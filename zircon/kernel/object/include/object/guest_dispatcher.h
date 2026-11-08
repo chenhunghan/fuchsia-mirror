@@ -15,7 +15,6 @@
 #include <kernel/ffi.h>
 #include <object/dispatcher.h>
 #include <object/handle.h>
-#include <object/opaque_storage.h>
 
 class Guest;
 class GuestDispatcher;
@@ -31,8 +30,6 @@ Lock<CriticalMutex>* rust_guest_dispatcher_state_get_lock(const void* state);
 
 class GuestDispatcher final : public Dispatcher {
  public:
-  static constexpr zx_rights_t default_rights() { return ZX_DEFAULT_GUEST_RIGHTS; }
-
   ~GuestDispatcher() final;
 
   zx_obj_type_t get_type() const final { return ZX_OBJ_TYPE_GUEST; }

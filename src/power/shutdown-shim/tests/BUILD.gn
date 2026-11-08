@@ -13,8 +13,7 @@ import("//build/rust/rustc_test.gni")
 # `//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component`.
 # `shutdown_shim_component` also remains in BUILD.gn because it is depended on
 # by `:shutdown-shim-integration-tests` as well as GN-only test packages in
-# `//src/sys/component_manager/tests/reboot_on_terminate`,
-# `//src/sys/pkg/bin/omaha-client`, and
+# `//src/sys/pkg/bin/omaha-client` and
 # `//src/sys/pkg/lib/omaha-client-fuchsia`.
 rustc_test("shutdown_shim_integration_test_bin") {
   edition = "2024"

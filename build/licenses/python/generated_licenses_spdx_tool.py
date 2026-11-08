@@ -15,7 +15,6 @@ from file_access import FileAccess
 from gn_label import GnLabel
 from gn_license_metadata import GnLicenseMetadataDB
 from readme_fuchsia import ReadmesDB
-from spdx_comparator import SpdxComparator
 from spdx_writer import SpdxWriter
 
 
@@ -72,20 +71,6 @@ def main() -> int:
         default=False,
         help="Embeds '_hint' keys in the output SPDX for debugging purposes",
     )
-    # TODO(132725): Remove once migration completes.
-    parser.add_argument(
-        "--compare-with-legacy-spdx",
-        type=str,
-        default=None,
-        help="The tool will compare the contents of the actual spdx output with the given legacy file",
-    )
-    parser.add_argument(
-        "--ignore-comparison-errors",
-        action="store_true",
-        default=False,
-        help="Tool will fail when comparison with the legacy spdx finds missing licenses",
-    )
-
     parser.add_argument(
         "--log-level",
         type=str,
@@ -159,23 +144,6 @@ def main() -> int:
     logging.info(
         f"Wrote spdx {args.spdx_output} (licenses={len(collector.unique_licenses)} size={os.stat(args.spdx_output).st_size})"
     )
-
-    if args.compare_with_legacy_spdx:
-        # Compare with legacy spdx file
-        comparator = SpdxComparator(
-            current_file=args.spdx_output,
-            legacy_file=Path(args.compare_with_legacy_spdx),
-        )
-        comparator.compare()
-        if comparator.found_differences():
-            if args.ignore_comparison_errors:
-                comparator.log_differences(logging.WARN, is_full_report=False)
-                logging.warning(
-                    "Differences are ignored because --ignore_comparison_errors is True. "
-                )
-            else:
-                comparator.log_differences(logging.ERROR, is_full_report=True)
-                return -1
 
     # Generate a GN depfile
     logging.info(f"writing depfile {args.dep_file}")

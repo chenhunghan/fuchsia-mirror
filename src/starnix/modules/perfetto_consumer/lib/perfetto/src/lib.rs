@@ -6,9 +6,10 @@
 #![recursion_limit = "256"]
 
 use perfetto_protos::perfetto::protos::{
-    DisableTracingRequest, EnableTracingRequest, FreeBuffersRequest, GetAsyncCommandRequest,
-    GetAsyncCommandResponse, InitializeConnectionRequest, InitializeConnectionResponse, IpcFrame,
-    ReadBuffersRequest, RegisterDataSourceRequest, RegisterDataSourceResponse, ipc_frame,
+    DisableTracingRequest, EnableTracingRequest, FlushRequest, FreeBuffersRequest,
+    GetAsyncCommandRequest, GetAsyncCommandResponse, InitializeConnectionRequest,
+    InitializeConnectionResponse, IpcFrame, ReadBuffersRequest, RegisterDataSourceRequest,
+    RegisterDataSourceResponse, ipc_frame,
 };
 use prost::Message;
 use starnix_core::task::{CurrentTask, EventHandler, Waiter};
@@ -123,7 +124,7 @@ impl IpcConnection {
         self.write_frame(msg, current_task)
     }
 
-    fn write_frame(
+    pub fn write_frame(
         &mut self,
         frame: IpcFrame,
         current_task: &CurrentTask,
@@ -242,6 +243,14 @@ impl Consumer {
         let conn = SocketFile::get_from_file(&conn_file)?;
         let peer = SocketPeer::Handle(resolve_unix_socket_address(current_task, socket_path)?);
         conn.connect(current_task, peer)?;
+        Self::from_file(current_task, conn_file)
+    }
+
+    /// Initializes a `Consumer` over an already-connected `conn_file`.
+    pub fn from_file(
+        current_task: &CurrentTask,
+        conn_file: FileHandle,
+    ) -> Result<Self, anyhow::Error> {
         let mut frame_reader = FrameReader::new(conn_file.clone());
         let mut request_id = 1;
 
@@ -260,7 +269,7 @@ impl Consumer {
         );
         bind_service_message.encode(&mut bind_service_bytes)?;
         let mut bind_service_buffer: VecInputBuffer = bind_service_bytes.into();
-        conn.file().write(current_task, &mut bind_service_buffer)?;
+        conn_file.write(current_task, &mut bind_service_buffer)?;
 
         let reply_frame = frame_reader.next_frame_blocking(current_task)?;
 
@@ -336,6 +345,26 @@ impl Consumer {
         req: DisableTracingRequest,
     ) -> Result<u64, anyhow::Error> {
         let method_id = self.method_id("DisableTracing")?;
+        let mut encoded_args: Vec<u8> = Vec::with_capacity(req.encoded_len());
+        req.encode(&mut encoded_args)?;
+
+        self.send_message(
+            current_task,
+            ipc_frame::Msg::MsgInvokeMethod(ipc_frame::InvokeMethod {
+                service_id: self.bind_service_reply.service_id,
+                method_id: Some(method_id),
+                args_proto: Some(encoded_args),
+                drop_reply: None,
+            }),
+        )
+    }
+
+    pub fn flush(
+        &mut self,
+        current_task: &CurrentTask,
+        req: FlushRequest,
+    ) -> Result<u64, anyhow::Error> {
+        let method_id = self.method_id("Flush")?;
         let mut encoded_args: Vec<u8> = Vec::with_capacity(req.encoded_len());
         req.encode(&mut encoded_args)?;
 

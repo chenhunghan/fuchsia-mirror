@@ -1,0 +1,22 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "device-protocol-pci",
+    srcs = ["pci.cc"],
+    hdrs = ["include/lib/device-protocol/pci.h"],
+    includes = ["include"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "@fuchsia_sdk//fidl/fuchsia.hardware.pci:fuchsia.hardware.pci_cpp",
+        "@fuchsia_sdk//pkg/driver_incoming_cpp",
+        "@fuchsia_sdk//pkg/driver_mmio_cpp",
+        "@fuchsia_sdk//pkg/zx",
+    ],
+)

@@ -1,0 +1,40 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Exported for //tools/integration/fint:proto_lib, which builds the generated
+# Go protobuf sources from the parent package.
+exports_files(
+    [
+        "build_artifacts.pb.go",
+        "context.pb.go",
+        "set_artifacts.pb.go",
+        "static.pb.go",
+    ],
+    visibility = ["//tools/integration/fint:__pkg__"],
+)
+
+# Host-only Python library: depends on the host-only Python protobuf runtime
+# and is only consumed on host by //tools/integration/fint:fint_build_lib.
+# TODO(https://fxbug.dev/570694755): Verify whether proto should use target_compatible_with (was not gated by if (is_host) in GN).
+py_library(
+    name = "proto",
+    srcs = [
+        "__init__.py",
+        "build_artifacts_pb2.py",
+        "context_pb2.py",
+        "static_pb2.py",
+    ],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//tools/integration/fint:__pkg__"],
+    deps = [
+        # GN uses the extracted //prebuilt/third_party/protobuf-py3 wheel, while
+        # Bazel uses the in-tree @com_google_protobuf//:protobuf_python runtime.
+        "@com_google_protobuf//:protobuf_python",  # @bazel2gn:path_overwrite://prebuilt/third_party/protobuf-py3
+    ],
+)

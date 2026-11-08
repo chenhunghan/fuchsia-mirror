@@ -166,9 +166,9 @@ mod tests {
         // Initial wait always completes immediately.
         sched.request_present();
         let mut fut = sched.wait_to_update();
-        exec.run_until_stalled(&mut fut).is_ready();
+        assert!(exec.run_until_stalled(&mut fut).is_ready());
 
-        // Second wait doesn't complete until after on_frame_presented().
+        // Second wait doesn't complete until after on_next_frame_begin().
         sched.request_present();
         let mut fut = sched.wait_to_update();
         assert!(exec.run_until_stalled(&mut fut).is_pending());

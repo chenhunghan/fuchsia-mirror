@@ -21,22 +21,40 @@ source_set("config") {
   ]
 }
 
+source_set("role") {
+  sources = [
+    "src/resource.cc",
+    "src/resource.h",
+    "src/role.cc",
+    "src/role.h",
+  ]
+  public_deps = [
+    ":config",
+    "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_cpp",
+    "//sdk/fidl/fuchsia.scheduler:fuchsia.scheduler_cpp",
+    "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_cpp",
+    "//sdk/lib/async:async-cpp",
+    "//sdk/lib/component/incoming/cpp",
+    "//sdk/lib/inspect/component/cpp",
+    "//sdk/lib/syslog/cpp",
+  ]
+}
+
 executable("bin") {
   output_name = "role_manager"
   sources = [
     "src/main.cc",
     "src/profile.cc",
     "src/profile.h",
-    "src/resource.cc",
-    "src/resource.h",
-    "src/role.cc",
-    "src/role.h",
   ]
   deps = [
     ":config",
+    ":role",
     "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_cpp",
     "//sdk/fidl/fuchsia.scheduler:fuchsia.scheduler_cpp",
     "//sdk/fidl/fuchsia.scheduler.deprecated:fuchsia.scheduler.deprecated_cpp",
+    "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_cpp",
+    "//sdk/lib/async:async-cpp",
     "//sdk/lib/async-loop:async-loop-cpp",
     "//sdk/lib/component/incoming/cpp",
     "//sdk/lib/component/outgoing/cpp",

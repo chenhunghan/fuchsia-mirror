@@ -51,6 +51,7 @@ void ReleaseFenceManager::OnDirectScanoutFrame(
     std::vector<zx::counter> release_counters, std::vector<zx::counter> present_fences,
     scheduling::FramePresentedCallback frame_presented_callback) {
   TRACE_DURATION("gfx", "ReleaseFenceManager::OnDirectScanoutFrame", "frame number", frame_number);
+  TRACE_FLOW_END("gfx", "scenic_frame", frame_number);
   FLATLAND_VERBOSE_LOG << "ReleaseFenceManager::OnDirectScanoutFrame() frame_number="
                        << frame_number;
   auto record = NewDirectScanoutFrameRecord(std::move(frame_presented_callback));
@@ -66,6 +67,7 @@ void ReleaseFenceManager::OnSkippedFrame(
     std::vector<zx::counter> release_counters, std::vector<zx::counter> present_fences,
     scheduling::FramePresentedCallback frame_presented_callback) {
   TRACE_DURATION("gfx", "ReleaseFenceManager::OnSkippedFrame", "frame number", frame_number);
+  TRACE_FLOW_END("gfx", "scenic_frame", frame_number);
   FLATLAND_VERBOSE_LOG << "ReleaseFenceManager::OnSkippedFrame() frame_number=" << frame_number;
 
   auto record = NewSkippedFrameRecord(std::move(frame_presented_callback));

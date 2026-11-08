@@ -48,7 +48,7 @@ success("TableFieldInlinedHandle") {
 // This tests logic checking that values are inlined in the correct situations.
 success("TableFieldInlinedReservedStored") {
     // TODO(https://fxbug.dev/42166276): Remove in favor of TableFieldInlinedReservedDropped.
-    bindings_allowlist = [dart, go],
+    bindings_allowlist = [dart],
     value = TableFieldInlinedStruct{
         t: TableFieldInlined{
             2: {
@@ -70,7 +70,7 @@ success("TableFieldInlinedReservedStored") {
 
 decode_success("TableFieldInlinedReservedDropped") {
     // TODO(https://fxbug.dev/42166276): Drop unknown data in all bindings.
-    bindings_denylist = [dart, go],
+    bindings_denylist = [dart],
     value = TableFieldInlinedStruct{
         t: TableFieldInlined{},
     },
@@ -224,7 +224,7 @@ decode_failure("TableFieldOutOfLineBadOutlinedMarker") {
 // Tests a table in which a value is inlined into an unknown field.
 success("TableFieldUnknownInlinedStored") {
     // TODO(https://fxbug.dev/42166276): Remove in favor of TableFieldUnknownInlinedDropped.
-    bindings_allowlist = [dart, go],
+    bindings_allowlist = [dart],
     value = TableFieldUnknownStruct{
         t: TableFieldUnknown{
             1: {
@@ -245,7 +245,7 @@ success("TableFieldUnknownInlinedStored") {
 // Tests a table in which a value is inlined into an unknown field.
 decode_success("TableFieldUnknownInlinedDropped") {
     // TODO(https://fxbug.dev/42166276): Drop unknown data in all bindings.
-    bindings_denylist = [dart, go],
+    bindings_denylist = [dart],
     value = TableFieldUnknownStruct{
         t: TableFieldUnknown{},
     },
@@ -287,7 +287,7 @@ encode_success("TableFieldUnknownInlinedDropped") {
 // Tests a table in which a handle value is inlined into an unknown field.
 success("TableFieldUnknownInlinedHandleStored") {
     // TODO(https://fxbug.dev/42166276): Remove in favor of TableFieldUnknownInlinedHandleDropped.
-    bindings_allowlist = [dart, go],
+    bindings_allowlist = [dart],
     handle_defs = {
         #0 = channel(),
     },
@@ -315,7 +315,7 @@ success("TableFieldUnknownInlinedHandleStored") {
 // Tests a table in which a handle value is inlined into an unknown field.
 decode_success("TableFieldUnknownInlinedHandleDropped") {
     // TODO(https://fxbug.dev/42166276): Drop unknown data in all bindings.
-    bindings_denylist = [dart, go],
+    bindings_denylist = [dart],
     handle_defs = {
         #0 = channel(),
     },
@@ -369,7 +369,7 @@ encode_success("TableFieldUnknownInlinedHandleDropped") {
 // Tests a table in which a value is stored out of line in an unknown field.
 success("TableFieldUnknownOutOfLineStored") {
     // TODO(https://fxbug.dev/42166276): Remove in favor of TableFieldUnknownOutOfLineDropped.
-    bindings_allowlist = [dart, go],
+    bindings_allowlist = [dart],
     value = TableFieldUnknownStruct{
         t: TableFieldUnknown{
             1: {
@@ -392,7 +392,7 @@ success("TableFieldUnknownOutOfLineStored") {
 // Tests a table in which a value is stored out of line in an unknown field.
 decode_success("TableFieldUnknownOutOfLineDropped") {
     // TODO(https://fxbug.dev/42166276): Drop unknown data in all bindings.
-    bindings_denylist = [dart, go],
+    bindings_denylist = [dart],
     value = TableFieldUnknownStruct{
         t: TableFieldUnknown{},
     },
@@ -648,7 +648,30 @@ success("TableWithStringAndVectorNoVectorContent") {
     },
 }
 
-// TODO(https://fxbug.dev/42159720): Create test with TableWithStringAndVectorHasVectorContent.
+success("TableWithStringAndVectorHasVectorContent") {
+    value = StructOfTableWithStringAndVector{
+        table: TableWithStringAndVector{
+            foo: "hello",
+            bar: 27,
+            baz: [1, 2, 3],
+        },
+    },
+    bytes = {
+        v2 = [
+            3, 0, 0, 0, 0, 0, 0, 0, // max ordinal
+            255, 255, 255, 255, 255, 255, 255, 255, // alloc present
+            24, 0, 0, 0, 0, 0, 0, 0, // envelope 1: num bytes / num handles
+            27, 0, 0, 0, 0, 0, 1, 0, // envelope 2: num bytes / num handles / inlined
+            24, 0, 0, 0, 0, 0, 0, 0, // envelope 3: num bytes / num handles
+            5, 0, 0, 0, 0, 0, 0, 0, // element 1: length
+            255, 255, 255, 255, 255, 255, 255, 255, // element 1: alloc present
+            104, 101, 108, 108, 111, 0, 0, 0, // element 1: hello
+            3, 0, 0, 0, 0, 0, 0, 0, // element 3: length
+            255, 255, 255, 255, 255, 255, 255, 255, // element 3: alloc present
+            1, 2, 3, 0, 0, 0, 0, 0, // element 3: [1, 2, 3]
+        ],
+    },
+}
 
 success("SimpleTableThenUint64") {
     value = SimpleTableThenUint64{
@@ -721,9 +744,200 @@ success("TableWithGaps") {
     },
 }
 
+decode_success("TableWithGapsEmptyEnvelopeInFirstGap") {
+    value = StructOfTableWithGaps{
+        table: TableWithGaps{},
+    },
+    bytes = {
+        v2 = [
+            num(1):8, repeat(0xff):8, // max ordinal, present
+            num(0):4, num(0):2, num(0):2, // envelope #1: empty
+        ],
+    },
+}
+
+decode_success("TableWithGapsEmptyEnvelopeInSecondGap") {
+    value = StructOfTableWithGaps{
+        table: TableWithGaps{
+            second: 1,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(3):8, repeat(0xff):8, // max ordinal, present
+            num(0):4, num(0):2, num(0):2, // envelope #1: empty
+            num(1):4, num(0):2, num(1):2, // envelope #2: second (inlined)
+            num(0):4, num(0):2, num(0):2, // envelope #3: empty
+        ],
+    },
+}
+
+decode_success("SimpleTableEmptyEnvelopesInGap") {
+    value = StructOfSimpleTable{
+        table: SimpleTable{},
+    },
+    bytes = {
+        v2 = [
+            num(2):8, repeat(0xff):8, // max ordinal, present
+            num(0):4, num(0):2, num(0):2, // envelope #1: empty
+            num(0):4, num(0):2, num(0):2, // envelope #2: empty
+        ],
+    },
+}
+
+decode_success("ValueTableUnknownReservedInGapDropped") {
+    // TODO(https://fxbug.dev/42166276): Drop unknown data in all bindings.
+    bindings_denylist = [dart],
+    bytes = {
+        v2 = [
+            3, 0, 0, 0, 0, 0, 0, 0, // max ordinal (inside gap 2..4)
+            255, 255, 255, 255, 255, 255, 255, 255, // alloc present
+            8, 0, 0, 0, 0, 0, 0, 0, // envelope 1: num bytes / num handles
+            0, 0, 0, 0, 0, 0, 0, 0, // envelope 2: num bytes / num handles
+            8, 0, 0, 0, 0, 0, 0, 0, // envelope 3: num bytes / num handles
+            42, 0, 0, 0, 0, 0, 0, 0, // field X
+            1, 2, 3, 4, 5, 6, 7, 8, // 8 unknown bytes for envelope 3
+        ],
+    },
+    value = StructOfSimpleTable{
+        table: SimpleTable{
+            x: 42,
+        },
+    },
+}
+
+encode_success("ValueTableUnknownReservedInGapDropped") {
+    // TODO(https://fxbug.dev/42166276): Drop unknown data in all bindings.
+    // TODO(https://fxbug.dev/42067496): Implement the decode function in all backends.
+    bindings_allowlist = [rust],
+    value = StructOfSimpleTable{
+        table: decode({
+            type = SimpleTable,
+            bytes = {
+                v2 = [
+                    3, 0, 0, 0, 0, 0, 0, 0, // max ordinal (inside gap 2..4)
+                    255, 255, 255, 255, 255, 255, 255, 255, // alloc present
+                    8, 0, 0, 0, 0, 0, 0, 0, // envelope 1: num bytes / num handles
+                    0, 0, 0, 0, 0, 0, 0, 0, // envelope 2: num bytes / num handles
+                    8, 0, 0, 0, 0, 0, 0, 0, // envelope 3: num bytes / num handles
+                    42, 0, 0, 0, 0, 0, 0, 0, // field X
+                    1, 2, 3, 4, 5, 6, 7, 8, // 8 unknown bytes for envelope 3
+                ],
+            },
+        }),
+    },
+    bytes = {
+        v2 = [
+            1, 0, 0, 0, 0, 0, 0, 0, // max ordinal
+            255, 255, 255, 255, 255, 255, 255, 255, // alloc present
+            8, 0, 0, 0, 0, 0, 0, 0, // envelope 1: num bytes / num handles
+            42, 0, 0, 0, 0, 0, 0, 0, // field X
+        ],
+    },
+}
+
+decode_success("ResourceTableUnknownReservedInGapDropped") {
+    // TODO(https://fxbug.dev/42166276): Drop unknown data in all bindings.
+    bindings_denylist = [dart],
+    bytes = {
+        v2 = [
+            3, 0, 0, 0, 0, 0, 0, 0, // max ordinal (inside gap 2..4)
+            255, 255, 255, 255, 255, 255, 255, 255, // alloc present
+            8, 0, 0, 0, 0, 0, 0, 0, // envelope 1: num bytes / num handles
+            0, 0, 0, 0, 0, 0, 0, 0, // envelope 2: num bytes / num handles
+            8, 0, 0, 0, 0, 0, 0, 0, // envelope 3: num bytes / num handles
+            42, 0, 0, 0, 0, 0, 0, 0, // field X
+            1, 2, 3, 4, 5, 6, 7, 8, // 8 unknown bytes for envelope 3
+        ],
+    },
+    value = StructOfSimpleResourceTable{
+        table: SimpleResourceTable{
+            x: 42,
+        },
+    },
+}
+
+encode_success("ResourceTableUnknownReservedInGapDropped") {
+    // TODO(https://fxbug.dev/42166276): Drop unknown data in all bindings.
+    // TODO(https://fxbug.dev/42067496): Implement the decode function in all backends.
+    bindings_allowlist = [rust],
+    value = StructOfSimpleResourceTable{
+        table: decode({
+            type = SimpleResourceTable,
+            bytes = {
+                v2 = [
+                    3, 0, 0, 0, 0, 0, 0, 0, // max ordinal (inside gap 2..4)
+                    255, 255, 255, 255, 255, 255, 255, 255, // alloc present
+                    8, 0, 0, 0, 0, 0, 0, 0, // envelope 1: num bytes / num handles
+                    0, 0, 0, 0, 0, 0, 0, 0, // envelope 2: num bytes / num handles
+                    8, 0, 0, 0, 0, 0, 0, 0, // envelope 3: num bytes / num handles
+                    42, 0, 0, 0, 0, 0, 0, 0, // field X
+                    1, 2, 3, 4, 5, 6, 7, 8, // 8 unknown bytes for envelope 3
+                ],
+            },
+        }),
+    },
+    bytes = {
+        v2 = [
+            1, 0, 0, 0, 0, 0, 0, 0, // max ordinal
+            255, 255, 255, 255, 255, 255, 255, 255, // alloc present
+            8, 0, 0, 0, 0, 0, 0, 0, // envelope 1: num bytes / num handles
+            42, 0, 0, 0, 0, 0, 0, 0, // field X
+        ],
+    },
+}
+
+success("ValueTableUnknownReservedInGapStored") {
+    // TODO(https://fxbug.dev/42166276): Remove in favor of ValueTableUnknownReservedInGapDropped.
+    bindings_allowlist = [dart],
+    bytes = {
+        v2 = [
+            3, 0, 0, 0, 0, 0, 0, 0, // max ordinal (inside gap 2..4)
+            255, 255, 255, 255, 255, 255, 255, 255, // alloc present
+            8, 0, 0, 0, 0, 0, 0, 0, // envelope 1: num bytes / num handles
+            0, 0, 0, 0, 0, 0, 0, 0, // envelope 2: num bytes / num handles
+            8, 0, 0, 0, 0, 0, 0, 0, // envelope 3: num bytes / num handles
+            42, 0, 0, 0, 0, 0, 0, 0, // field X
+            1, 2, 3, 4, 5, 6, 7, 8, // 8 unknown bytes for envelope 3
+        ],
+    },
+    value = StructOfSimpleTable{
+        table: SimpleTable{
+            x: 42,
+            3: {
+                bytes = [1, 2, 3, 4, 5, 6, 7, 8],
+            },
+        },
+    },
+}
+
+success("ResourceTableUnknownReservedInGapStored") {
+    // TODO(https://fxbug.dev/42166276): Remove in favor of ResourceTableUnknownReservedInGapDropped.
+    bindings_allowlist = [dart],
+    bytes = {
+        v2 = [
+            3, 0, 0, 0, 0, 0, 0, 0, // max ordinal (inside gap 2..4)
+            255, 255, 255, 255, 255, 255, 255, 255, // alloc present
+            8, 0, 0, 0, 0, 0, 0, 0, // envelope 1: num bytes / num handles
+            0, 0, 0, 0, 0, 0, 0, 0, // envelope 2: num bytes / num handles
+            8, 0, 0, 0, 0, 0, 0, 0, // envelope 3: num bytes / num handles
+            42, 0, 0, 0, 0, 0, 0, 0, // field X
+            1, 2, 3, 4, 5, 6, 7, 8, // 8 unknown bytes for envelope 3
+        ],
+    },
+    value = StructOfSimpleResourceTable{
+        table: SimpleResourceTable{
+            x: 42,
+            3: {
+                bytes = [1, 2, 3, 4, 5, 6, 7, 8],
+            },
+        },
+    },
+}
+
 decode_success("ValueTableUnknownReservedDropped") {
     // TODO(https://fxbug.dev/42166276): Drop unknown data in all bindings.
-    bindings_denylist = [dart, go],
+    bindings_denylist = [dart],
     bytes = {
         v2 = [
             5, 0, 0, 0, 0, 0, 0, 0, // max ordinal
@@ -786,7 +1000,7 @@ encode_success("ValueTableUnknownReservedDropped") {
 
 decode_success("ResourceTableUnknownReservedDropped") {
     // TODO(https://fxbug.dev/42166276): Drop unknown data in all bindings.
-    bindings_denylist = [dart, go],
+    bindings_denylist = [dart],
     bytes = {
         v2 = [
             5, 0, 0, 0, 0, 0, 0, 0, // max ordinal
@@ -849,7 +1063,7 @@ encode_success("ResourceTableUnknownReservedDropped") {
 
 success("ValueTableUnknownReservedStored") {
     // TODO(https://fxbug.dev/42166276): Remove in favor of ValueTableUnknownReservedDropped.
-    bindings_allowlist = [dart, go],
+    bindings_allowlist = [dart],
     bytes = {
         v2 = [
             5, 0, 0, 0, 0, 0, 0, 0, // max ordinal
@@ -877,7 +1091,7 @@ success("ValueTableUnknownReservedStored") {
 
 success("ResourceTableUnknownReservedStored") {
     // TODO(https://fxbug.dev/42166276): Remove in favor of ResourceTableUnknownReservedDropped.
-    bindings_allowlist = [dart, go],
+    bindings_allowlist = [dart],
     bytes = {
         v2 = [
             5, 0, 0, 0, 0, 0, 0, 0, // max ordinal
@@ -905,7 +1119,7 @@ success("ResourceTableUnknownReservedStored") {
 
 decode_success("ValueTableUnknownTrailingDropped") {
     // TODO(https://fxbug.dev/42166276): Drop unknown data in all bindings.
-    bindings_denylist = [dart, go],
+    bindings_denylist = [dart],
     bytes = {
         v2 = [
             6, 0, 0, 0, 0, 0, 0, 0, // max ordinal
@@ -970,7 +1184,7 @@ encode_success("ValueTableUnknownTrailingDropped") {
 
 decode_success("ResourceTableUnknownTrailingDropped") {
     // TODO(https://fxbug.dev/42166276): Drop unknown data in all bindings.
-    bindings_denylist = [dart, go],
+    bindings_denylist = [dart],
     bytes = {
         v2 = [
             6, 0, 0, 0, 0, 0, 0, 0, // max ordinal
@@ -1035,7 +1249,7 @@ encode_success("ResourceTableUnknownTrailingDropped") {
 
 success("ValueTableUnknownTrailingStored") {
     // TODO(https://fxbug.dev/42166276): Remove in favor of ValueTableUnknownTrailingDropped.
-    bindings_allowlist = [dart, go],
+    bindings_allowlist = [dart],
     bytes = {
         v2 = [
             6, 0, 0, 0, 0, 0, 0, 0, // max ordinal
@@ -1064,7 +1278,7 @@ success("ValueTableUnknownTrailingStored") {
 
 success("ResourceTableUnknownTrailingStored") {
     // TODO(https://fxbug.dev/42166276): Remove in favor of ResourceTableUnknownTrailingDropped.
-    bindings_allowlist = [dart, go],
+    bindings_allowlist = [dart],
     bytes = {
         v2 = [
             6, 0, 0, 0, 0, 0, 0, 0, // max ordinal
@@ -1093,7 +1307,7 @@ success("ResourceTableUnknownTrailingStored") {
 
 decode_success("ValueTableUnknownTrailingHandlesDropped") {
     // TODO(https://fxbug.dev/42166276): Drop unknown data in all bindings.
-    bindings_denylist = [dart, go],
+    bindings_denylist = [dart],
     handle_defs = {
         #0 = event(),
         #1 = event(),
@@ -1174,7 +1388,7 @@ encode_success("ValueTableUnknownTrailingHandlesDropped") {
 
 decode_success("ResourceTableUnknownTrailingHandlesDropped") {
     // TODO(https://fxbug.dev/42166276): Drop unknown data in all bindings.
-    bindings_denylist = [dart, go],
+    bindings_denylist = [dart],
     handle_defs = {
         #0 = event(),
         #1 = event(),
@@ -1255,7 +1469,7 @@ encode_success("ResourceTableUnknownTrailingHandlesDropped") {
 
 decode_failure("ValueTableUnknownTrailingHandlesRejected") {
     // TODO(https://fxbug.dev/42166276): Remove in favor of ValueTableUnknownTrailingHandlesDropped.
-    bindings_allowlist = [dart, go],
+    bindings_allowlist = [dart],
     handle_defs = {
         #0 = event(),
         #1 = event(),
@@ -1286,7 +1500,7 @@ decode_failure("ValueTableUnknownTrailingHandlesRejected") {
 
 success("ResourceTableUnknownTrailingHandlesStored") {
     // TODO(https://fxbug.dev/42166276): Remove in favor of ResourceTableUnknownTrailingHandlesDropped.
-    bindings_allowlist = [dart, go],
+    bindings_allowlist = [dart],
     handle_defs = {
         #0 = event(),
         #1 = event(),
@@ -1364,4 +1578,241 @@ decode_failure("TableCountOverflow") {
         ],
     },
     err = TABLE_COUNT_EXCEEDS_32_BIT_LIMIT,
+}
+
+success("TableWith64Ordinals") {
+    value = StructOfTableWith64Ordinals{
+        t: TableWith64Ordinals{
+            v63: 0xaa,
+            v64: 0xbb,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(64):8, // max ordinal
+            repeat(0xff):8, // alloc present
+            repeat(0x00):496, // absent envelopes 1..62 (62 * 8 = 496 bytes)
+            0xaa, padding:3, num(0):2, num(1):2, // envelope 63 (inlined)
+            0xbb, padding:3, num(0):2, num(1):2, // envelope 64 (inlined)
+        ],
+    },
+}
+
+decode_success("TableWithUnknown65thOrdinal") {
+    value = StructOfTableWith64Ordinals{
+        t: TableWith64Ordinals{
+            v63: 0xaa,
+            v64: 0xbb,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(65):8, // max ordinal
+            repeat(0xff):8, // alloc present
+            repeat(0x00):496, // absent envelopes 1..62
+            0xaa, padding:3, num(0):2, num(1):2, // envelope 63 (inlined)
+            0xbb, padding:3, num(0):2, num(1):2, // envelope 64 (inlined)
+            0xcc, padding:3, num(0):2, num(1):2, // envelope 65 (unknown inlined)
+        ],
+    },
+}
+
+decode_success("SimpleTableMaxOrdinalInGap") {
+    // TODO(https://fxbug.dev/579582293): Fix table decoder gap loop in rust.
+    bindings_denylist = [rust],
+    value = StructOfSimpleTable{
+        table: SimpleTable{
+            x: 42,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(2):8, // max ordinal (falls in gap 2..4 before known ordinal 5)
+            repeat(0xff):8, // alloc present
+            num(8):4, num(0):2, num(0):2, // envelope 1 (x: 42)
+            num(99):4, num(0):2, num(1):2, // envelope 2 (unknown inlined)
+            num(42):8, // field X
+        ],
+    },
+}
+
+decode_failure("NonEmptyTableWithAbsentAlloc") {
+    type = StructOfSimpleTable,
+    bytes = {
+        v2 = [
+            num(1):8, // max ordinal
+            repeat(0x00):8, // alloc absent
+        ],
+    },
+    err = NON_EMPTY_VECTOR_WITH_NULL_BODY,
+}
+
+decode_failure("NonEmptyTableWithInvalidAlloc") {
+    type = StructOfSimpleTable,
+    bytes = {
+        v2 = [
+            num(1):8, // max ordinal
+            repeat(0xab):8, // invalid presence
+            num(8):4, num(0):4, // envelope 1
+            num(42):8, // field X
+        ],
+    },
+    err = INVALID_PRESENCE_INDICATOR,
+}
+
+decode_failure("TableKnownOutOfLineMemberWrongEnvelopeByteCount") {
+    // TODO(https://fxbug.dev/579582163): Validate envelope byte count in rust_next.
+    bindings_denylist = [rust_next],
+    type = TableFieldOutOfLineStruct,
+    bytes = {
+        v2 = [
+            num(1):8, // max ordinal
+            repeat(0xff):8, // alloc present
+            num(16):4, num(0):2, num(0):2, // envelope claims 16 bytes instead of 8
+            num(123):8,
+            num(0):8,
+        ],
+    },
+    err = INVALID_NUM_BYTES_IN_ENVELOPE,
+}
+
+decode_failure("TableKnownInlineHandleZeroHandlesInEnvelope") {
+    handle_defs = {
+        #0 = channel(),
+    },
+    type = TableFieldInlinedHandleStruct,
+    bytes = {
+        v2 = [
+            num(1):8, // max ordinal
+            repeat(0xff):8, // alloc present
+            repeat(0xff):4, num(0):2, num(1):2, // inlined envelope claims 0 handles
+        ],
+    },
+    handles = {
+        v2 = [#0],
+    },
+    err = INVALID_NUM_HANDLES_IN_ENVELOPE,
+}
+
+decode_failure("TableUnknownOutOfLineEnvelopeZeroBytesWithHandle") {
+    // TODO(https://fxbug.dev/579637828): Validate unknown envelope byte/handle count in cpp, hlcpp, and llcpp.
+    // TODO(https://fxbug.dev/579582741): Validate unknown envelope byte/handle count in rust and rust_codec.
+    // TODO(https://fxbug.dev/579582163): Validate unknown envelope byte/handle count in rust_next.
+    bindings_denylist = [cpp, hlcpp, llcpp, rust, rust_codec, rust_next],
+    handle_defs = {
+        #0 = channel(),
+    },
+    type = TableFieldUnknownResourceStruct,
+    bytes = {
+        v2 = [
+            num(1):8, // max ordinal
+            repeat(0xff):8, // alloc present
+            num(0):4, num(1):2, num(0):2, // out-of-line envelope with 0 bytes and 1 handle
+        ],
+    },
+    handles = {
+        v2 = [#0],
+    },
+    err = INVALID_NUM_HANDLES_IN_ENVELOPE,
+}
+
+decode_failure("TableUnknownOutOfLineEnvelopeMoreHandlesThanFitInBytes") {
+    // TODO(https://fxbug.dev/579637828): Validate unknown envelope byte/handle count in cpp, hlcpp, and llcpp.
+    // TODO(https://fxbug.dev/579582741): Validate unknown envelope byte/handle count in rust and rust_codec.
+    // TODO(https://fxbug.dev/579582163): Validate unknown envelope byte/handle count in rust_next.
+    bindings_denylist = [cpp, hlcpp, llcpp, rust, rust_codec, rust_next],
+    handle_defs = {
+        #0 = channel(),
+        #1 = channel(),
+        #2 = channel(),
+    },
+    type = TableFieldUnknownResourceStruct,
+    bytes = {
+        v2 = [
+            num(1):8, // max ordinal
+            repeat(0xff):8, // alloc present
+            num(8):4, num(3):2, num(0):2, // 8 bytes can hold at most 2 handles
+            repeat(0xff):8,
+        ],
+    },
+    handles = {
+        v2 = [#0, #1, #2],
+    },
+    err = INVALID_NUM_HANDLES_IN_ENVELOPE,
+}
+
+decode_failure("TableUnknownInlineEnvelopeMoreThanOneHandle") {
+    // TODO(https://fxbug.dev/579637828): Validate unknown envelope byte/handle count in cpp, hlcpp, and llcpp.
+    // TODO(https://fxbug.dev/579582741): Validate unknown envelope byte/handle count in rust and rust_codec.
+    // TODO(https://fxbug.dev/579582163): Validate unknown envelope byte/handle count in rust_next.
+    bindings_denylist = [cpp, hlcpp, llcpp, rust, rust_codec, rust_next],
+    handle_defs = {
+        #0 = channel(),
+        #1 = channel(),
+    },
+    type = TableFieldUnknownResourceStruct,
+    bytes = {
+        v2 = [
+            num(1):8, // max ordinal
+            repeat(0xff):8, // alloc present
+            repeat(0xff):4, num(2):2, num(1):2, // inlined envelope with 2 handles (max 1 fits in 4 bytes)
+        ],
+    },
+    handles = {
+        v2 = [#0, #1],
+    },
+    err = INVALID_NUM_HANDLES_IN_ENVELOPE,
+}
+
+decode_failure("TableUnknownEnvelopeBadInlineMarker") {
+    type = TableFieldUnknownStruct,
+    bytes = {
+        v2 = [
+            num(1):8, // max ordinal
+            repeat(0xff):8, // alloc present
+            num(123):4, num(0):2, 0x01, 0xee, // bad inline marker
+        ],
+    },
+    err = INVALID_INLINE_MARKER_IN_ENVELOPE,
+}
+
+decode_success("ValueTableWithUnknownHandlesThenResourceTableWithHandle") {
+    // TODO(https://fxbug.dev/579582742): Advance handle_index_ for unknown handles in value tables in hlcpp.
+    bindings_denylist = [hlcpp],
+    handle_defs = {
+        #0 = event(),
+        #1 = channel(),
+    },
+    value = ValueTableThenResourceTable{
+        first: SimpleTable{
+            x: 42,
+        },
+        second: TableFieldInlinedHandle{
+            f: #1,
+        },
+    },
+    bytes = {
+        v2 = [
+            // primary object: first (SimpleTable) header
+            num(6):8, // max ordinal
+            repeat(0xff):8, // alloc present
+            // primary object: second (TableFieldInlinedHandle) header
+            num(1):8, // max ordinal
+            repeat(0xff):8, // alloc present
+            // first envelopes
+            num(8):4, num(0):2, num(0):2, // envelope 1 (x: 42)
+            num(0):8, // envelope 2 (absent)
+            num(0):8, // envelope 3 (absent)
+            num(0):8, // envelope 4 (absent)
+            num(0):8, // envelope 5 (absent)
+            repeat(0xff):4, num(1):2, num(1):2, // envelope 6 (unknown inline handle #0)
+            // first out-of-line payload for envelope 1
+            num(42):8,
+            // second envelopes
+            repeat(0xff):4, num(1):2, num(1):2, // envelope 1 (f: #1)
+        ],
+    },
+    handles = {
+        v2 = [#0, #1],
+    },
 }

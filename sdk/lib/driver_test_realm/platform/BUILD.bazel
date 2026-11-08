@@ -1,0 +1,62 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    "//build/bazel/rules/components:expect_includes.bzl",
+    "expect_includes",
+)
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+expect_includes(
+    name = "client_includes",
+    includes = ["meta/client.shard.cml"],
+)
+
+# TODO(https://fxbug.dev/42176699): This target uses mutable tables which are deprecated,
+# rather than builders.
+fx_cc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["platform.cc"],
+    build_flags = ["//build/cpp:fidl-wire-deprecated-mutable-tables"],
+    gn_output_name = "platform_driver_test_realm",
+    deps = [
+        "//sdk/fidl/fuchsia.driver.test:fuchsia.driver.test_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/syslog/cpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "platform_driver_test_realm_packaged_bin",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "platform_driver_test_realm",
+)
+
+fx_component_manifest(
+    name = "platform_component_manifest",
+    testonly = True,
+    component_name = "platform_driver_test_realm",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/platform_driver_test_realm.cml",
+)
+
+fx_component(
+    name = "platform_component",
+    testonly = True,
+    compiled_manifest = ":platform_component_manifest",
+    deps = [":platform_driver_test_realm_packaged_bin"],
+)

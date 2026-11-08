@@ -1,0 +1,21 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# LINT.IfChange
+
+host_py_test(
+    name = "verify_golden_go_proto_file_test",
+    srcs = [
+        "verify_golden_go_proto_file.py",
+        "verify_golden_go_proto_file_test.py",
+    ],
+    imports = ["."],
+    visibility = ["//build:__pkg__"],
+)
+
+# LINT.ThenChange(BUILD.gn)

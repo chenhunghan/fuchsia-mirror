@@ -34,7 +34,7 @@ extern "C" {
 // This version should be incremented whenever the Magma API changes.
 // Note, for changes to magma.h that only advance the Fuchsia API level,
 // this IFTTT can be ignored.
-#define MAGMA_API_VERSION 16
+#define MAGMA_API_VERSION 17
 // LINT.ThenChange(magma_common_defs.h)
 
 // LINT.IfChange
@@ -100,7 +100,9 @@ typedef int32_t magma_status_t;
 #define MAGMA_STATUS_CONSTRAINTS_INTERSECTION_EMPTY ((magma_status_t)(-10))
 // Corresponds to fuchsia.sysmem2/Error.TooManyGroupChildCombinations
 #define MAGMA_STATUS_TOO_MANY_GROUP_CHILD_COMBINATIONS ((magma_status_t)(-11))
-#define MAGMA_STATUS_ALIAS_FOR_LAST MAGMA_STATUS_TOO_MANY_GROUP_CHILD_COMBINATIONS
+// An object with the given id already exists.
+#define MAGMA_STATUS_ALREADY_EXISTS ((magma_status_t)(-12))
+#define MAGMA_STATUS_ALIAS_FOR_LAST MAGMA_STATUS_ALREADY_EXISTS
 
 typedef uint32_t magma_cache_operation_t;
 // possible values for magma_cache_operation_t
@@ -369,6 +371,15 @@ typedef struct magma_image_info {
 #define MAGMA_PRIORITY_REALTIME ((uint64_t)(1024))
 
 typedef uint64_t magma_priority_t;
+
+typedef uint64_t magma_buffer_flags_t;
+// Flags for magma_connection_create_buffer2.
+// Bits 16 and above are reserved for vendor-specific flags.
+#define MAGMA_BUFFER_FLAG_VENDOR_SHIFT ((uint64_t)16)
+
+// The buffer memory is allocated by the system driver instead of by the client.
+#define MAGMA_BUFFER_FLAG_REMOTE_ALLOCATION ((magma_buffer_flags_t)1)
+#define MAGMA_BUFFER_FLAG_VENDOR_0 ((magma_buffer_flags_t)(1ull << MAGMA_BUFFER_FLAG_VENDOR_SHIFT))
 
 // LINT.ThenChange(magma_common_defs.h:version)
 // NOLINTEND(modernize-use-using)

@@ -7,8 +7,10 @@
 load(
     "//build/shac.star",
     "_build_python_type_check_coverage",
+    "_find_bazel_type_checked_sources",
     "_find_type_checked_sources",
     "_resolve",
+    "_resolve_bazel_label",
 )
 
 # Helpers for constructing nodes of the AST produced by
@@ -51,6 +53,20 @@ def test_resolve():
     ]
     for base_dir, path, want in cases:
         asserts.eq(_resolve(base_dir, path), want, msg = "_resolve(%r, %r)" % (base_dir, path))
+
+def test_resolve_bazel_label():
+    cases = [
+        ("scripts", "foo.py", "scripts/foo.py"),
+        ("scripts", ":foo.py", "scripts/foo.py"),
+        ("scripts", ":sub/foo.py", "scripts/sub/foo.py"),
+        ("scripts", "//build/other:bar.py", "other/bar.py"),
+        ("scripts", "//build:root.py", "root.py"),
+        ("scripts", "@//build/other:bar.py", "other/bar.py"),
+        ("scripts", "//src/foo:bar.py", None),
+        ("scripts", "@rules_python//python:py_library.bzl", None),
+    ]
+    for base_dir, label, want in cases:
+        asserts.eq(_resolve_bazel_label(base_dir, label), want, msg = "_resolve_bazel_label(%r, %r)" % (base_dir, label))
 
 def test_find_type_checked_sources():
     tree = _file(
@@ -138,14 +154,55 @@ def test_find_type_checked_sources_nested():
     })
     asserts.eq(_find_type_checked_sources(tree, ""), ["a.py"])
 
+def test_find_bazel_type_checked_sources():
+    content = '''
+"""Docstring py_library(srcs = ["fake.py"])."""
+# Comment py_library(srcs = ["commented.py"])
+_ESCAPED = "ignored \\" py_library(srcs = ['fake2.py'])"
+_RAW_ESCAPED = r"ignored \\" py_library(srcs = ['fake3.py'])"
+_RAW_TRAILING_SLASHES = r"trailing\\\\"
+py_library(
+    name = "lib",
+    srcs = ["a.py", "b.txt"] + [":more.py"],
+)
+py_binary(
+    name = "bin",
+    srcs = ["bin.py"],
+    main = "bin.py",
+)
+py_test(
+    name = "unit_test",
+    srcs = ["unit_test.py"],
+)
+host_py_test(
+    name = "test",
+    srcs = ["test.py"],
+    tags = ["no-pyrefly"],
+)
+filegroup(
+    name = "not_checked",
+    srcs = ["untyped.py"],
+)
+'''
+    got = _find_bazel_type_checked_sources(content, "dir")
+    asserts.eq(sorted(got), sorted([
+        "dir/a.py",
+        "dir/more.py",
+        "dir/bin.py",
+        "dir/bin.py",
+        "dir/unit_test.py",
+        "dir/test.py",
+    ]))
+
 def _coverage_finding(path):
     return testing.finding(
         level = "error",
         message = (
             "Python files under //build must be type checked. " +
-            "Add this file to the `sources` of a GN Python target such " +
-            "as a python_library(), python_binary(), python_host_test() " +
-            "or python_build_time_tests(), or to " +
+            "Add this file to the `srcs`/`sources` of a Bazel or GN " +
+            "Python target such as py_library(), py_binary(), " +
+            "host_py_test(), python_build_time_tests(), python_library(), " +
+            "python_binary(), or python_host_test(), or to " +
             "//build:type_checked_scripts if it isn't part of any other " +
             "target. Sources must be listed as string literals in the " +
             "target itself for this check to see them."
@@ -184,6 +241,16 @@ python_host_test("test") {
             "sub/test.py": testing.file(affected = False),
             "sub/lib.py": testing.file(affected = False),
             "sub/script.py": testing.file(affected = False),
+            "bazel_pkg/BUILD.bazel": testing.file(
+                content = """\
+py_library(
+    name = "bazel_lib",
+    srcs = ["bazel_lib.py"],
+)
+""",
+                affected = True,
+            ),
+            "bazel_pkg/bazel_lib.py": testing.file(affected = False),
         },
     )
     asserts.eq(res.findings, (
@@ -197,6 +264,7 @@ def test_build_python_type_check_coverage_unaffected():
         subdir = "build",
         files = {
             "BUILD.gn": testing.file(content = "", affected = False),
+            "BUILD.bazel": testing.file(content = "", affected = False),
             "untracked.py": testing.file(affected = False),
             "README.md": "",
         },

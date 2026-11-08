@@ -53,14 +53,20 @@ fn estimate_params(num_items: usize) -> (usize, usize) {
     let bits = std::cmp::max(bits, 8).next_power_of_two();
     let m = bits as f64;
 
-    // Then, solve for a minimal `k` such that the probability of FP is <= TARGET_FP_RATE.
-    let mut k: f64 = 0.0;
-    let mut fp_rate = 1.0;
-    while fp_rate > TARGET_FP_RATE {
-        k += 1.0;
-        fp_rate = (1f64 - (-k / (m / n)).exp()).powf(k);
+    // The false positive rate when using `k` hashes.
+    let fp_rate = |k: usize| (1f64 - (-(k as f64) / (m / n)).exp()).powf(k as f64);
+
+    // Then, find the smallest `k` such that the probability of FP is <= TARGET_FP_RATE.
+    //
+    // As `k` grows, the FP rate falls until it reaches a minimum and then rises again.  Usually
+    // the target is met before reaching the minimum, but occasionally (e.g. for 291,725 items)
+    // the filter size is so close to the limit that no `k` meets the target.  In that case, we
+    // stop at the minimum, which is the best we can do.
+    let mut k = 1;
+    while fp_rate(k) > TARGET_FP_RATE && fp_rate(k + 1) < fp_rate(k) {
+        k += 1;
     }
-    (bits as usize, k.round() as usize)
+    (bits as usize, k)
 }
 
 /// A read-only handle to a bloom filter.  To create a bloom filter, use `BloomFilterWriter`.
@@ -250,6 +256,7 @@ mod tests {
     use crate::lsm_tree::bloom_filter::{BloomFilterReader, BloomFilterWriter, estimate_params};
     use crate::lsm_tree::types::MaybeContainsKey;
     use crate::object_store::allocator::AllocatorKey;
+    use crate::object_store::{AttributeId, ObjectKey};
     use storage_ptr_slice::PtrByteSlice;
 
     #[test]
@@ -261,6 +268,17 @@ mod tests {
         assert_eq!(estimate_params(5000), (131072, 4));
         assert_eq!(estimate_params(50000), (1048576, 4));
         assert_eq!(estimate_params(5_000_000), (134217728, 4));
+    }
+
+    #[test]
+    fn estimated_params_target_fp_rate_unreachable() {
+        // For these counts, no number of hashes meets the target FP rate, so the best (10) is used.
+        // These used to loop forever.
+        assert_eq!(estimate_params(291_725), (4194304, 10));
+        assert_eq!(estimate_params(583_449), (8388608, 10));
+        assert_eq!(estimate_params(583_450), (8388608, 10));
+        assert_eq!(estimate_params(1_166_897), (16777216, 10));
+        assert_eq!(estimate_params(9_335_205), (134217728, 10));
     }
 
     const TEST_KEYS: [i32; 4] = [0, 65535, i32::MAX, i32::MIN];
@@ -362,6 +380,82 @@ mod tests {
         // match should defensively return RangeKeyTooLarge without panicking.
         assert_eq!(
             filter.maybe_contains(&AllocatorKey { device_range: (104857600..110100480).into() }),
+            MaybeContainsKey::RangeKeyTooLarge
+        );
+    }
+
+    #[test]
+    fn test_object_extent_key_full_range() {
+        const MIB: u64 = 1024 * 1024;
+        let attr0 = AttributeId(0);
+        let attr1 = AttributeId(1);
+        let start = 512 * 1024;
+        let end = 8 * MIB + 512 * 1024;
+
+        // Size for 100 items so the bitmap is 2048 bits (`< 2%` fill for 9 buckets) and
+        // deterministic with `seed = 0`. Inserting a single 8 MiB unaligned `ObjectKey::extent`
+        // (`512 KiB..8.5 MiB`) must populate all 9 overlapping 1 MiB buckets (`[0..9 MiB)`), even
+        // though 9 exceeds `MAX_HASH_PARTITIONS` (4).
+        let mut filter = BloomFilterWriter::new(0, 100);
+        filter.insert(&ObjectKey::extent(1, attr0, start..end));
+        let filter = BloomFilterReader::from(filter);
+
+        // Queries at the exact start, exact end, and inside every 1 MiB bucket `0..9` must return
+        // `Maybe`.
+        assert_eq!(
+            filter.maybe_contains(&ObjectKey::extent(1, attr0, start..(start + 4096))),
+            MaybeContainsKey::Maybe
+        );
+        assert_eq!(
+            filter.maybe_contains(&ObjectKey::extent(1, attr0, (end - 4096)..end)),
+            MaybeContainsKey::Maybe
+        );
+        for bucket in 0..9 {
+            let probe_offset = bucket * MIB + 16 * 1024;
+            assert_eq!(
+                filter.maybe_contains(&ObjectKey::extent(
+                    1,
+                    attr0,
+                    probe_offset..(probe_offset + 4096)
+                )),
+                MaybeContainsKey::Maybe,
+                "expected hit in bucket {bucket}"
+            );
+        }
+
+        // A 4-bucket (`== MAX_HASH_PARTITIONS`) query overlapping only the last bucket
+        // (`[8..9 MiB)`) must still return `Maybe`.
+        assert_eq!(
+            filter.maybe_contains(&ObjectKey::extent(1, attr0, (8 * MIB)..(12 * MIB))),
+            MaybeContainsKey::Maybe
+        );
+
+        // Non-overlapping byte ranges, different object IDs, and different attribute IDs must
+        // return `False`.
+        assert_eq!(
+            filter.maybe_contains(&ObjectKey::extent(1, attr0, (9 * MIB)..(9 * MIB + 4096))),
+            MaybeContainsKey::False
+        );
+        assert_eq!(
+            filter.maybe_contains(&ObjectKey::extent(1, attr0, (9 * MIB)..(13 * MIB))),
+            MaybeContainsKey::False
+        );
+        assert_eq!(
+            filter.maybe_contains(&ObjectKey::extent(2, attr0, MIB..(MIB + 4096))),
+            MaybeContainsKey::False
+        );
+        assert_eq!(
+            filter.maybe_contains(&ObjectKey::extent(1, attr1, MIB..(MIB + 4096))),
+            MaybeContainsKey::False
+        );
+
+        // Queries spanning `> MAX_HASH_PARTITIONS` (4) buckets must return `RangeKeyTooLarge`.
+        assert_eq!(
+            filter.maybe_contains(&ObjectKey::extent(1, attr0, 0..(5 * MIB))),
+            MaybeContainsKey::RangeKeyTooLarge
+        );
+        assert_eq!(
+            filter.maybe_contains(&ObjectKey::extent(1, attr0, (10 * MIB)..(15 * MIB))),
             MaybeContainsKey::RangeKeyTooLarge
         );
     }

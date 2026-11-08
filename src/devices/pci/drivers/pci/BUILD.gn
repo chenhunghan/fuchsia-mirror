@@ -23,7 +23,6 @@ source_set("user_pci") {
     "bus.cc",
     "bus_device_interface.cc",
     "capabilities/msix.cc",
-    "capabilities/power_management.cc",
     "composite.cc",
     "config.cc",
     "device.cc",
@@ -34,27 +33,27 @@ source_set("user_pci") {
   ]
 
   deps = [
-    "//sdk/lib/driver/legacy-bind-constants",
     "//sdk/lib/driver/metadata/cpp",
+    "//sdk/lib/fidl/cpp/wire",
+    "//sdk/lib/fit",
+    "//sdk/lib/stdcompat",
     "//src/devices/bind/fuchsia.acpi:fuchsia.acpi_cpp",
+    "//src/zircon/lib/zircon:zircon-headers",
   ]
 
   public_deps = [
-    "//sdk/banjo/fuchsia.hardware.pciroot:fuchsia.hardware.pciroot_banjo_cpp",
+    "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_cpp",
     "//sdk/fidl/fuchsia.hardware.pci:fuchsia.hardware.pci_cpp",
-    "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+    "//sdk/fidl/fuchsia.hardware.pci.root:fuchsia.hardware.pci.root_cpp",
     "//sdk/lib/async:async-cpp",
-    "//sdk/lib/component/outgoing/cpp",
+    "//sdk/lib/driver/component/cpp",
+    "//sdk/lib/driver/legacy-bind-constants",
+    "//sdk/lib/driver/logging/cpp",
+    "//sdk/lib/driver/outgoing/cpp",
     "//src/devices/bind/fuchsia:fuchsia_cpp",
-    "//src/devices/bind/fuchsia.acpi:fuchsia.acpi_cpp",
     "//src/devices/bind/fuchsia.pci:fuchsia.pci_cpp",
-    "//src/devices/lib/driver",
     "//src/devices/lib/driver:driver_runtime",
     "//src/devices/pci/lib/cpp:headers",
-    "//src/devices/pci/lib/device-protocol-pci",
-    "//src/devices/pci/lib/pci",
-    "//src/lib/ddk",
-    "//src/lib/ddktl",
     "//zircon/system/ulib/fbl",
     "//zircon/system/ulib/hwreg",
     "//zircon/system/ulib/pretty",
@@ -74,22 +73,20 @@ source_set("user_pci") {
 
 fuchsia_driver_dml("pci-dml") {
   dml = "meta/pci.dml"
-  driver_name = "pci"
+  driver_name = "bus-pci"
+  golden_cml = "meta/pci.cml"
+  golden_bind = "meta/pci.bind"
 }
 
 driver_bind_rules("pci_bind") {
   bind_output = "bus-pci.bindbc"
   dml_label = ":pci-dml"
   tests = "meta/pci_bind_tests.json"
-  deps = [
-    "//src/devices/bind/fuchsia.pci",
-    "//src/devices/bind/fuchsia.platform",
-  ]
+  deps = [ "//src/devices/bind/fuchsia" ]
 }
 
 # bus-pci is used on boards that enable user space PCI support.
 fuchsia_cc_driver("bus-pci-driver") {
-  legacy = true
   output_name = "bus-pci"
   configs += [
     "//build/config:all_source",
@@ -103,7 +100,6 @@ fuchsia_cc_driver("bus-pci-driver") {
   deps = [
     ":pci_bind",
     ":user_pci",
-    "//src/devices/lib/driver",
   ]
 }
 
@@ -111,12 +107,15 @@ fuchsia_driver_component("bus-pci") {
   component_name = "bus-pci"
   deps = [ ":bus-pci-driver" ]
   info = "meta/bus-pci-info.json"
-  manifest = "meta/pci.cml"
+  dml_label = ":pci-dml"
 }
 
 fuchsia_driver_package("bus-pci-package") {
   package_name = "bus-pci"
-  driver_components = [ ":bus-pci" ]
+  driver_components = [
+    ":bus-pci",
+    "//src/devices/pci/drivers/pciroot-banjo-adapter:pciroot-banjo-adapter-component",
+  ]
 }
 
 group("tests") {

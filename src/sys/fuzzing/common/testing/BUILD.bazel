@@ -1,0 +1,106 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+# Note: Fuchsia-only target matching platform-only deps via target_compatible_with.
+fx_cc_library(
+    name = "testing",
+    testonly = True,
+    srcs = [
+        "artifact.cc",
+        "component-context.cc",
+        "corpus-reader.cc",
+        "module.cc",
+        "monitor.cc",
+        "registrar.cc",
+        "runner.cc",
+    ],
+    hdrs = [
+        "artifact.h",
+        "async-test.h",
+        "component-context.h",
+        "corpus-reader.h",
+        "module.h",
+        "monitor.h",
+        "registrar.h",
+        "runner.h",
+    ],
+    implementation_deps = [
+        "//sdk/lib/async",
+        "//sdk/lib/syslog/cpp",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/sys:__subpackages__"],
+    deps = [
+        "//sdk/testing/fidl:test_support",
+        "//src/sys/fuzzing/common",
+        "//zircon/system/ulib/sync",
+        "@com_google_googletest//:gtest",
+    ],
+    alwayslink = True,
+)
+
+# Test executables which use this source_set (in place of a real sanitizer
+# runtime) must include `exclude_toolchain_tags = [ "instrumented" ]`.
+# Note: Fuchsia-only target matching platform-only deps via target_compatible_with.
+fx_cc_library(
+    name = "sanitizer",
+    testonly = True,
+    srcs = ["sanitizer.cc"],
+    hdrs = ["sanitizer.h"],
+    implementation_deps = [
+        ":testing",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl",
+        "//src/sys/fuzzing/common",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/sys/fuzzing/libfuzzer/testing:__pkg__",
+        "//src/sys/fuzzing/libfuzzer/tests:__pkg__",
+        "//src/sys/fuzzing/realmfuzzer/tests:__pkg__",
+    ],
+    alwayslink = True,
+)
+
+# Simple echo executable.
+fx_cc_binary(
+    name = "echo",
+    testonly = True,
+    srcs = ["echo.cc"],
+    gn_output_name = "fuzzing_echo_for_test",
+    visibility = ["//src/sys/fuzzing:__subpackages__"],
+)
+
+fx_packaged_binary(
+    name = "echo_packaged_bin",
+    testonly = True,
+    binary = ":echo",
+    binary_name = "fuzzing_echo_for_test",
+    visibility = ["//src/sys/fuzzing/common:__pkg__"],
+)
+
+# A standalone fuzzer that uses a fake runner.
+# Note: Fuchsia-only target matching platform-only deps via target_compatible_with.
+fx_cc_binary(
+    name = "fuzzer-bin",
+    testonly = True,
+    srcs = ["engine-main.cc"],
+    gn_output_name = "fake_fuzzer_for_testing",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/sys/fuzzing/registry/tests:__pkg__"],
+    deps = [
+        ":testing",
+        "//src/lib/fxl",
+        "//src/sys/fuzzing/fidl:fuchsia.fuzzer_hlcpp",
+    ],
+)

@@ -40,7 +40,6 @@ all_libs = [
   "cxxabi-dynamic-init",
   "debug",
   "debuglog",
-  "devicetree",
   "dump",
   "efi",
   "fasttime",

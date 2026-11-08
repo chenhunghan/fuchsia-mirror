@@ -52,7 +52,10 @@ class ArchVmAspaceInterface {
 
   // Function pointer to allocate a single page that the mmu routine uses to allocate
   // page tables.
-  using page_alloc_fn_t = zx_status_t (*)(uint alloc_flags, vm_page** p, paddr_t* pa);
+  // TODO(https://fxbug.dev/528405969): Remove cfi_unchecked_callee once cross-language
+  // CFI between Clang C++ and rustc is supported in the kernel.
+  using page_alloc_fn_t = zx_status_t (*)(uint alloc_flags, vm_page** p, paddr_t* pa)
+      [[clang::cfi_unchecked_callee]];
 
   // The Init* methods are used to initialize the ArchVmAspace. The method that should be used
   // is dependent on the type of address space being created.
@@ -116,7 +119,9 @@ class ArchVmAspaceInterface {
   //  - |Error| - Existing mappings result in a ZX_ERR_ALREADY_EXISTS error.
   //  - |Upgrade| - Upgrade any existing mappings, meaning a read-only mapping
   //                can be converted to read-write, or the mapping can have its
-  //                paddr changed.
+  //                paddr changed. Must not be used on kernel address spaces, as
+  //                changing an existing mapping's paddr may perform
+  //                break-before-make and transiently unmap the page.
   //
   // On error none of the provided pages will be mapped. In the case of |Upgrade| the state of any
   // previous mappings is undefined, and could either still be present or be unmapped.

@@ -5,306 +5,788 @@
 
 set -euo pipefail
 
-# Deterministic check auditing BUILD.bazel files for visibility scoping and rdeps anti-patterns:
-# 1. Package-level default_visibility in package(...)
-# 2. Missing target-level visibility when a target has external callers
-# 3. Overly narrow sprawling visibility lists (> 15 entries) on widely-used libraries/utilities (should use 2-3 level subsystem/top-level area rollups or ["//:__subpackages__"] for foundational tree-wide libraries)
-# 4. Disallowed target-level '//visibility:public' when migrating GN targets to Bazel (per determining_bazel_visibility/SKILL.md),
-#    including on test entry points (fx_unittest_package, fx_test, host_*_test), which should be private
-# 5. Redundant ':__pkg__' (or '//<current_pkg>:__pkg__') in target visibility lists
-# 6. Overbroad repository-wide visibility ('//:__subpackages__') and top-level roots ('//src:__subpackages__', '//sdk:__subpackages__', etc.) on non-globally-used targets
-# 7. Multi-domain catch-all umbrella wildcards ('//src/lib:__subpackages__', '//sdk/lib:__subpackages__', '//src/testing:__subpackages__', '//src/tests:__subpackages__')
-# 8. Cross-area depth-2 wildcards ('//src/<area>:__subpackages__') on non-global targets outside //src/<area>
-# 9. Overbroad depth >= 3 ':__subpackages__' wildcards wider than the Lowest Common Ancestor (LCA) of actual callers on non-global targets
-# 10. False-positive rdeps from visibility allowlists (visibility.gni / visibility = [...]) or GN-only targets (:tests, :benchmarks)
-# 11. Uncovered callers: a package whose BUILD.gn/BUILD.bazel depends on the target, or on a generated
-#     '<target>_<suffix>' sub-target (e.g. fidl_library bindings '<fidl>_rust', '<fidl>_cpp'), that no
-#     visibility entry covers. References to generated sub-targets count as rdeps of the owning target.
+# Deterministic check auditing BUILD.bazel files for visibility scoping and rdeps anti-patterns.
+# Uses shared rdep discovery and visibility recommendation logic in `rdeps_lib.py` and
+# shared check helpers in `planter_check_lib.py`.
 
 export PATH="${PATH:-}:${HOME:-}/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKDIR="${PLANTER_WORKDIR:-.}"
 TARGET_DIR="${PLANTER_TARGET_DIR:-}"
+TARGET_DIRS="${PLANTER_TARGET_DIRS:-$TARGET_DIR}"
 
-python3 - "$WORKDIR" "$TARGET_DIR" <<'PYEOF'
+python3 - "$SCRIPT_DIR" "$WORKDIR" "$TARGET_DIR" "$TARGET_DIRS" <<'PYEOF'
 import ast
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 
-workdir = os.path.abspath(sys.argv[1])
-target_dir = sys.argv[2].strip().strip("/")
+sys.path.insert(0, os.path.abspath(sys.argv[1]))
+import planter_check_lib as pcl
+import rdeps_lib as rl
 
-EXCLUDED_GLOBAL_VIS_PREFIXES = (
-    "bundles/assembly/",
-    "build/bazel/",
-    "build/bazel2gn/",
-    "build/images/",
-    "build/config/rust/lints/",
-    "third_party/rust_crates/",
-)
-
-candidate_files = set()
-if target_dir:
-    rel_bazel = os.path.join(target_dir, "BUILD.bazel")
-    if os.path.isfile(os.path.join(workdir, rel_bazel)):
-        candidate_files.add(rel_bazel)
-
-change_base = os.environ.get("PLANTER_CHANGE_BASE", "").strip() or "HEAD"
-git_cmds = [
-    ["git", "-C", workdir, "diff", "--name-only", change_base, "--", "*BUILD.bazel"],
-    ["git", "-C", workdir, "diff", "--cached", "--name-only", "--", "*BUILD.bazel"],
+workdir = os.path.abspath(sys.argv[2])
+target_dir = rl.normalize_target_dir(sys.argv[3], workdir)
+target_dirs = [
+    rl.normalize_target_dir(d, workdir)
+    for d in re.split(r"[\s,]+", f"{sys.argv[4]} {target_dir}")
+    if rl.normalize_target_dir(d, workdir)
 ]
-if target_dir:
-    git_cmds.append(["git", "-C", workdir, "ls-files", "--others", "--exclude-standard", "--", f"{target_dir}/*BUILD.bazel"])
-else:
-    git_cmds.append(["git", "-C", workdir, "ls-files", "--others", "--exclude-standard", "--", "*BUILD.bazel"])
-for cmd in git_cmds:
+target_bazel_files = {os.path.join(d, "BUILD.bazel") for d in target_dirs}
+
+candidate_files = {
+    rel_bazel
+    for rel_bazel in sorted(target_bazel_files)
+    if not rel_bazel.startswith(rl.EXCLUDED_GLOBAL_VIS_PREFIXES)
+    and os.path.isfile(os.path.join(workdir, rel_bazel))
+}
+
+# Check whether a changed BUILD.bazel outside target_dirs is a @bazel2gn:skip bridge stub.
+def is_bridge_stub_bazel_file(workdir, rel_bazel, changed_set, target_bazel_files):
+    if rel_bazel in target_bazel_files:
+        return False
+    pkg_dir = os.path.dirname(rel_bazel).strip("/")
+    if not pkg_dir or f"{pkg_dir}/BUILD.gn" in changed_set:
+        return False
+    full_bz = os.path.join(workdir, rel_bazel)
     try:
-        out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL, text=True)
-        for line in out.splitlines():
-            line = line.strip()
-            if (
-                line.endswith("BUILD.bazel")
-                and not line.startswith(EXCLUDED_GLOBAL_VIS_PREFIXES)
-                and os.path.isfile(os.path.join(workdir, line))
-            ):
-                candidate_files.add(line)
+        with open(full_bz, encoding="utf-8") as fh:
+            bz_src = fh.read()
+        tree = ast.parse(bz_src, filename=rel_bazel)
     except Exception:
-        pass
-
-if not candidate_files:
-    print("[]")
-    sys.exit(0)
-
-BANNED_TOP_LEVEL_SUBPKGS = {
-    "src",
-    "sdk",
-    "build",
-    "zircon",
-    "third_party",
-}
-
-BANNED_UMBRELLA_SUBPKGS = {
-    "src/lib",
-    "sdk/lib",
-    "src/testing",
-    "src/tests",
-    "third_party/rust_crates",
-}
-
-def get_pkg_area(p):
-    parts = p.strip("/").split("/")
-    if not parts or not parts[0]:
-        return ""
-    if parts[0] in ("src", "sdk") and len(parts) >= 2:
-        return f"{parts[0]}/{parts[1]}"
-    return parts[0]
-
-def get_distinct_areas(rdep_pkgs, pkg_path):
-    pkgs = sorted(set(p.strip("/") for p in rdep_pkgs if p.strip("/") and p.strip("/") != pkg_path))
-    return sorted({get_pkg_area(p) for p in pkgs if get_pkg_area(p)})
-
-VG_ROOT = "vendor/" + "google"
-VG_SUBPKGS = "//" + VG_ROOT + ":__subpackages__"
-
-def recommend_narrow_visibility(rdep_pkgs, pkg_path):
-    raw_pkgs = sorted(set(p.strip("/") for p in rdep_pkgs if p.strip("/") and p.strip("/") != pkg_path))
-    if not raw_pkgs:
-        return []
-    has_vendor_google = any(p == VG_ROOT or p.startswith(VG_ROOT + "/") for p in raw_pkgs)
-    pkgs = [p for p in raw_pkgs if p != VG_ROOT and not p.startswith(VG_ROOT + "/")]
-    vendor_entries = [VG_SUBPKGS] if has_vendor_google else []
-    if not pkgs:
-        return vendor_entries
-    if len(pkgs) <= 5:
-        result = list(vendor_entries)
-        for p in pkgs:
-            if p == "bundles/assembly":
-                result.append("//bundles/assembly:__subpackages__")
-                continue
-            if any(p != other and p.startswith(other + "/") for other in pkgs if len(other.split("/")) >= 3):
-                continue
-            has_child = any(other != p and other.startswith(p + "/") for other in pkgs)
-            if has_child and len(p.split("/")) >= 3:
-                result.append(f"//{p}:__subpackages__")
-            else:
-                result.append(f"//{p}:__pkg__")
-        return sorted(set(result))
-
-    by_d3 = {}
-    for p in pkgs:
-        parts = p.split("/")
-        if len(parts) < 3:
-            by_d3.setdefault(p, []).append(p)
-        else:
-            d3 = "/".join(parts[:3])
-            by_d3.setdefault(d3, []).append(p)
-
-    result = set(vendor_entries)
-    for d3, group in sorted(by_d3.items()):
-        parts_d3 = d3.split("/")
-        if len(parts_d3) < 3:
-            for p in group:
-                if p == "bundles/assembly":
-                    result.add("//bundles/assembly:__subpackages__")
-                else:
-                    result.add(f"//{p}:__pkg__")
+        return False
+    src_lines = bz_src.splitlines()
+    saw_entry = False
+    for stmt in tree.body:
+        if not (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)):
             continue
+        fn = (
+            stmt.value.func.id
+            if isinstance(stmt.value.func, ast.Name)
+            else (stmt.value.func.attr if isinstance(stmt.value.func, ast.Attribute) else "")
+        )
+        if fn in ("load", "package", "licenses", "visibility"):
+            continue
+        saw_entry = True
+        if fn == "exports_files":
+            continue
+        if not pcl.has_bazel2gn_skip_comment(src_lines, stmt.value.lineno):
+            return False
+    return saw_entry
 
-        split_group = [g.split("/") for g in group]
-        min_len = min(len(s) for s in split_group)
-        lca_len = 0
-        for i in range(min_len):
-            if len({s[i] for s in split_group}) == 1:
-                lca_len = i + 1
-            else:
-                break
-        lca = "/".join(split_group[0][:max(3, lca_len)])
-        lca_depth = len(lca.split("/"))
 
-        if lca in group and len(group) >= 2:
-            result.add(f"//{lca}:__subpackages__")
-        elif (lca_depth >= 4 and len(group) >= 3) or (lca_depth == 3 and len(group) >= 4):
-            result.add(f"//{lca}:__subpackages__")
-        else:
-            for p in group:
-                if any(p != other and p.startswith(other + "/") for other in group if len(other.split("/")) >= 3):
-                    continue
-                has_child = any(other != p and other.startswith(p + "/") for other in group)
-                if has_child and len(p.split("/")) >= 3:
-                    result.add(f"//{p}:__subpackages__")
-                else:
-                    result.add(f"//{p}:__pkg__")
+change_base = pcl.resolve_change_base(workdir)
+changed_set = set(pcl.changed_files(workdir, change_base))
+for line in sorted(changed_set):
+    if (
+        line.endswith("BUILD.bazel")
+        and not line.startswith(rl.EXCLUDED_GLOBAL_VIS_PREFIXES)
+        and os.path.isfile(os.path.join(workdir, line))
+        and not is_bridge_stub_bazel_file(
+            workdir, line, changed_set, target_bazel_files
+        )
+    ):
+        candidate_files.add(line)
 
-    return sorted(result)
+findings = []
+clean_audited_targets = set()
+gni_importer_cache = {}
+gni_grep_cache = {}
+bzl_macro_cache = {}
+ancestor_suite_cache = {}
+cml_shard_caller_cache = {}
 
-def recommend_area_rollup_visibility(rdep_pkgs, pkg_path):
-    raw_pkgs = sorted(set(p.strip("/") for p in rdep_pkgs if p.strip("/") and p.strip("/") != pkg_path))
-    if not raw_pkgs:
-        return []
-    has_vendor_google = any(p == VG_ROOT or p.startswith(VG_ROOT + "/") for p in raw_pkgs)
-    pkgs = [p for p in raw_pkgs if p != VG_ROOT and not p.startswith(VG_ROOT + "/")]
-    by_area = {}
-    for p in pkgs:
-        area = get_pkg_area(p)
-        by_area.setdefault(area, []).append(p)
-    result = {VG_SUBPKGS} if has_vendor_google else set()
-    for area, group in sorted(by_area.items()):
-        if area in BANNED_UMBRELLA_SUBPKGS:
-            for item in recommend_narrow_visibility(group, pkg_path):
-                result.add(item)
-        elif "/" in area:
-            if len(group) >= 2 or any(g != area and len(g.split("/")) > 2 for g in group):
-                result.add(f"//{area}:__subpackages__")
-            else:
-                result.add(f"//{group[0]}:__pkg__")
-        else:
-            by_d2 = {}
-            for g in group:
-                parts = g.split("/")
-                d2 = "/".join(parts[:2]) if len(parts) >= 2 else parts[0]
-                by_d2.setdefault(d2, []).append(g)
-            for d2, d2_group in sorted(by_d2.items()):
-                if len(d2_group) >= 2 or any(x != d2 for x in d2_group):
-                    result.add(f"//{d2}:__subpackages__")
-                else:
-                    result.add(f"//{d2_group[0]}:__pkg__")
-    return sorted(result)
 
-def is_globally_used_target(rdep_pkgs, pkg_path):
-    pkgs = sorted(set(p.strip("/") for p in rdep_pkgs if p.strip("/") and p.strip("/") != pkg_path))
-    narrow = recommend_narrow_visibility(pkgs, pkg_path)
-    areas = get_distinct_areas(pkgs, pkg_path)
-    return len(areas) >= 6 and (len(narrow) > 15 or len(pkgs) >= 20)
-
-def recommend_visibility(rdep_pkgs, pkg_path, is_test_support=False):
-    pkgs = sorted(set(p.strip("/") for p in rdep_pkgs if p.strip("/") and p.strip("/") != pkg_path))
-    narrow = recommend_narrow_visibility(pkgs, pkg_path)
-    globally_used = is_globally_used_target(pkgs, pkg_path)
-    if globally_used or len(narrow) > 8:
-        rollup = recommend_area_rollup_visibility(pkgs, pkg_path)
-        if globally_used and len(rollup) > 15:
-            return ["//:__subpackages__"]
-        if len(rollup) <= len(narrow):
-            return rollup
-    if is_test_support and len(get_distinct_areas(pkgs, pkg_path)) >= 2:
-        return ["//:__subpackages__"]
-    return narrow
-
-def get_orig_gn_visibility_scopes(pkg_path):
-    """Returns {target_name: [(scope_pkg, 'pkg'|'subpackages'), ...]} for targets in change_base BUILD.gn
-    that had an explicit non-wildcard visibility = [...] restriction."""
-    gn_rel = f"{pkg_path}/BUILD.gn" if pkg_path else "BUILD.gn"
+# Discover caller packages whose .cml manifests include a cml_shard file from pkg_path.
+def discover_cml_shard_rdeps(node, target_name, pkg_path):
+    shard_rel = ""
+    for kw in node.keywords:
+        if (
+            kw.arg == "shard"
+            and isinstance(kw.value, ast.Constant)
+            and isinstance(kw.value.value, str)
+        ):
+            shard_rel = kw.value.value.strip().lstrip(":")
+            break
+    if not shard_rel:
+        shard_rel = (
+            target_name if target_name.endswith(".cml") else f"{target_name}.cml"
+        )
+    cache_key = (pkg_path, shard_rel)
+    if cache_key in cml_shard_caller_cache:
+        return cml_shard_caller_cache[cache_key]
+    inc_label = (
+        f"//{pkg_path}/{shard_rel.lstrip('/')}"
+        if pkg_path
+        else f"//{shard_rel.lstrip('/')}"
+    )
+    callers = set()
     try:
-        gn_src = subprocess.check_output(
-            ["git", "-C", workdir, "show", f"{change_base}:{gn_rel}"],
+        proc = subprocess.run(
+            [
+                "git",
+                "-C",
+                workdir,
+                "grep",
+                "--untracked",
+                "-l",
+                "--fixed-strings",
+                "-e",
+                inc_label,
+                "--",
+                "*.cml",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
+            timeout=15,
+            check=False,
         )
-    except Exception:
-        return {}
-    no_comments = re.sub(r"#[^\n]*", "", gn_src)
-    def parse_gn_vis_list(vis_body):
-        if "$" in vis_body:
-            return None
-        pats = re.findall(r'"([^"]+)"', vis_body)
-        if not pats:
-            return None
-        scopes = []
-        for pat in pats:
-            if pat == "//*":
-                return None
-            if pat.startswith(":"):
-                scopes.append((pkg_path, "pkg"))
+        for raw_line in proc.stdout.splitlines():
+            cml_rel = raw_line.strip().strip("/")
+            if not cml_rel:
                 continue
-            m_gn = re.match(r"^//([^:*]*?)/?(\*|:.*)?$", pat)
-            if not m_gn:
-                return None
-            sp = m_gn.group(1).strip("/")
-            suffix = m_gn.group(2) or ""
-            scopes.append((sp, "subpackages" if suffix == "*" else "pkg"))
-        return scopes
-    out = {}
-    target_re = re.compile(r'\b([A-Za-z_]\w*)\(\s*"([^"$]+)"\s*\)\s*\{')
-    for m in target_re.finditer(no_comments):
-        tname = m.group(2)
-        depth, in_str, i, n = 0, False, m.end() - 1, len(no_comments)
-        while i < n:
-            c = no_comments[i]
-            if in_str:
-                if c == "\\":
-                    i += 2
-                    continue
-                if c == '"':
-                    in_str = False
-            elif c == '"':
-                in_str = True
-            elif c == "{":
-                depth += 1
-            elif c == "}":
-                depth -= 1
-                if depth == 0:
+            cur_dir = os.path.dirname(cml_rel)
+            while cur_dir:
+                if os.path.isfile(
+                    os.path.join(workdir, cur_dir, "BUILD.bazel")
+                ) or os.path.isfile(
+                    os.path.join(workdir, cur_dir, "BUILD.gn")
+                ):
+                    if cur_dir != pkg_path:
+                        callers.add(cur_dir)
                     break
-            i += 1
-        tbody = no_comments[m.end() : i]
-        if re.search(r"\bvisibility\s*\+=", tbody):
-            continue
-        vm = re.search(r"\bvisibility\s*=\s*\[([^\]]*)\]", tbody)
-        if vm:
-            scopes = parse_gn_vis_list(vm.group(1))
-            if scopes:
-                out[tname] = scopes
-    return out
+                cur_dir = os.path.dirname(cur_dir)
+    except Exception:
+        pass
+    cml_shard_caller_cache[cache_key] = callers
+    return callers
 
-def get_preexisting_vis_info(rel_path):
-    """Returns (vis_strings, no_vis_targets) already present in change_base/HEAD~1 of rel_path (unless rel_path is target_dir)."""
-    if target_dir and rel_path == os.path.join(target_dir, "BUILD.bazel"):
-        return set(), set()
-    for ref in dict.fromkeys([change_base, "HEAD~1"]):
+
+def emit_finding(category, severity, file_rel, line_no, message, remediation):
+    pcl.emit(
+        findings,
+        category=category,
+        severity=severity,
+        file=file_rel,
+        line=line_no,
+        message=message,
+        remediation=remediation,
+        source="visibility_audit",
+    )
+
+# Check whether `<pkg_dir>/BUILD.gn` still depends on the crate guarded by `group_name`.
+def gn_pkg_uses_restricted_rust_crate(pkg_dir, group_name):
+    gn_file = os.path.join(workdir, pkg_dir, "BUILD.gn")
+    if not os.path.isfile(gn_file):
+        return False
+    try:
+        with open(gn_file, "r", encoding="utf-8") as f:
+            gn_clean = pcl.strip_comments(f.read())
+    except Exception:
+        return False
+    prefix = group_name[: -len("_visibility")].replace("_", "[-_]")
+    if prefix == "md5":
+        prefix = "md[-_]?5"
+    crate_re = re.compile(
+        r'"//third_party/rust_crates(?:/vendor)?:' + prefix + r'(?:"|\()'
+    )
+    return bool(crate_re.search(gn_clean))
+
+
+# Parse restricted crate aliases in `third_party/rust_crates/vendor/BUILD.bazel` and
+# their `*_visibility` package_groups in `third_party/rust_crates/BUILD.bazel`.
+def load_restricted_rust_crate_allowlists():
+    rc_bz_path = os.path.join(workdir, "third_party/rust_crates/BUILD.bazel")
+    vendor_bz_path = os.path.join(
+        workdir, "third_party/rust_crates/vendor/BUILD.bazel"
+    )
+    if not os.path.isfile(rc_bz_path) or not os.path.isfile(vendor_bz_path):
+        return {}, {}
+    try:
+        with open(rc_bz_path, "r", encoding="utf-8") as f:
+            rc_tree = ast.parse(
+                f.read(), filename="third_party/rust_crates/BUILD.bazel"
+            )
+        with open(vendor_bz_path, "r", encoding="utf-8") as f:
+            vendor_tree = ast.parse(
+                f.read(), filename="third_party/rust_crates/vendor/BUILD.bazel"
+            )
+    except Exception:
+        return {}, {}
+
+    pkg_groups = {}
+    for node in ast.walk(rc_tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func.id if isinstance(node.func, ast.Name) else ""
+        if fn != "package_group":
+            continue
+        gname = None
+        exact = set()
+        subtrees = set()
+        for kw in node.keywords:
+            if (
+                kw.arg == "name"
+                and isinstance(kw.value, ast.Constant)
+                and isinstance(kw.value.value, str)
+            ):
+                gname = kw.value.value
+            elif kw.arg == "packages" and isinstance(kw.value, ast.List):
+                for elt in kw.value.elts:
+                    if not (
+                        isinstance(elt, ast.Constant)
+                        and isinstance(elt.value, str)
+                        and elt.value.startswith("//")
+                    ):
+                        continue
+                    raw_pkg = elt.value
+                    if raw_pkg == "//...":
+                        subtrees.add("")
+                    elif raw_pkg.endswith("/..."):
+                        subtrees.add(raw_pkg[2:-4].strip("/"))
+                    else:
+                        exact.add(raw_pkg[2:].strip("/"))
+        if gname and gname.endswith("_visibility"):
+            pkg_groups[gname] = (exact, subtrees)
+
+    restricted_labels = {}
+    vis_group_re = re.compile(
+        r"^//third_party/rust_crates:([A-Za-z0-9_]+_visibility)$"
+    )
+    for node in ast.walk(vendor_tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func.id if isinstance(node.func, ast.Name) else ""
+        if fn != "alias":
+            continue
+        alias_name = None
+        actual_lbl = None
+        group_name = None
+        for kw in node.keywords:
+            if (
+                kw.arg == "name"
+                and isinstance(kw.value, ast.Constant)
+                and isinstance(kw.value.value, str)
+            ):
+                alias_name = kw.value.value
+            elif (
+                kw.arg == "actual"
+                and isinstance(kw.value, ast.Constant)
+                and isinstance(kw.value.value, str)
+            ):
+                actual_lbl = kw.value.value
+            elif kw.arg == "visibility" and isinstance(kw.value, ast.List):
+                for elt in kw.value.elts:
+                    if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                        m_vg = vis_group_re.match(elt.value)
+                        if m_vg:
+                            group_name = m_vg.group(1)
+                            break
+        if alias_name and group_name and group_name in pkg_groups:
+            restricted_labels[
+                f"//third_party/rust_crates/vendor:{alias_name}"
+            ] = group_name
+            if actual_lbl and actual_lbl.startswith("//"):
+                restricted_labels[actual_lbl] = group_name
+    return restricted_labels, pkg_groups
+
+
+# Verify that candidate BUILD.bazel packages depending on restricted third-party Rust
+# crates are listed in the corresponding `*_visibility` package_group in
+# `third_party/rust_crates/BUILD.bazel`.
+def check_missing_rust_crates_visibility(bazel_files):
+    if not bazel_files:
+        return
+    restricted_labels, pkg_groups = load_restricted_rust_crate_allowlists()
+    if not restricted_labels or not pkg_groups:
+        return
+    for rel_bz in sorted(bazel_files):
+        pkg_dir = os.path.dirname(rel_bz).strip("/")
+        if not pkg_dir or rel_bz.startswith("third_party/rust_crates/"):
+            continue
+        full_bz = os.path.join(workdir, rel_bz)
+        try:
+            with open(full_bz, "r", encoding="utf-8") as f:
+                bz_src = f.read()
+            bz_tree = ast.parse(bz_src, filename=rel_bz)
+        except Exception:
+            continue
+        var_table = {}
+        for stmt in bz_tree.body:
+            if isinstance(stmt, ast.Assign):
+                for tgt in stmt.targets:
+                    if isinstance(tgt, ast.Name):
+                        var_table[tgt.id] = stmt.value
+        seen_groups = set()
+        for node in ast.walk(bz_tree):
+            if not isinstance(node, ast.Call):
+                continue
+            tname = None
+            for kw in node.keywords:
+                if (
+                    kw.arg == "name"
+                    and isinstance(kw.value, ast.Constant)
+                    and isinstance(kw.value.value, str)
+                ):
+                    tname = kw.value.value
+                    break
+            if not tname:
+                continue
+            for kw in node.keywords:
+                if not kw.arg or kw.arg in ("name", "visibility"):
+                    continue
+                for raw_lbl in pcl._extract_ast_strings(kw.value, var_table):
+                    norm_lbl = re.sub(r"^@@?//", "//", raw_lbl.strip())
+                    if norm_lbl.startswith("//") and ":" not in norm_lbl:
+                        norm_lbl = f"{norm_lbl}:{norm_lbl.rsplit('/', 1)[-1]}"
+                    group_name = restricted_labels.get(norm_lbl)
+                    if not group_name or group_name in seen_groups:
+                        continue
+                    exact_pkgs, subtree_prefixes = pkg_groups[group_name]
+                    is_allowed = pkg_dir in exact_pkgs or any(
+                        pref == ""
+                        or pkg_dir == pref
+                        or pkg_dir.startswith(pref + "/")
+                        for pref in subtree_prefixes
+                    )
+                    if is_allowed:
+                        continue
+                    seen_groups.add(group_name)
+                    uses_in_gn = gn_pkg_uses_restricted_rust_crate(
+                        pkg_dir, group_name
+                    )
+                    line_no = getattr(kw, "lineno", getattr(node, "lineno", 1))
+                    msg = (
+                        f"Target '{tname}' depends on restricted third-party Rust "
+                        f"crate '{norm_lbl}', which requires visibility group "
+                        f"'//third_party/rust_crates:{group_name}', but "
+                        f"'//{pkg_dir}' is missing from `{group_name}` in "
+                        "`third_party/rust_crates/BUILD.bazel`."
+                    )
+                    if uses_in_gn:
+                        rem = (
+                            f'Add `"//{pkg_dir}"` (sorted alphabetically) to '
+                            f'`package_group(name = "{group_name}", ...)` in '
+                            "`third_party/rust_crates/BUILD.bazel`. Keep "
+                            f'`"//{pkg_dir}:*"` in `{group_name}` in '
+                            "`third_party/rust_crates/visibility.gni` while GN "
+                            f"targets in `{pkg_dir}/BUILD.gn` still depend on the "
+                            "crate, never add a `NO_IFTTT` line to the commit "
+                            "message or `CoderReport.summary`, and explain in the "
+                            "commit body that the GN allowlist entry is still "
+                            "required by `BUILD.gn`."
+                        )
+                    else:
+                        rem = (
+                            f'Add `"//{pkg_dir}"` (sorted alphabetically) to '
+                            f'`package_group(name = "{group_name}", ...)` in '
+                            "`third_party/rust_crates/BUILD.bazel`, and remove "
+                            f'`"//{pkg_dir}:*"` from `{group_name}` in '
+                            "`third_party/rust_crates/visibility.gni` if present "
+                            "(paired via `LINT.ThenChange`)."
+                        )
+                    emit_finding(
+                        "missing_rust_crates_visibility",
+                        "error",
+                        rel_bz,
+                        line_no,
+                        msg,
+                        rem,
+                    )
+
+
+# Check third_party/rust_crates/BUILD.bazel and visibility.gni allowlist sync.
+def check_rust_crates_visibility_sync(changed_paths):
+    rc_bz_rel = "third_party/rust_crates/BUILD.bazel"
+    rc_gni_rel = "third_party/rust_crates/visibility.gni"
+    if rc_bz_rel not in changed_paths and rc_gni_rel not in changed_paths:
+        return
+    rc_bz_path = os.path.join(workdir, rc_bz_rel)
+    rc_gni_path = os.path.join(workdir, rc_gni_rel)
+    if not os.path.isfile(rc_bz_path) or not os.path.isfile(rc_gni_path):
+        return
+    try:
+        with open(rc_bz_path, "r", encoding="utf-8") as f:
+            bz_src = f.read()
+        bz_tree = ast.parse(bz_src, filename=rc_bz_rel)
+        with open(rc_gni_path, "r", encoding="utf-8") as f:
+            gni_src = f.read()
+    except Exception:
+        return
+
+    base_bz_src = pcl._git_out(workdir, ["show", f"{change_base}:{rc_bz_rel}"])
+    try:
+        base_bz_tree = ast.parse(base_bz_src) if base_bz_src else None
+    except Exception:
+        base_bz_tree = None
+
+    def parse_pkg_groups(tree):
+        groups = {}
+        if not tree:
+            return groups
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func.id if isinstance(node.func, ast.Name) else ""
+            if fn != "package_group":
+                continue
+            gname = None
+            pkgs = {}
+            for kw in node.keywords:
+                if (
+                    kw.arg == "name"
+                    and isinstance(kw.value, ast.Constant)
+                    and isinstance(kw.value.value, str)
+                ):
+                    gname = kw.value.value
+                elif kw.arg == "packages" and isinstance(kw.value, ast.List):
+                    for elt in kw.value.elts:
+                        if (
+                            isinstance(elt, ast.Constant)
+                            and isinstance(elt.value, str)
+                            and elt.value.startswith("//")
+                            and not elt.value.endswith("/...")
+                        ):
+                            pkgs[elt.value[2:].strip("/")] = elt.lineno
+            if gname and gname.endswith("_visibility"):
+                groups[gname] = pkgs
+        return groups
+
+    def parse_gni_vis_lists(text):
+        lists = {}
+        clean = pcl.blank_comments(text)
+        pat = re.compile(r"(?m)^\s*([A-Za-z0-9_]+_visibility)\s*=\s*\[([^\]]*)\]")
+        for m in pat.finditer(clean):
+            vname = m.group(1)
+            body = m.group(2)
+            base_line = clean.count("\n", 0, m.start(2)) + 1
+            entries = {}
+            for sm in re.finditer(r'"//([^":*]+):?\*"', body):
+                pkg = sm.group(1).strip("/")
+                entries[pkg] = base_line + body.count("\n", 0, sm.start())
+            lists[vname] = entries
+        return lists
+
+    cur_bz_groups = parse_pkg_groups(bz_tree)
+    base_bz_groups = parse_pkg_groups(base_bz_tree)
+    cur_gni_lists = parse_gni_vis_lists(gni_src)
+    base_gni_src = pcl._git_out(workdir, ["show", f"{change_base}:{rc_gni_rel}"])
+    base_gni_lists = parse_gni_vis_lists(base_gni_src) if base_gni_src else {}
+
+    then_change_line = len(bz_src.splitlines())
+    for idx, line_txt in enumerate(bz_src.splitlines(), start=1):
+        if "LINT.ThenChange" in line_txt and "visibility.gni" in line_txt:
+            then_change_line = idx
+            break
+
+    dual_build_added = []
+    for gname, cur_pkgs in sorted(cur_bz_groups.items()):
+        base_pkgs = base_bz_groups.get(gname, {})
+        gni_pkgs = cur_gni_lists.get(gname, {})
+        for pkg, _ in sorted(cur_pkgs.items()):
+            if pkg in base_pkgs:
+                continue
+            uses_in_gn = gn_pkg_uses_restricted_rust_crate(pkg, gname)
+            if not uses_in_gn and pkg in gni_pkgs:
+                emit_finding(
+                    "stale_rust_crates_gn_visibility",
+                    "error",
+                    rc_gni_rel,
+                    gni_pkgs[pkg],
+                    (
+                        f"`{rc_bz_rel}` adds `//{pkg}` to `{gname}`, and no target in "
+                        f"`{pkg}/BUILD.gn` depends on this restricted crate in GN, but "
+                        f"`//{pkg}:*` still remains in `{gname}` in `{rc_gni_rel}` "
+                        f"(violating `LINT.ThenChange(//{rc_gni_rel})`)."
+                    ),
+                    (
+                        f"Remove `\"//{pkg}:*\"` from `{gname}` in `{rc_gni_rel}` now "
+                        f"that no GN targets in `//{pkg}` use the crate."
+                    ),
+                )
+            elif uses_in_gn and pkg in gni_pkgs:
+                dual_build_added.append((gname, pkg))
+
+    for gname, base_gni_pkgs in sorted(base_gni_lists.items()):
+        cur_gni_pkgs = cur_gni_lists.get(gname, {})
+        for pkg in sorted(base_gni_pkgs):
+            if pkg not in cur_gni_pkgs and gn_pkg_uses_restricted_rust_crate(
+                pkg, gname
+            ):
+                emit_finding(
+                    "removed_active_rust_crates_gn_visibility",
+                    "error",
+                    rc_gni_rel,
+                    1,
+                    (
+                        f"`//{pkg}:*` was removed from `{gname}` in `{rc_gni_rel}`, "
+                        f"but `{pkg}/BUILD.gn` still has GN target(s) depending on "
+                        "that restricted third-party crate."
+                    ),
+                    (
+                        f"Restore `\"//{pkg}:*\"` in `{gname}` in `{rc_gni_rel}` "
+                        f"while GN targets in `{pkg}/BUILD.gn` still depend on the "
+                        "crate."
+                    ),
+                )
+
+    if dual_build_added and rc_gni_rel not in changed_paths:
+        desc = ", ".join(f"`//{p}` in `{g}`" for g, p in dual_build_added)
+        emit_finding(
+            "rust_crates_dual_build_ifttt",
+            "info",
+            rc_bz_rel,
+            then_change_line,
+            (
+                f"`{rc_bz_rel}` adds {desc} while `{dual_build_added[0][1]}/BUILD.gn` "
+                f"still depends on the crate in GN, so `{rc_gni_rel}` already lists "
+                "the package and must remain unchanged despite "
+                f"`LINT.ThenChange(//{rc_gni_rel})`."
+            ),
+            (
+                f"Keep `{rc_gni_rel}` unchanged while GN targets in `BUILD.gn` still "
+                "use the crate, and never add a `NO_IFTTT` line to the commit message "
+                "or `CoderReport.summary` (only a human reviewer may add `NO_IFTTT` "
+                "after reviewing the IFTTT warning). Explain in the commit body and "
+                "`CoderReport.summary` that the GN allowlist entry in "
+                f"`{rc_gni_rel}` is still required by `BUILD.gn`."
+            ),
+        )
+
+check_rust_crates_visibility_sync(changed_set)
+check_missing_rust_crates_visibility(candidate_files)
+
+if not candidate_files:
+    pcl.emit_json(findings)
+    sys.exit(0)
+
+origin_main_sources = {}
+pkg_paths = sorted({os.path.dirname(p).strip("/") for p in candidate_files})
+matched_files = rl.discover_referencing_build_files(
+    workdir,
+    pkg_paths,
+    candidate_files=candidate_files,
+    change_base=change_base,
+    origin_main_sources=origin_main_sources,
+    refresh_origin_main=len(pkg_paths) <= 10,
+)
+file_cache = rl.build_file_cache(matched_files, origin_main_sources)
+
+def check_visibility_tightened_from_gn(
+    target_name, rel_path, lineno, vis_vals, vis_scopes, preserved_gn_vis, pkg_path
+):
+    missing_preserved = []
+    for pval in preserved_gn_vis:
+        pm = re.match(r"^//([^:]+):__(pkg|subpackages)__$", pval)
+        if not pm:
+            continue
+        psp, pkind = pm.group(1).strip("/"), pm.group(2)
+        if pkind == "pkg":
+            cov = any(
+                psp == sp or (k == "subpackages" and (sp == "" or psp.startswith(sp + "/")))
+                for sp, k in vis_scopes
+            )
+        else:
+            cov = any(
+                k == "subpackages" and (sp == "" or psp == sp or psp.startswith(sp + "/"))
+                for sp, k in vis_scopes
+            )
+        if not cov:
+            missing_preserved.append(pval)
+    if missing_preserved:
+        emit_finding(
+            "visibility_tightened_from_gn",
+            "error",
+            rel_path,
+            lineno,
+            (
+                f"Target '{target_name}' tightens visibility to {json.dumps(vis_vals)} "
+                f"from the explicit narrow visibility in `{pkg_path}/BUILD.gn` "
+                f"({json.dumps(preserved_gn_vis)}). Stick with the existing narrow "
+                "visibility decision even if the target is not currently used outside "
+                "a narrower scope."
+            ),
+            (
+                f"Set visibility = {json.dumps(preserved_gn_vis)} on '{target_name}' "
+                "to preserve the original narrow GN visibility scope, and re-run "
+                "fx bazel2gn."
+            ),
+        )
+
+def record_intentional_visibility_narrowing(
+    target_name, rel_path, target_lineno, vis_scopes, orig_gn_vis_map, pkg_path
+):
+    gn_scopes = orig_gn_vis_map.get(target_name)
+    if not gn_scopes:
+        return
+    uncovered_gn = []
+    suggested_bz = []
+    for gsp, gk in gn_scopes:
+        if gsp == pkg_path and gk == "pkg":
+            continue
+        if gk == "pkg":
+            cov = any(
+                gsp == sp or (k == "subpackages" and (sp == "" or gsp.startswith(sp + "/")))
+                for sp, k in vis_scopes
+            )
+            gn_pat, bz_pat = f"//{gsp}:*", f"//{gsp}:__pkg__"
+        else:
+            cov = any(
+                k == "subpackages" and (sp == "" or gsp == sp or gsp.startswith(sp + "/"))
+                for sp, k in vis_scopes
+            )
+            gn_pat = "//*" if not gsp else f"//{gsp}/*"
+            bz_pat = "//:__subpackages__" if not gsp else f"//{gsp}:__subpackages__"
+        if not cov and gn_pat not in uncovered_gn:
+            uncovered_gn.append(gn_pat)
+            suggested_bz.append(bz_pat)
+    if not uncovered_gn:
+        return
+    emit_finding(
+        "visibility_narrowed",
+        "info",
+        rel_path,
+        target_lineno,
+        (
+            f'Target "{target_name}": GN visibility [{", ".join(uncovered_gn)}] is not '
+            "covered by Bazel visibility (GN `/*` also grants subpackages, unlike `:*`; "
+            "only the target's own package is implicit in Bazel); add "
+            f'[{", ".join(suggested_bz)}] or confirm the narrowing is intended'
+        ),
+        (
+            "Intentional visibility narrowing verified by visibility_audit "
+            "(all actual reverse dependencies and preserved narrow GN scopes are covered)."
+        ),
+    )
+
+def record_diff_visibility_narrowed_info(clean_targets):
+    if not clean_targets or os.environ.get("PLANTER_SKIP_DIFF_COVERAGE") == "1":
+        return
+    diff_list = pcl.read_review_diff_findings()
+    if not diff_list and "PLANTER_REVIEW_DIFF_JSON" not in os.environ:
+        planter_bin = rl.find_planter_bin()
+        if not planter_bin:
+            return
+        env = dict(os.environ)
+        env["PLANTER_BIN"] = planter_bin
+        env["PLANTER_SKIP_DIFF_COVERAGE"] = "1"
+        try:
+            out = subprocess.run(
+                [planter_bin, "diff", "--local", "--check-findings", f"--workdir={workdir}"],
+                cwd=workdir,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=15,
+            ).stdout
+            start, end = out.find("["), out.rfind("]")
+            if start >= 0 and end > start:
+                parsed = json.loads(out[start : end + 1])
+                if isinstance(parsed, list):
+                    diff_list = parsed
+        except Exception:
+            return
+
+    reason = (
+        "Intentional visibility narrowing verified by visibility_audit "
+        "(all actual reverse dependencies and preserved narrow GN scopes are covered)."
+    )
+    by_key = {
+        (f.get("category"), f.get("file"), f.get("line"), f.get("message")): f
+        for f in findings
+    }
+    for df in diff_list:
+        if not isinstance(df, dict) or df.get("category") != "visibility_narrowed":
+            continue
+        f_rel = df.get("file", "")
+        msg = df.get("message", "")
+        ln = df.get("line", 0)
+        tm = re.match(r'^Target "([^"]+)"', msg)
+        tname = tm.group(1) if tm else None
+        if not tname or (f_rel, tname) not in clean_targets:
+            continue
+        key = ("visibility_narrowed", f_rel, ln, msg)
+        if key in by_key:
+            # record_intentional_visibility_narrowing already reported this target; waive the
+            # review_diff finding through that entry instead of emitting a duplicate.
+            by_key[key]["waiver"] = reason
+            continue
+        entry = pcl.emit(
+            findings,
+            category="visibility_narrowed",
+            severity="info",
+            file=f_rel,
+            line=ln,
+            message=msg,
+            remediation=reason,
+            source="visibility_audit",
+        )
+        # An explicit waiver: planter's upload gate drops the review_diff visibility_narrowed
+        # finding with this key (a same-key INFO finding alone no longer suppresses it).
+        entry["waiver"] = reason
+        by_key[key] = entry
+
+# Collect (scope_pkg, kind) pairs declared in exports_files(..., visibility = [...]) calls.
+def collect_exports_files_vis_scopes(tree, var_table, pkg_path):
+    scopes = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = (
+            node.func.id
+            if isinstance(node.func, ast.Name)
+            else (node.func.attr if isinstance(node.func, ast.Attribute) else "")
+        )
+        if fn != "exports_files":
+            continue
+        vis_node = next((kw.value for kw in node.keywords if kw.arg == "visibility"), None)
+        if vis_node is None and len(node.args) >= 2:
+            vis_node = node.args[1]
+        if vis_node is None:
+            continue
+        entries = rl.extract_list_entries(vis_node, var_table, node.lineno) or []
+        for val, _ in entries:
+            m_sc = re.match(r"^(?://([^:]*))?:__(pkg|subpackages)__$", val)
+            if m_sc:
+                sp = pkg_path if m_sc.group(1) is None else m_sc.group(1).strip("/")
+                scopes.append((sp, m_sc.group(2)))
+    return scopes
+
+
+# Collect rule target names that already had an explicit narrow visibility list at change_base.
+def collect_preexisting_narrow_vis_targets(workdir, rel_path, change_base):
+    wt_diff = False
+    try:
+        wt_out = subprocess.check_output(
+            [
+                "git",
+                "-C",
+                workdir,
+                "diff",
+                "--name-only",
+                "HEAD",
+                "--",
+                rel_path,
+            ],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        wt_diff = bool(wt_out)
+    except Exception:
+        pass
+    refs = (
+        ["HEAD~1"]
+        if (change_base == "HEAD" and not wt_diff)
+        else [change_base, "HEAD~1"]
+    )
+    for ref in dict.fromkeys(refs):
         try:
             prev_src = subprocess.check_output(
                 ["git", "-C", workdir, "show", f"{ref}:{rel_path}"],
@@ -312,279 +794,234 @@ def get_preexisting_vis_info(rel_path):
                 text=True,
             )
             prev_tree = ast.parse(prev_src, filename=rel_path)
-            vis_vals = set()
-            no_vis_targets = set()
-            for node in ast.walk(prev_tree):
-                if isinstance(node, ast.Call):
-                    tname = None
-                    has_vis = False
-                    for kw in node.keywords:
-                        if kw.arg == "name" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
-                            tname = kw.value.value
-                        elif kw.arg == "visibility":
-                            has_vis = True
-                            if isinstance(kw.value, ast.List):
-                                for elt in kw.value.elts:
-                                    if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
-                                        vis_vals.add(elt.value)
-                    if tname and not has_vis:
-                        no_vis_targets.add(tname)
-            return vis_vals, no_vis_targets
         except Exception:
             continue
-    return set(), set()
+        prev_var_table = rl.extract_bazel_var_table(prev_tree)
+        narrow_targets = set()
+        for node in ast.walk(prev_tree):
+            if not isinstance(node, ast.Call):
+                continue
+            tname = None
+            vis_vals = []
+            has_vis = False
+            for kw in node.keywords:
+                if (
+                    kw.arg == "name"
+                    and isinstance(kw.value, ast.Constant)
+                    and isinstance(kw.value.value, str)
+                ):
+                    tname = kw.value.value
+                elif kw.arg == "visibility":
+                    vis_entries = rl.extract_list_entries(
+                        kw.value, prev_var_table, getattr(kw, "lineno", 1)
+                    )
+                    if vis_entries is not None:
+                        has_vis = True
+                        vis_vals = [v for (v, _) in vis_entries]
+            if (
+                tname
+                and has_vis
+                and "//visibility:public" not in vis_vals
+                and "//:__subpackages__" not in vis_vals
+            ):
+                narrow_targets.add(tname)
+        return narrow_targets
+    return set()
 
-# Batch-discover all files mentioning any candidate package across checkout repositories
-pkg_paths = sorted({os.path.dirname(p).strip("/") for p in candidate_files})
-search_roots = [r for r in (workdir, os.path.join(workdir, VG_ROOT)) if os.path.isdir(r)]
-patterns = [arg for p in pkg_paths for arg in ("-e", f"//{p}")]
-build_globs = ("*BUILD.gn", "*BUILD.bazel", "*.gni", "*.bzl")
 
-matched_files = set()
-rg_bin = shutil.which("rg")
-if rg_bin and patterns and search_roots:
-    rg_cmd = [rg_bin, "-l", "--fixed-strings", *patterns]
-    for g in build_globs:
-        rg_cmd.extend(["-g", g])
-    rg_cmd.extend(search_roots)
-    res = subprocess.run(rg_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-    for line in res.stdout.splitlines():
-        if line.strip():
-            matched_files.add(line.strip())
-elif patterns:
-    for repo in search_roots:
-        if not os.path.isdir(os.path.join(repo, ".git")):
+# Check cross-package dependency and exported file visibility
+_NON_LABEL_ATTRS = frozenset({
+    "name",
+    "visibility",
+    "default_visibility",
+    "packages",
+    "includes",
+    "applicable_licenses",
+    "default_applicable_licenses",
+    "tags",
+    "copts",
+    "linkopts",
+    "defines",
+    "local_defines",
+    "cxxopts",
+    "conlyopts",
+    "rustc_flags",
+    "test_rustc_flags",
+    "args",
+    "env",
+    "rustc_env",
+    "package_name",
+    "component_name",
+    "binary_name",
+    "crate_name",
+    "library_name",
+    "output_name",
+    "gn_output_name",
+    "install_root",
+    "max_log_severity",
+    "test_type",
+})
+
+dep_pkg_vis_cache = {}
+
+
+# Check whether a concrete Bazel visibility entry list allows caller_pkg.
+def _caller_covered_by_vis_entries(caller_pkg, dep_pkg, vis_entries):
+    if not vis_entries:
+        return False
+    for entry in vis_entries:
+        if entry == "//visibility:public":
+            return True
+        if entry == "//visibility:private":
+            if caller_pkg == dep_pkg:
+                return True
             continue
-        res = subprocess.run(
-            ["git", "-C", repo, "grep", "-l", "--fixed-strings", *patterns, "--", *build_globs],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-        for line in res.stdout.splitlines():
-            if line.strip():
-                matched_files.add(os.path.join(repo, line.strip()))
-        untracked = subprocess.run(
-            ["git", "-C", repo, "ls-files", "--others", "--exclude-standard", "--", *build_globs],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-        for line in untracked.stdout.splitlines():
-            if line.strip():
-                fpath = os.path.join(repo, line.strip())
-                if os.path.isfile(fpath):
-                    matched_files.add(fpath)
+        m = re.match(r"^(?://([^:]*))?:__(pkg|subpackages)__$", entry)
+        if not m:
+            # Treat custom package_group labels conservatively as covered.
+            return True
+        scope = dep_pkg if m.group(1) is None else m.group(1).strip("/")
+        kind = m.group(2)
+        if kind == "pkg" and caller_pkg == scope:
+            return True
+        if kind == "subpackages" and (
+            scope == "" or caller_pkg == scope or caller_pkg.startswith(scope + "/")
+        ):
+            return True
+    return False
 
-for p in pkg_paths:
-    parts = p.split("/")
-    for i in range(1, len(parts)):
-        anc_gn = os.path.join(workdir, "/".join(parts[:i]), "BUILD.gn")
-        if os.path.isfile(anc_gn):
-            matched_files.add(anc_gn)
 
-file_cache = {}
-for fpath in sorted(matched_files):
+# Parse explicit target and exports_files visibility declarations in dep_pkg/BUILD.bazel.
+def _load_dep_pkg_explicit_vis(dep_pkg):
+    if dep_pkg in dep_pkg_vis_cache:
+        return dep_pkg_vis_cache[dep_pkg]
+    vis_map = {}
+    dep_bazel = os.path.join(workdir, dep_pkg, "BUILD.bazel")
+    if not os.path.isfile(dep_bazel):
+        dep_pkg_vis_cache[dep_pkg] = vis_map
+        return vis_map
     try:
-        with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
-            raw = f.read()
-        no_comments = re.sub(r"#[^\n]*", "", raw)
-        stripped = re.sub(r"(?:visibility|packages)\s*\+?=\s*\[[^\]]*\]", "", no_comments, flags=re.DOTALL)
-        file_cache[fpath] = (no_comments, stripped)
+        with open(dep_bazel, "r", encoding="utf-8") as fh:
+            dep_src = fh.read()
+        dep_tree = ast.parse(dep_src, filename=f"{dep_pkg}/BUILD.bazel")
     except Exception:
-        pass
-
-CONVERTIBLE_GN_TEMPLATES = {
-    "static_library",
-    "source_set",
-    "shared_library",
-    "executable",
-    "library_headers",
-    "rustc_library",
-    "rustc_binary",
-    "rustc_macro",
-    "rustc_test",
-    "go_library",
-    "go_binary",
-    "go_test",
-    "python_library",
-    "python_binary",
-    "fidl",
-    "sdk_source_set",
-    "sdk_static_library",
-    "sdk_shared_library",
-    "zx_library",
-    "fuchsia_package",
-    "fuchsia_package_with_single_component",
-    "fuchsia_component",
-    "fuchsia_component_manifest",
-    "resource",
-}
-
-BAZEL_NON_GN_SYNCED_RULES = {
-    "fx_packaged_binary",
-    "fx_test_component",
-    "fx_unittest_component",
-    "fx_test",
-    "fx_unittest_package",
-    "test_suite",
-    "rustc_test",
-    "host_rustc_test",
-    "host_go_test",
-    "host_py_test",
-    "host_test",
-    "host_test_data_files",
-    "host_test_data_map",
-    "cc_binary_host_tool",
-    "go_binary_host_tool",
-    "py_binary_host_tool",
-    "rustc_binary_host_tool",
-    "idk_cc_binary_host_tool",
-    "idk_go_binary_host_tool",
-    "idk_rustc_binary_host_tool",
-    "wrap_host_rust_test",
-    "go_test",
-}
-
-def owning_bazel_target(sub, bazel_targets):
-    """Maps a referenced label name to the Bazel target that defines or generates it.
-
-    Rules such as fidl_library emit GN sub-targets named '<name>_<suffix>' (e.g.
-    '<fidl>_rust', '<fidl>_cpp', '<fidl>_hlcpp') that callers depend on and that share the
-    visibility of '<name>'; attribute them to the longest matching Bazel target name.
-    """
-    if sub in bazel_targets:
-        return sub
-    best = None
-    for t in bazel_targets:
-        if sub.startswith(t + "_") and (best is None or len(t) > len(best)):
-            best = t
-    return best
-
-def compute_package_rdeps(pkg_path, bazel_targets, package_targets, non_gn_synced_targets, alias_map):
-    default_target = os.path.basename(pkg_path)
-    gn_file = os.path.join(workdir, pkg_path, "BUILD.gn")
-    gn_only_targets = {"tests", "benchmarks"}
-    gn_nonconvertible_targets = {"tests", "benchmarks"}
-    if os.path.isfile(gn_file):
-        try:
-            with open(gn_file, "r", encoding="utf-8", errors="ignore") as f:
-                gn_src = f.read()
-            above_sentinel = gn_src.split("BAZEL2GN SENTINEL")[0] if "BAZEL2GN SENTINEL" in gn_src else gn_src
-            has_sentinel = "BAZEL2GN SENTINEL" in gn_src
-            for m in re.finditer(r'^\s*([a-zA-Z0-9_]+)\(\s*"([^"]+)"\s*\)', above_sentinel, flags=re.MULTILINE):
-                tmpl, t = m.group(1), m.group(2)
-                if t not in bazel_targets:
-                    gn_only_targets.add(t)
-                if tmpl not in CONVERTIBLE_GN_TEMPLATES or (not has_sentinel and pkg_path != target_dir):
-                    gn_nonconvertible_targets.add(t)
-        except Exception:
-            pass
-
-    abs_label_re = re.compile(r'"//' + re.escape(pkg_path) + r'(?::([A-Za-z0-9_.-]+))?(?:\([^)]*\))?"')
-    true_rdep_packages = set()
-    visibility_only_packages = set()
-    gn_only_ref_packages = set()
-    per_target_rdeps = {t: set() for t in bazel_targets}
-    per_target_direct_rdeps = {t: {} for t in bazel_targets}
-    has_macro_injected_rdeps = False
-
-    for fpath, (no_comments, stripped) in file_cache.items():
-        rel = os.path.relpath(fpath, workdir)
-        caller_pkg = os.path.dirname(rel).strip("/")
-        if caller_pkg == pkg_path:
+        dep_pkg_vis_cache[dep_pkg] = vis_map
+        return vis_map
+    dep_lines = dep_src.splitlines()
+    dep_var_table = rl.parse_package_bazel_targets(dep_tree, dep_lines)["var_table"]
+    for dnode in ast.walk(dep_tree):
+        if not isinstance(dnode, ast.Call):
             continue
-
-        rel_sub = None
-        if pkg_path.startswith(caller_pkg + "/"):
-            rel_sub = pkg_path[len(caller_pkg) + 1 :]
-        rel_label_re = (
-            re.compile(r'"' + re.escape(rel_sub) + r'(?::([A-Za-z0-9_.-]+))?(?:\([^)]*\))?"')
-            if rel_sub
-            else None
+        dfn = (
+            dnode.func.id
+            if isinstance(dnode.func, ast.Name)
+            else (dnode.func.attr if isinstance(dnode.func, ast.Attribute) else "")
         )
-
-        if f"//{pkg_path}" not in no_comments and (not rel_sub or rel_sub not in no_comments):
-            continue
-
-        if os.path.basename(rel) == "visibility.gni":
-            if abs_label_re.search(no_comments):
-                visibility_only_packages.add(caller_pkg)
-            continue
-
-        all_matches = list(abs_label_re.finditer(no_comments)) + (
-            list(rel_label_re.finditer(no_comments)) if rel_label_re else []
-        )
-        if not all_matches:
-            continue
-
-        dep_matches = list(abs_label_re.finditer(stripped)) + (
-            list(rel_label_re.finditer(stripped)) if rel_label_re else []
-        )
-        if not dep_matches:
-            visibility_only_packages.add(caller_pkg)
-            continue
-
-        for m in dep_matches:
-            sub = m.group(1) or default_target
-            if sub in gn_only_targets and sub not in bazel_targets:
-                gn_only_ref_packages.add(caller_pkg)
+        if dfn == "exports_files":
+            srcs_node = dnode.args[0] if dnode.args else None
+            vis_node = dnode.args[1] if len(dnode.args) >= 2 else None
+            vis_lineno = dnode.lineno
+            for dkw in dnode.keywords:
+                if dkw.arg == "srcs":
+                    srcs_node = dkw.value
+                elif dkw.arg == "visibility":
+                    vis_node = dkw.value
+                    vis_lineno = dkw.lineno
+            if srcs_node is None:
                 continue
-            if rel.endswith((".gn", ".gni")) and (sub in non_gn_synced_targets or sub in gn_nonconvertible_targets):
-                gn_only_ref_packages.add(caller_pkg)
-                continue
-            is_pkg_target = sub in package_targets or (
-                sub == default_target and len(bazel_targets) == 1 and bazel_targets[0] in package_targets
+            exported_names = [
+                sub.value
+                for sub in ast.walk(srcs_node)
+                if isinstance(sub, ast.Constant) and isinstance(sub.value, str)
+            ]
+            if vis_node is None:
+                vis_vals = ["//visibility:public"]
+            else:
+                parsed_entries = rl.extract_list_entries(vis_node, dep_var_table, vis_lineno)
+                if parsed_entries is None:
+                    continue
+                vis_vals = [v for (v, _) in parsed_entries]
+            for ename in exported_names:
+                if ename in vis_map and vis_map[ename][2] == "exports_files":
+                    merged = list(dict.fromkeys(vis_map[ename][1] + vis_vals))
+                    vis_map[ename] = (vis_map[ename][0], merged, "exports_files")
+                else:
+                    vis_map[ename] = (vis_lineno, vis_vals, "exports_files")
+            continue
+
+        dname = None
+        dvis_kw = None
+        for dkw in dnode.keywords:
+            if (
+                dkw.arg == "name"
+                and isinstance(dkw.value, ast.Constant)
+                and isinstance(dkw.value.value, str)
+            ):
+                dname = dkw.value.value
+            elif dkw.arg == "visibility":
+                dvis_kw = dkw
+        if dname and dvis_kw is not None:
+            parsed_entries = rl.extract_list_entries(
+                dvis_kw.value, dep_var_table, dvis_kw.lineno
             )
-            if is_pkg_target and rel.endswith((".gn", ".gni")) and not caller_pkg.startswith(("bundles/assembly", "build/images")):
-                gn_only_ref_packages.add(caller_pkg)
+            if parsed_entries is not None:
+                vis_map[dname] = (
+                    dvis_kw.lineno,
+                    [v for (v, _) in parsed_entries],
+                    dfn or "rule",
+                )
+    dep_pkg_vis_cache[dep_pkg] = vis_map
+    return vis_map
+
+
+# Emit inaccessible_cross_package_dep when a cross-package label is not visible to pkg_path.
+def check_cross_package_dep_visibility(node, target_name, rel_path, pkg_path):
+    checked_pairs = set()
+    for kw in node.keywords:
+        if not kw.arg or kw.arg in _NON_LABEL_ATTRS:
+            continue
+        for sub in ast.walk(kw.value):
+            if not (isinstance(sub, ast.Constant) and isinstance(sub.value, str)):
                 continue
-            norm_caller = (
-                "bundles/assembly"
-                if (caller_pkg == "bundles/assembly" or caller_pkg.startswith("bundles/assembly/"))
-                else caller_pkg
-            )
-            if caller_pkg.startswith("build/") and (rel.endswith(".bzl") or rel.endswith(".gni")) and "verification" not in os.path.basename(rel):
-                has_macro_injected_rdeps = True
-            true_rdep_packages.add(norm_caller)
-            owner = owning_bazel_target(sub, bazel_targets)
-            if owner is None and sub == default_target and len(bazel_targets) == 1:
-                owner = bazel_targets[0]
-            if owner is not None:
-                per_target_rdeps[owner].add(norm_caller)
-                # GN and Bazel enforce visibility in the package whose BUILD file names the
-                # label (not in the .gni/.bzl that a template reference comes from).
-                if os.path.basename(rel) in ("BUILD.gn", "BUILD.bazel"):
-                    kind_bs = "gn" if rel.endswith(".gn") else "bazel"
-                    per_target_direct_rdeps[owner].setdefault(caller_pkg, set()).add(kind_bs)
+            lbl = sub.value.strip()
+            if not lbl.startswith("//") or lbl.startswith(("//conditions:", "//visibility:")):
+                continue
+            body = lbl[2:]
+            if ":" in body:
+                dep_pkg, dep_target = body.split(":", 1)
+            else:
+                dep_pkg = body.strip("/")
+                dep_target = os.path.basename(dep_pkg)
+            dep_pkg = dep_pkg.strip("/")
+            if not dep_pkg or dep_pkg == pkg_path or not dep_target:
+                continue
+            pair = (dep_pkg, dep_target)
+            if pair in checked_pairs:
+                continue
+            checked_pairs.add(pair)
+            dep_vis_info = _load_dep_pkg_explicit_vis(dep_pkg).get(dep_target)
+            if dep_vis_info is None:
+                continue
+            vis_lineno, vis_vals, decl_kind = dep_vis_info
+            if not _caller_covered_by_vis_entries(pkg_path, dep_pkg, vis_vals):
+                ref_line = getattr(sub, "lineno", node.lineno)
+                emit_finding(
+                    "inaccessible_cross_package_dep",
+                    "error",
+                    rel_path,
+                    ref_line,
+                    (
+                        f"Target '{target_name}' references '{lbl}', which is not visible "
+                        f"from package '//{pkg_path}' ('{dep_pkg}/BUILD.bazel':{vis_lineno} "
+                        f"restricts '{dep_target}' via {decl_kind} visibility)."
+                    ),
+                    (
+                        f"Add '\"//{pkg_path}:__pkg__\"' (in sorted order) to the "
+                        f"'visibility' list for '{dep_target}' in '{dep_pkg}/BUILD.bazel' "
+                        f"(around line {vis_lineno}), leaving unrelated targets untouched."
+                    ),
+                )
 
-    for alias_name, actual_name in alias_map.items():
-        if alias_name in per_target_rdeps and actual_name in per_target_rdeps:
-            combined = per_target_rdeps[alias_name] | per_target_rdeps[actual_name]
-            per_target_rdeps[alias_name] = set(combined)
-            per_target_rdeps[actual_name] = set(combined)
-
-    visibility_only_packages -= true_rdep_packages
-    gn_only_ref_packages -= true_rdep_packages
-    return true_rdep_packages, per_target_rdeps, per_target_direct_rdeps, visibility_only_packages, gn_only_ref_packages, has_macro_injected_rdeps
-
-def extract_list_entries(expr, var_table, default_lineno):
-    if isinstance(expr, ast.List):
-        res = []
-        for elt in expr.elts:
-            if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
-                res.append((elt.value, getattr(elt, "lineno", default_lineno)))
-        return res
-    if isinstance(expr, ast.Name) and expr.id in var_table:
-        return extract_list_entries(var_table[expr.id], var_table, default_lineno)
-    if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
-        return (
-            extract_list_entries(expr.left, var_table, default_lineno)
-            + extract_list_entries(expr.right, var_table, default_lineno)
-        )
-    return None
-
-findings = []
 
 for rel_path in sorted(candidate_files):
     full_path = os.path.join(workdir, rel_path)
@@ -595,50 +1032,104 @@ for rel_path in sorted(candidate_files):
         tree = ast.parse(src, filename=rel_path)
     except Exception:
         continue
-    # Generated files (e.g. crate_universe's third_party/rust_crates/vendor/*/BUILD.bazel)
-    # get their visibility from the generator; fix the generator input instead.
-    if re.search(r"^#\s*[@]generated\b", "\n".join(src.splitlines()[:10]), flags=re.MULTILINE):
+    src_lines = src.splitlines()
+    if re.search(r"^#\s*[@]generated\b", "\n".join(src_lines[:10]), flags=re.MULTILINE):
         continue
 
-    preexisting_vis, preexisting_no_vis_targets = get_preexisting_vis_info(rel_path)
-    orig_gn_vis_map = get_orig_gn_visibility_scopes(pkg_path)
-    var_table = {}
-    bazel_targets = []
-    package_targets = set()
-    non_gn_synced_targets = set()
-    alias_map = {}
-    for node in tree.body:
-        if isinstance(node, ast.Assign):
-            for t in node.targets:
-                if isinstance(t, ast.Name):
-                    var_table[t.id] = node.value
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            func = (
-                node.func.id
-                if isinstance(node.func, ast.Name)
-                else (node.func.attr if isinstance(node.func, ast.Attribute) else "")
-            )
-            tname = None
-            actual = None
-            for kw in node.keywords:
-                if kw.arg == "name" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
-                    tname = kw.value.value
-                elif kw.arg == "actual" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
-                    actual = kw.value.value
-            if tname:
-                bazel_targets.append(tname)
-                if func in ("fx_package", "fuchsia_package", "fx_unittest_package"):
-                    package_targets.add(tname)
-                if func in BAZEL_NON_GN_SYNCED_RULES:
-                    non_gn_synced_targets.add(tname)
-                if func == "alias" and actual and actual.startswith(":"):
-                    alias_map[tname] = actual[1:]
-
-    true_rdeps, per_target_rdeps, per_target_direct_rdeps, vis_only_pkgs, gn_only_pkgs, has_macro_injected_rdeps = compute_package_rdeps(
-        pkg_path, bazel_targets, package_targets, non_gn_synced_targets, alias_map
+    (
+        preexisting_vis,
+        preexisting_no_vis_targets,
+        preexisting_pkg_default_vis,
+    ) = rl.get_preexisting_vis_info(workdir, rel_path, change_base)
+    preexisting_narrow_vis_targets = collect_preexisting_narrow_vis_targets(
+        workdir, rel_path, change_base
     )
+    orig_gn_vis_map = rl.get_orig_gn_visibility_scopes(workdir, pkg_path, change_base)
+    orig_gn_unrestricted_targets = rl.get_orig_gn_unrestricted_targets(
+        workdir, pkg_path, change_base
+    )
+    parsed = rl.parse_package_bazel_targets(tree, src_lines)
+    var_table = parsed["var_table"]
+    exports_files_vis_scopes = collect_exports_files_vis_scopes(tree, var_table, pkg_path)
+    bazel_targets = parsed["bazel_targets"]
+    package_targets = parsed["package_targets"]
+    non_gn_synced_targets = parsed["non_gn_synced_targets"]
+    test_rule_targets = parsed["test_rule_targets"]
+    idk_targets = parsed["idk_targets"]
+    bazel2gn_skipped_targets = parsed["bazel2gn_skipped_targets"]
+    alias_map = parsed["alias_map"]
+    for _a_name, _a_actual in alias_map.items():
+        if _a_actual in orig_gn_unrestricted_targets and _a_name not in orig_gn_vis_map:
+            orig_gn_unrestricted_targets.add(_a_name)
+
+    sym_macro_caller_pkgs = rl.compute_symbolic_macro_caller_pkgs(
+        workdir, tree, var_table, pkg_path, bzl_cache=bzl_macro_cache
+    )
+    (
+        true_rdeps,
+        per_target_rdeps,
+        per_target_direct_rdeps,
+        vis_only_pkgs,
+        gn_only_pkgs,
+        has_macro_injected_rdeps,
+    ) = rl.compute_package_rdeps(
+        workdir,
+        pkg_path,
+        bazel_targets,
+        package_targets,
+        non_gn_synced_targets,
+        alias_map,
+        orig_gn_vis_map=orig_gn_vis_map,
+        test_rule_targets=test_rule_targets,
+        idk_targets=idk_targets,
+        file_cache=file_cache,
+        origin_main_sources=origin_main_sources,
+        target_dir=target_dir,
+        importer_cache=gni_importer_cache,
+        grep_cache=gni_grep_cache,
+    )
+
+    def check_pkg_default_visibility(pkg_node):
+        found_default_vis = False
+        for kw in pkg_node.keywords:
+            if kw.arg != "default_visibility":
+                continue
+            found_default_vis = True
+            if preexisting_pkg_default_vis:
+                continue
+            ext_targets = [
+                t for t in bazel_targets if len(per_target_rdeps.get(t, set())) > 0
+            ]
+            if ext_targets:
+                per_t_desc = ", ".join(
+                    f"'{t}': {json.dumps(rl.recommend_visibility(per_target_rdeps[t], pkg_path))}"
+                    for t in ext_targets
+                )
+                target_guidance = (
+                    "Set target-level visibility only on targets used outside this package "
+                    f"({per_t_desc}), and omit visibility on package-private targets."
+                )
+            else:
+                rec_pkg = rl.recommend_visibility(true_rdeps, pkg_path)
+                target_guidance = (
+                    f"Set target-level visibility = {json.dumps(rec_pkg)} only on targets "
+                    "used outside this package, and omit visibility on package-private targets."
+                )
+            emit_finding(
+                "visibility_scoping",
+                "error",
+                rel_path,
+                kw.lineno,
+                (
+                    "Do not set package-level 'default_visibility' in package(...) "
+                    "(see //docs/development/languages/bazel/style/build_files.md"
+                    "#avoid-package-default-visibility). Declare 'visibility' only on individual "
+                    "targets used outside this package, scoped to the packages and subpackages "
+                    "that depend on them."
+                ),
+                f"Remove default_visibility from package(). {target_guidance}",
+            )
+        return found_default_vis
 
     has_pkg_default_vis = False
     for node in ast.walk(tree):
@@ -651,32 +1142,10 @@ for rel_path in sorted(candidate_files):
         )
 
         if func_name == "package":
-            for kw in node.keywords:
-                if kw.arg == "default_visibility":
-                    has_pkg_default_vis = True
-                    rec_pkg = recommend_visibility(true_rdeps, pkg_path)
-                    findings.append({
-                        "source": "visibility_audit",
-                        "category": "visibility_scoping",
-                        "severity": "error",
-                        "file": rel_path,
-                        "line": kw.lineno,
-                        "message": "Do not set package-level 'default_visibility' in package(...). Declare 'visibility' explicitly on individual targets.",
-                        "remediation": f"Remove default_visibility from package() and set target-level visibility = {json.dumps(rec_pkg)} on targets with external callers."
-                    })
+            if check_pkg_default_visibility(node):
+                has_pkg_default_vis = True
             continue
-
-        if func_name == "exports_files":
-            if not any(kw.arg == "visibility" for kw in node.keywords) and len(node.args) < 2:
-                findings.append({
-                    "source": "visibility_audit",
-                    "category": "exports_files_missing_visibility",
-                    "severity": "error",
-                    "file": rel_path,
-                    "line": node.lineno,
-                    "message": "exports_files() omits 'visibility' (Bazel then exports the files publicly).",
-                    "remediation": "Add visibility = [...] to exports_files(), scoped as narrowly as practical to the packages that consume the files (e.g. [\"//<consumer_pkg>:__pkg__\"], or an area rollup like \"//<area>:__subpackages__\" for many consumers), per the determining_bazel_visibility skill."
-                })
+        if func_name == "package_group":
             continue
 
         target_name = None
@@ -688,54 +1157,191 @@ for rel_path in sorted(candidate_files):
             elif kw.arg == "visibility":
                 vis_kw = kw
             elif kw.arg == "testonly":
-                if isinstance(kw.value, ast.Constant) and kw.value.value is True:
-                    is_testonly = True
-                elif isinstance(kw.value, ast.Name) and kw.value.id in ("True", "true"):
+                if (isinstance(kw.value, ast.Constant) and kw.value.value is True) or (
+                    isinstance(kw.value, ast.Name) and kw.value.id in ("True", "true")
+                ):
                     is_testonly = True
 
         if not target_name:
             continue
 
-        is_test_rule = (
+        check_cross_package_dep_visibility(node, target_name, rel_path, pkg_path)
+
+        is_test_suite_rule = func_name == "test_suite"
+        suite_has_cross_pkg_member = False
+        if is_test_suite_rule:
+            for kw in node.keywords:
+                if kw.arg == "tests":
+                    suite_tests = (
+                        rl.extract_list_entries(
+                            kw.value, var_table, getattr(kw, "lineno", 1)
+                        )
+                        or []
+                    )
+                    for st_val, _ in suite_tests:
+                        st_s = st_val.lstrip("@")
+                        if st_s.startswith("//"):
+                            st_pkg = st_s[2:].split(":", 1)[0].strip("/")
+                            if st_pkg != pkg_path:
+                                suite_has_cross_pkg_member = True
+                                break
+                        elif st_val.startswith("@"):
+                            suite_has_cross_pkg_member = True
+                            break
+        is_exposable_test_suite = is_test_suite_rule and (
+            target_name in ("tests", "host_tests")
+            or suite_has_cross_pkg_member
+        )
+        is_individual_test_rule = (
             func_name in (
                 "host_rustc_test", "host_test", "wrap_host_rust_test",
                 "fx_test", "fx_unittest_package", "fx_test_package",
-                "rustc_test", "rust_test", "cc_test", "fx_cc_test", "go_test",
+                "fx_test_component", "fx_unittest_component",
+                "rustc_test", "rust_test", "cc_test", "fx_cc_test_binary", "go_test",
             )
             or func_name.startswith("wrap_host_")
             or func_name.endswith("_test")
+            or (func_name == "fx_package" and any(k.arg == "test_components" for k in getattr(node, "keywords", [])))
+            or (func_name == "fx_component_manifest" and is_testonly)
         )
-        is_test_support_pkg = (
-            rel_path.startswith("src/testing/")
-            or rel_path.startswith("src/lib/testing/")
-            or rel_path.startswith("testing/")
-            or "/testing/" in rel_path
+        is_test_rule = is_individual_test_rule or is_test_suite_rule
+        is_test_support_pkg = rl.is_test_support_package(rel_path)
+        is_shard_rule = func_name in ("cml_shard", "expect_includes")
+        target_rdeps = set(
+            per_target_rdeps.get(target_name, set())
+            if (is_test_rule or target_name in test_rule_targets)
+            else per_target_rdeps.get(target_name, true_rdeps)
         )
-        target_rdeps = per_target_rdeps.get(target_name, true_rdeps)
-        distinct_areas = get_distinct_areas(target_rdeps, pkg_path)
-        # Shared test-support targets may use broad visibility only when they are reused across
-        # >= 2 areas, the same rule find_rdeps.sh uses to recommend ["//:__subpackages__"].
-        allow_broad_test_vis = (is_testonly or is_test_support_pkg or is_test_rule) and len(distinct_areas) >= 2
+        if func_name == "cml_shard":
+            target_rdeps |= discover_cml_shard_rdeps(node, target_name, pkg_path)
+        distinct_areas = rl.get_distinct_areas(target_rdeps, pkg_path)
+        is_multi_area_test_bench_lib = (
+            not is_test_rule
+            and len(distinct_areas) >= 2
+            and rl.has_only_test_or_bench_rdeps(target_rdeps, pkg_path)
+        )
+        allow_broad_test_vis = (
+            (is_testonly or is_test_support_pkg or is_multi_area_test_bench_lib)
+            and not is_test_rule
+            and len(distinct_areas) >= 2
+        ) or is_shard_rule
 
-        narrow_vis = recommend_narrow_visibility(target_rdeps, pkg_path)
-        area_rollup_vis = recommend_area_rollup_visibility(target_rdeps, pkg_path)
-        rec_target_vis = recommend_visibility(target_rdeps, pkg_path, is_test_support=allow_broad_test_vis)
-        is_globally_used = is_globally_used_target(target_rdeps, pkg_path)
+        is_public_lib_rule = (
+            func_name.startswith("idk_")
+            or func_name.endswith(("_library", "_library_zx", "_headers"))
+            or func_name == "alias"
+        )
+        is_unrestricted_public_lib = (
+            not is_test_rule
+            and target_name not in test_rule_targets
+            and target_name not in package_targets
+            and target_name not in non_gn_synced_targets
+            and target_name not in orig_gn_vis_map
+            and target_name in orig_gn_unrestricted_targets
+            and is_public_lib_rule
+            and (func_name.startswith("idk_") or rl.is_public_sdk_or_ulib_pkg(pkg_path))
+        )
+        allow_unrestricted_gn_subpkgs = is_unrestricted_public_lib
+        narrow_vis = rl.recommend_narrow_visibility(target_rdeps, pkg_path)
+        area_rollup_vis = rl.recommend_area_rollup_visibility(target_rdeps, pkg_path)
+        rec_target_vis = rl.recommend_visibility(
+            target_rdeps,
+            pkg_path,
+            is_test_support=allow_broad_test_vis,
+            target_name=target_name,
+            orig_gn_vis_map=orig_gn_vis_map,
+            vis_only_pkgs=vis_only_pkgs,
+            gn_only_pkgs=gn_only_pkgs,
+            non_gn_synced_targets=non_gn_synced_targets,
+            workdir=workdir,
+            orig_gn_unrestricted_targets=orig_gn_unrestricted_targets,
+            idk_targets=idk_targets,
+        )
+        is_globally_used = rl.is_globally_used_target(target_rdeps, pkg_path)
+        if pkg_path.startswith("src/lib/assembly/"):
+            is_globally_used = False
+        preserved_gn_vis = (
+            None
+            if is_test_rule or is_globally_used
+            else rl.get_preserved_gn_visibility(
+                workdir,
+                target_name,
+                target_rdeps,
+                pkg_path,
+                orig_gn_vis_map,
+                vis_only_pkgs,
+                gn_only_pkgs,
+            )
+        )
+        if preserved_gn_vis:
+            rec_target_vis = preserved_gn_vis
 
+        requires_vis_for_callers = (
+            not (is_test_rule or target_name in test_rule_targets)
+            or has_macro_injected_rdeps
+            or any(
+                "bazel" in kinds
+                for kinds in per_target_direct_rdeps.get(target_name, {}).values()
+            )
+        )
+        target_start_findings = len(findings)
         if vis_kw is None:
-            if not has_pkg_default_vis and len(target_rdeps) > 0 and target_name not in preexisting_no_vis_targets:
-                findings.append({
-                    "source": "visibility_audit",
-                    "category": "missing_target_visibility",
-                    "severity": "error",
-                    "file": rel_path,
-                    "line": node.lineno,
-                    "message": f"Target '{target_name}' has {len(target_rdeps)} external reverse-dependency package(s) but omits 'visibility' (defaulting to private in Bazel and unrestricted in bazel2gn).",
-                    "remediation": f"Add visibility = {json.dumps(rec_target_vis)} to '{target_name}'."
-                })
+            if (
+                not preexisting_pkg_default_vis
+                and len(target_rdeps) > 0
+                and requires_vis_for_callers
+                and target_name not in preexisting_no_vis_targets
+            ):
+                emit_finding(
+                    "missing_target_visibility",
+                    "error",
+                    rel_path,
+                    node.lineno,
+                    (
+                        f"Target '{target_name}' has {len(target_rdeps)} external "
+                        "reverse-dependency package(s) but omits 'visibility' "
+                        "(defaulting to private in Bazel and unrestricted in bazel2gn)."
+                    ),
+                    f"Add visibility = {json.dumps(rec_target_vis)} to '{target_name}'.",
+                )
+            elif (
+                not preexisting_pkg_default_vis
+                and is_unrestricted_public_lib
+                and target_name not in preexisting_no_vis_targets
+                and target_name not in preexisting_narrow_vis_targets
+            ):
+                emit_finding(
+                    "visibility_tightened_from_gn",
+                    "error",
+                    rel_path,
+                    node.lineno,
+                    (
+                        f"Target '{target_name}' omits 'visibility' (defaulting to package-private), "
+                        f"but its pre-migration target in `{pkg_path}/BUILD.gn` had unrestricted "
+                        "visibility. Do not restrict visibility on SDK or Zircon ulib libraries "
+                        "during migration."
+                    ),
+                    (
+                        f"Set visibility = {json.dumps(['//:__subpackages__'])} on '{target_name}' "
+                        "and re-run fx bazel2gn."
+                    ),
+                )
+            elif (
+                not preexisting_pkg_default_vis
+                and preserved_gn_vis
+                and target_name not in preexisting_no_vis_targets
+            ):
+                check_visibility_tightened_from_gn(
+                    target_name, rel_path, node.lineno, [], [], preserved_gn_vis, pkg_path
+                )
+            elif not has_pkg_default_vis and not preserved_gn_vis:
+                clean_audited_targets.add((rel_path, target_name))
+                record_intentional_visibility_narrowing(
+                    target_name, rel_path, node.lineno, [], orig_gn_vis_map, pkg_path
+                )
             continue
 
-        entries = extract_list_entries(vis_kw.value, var_table, vis_kw.lineno)
+        entries = rl.extract_list_entries(vis_kw.value, var_table, vis_kw.lineno)
         if entries is None:
             continue
 
@@ -750,17 +1356,18 @@ for rel_path in sorted(candidate_files):
                 break
             m_scope = re.match(r"^(?://([^:]*))?:__(pkg|subpackages)__$", val)
             if not m_scope:
-                # package_group or other label: coverage cannot be decided statically.
                 only_scope_entries = False
                 break
             scope_pkg = pkg_path if m_scope.group(1) is None else m_scope.group(1).strip("/")
             vis_scopes.append((scope_pkg, m_scope.group(2)))
-        # bazel2gn emits the Bazel list as GN visibility unless the closing line carries
-        # '# @bazel2gn:raw_overwrite:[ ... ]' (GN patterns '//*', '//a/*', '//a:*').
-        gn_scopes = vis_scopes
+
+        is_gn_synced_target = (
+            target_name not in bazel2gn_skipped_targets
+            and target_name not in non_gn_synced_targets
+        )
+        gn_scopes = vis_scopes if is_gn_synced_target else None
         end_line = getattr(vis_kw.value, "end_lineno", None)
-        src_lines = src.splitlines()
-        if end_line and end_line <= len(src_lines):
+        if is_gn_synced_target and end_line and end_line <= len(src_lines):
             m_raw = re.search(r"#\s*@bazel2gn:raw_overwrite:\s*(\[.*\])", src_lines[end_line - 1])
             if m_raw:
                 try:
@@ -774,15 +1381,24 @@ for rel_path in sorted(candidate_files):
                         gn_scopes.append((gn_pkg, "subpackages" if m_gn.group(2) == "*" else "pkg"))
                 except Exception:
                     gn_scopes = None
+
         if only_scope_entries:
             uncovered = set()
             for caller, kinds in per_target_direct_rdeps.get(target_name, {}).items():
                 for kind_bs in kinds:
-                    scopes = gn_scopes if kind_bs == "gn" else vis_scopes
+                    scopes = (
+                        gn_scopes
+                        if kind_bs == "gn"
+                        else (vis_scopes + exports_files_vis_scopes)
+                    )
                     if scopes is None:
                         continue
                     covered = any(
-                        caller == sp or (kind == "subpackages" and (sp == "" or caller.startswith(sp + "/")))
+                        caller == sp
+                        or (
+                            kind == "subpackages"
+                            and (sp == "" or caller.startswith(sp + "/"))
+                        )
                         for sp, kind in scopes
                     )
                     if not covered:
@@ -790,214 +1406,330 @@ for rel_path in sorted(candidate_files):
             if uncovered:
                 shown = sorted(
                     {
-                        f"//{VG_ROOT}" if (c == VG_ROOT or c.startswith(VG_ROOT + "/")) else f"//{c}"
+                        f"//{rl.VG_ROOT}" if (c == rl.VG_ROOT or c.startswith(rl.VG_ROOT + "/")) else f"//{c}"
                         for c in uncovered
                     }
                 )
-                add_entries = recommend_narrow_visibility(uncovered, pkg_path)
-                findings.append({
-                    "source": "visibility_audit",
-                    "category": "uncovered_rdep_visibility",
-                    "severity": "error",
-                    "file": rel_path,
-                    "line": vis_kw.lineno,
-                    "message": (
+                add_entries = rl.recommend_narrow_visibility(uncovered, pkg_path)
+                emit_finding(
+                    "uncovered_rdep_visibility",
+                    "error",
+                    rel_path,
+                    vis_kw.lineno,
+                    (
                         f"Target '{target_name}' has visibility that does not cover {len(shown)} package(s) whose "
                         f"BUILD.gn/BUILD.bazel depend on it or on a sub-target it generates "
                         f"(e.g. '{target_name}_rust', '{target_name}_cpp'): {', '.join(shown)}. GN enforces the "
-                        f"converted visibility on every generated sub-target, and callers outside the locally "
-                        f"built product graph (other products, the internal tree) only fail in CQ with "
-                        f"'Dependency not allowed'."
+                        "converted visibility on every generated sub-target, and callers outside the locally "
+                        "built product graph (other products, the internal tree) only fail in CQ with "
+                        "'Dependency not allowed'."
                     ),
-                    "remediation": (
+                    (
                         f"Add {json.dumps(add_entries)} to the visibility of '{target_name}' (or use the "
                         f"find_rdeps per_target_recommended_visibility {json.dumps(rec_target_vis)}) and re-run "
-                        f"fx bazel2gn."
+                        "fx bazel2gn."
                     ),
-                })
+                )
 
+        max_rollup_entries = max(15, len(area_rollup_vis))
         new_entries = [(val, lineno) for (val, lineno) in entries if val not in preexisting_vis]
-        if len(new_entries) > 15 and (is_globally_used or len(area_rollup_vis) < len(entries)):
+        if (
+            not is_test_rule
+            and not is_shard_rule
+            and allow_broad_test_vis
+            and not preserved_gn_vis
+            and target_name not in orig_gn_vis_map
+            and len(distinct_areas) >= 3
+            and new_entries
+            and "//:__subpackages__" not in vis_vals
+            and "//visibility:public" not in vis_vals
+        ):
+            emit_finding(
+                "overly_narrow_global_visibility",
+                "error",
+                rel_path,
+                vis_kw.lineno,
+                (
+                    f"Target '{target_name}' is a shared test/benchmark support library used "
+                    f"across {len(distinct_areas)} distinct areas ({len(target_rdeps)} caller "
+                    f"packages) whose pre-migration `{pkg_path}/BUILD.gn` had unrestricted "
+                    f"visibility, but narrows visibility to {len(entries)} package/subtree "
+                    "entries, breaking cross-tree and out-of-graph benchmark/test callers in "
+                    "CQ with 'Dependency not allowed'."
+                ),
+                (
+                    f"Replace visibility on '{target_name}' with {json.dumps(rec_target_vis)} "
+                    "(shared test/benchmark support libraries used across multiple areas use "
+                    "repository-wide subpackage visibility) and re-run fx bazel2gn."
+                ),
+            )
+            continue
+
+        # Avoid forcing repository-wide rollup on targets whose BUILD.bazel already
+        # had an explicit narrow visibility allowlist before this change unless >10
+        # new visibility entries are added at once.
+        has_preexisting_narrow_vis = (
+            target_name in preexisting_narrow_vis_targets and len(new_entries) <= 10
+        )
+        if (
+            is_unrestricted_public_lib
+            and not has_preexisting_narrow_vis
+            and new_entries
+            and "//:__subpackages__" not in vis_vals
+            and "//visibility:public" not in vis_vals
+        ):
+            emit_finding(
+                "visibility_tightened_from_gn",
+                "error",
+                rel_path,
+                vis_kw.lineno,
+                (
+                    f"Target '{target_name}' narrows visibility to {json.dumps(vis_vals)}, "
+                    f"but its pre-migration target in `{pkg_path}/BUILD.gn` had unrestricted "
+                    "visibility. Do not restrict visibility on SDK or Zircon ulib libraries "
+                    "during migration."
+                ),
+                (
+                    f"Replace visibility on '{target_name}' with {json.dumps(['//:__subpackages__'])} "
+                    "and re-run fx bazel2gn."
+                ),
+            )
+            continue
+        sprawling_vis = (
+            bool(new_entries)
+            and not has_preexisting_narrow_vis
+            and (
+                (
+                    len(entries) > max_rollup_entries
+                    and (is_globally_used or len(area_rollup_vis) < len(entries))
+                )
+                or (
+                    len(entries) > 10
+                    and len(distinct_areas) >= 3
+                    and len(area_rollup_vis) < len(entries)
+                )
+            )
+        )
+        if sprawling_vis:
             if is_globally_used:
-                findings.append({
-                    "source": "visibility_audit",
-                    "category": "overly_narrow_global_visibility",
-                    "severity": "error",
-                    "file": rel_path,
-                    "line": vis_kw.lineno,
-                    "message": (
+                emit_finding(
+                    "overly_narrow_global_visibility",
+                    "error",
+                    rel_path,
+                    vis_kw.lineno,
+                    (
                         f"Target '{target_name}' is widely used across {len(distinct_areas)} distinct areas "
                         f"({len(target_rdeps)} reverse-dependency packages) but enumerates {len(entries)} narrow "
-                        f"visibility entries ('too narrow' for a widely-used platform library/test utility)."
+                        "visibility entries ('too narrow' for a widely-used platform library/test utility)."
                     ),
-                    "remediation": (
+                    (
                         f"Replace the sprawling {len(entries)}-entry visibility list on '{target_name}' with "
                         f"subsystem/top-level rollup visibility {json.dumps(rec_target_vis)} (or "
-                        f"visibility = [\"//:__subpackages__\"] for foundational tree-wide libraries), per "
-                        f"determining_bazel_visibility/SKILL.md, and re-run fx bazel2gn."
+                        'visibility = ["//:__subpackages__"] for foundational tree-wide libraries), per '
+                        "determining_bazel_visibility/SKILL.md, and re-run fx bazel2gn."
                     ),
-                })
+                )
             else:
-                findings.append({
-                    "source": "visibility_audit",
-                    "category": "overly_narrow_global_visibility",
-                    "severity": "error",
-                    "file": rel_path,
-                    "line": vis_kw.lineno,
-                    "message": (
-                        f"Target '{target_name}' enumerates {len(entries)} narrow visibility entries across multiple "
-                        f"subtrees. Drop visibility to 2-3 levels deep instead of listing dozens of leaf packages."
+                top_roots = {r.split("/")[0] for r in target_rdeps if r.strip("/")}
+                top_rollup_hint = (
+                    ' (or ["//src:__subpackages__"] when widely used across //src)'
+                    if top_roots == {"src"} and len(distinct_areas) >= 3
+                    else ""
+                )
+                emit_finding(
+                    "overly_narrow_global_visibility",
+                    "error",
+                    rel_path,
+                    vis_kw.lineno,
+                    (
+                        f"Target '{target_name}' enumerates {len(entries)} narrow visibility entries across "
+                        f"{len(distinct_areas)} areas. Roll up visibility to subsystem or top-level subtrees "
+                        "instead of appending individual leaf packages."
                     ),
-                    "remediation": (
-                        f"Replace visibility on '{target_name}' with 2-3 level area rollup entries: "
-                        f"{json.dumps(area_rollup_vis)} and re-run fx bazel2gn."
+                    (
+                        f"Replace visibility on '{target_name}' with rollup entries "
+                        f"{json.dumps(area_rollup_vis)}{top_rollup_hint} and re-run fx bazel2gn."
                     ),
-                })
+                )
             continue
 
         findings_before_target = len(findings)
-        max_rollup_entries = 15 if is_globally_used else max(15, len(area_rollup_vis))
-        allow_broad_rollup = (is_globally_used or len(narrow_vis) > 5 or len(distinct_areas) >= 3 or allow_broad_test_vis) and len(entries) <= max_rollup_entries
+        allow_broad_rollup = (
+            is_globally_used or len(narrow_vis) > 5 or len(distinct_areas) >= 3 or allow_broad_test_vis
+        ) and len(entries) <= max_rollup_entries
         top_level_subpkgs = []
         for val, lineno in entries:
             if val in preexisting_vis:
                 continue
             if val == "//visibility:private":
-                # Check redundant //visibility:private when package has no default_visibility.
-                if not has_pkg_default_vis:
-                    findings.append({
-                        "source": "visibility_audit",
-                        "category": "redundant_private_visibility",
-                        "severity": "error",
-                        "file": rel_path,
-                        "line": lineno,
-                        "message": (
+                if not has_pkg_default_vis and not (is_gn_synced_target and len(entries) == 1):
+                    emit_finding(
+                        "redundant_private_visibility",
+                        "error",
+                        rel_path,
+                        lineno,
+                        (
                             f"Target '{target_name}' specifies redundant "
-                            "`visibility = [\"//visibility:private\"]`, which is already the "
-                            "Bazel default when `default_visibility` is not set."
+                            '`"//visibility:private"` in `visibility` (which is already the '
+                            "Bazel default when `default_visibility` is not set, and `bazel2gn` "
+                            'automatically adds `":*"` to non-empty visibility lists).'
                         ),
-                        "remediation": (
-                            f"Remove `visibility = [\"//visibility:private\"]` from '{target_name}' "
-                            f"in '{rel_path}'."
-                        ),
-                    })
+                        f"Remove `\"//visibility:private\"` from `visibility` on '{target_name}' in '{rel_path}'.",
+                    )
                 continue
             if val == "//visibility:public":
                 if rel_path.startswith("build/bazel_sdk/"):
                     continue
-                if is_test_rule:
-                    # Test entry points (fx_unittest_package, fx_test, host_*_test, ...) are built as
-                    # top-level Bazel targets by the GN bazel_test_suite() bridge and by fx test, and
-                    # Bazel never visibility-checks top-level targets. They only need visibility when
-                    # a Bazel test_suite() in another package aggregates them.
+                if is_test_suite_rule:
                     if target_rdeps and narrow_vis:
                         rem = (
-                            f"Replace '//visibility:public' on test target '{target_name}' with only the "
-                            f"packages whose Bazel test_suite() aggregates it: {json.dumps(narrow_vis)}, and "
-                            f"re-run fx bazel2gn."
-                        )
-                    elif has_macro_injected_rdeps:
-                        rem = (
-                            f"Replace '//visibility:public' on test target '{target_name}' with the specific "
-                            f"packages that aggregate it (e.g. [\"//<parent>:__pkg__\"]), and re-run fx bazel2gn."
+                            f"Replace '//visibility:public' on test_suite '{target_name}' with package-specific "
+                            f"visibility for the aggregation package that includes it: {json.dumps(narrow_vis)}."
                         )
                     else:
                         rem = (
-                            f"Omit 'visibility' on test target '{target_name}' (default private) and re-run fx "
-                            f"bazel2gn. The GN bazel_test_suite() bridge and fx test build it as a top-level "
-                            f"Bazel target, which Bazel does not visibility-check, and no other Bazel package "
-                            f"depends on it."
+                            f"Replace '//visibility:public' on test_suite '{target_name}' with package-specific "
+                            "visibility for the aggregation package that includes it (e.g. "
+                            '["//<aggregation_dir>:__pkg__"] once an aggregation test_suite() exists in '
+                            "//<aggregation_dir>, or omit 'visibility' until the aggregation package is known "
+                            "or if it is a top-level aggregation test_suite() / package-private sub-suite)."
                         )
+                elif is_individual_test_rule:
+                    rem = (
+                        f"Omit 'visibility' on individual test target '{target_name}' (default package-private) and "
+                        "expose the package's tests via a package `test_suite(name = \"tests\" | \"host_tests\")` "
+                        "(granting `visibility = [\"//<aggregation_dir>:__pkg__\"]` once wired into an existing "
+                        "aggregation `test_suite()`) instead."
+                    )
                 elif allow_broad_test_vis:
                     rem = (
-                        f"Never use '//visibility:public' when migrating GN targets to Bazel (per "
-                        f"determining_bazel_visibility/SKILL.md). Replace '//visibility:public' with "
-                        f"[\"//:__subpackages__\"] for test support libraries and re-run fx bazel2gn."
+                        "Never use '//visibility:public' when migrating GN targets to Bazel (per "
+                        "determining_bazel_visibility/SKILL.md). Replace '//visibility:public' with "
+                        '["//:__subpackages__"] for test support libraries and re-run fx bazel2gn.'
                     )
                 elif len(target_rdeps) == 0 and not has_macro_injected_rdeps:
                     rem = f"Omit 'visibility' on '{target_name}' (default private) as no external packages depend on it, and re-run fx bazel2gn."
                 elif is_globally_used or has_macro_injected_rdeps:
                     rem = (
-                        f"Never use '//visibility:public' when migrating GN targets to Bazel (per "
-                        f"determining_bazel_visibility/SKILL.md). Replace '//visibility:public' with "
+                        "Never use '//visibility:public' when migrating GN targets to Bazel (per "
+                        "determining_bazel_visibility/SKILL.md). Replace '//visibility:public' with "
                         f"subsystem-scoped visibility {json.dumps(rec_target_vis)} (or "
-                        f"[\"//:__subpackages__\"] for foundational tree-wide libraries) and re-run fx bazel2gn."
+                        '["//:__subpackages__"] for foundational tree-wide libraries) and re-run fx bazel2gn.'
                     )
                 else:
                     rem = (
-                        f"Never use '//visibility:public' when migrating GN targets to Bazel (per "
-                        f"determining_bazel_visibility/SKILL.md). Replace '//visibility:public' with "
+                        "Never use '//visibility:public' when migrating GN targets to Bazel (per "
+                        "determining_bazel_visibility/SKILL.md). Replace '//visibility:public' with "
                         f"tightly-scoped caller visibility: {json.dumps(rec_target_vis)} and re-run fx bazel2gn."
                     )
-                findings.append({
-                    "source": "visibility_audit",
-                    "category": "overbroad_public_visibility",
-                    "severity": "error",
-                    "file": rel_path,
-                    "line": lineno,
-                    "message": (
+                emit_finding(
+                    "overbroad_public_visibility",
+                    "error",
+                    rel_path,
+                    lineno,
+                    (
                         f"Target '{target_name}' uses '//visibility:public', which is disallowed outside "
                         f"//build/bazel_sdk/... ({len(target_rdeps)} package(s) across {len(distinct_areas)} "
                         f"area(s) depend on '{target_name}')."
                     ),
-                    "remediation": rem,
-                })
+                    rem,
+                )
                 continue
             if val in (":__pkg__", f"//{pkg_path}:__pkg__"):
-                findings.append({
-                    "source": "visibility_audit",
-                    "category": "redundant_same_package_visibility",
-                    "severity": "error",
-                    "file": rel_path,
-                    "line": lineno,
-                    "message": f"Target '{target_name}' includes redundant '{val}' in visibility. Same-package visibility is implicit in Bazel and added automatically by bazel2gn.",
-                    "remediation": f"Remove '{val}' from visibility."
-                })
-            elif val == "//:__subpackages__" and is_test_rule and not target_rdeps and not has_macro_injected_rdeps:
-                findings.append({
-                    "source": "visibility_audit",
-                    "category": "overbroad_test_target_visibility",
-                    "severity": "error",
-                    "file": rel_path,
-                    "line": lineno,
-                    "message": (
-                        f"Test target '{target_name}' uses '//:__subpackages__' in visibility, but no Bazel "
-                        f"package depends on it. Test entry points are built as top-level targets by the GN "
-                        f"bazel_test_suite() bridge and fx test, which Bazel does not visibility-check."
+                emit_finding(
+                    "redundant_same_package_visibility",
+                    "error",
+                    rel_path,
+                    lineno,
+                    f"Target '{target_name}' includes redundant '{val}' in visibility. Same-package visibility is implicit in Bazel and added automatically by bazel2gn.",
+                    f"Remove '{val}' from visibility.",
+                )
+            elif val == "//sdk:__pkg__" and func_name.startswith("idk_") and "sdk" not in target_rdeps:
+                emit_finding(
+                    "redundant_idk_sdk_visibility",
+                    "error",
+                    rel_path,
+                    lineno,
+                    (
+                        f"`{func_name}(name = \"{target_name}\")` lists '//sdk:__pkg__' in visibility, but "
+                        f"`{func_name}` already appends it to the target and its `_idk` atom, and nothing in "
+                        "//sdk depends on the library target itself in GN (GN `sdk_*` templates only forward "
+                        "`visibility` to the library, not to the `<name>_sdk` atom)."
                     ),
-                    "remediation": f"Omit 'visibility' on '{target_name}' (default private) and re-run fx bazel2gn.",
-                })
+                    f"Remove '//sdk:__pkg__' from the visibility of '{target_name}' and re-run fx bazel2gn.",
+                )
+            elif val in ("//build/sdk:__pkg__", "//build/sdk:__subpackages__", "//sdk/fidl:__pkg__"):
+                emit_finding(
+                    "redundant_sdk_visibility",
+                    "error",
+                    rel_path,
+                    lineno,
+                    (
+                        f"Target '{target_name}' includes redundant '{val}' in visibility. Bazel IDK atom rules "
+                        "and GN SDK templates (sdk_source_set, sdk_prebuilt_library_impl, fidl_library) inject "
+                        "required SDK visibility automatically."
+                    ),
+                    f"Remove '{val}' from visibility and re-run fx bazel2gn.",
+                )
+            elif val == "//:__subpackages__" and is_test_rule and not has_macro_injected_rdeps:
+                emit_finding(
+                    "overbroad_test_target_visibility",
+                    "error",
+                    rel_path,
+                    lineno,
+                    (
+                        f"Test target '{target_name}' ({func_name}) uses '//:__subpackages__' in visibility; "
+                        "individual test targets must omit 'visibility' (package-private), and package "
+                        "test_suite() targets must use package-specific visibility (e.g. "
+                        '["//<aggregation_dir>:__pkg__"]), never \':__subpackages__\'.'
+                    ),
+                    (
+                        f"Replace '//:__subpackages__' on '{target_name}' with {json.dumps(narrow_vis)}."
+                        if is_exposable_test_suite and narrow_vis
+                        else (
+                            f"Replace '//:__subpackages__' on '{target_name}' with package-specific "
+                            'visibility for the aggregation package (or omit \'visibility\' until the '
+                            "aggregation package is known)."
+                            if is_exposable_test_suite
+                            else f"Omit 'visibility' on '{target_name}' (default package-private) and expose a package `test_suite(name = \"tests\" | \"host_tests\")` instead."
+                        )
+                    ),
+                )
             elif val == "//:__subpackages__":
-                if not is_globally_used and not has_macro_injected_rdeps and not allow_broad_test_vis:
-                    findings.append({
-                        "source": "visibility_audit",
-                        "category": "disguised_public_visibility",
-                        "severity": "error",
-                        "file": rel_path,
-                        "line": lineno,
-                        "message": (
+                if (
+                    not is_globally_used
+                    and not has_macro_injected_rdeps
+                    and not allow_broad_test_vis
+                    and not allow_unrestricted_gn_subpkgs
+                ):
+                    emit_finding(
+                        "disguised_public_visibility",
+                        "error",
+                        rel_path,
+                        lineno,
+                        (
                             f"Target '{target_name}' uses '//:__subpackages__' in visibility, but only "
                             f"{len(target_rdeps)} package(s) across {len(distinct_areas)} area(s) depend on '{target_name}'. "
-                            f"Reserve '//:__subpackages__' for foundational libraries with widespread tree-wide usage."
+                            "Reserve '//:__subpackages__' for foundational libraries with widespread tree-wide usage."
                         ),
-                        "remediation": f"Replace '//:__subpackages__' with {json.dumps(rec_target_vis)} and re-run fx bazel2gn."
-                    })
+                        f"Replace '//:__subpackages__' with {json.dumps(rec_target_vis)} and re-run fx bazel2gn.",
+                    )
             else:
-                if val.startswith("//" + VG_ROOT + "/"):
-                    findings.append({
-                        "source": "visibility_audit",
-                        "category": "internal_vendor_subpath_visibility",
-                        "severity": "error",
-                        "file": rel_path,
-                        "line": lineno,
-                        "message": (
+                if val.startswith("//" + rl.VG_ROOT + "/"):
+                    emit_finding(
+                        "internal_vendor_subpath_visibility",
+                        "error",
+                        rel_path,
+                        lineno,
+                        (
                             f"Target '{target_name}' exposes internal vendor subpath '{val}' in visibility. "
-                            f"Never use internal vendor subpaths in visibility; expose to '{VG_SUBPKGS}' instead."
+                            f"Never use internal vendor subpaths in visibility; expose to '{rl.VG_SUBPKGS}' instead."
                         ),
-                        "remediation": (
-                            f"Replace '{val}' with '\"{VG_SUBPKGS}\"' and re-run fx bazel2gn."
-                        ),
-                    })
+                        f"Replace '{val}' with '\"{rl.VG_SUBPKGS}\"' and re-run fx bazel2gn.",
+                    )
+                    continue
+
+                if preserved_gn_vis and val in preserved_gn_vis:
                     continue
 
                 m_sub = re.match(r"^//([^:]+):__subpackages__$", val)
@@ -1005,96 +1737,112 @@ for rel_path in sorted(candidate_files):
 
                 if m_sub:
                     prefix = m_sub.group(1).strip("/")
-                    if prefix == VG_ROOT:
-                        has_vg_rdep = any(
-                            r == VG_ROOT or r.startswith(VG_ROOT + "/") for r in target_rdeps
+                    if is_test_rule and not has_macro_injected_rdeps:
+                        emit_finding(
+                            "overbroad_subpackages_visibility",
+                            "error",
+                            rel_path,
+                            lineno,
+                            (
+                                f"Test target '{target_name}' ({func_name}) uses subpackage wildcard '{val}'; "
+                                "individual test targets must omit 'visibility' (package-private), and package "
+                                "test_suite() targets must use package-specific visibility (e.g. "
+                                f'["//{prefix}:__pkg__"]), never \':__subpackages__\'.'
+                            ),
+                            (
+                                f"Replace '{val}' on '{target_name}' with {json.dumps(narrow_vis) if narrow_vis else f'[\"//{prefix}:__pkg__\"]'}."
+                                if is_exposable_test_suite
+                                else f"Omit 'visibility' on '{target_name}' (default package-private) and expose a package test_suite(name = \"tests\" | \"host_tests\", visibility = [\"//{prefix}:__pkg__\"]) instead."
+                            ),
                         )
-                        if not has_vg_rdep and not has_macro_injected_rdeps:
-                            findings.append({
-                                "source": "visibility_audit",
-                                "category": "false_positive_rdep_visibility",
-                                "severity": "error",
-                                "file": rel_path,
-                                "line": lineno,
-                                "message": f"Target '{target_name}' grants visibility to '{val}', but no package in that vendor tree actually depends on '{target_name}'.",
-                                "remediation": f"Remove '{val}' from visibility.",
-                            })
+                        continue
+                    if prefix == rl.VG_ROOT:
+                        has_vg_rdep = any(
+                            r == rl.VG_ROOT or r.startswith(rl.VG_ROOT + "/") for r in target_rdeps
+                        )
+                        if (
+                            not has_vg_rdep
+                            and not has_macro_injected_rdeps
+                            and not rl.is_subrepo_origin_main_stale(workdir, rl.VG_ROOT)
+                        ):
+                            emit_finding(
+                                "false_positive_rdep_visibility",
+                                "error",
+                                rel_path,
+                                lineno,
+                                (
+                                    f"Target '{target_name}' grants visibility to '{val}', "
+                                    "but no package in that vendor tree actually depends on "
+                                    f"'{target_name}'."
+                                ),
+                                f"Remove '{val}' from visibility.",
+                            )
                         continue
                     parts = prefix.split("/")
                     depth = len(parts)
                     covered_rdeps = sorted(
                         r for r in target_rdeps if r == prefix or r.startswith(prefix + "/")
                     )
-                    replacement = recommend_narrow_visibility(covered_rdeps, pkg_path)
+                    replacement = rl.recommend_narrow_visibility(covered_rdeps, pkg_path)
 
                     if depth == 1:
                         top_level_subpkgs.append((val, lineno))
-                        if prefix in BANNED_TOP_LEVEL_SUBPKGS and not is_globally_used and not allow_broad_rollup and not allow_broad_test_vis:
-                            findings.append({
-                                "source": "visibility_audit",
-                                "category": "overbroad_top_level_subpackages_visibility",
-                                "severity": "error",
-                                "file": rel_path,
-                                "line": lineno,
-                                "message": f"Target '{target_name}' grants top-level wildcard '{val}' in visibility ('All of //{prefix} seems too wide').",
-                                "remediation": (
+                        if (
+                            prefix in rl.BANNED_TOP_LEVEL_SUBPKGS
+                            and not is_globally_used
+                            and not allow_broad_rollup
+                            and not allow_broad_test_vis
+                        ):
+                            emit_finding(
+                                "overbroad_top_level_subpackages_visibility",
+                                "error",
+                                rel_path,
+                                lineno,
+                                f"Target '{target_name}' grants top-level wildcard '{val}' in visibility ('All of //{prefix} seems too wide').",
+                                (
                                     f"Replace '{val}' with tightly-scoped package/subsystem entries: {json.dumps(replacement)}."
                                     if replacement
                                     else f"Remove '{val}' from visibility (no true reverse dependencies exist under '//{prefix}')."
                                 ),
-                            })
+                            )
                             continue
 
-                    if prefix in BANNED_UMBRELLA_SUBPKGS:
+                    if prefix in rl.BANNED_UMBRELLA_SUBPKGS:
                         if not allow_broad_test_vis and not is_globally_used:
-                            findings.append({
-                                "source": "visibility_audit",
-                                "category": "overbroad_subpackages_visibility",
-                                "severity": "error",
-                                "file": rel_path,
-                                "line": lineno,
-                                "message": f"Target '{target_name}' grants multi-domain umbrella wildcard '{val}' in visibility ('//{prefix} seems too wide').",
-                                "remediation": (
+                            emit_finding(
+                                "overbroad_subpackages_visibility",
+                                "error",
+                                rel_path,
+                                lineno,
+                                f"Target '{target_name}' grants multi-domain umbrella wildcard '{val}' in visibility ('//{prefix} seems too wide').",
+                                (
                                     f"Replace '{val}' with specific library/package visibility entries: {json.dumps(replacement)}."
                                     if replacement
                                     else f"Remove '{val}' from visibility (no true reverse dependencies exist under '//{prefix}')."
                                 ),
-                            })
+                            )
                             continue
                         if not allow_broad_test_vis and covered_rdeps:
-                            # docs/development/languages/bazel/style/build_files.md#target-visibility
-                            # suggests top-level directories such as //sdk/lib:__subpackages__ for
-                            # targets used across the code base, so on globally-used targets this is
-                            # only a hint for a human to confirm. A grant with no caller under the
-                            # prefix still falls through to false_positive_rdep_visibility below.
-                            findings.append({
-                                "source": "visibility_audit",
-                                "category": "overbroad_subpackages_visibility",
-                                "severity": "info",
-                                "file": rel_path,
-                                "line": lineno,
-                                "message": (
-                                    f"Globally used target '{target_name}' grants multi-domain umbrella wildcard "
-                                    f"'{val}' in visibility."
-                                ),
-                                "remediation": (
-                                    f"No change needed if '{target_name}' is meant for use across '//{prefix}' "
-                                    "(a human reviewer should confirm)."
-                                ),
-                            })
+                            emit_finding(
+                                "overbroad_subpackages_visibility",
+                                "info",
+                                rel_path,
+                                lineno,
+                                f"Globally used target '{target_name}' grants multi-domain umbrella wildcard '{val}' in visibility.",
+                                f"No change needed if '{target_name}' is meant for use across '//{prefix}' (a human reviewer should confirm).",
+                            )
                             continue
 
                     if len(covered_rdeps) == 0:
                         if not has_macro_injected_rdeps:
-                            findings.append({
-                                "source": "visibility_audit",
-                                "category": "false_positive_rdep_visibility",
-                                "severity": "error",
-                                "file": rel_path,
-                                "line": lineno,
-                                "message": f"Target '{target_name}' grants visibility to '{val}', but no package under '//{prefix}' actually depends on '{target_name}'.",
-                                "remediation": f"Remove '{val}' from visibility."
-                            })
+                            emit_finding(
+                                "false_positive_rdep_visibility",
+                                "error",
+                                rel_path,
+                                lineno,
+                                f"Target '{target_name}' grants visibility to '{val}', but no package under '//{prefix}' actually depends on '{target_name}'.",
+                                f"Remove '{val}' from visibility.",
+                            )
                         continue
 
                     if allow_broad_rollup:
@@ -1106,18 +1854,18 @@ for rel_path in sorted(candidate_files):
                             d3_subtrees = {
                                 "/".join(r.split("/")[:3]) for r in covered_rdeps if len(r.split("/")) >= 3
                             }
-                            findings.append({
-                                "source": "visibility_audit",
-                                "category": "overbroad_subpackages_visibility",
-                                "severity": "error",
-                                "file": rel_path,
-                                "line": lineno,
-                                "message": f"Target '{target_name}' (in '//{pkg_path}') grants cross-area wildcard '{val}' ('//{prefix} seems too wide'; only {len(covered_rdeps)} caller package(s) across {len(d3_subtrees)} subcomponent(s) depend on '{target_name}').",
-                                "remediation": f"Replace '{val}' with narrower package/subcomponent visibility entries: {json.dumps(replacement)}."
-                            })
+                            emit_finding(
+                                "overbroad_subpackages_visibility",
+                                "error",
+                                rel_path,
+                                lineno,
+                                f"Target '{target_name}' (in '//{pkg_path}') grants cross-area wildcard '{val}' ('//{prefix} seems too wide'; only {len(covered_rdeps)} caller package(s) across {len(d3_subtrees)} subcomponent(s) depend on '{target_name}').",
+                                f"Replace '{val}' with narrower package/subcomponent visibility entries: {json.dumps(replacement)}.",
+                            )
                             continue
 
-                    if depth >= 3 and not prefix.startswith(("build/bazel/", "build/images/", "bundles/")):
+                    same_subtree = pkg_path == prefix or pkg_path.startswith(prefix + "/")
+                    if depth >= 3 and not same_subtree and not prefix.startswith(("build/bazel/", "build/images/", "bundles/")):
                         split_cov = [r.split("/") for r in covered_rdeps]
                         min_len = min(len(s) for s in split_cov)
                         lca_len = 0
@@ -1130,61 +1878,100 @@ for rel_path in sorted(candidate_files):
 
                         if len(covered_rdeps) == 1:
                             only_pkg = covered_rdeps[0]
-                            findings.append({
-                                "source": "visibility_audit",
-                                "category": "overbroad_subpackages_visibility",
-                                "severity": "error",
-                                "file": rel_path,
-                                "line": lineno,
-                                "message": f"Target '{target_name}' uses wildcard '{val}', but only a single package ('//{only_pkg}') under '//{prefix}' depends on '{target_name}'.",
-                                "remediation": f"Replace '{val}' with '\"//{only_pkg}:__pkg__\"'."
-                            })
+                            emit_finding(
+                                "overbroad_subpackages_visibility",
+                                "error",
+                                rel_path,
+                                lineno,
+                                f"Target '{target_name}' uses wildcard '{val}', but only a single package ('//{only_pkg}') under '//{prefix}' depends on '{target_name}'.",
+                                f"Replace '{val}' with '\"//{only_pkg}:__pkg__\"'.",
+                            )
                         elif lca != prefix and lca.startswith(prefix + "/"):
-                            findings.append({
-                                "source": "visibility_audit",
-                                "category": "overbroad_subpackages_visibility",
-                                "severity": "error",
-                                "file": rel_path,
-                                "line": lineno,
-                                "message": f"Target '{target_name}' uses '{val}', which is wider than the Lowest Common Ancestor ('//{lca}') of its actual callers under '//{prefix}'.",
-                                "remediation": f"Replace '{val}' with {json.dumps(replacement)}."
-                            })
+                            emit_finding(
+                                "overbroad_subpackages_visibility",
+                                "error",
+                                rel_path,
+                                lineno,
+                                f"Target '{target_name}' uses '{val}', which is wider than the Lowest Common Ancestor ('//{lca}') of its actual callers under '//{prefix}'.",
+                                f"Replace '{val}' with {json.dumps(replacement)}.",
+                            )
 
                 elif m_pkg:
                     caller_pkg = m_pkg.group(1).strip("/")
                     if caller_pkg == "visibility":
                         continue
-                    if caller_pkg in vis_only_pkgs:
-                        findings.append({
-                            "source": "visibility_audit",
-                            "category": "visibility_allowlist_false_rdep",
-                            "severity": "error",
-                            "file": rel_path,
-                            "line": lineno,
-                            "message": f"Target '{target_name}' grants visibility to '{val}', but '//{caller_pkg}' only references '//{pkg_path}' inside its own visibility allowlist.",
-                            "remediation": f"Remove '{val}' from visibility."
-                        })
+                    if caller_pkg in sym_macro_caller_pkgs.get(target_name, set()):
+                        continue
+                    if rl.is_pending_ancestor_test_suite_vis(
+                        workdir,
+                        caller_pkg,
+                        pkg_path,
+                        is_exposable_test_suite,
+                        per_target_direct_rdeps.get(target_name, {}),
+                        cache=ancestor_suite_cache,
+                    ):
+                        continue
+                    if caller_pkg in target_rdeps:
+                        continue
+                    if is_individual_test_rule or (
+                        is_test_suite_rule and not is_exposable_test_suite
+                    ):
+                        emit_finding(
+                            "false_positive_rdep_visibility",
+                            "error",
+                            rel_path,
+                            lineno,
+                            (
+                                f"Test target '{target_name}' ({func_name}) grants visibility to "
+                                f"'{val}', but individual test targets and sub-suites within a package "
+                                "must remain package-private (omit 'visibility') and be exposed via a "
+                                "package test_suite(name = \"tests\" | \"host_tests\") instead."
+                            ),
+                            (
+                                f"Omit 'visibility' on '{target_name}' in '{rel_path}', define a package "
+                                f"`test_suite(name = \"tests\" | \"host_tests\", visibility = [\"{val}\"])` "
+                                f"as the first target in '{rel_path}', and reference `//{pkg_path}:tests` "
+                                f"(or `//{pkg_path}:host_tests`) in '//{caller_pkg}/BUILD.bazel'."
+                            ),
+                        )
+                    elif caller_pkg in vis_only_pkgs:
+                        emit_finding(
+                            "visibility_allowlist_false_rdep",
+                            "error",
+                            rel_path,
+                            lineno,
+                            f"Target '{target_name}' grants visibility to '{val}', but '//{caller_pkg}' only references '//{pkg_path}' inside its own visibility allowlist.",
+                            f"Remove '{val}' from visibility.",
+                        )
                     elif caller_pkg in gn_only_pkgs or caller_pkg not in target_rdeps:
-                        findings.append({
-                            "source": "visibility_audit",
-                            "category": "false_positive_rdep_visibility",
-                            "severity": "error",
-                            "file": rel_path,
-                            "line": lineno,
-                            "message": f"Target '{target_name}' grants visibility to '{val}', but '//{caller_pkg}' does not depend on Bazel target '{target_name}' (e.g. only references :tests or :benchmarks).",
-                            "remediation": f"Remove '{val}' from visibility."
-                        })
+                        emit_finding(
+                            "false_positive_rdep_visibility",
+                            "error",
+                            rel_path,
+                            lineno,
+                            f"Target '{target_name}' grants visibility to '{val}', but '//{caller_pkg}' does not depend on Bazel target '{target_name}' (e.g. only references :tests or :benchmarks).",
+                            f"Remove '{val}' from visibility.",
+                        )
 
         if len(top_level_subpkgs) >= 5 and not allow_broad_rollup:
-            findings.append({
-                "source": "visibility_audit",
-                "category": "disguised_public_visibility",
-                "severity": "error",
-                "file": rel_path,
-                "line": vis_kw.lineno,
-                "message": f"Target '{target_name}' enumerates {len(top_level_subpkgs)} top-level '//<dir>:__subpackages__' roots in visibility.",
-                "remediation": f"Scope visibility to {json.dumps(rec_target_vis)}."
-            })
+            emit_finding(
+                "disguised_public_visibility",
+                "error",
+                rel_path,
+                vis_kw.lineno,
+                f"Target '{target_name}' enumerates {len(top_level_subpkgs)} top-level '//<dir>:__subpackages__' roots in visibility.",
+                f"Scope visibility to {json.dumps(rec_target_vis)}.",
+            )
+
+        if (
+            preserved_gn_vis
+            and new_entries
+            and only_scope_entries
+            and len(findings) == findings_before_target
+        ):
+            check_visibility_tightened_from_gn(
+                target_name, rel_path, vis_kw.lineno, vis_vals, vis_scopes, preserved_gn_vis, pkg_path
+            )
 
         if target_name in orig_gn_vis_map and len(findings) == findings_before_target:
             gn_allowed = orig_gn_vis_map[target_name]
@@ -1204,6 +1991,15 @@ for rel_path in sorted(candidate_files):
                         continue
                     sp = pkg_path if m_scope.group(1) is None else m_scope.group(1).strip("/")
                     kind = m_scope.group(2)
+                    if kind == "pkg" and rl.is_pending_ancestor_test_suite_vis(
+                        workdir,
+                        sp,
+                        pkg_path,
+                        is_exposable_test_suite,
+                        per_target_direct_rdeps.get(target_name, {}),
+                        cache=ancestor_suite_cache,
+                    ):
+                        continue
                     if kind == "pkg":
                         covered_by_gn = any(
                             sp == gsp or (gk == "subpackages" and (gsp == "" or sp.startswith(gsp + "/")))
@@ -1218,22 +2014,31 @@ for rel_path in sorted(candidate_files):
                         gn_bounds_desc = sorted(
                             {f"//{gsp}/*" if gk == "subpackages" else f"//{gsp}:*" for gsp, gk in gn_allowed}
                         )
-                        findings.append({
-                            "source": "visibility_audit",
-                            "category": "visibility_widened_beyond_gn",
-                            "severity": "error",
-                            "file": rel_path,
-                            "line": lineno,
-                            "message": (
+                        emit_finding(
+                            "visibility_widened_beyond_gn",
+                            "error",
+                            rel_path,
+                            lineno,
+                            (
                                 f"Target '{target_name}' widens visibility with '{val}' beyond the explicit "
-                                f"visibility bounds in `{pkg_path}/BUILD.gn` at `{change_base}` ({', '.join(gn_bounds_desc)}), "
-                                f"even though all actual reverse dependencies are within the original GN scope."
+                                f"visibility bounds in `{pkg_path}/BUILD.gn` in base GN ({', '.join(gn_bounds_desc)}), "
+                                "even though all actual reverse dependencies are within the original GN scope."
                             ),
-                            "remediation": (
+                            (
                                 f"Scope visibility on '{target_name}' to {json.dumps(rec_target_vis)} (or omit "
                                 "visibility if private to the package) and re-run fx bazel2gn."
                             ),
-                        })
+                        )
 
-print(json.dumps(findings, indent=2))
+        has_target_err = any(
+            f.get("severity", "").lower() != "info" for f in findings[target_start_findings:]
+        )
+        if only_scope_entries and not has_target_err and (not preserved_gn_vis or new_entries):
+            clean_audited_targets.add((rel_path, target_name))
+            record_intentional_visibility_narrowing(
+                target_name, rel_path, node.lineno, vis_scopes, orig_gn_vis_map, pkg_path
+            )
+
+record_diff_visibility_narrowed_info(clean_audited_targets)
+pcl.emit_json(findings)
 PYEOF

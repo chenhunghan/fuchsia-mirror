@@ -15,68 +15,249 @@
 #include <zircon/types.h>
 
 #include <memory>
+#include <type_traits>
 
 #include <hwreg/bitfields.h>
 
 namespace pci {
+
+class Config;
+
 namespace config {
 
 // Fields correspond to the name in the PCI Local Bus Spec section 6.2.
-struct Command {
-  uint16_t value;
-  // 15-11 are reserved preserve.
-  DEF_SUBBIT(value, 10, interrupt_disable);
-  DEF_SUBBIT(value, 9, fast_back_to_back_enable);
-  DEF_SUBBIT(value, 8, serr_enable);
-  // 7 is reserved preserve.
-  DEF_SUBBIT(value, 6, parity_error_response);
-  DEF_SUBBIT(value, 5, vga_palette_snoop);
-  DEF_SUBBIT(value, 4, memory_write_and_invalidate_enable);
-  DEF_SUBBIT(value, 3, special_cycles);
-  DEF_SUBBIT(value, 2, bus_master);
-  DEF_SUBBIT(value, 1, memory_space);
-  DEF_SUBBIT(value, 0, io_space);
-};
+struct VendorIdReg : public hwreg::RegisterBase<VendorIdReg, uint16_t> {};
+inline const hwreg::RegisterAddr<VendorIdReg> VendorId(pci::kConfigVendorId);
 
-struct Status {
-  uint16_t value;
-  DEF_SUBBIT(value, 15, detected_parity_error);
-  DEF_SUBBIT(value, 14, signaled_system_error);
-  DEF_SUBBIT(value, 13, received_master_abort);
-  DEF_SUBBIT(value, 12, received_target_abort);
-  DEF_SUBBIT(value, 11, signaled_target_abort);
-  DEF_SUBFIELD(value, 10, 9, devsel_timing);
-  DEF_SUBBIT(value, 8, master_data_parity_error);
-  DEF_SUBBIT(value, 7, fast_b2b_capable);
-  // 6 is reserved preserve.
-  DEF_SUBBIT(value, 5, capable_66mhz);
-  DEF_SUBBIT(value, 4, has_capabilities_list);
-  DEF_SUBBIT(value, 3, interrupt_status);
-  // 2-0 are reserved preserve.
+struct DeviceIdReg : public hwreg::RegisterBase<DeviceIdReg, uint16_t> {};
+inline const hwreg::RegisterAddr<DeviceIdReg> DeviceId(pci::kConfigDeviceId);
+
+struct CommandReg : public hwreg::RegisterBase<CommandReg, uint16_t> {
+  // 15-11 are reserved preserve.
+  DEF_BIT(10, interrupt_disable);
+  DEF_BIT(9, fast_back_to_back_enable);
+  DEF_BIT(8, serr_enable);
+  // 7 is reserved preserve.
+  DEF_BIT(6, parity_error_response);
+  DEF_BIT(5, vga_palette_snoop);
+  DEF_BIT(4, memory_write_and_invalidate_enable);
+  DEF_BIT(3, special_cycles);
+  DEF_BIT(2, bus_master);
+  DEF_BIT(1, memory_space);
+  DEF_BIT(0, io_space);
 };
+inline const hwreg::RegisterAddr<CommandReg> Command(pci::kConfigCommand);
+
+// Status register (PCI Local Bus Spec section 6.2.3, PCIe Base Spec section 7.5.1.1.4).
+// Bits 8 and 11-15 are RW1C. Writes must set only the bits to be cleared (no read-modify-write).
+struct StatusReg : public hwreg::RegisterBase<StatusReg, uint16_t> {
+  DEF_BIT(15, detected_parity_error);
+  DEF_BIT(14, signaled_system_error);
+  DEF_BIT(13, received_master_abort);
+  DEF_BIT(12, received_target_abort);
+  DEF_BIT(11, signaled_target_abort);
+  DEF_FIELD(10, 9, devsel_timing);
+  DEF_BIT(8, master_data_parity_error);
+  DEF_BIT(7, fast_b2b_capable);
+  // 6 is reserved preserve.
+  DEF_BIT(5, capable_66mhz);
+  DEF_BIT(4, has_capabilities_list);
+  DEF_BIT(3, interrupt_status);
+  // 2-1 are reserved preserve.
+  DEF_BIT(0, immediate_readiness);
+};
+inline const hwreg::RegisterAddr<StatusReg> Status(pci::kConfigStatus);
+
+struct RevisionIdReg : public hwreg::RegisterBase<RevisionIdReg, uint8_t> {};
+inline const hwreg::RegisterAddr<RevisionIdReg> RevisionId(pci::kConfigRevisionId);
+
+struct ProgramInterfaceReg : public hwreg::RegisterBase<ProgramInterfaceReg, uint8_t> {};
+inline const hwreg::RegisterAddr<ProgramInterfaceReg> ProgramInterface(pci::kConfigClassCodeIntr);
+
+struct SubClassReg : public hwreg::RegisterBase<SubClassReg, uint8_t> {};
+inline const hwreg::RegisterAddr<SubClassReg> SubClass(pci::kConfigClassCodeSub);
+
+struct BaseClassReg : public hwreg::RegisterBase<BaseClassReg, uint8_t> {};
+inline const hwreg::RegisterAddr<BaseClassReg> BaseClass(pci::kConfigClassCodeBase);
+
+struct CacheLineSizeReg : public hwreg::RegisterBase<CacheLineSizeReg, uint8_t> {};
+inline const hwreg::RegisterAddr<CacheLineSizeReg> CacheLineSize(pci::kConfigCacheLineSize);
+
+struct LatencyTimerReg : public hwreg::RegisterBase<LatencyTimerReg, uint8_t> {};
+inline const hwreg::RegisterAddr<LatencyTimerReg> LatencyTimer(pci::kConfigLatencyTimer);
+
+struct HeaderTypeReg : public hwreg::RegisterBase<HeaderTypeReg, uint8_t> {
+  DEF_BIT(7, multi_function);
+  DEF_FIELD(6, 0, type);
+};
+inline const hwreg::RegisterAddr<HeaderTypeReg> HeaderType(pci::kConfigHeaderType);
+
+struct BistReg : public hwreg::RegisterBase<BistReg, uint8_t> {
+  DEF_BIT(7, capable);
+  DEF_BIT(6, start);
+  // 5-4 are reserved.
+  DEF_FIELD(3, 0, completion_code);
+};
+inline const hwreg::RegisterAddr<BistReg> Bist(pci::kConfigBist);
 
 // The layout of a Base Address Register changes based on its type.
 // PCI Local Bus Spec section 6.2.5.1.
-struct IoBaseAddress;
-struct MmioBaseAddress;
-struct BaseAddress : public hwreg::RegisterBase<BaseAddress, uint32_t> {
-  DEF_RSVDZ_BIT(1);
-  DEF_BIT(0, is_io_space);
-
-  IoBaseAddress* io() { return reinterpret_cast<IoBaseAddress*>(this); }
-  MmioBaseAddress* mmio() { return reinterpret_cast<MmioBaseAddress*>(this); }
-  static auto Get() { return hwreg::RegisterAddr<BaseAddress>(0); }
-};
-
-struct IoBaseAddress : public BaseAddress {
+struct IoBaseAddressReg : public hwreg::RegisterBase<IoBaseAddressReg, uint32_t> {
   DEF_UNSHIFTED_FIELD(31, 2, base_address);
+  DEF_BIT(0, is_io_space);
 };
 
-struct MmioBaseAddress : public BaseAddress {
+struct MmioBaseAddressReg : public hwreg::RegisterBase<MmioBaseAddressReg, uint32_t> {
+  static constexpr uint32_t kType32Bit = 0b00;
+  static constexpr uint32_t kType64Bit = 0b10;
+
   DEF_UNSHIFTED_FIELD(31, 4, base_address);
   DEF_BIT(3, is_prefetchable);
-  DEF_BIT(2, is_64_bit);
+  DEF_FIELD(2, 1, type);
+  DEF_BIT(0, is_io_space);
 };
+
+struct BaseAddressReg : public hwreg::RegisterBase<BaseAddressReg, uint32_t> {
+  // Bit 1 is reserved in I/O BARs and part of the 2-bit type field in MMIO BARs.
+  DEF_BIT(0, is_io_space);
+
+  IoBaseAddressReg io() const {
+    return hwreg::RegisterAddr<IoBaseAddressReg>(reg_addr()).FromValue(reg_value());
+  }
+  MmioBaseAddressReg mmio() const {
+    return hwreg::RegisterAddr<MmioBaseAddressReg>(reg_addr()).FromValue(reg_value());
+  }
+};
+
+inline hwreg::RegisterAddr<BaseAddressReg> BaseAddress(uint32_t bar_id) {
+  ZX_ASSERT(bar_id < pci::kMaxBarCount);
+  return hwreg::RegisterAddr<BaseAddressReg>(
+      static_cast<uint32_t>(pci::kConfigBaseAddresses + (bar_id * sizeof(uint32_t))));
+}
+
+struct CardbusCisPtrReg : public hwreg::RegisterBase<CardbusCisPtrReg, uint32_t> {};
+inline const hwreg::RegisterAddr<CardbusCisPtrReg> CardbusCisPtr(pci::kConfigCardbusCisPtr);
+
+struct SubsystemVendorIdReg : public hwreg::RegisterBase<SubsystemVendorIdReg, uint16_t> {};
+inline const hwreg::RegisterAddr<SubsystemVendorIdReg> SubsystemVendorId(
+    pci::kConfigSubsysVendorId);
+
+struct SubsystemIdReg : public hwreg::RegisterBase<SubsystemIdReg, uint16_t> {};
+inline const hwreg::RegisterAddr<SubsystemIdReg> SubsystemId(pci::kConfigSubsysId);
+
+struct ExpansionRomAddressReg : public hwreg::RegisterBase<ExpansionRomAddressReg, uint32_t> {
+  DEF_UNSHIFTED_FIELD(31, 11, address);
+  // Bits 10:8 are reserved.
+  DEF_FIELD(7, 4, validation_details);
+  DEF_FIELD(3, 1, validation_status);
+  DEF_BIT(0, enable);
+};
+inline const hwreg::RegisterAddr<ExpansionRomAddressReg> ExpansionRomAddress(
+    pci::kConfigExpRomAddress);
+
+struct CapabilitiesPtrReg : public hwreg::RegisterBase<CapabilitiesPtrReg, uint8_t> {};
+inline const hwreg::RegisterAddr<CapabilitiesPtrReg> CapabilitiesPtr(pci::kConfigCapabilities);
+
+// 0x35-0x3B is reserved.
+
+struct InterruptLineReg : public hwreg::RegisterBase<InterruptLineReg, uint8_t> {};
+inline const hwreg::RegisterAddr<InterruptLineReg> InterruptLine(pci::kConfigInterruptLine);
+
+struct InterruptPinReg : public hwreg::RegisterBase<InterruptPinReg, uint8_t> {};
+inline const hwreg::RegisterAddr<InterruptPinReg> InterruptPin(pci::kConfigInterruptPin);
+
+struct MinGrantReg : public hwreg::RegisterBase<MinGrantReg, uint8_t> {};
+inline const hwreg::RegisterAddr<MinGrantReg> MinGrant(pci::kConfigMinGrant);
+
+struct MaxLatencyReg : public hwreg::RegisterBase<MaxLatencyReg, uint8_t> {};
+inline const hwreg::RegisterAddr<MaxLatencyReg> MaxLatency(pci::kConfigMaxLatency);
+
+// PCI-to-PCI bridge configuration registers (Type 1 header).
+// Unlike a normal PCI header, a bridge only has two BARs, but the BAR offset in config space
+// is the same.
+struct PrimaryBusIdReg : public hwreg::RegisterBase<PrimaryBusIdReg, uint8_t> {};
+inline const hwreg::RegisterAddr<PrimaryBusIdReg> PrimaryBusId(0x18);
+
+struct SecondaryBusIdReg : public hwreg::RegisterBase<SecondaryBusIdReg, uint8_t> {};
+inline const hwreg::RegisterAddr<SecondaryBusIdReg> SecondaryBusId(0x19);
+
+struct SubordinateBusIdReg : public hwreg::RegisterBase<SubordinateBusIdReg, uint8_t> {};
+inline const hwreg::RegisterAddr<SubordinateBusIdReg> SubordinateBusId(0x1A);
+
+struct SecondaryLatencyTimerReg : public hwreg::RegisterBase<SecondaryLatencyTimerReg, uint8_t> {};
+inline const hwreg::RegisterAddr<SecondaryLatencyTimerReg> SecondaryLatencyTimer(0x1B);
+
+struct IoBaseReg : public hwreg::RegisterBase<IoBaseReg, uint8_t> {
+  DEF_FIELD(7, 4, address);
+  DEF_FIELD(3, 0, address_type);
+};
+inline const hwreg::RegisterAddr<IoBaseReg> IoBase(0x1C);
+
+struct IoLimitReg : public hwreg::RegisterBase<IoLimitReg, uint8_t> {
+  DEF_FIELD(7, 4, address);
+  DEF_FIELD(3, 0, address_type);
+};
+inline const hwreg::RegisterAddr<IoLimitReg> IoLimit(0x1D);
+
+// Secondary Status register (PCI to PCI Bridge Architecture Spec section 3.2.5.7, PCIe Base Spec
+// section 7.5.1.3.7). Bits 8 and 11-15 are RW1C. Writes must set only the bits to be cleared (no
+// read-modify-write).
+struct SecondaryStatusReg : public hwreg::RegisterBase<SecondaryStatusReg, uint16_t> {};
+inline const hwreg::RegisterAddr<SecondaryStatusReg> SecondaryStatus(0x1E);
+
+struct MemoryBaseReg : public hwreg::RegisterBase<MemoryBaseReg, uint16_t> {
+  DEF_FIELD(15, 4, address);
+};
+inline const hwreg::RegisterAddr<MemoryBaseReg> MemoryBase(0x20);
+
+struct MemoryLimitReg : public hwreg::RegisterBase<MemoryLimitReg, uint16_t> {
+  DEF_FIELD(15, 4, address);
+};
+inline const hwreg::RegisterAddr<MemoryLimitReg> MemoryLimit(0x22);
+
+struct PrefetchableMemoryBaseReg : public hwreg::RegisterBase<PrefetchableMemoryBaseReg, uint16_t> {
+  DEF_FIELD(15, 4, address);
+  DEF_FIELD(3, 0, address_type);
+};
+inline const hwreg::RegisterAddr<PrefetchableMemoryBaseReg> PrefetchableMemoryBase(0x24);
+
+struct PrefetchableMemoryLimitReg
+    : public hwreg::RegisterBase<PrefetchableMemoryLimitReg, uint16_t> {
+  DEF_FIELD(15, 4, address);
+  DEF_FIELD(3, 0, address_type);
+};
+inline const hwreg::RegisterAddr<PrefetchableMemoryLimitReg> PrefetchableMemoryLimit(0x26);
+
+struct PrefetchableMemoryBaseUpperReg
+    : public hwreg::RegisterBase<PrefetchableMemoryBaseUpperReg, uint32_t> {};
+inline const hwreg::RegisterAddr<PrefetchableMemoryBaseUpperReg> PrefetchableMemoryBaseUpper(0x28);
+
+struct PrefetchableMemoryLimitUpperReg
+    : public hwreg::RegisterBase<PrefetchableMemoryLimitUpperReg, uint32_t> {};
+inline const hwreg::RegisterAddr<PrefetchableMemoryLimitUpperReg> PrefetchableMemoryLimitUpper(
+    0x2C);
+
+struct IoBaseUpperReg : public hwreg::RegisterBase<IoBaseUpperReg, uint16_t> {};
+inline const hwreg::RegisterAddr<IoBaseUpperReg> IoBaseUpper(0x30);
+
+struct IoLimitUpperReg : public hwreg::RegisterBase<IoLimitUpperReg, uint16_t> {};
+inline const hwreg::RegisterAddr<IoLimitUpperReg> IoLimitUpper(0x32);
+
+// Capabilities Pointer (0x34) is the same as standard Type 0 config.
+// 0x35-0x37 is reserved.
+struct BridgeExpansionRomAddressReg
+    : public hwreg::RegisterBase<BridgeExpansionRomAddressReg, uint32_t> {
+  DEF_UNSHIFTED_FIELD(31, 11, address);
+  // Bits 10:8 are reserved.
+  DEF_FIELD(7, 4, validation_details);
+  DEF_FIELD(3, 1, validation_status);
+  DEF_BIT(0, enable);
+};
+inline const hwreg::RegisterAddr<BridgeExpansionRomAddressReg> BridgeExpansionRomAddress(0x38);
+
+// Interrupt Line (0x3C) and Interrupt Pin (0x3D) are the same as Type 0 config.
+struct BridgeControlReg : public hwreg::RegisterBase<BridgeControlReg, uint16_t> {};
+inline const hwreg::RegisterAddr<BridgeControlReg> BridgeControl(0x3E);
 
 }  // namespace config
 
@@ -122,119 +303,60 @@ constexpr zx_vaddr_t GetConfigOffsetInCam(fuchsia_hardware_pci::wire::Bdf bdf, u
   return GetConfigOffsetInCam<CamOffset>(bdf, start_bus);
 }
 
-class PciReg8 {
- public:
-  constexpr PciReg8() = default;
-  constexpr explicit PciReg8(uint16_t offset) : offset_(offset) {}
-  constexpr uint16_t offset() const { return offset_; }
-  bool operator==(const PciReg8& other) const { return (offset() == other.offset()); }
-
- private:
-  uint16_t offset_ = 0;
-};
-
-class PciReg16 {
- public:
-  constexpr PciReg16() = default;
-  constexpr explicit PciReg16(uint16_t offset) : offset_(offset) {}
-  constexpr uint16_t offset() const { return offset_; }
-  bool operator==(const PciReg8& other) const { return (offset() == other.offset()); }
-
- private:
-  uint16_t offset_ = 0;
-};
-
-class PciReg32 {
- public:
-  constexpr PciReg32() = default;
-  constexpr explicit PciReg32(uint16_t offset) : offset_(offset) {}
-  constexpr uint16_t offset() const { return offset_; }
-  bool operator==(const PciReg8& other) const { return (offset() == other.offset()); }
-
- private:
-  uint16_t offset_ = 0;
-};
-
 // Config supplies the factory for creating the appropriate pci config
 // object based on the address space of the pci device.
 class Config {
  public:
-  // Standard PCI configuration space values. Offsets from PCI Firmware Spec ch 6.
-  static constexpr PciReg16 kVendorId = PciReg16(pci::kConfigVendorId);
-  static constexpr PciReg16 kDeviceId = PciReg16(pci::kConfigDeviceId);
-  static constexpr PciReg16 kCommand = PciReg16(pci::kConfigCommand);
-  static constexpr PciReg16 kStatus = PciReg16(pci::kConfigStatus);
-  static constexpr PciReg8 kRevisionId = PciReg8(pci::kConfigRevisionId);
-  static constexpr PciReg8 kProgramInterface = PciReg8(pci::kConfigClassCodeIntr);
-  static constexpr PciReg8 kSubClass = PciReg8(pci::kConfigClassCodeSub);
-  static constexpr PciReg8 kBaseClass = PciReg8(pci::kConfigClassCodeBase);
-  static constexpr PciReg8 kCacheLineSize = PciReg8(pci::kConfigCacheLineSize);
-  static constexpr PciReg8 kLatencyTimer = PciReg8(pci::kConfigLatencyTimer);
-  static constexpr PciReg8 kHeaderType = PciReg8(pci::kConfigHeaderType);
-  static constexpr PciReg8 kBist = PciReg8(pci::kConfigBist);
-  // 0x10 is the address of the first BAR in config space
-  // BAR rather than BaseAddress for brevity
-  static constexpr PciReg32 kBar(uint32_t bar) {
-    ZX_ASSERT(bar < pci::kMaxBarCount);
-    return PciReg32(static_cast<uint16_t>(pci::kConfigBaseAddresses + (bar * sizeof(uint32_t))));
-  }
-  static constexpr PciReg32 kCardbusCisPtr = PciReg32(pci::kConfigCardbusCisPtr);
-  static constexpr PciReg16 kSubsystemVendorId = PciReg16(pci::kConfigSubsysVendorId);
-  static constexpr PciReg16 kSubsystemId = PciReg16(pci::kConfigSubsysId);
-  static constexpr PciReg32 kExpansionRomAddress = PciReg32(pci::kConfigExpRomAddress);
-  static constexpr PciReg8 kCapabilitiesPtr = PciReg8(pci::kConfigCapabilities);
-  // 0x35 through 0x3B is reserved
-  static constexpr PciReg8 kInterruptLine = PciReg8(pci::kConfigInterruptLine);
-  static constexpr PciReg8 kInterruptPin = PciReg8(pci::kConfigInterruptPin);
-  static constexpr PciReg8 kMinGrant = PciReg8(pci::kConfigMinGrant);
-  static constexpr PciReg8 kMaxLatency = PciReg8(pci::kConfigMaxLatency);
-  static constexpr uint8_t kStdCfgEnd =
-      static_cast<uint8_t>(kMaxLatency.offset() + sizeof(uint8_t));
-
-  // pci to pci bridge config
-  // Unlike a normal PCI header, a bridge only has two BARs, but the BAR offset in config space
-  // is the same.
-  static constexpr PciReg8 kPrimaryBusId = PciReg8(0x18);
-  static constexpr PciReg8 kSecondaryBusId = PciReg8(0x19);
-  static constexpr PciReg8 kSubordinateBusId = PciReg8(0x1A);
-  static constexpr PciReg8 kSecondaryLatencyTimer = PciReg8(0x1B);
-  static constexpr PciReg8 kIoBase = PciReg8(0x1C);
-  static constexpr PciReg8 kIoLimit = PciReg8(0x1D);
-  static constexpr PciReg16 kSecondaryStatus = PciReg16(0x1E);
-  static constexpr PciReg16 kMemoryBase = PciReg16(0x20);
-  static constexpr PciReg16 kMemoryLimit = PciReg16(0x22);
-  static constexpr PciReg16 kPrefetchableMemoryBase = PciReg16(0x24);
-  static constexpr PciReg16 kPrefetchableMemoryLimit = PciReg16(0x26);
-  static constexpr PciReg32 kPrefetchableMemoryBaseUpper = PciReg32(0x28);
-  static constexpr PciReg32 kPrefetchableMemoryLimitUpper = PciReg32(0x2C);
-  static constexpr PciReg16 kIoBaseUpper = PciReg16(0x30);
-  static constexpr PciReg16 kIoLimitUpper = PciReg16(0x32);
-  // Capabilities Pointer for a bridge matches the standard 0x34 offset
-  // 0x35 through 0x38 is reserved
-  static constexpr PciReg32 kBridgeExpansionRomAddress = PciReg32(0x38);
-  // interrupt line for a bridge matches the standard 0x3C offset
-  // interrupt pin for a bridge matches the standard 0x3D offset
-  static constexpr PciReg16 kBridgeControl = PciReg16(0x3E);
-
   const fuchsia_hardware_pci::wire::Bdf& bdf() const { return bdf_; }
   const char* addr() const { return addr_; }
   virtual const char* type() const = 0;
   // Return a copy of the MmioView backing the Config's MMIO space, if supported.
   virtual zx::result<fdf::MmioView> get_view() const { return zx::error(ZX_ERR_NOT_SUPPORTED); }
 
-  // Virtuals
-  virtual uint8_t Read(PciReg8 addr) const = 0;
-  virtual uint16_t Read(PciReg16 addr) const = 0;
-  virtual uint32_t Read(PciReg32 addr) const = 0;
-  virtual void Write(PciReg8 addr, uint8_t val) const = 0;
-  virtual void Write(PciReg16 addr, uint16_t val) const = 0;
-  virtual void Write(PciReg32 addr, uint32_t val) const = 0;
+  // Sized configuration space accessors used by hwreg for register I/O and direct raw-offset
+  // access.
+  template <typename IntType, typename = std::enable_if_t<std::is_unsigned_v<IntType> &&
+                                                          !std::is_same_v<IntType, bool>>>
+  IntType Read(uint32_t offset) const {
+    static_assert(sizeof(IntType) == 1 || sizeof(IntType) == 2 || sizeof(IntType) == 4,
+                  "Invalid PCI config access size");
+    ZX_DEBUG_ASSERT(offset <= UINT16_MAX);
+    if constexpr (sizeof(IntType) == 1) {
+      return Read8(static_cast<uint16_t>(offset));
+    } else if constexpr (sizeof(IntType) == 2) {
+      return Read16(static_cast<uint16_t>(offset));
+    } else {
+      return Read32(static_cast<uint16_t>(offset));
+    }
+  }
+
+  template <typename IntType, typename = std::enable_if_t<std::is_unsigned_v<IntType> &&
+                                                          !std::is_same_v<IntType, bool>>>
+  void Write(IntType val, uint32_t offset) const {
+    static_assert(sizeof(IntType) == 1 || sizeof(IntType) == 2 || sizeof(IntType) == 4,
+                  "Invalid PCI config access size");
+    ZX_DEBUG_ASSERT(offset <= UINT16_MAX);
+    if constexpr (sizeof(IntType) == 1) {
+      Write8(val, static_cast<uint16_t>(offset));
+    } else if constexpr (sizeof(IntType) == 2) {
+      Write16(val, static_cast<uint16_t>(offset));
+    } else {
+      Write32(val, static_cast<uint16_t>(offset));
+    }
+  }
   virtual ~Config() = default;
 
  protected:
   explicit Config(fuchsia_hardware_pci::wire::Bdf bdf) : bdf_(bdf) {
     snprintf(addr_, sizeof(addr_), "%02x:%02x.%01x", bdf_.bus_id, bdf_.device_id, bdf_.function_id);
   }
+
+  virtual uint8_t Read8(uint16_t offset) const = 0;
+  virtual uint16_t Read16(uint16_t offset) const = 0;
+  virtual uint32_t Read32(uint16_t offset) const = 0;
+  virtual void Write8(uint8_t val, uint16_t offset) const = 0;
+  virtual void Write16(uint16_t val, uint16_t offset) const = 0;
+  virtual void Write32(uint32_t val, uint16_t offset) const = 0;
 
  private:
   const fuchsia_hardware_pci::wire::Bdf bdf_;
@@ -265,14 +387,16 @@ class MmioConfig : public Config {
   explicit MmioConfig(const fdf::MmioView& view, fuchsia_hardware_pci::wire::Bdf bdf = {})
       : Config(bdf), view_(view) {}
 
-  uint8_t Read(const PciReg8 addr) const final { return view_.Read<uint8_t>(addr.offset()); }
-  uint16_t Read(const PciReg16 addr) const final { return view_.Read<uint16_t>(addr.offset()); }
-  uint32_t Read(const PciReg32 addr) const final { return view_.Read<uint32_t>(addr.offset()); }
-  void Write(PciReg8 addr, uint8_t val) const final { view_.Write(val, addr.offset()); }
-  void Write(PciReg16 addr, uint16_t val) const final { view_.Write(val, addr.offset()); }
-  void Write(PciReg32 addr, uint32_t val) const override { view_.Write(val, addr.offset()); }
   const char* type() const override { return "mmio"; }
   zx::result<fdf::MmioView> get_view() const final { return zx::ok(fdf::MmioView(view_)); }
+
+ protected:
+  uint8_t Read8(uint16_t offset) const final { return view_.Read<uint8_t>(offset); }
+  uint16_t Read16(uint16_t offset) const final { return view_.Read<uint16_t>(offset); }
+  uint32_t Read32(uint16_t offset) const final { return view_.Read<uint32_t>(offset); }
+  void Write8(uint8_t val, uint16_t offset) const final { view_.Write(val, offset); }
+  void Write16(uint16_t val, uint16_t offset) const final { view_.Write(val, offset); }
+  void Write32(uint32_t val, uint16_t offset) const override { view_.Write(val, offset); }
 
  private:
   const fdf::MmioView view_;

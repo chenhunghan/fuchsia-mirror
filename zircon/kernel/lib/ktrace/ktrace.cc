@@ -12,7 +12,6 @@
 #include <lib/fxt/interned_string.h>
 #include <lib/io.h>
 #include <lib/ktrace.h>
-#include <lib/syscalls/zx-syscall-numbers.h>
 #include <lib/zircon-internal/thread_annotations.h>
 #include <platform.h>
 #include <string.h>
@@ -30,7 +29,6 @@
 #include <ktl/atomic.h>
 #include <ktl/iterator.h>
 #include <lk/init.h>
-#include <object/thread_dispatcher.h>
 #include <vm/fault.h>
 #include <vm/vm_aspace.h>
 
@@ -43,19 +41,7 @@ zx_status_t rust_ktrace_init_cpu_buffer(void* ktrace_ptr, uint32_t cpu_num, void
                                         uint64_t thread_koid, uint16_t cpu_ref_header_entry);
 void rust_ktrace_clear_cpu_buffers(void* ktrace_ptr);
 void rust_ktrace_free(void* ktrace_ptr);
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void* cpp_ktrace_get_active_instance() {
-#ifdef UNITTESTS_ENABLED
-  Thread* current = Thread::Current::Get();
-  if (likely(current != nullptr)) {
-    if (unlikely(current->rust_ktrace_override() != nullptr)) {
-      return current->rust_ktrace_override();
-    }
-  }
-#endif
-  return KTrace::GetInstance().rust_ktrace();
-}
+void rust_ktrace_set_active(void* ktrace_ptr);
 
 #ifdef UNITTESTS_ENABLED
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
@@ -273,6 +259,9 @@ zx_status_t KTrace::Start(uint32_t action, uint32_t categories) {
 }
 
 KTrace::~KTrace() {
+  // The global instance is published to Rust by Init and is never destroyed, so Rust readers of
+  // the published pointer can never observe it being freed.
+  ZX_DEBUG_ASSERT(this != &GetInstance());
   if (void* rust_ktrace = rust_ktrace_.exchange(nullptr, ktl::memory_order_acq_rel)) {
     rust_ktrace_free(rust_ktrace);
   }
@@ -299,6 +288,11 @@ void KTrace::Init(uint32_t bufsize, uint32_t initial_grpmask) {
     zx_status_t status = rust_ktrace_init(num_buffers_, &state_, &rust_ktrace);
     if (status == ZX_OK) {
       rust_ktrace_.store(rust_ktrace, ktl::memory_order_release);
+      // Publish the global instance to Rust so that trace points can reach it directly. Test
+      // instances are reached through the per-thread override instead.
+      if (this == &GetInstance()) {
+        rust_ktrace_set_active(rust_ktrace);
+      }
     } else {
       dprintf(INFO, "ktrace: rust init failed: %d\n", status);
     }

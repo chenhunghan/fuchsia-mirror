@@ -1,0 +1,45 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "semantics",
+    srcs = [
+        "a11y_semantics_event_manager.cc",
+        "semantic_tree.cc",
+        "semantic_tree_service.cc",
+    ],
+    hdrs = [
+        "a11y_semantics_event_manager.h",
+        "semantic_tree.h",
+        "semantic_tree_service.h",
+        "semantics_event.h",
+        "semantics_event_listener.h",
+        "semantics_event_manager.h",
+        "semantics_source.h",
+        "typedefs.h",
+    ],
+    # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
+    copts = ["-Wno-conversion"],
+    implementation_deps = [
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fsl",
+    ],
+    visibility = ["//src/ui/a11y:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.accessibility.semantics:fuchsia.accessibility.semantics_hlcpp",
+        "//sdk/fidl/fuchsia.math:fuchsia.math_hlcpp",
+        "//sdk/fidl/fuchsia.ui.gfx:fuchsia.ui.gfx_hlcpp",
+        "//sdk/fidl/fuchsia.ui.views:fuchsia.ui.views_hlcpp",
+        "//sdk/lib/inspect/component/cpp",
+        "//sdk/lib/sys/cpp",
+        "//src/lib/fxl",
+        "//src/ui/a11y/lib/semantics/util",
+        "//src/ui/a11y/lib/util",
+    ],
+    alwayslink = True,
+)

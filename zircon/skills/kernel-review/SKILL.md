@@ -79,13 +79,15 @@ structured summary containing:
     * **Step 3 (babeldiff)**: Does the commit implement existing C++ logic in
       Rust? (If yes, list the corresponding C++ and Rust file paths.)
     * **Step 6 (Concurrency)**: Does the diff or affected code involve locks,
-      atomics, `UnsafeCell`, parallelism, or data structures shared concurrently
-      across CPUs?
-    * **Step 7 (Provenance)**: Does the diff manipulate raw pointers or
-      notionally implement/run an allocator?
+      atomics, `UnsafeCell`, `spin_loop` / CPU yield hints, parallelism, or data
+      structures shared concurrently across CPUs?
+    * **Step 7 (Provenance)**: Does the diff manipulate raw pointers, store
+      tagged pointers inside integer/atomic words, or notionally implement/run
+      an allocator?
     * **Step 8 (Unsafe)**: Does the diff add, modify, or rely on `unsafe`
-      blocks, functions, traits, `#[pin_data]` / `!Unpin` pinning guarantees, or
-      safe APIs in modules that uphold safety invariants?
+      blocks, functions, traits, inline `asm!`, `#[pin_data]` / `!Unpin` pinning
+      guarantees, panic/halt handlers, or safe APIs in modules that uphold
+      safety invariants?
 
 ### 1. Commit Message (`Model: "flash"`)
 
@@ -96,8 +98,10 @@ against the following criteria:
 2.  Has appropriate subject description.
 3.  Contains a meaningful description, rationale and motivation of the contents
     of the commit.
-4.  The commit does not contain changes that seem out of place or surprising
-    based on the commit message.
+4.  The commit does not contain changes that seem out of place, bundle unrelated
+    subsystem edits, or mix secondary refactorings/optimizations into a port or
+    delicate concurrency/lock-free change beyond what the commit message
+    motivates.
 5.  If the commit message has a Bug: footer check the bug and make sure that it
     exists and is a meaningful bug to use for this commit. It is fine for a Bug:
     footer to be absent.
@@ -105,9 +109,10 @@ against the following criteria:
     relevant and up to date for the current commit contents. It is fine for a
     Test: footer to be absent.
 
-Commit messages tend to be fairly subjective. Your report should only consider
-absence of a [tag] and a commit message that looks like a placeholder as being
-serious issues, any other issues should be minor recommendations.
+Commit messages tend to be fairly subjective. Your report should consider
+absence of a [tag], a commit message that looks like a placeholder, or
+substantive out-of-scope changes bundled into the commit (criterion 4) as
+serious issues; other wording preferences should be minor recommendations.
 
 ### 2. Build and Test (`Model: "flash"` for execution; `pro` for complex failure diagnosis)
 
@@ -191,16 +196,22 @@ report on its findings:
         * Verify that comments copied between `*_locked` and unlocked variants
           accurately reflect whether the lock was just released, and do not
           reference obsolete lock types (e.g., calling a mutex a spinlock).
-        * Use a `TODO:` prefix on comments noting that a temporary FFI export,
-          shim, or trait impl can be removed once remaining C++ types/callers
-          are ported.
+        * Use a `TODO(https://fxbug.dev/...):` prefix (with a bug URL or owner
+          to satisfy `clang-tidy`'s `google-readability-todo` check) on comments
+          noting that a temporary FFI export, shim, manual struct mirror, or
+          trait impl can be removed once remaining C++ types/callers are ported.
 * **FFI Shim & Facade Ownership (Callee, Not Caller)**: Verify that `extern "C"`
   FFI shims (`cpp_*` / `rust_*`), `*_ffi.{cc,h,rs}` declarations, and opaque
   Rust facade types (`OpaqueFacade`) live in the **callee** module/subsystem
-  that owns the underlying C++ API or type—never in a caller's local
-  `*_ffi.{cc,rs}` or an unrelated module. Before a CL introduces a new opaque
-  facade, FFI wrapper, or bindgen-backed struct, search the tree to ensure a
-  facade or Rust type does not already exist in another module.
+  that owns the underlying C++ API or type (e.g., KASAN helpers in
+  `lib/instrumentation/asan`, arch quirks in `arch_rs`)—never in a caller's
+  local `*_ffi.{cc,rs}` or an unrelated module, even if adding or extending a
+  `-rs` target in the owning subsystem is needed. Before a CL introduces a new
+  opaque facade, FFI wrapper, or bindgen-backed struct, search the tree to
+  ensure a facade or Rust implementation does not already exist in another
+  module; when an API is already implemented in Rust (including per-arch code
+  under `#[cfg(target_arch = ...)]`), call or re-export the Rust function
+  directly rather than routing Rust -> `extern "C"` -> Rust.
 * **`*_ffi.rs` Boundary & Encapsulation**:
     1.  `*_ffi.rs` files must strictly contain `extern "C"` declarations and
         thin C++ <-> Rust proxy entry points (`rust_*` / `cpp_*`). New Rust
@@ -209,11 +220,21 @@ report on its findings:
     2.  Callers outside a type's defining module (or higher-level methods) must
         not call raw `bindings::cpp_*` / `ffi::cpp_*` functions directly on a
         Rust wrapper type; expose and call methods on the Rust type itself.
-    3.  **Prefer References in `rust_*` FFI Trampolines**: When C++ passes a
-        non-null pointer to an initialized `#[repr(C)]`, `Freeze` Rust type
-        (e.g., `Deadline`), take `&T` / `&mut T` directly in the `extern "C" fn`
-        signature (and `const T&` / `T&` in C++) rather than `*const T` / `*mut
-        T` (or a `c_void` bindgen alias) with manual null checks and casts.
+    3.  **Prefer References in `rust_*` FFI Trampolines & Preserve `RefPtr` /
+        `const` Contracts**: When C++ passes a non-null pointer to an
+        initialized `#[repr(C)]`, `Freeze` Rust type (e.g., `Deadline`), take
+        `&T` / `&mut T` directly in the `extern "C" fn` signature (and `const
+        T&` / `T&` in C++) rather than `*const T` / `*mut T` (or a `c_void`
+        bindgen alias) with manual null checks and casts. When C++ forwards
+        `const fbl::RefPtr<T>&` to a Rust FFI function taking `&T`: if `nullptr`
+        was previously valid (e.g., returning `false`), preserve `ptr &&
+        rust_fn(*ptr)` instead of unconditionally dereferencing `*ptr`; if
+        `nullptr` is invalid, keep `DEBUG_ASSERT(ptr)` (or `&*ptr`) rather than
+        `ptr.get()`, which drops `RefPtr::operator->()`'s debug null check. In
+        C++ `extern "C"` declarations for logically mutating methods on opaque
+        Rust types, take non-`const` `T*` (even if Rust takes `&T` via interior
+        mutability) so non-`const` C++ wrapper methods do not trigger
+        `clang-tidy` `readability-make-member-function-const`.
     4.  **Keep C++ Convenience Overload Delegation in C++**: When C++ overloads
         (e.g., `WaitQueue::Block`) simply forward to a single canonical C++
         method (`BlockEtc`), keep the overloads delegating in C++ and only route
@@ -251,35 +272,63 @@ report on its findings:
         C++-only `static_assert(offsetof(...))` checks into `*_tests.cc`.
 * **1:1 Struct & State Fidelity**: Verify field-by-field parity between C++
   structs/globals and their Rust counterparts:
-    1.  **Type Changes & Atomics Require Justification**: Plain C++ fields or
-        globals should not be silently changed to `Atomic*` (or duplicated in a
-        parallel shadow wrapper type like `AtomicFoo` that can lose sync with
-        `Foo`) when the C++ original used non-atomic reads/writes. Changing a
-        type (such as using `Atomic*` because an unlocked read or concurrent
-        access would otherwise be Undefined Behavior in Rust) is allowed **only
-        if accompanied by a comment justifying why the change is necessary**
-        (and provided it does not add unacceptable overhead inside a benchmark).
-    2.  **No Dropped Fields or Downgraded Types**: Flag any omitted C++ struct
-        fields (even if unused by the functions in the current CL) or helper
-        types (e.g., `EventLimiter`) replaced with raw primitives.
+    1.  **Type Changes & Atomics Require an Actual Concurrent Race**: Plain C++
+        fields or globals must not be silently changed to `Atomic*` (or
+        duplicated in a parallel shadow wrapper type like `AtomicFoo` that can
+        lose sync with `Foo`) when the C++ original used non-atomic
+        reads/writes—especially when `#[unsafe(export_name = "...")]` shares the
+        symbol with non-atomic C++ declarations. Changing a non-atomic type to
+        `Atomic*` is allowed **only when there is an actual concurrent
+        read/write access that would otherwise be a data race (UB) in Rust,
+        accompanied by a comment justifying why `Atomic*` is required** (and
+        provided it does not add unacceptable benchmark overhead). A comment
+        merely explaining why `Ordering::Relaxed` is sufficient on a global
+        written once during single-threaded boot before secondary CPUs start
+        proves there is *no* concurrent race and does **not** justify `Atomic*`.
+        When genuine C++ atomics are ported, prefer matching typed kernel
+        atomics (`AtomicCpuMask`, `AtomicBool`, `AtomicPtr<T>`,
+        `zr::AtomicConstPtr<T>`) over raw integer atomics.
+    2.  **No Dropped Fields, Downgraded Types, or Hand-Rolled Intrusive Lists**:
+        Flag any omitted C++ struct fields (even if unused by the functions in
+        the current CL), helper types (e.g., `EventLimiter`) replaced with raw
+        primitives, or C++ `fbl` intrusive containers (`DoublyLinkedList`,
+        `SinglyLinkedList`, `WAVLTree`) replaced with hand-rolled raw-pointer
+        linked lists when Rust `fbl` intrusive containers exist. Defer
+        cross-object API/ownership restructures until the C++ counterparts are
+        fully removed unless strictly required to avoid UB in Rust.
     3.  **Derived Default Values**: Ensure default values derived from C++
         struct initializers or configuration objects (e.g.,
         `BootOptions{}.pmm_checker_action`) are not replaced with hardcoded
         constants in Rust.
-    4.  **Explicit `#[repr(...)]` on `OpaqueStorage`-Backed Types**: Any Rust
-        enum or struct whose layout or size is mirrored by C++
+    4.  **Explicit `#[repr(...)]` & C++ `OpaqueStorage` Special-Member Safety**:
+        Any Rust enum or struct whose layout or size is mirrored by C++
         `OpaqueStorage<SIZE, ALIGN>` must carry an explicit `#[repr(C)]`,
-        `#[repr(u8)]`, or `#[repr(C, u8)]` attribute rather than relying on
-        unspecified `repr(Rust)` layout.
+        `#[repr(u8)]`, `#[repr(C, u8)]`, or `#[repr(transparent)]` attribute
+        (preferring `#[repr(transparent)]` on single-field newtype wrappers like
+        `CriticalMutex` or `AutounsignalEvent` so call-ABI representation also
+        matches) rather than relying on unspecified `repr(Rust)` layout, and
+        must `zr::static_assert!` both `size_of` and `align_of` against C++. On
+        the C++ side, replacing non-trivial fields (such as `fbl::RefPtr`) with
+        `OpaqueStorage` inside a `public` struct gives it implicitly trivial
+        default/copy/move constructors and destructor (risking uninitialized
+        storage or shallow-copying an owned Rust `RefPtr`); hide `OpaqueStorage`
+        privately or `= delete` copy/move operations and restrict construction.
     5.  **Pinning (`Pin`, `#[pin_data]`, `!Unpin`) Fidelity**:
         * Inside a `#[pin_data]` struct, never use an unannotated
-          `PhantomData<PhantomPinned>` or bare `PhantomPinned` (which leaves the
-          generated `Unpin` impl active); use `#[pin] _pin: PhantomPinned` (or
-          another `#[pin]` field that is `!Unpin`).
+          `PhantomData<PhantomPinned>` (which leaves the generated `Unpin` impl
+          active) or a bare `#[pin] _pin: PhantomPinned` on types reachable from
+          `extern "C"` signatures (which triggers `rustc`'s `improper_ctypes`
+          lint); use `#[pin] _pin: PhantomData<PhantomPinned>` (or another
+          FFI-safe `#[pin]` field that is `!Unpin`). Also verify that structs
+          mirroring address-sensitive C++ `DISALLOW_COPY_ASSIGN_AND_MOVE` types
+          whose fields are otherwise `Unpin` (e.g., `AtomicPtr<T>`) still opt
+          into `#[pin_data]` + `!Unpin` and are marked `#[pin]` in parents.
         * When a `!Unpin` / `#[pin_data]` type is pin-initialized in place
-          inside a `kalloc::Box`, store it as `Pin<kalloc::Box<T>>` (via
-          `Pin::new_unchecked(uninit_box.assume_init())`) rather than stripping
-          `Pin` into a plain `kalloc::Box<T>`.
+          inside a `kalloc::Box` or `MaybeUninit` slot, retain
+          `Pin<kalloc::Box<T>>` and use public `pin_init` APIs
+          (`Box::try_pin_init(...)`, `MaybeUninit::write_pin_init(...)`) rather
+          than stripping `Pin` into a plain `kalloc::Box<T>` or calling
+          `#[doc(hidden)]` `__pinned_init` manually.
         * When interior mutability (`OpaqueBytes`, `UnsafeCell`, atomics) allows
           relaxing a method on an address-sensitive or intrusive type from
           `Pin<&mut Self>` to a shared reference, keep the receiver as `self:
@@ -322,25 +371,47 @@ report on its findings:
     3.  Flag newly added methods on a type that duplicate the exact type
         signature and semantics of an existing accessor on that type (including
         methods already exposed via `Deref<Target = Base>`).
-    4.  Prefer existing in-tree utilities (`pin_init::pin_init_array_from_fn`,
-        `fbl::StringBuffer`, `DurationMono::from_seconds(1).into_nanos()`,
-        `UnsafeCell::get_mut()` when holding `Pin<&mut Self>`) over hand-rolled
-        `unsafe` closures, custom buffer types, magic numbers (`1_000_000_000`),
-        or raw pointer dereferences in `Drop`.
+    4.  Prefer existing in-tree utilities (`zr::slice_from_raw_parts` /
+        `zr::slice_from_raw_parts_mut` for C/FFI `(ptr, len)` pairs where `ptr`
+        may be null when `len == 0`, `Box::try_pin_init`, `write_pin_init`,
+        `pin_init::pin_init_array_from_fn`, `fbl::Vector::truncate`,
+        `fbl::StringBuffer`, `&CStr` with `{:s}` in `kprint!`,
+        `DurationMono::from_seconds(1).into_nanos()`, and
+        `UnsafeCell::get_mut()` when holding `Pin<&mut Self>`) over
+        `core::slice::from_raw_parts[_mut]` on potentially null empty pointers,
+        hand-rolled `unsafe` closures, custom buffer types, magic numbers
+        (`1_000_000_000`), or raw pointer dereferences in `Drop`.
+    5.  **Uninitialized Out-Buffers & Signed C Return Casts**: Take `&mut
+        [MaybeUninit<u8>]` rather than `&mut [u8]` for destination/output byte
+        buffers (e.g., compression, decompression, or VMO/crashlog reads) so
+        callers do not have to zero-initialize buffers up front. Never cast
+        signed C/FFI return values (`c_int` / `ssize_t`, e.g., `FILE::write`)
+        directly `as usize` without clamping or checking `< 0` (e.g., `max(res,
+        0) as usize`), which sign-extends negative errors into huge unsigned
+        counts.
 * **Behavioral, Debug-Switch, Branch-Hint, & Control-Flow Parity**:
     1.  **`unlikely(...)` Branch Hints**: Preserve C++ `unlikely(...)` branch
         hints using `core::hint::cold_path()` in Rust.
-    2.  **`ASSERT` vs. `DEBUG_ASSERT` & Release-Build Null Checks**: Flag
-        unintended upgrades of `DEBUG_ASSERT` to `ASSERT` or `debug_assert!` to
-        `assert!` (especially when `assert!` calls an FFI function like
-        `ints_disabled()` in a hot path), and flag replacing a C++ release-build
-        silent return on null (`DEBUG_ASSERT(p); if (!p) return;`) with an
-        unconditional `.unwrap()`.
-    3.  **Compile-Time Debug Switches (`LK_DEBUGLEVEL`,
-        `ZX_DEBUG_ASSERT_IMPLEMENTED`)**: Do not hardcode C++ `LK_DEBUGLEVEL`
-        checks (e.g., `WAIT_QUEUE_VALIDATION`) to `false` in Rust; wire them to
-        `cfg!(...)`. In C++ headers using `<zircon/assert.h>`, use `#if
-        ZX_DEBUG_ASSERT_IMPLEMENTED` consistently.
+    2.  **`ASSERT` vs. `DEBUG_ASSERT` & Fail-Fast Parity**: Flag unintended
+        upgrades of `DEBUG_ASSERT` to `ASSERT` or `debug_assert!` to `assert!`
+        (especially when `assert!` calls an FFI function like `ints_disabled()`
+        in a hot path), flag replacing a C++ release-build silent return on null
+        (`DEBUG_ASSERT(p); if (!p) return;`) with an unconditional `.unwrap()`,
+        and conversely flag unintended *downgrades* of C++ release-build panics
+        to `.ok()` + `debug_assert!` or moving top-of-function single-init
+        `ASSERT(!instance_)` checks after side-effecting mutations. When a safe
+        Rust function adds a non-debug `assert!` or saturating `c_int::try_from`
+        check absent from C++ because safe callers could pass arbitrary slice
+        lengths into an `unsafe` C call, require a comment explaining why
+        soundness requires it.
+    3.  **Compile-Time Debug & Feature Gates (`LK_DEBUGLEVEL`,
+        `ZX_DEBUG_ASSERT_IMPLEMENTED`, Sanitizers)**: Do not hardcode C++
+        `LK_DEBUGLEVEL` checks (e.g., `WAIT_QUEUE_VALIDATION`) to `false` in
+        Rust; wire them to `cfg!(...)`. Verify `#[cfg(...)]` and `BUILD.gn`
+        gates (such as KASAN/sanitizer or `kernel_no_userabi` configs) match C++
+        build conditions rather than compiling out needed modules. In C++
+        headers using `<zircon/assert.h>`, use `#if ZX_DEBUG_ASSERT_IMPLEMENTED`
+        consistently.
     4.  **Control-Flow, Panic Formatting, & Helper Parity**: Keep function
         boundaries and control flow aligned with C++ (avoid inventing extra
         helper functions like `flush_range` or `#[cold] fn unexpected_*` when
@@ -349,13 +420,15 @@ report on its findings:
         (e.g., `page_state_to_string(state)`) instead of `{:?}` (`Debug`) when
         matching C++ panic/log messages, and omit trailing `\n` in Rust `panic!`
         messages.
-* **Orphaned Cross-Language FFI, C++ Header, & `bindgen` Dead-Code Audit**:
-  Audit both the ported module and any collaborating modules for code made dead
-  by the port:
-    1.  **Dead C++ Methods & FFI Shims**: Remove C++ declarations, `.cc`
-        forwarding shims, and `rust_*` / `cpp_*` FFI entry points that have no
-        remaining C++ callers once callers move to Rust, and tighten the
-        corresponding Rust functions' visibility (`fn` or `pub(super)`).
+* **Orphaned Cross-Language FFI, C++ Header, `BUILD.gn`, & Doc Dead-Code
+  Audit**: Audit both the ported module and any collaborating modules for code
+  or doc links made dead by the port:
+    1.  **Dead C++ Methods, FFI Shims, & `#![allow(dead_code)]` Helpers**:
+        Remove C++ declarations, `.cc` forwarding shims, `rust_*` / `cpp_*` FFI
+        entry points, and unused Rust methods (including dead helpers masked by
+        crate-level `#![allow(dead_code)]`) that have no remaining callers once
+        callers move to Rust, and tighten the corresponding Rust functions'
+        visibility (`fn` or `pub(super)`).
     2.  **Orphaned FFI-Only Parameters & Conversion Helpers**: Remove Rust
         helpers or parameters that only existed to serve removed C++ FFI callers
         (e.g., C++-supplied `now` timestamps on `*_with_ticks` wrappers, unused
@@ -367,11 +440,19 @@ report on its findings:
         (`Stats`, `State`, `StateLayout`, `OpaqueStorage` fields), remove the
         C++ definitions, `bindgen` allowlist entries, and `zr::static_assert!`
         checks that kept them alive solely for layout assertions.
-    4.  **Empty `*_ffi.h` Headers, Unused `#include`s, & Stale `bindgen`
+    4.  **Empty `*_ffi.h` Headers, Unused `#include`s/`deps`, & Stale `bindgen`
         Rules**: Delete emptied `*_ffi.h` headers, remove unused `#include`s and
-        forward declarations from modified `.h`/`.cc` files, and prune redundant
-        `function_allowlist = []` or stale `type_blocklist` entries in
+        forward declarations from modified `.h`/`.cc` files, prune unused C++
+        `deps` and stale single-file `source_set`s in `BUILD.gn` once `.cc`
+        includes are removed, and omit disallowed `output_name`/`edition` args,
+        redundant `function_allowlist = []`, or unreachable `type_blocklist`
+        entries (under `--no-recursive-allowlist` + `opaque_types`) in
         `kernel_bindgen_crate` (`BUILD.gn`).
+    5.  **Documentation Link Hygiene (`doc_checker`)**: When `.cc`/`.h`/`.rs`
+        files are deleted, moved, or ported, search `docs/` and in-tree Markdown
+        files for links to the deleted/moved file paths or line anchors (e.g.,
+        `/zircon/kernel/.../foo.cc#28`) and update the surrounding documentation
+        prose so `doc_checker` does not fail in CQ.
 
 ### 4. Fuchsia Review (`Model: "inherit"`)
 
@@ -391,28 +472,51 @@ subagent evaluates:
   contention, or diagnostic/logging branches inside hot or inline functions
   where calling `core::hint::cold_path()` would improve branch layout and keep
   fast-path code generation compact.
+* **Hard Ban on `core::hint::spin_loop()`**: Treat any use of
+  `core::hint::spin_loop()` or `std::hint::spin_loop()` in kernel or shared
+  Zircon Rust code as a blocking issue (it is broken on arm64 emulators);
+  require `arch_rs::r#yield()` in kernel code (`libarch::r#yield()` in
+  host/shared builds).
+* **Scope Discipline & Avoiding Transitional Churn**: Flag unrelated subsystem
+  changes or secondary optimizations bundled into a port or delicate
+  lock-free/concurrency CL so they can be split into separate CLs, and question
+  churning transitional single-TU C++ headers or FFI shims that will soon be
+  deleted altogether when ongoing porting finishes.
 * **Cross-Cutting FFI, API, and Comment Hygiene** (especially when Step 3 was
   skipped, e.g. on FFI-pruning or standalone Rust/C++ CLs):
-    * FFI shims/facades live in the callee module, `*_ffi.rs` files only proxy
-      C++ <-> Rust without defining domain types/methods, and callers invoke
-      methods on Rust types rather than raw `bindings::cpp_*` calls.
+    * FFI shims/facades live in the owning callee subsystem crate (never a
+      caller module), already-ported Rust functions are called directly rather
+      than via `extern "C"`, `*_ffi.rs` files only proxy C++ <-> Rust without
+      defining domain types/methods, and callers invoke methods on Rust types
+      rather than raw `bindings::cpp_*` calls.
+    * Public C++ `OpaqueStorage` wrappers do not expose trivial copy/uninit
+      constructors over owned Rust state (`RefPtr`), `fbl::RefPtr` -> `&T` FFI
+      forwarding preserves null handling or `DEBUG_ASSERT(ptr)`, and mutating
+      C++ `extern "C"` declarations take non-`const` `T*`.
     * No orphaned C++ methods, `rust_*`/`cpp_*` FFI shims, `as_raw`/`from_raw`
-      helpers, layout-only C++ structs/enums (`OpaqueStorage`/`StateLayout` when
-      C++ only uses `T&`/`T*`), empty `*_ffi.h` headers, unused
-      `#include`s/forward declarations, or redundant `kernel_bindgen_crate`
-      allowlists/blocklists.
+      helpers, `#![allow(dead_code)]`-masked dead methods, layout-only C++
+      structs/enums (`OpaqueStorage`/`StateLayout` when C++ only uses
+      `T&`/`T*`), empty `*_ffi.h` headers, unused `#include`s/forward
+      declarations, unused C++ `BUILD.gn` `deps`/stale `source_set`s, disallowed
+      `kernel_bindgen_crate` args (`output_name`, `edition`) or redundant
+      allowlists/blocklists, or broken `docs/` links (`doc_checker`) to deleted
+      files.
     * No manual duplication of `sdk/lib/...` definitions, misuse of `bindgen`
       with `LINT.IfChange`, or Rust definitions inside `bindgen` `raw_lines`.
-    * Proper `Pin` / `#[pin_data]` hygiene (`#[pin] _pin: PhantomPinned` rather
-      than unpinned `PhantomData<PhantomPinned>`, `Pin<kalloc::Box<T>>` for
-      heap-pinned `!Unpin` types, and `self: Pin<&Self>` on shared methods of
-      pinned types).
-    * No broken relative comments (e.g., `"See WARNING above"` after header
-      pruning), stale identifier/parameter names in moved comments, missing
-      `TODO:` prefixes on temporary shims, degraded $O(N)$ container operations,
-      `Option<&T>` parameters where `None` is invalid, duplicate accessors
-      (including `Deref` duplicates), or verbose repeated module paths where a
-      `use` import suffices.
+    * Proper `Pin` / `#[pin_data]` hygiene (`#[pin] _pin:
+      PhantomData<PhantomPinned>` rather than unpinned
+      `PhantomData<PhantomPinned>` or FFI-unsafe bare `PhantomPinned`, `!Unpin`
+      on `AtomicPtr`-backed address-sensitive wrappers, `Pin<kalloc::Box<T>>`
+      via `Box::try_pin_init` for heap-pinned `!Unpin` types, and `self:
+      Pin<&Self>` on shared methods of pinned types).
+    * Preserve non-obvious inline "why" comments from deleted `*_ffi.{cc,rs}`
+      files when inlining calls into callers; check for broken relative comments
+      (e.g., `"See WARNING above"` after header pruning), stale
+      identifier/parameter names in moved comments, missing
+      `TODO(https://fxbug.dev/...):` prefixes on temporary shims, degraded
+      $O(N)$ container operations, `Option<&T>` parameters where `None` is
+      invalid, duplicate accessors (including `Deref` duplicates), or verbose
+      repeated module paths where a `use` import suffices.
 
 ### 5. Performance and Code Generation (`Model: "flash"` for disassembly collection -> `Model: "inherit"` for analysis)
 
@@ -451,15 +555,56 @@ Determine the requested performance analysis level (`none`, `brief`, or
       obviously 'bad' and if there are minor code / data changes that could
       improve it, testing candidate changes if needed.
 
+**Kernel-Only Builds for Disassembly:**
+
+When disassembling `//zircon/kernel` code (at `HEAD` if Step 2 was skipped, at
+`HEAD~1` for a baseline comparison, or across architectures / candidate changes
+in `thorough` mode), you **only** need to build the kernel ELF binary rather
+than running a full `fx build` (which unnecessarily compiles userspace packages,
+ZBIs, and Bazel product bundles):
+
+```bash
+fx [--dir=<build_dir>] build kernel_<arch>.<switchset>[-<variant>]/<kernel_target>
+```
+
+For example, `fx --dir=out/arm build
+kernel_arm64.lk_debug_level_2/vmzircon.with-tests` or `fx build
+kernel_x64.lk_debug_level_0/vmzircon`. Choose each component to match the build
+directory and analysis goal:
+
+* **Build directory (`--dir=<build_dir>`)**: Omit to use the current default
+  `fx` build directory, or pass `--dir=<build_dir>` when targeting a specific or
+  per-architecture build directory (e.g., `out/arm`, `out/x64`).
+* **Architecture (`<arch>`)**: `x64`, `arm64`, or `riscv64`, matching the target
+  architecture configured in `<build_dir>`.
+* **Debug level / switchset (`<switchset>`)**: Reuse the `kernel_*` toolchain
+  directory already populated in `<build_dir>` (when Step 2 has run) and keep it
+  identical between `HEAD` and `HEAD~1`. Common switchsets are
+  `lk_debug_level_2` (`LK_DEBUGLEVEL=2`, debug assertions enabled, standard for
+  `eng`) and `lk_debug_level_0` (`LK_DEBUGLEVEL=0`, debug assertions disabled as
+  in `user` / `userdebug`, useful when `DEBUG_ASSERT` / `debug_assert!` checks
+  obscure hot-path codegen), plus any active toolchain variant suffix (e.g.,
+  `-kasan`). Never use `static-checks` (`kernel_<arch>.static-checks`), which
+  compiles unoptimized (`optimization_mode = "none"`) for static lints only.
+* **Kernel binary (`<kernel_target>`)**: Use `vmzircon.with-tests` when unit
+  tests are enabled in the switchset (such as `lk_debug_level_2`, matching `eng`
+  builds and required when disassembling test symbols), or `vmzircon` for a
+  standalone kernel without built-in unit tests (faster to link when test
+  symbols are not needed, and required when unit tests are disabled such as in
+  `lk_debug_level_0`). The build writes the unstripped ELF directly to that same
+  `<build_dir>/kernel_<arch>.<switchset>[-<variant>]/<kernel_target>` path for
+  `llvm-objdump`.
+
 **Two-Phase Execution for Step 5:**
 
 1.  **Phase A — Disassembly Collection (`Model: "flash"`)**: Use a `flash`
-    subagent (run after Step 2 completes) to locate the compiled binary/object
-    files, resolve mangled symbol names for the modified/added functions, run
-    `llvm-objdump --disassemble-symbols=<sym>` at `HEAD` (and `HEAD~1` if
-    applicable, restoring `HEAD` immediately), run `fx bazel shutdown` when all
-    builds are finished, and write the extracted disassembly to scratch files in
-    `<Artifact Directory Path>/scratch/`.
+    subagent (run after Step 2 completes) to locate (or minimally build, using
+    the kernel-only target above for `//zircon/kernel` changes) the compiled
+    binary/object files, resolve mangled symbol names for the modified/added
+    functions, run `llvm-objdump --disassemble-symbols=<sym>` at `HEAD` (and
+    `HEAD~1` if applicable, restoring `HEAD` immediately), run `fx bazel
+    shutdown` when all builds are finished, and write the extracted disassembly
+    to scratch files in `<Artifact Directory Path>/scratch/`.
 2.  **Phase B — Assembly & Stack Analysis (`Model: "inherit"`)**: Using the
     `pro` model (either directly in the orchestrator or via a `Model: "inherit"`
     subagent in a single pass over the scratch disassembly files and source
@@ -488,26 +633,45 @@ concurrency and parallelism. Items you are specifically evaluating:
 * Runtime trace arguments (such as `PerCpu` or active transaction reads for
   `ktrace`) are evaluated lazily inside the trace macro rather than eagerly
   before checking whether the trace category is enabled.
-* 'manual' concurrency using UnsafeCell looks correct.
-* No shared reference (`&Self`) or lifetime-unified lock guard remains in scope
-  across a thread-blocking call (e.g., `scheduler::block` /
-  `block_etc_postamble`) or lock release after which another CPU/thread may
-  destroy the object, and `PinnedDrop::drop(self: Pin<&mut Self>)` does not
-  violate `# Safety` aliasing claims while background threads still hold
-  `&Self`.
+* Never use `core::hint::spin_loop()` or `std::hint::spin_loop()` in spin-wait
+  loops (broken on arm64 emulators); require `arch_rs::r#yield()` /
+  `libarch::r#yield()`.
+* 'manual' concurrency using `UnsafeCell` looks correct—in particular, when a
+  `// SAFETY:` comment claims a global or field is written only during
+  single-threaded early boot before secondary CPUs start, verify in the boot
+  init call order that the write actually precedes `platform_init_smp()` / AP
+  bringup (e.g., `x86_bringup_aps`).
+* **Zero `Freeze` Bytes on Concurrent Self-Destructing Types & No Live `&Self`
+  Across Blocking/Unlock**: No shared reference (`&Self`) or lifetime-unified
+  lock guard remains in scope across a thread-blocking call (e.g.,
+  `scheduler::block` / `block_etc_postamble`) or lock release after which
+  another CPU/thread may destroy the object. Furthermore, on synchronization
+  primitives (`Mutex`, `Event`, `Semaphore`, `WaitQueue`) where a non-blocking
+  method taking `&self` (e.g., `release(&self)`, `signal(&self)`) performs an
+  atomic state transition after which another CPU can immediately acquire,
+  release, and destroy the object (`~T` / `Drop`, such as zeroing `fbl::Canary`
+  magic) *before* `&self` returns, Stacked Borrows and Tree Borrows function
+  protectors (`LLVM readonly`) make any bare `Freeze` field in `Self` immediate
+  UB: verify **every** field mutated during init or destruction (`Canary` magic,
+  lock-name/spin-tracing storage) is wrapped in `UnsafeCell` (zero `Freeze`
+  bytes), and verify `PinnedDrop::drop(self: Pin<&mut Self>)` does not violate
+  `# Safety` aliasing claims while background threads still hold `&Self`.
 * Data structures that might be used concurrently across CPUs are structured to
   minimize false contention.
 * Memory orders on atomic operations. If converting existing C++ memory orders
   should exactly match the C++. Any memory order that is not Sequentially
-  Consistent should have a justification as to why this is not the case.
+  Consistent should have a justification as to why this is not the case (note
+  that single-init `swap(true, Ordering::Relaxed)` guards with no paired
+  `Release` store should use `Relaxed` rather than `Acquire`).
 
 Prepare a report on your findings.
 
 ### 7. Provenance (`Model: "inherit"`)
 
-If Step 0 determined that the change is manipulating raw pointers or notionally
-running some kind of allocator and hence might need to be examined for
-provenance, continue; otherwise skip.
+If Step 0 determined that the change is manipulating raw pointers, storing
+tagged pointers in integer/atomic words, or notionally running some kind of
+allocator and hence might need to be examined for provenance, continue;
+otherwise skip.
 
 Spawn a `Model: "inherit"` subagent to perform a careful analysis of the changed
 code and existing code against the rules of Rust provenance and prepare a
@@ -517,38 +681,89 @@ thorough report, specifically checking:
   T` into a shared reference `&T` and then cast back to `*const T` / `*mut T`
   (e.g., `core::ptr::from_ref(x.foo()).cast_mut()`) when the stored pointer can
   be returned directly via `.as_ptr()`.
+* **Tagged-Pointer Atomics (`AtomicPtr<T>`)**: When an atomic state or lock word
+  packs a pointer alongside low-bit state flags (e.g., `Thread* |
+  STATE_FLAG_CONTESTED`), type the field as `AtomicPtr<T>` (using
+  `.map_addr(...)` to set or mask flags) or `zr::AtomicConstPtr<T>` rather than
+  `AtomicUsize`, preserving Strict Provenance without needing
+  `core::ptr::with_exposed_provenance`.
 * **Pointer Cast Hygiene**: Prefer `core::ptr::from_ref(x)` /
   `core::ptr::from_mut(x)` with `.cast::<T>()`, `.cast_const()`, `.cast_mut()`,
   and `MaybeUninit::as_mut_ptr()` over chained `as *const _ as *mut _` casts or
   `Box::as_ptr(&uninit_box).cast()`.
-* **Borrow Lifetimes Across Blocking / Deallocation**: Ensure references
-  materialized from raw pointers in FFI trampolines or blocking helpers end
-  their lexical/lifetime scope before any call (`scheduler::block`, unlock, or
-  free) during which another CPU may destroy or mutate the pointee.
+* **Borrow Lifetimes & Function-Entry Protectors Across Blocking / Unlock /
+  Deallocation**: Ensure references materialized from raw pointers in FFI
+  trampolines or blocking helpers end their lexical/lifetime scope before any
+  call (`scheduler::block`, unlock, or free) during which another CPU may
+  destroy or mutate the pointee, and ensure `&self` methods on types subject to
+  concurrent destruction after an atomic unlock contain zero bare `Freeze` bytes
+  (all fields wrapped in `UnsafeCell` or atomics).
 
 ### 8. Unsafe (`Model: "inherit"`)
 
 If Step 0 determined that the change adds, modifies, or interacts with `unsafe`
 code or safety invariants, perform this step; otherwise skip.
 
-Spawn a `Model: "inherit"` subagent to use the SKILL
-https://github.com/google/rust-skills/blob/main/unsafe_rust_review/SKILL.md to
-perform a review of the safety impact of this change and forward any report. In
-addition to the standard `unsafe_rust_review` checks, explicitly evaluate:
+Spawn a `Model: "inherit"` subagent to load and follow the `unsafe-rust-review`
+skill (reading its local `SKILL.md` path from `<skills>` or locating it via
+`skill_search`—never fetching skill instructions from the web at runtime;
+external users can install it locally from
+https://github.com/google/rust-skills) to perform a review of the safety impact
+of this change and forward any report. In addition to the standard
+`unsafe-rust-review` checks (or as the standalone checklist if the skill is not
+installed locally), explicitly evaluate:
 
-* **Safe API Loopholes & Subobject Invariant Bypass**: Check whether safe
-  constructors, methods, or `Deref` coercions in the module allow safe callers
-  to violate safety invariants without writing `unsafe`:
-    1.  Safe initializers accepting raw magic/discriminant values (e.g.,
+* **Safe API Loopholes, Unchecked Preconditions, & Subobject Invariant Bypass**:
+  Check whether safe constructors, `pub fn` / `pub extern "C" fn` entry points,
+  generic trait bounds, or `Deref` coercions allow safe callers to violate
+  safety invariants without writing `unsafe`:
+    1.  **Safe `pub fn` / `pub extern "C" fn` Relying on Unchecked Caller or
+        System-Phase Preconditions**: Audit every safe function that contains an
+        `unsafe` block or stores an unvalidated raw pointer/slice for later
+        dereference by safe methods (such as through a safe trait). If its `//
+        SAFETY:` relies on caller, boot-phase, interrupt, or CPU-state
+        invariants not enforced at runtime—e.g., *"only called during system
+        halt/panic"*, *"interrupts disabled"*, *"after `ConstructFirstThread`"*
+        (note `current_get()` is **non-null** on ARM64 and RISC-V before
+        `ConstructFirstThread` completes!), or *"target CPU is offline and not
+        the calling CPU"*—it **must** be marked `pub unsafe fn` or `pub unsafe
+        extern "C" fn` with a `# Safety` doc comment.
+    2.  **Nullable C/FFI `(ptr, len)` Slice Construction**: Flag
+        `core::slice::from_raw_parts` / `core::slice::from_raw_parts_mut` on
+        C/FFI pointers unless `ptr` is guaranteed non-null and aligned even when
+        `len == 0`; require `zr::slice_from_raw_parts[_mut]` when empty C
+        buffers may pass `nullptr`.
+    3.  Safe initializers accepting raw magic/discriminant values (e.g.,
         `init(magic: u32)`) that could trigger an unchecked C++ downcast
         (`static_cast<Derived*>`).
-    2.  Safe methods on a base type reachable via `Deref` or `.as_base()` (e.g.,
+    4.  Safe methods on a base type reachable via `Deref` or `.as_base()` (e.g.,
         `WaitQueueBase::collection_mut`) that bypass an `unsafe` invariant on a
-        derived type (`OwnedWaitQueue`).
-    3.  Safe token reborrow helpers returning a by-value token (`reborrow(&mut
+        derived type (`OwnedWaitQueue`), or outer `Deref` wrapper `as_mut_ptr`
+        methods that return the wrapper's address instead of forwarding to the
+        inner C++ lock/object when feature-gated prefix fields (`lock_dep`)
+        shift the inner offset.
+    5.  Safe token reborrow helpers returning a by-value token (`reborrow(&mut
         self) -> Token`) that can be passed to a lock-releasing (`TA_REL`)
         method without disarming the owning guard (causing a double-release on
         `Drop`).
+    6.  **Generic `unsafe trait` Relaxation**: When relaxing an `unsafe trait`'s
+        contract (e.g., widening a lock-policy trait from exclusive-only to
+        shared-or-exclusive), audit every safe generic API and proc-macro
+        bounded on that trait so shared-lock policies cannot obtain aliasing
+        `&mut T` references without an `ExclusiveLockPolicy` subtrait bound, and
+        ensure split hook sequences (`pre_validate` + `post_validate_acquire`)
+        are documented in `# Safety`.
+* **Inline `asm!` Options & Early-Boot / Panic Handler Fallibility**:
+    * Audit `core::arch::asm!` options (`nostack`, `pure`, `readonly`,
+      `preserves_flags`). Instructions that modify page tables / address spaces
+      (`cr3`, `ttbr*`, `satp`) or stack pointers can switch or remap the active
+      stack from the compiler's perspective and must **never** specify
+      `options(nostack)` (nor `preserves_flags` when flags are clobbered).
+    * In panic, crashlog, halt, and reboot paths (reachable before per-CPU,
+      microarch, or SMP initialization completes), never `.unwrap()` optional
+      early-boot state in a way that recursively panics instead of falling
+      through to fallback reboot/halt paths, and ensure early-boot allocation
+      failures leave global/SMP state consistent for later init stages.
 * **Propagating Subobject & Transitive C++ Preconditions into `# Safety`**:
   Ensure `pub unsafe fn`s on base types document conditional derived-type
   (`OwnedWaitQueue`) invariants in `# Safety` and at `// SAFETY:` call sites,
@@ -562,14 +777,18 @@ addition to the standard `unsafe_rust_review` checks, explicitly evaluate:
   Safety` precondition that no conflicting proof/guard (`ChainLockProof` /
   `OwnerGuard`) is live across the call.
 * **Pinning (`#[pin_data]`, `Pin<kalloc::Box<T>>`) & `PinnedDrop` Soundness**:
-  Verify `#[pin_data]` structs use `#[pin] _pin: PhantomPinned` (never unpinned
-  `PhantomData<PhantomPinned>`), heap-allocated `!Unpin` types retain
+  Verify `#[pin_data]` structs use `#[pin] _pin: PhantomData<PhantomPinned>`
+  (never unpinned `PhantomData<PhantomPinned>`, and never bare `PhantomPinned`
+  on FFI-reachable types), `!Unpin` is preserved on `AtomicPtr`-only
+  address-sensitive wrappers, heap-allocated `!Unpin` types retain
   `Pin<kalloc::Box<T>>`, and `PinnedDrop::drop(self: Pin<&mut Self>)` does not
   violate `# Safety` aliasing claims while background threads hold `&Self`.
-* **`// SAFETY:` Placement & Accuracy**: Verify that `// SAFETY:` comments only
-  appear immediately above an `unsafe` block or `unsafe impl` (never above safe
-  assignments) and that any code expressions cited in `// SAFETY:` match the
-  actual code.
+* **`// SAFETY:` Placement, Accuracy, & Compile-Time Proofs**: Verify that `//
+  SAFETY:` comments only appear immediately above an `unsafe` block or `unsafe
+  impl` (never above safe assignments), that any code expressions cited in `//
+  SAFETY:` match the actual code, and that compile-time layout/size invariants
+  relied on by `// SAFETY:` (e.g., stack guard sizes matching a constant) are
+  enforced via `zr::static_assert!`.
 
 ### 9. Code Formatting (`Model: "flash"`)
 
@@ -588,10 +807,23 @@ etc) if there is a '//' comment determine if that is a mistake or should be a
 doc comment. In `///` doc comments, check that a blank `///` line separates any
 numbered or bulleted list from a subsequent paragraph.
 
-Scan added comments, strings, and the commit message for common Gerrit
-Spellchecker warnings (e.g., `"re-use"` instead of `"reuse"`, `"defered"`
-instead of `"deferred"`), and check whether C++ methods modified to call `const`
-FFI functions can now be marked `const` (`clang-tidy`).
+Scan added identifiers (register/constant/type names), comments, strings, and
+the commit message for transposed-letter typos (e.g., `"TRASNIENTCFG"` instead
+of `"TRANSIENTCFG"`, `"readablity"` instead of `"readability"`) as well as
+common Gerrit Spellchecker warnings (e.g., `"re-use"` instead of `"reuse"`,
+`"defered"` instead of `"deferred"`).
+
+Check added or modified C++ and Rust files for common `clang-tidy` and header
+hygiene warnings: bare `TODO:` without a bug link or owner
+(`TODO(https://fxbug.dev/...):` for `google-readability-todo`), mismatched
+parameter names between `.h`/forward declarations and `.cc` definitions
+(`readability-inconsistent-declaration-parameter-name`), missing direct
+`#include`s in `.h` / `*_layout.h` headers (Include-What-You-Use), signed
+integer operands in bitwise expressions (`bugprone-signed-bitwise`, e.g., use
+unsigned `14u` literals), Cisms in `.cc` translation units (`#include
+<stdbool.h>`, `(void)` parameter lists), and C++ methods modified to call
+`const` FFI functions that can now be marked `const`
+(`readability-make-member-function-const`).
 
 Summarize any issues in a report.
 

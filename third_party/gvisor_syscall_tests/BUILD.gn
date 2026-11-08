@@ -304,9 +304,10 @@ template("syscall_test_suite") {
     _num_shards = invoker.num_shards
   }
 
-  component = "//src/connectivity/network/netstack3:component-debug"
+  netstack_package = "//src/connectivity/network/netstack3:package-debug"
   if (defined(invoker.log_less) && invoker.log_less) {
-    component = "//src/connectivity/network/netstack3:component-debug-less-logs"
+    netstack_package =
+        "//src/connectivity/network/netstack3:package-debug-less-logs"
   }
 
   test_target_label = "netstack_${suite_label}_socket_tests"
@@ -333,13 +334,11 @@ template("syscall_test_suite") {
 
   fuchsia_sharded_test_package(test_package_label) {
     forward_variables_from(invoker, [ "test_specs" ])
+    subpackages = [ netstack_package ]
     test_components = [
       {
         name = component_label
-        deps = [
-          ":${test_target_label}",
-          component,
-        ]
+        deps = [ ":${test_target_label}" ]
         manifest = "meta/${suite_label}_syscall_tests.cml"
         generated_expectations = ":${expectations_target_name}"
         num_shards = _num_shards

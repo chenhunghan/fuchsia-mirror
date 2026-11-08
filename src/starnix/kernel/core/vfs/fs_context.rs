@@ -90,6 +90,11 @@ impl SharedFsContext {
         self.0.upgrade()
     }
 
+    /// Returns `true` if the [`FsContext`] has been cleared on exit.
+    pub fn is_none(&self) -> bool {
+        self.0.is_none()
+    }
+
     /// Replaces the held [`FsContext`] for `current_task` and updates the old and new share counts.
     pub fn update(&self, current_task: &CurrentTask, fs: impl Into<Option<Arc<FsContext>>>) {
         // Requiring `&CurrentTask` (`!Sync`) and verifying that `self` belongs to `current_task`

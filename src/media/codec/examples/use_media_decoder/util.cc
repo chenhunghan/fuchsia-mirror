@@ -179,43 +179,35 @@ void FencePostSerial(async_dispatcher_t* dispatcher) {
   one_shot.Wait();
 }
 
-void SHA256_Update_AudioParameters(SHA256_CTX* sha256_ctx, const fuchsia::media::PcmFormat& pcm) {
-  uint32_t pcm_mode_le = htole32(pcm.pcm_mode);
+void SHA256_Update_AudioParameters(SHA256_CTX* sha256_ctx, const fuchsia::media::PcmFormat2& pcm) {
+  uint32_t pcm_mode_le = htole32(static_cast<uint32_t>(pcm.pcm_mode()));
   if (!SHA256_Update(sha256_ctx, &pcm_mode_le, sizeof(pcm_mode_le))) {
     assert(false);
   }
-  uint32_t bits_per_sample_le = htole32(pcm.bits_per_sample);
+  uint32_t bits_per_sample_le = htole32(pcm.bits_per_sample());
   if (!SHA256_Update(sha256_ctx, &bits_per_sample_le, sizeof(bits_per_sample_le))) {
     assert(false);
   }
-  uint32_t frames_per_second_le = htole32(pcm.frames_per_second);
+  const uint32_t effective_bytes_per_sample =
+      pcm.has_bytes_per_sample() ? pcm.bytes_per_sample() : (pcm.bits_per_sample() + 7) / 8;
+  uint32_t bytes_per_sample_le = htole32(effective_bytes_per_sample);
+  if (!SHA256_Update(sha256_ctx, &bytes_per_sample_le, sizeof(bytes_per_sample_le))) {
+    assert(false);
+  }
+  uint32_t frames_per_second_le = htole32(pcm.frames_per_second());
   if (!SHA256_Update(sha256_ctx, &frames_per_second_le, sizeof(frames_per_second_le))) {
     assert(false);
   }
-  for (fuchsia::media::AudioChannelId channel_id : pcm.channel_map) {
-    uint32_t channel_id_le = htole32(channel_id);
+  uint32_t channel_count_le = htole32(static_cast<uint32_t>(pcm.channel_map().size()));
+  if (!SHA256_Update(sha256_ctx, &channel_count_le, sizeof(channel_count_le))) {
+    assert(false);
+  }
+  for (fuchsia::media::AudioChannelId2 channel_id : pcm.channel_map()) {
+    uint32_t channel_id_le = htole32(static_cast<uint32_t>(channel_id));
     if (!SHA256_Update(sha256_ctx, &channel_id_le, sizeof(channel_id_le))) {
       assert(false);
     }
   }
-}
-
-void SHA256_Update_VideoParameters(SHA256_CTX* sha256_ctx,
-                                   const fuchsia::media::VideoUncompressedFormat& video) {
-  UpdateSha256(sha256_ctx, video.fourcc);
-  UpdateSha256(sha256_ctx, video.primary_width_pixels);
-  UpdateSha256(sha256_ctx, video.primary_height_pixels);
-  UpdateSha256(sha256_ctx, video.secondary_width_pixels);
-  UpdateSha256(sha256_ctx, video.secondary_height_pixels);
-  UpdateSha256(sha256_ctx, video.planar);
-  UpdateSha256(sha256_ctx, video.swizzled);
-  UpdateSha256(sha256_ctx, video.primary_line_stride_bytes);
-  UpdateSha256(sha256_ctx, video.secondary_line_stride_bytes);
-  UpdateSha256(sha256_ctx, video.primary_start_offset);
-  UpdateSha256(sha256_ctx, video.secondary_start_offset);
-  UpdateSha256(sha256_ctx, video.tertiary_start_offset);
-  UpdateSha256(sha256_ctx, video.primary_pixel_stride);
-  UpdateSha256(sha256_ctx, video.secondary_pixel_stride);
 }
 
 void SHA256_Update_VideoPlane(SHA256_CTX* sha256_ctx, uint8_t* start, uint32_t width,

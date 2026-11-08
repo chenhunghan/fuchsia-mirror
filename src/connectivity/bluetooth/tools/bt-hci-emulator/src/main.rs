@@ -3,9 +3,10 @@
 // found in the LICENSE file.
 
 use anyhow::{Context as _, Error};
-use fuchsia_bluetooth::constants::DEV_DIR;
 use futures::future::pending;
 use hci_emulator_client::Emulator;
+
+const SVC_DIR: &str = "/svc";
 
 fn usage(appname: &str) {
     eprintln!("usage: {}", appname);
@@ -31,13 +32,12 @@ async fn main() -> Result<(), Error> {
         }
     };
 
-    let dev_dir = fuchsia_fs::directory::open_in_namespace(DEV_DIR, fuchsia_fs::PERM_READABLE)
-        .with_context(|| format!("failed to open {}", DEV_DIR))?;
+    let svc_dir = fuchsia_fs::directory::open_in_namespace(SVC_DIR, fuchsia_fs::PERM_READABLE)
+        .with_context(|| format!("failed to open {}", SVC_DIR))?;
 
-    let emulator = Emulator::create_and_publish(dev_dir).await?;
+    let emulator = Emulator::create_and_publish(&svc_dir).await?;
 
-    let topo_path = emulator.get_topological_path().await?;
-    eprintln!("Instantiated emulator at path: {}", topo_path);
+    eprintln!("Instantiated emulator: {}", emulator.instance_name());
 
     // TODO(armansito): Instantiate a REPL here. For now we await forever to make sure that the
     // emulator device remains alive until the user terminates this program (it will be removed when

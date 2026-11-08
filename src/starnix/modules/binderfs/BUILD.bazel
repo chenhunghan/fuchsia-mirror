@@ -1,0 +1,144 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# LTO OOMs out on RBE default workers, so use bigger workers.
+# @bazel2gn:raw_attribute:if (is_lto_variant || optimize == "size_lto" || optimize == "size_thinlto") { _concurrent_jobs = concurrent_jobs.link_highmem configs += _concurrent_jobs.configs forward_variables_from(_concurrent_jobs.vars, "*") }
+rustc_library(
+    name = "binderfs",
+    srcs = [
+        "binder.rs",
+        "binder_thread_channel.rs",
+        "fs.rs",
+        "lib.rs",
+        "objects.rs",
+        "process.rs",
+        "remote_binder.rs",
+        "resource_accessor.rs",
+        "shared_memory.rs",
+        "tests.rs",
+        "thread.rs",
+        "trace.rs",
+        "user_memory_cursor.rs",
+    ],
+    crate_name = "starnix_modules_binderfs",
+    crate_root = "lib.rs",
+    edition = "2024",
+    lint_config = "//src/starnix/build:kernel_library_config",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:derivative"],
+    visibility = ["//src/starnix/modules:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.posix:fuchsia.posix_rust",
+        "//sdk/fidl/fuchsia.starnix.binder:fuchsia.starnix.binder_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-runtime",
+        "//src/lib/trace/rust:trace",
+        "//src/starnix/kernel/core",
+        "//src/starnix/lib/starnix_lifecycle",
+        "//src/starnix/lib/starnix_logging",
+        "//src/starnix/lib/starnix_sync",
+        "//src/starnix/lib/starnix_syscalls",
+        "//src/starnix/lib/starnix_types",
+        "//src/starnix/lib/starnix_uapi",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:bitflags",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:itertools",
+        "//third_party/rust_crates/vendor:scopeguard",
+        "//third_party/rust_crates/vendor:slab",
+        "//third_party/rust_crates/vendor:smallvec",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)
+
+# LTO OOMs out on RBE default workers, so use bigger workers.
+# @bazel2gn:raw_attribute:if (is_lto_variant || optimize == "size_lto" || optimize == "size_thinlto") { _concurrent_jobs = concurrent_jobs.link_highmem configs += _concurrent_jobs.configs forward_variables_from(_concurrent_jobs.vars, "*") }
+rustc_test(
+    name = "binderfs_test",
+    compile_data = ["//src/starnix/lib/selinux:testdata/micro_policies/hooks_tests_policy"],
+    crate = ":binderfs",
+    # Matches program.binary in meta/starnix_binderfs_tests.cml for the generated GN test.
+    crate_name = "starnix_modules_binderfs_lib_test",
+    lint_config = "//src/starnix/config:starnix_clippy_lints_test",
+    # TODO(https://fxbug.dev/42059075): Re-enable starnix in these environments.
+    tags = [
+        "exclude_toolchain_tags=asan",
+        "exclude_toolchain_tags=hwasan",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/starnix/lib/starnix_task_command",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:memoffset",
+        "//third_party/rust_crates/vendor:rand",
+        "//third_party/rust_crates/vendor:static_assertions",
+    ],
+)
+
+fx_packaged_binary(
+    name = "binderfs_test_packaged_bin",
+    testonly = True,
+    binary = ":binderfs_test",
+    binary_name = "starnix_modules_binderfs_lib_test",
+)
+
+fx_component_manifest(
+    name = "starnix-binderfs-tests-manifest",
+    testonly = True,
+    component_name = "starnix-binderfs-tests",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/starnix:unit_test.shard.cml",
+    ],
+    manifest = "meta/starnix_binderfs_tests.cml",
+)
+
+fx_test_component(
+    name = "starnix-binderfs-tests-component",
+    compiled_manifest = ":starnix-binderfs-tests-manifest",
+    test_type = "starnix",
+    deps = [
+        ":binderfs_test_packaged_bin",
+        # In GN, //src/starnix/kernel/vdso is a resource() propagated through
+        # //src/starnix/kernel/core's deps.
+        "//src/starnix/kernel/vdso",
+    ],
+)
+
+# Hand-maintained in BUILD.gn above the sentinel because bazel2gn does not
+# support create_no_exception_channel on fx_test.
+# @bazel2gn:skip
+fx_package(
+    name = "starnix-binderfs-tests-package",
+    package_name = "starnix-binderfs-tests",
+    test_components = [":starnix-binderfs-tests-component"],
+)
+
+fx_test(
+    name = "starnix-binderfs-tests",
+    create_no_exception_channel = True,
+    # Tests exercise failure cases, so ERROR logs are expected.
+    max_log_severity = "ERROR",
+    package = ":starnix-binderfs-tests-package",
+    test_type = "starnix",
+)

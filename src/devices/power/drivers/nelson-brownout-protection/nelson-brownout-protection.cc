@@ -5,7 +5,6 @@
 #include "nelson-brownout-protection.h"
 
 #include <fidl/fuchsia.hardware.power.sensor/cpp/wire.h>
-#include <fuchsia/hardware/audio/cpp/banjo.h>
 #include <lib/ddk/binding_driver.h>
 #include <lib/ddk/debug.h>
 #include <lib/ddk/trace/event.h>

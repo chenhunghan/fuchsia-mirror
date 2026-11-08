@@ -94,33 +94,42 @@ async fn assemble_puppet_realm(
         .await
         .expect("Failed to add UI realm.");
 
-    builder
-        .init_mutable_config_from_package(&ui_stack)
-        .await
-        .expect("Failed to init config for ui_stack");
-
-    match display_rotation {
-        Some(display_rotation) => {
-            builder
-                .set_config_value(&ui_stack, "display_rotation", display_rotation.into())
-                .await
-                .expect("Failed to set display_rotation.");
-        }
-        None => {}
+    if let Some(display_rotation) = display_rotation {
+        builder
+            .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                name: "fuchsia.ui.test.DisplayRotation".parse().unwrap(),
+                value: display_rotation.into(),
+            }))
+            .await
+            .expect("Failed to set display_rotation.");
+        builder
+            .add_route(
+                Route::new()
+                    .capability(Capability::configuration("fuchsia.ui.test.DisplayRotation"))
+                    .from(Ref::self_())
+                    .to(&ui_stack),
+            )
+            .await
+            .expect("Failed to route display_rotation.");
     }
 
-    match device_pixel_ratio {
-        Some(device_pixel_ratio) => {
-            builder
-                .set_config_value(
-                    &ui_stack,
-                    "device_pixel_ratio",
-                    device_pixel_ratio.to_string().into(),
-                )
-                .await
-                .expect("Failed to set device_pixel_ratio.");
-        }
-        None => {}
+    if let Some(device_pixel_ratio) = device_pixel_ratio {
+        builder
+            .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                name: "fuchsia.ui.test.DevicePixelRatio".parse().unwrap(),
+                value: device_pixel_ratio.to_string().into(),
+            }))
+            .await
+            .expect("Failed to set device_pixel_ratio.");
+        builder
+            .add_route(
+                Route::new()
+                    .capability(Capability::configuration("fuchsia.ui.test.DevicePixelRatio"))
+                    .from(Ref::self_())
+                    .to(&ui_stack),
+            )
+            .await
+            .expect("Failed to route device_pixel_ratio.");
     }
 
     // Route capabilities to the test UI stack.

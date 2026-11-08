@@ -2,17 +2,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::reader::{BlockService, read_aligned_range};
+use crate::reader::{
+    BlockService, MAX_READ_BUFFER_SIZE, read_aligned_range, read_aligned_range_with_precommit,
+};
 use crate::{
     BLOCK_SIZE, ENCRYPTION_KEY_SIZE, Extents, MappingCommand, NullPageRequest, PageRequest,
     RawMappingCommand,
 };
 use anyhow::{Error, anyhow, bail};
-use blob_metadata::{BlobFormat, BlobMetadata, MerkleLeaves};
+use blob_metadata::{BlobMetadata, BlobMetadataV53, MerkleLeaves};
 use byteorder::{LittleEndian, ReadBytesExt};
-use delivery_blob::compression::{
-    CompressionAlgorithm, CompressionInfo, DataBuffer, StreamingDecompressor,
-};
+use delivery_blob::compression::{CompressionInfo, DataBuffer, StreamingDecompressor};
 use fuchsia_sync::Mutex;
 use futures::channel::oneshot;
 use fxfs_crypto::{Cipher, FxfsCipher, UnwrappedKey};
@@ -160,6 +160,50 @@ impl File {
         }
     }
 
+    /// Returns the maximum uncompressed byte length for a single [`PageRequest`] window on a file
+    /// with `window_alignment` (`MAX_READ_BUFFER_SIZE` rounded down to a multiple of
+    /// `window_alignment`, or `window_alignment` if larger).
+    fn max_page_request_window(window_alignment: u64) -> u64 {
+        std::cmp::max(
+            (MAX_READ_BUFFER_SIZE as u64 / window_alignment) * window_alignment,
+            window_alignment,
+        )
+    }
+
+    /// Expands `original_range` to `window_alignment` boundaries, clamped to the page-aligned end
+    /// of the file, or returns `None` if `original_range` is empty or starts past the end of the
+    /// file.
+    fn aligned_read_range(
+        &self,
+        original_range: Range<u64>,
+        window_alignment: u64,
+    ) -> Option<Range<u64>> {
+        self.aligned_read_range_for_page_size(
+            original_range,
+            window_alignment,
+            zx::system_get_page_size() as u64,
+        )
+    }
+
+    fn aligned_read_range_for_page_size(
+        &self,
+        original_range: Range<u64>,
+        window_alignment: u64,
+        page_size: u64,
+    ) -> Option<Range<u64>> {
+        if original_range.is_empty() {
+            return None;
+        }
+        let page_aligned_size = self.uncompressed_size.next_multiple_of(page_size);
+        if original_range.start >= page_aligned_size {
+            return None;
+        }
+        Some(
+            (original_range.start / window_alignment) * window_alignment
+                ..min(original_range.end.next_multiple_of(window_alignment), page_aligned_size),
+        )
+    }
+
     /// Streams and decodes the uncompressed range requested by `page_request`, applying readahead.
     pub fn read_range(
         self: &Arc<Self>,
@@ -181,6 +225,9 @@ impl File {
         service: &(impl BlockService + ?Sized),
         page_request: impl PageRequest,
     ) {
+        let verification_alignment = self.verification_alignment();
+        let window_alignment = std::cmp::max(window_alignment, verification_alignment)
+            .next_multiple_of(verification_alignment);
         self.read_range_with_recording(window_alignment, service, page_request, |_| {});
     }
 
@@ -191,23 +238,53 @@ impl File {
         mut page_request: impl PageRequest,
         record_offset: impl Fn(u64),
     ) {
-        let page_size = zx::system_get_page_size() as u64;
-        let original_range = page_request.range();
-        if original_range.is_empty() {
-            return;
+        let max_window = Self::max_page_request_window(window_alignment);
+        loop {
+            let range = page_request.range();
+            let max_end = (range.start / max_window + 1) * max_window;
+            if range.end > max_end {
+                let head = page_request.split_at(max_end);
+                self.read_single_window(window_alignment, service, head, &record_offset);
+            } else {
+                self.read_single_window(window_alignment, service, page_request, &record_offset);
+                break;
+            }
         }
+    }
 
-        let page_aligned_size = self.uncompressed_size.next_multiple_of(page_size);
-        if original_range.start >= page_aligned_size {
+    fn read_single_window(
+        self: &Arc<Self>,
+        window_alignment: u64,
+        service: &(impl BlockService + ?Sized),
+        page_request: impl PageRequest,
+        record_offset: &impl Fn(u64),
+    ) {
+        self.read_single_window_for_page_size(
+            window_alignment,
+            zx::system_get_page_size() as u64,
+            service,
+            page_request,
+            record_offset,
+        );
+    }
+
+    fn read_single_window_for_page_size(
+        self: &Arc<Self>,
+        window_alignment: u64,
+        page_size: u64,
+        service: &(impl BlockService + ?Sized),
+        mut page_request: impl PageRequest,
+        record_offset: &impl Fn(u64),
+    ) {
+        let Some(read_range) = self.aligned_read_range_for_page_size(
+            page_request.range(),
+            window_alignment,
+            page_size,
+        ) else {
             return;
-        }
+        };
 
         let chunk_size = self.verification_alignment();
-        let read_range = (original_range.start / window_alignment) * window_alignment
-            ..std::cmp::min(
-                original_range.end.next_multiple_of(window_alignment),
-                page_aligned_size,
-            );
         if page_request.prepare(read_range.clone(), chunk_size as usize).is_err() {
             return;
         }
@@ -216,36 +293,85 @@ impl File {
             record_offset(offset);
         }
 
-        match &self.transform {
-            Transform::None => {
-                let mut current_offset = read_range.start;
-                let uncompressed_size = self.uncompressed_size;
+        if read_range.start >= self.uncompressed_size {
+            let len = (read_range.end - read_range.start) as usize;
+            page_request.mut_ptr_slice().subslice_mut(0..len).fill(0);
+            let _ = page_request.commit(len);
+            return;
+        }
 
-                read_aligned_range(&self.extents, read_range, service, move |res| {
-                    let buffer = match res {
-                        Ok(buffer) => buffer,
-                        Err(error) => {
-                            if !is_cancelled(&error) {
-                                log::error!(error:?; "Failed to read blocks for mapped file");
+        // Obtain the deferred VMAR pre-commit handle before moving `page_request` into the
+        // completion closure. `read_aligned_range_with_precommit` executes `precommit.run()` on
+        // this thread right after the first asynchronous block read is submitted to overlap
+        // `zx::VmarOp::COMMIT` with storage DMA.
+        let precommit = page_request.precommit();
+        enum ReadMode<'a> {
+            Raw(u64),
+            Decompress,
+            Decrypt(&'a Arc<dyn Cipher>),
+        }
+        let mode = match &self.transform {
+            Transform::None => ReadMode::Raw(read_range.start),
+            Transform::Compressed(info) => {
+                match info.raw_offset_for_uncompressed_range(&read_range, BLOCK_SIZE) {
+                    Some(offset) => ReadMode::Raw(offset),
+                    None => ReadMode::Decompress,
+                }
+            }
+            Transform::Encrypted(cipher) => ReadMode::Decrypt(cipher),
+        };
+        match mode {
+            ReadMode::Raw(raw_offset) => {
+                let uncompressed_size = self.uncompressed_size;
+                let stored_len = min(read_range.end, uncompressed_size)
+                    .saturating_sub(read_range.start)
+                    .next_multiple_of(BLOCK_SIZE);
+                let mut current_offset = read_range.start;
+                let stored_end_offset = read_range.start + stored_len;
+                let stored_range = raw_offset..raw_offset + stored_len;
+
+                read_aligned_range_with_precommit(
+                    &self.extents,
+                    stored_range,
+                    service,
+                    precommit,
+                    move |res| {
+                        let buffer = match res {
+                            Ok(buffer) => buffer,
+                            Err(error) => {
+                                if !is_cancelled(&error) {
+                                    log::error!(error:?; "Failed to read blocks for mapped file");
+                                }
+                                return ControlFlow::Break(());
                             }
+                        };
+                        let valid_len = min(
+                            buffer.len() as u64,
+                            uncompressed_size.saturating_sub(current_offset),
+                        ) as usize;
+                        current_offset += buffer.len() as u64;
+                        let commit_len = if current_offset == stored_end_offset
+                            && current_offset < read_range.end
+                        {
+                            let total_len =
+                                buffer.len() + (read_range.end - current_offset) as usize;
+                            current_offset = read_range.end;
+                            total_len
+                        } else {
+                            buffer.len()
+                        };
+                        let dest = page_request.mut_ptr_slice().subslice_mut(0..commit_len);
+                        let (mut head, mut tail) = dest.split_at_mut(valid_len);
+                        head.copy_from_ptr_slice(buffer.as_ptr_slice().subslice(0..valid_len));
+                        tail.fill(0);
+                        if page_request.commit(commit_len).is_err() {
                             return ControlFlow::Break(());
                         }
-                    };
-                    let valid_len =
-                        min(buffer.len() as u64, uncompressed_size.saturating_sub(current_offset))
-                            as usize;
-                    let dest = page_request.mut_ptr_slice().subslice_mut(0..buffer.len());
-                    let (mut head, mut tail) = dest.split_at_mut(valid_len);
-                    head.copy_from_ptr_slice(buffer.as_ptr_slice().subslice(0..valid_len));
-                    tail.fill(0);
-                    if page_request.commit(buffer.len()).is_err() {
-                        return ControlFlow::Break(());
-                    }
-                    current_offset += buffer.len() as u64;
-                    ControlFlow::Continue(())
-                });
+                        ControlFlow::Continue(())
+                    },
+                );
             }
-            Transform::Compressed(_) => {
+            ReadMode::Decompress => {
                 let Ok((mut decompressor, aligned_range)) = StreamingDecompressor::new(
                     FileCompression(self.clone()),
                     self.uncompressed_size,
@@ -256,66 +382,79 @@ impl File {
                     return;
                 };
 
-                read_aligned_range(&self.extents, aligned_range, service, move |res| {
-                    let buffer = match res {
-                        Ok(buffer) => buffer,
-                        Err(error) => {
-                            if !is_cancelled(&error) {
-                                log::error!(
-                                    error:?;
-                                    "Failed to read blocks for compressed mapped file"
-                                );
+                read_aligned_range_with_precommit(
+                    &self.extents,
+                    aligned_range,
+                    service,
+                    precommit,
+                    move |res| {
+                        let buffer = match res {
+                            Ok(buffer) => buffer,
+                            Err(error) => {
+                                if !is_cancelled(&error) {
+                                    log::error!(
+                                        error:?;
+                                        "Failed to read blocks for compressed mapped file"
+                                    );
+                                }
+                                return ControlFlow::Break(());
                             }
+                        };
+                        if decompressor.push(buffer.as_ptr_slice()).is_err() {
                             return ControlFlow::Break(());
                         }
-                    };
-                    if decompressor.push(buffer.as_ptr_slice()).is_err() {
-                        return ControlFlow::Break(());
-                    }
-                    ControlFlow::Continue(())
-                });
+                        ControlFlow::Continue(())
+                    },
+                );
             }
-            Transform::Encrypted(cipher) => {
+            ReadMode::Decrypt(cipher) => {
                 let mut current_offset = read_range.start;
                 let uncompressed_size = self.uncompressed_size;
                 let cipher = cipher.clone();
 
-                read_aligned_range(&self.extents, read_range, service, move |res| {
-                    let buffer = match res {
-                        Ok(buffer) => buffer,
-                        Err(error) => {
-                            if !is_cancelled(&error) {
-                                log::error!(
-                                    error:?;
-                                    "Failed to read blocks for encrypted mapped file"
-                                );
+                read_aligned_range_with_precommit(
+                    &self.extents,
+                    read_range,
+                    service,
+                    precommit,
+                    move |res| {
+                        let buffer = match res {
+                            Ok(buffer) => buffer,
+                            Err(error) => {
+                                if !is_cancelled(&error) {
+                                    log::error!(
+                                        error:?;
+                                        "Failed to read blocks for encrypted mapped file"
+                                    );
+                                }
+                                return ControlFlow::Break(());
                             }
+                        };
+                        let mut dest = page_request.mut_ptr_slice().subslice_mut(0..buffer.len());
+                        // Both `buffer` and `dest` are aligned to 64 bytes.
+                        if let Err(error) = cipher.decrypt_to(
+                            0,
+                            0,
+                            0,
+                            current_offset,
+                            buffer.as_ptr_slice(),
+                            dest.reborrow(),
+                        ) {
+                            log::error!(error:?; "Failed to decrypt buffer");
                             return ControlFlow::Break(());
                         }
-                    };
-                    let mut dest = page_request.mut_ptr_slice().subslice_mut(0..buffer.len());
-                    // Both `buffer` and `dest` are aligned to 64 bytes.
-                    if let Err(error) = cipher.decrypt_to(
-                        0,
-                        0,
-                        0,
-                        current_offset,
-                        buffer.as_ptr_slice(),
-                        dest.reborrow(),
-                    ) {
-                        log::error!(error:?; "Failed to decrypt buffer");
-                        return ControlFlow::Break(());
-                    }
-                    let valid_len =
-                        min(buffer.len() as u64, uncompressed_size.saturating_sub(current_offset))
-                            as usize;
-                    dest.subslice_mut(valid_len..buffer.len()).fill(0);
-                    if page_request.commit(buffer.len()).is_err() {
-                        return ControlFlow::Break(());
-                    }
-                    current_offset += buffer.len() as u64;
-                    ControlFlow::Continue(())
-                });
+                        let valid_len = min(
+                            buffer.len() as u64,
+                            uncompressed_size.saturating_sub(current_offset),
+                        ) as usize;
+                        dest.subslice_mut(valid_len..buffer.len()).fill(0);
+                        if page_request.commit(buffer.len()).is_err() {
+                            return ControlFlow::Break(());
+                        }
+                        current_offset += buffer.len() as u64;
+                        ControlFlow::Continue(())
+                    },
+                );
             }
         }
     }
@@ -343,18 +482,11 @@ impl File {
         service: &(impl BlockService + ?Sized),
         delivery_handler: &Arc<D>,
     ) -> bool {
-        let page_size = zx::system_get_page_size() as u64;
-        if original_range.is_empty() {
+        let Some(child_read_range) =
+            self.aligned_read_range(original_range, self.read_ahead_size())
+        else {
             return false;
-        }
-        let page_aligned_size = self.uncompressed_size.next_multiple_of(page_size);
-        if original_range.start >= page_aligned_size {
-            return false;
-        }
-        let read_ahead_size = self.read_ahead_size();
-        let raw_start = (original_range.start / read_ahead_size) * read_ahead_size;
-        let raw_end = min(original_range.end.next_multiple_of(read_ahead_size), page_aligned_size);
-        let child_read_range = raw_start..raw_end;
+        };
         let parent_align = parent_file.verification_alignment();
 
         let mut started_async_io = false;
@@ -376,11 +508,10 @@ impl File {
                 }
                 crate::DeviceExtent::Block(dev_offset) => {
                     let parent_start = dev_offset + (slice_start - extent.logical_range().start);
-                    let parent_byte_range = parent_start..(parent_start + slice_len);
                     let child_req = delivery_handler.get_child_page_request(
                         child_key,
                         slice_start,
-                        parent_byte_range,
+                        parent_start..(parent_start + slice_len),
                     );
                     parent_file.read_range_with_alignment(parent_align, service, child_req);
                     started_async_io = true;
@@ -498,6 +629,7 @@ impl DeliveryHandler for NoopDeliveryHandler {
 
 const PAGER_SHUTDOWN_KEY: u64 = 0;
 const PAGER_WAKE_KEY: u64 = 1;
+const PAGER_THREAD_ROLE: &str = "fuchsia.storage.blob.delivery";
 
 /// An RAII guard for the background pager thread spawned by [`Files::spawn_pager_thread`].
 ///
@@ -667,38 +799,21 @@ impl<S: BlockService + ?Sized + 'static, D: DeliveryHandler> Files<S, D> {
     pub fn spawn_pager_thread(self: &Arc<Self>) -> PagerThread<S, D> {
         let files = self.clone();
         let thread = std::thread::spawn(move || {
+            if let Err(error) = fuchsia_scheduler::set_role_for_this_thread(PAGER_THREAD_ROLE) {
+                log::warn!(error:?; "Failed to set pager thread role");
+            }
             files.run_pager_loop();
         });
         PagerThread { files: self.clone(), thread: Some(thread) }
     }
 
-    // Dispatches a page request for an already-loaded `file`. When `self.parent` is `Some`, calls
-    // `file.read_child_range` directly without allocating a root `D::Request` first.
-    fn dispatch_page_range(&self, key: u64, file: &Arc<File>, original_range: Range<u64>) {
-        if let Some(parent_file) = &self.parent {
-            let _ = file.read_child_range(
-                key,
-                original_range,
-                parent_file,
-                self.service.as_ref(),
-                &self.delivery_handler,
-            );
-        } else {
-            let req = self.delivery_handler.get_page_request(key, original_range);
-            self.dispatch_page_request(key, file, req);
-        }
-    }
-
-    // Dispatches a `D::Request` (including requests that were queued in `LoadingSlot` while
-    // metadata was still loading) to either `file.read_child_range` (for child sessions) or
+    // Dispatches a `D::Request` to either `file.read_child_range` (for child sessions) or
     // `file.read_range_with_recording` (for root sessions).
     fn dispatch_page_request(&self, key: u64, file: &Arc<File>, req: D::Request) {
-        let original_range = req.range();
         if let Some(parent_file) = &self.parent {
-            drop(req);
             let _ = file.read_child_range(
                 key,
-                original_range,
+                req.range(),
                 parent_file,
                 self.service.as_ref(),
                 &self.delivery_handler,
@@ -764,16 +879,6 @@ impl<S: BlockService + ?Sized + 'static, D: DeliveryHandler> Files<S, D> {
     // If the file is currently loading or unmapped, queues the request to be fulfilled
     // when loaded.
     fn handle_page_request(&self, key: u64, range: Range<u64>) {
-        {
-            let map = self.map.lock();
-            if let Some(FileEntry::Loaded(file)) = map.get(&key) {
-                let file = Arc::clone(file);
-                drop(map);
-                self.dispatch_page_range(key, &file, range);
-                return;
-            }
-        }
-
         let req = self.delivery_handler.get_page_request(key, range);
         let mut map = self.map.lock();
         match map.entry(key) {
@@ -919,27 +1024,33 @@ impl<S: BlockService + ?Sized + 'static> Files<S, NoopDeliveryHandler> {
     }
 }
 
-/// The version where `BlobMetadata` was introduced in Fxfs.
+const MIN_BLOB_METADATA_VERSION: u32 = 53;
+
+/// The latest version of `BlobMetadata` in Fxfs.
 /// Eventually, we'll need to integrate Fxfs's code for upgrading data structures.
-pub(crate) const BLOB_METADATA_VERSION: u32 = 53;
+pub(crate) const BLOB_METADATA_VERSION: u32 = 64;
 
 /// Deserializes versioned `BlobMetadata` from the raw on-disk bytes.
 fn deserialize_blob_metadata(mut bytes: &[u8]) -> Result<BlobMetadata, anyhow::Error> {
     use bincode::Options;
     let options = bincode::DefaultOptions::new().allow_trailing_bytes();
 
-    let version = bytes.read_u32::<LittleEndian>()?;
-    if version < BLOB_METADATA_VERSION {
-        bail!(
-            "Unsupported blob metadata version: {} (expected >= {})",
-            version,
-            BLOB_METADATA_VERSION
-        );
-    }
+    // Fxfs versions are a 24-bit major version followed by an 8-bit minor version.
+    let version = bytes.read_u24::<LittleEndian>()?;
+    let _minor_version = bytes.read_u8()?;
 
-    options
-        .deserialize::<BlobMetadata>(bytes)
-        .map_err(|e| anyhow!("Failed to deserialize BlobMetadata: {e:?}"))
+    // Unlike Fxfs, newer versions aren't rejected so that this doesn't need updating every time the
+    // Fxfs version changes. Fxfs won't mount a filesystem that is newer than it.
+    match version {
+        MIN_BLOB_METADATA_VERSION..BLOB_METADATA_VERSION => {
+            options.deserialize::<BlobMetadataV53>(bytes).map(Into::into)
+        }
+        BLOB_METADATA_VERSION.. => options.deserialize::<BlobMetadata>(bytes),
+        _ => bail!(
+            "Unsupported blob metadata version: {version} (expected >= {MIN_BLOB_METADATA_VERSION})"
+        ),
+    }
+    .map_err(|e| anyhow!("Failed to deserialize BlobMetadata: {e:?}"))
 }
 
 /// Metadata decoded from on-disk storage describing a blob's uncompressed size, compression info,
@@ -1009,51 +1120,18 @@ pub fn read_blob_metadata(
             }
         };
 
-        let merkle_leaves = metadata.merkle_leaves;
-        let res = match metadata.format {
-            BlobFormat::Uncompressed => DecodedBlobMetadata {
-                uncompressed_size: stored_data_size,
-                compression_info: None,
-                merkle_leaves,
-            },
-            BlobFormat::ChunkedZstd { uncompressed_size, chunk_size, compressed_offsets } => {
-                match CompressionInfo::new(
-                    chunk_size,
-                    stored_data_size,
-                    &compressed_offsets,
-                    CompressionAlgorithm::Zstd,
-                ) {
-                    Ok(compression_info) => DecodedBlobMetadata {
-                        uncompressed_size,
-                        compression_info: Some(compression_info),
-                        merkle_leaves,
-                    },
-                    Err(error) => {
-                        log::error!(error:?; "Failed to parse Zstd CompressionInfo");
-                        return ControlFlow::Break(());
-                    }
-                }
-            }
-            BlobFormat::ChunkedLz4 { uncompressed_size, chunk_size, compressed_offsets } => {
-                match CompressionInfo::new(
-                    chunk_size,
-                    stored_data_size,
-                    &compressed_offsets,
-                    CompressionAlgorithm::Lz4,
-                ) {
-                    Ok(compression_info) => DecodedBlobMetadata {
-                        uncompressed_size,
-                        compression_info: Some(compression_info),
-                        merkle_leaves,
-                    },
-                    Err(error) => {
-                        log::error!(error:?; "Failed to parse Lz4 CompressionInfo");
-                        return ControlFlow::Break(());
-                    }
-                }
+        let compression_info = match metadata.format.compression_info(stored_data_size) {
+            Ok(compression_info) => compression_info,
+            Err(error) => {
+                log::error!(error:?; "Failed to parse CompressionInfo");
+                return ControlFlow::Break(());
             }
         };
-        cb(res);
+        cb(DecodedBlobMetadata {
+            uncompressed_size: metadata.format.uncompressed_size().unwrap_or(stored_data_size),
+            compression_info,
+            merkle_leaves: metadata.merkle_leaves,
+        });
         ControlFlow::Break(())
     });
 }
@@ -1194,8 +1272,9 @@ mod tests {
     use crate::{BLOCK_SIZE, Extent};
     use anyhow::Error;
     use bincode::Options;
+    use blob_metadata::BlobFormat;
     use byteorder::WriteBytesExt;
-    use delivery_blob::compression::{ChunkedArchiveOptions, CompressionAlgorithm};
+    use delivery_blob::compression::{ChunkedArchive, ChunkedArchiveOptions, CompressionAlgorithm};
     use fuchsia_async as fasync;
     use fxfs_crypto::{Cipher, FxfsCipher, UnwrappedKey};
     use std::sync::Arc;
@@ -2019,6 +2098,9 @@ mod tests {
             ) -> Result<(), ChunkedArchiveError> {
                 Ok(())
             }
+            fn split_at(&mut self, _mid: u64) -> Self {
+                unreachable!()
+            }
         }
 
         let metadata = BlobMetadata {
@@ -2140,16 +2222,6 @@ mod tests {
             payload_bytes.extend_from_slice(&w.to_le_bytes());
         }
 
-        let cmd = crate::RawMappingCommand {
-            opcode: crate::MAPPINGS_COMMAND,
-            offset: 0,
-            key: 42,
-            stored_size: BLOCK_SIZE,
-            device_offset: 0,
-            metadata_count: 1,
-            extent_count: 1,
-        };
-
         let vmo = Vmo::create(65536).unwrap();
         let mut sender = SyncSender::<crate::RawMappingCommand>::new(
             vmo.duplicate_handle(Rights::SAME_RIGHTS).unwrap(),
@@ -2159,6 +2231,15 @@ mod tests {
         .unwrap();
         let mut payload_buf = sender.reserve_payload(payload_bytes.len()).unwrap();
         payload_buf.data().copy_from_slice(&payload_bytes);
+        let cmd = crate::RawMappingCommand {
+            opcode: crate::MAPPINGS_COMMAND,
+            offset: payload_buf.offset(),
+            key: 42,
+            stored_size: BLOCK_SIZE,
+            device_offset: 0,
+            metadata_count: 1,
+            extent_count: 1,
+        };
         payload_buf.commit(cmd).unwrap();
         let mut receiver = vmo_fifo::Receiver::<crate::RawMappingCommand>::new(vmo, 16).unwrap();
 
@@ -2247,16 +2328,6 @@ mod tests {
             payload_bytes.extend_from_slice(&w.to_le_bytes());
         }
 
-        let cmd = crate::RawMappingCommand {
-            opcode: crate::MAPPINGS_COMMAND,
-            offset: 0,
-            key: 42,
-            stored_size: BLOCK_SIZE,
-            device_offset: 0,
-            metadata_count: 1,
-            extent_count: 1,
-        };
-
         let vmo = Vmo::create(65536).unwrap();
         let mut sender = SyncSender::<crate::RawMappingCommand>::new(
             vmo.duplicate_handle(Rights::SAME_RIGHTS).unwrap(),
@@ -2266,6 +2337,15 @@ mod tests {
         .unwrap();
         let mut payload_buf = sender.reserve_payload(payload_bytes.len()).unwrap();
         payload_buf.data().copy_from_slice(&payload_bytes);
+        let cmd = crate::RawMappingCommand {
+            opcode: crate::MAPPINGS_COMMAND,
+            offset: payload_buf.offset(),
+            key: 42,
+            stored_size: BLOCK_SIZE,
+            device_offset: 0,
+            metadata_count: 1,
+            extent_count: 1,
+        };
         payload_buf.commit(cmd).unwrap();
         let mut receiver = vmo_fifo::Receiver::<crate::RawMappingCommand>::new(vmo, 16).unwrap();
 
@@ -2386,7 +2466,7 @@ mod tests {
         let metadata =
             BlobMetadata { merkle_leaves: MerkleLeaves::new(), format: BlobFormat::Uncompressed };
 
-        // Valid metadata with version 53.
+        // Valid metadata with version 64.
         let bytes = serialize_metadata(&metadata);
         let deserialized = deserialize_blob_metadata(&bytes).unwrap();
         assert_eq!(deserialized, metadata);
@@ -2395,9 +2475,37 @@ mod tests {
         assert!(deserialize_blob_metadata(&[1, 2, 3]).is_err());
 
         // Unsupported version (< 53).
-        let mut old_version_bytes = bytes.clone();
-        (&mut old_version_bytes[..4]).write_u32::<LittleEndian>(52).unwrap();
-        assert!(deserialize_blob_metadata(&old_version_bytes).is_err());
+        let with_version = |bytes: &[u8], version: u32| {
+            let mut bytes = bytes.to_vec();
+            (&mut bytes[..4]).write_u32::<LittleEndian>(version).unwrap();
+            bytes
+        };
+        assert!(deserialize_blob_metadata(&with_version(&bytes, 52)).is_err());
+
+        // Versions before 64 are decoded with the old format and can't contain raw chunks.
+        let lz4 = |format| BlobMetadata { merkle_leaves: MerkleLeaves::new(), format };
+        let old = lz4(BlobFormat::ChunkedLz4 {
+            uncompressed_size: 65536,
+            chunk_size: 32768,
+            compressed_offsets: vec![0, 100],
+        });
+        assert_eq!(
+            deserialize_blob_metadata(&with_version(&serialize_metadata(&old), 63)).unwrap(),
+            old
+        );
+        let raw = lz4(BlobFormat::ChunkedLz4WithRawChunks {
+            uncompressed_size: 65536,
+            chunk_size: 32768,
+            compressed_offsets: vec![0, 100],
+        });
+        let raw_bytes = serialize_metadata(&raw);
+        assert_eq!(deserialize_blob_metadata(&raw_bytes).unwrap(), raw);
+        assert_eq!(
+            deserialize_blob_metadata(&with_version(&raw_bytes, BLOB_METADATA_VERSION | (1 << 24)))
+                .unwrap(),
+            raw
+        );
+        assert!(deserialize_blob_metadata(&with_version(&raw_bytes, 63)).is_err());
     }
 
     #[fuchsia::test]
@@ -3071,5 +3179,524 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[fuchsia::test]
+    fn test_read_range_runs_precommit_only_when_io_is_in_flight() {
+        use crate::PagePrecommit;
+        use delivery_blob::compression::{ChunkedArchiveError, DataBuffer};
+
+        struct VmarBackedRequest {
+            range: Range<u64>,
+            vaddr: usize,
+            len: usize,
+            keep_alive: Arc<()>,
+        }
+
+        impl DataBuffer for VmarBackedRequest {
+            fn range(&self) -> Range<u64> {
+                self.range.clone()
+            }
+            fn mut_ptr_slice(&mut self) -> MutPtrByteSlice<'_> {
+                unsafe {
+                    MutPtrByteSlice::new(std::ptr::slice_from_raw_parts_mut(
+                        self.vaddr as *mut u8,
+                        self.len,
+                    ))
+                }
+            }
+            fn commit(&mut self, size: usize) -> Result<(), ChunkedArchiveError> {
+                self.vaddr += size;
+                self.len -= size;
+                Ok(())
+            }
+        }
+
+        impl PageRequest for VmarBackedRequest {
+            fn prepare(
+                &mut self,
+                read_range: Range<u64>,
+                _read_alignment: usize,
+            ) -> Result<(), ChunkedArchiveError> {
+                self.range = read_range;
+                Ok(())
+            }
+            fn split_at(&mut self, _mid: u64) -> Self {
+                unreachable!()
+            }
+            fn precommit(&self) -> PagePrecommit {
+                PagePrecommit::new(self.vaddr, self.len, self.keep_alive.clone())
+            }
+        }
+
+        let page_size = zx::system_get_page_size() as usize;
+        let vmo = zx::Vmo::create((2 * page_size) as u64).expect("Vmo::create");
+        let vaddr = fuchsia_runtime::vmar_root_self()
+            .map(0, &vmo, 0, 2 * page_size, zx::VmarFlags::PERM_READ | zx::VmarFlags::PERM_WRITE)
+            .expect("vmar map");
+
+        let extents = Extents::try_new([Extent::new(0..(2 * page_size as u64), Some(0))], 0)
+            .expect("extents");
+        let file = Arc::new(File::new(extents, (2 * page_size) as u64, Transform::None));
+
+        // With `DelayedBlockService`, the read is in flight when `read_range` returns, so
+        // `PagePrecommit::run` must have already committed both pages in `vmo` before the read
+        // completes!
+        let delayed = DelayedBlockService::new(vec![0x5Au8; 2 * page_size]);
+        let req = VmarBackedRequest {
+            range: 0..(page_size as u64),
+            vaddr,
+            len: 2 * page_size,
+            keep_alive: Arc::new(()),
+        };
+        file.read_range(&*delayed, req);
+        assert_eq!(
+            vmo.info().expect("vmo info").committed_bytes,
+            (2 * page_size) as u64,
+            "PagePrecommit must commit VMO pages while async I/O is in flight"
+        );
+        delayed.wait_and_trigger_sync();
+
+        unsafe {
+            let _ = fuchsia_runtime::vmar_root_self().unmap(vaddr, 2 * page_size);
+        }
+    }
+
+    #[fuchsia::test]
+    fn test_files_splits_large_page_request_into_1mib_windows() {
+        use delivery_blob::compression::ChunkedArchiveError;
+
+        struct RecordingRequest {
+            range: Range<u64>,
+            buf: Vec<u8>,
+            prepared_ranges: Arc<Mutex<Vec<Range<u64>>>>,
+        }
+
+        impl DataBuffer for RecordingRequest {
+            fn range(&self) -> Range<u64> {
+                self.range.clone()
+            }
+            fn mut_ptr_slice(&mut self) -> MutPtrByteSlice<'_> {
+                MutPtrByteSlice::from(&mut self.buf[..])
+            }
+            fn commit(&mut self, _size: usize) -> Result<(), ChunkedArchiveError> {
+                Ok(())
+            }
+        }
+
+        impl PageRequest for RecordingRequest {
+            fn prepare(
+                &mut self,
+                read_range: Range<u64>,
+                _read_alignment: usize,
+            ) -> Result<(), ChunkedArchiveError> {
+                let len = (read_range.end - read_range.start) as usize;
+                assert!(len <= MAX_READ_BUFFER_SIZE, "prepared range {len} > 1 MiB");
+                self.buf = vec![0u8; len];
+                self.prepared_ranges.lock().push(read_range);
+                Ok(())
+            }
+
+            fn split_at(&mut self, mid: u64) -> Self {
+                let head_range = self.range.start..mid;
+                self.range.start = mid;
+                Self {
+                    range: head_range,
+                    buf: Vec::new(),
+                    prepared_ranges: self.prepared_ranges.clone(),
+                }
+            }
+        }
+
+        let file_size = (2 * MAX_READ_BUFFER_SIZE + 256 * 1024) as u64;
+        let service = Arc::new(FakeBlockService::new(vec![0xABu8; file_size as usize]));
+        let prepared = Arc::new(Mutex::new(Vec::new()));
+        let prepared_clone = prepared.clone();
+        let files = Arc::new(Files::new(
+            service,
+            TestDeliveryHandler(move |_k, range| RecordingRequest {
+                range,
+                buf: Vec::new(),
+                prepared_ranges: prepared_clone.clone(),
+            }),
+            zx::Port::create(),
+        ));
+
+        let extents = Extents::try_new([Extent::new(0..file_size, Some(0))], 0).expect("extents");
+        let file = Arc::new(File::new(extents, file_size, Transform::None));
+        files.insert(77, file);
+
+        files.handle_page_request(77, 0..file_size);
+        let ranges = prepared.lock().clone();
+        let mib = MAX_READ_BUFFER_SIZE as u64;
+        assert_eq!(ranges, vec![0..mib, mib..2 * mib, 2 * mib..file_size]);
+    }
+
+    #[fuchsia::test]
+    fn test_child_files_splits_large_page_requests_and_handles_deferred_loading() {
+        use delivery_blob::compression::ChunkedArchiveError;
+
+        #[derive(Clone, Debug, PartialEq)]
+        struct RecordedChildSlice {
+            child_key: u64,
+            child_target_offset: u64,
+            parent_byte_range: Range<u64>,
+            prepared_parent_range: Range<u64>,
+        }
+
+        struct ChildRecordingRequest {
+            range: Range<u64>,
+            buf: Vec<u8>,
+            child_meta: Option<(u64, u64, Range<u64>)>,
+            recorded: Arc<Mutex<Vec<RecordedChildSlice>>>,
+            on_record: Arc<fuchsia_sync::Condvar>,
+        }
+
+        impl DataBuffer for ChildRecordingRequest {
+            fn range(&self) -> Range<u64> {
+                self.range.clone()
+            }
+            fn mut_ptr_slice(&mut self) -> MutPtrByteSlice<'_> {
+                MutPtrByteSlice::from(&mut self.buf[..])
+            }
+            fn commit(&mut self, _size: usize) -> Result<(), ChunkedArchiveError> {
+                Ok(())
+            }
+        }
+
+        impl PageRequest for ChildRecordingRequest {
+            fn prepare(
+                &mut self,
+                read_range: Range<u64>,
+                _read_alignment: usize,
+            ) -> Result<(), ChunkedArchiveError> {
+                let len = (read_range.end - read_range.start) as usize;
+                assert!(len <= MAX_READ_BUFFER_SIZE, "prepared child parent range {len} > 1 MiB");
+                self.buf = vec![0u8; len];
+                let (child_key, child_target_offset, parent_byte_range) = self
+                    .child_meta
+                    .take()
+                    .expect("root get_page_request should not be prepared for child session");
+                self.recorded.lock().push(RecordedChildSlice {
+                    child_key,
+                    child_target_offset,
+                    parent_byte_range,
+                    prepared_parent_range: read_range,
+                });
+                self.on_record.notify_all();
+                Ok(())
+            }
+
+            fn split_at(&mut self, mid: u64) -> Self {
+                let head_range = self.range.start..mid;
+                let head_meta =
+                    self.child_meta.as_mut().map(|(child_key, child_offset, parent_range)| {
+                        let head = (*child_key, *child_offset, head_range.clone());
+                        *child_offset += mid - head_range.start;
+                        parent_range.start = mid;
+                        head
+                    });
+                self.range.start = mid;
+                Self {
+                    range: head_range,
+                    buf: Vec::new(),
+                    child_meta: head_meta,
+                    recorded: self.recorded.clone(),
+                    on_record: self.on_record.clone(),
+                }
+            }
+        }
+
+        struct ChildRecordingHandler {
+            recorded: Arc<Mutex<Vec<RecordedChildSlice>>>,
+            on_record: Arc<fuchsia_sync::Condvar>,
+        }
+
+        impl DeliveryHandler for ChildRecordingHandler {
+            type Request = ChildRecordingRequest;
+
+            fn get_page_request(self: &Arc<Self>, _key: u64, range: Range<u64>) -> Self::Request {
+                ChildRecordingRequest {
+                    range,
+                    buf: Vec::new(),
+                    child_meta: None,
+                    recorded: self.recorded.clone(),
+                    on_record: self.on_record.clone(),
+                }
+            }
+
+            fn get_child_page_request(
+                self: &Arc<Self>,
+                child_key: u64,
+                child_target_offset: u64,
+                parent_byte_range: Range<u64>,
+            ) -> Self::Request {
+                ChildRecordingRequest {
+                    range: parent_byte_range.clone(),
+                    buf: Vec::new(),
+                    child_meta: Some((child_key, child_target_offset, parent_byte_range)),
+                    recorded: self.recorded.clone(),
+                    on_record: self.on_record.clone(),
+                }
+            }
+        }
+
+        let mib = MAX_READ_BUFFER_SIZE as u64;
+        let parent_size = 2 * mib + 256 * 1024;
+        let child_size = 2 * mib;
+        let service = Arc::new(FakeBlockService::new(vec![0xCDu8; parent_size as usize]));
+
+        let parent_extents =
+            Extents::try_new([Extent::new(0..parent_size, Some(0))], 0).expect("parent extents");
+        let parent_file = Arc::new(File::new(parent_extents, parent_size, Transform::None));
+
+        // Map the 2 MiB child file starting at an unaligned 4 KiB block offset in the parent so a
+        // 2 MiB child read (`0..2 MiB` -> `4 KiB..2 MiB + 4 KiB` in parent) crosses two 1 MiB
+        // parent window boundaries (`1 MiB` and `2 MiB`).
+        let dev_offset = 4096u64;
+        let child_extents =
+            Extents::try_new([Extent::new(0..child_size, Some(dev_offset))], 0).expect("extents");
+        let child_file = Arc::new(File::new(child_extents, child_size, Transform::None));
+
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let on_record = Arc::new(fuchsia_sync::Condvar::new());
+        let handler = Arc::new(ChildRecordingHandler {
+            recorded: recorded.clone(),
+            on_record: on_record.clone(),
+        });
+        let child_files = Arc::new(Files::new_with_shared_handler(
+            service,
+            handler,
+            zx::Port::create(),
+            Some(parent_file),
+        ));
+        let _pager_thread = child_files.spawn_pager_thread();
+
+        // 1. Queue a 4 KiB child page request while the child file is not yet loaded, then insert
+        // the child file so `PagerThread` dispatches it through `dispatch_page_request` ->
+        // `dispatch_page_range` -> `read_child_range`.
+        child_files.handle_page_request(88, 0..4096);
+        assert!(child_files.has_queued_page_requests(88));
+        child_files.insert(88, child_file);
+
+        {
+            let mut guard = recorded.lock();
+            while guard.is_empty() {
+                on_record.wait(&mut guard);
+            }
+            assert_eq!(
+                &*guard,
+                &[RecordedChildSlice {
+                    child_key: 88,
+                    child_target_offset: 0,
+                    parent_byte_range: dev_offset..(dev_offset + TARGET_READ_AHEAD_SIZE),
+                    prepared_parent_range: 0..(TARGET_READ_AHEAD_SIZE
+                        + DEFAULT_VERIFICATION_ALIGNMENT),
+                }]
+            );
+            guard.clear();
+        }
+
+        // 2. Dispatch a 2 MiB request on the loaded child file and verify it is split at the 1 MiB
+        // and 2 MiB parent boundaries so each prepared parent range is <= 1 MiB.
+        child_files.handle_page_request(88, 0..child_size);
+        let slices = recorded.lock().clone();
+        assert_eq!(
+            slices,
+            vec![
+                RecordedChildSlice {
+                    child_key: 88,
+                    child_target_offset: 0,
+                    parent_byte_range: dev_offset..mib,
+                    prepared_parent_range: 0..mib,
+                },
+                RecordedChildSlice {
+                    child_key: 88,
+                    child_target_offset: mib - dev_offset,
+                    parent_byte_range: mib..(2 * mib),
+                    prepared_parent_range: mib..(2 * mib),
+                },
+                RecordedChildSlice {
+                    child_key: 88,
+                    child_target_offset: 2 * mib - dev_offset,
+                    parent_byte_range: (2 * mib)..(2 * mib + dev_offset),
+                    prepared_parent_range: (2 * mib)..(2 * mib + DEFAULT_VERIFICATION_ALIGNMENT),
+                },
+            ]
+        );
+    }
+
+    #[fuchsia::test]
+    fn test_lz4_raw_chunks_direct_read() {
+        const CHUNK_SIZE: usize = 32768;
+        const WINDOW: usize = TARGET_READ_AHEAD_SIZE as usize;
+        const BLOB_LEN: usize = WINDOW * 2 + 5000;
+
+        // Only chunk 0 is compressible, so windows 1 and 2 are made up of raw chunks.
+        let mut data = vec![0xAAu8; CHUNK_SIZE];
+        // Generate pseudo-random incompressible bytes with a linear congruential generator.
+        let mut rng_state = 1u64;
+        data.extend((CHUNK_SIZE..BLOB_LEN).map(|_| {
+            rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (rng_state >> 32) as u8
+        }));
+
+        let options =
+            ChunkedArchiveOptions::V3 { compression_algorithm: CompressionAlgorithm::Lz4 };
+        let archive = ChunkedArchive::new(&data, options).unwrap();
+
+        let mut compressed_offsets = Vec::new();
+        let mut compressed_data = Vec::new();
+        for (padding, chunk) in archive.chunks_with_padding() {
+            compressed_offsets.push(compressed_data.len() as u64);
+            compressed_data.extend_from_slice(padding);
+            compressed_data.extend_from_slice(&chunk.compressed_data);
+        }
+        assert_eq!(compressed_offsets, archive.compressed_offsets());
+
+        let stored_size = compressed_data.len() as u64;
+        let stored_aligned = stored_size.next_multiple_of(BLOCK_SIZE);
+        compressed_data.resize(stored_aligned as usize, 0);
+
+        let extents = Extents::try_new([Extent::new(0..stored_aligned, Some(0))], 0).unwrap();
+        let compression_info = CompressionInfo::new_lz4_with_raw_chunks(
+            CHUNK_SIZE as u64,
+            BLOB_LEN as u64,
+            stored_size,
+            &compressed_offsets,
+        )
+        .unwrap();
+        let file = Arc::new(File::new(extents, BLOB_LEN as u64, compression_info.into()));
+        let service = FakeBlockService::new(compressed_data);
+
+        let read_window = |window: usize| {
+            let start = (window * WINDOW) as u64;
+            let (req, rx) = TestVecBuffer::new_with_range(start..start + 4096);
+            file.read_range(&service, req);
+            rx
+        };
+
+        // Window 0 has a compressed chunk so it's decompressed a chunk at a time.
+        let rx = read_window(0);
+        assert_eq!(&rx.output()[..], &data[..WINDOW]);
+        assert_eq!(rx.commits().len(), 4);
+
+        // Window 1 only has raw chunks so it's read directly.
+        let rx = read_window(1);
+        assert_eq!(&rx.output()[..], &data[WINDOW..WINDOW * 2]);
+        assert_eq!(rx.commits(), vec![(WINDOW as u64, WINDOW)]);
+
+        // Window 2 is a raw partial chunk, which is read directly and zero filled to a page.
+        let rx = read_window(2);
+        let mut expected = data[WINDOW * 2..].to_vec();
+        expected.resize(8192, 0);
+        assert_eq!(rx.output(), expected);
+        assert_eq!(rx.commits(), vec![((WINDOW * 2) as u64, 8192)]);
+
+        // When page_size > BLOCK_SIZE (e.g. 16 KiB pages), read_range.end exceeds the
+        // BLOCK_SIZE-padded EOF extents (8 KiB), so ReadMode::Raw clamps disk reads to the
+        // block-padded extents and zero-fills the remaining tail pages in a single commit.
+        let (req, rx) =
+            TestVecBuffer::new_with_range((WINDOW * 2) as u64..(WINDOW * 2 + 4096) as u64);
+        file.read_single_window_for_page_size(WINDOW as u64, 16384, &service, req, &|_| {});
+        let mut expected = data[WINDOW * 2..].to_vec();
+        expected.resize(16384, 0);
+        assert_eq!(rx.output(), expected);
+        assert_eq!(rx.commits(), vec![((WINDOW * 2) as u64, 16384)]);
+
+        // Also test ReadMode::Raw extent clamping with an uncompressed file.
+        let uncompressed_len = 5000usize;
+        let uncompressed_bytes: Vec<u8> = (0..uncompressed_len).map(|i| (i % 251) as u8).collect();
+        let stored_blocks_len = (uncompressed_len as u64).next_multiple_of(BLOCK_SIZE);
+        let mut raw_device_data = vec![0xFFu8; stored_blocks_len as usize];
+        raw_device_data[..uncompressed_len].copy_from_slice(&uncompressed_bytes);
+        let raw_extents =
+            Extents::try_new([Extent::new(0..stored_blocks_len, Some(0))], 0).unwrap();
+        let raw_file = Arc::new(File::new(raw_extents, uncompressed_len as u64, Transform::None));
+        let raw_service = FakeBlockService::new(raw_device_data);
+        let (req, rx) = TestVecBuffer::new_with_range(0..4096);
+        raw_file.read_single_window_for_page_size(16384, 16384, &raw_service, req, &|_| {});
+        let mut expected_raw = uncompressed_bytes;
+        expected_raw.resize(16384, 0);
+        assert_eq!(rx.output(), expected_raw);
+        assert_eq!(rx.commits(), vec![(0, 16384)]);
+    }
+
+    #[fuchsia::test]
+    fn test_read_single_window_decompress_16k_page_size_with_8k_chunks() {
+        const PAGE_SIZE: u64 = 16384;
+        const CHUNK_SIZE: usize = 8192;
+        const UNCOMPRESSED_LEN: usize = 12000;
+        let data: Vec<u8> = (0..UNCOMPRESSED_LEN).map(|i| (i % 251) as u8).collect();
+        let options = ChunkedArchiveOptions::V2 {
+            minimum_chunk_size: CHUNK_SIZE,
+            chunk_alignment: CHUNK_SIZE,
+            compression_level: 1,
+        };
+        let archive = ChunkedArchive::new(&data, options).unwrap();
+
+        let mut compressed_offsets = vec![0];
+        let mut compressed_data = Vec::new();
+        for chunk in archive.chunks() {
+            compressed_data.extend_from_slice(&chunk.compressed_data);
+            compressed_offsets.push(compressed_data.len() as u64);
+        }
+        compressed_offsets.pop();
+
+        let stored_size = compressed_data.len() as u64;
+        let stored_aligned = stored_size.next_multiple_of(BLOCK_SIZE);
+        compressed_data.resize(stored_aligned as usize, 0);
+
+        let extents = Extents::try_new([Extent::new(0..stored_aligned, Some(0))], 0).unwrap();
+        let compression_info = CompressionInfo::new(
+            CHUNK_SIZE as u64,
+            stored_size,
+            &compressed_offsets,
+            CompressionAlgorithm::Zstd,
+        )
+        .unwrap();
+        let file = Arc::new(File::new(extents, UNCOMPRESSED_LEN as u64, compression_info.into()));
+        let service = FakeBlockService::new(compressed_data.clone());
+
+        let (req, rx) = TestVecBuffer::new_with_range(0..4096);
+        file.read_single_window_for_page_size(PAGE_SIZE, PAGE_SIZE, &service, req, &|_| {});
+        let mut expected = data;
+        expected.resize(PAGE_SIZE as usize, 0);
+        assert_eq!(rx.output(), expected);
+        assert_eq!(rx.commits(), vec![(0, CHUNK_SIZE), (CHUNK_SIZE as u64, CHUNK_SIZE)]);
+
+        // When a window starts at or past `uncompressed_size` (e.g. a 16 KiB page tail on a
+        // 24 KiB window alignment), `read_single_window_for_page_size` zero-fills and commits the
+        // tail pages instead of dropping `page_request`.
+        let exact_chunk_data = vec![0x42u8; CHUNK_SIZE];
+        let single_archive = ChunkedArchive::new(&exact_chunk_data, options).unwrap();
+        let single_compressed = single_archive.chunks()[0].compressed_data.clone();
+        let single_stored_size = single_compressed.len() as u64;
+        let single_stored_aligned = single_stored_size.next_multiple_of(BLOCK_SIZE);
+        let mut single_device_data = single_compressed;
+        single_device_data.resize(single_stored_aligned as usize, 0);
+
+        let single_extents =
+            Extents::try_new([Extent::new(0..single_stored_aligned, Some(0))], 0).unwrap();
+        let single_info = CompressionInfo::new(
+            CHUNK_SIZE as u64,
+            single_stored_size,
+            &[0],
+            CompressionAlgorithm::Zstd,
+        )
+        .unwrap();
+        let single_file =
+            Arc::new(File::new(single_extents, CHUNK_SIZE as u64, single_info.into()));
+        let single_service = FakeBlockService::new(single_device_data);
+        let (req, rx) = TestVecBuffer::new_with_range(CHUNK_SIZE as u64..PAGE_SIZE);
+        single_file.read_single_window_for_page_size(
+            CHUNK_SIZE as u64,
+            PAGE_SIZE,
+            &single_service,
+            req,
+            &|_| {},
+        );
+        assert_eq!(rx.output(), vec![0u8; CHUNK_SIZE]);
+        assert_eq!(rx.commits(), vec![(CHUNK_SIZE as u64, CHUNK_SIZE)]);
     }
 }

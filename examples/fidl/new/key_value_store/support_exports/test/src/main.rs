@@ -7,7 +7,7 @@ use example_tester::{Client, Server, TestKind, assert_logs_eq_to_golden, run_tes
 use fidl::prelude::*;
 use fidl_examples_keyvaluestore_supportexports::StoreMarker;
 
-use fuchsia_component_test::{ChildRef, RealmBuilder};
+use fuchsia_component_test::{Capability, ChildRef, RealmBuilder, Ref, Route};
 
 async fn test_export(
     test_name: &str,
@@ -22,9 +22,33 @@ async fn test_export(
         StoreMarker::PROTOCOL_NAME,
         TestKind::ClientAndServer { client: &client, server: &server },
         |builder: RealmBuilder, client: ChildRef| async move {
-            builder.init_mutable_config_to_empty(&client).await?;
-            builder.set_config_value(&client, "write_items", write_items.into()).await?;
-            builder.set_config_value(&client, "max_export_size", max_export_size.into()).await?;
+            builder
+                .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                    name: "fuchsia.examples.keyvaluestore.supportexports.WriteItems".parse()?,
+                    value: write_items.into(),
+                }))
+                .await?;
+            builder
+                .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                    name: "fuchsia.examples.keyvaluestore.supportexports.MaxExportSize".parse()?,
+                    value: max_export_size.into(),
+                }))
+                .await?;
+            let config_capabilities = [
+                "fuchsia.examples.keyvaluestore.supportexports.WriteItems",
+                "fuchsia.examples.keyvaluestore.supportexports.MaxExportSize",
+            ];
+            builder
+                .add_route(
+                    config_capabilities
+                        .into_iter()
+                        .fold(Route::new(), |route, name| {
+                            route.capability(Capability::configuration(name))
+                        })
+                        .from(Ref::self_())
+                        .to(&client),
+                )
+                .await?;
             Ok::<(RealmBuilder, ChildRef), Error>((builder, client))
         },
         |log_reader| {

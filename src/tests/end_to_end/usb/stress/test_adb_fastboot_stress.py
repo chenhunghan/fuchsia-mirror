@@ -61,7 +61,7 @@ class AdbFastbootStressTest(fuchsia_base_test.FuchsiaBaseTest):
         await self.dut.fastboot.boot_to_fuchsia_mode(
             method=fastboot_types.BootToFuchsiaMethod.CONTINUE
         )
-        self.dut.adb.wait_for_boot_complete()
+        await self.dut.wait_for_online()
 
         _LOGGER.info(
             "Successfully ended the ADB/Fastboot transition test iteration# %s",

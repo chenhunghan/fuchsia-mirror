@@ -112,9 +112,7 @@ static_library("headers") {
     "registers.h",
     "scs_unwinder.h",
     "sigreturn_unwinder.h",
-    "third_party/libunwindstack/context.h",
     "unwind.h",
-    "unwind_local.h",
     "unwinder_base.h",
   ]
   if (is_fuchsia) {
@@ -124,6 +122,7 @@ static_library("headers") {
   }
   public_deps = [ "//sdk/lib/fit" ]
 }
+
 static_library("internal_headers") {
   public = [
     "arm_ehabi_parser.h",
@@ -132,6 +131,7 @@ static_library("internal_headers") {
   visibility = [ ":*" ]
   public_deps = [ ":headers" ]
 }
+
 static_library("unwinder") {
   sources = []
   sources += [
@@ -157,12 +157,8 @@ static_library("unwinder") {
     "scs_unwinder.cc",
     "sigreturn_unwinder.cc",
     "unwind.cc",
-    "unwind_local.cc",
     "unwinder_base.cc",
   ]
-  if (current_cpu == "x64") {
-    sources += [ "third_party/libunwindstack/context_x86_64.S" ]
-  }
   if (is_fuchsia) {
     sources += [ "fuchsia.cc" ]
   } else if (is_linux) {

@@ -183,6 +183,34 @@ impl TargetStateDiscoverer for DefaultTargetStateDiscoverer {
     }
 }
 
+/// Converts `target_spec` into a `TargetInfoQuery` for waiting on target state.
+///
+/// Returns `Ok(None)` if `target_spec` is a scoped IPv6 address (e.g.
+/// `[fe80::1%zx-1234]`) whose scope network interface does not currently exist
+/// on the host. This is expected while a USB-connected target is disconnected
+/// or rebooting, so callers should treat it as "the target is not reachable
+/// right now" rather than as an invalid specifier. Note that this cannot
+/// distinguish an interface that was removed from one that never existed
+/// (e.g. a typo in the interface name).
+///
+/// Any other parse error is permanent and is returned as a user error.
+fn query_for_wait(
+    target_spec: Option<&str>,
+) -> Result<Option<TargetInfoQuery>, ffx_command_error::Error> {
+    let Some(spec) = target_spec else {
+        return Ok(Some(TargetInfoQuery::First));
+    };
+    // Parse only once: each parse looks up the scope interface, so parsing
+    // again to classify an error could race with the interface appearing.
+    match TargetInfoQuery::try_from(spec) {
+        Ok(query) => Ok(Some(query)),
+        Err(discovery::error::Error::ParseError(addr::TargetAddrParseError::Scope { .. })) => {
+            Ok(None)
+        }
+        Err(e) => Err(ffx_command_error::Error::User(e.into())),
+    }
+}
+
 async fn wait_for_discovered_state(
     discoverer: impl TargetStateDiscoverer,
     wait_timeout: Option<Duration>,
@@ -190,12 +218,31 @@ async fn wait_for_discovered_state(
     target_spec: &Option<String>,
     behavior: WaitFor,
 ) -> Result<(), ffx_command_error::Error> {
-    let query = TargetInfoQuery::try_from(target_spec.clone())
-        .map_err(|e| ffx_command_error::Error::User(e.into()))?;
-    let source = target_source_for_query(&query, env);
     let discover_fut = async {
+        // `target_spec` comes from the same config as
+        // `get_target_specifier_with_source`, so a string comparison identifies
+        // its source without re-parsing it (which would look up the scope
+        // interface again). If a caller passes a different spec string, the
+        // source is just `None`, which only affects how an error message
+        // describes the target.
+        let source = match get_target_specifier_with_source(env) {
+            Ok((spec, source)) if spec == *target_spec => source,
+            _ => None,
+        };
         loop {
             futures_lite::future::yield_now().await;
+
+            // Note that we transform the target_spec into a query every time
+            // through the loop, because while we are waiting for the device, we
+            // may have to wait for a valid scope-id to appear.
+            let query = match query_for_wait(target_spec.as_deref())? {
+                Some(q) => q,
+                None => {
+                    debug!("Waiting for the network interface of target {target_spec:?} to appear");
+                    Timer::new(Duration::from_millis(DOWN_REPOLL_DELAY_MS)).await;
+                    continue;
+                }
+            };
 
             match discoverer.discover(query.clone(), env).await {
                 Ok(handles) => match resolve::expect_single_target(&query, handles, source.clone())
@@ -267,13 +314,25 @@ async fn wait_for_device_inner(
             // Note that we transform the target_spec into a query every time
             // through the loop, because while we are waiting for the device, we
             // may have to wait for a valid scope-id to appear.
-            let query = match TargetInfoQuery::try_from(target_spec_clone.clone()) {
-                Ok(q) => q,
-                Err(e) => {
-                    log::debug!("Waiting for valid target specifier: {e}");
+            let query = match query_for_wait(target_spec_clone.as_deref()) {
+                Ok(Some(q)) => q,
+                Ok(None) => {
+                    if let WaitFor::DeviceOffline = behavior {
+                        // The target cannot be reached through a network
+                        // interface that does not exist, so it is offline.
+                        info!(
+                            "Network interface of target {target_spec_clone:?} does not exist; \
+                            treating target as offline"
+                        );
+                        break Ok(());
+                    }
+                    debug!(
+                        "Waiting for the network interface of target {target_spec_clone:?} to appear"
+                    );
                     Timer::new(Duration::from_millis(DOWN_REPOLL_DELAY_MS)).await;
                     continue;
                 }
+                Err(e) => break Err(e),
             };
 
             break match knocker.knock_rcs(&query, &env).await {
@@ -428,7 +487,7 @@ pub(crate) async fn knock_target_impl(
             ever_found.store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
-        log::debug!("daemonless knock connecting to resolved target {:?}", res);
+        log::debug!("knock connecting to resolved target {:?}", res);
         if res.get_connection_if_already_established().is_none() {
             let conn = res.get_connection(context).await.map_err(|e| match e {
                 FfxTargetCrateError::Knock(ke) => ke,
@@ -436,7 +495,7 @@ pub(crate) async fn knock_target_impl(
                     KnockError::Critical(KnockCriticalError::TargetError(format!("{:?}", other)))
                 }
             })?;
-            log::debug!("daemonless knock connection established");
+            log::debug!("knock connection established");
             let _ = conn.rcs_proxy_fdomain().await.map_err(|e| {
                 KnockError::NonCritical(KnockNonCriticalError::Custom(format!("{:?}", e)))
             })?;
@@ -447,7 +506,7 @@ pub(crate) async fn knock_target_impl(
     futures_lite::pin!(res_future);
     timeout::timeout(knock_timeout, res_future).await.map_err(|_| {
         KnockError::NonCritical(KnockNonCriticalError::Timeout {
-            detail: "daemonless knock timeout".to_string(),
+            detail: "knock timeout".to_string(),
         })
     })?
 }
@@ -1283,5 +1342,198 @@ mod test {
         )
         .await;
         assert!(res.is_err(), "{:?}", res);
+    }
+
+    #[fuchsia::test]
+    async fn wait_for_device_down_invalid_scope_returns_ok() {
+        let mut mock = MockRcsKnocker::new();
+        mock.expect_knock_rcs().times(0);
+        let env = ffx_config::test_init().unwrap();
+        let res = wait_for_device_inner(
+            mock,
+            Some(Duration::from_secs(5)),
+            &env.context,
+            &Some("[fe80::1%nonexistent_scope]".to_string()),
+            WaitFor::DeviceOffline,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .await;
+        assert!(res.is_ok(), "{:?}", res);
+    }
+
+    #[fuchsia::test]
+    async fn wait_for_device_up_invalid_scope_times_out() {
+        let mut mock = MockRcsKnocker::new();
+        mock.expect_knock_rcs().times(0);
+        let env = ffx_config::test_init().unwrap();
+        let res = wait_for_device_inner(
+            mock,
+            Some(Duration::from_millis(50)),
+            &env.context,
+            &Some("[fe80::1%nonexistent_scope]".to_string()),
+            WaitFor::DeviceOnline,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .await;
+        let err = res.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("Timeout attempting to reach target \"[fe80::1%nonexistent_scope]\"."),
+            "expected reach target timeout message, got: {err_msg}"
+        );
+    }
+
+    #[fuchsia::test]
+    async fn test_wait_for_discovered_state_invalid_scope_times_out() {
+        let mut mock = MockTargetStateDiscoverer::new();
+        mock.expect_discover().times(0);
+        let env = ffx_config::test_init().unwrap();
+        let res = wait_for_discovered_state(
+            mock,
+            Some(Duration::from_millis(50)),
+            &env.context,
+            &Some("[fe80::1%nonexistent_scope]".to_string()),
+            WaitFor::Product,
+        )
+        .await;
+        let err = res.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("Timeout attempting to reach target \"[fe80::1%nonexistent_scope]\"."),
+            "expected reach target timeout message, got: {err_msg}"
+        );
+    }
+
+    #[fuchsia::test]
+    async fn test_wait_for_discovered_state_ambiguous_default_target_reports_source() {
+        let mut mock = MockTargetStateDiscoverer::new();
+        mock.expect_discover().times(1).returning(|_, _| {
+            Box::pin(ready(Ok(vec![
+                discovery::TargetHandle {
+                    node_name: Some("foo1".to_string()),
+                    state: discovery::TargetState::Fastboot(discovery::FastbootTargetState {
+                        serial_number: "12345".to_string(),
+                        connection_state: discovery::FastbootConnectionState::Usb,
+                    }),
+                    manual: false,
+                },
+                discovery::TargetHandle {
+                    node_name: Some("foo2".to_string()),
+                    state: discovery::TargetState::Fastboot(discovery::FastbootTargetState {
+                        serial_number: "67890".to_string(),
+                        connection_state: discovery::FastbootConnectionState::Usb,
+                    }),
+                    manual: false,
+                },
+            ])))
+        });
+        let env = ffx_config::test_env().env_var("FUCHSIA_NODENAME", "foo").build().unwrap();
+        let res = wait_for_discovered_state(
+            mock,
+            Some(Duration::from_secs(5)),
+            &env.context,
+            &Some("foo".to_string()),
+            WaitFor::Product,
+        )
+        .await;
+        let err_msg = res.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Default target") && err_msg.contains("$FUCHSIA_NODENAME"),
+            "expected the error to report the default target source, got: {err_msg}"
+        );
+    }
+
+    #[fuchsia::test]
+    fn test_query_for_wait() {
+        assert_eq!(
+            query_for_wait(Some("foo")).unwrap(),
+            Some(TargetInfoQuery::NodenameOrId("foo".to_string()))
+        );
+        assert_eq!(query_for_wait(None).unwrap(), Some(TargetInfoQuery::First));
+        assert_eq!(query_for_wait(Some("[fe80::1%nonexistent_scope]")).unwrap(), None);
+        for spec in ["usb:cid:abc", "vsock:cid:xyz", "127.0.0.1:abc", "uart:"] {
+            let err = query_for_wait(Some(spec)).unwrap_err();
+            assert!(
+                matches!(err, ffx_command_error::Error::User(_)),
+                "{spec} should be rejected as a user error, got {err:?}"
+            );
+        }
+    }
+
+    #[fuchsia::test]
+    async fn wait_for_device_down_malformed_spec_fails() {
+        let mut mock = MockRcsKnocker::new();
+        mock.expect_knock_rcs().times(0);
+        let env = ffx_config::test_init().unwrap();
+        let res = wait_for_device_inner(
+            mock,
+            Some(Duration::from_secs(5)),
+            &env.context,
+            &Some("usb:cid:abc".to_string()),
+            WaitFor::DeviceOffline,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .await;
+        let err = res.unwrap_err();
+        assert!(
+            matches!(err, ffx_command_error::Error::User(_)),
+            "expected a user error, got: {err:?}"
+        );
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("invalid target specifier"),
+            "expected invalid target specifier error, got: {err_msg}"
+        );
+    }
+
+    #[fuchsia::test]
+    async fn wait_for_device_up_malformed_spec_fails() {
+        let mut mock = MockRcsKnocker::new();
+        mock.expect_knock_rcs().times(0);
+        let env = ffx_config::test_init().unwrap();
+        let res = wait_for_device_inner(
+            mock,
+            Some(Duration::from_secs(5)),
+            &env.context,
+            &Some("127.0.0.1:abc".to_string()),
+            WaitFor::DeviceOnline,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .await;
+        let err = res.unwrap_err();
+        assert!(
+            matches!(err, ffx_command_error::Error::User(_)),
+            "expected a user error, got: {err:?}"
+        );
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("invalid target specifier"),
+            "expected invalid target specifier error, got: {err_msg}"
+        );
+    }
+
+    #[fuchsia::test]
+    async fn test_wait_for_discovered_state_malformed_spec_fails() {
+        let mut mock = MockTargetStateDiscoverer::new();
+        mock.expect_discover().times(0);
+        let env = ffx_config::test_init().unwrap();
+        let res = wait_for_discovered_state(
+            mock,
+            Some(Duration::from_secs(5)),
+            &env.context,
+            &Some("vsock:cid:xyz".to_string()),
+            WaitFor::Product,
+        )
+        .await;
+        let err = res.unwrap_err();
+        assert!(
+            matches!(err, ffx_command_error::Error::User(_)),
+            "expected a user error, got: {err:?}"
+        );
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("invalid target specifier"),
+            "expected invalid target specifier error, got: {err_msg}"
+        );
     }
 }

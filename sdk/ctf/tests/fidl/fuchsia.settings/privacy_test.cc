@@ -63,11 +63,22 @@ class PrivacyTest : public zxtest::Test {
   void SetUp() override {
     EXPECT_EQ(ZX_OK, service->Connect(realm_factory.NewRequest()));
 
+#if FUCHSIA_API_LEVEL_LESS_THAN(HEAD)
     fuchsia::settings::test::RealmOptions options;
     fuchsia::settings::test::RealmFactory_CreateRealm2_Result result1;
     fuchsia::component::sandbox::DictionarySyncPtr dictionary;
     EXPECT_OK(realm_factory->CreateRealm2(std::move(options), dictionary.NewRequest(), &result1));
     test_ns_.emplace(ExtendNamespace(realm_factory.Unbind(), dictionary.Unbind()));
+#else
+    zx::eventpair dictionary;
+    zx::eventpair dictionary_other_end;
+    zx_status_t status = zx::eventpair::create(0, &dictionary, &dictionary_other_end);
+    ZX_ASSERT(status == ZX_OK);
+    fuchsia::settings::test::RealmOptions options;
+    fuchsia::settings::test::RealmFactory_CreateRealm3_Result result1;
+    EXPECT_OK(realm_factory->CreateRealm3(std::move(options), std::move(dictionary), &result1));
+    test_ns_.emplace(ExtendNamespace(realm_factory.Unbind(), std::move(dictionary_other_end)));
+#endif
     EXPECT_OK(test_ns_->Connect("fuchsia.settings.Privacy", privacy.NewRequest().TakeChannel()));
   }
 
@@ -92,10 +103,15 @@ class PrivacyTest : public zxtest::Test {
   template <typename Interface>
   InstalledNamespace ExtendNamespace(
       fidl::InterfaceHandle<Interface> realm_factory,
+#if FUCHSIA_API_LEVEL_LESS_THAN(HEAD)
       fidl::InterfaceHandle<::fuchsia::component::sandbox::Dictionary> dictionary) {
+#else
+      zx::eventpair dictionary) {
+#endif
     std::string prefix = std::string("/dict-") + std::to_string(namespace_ctr++);
     fuchsia::component::NamespaceSyncPtr namespace_proxy;
     EXPECT_OK(service->Connect(namespace_proxy.NewRequest()));
+#if FUCHSIA_API_LEVEL_LESS_THAN(HEAD)
     std::vector<fuchsia::component::NamespaceInputEntry> entries;
     entries.emplace_back(fuchsia::component::NamespaceInputEntry{
         .path = prefix,
@@ -103,6 +119,15 @@ class PrivacyTest : public zxtest::Test {
     });
     fuchsia::component::Namespace_Create_Result result;
     EXPECT_OK(namespace_proxy->Create(std::move(entries), &result));
+#else
+    std::vector<fuchsia::component::NamespaceInputEntry2> entries;
+    entries.emplace_back(fuchsia::component::NamespaceInputEntry2{
+        .path = prefix,
+        .capability = std::move(dictionary),
+    });
+    fuchsia::component::Namespace_Create2_Result result;
+    EXPECT_OK(namespace_proxy->Create2(std::move(entries), &result));
+#endif
     EXPECT_TRUE(!result.is_err());
     std::vector<fuchsia::component::NamespaceEntry> namespace_entries =
         std::move(result.response().entries);

@@ -5,17 +5,17 @@
 //! IPv4 and IPv6 sockets.
 
 use core::cmp::Ordering;
-use core::num::NonZeroU8;
+use core::num::{NonZeroU8, NonZeroU16};
 
 use log::{debug, error};
-use net_types::ip::{Ip, IpVersionMarker, Ipv6Addr, Mtu};
+use net_types::ip::{Ip, IpVersion, IpVersionMarker, Ipv6Addr, Mtu};
 use net_types::{MulticastAddress, ScopeableAddress, SpecifiedAddr, Witness as _};
 use netstack3_base::socket::{SocketIpAddr, SocketIpAddrExt as _};
 use netstack3_base::{
-    AnyDevice, CounterContext, DeviceIdContext, DeviceIdentifier, EitherDeviceId, InstantContext,
-    InterfaceProperties, IpDeviceAddr, IpExt, Marks, Mms, NetworkSerializationContext, PacketType,
-    SendFrameErrorReason, StrongDeviceIdentifier, TxMetadata, TxMetadataBindingsTypes,
-    WeakDeviceIdentifier,
+    AnyDevice, CounterContext, DeviceIdContext, DeviceIdentifier, EitherDeviceId, GsoInfo,
+    InstantContext, InterfaceProperties, IpDeviceAddr, IpExt, Ipv4IdMode, Marks, Mms,
+    NetworkSerializationContext, PacketType, SendFrameErrorReason, StrongDeviceIdentifier,
+    TxMetadata, TxMetadataBindingsTypes, WeakDeviceIdentifier,
 };
 use netstack3_filter::{
     self as filter, DynTransportSerializer, DynamicTransportSerializer, FilterBindingsContext,
@@ -58,6 +58,41 @@ pub struct IpSocketArgs<'a, D: StrongDeviceIdentifier, I: IpExt, O> {
     /// Additional IP layer options.
     pub options: &'a O,
 }
+
+/// Generic Segmentation Offload (GSO) metadata provided by the transport layer
+/// when sending a packet on an IP socket.
+///
+/// The IP layer decides how IPv4 identification fields are assigned across
+/// segments when converting this to a [`GsoInfo`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransportGsoInfo {
+    /// The maximum segment size (payload length per segment) that GSO should
+    /// use during segmentation.
+    pub gso_size: NonZeroU16,
+    /// The number of segments GSO will produce.
+    pub gso_segs: NonZeroU16,
+}
+
+impl TransportGsoInfo {
+    fn into_gso_info<I: Ip>(self) -> GsoInfo {
+        let Self { gso_size, gso_segs } = self;
+        let ipv4_id_mode = match I::VERSION {
+            // Each segment gets its own ID; the IP layer reserves a contiguous
+            // block of them when sending the packet.
+            //
+            // TODO(https://fxbug.dev/408513626): If we start setting DF on
+            // these packets, we could use `Ipv4IdMode::Fixed` instead, since
+            // RFC 6864 permits atomic datagrams to share an ID. That choice
+            // should come from a stack-wide policy shared with the DF decision
+            // and ID allocation in `send_ip_packet_from_device`, so that it
+            // applies consistently to all packets.
+            IpVersion::V4 => Some(Ipv4IdMode::Incrementing),
+            IpVersion::V6 => None,
+        };
+        GsoInfo { gso_size, gso_segs, ipv4_id_mode }
+    }
+}
+
 /// An execution context defining a type of IP socket.
 pub trait IpSocketHandler<I: IpExt + FilterIpExt, BC: TxMetadataBindingsTypes>:
     DeviceIdContext<AnyDevice>
@@ -95,12 +130,19 @@ pub trait IpSocketHandler<I: IpExt + FilterIpExt, BC: TxMetadataBindingsTypes>:
     /// Note that the device's MTU will still be imposed on the packet. That is,
     /// the smaller of `mtu` and the device's MTU will be imposed on the packet.
     ///
+    /// `gso_info`, when provided, instructs the IP layer to split `body`'s
+    /// transport payload into multiple segments on egress. In that case,
+    /// `body` must be segmentable, i.e. `S`'s implementation of
+    /// [`MaybeSegmentableTransportSerializer::try_as_segmentable`] must return
+    /// `Ok`.
+    ///
     /// If the socket is currently unroutable, an error is returned.
     fn send_ip_packet<S, O>(
         &mut self,
         bindings_ctx: &mut BC,
         socket: &IpSock<I, Self::WeakDeviceId>,
         body: S,
+        gso_info: Option<TransportGsoInfo>,
         options: &O,
         tx_metadata: BC::TxMetadata,
     ) -> Result<(), IpSockSendError>
@@ -163,7 +205,7 @@ pub trait IpSocketHandler<I: IpExt + FilterIpExt, BC: TxMetadataBindingsTypes>:
             .map_err(|err| SendOneShotIpPacketError::CreateAndSendError { err: err.into() })?;
         let packet = get_body_from_src_ip(*tmp.local_ip())
             .map_err(SendOneShotIpPacketError::SerializeError)?;
-        self.send_ip_packet(bindings_ctx, &tmp, packet, options, tx_metadata)
+        self.send_ip_packet(bindings_ctx, &tmp, packet, None, options, tx_metadata)
             .map_err(|err| SendOneShotIpPacketError::CreateAndSendError { err: err.into() })
     }
 
@@ -194,6 +236,7 @@ pub trait IpSocketHandler<I: IpExt + FilterIpExt, BC: TxMetadataBindingsTypes>:
             bindings_ctx,
             &tmp,
             DynTransportSerializer::new(&mut packet),
+            None,
             options,
             tx_metadata,
         )
@@ -551,6 +594,7 @@ where
         bindings_ctx: &mut BC,
         ip_sock: &IpSock<I, CC::WeakDeviceId>,
         body: S,
+        gso_info: Option<TransportGsoInfo>,
         options: &O,
         tx_metadata: BC::TxMetadata,
     ) -> Result<(), IpSockSendError>
@@ -559,7 +603,7 @@ where
         S::Buffer: BufferMut,
         O: SendOptions<I> + RouteResolutionOptions<I>,
     {
-        send_ip_packet(self, bindings_ctx, ip_sock, body, options, tx_metadata)
+        send_ip_packet(self, bindings_ctx, ip_sock, body, gso_info, options, tx_metadata)
     }
 
     fn confirm_reachable<O>(
@@ -860,6 +904,7 @@ fn send_ip_packet<I, S, BC, CC, O>(
     bindings_ctx: &mut BC,
     socket: &IpSock<I, CC::WeakDeviceId>,
     mut body: S,
+    gso_info: Option<TransportGsoInfo>,
     options: &O,
     tx_metadata: BC::TxMetadata,
 ) -> Result<(), IpSockSendError>
@@ -933,9 +978,7 @@ where
 
     let previous_dst = remote_ip.addr();
     let mut packet = filter::TxPacket::new(local_ip.addr(), remote_ip.addr(), *proto, &mut body);
-    // TODO(https://fxbug.dev/565891068): Support TCP GSO by populating GSO
-    // metadata when segment offloading is enabled for the socket.
-    let gso_info = None;
+    let gso_info = gso_info.map(TransportGsoInfo::into_gso_info::<I>);
     let mut packet_metadata =
         IpLayerPacketMetadata::new_local_tx(tx_metadata, *options.marks(), gso_info);
 
@@ -1713,6 +1756,7 @@ pub(crate) mod testutil {
             bindings_ctx: &mut BC,
             socket: &IpSock<I, Self::WeakDeviceId>,
             body: S,
+            _gso_info: Option<TransportGsoInfo>,
             options: &O,
             // NB: Tx metadata plumbing is not supported for fake socket
             // contexts. Drop at the end of the scope.
@@ -2159,7 +2203,7 @@ pub(crate) mod testutil {
                 proto: *proto,
                 ttl: options.hop_limit(remote_ip),
                 mtu: options.mtu(),
-                dscp_and_ecn: DscpAndEcn::default(),
+                dscp_and_ecn: options.dscp_and_ecn(),
             })
         }
     }

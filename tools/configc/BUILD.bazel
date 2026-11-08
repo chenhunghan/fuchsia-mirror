@@ -1,0 +1,42 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host:defs.bzl", "rustc_binary_host_tool")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary_host_tool(
+    name = "configc",
+    srcs = [
+        "src/client_cpp.rs",
+        "src/client_fidl.rs",
+        "src/client_rust.rs",
+        "src/common.rs",
+        "src/cvf.rs",
+        "src/cvm.rs",
+        "src/dump_values.rs",
+        "src/main.rs",
+        "src/validate_package.rs",
+    ],
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//build/bazel/rules/components:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust_common",
+        "//src/lib/assembly/validate_package",
+        "//src/lib/fidl/rust/fidl",
+        "//src/sys/lib/cm_rust",
+        "//src/sys/lib/cm_types",
+        "//src/sys/lib/config_encoder",
+        "//src/sys/pkg/lib/fuchsia-pkg",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:camino",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:serde_json5",
+        "//tools/lib/config_client",
+        "//tools/lib/config_value_file",
+    ],
+)

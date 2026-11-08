@@ -84,6 +84,12 @@ atomic_bitflags! {
 
         /// Whether the entry has filesystems mounted on top of it.
         const HAS_MOUNTS = 1 << 1;
+
+        /// Whether the entry has been used since it was inserted into the dentry cache of its
+        /// file system, or since that cache last gave it a second chance. Set by
+        /// `DirEntry::record_dcache_use` and cleared by `FileSystem::purge_old_entries` and
+        /// `FileSystem::forget_dir_entry_uses`.
+        const DCACHE_REFERENCED = 1 << 2;
     }
 }
 
@@ -940,11 +946,27 @@ impl DirEntry {
     /// Remove the child with the given name from the children cache.  The child must not have any
     /// mounts.
     pub fn remove_child(&self, name: &FsStr, mounts: &Mounts) {
+        self.remove_child_if(name, mounts, |_| true);
+    }
+
+    /// Removes the child with the given name from the children cache if `predicate` returns `true`
+    /// while holding the children write lock. The child must not have any mounts.
+    pub fn remove_child_if(
+        &self,
+        name: &FsStr,
+        mounts: &Mounts,
+        predicate: impl FnOnce(&DirEntryHandle) -> bool,
+    ) {
+        // Declare `child` before `children` so any last reference drops after releasing the lock.
+        let child;
         let mut children = self.children.write();
-        let child = children.remove(name).and_then(|weak| weak.upgrade());
-        if let Some(child) = child {
+        child = children.get(name).and_then(|weak| weak.upgrade());
+        if child.as_ref().is_none_or(predicate) {
+            children.remove(name);
             std::mem::drop(children);
-            child.destroy(mounts);
+            if let Some(child) = child {
+                child.destroy(mounts);
+            }
         }
     }
 
@@ -969,6 +991,29 @@ impl DirEntry {
             CheckAccessReason::InternalPermissionChecks,
             self,
         )
+    }
+
+    /// Records a use of this cached entry for the dentry cache of its file system, if `can_cache`
+    /// returns true.
+    ///
+    /// The use is recorded with `DirEntryFlags::DCACHE_REFERENCED`: an LRU dentry cache does not
+    /// move entries when they are used, but gives entries with the flag set a second chance in
+    /// `FileSystem::purge_old_entries`, which clears it again. Other dentry caches ignore the flag.
+    /// A use only needs to be recorded once until the flag is cleared, so for an entry that is used
+    /// often this is a single atomic load and `can_cache` is not called.
+    fn record_dcache_use(&self, can_cache: impl FnOnce() -> bool) {
+        if !self.flags.load(Ordering::Relaxed).contains(DirEntryFlags::DCACHE_REFERENCED)
+            && can_cache()
+        {
+            self.flags.fetch_or(DirEntryFlags::DCACHE_REFERENCED, Ordering::Relaxed);
+        }
+    }
+
+    /// Clears `DirEntryFlags::DCACHE_REFERENCED` and returns whether it was set.
+    pub(super) fn clear_dcache_referenced(&self) -> bool {
+        self.flags
+            .fetch_and(!DirEntryFlags::DCACHE_REFERENCED, Ordering::Relaxed)
+            .contains(DirEntryFlags::DCACHE_REFERENCED)
     }
 
     /// Retrieves a child `DirEntry` from the cache or obtains one via `create_fn`.
@@ -999,9 +1044,9 @@ impl DirEntry {
         if let Some(child) = child {
             if child.ops.revalidate(current_task, &child)? {
                 // Do not cache a child in a locked directory
-                if self.node.fail_if_locked(current_task, &self.node.info()).is_ok() {
-                    child.node.fs().did_access_dir_entry(&child);
-                }
+                child.record_dcache_use(|| {
+                    self.node.fail_if_locked(current_task, &self.node.info()).is_ok()
+                });
                 return Ok((child, CreationStatus::Existed));
             }
             // The cached child is stale. Evict it so that create_fn provides a fresh node.
@@ -1290,9 +1335,9 @@ impl<'a> DirEntryLockedChildren<'a> {
     ) -> Result<(DirEntryHandle, CreationStatus), Errno> {
         if let Some(child) = self.children.get(name).and_then(Weak::upgrade) {
             // Do not cache a child in a locked directory
-            if self.entry.node.fail_if_locked(current_task, &self.entry.node.info()).is_ok() {
-                child.node.fs().did_access_dir_entry(&child);
-            }
+            child.record_dcache_use(|| {
+                self.entry.node.fail_if_locked(current_task, &self.entry.node.info()).is_ok()
+            });
             return Ok((child, CreationStatus::Existed));
         }
 
@@ -1589,8 +1634,8 @@ mod tests {
     use crate::vfs::pseudo::simple_directory::SimpleDirectory;
     use crate::vfs::{
         CacheConfig, CacheMode, FileOps, FileSystem, FileSystemHandle, FileSystemOps,
-        FileSystemOptions, FsNode, FsNodeInfo, FsNodeOps, MemoryDirectoryFile, Namespace,
-        SymlinkNode, WhatToMount, fs_node_impl_not_dir,
+        FileSystemOptions, FsNode, FsNodeInfo, FsNodeOps, LookupContext, MemoryDirectoryFile,
+        Namespace, SymlinkNode, WhatToMount, fs_node_impl_not_dir,
     };
     use starnix_sync::Mutex;
     use starnix_types::vfs::default_statfs;
@@ -1939,6 +1984,49 @@ mod tests {
             };
             assert_eq!(open_excl("file", ResolveFlags::empty()).unwrap_err(), errno!(EEXIST));
             assert_eq!(open_excl("file", ResolveFlags::NO_XDEV).unwrap_err(), errno!(EXDEV));
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn test_dcache_keeps_recently_used_entries() {
+        spawn_kernel_and_run(async |current_task| {
+            let (fs, lookup_count) = create_counting_fs(&current_task);
+            let dir = Namespace::new(fs.clone()).root();
+            // The entries are only kept alive by the cache, so a weak reference to an entry tells
+            // whether the entry is still cached without recording a use.
+            let create = |name: &str| -> Weak<DirEntry> {
+                let node = dir
+                    .create_node(&current_task, name.into(), mode!(IFREG, 0o644), DeviceId::NONE)
+                    .expect("create_node failed");
+                Arc::downgrade(&node.entry)
+            };
+            let is_cached = |entry: &Weak<DirEntry>| entry.upgrade().is_some();
+
+            // Fill the cache, which holds 16 entries.
+            let mut entries: Vec<_> = (0..16).map(|i| create(&format!("file{i}"))).collect();
+
+            // Use the oldest entry, then add another entry, which evicts one entry.
+            let lookups = lookup_count.load(Ordering::SeqCst);
+            dir.lookup_child(&current_task, &mut LookupContext::default(), "file0".into())
+                .expect("lookup_child failed");
+            assert_eq!(lookup_count.load(Ordering::SeqCst), lookups);
+            entries.push(create("file16"));
+
+            // The entry that was used got a second chance, and the next oldest one was evicted.
+            assert!(is_cached(&entries[0]));
+            assert!(!is_cached(&entries[1]));
+
+            // The second chance cleared the use: without another use, the entry is evicted once
+            // the 15 entries that are now ahead of it have been evicted.
+            for i in 17..32 {
+                entries.push(create(&format!("file{i}")));
+            }
+            assert!(is_cached(&entries[0]));
+            assert!((2..17).all(|i| !is_cached(&entries[i])));
+            entries.push(create("file32"));
+            assert!(!is_cached(&entries[0]));
+            assert!((17..33).all(|i| is_cached(&entries[i])));
         })
         .await;
     }

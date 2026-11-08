@@ -100,7 +100,7 @@ void bti_pin_test_helper(VmoType vmo_type) {
             ZX_OK);
   ASSERT_EQ(zx::bti::create(iommu, 0, 0xdeadbeef, &bti), ZX_OK);
 
-  static constexpr uint64_t kPageCount = 256;
+  static constexpr uint64_t kPageCount = 4;
   const uint64_t kVmoSize = zx_system_get_page_size() * kPageCount;
   zx::vmo vmo;
   if (vmo_type == VmoType::Contiguous) {
@@ -141,7 +141,7 @@ TEST(Bti, PinContigFlag) {
             ZX_OK);
   ASSERT_EQ(zx::bti::create(iommu, 0, 0xdeadbeef, &bti), ZX_OK);
 
-  static constexpr uint64_t kPageCount = 256;
+  static constexpr uint64_t kPageCount = 4;
   const uint64_t kVmoSize = zx_system_get_page_size() * kPageCount;
   zx::vmo vmo;
   ASSERT_EQ(zx::vmo::create_contiguous(bti, kVmoSize, 0, &vmo), ZX_OK);
@@ -579,6 +579,28 @@ TEST(Bti, InvalidPinArgs) {
     EXPECT_OK(zx::vmo::create(kVmoSize, 0, &vmo));
     EXPECT_STATUS(ZX_ERR_INVALID_ARGS,
                   bti.pin(ZX_BTI_PERM_READ, vmo, 0, 0, paddrs, kPageCount, &pmt));
+  }
+
+  // Mismatched addrs_count and invalid addrs pointer.  These fail after the
+  // kernel has already created and mapped the PMT, exercising pre-handoff PMT
+  // cleanup without quarantining the PMT or faulting the BTI.
+  {
+    zx::vmo vmo;
+    zx::pmt pmt;
+    EXPECT_OK(zx::vmo::create(kVmoSize, 0, &vmo));
+    EXPECT_STATUS(ZX_ERR_INVALID_ARGS,
+                  bti.pin(ZX_BTI_PERM_READ, vmo, 0, kVmoSize, paddrs, kPageCount - 1, &pmt));
+    EXPECT_STATUS(ZX_ERR_INVALID_ARGS,
+                  zx_bti_pin(bti.get(), ZX_BTI_PERM_READ, vmo.get(), 0, kVmoSize, nullptr,
+                             kPageCount, pmt.reset_and_get_address()));
+
+    zx_info_bti_t bti_info{};
+    ASSERT_OK(bti.get_info(ZX_INFO_BTI, &bti_info, sizeof(bti_info), nullptr, nullptr));
+    EXPECT_EQ(bti_info.pmo_count, 0u);
+    EXPECT_EQ(bti_info.quarantine_count, 0u);
+
+    EXPECT_OK(bti.pin(ZX_BTI_PERM_READ, vmo, 0, kVmoSize, paddrs, kPageCount, &pmt));
+    EXPECT_OK(pmt.unpin());
   }
 }
 

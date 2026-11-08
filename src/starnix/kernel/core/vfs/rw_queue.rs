@@ -5,9 +5,10 @@
 use crate::task::CurrentTask;
 use starnix_uapi::errors::Errno;
 
-use core::marker::PhantomData;
-
-use starnix_sync::{InterruptibleEvent, LockDepMutex, LockLevel, RwQueueInnerLock};
+use starnix_sync::{
+    DynamicLockTracking, InterruptibleEvent, LockDepMutex, LockLevel, LockLevelToken,
+    RwQueueInnerLock,
+};
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -17,16 +18,25 @@ use lock_api as _;
 use lock_api::RawRwLock;
 
 #[derive(Debug)]
-pub struct RwQueue<L> {
+pub struct RwQueue {
     inner: LockDepMutex<RwQueueInner, RwQueueInnerLock>,
-    _phantom: PhantomData<L>,
+    tracking: DynamicLockTracking,
 
     // Used to inform our deadlock detector about the waiters in the queue.
     #[cfg(any(test, debug_assertions))]
     tracer: tracer::MutexTracer,
 }
 
-impl<L> RwQueue<L> {
+impl RwQueue {
+    pub fn new<L: LockLevel>() -> Self {
+        Self {
+            inner: Default::default(),
+            tracking: DynamicLockTracking::new::<L>(),
+            #[cfg(any(test, debug_assertions))]
+            tracer: Default::default(),
+        }
+    }
+
     fn unlock_read(&self) {
         self.inner.lock().unlock_read();
 
@@ -52,15 +62,10 @@ impl<L> RwQueue<L> {
             self.tracer.unlock_exclusive();
         }
     }
-}
 
-impl<L: LockLevel> RwQueue<L> {
-    pub fn read<'a>(
-        &'a self,
-        current_task: &CurrentTask,
-    ) -> Result<RwQueueReadGuard<'a, L>, Errno> {
-        // TODO(https://fxbug.dev/532501001): A lock dep guard should
-        // be added once FsNodeAppend is correct in respect of LockDep.
+    #[track_caller]
+    pub fn read<'a>(&'a self, current_task: &CurrentTask) -> Result<RwQueueReadGuard<'a>, Errno> {
+        let token = self.tracking.acquire();
         #[cfg(any(test, debug_assertions))]
         self.tracer.lock_shared();
 
@@ -79,15 +84,12 @@ impl<L: LockLevel> RwQueue<L> {
                 e
             })?;
         }
-        Ok(RwQueueReadGuard { queue: self })
+        Ok(RwQueueReadGuard { queue: self, _token: token })
     }
 
-    pub fn write<'a>(
-        &'a self,
-        current_task: &CurrentTask,
-    ) -> Result<RwQueueWriteGuard<'a, L>, Errno> {
-        // TODO(https://fxbug.dev/532501001): A lock dep guard should
-        // be added once FsNodeAppend is correct in respect of LockDep.
+    #[track_caller]
+    pub fn write<'a>(&'a self, current_task: &CurrentTask) -> Result<RwQueueWriteGuard<'a>, Errno> {
+        let token = self.tracking.acquire();
         #[cfg(any(test, debug_assertions))]
         self.tracer.lock_exclusive();
 
@@ -106,31 +108,7 @@ impl<L: LockLevel> RwQueue<L> {
                 e
             })?;
         }
-        Ok(RwQueueWriteGuard { queue: self })
-    }
-
-    /// Used to establish lock ordering.
-    #[cfg(any(test, debug_assertions))]
-    pub fn read_for_lock_ordering<'a>(&'a self) -> RwQueueReadGuard<'a, L> {
-        // TODO(https://fxbug.dev/532501001): A lock dep guard should
-        // be added once FsNodeAppend is correct in respect of LockDep.
-        #[cfg(any(test, debug_assertions))]
-        self.tracer.lock_shared();
-
-        assert!(self.inner.lock().try_read(), "Cannot fail to acquire a read for lock ordering.");
-
-        RwQueueReadGuard { queue: self }
-    }
-}
-
-impl<L> Default for RwQueue<L> {
-    fn default() -> Self {
-        Self {
-            inner: Default::default(),
-            _phantom: PhantomData,
-            #[cfg(any(test, debug_assertions))]
-            tracer: Default::default(),
-        }
+        Ok(RwQueueWriteGuard { queue: self, _token: token })
     }
 }
 
@@ -257,21 +235,23 @@ impl RwQueueInner {
     }
 }
 
-pub struct RwQueueReadGuard<'a, L> {
-    queue: &'a RwQueue<L>,
+pub struct RwQueueReadGuard<'a> {
+    queue: &'a RwQueue,
+    _token: LockLevelToken,
 }
 
-impl<'a, L> Drop for RwQueueReadGuard<'a, L> {
+impl<'a> Drop for RwQueueReadGuard<'a> {
     fn drop(&mut self) {
         self.queue.unlock_read();
     }
 }
 
-pub struct RwQueueWriteGuard<'a, L> {
-    queue: &'a RwQueue<L>,
+pub struct RwQueueWriteGuard<'a> {
+    queue: &'a RwQueue,
+    _token: LockLevelToken,
 }
 
-impl<'a, L> Drop for RwQueueWriteGuard<'a, L> {
+impl<'a> Drop for RwQueueWriteGuard<'a> {
     fn drop(&mut self) {
         self.queue.unlock_write();
     }
@@ -366,7 +346,7 @@ mod test {
         }
 
         spawn_kernel_and_run(async |current_task| {
-            let queue = RwQueue::<TestLevel>::default();
+            let queue = RwQueue::new::<TestLevel>();
             let read_guard1 = queue.read(current_task).expect("shouldn't be interrupted");
             std::mem::drop(read_guard1);
 
@@ -388,11 +368,11 @@ mod test {
             }
             struct Info {
                 barrier: Barrier,
-                queue: RwQueue<TestLevel>,
+                queue: RwQueue,
             }
 
             let info =
-                Arc::new(Info { barrier: Barrier::new(2), queue: RwQueue::<TestLevel>::default() });
+                Arc::new(Info { barrier: Barrier::new(2), queue: RwQueue::new::<TestLevel>() });
 
             let info1 = Arc::clone(&info);
             let closure1 = move |current_task: &CurrentTask| {
@@ -426,7 +406,7 @@ mod test {
         Unlocked => A
     }
     struct State {
-        queue: RwQueue<A>,
+        queue: RwQueue,
         gate: Barrier,
         writer_count: AtomicUsize,
         reader_count: AtomicUsize,
@@ -435,7 +415,7 @@ mod test {
     impl State {
         fn new(n: usize) -> State {
             State {
-                queue: Default::default(),
+                queue: RwQueue::new::<A>(),
                 gate: Barrier::new(n),
                 writer_count: Default::default(),
                 reader_count: Default::default(),

@@ -4,7 +4,7 @@
 
 use anyhow::{Context, Result};
 use attribution_data::AttributionDataProviderImpl;
-use attribution_processing::digest::BucketDefinition;
+use attribution_processing::digest::{BucketDefinition, BucketDefinitions};
 use attribution_processing::{AttributionDataProvider, PrincipalDescription};
 use cobalt::{collect_stalls_forever, create_metric_event_logger};
 use fidl::endpoints::RequestStream;
@@ -16,7 +16,7 @@ use fuchsia_sync::Mutex;
 use fuchsia_trace::duration;
 use futures::{FutureExt, StreamExt, TryFutureExt, select};
 use log::{error, info, warn};
-use periodic_monitoring::periodic_monitoring;
+use periodic_monitoring::{ManualMonitoringData, ManualMonitoringEvent, periodic_monitoring};
 use resources::Job;
 use snapshot::AttributionSnapshot;
 use stalls::StallProvider;
@@ -48,6 +48,10 @@ enum Service {
 
 const INTROSPECTOR_PATH: &str = "/svc/fuchsia.component.Introspector.root";
 
+/// Delay between periodic captures, if the configured delay is invalid.
+const DEFAULT_PERIODIC_CAPTURE_INTERVAL: zx::MonotonicDuration =
+    zx::MonotonicDuration::from_minutes(5);
+
 // Lower this thread priority to avoid affecting the system.
 fn run_with_lower_priority() -> Result<()> {
     fuchsia_scheduler::set_role_for_this_thread("fuchsia.memory-monitor.main").into()
@@ -74,6 +78,9 @@ async fn main() -> Result<()> {
     let page_fault_tracker = stalls::refaults::PageFaultProviderImpl::default();
 
     let root_node = fuchsia_inspect::component::inspector().root();
+    let config = memory_monitor2_config::Config::take_from_startup_handle();
+    // Register the current config.
+    root_node.record_child("config", |node| config.record_inspect(node));
     let task_health_node = root_node.create_child("task health");
 
     // Serves Fuchsia performance trace system.
@@ -112,7 +119,7 @@ async fn main() -> Result<()> {
         )),
     );
 
-    let bucket_definitions: Arc<[BucketDefinition]> = read_bucket_definitions().into();
+    let bucket_definitions = Arc::new(read_bucket_definitions());
     // Serves Fuchsia component inspection protocol
     // https://fuchsia.dev/fuchsia-src/development/diagnostics/inspect
     let mut inspect_nodes_service = fuchsia_async::Task::spawn(inspect_nodes::serve(
@@ -125,6 +132,15 @@ async fn main() -> Result<()> {
         fmetrics::MetricEventLoggerFactoryMarker,
     >()?)
     .await?;
+    let (manual_monitoring_tx, manual_monitoring_rx) =
+        futures::channel::mpsc::unbounded::<ManualMonitoringEvent>();
+    let capture_periodically = config.capture_periodically;
+    let periodic_capture_interval = if config.periodic_capture_delay_s > 0 {
+        zx::MonotonicDuration::from_seconds(config.periodic_capture_delay_s.into())
+    } else {
+        warn!("Invalid periodic capture delay of 0s, using the default delay");
+        DEFAULT_PERIODIC_CAPTURE_INTERVAL
+    };
     let mut periodic_collection = fuchsia_async::Task::local({
         let attribution_data_provider = fast_attribution_data_provider.clone();
         let stall_provider = stall_provider.clone();
@@ -133,6 +149,14 @@ async fn main() -> Result<()> {
         let metric_event_logger = metric_event_logger.clone();
         let bucket_definitions = bucket_definitions.clone();
         async move {
+            if !capture_periodically {
+                // Periodic collection is disabled by configuration: never complete, so that this
+                // task is not reported as having stopped unexpectedly. Drop the receiver so that
+                // on-demand snapshots do not wait for periodic monitoring to process them.
+                info!("Periodic collection is disabled");
+                drop(manual_monitoring_rx);
+                return std::future::pending().await;
+            }
             periodic_monitoring(
                 kernel_stats,
                 &*attribution_data_provider,
@@ -141,15 +165,18 @@ async fn main() -> Result<()> {
                 &metric_event_logger,
                 &*bucket_definitions,
                 root_node.create_child("logger"),
+                manual_monitoring_rx,
+                periodic_capture_interval,
             )
             .await
         }
-        .inspect_ok(|_| error!("Periodic collection unexpectedly exited without error"))
         .inspect_err(|e| error!("Periodic collection unexpectedly failed: {:?}", e))
     })
     .fuse();
-    let periodic_collection_health =
-        task_health_node.create_string("periodic_collection_health", "ok");
+    let periodic_collection_health = task_health_node.create_string(
+        "periodic_collection_health",
+        if capture_periodically { "ok" } else { "disabled" },
+    );
 
     let mut collect_stalls_task = fuchsia_async::Task::spawn({
         let stall_provider = stall_provider.clone();
@@ -158,7 +185,7 @@ async fn main() -> Result<()> {
         collect_stalls_forever(stall_provider, page_fault_tracker, metric_event_logger)
     })
     .fuse();
-    let collect_stalls_health = task_health_node.create_string("collect_stalls_health", "ok");
+    let _collect_stalls_health = task_health_node.create_string("collect_stalls_health", "ok");
 
     let thrashing_config = thrashing::read_thrashing_config();
     let mut thrashing_detector = thrashing::ThrashingDetector::new(
@@ -202,6 +229,7 @@ async fn main() -> Result<()> {
                         kernel_stats.clone(),
                         stall_provider.clone(),
                         page_fault_tracker.clone(),
+                        manual_monitoring_tx.clone(),
                     )
                     .inspect_err(|error| warn!(error:%; ""))
                     .await
@@ -229,13 +257,11 @@ async fn main() -> Result<()> {
             },
             _ = inspect_nodes_service => error!("No longer serving inspect!"),
             result = periodic_collection => {
-                periodic_collection_health.set(&result.err().map_or_else(||"stopped".to_string(), |err| format!("{:?}", err)));
+                let Err(err) = result;
+                periodic_collection_health.set(&format!("{:?}", err));
                 error!("Stopped periodic collection");
             },
-            result = collect_stalls_task => {
-                collect_stalls_health.set(&(result.err().map_or_else(||"stopped".to_string(), |err| format!("{:?}", err))));
-                error!("Stopped collecting stalls");
-            },
+            infallible = collect_stalls_task => match infallible {},
             _ = thrashing_loop => {
                  thrashing_health.set("stopped");
                  error!("Stopped thrashing loop");
@@ -256,6 +282,7 @@ async fn serve_client_stream(
     kernel_stats_proxy: fkernel::StatsProxy,
     stall_provider: impl StallProvider,
     page_fault_tracker: impl PageFaultProvider,
+    manual_monitoring_tx: futures::channel::mpsc::UnboundedSender<ManualMonitoringEvent>,
 ) -> Result<()> {
     while let Some(request) = stream.next().await.transpose()? {
         match request {
@@ -267,6 +294,7 @@ async fn serve_client_stream(
                     page_fault_tracker.clone(),
                     bucket_definitions,
                     snapshot,
+                    &manual_monitoring_tx,
                 )
                 .await
                 {
@@ -298,6 +326,7 @@ async fn serve_client_stream(
                     page_fault_tracker.clone(),
                     bucket_definitions,
                     snapshot,
+                    &manual_monitoring_tx,
                 )
                 .await
                 {
@@ -322,31 +351,49 @@ async fn provide_snapshot(
     page_fault_tracker: impl PageFaultProvider,
     bucket_definitions: &[BucketDefinition],
     snapshot: zx::Socket,
+    manual_monitoring_tx: &futures::channel::mpsc::UnboundedSender<ManualMonitoringEvent>,
 ) -> Result<()> {
     duration!(CATEGORY_MEMORY_CAPTURE, c"provide_snapshot");
+    let _ = manual_monitoring_tx.unbounded_send(ManualMonitoringEvent::Started);
+    let timestamp = BootInstant::get();
     let attribution_data = attribution_data_provider.get_attribution_data()?;
 
+    let (memory_stats, compression_stats) = futures::try_join!(
+        kernel_stats_proxy.get_memory_stats(),
+        kernel_stats_proxy.get_memory_stats_compression()
+    )?;
     let kernel_stats = fattribution_plugin::KernelStatistics {
-        memory_stats: Some(kernel_stats_proxy.get_memory_stats().await?),
-        compression_stats: Some(kernel_stats_proxy.get_memory_stats_compression().await?),
+        memory_stats: Some(memory_stats.clone()),
+        compression_stats: Some(compression_stats.clone()),
         ..Default::default()
     };
 
     let memory_stalls = stall_provider.get_stall_info()?;
     let attribution_snapshot = AttributionSnapshot::new(
-        attribution_data,
+        &attribution_data,
         kernel_stats,
         memory_stalls,
         page_fault_tracker,
         bucket_definitions,
     );
+    let (done_tx, done_rx) = futures::channel::oneshot::channel();
+    let _ = manual_monitoring_tx.unbounded_send(ManualMonitoringEvent::Completed(Box::new(
+        ManualMonitoringData {
+            timestamp,
+            attribution_data,
+            kmem_stats: memory_stats,
+            kmem_stats_compression: compression_stats,
+            done_tx: Some(done_tx),
+        },
+    )));
+    let _ = done_rx.await;
     attribution_snapshot.serve(snapshot).await
 }
 
 /// Looks for a bucket definitions configuration, to perform memory
 /// aggregations for reporting purposes. Returns an empty list if no
 /// such configuration was found.
-fn read_bucket_definitions() -> Vec<BucketDefinition> {
+fn read_bucket_definitions() -> BucketDefinitions {
     std::fs::File::open("/config/data/buckets.json")
         .inspect_err(|err| warn!(err:%; "Could not access the bucket definitions configuration"))
         .ok()

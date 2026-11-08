@@ -1,0 +1,63 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "integration_test_bin",
+    srcs = ["tests/timekeeper/integration.rs"],
+    crate_name = "timekeeper_integration_test",
+    crate_root = "tests/timekeeper/integration.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.metrics:fuchsia.metrics_rust",
+        "//sdk/fidl/fuchsia.metrics.test:fuchsia.metrics.test_rust",
+        "//sdk/fidl/fuchsia.testing.harness:fuchsia.testing.harness_rust",
+        "//sdk/fidl/fuchsia.time.external:fuchsia.time.external_rust",
+        "//sdk/fidl/fuchsia.time:fuchsia.time_rust",
+        "//sdk/rust/zx",
+        "//src/lib/cobalt/rust/builders",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/test_util",
+        "//src/sys/time/lib/time_metrics_registry",
+        "//src/sys/time/testing:timekeeper_integration",
+        "//src/sys/time/testing/fidl/test.time.realm:fidl_rust",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+# Faketime tests
+rustc_test(
+    name = "faketime_integration_test_bin",
+    srcs = ["tests/faketime/integration.rs"],
+    crate_name = "faketime_integration_test",
+    crate_root = "tests/faketime/integration.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.metrics.test:fuchsia.metrics.test_rust",
+        "//sdk/fidl/fuchsia.testing.harness:fuchsia.testing.harness_rust",
+        "//sdk/fidl/fuchsia.time.external:fuchsia.time.external_rust",
+        "//sdk/fidl/fuchsia.time:fuchsia.time_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fake-clock/fidl:fidl_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/test_util",
+        "//src/sys/time/lib/time_metrics_registry",
+        "//src/sys/time/testing:timekeeper_integration",
+        "//src/sys/time/testing/fidl/test.time.realm:fidl_rust",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)

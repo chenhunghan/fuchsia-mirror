@@ -27,6 +27,11 @@ declare_args() {
   # memory profile.
   kernel_memory_profiler = false
 
+  # Enable cmpctmalloc debug fills (free fill 0x77, alloc fill 0x99, padding
+  # fill 0x55) to detect use-after-free and heap corruption.
+  # Force-enabled on riscv64 to track https://fxbug.dev/404291515.
+  cmpct_debug = zircon_cpu == "riscv64"
+
   # **NOTE: _For experimental use only._** This gives a list of
   # compiler_config() labels to include first in the kernel's compilation
   # configuration / Rust custom target definition.
@@ -35,30 +40,10 @@ declare_args() {
 
 # For any standalone static binary.
 compiler_config("standalone") {
-  compiler_configs = [ ":static-pic-link" ]
-
-  if (rust_custom_target) {
-    rust_linker = "$rebased_clang_prefix/lld"
-    if (rust_rbe_enable) {
-      rustflags = [ "--remote-inputs=$rust_linker" ]
-    }
-    rust_target_edits = [
-      {
-        key = "pre-link-objects"
-        action = "unset"
-      },
-      {
-        key = "linker"
-        action = "set"
-        value = rust_linker
-      },
-      {
-        key = "linker-flavor"
-        action = "set"
-        value = "gnu-lld"
-      },
-    ]
-  }
+  compiler_configs = [
+    ":static-pic-link",
+    "//build/config:nostartfiles",
+  ]
 
   configs = [
     "//build/config:no_exceptions",
@@ -194,14 +179,18 @@ config("instrumented-stack-size") {
     increase_stack_size = true
   }
   if (increase_stack_size) {
-    defines = [ "CUSTOM_DEFAULT_STACK_SIZE=16384" ]
+    custom_default_stack_size = 16384
+
+    # C++ <lib/thread-stack/abi.h> reads the define and Rust thread_stack
+    # reads the environment variable with option_env!().
+    defines = [ "CUSTOM_DEFAULT_STACK_SIZE=$custom_default_stack_size" ]
+    rustenv = [ "CUSTOM_DEFAULT_STACK_SIZE=$custom_default_stack_size" ]
   }
 }
 
-# This is the "top" compiler_config().  Its $compiler_configs must reach all
-# other compiler_config()s that could be reached in any way as normal config()s
-# in this toolchain.  It's paired with //build/toolchain/rust:target to roll up
-# the compiler_config() instructions for the custom Rust target.
+# This is the "top" compiler_config() that //build/config/zircon:kernel points
+# to.  Its $compiler_configs must reach all other compiler_config()s that could
+# be reached in any way as normal config()s in this toolchain.
 compiler_config("abi") {
   # These always come first, so they can enable target features that need to be
   # disabled for ABI purposes later.
@@ -211,19 +200,6 @@ compiler_config("abi") {
     "//zircon/kernel/arch/$zircon_cpu:abi",
     ":standalone",
   ]
-}
-
-# These are referenced because :abi is listed in the toolchain definition.
-group("abi_deps") {
-}
-
-group("abi_executable_deps") {
-}
-
-group("abi_link_deps") {
-}
-
-group("abi_source_deps") {
 }
 
 # This is the top config for all kernel code (after :abi).
@@ -292,6 +268,9 @@ variant("kernel_config") {
   if (console_enable_history) {
     rustflags += [ "--cfg=feature=\"console_enable_history\"" ]
   }
+  if (cmpct_debug) {
+    rustflags += [ "--cfg=feature=\"cmpct_debug\"" ]
+  }
   if (experimental_continuous_per_vmo_attribution_enabled) {
     rustflags += [
       "--cfg=feature=\"experimental_continuous_per_vmo_attribution_enabled\"",
@@ -321,8 +300,15 @@ variant("kernel_config") {
     rustflags += [ "--cfg=enable_entropy_collector_test" ]
   }
 
-  if (kernel_no_userabi) {
-    defines += [ "KERNEL_NO_USERABI" ]
+  if (kernel_extra_defines + [
+        "HEAP_ENABLE_TESTS=1",
+        "HEAP_ENABLE_TESTS",
+      ] -
+      [
+        "HEAP_ENABLE_TESTS=1",
+        "HEAP_ENABLE_TESTS",
+      ] != kernel_extra_defines) {
+    rustflags += [ "--cfg=feature=\"heap_enable_tests\"" ]
   }
 
   rustenv += [
@@ -452,7 +438,7 @@ config("kernel_image_max_size") {
 
   visibility = [
     ":*",
-    "//zircon/kernel/phys:*",
+    "//zircon/kernel/phys/physboot:*",
   ]
   defines = [ "KERNEL_IMAGE_MAX_SIZE=$kernel_image_max_size" ]
 }
@@ -504,6 +490,10 @@ config("jtrace_config") {
     rustflags = []
     if (jtrace_use_large_entries) {
       rustflags += [ "--cfg=jtrace_use_large_entries" ]
+    }
+
+    if (jtrace_use_mono_timestamps) {
+      rustflags += [ "--cfg=jtrace_use_mono_timestamps" ]
     }
 
     if (jtrace_enabled == "persistent") {

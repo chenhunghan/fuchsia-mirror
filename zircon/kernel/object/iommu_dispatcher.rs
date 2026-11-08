@@ -5,8 +5,9 @@
 // https://opensource.org/licenses/MIT
 
 use crate::counters::define_kcounter;
+use crate::ksync_kernel::TrackedCriticalMutex;
 use fbl::{Array, Canary, RefPtr};
-use ksync::{KMutex, RawCriticalMutex, guarded};
+use ksync::{KMutex, guarded};
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
 use zx_types::{ZX_DEFAULT_IOMMU_RIGHTS, ZX_OBJ_TYPE_IOMMU, zx_rights_t};
@@ -39,7 +40,7 @@ pub struct IommuDispatcherState {
 
     /// Mutex guarding state operations.
     #[mutex]
-    lock: KMutex<RawCriticalMutex>,
+    lock: KMutex<TrackedCriticalMutex>,
 }
 
 impl IommuDispatcherState {
@@ -77,11 +78,6 @@ crate::object::dispatcher::impl_dispatcher_facade_with_state!(
 );
 
 impl IommuDispatcher {
-    /// Returns default rights for an IommuDispatcher handle.
-    pub fn default_rights() -> zx_rights_t {
-        ZX_DEFAULT_IOMMU_RIGHTS
-    }
-
     /// Creates a new IommuDispatcher and returns its kernel handle and rights.
     pub fn create(
         type_param: u32,

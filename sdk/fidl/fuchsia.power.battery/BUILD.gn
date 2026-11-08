@@ -39,6 +39,7 @@ fidl("fuchsia.power.battery") {
     "//src/power/*",
     "//src/starnix/*",
     "//src/storage/*",
+    "//src/ui/lib/debug_telemetry/*",
     "//vendor/google/*",
   ]
   public_deps = [

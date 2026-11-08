@@ -1,0 +1,49 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Aggregated into //src/storage:target_tests.
+test_suite(
+    name = "tests",
+    tests = [":io_conformance_util_tests"],
+    visibility = ["//src/storage:__pkg__"],
+)
+
+rustc_library(
+    name = "io_conformance_util",
+    testonly = True,
+    srcs = [
+        "src/flags.rs",
+        "src/lib.rs",
+        "src/test_harness.rs",
+    ],
+    edition = "2024",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:async-trait"],
+    deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.io.test:fuchsia.io.test_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:bitflags",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+rustc_test(
+    name = "io_conformance_util_test",
+    crate = ":io_conformance_util",
+)
+
+fx_unittest_package(
+    name = "io_conformance_util_tests",
+    unit_tests = [":io_conformance_util_test"],
+)

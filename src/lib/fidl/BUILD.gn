@@ -6,11 +6,11 @@ group("tests") {
   testonly = true
 
   deps = [
-    "c:tests",
     "contrib:tests",
     "llcpp/tests",
     "rust:tests",
     "rust_next:tests",
     "//sdk/lib/fidl/cpp/tests",
+    "//src/lib:bazel_tests",
   ]
 }

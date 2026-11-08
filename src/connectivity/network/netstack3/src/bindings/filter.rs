@@ -559,7 +559,7 @@ async fn serve_controller(
                 };
                 let id =
                     febpf::ProgramId { id: handle.koid().expect("Failed to get koid").raw_koid() };
-                let result = ebpf_registry.register(ctx.bindings_ctx(), id, program);
+                let result = ebpf_registry.register(ctx.bindings_ctx(), id, program).await;
 
                 if result.is_ok() {
                     // Observe signals on the program handle to remove it from set when necessary.

@@ -1,0 +1,100 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [],  # Include all tests in the package.
+    visibility = ["//src/connectivity/network:__pkg__"],
+)
+
+fx_cc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["main.cc"],
+    gn_output_name = "sync_manager",
+    tags = ["manual"],
+    deps = [
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/connectivity/network/testing/netemul/sync-manager/lib:sync_service",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "sync_manager",
+)
+
+fx_component_manifest(
+    name = "sync-manager_manifest",
+    testonly = True,
+    component_name = "sync-manager",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "//src/connectivity/network/testing/netemul/sync-manager/meta:sync-manager.cml",
+)
+
+# @bazel2gn:raw_attribute:visibility = [ ":*" ]
+fx_component(
+    name = "component",
+    testonly = True,
+    compiled_manifest = ":sync-manager_manifest",
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "sync-manager",
+    testonly = True,
+    components = [":component"],
+)
+
+fx_component_manifest(
+    name = "sync-test_manifest",
+    testonly = True,
+    component_name = "sync-test",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default",
+    ],
+    manifest = "//src/connectivity/network/testing/netemul/sync-manager/meta:sync-test.cml",
+)
+
+fx_test_component(
+    name = "sync-test",
+    testonly = True,
+    compiled_manifest = ":sync-test_manifest",
+    # TODO(https://fxbug.dev/570694755): bazel2gn only unwraps fx_packaged_binary
+    # targets defined in the same package.
+    deps = [
+        "//src/connectivity/network/testing/netemul/sync-manager/lib:sync_test_bin_packaged",  # @bazel2gn:path_overwrite://src/connectivity/network/testing/netemul/sync-manager/lib:sync_test_bin
+    ],
+)
+
+fx_package(
+    name = "sync-tests_package",
+    package_name = "sync-tests",
+    testonly = True,
+    test_components = [":sync-test"],
+)
+
+fx_test(
+    name = "sync-tests",
+    package = ":sync-tests_package",
+)

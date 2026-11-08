@@ -7,9 +7,19 @@ using fuchsia.math;
 
 /// Attributes for a [`Mode`].
 ///
-/// This type allows for the future expansion of `Mode` with binary attributes,
-/// such as whether a display mode is interlaced.
-type ModeFlags = flexible bits : uint32 {};
+/// This type holds the binary attributes of a `Mode`, and allows for future
+/// ones, such as whether a display mode is interlaced.
+type ModeFlags = flexible bits : uint32 {
+    /// The display may refresh less often than `Mode.refresh_rate_millihertz`.
+    ///
+    /// In modes with this attribute, the display lowers its refresh rate on its
+    /// own, for example while the displayed image does not change. The mode's
+    /// `refresh_rate_millihertz` is the maximum refresh rate.
+    ///
+    /// This flag says nothing about the cadence of
+    /// [`fuchsia.hardware.display/CoordinatorListener.OnVsync`] events.
+    VARIABLE_REFRESH_RATE = 0x1;
+};
 
 /// Describes an operational mode for a display device attached to the system.
 ///
@@ -28,15 +38,25 @@ type Mode = struct {
     /// Valid modes have non-empty active areas.
     active_area fuchsia.math.SizeU;
 
-    /// Number of images transmitted to the display in 1,000 seconds.
+    /// Maximum number of images transmitted to the display in 1,000 seconds.
     ///
-    /// This quantity is also known as the display's frame rate, or the
-    /// display's vertical refresh rate. The rate is measured in millihertz
-    /// (mHz).
+    /// This quantity is also known as the display's maximum frame rate, or the
+    /// display's maximum vertical refresh rate. The rate is measured in
+    /// millihertz (mHz).
+    ///
+    /// Modes with the `VARIABLE_REFRESH_RATE` flag may refresh the display less
+    /// often than this rate. Modes without the flag refresh the display at this
+    /// rate.
     ///
     /// Valid modes have positive refresh rates.
     refresh_rate_millihertz uint32;
 
+    /// Binary attributes of the mode.
+    ///
+    /// Flags are part of a mode's identity. Two entries in a display's mode
+    /// list may differ only in their flags.
+    ///
+    /// Valid modes only set flags defined in [`ModeFlags`].
     flags ModeFlags;
 };
 

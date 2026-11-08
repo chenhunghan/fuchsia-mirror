@@ -123,16 +123,6 @@ macro_rules! assert_truncate_err {
 }
 
 #[macro_export]
-macro_rules! assert_get_attr {
-    ($proxy:expr, $expected:expr) => {{
-        let (status, attrs) = $proxy.deprecated_get_attr().await.expect("get_attr failed");
-
-        assert_eq!(status, zx_status::sys::ZX_OK);
-        assert_eq!(attrs, $expected);
-    }};
-}
-
-#[macro_export]
 macro_rules! assert_query {
     ($proxy:expr, $expected:expr) => {
         let protocol = $proxy.query().await.expect("describe failed");

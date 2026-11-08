@@ -7,6 +7,7 @@
 
 #include <fidl/fuchsia.net.tun/cpp/wire.h>
 #include <fidl/fuchsia.net/cpp/wire.h>
+#include <lib/zx/event.h>
 
 namespace network {
 namespace tun {
@@ -25,11 +26,11 @@ class BasePortConfig {
 
 class DevicePortConfig : public BasePortConfig {
  public:
-  static std::optional<DevicePortConfig> Create(
-      const fuchsia_net_tun::wire::DevicePortConfig& config);
+  static std::optional<DevicePortConfig> Create(fuchsia_net_tun::wire::DevicePortConfig&& config);
 
   bool online = false;
   std::optional<fuchsia_net::wire::MacAddress> mac;
+  zx::event power_dependency_token;
 
  private:
   explicit DevicePortConfig(BasePortConfig&& base) : BasePortConfig(std::move(base)) {}

@@ -22,9 +22,9 @@
 #include <sstream>
 
 #include <openssl/sha.h>
-#include <re2/re2.h>
 
 #include "absl/strings/string_view.h"
+#include "re2/re2.h"
 #include "src/lib/files/directory.h"
 #include "src/lib/files/eintr_wrapper.h"
 #include "src/lib/files/file.h"

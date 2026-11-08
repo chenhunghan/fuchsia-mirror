@@ -16,7 +16,7 @@
 #include <ktl/string_view.h>
 #include <phys/address-space.h>
 #include <phys/elf-image.h>
-#include <phys/kernel-package.h>
+#include <phys/kernel-package/kernel-package.h>
 #include <phys/symbolize.h>
 #include <phys/zbitl-allocation.h>
 
@@ -33,10 +33,13 @@ constexpr ktl::string_view kGetInt = "get-int.basic-elf-loading-test";
 // The BOOTFS namespace under which kGetInt lives.
 constexpr ktl::string_view kNamespace = "basic-elf-loading-test-data";
 
+// Symbolizer module ID for kGetInt (module 0 is this test).
+constexpr unsigned int kGetIntModuleId = 1;
+
 }  // namespace
 
 int TestMain(void* zbi_ptr, ktl::optional<EarlyBootZbi> early_zbi, arch::EarlyTicks) {
-  MainSymbolize symbolize("basic-elf-loading-test");
+  Symbolize symbolize("basic-elf-loading-test");
 
   // Initialize memory for allocation/free.
   AddressSpace aspace;
@@ -57,9 +60,6 @@ int TestMain(void* zbi_ptr, ktl::optional<EarlyBootZbi> early_zbi, arch::EarlyTi
 
   symbolize.Context();
 
-  ktl::array<const ElfImage*, 2> modules;
-  symbolize.EnableModuleLoading(Symbolize::ModuleList(ktl::span(modules)));
-
   printf("Loading %.*s...\n", static_cast<int>(kGetInt.size()), kGetInt.data());
   ElfImage elf;
   if (auto result = elf.Init(bootfs, kGetInt, true); result.is_error()) {
@@ -74,10 +74,13 @@ int TestMain(void* zbi_ptr, ktl::optional<EarlyBootZbi> early_zbi, arch::EarlyTi
   elf.AssertInterpMatchesBuildId(kGetInt, symbolize.build_id());
 
   // If the file can't be loaded in place, this Allocation owns its image.
-  Allocation loaded = elf.Load(memalloc::Type::kPhysElf);
+  auto emit_markup = [&symbolize](const ElfImage& image) {
+    symbolize.ModuleContext(image, kGetIntModuleId);
+  };
+  Allocation loaded = elf.Load(memalloc::Type::kPhysElf, emit_markup);
   elf.Relocate();
 
-  // Since Context() was called above ContextOnLoad() should have printed
+  // Since Context() was called above, ModuleContext() should have printed
   // inside elf.Load() above.  Now that the new module list is in place,
   // printing again should show the same two modules already printed piecemeal.
   printf("Symbolizer context for both modules expected, repeating:\n");

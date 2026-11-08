@@ -40,24 +40,13 @@ fuchsia_structured_config_cpp_elf_lib("config-cpp-lib") {
   cm_label = ":component-manifest"
 }
 
-fuchsia_structured_config_values("default-config-values") {
-  cm_label = ":component-manifest"
-  values_source = "config/default-config-values.json5"
-}
-
 group("component-with-default-config") {
-  deps = [
-    ":component",
-    ":default-config-values",
-  ]
+  deps = [ ":component" ]
 }
 
 fuchsia_package("fake-display-stack-host") {
   package_name = "fake-display-stack-host"
-  deps = [
-    ":component",
-    ":default-config-values",
-  ]
+  deps = [ ":component" ]
 }
 
 export_fuchsia_package_to_bazel("fake-display-stack-host.bazel_input") {

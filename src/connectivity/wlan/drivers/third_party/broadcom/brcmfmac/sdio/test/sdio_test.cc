@@ -666,6 +666,7 @@ struct MinimalBrcmfSdio {
     sdio_dev.bus = &bus;
     bus.sdiodev = &sdio_dev;
 
+    bus.tx_queue = &tx_queue;
     bus.timer = &timer;
 
     // Prepare a WorkQueue with a single WorkItem to run the work_item_handler.
@@ -680,6 +681,7 @@ struct MinimalBrcmfSdio {
   sdio_func func2{};
   struct brcmf_bus bus_if{};
   struct brcmf_sdio bus{};
+  brcmf_tx_queue tx_queue{10};
   WorkQueue wq;
 
   // Fake timer that does nothing. This needs to exist for ResetClearsTxGlom test.
@@ -791,5 +793,75 @@ TEST_F(SdioTest, ResetClearsTxGlom) {
   b.bus.txglom = true;
   brcmf_sdio_reset(&b.bus);
   ASSERT_FALSE(b.bus.txglom);
+}
+
+TEST_F(SdioTest, PrepareAndReleaseVmoClosesHandles) {
+  MinimalBrcmfSdio b(BRCMF_SDIOD_DATA, ZX_MSEC(1), "brcmf_wq/prepare_and_release_vmo",
+                     [](WorkItem*) {});
+  MockSdio sdio1;
+  MockSdio sdio2;
+  b.sdio_dev.sdio_proto_fn1 = *sdio1.GetProto();
+  b.sdio_dev.sdio_proto_fn2 = *sdio2.GetProto();
+
+  constexpr uint8_t kVmoId = 1;
+  constexpr size_t kVmoSize = 4096;
+  uint8_t dummy_mapped_addr = 0;
+
+  zx::vmo vmo;
+  ASSERT_OK(zx::vmo::create(kVmoSize, 0, &vmo));
+
+  auto get_handle_count = [&](size_t* out_count) {
+    zx_info_handle_count_t info{};
+    ASSERT_OK(vmo.get_info(ZX_INFO_HANDLE_COUNT, &info, sizeof(info), nullptr, nullptr));
+    *out_count = info.handle_count;
+  };
+
+  size_t handle_count = 0;
+  ASSERT_NO_FATAL_FAILURE(get_handle_count(&handle_count));
+  EXPECT_EQ(handle_count, 1u);
+
+  zx::vmo fn1_registered_vmo;
+  zx::vmo fn2_registered_vmo;
+  sdio1.mock_register_vmo().ExpectCallWithMatcher(
+      [&](uint32_t vmo_id, zx::vmo registered_vmo, uint64_t offset, uint64_t size,
+          uint32_t vmo_rights) {
+        EXPECT_EQ(vmo_id, kVmoId);
+        EXPECT_TRUE(registered_vmo.is_valid());
+        EXPECT_EQ(offset, 0u);
+        EXPECT_EQ(size, kVmoSize);
+        EXPECT_EQ(vmo_rights, SDMMC_VMO_RIGHT_READ | SDMMC_VMO_RIGHT_WRITE);
+        fn1_registered_vmo = std::move(registered_vmo);
+        return std::tuple<zx_status_t>{ZX_OK};
+      });
+  sdio2.mock_register_vmo().ExpectCallWithMatcher(
+      [&](uint32_t vmo_id, zx::vmo registered_vmo, uint64_t offset, uint64_t size,
+          uint32_t vmo_rights) {
+        EXPECT_EQ(vmo_id, kVmoId);
+        EXPECT_TRUE(registered_vmo.is_valid());
+        EXPECT_EQ(offset, 0u);
+        EXPECT_EQ(size, kVmoSize);
+        EXPECT_EQ(vmo_rights, SDMMC_VMO_RIGHT_READ | SDMMC_VMO_RIGHT_WRITE);
+        fn2_registered_vmo = std::move(registered_vmo);
+        return std::tuple<zx_status_t>{ZX_OK};
+      });
+
+  ASSERT_OK(brcmf_sdio_prepare_vmo(&b.bus_if, kVmoId, vmo.get(), &dummy_mapped_addr, kVmoSize));
+  sdio1.VerifyAndClear();
+  sdio2.VerifyAndClear();
+
+  // Both fn1 and fn2 now hold duplicated VMO handles in addition to `vmo`.
+  ASSERT_NO_FATAL_FAILURE(get_handle_count(&handle_count));
+  EXPECT_EQ(handle_count, 3u);
+
+  sdio1.ExpectUnregisterVmo(ZX_OK, kVmoId, std::move(fn1_registered_vmo));
+  sdio2.ExpectUnregisterVmo(ZX_OK, kVmoId, std::move(fn2_registered_vmo));
+
+  ASSERT_OK(brcmf_sdio_release_vmo(&b.bus_if, kVmoId));
+  sdio1.VerifyAndClear();
+  sdio2.VerifyAndClear();
+
+  // Both unregistered VMO handles returned by fn1 and fn2 must be closed by brcmf_sdio_release_vmo.
+  ASSERT_NO_FATAL_FAILURE(get_handle_count(&handle_count));
+  EXPECT_EQ(handle_count, 1u);
 }
 }  // namespace

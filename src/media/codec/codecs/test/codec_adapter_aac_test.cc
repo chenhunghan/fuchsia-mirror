@@ -16,20 +16,11 @@
 namespace {
 
 fuchsia::media::FormatDetails MakeValidAacEncoderFormatDetails() {
-  fuchsia::media::PcmFormat pcm;
-  pcm.pcm_mode = fuchsia::media::AudioPcmMode::LINEAR;
-  pcm.bits_per_sample = 16;
-  pcm.frames_per_second = 48000;
-  pcm.channel_map = {fuchsia::media::AudioChannelId::LF};
-
-  fuchsia::media::AudioUncompressedFormat uncompressed;
-  uncompressed.set_pcm(std::move(pcm));
-
-  fuchsia::media::AudioFormat audio;
-  audio.set_uncompressed(std::move(uncompressed));
-
-  fuchsia::media::DomainFormat domain;
-  domain.set_audio(std::move(audio));
+  fuchsia::media::PcmFormat2 pcm;
+  pcm.set_pcm_mode(fuchsia::media::AudioPcmMode2::LINEAR);
+  pcm.set_bits_per_sample(16);
+  pcm.set_frames_per_second(48000);
+  pcm.set_channel_map({fuchsia::media::AudioChannelId2::FL});
 
   fuchsia::media::AacEncoderSettings aac_settings;
   aac_settings.aot = fuchsia::media::AacAudioObjectType::MPEG4_AAC_LC;
@@ -43,7 +34,7 @@ fuchsia::media::FormatDetails MakeValidAacEncoderFormatDetails() {
 
   fuchsia::media::FormatDetails format_details;
   format_details.set_format_details_version_ordinal(0);
-  format_details.set_domain(std::move(domain));
+  format_details.set_pcm_format(std::move(pcm));
   format_details.set_encoder_settings(std::move(encoder_settings));
   return format_details;
 }
@@ -202,6 +193,44 @@ TEST(CodecAdapterAacEncoderTest, StopAndMidStreamFormatFailureWhileOutputReconfi
   EXPECT_EQ(events.output_eos_count(), 0u);
 
   encoder.CoreCodecStopStream();
+}
+
+TEST(CodecAdapterAacEncoderTest, BytesPerSampleValidation) {
+  {
+    // Padded 4-byte container for 16-bit PCM is rejected.
+    std::mutex lock;
+    FakeCodecAdapterEvents events;
+    CodecAdapterAacEncoder encoder(lock, &events);
+
+    auto format_details = MakeValidAacEncoderFormatDetails();
+    format_details.mutable_pcm_format()->set_bytes_per_sample(4);
+    encoder.CoreCodecInit(format_details);
+    ASSERT_EQ(events.fail_codec_count(), 0u);
+
+    encoder.CoreCodecStartStream();
+    encoder.CoreCodecQueueInputFormatDetails(format_details);
+    events.WaitForOutputConstraintsChangeCount(1);
+    EXPECT_EQ(events.fail_codec_count(), 1u);
+    encoder.CoreCodecStopStream();
+  }
+
+  {
+    // Explicit 2-byte container for 16-bit PCM succeeds.
+    std::mutex lock;
+    FakeCodecAdapterEvents events;
+    CodecAdapterAacEncoder encoder(lock, &events);
+
+    auto format_details = MakeValidAacEncoderFormatDetails();
+    format_details.mutable_pcm_format()->set_bytes_per_sample(2);
+    encoder.CoreCodecInit(format_details);
+    ASSERT_EQ(events.fail_codec_count(), 0u);
+
+    encoder.CoreCodecStartStream();
+    encoder.CoreCodecQueueInputFormatDetails(format_details);
+    events.WaitForOutputConstraintsChangeCount(1);
+    EXPECT_EQ(events.fail_codec_count(), 0u);
+    encoder.CoreCodecStopStream();
+  }
 }
 
 }  // namespace

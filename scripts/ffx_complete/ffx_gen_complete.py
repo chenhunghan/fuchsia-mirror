@@ -20,10 +20,10 @@ import pathlib
 import sys
 import textwrap
 import typing
-from typing import Any, Iterable, Sequence, TypeAlias
+from typing import Any, Iterable, Sequence
 
-JSONObject: TypeAlias = dict[str, "JSONValue"]
-JSONValue: TypeAlias = JSONObject | str | int | float | list["JSONValue"]
+type JSONObject = dict[str, JSONValue]
+type JSONValue = JSONObject | str | int | float | list[JSONValue]
 
 try:
     import dataclasses_json_lite
@@ -104,7 +104,7 @@ class Command:
     description: str
     examples: Sequence[str]
     flags: Sequence[Flag]
-    commands: Sequence["SubCommand"]
+    commands: Sequence[SubCommand]
     positionals: Sequence[Positional]
     notes: Sequence[str] | None
     error_codes: Sequence[ErrorCode] | None

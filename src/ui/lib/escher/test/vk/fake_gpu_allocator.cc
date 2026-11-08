@@ -87,11 +87,18 @@ ImagePtr FakeGpuAllocator::AllocateImage(ResourceManager* manager, const ImageIn
   return fxl::AdoptRef(new FakeImage(manager, info, memory));
 }
 
-size_t FakeGpuAllocator::GetTotalBytesAllocated() const { return bytes_allocated_; }
+size_t FakeGpuAllocator::GetTotalBytesAllocated() const {
+  return bytes_allocated_.load(std::memory_order_relaxed);
+}
 
-void FakeGpuAllocator::OnAllocation(uint64_t size) { bytes_allocated_ += size; }
+void FakeGpuAllocator::OnAllocation(uint64_t size) {
+  bytes_allocated_.fetch_add(size, std::memory_order_relaxed);
+}
 
-void FakeGpuAllocator::OnDeallocation(uint64_t size) { bytes_allocated_ -= size; }
+void FakeGpuAllocator::OnDeallocation(uint64_t size) {
+  const uint64_t prev = bytes_allocated_.fetch_sub(size, std::memory_order_relaxed);
+  FX_DCHECK(prev >= size);
+}
 
 }  // namespace test
 }  // namespace escher

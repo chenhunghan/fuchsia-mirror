@@ -100,9 +100,8 @@ void BufferCollectionToken::CombinedTokenServer::DuplicateSyncV1(
                      "BufferCollectionToken::DuplicateSync() attempted when is_done_");
     return;
   }
-  std::vector<fidl::ClientEnd<fuchsia_sysmem::BufferCollectionToken>> new_tokens;
-
-  for (auto& rights_attenuation_mask : request.rights_attenuation_masks()) {
+  const auto& masks = request.rights_attenuation_masks();
+  for (auto& rights_attenuation_mask : masks) {
     if (rights_attenuation_mask == 0) {
       parent_.FailSync(FROM_HERE, ConnectionVersion::kVersion1, completer, ZX_ERR_INVALID_ARGS,
                        "DuplicateSync() rights_attenuation_mask 0 not permitted");
@@ -110,7 +109,9 @@ void BufferCollectionToken::CombinedTokenServer::DuplicateSyncV1(
     }
   }
 
-  for (auto& rights_attenuation_mask : request.rights_attenuation_masks()) {
+  std::vector<zx::channel> new_tokens;
+  new_tokens.reserve(masks.size());
+  for (auto& rights_attenuation_mask : masks) {
     auto token_endpoints = fidl::CreateEndpoints<fuchsia_sysmem::BufferCollectionToken>();
     if (!token_endpoints.is_ok()) {
       parent_.FailSync(FROM_HERE, ConnectionVersion::kVersion1, completer,
@@ -128,7 +129,7 @@ void BufferCollectionToken::CombinedTokenServer::DuplicateSyncV1(
     parent_.logical_buffer_collection().CreateBufferCollectionTokenV1(
         parent_.shared_logical_buffer_collection(), new_node_properties,
         std::move(token_endpoints->server));
-    new_tokens.push_back(std::move(token_endpoints->client));
+    new_tokens.push_back(token_endpoints->client.TakeChannel());
   }
 
   fuchsia_sysmem2_internal::CombinedBufferCollectionTokenDuplicateSyncV1Response response;
@@ -154,7 +155,8 @@ void BufferCollectionToken::CombinedTokenServer::DuplicateSyncV2(
     return;
   }
 
-  for (auto& rights_attenuation_mask : *request.rights_attenuation_masks()) {
+  const auto& masks = *request.rights_attenuation_masks();
+  for (auto& rights_attenuation_mask : masks) {
     if (rights_attenuation_mask == 0) {
       parent_.FailSync(FROM_HERE, ConnectionVersion::kVersion2, completer, ZX_ERR_INVALID_ARGS,
                        "DuplicateSync() rights_attenuation_mask 0 not permitted");
@@ -163,7 +165,8 @@ void BufferCollectionToken::CombinedTokenServer::DuplicateSyncV2(
   }
 
   std::vector<fidl::ClientEnd<fuchsia_sysmem2::BufferCollectionToken>> new_tokens;
-  for (auto& rights_attenuation_mask : request.rights_attenuation_masks().value()) {
+  new_tokens.reserve(masks.size());
+  for (auto& rights_attenuation_mask : masks) {
     auto token_endpoints = fidl::CreateEndpoints<fuchsia_sysmem2::BufferCollectionToken>();
     if (!token_endpoints.is_ok()) {
       parent_.FailSync(FROM_HERE, ConnectionVersion::kVersion2, completer,
@@ -227,7 +230,7 @@ void BufferCollectionToken::CombinedTokenServer::DuplicateV1(
   }
   parent_.logical_buffer_collection().CreateBufferCollectionTokenV1(
       parent_.shared_logical_buffer_collection(), new_node_properties,
-      std::move(request.token_request()));
+      fidl::ServerEnd<fuchsia_sysmem::BufferCollectionToken>(std::move(request.token_request())));
 }
 
 void BufferCollectionToken::CombinedTokenServer::DuplicateV2(
@@ -401,7 +404,8 @@ void BufferCollectionToken::CombinedTokenServer::CreateBufferCollectionTokenGrou
   }
   parent_.logical_buffer_collection().CreateBufferCollectionTokenGroupV1(
       parent_.shared_logical_buffer_collection(), new_node_properties,
-      std::move(request.group_request()));
+      fidl::ServerEnd<fuchsia_sysmem::BufferCollectionTokenGroup>(
+          std::move(request.group_request())));
 }
 
 void BufferCollectionToken::CombinedTokenServer::CreateBufferCollectionTokenGroupV2(

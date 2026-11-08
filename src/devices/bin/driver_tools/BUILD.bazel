@@ -1,0 +1,206 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+# Convert shared source file paths for GN targets.
+# @bazel2gn:transformer=file_paths
+_LIB_SRCS = [
+    "src/args.rs",
+    "src/common.rs",
+    "src/lib.rs",
+    "src/subcommands/composite/args.rs",
+    "src/subcommands/composite/mod.rs",
+    "src/subcommands/composite/subcommands/list/args.rs",
+    "src/subcommands/composite/subcommands/list/mod.rs",
+    "src/subcommands/composite/subcommands/mod.rs",
+    "src/subcommands/composite/subcommands/show/args.rs",
+    "src/subcommands/composite/subcommands/show/mod.rs",
+    "src/subcommands/disable/args.rs",
+    "src/subcommands/disable/mod.rs",
+    "src/subcommands/doctor/args.rs",
+    "src/subcommands/doctor/mod.rs",
+    "src/subcommands/dump/args.rs",
+    "src/subcommands/dump/mod.rs",
+    "src/subcommands/enable/args.rs",
+    "src/subcommands/enable/mod.rs",
+    "src/subcommands/health_check/args.rs",
+    "src/subcommands/health_check/mod.rs",
+    "src/subcommands/host/args.rs",
+    "src/subcommands/host/mod.rs",
+    "src/subcommands/host/subcommands/list/args.rs",
+    "src/subcommands/host/subcommands/list/mod.rs",
+    "src/subcommands/host/subcommands/mod.rs",
+    "src/subcommands/host/subcommands/show/args.rs",
+    "src/subcommands/host/subcommands/show/mod.rs",
+    "src/subcommands/list/args.rs",
+    "src/subcommands/list/mod.rs",
+    "src/subcommands/list_composite_node_specs/args.rs",
+    "src/subcommands/list_composite_node_specs/mod.rs",
+    "src/subcommands/list_composites/args.rs",
+    "src/subcommands/list_composites/mod.rs",
+    "src/subcommands/list_devices/args.rs",
+    "src/subcommands/list_devices/mod.rs",
+    "src/subcommands/list_hosts/args.rs",
+    "src/subcommands/list_hosts/mod.rs",
+    "src/subcommands/mod.rs",
+    "src/subcommands/node/args.rs",
+    "src/subcommands/node/common.rs",
+    "src/subcommands/node/mod.rs",
+    "src/subcommands/node/subcommands/add/args.rs",
+    "src/subcommands/node/subcommands/add/mod.rs",
+    "src/subcommands/node/subcommands/graph/args.rs",
+    "src/subcommands/node/subcommands/graph/mod.rs",
+    "src/subcommands/node/subcommands/list/args.rs",
+    "src/subcommands/node/subcommands/list/mod.rs",
+    "src/subcommands/node/subcommands/mod.rs",
+    "src/subcommands/node/subcommands/remove/args.rs",
+    "src/subcommands/node/subcommands/remove/mod.rs",
+    "src/subcommands/node/subcommands/show/args.rs",
+    "src/subcommands/node/subcommands/show/mod.rs",
+    "src/subcommands/register/args.rs",
+    "src/subcommands/register/mod.rs",
+    "src/subcommands/restart/args.rs",
+    "src/subcommands/restart/mod.rs",
+    "src/subcommands/show/args.rs",
+    "src/subcommands/show/mod.rs",
+    "src/subcommands/test_node/args.rs",
+    "src/subcommands/test_node/mod.rs",
+    "src/subcommands/test_node/subcommands/add/args.rs",
+    "src/subcommands/test_node/subcommands/add/mod.rs",
+    "src/subcommands/test_node/subcommands/mod.rs",
+    "src/subcommands/test_node/subcommands/remove/args.rs",
+    "src/subcommands/test_node/subcommands/remove/mod.rs",
+]
+
+# Convert shared compile_data file paths for GN targets.
+# @bazel2gn:transformer=file_paths
+_LIB_COMPILE_DATA = [
+    "tests/golden/list_composites_verbose",
+    "tests/golden/list_composites_verbose_empty_fields",
+]
+
+# Translate shared Bazel dependency labels to GN labels.
+# @bazel2gn:transformer=deps
+_COMMON_DEPS = [
+    "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust_common",
+    "//sdk/rust/zx-status",
+    "//src/developer/ffx/lib/safe_string:lib",
+    "//src/devices/lib/bind",
+    "//third_party/rust_crates/forks/prettytable-rs:prettytable",
+    "//third_party/rust_crates/vendor:ansi_term",
+    "//third_party/rust_crates/vendor:anyhow",
+    "//third_party/rust_crates/vendor:argh",
+    "//third_party/rust_crates/vendor:futures",
+    "//third_party/rust_crates/vendor:itertools",
+    "//third_party/rust_crates/vendor:regex-lite",
+    "//third_party/rust_crates/vendor:serde",
+    "//third_party/rust_crates/vendor:serde_json",
+    "//third_party/rust_crates/vendor:termion",
+] + select({
+    "//build/bazel/platforms:is_host_os": [
+        "//src/devices/lib/driver-static-checks:lib",
+    ],
+    "@platforms//os:fuchsia": [
+        "//sdk/rust/zx",
+    ],
+})
+
+rustc_library(
+    name = "lib",
+    srcs = _LIB_SRCS,
+    compile_data = _LIB_COMPILE_DATA,
+    crate_name = "driver_tools",
+    edition = "2024",
+    deps = _COMMON_DEPS + [
+        "//sdk/fidl/fuchsia.driver.development:fuchsia.driver.development_rust_flex",
+        "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust_flex",
+        "//sdk/fidl/fuchsia.driver.registrar:fuchsia.driver.registrar_rust_flex",
+        "//src/devices/bin/driver_tools/common:lib",
+        "//src/devices/bin/driver_tools/connector:lib",
+        "//src/lib/fdomain/client:flex_fidl",
+    ],
+)
+
+rustc_library(
+    name = "lib_fdomain",
+    srcs = _LIB_SRCS,
+    compile_data = _LIB_COMPILE_DATA,
+    crate_features = ["fdomain"],
+    crate_name = "driver_tools_fdomain",
+    edition = "2024",
+    visibility = ["//src/developer/ffx/tools/driver:__pkg__"],
+    deps = _COMMON_DEPS + [
+        "//sdk/fidl/fuchsia.driver.development:fuchsia.driver.development_rust_fdomain_flex",
+        "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust_fdomain_flex",
+        "//sdk/fidl/fuchsia.driver.registrar:fuchsia.driver.registrar_rust_fdomain_flex",
+        "//src/devices/bin/driver_tools/common:lib_fdomain",
+        "//src/devices/bin/driver_tools/connector:lib_fdomain",
+        "//src/lib/fdomain/client:flex_fdomain",
+    ],
+)
+
+rustc_test(
+    name = "lib_test",
+    crate = ":lib",
+    # Give the generated GN `rustc_test("lib_test")` a unique `output_name`.
+    crate_name = "driver_tools_lib_test",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+    ],
+)
+
+fx_unittest_package(
+    name = "driver_tools_tests",
+    unit_tests = [":lib_test"],
+)
+
+host_rustc_test(
+    name = "lib_fdomain_test",
+    crate = ":lib_fdomain",
+    crate_features = ["fdomain"],
+    # Give the generated GN `rustc_test("lib_fdomain_test")` a unique `output_name`.
+    crate_name = "driver_tools_fdomain_lib_test",
+    # Tests compare golden command output that includes formatted `anyhow::Error`
+    # values, which include a backtrace when `RUST_BACKTRACE=1` is set.
+    test_args = ["env RUST_LIB_BACKTRACE=0"],
+    deps = [
+        "//src/lib/fdomain/local",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+    ],
+)
+
+rustc_binary(
+    name = "driver_tools",
+    srcs = ["src/main.rs"],
+    binary_name = "driver",
+    build_flags = ["//build/config/rust:bootfs"],
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        ":lib",
+        "//sdk/fidl/fuchsia.driver.development:fuchsia.driver.development_rust",
+        "//sdk/fidl/fuchsia.driver.registrar:fuchsia.driver.registrar_rust",
+        "//sdk/fidl/fuchsia.test.manager:fuchsia.test.manager_rust",
+        "//src/devices/bin/driver_tools/connector:lib",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+    ],
+)

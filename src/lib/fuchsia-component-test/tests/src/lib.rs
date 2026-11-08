@@ -750,6 +750,17 @@ async fn config_packaged_values_only() -> Result<(), Error> {
     builder
         .add_route(
             Route::new()
+                .capability(Capability::configuration("fuchsia.config.EchoString").optional())
+                .capability(Capability::configuration("fuchsia.config.EchoStringVector").optional())
+                .capability(Capability::configuration("fuchsia.config.EchoBool").optional())
+                .capability(Capability::configuration("fuchsia.config.EchoNum").optional())
+                .from(Ref::void())
+                .to(&echo_client),
+        )
+        .await?;
+    builder
+        .add_route(
+            Route::new()
                 .capability(Capability::protocol::<fecho::EchoMarker>())
                 .from(&echo_server)
                 .to(&echo_client),
@@ -806,61 +817,71 @@ async fn config_set_values_only() -> Result<(), Error> {
         Err(RealmBuilderError::ServerError(ftest::RealmBuilderError::NoConfigSchema))
     );
 
-    // fail to replace a config field for a component that hasn't opted in
-    assert_matches!(
-        builder.set_config_value(&echo_client, "doesnt_exist", "test".into()).await,
-        Err(RealmBuilderError::ServerError(ftest::RealmBuilderError::ConfigOverrideUnsupported))
-    );
-
-    // allow setting config values now
-    builder.init_mutable_config_to_empty(&echo_client).await.unwrap();
-
-    // fail to replace a field that doesn't exist
-    assert_matches!(
-        builder.set_config_value(&echo_client, "doesnt_exist", "test".into()).await,
-        Err(RealmBuilderError::ServerError(ftest::RealmBuilderError::NoSuchConfigField))
-    );
-
-    // fail to replace a field with the wrong type
-    assert_matches!(
-        builder.set_config_value(&echo_client, "echo_bool", "test".into()).await,
-        Err(RealmBuilderError::ServerError(ftest::RealmBuilderError::ConfigValueInvalid))
-    );
-
-    // fail to replace a string that violates max_len
-    let long_string = String::from_utf8(vec![b'F'; 20]).unwrap();
-    assert_matches!(
-        builder.set_config_value(&echo_client, "echo_string", long_string.clone().into()).await,
-        Err(RealmBuilderError::ServerError(ftest::RealmBuilderError::ConfigValueInvalid))
-    );
-
-    // fail to replace a vector whose string element violates max_len
-    assert_matches!(
-        builder
-            .set_config_value(&echo_client, "echo_string_vector", vec![long_string].into())
-            .await,
-        Err(RealmBuilderError::ServerError(ftest::RealmBuilderError::ConfigValueInvalid))
-    );
-
-    // fail to replace a vector that violates max_count
-    assert_matches!(
-        builder
-            .set_config_value(&echo_client, "echo_string_vector", vec!["a", "b", "c", "d"].into(),)
-            .await,
-        Err(RealmBuilderError::ServerError(ftest::RealmBuilderError::ConfigValueInvalid))
-    );
-
-    // succeed at replacing all fields with proper constraints
+    // succeed at routing all config capabilities
     builder
-        .set_config_value(&echo_client, "echo_string", "Foobar!".to_string().into())
+        .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+            name: "fuchsia.config.EchoString".parse().unwrap(),
+            value: "Foobar!".into(),
+        }))
         .await
         .unwrap();
     builder
-        .set_config_value(&echo_client, "echo_string_vector", vec!["Hey", "Folks"].into())
+        .add_route(
+            Route::new()
+                .capability(Capability::configuration("fuchsia.config.EchoString"))
+                .from(Ref::self_())
+                .to(&echo_client),
+        )
         .await
         .unwrap();
-    builder.set_config_value(&echo_client, "echo_bool", true.into()).await.unwrap();
-    builder.set_config_value(&echo_client, "echo_num", (42 as u64).into()).await.unwrap();
+    builder
+        .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+            name: "fuchsia.config.EchoStringVector".parse().unwrap(),
+            value: vec!["Hey", "Folks"].into(),
+        }))
+        .await
+        .unwrap();
+    builder
+        .add_route(
+            Route::new()
+                .capability(Capability::configuration("fuchsia.config.EchoStringVector"))
+                .from(Ref::self_())
+                .to(&echo_client),
+        )
+        .await
+        .unwrap();
+    builder
+        .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+            name: "fuchsia.config.EchoBool".parse().unwrap(),
+            value: true.into(),
+        }))
+        .await
+        .unwrap();
+    builder
+        .add_route(
+            Route::new()
+                .capability(Capability::configuration("fuchsia.config.EchoBool"))
+                .from(Ref::self_())
+                .to(&echo_client),
+        )
+        .await
+        .unwrap();
+    builder
+        .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+            name: "fuchsia.config.EchoNum".parse().unwrap(),
+            value: 42u64.into(),
+        }))
+        .await
+        .unwrap();
+    builder
+        .add_route(
+            Route::new()
+                .capability(Capability::configuration("fuchsia.config.EchoNum"))
+                .from(Ref::self_())
+                .to(&echo_client),
+        )
+        .await
+        .unwrap();
     builder
         .add_route(
             Route::new()
@@ -915,13 +936,47 @@ async fn config_mix_packaged_and_set_values() {
         .await
         .unwrap();
 
-    // use the packaged values for fields not set by this test
-    builder.init_mutable_config_from_package(&echo_client).await.unwrap();
-
     // succeed at replacing two of four fields with proper constraints
-    builder.set_config_value(&echo_client, "echo_string", "Foobar!".into()).await.unwrap();
     builder
-        .set_config_value(&echo_client, "echo_string_vector", vec!["Hey", "Folks"].into())
+        .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+            name: "fuchsia.config.EchoString".parse().unwrap(),
+            value: "Foobar!".into(),
+        }))
+        .await
+        .unwrap();
+    builder
+        .add_route(
+            Route::new()
+                .capability(Capability::configuration("fuchsia.config.EchoString"))
+                .from(Ref::self_())
+                .to(&echo_client),
+        )
+        .await
+        .unwrap();
+    builder
+        .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+            name: "fuchsia.config.EchoStringVector".parse().unwrap(),
+            value: vec!["Hey", "Folks"].into(),
+        }))
+        .await
+        .unwrap();
+    builder
+        .add_route(
+            Route::new()
+                .capability(Capability::configuration("fuchsia.config.EchoStringVector"))
+                .from(Ref::self_())
+                .to(&echo_client),
+        )
+        .await
+        .unwrap();
+    builder
+        .add_route(
+            Route::new()
+                .capability(Capability::configuration("fuchsia.config.EchoBool").optional())
+                .capability(Capability::configuration("fuchsia.config.EchoNum").optional())
+                .from(Ref::void())
+                .to(&echo_client),
+        )
         .await
         .unwrap();
 
@@ -991,11 +1046,32 @@ async fn config_override_for_root_with_config_in_collection_without_override() {
         .await
         .unwrap();
 
-    // use the packaged values for fields not set by this test
-    builder.init_mutable_config_from_package(&collection_launcher).await.unwrap();
-
     // set a config override for the RB root
-    builder.set_config_value(&collection_launcher, "to_override", "Foobar!".into()).await.unwrap();
+    builder
+        .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+            name: "fuchsia.config.ToOverride".parse().unwrap(),
+            value: "Foobar!".into(),
+        }))
+        .await
+        .unwrap();
+    builder
+        .add_route(
+            Route::new()
+                .capability(Capability::configuration("fuchsia.config.ToOverride"))
+                .from(Ref::self_())
+                .to(&collection_launcher),
+        )
+        .await
+        .unwrap();
+    builder
+        .add_route(
+            Route::new()
+                .capability(Capability::configuration("fuchsia.config.DontOverride").optional())
+                .from(Ref::void())
+                .to(&collection_launcher),
+        )
+        .await
+        .unwrap();
 
     builder
         .add_route(

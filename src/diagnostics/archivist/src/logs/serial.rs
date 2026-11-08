@@ -62,10 +62,9 @@ pub async fn launch_serial(
             }
             flush_request = flush_receiver.next() => {
                 if let Some(flush_request) = flush_request {
-                    // We have a background thread that polls sockets.  Ensure the background thread
-                    // is polled first before we write the remaining logs to serial to ensure we
-                    // capture all logs.
-                    logs_repo.flush().await;
+                    // Drain any remaining messages from the ring buffer before we write the
+                    // remaining logs to serial to ensure we capture all logs.
+                    logs_repo.flush();
 
                     // Write all pending logs to serial
                     while let Some(Some(log)) = log_stream.next().now_or_never() {
@@ -352,7 +351,7 @@ mod tests {
     use crate::logs::testing::make_message;
     use diagnostics_data::{BuilderArgs, LogsDataBuilder, LogsField, LogsProperty, Severity};
     use fidl::endpoints::create_proxy;
-    use fidl_fuchsia_logger::LogSinkMarker;
+    use fidl_fuchsia_logger::{LogSinkEvent, LogSinkMarker, LogSinkOnInitRequest};
     use fuchsia_async::TimeoutExt;
     use fuchsia_sync::Mutex;
     use futures::FutureExt;
@@ -700,8 +699,12 @@ mod tests {
             let (log_sink, server_end) = create_proxy::<LogSinkMarker>();
             let log_container = repo.get_log_container(identity);
             log_container.handle_log_sink(server_end.into_stream(), scope.as_handle().clone());
-            let (client_socket, server_socket) = zx::Socket::create_datagram();
-            log_sink.connect_structured(server_socket).unwrap();
+            let Some(Ok(LogSinkEvent::OnInit {
+                payload: LogSinkOnInitRequest { buffer: Some(iob), .. },
+            })) = log_sink.take_event_stream().next().await
+            else {
+                panic!("Expected OnInit");
+            };
 
             let (sink, mut rcv) = TestSink::new();
             let cloned_repo = Arc::clone(&repo);
@@ -720,7 +723,6 @@ mod tests {
                 cursor,
                 diagnostics_log_encoding::encode::EncoderOpts::default(),
             );
-            // Wait for initial interest to ensure that the socket is registered.
             log_sink.wait_for_interest_change().await.unwrap().unwrap();
 
             encoder
@@ -733,14 +735,16 @@ mod tests {
                     ],
                 })
                 .unwrap();
-            client_socket
-                .write(&encoder.inner().get_ref()[..encoder.inner().position() as usize])
-                .unwrap();
+            iob.write(
+                Default::default(),
+                0,
+                &encoder.inner().get_ref()[..encoder.inner().position() as usize],
+            )
+            .unwrap();
             let (sender, receiver) = oneshot::channel();
-            // Send the log flush command
+
+            // Send the log flush command and wait for flush to complete.
             flush_sender.unbounded_send(sender).unwrap();
-            // Wait for flush to complete. Flush involves a background thread,
-            // so keep polling until the background thread handles the flush event.
             assert_eq!(receiver.await, Ok(()));
             let received = rcv.next().now_or_never().unwrap().unwrap();
             assert_eq!(received, "[00000.000] 00000:00000> [foo] INFO: a\n");

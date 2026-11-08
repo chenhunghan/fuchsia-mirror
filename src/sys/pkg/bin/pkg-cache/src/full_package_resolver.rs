@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::upgradable_packages::UpgradablePackages;
+use crate::index::PackageIndex;
 use anyhow::{Context as _, anyhow};
 use fidl::endpoints::ServerEnd;
 use fidl_connector::Connect as _;
@@ -35,7 +35,7 @@ const INSPECT_RECENT_RESOLVE_COUNT: usize = 50;
 ///   5. the cache index in case of certain TUF errors
 pub(crate) struct Resolver {
     base_resolver: Arc<crate::base_package_resolver::Resolver>,
-    upgradable_packages: Option<Arc<UpgradablePackages>>,
+    package_index: Arc<PackageIndex>,
     tuf_authority: fidl_connector::ServiceReconnector<fpkg::AuthorityMarker>,
     cache_index: Arc<crate::CacheIndex>,
     package_fetcher: crate::package_fetcher::PackageFetcher,
@@ -54,7 +54,7 @@ pub(crate) struct Resolver {
 impl Resolver {
     pub(crate) fn new(
         base_resolver: Arc<crate::base_package_resolver::Resolver>,
-        upgradable_packages: Option<Arc<UpgradablePackages>>,
+        package_index: Arc<PackageIndex>,
         tuf_authority: fidl_connector::ServiceReconnector<fpkg::AuthorityMarker>,
         cache_index: Arc<crate::CacheIndex>,
         package_fetcher: crate::package_fetcher::PackageFetcher,
@@ -66,7 +66,7 @@ impl Resolver {
     ) -> Arc<Self> {
         Arc::new(Self {
             base_resolver,
-            upgradable_packages,
+            package_index,
             tuf_authority,
             cache_index,
             package_fetcher,
@@ -319,9 +319,13 @@ impl Resolver {
             Err(e) => return Err(Error::BaseResolver(e)),
         };
 
-        if let Some(upgradable_packages) = self.upgradable_packages.as_ref()
-            && let Some(hash) = upgradable_packages.get_hash(url.as_unpinned()).await
-        {
+        // NOTE: Resolving an upgradable package races with garbage collection. The hash returned
+        // here is protected from GC only as an upgradable package until the caller adds the
+        // package to `open_packages`. If `SetUpgradableUrls` associates the URL with a different
+        // hash and a GC pass snapshots `open_packages` in between, that pass can delete the
+        // package's blobs while it is being resolved. Re-checking the URL's hash after opening the
+        // package, and retrying on a mismatch, would close this race.
+        if let Some(hash) = self.package_index.upgradable_hash(url.as_unpinned()).await {
             if url.hash().is_some() {
                 return Err(Error::PinnedUpgradablePackage);
             }

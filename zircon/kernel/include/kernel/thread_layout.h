@@ -79,6 +79,19 @@ struct MemoryAllocationStateStorage {
 #pragma GCC diagnostic ignored "-Winvalid-offsetof"
 
 struct PreemptionStateLayout {
+  static constexpr uint32_t kMaxCountValue = PreemptionState::kMaxCountValue;
+  static constexpr uint32_t kPreemptDisableMask = PreemptionState::kPreemptDisableMask;
+  static constexpr uint32_t kEagerReschedDisableShift = PreemptionState::kEagerReschedDisableShift;
+  static constexpr uint32_t kEagerReschedDisableMask = PreemptionState::kEagerReschedDisableMask;
+  static constexpr uint32_t kTimesliceExtensionFlagsShift =
+      PreemptionState::kTimesliceExtensionFlagsShift;
+  static constexpr uint32_t kTimesliceExtensionFlagsMask =
+      PreemptionState::kTimesliceExtensionFlagsMask;
+  static constexpr uint32_t kTimesliceExtensionPresent =
+      PreemptionState::TimesliceExtensionFlags::Present;
+  static constexpr uint32_t kTimesliceExtensionActive =
+      PreemptionState::TimesliceExtensionFlags::Active;
+
   static constexpr size_t kStateOffset = offsetof(PreemptionState, state_);
   static constexpr size_t kPreemptsPendingOffset = offsetof(PreemptionState, preempts_pending_);
   static constexpr size_t kTimesliceExtensionOffset =
@@ -106,6 +119,12 @@ struct ThreadLayout {
   static_assert(sizeof(fbl::DoublyLinkedList<OwnedWaitQueue*>) == sizeof(void*));
   static_assert(sizeof(Thread::Canary) == sizeof(uint32_t));
   static_assert(sizeof(RelaxedAtomic<VmAspace*>) == sizeof(void*));
+
+  // Members that Rust models as RelaxedAtomicU32 / RelaxedAtomicU64 must match in size and align.
+  static_assert(sizeof(ktl::atomic<uint32_t>) == sizeof(uint32_t));
+  static_assert(alignof(ktl::atomic<uint32_t>) == alignof(uint32_t));
+  static_assert(sizeof(ktl::atomic<zx_koid_t>) == sizeof(zx_koid_t));
+  static_assert(alignof(ktl::atomic<zx_koid_t>) == alignof(zx_koid_t));
 
   static constexpr size_t kLockOffset = offsetof(Thread, lock_);
   static constexpr size_t kCanaryOffset = offsetof(Thread, canary_);

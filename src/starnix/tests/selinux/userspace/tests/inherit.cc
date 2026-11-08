@@ -13,9 +13,12 @@
 
 #include <fbl/unique_fd.h>
 #include <gtest/gtest.h>
+#include <linux/audit.h>
 #include <linux/capability.h>
+#include <linux/netlink.h>
 
 #include "src/lib/files/file.h"
+#include "src/starnix/tests/selinux/userspace/audit_utils.h"
 #include "src/starnix/tests/selinux/userspace/util.h"
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
@@ -113,6 +116,61 @@ TEST(InheritTest, FdUseDeniedFdRemappedToNull) {
       SAFE_SYSCALL(execv(path_for_exec.data(), args));
     }));
   }));
+}
+
+// Verifies that AVC denials emitted while revalidating inherited file descriptors during `execve`
+// report the post-exec binary name in `comm=` rather than the pre-exec thread name.
+TEST(InheritTest, UnauthorizedFdDenialLogsPostExecComm) {
+  constexpr char kParentSecurityContext[] = "test_u:test_r:test_inherit_parent_t:s0";
+  constexpr char kBridgeSecurityContext[] = "test_u:test_r:test_inherit_bridge_t:s0";
+  constexpr char kChildSecurityContext[] = "test_u:test_r:test_inherit_child_no_use_fd_t:s0";
+
+  auto enforce = ScopedEnforcement::SetEnforcing();
+
+  ASSERT_TRUE(RunSubprocessAs(kParentSecurityContext, [&] {
+    auto tmp_file_path = CreateTmpFile();
+    ASSERT_TRUE(tmp_file_path.is_ok());
+    fbl::unique_fd no_use_fd(open(tmp_file_path.value().data(), O_RDONLY));
+    ASSERT_TRUE(no_use_fd.is_valid());
+
+    ASSERT_TRUE(RunSubprocessAs(kBridgeSecurityContext, [&] {
+      std::string binary_name = "true_bin";
+      std::string path_for_exec = PathForExec(binary_name);
+      char* const args[] = {binary_name.data(), nullptr};
+
+      ASSERT_TRUE(WriteTaskAttr("exec", kChildSecurityContext).is_ok());
+      SAFE_SYSCALL(execv(path_for_exec.data(), args));
+    }));
+  }));
+
+  fbl::unique_fd audit_fd = OpenNetlinkAuditSocket();
+  ASSERT_TRUE(audit_fd.is_valid());
+  ASSERT_TRUE(SendUserAuditMessage(audit_fd.get(), 1, "COMM_TEST_END").is_ok());
+  ASSERT_TRUE(RegisterAsAuditDaemon(audit_fd.get(), getpid()).is_ok());
+
+  bool found_fd_denial = false;
+  char buf[4096];
+  while (true) {
+    auto recv_res = ReceiveNetlinkMessage(audit_fd.get(), buf, sizeof(buf));
+    if (recv_res.is_error() && recv_res.error_value() == EINTR) {
+      continue;
+    }
+    ASSERT_TRUE(recv_res.is_ok()) << strerror(recv_res.error_value());
+    ASSERT_GE(recv_res.value(), static_cast<ssize_t>(NLMSG_LENGTH(0)));
+    auto* header = reinterpret_cast<struct nlmsghdr*>(buf);
+    std::string_view message(reinterpret_cast<const char*>(NLMSG_DATA(header)),
+                             recv_res.value() - sizeof(*header));
+    if (header->nlmsg_type == AUDIT_USER_AVC &&
+        message.find("COMM_TEST_END") != std::string_view::npos) {
+      break;
+    }
+    if (header->nlmsg_type == AUDIT_AVC && message.find("tclass=fd") != std::string_view::npos) {
+      found_fd_denial = true;
+      EXPECT_NE(message.find("comm=\"true_bin\""), std::string_view::npos) << message;
+    }
+  }
+  EXPECT_TRUE(UnregisterAuditDaemon(audit_fd.get()).is_ok());
+  EXPECT_TRUE(found_fd_denial);
 }
 
 // Under the parent domain, open a test file twice such that the child domain does not have the
@@ -589,7 +647,8 @@ TEST(InheritTest, RlimitinhAllowedRlimitsInherited) {
 }
 
 // When the `noatsecure` permission is denied and the security domain is changing
-// during exec, the `AT_SECURE` entry is set in the executable's auxiliary vector.
+// during exec, the `AT_SECURE` entry is set in the executable's auxiliary vector and
+// `pdeath_signal` is cleared.
 TEST(InheritTest, NoAtSecureDenied) {
   constexpr char kParentSecurityContext[] = "test_u:test_r:test_inherit_parent_t:s0";
   constexpr char kChildSecurityContext[] = "test_u:test_r:test_inherit_child_deny_noatsecure_t:s0";
@@ -597,10 +656,14 @@ TEST(InheritTest, NoAtSecureDenied) {
   auto enforce = ScopedEnforcement::SetEnforcing();
 
   ASSERT_TRUE(RunSubprocessAs(kParentSecurityContext, [&] {
+    ASSERT_THAT(prctl(PR_SET_PDEATHSIG, SIGUSR1), SyscallSucceeds());
+
     std::string binary_name = "is_at_secure_set_bin";
     std::string path_for_exec = PathForExec(binary_name);
     std::string expect_at_secure_set = std::to_string(int(true));
-    char* const args[] = {binary_name.data(), expect_at_secure_set.data(), nullptr};
+    std::string expect_pdeathsig = std::to_string(0);
+    char* const args[] = {binary_name.data(), expect_at_secure_set.data(), expect_pdeathsig.data(),
+                          nullptr};
 
     ASSERT_TRUE(WriteTaskAttr("exec", kChildSecurityContext).is_ok());
     SAFE_SYSCALL(execv(path_for_exec.data(), args));
@@ -638,23 +701,29 @@ TEST(InheritTest, NoAtSecureDeniedPreservesAmbientCapabilities) {
 }
 
 // When the security domain does not change during exec, the `noatsecure` permission is not
-// checked and the `AT_SECURE` entry is not set in the executable's auxiliary vector.
+// checked, the `AT_SECURE` entry is not set in the executable's auxiliary vector, and
+// `pdeath_signal` is preserved.
 TEST(InheritTest, NoAtSecureDeniedSameDomain) {
   constexpr char kConstantSecurityContext[] = "test_u:test_r:test_inherit_constant_t:s0";
 
   auto enforce = ScopedEnforcement::SetEnforcing();
 
   ASSERT_TRUE(RunSubprocessAs(kConstantSecurityContext, [&] {
+    ASSERT_THAT(prctl(PR_SET_PDEATHSIG, SIGUSR1), SyscallSucceeds());
+
     std::string binary_name = "is_at_secure_set_bin";
     std::string path_for_exec = PathForExec(binary_name);
     std::string expect_at_secure_set = std::to_string(int(false));
-    char* const args[] = {binary_name.data(), expect_at_secure_set.data(), nullptr};
+    std::string expect_pdeathsig = std::to_string(SIGUSR1);
+    char* const args[] = {binary_name.data(), expect_at_secure_set.data(), expect_pdeathsig.data(),
+                          nullptr};
     SAFE_SYSCALL(execv(path_for_exec.data(), args));
   }));
 }
 
 // When the `noatsecure` permission is allowed and the security domain is changing
-// during exec, the AT_SECURE entry is not set in the executable's auxiliary vector.
+// during exec, the AT_SECURE entry is not set in the executable's auxiliary vector,
+// but `pdeath_signal` is still cleared.
 TEST(InheritTest, NoAtSecureAllowed) {
   constexpr char kParentSecurityContext[] = "test_u:test_r:test_inherit_parent_t:s0";
   constexpr char kChildSecurityContext[] = "test_u:test_r:test_inherit_child_allow_noatsecure_t:s0";
@@ -662,15 +731,54 @@ TEST(InheritTest, NoAtSecureAllowed) {
   auto enforce = ScopedEnforcement::SetEnforcing();
 
   ASSERT_TRUE(RunSubprocessAs(kParentSecurityContext, [&] {
+    ASSERT_THAT(prctl(PR_SET_PDEATHSIG, SIGUSR1), SyscallSucceeds());
+
     std::string binary_name = "is_at_secure_set_bin";
     std::string path_for_exec = PathForExec(binary_name);
     std::string expect_at_secure_set = std::to_string(int(false));
-    char* const args[] = {binary_name.data(), expect_at_secure_set.data(), nullptr};
+    std::string expect_pdeathsig = std::to_string(0);
+    char* const args[] = {binary_name.data(), expect_at_secure_set.data(), expect_pdeathsig.data(),
+                          nullptr};
 
     ASSERT_TRUE(WriteTaskAttr("exec", kChildSecurityContext).is_ok());
     SAFE_SYSCALL(execv(path_for_exec.data(), args));
   }));
 }
+
+class InheritShareTest : public testing::TestWithParam<bool> {};
+
+// When a process shares filesystem context (via `CLONE_FS`), `exec` requires the `share`
+// permission for the post-exec domain and fails with `EPERM` if denied.
+TEST_P(InheritShareTest, ShareWithCloneFs) {
+  constexpr char kParentSecurityContext[] = "test_u:test_r:test_inherit_parent_t:s0";
+  const bool allow_share = GetParam();
+  const char* child_context = allow_share ? "test_u:test_r:test_inherit_child_allow_share_t:s0"
+                                          : "test_u:test_r:test_inherit_child_no_share_t:s0";
+
+  auto enforce = ScopedEnforcement::SetEnforcing();
+
+  ASSERT_TRUE(RunSubprocessAs(kParentSecurityContext, [&] {
+    test_helper::CloneHelper clone_helper;
+    test_helper::ForkHelper fork_helper;
+    clone_helper.runInClonedChild(CLONE_FS | SIGCHLD, [&] {
+      ASSERT_TRUE(WriteTaskAttr("exec", child_context).is_ok());
+
+      std::string binary_name = "true_bin";
+      std::string path_for_exec = PathForExec(binary_name);
+      char* const args[] = {binary_name.data(), nullptr};
+      if (allow_share) {
+        SAFE_SYSCALL(execv(path_for_exec.data(), args));
+      } else {
+        EXPECT_THAT(execv(path_for_exec.data(), args), SyscallFailsWithErrno(EPERM));
+      }
+    });
+  }));
+}
+
+INSTANTIATE_TEST_SUITE_P(InheritTest, InheritShareTest, ::testing::Bool(),
+                         [](const testing::TestParamInfo<bool>& info) {
+                           return info.param ? "Allowed" : "Denied";
+                         });
 
 // Creates a temporary `#!` script and ELF interpreter labeled for script transition testing.
 void PrepareScriptTest(const test_helper::ScopedTempDir& temp_dir, std::string* script_path) {

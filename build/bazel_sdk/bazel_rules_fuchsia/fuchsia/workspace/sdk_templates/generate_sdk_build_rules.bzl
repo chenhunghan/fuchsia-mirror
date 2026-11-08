@@ -975,11 +975,22 @@ _FUCHSIA_CPU_CONSTRAINT_MAP = {
 
 # Maps a variant name to the corresponding config_setting() label in
 # @fuchsia_clang
+# LINT.IfChange(sysroot_variants)
 _FUCHSIA_CLANG_VARIANT_MAP = {
     "": "@fuchsia_clang//:novariant",
     "asan": "@fuchsia_clang//:asan_variant",
+    "asan-sancov": "@fuchsia_clang//:asan-sancov_variant",
+    "asan-ubsan": "@fuchsia_clang//:asan-ubsan_variant",
     "hwasan": "@fuchsia_clang//:hwasan_variant",
+    "hwasan-ubsan": "@fuchsia_clang//:hwasan-ubsan_variant",
+    "ubsan": "@fuchsia_clang//:ubsan_variant",
+    "ubsan-sancov": "@fuchsia_clang//:ubsan-sancov_variant",
+    "coverage": "@fuchsia_clang//:coverage_variant",
+    "coverage-rust": "@fuchsia_clang//:coverage-rust_variant",
+    "profile": "@fuchsia_clang//:profile_variant",
+    "profile-rust": "@fuchsia_clang//:profile-rust_variant",
 }
+# LINT.ThenChange(//build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/sanitizer.bzl:variant_config_settings)
 
 def _get_variant_suffix(variant):
     return variant if variant else "novariant"

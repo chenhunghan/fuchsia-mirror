@@ -34,6 +34,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <trace.h>
 #include <zircon/errors.h>
 #include <zircon/time.h>
 #include <zircon/types.h>
@@ -62,7 +63,6 @@
 #include <lockdep/lockdep.h>
 #include <object/job_dispatcher.h>
 #include <object/process_dispatcher.h>
-#include <object/sampler_dispatcher.h>
 #include <object/thread_dispatcher.h>
 #include <pretty/hexdump.h>
 #include <vm/kstack.h>
@@ -87,9 +87,6 @@ KCOUNTER(thread_join_count, "thread.join")
 KCOUNTER(thread_suspend_count, "thread.suspend")
 // counts the number of calls to resume() that succeeded.
 KCOUNTER(thread_resume_count, "thread.resume")
-// counts the number of times a thread's timeslice extension was activated (see
-// |PreemptionState::SetTimesliceExtension|).
-KCOUNTER(thread_timeslice_extended, "thread.timeslice_extended")
 // counts the number of calls to restricted_kick() that succeeded.
 KCOUNTER(thread_restricted_kick_count, "thread.restricted_kick")
 // counts the number of failed samples
@@ -237,45 +234,12 @@ Thread::~Thread() {
   // here.
 }
 
-void Thread::set_name(ktl::string_view name) {
-  // |name| must fit in ZX_MAX_NAME_LEN bytes, minus 1 for the trailing NUL.
-  name = name.substr(0, ZX_MAX_NAME_LEN - 1);
-  memcpy(name_, name.data(), name.size());
-  memset(name_ + name.size(), 0, ZX_MAX_NAME_LEN - name.size());
-}
-
 Thread::Thread(ktl::string_view name) {
   set_name(name);
 
 #if WITH_LOCK_DEP
   lockdep::SystemInitThreadLockState(&lock_state());
 #endif
-}
-
-void TaskState::Init(thread_start_routine entry, void* arg) {
-  entry_ = entry;
-  arg_ = arg;
-}
-
-zx_status_t TaskState::Join(Thread* const current_thread, zx_instant_mono_t deadline) {
-  return retcode_wait_queue_.Block(current_thread, deadline, Interruptible::No);
-}
-
-bool TaskState::TryWakeJoiners(zx_status_t status) {
-  ktl::optional<uint32_t> result;
-
-  // Attempt to lock the queue first.
-  if (retcode_wait_queue_.get_lock().AcquireOrBackoff()) {
-    // Now, try to lock and wake all of our waiting threads.
-    result = retcode_wait_queue_.WakeAllLocked(status);
-
-    // No matter what just happened, we need to drop the queue's lock.
-    retcode_wait_queue_.get_lock().Release();
-  }
-
-  // If we got a result, then we succeeded in waking the threads we wanted to
-  // wake.
-  return result != ktl::nullopt;
 }
 
 static void free_thread_resources(Thread* t) {
@@ -332,20 +296,6 @@ zx_status_t Thread::Current::SoftFaultInRange(vaddr_t va, uint flags, size_t len
 
 zx_status_t Thread::Current::AccessedFault(vaddr_t va) {
   return Fault(va, [va](VmAspace* aspace) { return aspace->AccessedFault(va); });
-}
-
-void Thread::Trampoline() {
-  // Handle the special case of starting a new thread for the first time,
-  // releasing the previous thread's lock as well as the current thread's lock
-  // in the process, before restoring interrupts and dropping into the thread's
-  // entry point.
-  Scheduler::TrampolineLockHandoff();
-  arch_enable_ints();
-
-  // Call into the thread's entry point, and call exit when finished.
-  const TaskState& task_state = Thread::Current::Get()->task_state_;
-  int ret = task_state.entry()(task_state.arg());
-  Thread::Current::Exit(ret);
 }
 
 /**
@@ -441,10 +391,10 @@ Thread* Thread::CreateEtc(Thread* t, ktl::string_view name, thread_start_routine
     }
 
     // save whether or not we need to free the thread struct and/or stack
-    t->flags_ = flags;
+    t->flags_.store(flags, ktl::memory_order_relaxed);
 
     if (likely(alt_trampoline == nullptr)) {
-      alt_trampoline = &Thread::Trampoline;
+      alt_trampoline = &rust_thread_trampoline;
     }
 
     // set up the initial stack frame
@@ -789,7 +739,7 @@ zx_status_t Thread::Join(int* out_retcode, zx_instant_mono_t deadline) {
       Guard<SpinLock, NoIrqSave> list_guard{&list_lock_};
       ChainLockGuard guard{get_lock()};
 
-      if (flags_ & THREAD_FLAG_DETACHED) {
+      if (flags_.load(ktl::memory_order_relaxed) & THREAD_FLAG_DETACHED) {
         // the thread is detached, go ahead and exit
         return ZX_ERR_BAD_STATE;
       }
@@ -883,13 +833,14 @@ zx_status_t Thread::Detach() {
 
     // If the target thread is not yet dead, flag it as detached and get out.
     if (state() != THREAD_DEATH) {
-      flags_ |= THREAD_FLAG_DETACHED;
+      flags_.fetch_or(THREAD_FLAG_DETACHED, ktl::memory_order_relaxed);
       return JoinThread::No;
     }
 
     // Looks like the thread has already died.  Make sure the DETACHED flag has
     // been cleared (so that Join continues).
-    flags_ &= ~THREAD_FLAG_DETACHED;  // makes sure Join continues
+    flags_.fetch_and(~THREAD_FLAG_DETACHED,
+                     ktl::memory_order_relaxed);  // makes sure Join continues
     // Drop our lock and Join to finish the cleanup.
     return JoinThread::Yes;
   };
@@ -1003,7 +954,7 @@ __NO_RETURN void Thread::Current::Exit(int retcode) {
     current_thread->CallMigrateFnLocked(Thread::MigrateStage::Exiting);
 
     // if we're detached, then do our teardown here
-    if (current_thread->flags_ & THREAD_FLAG_DETACHED) {
+    if (current_thread->flags_.load(ktl::memory_order_relaxed) & THREAD_FLAG_DETACHED) {
       kcounter_add(thread_detached_exit_count, 1);
 
       // remove it from global lists and drop the global list lock.
@@ -1044,7 +995,8 @@ __NO_RETURN void Thread::Current::Exit(int retcode) {
       // this is safe, it may be a good idea to come back here later and queue
       // the DPC while holding the thread's lock, just to simplify the structure
       // of the code around here.
-      if (current_thread->stack_.base() || (current_thread->flags_ & THREAD_FLAG_FREE_STRUCT)) {
+      if (current_thread->stack_.base() ||
+          (current_thread->flags_.load(ktl::memory_order_relaxed) & THREAD_FLAG_FREE_STRUCT)) {
         queue_free_dpc = true;
       }
     } else {
@@ -1231,13 +1183,12 @@ void Thread::CallMigrateFnLocked(MigrateStage stage) {
   }
 }
 
-// Go over every thread which has a migrate function assigned to it, and which
-// last ran on the current CPU, but is not in the ready state.  The current CPU
-// is becoming unavailable, and the currently running thread is the last change
-// anything is going to have to run on this CPU for a while.  If there are
-// threads out there which are blocked, but which need to record some per-cpu
-// state (eg; VCPU threads), this will be their last chance to do so.  The next
-// time they become scheduled to run, they are going to run on a different CPU.
+// Go over every non-running thread which has a migrate function assigned to it
+// and last ran on |cpu|. |cpu| is becoming unavailable, and the currently
+// running unplug thread is the last thing going to run on |cpu| before it goes
+// offline. Any blocked threads or pinned READY threads remaining queued on
+// |cpu| that need to record per-CPU state (e.g., VCPU threads) must run their
+// Save stage now before |cpu| powers down.
 void Thread::CallMigrateFnForCpu(cpu_num_t cpu) {
   DEBUG_ASSERT(arch_ints_disabled());
   Guard<SpinLock, NoIrqSave> list_guard{&list_lock_};
@@ -1245,7 +1196,7 @@ void Thread::CallMigrateFnForCpu(cpu_num_t cpu) {
   for (auto& thread : migrate_list_) {
     SingleChainLockGuard thread_guard{NoIrqSaveOption, thread.get_lock(),
                                       CLT_TAG("Thread::CallMigrateFnForCpu")};
-    if (thread.state() != THREAD_READY && thread.scheduler_state().last_cpu_ == cpu) {
+    if (thread.state() != THREAD_RUNNING && thread.scheduler_state().last_cpu_ == cpu) {
       thread.CallMigrateFnLocked(Thread::MigrateStage::Save);
     }
   }
@@ -1270,17 +1221,6 @@ bool Thread::CheckKillSignal() {
   } else {
     return false;
   }
-}
-
-zx_status_t Thread::CheckKillOrSuspendSignal() const {
-  const auto current_signals = signals();
-  if (unlikely(current_signals & THREAD_SIGNAL_KILL)) {
-    return ZX_ERR_INTERNAL_INTR_KILLED;
-  }
-  if (unlikely(current_signals & THREAD_SIGNAL_SUSPEND)) {
-    return ZX_ERR_INTERNAL_INTR_RETRY;
-  }
-  return ZX_OK;
 }
 
 // finish suspending the current thread
@@ -1376,11 +1316,11 @@ void Thread::Current::DoSampleStack(GeneralRegsSource source, void* gregs) {
     }
 
     // If a thread was marked to be sampled but was first suspended, it may now be long after the
-    // sampling session has ended. sampler::SampleThread grabs the global state, checks if it's
-    // still valid.
+    // sampling session has ended. sampler::ThreadSampler::SampleThread grabs the global state,
+    // checks if it's still valid.
     auto sampler_result =
-        SamplerDispatcher::SampleThread(current_thread->pid(), current_thread->tid(), source, gregs,
-                                        current_thread->sampling_session_.load());
+        sampler::ThreadSampler::SampleThread(current_thread->pid(), current_thread->tid(), source,
+                                             gregs, current_thread->sampling_session_.load());
     if (sampler_result.is_error()) {
       kcounter_add(thread_sampling_failed, 1);
     }
@@ -1447,6 +1387,7 @@ void Thread::Current::ProcessPendingSignals(GeneralRegsSource source, void* greg
   // of signal processing. Store this information in a local so that we can process all signals
   // before actually exiting.
   bool exit_to_normal_mode = false;
+  bool sampled_stack = false;
 
   // It's possible for certain signals to be asserted, processed, and then re-asserted during this
   // method so loop until there are no pending signals.
@@ -1603,10 +1544,18 @@ void Thread::Current::ProcessPendingSignals(GeneralRegsSource source, void* greg
     // THREAD_SIGNAL_SAMPLE_STACK
     //
     if (signals & THREAD_SIGNAL_SAMPLE_STACK) {
-      // Sampling the user stack may page fault as we try to do usercopies.
-      arch_enable_ints();
-      Thread::Current::DoSampleStack(source, gregs);
-      arch_disable_ints();
+      if (!sampled_stack) {
+        sampled_stack = true;
+        // Sampling the user stack may page fault as we try to do usercopies.
+        arch_enable_ints();
+        Thread::Current::DoSampleStack(source, gregs);
+        arch_disable_ints();
+      }
+      // Clear any THREAD_SIGNAL_SAMPLE_STACK re-asserted by the sampling timer while interrupts
+      // were enabled. The thread has not executed any new user instructions since `gregs` was
+      // captured, and re-sampling the identical register state in a loop can livelock under
+      // high-frequency sampling (e.g. in coverage builds).
+      current_thread->clear_signals(THREAD_SIGNAL_SAMPLE_STACK);
     }
   }
 
@@ -1711,44 +1660,6 @@ void Thread::Current::Reschedule() {
 
   DEBUG_ASSERT(current_thread->state() == THREAD_RUNNING);
   Scheduler::Reschedule(current_thread);
-}
-
-void PreemptionState::SetPreemptionTimerForExtension(zx_instant_mono_t deadline) {
-  // Interrupts must be disabled when calling PreemptReset.
-  InterruptDisableGuard interrupt_disable;
-  percpu::Get(arch_curr_cpu_num()).timer_queue.PreemptReset(deadline);
-  kcounter_add(thread_timeslice_extended, 1);
-}
-
-void PreemptionState::FlushPendingContinued(Flush flush) {
-  // If we're flushing the local CPU, make sure OK to block since flushing
-  // local may trigger a reschedule.
-  DEBUG_ASSERT(((flush & FlushLocal) == 0) || !arch_blocking_disallowed());
-
-  InterruptDisableGuard interrupt_disable;
-  // Recheck, pending preemptions could have been flushed by a context switch
-  // before interrupts were disabled.
-  const cpu_mask_t pending_mask = preempts_pending_;
-
-  // If there is a pending local preemption the scheduler will take care of
-  // flushing all pending reschedules.
-  const cpu_mask_t current_cpu_mask = cpu_num_to_mask(arch_curr_cpu_num());
-  if ((pending_mask & current_cpu_mask) != 0 && (flush & FlushLocal) != 0) {
-    // Clear the local preempt pending flag before calling preempt.  Failure
-    // to do this can cause recursion during Scheduler::Preempt if any code
-    // (such as debug tracing code) attempts to disable and re-enable
-    // preemption during the scheduling operation.
-    preempts_pending_ &= ~current_cpu_mask;
-
-    // TODO(johngro): We cannot be holding the current thread's lock while we do
-    // this.  Is there a good way to enforce this requirement via either static
-    // annotation or dynamic checks?
-    Scheduler::Preempt(Scheduler::PreemptType::FlushPending);
-  } else if ((flush & FlushRemote) != 0) {
-    // The current cpu is ignored by mp_reschedule if present in the mask.
-    mp_reschedule(pending_mask, 0);
-    preempts_pending_ &= current_cpu_mask;
-  }
 }
 
 // timer callback to wake up a sleeping thread
@@ -1940,10 +1851,7 @@ void thread_init_early() {
 /**
  * @brief Change name of current thread
  */
-void Thread::Current::SetName(const char* name) {
-  Thread* current_thread = Thread::Current::Get();
-  strlcpy(current_thread->name_, name, sizeof(current_thread->name_));
-}
+void Thread::Current::SetName(const char* name) { Thread::Current::Get()->set_name(name); }
 
 /**
  * @brief Change the base profile of current thread
@@ -1975,12 +1883,12 @@ void Thread::SetUsermodeThread(fbl::RefPtr<ThreadDispatcher> user_thread) {
   DEBUG_ASSERT(!user_thread_);
 
   user_thread_ = ktl::move(user_thread);
-  tid_ = user_thread_->get_koid();
-  pid_ = user_thread_->process()->get_koid();
+  tid_.store(user_thread_->get_koid(), ktl::memory_order_relaxed);
+  pid_.store(user_thread_->process()->get_koid(), ktl::memory_order_relaxed);
 
   // All user mode threads are detached since they are responsible for cleaning themselves up.
   // We can set this directly because we've checked that we are in the initial state.
-  flags_ |= THREAD_FLAG_DETACHED;
+  flags_.fetch_or(THREAD_FLAG_DETACHED, ktl::memory_order_relaxed);
 }
 
 /**
@@ -2007,7 +1915,7 @@ void Thread::Current::BecomeIdle() {
     Thread::Current::SetName(name);
 
     // Mark ourself as idle
-    t->flags_ |= THREAD_FLAG_IDLE;
+    t->flags_.fetch_or(THREAD_FLAG_IDLE, ktl::memory_order_relaxed);
 
     // Now that we are the idle thread, make sure that we drop out of the
     // scheduler's bookkeeping altogether.
@@ -2121,7 +2029,7 @@ Thread* Thread::CreateIdleThread(cpu_num_t cpu_num) {
   {
     SingleChainLockGuard guard{IrqSaveOption, t->get_lock(), CLT_TAG("Thread::CreateIdleThread")};
 
-    t->flags_ |= THREAD_FLAG_IDLE | THREAD_FLAG_DETACHED;
+    t->flags_.fetch_or(THREAD_FLAG_IDLE | THREAD_FLAG_DETACHED, ktl::memory_order_relaxed);
     t->scheduler_state_.hard_affinity_ = cpu_num_to_mask(cpu_num);
 
     Scheduler::UnblockIdle(t);
@@ -2140,7 +2048,7 @@ void Thread::ReviveIdlePowerThread(cpu_num_t cpu_num) {
   DEBUG_ASSERT(thread->scheduler_state().hard_affinity() == cpu_num_to_mask(cpu_num));
   DEBUG_ASSERT(thread->task_state().entry() == IdlePowerThread::Run);
 
-  arch_thread_initialize(thread, reinterpret_cast<vaddr_t>(Thread::Trampoline));
+  arch_thread_initialize(thread, reinterpret_cast<vaddr_t>(rust_thread_trampoline));
   thread->preemption_state().Reset();
 }
 
@@ -2268,10 +2176,11 @@ void ThreadDumper::DumpLocked(const Thread* t, const char* match_owner, bool ful
     dprintf(INFO, "\truntime_ns %" PRIi64 ", runtime_s %" PRIi64 "\n", runtime,
             runtime / 1000000000);
     t->stack().DumpInfo(INFO);
+    const unsigned int flags = t->flags_.load(ktl::memory_order_relaxed);
     dprintf(INFO, "\tentry %p, arg %p, flags 0x%x %s%s%s%s\n", t->task_state_.entry_,
-            t->task_state_.arg_, t->flags_, (t->flags_ & THREAD_FLAG_DETACHED) ? "Dt" : "",
-            (t->flags_ & THREAD_FLAG_FREE_STRUCT) ? "Ft" : "",
-            (t->flags_ & THREAD_FLAG_IDLE) ? "Id" : "", (t->flags_ & THREAD_FLAG_VCPU) ? "Vc" : "");
+            t->task_state_.arg_, flags, (flags & THREAD_FLAG_DETACHED) ? "Dt" : "",
+            (flags & THREAD_FLAG_FREE_STRUCT) ? "Ft" : "", (flags & THREAD_FLAG_IDLE) ? "Id" : "",
+            (flags & THREAD_FLAG_VCPU) ? "Vc" : "");
 
     dprintf(INFO, "\twait queue %p, blocked_status %d, interruptible %s, wait queues owned %s\n",
             t->wait_queue_state().blocking_wait_queue_, t->wait_queue_state().blocked_status_,

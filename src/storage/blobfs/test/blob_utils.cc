@@ -363,6 +363,8 @@ zx::result<BlobWriterWrapper> BlobCreatorWrapper::Create(const Digest& digest,
         return zx::error(ZX_ERR_ALREADY_EXISTS);
       case fuchsia_fxfs::CreateBlobError::kInternal:
         return zx::error(ZX_ERR_INTERNAL);
+      case fuchsia_fxfs::CreateBlobError::kOutOfSpace:
+        return zx::error(ZX_ERR_NO_SPACE);
     }
   }
   return zx::ok(BlobWriterWrapper(

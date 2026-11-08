@@ -121,19 +121,6 @@ void DirectoryConnection::Unbind() {
     binding_->Unbind();
 }
 
-#if FUCHSIA_API_LEVEL_LESS_THAN(29) || FUCHSIA_API_LEVEL_AT_LEAST(PLATFORM)
-void DirectoryConnection::DeprecatedClone(DeprecatedCloneRequestView request,
-                                          DeprecatedCloneCompleter::Sync& completer) {
-  fidl::ServerEnd<fio::Node> server_end{std::move(request->object)};
-  if (request->flags & fio::wire::OpenFlags::kDescribe) {
-    // Ignore errors since there is nothing we can do if this fails.
-    [[maybe_unused]] auto result =
-        fidl::WireSendEvent(server_end)->OnOpen(ZX_ERR_NOT_SUPPORTED, {});
-  }
-  server_end.Close(ZX_ERR_NOT_SUPPORTED);
-}
-#endif
-
 void DirectoryConnection::Clone(CloneRequestView request, CloneCompleter::Sync& completer) {
   Connection::NodeClone(fio::Flags::kProtocolDirectory | fs::internal::RightsToFlags(rights()),
                         request->request.TakeChannel());
@@ -159,34 +146,6 @@ void DirectoryConnection::Sync(SyncCompleter::Sync& completer) {
       completer.ReplySuccess();
     }
   });
-}
-
-#if FUCHSIA_API_LEVEL_AT_LEAST(28)
-void DirectoryConnection::DeprecatedGetAttr(DeprecatedGetAttrCompleter::Sync& completer) {
-#else
-void DirectoryConnection::GetAttr(GetAttrCompleter::Sync& completer) {
-#endif  // FUCHSIA_API_LEVEL_AT_LEAST(28)
-  if (!(rights() & fio::Rights::kGetAttributes)) {
-    completer.Reply(ZX_ERR_BAD_HANDLE, {});
-    return;
-  }
-  zx::result attrs = vnode()->GetAttributes();
-  if (attrs.is_ok()) {
-    completer.Reply(ZX_OK, attrs->ToIoV1NodeAttributes(*vnode()));
-  } else {
-    completer.Reply(attrs.error_value(), {});
-  }
-}
-
-#if FUCHSIA_API_LEVEL_AT_LEAST(28)
-void DirectoryConnection::DeprecatedSetAttr(DeprecatedSetAttrRequestView request,
-                                            DeprecatedSetAttrCompleter::Sync& completer) {
-#else
-void DirectoryConnection::SetAttr(SetAttrRequestView request, SetAttrCompleter::Sync& completer) {
-#endif  // FUCHSIA_API_LEVEL_AT_LEAST(28)
-  VnodeAttributesUpdate update =
-      VnodeAttributesUpdate::FromIo1(request->attributes, request->flags);
-  completer.Reply(Connection::NodeUpdateAttributes(update).status_value());
 }
 
 void DirectoryConnection::GetAttributes(fio::wire::NodeGetAttributesRequest* request,
@@ -228,15 +187,6 @@ void DirectoryConnection::GetFlags(GetFlagsCompleter::Sync& completer) {
 }
 void DirectoryConnection::SetFlags(SetFlagsRequestView, SetFlagsCompleter::Sync& completer) {
   completer.ReplyError(ZX_ERR_NOT_SUPPORTED);
-}
-
-void DirectoryConnection::DeprecatedGetFlags(DeprecatedGetFlagsCompleter::Sync& completer) {
-  completer.Reply(ZX_OK, RightsToOpenFlags(rights()));
-}
-
-void DirectoryConnection::DeprecatedSetFlags(DeprecatedSetFlagsRequestView,
-                                             DeprecatedSetFlagsCompleter::Sync& completer) {
-  completer.Reply(ZX_ERR_NOT_SUPPORTED);
 }
 
 #if FUCHSIA_API_LEVEL_LESS_THAN(32) || FUCHSIA_API_LEVEL_AT_LEAST(PLATFORM)

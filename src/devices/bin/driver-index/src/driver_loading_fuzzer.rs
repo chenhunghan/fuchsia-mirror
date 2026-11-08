@@ -36,6 +36,9 @@ impl Session {
         }
     }
 
+    // TODO(https://fxbug.dev/582353224): `driver_buffer` is moved into `push_drivers` before being
+    // reassigned, so `.clear()` cannot be used (clippy::new_instead_of_clear false positive).
+    #[allow(clippy::new_instead_of_clear)]
     pub async fn run(mut self) {
         if self.max_delay.into_millis() == 0 {
             push_drivers(&self.sender, self.shuffled_boot_drivers).await;

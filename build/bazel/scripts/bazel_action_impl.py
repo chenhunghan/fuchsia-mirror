@@ -10,22 +10,30 @@ import dataclasses
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import typing as T
 from pathlib import Path
 
 _SCRIPT_DIR = os.path.dirname(__file__)
-sys.path.insert(0, _SCRIPT_DIR)
 # LINT.IfChange(imports)
-import bazel_action_utils
-import bazel_label_mapper
-import bazel_rust_analyzer_utils
-import bazel_source_path_mapper
-import build_utils
-import stdio_redirection
-import thread_pool_helpers
-from bazel_action_file_copy_utils import (
+from build.api.debug_symbols import (
+    DebugSymbolEntryType,
+    DebugSymbolExporter,
+    DebugSymbolsManifestParser,
+)
+from build.bazel.scripts import (
+    bazel_action_utils,
+    bazel_label_mapper,
+    bazel_rust_analyzer_utils,
+    bazel_source_path_mapper,
+    bazel_test_packages,
+    build_utils,
+    stdio_redirection,
+    thread_pool_helpers,
+)
+from build.bazel.scripts.bazel_action_file_copy_utils import (
     FilePath,
     check_if_need_to_copy_file,
     copy_directory_if_changed,
@@ -33,15 +41,10 @@ from bazel_action_file_copy_utils import (
     write_file_if_changed,
 )
 
-_BUILD_API_DIR = os.path.join(_SCRIPT_DIR, "../../api")
-sys.path.insert(0, _BUILD_API_DIR)
-from debug_symbols import (
-    DebugSymbolEntryType,
-    DebugSymbolExporter,
-    DebugSymbolsManifestParser,
-)
-
-# LINT.ThenChange(//build/bazel/bazel_action.gni:bazel_action_impl_imports, //build/bazel/scripts/BUILD.gn:bazel_action_impl_imports)
+# LINT.ThenChange(
+#   //build/bazel/bazel_action.gni:bazel_action_python_script_inputs,
+#   //build/bazel/scripts/BUILD.gn:bazel_action_impl_imports,
+# )
 
 
 # Set this to True to debug operations locally in this script.
@@ -98,6 +101,10 @@ class MissingTrackedFileError(BazelActionScriptError):
     """Missing tracked file inside output directory."""
 
 
+class PackageExtractionError(BazelActionScriptError):
+    """Failed to extract a package archive."""
+
+
 @dataclasses.dataclass
 class _InputFileGenQueryInfo(object):
     """Class for holding info about the genqueries generated for each target."""
@@ -115,6 +122,7 @@ class BazelActionOutputs(object):
     packages: list[bazel_action_utils.PackageOutput]
     final_symlinks: list[bazel_action_utils.FinalSymlinkOutput]
     copy_debug_symbols: bool = False
+    export_test_packages: bool = False
 
     def __len__(self) -> int:
         return (
@@ -429,6 +437,37 @@ class BazelActionRunner(object):
             )
         all_output_files = output_copier.copy(outputs, time_profile)
 
+        if command == "build" and outputs.export_test_packages:
+            # Do this now, while the packages' files are top-level outputs of
+            # the invocation that just finished. A later invocation could
+            # rebuild some of them as non-top-level outputs and leave them
+            # missing from disk, or replant the execroot without the external
+            # repositories that some of their blobs come from.
+            time_profile.start(
+                "export_test_packages",
+                "Export Bazel test packages to the Ninja build directory",
+            )
+            try:
+                bazel_test_packages.export_packages(
+                    self.paths,
+                    bazel_test_packages.read_packages_list(
+                        self.paths.ninja_build_dir
+                    ),
+                )
+            except (OSError, KeyError, ValueError) as e:
+                raise BazelActionError(
+                    f"Failed to export Bazel test packages: {e}"
+                ) from e
+
+        if command == "build" and outputs.packages:
+            # Extract the package archives that request it, now that they have
+            # been copied into the Ninja build directory.
+            all_output_files.extend(
+                self._extract_package_archives(
+                    outputs.packages, all_output_files, time_profile
+                )
+            )
+
         # Perform the merging of debug symbols data, and optionally copy
         # and write the output to a manifest.
         need_to_copy_debug_symbols = outputs.copy_debug_symbols or any(
@@ -518,6 +557,120 @@ class BazelActionRunner(object):
                 )
             )
         return package_archive_paths
+
+    def _extract_package_archives(
+        self,
+        packages: list[bazel_action_utils.PackageOutput],
+        updated_files: list[Path],
+        time_profile: build_utils.TimeProfile,
+    ) -> list[Path]:
+        """Extract the package archives of PackageOutputs into package_out_dir.
+
+        This replaces the use of a separate `prebuilt_package()` GN target to
+        extract the archive, which cannot be traced as a hermetic action
+        because the set of blobs it writes is not known in advance.
+
+        To preserve Ninja's `restat` behavior, an archive is only extracted if
+        it was updated by this action, or if any of the extracted files that
+        are tracked by Ninja are missing.
+
+        Args:
+            packages: The package outputs of this action.
+            updated_files: The Ninja output paths updated by this action.
+            time_profile: The TimeProfile to update.
+
+        Returns:
+            The list of Ninja output paths updated by the extraction.
+
+        Raises:
+            PackageExtractionError if package-tool fails.
+        """
+        updated = set(updated_files)
+        build_dir = self.paths.ninja_build_dir
+
+        def _needs_extraction(
+            package: bazel_action_utils.PackageOutput,
+        ) -> bool:
+            """Returns True if the package archive needs to be extracted.
+
+            This is the case if the archive was just updated by this action
+            (i.e. the Bazel output changed), or if any of the extracted files
+            that are tracked by Ninja are missing (e.g. a clean build, or a
+            previous extraction that failed or was interrupted).
+
+            Otherwise, the previously extracted content is up to date, and
+            skipping extraction preserves the timestamps of the tracked files
+            so that Ninja's `restat` can prune downstream actions.
+            """
+            if Path(package.archive_path) in updated:
+                return True
+            return not all(
+                (build_dir / p).exists()
+                for p in package.extracted_ninja_paths()
+            )
+
+        to_extract = [p for p in packages if _needs_extraction(p)]
+
+        if not to_extract:
+            return []
+
+        time_profile.start(
+            "extract_package_archives",
+            "Extract Fuchsia package archives into the Ninja build directory",
+        )
+
+        def _extract(package: bazel_action_utils.PackageOutput) -> str | None:
+            out_dir = build_dir / package.package_out_dir
+            # Remove the outputs of previous extractions, to avoid keeping
+            # stale files around. Removing the files tracked by Ninja first
+            # also ensures that `_needs_extraction()` returns True on the next
+            # build if extraction fails or is interrupted.
+            for p in package.extracted_ninja_paths():
+                (build_dir / p).unlink(missing_ok=True)
+            for subdir in ("blobs", "manifests"):
+                shutil.rmtree(out_dir / subdir, ignore_errors=True)
+            cmd = [
+                self.global_args.package_tool,
+                "package",
+                "archive",
+                "extract",
+                package.archive_path,
+                "-o",
+                package.package_out_dir,
+                "--repository",
+                "fuchsia.com",
+                "--blobs-json",
+            ]
+            ret = subprocess.run(
+                cmd, cwd=build_dir, capture_output=True, text=True
+            )
+            if ret.returncode == 0:
+                return None
+
+            # The tracked outputs were removed above, so the next build will
+            # retry extraction even if the Bazel output did not change.
+            return (
+                f"Failed to extract {package.archive_path} for {package.package_label}:\n"
+                + f"  {build_utils.cmd_args_to_string(cmd)}\n"
+                + ret.stdout
+                + ret.stderr
+            )
+
+        errors = [
+            e
+            for e in thread_pool_helpers.map_threaded(_extract, to_extract)
+            if e
+        ]
+        if errors:
+            raise PackageExtractionError(
+                "\nBAZEL_ACTION_ERROR: " + "\n".join(errors)
+            )
+
+        return [
+            Path(p)
+            for package in to_extract
+            for p in package.extracted_ninja_paths()
+        ]
 
     def _create_buildfiles_genqueries(
         self, targets: list[str]
@@ -724,20 +877,6 @@ class BazelActionRunner(object):
             An AspectManifestOutputs instance.
         """
 
-        if self.global_args.quiet:
-            # Still capture stdout to print its content if there is an error
-            # running the build command below.
-            stdout_sink = stdio_redirection.BytesOutputSink()
-            stderr_sink = stdio_redirection.BytesOutputSink()
-            is_stdout_pty = False
-            is_stderr_pty = False
-        else:
-            # Send output to regular stdout / stderr instead.
-            stdout_sink = stdio_redirection.StdoutOutputSink()
-            stderr_sink = stdio_redirection.StderrOutputSink()
-            is_stdout_pty = os.isatty(sys.stdout.fileno())
-            is_stderr_pty = os.isatty(sys.stderr.fileno())
-
         with tempfile.NamedTemporaryFile(
             prefix="bazel_bep_",
             suffix=".json",
@@ -752,44 +891,35 @@ class BazelActionRunner(object):
             "--output_groups=+debug_symbol_manifest",
         ]
 
-        with stdio_redirection.PipeOutputSink(
-            stderr_sink, use_pty=is_stderr_pty
-        ) as pty_stderr:
-            # This makes mypy happy, as it can't detect the type correctly in the 'with' statement
-            assert isinstance(pty_stderr, stdio_redirection.PipeOutputSink)
-
+        time_profile.start("run_bazel_command", "Run the Bazel command.")
+        if self.global_args.quiet:
+            # Still capture output to print its content if there is an error
+            # running the build command below.
+            output_sink = stdio_redirection.BytesOutputSink()
             with stdio_redirection.PipeOutputSink(
-                stdout_sink, use_pty=is_stdout_pty
-            ) as pty_stdout:
+                output_sink, use_pty=False
+            ) as pipe_sink:
                 # This makes mypy happy, as it can't detect the type correctly in the 'with' statement
-                assert isinstance(pty_stdout, stdio_redirection.PipeOutputSink)
-
-                time_profile.start(
-                    "run_bazel_command", "Run the Bazel command."
-                )
+                assert isinstance(pipe_sink, stdio_redirection.PipeOutputSink)
                 ret = self.launcher.run_bazel_command(
                     cmd_args,
-                    stdout=pty_stdout.get_write_fd(),
-                    stderr=pty_stderr.get_write_fd(),
+                    stdout=pipe_sink.get_write_fd(),
+                    stderr=pipe_sink.get_write_fd(),
                 )
+        else:
+            # Inherit regular stdout / stderr directly from the parent process.
+            ret = self.launcher.run_bazel_command(
+                cmd_args,
+                stdout=None,
+                stderr=None,
+            )
 
         if ret.returncode != 0:
             bep_json_path.unlink(missing_ok=True)
             if self.global_args.quiet:
-                # Assert that the output sinks are the expected types for quiet mode.
-                assert isinstance(
-                    stdout_sink, stdio_redirection.BytesOutputSink
-                )
-                assert isinstance(
-                    stderr_sink, stdio_redirection.BytesOutputSink
-                )
-
                 # Print the captured outputs in quiet mode to help debugging build errors.
-                if stdout_sink.data:
-                    sys.stdout.buffer.write(stdout_sink.data)
-                    sys.stdout.flush()
-                if stderr_sink.data:
-                    sys.stderr.buffer.write(stderr_sink.data)
+                if output_sink.data:
+                    sys.stderr.buffer.write(output_sink.data)
                     sys.stderr.flush()
 
             # Detect the error message corresponding to a Bazel target
@@ -1058,6 +1188,7 @@ def merge_target_info_outputs(
     package_outputs: list[bazel_action_utils.PackageOutput] = []
     final_symlink_outputs: list[bazel_action_utils.FinalSymlinkOutput] = []
     copy_debug_symbols = False
+    export_test_packages = False
 
     # This is the set of gn input targets manifests
     gn_target_manifests: set[Path] = set()
@@ -1068,6 +1199,7 @@ def merge_target_info_outputs(
         package_outputs.extend(target_info.package_outputs)
         final_symlink_outputs.extend(target_info.final_symlink_outputs)
         copy_debug_symbols |= target_info.copy_debug_symbols
+        export_test_packages |= target_info.export_test_packages
 
         gn_target_manifests.add(Path(target_info.gn_targets_manifest))
 
@@ -1078,6 +1210,7 @@ def merge_target_info_outputs(
             package_outputs,
             final_symlink_outputs,
             copy_debug_symbols,
+            export_test_packages,
         ),
         list(gn_target_manifests),
     )

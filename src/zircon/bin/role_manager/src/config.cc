@@ -23,11 +23,11 @@
 #include <fbl/unique_fd.h>
 #include <rapidjson/document.h>
 #include <rapidjson/error/en.h>
-#include <re2/re2.h>
 #include <src/lib/files/directory.h>
 #include <src/lib/files/file.h>
 
 #include "absl/strings/string_view.h"
+#include "re2/re2.h"
 
 using fuchsia_scheduler::Parameter;
 using fuchsia_scheduler::ParameterValue;

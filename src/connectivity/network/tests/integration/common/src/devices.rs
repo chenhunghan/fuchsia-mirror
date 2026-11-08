@@ -68,7 +68,7 @@ pub async fn create_tun_port_with(
         .collect();
     tun_device
         .add_port(
-            &fnet_tun::DevicePortConfig {
+            fnet_tun::DevicePortConfig {
                 base: Some(fnet_tun::BasePortConfig {
                     id: Some(id),
                     rx_types: Some(rx_types),

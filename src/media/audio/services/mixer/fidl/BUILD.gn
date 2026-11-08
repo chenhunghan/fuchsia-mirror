@@ -116,4 +116,7 @@ cc_test_executable("fidl_unittests") {
 
 fuchsia_unittest_package("audio_services_mixer_fidl_unittests") {
   deps = [ ":fidl_unittests" ]
+  test_specs = {
+    parallel = 4
+  }
 }

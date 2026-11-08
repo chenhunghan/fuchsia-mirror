@@ -133,9 +133,6 @@ inline void arch_set_restricted_flag(bool restricted) {
 }
 
 extern "C" {
-// Setup the high-level percpu struct pointer for |cpu_num|.
-void arch_setup_percpu(cpu_num_t cpu_num, percpu* percpu);
-
 void riscv64_mp_early_init_percpu(uint32_t hart_id, uint cpu_num);
 
 // Translate a bitmap of cpu ids to a bitmap of harts, which may not be 1:1

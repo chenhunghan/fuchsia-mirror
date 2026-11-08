@@ -5,7 +5,7 @@
 #ifndef SRC_DEVELOPER_FORENSICS_UTILS_REGEXP_H_
 #define SRC_DEVELOPER_FORENSICS_UTILS_REGEXP_H_
 
-#include <re2/re2.h>
+#include "re2/re2.h"
 
 namespace forensics {
 

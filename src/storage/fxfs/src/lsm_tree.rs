@@ -259,11 +259,6 @@ impl<'tree, K: MergeableKey, V: Value> LSMTree<K, V> {
         counters.max_layer_count = std::cmp::max(counters.max_layer_count, layer_count as u64);
     }
 
-    /// Resets the immutable layers.
-    pub fn reset_immutable_layers(&self) {
-        self.data.write().layers = Vec::new();
-    }
-
     /// Seals the current mutable layer and creates a new one.
     pub fn seal(&self) {
         // We need to be sure there are no mutations currently in-progress.  This is currently

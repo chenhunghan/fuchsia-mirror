@@ -39,6 +39,15 @@
             to: "#memory_monitor2",
             subdir: "memory_monitor2",
         },
+        {
+            config: [
+                "fuchsia.memory.CapturePeriodically",
+                "fuchsia.memory.PeriodicCaptureDelay",
+            ],
+            from: "parent",
+            to: "#memory_monitor2",
+            availability: "same_as_target",
+        },
     ],
     expose: [
         {

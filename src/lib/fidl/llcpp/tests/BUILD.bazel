@@ -1,0 +1,50 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "arena_checker",
+    testonly = True,
+    srcs = [
+        "arena_checker.cc",
+        "arena_checker.h",
+    ],
+    hdrs = ["arena_checker.h"],
+    visibility = [
+        "//sdk/lib/fidl/cpp/tests/conversion:__pkg__",
+        "//src/lib/fidl/llcpp/tests/integration:__pkg__",
+        "//src/lib/fidl/llcpp/tests/wire_types:__pkg__",
+    ],
+    deps = [
+        "//sdk/lib/fidl",
+        "//sdk/lib/fidl/cpp/wire",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "types_test_utils",
+    testonly = True,
+    srcs = [
+        "types_test_utils.cc",
+        "types_test_utils.h",
+    ],
+    hdrs = ["types_test_utils.h"],
+    # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
+    copts = ["-Wno-conversion"],
+    visibility = [
+        "//src/lib/fidl/llcpp/tests/integration:__pkg__",
+        "//src/lib/fidl/llcpp/tests/message_container:__pkg__",
+        "//src/lib/fidl/llcpp/tests/wire_types:__pkg__",
+    ],
+    deps = [
+        "//sdk/lib/fidl",
+        "//sdk/lib/fidl/cpp/wire",
+        "@com_google_googletest//:gtest",
+    ],
+    alwayslink = True,
+)

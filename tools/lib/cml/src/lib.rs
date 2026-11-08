@@ -837,7 +837,7 @@ pub fn format_cml(buffer: &str, file: Option<&std::path::Path>) -> Result<Vec<u8
     ]);
     let options = FormatOptions {
         collapse_containers_of_one: true,
-        sort_array_items: true, // but use options_by_path to turn this off for program args
+        sort_array_items: false, // use options_by_path to turn this on only for unordered CML sets
         options_by_path: hashmap! {
             "/*" => hashset! {
                 PathOption::PropertyNameOrder(vec![
@@ -858,6 +858,9 @@ pub fn format_cml(buffer: &str, file: Option<&std::path::Path>) -> Result<Vec<u8
                     "metadata_mappings",
                 ])
             },
+            "/*/include" => hashset! {
+                PathOption::SortArrayItems(true),
+            },
             "/*/program" => hashset! {
                 PathOption::CollapseContainersOfOne(false),
                 PathOption::PropertyNameOrder(vec![
@@ -866,14 +869,62 @@ pub fn format_cml(buffer: &str, file: Option<&std::path::Path>) -> Result<Vec<u8
                     "args",
                 ]),
             },
-            "/*/program/*" => hashset! {
-                PathOption::SortArrayItems(false),
-            },
             "/*/*/*" => hashset! {
                 general_order.clone()
             },
+            "/*/*/*/config" => hashset! {
+                PathOption::SortArrayItems(true),
+            },
+            "/*/*/*/dictionary" => hashset! {
+                PathOption::SortArrayItems(true),
+            },
+            "/*/*/*/directory" => hashset! {
+                PathOption::SortArrayItems(true),
+            },
+            "/*/*/*/event" => hashset! {
+                PathOption::SortArrayItems(true),
+            },
+            "/*/*/*/event_stream" => hashset! {
+                PathOption::SortArrayItems(true),
+            },
+            "/*/*/*/from" => hashset! {
+                PathOption::SortArrayItems(true),
+            },
+            "/*/*/*/mutability" => hashset! {
+                PathOption::SortArrayItems(true),
+            },
+            "/*/*/*/protocol" => hashset! {
+                PathOption::SortArrayItems(true),
+            },
+            "/*/*/*/resolver" => hashset! {
+                PathOption::SortArrayItems(true),
+            },
+            "/*/*/*/rights" => hashset! {
+                PathOption::SortArrayItems(true),
+            },
+            "/*/*/*/runner" => hashset! {
+                PathOption::SortArrayItems(true),
+            },
+            "/*/*/*/scope" => hashset! {
+                PathOption::SortArrayItems(true),
+            },
+            "/*/*/*/service" => hashset! {
+                PathOption::SortArrayItems(true),
+            },
+            "/*/*/*/storage" => hashset! {
+                PathOption::SortArrayItems(true),
+            },
+            "/*/*/*/to" => hashset! {
+                PathOption::SortArrayItems(true),
+            },
             "/*/*/*/*/*" => hashset! {
                 general_order
+            },
+            "/*/*/*/*/*/protocol" => hashset! {
+                PathOption::SortArrayItems(true),
+            },
+            "/*/*/*/*/*/service" => hashset! {
+                PathOption::SortArrayItems(true),
             },
         },
         ..Default::default()
@@ -1000,5 +1051,252 @@ mod tests {
 }
 "#;
         assert_eq!(formatted_str, expected);
+    }
+
+    #[test]
+    fn test_format_preserves_integer_array_order() {
+        let input = r##"{
+    include: [
+        "b.shard.dml",
+        "a.shard.dml",
+    ],
+    offer: [
+        {
+            service: [
+                "fuchsia.hardware.usb.phy.Service",
+                "fuchsia.hardware.usb.dci.UsbDciService",
+            ],
+            from: "#self",
+            to: "#usb-phy",
+            tune_params: {
+                tune_param1: {
+                    tune_name: "sup_dig_lvl_ovrd_in_addr",
+                    tune_names: [
+                        "reg_b",
+                        "reg_a",
+                    ],
+                    tune_value: [
+                        0x6202,
+                        0x29,
+                    ],
+                    decimal_values: [
+                        10,
+                        2,
+                    ],
+                },
+            },
+        },
+    ],
+}
+"##;
+        let expected = r##"{
+    include: [
+        "a.shard.dml",
+        "b.shard.dml",
+    ],
+    offer: [
+        {
+            service: [
+                "fuchsia.hardware.usb.dci.UsbDciService",
+                "fuchsia.hardware.usb.phy.Service",
+            ],
+            from: "#self",
+            to: "#usb-phy",
+            tune_params: {
+                tune_param1: {
+                    tune_name: "sup_dig_lvl_ovrd_in_addr",
+                    tune_names: [
+                        "reg_b",
+                        "reg_a",
+                    ],
+                    tune_value: [
+                        0x6202,
+                        0x29,
+                    ],
+                    decimal_values: [
+                        10,
+                        2,
+                    ],
+                },
+            },
+        },
+    ],
+}
+"##;
+        let formatted =
+            format_cml(input, Some(Path::new("usb.shard.dml"))).expect("failed to format");
+        let formatted_str = std::str::from_utf8(&formatted).unwrap();
+        assert_eq!(formatted_str, expected);
+    }
+
+    #[test]
+    fn test_format_preserves_config_default_and_value_array_order() {
+        let input = r##"{
+    include: [
+        "syslog/client.shard.cml",
+        "inspect/client.shard.cml",
+    ],
+    capabilities: [
+        {
+            protocol: [
+                "fuchsia.example.ServiceB",
+                "fuchsia.example.ServiceA",
+            ],
+        },
+        {
+            config: "fuchsia.config.StringVector",
+            type: "vector",
+            element: {
+                type: "string",
+                max_size: 100,
+            },
+            max_count: 10,
+            value: [
+                "zebra",
+                "alpha",
+                "middle",
+            ],
+        },
+    ],
+    use: [
+        {
+            config: "fuchsia.example.WorkerIds",
+            key: "worker_ids",
+            type: "vector",
+            element: {
+                type: "string",
+                max_size: 100,
+            },
+            max_count: 20,
+            availability: "transitional",
+            default: [
+                "storage",
+                "network",
+                "audio",
+                "display",
+            ],
+        },
+        {
+            config: "fuchsia.example.WorkerEndpoints",
+            key: "worker_endpoints",
+            type: "vector",
+            element: {
+                type: "string",
+                max_size: 256,
+            },
+            max_count: 20,
+            availability: "transitional",
+            default: [
+                "fuchsia.example.storage.Endpoint",
+                "fuchsia.example.net.stack.Endpoint",
+                "fuchsia.example.media.audio.Endpoint",
+                "fuchsia.example.ui.display.Endpoint",
+            ],
+        },
+        {
+            config: "fuchsia.example.WorkerBufferSizes",
+            key: "worker_buffer_sizes",
+            type: "vector",
+            element: { type: "uint64" },
+            max_count: 20,
+            availability: "transitional",
+            default: [
+                65536,
+                131072,
+                65536,
+                32768,
+            ],
+        },
+    ],
+}
+"##;
+        let expected = r##"{
+    include: [
+        "inspect/client.shard.cml",
+        "syslog/client.shard.cml",
+    ],
+    capabilities: [
+        {
+            protocol: [
+                "fuchsia.example.ServiceA",
+                "fuchsia.example.ServiceB",
+            ],
+        },
+        {
+            config: "fuchsia.config.StringVector",
+            type: "vector",
+            element: {
+                type: "string",
+                max_size: 100,
+            },
+            max_count: 10,
+            value: [
+                "zebra",
+                "alpha",
+                "middle",
+            ],
+        },
+    ],
+    use: [
+        {
+            config: "fuchsia.example.WorkerIds",
+            key: "worker_ids",
+            type: "vector",
+            element: {
+                type: "string",
+                max_size: 100,
+            },
+            max_count: 20,
+            availability: "transitional",
+            default: [
+                "storage",
+                "network",
+                "audio",
+                "display",
+            ],
+        },
+        {
+            config: "fuchsia.example.WorkerEndpoints",
+            key: "worker_endpoints",
+            type: "vector",
+            element: {
+                type: "string",
+                max_size: 256,
+            },
+            max_count: 20,
+            availability: "transitional",
+            default: [
+                "fuchsia.example.storage.Endpoint",
+                "fuchsia.example.net.stack.Endpoint",
+                "fuchsia.example.media.audio.Endpoint",
+                "fuchsia.example.ui.display.Endpoint",
+            ],
+        },
+        {
+            config: "fuchsia.example.WorkerBufferSizes",
+            key: "worker_buffer_sizes",
+            type: "vector",
+            element: { type: "uint64" },
+            max_count: 20,
+            availability: "transitional",
+            default: [
+                65536,
+                131072,
+                65536,
+                32768,
+            ],
+        },
+    ],
+}
+"##;
+        let formatted =
+            format_cml(input, Some(Path::new("worker_manager.cml"))).expect("failed to format");
+        let formatted_str = std::str::from_utf8(&formatted).unwrap();
+        assert_eq!(formatted_str, expected);
+
+        // Verify idempotency.
+        let formatted_twice = format_cml(formatted_str, Some(Path::new("worker_manager.cml")))
+            .expect("failed to format twice");
+        assert_eq!(std::str::from_utf8(&formatted_twice).unwrap(), expected);
     }
 }

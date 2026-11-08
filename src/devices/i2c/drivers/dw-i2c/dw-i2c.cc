@@ -9,17 +9,61 @@
 #include <lib/driver/logging/cpp/logger.h>
 #include <lib/fit/defer.h>
 #include <lib/sync/completion.h>
+#include <lib/zx/clock.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <zircon/assert.h>
+#include <zircon/syscalls/port.h>
 
+#include <algorithm>
 #include <array>
 #include <memory>
 #include <mutex>
 
 namespace dw_i2c {
+
+namespace {
+
+using fuchsia_driver_framework::HealthCheckError;
+using fuchsia_driver_framework::HealthCheckRequest;
+using fuchsia_driver_framework::HealthCheckResponse;
+using fuchsia_driver_framework::HealthCondition;
+using fuchsia_driver_framework::HealthDiagnosticItem;
+using fuchsia_driver_framework::HealthDiagnosticValue;
+using fuchsia_driver_framework::HealthStatus;
+
+}  // namespace
+
+bool DwI2c::HasLatchedCondition(std::string_view reason_code) const {
+  return std::ranges::any_of(health_latch_.Snapshot(), [reason_code](const HealthCondition& cond) {
+    return cond.reason_code() == reason_code;
+  });
+}
+
+void DwI2c::RecordTimeout(std::string_view reason) {
+  ++timeout_count_;
+  HealthCondition cond;
+  cond.reason_code(std::string(reason));
+  cond.status(HealthStatus::kDegraded);
+  cond.message("I2C transaction or controller wait timed out");
+  cond.diagnostics(
+      {{HealthDiagnosticItem({.key = std::string(kDiagTimeoutCount),
+                              .value = HealthDiagnosticValue::WithUintValue(timeout_count_)})}});
+  health_latch_.Raise(std::move(cond));
+}
+
+void DwI2c::RaiseSclStuckLow(uint32_t raw_intr_stat) {
+  HealthCondition cond;
+  cond.reason_code(std::string(kReasonSclStuckLow));
+  cond.status(HealthStatus::kDegraded);
+  cond.message("I2C SCL line stuck low");
+  cond.diagnostics(
+      {{HealthDiagnosticItem({.key = std::string(kDiagRawIntrStat),
+                              .value = HealthDiagnosticValue::WithUintValue(raw_intr_stat)})}});
+  health_latch_.Raise(std::move(cond));
+}
 
 void DwI2c::Dumpstate() {
   fdf::info("DW_kI2cEnable_STATUS = \t0x{:x}",
@@ -75,6 +119,10 @@ zx::result<> DwI2c::EnableAndWait(bool enable) {
              EnableStatusReg::Get().ReadFrom(&mmio_.value()).enable());
   Dumpstate();
 
+  // A controller that will not disable is as much of a fault as one that will not enable: the next
+  // transfer cannot reprogram IC_TAR until IC_ENABLE_STATUS reads back disabled.
+  RecordTimeout(enable ? kReasonEnableTimeout : kReasonDisableTimeout);
+
   return zx::error(ZX_ERR_TIMED_OUT);
 }
 
@@ -99,8 +147,10 @@ InterruptStatusReg DwI2c::ReadAndClearIrq() {
   if (irq.tx_abrt()) {
     // The device did not respond with an ACK to its address. This is expected for some devices, so
     // don't log an error message.
-    fdf::error("dw-i2c: error on bus - Abort source 0x{:x}",
-               TxAbrtSourceReg::Get().ReadFrom(&mmio_.value()).reg_value());
+    uint32_t abort_source = TxAbrtSourceReg::Get().ReadFrom(&mmio_.value()).reg_value();
+    ++tx_abort_count_;
+    last_abort_source_ = abort_source;
+    fdf::error("dw-i2c: error on bus - Abort source 0x{:x}", abort_source);
     // ABRT_SOURCE should be read before clearing TX_ABRT.
     ClearTxAbrtReg::Get().ReadFrom(&mmio_.value());
   }
@@ -139,45 +189,23 @@ void DwI2c::SetOpsHelper(std::vector<Op> ops) {
   rx_pending_ = 0;
 }
 
-void DwI2c::Transact(TransactRequestView request, fdf::Arena& arena,
-                     TransactCompleter::Sync& completer) {
-  size_t count = request->op.size();
-  if (count == 0) {
-    completer.buffer(arena).ReplySuccess({});
-    return;
-  }
-
+zx::result<std::vector<fuchsia_hardware_i2cimpl::wire::ReadData>> DwI2c::PrepareOps(
+    TransactRequestView request, fdf::Arena& arena) {
   for (const auto& op : request->op) {
     if (op.type.is_read_size() && op.type.read_size() > kMaxTransfer) {
-      completer.buffer(arena).ReplyError(ZX_ERR_OUT_OF_RANGE);
-      return;
+      return zx::error(ZX_ERR_OUT_OF_RANGE);
     }
     if (op.type.is_write_data() && op.type.write_data().size() > kMaxTransfer) {
-      completer.buffer(arena).ReplyError(ZX_ERR_OUT_OF_RANGE);
-      return;
+      return zx::error(ZX_ERR_OUT_OF_RANGE);
     }
   }
 
-  for (size_t i = 1; i < count; ++i) {
+  for (size_t i = 1; i < request->op.size(); ++i) {
     if (request->op[i].address != request->op[0].address) {
-      completer.buffer(arena).ReplyError(ZX_ERR_NOT_SUPPORTED);
-      return;
+      return zx::error(ZX_ERR_NOT_SUPPORTED);
     }
   }
 
-  if (auto result = WaitBusBusy(); result.is_error()) {
-    fdf::error("I2C bus wait failed {}", result.status_value());
-    completer.buffer(arena).ReplyError(result.status_value());
-    return;
-  }
-
-  if (auto result = SetSlaveAddress(request->op[0].address); result.is_error()) {
-    fdf::error("I2C set address failed {}", result.status_value());
-    completer.buffer(arena).ReplyError(result.status_value());
-    return;
-  }
-
-  // Count reads.
   size_t read_count = 0;
   for (const auto& op : request->op) {
     if (op.type.is_read_size()) {
@@ -207,42 +235,84 @@ void DwI2c::Transact(TransactRequestView request, fdf::Arena& arena,
     }
   }
 
-  DisableInterrupts();
   SetOpsHelper(std::move(ops));
+  return zx::ok(std::move(reads));
+}
+
+void DwI2c::DrainIrqPort(bool& irq_needs_ack) {
+  if (irq_needs_ack) {
+    irq_.ack();
+    irq_needs_ack = false;
+  }
+  zx_port_packet_t packet;
+  while (irq_port_.wait(zx::time::infinite_past(), &packet) == ZX_OK) {
+    irq_.ack();
+  }
+}
+
+zx::result<InterruptStatusReg> DwI2c::WaitForInterrupt(zx::time deadline, bool& irq_needs_ack) {
+  while (true) {
+    // Read the masked status register so masked raw bits (such as TX_EMPTY after all TX commands
+    // are queued) do not wake the loop.
+    if (auto reg = InterruptStatusReg::Get().ReadFrom(&mmio_.value()); reg.reg_value() != 0) {
+      return zx::ok(reg);
+    }
+    if (irq_needs_ack) {
+      // Only acknowledge the level-triggered interrupt after confirming all unmasked status bits
+      // are clear.
+      irq_.ack();
+      irq_needs_ack = false;
+      if (auto reg = InterruptStatusReg::Get().ReadFrom(&mmio_.value()); reg.reg_value() != 0) {
+        return zx::ok(reg);
+      }
+    }
+    zx_port_packet_t packet;
+    zx_status_t status = irq_port_.wait(deadline, &packet);
+    if (status == ZX_OK) {
+      irq_needs_ack = true;
+      continue;
+    }
+    if (status == ZX_ERR_TIMED_OUT) {
+      auto raw_intr = RawInterruptStatusReg::Get().ReadFrom(&mmio_.value());
+      RecordTimeout(kReasonTransactionTimeout);
+      if (raw_intr.scl_stuck_low()) {
+        RaiseSclStuckLow(raw_intr.reg_value());
+      }
+      fdf::error("I2C interrupt timeout! Raw IRQ: 0x{:x}", raw_intr.reg_value());
+    } else {
+      fdf::error("I2C interrupt wait failed: {}", zx_status_get_string(status));
+    }
+    return zx::error(status);
+  }
+}
+
+zx::result<bool> DwI2c::ExecuteTransact() {
+  DisableInterrupts();
   if (auto result = Enable(); result.is_error()) {
     fdf::error("I2C device enable failed {}", result.status_value());
-    completer.buffer(arena).ReplyError(result.status_value());
-    return;
+    return result.take_error();
   }
 
-  ClearInterrupts();
-  EnableInterrupts(kI2cInterruptDefaultMask);
-
   bool done = false;
+  bool irq_needs_ack = false;
   zx_status_t error_status = ZX_OK;
+
+  ClearInterrupts();
+  DrainIrqPort(irq_needs_ack);
+
+  // Prime the TX FIFO before unmasking TX_EMPTY so it does not fire before the initial commands
+  // are queued.
+  if (auto res = Transmit(); res.is_error()) {
+    error_status = res.status_value();
+    done = true;
+  } else if (tx_op_idx_ < ops_.size()) {
+    EnableInterrupts(kI2cInterruptDefaultMask);
+  }
+
+  const zx::time deadline = zx::deadline_after(transfer_timeout_);
   while (!done) {
-    // Poll instead of wait.
-    for (uint32_t timeout = 0;; timeout++) {
-      // Poll the masked interrupt status register (InterruptStatusReg) instead of the raw one.
-      // After all TX operations are queued, the TX_EMPTY interrupt mask is disabled in the
-      // InterruptMaskReg. If we poll RawInterruptStatusReg, the TX_EMPTY raw bit will remain
-      // set (because the TX FIFO is empty), causing the polling loop to exit immediately without
-      // sleeping, resulting in a CPU-spinning infinite loop. Polling the masked status register
-      // ensures we only exit when an unmasked (active) interrupt event occurs.
-      auto reg = InterruptStatusReg::Get().ReadFrom(&mmio_.value());
-      if (reg.reg_value()) {
-        break;
-      }
-      if (timeout > 1000) {  // 1 second timeout
-        fdf::error("I2C polling timeout! Raw IRQ: 0x{:x}",
-                   RawInterruptStatusReg::Get().ReadFrom(&mmio_.value()).reg_value());
-        error_status = ZX_ERR_TIMED_OUT;
-        done = true;
-        break;
-      }
-      zx::nanosleep(zx::deadline_after(zx::msec(1)));
-    }
-    if (done) {
+    if (zx::result status = WaitForInterrupt(deadline, irq_needs_ack); status.is_error()) {
+      error_status = status.error_value();
       break;
     }
 
@@ -254,14 +324,14 @@ void DwI2c::Transact(TransactRequestView request, fdf::Arena& arena,
       done = true;
     }
 
-    if (reg.rx_full()) {
+    if (!done && reg.rx_full()) {
       if (auto res = Receive(); res.is_error()) {
         error_status = res.status_value();
         done = true;
       }
     }
 
-    if (reg.tx_empty()) {
+    if (!done && reg.tx_empty()) {
       if (auto res = Transmit(); res.is_error()) {
         error_status = res.status_value();
         done = true;
@@ -275,19 +345,77 @@ void DwI2c::Transact(TransactRequestView request, fdf::Arena& arena,
     }
   }
 
+  // Mask and clear controller interrupts before acknowledging and draining the interrupt port.
+  DisableInterrupts();
+  ClearInterrupts();
+  DrainIrqPort(irq_needs_ack);
+
+  // A disable timeout latches I2C_DISABLE_TIMEOUT (via EnableAndWait) but does not fail a transfer
+  // that already completed on the bus; the caller uses the returned flag to decide what to clear.
+  bool controller_disabled = true;
   if (auto result = Disable(); result.is_error()) {
     fdf::error("I2C device disable failed {}", result.status_value());
+    controller_disabled = false;
   }
 
   if (error_status != ZX_OK) {
-    completer.buffer(arena).ReplyError(error_status);
+    return zx::error(error_status);
+  }
+  return zx::ok(controller_disabled);
+}
+
+void DwI2c::Transact(TransactRequestView request, fdf::Arena& arena,
+                     TransactCompleter::Sync& completer) {
+  if (request->op.empty()) {
+    completer.buffer(arena).ReplySuccess({});
     return;
   }
 
-  if (reads.empty()) {
+  zx::result reads = PrepareOps(request, arena);
+  if (reads.is_error()) {
+    completer.buffer(arena).ReplyError(reads.error_value());
+    return;
+  }
+
+  if (auto result = WaitBusBusy(); result.is_error()) {
+    RecordTimeout(kReasonBusBusyTimeout);
+    fdf::error("I2C bus wait failed {}", result.status_value());
+    completer.buffer(arena).ReplyError(result.status_value());
+    return;
+  }
+
+  if (auto result = SetSlaveAddress(request->op[0].address); result.is_error()) {
+    fdf::error("I2C set address failed {}", result.status_value());
+    completer.buffer(arena).ReplyError(result.status_value());
+    return;
+  }
+
+  zx::result<bool> transfer = ExecuteTransact();
+  if (transfer.is_error()) {
+    completer.buffer(arena).ReplyError(transfer.error_value());
+    return;
+  }
+
+  if (*transfer) {
+    // A completed transfer proves the controller is powered, clocked, enabled and able to finish
+    // bus I/O, so every fault this driver raises is resolved. ClearAll() emits a single recovery
+    // alert instead of one per cleared condition.
+    health_latch_.ClearAll();
+  } else {
+    // The transfer completed but the controller would not disable afterwards: keep the
+    // I2C_DISABLE_TIMEOUT just latched by EnableAndWait() and clear only the faults this transfer
+    // disproved.
+    for (std::string_view code :
+         {kReasonEnableTimeout, kReasonBusBusyTimeout, kReasonTransactionTimeout,
+          kReasonUnclockedMmioRead, kReasonSclStuckLow, kReasonResumeFailed}) {
+      health_latch_.Clear(code);
+    }
+  }
+
+  if (reads->empty()) {
     completer.buffer(arena).ReplySuccess({});
   } else {
-    completer.buffer(arena).ReplySuccess({arena, reads});
+    completer.buffer(arena).ReplySuccess({arena, *reads});
   }
 }
 
@@ -417,11 +545,22 @@ zx::result<> DwI2c::HostInit() {
   auto dw_comp_type = CompTypeReg::Get().ReadFrom(&mmio_.value()).reg_value();
 
   if (dw_comp_type != kDwCompTypeNum) {
+    ++unclocked_read_count_;
+    HealthCondition cond;
+    cond.reason_code(std::string(kReasonUnclockedMmioRead));
+    cond.status(HealthStatus::kUnhealthy);
+    cond.message("Unclocked MMIO read detected (CompTypeReg != expected)");
+    cond.diagnostics(
+        {{HealthDiagnosticItem({.key = std::string(kDiagCompType),
+                                .value = HealthDiagnosticValue::WithUintValue(dw_comp_type)}),
+          HealthDiagnosticItem({.key = std::string(kDiagExpectedCompType),
+                                .value = HealthDiagnosticValue::WithUintValue(kDwCompTypeNum)})}});
+    health_latch_.Raise(std::move(cond));
     fdf::error("{}: Incompatible IP Block detected. Expected = 0x{:x}, Actual = 0x{:x}",
                __FUNCTION__, kDwCompTypeNum, dw_comp_type);
-
     return zx::error(ZX_ERR_NOT_SUPPORTED);
   }
+  health_latch_.Clear(kReasonUnclockedMmioRead);
 
   // Read the various capabilities of the fragment.
   auto comp_reg = CompParam1Reg::Get().ReadFrom(&mmio_.value());
@@ -441,6 +580,9 @@ zx::result<> DwI2c::HostInit() {
   // Configure the controller:
   auto ctrl_reg = ControlReg::Get().FromValue(0);
 
+  // - enable bus clear / stuck-line timeout detection (ignored as R/O 0 if unsynthesized)
+  ctrl_reg.set_bus_clear_feature_ctrl(1);
+
   // - slave disable
   ctrl_reg.set_slave_disable(1);
 
@@ -459,6 +601,16 @@ zx::result<> DwI2c::HostInit() {
 
   // Write final mask.
   ctrl_reg.WriteTo(&mmio_.value());
+
+  // If the IP block synthesized IC_BUS_CLEAR_FEATURE (so bit 11 latched), program the SCL
+  // stuck-low timeout shorter than kTransferTimeout so stuck-SCL hangs assert SCL_STUCK_AT_LOW
+  // before WaitForInterrupt() times out.
+  if (ControlReg::Get().ReadFrom(&mmio_.value()).bus_clear_feature_ctrl()) {
+    SclStuckAtLowTimeoutReg::Get()
+        .FromValue(0)
+        .set_scl_stuck_low_timeout(kSclStuckLowTimeoutCycles)
+        .WriteTo(&mmio_.value());
+  }
 
   // Write SS/FS LCNT and HCNT.
   StandardSpeedSclHighCountReg::Get()
@@ -634,6 +786,15 @@ zx::result<> DwI2c::Start(fdf::DriverContext context) {
       return interrupt.take_error();
     }
     irq_ = std::move(interrupt.value());
+    if (zx_status_t status = zx::port::create(ZX_PORT_BIND_TO_INTERRUPT, &irq_port_);
+        status != ZX_OK) {
+      fdf::error("Failed to create interrupt port: {}", zx_status_get_string(status));
+      return zx::error(status);
+    }
+    if (zx_status_t status = irq_.bind(irq_port_, kIrqPortKey, 0); status != ZX_OK) {
+      fdf::error("Failed to bind interrupt to port: {}", zx_status_get_string(status));
+      return zx::error(status);
+    }
   }
 
   // Initialize i2c host controller.
@@ -747,15 +908,40 @@ void DwI2c::SystemSuspend(fdf::SuspendCompleter completer) {
 
 void DwI2c::SystemResume(std::optional<fuchsia_power_broker::LeaseToken> pe_lease,
                          fdf::ResumeCompleter completer) {
+  auto record_resume_failure = [this](std::string_view reason) {
+    ++resume_failure_count_;
+    const bool was_active = HasLatchedCondition(kReasonResumeFailed);
+    HealthCondition cond;
+    cond.reason_code(std::string(kReasonResumeFailed));
+    cond.status(HealthStatus::kUnhealthy);
+    cond.message("Failed to resume I2C controller");
+    cond.diagnostics({{HealthDiagnosticItem(
+        {.key = std::string(kDiagReason),
+         .value = HealthDiagnosticValue::WithStringValue(std::string(reason))})}});
+    health_latch_.Raise(std::move(cond));
+    // SystemResume runs on the always-on dispatcher veneer while the driver's power-managed
+    // dispatcher is still suspended. The latch's alert is queued on that suspended dispatcher, and
+    // a failed Resume makes driver-host stop the driver without ever resuming it, so the queued
+    // alert would never be delivered. Report the self-fault synchronously on the first failure of
+    // the episode (edge-triggered) so it precedes the Resume error reply on the Driver channel
+    // without flooding alerts on repeated resume retries.
+    if (!was_active) {
+      ReportHealthAlert(
+          fuchsia_driver_framework::HealthAlert::WithSelfFault(health_latch_.ToResponse()));
+    }
+  };
+
   {
     auto result = powerdomain_->Enable();
     if (!result.ok()) {
       fdf::error("Failed to send Enable request to power domain: {}", result.status_string());
+      record_resume_failure("power-domain Enable FIDL failed");
       completer(zx::error(result.status()));
       return;
     }
     if (result->is_error()) {
       fdf::error("Failed to enable power domain: {}", zx_status_get_string(result->error_value()));
+      record_resume_failure("power-domain Enable failed");
       completer(result->take_error());
       return;
     }
@@ -767,11 +953,13 @@ void DwI2c::SystemResume(std::optional<fuchsia_power_broker::LeaseToken> pe_leas
     auto result = clock_bus_->Enable();
     if (!result.ok()) {
       fdf::error("Failed to send Enable request to clock-bus: {}", result.status_string());
+      record_resume_failure("clock-bus Enable FIDL failed");
       completer(zx::error(result.status()));
       return;
     }
     if (result->is_error()) {
       fdf::error("Failed to enable clock-bus: {}", zx_status_get_string(result->error_value()));
+      record_resume_failure("clock-bus Enable failed");
       completer(result->take_error());
       return;
     }
@@ -783,12 +971,14 @@ void DwI2c::SystemResume(std::optional<fuchsia_power_broker::LeaseToken> pe_leas
     auto result = clock_regs_->Enable();
     if (!result.ok()) {
       fdf::error("Failed to send Enable request to clock-registers: {}", result.status_string());
+      record_resume_failure("clock-registers Enable FIDL failed");
       completer(zx::error(result.status()));
       return;
     }
     if (result->is_error()) {
       fdf::error("Failed to enable clock-registers: {}",
                  zx_status_get_string(result->error_value()));
+      record_resume_failure("clock-registers Enable failed");
       completer(result->take_error());
       return;
     }
@@ -800,11 +990,13 @@ void DwI2c::SystemResume(std::optional<fuchsia_power_broker::LeaseToken> pe_leas
     auto result = reset_->Deassert();
     if (!result.ok()) {
       fdf::error("Failed to send Deassert request to reset: {}", result.status_string());
+      record_resume_failure("reset Deassert FIDL failed");
       completer(zx::error(result.status()));
       return;
     }
     if (result->is_error()) {
       fdf::error("Failed to deassert reset: {}", zx_status_get_string(result->error_value()));
+      record_resume_failure("reset Deassert failed");
       completer(result->take_error());
       return;
     }
@@ -826,6 +1018,7 @@ void DwI2c::SystemResume(std::optional<fuchsia_power_broker::LeaseToken> pe_leas
 
   if (auto result = HostInit(); result.is_error()) {
     fdf::error("Failed to initialize i2c host controller: {}", result.status_string());
+    record_resume_failure("HostInit failed");
     completer(result.take_error());
     return;
   }
@@ -833,8 +1026,133 @@ void DwI2c::SystemResume(std::optional<fuchsia_power_broker::LeaseToken> pe_leas
   disable_clock_regs_on_failure.cancel();
   disable_clock_bus_on_failure.cancel();
   disable_powerdomain_on_failure.cancel();
+  // A successful resume re-initializes the controller, so every fault this driver raises is
+  // resolved. `ClearAll()` emits a single recovery alert instead of one per cleared condition.
+  health_latch_.ClearAll();
   resources_enabled_ = true;
   completer(zx::ok());
+}
+
+std::vector<HealthDiagnosticItem> DwI2c::BuildCommonDiagnostics() const {
+  return {
+      HealthDiagnosticItem({.key = std::string(kDiagResourcesEnabled),
+                            .value = HealthDiagnosticValue::WithBoolValue(resources_enabled_)}),
+      HealthDiagnosticItem({.key = std::string(kDiagTimeoutCount),
+                            .value = HealthDiagnosticValue::WithUintValue(timeout_count_)}),
+      HealthDiagnosticItem({.key = std::string(kDiagTxAbortCount),
+                            .value = HealthDiagnosticValue::WithUintValue(tx_abort_count_)}),
+      HealthDiagnosticItem({.key = std::string(kDiagLastAbortSource),
+                            .value = HealthDiagnosticValue::WithUintValue(last_abort_source_)}),
+      HealthDiagnosticItem({.key = std::string(kDiagResumeFailureCount),
+                            .value = HealthDiagnosticValue::WithUintValue(resume_failure_count_)}),
+      HealthDiagnosticItem({.key = std::string(kDiagUnclockedReadCount),
+                            .value = HealthDiagnosticValue::WithUintValue(unclocked_read_count_)})};
+}
+
+void DwI2c::HealthCheck(fuchsia_driver_framework::HealthCheckRequest request,
+                        HealthCheckCompleter completer) {
+  // Transact() blocks on irq_port_ (up to transfer_timeout_, default 1s) on this same synchronized
+  // dispatcher, so a HealthCheck that arrives mid-transaction is delayed and never concurrent with
+  // MMIO access. Because 1s exceeds the 250ms PING deadline, an actively wedged transfer surfaces
+  // first as DISPATCHER_TIMEOUT at the framework layer and then reports I2C_TRANSACTION_TIMEOUT
+  // (and I2C_SCL_STUCK_LOW if applicable) on the next poll once WaitForInterrupt() unwinds.
+  if (request == HealthCheckRequest::kPing) {
+    HealthCheckResponse response;
+    health_latch_.MergeInto(response);
+    response.diagnostics(BuildCommonDiagnostics());
+    completer(zx::ok(std::move(response)));
+    return;
+  }
+
+  if (request == HealthCheckRequest::kFast) {
+    if (!resources_enabled_ || !mmio_.has_value()) {
+      // The controller is unpowered, so registers cannot be sampled. Keep a latched fault (e.g. a
+      // failed resume) visible to kFast pollers; otherwise report kUnavailable rather than kOk.
+      fuchsia_driver_framework::HealthStatus current_status = health_latch_.status();
+      if (current_status == fuchsia_driver_framework::HealthStatus::kUnhealthy ||
+          current_status == fuchsia_driver_framework::HealthStatus::kDegraded) {
+        HealthCheckResponse response;
+        health_latch_.MergeInto(response);
+        response.diagnostics(BuildCommonDiagnostics());
+        completer(zx::ok(std::move(response)));
+        return;
+      }
+      completer(zx::error(HealthCheckError::kUnavailable));
+      return;
+    }
+
+    // Gate on CompTypeReg first: on real hardware an unclocked APB window can return 0/garbage or
+    // fault, so skip reading the remaining controller registers unless CompTypeReg matches.
+    const uint32_t comp_type = CompTypeReg::Get().ReadFrom(&mmio_.value()).reg_value();
+    std::vector<HealthDiagnosticItem> common_diag;
+
+    if (comp_type != kDwCompTypeNum) {
+      ++unclocked_read_count_;
+      // Only raise on the healthy -> fault edge so repeated kFast polls do not inflate
+      // occurrence_count or reset first_observed.
+      if (!HasLatchedCondition(kReasonUnclockedMmioRead)) {
+        HealthCondition cond;
+        cond.reason_code(std::string(kReasonUnclockedMmioRead));
+        cond.status(HealthStatus::kUnhealthy);
+        cond.message("Unclocked MMIO read detected (CompTypeReg != expected)");
+        cond.diagnostics(
+            {{HealthDiagnosticItem({.key = std::string(kDiagCompType),
+                                    .value = HealthDiagnosticValue::WithUintValue(comp_type)}),
+              HealthDiagnosticItem(
+                  {.key = std::string(kDiagExpectedCompType),
+                   .value = HealthDiagnosticValue::WithUintValue(kDwCompTypeNum)})}});
+        health_latch_.Raise(std::move(cond));
+      }
+      common_diag = BuildCommonDiagnostics();
+      common_diag.push_back(
+          HealthDiagnosticItem({.key = std::string(kDiagCompType),
+                                .value = HealthDiagnosticValue::WithUintValue(comp_type)}));
+    } else {
+      // A correct CompTypeReg read is direct proof the MMIO window is clocked again, which is the
+      // same evidence HostInit() clears this condition on.
+      health_latch_.Clear(kReasonUnclockedMmioRead);
+
+      const uint32_t enable_status = EnableStatusReg::Get().ReadFrom(&mmio_.value()).reg_value();
+      const uint32_t status = StatusReg::Get().ReadFrom(&mmio_.value()).reg_value();
+      const RawInterruptStatusReg raw_intr = RawInterruptStatusReg::Get().ReadFrom(&mmio_.value());
+      const uint32_t tx_abrt_source = TxAbrtSourceReg::Get().ReadFrom(&mmio_.value()).reg_value();
+
+      // WaitForInterrupt() is the primary detector during transfers; check here defensively for an
+      // idle bus held low, guarding with HasLatchedCondition so repeated polls do not re-raise.
+      if (raw_intr.scl_stuck_low() && !HasLatchedCondition(kReasonSclStuckLow)) {
+        RaiseSclStuckLow(raw_intr.reg_value());
+      }
+      // Deliberately no Clear(kReasonSclStuckLow) here: SCL_STUCK_AT_LOW is a sticky status bit
+      // that ClearInterrupts() wipes at the end of every transfer attempt, so a clear sample is not
+      // evidence the bus recovered. Recovery is proven the same way Transact() proves it: by a
+      // transfer completing on the bus (Transact() then clears the whole fault set).
+
+      common_diag = BuildCommonDiagnostics();
+      common_diag.push_back(
+          HealthDiagnosticItem({.key = std::string(kDiagCompType),
+                                .value = HealthDiagnosticValue::WithUintValue(comp_type)}));
+      common_diag.push_back(
+          HealthDiagnosticItem({.key = std::string(kDiagEnableStatus),
+                                .value = HealthDiagnosticValue::WithUintValue(enable_status)}));
+      common_diag.push_back(
+          HealthDiagnosticItem({.key = std::string(kDiagStatus),
+                                .value = HealthDiagnosticValue::WithUintValue(status)}));
+      common_diag.push_back(HealthDiagnosticItem(
+          {.key = std::string(kDiagRawIntrStat),
+           .value = HealthDiagnosticValue::WithUintValue(raw_intr.reg_value())}));
+      common_diag.push_back(
+          HealthDiagnosticItem({.key = std::string(kDiagTxAbrtSource),
+                                .value = HealthDiagnosticValue::WithUintValue(tx_abrt_source)}));
+    }
+
+    HealthCheckResponse response;
+    response.diagnostics(std::move(common_diag));
+    health_latch_.MergeInto(response);
+    completer(zx::ok(std::move(response)));
+    return;
+  }
+
+  completer(zx::error(HealthCheckError::kNotSupported));
 }
 
 zx::result<> DwI2c::ServeI2cImpl() {

@@ -1,0 +1,52 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+# The library is a test double. It must not be linked into production code.
+rustc_library(
+    name = "globally-ordered-mock-mmio",
+    testonly = True,
+    srcs = [
+        "src/data_access.rs",
+        "src/expectation.rs",
+        "src/formatting.rs",
+        "src/history_entry.rs",
+        "src/lib.rs",
+        "src/mmio_operand_value.rs",
+        "src/mock_builder.rs",
+        "src/operation.rs",
+        "src/scoreboard.rs",
+        "src/source_info.rs",
+        "src/trace_builder.rs",
+    ],
+    edition = "2024",
+    visibility = ["//vendor/google:__subpackages__"],
+    deps = [
+        "//sdk/lib/driver/mmio/rust:mmio",
+        "//src/lib/fuchsia-sync",
+    ],
+)
+
+rustc_test(
+    name = "globally_ordered_mock_mmio_lib_test",
+    crate = ":globally-ordered-mock-mmio",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    # `mmio::register!` expands to `bitfield::bitfield!`.
+    deps = [
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:bitfield",
+    ],
+)
+
+fx_unittest_package(
+    name = "globally-ordered-mock-mmio-unittests",
+    max_log_severity = "ERROR",
+    unit_tests = [":globally_ordered_mock_mmio_lib_test"],
+    visibility = ["//src/graphics/display:__pkg__"],
+)

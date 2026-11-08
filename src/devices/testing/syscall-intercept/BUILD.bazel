@@ -1,0 +1,45 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# This file contains fake syscall implementation(s) used for testing power
+# observability.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "lib",
+    testonly = True,
+    srcs = ["syscall-intercept.cc"],
+    hdrs = ["syscall-intercept.h"],
+    implementation_deps = [
+        ":fuchsia.test.syscalls_cpp",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+        "//sdk/lib/driver/logging/cpp",
+        "//sdk/lib/fidl_driver",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/zircon-internal",
+    ],
+    # Narrowed from an unguarded GN target: includes `<zircon/syscalls.h>` and
+    # `<zircon/syscalls-next.h>`, and depends on Fuchsia-only
+    # `//sdk/lib/driver/outgoing/cpp`.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/devices/suspend/drivers/generic-suspend:__pkg__"],
+    deps = [
+        "//sdk/lib/async",
+        "//sdk/lib/driver/outgoing/cpp",
+        "//sdk/lib/driver/runtime:driver_runtime_cpp",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+fidl_library(
+    name = "fuchsia.test.syscalls",
+    srcs = ["test-syscalls.test.fidl"],
+    visibility = ["//src/starnix/tests/diagnostics/suspend_inspect/testing/suspend_driver_realm_proxy:__pkg__"],
+    deps = ["//zircon/vdso/zx"],
+)

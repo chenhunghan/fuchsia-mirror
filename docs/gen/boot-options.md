@@ -1065,6 +1065,154 @@ on all products.
 TODO(https://fxbug.dev/322207536): Stop resetting start and finish times when
 unblocking once we solve races higher in the stack.
 
+### kernel.scheduler.fair-demand-weighted-decay=\<bool\>
+
+**Default:** `true`
+
+When enabled, the per-thread estimate of a fair thread's runtime that feeds the
+scheduler's variable bandwidth demand decays in proportion to the length of each
+sample. A sample closed by a brief run before blocking (for example one leg of an
+IPC round trip) then lowers the estimate only slightly, while a sample that
+spans a full time slice decays it at the full rate. Increases in the estimate
+are unaffected.
+
+When disabled, every sample decays the estimate at the full rate regardless of
+its length, so a thread alternating brief runs and blocks can lose its estimate
+within a few milliseconds.
+
+TODO(https://fxbug.dev/448195120): Remove the option once the default has
+baked.
+
+### kernel.scheduler.variable-demand-placement=\<bool\>
+
+**Default:** `false`
+
+When enabled, the scheduler accounts for the estimated (variable) bandwidth
+demand of fair threads, in addition to the declared (constant) bandwidth demand
+of deadline threads, when selecting a CPU for a waking or migrating thread. A
+fair thread whose estimated demand cannot be supplied by a candidate CPU at its
+maximum processing rate is placed elsewhere when a feasible candidate exists.
+
+When disabled, only constant bandwidth demand and the weights of the fair
+threads already runnable on each candidate are considered.
+
+TODO(https://fxbug.dev/448195120): Enable by default once synchronous
+hand-offs and producer/consumer pairs on homogeneous cores keep their
+co-location (perfcompare regressions on x64 and VIM3 otherwise).
+
+### kernel.scheduler.variable-demand-migration=\<bool\>
+
+**Default:** `false`
+
+When enabled, together with kernel.scheduler.variable-demand-placement, a fair
+thread that keeps exhausting its time slice on a CPU whose capacity is saturated
+is periodically re-placed as if it demanded more than that CPU can supply at its
+maximum processing rate. If another CPU with a higher maximum processing rate
+can accommodate it, the thread migrates there. This moves CPU-bound work off
+small cores on heterogeneous systems without requiring affinity configuration.
+
+Has no effect on systems with a single power domain, or when
+kernel.scheduler.variable-demand-placement is disabled.
+
+TODO(https://fxbug.dev/448195120): Enable by default together with
+kernel.scheduler.variable-demand-placement.
+
+### kernel.scheduler.variable-demand-reservation=\<bool\>
+
+**Default:** `false`
+
+When enabled, together with kernel.power.rppm, the estimated (variable) bandwidth
+demand of a fair thread remains reserved on the CPU it blocked on for one fair
+period after it blocks, instead of being withdrawn immediately. A thread that
+runs periodically therefore finds the CPU's processing rate still provisioned
+for it when its next job begins, rather than having the rate drop between jobs
+and ramp again after it wakes. A reservation is withdrawn when the thread wakes
+on the same CPU, where its demand is counted again directly; one left on a
+different CPU expires on its own.
+
+When disabled, variable demand is withdrawn as soon as the thread blocks.
+
+TODO(https://fxbug.dev/448195120): Enable by default once the reservation is
+retuned. With kernel.scheduler.fair-demand-weighted-decay the reserved
+estimates are larger and longer-lived, and on a heterogeneous device the
+reservations held about 25 units of demand on each idle mid/big CPU, raising
+the processing rate request by about 13% while idle.
+
+### kernel.scheduler.pi-target-eligibility=\<bool\>
+
+**Default:** `true`
+
+When enabled, priority inheritance keeps the thread it boosts (the target, e.g.
+a lock holder) eligible to run:
+
+ * A deadline target joined by a deadline thread keeps at least its own
+   remaining time slice, bounded by the time until the combined deadline and
+   the combined capacity. Without this, a target that has consumed more of its
+   capacity than its share of the shorter inherited window allows is issued a
+   zero time slice, exhausts immediately, and is ineligible until the deadline
+   of the very thread waiting on it. The preserved slice is granted in addition
+   to what lag conservation allows (by at most the target's old remaining time
+   slice) and is reported by the scheduler.pi.join-slice-preserved counters.
+
+ * A fair target whose start time is in the future (it exhausted its previous
+   activation) starts a new activation immediately when it gains inherited
+   weight, rather than remaining ineligible for the rest of its period while
+   the fair thread that boosted it waits.
+
+ * A target that becomes fair again, by shedding an inherited deadline or by
+   a base profile change, starts a new fair activation immediately instead of
+   running out its stale deadline activation. (A target that becomes deadline
+   always starts a new deadline activation, carrying over the consumed
+   fraction of its fair time slice; that is not gated by this option.)
+
+When disabled, the time slice of a deadline target is composed strictly by the
+lag equation and clamped at zero, and fair activations are left as they are.
+
+TODO(https://fxbug.dev/573204130): Remove the option once the default has
+baked.
+
+### kernel.scheduler.fair-placement-affinity=\[cluster | idle | headroom\]
+
+**Default:** `headroom`
+
+When a fair thread wakes or migrates, candidate CPUs that can supply its
+estimated demand about equally well are ordered by a secondary policy. This
+option selects how the thread's last cluster (cache affinity) is weighed against
+CPUs that are available right now:
+
+ * `cluster`: prefer the last cluster, then an idle CPU, then the lowest power
+   cost. A busy CPU in the last cluster is preferred over an idle CPU elsewhere,
+   which keeps cache affinity but leaves a thread whose demand is not yet
+   known waiting behind other work in a small cluster (measured as a ~20 ms
+   cold-start regression on a heterogeneous device).
+ * `idle`: prefer an idle CPU, then the last cluster, then the lowest power cost.
+   Any idle CPU is preferred over a busy CPU in the last cluster.
+ * `headroom` (default): prefer an available CPU, then the last cluster, then an idle CPU,
+   then the lowest power cost. A CPU is available if it is idle or if its
+   projected fair headroom for the thread covers the thread's estimated demand
+   (at least a tenth of a CPU when the demand is not yet known), so light
+   threads stay in their cluster while threads that need more go to free
+   capacity immediately.
+
+The remaining tie-breaks (projected headroom, weight entitlement, deadline load)
+are the same under every policy. Deadline threads are not affected.
+
+TODO(https://fxbug.dev/448195120): Remove once a policy is chosen.
+
+### kernel.scheduler.deadline-wake-affinity=\<bool>
+
+**Default:** `false`
+
+When enabled, a waking deadline thread stays on its last CPU when that CPU can
+admit it and has no other runnable deadline work, even if another CPU is idle.
+A deadline thread preempts fair work immediately, so moving it from a CPU
+running only fair threads to an idle CPU trades cache affinity and an IPI for
+no earlier execution.
+
+When disabled, an idle CPU is preferred.
+
+TODO(https://fxbug.dev/448195120): Remove once enabled by default.
+
 ### kernel.ubsan.action=\[oops | panic\]
 
 **Default:** `panic`

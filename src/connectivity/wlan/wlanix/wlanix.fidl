@@ -167,6 +167,10 @@ open protocol WifiStaIface {
     flexible SetMacAddress(resource struct {
         mac_addr fuchsia.wlan.ieee80211.MacAddr;
     }) -> () error zx.Status;
+    /// Gets the factory MAC address of the client interface.
+    flexible GetFactoryMacAddress() -> (struct {
+        mac_addr fuchsia.wlan.ieee80211.MacAddr;
+    }) error zx.Status;
 
     // APF (Android Packet Filter) extensions
     flexible GetApfPacketFilterSupport() -> (table {

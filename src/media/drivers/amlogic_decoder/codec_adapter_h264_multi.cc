@@ -31,11 +31,6 @@
 namespace amlogic_decoder {
 
 namespace {
-static inline constexpr uint32_t make_fourcc(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
-  return (static_cast<uint32_t>(d) << 24) | (static_cast<uint32_t>(c) << 16) |
-         (static_cast<uint32_t>(b) << 8) | static_cast<uint32_t>(a);
-}
-
 template <typename T>
 constexpr T AlignUpConstexpr(T value, T divisor) {
   return (value + divisor - 1) / divisor * divisor;
@@ -729,49 +724,20 @@ fuchsia::media::StreamOutputFormat CodecAdapterH264Multi::CoreCodecGetOutputForm
 
   result.mutable_format_details()->set_mime_type("video/raw");
 
-  // For the moment, we'll memcpy to NV12 without any extra padding.
-  fuchsia::media::VideoUncompressedFormat video_uncompressed;
-  video_uncompressed.fourcc = make_fourcc('N', 'V', '1', '2');
-  video_uncompressed.primary_width_pixels = width_;
-  video_uncompressed.primary_height_pixels = height_;
-  video_uncompressed.secondary_width_pixels = width_ / 2;
-  video_uncompressed.secondary_height_pixels = height_ / 2;
-  // TODO(dustingreen): remove this field from the VideoUncompressedFormat or
-  // specify separately for primary / secondary.
-  video_uncompressed.planar = true;
-  video_uncompressed.swizzled = false;
-  video_uncompressed.primary_line_stride_bytes = output_stride_;
-  video_uncompressed.secondary_line_stride_bytes = output_stride_;
-  video_uncompressed.primary_start_offset = 0;
-  video_uncompressed.secondary_start_offset = output_stride_ * height_;
-  video_uncompressed.tertiary_start_offset = output_stride_ * height_ + 1;
-  video_uncompressed.primary_pixel_stride = 1;
-  video_uncompressed.secondary_pixel_stride = 2;
-  video_uncompressed.primary_display_width_pixels = display_width_;
-  video_uncompressed.primary_display_height_pixels = display_height_;
-  video_uncompressed.has_pixel_aspect_ratio = has_sar_;
-  video_uncompressed.pixel_aspect_ratio_width = sar_width_;
-  video_uncompressed.pixel_aspect_ratio_height = sar_height_;
-
-  // TODO(dustingreen): Deprecate and remove fields set above.  Use only these fields (or newer
-  // variant of these fields; TBD):
-  video_uncompressed.image_format.pixel_format.type = fuchsia::sysmem::PixelFormatType::NV12;
-  video_uncompressed.image_format.coded_width = width_;
-  video_uncompressed.image_format.coded_height = height_;
+  fuchsia::images2::ImageFormat image_format;
+  image_format.set_pixel_format(fuchsia::images2::PixelFormat::NV12);
+  image_format.set_size(fuchsia::math::SizeU{.width = width_, .height = height_});
   DLOG("h264 coded_width: %u coded_height: %u", width_, height_);
-  video_uncompressed.image_format.bytes_per_row = output_stride_;
-  video_uncompressed.image_format.display_width = display_width_;
-  video_uncompressed.image_format.display_height = display_height_;
-  video_uncompressed.image_format.layers = 1;
-  video_uncompressed.image_format.color_space.type = fuchsia::sysmem::ColorSpaceType::REC709;
-  video_uncompressed.image_format.has_pixel_aspect_ratio = has_sar_;
-  video_uncompressed.image_format.pixel_aspect_ratio_width = sar_width_;
-  video_uncompressed.image_format.pixel_aspect_ratio_height = sar_height_;
+  image_format.set_bytes_per_row(output_stride_);
+  image_format.set_display_rect(
+      fuchsia::math::RectU{.x = 0, .y = 0, .width = display_width_, .height = display_height_});
+  image_format.set_color_space(fuchsia::images2::ColorSpace::REC709);
+  if (has_sar_) {
+    image_format.set_pixel_aspect_ratio(
+        fuchsia::math::SizeU{.width = sar_width_, .height = sar_height_});
+  }
 
-  fuchsia::media::VideoFormat video_format;
-  video_format.set_uncompressed(std::move(video_uncompressed));
-
-  result.mutable_format_details()->mutable_domain()->set_video(std::move(video_format));
+  result.mutable_format_details()->set_image_format(std::move(image_format));
 
   return result;
 }
@@ -1319,7 +1285,7 @@ zx_status_t CodecAdapterH264Multi::InitializeFrames(uint32_t min_frame_count,
     // TODO(dustingreen): This may be unnecessary / redundant.
     events_->onCoreCodecOutputFormatChange();
     shared_fidl_sequence_closure_queue_->Enqueue([this] {
-      // We have to run this on the shared fidl thread since that's what CodecImpl is using to
+      // We have to run this on the shared fidl sequence since that's what CodecImpl is using to
       // process RecycleOutputPacket(); we need to avoid this running concurrently with
       // CoreCodecRecycleOutputPacket().
       MidStreamOutputBufferConfigInternal(false);

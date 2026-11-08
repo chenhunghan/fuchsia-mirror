@@ -55,11 +55,13 @@ if (is_host) {
       ":*",
       "//src/developer/ffx/lib/discovery:*",
       "//src/developer/ffx/lib/target:*",
+      "//src/developer/ffx/tests/uart:*",
       "//src/developer/ffx/tools/uart:*",
       "//src/developer/ffx/tools/uart_driver/*",
     ]
     deps = [
       "//src/developer/ffx/config:lib",
+      "//src/developer/ffx/lib/emulator_instance:lib",
       "//third_party/rust_crates:serde",
       "//third_party/rust_crates:serde_json",
       "//third_party/rust_crates:sha2",
@@ -76,6 +78,7 @@ if (is_host) {
     edition = "2024"
     deps = [
              "//src/developer/ffx/config:lib",
+             "//src/developer/ffx/lib/emulator_instance:lib",
              "//third_party/rust_crates:serde",
              "//third_party/rust_crates:serde_json",
              "//third_party/rust_crates:sha2",

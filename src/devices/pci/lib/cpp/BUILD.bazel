@@ -9,6 +9,9 @@ package(default_applicable_licenses = ["//:license"])
 cc_library(
     name = "cpp",
     hdrs = [
+        "capabilities.h",
+        "capabilities/pci_express.h",
+        "capabilities/power_management.h",
         "config.h",
         "include/lib/pci/constants.h",
         "include/lib/pci/hw.h",

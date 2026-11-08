@@ -2,8 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-from __future__ import annotations
-
 import unittest
 from unittest import mock
 
@@ -37,7 +35,7 @@ class AttenuatorTest(unittest.TestCase):
         }
         attenuators = attenuator.create([cfg])
         self.assertEqual(len(attenuators), 4)
-        for i, attn in enumerate(attenuators):
+        for i, attn in enumerate(attenuators, start=1):
             self.assertIsInstance(attn, Attenuator)
             self.assertEqual(attn.idx, i)
             self.assertEqual(attn.instrument.address, "192.168.42.200")
@@ -47,10 +45,10 @@ class AttenuatorTest(unittest.TestCase):
         self.assertEqual(
             info,
             [
-                {"Address": "192.168.42.200", "Attenuator_Port": 0},
                 {"Address": "192.168.42.200", "Attenuator_Port": 1},
                 {"Address": "192.168.42.200", "Attenuator_Port": 2},
                 {"Address": "192.168.42.200", "Attenuator_Port": 3},
+                {"Address": "192.168.42.200", "Attenuator_Port": 4},
             ],
         )
 
@@ -70,7 +68,7 @@ class AttenuatorTest(unittest.TestCase):
         mock_urlopen.side_effect = [open_resp, set_resp, get_resp]
 
         instrument.open("10.0.0.1", 80)
-        attn = Attenuator(instrument, idx=1)
+        attn = Attenuator(instrument, idx=2)
         attn.set_atten(15.5)
         self.assertEqual(attn.get_atten(), 15.5)
 
@@ -80,6 +78,9 @@ class AttenuatorTest(unittest.TestCase):
         mock_urlopen.assert_any_call(
             "http://10.0.0.1:80/CHAN:2:ATT?", timeout=2
         )
+
+        with self.assertRaises(IndexError):
+            Attenuator(instrument, idx=0)
 
     @mock.patch("urllib.request.urlopen")
     def test_invalid_data_error_on_open(self, mock_urlopen: mock.Mock) -> None:
@@ -99,19 +100,47 @@ class AttenuatorTest(unittest.TestCase):
 
         instrument = http.AttenuatorInstrument(num_atten=4)
         instrument.open("192.168.42.200", 80)
-        attenuators = [Attenuator(instrument, idx=i) for i in range(4)]
+        attenuators = [Attenuator(instrument, idx=i) for i in range(1, 5)]
 
         device_configs: list[ControllerConfig] = [
             {
                 "Address": "192.168.42.200",
-                "attenuator_ports_wifi_2g": [0, 2],
-                "attenuator_ports_wifi_5g": [1, 3],
+                "attenuator_ports_wifi_2g": [1, 3],
+                "attenuator_ports_wifi_5g": [2, 4],
             }
         ]
         matched_2g = get_attenuators_for_device(
             device_configs, attenuators, "attenuator_ports_wifi_2g"
         )
-        self.assertEqual([a.idx for a in matched_2g], [0, 2])
+        self.assertEqual([a.idx for a in matched_2g], [1, 3])
+        matched_5g = get_attenuators_for_device(
+            device_configs, attenuators, "attenuator_ports_wifi_5g"
+        )
+        self.assertEqual([a.idx for a in matched_5g], [2, 4])
+
+        with self.assertRaises(IndexError):
+            get_attenuators_for_device(
+                [
+                    {
+                        "Address": "192.168.42.200",
+                        "attenuator_ports_wifi_2g": [0],
+                    }
+                ],
+                attenuators,
+                "attenuator_ports_wifi_2g",
+            )
+
+        with self.assertRaises(ValueError):
+            get_attenuators_for_device(
+                [
+                    {
+                        "Address": "192.168.42.999",
+                        "attenuator_ports_wifi_2g": [1],
+                    }
+                ],
+                attenuators,
+                "attenuator_ports_wifi_2g",
+            )
 
 
 if __name__ == "__main__":

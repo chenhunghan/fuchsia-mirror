@@ -1,0 +1,146 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "elf_runner_test_bin",
+    srcs = ["elf_runner_test.rs"],
+    crate_name = "elf_runner_test",
+    crate_root = "elf_runner_test.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/sys/lib/component-events",
+    ],
+)
+
+fx_packaged_binary(
+    name = "elf_runner_test_packaged_bin",
+    testonly = True,
+    binary = ":elf_runner_test_bin",
+    binary_name = "elf_runner_test",
+)
+
+rustc_binary(
+    name = "args_reporter_bin",
+    testonly = True,
+    srcs = ["args_reporter.rs"],
+    binary_name = "args_reporter",
+    crate_root = "args_reporter.rs",
+    edition = "2024",
+)
+
+fx_packaged_binary(
+    name = "args_reporter_packaged_bin",
+    testonly = True,
+    binary = ":args_reporter_bin",
+    binary_name = "args_reporter",
+)
+
+rustc_binary(
+    name = "no_args_reporter_bin",
+    testonly = True,
+    srcs = ["no_args_reporter.rs"],
+    binary_name = "no_args_reporter",
+    crate_root = "no_args_reporter.rs",
+    edition = "2024",
+)
+
+fx_packaged_binary(
+    name = "no_args_reporter_packaged_bin",
+    testonly = True,
+    binary = ":no_args_reporter_bin",
+    binary_name = "no_args_reporter",
+)
+
+fx_component_manifest(
+    name = "reporter_no_args-manifest",
+    testonly = True,
+    component_name = "reporter_no_args",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/component_manager/tests:meta/use_elf_runner.shard",
+    ],
+    manifest = "meta/reporter_no_args.cml",
+)
+
+fx_component(
+    name = "reporter_no_args",
+    testonly = True,
+    compiled_manifest = ":reporter_no_args-manifest",
+    deps = [":no_args_reporter_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "reporter_args-manifest",
+    testonly = True,
+    component_name = "reporter_args",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/component_manager/tests:meta/use_elf_runner.shard",
+    ],
+    manifest = "meta/reporter_args.cml",
+)
+
+fx_component(
+    name = "reporter_args",
+    testonly = True,
+    compiled_manifest = ":reporter_args-manifest",
+    deps = [":args_reporter_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "elf-runner-test-manifest",
+    testonly = True,
+    component_name = "elf-runner-test",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/lib/fuchsia-component-test:meta/nested_component_manager.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/elf-runner-test.cml",
+)
+
+fx_test_component(
+    name = "elf-runner-test-component",
+    compiled_manifest = ":elf-runner-test-manifest",
+    deps = [":elf_runner_test_packaged_bin"],
+)
+
+fx_package(
+    name = "elf-runner-test-package",
+    package_name = "elf-runner-test",
+    components = [
+        ":reporter_args",
+        ":reporter_no_args",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+        "//src/sys/component_manager:component-manager-realm-builder-debug-cmp",
+    ],
+    test_components = [":elf-runner-test-component"],
+)
+
+fx_test(
+    name = "elf-runner-test",
+    package = ":elf-runner-test-package",
+    visibility = ["//src/sys/component_manager:__pkg__"],
+)

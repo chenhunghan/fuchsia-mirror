@@ -8,6 +8,7 @@
 #include <lib/hid-parser/report.h>
 #include <lib/hid-parser/units.h>
 #include <lib/hid-parser/usages.h>
+#include <lib/stdcompat/inplace_vector.h>
 #include <stdint.h>
 
 #include "src/ui/input/lib/hid-input-report/device.h"
@@ -20,8 +21,7 @@ ParseResult Mouse::ParseReportDescriptor(const hid::ReportDescriptor& hid_report
   std::optional<hid::Attributes> position_x;
   std::optional<hid::Attributes> position_y;
   std::optional<hid::Attributes> scroll_v;
-  hid::Attributes buttons[fuchsia_input_report::wire::kMouseMaxNumButtons];
-  uint8_t num_buttons = 0;
+  cpp26::inplace_vector<hid::Attributes, fuchsia_input_report::wire::kMouseMaxNumButtons> buttons;
 
   for (size_t i = 0; i < hid_report_descriptor.input_count; i++) {
     const hid::ReportField& field = hid_report_descriptor.input_fields[i];
@@ -44,14 +44,13 @@ ParseResult Mouse::ParseReportDescriptor(const hid::ReportDescriptor& hid_report
                hid::USAGE(hid::usage::Page::kGenericDesktop, hid::usage::GenericDesktop::kWheel)) {
       scroll_v = field.attr;
     } else if (field.attr.usage.page == hid::usage::Page::kButton) {
-      if (num_buttons == fuchsia_input_report::wire::kMouseMaxNumButtons) {
+      if (!buttons.try_push_back(field.attr)) {
         return ParseResult::kTooManyItems;
       }
-      buttons[num_buttons++] = field.attr;
     }
   }
 
-  if (!movement_x && !movement_y && !position_x && !position_y && !scroll_v && (num_buttons == 0)) {
+  if (!movement_x && !movement_y && !position_x && !position_y && !scroll_v && buttons.empty()) {
     return ParseResult::kItemNotFound;
   }
 
@@ -71,10 +70,7 @@ ParseResult Mouse::ParseReportDescriptor(const hid::ReportDescriptor& hid_report
   if (scroll_v) {
     scroll_v_ = scroll_v;
   }
-  for (size_t i = 0; i < num_buttons; i++) {
-    buttons_[i] = buttons[i];
-  }
-  num_buttons_ = num_buttons;
+  buttons_ = std::move(buttons);
 
   report_size_ = hid_report_descriptor.input_byte_sz;
   report_id_ = hid_report_descriptor.report_id;
@@ -108,10 +104,9 @@ ParseResult Mouse::CreateDescriptor(fidl::AnyArena& allocator,
 
   // Set the buttons array.
   {
-    fidl::VectorView<uint8_t> buttons(allocator, num_buttons_);
-    size_t index = 0;
-    for (auto& button : buttons_) {
-      buttons[index++] = button.usage.usage;
+    fidl::VectorView<uint8_t> buttons(allocator, buttons_.size());
+    for (size_t i = 0; i < buttons_.size(); i++) {
+      buttons[i] = static_cast<uint8_t>(buttons_[i].usage.usage);
     }
     mouse_input.set_buttons(allocator, std::move(buttons));
   }
@@ -148,23 +143,20 @@ ParseResult Mouse::ParseInputReportInternal(const uint8_t* data, size_t len,
     mouse_report.set_scroll_v(Extract<int64_t>(data, len, *scroll_v_, allocator));
   }
 
-  std::array<uint8_t, fuchsia_input_report::wire::kMouseMaxNumButtons> buttons;
-  size_t buttons_size = 0;
-  for (size_t i = 0; i < num_buttons_; i++) {
+  cpp26::inplace_vector<uint8_t, fuchsia_input_report::wire::kMouseMaxNumButtons> pressed_buttons;
+  for (const hid::Attributes& button : buttons_) {
     double value_out;
-    if (hid::ExtractAsUnitType(data, len, buttons_[i], &value_out)) {
+    if (hid::ExtractAsUnitType(data, len, button, &value_out)) {
       uint8_t pressed = (value_out > 0) ? 1 : 0;
       if (pressed) {
-        buttons[buttons_size++] = static_cast<uint8_t>(buttons_[i].usage.usage);
+        pressed_buttons.push_back(static_cast<uint8_t>(button.usage.usage));
       }
     }
   }
 
-  fidl::VectorView<uint8_t> fidl_buttons(allocator, buttons_size);
-  for (size_t i = 0; i < buttons_size; i++) {
-    fidl_buttons[i] = buttons[i];
-  }
-  mouse_report.set_pressed_buttons(allocator, std::move(fidl_buttons));
+  fidl::VectorView<uint8_t> fidl_pressed_buttons(allocator, pressed_buttons.begin(),
+                                                 pressed_buttons.end());
+  mouse_report.set_pressed_buttons(allocator, std::move(fidl_pressed_buttons));
 
   input_report.set_mouse(allocator, std::move(mouse_report));
   return ParseResult::kOk;

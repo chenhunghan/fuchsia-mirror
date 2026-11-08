@@ -32,6 +32,10 @@ generated_file("global_args.json") {
   contents = {
     auto_refresh_compdb = bazel_auto_refresh_compdb
     rust_sysroot = rebased_rustc_prefix
+
+    # Used by bazel_action_impl.py to extract the archives of packages listed
+    # in `package_outputs`. Each such bazel_action() depends on the binary.
+    package_tool = bazel_action_package_tool_rebased
   }
   output_conversion = "json"
 }
@@ -49,24 +53,45 @@ generated_file("bazel_default_configs_json") {
   outputs = [ "$root_build_dir/bazel_default_configs/${_config_name}.json" ]
   output_conversion = "json"
 
+  # LINT.IfChange(fdio_config)
+  # Exclude //build/config/fuchsia:fdio_config because it injects a C++
+  # library dependency (//sdk/lib/fdio) that cannot be attached to
+  # cc_toolchain without forming a dependency cycle; fx_cc_binary() applies
+  # it via build_flags instead. Add it first so the removal does not fail
+  # when it is absent (e.g. for host toolchains).
+  #
+  # Note: //build/config/fuchsia:maybe_scudo_default_options (from
+  # default_executable_deps in BUILDCONFIG.gn) is similarly wired directly into
+  # executable macros (fx_cc_binary, rustc_binary, rustc_test) via build_flags.
+  default_executable_configs += [ "//build/config/fuchsia:fdio_config" ]
+  default_executable_configs -= [ "//build/config/fuchsia:fdio_config" ]
+
+  # LINT.ThenChange(//build/bazel/rules/cc/fx_cc_binary.bzl:fdio_config)
+
+  _common_configs = filter_exclude(default_common_binary_configs,
+                                   [
+                                     "//build/config:executable_config",
+                                     "//build/config:shared_library_config",
+                                   ])
+
   # Keep these definitions in sync with the set_defaults() calls in
   # //build/config/BUILDCONFIG.gn
   contents = {
     # LINT.IfChange(DefaultConfigsJsonSchema)
 
     # List of configs that apply to all C++ targets
-    cxx_common = default_common_binary_configs
+    cxx_common = _common_configs
 
     # List of extra configs that apply to C++ executables.
     cxx_executable_extra =
-        default_executable_configs - default_common_binary_configs
+        filter_exclude(default_executable_configs, _common_configs)
 
     # List of extra configs that apply to C++ shared libraries.
     cxx_shared_library_extra =
-        default_shared_library_configs - default_common_binary_configs
+        filter_exclude(default_shared_library_configs, _common_configs)
 
     # List of configs that apply to all Rust targets.
-    rust_common = default_common_binary_configs
+    rust_common = _common_configs
 
     # List of extra configs that apply to Rust executables.
     rust_executable_extra = []

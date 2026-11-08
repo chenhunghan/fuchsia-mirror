@@ -2,13 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use anyhow::{format_err, Context, Error};
+use anyhow::{Context, Error, format_err};
 use fidl_fuchsia_bluetooth_sys::HostWatcherProxy;
 use fidl_fuchsia_hardware_bluetooth::EmulatorProxy;
-use fuchsia_bluetooth::expectation::asynchronous::{
-    expectable, Expectable, ExpectableExt, ExpectableState, ExpectableStateExt,
-};
 use fuchsia_bluetooth::expectation::Predicate;
+use fuchsia_bluetooth::expectation::asynchronous::{
+    Expectable, ExpectableExt, ExpectableState, ExpectableStateExt, expectable,
+};
 use fuchsia_bluetooth::types::{Address, HostId, HostInfo};
 
 use futures::future::{self, BoxFuture, FutureExt, TryFutureExt};
@@ -17,7 +17,7 @@ use log::error;
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
-use test_harness::{SharedState, TestHarness, SHARED_STATE_TEST_COMPONENT_INDEX};
+use test_harness::{SharedState, TestHarness};
 
 use crate::core_realm::{CoreRealm, SHARED_STATE_INDEX};
 use crate::timeout_duration;
@@ -85,11 +85,8 @@ impl TestHarness for HostWatcherHarness {
     ) -> BoxFuture<'static, Result<(Self, Self::Env, Self::Runner), Error>> {
         let shared_state = shared_state.clone();
         async move {
-            let test_component: Arc<String> = shared_state
-                .get(SHARED_STATE_TEST_COMPONENT_INDEX)
-                .expect("SharedState must have TEST-COMPONENT")?;
-            let inserter = move || CoreRealm::create(test_component.to_string());
-            let realm = shared_state.get_or_insert_with(SHARED_STATE_INDEX, inserter).await?;
+            let realm =
+                shared_state.get_or_insert_with(SHARED_STATE_INDEX, CoreRealm::create).await?;
             let harness = new_host_watcher_harness(realm.clone()).await?;
             let run_host_watcher = watch_hosts(harness.clone())
                 .map_err(|e| e.context("Error running HostWatcher harness"))
@@ -122,8 +119,7 @@ pub async fn activate_fake_host(
     let initial_hosts: Vec<HostId> = host_watcher.read().hosts.keys().cloned().collect();
     let initial_hosts_ = initial_hosts.clone();
 
-    let dev_dir = host_watcher.realm.dev().context("failed to open dev directory")?;
-    let hci = Emulator::create_and_publish(dev_dir).await?;
+    let hci = Emulator::create_and_publish(host_watcher.realm.svc()).await?;
 
     let host_watcher_state = host_watcher
         .when_satisfied(

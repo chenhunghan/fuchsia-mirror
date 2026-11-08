@@ -52,6 +52,7 @@ zx::result<> UfsPci::InitResources() {
   }
 
   // Request 1 interrupt of any mode.
+  fuchsia_hardware_pci::InterruptMode irq_mode;
   {
     const auto result = pci_->GetInterruptModes();
     if (!result.ok()) {
@@ -59,19 +60,19 @@ zx::result<> UfsPci::InitResources() {
       return zx::error(result.status());
     }
     if (result->modes.msix_count > 0) {
-      irq_mode_ = fuchsia_hardware_pci::InterruptMode::kMsiX;
+      irq_mode = fuchsia_hardware_pci::InterruptMode::kMsiX;
     } else if (result->modes.msi_count > 0) {
-      irq_mode_ = fuchsia_hardware_pci::InterruptMode::kMsi;
+      irq_mode = fuchsia_hardware_pci::InterruptMode::kMsi;
     } else if (result->modes.has_legacy) {
-      irq_mode_ = fuchsia_hardware_pci::InterruptMode::kLegacy;
+      irq_mode = fuchsia_hardware_pci::InterruptMode::kLegacy;
     } else {
       fdf::error("No interrupt modes are supported.");
       return zx::error(ZX_ERR_NOT_SUPPORTED);
     }
-    fdf::debug("Interrupt mode: {}", static_cast<uint8_t>(irq_mode_));
+    fdf::debug("Interrupt mode: {}", static_cast<uint8_t>(irq_mode));
   }
   {
-    const auto result = pci_->SetInterruptMode(irq_mode_, 1);
+    const auto result = pci_->SetInterruptMode(irq_mode, 1);
     if (!result.ok()) {
       fdf::error("Call to SetInterruptMode failed: {}", result.status_string());
       return zx::error(result.status());
@@ -152,20 +153,6 @@ zx::result<> UfsPci::InitQuirk() {
             info.device_id);
 
   return zx::ok();
-}
-
-void UfsPci::OnIrqComplete() {
-  if (irq_mode_ == fuchsia_hardware_pci::InterruptMode::kLegacy) {
-    const fidl::WireResult result = pci_->AckInterrupt();
-    if (!result.ok()) {
-      fdf::error("Call to AckInterrupt failed: {}", result.status_string());
-      return;
-    }
-    if (result->is_error()) {
-      fdf::error("AckInterrupt failed: {}", zx_status_get_string(result->error_value()));
-      return;
-    }
-  }
 }
 
 }  // namespace ufs

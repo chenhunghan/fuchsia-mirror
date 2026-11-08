@@ -8,6 +8,12 @@ load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package
 
 package(default_applicable_licenses = ["//:license"])
 
+test_suite(
+    name = "tests",
+    tests = [":fuchsia-audio-device-tests"],
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)
+
 rustc_library(
     name = "fuchsia-audio-device",
     srcs = [
@@ -35,7 +41,7 @@ rustc_library(
         "//src/connectivity/bluetooth/lib/async-helpers",
         "//src/lib/async-utils",
         "//src/lib/diagnostics/inspect/derive",
-        "//src/lib/diagnostics/inspect/rust:fuchsia-inspect",  # @bazel2gn:path_overwrite://src/lib/diagnostics/inspect/rust
+        "//src/lib/diagnostics/inspect/rust",
         "//src/lib/fidl/rust/fidl",
         "//src/lib/fuchsia-async",
         "//src/lib/fuchsia-sync",
@@ -62,5 +68,4 @@ rustc_test(
 fx_unittest_package(
     name = "fuchsia-audio-device-tests",
     unit_tests = [":fuchsia-audio-device_test"],
-    visibility = ["//src/connectivity/bluetooth:__pkg__"],
 )

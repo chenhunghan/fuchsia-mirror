@@ -10,38 +10,31 @@
 
 #include <phys/stdio.h>
 
-#include "log.h"
+namespace {
 
-FILE gStdout;
+int NullWrite(void*, const char*, size_t len) { return static_cast<int>(len); }
 
-PhysConsole::PhysConsole()
-    : null_{[](ktl::string_view s) -> int { return static_cast<int>(s.length()); }}, mux_files_{} {}
+constinit FILE gNullFile{NullWrite, nullptr};
 
-PhysConsole& PhysConsole::Get() {
-  static PhysConsole gConsole;
-  return gConsole;
-}
+FILE* gNonVerboseOutput;
 
-void InitStdout() { gStdout = PhysConsole::Get().mux_; }
+}  // namespace
 
-void PhysConsole::SetMux(size_t idx, const FILE& f) {
-  mux_files_[idx] = f;
-  mux_.files()[idx] = &mux_files_[idx];
-}
+constinit FILE gStdout{NullWrite, nullptr};
+
+FILE* NullFile() { return &gNullFile; }
+
+void SetNonVerboseOutput(FILE* f) { gNonVerboseOutput = f; }
 
 void debugf(const char* fmt, ...) {
   FILE* outfile = stdout;
 
-  // If kernel.phys.verbose=false then only write to the log.
-  FILE log_only_file;
+  // If kernel.phys.verbose=false then only write to the non-verbose output.
   if (BootOptions::Get() && !BootOptions::Get()->phys_verbose) {
-    if (!gLog) {
-      // The log isn't initialized yet, so write nothing.
+    if (!gNonVerboseOutput) {
       return;
     }
-
-    log_only_file = gLog->LogOnlyFile();
-    outfile = &log_only_file;
+    outfile = gNonVerboseOutput;
   }
 
   va_list args;

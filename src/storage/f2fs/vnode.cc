@@ -90,8 +90,6 @@ bool VnodeF2fs::IsSock() const { return S_ISSOCK(mode_); }
 
 bool VnodeF2fs::IsFifo() const { return S_ISFIFO(mode_); }
 
-bool VnodeF2fs::HasGid() const { return mode_ & S_ISGID; }
-
 bool VnodeF2fs::IsNode() const { return ino_ == superblock_info_.GetNodeIno(); }
 
 bool VnodeF2fs::IsMeta() const { return ino_ == superblock_info_.GetMetaIno(); }

@@ -78,6 +78,11 @@ devicetree::ScanState DevicetreeCpuTopologyItem::OnSubtree(const devicetree::Nod
       }
     }
   }
+  if (current_socket_) {
+    if (path.IsDescendentOf("/cpus/cpu-map") && IsCpuMapNode(path.back(), "socket")) {
+      current_socket_ = std::nullopt;
+    }
+  }
 
   // Allocated and filled up, means we are done going through the tree.
   if (!cpu_entries_.empty() && cpu_entry_index_ == cpu_entry_count_) {
@@ -160,6 +165,35 @@ void DevicetreeCpuTopologyItem::OnDone() {
     }
     return false;
   });
+
+  if (cpu_entry_count_ == 0) {
+    topology_node_count_ = 0;
+    return;
+  }
+
+  if (has_cpu_map_ && !map_entries_.empty()) {
+    if (auto result = UpdateEntryCpuLinks(); result.is_error()) {
+      init_error_ = result.error_value();
+      return;
+    }
+    if (auto result = MarkSkippedMapEntries(); result.is_error()) {
+      init_error_ = result.error_value();
+      return;
+    } else {
+      topology_node_count_ -= *result;
+      uint32_t active_clusters = 0;
+      for (const auto& entry : map_entries_) {
+        if (!entry.skip && entry.type == TopologyEntryType::kCluster) {
+          active_clusters++;
+        }
+      }
+      cluster_count_ = active_clusters;
+    }
+    if (auto result = SplitHeterogeneousClusters(); result.is_error()) {
+      init_error_ = result.error_value();
+      return;
+    }
+  }
 }
 
 devicetree::ScanState DevicetreeCpuTopologyItem::IncreaseEntryNodeCountFirstScan(
@@ -212,6 +246,7 @@ devicetree::ScanState DevicetreeCpuTopologyItem::AddEntryNodeSecondScan(
   if (IsCpuMapNode(name, "socket")) {
     map_entries_[map_entry_index_] = CpuMapEntry{
         .type = TopologyEntryType::kSocket,
+        .parent_index = map_entry_index_,
     };
     current_socket_ = map_entry_index_;
     map_entry_index_++;
@@ -424,6 +459,9 @@ fit::result<ItemBase::DataZbi::Error> DevicetreeCpuTopologyItem::CalculateCluste
   uint32_t max_cap = 1;
   for (size_t i = 0; i < map_entries_.size(); ++i) {
     const auto& entry = map_entries_[i];
+    if (entry.skip) {
+      continue;
+    }
     if (entry.type == TopologyEntryType::kCluster) {
       perf[current_cluster].cluster_index = static_cast<uint32_t>(i);
       perf[current_cluster].perf = 1;
@@ -497,24 +535,17 @@ fit::result<ItemBase::DataZbi::Error> DevicetreeCpuTopologyItem::CalculateCluste
 
 fit::result<DevicetreeCpuTopologyItem::DataZbi::Error> DevicetreeCpuTopologyItem::AppendItems(
     DataZbi& zbi) const {
+  if (init_error_) {
+    return fit::error(*init_error_);
+  }
   if (size_bytes() == 0) {
     return fit::ok();
   }
 
   ZX_ASSERT(!cpu_entries_.empty() && cpu_entry_count_ != 0);
   ZX_DEBUG_ASSERT(arch_info_setter_);
-  if (auto result = UpdateEntryCpuLinks(); result.is_error()) {
-    return result;
-  }
 
-  size_t skipped_topology_nodes = 0;
-  if (auto result = MarkSkippedMapEntries(); result.is_error()) {
-    return result.take_error();
-  } else {
-    skipped_topology_nodes = *result;
-  }
-
-  size_t adjusted_node_count = node_element_count() - skipped_topology_nodes;
+  size_t adjusted_node_count = node_element_count();
 
   // Allocate the container in the zbi.
   auto result = zbi.Append({
@@ -666,6 +697,188 @@ fit::result<ItemBase::DataZbi::Error, size_t> DevicetreeCpuTopologyItem::MarkSki
   }
 
   return fit::ok(total_skipped);
+}
+
+fit::result<ItemBase::DataZbi::Error> DevicetreeCpuTopologyItem::SplitHeterogeneousClusters() {
+  if (!has_cpu_map_ || map_entries_.empty() || cluster_count_ == 0) {
+    return fit::ok();
+  }
+
+  // When cpu-map already defines multiple clusters, preserve explicit cluster boundaries unless a
+  // leaf cluster spans distinct 'operating-points-v2' domains. When cpu-map puts all cores in a
+  // single cluster (common on single-DSU DynamIQ systems), also split by 'capacity-dmips-mhz'.
+  const bool split_by_capacity = cluster_count_ == 1;
+
+  struct CpuPerfGroupKey {
+    std::optional<uint32_t> operating_points_v2;
+    std::optional<uint32_t> capacity_dmips_mhz;
+    constexpr bool operator==(const CpuPerfGroupKey&) const = default;
+  };
+
+  auto core_perf_key = [this, split_by_capacity](size_t core_index) -> CpuPerfGroupKey {
+    for (size_t i = core_index + 1; i < map_entries_.size(); ++i) {
+      const auto& entry = map_entries_[i];
+      if (entry.type != TopologyEntryType::kThread || entry.parent_index != core_index) {
+        break;
+      }
+      if (entry.skip || !entry.cpu_index) {
+        continue;
+      }
+      devicetree::PropertyDecoder decoder(cpu_entries_[*entry.cpu_index].properties);
+      std::optional<uint32_t> opps =
+          decoder.FindAndDecodeProperty<&devicetree::PropertyValue::AsUint32>(
+              "operating-points-v2");
+      std::optional<uint32_t> capacity =
+          split_by_capacity ? decoder.FindAndDecodeProperty<&devicetree::PropertyValue::AsUint32>(
+                                  "capacity-dmips-mhz")
+                            : std::nullopt;
+      return CpuPerfGroupKey{
+          .operating_points_v2 = opps,
+          .capacity_dmips_mhz = capacity,
+      };
+    }
+    return CpuPerfGroupKey{};
+  };
+
+  auto is_active_leaf_cluster = [this](size_t cluster_index) -> bool {
+    const auto& cluster = map_entries_[cluster_index];
+    if (cluster.skip || cluster.type != TopologyEntryType::kCluster) {
+      return false;
+    }
+    for (size_t i = cluster_index + 1; i < map_entries_.size(); ++i) {
+      if (!map_entries_[i].skip && map_entries_[i].type == TopologyEntryType::kCluster &&
+          map_entries_[i].parent_index == cluster_index) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  size_t extra_clusters = 0;
+  {
+    std::optional<size_t> active_leaf;
+    bool has_first_core = false;
+    CpuPerfGroupKey last_key{};
+    for (size_t i = 0; i < map_entries_.size(); ++i) {
+      const auto& entry = map_entries_[i];
+      if (entry.type == TopologyEntryType::kSocket) {
+        active_leaf = std::nullopt;
+        continue;
+      }
+      if (entry.type == TopologyEntryType::kCluster) {
+        if (is_active_leaf_cluster(i)) {
+          active_leaf = i;
+          has_first_core = false;
+        } else {
+          active_leaf = std::nullopt;
+        }
+        continue;
+      }
+      if (active_leaf && !entry.skip && entry.type == TopologyEntryType::kCore &&
+          entry.parent_index == *active_leaf) {
+        const CpuPerfGroupKey key = core_perf_key(i);
+        if (!has_first_core) {
+          has_first_core = true;
+          last_key = key;
+        } else if (key != last_key) {
+          extra_clusters++;
+          last_key = key;
+        }
+      }
+    }
+  }
+
+  if (extra_clusters == 0) {
+    return fit::ok();
+  }
+
+  fbl::AllocChecker ac;
+  std::span new_entries = Allocate<CpuMapEntry>(map_entries_.size() + extra_clusters, ac);
+  if (!ac.check()) {
+    return fit::error(DataZbi::Error{
+        .zbi_error = "Failed to allocate expanded CPU map entries.",
+        .item_offset = 0,
+    });
+  }
+  std::span old_to_new = Allocate<size_t>(map_entries_.size(), ac);
+  if (!ac.check()) {
+    return fit::error(DataZbi::Error{
+        .zbi_error = "Failed to allocate CPU map index remap buffer.",
+        .item_offset = 0,
+    });
+  }
+
+  size_t new_index = 0;
+  std::optional<size_t> active_leaf_old;
+  size_t current_split_new = 0;
+  bool has_first_core = false;
+  CpuPerfGroupKey last_key{};
+
+  for (size_t old_index = 0; old_index < map_entries_.size(); ++old_index) {
+    const CpuMapEntry& entry = map_entries_[old_index];
+
+    if (active_leaf_old && !entry.skip && entry.type == TopologyEntryType::kCore &&
+        entry.parent_index == *active_leaf_old) {
+      const CpuPerfGroupKey key = core_perf_key(old_index);
+      if (!has_first_core) {
+        has_first_core = true;
+        last_key = key;
+      } else if (key != last_key) {
+        const CpuMapEntry& orig_cluster = map_entries_[*active_leaf_old];
+        const size_t split_parent = orig_cluster.parent_index == *active_leaf_old
+                                        ? new_index
+                                        : old_to_new[orig_cluster.parent_index];
+        const std::optional<uint32_t> split_enclosing =
+            orig_cluster.cluster_index ? std::optional<uint32_t>(static_cast<uint32_t>(
+                                             old_to_new[*orig_cluster.cluster_index]))
+                                       : std::nullopt;
+        new_entries[new_index] = CpuMapEntry{
+            .type = TopologyEntryType::kCluster,
+            .parent_index = split_parent,
+            .cluster_index = split_enclosing,
+        };
+        current_split_new = new_index++;
+        last_key = key;
+      }
+    }
+
+    CpuMapEntry copied = entry;
+    if (active_leaf_old && entry.type == TopologyEntryType::kCore &&
+        entry.parent_index == *active_leaf_old) {
+      copied.parent_index = current_split_new;
+      copied.cluster_index = static_cast<uint32_t>(current_split_new);
+    } else {
+      copied.parent_index =
+          entry.parent_index == old_index ? new_index : old_to_new[entry.parent_index];
+      if (entry.cluster_index) {
+        copied.cluster_index = active_leaf_old && *entry.cluster_index == *active_leaf_old
+                                   ? static_cast<uint32_t>(current_split_new)
+                                   : static_cast<uint32_t>(old_to_new[*entry.cluster_index]);
+      }
+    }
+
+    old_to_new[old_index] = new_index;
+    new_entries[new_index++] = copied;
+
+    if (entry.type == TopologyEntryType::kSocket) {
+      active_leaf_old = std::nullopt;
+    } else if (entry.type == TopologyEntryType::kCluster) {
+      if (is_active_leaf_cluster(old_index)) {
+        active_leaf_old = old_index;
+        current_split_new = old_to_new[old_index];
+        has_first_core = false;
+      } else {
+        active_leaf_old = std::nullopt;
+      }
+    }
+  }
+
+  ZX_DEBUG_ASSERT(new_index == new_entries.size());
+  map_entries_ = new_entries;
+  map_entry_count_ = static_cast<uint32_t>(new_entries.size());
+  cluster_count_ += static_cast<uint32_t>(extra_clusters);
+  topology_node_count_ += extra_clusters;
+  return fit::ok();
 }
 
 }  // namespace boot_shim

@@ -28,7 +28,13 @@ KCOUNTER(dispatcher_pager_timed_out_request_count, "dispatcher.pager.timed_out_r
 
 PagerProxy::PagerProxy(PagerDispatcher* dispatcher, fbl::RefPtr<PortDispatcher> port, uint64_t key,
                        uint32_t options)
-    : pager_(dispatcher),
+    : PortAllocator{
+          .free_fn =
+              [](const PortAllocator* self, PortPacket* packet) {
+                const_cast<PagerProxy*>(static_cast<const PagerProxy*>(self))->Free(packet);
+              },
+      },
+      pager_(dispatcher),
       pager_koid_(pager_->get_koid()),
       port_(ktl::move(port)),
       key_(key),
@@ -444,6 +450,15 @@ void PagerProxy::PrintOvertime(uint64_t waited_seconds) {
       // Use DumpSelf to avoid it calling our Dump method that we already performed.
       src->DumpSelf(0, BootOptions::Get()->userpager_overtime_printout_limit);
     }
+  }
+}
+
+void PagerProxy::GetDebugName(char (&name)[ZX_MAX_NAME_LEN]) const {
+  Guard<Mutex> guard{&mtx_};
+  if (pager_) {
+    pager_->get_debug_name(name, sizeof(name));
+  } else {
+    name[0] = '\0';
   }
 }
 

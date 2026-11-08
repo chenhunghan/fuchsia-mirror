@@ -8,12 +8,15 @@
 #define ZIRCON_KERNEL_INCLUDE_DEV_INIT_H_
 
 #include <lib/uart/all.h>
+#include <zircon/compiler.h>
 
 // Forward-declared; fully declared in <phys/handoff/handoff.h>
 struct PhysHandoff;
 
 // Forward-declared; fully declared in <phys/handoff/arch-handoff.h>.
 struct ArchPhysHandoff;
+
+__BEGIN_CDECLS
 
 // These routines initialize the kernel's drivers, as a function of the
 // configurations described in the physboot hand-off, at two stages:
@@ -24,7 +27,7 @@ struct ArchPhysHandoff;
 // * "late" refers to immediately after the main platform initialization, once
 //   the VM, the heap, threading, and general kernel facilities are available.
 //
-// Defined in //zircon/kernel/dev/init.cc.
+// Defined in //zircon/kernel/dev/init.rs.
 void DriverHandoffEarly(const PhysHandoff& handoff);
 void DriverHandoffPostVm(const PhysHandoff& handoff);
 void DriverHandoffLate(const PhysHandoff& handoff);
@@ -40,5 +43,7 @@ void UartDriverHandoffLate(const uart::all::Driver& serial);
 void PlatformDriverHandoffEarly(const ArchPhysHandoff& arch_handoff);
 void PlatformDriverHandoffPostVm(const ArchPhysHandoff& arch_handoff);
 void PlatformDriverHandoffLate(const ArchPhysHandoff& arch_handoff);
+
+__END_CDECLS
 
 #endif  // ZIRCON_KERNEL_INCLUDE_DEV_INIT_H_

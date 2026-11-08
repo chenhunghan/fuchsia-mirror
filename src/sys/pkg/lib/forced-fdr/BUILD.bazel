@@ -82,7 +82,6 @@ fx_component_manifest(
 fx_test_component(
     name = "forced-fdr-tests-component",
     compiled_manifest = ":forced-fdr-tests-manifest",
-    component_name = "forced-fdr-tests",
     deps = [":forced-fdr_test_packaged_bin"],
 )
 

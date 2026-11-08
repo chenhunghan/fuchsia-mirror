@@ -2,8 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
 load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
 load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
@@ -24,14 +24,13 @@ fx_cc_library(
     alwayslink = True,
 )
 
-# @bazel2gn:raw_attribute:output_name = "audio_lib_timeline_unittests"
-fx_cc_binary(
+fx_cc_test_binary(
     name = "unittest_bin",
-    testonly = True,
     srcs = [
         "timeline_function_unittest.cc",
         "timeline_rate_unittest.cc",
     ],
+    gn_output_name = "audio_lib_timeline_unittests",
     tags = ["manual"],
     deps = [
         ":timeline",

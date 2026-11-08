@@ -14,8 +14,6 @@ use std::collections::hash_map::Entry;
 use std::pin::pin;
 use std::sync::Arc;
 
-pub const SHARED_STATE_TEST_COMPONENT_INDEX: &str = "TEST-COMPONENT";
-
 /// SharedState is a string-indexed map used to share state across multiple TestHarnesses that are
 /// tupled together. For example, the state could be a Bluetooth emulator instance and core
 /// component/driver hierarchy manipulated by two distinct Harnesses during a test. The map's value
@@ -119,7 +117,7 @@ pub trait TestHarness: Sized {
 }
 
 /// We can run any test which is an async function from some harness `H` to a result
-pub async fn run_with_harness<H, F, Fut>(test_func: F, test_component: Option<String>)
+pub async fn run_with_harness<H, F, Fut>(test_func: F)
 where
     H: TestHarness,
     F: FnOnce(H) -> Fut + Send + 'static,
@@ -127,11 +125,6 @@ where
 {
     diagnostics_log::initialize(diagnostics_log::PublishOptions::default()).expect("init logging");
     let state: Arc<SharedState> = Default::default();
-    if test_component.is_some() {
-        let _ = state
-            .try_insert(SHARED_STATE_TEST_COMPONENT_INDEX, test_component.unwrap())
-            .expect("insert test_component");
-    }
     let (harness, env, runner) = H::init(&state).await.expect("couldn't initialize harness");
     // Drop `state` so that SharedState entries may be dropped if not needed during test execution.
     // See Harness::init doc comment for further explanation.

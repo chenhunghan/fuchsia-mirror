@@ -24,30 +24,18 @@ cc_test_executable("web_runner_pixel_test_bin") {
   sources = [ "web_runner_pixeltest.cc" ]
   deps = [
     "//sdk/fidl/fuchsia.accessibility.semantics:fuchsia.accessibility.semantics_hlcpp",
-    "//sdk/fidl/fuchsia.buildinfo:fuchsia.buildinfo_hlcpp",
-    "//sdk/fidl/fuchsia.component:fuchsia.component_hlcpp",
-    "//sdk/fidl/fuchsia.fonts:fuchsia.fonts_hlcpp",
-    "//sdk/fidl/fuchsia.input.injection:fuchsia.input.injection_hlcpp",
-    "//sdk/fidl/fuchsia.intl:fuchsia.intl_hlcpp",
-    "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_hlcpp",
     "//sdk/fidl/fuchsia.logger:fuchsia.logger_hlcpp",
-    "//sdk/fidl/fuchsia.memorypressure:fuchsia.memorypressure_hlcpp",
-    "//sdk/fidl/fuchsia.metrics:fuchsia.metrics_hlcpp",
-    "//sdk/fidl/fuchsia.net.interfaces:fuchsia.net.interfaces_hlcpp",
+    "//sdk/fidl/fuchsia.media:fuchsia.media_hlcpp",
     "//sdk/fidl/fuchsia.posix.socket:fuchsia.posix.socket_hlcpp",
-    "//sdk/fidl/fuchsia.process:fuchsia.process_hlcpp",
-    "//sdk/fidl/fuchsia.scheduler:fuchsia.scheduler_hlcpp",
-    "//sdk/fidl/fuchsia.tracing.provider:fuchsia.tracing.provider_hlcpp",
-    "//sdk/fidl/fuchsia.ui.app:fuchsia.ui.app_hlcpp",
     "//sdk/fidl/fuchsia.ui.composition:fuchsia.ui.composition_hlcpp",
     "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_hlcpp",
-    "//sdk/fidl/fuchsia.ui.test.input:fuchsia.ui.test.input_hlcpp",
-    "//sdk/fidl/fuchsia.ui.views:fuchsia.ui.views_hlcpp",
-    "//sdk/fidl/fuchsia.vulkan.loader:fuchsia.vulkan.loader_hlcpp",
     "//sdk/fidl/fuchsia.web:fuchsia.web_hlcpp",
+    "//sdk/lib/sys/component/cpp/testing:cpp",
+    "//sdk/lib/syslog/cpp",
+    "//src/lib/fxl",
     "//src/lib/fxl/test:gtest_main",
-    "//src/lib/testing/loop_fixture",
     "//src/ui/testing/util",
+    "//src/ui/testing/util:web_view_client",
     "//third_party/googletest:gtest",
   ]
 }
@@ -58,19 +46,12 @@ fuchsia_test_component("web_runner_pixel_test_component") {
   deps = [
     ":web_runner_pixel_test_bin",
     "//src/cobalt/bin/testing/fake_cobalt",
-    "//src/connectivity/network/netstack3:component-for-tests",
     "//src/developer/build_info/testing:fake-build-info-component",
-    "//src/developer/memory/pressure_signaler:component",
     "//src/fonts:font_provider_hermetic_for_test",
+    "//src/memory/pressure_signaler:component",
     "//src/testing/fidl/intl_property_manager:intl_property_manager_component",
     "//src/ui/bin/text:text_manager_comp",
-
-    # Include some default config (it doesn't matter which, since we're going to
-    # override it).
-    "//src/ui/testing/test_ui_stack:flatland_scene_manager_config",
     "//src/ui/testing/test_ui_stack:test-ui-stack-component",
-    "//src/ui/tests/integration_graphics_tests/web-pixel-tests/chromium_pixel_client:chromium_pixel_client_component",
-    "//src/ui/tests/integration_graphics_tests/web-pixel-tests/chromium_pixel_client:chromium_pixel_client_default_config",
     "//src/ui/tests/integration_graphics_tests/web-pixel-tests/http_server:http_server_component",
   ]
   test_type = "system"
@@ -78,6 +59,7 @@ fuchsia_test_component("web_runner_pixel_test_component") {
 
 fuchsia_test_package("web_runner_pixel_test") {
   test_components = [ ":web_runner_pixel_test_component" ]
+  subpackages = [ "//src/connectivity/network/netstack3:package-for-tests" ]
 
   test_specs = {
     log_settings = {

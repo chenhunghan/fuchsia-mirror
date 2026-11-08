@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 use component_id_index::Index;
 use fidl::persist;
-use fidl_fuchsia_component_internal::ComponentIdIndex;
+use fidl_fuchsia_component_internal_common::ComponentIdIndex;
 
 /// A builder that constructs component id indices.
 #[derive(Default)]

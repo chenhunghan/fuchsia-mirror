@@ -12,9 +12,11 @@ group("tests") {
   testonly = true
   deps = [
     ":audio_services_device_registry_unittests",
-    ":audio_services_device_registry_warning_unittests",
     "testing",
   ]
+  if (is_debug || is_asan || is_coverage) {
+    deps += [ ":audio_services_device_registry_warning_unittests" ]
+  }
 }
 
 ## Packages
@@ -30,6 +32,7 @@ fuchsia_unittest_package("audio_services_device_registry_unittests") {
     log_settings = {
       max_severity = "INFO"
     }
+    parallel = 4
   }
 }
 
@@ -40,6 +43,7 @@ fuchsia_unittest_package("audio_services_device_registry_warning_unittests") {
     log_settings = {
       max_severity = "WARN"
     }
+    parallel = 4
   }
 }
 

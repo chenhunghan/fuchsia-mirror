@@ -9,26 +9,31 @@
 #include <inttypes.h>
 #include <lib/boot-options/boot-options.h>
 #include <lib/elfldltl/diagnostics.h>
+#include <lib/elfldltl/self.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <zircon/assert.h>
 
+#include <fbl/no_destructor.h>
 #include <ktl/iterator.h>
+#include <ktl/span.h>
 #include <ktl/string_view.h>
 #include <ktl/utility.h>
 #include <ktl/variant.h>
 #include <phys/elf-image.h>
-#include <phys/main.h>
-#include <phys/stack.h>
+#include <phys/runtime/exception.h>
+#include <phys/runtime/main.h>
+#include <phys/runtime/stack.h>
 #include <pretty/hexdump.h>
 
-// The zx_*_t types used in the exception stuff aren't defined for 32-bit.
-// There is no exception handling implementation for 32-bit.
-#ifndef __i386__
-#include <phys/exception.h>
-#endif
-
 #include <ktl/enforce.h>
+
+#ifdef __ELF__
+// These are defined by the phys.ld linker script.
+extern "C" ktl::byte __executable_start[], _edata[], _end[];
+extern "C" const ktl::byte __start_note_gnu_build_id[];
+extern "C" const ktl::byte __stop_note_gnu_build_id[];
+#endif  // __ELF__
 
 namespace {
 
@@ -59,26 +64,66 @@ void PruneSegment(LoadInfo::DataWithZeroFillSegment& segment, size_type memsz) {
 void PruneSegment(auto& segment, size_type memsz) {
   // The final segment being pruned should only ever be either
   // DataWithZeroFillSegment or pure ZeroFillSegment.
-  ZX_PANIC("impossible segment type for Symbolize::PruneFromMainModule!");
+  ZX_PANIC("impossible segment type for Symbolize::PruneFromSelf!");
 }
 
 }  // namespace
 
 Symbolize* gSymbolize = nullptr;
 
-void Symbolize::ReplaceModulesStorage(ModuleList modules) {
-  ModuleList old = ktl::exchange(modules_, ktl::move(modules));
-  modules_.clear();
-  for (const ElfImage* module : old) {
-    AddModule(module);
+Symbolize::Symbolize(const char* name, FILE* f) : name_{name}, output_{f}, writer_{{output_}} {
+  gSymbolize = this;
+
+  InitSelf();
+
+  if (!BootOptions::Get() || BootOptions::Get()->phys_verbose) {
+    Context();
   }
 }
 
-void Symbolize::AddModule(const ElfImage* module) {
-  auto diag = PanicDiagnostics(name_);
-  [[maybe_unused]] bool ok = modules_.push_back(diag, "too many modules loaded", module);
-  ZX_DEBUG_ASSERT(ok);
+#ifdef __ELF__
+
+void Symbolize::InitSelf() {
+  using Phdr = ElfImage::Elf::Phdr;
+
+  auto memory = elfldltl::Self<>::Memory(__executable_start, _end);
+  auto bias = elfldltl::Self<>::LoadBias();
+
+  Phdr load_segment = {
+      .type = elfldltl::ElfPhdrType::kLoad,
+      .vaddr = memory.base(),
+      .filesz = _edata - __executable_start,
+      .memsz = memory.image().size_bytes(),
+  };
+  load_segment.flags = Phdr::kRead | Phdr::kWrite | Phdr::kExecute;
+
+  static fbl::NoDestructor<ElfImage> gSelfImage;
+  gSelfImage->InitSelf(name_, memory, bias, load_segment,
+                       {__start_note_gnu_build_id, __stop_note_gnu_build_id});
+
+  ZX_DEBUG_ASSERT(!self_);
+  self_ = gSelfImage.get();
+
+  static constexpr Stack<BootStack> kBootStacks[] = {
+      {boot_stack, "boot"},
+      {phys_exception_stack, "exception"},
+  };
+  set_stacks(ktl::span(kBootStacks));
+
+#if __has_feature(shadow_call_stack)
+  static constexpr Stack<BootShadowCallStack> kBootShadowCallStacks[] = {
+      {boot_shadow_call_stack, "boot"},
+      {phys_exception_shadow_call_stack, "exception"},
+  };
+  set_shadow_call_stacks(ktl::span(kBootShadowCallStacks));
+#endif  // __has_feature(shadow_call_stack)
 }
+
+#else  // !__ELF__
+
+void Symbolize::InitSelf() {}
+
+#endif  // __ELF__
 
 const char* ProgramName() {
   if (gSymbolize) {
@@ -88,9 +133,9 @@ const char* ProgramName() {
 }
 
 elfldltl::ElfNote Symbolize::build_id() const {
-  ZX_DEBUG_ASSERT(main_module_);
-  ZX_DEBUG_ASSERT(main_module_->build_id());
-  return main_module_->build_id().value();
+  ZX_DEBUG_ASSERT(self_);
+  ZX_DEBUG_ASSERT(self_->build_id());
+  return self_->build_id().value();
 }
 
 void Symbolize::Printf(const char* fmt, ...) {
@@ -101,12 +146,15 @@ void Symbolize::Printf(const char* fmt, ...) {
 }
 
 void Symbolize::ContextAlways(FILE* log) {
+  // Non-ELF (i.e., EFI) builds carry no self image and no context to emit.
+#ifndef __ELF__
+  return;
+#endif
+  ZX_DEBUG_ASSERT(self_);
   decltype(writer_) log_writer{{log}};
   auto& writer = log ? log_writer : writer_;
   writer.Prefix(name_).Reset().Newline();
-  for (size_t i = 0; i < modules_.size(); ++i) {
-    modules_[i]->SymbolizerContext(writer, static_cast<unsigned int>(i), name_);
-  }
+  self_->SymbolizerContext(writer, 0, name_);
 }
 
 void Symbolize::Context() {
@@ -120,11 +168,6 @@ void Symbolize::ModuleContext(const ElfImage& loaded, unsigned int module_id, bo
   if (context_done_) {
     loaded.SymbolizerContext(writer_, module_id, name_, physical);
   }
-}
-
-void Symbolize::OnLoad(const ElfImage& loaded) {
-  ModuleContext(loaded, static_cast<unsigned int>(modules_.size()));
-  AddModule(&loaded);
 }
 
 void Symbolize::BackTraceFrame(unsigned int n, uintptr_t pc, bool interrupt) {
@@ -213,14 +256,14 @@ arch::ShadowCallStackBacktrace Symbolize::GetShadowCallStackBacktrace(uintptr_t 
   return backtrace;
 }
 
-void Symbolize::PruneFromMainModule(uint64_t start, uint64_t end) {
+void Symbolize::PruneFromSelf(uint64_t start, uint64_t end) {
   // Modify the ZeroFillSegment or DataWithZeroFillSegment to prune the range.
   auto adjust_memsz = [start, end, this](auto& segment) {
-    [[maybe_unused]] auto abs = segment.vaddr() + main_module_->load_bias();
+    [[maybe_unused]] auto abs = segment.vaddr() + self_->load_bias();
     ZX_DEBUG_ASSERT(start >= abs);
     ZX_DEBUG_ASSERT(end >= start);
     ZX_DEBUG_ASSERT(end - abs <= segment.memsz());
-    auto rel_end = static_cast<size_type>(start - main_module_->load_bias());
+    auto rel_end = static_cast<size_type>(start - self_->load_bias());
     size_type new_memsz = rel_end - segment.vaddr();
     ZX_DEBUG_ASSERT(new_memsz >= segment.filesz());
     PruneSegment(segment, new_memsz);
@@ -228,7 +271,7 @@ void Symbolize::PruneFromMainModule(uint64_t start, uint64_t end) {
 
   // Adjusting the last segment in LoadInfo is actually done by removing the
   // existing segment and then adding back its replacement.
-  auto& load_info = const_cast<ElfImage*>(main_module_)->load_info();
+  auto& load_info = const_cast<ElfImage*>(self_)->load_info();
   auto segment = load_info.RemoveLastSegment();
   ktl::visit(adjust_memsz, segment);
   auto diag = PanicDiagnostics(name_);
@@ -238,8 +281,6 @@ void Symbolize::PruneFromMainModule(uint64_t start, uint64_t end) {
     ContextAlways();
   }
 }
-
-#ifndef __i386__
 
 void Symbolize::PrintRegisters(const PhysExceptionState& exc) {
   Printf("%s: Registers stored at %p: {{{hexdict:", name_, &exc);
@@ -430,5 +471,3 @@ void PrintPhysException(uint64_t vector, const char* vector_name, const PhysExce
     gSymbolize->PrintException(vector, vector_name, regs);
   }
 }
-
-#endif  // !__i386__

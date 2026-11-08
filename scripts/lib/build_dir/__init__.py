@@ -3,3 +3,4 @@
 # found in the LICENSE file.
 
 from .lib import *
+from .main_pb import *

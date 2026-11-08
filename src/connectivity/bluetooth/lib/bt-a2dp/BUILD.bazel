@@ -8,6 +8,12 @@ load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package
 
 package(default_applicable_licenses = ["//:license"])
 
+test_suite(
+    name = "tests",
+    tests = [":bt-a2dp-lib-tests"],
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)
+
 rustc_library(
     name = "bt-a2dp",
     srcs = [
@@ -42,7 +48,7 @@ rustc_library(
         "//src/connectivity/bluetooth/lib/bt-metrics",
         "//src/connectivity/bluetooth/lib/fuchsia-bluetooth",
         "//src/lib/diagnostics/inspect/derive",
-        "//src/lib/diagnostics/inspect/rust:fuchsia-inspect",  # @bazel2gn:path_overwrite://src/lib/diagnostics/inspect/rust
+        "//src/lib/diagnostics/inspect/rust",
         "//src/lib/fidl/rust/fidl",
         "//src/lib/fuchsia-async",
         "//src/lib/fuchsia-sync",
@@ -78,5 +84,4 @@ fx_unittest_package(
     name = "bt-a2dp-lib-tests",
     max_log_severity = "ERROR",
     unit_tests = [":bt-a2dp_test"],
-    visibility = ["//src/connectivity/bluetooth:__pkg__"],
 )

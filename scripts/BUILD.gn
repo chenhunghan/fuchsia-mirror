@@ -28,7 +28,6 @@ group("tests") {
     "fortunes:tests",
     "fxtest:tests",
     "lib:tests",
-    "memory:tests",
     "shac/tests($host_toolchain)",
     "skill_linter:tests",
     "versioning:tests($host_toolchain)",

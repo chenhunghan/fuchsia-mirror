@@ -59,8 +59,10 @@ impl<T, Check: Policy> LazyInit<T, Check> {
     /// initializing.
     pub unsafe fn init(&'static self, value: T) {
         let _ = Check::init_with(&self.check, || -> Result<(), Infallible> {
+            // SAFETY: The caller ensures that initialization is serialized with respect to any
+            // other access and that the storage is uninitialized.
             unsafe {
-                (*self.value.get()).write(value);
+                self.as_ptr().write(value);
             }
             Ok(())
         });
@@ -80,8 +82,9 @@ impl<T, Check: Policy> LazyInit<T, Check> {
     /// Panics if the instance has already been initialized or is currently
     /// initializing.
     pub unsafe fn init_pin<E>(self: Pin<&'static Self>, init: impl PinInit<T, E>) -> Result<(), E> {
-        let slot = unsafe { (*self.value.get()).as_mut_ptr() };
-        // Safety: `slot` is pinned since `self` is.
+        let slot = self.as_ptr();
+        // SAFETY: `slot` is pinned since `self` is, and the caller ensures that initialization is
+        // serialized with respect to any other access.
         Check::init_with(&self.check, || unsafe { init.__pinned_init(slot) })
     }
 
@@ -94,6 +97,16 @@ impl<T, Check: Policy> LazyInit<T, Check> {
     #[inline(always)]
     pub const unsafe fn get_unchecked(&self) -> &T {
         unsafe { (*self.value.get()).assume_init_ref() }
+    }
+
+    /// Returns a raw mutable pointer to the underlying storage without
+    /// checking initialization state.
+    ///
+    /// The pointee is uninitialized until [`Self::init`] or [`Self::init_pin`]
+    /// completes.
+    #[inline(always)]
+    pub const fn as_ptr(&self) -> *mut T {
+        self.value.get().cast::<T>()
     }
 }
 
@@ -139,9 +152,13 @@ mod tests {
     #[test]
     fn basic_check() {
         static LAZY: LazyInit<i32, BasicCheck> = LazyInit::uninit();
+        let raw_before = LAZY.as_ptr();
         unsafe {
             LAZY.init(42);
         }
+        // SAFETY: `LAZY` was initialized to 42 above.
+        assert_eq!(unsafe { *raw_before }, 42);
+        assert_eq!(LAZY.as_ptr(), raw_before);
         assert_eq!(*LAZY.get(), 42);
         assert_eq!(*LAZY, 42);
         assert_eq!(unsafe { *LAZY.get_unchecked() }, 42);

@@ -1,0 +1,45 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "testing_deps",
+    testonly = True,
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ],
+    alwayslink = True,
+)
+
+# fx test scenic_types_unittests
+fx_cc_test_binary(
+    name = "unittests",
+    srcs = [
+        "display_mode_unittest.cc",
+        "extent2_f_unittest.cc",
+        "extent2_unittest.cc",
+        "id_type_unittest.cc",
+        "point2_f_unittest.cc",
+        "point2_unittest.cc",
+        "rectangle_f_unittest.cc",
+        "rectangle_unittest.cc",
+        "rotate_flip_unittest.cc",
+        "view_ref_unittest.cc",
+    ],
+    gn_output_name = "scenic_types_unittests",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        ":testing_deps",
+        "//sdk/fidl/fuchsia.hardware.display.types:fuchsia.hardware.display.types_cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/ui/scenic/lib/types",
+        "@com_google_googletest//:gtest",
+    ],
+)

@@ -28,7 +28,6 @@ rustc_library(
         "//src/developer/ffx/lib/mdns_discovery:__pkg__",
         "//src/lib/mdns/rust:__pkg__",
         "//src/lib/network:__subpackages__",
-        "//src/testing/end_to_end/antlion/runner:__pkg__",
     ],
     deps = [
         "//src/lib/replace-with",

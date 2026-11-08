@@ -11,11 +11,13 @@ exports_files(
     visibility = ["//build/bazel/rules/fidl:__subpackages__"],
 )
 
-# IDK shared libraries are defined under //sdk/lib/ and in macro tests.
+# IDK shared libraries are defined under //sdk/lib/, //zircon/system/ulib/trace-engine, and in macro tests.
 exports_files(
     glob(["*.ifs"]),
     visibility = [
         "//build/bazel/bazel_idk/tests:__subpackages__",
         "//sdk/lib:__subpackages__",
+        "//src/performance/memory/heapdump/instrumentation:__pkg__",
+        "//zircon/system/ulib/trace-engine:__pkg__",
     ],
 )

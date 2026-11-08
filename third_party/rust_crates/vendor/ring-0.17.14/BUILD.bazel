@@ -56,18 +56,7 @@ rust_library(
         "alloc",
         "default",
         "dev_urandom_fallback",
-    ] + select({
-        "@rules_rust//rust/platform:aarch64-unknown-fuchsia": [
-            "std",  # aarch64-unknown-fuchsia
-        ],
-        "@rules_rust//rust/platform:riscv64gc-unknown-fuchsia": [
-            "std",  # riscv64gc-unknown-fuchsia
-        ],
-        "@rules_rust//rust/platform:x86_64-unknown-fuchsia": [
-            "std",  # x86_64-unknown-fuchsia
-        ],
-        "//conditions:default": [],
-    }),
+    ],
     crate_root = "src/lib.rs",
     edition = "2021",
     link_deps = [

@@ -4,17 +4,14 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT
 
-import("//build/cpp/library_headers.gni")
 import("//zircon/kernel/kernel_rust_mod.gni")
 
-library_headers("headers") {
-  headers = [ "lib/suspend_wakeup_timer.h" ]
-  public_deps = [
-    "//sdk/lib/fit",
-    "//src/lib/lazy_init",
-    "//zircon/kernel/lib/ktl",
-    "//zircon/system/ulib/fbl",
-  ]
+source_set("ffi") {
+  visibility = [ ":*" ]
+  sources = [ "suspend_wakeup_timer_ffi.cc" ]
+  if (current_cpu == "arm64") {
+    deps = [ "//zircon/kernel/dev/timer/armv7_mmio_timer" ]
+  }
 }
 
 kernel_rust_mod("suspend_wakeup_timer-rs") {
@@ -23,6 +20,7 @@ kernel_rust_mod("suspend_wakeup_timer-rs") {
     "suspend_wakeup_timer_ffi.rs",
   ]
   deps = [
+    ":ffi",
     "//sdk/rust/zx-status",
     "//sdk/rust/zx-types",
     "//src/lib/ksync",
@@ -33,15 +31,8 @@ kernel_rust_mod("suspend_wakeup_timer-rs") {
   test_deps = [ "//zircon/kernel/lib/unittest:unittest-rs" ]
 }
 
-static_library("suspend_wakeup_timer") {
-  public_deps = [ ":headers" ]
-
-  sources = [ "suspend_wakeup_timer_ffi.cc" ]
-  deps = [ ":suspend_wakeup_timer-rs" ]
-
-  if (current_cpu == "arm64") {
-    deps += [ "//zircon/kernel/dev/timer/armv7_mmio_timer" ]
-  }
+group("suspend_wakeup_timer") {
+  public_deps = [ ":suspend_wakeup_timer-rs" ]
 }
 
 group("tests") {

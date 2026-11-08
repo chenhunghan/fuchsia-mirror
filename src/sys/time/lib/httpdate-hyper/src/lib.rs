@@ -419,7 +419,7 @@ mod test {
                 ()
             } else if line.starts_with("-----END") {
                 let encoded = current_encoded.join("");
-                current_encoded = vec![];
+                current_encoded.clear();
                 parsed.push(BASE64_STANDARD.decode(&encoded).unwrap());
             } else {
                 current_encoded.push(line.trim());

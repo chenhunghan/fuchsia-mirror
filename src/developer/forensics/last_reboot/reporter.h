@@ -5,11 +5,11 @@
 #ifndef SRC_DEVELOPER_FORENSICS_LAST_REBOOT_REPORTER_H_
 #define SRC_DEVELOPER_FORENSICS_LAST_REBOOT_REPORTER_H_
 
-#include <fuchsia/feedback/cpp/fidl.h>
 #include <lib/async/cpp/executor.h>
 #include <lib/fpromise/promise.h>
 #include <lib/zx/time.h>
 
+#include "src/developer/forensics/crash_reports/crash_reporter_internal.h"
 #include "src/developer/forensics/feedback/config.h"
 #include "src/developer/forensics/feedback/reboot_log/reboot_log.h"
 #include "src/developer/forensics/utils/cobalt/logger.h"
@@ -23,7 +23,7 @@ namespace last_reboot {
 class Reporter {
  public:
   Reporter(async_dispatcher_t* dispatcher, cobalt::Logger* cobalt, RedactorBase* redactor,
-           fuchsia::feedback::CrashReporter* crash_reporter);
+           crash_reports::CrashReporterInternal* crash_reporter);
 
   void ReportOn(const feedback::RebootLog& reboot_log, zx::duration crash_reporting_delay,
                 feedback::SpontaneousRebootReason spontaneous_reboot_reason);
@@ -38,7 +38,7 @@ class Reporter {
 
   cobalt::Logger* cobalt_;
   RedactorBase* redactor_;
-  fuchsia::feedback::CrashReporter* crash_reporter_;
+  crash_reports::CrashReporterInternal* crash_reporter_;
 
   // We wrap the delayed task we post on the async loop to delay the crash reporting in a
   // CancelableClosure so we can cancel it if we are done another way.

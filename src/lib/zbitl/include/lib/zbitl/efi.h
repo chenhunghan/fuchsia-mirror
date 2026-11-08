@@ -8,8 +8,7 @@
 // Including this header makes zbitl::View<efi_file_protocol*> and
 // zbitl::Image<efi_file_protocol*> specializations available to access ZBI
 // files via the EFI filesystem.  For smart-pointer types for efi_file_protocol
-// (using unique_ptr, as in <phys/efi/file.h> EfiFilePtr), there is also an
-// owning specialization.
+// (using unique_ptr), there is also an owning specialization.
 
 #include <memory>
 

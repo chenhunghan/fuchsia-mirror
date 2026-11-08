@@ -91,6 +91,7 @@ crate::impl_dispatcher_facade_with_state!(
 ```
 
 ### Benefits:
+
 - **Zero Memory Overhead**: `OpaqueRefCountedFacade` wraps `zr::OpaqueFacade` to
   communicate interior mutability to LLVM optimization passes without adding
   size bytes.
@@ -104,6 +105,7 @@ When a dispatcher holds a `fbl::RefPtr<T>` to a non-dispatcher C++
 `fbl::RefCounted` object (such as `PageSource`, `VmObject`, `VmAddressRegion`,
 or `Bti`), choose the pattern based on whether `T` has `bindgen`-generated
 bindings:
+
 - **Bindgen-Backed C++ Types** (e.g., `PageSource`, `VmObject`, `VmCowPages`):
   If `bindgen` generates `bindings::T`, **do NOT use
   `fbl::impl_opaque_ref_counted_facade!`**. Using that macro replaces the struct
@@ -141,8 +143,9 @@ internal fields guarded by mutex/rwlock (`KMutex` / `BrwLockPi`) inside this
 struct:
 
 ```rust
+use crate::ksync_kernel::TrackedCriticalMutex;
 use fbl::Canary;
-use ksync::{guarded, KMutex, RawCriticalMutex};
+use ksync::{guarded, KMutex};
 
 #[guarded]
 #[repr(C)]
@@ -153,7 +156,7 @@ pub struct CounterDispatcherState {
     value: i64,
 
     #[mutex]
-    lock: KMutex<RawCriticalMutex>,
+    lock: KMutex<TrackedCriticalMutex>,
 }
 ```
 
@@ -172,38 +175,31 @@ zr::static_assert_size_and_align!(
 
 ### 3. In-Place Pin-Init Construction & Sub-Object Pinning
 Construct the state struct safely in-place using `PinInit`. For embedded fields
-that require pinning or native C++ initialization (such as `DlogReaderStorage`),
-annotate the field with `#[pin]` inside `#[guarded]` structs and initialize it
-in-place using `field <- ...`:
+that require pinning (such as `DlogReader`), annotate the field with `#[pin]`
+inside `#[guarded]` structs and initialize it in-place using
+`ksync::kcell_init`:
 
 ```rust
 impl LogDispatcherState {
     pub fn init(
-        dispatcher: *const LogDispatcher,
+        _dispatcher: *const LogDispatcher,
         flags: u32,
     ) -> impl pin_init::PinInit<Self, core::convert::Infallible> {
+        DISPATCHER_LOG_CREATE_COUNT.add(1);
         pin_init!(Self {
             canary: Canary::new(),
             flags,
             lock <- KMutex::init(),
-            reader <- ksync::kcell_init(
-                // SAFETY: `dispatcher` points to the valid `LogDispatcher` enclosing this state.
-                unsafe {
-                    DlogReaderStorage::init(
-                        *flags,
-                        rust_log_dispatcher_notify,
-                        dispatcher.cast_mut().cast(),
-                    )
-                }
-            ),
+            reader <- ksync::kcell_init(DlogReader::new()),
         })
     }
 }
 ```
 
-Sub-objects should expose a single `unsafe fn init(...) -> impl
-pin_init::PinInit<Self, ...>` rather than two-phase `new()` and `initialize()`
-functions.
+When a pinned sub-object captures a pointer to its containing dispatcher via a
+notification callback (such as `DlogReader`), initialize its storage in
+`State::init` and complete the 2-phase registration in `Dispatcher::create` once
+the containing `KernelHandle` has been allocated.
 
 ### 4. Offset Pointer Accessor in Facade Struct (Auto-generated)
 The stateful facade macro `impl_dispatcher_facade_with_state!` automatically
@@ -262,7 +258,7 @@ pointers via `ToMutPtr`:
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rust_counter_dispatcher_state_get_lock(
     ptr: *const CounterDispatcherState,
-) -> *mut KMutex<CounterDispatcherStateLockClass, RawCriticalMutex> {
+) -> *mut KMutex<CounterDispatcherStateLockClass, TrackedCriticalMutex> {
     // SAFETY: The caller guarantees `ptr` points to a valid, initialized
     // `CounterDispatcherState`.
     let lock = unsafe { &(*ptr).lock };
@@ -316,8 +312,7 @@ impl PinnedDrop for LogDispatcherState {
         DISPATCHER_LOG_DESTROY_COUNT.add(1);
         let this = self.project();
         if (*this.flags & ZX_LOG_FLAG_READABLE) != 0 {
-            let reader_pin = this.reader.get_pinned_mut();
-            reader_pin.disconnect();
+            this.reader.get_pinned_mut().into_ref().disconnect();
         }
     }
 }
@@ -330,50 +325,53 @@ using a single unified `impl_dispatcher_state_init!` macro in the dispatcher's
 `dispatcher: *const <Type>` as their first argument:
 
 1.  **Standard Initialization** (calls `<Type>State::init(dispatcher)`):
-   ```rust
-   // In suspend_token_dispatcher_ffi.rs / sampler_dispatcher_ffi.rs:
-   crate::impl_dispatcher_state_init!(SuspendTokenDispatcher, SuspendTokenDispatcherState);
-   ```
+
+    ```rust
+    // In suspend_token_dispatcher_ffi.rs / sampler_dispatcher_ffi.rs:
+    crate::impl_dispatcher_state_init!(SuspendTokenDispatcher, SuspendTokenDispatcherState);
+    ```
 
 2.  **Initialization with Additional Arguments** (calls
     `<Type>State::init(dispatcher, flags)`):
-   ```rust
-   // In log_dispatcher_ffi.rs:
-   crate::impl_dispatcher_state_init!(LogDispatcher, LogDispatcherState, flags: u32);
-   ```
+
+    ```rust
+    // In log_dispatcher_ffi.rs:
+    crate::impl_dispatcher_state_init!(LogDispatcher, LogDispatcherState, flags: u32);
+    ```
 
 3.  **Custom Initialization Logic** (written explicitly when post-initialization
     calls are needed):
-   ```rust
-   // In interrupt_dispatcher_ffi.rs:
-   /// # Safety
-   ///
-   /// `state` must point to uninitialized memory of at least `size_of::<InterruptDispatcherState>()`
-   /// bytes with proper alignment, `dispatcher` must point to the enclosing C++ `InterruptDispatcher`,
-   /// and `init_fn` must initialize `InterruptKind` from `ctx`.
-   #[unsafe(no_mangle)]
-   pub unsafe extern "C" fn rust_interrupt_dispatcher_state_init(
-       dispatcher: NonNull<InterruptDispatcher>,
-       state: *mut InterruptDispatcherState,
-       flags: u32,
-       options: u32,
-       ctx: *mut u8,
-       init_fn: InterruptKindInitFn,
-   ) {
-       // SAFETY: `state` points to valid uninitialized storage in `InterruptDispatcher`.
-       unsafe {
-           let _ = pin_init::PinInit::__pinned_init(
-               InterruptDispatcherState::new(dispatcher, flags, options),
-               state,
-           );
-       }
-       // SAFETY: `InterruptDispatcherState` is now initialized at `state`, and `init_fn`
-       // initializes `(*state).kind` from `ctx`.
-       unsafe {
-           init_fn(dispatcher.as_ref(), ctx);
-       }
-   }
-   ```
+
+    ```rust
+    // In interrupt_dispatcher_ffi.rs:
+    /// # Safety
+    ///
+    /// `state` must point to uninitialized memory of at least `size_of::<InterruptDispatcherState>()`
+    /// bytes with proper alignment, `dispatcher` must point to the enclosing C++ `InterruptDispatcher`,
+    /// and `init_fn` must initialize `InterruptKind` from `ctx`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn rust_interrupt_dispatcher_state_init(
+        dispatcher: NonNull<InterruptDispatcher>,
+        state: *mut InterruptDispatcherState,
+        flags: u32,
+        options: u32,
+        ctx: *mut u8,
+        init_fn: InterruptKindInitFn,
+    ) {
+        // SAFETY: `state` points to valid uninitialized storage in `InterruptDispatcher`.
+        unsafe {
+            let _ = pin_init::PinInit::__pinned_init(
+                InterruptDispatcherState::new(dispatcher, flags, options),
+                state,
+            );
+        }
+        // SAFETY: `InterruptDispatcherState` is now initialized at `state`, and `init_fn`
+        // initializes `(*state).kind` from `ctx`.
+        unsafe {
+            init_fn(dispatcher.as_ref(), ctx);
+        }
+    }
+    ```
 
 ---
 
@@ -516,9 +514,10 @@ Preserve all C++ `LTRACE` statements when porting syscalls:
     import the macros from it (`use debug::ltracef;`).
 2.  Declare `const LOCAL_TRACE: u32 = 0;` at the top of the syscall module.
 3.  Use `ltracef!` for entry and argument logging:
-   ```rust
-   ltracef!("options {:#x}\n", options);
-   ```
+
+    ```rust
+    ltracef!("options {:#x}\n", options);
+    ```
 
 ---
 
@@ -532,15 +531,17 @@ When interfacing between C++ and Rust during incremental dispatcher migrations:
     branching or chain across sub-objects (`disp->sub_object()->Method()`) in a
     `cpp_*` FFI shim.
 2.  **Naming Conventions**:
-   - Rust exposed to C++: `rust_$module_$type_$method`
-   - C++ exposed to Rust: `cpp_$namespace_$type_$method`
+    - Rust exposed to C++: `rust_$module_$type_$method`
+    - C++ exposed to Rust: `cpp_$namespace_$type_$method`
 3.  **Clean Destructor Overrides**: Omit redundant `override` specifiers on
     final C++ methods (e.g., `~LogDispatcher() final;`).
 4.  **Safety Assertions**: Always verify structural memory layout parity across
     language boundaries using compile-time static assertions:
-   ```rust
-   zr::static_assert!(core::mem::size_of::<CounterDispatcher>() == core::mem::size_of::<usize>());
-   ```
+
+    ```rust
+    zr::static_assert!(core::mem::size_of::<CounterDispatcher>() == core::mem::size_of::<usize>());
+    ```
+
 5.  **C++ Header Prototype Declarations**: All C++ FFI helper functions defined
     in `.cc` files (e.g. `cpp_*`) MUST have prototype declarations enclosed in
     `extern "C"` blocks inside an included C++ header file (e.g. `debuglog.h`,

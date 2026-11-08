@@ -2,11 +2,11 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/bazel/bazel_inputs.gni")
 import("//build/bazel/bazel_test_suite.gni")
 import("//build/host.gni")
 import("//build/images/paths.gni")
 import("//build/sdk/sdk_host_tool.gni")
-import("//build/testing/host_test.gni")
 import("//build/testing/host_test_data.gni")
 import("//build/tools/json_merge/json_merge.gni")
 import("//src/storage/fshost/generated_fshost_config.gni")
@@ -224,6 +224,36 @@ if (is_host) {
     sources = [ "${host_tools_dir}/ffx" ]
   }
 
+  if (current_toolchain == host_toolchain &&
+      current_toolchain == toolchain_variant.base) {
+    bazel_input_file("test_data.bazel_input") {
+      testonly = false
+      generator = ":host"
+      outputs = [ "${host_tools_dir}/ffx" ]
+      gn_targets_name = "test_data"
+    }
+
+    # Aggregates gn_targets inputs for the GN-built ffx binary and subtools
+    # consumed by Bazel host tests (such as host-target-testing / system-tests).
+    group("host_test_data_bazel_inputs") {
+      public_deps = [
+        ":test_data.bazel_input",
+        "//src/developer/ffx/plugins/component:ffx_component_tool_test_data.bazel_input",
+        "//src/developer/ffx/plugins/emulator:ffx_emulator_tool_test_data.bazel_input",
+        "//src/developer/ffx/plugins/inspect:ffx_inspect_tool_test_data.bazel_input",
+        "//src/developer/ffx/plugins/log:ffx_log_tool_test_data.bazel_input",
+        "//src/developer/ffx/plugins/product:ffx_product_tool_test_data.bazel_input",
+        "//src/developer/ffx/plugins/product_bundle:ffx_product_bundle_tool_test_data.bazel_input",
+        "//src/developer/ffx/plugins/repository:ffx_repository_tool_test_data.bazel_input",
+      ]
+    }
+  } else {
+    group("host_test_data_bazel_inputs") {
+      public_deps =
+          [ ":host_test_data_bazel_inputs(${toolchain_variant.base})" ]
+    }
+  }
+
   group("suite_test_data") {
     testonly = true
     public_deps = [ ":test_data" ]
@@ -232,6 +262,7 @@ if (is_host) {
     }
   }
 
+  # LINT.IfChange
   json_merge("ffx-defaults.json") {
     # the "DEFAULT" config level will be made up of a json merge of the
     # following source json, some of which may be generated. Anything that's
@@ -267,6 +298,8 @@ if (is_host) {
       sources += [ get_label_info(dep, "target_out_dir") + "/config.json" ]
     }
   }
+
+  # LINT.ThenChange(//src/developer/ffx/BUILD.bazel)
 }
 
 # NOTE: this group is included in `//src/developer:tests` and `//src:tests`
@@ -291,8 +324,9 @@ group("tests") {
     "playground:tests($host_toolchain)",
     "plugins/emulator/common:ffx_emulator_common_test($host_toolchain)",
     "plugins/package:tests($host_toolchain)",
-    "plugins/package/far/extract:ffx_package_far_extract_test($host_toolchain)",
+    "plugins/platform/preflight:tests($host_toolchain)",
     "plugins/target:tests($host_toolchain)",
+    "plugins/target/default:ffx_target_default_test($host_toolchain)",
     "plugins/trace:tests($host_toolchain)",
     "plugins/version:ffx_version_test($host_toolchain)",
     "tests($host_toolchain)",

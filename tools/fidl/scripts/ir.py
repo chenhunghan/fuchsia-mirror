@@ -15,7 +15,7 @@ class DeclState(object):
 
     def nest(
         self, indent: str = "", identifier: t.Optional[str] = None
-    ) -> "DeclState":
+    ) -> DeclState:
         indent = self.indent + indent
         parents = self.parents
         if identifier:
@@ -24,7 +24,7 @@ class DeclState(object):
 
 
 class Declaration(dict):
-    def __init__(self, library: "Library", value: dict):
+    def __init__(self, library: Library, value: dict):
         dict.__init__(self, value)
         self.library = library
 
@@ -109,7 +109,7 @@ class Const(Declaration):
 
 
 class EnumMember(Declaration):
-    def __init__(self, enum: "Enum", value: dict):
+    def __init__(self, enum: Enum, value: dict):
         Declaration.__init__(self, enum.library, value)
         self.enum = enum
 
@@ -146,7 +146,7 @@ class Bits(Declaration):
 
 
 class Argument(Declaration):
-    def __init__(self, method: "Method", value: dict):
+    def __init__(self, method: Method, value: dict):
         Declaration.__init__(self, method.library, value)
         self.method = method
 
@@ -159,7 +159,7 @@ class Argument(Declaration):
 
 
 class Method(Declaration):
-    def __init__(self, protocol: "Protocol", value: dict):
+    def __init__(self, protocol: Protocol, value: dict):
         Declaration.__init__(self, protocol.library, value)
         self.protocol = protocol
 
@@ -219,7 +219,7 @@ class Protocol(Declaration):
 
 
 class StructMember(Declaration):
-    def __init__(self, struct: "Struct", value: dict):
+    def __init__(self, struct: Struct, value: dict):
         Declaration.__init__(self, struct.library, value)
         self.struct = struct
 
@@ -253,7 +253,7 @@ class Struct(Declaration):
 
 
 class TableMember(Declaration):
-    def __init__(self, table: "Table", value: dict):
+    def __init__(self, table: Table, value: dict):
         Declaration.__init__(self, table.library, value)
         self.table = table
 
@@ -292,7 +292,7 @@ class Table(Declaration):
 
 
 class UnionMember(Declaration):
-    def __init__(self, union: "Union", value):
+    def __init__(self, union: Union, value):
         Declaration.__init__(self, union.library, value)
         self.union = union
 
@@ -335,7 +335,7 @@ DECLARATION_TYPES = {
 
 
 class Library(dict):
-    def __init__(self, libraries: "FidlLibraries", path: str):
+    def __init__(self, libraries: FidlLibraries, path: str):
         self.libraries = libraries
         self._path = path
         dict.__init__(self, json.load(open(path)))

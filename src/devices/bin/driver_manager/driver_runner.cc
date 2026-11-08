@@ -280,58 +280,6 @@ zx_koid_t GetKoid(const zx::event& handle) {
   return status == ZX_OK ? info.koid : ZX_KOID_INVALID;
 }
 
-// Returns the Inspect "level" string for the check that produced a record.
-std::string HealthCheckLevelString(fuchsia_driver_framework::HealthCheckRequest level) {
-  switch (level) {
-    case fuchsia_driver_framework::HealthCheckRequest::kPing:
-      return "PING";
-    case fuchsia_driver_framework::HealthCheckRequest::kFast:
-      return "FAST";
-    case fuchsia_driver_framework::HealthCheckRequest::kDeep:
-      return "DEEP";
-    default:
-      return "UNKNOWN";
-  }
-}
-
-// Returns the Inspect "error" string for a failed health check record.
-std::string HealthCheckErrorString(fuchsia_driver_framework::HealthCheckError error) {
-  switch (error) {
-    case fuchsia_driver_framework::HealthCheckError::kTimeout:
-      return "TIMEOUT";
-    case fuchsia_driver_framework::HealthCheckError::kInternalError:
-      return "INTERNAL_ERROR";
-    case fuchsia_driver_framework::HealthCheckError::kNotSupported:
-      return "NOT_SUPPORTED";
-    case fuchsia_driver_framework::HealthCheckError::kInvalidState:
-      return "INVALID_STATE";
-    case fuchsia_driver_framework::HealthCheckError::kUnavailable:
-      return "UNAVAILABLE";
-    case fuchsia_driver_framework::HealthCheckError::kCommunicationError:
-      return "COMMUNICATION_ERROR";
-    case fuchsia_driver_framework::HealthCheckError::kNotFound:
-      return "NOT_FOUND";
-    default:
-      return "UNKNOWN";
-  }
-}
-
-std::string HealthStatusString(std::optional<fuchsia_driver_framework::HealthStatus> status) {
-  if (!status.has_value()) {
-    return "UNKNOWN";
-  }
-  switch (*status) {
-    case fuchsia_driver_framework::HealthStatus::kOk:
-      return "OK";
-    case fuchsia_driver_framework::HealthStatus::kDegraded:
-      return "DEGRADED";
-    case fuchsia_driver_framework::HealthStatus::kUnhealthy:
-      return "UNHEALTHY";
-    default:
-      return "UNKNOWN";
-  }
-}
-
 // Records |items| as properties of a new "diagnostics" child of |parent|. The schema matches the
 // driver-side mirrors in the C++ and Rust driver component SDKs.
 void RecordHealthDiagnostics(
@@ -435,7 +383,7 @@ DriverRunner::DriverRunner(
 
   power_manager_ = std::make_unique<PowerManager>(dispatcher_, std::move(topology_client),
                                                   std::move(cpu_element_mgr),
-                                                  wait_for_storage_token_from_driver_);
+                                                  wait_for_storage_token_from_driver_, root_node_);
 }
 
 // fidl::WireServer<fuchsia_driver_token::Debug>
@@ -546,6 +494,17 @@ void DriverRunner::AddSpec(AddSpecRequestView request, AddSpecCompleter::Sync& c
     return;
   }
 
+  std::string driver_host_name_for_colocation =
+      request->has_driver_host() ? std::string(request->driver_host().get()) : std::string();
+  if (!driver_host_name_for_colocation.empty() && !dynamic_linker_args_.has_value() &&
+      GetDriverHost(driver_host_name_for_colocation) == nullptr) {
+    zx::result result = CreateDriverHost(/*use_next_vdso=*/true, driver_host_name_for_colocation);
+    if (result.is_error()) {
+      fdf_log::warn("Failed to pre-create driver host '{}': {}", driver_host_name_for_colocation,
+                    result.status_string());
+    }
+  }
+
   std::vector<fuchsia_driver_framework::ParentSpec2> parents =
       fidl::ToNatural(request->parents2()).value();
 
@@ -553,9 +512,7 @@ void DriverRunner::AddSpec(AddSpecRequestView request, AddSpecCompleter::Sync& c
       CompositeNodeSpecCreateInfo{
           .name = std::string(request->name().get()),
           .parents = std::move(parents),
-          .driver_host_name_for_colocation = request->has_driver_host()
-                                                 ? std::string(request->driver_host().get())
-                                                 : std::string(),
+          .driver_host_name_for_colocation = std::move(driver_host_name_for_colocation),
       },
       dispatcher_, this);
   composite_node_spec_manager_.AddSpec(
@@ -1055,7 +1012,7 @@ void DriverRunner::CreatePowerElement(
 
 void DriverRunner::OnBootupComplete() {
   if (power_manager_) {
-    power_manager_->OnBootupComplete(root_node_);
+    power_manager_->OnBootupComplete();
   }
 }
 
@@ -1654,7 +1611,8 @@ void DriverRunner::LeaseAllDriversForShutdown(fit::callback<void()> callback) {
 }
 
 fpromise::promise<inspect::Inspector> DriverRunner::InspectHealthChecks() const {
-  inspect::Inspector inspector;
+  // Allocate a 1 MiB VMO to accommodate the health history ring buffers across all nodes.
+  inspect::Inspector inspector(inspect::InspectSettings{.maximum_size = size_t{1024} * 1024});
   std::unordered_set<const Node*> unique_nodes;
   std::queue<const Node*> remaining_nodes;
   if (root_node_) {
@@ -1669,51 +1627,80 @@ fpromise::promise<inspect::Inspector> DriverRunner::InspectHealthChecks() const 
     for (const auto& child : node->children()) {
       remaining_nodes.push(child.get());
     }
-    if (!node->last_health_check().has_value()) {
+    if (!node->last_health_check().has_value() && node->health_history().empty()) {
       continue;
     }
-    const auto& hc = node->last_health_check().value();
+
     inspect::Node hc_node = inspector.GetRoot().CreateChild(node->MakeComponentMoniker());
-    // Same encoding as the driver-side SDK mirrors: a response publishes its status, a failed
-    // check publishes status "ERROR" and names the error separately.
-    if (hc.error.has_value()) {
-      hc_node.RecordString("status", "ERROR");
-      hc_node.RecordString("error", HealthCheckErrorString(*hc.error));
-    } else {
-      hc_node.RecordString("status", HealthStatusString(hc.status));
-    }
-    if (hc.level.has_value()) {
-      hc_node.RecordString("level", HealthCheckLevelString(*hc.level));
-    }
-    hc_node.RecordInt("last_check_monotonic_ns", hc.timestamp.get());
     hc_node.RecordString("driver_url", node->driver_url());
-    if (!hc.diagnostics.empty()) {
-      RecordHealthDiagnostics(hc_node, hc.diagnostics);
-    }
-    if (!hc.conditions.empty()) {
-      inspect::Node conditions_node = hc_node.CreateChild("conditions");
-      for (const auto& condition : hc.conditions) {
-        inspect::Node condition_node =
-            conditions_node.CreateChild(condition.reason_code().value_or("UNKNOWN"));
-        condition_node.RecordString("status", HealthStatusString(condition.status()));
-        if (condition.message().has_value()) {
-          condition_node.RecordString("message", condition.message().value());
+    hc_node.RecordUint("unhealthy_count", node->unhealthy_count());
+    hc_node.RecordUint("recovered_count", node->recovered_count());
+
+    if (!node->health_history().empty()) {
+      inspect::Node history_node = hc_node.CreateChild("history");
+      size_t idx = 0;
+      for (const auto& entry : node->health_history()) {
+        inspect::Node entry_node = history_node.CreateChild(std::to_string(idx++));
+        entry_node.RecordInt("timestamp_ns", entry.timestamp.get());
+        if (entry.error.has_value()) {
+          entry_node.RecordString("status", "ERROR");
+          entry_node.RecordString("error", Node::HealthCheckErrorString(*entry.error));
+        } else {
+          entry_node.RecordString("status", Node::HealthStatusString(entry.status));
         }
-        if (condition.first_observed().has_value()) {
-          condition_node.RecordInt("first_observed", condition.first_observed().value().get());
+        // The synthetic DRIVER_STARTED marker is not produced by a check or an alert.
+        if (entry.reason_code != Node::kDriverStartedReasonCode) {
+          entry_node.RecordString("level", Node::HealthCheckLevelString(entry.level));
         }
-        if (condition.last_observed().has_value()) {
-          condition_node.RecordInt("last_observed", condition.last_observed().value().get());
+        entry_node.RecordString("reason_code", entry.reason_code);
+        if (!entry.message.empty()) {
+          entry_node.RecordString("message", entry.message);
         }
-        if (condition.occurrence_count().has_value()) {
-          condition_node.RecordUint("occurrence_count", condition.occurrence_count().value());
-        }
-        if (condition.diagnostics().has_value() && !condition.diagnostics()->empty()) {
-          RecordHealthDiagnostics(condition_node, condition.diagnostics().value());
-        }
-        conditions_node.Record(std::move(condition_node));
+        history_node.Record(std::move(entry_node));
       }
-      hc_node.Record(std::move(conditions_node));
+      hc_node.Record(std::move(history_node));
+    }
+
+    if (node->last_health_check().has_value()) {
+      const auto& hc = node->last_health_check().value();
+      if (hc.error.has_value()) {
+        hc_node.RecordString("status", "ERROR");
+        hc_node.RecordString("error", Node::HealthCheckErrorString(*hc.error));
+      } else {
+        hc_node.RecordString("status", Node::HealthStatusString(hc.status));
+      }
+      if (hc.level.has_value()) {
+        hc_node.RecordString("level", Node::HealthCheckLevelString(hc.level));
+      }
+      hc_node.RecordInt("last_check_monotonic_ns", hc.timestamp.get());
+      if (!hc.diagnostics.empty()) {
+        RecordHealthDiagnostics(hc_node, hc.diagnostics);
+      }
+      if (!hc.conditions.empty()) {
+        inspect::Node conditions_node = hc_node.CreateChild("conditions");
+        for (const auto& condition : hc.conditions) {
+          inspect::Node condition_node = conditions_node.CreateChild(
+              condition.reason_code().has_value() ? condition.reason_code().value() : "UNKNOWN");
+          condition_node.RecordString("status", Node::HealthStatusString(condition.status()));
+          if (condition.message().has_value()) {
+            condition_node.RecordString("message", condition.message().value());
+          }
+          if (condition.first_observed().has_value()) {
+            condition_node.RecordInt("first_observed", condition.first_observed().value().get());
+          }
+          if (condition.last_observed().has_value()) {
+            condition_node.RecordInt("last_observed", condition.last_observed().value().get());
+          }
+          if (condition.occurrence_count().has_value()) {
+            condition_node.RecordUint("occurrence_count", condition.occurrence_count().value());
+          }
+          if (condition.diagnostics().has_value() && !condition.diagnostics()->empty()) {
+            RecordHealthDiagnostics(condition_node, condition.diagnostics().value());
+          }
+          conditions_node.Record(std::move(condition_node));
+        }
+        hc_node.Record(std::move(conditions_node));
+      }
     }
     inspector.GetRoot().Record(std::move(hc_node));
   }

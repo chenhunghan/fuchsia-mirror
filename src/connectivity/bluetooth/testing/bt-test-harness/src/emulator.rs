@@ -94,11 +94,8 @@ use {
     std::{collections::HashMap, convert::AsRef},
 };
 
-/// The URL of the platform bus driver. The bt-hci-emulator driver is a legacy driver, which binds
-/// under the platform-bus instead of the test-root driver. Because this is non-standard behavior,
-/// we have to provide this URL to the Driver Test Realm.
-pub(crate) const EMULATOR_ROOT_DRIVER_URL: &str =
-    "fuchsia-boot:///platform-bus#meta/platform-bus.cm";
+/// Component URL for the virtual Bluetooth HCI component.
+pub(crate) const EMULATOR_COMPONENT_URL: &str = "virtual#meta/bt-hci-virtual.cm";
 
 /// Used to maintain the state transitions that are observed from the emulator. This type can be
 /// used in test harness auxiliary types.

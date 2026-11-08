@@ -9,15 +9,10 @@
 
 #include <lib/object-constants.h>
 #include <lib/wake-vector.h>
-#include <sys/types.h>
-#include <zircon/compiler.h>
-#include <zircon/rights.h>
 #include <zircon/types.h>
 
 #include <kernel/ffi.h>
 #include <object/dispatcher.h>
-#include <object/handle.h>
-#include <object/opaque_storage.h>
 
 class InterruptDispatcher;
 
@@ -43,9 +38,6 @@ void rust_interrupt_dispatcher_on_zero_handles(const InterruptDispatcher* disp);
 bool rust_interrupt_dispatcher_is_virtual(const InterruptDispatcher* disp);
 void rust_interrupt_dispatcher_get_diagnostics(
     const InterruptDispatcher* disp, wake_vector::WakeVector::Diagnostics* diagnostics_out);
-zx_status_t rust_interrupt_dispatcher_wait_for_interrupt(const InterruptDispatcher* disp,
-                                                         zx_time_t* out_timestamp);
-zx_status_t rust_interrupt_dispatcher_ack(const InterruptDispatcher* disp);
 
 }  // extern "C"
 
@@ -70,9 +62,6 @@ class InterruptDispatcher final : public Dispatcher, public wake_vector::WakeVec
   void on_zero_handles() final { rust_interrupt_dispatcher_on_zero_handles(this); }
 
   void GetDiagnostics(WakeVector::Diagnostics& diagnostics_out) const final;
-
-  zx_status_t WaitForInterrupt(zx_time_t* out_timestamp);
-  zx_status_t Ack();
 
  protected:
   Lock<CriticalMutex>* get_lock() const final;

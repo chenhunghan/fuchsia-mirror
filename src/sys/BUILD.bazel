@@ -2,13 +2,52 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        "//src/sys/run_test_suite/directory:directory_host_test",
+    ],
+)
 
 test_suite(
     name = "target_tests",
     target_compatible_with = ["@platforms//os:fuchsia"],
     tests = [
+        "//src/sys/activity:activity-test",
+        "//src/sys/cache_manager:cache_manager_tests",
+        "//src/sys/fuzzing/common:fuzzing-common-error-tests",
+        "//src/sys/fuzzing/common:fuzzing-common-tests",
+        "//src/sys/fuzzing/fuzzctl:fuzzctl-tests",
+        "//src/sys/fuzzing/manager:fuzz-manager-unittests",
+        "//src/sys/fuzzing/realmfuzzer/coverage:realmfuzzer-coverage-unittests",
+        "//src/sys/fuzzing/realmfuzzer/coverage/tests",
+        "//src/sys/fuzzing/registry:fuzz-registry-unittests",
+        "//src/sys/fuzzing/registry/tests:registry-integration-tests",
+        "//src/sys/instrumentation_data_processor:instrumentation_data_processor_tests",
+        "//src/sys/lib/component_debug:component_debug_unittests",
+        "//src/sys/lib/elf_runner/tests/environ:elf_runner_environ_test",
+        "//src/sys/lib/socket-to-stdio:socket-to-stdio-tests",
+        "//src/sys/process-resolver:process-resolver-unittests",
+        "//src/sys/run_test_suite:run-test-suite-unit-tests",
+        "//src/sys/run_test_suite/directory:test-output-directory-unit-tests",
+        "//src/sys/service-broker:service-broker-unittests",
+        "//src/sys/stash:stash-tests",
+        "//src/sys/stash/tests/inspect:stash-integration-tests",
+        "//src/sys/test_manager:test-manager-unittests",
+        "//src/sys/test_manager/debug_data_processor:tests",
+        "//src/sys/test_manager/tests/chromium_tests:tests",
+        "//src/sys/test_manager/tests/test_data:debug-data-test_test",
+        "//src/sys/test_runners:test-runner-test-lib-unit-tests",
+        "//src/sys/test_runners:test-runner-unit-tests",
+        "//src/sys/test_runners/lib_loader_cache:lib_loader_runner_cache_unit_tests",
+        "//src/sys/time/httpsdate_time_source:httpsdate-time-source-tests",
         "//src/sys/time/lib/push-source:push-source-tests",
         "//src/sys/time/timekeeper/persistence:time-persistence-tests",
+        "//src/sys/tools/stash_ctl:stash_ctl_tests",
     ],
 )

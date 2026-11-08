@@ -1,0 +1,153 @@
+{
+    // Records in driver_manager are populated on-demand by self_fault alerts, neighbor-fault
+    // probes, driver-host crashes, and explicit RunHealthCheck/ffx driver health-check calls
+    // (there is no periodic background sweep).
+    // Note: Detect's repeat cap is per signature across all drivers. Because cached records persist,
+    // a single driver's UNHEALTHY/TIMEOUT record stays in the cache until cleared by a subsequent
+    // check or driver restart, and gets re-snapshotted every 24 h. The offending driver is
+    // identified in the snapshot under bootstrap/driver_manager:root/health_checks/<moniker>.
+    select: {
+        // driver_manager publishes `status` (OK, DEGRADED, UNHEALTHY, UNKNOWN or ERROR) and, only
+        // when status is ERROR, an `error` property (TIMEOUT, INTERNAL_ERROR, ...).
+        driver_manager_health_statuses: [
+            "INSPECT:bootstrap/driver_manager:root/health_checks/*:status",
+        ],
+        driver_manager_health_errors: [
+            "INSPECT:bootstrap/driver_manager:root/health_checks/*:error",
+        ],
+    },
+    eval: {
+        // A selector with no data evaluates to Missing or an empty vector; guard each with `Missing()`.
+        has_driver_timeout: "And(Not(Missing(driver_manager_health_errors)), Any(Fn([e], e == \"TIMEOUT\"), driver_manager_health_errors))",
+        has_driver_unhealthy: "And(Not(Missing(driver_manager_health_statuses)), Any(Fn([s], s == \"UNHEALTHY\"), driver_manager_health_statuses))",
+    },
+    act: {
+        driver_dispatcher_timeout: {
+            type: "Snapshot",
+            trigger: "has_driver_timeout",
+            repeat: "Hours(24)",
+            signature: "driver-dispatcher-timeout",
+        },
+        driver_health_check_unhealthy: {
+            type: "Snapshot",
+            trigger: "has_driver_unhealthy",
+            repeat: "Hours(24)",
+            signature: "driver-health-check-unhealthy",
+        },
+    },
+    test: {
+        timeout_detected: {
+            yes: [
+                "driver_dispatcher_timeout",
+            ],
+            no: [
+                "driver_health_check_unhealthy",
+            ],
+            values: {
+                driver_manager_health_statuses: [
+                    "OK",
+                    "ERROR",
+                ],
+                driver_manager_health_errors: [
+                    "TIMEOUT",
+                ],
+            },
+        },
+        non_timeout_error_ignored: {
+            yes: [],
+            no: [
+                "driver_dispatcher_timeout",
+                "driver_health_check_unhealthy",
+            ],
+            values: {
+                driver_manager_health_statuses: [
+                    "ERROR",
+                ],
+                driver_manager_health_errors: [
+                    "NOT_SUPPORTED",
+                ],
+            },
+        },
+        internal_error_ignored: {
+            yes: [],
+            no: [
+                "driver_dispatcher_timeout",
+                "driver_health_check_unhealthy",
+            ],
+            values: {
+                driver_manager_health_statuses: [
+                    "ERROR",
+                ],
+                driver_manager_health_errors: [
+                    "INTERNAL_ERROR",
+                ],
+            },
+        },
+        degraded_ignored: {
+            yes: [],
+            no: [
+                "driver_dispatcher_timeout",
+                "driver_health_check_unhealthy",
+            ],
+            values: {
+                driver_manager_health_statuses: [
+                    "OK",
+                    "DEGRADED",
+                ],
+                driver_manager_health_errors: [],
+            },
+        },
+        driver_manager_unhealthy: {
+            yes: [
+                "driver_health_check_unhealthy",
+            ],
+            no: [
+                "driver_dispatcher_timeout",
+            ],
+            values: {
+                driver_manager_health_statuses: [
+                    "OK",
+                    "UNHEALTHY",
+                ],
+                driver_manager_health_errors: [],
+            },
+        },
+        timeout_and_unhealthy_both_fire: {
+            yes: [
+                "driver_dispatcher_timeout",
+                "driver_health_check_unhealthy",
+            ],
+            no: [],
+            values: {
+                driver_manager_health_statuses: [
+                    "ERROR",
+                    "UNHEALTHY",
+                ],
+                driver_manager_health_errors: [
+                    "TIMEOUT",
+                ],
+            },
+        },
+        all_healthy: {
+            yes: [],
+            no: [
+                "driver_dispatcher_timeout",
+                "driver_health_check_unhealthy",
+            ],
+            values: {
+                driver_manager_health_statuses: [
+                    "OK",
+                ],
+                driver_manager_health_errors: [],
+            },
+        },
+        nothing_recorded: {
+            yes: [],
+            no: [
+                "driver_dispatcher_timeout",
+                "driver_health_check_unhealthy",
+            ],
+            values: {},
+        },
+    },
+}

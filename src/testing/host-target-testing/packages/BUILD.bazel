@@ -1,0 +1,54 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = ["//:license"])
+
+go_library(
+    name = "packages",
+    testonly = True,
+    srcs = [
+        "package.go",
+        "package_builder.go",
+        "repo.go",
+        "server.go",
+        "system_image_package.go",
+        "update_images.go",
+        "update_package.go",
+    ],
+    importpath = "go.fuchsia.dev/fuchsia/src/testing/host-target-testing/packages",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//src/lib/versioning/version-history/go:version-history",
+        "//src/sys/pkg/lib/far/go:far",
+        "//src/sys/pkg/lib/merkle",
+        "//src/testing/host-target-testing/avb",
+        "//src/testing/host-target-testing/build",
+        "//src/testing/host-target-testing/ffx",
+        "//src/testing/host-target-testing/pkg",
+        "//src/testing/host-target-testing/util",
+        "//src/testing/host-target-testing/zbi",
+        # GN bundles subpackages into //third_party/golibs:github.com/theupdateframework/go-tuf; Bazel requires the :github.com/theupdateframework/go-tuf/data subpackage target.
+        "//third_party/golibs:github.com/theupdateframework/go-tuf/data",  # @bazel2gn:path_overwrite://third_party/golibs:github.com/theupdateframework/go-tuf
+        "//tools/lib/logger",
+        "//tools/lib/osmisc",
+    ],
+)
+
+# Runtime execution requires ffx and empty-repo-keys test_data targets.
+# @bazel2gn:raw_attribute:data_deps = [ "//src/developer/ffx:test_data", "//src/developer/ffx/lib/pkg:empty-repo-keys", "//src/developer/ffx/plugins/package:ffx_package_tool_test_data", "//src/developer/ffx/plugins/repository:ffx_repository_tool_test_data" ]
+go_test(
+    name = "host-target-testing-packages-test",
+    srcs = [
+        "package_builder_test.go",
+        "package_test.go",
+        "repo_test.go",
+    ],
+    embed = [":packages"],
+    tags = ["manual"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)

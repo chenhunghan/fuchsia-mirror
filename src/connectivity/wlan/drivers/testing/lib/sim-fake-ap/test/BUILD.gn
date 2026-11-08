@@ -27,8 +27,7 @@
 
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
-executable("assoc_unittests") {
-  testonly = true
+cc_test_executable("assoc_unittests") {
   sources = [ "assoc_unittests.cc" ]
   configs += [ "//build/config:Wno-conversion" ]
   deps = [
@@ -37,9 +36,11 @@ executable("assoc_unittests") {
     "//src/connectivity/wlan/drivers/testing/lib/sim-fake-ap",
     "//src/lib/fxl/test:gtest_main",
   ]
-}
-executable("auth_unittests") {
   testonly = true
+  emit_tool_path = false
+}
+
+cc_test_executable("auth_unittests") {
   sources = [ "auth_unittests.cc" ]
   configs += [ "//build/config:Wno-conversion" ]
   deps = [
@@ -48,9 +49,11 @@ executable("auth_unittests") {
     "//src/connectivity/wlan/drivers/testing/lib/sim-fake-ap",
     "//src/lib/fxl/test:gtest_main",
   ]
-}
-executable("beacon_unittests") {
   testonly = true
+  emit_tool_path = false
+}
+
+cc_test_executable("beacon_unittests") {
   sources = [ "beacon_unittests.cc" ]
   configs += [ "//build/config:Wno-conversion" ]
   deps = [
@@ -60,9 +63,11 @@ executable("beacon_unittests") {
     "//src/lib/fxl/test:gtest_main",
     "//third_party/googletest:gmock",
   ]
-}
-executable("data_unittests") {
   testonly = true
+  emit_tool_path = false
+}
+
+cc_test_executable("data_unittests") {
   sources = [ "data_unittests.cc" ]
   configs += [ "//build/config:Wno-conversion" ]
   deps = [
@@ -71,9 +76,11 @@ executable("data_unittests") {
     "//src/connectivity/wlan/drivers/testing/lib/sim-fake-ap",
     "//src/lib/fxl/test:gtest_main",
   ]
-}
-executable("probe_unittests") {
   testonly = true
+  emit_tool_path = false
+}
+
+cc_test_executable("probe_unittests") {
   sources = [ "probe_unittests.cc" ]
   configs += [ "//build/config:Wno-conversion" ]
   deps = [
@@ -83,32 +90,40 @@ executable("probe_unittests") {
     "//src/lib/fxl/test:gtest_main",
     "//third_party/googletest:gmock",
   ]
+  testonly = true
+  emit_tool_path = false
 }
+
 fuchsia_unittest_component("wlan-sim-fake-ap-test.assoc_unittests.component") {
   component_name = "assoc_unittests"
   visibility = [ ":*" ]
   deps = [ ":assoc_unittests" ]
 }
+
 fuchsia_unittest_component("wlan-sim-fake-ap-test.auth_unittests.component") {
   component_name = "auth_unittests"
   visibility = [ ":*" ]
   deps = [ ":auth_unittests" ]
 }
+
 fuchsia_unittest_component("wlan-sim-fake-ap-test.beacon_unittests.component") {
   component_name = "beacon_unittests"
   visibility = [ ":*" ]
   deps = [ ":beacon_unittests" ]
 }
+
 fuchsia_unittest_component("wlan-sim-fake-ap-test.data_unittests.component") {
   component_name = "data_unittests"
   visibility = [ ":*" ]
   deps = [ ":data_unittests" ]
 }
+
 fuchsia_unittest_component("wlan-sim-fake-ap-test.probe_unittests.component") {
   component_name = "probe_unittests"
   visibility = [ ":*" ]
   deps = [ ":probe_unittests" ]
 }
+
 fuchsia_test_package("wlan-sim-fake-ap-test") {
   package_name = "wlan-sim-fake-ap-test-gn"
   test_components = [

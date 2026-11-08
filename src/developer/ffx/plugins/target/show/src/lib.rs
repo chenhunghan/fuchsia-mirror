@@ -16,7 +16,7 @@ use netext::ScopedSocketAddr;
 use show::{
     AddressData, BoardData, BuildData, DeviceData, ProductData, TargetShowInfo, UpdateData,
 };
-use target_behavior::{ConnectionBehavior, DirectConnector};
+use target_behavior::DirectConnector;
 use target_holders::{RemoteControlProxyHolder, moniker};
 
 mod show;
@@ -105,15 +105,14 @@ impl ShowTool {
         self,
         writer: &mut VerifiedMachineWriter<TargetShowInfo>,
     ) -> Result<(), ShowError> {
-        let behavior = target_behavior::target_interface(&self.fho_env).behavior()?;
-        let ConnectionBehavior::Direct(ref connector) = *behavior;
+        let connector = target_behavior::target_interface(&self.fho_env).behavior()?;
         // To add more show information, add a gather_*_show(*) call to this list
         // and add the result to the TargetShowInfo struct below.
         let (target, board, device, product, update, build) = futures::try_join!(
             gather_target_show(
                 self.rcs_proxy,
                 &self.fho_env,
-                connector.clone(),
+                connector,
                 self.last_reboot_info_proxy
             ),
             gather_board_show(self.board_proxy),
@@ -464,7 +463,7 @@ mod tests {
         let output = VerifiedMachineWriter::<TargetShowInfo>::new_test(None, &buffers);
         let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "test"]);
         let target_env = target_behavior::target_interface(&fho_env);
-        target_env.set_behavior_for_test(ConnectionBehavior::fake_direct_connector(
+        target_env.set_behavior_for_test(DirectConnector::from_resolution_for_test(
             target_behavior::setup_fake_resolution(None).await,
         ));
         let tool = ShowTool {
@@ -644,7 +643,7 @@ mod tests {
             VerifiedMachineWriter::<TargetShowInfo>::new_test(Some(Format::JsonPretty), &buffers);
         let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "test"]);
         let target_env = target_behavior::target_interface(&fho_env);
-        target_env.set_behavior_for_test(ConnectionBehavior::fake_direct_connector(
+        target_env.set_behavior_for_test(DirectConnector::from_resolution_for_test(
             target_behavior::setup_fake_resolution(None).await,
         ));
         let tool = ShowTool {
@@ -696,7 +695,7 @@ mod tests {
         let output = VerifiedMachineWriter::<TargetShowInfo>::new_test(None, &buffers);
         let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "test"]);
         let target_env = target_behavior::target_interface(&fho_env);
-        target_env.set_behavior_for_test(ConnectionBehavior::fake_direct_connector(
+        target_env.set_behavior_for_test(DirectConnector::from_resolution_for_test(
             target_behavior::setup_fake_resolution(None).await,
         ));
         let tool = ShowTool {
@@ -756,7 +755,7 @@ mod tests {
         let output = VerifiedMachineWriter::<TargetShowInfo>::new_test(None, &buffers);
         let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "test"]);
         let target_env = target_behavior::target_interface(&fho_env);
-        target_env.set_behavior_for_test(ConnectionBehavior::fake_direct_connector(
+        target_env.set_behavior_for_test(DirectConnector::from_resolution_for_test(
             target_behavior::setup_fake_resolution(None).await,
         ));
 
@@ -818,7 +817,7 @@ mod tests {
         let output = VerifiedMachineWriter::<TargetShowInfo>::new_test(None, &buffers);
         let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "test"]);
         let target_env = target_behavior::target_interface(&fho_env);
-        target_env.set_behavior_for_test(ConnectionBehavior::fake_direct_connector(
+        target_env.set_behavior_for_test(DirectConnector::from_resolution_for_test(
             target_behavior::setup_fake_resolution(None).await,
         ));
         let tool = ShowTool {
@@ -862,7 +861,7 @@ mod tests {
         let output = VerifiedMachineWriter::<TargetShowInfo>::new_test(None, &buffers);
         let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "test"]);
         let target_env = target_behavior::target_interface(&fho_env);
-        target_env.set_behavior_for_test(ConnectionBehavior::fake_direct_connector(
+        target_env.set_behavior_for_test(DirectConnector::from_resolution_for_test(
             target_behavior::setup_fake_resolution(None).await,
         ));
         let tool = ShowTool {

@@ -7,12 +7,12 @@ mod conformance;
 pub mod converter;
 pub mod error;
 mod executor;
+pub mod jit;
 pub mod maps;
 pub mod memio;
 pub mod program;
 mod scalar_value;
 pub mod verifier;
-mod visitor;
 
 pub use api::*;
 pub use converter::*;

@@ -9,6 +9,9 @@
 
 use core::ffi::c_char;
 use core::fmt;
+
+use bitrs::{bitfield_repr, layout};
+use regio::{AccessRestrictsTo, Accessible, MmioBank, MmioPtr, Offset, Ro};
 use zr::static_assert;
 
 /// Typically components are 4KiB in size; the spec permits them to be larger.
@@ -62,46 +65,9 @@ pub mod arm {
     }
 }
 
-/// Abstracts 32-bit and 64-bit register reads and writes at byte offsets from a component base.
-pub trait RegisterIo {
-    /// Reads a 32-bit register at `offset` bytes.
-    fn read32(&mut self, offset: u32) -> u32;
-
-    /// Reads a 64-bit register at `offset` bytes.
-    fn read64(&mut self, offset: u32) -> u64;
-
-    /// Writes a 32-bit register at `offset` bytes.
-    fn write32(&mut self, val: u32, offset: u32);
-
-    /// Writes a 64-bit register at `offset` bytes.
-    fn write64(&mut self, val: u64, offset: u32);
-}
-
-impl<T: RegisterIo + ?Sized> RegisterIo for &mut T {
-    #[inline]
-    fn read32(&mut self, offset: u32) -> u32 {
-        (**self).read32(offset)
-    }
-
-    #[inline]
-    fn read64(&mut self, offset: u32) -> u64 {
-        (**self).read64(offset)
-    }
-
-    #[inline]
-    fn write32(&mut self, val: u32, offset: u32) {
-        (**self).write32(val, offset);
-    }
-
-    #[inline]
-    fn write64(&mut self, val: u64, offset: u32) {
-        (**self).write64(val, offset);
-    }
-}
-
 /// Component class identifier encoded in `CIDR1.CLASS` (`ComponentIdRegister::Class`).
-#[repr(u8)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[bitfield_repr(u8)]
+#[derive(Copy, Clone)]
 pub enum ClassId {
     /// Generic verification component (`0x0`).
     GenericVerification = 0x0,
@@ -117,31 +83,11 @@ pub enum ClassId {
     NonStandard = 0xf,
 }
 
-static_assert!(size_of::<ClassId>() == size_of::<u8>());
-static_assert!(align_of::<ClassId>() == align_of::<u8>());
-
-impl TryFrom<u8> for ClassId {
-    type Error = u8;
-
-    #[inline]
-    fn try_from(val: u8) -> Result<Self, Self::Error> {
-        match val {
-            0x0 => Ok(Self::GenericVerification),
-            0x1 => Ok(Self::RomTable0x1),
-            0x9 => Ok(Self::CoreSight),
-            0xb => Ok(Self::PeripheralTestBlock),
-            0xe => Ok(Self::GenericIp),
-            0xf => Ok(Self::NonStandard),
-            other => Err(other),
-        }
-    }
-}
-
 impl ClassId {
     /// Returns the human-readable description of this component class.
     #[inline]
     pub const fn as_str(self) -> &'static str {
-        class_id_to_string(self as u8)
+        class_id_to_string(self)
     }
 }
 
@@ -151,454 +97,171 @@ impl fmt::Display for ClassId {
     }
 }
 
-/// Returns the human-readable description of a raw `CIDR1.CLASS` value, or `"unknown"` if the raw
-/// value does not match a known [`ClassId`].
+static_assert!(size_of::<ClassId>() == size_of::<u8>());
+static_assert!(align_of::<ClassId>() == align_of::<u8>());
+
+/// Returns the human-readable description of a [`ClassId`].
 #[inline]
-pub const fn class_id_to_string(classid: u8) -> &'static str {
+pub const fn class_id_to_string(classid: ClassId) -> &'static str {
     match classid {
-        x if x == ClassId::GenericVerification as u8 => "generic verification",
-        x if x == ClassId::RomTable0x1 as u8 => "0x1 ROM table",
-        x if x == ClassId::CoreSight as u8 => "CoreSight",
-        x if x == ClassId::PeripheralTestBlock as u8 => "peripheral test block",
-        x if x == ClassId::GenericIp as u8 => "generic IP",
-        x if x == ClassId::NonStandard as u8 => "non-standard",
-        _ => "unknown",
+        ClassId::GenericVerification => "generic verification",
+        ClassId::RomTable0x1 => "0x1 ROM table",
+        ClassId::CoreSight => "CoreSight",
+        ClassId::PeripheralTestBlock => "peripheral test block",
+        ClassId::GenericIp => "generic IP",
+        ClassId::NonStandard => "non-standard",
     }
 }
 
-/// [CS] B2.2.1
-/// The first component identification register (`CIDR1`).
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct ComponentIdRegister(pub u32);
-
-impl ComponentIdRegister {
-    /// Byte offset of `CIDR1` within a component page.
-    pub const OFFSET: u32 = 0xff4;
-
-    /// Creates a `ComponentIdRegister` from its raw 32-bit value.
-    #[inline]
-    pub const fn from_raw(val: u32) -> Self {
-        Self(val)
+layout!({
+    /// [CS] B2.2.1
+    /// The first component identification register (`CIDR1`).
+    pub struct ComponentIdRegister(u32);
+    {
+        let __ @ 31..8;
+        /// Should conventionally be called `class` to match the spec, but that is a
+        /// reserved keyword.
+        let classid @ 7..4: ClassId;
+        let prmbl_1 @ 3..0;
     }
+});
 
-    /// Reads `CIDR1` from `io`.
-    #[inline]
-    pub fn read_from<Io: RegisterIo>(mut io: Io) -> Self {
-        Self(io.read32(Self::OFFSET))
+/// Byte offset of [`ComponentIdRegister`] (`CIDR1`) within a component page.
+pub const CIDR1: Offset<ComponentIdRegister, Ro> = Offset::new(0xff4);
+
+layout!({
+    /// [CS] B2.2.2
+    /// Peripheral ID0 register (`PIDR0`).
+    pub struct PeripheralId0Register(u32);
+    {
+        let __ @ 31..8;
+        let part0 @ 7..0;
     }
+});
 
-    /// Returns the raw 32-bit register value.
-    #[inline]
-    pub const fn reg_value(self) -> u32 {
-        self.0
+/// Byte offset of [`PeripheralId0Register`] (`PIDR0`) within a component page.
+pub const PIDR0: Offset<PeripheralId0Register, Ro> = Offset::new(0xfe0);
+
+layout!({
+    /// [CS] B2.2.2
+    /// Peripheral ID1 register (`PIDR1`).
+    pub struct PeripheralId1Register(u32);
+    {
+        let __ @ 31..8;
+        let des0 @ 7..4;
+        let part1 @ 3..0;
     }
+});
 
-    /// Returns the raw 4-bit `classid` field (`[7:4]`).
-    ///
-    /// Should conventionally be called `class` to match the spec, but that is a reserved
-    /// keyword.
-    #[inline]
-    pub const fn classid_raw(self) -> u8 {
-        ((self.0 >> 4) & 0xf) as u8
+/// Byte offset of [`PeripheralId1Register`] (`PIDR1`) within a component page.
+pub const PIDR1: Offset<PeripheralId1Register, Ro> = Offset::new(0xfe4);
+
+layout!({
+    /// [CS] B2.2.2
+    /// Peripheral ID2 register (`PIDR2`).
+    pub struct PeripheralId2Register(u32);
+    {
+        let __ @ 31..8;
+        let revision @ 7..4;
+        let jedec @ 3;
+        let des1 @ 2..0;
     }
+});
 
-    /// Returns the decoded [`ClassId`] from `[7:4]`, or `Err(raw)` if unrecognized.
-    ///
-    /// Should conventionally be called `class` to match the spec, but that is a reserved
-    /// keyword.
-    #[inline]
-    pub fn classid(self) -> Result<ClassId, u8> {
-        ClassId::try_from(self.classid_raw())
+/// Byte offset of [`PeripheralId2Register`] (`PIDR2`) within a component page.
+pub const PIDR2: Offset<PeripheralId2Register, Ro> = Offset::new(0xfe8);
+
+layout!({
+    /// [CS] B2.2.2
+    /// Peripheral ID4 register (`PIDR4`).
+    pub struct PeripheralId4Register(u32);
+    {
+        let __ @ 31..8;
+        let size @ 7..4;
+        let des2 @ 3..0;
     }
+});
 
-    /// Sets the `classid` field (`[7:4]`).
-    #[inline]
-    pub const fn set_classid(&mut self, classid: ClassId) -> &mut Self {
-        self.0 = (self.0 & !(0xf << 4)) | (((classid as u32) & 0xf) << 4);
-        self
-    }
-
-    /// Returns the `prmbl_1` field (`[3:0]`).
-    #[inline]
-    pub const fn prmbl_1(self) -> u8 {
-        (self.0 & 0xf) as u8
-    }
-
-    /// Sets the `prmbl_1` field (`[3:0]`).
-    #[inline]
-    pub const fn set_prmbl_1(&mut self, prmbl_1: u8) -> &mut Self {
-        self.0 = (self.0 & !0xf) | ((prmbl_1 as u32) & 0xf);
-        self
-    }
-}
-
-/// [CS] B2.2.2
-/// Peripheral ID0 register (`PIDR0`).
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct PeripheralId0Register(pub u32);
-
-impl PeripheralId0Register {
-    /// Byte offset of `PIDR0` within a component page.
-    pub const OFFSET: u32 = 0xfe0;
-
-    /// Creates a `PeripheralId0Register` from its raw 32-bit value.
-    #[inline]
-    pub const fn from_raw(val: u32) -> Self {
-        Self(val)
-    }
-
-    /// Reads `PIDR0` from `io`.
-    #[inline]
-    pub fn read_from<Io: RegisterIo>(mut io: Io) -> Self {
-        Self(io.read32(Self::OFFSET))
-    }
-
-    /// Returns the raw 32-bit register value.
-    #[inline]
-    pub const fn reg_value(self) -> u32 {
-        self.0
-    }
-
-    /// Returns the `part0` field (`[7:0]`).
-    #[inline]
-    pub const fn part0(self) -> u8 {
-        (self.0 & 0xff) as u8
-    }
-
-    /// Sets the `part0` field (`[7:0]`).
-    #[inline]
-    pub const fn set_part0(&mut self, part0: u8) -> &mut Self {
-        self.0 = (self.0 & !0xff) | (part0 as u32);
-        self
-    }
-}
-
-/// [CS] B2.2.2
-/// Peripheral ID1 register (`PIDR1`).
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct PeripheralId1Register(pub u32);
-
-impl PeripheralId1Register {
-    /// Byte offset of `PIDR1` within a component page.
-    pub const OFFSET: u32 = 0xfe4;
-
-    /// Creates a `PeripheralId1Register` from its raw 32-bit value.
-    #[inline]
-    pub const fn from_raw(val: u32) -> Self {
-        Self(val)
-    }
-
-    /// Reads `PIDR1` from `io`.
-    #[inline]
-    pub fn read_from<Io: RegisterIo>(mut io: Io) -> Self {
-        Self(io.read32(Self::OFFSET))
-    }
-
-    /// Returns the raw 32-bit register value.
-    #[inline]
-    pub const fn reg_value(self) -> u32 {
-        self.0
-    }
-
-    /// Returns the `des0` field (`[7:4]`).
-    #[inline]
-    pub const fn des0(self) -> u8 {
-        ((self.0 >> 4) & 0xf) as u8
-    }
-
-    /// Sets the `des0` field (`[7:4]`).
-    #[inline]
-    pub const fn set_des0(&mut self, des0: u8) -> &mut Self {
-        self.0 = (self.0 & !(0xf << 4)) | (((des0 as u32) & 0xf) << 4);
-        self
-    }
-
-    /// Returns the `part1` field (`[3:0]`).
-    #[inline]
-    pub const fn part1(self) -> u8 {
-        (self.0 & 0xf) as u8
-    }
-
-    /// Sets the `part1` field (`[3:0]`).
-    #[inline]
-    pub const fn set_part1(&mut self, part1: u8) -> &mut Self {
-        self.0 = (self.0 & !0xf) | ((part1 as u32) & 0xf);
-        self
-    }
-}
-
-/// [CS] B2.2.2
-/// Peripheral ID2 register (`PIDR2`).
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct PeripheralId2Register(pub u32);
-
-impl PeripheralId2Register {
-    /// Byte offset of `PIDR2` within a component page.
-    pub const OFFSET: u32 = 0xfe8;
-
-    /// Creates a `PeripheralId2Register` from its raw 32-bit value.
-    #[inline]
-    pub const fn from_raw(val: u32) -> Self {
-        Self(val)
-    }
-
-    /// Reads `PIDR2` from `io`.
-    #[inline]
-    pub fn read_from<Io: RegisterIo>(mut io: Io) -> Self {
-        Self(io.read32(Self::OFFSET))
-    }
-
-    /// Returns the raw 32-bit register value.
-    #[inline]
-    pub const fn reg_value(self) -> u32 {
-        self.0
-    }
-
-    /// Returns the `revision` field (`[7:4]`).
-    #[inline]
-    pub const fn revision(self) -> u8 {
-        ((self.0 >> 4) & 0xf) as u8
-    }
-
-    /// Sets the `revision` field (`[7:4]`).
-    #[inline]
-    pub const fn set_revision(&mut self, revision: u8) -> &mut Self {
-        self.0 = (self.0 & !(0xf << 4)) | (((revision as u32) & 0xf) << 4);
-        self
-    }
-
-    /// Returns the `jedec` bit (`[3]`).
-    #[inline]
-    pub const fn jedec(self) -> bool {
-        ((self.0 >> 3) & 0x1) != 0
-    }
-
-    /// Sets the `jedec` bit (`[3]`).
-    #[inline]
-    pub const fn set_jedec(&mut self, jedec: bool) -> &mut Self {
-        if jedec {
-            self.0 |= 1 << 3;
-        } else {
-            self.0 &= !(1 << 3);
-        }
-        self
-    }
-
-    /// Returns the `des1` field (`[2:0]`).
-    #[inline]
-    pub const fn des1(self) -> u8 {
-        (self.0 & 0x7) as u8
-    }
-
-    /// Sets the `des1` field (`[2:0]`).
-    #[inline]
-    pub const fn set_des1(&mut self, des1: u8) -> &mut Self {
-        self.0 = (self.0 & !0x7) | ((des1 as u32) & 0x7);
-        self
-    }
-}
-
-/// [CS] B2.2.2
-/// Peripheral ID4 register (`PIDR4`).
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct PeripheralId4Register(pub u32);
-
-impl PeripheralId4Register {
-    /// Byte offset of `PIDR4` within a component page.
-    pub const OFFSET: u32 = 0xfd0;
-
-    /// Creates a `PeripheralId4Register` from its raw 32-bit value.
-    #[inline]
-    pub const fn from_raw(val: u32) -> Self {
-        Self(val)
-    }
-
-    /// Reads `PIDR4` from `io`.
-    #[inline]
-    pub fn read_from<Io: RegisterIo>(mut io: Io) -> Self {
-        Self(io.read32(Self::OFFSET))
-    }
-
-    /// Returns the raw 32-bit register value.
-    #[inline]
-    pub const fn reg_value(self) -> u32 {
-        self.0
-    }
-
-    /// Returns the `size` field (`[7:4]`).
-    #[inline]
-    pub const fn size(self) -> u8 {
-        ((self.0 >> 4) & 0xf) as u8
-    }
-
-    /// Sets the `size` field (`[7:4]`).
-    #[inline]
-    pub const fn set_size(&mut self, size: u8) -> &mut Self {
-        self.0 = (self.0 & !(0xf << 4)) | (((size as u32) & 0xf) << 4);
-        self
-    }
-
-    /// Returns the `des2` field (`[3:0]`).
-    #[inline]
-    pub const fn des2(self) -> u8 {
-        (self.0 & 0xf) as u8
-    }
-
-    /// Sets the `des2` field (`[3:0]`).
-    #[inline]
-    pub const fn set_des2(&mut self, des2: u8) -> &mut Self {
-        self.0 = (self.0 & !0xf) | ((des2 as u32) & 0xf);
-        self
-    }
-}
-
-/// [CS] B2.3.3
-/// Used to determine whether two components have an affinity with one another
-/// (e.g., if both correspond to the same CPU).
-///
-/// This 64-bit register is actually an amalgamation of the two device affinity
-/// registers, `DEVAFF0` and `DEVAFF1`. We combine them as, in practice, the
-/// resulting value is typically that of the 64-bit `MPIDR` register of the
-/// associated CPU.
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct DeviceAffinityRegister(pub u64);
-
-impl DeviceAffinityRegister {
-    /// Byte offset of `DEVAFF0`/`DEVAFF1` within a component page.
-    pub const OFFSET: u32 = 0xfa8;
-
-    /// Creates a `DeviceAffinityRegister` from its raw 64-bit value.
-    #[inline]
-    pub const fn from_raw(val: u64) -> Self {
-        Self(val)
-    }
-
-    /// Reads `DEVAFF0`/`DEVAFF1` from `io`.
-    #[inline]
-    pub fn read_from<Io: RegisterIo>(mut io: Io) -> Self {
-        Self(io.read64(Self::OFFSET))
-    }
-
-    /// Returns the raw 64-bit register value.
-    #[inline]
-    pub const fn reg_value(self) -> u64 {
-        self.0
-    }
-}
-
-/// [CS] B2.3.4
-/// Identifies the architect and architecture of a CoreSight component (`DEVARCH`).
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct DeviceArchRegister(pub u32);
-
-impl DeviceArchRegister {
-    /// Byte offset of `DEVARCH` within a component page.
-    pub const OFFSET: u32 = 0xfbc;
-
-    /// Creates a `DeviceArchRegister` from its raw 32-bit value.
-    #[inline]
-    pub const fn from_raw(val: u32) -> Self {
-        Self(val)
-    }
-
-    /// Reads `DEVARCH` from `io`.
-    #[inline]
-    pub fn read_from<Io: RegisterIo>(mut io: Io) -> Self {
-        Self(io.read32(Self::OFFSET))
-    }
-
-    /// Returns the raw 32-bit register value.
-    #[inline]
-    pub const fn reg_value(self) -> u32 {
-        self.0
-    }
-
-    /// Returns the `architect` field (`[31:21]`).
-    #[inline]
-    pub const fn architect(self) -> u16 {
-        ((self.0 >> 21) & 0x7ff) as u16
-    }
-
-    /// Sets the `architect` field (`[31:21]`).
-    #[inline]
-    pub const fn set_architect(&mut self, architect: u16) -> &mut Self {
-        self.0 = (self.0 & !(0x7ff << 21)) | (((architect as u32) & 0x7ff) << 21);
-        self
-    }
-
-    /// Returns the `present` bit (`[20]`).
-    #[inline]
-    pub const fn present(self) -> bool {
-        ((self.0 >> 20) & 0x1) != 0
-    }
-
-    /// Sets the `present` bit (`[20]`).
-    #[inline]
-    pub const fn set_present(&mut self, present: bool) -> &mut Self {
-        if present {
-            self.0 |= 1 << 20;
-        } else {
-            self.0 &= !(1 << 20);
-        }
-        self
-    }
-
-    /// Returns the `revision` field (`[19:16]`).
-    #[inline]
-    pub const fn revision(self) -> u8 {
-        ((self.0 >> 16) & 0xf) as u8
-    }
-
-    /// Sets the `revision` field (`[19:16]`).
-    #[inline]
-    pub const fn set_revision(&mut self, revision: u8) -> &mut Self {
-        self.0 = (self.0 & !(0xf << 16)) | (((revision as u32) & 0xf) << 16);
-        self
-    }
-
-    /// Returns the `archid` field (`[15:0]`).
-    #[inline]
-    pub const fn archid(self) -> u16 {
-        (self.0 & 0xffff) as u16
-    }
-
-    /// Sets the `archid` field (`[15:0]`).
-    #[inline]
-    pub const fn set_archid(&mut self, archid: u16) -> &mut Self {
-        self.0 = (self.0 & !0xffff) | (archid as u32);
-        self
-    }
-}
+/// Byte offset of [`PeripheralId4Register`] (`PIDR4`) within a component page.
+pub const PIDR4: Offset<PeripheralId4Register, Ro> = Offset::new(0xfd0);
 
 /// [CS] B2.2.2
 /// JEDEC ID of the designer.
+///
+/// # Safety
+///
+/// `bank` must wrap a valid, mapped CoreSight component MMIO region of at least
+/// [`MINIMUM_COMPONENT_SIZE`] bytes that is safe to read for the duration of the call.
 #[inline]
-pub fn get_designer<Io: RegisterIo>(mut io: Io) -> u16 {
-    let des0 = u16::from(PeripheralId1Register::read_from(&mut io).des0());
-    let des1 = u16::from(PeripheralId2Register::read_from(&mut io).des1());
-    let des2 = u16::from(PeripheralId4Register::read_from(&mut io).des2());
-    (des2 << 7) | (des1 << 4) | des0
+pub unsafe fn get_designer<Access>(bank: &MmioBank<u32, Access>) -> u16
+where
+    Access: Accessible + AccessRestrictsTo<Ro>,
+{
+    // SAFETY: Caller guarantees `bank` covers a valid component MMIO region of at least
+    // `MINIMUM_COMPONENT_SIZE` bytes, which includes `PIDR1`, `PIDR2`, and `PIDR4`.
+    unsafe {
+        let des0 = u16::from(bank.at(PIDR1).read().des0());
+        let des1 = u16::from(bank.at(PIDR2).read().des1());
+        let des2 = u16::from(bank.at(PIDR4).read().des2());
+        (des2 << 7) | (des1 << 4) | des0
+    }
 }
 
 /// [CS] B2.2.2
 /// This number is an ID chosen by the designer.
+///
+/// # Safety
+///
+/// `bank` must wrap a valid, mapped CoreSight component MMIO region of at least
+/// [`MINIMUM_COMPONENT_SIZE`] bytes that is safe to read for the duration of the call.
 #[inline]
-pub fn get_part_id<Io: RegisterIo>(mut io: Io) -> u16 {
-    let part0 = u16::from(PeripheralId0Register::read_from(&mut io).part0());
-    let part1 = u16::from(PeripheralId1Register::read_from(&mut io).part1());
-    (part1 << 8) | part0
+pub unsafe fn get_part_id<Access>(bank: &MmioBank<u32, Access>) -> u16
+where
+    Access: Accessible + AccessRestrictsTo<Ro>,
+{
+    // SAFETY: Caller guarantees `bank` covers a valid component MMIO region of at least
+    // `MINIMUM_COMPONENT_SIZE` bytes, which includes `PIDR0` and `PIDR1`.
+    unsafe {
+        let part0 = u16::from(bank.at(PIDR0).read().part0());
+        let part1 = u16::from(bank.at(PIDR1).read().part1());
+        (part1 << 8) | part0
+    }
 }
 
+layout!({
+    /// [CS] B2.3.3
+    /// Used to determine whether two components have an affinity with one another
+    /// (e.g., if both correspond to the same CPU).
+    ///
+    /// This 64-bit register is actually an amalgamation of the two device affinity
+    /// registers, `DEVAFF0` and `DEVAFF1`. We combine them as, in practice, the
+    /// resulting value is typically that of the 64-bit `MPIDR` register of the
+    /// associated CPU.
+    pub struct DeviceAffinityRegister(u64);
+    {}
+});
+
+/// Byte offset of [`DeviceAffinityRegister`] (`DEVAFF0`/`DEVAFF1`) within a component page.
+pub const DEVAFF: Offset<DeviceAffinityRegister, Ro> = Offset::new(0xfa8);
+
+layout!({
+    /// [CS] B2.3.4
+    /// Identifies the architect and architecture of a CoreSight component (`DEVARCH`).
+    pub struct DeviceArchRegister(u32);
+    {
+        let architect @ 31..21;
+        let present @ 20;
+        let revision @ 19..16;
+        let archid @ 15..0;
+    }
+});
+
+/// Byte offset of [`DeviceArchRegister`] (`DEVARCH`) within a component page.
+pub const DEVARCH: Offset<DeviceArchRegister, Ro> = Offset::new(0xfbc);
+
 /// Major component type encoded in `DEVTYPE.MAJOR` (`DeviceTypeRegister::MajorType`).
-#[repr(u8)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[bitfield_repr(u8)]
+#[derive(Copy, Clone)]
 pub enum MajorType {
     /// Miscellaneous component (`0x0`).
     Miscellaneous = 0x0,
@@ -620,8 +283,8 @@ static_assert!(size_of::<MajorType>() == size_of::<u8>());
 static_assert!(align_of::<MajorType>() == align_of::<u8>());
 
 /// Combined CoreSight device type (`DeviceTypeRegister::Type`) decoded from `(major, sub)`.
-#[repr(u32)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[bitfield_repr(u32)]
+#[derive(Copy, Clone)]
 pub enum DeviceType {
     /// Unknown or reserved `(major, sub)` combination.
     Unknown = 0,
@@ -677,66 +340,6 @@ pub enum DeviceType {
     MmuPerformanceMonitor,
 }
 
-static_assert!(size_of::<DeviceType>() == size_of::<u32>());
-static_assert!(align_of::<DeviceType>() == align_of::<u32>());
-
-impl TryFrom<u8> for MajorType {
-    type Error = u8;
-
-    #[inline]
-    fn try_from(val: u8) -> Result<Self, Self::Error> {
-        match val {
-            0x0 => Ok(Self::Miscellaneous),
-            0x1 => Ok(Self::TraceSink),
-            0x2 => Ok(Self::TraceLink),
-            0x3 => Ok(Self::TraceSource),
-            0x4 => Ok(Self::DebugControl),
-            0x5 => Ok(Self::DebugLogic),
-            0x6 => Ok(Self::PerformanceMonitor),
-            other => Err(other),
-        }
-    }
-}
-
-impl TryFrom<u32> for DeviceType {
-    type Error = u32;
-
-    #[inline]
-    fn try_from(val: u32) -> Result<Self, Self::Error> {
-        match val {
-            x if x == Self::Unknown as u32 => Ok(Self::Unknown),
-            x if x == Self::ValidationComponent as u32 => Ok(Self::ValidationComponent),
-            x if x == Self::TracePort as u32 => Ok(Self::TracePort),
-            x if x == Self::TraceBuffer as u32 => Ok(Self::TraceBuffer),
-            x if x == Self::TraceRouter as u32 => Ok(Self::TraceRouter),
-            x if x == Self::TraceFunnel as u32 => Ok(Self::TraceFunnel),
-            x if x == Self::TraceFilter as u32 => Ok(Self::TraceFilter),
-            x if x == Self::TraceFifo as u32 => Ok(Self::TraceFifo),
-            x if x == Self::CpuTraceSource as u32 => Ok(Self::CpuTraceSource),
-            x if x == Self::DspTraceSource as u32 => Ok(Self::DspTraceSource),
-            x if x == Self::DataEngineTraceSource as u32 => Ok(Self::DataEngineTraceSource),
-            x if x == Self::BusTraceSource as u32 => Ok(Self::BusTraceSource),
-            x if x == Self::SoftwareTraceSource as u32 => Ok(Self::SoftwareTraceSource),
-            x if x == Self::TriggerMatrix as u32 => Ok(Self::TriggerMatrix),
-            x if x == Self::DebugAuthenticationModule as u32 => Ok(Self::DebugAuthenticationModule),
-            x if x == Self::PowerRequestor as u32 => Ok(Self::PowerRequestor),
-            x if x == Self::CpuDebugLogic as u32 => Ok(Self::CpuDebugLogic),
-            x if x == Self::DspDebugLogic as u32 => Ok(Self::DspDebugLogic),
-            x if x == Self::DataEngineDebugLogic as u32 => Ok(Self::DataEngineDebugLogic),
-            x if x == Self::BusDebugLogic as u32 => Ok(Self::BusDebugLogic),
-            x if x == Self::MemoryDebugLogic as u32 => Ok(Self::MemoryDebugLogic),
-            x if x == Self::CpuPerformanceMonitor as u32 => Ok(Self::CpuPerformanceMonitor),
-            x if x == Self::DspPerformanceMonitor as u32 => Ok(Self::DspPerformanceMonitor),
-            x if x == Self::DataEnginePerformanceMonitor as u32 => {
-                Ok(Self::DataEnginePerformanceMonitor)
-            }
-            x if x == Self::BusPerformanceMonitor as u32 => Ok(Self::BusPerformanceMonitor),
-            x if x == Self::MmuPerformanceMonitor as u32 => Ok(Self::MmuPerformanceMonitor),
-            other => Err(other),
-        }
-    }
-}
-
 impl DeviceType {
     /// Returns the human-readable description of this device type.
     #[inline]
@@ -750,6 +353,9 @@ impl fmt::Display for DeviceType {
         f.write_str(self.as_str())
     }
 }
+
+static_assert!(size_of::<DeviceType>() == size_of::<u32>());
+static_assert!(align_of::<DeviceType>() == align_of::<u32>());
 
 /// Returns the human-readable description of a [`DeviceType`].
 #[inline]
@@ -786,117 +392,63 @@ pub const fn device_type_to_string(dev_type: DeviceType) -> &'static str {
     }
 }
 
-/// [CS] B2.3.8
-/// Gives high-level information about the type of a CoreSight component (`DEVTYPE`).
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct DeviceTypeRegister(pub u32);
+layout!({
+    /// [CS] B2.3.8
+    /// Gives high-level information about the type of a CoreSight component (`DEVTYPE`).
+    pub struct DeviceTypeRegister(u32);
+    {
+        let __ @ 31..8;
+        /// Subtype.
+        let sub @ 7..4;
+        let major @ 3..0: MajorType;
+    }
+});
 
 impl DeviceTypeRegister {
-    /// Byte offset of `DEVTYPE` within a component page.
-    pub const OFFSET: u32 = 0xfcc;
-
-    /// Creates a `DeviceTypeRegister` from its raw 32-bit value.
-    #[inline]
-    pub const fn from_raw(val: u32) -> Self {
-        Self(val)
-    }
-
-    /// Reads `DEVTYPE` from `io`.
-    #[inline]
-    pub fn read_from<Io: RegisterIo>(mut io: Io) -> Self {
-        Self(io.read32(Self::OFFSET))
-    }
-
-    /// Returns the raw 32-bit register value.
-    #[inline]
-    pub const fn reg_value(self) -> u32 {
-        self.0
-    }
-
-    /// Returns the `sub` (subtype) field (`[7:4]`).
-    #[inline]
-    pub const fn sub(self) -> u8 {
-        ((self.0 >> 4) & 0xf) as u8
-    }
-
-    /// Sets the `sub` (subtype) field (`[7:4]`).
-    #[inline]
-    pub const fn set_sub(&mut self, sub: u8) -> &mut Self {
-        self.0 = (self.0 & !(0xf << 4)) | (((sub as u32) & 0xf) << 4);
-        self
-    }
-
-    /// Returns the raw 4-bit `major` field (`[3:0]`).
-    #[inline]
-    pub const fn major_raw(self) -> u8 {
-        (self.0 & 0xf) as u8
-    }
-
-    /// Returns the decoded [`MajorType`] from `[3:0]`, or `Err(raw)` if unrecognized.
-    #[inline]
-    pub fn major(self) -> Result<MajorType, u8> {
-        MajorType::try_from(self.major_raw())
-    }
-
-    /// Sets the `major` field (`[3:0]`).
-    #[inline]
-    pub const fn set_major(&mut self, major: MajorType) -> &mut Self {
-        self.0 = (self.0 & !0xf) | ((major as u32) & 0xf);
-        self
-    }
-
     /// The type encoded by `sub` and `major` fields.
     #[inline]
     pub fn device_type(self) -> DeviceType {
         // Allows us to switch across (major, sub-) type pairs.
 
         // [CS] Table B2-9.
-        match (self.major_raw(), self.sub()) {
-            (x, 0x4) if x == MajorType::Miscellaneous as u8 => DeviceType::ValidationComponent,
-            (x, 0x1) if x == MajorType::TraceSink as u8 => DeviceType::TracePort,
-            (x, 0x2) if x == MajorType::TraceSink as u8 => DeviceType::TraceBuffer,
-            (x, 0x3) if x == MajorType::TraceSink as u8 => DeviceType::TraceRouter,
-            (x, 0x1) if x == MajorType::TraceLink as u8 => DeviceType::TraceFunnel,
-            (x, 0x2) if x == MajorType::TraceLink as u8 => DeviceType::TraceFilter,
-            (x, 0x3) if x == MajorType::TraceLink as u8 => DeviceType::TraceFifo,
-            (x, 0x1) if x == MajorType::TraceSource as u8 => DeviceType::CpuTraceSource,
-            (x, 0x2) if x == MajorType::TraceSource as u8 => DeviceType::DspTraceSource,
-            (x, 0x3) if x == MajorType::TraceSource as u8 => DeviceType::DataEngineTraceSource,
-            (x, 0x4) if x == MajorType::TraceSource as u8 => DeviceType::BusTraceSource,
-            (x, 0x6) if x == MajorType::TraceSource as u8 => DeviceType::SoftwareTraceSource,
-            (x, 0x1) if x == MajorType::DebugControl as u8 => DeviceType::TriggerMatrix,
-            (x, 0x2) if x == MajorType::DebugControl as u8 => DeviceType::DebugAuthenticationModule,
-            (x, 0x3) if x == MajorType::DebugControl as u8 => DeviceType::PowerRequestor,
-            (x, 0x1) if x == MajorType::DebugLogic as u8 => DeviceType::CpuDebugLogic,
-            (x, 0x2) if x == MajorType::DebugLogic as u8 => DeviceType::DspDebugLogic,
-            (x, 0x3) if x == MajorType::DebugLogic as u8 => DeviceType::DataEngineDebugLogic,
-            (x, 0x4) if x == MajorType::DebugLogic as u8 => DeviceType::BusDebugLogic,
-            (x, 0x5) if x == MajorType::DebugLogic as u8 => DeviceType::MemoryDebugLogic,
-            (x, 0x1) if x == MajorType::PerformanceMonitor as u8 => {
-                DeviceType::CpuPerformanceMonitor
-            }
-            (x, 0x2) if x == MajorType::PerformanceMonitor as u8 => {
-                DeviceType::DspPerformanceMonitor
-            }
-            (x, 0x3) if x == MajorType::PerformanceMonitor as u8 => {
-                DeviceType::DataEnginePerformanceMonitor
-            }
-            (x, 0x4) if x == MajorType::PerformanceMonitor as u8 => {
-                DeviceType::BusPerformanceMonitor
-            }
-            (x, 0x5) if x == MajorType::PerformanceMonitor as u8 => {
-                DeviceType::MmuPerformanceMonitor
-            }
+        match (self.try_major(), self.sub()) {
+            (Ok(MajorType::Miscellaneous), 0x4) => DeviceType::ValidationComponent,
+            (Ok(MajorType::TraceSink), 0x1) => DeviceType::TracePort,
+            (Ok(MajorType::TraceSink), 0x2) => DeviceType::TraceBuffer,
+            (Ok(MajorType::TraceSink), 0x3) => DeviceType::TraceRouter,
+            (Ok(MajorType::TraceLink), 0x1) => DeviceType::TraceFunnel,
+            (Ok(MajorType::TraceLink), 0x2) => DeviceType::TraceFilter,
+            (Ok(MajorType::TraceLink), 0x3) => DeviceType::TraceFifo,
+            (Ok(MajorType::TraceSource), 0x1) => DeviceType::CpuTraceSource,
+            (Ok(MajorType::TraceSource), 0x2) => DeviceType::DspTraceSource,
+            (Ok(MajorType::TraceSource), 0x3) => DeviceType::DataEngineTraceSource,
+            (Ok(MajorType::TraceSource), 0x4) => DeviceType::BusTraceSource,
+            (Ok(MajorType::TraceSource), 0x6) => DeviceType::SoftwareTraceSource,
+            (Ok(MajorType::DebugControl), 0x1) => DeviceType::TriggerMatrix,
+            (Ok(MajorType::DebugControl), 0x2) => DeviceType::DebugAuthenticationModule,
+            (Ok(MajorType::DebugControl), 0x3) => DeviceType::PowerRequestor,
+            (Ok(MajorType::DebugLogic), 0x1) => DeviceType::CpuDebugLogic,
+            (Ok(MajorType::DebugLogic), 0x2) => DeviceType::DspDebugLogic,
+            (Ok(MajorType::DebugLogic), 0x3) => DeviceType::DataEngineDebugLogic,
+            (Ok(MajorType::DebugLogic), 0x4) => DeviceType::BusDebugLogic,
+            (Ok(MajorType::DebugLogic), 0x5) => DeviceType::MemoryDebugLogic,
+            (Ok(MajorType::PerformanceMonitor), 0x1) => DeviceType::CpuPerformanceMonitor,
+            (Ok(MajorType::PerformanceMonitor), 0x2) => DeviceType::DspPerformanceMonitor,
+            (Ok(MajorType::PerformanceMonitor), 0x3) => DeviceType::DataEnginePerformanceMonitor,
+            (Ok(MajorType::PerformanceMonitor), 0x4) => DeviceType::BusPerformanceMonitor,
+            (Ok(MajorType::PerformanceMonitor), 0x5) => DeviceType::MmuPerformanceMonitor,
             _ => DeviceType::Unknown,
         }
     }
 }
 
+/// Byte offset of [`DeviceTypeRegister`] (`DEVTYPE`) within a component page.
+pub const DEVTYPE: Offset<DeviceTypeRegister, Ro> = Offset::new(0xfcc);
+
 /// FFI trampoline for `coresight::DeviceTypeRegister::type()`.
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_coresight_device_type_from_raw(reg_value: u32) -> u32 {
-    DeviceTypeRegister::from_raw(reg_value).device_type() as u32
+    DeviceTypeRegister::from(reg_value).device_type() as u32
 }
 
 /// FFI trampoline for `coresight::ToString(ComponentIdRegister::Class)`.
@@ -909,10 +461,12 @@ pub unsafe extern "C" fn rust_coresight_class_id_to_string(
     raw_classid: u8,
     out_len: *mut usize,
 ) -> *const c_char {
-    let s = class_id_to_string(raw_classid);
+    let s =
+        zerocopy::TryFromBytes::try_read_from_bytes(zerocopy::IntoBytes::as_bytes(&raw_classid))
+            .map_or("unknown", class_id_to_string);
     // SAFETY: Caller guarantees `out_len` is a valid, aligned, writable pointer.
     unsafe {
-        *out_len = s.len();
+        out_len.write(s.len());
     }
     s.as_ptr().cast::<c_char>()
 }
@@ -927,53 +481,91 @@ pub unsafe extern "C" fn rust_coresight_device_type_to_string(
     raw_dev_type: u32,
     out_len: *mut usize,
 ) -> *const c_char {
-    let dev_type = DeviceType::try_from(raw_dev_type).unwrap_or(DeviceType::Unknown);
+    let dev_type =
+        zerocopy::TryFromBytes::try_read_from_bytes(zerocopy::IntoBytes::as_bytes(&raw_dev_type))
+            .unwrap_or(DeviceType::Unknown);
     let s = device_type_to_string(dev_type);
     // SAFETY: Caller guarantees `out_len` is a valid, aligned, writable pointer.
     unsafe {
-        *out_len = s.len();
+        out_len.write(s.len());
     }
     s.as_ptr().cast::<c_char>()
+}
+
+/// FFI trampoline for `coresight::GetDesigner`.
+///
+/// # Safety
+///
+/// `base` must be a valid, 4-byte aligned pointer to a mapped CoreSight component MMIO region of
+/// at least [`MINIMUM_COMPONENT_SIZE`] bytes that is safe to read for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_coresight_get_designer(base: *const u32) -> u16 {
+    // SAFETY: Caller guarantees `base` is a valid, aligned pointer to a mapped component MMIO
+    // region of at least `MINIMUM_COMPONENT_SIZE` bytes.
+    unsafe {
+        let ptr = MmioPtr::<u32, Ro>::new(base);
+        let bank = MmioBank::new(ptr, MINIMUM_COMPONENT_SIZE);
+        get_designer(&bank)
+    }
+}
+
+/// FFI trampoline for `coresight::GetPartId`.
+///
+/// # Safety
+///
+/// `base` must be a valid, 4-byte aligned pointer to a mapped CoreSight component MMIO region of
+/// at least [`MINIMUM_COMPONENT_SIZE`] bytes that is safe to read for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_coresight_get_part_id(base: *const u32) -> u16 {
+    // SAFETY: Caller guarantees `base` is a valid, aligned pointer to a mapped component MMIO
+    // region of at least `MINIMUM_COMPONENT_SIZE` bytes.
+    unsafe {
+        let ptr = MmioPtr::<u32, Ro>::new(base);
+        let bank = MmioBank::new(ptr, MINIMUM_COMPONENT_SIZE);
+        get_part_id(&bank)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    struct FakeComponentIo {
-        pidr0: u32,
-        pidr1: u32,
-        pidr2: u32,
-        pidr4: u32,
-        devaff: u64,
-        devarch: u32,
-        devtype: u32,
-        cidr1: u32,
+    #[repr(C, align(8))]
+    struct FakeComponentPage {
+        words: [u32; MINIMUM_COMPONENT_SIZE / size_of::<u32>()],
     }
 
-    impl RegisterIo for FakeComponentIo {
-        fn read32(&mut self, offset: u32) -> u32 {
-            match offset {
-                PeripheralId0Register::OFFSET => self.pidr0,
-                PeripheralId1Register::OFFSET => self.pidr1,
-                PeripheralId2Register::OFFSET => self.pidr2,
-                PeripheralId4Register::OFFSET => self.pidr4,
-                DeviceArchRegister::OFFSET => self.devarch,
-                DeviceTypeRegister::OFFSET => self.devtype,
-                ComponentIdRegister::OFFSET => self.cidr1,
-                other => panic!("unexpected 32-bit read at {other:#x}"),
-            }
+    impl FakeComponentPage {
+        const fn new() -> Self {
+            Self { words: [0; MINIMUM_COMPONENT_SIZE / size_of::<u32>()] }
         }
 
-        fn read64(&mut self, offset: u32) -> u64 {
-            match offset {
-                DeviceAffinityRegister::OFFSET => self.devaff,
-                other => panic!("unexpected 64-bit read at {other:#x}"),
-            }
+        fn write32(&mut self, offset: usize, val: u32) {
+            self.words[offset / size_of::<u32>()] = val;
         }
 
-        fn write32(&mut self, _val: u32, _offset: u32) {}
-        fn write64(&mut self, _val: u64, _offset: u32) {}
+        fn write64(&mut self, offset: usize, val: u64) {
+            let idx = offset / size_of::<u32>();
+            let bytes = val.to_ne_bytes();
+            self.words[idx] = u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            self.words[idx + 1] = u32::from_ne_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+        }
+
+        fn bank(&self) -> MmioBank<u32, Ro> {
+            // SAFETY: `self.words` is a valid, 8-byte aligned 4 KiB region alive for the borrow.
+            let ptr = unsafe { MmioPtr::<u32, Ro>::new(self.words.as_ptr()) };
+            MmioBank::new(ptr, MINIMUM_COMPONENT_SIZE)
+        }
+
+        fn bank64(&self) -> MmioBank<u64, Ro> {
+            // SAFETY: `self.words` is a valid, 8-byte aligned 4 KiB region alive for the borrow.
+            let ptr = unsafe { MmioPtr::<u64, Ro>::new(self.words.as_ptr().cast::<u64>()) };
+            MmioBank::new(ptr, MINIMUM_COMPONENT_SIZE)
+        }
+
+        fn as_ptr(&self) -> *const u32 {
+            self.words.as_ptr()
+        }
     }
 
     #[test]
@@ -1051,23 +643,22 @@ mod tests {
             reg.set_major(major).set_sub(sub);
             assert_eq!(reg.device_type(), expected_type);
             assert_eq!(reg.device_type().as_str(), expected_str);
-            assert_eq!(rust_coresight_device_type_from_raw(reg.reg_value()), expected_type as u32);
+            assert_eq!(rust_coresight_device_type_from_raw(reg.bits()), expected_type as u32);
         }
 
-        let unknown = DeviceTypeRegister::from_raw(0xff);
+        let unknown = DeviceTypeRegister::from(0xff);
         assert_eq!(unknown.device_type(), DeviceType::Unknown);
         assert_eq!(unknown.device_type().as_str(), "unknown");
     }
 
     #[test]
     fn class_id_decoding_and_strings() {
-        assert_eq!(class_id_to_string(0x0), "generic verification");
-        assert_eq!(class_id_to_string(0x1), "0x1 ROM table");
-        assert_eq!(class_id_to_string(0x9), "CoreSight");
-        assert_eq!(class_id_to_string(0xb), "peripheral test block");
-        assert_eq!(class_id_to_string(0xe), "generic IP");
-        assert_eq!(class_id_to_string(0xf), "non-standard");
-        assert_eq!(class_id_to_string(0x5), "unknown");
+        assert_eq!(class_id_to_string(ClassId::GenericVerification), "generic verification");
+        assert_eq!(class_id_to_string(ClassId::RomTable0x1), "0x1 ROM table");
+        assert_eq!(class_id_to_string(ClassId::CoreSight), "CoreSight");
+        assert_eq!(class_id_to_string(ClassId::PeripheralTestBlock), "peripheral test block");
+        assert_eq!(class_id_to_string(ClassId::GenericIp), "generic IP");
+        assert_eq!(class_id_to_string(ClassId::NonStandard), "non-standard");
     }
 
     #[test]
@@ -1081,52 +672,53 @@ mod tests {
         let mut pidr4 = PeripheralId4Register::default();
         pidr4.set_des2(0x4).set_size(0x0);
 
-        let mut io = FakeComponentIo {
-            pidr0: pidr0.reg_value(),
-            pidr1: pidr1.reg_value(),
-            pidr2: pidr2.reg_value(),
-            pidr4: pidr4.reg_value(),
-            devaff: 0x8000_0001,
-            devarch: 0,
-            devtype: 0,
-            cidr1: 0x90,
-        };
+        let mut page = FakeComponentPage::new();
+        page.write32(PIDR0.value, pidr0.bits());
+        page.write32(PIDR1.value, pidr1.bits());
+        page.write32(PIDR2.value, pidr2.bits());
+        page.write32(PIDR4.value, pidr4.bits());
+        page.write64(DEVAFF.value, 0x8000_0001);
+        page.write32(CIDR1.value, 0x90);
 
-        assert_eq!(get_designer(&mut io), arm::ARCHITECT);
-        assert_eq!(get_part_id(&mut io), arm::partid::CTI_400);
-        assert_eq!(DeviceAffinityRegister::read_from(&mut io).reg_value(), 0x8000_0001);
-        assert_eq!(ComponentIdRegister::read_from(&mut io).classid(), Ok(ClassId::CoreSight));
+        let bank = page.bank();
+        let bank64 = page.bank64();
+        // SAFETY: `page` is a valid, 8-byte aligned 4 KiB component buffer.
+        unsafe {
+            assert_eq!(get_designer(&bank), arm::ARCHITECT);
+            assert_eq!(get_part_id(&bank), arm::partid::CTI_400);
+            assert_eq!(rust_coresight_get_designer(page.as_ptr()), arm::ARCHITECT);
+            assert_eq!(rust_coresight_get_part_id(page.as_ptr()), arm::partid::CTI_400);
+            assert_eq!(bank64.at(DEVAFF).read().bits(), 0x8000_0001);
+            assert_eq!(bank.at(CIDR1).read().try_classid().ok(), Some(ClassId::CoreSight));
+        }
     }
 
     #[test]
     fn ffi_trampolines() {
         let mut len = 0usize;
-        // SAFETY: `&mut len` is a valid, aligned pointer.
-        let ptr = unsafe { rust_coresight_class_id_to_string(ClassId::CoreSight as u8, &mut len) };
-        // SAFETY: `rust_coresight_class_id_to_string` returns a static UTF-8 slice of length `len`.
-        let s = unsafe {
-            core::str::from_utf8_unchecked(core::slice::from_raw_parts(ptr.cast::<u8>(), len))
-        };
-        assert_eq!(s, "CoreSight");
+        // SAFETY: `&mut len` is a valid, aligned pointer, and the FFI functions return valid
+        // static UTF-8 slices of length `len`.
+        unsafe {
+            let ptr = rust_coresight_class_id_to_string(ClassId::CoreSight as u8, &mut len);
+            let s =
+                core::str::from_utf8_unchecked(core::slice::from_raw_parts(ptr.cast::<u8>(), len));
+            assert_eq!(s, "CoreSight");
 
-        // SAFETY: `&mut len` is a valid, aligned pointer.
-        let ptr = unsafe {
-            rust_coresight_device_type_to_string(DeviceType::CpuDebugLogic as u32, &mut len)
-        };
-        // SAFETY: `rust_coresight_device_type_to_string` returns a static UTF-8 slice of length
-        // `len`.
-        let s = unsafe {
-            core::str::from_utf8_unchecked(core::slice::from_raw_parts(ptr.cast::<u8>(), len))
-        };
-        assert_eq!(s, "CPU debug logic");
+            let ptr = rust_coresight_class_id_to_string(0x5, &mut len);
+            let s =
+                core::str::from_utf8_unchecked(core::slice::from_raw_parts(ptr.cast::<u8>(), len));
+            assert_eq!(s, "unknown");
 
-        // SAFETY: `&mut len` is a valid, aligned pointer.
-        let ptr = unsafe { rust_coresight_device_type_to_string(0xffff, &mut len) };
-        // SAFETY: `rust_coresight_device_type_to_string` returns a static UTF-8 slice of length
-        // `len`.
-        let s = unsafe {
-            core::str::from_utf8_unchecked(core::slice::from_raw_parts(ptr.cast::<u8>(), len))
-        };
-        assert_eq!(s, "unknown");
+            let ptr =
+                rust_coresight_device_type_to_string(DeviceType::CpuDebugLogic as u32, &mut len);
+            let s =
+                core::str::from_utf8_unchecked(core::slice::from_raw_parts(ptr.cast::<u8>(), len));
+            assert_eq!(s, "CPU debug logic");
+
+            let ptr = rust_coresight_device_type_to_string(0xffff, &mut len);
+            let s =
+                core::str::from_utf8_unchecked(core::slice::from_raw_parts(ptr.cast::<u8>(), len));
+            assert_eq!(s, "unknown");
+        }
     }
 }

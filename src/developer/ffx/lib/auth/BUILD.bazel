@@ -1,0 +1,39 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "auth",
+    srcs = ["src/lib.rs"],
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/developer/ffx:__subpackages__"],
+    deps = [
+        "//src/developer/ffx/lib/fho:lib",
+        # TODO(b/302078392): remove this when AuthFlowChoice is moved out of PBMS.
+        "//src/developer/ffx/lib/pbms:lib",
+        "//src/developer/lib/credentials:lib",
+        "//src/lib/gcs",
+        "//src/lib/structured_ui",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+host_rustc_test(
+    name = "auth_test",
+    crate = ":auth",
+    # Avoid colliding with other `auth_test` binaries in the GN output directory.
+    crate_name = "auth_lib_test",
+    visibility = ["//src/developer/ffx:__pkg__"],
+    deps = [
+        "//src/lib/fuchsia",
+    ],
+)

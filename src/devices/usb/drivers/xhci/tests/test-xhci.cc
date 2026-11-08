@@ -81,6 +81,9 @@ DeviceState::~DeviceState() = default;
 
 zx_status_t DeviceState::InitEndpoint(uint8_t ep_addr, EventRing* event_ring, fdf::MmioBuffer* mmio)
     __TA_REQUIRES(transaction_lock_) {
+  if (disconnecting_) {
+    return ZX_ERR_IO_NOT_PRESENT;
+  }
   rings_[ep_addr].emplace(hci_, device_id_, ep_addr);
   return rings_[ep_addr]->Init(event_ring, mmio);
 }

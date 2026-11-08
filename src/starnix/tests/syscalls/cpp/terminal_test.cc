@@ -719,13 +719,13 @@ TEST_F(Pty, SessionLeaderExitSendsSighup) {
       sigemptyset(&wait_mask);
       sigsuspend(&wait_mask);
       EXPECT_EQ(g_received_signal[SIGHUP], 1);
-      exit(0);
+      fflush(nullptr);
+      _exit(testing::Test::HasFailure());
     }
 
     ready.poker = {};
 
     ready.holder.hold();
-    exit(0);
   });
   ASSERT_TRUE(helper.WaitForChildren());
 }
@@ -755,7 +755,8 @@ TEST_F(Pty, SessionLeaderAndChildExitConcurrently) {
       ready.poker.poke();
 
       finished.holder.hold();
-      exit(0);
+      fflush(nullptr);
+      _exit(testing::Test::HasFailure());
     }
 
     ready.poker = {};
@@ -763,7 +764,6 @@ TEST_F(Pty, SessionLeaderAndChildExitConcurrently) {
 
     ready.holder.hold();
     finished.poker.poke();
-    exit(0);
   });
 
   ASSERT_TRUE(helper.WaitForChildren());
@@ -1223,8 +1223,7 @@ TEST(JobControl, SessionLeaderExitRevokesDevTtyForEntireSession) {
         });
 
     child_ready.holder.hold();
-    // Session leader exits.
-    exit(0);
+    // Session leader exits naturally.
   });
 
   ASSERT_TRUE(helper.WaitForChildren());

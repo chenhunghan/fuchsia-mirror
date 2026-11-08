@@ -834,6 +834,12 @@ impl<B: SplitByteSlice> Ipv6Packet<B> {
                 Nat64TranslationResult::Forward(v4_pkt_builder.wrap_body(common_serializer))
             }
 
+            Ipv6Proto::Proto(proto @ (IpProto::Ipv4Encap | IpProto::Ipv6Encap | IpProto::Esp)) => {
+                let v4_pkt_builder = v4_builder(Ipv4Proto::Proto(proto));
+                let common_serializer = Nat64Serializer::Other(self.body().into_serializer());
+                Nat64TranslationResult::Forward(v4_pkt_builder.wrap_body(common_serializer))
+            }
+
             Ipv6Proto::NoNextHeader => {
                 let v4_pkt_builder = v4_builder(Ipv4Proto::Other(Ipv6Proto::NoNextHeader.into()));
                 let common_serializer = Nat64Serializer::Other(self.body().into_serializer());

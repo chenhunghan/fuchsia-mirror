@@ -27,17 +27,11 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-import build_utils
-import remote_services_utils
+from build.bazel.scripts import build_utils, remote_services_utils
+from build.rbe import rbe_profile, rbe_settings
 
 _THIS_SCRIPT = Path(__file__)
 _SCRIPT_DIR = _THIS_SCRIPT.resolve().parent
-_FUCHSIA_DIR = _SCRIPT_DIR.parent.parent.parent
-
-if str(_FUCHSIA_DIR) not in sys.path:
-    sys.path.insert(0, str(_FUCHSIA_DIR))
-
-from build.rbe import rbe_settings
 
 
 def _main_arg_parser() -> argparse.ArgumentParser:
@@ -74,6 +68,7 @@ _MAIN_ARG_PARSER = _main_arg_parser()
 def force_symlink(src: Path, dest: Path) -> None:
     if src.exists() or src.is_symlink():
         src.unlink()
+    src.parent.mkdir(parents=True, exist_ok=True)
     src.symlink_to(dest)
 
 
@@ -146,7 +141,9 @@ def main(argv: Sequence[str]) -> int:
     (workspace_dir / "third_party").mkdir(parents=True, exist_ok=True)
     force_symlink(
         workspace_dir / "third_party" / "bazel_skylib",
-        fuchsia_dir / "third_party" / "bazel_vendor/bazel_skylib+",
+        fuchsia_dir
+        / "third_party"
+        / "bazel_vendor/fuchsia_in_tree/bazel_skylib+",
     )
 
     # copy/link over build files (no template expansion needed)
@@ -166,6 +163,11 @@ def main(argv: Sequence[str]) -> int:
         workspace_dir / "expect_pwd.txt",
         _SCRIPT_DIR / "expect_pwd.txt",
     )
+
+    # Symlink active build service profiles so fuchsia_platform_build.bzl
+    # can resolve active RBE configuration (container image and worker pools).
+    for link in rbe_profile.workspace_symlinks(fuchsia_dir):
+        force_symlink(workspace_dir / link.workspace_relpath, link.target_path)
 
     # Generate args.json expected by fuchsia_platform_build.bzl
     write_file(workspace_dir / "fuchsia_build_generated" / "args.json", "{}")

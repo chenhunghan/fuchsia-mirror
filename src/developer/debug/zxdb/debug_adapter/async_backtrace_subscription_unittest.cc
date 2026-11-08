@@ -54,8 +54,6 @@ class RaceConditionAsyncTaskProvider : public AsyncTaskProvider {
   std::vector<SavedCallback> callbacks_;
 };
 
-}  // namespace
-
 TEST_F(AsyncBacktraceSubscriptionTest, SingleThreadLifecycle) {
   InitializeDebugging();
 
@@ -522,5 +520,148 @@ TEST_F(AsyncBacktraceSubscriptionTest, ResumingThreadCancelsPendingBacktracesFor
 
   EXPECT_EQ(updates.size(), 0u);
 }
+
+TEST_F(AsyncBacktraceSubscriptionTest, CppDispatcherSingleThreadLifecycle) {
+  InitializeDebugging();
+
+  std::vector<dap::AsyncBacktraceUpdate> updates;
+  client().registerHandler(
+      [&](const dap::AsyncBacktraceUpdate& event) { updates.push_back(event); });
+
+  Process* process = InjectProcessWithModule(kProcessKoid, 0x1000);
+  process->AddAsyncTaskProviderForTesting(ExprLanguage::kC,
+                                          std::make_unique<MockAsyncTaskProvider>(fake_file_path_));
+  RunClient();
+
+  InjectThread(kProcessKoid, kThreadKoid);
+
+  context().OnStreamReadable();
+  loop().RunUntilNoTasks();
+  RunPendingClientCalls();
+
+  // Expect an update from ThreadObserver::DidCreateThread.
+  ASSERT_EQ(updates.size(), 1u);
+  EXPECT_EQ(updates[0].id, static_cast<double>(kThreadKoid));
+  EXPECT_TRUE(updates[0].tasks.has_value());
+  EXPECT_EQ(updates[0].tasks.value().size(), 0u);
+
+  updates.clear();
+  Thread* thread = process->GetThreadFromKoid(kThreadKoid);
+  ASSERT_NE(thread, nullptr);
+
+  std::vector<std::unique_ptr<Frame>> frames;
+  auto cu = fxl::MakeRefCounted<CompileUnit>(DwarfTag::kCompileUnit, fxl::WeakPtr<ModuleSymbols>(),
+                                             fxl::RefPtr<DwarfUnit>(), DwarfLang::kCpp, "driver.cc",
+                                             std::optional<uint64_t>());
+  auto func = fxl::MakeRefCounted<Function>(DwarfTag::kSubprogram);
+  func->set_assigned_name("mock_cpp_dispatcher");
+  SymbolTestParentSetter parent_setter(func, cu);
+  Location loc(0x1234, FileLine(), 0, SymbolContext::ForRelativeAddresses(), func);
+  frames.push_back(std::make_unique<MockFrame>(&session(), thread, loc, 0x1000));
+
+  InjectExceptionWithStack(kProcessKoid, kThreadKoid, debug_ipc::ExceptionType::kSingleStep,
+                           std::move(frames), false);
+
+  EXPECT_TRUE(thread->CurrentStopSupportsFrames());
+
+  context().OnStreamReadable();
+  loop().RunUntilNoTasks();
+  RunPendingClientCalls();
+
+  // Expect an update from ThreadObserver::OnThreadStopped with C++ async backtrace.
+  ASSERT_EQ(updates.size(), 1u);
+  EXPECT_EQ(updates[0].id, static_cast<double>(kThreadKoid));
+  EXPECT_TRUE(updates[0].tasks.has_value());
+  EXPECT_EQ(updates[0].tasks.value().size(), 2u);
+  ASSERT_TRUE(updates[0].tasks.value()[0].id.has_value());
+  EXPECT_EQ(updates[0].tasks.value()[0].id.value(), "0x1");
+  EXPECT_EQ(updates[0].tasks.value()[0].name, "root");
+
+  EXPECT_FALSE(updates[0].tasks.value()[1].id.has_value());
+  EXPECT_EQ(updates[0].tasks.value()[1].name, "zero_id_task");
+}
+
+TEST_F(AsyncBacktraceSubscriptionTest, CppNonDriverFramesAndImmediateDestruction) {
+  InitializeDebugging();
+
+  std::vector<dap::AsyncBacktraceUpdate> updates;
+  client().registerHandler(
+      [&](const dap::AsyncBacktraceUpdate& event) { updates.push_back(event); });
+
+  Process* process = InjectProcessWithModule(kProcessKoid, 0x1000);
+  auto provider = std::make_unique<RaceConditionAsyncTaskProvider>();
+  auto* provider_ptr = provider.get();
+  process->AddAsyncTaskProviderForTesting(ExprLanguage::kC, std::move(provider));
+  RunClient();
+
+  InjectThread(kProcessKoid, kThreadKoid);
+
+  context().OnStreamReadable();
+  loop().RunUntilNoTasks();
+  RunPendingClientCalls();
+
+  // Expect update from ThreadObserver::DidCreateThread.
+  ASSERT_EQ(updates.size(), 1u);
+  EXPECT_EQ(updates[0].id, static_cast<double>(kThreadKoid));
+  EXPECT_TRUE(updates[0].tasks.has_value());
+  EXPECT_EQ(updates[0].tasks.value().size(), 0u);
+
+  updates.clear();
+  Thread* thread = process->GetThreadFromKoid(kThreadKoid);
+  ASSERT_NE(thread, nullptr);
+
+  std::vector<std::unique_ptr<Frame>> frames;
+  auto cu = fxl::MakeRefCounted<CompileUnit>(DwarfTag::kCompileUnit, fxl::WeakPtr<ModuleSymbols>(),
+                                             fxl::RefPtr<DwarfUnit>(), DwarfLang::kCpp, "main.cc",
+                                             std::optional<uint64_t>());
+  auto func = fxl::MakeRefCounted<Function>(DwarfTag::kSubprogram);
+  func->set_assigned_name("main");
+  SymbolTestParentSetter parent_setter(func, cu);
+  Location loc(0x1234, FileLine("main.cc", 20), 0, SymbolContext::ForRelativeAddresses(), func);
+  frames.push_back(std::make_unique<MockFrame>(&session(), thread, loc, 0x1000));
+
+  InjectExceptionWithStack(kProcessKoid, kThreadKoid, debug_ipc::ExceptionType::kSingleStep,
+                           std::move(frames), true);
+
+  context().OnStreamReadable();
+  loop().RunUntilNoTasks();
+  RunPendingClientCalls();
+
+  // The async backtrace collection was triggered and is now pending in provider_ptr->callbacks_.
+  ASSERT_EQ(provider_ptr->callbacks_.size(), 1u);
+
+  // Immediately destroy the thread before the callback completes.
+  debug_ipc::NotifyThreadExiting notify_exit;
+  notify_exit.record.id = {.process = kProcessKoid, .thread = kThreadKoid};
+  notify_exit.record.state = debug_ipc::ThreadRecord::State::kDead;
+  session().DispatchNotifyThreadExiting(notify_exit);
+
+  context().OnStreamReadable();
+  loop().RunUntilNoTasks();
+  RunPendingClientCalls();
+
+  // Expect an update from ThreadObserver::WillDestroyThread (tasks omitted).
+  ASSERT_EQ(updates.size(), 1u);
+  EXPECT_EQ(updates[0].id, static_cast<double>(kThreadKoid));
+  EXPECT_FALSE(updates[0].tasks.has_value());
+
+  updates.clear();
+
+  // Now execute the late callback. It should be safely ignored because the subscription
+  // cancelled the pending backtrace and thread was destroyed.
+  auto cb = std::move(provider_ptr->callbacks_[0]);
+  std::vector<std::unique_ptr<AsyncTask>> tasks;
+  tasks.push_back(std::make_unique<MockAsyncTask>(cb.session, 42, "late_task"));
+  cb.cb(Err(), std::move(tasks));
+
+  context().OnStreamReadable();
+  loop().RunUntilNoTasks();
+  RunPendingClientCalls();
+
+  // No spurious updates should be sent.
+  EXPECT_EQ(updates.size(), 0u);
+}
+
+}  // namespace
 
 }  // namespace zxdb

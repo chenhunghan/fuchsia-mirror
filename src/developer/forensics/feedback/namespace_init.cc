@@ -11,6 +11,7 @@
 #include "src/developer/forensics/feedback_data/system_log_recorder/encoding/production_encoding.h"
 #include "src/developer/forensics/feedback_data/system_log_recorder/encoding/version.h"
 #include "src/developer/forensics/feedback_data/system_log_recorder/reader.h"
+#include "src/developer/forensics/utils/cobalt/metrics.h"
 #include "src/lib/files/file.h"
 #include "src/lib/files/path.h"
 #include "src/lib/fxl/strings/join_strings.h"
@@ -63,6 +64,7 @@ bool TestAndSetNotAFdr(const std::string& not_a_fdr_file) {
 }
 
 void CreatePreviousLogsFile(cobalt::Logger* cobalt, const StorageSize max_decompressed_size,
+                            const std::optional<zx::duration> last_boot_uptime,
                             const std::string& dir, const std::string& write_path) {
   // We read the set of /cache files into a single /tmp file.
   //
@@ -71,26 +73,56 @@ void CreatePreviousLogsFile(cobalt::Logger* cobalt, const StorageSize max_decomp
   // large enough to be serviced by scudo's secondary allocator and the memory can be decommitted
   // immediately after it's freed.
   feedback_data::system_log_recorder::ProductionDecoder decoder(max_decompressed_size.ToBytes());
-  float compression_ratio;
-  const fit::result<feedback_data::system_log_recorder::ReaderError, std::string> concatenated_log =
-      feedback_data::system_log_recorder::Concatenate(dir, max_decompressed_size, &decoder,
-                                                      &compression_ratio);
-  if (concatenated_log.is_error()) {
+  const fit::result<feedback_data::system_log_recorder::ReaderError,
+                    feedback_data::system_log_recorder::ConcatenateResult>
+      result =
+          feedback_data::system_log_recorder::Concatenate(dir, max_decompressed_size, &decoder);
+  if (result.is_error()) {
     FX_LOGS(WARNING) << "Could not concatenate log files";
     return;
   }
 
-  if (!files::WriteFile(write_path, *concatenated_log)) {
+  if (!files::WriteFile(write_path, result->logs)) {
     FX_LOGS(WARNING) << "Could not write the log file: " << write_path;
     return;
   }
 
   FX_LOGS(INFO) << fxl::StringPrintf(
       "Found logs from previous boot cycle (compression ratio %.2f), available at %s\n",
-      compression_ratio, write_path.c_str());
+      result->compression_ratio, write_path.c_str());
 
   cobalt->LogCount(feedback_data::system_log_recorder::ToCobalt(decoder.GetEncodingVersion()),
-                   (uint64_t)(compression_ratio * 100));
+                   (uint64_t)(result->compression_ratio * 100));
+
+  if (result->last_timestamp.has_value() && last_boot_uptime.has_value()) {
+    const int64_t delta_ms =
+        (zx::time_boot(last_boot_uptime->get()) - *result->last_timestamp).to_msecs();
+
+    cobalt->LogEvent(cobalt::Event(
+        cobalt::EventType::kInteger, cobalt_registry::kPreviousBootLogLastTimestampDeltaMetricId,
+        {cobalt_registry::FeedbackMetricDimensionProvider::Feedback}, delta_ms));
+  }
+
+  if (result->is_at_capacity) {
+    cobalt->LogEvent(
+        cobalt::Event(cobalt::EventType::kInteger,
+                      cobalt_registry::kPreviousBootLogDeduplicatedMessageCountAtCapacityMetricId,
+                      {cobalt_registry::FeedbackMetricDimensionProvider::Feedback},
+                      result->deduplicated_message_count));
+
+    cobalt->LogEvent(cobalt::Event(cobalt::EventType::kInteger,
+                                   cobalt_registry::kPreviousBootLogMessageCountAtCapacityMetricId,
+                                   {cobalt_registry::FeedbackMetricDimensionProvider::Feedback},
+                                   result->message_count));
+
+    if (result->first_timestamp.has_value() && result->last_timestamp.has_value() &&
+        *result->last_timestamp >= *result->first_timestamp) {
+      const zx::duration duration = *result->last_timestamp - *result->first_timestamp;
+      cobalt->LogEvent(cobalt::Event(
+          cobalt::EventType::kInteger, cobalt_registry::kPreviousBootLogDurationAtCapacityMetricId,
+          {cobalt_registry::FeedbackMetricDimensionProvider::Feedback}, duration.to_mins()));
+    }
+  }
 
   // Clean up the /cache files now that they have been concatenated into a single /tmp file.
   files::DeletePath(dir, /*recursive=*/true);

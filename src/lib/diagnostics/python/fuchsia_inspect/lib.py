@@ -64,7 +64,7 @@ class InspectMetadata:
     component_url: str | None = None
 
     @staticmethod
-    def from_dict(data: dict[str, typing.Any]) -> "InspectMetadata":
+    def from_dict(data: dict[str, typing.Any]) -> InspectMetadata:
         """Process the dictionary as an InspectMetadata field.
 
         Args:
@@ -94,7 +94,7 @@ class InspectData:
     version: int
 
     @staticmethod
-    def from_dict(data: dict[str, typing.Any]) -> "InspectData":
+    def from_dict(data: dict[str, typing.Any]) -> InspectData:
         """Process the dictionary as InspectData.
 
         Args:
@@ -133,7 +133,7 @@ class InspectDataCollection:
     data: list[InspectData]
 
     @staticmethod
-    def from_list(lst: list[dict[str, typing.Any]]) -> "InspectDataCollection":
+    def from_list(lst: list[dict[str, typing.Any]]) -> InspectDataCollection:
         """Process a list into a collection.
 
         Args:
@@ -145,7 +145,7 @@ class InspectDataCollection:
         return InspectDataCollection([InspectData.from_dict(d) for d in lst])
 
     @staticmethod
-    def from_json_list(json_str: str) -> "InspectDataCollection":
+    def from_json_list(json_str: str) -> InspectDataCollection:
         """Process a string as JSON and turn into a collection.
 
         Args:

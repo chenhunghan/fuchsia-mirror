@@ -6,8 +6,8 @@ import("//build/components.gni")
 import("//build/rust/rustc_binary.gni")
 import("//build/rust/rustc_test.gni")
 
-# Kept in GN because `dns-tests-ns3` packages
-# `//src/connectivity/network/netstack3:component-debug`, which has no Bazel
+# Kept in GN because `dns-tests-ns3` subpackages
+# `//src/connectivity/network/netstack3:package-debug`, which has no Bazel
 # build yet.
 fuchsia_component("dns_lib_test") {
   testonly = true
@@ -17,7 +17,7 @@ fuchsia_component("dns_lib_test") {
 
 fuchsia_test_package("dns-tests-ns3") {
   test_components = [ ":dns_lib_test" ]
-  deps = [ "//src/connectivity/network/netstack3:component-debug" ]
+  subpackages = [ "//src/connectivity/network/netstack3:package-debug" ]
 }
 
 bin_base = {
@@ -158,10 +158,13 @@ rustc_library("lib") {
     "//src/lib/fuchsia-sync",
     "//src/lib/network/fidl_fuchsia_net_ext",
     "//third_party/rust_crates:futures",
+    "//third_party/rust_crates:hickory-net",
+    "//third_party/rust_crates:hickory-resolver",
     "//third_party/rust_crates:trust-dns-proto",
     "//third_party/rust_crates:trust-dns-resolver",
   ]
 }
+
 rustc_test("lib_test") {
   sources = [
     "src/async_resolver.rs",
@@ -180,12 +183,15 @@ rustc_test("lib_test") {
            "//src/lib/fuchsia-sync",
            "//src/lib/network/fidl_fuchsia_net_ext",
            "//third_party/rust_crates:futures",
+           "//third_party/rust_crates:hickory-net",
+           "//third_party/rust_crates:hickory-resolver",
            "//third_party/rust_crates:trust-dns-proto",
            "//third_party/rust_crates:trust-dns-resolver",
          ] +
          [
            "//src/connectivity/lib/net-declare",
            "//src/lib/fuchsia",
+           "//third_party/rust_crates:hickory-proto",
          ]
   configs += [ "//build/config/rust/lints:deny_unused_results" ]
   output_name = "dns_lib_test"

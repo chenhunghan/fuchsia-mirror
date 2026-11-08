@@ -7,28 +7,33 @@
 #![no_std]
 
 use bitmap::{Bitmap, FixedStorage, RawBitmapGeneric};
-use ksync::{KMutex, guarded, lock};
+use ksync::{KMutex, RawLock, guarded, lock};
 use pin_init::{PinInit, pin_init};
 use zx_status::Status;
 
-// Allocates architecture-specific resource IDs.
-//
-// IDs of type `T` will be allocated in the range [`MIN_ID`, `MAX_ID`).
-//
-// `N` is the number of `usize` words required to back the bitmap for `MAX_ID` bits.
-// We must pass `N` explicitly because stable Rust does not support using generic
-// parameters (like `MAX_ID`) in const operations within type signatures (e.g.
-// `FixedStorage<{ (MAX_ID - 1) / 64 + 1 }>`). Doing so requires the unstable
-// `generic_const_exprs` feature.
+/// Allocates architecture-specific resource IDs.
+///
+/// IDs of type `T` will be allocated in the range [`MIN_ID`, `MAX_ID`).
+///
+/// `N` is the number of `usize` words required to back the bitmap for `MAX_ID` bits.
+/// We must pass `N` explicitly because stable Rust does not support using generic
+/// parameters (like `MAX_ID`) in const operations within type signatures (e.g.
+/// `FixedStorage<{ (MAX_ID - 1) / 64 + 1 }>`). Doing so requires the unstable
+/// `generic_const_exprs` feature.
+///
+/// `M` is the raw lock type of the allocator's mutex. There is no default since the kernel's
+/// `TrackedMutex` is not visible to this crate; the kernel supplies its `TrackedMutex`.
 #[guarded]
+#[repr(C)]
 pub struct IdAllocator<
     T: Copy + Ord + TryFrom<usize> + TryInto<usize> + 'static,
+    M: RawLock,
     const MAX_ID: usize,
     const MIN_ID: usize,
     const N: usize,
 > {
     #[mutex]
-    mutex: KMutex,
+    mutex: KMutex<M>,
 
     /// Hint for where the next search starts.  Held as a `usize` because it is
     /// only ever a bitmap index; the C++ holds a `T` and widens it implicitly.
@@ -41,10 +46,14 @@ pub struct IdAllocator<
 
 impl<
     T: Copy + Ord + TryFrom<usize> + TryInto<usize> + 'static,
+    M: RawLock,
     const MAX_ID: usize,
     const MIN_ID: usize,
     const N: usize,
-> IdAllocator<T, MAX_ID, MIN_ID, N>
+> IdAllocator<T, M, MAX_ID, MIN_ID, N>
+where
+    // `M` must be a mutex-like lock which takes no acquisition arguments.
+    M::DefaultPolicy: ksync::ExclusiveLockPolicy<M, AcquireArgs = ()>,
 {
     const _STATIC_ASSERT: () = {
         assert!(MAX_ID > MIN_ID, "MAX_ID must be greater than MIN_ID");
@@ -128,6 +137,7 @@ impl<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ksync::RawMutex;
     use pin_init::stack_try_pin_init;
 
     #[test]
@@ -135,7 +145,7 @@ mod tests {
         const K_MAX_ID: usize = 8;
         const K_MIN_ID: usize = 1;
 
-        stack_try_pin_init!(let allocator = IdAllocator::<u8, 254, K_MIN_ID, 4>::init());
+        stack_try_pin_init!(let allocator = IdAllocator::<u8, RawMutex, 254, K_MIN_ID, 4>::init());
         let allocator = allocator.unwrap();
 
         // Reset to invalid value, before using a valid value.
@@ -167,7 +177,9 @@ mod tests {
         const K_MIN_ID: usize = 2;
         const K_SHRUNK_MAX: usize = 8;
 
-        stack_try_pin_init!(let allocator = IdAllocator::<u16, 65536, K_MIN_ID, 1024>::init());
+        stack_try_pin_init!(
+            let allocator = IdAllocator::<u16, RawMutex, 65536, K_MIN_ID, 1024>::init()
+        );
         let allocator = allocator.unwrap();
 
         // Advance `next` past `K_SHRUNK_MAX` before shrinking via `reset`.

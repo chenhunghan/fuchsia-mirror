@@ -120,6 +120,42 @@ impl ValidatorLockClassState {
     }
 }
 
+/// An opaque type representing the C++ `lockdep::ThreadLockState` class.
+#[cfg(with_lock_dep)]
+#[repr(transparent)]
+pub struct ThreadLockState(zr::Opaque<percpu_bindings::lockdep_ThreadLockState>);
+
+#[cfg(with_lock_dep)]
+impl ThreadLockState {
+    /// Constructs a default `ThreadLockState` in place.
+    #[inline]
+    pub fn init() -> impl pin_init::PinInit<Self, core::convert::Infallible> {
+        zr::pin_init_ffi!(cpp_lockdep_thread_lock_state_init)
+    }
+}
+
+#[cfg(with_lock_dep)]
+#[allow(improper_ctypes)]
+unsafe extern "C" {
+    fn cpp_lockdep_thread_lock_state_init(out: *mut core::mem::MaybeUninit<ThreadLockState>);
+    fn cpp_lockdep_system_init_thread_lock_state(state: *mut ThreadLockState);
+}
+
+/// Initializes an instance of [`ThreadLockState`] (`lockdep::SystemInitThreadLockState`).
+///
+/// # Safety
+///
+/// Must only be called once during single-threaded construction before `state` is accessed
+/// concurrently.
+#[cfg(with_lock_dep)]
+#[inline]
+pub unsafe fn system_init_thread_lock_state(state: &ThreadLockState) {
+    // SAFETY: `state.0.get()` yields a valid mutable pointer via `zr::Opaque` (`UnsafeCell`) to
+    // `#[repr(transparent)]` `ThreadLockState`, and the caller guarantees exclusive access during
+    // construction.
+    unsafe { cpp_lockdep_system_init_thread_lock_state(state.0.get().cast::<ThreadLockState>()) };
+}
+
 /// Triggers an asynchronous loop detection pass (`lockdep::SystemTriggerLoopDetection()`).
 pub fn system_trigger_loop_detection() {
     // SAFETY: Safe FFI call into `lockdep::SystemTriggerLoopDetection`.

@@ -130,7 +130,9 @@ impl Graveyard {
         while let Some(message) = receiver.next().await {
             match message {
                 Message::Tombstone(store_id, object_id, attribute_id) => {
-                    let Some(fs) = self.filesystem.upgrade() else { return };
+                    let Some(fs) = self.filesystem.upgrade() else {
+                        return;
+                    };
                     let res = if let Some(attribute_id) = attribute_id {
                         fs.tombstone_attribute(store_id, object_id, attribute_id).await
                     } else {
@@ -147,7 +149,9 @@ impl Graveyard {
                     }
                 }
                 Message::Trim(store_id, object_id) => {
-                    let Some(fs) = self.filesystem.upgrade() else { return };
+                    let Some(fs) = self.filesystem.upgrade() else {
+                        return;
+                    };
                     if let Err(e) = Self::trim(&fs, store_id, object_id).await {
                         error!(error:? = e, store_id, oid = object_id; "Tombstone error");
                     }
@@ -492,10 +496,9 @@ mod tests {
         let (device, _object_ids) = {
             let fs = FxFilesystemBuilder::new()
                 .skip_initial_reap(true)
-                .format(true)
-                .open(device)
+                .format(device)
                 .await
-                .expect("open failed");
+                .expect("format failed");
             let root_store = fs.root_store();
 
             let mut object_ids = Vec::new();
@@ -758,18 +761,21 @@ mod tests {
             let mut transaction = handle.new_transaction().await.expect("new_transaction failed");
 
             // `write_new_attr` splits writes exceeding `WRITE_ATTR_BATCH_SIZE` into batches across
-            // multiple transactions, adding the attribute to the graveyard in the first
-            // transaction and removing it in the final (uncommitted) transaction. This write spans
-            // three transactions; dropping the final transaction below mimics the write being
-            // interrupted by `filesystem.close()`.
-            handle
+            // multiple transactions, adding the attribute to the graveyard in the first transaction
+            // and removing it in the final (uncommitted) transaction. This write spans three
+            // transactions; defusing the returned guard before dropping the final transaction below
+            // mimics the write being interrupted by an unclean shutdown.
+            if let Some(guard) = handle
                 .write_new_attr(
                     &mut transaction,
                     AttributeId::TEST_ID,
                     &vec![0; 3 * WRITE_ATTR_BATCH_SIZE],
                 )
                 .await
-                .expect("failed to write attribute");
+                .expect("failed to write attribute")
+            {
+                scopeguard::ScopeGuard::into_inner(guard);
+            }
 
             handle.object_id()
             // Drop the transaction to simulate interrupting the attribute creation as well as to
@@ -857,10 +863,9 @@ mod tests {
         let fs = FxFilesystemBuilder::new()
             .hooks(fs_hooks)
             .journal_options(JournalOptions { reclaim_size, ..Default::default() })
-            .format(true)
-            .open(device)
+            .format(device)
             .await
-            .expect("open failed");
+            .expect("format failed");
 
         let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
         let num_stores = 9;

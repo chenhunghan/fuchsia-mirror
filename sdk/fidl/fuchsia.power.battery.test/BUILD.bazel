@@ -9,10 +9,12 @@ package(default_applicable_licenses = ["//:license"])
 fidl_library(
     name = "fuchsia.power.battery.test",
     srcs = [
+        "governor.fidl",
         "simulator.fidl",
     ],
     visibility = ["//visibility:public"],
     deps = [
+        "//sdk/fidl/fuchsia.hardware.power.charger",
         "//sdk/fidl/fuchsia.power.battery",
     ],
 )

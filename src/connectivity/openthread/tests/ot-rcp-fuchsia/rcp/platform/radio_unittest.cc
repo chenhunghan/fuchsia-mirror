@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <optional>
 
 #include <gtest/gtest.h>
 #include <openthread/platform/radio.h>
@@ -96,10 +97,10 @@ class RadioTest : public ::testing::Test {
  protected:
   void SetUp() override {
     SubMac() = FakeSubMac();
-    Platform::Create(loop_.dispatcher(), kNodeId);
+    platform_.emplace(loop_.dispatcher(), kNodeId);
   }
 
-  void TearDown() override { Platform::Destroy(); }
+  void TearDown() override { platform_.reset(); }
 
   // Brings the radio to the Receive state
   void EnableAndReceive() {
@@ -120,6 +121,8 @@ class RadioTest : public ::testing::Test {
   }
 
   async::TestLoop loop_;
+  // Declared after `loop_` so that it is destroyed first, even if TearDown() does not run.
+  std::optional<Platform> platform_;
 };
 
 // State machine

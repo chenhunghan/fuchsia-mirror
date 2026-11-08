@@ -22,7 +22,6 @@ CodecInputItem::CodecInputItem(const CodecPacket* packet) : packet_(packet) {
 
 CodecInputItem CodecInputItem::Invalid() { return CodecInputItem(); }
 
-// Don't std::move() the caller's format_details, for now.
 CodecInputItem CodecInputItem::FormatDetails(const fuchsia::media::FormatDetails& format_details) {
   return CodecInputItem(format_details);
 }
@@ -43,6 +42,11 @@ bool CodecInputItem::is_packet() const { return is_valid() && !!packet_; }
 bool CodecInputItem::is_end_of_stream() const { return is_valid() && !format_details_ && !packet_; }
 
 const fuchsia::media::FormatDetails& CodecInputItem::format_details() {
+  ZX_DEBUG_ASSERT(is_format_details());
+  return *format_details_;
+}
+
+fuchsia::media::FormatDetails& CodecInputItem::mutable_format_details() {
   ZX_DEBUG_ASSERT(is_format_details());
   return *format_details_;
 }

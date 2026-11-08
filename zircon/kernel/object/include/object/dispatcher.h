@@ -32,6 +32,7 @@
 #include <object/signal_observer.h>
 
 class Dispatcher;
+class PortDispatcher;
 
 extern "C" {
 void cpp_dispatcher_on_zero_handles(Dispatcher* disp);
@@ -53,7 +54,17 @@ bool cpp_dispatcher_is_waitable(const Dispatcher* disp);
 void cpp_dispatcher_cancel(Dispatcher* disp, const void* handle);
 bool cpp_dispatcher_cancel_by_key(Dispatcher* disp, const void* handle, const void* port,
                                   uint64_t key);
-void cpp_dispatcher_set_owner(Dispatcher* disp, zx_koid_t new_owner);
+zx_signals_t cpp_dispatcher_poll_signals(const Dispatcher* disp);
+
+typedef void (*cpp_callback_signal_observer_on_match_fn)(const void* ctx, zx_signals_t signals);
+typedef void (*cpp_callback_signal_observer_on_cancel_fn)(const void* ctx, zx_signals_t signals);
+typedef bool (*cpp_callback_signal_observer_matches_key_fn)(const void* ctx, const void* port,
+                                                            uint64_t key);
+SignalObserver* cpp_callback_signal_observer_init(
+    void* storage, const void* ctx, cpp_callback_signal_observer_on_match_fn on_match,
+    cpp_callback_signal_observer_on_cancel_fn on_cancel,
+    cpp_callback_signal_observer_matches_key_fn matches_key);
+void cpp_callback_signal_observer_destroy(SignalObserver* observer);
 }
 
 template <typename T>
@@ -114,36 +125,11 @@ struct CanaryTag;
   };
 
 DECLARE_SOLO_DISPTAG(ProcessDispatcher, ZX_OBJ_TYPE_PROCESS, "PROC")
-DECLARE_DISPTAG(ThreadDispatcher, ZX_OBJ_TYPE_THREAD)
 DECLARE_DISPTAG(VmObjectDispatcher, ZX_OBJ_TYPE_VMO)
 DECLARE_DISPTAG(ChannelDispatcher, ZX_OBJ_TYPE_CHANNEL)
-DECLARE_DISPTAG(EventDispatcher, ZX_OBJ_TYPE_EVENT)
-DECLARE_SOLO_DISPTAG(PortDispatcher, ZX_OBJ_TYPE_PORT, "PORT")
-DECLARE_DISPTAG(InterruptDispatcher, ZX_OBJ_TYPE_INTERRUPT)
-DECLARE_DISPTAG(LogDispatcher, ZX_OBJ_TYPE_LOG)
 DECLARE_DISPTAG(SocketDispatcher, ZX_OBJ_TYPE_SOCKET)
-DECLARE_DISPTAG(ResourceDispatcher, ZX_OBJ_TYPE_RESOURCE)
-DECLARE_DISPTAG(EventPairDispatcher, ZX_OBJ_TYPE_EVENTPAIR)
 DECLARE_SOLO_DISPTAG(JobDispatcher, ZX_OBJ_TYPE_JOB, "JOBD")
-DECLARE_DISPTAG(VmAddressRegionDispatcher, ZX_OBJ_TYPE_VMAR)
-DECLARE_DISPTAG(FifoDispatcher, ZX_OBJ_TYPE_FIFO)
-DECLARE_DISPTAG(GuestDispatcher, ZX_OBJ_TYPE_GUEST)
-DECLARE_DISPTAG(VcpuDispatcher, ZX_OBJ_TYPE_VCPU)
-DECLARE_DISPTAG(TimerDispatcher, ZX_OBJ_TYPE_TIMER)
-DECLARE_DISPTAG(IommuDispatcher, ZX_OBJ_TYPE_IOMMU)
-DECLARE_DISPTAG(BusTransactionInitiatorDispatcher, ZX_OBJ_TYPE_BTI)
-DECLARE_DISPTAG(ProfileDispatcher, ZX_OBJ_TYPE_PROFILE)
-DECLARE_DISPTAG(PinnedMemoryTokenDispatcher, ZX_OBJ_TYPE_PMT)
-DECLARE_DISPTAG(SuspendTokenDispatcher, ZX_OBJ_TYPE_SUSPEND_TOKEN)
-DECLARE_DISPTAG(PagerDispatcher, ZX_OBJ_TYPE_PAGER)
-DECLARE_DISPTAG(ExceptionDispatcher, ZX_OBJ_TYPE_EXCEPTION)
-DECLARE_DISPTAG(ClockDispatcher, ZX_OBJ_TYPE_CLOCK)
-DECLARE_DISPTAG(StreamDispatcher, ZX_OBJ_TYPE_STREAM)
-DECLARE_DISPTAG(MsiDispatcher, ZX_OBJ_TYPE_MSI)
 DECLARE_DISPTAG(IoBufferDispatcher, ZX_OBJ_TYPE_IOB)
-DECLARE_DISPTAG(CounterDispatcher, ZX_OBJ_TYPE_COUNTER)
-DECLARE_DISPTAG(IoBufferSharedRegionDispatcher, ZX_OBJ_TYPE_IOB_SHARED_REGION)
-DECLARE_DISPTAG(SamplerDispatcher, ZX_OBJ_TYPE_SAMPLER)
 
 #undef DECLARE_SOLO_DISPTAG
 #undef DECLARE_DISPTAG
@@ -315,11 +301,6 @@ class Dispatcher : private fbl::RefCountedUpgradeable<Dispatcher>,
     }
   };
 
-  // Called whenever the object is bound to a new process. The |new_owner| is
-  // the koid of the new process. It is only overridden for objects where a single
-  // owner makes sense.
-  virtual void set_owner(zx_koid_t new_owner) {}
-
   // Poll the currently active signals on this object.
   //
   // By the time the result of the function is inspected, the signals may have already
@@ -482,27 +463,10 @@ class SoloDispatcher : public Dispatcher {
   mutable DECLARE_CRITICAL_MUTEX(SoloDispatcher, Flags) lock_;
 };
 
-// DownCastDispatcher checks if a RefPtr<Dispatcher> points to a
-// dispatcher of a given dispatcher subclass T and, if so, moves the
-// reference to a RefPtr<T>, otherwise it leaves the
-// RefPtr<Dispatcher> alone.  Must be called with a pointer to a valid
-// (non-null) dispatcher.
-
-// Dispatcher -> FooDispatcher
-template <typename T>
-fbl::RefPtr<T> DownCastDispatcher(fbl::RefPtr<Dispatcher>* disp) {
-  return (likely(DispatchTag<T>::ID == (*disp)->get_type()))
-             ? fbl::RefPtr<T>::Downcast(ktl::move(*disp))
-             : nullptr;
-}
-
-// The same, but for Dispatcher* and FooDispatcher* instead of RefPtr.
-
-// Dispatcher -> FooDispatcher
-template <typename T>
-T* DownCastDispatcher(Dispatcher* disp) {
-  return (likely(DispatchTag<T>::ID == disp->get_type())) ? static_cast<T*>(disp) : nullptr;
-}
+// DownCastDispatcher checks if a const Dispatcher* points to a
+// dispatcher of a given dispatcher subclass T and, if so, casts the
+// pointer to const T*, otherwise it returns nullptr. Must be called
+// with a pointer to a valid (non-null) dispatcher.
 
 // const Dispatcher -> const FooDispatcher
 template <typename T>

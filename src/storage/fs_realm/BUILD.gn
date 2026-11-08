@@ -33,9 +33,6 @@ rustc_binary("bin") {
   ]
 
   sources = [ "src/main.rs" ]
-
-  # fs_realm is only used in eng products, not production.
-  deps += [ "//build/validate:non_production_tag" ]
 }
 
 fuchsia_component("component") {

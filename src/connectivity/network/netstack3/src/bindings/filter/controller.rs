@@ -277,7 +277,7 @@ impl EbpfProgramRegistry {
         Self { programs: HashMap::new() }
     }
 
-    pub(super) fn register(
+    pub(super) async fn register(
         &mut self,
         ctx: &BindingsCtx,
         id: febpf::ProgramId,
@@ -288,8 +288,9 @@ impl EbpfProgramRegistry {
                 Err(fnet_filter::RegisterEbpfProgramError::AlreadyRegistered)
             }
             hash_map::Entry::Vacant(entry) => {
-                let program =
-                    Arc::new(SocketFilterProgram::new(program, ctx.ebpf_manager.maps_cache())?);
+                let program = Arc::new(
+                    SocketFilterProgram::new(program, ctx.ebpf_manager.maps_cache()).await?,
+                );
                 let _: &Arc<SocketFilterProgram> = entry.insert(program);
                 Ok(())
             }

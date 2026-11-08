@@ -1214,7 +1214,7 @@ impl ZbiHeader {
 /// ```
 pub type ZbiKernel = zbi_kernel_t;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 /// Error values that can be returned by function in this library
 pub enum ZbiError {
     /// Generic error

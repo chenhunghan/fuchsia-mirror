@@ -54,19 +54,9 @@ rust_library(
         ],
     ),
     crate_features = [
+        "std",
         "sys_rng",
-    ] + select({
-        "@rules_rust//rust/platform:aarch64-unknown-fuchsia": [
-            "std",  # aarch64-unknown-fuchsia
-        ],
-        "@rules_rust//rust/platform:riscv64gc-unknown-fuchsia": [
-            "std",  # riscv64gc-unknown-fuchsia
-        ],
-        "@rules_rust//rust/platform:x86_64-unknown-fuchsia": [
-            "std",  # x86_64-unknown-fuchsia
-        ],
-        "//conditions:default": [],
-    }),
+    ],
     crate_root = "src/lib.rs",
     edition = "2024",
     rustc_env = {
@@ -127,19 +117,9 @@ cargo_build_script(
         ],
     ),
     crate_features = [
+        "std",
         "sys_rng",
-    ] + select({
-        "@rules_rust//rust/platform:aarch64-unknown-fuchsia": [
-            "std",  # aarch64-unknown-fuchsia
-        ],
-        "@rules_rust//rust/platform:riscv64gc-unknown-fuchsia": [
-            "std",  # riscv64gc-unknown-fuchsia
-        ],
-        "@rules_rust//rust/platform:x86_64-unknown-fuchsia": [
-            "std",  # x86_64-unknown-fuchsia
-        ],
-        "//conditions:default": [],
-    }),
+    ],
     crate_name = "build_script_build",
     crate_root = "build.rs",
     data = glob(

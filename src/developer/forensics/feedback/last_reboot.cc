@@ -7,7 +7,7 @@
 namespace forensics::feedback {
 
 LastReboot::LastReboot(async_dispatcher_t* dispatcher, cobalt::Logger* cobalt,
-                       RedactorBase* redactor, fuchsia::feedback::CrashReporter* crash_reporter,
+                       RedactorBase* redactor, crash_reports::CrashReporterInternal* crash_reporter,
                        const Options options)
     : reporter_(dispatcher, cobalt, redactor, crash_reporter),
       last_reboot_info_provider_(options.reboot_log.GetFinalShutdownInfo()) {
@@ -19,7 +19,7 @@ LastReboot::LastReboot(async_dispatcher_t* dispatcher, cobalt::Logger* cobalt,
   }
 }
 
-fuchsia::feedback::LastRebootInfoProvider* LastReboot::LastRebootInfoProvider() {
+fidl::Server<fuchsia_feedback::LastRebootInfoProvider>* LastReboot::LastRebootInfoProvider() {
   return &last_reboot_info_provider_;
 }
 

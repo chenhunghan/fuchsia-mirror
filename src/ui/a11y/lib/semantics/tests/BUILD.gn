@@ -5,7 +5,6 @@
 import("//build/components.gni")
 import("//build/testing/cc_test_executable.gni")
 import("//build/testing/environments.gni")
-import("//src/fonts/build/fonts.gni")
 
 group("unit") {
   testonly = true
@@ -36,11 +35,9 @@ cc_test_executable("semantics_tests") {
     "semantic_tree_service_unittest.cc",
     "tree_unittest.cc",
   ]
-  public_deps = [
+  deps = [
     "//sdk/fidl/fuchsia.accessibility.semantics:fuchsia.accessibility.semantics_hlcpp",
     "//sdk/fidl/fuchsia.ui.gfx:fuchsia.ui.gfx_hlcpp",
-  ]
-  deps = [
     "//sdk/lib/inspect/testing/cpp",
     "//sdk/lib/sys/cpp",
     "//sdk/lib/sys/cpp/testing:unit",
@@ -63,108 +60,59 @@ cc_test_executable("semantics_tests") {
   configs += [ "//build/config:Wno-conversion" ]
 }
 
-source_set("semantics_integration_test_fixture") {
-  testonly = true
-
-  sources = [
-    "semantics_integration_test_fixture.cc",
-    "semantics_integration_test_fixture.h",
-  ]
-
-  deps = [
-    "//sdk/lib/fdio",
-    "//sdk/lib/fit",
-    "//sdk/lib/sys/component/cpp/testing:cpp",
-    "//sdk/lib/sys/cpp",
-    "//src/lib/fsl",
-    "//src/lib/fxl",
-    "//src/lib/testing/loop_fixture",
-  ]
-
-  public_deps = [
-    "//sdk/fidl/fuchsia.accessibility.semantics:fuchsia.accessibility.semantics_hlcpp",
-    "//sdk/fidl/fuchsia.component:fuchsia.component_hlcpp",
-    "//sdk/fidl/fuchsia.fonts:fuchsia.fonts_hlcpp",
-    "//sdk/fidl/fuchsia.intl:fuchsia.intl_hlcpp",
-    "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_hlcpp",
-    "//sdk/fidl/fuchsia.memorypressure:fuchsia.memorypressure_hlcpp",
-    "//sdk/fidl/fuchsia.net.interfaces:fuchsia.net.interfaces_hlcpp",
-    "//sdk/fidl/fuchsia.posix.socket:fuchsia.posix.socket_hlcpp",
-    "//sdk/fidl/fuchsia.process:fuchsia.process_hlcpp",
-    "//sdk/fidl/fuchsia.scheduler:fuchsia.scheduler_hlcpp",
-    "//sdk/fidl/fuchsia.tracing.provider:fuchsia.tracing.provider_hlcpp",
-    "//sdk/fidl/fuchsia.ui.app:fuchsia.ui.app_hlcpp",
-    "//sdk/fidl/fuchsia.ui.composition:fuchsia.ui.composition_hlcpp",
-    "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_hlcpp",
-    "//sdk/fidl/fuchsia.vulkan.loader:fuchsia.vulkan.loader_hlcpp",
-    "//sdk/lib/async-loop",
-    "//sdk/lib/async-loop:async-loop-cpp",
-    "//sdk/lib/async-loop:async-loop-default",
-    "//src/lib/testing/loop_fixture",
-    "//src/ui/a11y/lib/annotation/tests/mocks",
-    "//src/ui/a11y/lib/semantics",
-    "//src/ui/a11y/lib/semantics/util",
-    "//src/ui/a11y/lib/view",
-    "//src/ui/a11y/lib/view/tests/mocks",
-    "//src/ui/testing/ui_test_manager",
-    "//src/ui/testing/util",
-    "//third_party/googletest:gtest",
-  ]
-}
-
 cc_test_executable("web-semantics-test-bin") {
   testonly = true
   sources = [ "web_semantics_tests.cc" ]
   output_name = "web-semantics-test"
   deps = [
-    ":semantics_integration_test_fixture",
-    "//sdk/fidl/fuchsia.buildinfo:fuchsia.buildinfo_hlcpp",
+    "//sdk/fidl/fuchsia.accessibility.semantics:fuchsia.accessibility.semantics_hlcpp",
     "//sdk/fidl/fuchsia.component:fuchsia.component_hlcpp",
-    "//sdk/fidl/fuchsia.fonts:fuchsia.fonts_hlcpp",
-    "//sdk/fidl/fuchsia.intl:fuchsia.intl_hlcpp",
-    "//sdk/fidl/fuchsia.io:fuchsia.io_hlcpp",
+    "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_hlcpp",
     "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_hlcpp",
-    "//sdk/fidl/fuchsia.logger:fuchsia.logger_hlcpp",
-    "//sdk/fidl/fuchsia.memorypressure:fuchsia.memorypressure_hlcpp",
-    "//sdk/fidl/fuchsia.metrics:fuchsia.metrics_hlcpp",
-    "//sdk/fidl/fuchsia.net.interfaces:fuchsia.net.interfaces_hlcpp",
-    "//sdk/fidl/fuchsia.posix.socket:fuchsia.posix.socket_hlcpp",
+    "//sdk/fidl/fuchsia.math:fuchsia.math_hlcpp",
     "//sdk/fidl/fuchsia.process:fuchsia.process_hlcpp",
-    "//sdk/fidl/fuchsia.scheduler:fuchsia.scheduler_hlcpp",
-    "//sdk/fidl/fuchsia.tracing.provider:fuchsia.tracing.provider_hlcpp",
-    "//sdk/fidl/fuchsia.ui.app:fuchsia.ui.app_hlcpp",
-    "//sdk/fidl/fuchsia.web:fuchsia.web_hlcpp",
+    "//sdk/fidl/fuchsia.ui.composition:fuchsia.ui.composition_hlcpp",
+    "//sdk/fidl/fuchsia.ui.gfx:fuchsia.ui.gfx_hlcpp",
+    "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_hlcpp",
+    "//sdk/fidl/fuchsia.ui.views:fuchsia.ui.views_hlcpp",
+    "//sdk/lib/fidl/cpp",
     "//sdk/lib/fit",
     "//sdk/lib/sys/component/cpp/testing:cpp",
     "//sdk/lib/sys/cpp",
     "//sdk/lib/syslog/cpp",
-    "//src/chromium/web_runner_tests:mock_server",
     "//src/lib/fxl",
     "//src/lib/fxl/test:gtest_main",
+    "//src/lib/testing/loop_fixture",
+    "//src/ui/a11y/lib/semantics",
     "//src/ui/a11y/lib/view",
+    "//src/ui/a11y/lib/view/tests/mocks",
+    "//src/ui/testing/ui_test_manager",
+    "//src/ui/testing/ui_test_realm",
+    "//src/ui/testing/util:web_view_client",
     "//third_party/googletest:gtest",
+    "//zircon/system/ulib/zx",
   ]
 }
 
 fuchsia_test_component("web-semantics-test-component") {
   restricted_features = [ "allow_non_hermetic_packages" ]
   manifest = "meta/web-semantics-test.cml"
-  deps = [ ":web-semantics-test-bin" ]
+  deps = [
+    ":web-semantics-test-bin",
+    "//src/chromium/web_engine/meta/shards/test:launch_context_provider",
+  ]
   test_type = "system"
 }
 
 fuchsia_test_package("web-semantics-test") {
   test_components = [ ":web-semantics-test-component" ]
   deps = [
-    "//src/connectivity/network/netstack3:component-for-tests",
     "//src/developer/build_info/testing:fake-build-info-component",
-    "//src/developer/memory/pressure_signaler:component",
     "//src/fonts:font_provider_hermetic_for_test",
+    "//src/memory/pressure_signaler:component",
     "//src/testing/fidl/intl_property_manager:intl_property_manager_component",
-    "//src/ui/a11y/lib/semantics/tests/web_client:component",
-    "//src/ui/a11y/lib/semantics/tests/web_client:web_client_default_config",
-    "//src/ui/bin/text:text_manager_comp",
   ]
+  subpackages = [ "//src/connectivity/network/netstack3:package-for-tests" ]
   test_specs = {
     log_settings = {
       # Do not fail the test if a message with level ERROR is logged.  Several

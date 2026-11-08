@@ -184,7 +184,8 @@ fuchsia_cc_test(
     size = "small",
     srcs = ["driver-lifecycle-test.cc"],
     deps = [
-        ":sim_library",
+        "//src/connectivity/wlan/drivers/third_party/intel/iwlwifi/platform:iwlwifi_device",
+        "//src/devices/pci/testing:pci-protocol-fake",
         "@com_google_googletest//:gtest_main",
         "@fuchsia_sdk//fidl/fuchsia.wlan.softmac:fuchsia.wlan.softmac_cpp_driver",
         "@fuchsia_sdk//pkg/async",

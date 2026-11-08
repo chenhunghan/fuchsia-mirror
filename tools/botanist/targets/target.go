@@ -38,6 +38,12 @@ import (
 const (
 	localhostPlaceholder = "localhost"
 	repoID               = "fuchsia-pkg://fuchsia.com"
+
+	// Timeout for waiting for `ffx forward` to establish the initial port
+	// forwarding tunnel and print the target address. Arbitrarily chosen;
+	// the target is already connected when `AddFFXPackageRepository` runs,
+	// so setup normally completes in under a second.
+	ffxForwardStartupTimeout = 5 * time.Second
 )
 
 // FFXInstance is a wrapper around ffxutil.FFXInstance with extra fields to
@@ -240,16 +246,17 @@ func (t *genericFuchsiaTarget) StartSerialServer() error {
 	if t.serial == nil || t.serialSocket != "" {
 		return nil
 	}
-	t.serialSocket = CreateSocketPath("serial")
-	t.serialServer = serial.NewServer(t.serial, serial.ServerOptions{})
+	socketPath := CreateSocketPath("serial")
 	addr := &net.UnixAddr{
-		Name: t.serialSocket,
+		Name: socketPath,
 		Net:  "unix",
 	}
 	l, err := net.ListenUnix("unix", addr)
 	if err != nil {
 		return err
 	}
+	t.serialSocket = socketPath
+	t.serialServer = serial.NewServer(t.serial, serial.ServerOptions{})
 	go func() {
 		t.serialServer.Run(t.targetCtx, l)
 	}()
@@ -268,15 +275,36 @@ func (t *genericFuchsiaTarget) ResolveIP() error {
 	}
 	ctx, cancel := context.WithTimeout(t.targetCtx, timeout)
 	defer cancel()
-	ipv4, ipv6, err := ResolveIP(ctx, t.nodename)
-	if err != nil {
-		return fmt.Errorf("%s for %s: %w", constants.FailedToResolveIPErrorMsg, t.nodename, err)
+	// Every target that uses this (emulators, and devices that flash over TCP
+	// fastboot) needs the IPv6 address: Device and GCE get their IPv4
+	// addresses elsewhere, and an emulator's IPv4 address, if any, is on
+	// QEMU's internal SLiRP network and unreachable from the host. mDNS may
+	// answer with only an A record first (e.g. when SLiRP's DHCP finishes
+	// before IPv6 duplicate address detection), so keep asking until the
+	// IPv6 address is resolved.
+	for {
+		ipv4, ipv6, err := resolveIP(ctx, t.nodename)
+		if err != nil {
+			return fmt.Errorf("%s for %s: %w", constants.FailedToResolveIPErrorMsg, t.nodename, err)
+		}
+		if ipv6.IP != nil {
+			t.ipv4 = ipv4
+			t.ipv6 = &ipv6
+			t.addrResolved = true
+			return nil
+		}
+		logger.Debugf(ctx, "resolved only IPv4 address %s for %s; waiting for its IPv6 address", ipv4, t.nodename)
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%s for %s: resolved IPv4 address %s but no IPv6 address: %w",
+				constants.FailedToResolveIPErrorMsg, t.nodename, ipv4, ctx.Err())
+		case <-time.After(mDNSQuestionInterval):
+		}
 	}
-	t.ipv4 = ipv4
-	t.ipv6 = &ipv6
-	t.addrResolved = true
-	return nil
 }
+
+// resolveIP is ResolveIP, as a variable so that tests can fake it.
+var resolveIP = ResolveIP
 
 // SerialSocketPath returns the path to the unix socket multiplexing serial
 // logs.
@@ -336,30 +364,53 @@ func (t *genericFuchsiaTarget) CaptureSerialLog(filename string) error {
 	if err != nil {
 		return err
 	}
+	defer serialLog.Close()
 	serialLogWriter := botanist.NewTimestampWriter(serialLog)
 	conn, err := net.Dial("unix", t.serialSocket)
 	if err != nil {
+		if t.targetCtx.Err() != nil {
+			return nil
+		}
 		return err
 	}
+	defer conn.Close()
 	// Set up a goroutine to terminate this capture on target context cancel.
+	captureDone := make(chan struct{})
+	defer close(captureDone)
 	go func() {
-		<-t.targetCtx.Done()
-		conn.Close()
-		serialLog.Close()
+		select {
+		case <-t.targetCtx.Done():
+			if t.serialServer != nil {
+				// Allow the in-process serial server to flush any remaining
+				// buffered output and close its side of the connection first.
+				select {
+				case <-captureDone:
+					return
+				case <-time.After(5 * time.Second):
+				}
+			}
+			conn.Close()
+		case <-captureDone:
+		}
 	}()
 
 	// Start capturing serial logs.
 	b := bufio.NewReader(conn)
 	for {
 		line, err := b.ReadString('\n')
-		if err != nil {
-			if !errors.Is(err, net.ErrClosed) {
-				return fmt.Errorf("%s: %w", constants.SerialReadErrorMsg, err)
+		if len(line) > 0 {
+			if !strings.HasSuffix(line, "\n") {
+				line += "\n"
 			}
-			return nil
+			if _, writeErr := io.WriteString(serialLogWriter, line); writeErr != nil {
+				return fmt.Errorf("failed to write line to serial log: %w", writeErr)
+			}
 		}
-		if _, err := io.WriteString(serialLogWriter, line); err != nil {
-			return fmt.Errorf("failed to write line to serial log: %w", err)
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) || (errors.Is(err, io.EOF) && t.targetCtx.Err() != nil) {
+				return nil
+			}
+			return fmt.Errorf("%s: %w", constants.SerialReadErrorMsg, err)
 		}
 	}
 }
@@ -470,33 +521,103 @@ func (t *genericFuchsiaTarget) SetupSSHControlMaster(ctx context.Context, sshKey
 func (t *genericFuchsiaTarget) AddFFXPackageRepository(ctx context.Context, repoName string, pkgSrvPort int, useForward bool) (func(), error) {
 	cleanup := func() {}
 	var overrideAddr string
+	var lines chan string
+	var regCtx context.Context
 	if useForward {
-		var forwardOutput bytes.Buffer
-		t.GetFFX().SetStdoutStderr(io.MultiWriter(os.Stdout, &forwardOutput), os.Stderr)
-		cleanup = botanist.WaitForProcess(ctx, func(processCtx context.Context) error {
-			return t.GetFFX().Forward(processCtx, pkgSrvPort)
+		pr, pw := io.Pipe()
+		var cancelReg context.CancelFunc
+		regCtx, cancelReg = context.WithCancel(botanist.GetLoggerCtx(ctx))
+		forwardCleanup := botanist.WaitForProcess(ctx, func(processCtx context.Context) error {
+			defer pw.Close()
+			return t.GetFFX().Forward(processCtx, pkgSrvPort, pw)
 		}, "ffx forward")
-		if err := retry.Retry(ctx, retry.WithMaxDuration(retry.NewConstantBackoff(time.Second), 5*time.Second), func() error {
-			line, err := (&forwardOutput).ReadString('\n')
-			if err != nil {
-				return err
-			}
-			addr, err := parseFFXForwardTarget(line)
-			if err != nil {
-				return retry.Fatal(err)
-			}
-			overrideAddr = addr
-			return nil
-		}, nil); err != nil {
-			return cleanup, err
+		cleanup = func() {
+			cancelReg()
+			_ = pr.Close()
+			forwardCleanup()
 		}
-		t.GetFFX().SetStdoutStderr(os.Stdout, os.Stderr)
+		lines = make(chan string)
+		readErr := make(chan error, 1)
+		go func() {
+			defer close(lines)
+			reader := bufio.NewReader(pr)
+			for {
+				line, err := reader.ReadString('\n')
+				if line != "" {
+					select {
+					case lines <- line:
+					case <-regCtx.Done():
+						return
+					}
+				}
+				if err != nil {
+					if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe) {
+						readErr <- err
+					}
+					return
+				}
+			}
+		}()
+		var firstLine string
+		select {
+		case line, ok := <-lines:
+			if !ok {
+				cleanup()
+				select {
+				case err := <-readErr:
+					return func() {}, err
+				default:
+					return func() {}, fmt.Errorf("ffx forward exited before outputting forwarding address")
+				}
+			}
+			firstLine = line
+		case <-time.After(ffxForwardStartupTimeout):
+			cleanup()
+			return func() {}, fmt.Errorf("timed out waiting for ffx forward output")
+		case <-ctx.Done():
+			cleanup()
+			return func() {}, ctx.Err()
+		}
+		addr, err := parseFFXForwardTarget(firstLine)
+		if err != nil {
+			cleanup()
+			return func() {}, err
+		}
+		overrideAddr = addr
 	}
 	if err := t.GetFFX().RegisterRepository(ctx, repoName, pkgSrvPort, overrideAddr); err != nil {
 		logger.Errorf(ctx, "failed to register repository: %s", err)
-		return cleanup, err
+		cleanup()
+		return func() {}, err
 	}
 	logger.Debugf(ctx, "added package repo to target %s", t.nodename)
+	if useForward {
+		reRegisterDone := make(chan struct{})
+		go func() {
+			defer close(reRegisterDone)
+			for line := range lines {
+				addr, err := parseFFXForwardTarget(line)
+				if err != nil {
+					logger.Errorf(ctx, "failed to parse ffx forward output: %s", err)
+					continue
+				}
+				if err := retry.Retry(regCtx, retry.WithMaxAttempts(retry.NewConstantBackoff(time.Second), 3), func() error {
+					return t.GetFFX().RegisterRepository(regCtx, repoName, pkgSrvPort, addr)
+				}, nil); err != nil {
+					if regCtx.Err() == nil {
+						logger.Errorf(ctx, "failed to re-register repository: %s", err)
+					}
+					continue
+				}
+				logger.Debugf(ctx, "re-registered package repo to target %s at %s", t.nodename, addr)
+			}
+		}()
+		baseCleanup := cleanup
+		cleanup = func() {
+			baseCleanup()
+			<-reRegisterDone
+		}
+	}
 	return cleanup, nil
 }
 
@@ -618,7 +739,7 @@ func (t *genericFuchsiaTarget) CaptureSyslog(client *sshutil.Client, filename st
 			// then there's likely an issue with the syslogger so return an err.
 			// LINT.IfChange(syslog_failed)
 			return fmt.Errorf("failed to stream syslog multiple times within 1 minute: %d attempts", maxAttempts)
-			// LINT.ThenChange(/tools/testing/tefmocheck/string_in_log_check.go:syslog_failed)
+			// LINT.ThenChange(/tools/testing/tefmocheck/check-configs.yaml:syslog_failed)
 		}
 		if !syslogger.IsRunning() {
 			return nil
@@ -672,7 +793,7 @@ func remoteScopedLocalHost(ctx context.Context, client *sshutil.Client) (string,
 	// remote address.
 	var stdout bytes.Buffer
 	if err := client.Run(ctx, []string{"echo", "${SSH_CONNECTION}"}, &stdout, nil); err != nil {
-		return "", fmt.Errorf("%s: %w", constants.FailedToDeriveSshConnectionMsg, err)
+		return "", fmt.Errorf("failed to derive $SSH_CONNECTION: %w", err)
 	}
 	val := stdout.String()
 	tokens := strings.Split(val, " ")

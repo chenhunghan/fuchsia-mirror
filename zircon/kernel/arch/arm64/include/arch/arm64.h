@@ -40,50 +40,12 @@ struct arch_exception_context {
   uint32_t user_synth_data;
 };
 
-// Register state layout used by arm64_context_switch().
-struct arm64_context_switch_frame {
-  uint64_t r19;
-  uint64_t zero;  // slot where x20 (percpu pointer) would be saved if it were
-  uint64_t r21;
-  uint64_t r22;
-  uint64_t r23;
-  uint64_t r24;
-  uint64_t r25;
-  uint64_t r26;
-  uint64_t r27;
-  uint64_t r28;
-  uint64_t r29;
-  uint64_t lr;
-};
-
-struct Thread;
-
 // Implemented in or called from assembly.
 extern "C" {
-#if __has_feature(shadow_call_stack)
-void arm64_context_switch(vaddr_t* old_sp, vaddr_t new_sp, vaddr_t new_tpidr, uintptr_t** old_scsp,
-                          uintptr_t* new_scsp);
-void arm64_uspace_entry(const iframe_t* iframe, vaddr_t kstack, vaddr_t scsp) __NO_RETURN;
-#else
-void arm64_context_switch(vaddr_t* old_sp, vaddr_t new_sp, vaddr_t new_tpidr);
-void arm64_uspace_entry(const iframe_t* iframe, vaddr_t kstack) __NO_RETURN;
-#endif
-
-extern arch::AsmLabel arm64_el1_exception;
-extern arch::AsmLabel arm64_el1_exception_smccc11_workaround;
-extern arch::AsmLabel arm64_el1_exception_smccc10_workaround;
-
 void arm64_sync_exception(iframe_t* iframe, uint exception_flags, uint32_t esr);
 
 void platform_irq(iframe_t* frame);
 }  // extern C
-
-arm64_context_switch_frame* arm64_get_context_switch_frame(Thread* thread);
-
-// FPU routines
-extern "C" void arm64_fpu_context_switch(Thread* oldthread, Thread* newthread);
-extern "C" void arm64_fpu_save_state(Thread* t);
-extern "C" void arm64_fpu_restore_state(const Thread* t);
 
 inline uint64_t arm64_get_boot_el() { return __arm_rsr64("CurrentEL") >> 2; }
 
@@ -103,16 +65,12 @@ extern "C" zx_status_t arm64_create_secondary_stack(cpu_num_t cpu_num, uintptr_t
 // Frees a stack created by |arm64_create_secondary_stack|.
 extern "C" zx_status_t arm64_free_secondary_stack(cpu_num_t cpu_num);
 
-// Shortcuts for setting and clearing PSTATE.PAN.
-inline void arm64_enable_pan() { __arm_wsr64("PAN", 1); }
-inline void arm64_disable_pan() { __arm_wsr64("PAN", 0); }
-
 #endif  // __ASSEMBLER__
 
 // Used in above exception_flags arguments.
 #define ARM64_EXCEPTION_FLAG_LOWER_EL (1 << 0)
 
-// Used in the exceptions_c which argument.
+// Used in the which argument of arm64_unrestricted_arm32_exception.
 #define ARM64_DISALLOWED_ARM32_SYSCALL (1 << 0)
 #define ARM64_DISALLOWED_ARM32_SYNC_EXCEPTION (1 << 1)
 #define ARM64_DISALLOWED_ARM32_ASYNC_EXCEPTION (1 << 2)

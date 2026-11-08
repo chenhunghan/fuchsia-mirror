@@ -40,7 +40,6 @@ source_set("common") {
     "popcount.cc",
     "printf_tests.cc",
     "relocation_tests.cc",
-    "string_file_tests.cc",
     "string_view_tests.cc",
     "unittest_tests.cc",
   ]
@@ -54,6 +53,8 @@ source_set("common") {
 
   if (toolchain_environment == "kernel") {
     deps += [ "//zircon/kernel/lib/console" ]
+  } else {
+    sources += [ "string_file_tests.cc" ]
   }
 }
 
@@ -85,43 +86,28 @@ if (toolchain_environment == "kernel") {
       "benchmarks.cc",
       "brwlock_tests.cc",
       "cpu_search_tests.cc",
-      "cpu_tests.cc",
-      "dpc_tests.cc",
       "event_tests.cc",
       "heap_tests.cc",
       "interrupt_disable_tests.cc",
-      "job_tests.cc",
       "kstack_tests.cc",
       "ksync_tests.cc",
-      "lazy_owned_wait_queue_tests.cc",
       "lock_dep_tests.cc",
       "loop_limiter_tests.cc",
-      "mmu_tests.cc",
       "mp_hotplug_tests.cc",
       "mp_tests.cc",
-      "mutex_spin_time_tests.cc",
-      "owned_wait_queue_topology.cc",
-      "pi_tests.cc",
-      "port_tests.cc",
       "pow2_tests.cc",
-      "preempt_disable_tests.cc",
       "range_check_tests.cc",
       "relaxed_atomic_tests.cc",
       "relocation_tests.cc",
       "scheduler_run_queue_tests.cc",
-      "scheduler_state_tests.cc",
       "string_tests.cc",
-      "sync_ipi_tests.cc",
-      "thread_dispatcher_tests.cc",
       "timer_tests.cc",
       "variant_tests.cc",
-      "wait_queue_ordering_tests.cc",
     ]
     deps = [
       ":arch_rs_tests",
       ":common",
       ":tests_rs",
-      ":unused_rust",
       "rustlang-support:kernel-tests",
       "//src/lib/ksync:ksync_kernel_tests",
       "//zircon/kernel/arch/$zircon_cpu:kernel-tests",
@@ -140,23 +126,12 @@ if (toolchain_environment == "kernel") {
       "//zircon/kernel/lib/page",
       "//zircon/kernel/lib/thread-stack",
       "//zircon/kernel/lib/unittest",
-      "//zircon/kernel/object",
-      "//zircon/kernel/object:kernel-tests",
       "//zircon/kernel/platform:kernel-tests",
       "//zircon/kernel/vm:kernel-tests",
       "//zircon/system/ulib/affine",
       "//zircon/system/ulib/pretty",
     ]
     public_deps = [ "//zircon/system/ulib/zx:headers" ]
-  }
-
-  kernel_rust_mod("unused_rust") {
-    testonly = true
-    sources = [ "unused_rust.rs" ]
-    deps = [
-      "//src/lib/ksync",
-      "//zircon/kernel/lib/debug",
-    ]
   }
 
   kernel_rust_mod("arch_rs_tests") {
@@ -171,6 +146,10 @@ if (toolchain_environment == "kernel") {
       "clock_tests.rs",
       "fibo.rs",
       "mem_tests.rs",
+      "mmu_tests.rs",
+      "mutex_spin_time_tests.rs",
+      "owned_wait_queue_topology.rs",
+      "pi_tests.rs",
       "sleep_tests.rs",
       "spinner.rs",
       "tests.rs",
@@ -178,13 +157,22 @@ if (toolchain_environment == "kernel") {
     ]
     deps = [
       "//sdk/rust/zx-status",
+      "//sdk/rust/zx-types",
+      "//src/lib/ffl",
       "//src/lib/kalloc",
       "//src/lib/kprint",
       "//src/lib/ksync",
+      "//src/lib/lazy_init",
+      "//src/lib/zr",
+      "//third_party/rust_crates:pin-init",
       "//third_party/rust_crates:rand",
       "//zircon/kernel/lib/arch:arch-rs",
       "//zircon/kernel/lib/debug",
+      "//zircon/kernel/lib/init:init_rust",
       "//zircon/kernel/lib/page",
+      "//zircon/kernel/lib/unittest:unittest-rs",
+      "//zircon/system/ulib/affine/rust:affine",
+      "//zircon/system/ulib/fbl/rust:fbl",
       "//zircon/system/ulib/pretty/rust:pretty",
     ]
   }

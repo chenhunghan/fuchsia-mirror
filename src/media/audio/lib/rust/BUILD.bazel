@@ -1,0 +1,166 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+_COMMON_SRCS = [
+    "src/dai.rs",
+    "src/device.rs",
+    "src/format.rs",
+    "src/format_set.rs",
+    "src/lib.rs",
+    "src/registry.rs",
+    "src/sigproc.rs",
+] + select({
+    "@platforms//os:fuchsia": ["src/vmo_buffer.rs"],
+    "//conditions:default": [],
+})
+
+# @bazel2gn:transformer=deps
+_COMMON_DEPS = [
+    "//sdk/rust/zx-status",
+    "//sdk/rust/zx-types",
+    "//src/lib/async-utils",
+    "//src/lib/fidl/rust/fidl",
+    "//src/lib/fuchsia-async",
+    "//third_party/rust_crates/vendor:anyhow",
+    "//third_party/rust_crates/vendor:camino",
+    "//third_party/rust_crates/vendor:futures",
+    "//third_party/rust_crates/vendor:hound",
+    "//third_party/rust_crates/vendor:itertools",
+    "//third_party/rust_crates/vendor:log",
+    "//third_party/rust_crates/vendor:regex-lite",
+    "//third_party/rust_crates/vendor:thiserror",
+] + select({
+    "@platforms//os:fuchsia": [
+        "//sdk/rust/zx",
+        "//src/lib/fuchsia-runtime",
+        "//src/lib/trace/rust:trace",
+    ],
+    "//conditions:default": [],
+})
+
+# @bazel2gn:transformer=deps
+_COMMON_TEST_DEPS = [
+    "//src/lib/fidl/rust/fidl_test_util",
+    "//src/lib/fuchsia",
+    "//third_party/rust_crates/vendor:assert_matches",
+    "//third_party/rust_crates/vendor:test-case",
+]
+
+rustc_library(
+    name = "fuchsia_audio",
+    srcs = _COMMON_SRCS,
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    visibility = [
+        "//src/developer/ffx/plugins/audio:__subpackages__",
+        "//src/media/audio/lib:__pkg__",
+        "//src/media/audio/services/device_registry/testing/enumeration:__pkg__",
+        "//src/media/audio/services/ffxdaemon:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
+    deps = _COMMON_DEPS + select({
+        "@platforms//os:fuchsia": [
+            "//sdk/fidl/fuchsia.audio.controller:fuchsia.audio.controller_rust_flex",
+            "//sdk/fidl/fuchsia.audio.device:fuchsia.audio.device_rust_flex",
+            "//sdk/fidl/fuchsia.audio:fuchsia.audio_rust_flex",
+            "//sdk/fidl/fuchsia.hardware.audio:fuchsia.hardware.audio_rust_flex",
+            "//sdk/fidl/fuchsia.hardware.audio.signalprocessing:fuchsia.hardware.audio.signalprocessing_rust_flex",
+            "//sdk/fidl/fuchsia.io:fuchsia.io_rust_flex",
+            "//sdk/fidl/fuchsia.media:fuchsia.media_rust_flex",
+            "//src/lib/fdomain/client:flex_fidl",
+            "//src/lib/fuchsia-fs",
+        ],
+        "//conditions:default": [
+            "//sdk/fidl/fuchsia.audio.controller:fuchsia.audio.controller_rust_fdomain_flex",
+            "//sdk/fidl/fuchsia.audio.device:fuchsia.audio.device_rust_fdomain_flex",
+            "//sdk/fidl/fuchsia.audio:fuchsia.audio_rust_fdomain_flex",
+            "//sdk/fidl/fuchsia.hardware.audio:fuchsia.hardware.audio_rust_fdomain_flex",
+            "//sdk/fidl/fuchsia.hardware.audio.signalprocessing:fuchsia.hardware.audio.signalprocessing_rust_fdomain_flex",
+            "//sdk/fidl/fuchsia.io:fuchsia.io_rust_fdomain_flex",
+            "//sdk/fidl/fuchsia.media:fuchsia.media_rust_fdomain_flex",
+            "//src/lib/fdomain/client:flex_fdomain",
+            "//src/lib/fuchsia-fs",
+        ],
+    }),
+)
+
+rustc_library(
+    name = "fuchsia_audio_fdomain",
+    srcs = _COMMON_SRCS,
+    crate_features = ["fdomain"],
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    visibility = [
+        "//src/developer/ffx/plugins/audio/common:__pkg__",
+        "//src/developer/ffx/plugins/audio/device:__pkg__",
+        "//src/developer/ffx/plugins/audio/list-devices:__pkg__",
+    ],
+    deps = _COMMON_DEPS + [
+        "//sdk/fidl/fuchsia.audio.controller:fuchsia.audio.controller_rust_fdomain_flex",
+        "//sdk/fidl/fuchsia.audio.device:fuchsia.audio.device_rust_fdomain_flex",
+        "//sdk/fidl/fuchsia.audio:fuchsia.audio_rust_fdomain_flex",
+        "//sdk/fidl/fuchsia.hardware.audio:fuchsia.hardware.audio_rust_fdomain_flex",
+        "//sdk/fidl/fuchsia.hardware.audio.signalprocessing:fuchsia.hardware.audio.signalprocessing_rust_fdomain_flex",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust_fdomain_flex",
+        "//sdk/fidl/fuchsia.media:fuchsia.media_rust_fdomain_flex",
+        "//src/lib/fdomain/client:flex_fdomain",
+        "//src/lib/fuchsia-fs:fuchsia-fs_fdomain",
+    ],
+)
+
+# Don't build unit tests on host to avoid depending
+# on //src/storage/lib/vfs/rust:vfs.
+rustc_test(
+    name = "fuchsia_audio_test",
+    crate = ":fuchsia_audio",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = _COMMON_TEST_DEPS + [
+        "//src/storage/lib/vfs/rust:vfs",
+    ],
+)
+
+# Don't build unit tests on host to avoid depending
+# on //src/storage/lib/vfs/rust:vfs.
+rustc_test(
+    name = "fuchsia_audio_fdomain_test",
+    crate = ":fuchsia_audio_fdomain",
+    crate_features = ["fdomain"],
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = _COMMON_TEST_DEPS + [
+        "//src/lib/fdomain/client",
+        "//src/lib/fdomain/local",
+    ],
+)
+
+fx_unittest_package(
+    name = "fuchsia_audio_tests",
+    unit_tests = [":fuchsia_audio_test"],
+    visibility = ["//src/media:__pkg__"],
+)
+
+fx_unittest_package(
+    name = "fuchsia_audio_fdomain_tests",
+    unit_tests = [":fuchsia_audio_fdomain_test"],
+    visibility = ["//src/media:__pkg__"],
+)
+
+alias(
+    name = "rust",
+    actual = ":fuchsia_audio",
+    visibility = [
+        "//src/developer/ffx/plugins/audio:__subpackages__",
+        "//src/media/audio/lib:__pkg__",
+        "//src/media/audio/services/device_registry/testing/enumeration:__pkg__",
+        "//src/media/audio/services/ffxdaemon:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
+)

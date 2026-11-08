@@ -44,12 +44,56 @@
         "name": "fuchsia.memory.sampler/ModuleMap"
     },
     {
+        "kind": "table/member",
+        "name": "fuchsia.memory.sampler/RecordAllocationEvent.address",
+        "ordinal": "1",
+        "type": "uint64"
+    },
+    {
+        "kind": "table/member",
+        "name": "fuchsia.memory.sampler/RecordAllocationEvent.sampling_interval_bytes",
+        "ordinal": "4",
+        "type": "uint64"
+    },
+    {
+        "kind": "table/member",
+        "name": "fuchsia.memory.sampler/RecordAllocationEvent.size",
+        "ordinal": "3",
+        "type": "uint64"
+    },
+    {
+        "kind": "table/member",
+        "name": "fuchsia.memory.sampler/RecordAllocationEvent.stack_trace",
+        "ordinal": "2",
+        "type": "fuchsia.memory.sampler/StackTrace"
+    },
+    {
+        "kind": "table",
+        "name": "fuchsia.memory.sampler/RecordAllocationEvent"
+    },
+    {
+        "kind": "table/member",
+        "name": "fuchsia.memory.sampler/RecordDeallocationEvent.address",
+        "ordinal": "1",
+        "type": "uint64"
+    },
+    {
+        "kind": "table/member",
+        "name": "fuchsia.memory.sampler/RecordDeallocationEvent.stack_trace",
+        "ordinal": "2",
+        "type": "fuchsia.memory.sampler/StackTrace"
+    },
+    {
+        "kind": "table",
+        "name": "fuchsia.memory.sampler/RecordDeallocationEvent"
+    },
+    {
         "kind": "protocol/member",
         "name": "fuchsia.memory.sampler/Sampler.RecordAllocation",
         "strictness": "flexible",
         "ordinal": "7713220988798337613",
         "direction": "one_way",
-        "request": "fuchsia.memory.sampler/SamplerRecordAllocationRequest"
+        "request": "fuchsia.memory.sampler/RecordAllocationEvent"
     },
     {
         "kind": "protocol/member",
@@ -57,7 +101,7 @@
         "strictness": "flexible",
         "ordinal": "5781495329128824555",
         "direction": "one_way",
-        "request": "fuchsia.memory.sampler/SamplerRecordDeallocationRequest"
+        "request": "fuchsia.memory.sampler/RecordDeallocationEvent"
     },
     {
         "kind": "protocol/member",
@@ -68,48 +112,35 @@
         "request": "fuchsia.memory.sampler/SamplerSetProcessInfoRequest"
     },
     {
+        "kind": "protocol/member",
+        "name": "fuchsia.memory.sampler/Sampler.SetSharedSocket",
+        "strictness": "flexible",
+        "ordinal": "3668675695227787517",
+        "direction": "one_way",
+        "request": "fuchsia.memory.sampler/SamplerSetSharedSocketRequest"
+    },
+    {
         "kind": "protocol",
         "name": "fuchsia.memory.sampler/Sampler",
         "openness": "open",
         "transport": "channel"
     },
     {
-        "kind": "table/member",
-        "name": "fuchsia.memory.sampler/SamplerRecordAllocationRequest.address",
+        "kind": "union/member",
+        "name": "fuchsia.memory.sampler/SamplerDatagram.record_allocation",
         "ordinal": "1",
-        "type": "uint64"
+        "type": "fuchsia.memory.sampler/RecordAllocationEvent"
     },
     {
-        "kind": "table/member",
-        "name": "fuchsia.memory.sampler/SamplerRecordAllocationRequest.size",
-        "ordinal": "3",
-        "type": "uint64"
-    },
-    {
-        "kind": "table/member",
-        "name": "fuchsia.memory.sampler/SamplerRecordAllocationRequest.stack_trace",
+        "kind": "union/member",
+        "name": "fuchsia.memory.sampler/SamplerDatagram.record_deallocation",
         "ordinal": "2",
-        "type": "fuchsia.memory.sampler/StackTrace"
+        "type": "fuchsia.memory.sampler/RecordDeallocationEvent"
     },
     {
-        "kind": "table",
-        "name": "fuchsia.memory.sampler/SamplerRecordAllocationRequest"
-    },
-    {
-        "kind": "table/member",
-        "name": "fuchsia.memory.sampler/SamplerRecordDeallocationRequest.address",
-        "ordinal": "1",
-        "type": "uint64"
-    },
-    {
-        "kind": "table/member",
-        "name": "fuchsia.memory.sampler/SamplerRecordDeallocationRequest.stack_trace",
-        "ordinal": "2",
-        "type": "fuchsia.memory.sampler/StackTrace"
-    },
-    {
-        "kind": "table",
-        "name": "fuchsia.memory.sampler/SamplerRecordDeallocationRequest"
+        "kind": "union",
+        "name": "fuchsia.memory.sampler/SamplerDatagram",
+        "strictness": "flexible"
     },
     {
         "kind": "table/member",
@@ -126,6 +157,17 @@
     {
         "kind": "table",
         "name": "fuchsia.memory.sampler/SamplerSetProcessInfoRequest"
+    },
+    {
+        "kind": "struct/member",
+        "name": "fuchsia.memory.sampler/SamplerSetSharedSocketRequest.socket",
+        "ordinal": "1",
+        "type": "zx/Handle:SOCKET"
+    },
+    {
+        "kind": "struct",
+        "name": "fuchsia.memory.sampler/SamplerSetSharedSocketRequest",
+        "resourceness": "resource"
     },
     {
         "kind": "table/member",

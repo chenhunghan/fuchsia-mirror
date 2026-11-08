@@ -2,83 +2,28 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-import("//build/rust/rustc_library.gni")
-import("//build/test.gni")
+import("//build/testing/host_test.gni")
 
-fuchsia_unittest_component("storage_trace_enabled_rust_test_component") {
-  deps = [ ":storage_trace_enabled_rust_test" ]
-}
-
-fuchsia_unittest_component("storage_trace_disabled_rust_test_component") {
-  deps = [ ":storage_trace_disabled_rust_test" ]
-}
-
+# Hand-written config() because public_configs is not converted to Bazel
 config("enable_tracing") {
   visibility = [ ":*" ]
   defines = [ "STORAGE_ENABLE_TRACING" ]
 }
 
-test("storage_trace_cpp_test") {
-  visibility = [ ":*" ]
-  sources = [ "trace_test.cc" ]
-  deps = [
-    ":cpp",
-    "//src/lib/fxl/test:gtest_main",
-    "//third_party/googletest:gtest",
-    "//zircon/system/ulib/fbl",
-  ]
-}
-
-if (is_fuchsia) {
-  test("storage_trace_enabled_cpp_test") {
-    visibility = [ ":*" ]
-    sources = [ "trace_test.cc" ]
-    deps = [
-      ":storage_trace_force_enabled_cpp",
-      "//src/lib/fxl/test:gtest_main",
-      "//third_party/googletest:gtest",
-      "//zircon/system/ulib/fbl",
-    ]
+if (is_host) {
+  host_test("storage_trace_cpp_host_test") {
+    binary_path = "$root_out_dir/storage_trace_cpp_test"
+    deps = [ ":storage_trace_cpp_test" ]
+    target = get_label_info(":storage_trace_cpp_test", "label_with_toolchain")
   }
-}
-
-test("storage_trace_disabled_cpp_test") {
-  visibility = [ ":*" ]
-  sources = [ "trace_test.cc" ]
-  deps = [
-    ":storage_trace_force_disabled_cpp",
-    "//src/lib/fxl/test:gtest_main",
-    "//third_party/googletest:gtest",
-    "//zircon/system/ulib/fbl",
-  ]
-}
-
-fuchsia_unittest_component("storage_trace_enabled_cpp_test_component") {
-  component_name = "storage_trace_enabled_cpp_test"
-  deps = [ ":storage_trace_enabled_cpp_test" ]
-}
-
-fuchsia_unittest_component("storage_trace_disabled_cpp_test_component") {
-  component_name = "storage_trace_disabled_cpp_test"
-  deps = [ ":storage_trace_disabled_cpp_test" ]
-}
-
-fuchsia_test_package("storage_trace_tests") {
-  test_components = [
-    ":storage_trace_enabled_rust_test_component",
-    ":storage_trace_disabled_rust_test_component",
-    ":storage_trace_enabled_cpp_test_component",
-    ":storage_trace_disabled_cpp_test_component",
-  ]
 }
 
 group("tests") {
   testonly = true
   deps = [
-    ":storage_trace_cpp_test($host_toolchain)",
-    ":storage_trace_tests",
-    ":trace_test($host_toolchain)",  # storage_trace_lib_test
+    ":storage_trace_cpp_host_test($host_toolchain)",
+    ":storage_trace_host_test($host_toolchain)",
+    ":storage_trace_tests_pkg",
   ]
 }
 
@@ -122,16 +67,37 @@ rustc_library("trace") {
   }
   crate_name = "storage_trace"
   edition = "2024"
-  test_deps = [ "//src/lib/fuchsia" ]
   visibility = [
     ":*",
     "//src/storage/*",
   ]
-  with_unit_tests = true
   if (is_fuchsia) {
     deps = [ "//src/lib/trace/rust:trace" ]
   } else {
     deps = []
+  }
+}
+if (is_host) {
+  rustc_test("storage_trace_host_test") {
+    sources = []
+    sources += [ "src/lib.rs" ]
+    if (is_fuchsia) {
+      sources += []
+    } else {
+      sources += [ "src/noop.rs" ]
+    }
+    edition = "2024"
+    deps = []
+    if (is_fuchsia) {
+      deps += [ "//src/lib/trace/rust:trace" ]
+    }
+    deps += [ "//src/lib/fuchsia" ]
+    if (is_fuchsia) {
+      features = [ "tracing" ]
+    } else {
+      features = []
+    }
+    output_name = "storage_trace_lib_test"
   }
 }
 if (is_fuchsia) {
@@ -140,11 +106,22 @@ if (is_fuchsia) {
     sources = [ "src/lib.rs" ]
     features = [ "tracing" ]
     edition = "2024"
-    test_deps = [ "//src/lib/fuchsia" ]
-    with_unit_tests = true
     deps = [ "//src/lib/trace/rust:trace" ]
   }
 }
+if (is_fuchsia) {
+  rustc_test("storage_trace_enabled_rust_test") {
+    sources = [ "src/lib.rs" ]
+    edition = "2024"
+    deps = [ "//src/lib/trace/rust:trace" ] + [ "//src/lib/fuchsia" ]
+    features = [ "tracing" ]
+  }
+}
+
+fuchsia_unittest_component("storage_trace_enabled_rust_test_component") {
+  deps = [ ":storage_trace_enabled_rust_test" ]
+}
+
 rustc_library("storage_trace_disabled_rust") {
   testonly = true
   sources = [
@@ -152,8 +129,20 @@ rustc_library("storage_trace_disabled_rust") {
     "src/noop.rs",
   ]
   edition = "2024"
-  test_deps = [ "//src/lib/fuchsia" ]
-  with_unit_tests = true
+}
+if (is_fuchsia) {
+  rustc_test("storage_trace_disabled_rust_test") {
+    sources = [
+      "src/lib.rs",
+      "src/noop.rs",
+    ]
+    edition = "2024"
+    deps = [ "//src/lib/fuchsia" ]
+  }
+}
+
+fuchsia_unittest_component("storage_trace_disabled_rust_test_component") {
+  deps = [ ":storage_trace_disabled_rust_test" ]
 }
 if (is_fuchsia) {
   source_set("storage_trace_enabled_cpp") {
@@ -162,10 +151,12 @@ if (is_fuchsia) {
     public_deps = [ "//zircon/system/ulib/trace" ]
   }
 }
+
 source_set("storage_trace_disabled_cpp") {
   public = [ "trace_disabled.h" ]
   public_deps = [ "//zircon/system/ulib/fbl" ]
 }
+
 source_set("cpp") {
   public = [ "trace.h" ]
   if (is_fuchsia) {
@@ -188,6 +179,18 @@ source_set("cpp") {
     public_deps = [ ":storage_trace_disabled_cpp" ]
   }
 }
+
+cc_test_executable("storage_trace_cpp_test") {
+  sources = [ "trace_test.cc" ]
+  deps = [
+    ":cpp",
+    "//src/lib/fxl/test:gtest_main",
+    "//third_party/googletest:gtest",
+    "//zircon/system/ulib/fbl",
+  ]
+  testonly = true
+  emit_tool_path = false
+}
 if (is_fuchsia) {
   source_set("storage_trace_force_enabled_cpp") {
     testonly = true
@@ -197,8 +200,54 @@ if (is_fuchsia) {
     public_deps = [ ":storage_trace_enabled_cpp" ]
   }
 }
+if (is_fuchsia) {
+  cc_test_executable("storage_trace_enabled_cpp_test") {
+    sources = [ "trace_test.cc" ]
+    deps = [
+      ":storage_trace_force_enabled_cpp",
+      "//src/lib/fxl/test:gtest_main",
+      "//third_party/googletest:gtest",
+      "//zircon/system/ulib/fbl",
+    ]
+    testonly = true
+    emit_tool_path = false
+  }
+}
+
+fuchsia_unittest_component("storage_trace_enabled_cpp_test_component") {
+  deps = [ ":storage_trace_enabled_cpp_test" ]
+  component_name = "storage_trace_enabled_cpp_test"
+}
+
 source_set("storage_trace_force_disabled_cpp") {
   testonly = true
   public = [ "trace.h" ]
   public_deps = [ ":storage_trace_disabled_cpp" ]
+}
+
+cc_test_executable("storage_trace_disabled_cpp_test") {
+  sources = [ "trace_test.cc" ]
+  deps = [
+    ":storage_trace_force_disabled_cpp",
+    "//src/lib/fxl/test:gtest_main",
+    "//third_party/googletest:gtest",
+    "//zircon/system/ulib/fbl",
+  ]
+  testonly = true
+  emit_tool_path = false
+}
+
+fuchsia_unittest_component("storage_trace_disabled_cpp_test_component") {
+  deps = [ ":storage_trace_disabled_cpp_test" ]
+  component_name = "storage_trace_disabled_cpp_test"
+}
+
+fuchsia_test_package("storage_trace_tests_pkg") {
+  package_name = "storage_trace_tests-gn"
+  test_components = [
+    ":storage_trace_enabled_rust_test_component",
+    ":storage_trace_disabled_rust_test_component",
+    ":storage_trace_enabled_cpp_test_component",
+    ":storage_trace_disabled_cpp_test_component",
+  ]
 }

@@ -21,6 +21,7 @@ use ffx_emulator_config::{EmulatorEngine, EngineConsoleType, ShowDetail};
 use ffx_target::{KnockError, TargetInfoQuery};
 use fho::{FfxContext, Result, bug, return_bug, return_user_error, user_error};
 use fuchsia_async::Timer;
+use nix::sys::signal::Signal;
 use serde_json::{Deserializer, Value, json};
 use shared_child::SharedChild;
 use std::fs::{self, File};
@@ -36,6 +37,18 @@ use std::sync::mpsc::channel;
 use std::time::{Duration, Instant};
 use std::{env, str};
 use tempfile::NamedTempFile;
+
+const FDOMAIN_UART_KERNEL_ARG: &str = "dev.fdomain.uart=true";
+const SERIAL_SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+pub(crate) fn is_uart_enabled(emu_config: &EmulatorConfiguration) -> bool {
+    emu_config.flags.kernel_args.iter().any(|arg| arg.contains(FDOMAIN_UART_KERNEL_ARG))
+        || emu_config
+            .runtime
+            .addl_kernel_args
+            .iter()
+            .any(|arg| arg.contains(FDOMAIN_UART_KERNEL_ARG))
+}
 
 pub(crate) fn make_absolute_path(path: &Path) -> Result<PathBuf> {
     if path.is_absolute() {
@@ -160,6 +173,37 @@ where
     }
 }
 
+/// Waits for the QMP greeting (`{"QMP": ...}`) on a newly opened QMP connection.
+///
+/// QEMU serves one QMP client at a time. It does not read from a new connection until the
+/// previous client disconnects. Waiting for the greeting ensures that no command with side
+/// effects, such as a key press, is queued behind another client and executed late.
+pub(crate) fn qmp_wait_for_greeting<I>(
+    stream: &UnixStream,
+    responses: &mut I,
+    timeout: Duration,
+) -> Result<()>
+where
+    I: Iterator<Item = serde_json::Result<Value>>,
+{
+    let deadline = Instant::now() + timeout;
+    loop {
+        let data = qmp_read(stream, responses, deadline, "the QMP greeting").map_err(|e| {
+            if Instant::now() >= deadline {
+                user_error!(
+                    "{e} Another QMP client, such as `ffx emu console --machine`, may be connected."
+                )
+            } else {
+                e
+            }
+        })?;
+        if data.get("QMP").is_some() {
+            return Ok(());
+        }
+        log::debug!("Skipping QMP message while waiting for the greeting: {data}");
+    }
+}
+
 pub(crate) fn get_host_tool(context: &EnvironmentContext, name: &str) -> Result<PathBuf> {
     // Attempts to get a host tool from the SDK manifest. If it fails, falls
     // back to attempting to derive the path to the host tool binary by simply checking
@@ -178,8 +222,11 @@ pub(crate) fn get_host_tool(context: &EnvironmentContext, name: &str) -> Result<
                 .rerun_bin()
                 .or_else(|_| std::env::current_exe())
                 .map_err(|e| bug!("getting current ffx exe path for host tool {name}: {e}"))?;
-            ffx_path = std::fs::canonicalize(ffx_path.clone())
-                .map_err(|e| bug!("canonicalizing ffx path {ffx_path:?}: {e}"))?;
+            // Look next to the path ffx was invoked through, without resolving symlinks: when
+            // the SDK is a symlink tree, the host tools are siblings of the symlink, not of its
+            // target.
+            ffx_path = std::path::absolute(&ffx_path)
+                .map_err(|e| bug!("making ffx path {ffx_path:?} absolute: {e}"))?;
 
             let tool_path = ffx_path
                 .parent()
@@ -230,15 +277,52 @@ pub(crate) mod femu;
 pub(crate) mod gpt;
 pub(crate) mod qemu;
 
-const COMMAND_CONSOLE: &str = "./monitor";
-const MACHINE_CONSOLE: &str = "./qmp";
-const SERIAL_CONSOLE: &str = "./serial";
-
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct PortPair {
     pub guest: u16,
     pub host: u16,
 }
+/// How long `QemuBasedEngine::stop_emulator()` gives the emulator to exit on its own, after asking
+/// it to, before it kills it.
+const EXIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long `QemuBasedEngine::stop_emulator()` waits in all for the emulator process to exit,
+/// including the `EXIT_REQUEST_TIMEOUT` before it kills it.
+const STOP_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Waits for the process with the given pid to exit, for at most `timeout`. Returns whether it has
+/// exited.
+async fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
+    let start = Instant::now();
+    while process::is_running(pid) {
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        Timer::new(Duration::from_millis(100)).await;
+    }
+    true
+}
+
+/// Stops the process with the given pid: asks it to exit, and kills it if it is still there after
+/// `exit_timeout`. Returns whether the process has gone, which is given up on `kill_timeout` after
+/// the kill.
+async fn stop_process(pid: u32, exit_timeout: Duration, kill_timeout: Duration) -> bool {
+    if let Err(e) = process::signal(pid, Signal::SIGTERM) {
+        log::warn!("Error asking process {pid} to exit: {e:?}");
+    }
+    if wait_for_exit(pid, exit_timeout).await {
+        return true;
+    }
+    log::warn!(
+        "Process {pid} has not exited {} seconds after being asked to; killing it.",
+        exit_timeout.as_secs()
+    );
+    if let Err(e) = process::signal(pid, Signal::SIGKILL) {
+        log::warn!("Error encountered terminating process: {e:?}");
+    }
+    wait_for_exit(pid, kill_timeout).await
+}
+
 /// QemuBasedEngine collects the interface for
 /// emulator engine implementations that use
 /// QEMU as the emulator.
@@ -263,16 +347,14 @@ pub(crate) trait QemuBasedEngine: EmulatorEngine {
     ) -> Result<GuestConfig> {
         let mut updated_guest = emu_config.guest.clone();
 
-        // Create the data directory if needed.
+        // Create the data directory if needed. Images are always staged in the
+        // primary (first) instance root; the other roots are only used for
+        // reading existing instances. This uses `get` rather than `get_file`,
+        // which would skip the primary root if it doesn't exist yet.
         let mut instance_root: PathBuf = env
-            .query(ffx_config::keys::EMU_INSTANCE_ROOT_DIR)
-            .build()
-            .get_file(env)
+            .get(ffx_config::keys::EMU_INSTANCE_ROOT_DIR)
             .map_err(|e| bug!("Error reading config for instance root: {e}"))?;
-        // This should really just be part of the conversion, but the structure of the config file
-        // makes it awkward to do. The `file_check` function doesn't allow for returning an error,
-        // for example, and the `get_file` function has to support returning a `Vec` in addition to
-        // a `PathBuf`.
+        // An `emu.instance_dir` override may be a relative path.
         if !instance_root.has_root() {
             instance_root = std::fs::canonicalize(instance_root).bug()?;
         }
@@ -618,13 +700,23 @@ pub(crate) trait QemuBasedEngine: EmulatorEngine {
     fn validate_network_flags(&self, emu_config: &EmulatorConfiguration) -> Result<()> {
         match emu_config.host.networking {
             NetworkingMode::None => {
-                // Check for console/monitor.
+                // Check for console/monitor, or if serial connection is enabled.
                 if emu_config.runtime.console == ConsoleType::None {
-                    return_user_error!(
-                        "Running without networking enabled and no interactive console;\n\
-                        there will be no way to communicate with this emulator.\n\
-                        Restart with --console/--monitor or with networking enabled to proceed."
-                    );
+                    if is_uart_enabled(emu_config) {
+                        let message = format!(
+                            "Running without networking enabled and no interactive console. \
+                            You will be interacting with this emulator via the UART interface \
+                            'uart:{}'. Note that ffx interactions will be slow.",
+                            emu_config.runtime.name
+                        );
+                        log::info!("{message}");
+                    } else {
+                        return_user_error!(
+                            "Running without networking enabled and no interactive console;\n\
+                            there will be no way to communicate with this emulator.\n\
+                            Restart with --console/--monitor or with networking enabled to proceed."
+                        );
+                    }
                 }
             }
             NetworkingMode::Auto => {
@@ -813,7 +905,23 @@ pub(crate) trait QemuBasedEngine: EmulatorEngine {
             let name = self.emu_config().runtime.name.clone();
             let start = Instant::now();
             let mut connection_errors = Vec::new();
+            let serial_enabled = is_uart_enabled(self.emu_config());
             while start.elapsed().as_secs() <= startup_timeout {
+                if serial_enabled {
+                    // Wait for the serial socket file to exist before attempting to knock.
+                    // Knocking will fail immediately with a critical error if it cannot connect to
+                    // the serial driver, and the serial driver will not have started yet if the
+                    // serial socket has not been created by QEMU.
+                    let socket_path = self.emu_config().runtime.get_serial_socket_path();
+                    if !socket_path.exists() {
+                        log::debug!(
+                            "Serial socket path {:?} does not exist yet. Waiting...",
+                            socket_path
+                        );
+                        Timer::new(SERIAL_SOCKET_POLL_INTERVAL).await;
+                        continue;
+                    }
+                }
                 let compat_res = ffx_target::knock_target(
                     &TargetInfoQuery::try_from(name.clone())
                         .map_err(|e| user_error!("Invalid target specifier: {}", e))?,
@@ -967,9 +1075,22 @@ pub(crate) trait QemuBasedEngine: EmulatorEngine {
 
     async fn stop_emulator(&mut self) -> Result<()> {
         if self.is_running().await {
-            log::info!("Terminating running instance {:?}", self.get_pid());
-            if let Some(terminate_error) = process::terminate(self.get_pid()).err() {
-                log::warn!("Error encountered terminating process: {:?}", terminate_error);
+            let pid = self.get_pid();
+            log::info!("Stopping running instance {pid}");
+            // The emulator is asked to exit before it is killed, so that it can finish its I/O and
+            // close the disk image properly: QEMU writes back its cached qcow2 metadata on the way
+            // out, while a killed QEMU leaves the image as a crash would. Either way the process
+            // doesn't go away the moment it exits: the kernel still has to release the guest's
+            // memory and the files which the emulator had open, which takes seconds for a large
+            // guest. Wait for that, so that the instance can be started again as soon as stop
+            // returns, as `ffx emu stop --persist && ffx emu start --reuse` does.
+            let kill_timeout = STOP_TIMEOUT - EXIT_REQUEST_TIMEOUT;
+            if !stop_process(pid, EXIT_REQUEST_TIMEOUT, kill_timeout).await {
+                return_user_error!(
+                    "The emulator process (pid {pid}) was killed, but is still shutting down {} \
+                    seconds later. Wait for it to exit before starting the instance again.",
+                    kill_timeout.as_secs()
+                );
             }
         }
         self.set_engine_state(EngineState::Staged);
@@ -985,8 +1106,8 @@ pub(crate) trait QemuBasedEngine: EmulatorEngine {
     fn get_engine_state(&self) -> EngineState;
 
     /// Attach to emulator's console socket.
-    fn attach_to(&self, path: &Path, console: EngineConsoleType) -> Result<()> {
-        let console_path = self.get_path_for_console_type(path, console);
+    fn attach_to(&self, console: EngineConsoleType) -> Result<()> {
+        let console_path = self.get_path_for_console_type(console);
         let mut socket = QemuSocket::new(&console_path);
         socket.connect().map_err(|e| bug!("Error connecting to console: {e}"))?;
         let stream = socket.stream().ok_or_else(|| bug!("No socket connected."))?;
@@ -1008,13 +1129,14 @@ pub(crate) trait QemuBasedEngine: EmulatorEngine {
         Ok(())
     }
 
-    fn get_path_for_console_type(&self, path: &Path, console: EngineConsoleType) -> PathBuf {
-        path.join(match console {
-            EngineConsoleType::Command => COMMAND_CONSOLE,
-            EngineConsoleType::Machine => MACHINE_CONSOLE,
-            EngineConsoleType::Serial => SERIAL_CONSOLE,
+    fn get_path_for_console_type(&self, console: EngineConsoleType) -> PathBuf {
+        let runtime = &self.emu_config().runtime;
+        match console {
+            EngineConsoleType::Command => runtime.get_monitor_socket_path(),
+            EngineConsoleType::Machine => runtime.get_qmp_socket_path(),
+            EngineConsoleType::Serial => runtime.get_console_socket_path(),
             EngineConsoleType::None => panic!("No path exists for EngineConsoleType::None"),
-        })
+        }
     }
 
     /// Connect to the qmp socket for the emulator instance and read the port mappings.
@@ -1030,7 +1152,7 @@ pub(crate) trait QemuBasedEngine: EmulatorEngine {
     /// the mappings are not available within this time.
     async fn read_port_mappings(&mut self) -> Result<()> {
         // Check if there are any ports not already mapped.
-        if !self.emu_config().host.port_map.values().any(|m| m.host.is_none()) {
+        if !self.emu_config().host.port_map.values().any(|m| m.host.is_none_or(|h| h == 0)) {
             log::debug!("No unmapped ports found.");
             return Ok(());
         }
@@ -1044,8 +1166,7 @@ pub(crate) trait QemuBasedEngine: EmulatorEngine {
         };
 
         // Open machine socket
-        let instance_dir = &self.emu_config().runtime.instance_directory;
-        let console_path = self.get_path_for_console_type(instance_dir, EngineConsoleType::Machine);
+        let console_path = self.get_path_for_console_type(EngineConsoleType::Machine);
         let mut socket = QemuSocket::new(&console_path);
 
         // Start the timeout tracking here so it includes opening the socket,
@@ -1088,7 +1209,12 @@ pub(crate) trait QemuBasedEngine: EmulatorEngine {
                         // If the mapping was updated and there are no more unmapped ports,
                         // save and return.
                         if modified
-                            && !self.emu_config().host.port_map.values().any(|m| m.host.is_none())
+                            && !self
+                                .emu_config()
+                                .host
+                                .port_map
+                                .values()
+                                .any(|m| m.host.is_none_or(|h| h == 0))
                         {
                             return Ok(());
                         }
@@ -1220,12 +1346,12 @@ pub(crate) trait QemuBasedEngine: EmulatorEngine {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use async_trait::async_trait;
     use emulator_instance::{
         DataAmount, DataUnits, EmulatorInstanceData, EmulatorInstanceInfo, EmulatorInstances,
         EngineType, PortMapping,
     };
     use ffx_config::environment::{EnvironmentKind, TestEnvBuilder};
+    use ffx_emulator_config::BoxFuture;
 
     use serde::{Deserialize, Serialize};
     use std::io::Read;
@@ -1234,27 +1360,36 @@ pub(crate) mod tests {
     use tempfile::{TempDir, tempdir};
 
     #[derive(Default, Serialize)]
-    struct TestEngine {}
+    struct TestEngine {
+        pid: u32,
+        state: EngineState,
+    }
     impl QemuBasedEngine for TestEngine {
-        fn set_pid(&mut self, _pid: u32) {}
-        fn get_pid(&self) -> u32 {
-            todo!()
+        fn set_pid(&mut self, pid: u32) {
+            self.pid = pid;
         }
-        fn set_engine_state(&mut self, _state: EngineState) {}
+        fn get_pid(&self) -> u32 {
+            self.pid
+        }
+        fn set_engine_state(&mut self, state: EngineState) {
+            self.state = state;
+        }
         fn get_engine_state(&self) -> EngineState {
-            todo!()
+            self.state
         }
     }
-    #[async_trait(?Send)]
     impl EmulatorEngine for TestEngine {
         fn engine_state(&self) -> EngineState {
-            EngineState::default()
+            self.state
         }
         fn engine_type(&self) -> EngineType {
             EngineType::default()
         }
-        async fn is_running(&mut self) -> bool {
-            false
+        fn is_running(&mut self) -> BoxFuture<'_, bool> {
+            Box::pin(async { process::is_running(self.pid) })
+        }
+        fn save_to_disk(&self) -> BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
         }
     }
     const ORIGINAL: &str = "THIS_STRING";
@@ -2196,6 +2331,18 @@ pub(crate) mod tests {
         let result = engine.validate_network_flags(&emu_config);
         assert!(result.is_ok(), "{:?}", result.unwrap_err());
 
+        // If serial is enabled in kernel args, it should pass even without console.
+        emu_config.runtime.console = ConsoleType::None;
+        emu_config.flags.kernel_args = vec!["dev.fdomain.uart=true".to_string()];
+        let result = engine.validate_network_flags(&emu_config);
+        assert!(result.is_ok(), "{:?}", result.unwrap_err());
+
+        // If serial is enabled in addl kernel args, it should pass.
+        emu_config.flags.kernel_args.clear();
+        emu_config.runtime.addl_kernel_args = vec!["dev.fdomain.uart=true".to_string()];
+        let result = engine.validate_network_flags(&emu_config);
+        assert!(result.is_ok(), "{:?}", result.unwrap_err());
+
         // Tap mode errors if host is Linux and there's no interface, but we can't mock the
         // interface, so we can't test this case yet.
         emu_config.host.networking = NetworkingMode::Tap;
@@ -2207,6 +2354,80 @@ pub(crate) mod tests {
         assert!(result.is_err());
 
         Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_wait_for_exit() {
+        // A process which exits is waited for, and is gone afterwards.
+        let child = Command::new("sleep").arg("0.2").spawn().expect("spawn sleep");
+        let start = Instant::now();
+        assert!(wait_for_exit(child.id(), Duration::from_secs(30)).await);
+        assert!(start.elapsed() >= Duration::from_millis(200));
+        assert!(!process::is_running(child.id()));
+
+        // A process which keeps running is given up on when the timeout runs out.
+        let mut child = Command::new("sleep").arg("60").spawn().expect("spawn sleep");
+        let start = Instant::now();
+        assert!(!wait_for_exit(child.id(), Duration::from_millis(300)).await);
+        assert!(start.elapsed() >= Duration::from_millis(300));
+        assert!(process::is_running(child.id()));
+        child.kill().expect("kill sleep");
+        child.wait().expect("wait for sleep");
+    }
+
+    #[fuchsia::test]
+    async fn test_stop_emulator_waits_for_exit() {
+        let child = Command::new("sleep").arg("60").spawn().expect("spawn sleep");
+        let mut engine = TestEngine { pid: child.id(), state: EngineState::Running };
+        assert!(engine.is_running().await);
+
+        engine.stop_emulator().await.expect("stop");
+
+        // The process has exited, rather than only having been signalled, when stop returns.
+        assert!(!process::is_running(child.id()));
+        assert!(!engine.is_running().await);
+        assert_eq!(engine.get_engine_state(), EngineState::Staged);
+    }
+
+    #[fuchsia::test]
+    async fn test_stop_emulator_not_running() {
+        let mut engine = TestEngine { pid: 0, state: EngineState::Running };
+        engine.stop_emulator().await.expect("stop");
+        assert_eq!(engine.get_engine_state(), EngineState::Staged);
+    }
+
+    #[fuchsia::test]
+    async fn test_stop_process_asks_first() {
+        // A process which exits when asked to is gone well before it would have been killed.
+        let child = Command::new("sleep").arg("60").spawn().expect("spawn sleep");
+        let start = Instant::now();
+        assert!(stop_process(child.id(), Duration::from_secs(30), Duration::from_secs(30)).await);
+        assert!(start.elapsed() < Duration::from_secs(30));
+        assert!(!process::is_running(child.id()));
+    }
+
+    #[fuchsia::test]
+    async fn test_stop_process_kills_after_timeout() {
+        // A process which ignores the request to exit is killed once the time for it has run out.
+        let mut command = Command::new("sleep");
+        command.arg("60");
+        unsafe {
+            command.pre_exec(|| {
+                nix::sys::signal::signal(
+                    nix::sys::signal::Signal::SIGTERM,
+                    nix::sys::signal::SigHandler::SigIgn,
+                )
+                .map(|_| ())
+                .map_err(|e| std::io::Error::from_raw_os_error(e as i32))
+            });
+        }
+        let child = command.spawn().expect("spawn sleep");
+        let start = Instant::now();
+        assert!(
+            stop_process(child.id(), Duration::from_millis(300), Duration::from_secs(30)).await
+        );
+        assert!(start.elapsed() >= Duration::from_millis(300));
+        assert!(!process::is_running(child.id()));
     }
 
     #[derive(Deserialize, Debug)]
@@ -2245,7 +2466,7 @@ pub(crate) mod tests {
         data.get_emulator_configuration_mut()
             .host
             .port_map
-            .insert("http".into(), PortMapping { guest: 80, host: None });
+            .insert("http".into(), PortMapping { guest: 80, host: Some(0) });
         data.get_emulator_configuration_mut()
             .host
             .port_map
@@ -2263,7 +2484,7 @@ pub(crate) mod tests {
         // Set up a socket that behaves like QMP
         env::set_current_dir(engine.emu_config().runtime.instance_directory.clone())
             .expect("setting current dir");
-        let listener = UnixListener::bind(MACHINE_CONSOLE).expect("binding machine console");
+        let listener = UnixListener::bind("qmp").expect("binding machine console");
         env::set_current_dir(&cwd).expect("setting current dir");
 
         // Helper function for this test to be the QEMU side of the QMP socket.
@@ -2421,6 +2642,10 @@ pub(crate) mod tests {
           TCP[HOST_FORWARD]  83               * 43265       10.0.2.15  2345     0     0\r
           TCP[HOST_FORWARD]  80               * 38989       10.0.2.15  5353     0     0\r
           TCP[HOST_FORWARD]  79               * 43751       10.0.2.15    22     0     0\r"#;
+        let qemu_hub_expected = r#"Hub -1 (net0):
+          Protocol[State]    FD  Source Address  Port   Dest. Address  Port RecvQ SendQ
+          TCP[HOST_FORWARD]  12               * 44417       10.0.2.15    22     0     0
+          TCP[HOST_FORWARD]  11               * 33519       10.0.2.15    80     0     0"#;
 
         let testdata: Vec<(&str, Result<Vec<PortPair>>)> = vec![
             ("", Ok(vec![])),
@@ -2453,6 +2678,10 @@ pub(crate) mod tests {
                     PortPair { guest: 5353, host: 38989 },
                     PortPair { guest: 22, host: 43751 },
                 ]),
+            ),
+            (
+                qemu_hub_expected,
+                Ok(vec![PortPair { guest: 22, host: 44417 }, PortPair { guest: 80, host: 33519 }]),
             ),
         ];
 
@@ -2702,6 +2931,49 @@ pub(crate) mod tests {
         let err =
             qmp_execute(&client, &mut responses, "cmd", None, Duration::from_secs(10)).unwrap_err();
         assert!(err.to_string().contains("connection closed"), "{err}");
+        handle.join().unwrap();
+    }
+
+    #[fuchsia::test]
+    fn test_qmp_wait_for_greeting() {
+        let (client, handle) = fake_qmp_pair(|stream, _requests| {
+            write_json(&stream, json!({"event": "RTC_CHANGE", "data": {"offset": 0}}));
+            write_json(&stream, json!({"QMP": {"version": {}, "capabilities": []}}));
+        });
+        let mut responses = Deserializer::from_reader(&client).into_iter::<Value>();
+        qmp_wait_for_greeting(&client, &mut responses, Duration::from_secs(10)).expect("greeting");
+        handle.join().unwrap();
+    }
+
+    #[fuchsia::test]
+    fn test_qmp_wait_for_greeting_timeout() {
+        // Models a QMP server that is busy with another client: the connection is open, but
+        // nothing is ever sent on it.
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let (client, handle) = fake_qmp_pair(move |_stream, _requests| {
+            let _ = done_rx.recv();
+        });
+        let mut responses = Deserializer::from_reader(&client).into_iter::<Value>();
+        let start = Instant::now();
+        let err = qmp_wait_for_greeting(&client, &mut responses, Duration::from_millis(200))
+            .unwrap_err()
+            .to_string();
+        assert!(start.elapsed() >= Duration::from_millis(200));
+        assert!(start.elapsed() < Duration::from_secs(5), "took {:?}", start.elapsed());
+        assert!(err.contains("Timed out"), "{err}");
+        assert!(err.contains("Another QMP client"), "{err}");
+        done_tx.send(()).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[fuchsia::test]
+    fn test_qmp_wait_for_greeting_connection_closed() {
+        let (client, handle) = fake_qmp_pair(|_stream, _requests| {});
+        let mut responses = Deserializer::from_reader(&client).into_iter::<Value>();
+        let err = qmp_wait_for_greeting(&client, &mut responses, Duration::from_secs(10))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("closed"), "{err}");
         handle.join().unwrap();
     }
 }

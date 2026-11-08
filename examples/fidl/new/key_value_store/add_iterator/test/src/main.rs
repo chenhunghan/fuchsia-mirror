@@ -7,7 +7,7 @@ use example_tester::{Client, Server, TestKind, assert_logs_eq_to_golden, run_tes
 use fidl::prelude::*;
 use fidl_examples_keyvaluestore_additerator::StoreMarker;
 
-use fuchsia_component_test::{ChildRef, RealmBuilder};
+use fuchsia_component_test::{Capability, ChildRef, RealmBuilder, Ref, Route};
 
 async fn test_iteration(test_name: &str, iterate_from: &str) -> Result<(), Error> {
     let client = Client::new(test_name, "#meta/keyvaluestore_additerator_client.cm");
@@ -17,15 +17,33 @@ async fn test_iteration(test_name: &str, iterate_from: &str) -> Result<(), Error
         StoreMarker::PROTOCOL_NAME,
         TestKind::ClientAndServer { client: &client, server: &server },
         |builder: RealmBuilder, client: ChildRef| async move {
-            builder.init_mutable_config_to_empty(&client).await?;
             builder
-                .set_config_value(
-                    &client,
-                    "write_items",
-                    vec!["verse_1", "verse_2", "verse_3", "verse_4"].into(),
+                .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                    name: "fuchsia.examples.keyvaluestore.additerator.WriteItems".parse()?,
+                    value: vec!["verse_1", "verse_2", "verse_3", "verse_4"].into(),
+                }))
+                .await?;
+            builder
+                .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                    name: "fuchsia.examples.keyvaluestore.additerator.IterateFrom".parse()?,
+                    value: iterate_from.into(),
+                }))
+                .await?;
+            let config_capabilities = [
+                "fuchsia.examples.keyvaluestore.additerator.WriteItems",
+                "fuchsia.examples.keyvaluestore.additerator.IterateFrom",
+            ];
+            builder
+                .add_route(
+                    config_capabilities
+                        .into_iter()
+                        .fold(Route::new(), |route, name| {
+                            route.capability(Capability::configuration(name))
+                        })
+                        .from(Ref::self_())
+                        .to(&client),
                 )
                 .await?;
-            builder.set_config_value(&client, "iterate_from", iterate_from.into()).await?;
             Ok::<(RealmBuilder, ChildRef), Error>((builder, client))
         },
         |log_reader| {

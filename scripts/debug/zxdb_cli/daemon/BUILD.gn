@@ -11,7 +11,20 @@ group("tests") {
   deps = [
     ":daemon_events_test($host_toolchain)",
     ":daemon_test($host_toolchain)",
-    ":daemon_zxdb_mixin_test($host_toolchain)",
+    ":test_async_backtrace($host_toolchain)",
+    ":test_attach($host_toolchain)",
+    ":test_breakpoints($host_toolchain)",
+    ":test_detach($host_toolchain)",
+    ":test_diagnose_hang($host_toolchain)",
+    ":test_driver_list($host_toolchain)",
+    ":test_evaluate_and_console($host_toolchain)",
+    ":test_execution($host_toolchain)",
+    ":test_process_inspection($host_toolchain)",
+    ":test_stack_trace($host_toolchain)",
+    ":test_start($host_toolchain)",
+    ":test_threads_and_state($host_toolchain)",
+    ":test_tracepoint($host_toolchain)",
+    ":test_variables($host_toolchain)",
   ]
 }
 
@@ -22,17 +35,26 @@ if (is_host) {
       "__init__.py",
       "constants.py",
       "daemon.py",
+      "driver_utils.py",
+      "ffx_utils.py",
       "handlers/__init__.py",
+      "handlers/aspace.py",
       "handlers/async_backtrace.py",
       "handlers/attach.py",
       "handlers/break_req.py",
       "handlers/console.py",
       "handlers/continue_req.py",
       "handlers/detach.py",
+      "handlers/diagnose_hang.py",
+      "handlers/driver_list.py",
       "handlers/evaluate.py",
       "handlers/finish.py",
+      "handlers/frame_utils.py",
       "handlers/get_state.py",
+      "handlers/handles.py",
       "handlers/hello.py",
+      "handlers/mem_read.py",
+      "handlers/modules.py",
       "handlers/next_req.py",
       "handlers/pause.py",
       "handlers/stack_trace.py",
@@ -40,6 +62,7 @@ if (is_host) {
       "handlers/step_in.py",
       "handlers/stop.py",
       "handlers/threads.py",
+      "handlers/tracepoint.py",
       "handlers/variables.py",
       "handlers/wait_for_event.py",
       "handlers/watch_req.py",
@@ -55,6 +78,16 @@ if (is_host) {
     ]
   }
 
+  python_library("test_helpers") {
+    testonly = true
+    library_name = "daemon"
+    sources = [
+      "tests/__init__.py",
+      "tests/helpers.py",
+    ]
+    deps = [ ":daemon_lib" ]
+  }
+
   python_binary("daemon_bin") {
     main_source = "main.py"
     output_name = "zxdb-daemon.pyz"
@@ -67,33 +100,85 @@ if (is_host) {
     binary = ":daemon_bin"
   }
 
-  python_host_test("daemon_test") {
-    main_source = "tests/test_daemon.py"
-    libraries = [ ":daemon_lib" ]
+  _daemon_tests = [
+    {
+      target_name = "daemon_test"
+      source = "tests/test_daemon.py"
+    },
+    {
+      target_name = "daemon_events_test"
+      source = "tests/test_events.py"
+    },
+    {
+      target_name = "test_async_backtrace"
+      source = "handlers/tests/test_async_backtrace.py"
+    },
+    {
+      target_name = "test_attach"
+      source = "handlers/tests/test_attach.py"
+    },
+    {
+      target_name = "test_breakpoints"
+      source = "handlers/tests/test_breakpoints.py"
+    },
+    {
+      target_name = "test_detach"
+      source = "handlers/tests/test_detach.py"
+    },
+    {
+      target_name = "test_diagnose_hang"
+      source = "handlers/tests/test_diagnose_hang.py"
+    },
+    {
+      target_name = "test_driver_list"
+      source = "handlers/tests/test_driver_list.py"
+    },
+    {
+      target_name = "test_evaluate_and_console"
+      source = "handlers/tests/test_evaluate_and_console.py"
+    },
+    {
+      target_name = "test_execution"
+      source = "handlers/tests/test_execution.py"
+    },
+    {
+      target_name = "test_process_inspection"
+      source = "handlers/tests/test_process_inspection.py"
+    },
+    {
+      target_name = "test_stack_trace"
+      source = "handlers/tests/test_stack_trace.py"
+    },
+    {
+      target_name = "test_start"
+      source = "handlers/tests/test_start.py"
+    },
+    {
+      target_name = "test_threads_and_state"
+      source = "handlers/tests/test_threads_and_state.py"
+    },
+    {
+      target_name = "test_tracepoint"
+      source = "handlers/tests/test_tracepoint.py"
+    },
+    {
+      target_name = "test_variables"
+      source = "handlers/tests/test_variables.py"
+    },
+  ]
 
-    # Explicitly depend on pydantic-core's test_data. This is to ensure that the
-    # module's DSO is bundled together with our test so the top-level pydantic
-    # module loads correctly.
-    test_data_deps = [ "//prebuilt/third_party/pydantic-core:test_data" ]
-  }
+  foreach(test, _daemon_tests) {
+    python_host_test(test.target_name) {
+      main_source = test.source
+      libraries = [
+        ":daemon_lib",
+        ":test_helpers",
+      ]
 
-  python_host_test("daemon_events_test") {
-    main_source = "tests/test_events.py"
-    libraries = [ ":daemon_lib" ]
-
-    # Explicitly depend on pydantic-core's test_data. This is to ensure that the
-    # module's DSO is bundled together with our test so the top-level pydantic
-    # module loads correctly.
-    test_data_deps = [ "//prebuilt/third_party/pydantic-core:test_data" ]
-  }
-
-  python_host_test("daemon_zxdb_mixin_test") {
-    main_source = "tests/test_zxdb_mixin.py"
-    libraries = [ ":daemon_lib" ]
-
-    # Explicitly depend on pydantic-core's test_data. This is to ensure that the
-    # module's DSO is bundled together with our test so the top-level pydantic
-    # module loads correctly.
-    test_data_deps = [ "//prebuilt/third_party/pydantic-core:test_data" ]
+      # Explicitly depend on pydantic-core's test_data. This is to ensure that
+      # the module's DSO is bundled together with our test so the top-level
+      # pydantic module loads correctly.
+      test_data_deps = [ "//prebuilt/third_party/pydantic-core:test_data" ]
+    }
   }
 }

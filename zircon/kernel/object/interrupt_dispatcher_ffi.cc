@@ -4,7 +4,6 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-#include <inttypes.h>
 #include <lib/counters.h>
 
 #include <fbl/alloc_checker.h>
@@ -34,12 +33,6 @@ Lock<CriticalMutex>* InterruptDispatcher::get_lock() const {
 void InterruptDispatcher::GetDiagnostics(WakeVector::Diagnostics& diagnostics_out) const {
   rust_interrupt_dispatcher_get_diagnostics(this, &diagnostics_out);
 }
-
-zx_status_t InterruptDispatcher::WaitForInterrupt(zx_time_t* out_timestamp) {
-  return rust_interrupt_dispatcher_wait_for_interrupt(this, out_timestamp);
-}
-
-zx_status_t InterruptDispatcher::Ack() { return rust_interrupt_dispatcher_ack(this); }
 
 extern "C" {
 

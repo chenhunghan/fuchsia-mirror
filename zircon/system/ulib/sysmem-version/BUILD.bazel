@@ -1,0 +1,38 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules:zx_library.bzl", "cc_source_library_zx")
+
+package(default_applicable_licenses = ["//:license"])
+
+cc_source_library_zx(
+    name = "sysmem-version",
+    srcs = [
+        "log.h",
+        "sysmem-version.cc",
+    ],
+    hdrs = ["include/lib/sysmem-version/sysmem-version.h"],
+    # TODO(https://fxbug.dev/42176699): This target uses mutable tables which are deprecated,
+    # rather than builders.
+    copts = [
+        "-DFIDL_WIRE_ALLOW_DEPRECATED_MUTABLE_TABLES",
+    ],  # @bazel2gn:raw_overwrite:[ "//build/cpp:fidl-wire-deprecated-mutable-tables" ]
+    # Bazel bind C++ libraries use the `_cc` suffix, while GN `bind_library()` generates `_cpp`.
+    implementation_deps = [
+        "//sdk/lib/fidl",
+        # GN `bind_library()` generates `:fuchsia.amlogic.platform.sysmem.heap_cpp`.
+        "//src/devices/bind/fuchsia.amlogic.platform.sysmem.heap:fuchsia.amlogic.platform.sysmem.heap_cc",  # @bazel2gn:path_overwrite://src/devices/bind/fuchsia.amlogic.platform.sysmem.heap:fuchsia.amlogic.platform.sysmem.heap_cpp
+        # GN `bind_library()` generates `:fuchsia.goldfish.platform.sysmem.heap_cpp`.
+        "//src/devices/bind/fuchsia.goldfish.platform.sysmem.heap:fuchsia.goldfish.platform.sysmem.heap_cc",  # @bazel2gn:path_overwrite://src/devices/bind/fuchsia.goldfish.platform.sysmem.heap:fuchsia.goldfish.platform.sysmem.heap_cpp
+        # GN `bind_library()` generates `:fuchsia.sysmem.heap_cpp`.
+        "//src/devices/bind/fuchsia.sysmem.heap:fuchsia.sysmem.heap_cc",  # @bazel2gn:path_overwrite://src/devices/bind/fuchsia.sysmem.heap:fuchsia.sysmem.heap_cpp
+        "//zircon/third_party/ulib/safemath",
+    ],
+    includes = ["include"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.sysmem:fuchsia.sysmem_cpp",
+        "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_cpp",
+    ],
+)

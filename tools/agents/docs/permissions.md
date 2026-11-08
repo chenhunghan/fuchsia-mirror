@@ -130,9 +130,9 @@ supporting `-C <dir>`, `--git-dir <dir>`, `--work-tree <dir>`, `--namespace <nam
 `--no-pager`, `--no-color`, `--literal-pathspecs`, `--no-optional-locks`, `-p`, `--paginate`, and
 `-c <config>`.
 
-### 4.3 Fuchsia Tool Global Flags & Chaining (`fx`, `ffx`, `jiri`)
+### 4.3 Fuchsia & VCS Tool Global Flags & Chaining (`fx`, `ffx`, `jiri`, `jj`)
 
-Fuchsia wrapper tools emit `allow`/`ask` regexes matching any binary path (`fx`, `scripts/fx`,
+Fuchsia and VCS wrapper tools emit `allow`/`ask` regexes matching any binary path (`fx`, `scripts/fx`,
 `/abs/path/fx`) and supported global flags:
 
 - **`fx`**: Handles `-t <target>`, `--dir <out_dir>`, `--enable=...`, `--disable=...`,
@@ -141,6 +141,11 @@ Fuchsia wrapper tools emit `allow`/`ask` regexes matching any binary path (`fx`,
   `--machine json`, `-t <target>`, `-c <config>`, `-v`, and `--isolate-dir`.
 - **`jiri`**: Handles `-j <N>`, `-root <dir>`, `-color <mode>`, `-time`, `-v`, `-vv`, and
   `--show-progress`.
+- **`jj`**: Handles `--at-op <op>`, `--at-operation <op>`, `--color <mode>`,
+  `--ignore-working-copy`, `--ignore-immutable`, `--no-integrate-operation`,
+  `--no-pager`, `--quiet`, and `--debug`. (Config override flags `--config*`
+  and repository path flags `-R`/`--repository` are strictly disallowed to
+  prevent arbitrary command execution).
 
 ### 4.4 Schema-Driven `PreToolUse` Hook (`lib/agent_hooks`)
 

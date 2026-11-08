@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -40,6 +41,7 @@ func main() {
 	jsonOutput := flag.String("json-output", "", "Output summary.json to this path.")
 	var checksConfigPaths flagmisc.StringsValue
 	flag.Var(&checksConfigPaths, "checks-config", "Repeated flag, path to a file containing FailureModeChecks to load. Optional.")
+	exonerationConfigPath := flag.String("exoneration-config", "", "Path to a JSON file configuring LUCI Analysis test stability exoneration. Optional.")
 	flag.Parse()
 
 	if *help || flag.NArg() > 0 || *swarmingSummaryPath == "" {
@@ -117,8 +119,8 @@ func main() {
 	}
 
 	// These should be ordered from most specific to least specific. If an earlier
-	// check finds a failure mode, then we skip running later checks because we assume
-	// they'll add no useful information.
+	// check finds a failure mode, we skip emitting top-level check tests for later
+	// checks, though all matching checks are recorded in FailureReason.Errors.
 	checks := []tefmocheck.FailureModeCheck{}
 
 	// Parse FailureModeChecks from external sources if provided.
@@ -151,6 +153,15 @@ func main() {
 	checkTests, err := tefmocheck.RunChecks(checks, &testingOutputs, *outputsDir)
 	if err != nil {
 		log.Fatalf("failed to run checks: %v", err)
+	}
+
+	if *exonerationConfigPath != "" {
+		exonerationCfg, err := tefmocheck.LoadExonerationConfig(*exonerationConfigPath)
+		if err != nil {
+			log.Printf("Warning: failed to load exoneration config from %s (leaving failing tests un-exonerated): %v", *exonerationConfigPath, err)
+		} else if err := tefmocheck.ApplyStabilityExoneration(context.Background(), exonerationCfg, inputSummary, checkTests); err != nil {
+			log.Printf("Warning: LUCI Analysis stability check failed (leaving failing tests un-exonerated): %v", err)
+		}
 	}
 
 	inputSummary.Tests = append(inputSummary.Tests, checkTests...)

@@ -71,6 +71,7 @@ async fn run(mut stream: TestHarnessRequestStream, pager: Arc<ErofsPager>) -> Re
                     supports_modify_directory: false,
                     supports_mutable_file: false,
                     supports_unnamed_temporary_file: false,
+                    supports_link_into_replace_existing: false,
                     // TODO(https://fxbug.dev/479841115): support xattrs in erofs
                     supports_xattrs: false,
                 };

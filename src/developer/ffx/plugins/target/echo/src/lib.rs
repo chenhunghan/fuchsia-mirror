@@ -99,16 +99,6 @@ async fn echo_impl(
         // Get a connection to the target. If the target isn't there, this will
         // wait for it to appear. The closure is called just before that wait so
         // we can log what's happening before blocking a long time.
-        //
-        // If the daemon isn't available, we simply start it. If the daemon is
-        // disabled from auto-starting with `daemon.autostart = false` then this
-        // will still fail and exit the tool. Workflows that need tools to
-        // auto-reconnect but still need to manually manage the daemon aren't
-        // known to us at this time.
-        //
-        // Daemonless workflows should behave as though the daemon is always
-        // reachable as far as this command is concerned, but daemonless is
-        // experimental/unimplemented as of now so this isn't tested.
         let rcs_proxy = rcs_proxy_connector
             .try_connect(|target, connect_err| {
                 let err_string = connect_err
@@ -166,7 +156,7 @@ mod test {
     use fidl::endpoints::DiscoverableProtocolMarker;
     use serde_json::json;
     use std::sync::Arc;
-    use target_behavior::ConnectionBehavior;
+    use target_behavior::DirectConnector;
 
     fn setup_fake_client(
         rcs_handler: impl Fn(fidl_fuchsia_developer_remotecontrol::RemoteControlRequest)
@@ -227,8 +217,7 @@ mod test {
             &["some", "test"],
         );
         let target_env = target_behavior::target_interface(&env);
-        let behavior = ConnectionBehavior::fake_with_fdomain_client(client).await;
-        target_env.set_behavior_for_test(behavior);
+        target_env.set_behavior_for_test(DirectConnector::fake_with_fdomain_client(client).await);
 
         let connector = Connector::try_from_env(&env).await.expect("Could not make test connector");
         let tool = EchoTool { cmd, rcs_proxy: connector };
@@ -278,8 +267,7 @@ mod test {
             &["some", "test"],
         );
         let target_env = target_behavior::target_interface(&env);
-        let behavior = ConnectionBehavior::fake_with_fdomain_client(client).await;
-        target_env.set_behavior_for_test(behavior);
+        target_env.set_behavior_for_test(DirectConnector::fake_with_fdomain_client(client).await);
         let connector = Connector::try_from_env(&env).await.expect("Could not make test connector");
         let cmd = EchoCommand { text: Some("test".to_string()), repeat: false };
         let tool = EchoTool { cmd, rcs_proxy: connector };
@@ -316,8 +304,7 @@ mod test {
             &["some", "test"],
         );
         let target_env = target_behavior::target_interface(&env);
-        let behavior = ConnectionBehavior::fake_with_fdomain_client(client).await;
-        target_env.set_behavior_for_test(behavior);
+        target_env.set_behavior_for_test(DirectConnector::fake_with_fdomain_client(client).await);
 
         let connector = Connector::try_from_env(&env).await.expect("Could not make test connector");
         let tool = EchoTool { cmd, rcs_proxy: connector };
@@ -357,8 +344,7 @@ mod test {
             &["some", "test"],
         );
         let target_env = target_behavior::target_interface(&env);
-        let behavior = ConnectionBehavior::fake_with_fdomain_client(client).await;
-        target_env.set_behavior_for_test(behavior);
+        target_env.set_behavior_for_test(DirectConnector::fake_with_fdomain_client(client).await);
 
         let connector = Connector::try_from_env(&env).await.expect("Could not make test connector");
         let tool = EchoTool { cmd, rcs_proxy: connector };

@@ -11,6 +11,7 @@ rustc_binary("bin") {
   edition = "2024"
 
   deps = [
+    ":config",
     "//sdk/fidl/fuchsia.net.dhcp:fuchsia.net.dhcp_rust",
     "//sdk/rust/zx",
     "//src/connectivity/lib/net-declare",
@@ -25,7 +26,6 @@ rustc_binary("bin") {
     "//src/lib/fuchsia_nix",
     "//src/lib/network/packet",
     "//third_party/rust_crates:anyhow",
-    "//third_party/rust_crates:argh",
     "//third_party/rust_crates:futures",
     "//third_party/rust_crates:libc",
     "//third_party/rust_crates:log",
@@ -50,16 +50,40 @@ fuchsia_test_package("dhcpv4-server-tests") {
   deps = [ "//src/sys/stash:stash_secure_v2" ]
 }
 
-fuchsia_component("component") {
+fuchsia_component_manifest("manifest") {
   component_name = "dhcpv4_server"
   manifest = "meta/dhcpv4_server.cml"
+  visibility = [ ":*" ]
+}
+
+fuchsia_structured_config_rust_lib("config") {
+  cm_label = ":manifest"
+  visibility = [ ":*" ]
+}
+
+fuchsia_component("component") {
+  cm_label = ":manifest"
   deps = [ ":bin" ]
+  visibility = [
+    ":*",
+    "//vendor/google/*",
+  ]
+}
+
+fuchsia_structured_config_values("default_config_values") {
+  cm_label = ":manifest"
+  values = {
+    persistent = false
+  }
+  visibility = [ ":*" ]
 }
 
 fuchsia_package("package") {
   package_name = "dhcpv4-server"
-  deps = [ ":component" ]
-  visibility = [ "//bundles/assembly/*" ]
+  deps = [
+    ":component",
+    ":default_config_values",
+  ]
 }
 
 group("tests") {

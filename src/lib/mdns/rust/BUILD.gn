@@ -56,13 +56,13 @@ rustc_library("mdns") {
     "//src/connectivity/lib/packet-formats:*",
     "//src/connectivity/lib/packet-formats-dhcp:*",
     "//src/developer/ffx/lib/mdns_discovery:*",
-    "//src/testing/end_to_end/antlion/runner:*",
   ]
   deps = [
     "//src/lib/network/packet",
     "//third_party/rust_crates:zerocopy",
   ]
 }
+
 rustc_test("mdns_lib_test") {
   sources = [
     "src/lib.rs",
@@ -74,6 +74,7 @@ rustc_test("mdns_lib_test") {
     "//third_party/rust_crates:zerocopy",
   ]
 }
+
 fuchsia_unittest_package("mdns-rust-tests") {
   package_name = "mdns-rust-tests-gn"
   component_name = "mdns-rust-tests"

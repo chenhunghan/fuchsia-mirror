@@ -174,6 +174,54 @@
       "short": null,
       "description": "only build the ZBI and copy it to the top level of the output directory.",
       "hidden": false
+    },
+    {
+      "kind": {
+        "Option": {
+          "arg_name": "android"
+        }
+      },
+      "optionality": "optional",
+      "long": "--android",
+      "short": null,
+      "description": "directory to write Android-compatible partition images and an unsigned ota.zip to (requires --tuf-keys, and --android-base-ota or --android-build-prop).",
+      "hidden": false
+    },
+    {
+      "kind": {
+        "Option": {
+          "arg_name": "android-base-ota"
+        }
+      },
+      "optionality": "optional",
+      "long": "--android-base-ota",
+      "short": null,
+      "description": "base Android ota.zip whose Android build metadata is copied into the generated ota.zip.",
+      "hidden": false
+    },
+    {
+      "kind": {
+        "Option": {
+          "arg_name": "android-build-prop"
+        }
+      },
+      "optionality": "repeating",
+      "long": "--android-build-prop",
+      "short": null,
+      "description": "android build.prop file to derive the Android build metadata of the generated ota.zip from. May be repeated; later files take precedence.",
+      "hidden": false
+    },
+    {
+      "kind": {
+        "Option": {
+          "arg_name": "android-ota-cert"
+        }
+      },
+      "optionality": "optional",
+      "long": "--android-ota-cert",
+      "short": null,
+      "description": "optional PEM X.509 certificate to embed in the ota.zip as META-INF/com/android/otacert.",
+      "hidden": false
     }
   ],
   "notes": [

@@ -9,7 +9,8 @@
 #include <gbl/gbl_efi_protocols.h>
 #include <gbl/uefi/gbl_protocol_utils.h>
 #include <gbl/uefi/protocols/gbl_efi_avb_protocol.h>
-#include <phys/efi/main.h>
+
+#include "utils.h"
 
 namespace {
 

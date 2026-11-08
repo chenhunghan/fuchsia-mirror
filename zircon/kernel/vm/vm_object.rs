@@ -11,8 +11,10 @@ use super::page_source::MultiPageRequest;
 use super::stream_size_manager::StreamSizeManager;
 use super::vm_mapping::VmMapping;
 use super::vm_object_paged::VmObjectPaged;
+use super::vm_object_physical::VmObjectPhysical;
 use super::vm_page_list::VmPageSpliceList;
 use crate::kernel::types::PAddr;
+use crate::ksync_kernel::TrackedCriticalMutex;
 use crate::user_copy::{UserInPtr, UserOutPtr};
 use bitflags::bitflags;
 use core::convert::Infallible;
@@ -23,17 +25,19 @@ use core::pin::Pin;
 use core::ptr::NonNull;
 use fbl::{HasRefCount, Recyclable, RefPtr};
 use kalloc::AllocError;
-use ksync::{KMutex, KMutexGuard, LockToken, RawCriticalMutex};
+use ksync::{KMutex, KMutexGuard, LockToken};
 use page;
 use pin_init::PinInit;
 use vm_object_bindings as bindings;
+use vm_object_physical_bindings as phys_bindings;
 use zr::Opaque;
 use zx_status::Status;
 use zx_types::{ZX_KOID_INVALID, zx_koid_t, zx_pager_vmo_stats_t, zx_status_t};
 
 pub use bindings::{
     Resizability, SnapshotType, VmObject_CacheOpType as CacheOpType,
-    VmObject_ChildType as ChildType, VmObject_EvictionHint as EvictionHint, VmObjectChildObserver,
+    VmObject_ChildType as ChildType, VmObject_EvictionHint as EvictionHint,
+    VmObject_RangeChangeOp as RangeChangeOp, VmObjectChildObserver,
 };
 pub use zx_types::zx_vmo_lock_state_t;
 
@@ -62,7 +66,7 @@ zr::static_assert!(
 
 pub use crate::vm::vm_cow_pages::VmCowPagesLockClass as VmObjectLockClass;
 
-pub type VmObjectMutex = KMutex<VmObjectLockClass, RawCriticalMutex>;
+pub type VmObjectMutex = KMutex<VmObjectLockClass, TrackedCriticalMutex>;
 
 /// The base vm object that holds a range of bytes of data
 ///
@@ -153,16 +157,34 @@ impl VmObject {
         unsafe { bindings::cpp_vm_object_is_stream_compatible(self.as_raw()) }
     }
 
+    /// Returns true if the VMO's pages require dirty bit tracking.
+    #[inline]
+    pub fn is_dirty_tracked(&self) -> bool {
+        // SAFETY: `self.as_raw()` returns a valid `VmObject` pointer.
+        unsafe { bindings::cpp_vm_object_is_dirty_tracked(self.as_raw()) }
+    }
+
+    /// Checks if all pages in the provided range are pinned.
+    /// This is only intended to be used for debugging checks.
+    ///
+    /// Must not be called with the VMO lock held.
+    #[inline]
+    pub fn debug_is_range_pinned(&self, offset: u64, len: u64) -> bool {
+        // SAFETY: `self.as_raw()` returns a valid `VmObject` pointer.
+        unsafe { bindings::cpp_vm_object_debug_is_range_pinned(self.as_raw(), offset, len) }
+    }
+
     #[inline]
     pub fn lock(
         &self,
-    ) -> impl PinInit<KMutexGuard<'_, VmObjectLockClass, RawCriticalMutex>, Infallible> {
+    ) -> impl PinInit<KMutexGuard<'_, VmObjectLockClass, TrackedCriticalMutex>, Infallible> {
         self.lock_ref().lock()
     }
 
     #[inline]
     pub fn lock_ref(&self) -> &VmObjectMutex {
-        // SAFETY: The pointer returned by cpp_vm_object_lock is valid for reads for the lifetime of self.
+        // SAFETY: The pointer returned by cpp_vm_object_lock is valid for reads for the lifetime
+        // of self.
         unsafe { &*bindings::cpp_vm_object_lock(self.as_raw()).cast::<VmObjectMutex>() }
     }
 
@@ -206,7 +228,23 @@ impl VmObject {
         }
     }
 
+    /// Retrieve the name of the object.
+    #[inline]
+    pub fn get_name_locked(&self, out_name: &mut [u8], _token: &LockToken<'_, VmObjectLockClass>) {
+        // SAFETY: `self.as_raw()` returns a valid `VmObject` pointer and `out_name` points to
+        // `out_name.len()` bytes of valid memory. The caller holds the VMO lock.
+        unsafe {
+            bindings::cpp_vm_object_get_name_locked(
+                self.as_raw(),
+                out_name.as_mut_ptr().cast(),
+                out_name.len(),
+            );
+        }
+    }
+
     /// Sets the child observer for the VMO.
+    ///
+    /// The associated VmObjectDispatcher will set an observer to notify user mode.
     ///
     /// # Safety
     ///
@@ -470,6 +508,19 @@ impl VmObject {
         }
     }
 
+    /// Downcasts a `&VmObject` into a `&VmObjectPhysical` if it is a physical VMO.
+    #[inline]
+    pub fn as_physical(&self) -> Option<&VmObjectPhysical> {
+        // SAFETY: `self.as_raw()` returns a valid `VmObject` pointer.
+        let raw = unsafe { phys_bindings::cpp_vm_object_as_vm_object_physical(self.as_raw()) };
+        if raw.is_null() {
+            None
+        } else {
+            // SAFETY: `raw` points to a valid `VmObjectPhysical` whose lifetime matches `self`.
+            unsafe { Some(&*raw.cast::<VmObjectPhysical>()) }
+        }
+    }
+
     /// Sets the user ID of the VMO.
     pub fn set_user_id(&self, user_id: u64) {
         // SAFETY: `self.as_raw()` returns a valid `VmObject` pointer.
@@ -559,24 +610,27 @@ impl VmObject {
         }
     }
 
-    /// execute lookup_fn on a given range of physical addresses within the vmo. Only pages that are
-    /// present and writable in this VMO will be enumerated. Any copy-on-write pages in our parent
-    /// will not be enumerated. The physical addresses given to the lookup_fn should not be retained
-    /// in any way unless the range has also been pinned by the caller. Offsets provided will be in
-    /// relation to the object being queried, even if pages are actually from a parent object where
-    /// this is a slice.
-    /// Ranges of length zero are considered invalid and will return
-    /// ZX_ERR_INVALID_ARGS. The lookup_fn can terminate iteration early by returning ZX_ERR_STOP.
+    /// Executes `lookup_fn` on a given range of physical addresses within the VMO. Only pages that
+    /// are present and writable in this VMO will be enumerated. Any copy-on-write pages in our
+    /// parent will not be enumerated. The physical addresses given to `lookup_fn` should not be
+    /// retained in any way unless the range has also been pinned by the caller. Offsets provided
+    /// will be in relation to the object being queried, even if pages are actually from a parent
+    /// object where this is a slice.
+    ///
+    /// Ranges of length zero are considered invalid and will return `Err(Status::INVALID_ARGS)`.
+    /// Returning `Status::NEXT` from `lookup_fn` continues enumeration, `Status::STOP` stops
+    /// iteration early and returns `Ok(())`, and any other `Status` aborts early with
+    /// `Err(status)`.
     pub fn lookup<T: Sized>(
         &self,
         offset: u64,
         len: u64,
         ctx: &mut T,
-        lookup_fn: fn(u64, PAddr, &mut T) -> Result<(), Status>,
+        lookup_fn: fn(u64, PAddr, &mut T) -> Status,
     ) -> Result<(), Status> {
         struct LookupState<'a, T> {
             ctx: &'a mut T,
-            lookup_fn: fn(u64, PAddr, &mut T) -> Result<(), Status>,
+            lookup_fn: fn(u64, PAddr, &mut T) -> Status,
         }
 
         /// # Safety
@@ -592,7 +646,7 @@ impl VmObject {
             // passed from `lookup`, which points to a live `LookupState<'_, T>` on the caller's
             // stack.
             let state = unsafe { ctx.cast::<LookupState<'_, T>>().as_mut_unchecked() };
-            Status::result_into_raw((state.lookup_fn)(offset, paddr.into(), state.ctx))
+            (state.lookup_fn)(offset, paddr.into(), state.ctx).into_raw()
         }
 
         let mut state = LookupState { ctx, lookup_fn };
@@ -1095,6 +1149,93 @@ impl VmObject {
         };
         (Status::ok(status), out_actual)
     }
+}
+
+/// Kernel console `vm_object` command implementation.
+#[cfg(console_enabled)]
+mod console {
+    use crate::console::{CMD_AVAIL_NORMAL, CmdArgs, static_command};
+    use core::ffi::c_int;
+    use kprint::kprintln;
+    use zx_status::Status;
+
+    // TODO(https://fxbug.dev/408878701): add option to dump by koid.
+    /// Console command handler for `k vm_object`.
+    ///
+    /// # Safety
+    ///
+    /// - `argc` must be `>= 1` and `argv` must be non-null and valid for reads of `argc`
+    ///   initialized `CmdArgs` entries for the duration of the call.
+    /// - For the `dump` and `dump_pages` subcommands, `argv[2].arg_uint` must be the aligned
+    ///   address of a live `VmObject` that remains valid for the duration of the call.
+    unsafe extern "C" fn cmd_vm_object(argc: c_int, argv: *const CmdArgs, _flags: u32) -> c_int {
+        if argc <= 0 || argv.is_null() {
+            return Status::INTERNAL.into_raw();
+        }
+        // SAFETY: `argv` is non-null and points to `argc` initialized `CmdArgs` entries from the
+        // console dispatcher.
+        let args = unsafe { core::slice::from_raw_parts(argv, argc as usize) };
+        let cmd_name = args[0].as_str();
+        let usage_msg = || -> c_int {
+            kprintln!("usage:");
+            kprintln!("{:s} dump <address>", cmd_name);
+            kprintln!("{:s} dump_pages <address>", cmd_name);
+            Status::INTERNAL.into_raw()
+        };
+
+        if args.len() < 2 {
+            kprintln!("not enough arguments");
+            return usage_msg();
+        }
+
+        let subcmd = args[1].as_str();
+        if subcmd == "dump" {
+            if args.len() < 3 {
+                kprintln!("not enough arguments");
+                return usage_msg();
+            }
+
+            let o =
+                core::ptr::with_exposed_provenance::<super::VmObject>(args[2].arg_uint as usize);
+
+            if o.is_null() || !o.is_aligned() {
+                kprintln!("invalid address");
+                return usage_msg();
+            }
+
+            // SAFETY: Console debugging command dumping a user-supplied `VmObject` pointer.
+            unsafe { (*o).dump(0, false) };
+        } else if subcmd == "dump_pages" {
+            if args.len() < 3 {
+                kprintln!("not enough arguments");
+                return usage_msg();
+            }
+
+            let o =
+                core::ptr::with_exposed_provenance::<super::VmObject>(args[2].arg_uint as usize);
+
+            if o.is_null() || !o.is_aligned() {
+                kprintln!("invalid address");
+                return usage_msg();
+            }
+
+            // SAFETY: Console debugging command dumping a user-supplied `VmObject` pointer.
+            unsafe { (*o).dump(0, true) };
+        } else {
+            kprintln!("unknown command");
+            return usage_msg();
+        }
+
+        zx_status::sys::ZX_OK
+    }
+
+    static_command!(
+        VM_OBJECT,
+        c"vm_object".as_ptr(),
+        c"vm object debug commands".as_ptr(),
+        cmd_vm_object,
+        CMD_AVAIL_NORMAL
+    );
 }
 
 impl HasRefCount for VmObject {

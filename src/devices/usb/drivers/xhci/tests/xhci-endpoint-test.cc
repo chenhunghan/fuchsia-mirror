@@ -9,7 +9,9 @@
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/driver/fake-bti/cpp/fake-bti.h>
 
+#include <atomic>
 #include <list>
+#include <thread>
 #include <vector>
 
 #include <fake-dma-buffer/fake-dma-buffer.h>
@@ -104,6 +106,7 @@ class EndpointHarness : public ::testing::Test {
   }
 
   FakeTRB* CreateTRB() {
+    fbl::AutoLock _(&trbs_lock_);
     auto it = trbs_.insert(trbs_.end(), std::make_unique<FakeTRB>());
     (*it)->control = 0;
     (*it)->ptr = 0;
@@ -112,6 +115,7 @@ class EndpointHarness : public ::testing::Test {
   }
 
   FakeTRB* CreateTRBs(size_t count) {
+    fbl::AutoLock _(&trbs_lock_);
     auto it = trbs_.insert(trbs_.end(), std::make_unique<FakeTRB>());
     (*it)->control = 0;
     (*it)->ptr = 0;
@@ -122,6 +126,8 @@ class EndpointHarness : public ::testing::Test {
 
   fdf_testing::ForegroundDriverTest<EmptyTestConfig>& driver_test() { return driver_test_; }
   const std::list<std::unique_ptr<FakeTRB>>& trbs() { return trbs_; }
+  bool allow_concurrent_hci_calls() const { return allow_concurrent_hci_calls_.load(); }
+  void set_allow_concurrent_hci_calls(bool allow) { allow_concurrent_hci_calls_.store(allow); }
 
   sync_completion_t doorbell_;
   std::queue<std::pair<uint32_t, uint8_t>> expected_cancel_all_;
@@ -133,8 +139,10 @@ class EndpointHarness : public ::testing::Test {
   fidl::SyncClient<fendpoint::Endpoint> client_;
 
  private:
+  std::atomic<bool> allow_concurrent_hci_calls_{false};
   async::Loop loop_{&kAsyncLoopConfigNeverAttachToThread};
   fdf_testing::ForegroundDriverTest<EmptyTestConfig> driver_test_;
+  fbl::Mutex trbs_lock_;
   std::list<std::unique_ptr<FakeTRB>> trbs_;
 };
 
@@ -173,6 +181,9 @@ void UsbXhci::UsbHciRequestQueue(usb_request_t* usb_request,
                                  const usb_request_complete_callback_t* complete_cb) {}
 zx_status_t UsbXhci::UsbHciCancelAll(uint32_t device_id, uint8_t ep_address) {
   auto* test_harness = GetTestHarness<EndpointHarness>();
+  if (test_harness->allow_concurrent_hci_calls()) {
+    return ZX_OK;
+  }
   EXPECT_FALSE(test_harness->expected_cancel_all_.empty());
   EXPECT_EQ(test_harness->expected_cancel_all_.front().first, device_id);
   EXPECT_EQ(test_harness->expected_cancel_all_.front().second, ep_address);
@@ -182,15 +193,22 @@ zx_status_t UsbXhci::UsbHciCancelAll(uint32_t device_id, uint8_t ep_address) {
 fpromise::promise<void, zx_status_t> UsbXhci::UsbHciDisableEndpoint(uint32_t device_id,
                                                                     uint8_t ep_addr) {
   auto* test_harness = GetTestHarness<EndpointHarness>();
+  if (test_harness->allow_concurrent_hci_calls()) {
+    return fpromise::make_result_promise<void, zx_status_t>(fpromise::ok());
+  }
   EXPECT_FALSE(test_harness->expected_disable_endpoint_.empty());
   EXPECT_EQ(test_harness->expected_disable_endpoint_.front().first, device_id);
   EXPECT_EQ(test_harness->expected_disable_endpoint_.front().second, ep_addr);
   test_harness->expected_disable_endpoint_.pop();
   return fpromise::make_result_promise<void, zx_status_t>(fpromise::ok());
 }
-bool UsbXhci::Running() const { return true; }
+bool UsbXhci::Running() const { return running_; }
 void UsbXhci::RingDoorbell(uint8_t slot, uint8_t target) {
   auto* test_harness = GetTestHarness<EndpointHarness>();
+  if (test_harness->allow_concurrent_hci_calls()) {
+    sync_completion_signal(&test_harness->doorbell_);
+    return;
+  }
   EXPECT_FALSE(test_harness->expected_ring_doorbell_.empty());
   EXPECT_EQ(test_harness->expected_ring_doorbell_.front().first, slot);
   EXPECT_EQ(
@@ -236,7 +254,11 @@ zx_status_t TransferRing::Init(size_t page_size, const zx::bti& bti, EventRing* 
   stalled_ = false;
   return ZX_OK;
 }
-zx_status_t TransferRing::DeinitIfActive() { return ZX_OK; }
+zx_status_t TransferRing::DeinitIfActive() {
+  fbl::AutoLock _(&mutex_);
+  trbs_ = nullptr;
+  return ZX_OK;
+}
 zx_status_t TransferRing::AssignContext(TRB* trb, std::unique_ptr<TRBContext> context,
                                         TRB* first_trb, TRB* setup) {
   return ZX_OK;
@@ -474,6 +496,157 @@ TEST_F(EndpointHarness, UnbindAfterDeviceStateDropped) {
   // Closing the client triggers Endpoint::OnUnbound after UsbXhci dropped device_state_[kDeviceId].
   client = {};
   loop.Shutdown();
+}
+
+namespace {
+
+TEST_F(EndpointHarness, GetEndpointAfterResetHciDoesNotDereferenceNullHci) {
+  auto state = driver_test().driver()->GetDeviceState()[kDeviceId];
+  ASSERT_TRUE(state);
+  state->ResetHci();
+
+  fbl::AutoLock _(&state->transaction_lock());
+  EXPECT_TRUE(state->IsDisconnecting());
+
+  // Lazily emplacing a new Endpoint after ResetHci() must still have a valid non-null hci_ and
+  // refuse initialization with ZX_ERR_IO_NOT_PRESENT because the device is disconnecting.
+  Endpoint& ep = state->GetEndpoint(3);
+  ep.set_ep_type(fuchsia_hardware_usb_descriptor::EndpointType::kBulk);
+  EXPECT_EQ(state->InitEndpoint(XhciEndpointIndexInverse(4), nullptr, nullptr),
+            ZX_ERR_IO_NOT_PRESENT);
+}
+
+TEST_F(EndpointHarness, ControllerStoppedReturnsBadState) {
+  Init(1);
+
+  std::vector<fendpoint::VmoInfo> vmo_info;
+  vmo_info.emplace_back(std::move(fendpoint::VmoInfo().id(8).size(zx_system_get_page_size())));
+  {
+    fidl::Result<fendpoint::Endpoint::RegisterVmos> result =
+        client_->RegisterVmos({std::move(vmo_info)});
+    ASSERT_TRUE(result.is_ok());
+  }
+
+  driver_test().driver()->SetRunningForTesting(false);
+
+  // Endpoint::Init must return ZX_ERR_BAD_STATE when the controller is not running.
+  Endpoint uninit_ep(driver_test().driver(), kDeviceId, 2);
+  EXPECT_EQ(uninit_ep.Init(nullptr, nullptr), ZX_ERR_BAD_STATE);
+
+  // CancelAll must return ZX_ERR_BAD_STATE (not ZX_ERR_IO_NOT_PRESENT) when the controller stops.
+  auto cancel_res = client_->CancelAll();
+  ASSERT_TRUE(cancel_res.is_error());
+  ASSERT_TRUE(cancel_res.error_value().is_domain_error());
+  EXPECT_EQ(cancel_res.error_value().domain_error(), ZX_ERR_BAD_STATE);
+
+  // QueueRequests must complete with ZX_ERR_BAD_STATE when the controller stops.
+  std::vector<frequest::Request> requests;
+  requests.emplace_back()
+      .defer_completion(false)
+      .information(frequest::RequestInfo::WithBulk(frequest::BulkRequestInfo()))
+      .data()
+      .emplace()
+      .emplace_back()
+      .offset(0)
+      .size(zx_system_get_page_size())
+      .buffer(frequest::Buffer::WithVmoId(8));
+  fit::result<fidl::OneWayError> queue_res = client_->QueueRequests(std::move(requests));
+  ASSERT_TRUE(queue_res.is_ok());
+  ASSERT_NO_FATAL_FAILURE(ExpectOneCompletion(ZX_ERR_BAD_STATE));
+
+  // Restore running state so TearDown's OnUnbound expectations match.
+  driver_test().driver()->SetRunningForTesting(true);
+}
+
+TEST_F(EndpointHarness, ConcurrentResetHciDuringEndpointCalls) {
+  set_allow_concurrent_hci_calls(true);
+
+  async::Loop loop{&kAsyncLoopConfigNeverAttachToThread};
+  loop.StartThread("ep-concurrent-thread");
+
+  auto endpoints = fidl::Endpoints<fendpoint::Endpoint>::Create();
+  {
+    auto state = driver_test().driver()->GetDeviceState()[kDeviceId];
+    ASSERT_TRUE(state);
+    fbl::AutoLock _(&state->transaction_lock());
+    auto& ep = state->GetEndpoint(0);
+    ep.set_ep_type(fdescriptor::EndpointType::kBulk);
+    ASSERT_OK(ep.Init(nullptr, nullptr));
+    ep.Connect(loop.dispatcher(), std::move(endpoints.server), state);
+  }
+
+  fidl::SyncClient<fendpoint::Endpoint> client(std::move(endpoints.client));
+  std::vector<fendpoint::VmoInfo> vmo_info;
+  vmo_info.emplace_back(std::move(fendpoint::VmoInfo().id(8).size(zx_system_get_page_size())));
+  ASSERT_TRUE(client->RegisterVmos({std::move(vmo_info)}).is_ok());
+
+  std::atomic<bool> stop_worker{false};
+  std::thread worker([&] {
+    while (!stop_worker.load(std::memory_order_relaxed)) {
+      std::vector<frequest::Request> requests;
+      requests.emplace_back()
+          .defer_completion(false)
+          .information(frequest::RequestInfo::WithBulk(frequest::BulkRequestInfo()))
+          .data()
+          .emplace()
+          .emplace_back()
+          .offset(0)
+          .size(zx_system_get_page_size())
+          .buffer(frequest::Buffer::WithVmoId(8));
+      (void)client->QueueRequests(std::move(requests));
+      (void)client->CancelAll();
+    }
+  });
+
+  // Let worker issue a few rounds of FIDL calls before tearing down DeviceState.
+  zx::nanosleep(zx::deadline_after(zx::msec(5)));
+  {
+    auto state = std::move(driver_test().driver()->GetDeviceState()[kDeviceId]);
+    ASSERT_TRUE(state);
+    state->ResetHci();
+  }
+  zx::nanosleep(zx::deadline_after(zx::msec(5)));
+
+  stop_worker.store(true, std::memory_order_relaxed);
+  worker.join();
+
+  client = {};
+  loop.Shutdown();
+  set_allow_concurrent_hci_calls(false);
+}
+
+}  // namespace
+
+TEST_F(EndpointHarness, XhciEndpointIndexMasksReservedBits) {
+  // Valid endpoint addresses without reserved bits.
+  EXPECT_EQ(XhciEndpointIndex(0x00), 0u);
+  EXPECT_EQ(XhciEndpointIndex(0x01), 1u);
+  EXPECT_EQ(XhciEndpointIndex(0x81), 2u);
+  EXPECT_EQ(XhciEndpointIndex(0x0F), 29u);
+  EXPECT_EQ(XhciEndpointIndex(0x8F), 30u);
+
+  // Endpoint addresses with reserved bits 4-6 (0x70) set must mask to the 4-bit endpoint number
+  // and never exceed the legal maximum index of 30 or underflow on endpoint 0.
+  EXPECT_EQ(XhciEndpointIndex(0xFF), 30u);
+  EXPECT_EQ(XhciEndpointIndex(0x7F), 29u);
+  EXPECT_EQ(XhciEndpointIndex(0xA1), 2u);
+  EXPECT_EQ(XhciEndpointIndex(0x21), 1u);
+  EXPECT_EQ(XhciEndpointIndex(0x10), 0u);
+  EXPECT_EQ(XhciEndpointIndex(0x70), 0u);
+  EXPECT_EQ(XhciEndpointIndex(0x80), 0u);
+  EXPECT_EQ(XhciEndpointIndex(0xF0), 0u);
+
+  for (uint16_t raw = 0; raw <= 0xFF; ++raw) {
+    uint8_t addr = static_cast<uint8_t>(raw);
+    uint8_t idx = XhciEndpointIndex(addr);
+    EXPECT_LE(idx, 30u);
+    if ((addr & 0x0F) == 0) {
+      EXPECT_EQ(idx, 0u);
+    } else {
+      EXPECT_GE(idx, 1u);
+      EXPECT_EQ(idx, XhciEndpointIndex(addr & 0x8F));
+    }
+  }
 }
 
 }  // namespace usb_xhci

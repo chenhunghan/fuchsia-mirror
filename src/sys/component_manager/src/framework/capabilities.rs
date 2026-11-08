@@ -10,6 +10,7 @@ use capability_source::{CapabilitySource, RemotedAtSource};
 use cm_rust::CapabilityTypeName;
 use cm_types::{Name, RelativePath};
 use fidl::endpoints::ServerEnd;
+use fidl_fuchsia_component_decl as fdecl;
 use fidl_fuchsia_component_runtime as fruntime;
 use fidl_fuchsia_io as fio;
 use fuchsia_async as fasync;
@@ -18,17 +19,23 @@ use futures::channel::mpsc;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt, select};
+use log::warn;
 use moniker::Moniker;
 use router_error::{Explain, RouterError};
 use routing::error::RoutingError;
 use runtime_capabilities::{
     Capability, CapabilityBound, Connectable, Connector, Data, Dictionary, DirConnectable,
-    DirConnector, Routable, Router, WeakInstanceToken,
+    DirConnector, Handle, Routable, Router, WeakInstanceToken,
 };
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use vfs::WeakExecutionScope;
+use vfs::directory::entry::SubNode;
+use vfs::directory::helper::DirectlyMutable;
+use vfs::directory::immutable::Simple;
+use vfs::execution_scope::ExecutionScope;
+use vfs::path::Path;
 use zx::sys::ZX_CHANNEL_MAX_MSG_BYTES;
 
 /// These two constants are needed for computing how many strings we can fit into a FIDL message.
@@ -56,79 +63,94 @@ pub fn serve(
     .boxed()
 }
 
-/// Capabilities which have had event pair handles assigned to them, allowing normal components to
+/// Capabilities which have had handles assigned to them, allowing normal components to
 /// reference and interact with them.
 pub struct RemotedRuntimeCapabilities {
     pub(super) remote_capabilities: Arc<Mutex<HashMap<zx::Koid, Capability>>>,
-    event_pair_sender: mpsc::UnboundedSender<zx::EventPair>,
+    handle_sender: mpsc::UnboundedSender<zx::NullableHandle>,
     _garbage_collector_task: fasync::Task<()>,
 }
 
 impl RemotedRuntimeCapabilities {
     pub fn new() -> Self {
-        let (event_pair_sender, mut receiver) = mpsc::unbounded();
+        let (handle_sender, mut receiver) = mpsc::unbounded();
         let remote_capabilities = Arc::new(Mutex::new(HashMap::new()));
         let remote_capabilities_hashmap_clone = remote_capabilities.clone();
         let _garbage_collector_task = fasync::Task::spawn(async move {
-            let mut event_pair_watchers = FuturesUnordered::new();
+            let mut handle_watchers = FuturesUnordered::new();
             loop {
-                let event_pair = if event_pair_watchers.is_empty() {
-                    let Some(event_pair) = receiver.next().await else {
+                let handle = if handle_watchers.is_empty() {
+                    let Some(handle) = receiver.next().await else {
                         return;
                     };
-                    event_pair
+                    handle
                 } else {
-                    let mut event_pair_close_fut = event_pair_watchers.next();
-                    let mut new_event_pair = receiver.next();
+                    let mut handle_close_fut = handle_watchers.next();
+                    let mut new_handle = receiver.next();
                     select! {
-                        closed_event_pair = event_pair_close_fut => {
-                            let closed_event_pair: zx::EventPair = closed_event_pair
-                                .expect("we checked if event_pair_watchers is empty above");
+                        closed_handle = handle_close_fut => {
+                            let closed_handle: zx::NullableHandle = closed_handle
+                                .expect("we checked if handle_watchers is empty above");
                             remote_capabilities_hashmap_clone
                                 .lock()
-                                .remove(&closed_event_pair.basic_info().unwrap().koid)
+                                .remove(&closed_handle.basic_info().unwrap().koid)
                                 .expect("this should be the only point things get removed, and thus this should never fail");
                             continue;
                         }
-                        maybe_event_pair = new_event_pair => {
-                            let Some(event_pair) = maybe_event_pair else {
+                        maybe_handle = new_handle => {
+                            let Some(handle) = maybe_handle else {
                                 return;
                             };
-                            event_pair
+                            handle
                         }
                     }
                 };
-                event_pair_watchers.push(async move {
-                    let _ = fasync::OnSignals::new(&event_pair, zx::Signals::EVENTPAIR_PEER_CLOSED)
-                        .await;
-                    event_pair
+                handle_watchers.push(async move {
+                    let _ = fasync::OnSignals::new(&handle, zx::Signals::OBJECT_PEER_CLOSED).await;
+                    handle
                 });
             }
         });
-        Self { remote_capabilities, event_pair_sender, _garbage_collector_task }
+        Self { remote_capabilities, handle_sender, _garbage_collector_task }
     }
 
     pub fn store(
         &self,
-        event_pair: zx::EventPair,
+        handle: impl Into<zx::NullableHandle>,
         capability: impl Into<Capability>,
     ) -> Result<(), fruntime::CapabilitiesError> {
+        let handle = handle.into();
         let koid =
-            event_pair.basic_info().map_err(|_| fruntime::CapabilitiesError::InvalidHandle)?.koid;
+            handle.basic_info().map_err(|_| fruntime::CapabilitiesError::InvalidHandle)?.koid;
         let mut guard = self.remote_capabilities.lock();
         if guard.contains_key(&koid) {
             return Err(fruntime::CapabilitiesError::HandleAlreadyRegistered);
         }
         guard.insert(koid, capability.into());
-        self.event_pair_sender.unbounded_send(event_pair).expect("the receiver should never be dropped as long as this RemoteRuntimeCapabilities is live");
+        self.handle_sender.unbounded_send(handle).expect("the receiver should never be dropped as long as this RemoteRuntimeCapabilities is live");
         Ok(())
     }
 
-    pub fn get<C>(&self, handle: zx::EventPair) -> Result<Arc<C>, fruntime::CapabilitiesError>
+    pub fn get<C>(
+        &self,
+        handle: impl Into<zx::NullableHandle>,
+    ) -> Result<Arc<C>, fruntime::CapabilitiesError>
+    where
+        Arc<C>: TryFrom<Capability>,
+    {
+        self.get_by_ref(&handle.into())
+    }
+
+    /// Identical to `get` but borrows `handle` instead of consuming it.
+    pub fn get_by_ref<C>(
+        &self,
+        handle: &impl zx::AsHandleRef,
+    ) -> Result<Arc<C>, fruntime::CapabilitiesError>
     where
         Arc<C>: TryFrom<Capability>,
     {
         let koid = handle
+            .as_handle_ref()
             .basic_info()
             .map_err(|_| fruntime::CapabilitiesError::InvalidHandle)?
             .related_koid;
@@ -145,8 +167,9 @@ impl RemotedRuntimeCapabilities {
     /// Identical to `get` but returns a generic Capability
     pub fn get_capability(
         &self,
-        handle: zx::EventPair,
+        handle: impl Into<zx::NullableHandle>,
     ) -> Result<Capability, fruntime::CapabilitiesError> {
+        let handle = handle.into();
         let koid = handle
             .basic_info()
             .map_err(|_| fruntime::CapabilitiesError::InvalidHandle)?
@@ -203,6 +226,15 @@ impl Capabilities {
                 let res = self.remote_capabilities.store(dir_connector, cap);
                 let _ = responder.send(res);
             }
+            fruntime::CapabilitiesRequest::ServiceAggregateCreate {
+                dir_connector,
+                sources,
+                responder,
+                ..
+            } => {
+                let res = self.service_aggregate_create(dir_connector, sources);
+                let _ = responder.send(res);
+            }
             fruntime::CapabilitiesRequest::DictionaryCreate { dictionary, responder, .. } => {
                 let res = self.remote_capabilities.store(dictionary, Dictionary::new());
                 let _ = responder.send(res);
@@ -211,6 +243,15 @@ impl Capabilities {
                 let data_res = data_from_remote(data);
                 let res =
                     data_res.and_then(|data| self.remote_capabilities.store(data_handle, data));
+                let _ = responder.send(res);
+            }
+            fruntime::CapabilitiesRequest::HandleCreate {
+                handle_capability,
+                handle,
+                responder,
+                ..
+            } => {
+                let res = self.remote_capabilities.store(handle_capability, Handle::new(handle));
                 let _ = responder.send(res);
             }
             fruntime::CapabilitiesRequest::ConnectorRouterCreate {
@@ -371,6 +412,19 @@ impl Capabilities {
                 })();
                 let _ = responder.send(res);
             }
+            fruntime::CapabilitiesRequest::DictionaryLegacyExport {
+                dictionary_handle,
+                server_end,
+                responder,
+                ..
+            } => {
+                let res = (|| {
+                    let dictionary =
+                        self.remote_capabilities.get::<Dictionary>(dictionary_handle)?;
+                    self.remote_capabilities.store(server_end, dictionary)
+                })();
+                let _ = responder.send(res);
+            }
             fruntime::CapabilitiesRequest::DataGet { data_handle, responder, .. } => {
                 match self.remote_capabilities.get(data_handle) {
                     Ok(data) => {
@@ -380,6 +434,13 @@ impl Capabilities {
                         let _ = responder.send(Err(e));
                     }
                 }
+            }
+            fruntime::CapabilitiesRequest::HandleGet { handle_capability, responder, .. } => {
+                let res = self
+                    .remote_capabilities
+                    .get::<Handle>(handle_capability)
+                    .and_then(|h| h.take().ok_or(fruntime::CapabilitiesError::HandleAlreadyTaken));
+                let _ = responder.send(res);
             }
             fruntime::CapabilitiesRequest::CapabilityAssociateHandle {
                 capability_handle,
@@ -469,6 +530,80 @@ impl Capabilities {
             request => return Err(format_err!("unknown request type: {request:?}")),
         }
         Ok(())
+    }
+
+    fn service_aggregate_create(
+        &self,
+        dir_connector: zx::EventPair,
+        sources: Vec<fruntime::AggregateSource>,
+    ) -> Result<(), fruntime::CapabilitiesError> {
+        fn is_set<T>(val: &Option<Vec<T>>) -> bool {
+            val.as_ref().map(|v| !v.is_empty()).unwrap_or(false)
+        }
+        if !sources
+            .iter()
+            .any(|s| is_set(&s.source_instance_filter) || is_set(&s.renamed_instances))
+        {
+            // Anonymous aggregates are currently unsupported.
+            warn!(
+                "fuchsia.component.runtime.Capabilities unable to create service aggregate: anonymous aggregates are currently unsupported"
+            );
+            return Err(fruntime::CapabilitiesError::InvalidArgs);
+        }
+        let dir_connectors_and_renames = sources
+            .into_iter()
+            .map(|s| {
+                let renames = process_renames(&s);
+                let handle = s.dir_connector.ok_or(fruntime::CapabilitiesError::InvalidArgs)?;
+                let source_dir_connector = self.remote_capabilities.get::<DirConnector>(handle)?;
+                Ok((source_dir_connector, renames))
+            })
+            .collect::<Result<Vec<_>, fruntime::CapabilitiesError>>()?;
+        let target_directory = Simple::new();
+        for (source_dir_connector, renames) in dir_connectors_and_renames.into_iter() {
+            for mapping in renames.into_iter() {
+                let source_path = Path::validate_and_split(mapping.source_name)
+                    .map_err(|_| fruntime::CapabilitiesError::InvalidArgs)?;
+                let target_path = Path::validate_and_split(mapping.target_name)
+                    .map_err(|_| fruntime::CapabilitiesError::InvalidArgs)?;
+                let dir_connector_as_dir_entry = source_dir_connector
+                    .clone()
+                    .try_into_directory_entry(ExecutionScope::new(), self.default_target.clone())
+                    .expect("this is infallible");
+                let sub_node = Arc::new(SubNode::new(
+                    dir_connector_as_dir_entry,
+                    source_path,
+                    fio::DirentType::Directory,
+                ));
+                let sub_dir_connector =
+                    DirConnector::from_directory_entry(sub_node, fio::PERM_READABLE);
+                let sub_dir_entry = sub_dir_connector
+                    .try_into_directory_entry(ExecutionScope::new(), self.default_target.clone())
+                    .expect("this is infallible");
+                target_directory
+                    .add_entry(target_path.as_str(), sub_dir_entry)
+                    .map_err(|_| fruntime::CapabilitiesError::InvalidArgs)?;
+            }
+        }
+        let aggregate_dir_connector =
+            DirConnector::from_directory_entry(target_directory, fio::PERM_READABLE);
+        self.remote_capabilities.store(dir_connector, aggregate_dir_connector)
+    }
+}
+
+fn process_renames(source: &fruntime::AggregateSource) -> Vec<fdecl::NameMapping> {
+    match (&source.source_instance_filter, &source.renamed_instances) {
+        (Some(filter), Some(renames)) if !renames.is_empty() && !filter.is_empty() => renames
+            .iter()
+            .filter(|mapping| filter.contains(&mapping.target_name))
+            .cloned()
+            .collect(),
+        (Some(filter), _) if !filter.is_empty() => filter
+            .iter()
+            .map(|name| fdecl::NameMapping { source_name: name.clone(), target_name: name.clone() })
+            .collect(),
+        (_, Some(renames)) if !renames.is_empty() => renames.clone(),
+        _ => vec![],
     }
 }
 
@@ -702,12 +837,12 @@ fn capability_as_type(cap: &Capability) -> Result<fruntime::CapabilityType, Erro
         Capability::DirConnector(_) => Ok(fruntime::CapabilityType::DirConnector),
         Capability::Dictionary(_) => Ok(fruntime::CapabilityType::Dictionary),
         Capability::Data(_) => Ok(fruntime::CapabilityType::Data),
+        Capability::Handle(_) => Ok(fruntime::CapabilityType::Handle),
         Capability::ConnectorRouter(_) => Ok(fruntime::CapabilityType::ConnectorRouter),
         Capability::DirConnectorRouter(_) => Ok(fruntime::CapabilityType::DirConnectorRouter),
         Capability::DictionaryRouter(_) => Ok(fruntime::CapabilityType::DictionaryRouter),
         Capability::DataRouter(_) => Ok(fruntime::CapabilityType::DataRouter),
         Capability::Instance(_) => Ok(fruntime::CapabilityType::InstanceToken),
-        other_value => Err(format_err!("unexpected capability type: {other_value:?}")),
     }
 }
 
@@ -874,12 +1009,101 @@ mod tests {
     }
 
     #[fuchsia::test]
+    async fn create_service_aggregate_test() {
+        let (proxy, remote_capabilities, _scope) = new_connection();
+        let (source_dir_connector_1, mut dir_receiver_stream_1) =
+            create_dir_connector(&proxy).await;
+        let (source_dir_connector_2, mut dir_receiver_stream_2) =
+            create_dir_connector(&proxy).await;
+
+        let sources = vec![
+            fruntime::AggregateSource {
+                dir_connector: Some(source_dir_connector_1),
+                renamed_instances: Some(vec![fdecl::NameMapping {
+                    source_name: "foo".to_string(),
+                    target_name: "bar".to_string(),
+                }]),
+                ..Default::default()
+            },
+            fruntime::AggregateSource {
+                dir_connector: Some(source_dir_connector_2),
+                source_instance_filter: Some(vec!["baz".to_string()]),
+                ..Default::default()
+            },
+        ];
+
+        let (aggregate_dir_connector, aggregate_dir_connector_other_end) = zx::EventPair::create();
+        proxy
+            .service_aggregate_create(aggregate_dir_connector_other_end, sources)
+            .await
+            .unwrap()
+            .unwrap();
+
+        for (dir_receiver_stream, target_name, expected_source_path) in
+            [(&mut dir_receiver_stream_1, "bar", "foo"), (&mut dir_receiver_stream_2, "baz", "baz")]
+        {
+            let (client_end, server_end) =
+                fidl::endpoints::create_endpoints::<fio::DirectoryMarker>();
+            proxy
+                .dir_connector_open(fruntime::CapabilitiesDirConnectorOpenRequest {
+                    dir_connector: Some(
+                        aggregate_dir_connector.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
+                    ),
+                    channel: Some(server_end),
+                    path: Some(target_name.to_string()),
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            let (received_server_end, path, rights) = match dir_receiver_stream.next().await {
+                Some(Ok(fruntime::DirReceiverRequest::Receive {
+                    channel, path, rights, ..
+                })) => (channel, path, rights),
+                other_message => panic!("unexpected message: {other_message:?}"),
+            };
+            assert_eq!(
+                client_end.as_handle_ref().basic_info().unwrap().koid,
+                received_server_end.as_handle_ref().basic_info().unwrap().related_koid
+            );
+            assert_eq!(path, expected_source_path);
+            assert_eq!(rights, fio::PERM_READABLE);
+        }
+
+        assert_matches!(remote_capabilities.get::<DirConnector>(aggregate_dir_connector), Ok(_));
+        assert_no_remote_capabilities(&remote_capabilities).await;
+    }
+
+    #[fuchsia::test]
     async fn create_dictionary_test() {
         let (proxy, remote_capabilities, _scope) = new_connection();
         let (dictionary, dictionary_other_end) = zx::EventPair::create();
         proxy.dictionary_create(dictionary_other_end).await.unwrap().unwrap();
 
         assert_matches!(remote_capabilities.get::<Dictionary>(dictionary), Ok(_));
+        assert_no_remote_capabilities(&remote_capabilities).await;
+    }
+
+    #[fuchsia::test]
+    async fn create_get_handle_test() {
+        let (proxy, remote_capabilities, _scope) = new_connection();
+        let (handle_cap, handle_cap_other_end) = zx::EventPair::create();
+        let (c1, c2) = zx::Channel::create();
+        let expected_koid = c1.basic_info().unwrap().koid;
+        proxy.handle_create(handle_cap_other_end, c1.into()).await.unwrap().unwrap();
+
+        let handle_cap_dup = handle_cap.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap();
+        let retrieved = proxy.handle_get(handle_cap_dup).await.unwrap().unwrap();
+        assert_eq!(retrieved.basic_info().unwrap().koid, expected_koid);
+        assert_eq!(retrieved.basic_info().unwrap().related_koid, c2.basic_info().unwrap().koid,);
+
+        let handle_cap_dup_2 = handle_cap.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap();
+        assert_eq!(
+            proxy.handle_get(handle_cap_dup_2).await.unwrap(),
+            Err(fruntime::CapabilitiesError::HandleAlreadyTaken),
+        );
+
+        assert_matches!(remote_capabilities.get::<Handle>(handle_cap), Ok(_));
         assert_no_remote_capabilities(&remote_capabilities).await;
     }
 

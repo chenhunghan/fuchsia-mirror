@@ -23,9 +23,6 @@ pub enum SdkError {
     #[error("Could not resolve working directory while searching for the Fuchsia SDK: {0}")]
     ResolveCwd(#[source] std::io::Error),
 
-    #[error("FFX was run from an invalid working directory: {0}")]
-    InvalidCwd(#[source] std::io::Error),
-
     #[error("FFX Binary doesn't exist in the file system: {0}")]
     NoBinary(#[source] std::io::Error),
 
@@ -267,58 +264,61 @@ impl SdkRoot {
     }
 }
 
-/// Finds the executable path of the ffx binary being run, attempting to
-/// get the path the user believes it to be at, even if it's symlinked from
-/// somewhere else, by using `argv[0]` and [`std::env::current_exe`].
+/// Finds the path of the ffx binary to search for the SDK from, keeping the path the user
+/// believes it to be at even if it's symlinked from somewhere else.
 ///
-/// We do this because sometimes ffx is invoked through an SDK that is symlinked
-/// into place from a content addressable store, and we want to make a best
-/// effort to search for the sdk in the right place.
+/// Sometimes ffx is invoked through an SDK that is symlinked into place from a content
+/// addressable store, and the SDK must be searched for relative to the symlink, not its target.
+///
+/// If `FFX_BIN` is set (by a parent ffx running this process as a subtool or re-running
+/// itself), it already holds the path the top-level ffx was invoked through, so it is used
+/// as-is. Otherwise, this is the path the current executable was invoked through.
 fn find_exe_path() -> Result<PathBuf, SdkError> {
-    // get the 'real' binary path, which may have symlinks resolved, as well
-    // as the command this was run as and the cwd
-    let cwd = std::env::current_dir().map_err(SdkError::InvalidCwd)?;
-    let binary_path = std::env::var("FFX_BIN")
-        .map(PathBuf::from)
-        .or_else(|_| std::env::current_exe())
-        .and_then(|p| p.canonicalize())
-        .map_err(SdkError::NoBinary)?;
-    let args_path = match std::env::args_os().next() {
-        Some(arg) => PathBuf::from(&arg),
-        None => {
-            log::trace!("FFX was run without an argv[0] somehow");
-            return Ok(binary_path);
-        }
-    };
+    if let Some(ffx_bin) = std::env::var_os("FFX_BIN") {
+        return std::path::absolute(ffx_bin).map_err(SdkError::NoBinary);
+    }
+    invoked_exe_path().map_err(SdkError::NoBinary)
+}
 
-    // canonicalize the path from argv0 to try to figure out where it 'really'
-    // is to make sure it's actually the right binary through potential
-    // symlinks.
-    let canonical_args_path = match args_path.canonicalize() {
-        Ok(path) => path,
-        Err(e) => {
-            log::trace!(
-                "Could not canonicalize the path ffx was run with, \
-                which might mean the working directory has changed or the file \
-                doesn't exist anymore: {e:?}"
-            );
-            return Ok(binary_path);
-        }
-    };
+/// Returns the path the running executable was invoked through, without resolving symlinks.
+///
+/// [`std::env::current_exe`] is fully symlink-resolved on Linux (it reads `/proc/self/exe`),
+/// so this prefers `argv[0]` when it refers to the same file as the running executable, and
+/// falls back to [`std::env::current_exe`] otherwise (for example when ffx was found through
+/// `PATH`).
+pub fn invoked_exe_path() -> std::io::Result<PathBuf> {
+    let current_exe = std::env::current_exe()?;
+    let argv0 = std::env::args_os().next().map(PathBuf::from);
+    let cwd = std::env::current_dir().ok();
+    Ok(select_invoked_exe_path(current_exe, argv0.as_deref(), cwd.as_deref()))
+}
 
-    // check that it's the same file in the end
-    if binary_path == canonical_args_path {
-        // but return the path it was actually run through instead of the canonical
-        // path, but [`Path::join`]-ed to the cwd to make it more or less
-        // absolute.
-        Ok(cwd.join(args_path))
+fn select_invoked_exe_path(
+    current_exe: PathBuf,
+    argv0: Option<&Path>,
+    cwd: Option<&Path>,
+) -> PathBuf {
+    let Some(argv0) = argv0 else {
+        log::trace!("ffx was run without an argv[0]; using {current_exe:?}");
+        return current_exe;
+    };
+    let candidate = if argv0.is_absolute() {
+        argv0.to_owned()
+    } else if let Some(cwd) = cwd {
+        cwd.join(argv0)
     } else {
-        log::trace!(
-            "FFX's argv[0] ({args_path:?}) resolved to {canonical_args_path:?} \
-            instead of the binary's path {binary_path:?}, falling back to the \
-            binary path."
-        );
-        Ok(binary_path)
+        log::trace!("No working directory to resolve argv[0] {argv0:?}; using {current_exe:?}");
+        return current_exe;
+    };
+    match (candidate.canonicalize(), current_exe.canonicalize()) {
+        (Ok(invoked), Ok(running)) if invoked == running => candidate,
+        (invoked, running) => {
+            log::trace!(
+                "argv[0] {argv0:?} ({invoked:?}) is not the running executable \
+                 {current_exe:?} ({running:?}); using the latter"
+            );
+            current_exe
+        }
     }
 }
 
@@ -594,6 +594,49 @@ mod test {
                 .write_all(include_bytes!(concat!($prefix, "/", $name)))
                 .unwrap();
         }};
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_select_invoked_exe_path_prefers_symlinked_argv0() {
+        // `current_exe()` reports the resolved blob; argv[0] is the symlink inside the SDK.
+        let root = tempdir().unwrap();
+        let real_bin = root.path().join("store").join("blob");
+        let link = root.path().join("sdk").join("ffx");
+        let other_bin = root.path().join("store").join("other");
+        fs::create_dir_all(real_bin.parent().unwrap()).unwrap();
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        fs::write(&real_bin, b"").unwrap();
+        fs::write(&other_bin, b"").unwrap();
+        std::os::unix::fs::symlink(&real_bin, &link).unwrap();
+
+        // Absolute argv[0] referring to the same file through a symlink, with or without a cwd.
+        assert_eq!(select_invoked_exe_path(real_bin.clone(), Some(&link), Some(root.path())), link);
+        assert_eq!(select_invoked_exe_path(real_bin.clone(), Some(&link), None), link);
+        // Relative argv[0] is resolved against cwd, but symlinks are kept.
+        assert_eq!(
+            select_invoked_exe_path(
+                real_bin.clone(),
+                Some(Path::new("sdk/ffx")),
+                Some(root.path())
+            ),
+            link
+        );
+        // Relative argv[0] without a cwd, argv[0] referring to a different file, a bare argv[0]
+        // found through PATH, and no argv[0] all fall back to current_exe.
+        assert_eq!(
+            select_invoked_exe_path(real_bin.clone(), Some(Path::new("sdk/ffx")), None),
+            real_bin
+        );
+        assert_eq!(
+            select_invoked_exe_path(real_bin.clone(), Some(&other_bin), Some(root.path())),
+            real_bin
+        );
+        assert_eq!(
+            select_invoked_exe_path(real_bin.clone(), Some(Path::new("ffx")), Some(root.path())),
+            real_bin
+        );
+        assert_eq!(select_invoked_exe_path(real_bin.clone(), None, Some(root.path())), real_bin);
     }
 
     fn sdk_test_data_root() -> TempDir {

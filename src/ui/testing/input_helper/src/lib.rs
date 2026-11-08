@@ -25,7 +25,7 @@ use fidl_fuchsia_ui_test_input::{
     TouchScreenMarker, TouchScreenRequest, TouchScreenRequestStream,
 };
 use fuchsia_async as fasync;
-use fuchsia_component::client::connect_to_protocol;
+use fuchsia_component::client::{connect_to_protocol, connect_to_protocol_at_path};
 use fuchsia_trace::Scope;
 use futures::stream::FuturesUnordered;
 use futures::{StreamExt, TryStreamExt};
@@ -37,6 +37,9 @@ use std::time::Duration;
 mod input_device;
 mod input_device_registry;
 mod input_reports_reader;
+
+pub(crate) const STARNIX_INPUT_DEVICE_REGISTRY_PATH: &str =
+    "/svc/fuchsia.input.injection.InputDeviceRegistry-starnix";
 
 pub(crate) static INPUT_CATEGORY: &str = "input";
 
@@ -242,10 +245,28 @@ pub async fn handle_registry_request_stream(request_stream: RegistryRequestStrea
         .try_for_each_concurrent(None, |request| async {
             let input_device_registry = connect_to_protocol::<InputDeviceRegistryMarker>()
                 .expect("connect to input_device_registry");
+            let starnix_routed = std::path::Path::new(STARNIX_INPUT_DEVICE_REGISTRY_PATH).exists();
+            let starnix_registry = if starnix_routed {
+                connect_to_protocol_at_path::<InputDeviceRegistryMarker>(
+                    STARNIX_INPUT_DEVICE_REGISTRY_PATH,
+                )
+                .ok()
+            } else {
+                None
+            };
+            let starnix_connector = if starnix_routed {
+                Some(input_device::StarnixConnector::Path(
+                    STARNIX_INPUT_DEVICE_REGISTRY_PATH.to_string(),
+                ))
+            } else {
+                None
+            };
             let got_input_reports_reader = AsyncEvent::new();
 
-            let registry = input_device_registry::InputDeviceRegistry::new(
+            let registry = input_device_registry::InputDeviceRegistry::new_with_starnix_connector(
                 input_device_registry,
+                starnix_registry,
+                starnix_connector,
                 got_input_reports_reader.clone(),
             );
             let scope = fasync::Scope::new();

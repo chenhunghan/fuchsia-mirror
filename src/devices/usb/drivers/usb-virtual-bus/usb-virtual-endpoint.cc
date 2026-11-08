@@ -43,16 +43,22 @@ zx::result<void*> UsbEpServer::GetBuffer(RequestVariant& req) {
     return zx::ok(buffer);
   }
 
-  auto& request_buffer = (*std::get<usb::FidlRequest>(req)->data())[0].buffer();
+  auto& fidl_req = std::get<usb::FidlRequest>(req);
+  if (!fidl_req->data().has_value() || fidl_req->data()->empty() ||
+      !(*fidl_req->data())[0].buffer().has_value()) {
+    return zx::error(ZX_ERR_INVALID_ARGS);
+  }
+  auto& request_buffer = (*fidl_req->data())[0].buffer();
   const auto& buffer_type = request_buffer->Which();
   switch (buffer_type) {
     case fuchsia_hardware_usb_request::Buffer::Tag::kVmoId: {
-      zx::result result = GetMapped(*request_buffer);
-      if (result.is_error()) {
-        fdf::error("Failed to map {}", result);
-        return result.take_error();
+      auto it = registered_vmos_.find(request_buffer->vmo_id().value());
+      if (it == registered_vmos_.end()) {
+        fdf::error("Failed to find registered VMO {}", request_buffer->vmo_id().value());
+        return zx::error(ZX_ERR_NOT_FOUND);
       }
-      return zx::ok(reinterpret_cast<void*>(result->addr));
+      fidl_req.add_shared_context(it->second);
+      return zx::ok(reinterpret_cast<void*>(it->second->addr));
     }
     case fuchsia_hardware_usb_request::Buffer::Tag::kData:
       return zx::ok(request_buffer->data()->data());
@@ -70,15 +76,12 @@ void UsbEpServer::Connect(fidl::ServerEnd<fuchsia_hardware_usb_endpoint::Endpoin
   }
   binding_ = std::make_shared<fidl::ServerBinding<fuchsia_hardware_usb_endpoint::Endpoint>>(
       ep_->bus_->async_dispatcher(), std::move(server_end), this, [this](fidl::UnbindInfo) {
-        fbl::AutoLock lock(&lock_);
-        for (const auto& [_, registered_vmo] : registered_vmos_) {
-          auto status = zx::vmar::root_self()->unmap(registered_vmo.addr, registered_vmo.size);
-          if (status != ZX_OK) {
-            fdf::error("Failed to unmap VMO {}", zx_status_get_string(status));
-            continue;
-          }
+        std::map<uint64_t, std::shared_ptr<RegisteredVmo>> vmos_to_unmap;
+        {
+          fbl::AutoLock lock(&lock_);
+          vmos_to_unmap = std::move(registered_vmos_);
         }
-        registered_vmos_.clear();
+        vmos_to_unmap.clear();
         async::PostTask(ep_->bus_->async_dispatcher(), [this]() {
           fbl::AutoLock lock(&lock_);
           binding_.reset();
@@ -157,7 +160,7 @@ void UsbEpServer::RegisterVmos(RegisterVmosRequest& request,
       // Save
       vmos.emplace_back(
           std::move(fuchsia_hardware_usb_endpoint::VmoHandle().id(id).vmo(std::move(vmo))));
-      registered_vmos_.emplace(id, usb::MappedVmo{mapped_addr, size});
+      registered_vmos_.emplace(id, std::make_shared<RegisteredVmo>(mapped_addr, size));
     }
   }
 
@@ -169,11 +172,7 @@ void UsbEpServer::UnregisterVmos(UnregisterVmosRequest& request,
   std::vector<zx_status_t> errors;
   std::vector<uint64_t> failed_vmo_ids;
 
-  struct UnmapInfo {
-    uint64_t id;
-    usb::MappedVmo mapped;
-  };
-  std::vector<UnmapInfo> vmos_to_unmap;
+  std::vector<std::shared_ptr<RegisteredVmo>> vmos_to_unmap;
 
   {
     fbl::AutoLock lock(&lock_);
@@ -184,19 +183,11 @@ void UsbEpServer::UnregisterVmos(UnregisterVmosRequest& request,
         errors.emplace_back(ZX_ERR_NOT_FOUND);
         continue;
       }
-      vmos_to_unmap.push_back({id, std::move(node.mapped())});
+      vmos_to_unmap.push_back(std::move(node.mapped()));
     }
   }
 
-  for (auto& info : vmos_to_unmap) {
-    auto status = zx::vmar::root_self()->unmap(info.mapped.addr, info.mapped.size);
-    if (status != ZX_OK) {
-      fdf::error("Failed to unmap VMO {}", zx_status_get_string(status));
-      failed_vmo_ids.emplace_back(info.id);
-      errors.emplace_back(status);
-    }
-  }
-
+  vmos_to_unmap.clear();
   completer.Reply({std::move(failed_vmo_ids), std::move(errors)});
 }
 
@@ -220,6 +211,7 @@ void UsbEpServer::RequestComplete(zx_status_t status, size_t actual, RequestVari
 
   auto& freq = std::get<usb::FidlRequest>(request);
   auto defer_completion = *freq->defer_completion();
+  auto fidl_req = freq.take_request();
 
   std::vector<fuchsia_hardware_usb_endpoint::Completion> completions;
 
@@ -229,7 +221,7 @@ void UsbEpServer::RequestComplete(zx_status_t status, size_t actual, RequestVari
     fbl::AutoLock lock(&lock_);
 
     completions_.emplace_back(std::move(fuchsia_hardware_usb_endpoint::Completion()
-                                            .request(freq.take_request())
+                                            .request(std::move(fidl_req))
                                             .status(status)
                                             .transfer_size(actual)));
     if (defer_completion && status == ZX_OK) {

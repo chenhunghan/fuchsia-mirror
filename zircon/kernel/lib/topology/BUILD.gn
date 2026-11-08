@@ -52,13 +52,8 @@ group("tests") {
   testonly = true
 }
 
-source_set("kernel-tests") {
+group("kernel-tests") {
   testonly = true
-  sources = [ "system-topology_test.cc" ]
-  deps = [
-    ".",
-    "//zircon/kernel/lib/unittest",
-  ]
 }
 
 group("phys-tests") {

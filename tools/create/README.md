@@ -20,16 +20,40 @@ pass the `--host` flag to `fx test`.
     * Name all template files with the `.tmpl` extension or `.tmpl-<lang>` for
       language-specific template files.
     * Use `{{PROJECT_NAME}}` in a file/directory name to substitute the user's `PROJECT_NAME`.
-3. Edit the `templates` target in `//tools/create/templates/BUILD.gn` to include all your new
-   template files.
+3. Add your new template files to the `templates` target in
+   `//tools/create/templates/BUILD.gn` and to `TEMPLATES` in
+   `//tools/create/templates/templates.bzl`.
 4. Add the project type to the help doc-string in `CreateArgs` in `//tools/create/src/main.rs`.
 5. Create a golden project in `//tools/create/goldens`.
     * Use the `fx create` command to create a golden project, using the `--override-copyright-year 2020`
       flag. This makes sure that tests don't start failing in 2021+.
-6. Add a test target to `//tools/create/goldens/BUILD.gn`.
-    * See the existing tests for examples. Use the template in `//tools/create/goldens/golden_test.gni`.
+6. Add a `golden_test()` to `//tools/create/goldens/BUILD.bazel` and add it to
+   the `host_tests` test suite in the same file.
+    * See the existing tests for examples.
     * The test will generate a project and compare it with your golden project.
-    * Execute the test with `fx test //tools/create/goldens`.
+    * Execute the tests with
+      `fx bazel test --config=host //tools/create/goldens:host_tests`.
+    * If your project includes a `BUILD.bazel` file, it's its own Bazel
+      package, and the golden test can only read the files that it exports.
+      List every generated file in an `exports_files()` call in that
+      template, wrapped in `{{#if EXPORT_ALL_FILES}}` so that it only appears
+      in the golden project, and generate the golden project with
+      `--export-all-files`. For example, see
+      [`templates/driver-default/BUILD.bazel.tmpl-rust`](templates/driver-default/BUILD.bazel.tmpl-rust):
+
+      ```
+      {{#if EXPORT_ALL_FILES}}
+      exports_files(
+          [
+              "BUILD.bazel",
+              "README.md",
+              "src/lib.rs",
+          ],
+          visibility = ["//tools/create/goldens:__pkg__"],
+      )
+
+      {{/if}}
+      ```
 
 ## Templates
 

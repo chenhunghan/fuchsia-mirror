@@ -5,6 +5,7 @@
 package resultdb
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -12,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -36,6 +38,8 @@ const (
 	MaxFailureReasonLength = 1024
 	// MaxFailureReasonTotalSize is the maximum total protobuf size of a failure reason (16384 bytes).
 	MaxFailureReasonTotalSize = 16384
+	// MaxExplanationHTMLLength is the maximum size of a test exoneration's explanation_html (4096 bytes).
+	MaxExplanationHTMLLength = 4096
 	// MaxBatchSize is the maximum number of items (results or exonerations) reported in a single request.
 	MaxBatchSize = 250
 	// DefaultRepo is the Gitiles repository URL for the main Fuchsia repository.
@@ -545,59 +549,27 @@ func testCaseToResultSink(testCases []runtests.TestCaseResult, tags []*resultpb.
 	// expected and thus should be reported as a passed result.
 	testStatus, _, _ := resultDBStatus(testDetail.Status)
 	scheme := DetermineScheme(testDetail)
-
-	// ResultDB reserves characters <= ',' (ASCII U+0020 to U+002C, such as ' ',
-	// '!', '"', '#', etc.) as leading characters for fine_name and case_name
-	// components, rejecting them with 400 Bad Request. Wrapping any component
-	// starting with a reserved character in brackets preserves the original name
-	// verbatim while satisfying ResultDB constraints.
-	sanitizeIdentifier := func(s string) string {
-		if len(s) > 0 && s[0] <= ',' {
-			return fmt.Sprintf("[%s]", s)
-		}
-		return s
-	}
-
-	testIdentifier := testIdentifierFromCase
-	switch scheme {
-	case "flat":
-		testIdentifier = testIdentifierFromFlat
-	case "go":
-		label := testDetail.SourceLabel
-		if label == "" {
-			label = testDetail.GNLabel
-		}
-		if idx := strings.Index(label, "("); idx != -1 {
-			label = label[:idx]
-		}
-		label = strings.TrimLeft(label, "@/")
-		dir, _, _ := strings.Cut(label, ":")
-		goPkg := testDetail.Name
-		if dir != "" && dir != "." {
-			goPkg = dir
-		}
-		testIdentifier = func(testCase *runtests.TestCaseResult) (string, string) {
-			return testIdentifierFromGo(testCase, goPkg)
-		}
-	case "rust":
-		testIdentifier = testIdentifierFromRust
-	}
+	testIdentifier := caseIdentifierResolver(scheme, testDetail)
 
 	metadataFields := resolveTestMetadataFields(testDetail)
 	startTime := timestamppb.New(testDetail.StartTime)
 
-	// Within a single TestDetails, almost all test cases share the same Format
-	// and have no per-case Tags, so their Properties and Tags are identical.
-	// Cache them by Format to avoid rebuilding a structpb.Struct and calling
-	// proto.Size on every test case.
+	// Within a single TestDetails, almost all test cases share only 1-2 unique
+	// (Format, Tags) combinations (for example, Fuchsia target tests attach
+	// test_outcome and use_ffx tags to every case), so their Properties and
+	// Tags are identical. Cache a small slice of unique combinations to avoid
+	// rebuilding a structpb.Struct and calling proto.Size on every test case.
 	type cachedPropsAndTags struct {
+		format     string
+		customTags []build.TestTag
 		properties *structpb.Struct
 		tags       []*resultpb.StringPair
 	}
-	var cachedByFormat map[string]cachedPropsAndTags
+	const maxCachedPropsEntries = 8
+	var propCache []cachedPropsAndTags
 
 	for _, testCase := range testCases {
-		testID := fmt.Sprintf("%s/%s:%s", testDetail.Name, testCase.SuiteName, testCase.CaseName)
+		testID := LegacyTestCaseID(testDetail.Name, testCase.SuiteName, testCase.CaseName)
 		if len(testID) > MaxTestIDLength {
 			log.Printf("[ERROR] Skip uploading to ResultDB due to test_id exceeding %d bytes max limit: %q", MaxTestIDLength, testID)
 			testsSkipped = append(testsSkipped, testID)
@@ -606,24 +578,30 @@ func testCaseToResultSink(testCases []runtests.TestCaseResult, tags []*resultpb.
 
 		var properties *structpb.Struct
 		var testCaseTags []*resultpb.StringPair
-		if len(testCase.Tags) == 0 {
-			if cached, ok := cachedByFormat[testCase.Format]; ok {
-				properties, testCaseTags = cached.properties, cached.tags
-			} else {
-				properties, testCaseTags = testCaseProperties(testCase, testDetail, tags)
-				if cachedByFormat == nil {
-					cachedByFormat = make(map[string]cachedPropsAndTags, 1)
-				}
-				cachedByFormat[testCase.Format] = cachedPropsAndTags{properties: properties, tags: testCaseTags}
+		foundCached := false
+		for i := range propCache {
+			if propCache[i].format == testCase.Format && slices.Equal(propCache[i].customTags, testCase.Tags) {
+				properties, testCaseTags = propCache[i].properties, propCache[i].tags
+				foundCached = true
+				break
 			}
-		} else {
-			properties, testCaseTags = testCaseProperties(testCase, testDetail, tags)
+		}
+		if !foundCached {
+			properties, testCaseTags = testCaseProperties(testCase.Format, testCase.Tags, testDetail, tags)
+			if len(propCache) < maxCachedPropsEntries {
+				propCache = append(propCache, cachedPropsAndTags{
+					format:     testCase.Format,
+					customTags: slices.Clone(testCase.Tags),
+					properties: properties,
+					tags:       slices.Clip(testCaseTags),
+				})
+			}
 		}
 
-		fineName, caseName := testIdentifier(&testCase)
+		fineName, caseName := structuredCaseIdentifier(testIdentifier, &testCase)
 		testIDStructured := &sinkpb.TestIdentifier{
-			FineName:           sanitizeIdentifier(fineName),
-			CaseNameComponents: []string{sanitizeIdentifier(caseName)},
+			FineName:           fineName,
+			CaseNameComponents: []string{caseName},
 		}
 		r := sinkpb.TestResult{
 			TestId:           testID,
@@ -668,8 +646,11 @@ func testCaseToResultSink(testCases []runtests.TestCaseResult, tags []*resultpb.
 			testExonerations = append(testExonerations, &sinkpb.TestExoneration{
 				TestId:           testID,
 				TestIdStructured: testIDStructured,
-				ExplanationHtml:  fmt.Sprintf("Test case %s was exonerated in the test summary.", testCase.CaseName),
-				Reason:           resultpb.ExonerationReason_NOT_CRITICAL,
+				ExplanationHtml: truncateEscapedHTML(
+					cmp.Or(testCase.ExonerationExplanation, fmt.Sprintf("Test case %s was exonerated in the test summary.", testCase.CaseName)),
+					MaxExplanationHTMLLength,
+				),
+				Reason: resultpb.ExonerationReason_OCCURS_ON_OTHER_CLS,
 			})
 		}
 	}
@@ -718,6 +699,77 @@ func testIdentifierFromFlat(testCase *runtests.TestCaseResult) (string, string) 
 	return "", testCase.CaseName
 }
 
+// ResultDB reserves characters <= ',' (ASCII U+0020 to U+002C, such as ' ',
+// '!', '"', '#', etc.) as leading characters for fine_name and case_name
+// components, rejecting them with 400 Bad Request. Wrapping any component
+// starting with a reserved character in brackets preserves the original name
+// verbatim while satisfying ResultDB constraints.
+func sanitizeIdentifier(s string) string {
+	if len(s) > 0 && s[0] <= ',' {
+		return fmt.Sprintf("[%s]", s)
+	}
+	return s
+}
+
+func caseIdentifierResolver(scheme string, testDetail *runtests.TestDetails) func(*runtests.TestCaseResult) (string, string) {
+	switch scheme {
+	case "flat":
+		return testIdentifierFromFlat
+	case "go":
+		label := testDetail.SourceLabel
+		if label == "" {
+			label = testDetail.GNLabel
+		}
+		if idx := strings.Index(label, "("); idx != -1 {
+			label = label[:idx]
+		}
+		label = strings.TrimLeft(label, "@/")
+		dir, _, _ := strings.Cut(label, ":")
+		goPkg := testDetail.Name
+		if dir != "" && dir != "." {
+			goPkg = dir
+		}
+		return func(testCase *runtests.TestCaseResult) (string, string) {
+			return testIdentifierFromGo(testCase, goPkg)
+		}
+	case "rust":
+		return testIdentifierFromRust
+	default:
+		return testIdentifierFromCase
+	}
+}
+
+func structuredCaseIdentifier(resolver func(*runtests.TestCaseResult) (string, string), testCase *runtests.TestCaseResult) (string, string) {
+	fineName, caseName := resolver(testCase)
+	return sanitizeIdentifier(fineName), sanitizeIdentifier(caseName)
+}
+
+// StructuredCaseIdentifier returns the sanitized structured test identifier
+// (fine_name, case_name) for testCase within testDetail under scheme.
+func StructuredCaseIdentifier(scheme string, testDetail *runtests.TestDetails, testCase *runtests.TestCaseResult) (string, string) {
+	return structuredCaseIdentifier(caseIdentifierResolver(scheme, testDetail), testCase)
+}
+
+// StructuredDetailIdentifier returns the structured test identifier
+// (fine_name, case_name) for a caseless top-level test under scheme.
+func StructuredDetailIdentifier(scheme string) (string, string) {
+	switch scheme {
+	case "single":
+		return "", FixtureCaseName
+	case "flat":
+		return "", "case"
+	default:
+		return "test", "case"
+	}
+}
+
+// LegacyTestCaseID returns the legacy flat ResultDB test_id for a test case.
+// TODO(b/527958872): Remove once Fuchsia test results complete the migration to
+// structured test identifiers.
+func LegacyTestCaseID(testName, suiteName, caseName string) string {
+	return fmt.Sprintf("%s/%s:%s", testName, suiteName, caseName)
+}
+
 // testDetailsToResultSink converts TestDetail defined in /tools/testing/runtests/runtests.go
 // to ResultSink's TestResult. Returns an error if a test result cannot be mapped to
 // result_sink.Status
@@ -730,21 +782,10 @@ func testDetailsToResultSink(tags []*resultpb.StringPair, testDetail *runtests.T
 	properties, testTags := testDetailProperties(testDetail, tags)
 	var testIDStructured *sinkpb.TestIdentifier
 	if len(testDetail.Cases) == 0 {
-		scheme := DetermineScheme(testDetail)
-		switch scheme {
-		case "single":
-			testIDStructured = &sinkpb.TestIdentifier{
-				CaseNameComponents: []string{"*fixture"},
-			}
-		case "flat":
-			testIDStructured = &sinkpb.TestIdentifier{
-				CaseNameComponents: []string{"case"},
-			}
-		default:
-			testIDStructured = &sinkpb.TestIdentifier{
-				FineName:           "test",
-				CaseNameComponents: []string{"case"},
-			}
+		fineName, caseName := StructuredDetailIdentifier(DetermineScheme(testDetail))
+		testIDStructured = &sinkpb.TestIdentifier{
+			FineName:           fineName,
+			CaseNameComponents: []string{caseName},
 		}
 	}
 	r := sinkpb.TestResult{
@@ -787,8 +828,11 @@ func testDetailsToResultSink(tags []*resultpb.StringPair, testDetail *runtests.T
 		return &r, &sinkpb.TestExoneration{
 			TestId:           testDetail.Name,
 			TestIdStructured: testIDStructured,
-			ExplanationHtml:  fmt.Sprintf("Test target %s was exonerated in the test summary.", testDetail.Name),
-			Reason:           resultpb.ExonerationReason_NOT_CRITICAL,
+			ExplanationHtml: truncateEscapedHTML(
+				cmp.Or(testDetail.ExonerationExplanation, fmt.Sprintf("Test target %s was exonerated in the test summary.", testDetail.Name)),
+				MaxExplanationHTMLLength,
+			),
+			Reason: resultpb.ExonerationReason_OCCURS_ON_OTHER_CLS,
 		}, "", nil
 	}
 
@@ -828,22 +872,36 @@ func testDetailProperties(testDetail *runtests.TestDetails, buildTags []*resultp
 }
 
 // testCaseProperties returns the properties and the legacy tags of a test case
-// result.
+// result. Accepting only format and caseTags (rather than the full
+// TestCaseResult) ensures callers can safely cache results by (format,
+// caseTags) within a TestDetails.
 //
 // buildTags is the build and environment metadata that applies to every test
 // result, such as the builder and the board.
-func testCaseProperties(testCase runtests.TestCaseResult, testDetail *runtests.TestDetails, buildTags []*resultpb.StringPair) (*structpb.Struct, []*resultpb.StringPair) {
+func testCaseProperties(format string, caseTags []build.TestTag, testDetail *runtests.TestDetails, buildTags []*resultpb.StringPair) (*structpb.Struct, []*resultpb.StringPair) {
 	fields := map[string]any{
-		"format": testCase.Format,
+		"gn_label": testDetail.GNLabel,
+		// Most consumers should use `source_label` rather than `gn_label`
+		// since it better corresponds to the location of the test's source
+		// code for Bazel tests.
+		"source_label": testDetail.SourceLabel,
+		"affected":     testDetail.Affected,
+		"format":       format,
 	}
 
 	// See the comment on is_top_level_test in testDetailProperties.
 	tags := []*resultpb.StringPair{
 		{Key: "is_test_case", Value: "true"},
-		{Key: "format", Value: testCase.Format},
+	}
+	for key, value := range fields {
+		tags = append(tags, &resultpb.StringPair{Key: key, Value: fmt.Sprint(value)})
 	}
 
-	addCommonProperties(fields, &tags, testDetail.Metadata.Owners, testCase.Tags, buildTags)
+	customTags := make([]build.TestTag, 0, len(testDetail.Tags)+len(caseTags))
+	customTags = append(customTags, testDetail.Tags...)
+	customTags = append(customTags, caseTags...)
+
+	addCommonProperties(fields, &tags, testDetail.Metadata.Owners, customTags, buildTags)
 	return newProperties(fields), tags
 }
 

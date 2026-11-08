@@ -39,17 +39,8 @@ namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 namespace usb_cdc_function {
 
 // UsbCdcTestHelper exposes hooks to inspect private endpoint state for tests.
-// Note: In this test-only precursor CL, these methods return stubbed values to allow
-// compilation against the unmodified driver. A subsequent CL introducing the
-// dead-endpoint tracking feature will connect these methods to the real driver state.
 class UsbCdcTestHelper {
  public:
-  [[maybe_unused]] static bool IsIntrEndpointDead(const UsbCdcFunction& /*driver*/) {
-    return false;
-  }
-  [[maybe_unused]] static bool IsRxEndpointDead(const UsbCdcFunction& /*driver*/) { return false; }
-  [[maybe_unused]] static bool IsTxEndpointDead(const UsbCdcFunction& /*driver*/) { return false; }
-  [[maybe_unused]] static size_t ActiveRxVmoIdsSize(const UsbCdcFunction& /*driver*/) { return 0; }
   static size_t GetBulkOutInFlightCount(UsbCdcFunction& driver) {
     return driver.bulk_out_ep_.GetInFlightCount();
   }
@@ -319,6 +310,7 @@ class FakeUsbFunction
     fit::callback<void()> callback;
     {
       std::lock_guard<std::mutex> guard(lock_);
+      configuration_ = request.configuration();
       interface_ = std::move(request.iface());
       callback = std::move(on_configure_);
     }
@@ -434,8 +426,14 @@ class FakeUsbFunction
     on_configure_ = std::move(callback);
   }
 
+  std::vector<uint8_t> configuration() {
+    std::lock_guard<std::mutex> guard(lock_);
+    return configuration_;
+  }
+
  private:
   std::mutex lock_;
+  std::vector<uint8_t> configuration_;
   fidl::ClientEnd<fuchsia_hardware_usb_function::UsbFunctionInterface> interface_;
   fit::callback<void()> on_configure_;
   bool verify_lifecycle_order_ = false;
@@ -2227,33 +2225,118 @@ TEST_F(UsbCdcTest, DisableAllEndpointsIoNotPresent) {
 }
 
 // Validates that unbind/transport failures on endpoint channels mark the corresponding endpoint
-// client dead to prevent subsequent operations. Requires dead-endpoint tracking and error callbacks
-// on endpoint clients.
-TEST_F(UsbCdcTest, DISABLED_EndpointFailureMarksEndpointDead) {
+// client dead to prevent subsequent operations. Requires dead-endpoint tracking and error
+// callbacks on endpoint clients.
+TEST_F(UsbCdcTest, EndpointFailureMarksEndpointDead) {
   StartNetworkDevice();
   ASSERT_NO_FATAL_FAILURE(SetConfiguredAndEnable());
 
-  // 1. Close the UsbFunction server endpoint client on kBulkInEp.
-  driver_test_.RunInEnvironmentTypeContext(
-      [](Environment& env) { env.fake_usb_fidl_.fake_endpoint(kBulkInEp).Close(); });
-
-  // 2. Wait deterministically for the unbind callback to run and mark the endpoint dead.
-  ASSERT_TRUE(driver_test_.runtime().RunWithTimeoutOrUntil(
-      [&]() {
-        bool dead = false;
-        driver_test_.RunInDriverContext([&](const UsbCdcFunction& driver) {
-          dead = UsbCdcTestHelper::IsTxEndpointDead(driver);
-        });
-        return dead;
-      },
-      zx::sec(5)));
-
-  // 3. Verify the tx endpoint is marked dead in the driver context.
-  driver_test_.RunInDriverContext([](const UsbCdcFunction& driver) {
-    EXPECT_TRUE(UsbCdcTestHelper::IsTxEndpointDead(driver));
+  // Verify the Configure() descriptor payload starts with the CDC Ethernet IAD.
+  driver_test_.RunInEnvironmentTypeContext([](Environment& env) {
+    std::vector<uint8_t> config = env.fake_usb_fidl_.configuration();
+    ASSERT_GE(config.size(), sizeof(usb_interface_assoc_descriptor_t));
+    usb_interface_assoc_descriptor_t iad;
+    memcpy(&iad, config.data(), sizeof(iad));
+    EXPECT_EQ(iad.b_length, sizeof(usb_interface_assoc_descriptor_t));
+    EXPECT_EQ(iad.b_descriptor_type,
+              fidl::ToUnderlying(fdescriptor::DescriptorType::kInterfaceAssociation));
+    EXPECT_EQ(iad.b_first_interface, kCommInterface);
+    EXPECT_EQ(iad.b_interface_count, 2u);
+    EXPECT_EQ(iad.b_function_class, fidl::ToUnderlying(fdescriptor::UsbClass::kComm));
+    EXPECT_EQ(iad.b_function_sub_class, fidl::ToUnderlying(fdescriptor::CdcSubclass::kEthernet));
+    EXPECT_EQ(iad.b_function_protocol, 0u);
   });
 
-  // 4. Deconfigure the driver to clean up and prevent dispatcher hangs in TearDown.
+  // 1. Prepare a VMO and queue an in-flight TX buffer before closing the endpoints.
+  zx::vmo vmo;
+  ASSERT_OK(zx::vmo::create(4096, 0, &vmo));
+  uint8_t data[] = {0xAA, 0xBB, 0xCC, 0xDD};
+  ASSERT_OK(vmo.write(data, 0, sizeof(data)));
+  fdf::Arena arena(kArenaTag);
+  auto prepare_result = net_impl_client_.buffer(arena)->PrepareVmo(kVmoId, std::move(vmo));
+  ASSERT_OK(prepare_result.status());
+  ASSERT_OK(prepare_result->s);
+
+  constexpr uint32_t kInFlightBufferId = 100;
+  fnetdev::wire::BufferRegion region = {
+      .vmo = kVmoId,
+      .offset = 0,
+      .length = sizeof(data),
+  };
+  fnetdev::wire::TxBuffer in_flight_tx{
+      .id = kInFlightBufferId,
+      .data = fidl::VectorView<fnetdev::wire::BufferRegion>::FromExternal(&region, 1),
+  };
+  ASSERT_OK(net_impl_client_.buffer(arena)
+                ->QueueTx(fidl::VectorView<fnetdev::wire::TxBuffer>::FromExternal(&in_flight_tx, 1))
+                .status());
+
+  ASSERT_TRUE(driver_test_.runtime().RunWithTimeoutOrUntil(
+      [&]() {
+        size_t pending = 0;
+        driver_test_.RunInEnvironmentTypeContext([&](Environment& env) {
+          pending = env.fake_usb_fidl_.fake_endpoint(kBulkInEp).pending_request_count();
+        });
+        return pending == 1;
+      },
+      zx::duration::infinite()));
+
+  // 2. Close the UsbFunction server endpoint clients on kBulkInEp, kBulkOutEp, and kIntrEp.
+  driver_test_.RunInEnvironmentTypeContext([](Environment& env) {
+    env.fake_usb_fidl_.fake_endpoint(kBulkInEp).Close();
+    env.fake_usb_fidl_.fake_endpoint(kBulkOutEp).Close();
+    env.fake_usb_fidl_.fake_endpoint(kIntrEp).Close();
+  });
+
+  // 3. Verify the in-flight TX buffer is immediately discarded with ZX_ERR_PEER_CLOSED on unbind.
+  std::optional<fnetdev::wire::TxResult> in_flight_result;
+  ASSERT_TRUE(driver_test_.runtime().RunWithTimeoutOrUntil(
+      [&]() {
+        driver_test_.RunInEnvironmentTypeContext(
+            [&](Environment& env) { in_flight_result = env.fake_ifc_.PopCompleteTx(); });
+        return in_flight_result.has_value();
+      },
+      zx::duration::infinite()));
+  EXPECT_EQ(in_flight_result->id, kInFlightBufferId);
+  EXPECT_EQ(in_flight_result->status, ZX_ERR_PEER_CLOSED);
+
+  // 4. Verify a new QueueTx after unbind also completes with ZX_ERR_PEER_CLOSED.
+  constexpr uint32_t kPostUnbindBufferId = 101;
+  fnetdev::wire::TxBuffer post_unbind_tx{
+      .id = kPostUnbindBufferId,
+      .data = fidl::VectorView<fnetdev::wire::BufferRegion>::FromExternal(&region, 1),
+  };
+  ASSERT_OK(
+      net_impl_client_.buffer(arena)
+          ->QueueTx(fidl::VectorView<fnetdev::wire::TxBuffer>::FromExternal(&post_unbind_tx, 1))
+          .status());
+
+  std::optional<fnetdev::wire::TxResult> post_unbind_result;
+  ASSERT_TRUE(driver_test_.runtime().RunWithTimeoutOrUntil(
+      [&]() {
+        driver_test_.RunInEnvironmentTypeContext(
+            [&](Environment& env) { post_unbind_result = env.fake_ifc_.PopCompleteTx(); });
+        return post_unbind_result.has_value();
+      },
+      zx::duration::infinite()));
+  EXPECT_EQ(post_unbind_result->id, kPostUnbindBufferId);
+  EXPECT_EQ(post_unbind_result->status, ZX_ERR_PEER_CLOSED);
+
+  // 5. Verify SetInterface(alt_setting = 1) fails with ZX_ERR_PEER_CLOSED and keeps the port
+  // offline when bulk endpoints have unbound.
+  {
+    fidl::Result result = function_client_->SetInterface({{
+        .interface = kDataInterface,
+        .alt_setting = 1,
+    }});
+    ASSERT_TRUE(result.is_error());
+    ASSERT_TRUE(result.error_value().is_domain_error());
+    EXPECT_STATUS(result.error_value().domain_error(), ZX_ERR_PEER_CLOSED);
+  }
+  driver_test_.RunInDriverContext([](UsbCdcFunction& driver) { EXPECT_FALSE(driver.online()); });
+
+  // 6. Deconfigure the driver to verify SetConfigured(false) succeeds without hanging on dead
+  // endpoints.
   {
     fidl::Result result = function_client_->SetConfigured({{
         .configured = false,
@@ -2274,10 +2357,11 @@ class UsbCdcNoMetadataTest : public UsbCdcTest {
 // when boot metadata is missing.
 TEST_F(UsbCdcNoMetadataTest, FallbackToRandomMacAddress) {
   // The driver should successfully start and generate a random MAC address.
-  // We can verify that the generated MAC address has the local-assignment bit (0x02) set!
+  // We can verify that the generated MAC address has the local-assignment bit (0x02) set
+  // and the multicast bit (0x01) cleared!
   driver_test_.RunInDriverContext([](UsbCdcFunction& driver) {
     std::array<uint8_t, 6> mac = driver.mac_addr();
-    EXPECT_EQ(mac[0] & 0x02, 0x02);
+    EXPECT_EQ(mac[0] & 0x03, 0x02);
   });
 }
 
@@ -2762,6 +2846,36 @@ TEST_F(UsbCdcTest, RxCompletionIoNotPresentDoesNotRequeueInTightLoop) {
 
   driver_test_.RunInEnvironmentTypeContext([&](Environment& env) {
     env.fake_usb_fidl_.fake_endpoint(kBulkOutEp).RequestComplete(ZX_ERR_IO_NOT_PRESENT, 0);
+  });
+
+  size_t in_flight = 0;
+  size_t pending = 0;
+  ASSERT_TRUE(driver_test_.runtime().RunWithTimeoutOrUntil(
+      [&]() {
+        driver_test_.RunInDriverContext([&](UsbCdcFunction& driver) {
+          in_flight = UsbCdcTestHelper::GetBulkOutInFlightCount(driver);
+        });
+        driver_test_.RunInEnvironmentTypeContext([&](Environment& env) {
+          pending = env.fake_usb_fidl_.fake_endpoint(kBulkOutEp).pending_request_count();
+        });
+        return in_flight == UsbCdcFunction::kRxDepth - 1 || pending == UsbCdcFunction::kRxDepth;
+      },
+      zx::duration::infinite()));
+
+  EXPECT_EQ(in_flight, UsbCdcFunction::kRxDepth - 1);
+  EXPECT_EQ(pending, UsbCdcFunction::kRxDepth - 1);
+}
+
+// Validates that an RX completion with ZX_ERR_BAD_STATE while still online and configured
+// (e.g., queued while the DCI endpoint is disabled before SetConfigured(false) arrives)
+// returns the request to the free pool instead of logging an error and re-queuing it in a
+// tight loop.
+TEST_F(UsbCdcTest, RxCompletionBadStateDoesNotRequeueInTightLoop) {
+  StartNetworkDevice();
+  ASSERT_NO_FATAL_FAILURE(SetConfiguredAndEnable());
+
+  driver_test_.RunInEnvironmentTypeContext([&](Environment& env) {
+    env.fake_usb_fidl_.fake_endpoint(kBulkOutEp).RequestComplete(ZX_ERR_BAD_STATE, 0);
   });
 
   size_t in_flight = 0;

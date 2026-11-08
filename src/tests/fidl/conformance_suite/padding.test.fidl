@@ -226,6 +226,17 @@ type UnionInlinePaddingStruct = struct {
     u UnionInlinePadding;
 };
 
+type TableInlinePadding = table {
+    1: three_padding_bytes uint8;
+    2: two_padding_bytes uint16;
+    3: one_padding_byte array<uint8, 3>;
+};
+
+type TableInlinePaddingStruct = struct {
+    t TableInlinePadding;
+};
+
+
 // Bindings might generate an 4 byte padding mask for this struct,
 // which is wrong because the struct has alignment 2 and might
 // be used at a non 4 byte aligned offset.

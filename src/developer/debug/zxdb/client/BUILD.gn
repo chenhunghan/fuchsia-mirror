@@ -17,6 +17,7 @@ static_library("client") {
     "analytics_reporter.h",
     "arch_info.h",
     "async_task.h",
+    "async_task_provider.h",
     "async_task_tree.h",
     "breakpoint.h",
     "breakpoint_location.h",
@@ -30,6 +31,7 @@ static_library("client") {
     "elf_memory_region.h",
     "exception_settings.h",
     "execution_scope.h",
+    "fdf_dispatcher_task_provider.h",
     "file_memory_region.h",
     "filter.h",
     "finish_physical_frame_thread_controller.h",
@@ -70,6 +72,9 @@ static_library("client") {
     "thread.h",
     "thread_controller.h",
     "thread_observer.h",
+    "tracepoint.h",
+    "tracepoint_capture.h",
+    "tracepoint_spec.h",
     "until_process_controller.h",
     "until_thread_controller.h",
   ]
@@ -105,6 +110,7 @@ static_library("client") {
     "exception_settings.cc",
     "exception_settings.h",
     "execution_scope.cc",
+    "fdf_dispatcher_task_provider.cc",
     "file_memory_region.cc",
     "filter.cc",
     "finish_physical_frame_thread_controller.cc",
@@ -165,6 +171,8 @@ static_library("client") {
     "thread_controller.cc",
     "thread_impl.cc",
     "thread_impl.h",
+    "tracepoint.cc",
+    "tracepoint_capture.cc",
     "until_process_controller.cc",
     "until_thread_controller.cc",
   ]
@@ -191,6 +199,7 @@ static_library("client") {
   ]
 
   deps = [
+    "//src/developer/debug/zxdb/format",
     "//src/lib/elflib",
     "//src/lib/llvm/host:LLVMMC",
     "//src/lib/llvm/host:LLVMObject",
@@ -283,6 +292,7 @@ source_set("tests") {
     "disassembler_unittest.cc",
     "download_manager_unittest.cc",
     "elf_memory_region_unittest.cc",
+    "fdf_dispatcher_task_provider_unittest.cc",
     "filter_unittest.cc",
     "finish_physical_frame_thread_controller_unittest.cc",
     "finish_thread_controller_unittest.cc",
@@ -318,6 +328,8 @@ source_set("tests") {
     "thread_controller_test.h",
     "thread_controller_unittest.cc",
     "thread_impl_unittest.cc",
+    "tracepoint_capture_unittest.cc",
+    "tracepoint_unittest.cc",
     "until_thread_controller_unittest.cc",
   ]
 

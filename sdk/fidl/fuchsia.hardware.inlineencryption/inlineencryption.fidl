@@ -63,6 +63,15 @@ closed protocol Controller {
     }) -> (resource struct {
         secret vector<uint8>:MAX;
     }) error zx.Status;
+
+    /// Evicts any key material previously programmed into hardware key `slot`.
+    strict EvictKeySlot(struct {
+        slot uint8;
+    }) -> () error zx.Status;
+
+    /// Re-imports active hardware-wrapped keys into the inline encryption engine after a host
+    /// controller power-down clears volatile keyslot registers.
+    strict RestoreKeys() -> () error zx.Status;
 };
 
 /// A driver transport variant of the `Controller` protocol.

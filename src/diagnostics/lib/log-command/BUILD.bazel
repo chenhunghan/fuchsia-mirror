@@ -1,0 +1,161 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+_COMMON_SRCS = [
+    "src/filter.rs",
+    "src/fxt_streamer.rs",
+    "src/lib.rs",
+    "src/log_formatter.rs",
+    "src/log_socket_stream.rs",
+]
+
+# @bazel2gn:transformer=deps
+_COMMON_DEPS = [
+    "//sdk/rust/zx-types",
+    "//src/developer/ffx/lib/errors:lib",
+    "//src/developer/lib/writer:lib",
+    "//src/lib/diagnostics/data/rust",
+    "//src/lib/diagnostics/log/encoding/rust",
+    "//src/lib/diagnostics/log/message/rust:lib",
+    "//src/lib/diagnostics/selectors",
+    "//src/lib/fidl/rust/fidl",
+    "//src/sys/lib/moniker",
+    "//third_party/rust_crates/vendor:anyhow",
+    "//third_party/rust_crates/vendor:argh",
+    "//third_party/rust_crates/vendor:async-stream",
+    "//third_party/rust_crates/vendor:chrono",
+    "//third_party/rust_crates/vendor:chrono-english",
+    "//third_party/rust_crates/vendor:flyweights",
+    "//third_party/rust_crates/vendor:futures-util",
+    "//third_party/rust_crates/vendor:log",
+    "//third_party/rust_crates/vendor:regex-lite",
+    "//third_party/rust_crates/vendor:serde",
+    "//third_party/rust_crates/vendor:serde_json",
+    "//third_party/rust_crates/vendor:thiserror",
+    "//third_party/rust_crates/vendor:zerocopy",
+]
+
+# Unrolls the GN `log_command_lib` template into explicit Fuchsia
+# (`log-command`, `log-command-ctf`) and FDomain (`log-command_fdomain`)
+# library targets. The unreferenced `log-command-ctf_test` and
+# `log-command_fdomain_test` targets that the GN template implicitly created
+# are omitted.
+rustc_library(
+    name = "log-command",
+    srcs = _COMMON_SRCS,
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    visibility = [
+        "//src/diagnostics/log_listener:__pkg__",
+        "//src/lib/test_diagnostics/rust:__pkg__",
+    ],
+    deps = _COMMON_DEPS + [
+        "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_rust_flex",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust_flex",
+        "//src/lib/fdomain/client:flex_fidl",
+        "//src/sys/lib/component_debug",
+    ],
+)
+
+rustc_library(
+    name = "log-command-ctf",
+    srcs = _COMMON_SRCS,
+    crate_features = ["ctf"],
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    visibility = [
+        "//src/diagnostics/archivist/tests/integration/test_cases:__pkg__",
+    ],
+    deps = _COMMON_DEPS + [
+        "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_rust_flex",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust_flex",
+        "//src/lib/fdomain/client:flex_fidl",
+    ],
+)
+
+rustc_library(
+    name = "log-command_fdomain",
+    srcs = _COMMON_SRCS,
+    crate_features = ["fdomain"],
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    visibility = [
+        "//src/developer/ffx/plugins/component/run:__pkg__",
+        "//src/developer/ffx/plugins/log:__subpackages__",
+        "//src/lib/test_diagnostics/rust:__pkg__",
+    ],
+    deps = _COMMON_DEPS + [
+        "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_rust_fdomain_flex",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust_fdomain_flex",
+        "//src/lib/fdomain/client:flex_fdomain",
+        "//src/sys/lib/component_debug:component_debug_fdomain",
+    ],
+)
+
+rustc_test(
+    name = "log-command_test",
+    crate = ":log-command",
+    # Sets GN `output_name` to match `bin/log_command_lib_test` in `meta/log-command-test.cml`.
+    crate_name = "log_command_lib_test",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/rust/zx",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "log-command_test_packaged_bin",
+    testonly = True,
+    binary = ":log-command_test",
+    binary_name = "log_command_lib_test",
+)
+
+fx_component_manifest(
+    name = "log-command-test-manifest",
+    testonly = True,
+    component_name = "log-command-test",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/log-command-test.cml",
+)
+
+fx_test_component(
+    name = "log-command-test-component",
+    compiled_manifest = ":log-command-test-manifest",
+    deps = [":log-command_test_packaged_bin"],
+)
+
+fx_package(
+    name = "log-command-test-package",
+    package_name = "log-command-test",
+    test_components = [":log-command-test-component"],
+)
+
+fx_test(
+    name = "log-command-test",
+    package = ":log-command-test-package",
+    visibility = ["//src/diagnostics:__pkg__"],
+)

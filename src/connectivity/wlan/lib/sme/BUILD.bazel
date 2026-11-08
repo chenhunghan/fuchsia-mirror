@@ -53,7 +53,7 @@ rustc_library(
         "//src/connectivity/wlan/lib/rsn:wlan-rsn",
         "//src/connectivity/wlan/lib/statemachine:wlan-statemachine",
         "//src/lib/diagnostics/inspect/contrib/rust",
-        "//src/lib/diagnostics/inspect/rust:fuchsia-inspect",
+        "//src/lib/diagnostics/inspect/rust",
         "//src/lib/fidl/rust/fidl",
         "//src/lib/fuchsia-sync",
         "//third_party/rust_crates/vendor:anyhow",

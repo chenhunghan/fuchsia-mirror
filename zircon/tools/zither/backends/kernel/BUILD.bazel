@@ -15,8 +15,9 @@ go_library(
     ],
     embedsrcs = [
         "templates/category.inc.tmpl",
-        "templates/kernel-wrappers.inc.tmpl",
         "templates/kernel.inc.tmpl",
+        "templates/kernel_wrappers.rs.tmpl",
+        "templates/syscall_numbers.rs.tmpl",
         "templates/syscall_sigs.rs.tmpl",
         "templates/syscalls.inc.tmpl",
         "templates/zx-syscall-numbers.h.tmpl",

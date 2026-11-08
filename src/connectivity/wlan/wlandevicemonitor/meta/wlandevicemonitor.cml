@@ -18,6 +18,23 @@
     use: [
         { service: "fuchsia.wlan.phy.Service" },
         {
+            // Whether to hash BSSIDs, MAC addresses and SSIDs in logs and Inspect.
+            // Defaults to true (fail closed) so that a product or realm that does not
+            // route this capability never logs raw identifiers; assembly routes `false`
+            // explicitly on eng builds.
+            config: "fuchsia.connectivity.RedactNetworkIdentifiers",
+            key: "redact_network_identifiers",
+            type: "bool",
+            availability: "transitional",
+            default: true,
+        },
+        {
+            // Per-boot salt used when redact_network_identifiers is true.
+            protocol: "fuchsia.diagnostics.SaltProvider",
+            from: "parent/diagnostics",
+            availability: "optional",
+        },
+        {
             config: "fuchsia.wlan.WepSupported",
             from: "parent",
             key: "wep_supported",

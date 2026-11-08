@@ -38,6 +38,26 @@ to be in sync with their `BUILD.bazel` files by `shac` (`fx lint` and CQ).
 *   Or, run `fx bazel2gn -d path/to/dir`, if you only want to sync targets in a
     specific directory.
 
+### To maintain visibility allowlists
+
+When a target with a `visibility` allowlist is migrated, the allowlist moves to
+`BUILD.bazel` and uses Bazel syntax (`//foo:__pkg__`, `//foo:__subpackages__`).
+bazel2gn derives the GN list from it, so the Bazel list must cover the
+consumers in both graphs. To find stale entries, run:
+
+```posix-terminal
+build/bazel/scripts/trim_visibility.py --target=//path/to:target
+```
+
+The script finds direct consumers with `fx bazel query 'rdeps(...)'` and
+`fx gn refs`, then prints the entries still needed, the unused entries, and a
+trimmed list ready to paste. (`scripts/gn/trim_visibility.py` is deprecated
+and forwards to this script.)
+
+If the Bazel and GN lists differ on purpose, keep the GN list in a
+`# @bazel2gn:raw_overwrite:` annotation on `visibility`. The script then trims
+the Bazel list against Bazel consumers and the GN list against GN consumers.
+
 ## Design ideas
 
 There are two main sources of differences between `BUILD.gn` and `BUILD.bazel`:
@@ -71,6 +91,11 @@ C/C++) libraries linked into Rust targets go in `link_deps` instead. The GN
 `rustc_*` templates accept `link_deps` too (with the same semantics as `deps`),
 so `bazel2gn` passes the attribute through unchanged, applying the same label
 translations it applies to `deps`.
+
+Conversely, C++ library rules (`cc_library()`, `fx_cc_library()`, and
+`fx_cc_library_headers()`) map Bazel `deps` to GN `public_deps` and
+`implementation_deps` to GN `deps`, because Bazel propagates the headers of
+`deps` (but not `implementation_deps`) to dependents.
 
 #### `compiled_action()`
 
@@ -112,41 +137,213 @@ compiled_action("generate") {
 }
 ```
 
-`outs` are placed in `$target_gen_dir` unless they have a `path_overwrite`
-annotation. `args` only support `$(location <file>)`, `$(execpath <file>)`, and
-`$(RULEDIR)`; any other substitution is an error. The GN tool's output name must
-match its target name, because `tool_output_name` is not synced.
+`outs` and `depfile` are placed in `$target_gen_dir` unless they have a
+`path_overwrite` annotation. `args` only support `$(location <label>)` and
+`$(execpath <label>)` (for `outs`, `srcs`, or `path_overwrite`-annotated
+`deps`), and `$(RULEDIR)`; any other substitution is an error. `deps`,
+`mnemonic`, `testonly`, `visibility`, and `tool_output_name` are forwarded as
+well.
+
+#### Large RBE workers
+
+Rust targets that need a lot of memory to compile run on large RBE workers with
+`exec_properties = RBE_USE_LARGE_WORKER` (from `//build/bazel/rbe:rbe.bzl`) in
+Bazel, and use `concurrent_jobs.rust_highmem` (a large RBE worker, or the local
+high memory pool without RBE) in GN:
+
+```bzl
+load("//build/bazel/rbe:rbe.bzl", "RBE_USE_LARGE_WORKER")
+
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    exec_properties = RBE_USE_LARGE_WORKER,
+)
+```
+
+is synced to:
+
+```gn
+rustc_binary("bin") {
+  sources = [ "src/main.rs" ]
+  _concurrent_jobs = concurrent_jobs.rust_highmem
+  configs += _concurrent_jobs.configs
+  forward_variables_from(_concurrent_jobs.vars, "*")
+}
+```
+
+`exec_properties` is never emitted verbatim. Other values, other rules (only
+`rustc_binary()`, `rustc_cdylib()`, `fuchsia_rust_dso()`, `rustc_library()`,
+`rustc_staticlib()`, `rustc_test()` and their aliases are supported), and
+overwrite annotations on `exec_properties` are errors; use `# @bazel2gn:skip`
+and `# @bazel2gn:raw_attribute:` instead.
+
+#### `rustc_cdylib()`, `fuchsia_cc_dso()`, and `fuchsia_rust_dso()`
+
+Rust `cdylib` shared libraries (`rustc_cdylib()` from
+`//build/bazel/rules/rust:rustc_cdylib.bzl`) and Fuchsia DSO component shared
+libraries (`fuchsia_cc_dso()` and `fuchsia_rust_dso()` from
+`//src/lib/dso:fuchsia_dso.bzl`) sync directly to their GN counterparts in
+`//build/rust/rustc_cdylib.gni` and `//src/lib/dso/fuchsia_dso.gni`:
+
+*   On `fuchsia_cc_dso()`, `is_async` (named `is_async` because `async` is a
+    reserved keyword in Starlark) maps to GN `async`, and `linkopts` maps to GN
+    `ldflags`.
+*   On `rustc_cdylib()`, `hdrs` maps to GN `public`, and `public_deps` passes
+    through.
+*   To include a `rustc_cdylib()`, `fuchsia_cc_dso()`, or `fuchsia_rust_dso()`
+    in an `fx_component()` (or converted `fx_test_component()`), wrap it with
+    `fx_packaged_binary(binary = ":<dso>", binary_name = "lib<output_name>.so",
+    install_root = "lib/")`. Because `"lib/lib<output_name>.so"` matches the GN
+    shared library's default `distribution_entries` destination, `bazel2gn`
+    unwraps `:<packaged_dso>` in component `deps` directly to `:<dso>`.
+    (`fuchsia_cc_dso()` builds in GN's `$shlib_toolchain`, so non-default
+    `fx_packaged_binary` destinations on `fuchsia_cc_dso()` are rejected.)
 
 #### Components
 
-`fx_component_manifest()` and `fx_component()` sync to GN
-`fuchsia_component_manifest()` and `fuchsia_component()`:
+`cmc_merge()`, `fx_component_manifest()`, `fx_compiled_manifest()`, and
+`fx_component()` sync to GN `cmc_merge()`, `fuchsia_component_manifest()`,
+`cm()`, and `fuchsia_component()`:
 
-*   `fx_component_manifest()` maps `manifest` to a GN path and omits `includes`
+*   `cmc_merge()` maps `srcs` (`.cml`, `.shard.cml`, or `.json` files,
+    `cml_shard()` targets ending in `.shard`, or `:<merge>` targets defined in
+    the same `BUILD.bazel`) to `sources` and defaults `output_name` to
+    `<name>.cml` (matching the Bazel rule, whereas GN `cmc_merge()` defaults to
+    `<name>`). When an `fx_component_manifest()`,
+    `fx_component_manifest_with_expectations()`, `fx_compiled_manifest()`, or
+    `cmc_merge()` consumes a `:<merge>` target defined in the same
+    `BUILD.bazel`, `bazel2gn` rewrites `:<merge>` to
+    `"$target_out_dir/<output_name>"` and adds `:<merge>` to `deps`.
+*   `fx_component_manifest()` maps `manifest` to a GN path, passes
+    `restricted_features` through, and omits `includes`
     (which lists `.cml` shard inputs for the Bazel action sandbox; GN runs `cmc`
     with global include paths and a depfile instead). An
     `fx_component_manifest()` referenced via `compiled_manifest` only by
-    `fx_test_component()` or a skipped `fx_component()` in the same
-    `BUILD.bazel` (and not by any un-skipped `fx_component()` or
-    `fuchsia_structured_config_rust_lib()`) is skipped automatically.
+    Bazel-only `fx_test_component()`s (see [Tests](#tests)) or skipped
+    `fx_component()`s in the same `BUILD.bazel` (and not by any converted
+    component or `fuchsia_structured_config_rust_lib()`) is skipped
+    automatically.
 *   `fx_component()` maps `compiled_manifest` (which must refer to a
     `:<manifest>` target in the same `BUILD` file) to `cm_label`. If the
-    `fx_component_manifest()` appears after a consumer in `BUILD.bazel`,
-    `bazel2gn` hoists it earlier in `BUILD.gn` so GN's `get_target_outputs()`
-    succeeds.
+    `fx_component_manifest()` or `fx_compiled_manifest()` appears after a
+    consumer (including `fuchsia_structured_config_rust_lib()`) in
+    `BUILD.bazel`, `bazel2gn` hoists it earlier in `BUILD.gn` so GN's
+    `get_target_outputs()` succeeds.
+*   `fx_compiled_manifest()` maps to the low-level GN `cm()`, which compiles
+    the manifest without adding it to a package as a resource (for a `.cm`
+    file that is embedded in a binary or only read at build time). GN `cm()`
+    has no `component_name`, so `bazel2gn` emits the `output_name` (default
+    `cml/<name>/<component_name>.cm`) and `config_values_package_path`
+    (`meta/<component_name>.cvf`) that the Bazel rule uses instead.
+    `restricted_features` is passed through and `includes` is omitted. An
+    `fx_component()` can't use an `fx_compiled_manifest()` as its
+    `compiled_manifest`.
 *   `fx_packaged_binary()` has no standalone GN equivalent, but when an
-    `fx_component()` depends on a `:<packaged_bin>` defined in the same
-    `BUILD.bazel` wrapping an un-skipped binary target in the same file:
-    *   If `install_root + binary_name` matches the GN binary's default
-        `"bin/<output_name>"`, `:<packaged_bin>` in `deps` unwraps directly to
-        the underlying `:<binary>` target.
+    `fx_component()` (or a converted `fx_test_component()`) depends on a
+    `:<packaged_bin>` defined in the same
+    `BUILD.bazel` wrapping an un-skipped binary or shared-object target in the
+    same file:
+    *   If `install_root + binary_name` matches the GN target's default
+        distribution destination (`"bin/<output_name>"` for executables,
+        including `fx_cc_test_binary()`, or
+        `"lib/lib<output_name>.so"` for `rustc_cdylib()`, `fuchsia_cc_dso()`,
+        and `fuchsia_rust_dso()`), `:<packaged_bin>` in `deps` unwraps directly
+        to the underlying `:<binary>` target.
     *   Otherwise, `bazel2gn` emits a GN `renamed_binary("<packaged_bin>")`
-        target and keeps `:<packaged_bin>` in `deps`.
+        target and keeps `:<packaged_bin>` in `deps` (except for
+        `fuchsia_cc_dso()`, which builds in `$shlib_toolchain` and only supports
+        its default `"lib/lib<output_name>.so"` destination).
 
 Put `# @bazel2gn:skip` (with a brief explanatory comment) on an `fx_component()`
 when its package is Bazel-only and has no GN consumer (its
 `fx_component_manifest()` will then be skipped automatically unless used by
 another un-skipped target).
+
+#### Starnix Linux binaries
+
+Starnix Linux binaries and shared objects packaged into Fuchsia components use
+standard binary rules (`fx_cc_binary()`, `fx_cc_test_binary()`, `cc_binary()`,
+`rustc_binary()`) paired with `linux_resource()` (from
+`//src/starnix/containers:linux_resource.bzl`), which syncs to GN's
+`linux_resource()` template (from `//src/starnix/build/linux_resource.gni`):
+
+*   On C++ binary rules (`fx_cc_binary()`, `cc_binary()`,
+    `cc_binary_host_tool()`, and `idk_cc_binary_host_tool()`), `linkopts` maps
+    to GN `ldflags`, and `linkshared = True` on `fx_cc_binary()` / `cc_binary()`
+    maps to GN `loadable_module()`. `gn_output_name` on `fx_cc_binary()`
+    / `fx_cc_test_binary()` is only used by GN: it maps to the GN `output_name` (the
+    Bazel binary is always named after the target).
+*   When a `linux_resource()` references a binary target in the same
+    `BUILD.bazel` file that has no non-`linux_resource()` GN consumers,
+    `bazel2gn` automatically wraps the binary in
+    `if (is_linux && !is_host) { ... }` in `BUILD.gn` (unless an OS constraint
+    such as `"//build/bazel/platforms:linux_flavor_starnix"` is already
+    specified in `target_compatible_with`), and passes `bin_output_name` /
+    `arch32_bin_output_name` to `linux_resource()` whenever the GN binary's
+    output filename differs from its target name.
+*   `arch32_src = select({"@platforms//cpu:arm64": ":<bin32>",
+    "//conditions:default": None})` with `arch32_dest` syncs to an
+    `if (target_cpu == "arm64") { ... }` block inside `linux_resource()`.
+
+```bzl
+fx_cc_binary(
+    name = "hello_starnix_bin_bin",
+    srcs = select({
+        "@platforms//cpu:x86_64": ["hello_x64.S"],
+        "@platforms//cpu:arm64": ["hello_aarch64.S"],
+        "@platforms//cpu:riscv64": ["hello_riscv64.S"],
+    }),
+    disable_instrumentation = True,
+    disable_syslog_backend = True,
+    linkopts = [
+        "-nostdlib",
+        "-nostartfiles",
+        "-static",
+        "-Wno-unused-command-line-argument",
+    ],
+    tags = ["manual"],
+)
+
+linux_resource(
+    name = "hello_starnix_bin",
+    src = ":hello_starnix_bin_bin",
+    dest = "data/tests/hello_starnix",
+    visibility = ["//src/starnix/kernel/core:__pkg__"],
+)
+```
+
+is synced to:
+
+```gn
+if (is_linux && !is_host) {
+  executable("hello_starnix_bin_bin") {
+    if (current_cpu == "x64") {
+      sources = [ "hello_x64.S" ]
+    } else if (current_cpu == "arm64") {
+      sources = [ "hello_aarch64.S" ]
+    } else if (current_cpu == "riscv64") {
+      sources = [ "hello_riscv64.S" ]
+    }
+    exclude_toolchain_tags = [ "instrumented" ]
+    disable_syslog_backend = true
+    ldflags = [
+      "-nostdlib",
+      "-nostartfiles",
+      "-static",
+      "-Wno-unused-command-line-argument",
+    ]
+  }
+}
+linux_resource("hello_starnix_bin") {
+  src = ":hello_starnix_bin_bin"
+  dest = "data/tests/hello_starnix"
+  visibility = [
+    ":*",
+    "//src/starnix/kernel/core:*",
+  ]
+}
+```
 
 #### Tests
 
@@ -154,11 +351,28 @@ While a library is used in both build systems, its tests run in both (see
 [Testing libraries in both build systems](/docs/development/build/bazel_concepts/tests.md#tests-in-both-build-systems)),
 so `bazel2gn` translates test rules too:
 
+*   `fx_cc_test_binary()` (from
+    `//build/bazel/rules/cc:fx_cc_test_binary.bzl`) maps to GN
+    `cc_test_executable()` (from `//build/testing/cc_test_executable.gni`) with
+    the same attribute mappings as `fx_cc_binary()` (except `linkshared`, which
+    is not supported on test binaries). The GN target always gets
+    `testonly = true` (`testonly = False` is an error) and
+    `emit_tool_path = false`, and `disable_lto` passes through when explicitly
+    set. Like the Bazel macro, it doesn't register a test. `bazel2gn` doesn't
+    translate `host_cc_test()` or `host_test()` yet, so the GN copy of a C++
+    host test is a hand-written GN `host_test()` that runs the generated
+    binary, above the sentinel.
 *   `rustc_test()` maps to GN `rustc_test()`. With `crate = ":<lib>"`, the
     crate must be defined in the same `BUILD.bazel`, and its `srcs`,
     `crate_root`, `edition`, `rustc_env`, `deps`, `proc_macro_deps`,
     `link_deps`, and `compile_data` are inlined into the GN test, like
-    `rules_rust` does.
+    `rules_rust` does (including `fuchsia_rust_dso()`'s implicit DSO runtime
+    dependencies and `public_deps` -> `link_deps` on `rustc_cdylib()`,
+    `rustc_dylib()`, and `fuchsia_rust_dso()`). Generic undisambiguated test
+    binary names (such as `lib_test` or `bin_test`) are rejected so test
+    binaries from different packages do not collide in `${root_out_dir}`; name
+    the test after the crate (or set `crate_name`, which maps to GN's
+    `output_name`).
 *   `host_rustc_test()` and `host_go_test()` map to GN `rustc_test()` and
     `go_test()` inside `if (is_host)`. `data`, `test_data`, and `test_label`
     are errors, because the GN templates have no equivalent.
@@ -166,13 +380,103 @@ so `bazel2gn` translates test rules too:
     `fuchsia_unittest_component()`s in a `fuchsia_test_package()` when it has
     several `unit_tests`. The GN package name gets a `-gn` suffix so it doesn't
     collide with the Bazel package in the package repository. Only `name`,
-    `package_name`, `unit_tests`, `max_log_severity`, `tags`, `testonly`, and
-    `visibility` are supported; any other attribute (such as `resources` or
-    `environments`) is an error.
+    `package_name`, `unit_tests`, `max_log_severity`, `min_log_severity`,
+    `tags`, `testonly`, and `visibility` are supported; any other attribute
+    (such as `resources` or `environments`) is an error.
+*   An `fx_package()` with un-skipped `test_components` maps to
+    `fuchsia_test_package()`, with the same `-gn` suffix on the package name.
+    `test_components` (which must be a list literal) and `subpackages` are
+    passed through, and `components` maps to `deps`. Any other attribute (such
+    as `resources` or `tools`) is an error. The `fx_test()` in the same
+    `BUILD.bazel` whose `package` is the `fx_package()` (at most one) sets the
+    GN `test_specs`: `max_log_severity` and `min_log_severity` map to
+    `log_settings.max_severity` and `log_settings.min_severity`,
+    `build_only` is passed through, and `environments` must be a list of
+    `//build/testing/environments:<env>` labels, which map to the `<env>`
+    variables of `//build/testing/environments.gni`. GN only supports
+    `test_type` on components, so `fx_test(test_type = ...)` is set on each test
+    component instead.
+*   An `fx_test_component()` listed in the `test_components` of such an
+    `fx_package()` in the same `BUILD.bazel` maps to `fuchsia_test_component()`
+    like `fx_component()` maps to `fuchsia_component()`, and also passes
+    `test_type` through. A listed `fx_unittest_component()` maps to
+    `fuchsia_unittest_component()` with `binary` in `deps` (only `name`,
+    `binary`, `component_name`, `test_type`, `tags`, `testonly`, and
+    `visibility` are supported). Any other same-package test component (such as
+    a skipped one) is an error. Other `fx_test_component()`s and
+    `fx_unittest_component()`s, `fx_package()`s without `test_components`, and
+    `fx_test()` are ignored.
+*   `fx_component_manifest_with_expectations()` and `fx_expectations()` map to
+    `fuchsia_component_manifest_with_expectations()` and
+    `fuchsia_expectations()` in
+    `//src/lib/testing/expectation/fuchsia_test_component_with_expectations.gni`
+    (omitting `includes`), and `fx_generated_expectations()` maps to
+    `generated_expectations_file()` in
+    `//src/lib/testing/expectation/generated_expectations_file.gni`. An
+    `fx_test_component_with_expectations()` listed in the `test_components` of a
+    converted `fx_package()` in the same `BUILD.bazel` maps to
+    `fuchsia_test_component_with_expectations()`: `compiled_manifest` maps to
+    `cm_label`, `.json5` labels in `expectations` convert to GN paths while
+    target labels (such as `:expectations` or `//pkg:expectations`) convert as
+    GN labels (including inside `select()`), and
+    `treatment_of_cases_with_error_logs` and `test_type` pass through. Unlisted
+    `fx_test_component_with_expectations()` targets (and any
+    `fx_component_manifest_with_expectations()` referenced only by them) are
+    ignored.
 *   The `with_unit_tests`, `with_host_unit_tests`, and `test_deps` attributes
     of Rust rules are passed through to the GN templates.
-*   `wrap_host_rust_test()`, explicit `fx_package()` / `fx_test()` chains, and
-    the other `host_*_test()` rules have no GN equivalent and are ignored.
+*   `test_suite()`, `wrap_host_rust_test()`, and the other `host_*_test()`
+    rules have no GN equivalent and are ignored.
+
+Put `# @bazel2gn:skip` (with a brief explanatory comment) on an `fx_package()`
+with `test_components` when the test is Bazel-only (for example, because its
+test binary is skipped) or when its GN copy must be written by hand; its
+`fx_test_component()`s / `fx_test_component_with_expectations()`s and their
+manifests are then ignored too.
+
+#### Tags
+
+Most Bazel `tags` have no GN equivalent and are ignored, except:
+
+*   `assert_no_deps=<label>` is converted to GN `assert_no_deps`, see
+    [`assert_no_deps.bzl`](/build/bazel/aspects/assert_no_deps.bzl).
+    Comment annotations such as `# @bazel2gn:path_overwrite:` and
+    `# @bazel2gn:raw_overwrite:` are forwarded onto the generated GN
+    dependencies, allowing toolchain qualifiers (e.g. `($current_toolchain)`).
+*   `exclude_toolchain_tags=<tag>` on Rust binary, cdylib/dylib/DSO, and test
+    rules (and on library rules with `with_unit_tests`, where it only affects
+    the unit test) is ignored by Bazel, and converted to GN
+    `exclude_toolchain_tags`, so the GN target isn't built in toolchains
+    (variants) with `<tag>`, such as `heapdump`. This is the Rust counterpart of
+    `disable_instrumentation = True` on `fx_cc_binary()` / `fuchsia_cc_dso()`,
+    which becomes `exclude_toolchain_tags = [ "instrumented" ]`.
+    TODO(https://fxbug.dev/578022348): Add canonical Bazel support for excluding
+    Rust targets from toolchain variants (e.g. heapdump).
+
+```bzl
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    tags = [
+        "assert_no_deps=//third_party/rust_crates/vendor:regex",
+        "assert_no_deps=//third_party/rust_crates/vendor:serde_json5",  # @bazel2gn:path_overwrite://third_party/rust_crates:serde_json5($current_toolchain)
+        "exclude_toolchain_tags=heapdump",
+    ],
+)
+```
+
+is synced to:
+
+```gn
+rustc_binary("bin") {
+  sources = [ "src/main.rs" ]
+  assert_no_deps = [
+    "//third_party/rust_crates:regex",
+    "//third_party/rust_crates:serde_json5($current_toolchain)",
+  ]
+  exclude_toolchain_tags = [ "heapdump" ]
+}
+```
 
 ### Starlark vs GN
 
@@ -378,6 +682,9 @@ target. It is useful when a GN target needs an extra attribute or statement that
 has no counterpart in the Bazel target. This annotation must be placed right
 above the target definition it is annotating to take effect. Multiple
 `@bazel2gn:raw_attribute:` annotations may be stacked right above a target.
+Prefer a Bazel attribute when the rule has one: for example, set
+`gn_output_name` on `fx_cc_binary()` and `fx_cc_test_binary()` instead of using this
+annotation.
 
 **Example:**
 
@@ -458,6 +765,8 @@ The currently supported transformers are:
 *   `deps`: converts Bazel dependencies to GN dependencies.
 *   `configs`: converts Bazel `copts` to GN `configs`.
 *   `file_paths`: converts Bazel file paths to GN file paths.
+*   `expectations`: converts `.json5` labels to GN file paths and other labels
+    to GN dependencies.
 
 ### Third-party dependency translation
 

@@ -4,7 +4,6 @@
 
 #include "src/media/codec/examples/encode_camera/encoder_client.h"
 
-#include <fidl/fuchsia.sysmem/cpp/hlcpp_conversion.h>
 #include <fidl/fuchsia.sysmem2/cpp/hlcpp_conversion.h>
 #include <lib/async/cpp/task.h>
 #include <lib/sysmem-version/sysmem-version.h>
@@ -73,30 +72,15 @@ EncoderClient::~EncoderClient() {}
 
 zx_status_t EncoderClient::Start(fuchsia::sysmem2::BufferCollectionTokenHandle token,
                                  fuchsia::images2::ImageFormat image_format, uint32_t framerate) {
-  if (image_format.pixel_format() != fuchsia::images2::PixelFormat::NV12) {
+  if (!image_format.has_pixel_format() ||
+      image_format.pixel_format() != fuchsia::images2::PixelFormat::NV12) {
     std::cout << "Unsupported pixel format" << std::endl;
     return ZX_ERR_INVALID_ARGS;
   }
 
   std::cout << "Starting encoder at frame rate " << framerate << std::endl;
 
-  auto v2_natural_image_format = fidl::HLCPPToNatural(fidl::Clone(image_format));
-  auto v1_natural_image_format_result = sysmem::V1CopyFromV2ImageFormat(v2_natural_image_format);
-  if (v1_natural_image_format_result.is_error()) {
-    std::cout << "sysmem::V1CopyFromV2ImageFormat failed" << std::endl;
-    return ZX_ERR_INVALID_ARGS;
-  }
-  auto v1_image_format = fidl::NaturalToHLCPP(std::move(v1_natural_image_format_result.value()));
-
-  fuchsia::media::VideoUncompressedFormat uncompressed;
-  uncompressed.image_format = std::move(v1_image_format);
-
-  fuchsia::media::VideoFormat video_format;
-  video_format.set_uncompressed(uncompressed);
-
-  fuchsia::media::DomainFormat domain;
   fuchsia::media::EncoderSettings encoder_settings;
-  domain.set_video(std::move(video_format));
 
   if (mime_type_ == kH264MimeType) {
     fuchsia::media::H264EncoderSettings h264_settings;
@@ -119,7 +103,7 @@ zx_status_t EncoderClient::Start(fuchsia::sysmem2::BufferCollectionTokenHandle t
   input_details.set_format_details_version_ordinal(0)
       .set_mime_type(mime_type_)
       .set_encoder_settings(std::move(encoder_settings))
-      .set_domain(std::move(domain));
+      .set_image_format(std::move(image_format));
 
   fuchsia::mediacodec::CreateEncoder_Params encoder_params;
   encoder_params.set_input_details(std::move(input_details));
@@ -277,8 +261,7 @@ void EncoderClient::ConfigurePortBufferCollection(
   settings.set_buffer_lifetime_ordinal(new_buffer_lifetime_ordinal);
   settings.set_buffer_constraints_version_ordinal(buffer_constraints_version_ordinal);
 
-  settings.set_sysmem_token(
-      fidl::InterfaceHandle<fuchsia::sysmem::BufferCollectionToken>(token.TakeChannel()));
+  settings.set_sysmem2_token(std::move(token));
 
   fuchsia::sysmem2::BufferCollectionConstraints constraints;
 

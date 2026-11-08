@@ -7,9 +7,12 @@
 
 #include <fuchsia/media/cpp/fidl.h>
 
+#include <array>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
+#include <vector>
 
 #include "src/media/audio/audio_core/testing/integration/hermetic_pipeline_test.h"
 
@@ -26,6 +29,10 @@ class HermeticFidelityTest : public HermeticPipelineTest {
   // and sinad_lower_limits_db, and corresponding actual results arrays gathered during the tests.
   // The actual frequencies (within a buffer of kFreqTestBufSize) are found in kRefFreqsInternal.
   static const std::array<int32_t, kNumReferenceFreqs> kReferenceFrequencies;
+  static constexpr int64_t kNumSummaryFreqs = 7;
+  // A representative 7-frequency subset across the spectrum (subsonic/out-of-band, bass,
+  // low-midrange, 1 kHz reference, upper-mid/crossover, high/treble, and ultrasonic/out-of-band).
+  static const std::array<int32_t, kNumSummaryFreqs> kSummaryFrequencies;
 
   // Test renderers that use various reference clocks.  These options include:
   enum class ClockMode : uint8_t {
@@ -76,8 +83,9 @@ class HermeticFidelityTest : public HermeticPipelineTest {
     std::optional<float> gain_db;
 
     PipelineConstants pipeline;
-    // Only test this one frequency, not the full-spectrum set.
-    std::optional<int32_t> single_frequency_to_test;
+    // Frequencies to test. If unspecified or empty, all reference frequencies are tested.
+    // Non-owning view; the underlying storage must outlive `Run()`.
+    std::span<const int32_t> frequencies_to_test = {};
     // Regardless of the input frequencies used, expect no output frequencies below this value.
     int32_t low_cut_frequency = 0;
     // Regardless of the input frequencies used, expect no output frequencies above this value.

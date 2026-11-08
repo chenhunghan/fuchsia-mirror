@@ -41,7 +41,10 @@ import("//build/tools/bazel2gn/bazel_migration.gni")
 if (is_host) {
   rustc_library("lib") {
     sources = [ "src/lib.rs" ]
-    inputs = [ "//tools/devshell/lib/agents.txt" ]
+    inputs = [
+      "//tools/devshell/lib/agent_session_ids.txt",
+      "//tools/devshell/lib/agents.txt",
+    ]
     crate_name = "agents"
     edition = "2024"
     version = "0.1.0"

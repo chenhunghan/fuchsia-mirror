@@ -700,6 +700,9 @@ where
                     .capability(Capability::configuration(
                         "fuchsia.pkgcache.BlobDownloadResumptionAttemptsLimit",
                     ))
+                    .capability(Capability::configuration(
+                        "fuchsia.pkgcache.PostCommitGcEarliestBootSeconds",
+                    ))
                     .capability(Capability::configuration("fuchsia.pkgcache.UseDriverBlobPaging"))
                     .capability(Capability::configuration("fuchsia.fshost.StartupProfilingSeconds"))
                     .from(Ref::void())

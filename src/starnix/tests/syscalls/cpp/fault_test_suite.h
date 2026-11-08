@@ -52,7 +52,7 @@ TEST_P(FaultFileTest, ReadV) {
       },
       {
           .iov_base = faulting_ptr_,
-          .iov_len = sizeof(kFaultingSize_),
+          .iov_len = kFaultingSize_,
       },
       {
           .iov_base = base2,
@@ -86,7 +86,7 @@ TEST_P(FaultFileTest, WriteV) {
       },
       {
           .iov_base = faulting_ptr_,
-          .iov_len = sizeof(kFaultingSize_),
+          .iov_len = kFaultingSize_,
       },
       {
           .iov_base = reinterpret_cast<char*>(write_buf) + kBase0Size,

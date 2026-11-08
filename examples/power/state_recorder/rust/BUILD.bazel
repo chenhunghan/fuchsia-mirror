@@ -1,0 +1,71 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Package built in GN via bazel_fuchsia_package.
+# @bazel2gn:skip
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    binary_name = "state_recorder_rust_example",
+    edition = "2024",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:strum_macros"],
+    tags = ["manual"],
+    deps = [
+        "//sdk/lib/power/state_recorder/rust",
+        "//src/lib/diagnostics/inspect/runtime/rust",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/trace/rust:trace-provider",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:strum",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "state_recorder_rust_example",
+)
+
+# Package built in GN via bazel_fuchsia_package.
+# @bazel2gn:skip
+fx_component_manifest(
+    name = "manifest",
+    component_name = "state_recorder_rust_example",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//sdk/lib/trace:client.shard",
+    ],
+    manifest = "meta/state_recorder_rust_example.cml",
+)
+
+# Package built in GN via bazel_fuchsia_package.
+# @bazel2gn:skip
+fx_component(
+    name = "component",
+    compiled_manifest = ":manifest",
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "package",
+    package_name = "state_recorder_rust_example",
+    components = [":component"],
+)

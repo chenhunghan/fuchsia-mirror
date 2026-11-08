@@ -14,14 +14,14 @@ use crate::arch_rs::{InterruptDisableGuard, curr_cpu_num};
 use crate::kernel::percpu::PerCpu;
 use crate::kernel::thread::{self, Thread, ThreadStallState};
 use crate::kernel::types::{INVALID_CPU, cpu_num_t};
+use crate::ksync_kernel::{NoIrqSavePolicy, TrackedCriticalMutex, TrackedSpinlock};
 use crate::platform_rs::timer::{DurationMono, InstantMono, current_mono_time};
 use core::convert::Infallible;
 use core::ffi::c_void;
-use core::mem::MaybeUninit;
 use core::pin::Pin;
 use core::ptr::NonNull;
 use fbl::{DoublyLinkedList, DoublyLinkedListContainable, DoublyLinkedListNode, UniquePtr};
-use pin_init::{InPlaceWrite as _, PinInit, pin_data, pin_init};
+use pin_init::{PinInit, pin_data, pin_init};
 use zx_status::Status;
 
 /// The interval at which the sampling thread aggregates the per-CPU accumulators, i.e. the
@@ -58,7 +58,7 @@ pub struct AccumulatorStats {
 #[repr(C)]
 pub struct StallAccumulator {
     #[mutex]
-    lock: ksync::KMutex<ksync::RawSpinlock>,
+    lock: ksync::KMutex<TrackedSpinlock>,
 
     /// Number of progressing threads currently tracked by this structure.
     #[guarded_by(lock)]
@@ -123,7 +123,7 @@ impl StallAccumulator {
         debug_assert!((-1..=1).contains(&op_contributors_progressing));
         debug_assert!((-1..=1).contains(&op_contributors_stalling));
 
-        ksync::lock!(let mut guard = self.lock_lock_policy::<ksync::NoIrqSavePolicy>());
+        ksync::lock!(let mut guard = self.lock_lock_policy::<NoIrqSavePolicy>());
         let fields = guard.as_mut().fields_mut();
         consolidate(
             *fields.num_contributors_progressing,
@@ -180,16 +180,20 @@ struct ContextSwitchStallStates {
 
 /// Works out how a context switch moves the two threads' stall contributions.
 ///
-/// `next_thread_last_cpu` is the incoming thread's `SchedulerState::last_cpu()`, and
-/// `current_cpu` is the CPU the switch is happening on. This is the part of
-/// [`apply_context_switch`] that does not touch the threads themselves, so that it can be tested
-/// without any.
+/// `next_thread_last_cpu` is the incoming thread's `SchedulerState::last_cpu()`. The switch is
+/// happening on the calling CPU, which is compared against `next_thread_last_cpu` to detect
+/// cross-CPU migration. This is the part of [`apply_context_switch`] that does not touch the
+/// threads themselves, so that it can be tested without any.
+///
+/// # Safety
+///
+/// If `next_thread_state == ThreadStallState::Stalling`, `next_thread_last_cpu` must be a valid
+/// CPU number (`(next_thread_last_cpu as usize) < PerCpu::processor_count()`).
 #[inline]
-fn apply_context_switch_states(
+unsafe fn apply_context_switch_states(
     current_thread_state: ThreadStallState,
     next_thread_state: ThreadStallState,
     next_thread_last_cpu: cpu_num_t,
-    current_cpu: cpu_num_t,
 ) -> ContextSwitchStallStates {
     let mut local_op_progressing = 0;
     let mut local_op_stalling = 0;
@@ -206,17 +210,24 @@ fn apply_context_switch_states(
     }
 
     // If the next thread has been migrated while stalling, move its stall to the current CPU.
-    if next_thread_state == ThreadStallState::Stalling && next_thread_last_cpu != current_cpu {
-        // Unmark the thread as stalling on its last CPU.
-        debug_assert!(
-            next_thread_last_cpu != INVALID_CPU,
-            "Stalling threads must have run at least once"
-        );
-        let last_accumulator = &PerCpu::get(next_thread_last_cpu).memory_stall_accumulator;
-        last_accumulator.update_with_irq_disabled(0, -1);
+    if next_thread_state == ThreadStallState::Stalling {
+        core::hint::cold_path();
+        if next_thread_last_cpu != curr_cpu_num() {
+            // Unmark the thread as stalling on its last CPU.
+            debug_assert!(
+                next_thread_last_cpu != INVALID_CPU,
+                "Stalling threads must have run at least once"
+            );
+            // SAFETY: By the caller's precondition (see the safety invariant on
+            // `ThreadStallState`, with `last_cpu` read under the thread lock),
+            // `(next_thread_last_cpu as usize) < PerCpu::processor_count()`.
+            let last_accumulator =
+                &unsafe { PerCpu::get(next_thread_last_cpu) }.memory_stall_accumulator;
+            last_accumulator.update_with_irq_disabled(0, -1);
 
-        // We now have new a stalling thread tied to the current_cpu.
-        local_op_stalling += 1;
+            // We now have new a stalling thread tied to the current_cpu.
+            local_op_stalling += 1;
+        }
     }
 
     // If the next thread is not stalling, add it to the local counter.
@@ -227,7 +238,7 @@ fn apply_context_switch_states(
 
     // Propagate changes (we can skip this to be faster if there are no changes).
     if local_op_progressing != 0 || local_op_stalling != 0 {
-        let local_accumulator = &PerCpu::get(current_cpu).memory_stall_accumulator;
+        let local_accumulator = &PerCpu::get_current().memory_stall_accumulator;
         local_accumulator.update_with_irq_disabled(local_op_progressing, local_op_stalling);
     }
 
@@ -246,16 +257,17 @@ fn apply_context_switch_states(
 /// - Interrupts (and thus preemption) must be disabled on the calling CPU, with exclusive access
 ///   to both threads' `memory_stall_state_`.
 /// - `next_thread` must be the thread being switched to on the calling CPU.
+/// - If `next_thread` is in [`ThreadStallState::Stalling`], its `SchedulerState::last_cpu()` must
+///   be a valid CPU number (`< PerCpu::processor_count()`; see the safety invariant on
+///   [`ThreadStallState`]).
 #[inline]
 pub unsafe fn apply_context_switch(current_thread: *mut Thread, next_thread: *mut Thread) {
-    let current_cpu = curr_cpu_num();
-
     // SAFETY: The caller guarantees `current_thread` and `next_thread` are valid, live `Thread`s,
     // holds both of their locks, and has interrupts/preemption disabled with no concurrent writes
     // to `memory_stall_state_`.
     let (current_thread_state, next_thread_state, next_thread_last_cpu) = unsafe {
         let next_state = thread::scheduler_state(next_thread);
-        debug_assert_eq!(next_state.curr_cpu(), current_cpu);
+        debug_assert_eq!(next_state.curr_cpu(), curr_cpu_num());
         (
             thread::memory_stall_state(current_thread),
             thread::memory_stall_state(next_thread),
@@ -263,16 +275,18 @@ pub unsafe fn apply_context_switch(current_thread: *mut Thread, next_thread: *mu
         )
     };
 
-    let updated = apply_context_switch_states(
-        current_thread_state,
-        next_thread_state,
-        next_thread_last_cpu,
-        current_cpu,
-    );
+    // SAFETY: A thread only enters `Stalling` while running on its CPU and `last_cpu` is never
+    // reset (see the safety invariant on `ThreadStallState`), so `next_thread_last_cpu` (read
+    // above under `next_thread`'s lock) is `< PerCpu::processor_count()` when
+    // `next_thread_state == ThreadStallState::Stalling`.
+    let updated = unsafe {
+        apply_context_switch_states(current_thread_state, next_thread_state, next_thread_last_cpu)
+    };
 
     // SAFETY: The caller guarantees `current_thread` and `next_thread` are valid, live, distinct
     // `Thread`s and has interrupts/preemption disabled with exclusive access to both threads'
-    // `memory_stall_state_`.
+    // `memory_stall_state_`. `apply_context_switch_states` only ever changes a state to
+    // `Inactive` or `Progressing`, so neither call sets `Stalling`.
     unsafe {
         if updated.current_thread != current_thread_state {
             thread::set_memory_stall_state(current_thread, updated.current_thread);
@@ -295,22 +309,6 @@ pub unsafe extern "C" fn rust_stall_apply_context_switch(
 ) {
     // SAFETY: The caller guarantees all safety preconditions of `apply_context_switch`.
     unsafe { apply_context_switch(current_thread, next_thread) };
-}
-
-/// Initializes the `StallAccumulator` held by a `struct percpu`.
-///
-/// # Safety
-///
-/// `accumulator` must point to writable storage that is correctly sized and aligned for a
-/// `StallAccumulator`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_stall_accumulator_init(
-    accumulator: *mut MaybeUninit<StallAccumulator>,
-) {
-    // SAFETY: accumulator is a correctly sized and aligned ptr.
-    unsafe {
-        let Ok(_) = accumulator.as_mut_unchecked().write_pin_init(StallAccumulator::init());
-    }
 }
 
 /// Alters the accumulator's contributor counts by the given amount.
@@ -455,12 +453,12 @@ struct Observers {
 #[pin_data]
 pub struct StallAggregator {
     #[mutex]
-    stats_lock: ksync::KMutex<ksync::RawCriticalMutex>,
+    stats_lock: ksync::KMutex<TrackedCriticalMutex>,
     #[guarded_by(stats_lock)]
     stats: AggregatorStats,
 
     #[mutex]
-    observers_lock: ksync::KMutex<ksync::RawCriticalMutex>,
+    observers_lock: ksync::KMutex<TrackedCriticalMutex>,
     #[guarded_by(observers_lock)]
     #[pin]
     observers: Observers,
@@ -1063,41 +1061,50 @@ mod stall_tests {
     /// Verifies the stall states a context switch assigns to the outgoing and incoming threads.
     #[test]
     fn context_switch_states() {
-        // Every case below leaves the current CPU's accumulator exactly as it was found, so this
-        // does not perturb the system's real stall accounting. Interrupts stay disabled for the
-        // same reason the scheduler has them disabled: this takes the per-CPU
-        // accumulator's spinlock with the no-IRQ-save policy.
+        // Every case below has zero net delta and leaves per-CPU accumulators untouched.
+        // Interrupts stay disabled so preemption cannot migrate this thread off `cpu` (which
+        // would make `curr_cpu_num() != cpu` and trigger the cross-CPU `Stalling` transfer on
+        // live accumulators) and because the accumulator spinlock uses the no-IRQ-save policy.
         let _irqd = InterruptDisableGuard::new();
         let cpu = curr_cpu_num();
 
         // Two kernel-only threads contribute nothing, so nothing changes.
-        let updated = apply_context_switch_states(
-            ThreadStallState::IgnoredKernelOnly,
-            ThreadStallState::IgnoredKernelOnly,
-            cpu,
-            cpu,
-        );
+        // SAFETY: `cpu` is `curr_cpu_num()` (held stable by `_irqd`), which is
+        // `< PerCpu::processor_count()`.
+        let updated = unsafe {
+            apply_context_switch_states(
+                ThreadStallState::IgnoredKernelOnly,
+                ThreadStallState::IgnoredKernelOnly,
+                cpu,
+            )
+        };
         expect_eq!(ThreadStallState::IgnoredKernelOnly as i32, updated.current_thread as i32);
         expect_eq!(ThreadStallState::IgnoredKernelOnly as i32, updated.next_thread as i32);
 
         // A progressing thread stops contributing and an inactive one starts, which cancels out
         // to no net change in the accumulator.
-        let updated = apply_context_switch_states(
-            ThreadStallState::Progressing,
-            ThreadStallState::Inactive,
-            cpu,
-            cpu,
-        );
+        // SAFETY: `cpu` is `curr_cpu_num()` (held stable by `_irqd`), which is
+        // `< PerCpu::processor_count()`.
+        let updated = unsafe {
+            apply_context_switch_states(
+                ThreadStallState::Progressing,
+                ThreadStallState::Inactive,
+                cpu,
+            )
+        };
         expect_eq!(ThreadStallState::Inactive as i32, updated.current_thread as i32);
         expect_eq!(ThreadStallState::Progressing as i32, updated.next_thread as i32);
 
         // A stalling thread that last ran on this CPU keeps both its state and its contribution.
-        let updated = apply_context_switch_states(
-            ThreadStallState::IgnoredKernelOnly,
-            ThreadStallState::Stalling,
-            cpu,
-            cpu,
-        );
+        // SAFETY: `cpu` is `curr_cpu_num()` (held stable by `_irqd`), which is
+        // `< PerCpu::processor_count()`.
+        let updated = unsafe {
+            apply_context_switch_states(
+                ThreadStallState::IgnoredKernelOnly,
+                ThreadStallState::Stalling,
+                cpu,
+            )
+        };
         expect_eq!(ThreadStallState::IgnoredKernelOnly as i32, updated.current_thread as i32);
         expect_eq!(ThreadStallState::Stalling as i32, updated.next_thread as i32);
     }

@@ -1,0 +1,236 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+load("//build/bazel/rules/host_tests:host_test.bzl", "host_test")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "test_sources",
+    testonly = True,
+    srcs = [
+        "array_util.h",
+        "extra_messages.h",
+        "fidl_align_tests.cc",
+        "fidl_coded_types.cc",
+        "fidl_coded_types.h",
+        "fidl_structs.h",
+        "formatting_tests.cc",
+        "validating_tests.cc",
+    ],
+    # zxtest propagates //build/config:Wno-vla-cxx-extension via public_configs in GN.
+    # @bazel2gn:skip
+    copts = ["-Wno-vla-cxx-extension"],
+    # In GN, test_sources was not gated by if (is_fuchsia), as GN only
+    # instantiates it when depended on by Fuchsia-only walker_tests_bin.
+    # @bazel2gn:skip
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":fidl.test.coding.fuchsia_cpp",
+        ":fidl.test.coding.fuchsia_hlcpp",
+        ":fidl.test.coding_cpp",
+        ":fidl.test.coding_hlcpp",
+        "//sdk/lib/async",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/fidl",
+        "//sdk/lib/fit",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/sync",
+        "//zircon/system/ulib/zx",
+        "//zircon/system/ulib/zxtest",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_binary(
+    name = "walker_tests_bin",
+    testonly = True,
+    disable_build_flags = ["//build/config/fuchsia:fdio_config"],
+    gn_output_name = "walker-tests",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":test_sources",
+        "//sdk/lib/fdio",
+    ],
+)
+
+fx_unittest_package(
+    name = "fidl-walker-tests",
+    unit_tests = [":walker_tests_bin"],
+    visibility = [
+        "//src/lib:__pkg__",
+        "//src/lib/fidl/c:__pkg__",
+    ],
+)
+
+# this must match the requested binary in run_with_handle_policy_tests.cc
+fx_cc_binary(
+    name = "tests_to_run_under_handle_policy",
+    testonly = True,
+    srcs = [
+        "array_util.h",
+        "fidl_coded_types.cc",
+        "fidl_coded_types.h",
+        "fidl_structs.h",
+    ],
+    gn_output_name = "fidl-handle-policy-test-app",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/lib/fidl",
+        "//sdk/lib/fit",
+        "//zircon/system/ulib/zx",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "tests_to_run_under_handle_policy_packaged_bin",
+    testonly = True,
+    binary = ":tests_to_run_under_handle_policy",
+    binary_name = "fidl-handle-policy-test-app",
+    tags = ["manual"],
+)
+
+fx_cc_binary(
+    name = "test_launcher_bin",
+    testonly = True,
+    srcs = ["run_with_handle_policy_tests.cc"],
+    gn_output_name = "run_with_handle_policy_tests",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":fidl.test.coding.fuchsia_cpp",
+        ":fidl.test.coding_cpp",
+        "//sdk/lib/fdio",
+        "//src/lib/fxl/test:gtest_main",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/zx",
+    ],
+)
+
+fx_packaged_binary(
+    name = "test_launcher_packaged_bin",
+    testonly = True,
+    binary = ":test_launcher_bin",
+    binary_name = "run_with_handle_policy_tests",
+    tags = ["manual"],
+)
+
+fx_component_manifest(
+    name = "fidl-handle-closing-tests-manifest",
+    testonly = True,
+    component_name = "fidl-handle-closing-tests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "run_with_handle_policy_tests.cml",
+)
+
+fx_test_component(
+    name = "fidl-handle-closing-tests-component",
+    compiled_manifest = ":fidl-handle-closing-tests-manifest",
+    deps = [
+        ":test_launcher_packaged_bin",
+        ":tests_to_run_under_handle_policy_packaged_bin",
+    ],
+)
+
+fx_package(
+    name = "fidl-handle-closing-tests",
+    package_name = "fidl-handle-closing-tests",
+    testonly = True,
+    test_components = [":fidl-handle-closing-tests-component"],
+    visibility = ["//src/lib/fidl/c:__pkg__"],
+)
+
+fx_test(
+    name = "fidl-handle-closing-tests_test",
+    package = ":fidl-handle-closing-tests",
+    visibility = ["//src/lib:__pkg__"],
+)
+
+fx_cc_library(
+    name = "host_test_sources",
+    testonly = True,
+    srcs = [
+        "array_util.h",
+        "extra_messages.h",
+        "fidl_align_tests.cc",
+        "fidl_coded_types.cc",
+        "fidl_coded_types.h",
+        "fidl_structs.h",
+        "validating_tests.cc",
+    ],
+    # zxtest propagates //build/config:Wno-vla-cxx-extension via public_configs in GN.
+    # @bazel2gn:skip
+    copts = ["-Wno-vla-cxx-extension"],
+    deps = [
+        ":fidl.test.coding_cpp",
+        ":fidl.test.coding_hlcpp",
+        "//sdk/lib/fidl_base",
+        "//zircon/system/ulib/zxtest",
+    ],
+    alwayslink = True,
+)
+
+# Some of the tests can run on host.
+fx_cc_test_binary(
+    name = "fidl-walker-host-tests",
+    # In GN, this target used if (!is_fuchsia) and is instantiated via ($host_toolchain).
+    # @bazel2gn:skip
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/lib/fidl/c:__pkg__"],
+    deps = [":host_test_sources"],
+)
+
+host_test(
+    name = "fidl-walker-host-tests_host_test",
+    binary = ":fidl-walker-host-tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    test_label = "//src/lib/fidl/c/walker_tests:fidl-walker-host-tests",
+    visibility = ["//src/lib:__pkg__"],
+)
+
+fidl_library(
+    name = "fidl.test.coding",
+    testonly = True,
+    srcs = ["extra_messages.test.fidl"],
+    enable_hlcpp = True,
+    visibility = ["//visibility:private"],
+)
+
+fidl_library(
+    name = "fidl.test.coding.fuchsia",
+    testonly = True,
+    srcs = [
+        "extra_messages_fuchsia.test.fidl",
+        "messages.test.fidl",
+    ],
+    enable_hlcpp = True,
+    # fdomain Rust bindings fail to compile on untyped zx.Handle vectors.
+    # @bazel2gn:skip
+    enable_rust = False,
+    visibility = ["//visibility:private"],
+    deps = ["//zircon/vdso/zx"],
+)

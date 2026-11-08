@@ -31,22 +31,43 @@ motivation, and comment annotations.
     assignment operators (`bazelAttrToGNAssignmentOps`), platform constraints,
     `coptToConfig`, third-party repo mappings, and `@bazel2gn:*` annotation
     prefixes.
--   [`compiled_action.go`](./compiled_action.go): Converts `compiled_action`
-    `outs` (placed under `$target_gen_dir` unless overwritten) and `args`
-    (`$(location <label>)`, `$(execpath <label>)`, and `$(RULEDIR)`).
--   [`fx_component.go`](./fx_component.go): Validates `fx_component_manifest`
-    and `fx_component`, skips `fx_component_manifest` targets consumed only by
-    `fx_test_component` or a skipped `fx_component` in the same file, hoists
-    remaining `fx_component_manifest` targets before earlier same-file
-    consumers, and resolves `fx_packaged_binary` dependencies in `fx_component`
-    `deps` (either unwrapping to the underlying binary target or emitting a GN
-    `renamed_binary`).
+-   [`cmc_merge.go`](./cmc_merge.go): Validates `cmc_merge` and populates its
+    default `<name>.cml` `output_name`, and rewrites same-file `:cmc_merge`
+    references in `fx_component_manifest`,
+    `fx_component_manifest_with_expectations`, `fx_compiled_manifest`, and
+    chained `cmc_merge` targets into `"$target_out_dir/<output_name>"` with GN
+    `deps`.
+-   [`compiled_action.go`](./compiled_action.go): Validates and converts
+    `compiled_action` `outs` and `depfile` (placed under `$target_gen_dir`
+    unless overwritten), `args` (`$(location <label>)`, `$(execpath <label>)`,
+    and `$(RULEDIR)`), `tool`, `tool_output_name`, `deps`, and `mnemonic`.
+-   [`fx_component.go`](./fx_component.go): Validates component manifest and
+    component rules (`fx_component_manifest`,
+    `fx_component_manifest_with_expectations`, `fx_component`, and converted
+    test components), skips manifests consumed only by Bazel-only test
+    components or skipped components in the same file, hoists remaining
+    manifests before earlier same-file consumers, and resolves
+    `fx_packaged_binary` dependencies in component `deps` (either unwrapping to
+    the underlying binary target or emitting a GN `renamed_binary`).
+-   [`fx_test_package.go`](./fx_test_package.go): Marks `fx_package` targets
+    with `test_components` (and the `fx_test_component`,
+    `fx_test_component_with_expectations`, and `fx_unittest_component` targets
+    they list in the same file) for conversion into `fuchsia_test_package`
+    (with a `-gn` suffix on `package_name`) and their GN test component
+    templates, folding the same-file `fx_test` attributes into `test_specs` and
+    `test_type`.
 -   [`fx_unittest_package.go`](./fx_unittest_package.go): Converts
     `fx_unittest_package` into `fuchsia_unittest_package` (or
     `fuchsia_unittest_component` + `fuchsia_test_package` for multiple test
     binaries) with a `-gn` suffix on `package_name`.
 -   [`genrule.go`](./genrule.go): Converts `genrule` `cmd` strings starting with
     `$(location //path/to:tool)` into GN `script` and `args`.
+-   [`linux_resource.go`](./linux_resource.go): Converts Starnix
+    `linux_resource` targets into GN `linux_resource` targets (from
+    `//src/starnix/build/linux_resource.gni`), propagates non-default same-file
+    binary output names (`bin_output_name` / `arch32_bin_output_name`), and
+    auto-wraps same-file Linux binaries consumed exclusively by
+    `linux_resource` in `if (is_linux && !is_host)`.
 -   [`rust_check_cfg.go`](./rust_check_cfg.go): Converts
     `rustc_check_cfg_build_flags` macro calls into GN `config` targets with
     `--check-cfg=cfg(...)` in `rustflags`.
@@ -61,11 +82,17 @@ motivation, and comment annotations.
     (`CondExpr`), and `+` list concatenations into GN `if / else if / else`
     statements.
 -   [`tags.go`](./tags.go): Extracts `assert_no_deps=<label>` from Bazel `tags`
-    into GN `assert_no_deps`.
+    into GN `assert_no_deps` (preserving comments for overwrites), and
+    `exclude_toolchain_tags=<tag>` on Rust rules into GN
+    `exclude_toolchain_tags`.
 -   [`transformers.go`](./transformers.go): Attribute value transformers
     (`bazelVisibilityToGN`, `bazelCOptToGNConfig`, `bazelDepToGN`,
-    `bazelFilePathsToGN`, `bazelLdflagsToGN`, `bazelExprToGNList`) and inline
-    comment overwrite readers.
+    `bazelExpectationsToGN`, `bazelFilePathsToGN`, `bazelLdflagsToGN`,
+    `bazelExprToGNList`) and inline comment overwrite readers.
+-   [`sentinel.go`](./sentinel.go): Exported `SentinelComment`,
+    `DiscoverSentinelDirectories`, and `SkipDiscovery`, shared with
+    [`gn2gone`](../gn2gone/README.md), which finds sentinel directories that
+    no longer need syncing.
 -   [`bazel_migration.gni`](./bazel_migration.gni): Umbrella `.gni` file
     imported below the sentinel in all generated `BUILD.gn` files.
 -   [`third_party_target_map.json`](./third_party_target_map.json): Embedded
@@ -83,9 +110,11 @@ When adding support for a Bazel rule or attribute, check all five touchpoints:
 
 1.  **Rule registration ([`constants.go`](./constants.go))**:
     -   Add the Bazel rule to `bazelRuleToGNTemplate`.
-    -   Map Bazel-only rules (such as `fx_package`, `fx_test_component`,
-        `fx_test`, or `host_cc_test`) to `noGNEquivalent` so `bazel2gn` skips
-        them cleanly.
+    -   Map Bazel-only rules (such as `fx_packaged_binary`, `fx_test`, or
+        `host_cc_test`) to `noGNEquivalent` so `bazel2gn` skips them cleanly.
+        `fx_package`, `fx_test_component`, and `fx_unittest_component` are also
+        `noGNEquivalent`, but `resolveTestPackages` renames test packages and
+        their test components to internal `$`-prefixed rules that do convert.
     -   If the rule requires custom target emission (like
         `rustc_check_cfg_build_flags`), intercept it in `callExprToGN` in
         [`bazel2gn.go`](./bazel2gn.go).
@@ -131,17 +160,21 @@ When adding support for a Bazel rule or attribute, check all five touchpoints:
     `BUILD.gn` when `--check_only` is set.
 -   **`shac` output coupling (`LINT.IfChange`)**:
     [`//scripts/shac/bazel_migration.star`](../../../scripts/shac/bazel_migration.star)
-    runs `bazel2gn --check_only --json` and depends on two things in
-    `cmd/main.go`: `sentinelComment` (`LINT.IfChange(bazel2gn_output)`) and the
-    fields of the JSON `diagnostic` struct (`LINT.IfChange(bazel2gn_json)`).
+    runs `bazel2gn --check_only --json` and depends on two things:
+    `SentinelComment` in [`sentinel.go`](./sentinel.go)
+    (`LINT.IfChange(bazel2gn_output)`) and the fields of the JSON `diagnostic`
+    struct in `cmd/main.go` (`LINT.IfChange(bazel2gn_json)`).
     Keep both sides of each block synchronized, and keep stdout valid JSON in
     `--json` mode (log to stderr).
 -   **Avoid unnecessary `BUILD.gn` writes**: When `--check_only` is false and
     the formatted output matches the existing `BUILD.gn`, do not touch
     `BUILD.gn` on disk so `ninja` / `gn gen` timestamps remain clean.
--   **`cc_library` vs. `source_set`**: `cc_library` and `fx_cc_library` map to
-    `static_library` by default. They only convert to `source_set` when
-    `alwayslink = True` is set on the Bazel target.
+-   **`cc_library` vs. `source_set` and `cc_binary` vs. `loadable_module`**:
+    `cc_library` and `fx_cc_library` map to `static_library` by default, and
+    only convert to `source_set` when `alwayslink = True` is set. Similarly,
+    `cc_binary` and `fx_cc_binary` map to `executable` by default, and convert
+    to `loadable_module` when `linkshared = True` is set (stripping any trailing
+    `.so` from `name` into `output_name` so GN does not produce `<name>.so.so`).
 -   **Same-package visibility (`":*"`)**: Bazel grants implicit same-package
     visibility, whereas GN does not. `ensureSamePackageVisibility` injects
     `":*"` into restricted GN visibility lists unless `"*"`, `"//*"`, `":*"`, or
@@ -151,6 +184,11 @@ When adding support for a Bazel rule or attribute, check all five touchpoints:
     `reorderAspectHints` moves `aspect_hints` after other `deps`-mapped
     attributes and uses `+=` (emitting `deps = []` first if earlier `deps`
     assignments are conditional).
+-   **`exec_properties` is Bazel-only**: GN templates don't accept it, so
+    `execPropertiesToGN` maps `exec_properties = RBE_USE_LARGE_WORKER` on Rust
+    rules to `concurrent_jobs.rust_highmem` (via a `_concurrent_jobs`
+    variable, because GN rejects nested scope access like `a.b.c`) and fails on
+    anything else. Never emit `exec_properties` verbatim.
 -   **Top-level variable assignments**: `assignStmtToGN` emits `not_needed([
     "<var>" ])` immediately after each top-level assignment so GN does not fail
     with `"Assignment had no effect"` when variables are only referenced inside

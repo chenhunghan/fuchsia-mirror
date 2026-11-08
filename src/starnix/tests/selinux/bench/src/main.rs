@@ -6,8 +6,8 @@
 
 mod contention;
 
-use criterion::Criterion;
 use criterion::measurement::WallTime;
+use criterion::{BatchSize, Criterion};
 use fuchsia_criterion::FuchsiaCriterion;
 use security::PermissionFlags;
 use selinux::policy::AccessVector;
@@ -18,6 +18,11 @@ use selinux::{
 use starnix_core::security;
 use starnix_core::task::CurrentTask;
 use starnix_core::testing::{PanickingFile, spawn_kernel_with_selinux_and_run};
+use starnix_core::vfs::{NamespaceNode, OpenAccessCheck};
+use starnix_uapi::auth::Credentials;
+use starnix_uapi::device_id::DeviceId;
+use starnix_uapi::file_mode::FileMode;
+use starnix_uapi::open_flags::OpenFlags;
 use std::hint::black_box;
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -81,13 +86,18 @@ fn pin_thread_to_big_cores() {
 
 async fn spawn_test_kernel<F>(callback: F)
 where
-    F: AsyncFnOnce(&mut CurrentTask) + Send + Sync + 'static,
+    F: AsyncFnOnce(&mut CurrentTask, &Arc<SecurityServer>) + Send + Sync + 'static,
 {
     spawn_kernel_with_selinux_and_run(async |current_task, security_server| {
         pin_thread_to_big_cores();
-        security_server.load_policy(POLICY_BYTES.to_vec()).unwrap();
+        // Load the policy via the hook, rather than `SecurityServer::load_policy()`, so that the
+        // kernel's SELinux state is activated; otherwise hooks skip all SELinux checks.
+        security::selinuxfs_load_policy(current_task, POLICY_BYTES.to_vec()).unwrap();
+        // Enforce the policy, so that benchmarks fail on unexpected denials, rather than measure
+        // their audit logging.
+        security_server.set_enforcing(true);
         populate_sid_table(security_server);
-        callback(current_task).await
+        callback(current_task, security_server).await
     })
     .await;
 }
@@ -150,13 +160,14 @@ fn sid_to_security_context_bench(
 fn compute_access_decision_bench(
     group: &mut criterion::BenchmarkGroup<'_, WallTime>,
     name_suffix: &'static str,
+    class_name: &'static str,
     source_context: &'static [u8],
     target_context: &'static [u8],
 ) {
     let server = new_populated_security_server();
     let source_sid = server.security_context_to_sid(source_context.into()).unwrap();
     let target_sid = server.security_context_to_sid(target_context.into()).unwrap();
-    let class_id = server.class_id_by_name("file").unwrap();
+    let class_id = server.class_id_by_name(class_name).unwrap();
     assert_ne!(source_sid, target_sid, "source and target contexts must resolve to distinct SIDs");
     assert_ne!(
         server.compute_access_decision_raw(source_sid, target_sid, class_id).allow,
@@ -331,6 +342,59 @@ fn fs_node_permission_bench(
     });
 }
 
+/// Creates a regular file named `name` in the root `tmpfs` directory.
+///
+/// Unlike the private anonymous file used by [`create_file_bench`], the file is labeled by the
+/// policy, so hooks look up the access vector cache to check access to it.
+fn create_tmpfs_file(current_task: &CurrentTask, name: &str) -> NamespaceNode {
+    current_task
+        .fs()
+        .root()
+        .create_node(current_task, name.into(), FileMode::IFREG, DeviceId::NONE)
+        .expect("create_node(file)")
+}
+
+fn fs_node_permission_tmpfs_bench(
+    group: &mut criterion::BenchmarkGroup<'_, WallTime>,
+    current_task: &'static CurrentTask,
+) {
+    let node = create_tmpfs_file(current_task, "fs_node_permission_tmpfs");
+    let _ = group.bench_function("fs_node_permission_tmpfs", move |bench| {
+        bench.iter(|| {
+            let _ = black_box(
+                security::fs_node_permission(
+                    current_task,
+                    &node.entry.node,
+                    PermissionFlags::READ | PermissionFlags::WRITE,
+                    security::Auditable::None,
+                )
+                .unwrap(),
+            );
+        })
+    });
+}
+
+fn file_open_tmpfs_bench(
+    group: &mut criterion::BenchmarkGroup<'_, WallTime>,
+    current_task: &'static CurrentTask,
+) {
+    let node = create_tmpfs_file(current_task, "file_open_tmpfs");
+    let _ = group.bench_function("file_open_tmpfs", move |bench| {
+        // `file_open()` may only be called once per `FileObject`, so each iteration opens a new
+        // one, outside of the measured routine.
+        bench.iter_batched_ref(
+            || {
+                // Release the `FileObject`s dropped by earlier iterations, which would otherwise
+                // accumulate until the benchmarks complete.
+                current_task.trigger_delayed_releaser();
+                node.open(current_task, OpenAccessCheck::skip(OpenFlags::RDWR)).unwrap()
+            },
+            |file| black_box(security::file_open(current_task, file).unwrap()),
+            BatchSize::SmallInput,
+        )
+    });
+}
+
 fn check_file_ioctl_access_bench(
     group: &mut criterion::BenchmarkGroup<'_, WallTime>,
     current_task: &'static CurrentTask,
@@ -344,18 +408,26 @@ fn check_file_ioctl_access_bench(
 fn binder_transaction_bench(
     group: &mut criterion::BenchmarkGroup<'_, WallTime>,
     current_task: &'static CurrentTask,
+    security_server: &SecurityServer,
 ) {
+    // `aosp_sepolicy` does not allow `kernel` to make Binder calls to itself, but allows calls to
+    // `su`.
+    let target_sid = security_server.security_context_to_sid(b"u:r:su:s0".into()).unwrap();
     let _ = group.bench_function("binder_transaction", move |bench| {
-        let creds = current_task.current_creds();
+        let source_creds = current_task.current_creds();
+        let mut target_creds = Credentials::clone(&source_creds);
+        target_creds.security_state.current_sid = target_sid;
         bench.iter(|| {
-            let _ = black_box(security::binder_transaction(current_task, &creds, &creds).unwrap());
+            let _ = black_box(
+                security::binder_transaction(current_task, &source_creds, &target_creds).unwrap(),
+            );
         })
     });
 }
 
 fn main() {
     let mut executor = fuchsia_async::LocalExecutor::default();
-    executor.run_singlethreaded(spawn_test_kernel(async move |current_task| {
+    executor.run_singlethreaded(spawn_test_kernel(async move |current_task, security_server| {
         // SAFETY: The Criterion benchmarks run synchronously and block until completion
         // entirely within the scope of this closure. Therefore, `current_task` is guaranteed
         // to outlive the benchmark execution, making it safe to cast to a `'static` reference.
@@ -393,14 +465,26 @@ fn main() {
         compute_access_decision_bench(
             &mut group,
             "simple",
+            "file",
             b"u:r:untrusted_app:s0",
             b"u:object_r:app_data_file:s0",
         );
         compute_access_decision_bench(
             &mut group,
             "c0_c255",
+            "file",
             b"u:r:untrusted_app:s0:c0.c255",
             b"u:object_r:app_data_file:s0:c0.c255",
+        );
+        // `dir` has 4 constraints in `aosp_sepolicy` with [5, 5, 13, 7] = 30 total terms, and
+        // `(apexd, postinstall_apex_mnt_dir)` has a small attribute cross-product (3x2 = 6) so
+        // constraint evaluation is not diluted by access vector rule table lookups.
+        compute_access_decision_bench(
+            &mut group,
+            "constraints",
+            "dir",
+            b"u:r:apexd:s0",
+            b"u:object_r:postinstall_apex_mnt_dir:s0",
         );
         compute_create_sid_bench(
             &mut group,
@@ -462,8 +546,10 @@ fn main() {
         contention::register_benchmarks(&mut group);
         file_permission_bench(&mut group, current_task);
         fs_node_permission_bench(&mut group, current_task);
+        fs_node_permission_tmpfs_bench(&mut group, current_task);
+        file_open_tmpfs_bench(&mut group, current_task);
         check_file_ioctl_access_bench(&mut group, current_task);
-        binder_transaction_bench(&mut group, current_task);
+        binder_transaction_bench(&mut group, current_task, security_server);
         group.finish();
     }));
 }

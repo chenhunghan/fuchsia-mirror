@@ -34,6 +34,8 @@ class AcpiImpl : public Acpi {
 
   acpi::status<acpi::UniquePtr<ACPI_DEVICE_INFO>> GetObjectInfo(ACPI_HANDLE obj) override;
 
+  bool HasLegacyCmosRtc() override;
+
   acpi::status<ACPI_HANDLE> GetParent(ACPI_HANDLE child) override;
   acpi::status<ACPI_HANDLE> GetHandle(ACPI_HANDLE parent, const char* pathname) override;
   acpi::status<std::string> GetPath(ACPI_HANDLE object) override;

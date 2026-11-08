@@ -33,6 +33,7 @@ pub struct Bti {
     pub id: u32,
     pub name: Option<String>,
     pub iommu_id: u32,
+    pub bti_id_mask: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -134,7 +135,9 @@ pub fn bti_list(dict: &fdr::Dictionary) -> anyhow::Result<Vec<Bti>> {
         let iommu_id = get_uint32(dict, &format!("btis.{i}.iommu_id"))
             .with_context(|| format!("BTI with ID {id} at index {i} is missing \"iommu_id\""))?;
         let name = get_string(dict, &format!("btis.{i}.name"));
-        list.push(Bti { id, name, iommu_id });
+        let bti_id_mask = get_uint32(dict, &format!("btis.{i}.mask"))
+            .or_else(|| get_uint32(dict, &format!("btis.{i}.bti_id_mask")));
+        list.push(Bti { id, name, iommu_id, bti_id_mask });
     }
     Ok(list)
 }
@@ -211,7 +214,7 @@ pub fn is_device_disabled(dev: &Device, enabled_nodes: &[String]) -> bool {
 #[cfg(target_os = "fuchsia")]
 pub use board_structured_config::Config as StructuredConfig;
 
-#[cfg(target_os = "fuchsia")]
+pub mod dump;
 pub mod parser;
 
 #[cfg(test)]
@@ -260,6 +263,10 @@ mod tests {
                     value: fdr::DictionaryValue::Str("dma_bti".to_string()),
                 },
                 fdr::DictionaryEntry {
+                    key: "btis.0.mask".to_string(),
+                    value: fdr::DictionaryValue::Int64(0x1f),
+                },
+                fdr::DictionaryEntry {
                     key: "btis.1.id".to_string(),
                     value: fdr::DictionaryValue::Int64(2),
                 },
@@ -267,18 +274,36 @@ mod tests {
                     key: "btis.1.iommu_id".to_string(),
                     value: fdr::DictionaryValue::Int64(0),
                 },
+                fdr::DictionaryEntry {
+                    key: "btis.2.id".to_string(),
+                    value: fdr::DictionaryValue::Int64(3),
+                },
+                fdr::DictionaryEntry {
+                    key: "btis.2.iommu_id".to_string(),
+                    value: fdr::DictionaryValue::Int64(10),
+                },
+                fdr::DictionaryEntry {
+                    key: "btis.2.bti_id_mask".to_string(),
+                    value: fdr::DictionaryValue::Int64(0x7),
+                },
             ]),
             ..Default::default()
         };
 
         let btis = bti_list(&dict).unwrap();
-        assert_eq!(btis.len(), 2);
+        assert_eq!(btis.len(), 3);
         assert_eq!(btis[0].id, 1);
         assert_eq!(btis[0].name.as_deref(), Some("dma_bti"));
         assert_eq!(btis[0].iommu_id, 10);
+        assert_eq!(btis[0].bti_id_mask, Some(0x1f));
         assert_eq!(btis[1].id, 2);
         assert_eq!(btis[1].name, None);
         assert_eq!(btis[1].iommu_id, 0);
+        assert_eq!(btis[1].bti_id_mask, None);
+        assert_eq!(btis[2].id, 3);
+        assert_eq!(btis[2].name, None);
+        assert_eq!(btis[2].iommu_id, 10);
+        assert_eq!(btis[2].bti_id_mask, Some(0x7));
 
         let dict_missing_iommu = fdr::Dictionary {
             entries: Some(vec![fdr::DictionaryEntry {

@@ -54,7 +54,6 @@ fx_component(
     name = "component",
     testonly = True,
     compiled_manifest = ":component-manifest",
-    component_name = "dev_time_source",
     visibility = ["//src/sys/time/testing/realm-proxy:__pkg__"],
     deps = [":bin_packaged_bin"],
 )

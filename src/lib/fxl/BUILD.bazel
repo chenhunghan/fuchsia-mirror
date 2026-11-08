@@ -134,7 +134,10 @@ cc_library(
 
 cc_library(
     name = "fxl",
-    hdrs = ["observer_list.h"],
+    hdrs = [
+        "observer_list.h",
+        "synchronization/thread_annotations.h",
+    ],
     deps = [
         ":common",
         ":functional",

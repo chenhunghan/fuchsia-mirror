@@ -1020,6 +1020,14 @@ impl Cache {
         }
     }
 
+    /// Returns `owner`'s `max_interval` vote for battery samples.
+    pub(crate) fn battery_sample_interval_vote(&self, owner: &str) -> Option<zx::BootDuration> {
+        self.sampling
+            .battery_interval_votes
+            .vote(owner)
+            .map(|millis| zx::BootDuration::from_millis(i64::try_from(millis).unwrap_or(i64::MAX)))
+    }
+
     /// Records the governors' `max_interval` votes and sampler state under
     /// `parent/governor_telemetry`.
     pub(crate) fn record_inspect(&self, parent: &inspect::Node) {

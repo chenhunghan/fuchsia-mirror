@@ -11,19 +11,22 @@
 #include <fidl/fuchsia.hardware.pin/cpp/wire.h>
 #include <fidl/fuchsia.hardware.powerdomain/cpp/wire.h>
 #include <fidl/fuchsia.hardware.reset/cpp/wire.h>
-#include <lib/async/cpp/irq.h>
 #include <lib/driver/component/cpp/driver_base2.h>
 #include <lib/driver/component/cpp/driver_export2.h>
+#include <lib/driver/component/cpp/health_alert_latch.h>
 #include <lib/driver/metadata/cpp/metadata_server.h>
 #include <lib/driver/mmio/cpp/mmio-buffer.h>
 #include <lib/driver/platform-device/cpp/pdev.h>
 #include <lib/zx/event.h>
 #include <lib/zx/interrupt.h>
+#include <lib/zx/port.h>
 #include <lib/zx/result.h>
+#include <lib/zx/time.h>
 
 #include <memory>
 #include <mutex>
 #include <span>
+#include <string_view>
 #include <variant>
 #include <vector>
 
@@ -37,6 +40,30 @@ class DwI2c : public fdf::DriverBase2, public fdf::WireServer<fuchsia_hardware_i
   static constexpr std::string_view kChildNodeName = "dw-i2c";
   static constexpr uint32_t kDwCompTypeNum = 0x44570140;
 
+  // Health condition reason codes.
+  static constexpr std::string_view kReasonEnableTimeout = "I2C_ENABLE_TIMEOUT";
+  static constexpr std::string_view kReasonDisableTimeout = "I2C_DISABLE_TIMEOUT";
+  static constexpr std::string_view kReasonBusBusyTimeout = "I2C_BUS_BUSY_TIMEOUT";
+  static constexpr std::string_view kReasonTransactionTimeout = "I2C_TRANSACTION_TIMEOUT";
+  static constexpr std::string_view kReasonSclStuckLow = "I2C_SCL_STUCK_LOW";
+  static constexpr std::string_view kReasonUnclockedMmioRead = "I2C_UNCLOCKED_MMIO_READ";
+  static constexpr std::string_view kReasonResumeFailed = "I2C_RESUME_FAILED";
+
+  // Health diagnostic keys.
+  static constexpr std::string_view kDiagResourcesEnabled = "resources_enabled";
+  static constexpr std::string_view kDiagTimeoutCount = "timeout_count";
+  static constexpr std::string_view kDiagTxAbortCount = "tx_abort_count";
+  static constexpr std::string_view kDiagLastAbortSource = "last_abort_source";
+  static constexpr std::string_view kDiagResumeFailureCount = "resume_failure_count";
+  static constexpr std::string_view kDiagUnclockedReadCount = "unclocked_read_count";
+  static constexpr std::string_view kDiagCompType = "comp_type";
+  static constexpr std::string_view kDiagExpectedCompType = "expected_comp_type";
+  static constexpr std::string_view kDiagEnableStatus = "enable_status";
+  static constexpr std::string_view kDiagStatus = "status";
+  static constexpr std::string_view kDiagRawIntrStat = "raw_intr_stat";
+  static constexpr std::string_view kDiagTxAbrtSource = "tx_abrt_source";
+  static constexpr std::string_view kDiagReason = "reason";
+
   explicit DwI2c() : fdf::DriverBase2(kDriverName) {}
 
   ~DwI2c() override = default;
@@ -47,6 +74,11 @@ class DwI2c : public fdf::DriverBase2, public fdf::WireServer<fuchsia_hardware_i
   void SystemSuspend(fdf::SuspendCompleter completer) override;
   void SystemResume(std::optional<fuchsia_power_broker::LeaseToken> pe_lease,
                     fdf::ResumeCompleter completer) override;
+  // fdf::DriverBase2 health hook. kPing reports the latched fault set and lifetime counters
+  // without touching hardware; kFast additionally samples status registers when the controller is
+  // powered.
+  void HealthCheck(fuchsia_driver_framework::HealthCheckRequest request,
+                   HealthCheckCompleter completer) override;
 
   // fdf::WireServer<fuchsia_hardware_i2cimpl::Device> implementation.
   void GetMaxTransferSize(fdf::Arena& arena, GetMaxTransferSizeCompleter::Sync& completer) override;
@@ -58,7 +90,18 @@ class DwI2c : public fdf::DriverBase2, public fdf::WireServer<fuchsia_hardware_i
                              fidl::UnknownMethodCompleter::Sync& completer) override;
 
  protected:
+  static constexpr zx::duration kTransferTimeout = zx::sec(1);
+
+  zx::duration transfer_timeout() const { return transfer_timeout_; }
+  void set_transfer_timeout(zx::duration timeout) { transfer_timeout_ = timeout; }
+  fdf::HealthAlertLatch& health_latch() { return health_latch_; }
+
  private:
+  bool HasLatchedCondition(std::string_view reason_code) const;
+  std::vector<fuchsia_driver_framework::HealthDiagnosticItem> BuildCommonDiagnostics() const;
+  void RecordTimeout(std::string_view reason);
+  void RaiseSclStuckLow(uint32_t raw_intr_stat);
+
   struct ReadOp {
     std::span<uint8_t> data;
     bool stop;
@@ -123,6 +166,9 @@ class DwI2c : public fdf::DriverBase2, public fdf::WireServer<fuchsia_hardware_i
 
   // IC_SDA_HOLD = (IC_CLK * tSDA;Hold + 500000 / 1000000)
   static constexpr uint32_t kSdaHoldValue = ((kClkRateKHz * kSdaTHold) + 500000) / 1000000;
+  // 100ms in IC_CLK cycles (4x SMBus t_TIMEOUT,MIN = 25ms, well below the 1s kTransferTimeout).
+  static constexpr uint32_t kSclStuckLowTimeoutMs = 100;
+  static constexpr uint32_t kSclStuckLowTimeoutCycles = kClkRateKHz * kSclStuckLowTimeoutMs;
 
   // Local buffer for transfer and receive. Matches FIFO size.
   uint32_t kMaxTransfer = 0;
@@ -141,12 +187,23 @@ class DwI2c : public fdf::DriverBase2, public fdf::WireServer<fuchsia_hardware_i
   InterruptStatusReg ReadAndClearIrq();
   zx::result<> WaitBusBusy();
   void SetOpsHelper(std::vector<Op> ops);
+  zx::result<std::vector<fuchsia_hardware_i2cimpl::wire::ReadData>> PrepareOps(
+      TransactRequestView request, fdf::Arena& arena);
+  void DrainIrqPort(bool& irq_needs_ack);
+  zx::result<InterruptStatusReg> WaitForInterrupt(zx::time deadline, bool& irq_needs_ack);
+  // Runs the prepared ops on the bus. On success returns whether the controller disabled cleanly
+  // afterwards (false means EnableAndWait(false) timed out and I2C_DISABLE_TIMEOUT is latched).
+  zx::result<bool> ExecuteTransact();
 
   virtual zx::result<fdf::MmioBuffer> MapMmio(fdf::PDev& pdev);
 
+  static constexpr uint64_t kIrqPortKey = 1;
+
   std::optional<fdf::MmioBuffer> mmio_;
   zx::interrupt irq_;
-  zx::duration timeout_ = zx::msec(100);
+  // Bound to `irq_` so `Transact()` can wait for interrupts with a deadline.
+  zx::port irq_port_;
+  zx::duration transfer_timeout_ = kTransferTimeout;
   uint32_t tx_fifo_depth_ = 0;
   uint32_t rx_fifo_depth_ = 0;
 
@@ -166,6 +223,14 @@ class DwI2c : public fdf::DriverBase2, public fdf::WireServer<fuchsia_hardware_i
   fdf_metadata::MetadataServer<fuchsia_hardware_i2c_businfo::I2CBusMetadata> metadata_server_;
   bool send_restart_ = false;
   bool resources_enabled_ = false;
+
+  uint64_t timeout_count_ = 0;
+  uint64_t tx_abort_count_ = 0;
+  uint32_t last_abort_source_ = 0;
+  uint64_t resume_failure_count_ = 0;
+  uint64_t unclocked_read_count_ = 0;
+  fdf::HealthAlertLatch health_latch_{*this};
+
   fidl::WireSyncClient<fuchsia_hardware_clock::Clock> clock_bus_;
   fidl::WireSyncClient<fuchsia_hardware_clock::Clock> clock_regs_;
   fidl::WireSyncClient<fuchsia_hardware_reset::Reset> reset_;

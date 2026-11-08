@@ -28,25 +28,32 @@ ResourceRecycler::~ResourceRecycler() {
 }
 
 void ResourceRecycler::OnReceiveOwnable(std::unique_ptr<Resource> resource) {
-  if (resource->sequence_number() <= last_finished_sequence_number_) {
-    // Recycle immediately.
-    RecycleResource(std::move(resource));
-  } else {
-    // Defer recycling.
+  {
+    // Compare `sequence_number()` against `last_finished_sequence_number_` and insert into
+    // `unused_resources_` atomically under `lock_` so a concurrent `OnCommandBufferFinished()`
+    // cannot drain `unused_resources_` between the check and the insertion.
     std::scoped_lock lock(lock_);
-    unused_resources_[resource.get()] = std::move(resource);
+    if (resource->sequence_number() > last_finished_sequence_number_) {
+      unused_resources_[resource.get()] = std::move(resource);
+      return;
+    }
   }
+
+  // Invoke `RecycleResource()` outside `lock_` so destroying a composite `Resource` that owns
+  // other `Resource`s managed by this `ResourceRecycler` can re-enter `OnReceiveOwnable()`
+  // without deadlocking.
+  RecycleResource(std::move(resource));
 }
 
 void ResourceRecycler::OnCommandBufferFinished(uint64_t sequence_number) {
-  FX_DCHECK(sequence_number > last_finished_sequence_number_);
-  last_finished_sequence_number_ = sequence_number;
-
   // The sequence number allows us to find all unused resources that are no
   // longer referenced by a pending command-buffer; destroy these.
   std::vector<std::unique_ptr<Resource>> resources_to_recycle;
   {
     std::scoped_lock lock(lock_);
+    FX_DCHECK(sequence_number > last_finished_sequence_number_);
+    last_finished_sequence_number_ = sequence_number;
+
     auto it = unused_resources_.begin();
     while (it != unused_resources_.end()) {
       if (it->second->sequence_number() <= last_finished_sequence_number_) {

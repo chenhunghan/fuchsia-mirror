@@ -4,24 +4,20 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-use core::ffi::c_char;
 use core::fmt::{self, Write};
 use core::panic::PanicInfo;
 
+use crate::crashlog::stdout_panic_buffer_write;
 use crate::platform_rs::power::{
     PlatformHaltAction, ZirconCrashReason, platform_halt, platform_panic_start,
 };
 
-/// Printed before the panic message, matching the C++ `PanicStart()` banner.
+/// Printed before the panic message, matching the [`super::debug::panic_start`] banner.
 const PANIC_HEADER: &str = "\n*** KERNEL PANIC (Rust):\n*** ";
 
 /// Written after the panic message: once to end it, and once more to separate it
-/// from the stack trace, matching the C++ `PanicFinish()`.
+/// from the stack trace, matching [`super::debug::panic_finish`].
 const NEWLINE: &str = "\n";
-
-unsafe extern "C" {
-    fn cpp_crashlog_panic_write(data: *const c_char, len: usize);
-}
 
 /// A `core::fmt::Write` sink for the crashlog's `stdout_panic_buffer`, which
 /// sends everything to both the console and the persistent panic buffer.
@@ -35,10 +31,7 @@ struct PanicWriter;
 
 impl Write for PanicWriter {
     fn write_str(&mut self, text: &str) -> fmt::Result {
-        // SAFETY: `text` is a valid, initialized slice of `text.len()` bytes that
-        // outlives the call, and the callee copies the bytes out without
-        // retaining the pointer.
-        unsafe { cpp_crashlog_panic_write(text.as_ptr().cast::<c_char>(), text.len()) };
+        stdout_panic_buffer_write(text.as_bytes());
         Ok(())
     }
 }

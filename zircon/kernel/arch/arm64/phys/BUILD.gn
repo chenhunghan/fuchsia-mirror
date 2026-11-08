@@ -6,7 +6,6 @@
 
 import("//build/toolchain/toolchain_environment.gni")
 import("//build/toolchain/variant.gni")
-import("//zircon/system/ulib/hwreg/hwreg_asm_header.gni")
 
 # This has to be variant() rather than config() to be used in the toolchain
 # configs list.
@@ -34,33 +33,6 @@ if (toolchain_environment == "kernel.phys" ||
     ]
   }
 
-  static_library("phys") {
-    complete_static_lib = true
-
-    sources = [
-      "exception.S",
-      "psci.S",
-      "psci.cc",
-      "reset.cc",
-      "setup.cc",
-      "start.S",
-    ]
-    include_dirs = [ "//zircon/.." ]
-    deps = [
-      ":arch-phys-info",
-      ":arch-phys-info-asm",
-      "//sdk/lib/zbi-format",
-      "//src/lib/zbitl",
-      "//zircon/kernel/lib/arch",
-      "//zircon/kernel/lib/boot-options",
-      "//zircon/kernel/lib/ktl",
-      "//zircon/kernel/lib/libc",
-      "//zircon/kernel/phys:main",
-      "//zircon/kernel/phys:stdio",
-      "//zircon/system/ulib/zircon-internal",
-    ]
-  }
-
   config("qemu.config") {
     # Like ZBI executables, direct QEMU phys executables can be loaded
     # anywhere, so they are linked at 0.
@@ -72,59 +44,10 @@ if (toolchain_environment == "kernel.phys" ||
     deps = [ "//zircon/kernel/lib/arch" ]
     libs = [ "//zircon/kernel/phys/linuxboot-pic.ld" ]
   }
-
-  source_set("arch-handoff-prep") {
-    sources = [ "arch-handoff-prep.cc" ]
-    deps = [
-      ":arch-phys-info",
-      "//sdk/lib/zbi-format",
-      "//zircon/kernel/lib/code-patching",
-      "//zircon/kernel/lib/ktl",
-      "//zircon/kernel/phys:handoff-prep.h",
-      "//zircon/kernel/phys:stdio",
-      "//zircon/kernel/phys/handoff",
-    ]
-    include_dirs = [ "//zircon/kernel/phys" ]
-  }
-
-  source_set("arch-physboot") {
-    sources = [ "arch-physboot.cc" ]
-    include_dirs = [ "//zircon/kernel/phys" ]
-    deps = [
-      "//zircon/kernel/lib/arch",
-      "//zircon/kernel/phys:physboot.h",
-    ]
-  }
-
-  source_set("arch-boot-zbi") {
-    sources = [ "arch-boot-zbi.cc" ]
-    deps = [
-      "//zircon/kernel/lib/arch",
-      "//zircon/kernel/phys:boot-zbi.deps",
-    ]
-  }
 }
 
 config("includes") {
   include_dirs = [ "include" ]
-}
-
-source_set("arch-phys-info") {
-  visibility = [
-    "./*",
-    "//zircon/kernel/arch/arm64/code-patches/*",
-    "//zircon/kernel/phys/*",
-  ]
-  public = [ "include/phys/arch/arch-phys-info.h" ]
-  public_deps = [ "//zircon/kernel/lib/arch" ]
-  public_configs = [ ":includes" ]
-}
-
-hwreg_asm_header("arch-phys-info-asm") {
-  visibility = [ ":*" ]
-  output_name = "arch-phys-info-asm.h"
-  sources = [ "gen-arch-phys-info-asm.cc" ]
-  deps = [ ":arch-phys-info" ]
 }
 
 group("tests") {

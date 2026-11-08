@@ -95,6 +95,9 @@ test("da7219-unit-tests") {
 
 fuchsia_unittest_package("da7219-tests") {
   deps = [ ":da7219-unit-tests" ]
+  test_specs = {
+    parallel = 4
+  }
 }
 
 group("da7219-dfv2") {

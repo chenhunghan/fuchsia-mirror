@@ -7,7 +7,7 @@
 #include <stdio.h>
 
 #include <ktl/utility.h>
-#include <phys/main.h>
+#include <phys/runtime/main.h>
 
 #include "test-main.h"
 

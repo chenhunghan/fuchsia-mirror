@@ -1,0 +1,21 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fidl_library(
+    name = "fuchsia.hardware.thermal",
+    srcs = ["thermal.fidl"],
+    enable_banjo = True,
+    enable_rust = False,
+    enable_rust_next = False,
+    visibility = [
+        "//src/devices/cpu/drivers/aml-cpu-legacy:__pkg__",
+        "//src/devices/thermal/drivers/aml-thermal:__pkg__",
+        "//src/devices/thermal/drivers/aml-thermal-s905d2g-legacy:__pkg__",
+    ],
+    deps = ["//zircon/vdso/zx"],
+)

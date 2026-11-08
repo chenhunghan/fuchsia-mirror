@@ -8,15 +8,11 @@
 
 use fbl::RefPtr;
 use zx_status::Status;
+use zx_types::zx_status_t;
 
+use super::energy_model::CppPowerLevelController;
 use super::pdev_power_level_controller::PDevPowerLevelController;
 use super::power_level_controller::{PowerLevelController, PowerLevelUpdateRequest};
-
-/// Resets the singleton `PDevPowerLevelController` instance for tests.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_pdev_power_level_controller_reset_for_test() {
-    PDevPowerLevelController::reset_for_test();
-}
 
 /// Acquires a strong reference to the singleton `PDevPowerLevelController` for `domain_id`.
 #[unsafe(no_mangle)]
@@ -75,28 +71,26 @@ pub extern "C" fn rust_pdev_power_level_controller_get_current_power_level(
     Ok(())
 }
 
-/// Returns the number of power domains supported by `controller`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_pdev_power_level_controller_domain_count(
-    controller: &PDevPowerLevelController,
-) -> usize {
-    controller.domain_count()
-}
-
-/// Returns whether `PDevPowerLevelController` is supported on the current platform.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_pdev_power_level_controller_is_supported() -> bool {
-    PDevPowerLevelController::is_supported()
-}
-
-#[cfg(ktest)]
 unsafe extern "C" {
+    /// Looks up the `PDevPowerLevelController` for `domain_id`
+    /// (`PDevPowerLevelController::Get`), exporting ownership of its `fbl::RefPtr` reference count
+    /// via `fbl::ExportToRawPtr` into `*out_controller` on `ZX_OK`.
+    ///
+    /// # Safety
+    ///
+    /// `out_controller` must reference a valid writable pointer.
+    pub fn cpp_pdev_power_level_controller_get(
+        domain_id: u32,
+        out_controller: &mut *mut CppPowerLevelController,
+    ) -> zx_status_t;
+
     /// Saves and clears the per-CPU `PowerDomainSet`s across all CPUs for unit testing.
     ///
     /// # Safety
     ///
     /// The caller must ensure no concurrent test is accessing `g_saved_power_domains` and must pair
     /// this call with [`cpp_restore_power_domains_for_test`].
+    #[cfg(ktest)]
     pub(super) fn cpp_save_and_clear_power_domains_for_test();
 
     /// Restores the per-CPU `PowerDomainSet`s previously saved by
@@ -106,5 +100,6 @@ unsafe extern "C" {
     ///
     /// Must only be called after a matching call to [`cpp_save_and_clear_power_domains_for_test`]
     /// with no concurrent access to `g_saved_power_domains`.
+    #[cfg(ktest)]
     pub(super) fn cpp_restore_power_domains_for_test();
 }

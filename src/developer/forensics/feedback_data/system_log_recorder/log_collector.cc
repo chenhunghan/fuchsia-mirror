@@ -28,10 +28,10 @@ void LogCollector::Start(Callback callback) {
   started_ = true;
   callback_ = std::move(callback);
 
-  services_->Connect(archive_accessor_.NewRequest(dispatcher_), kArchiveAccessorName);
+  services_->Connect(archive_accessor_.NewRequest(dispatcher_), kLogsArchiveAccessorName);
 
   archive_accessor_.set_error_handler([this](zx_status_t status) {
-    FX_LOGS(WARNING) << "Lost connection to " << kArchiveAccessorName << ": "
+    FX_LOGS(WARNING) << "Lost connection to " << kLogsArchiveAccessorName << ": "
                      << zx_status_get_string(status);
     OnError(Error::kStreamError);
   });
@@ -47,7 +47,7 @@ void LogCollector::Start(Callback callback) {
   fuchsia::diagnostics::BatchIteratorPtr batch_iterator;
   archive_accessor_->StreamDiagnostics(std::move(params), batch_iterator.NewRequest(dispatcher_));
 
-  iterator_ = std::make_unique<diagnostics::accessor2logger::LogBatchIterator>(
+  iterator_ = std::make_unique<diagnostics::fidl_log_message_parser::LogBatchIterator>(
       std::move(batch_iterator), format);
 
   iterator_->set_error_handler([this](zx_status_t status) {

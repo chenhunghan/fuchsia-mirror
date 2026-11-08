@@ -3,11 +3,10 @@
 // found in the LICENSE file.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::HashMap;
 use std::io::BufReader;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use std::{fs, io};
 use thiserror::Error;
 
@@ -15,36 +14,53 @@ use thiserror::Error;
 /// test itself failed.
 const FAIL_EXIT_STATUS: i32 = 86;
 
-/// The body of the test output summary.
-#[derive(Serialize, Deserialize, Debug, Default, PartialEq)]
-pub struct Summary {
-    /// Properties concerning the overall test run.
-    #[serde(flatten)]
-    pub common: SummaryCommonProperties,
-
-    /// Cases by case name.
+/// The body of the test output summary, matching `runtests.TestResult` in
+/// `//tools/testing/runtests/runtests.go`.
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq)]
+pub struct TestResult {
+    /// Paths to the test's output files relative to `output_dir`.
     #[serde(default)]
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
-    pub cases: HashMap<String, SummaryCase>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub output_files: Vec<String>,
 
+    /// The common directory that all `output_files` are located in.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub output_dir: String,
+
+    /// Individual test case results.
+    #[serde(default)]
+    pub cases: Vec<TestCaseResult>,
+
+    /// Optional structured error message or explanation of the failure.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<FailureReason>,
+
+    /// Indicates whether test setup completed successfully.
+    #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub setup_succeeded: Option<bool>,
 
+    /// Indicates whether test teardown completed successfully.
+    #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub teardown_succeeded: Option<bool>,
 
+    /// The process exit code of the test binary.
+    #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
 }
 
-impl Summary {
-    /// Merges `Summary` read from a file into self. Returns Ok(true) if the file was merged
+impl TestResult {
+    /// Merges `TestResult` read from a file into self. Returns Ok(true) if the file was merged
     /// successfully and `self` changed as a result, Ok(false) if the file did not exist or
     /// no change was made.
     pub fn maybe_merge_file(&mut self, path: &PathBuf) -> Result<bool, TestOutputError> {
-        if let Ok(file) = fs::File::open(&path) {
+        if let Ok(file) = fs::File::open(path) {
             let mut reader = BufReader::new(file);
-            let summary_from_file: Summary = serde_json::from_reader(&mut reader)
+            let summary_from_file: TestResult = serde_json::from_reader(&mut reader)
                 .map_err(|e| TestOutputError::SummaryRead { path: path.clone(), source: e })?;
             Ok(self.merge(summary_from_file))
         } else {
@@ -52,8 +68,17 @@ impl Summary {
         }
     }
 
-    /// Writes this summary to a file.
+    /// Writes this summary to a file. Returns an error if any case has `TestStatus::NotSpecified`.
     pub fn write(&self, path: &PathBuf) -> Result<(), TestOutputError> {
+        for case in &self.cases {
+            if case.status == TestStatus::NotSpecified {
+                return Err(TestOutputError::UnspecifiedCaseStatus {
+                    path: path.clone(),
+                    case_name: case.case_name.clone(),
+                });
+            }
+        }
+
         fs::write(path, serde_json::to_string_pretty(self).unwrap())
             .map_err(|e| TestOutputError::SummaryWrite { path: path.clone(), source: e })?;
 
@@ -62,20 +87,38 @@ impl Summary {
 
     /// Merges `other` into self. This is used for merging test and postprocessor summaries
     /// into the aggregate summary. Returns `true` if `self` changed as a result of the merge.
-    fn merge(&mut self, other: Summary) -> bool {
+    pub fn merge(&mut self, other: TestResult) -> bool {
         let mut changed = false;
 
-        changed |= self.common.merge(other.common);
-        for (other_case_name, other_case) in other.cases {
-            match &mut self.cases.get_mut(other_case_name.as_str()) {
-                Some(case_properties) => {
-                    changed |= case_properties.merge(other_case);
-                }
-                None => {
-                    self.cases.insert(other_case_name, other_case);
-                    changed = true;
-                }
+        for file in other.output_files {
+            if !self.output_files.contains(&file) {
+                self.output_files.push(file);
+                changed = true;
             }
+        }
+
+        if !other.output_dir.is_empty() && other.output_dir != self.output_dir {
+            self.output_dir = other.output_dir;
+            changed = true;
+        }
+
+        for other_case in other.cases {
+            if let Some(existing_case) = self.cases.iter_mut().find(|c| {
+                c.case_name == other_case.case_name
+                    && (c.suite_name == other_case.suite_name
+                        || c.suite_name.is_empty()
+                        || other_case.suite_name.is_empty())
+            }) {
+                changed |= existing_case.merge(other_case);
+            } else {
+                self.cases.push(other_case);
+                changed = true;
+            }
+        }
+
+        if other.failure_reason.is_some() && other.failure_reason != self.failure_reason {
+            self.failure_reason = other.failure_reason;
+            changed = true;
         }
 
         if other.setup_succeeded.is_some() && other.setup_succeeded != self.setup_succeeded {
@@ -96,248 +139,231 @@ impl Summary {
     }
 }
 
-/// Test output regarding a single case.
-#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
-pub struct SummaryCase {
-    #[serde(flatten)]
-    pub common: SummaryCommonProperties,
-}
-
-impl SummaryCase {
-    /// Merges `other` into self. This is used for merging test and postprocessor summaries
-    /// into the aggregate summary. Returns `true` if `self` changed as a result of the merge.
-    fn merge(&mut self, other: SummaryCase) -> bool {
-        self.common.merge(other.common)
-    }
-}
-
-/// Properties shared by the overall summary and by cases.
-#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
-pub struct SummaryCommonProperties {
+/// Test output regarding a single test case, matching `runtests.TestCaseResult` in
+/// `//tools/testing/runtests/runtests.go`.
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq)]
+pub struct TestCaseResult {
     #[serde(default)]
-    #[serde(skip_serializing_if = "is_zero")]
-    pub duration: i64,
-
-    pub outcome: SummaryOutcome,
+    pub display_name: String,
 
     #[serde(default)]
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
-    pub artifacts: HashMap<PathBuf, SummaryArtifact>,
+    pub suite_name: String,
 
-    #[serde(flatten)]
-    pub extension: HashMap<String, Value>,
+    pub case_name: String,
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "TestStatus::is_not_specified")]
+    pub status: TestStatus,
+
+    #[serde(
+        default,
+        rename = "duration_nanos",
+        serialize_with = "serialize_duration_nanos",
+        deserialize_with = "deserialize_duration_nanos"
+    )]
+    pub duration: Duration,
+
+    #[serde(default)]
+    pub format: String,
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<FailureReason>,
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub output_files: Vec<String>,
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub output_dir: String,
+
+    #[serde(default)]
+    pub tags: Vec<TestTag>,
 }
 
-impl SummaryCommonProperties {
-    /// Merges `other` into self. This is used for merging test and postprocessor summaries
+impl TestCaseResult {
+    /// Merges `other` into self. This is used for merging test and postprocessor case summaries
     /// into the aggregate summary. Returns `true` if `self` changed as a result of the merge.
-    fn merge(&mut self, other: SummaryCommonProperties) -> bool {
+    pub fn merge(&mut self, other: TestCaseResult) -> bool {
         let mut changed = false;
 
-        if other.duration != 0 && other.duration != self.duration {
+        if !other.display_name.is_empty() && other.display_name != self.display_name {
+            self.display_name = other.display_name;
+            changed = true;
+        }
+
+        if !other.suite_name.is_empty() && other.suite_name != self.suite_name {
+            self.suite_name = other.suite_name;
+            changed = true;
+        }
+
+        if other.status != TestStatus::NotSpecified && other.status != self.status {
+            self.status = other.status;
+            self.failure_reason = other.failure_reason;
+            changed = true;
+        } else if other.failure_reason.is_some() && other.failure_reason != self.failure_reason {
+            self.failure_reason = other.failure_reason;
+            changed = true;
+        }
+
+        if !other.duration.is_zero() && other.duration != self.duration {
             self.duration = other.duration;
             changed = true;
         }
 
-        changed |= self.outcome.merge(other.outcome);
+        if !other.format.is_empty() && other.format != self.format {
+            self.format = other.format;
+            changed = true;
+        }
 
-        for (other_artifact_name, other_artifact_properties) in other.artifacts {
-            match &mut self.artifacts.get_mut(&other_artifact_name) {
-                Some(artifact_properties) => {
-                    changed |= artifact_properties.merge(other_artifact_properties);
-                }
-                None => {
-                    self.artifacts.insert(other_artifact_name, other_artifact_properties);
+        for file in other.output_files {
+            if !self.output_files.contains(&file) {
+                self.output_files.push(file);
+                changed = true;
+            }
+        }
+
+        if !other.output_dir.is_empty() && other.output_dir != self.output_dir {
+            self.output_dir = other.output_dir;
+            changed = true;
+        }
+
+        for other_tag in other.tags {
+            if let Some(existing_tag) = self.tags.iter_mut().find(|t| t.key == other_tag.key) {
+                if existing_tag.value != other_tag.value {
+                    existing_tag.value = other_tag.value;
                     changed = true;
                 }
+            } else {
+                self.tags.push(other_tag);
+                changed = true;
             }
-        }
-
-        for (other_extension_name, other_extension_properties) in other.extension {
-            self.extension.insert(other_extension_name, other_extension_properties);
-            changed = true;
         }
 
         changed
     }
 }
 
-/// Expresses the outcome of a test or test case run.
-#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
-pub struct SummaryOutcome {
-    /// General result of the test run. The result of a test that has one
-    /// or more cases should typically be the maximum of the results of
-    /// the cases.
-    #[serde(default)]
-    #[serde(skip_serializing_if = "is_not_specified")]
-    pub result: SummaryOutcomeResult,
-
-    /// Optional details describing the outcome, used primarily to
-    /// describe `Failed` and `Error` outcomes. The format of this field
-    /// is not constrained by the ABI. The intent of this field is to offer
-    /// a brief description of the problem for the purposes of triage,
-    /// debugging, and classification of failures and errors.
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub detail: Option<String>,
-}
-
-impl SummaryOutcome {
-    /// Merges `other` into self. This is used for merging test and postprocessor summaries
-    /// into the aggregate summary. Returns `true` if `self` changed as a result of the merge.
-    fn merge(&mut self, other: SummaryOutcome) -> bool {
-        let mut changed = false;
-        if other.result != SummaryOutcomeResult::NotSpecified && other.result != self.result {
-            // If other has a specified result, the merge changes self to equal other.
-            self.result = other.result;
-            self.detail = other.detail;
-            changed = true;
-        } else if other.detail.is_some() && other.detail != self.detail {
-            // Otherwise, if other has detail, the merge changes self's detail to match other's.
-            self.detail = other.detail;
-            changed = true;
-        }
-
-        changed
-    }
-
-    /// Merges a case outcome into a test outcome (self).
-    pub fn merge_case_outcome(&mut self, case_outcome: SummaryOutcome) {
-        if (self.result as u8) < (case_outcome.result as u8) {
-            self.result = case_outcome.result;
-            self.detail = case_outcome.detail;
-        } else if self.result == case_outcome.result {
-            if self.detail.is_none() {
-                self.detail = case_outcome.detail;
-            } else if case_outcome.detail.is_some() {
-                let mut detail = self.detail.take().unwrap();
-                detail.push('\n');
-                detail.push_str(&case_outcome.detail.unwrap());
-                self.detail = Some(detail);
-            }
-        }
-    }
-}
-
-/// Summarizes the outcome of a test or test case run.
-///
-/// In general, the result of a test that has many cases will be the
-/// maximum of the results of the cases. This constrains the ordering of
-/// these values.
-#[derive(Serialize, Deserialize, Debug, Default, Copy, Clone, PartialEq)]
-#[repr(u8)]
-pub enum SummaryOutcomeResult {
-    /// Default result value used when a test or postprocessor summary does
-    /// not wish to specify an outcome result. This value must never appear
-    /// in an aggregate summary.
+/// Possible test statuses, matching `runtests.TestStatus` in
+/// `//tools/testing/runtests/runtests.go`.
+#[derive(Serialize, Deserialize, Debug, Default, Copy, Clone, PartialEq, Eq)]
+pub enum TestStatus {
+    /// Default status value used when a postprocessor summary updates an existing case
+    /// without specifying a status. This value must never appear in a final summary.
     #[default]
-    NotSpecified = 0x00,
+    #[serde(rename = "NOT_SPECIFIED", alias = "")]
+    NotSpecified,
 
-    /// Regarding a case, the case was not fully executed, because the
-    /// test configuration specified that it should be skipped or because
-    /// the case explicitly requested that it be skipped. In the latter
-    /// case, the detail associated with this result might give the reason
-    /// that the case was skipped.
-    ///
-    /// Regarding a test, all cases in the test were skipped.
-    #[serde(rename = "skipped")]
-    Skipped = 0x10,
+    /// Represents a passed test.
+    #[serde(rename = "PASS")]
+    Pass,
 
-    /// Regarding a case, the case was executed as requested and passed.
-    ///
-    /// Regarding a test, at least one case passed, and all others passed
-    /// or were skipped.
-    #[serde(rename = "passed")]
-    Passed = 0x20,
+    /// Represents a failed test.
+    #[serde(rename = "FAIL")]
+    Fail,
 
-    /// Regarding a case, the case was not executed to completion as
-    /// requested, because test execution was terminated early. This can
-    /// occur if the client requests early termination or if the
-    /// configuration specifies something like 'break on failure'.
-    ///
-    /// Regarding a test, at least one case was canceled, and all others
-    /// either were canceled, passed or were skipped.
-    #[serde(rename = "canceled")]
-    Canceled = 0x30,
+    /// Represents an aborted test (e.g. timeout or canceled).
+    #[serde(rename = "ABORT")]
+    Abort,
 
-    /// Regarding a case, the case was executed as requested but did not
-    /// terminate before the timeout interval for the case or overall test
-    /// elapsed.
-    ///
-    /// Regarding a test, at least one case timed out, and all others either
-    /// timed out, were canceled, passed, or were skipped. Alternatively,
-    /// this value may be used if a timeout applied to the overall test
-    /// run expired.
-    #[serde(rename = "timed_out")]
-    TimedOut = 0x40,
+    /// Represents a skipped test.
+    #[serde(rename = "SKIP")]
+    Skip,
 
-    /// Regarding a case, the case was executed as requested and failed.
-    /// Failed outcomes typically include a non-empty `detail` field,
-    /// formatted in a manner that is specific to the case. That format
-    /// is not defined by the test ABI.
-    ///
-    /// Regarding a test, at least one case failed, and all others either
-    /// failed, timed out, were canceled, passed, or were skipped. Failed
-    /// test outcomes typically aggregate the details of all the failed
-    /// cases.
-    #[serde(rename = "failed")]
-    Failed = 0x50,
+    /// Represents a test that failed due to an infrastructure-related issue.
+    #[serde(rename = "INFRA_FAIL")]
+    InfraFail,
 
-    /// Regarding a case, the case was not executed as requested due to
-    /// an error. This can occur due to resource or connectivity problems
-    /// or due to a bug in the test framework implementation. The associated
-    /// string is in a format that is specific to the test framework
-    /// implementation and is not part of the test ABI.
-    ///
-    /// Regarding a test, at least one case resulted in an error result or
-    /// an error that interfered with the execution of the test occurred
-    /// outside the context of any given case. Typically, error results for
-    /// a test are accompanied by a detail string indicating the nature of
-    /// the error.
-    #[serde(rename = "error")]
-    Error = 0x60,
+    /// Represents an exonerated test.
+    #[serde(rename = "EXONERATED")]
+    Exonerated,
 }
 
-impl SummaryOutcomeResult {
-    /// Determines whether this outcome represents a failure state.
-    /// Returns true for outcomes that indicate a failed or incomplete run,
-    /// specifically `Failed`, `TimedOut`, `Canceled`, or `Error`, false otherwise.
+impl TestStatus {
+    /// Returns true if the status is `NotSpecified`.
+    pub fn is_not_specified(&self) -> bool {
+        *self == TestStatus::NotSpecified
+    }
+
+    /// Determines whether this status represents a failure state.
     pub fn is_failure(&self) -> bool {
-        matches!(
-            self,
-            SummaryOutcomeResult::Failed
-                | SummaryOutcomeResult::TimedOut
-                | SummaryOutcomeResult::Canceled
-                | SummaryOutcomeResult::Error
-        )
+        matches!(self, TestStatus::Fail | TestStatus::Abort | TestStatus::InfraFail)
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
-pub struct SummaryArtifact {
-    #[serde(rename = "type")]
-    pub artifact_type: String,
+/// Provides structured information about why a test or test case failed, matching
+/// `runtests.FailureReason` in `//tools/testing/runtests/runtests.go`.
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq)]
+pub struct FailureReason {
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<FailureReasonError>,
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "is_zero_i32")]
+    pub truncated_errors_count: i32,
 }
 
-impl SummaryArtifact {
-    /// Merges `other` into self. This is used for merging test and postprocessor summaries
-    /// into the aggregate summary. Returns `true` if `self` changed as a result of the merge.
-    fn merge(&mut self, other: SummaryArtifact) -> bool {
-        let mut changed = false;
-        if !other.artifact_type.is_empty() && other.artifact_type != self.artifact_type {
-            self.artifact_type = other.artifact_type;
-            changed = true;
+impl FailureReason {
+    /// Constructs a `FailureReason` from a string message if non-empty after trimming,
+    /// containing a single error message.
+    pub fn from_message(message: impl Into<String>) -> Option<Self> {
+        let message = message.into();
+        let trimmed = message.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(Self {
+                errors: vec![FailureReasonError {
+                    message: trimmed.to_string(),
+                    trace: String::new(),
+                }],
+                truncated_errors_count: 0,
+            })
         }
-        changed
     }
 }
 
-fn is_zero(to_test: &i64) -> bool {
+/// Represents a problem that caused a test to fail, matching `runtests.FailureReasonError` in
+/// `//tools/testing/runtests/runtests.go`.
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq)]
+pub struct FailureReasonError {
+    #[serde(default)]
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub message: String,
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub trace: String,
+}
+
+/// Key-value metadata tag for a test case.
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq)]
+pub struct TestTag {
+    pub key: String,
+    pub value: String,
+}
+
+fn is_zero_i32(to_test: &i32) -> bool {
     *to_test == 0
 }
 
-fn is_not_specified(to_test: &SummaryOutcomeResult) -> bool {
-    *to_test == SummaryOutcomeResult::NotSpecified
+fn serialize_duration_nanos<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_u128(duration.as_nanos())
+}
+
+fn deserialize_duration_nanos<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let nanos = u128::deserialize(deserializer)?;
+    let secs = (nanos / 1_000_000_000) as u64;
+    let subsec_nanos = (nanos % 1_000_000_000) as u32;
+    Ok(Duration::new(secs, subsec_nanos))
 }
 
 const TEST_SUBDIR: &str = "test";
@@ -437,20 +463,21 @@ pub fn is_fail_exit_status(exit_status: std::process::ExitStatus) -> bool {
     exit_status.code() == Some(FAIL_EXIT_STATUS) || exit_status.into_raw() == FAIL_EXIT_STATUS
 }
 
-/// Returns an outcome string from an exit status.
-pub fn outcome_from_exit_status(exit_status: std::process::ExitStatus) -> SummaryOutcome {
+/// Returns a `FailureReason` from an exit status if the exit status indicates an error
+/// (neither 0 nor `FAIL_EXIT_STATUS`).
+pub fn failure_reason_from_exit_status(
+    exit_status: std::process::ExitStatus,
+) -> Option<FailureReason> {
     let code = exit_status.code().unwrap_or_else(|| exit_status.into_raw());
     match code {
-        0 => SummaryOutcome { result: SummaryOutcomeResult::Passed, detail: None },
-        FAIL_EXIT_STATUS => SummaryOutcome { result: SummaryOutcomeResult::Failed, detail: None },
-        status => SummaryOutcome {
-            result: SummaryOutcomeResult::Error,
-            detail: Some(format!("test binary failed with exit status {status}")),
-        },
+        0 | FAIL_EXIT_STATUS => None,
+        status => {
+            FailureReason::from_message(format!("test binary failed with exit status {status}"))
+        }
     }
 }
 
-/// Error encountered while executing test binary
+/// Error encountered while reading or writing a test output summary.
 #[derive(Debug, Error)]
 pub enum TestOutputError {
     #[error("Error reading output summary file {path}: {source}")]
@@ -466,201 +493,188 @@ pub enum TestOutputError {
         #[source]
         source: io::Error,
     },
+
+    #[error(
+        "Cannot write output summary file {path}: test case '{case_name}' has no status specified"
+    )]
+    UnspecifiedCaseStatus { path: PathBuf, case_name: String },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{Value, json};
     use std::fs::File;
     use std::os::unix::process::ExitStatusExt;
     use std::process::ExitStatus;
     use tempfile::tempdir;
 
-    fn outcome(result: SummaryOutcomeResult, detail: &str) -> SummaryOutcome {
-        SummaryOutcome { result, detail: Some(String::from(detail)) }
-    }
-
-    fn case(result: SummaryOutcomeResult, detail: &str) -> SummaryCase {
-        SummaryCase {
-            common: SummaryCommonProperties {
-                outcome: outcome(result, detail),
-                ..Default::default()
-            },
+    fn case(case_name: &str, status: TestStatus, detail: &str) -> TestCaseResult {
+        TestCaseResult {
+            display_name: String::from(case_name),
+            case_name: String::from(case_name),
+            status,
+            failure_reason: FailureReason::from_message(detail),
+            ..Default::default()
         }
     }
 
-    fn artifact(artifact_type: &str) -> SummaryArtifact {
-        SummaryArtifact { artifact_type: String::from(artifact_type) }
-    }
-
     #[fuchsia::test]
-    fn test_merge_common_properties() {
-        let mut under_test = SummaryCommonProperties {
-            duration: 1,
-            outcome: outcome(SummaryOutcomeResult::Failed, "test outcome a"),
-            artifacts: [
-                (PathBuf::from("a"), artifact("a_type")),
-                (PathBuf::from("b"), artifact("b_type")),
-            ]
-            .into(),
-            extension: [
-                (String::from("x"), Value::from("x_value")),
-                (String::from("y"), Value::from("y_value")),
-            ]
-            .into(),
+    fn test_merge_case_properties() {
+        let mut under_test = TestCaseResult {
+            display_name: String::from("case_a"),
+            suite_name: String::from("suite_a"),
+            case_name: String::from("case_a"),
+            status: TestStatus::Fail,
+            duration: Duration::from_millis(1),
+            format: String::from("FTF"),
+            failure_reason: FailureReason::from_message("test outcome a"),
+            output_files: vec![String::from("a"), String::from("b")],
+            output_dir: String::from("/out/a"),
+            tags: vec![
+                TestTag { key: String::from("x"), value: String::from("x_value") },
+                TestTag { key: String::from("y"), value: String::from("y_value") },
+            ],
         };
 
-        // Non-trivial values from argument take precedent. New artifacts are inserted.
-        // Existing artifacts with non-trivial values get updated.
-        assert!(
-            under_test.merge(SummaryCommonProperties {
-                duration: 3,
-                outcome: outcome(SummaryOutcomeResult::Failed, "test outcome b"),
-                artifacts: [
-                    (PathBuf::from("a"), artifact("new_a_type")),
-                    (PathBuf::from("c"), artifact("c_type")),
-                ]
-                .into(),
-                extension: [
-                    (String::from("x"), Value::from("new_x_value")),
-                    (String::from("z"), Value::from("z_value")),
-                ]
-                .into(),
-            })
-        );
-        assert_eq!(
-            under_test,
-            SummaryCommonProperties {
-                duration: 3,
-                outcome: outcome(SummaryOutcomeResult::Failed, "test outcome b"),
-                artifacts: [
-                    (PathBuf::from("a"), artifact("new_a_type")),
-                    (PathBuf::from("b"), artifact("b_type")),
-                    (PathBuf::from("c"), artifact("c_type")),
-                ]
-                .into(),
-                extension: [
-                    (String::from("x"), Value::from("new_x_value")),
-                    (String::from("y"), Value::from("y_value")),
-                    (String::from("z"), Value::from("z_value")),
-                ]
-                .into(),
-            }
-        );
-
-        // Trivial values from argument are not copied. For existing artifacts, trivial
-        // values from argument are not copied.
-        assert!(under_test.merge(SummaryCommonProperties {
-            duration: 0,
-            outcome: outcome(SummaryOutcomeResult::NotSpecified, "test outcome c"),
-            artifacts: [(PathBuf::from("a"), artifact(""))].into(),
-            extension: HashMap::new(),
+        // Non-trivial values from argument take precedence. New output_files and tags are inserted.
+        // Existing tags with updated values get updated.
+        assert!(under_test.merge(TestCaseResult {
+            display_name: String::from("case_a_new"),
+            suite_name: String::from("suite_a_new"),
+            case_name: String::from("case_a"),
+            status: TestStatus::Fail,
+            duration: Duration::from_millis(3),
+            format: String::from("GoogleTest"),
+            failure_reason: FailureReason::from_message("test outcome b"),
+            output_files: vec![String::from("a"), String::from("c")],
+            output_dir: String::from("/out/b"),
+            tags: vec![
+                TestTag { key: String::from("x"), value: String::from("new_x_value") },
+                TestTag { key: String::from("z"), value: String::from("z_value") },
+            ],
         }));
         assert_eq!(
             under_test,
-            SummaryCommonProperties {
-                duration: 3,
-                outcome: outcome(SummaryOutcomeResult::Failed, "test outcome c"),
-                artifacts: [
-                    (PathBuf::from("a"), artifact("new_a_type")),
-                    (PathBuf::from("b"), artifact("b_type")),
-                    (PathBuf::from("c"), artifact("c_type")),
-                ]
-                .into(),
-                extension: [
-                    (String::from("x"), Value::from("new_x_value")),
-                    (String::from("y"), Value::from("y_value")),
-                    (String::from("z"), Value::from("z_value")),
-                ]
-                .into(),
+            TestCaseResult {
+                display_name: String::from("case_a_new"),
+                suite_name: String::from("suite_a_new"),
+                case_name: String::from("case_a"),
+                status: TestStatus::Fail,
+                duration: Duration::from_millis(3),
+                format: String::from("GoogleTest"),
+                failure_reason: FailureReason::from_message("test outcome b"),
+                output_files: vec![String::from("a"), String::from("b"), String::from("c")],
+                output_dir: String::from("/out/b"),
+                tags: vec![
+                    TestTag { key: String::from("x"), value: String::from("new_x_value") },
+                    TestTag { key: String::from("y"), value: String::from("y_value") },
+                    TestTag { key: String::from("z"), value: String::from("z_value") },
+                ],
+            }
+        );
+
+        // Trivial values from argument are not copied, while failure_reason is updated when status
+        // is NotSpecified.
+        assert!(under_test.merge(TestCaseResult {
+            display_name: String::new(),
+            suite_name: String::new(),
+            case_name: String::from("case_a"),
+            status: TestStatus::NotSpecified,
+            duration: Duration::ZERO,
+            format: String::new(),
+            failure_reason: FailureReason::from_message("test outcome c"),
+            output_files: vec![String::from("a")],
+            output_dir: String::new(),
+            tags: vec![],
+        }));
+        assert_eq!(
+            under_test,
+            TestCaseResult {
+                display_name: String::from("case_a_new"),
+                suite_name: String::from("suite_a_new"),
+                case_name: String::from("case_a"),
+                status: TestStatus::Fail,
+                duration: Duration::from_millis(3),
+                format: String::from("GoogleTest"),
+                failure_reason: FailureReason::from_message("test outcome c"),
+                output_files: vec![String::from("a"), String::from("b"), String::from("c")],
+                output_dir: String::from("/out/b"),
+                tags: vec![
+                    TestTag { key: String::from("x"), value: String::from("new_x_value") },
+                    TestTag { key: String::from("y"), value: String::from("y_value") },
+                    TestTag { key: String::from("z"), value: String::from("z_value") },
+                ],
             }
         );
 
         // Merging with trivial or identical values does not change self and returns false.
         let before = under_test.clone();
-        assert!(!under_test.merge(SummaryCommonProperties {
-            duration: 0,
-            outcome: outcome(SummaryOutcomeResult::NotSpecified, "test outcome c"),
-            artifacts: [(PathBuf::from("a"), artifact(""))].into(),
-            extension: HashMap::new(),
+        assert!(!under_test.merge(TestCaseResult {
+            case_name: String::from("case_a"),
+            status: TestStatus::NotSpecified,
+            failure_reason: FailureReason::from_message("test outcome c"),
+            output_files: vec![String::from("a")],
+            ..Default::default()
         }));
         assert_eq!(under_test, before);
 
-        assert!(!under_test.merge(SummaryCommonProperties {
-            duration: 3,
-            outcome: SummaryOutcome::default(),
-            artifacts: [(PathBuf::from("a"), artifact("new_a_type"))].into(),
-            extension: HashMap::new(),
+        assert!(!under_test.merge(TestCaseResult {
+            case_name: String::from("case_a"),
+            duration: Duration::from_millis(3),
+            output_files: vec![String::from("a")],
+            ..Default::default()
         }));
         assert_eq!(under_test, before);
     }
 
     #[fuchsia::test]
     fn test_merge_cases() {
-        let mut under_test = Summary {
-            common: SummaryCommonProperties::default(),
-            cases: [
-                (String::from("case_a"), case(SummaryOutcomeResult::Failed, "case_a_outcome")),
-                (String::from("case_b"), case(SummaryOutcomeResult::Failed, "case_b_outcome")),
-            ]
-            .into(),
+        let mut under_test = TestResult {
+            cases: vec![
+                case("case_a", TestStatus::Fail, "case_a_outcome"),
+                case("case_b", TestStatus::Fail, "case_b_outcome"),
+            ],
             ..Default::default()
         };
 
-        // Non-trivial values from argument take precedent. New artifacts are inserted.
-        // Existing artifacts with non-trivial values get updated.
-        assert!(
-            under_test.merge(Summary {
-                common: SummaryCommonProperties::default(),
-                cases: [
-                    (
-                        String::from("case_a"),
-                        case(SummaryOutcomeResult::Failed, "case_a_new_outcome")
-                    ),
-                    (String::from("case_c"), case(SummaryOutcomeResult::Failed, "case_c_outcome")),
-                ]
-                .into(),
-                ..Default::default()
-            })
-        );
-        let expected = Summary {
-            common: SummaryCommonProperties::default(),
-            cases: [
-                (String::from("case_a"), case(SummaryOutcomeResult::Failed, "case_a_new_outcome")),
-                (String::from("case_b"), case(SummaryOutcomeResult::Failed, "case_b_outcome")),
-                (String::from("case_c"), case(SummaryOutcomeResult::Failed, "case_c_outcome")),
-            ]
-            .into(),
+        // Non-trivial values from argument take precedence. New cases are appended.
+        // Existing cases get updated.
+        assert!(under_test.merge(TestResult {
+            cases: vec![
+                case("case_a", TestStatus::Fail, "case_a_new_outcome"),
+                case("case_c", TestStatus::Fail, "case_c_outcome"),
+            ],
+            ..Default::default()
+        }));
+        let expected = TestResult {
+            cases: vec![
+                case("case_a", TestStatus::Fail, "case_a_new_outcome"),
+                case("case_b", TestStatus::Fail, "case_b_outcome"),
+                case("case_c", TestStatus::Fail, "case_c_outcome"),
+            ],
             ..Default::default()
         };
         assert_eq!(under_test, expected);
 
         // Merging unchanged cases returns false and leaves self unchanged.
-        assert!(
-            !under_test.merge(Summary {
-                common: SummaryCommonProperties::default(),
-                cases: [(
-                    String::from("case_a"),
-                    case(SummaryOutcomeResult::Failed, "case_a_new_outcome")
-                ),]
-                .into(),
-                ..Default::default()
-            })
-        );
+        assert!(!under_test.merge(TestResult {
+            cases: vec![case("case_a", TestStatus::Fail, "case_a_new_outcome")],
+            ..Default::default()
+        }));
         assert_eq!(under_test, expected);
     }
 
     #[fuchsia::test]
     fn test_merge_lifecycle_fields() {
-        // When self fields are None and other has Some, other's fields take precedent.
-        let mut under_test = Summary {
+        // When self fields are None and other has Some, other's fields take precedence.
+        let mut under_test = TestResult {
             setup_succeeded: None,
             teardown_succeeded: None,
             exit_code: None,
             ..Default::default()
         };
-        assert!(under_test.merge(Summary {
+        assert!(under_test.merge(TestResult {
             setup_succeeded: Some(true),
             teardown_succeeded: Some(false),
             exit_code: Some(0),
@@ -671,7 +685,7 @@ mod tests {
         assert_eq!(under_test.exit_code, Some(0));
 
         // When other has None, self fields are preserved.
-        assert!(!under_test.merge(Summary {
+        assert!(!under_test.merge(TestResult {
             setup_succeeded: None,
             teardown_succeeded: None,
             exit_code: None,
@@ -682,7 +696,7 @@ mod tests {
         assert_eq!(under_test.exit_code, Some(0));
 
         // When other has Some with identical values, self fields are preserved and merge returns false.
-        assert!(!under_test.merge(Summary {
+        assert!(!under_test.merge(TestResult {
             setup_succeeded: Some(true),
             teardown_succeeded: Some(false),
             exit_code: Some(0),
@@ -693,7 +707,7 @@ mod tests {
         assert_eq!(under_test.exit_code, Some(0));
 
         // When other has Some, it overwrites existing self fields.
-        assert!(under_test.merge(Summary {
+        assert!(under_test.merge(TestResult {
             setup_succeeded: Some(false),
             teardown_succeeded: Some(true),
             exit_code: Some(86),
@@ -705,224 +719,140 @@ mod tests {
     }
 
     #[fuchsia::test]
-    fn test_merge_outcomes() {
-        let results = [
-            SummaryOutcomeResult::NotSpecified,
-            SummaryOutcomeResult::Skipped,
-            SummaryOutcomeResult::Passed,
-            SummaryOutcomeResult::Canceled,
-            SummaryOutcomeResult::TimedOut,
-            SummaryOutcomeResult::Failed,
-            SummaryOutcomeResult::Error,
+    fn test_merge_statuses() {
+        let statuses = [
+            TestStatus::NotSpecified,
+            TestStatus::Skip,
+            TestStatus::Pass,
+            TestStatus::Abort,
+            TestStatus::Fail,
+            TestStatus::InfraFail,
+            TestStatus::Exonerated,
         ];
-        let specified_results = [
-            SummaryOutcomeResult::Skipped,
-            SummaryOutcomeResult::Passed,
-            SummaryOutcomeResult::Canceled,
-            SummaryOutcomeResult::TimedOut,
-            SummaryOutcomeResult::Failed,
-            SummaryOutcomeResult::Error,
+        let specified_statuses = [
+            TestStatus::Skip,
+            TestStatus::Pass,
+            TestStatus::Abort,
+            TestStatus::Fail,
+            TestStatus::InfraFail,
+            TestStatus::Exonerated,
         ];
 
-        // When other is unspecified and detail is none, merging leaves self unchanged.
-        for result in &results {
-            let mut under_test = outcome(result.clone(), "self");
-            assert!(!under_test.merge(SummaryOutcome {
-                result: SummaryOutcomeResult::NotSpecified,
-                detail: None
+        // When other is unspecified and failure_reason is none, merging leaves self unchanged.
+        for status in &statuses {
+            let mut under_test = case("c", *status, "self");
+            assert!(!under_test.merge(TestCaseResult {
+                case_name: String::from("c"),
+                status: TestStatus::NotSpecified,
+                failure_reason: None,
+                ..Default::default()
             }));
-            assert_eq!(under_test, outcome(result.clone(), "self"));
+            assert_eq!(under_test, case("c", *status, "self"));
         }
 
-        // When other's result is specified:
-        for self_result in &results {
-            for other_result in &specified_results {
-                // If other has a different result, or same result with a different detail,
+        // When other's status is specified:
+        for self_status in &statuses {
+            for other_status in &specified_statuses {
+                // If other has a different status, or same status with a different failure_reason,
                 // merging changes self to equal other.
-                let mut under_test = outcome(self_result.clone(), "self");
-                let other = outcome(other_result.clone(), "other");
+                let mut under_test = case("c", *self_status, "self");
+                let other = case("c", *other_status, "other");
                 assert!(under_test.merge(other.clone()));
                 assert_eq!(under_test, other);
 
-                // If other's result is different, self takes other's result and None detail.
-                // If other's result is the same and other's detail is None, self is unchanged.
-                let mut under_test = outcome(self_result.clone(), "self");
-                let other = SummaryOutcome { result: other_result.clone(), detail: None };
-                if self_result != other_result {
+                // If other's status is different, self takes other's status and None failure_reason.
+                // If other's status is the same and other's failure_reason is None, self is unchanged.
+                let mut under_test = case("c", *self_status, "self");
+                let other = TestCaseResult {
+                    display_name: String::from("c"),
+                    case_name: String::from("c"),
+                    status: *other_status,
+                    failure_reason: None,
+                    ..Default::default()
+                };
+                if self_status != other_status {
                     assert!(under_test.merge(other.clone()));
                     assert_eq!(under_test, other);
                 } else {
                     assert!(!under_test.merge(other));
-                    assert_eq!(under_test, outcome(self_result.clone(), "self"));
+                    assert_eq!(under_test, case("c", *self_status, "self"));
                 }
             }
         }
 
-        // When other's result and detail are identical, merging leaves self unchanged.
-        for result in &specified_results {
-            let mut under_test = outcome(result.clone(), "self");
-            let other = outcome(result.clone(), "self");
+        // When other's status and failure_reason are identical, merging leaves self unchanged.
+        for status in &specified_statuses {
+            let mut under_test = case("c", *status, "self");
+            let other = case("c", *status, "self");
             assert!(!under_test.merge(other));
-            assert_eq!(under_test, outcome(result.clone(), "self"));
+            assert_eq!(under_test, case("c", *status, "self"));
         }
 
-        // When other's result is unspecified:
-        for result in &results {
-            // Different detail changes self's detail to other's.
-            let mut under_test = outcome(result.clone(), "self");
-            assert!(under_test.merge(outcome(SummaryOutcomeResult::NotSpecified, "other")));
-            assert_eq!(under_test, outcome(result.clone(), "other"));
+        // When other's status is unspecified:
+        for status in &statuses {
+            // Different failure_reason changes self's failure_reason to other's.
+            let mut under_test = case("c", *status, "self");
+            assert!(under_test.merge(case("c", TestStatus::NotSpecified, "other")));
+            assert_eq!(under_test, case("c", *status, "other"));
 
-            // Same detail leaves self unchanged and returns false.
-            let mut under_test = outcome(result.clone(), "self");
-            assert!(!under_test.merge(outcome(SummaryOutcomeResult::NotSpecified, "self")));
-            assert_eq!(under_test, outcome(result.clone(), "self"));
-        }
-    }
-
-    #[fuchsia::test]
-    fn test_merge_case_outcomes() {
-        let results = [
-            SummaryOutcomeResult::NotSpecified,
-            SummaryOutcomeResult::Skipped,
-            SummaryOutcomeResult::Passed,
-            SummaryOutcomeResult::Canceled,
-            SummaryOutcomeResult::TimedOut,
-            SummaryOutcomeResult::Failed,
-            SummaryOutcomeResult::Error,
-        ];
-
-        // Merging an outcome with a greater result copies the greater result.
-        let selves_iter = &mut results.into_iter();
-        while let Some(self_result) = selves_iter.next() {
-            let mut others_iter = selves_iter.clone();
-            while let Some(other_result) = others_iter.next() {
-                let mut self_outcome = SummaryOutcome {
-                    result: self_result,
-                    detail: Some(String::from("self detail")),
-                };
-                let other_outcome = SummaryOutcome {
-                    result: other_result,
-                    detail: Some(String::from("other detail")),
-                };
-                self_outcome.merge_case_outcome(other_outcome.clone());
-                assert_eq!(other_outcome, self_outcome);
-            }
-        }
-
-        // Merging an outcome with a lesser result has no effect.
-        let others_iter = &mut results.into_iter();
-        while let Some(other_result) = others_iter.next() {
-            let mut selves_iter = others_iter.clone();
-            while let Some(self_result) = selves_iter.next() {
-                let mut self_outcome = SummaryOutcome {
-                    result: self_result,
-                    detail: Some(String::from("self detail")),
-                };
-                let other_outcome = SummaryOutcome {
-                    result: other_result,
-                    detail: Some(String::from("other detail")),
-                };
-                self_outcome.merge_case_outcome(other_outcome.clone());
-                assert_eq!(
-                    SummaryOutcome {
-                        result: self_result,
-                        detail: Some(String::from("self detail"))
-                    },
-                    self_outcome
-                );
-            }
-        }
-
-        // Merging an outcome with an equal result has no effect on the result and merges the
-        // detail.
-        for result in results {
-            // If both outcomes have no detail, the merge will have no detail.
-            let mut self_outcome = SummaryOutcome { result: result, detail: None };
-            let other_outcome = SummaryOutcome { result: result, detail: None };
-            self_outcome.merge_case_outcome(other_outcome.clone());
-            assert_eq!(self_outcome, SummaryOutcome { result: result, detail: None });
-
-            // If both outcomes have detail, the detail is concatenated with a newline separator.
-            let mut self_outcome =
-                SummaryOutcome { result: result, detail: Some(String::from("self detail")) };
-            let other_outcome =
-                SummaryOutcome { result: result, detail: Some(String::from("other detail")) };
-            self_outcome.merge_case_outcome(other_outcome.clone());
-            assert_eq!(
-                self_outcome,
-                SummaryOutcome {
-                    result: result,
-                    detail: Some(String::from("self detail\nother detail"))
-                }
-            );
-
-            // If only the self outcome has detail, that detail is used.
-            let mut self_outcome =
-                SummaryOutcome { result: result, detail: Some(String::from("self detail")) };
-            let other_outcome = SummaryOutcome { result: result, detail: None };
-            self_outcome.merge_case_outcome(other_outcome.clone());
-            assert_eq!(
-                self_outcome,
-                SummaryOutcome { result: result, detail: Some(String::from("self detail")) }
-            );
-
-            // If only the other outcome has detail, that detail is used.
-            let mut self_outcome = SummaryOutcome { result: result, detail: None };
-            let other_outcome =
-                SummaryOutcome { result: result, detail: Some(String::from("other detail")) };
-            self_outcome.merge_case_outcome(other_outcome.clone());
-            assert_eq!(
-                self_outcome,
-                SummaryOutcome { result: result, detail: Some(String::from("other detail")) }
-            );
+            // Same failure_reason leaves self unchanged and returns false.
+            let mut under_test = case("c", *status, "self");
+            assert!(!under_test.merge(case("c", TestStatus::NotSpecified, "self")));
+            assert_eq!(under_test, case("c", *status, "self"));
         }
     }
 
     #[fuchsia::test]
-    fn test_outcome_from_exit_status() {
+    fn test_failure_reason_from_exit_status() {
+        assert_eq!(failure_reason_from_exit_status(ExitStatus::from_raw(0)), None);
+        assert_eq!(failure_reason_from_exit_status(ExitStatus::from_raw(FAIL_EXIT_STATUS)), None);
         assert_eq!(
-            outcome_from_exit_status(ExitStatus::from_raw(0)),
-            SummaryOutcome { result: SummaryOutcomeResult::Passed, detail: None }
-        );
-        assert_eq!(
-            outcome_from_exit_status(ExitStatus::from_raw(FAIL_EXIT_STATUS)),
-            SummaryOutcome { result: SummaryOutcomeResult::Failed, detail: None }
-        );
-        assert_eq!(
-            outcome_from_exit_status(ExitStatus::from_raw(1)),
-            SummaryOutcome {
-                result: SummaryOutcomeResult::Error,
-                detail: Some(String::from("test binary failed with exit status 1"))
-            }
+            failure_reason_from_exit_status(ExitStatus::from_raw(1)),
+            FailureReason::from_message("test binary failed with exit status 1")
         );
     }
 
     #[fuchsia::test]
     fn test_summary_write() {
-        let under_test = Summary {
-            common: SummaryCommonProperties {
-                duration: 3,
-                outcome: outcome(SummaryOutcomeResult::Failed, "test outcome b"),
-                artifacts: [
-                    (PathBuf::from("a"), artifact("a_type")),
-                    (PathBuf::from("b"), artifact("b_type")),
-                    (PathBuf::from("c"), artifact("c_type")),
-                ]
-                .into(),
-                extension: [
-                    (String::from("x"), Value::from("x_value")),
-                    (String::from("y"), Value::from("y_value")),
-                    (String::from("z"), Value::from("z_value")),
-                ]
-                .into(),
-            },
-            cases: [
-                (String::from("case_a"), case(SummaryOutcomeResult::Failed, "case_a_outcome")),
-                (String::from("case_b"), case(SummaryOutcomeResult::Failed, "case_b_outcome")),
-            ]
-            .into(),
-            ..Default::default()
+        let under_test = TestResult {
+            output_files: vec![String::from("a"), String::from("b"), String::from("c")],
+            output_dir: String::from("/out/dir"),
+            cases: vec![
+                TestCaseResult {
+                    display_name: String::from("case_a"),
+                    suite_name: String::new(),
+                    case_name: String::from("case_a"),
+                    status: TestStatus::Fail,
+                    duration: Duration::from_millis(3),
+                    format: String::from("FTF"),
+                    failure_reason: FailureReason::from_message("case_a_outcome"),
+                    output_files: vec![String::from("case_a/log.txt")],
+                    output_dir: String::from("/out/dir"),
+                    tags: vec![TestTag {
+                        key: String::from("test_outcome"),
+                        value: String::from("FAILED"),
+                    }],
+                },
+                TestCaseResult {
+                    display_name: String::from("case_b"),
+                    suite_name: String::new(),
+                    case_name: String::from("case_b"),
+                    status: TestStatus::Pass,
+                    duration: Duration::from_millis(5),
+                    format: String::from("FTF"),
+                    failure_reason: None,
+                    output_files: vec![],
+                    output_dir: String::from("/out/dir"),
+                    tags: vec![TestTag {
+                        key: String::from("test_outcome"),
+                        value: String::from("PASSED"),
+                    }],
+                },
+            ],
+            failure_reason: FailureReason::from_message("test outcome b"),
+            setup_succeeded: Some(true),
+            teardown_succeeded: Some(true),
+            exit_code: Some(86),
         };
 
         let temp_dir = tempdir().expect("to create temporary directory");
@@ -936,20 +866,40 @@ mod tests {
         assert_eq!(
             file_contents,
             json!({
-                "artifacts": {
-                    "a": {"type": "a_type"},
-                    "b": {"type": "b_type"},
-                    "c": {"type": "c_type"}
+                "output_files": ["a", "b", "c"],
+                "output_dir": "/out/dir",
+                "cases": [
+                    {
+                        "display_name": "case_a",
+                        "suite_name": "",
+                        "case_name": "case_a",
+                        "status": "FAIL",
+                        "duration_nanos": 3_000_000,
+                        "format": "FTF",
+                        "failure_reason": {
+                            "errors": [{"message": "case_a_outcome"}]
+                        },
+                        "output_files": ["case_a/log.txt"],
+                        "output_dir": "/out/dir",
+                        "tags": [{"key": "test_outcome", "value": "FAILED"}]
+                    },
+                    {
+                        "display_name": "case_b",
+                        "suite_name": "",
+                        "case_name": "case_b",
+                        "status": "PASS",
+                        "duration_nanos": 5_000_000,
+                        "format": "FTF",
+                        "output_dir": "/out/dir",
+                        "tags": [{"key": "test_outcome", "value": "PASSED"}]
+                    }
+                ],
+                "failure_reason": {
+                    "errors": [{"message": "test outcome b"}]
                 },
-                "cases": {
-                    "case_a": {"outcome": {"result": "failed", "detail": "case_a_outcome"}},
-                    "case_b": {"outcome": {"result": "failed", "detail": "case_b_outcome"}}
-                },
-                "duration": 3,
-                "outcome": {"result": "failed", "detail": "test outcome b"},
-                "x": "x_value",
-                "y": "y_value",
-                "z": "z_value"
+                "setup_succeeded": true,
+                "teardown_succeeded": true,
+                "exit_code": 86
             })
         );
 
@@ -957,9 +907,36 @@ mod tests {
     }
 
     #[fuchsia::test]
+    fn test_summary_write_rejects_not_specified_status() {
+        let under_test = TestResult {
+            output_dir: String::from("/out/dir"),
+            cases: vec![TestCaseResult {
+                case_name: String::from("case_unspecified"),
+                status: TestStatus::NotSpecified,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let temp_dir = tempdir().expect("to create temporary directory");
+        let file_path = temp_dir.path().join("test_output_summary.json");
+
+        let err = under_test
+            .write(&file_path)
+            .expect_err("writing summary with NotSpecified case status should fail");
+        assert!(matches!(
+            err,
+            TestOutputError::UnspecifiedCaseStatus { case_name, .. }
+                if case_name == "case_unspecified"
+        ));
+
+        temp_dir.close().expect("to close temporary directory");
+    }
+
+    #[fuchsia::test]
     fn test_summary_maybe_merge_file() {
         let temp_dir = tempdir().expect("to create temporary directory");
-        let mut under_test = Summary::default();
+        let mut under_test = TestResult::default();
 
         assert_eq!(
             false,
@@ -968,68 +945,100 @@ mod tests {
                 .expect("success"),
         );
 
-        assert_eq!(Summary::default(), under_test);
+        assert_eq!(TestResult::default(), under_test);
 
         let file_path = temp_dir.path().join("test_output_summary.json");
         fs::write(
             &file_path,
             serde_json::to_string_pretty(&json!({
-                "artifacts": {
-                    "a": {"type": "a_type"},
-                    "b": {"type": "b_type"},
-                    "c": {"type": "c_type"}
-                },
-                "cases": {
-                    "case_a": {"outcome": {"result": "failed", "detail": "case_a_outcome"}},
-                    "case_b": {"outcome": {"result": "failed", "detail": "case_b_outcome"}}
-                },
-                "duration": 3,
-                "outcome": {"result": "failed", "detail": "test outcome b"},
-                "x": "x_value",
-                "y": "y_value",
-                "z": "z_value"
+                "output_files": ["a", "b"],
+                "output_dir": "/out",
+                "cases": [
+                    {
+                        "display_name": "case_a",
+                        "suite_name": "",
+                        "case_name": "case_a",
+                        "status": "FAIL",
+                        "duration_nanos": 3_000_000,
+                        "format": "FTF",
+                        "failure_reason": {"errors": [{"message": "case_a_outcome"}]},
+                        "tags": []
+                    },
+                    {
+                        "display_name": "case_b",
+                        "suite_name": "",
+                        "case_name": "case_b",
+                        "status": "PASS",
+                        "duration_nanos": 1_000_000,
+                        "format": "FTF",
+                        "tags": []
+                    }
+                ],
+                "failure_reason": {"errors": [{"message": "test outcome b"}]}
             }))
             .unwrap(),
         )
         .expect("json write succeeds");
 
-        assert_eq!(true, under_test.maybe_merge_file(&file_path).expect("success"),);
+        assert_eq!(true, under_test.maybe_merge_file(&file_path).expect("success"));
 
         assert_eq!(
-            Summary {
-                common: SummaryCommonProperties {
-                    duration: 3,
-                    outcome: outcome(SummaryOutcomeResult::Failed, "test outcome b"),
-                    artifacts: [
-                        (PathBuf::from("a"), artifact("a_type")),
-                        (PathBuf::from("b"), artifact("b_type")),
-                        (PathBuf::from("c"), artifact("c_type")),
-                    ]
-                    .into(),
-                    extension: [
-                        (String::from("x"), Value::from("x_value")),
-                        (String::from("y"), Value::from("y_value")),
-                        (String::from("z"), Value::from("z_value")),
-                    ]
-                    .into(),
-                },
-                cases: [
-                    (String::from("case_a"), case(SummaryOutcomeResult::Failed, "case_a_outcome")),
-                    (String::from("case_b"), case(SummaryOutcomeResult::Failed, "case_b_outcome")),
-                ]
-                .into(),
+            TestResult {
+                output_files: vec![String::from("a"), String::from("b")],
+                output_dir: String::from("/out"),
+                cases: vec![
+                    TestCaseResult {
+                        display_name: String::from("case_a"),
+                        case_name: String::from("case_a"),
+                        status: TestStatus::Fail,
+                        duration: Duration::from_millis(3),
+                        format: String::from("FTF"),
+                        failure_reason: FailureReason::from_message("case_a_outcome"),
+                        ..Default::default()
+                    },
+                    TestCaseResult {
+                        display_name: String::from("case_b"),
+                        case_name: String::from("case_b"),
+                        status: TestStatus::Pass,
+                        duration: Duration::from_millis(1),
+                        format: String::from("FTF"),
+                        ..Default::default()
+                    },
+                ],
+                failure_reason: FailureReason::from_message("test outcome b"),
                 ..Default::default()
             },
             under_test
         );
+
+        // Merging a postprocessor file that updates an existing case without specifying status
+        // preserves the existing case's status.
+        let postproc_file_path = temp_dir.path().join("postproc_summary.json");
+        fs::write(
+            &postproc_file_path,
+            serde_json::to_string_pretty(&json!({
+                "cases": [
+                    {
+                        "case_name": "case_b",
+                        "output_files": ["postproc/extra.txt"]
+                    }
+                ]
+            }))
+            .unwrap(),
+        )
+        .expect("json write succeeds");
+
+        assert_eq!(true, under_test.maybe_merge_file(&postproc_file_path).expect("success"));
+        assert_eq!(under_test.cases[1].status, TestStatus::Pass);
+        assert_eq!(under_test.cases[1].output_files, vec![String::from("postproc/extra.txt")]);
 
         // Merging a file with no new information returns Ok(false).
         let no_change_file_path = temp_dir.path().join("no_change_summary.json");
         fs::write(
             &no_change_file_path,
             serde_json::to_string_pretty(&json!({
-                "duration": 3,
-                "outcome": {"result": "failed", "detail": "test outcome b"},
+                "output_dir": "/out",
+                "failure_reason": {"errors": [{"message": "test outcome b"}]},
             }))
             .unwrap(),
         )
@@ -1047,7 +1056,6 @@ mod tests {
         fs::write(
             &file_path,
             serde_json::to_string_pretty(&json!({
-                "outcome": {},
                 "setup_succeeded": false,
                 "teardown_succeeded": true,
                 "exit_code": 1,
@@ -1056,7 +1064,7 @@ mod tests {
         )
         .expect("json write succeeds");
 
-        let mut under_test = Summary::default();
+        let mut under_test = TestResult::default();
         assert!(under_test.maybe_merge_file(&file_path).expect("success"));
         assert_eq!(under_test.setup_succeeded, Some(false));
         assert_eq!(under_test.teardown_succeeded, Some(true));
@@ -1068,31 +1076,30 @@ mod tests {
         temp_dir.close().expect("to close temporary directory");
     }
 
-    #[fuchsia::test]
-    fn test_merge_artifact() {
-        let mut under_test = artifact("old_type");
-
-        // Empty type does not change artifact and returns false.
-        assert!(!under_test.merge(artifact("")));
-        assert_eq!(under_test, artifact("old_type"));
-
-        // Same type does not change artifact and returns false.
-        assert!(!under_test.merge(artifact("old_type")));
-        assert_eq!(under_test, artifact("old_type"));
-
-        // Different non-empty type updates artifact and returns true.
-        assert!(under_test.merge(artifact("new_type")));
-        assert_eq!(under_test, artifact("new_type"));
+    #[test]
+    fn test_failure_reason_from_message() {
+        assert_eq!(FailureReason::from_message(""), None);
+        assert_eq!(FailureReason::from_message("   \n"), None);
+        assert_eq!(
+            FailureReason::from_message("  test failure  "),
+            Some(FailureReason {
+                errors: vec![FailureReasonError {
+                    message: String::from("test failure"),
+                    trace: String::new(),
+                }],
+                truncated_errors_count: 0,
+            })
+        );
     }
 
     #[test]
     fn test_is_failure() {
-        assert!(!SummaryOutcomeResult::NotSpecified.is_failure());
-        assert!(!SummaryOutcomeResult::Skipped.is_failure());
-        assert!(!SummaryOutcomeResult::Passed.is_failure());
-        assert!(SummaryOutcomeResult::Canceled.is_failure());
-        assert!(SummaryOutcomeResult::TimedOut.is_failure());
-        assert!(SummaryOutcomeResult::Failed.is_failure());
-        assert!(SummaryOutcomeResult::Error.is_failure());
+        assert!(!TestStatus::NotSpecified.is_failure());
+        assert!(!TestStatus::Skip.is_failure());
+        assert!(!TestStatus::Pass.is_failure());
+        assert!(!TestStatus::Exonerated.is_failure());
+        assert!(TestStatus::Abort.is_failure());
+        assert!(TestStatus::Fail.is_failure());
+        assert!(TestStatus::InfraFail.is_failure());
     }
 }

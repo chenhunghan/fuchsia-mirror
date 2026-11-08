@@ -36,7 +36,9 @@ def _rustc_library_impl(
     # for crates also matches the stale file, which breaks the build (see
     # //src/storage/lib/vfs/rust:vfs_static).
     if lint_config == None:
-        lint_config = "//build/config/rust/lints:clippy_warn_production"
+        lint_config = (
+            "//build/config/rust/lints:clippy_warn_default" if kwargs.get("testonly") else "//build/config/rust/lints:clippy_warn_production"
+        )
         test_lint_config = "//build/config/rust/lints:clippy_warn_default"
     else:
         test_lint_config = lint_config
@@ -102,7 +104,8 @@ with_unit_tests is enabled. The test target will be named "<name>_test"
 and will include extra dependencies from test_deps.
 
 The default lint_config value is //build/config/rust/lints:clippy_warn_production
-for the target, and //build/config/rust/lints:clippy_warn_default for the test target.
+for non-testonly targets, and //build/config/rust/lints:clippy_warn_default when
+testonly = True is set on the target or for the generated test target.
 If specified by the caller, lint_config is applied to both main and test targets.
 
 Also used to allow easier syncing between Bazel and GN targets.

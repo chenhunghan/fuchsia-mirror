@@ -49,6 +49,13 @@ class FuchsiaWlanBaseTest(fuchsia_base_test.FuchsiaBaseTest):
             )
             or []
         )
+        for ap in self.access_points:
+            switch, outlet = self._lookup_power_switch_from_config(
+                device_config=ap.config,
+                device_name=ap.nodename,
+            )
+            if switch is not None:
+                ap.set_power_switch(power_switch=switch, outlet=outlet)
         self.openwrt_aps = (
             await self.register_controller(
                 openwrt_access_point,
@@ -69,7 +76,8 @@ class FuchsiaWlanBaseTest(fuchsia_base_test.FuchsiaBaseTest):
             or []
         )
         for attn in self.attenuators:
-            attn.set_atten(0)
+            # Set a default attenuation for tests which don't explicitly control the attenuator.
+            attn.set_atten(25)
 
     async def setup_test(self) -> None:
         await super().setup_test()
@@ -133,6 +141,18 @@ class FuchsiaWlanBaseTest(fuchsia_base_test.FuchsiaBaseTest):
         await super().teardown_test()
 
     async def teardown_class(self) -> None:
+        for ap in self.access_points:
+            switch, outlet = self._lookup_power_switch_from_config(
+                device_config=ap.config,
+                device_name=ap.nodename,
+            )
+            if switch is not None:
+                try:
+                    switch.power_on(outlet=outlet)
+                except Exception as e:
+                    logging.warning(
+                        f"Failed to power on power switch for {ap.identifier}: {e}"
+                    )
         self._download_ap_logs(self.log_path)
         await super().teardown_class()
 
@@ -150,7 +170,7 @@ class FuchsiaWlanBaseTest(fuchsia_base_test.FuchsiaBaseTest):
             interface name
 
         Raises:
-            TestAbortClass: Desired interface does not exist
+            TestError: Desired interface does not exist
         """
         interfaces: list[InterfaceProperties] = []
         end_time = time.time() + INTERFACE_TIMEOUT
@@ -160,6 +180,6 @@ class FuchsiaWlanBaseTest(fuchsia_base_test.FuchsiaBaseTest):
                 if interface.port_class is port_class:
                     return interface.name
             await asyncio.sleep(1)  # Prevent denial-of-service
-        raise signals.TestAbortClass(
+        raise signals.TestError(
             f"Expected presence of a {port_class.name} interface, got {interfaces}"
         )

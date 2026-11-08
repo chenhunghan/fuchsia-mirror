@@ -7,6 +7,11 @@ use fbl::HasRefCount;
 use pin_init::stack_pin_init;
 use zx_status::Status;
 
+// The region allocator is generic over its raw lock type; tests use the userspace `RawMutex`.
+type Region = super::Region<ksync::RawMutex>;
+type RegionAllocator = super::RegionAllocator<ksync::RawMutex>;
+type RegionPool = super::RegionPool<ksync::RawMutex>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TestFlavor {
     UsePool,

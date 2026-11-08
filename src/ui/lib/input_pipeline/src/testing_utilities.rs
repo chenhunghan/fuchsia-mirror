@@ -662,7 +662,7 @@ pub fn create_touch_screen_event_with_handled(
         }
     }
 
-    let injector_contacts = SortedVecMap::from_iter(vec![
+    let mut injector_vec = vec![
         (
             pointerinjector_next::EventPhase::Add,
             contacts.get(&fidl_ui_input::PointerEventPhase::Add).unwrap().clone(),
@@ -675,7 +675,11 @@ pub fn create_touch_screen_event_with_handled(
             pointerinjector_next::EventPhase::Remove,
             contacts.get(&fidl_ui_input::PointerEventPhase::Remove).unwrap().clone(),
         ),
-    ]);
+    ];
+    if let Some(cancel_contacts) = contacts.get(&fidl_ui_input::PointerEventPhase::Cancel) {
+        injector_vec.push((pointerinjector_next::EventPhase::Cancel, cancel_contacts.clone()));
+    }
+    let injector_contacts = SortedVecMap::from_iter(injector_vec);
     input_device::InputEvent {
         device_event: input_device::InputDeviceEvent::TouchScreen(
             touch_binding::TouchScreenEvent {

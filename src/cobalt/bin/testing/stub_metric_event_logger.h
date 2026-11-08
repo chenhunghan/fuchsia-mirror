@@ -7,6 +7,8 @@
 
 #include <fuchsia/metrics/cpp/fidl.h>
 
+#include <optional>
+
 #include "src/cobalt/bin/testing/log_metric_method.h"
 
 namespace cobalt {
@@ -62,6 +64,10 @@ class StubMetricEventLogger_Sync : public fuchsia::metrics::MetricEventLogger_Sy
 
   void reset_logged_events() { logged_events_.clear(); }
 
+  void set_error_to_return(std::optional<fuchsia::metrics::Error> error) {
+    error_to_return_ = error;
+  }
+
   void reset() {
     reset_last_metric_id();
     reset_last_event_codes();
@@ -70,6 +76,7 @@ class StubMetricEventLogger_Sync : public fuchsia::metrics::MetricEventLogger_Sy
     reset_call_count();
     reset_event_count();
     reset_logged_events();
+    error_to_return_ = std::nullopt;
   }
 
  private:
@@ -78,6 +85,7 @@ class StubMetricEventLogger_Sync : public fuchsia::metrics::MetricEventLogger_Sy
   int64_t last_integer_ = -1;
   LogMetricMethod last_log_metric_method_invoked_ = LogMetricMethod::kDefault;
   size_t call_count_ = 0;
+  std::optional<fuchsia::metrics::Error> error_to_return_;
 
   // Used for LogMetricEvents() only.
   size_t event_count_ = 0;

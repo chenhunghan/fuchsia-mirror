@@ -43,8 +43,6 @@
 #include "threads_impl.h"
 #include "zircon_impl.h"
 
-void* __tls_get_addr(const size_t got[2]);
-
 static void early_init(void);
 static void error(const char*, ...);
 static void debugmsg(const char*, ...);
@@ -949,6 +947,8 @@ LIBC_NO_SAFESTACK NO_ASAN static zx_status_t map_library(zx_handle_t vmo, zx_han
   zx_status_t status = _zx_vmo_get_size(vmo, &l);
   if (status != ZX_OK)
     return status;
+  if (l < sizeof(*eh))
+    goto noexec;
   status = _zx_vmo_read(vmo, &buf, 0, sizeof(buf) < l ? sizeof(buf) : l);
   if (status != ZX_OK)
     return status;
@@ -959,12 +959,17 @@ LIBC_NO_SAFESTACK NO_ASAN static zx_status_t map_library(zx_handle_t vmo, zx_han
   // been loaded.  It's also policy in Fuchsia that all executables are
   // PIEs to maximize ASLR security benefits.  So don't even try to
   // handle loading ET_EXEC.
-  if (l < sizeof *eh || eh->e_type != ET_DYN)
+  if (eh->e_type != ET_DYN)
     goto noexec;
-  phsize = eh->e_phentsize * eh->e_phnum;
+  if (eh->e_phnum == 0 || eh->e_phentsize != sizeof(Phdr))
+    goto noexec;
+  phsize = (size_t)eh->e_phentsize * eh->e_phnum;
   if (phsize > sizeof(buf.phdrs))
     goto noexec;
-  if (eh->e_phoff + phsize > l) {
+  if (eh->e_phoff > l || phsize > l - eh->e_phoff)
+    goto noexec;
+  if (eh->e_phoff < sizeof(*eh) || eh->e_phoff + phsize > sizeof(buf) ||
+      eh->e_phoff % alignof(Phdr) != 0) {
     status = _zx_vmo_read(vmo, buf.phdrs, eh->e_phoff, phsize);
     if (status != ZX_OK)
       goto error;
@@ -1696,6 +1701,10 @@ __attribute__((__visibility__("hidden"))) void* __tls_get_new(size_t offset, siz
   return mem + (ptrdiff_t)offset + (ptrdiff_t)DTP_OFFSET;
 }
 
+static void* resolve_tls(size_t offset, size_t modid) {
+  return (char*)__tls_get_new(offset, modid) - (ptrdiff_t)DTP_OFFSET;
+}
+
 LIBC_NO_SAFESTACK static void update_tls_size(void) {
   tls_layout.tls_cnt = tls_cnt;
   tls_layout.align = tls_align;
@@ -2297,8 +2306,7 @@ static struct dl_phdr_info get_phdr_info(const struct dso* current, bool tls) {
       .dlpi_tls_data = NULL,
   };
   if (tls && current->tls_id > 0) {
-    const size_t fake_got[2] = {current->tls_id, 0};
-    info.dlpi_tls_data = (char*)__tls_get_addr(fake_got) - DTP_OFFSET;
+    info.dlpi_tls_data = resolve_tls(0, current->tls_id);
   }
   return info;
 }
@@ -2504,7 +2512,7 @@ static bool find_sym_for_dlsym(struct dso* p, const char* name, uint32_t* name_g
     sym = sysv_lookup(name, *name_sysv_hash, p);
   }
   if (sym && (sym->st_info & 0xf) == STT_TLS) {
-    *result = __tls_get_addr((size_t[]){p->tls_id, sym->st_value});
+    *result = resolve_tls(sym->st_value, p->tls_id);
     return true;
   }
   if (sym && sym->st_value && (1 << (sym->st_info & 0xf) & OK_TYPES)) {
@@ -2538,7 +2546,7 @@ static void* do_dlsym(struct dso* p, const char* s, void* ra) {
     if (!def.sym)
       goto failed;
     if ((def.sym->st_info & 0xf) == STT_TLS)
-      return __tls_get_addr((size_t[]){def.dso->tls_id, def.sym->st_value});
+      return resolve_tls(def.sym->st_value, def.dso->tls_id);
     return laddr(def.dso, def.sym->st_value);
   }
   if (__dl_invalid_handle(p))
@@ -2756,32 +2764,13 @@ LIBC_NO_SAFESTACK zx_status_t dl_clone_loader_service(zx_handle_t* out) {
   return status;
 }
 
-LIBC_NO_SAFESTACK static size_t errormsg_write(FILE* f, const unsigned char* buf, size_t len) {
-  if (f != NULL && f->wpos > f->wbase) {
-    _dl_log_write((const char*)f->wbase, f->wpos - f->wbase);
-  }
-
-  if (len > 0) {
-    _dl_log_write((const char*)buf, len);
-  }
-
-  if (f != NULL) {
-    f->wend = f->buf + f->buf_size;
-    f->wpos = f->wbase = f->buf;
-  }
-
-  return len;
-}
-
-LIBC_NO_SAFESTACK static int errormsg_vprintf(const char* restrict fmt, va_list ap) {
-  FILE f = {
-      .lbf = EOF,
-      .write = errormsg_write,
-      .buf = (void*)fmt,
-      .buf_size = 0,
-      .lock = -1,
-  };
-  return vfprintf(&f, fmt, ap);
+// This can be called before the compiler ABI is set up (e.g. from __dls3 or
+// load_deps), so it must not use stdio: vfprintf and its callees are built
+// with the shadow-call-stack (or safe-stack) ABI, which faults when the
+// corresponding register or thread pointer has not been initialized yet.
+// _dl_log_vprintf is built for the basic machine ABI.
+LIBC_NO_SAFESTACK static void errormsg_vprintf(const char* restrict fmt, va_list ap) {
+  _dl_log_vprintf(fmt, ap);
 }
 
 LIBC_NO_SAFESTACK static void debugmsg(const char* fmt, ...) {

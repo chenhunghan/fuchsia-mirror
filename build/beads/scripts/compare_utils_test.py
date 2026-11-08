@@ -4,20 +4,15 @@
 
 import json
 import pathlib
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-# Root directory of the Fuchsia source tree.
-_FUCHSIA_DIR = pathlib.Path(__file__).parent.parent.parent.parent
-
-sys.path.insert(0, str(_FUCHSIA_DIR / "build/bazel/scripts"))
-import build_utils
-import compare_utils
-from build_utils import MockCommandRunner, NinjaRunner
-from compare_utils import (
+from build.bazel.scripts import build_utils
+from build.bazel.scripts.build_utils import MockCommandRunner, NinjaRunner
+from build.beads.scripts import compare_utils
+from build.beads.scripts.compare_utils import (
     ACTION_C_COMPILE,
     ACTION_CPP_COMPILE,
     ACTION_CPP_LINK,
@@ -527,6 +522,198 @@ class TestBuildCommandQueryUtils(unittest.TestCase):
                 ],
             )
 
+    def test_is_pic_compile_action(self) -> None:
+        self.assertTrue(
+            compare_utils._is_pic_compile_action(
+                ["clang++", "-c", "foo.cc", "-o", "bazel-out/foo.pic.o"]
+            )
+        )
+        self.assertTrue(
+            compare_utils._is_pic_compile_action(
+                ["clang++", "-c", "foo.cc", "-o=bazel-out/foo.pic.o"]
+            )
+        )
+        self.assertTrue(
+            compare_utils._is_pic_compile_action(
+                ["clang++", "-c", "foo.cc", "--output=bazel-out/foo.pic.o"]
+            )
+        )
+        self.assertTrue(
+            compare_utils._is_pic_compile_action(
+                ["clang++", "-c", "foo.cc", "-obazel-out/foo.pic.o"]
+            )
+        )
+        self.assertFalse(
+            compare_utils._is_pic_compile_action(
+                ["clang++", "-c", "foo.cc", "-o", "bazel-out/foo.o"]
+            )
+        )
+        self.assertFalse(
+            compare_utils._is_pic_compile_action(
+                ["clang++", "-c", "foo.cc", "-o=bazel-out/foo.o"]
+            )
+        )
+        self.assertFalse(
+            compare_utils._is_pic_compile_action(
+                ["clang++", "-c", "foo.cc", "--output=bazel-out/foo.o"]
+            )
+        )
+        self.assertFalse(
+            compare_utils._is_pic_compile_action(["clang++", "-c", "foo.cc"])
+        )
+
+    def test_query_bazel_commands_prefer_non_pic_for_static(self) -> None:
+        mock_bazel_launcher = build_utils.MockBazelLauncher()
+        mock_bazel_launcher.push_expected_outputs(
+            [
+                json.dumps(
+                    {
+                        "targets": [{"id": "1", "label": "//foo:bar"}],
+                        "actions": [
+                            {
+                                "targetId": "1",
+                                "arguments": [
+                                    "clang++",
+                                    "-fPIC",
+                                    "-c",
+                                    "foo.cc",
+                                    "-o",
+                                    "bazel-out/foo.pic.o",
+                                ],
+                                "mnemonic": "CppCompile",
+                            },
+                            {
+                                "targetId": "1",
+                                "arguments": [
+                                    "clang++",
+                                    "-c",
+                                    "foo.cc",
+                                    "-o",
+                                    "bazel-out/foo.o",
+                                ],
+                                "mnemonic": "CppCompile",
+                            },
+                        ],
+                    }
+                )
+            ]
+        )
+
+        res = compare_utils.query_bazel_commands(
+            mock_bazel_launcher,
+            "execroot",
+            [
+                CompareCommandsQuery(
+                    gn="//foo:bar",
+                    bazel=ConfiguredBazelLabel("//foo:bar", "host"),
+                    action_type=ACTION_CPP_COMPILE,
+                )
+            ],
+        )
+        self.assertEqual(
+            res[ConfiguredBazelLabel("//foo:bar", "host")],
+            "clang++ -c foo.cc -o bazel-out/foo.o",
+        )
+
+    def test_query_bazel_commands_prefer_pic_for_shared_toolchain(self) -> None:
+        mock_bazel_launcher = build_utils.MockBazelLauncher()
+        mock_bazel_launcher.push_expected_outputs(
+            [
+                json.dumps(
+                    {
+                        "targets": [{"id": "1", "label": "//foo:bar"}],
+                        "actions": [
+                            {
+                                "targetId": "1",
+                                "arguments": [
+                                    "clang++",
+                                    "-fPIC",
+                                    "-c",
+                                    "foo.cc",
+                                    "-o",
+                                    "bazel-out/foo.pic.o",
+                                ],
+                                "mnemonic": "CppCompile",
+                            },
+                            {
+                                "targetId": "1",
+                                "arguments": [
+                                    "clang++",
+                                    "-c",
+                                    "foo.cc",
+                                    "-o",
+                                    "bazel-out/foo.o",
+                                ],
+                                "mnemonic": "CppCompile",
+                            },
+                        ],
+                    }
+                )
+            ]
+        )
+
+        res = compare_utils.query_bazel_commands(
+            mock_bazel_launcher,
+            "execroot",
+            [
+                CompareCommandsQuery(
+                    gn="//foo:bar(//build/toolchain/fuchsia:x64-shared)",
+                    bazel=ConfiguredBazelLabel("//foo:bar", "fuchsia_platform"),
+                    action_type=ACTION_CPP_COMPILE,
+                )
+            ],
+        )
+        self.assertEqual(
+            res[
+                ConfiguredBazelLabel(
+                    "//foo:bar", "fuchsia_platform", use_pic=True
+                )
+            ],
+            "clang++ -fPIC -c foo.cc -o bazel-out/foo.pic.o",
+        )
+
+    def test_query_bazel_commands_pic_fallback(self) -> None:
+        mock_bazel_launcher = build_utils.MockBazelLauncher()
+        mock_bazel_launcher.push_expected_outputs(
+            [
+                json.dumps(
+                    {
+                        "targets": [{"id": "1", "label": "//foo:bar"}],
+                        "actions": [
+                            {
+                                "targetId": "1",
+                                "arguments": [
+                                    "clang++",
+                                    "-fPIC",
+                                    "-c",
+                                    "foo.cc",
+                                    "-o",
+                                    "bazel-out/foo.pic.o",
+                                ],
+                                "mnemonic": "CppCompile",
+                            },
+                        ],
+                    }
+                )
+            ]
+        )
+
+        res = compare_utils.query_bazel_commands(
+            mock_bazel_launcher,
+            "execroot",
+            [
+                CompareCommandsQuery(
+                    gn="//foo:bar",
+                    bazel=ConfiguredBazelLabel("//foo:bar", "host"),
+                    action_type=ACTION_CPP_COMPILE,
+                )
+            ],
+        )
+        self.assertEqual(
+            res[ConfiguredBazelLabel("//foo:bar", "host")],
+            "clang++ -fPIC -c foo.cc -o bazel-out/foo.pic.o",
+        )
+
     def test_query_bazel_commands_empty_arguments(self) -> None:
         mock_launcher = build_utils.MockBazelLauncher()
         mock_launcher.push_expected_outputs(
@@ -949,6 +1136,71 @@ class TestBuildCommandQueryUtils(unittest.TestCase):
         self.assertIn(
             "my_bin", link_cmd[ConfiguredBazelLabel("//cc:my_bin", "host")]
         )
+
+    def test_query_bazel_commands_cpp_pic_selection(self) -> None:
+        mock_launcher = build_utils.MockBazelLauncher()
+        mock_launcher.push_expected_outputs(
+            [
+                json.dumps(
+                    {
+                        "targets": [
+                            {"id": "1", "label": "//cc:my_lib"},
+                        ],
+                        "actions": [
+                            {
+                                "targetId": "1",
+                                "arguments": [
+                                    "clang++",
+                                    "-fPIE",
+                                    "-c",
+                                    "lib.cc",
+                                    "-o",
+                                    "lib.o",
+                                ],
+                                "mnemonic": "CppCompile",
+                            },
+                            {
+                                "targetId": "1",
+                                "arguments": [
+                                    "clang++",
+                                    "-fPIC",
+                                    "-c",
+                                    "lib.cc",
+                                    "-o",
+                                    "lib.pic.o",
+                                ],
+                                "mnemonic": "CppCompile",
+                            },
+                        ],
+                    }
+                )
+            ]
+        )
+        non_pic_query = CompareCommandsQuery(
+            gn="//cc:my_lib(//build/toolchain/fuchsia:x64)",
+            bazel=ConfiguredBazelLabel(
+                "//cc:my_lib", "fuchsia_platform", use_pic=False
+            ),
+            action_type="cpp_compile",
+        )
+        pic_query = CompareCommandsQuery(
+            gn="//cc:my_lib(//build/toolchain/fuchsia:x64-shared)",
+            bazel=ConfiguredBazelLabel(
+                "//cc:my_lib", "fuchsia_platform", use_pic=True
+            ),
+            action_type="cpp_compile",
+        )
+        cmds = compare_utils.query_bazel_commands(
+            mock_launcher,
+            "execroot",
+            [non_pic_query, pic_query],
+        )
+        assert non_pic_query.bazel
+        assert pic_query.bazel
+        self.assertIn("-fPIE", cmds[non_pic_query.bazel])
+        self.assertIn("lib.o", cmds[non_pic_query.bazel])
+        self.assertIn("-fPIC", cmds[pic_query.bazel])
+        self.assertIn("lib.pic.o", cmds[pic_query.bazel])
 
     def test_target_query_dataclass(self) -> None:
         t_gn = CompareCommandsQuery(gn="//foo:bar")

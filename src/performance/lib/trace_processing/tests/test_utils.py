@@ -5,6 +5,7 @@
 """Utilities for trace model tests."""
 
 import unittest
+from collections.abc import Mapping, Sequence
 
 import trace_processing.trace_model as trace_model
 import trace_processing.trace_time as trace_time
@@ -491,9 +492,48 @@ def get_test_model(is_fxt: bool = False) -> trace_model.Model:
     return trace_model.Model(processes, scheduling_records)
 
 
-def assertEventsEqual(
-    test: unittest.TestCase, a: trace_model.Event, b: trace_model.Event
+def _assert_event_links_in_model(
+    test: unittest.TestCase, model: trace_model.Model
 ) -> None:
+    """Asserts that every event neighbor reference points to an event in `model`."""
+    model_events = set(model.all_events())
+    for event in model.all_events():
+        if isinstance(event, trace_model.DurationEvent):
+            if event.parent is not None:
+                test.assertIn(event.parent, model_events)
+            for child in event.child_durations:
+                test.assertIn(child, model_events)
+            for flow in event.child_flows:
+                test.assertIn(flow, model_events)
+        elif isinstance(event, trace_model.FlowEvent):
+            if event.enclosing_duration is not None:
+                test.assertIn(event.enclosing_duration, model_events)
+            if event.previous_flow is not None:
+                test.assertIn(event.previous_flow, model_events)
+            if event.next_flow is not None:
+                test.assertIn(event.next_flow, model_events)
+
+
+def assertEventsEqual(
+    test: unittest.TestCase,
+    a: trace_model.Event | None,
+    b: trace_model.Event | None,
+    visited: set[tuple[trace_model.Event, trace_model.Event]] | None = None,
+) -> None:
+    test.assertEqual(a is None, b is None)
+    if a is None or b is None:
+        return
+    # Event links form cycles (e.g. `parent <-> child_durations`,
+    # `enclosing_duration <-> child_flows`, `previous_flow <-> next_flow`), so
+    # record `(a, b)` before recursing to avoid infinite recursion.
+    if visited is None:
+        visited = set()
+    pair = (a, b)
+    if pair in visited:
+        # We have already checked (or are already checking) that a and b are equal.
+        return
+    visited.add(pair)
+
     test.assertIs(type(a), type(b))
 
     # Check basic [trace_model.Event] fields.
@@ -547,9 +587,17 @@ def assertEventsEqual(
         test.assertAlmostEqual(
             a.duration.to_microseconds(), b.duration.to_microseconds()
         )
-        test.assertEqual(a.parent is None, b.parent is None)
+        assertEventsEqual(test, a.parent, b.parent, visited)
         test.assertEqual(len(a.child_durations), len(b.child_durations))
+        for ca, cb in zip(a.child_durations, b.child_durations):
+            test.assertIs(ca.parent, a)
+            test.assertIs(cb.parent, b)
+            assertEventsEqual(test, ca, cb, visited)
         test.assertEqual(len(a.child_flows), len(b.child_flows))
+        for fa, fb in zip(a.child_flows, b.child_flows):
+            test.assertIs(fa.enclosing_duration, a)
+            test.assertIs(fb.enclosing_duration, b)
+            assertEventsEqual(test, fa, fb, visited)
     elif isinstance(a, trace_model.AsyncEvent) and isinstance(
         b, trace_model.AsyncEvent
     ):
@@ -563,12 +611,47 @@ def assertEventsEqual(
     ):
         test.assertEqual(a.id, b.id)
         test.assertEqual(a.phase, b.phase)
-        test.assertIsNotNone(a.enclosing_duration)
-        test.assertIsNotNone(b.enclosing_duration)
-        test.assertEqual(a.previous_flow is None, b.previous_flow is None)
-        test.assertEqual(a.next_flow is None, b.next_flow is None)
+        assertEventsEqual(
+            test, a.enclosing_duration, b.enclosing_duration, visited
+        )
+        assertEventsEqual(test, a.previous_flow, b.previous_flow, visited)
+        assertEventsEqual(test, a.next_flow, b.next_flow, visited)
     else:
         test.fail(f"event {a} and event {b} were unrecognized types")
+
+
+def assertEventListsEqual(
+    test: unittest.TestCase,
+    a_events: Sequence[trace_model.Event],
+    b_events: Sequence[trace_model.Event],
+) -> None:
+    test.assertEqual(len(a_events), len(b_events))
+    visited: set[tuple[trace_model.Event, trace_model.Event]] = set()
+    for a_event, b_event in zip(a_events, b_events):
+        assertEventsEqual(test, a_event, b_event, visited)
+    # Check that `visited` pairs events one-to-one: every Event object
+    # reachable from `a_events` pairs with at most one Event object from
+    # `b_events`, and every Event object reachable from `b_events` pairs with
+    # at most one Event object from `a_events`.
+    #
+    # This matters because `Event` uses object identity for equality and
+    # hashing, and downstream consumers rely on links (`parent`,
+    # `enclosing_duration`, `child_flows`, `next_flow`) pointing to the exact
+    # `Event` instances stored in the model rather than detached copies or
+    # accidentally shared instances:
+    #   * `Model.slice()` remaps neighbor references via a `dict[Event, Event]`
+    #     keyed by the events in `thread.events`, silently dropping any link
+    #     that points to a detached copy.
+    #   * `trace_utils.get_following_flow_events()` walks `enclosing_duration`,
+    #     `child_flows`, and `next_flow` with a `set[Event]`; a link to a
+    #     detached copy misses flows/children attached to the real instance,
+    #     while aliasing two distinct events into one instance collapses them.
+    # `assertEventsEqual` alone would not catch either bug because it keys
+    # `visited` on `(a, b)` pairs and compares fields by value, allowing one
+    # Event on one side to match multiple distinct Events with identical fields
+    # on the other side.
+    test.assertEqual(len({id(a) for a, _ in visited}), len(visited))
+    test.assertEqual(len({id(b) for _, b in visited}), len(visited))
 
 
 def assertThreadsEqual(
@@ -643,9 +726,35 @@ def assertSchedulingRecordEqual(
         test.assertEqual(a.outgoing_state, b.outgoing_state)
 
 
+def assertSchedulingRecordsEqual(
+    test: unittest.TestCase,
+    a_records: Mapping[int, Sequence[trace_model.SchedulingRecord]],
+    b_records: Mapping[int, Sequence[trace_model.SchedulingRecord]],
+) -> None:
+    test.assertEqual(
+        set(a_records.keys()),
+        set(b_records.keys()),
+        f"Error, scheduling record CPUs did not match: "
+        f"{set(a_records.keys())} vs {set(b_records.keys())}",
+    )
+
+    for cpu in sorted(a_records.keys()):
+        test.assertEqual(
+            len(a_records[cpu]),
+            len(b_records[cpu]),
+            f"Error, scheduling record counts on CPU {cpu} did not match: "
+            f"{len(a_records[cpu])} vs {len(b_records[cpu])}",
+        )
+        for a_record, b_record in zip(a_records[cpu], b_records[cpu]):
+            assertSchedulingRecordEqual(test, a_record, b_record)
+
+
 def assertModelsEqual(
     test: unittest.TestCase, a: trace_model.Model, b: trace_model.Model
 ) -> None:
+    _assert_event_links_in_model(test, a)
+    _assert_event_links_in_model(test, b)
+
     # Ignore process 0 (kernel/idle) when comparing processes. Perfetto
     # automatically creates a placeholder process with PID 0 to associate scheduling
     # and global events, which is not present in legacy JSON models.
@@ -660,15 +769,6 @@ def assertModelsEqual(
     for a_process, b_process in zip(a_processes, b_processes):
         assertProcessesEqual(test, a_process, b_process)
 
-    test.assertEqual(
-        len(a.scheduling_records),
-        len(b.scheduling_records),
-        f"Error, model scheduling record lengths did not match: {len(a.scheduling_records)} "
-        f"vs {len(b.scheduling_records)}",
+    assertSchedulingRecordsEqual(
+        test, a.scheduling_records, b.scheduling_records
     )
-
-    for cpu in a.scheduling_records:
-        for a_record, b_record in zip(
-            a.scheduling_records[cpu], b.scheduling_records[cpu]
-        ):
-            assertSchedulingRecordEqual(test, a_record, b_record)

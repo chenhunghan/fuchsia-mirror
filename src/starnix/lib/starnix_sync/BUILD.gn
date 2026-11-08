@@ -46,6 +46,7 @@ rustc_library("starnix_sync") {
     "src/interruptible_event.rs",
     "src/lib.rs",
     "src/lock_dep_mutex.rs",
+    "src/lock_guarded.rs",
     "src/lock_ordering.rs",
     "src/lock_traits.rs",
     "src/locks.rs",
@@ -88,6 +89,7 @@ rustc_library("starnix_sync") {
     "//third_party/rust_crates:smallvec",
   ]
 }
+
 rustc_test("starnix_sync_lib_test") {
   sources = [
     "src/atomic_time.rs",
@@ -95,6 +97,7 @@ rustc_test("starnix_sync_lib_test") {
     "src/interruptible_event.rs",
     "src/lib.rs",
     "src/lock_dep_mutex.rs",
+    "src/lock_guarded.rs",
     "src/lock_ordering.rs",
     "src/lock_traits.rs",
     "src/locks.rs",

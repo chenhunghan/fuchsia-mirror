@@ -6,7 +6,7 @@
 
 load("@bazel_skylib//lib:paths.bzl", "paths")
 load("@io_bazel_rules_go//go:def.bzl", "go_library")
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
 
 # LINT.IfChange
@@ -246,7 +246,7 @@ def _zither_c_family_library_impl(
     # TODO(https://fxbug.dev/456186319): This may need to be a wrapper when
     # supporting kernel builds. In GN, it was a `library_headers()`, which adds
     # `public_deps += [ "//zircon/system/public" ]`.
-    cc_library(
+    fx_cc_library(
         name = name,
         hdrs = generated_files,
         include_prefix = output_dir,
@@ -418,7 +418,8 @@ def _zither_kernel_sources_impl(
     generated_files = [
         paths.join(output_dir, output_namespace, "category.inc"),
         paths.join(output_dir, output_namespace, "kernel.inc"),
-        paths.join(output_dir, output_namespace, "kernel-wrappers.inc"),
+        paths.join(output_dir, output_namespace, "kernel_wrappers.rs"),
+        paths.join(output_dir, output_namespace, "syscall_numbers.rs"),
         paths.join(output_dir, output_namespace, "syscall_sigs.rs"),
         paths.join(output_dir, output_namespace, "syscalls.inc"),
         paths.join(output_dir, output_namespace, "zx-syscall-numbers.h"),
@@ -438,7 +439,7 @@ def _zither_kernel_sources_impl(
     # TODO(https://fxbug.dev/456186319): This may need to be a wrapper when
     # supporting kernel builds. In GN, it was a `library_headers()`, which adds
     # `public_deps += [ "//zircon/system/public" ]`.
-    cc_library(
+    fx_cc_library(
         name = name,
         hdrs = generated_files,
         include_prefix = output_dir,
@@ -651,6 +652,9 @@ _SUPPORTED_ZITHER_BACKEND_INFO = {
     # Internal kernel bindings.
     "kernel": {
         "formatter": _CLANG_FORMAT,
+        # TODO(https://fxbug.dev/454449781): Pass `_RUSTFMT` as the
+        # `-rust-formatter` for the backend's Rust outputs once it is
+        # available, mirroring `rust_formatter` in zither_library.gni.
         "output_namespace": {
             "prefix_parts": [
                 "lib",

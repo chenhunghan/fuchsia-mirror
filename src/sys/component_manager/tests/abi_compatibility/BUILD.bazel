@@ -1,0 +1,117 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load("//build/component:config.bzl", "component_config")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "integration_bin",
+    srcs = ["src/integration_test.rs"],
+    crate_name = "abi_integration_test",
+    crate_root = "src/integration_test.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component.resolution:fuchsia.component.resolution_rust",
+        "//sdk/fidl/fuchsia.mem:fuchsia.mem_rust",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/versioning/version-history/rust",
+        "//src/lib/versioning/version-history/rust/data",
+        "//src/sys/lib/cm_rust",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "integration_packaged_bin",
+    testonly = True,
+    binary = ":integration_bin",
+    binary_name = "abi_integration_test",
+)
+
+fx_component_manifest(
+    name = "integration_test-manifest",
+    testonly = True,
+    component_name = "integration_test",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/lib/fuchsia-component-test:meta/nested_component_manager.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/integration_test.cml",
+)
+
+fx_test_component(
+    name = "integration_test",
+    compiled_manifest = ":integration_test-manifest",
+    deps = [":integration_packaged_bin"],
+)
+
+component_config(
+    name = "component_manager_config",
+    testonly = True,
+    srcs = [
+        "configs/abi_compat_cm_config.json5",
+        "//src/sys/component_manager/configs:test_config.base.json5",
+    ],
+)
+
+fx_component_manifest(
+    name = "abi_compat_component_manager-manifest",
+    testonly = True,
+    component_name = "abi_compat_component_manager",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "//src/sys/component_manager:meta/component_manager.cml",
+)
+
+fx_component(
+    name = "abi_compat_component_manager",
+    testonly = True,
+    compiled_manifest = ":abi_compat_component_manager-manifest",
+    deps = [
+        ":component_manager_config",
+        "//src/sys/component_manager:bin_with_tracing_packaged",  # @bazel2gn:path_overwrite://src/sys/component_manager:bin_with_tracing
+    ],
+)
+
+fx_package(
+    name = "abi_compatibility_tests_package",
+    package_name = "abi_compatibility_tests",
+    components = [
+        ":abi_compat_component_manager",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":integration_test"],
+)
+
+fx_test(
+    name = "abi_compatibility_tests",
+    package = ":abi_compatibility_tests_package",
+    visibility = ["//src/sys/component_manager:__pkg__"],
+)

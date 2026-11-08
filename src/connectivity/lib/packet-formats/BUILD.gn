@@ -7,7 +7,7 @@ import("//build/fuzz.gni")
 import("//build/rust/rustc_fuzzer.gni")
 
 bazel_test_suite("packet-formats-test-package") {
-  target_tests = [ "//src/connectivity/lib/packet-formats:packet-formats-test" ]
+  target_tests = [ "//src/connectivity/lib/packet-formats:target_tests" ]
   host_tests =
       [ "//src/connectivity/lib/packet-formats:packet-formats_host_test" ]
 }
@@ -141,6 +141,7 @@ rustc_library("packet-formats") {
     "//third_party/rust_crates:zerocopy",
   ]
 }
+
 rustc_test("packet-formats_test") {
   sources = [
     "src/arp.rs",
@@ -192,6 +193,7 @@ rustc_test("packet-formats_test") {
          ]
   configs += [ "//build/config/rust/lints:deny_unused_results" ]
 }
+
 fuchsia_unittest_package("packet-formats-test") {
   package_name = "packet-formats-test-gn"
   component_name = "packet-formats-test"

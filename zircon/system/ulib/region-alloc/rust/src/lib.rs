@@ -53,8 +53,10 @@
 //! to destruct while there are allocations in flight.
 //!
 //! ## Thread Safety
-//! `RegionAllocator` and `RegionPool`s use `KMutex` or `RawMutex` objects to provide thread
-//! safety in multi-threaded environments. As such, `RegionAllocator`s are not
+//! `RegionAllocator` and `RegionPool`s use `KMutex` objects to provide thread safety in
+//! multi-threaded environments. They are generic over the raw lock type `M` used for those
+//! mutexes, which the kernel supplies as its `TrackedMutex` (`ksync` itself cannot name the
+//! kernel's `TrackedMutex`). As such, `RegionAllocator`s are not
 //! currently suitable for use in code which may run at IRQ context, or which
 //! must never block.
 //!
@@ -67,8 +69,12 @@
 //!
 //! ```rust
 //! use pin_init::stack_pin_init;
-//! use region_alloc::{RegionAllocator, RegionPool, RegionSpan, AllowOverlap};
+//! use ksync::RawMutex;
+//! use region_alloc::{RegionSpan, AllowOverlap};
 //! use zx_status::Status;
+//!
+//! type RegionAllocator = region_alloc::RegionAllocator<RawMutex>;
+//! type RegionPool = region_alloc::RegionPool<RawMutex>;
 //!
 //! # fn main() -> Result<(), Status> {
 //! // Create a pool and assign it to a stack allocated allocator. Limit the
@@ -120,8 +126,11 @@ use fbl::{
     WavlTreeNode,
 };
 use kalloc::{AllocError, Box};
-use ksync::{KMutex, RawMutex, guarded, kcell_init, lock};
+use ksync::{ExclusiveLockPolicy, KMutex, RawLock, guarded, kcell_init, lock};
 use zx_status::Status;
+
+/// The slab size used by a `RegionPool`'s slab allocator.
+pub const REGION_POOL_SLAB_SIZE: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegionSpan {
@@ -168,26 +177,29 @@ pub struct SortByBase;
 pub struct SortBySize;
 
 #[derive(WavlTreeContainable)]
-pub struct Region {
+pub struct Region<M: RawLock> {
     span: RegionSpan,
     key_size: RegionKey,
-    owner: NonNull<RegionAllocator>,
+    owner: NonNull<RegionAllocator<M>>,
 
     #[wavl_node(tag = SortByBase)]
-    node_base: WavlTreeNode<Region>,
+    node_base: WavlTreeNode<Region<M>>,
 
     #[wavl_node(tag = SortBySize)]
-    node_size: WavlTreeNode<Region>,
+    node_size: WavlTreeNode<Region<M>>,
 }
 
 // SAFETY: Region doesn't hold thread-local data and can be safely sent across thread boundaries.
-unsafe impl Send for Region {}
+unsafe impl<M: RawLock + Send + Sync> Send for Region<M> {}
 // SAFETY: Region's fields are only mutated under the allocator's lock, so it's Sync.
-unsafe impl Sync for Region {}
+unsafe impl<M: RawLock + Send + Sync> Sync for Region<M> {}
 
 // SAFETY: The Recyclable trait requires that `recycle` is safe to call with a valid pointer.
 // `Region` handles recycling via its allocator owner.
-unsafe impl Recyclable for Region {
+unsafe impl<M: RawLock> Recyclable for Region<M>
+where
+    M::DefaultPolicy: ExclusiveLockPolicy<M, AcquireArgs = ()>,
+{
     /// Recycle a region when its `UniquePtr` goes out of scope.
     ///
     /// # Safety
@@ -204,7 +216,7 @@ unsafe impl Recyclable for Region {
     }
 }
 
-impl Region {
+impl<M: RawLock> Region<M> {
     pub fn base(&self) -> u64 {
         self.span.base
     }
@@ -212,7 +224,7 @@ impl Region {
         self.span.size
     }
 
-    fn new(span: RegionSpan, owner: NonNull<RegionAllocator>) -> Self {
+    fn new(span: RegionSpan, owner: NonNull<RegionAllocator<M>>) -> Self {
         Self {
             span,
             key_size: RegionKey { base: span.base, size: span.size },
@@ -227,16 +239,22 @@ impl Region {
     }
 }
 
-impl WavlTreeKeyable<u64> for Region {
-    type Key<'a> = u64;
-    fn get_key(&self) -> u64 {
+impl<M: RawLock> WavlTreeKeyable<u64> for Region<M> {
+    type Key<'a>
+        = u64
+    where
+        Self: 'a;
+    unsafe fn get_key(&self) -> u64 {
         self.span.base
     }
 }
 
-impl WavlTreeKeyable<RegionKey> for Region {
-    type Key<'a> = RegionKey;
-    fn get_key(&self) -> RegionKey {
+impl<M: RawLock> WavlTreeKeyable<RegionKey> for Region<M> {
+    type Key<'a>
+        = RegionKey
+    where
+        Self: 'a;
+    unsafe fn get_key(&self) -> RegionKey {
         self.key_size
     }
 }
@@ -245,14 +263,14 @@ impl WavlTreeKeyable<RegionKey> for Region {
 #[pin_init::pin_data]
 #[derive(fbl::Recyclable)]
 #[repr(C)]
-pub struct RegionPool {
+pub struct RegionPool<M: RawLock> {
     #[pin]
-    allocator: fbl::SlabAllocator<Region, RawMutex, { RegionAllocator::REGION_POOL_SLAB_SIZE }>,
+    allocator: fbl::SlabAllocator<Region<M>, M, { REGION_POOL_SLAB_SIZE }>,
 }
 
-impl RegionPool {
+impl<M: RawLock> RegionPool<M> {
     pub fn create(max_memory: usize) -> Result<RefPtr<Self>, AllocError> {
-        let slab_size = RegionAllocator::REGION_POOL_SLAB_SIZE;
+        let slab_size = REGION_POOL_SLAB_SIZE;
         if slab_size > max_memory {
             return Err(AllocError);
         }
@@ -288,41 +306,49 @@ pub enum TestRegionSet {
 
 #[guarded]
 #[pin_init::pin_data(PinnedDrop)]
-pub struct RegionAllocator {
+pub struct RegionAllocator<M: RawLock> {
     #[mutex]
-    mu: KMutex,
+    mu: KMutex<M>,
 
     #[pin]
     // TODO(https://fxbug.dev/536051491): Remove this once WavlTree is pin-aware.
     #[ksync(unpinned)]
     #[guarded_by(mu)]
-    allocated_regions_by_base: WavlTree<u64, NonNull<Region>, SortByBase, TrackingSize>,
+    allocated_regions_by_base: WavlTree<u64, NonNull<Region<M>>, SortByBase, TrackingSize>,
 
     #[pin]
     // TODO(https://fxbug.dev/536051491): Remove this once WavlTree is pin-aware.
     #[ksync(unpinned)]
     #[guarded_by(mu)]
-    avail_regions_by_base: WavlTree<u64, NonNull<Region>, SortByBase, TrackingSize>,
+    avail_regions_by_base: WavlTree<u64, NonNull<Region<M>>, SortByBase, TrackingSize>,
 
     #[pin]
     // TODO(https://fxbug.dev/536051491): Remove this once WavlTree is pin-aware.
     #[ksync(unpinned)]
     #[guarded_by(mu)]
-    avail_regions_by_size: WavlTree<RegionKey, NonNull<Region>, SortBySize, TrackingSize>,
+    avail_regions_by_size: WavlTree<RegionKey, NonNull<Region<M>>, SortBySize, TrackingSize>,
 
     #[guarded_by(mu)]
-    region_pool: Option<RefPtr<RegionPool>>,
+    region_pool: Option<RefPtr<RegionPool<M>>>,
 }
 
 // SAFETY: RegionAllocator uses a mutex (`mu`) to synchronize access to its internal state,
 // making it safe to send across threads.
-unsafe impl Send for RegionAllocator {}
+unsafe impl<M: RawLock + Send + Sync> Send for RegionAllocator<M> {}
 // SAFETY: RegionAllocator uses a mutex (`mu`) to synchronize access to its internal state,
 // making it safe to share across threads.
-unsafe impl Sync for RegionAllocator {}
+unsafe impl<M: RawLock + Send + Sync> Sync for RegionAllocator<M> {}
 
-impl RegionAllocator {
-    pub const REGION_POOL_SLAB_SIZE: usize = 4096;
+impl<M: RawLock> RegionAllocator<M>
+where
+    // `M` must be a mutex-like lock which takes no acquisition arguments.
+    M::DefaultPolicy: ExclusiveLockPolicy<M, AcquireArgs = ()>,
+{
+    /// The slab size used by a `RegionPool`'s slab allocator, like the C++
+    /// `RegionAllocator::REGION_POOL_SLAB_SIZE`. This is the crate-level
+    /// [`crate::REGION_POOL_SLAB_SIZE`], which `RegionPool` uses directly since its field types
+    /// cannot name an associated constant of the generic `RegionAllocator<M>`.
+    pub const REGION_POOL_SLAB_SIZE: usize = REGION_POOL_SLAB_SIZE;
 
     pub fn init() -> impl pin_init::PinInit<Self, core::convert::Infallible> {
         pin_init::pin_init!(Self {
@@ -336,7 +362,7 @@ impl RegionAllocator {
 
     /// Initialize a `RegionAllocator` with a specified `RegionPool`.
     pub fn init_with_pool(
-        pool: RefPtr<RegionPool>,
+        pool: RefPtr<RegionPool<M>>,
     ) -> impl pin_init::PinInit<Self, core::convert::Infallible> {
         pin_init::pin_init!(Self {
             mu <- KMutex::init(),
@@ -352,7 +378,7 @@ impl RegionAllocator {
         guard.fields().region_pool.is_some()
     }
 
-    pub fn set_region_pool(&self, pool: RefPtr<RegionPool>) -> Result<(), Status> {
+    pub fn set_region_pool(&self, pool: RefPtr<RegionPool<M>>) -> Result<(), Status> {
         lock!(let mut guard = self.lock_mu());
         let fields = guard.as_mut().fields_mut();
 
@@ -639,7 +665,7 @@ impl RegionAllocator {
         Ok(())
     }
 
-    pub fn get_region(&self, size: u64, alignment: u64) -> Result<UniquePtr<Region>, Status> {
+    pub fn get_region(&self, size: u64, alignment: u64) -> Result<UniquePtr<Region<M>>, Status> {
         if size == 0 || alignment == 0 || !alignment.is_power_of_two() {
             return Err(Status::INVALID_ARGS);
         }
@@ -682,14 +708,14 @@ impl RegionAllocator {
 
     /// Get a region out of the set of currently available regions which has a
     /// specified size and is pointer-aligned (aligned to `core::mem::size_of::<*const ()>()`).
-    pub fn get_region_pointer_aligned(&self, size: u64) -> Result<UniquePtr<Region>, Status> {
+    pub fn get_region_pointer_aligned(&self, size: u64) -> Result<UniquePtr<Region<M>>, Status> {
         self.get_region(size, core::mem::size_of::<*const ()>() as u64)
     }
 
     pub fn get_region_specific(
         &self,
         requested_region: RegionSpan,
-    ) -> Result<UniquePtr<Region>, Status> {
+    ) -> Result<UniquePtr<Region<M>>, Status> {
         requested_region.validate()?;
         let base = requested_region.base;
         let size = requested_region.size;
@@ -770,7 +796,7 @@ impl RegionAllocator {
     /// from within the callback will deadlock.
     pub fn walk_allocated_regions<F>(&self, mut cb: F)
     where
-        F: FnMut(&Region) -> bool,
+        F: FnMut(&Region<M>) -> bool,
     {
         lock!(let guard = self.lock_mu());
         for region in guard.fields().allocated_regions_by_base.iter() {
@@ -792,7 +818,7 @@ impl RegionAllocator {
     /// from within the callback will deadlock.
     pub fn walk_available_regions<F>(&self, mut cb: F)
     where
-        F: FnMut(&Region) -> bool,
+        F: FnMut(&Region<M>) -> bool,
     {
         lock!(let guard = self.lock_mu());
         for region in guard.fields().avail_regions_by_base.iter() {
@@ -806,7 +832,7 @@ impl RegionAllocator {
 
     fn add_subtract_sanity_check_locked_mut(
         &self,
-        allocated_tree: &mut WavlTree<u64, NonNull<Region>, SortByBase, TrackingSize>,
+        allocated_tree: &mut WavlTree<u64, NonNull<Region<M>>, SortByBase, TrackingSize>,
         region: &RegionSpan,
     ) -> Result<(), Status> {
         if self.intersects_locked(allocated_tree, region)? {
@@ -822,7 +848,7 @@ impl RegionAllocator {
     ///
     /// The caller must ensure that `region_ptr` points to a valid `Region` that is currently in the
     /// allocated set.
-    unsafe fn release_region(&self, region_ptr: NonNull<Region>) {
+    unsafe fn release_region(&self, region_ptr: NonNull<Region<M>>) {
         lock!(let mut guard = self.lock_mu());
         let mut fields = guard.as_mut().fields_mut();
 
@@ -836,8 +862,8 @@ impl RegionAllocator {
 
     fn add_region_to_avail_locked(
         &self,
-        fields: &mut RegionAllocatorMuFieldsMut<'_>,
-        region_ptr: NonNull<Region>,
+        fields: &mut RegionAllocatorMuFieldsMut<'_, M>,
+        region_ptr: NonNull<Region<M>>,
         allow_overlap: AllowOverlap,
     ) {
         // SAFETY: `region_ptr` is a valid pointer to a `Region`.
@@ -921,11 +947,11 @@ impl RegionAllocator {
 
     fn alloc_from_avail_locked(
         &self,
-        fields: &mut RegionAllocatorMuFieldsMut<'_>,
+        fields: &mut RegionAllocatorMuFieldsMut<'_, M>,
         source_key: RegionKey,
         base: u64,
         size: u64,
-    ) -> Result<UniquePtr<Region>, Status> {
+    ) -> Result<UniquePtr<Region<M>>, Status> {
         let mut source_cursor = fields.avail_regions_by_size.find_cursor(&source_key);
         let source_ref = source_cursor.get().ok_or(Status::BAD_STATE)?;
         let source_base = source_ref.base();
@@ -1055,7 +1081,7 @@ impl RegionAllocator {
 
     fn intersects_locked(
         &self,
-        tree: &mut WavlTree<u64, NonNull<Region>, SortByBase, TrackingSize>,
+        tree: &mut WavlTree<u64, NonNull<Region<M>>, SortByBase, TrackingSize>,
         region: &RegionSpan,
     ) -> Result<bool, Status> {
         region.validate()?;
@@ -1079,7 +1105,7 @@ impl RegionAllocator {
 
     fn contained_by_locked(
         &self,
-        tree: &mut WavlTree<u64, NonNull<Region>, SortByBase, TrackingSize>,
+        tree: &mut WavlTree<u64, NonNull<Region<M>>, SortByBase, TrackingSize>,
         region: &RegionSpan,
     ) -> Result<bool, Status> {
         region.validate()?;
@@ -1104,9 +1130,9 @@ impl RegionAllocator {
     /// The allocator lock must be held when calling this function.
     fn create_region_raw(
         &self,
-        region_pool: &mut Option<RefPtr<RegionPool>>,
+        region_pool: &mut Option<RefPtr<RegionPool<M>>>,
         span: RegionSpan,
-    ) -> Result<NonNull<Region>, Status> {
+    ) -> Result<NonNull<Region<M>>, Status> {
         let region = Region::new(span, NonNull::from(self));
         if let Some(pool) = region_pool {
             let ptr = pool.allocator.alloc_raw().map_err(|_| Status::NO_MEMORY)?;
@@ -1123,7 +1149,11 @@ impl RegionAllocator {
             Ok(unsafe { NonNull::new_unchecked(raw) })
         }
     }
+}
 
+// Unlike the methods above, these do not acquire `mu`, so they place no requirements on the lock
+// policy of `M`. This allows them to be used from `drop`.
+impl<M: RawLock> RegionAllocator<M> {
     /// Destroy a region by either returning it to the current RegionPool, or to
     /// the heap if we have no assigned region pool.
     ///
@@ -1132,8 +1162,8 @@ impl RegionAllocator {
     /// is no longer in use (i.e. has been removed from all lists and indices) and
     /// was allocated by the allocator context associated with `region_pool`.
     unsafe fn destroy_region_raw(
-        region_pool: &mut Option<RefPtr<RegionPool>>,
-        region_ptr: NonNull<Region>,
+        region_pool: &mut Option<RefPtr<RegionPool<M>>>,
+        region_ptr: NonNull<Region<M>>,
     ) {
         if let Some(pool) = region_pool {
             // SAFETY: `region_ptr` was allocated from `pool.allocator`.
@@ -1154,7 +1184,7 @@ impl RegionAllocator {
 }
 
 #[pin_init::pinned_drop]
-impl pin_init::PinnedDrop for RegionAllocator {
+impl<M: RawLock> pin_init::PinnedDrop for RegionAllocator<M> {
     fn drop(self: core::pin::Pin<&mut Self>) {
         // SAFETY: We can obtain a mutable reference to the fields during drop because we are in
         // the drop implementation, and no other references can exist.

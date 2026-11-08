@@ -14,7 +14,7 @@ executable("vkpriority_bin") {
     "vkpriority.cc",
   ]
 
-  public_deps = [
+  deps = [
     "//src/lib/fxl/test:test_settings",
     "//src/lib/vulkan",
     "//third_party/googletest:gtest",

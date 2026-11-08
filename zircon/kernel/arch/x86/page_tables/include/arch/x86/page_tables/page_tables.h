@@ -488,6 +488,10 @@ class X86PageTableImpl : public X86PageTableBase {
     PageTableLevel ret_level;
 
     Guard<Mutex> a{AssertOrderedLock, &lock_, LockOrder()};
+    DEBUG_ASSERT(virt_);
+    if (!virt_) {
+      return ZX_ERR_BAD_STATE;
+    }
 
     volatile pt_entry_t* last_valid_entry;
     zx_status_t status =

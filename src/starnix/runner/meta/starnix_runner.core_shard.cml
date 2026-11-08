@@ -88,7 +88,10 @@
             availability: "optional",
         },
         {
-            protocol: [ "fuchsia.power.battery.BatteryManager" ],
+            protocol: [
+                "fuchsia.power.battery.BatteryManager",
+                "fuchsia.power.battery.test.BatterySimulator",
+            ],
             from: "#battery_manager",
             to: "#starnix_runner",
             source_availability: "unknown",

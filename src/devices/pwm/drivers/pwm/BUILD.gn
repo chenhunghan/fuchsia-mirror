@@ -58,6 +58,7 @@ test("pwm-test-bin") {
     ":common",
     "//sdk/lib/driver/metadata/cpp",
     "//sdk/lib/driver/testing/cpp",
+    "//src/devices/bind/fuchsia:fuchsia_cpp",
     "//src/lib/fxl/test:gtest_main",
     "//src/lib/testing/predicates",
   ]

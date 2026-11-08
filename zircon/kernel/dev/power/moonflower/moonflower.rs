@@ -284,7 +284,9 @@ pub extern "C" fn moonflower_power_init() {
         level_count: levels.len(),
     }];
 
-    if let Err(status) = power_management_register_domains(&domain_config) {
+    // SAFETY: `domain_config` points to the valid local `levels` array whose `diagnostic_name`
+    // pointers come from NUL-terminated string literals.
+    if let Err(status) = unsafe { power_management_register_domains(&domain_config) } {
         dprintf!(
             CRITICAL,
             "POWER: Failed to register moonflower power domain: {}\n",

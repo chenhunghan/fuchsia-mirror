@@ -17,6 +17,14 @@ It is automatically triggered (if necessary) at various points during OTA by the
 It is automatically triggered (if necessary) by the [system-update-checker][src_system_update_checker_gc],
 which is the update checker used by engineering builds.
 
+pkg-cache can also trigger GC automatically after an OTA, once the new system
+commits during the current boot. This behavior is disabled by default. You can
+enable it in [product configuration][src_swd_config] by setting
+`platform.software_delivery.post_commit_gc_earliest_boot_seconds` to the
+earliest time (in seconds) on the boot timeline at which post-commit GC runs.
+pkg-cache skips post-commit GC if GC already completed during that boot, and
+doesn't retry it on later boots if the device reboots before it runs.
+
 ## The algorithm
 
 The [current algorithm][src_pkg_cache_implementation] is based on the design
@@ -77,6 +85,7 @@ proposed by the [Open Package Tracking RFC][rfc_0217].
 [src_gc_fidl]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/fidl/fuchsia.space/space.fidl;l=18;drc=4eae0501e94a15718fea7e2410b55ef0e0fef979
 [src_system_updater_gc]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/sys/pkg/bin/system-updater/src/update.rs;l=1254;drc=f183b2bad311eb09c2be4d72411ddfd8e8db6e63
 [src_system_update_checker_gc]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/sys/pkg/bin/system-update-checker/src/check.rs;l=178;drc=f183b2bad311eb09c2be4d72411ddfd8e8db6e63
+[src_swd_config]: /src/lib/assembly/config_schema/src/platform_settings/swd_config.rs
 [src_pkg_cache_implementation]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/sys/pkg/bin/pkg-cache/src/gc_service.rs;l=52;drc=c33e19363ac233f6be9d8cb9df460fc0e30551ad
 [src_base_packages]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/sys/pkg/bin/pkg-cache/src/base_packages.rs;l=36;drc=d7e51f5a7d6b09dcc24b684aa19ccda7eb6c0757
 [src_cache_packages]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/sys/pkg/lib/system-image/src/cache_packages.rs;l=16;drc=156eb8041a38d097e146c99f54fcb06aaa3c7fe6

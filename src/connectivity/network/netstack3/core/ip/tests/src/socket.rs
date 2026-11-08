@@ -2,19 +2,25 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use alloc::vec;
 use alloc::vec::Vec;
-use core::num::NonZeroU8;
+use core::num::{NonZeroU8, NonZeroU16};
 
 use assert_matches::assert_matches;
 use ip_test_macro::ip_test;
 
 use net_types::ip::{AddrSubnet, GenericOverIp, Ip, IpAddr, Ipv4, Ipv4Addr, Ipv6, Ipv6Addr, Mtu};
 use net_types::{SpecifiedAddr, Witness};
-use packet::{Buf, InnerPacketBuilder, NestablePacketBuilder as _, ParseBuffer, Serializer as _};
+use packet::{
+    Buf, InnerPacketBuilder, NestablePacketBuilder as _, NestableSerializer as _, ParseBuffer,
+    Serializer as _,
+};
 use packet_formats::ethernet::EthernetFrameLengthCheck;
 use packet_formats::icmp::{IcmpIpExt, IcmpZeroCode};
-use packet_formats::ip::IpPacket;
+use packet_formats::ip::{IpPacket, IpProto};
 use packet_formats::ipv4::Ipv4Packet;
+use packet_formats::tcp::options::TcpOptionsBuilder;
+use packet_formats::tcp::{TcpSegmentBuilder, TcpSegmentBuilderWithOptions};
 use packet_formats::testutil::{parse_ethernet_frame, parse_ip_packet_in_ethernet_frame};
 use test_case::test_case;
 
@@ -32,7 +38,7 @@ use netstack3_ip::marker::OptionDelegationMarker;
 use netstack3_ip::socket::{
     DefaultIpSocketOptions, DelegatedRouteResolutionOptions, DelegatedSendOptions,
     DeviceIpSocketHandler, IpSockCreationError, IpSockDefinition, IpSockSendError, IpSocketArgs,
-    IpSocketHandler, MmsError, RouteResolutionOptions, SendOptions,
+    IpSocketHandler, MmsError, RouteResolutionOptions, SendOptions, TransportGsoInfo,
 };
 use netstack3_ip::testutil::IpCounterExpectations;
 use netstack3_ip::{
@@ -423,6 +429,7 @@ fn test_send_local<I: IpSocketIpExt + IpExt>(
         bindings_ctx,
         &sock,
         buffer.into_inner().buffer_view().as_ref().into_serializer(),
+        None,
         &DefaultIpSocketOptions,
         CoreTxMetadata::default(),
     )
@@ -521,6 +528,7 @@ fn test_send<I: IpSocketIpExt + IpExt>() {
         &mut bindings_ctx,
         &sock,
         (&[0u8][..]).into_serializer(),
+        None,
         &socket_options,
         CoreTxMetadata::default(),
     )
@@ -542,6 +550,7 @@ fn test_send<I: IpSocketIpExt + IpExt>() {
         &mut bindings_ctx,
         &sock,
         small_body_serializer,
+        None,
         &RestrictMtu { mtu: Ipv6::MINIMUM_LINK_MTU.into(), inner: socket_options },
         CoreTxMetadata::default(),
     );
@@ -556,6 +565,7 @@ fn test_send<I: IpSocketIpExt + IpExt>() {
         &mut bindings_ctx,
         &sock,
         small_body_serializer,
+        None,
         &RestrictMtu { mtu: 1, inner: socket_options },
         CoreTxMetadata::default(),
     );
@@ -570,10 +580,92 @@ fn test_send<I: IpSocketIpExt + IpExt>() {
         &mut bindings_ctx,
         &sock,
         small_body_serializer,
+        None,
         &socket_options,
         CoreTxMetadata::default(),
     );
     assert_eq!(res, Err(IpSockSendError::Unroutable(ResolveRouteError::Unreachable)));
+}
+
+#[test]
+fn test_send_gso_reserves_ipv4_ids() {
+    const GSO_SIZE: u16 = 100;
+    const NUM_SEGMENTS: u16 = 3;
+    const SRC_PORT: NonZeroU16 = NonZeroU16::new(1234).unwrap();
+    const DST_PORT: NonZeroU16 = NonZeroU16::new(80).unwrap();
+
+    let cfg = Ipv4::TEST_ADDRS;
+    let TestAddrs::<_> { local_mac: _, remote_mac: _, local_ip, remote_ip, subnet: _ } = cfg;
+    let (FakeCtx { core_ctx, mut bindings_ctx }, _device_ids) =
+        FakeCtxBuilder::with_addrs(cfg).build();
+    let sock = IpSocketHandler::<Ipv4, _>::new_ip_socket(
+        &mut core_ctx.context(),
+        &mut bindings_ctx,
+        IpSocketArgs {
+            device: None,
+            local_ip: None,
+            remote_ip: SocketIpAddr::try_from(remote_ip).unwrap(),
+            proto: IpProto::Tcp.into(),
+            options: &DefaultIpSocketOptions,
+        },
+    )
+    .unwrap();
+
+    let payload = vec![0xAB; usize::from(NUM_SEGMENTS * GSO_SIZE)];
+    let tcp_serializer = || {
+        payload.as_slice().into_serializer().wrap_in(
+            TcpSegmentBuilderWithOptions::new(
+                TcpSegmentBuilder::new(
+                    local_ip.get(),
+                    remote_ip.get(),
+                    SRC_PORT,
+                    DST_PORT,
+                    1,
+                    None,
+                    u16::MAX,
+                ),
+                TcpOptionsBuilder::default(),
+            )
+            .unwrap(),
+        )
+    };
+    let mut send = |gso_info| {
+        IpSocketHandler::<Ipv4, _>::send_ip_packet(
+            &mut core_ctx.context(),
+            &mut bindings_ctx,
+            &sock,
+            tcp_serializer(),
+            gso_info,
+            &DefaultIpSocketOptions,
+            CoreTxMetadata::default(),
+        )
+        .unwrap()
+    };
+    send(Some(TransportGsoInfo {
+        gso_size: NonZeroU16::new(GSO_SIZE).unwrap(),
+        gso_segs: NonZeroU16::new(NUM_SEGMENTS).unwrap(),
+    }));
+    send(None);
+
+    let ids = bindings_ctx
+        .take_ethernet_frames()
+        .into_iter()
+        .map(|(_device, frame)| {
+            let (mut body, _src_mac, _dst_mac, _ethertype) =
+                parse_ethernet_frame(&frame, EthernetFrameLengthCheck::NoCheck).unwrap();
+            packet_formats::ipv4::Ipv4Header::id(&(&mut body).parse::<Ipv4Packet<&[u8]>>().unwrap())
+        })
+        .collect::<Vec<_>>();
+    let (gso_ids, next_ids) = ids.split_at(usize::from(NUM_SEGMENTS));
+    // The GSO segments get consecutive IDs.
+    let first = gso_ids[0];
+    assert_eq!(
+        gso_ids,
+        (0..NUM_SEGMENTS).map(|i| first.wrapping_add(i)).collect::<Vec<_>>(),
+        "unexpected IPv4 IDs for GSO segments"
+    );
+    // The next packet doesn't reuse any of the GSO segments' IDs.
+    assert_eq!(next_ids, [first.wrapping_add(NUM_SEGMENTS)], "unexpected IPv4 ID for next packet");
 }
 
 #[netstack3_macros::context_ip_bounds(I, FakeBindingsCtx)]
@@ -643,6 +735,7 @@ fn test_send_hop_limits<I: IpSocketIpExt + IpExt>() {
             bindings_ctx,
             &sock,
             (&[0u8][..]).into_serializer(),
+            None,
             &options,
             CoreTxMetadata::default(),
         )

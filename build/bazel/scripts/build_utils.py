@@ -25,10 +25,6 @@ import typing as T
 from collections.abc import Sequence
 from pathlib import Path
 
-if T.TYPE_CHECKING:
-    import argparse
-
-
 # A type that describes either a path string of a Path instance.
 FilePath: T.TypeAlias = str | os.PathLike[T.Any]
 
@@ -1283,8 +1279,7 @@ class BazelQueryCache(object):
                     file=sys.stderr,
                 )
 
-        if log:
-            query_start_time = time.time()
+        query_start_time = time.time()
 
         ret = launcher.run_query(query_type, query_args, ignore_errors=False)
         # Log any query errors (which may have a return code of 0), if logging enabled.
@@ -1304,8 +1299,7 @@ class BazelQueryCache(object):
             log(
                 "Query took %.1f seconds for query %s"
                 % (
-                    time.time()
-                    - query_start_time,  # pyright: ignore[reportPossiblyUnboundVariable]
+                    time.time() - query_start_time,
                     cache_key_args,
                 )
             )

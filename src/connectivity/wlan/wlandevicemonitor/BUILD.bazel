@@ -45,7 +45,7 @@ rustc_binary(
         "src/watchable_map.rs",
         "src/watcher_service.rs",
     ],
-    crate_name = "wlandevicemonitor",
+    binary_name = "wlandevicemonitor",
     edition = "2024",
     lint_config = "//build/config/rust/lints:clippy_warn_all",
     deps = [
@@ -59,9 +59,10 @@ rustc_binary(
         "//sdk/rust/zx",
         "//src/connectivity/wlan/lib/fidl-ext:wlan-fidl-ext",
         "//src/connectivity/wlan/lib/ieee80211",
+        "//src/diagnostics/lib/redactor_client",
         "//src/lib/diagnostics/inspect/contrib/rust",
         "//src/lib/diagnostics/inspect/runtime/rust",
-        "//src/lib/diagnostics/inspect/rust:fuchsia-inspect",
+        "//src/lib/diagnostics/inspect/rust",
         "//src/lib/diagnostics/log/rust",
         "//src/lib/fidl/rust/fidl",
         "//src/lib/fuchsia",
@@ -75,9 +76,8 @@ rustc_binary(
 )
 
 rustc_test(
-    name = "bin_test",
+    name = "wlandevicemonitor_bin_test",
     crate = ":bin",
-    crate_name = "wlandevicemonitor_bin_test",
     deps = [
         "//src/connectivity/wlan/lib/common/rust:wlan-common",
         "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
@@ -92,7 +92,7 @@ fx_unittest_package(
     name = "wlandevicemonitor-tests",
     # This allows tests to pass even when there's an error log.
     max_log_severity = "ERROR",
-    unit_tests = [":bin_test"],
+    unit_tests = [":wlandevicemonitor_bin_test"],
     visibility = ["//src/connectivity/wlan:__pkg__"],
 )
 

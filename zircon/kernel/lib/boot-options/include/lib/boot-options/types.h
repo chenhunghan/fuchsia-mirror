@@ -80,6 +80,9 @@ enum class EntropyTestSource : uint8_t { kHwRng, kJitterEntropy };
 // See kernel.page-scanner.eviction_policy.
 enum class PageTableEvictionPolicy : uint8_t { kOnRequest, kNever, kAlways };
 
+// See kernel.scheduler.fair-placement-affinity.
+enum class FairPlacementAffinity : uint8_t { kCluster, kIdle, kHeadroom };
+
 // See kernel.enable-serial-syscalls.
 enum class SerialDebugSyscalls : uint8_t {
   kDisabled,
@@ -153,7 +156,6 @@ constexpr bool operator!=(const RamReservation& lhs, const RamReservation& rhs) 
 constexpr std::string_view kForceWatchdogDisabledName = "kernel.force-watchdog-disabled";
 constexpr std::string_view kPageScannerEnableEvictionName = "kernel.page-scanner.enable-eviction";
 constexpr std::string_view kPmmCheckerActionName = "kernel.pmm-checker.action";
-constexpr std::string_view kPmmCheckerFillSizeName = "kernel.pmm-checker.fill-size";
 constexpr std::string_view kRootJobBehaviorHaltName = "halt";
 constexpr std::string_view kRootJobBehaviorRebootName = "reboot";
 constexpr std::string_view kRootJobBehaviorBootloaderName = "bootloader";

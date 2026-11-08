@@ -6,14 +6,13 @@
 
 use super::{VmoFile, read_only};
 use crate::{
-    assert_close, assert_get_attr, assert_read, assert_read_at, assert_seek, assert_truncate_err,
-    assert_write_err, file,
+    assert_close, assert_get_attributes, assert_read, assert_read_at, assert_seek,
+    assert_truncate_err, assert_write_err, file,
 };
 use assert_matches::assert_matches;
 use flex_client::ProxyHasDomain;
 use flex_fuchsia_io as fio;
 use futures::{FutureExt as _, StreamExt as _};
-use libc::{S_IFREG, S_IRUSR};
 use zx::Vmo;
 use zx_status::Status;
 
@@ -222,17 +221,19 @@ async fn clone_inherit_access() {
 async fn get_attr_read_only() {
     let file = read_only(b"Content");
     let proxy = file::serve_proxy(file, fio::PERM_READABLE);
-    assert_get_attr!(
+    assert_get_attributes!(
         proxy,
-        fio::NodeAttributes {
-            mode: S_IFREG | S_IRUSR,
-            id: fio::INO_UNKNOWN,
-            content_size: 7,
-            storage_size: 7,
-            link_count: 1,
-            creation_time: 0,
-            modification_time: 0,
-        }
+        fio::NodeAttributesQuery::all(),
+        immutable_attributes!(
+            fio::NodeAttributesQuery::all(),
+            Immutable {
+                protocols: fio::NodeProtocolKinds::FILE,
+                abilities: fio::Operations::GET_ATTRIBUTES | fio::Operations::READ_BYTES,
+                content_size: 7,
+                storage_size: 7,
+                id: fio::INO_UNKNOWN,
+            }
+        )
     );
     assert_close!(proxy);
 }
@@ -246,17 +247,19 @@ async fn get_attr_read_only_with_inode() {
     vmo.write(&CONTENT, 0).unwrap();
     let file = VmoFile::new_with_inode(vmo, INODE);
     let proxy = file::serve_proxy(file, fio::PERM_READABLE);
-    assert_get_attr!(
+    assert_get_attributes!(
         proxy,
-        fio::NodeAttributes {
-            mode: S_IFREG | S_IRUSR,
-            id: INODE, // Custom inode was specified for this file.
-            content_size: content_len,
-            storage_size: content_len,
-            link_count: 1,
-            creation_time: 0,
-            modification_time: 0,
-        }
+        fio::NodeAttributesQuery::all(),
+        immutable_attributes!(
+            fio::NodeAttributesQuery::all(),
+            Immutable {
+                protocols: fio::NodeProtocolKinds::FILE,
+                abilities: fio::Operations::GET_ATTRIBUTES | fio::Operations::READ_BYTES,
+                content_size: content_len,
+                storage_size: content_len,
+                id: INODE,
+            }
+        )
     );
     assert_close!(proxy);
 }

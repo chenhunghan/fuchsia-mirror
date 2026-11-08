@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef ZIRCON_PLATFORM_STATUS_H
-#define ZIRCON_PLATFORM_STATUS_H
+#ifndef SRC_GRAPHICS_MAGMA_LIB_MAGMA_PLATFORM_ZIRCON_ZIRCON_PLATFORM_STATUS_H_
+#define SRC_GRAPHICS_MAGMA_LIB_MAGMA_PLATFORM_ZIRCON_ZIRCON_PLATFORM_STATUS_H_
 
 #include <lib/magma/util/macros.h>
 #include <lib/magma/util/status.h>
@@ -37,6 +37,8 @@ inline zx_status_t ToZxStatus(magma_status_t status) {
       return ZX_ERR_NOT_SUPPORTED;
     case MAGMA_STATUS_TOO_MANY_GROUP_CHILD_COMBINATIONS:
       return ZX_ERR_OUT_OF_RANGE;
+    case MAGMA_STATUS_ALREADY_EXISTS:
+      return ZX_ERR_ALREADY_EXISTS;
     default:
       MAGMA_DMESSAGE("No match for magma status %d", status);
       MAGMA_DASSERT(false);
@@ -67,6 +69,8 @@ inline Status FromZxStatus(zx_status_t zx_status) {
       return MAGMA_STATUS_UNIMPLEMENTED;
     case ZX_ERR_BAD_STATE:
       return MAGMA_STATUS_BAD_STATE;
+    case ZX_ERR_ALREADY_EXISTS:
+      return MAGMA_STATUS_ALREADY_EXISTS;
     default:
       MAGMA_DMESSAGE("No match for zx status %d", zx_status);
       MAGMA_DASSERT(false);
@@ -76,4 +80,4 @@ inline Status FromZxStatus(zx_status_t zx_status) {
 
 }  // namespace magma
 
-#endif
+#endif  // SRC_GRAPHICS_MAGMA_LIB_MAGMA_PLATFORM_ZIRCON_ZIRCON_PLATFORM_STATUS_H_

@@ -36,13 +36,16 @@ the Bazel targets to GN:
     still has users in both build systems, its tests must run in both build
     systems (see [Testing libraries in both build
     systems](../../../../../docs/development/build/bazel_concepts/tests.md#tests-in-both-build-systems)):
-    do not add `# @bazel2gn:skip` to test targets or test attributes
+    do not add `# @bazel2gn:skip` to individual test targets or test attributes
     (`with_unit_tests`, `with_host_unit_tests`, `test_deps`) unless one of the
-    opt-out cases in that doc applies (the target under test in `BUILD.bazel`
-    is itself skipped, `bazel2gn` cannot translate that specific
-    rule/attribute, or a code owner opted the test out with a comment), and keep
-    the generated GN test copies wired into `group("tests")` alongside
-    `bazel_test_suite("bazel_tests")`.
+    opt-out cases in that doc applies (the target under test in `BUILD.bazel` is
+    itself skipped, `bazel2gn` cannot translate that specific rule/attribute, or
+    a code owner opted the test out with a comment), keep the generated GN test
+    copies wired into `group("tests")`, and expose the Bazel tests via a
+    `test_suite(name = "tests" | "host_tests")` wired into the area's
+    aggregation `test_suite()` (instead of adding a per-package
+    `bazel_test_suite("bazel_tests")` in `BUILD.gn`). `bazel2gn` ignores
+    `test_suite()`, so don't put `# @bazel2gn:skip` on it.
 
 3.  **Verify:**
 

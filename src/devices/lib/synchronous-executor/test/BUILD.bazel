@@ -1,0 +1,33 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":synchronous-executor-test-package"],
+    visibility = ["//src/devices:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "synchronous-executor-test",
+    srcs = ["executor-test.cc"],
+    deps = [
+        "//sdk/lib/fdio",
+        "//sdk/lib/fit-promise",
+        "//src/devices/lib/synchronous-executor",
+        "//src/devices/testing/fake-object",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/zx",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "synchronous-executor-test-package",
+    unit_tests = [":synchronous-executor-test"],
+)

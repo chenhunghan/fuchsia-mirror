@@ -2,13 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <lib/async/cpp/irq.h>
 #include <lib/async/cpp/task.h>
 #include <lib/driver/component/cpp/driver_base2.h>
 #include <lib/driver/component/cpp/driver_export2.h>
 #include <lib/driver/testing/cpp/driver_runtime.h>
 #include <lib/driver/testing/cpp/driver_test.h>
 #include <lib/driver/testing/cpp/minimal_compat_environment.h>
+#include <lib/fdf/cpp/wake_vector.h>
 #include <lib/inspect/cpp/reader.h>
+#include <lib/zx/interrupt.h>
 
 #include <gtest/gtest.h>
 
@@ -651,5 +654,237 @@ TEST(DriverBase2Test, ReportHealthAlertSelfFaultMirroredToInspect) {
 
   ASSERT_EQ(ZX_OK, driver_test.StopDriver().status_value());
 }
+
+#if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
+class SuspendResumeTestDriver2 : public fdf::DriverBase2 {
+ public:
+  SuspendResumeTestDriver2() : fdf::DriverBase2("suspend_resume_driver2") {}
+
+  static DriverRegistration GetDriverRegistration() {
+    return FUCHSIA_DRIVER_REGISTRATION_V1(
+        fdf_internal::DriverServer2<SuspendResumeTestDriver2>::initialize,
+        fdf_internal::DriverServer2<SuspendResumeTestDriver2>::destroy);
+  }
+
+  zx::result<> Start(fdf::DriverContext context) override {
+    zx_status_t status = zx::interrupt::create(zx::resource(), 0, ZX_INTERRUPT_VIRTUAL, &wake_irq_);
+    if (status != ZX_OK) {
+      return zx::error(status);
+    }
+    irq_handler_.set_object(wake_irq_.get());
+    status = irq_handler_.Begin(dispatcher());
+    if (status != ZX_OK) {
+      return zx::error(status);
+    }
+    zx::result wake_reg = fdf::WakeVectorRegistration::Create(
+        *driver_dispatcher(), zx::unowned_handle(wake_irq_.get()), ZX_SIGNAL_NONE);
+    if (wake_reg.is_error()) {
+      return wake_reg.take_error();
+    }
+    wake_registration_ = std::move(*wake_reg);
+    return zx::ok();
+  }
+
+  void Stop(fdf::StopCompleter completer) override {
+    async::PostTask(dispatcher(), [this, completer = std::move(completer)]() mutable {
+      stopped_ = true;
+      completer(zx::ok());
+    });
+  }
+
+  void SystemSuspend(fdf::SuspendCompleter completer) override {
+    if (suspend_status_ != ZX_OK) {
+      completer(zx::error(suspend_status_));
+      return;
+    }
+    // Post a regular task and an always-on task during SystemSuspend.
+    // The always-on task must run to complete SystemSuspend, while the regular task must remain
+    // paused until after SystemResume completes.
+    async::PostTask(driver_dispatcher()->GetAlwaysOnDispatcher()->async_dispatcher(),
+                    [this, completer = std::move(completer)]() mutable {
+                      suspended_ = true;
+                      completer(zx::ok());
+                    });
+  }
+
+  void SystemResume(std::optional<fuchsia_power_broker::LeaseToken> pe_lease,
+                    fdf::ResumeCompleter completer) override {
+    if (resume_status_ != ZX_OK) {
+      completer(zx::error(resume_status_));
+      return;
+    }
+    lease_ = std::move(pe_lease);
+    // Post a regular task to drop the lease. Because the dispatcher is still suspended until
+    // completer(zx::ok()) finishes, this task goes into sleep_queue_ and must run after any
+    // triggered wake vectors in wake_queue_.
+    async::PostTask(dispatcher(), [this]() { lease_.reset(); });
+    async::PostTask(driver_dispatcher()->GetAlwaysOnDispatcher()->async_dispatcher(),
+                    [this, completer = std::move(completer)]() mutable {
+                      suspended_ = false;
+                      completer(zx::ok());
+                    });
+  }
+
+  void TriggerWakeIrq() { ASSERT_EQ(ZX_OK, wake_irq_.trigger(0, zx::time_boot(123))); }
+
+  void PostRegularTask() {
+    async::PostTask(dispatcher(), [this]() { regular_tasks_run_++; });
+  }
+
+  void set_suspend_status(zx_status_t status) { suspend_status_ = status; }
+  void set_resume_status(zx_status_t status) { resume_status_ = status; }
+
+  bool suspended() const { return suspended_; }
+  bool stopped() const { return stopped_; }
+  bool wake_irq_handled() const { return wake_irq_handled_; }
+  size_t regular_tasks_run() const { return regular_tasks_run_; }
+
+ private:
+  void HandleIrq(async_dispatcher_t* dispatcher, async::IrqBase* irq, zx_status_t status,
+                 const zx_packet_interrupt_t* interrupt) {
+    if (status == ZX_OK) {
+      EXPECT_FALSE(suspended_);
+      EXPECT_TRUE(lease_.has_value());
+      EXPECT_EQ(0u, regular_tasks_run_);
+      wake_irq_handled_ = true;
+      wake_irq_.ack();
+    }
+  }
+
+  zx::interrupt wake_irq_;
+  async::IrqMethod<SuspendResumeTestDriver2, &SuspendResumeTestDriver2::HandleIrq> irq_handler_{
+      this};
+  fdf::WakeVectorRegistration wake_registration_;
+  std::optional<fuchsia_power_broker::LeaseToken> lease_;
+  bool suspended_ = false;
+  bool stopped_ = false;
+  bool wake_irq_handled_ = false;
+  size_t regular_tasks_run_ = 0;
+  zx_status_t suspend_status_ = ZX_OK;
+  zx_status_t resume_status_ = ZX_OK;
+};
+
+struct SuspendResumeFixtureConfig final {
+  using DriverType = SuspendResumeTestDriver2;
+  using EnvironmentType = fdf_testing::MinimalCompatEnvironment;
+};
+
+TEST(DriverBase2Test, ForegroundSuspendAndResumePausesDispatchersUntilResumeCompletes) {
+  fdf_testing::ForegroundDriverTest<SuspendResumeFixtureConfig> driver_test;
+  ASSERT_EQ(ZX_OK, driver_test.StartDriver().status_value());
+
+  ASSERT_EQ(ZX_OK, driver_test.SuspendDriver().status_value());
+
+  // While suspended, only SystemSuspend callbacks on the always-on dispatcher have run.
+  EXPECT_TRUE(driver_test.driver()->suspended());
+  EXPECT_EQ(0u, driver_test.driver()->regular_tasks_run());
+
+  // Trigger a wakeable interrupt and post a regular task while suspended.
+  driver_test.driver()->PostRegularTask();
+  driver_test.driver()->TriggerWakeIrq();
+  driver_test.runtime().RunUntilIdle();
+
+  // Neither the wakeable interrupt nor the regular task may run before ResumeDriver.
+  EXPECT_FALSE(driver_test.driver()->wake_irq_handled());
+  EXPECT_EQ(0u, driver_test.driver()->regular_tasks_run());
+
+  zx::eventpair lease, lease_peer;
+  ASSERT_EQ(ZX_OK, zx::eventpair::create(0, &lease, &lease_peer));
+  ASSERT_EQ(ZX_OK, driver_test.ResumeDriver(std::move(lease)).status_value());
+  driver_test.runtime().RunUntilIdle();
+
+  // Wake vectors run immediately after SystemResume completes, before sleep_queue_ tasks.
+  EXPECT_FALSE(driver_test.driver()->suspended());
+  EXPECT_TRUE(driver_test.driver()->wake_irq_handled());
+  EXPECT_EQ(1u, driver_test.driver()->regular_tasks_run());
+  zx_signals_t observed = 0;
+  EXPECT_EQ(ZX_OK,
+            lease_peer.wait_one(ZX_EVENTPAIR_PEER_CLOSED, zx::time::infinite_past(), &observed));
+
+  ASSERT_EQ(ZX_OK, driver_test.StopDriver().status_value());
+  EXPECT_TRUE(driver_test.driver()->stopped());
+}
+
+TEST(DriverBase2Test, BackgroundSuspendAndResumePausesDispatchersUntilResumeCompletes) {
+  fdf_testing::BackgroundDriverTest<SuspendResumeFixtureConfig> driver_test;
+  ASSERT_EQ(ZX_OK, driver_test.StartDriver().status_value());
+
+  ASSERT_EQ(ZX_OK, driver_test.SuspendDriver().status_value());
+
+  driver_test.RunInDriverContext([](SuspendResumeTestDriver2& driver) {
+    EXPECT_TRUE(driver.suspended());
+    EXPECT_EQ(0u, driver.regular_tasks_run());
+    driver.PostRegularTask();
+    driver.TriggerWakeIrq();
+  });
+
+  zx::eventpair lease, lease_peer;
+  ASSERT_EQ(ZX_OK, zx::eventpair::create(0, &lease, &lease_peer));
+  ASSERT_EQ(ZX_OK, driver_test.ResumeDriver(std::move(lease)).status_value());
+
+  // RunInDriverContext when resumed posts a task to the synchronized dispatcher and waits for it,
+  // ensuring all wake_queue_ and sleep_queue_ tasks have completed first.
+  driver_test.RunInDriverContext([&](SuspendResumeTestDriver2& driver) {
+    EXPECT_FALSE(driver.suspended());
+    EXPECT_TRUE(driver.wake_irq_handled());
+    EXPECT_EQ(1u, driver.regular_tasks_run());
+    zx_signals_t observed = 0;
+    EXPECT_EQ(ZX_OK,
+              lease_peer.wait_one(ZX_EVENTPAIR_PEER_CLOSED, zx::time::infinite_past(), &observed));
+  });
+
+  ASSERT_EQ(ZX_OK, driver_test.StopDriver().status_value());
+}
+
+TEST(DriverBase2Test, StopDriverWhileSuspendedResumesBeforeStop) {
+  fdf_testing::ForegroundDriverTest<SuspendResumeFixtureConfig> driver_test;
+  ASSERT_EQ(ZX_OK, driver_test.StartDriver().status_value());
+
+  ASSERT_EQ(ZX_OK, driver_test.SuspendDriver().status_value());
+  driver_test.driver()->PostRegularTask();
+  EXPECT_TRUE(driver_test.driver()->suspended());
+  EXPECT_EQ(0u, driver_test.driver()->regular_tasks_run());
+
+  // Stopping while suspended must resume the driver and its dispatchers before Stop() runs,
+  // allowing Stop() to post teardown work to the regular dispatcher.
+  ASSERT_EQ(ZX_OK, driver_test.StopDriver().status_value());
+
+  EXPECT_FALSE(driver_test.driver()->suspended());
+  EXPECT_EQ(1u, driver_test.driver()->regular_tasks_run());
+  EXPECT_TRUE(driver_test.driver()->stopped());
+}
+
+TEST(DriverBase2Test, SuspendAndResumeErrorPropagation) {
+  {
+    fdf_testing::ForegroundDriverTest<SuspendResumeFixtureConfig> driver_test;
+    ASSERT_EQ(ZX_OK, driver_test.StartDriver().status_value());
+    driver_test.driver()->set_suspend_status(ZX_ERR_IO);
+    driver_test.driver()->PostRegularTask();
+    EXPECT_EQ(ZX_ERR_IO, driver_test.SuspendDriver().status_value());
+    driver_test.runtime().RunUntilIdle();
+    EXPECT_FALSE(driver_test.driver()->suspended());
+    EXPECT_EQ(0u, driver_test.driver()->regular_tasks_run());
+
+    ASSERT_EQ(ZX_OK, driver_test.StopDriver().status_value());
+    EXPECT_EQ(1u, driver_test.driver()->regular_tasks_run());
+    EXPECT_TRUE(driver_test.driver()->stopped());
+  }
+
+  {
+    fdf_testing::ForegroundDriverTest<SuspendResumeFixtureConfig> driver_test;
+    ASSERT_EQ(ZX_OK, driver_test.StartDriver().status_value());
+    ASSERT_EQ(ZX_OK, driver_test.SuspendDriver().status_value());
+    driver_test.driver()->set_resume_status(ZX_ERR_IO);
+    EXPECT_EQ(ZX_ERR_IO, driver_test.ResumeDriver().status_value());
+    driver_test.runtime().RunUntilIdle();
+    EXPECT_TRUE(driver_test.driver()->suspended());
+    EXPECT_EQ(0u, driver_test.driver()->regular_tasks_run());
+
+    ASSERT_EQ(ZX_OK, driver_test.StopDriver().status_value());
+    EXPECT_EQ(0u, driver_test.driver()->regular_tasks_run());
+    EXPECT_TRUE(driver_test.driver()->stopped());
+  }
+}
+#endif
 
 }  // namespace

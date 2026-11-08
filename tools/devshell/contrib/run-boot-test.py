@@ -2,7 +2,6 @@
 # Copyright 2020 The Fuchsia Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
-from __future__ import annotations
 
 import argparse
 import difflib
@@ -86,7 +85,6 @@ class BootTest:
 
         self.zbi = None
         self.qemu_kernel = None
-        self.efi_disk = None
 
         if test_json["product_bundle"] in product_bundles:
             self._product_bundle = product_bundles[test_json["product_bundle"]]
@@ -116,20 +114,6 @@ class BootTest:
 
         product_bundle_dir = self._product_bundle["path"]
 
-        # Check the bootloader partitions for a `efi_shell` type.
-        bootloader_partitions = manifest["partitions"]["bootloader_partitions"]
-
-        # There is UEFI disk, and we should ignore `system_a``.
-        if (
-            len(bootloader_partitions) == 1
-            and bootloader_partitions[0]["type"] == "efi-shell"
-        ):
-            self.efi_disk = os.path.join(
-                product_bundle_dir,
-                bootloader_partitions[0]["image"],
-            )
-            return
-
         # Normal QEMU Kernel handling a ZBI.
         for image in manifest["system_a"]:
             path = os.path.join(product_bundle_dir, image["path"])
@@ -149,8 +133,6 @@ class BootTest:
         return bool(test_json.get("is_boot_test"))
 
     def is_uefi_boot(self):
-        if self.efi_disk:
-            return True
         # The QEMU kernel might be a UEFI executable. Look for PE magic.
         if not self.qemu_kernel:
             return False
@@ -200,8 +182,6 @@ class BootTest:
                 kinds.append("QEMU kernel")
             if self.zbi:
                 kinds.append("ZBI")
-            if self.efi_disk:
-                kinds.append("EFI disk")
         print("* %s (%s)" % (self.name, ", ".join(kinds)))
         print("    label: %s" % self.label)
         print("    cpu: %s" % (self.arch() or "Unknown!"))
@@ -209,8 +189,6 @@ class BootTest:
             print("    qemu kernel: %s" % self.qemu_kernel)
         if self.zbi:
             print("    zbi: %s" % self.zbi)
-        if self.efi_disk:
-            print("    efi disk: %s" % self.efi_disk)
         if command:
             print("    command: %s" % " ".join(map(shlex.quote, command)))
 
@@ -267,7 +245,7 @@ def find_bootserver(build_dir):
 
 EPILOG = """
 In order to use this tool, please ensure that your boot test (usually defined
-by one of zbi_test(), qemu_kernel_test(), or efi_test()) is in your GN graph. A
+by zbi_test() or qemu_kernel_test()) is in your GN graph. A
 way to do this is to add //bundles/boot_tests to your `fx set` invocation.
 """
 
@@ -522,8 +500,6 @@ def main():
             cmd += ["-t", test.qemu_kernel]
         if test.zbi:
             cmd += ["-z", test.zbi]
-        if test.efi_disk:
-            cmd += ["-D", test.efi_disk]
         args.cmdline.extend(emulator_profile.kernel_args)
 
     for arg in (

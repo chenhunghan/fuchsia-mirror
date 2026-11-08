@@ -14,9 +14,7 @@
 #include <memory>
 #include <string>
 
-#include "src/lib/backoff/backoff.h"
-#include "src/lib/diagnostics/accessor2logger/log_message.h"
-#include "src/lib/fxl/memory/weak_ptr.h"
+#include "src/lib/diagnostics/fidl_log_message_parser/log_message.h"
 
 namespace forensics::feedback_data {
 
@@ -30,32 +28,18 @@ class LogSink {
   //
   // Returns false if the write fails though callers are not expected to take action on failure.
   virtual bool Add(MessageOr message) = 0;
-
-  // Notifies the sink the log source was interrupted and the messages it received in the past may
-  // be sent again.
-  virtual void NotifyInterruption() = 0;
-
-  // Returns true if the sink is safe to use after an interruption has occurred.
-  virtual bool SafeAfterInterruption() const = 0;
 };
 
 // Receives log messages from the system's logging service and dispatches them to a sink.
 class LogSource {
  public:
   LogSource(async_dispatcher_t* dispatcher, std::shared_ptr<sys::ServiceDirectory> services,
-            LogSink* sink, std::unique_ptr<backoff::Backoff> backoff = nullptr);
+            LogSink* sink);
 
   // Starts log collection.
-  //
-  // Note: a check-fail will occur if |sink_| cannot safely receive messages after being interrupted
-  // and the log stream has stopped due to a disconnection or call to Stop.
   void Start();
 
-  // Stops log collection and notfies |sink_| collection was interrupted.
-  void Stop();
-
  private:
-  void OnDisconnect();
   void GetNext();
 
   async_dispatcher_t* dispatcher_;
@@ -63,11 +47,7 @@ class LogSource {
 
   LogSink* sink_;
   fuchsia::diagnostics::ArchiveAccessorPtr archive_accessor_;
-  std::unique_ptr<diagnostics::accessor2logger::LogBatchIterator> batch_iterator_;
-
-  bool is_stopped_{false};
-  std::unique_ptr<backoff::Backoff> backoff_;
-  fxl::WeakPtrFactory<LogSource> ptr_factory_{this};
+  std::unique_ptr<diagnostics::fidl_log_message_parser::LogBatchIterator> batch_iterator_;
 };
 
 }  // namespace forensics::feedback_data

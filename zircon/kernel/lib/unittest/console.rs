@@ -19,7 +19,7 @@ use crate::kernel::thread;
 use crate::platform_rs::timer::{InstantMono, current_mono_time};
 use crate::vm::vm_aspace::{Type as AspaceType, VmAspace};
 
-ksync::declare_singleton_mutex!(UnittestLock);
+crate::ksync_kernel::declare_singleton_mutex!(UnittestLock);
 
 unsafe extern "C" {
     static __start_unittest_testcases: TestSuiteRegistration;

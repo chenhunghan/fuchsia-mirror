@@ -5,6 +5,7 @@
 #include "codec_adapter_vaapi_decoder.h"
 
 #include <fuchsia/media/cpp/fidl.h>
+#include <fuchsia/sysmem/cpp/fidl.h>
 #include <lib/async/cpp/task.h>
 #include <lib/fit/defer.h>
 #include <lib/media/codec_impl/fourcc.h>

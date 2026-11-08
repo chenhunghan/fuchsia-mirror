@@ -4,12 +4,14 @@
 
 use anyhow::Error;
 use bt_rfcomm::ServerChannel;
-use fidl::endpoints::ClientEnd;
+use fidl::endpoints::{ClientEnd, Proxy};
 use fidl_fuchsia_bluetooth_bredr as bredr;
 use fuchsia_bluetooth::profile::{
-    ChannelParameters, Psm, ServiceDefinition, combine_channel_parameters,
+    ChannelParameters, Psm, SecurityRequirements, ServiceDefinition, combine_channel_parameters,
+    combine_security_requirements,
 };
 use fuchsia_bluetooth::types::PeerId;
+use futures::stream::{BoxStream, StreamExt, TryStreamExt};
 use std::collections::{BTreeMap, HashSet};
 
 use crate::profile::{psms_from_service_definitions, server_channels_from_service_definitions};
@@ -103,6 +105,17 @@ impl Services {
 
         Some(AdvertiseParams { services, parameters })
     }
+
+    /// Returns the combined `SecurityRequirements` across all registered services.
+    pub fn security_requirements(&self) -> Option<SecurityRequirements> {
+        self.groups
+            .values()
+            .filter_map(|group| group.channel_parameters().security_requirements.as_ref())
+            .fold(None, |acc, reqs| match acc {
+                Some(acc_reqs) => Some(combine_security_requirements(&acc_reqs, reqs)),
+                None => Some(reqs.clone()),
+            })
+    }
 }
 
 /// Parameters needed to advertise a service.
@@ -115,15 +128,89 @@ pub struct AdvertiseParams {
 impl AdvertiseParams {
     pub fn into_advertise_request(
         self,
-        receiver: ClientEnd<bredr::ConnectionReceiverMarker>,
+        connection_receiver: ClientEnd<bredr::ConnectionReceiver2Marker>,
     ) -> bredr::ProfileAdvertiseRequest {
         let fidl_services = ServiceDefinition::try_into_fidl(&self.services).unwrap();
 
         bredr::ProfileAdvertiseRequest {
             services: Some(fidl_services),
             parameters: Some((&self.parameters).try_into().unwrap()),
-            receiver: Some(receiver),
+            connection_receiver: Some(connection_receiver),
             ..Default::default()
+        }
+    }
+}
+
+/// Event received from a `Profile.Advertise` client's connection receiver stream.
+#[derive(Debug)]
+pub enum ClientReceiverEvent {
+    OnRevoke,
+    Unknown,
+}
+
+/// Client proxy for a `Profile.Advertise` connection receiver, supporting both
+/// `ConnectionReceiver2` and the deprecated `ConnectionReceiver`.
+#[derive(Clone, Debug)]
+pub enum ConnectionReceiverClient {
+    V1(bredr::ConnectionReceiverProxy),
+    V2(bredr::ConnectionReceiver2Proxy),
+}
+
+impl ConnectionReceiverClient {
+    pub fn is_closed(&self) -> bool {
+        match self {
+            Self::V1(proxy) => proxy.is_closed(),
+            Self::V2(proxy) => proxy.is_closed(),
+        }
+    }
+
+    pub fn connected(
+        &self,
+        peer_id: PeerId,
+        channel: bredr::Channel,
+        protocol: Vec<bredr::ProtocolDescriptor>,
+    ) -> Result<(), fidl::Error> {
+        match self {
+            Self::V1(proxy) => proxy.connected(&peer_id.into(), channel, &protocol),
+            Self::V2(proxy) => {
+                let _ = proxy
+                    .connected(bredr::ConnectionReceiver2ConnectedRequest {
+                        peer_id: Some(peer_id.into()),
+                        channel: Some(channel),
+                        protocol: Some(protocol),
+                        ..Default::default()
+                    })
+                    .check()?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Returns the event stream for the underlying connection receiver proxy.
+    ///
+    /// Panics if called multiple times on the same proxy (or a clone of it).
+    pub fn take_event_stream(
+        &self,
+    ) -> BoxStream<'static, Result<ClientReceiverEvent, fidl::Error>> {
+        match self {
+            Self::V1(proxy) => proxy
+                .take_event_stream()
+                .map_ok(|event| match event {
+                    bredr::ConnectionReceiverEvent::OnRevoke {} => ClientReceiverEvent::OnRevoke,
+                    bredr::ConnectionReceiverEvent::_UnknownEvent { .. } => {
+                        ClientReceiverEvent::Unknown
+                    }
+                })
+                .boxed(),
+            Self::V2(proxy) => proxy
+                .take_event_stream()
+                .map_ok(|event| match event {
+                    bredr::ConnectionReceiver2Event::OnRevoke {} => ClientReceiverEvent::OnRevoke,
+                    bredr::ConnectionReceiver2Event::_UnknownEvent { .. } => {
+                        ClientReceiverEvent::Unknown
+                    }
+                })
+                .boxed(),
         }
     }
 }
@@ -133,7 +220,7 @@ impl AdvertiseParams {
 pub struct ServiceGroup {
     /// Connection to the FIDL client that made the `bredr.Advertise` request.
     /// Incoming L2CAP connections from a remote peer are relayed to this connection `receiver`.
-    receiver: bredr::ConnectionReceiverProxy,
+    receiver: ConnectionReceiverClient,
 
     /// The ChannelParameters for this service advertisement.
     channel_parameters: ChannelParameters,
@@ -149,10 +236,7 @@ pub struct ServiceGroup {
 }
 
 impl ServiceGroup {
-    pub fn new(
-        receiver: bredr::ConnectionReceiverProxy,
-        channel_parameters: ChannelParameters,
-    ) -> Self {
+    pub fn new(receiver: ConnectionReceiverClient, channel_parameters: ChannelParameters) -> Self {
         Self {
             receiver,
             channel_parameters,
@@ -191,7 +275,7 @@ impl ServiceGroup {
         channel: bredr::Channel,
         protocol: Vec<bredr::ProtocolDescriptor>,
     ) -> Result<(), Error> {
-        self.receiver.connected(&peer_id.into(), channel, &protocol).map_err(|e| e.into())
+        self.receiver.connected(peer_id, channel, protocol).map_err(Into::into)
     }
 
     /// Sets the ServiceDefinitions for this group.
@@ -292,11 +376,11 @@ pub(crate) mod tests {
         }]
     }
 
-    fn build_service_group() -> (ServiceGroup, bredr::ConnectionReceiverRequestStream) {
-        let (client, server) = create_proxy_and_stream::<bredr::ConnectionReceiverMarker>();
+    fn build_service_group() -> (ServiceGroup, bredr::ConnectionReceiver2RequestStream) {
+        let (client, server) = create_proxy_and_stream::<bredr::ConnectionReceiver2Marker>();
         let params = Default::default();
 
-        (ServiceGroup::new(client, params), server)
+        (ServiceGroup::new(ConnectionReceiverClient::V2(client), params), server)
     }
 
     #[test]
@@ -354,6 +438,53 @@ pub(crate) mod tests {
         expected_adv_params.services = defs1;
         expected_adv_params.parameters = ChannelParameters::default();
         assert_eq!(services.build_registration(), Some(expected_adv_params));
+    }
+
+    #[test]
+    fn test_services_security_requirements() {
+        let _exec = fasync::TestExecutor::new();
+        let mut services = Services::new();
+        assert_eq!(services.security_requirements(), None);
+
+        // Group with no security requirements yields `None`.
+        let (group1, _server1) = build_service_group();
+        let handle1 = services.insert(group1);
+        assert_eq!(services.security_requirements(), None);
+
+        // Group requiring authentication yields `authentication_required: Some(true)`.
+        let (mut group2, _server2) = build_service_group();
+        let auth_reqs = SecurityRequirements {
+            authentication_required: Some(true),
+            secure_connections_required: None,
+        };
+        group2.channel_parameters.security_requirements = Some(auth_reqs.clone());
+        let handle2 = services.insert(group2);
+        assert_eq!(services.security_requirements(), Some(auth_reqs.clone()));
+
+        // Group requiring secure connections combines with existing requirements.
+        let (mut group3, _server3) = build_service_group();
+        group3.channel_parameters.security_requirements = Some(SecurityRequirements {
+            authentication_required: Some(false),
+            secure_connections_required: Some(true),
+        });
+        let handle3 = services.insert(group3);
+        assert_eq!(
+            services.security_requirements(),
+            Some(SecurityRequirements {
+                authentication_required: Some(true),
+                secure_connections_required: Some(true),
+            })
+        );
+
+        // Removing group3 reverts combined requirements to group2's requirements.
+        let _ = services.remove(handle3);
+        assert_eq!(services.security_requirements(), Some(auth_reqs));
+
+        // Removing group2 and group1 reverts to `None`.
+        let _ = services.remove(handle2);
+        assert_eq!(services.security_requirements(), None);
+        let _ = services.remove(handle1);
+        assert_eq!(services.security_requirements(), None);
     }
 
     #[test]
@@ -421,10 +552,12 @@ pub(crate) mod tests {
 
         // We expect the connected request to be relayed to the client.
         let () = match exec.run_until_stalled(&mut server.next()) {
-            Poll::Ready(Some(Ok(bredr::ConnectionReceiverRequest::Connected {
-                peer_id, ..
+            Poll::Ready(Some(Ok(bredr::ConnectionReceiver2Request::Connected {
+                payload,
+                responder,
             }))) => {
-                assert_eq!(peer_id, id.into());
+                responder.send().expect("can respond");
+                assert_eq!(payload.peer_id, Some(id.into()));
             }
             x => panic!("Expected ready but got: {:?}", x),
         };

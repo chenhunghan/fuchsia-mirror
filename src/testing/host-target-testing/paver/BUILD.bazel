@@ -34,4 +34,5 @@ host_go_test(
     ],
     embed = [":paver"],
     target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/testing/host-target-testing:__pkg__"],
 )

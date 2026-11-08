@@ -5,8 +5,6 @@
 
 """Unit tests for permissions definitions and expansion logic."""
 
-from __future__ import annotations
-
 import re
 import unittest
 from collections.abc import Sequence
@@ -257,6 +255,97 @@ class PermissionsTest(BaseTestCase):
             ),
         )
 
+    def test_expand_jj_variants(self) -> None:
+        pattern = self._single_pattern("jj status")
+
+        for cmd in (
+            "jj status",
+            "/usr/bin/jj status",
+            ".jiri_root/bin/jj status",
+            "jj --no-pager status",
+            "jj --color=never status",
+            "jj --at-op=@- status",
+            "jj --at-op=@- --color=never --quiet status",
+            "ENV_VAR=1 jj status",
+            "jj status --no-pager",
+            "jj status -v",
+        ):
+            self.assertTrue(re.fullmatch(pattern, cmd), cmd)
+
+        for cmd in (
+            "jj new",
+            "jj-other status",
+            'jj --config ui.paginate="never" status',
+            'jj --config-toml ui.pager="cat" status',
+            "jj --config-file /tmp/cfg status",
+            'jj status --config ui.pager="..."',
+            "jj status --config-toml '...'",
+            "jj status -R /tmp/evil",
+            'jj status -R="../fuchsia-worktrees/my-task"',
+            "jj status --repository /tmp/evil",
+            "jj status --repository=/tmp/evil",
+            "jj status --config-file /tmp/cfg",
+            "jj -R /some/worktree status",
+            'jj -R="../fuchsia-worktrees/my-task" status',
+            "jj --repository /some/worktree status",
+            "jj --repository /some/worktree --no-pager --ignore-working-copy status",
+            "ENV_VAR=1 jj -R .jiri_root/worktrees/task status",
+            'jj status foo --config ui.pager="cat"',
+            "jj status foo -R /tmp/evil",
+        ):
+            self.assertFalse(re.fullmatch(pattern, cmd), cmd)
+
+    def test_expand_jj_subcommands(self) -> None:
+        log_pattern = self._single_pattern("jj log")
+        for cmd in (
+            "jj log",
+            "jj log -r @",
+            "jj --no-pager log",
+            "jj log --no-graph",
+        ):
+            self.assertTrue(re.fullmatch(log_pattern, cmd), cmd)
+
+        for cmd in (
+            'jj log --config ui.pager="..."',
+            'jj log --config-toml ui.pager="..."',
+            "jj log -R /tmp/evil",
+            "jj log --repository /tmp/evil",
+            "jj -R /tmp/evil log",
+            'jj --config ui.pager="..." log',
+        ):
+            self.assertFalse(re.fullmatch(log_pattern, cmd), cmd)
+
+        diff_pattern = self._single_pattern("jj diff")
+        for cmd in (
+            "jj diff",
+            "jj diff -r @-",
+            "jj --no-pager diff",
+        ):
+            self.assertTrue(re.fullmatch(diff_pattern, cmd), cmd)
+
+        for cmd in (
+            'jj diff --config ui.pager="..."',
+            "jj diff -R /tmp/evil",
+            "jj diff --repository /tmp/evil",
+        ):
+            self.assertFalse(re.fullmatch(diff_pattern, cmd), cmd)
+
+    def test_expand_jj_empty_args(self) -> None:
+        pattern = self._single_pattern("jj")
+        self.assertTrue(re.fullmatch(pattern, "jj"))
+        self.assertTrue(re.fullmatch(pattern, "jj --no-pager"))
+        self.assertTrue(re.fullmatch(pattern, "jj status"))
+
+        for cmd in (
+            "jj -R /some/dir status",
+            "jj --repository /some/dir status",
+            'jj --config ui.pager="cat" status',
+            'jj status --config ui.pager="cat"',
+            "jj status -R /some/dir",
+            "jj status --repository /some/dir",
+        ):
+            self.assertFalse(re.fullmatch(pattern, cmd), cmd)
+
     def test_tool_spec_custom_tool(self) -> None:
         spec = permissions.ToolSpec(
             binary_prefix=r"(\S+/)?custom",
@@ -278,6 +367,80 @@ class PermissionsTest(BaseTestCase):
         self.assertIn(
             "command(scripts/fuchsia-vendored-python script.py)", py_grants
         )
+        self.assertIn(
+            "command(./.jiri_root/bin/fuchsia-vendored-python script.py)",
+            py_grants,
+        )
+        regex_grants = [
+            g[14:-1] for g in py_grants if g.startswith("command(regex:")
+        ]
+        self.assertEqual(len(regex_grants), 1)
+        pattern = regex_grants[0]
+        for cmd in (
+            "./.jiri_root/bin/fuchsia-vendored-python script.py",
+            "../fuchsia-worktrees/slot/.jiri_root/bin/fuchsia-vendored-python script.py --strict",
+            "../worktree/scripts/fuchsia-vendored-python script.py",
+            "/usr/bin/python3 script.py",
+            "/usr/bin/python script.py",
+            "python3 script.py",
+            "python script.py",
+            "fuchsia-vendored-python script.py",
+            "PYTHONPATH=tools .jiri_root/bin/fuchsia-vendored-python script.py",
+            "PYTHONPATH=tools /usr/bin/python3 script.py",
+            "PYTHONPATH=tools python3 script.py",
+        ):
+            self.assertTrue(re.fullmatch(pattern, cmd), cmd)
+
+        for cmd in (
+            "python3 other.py",
+            "./out/default/python3 script.py",
+            "out/default/python3 script.py",
+            "/tmp/evil/python3 script.py",
+            "./python3 script.py",
+            "bin/python3 script.py",
+            "/usr/local/bin/python3 script.py",
+        ):
+            self.assertFalse(re.fullmatch(pattern, cmd), cmd)
+
+    def test_expand_python_checker_grants(self) -> None:
+        checker_grants = permissions.expand_command_variants(
+            "fuchsia-vendored-python scripts/shac/commit_msg_checker.py"
+        )
+        patterns = [
+            g[14:-1] for g in checker_grants if g.startswith("command(regex:")
+        ]
+        literals = {
+            g[8:-1]
+            for g in checker_grants
+            if not g.startswith("command(regex:")
+        }
+
+        def matches_any(cmd: str) -> bool:
+            return cmd in literals or any(
+                re.fullmatch(p, cmd) for p in patterns
+            )
+
+        # Valid invocations MUST pass
+        for cmd in (
+            "fuchsia-vendored-python scripts/shac/commit_msg_checker.py",
+            "/usr/bin/python3 scripts/shac/commit_msg_checker.py",
+            "/usr/bin/python scripts/shac/commit_msg_checker.py",
+            "python3 scripts/shac/commit_msg_checker.py",
+            "python scripts/shac/commit_msg_checker.py",
+            "../worktree/scripts/fuchsia-vendored-python scripts/shac/commit_msg_checker.py",
+            ".jiri_root/bin/fuchsia-vendored-python scripts/shac/commit_msg_checker.py",
+        ):
+            self.assertTrue(matches_any(cmd), cmd)
+
+        # Arbitrary python3 paths MUST be rejected
+        for cmd in (
+            "./out/default/python3 scripts/shac/commit_msg_checker.py",
+            "out/default/python3 scripts/shac/commit_msg_checker.py",
+            "/tmp/python3 scripts/shac/commit_msg_checker.py",
+            "./python3 scripts/shac/commit_msg_checker.py",
+            "tools/python3 scripts/shac/commit_msg_checker.py",
+        ):
+            self.assertFalse(matches_any(cmd), cmd)
 
     def test_expand_system_binary_regex(self) -> None:
         self.assertPatternMatches(

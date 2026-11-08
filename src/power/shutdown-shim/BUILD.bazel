@@ -120,7 +120,6 @@ fx_component(
     name = "component",
     check_includes = False,
     compiled_manifest = ":manifest",
-    component_name = "shutdown-shim",
 )
 
 # @bazel2gn:skip

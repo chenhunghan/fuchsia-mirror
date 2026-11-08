@@ -5,21 +5,21 @@
 #ifndef SRC_DEVELOPER_FORENSICS_FEEDBACK_DATA_SYSTEM_LOG_RECORDER_CONTROLLER_H_
 #define SRC_DEVELOPER_FORENSICS_FEEDBACK_DATA_SYSTEM_LOG_RECORDER_CONTROLLER_H_
 
-#include <fuchsia/process/lifecycle/cpp/fidl.h>
+#include <fidl/fuchsia.process.lifecycle/cpp/fidl.h>
 #include <lib/fit/function.h>
 
 namespace forensics {
 namespace feedback_data {
 namespace system_log_recorder {
 
-class Controller : public fuchsia::process::lifecycle::Lifecycle {
+class Controller : public fidl::Server<fuchsia_process_lifecycle::Lifecycle> {
  public:
   void SetStop(::fit::closure stop);
 
   // Immediately flushes the cached logs to disk.
   //
-  // |fuchsia.process.lifecycle.Lifecycle|
-  void Stop() override;
+  // |fuchsia_process_lifecycle::Lifecycle|
+  void Stop(StopCompleter::Sync& completer) override;
 
  private:
   ::fit::closure stop_;

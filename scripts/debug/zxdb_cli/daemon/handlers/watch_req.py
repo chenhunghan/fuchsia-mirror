@@ -2,17 +2,15 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-from __future__ import annotations
-
 from typing import TYPE_CHECKING, Any
 
+from daemon.handlers.frame_utils import FrameResolutionError, resolve_frame_id
 from pydap.client import DapError
 from pydap.dap_types import Breakpoint, DataBreakpoint
 from pydap.models import (
     DataBreakpointInfoArguments,
     SetDataBreakpointsArguments,
     SetDataBreakpointsResponse,
-    StackTraceArguments,
 )
 from shared.protocol.base import Response
 from shared.protocol.get_state import WatchpointInfo
@@ -25,41 +23,6 @@ __all__ = ["COMMAND_NAME", "handle"]
 
 if TYPE_CHECKING:
     from daemon.daemon import Daemon
-
-
-class _WatchStepError(Exception):
-    """A non-DAP precondition of a watch operation failed.
-
-    DAP request failures are reported as `DapError`, whose message already
-    names the failing request. This covers the remaining checks, e.g. pausing
-    the thread or an out-of-range frame index.
-    """
-
-
-async def _resolve_frame_id(
-    daemon: Daemon, thread_id: int, frame_index: int
-) -> int:
-    """Resolves the DAP frameId for evaluating the watchpoint expression."""
-    try:
-        await daemon.ensure_stopped(thread_id)
-    except Exception as e:
-        # ensure_stopped raises DapError from the pause request, or a plain
-        # Exception if the thread does not report stopped in time.
-        raise _WatchStepError(f"pause thread {thread_id} failed: {e}") from e
-    stack_resp = await daemon.dap_client.stack_trace(
-        StackTraceArguments(thread_id=thread_id)
-    )
-    if not stack_resp.body or not stack_resp.body.stack_frames:
-        raise _WatchStepError(
-            f"stackTrace returned no frames for thread {thread_id}"
-        )
-    num_frames = len(stack_resp.body.stack_frames)
-    if frame_index < 0 or frame_index >= num_frames:
-        raise _WatchStepError(
-            f"frame index {frame_index} out of range for thread {thread_id}"
-            f" (stack has {num_frames} frames)"
-        )
-    return stack_resp.body.stack_frames[frame_index].id
 
 
 def _to_dap_breakpoint(wp: WatchpointInfo) -> DataBreakpoint:
@@ -135,7 +98,7 @@ async def _handle_set(
         )
     assert req.thread_id is not None and req.access_type is not None
 
-    frame_id = await _resolve_frame_id(daemon, req.thread_id, req.frame_index)
+    frame_id = await resolve_frame_id(daemon, req.thread_id, req.frame_index)
     info_resp = await daemon.dap_client.data_breakpoint_info(
         DataBreakpointInfoArguments(name=expression, frame_id=frame_id)
     )
@@ -205,7 +168,7 @@ async def handle(daemon: Daemon, req: WatchRequest) -> Response[Any]:
             )
 
         return await _handle_set(daemon, req, name)
-    except (DapError, _WatchStepError) as e:
+    except (DapError, FrameResolutionError) as e:
         return Response(success=False, message=f"Failed to {operation}: {e}")
     except Exception as e:
         return Response(

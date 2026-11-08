@@ -1,0 +1,20 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Preserve GN-only //src/lib/ddk dependency for GN build parity.
+# @bazel2gn:raw_attribute:deps += [ "//src/lib/ddk" ]
+fx_cc_binary(
+    name = "spiutil",
+    srcs = ["spiutil.cc"],
+    # TODO(https://fxbug.dev/42085293): delete the below and fix compiler warnings
+    copts = ["-Wno-vla-cxx-extension"],
+    deps = [
+        "//sdk/lib/component/incoming/cpp",
+        "//zircon/system/ulib/spi",
+    ],
+)

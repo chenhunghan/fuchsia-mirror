@@ -20,7 +20,12 @@ import("//build/components.gni")
 #
 # Parameters
 #
-#   sources (required)
+#   source
+#     Source file for the test executable. Exactly one of `source` or
+#     `sources` must be specified.
+#     Type: path
+#
+#   sources
 #     List of source files to include in the test executable.
 #     Type: list(path)
 #
@@ -34,8 +39,15 @@ import("//build/components.gni")
 #     Type: list(target)
 #
 template("audio_core_api_test_component") {
-  assert(defined(invoker.source) && invoker.source != "",
-         "source must be specified")
+  if (defined(invoker.sources)) {
+    assert(!defined(invoker.source), "specify source or sources, not both")
+    assert(invoker.sources != [], "sources must not be empty")
+    _sources = invoker.sources
+  } else {
+    assert(defined(invoker.source) && invoker.source != "",
+           "source or sources must be specified")
+    _sources = [ invoker.source ]
+  }
 
   binary = "${target_name}-bin"
   cml_target = "${target_name}_cml"
@@ -61,7 +73,7 @@ template("audio_core_api_test_component") {
   }
 
   executable("${target_name}-bin") {
-    sources = [ invoker.source ]
+    sources = _sources
     if (defined(invoker.executable_deps)) {
       deps = invoker.executable_deps
     } else {

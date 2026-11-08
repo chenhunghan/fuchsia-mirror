@@ -60,7 +60,8 @@ acpi::status<> MockAcpi::WalkResources(ACPI_HANDLE object, const char* resource_
   if (!d) {
     return acpi::error(AE_BAD_PARAMETER);
   }
-  ZX_ASSERT_MSG((d->sta() & ACPI_STA_DEVICE_ENABLED) == ACPI_STA_DEVICE_ENABLED,
+  ZX_ASSERT_MSG((d->sta() & ACPI_STA_DEVICE_ENABLED) == ACPI_STA_DEVICE_ENABLED ||
+                    d->resources_readable_while_disabled(),
                 "Attempted to access resources on a device that isn't enabled");
   if (d->resources().empty()) {
     return acpi::error(AE_NOT_FOUND);

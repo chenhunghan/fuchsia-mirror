@@ -72,7 +72,24 @@ pub trait InspectTypeRenameable: private::InspectTypeInternal {
     fn rename<'a>(&self, name: impl Into<Cow<'a, str>>) -> Result<(), Error>;
 }
 
-/// Macro to generate private::InspectTypeInternal
+/// Macro to generate [`private::InspectTypeInternal`], [`InspectTypeRenameable`], and internal
+/// constructors for Inspect node and property types wrapping an [`Inner<T>`].
+///
+/// # Usage
+///
+/// - **Without custom data (`impl_inspect_type_internal!(TypeName)`)**:
+///   Use for standard node and property types whose [`InnerType::Data`] implements [`Default`]
+///   (such as `()` or `AtomicBool`). Generates `pub(crate) fn new(state, block_index)` (which
+///   initializes `inner` via [`Inner::new`] using `T::Data::default()`), `new_no_op()`, `rename()`,
+///   [`InspectTypeRenameable`], and [`private::InspectTypeInternal`].
+///
+/// - **With custom data (`impl_inspect_type_internal!(TypeName, custom_data)`)**:
+///   Use for types (such as [`BlobProperty`][crate::BlobProperty]) whose [`InnerType::Data`]
+///   carries state that must be provided at construction time rather than defaulted, and that
+///   define their own constructor calling [`Inner::new_with_data`]. Omits generating
+///   `pub(crate) fn new(state, block_index)` (so `T::Data` does not need to implement [`Default`]
+///   and no unused `new` constructor is emitted), while still generating `new_no_op()`, `rename()`,
+///   [`InspectTypeRenameable`], and [`private::InspectTypeInternal`].
 macro_rules! impl_inspect_type_internal {
     ($type_name:ident) => {
         impl $type_name {
@@ -82,7 +99,14 @@ macro_rules! impl_inspect_type_internal {
             ) -> $type_name {
                 $type_name { inner: $crate::writer::types::base::Inner::new(state, block_index) }
             }
-
+        }
+        $crate::impl_inspect_type_internal!(@common $type_name);
+    };
+    ($type_name:ident, custom_data) => {
+        $crate::impl_inspect_type_internal!(@common $type_name);
+    };
+    (@common $type_name:ident) => {
+        impl $type_name {
             pub(crate) fn new_no_op() -> $type_name {
                 $type_name { inner: $crate::writer::types::base::Inner::None }
             }
@@ -206,10 +230,20 @@ pub(crate) enum Inner<T: InnerType> {
     Strong(Arc<InnerRef<T>>),
 }
 
-impl<T: InnerType> Inner<T> {
+impl<T: InnerType> Inner<T>
+where
+    T::Data: Default,
+{
     /// Creates a new Inner with the desired block index within the inspect VMO
     pub(crate) fn new(state: State, block_index: BlockIndex) -> Self {
         Self::Strong(Arc::new(InnerRef { state, block_index, data: T::Data::default() }))
+    }
+}
+
+impl<T: InnerType> Inner<T> {
+    /// Creates a new Inner with the desired block index and custom data within the inspect VMO.
+    pub(crate) fn new_with_data(state: State, block_index: BlockIndex, data: T::Data) -> Self {
+        Self::Strong(Arc::new(InnerRef { state, block_index, data }))
     }
 
     pub(crate) fn rename<'a>(&self, name: impl Into<Cow<'a, str>>) -> Result<(), Error> {
@@ -316,7 +350,7 @@ impl<T: InnerType> Drop for InnerRef<T> {
 /// De-allocation behavior and associated data for an inner type.
 pub(crate) trait InnerType {
     /// Associated data stored on the InnerRef
-    type Data: Default + Debug + InnerData;
+    type Data: Debug + InnerData;
 
     /// De-allocation behavior for when the InnerRef gets dropped
     fn free(state: &State, data: &Self::Data, block_index: BlockIndex) -> Result<(), Error>;

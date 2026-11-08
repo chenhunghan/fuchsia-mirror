@@ -112,30 +112,172 @@ type StructId = flexible enum {
     BPF_SOCK_ADDR = 6;
 };
 
-/// Describes location of an instruction that accesses a struct field.
-///
-/// This is used as auxiliary information passed from the verifier to the
-/// linker. The linker may update these instructions.
-type StructAccess = struct {
-    /// Index of the instruction in the program.
-    pc uint32;
-
-    /// Id of the struct being accessed.
-    struct_id StructId;
-
-    /// Offset of the field being accessed.
-    field_offset uint32;
-
-    /// Indicates that the instruction loads a 32-bit pointer field. These
-    /// loads must be remapped to 64-bit fields.
-    is_32_bit_ptr_load bool;
-};
-
 /// Maximum allowed number of instructions in an eBPF program.
 const MAX_PROGRAM_INSTRUCTIONS uint32 = 4096;
 
 /// Maximum number of maps an eBPF program can use.
 const MAX_PROGRAM_MAPS uint32 = 4096;
+
+/// Maximum number of struct field mappings in [`ProgramLinkageInfo`].
+const MAX_STRUCT_FIELD_MAPPINGS uint32 = 256;
+
+/// Maximum number of helper functions in [`ProgramLinkageInfo`].
+const MAX_PROGRAM_HELPERS uint32 = 256;
+
+/// Relocation info for an eBPF map in a target process.
+type MapLinkage = struct {
+    /// Address of the map object in the target process.
+    map_addr uint64;
+
+    /// Address of the map's data buffer in the target process for eBPF array
+    /// maps, or 0 if not applicable.
+    data_addr uint64;
+};
+
+/// Relocation info for an eBPF helper function in a target process.
+type HelperLinkage = struct {
+    /// Helper function ID.
+    id uint32;
+
+    /// Function address in the target process.
+    ///
+    /// Must be a non-zero address of a function using the platform C calling
+    /// convention (`extern "C"`) with the signature:
+    ///
+    /// ```c
+    /// uint64_t helper(
+    ///     void* run_context,
+    ///     uint64_t arg1,
+    ///     uint64_t arg2,
+    ///     uint64_t arg3,
+    ///     uint64_t arg4,
+    ///     uint64_t arg5);
+    /// ```
+    ///
+    /// where `run_context` is the opaque context pointer passed by the runner
+    /// when invoking the compiled program, `arg1..arg5` correspond to eBPF
+    /// registers `r1..r5`, and the return value is placed in `r0`.
+    fn_addr uint64;
+};
+
+/// Relocation info for a struct field offset mapping.
+type StructFieldMapping = struct {
+    /// Identifier of the struct being remapped.
+    struct_id StructId;
+
+    /// Offset of the field in the UAPI struct.
+    source_offset uint64;
+
+    /// Offset of the field in the host struct.
+    target_offset uint64;
+};
+
+/// Target-process linkage information required to link and compile an eBPF
+/// program.
+type ProgramLinkageInfo = table {
+    /// Struct field offset mappings for the program's context arguments.
+    1: struct_mappings vector<StructFieldMapping>:MAX_STRUCT_FIELD_MAPPINGS;
+
+    /// Helper function addresses in the target process.
+    2: helpers vector<HelperLinkage>:MAX_PROGRAM_HELPERS;
+
+    /// Map addresses in the target process.
+    ///
+    /// Must have the same length as [`VerifiedProgram.maps`] and a one-to-one
+    /// mapping with the maps in [`VerifiedProgram.maps`].
+    3: maps vector<MapLinkage>:MAX_PROGRAM_MAPS;
+
+    /// Address of the packet-load trampoline function in the target process.
+    ///
+    /// Required if the eBPF program contains legacy packet access instructions
+    /// (`BPF_LD | BPF_ABS` or `BPF_LD | BPF_IND`); if omitted or `0` when the
+    /// program contains these instructions, [`ProgramLinker.Link`] fails with
+    /// [`LinkError.MISSING_PACKET_LOAD_FN`]. May be omitted or `0` if the
+    /// program does not use these instructions.
+    ///
+    /// When provided, must be the address of a function in the target process
+    /// using the platform C calling convention (`extern "C"`) with the
+    /// signature:
+    ///
+    /// ```c
+    /// uint64_t packet_load_fn(
+    ///     void* run_context,
+    ///     uint64_t skb,
+    ///     int32_t reg_offset,
+    ///     int32_t imm_offset,
+    ///     uint32_t width_bytes,
+    ///     uint64_t* out_value);
+    /// ```
+    ///
+    /// where `run_context` is the opaque context pointer passed by the runner,
+    /// `skb` is the packet pointer held in eBPF register `r6`,
+    /// `reg_offset + imm_offset` is the byte offset into the packet
+    /// (`reg_offset` is `0` for `BPF_ABS` or the source register value for
+    /// `BPF_IND`), and `width_bytes` is the load width in bytes (`1`, `2`, `4`,
+    /// or `8`). On success, the function writes the loaded host-endian value to
+    /// `*out_value` and returns `1`. On out-of-bounds access, it returns `0`,
+    /// causing the eBPF program to immediately exit with return value `0`.
+    4: packet_load_fn_addr uint64;
+};
+
+/// Error returned by [`ProgramLinker.Link`].
+type LinkError = flexible enum {
+    /// A struct field mapping has an unknown [`StructId`], an out-of-range
+    /// offset, or a required 32-bit pointer field is not mapped.
+    INVALID_STRUCT_MAPPING = 1;
+
+    /// [`ProgramLinkageInfo.maps`] does not match [`VerifiedProgram.maps`], is
+    /// missing `data_addr` for an array map direct value access, or has an
+    /// invalid map offset.
+    INVALID_MAP_LINKAGE = 2;
+
+    /// The program calls a helper function that is missing from
+    /// [`ProgramLinkageInfo.helpers`] or has a zero `fn_addr`.
+    MISSING_HELPER = 3;
+
+    /// The program contains packet access instructions (`BPF_LD | BPF_ABS` or
+    /// `BPF_LD | BPF_IND`), but [`ProgramLinkageInfo.packet_load_fn_addr`] was
+    /// not provided.
+    MISSING_PACKET_LOAD_FN = 4;
+
+    /// The program contains a malformed instruction that cannot be linked.
+    INVALID_PROGRAM = 5;
+};
+
+/// Linked eBPF bytecode for interpreter execution.
+type Bytecode = struct {
+    /// Program instructions.
+    instructions vector<uint64>:MAX_PROGRAM_INSTRUCTIONS;
+};
+
+/// Required handle rights for a JIT-compiled program VMO.
+const COMPILED_PROGRAM_RIGHTS zx.Rights
+        = zx.Rights.READ | zx.Rights.EXECUTE | zx.Rights.MAP | zx.Rights.TRANSFER;
+
+/// Result of linking an eBPF program via [`ProgramLinker.Link`].
+type LinkedProgram = flexible resource union {
+    /// Executable VMO containing JIT-compiled machine code.
+    1: compiled_program zx.Handle:<VMO, COMPILED_PROGRAM_RIGHTS>;
+
+    /// Linked bytecode for interpreter execution when the producer does not
+    /// use JIT compilation.
+    2: bytecode Bytecode;
+};
+
+/// Protocol used by a target process to link and compile a verified eBPF
+/// program with its local process addresses (maps, helpers, and struct
+/// mappings).
+closed protocol ProgramLinker {
+    /// Links the program using the provided linkage info, returning either an
+    /// executable VMO containing JIT-compiled machine code or linked `bytecode`
+    /// for interpreter execution.
+    ///
+    /// This is a one-shot method; the server closes the channel after sending
+    /// the response.
+    strict Link(ProgramLinkageInfo) -> (resource struct {
+        program LinkedProgram;
+    }) error LinkError;
+};
 
 /// A verified eBPF program.
 //
@@ -145,15 +287,12 @@ const MAX_PROGRAM_MAPS uint32 = 4096;
 // about the client. A separate BPF service responsible for program
 // verification will allow to remove this restriction.
 type VerifiedProgram = resource table {
-    /// Program instructions.
-    1: code vector<uint64>:MAX_PROGRAM_INSTRUCTIONS;
+    /// Linker channel for linking and compiling the program.
+    1: linker client_end:ProgramLinker;
 
-    /// List of instructions accessing struct fields.
-    2: struct_access_instructions vector<StructAccess>:MAX_PROGRAM_INSTRUCTIONS;
-
-    /// List of the maps used by the program. `code` may reference these maps
-    /// by their index in this array.
-    3: maps vector<Map>:MAX_PROGRAM_MAPS;
+    /// List of the maps used by the program. The program may reference these
+    /// maps by their index in this array.
+    2: maps vector<Map>:MAX_PROGRAM_MAPS;
 };
 
 /// A handle of an eBPF program.

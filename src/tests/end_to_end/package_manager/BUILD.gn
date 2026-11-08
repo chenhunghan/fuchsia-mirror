@@ -88,7 +88,6 @@ if (is_host) {
     deps = [
       ":pm_test_package_gather_deps($host_toolchain)",
       "//src/developer/ffx:ffx_bin",
-      "//src/developer/ffx/plugins/package:ffx_package_tool_metadata",
       "//src/developer/ffx/plugins/package:ffx_package_tool_versioned",
       "//src/developer/ffx/plugins/repository:ffx_repository_tool_metadata",
       "//src/developer/ffx/plugins/repository:ffx_repository_tool_versioned",

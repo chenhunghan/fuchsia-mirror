@@ -144,7 +144,6 @@ really well for doing remote work from your laptop.
         "*.rs.golden": "rust",
         "*.cc.golden": "cpp",
         "*.h.golden": "cpp",
-        "*.go.golden": "go",
   },
   ```
 
@@ -667,10 +666,10 @@ We'd actually like all back-ends to be in _separate_ tools!
 Down the road, we plan to have a script over all the various tools (`fidlc`,
 `fidlfmt`, the various back-ends) to make all things accessible easily,
 and manage the chaining of these things.
-For instance, it should be possible to generate Go bindings in one command such as:
+For instance, it should be possible to generate Rust bindings in one command such as:
 
 ```sh
-fidl gen --library my_library.fidl --binding go --out-dir go/src/my/library
+fidl gen --library my_library.fidl --binding rust --out-dir src/my/library
 ```
 
 Or format a library in place with:
@@ -692,7 +691,6 @@ fidl fmt --library my_library.fidl -i
 [jsonir]: /docs/reference/fidl/language/json-ir.md
 [getting_started]: /docs/get-started/README.md
 [compat_readme]: /src/tests/fidl/compatibility/README.md
-[go-test-flags]: https://golang.org/cmd/go/#hdr-Testing_flags
 [fidl-misc]: https://fuchsia.googlesource.com/fidl-misc
 [fidldev]: https://fuchsia.googlesource.com/fidl-misc/+/HEAD/fidldev
 [RFC-0042]: /docs/contribute/governance/rfcs/0042_non_nullable_types.md

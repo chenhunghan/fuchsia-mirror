@@ -1,0 +1,116 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load("//build/component:config.bzl", "component_config")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "ota_health_verification_test_bin",
+    srcs = ["integration_test.rs"],
+    crate_name = "ota_health_verification_test",
+    crate_root = "integration_test.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/sys/lib/cm_rust",
+        "//src/sys/lib/cm_types",
+        "//src/sys/pkg/fidl/fuchsia.update.verify:fuchsia.update.verify_rust",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "ota_health_verification_test_packaged_bin",
+    testonly = True,
+    binary = ":ota_health_verification_test_bin",
+    binary_name = "ota_health_verification_test",
+)
+
+component_config(
+    name = "component_manager_config",
+    testonly = True,
+    srcs = [
+        "health_check.json5",
+        "//src/sys/component_manager/configs:no_debug.json5",
+        "//src/sys/component_manager/configs:test_config.base.json5",
+    ],
+    dest = "data/component_manager_config",
+)
+
+fx_component_manifest(
+    name = "component-manager-cmp-manifest",
+    testonly = True,
+    component_name = "component_manager",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "//src/sys/component_manager:meta/component_manager.cml",
+)
+
+fx_component(
+    name = "component-manager-cmp",
+    testonly = True,
+    compiled_manifest = ":component-manager-cmp-manifest",
+    deps = [
+        ":component_manager_config",
+        "//src/sys/component_manager:bin_with_tracing_packaged",  # @bazel2gn:path_overwrite://src/sys/component_manager:bin_with_tracing
+    ],
+)
+
+fx_component_manifest(
+    name = "ota-health-verification-test-manifest",
+    testonly = True,
+    component_name = "ota-health-verification-test",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/lib/fuchsia-component-test:meta/nested_component_manager.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/integration_test.cml",
+)
+
+fx_test_component(
+    name = "ota-health-verification-test-component",
+    compiled_manifest = ":ota-health-verification-test-manifest",
+    deps = [":ota_health_verification_test_packaged_bin"],
+)
+
+fx_package(
+    name = "ota-health-verification-test-package",
+    package_name = "ota-health-verification-test",
+    components = [
+        ":component-manager-cmp",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":ota-health-verification-test-component"],
+)
+
+fx_test(
+    name = "ota-health-verification-test",
+    max_log_severity = "ERROR",
+    package = ":ota-health-verification-test-package",
+    visibility = ["//src/sys/component_manager:__pkg__"],
+)

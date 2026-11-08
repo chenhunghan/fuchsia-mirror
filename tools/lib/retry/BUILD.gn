@@ -42,6 +42,7 @@ if (is_host) {
     visibility = [
       ":*",
       "//src/sys/pkg/lib/repo:*",
+      "//src/testing/host-target-testing/artifacts:*",
       "//src/testing/host-target-testing/cli:*",
       "//src/testing/host-target-testing/device:*",
       "//tools/*",

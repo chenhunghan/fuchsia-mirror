@@ -6,8 +6,6 @@ group("test") {
   testonly = true
   deps = [
     "api",
-    "stress",
-
     # We do not enable "hardware" by default. It is a non-hermetic test of
     # capture hardware itself.
   ]

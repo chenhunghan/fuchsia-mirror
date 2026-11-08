@@ -5,6 +5,8 @@
 #ifndef SRC_DEVELOPER_DEBUG_ZXDB_EXPR_RESOLVE_TYPE_H_
 #define SRC_DEVELOPER_DEBUG_ZXDB_EXPR_RESOLVE_TYPE_H_
 
+#include <string_view>
+
 #include "src/developer/debug/zxdb/common/ref_ptr_to.h"
 #include "src/developer/debug/zxdb/expr/parsed_identifier.h"
 #include "src/developer/debug/zxdb/symbols/lazy_symbol.h"
@@ -56,6 +58,7 @@ fxl::RefPtr<Type> FindTypeDefinition(const FindNameContext& context, const Type*
 
 // Looks for a type definition matching the given fully-qualified name. Returns null if not found.
 fxl::RefPtr<Type> FindTypeDefinition(const FindNameContext& context, ParsedIdentifier looking_for);
+fxl::RefPtr<Type> FindTypeDefinition(const FindNameContext& context, std::string_view looking_for);
 
 }  // namespace zxdb
 

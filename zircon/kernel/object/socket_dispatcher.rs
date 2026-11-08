@@ -12,12 +12,13 @@ use super::handle::KernelHandle;
 use super::mbuf::MBufChain;
 use super::socket_dispatcher_ffi::cpp_socket_dispatcher_create;
 use crate::counters::define_kcounter;
+use crate::ksync_kernel::TrackedCriticalMutex;
 use crate::user_copy::{UserInPtr, UserOutPtr};
 use core::convert::Infallible;
 use core::pin::Pin;
 use debug::ltrace_entry;
 use fbl::{Canary, RefPtr};
-use ksync::{KMutex, PhantomMutex, RawCriticalMutex, guarded};
+use ksync::{KMutex, PhantomMutex, guarded};
 use object_constants_rs::{
     kSocketDispatcherStateAlign, kSocketDispatcherStateOffset, kSocketDispatcherStateSize,
 };
@@ -31,7 +32,7 @@ use zx_types::{
     ZX_USER_SIGNAL_ALL, zx_info_socket_t, zx_rights_t, zx_signals_t,
 };
 
-pub const ALLOWED_SIGNALS: u32 = ZX_USER_SIGNAL_ALL;
+const ALLOWED_SIGNALS: u32 = ZX_USER_SIGNAL_ALL;
 
 const LOCAL_TRACE: u32 = 0;
 
@@ -178,11 +179,6 @@ impl_peered_dispatcher_facade_with_state!(
 );
 
 impl SocketDispatcher {
-    /// Returns default rights for a SocketDispatcher.
-    pub fn default_rights() -> zx_rights_t {
-        ZX_DEFAULT_SOCKET_RIGHTS
-    }
-
     /// Creates a new SocketDispatcher pair and returns their kernel handles and rights.
     pub fn create(
         flags: u32,
@@ -265,7 +261,7 @@ impl SocketDispatcher {
     #[inline]
     unsafe fn peer<'a>(
         &'a self,
-        guard: &PeeredStateMuGuard<'_, Self, RawCriticalMutex>,
+        guard: &PeeredStateMuGuard<'_, Self, TrackedCriticalMutex>,
     ) -> Option<&'a Self> {
         // SAFETY: `guard` holds the shared `PeerHolder` lock, and the caller guarantees that the
         // returned reference is not used after `guard` is dropped/unlocked or `peer_mut()` is
@@ -352,7 +348,7 @@ impl SocketDispatcher {
     fn write_self_locked(
         &self,
         peer: &Self,
-        mut guard: Pin<&mut PeeredStateMuGuard<'_, SocketDispatcher, RawCriticalMutex>>,
+        mut guard: Pin<&mut PeeredStateMuGuard<'_, SocketDispatcher, TrackedCriticalMutex>>,
         src: UserInPtr<core::ffi::c_char>,
         len: usize,
     ) -> Result<usize, Status> {

@@ -84,16 +84,8 @@ class Metadata {
   // Updates the hash stored in the metadata, based on its contents.
   void UpdateHash();
 
-  // Returns the disk offset where the metadata should be persisted. This points to the
-  // offset of the *inactive* copy (see |inactive_header()|).
-  size_t GetInactiveHeaderOffset() const;
-
   // Returns whether the Metadata represents an active A copy or B copy.
   SuperblockType active_header() const { return active_header_; }
-  SuperblockType inactive_header() const { return OppositeHeader(active_header_); }
-
-  // Switches whether the Metadata represents an active A or B copy.
-  void SwitchActiveHeaders();
 
   // Accesses the header managed by the Metadata instance.
   Header& GetHeader() const;
@@ -116,15 +108,6 @@ class Metadata {
 
  private:
   Metadata(std::unique_ptr<MetadataBuffer> data, SuperblockType active_header);
-
-  constexpr static SuperblockType OppositeHeader(SuperblockType type) {
-    switch (type) {
-      case SuperblockType::kPrimary:
-        return SuperblockType::kSecondary;
-      case SuperblockType::kSecondary:
-        return SuperblockType::kPrimary;
-    }
-  }
 
   void MoveFrom(Metadata&& o);
 

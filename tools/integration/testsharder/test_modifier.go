@@ -149,10 +149,12 @@ func AffectedModifiers(testSpecs []build.TestSpec, affectedTestNames []string, m
 			}
 			for _, env := range spec.Envs {
 				shouldMultiply := true
-				if env.Dimensions.DeviceType() != "" && spec.OS != fuchsia {
+				if env.Dimensions.DeviceType() != "" && spec.OS != fuchsia && spec.PackageURL == "" {
 					// Don't multiply host+target tests because they tend to be
 					// flaky already. The idea is to expose new flakiness, not
-					// pre-existing flakiness.
+					// pre-existing flakiness. Target tests run via test-pilot
+					// also set OS to linux, so check that PackageURL is empty
+					// to distinguish host+target tests from target tests.
 					shouldMultiply = false
 				} else if env.Dimensions.DeviceType() != "" &&
 					!strings.HasSuffix(env.Dimensions.DeviceType(), "EMU") {

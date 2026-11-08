@@ -13,6 +13,7 @@ use crate::vdso::vdso_loader::ZX_TIME_VALUES_MEMORY;
 use crate::vfs::{FdNumber, FileHandle, FileMapping};
 use process_builder::elf_load;
 use starnix_logging::{log_error, log_warn};
+use starnix_task_command::TaskCommand;
 use starnix_types::arch::ArchWidth;
 use starnix_types::math::round_up_to_system_page_size;
 use starnix_types::thread_start_info::ThreadStartInfo;
@@ -46,22 +47,41 @@ struct StackResult {
 
 const RANDOM_SEED_BYTES: usize = 16;
 
-fn get_initial_stack_size(
-    path: &CStr,
-    argv: &Vec<CString>,
-    environ: &Vec<CString>,
-    auxv: &Vec<(u32, u64)>,
-    arch_width: ArchWidth,
-) -> usize {
-    // Worst-case, we overspec the initial stack size.
-    let auxv_entry_size = if arch_width.is_arch32() { size_of::<u32>() } else { size_of::<u64>() };
-    let ptr_size = if arch_width.is_arch32() { size_of::<u32>() } else { size_of::<*const u8>() };
+/// Required alignment of the stack pointer at program entry, mandated by the ABI.
+const INITIAL_STACK_ALIGNMENT: usize = 16;
+
+/// Linux maps the strings of the initial stack (argv, environ and the execve path) rounded up to a
+/// page, plus a fixed slack below them. That area holds argc/argv/envp/auxv and the remainder
+/// serves as initial headroom; the stack then grows on demand (MAP_GROWSDOWN).
+const INITIAL_STACK_SLACK: usize = 128 * 1024;
+
+/// Size of the strings written at the top of the initial stack. Each string includes its NUL
+/// terminator, and the 8 zero bytes at the very top of the stack, above the strings, are counted
+/// as well (see the `stack_size - 8` in `load_executable`).
+fn get_initial_stack_strings_size(path: &CStr, argv: &[CString], environ: &[CString]) -> usize {
     argv.iter().map(|x| x.as_bytes_with_nul().len()).sum::<usize>()
         + environ.iter().map(|x| x.as_bytes_with_nul().len()).sum::<usize>()
         + path.to_bytes_with_nul().len()
-        + RANDOM_SEED_BYTES
-        + (argv.len() + 1 + environ.len() + 1) * ptr_size
-        + (auxv.len() + 5) * 2 * auxv_entry_size
+        + size_of::<u64>()
+}
+
+/// Upper bound on the size of what is written below the strings: AT_RANDOM / AT_PLATFORM data,
+/// argc, the argv and envp pointer tables, the auxv and the final alignment of the stack pointer.
+fn get_initial_stack_pointer_area_size(
+    argv: &[CString],
+    environ: &[CString],
+    auxv: &[(u32, u64)],
+    arch_width: ArchWidth,
+) -> usize {
+    let auxv_entry_size = if arch_width.is_arch32() { size_of::<u32>() } else { size_of::<u64>() };
+    let ptr_size = if arch_width.is_arch32() { size_of::<u32>() } else { size_of::<*const u8>() };
+    // Entries pushed by populate_initial_stack on top of the given auxv: AT_EXECFN, AT_RANDOM,
+    // AT_NULL and, on arm32, AT_PLATFORM (whose "v7l\0" string is covered by the spare entry).
+    const EXTRA_AUXV_ENTRIES: usize = 5;
+    RANDOM_SEED_BYTES
+        + (/* argc = */1 + argv.len() + /* NULL = */ 1 + environ.len() + /* NULL = */ 1) * ptr_size
+        + (auxv.len() + EXTRA_AUXV_ENTRIES) * 2 * auxv_entry_size
+        + INITIAL_STACK_ALIGNMENT // Upper bound for the final alignment of the stack pointer.
 }
 
 fn populate_initial_stack(
@@ -168,7 +188,7 @@ fn populate_initial_stack(
 
     // Time to push.
     stack_pointer = (stack_pointer - main_data.len())?;
-    stack_pointer = (stack_pointer - stack_pointer.ptr() % 16)?;
+    stack_pointer = (stack_pointer - stack_pointer.ptr() % INITIAL_STACK_ALIGNMENT)?;
     write_stack(main_data.as_slice(), stack_pointer)?;
     let auxv_start = (stack_pointer + auxv_start_offset)?;
     let auxv_end = (stack_pointer + auxv_end_offset)?;
@@ -384,9 +404,14 @@ impl ResolvedProgram {
         }
     }
 
-    /// Returns the path string passed to `execve()`.
-    pub fn path(&self) -> &CStr {
-        &self.path
+    /// Returns the [`TaskCommand`] for the resolved program, extending the basename of `path` with
+    /// `argv[0]` when possible.
+    pub fn command_name(&self) -> TaskCommand {
+        let name = TaskCommand::from_path_bytes(self.path.to_bytes());
+        match self.argv.first() {
+            Some(argv0) => name.with_argv0(argv0.as_bytes()),
+            None => name,
+        }
     }
 
     /// Returns the [`ArchWidth`] of the resolved ELF executable, if resolved.
@@ -771,18 +796,24 @@ pub fn load_executable(
         ]
     };
 
-    // TODO(tbodt): implement MAP_GROWSDOWN and then reset this to 1 page. The current value of
-    // this is based on adding 0x1000 each time a segfault appears.
-    let stack_size: usize = round_up_to_system_page_size(
-        get_initial_stack_size(
-            &resolved_program.path,
-            &resolved_program.argv,
-            &resolved_program.environ,
-            &auxv,
-            main_elf.arch_width,
-        ) + 0xf0000,
-    )
-    .expect("stack is too big");
+    // Match Linux: the strings rounded up to a page, plus a fixed 128 KiB that contains the pointer
+    // area and provides the initial headroom so normal startup does not immediately fault.
+    // MAP_GROWSDOWN handles deeper stacks on demand. The pointer area can exceed the fixed slack for
+    // very long argument lists, in which case it is sized to fit.
+    let strings_size = round_up_to_system_page_size(get_initial_stack_strings_size(
+        &resolved_program.path,
+        &resolved_program.argv,
+        &resolved_program.environ,
+    ))?;
+    let pointer_area_size = round_up_to_system_page_size(get_initial_stack_pointer_area_size(
+        &resolved_program.argv,
+        &resolved_program.environ,
+        &auxv,
+        main_elf.arch_width,
+    ))?;
+    let stack_size: usize = strings_size
+        .checked_add(std::cmp::max(INITIAL_STACK_SLACK, pointer_area_size))
+        .ok_or_else(|| errno!(E2BIG))?;
 
     let prot_flags = ProtectionFlags::READ | ProtectionFlags::WRITE;
     let stack_base = mm.map_stack(stack_size, prot_flags)?;
@@ -934,6 +965,59 @@ mod tests {
         );
     }
 
+    /// Checks that `get_initial_stack_pointer_area_size` is an upper bound on what
+    /// `populate_initial_stack` actually writes below the strings, since `load_executable` relies
+    /// on it to size the initial stack mapping.
+    fn check_initial_stack_size_bounds(arch_width: ArchWidth) {
+        const STACK_SIZE: usize = 0x10000;
+        let stack_vmo =
+            StackVmo(zx::Vmo::create(STACK_SIZE as u64).expect("VMO creation should succeed."));
+        // Use the `stack_size - 8` top-of-stack offset of `load_executable`.
+        let original_stack_start_addr =
+            (TEST_STACK_ADDR + (STACK_SIZE - size_of::<u64>())).expect("OOB memory access.");
+
+        let path = CString::new("/system/bin/some_program").unwrap();
+        let argv: Vec<CString> =
+            (0..7).map(|i| CString::new(format!("argument-number-{i}")).unwrap()).collect();
+        let environ: Vec<CString> =
+            (0..13).map(|i| CString::new(format!("VARIABLE_{i}=value-{i}")).unwrap()).collect();
+        let auxv: Vec<(u32, u64)> = vec![(AT_PAGESZ, 0x1000), (AT_CLKTCK, 100), (AT_UID, 1000)];
+
+        let strings_size = get_initial_stack_strings_size(&path, &argv, &environ);
+        let pointer_area_bound =
+            get_initial_stack_pointer_area_size(&argv, &environ, &auxv, arch_width);
+
+        let result = populate_initial_stack(
+            &stack_vmo,
+            &path,
+            &argv,
+            &environ,
+            auxv,
+            original_stack_start_addr,
+            arch_width,
+        )
+        .expect("Populate initial stack should succeed.");
+
+        let stack_top = (TEST_STACK_ADDR + STACK_SIZE).expect("OOB memory access.");
+        let used = stack_top - result.stack_pointer;
+        assert!(
+            used <= strings_size + pointer_area_bound,
+            "used {used:#x} bytes, bound is {strings_size:#x} + {pointer_area_bound:#x}"
+        );
+        assert_eq!(result.stack_pointer.ptr() % INITIAL_STACK_ALIGNMENT, 0);
+    }
+
+    #[::fuchsia::test]
+    fn test_initial_stack_size_bounds() {
+        check_initial_stack_size_bounds(ArchWidth::Arch64);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[::fuchsia::test]
+    fn test_initial_stack_size_bounds_arch32() {
+        check_initial_stack_size_bounds(ArchWidth::Arch32);
+    }
+
     fn exec_hello_starnix(current_task: &mut CurrentTask) -> Result<(), Errno> {
         let argv = vec![CString::new("data/tests/hello_starnix").unwrap()];
         let executable = current_task.open_file_for_exec(
@@ -948,8 +1032,15 @@ mod tests {
     #[fuchsia::test]
     async fn test_load_hello_starnix() {
         spawn_kernel_and_run_with_pkgfs(async |current_task| {
-            exec_hello_starnix(current_task).expect("failed to load executable");
+            let path = CString::new("data/tests/hello_starnix").unwrap();
+            let argv = vec![CString::new("/custom/hello_starnix_with_long_argv0").unwrap()];
+            let executable = current_task
+                .open_file_for_exec(FdNumber::AT_FDCWD, path.as_bytes().into(), OpenFlags::empty())
+                .expect("failed to open executable");
+            current_task.exec(executable, path, argv, vec![]).expect("failed to load executable");
             assert!(current_task.mm().unwrap().get_mapping_count() > 0);
+            assert_eq!(current_task.command().as_bytes(), b"hello_starnix_with_long_argv0");
+            assert_eq!(current_task.command().comm_name(), b"hello_starnix");
         })
         .await;
     }

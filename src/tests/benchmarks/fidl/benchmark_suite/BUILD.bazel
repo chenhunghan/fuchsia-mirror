@@ -1,0 +1,57 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_python//python:defs.bzl", "py_binary")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+load(
+    ":benchmark_suite.bzl",
+    "BENCHMARK_SUITE_FIDL_FILES",
+    "BENCHMARK_SUITE_GIDL_FILES",
+    "UNIQUE_BENCHMARK_FIDL_SUITES",
+    "benchmark_fidl",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+# LINT.IfChange
+_BENCHMARK_SUITE_VISIBILITY = [
+    "//src/tests/benchmarks/fidl:__subpackages__",
+]
+
+exports_files(
+    BENCHMARK_SUITE_GIDL_FILES,
+    visibility = _BENCHMARK_SUITE_VISIBILITY,
+)
+
+py_binary(
+    name = "copy_replace_fidl_library",
+    srcs = ["copy_replace_fidl_library.py"],
+    main = "copy_replace_fidl_library.py",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//visibility:private"],
+)
+
+fidl_library(
+    name = "benchmark_suite_fidl",
+    testonly = True,
+    srcs = BENCHMARK_SUITE_FIDL_FILES,
+    contains_drivers = True,
+    enable_hlcpp = True,
+    library_name = "test.benchmarkfidl",
+    visibility = _BENCHMARK_SUITE_VISIBILITY,
+    deps = ["//zircon/vdso/zx"],
+)
+
+[
+    benchmark_fidl(
+        name = suite["fidl_target_name"],
+        srcs = suite["fidl"],
+        contains_drivers = suite["contains_drivers"],
+        fidl_library_suffix = suite["fidl_library_suffix"],
+        visibility = _BENCHMARK_SUITE_VISIBILITY,
+    )
+    for suite in UNIQUE_BENCHMARK_FIDL_SUITES
+]
+# LINT.ThenChange(//src/tests/benchmarks/fidl/benchmark_suite/BUILD.gn)

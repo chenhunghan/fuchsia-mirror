@@ -2,6 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
 package(default_applicable_licenses = ["//:license"])
 
 # Example device tests defined in Bazel. These are exported to `fx test` and
@@ -10,6 +12,32 @@ test_suite(
     name = "target_tests",
     target_compatible_with = ["@platforms//os:fuchsia"],
     tests = [
+        "//examples/components/dictionaries:dictionary-examples_test",
+        "//examples/components/dynamic:tests_test",
+        "//examples/components/runner/colocated:tests",
+        "//examples/components/storage:unittest_package_test",
+        "//examples/cpp/synchronization_checker:cpp-examples-synchronization-checker-test",
+        "//examples/diagnostics/inspect/rust-ergonomic:ergonomic-inspect-tests",
+        "//examples/fidl/calculator/cpp/client:calculator-client-cpp-parser-unittests",
+        "//examples/fidl/calculator/cpp/integration_test:calculator-integration-test-cpp",
+        "//examples/rust:rust-examples_test",
+        "//examples/rust/cdylib:tests",
         "//examples/rust/rust_static_linking:static_linking_tests",
+        "//examples/rust/staticlib:tests",
+        "//examples/testing/tools:stdout-test",
+        "//examples/testing/unittests/cpp:reverser_library_unittest",
+        "//examples/testing/unittests/rust:reverser_rust_unittest",
+        "//examples/tests/rust:tests",
+    ],
+)
+
+# Example host tests defined in Bazel. These are exported to `fx test` and
+# infra builders through the `bazel_tests` target in //examples/BUILD.gn.
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        "//examples/fidl/rust/fidl_crates:host_tests",
+        "//examples/fidl/rust/persistence:host_tests",
     ],
 )

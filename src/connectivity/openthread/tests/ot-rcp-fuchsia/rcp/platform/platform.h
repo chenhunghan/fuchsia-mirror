@@ -9,7 +9,6 @@
 #include <lib/async/dispatcher.h>
 
 #include <cstdint>
-#include <optional>
 #include <string>
 
 #include <openthread/instance.h>
@@ -21,19 +20,20 @@ namespace ot_rcp {
 // OpenThread platform state for the ot-rcp-fuchsia RCP: tasklet scheduling, the millisecond
 // alarm, time, the stub radio, and the per-node identity (node id, EUI-64, log tag, reset reason).
 //
-// There is at most one Platform at a time, reachable through `Get()`. Not thread-safe and
-// should be called on the same dispatcher.
+// The owner (RcpInstance) constructs and destroys it; there is at most one Platform at a time,
+// and the live one is reachable through `Get()`, which is what the context-free `otPlat*` entry
+// points use. Not thread-safe and should be called on the same dispatcher.
 class Platform {
  public:
   // Base of the IEEE EUI-64 reported by the stub radio; this mirrors the upstream OpenThread
   // simulation platform and OT-NS (ot-rfsim).
   static constexpr uint64_t kEui64Base = 0x18b4300000000000ull;
 
-  static void Create(async_dispatcher_t* dispatcher, uint32_t node_id);
-  static void Destroy();
+  // The live Platform. Asserts that one exists.
   static Platform& Get();
 
   Platform(async_dispatcher_t* dispatcher, uint32_t node_id);
+  ~Platform();
   Platform(const Platform&) = delete;
   Platform& operator=(const Platform&) = delete;
 
@@ -53,8 +53,8 @@ class Platform {
   uint64_t NowMicros() const;
 
  private:
-  // Single instance. Heap-allocated and never freed so that no destructor runs at process exit.
-  static std::optional<Platform>& Instance();
+  // The live Platform, registered by the constructor and cleared by the destructor.
+  static Platform* current_;
 
   static bool IsLive(otInstance* instance);
 
@@ -71,7 +71,7 @@ class Platform {
   otInstance* milli_instance_ = nullptr;
   async::TaskClosure milli_task_;
 
-  // Constructed fresh on every Create(), which is what returns it to its power-on configuration.
+  // Constructed fresh with every Platform, which is what returns it to its power-on configuration.
   Radio radio_{dispatcher_};
 };
 

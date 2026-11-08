@@ -8,7 +8,9 @@ use cobalt_registry_proto::cobalt::metric_definition::MetricType as CobaltMetric
 use cobalt_registry_proto::cobalt::{CobaltRegistry, MetricDefinition};
 use fidl_fuchsia_diagnostics_common::Selector;
 use prost::Message;
-use sampler_config::assembly::{MergedSamplerConfig, MetricTemplate, ProjectTemplate};
+use sampler_config::assembly::{
+    ComponentIdInfo, ComponentIdInfoList, MergedSamplerConfig, MetricTemplate, ProjectTemplate,
+};
 use sampler_config::runtime::{DataSetConfig, MetricConfig, ProjectConfig as SamplerProjectConfig};
 use sampler_config::{EventCode, MetricId, MetricType as SamplerMetricType, input};
 use selectors::SelectorDisplayOptions;
@@ -65,9 +67,10 @@ pub fn main() -> Result<(), Error> {
     let mut fire_component_configs = Vec::new();
     for component_config_path in args.fire_component_config {
         let parsed = read_file(&component_config_path)?;
-        fire_component_configs.push(parsed);
+        fire_component_configs.push((component_config_path, parsed));
     }
 
+    validate_fire_components(&fire_component_configs)?;
     validate_metric_ids_or_names(&project_configs, &fire_project_templates)?;
 
     let registry_bytes = std::fs::read(&args.cobalt_registry).with_context(|| {
@@ -80,12 +83,60 @@ pub fn main() -> Result<(), Error> {
     let config = MergedSamplerConfig {
         project_configs: project_configs.into_iter().map(|(_, c)| c).collect(),
         fire_project_templates: fire_project_templates.into_iter().map(|(_, t)| t).collect(),
-        fire_component_configs,
+        fire_component_configs: fire_component_configs.into_iter().map(|(_, c)| c).collect(),
     };
 
     write_file(args.output, config)?;
 
     Ok(())
+}
+
+fn validate_fire_components(
+    fire_component_configs: &[(PathBuf, ComponentIdInfoList)],
+) -> Result<(), Error> {
+    let mut errors = Vec::new();
+    let mut seen_ids: HashMap<EventCode, (&Path, &ComponentIdInfo)> = HashMap::new();
+    let mut seen_monikers: HashMap<String, (&Path, &ComponentIdInfo)> = HashMap::new();
+
+    for (path, components) in fire_component_configs {
+        for component in components.iter() {
+            if let Some((prev_path, prev)) =
+                seen_ids.insert(component.event_id, (path.as_path(), component))
+            {
+                errors.push(format!(
+                    "In {}: Duplicate FIRE component ID {} for '{}' ({}) (previously defined in {} for '{}' ({}))",
+                    path.display(),
+                    component.event_id,
+                    component.label,
+                    component.moniker,
+                    prev_path.display(),
+                    prev.label,
+                    prev.moniker,
+                ));
+            }
+            let moniker_str = component.moniker.to_string();
+            if let Some((prev_path, prev)) =
+                seen_monikers.insert(moniker_str, (path.as_path(), component))
+            {
+                errors.push(format!(
+                    "In {}: Duplicate FIRE component moniker '{}' for '{}' (id {}) (previously defined in {} for '{}' (id {}))",
+                    path.display(),
+                    component.moniker,
+                    component.label,
+                    component.event_id,
+                    prev_path.display(),
+                    prev.label,
+                    prev.event_id,
+                ));
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format_errors("validation error(s) found in Sampler configs", &errors))
+    }
 }
 
 fn format_errors(header: &str, errors: &[String]) -> anyhow::Error {
@@ -1580,6 +1631,47 @@ mod tests {
             "In test/bad_fire_codes.json5: Invalid event code for FIRE metric 101 \
              (test_fire_histogram) in project 10 (test_project): event_codes[0] = 3 is not \
              defined in Cobalt dimension 'reason'\n  Selector: core/fire:root:val"
+        ));
+    }
+
+    #[test]
+    fn test_validate_fire_components() {
+        let valid_components: ComponentIdInfoList = serde_json5::from_str(
+            r#"[
+                { id: 259, label: "Critical Services", moniker: "bootstrap/critical-services" },
+                { id: 260, label: "Kernel Debug Service", moniker: "bootstrap/kernel_debug_broker" },
+            ]"#,
+        )
+        .expect("parse valid components");
+        assert!(
+            validate_fire_components(&[(PathBuf::from("test/components.json5"), valid_components)])
+                .is_ok()
+        );
+
+        let duplicate_components: ComponentIdInfoList = serde_json5::from_str(
+            r#"[
+                { id: 259, label: "Critical Services", moniker: "bootstrap/critical-services" },
+                { id: 259, label: "Kernel Debug Service", moniker: "bootstrap/kernel_debug_broker" },
+                { id: 260, label: "Duplicate Moniker", moniker: "bootstrap/critical-services" },
+            ]"#,
+        )
+        .expect("parse duplicate components");
+        let err = validate_fire_components(&[(
+            PathBuf::from("test/components.json5"),
+            duplicate_components,
+        )])
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("2 validation error(s) found in Sampler configs:"), "{msg}");
+        assert!(msg.contains(
+            "In test/components.json5: Duplicate FIRE component ID 259 for 'Kernel Debug Service' \
+             (bootstrap/kernel_debug_broker) (previously defined in test/components.json5 for \
+             'Critical Services' (bootstrap/critical-services))"
+        ));
+        assert!(msg.contains(
+            "In test/components.json5: Duplicate FIRE component moniker \
+             'bootstrap/critical-services' for 'Duplicate Moniker' (id 260) (previously defined \
+             in test/components.json5 for 'Critical Services' (id 259))"
         ));
     }
 }

@@ -3,7 +3,7 @@
 # found in the LICENSE file.
 
 import("//src/developer/ffx/build/ffx_action.gni")
-import("//zircon/kernel/phys/efi/toolchain.gni")
+import("//src/firmware/gigaboot/cpp/efi_toolchain.gni")
 
 # Build an "EFI System Partition" target for EFI targets.
 #
@@ -59,8 +59,8 @@ template("esp") {
                              "visibility",
                            ])
 
-    ffx_tool = "//src/developer/ffx/tools/efi:ffx-efi_bazel_unversioned"
-    ffx_tool_output_name = "ffx-efi_bazel"
+    ffx_tool = "//src/developer/ffx/tools/efi:ffx-efi"
+    ffx_tool_output_name = "ffx-efi"
 
     outputs = [ output_file ]
     inputs = []

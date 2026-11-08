@@ -15,6 +15,7 @@ rustc_test("bin") {
   edition = "2024"
 
   deps = [
+    "//sdk/fidl/fuchsia.data:fuchsia.data_rust",
     "//sdk/fidl/fuchsia.fshost:fuchsia.fshost_rust",
     "//sdk/fidl/fuchsia.hardware.adb:fuchsia.hardware.adb_rust",
     "//sdk/fidl/fuchsia.hardware.display:fuchsia.hardware.display_rust",
@@ -26,12 +27,14 @@ rustc_test("bin") {
     "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_rust",
     "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_rust",
     "//sdk/rust/zx",
+    "//src/lib/fake-clock/fidl:fidl_rust",
     "//src/lib/fidl/rust/fidl",
     "//src/lib/fuchsia",
     "//src/lib/fuchsia-component-test",
     "//src/recovery/lib/bootloader-message",
     "//src/storage/lib/block_server/vmo_backed",
     "//src/storage/lib/vfs/rust:vfs",
+    "//src/sys/lib/cm_rust",
     "//src/sys/pkg/testing/mock-reboot",
     "//third_party/rust_crates:futures",
     "//third_party/rust_crates:zerocopy",
@@ -49,10 +52,17 @@ fuchsia_test_component("component") {
 
 fuchsia_test_package("recovery_android_integration_test") {
   test_components = [ ":component" ]
+  test_specs = {
+    log_settings = {
+      max_severity = "ERROR"
+    }
+  }
   deps = [
     "//src/graphics/display/testing/fake-display-stack-host:component-with-default-config",
+    "//src/lib/fake-clock/svc",
     "//src/recovery/system:component_android",
     "//src/recovery/system:roboto_regular",
+    "//src/recovery/system/android:bin_with_fake_time",
     "//src/sys/pkg/lib/isolated-swd:pkg-component",
   ]
 }

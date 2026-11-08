@@ -1,0 +1,102 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_library_headers.bzl", "fx_cc_library_headers")
+load("//build/bazel/rules/idk:idk_cc_source_library.bzl", "idk_cc_source_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# TODO(https://fxbug.dev/456186319): The kernel build is not yet supported in
+# Bazel, so the `is_kernel` dependencies are emitted in GN via raw_attribute.
+# @bazel2gn:raw_attribute:if (is_kernel) { public_deps += [ "//zircon/kernel/lib/ktl:headers", "//zircon/kernel/lib/libc:headers" ] }
+fx_cc_library_headers(
+    name = "headers",
+    hdrs = [
+        "include/hwreg/array.h",
+        "include/hwreg/asm.h",
+        "include/hwreg/bitfields.h",
+        "include/hwreg/indirect.h",
+        "include/hwreg/internal.h",
+        "include/hwreg/mmio.h",
+        "include/hwreg/pio.h",
+    ],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        # <hwreg/array.h> has #include <lib/stdcompat/span.h>.
+        # <hwreg/internal.h> has #include <lib/stdcompat/atomic.h>.
+        "//sdk/lib/stdcompat",
+        # Needed on host in Bazel for <zircon/assert.h> and <zircon/compiler.h>.
+        # @bazel2gn:skip
+        "//sdk/lib/zircon-assert",
+        # <hwreg/mmio.h> has #include <lib/mmio-ptr/mmio-ptr.h>.
+        "//zircon/system/ulib/mmio-ptr",
+    ],
+)
+
+# TODO(https://fxbug.dev/456186319): `asm.cc` and `//sdk/lib/fit` are only built
+# when `!is_kernel`; Bazel never builds for `is_kernel`, so include them in
+# Bazel and emit the GN `if (!is_kernel)` block via raw_attribute.
+# @bazel2gn:raw_attribute:if (!is_kernel) { sources += [ "asm.cc" ] deps = [ "//sdk/lib/fit" ] }
+fx_cc_library(
+    name = "hwreg",
+    srcs = [
+        # Emitted under `if (!is_kernel)` via raw_attribute above.
+        # @bazel2gn:skip
+        "asm.cc",
+        "printers.cc",
+    ],
+    implementation_deps = [
+        # Emitted under `if (!is_kernel)` via raw_attribute above.
+        # @bazel2gn:skip
+        "//sdk/lib/fit",
+    ],
+    visibility = ["//:__subpackages__"],
+    deps = [":headers"],
+)
+
+fx_cc_library_headers(
+    name = "hwreg-mock.headers",
+    hdrs = ["include/hwreg/mock.h"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        ":headers",
+        # <hwreg/mock.h> has #include <lib/mock-function/mock-function.h>.
+        "//zircon/system/ulib/mock-function:headers",
+    ],
+)
+
+fx_cc_library(
+    name = "hwreg-mock",
+    testonly = True,
+    implementation_deps = ["//zircon/system/ulib/mock-function"],
+    visibility = ["//:__subpackages__"],
+    deps = [":hwreg-mock.headers"],
+    alwayslink = True,
+)
+
+# Subset of API exported via the SDK.
+idk_cc_source_library(
+    name = "hwreg_public",
+    srcs = ["printers.cc"],
+    hdrs = [
+        "include/hwreg/bitfields.h",
+        "include/hwreg/internal.h",
+        "include/hwreg/mmio.h",
+    ],
+    api_area = "Driver SDK",
+    category = "partner",
+    idk_name = "hwreg",
+    # Needed on host in Bazel for <zircon/assert.h> and <zircon/compiler.h>.
+    # @bazel2gn:skip
+    non_fuchsia_deps = ["//sdk/lib/zircon-assert"],
+    stable = True,
+    visibility = ["//:__subpackages__"],
+    deps = [
+        # <hwreg/internal.h> has #include <lib/stdcompat/atomic.h>.
+        "//sdk/lib/stdcompat",
+        # <hwreg/mmio.h> has #include <lib/mmio-ptr/mmio-ptr.h>.
+        "//zircon/system/ulib/mmio-ptr",
+    ],
+)

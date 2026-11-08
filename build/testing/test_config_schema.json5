@@ -81,13 +81,6 @@
                 additionalProperties: false,
             },
         },
-        botanist_output_summary_file: {
-            // TODO(https://fxbug.dev/5550529245): remove this once temporary properties are
-            // supported in test-pilot. See fuchsia_test_package.gni for an explanation of this
-            // property.
-            description: "Path at which to deposit output summary file in a format defined by botanist",
-            type: "string",
-        },
         ssh_private_key_path: {
             description: "Path to ssh private key file",
             type: "string",

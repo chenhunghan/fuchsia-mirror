@@ -17,8 +17,7 @@
 #include <string>
 #include <vector>
 
-#include <re2/re2.h>
-
+#include "re2/re2.h"
 #include "src/lib/fxl/log_settings_command_line.h"
 #include "src/lib/fxl/strings/string_number_conversions.h"
 #include "tools/fidlcat/lib/decode_options.h"
@@ -342,9 +341,6 @@ cmdline::Status ProcessLogOptions(const CommandLineOptions* options) {
   }
   if (settings.disable_interest_listener) {
     builder.DisableInterestListener();
-  }
-  if (!settings.wait_for_initial_interest) {
-    builder.DisableWaitForInitialInterest();
   }
 #endif
   builder.BuildAndInitialize();

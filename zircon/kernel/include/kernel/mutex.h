@@ -27,6 +27,22 @@
 #include <kernel/thread.h>
 #include <ktl/atomic.h>
 
+class Mutex;
+
+// Rust implementations of the Mutex methods, in //zircon/kernel/kernel/mutex.rs. The Mutex
+// methods below and in //zircon/kernel/kernel/mutex.cc forward to these. Only the Mutex methods
+// may call them; see the `# Safety` sections in mutex.rs for their preconditions.
+extern "C" {
+void rust_mutex_destroy(Mutex* mutex);
+void rust_mutex_acquire_common(Mutex* mutex, zx_duration_t spin_max_duration)
+    TA_EXCL(chainlock_transaction_token);
+[[nodiscard]] bool rust_mutex_acquire_common_with_timeslice_extension(
+    Mutex* mutex, zx_duration_t spin_max_duration, zx_duration_t timeslice_extension)
+    TA_EXCL(chainlock_transaction_token);
+void rust_mutex_release_contended(Mutex* mutex, Thread* current_thread, uintptr_t old_mutex_state)
+    TA_EXCL(chainlock_transaction_token);
+}
+
 // Kernel mutex support.
 //
 class TA_CAP("mutex") Mutex
@@ -67,7 +83,10 @@ class TA_CAP("mutex") Mutex
   // non-annotated method, we can guarantee that the implementation of the
   // release operation *is* subject to static analysis, helping to guarantee
   // that we are holding (or not holding) all of the proper capabilities when
-  // interacting with things like threads, wait queues, and the scheduler.
+  // interacting with things like threads, wait queues, and the scheduler.  The
+  // contended release operation is implemented in Rust
+  // (//zircon/kernel/kernel/mutex.rs), and so is not subject to clang's static
+  // thread safety analysis.
   void Release() TA_REL() { ReleaseInternal(); }
 
   // does the current thread hold the mutex?
@@ -104,48 +123,26 @@ class TA_CAP("mutex") Mutex
                      TimesliceExtension<TimesliceExtensionEnabled> timeslice_extension);
 
  private:
+  friend struct MutexLayout;
+
   // The actual implementation of the Release operation.  See above for why this
   // is separate from |Release()|.
+  //
+  // The uncontended fast path is implemented in C++, in mutex.cc, and only the
+  // contended slow path crosses into Rust.  ThinLTO inlines this C++ fast path
+  // into callers; it does not reliably inline the Rust implementation into C++
+  // callers.  It is deliberately not defined inline in this header: doing so
+  // makes callers such as lockdep::Guard<CriticalMutex>::Release too large to be
+  // inlined themselves.
+  //
+  // Rust callers use a copy of this fast path, Mutex::release in
+  // //zircon/kernel/kernel/mutex.rs, which must be kept identical to this one.
+  //
+  // Must stay in sync with the acquire paths in Mutex::acquire_common and
+  // Mutex::acquire_contended_mutex in //zircon/kernel/kernel/mutex.rs.  In
+  // particular, uncontended releases are not traced (see the static assertion on
+  // KERNEL_MUTEX_TRACING_LEVEL in mutex.rs).
   void ReleaseInternal();
-
-  // Attempts to release the mutex. Returns STATE_FREE if the mutex was
-  // uncontested and released, otherwise returns the contested state of the
-  // mutex.
-  inline uintptr_t TryRelease(Thread* current_thread);
-
-  // Acquire a lock held by another thread.
-  //
-  // This is a slowpath taken by |Acquire| if the mutex is found to already be held
-  // by another thread.
-  //
-  // If TimesliceExtensionEnabled is true, attempt to set the timeslice
-  // extension after acquiring the mutex and return true if the extension was
-  // set.  Otherwise, return false.
-  //
-  // This function is deliberately moved out of line from |Acquire| to keep the stack
-  // set up, tear down in the |Acquire| fastpath small.
-  template <bool TimesliceExtensionEnabled>
-  bool AcquireContendedMutex(zx_duration_t spin_max_duration, Thread* current_thread,
-                             TimesliceExtension<TimesliceExtensionEnabled> timeslic_extension)
-      TA_EXCL(chainlock_transaction_token);
-
-  // Release a lock contended by another thread.
-  //
-  // This is the slowpath taken by |Release| when releasing a lock that is being
-  // waited for by another thread.
-  //
-  // This function is deliberately moved out of line from |Release| to keep the
-  // stack set up, tear down in the |Release| fastpath small.
-  void ReleaseContendedMutex(Thread* current_thread, uintptr_t old_mutex_state)
-      TA_EXCL(chainlock_transaction_token);
-
-  void RecordInitialAssignedCpu() {
-    maybe_acquired_on_cpu_.store(arch_curr_cpu_num(), ktl::memory_order_relaxed);
-  }
-
-  void ClearInitialAssignedCpu() {
-    maybe_acquired_on_cpu_.store(INVALID_CPU, ktl::memory_order_relaxed);
-  }
 
   static constexpr uint32_t MAGIC = 0x6D757478;  // 'mutx'
   static constexpr uintptr_t STATE_FREE = 0u;
@@ -162,16 +159,19 @@ class TA_CAP("mutex") Mutex
 
   fbl::Canary<MAGIC> magic_;
 
-  // See the comment near the start of AcquireContendedMutex for details about
-  // this variable, and how it affects the spin phase behavior of
-  // Mutex::AcquireContendedMutex
+  // See the comment near the start of Mutex::acquire_contended_mutex in
+  // //zircon/kernel/kernel/mutex.rs for details about this variable, and how it
+  // affects the spin phase behavior of Mutex::acquire_contended_mutex
   ktl::atomic<cpu_num_t> maybe_acquired_on_cpu_{INVALID_CPU};
+  // Holds the owning Thread* bitwise-ORed with STATE_FLAG_CONTESTED, or STATE_FREE. C++ must only
+  // ever store STATE_FREE here: Rust types this word as AtomicPtr<Thread> and dereferences the
+  // holders it loads, which relies on every other value having been stored by Rust.
   ktl::atomic<uintptr_t> val_{STATE_FREE};
   LazyOwnedWaitQueue wait_;
 };
 
-// TimeslicExtension specializations for Mutex::Acquire and
-// Mutex::AcquireContendedMutex.
+// TimesliceExtension specializations for Mutex::Acquire and
+// Mutex::AcquireCommon.
 //
 // No timeslice extension.
 template <>
@@ -181,6 +181,21 @@ template <>
 struct Mutex::TimesliceExtension<true> {
   zx_duration_t value;
 };
+
+template <>
+inline bool Mutex::AcquireCommon<false>(zx_duration_t spin_max_duration,
+                                        TimesliceExtension<false>) {
+  // Without a timeslice extension no extension is ever set.
+  rust_mutex_acquire_common(this, spin_max_duration);
+  return false;
+}
+
+template <>
+inline bool Mutex::AcquireCommon<true>(zx_duration_t spin_max_duration,
+                                       TimesliceExtension<true> timeslice_extension) {
+  return rust_mutex_acquire_common_with_timeslice_extension(this, spin_max_duration,
+                                                            timeslice_extension.value);
+}
 
 inline void Mutex::Acquire(zx_duration_t spin_max_duration) TA_ACQ() {
   AcquireCommon(spin_max_duration, TimesliceExtension<false>{});

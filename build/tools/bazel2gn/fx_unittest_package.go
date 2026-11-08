@@ -27,7 +27,7 @@ const gnTestPackageNameSuffix = "-gn"
 // attributes are errors, so tests using them need `# @bazel2gn:skip` and a
 // hand-written GN copy.
 func fxUnittestPackageToGN(call *syntax.CallExpr) ([]string, error) {
-	var name, packageName, maxLogSeverity string
+	var name, packageName, maxLogSeverity, minLogSeverity string
 	var unitTests *syntax.ListExpr
 	var visArg *syntax.BinaryExpr
 
@@ -63,6 +63,11 @@ func fxUnittestPackageToGN(call *syntax.CallExpr) ([]string, error) {
 			maxLogSeverity, err = stringLiteralValue(binaryExpr.Y)
 			if err != nil {
 				return nil, fmt.Errorf("fx_unittest_package max_log_severity: %v", err)
+			}
+		case "min_log_severity":
+			minLogSeverity, err = stringLiteralValue(binaryExpr.Y)
+			if err != nil {
+				return nil, fmt.Errorf("fx_unittest_package min_log_severity: %v", err)
 			}
 		case "unit_tests":
 			listExpr, ok := unwrapParenExpr(binaryExpr.Y).(*syntax.ListExpr)
@@ -152,18 +157,15 @@ func fxUnittestPackageToGN(call *syntax.CallExpr) ([]string, error) {
 	}
 	ret = append(ret, indent(packageBody, 1)...)
 
-	if maxLogSeverity != "" {
-		ret = append(ret, indent([]string{
-			"test_specs = {",
-			indentPrefix + "log_settings = {",
-			indentPrefix + indentPrefix + fmt.Sprintf("max_severity = %s", strconv.Quote(maxLogSeverity)),
-			indentPrefix + "}",
-			"}",
-		}, 1)...)
+	if maxLogSeverity != "" || minLogSeverity != "" {
+		specs := []string{"test_specs = {"}
+		specs = append(specs, indent(logSettingsToGN(maxLogSeverity, minLogSeverity), 1)...)
+		specs = append(specs, "}")
+		ret = append(ret, indent(specs, 1)...)
 	}
 
 	if visArg != nil {
-		lines, err := attrAssignmentToGN(visArg, "fx_unittest_package", nil /*compiledActionOutputs*/, false /*appendAspectHints*/)
+		lines, err := attrAssignmentToGN(visArg, "fx_unittest_package", nil /*compiledActionOutputs*/, false /*appendAspectHints*/, false /*hasWithUnitTests*/)
 		if err != nil {
 			return nil, fmt.Errorf("converting fx_unittest_package visibility: %v", err)
 		}

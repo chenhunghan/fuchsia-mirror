@@ -13,7 +13,6 @@
 #include <lib/media/codec_impl/codec_diagnostics.h>
 #include <lib/media/codec_impl/codec_impl.h>
 #include <lib/syslog/cpp/macros.h>
-#include <threads.h>
 
 #include "vaapi_utils.h"
 
@@ -130,8 +129,8 @@ class LocalSingleCodecFactory : public fuchsia::mediacodec::CodecFactory {
       }
 
       auto codec_impl = std::make_unique<CodecImpl>(std::move(sysmem_), std::move(codec_admission),
-                                                    fidl_dispatcher_, thrd_current(),
-                                                    std::move(params), std::move(codec_request));
+                                                    fidl_dispatcher_, std::move(params),
+                                                    std::move(codec_request));
 
       codec_impl->SetLifetimeTracking(std::move(lifetime_tracking_eventpair));
 

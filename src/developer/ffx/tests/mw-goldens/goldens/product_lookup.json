@@ -80,6 +80,10 @@
         {
             "type": "object",
             "properties": {
+                "type": {
+                    "type": "string",
+                    "const": "notice"
+                },
                 "title": {
                     "type": [
                         "string",
@@ -91,10 +95,6 @@
                         "string",
                         "null"
                     ]
-                },
-                "type": {
-                    "type": "string",
-                    "const": "notice"
                 }
             },
             "required": [

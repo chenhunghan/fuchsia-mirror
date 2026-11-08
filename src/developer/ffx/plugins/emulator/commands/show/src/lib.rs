@@ -78,9 +78,9 @@ impl FfxMain for EmuShowTool {
     type Error = ::fho::Error;
 
     async fn main(self, writer: Self::Writer) -> fho::Result<()> {
-        let instance_dir: PathBuf =
+        let dirs: Vec<PathBuf> =
             self.context.get(ffx_config::keys::EMU_INSTANCE_ROOT_DIR).map_err(|e| bug!("{e}"))?;
-        let emu_instances = EmulatorInstances::new(instance_dir);
+        let emu_instances = EmulatorInstances::from(dirs);
         self.show(&emu_instances, writer).await.map_err(|e| e.into())
     }
 }
@@ -134,6 +134,7 @@ mod tests {
 
     use ffx_writer::{Format, TestBuffers};
     use std::collections::HashMap;
+    use std::path::PathBuf;
 
     #[fuchsia::test]
     async fn test_show() -> Result<()> {

@@ -68,16 +68,19 @@ group("tests") {
   testonly = true
   deps = [
     "common:ffx_component_test",
-    "destroy:ffx_component_destroy_tests",
+    "destroy:tests",
     "doctor:ffx_component_doctor_tests",
-    "graph:ffx_component_graph_tests",
-    "list:ffx_component_list_tests",
-    "reload:ffx_component_reload_tests",
     "resolve:ffx_component_resolve_tests",
     "route:ffx_component_route_tests",
     "show:ffx_component_show_tests",
     "start:ffx_component_start_tests",
-    "stop:ffx_component_stop_tests",
+
+    # Bazel-migrated plugins
+    "graph:tests",
+    "list:tests",
+    "reload:tests",
+    "stop:tests",
+    "storage:tests",
   ]
   if (is_host) {
     deps += [ ":ffx_component_tests($host_toolchain)" ]

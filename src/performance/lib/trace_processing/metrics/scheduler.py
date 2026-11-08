@@ -82,7 +82,7 @@ class SchedulerMetricsProcessor(trace_metrics.MetricsProcessor):
         all_records: list[trace_model.SchedulingRecord] = []
         for records in model.scheduling_records.values():
             for record in records:
-                if record.is_idle():
+                if record.prio == trace_model.INT32_MIN:
                     idle_tids.add(record.tid)
                 if (
                     isinstance(record, trace_model.ContextSwitch)
@@ -93,11 +93,11 @@ class SchedulerMetricsProcessor(trace_metrics.MetricsProcessor):
 
         # Sort chronologically across all CPUs. For identical timestamps, process Waking
         # records before ContextSwitch records so zero-latency wakeups are captured.
+        # Packing `(start_ns << 1) | kind_bit` into a single int lets Timsort merge
+        # the pre-sorted per-CPU runs using C integer comparisons.
         all_records.sort(
-            key=lambda r: (
-                r.start,
-                0 if isinstance(r, trace_model.Waking) else 1,
-            )
+            key=lambda r: (r.start.to_epoch_nanoseconds() << 1)
+            | (0 if isinstance(r, trace_model.Waking) else 1)
         )
 
         pending_waits: dict[int, _PendingWait] = {}
@@ -118,13 +118,18 @@ class SchedulerMetricsProcessor(trace_metrics.MetricsProcessor):
 
                 in_tid = record.tid
                 pending = pending_waits.pop(in_tid, None)
-                if pending is not None and record.start >= pending.start:
-                    wait_ms = (record.start - pending.start).to_milliseconds_f()
-                    if pending.kind == _WaitKind.WAKEUP:
-                        wakeup_latencies.append(wait_ms)
-                    else:
-                        preemption_delays.append(wait_ms)
-                    task_wait_times.append(wait_ms)
+                if pending is not None:
+                    delta_ns = (
+                        record.start.to_epoch_nanoseconds()
+                        - pending.start.to_epoch_nanoseconds()
+                    )
+                    if delta_ns >= 0:
+                        wait_ms = float(delta_ns) / 1_000_000.0
+                        if pending.kind == _WaitKind.WAKEUP:
+                            wakeup_latencies.append(wait_ms)
+                        else:
+                            preemption_delays.append(wait_ms)
+                        task_wait_times.append(wait_ms)
 
                 out_tid = record.outgoing_tid
                 if out_tid not in idle_tids:

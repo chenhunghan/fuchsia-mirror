@@ -93,7 +93,11 @@ void NodeShutdownCoordinator::Remove(std::shared_ptr<Node> node, RemovalSet remo
   }
 
   while (!nodes_to_check_for_removal.empty()) {
-    nodes_to_check_for_removal.top()->GetNodeShutdownCoordinator().CheckNodeState();
+    auto& removal_node = nodes_to_check_for_removal.top();
+    if (removal_node->IsStoppingOrStopped()) {
+      removal_node->NotifyNodeUnbinding();
+    }
+    removal_node->GetNodeShutdownCoordinator().CheckNodeState();
     nodes_to_check_for_removal.pop();
   }
 }

@@ -3,17 +3,8 @@
 # found in the LICENSE file.
 
 import("//build/dist/resource.gni")
-import("//build/testing/cc_test_executable.gni")
 
-# test_binary.zstd results from building this target under core.x64-release and
-# compressing with zstd. For now, this is a manual process, which should be fine
-# since it shouldn't need to change very often.
-cc_test_executable("test_binary") {
-  testonly = true
-  sources = [ "test_binary_main.cc" ]
-  visibility = []
-}
-
+# Used by //src/storage/blobfs/* tests in GN.
 resource("test_binary_resource") {
   testonly = true
   sources = [ "test_binary.zstd" ]

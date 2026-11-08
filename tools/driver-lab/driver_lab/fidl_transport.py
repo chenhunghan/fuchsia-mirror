@@ -11,8 +11,6 @@ host-side round-trip tests (in-process channel pairs) and a real target
 (channels from a device-connected fuchsia-controller context).
 """
 
-from __future__ import annotations
-
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -143,7 +141,7 @@ def connect_transport(
     capability: str = "fuchsia.driver.lab.Service/default/proxy",
     target: str | None = None,
     config: dict[str, str] | None = None,
-) -> "FidlProxyTransport":
+) -> FidlProxyTransport:
     """Connects to the proxy served by a target device.
 
     Establishes a fuchsia-controller `Context` (the same transport ffx
@@ -251,7 +249,7 @@ class FidlProxyTransport:
         expectations: Expectations,
         allowlist: Sequence[AllowRule],
         mode: SessionMode = SessionMode.READ_ONLY,
-    ) -> "_FidlProxySession":
+    ) -> _FidlProxySession:
         """See `ProxyTransport.open_session`."""
         client_channel, server_channel = self._channel_factory()
         fidl_mode = (

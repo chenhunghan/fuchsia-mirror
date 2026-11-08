@@ -47,7 +47,7 @@ config("language") {
   cflags_objcc = cflags_cc
 }
 
-# LINT.ThenChange(//build/config/BUILD.bazel:language)
+# LINT.ThenChange(BUILD.bazel:language)
 
 # LINT.IfChange(cxx_versions)
 # These configs can be used to override the C++ version for a particular
@@ -371,7 +371,7 @@ compiler_config("relative_paths") {
 config("debug") {
 }
 
-# LINT.ThenChange(//build/config/BUILD.bazel:debug)
+# LINT.ThenChange(BUILD.bazel:debug)
 
 config("release") {
   defines = [ "NDEBUG=1" ]
@@ -390,8 +390,9 @@ config("no_exceptions") {
   ldflags = cflags_cc
 }
 
-# LINT.ThenChange(//build/config/BUILD.bazel:no_exceptions)
+# LINT.ThenChange(BUILD.bazel:no_exceptions)
 
+# LINT.IfChange(rtti)
 config("rtti") {
   cflags_cc = [ "-frtti" ]
   cflags_objcc = cflags_cc
@@ -413,6 +414,9 @@ config("no_rtti") {
   ldflags = cflags_cc
 }
 
+# LINT.ThenChange(BUILD.bazel:rtti)
+
+# LINT.IfChange(default_include_dirs)
 config("default_include_dirs") {
   include_dirs = [
     "//",
@@ -420,6 +424,9 @@ config("default_include_dirs") {
   ]
 }
 
+# LINT.ThenChange(BUILD.bazel:default_include_dirs)
+
+# LINT.IfChange(linker_gc)
 variant("linker_gc") {
   configs = [
     ":linker_gc.compiler",
@@ -459,6 +466,9 @@ config("default_linker_gc") {
   configs = [ ":linker_gc" ]
 }
 
+# LINT.ThenChange(BUILD.bazel:linker_gc)
+
+# LINT.IfChange(linker_string_merging)
 compiler_config("linker_string_merging") {
   if (is_pecoff) {
     linker_flags = [ "/opt:lldtailmerge" ]
@@ -467,10 +477,14 @@ compiler_config("linker_string_merging") {
   }
 }
 
+# LINT.ThenChange(BUILD.bazel:linker_string_merging)
+
 # Temporary placeholder to allow for a soft-transition.
 config("no_remote_link") {
   configs = [ "//build/config/rbe:no_remote_link" ]
 }
+
+# LINT.IfChange(optimize_configs)
 
 # Each 'optimize_$optimize' config below corresponds to a single setting that's
 # controlled by a 'foo_optimize' argument. The 'default_optimize' level is set
@@ -580,6 +594,8 @@ config("optimize_size_thinlto_clang") {
   }
 }
 
+# LINT.ThenChange(BUILD.bazel:optimize_configs)
+
 # LINT.IfChange(optimize_sanitizer)
 config("optimize_sanitizer") {
   # Instrumentation adds overhead that is greatly improved by optimization.
@@ -590,15 +606,27 @@ config("optimize_sanitizer") {
   rustflags = [ "-Copt-level=1" ]
 }
 
-# LINT.ThenChange(//build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/sanitizer.bzl:clang_sanitizer)
+# LINT.ThenChange(
+#   BUILD.bazel:optimize_sanitizer,
+#   //build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/sanitizer.bzl:clang_sanitizer)
 
+# LINT.IfChange(optimize_profile)
+# Matches -O1 in toolchain_utils.bzl:profile_feature and -Copt-level=1 in
+# template.bazelrc.
 config("optimize_profile") {
   cflags = [ "-O1" ]
   ldflags = cflags
   rustflags = [ "-Copt-level=1" ]
 }
 
+# LINT.ThenChange(
+#   BUILD.bazel:optimize_profile,
+#   //build/bazel/templates/template.bazelrc:rust_profile,
+#   //build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/toolchain_utils.bzl:profile,
+# )
 # LINT.IfChange(optimize_coverage)
+# Matches -O1 in toolchain_utils.bzl:coverage_feature and -Copt-level=1 in
+# template.bazelrc.
 config("optimize_coverage") {
   cflags = [ "-O1" ]
   ldflags = cflags
@@ -606,6 +634,7 @@ config("optimize_coverage") {
 }
 
 # LINT.ThenChange(
+#   BUILD.bazel:optimize_coverage,
 #   //build/bazel/templates/template.bazelrc:rust_coverage,
 #   //build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/toolchain_utils.bzl:coverage,
 # )
@@ -655,10 +684,18 @@ config("debuginfo_debug") {
 # LINT.ThenChange(BUILD.bazel:debuginfo_configs)
 
 # LINT.IfChange(dwarf_version)
-config("dwarf_version") {
-  cflags = [ "-gdwarf-${dwarf_version}" ]
-  asmflags = cflags
-  ldflags = cflags
+compiler_config("dwarf_version") {
+  c_family_flags = [ "-gdwarf-${dwarf_version}" ]
+  rustflags = [ "-Cdwarf-version=${dwarf_version}" ]
+  if (dwarf_version >= 5 && !is_gcc) {
+    # TODO(https://fxbug.dev/578487101): Remove once upstream Clang and
+    # rustc enable .debug_names and pass --debug-names to LLD by default
+    # for -gdwarf-5.
+    cflags = [ "-gpubnames" ]
+    if (is_elf) {
+      linker_flags = [ "--debug-names" ]
+    }
+  }
 }
 
 # LINT.ThenChange(
@@ -698,10 +735,8 @@ compiler_config("default_debuginfo") {
   linker_flags = []
   configs = [ ":debuginfo_${debuginfo}" ]
   if (is_dwarf) {
-    configs += [
-      ":dwarf_version",
-      ":compress_debuginfo",
-    ]
+    compiler_configs = [ ":dwarf_version" ]
+    configs += [ ":compress_debuginfo" ]
     if (!is_gcc) {
       # This option forces Clang to only emit class type information when
       # constructors are emitted which can significantly reduce debug info
@@ -742,8 +777,6 @@ variant("frame_pointers") {
   }
 }
 
-# LINT.ThenChange(//build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/sanitizer.bzl:clang_sanitizer)
-
 variant("no_frame_pointers") {
   cflags = [ "-fomit-frame-pointer" ]
   ldflags = cflags
@@ -754,6 +787,11 @@ variant("no_frame_pointers") {
     defines = [ "WITH_FRAME_POINTERS=0" ]
   }
 }
+
+# LINT.ThenChange(
+#   BUILD.bazel:frame_pointers,
+#   //build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/sanitizer.bzl:clang_sanitizer,
+# )
 
 config("suppress_iterator_warnings") {
   defines = [ "_LIBCPP_DISABLE_DEPRECATION_WARNINGS" ]
@@ -1000,11 +1038,9 @@ config("Wno-vla-cxx-extension") {
     "//src/connectivity/network/lib/udp_serde:*",
     "//src/connectivity/network/tests/external_network:*",
     "//src/connectivity/network/tests/socket:*",
-    "//src/connectivity/telephony/drivers/qmi-usb-transport:*",
     "//src/connectivity/wlan/drivers/lib/log/cpp/test:*",
     "//src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac:*",
     "//src/developer/adb/bin/adb-file-sync:*",
-    "//src/developer/memory/metrics/tests:*",
     "//src/devices/block/bin/gpt:*",
     "//src/devices/block/bin/iochk:*",
     "//src/devices/spi/bin/spiutil:*",
@@ -1013,6 +1049,7 @@ config("Wno-vla-cxx-extension") {
     "//src/graphics/lib/magma/src/libmagma_virt:*",
     "//src/media/audio/examples/effects:*",
     "//src/media/drivers/amlogic_decoder:*",
+    "//src/memory/legacy/metrics/tests:*",
     "//src/performance/cpu_profiler:*",
     "//src/performance/lib/gperftools:*",
     "//src/performance/lib/trace_converters:*",
@@ -1061,7 +1098,7 @@ config("Wno-conversion") {
   configs = [ "//src/lib/ubsan-custom:allow-implicit-integer-truncation" ]
 
   # To trim this list:
-  # $ scripts/gn/trim_visibility.py --target="//build/config:Wno-conversion"
+  # $ build/bazel/scripts/trim_visibility.py --target="//build/config:Wno-conversion"
   visibility = [
     "//src/connectivity/bluetooth/hci/transport/uart/cpp:*",
     "//src/connectivity/bluetooth/hci/vendor/broadcom:*",
@@ -1069,7 +1106,6 @@ config("Wno-conversion") {
     "//src/connectivity/openthread/drivers/ot-radio:*",
     "//src/connectivity/openthread/tests/fake-drivers/fake-ot-radio:*",
     "//src/connectivity/telephony/drivers/qmi-fake-transport:*",
-    "//src/connectivity/telephony/drivers/qmi-usb-transport:*",
     "//src/connectivity/wlan/drivers/testing/lib/sim-env:*",
     "//src/connectivity/wlan/drivers/testing/lib/sim-env/test:*",
     "//src/connectivity/wlan/drivers/testing/lib/sim-fake-ap:*",
@@ -1142,7 +1178,6 @@ config("Wno-conversion") {
     "//src/ui/input/lib/hid-input-report:*",
     "//src/ui/lib/escher/test:*",
     "//src/ui/lib/escher/test/common:*",
-    "//src/ui/lib/yuv:*",
     "//src/ui/scenic/bin:*",
     "//src/virtualization/third_party/fdt:*",
     "//third_party/crashpad/src/*",
@@ -1164,7 +1199,6 @@ config("Wno-conversion") {
     "//zircon/third_party/uapp/mkfs-msdosfs:*",
     "//zircon/third_party/ulib/cksum:*",
     "//zircon/third_party/ulib/musl/*",
-    "//zircon/tools/lz4:*",
   ]
 }
 
@@ -1180,7 +1214,6 @@ config("Wno-implicit-fallthrough") {
     "//third_party/rust_crates/compat/brotli",
     "//zircon/third_party/dev/ethernet/e1000:e1000_third_party",
     "//zircon/third_party/ulib/boringssl",
-    "//zircon/tools/lz4",
   ]
 }
 
@@ -1253,6 +1286,7 @@ config("Wno-newline-eof") {
   visibility = [ "//third_party/github.com/google/cppdap/*" ]
 }
 
+# LINT.IfChange(symbol_visibility_hidden)
 config("symbol_visibility_hidden") {
   # Disable libc++ visibility annotations to make sure that the compiler option
   # has effect on symbols defined in libc++ headers. Note that we don't want to
@@ -1266,9 +1300,30 @@ config("symbol_visibility_hidden") {
   }
 }
 
+# LINT.ThenChange(BUILD.bazel:symbol_visibility_hidden)
+
+# LINT.IfChange(symbol_no_undefined)
 compiler_config("symbol_no_undefined") {
   linker_flags = [ "--no-undefined" ]
 }
+
+# Allow undefined symbols when linking shared libraries, overriding
+# //build/config:symbol_no_undefined (which is in
+# default_shared_library_configs). Prefer adding this config over `configs -= [
+# "//build/config:symbol_no_undefined" ]` for compatibility with Bazel, where
+# --no-undefined is injected by the C++ toolchain configuration rather than a
+# build_flags() target.
+compiler_config("symbol_allow_undefined") {
+  linker_flags = [
+    "-z",
+    "undefs",
+  ]
+}
+
+# LINT.ThenChange(
+#   BUILD.bazel:symbol_no_undefined,
+#   //build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/cc_features.bzl:symbol_no_undefined,
+# )
 
 # LINT.IfChange(shared_library_config)
 config("shared_library_config") {
@@ -1297,7 +1352,7 @@ config("default_libs") {
   configs = []
 }
 
-# LINT.ThenChange(//build/config/BUILD.bazel:default_libs)
+# LINT.ThenChange(BUILD.bazel:default_libs)
 
 compiler_config("werror") {
   if (!use_ccache) {
@@ -1337,26 +1392,27 @@ config("no-template-backtrace-limit") {
   cflags_cc = [ "-ftemplate-backtrace-limit=0" ]
 }
 
-# LINT.ThenChange(//build/config/BUILD.bazel:no-template-backtrace-limit)
+# LINT.ThenChange(BUILD.bazel:no-template-backtrace-limit)
 
-config("no-stack-protector") {
-  cflags = [ "-fno-stack-protector" ]
+# LINT.IfChange(no-stack-protector)
+compiler_config("no-stack-protector") {
+  c_family_flags = [ "-fno-stack-protector" ]
 }
+
+# LINT.ThenChange(BUILD.bazel:no-stack-protector)
 
 variant("no-safe-stack") {
-  if (!is_gcc) {
-    cflags = [ "-fno-sanitize=safe-stack" ]
+  no_sanitize = [ "safe-stack" ]
+}
+
+compiler_config("no-shadow-call-stack") {
+  if (current_cpu == "arm64" || current_cpu == "riscv64") {
+    no_sanitize = [ "shadow-call-stack" ]
   }
 }
 
-config("no-shadow-call-stack") {
-  if ((current_cpu == "arm64" || current_cpu == "riscv64") && !is_gcc) {
-    cflags = [ "-fno-sanitize=shadow-call-stack" ]
-  }
-}
-
-variant("no-compiler-abi") {
-  configs = [
+compiler_config("no-compiler-abi") {
+  compiler_configs = [
     ":no-safe-stack",
     ":no-shadow-call-stack",
     ":no-stack-protector",
@@ -1461,7 +1517,7 @@ config("libcpp_remove_transitive_includes") {
   defines = [ "_LIBCPP_REMOVE_TRANSITIVE_INCLUDES" ]
 }
 
-# LINT.ThenChange(//build/config/BUILD.bazel:libcpp_remove_transitive_includes)
+# LINT.ThenChange(BUILD.bazel:libcpp_remove_transitive_includes)
 
 # Infinite loops are undefined behavior in C++ and thus can be optimized away
 # by the compiler. This config inhibits that optimization.
@@ -1575,7 +1631,6 @@ config("Wno-nontrivial-memaccess") {
 # until all instances are fixed.
 config("Wno-unterminated-string-initialization") {
   visibility = [
-    "//third_party/acpica-migrating/*",
     "//third_party/acpica/*",
     "//third_party/mesa-migrating/*",
     "//third_party/openssh-portable/*",
@@ -1654,14 +1709,47 @@ config("standalone") {
     # Make sure the unwinder isn't implicitly brought in for any reason.
     ldflags += [ "-unwindlib=none" ]
   }
+
+  rustflags = [ "-Zno-profiler-runtime" ]
 }
 
 # LINT.ThenChange(BUILD.bazel:standalone)
 
+compiler_config("nostartfiles") {
+  ldflags = [ "-nostartfiles" ]
+  if (rust_custom_target) {
+    rust_linker = "$rebased_clang_prefix/lld"
+    if (rust_rbe_enable) {
+      rustflags = [ "--remote-inputs=$rust_linker" ]
+    }
+    rust_target_edits = [
+      {
+        key = "pre-link-objects"
+        action = "unset"
+      },
+      {
+        key = "linker"
+        action = "set"
+        value = rust_linker
+      },
+      {
+        key = "linker-flavor"
+        action = "set"
+        value = "gnu-lld"
+      },
+    ]
+  } else if (!is_fuchsia) {
+    rustflags = [ "-Clink-arg=-nostartfiles" ]
+  }
+}
+
+# LINT.IfChange(bp_compression_sort)
 # Enable LLD's balanced partitioning for ordering function sections.
 compiler_config("bp-compression-sort") {
   linker_flags = [ "--bp-compression-sort=function" ]
 }
+
+# LINT.ThenChange(BUILD.bazel:bp_compression_sort)
 
 # Set __GNUC__ and related predefines as GCC does.  This doesn't control what
 # features Clang actually supports, just the predefines.  Clang doesn't support

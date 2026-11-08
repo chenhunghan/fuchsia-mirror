@@ -664,6 +664,63 @@ where
         self.cursor_back_mut().splice(other);
     }
 
+    /// Swaps the contents of this list with `other`.
+    ///
+    /// This operation is O(1).
+    #[inline]
+    pub fn swap(self: Pin<&mut Self>, other: Pin<&mut Self>) {
+        // Look up both tail nodes while both lists still satisfy every invariant. A non-empty
+        // list's tail node holds that list's sentinel in `next`; once the heads are exchanged it
+        // must hold the sentinel of the list the elements moved to instead.
+        let self_tail = (!self.is_empty()).then(|| {
+            let tail = self.get_tail();
+            // SAFETY: `!self.is_empty()` guarantees `tail` (`head->prev`) is a valid, aligned,
+            // initialized element of `self`, which stays linked (and therefore alive) for the
+            // rest of this call.
+            let node = unsafe { self.get_node_ref(tail) };
+            debug_assert_eq!(node.get_next(), self.get_sentinel());
+            node
+        });
+        let other_tail = (!other.is_empty()).then(|| {
+            let tail = other.get_tail();
+            // SAFETY: As above, for `other`.
+            let node = unsafe { other.get_node_ref(tail) };
+            debug_assert_eq!(node.get_next(), other.get_sentinel());
+            node
+        });
+
+        // SAFETY: Neither list is moved out of its pinned location: only the non-structurally
+        // pinned `head` and `size` fields are exchanged in place, and the raw pointers derived
+        // below point back at the same pinned locations.
+        let this = unsafe { Pin::into_inner_unchecked(self) };
+        // SAFETY: As above.
+        let that = unsafe { Pin::into_inner_unchecked(other) };
+        core::mem::swap(&mut this.head, &mut that.head);
+        this.size.swap(&mut that.size);
+
+        // Derive the sentinels from `&mut Self` so they carry write provenance over `head`:
+        // `remove_from_container` writes a list's `head` through the sentinel it finds in the
+        // tail node's `next`. These are the last uses of `this` and `that` as references; every
+        // later access goes through the raw pointers.
+        let this_ptr = core::ptr::from_mut(this);
+        let that_ptr = core::ptr::from_mut(that);
+        let this_sentinel: *mut P::Target = make_sentinel(this_ptr);
+        let that_sentinel: *mut P::Target = make_sentinel(that_ptr);
+
+        // The elements that came from `other` (if any) now hang off `this`, and vice versa.
+        match other_tail {
+            Some(tail_node) => tail_node.set_next(this_sentinel),
+            // SAFETY: `this_ptr` was just derived from a live `&mut Self` that nothing else
+            // accesses again before this function returns.
+            None => unsafe { (*this_ptr).head = this_sentinel },
+        }
+        match self_tail {
+            Some(tail_node) => tail_node.set_next(that_sentinel),
+            // SAFETY: As above, for `that_ptr`.
+            None => unsafe { (*that_ptr).head = that_sentinel },
+        }
+    }
+
     #[inline]
     pub fn iter(&self) -> Iterator<'_, P, Tag> {
         Iterator::new(self)
@@ -2059,6 +2116,53 @@ mod tests {
                     list1.as_mut().clear();
                     list2.as_mut().clear();
                 }
+
+                #[test]
+                fn test_swap() {
+                    let mut factory = <$factory_type>::new();
+                    stack_pin_init!(let list1 = DoublyLinkedList::<$ptr_type>::new());
+                    stack_pin_init!(let list2 = DoublyLinkedList::<$ptr_type>::new());
+
+                    // Swapping two empty lists leaves both empty.
+                    list1.as_mut().swap(list2.as_mut());
+                    assert_list_contents(&list1, &[], $get_val);
+                    assert_list_contents(&list2, &[], $get_val);
+
+                    // Swapping a non-empty list with an empty one moves all elements.
+                    $push(list1.as_mut(), factory.create(1));
+                    $push(list1.as_mut(), factory.create(2));
+                    list1.as_mut().swap(list2.as_mut());
+                    assert_list_contents(&list1, &[], $get_val);
+                    assert_list_contents(&list2, &[2, 1], $get_val);
+
+                    // Swapping an empty list with a non-empty one moves them back.
+                    list1.as_mut().swap(list2.as_mut());
+                    assert_list_contents(&list1, &[2, 1], $get_val);
+                    assert_list_contents(&list2, &[], $get_val);
+
+                    // Swapping two non-empty lists exchanges their contents.
+                    $push(list2.as_mut(), factory.create(3));
+                    list1.as_mut().swap(list2.as_mut());
+                    assert_list_contents(&list1, &[3], $get_val);
+                    assert_list_contents(&list2, &[2, 1], $get_val);
+
+                    // Both lists remain usable after being swapped.
+                    $push(list1.as_mut(), factory.create(4));
+                    $push(list2.as_mut(), factory.create(5));
+                    assert_list_contents(&list1, &[4, 3], $get_val);
+                    assert_list_contents(&list2, &[5, 2, 1], $get_val);
+                    let p = list1.as_mut().pop_back().unwrap();
+                    assert_eq!($get_val(p.get_ref()), 3);
+                    factory.cleanup(p);
+                    let p = list2.as_mut().pop_back().unwrap();
+                    assert_eq!($get_val(p.get_ref()), 1);
+                    factory.cleanup(p);
+                    assert_list_contents(&list1, &[4], $get_val);
+                    assert_list_contents(&list2, &[5, 2], $get_val);
+
+                    list1.as_mut().clear();
+                    list2.as_mut().clear();
+                }
             }
         };
     }
@@ -2493,6 +2597,89 @@ mod tests {
         assert!(iter.next().is_none());
 
         list1.as_mut().clear();
+    }
+
+    /// Checks every read-only view of `list` against `expected`, front to back.
+    fn assert_list_contents<P, S>(
+        list: &DoublyLinkedList<P, DefaultObjectTag, S>,
+        expected: &[i32],
+        get_val: impl Fn(&P::Target) -> i32,
+    ) where
+        P: PtrTraits,
+        P::Target: DoublyLinkedListContainable<P::Target>,
+        S: SizeTracker,
+    {
+        assert_eq!(list.is_empty(), expected.is_empty());
+        assert_eq!(list.iter().count(), expected.len());
+        assert_eq!(list.front().map(&get_val), expected.first().copied());
+        assert_eq!(list.back().map(&get_val), expected.last().copied());
+        assert_eq!(list.iter().map(&get_val).collect::<alloc::vec::Vec<_>>(), expected);
+        let reversed: alloc::vec::Vec<i32> = expected.iter().rev().copied().collect();
+        assert_eq!(list.iter().rev().map(&get_val).collect::<alloc::vec::Vec<_>>(), reversed);
+    }
+
+    #[test]
+    fn test_swap() {
+        let value = |o: &UniqueTestObject| o.value;
+        stack_pin_init!(let list1 =
+            DoublyLinkedList::<UniquePtr<UniqueTestObject>, DefaultObjectTag, TrackingSize>::new());
+        stack_pin_init!(let list2 =
+            DoublyLinkedList::<UniquePtr<UniqueTestObject>, DefaultObjectTag, TrackingSize>::new());
+
+        // Swapping two empty lists leaves both empty.
+        list1.as_mut().swap(list2.as_mut());
+        assert_eq!((list1.len(), list2.len()), (0, 0));
+        assert_list_contents(&list1, &[], value);
+        assert_list_contents(&list2, &[], value);
+
+        // Swapping a non-empty list with an empty one moves all elements.
+        list1.as_mut().push_back(UniquePtr::try_new(UniqueTestObject::new(1)).unwrap());
+        list1.as_mut().push_back(UniquePtr::try_new(UniqueTestObject::new(2)).unwrap());
+        list1.as_mut().swap(list2.as_mut());
+        assert_eq!((list1.len(), list2.len()), (0, 2));
+        assert_list_contents(&list1, &[], value);
+        assert_list_contents(&list2, &[1, 2], value);
+
+        // Swapping an empty list with a non-empty one moves them back.
+        list1.as_mut().swap(list2.as_mut());
+        assert_eq!((list1.len(), list2.len()), (2, 0));
+        assert_list_contents(&list1, &[1, 2], value);
+        assert_list_contents(&list2, &[], value);
+
+        // Swapping two non-empty lists exchanges their contents, including a single-element list
+        // whose head is also its tail.
+        list2.as_mut().push_back(UniquePtr::try_new(UniqueTestObject::new(3)).unwrap());
+        list1.as_mut().swap(list2.as_mut());
+        assert_eq!((list1.len(), list2.len()), (1, 2));
+        assert_list_contents(&list1, &[3], value);
+        assert_list_contents(&list2, &[1, 2], value);
+
+        // The result does not depend on which list the swap is invoked on.
+        list2.as_mut().swap(list1.as_mut());
+        assert_eq!((list1.len(), list2.len()), (2, 1));
+        assert_list_contents(&list1, &[1, 2], value);
+        assert_list_contents(&list2, &[3], value);
+
+        // Swapping two single-element lists.
+        assert_eq!(list1.as_mut().pop_front().unwrap().value, 1);
+        list1.as_mut().swap(list2.as_mut());
+        assert_eq!((list1.len(), list2.len()), (1, 1));
+        assert_list_contents(&list1, &[3], value);
+        assert_list_contents(&list2, &[2], value);
+
+        // Both lists remain usable after being swapped.
+        list1.as_mut().push_back(UniquePtr::try_new(UniqueTestObject::new(4)).unwrap());
+        list2.as_mut().push_back(UniquePtr::try_new(UniqueTestObject::new(5)).unwrap());
+        assert_list_contents(&list1, &[3, 4], value);
+        assert_list_contents(&list2, &[2, 5], value);
+        assert_eq!(list1.as_mut().pop_back().unwrap().value, 4);
+        assert_eq!(list2.as_mut().pop_front().unwrap().value, 2);
+        assert_eq!((list1.len(), list2.len()), (1, 1));
+        assert_list_contents(&list1, &[3], value);
+        assert_list_contents(&list2, &[5], value);
+
+        list1.as_mut().clear();
+        list2.as_mut().clear();
     }
 
     #[test]
@@ -3085,6 +3272,74 @@ mod tests {
         assert!(list.is_empty());
 
         list.as_mut().clear();
+    }
+
+    #[test]
+    fn test_swap_remove_from_container() {
+        let value = |o: &TestObject| o.value;
+        let remove = |obj: &TestObject| {
+            // SAFETY: `obj` is a live stack object linked into exactly one untracked list that
+            // nothing else is accessing.
+            let removed = unsafe {
+                remove_from_container::<TestObject, DefaultObjectTag, *mut TestObject>(obj)
+            };
+            assert_eq!(removed, Some(core::ptr::from_ref(obj).cast_mut()));
+        };
+        stack_pin_init!(let list1 = DoublyLinkedList::<*mut TestObject>::new());
+        stack_pin_init!(let list2 = DoublyLinkedList::<*mut TestObject>::new());
+        let mut obj1 = TestObject::new(1);
+        let mut obj2 = TestObject::new(2);
+        let mut obj3 = TestObject::new(3);
+
+        // SAFETY: The objects are live, are not in any list, and are all removed again below.
+        unsafe {
+            list1.as_mut().push_back_raw(&mut obj1);
+            list1.as_mut().push_back_raw(&mut obj2);
+            list1.as_mut().push_back_raw(&mut obj3);
+        }
+
+        // Swap a non-empty list with an empty one, then remove the head of the list the elements
+        // moved to: this follows the tail's `next` back to that list and writes its `head`
+        // through the sentinel the swap installed.
+        list1.as_mut().swap(list2.as_mut());
+        assert_list_contents(&list1, &[], value);
+        assert_list_contents(&list2, &[1, 2, 3], value);
+        remove(&obj1);
+        assert_list_contents(&list1, &[], value);
+        assert_list_contents(&list2, &[2, 3], value);
+
+        // Swap an empty list with a non-empty one, then remove the tail: this reads the list's
+        // `head` through the tail's own `next` sentinel.
+        list1.as_mut().swap(list2.as_mut());
+        assert_list_contents(&list1, &[2, 3], value);
+        assert_list_contents(&list2, &[], value);
+        remove(&obj3);
+        assert_list_contents(&list1, &[2], value);
+        assert_list_contents(&list2, &[], value);
+
+        // Swap two non-empty lists, one of which holds a single element that is both its head and
+        // its tail, then remove that sole element and the head of the other list.
+        // SAFETY: The objects are live, are not in any list, and are all removed again below.
+        unsafe {
+            list2.as_mut().push_back_raw(&mut obj1);
+            list2.as_mut().push_back_raw(&mut obj3);
+        }
+        list1.as_mut().swap(list2.as_mut());
+        assert_list_contents(&list1, &[1, 3], value);
+        assert_list_contents(&list2, &[2], value);
+        remove(&obj2);
+        assert_list_contents(&list2, &[], value);
+        remove(&obj1);
+        assert_list_contents(&list1, &[3], value);
+
+        // Swap an empty list with a non-empty one, invoked on the other list this time, then remove
+        // the sole element.
+        list2.as_mut().swap(list1.as_mut());
+        assert_list_contents(&list1, &[], value);
+        assert_list_contents(&list2, &[3], value);
+        remove(&obj3);
+        assert!(list1.is_empty());
+        assert!(list2.is_empty());
     }
 
     #[test]

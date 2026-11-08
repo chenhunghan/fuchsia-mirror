@@ -1,0 +1,56 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+# GN reader-bin set with_unit_tests = true without packaging :reader-bin_test;
+# preserve it in generated GN so //src/lib/diagnostics/inspect/rust/bench/reader:reader-bin_test remains defined.
+# @bazel2gn:raw_attribute:with_unit_tests = true
+rustc_binary(
+    name = "reader-bin",
+    srcs = ["src/main.rs"],
+    crate_name = "inspect_rust_reader_benchmarks",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    tags = ["manual"],
+    deps = [
+        "//src/developer/fuchsia-criterion",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/diagnostics/inspect/rust/bench/utils:fuchsia_inspect_bench_utils",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-sync",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "reader-bin_packaged_bin",
+    binary = ":reader-bin",
+    binary_name = "inspect_rust_reader_benchmarks",
+)
+
+fx_component_manifest(
+    name = "reader-component-manifest",
+    component_name = "reader",
+    includes = ["//src/lib/diagnostics/inspect/rust/bench/meta:benchmark.shard"],
+    manifest = "meta/reader.cml",
+)
+
+fx_component(
+    name = "reader-component",
+    compiled_manifest = ":reader-component-manifest",
+    visibility = ["//src/lib/diagnostics/inspect/rust/bench:__pkg__"],
+    deps = [":reader-bin_packaged_bin"],
+)

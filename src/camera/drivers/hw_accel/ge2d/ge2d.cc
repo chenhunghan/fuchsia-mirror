@@ -140,7 +140,6 @@ void Ge2dDevice::Ge2dRemoveTask(uint32_t task_index) {
 
   TaskInfo info;
   info.op = GE2D_OP_REMOVETASK;
-  info.task = task_entry->second.get();
   info.task_index = task_index;
 
   // Put the task on the queue.
@@ -189,7 +188,7 @@ zx_status_t Ge2dDevice::Ge2dSetOutputResolution(uint32_t task_index,
 
   TaskInfo info;
   info.op = GE2D_OP_SETOUTPUTRES;
-  info.task = task_entry->second.get();
+  info.task_index = task_index;
   info.index = new_output_image_format_index;
 
   // Put the task on queue.
@@ -224,7 +223,7 @@ zx_status_t Ge2dDevice::Ge2dSetInputAndOutputResolution(uint32_t task_index,
 
   TaskInfo info;
   info.op = GE2D_OP_SETINPUTOUTPUTRES;
-  info.task = task_entry->second.get();
+  info.task_index = task_index;
   info.index = new_image_format_index;
 
   // Put the task on queue.
@@ -251,7 +250,7 @@ zx_status_t Ge2dDevice::Ge2dProcessFrame(uint32_t task_index, uint32_t input_buf
 
   TaskInfo info;
   info.op = GE2D_OP_FRAME;
-  info.task = task_entry->second.get();
+  info.task_index = task_index;
   info.index = input_buffer_index;
   info.capture_timestamp = capture_timestamp;
 
@@ -276,7 +275,7 @@ void Ge2dDevice::Ge2dSetCropRect(uint32_t task_index, const rect_t* crop) {
 
   TaskInfo info;
   info.op = GE2D_OP_SETCROPRECT;
-  info.task = task_entry->second.get();
+  info.task_index = task_index;
   info.index = 0;
   info.crop_rect = *crop;
 
@@ -324,10 +323,28 @@ void Ge2dDevice::ProcessTask(TaskInfo& info) {
   }
 }
 
-void Ge2dDevice::ProcessSetCropRect(TaskInfo& info) { info.task->SetCropRect(info.crop_rect); }
+Ge2dTask* Ge2dDevice::LookupTask(uint32_t task_index) {
+  fbl::AutoLock al(&interface_lock_);
+  auto task_entry = task_map_.find(task_index);
+  if (task_entry == task_map_.end()) {
+    return nullptr;
+  }
+  return task_entry->second.get();
+}
+
+void Ge2dDevice::ProcessSetCropRect(TaskInfo& info) {
+  Ge2dTask* task = LookupTask(info.task_index);
+  if (task == nullptr) {
+    return;
+  }
+  task->SetCropRect(info.crop_rect);
+}
 
 void Ge2dDevice::ProcessChangeResolution(TaskInfo& info) {
-  auto task = info.task;
+  Ge2dTask* task = LookupTask(info.task_index);
+  if (task == nullptr) {
+    return;
+  }
 
   if (task->has_output_images()) {
     // This has to free and reallocate the output buffer canvas ids.
@@ -829,7 +846,10 @@ void Ge2dDevice::ProcessInPlaceWatermarkTask(Ge2dTask* task, uint32_t input_buff
 
 void Ge2dDevice::ProcessFrame(TaskInfo& info) {
   TRACE_DURATION("camera", "Ge2dDevice::ProcessFrame");
-  auto task = info.task;
+  Ge2dTask* task = LookupTask(info.task_index);
+  if (task == nullptr) {
+    return;
+  }
 
   auto input_buffer_index = info.index;
   if (task->Ge2dTaskType() == Ge2dTask::GE2D_IN_PLACE_WATERMARK) {
@@ -882,16 +902,15 @@ void Ge2dDevice::ProcessFrame(TaskInfo& info) {
 void Ge2dDevice::ProcessRemoveTask(TaskInfo& info) {
   fbl::AutoLock al(&interface_lock_);
 
-  auto task = info.task;
   auto task_index = info.task_index;
 
   // Find the entry in hashmap.
   auto task_entry = task_map_.find(task_index);
   if (task_entry == task_map_.end()) {
-    task->RemoveTaskCallback(TASK_REMOVE_STATUS_ERROR_INVALID);
     return;
   }
 
+  auto task = task_entry->second.get();
   task->RemoveTaskCallback(TASK_REMOVE_STATUS_OK);
 
   // Remove map entry.
@@ -927,6 +946,9 @@ zx_status_t Ge2dDevice::StopThread() {
   // Signal the worker thread and wait for it to terminate.
   {
     fbl::AutoLock al(&lock_);
+    if (shutdown_) {
+      return ZX_OK;
+    }
     shutdown_ = true;
     frame_processing_signal_.Signal();
   }

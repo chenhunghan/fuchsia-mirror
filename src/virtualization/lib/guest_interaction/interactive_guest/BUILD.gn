@@ -20,22 +20,19 @@ executable("interactive_guest_impl") {
     "running_guest.h",
   ]
 
-  public_deps = [
+  deps = [
     "//sdk/fidl/fuchsia.virtualization:fuchsia.virtualization_cpp",
     "//sdk/lib/component/incoming/cpp",
     "//sdk/lib/component/outgoing/cpp",
+    "//sdk/lib/fdio",
     "//sdk/lib/syslog/cpp",
     "//sdk/lib/zxio",
     "//src/lib/fuchsia-async",
+    "//src/virtualization/lib/grpc",
+    "//src/virtualization/lib/guest_interaction:common",
     "//src/virtualization/lib/guest_interaction:fuchsia.virtualization.guest.interaction_cpp",
     "//src/virtualization/lib/guest_interaction:guest_interaction_client",
     "//src/virtualization/lib/guest_interaction:platform_interface_posix",
-  ]
-
-  deps = [
-    "//sdk/lib/fdio",
-    "//src/virtualization/lib/grpc",
-    "//src/virtualization/lib/guest_interaction:common",
     "//src/virtualization/lib/guest_interaction:proto",
     "//src/virtualization/tests/lib:guest_console",
     "//zircon/system/ulib/fbl",

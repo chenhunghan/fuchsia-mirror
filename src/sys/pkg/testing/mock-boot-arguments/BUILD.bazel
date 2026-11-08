@@ -21,9 +21,8 @@ rustc_library(
     ],
 )
 
-# @bazel2gn:raw_attribute:output_name = "mock_boot_arguments_lib_test"
 rustc_test(
-    name = "lib_test",
+    name = "mock_boot_arguments_lib_test",
     crate = ":lib",
     edition = "2024",
     lint_config = "//build/config/rust/lints:clippy_warn_all",
@@ -38,5 +37,5 @@ rustc_test(
 
 fx_unittest_package(
     name = "mock-boot-arguments-tests",
-    unit_tests = [":lib_test"],
+    unit_tests = [":mock_boot_arguments_lib_test"],
 )

@@ -4,6 +4,8 @@ file_descriptor.h
 fs_util.cc
 fs_util.h
 fuchsia_capability_util.cc
+linux_capability_util.cc
+linux_capability_util.h
 logging.cc
 logging.h
 multiprocess_util.cc

@@ -172,6 +172,7 @@ zx::result<std::unique_ptr<Blobfs>> Blobfs::Create(async_dispatcher_t* dispatche
   // may require upgrades / journal replays to become valid.
   auto fs = std::unique_ptr<Blobfs>(new Blobfs(dispatcher, std::move(device), vfs, superblock,
                                                options.writability, decompression_connector));
+  fs->DieOnMutationFailure(options.die_on_mutation_failure);
   fs->block_info_ = block_info;
 
   auto fs_ptr = fs.get();
@@ -307,9 +308,13 @@ zx::result<std::unique_ptr<Blobfs>> Blobfs::Create(async_dispatcher_t* dispatche
     return loader_or.take_error();
   }
   fs->loader_ = *std::move(loader_or);
+  if (fs->info_.oldest_minor_version < kBlobfsMinorVersionNoOldCompressionFormats) {
+    return zx::error(ZX_ERR_NOT_SUPPORTED);  // Too old to support migration.
+  }
 
   // At this point, the filesystem is loaded and validated. No errors should be returned after this
   // point.
+  fs->clean_unmount_on_reset_ = (options.writability == blobfs::Writability::Writable);
 
   // On a read-write filesystem, since we can now serve writes, we need to unset the kBlobFlagClean
   // flag to indicate that the filesystem may not be in a "clean" state anymore. This helps to make
@@ -319,7 +324,7 @@ zx::result<std::unique_ptr<Blobfs>> Blobfs::Create(async_dispatcher_t* dispatche
   FX_LOGS(INFO) << "detected oldest_minor_version " << fs->info_.oldest_minor_version
                 << ", current minor version " << kBlobfsCurrentMinorVersion;
   if (options.writability == blobfs::Writability::Writable) {
-    BlobTransaction transaction;
+    BlobTransaction transaction(fs->die_on_mutation_failure());
     fs->info_.flags &= ~kBlobFlagClean;
     if (fs->info_.oldest_minor_version > kBlobfsCurrentMinorVersion) {
       FX_LOGS(INFO) << "Setting oldest_minor_version to " << kBlobfsCurrentMinorVersion;
@@ -339,9 +344,7 @@ zx::result<std::unique_ptr<Blobfs>> Blobfs::Create(async_dispatcher_t* dispatche
     transaction.Commit(*fs->GetJournal());
   }
 
-  if (zx_status_t status = fs->Migrate(); status != ZX_OK) {
-    return zx::error(status);
-  }
+  fs->Migrate();
 
   FX_LOGS(INFO) << "Writing blob layout format: "
                 << BlobLayoutFormatToString(fs->BlobWriteFormat());
@@ -692,7 +695,7 @@ zx_status_t Blobfs::AddInodes(Allocator* allocator) {
   ZX_ASSERT_MSG(new_nodes.is_ok(), "The new nodes should be valid: %s", new_nodes.status_string());
   memset(&*new_nodes.value(), 0, kBlobfsBlockSize * zeroed_nodes_blocks);
 
-  BlobTransaction transaction;
+  BlobTransaction transaction(die_on_mutation_failure());
   WriteInfo(transaction);
   if (zeroed_nodes_blocks > 0) {
     transaction.AddOperation({
@@ -754,7 +757,7 @@ zx_status_t Blobfs::AddBlocks(size_t nblocks, RawBitmap* block_map) {
   info_.dat_slices += safemath::checked_cast<uint32_t>(length);
   info_.data_block_count = blocks;
 
-  BlobTransaction transaction;
+  BlobTransaction transaction(die_on_mutation_failure());
   WriteInfo(transaction);
   uint64_t zeroed_bitmap_blocks = abmblks - abmblks_old;
   // Since we are extending the bitmap, we need to fill the expanded portion of the allocation block
@@ -899,20 +902,12 @@ std::unique_ptr<BlockDevice> Blobfs::Reset() {
     return ZX_OK;
   });
 
-  // Write the clean bit.
-  if (writability_ == Writability::Writable) {
-    // NB: If blobfs initialization failed, it is possible that the info_mapping_ vmo that we use to
-    // send writes to the underlying block device has not been initialized yet.
-    // To fix this, we could change Blobfs::Create ordering to try and get the object into a valid
-    // state as soon as possible and reassess what is needed in the destructor.
-    if (info_mapping_.start() == nullptr) {
-      FX_LOGS(ERROR) << "Cannot write journal clean bit";
-    } else {
-      BlobTransaction transaction;
-      info_.flags |= kBlobFlagClean;
-      WriteInfo(transaction);
-      transaction.Commit(*journal_);
-    }
+  // Write the clean bit if the filesystem was successfully mounted as writable.
+  if (clean_unmount_on_reset_) {
+    BlobTransaction transaction(die_on_mutation_failure());
+    info_.flags |= kBlobFlagClean;
+    WriteInfo(transaction);
+    transaction.Commit(*journal_);
   }
   // Waits for all pending writeback operations to complete or fail.
   journal_.reset();
@@ -1130,22 +1125,18 @@ void Blobfs::FsckAtEndOfTransaction() {
   ZX_ASSERT(Fsck(std::move(device), options) == ZX_OK);
 }
 
-zx_status_t Blobfs::Migrate() {
-  if (info_.oldest_minor_version < kBlobfsMinorVersionNoOldCompressionFormats)
-    return ZX_ERR_NOT_SUPPORTED;  // Too old to support migration.
-  if (zx_status_t status = MigrateToRev4(); status != ZX_OK) {
-    return status;
-  }
-  return MigrateToV10Rev4();
+void Blobfs::Migrate() {
+  MigrateToRev4();
+  MigrateToV10Rev4();
 }
 
-zx_status_t Blobfs::MigrateToRev4() {
+void Blobfs::MigrateToRev4() {
   if (writability_ != Writability::Writable ||
       info_.oldest_minor_version != kBlobfsMinorVersionHostToolHandlesNullBlobCorrectly - 1) {
-    return ZX_OK;
+    return;
   }
   FX_LOGS(INFO) << "Migrating to revision " << kBlobfsMinorVersionHostToolHandlesNullBlobCorrectly;
-  BlobTransaction transaction;
+  BlobTransaction transaction(die_on_mutation_failure());
   for (uint32_t node_index = 0; node_index < info_.inode_count; ++node_index) {
     auto inode = GetNode(node_index);
     ZX_ASSERT_MSG(inode.is_ok(), "Failed to get node %u: %s", node_index, inode.status_string());
@@ -1163,17 +1154,16 @@ zx_status_t Blobfs::MigrateToRev4() {
   info_.oldest_minor_version = kBlobfsMinorVersionHostToolHandlesNullBlobCorrectly;
   WriteInfo(transaction);
   transaction.Commit(*journal_);
-  return ZX_OK;
 }
 
-zx_status_t Blobfs::MigrateToV10Rev4() {
+void Blobfs::MigrateToV10Rev4() {
   if (writability_ != Writability::Writable ||
       (info_.major_version != 0x8 && info_.major_version != 0x9)) {
-    return ZX_OK;
+    return;
   }
   FX_LOGS(INFO) << "Migrating to Blobfs to V10Rev4";
 
-  BlobTransaction transaction;
+  BlobTransaction transaction(die_on_mutation_failure());
   const BlobLayoutFormat blob_layout_format =
       info_.major_version == kBlobfsCompactMerkleTreeVersion
           ? BlobLayoutFormat::kCompactMerkleTreeAtEnd
@@ -1195,12 +1185,29 @@ zx_status_t Blobfs::MigrateToV10Rev4() {
   info_.major_version = kBlobfsBlobLayoutFormatInInodeVersion;
   WriteInfo(transaction);
   transaction.Commit(*journal_);
-  return ZX_OK;
 }
 
 zx_status_t Blobfs::RunRequests(const std::vector<storage::BufferedOperation>& operations) {
   std::shared_lock lock(fsck_at_end_of_transaction_mutex_);
-  return TransactionManager::RunRequests(operations);
+  zx_status_t status = TransactionManager::RunRequests(operations);
+  if (status != ZX_OK && die_on_mutation_failure_.load()) {
+    for (const auto& operation : operations) {
+      if (operation.op.type == storage::OperationType::kWrite ||
+          operation.op.type == storage::OperationType::kWriteFua ||
+          operation.op.type == storage::OperationType::kTrim) {
+        ZX_PANIC("Mutation failure. Disk no longer consistent: %s", zx_status_get_string(status));
+      }
+    }
+  }
+  return status;
+}
+
+zx_status_t Blobfs::Flush() {
+  zx_status_t status = TransactionManager::Flush();
+  if (status != ZX_OK && die_on_mutation_failure_.load()) {
+    ZX_PANIC("Flush failure. Disk no longer consistent: %s", zx_status_get_string(status));
+  }
+  return status;
 }
 
 zx::result<std::unique_ptr<Superblock>> Blobfs::ReadBackupSuperblock() {

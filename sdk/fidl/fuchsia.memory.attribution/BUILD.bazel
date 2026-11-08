@@ -17,9 +17,9 @@ fidl_library(
     # TODO(https://fxbug.dev/307580082): This protocol is under construction.
     visibility = [
         "//examples/components/runner/colocated:__subpackages__",
-        "//src/developer/memory:__subpackages__",
         "//src/devices/bin/driver_manager:__subpackages__",
         "//src/devices/bin/driver_manager_rust:__subpackages__",
+        "//src/memory:__subpackages__",
         "//src/performance/memory:__subpackages__",
         "//src/starnix:__subpackages__",
         "//src/storage/fxfs:__subpackages__",

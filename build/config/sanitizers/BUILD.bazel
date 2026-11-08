@@ -1,0 +1,119 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/config/sanitizers:sanitizer_default_options.bzl",
+    "extra_options_for_all_sanitizers",
+    "sanitizer_default_options",
+    "sanitizer_extra_options",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+exports_files(
+    [
+        "sanitizer_default_options.c",
+    ],
+    visibility = ["//:__subpackages__"],
+)
+
+# LINT.IfChange(asan_and_lsan_options)
+sanitizer_default_options(
+    name = "asan_default_options",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        ":lsan_default_options",
+        ":ubsan_default_options",
+    ],
+)
+
+sanitizer_default_options(
+    name = "lsan_default_options",
+    visibility = ["//:__subpackages__"],
+)
+
+sanitizer_extra_options(
+    name = "suppress-lsan.DO-NOT-USE-THIS",
+    args = ["detect_leaks=0"],
+    sanitizer = "lsan",
+    variant_tags = ["lsan"],
+    visibility = [
+        "//src/cobalt/bin/system-metrics:__subpackages__",
+        "//src/connectivity/network/netstack3/core/tests:__subpackages__",
+        "//src/fonts:__subpackages__",
+        "//src/graphics/lib/compute/forma:__subpackages__",
+        "//src/graphics/lib/compute/surpass:__subpackages__",
+        "//src/media/audio/drivers/intel-hda/controller:__subpackages__",
+        "//src/media/codec/factory:__subpackages__",
+        "//third_party/alacritty/alacritty_terminal:__subpackages__",
+        "//third_party/crashpad/src:__subpackages__",
+        "//vendor:__subpackages__",
+    ],
+)
+
+sanitizer_extra_options(
+    name = "suppress-asan-stack-use-after-return",
+    args = ["detect_stack_use_after_return=0"],
+    sanitizer = "asan",
+    variant_tags = ["asan"],
+    visibility = [
+        "//sdk/lib/c/test/sanitizer:__pkg__",
+    ],
+)
+
+sanitizer_extra_options(
+    name = "suppress-asan-container-overflow",
+    args = ["detect_container_overflow=0"],
+    sanitizer = "asan",
+    variant_tags = ["asan"],
+    visibility = [
+        "//sdk/lib/sys/component/cpp/testing:__pkg__",
+        "//src/lib/llvm/fuchsia:__pkg__",
+        "//src/lib/llvm/host:__pkg__",
+    ],
+)
+
+sanitizer_extra_options(
+    name = "suppress-asan-new-delete-type-mismatch.DO-NOT-USE-THIS",
+    args = ["new_delete_type_mismatch=0"],
+    sanitizer = "asan",
+    variant_tags = ["asan"],
+    visibility = [
+        "//src/devices/tpm/drivers/tpm:__pkg__",
+    ],
+)
+# LINT.ThenChange(//build/config/sanitizers/BUILD.gn:asan_and_lsan_options)
+
+# LINT.IfChange(ubsan_default_options)
+sanitizer_default_options(
+    name = "ubsan_default_options",
+    visibility = ["//:__subpackages__"],
+)
+# LINT.ThenChange(//build/config/sanitizers/BUILD.gn:ubsan_default_options)
+
+# LINT.IfChange(tsan_default_options)
+sanitizer_default_options(
+    name = "tsan_default_options",
+    visibility = ["//:__subpackages__"],
+)
+# LINT.ThenChange(//build/config/sanitizers/BUILD.gn:tsan_default_options)
+
+# LINT.IfChange(hwasan_default_options)
+sanitizer_default_options(
+    name = "hwasan_default_options",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        ":lsan_default_options",
+        ":ubsan_default_options",
+    ],
+)
+# LINT.ThenChange(//build/config/sanitizers/BUILD.gn:hwasan_default_options)
+
+# LINT.IfChange(sanitizers_use_symbolizer_markup)
+extra_options_for_all_sanitizers(
+    name = "sanitizers_use_symbolizer_markup",
+    args = ["enable_symbolizer_markup=1"],
+    visibility = ["//:__subpackages__"],
+)
+# LINT.ThenChange(//build/config/sanitizers/BUILD.gn:sanitizers_use_symbolizer_markup)

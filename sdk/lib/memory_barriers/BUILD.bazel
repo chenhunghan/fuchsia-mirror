@@ -18,10 +18,7 @@ idk_cc_source_library(
         "//src/devices/block/drivers/aml-sdmmc:__subpackages__",
         "//src/media:__subpackages__",
         "//src/sysmem:__subpackages__",
-        "//vendor/amlogic/drivers:__subpackages__",
-
-        # For bazel2gn.
-        "//build/sdk:__pkg__",
+        "//vendor:__subpackages__",
 
         # TODO(https://fxbug.dev/428229472): Once Bazel-defined atoms are used
         # in the production build path, remove this atom from the IDK macro

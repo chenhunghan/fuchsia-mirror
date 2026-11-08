@@ -32,6 +32,7 @@
 #include "src/developer/debug/zxdb/console/format_table.h"
 #include "src/developer/debug/zxdb/console/format_target.h"
 #include "src/developer/debug/zxdb/console/format_thread.h"
+#include "src/developer/debug/zxdb/console/format_tracepoint.h"
 #include "src/developer/debug/zxdb/format/output_buffer.h"
 #include "src/developer/debug/zxdb/format/string_util.h"
 
@@ -754,6 +755,70 @@ bool HandleBreakpointNoun(ConsoleContext* console_context, const Command& cmd,
   return true;
 }
 
+// Tracepoints ---------------------------------------------------------------------------------
+
+const char kTracepointShortHelp[] = "tracepoint / tp: Select or list tracepoints.";
+const char kTracepointUsage[] = "tracepoint [ <id> [ <command> ... ] ]";
+const char kTracepointHelp[] = R"(
+  Alias: "tp"
+
+  Selects or lists tracepoints. Not to be confused with the "trace" / "tr"
+  command which creates new tracepoints. See "help trace" for more.
+
+  By itself, "tracepoint" or "tp" will list all tracepoints with their IDs,
+  states, hit counts, locations, and expressions.
+
+  With an ID following it ("tracepoint 3"), selects that tracepoint as the
+  current active tracepoint. This tracepoint will apply by default for
+  subsequent tracepoint commands (like "rm").
+
+  With an ID and another command following it ("tracepoint 2 rm"), modifies the
+  tracepoint context for that command only.
+
+Examples
+
+  tp
+  tracepoint
+      Lists all tracepoints.
+
+  tp 2
+  tracepoint 2
+      Sets tracepoint 2 as the active one.
+
+  tp 2 disable
+  tracepoint 2 disable
+      Disables tracepoint 2.
+
+  tp 2 enable
+  tracepoint 2 enable
+      Enables tracepoint 2.
+
+  tp 2 rm
+  tracepoint 2 rm
+      Removes tracepoint 2.
+)";
+
+bool HandleTracepointNoun(ConsoleContext* console_context, const Command& cmd,
+                          fxl::RefPtr<CommandContext>& cmd_context) {
+  if (!cmd.HasNoun(Noun::kTracepoint))
+    return false;
+
+  if (Err err = cmd.ValidateNouns({Noun::kTracepoint}); err.has_error()) {
+    cmd_context->ReportError(err);
+    return true;
+  }
+
+  if (cmd.GetNounIndex(Noun::kTracepoint) == Command::kNoIndex) {
+    cmd_context->Output(FormatTracepointList(console_context));
+    return true;
+  }
+
+  FX_DCHECK(cmd.tracepoint());
+  console_context->SetActiveTracepoint(cmd.tracepoint());
+  cmd_context->Output(FormatTracepoint(console_context, cmd.tracepoint()));
+  return true;
+}
+
 // Symbol Servers ----------------------------------------------------------------------------------
 
 const char kSymServerShortHelp[] = "sym-server: Select or list symbol servers.";
@@ -950,6 +1015,8 @@ void ExecuteNoun(const Command& cmd, fxl::RefPtr<CommandContext> cmd_context) {
 
   if (HandleBreakpointNoun(console_context, cmd, cmd_context))
     return;
+  if (HandleTracepointNoun(console_context, cmd, cmd_context))
+    return;
   if (HandleFilterNoun(console_context, cmd, cmd_context))
     return;
 
@@ -987,6 +1054,9 @@ void AppendNouns(std::map<Noun, NounRecord>* nouns) {
                                           kSymServerHelp, CommandGroup::kSymbol);
   (*nouns)[Noun::kFilter] =
       NounRecord({"filter"}, kFilterShortHelp, kFilterUsage, kFilterHelp, CommandGroup::kProcess);
+  (*nouns)[Noun::kTracepoint] =
+      NounRecord({"tracepoint", "tp"}, kTracepointShortHelp, kTracepointUsage, kTracepointHelp,
+                 CommandGroup::kBreakpoint);
 }
 
 const std::vector<SwitchRecord>& GetNounSwitches() {

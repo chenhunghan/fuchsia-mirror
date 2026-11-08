@@ -143,6 +143,7 @@
             config: [
                 "fuchsia.storage.ufs.AutoHibernateTimerUs",
                 "fuchsia.storage.ufs.EnableAutoHibernate",
+                "fuchsia.storage.ufs.LinkIdleAhitMultiplier",
                 "fuchsia.usb.dwc3.BypassPlatformExtension",
             ],
             from: "void",
@@ -169,21 +170,6 @@
             from: "parent",
             as: "fuchsia.component.resolution.Resolver-boot",
             to: "#driver_index",
-        },
-        {
-            // This is only used when the #driver_index |enable_ephemeral_drivers| config
-            // is set, which enables loading drivers ephemerally. This is intended for
-            // eng builds only and is set through product assembly.
-            //
-            // The #driver_manager will only use this protocol in DFv1.
-            // In DFv2 resolution is done by the component framework since drivers
-            // are componenets in DFv2.
-            protocol: "fuchsia.component.resolution.Resolver",
-            from: "#full_resolver",
-            as: "fuchsia.component.resolution.Resolver-full",
-            to: "#driver_index",
-            dependency: "weak",
-            source_availability: "unknown",
         },
         {
             directory: "boot",
@@ -581,6 +567,10 @@
                 "fuchsia.gpu.magma.TrustedService",
                 "fuchsia.hardware.clock.DebugService",
                 "fuchsia.hardware.gnss.Service",
+                "fuchsia.hardware.google.cryptobam.Service",
+                "fuchsia.hardware.google.cryptobam.TestService",
+                "fuchsia.hardware.google.gpdma.Service",
+                "fuchsia.hardware.google.gpdma.TestService",
                 "fuchsia.hardware.google.nanohub.DataChannelService",
                 "fuchsia.hardware.google.nanohub.DisplayService",
                 "fuchsia.hardware.google.nanohub.Service",

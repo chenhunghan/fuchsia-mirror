@@ -71,7 +71,7 @@ pub trait Interface: Send + Sync + Unpin + 'static {
         _mapping_vmo: &zx::Vmo,
         delivery_queue: zx::Vmo,
     ) -> Result<Verifier, zx::Status> {
-        Ok(Verifier::new(delivery_queue))
+        Verifier::new(delivery_queue)
     }
 }
 

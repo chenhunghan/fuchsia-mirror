@@ -1,0 +1,46 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "src",
+    srcs = ["acpidump.cc"],
+    hdrs = ["acpidump.h"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//sdk/fidl/fuchsia.acpi.tables:fuchsia.acpi.tables_cpp",
+        "//sdk/lib/device-watcher/cpp",
+        "//src/lib/cmdline",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+# GN places this legacy Zircon binary under $root_out_dir/zircon-migrated.
+# @bazel2gn:raw_attribute:output_dir = "$root_out_dir/zircon-migrated"
+fx_cc_binary(
+    name = "acpidump",
+    srcs = ["main.cc"],
+    gn_output_name = "acpidump",
+    visibility = ["//visibility:private"],
+    deps = [":src"],
+)
+
+# GN's bootfs_test() expects the binary at test/acpidump-test via distribution_entries metadata, which cc_test_executable() omits.
+# @bazel2gn:raw_attribute:metadata = { distribution_entries = [ { source = rebase_path("$root_out_dir/acpidump-test", root_build_dir) destination = "test/acpidump-test" label = get_label_info(":test", "label_with_toolchain") } ] }
+fx_cc_test_binary(
+    name = "test",
+    srcs = ["acpidump_test.cc"],
+    gn_output_name = "acpidump-test",
+    deps = [
+        ":src",
+        "//zircon/system/ulib/zxtest",
+    ],
+)

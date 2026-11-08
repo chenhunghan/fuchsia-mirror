@@ -2,6 +2,22 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
 package(default_applicable_licenses = ["//:license"])
 
 exports_files(
@@ -12,4 +28,66 @@ exports_files(
         "meta/process_resolver.root_shard.cml",
     ],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = [
+        "src/main.rs",
+        "src/resolve/mod.rs",
+        "src/resolve/serve.rs",
+    ],
+    build_flags = ["//build/config/rust:bootfs"],
+    crate_name = "process_resolver",
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.ldsvc:fuchsia.ldsvc_rust",
+        "//sdk/fidl/fuchsia.pkg:fuchsia.pkg_rust",
+        "//sdk/fidl/fuchsia.process:fuchsia.process_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-fs",
+        "//src/lib/fuchsia-url",
+        "//src/sys/lib/library_loader",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged_bin",
+    binary = ":bin",
+    binary_name = "process_resolver",
+)
+
+fx_component_manifest(
+    name = "component-manifest",
+    component_name = "process_resolver",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/process_resolver.cml",
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":component-manifest",
+    deps = [":bin_packaged_bin"],
+)
+
+rustc_test(
+    name = "process_resolver_bin_test",
+    build_flags = ["//build/config/rust:bootfs"],
+    crate = ":bin",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = ["//src/lib/fuchsia-async"],
+)
+
+fx_unittest_package(
+    name = "process-resolver-unittests",
+    unit_tests = [":process_resolver_bin_test"],
+    visibility = ["//src/sys:__pkg__"],
 )

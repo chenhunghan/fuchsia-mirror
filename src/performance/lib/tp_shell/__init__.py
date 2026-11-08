@@ -5,10 +5,12 @@
 """Perfetto Trace Processor wrapper library."""
 
 from perfetto.trace_processor.api import TraceProcessorConfig
+from tp_shell.tp_server import TraceProcessorStartupError
 from tp_shell.tp_utils import FuchsiaPlatformDelegate, PerfettoTraceProcessor
 
 __all__ = [
     "FuchsiaPlatformDelegate",
     "PerfettoTraceProcessor",
     "TraceProcessorConfig",
+    "TraceProcessorStartupError",
 ]

@@ -8,6 +8,7 @@ load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 load(
     "@fuchsia_rules_common//components:component_manifest.bzl",
     "compile_component_manifest",
+    "merge_component_manifests",
 )
 load(
     "@fuchsia_rules_common//components:fuchsia_component_common.bzl",
@@ -29,6 +30,61 @@ load(
     "//build/bazel/rules/components:expect_includes.bzl",
     "FuchsiaExpectedIncludesInfo",
 )
+load(
+    "//tools/cmc/build/restricted_features:allowlists.bzl",
+    "RESTRICTED_FEATURE_ALLOWLISTS",
+)
+
+def gn_visibility_pattern_matches(pattern, label):
+    """Returns whether `label` matches a GN visibility `pattern`.
+
+    See //tools/cmc/build/restricted_features/allowlists.bzl for the supported
+    patterns.
+    """
+    if pattern == "*":
+        return True
+    if label.repo_name or not pattern.startswith("//"):
+        return False
+    if pattern.endswith("/*"):
+        prefix = pattern[2:-2]
+        return (not prefix or label.package == prefix or
+                label.package.startswith(prefix + "/"))
+    package, sep, name = pattern[2:].partition(":")
+    if not sep:
+        fail("Unsupported restricted feature allowlist pattern: {}".format(pattern))
+    return label.package == package and name in ("*", label.name)
+
+def _restricted_features_args(label, restricted_features):
+    """Returns the `--features` flags for `cmc compile` from `restricted_features`.
+
+    Fails if `label` isn't in the allowlist of any of `restricted_features`.
+    """
+    if not restricted_features:
+        return []
+
+    for feature in restricted_features:
+        if feature not in RESTRICTED_FEATURE_ALLOWLISTS:
+            fail(("Unknown restricted CML feature {} in `restricted_features` of {}. " +
+                  "Known features: {}").format(
+                repr(feature),
+                label,
+                ", ".join(sorted(RESTRICTED_FEATURE_ALLOWLISTS.keys())),
+            ))
+        allowlist = RESTRICTED_FEATURE_ALLOWLISTS[feature]
+        if allowlist == None:
+            fail(("Restricted CML feature {} in `restricted_features` of {} is not yet " +
+                  "supported in Bazel; mirror its allowlist from BUILD.gn.").format(
+                repr(feature),
+                label,
+            ))
+        if not any([gn_visibility_pattern_matches(p, label) for p in allowlist]):
+            fail(("{} is not allowed to use the restricted CML feature {}. See " +
+                  "//tools/cmc/build/restricted_features/README.md.").format(
+                label,
+                repr(feature),
+            ))
+
+    return ["--features"] + restricted_features
 
 # Maps `test_type` values to the realm moniker the test component runs in.
 # LINT.IfChange(type_moniker_map)
@@ -88,7 +144,7 @@ _FxComponentManifestSourcesInfo = provider(
     },
 )
 
-def _fx_component_manifest_impl(ctx):
+def _compile_fx_manifest(ctx, output_name = None, include_sources_info = True):
     manifest_in = ctx.file.manifest
     component_name = ctx.attr.component_name or ctx.label.name
 
@@ -106,50 +162,97 @@ def _fx_component_manifest_impl(ctx):
     include_paths = [".", "sdk/lib"]
     if debugdata_shard:
         include_paths.append(manifest_in.dirname)
-        manifest_merged = ctx.actions.declare_file("{}_merge.cml".format(ctx.label.name))
-        ctx.actions.run(
-            executable = cmc,
-            arguments = [
-                "merge",
-                "--output",
-                manifest_merged.path,
-                debugdata_shard.path,
-                manifest_in.path,
-            ],
-            inputs = [
+        manifest_in = merge_component_manifests(
+            ctx = ctx,
+            cmc_tool = cmc,
+            srcs = [
                 debugdata_shard,
                 manifest_in,
             ],
-            outputs = [manifest_merged],
-            mnemonic = "CmcMerge",
+            output_name = "{}_merge.cml".format(ctx.label.name),
         )
-        manifest_in = manifest_merged
 
     # LINT.ThenChange(//tools/cmc/build/cml.gni:debugdata_merge)
 
-    # `includes` accepts both `cml_shard` targets (which carry `FuchsiaCmlShardInfo`
-    # with their transitive shard dependencies) and raw `.cml` / `.shard.cml` leaf
-    # files (which do not include other shards and only provide `DefaultInfo.files`).
+    # `includes` accepts both `cml_shard` targets (which carry
+    # `FuchsiaCmlShardInfo` with their transitive shard dependencies) and raw
+    # `.cml` / `.shard.cml` leaf files (which do not include other shards and
+    # only provide `DefaultInfo.files`). Also propagate transitive shards from
+    # `manifest` when `manifest` is a `cmc_merge` or `cml_shard` target.
+    manifest_transitive_shards = (
+        [ctx.attr.manifest[FuchsiaCmlShardInfo].transitive_shards] if FuchsiaCmlShardInfo in ctx.attr.manifest else []
+    )
     includes = depset(
-        transitive = [
+        transitive = manifest_transitive_shards + [
             dep[FuchsiaCmlShardInfo].transitive_shards if FuchsiaCmlShardInfo in dep else dep[DefaultInfo].files
             for dep in ctx.attr.includes
         ],
     )
 
-    return compile_component_manifest(
+    res = compile_component_manifest(
         ctx = ctx,
         cmc_tool = cmc,
         manifest_in = manifest_in,
         component_name = component_name,
         includes = includes.to_list(),
         include_paths = include_paths,
-    ) + [
-        _FxComponentManifestSourcesInfo(
-            source_manifest = ctx.file.manifest,
-            includes = includes,
-        ),
-    ]
+        extra_args = _restricted_features_args(ctx.label, ctx.attr.restricted_features),
+        output_name = output_name,
+    )
+    if include_sources_info:
+        res = res + [
+            _FxComponentManifestSourcesInfo(
+                source_manifest = ctx.file.manifest,
+                includes = includes,
+            ),
+        ]
+    return res
+
+def _fx_component_manifest_impl(ctx):
+    return _compile_fx_manifest(ctx)
+
+_FX_COMPONENT_MANIFEST_ATTRS = {
+    "manifest": attr.label(
+        doc = "The component manifest file (.cml) to compile.",
+        allow_single_file = [".cml"],
+        mandatory = True,
+    ),
+    "component_name": attr.string(
+        doc = "The name of the component. Defaults to the label name of the target.",
+    ),
+    "includes": attr.label_list(
+        doc = """Other manifest shard files (.shard.cml or .cml) to include during compilation.
+Explicitly setting this is necessary for sandboxed build action execution.""",
+        allow_files = [".cml"],
+    ),
+    "restricted_features": attr.string_list(
+        doc = """The restricted CML features to allow, such as `"dynamic_dictionaries"`.
+
+Each feature has an allowlist of targets that may use it in
+//tools/cmc/build/restricted_features/allowlists.bzl (mirroring
+//tools/cmc/build/restricted_features/BUILD.gn).""",
+    ),
+    "_cmc_tool": attr.label(
+        doc = "The path to the component manifest compiler (cmc) tool.",
+        default = "//tools/cmc:cmc",
+        executable = True,
+        cfg = "exec",
+    ),
+    "_is_coverage": attr.label(
+        default = "//build/bazel/config/variables:is_coverage",
+    ),
+    "_is_profile": attr.label(
+        default = "//build/bazel/config/variables:is_profile",
+    ),
+    "_coverage_shard": attr.label(
+        default = "//sdk/lib/sys/testing:coverage.shard.cml",
+        allow_single_file = [".cml"],
+    ),
+    "_profile_shard": attr.label(
+        default = "//build/config/profile:instrumentation_data.cml",
+        allow_single_file = [".cml"],
+    ),
+}
 
 fx_component_manifest = rule(
     doc = """Compiles a Fuchsia component manifest (.cml) into a binary component manifest (.cm).
@@ -158,39 +261,38 @@ This rule executes the component manifest compiler (cmc) tool to validate
 and compile the input manifest file, including any specified dependency shards.
 """,
     implementation = _fx_component_manifest_impl,
-    attrs = {
-        "manifest": attr.label(
-            doc = "The component manifest file (.cml) to compile.",
-            allow_single_file = [".cml"],
-            mandatory = True,
-        ),
-        "component_name": attr.string(
-            doc = "The name of the component. Defaults to the label name of the target.",
-        ),
-        "includes": attr.label_list(
-            doc = """Other manifest shard files (.shard.cml or .cml) to include during compilation.
-Explicitly setting this is necessary for sandboxed build action execution.""",
-            allow_files = [".cml"],
-        ),
-        "_cmc_tool": attr.label(
-            doc = "The path to the component manifest compiler (cmc) tool.",
-            default = "//tools/cmc:cmc",
-            executable = True,
-            cfg = "exec",
-        ),
-        "_is_coverage": attr.label(
-            default = "//build/bazel/config/variables:is_coverage",
-        ),
-        "_is_profile": attr.label(
-            default = "//build/bazel/config/variables:is_profile",
-        ),
-        "_coverage_shard": attr.label(
-            default = "//sdk/lib/sys/testing:coverage.shard.cml",
-            allow_single_file = [".cml"],
-        ),
-        "_profile_shard": attr.label(
-            default = "//build/config/profile:instrumentation_data.cml",
-            allow_single_file = [".cml"],
+    attrs = _FX_COMPONENT_MANIFEST_ATTRS,
+)
+
+def _fx_compiled_manifest_impl(ctx):
+    component_name = ctx.attr.component_name or ctx.label.name
+    return _compile_fx_manifest(
+        ctx,
+        # LINT.IfChange(fx_compiled_manifest_output_name)
+        output_name = ctx.attr.output_name or "cml/{}/{}.cm".format(ctx.label.name, component_name),
+        # LINT.ThenChange(//build/tools/bazel2gn/fx_component.go:fx_compiled_manifest_output_name)
+        include_sources_info = False,
+    )
+
+fx_compiled_manifest = rule(
+    doc = """Compiles a Fuchsia component manifest (.cml) into a `.cm` file that isn't packaged.
+
+This is the equivalent of the low-level GN `cm()` template, which bazel2gn
+converts it to: unlike `fx_component_manifest()`, which bazel2gn converts to GN
+`fuchsia_component_manifest()`, the compiled manifest isn't added as a package
+resource in GN. Use this for a `.cm` file that is embedded in a binary (for
+example with `compile_data` and `include_bytes!`) or only read at build time
+(for example by `fuchsia_structured_config_rust_lib(cm_label = ...)`), so that
+the GN build doesn't also add it to the package or bootfs image that contains
+the binary. Don't pass it to `fx_component()`.
+""",
+    implementation = _fx_compiled_manifest_impl,
+    attrs = _FX_COMPONENT_MANIFEST_ATTRS | {
+        "output_name": attr.string(
+            doc = """The path of the compiled manifest, relative to this package's output directory.
+
+Defaults to `cml/<name>/<component_name>.cm`, matching the outputs of GN
+`fuchsia_component_manifest()`.""",
         ),
     },
 )
@@ -289,15 +391,6 @@ _fx_check_includes = rule(
 )
 
 _COMMON_COMPONENT_ATTRS = {
-    # The behavior is different from that documented for the inherited attribute.
-    "component_name": attr.string(
-        doc = """The name of the component.
-
-        This value will override the component name value in the `compiled_manifest`.
-        Defaults to the `name` of this target.
-        """,
-        mandatory = False,
-    ),
     "check_includes": attr.bool(
         doc = """Whether to check against `expect_includes()` in `deps`.
 
@@ -325,7 +418,6 @@ _COMMON_COMPONENT_ATTRS = {
 
 def _fx_component_impl(
         name,
-        component_name,
         compiled_manifest,
         deps,
         check_includes,
@@ -357,7 +449,6 @@ def _fx_component_impl(
     fuchsia_component_common(
         name = name,
         compiled_manifest = compiled_manifest,
-        component_name = component_name or name,
         deps = deps,
         testonly = testonly,
         visibility = visibility,

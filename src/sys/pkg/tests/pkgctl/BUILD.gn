@@ -15,11 +15,11 @@ fuchsia_test_package("pkgctl-integration-tests") {
   test_components = [ ":pkgctl_integration_test-component" ]
   deps = [
     "//src/connectivity/network/dns:component",
-    "//src/connectivity/network/netstack3:component-for-tests",
     "//src/connectivity/policy/http-client:component",
     "//src/sys/pkg/bin/pkgctl:pkgctl-binary",
     "//src/sys/pkg/testing:fake-ssl-certs",
   ]
+  subpackages = [ "//src/connectivity/network/netstack3:package-for-tests" ]
 }
 
 group("non_hermetic_tests") {

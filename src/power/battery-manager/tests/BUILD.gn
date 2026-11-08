@@ -15,31 +15,21 @@ rustc_test("battery_manager_integration_test") {
     "src/integration_test.rs",
   ]
   deps = [
-    "//sdk/fidl/fuchsia.component.test:fuchsia.component.test_rust",
-    "//sdk/fidl/fuchsia.driver.test:fuchsia.driver.test_rust",
+    "harness:battery_manager_test_harness",
     "//sdk/fidl/fuchsia.hardware.power.battery:fuchsia.hardware.power.battery_rust",
     "//sdk/fidl/fuchsia.hardware.power.charger:fuchsia.hardware.power.charger_rust",
     "//sdk/fidl/fuchsia.power.battery:fuchsia.power.battery_rust",
     "//sdk/fidl/fuchsia.power.battery.test:fuchsia.power.battery.test_rust",
-    "//sdk/fidl/fuchsia.power.system:fuchsia.power.system_rust",
-    "//sdk/lib/driver_test_realm/realm_builder/rust",
     "//sdk/rust/zx",
-    "//src/devices/bind/fuchsia.platform:fuchsia.platform_rust",
-    "//src/lib/diagnostics/reader/rust",
     "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
     "//src/lib/fake-clock/fidl:fidl_rust",
     "//src/lib/fidl/rust/fidl",
     "//src/lib/fuchsia",
-    "//src/lib/fuchsia-async",
     "//src/lib/fuchsia-component",
-    "//src/lib/fuchsia-component-test",
-    "//src/lib/fuchsia-sync",
     "//src/lib/test_util",
     "//src/power/testing/fake-hardware-power-control:test.hardwarepowercontrol_rust",
-    "//src/sys/lib/cm_rust",
     "//third_party/rust_crates:anyhow",
     "//third_party/rust_crates:futures",
-    "//third_party/rust_crates:log",
     "//third_party/rust_crates:serde_json",
     "//third_party/rust_crates:test-case",
   ]
@@ -95,6 +85,18 @@ fuchsia_component("fake_telemetry_governor") {
   deps = [ ":fake_telemetry_governor_bin" ]
 }
 
+# Components that `battery_manager_test_harness` starts, which test packages
+# using it must include.
+group("harness_components") {
+  testonly = true
+  deps = [
+    "//src/devices/bus/drivers/platform:platform-bus",
+    "//src/lib/fake-clock/svc",
+    "//src/power/battery-manager:battery_manager_fake_time",
+    "//src/power/testing/fake-battery:fake_battery_component",
+  ]
+}
+
 fuchsia_test_component("battery_manager_integration_test_component") {
   component_name = "battery_manager_integration_test"
   manifest = "meta/battery_manager_test.cml"
@@ -117,10 +119,7 @@ fuchsia_test_package("battery-manager-integration-tests") {
   deps = [
     ":fake_governor",
     ":fake_telemetry_governor",
+    ":harness_components",
     ":test_config",
-    "//src/devices/bus/drivers/platform:platform-bus",
-    "//src/lib/fake-clock/svc",
-    "//src/power/battery-manager:battery_manager_fake_time",
-    "//src/power/testing/fake-battery:fake_battery_component",
   ]
 }

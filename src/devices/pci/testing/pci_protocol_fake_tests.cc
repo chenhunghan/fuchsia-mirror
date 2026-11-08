@@ -8,12 +8,14 @@
 #include <lib/async-loop/loop.h>
 #include <lib/async/cpp/task.h>
 #include <lib/device-protocol/pci.h>
+#include <lib/driver/fake-bti/cpp/fake-bti.h>
 #include <lib/driver/mmio/cpp/mmio.h>
 #include <lib/fit/function.h>
 #include <lib/pci/constants.h>
 #include <lib/sync/completion.h>
 #include <lib/zx/bti.h>
 #include <lib/zx/object.h>
+#include <lib/zx/pmt.h>
 #include <lib/zx/vmo.h>
 #include <zircon/errors.h>
 #include <zircon/system/public/zircon/syscalls.h>
@@ -37,19 +39,19 @@ class FakePciProtocolTests : public zxtest::Test {
                      fidl::ServerEnd<fuchsia_hardware_pci::Device>(endpoints.server.TakeChannel()),
                      &fake_pci_);
 
-    pci_ = ddk::Pci(std::move(endpoints.client));
+    pci_ = fdf::Pci(std::move(endpoints.client));
     ASSERT_TRUE(pci_.is_valid());
 
     loop_.StartThread("pci-fidl-server-thread");
   }
   pci::FakePciProtocol& fake_pci() { return fake_pci_; }
-  ddk::Pci& pci() { return pci_; }
+  fdf::Pci& pci() { return pci_; }
 
   async::Loop loop_{&kAsyncLoopConfigNeverAttachToThread};
 
  private:
   pci::FakePciProtocol fake_pci_;
-  ddk::Pci pci_;
+  fdf::Pci pci_;
 };
 
 TEST_F(FakePciProtocolTests, CreateBar) {
@@ -82,6 +84,26 @@ TEST_F(FakePciProtocolTests, GetBti) {
   // Verify it's a BTI at least.
   ASSERT_OK(bti.get_info(ZX_INFO_BTI, &info, sizeof(info), /*actual_count=*/nullptr,
                          /*avail_count=*/nullptr));
+}
+
+TEST_F(FakePciProtocolTests, SetBti) {
+  constexpr zx_paddr_t kExpectedPaddr = 0x1234000;
+  const zx_paddr_t paddrs[] = {kExpectedPaddr};
+  zx::result custom_bti = fake_bti::CreateFakeBtiWithPaddrs(paddrs);
+  ASSERT_OK(custom_bti);
+  pci::RunAsync(loop_, [&] { fake_pci().SetBti(std::move(*custom_bti)); });
+
+  zx::bti bti;
+  ASSERT_OK(pci().GetBti(0, &bti));
+
+  const size_t page_size = zx_system_get_page_size();
+  zx::vmo vmo;
+  ASSERT_OK(zx::vmo::create(page_size, 0, &vmo));
+  zx_paddr_t pinned_paddr = 0;
+  zx::pmt pmt;
+  ASSERT_OK(bti.pin(ZX_BTI_PERM_READ, vmo, 0, page_size, &pinned_paddr, 1, &pmt));
+  EXPECT_EQ(kExpectedPaddr, pinned_paddr);
+  ASSERT_OK(pmt.unpin());
 }
 
 TEST_F(FakePciProtocolTests, SetBusMastering) {
@@ -398,8 +420,10 @@ TEST_F(FakePciProtocolTests, GetBar) {
 
   uint32_t bar_id = 3;
   size_t size = 256;
-  pci::RunAsync(loop_,
-                [&] { ASSERT_NO_DEATH([&]() { fake_pci().CreateBar(bar_id, size, true); }); });
+  constexpr uint64_t kBarAddress = 0x12345000;
+  pci::RunAsync(loop_, [&] {
+    ASSERT_NO_DEATH([&]() { fake_pci().CreateBar(bar_id, size, true, kBarAddress); });
+  });
   // Verify that the VMO we got back via the protocol method matches the setup
   // and that the other fields are correct.
   ASSERT_OK(pci().GetBar(arena, bar_id, &bar));
@@ -409,21 +433,27 @@ TEST_F(FakePciProtocolTests, GetBar) {
   ASSERT_TRUE(MatchKoids(borrowed, proto));
   ASSERT_EQ(bar_id, bar.bar_id);
   ASSERT_EQ(size, bar.size);
+  EXPECT_EQ(kBarAddress, bar.address);
 }
 
 TEST_F(FakePciProtocolTests, BarTypes) {
+  constexpr uint64_t kMmioAddress = 0x123456780000;
+  constexpr uint64_t kIoAddress = 0x2000;
   size_t page_size = zx_system_get_page_size();
   pci::RunAsync(loop_, [&] {
-    fake_pci().CreateBar(0, page_size, true);
-    fake_pci().CreateBar(1, page_size, false);
+    fake_pci().CreateBar(0, page_size, true, kMmioAddress);
+    fake_pci().CreateBar(1, page_size, false, kIoAddress);
   });
 
   fidl::Arena arena;
   fuchsia_hardware_pci::wire::Bar bar;
   ASSERT_OK(pci().GetBar(arena, 0, &bar));
   ASSERT_TRUE(bar.result.is_vmo());
+  EXPECT_EQ(kMmioAddress, bar.address);
   ASSERT_OK(pci().GetBar(arena, 1, &bar));
   ASSERT_TRUE(bar.result.is_io());
+  EXPECT_EQ(kIoAddress, bar.address);
+  EXPECT_EQ(kIoAddress, bar.result.io().address);
 }
 
 TEST_F(FakePciProtocolTests, MapMmio) {

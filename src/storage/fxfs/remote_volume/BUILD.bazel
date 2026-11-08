@@ -1,0 +1,89 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# This exists so that Starnix can access Fxfs volumes in-process.
+rustc_library(
+    name = "remote_volume",
+    srcs = [
+        "src/lib.rs",
+        "src/testing.rs",
+    ],
+    edition = "2024",
+    visibility = [
+        "//src/starnix/kernel:__subpackages__",
+        "//src/storage/fxfs:__subpackages__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/rust/zx",
+        "//src/storage/fxfs/platform",
+        "//src/storage/lib/sync_io_client",
+        "//src/storage/lib/vfs/rust:vfs_static",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+rustc_test(
+    name = "remote_volume_lib_test",
+    crate = ":remote_volume",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.fs:fuchsia.fs_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/performance/memory/attribution/refaults_vmo",
+        "//src/storage/fxfs:lib",
+        "//src/storage/lib/storage_device",
+    ],
+)
+
+fx_packaged_binary(
+    name = "remote_volume_lib_test_packaged_bin",
+    testonly = True,
+    binary = ":remote_volume_lib_test",
+    binary_name = "remote_volume_lib_test",
+)
+
+fx_component_manifest(
+    name = "fxfs-remote-volume-tests-manifest",
+    testonly = True,
+    component_name = "fxfs-remote-volume-tests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:next-vdso.shard.cml",
+    ],
+    manifest = "meta/fxfs_remote_volume_tests.cml",
+)
+
+fx_test_component(
+    name = "fxfs-remote-volume-tests-component",
+    compiled_manifest = ":fxfs-remote-volume-tests-manifest",
+    deps = [":remote_volume_lib_test_packaged_bin"],
+)
+
+fx_package(
+    name = "fxfs-remote-volume-tests-package",
+    package_name = "fxfs-remote-volume-tests",
+    test_components = [":fxfs-remote-volume-tests-component"],
+)
+
+fx_test(
+    name = "fxfs-remote-volume-tests",
+    package = ":fxfs-remote-volume-tests-package",
+    visibility = ["//src/storage:__pkg__"],
+)

@@ -19,10 +19,6 @@
             // the tests don't require changing keyboard settings.
         },
         {
-            name: "scene_manager_config",
-            url: "#meta/scene_manager_config.cm",
-        },
-        {
             name: "fake_cobalt",
             url: "#meta/fake_cobalt.cm",
         },

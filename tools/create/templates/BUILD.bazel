@@ -1,0 +1,25 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
+load(":templates.bzl", "TEMPLATES")
+
+package(default_applicable_licenses = ["//:license"])
+
+exports_files(
+    TEMPLATES,
+    visibility = [
+        "//tools/create:__pkg__",
+        "//tools/create/goldens:__pkg__",
+    ],
+)
+
+# fx create uses the paths in this file as the available set of template
+# files.
+write_file(
+    name = "templates_json",
+    out = "templates.json",
+    content = [json.encode(TEMPLATES)],
+    visibility = ["//tools/create/goldens:__pkg__"],
+)

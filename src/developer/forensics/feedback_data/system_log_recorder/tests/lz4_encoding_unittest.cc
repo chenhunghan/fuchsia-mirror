@@ -4,8 +4,8 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
-#include <re2/re2.h>
 
+#include "re2/re2.h"
 #include "src/developer/forensics/feedback_data/system_log_recorder/encoding/lz4_decoder.h"
 #include "src/developer/forensics/feedback_data/system_log_recorder/encoding/lz4_encoder.h"
 #include "src/developer/forensics/feedback_data/system_log_recorder/encoding/lz4_utils.h"

@@ -254,3 +254,25 @@ decode_failure("StrictEnumUint64StructUnknownValue") {
     },
     err = STRICT_ENUM_UNKNOWN_VALUE,
 }
+
+decode_failure("StrictEnumUint8StructZeroUnknownValue") {
+    type = StrictEnumUint8Struct,
+    bytes = {
+        v2 = [
+            0x00, padding:7,
+        ],
+    },
+    err = STRICT_ENUM_UNKNOWN_VALUE,
+}
+
+decode_failure("VectorOfEnumStructUnknownValue") {
+    type = VectorOfEnumStruct,
+    bytes = {
+        v2 = [
+            num(1):8,
+            repeat(0xff):8,
+            0xaa, 0xaa, padding:6,
+        ],
+    },
+    err = STRICT_ENUM_UNKNOWN_VALUE,
+}

@@ -5,6 +5,8 @@
 #ifndef SRC_UI_INPUT_LIB_HID_INPUT_REPORT_MOUSE_H_
 #define SRC_UI_INPUT_LIB_HID_INPUT_REPORT_MOUSE_H_
 
+#include <lib/stdcompat/inplace_vector.h>
+
 #include "src/ui/input/lib/hid-input-report/device.h"
 
 namespace hid_input_report {
@@ -30,8 +32,7 @@ class Mouse : public Device {
   std::optional<hid::Attributes> position_x_;
   std::optional<hid::Attributes> position_y_;
   std::optional<hid::Attributes> scroll_v_;
-  std::array<hid::Attributes, fuchsia_input_report::wire::kMouseMaxNumButtons> buttons_;
-  size_t num_buttons_ = 0;
+  cpp26::inplace_vector<hid::Attributes, fuchsia_input_report::wire::kMouseMaxNumButtons> buttons_;
 
   size_t report_size_ = 0;
   uint8_t report_id_ = 0;

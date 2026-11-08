@@ -34,26 +34,11 @@ fuchsia_component("tracee") {
   deps = [ ":tracee_bin" ]
 }
 
-fuchsia_structured_config_values("without_trace_data") {
-  cm_label = ":tracee_manifest"
-  values = {
-    emit_trace_data = false
-  }
-}
-
-fuchsia_structured_config_values("with_trace_data") {
-  cm_label = ":tracee_manifest"
-  values = {
-    emit_trace_data = true
-  }
-}
-
 executable("trace_system_benchmarks_bin") {
   output_name = "trace_system_benchmarks"
   testonly = true
   sources = [ "streaming_throughput.cc" ]
   deps = [
-    ":with_trace_data",
     "//sdk/fidl/fuchsia.tracing.controller:fuchsia.tracing.controller_cpp",
     "//sdk/lib/async:async-cpp",
     "//sdk/lib/async-loop:async-loop-cpp",
@@ -72,7 +57,6 @@ executable("trace_system_benchmarks_many_providers_bin") {
   testonly = true
   sources = [ "configure.cc" ]
   deps = [
-    ":without_trace_data",
     "//sdk/fidl/fuchsia.tracing.controller:fuchsia.tracing.controller_cpp",
     "//sdk/lib/async:async-cpp",
     "//sdk/lib/async-loop:async-loop-cpp",

@@ -59,7 +59,6 @@
             "host_x64/ffx",
             "host_x64/fvm",
             "host_x64/llvm-profdata",
-            "host_x64/resummarize",
             "host_x64/ssh",
             "host_x64/test-pilot",
             "host_x64/zbi",
@@ -68,14 +67,14 @@
         ],
         "timeout_secs": 604,
         "summary": {
-            "tests": null
+            "tests": []
         },
         "summary_if_skipped": {
             "tests": [
                 {
-                    "output_files": null,
+                    "output_files": [],
                     "output_dir": "",
-                    "cases": null,
+                    "cases": [],
                     "name": "fuchsia-pkg://fuchsia.com/foo1#meta/foo1.cm",
                     "gn_label": "//src/something:foo1(//build/toolchain/fuchsia:x64)",
                     "source_label": "//src/something:foo1",
@@ -93,9 +92,9 @@
                     "metadata": {}
                 },
                 {
-                    "output_files": null,
+                    "output_files": [],
                     "output_dir": "",
-                    "cases": null,
+                    "cases": [],
                     "name": "fuchsia-pkg://fuchsia.com/foo3#meta/foo3.cm",
                     "gn_label": "//src/something:foo3(//build/toolchain/fuchsia:x64)",
                     "source_label": "//src/something:foo3",
@@ -228,7 +227,6 @@
             "host_x64/ffx",
             "host_x64/fvm",
             "host_x64/llvm-profdata",
-            "host_x64/resummarize",
             "host_x64/ssh",
             "host_x64/test-pilot",
             "host_x64/zbi",
@@ -237,14 +235,14 @@
         ],
         "timeout_secs": 604,
         "summary": {
-            "tests": null
+            "tests": []
         },
         "summary_if_skipped": {
             "tests": [
                 {
-                    "output_files": null,
+                    "output_files": [],
                     "output_dir": "",
-                    "cases": null,
+                    "cases": [],
                     "name": "fuchsia-pkg://fuchsia.com/foo2#meta/foo2.cm",
                     "gn_label": "//src/something:foo2(//build/toolchain/fuchsia:x64)",
                     "source_label": "//src/something:foo2",
@@ -262,9 +260,9 @@
                     "metadata": {}
                 },
                 {
-                    "output_files": null,
+                    "output_files": [],
                     "output_dir": "",
-                    "cases": null,
+                    "cases": [],
                     "name": "fuchsia-pkg://fuchsia.com/foo4#meta/foo4.cm",
                     "gn_label": "//src/something:foo4(//build/toolchain/fuchsia:x64)",
                     "source_label": "//src/something:foo4",

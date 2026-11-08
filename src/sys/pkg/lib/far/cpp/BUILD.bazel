@@ -88,7 +88,6 @@ fx_component_manifest(
 fx_test_component(
     name = "cpp-fars-tests-component",
     compiled_manifest = ":cpp-fars-tests-manifest",
-    component_name = "cpp-fars-tests",
     deps = [":validate-fars_packaged_bin"],
 )
 

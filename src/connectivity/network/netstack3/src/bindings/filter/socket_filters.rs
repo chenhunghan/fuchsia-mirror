@@ -22,7 +22,7 @@ struct SocketControlConnectionState<'a> {
 }
 
 impl<'a> SocketControlConnectionState<'a> {
-    fn attach_socket_filter(
+    async fn attach_socket_filter(
         &mut self,
         hook: fnet_filter::SocketHook,
         program: ValidVerifiedProgram,
@@ -31,20 +31,19 @@ impl<'a> SocketControlConnectionState<'a> {
         // client then it can be replaced.
         let replace = self.attached.contains(&hook);
 
-        CgroupSkbProgram::new(program, &self.ebpf_manager.maps_cache())
-            .map_err(|e| e.into())
-            .and_then(|program| match hook {
-                fnet_filter::SocketHook::Egress => {
-                    self.ebpf_manager.set_egress_hook(Some(program), replace).map_err(|e| e.into())
-                }
-                fnet_filter::SocketHook::Ingress => {
-                    self.ebpf_manager.set_ingress_hook(Some(program), replace).map_err(|e| e.into())
-                }
-                fnet_filter::SocketHook::__SourceBreaking { unknown_ordinal } => {
-                    log::warn!("Unsupported SocketHook ordinal: {}", unknown_ordinal);
-                    Err(fnet_filter::SocketControlAttachEbpfProgramError::NotSupported)
-                }
-            })?;
+        let program = CgroupSkbProgram::new(program, &self.ebpf_manager.maps_cache()).await?;
+        match hook {
+            fnet_filter::SocketHook::Egress => {
+                self.ebpf_manager.set_egress_hook(Some(program), replace)?;
+            }
+            fnet_filter::SocketHook::Ingress => {
+                self.ebpf_manager.set_ingress_hook(Some(program), replace)?;
+            }
+            fnet_filter::SocketHook::__SourceBreaking { unknown_ordinal } => {
+                log::warn!("Unsupported SocketHook ordinal: {}", unknown_ordinal);
+                return Err(fnet_filter::SocketControlAttachEbpfProgramError::NotSupported);
+            }
+        }
 
         if !replace {
             let inserted = self.attached.insert(hook);
@@ -116,7 +115,7 @@ pub(crate) async fn serve_socket_control(
                     }
                 };
 
-                responder.send(state.attach_socket_filter(hook, program))?;
+                responder.send(state.attach_socket_filter(hook, program).await)?;
             }
             SocketControlRequest::DetachEbpfProgram { hook, responder } => {
                 responder.send(state.detach_socket_filter(hook))?;

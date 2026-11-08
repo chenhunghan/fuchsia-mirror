@@ -344,6 +344,46 @@ class TestConnection {
     magma_connection_release_buffer(connection_, buffer);
   }
 
+  void Buffer2(uint64_t flags) {
+    ASSERT_TRUE(connection_);
+
+    uint64_t size = page_size() + 16;
+    uint64_t actual_size = 0;
+    magma_buffer_t buffer = 0;
+    magma_buffer_id_t buffer_id = 0;
+
+    magma_status_t status = magma_connection_create_buffer2(connection_, size, flags, &actual_size,
+                                                            &buffer, &buffer_id);
+    if ((flags & MAGMA_BUFFER_FLAG_REMOTE_ALLOCATION) && status == MAGMA_STATUS_UNIMPLEMENTED) {
+      // The system driver doesn't support remote allocation; the connection remains usable.
+      EXPECT_EQ(MAGMA_STATUS_OK, magma_connection_flush(connection_));
+      GTEST_SKIP() << "Remote allocation not supported";
+    }
+    ASSERT_EQ(MAGMA_STATUS_OK, status);
+    EXPECT_GE(actual_size, size);
+    EXPECT_NE(buffer, 0u);
+
+    magma_buffer_info_t info;
+    EXPECT_EQ(MAGMA_STATUS_OK, magma_buffer_get_info(buffer, &info));
+    EXPECT_EQ(actual_size, info.size);
+
+    {
+      magma_buffer_t buffer2 = 0;
+      magma_buffer_id_t buffer_id2 = 0;
+      uint64_t actual_size2 = 0;
+      ASSERT_EQ(MAGMA_STATUS_OK,
+                magma_connection_create_buffer2(connection_, size, flags, &actual_size2, &buffer2,
+                                                &buffer_id2));
+      EXPECT_NE(buffer_id2, buffer_id);
+      magma_connection_release_buffer(connection_, buffer2);
+    }
+
+    // The buffer is known to the system driver, so releasing it doesn't close the connection.
+    EXPECT_EQ(MAGMA_STATUS_OK, magma_connection_flush(connection_));
+    magma_connection_release_buffer(connection_, buffer);
+    EXPECT_EQ(MAGMA_STATUS_OK, magma_connection_flush(connection_));
+  }
+
   void BufferMap() {
     ASSERT_TRUE(connection_);
 
@@ -1784,6 +1824,16 @@ TEST_F(Magma, TracingInitFake) {
 TEST_F(Magma, Buffer) {
   TestConnection test;
   test.Buffer();
+}
+
+TEST_F(Magma, Buffer2Local) {
+  TestConnection test;
+  test.Buffer2(/*flags=*/0);
+}
+
+TEST_F(Magma, Buffer2Remote) {
+  TestConnection test;
+  test.Buffer2(MAGMA_BUFFER_FLAG_REMOTE_ALLOCATION);
 }
 
 TEST_F(Magma, Connection) {

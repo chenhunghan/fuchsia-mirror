@@ -8,6 +8,7 @@ use crate::subcommands::node::subcommands::graph::args::GraphOrientation;
 
 use anyhow::{Result, format_err};
 use args::GraphNodeCommand;
+use fidl_fuchsia_component_decl_common as fidl_fuchsia_component_decl;
 use flex_fuchsia_driver_development as fdd;
 #[cfg(feature = "fdomain")]
 use fuchsia_driver_dev_fdomain as fuchsia_driver_dev;
@@ -683,7 +684,7 @@ mod tests {
     use super::*;
     use anyhow::Context;
     use argh::FromArgs;
-    use fidl_fuchsia_component_decl as fcd;
+    use fidl_fuchsia_component_decl_common as fcd;
     use flex_client::fidl::ServerEnd;
     use fuchsia_async as fasync;
     use futures::future::{Future, FutureExt};

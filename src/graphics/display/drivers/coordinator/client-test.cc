@@ -30,6 +30,9 @@
 #include "src/graphics/display/lib/api-types/cpp/config-stamp.h"
 #include "src/graphics/display/lib/api-types/cpp/display-id.h"
 #include "src/graphics/display/lib/api-types/cpp/driver-config-stamp.h"
+#include "src/graphics/display/lib/api-types/cpp/event-id.h"
+#include "src/graphics/display/lib/api-types/cpp/image-id.h"
+#include "src/graphics/display/lib/api-types/cpp/power-mode.h"
 #include "src/lib/testing/predicates/status.h"
 
 namespace display_coordinator {
@@ -189,6 +192,46 @@ TEST_F(ClientTest, ClientClosesFidlConnection) {
   coordinator_client_end_.reset();
   driver_runtime_.RunUntilIdle();
   EXPECT_EQ(nullptr, controller_->ClientsForTesting().GetClientOwningDisplays());
+}
+
+TEST_F(ClientTest, NonOwningClientCannotStartCaptureOrSetDisplayPowerMode) {
+  MockCoordinatorListener virtcon_listener;
+  auto [listener_client_end, listener_server_end] =
+      fidl::Endpoints<fuchsia_hardware_display::CoordinatorListener>::Create();
+  fidl::ServerBindingRef listener_binding = fidl::BindServer(
+      driver_dispatcher_->async_dispatcher(), std::move(listener_server_end), &virtcon_listener);
+
+  auto [coordinator_client_end, coordinator_server_end] =
+      fidl::Endpoints<fuchsia_hardware_display::Coordinator>::Create();
+  ASSERT_OK(controller_->CreateClient(display::ClientPriority::kVirtcon,
+                                      std::move(coordinator_server_end),
+                                      std::move(listener_client_end)));
+  driver_runtime_.RunUntilIdle();
+  ASSERT_FALSE(virtcon_listener.client_has_ownership());
+
+  fidl::WireSyncClient<fuchsia_hardware_display::Coordinator> virtcon_client(
+      std::move(coordinator_client_end));
+  driver_runtime_.PerformBlockingWork([&]() {
+    auto capture_result =
+        virtcon_client->StartCapture(display::EventId(1).ToFidl(), display::ImageId(1).ToFidl());
+    ASSERT_TRUE(capture_result.ok());
+    ASSERT_TRUE(capture_result->is_error());
+    EXPECT_STATUS(capture_result->error_value(), ZX_ERR_NOT_CONNECTED);
+
+    auto power_result = virtcon_client->SetDisplayPowerMode(display::DisplayId(1).ToFidl(),
+                                                            display::PowerMode::kOff.ToFidl());
+    ASSERT_TRUE(power_result.ok());
+    ASSERT_TRUE(power_result->is_error());
+    EXPECT_STATUS(power_result->error_value(), ZX_ERR_NOT_CONNECTED);
+
+    auto min_rgb_result = virtcon_client->SetMinimumRgb(16);
+    ASSERT_TRUE(min_rgb_result.ok());
+    ASSERT_TRUE(min_rgb_result->is_error());
+    EXPECT_STATUS(min_rgb_result->error_value(), ZX_ERR_NOT_CONNECTED);
+  });
+
+  listener_binding.Unbind();
+  driver_runtime_.RunUntilIdle();
 }
 
 }  // namespace

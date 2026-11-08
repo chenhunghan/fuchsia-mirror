@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"os/user"
 	"strings"
+	"sync"
 	"time"
 
 	"go.fuchsia.dev/fuchsia/tools/botanist"
@@ -33,18 +34,32 @@ import (
 
 const (
 	gcemClientBinary = "./gcem_client"
+
+	defaultMediatorTimeout      = 5 * time.Minute
+	defaultSerialConnectTimeout = 3 * time.Minute
+	defaultSerialDialTimeout    = 30 * time.Second
+	defaultSerialBootTimeout    = 2 * time.Minute
+	defaultSerialReadTimeout    = 5 * time.Second
+	defaultSerialRetryDelay     = 5 * time.Second
+	maxCreateInstanceAttempts   = 3
 )
 
 // gceSerial is a ReadWriteCloser that talks to a GCE serial port via SSH.
 type gceSerial struct {
-	in     io.WriteCloser
-	out    io.Reader
-	sess   *ssh.Session
-	client *ssh.Client
-	closed bool
+	mu      sync.Mutex
+	writeMu sync.Mutex
+	in      io.WriteCloser
+	out     io.Reader
+	sess    *ssh.Session
+	client  *ssh.Client
+	closed  bool
 }
 
 func newGCESerial(pkeyPath, username, endpoint string) (*gceSerial, error) {
+	return newGCESerialWithTimeout(pkeyPath, username, endpoint, defaultSerialDialTimeout)
+}
+
+func newGCESerialWithTimeout(pkeyPath, username, endpoint string, timeout time.Duration) (*gceSerial, error) {
 	// Load the pkey and use it to dial the GCE serial port.
 	data, err := os.ReadFile(pkeyPath)
 	if err != nil {
@@ -61,27 +76,57 @@ func newGCESerial(pkeyPath, username, endpoint string) (*gceSerial, error) {
 		},
 		// TODO(rudymathu): Replace this with google ssh serial port key.
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         timeout,
 	}
-	client, err := ssh.Dial("tcp", endpoint, sshConfig)
+	conn, err := net.DialTimeout("tcp", endpoint, timeout)
 	if err != nil {
 		return nil, err
 	}
+	if timeout > 0 {
+		if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+	}
+	sshConn, chans, reqs, err := ssh.NewClientConn(conn, endpoint, sshConfig)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	client := ssh.NewClient(sshConn, chans, reqs)
 
 	// Create an SSH shell and wire up stdio.
 	session, err := client.NewSession()
 	if err != nil {
+		_ = client.Close()
 		return nil, err
 	}
 	out, err := session.StdoutPipe()
 	if err != nil {
+		_ = session.Close()
+		_ = client.Close()
 		return nil, err
 	}
 	in, err := session.StdinPipe()
 	if err != nil {
+		_ = session.Close()
+		_ = client.Close()
 		return nil, err
 	}
 	if err := session.Shell(); err != nil {
+		_ = session.Close()
+		_ = client.Close()
 		return nil, err
+	}
+	if timeout > 0 {
+		// Clear the connection deadline now that the TCP connection, SSH
+		// handshake, and serial shell session are established, so subsequent
+		// serial reads and writes during the test run do not time out.
+		if err := conn.SetDeadline(time.Time{}); err != nil {
+			_ = session.Close()
+			_ = client.Close()
+			return nil, err
+		}
 	}
 	return &gceSerial{
 		in:     in,
@@ -92,13 +137,24 @@ func newGCESerial(pkeyPath, username, endpoint string) (*gceSerial, error) {
 }
 
 func (s *gceSerial) Read(b []byte) (int, error) {
-	if s.closed {
+	s.mu.Lock()
+	closed := s.closed
+	s.mu.Unlock()
+	if closed {
 		return 0, os.ErrClosed
 	}
 	return s.out.Read(b)
 }
 
 func (s *gceSerial) Write(b []byte) (int, error) {
+	s.mu.Lock()
+	closed := s.closed
+	s.mu.Unlock()
+	if closed {
+		return 0, os.ErrClosed
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	// Chunk out writes to 128 bytes or less. SSH connections to GCE do not
 	// seem to properly handle longer messages.
 	maxChunkSize := 128
@@ -121,6 +177,12 @@ func (s *gceSerial) Write(b []byte) (int, error) {
 }
 
 func (s *gceSerial) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
 	multierr := ""
 	if err := s.in.Close(); err != nil {
 		multierr += fmt.Sprintf("failed to close serial SSH session input pipe: %s, ", err)
@@ -131,7 +193,6 @@ func (s *gceSerial) Close() error {
 	if err := s.client.Close(); err != nil {
 		multierr += fmt.Sprintf("failed to close serial SSH client: %s", err)
 	}
-	s.closed = true
 	if multierr != "" {
 		return errors.New(multierr)
 	}
@@ -161,12 +222,22 @@ type GCEConfig struct {
 // GCE represents a GCE VM running Fuchsia.
 type GCE struct {
 	*genericFuchsiaTarget
-	config      GCEConfig
-	currentUser string
-	ipv4        net.IP
-	loggerCtx   context.Context
-	opts        Options
-	serial      io.ReadWriteCloser
+	config               GCEConfig
+	currentUser          string
+	ipv4                 net.IP
+	loggerCtx            context.Context
+	opts                 Options
+	serial               io.ReadWriteCloser
+	serialConnectTimeout time.Duration
+	// serialConnectBackoff overrides the default backoff used when retrying
+	// serial connection and GCE instance creation.
+	serialConnectBackoff retry.Backoff
+	serialBootTimeout    time.Duration
+	serialReadTimeout    time.Duration
+	serialRetryDelay     time.Duration
+	createInstanceFn     func() error
+	addSSHKeyFn          func() error
+	connectToSerialFn    func() error
 }
 
 var _ FuchsiaTarget = (*GCE)(nil)
@@ -192,47 +263,120 @@ func NewGCE(ctx context.Context, config GCEConfig, opts Options) (*GCE, error) {
 		opts:        opts,
 	}
 
-	if config.InstanceName == "" && config.Zone == "" {
-		// If the instance has not been created, create it now.
-		logger.Infof(ctx, "creating the GCE instance")
-		expBackoff := retry.NewExponentialBackoff(15*time.Second, 2*time.Minute, 2)
-		if err := retry.Retry(ctx, expBackoff, g.createInstance, nil); err != nil {
-			return nil, err
-		}
-		logger.Infof(ctx, "successfully created GCE instance: Name: %s, Zone: %s", g.config.InstanceName, g.config.Zone)
-	} else {
-		// The instance has already been created, so add the SSH key to it.
-		logger.Infof(ctx, "adding the SSH public key to GCE instance %s", g.config.InstanceName)
-		expBackoff := retry.NewExponentialBackoff(15*time.Second, 2*time.Minute, 2)
-		if err := retry.Retry(ctx, expBackoff, g.addSSHKey, nil); err != nil {
-			return nil, err
-		}
-		logger.Infof(ctx, "successfully added SSH key")
-	}
-
-	// Connect to the serial line.
-	logger.Infof(ctx, "setting up the serial connection to the GCE instance")
-	expBackoff := retry.NewExponentialBackoff(15*time.Second, 2*time.Minute, 2)
-	connectSerialErrs := make(chan error)
-	defer close(connectSerialErrs)
-	go logErrors(ctx, "connectToSerial()", connectSerialErrs)
-	if err := retry.Retry(ctx, expBackoff, g.connectToSerial, connectSerialErrs); err != nil {
+	if err := g.initTarget(ctx); err != nil {
 		return nil, err
 	}
-	logger.Infof(ctx, "successfully connected to serial")
 
-	// If we're running a non-bringup configuration, we need to provision an SSH key.
-	if opts.ExpectsSSH {
-		if err := g.provisionSSHKey(ctx); err != nil {
-			return nil, err
-		}
-	}
-	base, err := newGenericFuchsia(ctx, "", "", []string{g.opts.SSHKey}, g.serial)
+	base, err := newGenericFuchsia(ctx, g.config.InstanceName, "", []string{g.opts.SSHKey}, g.serial)
 	if err != nil {
 		return nil, err
 	}
 	g.genericFuchsiaTarget = base
 	return g, nil
+}
+
+func defaultExponentialBackoff() retry.Backoff {
+	return retry.NewExponentialBackoff(15*time.Second, 2*time.Minute, 2)
+}
+
+func defaultMediatorBackoff() retry.Backoff {
+	return retry.WithMaxDuration(defaultExponentialBackoff(), defaultMediatorTimeout)
+}
+
+func (g *GCE) initTarget(ctx context.Context) error {
+	createFn := g.createInstanceFn
+	if createFn == nil {
+		createFn = g.createInstance
+	}
+	addKeyFn := g.addSSHKeyFn
+	if addKeyFn == nil {
+		addKeyFn = g.addSSHKey
+	}
+	connectFn := g.connectToSerialFn
+	if connectFn == nil {
+		connectFn = g.connectToSerial
+	}
+	connectTimeout := g.serialConnectTimeout
+	if connectTimeout <= 0 {
+		connectTimeout = defaultSerialConnectTimeout
+	}
+
+	connectSerial := func() error {
+		logger.Infof(ctx, "setting up the serial connection to the GCE instance")
+		baseBackoff := g.serialConnectBackoff
+		if baseBackoff == nil {
+			baseBackoff = defaultExponentialBackoff()
+		}
+		backoff := retry.WithMaxDuration(baseBackoff, connectTimeout)
+		connectSerialErrs := make(chan error)
+		defer close(connectSerialErrs)
+		go logErrors(ctx, "connectToSerial()", connectSerialErrs)
+		if err := retry.Retry(ctx, backoff, connectFn, connectSerialErrs); err != nil {
+			return err
+		}
+		logger.Infof(ctx, "successfully connected to serial")
+		return nil
+	}
+
+	if g.config.InstanceName == "" && g.config.Zone == "" {
+		// Note: gce_mediator's RPC interface (and gcem_client) does not expose a
+		// DeleteInstance method, so botanist cannot directly delete an orphaned VM
+		// if serial connection fails. Instead, gce_mediator associates every
+		// created instance in Datastore with the Swarming task ID and automatically
+		// garbage-collects all instances belonging to the task once it completes.
+		createBackoff := g.serialConnectBackoff
+		if createBackoff == nil {
+			createBackoff = defaultExponentialBackoff()
+		}
+		createBackoff.Reset()
+		var lastErr error
+		for attempt := 1; attempt <= maxCreateInstanceAttempts; attempt++ {
+			g.config.InstanceName = ""
+			g.config.Zone = ""
+			logger.Infof(ctx, "creating the GCE instance (attempt %d/%d)", attempt, maxCreateInstanceAttempts)
+			if err := createFn(); err != nil {
+				lastErr = err
+				if ctx.Err() != nil {
+					return err
+				}
+				if attempt == maxCreateInstanceAttempts {
+					break
+				}
+				delay := createBackoff.Next()
+				logger.Warningf(ctx, "failed to create GCE instance on attempt %d/%d (%s); retrying in %s", attempt, maxCreateInstanceAttempts, err, delay)
+				timer := time.NewTimer(delay)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return ctx.Err()
+				case <-timer.C:
+				}
+				continue
+			}
+			logger.Infof(ctx, "successfully created GCE instance: Name: %s, Zone: %s", g.config.InstanceName, g.config.Zone)
+			if err := connectSerial(); err != nil {
+				lastErr = err
+				if ctx.Err() != nil {
+					return err
+				}
+				if attempt == maxCreateInstanceAttempts {
+					break
+				}
+				logger.Warningf(ctx, "failed to connect to serial for GCE instance %s in %s (%s); recreating instance", g.config.InstanceName, g.config.Zone, err)
+				continue
+			}
+			return nil
+		}
+		return fmt.Errorf("failed to create and connect to GCE instance after %d attempts: %w", maxCreateInstanceAttempts, lastErr)
+	}
+
+	// The instance has already been created, so add the SSH key to it.
+	logger.Infof(ctx, "adding the SSH public key to GCE instance %s", g.config.InstanceName)
+	if err := retry.Retry(ctx, defaultMediatorBackoff(), addKeyFn, nil); err != nil {
+		return err
+	}
+	logger.Infof(ctx, "successfully added SSH key")
+	return connectSerial()
 }
 
 func logErrors(ctx context.Context, functionName string, errs <-chan error) {
@@ -252,36 +396,98 @@ func (g *GCE) provisionSSHKey(ctx context.Context) error {
 	if g.serial == nil {
 		return fmt.Errorf("serial is not connected")
 	}
-	time.Sleep(2 * time.Minute)
-	logger.Infof(g.loggerCtx, "provisioning SSH key over serial")
+	if err := g.StartSerialServer(); err != nil {
+		return err
+	}
 	p, err := os.ReadFile(g.opts.AuthorizedKey)
 	if err != nil {
 		return err
 	}
-	pubkey := string(p)
-	pubkey = strings.TrimSuffix(pubkey, "\n")
-	pubkey = fmt.Sprintf("\"%s %s\"", pubkey, g.currentUser)
-	cmds := []serial.Command{
-		{Cmd: []string{"echo", pubkey, ">", "/data/ssh/authorized_keys"}},
+	var pubkey string
+	if parsedKey, _, _, _, err := ssh.ParseAuthorizedKey(p); err == nil {
+		pubkey = strings.TrimSpace(string(ssh.MarshalAuthorizedKey(parsedKey)))
+	} else {
+		pubkey = strings.TrimSpace(string(p))
 	}
-	if err := serial.RunCommands(ctx, g.serial, cmds); err != nil {
+	pubkey = fmt.Sprintf("%s %s", pubkey, g.currentUser)
+
+	bootTimeout := g.serialBootTimeout
+	if bootTimeout <= 0 {
+		if g.connectionTimeout > 0 {
+			bootTimeout = g.connectionTimeout
+		} else {
+			bootTimeout = defaultSerialBootTimeout
+		}
+	}
+	readTimeout := g.serialReadTimeout
+	if readTimeout <= 0 {
+		readTimeout = defaultSerialReadTimeout
+	}
+	retryDelay := g.serialRetryDelay
+	if retryDelay <= 0 {
+		retryDelay = defaultSerialRetryDelay
+	}
+
+	logger.Infof(g.loggerCtx, "waiting for GCE serial console to be ready")
+	var socket *serial.SerialSocket
+	bootBackoff := retry.WithMaxDuration(retry.NewConstantBackoff(retryDelay), bootTimeout)
+	if err := retry.Retry(ctx, bootBackoff, func() error {
+		var err error
+		socket, err = serial.NewSocketWithIOTimeout(ctx, g.SerialSocketPath(), readTimeout, true)
+		return err
+	}, nil); err != nil {
 		return err
 	}
-	// Call ReadUntilMatchString with a new ctx w/ a shorter timeout so it doesn't hang if the output is corrupted
-	return retry.Retry(ctx, retry.WithMaxAttempts(retry.NewConstantBackoff(5*time.Second), 5), func() error {
-		truncCtx, cancel := context.WithTimeout(ctx, 1*time.Second)
-		_, readErr := iomisc.ReadUntilMatchString(truncCtx, g.serial, pubkey)
+	defer func() {
+		if socket != nil {
+			socket.Close()
+		}
+	}()
+
+	logger.Infof(g.loggerCtx, "provisioning SSH key over serial")
+	attempt := 0
+	retryBackoff := retry.WithMaxAttempts(retry.NewConstantBackoff(retryDelay), 5)
+	return retry.Retry(ctx, retryBackoff, func() error {
+		attempt++
+		if socket == nil {
+			var err error
+			socket, err = serial.NewSocketWithIOTimeout(ctx, g.SerialSocketPath(), readTimeout, false)
+			if err != nil {
+				return err
+			}
+		}
+		defer func() {
+			socket.Close()
+			socket = nil
+		}()
+
+		marker := fmt.Sprintf("SSH_KEY_PROVISIONED_%d", attempt)
+		expected := fmt.Sprintf("%s %s", marker, pubkey)
+		cmds := []serial.Command{
+			{
+				Cmd: []string{
+					"mkdir", "-p", "/data/ssh",
+					"&&", "echo", fmt.Sprintf("%q", pubkey), ">", "/data/ssh/authorized_keys",
+					"&&", "read", "-r", "line", "<", "/data/ssh/authorized_keys",
+					"&&", "echo", fmt.Sprintf("\"%s $line\"", marker),
+				},
+			},
+		}
+		if err := serial.RunCommands(ctx, socket, cmds); err != nil {
+			return err
+		}
+		truncCtx, cancel := context.WithTimeout(ctx, readTimeout)
+		_, readErr := iomisc.ReadUntilMatchString(truncCtx, socket, expected)
 		cancel()
 		if readErr == nil {
 			logger.Infof(g.loggerCtx, "successfully provisioned SSH key")
-		} else if errors.Is(readErr, truncCtx.Err()) {
+		} else if errors.Is(readErr, truncCtx.Err()) || errors.Is(readErr, os.ErrDeadlineExceeded) {
 			logger.Warningf(ctx, "ssh key is corrupted")
 		} else {
 			logger.Errorf(ctx, "unexpected error checking for ssh key: %s", readErr)
 		}
 		return readErr
 	}, nil)
-	return nil
 }
 
 func getSerialEndpoint(zone string) string {
@@ -433,8 +639,7 @@ func (g *GCE) IPv6() (*net.IPAddr, error) {
 }
 
 func (g *GCE) Nodename() string {
-	// TODO(rudymathu): fill in nodename
-	return ""
+	return g.config.InstanceName
 }
 
 func (g *GCE) Serial() io.ReadWriteCloser {
@@ -449,12 +654,19 @@ func (g *GCE) UseProductBundles() bool {
 	return false
 }
 
-func (g *GCE) Start(_ context.Context, _ []string, _ string, _ bool) error {
+func (g *GCE) Start(ctx context.Context, _ []string, _ string, _ bool) error {
+	// If we're running a non-bringup configuration, we need to provision an SSH key.
+	if g.opts.ExpectsSSH {
+		return g.provisionSSHKey(ctx)
+	}
 	return nil
 }
 
 func (g *GCE) Stop() error {
 	g.genericFuchsiaTarget.Stop()
+	if g.serial == nil {
+		return nil
+	}
 	return g.serial.Close()
 }
 

@@ -10,13 +10,9 @@ Returns:
     An instance of SshSettings or None
 """
 
-from typing import TypeAlias
-
 from libs.validation import MapValidator
 
-Json: TypeAlias = (
-    dict[str, "Json"] | list["Json"] | str | int | float | bool | None
-)
+type Json = dict[str, Json] | list[Json] | str | int | float | bool | None
 
 
 class SshSettings(object):

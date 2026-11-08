@@ -13,7 +13,6 @@ fidl_library(
     ],
     api_area = "FIDL",
     category = "partner",
-    enable_banjo = True,
     enable_hlcpp = True,
     enable_rust_next = True,
     stable = True,

@@ -62,15 +62,21 @@ StatusCode VmoManager::RegisterVmos(fidl::VectorView<const uint32_t> vmo_ids,
   fbl::AutoLock lock(&lock_);
 
   zx_status_t status = ZX_OK;
-  size_t last_vmo_index = 0;
-  for (; last_vmo_index < vmo_ids.size(); last_vmo_index++) {
-    const uint32_t vmo_id = vmo_ids[last_vmo_index];
+  size_t vmos_registered = 0;
+  for (size_t i = 0; i < vmo_ids.size(); i++) {
+    const uint32_t vmo_id = vmo_ids[i];
+    if (registered_vmos_.GetVmo(vmo_id) != nullptr) {
+      status = ZX_ERR_ALREADY_EXISTS;
+      break;
+    }
 
-    status = registered_vmos_.RegisterWithKey(
-        vmo_id, vmo_store::StoredVmo<void>(std::move(vmos[last_vmo_index])));
+    status =
+        registered_vmos_.RegisterWithKey(vmo_id, vmo_store::StoredVmo<void>(std::move(vmos[i])));
     if (status != ZX_OK) {
       break;
     }
+
+    vmos_registered++;
 
     vmo_store::StoredVmo<void>* vmo = registered_vmos_.GetVmo(vmo_id);
     ZX_ASSERT(vmo != nullptr);
@@ -85,16 +91,12 @@ StatusCode VmoManager::RegisterVmos(fidl::VectorView<const uint32_t> vmo_ids,
   // Registration for one of the VMOs failed, so undo any previous registrations that may have
   // succeeded.
   if (status != ZX_OK) {
-    for (size_t i = 0; i <= last_vmo_index; i++) {
+    for (size_t i = 0; i < vmos_registered; i++) {
       const uint32_t vmo_id = vmo_ids[i];
-      // Only unregister the final VMO if the status code isn't ZX_ERR_ALREADY_EXISTS. Otherwise
-      // this would unregister a VMO that had been registered in a previous call call.
-      if (i != last_vmo_index || status != ZX_ERR_ALREADY_EXISTS) {
-        RemoveVmoId(vmo_id, &unlocked_vmos_);
+      RemoveVmoId(vmo_id, &unlocked_vmos_);
 
-        // We can't return handles to the caller, so just close them.
-        zx::result<zx::vmo> vmo = registered_vmos_.Unregister(vmo_id);
-      }
+      // We can't return handles to the caller, so just close them.
+      zx::result<zx::vmo> vmo = registered_vmos_.Unregister(vmo_id);
     }
   }
 

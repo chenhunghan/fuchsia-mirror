@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#![recursion_limit = "256"]
+
 use linux_uapi::{
     ASHMEM_GET_NAME, ASHMEM_GET_PIN_STATUS, ASHMEM_GET_PROT_MASK, ASHMEM_GET_SIZE,
     ASHMEM_IS_PINNED, ASHMEM_IS_UNPINNED, ASHMEM_NOT_PURGED, ASHMEM_PIN, ASHMEM_PURGE_ALL_CACHES,
@@ -35,9 +37,7 @@ use std::sync::Arc;
 pub fn ashmem_device_init(kernel: &Kernel) {
     let registry = &kernel.device_registry;
 
-    registry
-        .register_misc_device(kernel, "ashmem".into(), AshmemDevice::new())
-        .expect("can register ashmem");
+    registry.add_misc_device(kernel, "ashmem".into(), AshmemDevice::new()).expect("can add ashmem");
 }
 
 #[derive(Clone)]

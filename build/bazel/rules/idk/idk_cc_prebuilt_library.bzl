@@ -50,7 +50,11 @@ def idk_cc_shared_library(
             api_file_path = api_file_path,
         ),
         output_name = output_name,
-        ifs_golden_file = get_golden_file(_get_ifs_golden_file_name(output_name), support_platform = True),
+        ifs_golden_file = get_golden_file(
+            _get_ifs_golden_file_name(output_name),
+            support_platform = True,
+            api_file_path = api_file_path,
+        ),
         **kwargs
     )
 
@@ -113,7 +117,11 @@ def idk_cc_shared_library_zx(
             api_file_path = api_file_path,
         ),
         output_name = output_name,
-        ifs_golden_file = get_golden_file(_get_ifs_golden_file_name(output_name), support_platform = True),
+        ifs_golden_file = get_golden_file(
+            _get_ifs_golden_file_name(output_name),
+            support_platform = True,
+            api_file_path = api_file_path,
+        ),
         **kwargs
     )
 

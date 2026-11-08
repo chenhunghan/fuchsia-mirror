@@ -7,7 +7,7 @@ use bt_a2dp::codec::MediaCodecConfig;
 use bt_a2dp::media_task::*;
 use bt_avdtp::MediaStream;
 use fidl_fuchsia_bluetooth_bredr::AudioOffloadExtProxy;
-use fidl_fuchsia_media::{AudioChannelId, AudioPcmMode, PcmFormat};
+use fidl_fuchsia_media::{AudioChannelId2, AudioPcmMode2, PcmFormat2};
 use fuchsia_async as fasync;
 use fuchsia_audio_device::AudioStreamItem;
 use fuchsia_bluetooth::inspect::DataStreamInspect;
@@ -43,7 +43,7 @@ pub trait AudioSourceStreamBuilder: Send + Sync {
     fn build(
         &self,
         peer_id: &PeerId,
-        pcm_format: PcmFormat,
+        pcm_format: PcmFormat2,
         external_delay: std::time::Duration,
         inspect_parent: &mut Node,
     ) -> Result<Box<dyn AudioSourceStream>, MediaTaskError>;
@@ -107,14 +107,24 @@ fn build_aac_source(bitrate: u32) -> MediaCodecConfig {
         .unwrap()
 }
 
+fn pcm_format_for_codec_config(config: &MediaCodecConfig) -> Result<PcmFormat2, MediaTaskError> {
+    let channel_map = match config.channel_count() {
+        Ok(1) => vec![AudioChannelId2::Fc],
+        Ok(2) => vec![AudioChannelId2::Fl, AudioChannelId2::Fr],
+        Ok(_) | Err(_) => return Err(MediaTaskError::NotSupported),
+    };
+    Ok(PcmFormat2 {
+        pcm_mode: Some(AudioPcmMode2::Linear),
+        bits_per_sample: Some(16),
+        frames_per_second: Some(config.sampling_frequency()?),
+        channel_map: Some(channel_map),
+        ..Default::default()
+    })
+}
+
 async fn test_encodable(config: &MediaCodecConfig) -> Result<(), MediaTaskError> {
     // all sinks must support these options for audio input
-    let required_format = PcmFormat {
-        pcm_mode: AudioPcmMode::Linear,
-        bits_per_sample: 16,
-        frames_per_second: 48000,
-        channel_map: vec![AudioChannelId::Lf],
-    };
+    let required_format = pcm_format_for_codec_config(config)?;
     EncodedStream::test(required_format, config).await
 }
 
@@ -178,24 +188,7 @@ impl Builder {
         peer_id: &PeerId,
         codec_config: &MediaCodecConfig,
     ) -> Result<ConfiguredTask, MediaTaskError> {
-        let channel_map = match codec_config.channel_count() {
-            Ok(1) => vec![AudioChannelId::Cf],
-            Ok(2) => vec![AudioChannelId::Lf, AudioChannelId::Rf],
-            Ok(_) | Err(_) => return Err(MediaTaskError::NotSupported),
-        };
-        let pcm_format = PcmFormat {
-            pcm_mode: AudioPcmMode::Linear,
-            bits_per_sample: 16,
-            frames_per_second: codec_config.sampling_frequency()?,
-            channel_map,
-        };
-        let task = ConfiguredTask::build(
-            pcm_format.clone(),
-            self.source_type,
-            self.stream_builder.clone(),
-            peer_id.clone(),
-            codec_config,
-        );
+        let pcm_format = pcm_format_for_codec_config(codec_config)?;
         let test_stream = self.stream_builder.build(
             peer_id,
             pcm_format.clone(),
@@ -206,7 +199,13 @@ impl Builder {
             trace!("inband_source::Builder: can't build encoded stream: {e:?}");
             return Err(e.context("Building test stream").into());
         }
-        Ok(task)
+        Ok(ConfiguredTask::build(
+            pcm_format,
+            self.source_type,
+            self.stream_builder.clone(),
+            peer_id.clone(),
+            codec_config,
+        ))
     }
 }
 
@@ -239,7 +238,7 @@ pub(crate) struct ConfiguredTask {
     /// Shared with any RunningTask
     source_stream: OnceLock<SharedSourceStream>,
     /// Format the source audio should be produced in.
-    pub(crate) pcm_format: PcmFormat,
+    pub(crate) pcm_format: PcmFormat2,
     /// Configuration providing the format of encoded audio requested by the peer.
     codec_config: MediaCodecConfig,
     /// Delay reported from the peer. Defaults to zero. Passed on to the Audio source.
@@ -254,7 +253,7 @@ pub(crate) struct ConfiguredTask {
 impl ConfiguredTask {
     /// Build a new ConfiguredTask. Usually only called by Builder.
     pub(crate) fn build(
-        pcm_format: PcmFormat,
+        pcm_format: PcmFormat2,
         source_type: AudioSourceType,
         stream_builder: Arc<Box<dyn AudioSourceStreamBuilder>>,
         peer_id: PeerId,
@@ -476,8 +475,8 @@ mod tests {
             // Minimum SBC requirements are mono, 48kHz
             let mono_config = MediaCodecConfig::min_sbc();
             let task = builder.configure_task(&PeerId(1), &mono_config).expect("should build okay");
-            assert_eq!(48000, task.pcm_format.frames_per_second);
-            assert_eq!(1, task.pcm_format.channel_map.len());
+            assert_eq!(Some(48000), task.pcm_format.frames_per_second);
+            assert_eq!(1, task.pcm_format.channel_map.as_ref().unwrap().len());
 
             // A standard SBC audio config which is stereo and 44.1kHz
             let sbc_codec_info = SbcCodecInfo::new(
@@ -498,8 +497,8 @@ mod tests {
 
             let task =
                 builder.configure_task(&PeerId(1), &stereo_config).expect("should build okay");
-            assert_eq!(44100, task.pcm_format.frames_per_second);
-            assert_eq!(2, task.pcm_format.channel_map.len());
+            assert_eq!(Some(44100), task.pcm_format.frames_per_second);
+            assert_eq!(2, task.pcm_format.channel_map.as_ref().unwrap().len());
         }
 
         #[test_case(Transport::Socket ; "socket")]
@@ -585,7 +584,7 @@ mod tests {
             fn build(
                 &self,
                 _peer_id: &PeerId,
-                _pcm_format: PcmFormat,
+                _pcm_format: PcmFormat2,
                 _external_delay: std::time::Duration,
                 _inspect_parent: &mut Node,
             ) -> Result<Box<dyn AudioSourceStream>, MediaTaskError> {
@@ -608,11 +607,12 @@ mod tests {
             };
 
             let mono_config = MediaCodecConfig::min_sbc();
-            let pcm_format = PcmFormat {
-                pcm_mode: AudioPcmMode::Linear,
-                bits_per_sample: 16,
-                frames_per_second: 48000,
-                channel_map: vec![AudioChannelId::Cf],
+            let pcm_format = PcmFormat2 {
+                pcm_mode: Some(AudioPcmMode2::Linear),
+                bits_per_sample: Some(16),
+                frames_per_second: Some(48000),
+                channel_map: Some(vec![AudioChannelId2::Fc]),
+                ..Default::default()
             };
 
             let mut task = ConfiguredTask::build(

@@ -4,11 +4,11 @@
 
 #include "src/developer/debug/zxdb/client/system.h"
 
-#include <functional>
 #include <lib/syslog/cpp/log_settings.h>
 
 #include <algorithm>
 #include <filesystem>
+#include <functional>
 #include <iterator>
 #include <set>
 
@@ -21,6 +21,7 @@
 #include "src/developer/debug/zxdb/client/download_observer.h"
 #include "src/developer/debug/zxdb/client/exception_settings.h"
 #include "src/developer/debug/zxdb/client/filter.h"
+#include "src/developer/debug/zxdb/client/pretty_stack_manager.h"
 #include "src/developer/debug/zxdb/client/process_impl.h"
 #include "src/developer/debug/zxdb/client/remote_api.h"
 #include "src/developer/debug/zxdb/client/session.h"
@@ -29,6 +30,7 @@
 #include "src/developer/debug/zxdb/client/system_observer.h"
 #include "src/developer/debug/zxdb/client/target_impl.h"
 #include "src/developer/debug/zxdb/client/thread_impl.h"
+#include "src/developer/debug/zxdb/client/tracepoint.h"
 #include "src/developer/debug/zxdb/common/join_callbacks.h"
 #include "src/developer/debug/zxdb/common/string_util.h"
 #include "src/developer/debug/zxdb/expr/vector_register_format.h"
@@ -278,6 +280,9 @@ System::System(Session* session)
   // Create the default target.
   AddNewTarget(std::make_unique<TargetImpl>(this));
 
+  pretty_stack_manager_ = fxl::MakeRefCounted<PrettyStackManager>();
+  pretty_stack_manager_->LoadDefaultMatchers();
+
   session->AddObserver(this);
   session->AddDownloadObserver(this);
 
@@ -309,6 +314,7 @@ System::~System() {
   }
 
   targets_.clear();
+  tracepoints_.clear();
 
   session()->RemoveDownloadObserver(this);
   session()->RemoveObserver(this);
@@ -493,15 +499,17 @@ void System::DeleteBreakpoint(Breakpoint* breakpoint) {
 }
 
 void System::DeleteAllBreakpoints() {
-  for (auto& bp : breakpoints_) {
-    // Only notify for non-internal breakpoints.
-    if (!bp.second->is_internal()) {
-      for (auto& observer : observers_)
-        observer.WillDestroyBreakpoint(bp.second.get());
+  for (auto it = breakpoints_.begin(); it != breakpoints_.end();) {
+    if (GetTracepointForBreakpoint(it->second.get())) {
+      ++it;
+      continue;
     }
+    if (!it->second->is_internal()) {
+      for (auto& observer : observers_)
+        observer.WillDestroyBreakpoint(it->second.get());
+    }
+    it = breakpoints_.erase(it);
   }
-
-  breakpoints_.clear();
 }
 
 Filter* System::CreateNewFilter(std::optional<debug_ipc::Filter> maybe_filter) {
@@ -549,6 +557,68 @@ void System::DeleteAllFilters() {
   filters_.clear();
 
   SyncFilters();
+}
+
+Tracepoint* System::CreateNewTracepoint() {
+  uint32_t id = next_tracepoint_id_++;
+  auto owning = std::make_unique<Tracepoint>(session(), id);
+  Tracepoint* to_return = owning.get();
+  tracepoints_[id] = std::move(owning);
+
+  for (auto& observer : observers_)
+    observer.DidCreateTracepoint(to_return);
+
+  return to_return;
+}
+
+void System::DeleteTracepoint(Tracepoint* tracepoint) {
+  if (!tracepoint)
+    return;
+  auto found = tracepoints_.find(tracepoint->id());
+  if (found == tracepoints_.end())
+    return;
+
+  // Move ownership onto the stack before notifying observers so re-entrant DeleteTracepoint calls
+  // become no-ops and cannot destroy the tracepoint twice.
+  auto node = tracepoints_.extract(found);
+  for (auto& observer : observers_)
+    observer.WillDestroyTracepoint(tracepoint);
+}
+
+void System::DeleteAllTracepoints() {
+  while (!tracepoints_.empty()) {
+    DeleteTracepoint(tracepoints_.begin()->second.get());
+  }
+}
+
+std::vector<Tracepoint*> System::GetTracepoints() const {
+  std::vector<Tracepoint*> result;
+  result.reserve(tracepoints_.size());
+  for (const auto& [id, tp] : tracepoints_) {
+    result.push_back(tp.get());
+  }
+  return result;
+}
+
+Tracepoint* System::GetTracepointForBreakpoint(const Breakpoint* bp) const {
+  if (!bp)
+    return nullptr;
+  for (const auto& [id, tp] : tracepoints_) {
+    if (tp->breakpoint() == bp)
+      return tp.get();
+  }
+  return nullptr;
+}
+
+void System::NotifyTracepointHit(Tracepoint* tracepoint, const TracepointHitRecord& hit) {
+  if (!tracepoint)
+    return;
+  fxl::WeakPtr<Tracepoint> weak_tp = tracepoint->GetWeakPtr();
+  for (auto& observer : observers_) {
+    if (!weak_tp)
+      break;
+    observer.OnTracepointHit(weak_tp.get(), hit);
+  }
 }
 
 void System::Pause(fit::callback<void()> on_paused) {

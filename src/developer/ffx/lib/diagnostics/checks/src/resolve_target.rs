@@ -61,8 +61,15 @@ where
 {
     if sources.contains(DiscoverySources::EMULATOR) {
         // This isn't an option as it's intended to be part of the default config.
-        let emu_instance_root: PathBuf = ctx.get(ffx_config::keys::EMU_INSTANCE_ROOT_DIR)?;
-        notifier.info(format!("Searching for emulators at {}", emu_instance_root.display()))?;
+        let emu_instance_roots: Vec<PathBuf> = ctx.get(ffx_config::keys::EMU_INSTANCE_ROOT_DIR)?;
+        let mut roots = emu_instance_roots.iter();
+        if let Some(root) = roots.next() {
+            notifier.info(format!("Searching for emulators at {}", root.display()))?;
+        }
+        for backup_root in roots.filter(|root| root.is_dir()) {
+            notifier
+                .info(format!("Searching for legacy emulators at {}", backup_root.display()))?;
+        }
     }
     if sources.contains(DiscoverySources::FASTBOOT_FILE) {
         let fastboot_file_path: Option<PathBuf> =

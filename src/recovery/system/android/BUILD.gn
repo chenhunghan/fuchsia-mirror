@@ -5,10 +5,8 @@
 import("//build/components.gni")
 import("//build/rust/rustc_binary.gni")
 
-rustc_binary("bin") {
-  name = "system_recovery_android"
+bin_base = {
   edition = "2024"
-  with_unit_tests = true
   deps = [
     "//sdk/fidl/fuchsia.fshost:fuchsia.fshost_rust",
     "//sdk/fidl/fuchsia.hardware.adb:fuchsia.hardware.adb_rust",
@@ -27,10 +25,11 @@ rustc_binary("bin") {
     "//src/lib/fuchsia-component",
     "//src/lib/fuchsia-fs",
     "//src/lib/fuchsia-runtime",
+    "//src/lib/fuchsia-sync",
     "//src/lib/ui/carnelian",
     "//src/recovery/lib/bootloader-message",
     "//src/recovery/lib/recovery-ui",
-    "//src/recovery/system:recovery_ui_config",
+    "//src/recovery/system:recovery_android_config",
     "//src/storage/fxfs/fidl/fuchsia.fxfs:fuchsia.fxfs_rust",
     "//src/storage/lib/block_client/rust",
     "//src/storage/lib/vfs/rust:vfs",
@@ -41,9 +40,6 @@ rustc_binary("bin") {
     "//third_party/rust_crates:log",
     "//third_party/rust_crates:zerocopy",
   ]
-  test_deps = [
-    "//src/storage/lib/block_server/vmo_backed:test_vmo_backed_block_server",
-  ]
   sources = [
     "src/bootloader.rs",
     "src/fdr.rs",
@@ -53,6 +49,22 @@ rustc_binary("bin") {
     "src/update.rs",
     "src/view_sender.rs",
   ]
+}
+
+rustc_binary("bin") {
+  forward_variables_from(bin_base, "*")
+  name = "system_recovery_android"
+  with_unit_tests = true
+  test_deps = [
+    "//src/storage/lib/block_server/vmo_backed:test_vmo_backed_block_server",
+  ]
+}
+
+rustc_binary("bin_with_fake_time") {
+  forward_variables_from(bin_base, "*")
+  name = "system_recovery_android_fake_time"
+  testonly = true
+  non_rust_deps = [ "//src/lib/fake-clock/lib" ]
 }
 
 fuchsia_unittest_package("system_recovery_android_unittests") {

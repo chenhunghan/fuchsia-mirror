@@ -46,7 +46,7 @@ semantics changes.
     making a modification to tables, or create a new test file.
 
 It is expected for changes to FIDL which cascade to backends to update all
-Fuchsia FIDL team owned bindings, i.e. Rust, Go, Dart, HLCPP, New C++ (natural
+Fuchsia FIDL team owned bindings, i.e. Rust, Dart, HLCPP, New C++ (natural
 and wire).
 
 ## Changes to the JSON IR

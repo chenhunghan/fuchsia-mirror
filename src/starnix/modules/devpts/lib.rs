@@ -140,22 +140,22 @@ pub fn tty_device_init(kernel: &Kernel) -> Result<(), Errno> {
         .expect("can register tty device");
 
     let tty_class = registry.objects.tty_class();
-    registry.add_device(
+    registry.add_major_device(
         kernel,
         "tty".into(),
         DeviceMetadata::new("tty".into(), DeviceId::TTY, DeviceMode::Char),
         /* parent = */ None,
         tty_class.clone(),
         build_device_directory,
-    )?;
-    registry.add_device(
+    );
+    registry.add_major_device(
         kernel,
         "ptmx".into(),
         DeviceMetadata::new("ptmx".into(), DeviceId::PTMX, DeviceMode::Char),
         /* parent = */ None,
         tty_class,
         build_device_directory,
-    )?;
+    );
     Ok(())
 }
 

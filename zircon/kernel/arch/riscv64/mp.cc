@@ -28,6 +28,7 @@
 #include <lk/main.h>
 #include <vm/handoff-end.h>
 #include <vm/vm.h>
+#include <vm/vm_aspace.h>
 
 #include <ktl/enforce.h>
 

@@ -4,13 +4,22 @@
 
 load(
     "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
     "fx_component_manifest",
+    "fx_test_component",
 )
 load(
     "//build/bazel/rules/components:structured_config.bzl",
     "fuchsia_structured_config_rust_lib",
 )
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -37,7 +46,6 @@ rustc_library(
     visibility = ["//src/sys/pkg/bin/grand-swd-binary:__pkg__"],
     deps = [
         ":system_update_committer_config",
-        "//sdk/fidl/fuchsia.component.sandbox:fuchsia.component.sandbox_rust",
         "//sdk/fidl/fuchsia.hardware.power.statecontrol:fuchsia.hardware.power.statecontrol_rust",
         "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
         "//sdk/fidl/fuchsia.paver:fuchsia.paver_rust",
@@ -53,7 +61,6 @@ rustc_library(
         "//src/lib/fuchsia-component",
         "//src/lib/fuchsia-runtime",
         "//src/lib/fuchsia-sync",
-        "//src/lib/sandbox",
         "//src/sys/pkg/fidl/fuchsia.update.verify:fuchsia.update.verify_rust",
         "//third_party/rust_crates/vendor:anyhow",
         "//third_party/rust_crates/vendor:futures",
@@ -62,16 +69,14 @@ rustc_library(
     ],
 )
 
-# The GN build uses the `fuchsia_component_manifest("manifest")` target defined
-# above the bazel2gn sentinel in BUILD.gn instead.
-# @bazel2gn:skip
+# The Bazel build defines an equivalent `fx_component_manifest("manifest")`
+# target, so that `:system_update_committer_config` refers to the same label in
+# both builds.
 fx_component_manifest(
     name = "manifest",
     component_name = "system-update-committer",
     includes = [
-        "//sdk/lib/inspect:client.shard.cml",
-        "//sdk/lib/inspect:offer.shard.cml",
-        "//sdk/lib/inspect:use.shard.cml",
+        "//sdk/lib/inspect:client.shard",
         "//sdk/lib/syslog:client.shard",
     ],
     manifest = "meta/system-update-committer.cml",
@@ -80,4 +85,72 @@ fx_component_manifest(
 fuchsia_structured_config_rust_lib(
     name = "system_update_committer_config",
     cm_label = ":manifest",
+)
+
+fx_packaged_binary(
+    name = "bin",
+    binary = "//src/sys/pkg/bin/grand-swd-binary",
+    binary_name = "system_update_committer",
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":manifest",
+    visibility = [
+        "//src/security/tests/pkg_test/tests:__subpackages__",
+        "//src/sys/pkg:__subpackages__",
+    ],
+    deps = [
+        ":bin",  # @bazel2gn:path_overwrite::bin
+    ],
+)
+
+rustc_test(
+    name = "system_update_committer_lib_test",
+    crate = ":lib",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    deps = [
+        "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+        "//src/sys/pkg/testing/mock-health-verification",
+        "//src/sys/pkg/testing/mock-paver",
+        "//src/sys/pkg/testing/mock-reboot",
+        "//third_party/rust_crates/vendor:assert_matches",
+    ],
+)
+
+fx_packaged_binary(
+    name = "lib_test_packaged_bin",
+    testonly = True,
+    binary = ":system_update_committer_lib_test",
+    binary_name = "system_update_committer_lib_test",
+)
+
+fx_component_manifest(
+    name = "unittest_manifest",
+    testonly = True,
+    component_name = "unittest_component",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/unittests.cml",
+)
+
+fx_test_component(
+    name = "unittest_component",
+    compiled_manifest = ":unittest_manifest",
+    deps = [":lib_test_packaged_bin"],
+)
+
+fx_package(
+    name = "system-update-committer-tests-package",
+    package_name = "system-update-committer-tests",
+    test_components = [":unittest_component"],
+)
+
+fx_test(
+    name = "system-update-committer-tests",
+    package = ":system-update-committer-tests-package",
 )

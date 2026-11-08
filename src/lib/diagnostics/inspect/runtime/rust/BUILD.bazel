@@ -7,12 +7,12 @@ load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
 
 package(default_applicable_licenses = ["//:license"])
 
-# NOTE: `lib_test` and `inspect-runtime-tests` remain in BUILD.gn above the
-# sentinel because `inspect_test_component` uses
-# `fuchsia_structured_config_rust_lib` and `fuchsia_structured_config_values`,
-# which do not have Bazel rules yet, and `lib_test` depends on
-# `//src/lib/diagnostics/reader/rust`, `//src/lib/fuchsia-component-test`, and
-# `//src/sys/lib/component-events`.
+# NOTE: `lib_test`, `inspect-runtime-tests`, and `inspect_test_component`
+# remain in BUILD.gn above the sentinel because `lib_test` depends on
+# `//src/lib/fuchsia-component-test` (which bundles the unmigrated GN-only
+# `//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component`),
+# and `inspect_test_component_default` is depended on by the GN-only
+# `//src/lib/diagnostics/reader/rust:diagnostics-reader-tests` package.
 # TODO(https://fxbug.dev/42161852): Remove this dep during post-migration cleanup.
 #
 # Restrict visibility to local targets. Clients looking to use the

@@ -2,7 +2,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
 load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 load("//build/rust:fidl_rust_next.bzl", "fidl_rust_next_allowlist")
 
 package(default_applicable_licenses = ["//:license"])
@@ -15,6 +17,7 @@ rustc_library(
     ],
     crate_name = "fidl_next_util",
     edition = "2024",
+    visibility = ["//src/lib/fidl/rust_next:__pkg__"],  # @bazel2gn:skip
     with_unit_tests = True,
     deps = [
         "//src/lib/fidl/rust_next/fidl_next_bind",
@@ -35,4 +38,14 @@ alias(
     testonly = True,
     actual = ":fidl_next_util_internal_test",
     visibility = fidl_rust_next_allowlist,
+)
+
+wrap_host_rust_test(
+    name = "fidl_next_util_host_test",
+    binary_name = "fidl_next_util_internal_test",
+)
+
+fx_unittest_package(
+    name = "fidl_next_util_test_package",
+    unit_tests = [":fidl_next_util_internal_test"],
 )

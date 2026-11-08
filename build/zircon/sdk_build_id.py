@@ -7,7 +7,6 @@ import argparse
 import json
 import os
 import sys
-from typing import TypeAlias
 
 sys.path.append(
     os.path.join(
@@ -19,7 +18,7 @@ sys.path.append(
 import binaries
 
 # A debug file name, or a (possibly nested) list of them.
-DebugPaths: TypeAlias = str | list["DebugPaths"]
+type DebugPaths = str | list[DebugPaths]
 
 
 # Rewrite a debug file name (or list of them) into its .build-id/...

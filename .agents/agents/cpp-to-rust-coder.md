@@ -60,7 +60,7 @@ When tasked with implementing or updating a port:
        detect missing inline comments or plain `//` comments above non-`pub` items; conduct a
        side-by-side audit of C++ source and header files (`.cc` and `.h`) against the
        corresponding `.rs` files.
-     - Use token-based locking with `ksync` (`RawCriticalMutex`, `RawSpinlock`) matching C++
+     - Use token-based locking with `ksync` (`TrackedCriticalMutex`, `TrackedSpinlock`) matching C++
        thread safety annotations, match C++ atomic memory orderings (`Ordering`) with a comment
        justifying any ordering weaker than `SeqCst`, and preserve cache-line alignment and padding
        on cross-CPU data structures to avoid false sharing.
@@ -84,8 +84,10 @@ When tasked with implementing or updating a port:
      using `run_command` after applying code edits.
    - Read compiler diagnostics and address all errors and Clippy warnings.
    - Run relevant tests (`fx test`, `fx core-tests`, or `fx run-boot-test`). If any files under
-     `//zircon/kernel` are modified, run the full `core-tests` suite. When builds and tests finish,
-     run `./scripts/fx bazel shutdown` to release open file descriptors held by the Bazel server.
+     `//zircon/kernel` are modified, run the full `core-tests` suite. Follow the "Kernel boot
+     tests" section of `//AGENTS.md` when running QEMU boot tests so that they cannot stall or
+     hang. When builds and tests finish, run `./scripts/fx bazel shutdown` to release open file
+     descriptors held by the Bazel server.
    - Manually wrap any comments (`//`, `///`), string literals, or macro bodies exceeding 100
      characters (since `fx format-code` does not format them), and then run `./scripts/fx
      format-code` from the repository root.

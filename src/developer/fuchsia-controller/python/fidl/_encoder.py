@@ -107,7 +107,7 @@ class Encoder:
         self,
         val: typing.Sequence[typing.Any] | None,
         offset: int,
-        element_encoder_fn: typing.Callable[[typing.Any, "Encoder", int], None],
+        element_encoder_fn: typing.Callable[[typing.Any, Encoder, int], None],
         element_size: int,
     ) -> None:
         if val is None:
@@ -125,7 +125,7 @@ class Encoder:
     def write_ool_vector(
         self,
         val: typing.Sequence[typing.Any],
-        element_encoder_fn: typing.Callable[[typing.Any, "Encoder", int], None],
+        element_encoder_fn: typing.Callable[[typing.Any, Encoder, int], None],
         element_size: int,
     ) -> None:
         parent_tasks = self.ool_tasks
@@ -153,7 +153,7 @@ class Encoder:
         self,
         val: typing.Sequence[typing.Any],
         offset: int,
-        element_encoder_fn: typing.Callable[[typing.Any, "Encoder", int], None],
+        element_encoder_fn: typing.Callable[[typing.Any, Encoder, int], None],
         element_size: int,
         count: int,
     ) -> None:
@@ -168,7 +168,7 @@ class Encoder:
         self,
         val: typing.Any,
         offset: int,
-        encode_fn: typing.Callable[[typing.Any, "Encoder", int], None],
+        encode_fn: typing.Callable[[typing.Any, Encoder, int], None],
         inline_size: int,
     ) -> None:
         if val is None:
@@ -182,7 +182,7 @@ class Encoder:
     def write_ool_struct(
         self,
         val: typing.Any,
-        encode_fn: typing.Callable[[typing.Any, "Encoder", int], None],
+        encode_fn: typing.Callable[[typing.Any, Encoder, int], None],
         inline_size: int,
     ) -> None:
         parent_tasks = self.ool_tasks
@@ -209,7 +209,7 @@ class Encoder:
         self,
         val: typing.Any,
         env_offset: int,
-        encode_fn: typing.Callable[[typing.Any, "Encoder", int], None],
+        encode_fn: typing.Callable[[typing.Any, Encoder, int], None],
         inline_size: int,
         is_inline: bool,
     ) -> None:
@@ -244,7 +244,7 @@ class Encoder:
     def write_ool_envelope_member(
         self,
         val: typing.Any,
-        encode_fn: typing.Callable[[typing.Any, "Encoder", int], None],
+        encode_fn: typing.Callable[[typing.Any, Encoder, int], None],
         inline_size: int,
         env_offset: int,
     ) -> None:

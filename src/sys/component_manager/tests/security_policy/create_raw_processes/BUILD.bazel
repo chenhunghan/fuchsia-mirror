@@ -1,0 +1,70 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_binary(
+    name = "bin",
+    srcs = ["main.cc"],
+    deps = ["//src/lib/test-suite:test_suite_lib"],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "security-policy-create-raw-processes-test",
+)
+
+fx_component_manifest(
+    name = "security-policy-create-raw-processes-test-manifest",
+    testonly = True,
+    component_name = "security-policy-create-raw-processes-test",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/security-policy-create-raw-processes-test.cml",
+)
+
+fx_test_component(
+    name = "security-policy-create-raw-processes-test-component",
+    compiled_manifest = ":security-policy-create-raw-processes-test-manifest",
+    test_type = "system",
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "security-policy-create-raw-processes-test-package",
+    package_name = "security-policy-create-raw-processes-test",
+    components = [
+        # https://fxbug.dev/42052321: Dep included for affected tests presubmit
+        "//src/sys/component_manager:component-manager-realm-builder-cmp",
+    ],
+    test_components = [":security-policy-create-raw-processes-test-component"],
+)
+
+# https://fxbug.dev/42052321: Dep included for affected tests presubmit
+fx_test(
+    name = "security-policy-create-raw-processes-test",
+    # The raw processes test is created using ZX_PROCESS_SHARED, which does not
+    # play nice with asan.
+    build_only = select({
+        "@prebuilt_clang//:asan-ubsan_variant": True,
+        "@prebuilt_clang//:asan_variant": True,
+        "@prebuilt_clang//:hwasan-ubsan_variant": True,
+        "@prebuilt_clang//:hwasan_variant": True,
+        "//conditions:default": False,
+    }),
+    package = ":security-policy-create-raw-processes-test-package",
+    test_type = "system",
+    visibility = ["//src/sys/component_manager:__pkg__"],
+)

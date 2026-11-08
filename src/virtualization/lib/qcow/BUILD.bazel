@@ -1,0 +1,101 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_build_config//:defs.bzl", "build_config")
+load(
+    "@fuchsia_rules_common//packages:resources.bzl",
+    "fuchsia_package_resource_collection",
+)
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules:cipd_prebuilt.bzl", "cipd_prebuilt_file")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+load("//src/virtualization/lib/qcow:qcow_test_image.bzl", "qcow_test_image")
+
+package(default_applicable_licenses = ["//:license"])
+
+exports_files(
+    ["scripts/gen-sparse-image.py"],
+    visibility = ["//src/virtualization:__subpackages__"],
+)
+
+# @bazel2gn:skip
+cipd_prebuilt_file(
+    name = "qemu_img",
+    testonly = True,
+    path = "prebuilt/third_party/qemu/%s/bin/qemu-img" % build_config.host_tag,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+rustc_library(
+    name = "qcow",
+    srcs = [
+        "src/lib.rs",
+        "src/wire.rs",
+    ],
+    edition = "2024",
+    visibility = ["//src/virtualization/bin/vmm/device/virtio_block:__pkg__"],
+    deps = [
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)
+
+rustc_test(
+    name = "qcow_test",
+    crate = ":qcow",
+)
+
+# bazel2gn can't translate qcow_test_image() or packages with resources, so the
+# GN copy of this test is packaged by hand in BUILD.gn.
+# LINT.IfChange
+# A completely empty image.
+# @bazel2gn:skip
+qcow_test_image(
+    name = "empty_1gb",
+    testonly = True,
+    disk_size = "1G",
+)
+
+# A disk image with data written to multiple locations in the file.
+# @bazel2gn:skip
+qcow_test_image(
+    name = "sparse",
+    testonly = True,
+    disk_size = "1G",
+    writes = [
+        # First and third 1k bytes are populated (but not bytes 1025->2048).
+        "0+1k=0xaa",
+        "2k+1k=0xab",
+
+        # Last 1024 bytes
+        "1048575k+1k=0xbb",
+
+        # Something in the middle
+        "512M+1k=0xcc",
+    ],
+)
+
+# @bazel2gn:skip
+fuchsia_package_resource_collection(
+    name = "test_images",
+    testonly = True,
+    resources = [
+        ":empty_1gb",
+        ":sparse",
+    ],
+)
+
+# @bazel2gn:skip
+fx_unittest_package(
+    name = "qcow_unittests",
+    resources = [":test_images"],
+    unit_tests = [":qcow_test"],
+    visibility = ["//src/virtualization:__pkg__"],
+)
+# LINT.ThenChange(BUILD.gn)

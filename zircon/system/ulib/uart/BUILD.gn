@@ -30,7 +30,7 @@ library_headers("headers") {
     "//zircon/kernel/lib/acpi_lite:headers",
 
     # Various headers have #include <lib/devicetree/devicetree.h>
-    "//zircon/kernel/lib/devicetree:headers",
+    "//sdk/lib/devicetree:headers",
 
     # <lib/uart/uart.h> has #include <lib/zircon-internal/thread_annotations.h>.
     "//zircon/system/ulib/zircon-internal:headers",

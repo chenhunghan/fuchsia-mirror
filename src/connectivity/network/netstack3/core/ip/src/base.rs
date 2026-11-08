@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use core::fmt::Debug;
 use core::hash::Hash;
 use core::marker::PhantomData;
-use core::num::NonZeroU8;
+use core::num::{NonZeroU8, NonZeroU16};
 use core::ops::ControlFlow;
 #[cfg(test)]
 use core::ops::DerefMut;
@@ -30,8 +30,8 @@ use netstack3_base::{
     AnyDevice, BroadcastIpExt, CoreTimerContext, Counter, CounterCollectionSpec, CounterContext,
     DeviceIdContext, DeviceIdentifier as _, ErrorAndSerializer, EventContext, GsoInfo,
     HandleableTimer, InstantContext, InterfaceProperties, IpAddressId, IpDeviceAddr,
-    IpDeviceAddressIdContext, IpExt, LocalFrameDestination, MarkDomain, Marks, Matcher as _,
-    MatcherBindingsTypes, NestedIntoCoreTimerCtx, NetworkParsingContext,
+    IpDeviceAddressIdContext, IpExt, Ipv4IdMode, LocalFrameDestination, MarkDomain, Marks,
+    Matcher as _, MatcherBindingsTypes, NestedIntoCoreTimerCtx, NetworkParsingContext,
     NetworkSerializationContext, NotFoundError, PacketType, ResourceCounterContext, RngContext,
     SendFrameErrorReason, StrongDeviceIdentifier, TimerBindingsTypes, TimerContext, TimerHandler,
     TxMetadata as _, TxMetadataBindingsTypes, WeakIpAddressId, WrapBroadcastMarker,
@@ -266,21 +266,30 @@ impl<BT: TxMetadataBindingsTypes> DeviceIpLayerMetadata<BT> {
     /// to IP fragmentation or GSO segmentation) into
     /// [`SplitDeviceIpLayerMetadata`].
     ///
-    /// The `primary` instance retains unique resources (`tx_metadata`), while
-    /// the `secondary` instance receives a copy of shareable metadata
-    /// (`conntrack_entry` and `marks`) with default unique resources.
+    /// The `primary` instance retains unique resources within `tx_metadata`
+    /// (such as buffer ownership tokens), while both instances receive shareable
+    /// metadata (`conntrack_entry`, `marks`, `packet_type`, and shareable
+    /// `tx_metadata` such as socket attribution and checksum offload configuration).
     pub(crate) fn split_for_multiple_frames(self) -> SplitDeviceIpLayerMetadata<BT> {
+        let (primary_tx_metadata, secondary_tx_metadata) =
+            self.tx_metadata.split_for_multiple_frames();
         let secondary = Self {
             conntrack_entry: self.conntrack_entry.clone(),
             // TODO(https://fxbug.dev/391953082): We should penalize sockets via
             // the tx metadata when a packet is sent as multiple frames instead
             // of just attaching the ownership to one of them. For now, only the
-            // `primary` instance retains the tx metadata.
-            tx_metadata: Default::default(),
+            // `primary` instance retains the unique buffer ownership tokens.
+            tx_metadata: secondary_tx_metadata,
             marks: self.marks,
             packet_type: self.packet_type,
         };
-        SplitDeviceIpLayerMetadata { primary: self, secondary }
+        let primary = Self {
+            conntrack_entry: self.conntrack_entry,
+            tx_metadata: primary_tx_metadata,
+            marks: self.marks,
+            packet_type: self.packet_type,
+        };
+        SplitDeviceIpLayerMetadata { primary, secondary }
     }
 
     /// Sets the packet type on this metadata.
@@ -943,8 +952,9 @@ pub trait IpLayerIpExt:
     type PacketIdState;
     /// The type of a single packet identifier.
     type PacketId;
-    /// Produces the next packet ID from the state.
-    fn next_packet_id_from_state(state: &Self::PacketIdState) -> Self::PacketId;
+    /// Reserves `count` consecutive packet IDs from the state, returning the
+    /// first one.
+    fn next_packet_id_from_state(state: &Self::PacketIdState, count: NonZeroU16) -> Self::PacketId;
 }
 
 impl IpLayerIpExt for Ipv4 {
@@ -953,11 +963,14 @@ impl IpLayerIpExt for Ipv4 {
         Ipv4State<StrongDeviceId, BT>;
     type PacketIdState = AtomicU16;
     type PacketId = u16;
-    fn next_packet_id_from_state(next_packet_id: &Self::PacketIdState) -> Self::PacketId {
+    fn next_packet_id_from_state(
+        next_packet_id: &Self::PacketIdState,
+        count: NonZeroU16,
+    ) -> Self::PacketId {
         // Relaxed ordering as we only need atomicity without synchronization. See
         // https://en.cppreference.com/w/cpp/atomic/memory_order#Relaxed_ordering
         // for more details.
-        next_packet_id.fetch_add(1, atomic::Ordering::Relaxed)
+        next_packet_id.fetch_add(count.get(), atomic::Ordering::Relaxed)
     }
 }
 
@@ -967,7 +980,7 @@ impl IpLayerIpExt for Ipv6 {
         Ipv6State<StrongDeviceId, BT>;
     type PacketIdState = ();
     type PacketId = ();
-    fn next_packet_id_from_state((): &Self::PacketIdState) -> Self::PacketId {
+    fn next_packet_id_from_state((): &Self::PacketIdState, _count: NonZeroU16) -> Self::PacketId {
         ()
     }
 }
@@ -1344,7 +1357,9 @@ impl<
 {
 }
 
-fn is_unicast_assigned<I: IpLayerIpExt>(status: &I::AddressStatus) -> bool {
+/// Returns whether `status` indicates a unicast address that is assigned to the
+/// device it was queried for.
+pub(crate) fn is_unicast_assigned<I: IpLayerIpExt>(status: &I::AddressStatus) -> bool {
     #[derive(GenericOverIp)]
     #[generic_over_ip(I, Ip)]
     struct WrapAddressStatus<'a, I: IpLayerIpExt>(&'a I::AddressStatus);
@@ -2119,13 +2134,14 @@ impl<StrongDeviceId: StrongDeviceIdentifier, BT: IpLayerBindingsTypes>
     }
 }
 
-/// Generates an IP packet ID.
+/// Reserves `count` consecutive IP packet IDs, returning the first one.
 ///
 /// This is only meaningful for IPv4, see [`IpLayerIpExt`].
 pub fn gen_ip_packet_id<I: IpLayerIpExt, CC: IpDeviceEgressStateContext<I>>(
     core_ctx: &mut CC,
+    count: NonZeroU16,
 ) -> I::PacketId {
-    core_ctx.with_next_packet_id(|state| I::next_packet_id_from_state(state))
+    core_ctx.with_next_packet_id(|state| I::next_packet_id_from_state(state, count))
 }
 
 /// The stack's IPv6 state.
@@ -5516,7 +5532,24 @@ where
     let SendIpPacketMeta { device, src_ip, dst_ip, destination, proto, ttl, mtu, dscp_and_ecn } =
         meta;
     core_ctx.increment_both(device, |c| &c.send_ip_packet);
-    let next_packet_id = gen_ip_packet_id(core_ctx);
+    // GSO with incrementing IPv4 IDs gives each segment its own ID, so reserve
+    // a contiguous block of `gso_segs` IDs.
+    let num_packet_ids = match packet_metadata.gso_info() {
+        Some(GsoInfo {
+            gso_segs,
+            ipv4_id_mode: Some(Ipv4IdMode::Incrementing) | None,
+            gso_size: _,
+        }) => gso_segs,
+        // Without GSO, or with fixed IPv4 IDs (where all segments share an
+        // ID), the packet consumes a single ID.
+        //
+        // TODO(https://fxbug.dev/408513626): If we start setting DF, consider
+        // reserving no IDs for DF packets (GSO or not), since RFC 6864 permits
+        // atomic datagrams to share an ID.
+        Some(GsoInfo { gso_segs: _, ipv4_id_mode: Some(Ipv4IdMode::Fixed), gso_size: _ })
+        | None => NonZeroU16::MIN,
+    };
+    let next_packet_id = gen_ip_packet_id(core_ctx, num_packet_ids);
     let ttl = ttl.unwrap_or_else(|| core_ctx.get_hop_limit(device)).get();
     let src_ip = src_ip.map_or(I::UNSPECIFIED_ADDRESS, |a| a.get());
     let mut builder = I::PacketBuilder::new(src_ip, dst_ip.get(), ttl, proto);

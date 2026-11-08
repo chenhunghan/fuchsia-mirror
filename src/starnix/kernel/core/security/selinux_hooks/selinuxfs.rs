@@ -4,13 +4,14 @@
 
 use super::{
     NonPrivateFsNode, PolicyCapSupport, build_permission_check, check_permission,
-    current_task_state, policycap_support, set_cached_sid, superblock,
+    current_task_state, fs_node_ensure_class, policycap_support, set_cached_sid, superblock,
 };
 
 use crate::task::CurrentTask;
 use crate::vfs::FileHandle;
 use selinux::{InitialSid, PolicyCap, SecurityPermission, SecurityServer};
 use starnix_logging::{log_info, log_warn};
+use starnix_uapi::errno;
 use starnix_uapi::errors::Errno;
 use std::sync::atomic::Ordering;
 use strum::VariantArray as _;
@@ -22,6 +23,7 @@ pub(in crate::security) fn selinuxfs_init_null(
     // Apply the "devnull" initial SID to the node.
     let null_node = NonPrivateFsNode::new(null_file_handle.node())
         .expect("selinuxfs null file must not be kernel-private");
+    fs_node_ensure_class(null_node).unwrap();
     set_cached_sid(null_node, InitialSid::Devnull.into());
 
     let kernel_state = current_task
@@ -37,12 +39,21 @@ pub(in crate::security) fn selinuxfs_init_null(
         .expect("selinuxfs null file initialized at most once");
 }
 
-/// Called by the "selinuxfs" when a policy has been successfully loaded, to allow policy-dependent
-/// initialization to be completed.
-pub(in crate::security) fn selinuxfs_policy_loaded(current_task: &CurrentTask) {
-    let kernel_state = current_task.kernel().security_state.state.as_ref().unwrap();
+/// Called by the "selinuxfs" to load a binary SELinux policy into the `SecurityServer` and
+/// complete policy-dependent kernel initialization.
+pub(in crate::security) fn selinuxfs_load_policy(
+    current_task: &CurrentTask,
+    policy_data: Vec<u8>,
+) -> Result<(), Errno> {
+    let kernel_state = current_task
+        .kernel()
+        .security_state
+        .state
+        .as_ref()
+        .expect("selinux kernel state exists when selinux is enabled");
     let security_server = &kernel_state.server;
-    assert!(security_server.has_policy(), "selinuxfs_policy_loaded() without policy");
+    log_info!("Loading {} byte policy", policy_data.len());
+    security_server.load_policy(policy_data).map_err(|error| errno!(EINVAL, error))?;
 
     // Compare the policy capabilities against this kernel's support level, and emit warnings for
     // each mismatch.
@@ -83,6 +94,7 @@ pub(in crate::security) fn selinuxfs_policy_loaded(current_task: &CurrentTask) {
     }
 
     kernel_state.has_policy.store(true, Ordering::Release);
+    Ok(())
 }
 
 /// Used by the "selinuxfs" module to perform checks on SELinux API file accesses.
@@ -102,4 +114,62 @@ pub(in crate::security) fn selinuxfs_check_access(
         permission,
         current_task.into(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::testing::HOOKS_TESTS_BINARY_POLICY;
+    use crate::security;
+    use crate::testing::spawn_kernel_with_selinux_and_run;
+    use starnix_uapi::error;
+
+    #[fuchsia::test]
+    async fn selinuxfs_load_policy_rejects_invalid_policy() {
+        spawn_kernel_with_selinux_and_run(async |current_task, security_server| {
+            let kernel_state = current_task
+                .kernel()
+                .security_state
+                .state
+                .as_ref()
+                .expect("selinux kernel state exists when selinux is enabled");
+            let pending_file_systems_count = kernel_state.pending_file_systems.lock().len();
+            assert_ne!(pending_file_systems_count, 0);
+            let queued_fs = kernel_state
+                .pending_file_systems
+                .lock()
+                .iter()
+                .next()
+                .and_then(|fs| fs.0.upgrade())
+                .expect("queued file system");
+            assert!(queued_fs.security_state.state.label().is_none());
+
+            // A policy that the `SecurityServer` rejects leaves the kernel's SELinux state
+            // unchanged.
+            assert_eq!(
+                security::selinuxfs_load_policy(current_task, b"not a policy".to_vec()),
+                error!(EINVAL)
+            );
+            assert!(!security_server.has_policy());
+            assert!(!kernel_state.has_policy());
+            assert_eq!(kernel_state.pending_file_systems.lock().len(), pending_file_systems_count);
+            assert!(queued_fs.security_state.state.label().is_none());
+
+            // A valid policy can then still be loaded, resolving the pending file systems' labels.
+            security::selinuxfs_load_policy(current_task, HOOKS_TESTS_BINARY_POLICY.to_vec())
+                .expect("load policy");
+            assert!(security_server.has_policy());
+            assert!(kernel_state.has_policy());
+            assert!(kernel_state.pending_file_systems.lock().is_empty());
+            assert!(queued_fs.security_state.state.label().is_some());
+
+            // A policy rejected on reload leaves the previously loaded policy active.
+            assert_eq!(
+                security::selinuxfs_load_policy(current_task, b"not a policy".to_vec()),
+                error!(EINVAL)
+            );
+            assert!(kernel_state.has_policy());
+            assert_eq!(security_server.binary_policy_size(), Some(HOOKS_TESTS_BINARY_POLICY.len()));
+        })
+        .await;
+    }
 }

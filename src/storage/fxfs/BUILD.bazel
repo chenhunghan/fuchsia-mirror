@@ -14,7 +14,10 @@ rustc_proc_macro(
     crate_root = "macros/macros.rs",
     edition = "2024",
     target_compatible_with = HOST_OS_CONSTRAINTS,  # @bazel2gn:skip
-    visibility = ["//src/storage/fxfs:__subpackages__"],
+    visibility = [
+        "//src/storage/fxfs:__subpackages__",
+        "//src/storage/lib/blob_metadata:__pkg__",
+    ],
     deps = [
         "//third_party/rust_crates/vendor:proc-macro2",
         "//third_party/rust_crates/vendor:quote",

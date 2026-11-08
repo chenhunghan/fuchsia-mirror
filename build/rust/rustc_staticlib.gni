@@ -10,6 +10,14 @@ import("//build/rust/rustc_test.gni")
 # Parameters
 #
 #   output_name (optional)
+#     Name of the output archive file (without `lib` prefix or `.a` suffix).
+#
+#   crate_name (optional)
+#     Name of the Rust crate passed to rustc (`--crate-name`). If not
+#     specified, defaults to `name` if set, or the target name. Synchronized
+#     from Bazel's `crate_name` by bazel2gn.
+#     Cannot be specified together with `name`.
+#
 #   name (optional, deprecated)
 #     Name of the crate as defined in its manifest file. If not specified, it is
 #     assumed to be the same as the target name.
@@ -106,8 +114,40 @@ import("//build/rust/rustc_test.gni")
 #   disable_clippy (optional)
 #     Don't run clippy on this target.
 #
+#   quiet_clippy (boolean, optional)
+#     Passed through to rustc_artifact(), see that template for documentation.
+#
 #   disable_rustdoc (optional)
 #     Don't add this target to https://fuchsia.dev/go/rustdoc
+#
+#   rustflags (optional)
+#     Extra rust compiler flags passed directly to rustc.
+#
+#   check_cfgs (optional)
+#     A list of valid configurations for the target.
+#     Passed to rustc as '--check-cfg=cfg(###)'.
+#
+#   lint_config (optional)
+#     Label of a config with target-specific Rust lints, appended on top of the
+#     lint configs applied to every Rust target.
+#
+#   public (optional)
+#     List of C/C++ header files exposed to dependents of this static library.
+#
+#   validations (optional)
+#     List of validation targets to run whenever this target is built.
+#
+#   proc_macro_deps (optional)
+#     List of Rust procedural macro dependencies, built in `$host_toolchain`.
+#
+#   link_deps (optional)
+#     List of native (e.g. C/C++) libraries to link against.
+#
+#   assert_no_deps (optional)
+#     Ensure no deps on these targets.
+#
+#   pool (optional)
+#     Pool label to use when compiling this target.
 #
 #   original_target_name (optional)
 #     The name of the target as it appears in the BUILD file. Enables tooling
@@ -138,6 +178,21 @@ template("rustc_staticlib") {
   not_needed(invoker, [ "version" ])
   assert(!(defined(invoker.output_name) && defined(invoker.name)),
          "Only one of output_name and name may be specified.")
+  assert(!(defined(invoker.name) && defined(invoker.crate_name)),
+         "Only one of name and crate_name may be specified.")
+
+  _crate_name = target_name
+  if (defined(invoker.name)) {
+    _crate_name = invoker.name
+  }
+  if (defined(invoker.crate_name)) {
+    _crate_name = invoker.crate_name
+  }
+
+  _base_output_name = _crate_name
+  if (defined(invoker.output_name)) {
+    _base_output_name = invoker.output_name
+  }
 
   # Resolve `with_unit_tests`, which may be a boolean or one of "host",
   # "fuchsia", or "both". See https://fxbug.dev/515405864.
@@ -172,20 +227,27 @@ template("rustc_staticlib") {
   # target.
   if (_generate_unit_tests) {
     rustc_test_internal("${target_name}_test") {
-      not_needed(invoker, [ "public" ])
       original_target_name = target_name
       deps = []
       forward_variables_from(invoker,
                              "*",
                              [
+                               "assert_no_deps",
+                               "crate_name",
+                               "disable_rustdoc",
+                               "dynamic_libstd",
                                "name",
                                "non_test_deps",
                                "output_name",
+                               "public",
                                "test_configs",
                                "test_deps",
-                               "dynamic_libstd",
+                               "test_disable_rbe",
                                "validations",
                              ])
+      if (defined(invoker.test_disable_rbe)) {
+        disable_rbe = invoker.test_disable_rbe
+      }
 
       # Use a different visibility for this test target if specified.
       if (defined(test_visibility)) {
@@ -193,12 +255,7 @@ template("rustc_staticlib") {
         visibility = test_visibility
       }
 
-      output_name = invoker.target_name + "_staticlib_test"
-      if (defined(invoker.output_name)) {
-        output_name = invoker.output_name + "_staticlib_test"
-      } else if (defined(invoker.name)) {
-        output_name = invoker.name + "_staticlib_test"
-      }
+      output_name = _base_output_name + "_staticlib_test"
       if (defined(invoker.test_configs)) {
         configs += invoker.test_configs
       }
@@ -211,6 +268,7 @@ template("rustc_staticlib") {
     not_needed(invoker,
                [
                  "args",
+                 "exclude_toolchain_tags",
                  "package_deps",
                  "test_build_only",
                  "test_configs",
@@ -224,12 +282,7 @@ template("rustc_staticlib") {
 
   group_target = target_name
 
-  rustc_target = "_${target_name}_rustc_static"
-  if (defined(invoker.output_name)) {
-    rustc_target = "_${invoker.output_name}_rustc_static"
-  } else if (defined(invoker.name)) {
-    rustc_target = "_${invoker.name}_rustc_static"
-  }
+  rustc_target = "_${_base_output_name}_rustc_static"
   rustc_target = string_replace(rustc_target, "-", "_")
 
   if (!defined(invoker.source_root)) {
@@ -241,13 +294,22 @@ template("rustc_staticlib") {
   rustc_artifact(rustc_target) {
     forward_variables_from(invoker,
                            [
+                             "allow_legacy_edition",
+                             "assert_no_deps",
+                             "check_cfgs",
                              "disable_clippy",
+                             "disable_rbe",
+                             "disable_rustdoc",
                              "edition",
                              "enforce_source_listing",
                              "features",
                              "inputs",
+                             "link_deps",
                              "lint_config",
                              "output_dir",
+                             "pool",
+                             "proc_macro_deps",
+                             "quiet_clippy",
                              "rustenv",
                              "sources",
                              "testonly",
@@ -258,8 +320,8 @@ template("rustc_staticlib") {
     target_type = "static_library"
     crate_root = source_root
     crate_type = "staticlib"
-    crate_name = rustc_target
-    output_name = crate_name
+    crate_name = _crate_name
+    output_name = rustc_target
     original_target_name = _original_target_name
 
     deps = []
@@ -277,12 +339,17 @@ template("rustc_staticlib") {
       deps += invoker.non_rust_deps
     }
 
+    rustflags = []
+    if (defined(invoker.rustflags)) {
+      rustflags += invoker.rustflags
+    }
+
     _dynamic_libstd = true
     if (defined(invoker.dynamic_libstd)) {
       _dynamic_libstd = invoker.dynamic_libstd
     }
     if (_dynamic_libstd && is_fuchsia && zircon_toolchain == false) {
-      rustflags = [
+      rustflags += [
         # This nightly flag is needed to support having dylibs in this target's
         # dependencies or transitive dependencies.
         "-Zstaticlib-allow-rdylib-deps",
@@ -325,6 +392,7 @@ template("rustc_staticlib") {
   header_target = "_${rustc_target}_staticlib_headers"
 
   source_set(header_target) {
+    forward_variables_from(invoker, [ "testonly" ])
     public = public_hdrs
     visibility = [ ":${group_target}" ]
     deps = []
@@ -339,6 +407,7 @@ template("rustc_staticlib") {
   group(group_target) {
     forward_variables_from(invoker,
                            [
+                             "assert_no_deps",
                              "data_deps",
                              "testonly",
                              "visibility",

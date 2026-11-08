@@ -3,15 +3,13 @@
 // found in the LICENSE file.
 
 use crate::memio::EbpfPtr;
-use crate::visitor::{BpfVisitor, ProgramCounter, Register, Source};
 use crate::{
     BPF_STACK_SIZE, BpfValue, DataWidth, EbpfInstruction, EbpfProgramContext, FromBpfValue,
-    GENERAL_REGISTER_COUNT, HelperSet, Packet, VerifierErrorKind,
+    HelperSet, Packet,
 };
-use byteorder::{BigEndian, ByteOrder, LittleEndian};
+use ebpf_core::executor::{AtomicRmwOp, EbpfMachineBackend, execute_core};
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use zerocopy::IntoBytes;
 
 pub fn execute<C: EbpfProgramContext>(
     code: &[EbpfInstruction],
@@ -19,1032 +17,361 @@ pub fn execute<C: EbpfProgramContext>(
     run_context: &mut C::RunContext<'_>,
     arguments: &[BpfValue],
 ) -> u64 {
-    assert!(arguments.len() < 5);
-    let mut context = ComputationContext {
-        code,
-        helpers,
-        registers: Default::default(),
-        stack: [MaybeUninit::uninit(); BPF_STACK_SIZE / std::mem::size_of::<BpfValue>()],
-        pc: 0,
-        result: None,
-    };
+    assert!(arguments.len() <= 5);
+    let mut stack =
+        [MaybeUninit::<BpfValue>::uninit(); BPF_STACK_SIZE / std::mem::size_of::<BpfValue>()];
+    let stack_ptr = stack.as_mut_ptr();
+    let stack_top = (stack_ptr as u64).wrapping_add(BPF_STACK_SIZE as u64);
+
+    let mut raw_args = [0u64; 5];
     for (i, v) in arguments.iter().enumerate() {
-        // Arguments are in registers r1 to r5.
-        context.set_reg((i as u8) + 1, *v);
+        raw_args[i] = v.as_u64();
     }
 
-    // R10 points at the stack.
-    context.registers[10] =
-        BpfValue::from((context.stack.as_mut_ptr() as u64) + (BPF_STACK_SIZE as u64));
-
-    loop {
-        if let Some(result) = context.result {
-            return result;
-        }
-        // The program has been verified, so visiting an instruction cannot fail.
-        let Ok(()) = context.visit(run_context, code[context.pc]);
-        context.next();
-    }
+    let mut backend = NativeMachineBackend { helpers, run_context, stack_top };
+    let result = execute_core(code, &mut backend, &raw_args)
+        .expect("Invalid code passed to eBPF interpreter");
+    // `stack_top` is passed into `backend` as a raw `u64`, so keep `stack_ptr`
+    // live and prevent dead-store / lifetime shrinking before `execute_core`
+    // returns.
+    std::hint::black_box(stack_ptr);
+    result
 }
 
-impl BpfValue {
-    #[inline(always)]
-    pub fn add(&self, offset: u64) -> Self {
-        Self::from(self.as_u64().overflowing_add(offset).0)
-    }
-}
-
-/// The state of the computation as known by the interpreter at a given point in time.
-struct ComputationContext<'a, C: EbpfProgramContext> {
-    /// The program being executed.
-    code: &'a [EbpfInstruction],
-    /// Helpers.
+struct NativeMachineBackend<'a, 'b, 'c, C: EbpfProgramContext> {
     helpers: &'a HelperSet<C>,
-    /// Registers.
-    registers: [BpfValue; GENERAL_REGISTER_COUNT as usize + 1],
-    /// The state of the stack.
-    stack: [MaybeUninit<BpfValue>; BPF_STACK_SIZE / std::mem::size_of::<BpfValue>()],
-    /// The program counter.
-    pc: ProgramCounter,
-    /// The result, set to Some(value) when the program terminates.
-    result: Option<u64>,
+    run_context: &'b mut C::RunContext<'c>,
+    stack_top: u64,
 }
 
-// The interpreter is supposed to be called only with bytecode that passed the
-// verifier.
-struct InterpreterError(!);
-
-impl From<VerifierErrorKind> for InterpreterError {
+impl<C: EbpfProgramContext> EbpfMachineBackend for NativeMachineBackend<'_, '_, '_, C> {
     #[inline(always)]
-    fn from(error: VerifierErrorKind) -> Self {
-        unreachable!("Invalid code passed to eBPF interpreter: {:?}", error)
-    }
-}
-
-impl<C: EbpfProgramContext> ComputationContext<'_, C> {
-    #[inline(always)]
-    fn reg(&mut self, index: Register) -> BpfValue {
-        self.registers[index as usize]
+    fn stack_top(&self) -> u64 {
+        self.stack_top
     }
 
     #[inline(always)]
-    fn set_reg(&mut self, index: Register, value: BpfValue) {
-        self.registers[index as usize] = value;
-    }
-
-    #[inline(always)]
-    fn next(&mut self) {
-        self.advance_pc(1)
-    }
-
-    /// Adds `offset` to the program counter in `ComputationContext`.
-    #[inline(always)]
-    fn advance_pc(&mut self, offset: i16) {
-        let mut pc = self.pc as i64;
-        pc += offset as i64;
-        self.pc = pc as usize;
-    }
-
-    #[inline(always)]
-    fn store_memory(
-        &mut self,
-        addr: BpfValue,
-        value: BpfValue,
-        instruction_offset: u64,
-        width: DataWidth,
-    ) {
-        let addr = addr.add(instruction_offset);
-        match width {
-            DataWidth::U8 => {
-                // SAFETY: Verifier ensures that the store operation is safe.
-                unsafe { EbpfPtr::new(addr.as_ptr::<u8>()).store_relaxed(value.as_u8()) }
-            }
-            DataWidth::U16 => {
-                // SAFETY: Verifier ensures that the store operation is safe.
-                unsafe { EbpfPtr::new(addr.as_ptr::<u16>()).store_relaxed(value.as_u16()) }
-            }
-            DataWidth::U32 => {
-                // SAFETY: Verifier ensures that the store operation is safe.
-                unsafe { EbpfPtr::new(addr.as_ptr::<u32>()).store_relaxed(value.as_u32()) }
-            }
-            DataWidth::U64 => {
-                // SAFETY: Verifier ensures that the store operation is safe.
-                unsafe { EbpfPtr::new(addr.as_ptr::<u64>()).store_relaxed(value.as_u64()) }
-            }
-        }
-    }
-
-    #[inline(always)]
-    fn load_memory(&self, addr: BpfValue, instruction_offset: u64, width: DataWidth) -> BpfValue {
-        let addr = addr.add(instruction_offset);
+    fn load_memory(&self, addr: u64, width: DataWidth) -> u64 {
+        let addr = BpfValue::from(addr);
         match width {
             DataWidth::U8 => {
                 // SAFETY: Verifier ensures that the load is safe.
-                BpfValue::from(unsafe { EbpfPtr::new(addr.as_ptr::<u8>()).load_relaxed() })
+                unsafe { EbpfPtr::new(addr.as_ptr::<u8>()).load_relaxed() as u64 }
             }
             DataWidth::U16 => {
                 // SAFETY: Verifier ensures that the load is safe.
-                BpfValue::from(unsafe { EbpfPtr::new(addr.as_ptr::<u16>()).load_relaxed() })
+                unsafe { EbpfPtr::new(addr.as_ptr::<u16>()).load_relaxed() as u64 }
             }
             DataWidth::U32 => {
                 // SAFETY: Verifier ensures that the load is safe.
-                BpfValue::from(unsafe { EbpfPtr::new(addr.as_ptr::<u32>()).load_relaxed() })
+                unsafe { EbpfPtr::new(addr.as_ptr::<u32>()).load_relaxed() as u64 }
             }
             DataWidth::U64 => {
                 // SAFETY: Verifier ensures that the load is safe.
-                BpfValue::from(unsafe { EbpfPtr::new(addr.as_ptr::<u64>()).load_relaxed() })
+                unsafe { EbpfPtr::new(addr.as_ptr::<u64>()).load_relaxed() }
             }
         }
     }
 
     #[inline(always)]
-    fn compute_source(&mut self, src: Source) -> BpfValue {
-        match src {
-            Source::Reg(reg) => self.reg(reg),
-            Source::Value(v) => v.into(),
-        }
-    }
-
-    #[inline(always)]
-    fn alu(
-        &mut self,
-        dst: Register,
-        src: Source,
-        op: impl Fn(u64, u64) -> u64,
-    ) -> Result<(), InterpreterError> {
-        let op1 = self.reg(dst).as_u64();
-        let op2 = self.compute_source(src).as_u64();
-        let result = op(op1, op2);
-        self.set_reg(dst, result.into());
-        Ok(())
-    }
-
-    #[inline(always)]
-    fn atomic_operation(
-        &mut self,
-        fetch: bool,
-        dst: Register,
-        offset: i16,
-        src: Register,
-        op: impl Fn(&mut Self, &AtomicU32, u32) -> u32,
-    ) -> Result<(), InterpreterError> {
-        let addr = self.reg(dst).add(offset as u64);
-        // SAFETY
-        //
-        // The address has been verified by the verifier that ensured the memory is valid for
-        // reading and writing, and that it is suitably aligned for an atomic access.
-        #[allow(
-            clippy::undocumented_unsafe_blocks,
-            reason = "Force documented unsafe blocks in Starnix"
-        )]
-        let atomic = unsafe { &*addr.as_ptr::<AtomicU32>() };
-        let value = self.reg(src).as_u32();
-        let old_value = op(self, atomic, value);
-        if fetch {
-            self.set_reg(src, old_value.into());
-        }
-        Ok(())
-    }
-
-    #[inline(always)]
-    fn atomic_operation64(
-        &mut self,
-        fetch: bool,
-        dst: Register,
-        offset: i16,
-        src: Register,
-        op: impl Fn(&mut Self, &AtomicU64, u64) -> u64,
-    ) -> Result<(), InterpreterError> {
-        let addr = self.reg(dst).add(offset as u64);
-        // SAFETY
-        //
-        // The address has been verified by the verifier that ensured the memory is valid for
-        // reading and writing, and that it is suitably aligned for an atomic access.
-        #[allow(
-            clippy::undocumented_unsafe_blocks,
-            reason = "Force documented unsafe blocks in Starnix"
-        )]
-        let atomic = unsafe { &*addr.as_ptr::<AtomicU64>() };
-        let value = self.reg(src).as_u64();
-        let old_value = op(self, atomic, value);
-        if fetch {
-            self.set_reg(src, old_value.into());
-        }
-        Ok(())
-    }
-
-    #[inline(always)]
-    fn endianness<BO: ByteOrder>(
-        &mut self,
-        dst: Register,
-        width: DataWidth,
-    ) -> Result<(), InterpreterError> {
-        let value = self.reg(dst);
-        let new_value = match width {
-            DataWidth::U16 => BO::read_u16((value.as_u64() as u16).as_bytes()) as u64,
-            DataWidth::U32 => BO::read_u32((value.as_u64() as u32).as_bytes()) as u64,
-            DataWidth::U64 => BO::read_u64(value.as_u64().as_bytes()),
-            _ => {
-                panic!("Unexpected bit width for endianness operation");
+    fn store_memory(&mut self, addr: u64, value: u64, width: DataWidth) {
+        let addr = BpfValue::from(addr);
+        match width {
+            DataWidth::U8 => {
+                // SAFETY: Verifier ensures that the store operation is safe.
+                unsafe { EbpfPtr::new(addr.as_ptr::<u8>()).store_relaxed(value as u8) }
             }
-        };
-        self.set_reg(dst, new_value.into());
-        Ok(())
-    }
-
-    #[inline(always)]
-    fn conditional_jump(
-        &mut self,
-        dst: Register,
-        src: Source,
-        offset: i16,
-        op: impl Fn(u64, u64) -> bool,
-    ) -> Result<(), InterpreterError> {
-        let op1 = self.reg(dst).as_u64();
-        let op2 = self.compute_source(src.clone()).as_u64();
-        if op(op1, op2) {
-            self.advance_pc(offset);
+            DataWidth::U16 => {
+                // SAFETY: Verifier ensures that the store operation is safe.
+                unsafe { EbpfPtr::new(addr.as_ptr::<u16>()).store_relaxed(value as u16) }
+            }
+            DataWidth::U32 => {
+                // SAFETY: Verifier ensures that the store operation is safe.
+                unsafe { EbpfPtr::new(addr.as_ptr::<u32>()).store_relaxed(value as u32) }
+            }
+            DataWidth::U64 => {
+                // SAFETY: Verifier ensures that the store operation is safe.
+                unsafe { EbpfPtr::new(addr.as_ptr::<u64>()).store_relaxed(value) }
+            }
         }
-        Ok(())
-    }
-}
-
-impl<C: EbpfProgramContext> BpfVisitor for ComputationContext<'_, C> {
-    type Context<'a> = C::RunContext<'a>;
-    type Error = InterpreterError;
-
-    #[inline(always)]
-    fn add<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-    ) -> Result<(), InterpreterError> {
-        self.alu(dst, src, |x, y| alu32(x, y, |x, y| x.overflowing_add(y).0))
-    }
-    #[inline(always)]
-    fn add64<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-    ) -> Result<(), InterpreterError> {
-        self.alu(dst, src, |x, y| x.overflowing_add(y).0)
-    }
-    #[inline(always)]
-    fn and<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-    ) -> Result<(), InterpreterError> {
-        self.alu(dst, src, |x, y| alu32(x, y, |x, y| x & y))
-    }
-    #[inline(always)]
-    fn and64<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-    ) -> Result<(), InterpreterError> {
-        self.alu(dst, src, |x, y| x & y)
-    }
-    #[inline(always)]
-    fn arsh<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-    ) -> Result<(), InterpreterError> {
-        self.alu(dst, src, |x, y| {
-            alu32(x, y, |x, y| {
-                let x = x as i32;
-                x.overflowing_shr(y).0 as u32
-            })
-        })
-    }
-    #[inline(always)]
-    fn arsh64<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-    ) -> Result<(), InterpreterError> {
-        self.alu(dst, src, |x, y| {
-            let x = x as i64;
-            // ebpf mask shift operation to the number of bytes, as does `overflowing_sh{rl}`
-            // rust operation. So, it is valid to just cast it to `u32`.
-            let y = y as u32;
-            x.overflowing_shr(y).0 as u64
-        })
-    }
-    #[inline(always)]
-    fn div<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-    ) -> Result<(), InterpreterError> {
-        self.alu(dst, src, |x, y| alu32(x, y, |x, y| if y == 0 { 0 } else { x / y }))
-    }
-    #[inline(always)]
-    fn div64<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-    ) -> Result<(), InterpreterError> {
-        self.alu(dst, src, |x, y| if y == 0 { 0 } else { x / y })
-    }
-    #[inline(always)]
-    fn lsh<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-    ) -> Result<(), InterpreterError> {
-        self.alu(dst, src, |x, y| alu32(x, y, |x, y| x.overflowing_shl(y).0))
-    }
-    #[inline(always)]
-    fn lsh64<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-    ) -> Result<(), InterpreterError> {
-        self.alu(dst, src, |x, y| {
-            // ebpf mask shift operation to the number of bytes, as does `overflowing_sh{rl}`
-            // rust operation. So, it is valid to just cast it to `u32`.
-            let y = y as u32;
-            x.overflowing_shl(y).0
-        })
-    }
-    #[inline(always)]
-    fn r#mod<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-    ) -> Result<(), InterpreterError> {
-        self.alu(dst, src, |x, y| alu32(x, y, |x, y| if y == 0 { x } else { x % y }))
-    }
-    #[inline(always)]
-    fn mod64<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-    ) -> Result<(), InterpreterError> {
-        self.alu(dst, src, |x, y| if y == 0 { x } else { x % y })
-    }
-    #[inline(always)]
-    fn mov<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-    ) -> Result<(), InterpreterError> {
-        self.alu(dst, src, |x, y| alu32(x, y, |_x, y| y))
-    }
-    #[inline(always)]
-    fn mov64<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-    ) -> Result<(), InterpreterError> {
-        self.alu(dst, src, |_x, y| y)
-    }
-    #[inline(always)]
-    fn mul<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-    ) -> Result<(), InterpreterError> {
-        self.alu(dst, src, |x, y| alu32(x, y, |x, y| x.overflowing_mul(y).0))
-    }
-    #[inline(always)]
-    fn mul64<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-    ) -> Result<(), InterpreterError> {
-        self.alu(dst, src, |x, y| x.overflowing_mul(y).0)
-    }
-    #[inline(always)]
-    fn or<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-    ) -> Result<(), InterpreterError> {
-        self.alu(dst, src, |x, y| alu32(x, y, |x, y| x | y))
-    }
-    #[inline(always)]
-    fn or64<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-    ) -> Result<(), InterpreterError> {
-        self.alu(dst, src, |x, y| x | y)
-    }
-    #[inline(always)]
-    fn rsh<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-    ) -> Result<(), InterpreterError> {
-        self.alu(dst, src, |x, y| alu32(x, y, |x, y| x.overflowing_shr(y).0))
-    }
-    #[inline(always)]
-    fn rsh64<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-    ) -> Result<(), InterpreterError> {
-        self.alu(dst, src, |x, y| {
-            // ebpf mask shift operation to the number of bytes, as does `overflowing_sh{rl}`
-            // rust operation. So, it is valid to just cast it to `u32`.
-            let y = y as u32;
-            x.overflowing_shr(y).0
-        })
-    }
-    #[inline(always)]
-    fn sub<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-    ) -> Result<(), InterpreterError> {
-        self.alu(dst, src, |x, y| alu32(x, y, |x, y| x.overflowing_sub(y).0))
-    }
-    #[inline(always)]
-    fn sub64<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-    ) -> Result<(), InterpreterError> {
-        self.alu(dst, src, |x, y| x.overflowing_sub(y).0)
-    }
-    #[inline(always)]
-    fn xor<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-    ) -> Result<(), InterpreterError> {
-        self.alu(dst, src, |x, y| alu32(x, y, |x, y| x ^ y))
-    }
-    #[inline(always)]
-    fn xor64<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-    ) -> Result<(), InterpreterError> {
-        self.alu(dst, src, |x, y| x ^ y)
     }
 
     #[inline(always)]
-    fn neg<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-    ) -> Result<(), InterpreterError> {
-        self.alu(dst, Source::Value(0), |x, y| {
-            alu32(x, y, |x, _y| (x as i32).overflowing_neg().0 as u32)
-        })
-    }
-    #[inline(always)]
-    fn neg64<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-    ) -> Result<(), InterpreterError> {
-        self.alu(dst, Source::Value(0), |x, _y| (x as i64).overflowing_neg().0 as u64)
-    }
-
-    #[inline(always)]
-    fn be<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        width: DataWidth,
-    ) -> Result<(), InterpreterError> {
-        self.endianness::<BigEndian>(dst, width)
-    }
-
-    #[inline(always)]
-    fn le<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        width: DataWidth,
-    ) -> Result<(), InterpreterError> {
-        self.endianness::<LittleEndian>(dst, width)
-    }
-
-    #[inline(always)]
-    fn call_external<'a>(
-        &mut self,
-        context: &mut Self::Context<'a>,
-        index: u32,
-    ) -> Result<(), InterpreterError> {
-        let helper = &self.helpers.get_by_index(index).unwrap();
-        let result =
-            helper.0(context, self.reg(1), self.reg(2), self.reg(3), self.reg(4), self.reg(5));
-        self.set_reg(0, result);
-        Ok(())
-    }
-
-    #[inline(always)]
-    fn exit<'a>(&mut self, _context: &mut Self::Context<'a>) -> Result<(), InterpreterError> {
-        self.result = Some(self.reg(0).as_u64());
-        Ok(())
-    }
-
-    #[inline(always)]
-    fn jump<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        offset: i16,
-    ) -> Result<(), InterpreterError> {
-        self.advance_pc(offset);
-        Ok(())
-    }
-
-    #[inline(always)]
-    fn jeq<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-        offset: i16,
-    ) -> Result<(), InterpreterError> {
-        self.conditional_jump(dst, src, offset, |x, y| comp32(x, y, |x, y| x == y))
-    }
-    #[inline(always)]
-    fn jeq64<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-        offset: i16,
-    ) -> Result<(), InterpreterError> {
-        self.conditional_jump(dst, src, offset, |x, y| x == y)
-    }
-    #[inline(always)]
-    fn jne<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-        offset: i16,
-    ) -> Result<(), InterpreterError> {
-        self.conditional_jump(dst, src, offset, |x, y| comp32(x, y, |x, y| x != y))
-    }
-    #[inline(always)]
-    fn jne64<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-        offset: i16,
-    ) -> Result<(), InterpreterError> {
-        self.conditional_jump(dst, src, offset, |x, y| x != y)
-    }
-    #[inline(always)]
-    fn jge<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-        offset: i16,
-    ) -> Result<(), InterpreterError> {
-        self.conditional_jump(dst, src, offset, |x, y| comp32(x, y, |x, y| x >= y))
-    }
-    #[inline(always)]
-    fn jge64<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-        offset: i16,
-    ) -> Result<(), InterpreterError> {
-        self.conditional_jump(dst, src, offset, |x, y| x >= y)
-    }
-    #[inline(always)]
-    fn jgt<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-        offset: i16,
-    ) -> Result<(), InterpreterError> {
-        self.conditional_jump(dst, src, offset, |x, y| comp32(x, y, |x, y| x > y))
-    }
-    #[inline(always)]
-    fn jgt64<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-        offset: i16,
-    ) -> Result<(), InterpreterError> {
-        self.conditional_jump(dst, src, offset, |x, y| x > y)
-    }
-    #[inline(always)]
-    fn jle<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-        offset: i16,
-    ) -> Result<(), InterpreterError> {
-        self.conditional_jump(dst, src, offset, |x, y| comp32(x, y, |x, y| x <= y))
-    }
-    #[inline(always)]
-    fn jle64<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-        offset: i16,
-    ) -> Result<(), InterpreterError> {
-        self.conditional_jump(dst, src, offset, |x, y| x <= y)
-    }
-    #[inline(always)]
-    fn jlt<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-        offset: i16,
-    ) -> Result<(), InterpreterError> {
-        self.conditional_jump(dst, src, offset, |x, y| comp32(x, y, |x, y| x < y))
-    }
-    #[inline(always)]
-    fn jlt64<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-        offset: i16,
-    ) -> Result<(), InterpreterError> {
-        self.conditional_jump(dst, src, offset, |x, y| x < y)
-    }
-    #[inline(always)]
-    fn jsge<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-        offset: i16,
-    ) -> Result<(), InterpreterError> {
-        self.conditional_jump(dst, src, offset, |x, y| scomp32(x, y, |x, y| x >= y))
-    }
-    #[inline(always)]
-    fn jsge64<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-        offset: i16,
-    ) -> Result<(), InterpreterError> {
-        self.conditional_jump(dst, src, offset, |x, y| scomp64(x, y, |x, y| x >= y))
-    }
-    #[inline(always)]
-    fn jsgt<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-        offset: i16,
-    ) -> Result<(), InterpreterError> {
-        self.conditional_jump(dst, src, offset, |x, y| scomp32(x, y, |x, y| x > y))
-    }
-    #[inline(always)]
-    fn jsgt64<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-        offset: i16,
-    ) -> Result<(), InterpreterError> {
-        self.conditional_jump(dst, src, offset, |x, y| scomp64(x, y, |x, y| x > y))
-    }
-    #[inline(always)]
-    fn jsle<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-        offset: i16,
-    ) -> Result<(), InterpreterError> {
-        self.conditional_jump(dst, src, offset, |x, y| scomp32(x, y, |x, y| x <= y))
-    }
-    #[inline(always)]
-    fn jsle64<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-        offset: i16,
-    ) -> Result<(), InterpreterError> {
-        self.conditional_jump(dst, src, offset, |x, y| scomp64(x, y, |x, y| x <= y))
-    }
-    #[inline(always)]
-    fn jslt<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-        offset: i16,
-    ) -> Result<(), InterpreterError> {
-        self.conditional_jump(dst, src, offset, |x, y| scomp32(x, y, |x, y| x < y))
-    }
-    #[inline(always)]
-    fn jslt64<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-        offset: i16,
-    ) -> Result<(), InterpreterError> {
-        self.conditional_jump(dst, src, offset, |x, y| scomp64(x, y, |x, y| x < y))
-    }
-    #[inline(always)]
-    fn jset<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-        offset: i16,
-    ) -> Result<(), InterpreterError> {
-        self.conditional_jump(dst, src, offset, |x, y| comp32(x, y, |x, y| x & y != 0))
-    }
-    #[inline(always)]
-    fn jset64<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        src: Source,
-        offset: i16,
-    ) -> Result<(), InterpreterError> {
-        self.conditional_jump(dst, src, offset, |x, y| x & y != 0)
-    }
-
-    #[inline(always)]
-    fn atomic_add<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        fetch: bool,
-        dst: Register,
-        offset: i16,
-        src: Register,
-    ) -> Result<(), InterpreterError> {
-        self.atomic_operation(fetch, dst, offset, src, |_, a, v| a.fetch_add(v, Ordering::SeqCst))
-    }
-
-    #[inline(always)]
-    fn atomic_add64<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        fetch: bool,
-        dst: Register,
-        offset: i16,
-        src: Register,
-    ) -> Result<(), InterpreterError> {
-        self.atomic_operation64(fetch, dst, offset, src, |_, a, v| a.fetch_add(v, Ordering::SeqCst))
-    }
-
-    #[inline(always)]
-    fn atomic_and<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        fetch: bool,
-        dst: Register,
-        offset: i16,
-        src: Register,
-    ) -> Result<(), InterpreterError> {
-        self.atomic_operation(fetch, dst, offset, src, |_, a, v| a.fetch_and(v, Ordering::SeqCst))
-    }
-
-    #[inline(always)]
-    fn atomic_and64<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        fetch: bool,
-        dst: Register,
-        offset: i16,
-        src: Register,
-    ) -> Result<(), InterpreterError> {
-        self.atomic_operation64(fetch, dst, offset, src, |_, a, v| a.fetch_and(v, Ordering::SeqCst))
-    }
-
-    #[inline(always)]
-    fn atomic_or<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        fetch: bool,
-        dst: Register,
-        offset: i16,
-        src: Register,
-    ) -> Result<(), InterpreterError> {
-        self.atomic_operation(fetch, dst, offset, src, |_, a, v| a.fetch_or(v, Ordering::SeqCst))
-    }
-
-    #[inline(always)]
-    fn atomic_or64<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        fetch: bool,
-        dst: Register,
-        offset: i16,
-        src: Register,
-    ) -> Result<(), InterpreterError> {
-        self.atomic_operation64(fetch, dst, offset, src, |_, a, v| a.fetch_or(v, Ordering::SeqCst))
-    }
-
-    #[inline(always)]
-    fn atomic_xor<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        fetch: bool,
-        dst: Register,
-        offset: i16,
-        src: Register,
-    ) -> Result<(), InterpreterError> {
-        self.atomic_operation(fetch, dst, offset, src, |_, a, v| a.fetch_xor(v, Ordering::SeqCst))
-    }
-
-    #[inline(always)]
-    fn atomic_xor64<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        fetch: bool,
-        dst: Register,
-        offset: i16,
-        src: Register,
-    ) -> Result<(), InterpreterError> {
-        self.atomic_operation64(fetch, dst, offset, src, |_, a, v| a.fetch_xor(v, Ordering::SeqCst))
-    }
-
-    #[inline(always)]
-    fn atomic_xchg<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        fetch: bool,
-        dst: Register,
-        offset: i16,
-        src: Register,
-    ) -> Result<(), InterpreterError> {
-        self.atomic_operation(fetch, dst, offset, src, |_, a, v| a.swap(v, Ordering::SeqCst))
-    }
-
-    #[inline(always)]
-    fn atomic_xchg64<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        fetch: bool,
-        dst: Register,
-        offset: i16,
-        src: Register,
-    ) -> Result<(), InterpreterError> {
-        self.atomic_operation64(fetch, dst, offset, src, |_, a, v| a.swap(v, Ordering::SeqCst))
-    }
-
-    #[inline(always)]
-    fn atomic_cmpxchg<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        offset: i16,
-        src: Register,
-    ) -> Result<(), InterpreterError> {
-        self.atomic_operation(false, dst, offset, src, |this, a, v| {
-            let r0 = this.reg(0).as_u32();
-            let r0 = match a.compare_exchange(r0, v, Ordering::SeqCst, Ordering::SeqCst) {
-                Ok(v) | Err(v) => v,
-            };
-            this.set_reg(0, r0.into());
-            0
-        })
-    }
-
-    #[inline(always)]
-    fn atomic_cmpxchg64<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        offset: i16,
-        src: Register,
-    ) -> Result<(), InterpreterError> {
-        self.atomic_operation64(false, dst, offset, src, |this, a, v| {
-            let r0 = this.reg(0).as_u64();
-            let r0 = match a.compare_exchange(r0, v, Ordering::SeqCst, Ordering::SeqCst) {
-                Ok(v) | Err(v) => v,
-            };
-            this.set_reg(0, r0.into());
-            0
-        })
-    }
-
-    #[inline(always)]
-    fn load<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        offset: i16,
-        src: Register,
-        width: DataWidth,
-    ) -> Result<(), InterpreterError> {
-        let addr = self.reg(src);
-        let loaded = self.load_memory(addr, offset as u64, width);
-        self.set_reg(dst, loaded);
-        Ok(())
-    }
-
-    #[inline(always)]
-    fn load64<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        _src: u8,
-        lower: u32,
-    ) -> Result<(), InterpreterError> {
-        let value = (lower as u64) | (((self.code[self.pc + 1].imm() as u32) as u64) << 32);
-        self.set_reg(dst, value.into());
-        self.advance_pc(1);
-        Ok(())
-    }
-
-    #[inline(always)]
-    fn load_from_packet<'a>(
-        &mut self,
-        context: &mut Self::Context<'a>,
-        dst_reg: Register,
-        src_reg: Register,
-        offset: i32,
-        register_offset: Option<Register>,
-        width: DataWidth,
-    ) -> Result<(), InterpreterError> {
-        let Some(offset) =
-            register_offset.map(|r| self.reg(r).as_i32()).unwrap_or(0).checked_add(offset as i32)
-        else {
-            // Offset overflowed. Exit.
-            self.result = Some(0);
-            return Ok(());
-        };
-        let src_reg = self.reg(src_reg);
-        // SAFETY: The verifier checks that the `src_reg` points at packet.
-        let packet = unsafe { C::Packet::from_bpf_value(context, src_reg) };
-        if let Some(value) = packet.load(offset, width) {
-            self.set_reg(dst_reg, value.into());
-        } else {
-            self.result = Some(0);
+    fn atomic_rmw32(&mut self, addr: u64, value: u32, op: AtomicRmwOp) -> u32 {
+        let ptr = BpfValue::from(addr).as_ptr::<AtomicU32>();
+        // SAFETY: The address has been verified by the verifier to be valid for
+        // reading and writing, and suitably aligned for a 32-bit atomic access.
+        let atomic = unsafe { &*ptr };
+        match op {
+            AtomicRmwOp::Add => atomic.fetch_add(value, Ordering::SeqCst),
+            AtomicRmwOp::And => atomic.fetch_and(value, Ordering::SeqCst),
+            AtomicRmwOp::Or => atomic.fetch_or(value, Ordering::SeqCst),
+            AtomicRmwOp::Xor => atomic.fetch_xor(value, Ordering::SeqCst),
+            AtomicRmwOp::Xchg => atomic.swap(value, Ordering::SeqCst),
         }
-        Ok(())
     }
 
     #[inline(always)]
-    fn store<'a>(
-        &mut self,
-        _context: &mut Self::Context<'a>,
-        dst: Register,
-        offset: i16,
-        src: Source,
-        width: DataWidth,
-    ) -> Result<(), InterpreterError> {
-        let src = self.compute_source(src);
-        let dst = self.reg(dst);
-        self.store_memory(dst, src, offset as u64, width);
-        Ok(())
+    fn atomic_rmw64(&mut self, addr: u64, value: u64, op: AtomicRmwOp) -> u64 {
+        let ptr = BpfValue::from(addr).as_ptr::<AtomicU64>();
+        // SAFETY: The address has been verified by the verifier to be valid for
+        // reading and writing, and suitably aligned for a 64-bit atomic access.
+        let atomic = unsafe { &*ptr };
+        match op {
+            AtomicRmwOp::Add => atomic.fetch_add(value, Ordering::SeqCst),
+            AtomicRmwOp::And => atomic.fetch_and(value, Ordering::SeqCst),
+            AtomicRmwOp::Or => atomic.fetch_or(value, Ordering::SeqCst),
+            AtomicRmwOp::Xor => atomic.fetch_xor(value, Ordering::SeqCst),
+            AtomicRmwOp::Xchg => atomic.swap(value, Ordering::SeqCst),
+        }
+    }
+
+    #[inline(always)]
+    fn atomic_cmpxchg32(&mut self, addr: u64, expected: u32, new: u32) -> u32 {
+        let ptr = BpfValue::from(addr).as_ptr::<AtomicU32>();
+        // SAFETY: The address has been verified by the verifier to be valid for
+        // reading and writing, and suitably aligned for a 32-bit atomic access.
+        let atomic = unsafe { &*ptr };
+        match atomic.compare_exchange(expected, new, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(v) | Err(v) => v,
+        }
+    }
+
+    #[inline(always)]
+    fn atomic_cmpxchg64(&mut self, addr: u64, expected: u64, new: u64) -> u64 {
+        let ptr = BpfValue::from(addr).as_ptr::<AtomicU64>();
+        // SAFETY: The address has been verified by the verifier to be valid for
+        // reading and writing, and suitably aligned for a 64-bit atomic access.
+        let atomic = unsafe { &*ptr };
+        match atomic.compare_exchange(expected, new, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(v) | Err(v) => v,
+        }
+    }
+
+    #[inline(always)]
+    fn call_helper(&mut self, index: u32, r1: u64, r2: u64, r3: u64, r4: u64, r5: u64) -> u64 {
+        let helper = self.helpers.get_by_index(index).unwrap();
+        helper.0(
+            self.run_context,
+            BpfValue::from(r1),
+            BpfValue::from(r2),
+            BpfValue::from(r3),
+            BpfValue::from(r4),
+            BpfValue::from(r5),
+        )
+        .as_u64()
+    }
+
+    #[inline(always)]
+    fn load_from_packet(&mut self, packet_ptr: u64, offset: i32, width: DataWidth) -> Option<u64> {
+        // SAFETY: The verifier checks that `packet_ptr` (from R6) points at the packet.
+        let packet =
+            unsafe { C::Packet::from_bpf_value(self.run_context, BpfValue::from(packet_ptr)) };
+        packet.load(offset, width).map(|v| v.as_u64())
     }
 }
 
-#[inline(always)]
-fn alu32(x: u64, y: u64, op: impl FnOnce(u32, u32) -> u32) -> u64 {
-    op(x as u32, y as u32) as u64
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::{
+        BPF_ADD, BPF_ALU, BPF_ALU64, BPF_ATOMIC, BPF_CALL, BPF_CMPXCHG, BPF_DW, BPF_EXIT,
+        BPF_FETCH, BPF_IND, BPF_JLT, BPF_JMP, BPF_K, BPF_LD, BPF_LDDW, BPF_LDX, BPF_MEM, BPF_MOV,
+        BPF_PSEUDO_MAP_IDX, BPF_STX, BPF_W, BPF_X,
+    };
+    use crate::error::VerifierErrorKind;
 
-#[inline(always)]
-fn comp32(x: u64, y: u64, op: impl FnOnce(u32, u32) -> bool) -> bool {
-    op(x as u32, y as u32)
-}
+    #[derive(Default)]
+    struct MockBackend {
+        mem64: u64,
+        mem32: u32,
+        last_helper: Option<(u32, [u64; 5])>,
+    }
 
-#[inline(always)]
-fn scomp64(x: u64, y: u64, op: impl FnOnce(i64, i64) -> bool) -> bool {
-    op(x as i64, y as i64)
-}
+    impl EbpfMachineBackend for MockBackend {
+        fn stack_top(&self) -> u64 {
+            0x2000
+        }
 
-#[inline(always)]
-fn scomp32(x: u64, y: u64, op: impl FnOnce(i32, i32) -> bool) -> bool {
-    op(x as i32, y as i32)
+        fn load_memory(&self, _addr: u64, width: DataWidth) -> u64 {
+            match width {
+                DataWidth::U32 => self.mem32 as u64,
+                DataWidth::U64 => self.mem64,
+                _ => 0,
+            }
+        }
+
+        fn store_memory(&mut self, _addr: u64, value: u64, width: DataWidth) {
+            match width {
+                DataWidth::U32 => self.mem32 = value as u32,
+                DataWidth::U64 => self.mem64 = value,
+                _ => {}
+            }
+        }
+
+        fn atomic_rmw32(&mut self, _addr: u64, value: u32, op: AtomicRmwOp) -> u32 {
+            let old = self.mem32;
+            self.mem32 = match op {
+                AtomicRmwOp::Add => old.wrapping_add(value),
+                AtomicRmwOp::And => old & value,
+                AtomicRmwOp::Or => old | value,
+                AtomicRmwOp::Xor => old ^ value,
+                AtomicRmwOp::Xchg => value,
+            };
+            old
+        }
+
+        fn atomic_rmw64(&mut self, _addr: u64, value: u64, op: AtomicRmwOp) -> u64 {
+            let old = self.mem64;
+            self.mem64 = match op {
+                AtomicRmwOp::Add => old.wrapping_add(value),
+                AtomicRmwOp::And => old & value,
+                AtomicRmwOp::Or => old | value,
+                AtomicRmwOp::Xor => old ^ value,
+                AtomicRmwOp::Xchg => value,
+            };
+            old
+        }
+
+        fn atomic_cmpxchg32(&mut self, _addr: u64, expected: u32, new: u32) -> u32 {
+            let old = self.mem32;
+            if old == expected {
+                self.mem32 = new;
+            }
+            old
+        }
+
+        fn atomic_cmpxchg64(&mut self, _addr: u64, expected: u64, new: u64) -> u64 {
+            let old = self.mem64;
+            if old == expected {
+                self.mem64 = new;
+            }
+            old
+        }
+
+        fn call_helper(&mut self, index: u32, r1: u64, r2: u64, r3: u64, r4: u64, r5: u64) -> u64 {
+            self.last_helper = Some((index, [r1, r2, r3, r4, r5]));
+            r1.wrapping_add(r2)
+        }
+
+        fn load_from_packet(
+            &mut self,
+            packet_ptr: u64,
+            offset: i32,
+            _width: DataWidth,
+        ) -> Option<u64> {
+            if packet_ptr == 0xdead_beef && offset >= 0 && offset <= 16 {
+                Some(0x42 + offset as u64)
+            } else {
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn test_execute_core_alu32_zero_ext_and_lddw() {
+        let mut backend = MockBackend::default();
+        let code = [
+            // r0 = 0x11223344_55667788
+            EbpfInstruction::new(BPF_LDDW, 0, 0, 0, 0x55667788u32 as i32),
+            EbpfInstruction::new(0, 0, 0, 0, 0x11223344u32 as i32),
+            // 32-bit add zero-extends upper 32 bits of r0.
+            EbpfInstruction::new(BPF_ALU | BPF_ADD | BPF_K, 0, 0, 0, 1),
+            EbpfInstruction::new(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+        ];
+        assert_eq!(execute_core(&code, &mut backend, &[0; 5]), Ok(0x55667789));
+    }
+
+    #[test]
+    fn test_execute_core_atomics_and_helper_call() {
+        let mut backend = MockBackend { mem64: 10, mem32: 7, last_helper: None };
+        let code = [
+            // r2 = 5; lock fetch add [r10 - 8], r2 -> old 10 in r2, mem64 = 15
+            EbpfInstruction::new(BPF_ALU64 | BPF_MOV | BPF_K, 2, 0, 0, 5),
+            EbpfInstruction::new(
+                BPF_STX | BPF_ATOMIC | BPF_DW,
+                10,
+                2,
+                -8,
+                (BPF_ADD | BPF_FETCH) as i32,
+            ),
+            // r0 = 15 (expected), r3 = 99 (new); lock cmpxchg [r10 - 8], r3 -> r0 = 15, mem64 = 99
+            EbpfInstruction::new(BPF_ALU64 | BPF_MOV | BPF_K, 0, 0, 0, 15),
+            EbpfInstruction::new(BPF_ALU64 | BPF_MOV | BPF_K, 3, 0, 0, 99),
+            EbpfInstruction::new(BPF_STX | BPF_ATOMIC | BPF_DW, 10, 3, -8, BPF_CMPXCHG as i32),
+            // call helper 7 with r1 (from args = 20) and r2 (= 10) -> r0 = 30
+            EbpfInstruction::new(BPF_JMP | BPF_CALL, 0, 0, 0, 7),
+            // r1 = [r10 - 8] (= 99); r0 += r1 (= 129)
+            EbpfInstruction::new(BPF_LDX | BPF_MEM | BPF_DW, 1, 10, -8, 0),
+            EbpfInstruction::new(BPF_ALU64 | BPF_ADD | BPF_X, 0, 1, 0, 0),
+            EbpfInstruction::new(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+        ];
+        assert_eq!(execute_core(&code, &mut backend, &[20, 0, 0, 0, 0]), Ok(129));
+        assert_eq!(backend.mem64, 99);
+        assert_eq!(backend.last_helper, Some((7, [20, 10, 99, 0, 0])));
+    }
+
+    #[test]
+    fn test_execute_core_packet_load_and_bounds_errors() {
+        let mut backend = MockBackend::default();
+
+        // Packet load signed offset overflow aborts cleanly with 0.
+        let overflow_pkt = [
+            // r6 = r1 (packet ptr), r2 = i32::MAX
+            EbpfInstruction::new(BPF_ALU64 | BPF_MOV | BPF_X, 6, 1, 0, 0),
+            EbpfInstruction::new(BPF_ALU64 | BPF_MOV | BPF_K, 2, 0, 0, i32::MAX),
+            EbpfInstruction::new(BPF_LD | BPF_IND | BPF_W, 0, 2, 0, 1),
+            EbpfInstruction::new(BPF_ALU64 | BPF_MOV | BPF_K, 0, 0, 0, 99),
+            EbpfInstruction::new(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+        ];
+        assert_eq!(execute_core(&overflow_pkt, &mut backend, &[0xdead_beef, 0, 0, 0, 0]), Ok(0));
+
+        // Falling off the end of `code` returns `FellOffProgramEnd`.
+        let no_exit = [EbpfInstruction::new(BPF_ALU64 | BPF_MOV | BPF_K, 0, 0, 0, 1)];
+        assert_eq!(
+            execute_core(&no_exit, &mut backend, &[0; 5]),
+            Err(VerifierErrorKind::FellOffProgramEnd)
+        );
+        assert_eq!(
+            execute_core(&[], &mut backend, &[0; 5]),
+            Err(VerifierErrorKind::FellOffProgramEnd)
+        );
+
+        // Truncated `BPF_LDDW` returns `IncompleteLddw` instead of panicking.
+        let truncated_lddw = [EbpfInstruction::new(BPF_LDDW, 0, 0, 0, 1)];
+        assert_eq!(
+            execute_core(&truncated_lddw, &mut backend, &[0; 5]),
+            Err(VerifierErrorKind::IncompleteLddw)
+        );
+
+        // Non-zero second slot fields in `BPF_LDDW` return `MalformedLddw`.
+        let malformed_lddw = [
+            EbpfInstruction::new(BPF_LDDW, 0, 0, 0, 1),
+            EbpfInstruction::new(0, 1, 0, 0, 0),
+            EbpfInstruction::new(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+        ];
+        assert_eq!(
+            execute_core(&malformed_lddw, &mut backend, &[0; 5]),
+            Err(VerifierErrorKind::MalformedLddw)
+        );
+
+        // Unlinked pseudo-map `src_reg != 0` in `BPF_LDDW` returns `UnsupportedLddwSource`.
+        let unlinked_lddw = [
+            EbpfInstruction::new(BPF_LDDW, 0, BPF_PSEUDO_MAP_IDX, 0, 0),
+            EbpfInstruction::new(0, 0, 0, 0, 0),
+            EbpfInstruction::new(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+        ];
+        assert_eq!(
+            execute_core(&unlinked_lddw, &mut backend, &[0; 5]),
+            Err(VerifierErrorKind::UnsupportedLddwSource(BPF_PSEUDO_MAP_IDX))
+        );
+
+        // Backward jump to `pc = 0` (`1 + 1 + (-2) = 0`) loops without underflowing `pc`.
+        let loop_to_zero = [
+            EbpfInstruction::new(BPF_ALU64 | BPF_ADD | BPF_K, 0, 0, 0, 1),
+            EbpfInstruction::new(BPF_JMP | BPF_JLT | BPF_K, 0, 0, -2, 3),
+            EbpfInstruction::new(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+        ];
+        assert_eq!(execute_core(&loop_to_zero, &mut backend, &[0; 5]), Ok(3));
+    }
 }

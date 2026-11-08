@@ -10,7 +10,12 @@ load(
     "wrap_rust_macro_args_with_build_flags",
 )
 load("@rules_rust//rust:defs.bzl", "rust_proc_macro")
-load("//build/bazel/rules/rust:common.bzl", "with_fuchsia_rust_tags", "with_fuchsia_rustc_flags")
+load(
+    "//build/bazel/rules/rust:common.bzl",
+    "with_fuchsia_rust_link_exec_properties",
+    "with_fuchsia_rust_tags",
+    "with_fuchsia_rustc_flags",
+)
 load("//build/bazel/rules/rust:generate_unit_tests.bzl", "generate_unit_tests")
 
 def _rustc_proc_macro_impl(
@@ -25,7 +30,9 @@ def _rustc_proc_macro_impl(
         visibility,
         **kwargs):
     if lint_config == None:
-        lint_config = "//build/config/rust/lints:clippy_warn_production"
+        lint_config = (
+            "//build/config/rust/lints:clippy_warn_default" if kwargs.get("testonly") else "//build/config/rust/lints:clippy_warn_production"
+        )
         test_lint_config = "//build/config/rust/lints:clippy_warn_default"
     else:
         test_lint_config = lint_config
@@ -45,7 +52,9 @@ def _rustc_proc_macro_impl(
         name = name,
         lint_config = lint_config,
         visibility = visibility,
-        **proc_macro_kwargs
+        **(proc_macro_kwargs | {
+            "exec_properties": with_fuchsia_rust_link_exec_properties(proc_macro_kwargs.get("exec_properties")),
+        })
     )
 
     if with_host_unit_tests or with_unit_tests:
@@ -76,7 +85,8 @@ with_unit_tests is enabled. The test target will be named "<name>_test"
 and will include extra dependencies from test_deps.
 
 The default lint_config value is //build/config/rust/lints:clippy_warn_production
-for the target, and //build/config/rust/lints:clippy_warn_default for the test target.
+for non-testonly targets, and //build/config/rust/lints:clippy_warn_default when
+testonly = True is set on the target or for the generated test target.
 If specified by the caller, lint_config is applied to both main and test targets.
 
 Also used to allow easier syncing between Bazel and GN targets.

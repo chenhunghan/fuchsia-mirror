@@ -25,7 +25,7 @@ sdk_source_set("headers") {
     ":node",
     "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_cpp",
     "//sdk/fidl/fuchsia.hardware.platform.bus:fuchsia.hardware.platform.bus_cpp",
-    "//zircon/kernel/lib/devicetree",
+    "//sdk/lib/devicetree",
     "//zircon/system/ulib/zx",
   ]
   if (is_fuchsia) {
@@ -96,8 +96,8 @@ sdk_source_set("node") {
     "visitor.h",
   ]
   public_deps = [
+    "//sdk/lib/devicetree",
     "//sdk/lib/driver/component/cpp:node",
-    "//zircon/kernel/lib/devicetree",
   ]
   deps = [
     "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_cpp",

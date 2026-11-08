@@ -13,6 +13,25 @@
 # are being evaluated; subsystem-owned entries may be scoped to the fuchsia
 # project for their own paths.
 
+# Default multi-perspective review agent for fuchsia CLs. Mirrors the
+# "turquoise-code-review-agent" entry in vendor/google; ids
+# must be unique across all repositories on a host (turquoise-internal serves
+# both fuchsia and vendor/google).
+configs: {
+  id: "fuchsia-code-review-agent"
+  display_name: "Code Review Agent"
+  description: "Default multi-perspective review agent for fuchsia."
+  tags: "code-review-agent"
+  # Use the baseline gerrit_reviewer subagent bundled with CRACS. Because this
+  # entry lists no skills, CRACS also attaches the default review skill; the
+  # subsystem skill entries below still apply to matching files.
+  use_default_subagents: true
+  include_filters: {
+    project: "fuchsia"
+    path_regex: ".*"
+  }
+}
+
 configs: {
   id: "fuchsia-rust-best-practices"
   display_name: "Fuchsia Rust Best Practices"
@@ -55,16 +74,29 @@ configs: {
 configs: {
   id: "fuchsia-driver-bind-devicetree"
   display_name: "Fuchsia Driver Bind & Devicetree"
-  description: "Driver .bind rules, devicetree node bindings, and devicetree schema conventions."
+  description: "Driver .bind rules and devicetree node bindings."
   tags: "code-review-agent"
   skills: "src/devices/skills/driver_bind_devicetree"
   skills: "src/devices/skills/driver_bind_find_instance_name"
-  skills: "src/devices/skills/devicetree_schema"
   include_filters: {
     project: "fuchsia"
     project: "vendor/google"
     path_regex: ".*\\.bind"
-    path_regex: ".*\\.dtsi?"
+    path_regex: ".*\\.dtsi?(\\.S)?"
+  }
+}
+
+configs: {
+  id: "fuchsia-devicetree-schema"
+  display_name: "Fuchsia Devicetree Schema"
+  description: "Devicetree binding schema YAML files and devicetree source conventions."
+  tags: "code-review-agent"
+  skills: "src/devices/skills/devicetree_schema"
+  include_filters: {
+    project: "fuchsia"
+    project: "vendor/google"
+    path_regex: "(.*/)?[^/]*devicetree[^/]*/.*\\.yaml"
+    path_regex: ".*\\.dtsi?(\\.S)?"
   }
 }
 
@@ -83,6 +115,19 @@ configs: {
 }
 
 configs: {
+  id: "fuchsia-driver-developer-tools"
+  display_name: "Fuchsia Driver Developer Tools"
+  description: "In-driver fuchsia.driver.debug/Debug protocol and explore CLI tool conventions for DFv2 drivers."
+  tags: "code-review-agent"
+  skills: "src/devices/skills/driver_developer_tools"
+  include_filters: {
+    project: "fuchsia"
+    project: "vendor/google"
+    path_regex: "src/devices/.*\\.(cml|rs|cc|h)"
+  }
+}
+
+configs: {
   id: "fuchsia-lacewing-e2e-tests"
   display_name: "Fuchsia Lacewing E2E Test Guidelines"
   description: "Timeouts, deadlines, cancellations, and exception handling in Lacewing end-to-end tests."
@@ -91,6 +136,9 @@ configs: {
   include_filters: {
     project: "fuchsia"
     project: "vendor/google"
+    # fuchsia paths.
+    path_regex: "src/(tests|testing)/end_to_end/.*\\.(py|gn|gni)"
+    # vendor/google paths.
     path_regex: "(tests/end_to_end|testing/lacewing)/.*\\.py"
   }
 }
@@ -105,6 +153,7 @@ configs: {
     project: "fuchsia"
     project: "vendor/google"
     path_regex: "docs/.*\\.md"
+    path_regex: "docs/.*\\.yaml"
   }
 }
 
@@ -270,7 +319,19 @@ configs: {
   skills: "zircon/skills/fbl-intrusive-porting"
   include_filters: {
     project: "fuchsia"
-    path_regex: "zircon/.*\\.(rs|cc|h)"
+    path_regex: "zircon/.*\\.rs"
+  }
+}
+
+configs: {
+  id: "fuchsia-zircon-cpp-to-rust-dispatcher"
+  display_name: "Fuchsia Zircon Dispatcher C++ to Rust Porting"
+  description: "Zircon kernel dispatcher facade objects, OpaqueRefCountedFacade, #[guarded] state, and FFI shim invariants."
+  tags: "code-review-agent"
+  skills: "zircon/skills/cpp-to-rust-dispatcher"
+  include_filters: {
+    project: "fuchsia"
+    path_regex: "zircon/kernel/(object|lib/syscalls)/.*"
   }
 }
 

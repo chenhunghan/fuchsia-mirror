@@ -1,4 +1,5 @@
-// Copyright 2026 The Fuchsia Authors
+// Copyright 2016 The Fuchsia Authors
+// Copyright (c) 2008-2015 Travis Geiselbrecht
 //
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file or at
@@ -6,31 +7,35 @@
 
 use crate::kernel::deadline::Deadline;
 use crate::kernel::event::Event;
+use crate::kernel::relaxed_atomic::RelaxedAtomicU32;
 use core::ptr::NonNull;
+use debug::ltracef;
+use ksync::LockToken;
 use pin_init::PinInit;
 use zx_status::Status;
+
+const LOCAL_TRACE: u32 = 0;
 
 /// Context returned along with a character read from the circular buffer.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct ReadContext {
     /// The character that was read.
     pub c: u8,
-    /// Whether the buffer transitioned away from being completely full as a result of this read.
+    /// Whether the buffer was full before reading.
     pub transitioned_from_full: bool,
 }
 
-/// A thread-safe, lock-protected circular byte buffer.
+/// A circular byte buffer, protected by a spinlock.
+///
+/// `head`, `tail` and `len_pow2` are modified only with `lock` held. They are relaxed atomics so
+/// that `full` can read them without it, while every access with the lock held is ordered by the
+/// lock.
 #[ksync::guarded]
 #[repr(C)]
 pub struct Cbuf {
-    #[guarded_by(lock)]
-    head: u32,
-
-    #[guarded_by(lock)]
-    tail: u32,
-
-    #[guarded_by(lock)]
-    len_pow2: u32,
+    head: RelaxedAtomicU32,
+    tail: RelaxedAtomicU32,
+    len_pow2: RelaxedAtomicU32,
 
     #[guarded_by(lock)]
     buf: Option<NonNull<u8>>,
@@ -39,110 +44,131 @@ pub struct Cbuf {
     event: Event,
 
     #[mutex]
-    lock: ksync::KMutex<ksync::RawSpinlock>,
+    lock: ksync::KMutex<crate::ksync_kernel::TrackedSpinlock>,
 }
 
-// SAFETY: Cbuf is safe to send across thread boundaries because all mutable access
-// to its fields is protected by the internal spinlock (`lock`).
+// SAFETY: `buf` is the only field that is not `Send`. The memory it points to stays valid while the
+// `Cbuf` is used (the obligation of `initialize`), and is accessed only with `lock` held.
 unsafe impl Send for Cbuf {}
 
-// SAFETY: Cbuf is safe to share across thread boundaries because all mutable access
-// to its fields is protected by the internal spinlock (`lock`).
+// SAFETY: As for `Send`: `buf` is read only with `lock` held, and the bytes it points to are read
+// and written only with `lock` held.
 unsafe impl Sync for Cbuf {}
 
 impl Cbuf {
-    /// Returns a pin initializer for a new, uninitialized `Cbuf`.
+    /// Returns a pin initializer for a `Cbuf` with no underlying data buffer.
+    ///
+    /// A subsequent call to `initialize` must supply the data buffer. Until then the `Cbuf` is
+    /// both full and empty: writes are dropped and reads find nothing.
     pub fn init() -> impl PinInit<Self, core::convert::Infallible> {
         pin_init::pin_init!(Self {
-            head: 0.into(),
-            tail: 0.into(),
-            len_pow2: 0.into(),
+            head: RelaxedAtomicU32::new(0),
+            tail: RelaxedAtomicU32::new(0),
+            len_pow2: RelaxedAtomicU32::new(0),
             buf: None.into(),
             event <- Event::init_unsignaled(),
             lock <- ksync::KMutex::init(),
         })
     }
 
-    /// Initializes the circular buffer with the specified size and backing memory region.
+    /// Initializes the `Cbuf` to use the `len` bytes at `buf` for internal storage.
     ///
     /// # Safety
     ///
-    /// The caller must ensure that `buf` points to a valid memory region of at least `len` bytes,
-    /// and that this memory region remains valid for the lifetime of `Cbuf`.
-    pub unsafe fn initialize(&self, len: usize, buf: *mut u8) -> Result<(), Status> {
-        if len == 0 || !len.is_power_of_two() {
-            return Err(Status::INVALID_ARGS);
+    /// Must be called at most once on a given `Cbuf`. `len` must be a non-zero power of two, and
+    /// `buf` must point to `len` writable bytes that remain valid, and are accessed only through
+    /// this `Cbuf`, for as long as the `Cbuf` is used.
+    pub unsafe fn initialize(&self, len: usize, buf: *mut u8) {
+        debug_assert!(len > 0);
+        debug_assert!(len.is_power_of_two());
+
+        let len_pow2 = len.ilog2();
+        {
+            ksync::lock!(let mut guard = self.lock_lock());
+            debug_assert!(guard.fields().buf.is_none());
+            self.len_pow2.store(len_pow2);
+            *guard.as_mut().fields_mut().buf = NonNull::new(buf);
         }
-        let len_pow2 = len.trailing_zeros();
 
-        ksync::lock!(let mut guard = self.lock_lock());
-        let fields = guard.as_mut().fields_mut();
-        *fields.len_pow2 = len_pow2;
-        *fields.buf = NonNull::new(buf);
-        *fields.head = 0;
-        *fields.tail = 0;
-
-        Ok(())
+        ltracef!("len {len}, len_pow2 {len_pow2}\n");
     }
 
-    /// Returns `true` if the buffer is currently full.
+    /// Returns `true` if the buffer has no free space.
+    ///
+    /// Does not take the lock, so without it the answer may be stale by the time the caller acts
+    /// on it. `write_char` checks again with the lock held.
+    // TODO(https://fxbug.dev/42125783): We want to revisit the Cbuf API. Lock-free `full` was
+    // intended for interrupt context on the assumption that no concurrent modifications can occur,
+    // which does not exclude concurrent readers on other CPUs or satisfy the Rust memory model;
+    // relaxed atomics avoid data races here at no additional cost.
     pub fn full(&self) -> bool {
-        ksync::lock!(let guard = self.lock_lock());
-        let fields = guard.fields();
-        is_full(*fields.head, *fields.tail, *fields.len_pow2)
+        let len_pow2 = self.len_pow2.load();
+        let head = self.head.load();
+        let tail = self.tail.load();
+        let consumed = modpow2(head.wrapping_sub(tail), len_pow2);
+        let avail = valpow2(len_pow2) - consumed - 1;
+        avail == 0
     }
 
     /// Writes a single character to the buffer if space is available.
     ///
     /// Returns `1` if the write succeeded, or `0` if the buffer was full.
     pub fn write_char(&self, c: u8) -> usize {
-        let wrote = {
-            ksync::lock!(let mut guard = self.lock_lock());
-            let fields = guard.fields_mut();
-            if is_full(*fields.head, *fields.tail, *fields.len_pow2) {
-                0
-            } else {
-                if let Some(buf) = fields.buf {
-                    // SAFETY: `initialize` caller guarantees that `buf` is valid.
-                    unsafe {
-                        buf.as_ptr().add(*fields.head as usize).write(c);
-                    }
-                    inc_pointer(fields.head, 1, *fields.len_pow2);
-                    1
-                } else {
-                    0
-                }
-            }
-        };
+        {
+            ksync::lock!(let guard = self.lock_lock());
 
-        if wrote > 0 {
-            self.event.signal();
+            if self.full() {
+                return 0;
+            }
+            let Some(buf) = *guard.fields().buf else {
+                return 0;
+            };
+
+            let head = self.head.load();
+            // SAFETY: `head` is below the `len` passed to the single `initialize` call, whose
+            // caller guarantees that `buf` points to `len` writable bytes. `lock` is held.
+            unsafe { buf.as_ptr().add(head as usize).write(c) };
+            self.inc_pointer(&self.head, 1, guard.token());
         }
-        wrote
+
+        // By signaling after dropping the lock, we avoid lock thrashing (though it doesn't matter
+        // much since this lock is a spinlock).
+        //
+        // Note: by the time we signal, the buffer may have already been drained, but that's OK.
+        // It just means a reader may be woken when the buffer is empty.
+        self.event.signal();
+
+        1
     }
 
     /// Reads a single character from the buffer, returning it along with the transition context.
     ///
-    /// If `block` is true, this function blocks until a character is available to read.
-    /// If `block` is false, it returns `Err(Status::SHOULD_WAIT)` if no character is available.
+    /// If `block` is true, blocks until a character is read or the thread is asked to suspend or
+    /// terminate (`ZX_ERR_INTERNAL_INTR_RETRY`, `ZX_ERR_INTERNAL_INTR_KILLED`).
+    ///
+    /// If `block` is false and no character is ready, returns `Err(Status::SHOULD_WAIT)`.
     pub fn read_char_with_context(&self, block: bool) -> Result<ReadContext, Status> {
         loop {
             {
-                ksync::lock!(let mut guard = self.lock_lock());
-                let fields = guard.fields_mut();
-                if *fields.tail != *fields.head
-                    && let Some(buf) = fields.buf
+                ksync::lock!(let guard = self.lock_lock());
+                let token = guard.token();
+                if !self.empty(token)
+                    && let Some(buf) = *guard.fields().buf
                 {
-                    // SAFETY: `initialize` caller guarantees that `buf` is valid.
-                    let c = unsafe { buf.as_ptr().add(*fields.tail as usize).read() };
-                    let transitioned_from_full =
-                        is_full(*fields.head, *fields.tail, *fields.len_pow2);
+                    let tail = self.tail.load();
+                    let res = ReadContext {
+                        // SAFETY: `tail` is below the `len` passed to the single `initialize` call,
+                        // whose caller guarantees that `buf` points to `len` valid bytes. `lock` is
+                        // held.
+                        c: unsafe { buf.as_ptr().add(tail as usize).read() },
+                        transitioned_from_full: self.full(),
+                    };
 
-                    inc_pointer(fields.tail, 1, *fields.len_pow2);
-                    if *fields.tail == *fields.head {
+                    self.inc_pointer(&self.tail, 1, token);
+                    if self.empty(token) {
                         let _ = self.event.unsignal();
                     }
-                    return Ok(ReadContext { c, transitioned_from_full });
+                    return Ok(res);
                 }
 
                 // Because the signal state does not 100% match the buffer state, it is critical
@@ -159,30 +185,35 @@ impl Cbuf {
         }
     }
 
-    /// Reads a single character from the buffer.
+    /// Reads one character.
     ///
-    /// If `block` is true, this function blocks until a character is available to read.
-    /// If `block` is false, it returns `Err(Status::SHOULD_WAIT)` if no character is available.
+    /// If `block` is true, blocks until a character is read or the thread is asked to suspend or
+    /// terminate (`ZX_ERR_INTERNAL_INTR_RETRY`, `ZX_ERR_INTERNAL_INTR_KILLED`).
+    ///
+    /// If `block` is false and no character is ready, returns `Err(Status::SHOULD_WAIT)`.
     pub fn read_char(&self, block: bool) -> Result<u8, Status> {
         self.read_char_with_context(block).map(|ctx| ctx.c)
     }
-}
 
-#[inline]
-fn inc_pointer(ptr: &mut u32, inc: u32, len_pow2: u32) {
-    let mask = (1u32 << len_pow2) - 1;
-    *ptr = ptr.wrapping_add(inc) & mask;
-}
-
-#[inline]
-fn is_full(head: u32, tail: u32, len_pow2: u32) -> bool {
-    if len_pow2 == 0 {
-        return true;
+    /// Returns true iff the buffer is empty.
+    fn empty(&self, _token: &LockToken<'_, CbufLockClass>) -> bool {
+        self.tail.load() == self.head.load()
     }
-    let mask = (1u32 << len_pow2) - 1;
-    let consumed = head.wrapping_sub(tail) & mask;
-    let avail = (1u32 << len_pow2) - consumed - 1;
-    avail == 0
+
+    fn inc_pointer(&self, ptr: &RelaxedAtomicU32, inc: u32, _token: &LockToken<'_, CbufLockClass>) {
+        let len_pow2 = self.len_pow2.load();
+        ptr.store(modpow2(ptr.load().wrapping_add(inc), len_pow2));
+    }
+}
+
+#[inline]
+fn modpow2(val: u32, modp2: u32) -> u32 {
+    val & ((1u32 << modp2) - 1)
+}
+
+#[inline]
+fn valpow2(valp2: u32) -> u32 {
+    1u32 << valp2
 }
 
 /// Test suite for Rust cbuf implementation.
@@ -195,10 +226,9 @@ mod tests {
     use pin_init::stack_pin_init;
     use unittest::{assert_eq, assert_ok, assert_true, unwrap_ok};
     use zx_status::Status;
+    use zx_types::ZX_ERR_INTERNAL_INTR_KILLED;
 
     use crate::kernel::thread;
-
-    const ZX_ERR_INTERNAL_INTR_KILLED: i32 = -502;
 
     /// Test that the cbuf constructor initializes it to full until initialized.
     #[test]
@@ -207,9 +237,10 @@ mod tests {
         assert_true!(cbuf.full());
 
         let mut buf = [0u8; 4];
-        // SAFETY: `buf` is valid for cbuf lifetime.
+        // SAFETY: First and only `initialize` call on `cbuf`; `buf` is 4 (a power of two) bytes,
+        // outlives every use of `cbuf`, and is not otherwise accessed.
         unsafe {
-            unwrap_ok!(cbuf.initialize(buf.len(), buf.as_mut_ptr()));
+            cbuf.initialize(buf.len(), buf.as_mut_ptr());
         }
         assert_true!(!cbuf.full());
     }
@@ -220,9 +251,10 @@ mod tests {
         stack_pin_init!(let cbuf = Cbuf::init());
 
         let mut buf = [0u8; 4];
-        // SAFETY: `buf` is valid for cbuf lifetime.
+        // SAFETY: First and only `initialize` call on `cbuf`; `buf` is 4 (a power of two) bytes,
+        // outlives every use of `cbuf`, and is not otherwise accessed.
         unsafe {
-            unwrap_ok!(cbuf.initialize(buf.len(), buf.as_mut_ptr()));
+            cbuf.initialize(buf.len(), buf.as_mut_ptr());
         }
 
         assert_true!(!cbuf.full());
@@ -266,9 +298,10 @@ mod tests {
         stack_pin_init!(let cbuf = Cbuf::init());
 
         let mut buf = [0u8; 4];
-        // SAFETY: `buf` is valid for cbuf lifetime.
+        // SAFETY: First and only `initialize` call on `cbuf`; `buf` is 4 (a power of two) bytes,
+        // outlives every use of `cbuf`, and is not otherwise accessed.
         unsafe {
-            unwrap_ok!(cbuf.initialize(buf.len(), buf.as_mut_ptr()));
+            cbuf.initialize(buf.len(), buf.as_mut_ptr());
         }
 
         let thread_name = c"cbuf_rust_race".as_ptr();
@@ -292,29 +325,6 @@ mod tests {
         }
     }
 
-    /// Test initialization limits (size 0, non-power of two).
-    #[test]
-    fn init_limits() {
-        stack_pin_init!(let cbuf = Cbuf::init());
-        let mut buf = [0u8; 4];
-
-        // Size 0 should fail.
-        unsafe {
-            assert_true!(cbuf.initialize(0, buf.as_mut_ptr()) == Err(Status::INVALID_ARGS));
-        }
-
-        // Non-power of two should fail.
-        unsafe {
-            assert_true!(cbuf.initialize(3, buf.as_mut_ptr()) == Err(Status::INVALID_ARGS));
-            assert_true!(cbuf.initialize(5, buf.as_mut_ptr()) == Err(Status::INVALID_ARGS));
-        }
-
-        // Power of two should succeed.
-        unsafe {
-            assert_ok!(cbuf.initialize(4, buf.as_mut_ptr()));
-        }
-    }
-
     /// Test uninitialized cbuf operations.
     #[test]
     fn uninitialized() {
@@ -331,8 +341,10 @@ mod tests {
         stack_pin_init!(let cbuf = Cbuf::init());
         let mut buf = [0u8; 4];
 
+        // SAFETY: First and only `initialize` call on `cbuf`; `buf` is 4 (a power of two) bytes,
+        // outlives every use of `cbuf`, and is not otherwise accessed.
         unsafe {
-            assert_ok!(cbuf.initialize(buf.len(), buf.as_mut_ptr()));
+            cbuf.initialize(buf.len(), buf.as_mut_ptr());
         }
 
         // Write 3 chars (capacity is 3)
@@ -371,8 +383,12 @@ mod tests {
     unsafe impl Send for BlockingReadContext {}
 
     extern "C" fn blocking_reader_entry(arg: *mut c_void) -> i32 {
+        // SAFETY: `arg` is the `BlockingReadContext` on `blocking_read`'s stack, and its pointers
+        // are to locals of `blocking_read`, which joins this thread before they go out of scope.
         let ctx = unsafe { &*(arg as *const BlockingReadContext) };
+        // SAFETY: As above.
         let cbuf = unsafe { &*ctx.cbuf };
+        // SAFETY: As above.
         let state = unsafe { &*ctx.state };
 
         state.store(1, Ordering::SeqCst);
@@ -380,6 +396,7 @@ mod tests {
 
         match c {
             Ok(val) => {
+                // SAFETY: As above. `blocking_read` reads `read_char` only after the join.
                 unsafe { *ctx.read_char = val };
                 state.store(2, Ordering::SeqCst);
                 0
@@ -397,9 +414,10 @@ mod tests {
         stack_pin_init!(let cbuf = Cbuf::init());
 
         let mut buf = [0u8; 4];
-        // SAFETY: `buf` is valid for cbuf lifetime.
+        // SAFETY: First and only `initialize` call on `cbuf`; `buf` is 4 (a power of two) bytes,
+        // outlives every use of `cbuf`, and is not otherwise accessed.
         unsafe {
-            assert_ok!(cbuf.initialize(buf.len(), buf.as_mut_ptr()));
+            cbuf.initialize(buf.len(), buf.as_mut_ptr());
         }
 
         let state = AtomicU32::new(0);
@@ -414,6 +432,7 @@ mod tests {
         let thread_name = c"cbuf_blocking_read".as_ptr();
         let ctx_ptr = &mut ctx as *mut BlockingReadContext as *mut c_void;
 
+        // SAFETY: `ctx` and the locals it points to outlive the thread, which is joined below.
         unsafe {
             let thread = unwrap_ok!(thread::spawn(thread_name, blocking_reader_entry, ctx_ptr));
 

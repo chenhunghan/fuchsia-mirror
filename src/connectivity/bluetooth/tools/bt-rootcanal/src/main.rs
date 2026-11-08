@@ -7,11 +7,10 @@ use fidl_fuchsia_bluetooth_pandora::{
     RootcanalClientControllerRequest, RootcanalClientControllerRequestStream, ServiceError,
 };
 use fidl_fuchsia_hardware_bluetooth::{
-    VirtualControllerCreateLoopbackDeviceRequest, VirtualControllerMarker,
+    VirtualControllerCreateLoopbackDeviceRequest, VirtualControllerServiceMarker,
 };
 use fuchsia_async::net::TcpStream;
 use fuchsia_async::{self as fasync};
-use fuchsia_bluetooth::constants::DEV_DIR;
 use fuchsia_component::server::ServiceFs;
 use fuchsia_sync::Mutex;
 
@@ -25,12 +24,6 @@ use std::sync::Arc;
 
 // Across all three link types, ACL has the largest frame at 1028. Add a byte of UART header.
 const UART_MAX_FRAME_BUFFER_SIZE: usize = 1029;
-
-/// The name of the test node to which bt_hci_virtual can expect to bind, i.e. the first positional
-/// argument in `ffx driver test-node add ______ fuchsia.COMPATIBLE=bt`.
-fn emulator_test_node_name() -> String {
-    "bt-hci-emulator".to_string()
-}
 
 // Read from `read_stream` exactly as many bytes as fit in `buf`. Returns error if EOF encountered
 // before that number of bytes can be read.
@@ -72,7 +65,7 @@ async fn read_hci_packet(
 }
 
 /// Reads the TCP stream from the host from the `read_stream` and writes all data to the loopback
-/// driver over `channel`.
+/// device over `channel`.
 async fn stream_reader(
     mut read_stream: ReadHalf<impl AsyncRead>,
     channel: &fasync::Channel,
@@ -135,17 +128,14 @@ async fn channel_reader(
 }
 
 /// Opens the virtual loopback device, creates a channel to pass to it and returns that channel.
-async fn open_virtual_device(control_device: &str) -> Result<fasync::Channel, Error> {
-    let dev_directory =
-        fuchsia_fs::directory::open_in_namespace(DEV_DIR, fuchsia_fs::PERM_READABLE)
-            .expect("unable to open directory");
-
-    let controller = device_watcher::recursive_wait_and_open::<VirtualControllerMarker>(
-        &dev_directory,
-        control_device,
-    )
-    .await
-    .with_context(|| format!("failed to open {}", control_device))?;
+async fn open_virtual_device() -> Result<fasync::Channel, Error> {
+    let controller = fuchsia_component::client::Service::open(VirtualControllerServiceMarker)
+        .context("failed to open VirtualControllerService")?
+        .watch_for_any()
+        .await
+        .context("failed to find VirtualControllerService instance")?
+        .connect_to_device()
+        .context("failed to connect to VirtualController protocol")?;
 
     let (remote_channel, local_channel) = zx::Channel::create();
     let request = VirtualControllerCreateLoopbackDeviceRequest {
@@ -156,10 +146,19 @@ async fn open_virtual_device(control_device: &str) -> Result<fasync::Channel, Er
     Ok(fasync::Channel::from_channel(local_channel))
 }
 
+async fn connect_tcp(socket_addr: SocketAddr) -> Result<TcpStream, Error> {
+    log::debug!("Opening host {}", socket_addr);
+    let tcp_connector = TcpStream::connect(socket_addr)?;
+    let tcp_stream = tcp_connector.await?;
+    log::debug!("Connected");
+    Ok(tcp_stream)
+}
+
+#[derive(Debug)]
 enum ClientTask {
     None,
     Starting,
-    Running { _task: fasync::Task<Result<(), Error>> },
+    Running { _task: fasync::Task<()> },
 }
 
 impl ClientTask {
@@ -172,7 +171,7 @@ impl ClientTask {
         return Err((ServiceError::AlreadyRunning, anyhow!("Rootcanal task already running")));
     }
 
-    // Set state to None if it is previously Running, clearing the contained Task.
+    // Set state to None if it is previously Starting or Running, clearing the contained Task.
     fn stop(&mut self) {
         *self = Self::None;
     }
@@ -180,38 +179,52 @@ impl ClientTask {
 
 /// Abstracts a connection to a Rootcanal server.
 struct RootcanalClient {
-    task: Mutex<ClientTask>,
+    task: Arc<Mutex<ClientTask>>,
 }
 
 impl RootcanalClient {
     pub fn new() -> Self {
-        RootcanalClient { task: Mutex::new(ClientTask::None) }
+        RootcanalClient { task: Arc::new(Mutex::new(ClientTask::None)) }
     }
 
-    /// Connect to Rootcanal server at `socket_addr` & loopback device and begin proxying data between them.
+    /// Connect to Rootcanal server at `socket_addr` & loopback device and begin proxying data
+    /// between them.
     async fn connect(&self, socket_addr: SocketAddr) -> Result<(), (ServiceError, Error)> {
+        self.connect_with(|| connect_tcp(socket_addr), open_virtual_device).await
+    }
+
+    async fn connect_with<S, ConnectFn, ConnectFut, OpenFn, OpenFut>(
+        &self,
+        connect_stream: ConnectFn,
+        open_device: OpenFn,
+    ) -> Result<(), (ServiceError, Error)>
+    where
+        S: AsyncRead + AsyncWrite + Send + 'static,
+        ConnectFn: FnOnce() -> ConnectFut,
+        ConnectFut: std::future::Future<Output = Result<S, Error>>,
+        OpenFn: FnOnce() -> OpenFut,
+        OpenFut: std::future::Future<Output = Result<fasync::Channel, Error>>,
+    {
         self.task.lock().set_starting()?;
 
-        log::debug!("Opening host {}", socket_addr);
-        let connector_res = TcpStream::connect(socket_addr);
-        let Ok(tcp_connector) = connector_res else {
-            return Err((ServiceError::ConnectionFailed, connector_res.unwrap_err().into()));
-        };
-        let stream_res = tcp_connector.await;
-        let Ok(tcp_stream) = stream_res else {
-            return Err((ServiceError::ConnectionFailed, stream_res.unwrap_err().into()));
-        };
-        log::debug!("Connected");
+        let tcp_stream = connect_stream().await.map_err(|e| {
+            self.task.lock().stop();
+            (ServiceError::ConnectionFailed, e)
+        })?;
 
-        let channel_res =
-            open_virtual_device(&(emulator_test_node_name() + "/bt_hci_virtual")).await;
-        let Ok(channel) = channel_res else {
-            return Err((ServiceError::Failed, channel_res.unwrap_err().into()));
-        };
+        let channel = open_device().await.map_err(|e| {
+            self.task.lock().stop();
+            (ServiceError::Failed, e)
+        })?;
 
-        *self.task.lock() = ClientTask::Running {
-            _task: fuchsia_async::Task::spawn(Self::run(tcp_stream, channel)),
-        };
+        let task_state = Arc::clone(&self.task);
+        let task = fuchsia_async::Task::spawn(async move {
+            if let Err(e) = Self::run(tcp_stream, channel).await {
+                log::info!("Rootcanal client session ended: {:?}", e);
+            }
+            task_state.lock().stop();
+        });
+        *self.task.lock() = ClientTask::Running { _task: task };
 
         Ok(())
     }
@@ -345,5 +358,139 @@ mod tests {
                 assert!(false, "still pending");
             }
         };
+    }
+
+    #[fuchsia::test]
+    fn test_connect_tcp_error_resets_state() {
+        let mut exec = fasync::TestExecutor::new();
+        let client = RootcanalClient::new();
+
+        let mut tcp_err_fut = Box::pin(client.connect_with(
+            || futures::future::ready(Err::<fasync::Socket, Error>(anyhow!("tcp connect failed"))),
+            || async { panic!("open_device should not be called when connect_stream fails") },
+        ));
+        match exec.run_until_stalled(&mut tcp_err_fut) {
+            Poll::Ready(Err((ServiceError::ConnectionFailed, _))) => {}
+            res => panic!("expected ConnectionFailed, got {:?}", res),
+        }
+        assert!(matches!(*client.task.lock(), ClientTask::None));
+
+        // Subsequent connect succeeds without requiring an intervening disconnect.
+        let (_txc, rxc) = zx::Channel::create();
+        let async_channel = fasync::Channel::from_channel(rxc);
+        let (_txs, rxs) = zx::Socket::create_stream();
+        let async_socket = fasync::Socket::from_socket(rxs);
+        let mut ok_fut = Box::pin(client.connect_with(
+            move || futures::future::ready(Ok(async_socket)),
+            move || futures::future::ready(Ok(async_channel)),
+        ));
+        assert!(matches!(exec.run_until_stalled(&mut ok_fut), Poll::Ready(Ok(()))));
+        assert!(matches!(*client.task.lock(), ClientTask::Running { .. }));
+    }
+
+    #[fuchsia::test]
+    fn test_connect_open_device_error_resets_state() {
+        let mut exec = fasync::TestExecutor::new();
+        let client = RootcanalClient::new();
+
+        let (_txs, rxs) = zx::Socket::create_stream();
+        let async_socket = fasync::Socket::from_socket(rxs);
+        let mut dev_err_fut = Box::pin(client.connect_with(
+            move || futures::future::ready(Ok(async_socket)),
+            || futures::future::ready(Err(anyhow!("open_virtual_device failed"))),
+        ));
+        match exec.run_until_stalled(&mut dev_err_fut) {
+            Poll::Ready(Err((ServiceError::Failed, _))) => {}
+            res => panic!("expected Failed, got {:?}", res),
+        }
+        assert!(matches!(*client.task.lock(), ClientTask::None));
+
+        // Subsequent connect succeeds without requiring an intervening disconnect.
+        let (_txc, rxc) = zx::Channel::create();
+        let async_channel = fasync::Channel::from_channel(rxc);
+        let (_txs2, rxs2) = zx::Socket::create_stream();
+        let async_socket2 = fasync::Socket::from_socket(rxs2);
+        let mut ok_fut = Box::pin(client.connect_with(
+            move || futures::future::ready(Ok(async_socket2)),
+            move || futures::future::ready(Ok(async_channel)),
+        ));
+        assert!(matches!(exec.run_until_stalled(&mut ok_fut), Poll::Ready(Ok(()))));
+        assert!(matches!(*client.task.lock(), ClientTask::Running { .. }));
+    }
+
+    #[fuchsia::test]
+    fn test_connect_while_running_fails() {
+        let mut exec = fasync::TestExecutor::new();
+        let client = RootcanalClient::new();
+
+        let (txc, rxc) = zx::Channel::create();
+        let async_channel = fasync::Channel::from_channel(rxc);
+        let (_txs, rxs) = zx::Socket::create_stream();
+        let async_socket = fasync::Socket::from_socket(rxs);
+
+        let mut connect_fut = Box::pin(client.connect_with(
+            move || futures::future::ready(Ok(async_socket)),
+            move || futures::future::ready(Ok(async_channel)),
+        ));
+        assert!(matches!(exec.run_until_stalled(&mut connect_fut), Poll::Ready(Ok(()))));
+        assert!(matches!(*client.task.lock(), ClientTask::Running { .. }));
+
+        let mut dup_fut = Box::pin(client.connect_with(
+            || async {
+                panic!("connect_stream should not run when AlreadyRunning")
+                    as Result<fasync::Socket, Error>
+            },
+            || async { panic!("open_device should not run when AlreadyRunning") },
+        ));
+        match exec.run_until_stalled(&mut dup_fut) {
+            Poll::Ready(Err((ServiceError::AlreadyRunning, _))) => {}
+            res => panic!("expected AlreadyRunning, got {:?}", res),
+        }
+
+        let mut disconnect_fut = Box::pin(client.disconnect());
+        assert!(matches!(exec.run_until_stalled(&mut disconnect_fut), Poll::Ready(())));
+        assert!(matches!(*client.task.lock(), ClientTask::None));
+        let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+        assert_eq!(
+            txc.wait_one(zx::Signals::CHANNEL_PEER_CLOSED, zx::MonotonicInstant::INFINITE_PAST)
+                .to_result(),
+            Ok(zx::Signals::CHANNEL_PEER_CLOSED)
+        );
+    }
+
+    #[fuchsia::test]
+    fn test_session_exit_resets_state() {
+        let mut exec = fasync::TestExecutor::new();
+        let client = RootcanalClient::new();
+
+        let (txc, rxc) = zx::Channel::create();
+        let async_channel = fasync::Channel::from_channel(rxc);
+        let (_txs, rxs) = zx::Socket::create_stream();
+        let async_socket = fasync::Socket::from_socket(rxs);
+
+        let mut connect_fut = Box::pin(client.connect_with(
+            move || futures::future::ready(Ok(async_socket)),
+            move || futures::future::ready(Ok(async_channel)),
+        ));
+        assert!(matches!(exec.run_until_stalled(&mut connect_fut), Poll::Ready(Ok(()))));
+        assert!(matches!(*client.task.lock(), ClientTask::Running { .. }));
+
+        // Closing the peer end of the loopback channel causes the spawned session task to exit and
+        // reset ClientTask to None.
+        drop(txc);
+        let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+        assert!(matches!(*client.task.lock(), ClientTask::None));
+
+        // A new connect now succeeds without requiring disconnect().
+        let (_txc2, rxc2) = zx::Channel::create();
+        let async_channel2 = fasync::Channel::from_channel(rxc2);
+        let (_txs2, rxs2) = zx::Socket::create_stream();
+        let async_socket2 = fasync::Socket::from_socket(rxs2);
+        let mut reconnect_fut = Box::pin(client.connect_with(
+            move || futures::future::ready(Ok(async_socket2)),
+            move || futures::future::ready(Ok(async_channel2)),
+        ));
+        assert!(matches!(exec.run_until_stalled(&mut reconnect_fut), Poll::Ready(Ok(()))));
+        assert!(matches!(*client.task.lock(), ClientTask::Running { .. }));
     }
 }

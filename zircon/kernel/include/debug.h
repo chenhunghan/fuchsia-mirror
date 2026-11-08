@@ -73,10 +73,15 @@ void rust_debug_crash_panic(void) __NO_RETURN;
 // detected by the kernel.
 // LINT.IfChange
 #define DRIVER_OOPS(fmt, ...) printf("\nDRIVER OOPS\n" fmt, ##__VA_ARGS__)
-// LINT.ThenChange(//tools/testing/tefmocheck/string_in_log_check.go)
+// LINT.ThenChange(
+//   //zircon/kernel/lib/debug/src/lib.rs,
+//   //tools/testing/tefmocheck/string_in_log_check.go,
+// )
 
 // Similar to DRIVER_OOPS, except should not trigger a tefmocheck failure.
+// LINT.IfChange
 #define DRIVER_WARN(fmt, ...) printf("\nDRIVER WARNING\n" fmt, ##__VA_ARGS__)
+// LINT.ThenChange(//zircon/kernel/lib/debug/src/lib.rs)
 
 __END_CDECLS
 

@@ -11,32 +11,6 @@
 
 namespace vm_unittest {
 
-// Helper function to allocate memory in a user address space.
-zx_status_t AllocUser(VmAspace* aspace, const char* name, size_t size, user_inout_ptr<void>* ptr) {
-  ASSERT(aspace->is_user());
-
-  size = RoundUpPageSize(size);
-  if (size == 0) {
-    return ZX_ERR_INVALID_ARGS;
-  }
-
-  fbl::RefPtr<VmObjectPaged> vmo;
-  zx_status_t status = VmObjectPaged::Create(PMM_ALLOC_FLAG_ANY, 0u, size, &vmo);
-  if (status != ZX_OK) {
-    return status;
-  }
-
-  vmo->set_name(name, strlen(name));
-  static constexpr const uint kArchFlags = kArchRwFlags | ARCH_MMU_FLAG_PERM_USER;
-  auto mapping = aspace->RootVmar()->CreateVmMapping(0, size, 0, 0, vmo, 0, kArchFlags, name);
-  if (mapping.is_error()) {
-    return mapping.status_value();
-  }
-
-  *ptr = make_user_inout_ptr(reinterpret_cast<void*>(mapping->base));
-  return ZX_OK;
-}
-
 zx_status_t make_partially_committed_pager_vmo(size_t num_pages, size_t committed_pages,
                                                bool trap_dirty, bool resizable,
                                                bool ignore_requests, vm_page_t** out_pages,
@@ -104,12 +78,6 @@ zx_status_t make_partially_committed_pager_vmo(size_t num_pages, size_t committe
   return ZX_OK;
 }
 
-zx_status_t make_uncommitted_pager_vmo(size_t num_pages, bool trap_dirty, bool resizable,
-                                       fbl::RefPtr<VmObjectPaged>* out_vmo) {
-  return make_partially_committed_pager_vmo(num_pages, 0, trap_dirty, resizable, false, nullptr,
-                                            out_vmo);
-}
-
 zx_status_t make_committed_pager_vmo(size_t num_pages, bool trap_dirty, bool resizable,
                                      vm_page_t** out_pages, fbl::RefPtr<VmObjectPaged>* out_vmo) {
   return make_partially_committed_pager_vmo(num_pages, num_pages, trap_dirty, resizable, false,
@@ -174,22 +142,6 @@ void fill_region(uintptr_t seed, void* _ptr, size_t len) {
   }
 }
 
-// just like |fill_region|, but for user memory
-void fill_region_user(uintptr_t seed, user_inout_ptr<void> _ptr, size_t len) {
-  user_inout_ptr<uint32_t> ptr = _ptr.reinterpret<uint32_t>();
-
-  ASSERT(IS_ROUNDED(ptr.get(), 4));
-
-  uint32_t val = (uint32_t)seed;
-  val ^= (uint32_t)(seed >> 32);
-  for (size_t i = 0; i < len / 4; i++) {
-    zx_status_t status = ptr.element_offset(i).copy_to_user(val);
-    ASSERT(status == ZX_OK);
-
-    val = test_rand(val);
-  }
-}
-
 // test a region of memory against a known pattern
 bool test_region(uintptr_t seed, void* _ptr, size_t len) {
   uint32_t* ptr = (uint32_t*)_ptr;
@@ -210,60 +162,7 @@ bool test_region(uintptr_t seed, void* _ptr, size_t len) {
   return true;
 }
 
-// just like |test_region|, but for user memory
-bool test_region_user(uintptr_t seed, user_inout_ptr<void> _ptr, size_t len) {
-  user_inout_ptr<uint32_t> ptr = _ptr.reinterpret<uint32_t>();
-
-  ASSERT(IS_ROUNDED(ptr.get(), 4));
-
-  uint32_t val = (uint32_t)seed;
-  val ^= (uint32_t)(seed >> 32);
-  for (size_t i = 0; i < len / 4; i++) {
-    auto p = ptr.element_offset(i);
-    uint32_t actual;
-    zx_status_t status = p.copy_from_user(&actual);
-    ASSERT(status == ZX_OK);
-    if (actual != val) {
-      unittest_printf("value at %p (%zu) is incorrect: 0x%x vs 0x%x\n", p.get(), i, actual, val);
-      return false;
-    }
-
-    val = test_rand(val);
-  }
-
-  return true;
-}
-
-bool fill_and_test(void* ptr, size_t len) {
-  BEGIN_TEST;
-
-  // fill it with a pattern
-  fill_region((uintptr_t)ptr, ptr, len);
-
-  // test that the pattern is read back properly
-  auto result = test_region((uintptr_t)ptr, ptr, len);
-  EXPECT_TRUE(result, "testing region for corruption");
-
-  END_TEST;
-}
-
-// just like |fill_and_test|, but for user memory
-bool fill_and_test_user(user_inout_ptr<void> ptr, size_t len) {
-  BEGIN_TEST;
-
-  const auto seed = reinterpret_cast<uintptr_t>(ptr.get());
-
-  // fill it with a pattern
-  fill_region_user(seed, ptr, len);
-
-  // test that the pattern is read back properly
-  auto result = test_region_user(seed, ptr, len);
-  EXPECT_TRUE(result, "testing region for corruption");
-
-  END_TEST;
-}
-
-// Helper function used by vmo_mapping_page_fault_optimisation_test.
+// Helper function used by vm_mapping_page_fault_optimisation_test.
 // Given a mapping, check that a run of consecutive pages are mapped (indicated by
 // expected_mapped_page_count) and that remaining pages are unmapped.
 bool verify_mapped_page_range(vaddr_t base, size_t mapping_size,

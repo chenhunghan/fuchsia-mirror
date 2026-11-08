@@ -94,7 +94,6 @@ pub struct ArchPhysHandoff {
 
 unsafe extern "C" {
     pub fn cpp_riscv64_handoff_boot_hart_id(handoff: *const ArchPhysHandoff) -> u64;
-    fn cpp_mp_set_curr_cpu_online(online: bool);
     fn Riscv64ExceptionEntry();
 }
 
@@ -173,6 +172,9 @@ pub unsafe fn riscv64_csr_clear<const CSR: u16>(val: u64) {
 }
 
 /// Hint to the processor that the CPU is in a spin-wait loop.
+// TODO(https://fxbug.dev/581987928): Remove `#[coverage(off)]` once compiler options can control
+// atomic coverage counter updates.
+#[coverage(off)]
 #[inline(always)]
 pub fn arch_yield() {
     // SAFETY: Low-level RISC-V pause instruction.
@@ -258,12 +260,8 @@ pub unsafe extern "C" fn ArchPostHandoffBootstrap(arch_handoff: *const ArchPhysH
 pub extern "C" fn arch_early_init() {
     super::sbi::riscv64_sbi_early_init();
     super::mmu::riscv64_mmu_early_init();
-    // SAFETY: takes no pointers; marks the calling CPU online in the generic mp
-    // layer, which is what the C++ `arch_early_init` did at this point.
-    unsafe {
-        // mark the boot cpu online
-        cpp_mp_set_curr_cpu_online(true);
-    }
+    // mark the boot cpu online
+    crate::kernel::mp::set_curr_cpu_online();
 }
 
 /// Architecture pre-VM initialization.
@@ -312,8 +310,7 @@ pub extern "C" fn arch_late_init_percpu() {
     }
 
     // per cpu on each secondary (and the boot cpu a second time)
-    // SAFETY: Marks the current CPU online in the C++ MP layer.
-    unsafe { cpp_mp_set_curr_cpu_online(true) };
+    crate::kernel::mp::set_curr_cpu_online();
 }
 
 /// Places the CPU in a low-power idle state waiting for an interrupt.

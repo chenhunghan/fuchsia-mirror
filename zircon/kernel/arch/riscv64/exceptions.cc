@@ -13,14 +13,12 @@
 #include <zircon/types.h>
 
 #include <arch/arch_ops.h>
-#include <arch/crashlog.h>
 #include <arch/regs.h>
 #include <arch/riscv64.h>
 #include <arch/thread.h>
 #include <kernel/ffi.h>
 #include <kernel/thread.h>
 #include <pretty/hexdump.h>
-#include <syscalls/syscalls.h>
 #include <vm/fault.h>
 #include <vm/vm.h>
 

@@ -6,9 +6,10 @@
 
 load("@io_bazel_rules_go//go:def.bzl", "go_binary")
 load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
-load("@rules_cc//cc:defs.bzl", "cc_binary")
 load("@rules_python//python:defs.bzl", "py_binary")
 load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/host:fx_host_tool.bzl", _fx_host_tool = "fx_host_tool", _fx_script_host_tool = "fx_script_host_tool")
 load("//build/bazel/rules/rust:defs.bzl", "rustc_binary")
 
 # Use with the `target_compatible_with` attribute to declare that a target
@@ -34,7 +35,7 @@ def _cc_binary_host_tool_impl(
     # Also ensure the API level is "PLATFORM".
     target_compatible_with += _target_compatible_with_platform_api_level
 
-    cc_binary(
+    fx_cc_binary(
         name = name,
         target_compatible_with = target_compatible_with,
         **kwargs
@@ -50,9 +51,7 @@ cc_binary_host_tool = macro(
     addressing https://fxbug.dev/486198435.
     """,
     implementation = _cc_binary_host_tool_impl,
-    # rules_cc wraps the `native.cc_binary()` rule in a legacy macro, which
-    # cannot be used with `inherit_attrs`. Use the rule directly instead.
-    inherit_attrs = native.cc_binary,
+    inherit_attrs = fx_cc_binary,
     attrs = {
         "target_compatible_with": attr.string_list(
             doc = "Standard meaning. Must be `HOST_CONSTRAINTS` or `HOST_OS_CONSTRAINTS`.",
@@ -170,3 +169,6 @@ rustc_binary_host_tool = macro(
         ),
     },
 )
+
+fx_host_tool = _fx_host_tool
+fx_script_host_tool = _fx_script_host_tool

@@ -1,0 +1,81 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "cpp",
+    srcs = [
+        "alpha-mode.cc",
+        "backlight-state.cc",
+        "client-priority.cc",
+        "color.cc",
+        "color-conversion.cc",
+        "config-check-result.cc",
+        "coordinate-transformation.cc",
+        "dimensions.cc",
+        "driver-layer.cc",
+        "engine-info.cc",
+        "id-type.cc",
+        "image-buffer-usage.cc",
+        "image-metadata.cc",
+        "image-tiling-type.cc",
+        "mode.cc",
+        "mode-and-id.cc",
+        "pixel-format.cc",
+        "power-mode.cc",
+        "rectangle.cc",
+    ],
+    hdrs = [
+        "alpha-mode.h",
+        "backlight-state.h",
+        "buffer-collection-id.h",
+        "client-priority.h",
+        "color.h",
+        "color-conversion.h",
+        "config-check-result.h",
+        "config-stamp.h",
+        "coordinate-transformation.h",
+        "dimensions.h",
+        "display-id.h",
+        "display-timing.h",
+        "driver-buffer-collection-id.h",
+        "driver-capture-image-id.h",
+        "driver-config-stamp.h",
+        "driver-image-id.h",
+        "driver-layer.h",
+        "engine-info.h",
+        "event-id.h",
+        "id-type.h",
+        "image-buffer-usage.h",
+        "image-id.h",
+        "image-metadata.h",
+        "image-tiling-type.h",
+        "layer-id.h",
+        "mode.h",
+        "mode-and-id.h",
+        "mode-id.h",
+        "pixel-format.h",
+        "power-mode.h",
+        "rectangle.h",
+        "vsync-ack-cookie.h",
+    ],
+    # TODO(https://fxbug.dev/446717362): Scenic also has a display:: namespace.
+    tags = ["assert_no_deps=//src/ui/scenic/lib/display:__subpackages__"],
+    visibility = [
+        "//src/graphics/display:__subpackages__",
+        "//vendor/google:__subpackages__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.backlight:fuchsia.hardware.backlight_cpp",
+        "//sdk/fidl/fuchsia.hardware.display.engine:fuchsia.hardware.display.engine_cpp",
+        "//sdk/fidl/fuchsia.hardware.display:fuchsia.hardware.display_cpp",
+        "//sdk/fidl/fuchsia.hardware.display.types:fuchsia.hardware.display.types_cpp",
+        "//sdk/fidl/fuchsia.images2:fuchsia.images2_cpp",
+        "//sdk/fidl/fuchsia.math:fuchsia.math_cpp",
+    ],
+    alwayslink = True,
+)

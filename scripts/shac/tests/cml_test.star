@@ -13,12 +13,12 @@ def _tool_paths(*names, built = True):
     tools = []
     files = {}
     for name in names:
-        for os, cpu in [("linux", "x64"), ("linux", "arm64"), ("mac", "x64"), ("mac", "arm64")]:
+        for cpu in ["x64", "arm64"]:
             path = "host_%s/%s" % (cpu, name)
             tools.append({
                 "label": "//tools/%s:%s(//build/toolchain:host_%s)" % (name, name, cpu),
                 "name": name,
-                "os": os,
+                "os": "linux",
                 "cpu": cpu,
                 "path": path,
             })

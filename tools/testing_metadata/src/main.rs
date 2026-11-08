@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+mod owners;
+
 use anyhow::{Context, Result};
 use argh::FromArgs;
 use serde::{Deserialize, Serialize};
@@ -23,6 +25,10 @@ struct Args {
     /// path to the output JSON file.
     #[argh(option)]
     output: PathBuf,
+
+    /// optional path to the output directory owners JSON file.
+    #[argh(option)]
+    directory_owners_file_output: Option<PathBuf>,
 
     /// path to the output depfile.
     #[argh(option)]
@@ -65,6 +71,19 @@ fn main() -> Result<()> {
     collect_metadata(args)
 }
 
+/// Serializes `value` as pretty-printed JSON and writes it to `path`, creating parent directories
+/// if needed.
+fn write_pretty_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let json_content = serde_json::to_string_pretty(value).context("failed to serialize JSON")?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, json_content).with_context(|| format!("failed to write output: {:?}", path))
+}
+
+/// Walks `--fuchsia-dir` to collect `TESTING.json5`, `OWNERS`, and `METADATA.textproto` files,
+/// writes `testing_metadata.json` (and optionally `directory_owners.json`), and emits the Ninja
+/// depfile.
 fn collect_metadata(args: Args) -> Result<()> {
     let abs_fuchsia_dir = if args.fuchsia_dir.is_absolute() {
         args.fuchsia_dir.clone()
@@ -76,6 +95,8 @@ fn collect_metadata(args: Args) -> Result<()> {
         .with_context(|| format!("failed to canonicalize fuchsia-dir: {:?}", abs_fuchsia_dir))?;
 
     let mut metadata_map: HashMap<PathBuf, TestingMetadataSource> = HashMap::new();
+    let mut ownership_collector =
+        args.directory_owners_file_output.as_ref().map(|_| owners::OwnershipCollector::default());
     let mut dep_files = Vec::new();
 
     let ignore_files = HashSet::from(["out", "prebuilt", "third_party"]);
@@ -109,10 +130,18 @@ fn collect_metadata(args: Args) -> Result<()> {
             }
             continue;
         }
+
+        let path = entry.path();
+        if let Some(collector) = &mut ownership_collector {
+            let rel_path = path
+                .strip_prefix(&abs_fuchsia_dir)
+                .context("failed to get relative path for ownership collector")?;
+            collector.visit_file(path, rel_path);
+        }
+
         if entry.file_name() != "TESTING.json5" {
             continue;
         }
-        let path = entry.path();
         let content =
             fs::read_to_string(path).with_context(|| format!("failed to read {:?}", path))?;
         let json_value: serde_json::Value = match serde_json5::from_str(&content) {
@@ -169,7 +198,7 @@ fn collect_metadata(args: Args) -> Result<()> {
     }
 
     let mut final_metadata = BTreeMap::new();
-    for dir in all_dirs {
+    for dir in &all_dirs {
         let mut merged_source = TestingMetadataDirectoryOutput::default();
 
         let mut components = Vec::new();
@@ -195,18 +224,32 @@ fn collect_metadata(args: Args) -> Result<()> {
     }
 
     let output_json = MetadataOutput { metadata: final_metadata, version: 1 };
-    let json_content =
-        serde_json::to_string_pretty(&output_json).context("failed to serialize JSON")?;
-    if let Some(parent) = args.output.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(&args.output, json_content)
-        .with_context(|| format!("failed to write output: {:?}", args.output))?;
+    write_pretty_json(&args.output, &output_json)?;
 
-    let mut depfile_content = format!("{}:", args.output.to_string_lossy());
+    if let (Some(ownership_output_path), Some(mut collector)) =
+        (&args.directory_owners_file_output, ownership_collector)
+    {
+        let (ownership_output, ownership_deps) = collector.finish(&all_dirs, &abs_fuchsia_dir);
+        write_pretty_json(ownership_output_path, &ownership_output)?;
+        for rel_dep in ownership_deps {
+            if !rel_dep.is_absolute() {
+                dep_files.push(args.fuchsia_dir.join(rel_dep));
+            }
+        }
+    }
+
+    let mut depfile_content = match &args.directory_owners_file_output {
+        Some(ownership_output_path) => format!(
+            "{} {}:",
+            args.output.to_string_lossy(),
+            ownership_output_path.to_string_lossy()
+        ),
+        None => format!("{}:", args.output.to_string_lossy()),
+    };
     // Rebuild the testing list if gn gen is run too.
     dep_files.push(PathBuf::from("build.ninja"));
     dep_files.sort();
+    dep_files.dedup();
     for dep in dep_files {
         depfile_content.push_str(&format!(" {}", dep.to_string_lossy()));
     }
@@ -219,6 +262,8 @@ fn collect_metadata(args: Args) -> Result<()> {
     Ok(())
 }
 
+/// Merges coverage category, subcategory, and tag metadata from an ancestor or current directory's
+/// `TESTING.json5` (`source`) into `target`.
 fn merge_metadata(target: &mut TestingMetadataDirectoryOutput, source: &TestingMetadataSource) {
     if let Some(source_cov) = &source.coverage {
         if target.coverage.is_none() {
@@ -252,6 +297,8 @@ mod tests {
     use pretty_assertions::assert_eq;
     const OUTPUT_SCHEMA: &str = include_str!("../testing_metadata.schema.json");
 
+    /// Protects against: regressions in directory inheritance, tag override/accumulation, schema
+    /// conformance, and depfile emission for `TESTING.json5`.
     #[test]
     fn test_integration() -> Result<()> {
         let temp = tempfile::tempdir()?;
@@ -305,6 +352,7 @@ mod tests {
         let args = Args {
             fuchsia_dir: root.to_path_buf(),
             output: output.clone(),
+            directory_owners_file_output: None,
             depfile: depfile.clone(),
         };
 
@@ -375,6 +423,45 @@ mod tests {
         Ok(())
     }
 
+    /// Protects against: CLI wiring regressions where `--directory-owners-file-output` fails to
+    /// write `directory_owners.json` or omits it from the multi-output Ninja depfile rule LHS.
+    #[test]
+    fn test_ownership_cli_output_and_depfile() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+
+        fs::write(root.join("TESTING.json5"), r#"{ "coverage": { "category": "root_cat" } }"#)?;
+        fs::create_dir_all(root.join("src"))?;
+        fs::write(root.join("src/OWNERS"), "owner@google.com\n")?;
+
+        let output = root.join("testing_metadata.json");
+        let ownership_output = root.join("directory_owners.json");
+        let depfile = root.join("testing_metadata.json.d");
+
+        collect_metadata(Args {
+            fuchsia_dir: root.to_path_buf(),
+            output: output.clone(),
+            directory_owners_file_output: Some(ownership_output.clone()),
+            depfile: depfile.clone(),
+        })?;
+
+        let parsed: owners::DirectoryOwnersOutput =
+            serde_json::from_str(&fs::read_to_string(&ownership_output)?)?;
+        assert_eq!(parsed.directories["src"].owners.len(), 1);
+        assert_eq!(parsed.directories["src"].owners[0].email, "owner@google.com");
+
+        let dep_content = fs::read_to_string(depfile)?;
+        assert!(dep_content.starts_with(&format!(
+            "{} {}:",
+            output.to_string_lossy(),
+            ownership_output.to_string_lossy()
+        )));
+        assert!(dep_content.contains("src/OWNERS"));
+        Ok(())
+    }
+
+    /// Protects against: silent acceptance of malformed JSON5 or schema-invalid `TESTING.json5`
+    /// files, and early termination that hides subsequent validation errors.
     #[test]
     fn test_validation_errors() -> Result<()> {
         let temp = tempfile::tempdir()?;
@@ -423,6 +510,7 @@ mod tests {
         let args = Args {
             fuchsia_dir: root.to_path_buf(),
             output: output.clone(),
+            directory_owners_file_output: None,
             depfile: depfile.clone(),
         };
 

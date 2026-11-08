@@ -1,0 +1,50 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_binary(
+    name = "bin",
+    srcs = ["main.cc"],
+    deps = [
+        "//sdk/fidl/fuchsia.media:fuchsia.media_hlcpp",
+        "//sdk/lib/async-default",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/sys/cpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "mock_profile_provider_packaged",
+    binary = ":bin",
+    binary_name = "mock_profile_provider",
+)
+
+fx_component_manifest(
+    name = "mock_profile_provider_manifest",
+    component_name = "mock_profile_provider",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/mock_profile_provider.cml",
+)
+
+fx_component(
+    name = "mock_profile_provider_component",
+    compiled_manifest = ":mock_profile_provider_manifest",
+    deps = [":mock_profile_provider_packaged"],
+)
+
+fx_package(
+    name = "mock_profile_provider",
+    components = [":mock_profile_provider_component"],
+)

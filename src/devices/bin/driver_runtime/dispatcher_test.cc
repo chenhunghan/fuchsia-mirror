@@ -4262,3 +4262,89 @@ TEST_F(DispatcherTest, IrqDuringSuspendOnAlwaysOnDispatcher) {
 
   g_suspend_completion = nullptr;
 }
+
+TEST_F(DispatcherTest, ShutdownDriverWhileSuspendedCancelsSleepAndWakeQueues) {
+  auto fake_driver = CreateFakeDriver();
+  libsync::Completion shutdown_completion;
+  auto destructed_handler = [&](fdf_dispatcher_t* dispatcher) { shutdown_completion.Signal(); };
+
+  auto dispatcher = fdf_env::DispatcherBuilder::CreateSynchronizedWithOwner(
+      fake_driver, {}, "dispatcher", destructed_handler);
+  ASSERT_FALSE(dispatcher.is_error());
+
+  async_dispatcher_t* async_dispatcher = dispatcher->async_dispatcher();
+  ASSERT_NOT_NULL(async_dispatcher);
+
+  zx::event event;
+  ASSERT_OK(zx::event::create(0, &event));
+  ASSERT_OK(fdf_dispatcher_register_wake_vector(dispatcher->get(), event.get(), ZX_USER_SIGNAL_0));
+
+  static libsync::Completion* g_resume_requested = nullptr;
+  libsync::Completion resume_requested;
+  g_resume_requested = &resume_requested;
+
+  fdf_env_resume_requester_t requester = {
+      .handler = [](fdf_env_resume_requester_t* r) -> int {
+        g_resume_requested->Signal();
+        return 0;
+      },
+  };
+  fdf_env_register_resume_requester(fake_driver, &requester);
+
+  StartAdditionalManagedThread();
+
+  // Suspend the driver and wait for it to complete.
+  libsync::Completion suspend_completion;
+  g_suspend_completion = &suspend_completion;
+  fdf_env_suspend_completer_t completer = {
+      .handler = [](fdf_env_suspend_completer_t* c) { g_suspend_completion->Signal(); },
+  };
+  fdf_env_driver_suspend(fake_driver, &completer);
+  suspend_completion.Wait();
+
+  std::optional<zx_status_t> wait_status;
+  async::WaitOnce wait(event.get(), ZX_USER_SIGNAL_0);
+  ASSERT_OK(wait.Begin(async_dispatcher,
+                       [&](async_dispatcher_t* d, async::WaitOnce* w, zx_status_t status,
+                           const zx_packet_signal_t* signal) { wait_status = status; }));
+
+  // With the driver suspended, signal the wake vector so the wait packet is queued into
+  // wake_queue_.
+  ASSERT_OK(event.signal(0, ZX_USER_SIGNAL_0));
+  ASSERT_OK(resume_requested.Wait(zx::time::infinite()));
+
+  // Also queue a task into sleep_queue_.
+  struct SleepTask : public async_task_t {
+    std::optional<zx_status_t> result_status;
+  };
+  SleepTask sleep_task{};
+  sleep_task.state = ASYNC_STATE_INIT;
+  sleep_task.handler = [](async_dispatcher_t* d, async_task_t* task, zx_status_t status) {
+    static_cast<SleepTask*>(task)->result_status = status;
+  };
+  sleep_task.deadline = async_now(async_dispatcher);
+  ASSERT_OK(async_post_task(async_dispatcher, &sleep_task));
+
+  ASSERT_FALSE(wait_status.has_value());
+  ASSERT_FALSE(sleep_task.result_status.has_value());
+
+  // Shut down the driver's dispatchers while still suspended.
+  fdf_env::DriverShutdown driver_shutdown;
+  libsync::Completion driver_shutdown_completion;
+  ASSERT_OK(driver_shutdown.Begin(fake_driver, [&](const void* driver) {
+    ASSERT_EQ(fake_driver, driver);
+    driver_shutdown_completion.Signal();
+  }));
+
+  shutdown_completion.Wait();
+  driver_shutdown_completion.Wait();
+
+  // Verify that the waiter and task were canceled by the dispatchers shutting down.
+  ASSERT_TRUE(wait_status.has_value());
+  EXPECT_STATUS(*wait_status, ZX_ERR_CANCELED);
+  ASSERT_TRUE(sleep_task.result_status.has_value());
+  EXPECT_STATUS(*sleep_task.result_status, ZX_ERR_CANCELED);
+
+  g_suspend_completion = nullptr;
+  g_resume_requested = nullptr;
+}

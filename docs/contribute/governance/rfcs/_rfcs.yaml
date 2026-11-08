@@ -3782,3 +3782,17 @@
   reviewers: ['awolter@google.com', 'cgonyeo@google.com', 'jmatt@google.com', 'novinc@google.com', 'puneetha@google.com', 'spqchan@google.com', 'surajmalhotra@google.com']
   submitted: '2026-08-04'
   reviewed: '2026-09-22'
+
+- name: 'RFC-0288'
+  title: 'git clone fuchsia'
+  short_description: 'Setting up and managing a Fuchsia source tree will require only direct git commands.'
+  authors: ['hjfreyer@google.com', 'awolter@google.com']
+  file: '0288_git_clone_fuchsia.md'
+  area: ['Build', 'Developer', 'EngProd/Infra']
+  issue: []
+  gerrit_change_id: ['1892439']
+  status: 'Accepted'
+  reviewers: ['abarth@google.com', 'digit@google.com', 'olivernewman@google.com']
+  submitted: '2026-10-15'
+  reviewed: '2026-11-03'
+

@@ -48,6 +48,7 @@
                 "fuchsia.kernel.VmexResource",
                 "fuchsia.process.Launcher",
                 "fuchsia.sys2.BootController",
+                "fuchsia.sys2.BootNotifier",
                 "fuchsia.sys2.CrashIntrospect",
                 "fuchsia.sys2.SystemController",
                 "fuchsia.time.Maintenance",

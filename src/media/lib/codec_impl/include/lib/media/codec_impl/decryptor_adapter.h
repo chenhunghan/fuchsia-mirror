@@ -150,7 +150,7 @@ class DecryptorAdapter : public CodecAdapter {
   void QueueInputItem(CodecInputItem input_item);
   CodecInputItem DequeueInputItem();
   void ProcessInput();
-  bool UpdateEncryptionParams(const fuchsia::media::EncryptedFormat& encrypted_format);
+  bool UpdateEncryptionParams(fuchsia::media::EncryptedFormat* encrypted_format);
   void OnCoreCodecFailStream(fuchsia::media::StreamError error);
 
   std::optional<InspectProperties> inspect_properties_;

@@ -4,7 +4,6 @@
 #[cfg(target_os = "fuchsia")]
 use zx::MonotonicDuration;
 
-pub const DEV_DIR: &str = "/dev";
 pub const BT_SERVICE_DIR: &str = "/svc/fuchsia.hardware.bluetooth.Service";
 
 // Constants for creating bt-host component in bt-init and integration tests

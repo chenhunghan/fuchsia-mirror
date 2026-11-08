@@ -4,7 +4,6 @@
 
 #include "src/developer/forensics/feedback/last_reboot.h"
 
-#include <fuchsia/feedback/cpp/fidl.h>
 #include <fuchsia/hardware/power/statecontrol/cpp/fidl.h>
 #include <lib/inspect/cpp/vmo/types.h>
 
@@ -38,21 +37,21 @@ class LastRebootTest : public UnitTestFixture {
   }
 
  protected:
-  void SetUpCrashReporterServer(std::unique_ptr<stubs::CrashReporterBase> crash_reporter_server) {
-    crash_reporter_server_ = std::move(crash_reporter_server);
+  void SetUpCrashReporter(std::unique_ptr<stubs::CrashReporterBase> crash_reporter) {
+    crash_reporter_ = std::move(crash_reporter);
   }
 
   cobalt::Logger* Cobalt() { return &cobalt_; }
   RedactorBase* Redactor() { return &redactor_; }
 
-  fuchsia::feedback::CrashReporter* CrashReporter() { return crash_reporter_server_.get(); }
+  crash_reports::CrashReporterInternal* CrashReporter() { return crash_reporter_.get(); }
 
  private:
   timekeeper::AsyncTestClock clock_;
   cobalt::Logger cobalt_;
   IdentityRedactor redactor_{inspect::BoolProperty()};
 
-  std::unique_ptr<stubs::CrashReporterBase> crash_reporter_server_;
+  std::unique_ptr<stubs::CrashReporterBase> crash_reporter_;
 };
 
 TEST_F(LastRebootTest, FirstInstance) {
@@ -61,14 +60,13 @@ TEST_F(LastRebootTest, FirstInstance) {
       FinalShutdownReason::kOom, GracefulShutdownAction::kReboot, zx::sec(1), zx::msec(500));
   RebootLog reboot_log(final_shutdown_info, "reboot log");
 
-  SetUpCrashReporterServer(
-      std::make_unique<stubs::CrashReporter>(stubs::CrashReporter::Expectations{
-          .crash_signature = "fuchsia-oom",
-          .reboot_log = reboot_log.RebootLogStr(),
-          .uptime = final_shutdown_info.Uptime(),
-          .runtime = final_shutdown_info.Runtime(),
-          .is_fatal = true,
-      }));
+  SetUpCrashReporter(std::make_unique<stubs::CrashReporter>(stubs::CrashReporter::Expectations{
+      .crash_signature = "fuchsia-oom",
+      .reboot_log = reboot_log.RebootLogStr(),
+      .uptime = final_shutdown_info.Uptime(),
+      .runtime = final_shutdown_info.Runtime(),
+      .is_fatal = true,
+  }));
 
   LastReboot last_reboot(dispatcher(), Cobalt(), Redactor(), CrashReporter(),
                          LastReboot::Options{
@@ -92,7 +90,7 @@ TEST_F(LastRebootTest, IsNotFirstInstance) {
       FinalShutdownReason::kOom, GracefulShutdownAction::kReboot, zx::sec(1), zx::msec(500));
   RebootLog reboot_log(final_shutdown_info, "reboot log");
 
-  SetUpCrashReporterServer(std::make_unique<stubs::CrashReporterNoFileExpected>());
+  SetUpCrashReporter(std::make_unique<stubs::CrashReporterNoFileExpected>());
 
   LastReboot last_reboot(dispatcher(), Cobalt(), Redactor(), CrashReporter(),
                          LastReboot::Options{

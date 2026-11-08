@@ -17,6 +17,7 @@ group("host") {
     "//build/images/updates/tests:fx_publish_tests($host_toolchain)",
     "//src/developer/ffx:host_tests($host_toolchain)",
     "//src/developer/fuchsia-controller:host_tests($host_toolchain)",
+    "//src/memory:host_tests($host_toolchain)",
     "//tools:host_tests($host_toolchain)",
   ]
 }
@@ -31,6 +32,7 @@ group("no_e2e") {
   deps = [
     "//build/assembly:host_tests($host_toolchain)",
     "//build/python:host_tests($host_toolchain)",
+    "//examples:host_tests($host_toolchain)",
     "//src/lib/assembly:host_tests($host_toolchain)",
     "//src/security:host_tests($host_toolchain)",
     "//src/sys/pkg:host_tests($host_toolchain)",

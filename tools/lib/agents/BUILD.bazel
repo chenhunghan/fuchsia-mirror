@@ -6,15 +6,19 @@ load("@io_bazel_rules_go//go:def.bzl", "go_library")
 load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
 load("//build/bazel/rules/host_tests:host_go_test.bzl", "host_go_test")
 
-package(
-    default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
-)
+package(default_applicable_licenses = ["//:license"])
 
 genrule(
     name = "copy_agents_txt",
     srcs = ["//tools/devshell/lib:agents.txt"],
     outs = ["agents.txt"],
+    cmd = "cp $< $@",
+)
+
+genrule(
+    name = "copy_agent_session_ids_txt",
+    srcs = ["//tools/devshell/lib:agent_session_ids.txt"],
+    outs = ["agent_session_ids.txt"],
     cmd = "cp $< $@",
 )
 
@@ -24,6 +28,7 @@ go_library(
         "agents.go",
     ],
     embedsrcs = [
+        ":copy_agent_session_ids_txt",
         ":copy_agents_txt",
     ],
     importpath = "go.fuchsia.dev/fuchsia/tools/lib/agents",

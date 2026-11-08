@@ -3,40 +3,19 @@
 # found in the LICENSE file.
 
 import("//build/components.gni")
-import("//build/fidl/fidl.gni")
 import("//build/testing/cc_test_executable.gni")
-
-fidl("test.virtualkeyboard") {
-  testonly = true
-  sources = [ "input_position_listener.test.fidl" ]
-  public_deps = [ "//zircon/vdso/zx" ]
-}
 
 cc_test_executable("virtual-keyboard-test-bin") {
   testonly = true
   sources = [ "virtual-keyboard-test.cc" ]
   output_name = "virtual-keyboard-test"
   deps = [
-    ":test.virtualkeyboard_cpp",
     "//sdk/fidl/fuchsia.accessibility.semantics:fuchsia.accessibility.semantics_cpp",
-    "//sdk/fidl/fuchsia.buildinfo:fuchsia.buildinfo_cpp",
-    "//sdk/fidl/fuchsia.element:fuchsia.element_cpp",
-    "//sdk/fidl/fuchsia.fonts:fuchsia.fonts_cpp",
     "//sdk/fidl/fuchsia.input.injection:fuchsia.input.injection_cpp",
     "//sdk/fidl/fuchsia.input.virtualkeyboard:fuchsia.input.virtualkeyboard_cpp",
-    "//sdk/fidl/fuchsia.intl:fuchsia.intl_cpp",
-    "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
-    "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_cpp",
-    "//sdk/fidl/fuchsia.memorypressure:fuchsia.memorypressure_cpp",
-    "//sdk/fidl/fuchsia.metrics:fuchsia.metrics_cpp",
-    "//sdk/fidl/fuchsia.posix.socket:fuchsia.posix.socket_cpp",
-    "//sdk/fidl/fuchsia.process:fuchsia.process_cpp",
-    "//sdk/fidl/fuchsia.scheduler:fuchsia.scheduler_cpp",
-    "//sdk/fidl/fuchsia.tracing.provider:fuchsia.tracing.provider_cpp",
-    "//sdk/fidl/fuchsia.ui.app:fuchsia.ui.app_cpp",
+    "//sdk/fidl/fuchsia.ui.composition:fuchsia.ui.composition_cpp",
     "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_cpp",
-    "//sdk/fidl/fuchsia.vulkan.loader:fuchsia.vulkan.loader_cpp",
-    "//sdk/fidl/fuchsia.web:fuchsia.web_cpp",
+    "//sdk/fidl/fuchsia.ui.input3:fuchsia.ui.input3_cpp",
     "//sdk/lib/async-loop:async-loop-cpp",
     "//sdk/lib/async-loop:async-loop-default",
     "//sdk/lib/fdio",
@@ -46,17 +25,16 @@ cc_test_executable("virtual-keyboard-test-bin") {
     "//src/lib/fostr/fidl/fuchsia.ui.input",
     "//src/lib/fxl",
     "//src/lib/fxl/test:gtest_main",
+    "//src/lib/json_parser",
     "//src/lib/testing/loop_fixture",
     "//src/lib/timekeeper",
     "//src/ui/input/testing/fake_input_report_device",
-    "//src/ui/testing/ui_test_manager",
+    "//src/ui/testing/util:fidl_cpp_helpers",
+    "//src/ui/testing/util:portable_ui_test",
+    "//src/ui/testing/util:web_view_client",
     "//third_party/googletest:gtest",
+    "//third_party/rapidjson",
     "//zircon/system/ulib/zx",
-
-    # TODO(https://fxbug.dev/355738783): Fix after realm builder support new C++ binding.
-    "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_cpp_hlcpp_conversion",
-    "//sdk/fidl/fuchsia.io:fuchsia.io_cpp_hlcpp_conversion",
-    "//sdk/lib/fidl/cpp:hlcpp_conversion",
   ]
 }
 
@@ -74,18 +52,13 @@ fuchsia_test_package("virtual-keyboard-test") {
   test_components = [ ":virtual-keyboard-test-component" ]
   deps = [
     "//src/cobalt/bin/testing/fake_cobalt",
-    "//src/connectivity/network/netstack3:component-for-tests",
     "//src/developer/build_info/testing:fake-build-info-component",
-    "//src/developer/memory/pressure_signaler:component",
     "//src/fonts:font_provider_hermetic_for_test",
+    "//src/memory/pressure_signaler:component",
     "//src/testing/fidl/intl_property_manager:intl_property_manager_component",
-    "//src/ui/tests/integration_input_tests/virtual-keyboard/web-virtual-keyboard-client:component",
-
-    # Include some default config (it doesn't matter which, since we're going to
-    # override it).
-    "//src/ui/testing/test_ui_stack:flatland_scene_manager_config",
     "//src/ui/testing/test_ui_stack:test-ui-stack-component",
   ]
+  subpackages = [ "//src/connectivity/network/netstack3:package-for-tests" ]
   test_specs = {
     log_settings = {
       # Do not fail the test if a message with level ERROR is logged.  Several

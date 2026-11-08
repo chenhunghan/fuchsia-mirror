@@ -1,0 +1,26 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fidl_library(
+    name = "fuchsia.hardware.powerimpl",
+    srcs = [
+        "power-impl.fidl",
+    ],
+    enable_banjo = True,
+    enable_rust = False,
+    enable_rust_next = False,
+    visibility = [
+        "//src/devices/board/drivers/astro:__pkg__",
+        "//src/devices/bus/drivers/platform/test:__pkg__",
+        "//src/devices/power/drivers/aml-meson-power:__pkg__",
+        "//src/devices/power/drivers/power:__pkg__",
+    ],
+    deps = [
+        "//zircon/vdso/zx",
+    ],
+)

@@ -9,300 +9,83 @@
 
 use core::ffi::{c_char, c_void};
 use core::mem::{align_of, size_of};
+
+use bitrs::{bitfield_repr, layout};
+use regio::{AccessRestrictsTo, Accessible, MmioBank, MmioPtr, Offset, Ro};
 use zr::static_assert;
 
-use crate::component::{
-    ClassId, ComponentIdRegister, DeviceArchRegister, MINIMUM_COMPONENT_SIZE, RegisterIo, arm,
-};
+use crate::component::{CIDR1, ClassId, DEVARCH, MINIMUM_COMPONENT_SIZE, arm};
 
-/// [CS] D6.4.4
-/// Class `0x1` ROM table entry register.
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct Class0x1RomEntry(pub u32);
+layout!({
+    /// [CS] D6.4.4
+    /// Class `0x1` ROM table entry register.
+    pub struct Class0x1RomEntry(u32);
+    {
+        let offset @ 31..12;
+        let __ @ 11..9;
+        let powerid @ 8..4;
+        let __ @ 3;
+        let powerid_valid @ 2;
+        let format @ 1;
+        let present @ 0;
+    }
+});
 
 impl Class0x1RomEntry {
     /// Returns the byte offset of entry `n` within a Class `0x1` ROM table.
     #[inline]
-    pub const fn offset_of(n: u32) -> u32 {
-        n * (size_of::<u32>() as u32)
-    }
-
-    /// Creates a `Class0x1RomEntry` from its raw 32-bit value.
-    #[inline]
-    pub const fn from_raw(val: u32) -> Self {
-        Self(val)
-    }
-
-    /// Reads entry `n` from `io`.
-    #[inline]
-    pub fn read_at<Io: RegisterIo>(mut io: Io, n: u32) -> Self {
-        Self(io.read32(Self::offset_of(n)))
-    }
-
-    /// Returns the raw 32-bit register value.
-    #[inline]
-    pub const fn reg_value(self) -> u32 {
-        self.0
-    }
-
-    /// Returns the `offset` field (`[31:12]`).
-    #[inline]
-    pub const fn offset(self) -> u32 {
-        self.0 >> 12
-    }
-
-    /// Sets the `offset` field (`[31:12]`).
-    #[inline]
-    pub const fn set_offset(&mut self, offset: u32) -> &mut Self {
-        self.0 = (self.0 & 0xfff) | (offset << 12);
-        self
-    }
-
-    /// Returns the `powerid` field (`[8:4]`).
-    #[inline]
-    pub const fn powerid(self) -> u8 {
-        ((self.0 >> 4) & 0x1f) as u8
-    }
-
-    /// Sets the `powerid` field (`[8:4]`).
-    #[inline]
-    pub const fn set_powerid(&mut self, powerid: u8) -> &mut Self {
-        self.0 = (self.0 & !(0x1f << 4)) | (((powerid as u32) & 0x1f) << 4);
-        self
-    }
-
-    /// Returns the `powerid_valid` bit (`[2]`).
-    #[inline]
-    pub const fn powerid_valid(self) -> bool {
-        ((self.0 >> 2) & 0x1) != 0
-    }
-
-    /// Sets the `powerid_valid` bit (`[2]`).
-    #[inline]
-    pub const fn set_powerid_valid(&mut self, valid: bool) -> &mut Self {
-        if valid {
-            self.0 |= 1 << 2;
-        } else {
-            self.0 &= !(1 << 2);
-        }
-        self
-    }
-
-    /// Returns the `format` bit (`[1]`).
-    #[inline]
-    pub const fn format(self) -> bool {
-        ((self.0 >> 1) & 0x1) != 0
-    }
-
-    /// Sets the `format` bit (`[1]`).
-    #[inline]
-    pub const fn set_format(&mut self, format: bool) -> &mut Self {
-        if format {
-            self.0 |= 1 << 1;
-        } else {
-            self.0 &= !(1 << 1);
-        }
-        self
-    }
-
-    /// Returns the `present` bit (`[0]`).
-    #[inline]
-    pub const fn present(self) -> bool {
-        (self.0 & 0x1) != 0
-    }
-
-    /// Sets the `present` bit (`[0]`).
-    #[inline]
-    pub const fn set_present(&mut self, present: bool) -> &mut Self {
-        if present {
-            self.0 |= 1;
-        } else {
-            self.0 &= !1;
-        }
-        self
+    pub const fn offset_of(n: u32) -> Offset<Self, Ro> {
+        Offset::new((n as usize) * size_of::<u32>())
     }
 }
 
-/// [CS] D7.5.17
-/// Class `0x9` 32-bit ROM table entry register.
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct Class0x9Rom32BitEntry(pub u32);
+layout!({
+    /// [CS] D7.5.17
+    /// Class `0x9` 32-bit ROM table entry register.
+    pub struct Class0x9Rom32BitEntry(u32);
+    {
+        let offset @ 31..12;
+        let __ @ 11..9;
+        let powerid @ 8..4;
+        let __ @ 3;
+        let powerid_valid @ 2;
+        let present @ 1..0;
+    }
+});
 
 impl Class0x9Rom32BitEntry {
     /// Returns the byte offset of entry `n` within a Class `0x9` 32-bit ROM table.
     #[inline]
-    pub const fn offset_of(n: u32) -> u32 {
-        n * (size_of::<u32>() as u32)
-    }
-
-    /// Creates a `Class0x9Rom32BitEntry` from its raw 32-bit value.
-    #[inline]
-    pub const fn from_raw(val: u32) -> Self {
-        Self(val)
-    }
-
-    /// Reads entry `n` from `io`.
-    #[inline]
-    pub fn read_at<Io: RegisterIo>(mut io: Io, n: u32) -> Self {
-        Self(io.read32(Self::offset_of(n)))
-    }
-
-    /// Returns the raw 32-bit register value.
-    #[inline]
-    pub const fn reg_value(self) -> u32 {
-        self.0
-    }
-
-    /// Returns the `offset` field (`[31:12]`).
-    #[inline]
-    pub const fn offset(self) -> u32 {
-        self.0 >> 12
-    }
-
-    /// Sets the `offset` field (`[31:12]`).
-    #[inline]
-    pub const fn set_offset(&mut self, offset: u32) -> &mut Self {
-        self.0 = (self.0 & 0xfff) | (offset << 12);
-        self
-    }
-
-    /// Returns the `powerid` field (`[8:4]`).
-    #[inline]
-    pub const fn powerid(self) -> u8 {
-        ((self.0 >> 4) & 0x1f) as u8
-    }
-
-    /// Sets the `powerid` field (`[8:4]`).
-    #[inline]
-    pub const fn set_powerid(&mut self, powerid: u8) -> &mut Self {
-        self.0 = (self.0 & !(0x1f << 4)) | (((powerid as u32) & 0x1f) << 4);
-        self
-    }
-
-    /// Returns the `powerid_valid` bit (`[2]`).
-    #[inline]
-    pub const fn powerid_valid(self) -> bool {
-        ((self.0 >> 2) & 0x1) != 0
-    }
-
-    /// Sets the `powerid_valid` bit (`[2]`).
-    #[inline]
-    pub const fn set_powerid_valid(&mut self, valid: bool) -> &mut Self {
-        if valid {
-            self.0 |= 1 << 2;
-        } else {
-            self.0 &= !(1 << 2);
-        }
-        self
-    }
-
-    /// Returns the 2-bit `present` field (`[1:0]`).
-    #[inline]
-    pub const fn present(self) -> u8 {
-        (self.0 & 0x3) as u8
-    }
-
-    /// Sets the 2-bit `present` field (`[1:0]`).
-    #[inline]
-    pub const fn set_present(&mut self, present: u8) -> &mut Self {
-        self.0 = (self.0 & !0x3) | ((present as u32) & 0x3);
-        self
+    pub const fn offset_of(n: u32) -> Offset<Self, Ro> {
+        Offset::new((n as usize) * size_of::<u32>())
     }
 }
 
-/// [CS] D7.5.17
-/// Class `0x9` 64-bit ROM table entry register.
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct Class0x9Rom64BitEntry(pub u64);
+layout!({
+    /// [CS] D7.5.17
+    /// Class `0x9` 64-bit ROM table entry register.
+    pub struct Class0x9Rom64BitEntry(u64);
+    {
+        let offset @ 63..12;
+        let __ @ 11..9;
+        let powerid @ 8..4;
+        let __ @ 3;
+        let powerid_valid @ 2;
+        let present @ 1..0;
+    }
+});
 
 impl Class0x9Rom64BitEntry {
     /// Returns the byte offset of entry `n` within a Class `0x9` 64-bit ROM table.
     #[inline]
-    pub const fn offset_of(n: u32) -> u32 {
-        n * (size_of::<u64>() as u32)
-    }
-
-    /// Creates a `Class0x9Rom64BitEntry` from its raw 64-bit value.
-    #[inline]
-    pub const fn from_raw(val: u64) -> Self {
-        Self(val)
-    }
-
-    /// Reads entry `n` from `io`.
-    #[inline]
-    pub fn read_at<Io: RegisterIo>(mut io: Io, n: u32) -> Self {
-        Self(io.read64(Self::offset_of(n)))
-    }
-
-    /// Returns the raw 64-bit register value.
-    #[inline]
-    pub const fn reg_value(self) -> u64 {
-        self.0
-    }
-
-    /// Returns the `offset` field (`[63:12]`).
-    #[inline]
-    pub const fn offset(self) -> u64 {
-        self.0 >> 12
-    }
-
-    /// Sets the `offset` field (`[63:12]`).
-    #[inline]
-    pub const fn set_offset(&mut self, offset: u64) -> &mut Self {
-        self.0 = (self.0 & 0xfff) | (offset << 12);
-        self
-    }
-
-    /// Returns the `powerid` field (`[8:4]`).
-    #[inline]
-    pub const fn powerid(self) -> u8 {
-        ((self.0 >> 4) & 0x1f) as u8
-    }
-
-    /// Sets the `powerid` field (`[8:4]`).
-    #[inline]
-    pub const fn set_powerid(&mut self, powerid: u8) -> &mut Self {
-        self.0 = (self.0 & !(0x1f << 4)) | (((powerid as u64) & 0x1f) << 4);
-        self
-    }
-
-    /// Returns the `powerid_valid` bit (`[2]`).
-    #[inline]
-    pub const fn powerid_valid(self) -> bool {
-        ((self.0 >> 2) & 0x1) != 0
-    }
-
-    /// Sets the `powerid_valid` bit (`[2]`).
-    #[inline]
-    pub const fn set_powerid_valid(&mut self, valid: bool) -> &mut Self {
-        if valid {
-            self.0 |= 1 << 2;
-        } else {
-            self.0 &= !(1 << 2);
-        }
-        self
-    }
-
-    /// Returns the 2-bit `present` field (`[1:0]`).
-    #[inline]
-    pub const fn present(self) -> u8 {
-        (self.0 & 0x3) as u8
-    }
-
-    /// Sets the 2-bit `present` field (`[1:0]`).
-    #[inline]
-    pub const fn set_present(&mut self, present: u8) -> &mut Self {
-        self.0 = (self.0 & !0x3) | ((present as u64) & 0x3);
-        self
+    pub const fn offset_of(n: u32) -> Offset<Self, Ro> {
+        Offset::new((n as usize) * size_of::<u64>())
     }
 }
 
 /// Entry format encoded in `DEVID.FORMAT` (`Class0x9RomDeviceIdRegister::Format`).
-#[repr(u8)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[bitfield_repr(u8)]
+#[derive(Copy, Clone)]
 pub enum Class0x9RomEntryFormat {
     /// 32-bit ROM table entries (`0`).
     Bits32 = 0,
@@ -313,103 +96,22 @@ pub enum Class0x9RomEntryFormat {
 static_assert!(size_of::<Class0x9RomEntryFormat>() == size_of::<u8>());
 static_assert!(align_of::<Class0x9RomEntryFormat>() == align_of::<u8>());
 
-impl TryFrom<u8> for Class0x9RomEntryFormat {
-    type Error = u8;
-
-    #[inline]
-    fn try_from(val: u8) -> Result<Self, Self::Error> {
-        match val {
-            0 => Ok(Self::Bits32),
-            1 => Ok(Self::Bits64),
-            other => Err(other),
-        }
+layout!({
+    /// [CS] D7.5.10
+    /// Class `0x9` ROM table device ID register (`DEVID`).
+    pub struct Class0x9RomDeviceIdRegister(u32);
+    {
+        let __ @ 31..6;
+        let prr @ 5;
+        let sysmem @ 4;
+        let format @ 3..0: Class0x9RomEntryFormat;
     }
-}
+});
 
-/// [CS] D7.5.10
-/// Class `0x9` ROM table device ID register (`DEVID`).
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct Class0x9RomDeviceIdRegister(pub u32);
+/// Byte offset of [`Class0x9RomDeviceIdRegister`] (`DEVID`) within a component page.
+pub const DEVID: Offset<Class0x9RomDeviceIdRegister, Ro> = Offset::new(0xfc8);
 
-impl Class0x9RomDeviceIdRegister {
-    /// Byte offset of `DEVID` within a component page.
-    pub const OFFSET: u32 = 0xfc8;
-
-    /// Creates a `Class0x9RomDeviceIdRegister` from its raw 32-bit value.
-    #[inline]
-    pub const fn from_raw(val: u32) -> Self {
-        Self(val)
-    }
-
-    /// Reads `DEVID` from `io`.
-    #[inline]
-    pub fn read_from<Io: RegisterIo>(mut io: Io) -> Self {
-        Self(io.read32(Self::OFFSET))
-    }
-
-    /// Returns the raw 32-bit register value.
-    #[inline]
-    pub const fn reg_value(self) -> u32 {
-        self.0
-    }
-
-    /// Returns the `prr` bit (`[5]`).
-    #[inline]
-    pub const fn prr(self) -> bool {
-        ((self.0 >> 5) & 0x1) != 0
-    }
-
-    /// Sets the `prr` bit (`[5]`).
-    #[inline]
-    pub const fn set_prr(&mut self, prr: bool) -> &mut Self {
-        if prr {
-            self.0 |= 1 << 5;
-        } else {
-            self.0 &= !(1 << 5);
-        }
-        self
-    }
-
-    /// Returns the `sysmem` bit (`[4]`).
-    #[inline]
-    pub const fn sysmem(self) -> bool {
-        ((self.0 >> 4) & 0x1) != 0
-    }
-
-    /// Sets the `sysmem` bit (`[4]`).
-    #[inline]
-    pub const fn set_sysmem(&mut self, sysmem: bool) -> &mut Self {
-        if sysmem {
-            self.0 |= 1 << 4;
-        } else {
-            self.0 &= !(1 << 4);
-        }
-        self
-    }
-
-    /// Returns the raw 4-bit `format` field (`[3:0]`).
-    #[inline]
-    pub const fn format_raw(self) -> u8 {
-        (self.0 & 0xf) as u8
-    }
-
-    /// Returns the decoded [`Class0x9RomEntryFormat`] from `[3:0]`, or `Err(raw)` if
-    /// unrecognized.
-    #[inline]
-    pub fn format(self) -> Result<Class0x9RomEntryFormat, u8> {
-        Class0x9RomEntryFormat::try_from(self.format_raw())
-    }
-
-    /// Sets the `format` field (`[3:0]`).
-    #[inline]
-    pub const fn set_format(&mut self, format: Class0x9RomEntryFormat) -> &mut Self {
-        self.0 = (self.0 & !0xf) | ((format as u32) & 0xf);
-        self
-    }
-}
-
-/// Represents an error that occurred while walking a ROM table.
+/// Represents an error that occurred while walking the table.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct WalkError {
     /// Human-readable description of the walk error.
@@ -418,43 +120,8 @@ pub struct WalkError {
     pub offset: u32,
 }
 
-// Relativizes access with a fixed offset.
-struct RelativizedIo<'a, Io: ?Sized> {
-    io: &'a mut Io,
-    offset: u32,
-}
-
-impl<'a, Io: RegisterIo + ?Sized> RelativizedIo<'a, Io> {
-    #[inline]
-    fn new(io: &'a mut Io, offset: u32) -> Self {
-        Self { io, offset }
-    }
-}
-
-impl<'a, Io: RegisterIo + ?Sized> RegisterIo for RelativizedIo<'a, Io> {
-    #[inline]
-    fn read32(&mut self, offset: u32) -> u32 {
-        self.io.read32(offset.wrapping_add(self.offset))
-    }
-
-    #[inline]
-    fn read64(&mut self, offset: u32) -> u64 {
-        self.io.read64(offset.wrapping_add(self.offset))
-    }
-
-    #[inline]
-    fn write32(&mut self, val: u32, offset: u32) {
-        self.io.write32(val, offset.wrapping_add(self.offset));
-    }
-
-    #[inline]
-    fn write64(&mut self, val: u64, offset: u32) {
-        self.io.write64(val, offset.wrapping_add(self.offset));
-    }
-}
-
-// There are several types of ROM table entry registers; this struct serves
-// as unified front-end for accessing their contents.
+/// There are several types of ROM table entry registers; this struct serves
+/// as unified front-end for accessing their contents.
 struct EntryContents {
     value: u64,
     offset: u32,
@@ -483,7 +150,7 @@ impl RomTable {
 
     /// Walks the underlying tree of components with no dynamic allocation,
     /// calling `callback` on the offset from the table's base address (implicitly
-    /// encoded in `io`) of each component found. The (`io`, `max_offset`)
+    /// encoded in `base`) of each component found. The (`base`, `max_offset`)
     /// together implicitly give the aperture to walk.
     ///
     /// The walk will visit and access the first page of memory of each found
@@ -492,22 +159,35 @@ impl RomTable {
     /// the maximum visited offset - or at least something deemed large enough -
     /// is left to the caller. The offset must at least be
     /// `MINIMUM_COMPONENT_SIZE`, which is the size of the base table proper.
-    pub fn walk<Io, F>(mut io: Io, max_offset: u32, mut callback: F) -> Result<(), WalkError>
+    ///
+    /// # Safety
+    ///
+    /// `base` must point to a valid, mapped MMIO aperture of at least `max_offset` bytes that
+    /// remains mapped and safe to read for the duration of the call (with 8-byte alignment if
+    /// 64-bit Class `0x9` ROM tables are present in the aperture).
+    pub unsafe fn walk<Access, F>(
+        base: MmioPtr<u32, Access>,
+        max_offset: u32,
+        mut callback: F,
+    ) -> Result<(), WalkError>
     where
-        Io: RegisterIo,
+        Access: Accessible + AccessRestrictsTo<Ro>,
         F: FnMut(u32),
     {
-        static_assert!(size_of::<u32>() == 4);
+        const { assert!(size_of::<u32>() == 4) };
         assert!((max_offset as usize) >= MINIMUM_COMPONENT_SIZE);
-        Self::walk_from(&mut io, max_offset, &mut callback, 0)
+        let base = base.restrict::<Ro>();
+        // SAFETY: Caller guarantees `base` points to a mapped MMIO aperture of at least
+        // `max_offset` bytes.
+        unsafe { Self::walk_from(base, max_offset, &mut callback, 0) }
     }
 
     #[inline]
-    const fn is_table(classid: u8, architect: u16, archid: u16) -> bool {
-        if classid == ClassId::RomTable0x1 as u8 {
+    fn is_table(classid: Option<ClassId>, architect: u16, archid: u16) -> bool {
+        if classid == Some(ClassId::RomTable0x1) {
             return true;
         }
-        if classid == ClassId::CoreSight as u8
+        if classid == Some(ClassId::CoreSight)
             && architect == arm::ARCHITECT
             && archid == arm::archid::ROM_TABLE
         {
@@ -516,14 +196,16 @@ impl RomTable {
         false
     }
 
-    fn walk_from<Io, F>(
-        root_io: &mut Io,
+    /// # Safety
+    ///
+    /// `base` must point to a valid, mapped MMIO aperture of at least `max_offset` bytes.
+    unsafe fn walk_from<F>(
+        base: MmioPtr<u32, Ro>,
         max_offset: u32,
         callback: &mut F,
         offset: u32,
     ) -> Result<(), WalkError>
     where
-        Io: RegisterIo + ?Sized,
         F: FnMut(u32),
     {
         if max_offset - (MINIMUM_COMPONENT_SIZE as u32) < offset {
@@ -532,36 +214,50 @@ impl RomTable {
 
         // Treats I/O as rooted at the current offset (instead of rooted at the base ROM table,
         // which would complicate register access).
-        let mut io = RelativizedIo::new(root_io, offset);
-
-        let classid = ComponentIdRegister::read_from(&mut io).classid_raw();
-        let arch_reg = DeviceArchRegister::read_from(&mut io);
+        // SAFETY: The check above guarantees `[offset, offset + MINIMUM_COMPONENT_SIZE)` lies
+        // within the `max_offset`-byte aperture starting at `base`, `offset` is a multiple of
+        // `MINIMUM_COMPONENT_SIZE` (4096) so alignment is preserved, and `CIDR1` and `DEVARCH`
+        // lie within the 4 KiB `bank32` component region.
+        let (comp_ptr, bank32, cidr1, arch_reg) = unsafe {
+            let comp_ptr = MmioPtr::<u32, Ro>::new(base.as_ptr().byte_add(offset as usize));
+            let bank32 = MmioBank::new(comp_ptr, MINIMUM_COMPONENT_SIZE);
+            let cidr1 = bank32.at(CIDR1).read();
+            let arch_reg = bank32.at(DEVARCH).read();
+            (comp_ptr, bank32, cidr1, arch_reg)
+        };
+        let classid = cidr1.try_classid().ok();
         let architect = arch_reg.architect();
         let archid = arch_reg.archid();
         if Self::is_table(classid, architect, archid) {
+            let classid = classid.unwrap();
             let max_entries: u32;
-            let mut format: Option<u8> = None;
-            if classid == ClassId::RomTable0x1 as u8 {
+            let mut format: Option<Class0x9RomEntryFormat> = None;
+            if classid == ClassId::RomTable0x1 {
                 max_entries = Self::MAX_0X1_ROM_ENTRIES;
             } else {
                 // If not a class 0x1 table, then a class 0x9.
-                debug_assert_eq!(classid, ClassId::CoreSight as u8);
-                format = Some(Class0x9RomDeviceIdRegister::read_from(&mut io).format_raw());
-                match format.unwrap() {
-                    x if x == Class0x9RomEntryFormat::Bits32 as u8 => {
+                debug_assert_eq!(classid, ClassId::CoreSight);
+                // SAFETY: `DEVID` lies within the 4 KiB `bank32` component region.
+                let devid = unsafe { bank32.at(DEVID) }.read();
+                match devid.try_format() {
+                    Ok(fmt @ Class0x9RomEntryFormat::Bits32) => {
+                        format = Some(fmt);
                         max_entries = Self::MAX_0X9_ROM_32BIT_ENTRIES;
                     }
-                    x if x == Class0x9RomEntryFormat::Bits64 as u8 => {
+                    Ok(fmt @ Class0x9RomEntryFormat::Bits64) => {
+                        format = Some(fmt);
                         max_entries = Self::MAX_0X9_ROM_64BIT_ENTRIES;
                     }
-                    _ => {
+                    Err(_) => {
                         return Err(WalkError { reason: "bad format value", offset });
                     }
                 }
             }
 
             for i in 0..max_entries {
-                let contents = Self::read_entry(&mut io, i, classid, format)
+                // SAFETY: `comp_ptr` covers the current 4 KiB component page, and
+                // `i < max_entries`.
+                let contents = unsafe { Self::read_entry(comp_ptr, i, classid, format) }
                     .map_err(|reason| WalkError { reason, offset })?;
                 if contents.value == 0 {
                     break; // Signals that the walk is over if identically zero.
@@ -572,7 +268,9 @@ impl RomTable {
                 // [CS] D5.4
                 // the offset provided by the ROM table entry requires a shift of 12 bits.
                 let new_offset = offset.wrapping_add(contents.offset.wrapping_shl(12));
-                Self::walk_from(io.io, max_offset, callback, new_offset)?;
+                // SAFETY: `base` covers `max_offset` bytes, and `walk_from` validates bounds for
+                // `new_offset` on entry.
+                unsafe { Self::walk_from(base, max_offset, callback, new_offset) }?;
             }
             return Ok(());
         }
@@ -586,37 +284,55 @@ impl RomTable {
         Ok(())
     }
 
-    fn read_entry<Io: RegisterIo>(
-        mut io: Io,
+    /// # Safety
+    ///
+    /// `comp_ptr` must cover a valid 4 KiB component MMIO region (8-byte aligned if `format` is
+    /// `Some(Class0x9RomEntryFormat::Bits64)`), and `n` must be less than the table's maximum
+    /// entry count.
+    unsafe fn read_entry(
+        comp_ptr: MmioPtr<u32, Ro>,
         n: u32,
-        classid: u8,
-        format: Option<u8>,
+        classid: ClassId,
+        format: Option<Class0x9RomEntryFormat>,
     ) -> Result<EntryContents, &'static str> {
-        if classid == ClassId::RomTable0x1 as u8 {
-            let entry = Class0x1RomEntry::read_at(&mut io, n);
+        let bank32 = MmioBank::new(comp_ptr, MINIMUM_COMPONENT_SIZE);
+        if classid == ClassId::RomTable0x1 {
+            // SAFETY: `n < MAX_0X1_ROM_ENTRIES` (960), so `n * 4 < MINIMUM_COMPONENT_SIZE` (4096),
+            // which lies within `bank32`.
+            let entry = unsafe { bank32.at(Class0x1RomEntry::offset_of(n)) }.read();
             return Ok(EntryContents {
-                value: u64::from(entry.reg_value()),
+                value: u64::from(entry.bits()),
                 offset: entry.offset(),
                 present: entry.present(),
             });
         }
 
         // If not a class 0x1 table, then a class 0x9.
-        debug_assert_eq!(classid, ClassId::CoreSight as u8);
+        debug_assert_eq!(classid, ClassId::CoreSight);
         debug_assert!(format.is_some());
 
-        match format.unwrap() {
-            x if x == Class0x9RomEntryFormat::Bits32 as u8 => {
-                let entry = Class0x9Rom32BitEntry::read_at(&mut io, n);
+        match format {
+            Some(Class0x9RomEntryFormat::Bits32) => {
+                // SAFETY: `n < MAX_0X9_ROM_32BIT_ENTRIES` (512), so
+                // `n * 4 < MINIMUM_COMPONENT_SIZE` (4096), which lies within `bank32`.
+                let entry = unsafe { bank32.at(Class0x9Rom32BitEntry::offset_of(n)) }.read();
                 Ok(EntryContents {
-                    value: u64::from(entry.reg_value()),
+                    value: u64::from(entry.bits()),
                     offset: entry.offset(),
                     // [CS] D7.5.17: only a value of 0b11 for present() signifies presence.
                     present: (entry.present() & 0b11) != 0,
                 })
             }
-            x if x == Class0x9RomEntryFormat::Bits64 as u8 => {
-                let entry = Class0x9Rom64BitEntry::read_at(&mut io, n);
+            Some(Class0x9RomEntryFormat::Bits64) => {
+                // SAFETY: Caller guarantees the component MMIO region is 8-byte aligned when
+                // 64-bit ROM tables are present and covers `MINIMUM_COMPONENT_SIZE` bytes;
+                // `n < MAX_0X9_ROM_64BIT_ENTRIES` (256), so `n * 8 < MINIMUM_COMPONENT_SIZE`.
+                let entry = unsafe {
+                    let comp_ptr64 = MmioPtr::<u64, Ro>::new(comp_ptr.as_ptr().cast::<u64>());
+                    let bank64 = MmioBank::new(comp_ptr64, MINIMUM_COMPONENT_SIZE);
+                    bank64.at(Class0x9Rom64BitEntry::offset_of(n))
+                }
+                .read();
                 let u32_offset = entry.offset() & 0xffff_ffff;
                 if entry.offset() != u32_offset {
                     return Err(
@@ -626,15 +342,17 @@ impl RomTable {
                     );
                 }
                 Ok(EntryContents {
-                    value: entry.reg_value(),
+                    value: entry.bits(),
                     offset: u32_offset as u32,
                     present: (entry.present() & 0b11) != 0,
                 })
             }
-            _ => Err("bad format value"),
+            None => Err("bad format value"),
         }
     }
 }
+
+type WalkCallback = unsafe extern "C" fn(*mut c_void, u32);
 
 /// FFI trampoline for `coresight::RomTable::Walk`.
 ///
@@ -643,69 +361,38 @@ impl RomTable {
 ///
 /// # Safety
 ///
-/// - `read32` and `read64` must be valid function pointers safe to invoke with `io_ctx` for the
-///   duration of the call.
+/// - `base` must point to a valid, mapped MMIO aperture of at least `max_offset` bytes that
+///   remains mapped and safe to read for the duration of the call (with 8-byte alignment if
+///   64-bit Class `0x9` ROM tables are present).
 /// - `callback` must be a valid function pointer safe to invoke with `cb_ctx` for the duration of
 ///   the call.
 /// - `out_error_reason_ptr`, `out_error_reason_len`, and `out_error_offset` must be valid, aligned
 ///   pointers writable for the duration of the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rust_coresight_rom_table_walk(
-    io_ctx: *mut c_void,
-    read32: unsafe extern "C" fn(*mut c_void, u32) -> u32,
-    read64: unsafe extern "C" fn(*mut c_void, u32) -> u64,
+    base: *const u32,
     max_offset: u32,
     cb_ctx: *mut c_void,
-    callback: unsafe extern "C" fn(*mut c_void, u32),
+    callback: WalkCallback,
     out_error_reason_ptr: *mut *const c_char,
     out_error_reason_len: *mut usize,
     out_error_offset: *mut u32,
 ) -> bool {
-    struct CppCallbackIo {
-        ctx: *mut c_void,
-        read32: unsafe extern "C" fn(*mut c_void, u32) -> u32,
-        read64: unsafe extern "C" fn(*mut c_void, u32) -> u64,
-    }
-
-    impl RegisterIo for CppCallbackIo {
-        #[inline]
-        fn read32(&mut self, offset: u32) -> u32 {
-            // SAFETY: The caller of `rust_coresight_rom_table_walk` guarantees that `read32` is a
-            // valid function pointer safe to invoke with `self.ctx` (`io_ctx`).
-            unsafe { (self.read32)(self.ctx, offset) }
-        }
-
-        #[inline]
-        fn read64(&mut self, offset: u32) -> u64 {
-            // SAFETY: The caller of `rust_coresight_rom_table_walk` guarantees that `read64` is a
-            // valid function pointer safe to invoke with `self.ctx` (`io_ctx`).
-            unsafe { (self.read64)(self.ctx, offset) }
-        }
-
-        #[inline]
-        fn write32(&mut self, _val: u32, _offset: u32) {}
-
-        #[inline]
-        fn write64(&mut self, _val: u64, _offset: u32) {}
-    }
-
-    let io = CppCallbackIo { ctx: io_ctx, read32, read64 };
-    let result = RomTable::walk(io, max_offset, |offset| {
-        // SAFETY: The caller of `rust_coresight_rom_table_walk` guarantees that `callback` is a
-        // valid function pointer safe to invoke with `cb_ctx`.
-        unsafe { callback(cb_ctx, offset) };
-    });
-
-    match result {
-        Ok(()) => true,
-        Err(err) => {
-            // SAFETY: Caller guarantees the output pointers are valid, aligned, and writable.
-            unsafe {
-                *out_error_reason_ptr = err.reason.as_ptr().cast::<c_char>();
-                *out_error_reason_len = err.reason.len();
-                *out_error_offset = err.offset;
+    // SAFETY: Caller guarantees `base` points to a mapped MMIO aperture of at least `max_offset`
+    // bytes, `callback` is safe to invoke with `cb_ctx`, and the output pointers are valid,
+    // aligned, and writable.
+    unsafe {
+        let ptr = MmioPtr::<u32, Ro>::new(base);
+        match RomTable::walk(ptr, max_offset, |offset| {
+            callback(cb_ctx, offset);
+        }) {
+            Ok(()) => true,
+            Err(err) => {
+                out_error_reason_ptr.write(err.reason.as_ptr().cast::<c_char>());
+                out_error_reason_len.write(err.reason.len());
+                out_error_offset.write(err.offset);
+                false
             }
-            false
         }
     }
 }
@@ -727,83 +414,57 @@ mod tests {
     const OFFSET_0X2000_CLASS_0X9_ROM_ENTRY_REG: u32 = 0x0000_2011;
     const OFFSET_0X2000_NOT_PRESENT_CLASS_0X1_ROM_ENTRY_REG: u32 = 0x0000_2000;
     const OFFSET_0X3000_CLASS_0X1_ROM_ENTRY_REG: u32 = 0x0000_3001;
-    const OFFSET_0X4000_CLASS_0X1_ROM_ENTRY_REG: u32 = 0x0000_4001;
     const OFFSET_0X5000_CLASS_0X1_ROM_ENTRY_REG: u32 = 0x0000_5001;
+    const OFFSET_0X6000_CLASS_0X1_ROM_ENTRY_REG: u32 = 0x0000_6001;
     const OFFSET_0XA000_CLASS_0X1_ROM_ENTRY_REG: u32 = 0x0000_a001;
     const OFFSET_0XFFFFF000_CLASS_0X1_ROM_ENTRY_REG: u32 = 0xffff_f001;
 
-    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-    enum ExpectedOp {
-        None,
-        Read32 { offset: u32, value: u32 },
-        Read64 { offset: u32, value: u64 },
+    const MAX_APERTURE_BYTES: usize = 0xb000;
+
+    #[repr(C, align(8))]
+    struct FakeAperture {
+        words: [u32; MAX_APERTURE_BYTES / size_of::<u32>()],
     }
 
-    struct MockRegisterIo {
-        expected: [ExpectedOp; 32],
-        len: usize,
-        cursor: usize,
-    }
-
-    impl MockRegisterIo {
-        fn new() -> Self {
-            Self { expected: [ExpectedOp::None; 32], len: 0, cursor: 0 }
+    impl FakeAperture {
+        const fn new() -> Self {
+            Self { words: [0; MAX_APERTURE_BYTES / size_of::<u32>()] }
         }
 
-        fn expect_read(&mut self, value: u32, offset: u32) -> &mut Self {
-            self.expected[self.len] = ExpectedOp::Read32 { offset, value };
-            self.len += 1;
+        fn clear(&mut self) {
+            self.words.fill(0);
+        }
+
+        fn write32(&mut self, value: u32, offset: u32) -> &mut Self {
+            let idx = (offset as usize) / size_of::<u32>();
+            self.words[idx] = value;
             self
         }
 
-        fn expect_read64(&mut self, value: u64, offset: u32) -> &mut Self {
-            self.expected[self.len] = ExpectedOp::Read64 { offset, value };
-            self.len += 1;
+        fn write64(&mut self, value: u64, offset: u32) -> &mut Self {
+            let idx = (offset as usize) / size_of::<u32>();
+            let bytes = value.to_ne_bytes();
+            self.words[idx] = u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            self.words[idx + 1] = u32::from_ne_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
             self
         }
 
-        fn verify_and_clear(&mut self) {
-            assert_eq!(self.cursor, self.len, "not all expected reads were consumed");
-            self.len = 0;
-            self.cursor = 0;
-        }
-    }
-
-    impl RegisterIo for MockRegisterIo {
-        fn read32(&mut self, offset: u32) -> u32 {
-            assert!(self.cursor < self.len, "unexpected read32 at offset {offset:#x}");
-            let op = self.expected[self.cursor];
-            self.cursor += 1;
-            match op {
-                ExpectedOp::Read32 { offset: expected_offset, value } => {
-                    assert_eq!(offset, expected_offset, "read32 offset mismatch");
-                    value
-                }
-                ExpectedOp::Read64 { offset: expected_offset, .. } => {
-                    panic!("expected read64 at {expected_offset:#x}, got read32 at {offset:#x}");
-                }
-                ExpectedOp::None => unreachable!(),
+        fn walk<F>(&self, max_offset: u32, callback: F) -> Result<(), WalkError>
+        where
+            F: FnMut(u32),
+        {
+            assert!((max_offset as usize) <= MAX_APERTURE_BYTES);
+            // SAFETY: `self.words` is a valid, 8-byte aligned aperture of `MAX_APERTURE_BYTES`
+            // (>= `max_offset`) bytes alive for the duration of the borrow.
+            unsafe {
+                let ptr = MmioPtr::<u32, Ro>::new(self.words.as_ptr());
+                RomTable::walk(ptr, max_offset, callback)
             }
         }
 
-        fn read64(&mut self, offset: u32) -> u64 {
-            assert!(self.cursor < self.len, "unexpected read64 at offset {offset:#x}");
-            let op = self.expected[self.cursor];
-            self.cursor += 1;
-            match op {
-                ExpectedOp::Read64 { offset: expected_offset, value } => {
-                    assert_eq!(offset, expected_offset, "read64 offset mismatch");
-                    value
-                }
-                ExpectedOp::Read32 { offset: expected_offset, .. } => {
-                    panic!("expected read32 at {expected_offset:#x}, got read64 at {offset:#x}");
-                }
-                ExpectedOp::None => unreachable!(),
-            }
+        fn as_ptr(&self) -> *const u32 {
+            self.words.as_ptr()
         }
-
-        fn write32(&mut self, _val: u32, _offset: u32) {}
-        fn write64(&mut self, _val: u64, _offset: u32) {}
     }
 
     struct VisitedList {
@@ -829,130 +490,123 @@ mod tests {
     #[test]
     fn empty_0x1_table() {
         let end_offset = 0x0000 + (MINIMUM_COMPONENT_SIZE as u32);
-        let mut mock = MockRegisterIo::new();
-        mock
+        let mut aperture = FakeAperture::new();
+        aperture
             // Visit: Table (class 0x1)
-            .expect_read(CLASS_0X1_ROM_COMPONENT_ID_REG, 0x0000 + 0xff4)
-            .expect_read(EMPTY_DEV_ARCH_REG, 0x0000 + 0xfbc)
+            .write32(CLASS_0X1_ROM_COMPONENT_ID_REG, 0x0000 + 0xff4)
+            .write32(EMPTY_DEV_ARCH_REG, 0x0000 + 0xfbc)
             // Read: Entry0 of Table (empty and last)
-            .expect_read(EMPTY_ROM_ENTRY_REG, 0);
+            .write32(EMPTY_ROM_ENTRY_REG, 0);
 
-        let result = RomTable::walk(&mut mock, end_offset, |offset| {
+        let result = aperture.walk(end_offset, |offset| {
             panic!("unexpected component found at offset {offset:#x}");
         });
         assert_eq!(result, Ok(()));
-        mock.verify_and_clear();
     }
 
     #[test]
     fn empty_0x9_table() {
         let end_offset = 0x0000 + (MINIMUM_COMPONENT_SIZE as u32);
-        let mut mock = MockRegisterIo::new();
-        mock
+        let mut aperture = FakeAperture::new();
+        aperture
             // Visit: Table (class 0x9)
-            .expect_read(CLASS_0X9_ROM_COMPONENT_ID_REG, 0x0000 + 0xff4)
-            .expect_read(CLASS_0X9_ROM_TABLE_DEV_ARCH_REG, 0x0000 + 0xfbc)
-            .expect_read(DEV_ID_REG, 0x0000 + 0xfc8)
+            .write32(CLASS_0X9_ROM_COMPONENT_ID_REG, 0x0000 + 0xff4)
+            .write32(CLASS_0X9_ROM_TABLE_DEV_ARCH_REG, 0x0000 + 0xfbc)
+            .write32(DEV_ID_REG, 0x0000 + 0xfc8)
             // Read: Entry0 of Table (empty and last)
-            .expect_read(EMPTY_ROM_ENTRY_REG, 0);
+            .write32(EMPTY_ROM_ENTRY_REG, 0);
 
-        let result = RomTable::walk(&mut mock, end_offset, |offset| {
+        let result = aperture.walk(end_offset, |offset| {
             panic!("unexpected component found at offset {offset:#x}");
         });
         assert_eq!(result, Ok(()));
-        mock.verify_and_clear();
     }
 
     #[test]
     fn depth_one_references() {
-        let mut mock = MockRegisterIo::new();
-        mock
+        let mut aperture = FakeAperture::new();
+        aperture
             // Visit: Table (class 0x1)
-            .expect_read(CLASS_0X1_ROM_COMPONENT_ID_REG, 0x0000 + 0xff4)
-            .expect_read(EMPTY_DEV_ARCH_REG, 0x0000 + 0xfbc)
+            .write32(CLASS_0X1_ROM_COMPONENT_ID_REG, 0x0000 + 0xff4)
+            .write32(EMPTY_DEV_ARCH_REG, 0x0000 + 0xfbc)
             // Read: Entry0 of Table -> Component0
-            .expect_read(OFFSET_0X1000_CLASS_0X1_ROM_ENTRY_REG, 0x0000)
+            .write32(OFFSET_0X1000_CLASS_0X1_ROM_ENTRY_REG, 0x0000)
             // Visit: Component0
-            .expect_read(CLASS_0X9_ROM_COMPONENT_ID_REG, 0x1000 + 0xff4)
-            .expect_read(EMPTY_DEV_ARCH_REG, 0x1000 + 0xfbc)
+            .write32(CLASS_0X9_ROM_COMPONENT_ID_REG, 0x1000 + 0xff4)
+            .write32(EMPTY_DEV_ARCH_REG, 0x1000 + 0xfbc)
             // Read: Entry1 of Table (not present)
-            .expect_read(
+            .write32(
                 OFFSET_0X2000_NOT_PRESENT_CLASS_0X1_ROM_ENTRY_REG,
                 0x0000 + (size_of::<u32>() as u32),
             )
             // Read: Entry2 of Table -> Component2
-            .expect_read(
-                OFFSET_0X3000_CLASS_0X1_ROM_ENTRY_REG,
-                0x0000 + 2 * (size_of::<u32>() as u32),
-            )
+            .write32(OFFSET_0X3000_CLASS_0X1_ROM_ENTRY_REG, 0x0000 + 2 * (size_of::<u32>() as u32))
             // Visit: Component2
-            .expect_read(CLASS_0X9_ROM_COMPONENT_ID_REG, 0x3000 + 0xff4)
-            .expect_read(EMPTY_DEV_ARCH_REG, 0x3000 + 0xfbc)
+            .write32(CLASS_0X9_ROM_COMPONENT_ID_REG, 0x3000 + 0xff4)
+            .write32(EMPTY_DEV_ARCH_REG, 0x3000 + 0xfbc)
             // Read: Entry3 of Table (empty and last).
-            .expect_read(EMPTY_ROM_ENTRY_REG, 0x0000 + 3 * (size_of::<u32>() as u32));
+            .write32(EMPTY_ROM_ENTRY_REG, 0x0000 + 3 * (size_of::<u32>() as u32));
 
         let end_offset = 0x3000 + (MINIMUM_COMPONENT_SIZE as u32);
         let mut visited = VisitedList::new();
-        let result = RomTable::walk(&mut mock, end_offset, |offset| visited.push(offset));
+        let result = aperture.walk(end_offset, |offset| visited.push(offset));
         assert_eq!(result, Ok(()));
         assert_eq!(visited.as_slice(), &[0x1000, 0x3000]);
-        mock.verify_and_clear();
     }
 
     #[test]
     fn depth_two_references() {
         let u32_size = size_of::<u32>() as u32;
-        let mut mock = MockRegisterIo::new();
-        mock
+        let mut aperture = FakeAperture::new();
+        aperture
             // Visit: Table (class 0x1)
-            .expect_read(CLASS_0X1_ROM_COMPONENT_ID_REG, 0x0000 + 0xff4)
-            .expect_read(EMPTY_DEV_ARCH_REG, 0x0000 + 0xfbc)
+            .write32(CLASS_0X1_ROM_COMPONENT_ID_REG, 0x0000 + 0xff4)
+            .write32(EMPTY_DEV_ARCH_REG, 0x0000 + 0xfbc)
             // Read: Entry0 of Table -> Subtable0
-            .expect_read(OFFSET_0X1000_CLASS_0X1_ROM_ENTRY_REG, 0x0000)
+            .write32(OFFSET_0X1000_CLASS_0X1_ROM_ENTRY_REG, 0x0000)
             // Visit: Subtable0 (class 0x1)
-            .expect_read(CLASS_0X1_ROM_COMPONENT_ID_REG, 0x1000 + 0xff4)
-            .expect_read(EMPTY_DEV_ARCH_REG, 0x1000 + 0xfbc)
+            .write32(CLASS_0X1_ROM_COMPONENT_ID_REG, 0x1000 + 0xff4)
+            .write32(EMPTY_DEV_ARCH_REG, 0x1000 + 0xfbc)
             // Read: Entry0 of Subtable0 -> Component00
-            .expect_read(OFFSET_0X1000_CLASS_0X1_ROM_ENTRY_REG, 0x1000)
+            .write32(OFFSET_0X1000_CLASS_0X1_ROM_ENTRY_REG, 0x1000)
             // Visit: Component00
-            .expect_read(CLASS_0X9_ROM_COMPONENT_ID_REG, 0x1000 + 0x1000 + 0xff4)
-            .expect_read(EMPTY_DEV_ARCH_REG, 0x1000 + 0x1000 + 0xfbc)
+            .write32(CLASS_0X9_ROM_COMPONENT_ID_REG, 0x1000 + 0x1000 + 0xff4)
+            .write32(EMPTY_DEV_ARCH_REG, 0x1000 + 0x1000 + 0xfbc)
             // Read: Entry1 of Subtable0 (not present)
-            .expect_read(OFFSET_0X2000_NOT_PRESENT_CLASS_0X1_ROM_ENTRY_REG, 0x1000 + u32_size)
+            .write32(OFFSET_0X2000_NOT_PRESENT_CLASS_0X1_ROM_ENTRY_REG, 0x1000 + u32_size)
             // Read: Entry2 of Subtable0 -> Component02
-            .expect_read(OFFSET_0X3000_CLASS_0X1_ROM_ENTRY_REG, 0x1000 + 2 * u32_size)
+            .write32(OFFSET_0X3000_CLASS_0X1_ROM_ENTRY_REG, 0x1000 + 2 * u32_size)
             // Visit: Component02
-            .expect_read(CLASS_0X9_ROM_COMPONENT_ID_REG, 0x1000 + 0x3000 + 0xff4)
-            .expect_read(EMPTY_DEV_ARCH_REG, 0x1000 + 0x3000 + 0xfbc)
+            .write32(CLASS_0X9_ROM_COMPONENT_ID_REG, 0x1000 + 0x3000 + 0xff4)
+            .write32(EMPTY_DEV_ARCH_REG, 0x1000 + 0x3000 + 0xfbc)
             // Read: Entry3 of Subtable0 (empty and last).
-            .expect_read(EMPTY_ROM_ENTRY_REG, 0x1000 + 3 * u32_size)
+            .write32(EMPTY_ROM_ENTRY_REG, 0x1000 + 3 * u32_size)
             // Read: Entry1 of Table -> Component1
-            .expect_read(OFFSET_0X5000_CLASS_0X1_ROM_ENTRY_REG, 0x0000 + u32_size)
+            .write32(OFFSET_0X5000_CLASS_0X1_ROM_ENTRY_REG, 0x0000 + u32_size)
             // Visit: Component1
-            .expect_read(CLASS_0X9_ROM_COMPONENT_ID_REG, 0x5000 + 0xff4)
-            .expect_read(EMPTY_DEV_ARCH_REG, 0x5000 + 0xfbc)
+            .write32(CLASS_0X9_ROM_COMPONENT_ID_REG, 0x5000 + 0xff4)
+            .write32(EMPTY_DEV_ARCH_REG, 0x5000 + 0xfbc)
             // Read: Entry2 of Table -> Subtable2
-            .expect_read(OFFSET_0X4000_CLASS_0X1_ROM_ENTRY_REG, 0x0000 + 2 * u32_size)
+            .write32(OFFSET_0X6000_CLASS_0X1_ROM_ENTRY_REG, 0x0000 + 2 * u32_size)
             // Visit: Subtable2 (class 0x9)
-            .expect_read(CLASS_0X9_ROM_COMPONENT_ID_REG, 0x4000 + 0xff4)
-            .expect_read(CLASS_0X9_ROM_TABLE_DEV_ARCH_REG, 0x4000 + 0xfbc)
-            .expect_read(DEV_ID_REG, 0x4000 + 0xfc8)
+            .write32(CLASS_0X9_ROM_COMPONENT_ID_REG, 0x6000 + 0xff4)
+            .write32(CLASS_0X9_ROM_TABLE_DEV_ARCH_REG, 0x6000 + 0xfbc)
+            .write32(DEV_ID_REG, 0x6000 + 0xfc8)
             // Read: Entry0 of Subtable2 -> Component20
-            .expect_read(OFFSET_0X2000_CLASS_0X9_ROM_ENTRY_REG, 0x4000)
-            // Visit: Component2
-            .expect_read(CLASS_0X9_ROM_COMPONENT_ID_REG, 0x4000 + 0x2000 + 0xff4)
-            .expect_read(EMPTY_DEV_ARCH_REG, 0x4000 + 0x2000 + 0xfbc)
+            .write32(OFFSET_0X2000_CLASS_0X9_ROM_ENTRY_REG, 0x6000)
+            // Visit: Component20
+            .write32(CLASS_0X9_ROM_COMPONENT_ID_REG, 0x6000 + 0x2000 + 0xff4)
+            .write32(EMPTY_DEV_ARCH_REG, 0x6000 + 0x2000 + 0xfbc)
             // Read: Entry1 of Subtable2 (empty and last)
-            .expect_read(EMPTY_ROM_ENTRY_REG, 0x4000 + u32_size)
+            .write32(EMPTY_ROM_ENTRY_REG, 0x6000 + u32_size)
             // Read: Entry3 of Table (empty and last).
-            .expect_read(EMPTY_ROM_ENTRY_REG, 3 * u32_size);
+            .write32(EMPTY_ROM_ENTRY_REG, 3 * u32_size);
 
-        let end_offset = 0x6000 + (MINIMUM_COMPONENT_SIZE as u32);
+        let end_offset = 0x8000 + (MINIMUM_COMPONENT_SIZE as u32);
         let mut visited = VisitedList::new();
-        let result = RomTable::walk(&mut mock, end_offset, |offset| visited.push(offset));
+        let result = aperture.walk(end_offset, |offset| visited.push(offset));
         assert_eq!(result, Ok(()));
-        assert_eq!(visited.as_slice(), &[0x2000, 0x4000, 0x5000, 0x6000]);
-        mock.verify_and_clear();
+        assert_eq!(visited.as_slice(), &[0x2000, 0x4000, 0x5000, 0x8000]);
     }
 
     #[test]
@@ -961,76 +615,72 @@ mod tests {
         // const COMP00_ENCODED_OFFSET: u32 = !1u32 + 1;
 
         let u32_size = size_of::<u32>() as u32;
-        let mut mock = MockRegisterIo::new();
-        mock
+        let mut aperture = FakeAperture::new();
+        aperture
             // Visit: Table (class 0x1)
-            .expect_read(CLASS_0X1_ROM_COMPONENT_ID_REG, 0x0000 + 0xff4)
-            .expect_read(EMPTY_DEV_ARCH_REG, 0x0000 + 0xfbc)
+            .write32(CLASS_0X1_ROM_COMPONENT_ID_REG, 0x0000 + 0xff4)
+            .write32(EMPTY_DEV_ARCH_REG, 0x0000 + 0xfbc)
             // Read: Entry0 of Table -> Subtable0
-            .expect_read(OFFSET_0XA000_CLASS_0X1_ROM_ENTRY_REG, 0x0000)
+            .write32(OFFSET_0XA000_CLASS_0X1_ROM_ENTRY_REG, 0x0000)
             // Visit: Subtable0 (class 0x1)
-            .expect_read(CLASS_0X1_ROM_COMPONENT_ID_REG, 0xa000 + 0xff4)
-            .expect_read(EMPTY_DEV_ARCH_REG, 0xa000 + 0xfbc)
+            .write32(CLASS_0X1_ROM_COMPONENT_ID_REG, 0xa000 + 0xff4)
+            .write32(EMPTY_DEV_ARCH_REG, 0xa000 + 0xfbc)
             // Read: Entry0 of Subtable0 -> Component00
-            .expect_read(OFFSET_0XFFFFF000_CLASS_0X1_ROM_ENTRY_REG, 0xa000)
+            .write32(OFFSET_0XFFFFF000_CLASS_0X1_ROM_ENTRY_REG, 0xa000)
             // Visit: Component00
-            .expect_read(CLASS_0X9_ROM_COMPONENT_ID_REG, 0x9000 + 0xff4)
-            .expect_read(EMPTY_DEV_ARCH_REG, 0x9000 + 0xfbc)
+            .write32(CLASS_0X9_ROM_COMPONENT_ID_REG, 0x9000 + 0xff4)
+            .write32(EMPTY_DEV_ARCH_REG, 0x9000 + 0xfbc)
             // Read: Entry1 of Subtable0 (empty and last).
-            .expect_read(EMPTY_ROM_ENTRY_REG, 0xa000 + u32_size)
+            .write32(EMPTY_ROM_ENTRY_REG, 0xa000 + u32_size)
             // Read: Entry1 of Table (empty and last).
-            .expect_read(EMPTY_ROM_ENTRY_REG, u32_size);
+            .write32(EMPTY_ROM_ENTRY_REG, u32_size);
 
         let end_offset = 0xa000 + (MINIMUM_COMPONENT_SIZE as u32);
         let mut visited = VisitedList::new();
-        let result = RomTable::walk(&mut mock, end_offset, |offset| visited.push(offset));
+        let result = aperture.walk(end_offset, |offset| visited.push(offset));
         assert_eq!(result, Ok(()));
         assert_eq!(visited.as_slice(), &[0x9000]);
-        mock.verify_and_clear();
     }
 
     #[test]
     fn class_0x9_64bit_entries_and_errors() {
         // 64-bit Class 0x9 table with one valid entry at offset 0x1000.
-        let mut mock = MockRegisterIo::new();
-        mock.expect_read(CLASS_0X9_ROM_COMPONENT_ID_REG, 0xff4)
-            .expect_read(CLASS_0X9_ROM_TABLE_DEV_ARCH_REG, 0xfbc)
-            .expect_read(0x0000_0001, 0xfc8) // Format::Bits64
-            .expect_read64(0x0000_0000_0000_1003, 0)
-            .expect_read(CLASS_0X9_ROM_COMPONENT_ID_REG, 0x1000 + 0xff4)
-            .expect_read(EMPTY_DEV_ARCH_REG, 0x1000 + 0xfbc)
-            .expect_read64(0, 8);
+        let mut aperture = FakeAperture::new();
+        aperture
+            .write32(CLASS_0X9_ROM_COMPONENT_ID_REG, 0xff4)
+            .write32(CLASS_0X9_ROM_TABLE_DEV_ARCH_REG, 0xfbc)
+            .write32(0x0000_0001, 0xfc8) // Format::Bits64
+            .write64(0x0000_0000_0000_1003, 0)
+            .write32(CLASS_0X9_ROM_COMPONENT_ID_REG, 0x1000 + 0xff4)
+            .write32(EMPTY_DEV_ARCH_REG, 0x1000 + 0xfbc)
+            .write64(0, 8);
 
         let mut visited = VisitedList::new();
         assert_eq!(
-            RomTable::walk(&mut mock, 0x1000 + (MINIMUM_COMPONENT_SIZE as u32), |offset| {
-                visited.push(offset)
-            }),
+            aperture.walk(0x1000 + (MINIMUM_COMPONENT_SIZE as u32), |offset| visited.push(offset)),
             Ok(())
         );
         assert_eq!(visited.as_slice(), &[0x1000]);
-        mock.verify_and_clear();
 
         // Not a ROM table at offset 0.
-        mock.expect_read(CLASS_0X9_ROM_COMPONENT_ID_REG, 0xff4)
-            .expect_read(EMPTY_DEV_ARCH_REG, 0xfbc);
+        aperture.clear();
+        aperture.write32(CLASS_0X9_ROM_COMPONENT_ID_REG, 0xff4).write32(EMPTY_DEV_ARCH_REG, 0xfbc);
         assert_eq!(
-            RomTable::walk(&mut mock, MINIMUM_COMPONENT_SIZE as u32, |_| {}),
+            aperture.walk(MINIMUM_COMPONENT_SIZE as u32, |_| {}),
             Err(WalkError { reason: "not a ROM table", offset: 0 })
         );
-        mock.verify_and_clear();
     }
 
     #[test]
     fn ffi_trampolines_and_register_setters() {
-        assert!(RomTable::is_table(ClassId::RomTable0x1 as u8, 0, 0));
+        assert!(RomTable::is_table(Some(ClassId::RomTable0x1), 0, 0));
         assert!(RomTable::is_table(
-            ClassId::CoreSight as u8,
+            Some(ClassId::CoreSight),
             arm::ARCHITECT,
             arm::archid::ROM_TABLE,
         ));
-        assert!(!RomTable::is_table(ClassId::CoreSight as u8, arm::ARCHITECT, arm::archid::ETM4));
-        assert!(!RomTable::is_table(0x5, arm::ARCHITECT, arm::archid::ROM_TABLE));
+        assert!(!RomTable::is_table(Some(ClassId::CoreSight), arm::ARCHITECT, arm::archid::ETM4));
+        assert!(!RomTable::is_table(None, arm::ARCHITECT, arm::archid::ROM_TABLE));
 
         let mut e0x1 = Class0x1RomEntry::default();
         e0x1.set_offset(1)
@@ -1038,36 +688,22 @@ mod tests {
             .set_powerid_valid(false)
             .set_format(false)
             .set_present(true);
-        assert_eq!(e0x1.reg_value(), OFFSET_0X1000_CLASS_0X1_ROM_ENTRY_REG);
+        assert_eq!(e0x1.bits(), OFFSET_0X1000_CLASS_0X1_ROM_ENTRY_REG);
 
         let mut e0x9_32 = Class0x9Rom32BitEntry::default();
         e0x9_32.set_offset(2).set_powerid(1).set_powerid_valid(false).set_present(1);
-        assert_eq!(e0x9_32.reg_value(), OFFSET_0X2000_CLASS_0X9_ROM_ENTRY_REG);
+        assert_eq!(e0x9_32.bits(), OFFSET_0X2000_CLASS_0X9_ROM_ENTRY_REG);
 
         let mut e0x9_64 = Class0x9Rom64BitEntry::default();
         e0x9_64.set_offset(1).set_powerid(0).set_powerid_valid(false).set_present(0b11);
-        assert_eq!(e0x9_64.reg_value(), 0x0000_0000_0000_1003);
+        assert_eq!(e0x9_64.bits(), 0x0000_0000_0000_1003);
 
         let mut devid = Class0x9RomDeviceIdRegister::default();
         devid.set_prr(true).set_sysmem(true).set_format(Class0x9RomEntryFormat::Bits64);
         assert!(devid.prr());
         assert!(devid.sysmem());
-        assert_eq!(devid.format(), Ok(Class0x9RomEntryFormat::Bits64));
+        assert_eq!(devid.try_format().ok(), Some(Class0x9RomEntryFormat::Bits64));
 
-        /// # Safety
-        ///
-        /// `ctx` must point to a valid `MockRegisterIo`.
-        unsafe extern "C" fn mock_read32(ctx: *mut c_void, offset: u32) -> u32 {
-            // SAFETY: `ctx` is a valid pointer to `MockRegisterIo`.
-            unsafe { (*ctx.cast::<MockRegisterIo>()).read32(offset) }
-        }
-        /// # Safety
-        ///
-        /// `ctx` must point to a valid `MockRegisterIo`.
-        unsafe extern "C" fn mock_read64(ctx: *mut c_void, offset: u32) -> u64 {
-            // SAFETY: `ctx` is a valid pointer to `MockRegisterIo`.
-            unsafe { (*ctx.cast::<MockRegisterIo>()).read64(offset) }
-        }
         /// # Safety
         ///
         /// `ctx` must point to a valid `VisitedList`.
@@ -1076,24 +712,23 @@ mod tests {
             unsafe { (*ctx.cast::<VisitedList>()).push(offset) };
         }
 
-        let mut mock = MockRegisterIo::new();
-        mock.expect_read(CLASS_0X1_ROM_COMPONENT_ID_REG, 0xff4)
-            .expect_read(EMPTY_DEV_ARCH_REG, 0xfbc)
-            .expect_read(OFFSET_0X1000_CLASS_0X1_ROM_ENTRY_REG, 0)
-            .expect_read(CLASS_0X9_ROM_COMPONENT_ID_REG, 0x1000 + 0xff4)
-            .expect_read(EMPTY_DEV_ARCH_REG, 0x1000 + 0xfbc)
-            .expect_read(EMPTY_ROM_ENTRY_REG, 4);
+        let mut aperture = FakeAperture::new();
+        aperture
+            .write32(CLASS_0X1_ROM_COMPONENT_ID_REG, 0xff4)
+            .write32(EMPTY_DEV_ARCH_REG, 0xfbc)
+            .write32(OFFSET_0X1000_CLASS_0X1_ROM_ENTRY_REG, 0)
+            .write32(CLASS_0X9_ROM_COMPONENT_ID_REG, 0x1000 + 0xff4)
+            .write32(EMPTY_DEV_ARCH_REG, 0x1000 + 0xfbc)
+            .write32(EMPTY_ROM_ENTRY_REG, 4);
 
         let mut visited = VisitedList::new();
         let mut err_ptr: *const c_char = core::ptr::null();
         let mut err_len: usize = 0;
         let mut err_offset: u32 = 0;
-        // SAFETY: `mock` and `visited` outlive the call and match the callback casts above.
+        // SAFETY: `aperture` and `visited` outlive the call and match the callback cast above.
         let ok = unsafe {
             rust_coresight_rom_table_walk(
-                (&raw mut mock).cast::<c_void>(),
-                mock_read32,
-                mock_read64,
+                aperture.as_ptr(),
                 0x1000 + (MINIMUM_COMPONENT_SIZE as u32),
                 (&raw mut visited).cast::<c_void>(),
                 visit_cb,
@@ -1104,6 +739,5 @@ mod tests {
         };
         assert!(ok);
         assert_eq!(visited.as_slice(), &[0x1000]);
-        mock.verify_and_clear();
     }
 }

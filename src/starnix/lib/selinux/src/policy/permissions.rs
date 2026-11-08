@@ -8,6 +8,7 @@ use fuchsia_rcu::RcuDroppable;
 use selinux_policy_derive::{HasName, HasPolicyId, Validate};
 
 use super::Policy;
+use super::access_vector::AccessVector;
 use super::error::{ParseError, SerializeError, ValidateError};
 use super::id_type::IdType;
 use super::parser::{PolicyCursor, PolicyWriter};
@@ -21,7 +22,7 @@ pub struct PermissionTag;
 pub type PermissionId = IdType<NonZeroU8, PermissionTag>;
 
 /// Parsed SELinux permission, containing a type-safe ID and a name.
-#[derive(Debug, Validate, HasName, HasPolicyId)]
+#[derive(Clone, Debug, Validate, HasName, HasPolicyId)]
 pub struct Permission {
     id: PermissionId,
     name: Box<[u8]>,
@@ -32,13 +33,12 @@ impl Parse for Permission {
         let length = u32::parse(cursor)? as usize;
         let id_val = u32::parse(cursor)?;
 
-        // Validate permission ID range (1..=32) during parsing
-        if id_val == 0 || id_val > 32 {
-            return Err(ParseError::InvalidId { value: id_val });
-        }
+        // Validate permission ID range (1..=AccessVector::MAX_PERMISSIONS) during parsing.
+        let id = PermissionId::from_u32(id_val)
+            .filter(|id| (id.as_u32() as usize) <= AccessVector::MAX_PERMISSIONS)
+            .ok_or(ParseError::InvalidId { value: id_val })?;
 
         let name = Box::from(cursor.read_bytes(length)?);
-        let id = PermissionId::from_u32(id_val).ok_or(ParseError::InvalidId { value: id_val })?;
 
         Ok(Self { id, name })
     }

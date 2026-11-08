@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<!--
+  Copyright 2026 The Fuchsia Authors. All rights reserved.
+  Use of this source code is governed by a BSD-style license that can be
+  found in the LICENSE file.
+
+  Local interactive status and control panel for Fuchsia libc rollers
+  (llvm-libc-roller, scudo-roller, and gwp_asan-roller).
+
+  Served locally on 127.0.0.1 by `scripts/check_libc_rollers.py --ui-server`.
+  Can be kept pinned in a personal agent dashboard / Auxiliary Pane via:
+    python3 sdk/lib/c/skills/libc-rollers/scripts/check_libc_rollers.py --install-sidecar
+  (then opened via `sidecar://libc-rollers-monitor/`), or launched on-demand in
+  any developer's local agent setup or web browser via `--ui-server`.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Fuchsia Libc Rollers</title>
+  <script src="/preload.js"></script>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--background, #18181b);
+      color: var(--foreground, #f4f4f5);
+      margin: 0;
+      padding: 14px 16px;
+      font-size: 15px;
+      line-height: 1.5;
+    }
+    a {
+      color: var(--primary, #60a5fa);
+      text-decoration: none;
+    }
+    a:hover {
+      text-decoration: underline;
+    }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 13.5px;
+      background: var(--secondary, rgba(127, 127, 127, 0.16));
+      border: 1px solid var(--border, rgba(127, 127, 127, 0.25));
+      border-radius: 4px;
+      padding: 2px 6px;
+    }
+    .header-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--border, rgba(127, 127, 127, 0.25));
+    }
+    .header-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .title {
+      font-size: 17px;
+      font-weight: 600;
+      margin: 0;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 600;
+      border: 1px solid var(--border, rgba(127, 127, 127, 0.3));
+    }
+    .badge-open {
+      background: rgba(34, 197, 94, 0.14);
+      color: #4ade80;
+      border-color: rgba(34, 197, 94, 0.35);
+    }
+    .badge-closed {
+      background: rgba(239, 68, 68, 0.16);
+      color: #f87171;
+      border-color: rgba(239, 68, 68, 0.4);
+    }
+    .badge-NEW, .badge-Pending, .badge-STARTED {
+      background: rgba(59, 130, 246, 0.15);
+      color: #60a5fa;
+      border-color: rgba(59, 130, 246, 0.35);
+    }
+    .badge-MERGED, .badge-SUCCESS {
+      background: rgba(34, 197, 94, 0.14);
+      color: #4ade80;
+      border-color: rgba(34, 197, 94, 0.35);
+    }
+    .badge-warn {
+      background: rgba(245, 158, 11, 0.16);
+      color: #fbbf24;
+      border-color: rgba(245, 158, 11, 0.38);
+    }
+    .slo-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 2px 9px;
+      border-radius: 999px;
+      font-size: 12.5px;
+      font-weight: 600;
+      border: 1px solid transparent;
+      white-space: nowrap;
+    }
+    .slo-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      display: inline-block;
+      flex-shrink: 0;
+    }
+    .slo-healthy {
+      background: rgba(34, 197, 94, 0.16);
+      color: #4ade80;
+      border-color: rgba(34, 197, 94, 0.42);
+    }
+    .slo-healthy .slo-dot {
+      background: #22c55e;
+      box-shadow: 0 0 6px rgba(34, 197, 94, 0.7);
+    }
+    .slo-warning {
+      background: rgba(245, 158, 11, 0.18);
+      color: #fbbf24;
+      border-color: rgba(245, 158, 11, 0.45);
+    }
+    .slo-warning .slo-dot {
+      background: #f59e0b;
+      box-shadow: 0 0 6px rgba(245, 158, 11, 0.75);
+    }
+    .slo-breach {
+      background: rgba(239, 68, 68, 0.20);
+      color: #f87171;
+      border-color: rgba(239, 68, 68, 0.50);
+    }
+    .slo-breach .slo-dot {
+      background: #ef4444;
+      box-shadow: 0 0 7px rgba(239, 68, 68, 0.85);
+    }
+    tr.health-row-healthy {
+      background: rgba(34, 197, 94, 0.035);
+    }
+    tr.health-row-healthy td:first-child {
+      border-left: 4px solid #22c55e;
+    }
+    tr.health-row-warning {
+      background: rgba(245, 158, 11, 0.07);
+    }
+    tr.health-row-warning td:first-child {
+      border-left: 4px solid #f59e0b;
+    }
+    tr.health-row-breach {
+      background: rgba(239, 68, 68, 0.09);
+    }
+    tr.health-row-breach td:first-child {
+      border-left: 4px solid #ef4444;
+    }
+    tr.cl-row td:first-child {
+      border-left: 4px solid #60a5fa;
+    }
+    .slo-summary-line {
+      margin-top: 4px;
+      font-size: 13.5px;
+      font-weight: 500;
+    }
+    .slo-summary-healthy {
+      color: #4ade80;
+    }
+    .slo-summary-warning {
+      color: #fbbf24;
+    }
+    .slo-summary-breach {
+      color: #f87171;
+    }
+    .muted {
+      color: var(--muted-foreground, #a1a1aa);
+      font-size: 13.5px;
+    }
+    .btn {
+      background: var(--secondary, rgba(127, 127, 127, 0.18));
+      color: var(--foreground, #f4f4f5);
+      border: 1px solid var(--border, rgba(127, 127, 127, 0.3));
+      border-radius: 5px;
+      padding: 5px 12px;
+      font-size: 13.5px;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .btn:hover:not(:disabled) {
+      background: color-mix(in srgb, var(--secondary, #3f3f46) 80%, var(--foreground, #fff));
+    }
+    .btn:disabled {
+      opacity: 0.55;
+      cursor: default;
+    }
+    .btn-sm {
+      padding: 3px 9px;
+      font-size: 13px;
+    }
+    .table-card {
+      background: var(--card, rgba(255, 255, 255, 0.03));
+      border: 1px solid var(--card-border, var(--border, rgba(127, 127, 127, 0.25)));
+      border-radius: 8px;
+      overflow-x: auto;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+    }
+    th, td {
+      padding: 11px 12px;
+      vertical-align: top;
+      border-bottom: 1px solid var(--border, rgba(127, 127, 127, 0.18));
+    }
+    th {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--muted-foreground, #a1a1aa);
+      background: var(--secondary, rgba(127, 127, 127, 0.08));
+      white-space: nowrap;
+    }
+    tr:last-child td {
+      border-bottom: none;
+    }
+    .roller-name {
+      font-size: 15.5px;
+      font-weight: 600;
+      white-space: nowrap;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .subline {
+      margin-top: 4px;
+      font-size: 13.5px;
+      color: var(--muted-foreground, #a1a1aa);
+    }
+    .progress-bar {
+      height: 6px;
+      width: 100%;
+      max-width: 200px;
+      background: var(--secondary, rgba(127, 127, 127, 0.25));
+      border-radius: 3px;
+      overflow: hidden;
+      margin-top: 5px;
+      display: flex;
+    }
+    .progress-pass {
+      background: #22c55e;
+      height: 100%;
+    }
+    .progress-fail {
+      background: #ef4444;
+      height: 100%;
+    }
+    details {
+      margin-top: 5px;
+    }
+    summary {
+      cursor: pointer;
+      font-size: 13.5px;
+      color: var(--primary, #60a5fa);
+      user-select: none;
+    }
+    .commit-list {
+      margin: 4px 0 0 0;
+      padding-left: 16px;
+      font-size: 13.5px;
+      color: var(--muted-foreground, #a1a1aa);
+    }
+    .commit-list li {
+      margin-bottom: 3px;
+    }
+    .toast {
+      margin-top: 10px;
+      padding: 7px 12px;
+      border-radius: 6px;
+      font-size: 13.5px;
+      background: var(--secondary, rgba(127, 127, 127, 0.18));
+      border: 1px solid var(--border, rgba(127, 127, 127, 0.3));
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="header-bar">
+    <div class="header-left">
+      <h1 class="title">Fuchsia Libc Rollers</h1>
+      <span id="tree-badge" class="badge">Tree: ...</span>
+      <span id="slo-overview-badge" class="slo-pill slo-healthy" style="display: none;"></span>
+      <span id="updated-text" class="muted">Loading...</span>
+    </div>
+    <div>
+      <button id="refresh-btn" class="btn" title="Poll Buildbucket, Gerrit, and Gitiles now">
+        <span id="refresh-label">Refresh</span>
+      </button>
+    </div>
+  </div>
+
+  <div class="table-card">
+    <table>
+      <thead>
+        <tr>
+          <th>Roller / CL &amp; SLO Health</th>
+          <th>Pinned &rarr; Head (Pending) &amp; Last Landed</th>
+          <th>Pending Attempt</th>
+          <th>Last Failed Attempt</th>
+        </tr>
+      </thead>
+      <tbody id="status-tbody">
+        <tr>
+          <td colspan="4" class="muted">Loading live roller status...</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <div class="subline" style="margin-top: 10px;">
+    Local AuxPane / browser view served by
+    <code>check_libc_rollers.py --ui-server</code>
+    (pin on-demand via <code>check_libc_rollers.py --install-sidecar</code>
+    &rarr; <code>sidecar://libc-rollers-monitor/</code>).
+  </div>
+
+  <script>
+    let latestData = null;
+    let initialUiMtime = null;
+
+    function escapeHtml(str) {
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function formatApproxLocalTime(epochSec, nowSec) {
+      if (!epochSec) return '';
+      const d = new Date(epochSec * 1000);
+      const now = new Date((nowSec || Date.now() / 1000) * 1000);
+      const diffSec = Math.max(0, (now.getTime() - d.getTime()) / 1000);
+
+      if (diffSec > 3 * 86400) {
+        return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      }
+      const rounded = new Date(Math.round(d.getTime() / (5 * 60 * 1000)) * (5 * 60 * 1000));
+      let hours = rounded.getHours();
+      const mins = rounded.getMinutes();
+      const ampm = hours >= 12 ? 'pm' : 'am';
+      hours = hours % 12;
+      if (hours === 0) hours = 12;
+      const minStr = mins === 0 ? '' : ':' + String(mins).padStart(2, '0');
+      return `~${hours}${minStr}${ampm}`;
+    }
+
+    function formatRelativeAgo(epochSec, nowSec) {
+      if (!epochSec) return '';
+      const now = nowSec || (Date.now() / 1000);
+      const diffSec = Math.max(0, now - epochSec);
+      if (diffSec < 90) return 'just now';
+      const mins = Math.round(diffSec / 60);
+      if (mins < 60) {
+        const rMins = mins >= 10 ? Math.round(mins / 5) * 5 : mins;
+        return `~${rMins}m ago`;
+      }
+      const hours = diffSec / 3600;
+      if (hours < 36) {
+        const rHours = hours < 4 ? Math.round(hours * 2) / 2 : Math.round(hours);
+        return `~${rHours}h ago`;
+      }
+      const days = diffSec / 86400;
+      if (days < 30) {
+        return `~${Math.round(days)}d ago`;
+      }
+      const months = Math.round((days / 30.44) * 2) / 2;
+      return `~${months}mo ago`;
+    }
+
+    function formatTimePair(epochSec, nowSec) {
+      if (!epochSec) return '';
+      const rel = formatRelativeAgo(epochSec, nowSec);
+      const loc = formatApproxLocalTime(epochSec, nowSec);
+      return `<strong>${escapeHtml(rel)}</strong> (${escapeHtml(loc)})`;
+    }
+
+    function showToast(msg) {
+      const el = document.getElementById('toast');
+      el.textContent = msg;
+      el.style.display = 'block';
+      setTimeout(() => {
+        el.style.display = 'none';
+      }, 5000);
+    }
+
+    async function apiFetch(path, options = {}) {
+      if (window.sidecar && window.sidecar.fetch) {
+        return window.sidecar.fetch(path, options);
+      }
+      return fetch(path, options);
+    }
+
+    async function triggerRefresh() {
+      const btn = document.getElementById('refresh-btn');
+      const label = document.getElementById('refresh-label');
+      btn.disabled = true;
+      label.textContent = 'Refreshing...';
+      try {
+        await apiFetch('/api/refresh', { method: 'POST', body: '{}' });
+        setTimeout(fetchStatus, 1500);
+      } catch (err) {
+        showToast('Refresh request failed: ' + err.message);
+        btn.disabled = false;
+        label.textContent = 'Refresh';
+      }
+    }
+
+    async function triggerRoller(rollerName) {
+      showToast(`Triggering ${rollerName}...`);
+      try {
+        const res = await apiFetch('/api/retrigger', {
+          method: 'POST',
+          body: JSON.stringify({ roller: rollerName }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          showToast(`Triggered ${rollerName} (${data.job_id})`);
+          setTimeout(fetchStatus, 2000);
+        } else {
+          showToast(`Failed to trigger ${rollerName}: ${data.error || data.output}`);
+        }
+      } catch (err) {
+        showToast(`Error triggering ${rollerName}: ${err.message}`);
+      }
+    }
+
+    function render(data) {
+      if (!data) return;
+      const nowSec = Date.now() / 1000;
+
+      const treeBadge = document.getElementById('tree-badge');
+      const tName = (data.tree_status && data.tree_status.tree) || 'fuchsia-stem';
+      const tState = (data.tree_status && data.tree_status.state) || 'UNKNOWN';
+      treeBadge.textContent = `${tName}: ${tState}`;
+      treeBadge.className = 'badge ' + (tState === 'OPEN' ? 'badge-open' : 'badge-closed');
+      if (data.tree_status && data.tree_status.message) {
+        treeBadge.title = data.tree_status.message;
+      }
+
+      const updatedEl = document.getElementById('updated-text');
+      const btn = document.getElementById('refresh-btn');
+      const label = document.getElementById('refresh-label');
+      if (data.is_refreshing) {
+        btn.disabled = true;
+        label.textContent = 'Refreshing...';
+      } else {
+        btn.disabled = false;
+        label.textContent = 'Refresh';
+      }
+      if (data.updated_epoch) {
+        updatedEl.textContent = `Checked ${formatRelativeAgo(data.updated_epoch, nowSec)}`;
+      }
+
+      const tbody = document.getElementById('status-tbody');
+      const rows = [];
+      const rollersList = data.rollers || [];
+
+      let healthyCount = 0;
+      let warningCount = 0;
+      let breachCount = 0;
+
+      for (const r of rollersList) {
+        const pendingCount = r.pending_count || 0;
+        const pinnedShort = escapeHtml((r.pinned_revision || '').slice(0, 12));
+        const headShort = escapeHtml((r.head_revision || '').slice(0, 12));
+        const slo = r.slo || {};
+        const targetH = slo.target_hours || 12;
+        const breachH = slo.breach_hours || 24;
+
+        let liveLagH = slo.lag_hours || 0;
+        if (pendingCount > 0 && slo.oldest_pending_epoch) {
+          liveLagH = Math.max(0, Math.round(((nowSec - slo.oldest_pending_epoch) / 3600) * 10) / 10);
+        }
+
+        let sloStatus = slo.status || 'healthy';
+        if (pendingCount > 0) {
+          if (liveLagH > breachH) {
+            sloStatus = 'breach';
+          } else if (liveLagH > targetH && sloStatus === 'healthy') {
+            sloStatus = 'warning';
+          }
+        }
+
+        if (sloStatus === 'breach') breachCount++;
+        else if (sloStatus === 'warning') warningCount++;
+        else healthyCount++;
+
+        const sloLabel = sloStatus === 'breach'
+          ? 'SLO Breached'
+          : (sloStatus === 'warning' ? 'SLO At Risk' : 'Within SLO');
+
+        let sloSummaryText = slo.summary_text || '';
+        if (pendingCount === 0) {
+          sloSummaryText = `0h lag / \u2264${targetH}h SLO`;
+        } else {
+          sloSummaryText = `Lag ~${liveLagH}h / \u2264${targetH}h SLO (breach >${breachH}h)`;
+        }
+
+        let statsSubHtml = '';
+        if (slo.stats && slo.stats.sample_rolls) {
+          const st = slo.stats;
+          const adviceTip = escapeHtml(st.calibration_advice || '');
+          statsSubHtml = `
+            <div class="subline" title="${adviceTip}">
+              P50 ${st.p50_hours}h &bull; P90 ${st.p90_hours}h &bull;
+              ${Math.round(st.within_target_pct)}% &le;${targetH}h (${st.sample_rolls} rolls)
+            </div>
+          `;
+        }
+
+        const col1 = `
+          <div class="roller-name">
+            <a href="${escapeHtml(r.builder_url)}" target="_blank" rel="noopener">${escapeHtml(r.name)}</a>
+            <span class="slo-pill slo-${escapeHtml(sloStatus)}" title="${escapeHtml(slo.reason || '')}">
+              <span class="slo-dot"></span>${escapeHtml(sloLabel)}
+            </span>
+          </div>
+          <div class="slo-summary-line slo-summary-${escapeHtml(sloStatus)}">
+            ${escapeHtml(sloSummaryText)}
+          </div>
+          ${statsSubHtml}
+          <div class="subline">
+            <a href="${escapeHtml(r.scheduler_url)}" target="_blank" rel="noopener">scheduler</a>
+            &bull; ${escapeHtml(r.schedule || '')}
+          </div>
+          <div style="margin-top: 5px;">
+            <button class="btn btn-sm" data-retrigger="${escapeHtml(r.name)}">Retrigger</button>
+          </div>
+        `;
+
+        let revHtml = '';
+        if (pendingCount > 0) {
+          revHtml = `<code>${pinnedShort}</code> &rarr; <code>${headShort}</code> (<strong>${pendingCount}</strong>)`;
+          if (slo.oldest_pending_epoch) {
+            revHtml += `<div class="subline">Oldest pending: ${formatTimePair(slo.oldest_pending_epoch, nowSec)}</div>`;
+          }
+        } else {
+          revHtml = `<code>${pinnedShort}</code> (<strong>0</strong>)`;
+        }
+
+        let landedHtml = '';
+        if (r.last_landed && r.last_landed.epoch) {
+          const clPart = r.last_landed.cl_url
+            ? `<a href="${escapeHtml(r.last_landed.cl_url)}" target="_blank" rel="noopener">fxr/${escapeHtml(r.last_landed.cl_num)}</a> `
+            : '';
+          landedHtml = `<div class="subline">Landed ${clPart}${formatTimePair(r.last_landed.epoch, nowSec)}</div>`;
+        }
+
+        let commitsHtml = '';
+        if (pendingCount > 0 && Array.isArray(r.pending_commits) && r.pending_commits.length > 0) {
+          const items = r.pending_commits.map(c =>
+            `<li><code>${escapeHtml(c.sha)}</code> ${escapeHtml(c.subject)}</li>`
+          ).join('');
+          commitsHtml = `
+            <details>
+              <summary>${pendingCount} pending commit${pendingCount === 1 ? '' : 's'}</summary>
+              <ol class="commit-list">${items}</ol>
+            </details>
+          `;
+        }
+        const col2 = `<div>${revHtml}</div>${landedHtml}${commitsHtml}`;
+
+        let col3 = '<span class="muted">&mdash;</span>';
+        if (r.pending_attempt) {
+          const pa = r.pending_attempt;
+          const clLink = pa.cl_url
+            ? `<a href="${escapeHtml(pa.cl_url)}" target="_blank" rel="noopener">fxr/${escapeHtml(pa.cl_num)}/${escapeHtml(pa.patchset || '1')}</a>`
+            : '<em>creating CL</em>';
+          const buildLink = pa.build_url
+            ? `<a href="${escapeHtml(pa.build_url)}" target="_blank" rel="noopener">build</a>`
+            : 'build';
+          const startedTime = pa.start_epoch
+            ? `, started ${formatTimePair(pa.start_epoch, nowSec)}`
+            : '';
+          let cqHtml = '';
+          if (pa.cq && pa.cq.total > 0) {
+            const pctPass = Math.round((pa.cq.passed / pa.cq.total) * 100);
+            const pctFail = Math.round((pa.cq.failed / pa.cq.total) * 100);
+            cqHtml = `
+              <div class="subline">
+                <code>${pa.cq.passed}/${pa.cq.total}</code> passed,
+                <code>${pa.cq.failed}</code> failed,
+                <code>${pa.cq.running}</code> running
+              </div>
+              <div class="progress-bar">
+                <div class="progress-pass" style="width: ${pctPass}%"></div>
+                <div class="progress-fail" style="width: ${pctFail}%"></div>
+              </div>
+            `;
+          }
+          col3 = `
+            <div>
+              ${clLink} (${buildLink}${startedTime}):
+              <span class="badge badge-STARTED">STARTED</span>
+            </div>
+            <div class="subline">${escapeHtml(pa.attempt_kind || '')}</div>
+            ${cqHtml}
+          `;
+        }
+
+        let col4 = '<span class="muted">&mdash; (up to date)</span>';
+        if (pendingCount > 0 && r.last_failed_attempt) {
+          const lf = r.last_failed_attempt;
+          const clLink = lf.cl_url
+            ? `<a href="${escapeHtml(lf.cl_url)}" target="_blank" rel="noopener">fxr/${escapeHtml(lf.cl_num || 'CL')}/${escapeHtml(lf.patchset || '1')}</a>`
+            : 'no CL';
+          const buildLink = lf.build_url
+            ? `<a href="${escapeHtml(lf.build_url)}" target="_blank" rel="noopener">build</a>`
+            : 'build';
+          const endTime = lf.end_epoch
+            ? `, ended ${formatTimePair(lf.end_epoch, nowSec)}`
+            : '';
+          let backoffHtml = '';
+          if (r.backoff && r.backoff.streak >= 2) {
+            backoffHtml = `<div class="subline"><span class="badge badge-warn">Backoff: streak ${r.backoff.streak}</span></div>`;
+          }
+          col4 = `
+            <div>${clLink} (${buildLink}${endTime})</div>
+            <div class="subline">${escapeHtml(lf.attempt_kind || '')}</div>
+            <div class="subline">${escapeHtml(lf.failure_summary || '')}</div>
+            ${backoffHtml}
+          `;
+        }
+
+        rows.push(`<tr class="health-row-${escapeHtml(sloStatus)}"><td>${col1}</td><td>${col2}</td><td>${col3}</td><td>${col4}</td></tr>`);
+      }
+
+      const sloOverviewBadge = document.getElementById('slo-overview-badge');
+      if (rollersList.length > 0 && sloOverviewBadge) {
+        sloOverviewBadge.style.display = 'inline-flex';
+        if (breachCount > 0) {
+          sloOverviewBadge.className = 'slo-pill slo-breach';
+          sloOverviewBadge.innerHTML = `<span class="slo-dot"></span>SLO: ${breachCount} Breached`;
+        } else if (warningCount > 0) {
+          sloOverviewBadge.className = 'slo-pill slo-warning';
+          sloOverviewBadge.innerHTML = `<span class="slo-dot"></span>SLO: ${warningCount} At Risk`;
+        } else {
+          sloOverviewBadge.className = 'slo-pill slo-healthy';
+          sloOverviewBadge.innerHTML = `<span class="slo-dot"></span>SLO: ${healthyCount}/${rollersList.length} Healthy`;
+        }
+      }
+
+      const watchedCls = Array.isArray(data.watched_cls)
+        ? data.watched_cls
+        : (data.skill_cl ? [data.skill_cl] : []);
+      for (const sc of watchedCls) {
+        if (!sc) continue;
+        const psText = sc.patchset ? `/${sc.patchset}` : '';
+        const col1 = `
+          <div class="roller-name">
+            <a href="${escapeHtml(sc.cl_url)}" target="_blank" rel="noopener">fxr/${escapeHtml(sc.cl_num)}${escapeHtml(psText)}</a>
+          </div>
+          <div class="subline">${escapeHtml(sc.subject || '')}</div>
+        `;
+        const uploadedTime = sc.ps_created_epoch
+          ? ` (PS${escapeHtml(sc.patchset)} uploaded ${formatTimePair(sc.ps_created_epoch, nowSec)})`
+          : '';
+        const col2 = `
+          <div><span class="badge badge-${escapeHtml(sc.status)}">${escapeHtml(sc.status)}</span>${uploadedTime}</div>
+        `;
+        const labels = sc.labels || {};
+        const labelParts = [];
+        if (labels['Commit-Queue']) labelParts.push(`CQ:${labels['Commit-Queue'] > 0 ? '+' : ''}${labels['Commit-Queue']}`);
+        if (labels['Presubmit-Verified']) labelParts.push(`Verified:${labels['Presubmit-Verified'] > 0 ? '+' : ''}${labels['Presubmit-Verified']}`);
+        if (labels['Fuchsia-Auto-Submit']) labelParts.push(`Auto-Submit:${labels['Fuchsia-Auto-Submit'] > 0 ? '+' : ''}${labels['Fuchsia-Auto-Submit']}`);
+        if (labels['Code-Review']) {
+          labelParts.push(`Code-Review:${labels['Code-Review'] > 0 ? '+' : ''}${labels['Code-Review']}`);
+        } else if (sc.status === 'NEW') {
+          labelParts.push('awaiting Code-Review:+2');
+        }
+        let cqSub = '';
+        if (sc.cq && sc.cq.total > 0) {
+          const pctPass = Math.round((sc.cq.passed / sc.cq.total) * 100);
+          cqSub = `
+            <div class="subline">
+              <code>${sc.cq.passed}/${sc.cq.total}</code> passed,
+              <code>${sc.cq.failed}</code> failed,
+              <code>${sc.cq.running}</code> running
+            </div>
+            <div class="progress-bar">
+              <div class="progress-pass" style="width: ${pctPass}%"></div>
+            </div>
+          `;
+        }
+        const commentSub = `<div class="subline">${sc.unresolved_comment_count || 0} unresolved comments</div>`;
+        const col3 = `<div>${escapeHtml(labelParts.join(', '))}</div>${cqSub}${commentSub}`;
+        const col4 = '<span class="muted">&mdash;</span>';
+        rows.push(`<tr class="cl-row"><td>${col1}</td><td>${col2}</td><td>${col3}</td><td>${col4}</td></tr>`);
+      }
+
+      tbody.innerHTML = rows.join('');
+      for (const btn of tbody.querySelectorAll('button[data-retrigger]')) {
+        btn.addEventListener('click', () => {
+          triggerRoller(btn.getAttribute('data-retrigger'));
+        });
+      }
+    }
+
+    async function fetchStatus() {
+      try {
+        const res = await apiFetch('/api/status');
+        if (!res.ok) return;
+        latestData = await res.json();
+        if (latestData.ui_mtime) {
+          if (initialUiMtime === null) {
+            initialUiMtime = latestData.ui_mtime;
+          } else if (latestData.ui_mtime !== initialUiMtime) {
+            window.location.reload();
+            return;
+          }
+        }
+        render(latestData);
+      } catch (err) {
+        console.error('Status fetch failed:', err);
+      }
+    }
+
+    document.getElementById('refresh-btn').addEventListener('click', triggerRefresh);
+
+    fetchStatus();
+    setInterval(fetchStatus, 12000);
+    setInterval(() => {
+      if (latestData) render(latestData);
+    }, 15000);
+  </script>
+</body>
+</html>

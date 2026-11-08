@@ -2,71 +2,19 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-import("//build/rust/rustc_test.gni")
+import("//build/bazel/bazel_test_suite.gni")
 
-# The library is defined in BUILD.bazel. Its unit tests stay in GN because
-# :package-directory_test depends on //src/sys/pkg/lib/fuchsia-pkg-testing,
-# which is GN-only and depends on //src/sys/pkg/lib/system-image and
-# //src/sys/pkg/lib/update-package (both of which depend back on
-# :package-directory).
-rustc_test("package-directory_test") {
-  output_name = "package_directory_lib_test"
-  edition = "2024"
-
-  deps = [
-    "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
-    "//sdk/rust/zx",
-    "//src/lib/collections/packed",
-    "//src/lib/diagnostics/inspect/rust",
-    "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
-    "//src/lib/fidl/rust/fidl",
-    "//src/lib/fuchsia",
-    "//src/lib/fuchsia-async",
-    "//src/lib/fuchsia-fs",
-    "//src/lib/fuchsia-url",
-    "//src/storage/lib/vfs/rust:vfs",
-    "//src/sys/pkg/lib/blobfs",
-    "//src/sys/pkg/lib/far/rust:fuchsia-archive",
-    "//src/sys/pkg/lib/fuchsia-hash",
-    "//src/sys/pkg/lib/fuchsia-merkle",
-    "//src/sys/pkg/lib/fuchsia-pkg",
-    "//src/sys/pkg/lib/fuchsia-pkg-testing",
-    "//third_party/rust_crates:anyhow",
-    "//third_party/rust_crates:assert_matches",
-    "//third_party/rust_crates:futures",
-    "//third_party/rust_crates:log",
-    "//third_party/rust_crates:pretty_assertions",
-    "//third_party/rust_crates:static_assertions",
-    "//third_party/rust_crates:thiserror",
-  ]
-
-  sources = [
-    "src/lib.rs",
-    "src/meta_as_dir.rs",
-    "src/meta_subdir.rs",
-    "src/non_meta_subdir.rs",
-    "src/root_dir.rs",
-    "src/root_dir_cache.rs",
-  ]
-  configs += [ "//build/config/rust/lints:clippy_warn_all" ]
-}
-
-fuchsia_component("test-component") {
-  component_name = "package-directory-lib-test"
-  visibility = [ ":*" ]
-  testonly = true
-  deps = [ ":package-directory_test" ]
-  manifest = "meta/package-directory-lib-test.cml"
-}
-
-fuchsia_test_package("package-directory-tests") {
-  test_components = [ ":test-component" ]
+bazel_test_suite("bazel_tests") {
+  target_tests =
+      [ "//src/sys/pkg/lib/package-directory:package-directory-tests_test" ]
 }
 
 group("tests") {
   testonly = true
-  public_deps = [ ":package-directory-tests" ]
+  public_deps = [
+    ":bazel_tests",
+    ":package-directory-tests",
+  ]
 }
 
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
@@ -129,4 +77,61 @@ rustc_library("package-directory") {
     "//third_party/rust_crates:static_assertions",
     "//third_party/rust_crates:thiserror",
   ]
+}
+
+rustc_test("package-directory_test") {
+  sources = [
+    "src/lib.rs",
+    "src/meta_as_dir.rs",
+    "src/meta_subdir.rs",
+    "src/non_meta_subdir.rs",
+    "src/root_dir.rs",
+    "src/root_dir_cache.rs",
+  ]
+  edition = "2024"
+  deps = [
+           "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+           "//sdk/rust/zx",
+           "//src/lib/collections/packed",
+           "//src/lib/diagnostics/inspect/rust",
+           "//src/lib/fidl/rust/fidl",
+           "//src/lib/fuchsia-fs",
+           "//src/storage/lib/vfs/rust:vfs",
+           "//src/sys/pkg/lib/blobfs",
+           "//src/sys/pkg/lib/far/rust:fuchsia-archive",
+           "//src/sys/pkg/lib/fuchsia-hash",
+           "//src/sys/pkg/lib/fuchsia-pkg",
+           "//third_party/rust_crates:anyhow",
+           "//third_party/rust_crates:futures",
+           "//third_party/rust_crates:log",
+           "//third_party/rust_crates:static_assertions",
+           "//third_party/rust_crates:thiserror",
+         ] + [
+           "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+           "//src/lib/fuchsia",
+           "//src/lib/fuchsia-async",
+           "//src/lib/fuchsia-url",
+           "//src/sys/pkg/lib/fuchsia-merkle",
+           "//src/sys/pkg/lib/fuchsia-pkg-testing",
+           "//third_party/rust_crates:assert_matches",
+           "//third_party/rust_crates:pretty_assertions",
+         ]
+  output_name = "package_directory_lib_test"
+  lint_config = "//build/config/rust/lints:clippy_warn_all"
+}
+
+fuchsia_component_manifest("test-component-manifest") {
+  testonly = true
+  component_name = "package-directory-lib-test"
+  manifest = "meta/package-directory-lib-test.cml"
+}
+
+fuchsia_test_component("test-component") {
+  cm_label = ":test-component-manifest"
+  deps = [ ":package-directory_test" ]
+}
+
+fuchsia_test_package("package-directory-tests") {
+  package_name = "package-directory-tests-gn"
+  test_components = [ ":test-component" ]
 }

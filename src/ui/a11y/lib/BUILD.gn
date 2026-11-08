@@ -2,8 +2,13 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/bazel/bazel_test_suite.gni")
 import("//build/components.gni")
 import("//build/icu/icu_group.gni")
+
+bazel_test_suite("bazel_tests") {
+  target_tests = [ "//src/ui/a11y/lib:target_tests" ]
+}
 
 icu_group("lib") {
   icu_public_deps = [ "screen_reader" ]
@@ -27,6 +32,7 @@ group("tests") {
 
   deps = [
     ":a11y-lib-tests",
+    ":bazel_tests",
     "magnifier/tests:integration-tests",
     "semantics/tests:integration",
     "view/tests:integration-tests",

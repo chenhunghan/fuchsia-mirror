@@ -1,0 +1,101 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+"""BUILD file for the @fuchsia_perfetto_protos repository.
+
+Rooted at //third_party/perfetto (see //build/bazel/toplevel.MODULE.bazel).
+Only the .proto sources are exposed. Imports in these files are relative to
+the repository root (e.g. "protos/perfetto/common/trace_stats.proto").
+"""
+
+_PROTOS = [
+    "protos/perfetto/common/android_log_constants.proto",
+    "protos/perfetto/common/builtin_clock.proto",
+    "protos/perfetto/common/commit_data_request.proto",
+    "protos/perfetto/common/data_source_descriptor.proto",
+    "protos/perfetto/common/ftrace_descriptor.proto",
+    "protos/perfetto/common/gpu_counter_descriptor.proto",
+    "protos/perfetto/common/observable_events.proto",
+    "protos/perfetto/common/perf_events.proto",
+    "protos/perfetto/common/semantic_type.proto",
+    "protos/perfetto/common/sys_stats_counters.proto",
+    "protos/perfetto/common/trace_attributes.proto",
+    "protos/perfetto/common/trace_stats.proto",
+    "protos/perfetto/common/tracing_service_capabilities.proto",
+    "protos/perfetto/common/tracing_service_state.proto",
+    "protos/perfetto/common/track_event_descriptor.proto",
+    "protos/perfetto/config/android/android_aflags_config.proto",
+    "protos/perfetto/config/android/android_game_intervention_list_config.proto",
+    "protos/perfetto/config/android/android_input_event_config.proto",
+    "protos/perfetto/config/android/android_log_config.proto",
+    "protos/perfetto/config/android/android_polled_state_config.proto",
+    "protos/perfetto/config/android/android_process_state_config.proto",
+    "protos/perfetto/config/android/android_sdk_sysprop_guard_config.proto",
+    "protos/perfetto/config/android/android_system_property_config.proto",
+    "protos/perfetto/config/android/app_wakelock_config.proto",
+    "protos/perfetto/config/android/cpu_per_uid_config.proto",
+    "protos/perfetto/config/android/display_video_config.proto",
+    "protos/perfetto/config/android/inputmethod_config.proto",
+    "protos/perfetto/config/android/kernel_wakelocks_config.proto",
+    "protos/perfetto/config/android/network_trace_config.proto",
+    "protos/perfetto/config/android/packages_list_config.proto",
+    "protos/perfetto/config/android/pixel_modem_config.proto",
+    "protos/perfetto/config/android/protolog_config.proto",
+    "protos/perfetto/config/android/surfaceflinger_layers_config.proto",
+    "protos/perfetto/config/android/surfaceflinger_transactions_config.proto",
+    "protos/perfetto/config/android/user_list_config.proto",
+    "protos/perfetto/config/android/windowmanager_config.proto",
+    "protos/perfetto/config/chrome/chrome_config.proto",
+    "protos/perfetto/config/chrome/histogram_samples.proto",
+    "protos/perfetto/config/chrome/sampling_heap_profiler.proto",
+    "protos/perfetto/config/chrome/stack_sampling_profiler.proto",
+    "protos/perfetto/config/chrome/system_metrics.proto",
+    "protos/perfetto/config/chrome/v8_config.proto",
+    "protos/perfetto/config/data_source_config.proto",
+    "protos/perfetto/config/etw/etw_config.proto",
+    "protos/perfetto/config/ftrace/frozen_ftrace_config.proto",
+    "protos/perfetto/config/ftrace/ftrace_config.proto",
+    "protos/perfetto/config/gpu/gpu_counter_config.proto",
+    "protos/perfetto/config/gpu/gpu_renderstages_config.proto",
+    "protos/perfetto/config/gpu/vulkan_memory_config.proto",
+    "protos/perfetto/config/inode_file/inode_file_config.proto",
+    "protos/perfetto/config/interceptor_config.proto",
+    "protos/perfetto/config/interceptors/console_config.proto",
+    "protos/perfetto/config/linux/journald_config.proto",
+    "protos/perfetto/config/power/android_power_config.proto",
+    "protos/perfetto/config/priority_boost/priority_boost_config.proto",
+    "protos/perfetto/config/process_stats/process_stats_config.proto",
+    "protos/perfetto/config/profiling/heapprofd_config.proto",
+    "protos/perfetto/config/profiling/java_hprof_config.proto",
+    "protos/perfetto/config/profiling/perf_event_config.proto",
+    "protos/perfetto/config/profiling/smaps_config.proto",
+    "protos/perfetto/config/protovm/protovm_config.proto",
+    "protos/perfetto/config/qnx/qnx_config.proto",
+    "protos/perfetto/config/statsd/atom_ids.proto",
+    "protos/perfetto/config/statsd/statsd_tracing_config.proto",
+    "protos/perfetto/config/sys_stats/sys_stats_config.proto",
+    "protos/perfetto/config/system_info/system_info_config.proto",
+    "protos/perfetto/config/test_config.proto",
+    "protos/perfetto/config/trace_config.proto",
+    "protos/perfetto/config/track_event/track_event_config.proto",
+    "protos/perfetto/ipc/consumer_port.proto",
+    "protos/perfetto/ipc/producer_port.proto",
+    "protos/perfetto/ipc/wire_protocol.proto",
+    "protos/perfetto/protovm/vm_program.proto",
+    "protos/perfetto/trace/perfetto_trace.proto",
+    "protos/third_party/android/frameworks/native/tracing/frameworks_native_trace_packet.proto",
+]
+
+# @fuchsia_perfetto_protos is a workspace-level repository for
+# //third_party/perfetto shared across the tree.
+exports_files(
+    _PROTOS,
+    visibility = ["@//:__subpackages__"],
+)
+
+filegroup(
+    name = "all_protos",
+    srcs = _PROTOS,
+    visibility = ["@//:__subpackages__"],
+)

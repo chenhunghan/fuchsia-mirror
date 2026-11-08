@@ -22,7 +22,7 @@
 fx-ensure-prebuilt "${PREBUILT_JQ}"
 
 # Increase the metrics version by 1 when analytics is updated
-_METRICS_VERSION="12"
+_METRICS_VERSION="13"
 _METRICS_ALLOWS_CUSTOM_REPORTING=( "test" "worktree" )
 # If args match the below, then track capture group 1
 _METRICS_TRACK_REGEX=(
@@ -990,6 +990,7 @@ function __send-analytics-batch {
   \"other_uuid\":{\"value\":\"${OTHER_TOOLS_ANALYTICS_UUID}\"},\
   \"internal\":{\"value\":${internal}},\
   \"is_cog\":{\"value\":$(_is_workspace)},\
+  \"is_abfs\":{\"value\":$(_is_abfs)},\
   \"metrics_level\":{\"value\":${METRICS_LEVEL}},\
   \"metrics_version\":{\"value\":${_METRICS_VERSION}},\
   \"nproc\":{\"value\":$(_get_nproc)}\
@@ -1169,6 +1170,14 @@ function _get_nproc {
 
 function _is_workspace {
   if [[ "${PWD}" =~ ^/google/cartfs/mount/ ]]; then
+    echo 1
+  else
+    echo 0
+  fi
+}
+
+function _is_abfs {
+  if [[ -e "${FUCHSIA_DIR}/../.abfs.ws" ]]; then
     echo 1
   else
     echo 0

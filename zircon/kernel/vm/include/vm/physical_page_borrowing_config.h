@@ -13,10 +13,8 @@
 
 __BEGIN_CDECLS
 
-void rust_ppb_config_set_borrowing_on_mru_enabled(bool enabled);
 void rust_ppb_config_set_loaning_enabled(bool enabled);
 bool rust_ppb_config_is_loaning_enabled(void);
-void rust_ppb_config_set_replace_on_unloan_enabled(bool enabled);
 
 __END_CDECLS
 
@@ -35,22 +33,10 @@ class PhysicalPageBorrowingConfig {
     return config;
   }
 
-  // true - allow page borrowing when a page is logically moved to MRU queue
-  // false - disallow page borrowing when a page is logically moved to MRU queue
-  void set_borrowing_on_mru_enabled(bool enabled) {
-    rust_ppb_config_set_borrowing_on_mru_enabled(enabled);
-  }
-
   // true - decommitted contiguous VMO pages will decommit+loan the pages.
   // false - decommit of a contiguous VMO page zeroes instead of decommitting+loaning.
   void set_loaning_enabled(bool enabled) { rust_ppb_config_set_loaning_enabled(enabled); }
   bool is_loaning_enabled() { return rust_ppb_config_is_loaning_enabled(); }
-
-  // true - loaned pages will be replaced with new page with copied contents.
-  // false - loaned pages will be evicted.
-  void set_replace_on_unloan_enabled(bool enabled) {
-    rust_ppb_config_set_replace_on_unloan_enabled(enabled);
-  }
 };
 
 #endif  // ZIRCON_KERNEL_VM_INCLUDE_VM_PHYSICAL_PAGE_BORROWING_CONFIG_H_

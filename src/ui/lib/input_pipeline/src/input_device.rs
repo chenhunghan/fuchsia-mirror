@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use crate::display_ownership::{DisplayOwnership, OwnershipState};
 use crate::{
     Dispatcher, Transport, consumer_controls_binding, keyboard_binding, light_sensor_binding,
     metrics, mouse_binding, touch_binding,
@@ -17,7 +18,7 @@ use fuchsia_trace as ftrace;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
 use futures::stream::StreamExt;
 use metrics_registry::*;
-use sorted_vec_map::SortedVecSet;
+use sorted_vec_map::{SortedVecMap, SortedVecSet};
 use strum_macros::{Display, EnumCount};
 
 pub use input_device_constants::InputDeviceType;
@@ -381,6 +382,8 @@ struct LocalReaderV2Handler<InputDeviceProcessReportsFn> {
     inspect_status: std::rc::Rc<InputDeviceStatus>,
     metrics_logger: metrics::MetricsLogger,
     feature_flags: InputPipelineFeatureFlags,
+    display_ownership: Option<std::rc::Rc<DisplayOwnership>>,
+    is_injected: bool,
     process_reports: InputDeviceProcessReportsFn,
     ack_threshold: u64,
     last_acknowledged_stamp: u64,
@@ -410,8 +413,146 @@ where
             fidl_next::fuchsia::zx::Channel,
         >,
     ) {
-        fuchsia_trace::duration!("input", "input-device-process-reports");
         let payload = request.wire_payload();
+        let should_discard = self.is_injected
+            && self.display_ownership.as_ref().map_or(false, |ownership| {
+                match ownership.ownership_state() {
+                    OwnershipState::DisplayUnowned => true,
+                    OwnershipState::ClientInputOwned => !matches!(
+                        self.device_descriptor,
+                        InputDeviceDescriptor::ConsumerControls(_)
+                    ),
+                    OwnershipState::PlatformOwned => false,
+                }
+            });
+
+        if should_discard {
+            if let Some(prev_state) = self.previous_state.take() {
+                let now = zx::MonotonicInstant::get();
+                let mut cleanup_events = Vec::new();
+                match prev_state {
+                    PreviousDeviceState::Keyboard { pressed_keys } => {
+                        for key in pressed_keys {
+                            let trace_id = ftrace::Id::new();
+                            ftrace::flow_begin!("input", "event_in_input_pipeline", trace_id);
+                            cleanup_events.push(InputEvent {
+                                device_event: InputDeviceEvent::Keyboard(
+                                    keyboard_binding::KeyboardEvent::new(
+                                        key,
+                                        fidl_fuchsia_ui_input3::KeyEventType::Cancel,
+                                    ),
+                                ),
+                                device_descriptor: self.device_descriptor.clone(),
+                                event_time: now,
+                                handled: Handled::No,
+                                trace_id: Some(trace_id),
+                            });
+                        }
+                    }
+                    PreviousDeviceState::TouchScreen { active_contacts, pressed_buttons } => {
+                        if !active_contacts.is_empty() {
+                            let trace_id = ftrace::Id::new();
+                            ftrace::flow_begin!("input", "event_in_input_pipeline", trace_id);
+                            cleanup_events.push(InputEvent {
+                                device_event: InputDeviceEvent::TouchScreen(
+                                    touch_binding::TouchScreenEvent {
+                                        contacts: SortedVecMap::from_iter(vec![(
+                                            fidl_fuchsia_ui_input::PointerEventPhase::Cancel,
+                                            active_contacts.clone(),
+                                        )]),
+                                        injector_contacts: SortedVecMap::from_iter(vec![(
+                                            fidl_next_fuchsia_ui_pointerinjector::EventPhase::Cancel,
+                                            active_contacts,
+                                        )]),
+                                        pressed_buttons: vec![],
+                                        wake_lease: None,
+                                    },
+                                ),
+                                device_descriptor: self.device_descriptor.clone(),
+                                event_time: now,
+                                handled: Handled::No,
+                                trace_id: Some(trace_id),
+                            });
+                        }
+                        if !pressed_buttons.is_empty() {
+                            let trace_id = ftrace::Id::new();
+                            ftrace::flow_begin!("input", "event_in_input_pipeline", trace_id);
+                            cleanup_events.push(InputEvent {
+                                device_event: InputDeviceEvent::TouchScreen(
+                                    touch_binding::TouchScreenEvent {
+                                        contacts: SortedVecMap::new(),
+                                        injector_contacts: SortedVecMap::new(),
+                                        pressed_buttons: vec![],
+                                        wake_lease: None,
+                                    },
+                                ),
+                                device_descriptor: self.device_descriptor.clone(),
+                                event_time: now,
+                                handled: Handled::No,
+                                trace_id: Some(trace_id),
+                            });
+                        }
+                    }
+                    PreviousDeviceState::Mouse { pressed_buttons } => {
+                        if !pressed_buttons.is_empty() {
+                            let trace_id = ftrace::Id::new();
+                            ftrace::flow_begin!("input", "event_in_input_pipeline", trace_id);
+                            cleanup_events.push(InputEvent {
+                                device_event: InputDeviceEvent::Mouse(
+                                    mouse_binding::MouseEvent::new(
+                                        mouse_binding::MouseLocation::Relative(Default::default()),
+                                        None,
+                                        None,
+                                        mouse_binding::MousePhase::Up,
+                                        pressed_buttons,
+                                        SortedVecSet::new(),
+                                        None,
+                                        None,
+                                    ),
+                                ),
+                                device_descriptor: self.device_descriptor.clone(),
+                                event_time: now,
+                                handled: Handled::No,
+                                trace_id: Some(trace_id),
+                            });
+                        }
+                    }
+                    PreviousDeviceState::ConsumerControls { pressed_buttons } => {
+                        if !pressed_buttons.is_empty() {
+                            let trace_id = ftrace::Id::new();
+                            ftrace::flow_begin!("input", "event_in_input_pipeline", trace_id);
+                            cleanup_events.push(InputEvent {
+                                device_event: InputDeviceEvent::ConsumerControls(
+                                    consumer_controls_binding::ConsumerControlsEvent::new(
+                                        vec![],
+                                        None,
+                                    ),
+                                ),
+                                device_descriptor: self.device_descriptor.clone(),
+                                event_time: now,
+                                handled: Handled::No,
+                                trace_id: Some(trace_id),
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+                if !cleanup_events.is_empty() {
+                    self.inspect_status.count_generated_events(&cleanup_events);
+                    let _ = self.event_sender.unbounded_send(cleanup_events);
+                }
+            }
+            let reports_stamp = *payload.last_report_stamp;
+            if reports_stamp.saturating_sub(self.last_acknowledged_stamp) >= self.ack_threshold {
+                if let Err(e) = self.client.acknowledge_reports(reports_stamp).await {
+                    log::warn!("failed to send acknowledge_reports: {:?}", e);
+                }
+                self.last_acknowledged_stamp = reports_stamp;
+            }
+            return;
+        }
+
+        fuchsia_trace::duration!("input", "input-device-process-reports");
         // TODO: b/513602239 - use InputEvent instead of InputReport for previous
         // report. To avoid wire to natural type conversion.
         let (prev_state, inspect_receiver) = (self.process_reports)(
@@ -454,6 +595,8 @@ pub fn initialize_report_stream<InputDeviceProcessReportsFn>(
     inspect_status: InputDeviceStatus,
     metrics_logger: metrics::MetricsLogger,
     feature_flags: InputPipelineFeatureFlags,
+    display_ownership: Option<std::rc::Rc<DisplayOwnership>>,
+    is_injected: bool,
     process_reports: InputDeviceProcessReportsFn,
 ) -> crate::dispatcher::TaskHandle<()>
 where
@@ -499,6 +642,8 @@ where
                 inspect_status,
                 metrics_logger,
                 feature_flags,
+                display_ownership,
+                is_injected,
                 process_reports,
                 ack_threshold,
                 last_acknowledged_stamp: 0,
@@ -547,6 +692,7 @@ pub async fn get_device_binding(
     device_node: fuchsia_inspect::Node,
     feature_flags: InputPipelineFeatureFlags,
     metrics_logger: metrics::MetricsLogger,
+    display_ownership: Option<std::rc::Rc<DisplayOwnership>>,
     is_injected: bool,
 ) -> Result<(Box<dyn InputDeviceBinding>, crate::dispatcher::TaskHandle<()>), Error> {
     match device_type {
@@ -558,6 +704,7 @@ pub async fn get_device_binding(
                 device_node,
                 feature_flags.clone(),
                 metrics_logger,
+                display_ownership,
                 is_injected,
             )
             .await?;
@@ -571,6 +718,8 @@ pub async fn get_device_binding(
                 device_node,
                 feature_flags.clone(),
                 metrics_logger,
+                display_ownership,
+                is_injected,
             )
             .await?;
             Ok((Box::new(binding), task))
@@ -583,6 +732,8 @@ pub async fn get_device_binding(
                 device_node,
                 feature_flags.clone(),
                 metrics_logger,
+                display_ownership,
+                is_injected,
             )
             .await?;
             Ok((Box::new(binding), task))
@@ -595,6 +746,8 @@ pub async fn get_device_binding(
                 device_node,
                 feature_flags.clone(),
                 metrics_logger,
+                display_ownership,
+                is_injected,
             )
             .await?;
             Ok((Box::new(binding), task))
@@ -607,6 +760,8 @@ pub async fn get_device_binding(
                 device_node,
                 feature_flags.clone(),
                 metrics_logger,
+                display_ownership,
+                is_injected,
             )
             .await?;
             Ok((Box::new(binding), task))
@@ -1321,10 +1476,627 @@ mod tests {
             inspect_status,
             metrics::MetricsLogger::default(),
             InputPipelineFeatureFlags::default(),
+            None,
+            false,
             |_reports, prev, _desc, _sender, _status, _logger, _flags| (prev, None),
         );
 
         let acked_stamp = ack_receiver.next().await;
         assert_eq!(acked_stamp, Some(1));
+    }
+
+    #[fuchsia::test]
+    async fn initialize_report_stream_discards_reports_under_client_input_owned() {
+        use zx::Peered as _;
+
+        let (ack_sender, mut ack_receiver) = futures::channel::mpsc::unbounded::<u64>();
+        let (processed_sender, mut processed_receiver) = futures::channel::mpsc::unbounded::<()>();
+
+        let (input_device_proxy, _task) = spawn_input_stream_handler(move |input_device_request| {
+            let ack_sender = ack_sender.clone();
+            async move {
+                match input_device_request {
+                    fidl_input_report::InputDeviceRequest::GetInputReportsReaderV2 {
+                        reader,
+                        responder,
+                        ..
+                    } => {
+                        responder.send(2).unwrap();
+                        let (mut request_stream, control_handle) =
+                            reader.into_stream_and_control_handle();
+                        fuchsia_async::Task::local(async move {
+                            control_handle
+                                .send_on_input_reports(
+                                    vec![fidl_input_report::InputReport::default()],
+                                    1,
+                                )
+                                .unwrap();
+
+                            while let Some(Ok(req)) = request_stream.next().await {
+                                match req {
+                                    fidl_input_report::InputReportsReaderV2Request::AcknowledgeReports {
+                                        last_acknowledged_report_stamp,
+                                        ..
+                                    } => {
+                                        ack_sender
+                                            .unbounded_send(last_acknowledged_report_stamp)
+                                            .unwrap();
+                                        break;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        })
+                        .detach();
+                    }
+                    _ => panic!("unexpected request: {:?}", input_device_request),
+                }
+            }
+        });
+
+        let (test_event, handler_event) = zx::EventPair::create();
+        test_event
+            .signal_peer(
+                zx::Signals::empty(),
+                *crate::display_ownership::DISPLAY_PLATFORM_OWNED
+                    | *crate::display_ownership::INPUT_CLIENT_OWNED,
+            )
+            .unwrap();
+
+        let (loop_done_sender, _loop_done) = futures::channel::mpsc::unbounded::<()>();
+        let display_ownership = DisplayOwnership::new_for_test(
+            handler_event,
+            loop_done_sender,
+            metrics::MetricsLogger::default(),
+        );
+
+        let inspector = fuchsia_inspect::Inspector::default();
+        let device_node = inspector.root().create_child("test_device");
+        let inspect_status = InputDeviceStatus::new(device_node);
+        let (event_sender, mut event_receiver) = futures::channel::mpsc::unbounded();
+
+        let _stream_task = initialize_report_stream(
+            input_device_proxy,
+            InputDeviceDescriptor::Fake,
+            event_sender,
+            inspect_status,
+            metrics::MetricsLogger::default(),
+            InputPipelineFeatureFlags::default(),
+            Some(display_ownership),
+            true,
+            move |_reports, prev, _desc, _sender, _status, _logger, _flags| {
+                processed_sender.unbounded_send(()).unwrap();
+                (prev, None)
+            },
+        );
+
+        let acked_stamp = ack_receiver.next().await;
+        assert_eq!(acked_stamp, Some(1));
+        assert!(processed_receiver.try_recv().is_err());
+        assert!(event_receiver.try_recv().is_err());
+    }
+
+    #[fuchsia::test]
+    async fn initialize_report_stream_discards_reports_under_display_unowned() {
+        use zx::Peered as _;
+
+        let (ack_sender, mut ack_receiver) = futures::channel::mpsc::unbounded::<u64>();
+        let (processed_sender, mut processed_receiver) = futures::channel::mpsc::unbounded::<()>();
+
+        let (input_device_proxy, _task) = spawn_input_stream_handler(move |input_device_request| {
+            let ack_sender = ack_sender.clone();
+            async move {
+                match input_device_request {
+                    fidl_input_report::InputDeviceRequest::GetInputReportsReaderV2 {
+                        reader,
+                        responder,
+                        ..
+                    } => {
+                        responder.send(2).unwrap();
+                        let (mut request_stream, control_handle) =
+                            reader.into_stream_and_control_handle();
+                        fuchsia_async::Task::local(async move {
+                            control_handle
+                                .send_on_input_reports(
+                                    vec![fidl_input_report::InputReport::default()],
+                                    1,
+                                )
+                                .unwrap();
+
+                            while let Some(Ok(req)) = request_stream.next().await {
+                                match req {
+                                    fidl_input_report::InputReportsReaderV2Request::AcknowledgeReports {
+                                        last_acknowledged_report_stamp,
+                                        ..
+                                    } => {
+                                        ack_sender
+                                            .unbounded_send(last_acknowledged_report_stamp)
+                                            .unwrap();
+                                        break;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        })
+                        .detach();
+                    }
+                    _ => panic!("unexpected request: {:?}", input_device_request),
+                }
+            }
+        });
+
+        let (test_event, handler_event) = zx::EventPair::create();
+        test_event
+            .signal_peer(zx::Signals::empty(), *crate::display_ownership::DISPLAY_UNOWNED)
+            .unwrap();
+
+        let (loop_done_sender, _loop_done) = futures::channel::mpsc::unbounded::<()>();
+        let display_ownership = DisplayOwnership::new_for_test(
+            handler_event,
+            loop_done_sender,
+            metrics::MetricsLogger::default(),
+        );
+
+        let inspector = fuchsia_inspect::Inspector::default();
+        let device_node = inspector.root().create_child("test_device");
+        let inspect_status = InputDeviceStatus::new(device_node);
+        let (event_sender, mut event_receiver) = futures::channel::mpsc::unbounded();
+
+        let _stream_task = initialize_report_stream(
+            input_device_proxy,
+            InputDeviceDescriptor::Fake,
+            event_sender,
+            inspect_status,
+            metrics::MetricsLogger::default(),
+            InputPipelineFeatureFlags::default(),
+            Some(display_ownership),
+            true,
+            move |_reports, prev, _desc, _sender, _status, _logger, _flags| {
+                processed_sender.unbounded_send(()).unwrap();
+                (prev, None)
+            },
+        );
+
+        let acked_stamp = ack_receiver.next().await;
+        assert_eq!(acked_stamp, Some(1));
+        assert!(processed_receiver.try_recv().is_err());
+        assert!(event_receiver.try_recv().is_err());
+    }
+
+    #[fuchsia::test]
+    async fn initialize_report_stream_delivers_consumer_controls_under_client_input_owned() {
+        use zx::Peered as _;
+
+        let (ack_sender, mut ack_receiver) = futures::channel::mpsc::unbounded::<u64>();
+        let (processed_sender, mut processed_receiver) = futures::channel::mpsc::unbounded::<()>();
+
+        let (input_device_proxy, _task) = spawn_input_stream_handler(move |input_device_request| {
+            let ack_sender = ack_sender.clone();
+            async move {
+                match input_device_request {
+                    fidl_input_report::InputDeviceRequest::GetInputReportsReaderV2 {
+                        reader,
+                        responder,
+                        ..
+                    } => {
+                        responder.send(2).unwrap();
+                        let (mut request_stream, control_handle) =
+                            reader.into_stream_and_control_handle();
+                        fuchsia_async::Task::local(async move {
+                            control_handle
+                                .send_on_input_reports(
+                                    vec![fidl_input_report::InputReport::default()],
+                                    1,
+                                )
+                                .unwrap();
+
+                            while let Some(Ok(req)) = request_stream.next().await {
+                                match req {
+                                    fidl_input_report::InputReportsReaderV2Request::AcknowledgeReports {
+                                        last_acknowledged_report_stamp,
+                                        ..
+                                    } => {
+                                        ack_sender
+                                            .unbounded_send(last_acknowledged_report_stamp)
+                                            .unwrap();
+                                        break;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        })
+                        .detach();
+                    }
+                    _ => panic!("unexpected request: {:?}", input_device_request),
+                }
+            }
+        });
+
+        let (test_event, handler_event) = zx::EventPair::create();
+        test_event
+            .signal_peer(
+                zx::Signals::empty(),
+                *crate::display_ownership::DISPLAY_PLATFORM_OWNED
+                    | *crate::display_ownership::INPUT_CLIENT_OWNED,
+            )
+            .unwrap();
+
+        let (loop_done_sender, _loop_done) = futures::channel::mpsc::unbounded::<()>();
+        let display_ownership = DisplayOwnership::new_for_test(
+            handler_event,
+            loop_done_sender,
+            metrics::MetricsLogger::default(),
+        );
+
+        let inspector = fuchsia_inspect::Inspector::default();
+        let device_node = inspector.root().create_child("test_device");
+        let inspect_status = InputDeviceStatus::new(device_node);
+        let (event_sender, _event_receiver) = futures::channel::mpsc::unbounded();
+
+        let _stream_task = initialize_report_stream(
+            input_device_proxy,
+            InputDeviceDescriptor::ConsumerControls(
+                consumer_controls_binding::ConsumerControlsDeviceDescriptor {
+                    buttons: vec![],
+                    device_id: 1,
+                    is_injected: true,
+                },
+            ),
+            event_sender,
+            inspect_status,
+            metrics::MetricsLogger::default(),
+            InputPipelineFeatureFlags::default(),
+            Some(display_ownership),
+            true,
+            move |_reports, prev, _desc, _sender, _status, _logger, _flags| {
+                processed_sender.unbounded_send(()).unwrap();
+                (prev, None)
+            },
+        );
+
+        let acked_stamp = ack_receiver.next().await;
+        assert_eq!(acked_stamp, Some(1));
+        assert_eq!(processed_receiver.next().await, Some(()));
+    }
+
+    #[fuchsia::test]
+    async fn discarding_injected_keyboard_reports_clears_display_ownership_key_state() {
+        use crate::display_ownership;
+        use crate::input_handler::UnhandledInputHandler as _;
+        use crate::keyboard_binding::{KeyboardDeviceDescriptor, KeyboardEvent};
+        use zx::Peered as _;
+
+        let (ack_sender, mut ack_receiver) = futures::channel::mpsc::unbounded::<u64>();
+        let (send_report_sender, send_report_receiver) =
+            futures::channel::mpsc::unbounded::<fidl_input_report::InputReport>();
+        let send_report_receiver =
+            std::sync::Arc::new(futures::lock::Mutex::new(Some(send_report_receiver)));
+
+        let (input_device_proxy, _task) = spawn_input_stream_handler(move |input_device_request| {
+            let ack_sender = ack_sender.clone();
+            let send_report_receiver = send_report_receiver.clone();
+            async move {
+                match input_device_request {
+                    fidl_input_report::InputDeviceRequest::GetInputReportsReaderV2 {
+                        reader,
+                        responder,
+                        ..
+                    } => {
+                        responder.send(2).unwrap();
+                        let (mut request_stream, control_handle) =
+                            reader.into_stream_and_control_handle();
+                        let rx_opt = send_report_receiver.lock().await.take();
+                        fuchsia_async::Task::local(async move {
+                            if let Some(mut rx) = rx_opt {
+                                let mut stamp = 1;
+                                while let Some(report) = rx.next().await {
+                                    control_handle
+                                        .send_on_input_reports(vec![report], stamp)
+                                        .unwrap();
+                                    stamp += 1;
+                                }
+                            }
+                        })
+                        .detach();
+                        fuchsia_async::Task::local(async move {
+                            while let Some(Ok(req)) = request_stream.next().await {
+                                match req {
+                                    fidl_input_report::InputReportsReaderV2Request::AcknowledgeReports {
+                                        last_acknowledged_report_stamp,
+                                        ..
+                                    } => {
+                                        ack_sender
+                                            .unbounded_send(last_acknowledged_report_stamp)
+                                            .unwrap();
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        })
+                        .detach();
+                    }
+                    _ => panic!("unexpected request: {:?}", input_device_request),
+                }
+            }
+        });
+
+        let (test_event, handler_event) = zx::EventPair::create();
+        test_event
+            .signal_peer(
+                zx::Signals::empty(),
+                *display_ownership::DISPLAY_PLATFORM_OWNED
+                    | *display_ownership::INPUT_PLATFORM_OWNED,
+            )
+            .unwrap();
+
+        let (loop_done_sender, mut loop_done) = futures::channel::mpsc::unbounded::<()>();
+        let display_ownership = DisplayOwnership::new_for_test(
+            handler_event,
+            loop_done_sender,
+            metrics::MetricsLogger::default(),
+        );
+
+        let (ownership_event_sender, mut ownership_event_receiver) =
+            futures::channel::mpsc::unbounded::<Vec<InputEvent>>();
+        let display_ownership_clone = display_ownership.clone();
+        let _ownership_task = fuchsia_async::Task::local(async move {
+            let _ = display_ownership_clone.handle_ownership_change(ownership_event_sender).await;
+        });
+
+        let inspector = fuchsia_inspect::Inspector::default();
+        let device_node = inspector.root().create_child("test_device");
+        let inspect_status = InputDeviceStatus::new(device_node);
+        let (event_sender, mut event_receiver) = futures::channel::mpsc::unbounded();
+
+        let keyboard_desc = InputDeviceDescriptor::Keyboard(KeyboardDeviceDescriptor {
+            keys: vec![fidl_fuchsia_input::Key::A],
+            device_information: fidl_fuchsia_input_report::DeviceInformation {
+                vendor_id: Some(1),
+                ..Default::default()
+            },
+            device_id: 1,
+        });
+
+        let (processed_sender, mut processed_receiver) = futures::channel::mpsc::unbounded::<()>();
+
+        let _stream_task = initialize_report_stream(
+            input_device_proxy,
+            keyboard_desc.clone(),
+            event_sender,
+            inspect_status,
+            metrics::MetricsLogger::default(),
+            InputPipelineFeatureFlags::default(),
+            Some(display_ownership.clone()),
+            /* is_injected */ true,
+            move |_reports, _prev, _desc, _sender, _status, _logger, _flags| {
+                processed_sender.unbounded_send(()).unwrap();
+                (
+                    Some(PreviousDeviceState::Keyboard {
+                        pressed_keys: vec![fidl_fuchsia_input::Key::A],
+                    }),
+                    None,
+                )
+            },
+        );
+
+        // 1. Send first report while PlatformOwned: sets previous_state to have Key::A pressed.
+        send_report_sender.unbounded_send(fidl_input_report::InputReport::default()).unwrap();
+        assert_eq!(ack_receiver.next().await, Some(1));
+        assert_eq!(processed_receiver.next().await, Some(()));
+
+        // Register Key::A pressed in display_ownership.
+        let key_event = KeyboardEvent::new(
+            fidl_fuchsia_input::Key::A,
+            fidl_fuchsia_ui_input3::KeyEventType::Pressed,
+        );
+        let unhandled = UnhandledInputEvent {
+            device_event: InputDeviceEvent::Keyboard(key_event),
+            device_descriptor: keyboard_desc.clone(),
+            event_time: zx::MonotonicInstant::get(),
+            trace_id: None,
+        };
+        let _ = display_ownership.clone().handle_unhandled_input_event(unhandled).await;
+
+        // 2. Transition to DisplayUnowned: emits Cancel for Key::A.
+        test_event
+            .signal_peer(
+                *display_ownership::DISPLAY_PLATFORM_OWNED
+                    | *display_ownership::INPUT_PLATFORM_OWNED,
+                *display_ownership::DISPLAY_UNOWNED,
+            )
+            .unwrap();
+        loop_done.next().await.expect("loop_done notification");
+
+        let cancel_events = ownership_event_receiver.next().await.expect("cancel events");
+        assert_eq!(cancel_events.len(), 1);
+        if let InputDeviceEvent::Keyboard(ref k) = cancel_events[0].device_event {
+            assert_eq!(k.get_event_type(), fidl_fuchsia_ui_input3::KeyEventType::Cancel);
+            assert_eq!(k.get_key(), fidl_fuchsia_input::Key::A);
+        } else {
+            panic!("expected keyboard event");
+        }
+
+        // 3. Send second report while DisplayUnowned: report is discarded and emits Cancel event for Key::A.
+        send_report_sender.unbounded_send(fidl_input_report::InputReport::default()).unwrap();
+        assert_eq!(ack_receiver.next().await, Some(2));
+        assert!(processed_receiver.try_recv().is_err());
+        let cleanup_events = event_receiver.next().await.expect("cleanup events");
+        assert_eq!(cleanup_events.len(), 1);
+        if let InputDeviceEvent::Keyboard(ref k) = cleanup_events[0].device_event {
+            assert_eq!(k.get_event_type(), fidl_fuchsia_ui_input3::KeyEventType::Cancel);
+            assert_eq!(k.get_key(), fidl_fuchsia_input::Key::A);
+        } else {
+            panic!("expected keyboard cancel event");
+        }
+
+        // Processing this Cancel event in display_ownership clears Key::A from key_state.
+        let unhandled = UnhandledInputEvent::try_from(cleanup_events[0].clone()).unwrap();
+        let handled_events =
+            display_ownership.clone().handle_unhandled_input_event(unhandled).await;
+        assert_eq!(handled_events[0].handled, Handled::Yes);
+
+        // 4. Transition back to PlatformOwned: since Key::A was cleared, no Sync event should be emitted!
+        test_event
+            .signal_peer(
+                *display_ownership::DISPLAY_UNOWNED,
+                *display_ownership::DISPLAY_PLATFORM_OWNED
+                    | *display_ownership::INPUT_PLATFORM_OWNED,
+            )
+            .unwrap();
+        loop_done.next().await.expect("loop_done notification");
+
+        // No sync event emitted because key_state was cleared!
+        assert!(ownership_event_receiver.try_recv().is_err());
+    }
+
+    #[fuchsia::test]
+    async fn discarding_injected_touch_reports_emits_cancel_event() {
+        use crate::display_ownership;
+        use crate::touch_binding::TouchContact;
+        use crate::utils::Position;
+        use zx::Peered as _;
+
+        let (ack_sender, mut ack_receiver) = futures::channel::mpsc::unbounded::<u64>();
+        let (send_report_sender, send_report_receiver) =
+            futures::channel::mpsc::unbounded::<fidl_input_report::InputReport>();
+        let send_report_receiver =
+            std::sync::Arc::new(futures::lock::Mutex::new(Some(send_report_receiver)));
+
+        let (input_device_proxy, _task) = spawn_input_stream_handler(move |input_device_request| {
+            let ack_sender = ack_sender.clone();
+            let send_report_receiver = send_report_receiver.clone();
+            async move {
+                match input_device_request {
+                    fidl_input_report::InputDeviceRequest::GetInputReportsReaderV2 {
+                        reader,
+                        responder,
+                        ..
+                    } => {
+                        responder.send(2).unwrap();
+                        let (mut request_stream, control_handle) =
+                            reader.into_stream_and_control_handle();
+                        let rx_opt = send_report_receiver.lock().await.take();
+                        fuchsia_async::Task::local(async move {
+                            if let Some(mut rx) = rx_opt {
+                                let mut stamp = 1;
+                                while let Some(report) = rx.next().await {
+                                    control_handle
+                                        .send_on_input_reports(vec![report], stamp)
+                                        .unwrap();
+                                    stamp += 1;
+                                }
+                            }
+                        })
+                        .detach();
+                        fuchsia_async::Task::local(async move {
+                            while let Some(Ok(req)) = request_stream.next().await {
+                                match req {
+                                    fidl_input_report::InputReportsReaderV2Request::AcknowledgeReports {
+                                        last_acknowledged_report_stamp,
+                                        ..
+                                    } => {
+                                        ack_sender
+                                            .unbounded_send(last_acknowledged_report_stamp)
+                                            .unwrap();
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        })
+                        .detach();
+                    }
+                    _ => panic!("unexpected request: {:?}", input_device_request),
+                }
+            }
+        });
+
+        let (test_event, handler_event) = zx::EventPair::create();
+        test_event
+            .signal_peer(
+                zx::Signals::empty(),
+                *display_ownership::DISPLAY_PLATFORM_OWNED
+                    | *display_ownership::INPUT_PLATFORM_OWNED,
+            )
+            .unwrap();
+
+        let (loop_done_sender, _loop_done) = futures::channel::mpsc::unbounded::<()>();
+        let display_ownership = DisplayOwnership::new_for_test(
+            handler_event,
+            loop_done_sender,
+            metrics::MetricsLogger::default(),
+        );
+
+        let inspector = fuchsia_inspect::Inspector::default();
+        let device_node = inspector.root().create_child("test_device");
+        let inspect_status = InputDeviceStatus::new(device_node);
+        let (event_sender, mut event_receiver) = futures::channel::mpsc::unbounded();
+
+        let touch_desc = crate::testing_utilities::get_touch_screen_device_descriptor();
+
+        let (processed_sender, mut processed_receiver) = futures::channel::mpsc::unbounded::<()>();
+
+        let _stream_task = initialize_report_stream(
+            input_device_proxy,
+            touch_desc.clone(),
+            event_sender,
+            inspect_status,
+            metrics::MetricsLogger::default(),
+            InputPipelineFeatureFlags::default(),
+            Some(display_ownership),
+            /* is_injected */ true,
+            move |_reports, _prev, _desc, _sender, _status, _logger, _flags| {
+                processed_sender.unbounded_send(()).unwrap();
+                (
+                    Some(PreviousDeviceState::TouchScreen {
+                        active_contacts: vec![TouchContact {
+                            id: 1,
+                            position: Position { x: 50.0, y: 50.0 },
+                            pressure: None,
+                            contact_size: None,
+                        }],
+                        pressed_buttons: vec![],
+                    }),
+                    None,
+                )
+            },
+        );
+
+        // 1. Send first report while PlatformOwned: sets previous_state to have contact 1 active.
+        send_report_sender.unbounded_send(fidl_input_report::InputReport::default()).unwrap();
+        assert_eq!(ack_receiver.next().await, Some(1));
+        assert_eq!(processed_receiver.next().await, Some(()));
+
+        // 2. Transition to DisplayUnowned.
+        test_event
+            .signal_peer(
+                *display_ownership::DISPLAY_PLATFORM_OWNED
+                    | *display_ownership::INPUT_PLATFORM_OWNED,
+                *display_ownership::DISPLAY_UNOWNED,
+            )
+            .unwrap();
+
+        // 3. Send second report while DisplayUnowned: should discard report AND emit Cancel TouchScreenEvent!
+        send_report_sender.unbounded_send(fidl_input_report::InputReport::default()).unwrap();
+        assert_eq!(ack_receiver.next().await, Some(2));
+        assert!(processed_receiver.try_recv().is_err());
+
+        let events = event_receiver.next().await.expect("cleanup events emitted on discard");
+        assert_eq!(events.len(), 1);
+        if let InputDeviceEvent::TouchScreen(ref ts) = events[0].device_event {
+            let cancel_contacts = ts
+                .injector_contacts
+                .get(&fidl_next_fuchsia_ui_pointerinjector::EventPhase::Cancel)
+                .expect("cancel contacts present");
+            assert_eq!(cancel_contacts.len(), 1);
+            assert_eq!(cancel_contacts[0].id, 1);
+        } else {
+            panic!("expected touch screen event");
+        }
+
+        // 4. Send third report while DisplayUnowned: previous_state is already cleared, so no further event is emitted.
+        send_report_sender.unbounded_send(fidl_input_report::InputReport::default()).unwrap();
+        assert_eq!(ack_receiver.next().await, Some(3));
+        assert!(processed_receiver.try_recv().is_err());
+        assert!(event_receiver.try_recv().is_err());
     }
 }

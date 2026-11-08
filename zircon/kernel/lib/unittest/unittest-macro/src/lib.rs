@@ -56,6 +56,9 @@ struct TestCase {
     block: Block,
     // Whether the test is ignored.
     ignored: bool,
+    // The test function's remaining attributes, forwarded to the generated
+    // function.
+    attrs: Vec<Attribute>,
 }
 
 impl TestCase {
@@ -93,7 +96,17 @@ impl TestCase {
 
         let ignored = item_fn.attrs.iter().any(|attr| attr.path().is_ident("ignore"));
 
-        Ok(Self { ident: item_fn.sig.ident, docstring, block: *item_fn.block, ignored })
+        let attrs = item_fn
+            .attrs
+            .into_iter()
+            .filter(|attr| {
+                matches!(attr.style, syn::AttrStyle::Outer)
+                    && !attr.path().is_ident("doc")
+                    && !attr.path().is_ident("ignore")
+            })
+            .collect();
+
+        Ok(Self { ident: item_fn.sig.ident, docstring, block: *item_fn.block, ignored, attrs })
     }
 }
 
@@ -101,6 +114,7 @@ impl ToTokens for TestCase {
     fn to_tokens(&self, tokens: &mut TokenStream2) {
         let ident = &self.ident;
         let block = &self.block;
+        let attrs = &self.attrs;
         let doc_comment = format!(" {}", self.docstring);
         let maybe_allow_dead_code = if self.ignored {
             quote! { #[allow(dead_code)] }
@@ -114,6 +128,7 @@ impl ToTokens for TestCase {
         tokens.extend(quote! {
             #[doc = #doc_comment]
             #maybe_allow_dead_code
+            #( #attrs )*
             pub extern "C" fn #ident() -> bool {
                 #[allow(unused_mut)]
                 let mut all_ok = true;

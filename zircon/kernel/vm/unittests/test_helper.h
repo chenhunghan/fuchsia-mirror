@@ -20,7 +20,6 @@
 #include <fbl/algorithm.h>
 #include <fbl/alloc_checker.h>
 #include <fbl/vector.h>
-#include <kernel/semaphore.h>
 #include <ktl/algorithm.h>
 #include <ktl/iterator.h>
 #include <ktl/utility.h>
@@ -75,9 +74,6 @@ class StubPageProvider : public PageProvider {
   const bool ignore_requests_ = false;
 };
 
-// Helper function to allocate memory in a user address space.
-zx_status_t AllocUser(VmAspace* aspace, const char* name, size_t size, user_inout_ptr<void>* ptr);
-
 // Create a pager-backed VMO |out_vmo| with size equals |num_pages| pages, and commit
 // |commited_pages| of its pages. |trap_dirty| controls whether modifications to pages must be
 // trapped in order to generate DIRTY page requests. |resizable| controls whether the created VMO is
@@ -94,10 +90,6 @@ zx_status_t make_partially_committed_pager_vmo(size_t num_pages, size_t committe
 zx_status_t make_committed_pager_vmo(size_t num_pages, bool trap_dirty, bool resizable,
                                      vm_page_t** out_pages, fbl::RefPtr<VmObjectPaged>* out_vmo);
 
-// Same as make_committed_pager_vmo but does not commit any pages in the VMO.
-zx_status_t make_uncommitted_pager_vmo(size_t num_pages, bool trap_dirty, bool resizable,
-                                       fbl::RefPtr<VmObjectPaged>* out_vmo);
-
 // Re-supplies |num_pages| to |vmo| starting at |page_offset|. |out_pages| is updated with the new
 // pages.
 zx_status_t supply_pager_vmo_pages(VmObjectPaged* vmo, uint64_t page_offset, uint64_t num_pages,
@@ -108,21 +100,10 @@ uint32_t test_rand(uint32_t seed);
 // fill a region of memory with a pattern based on the address of the region
 void fill_region(uintptr_t seed, void* _ptr, size_t len);
 
-// just like |fill_region|, but for user memory
-void fill_region_user(uintptr_t seed, user_inout_ptr<void> _ptr, size_t len);
-
 // test a region of memory against a known pattern
 bool test_region(uintptr_t seed, void* _ptr, size_t len);
 
-// just like |test_region|, but for user memory
-bool test_region_user(uintptr_t seed, user_inout_ptr<void> _ptr, size_t len);
-
-bool fill_and_test(void* ptr, size_t len);
-
-// just like |fill_and_test|, but for user memory
-bool fill_and_test_user(user_inout_ptr<void> ptr, size_t len);
-
-// Helper function used by vmo_mapping_page_fault_optimisation_test.
+// Helper function used by vm_mapping_page_fault_optimisation_test.
 // Given a mapping, check that a run of consecutive pages are mapped (indicated by
 // expected_mapped_page_count) and that remaining pages are unmapped.
 bool verify_mapped_page_range(vaddr_t base, size_t mapping_size, size_t expected_mapped_page_count);

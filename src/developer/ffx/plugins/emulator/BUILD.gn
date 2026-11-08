@@ -20,6 +20,7 @@ if (is_host) {
     config_data = [ "data/config.json" ]
     plugin_deps = [
       "commands/console:ffx_emulator_console",
+      "commands/input:ffx_emulator_input",
       "commands/list:ffx_emulator_list",
       "commands/screenshot:ffx_emulator_screenshot",
       "commands/show:ffx_emulator_show",
@@ -132,6 +133,7 @@ if (is_host) {
     testonly = true
     deps = [
       ":ffx_emulator_tests($host_toolchain)",
+      "commands/list:tests",
       "configuration:tests",
       "engines:tests",
     ]

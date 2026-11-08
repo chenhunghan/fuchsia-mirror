@@ -39,32 +39,12 @@ inline constexpr uint8_t kConfigMinGrant        = 0x3e;
 inline constexpr uint8_t kConfigMaxLatency      = 0x3f;
 
 /*
- * PCI header type register bits
- */
-inline constexpr uint8_t kHeaderTypeMask        = 0x7f;
-inline constexpr uint8_t kHeaderTypeMultiFn     = 0x80;
-
-/*
  * PCI header types
  */
 inline constexpr uint8_t kHeaderTypeStandard    = 0x00;
 inline constexpr uint8_t kHeaderTypePciBridge   = 0x01;
 inline constexpr uint8_t kHeaderTypeCardBus     = 0x02;
 
-/*
- * PCI command register bits
- */
-inline constexpr uint16_t kCommandIoEn           = 0x0001;
-inline constexpr uint16_t kCommandMemEn          = 0x0002;
-inline constexpr uint16_t kCommandBusMasterEn    = 0x0004;
-inline constexpr uint16_t kCommandSpecialEn      = 0x0008;
-inline constexpr uint16_t kCommandMemWrInvEn     = 0x0010;
-inline constexpr uint16_t kCommandPalSnoopEn     = 0x0020;
-inline constexpr uint16_t kCommandPerrRespEn     = 0x0040;
-inline constexpr uint16_t kCommandAdStepEn       = 0x0080;
-inline constexpr uint16_t kCommandSerrEn         = 0x0100;
-inline constexpr uint16_t kCommandFastB2bEn      = 0x0200;
-inline constexpr uint16_t kCommandIntDisable     = 0x0400;
 
 /*
  * PCI status register bits

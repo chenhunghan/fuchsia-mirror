@@ -8,8 +8,6 @@
 #define ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_CLOCK_DISPATCHER_H_
 
 #include <lib/object-constants.h>
-#include <lib/page/size.h>
-#include <sys/types.h>
 #include <zircon/rights.h>
 #include <zircon/types.h>
 
@@ -17,7 +15,6 @@
 #include <kernel/ffi.h>
 #include <object/dispatcher.h>
 #include <object/handle.h>
-#include <object/opaque_storage.h>
 #include <vm/vm_object_paged.h>
 
 class ClockDispatcher;
@@ -37,8 +34,6 @@ zx_status_t rust_clock_dispatcher_set_name(ClockDispatcher& disp, const char* na
 
 class ClockDispatcher final : public Dispatcher {
  public:
-  static inline constexpr uint64_t kMappedSize = kPageSize;
-
   ~ClockDispatcher() final;
   zx_obj_type_t get_type() const final { return ZX_OBJ_TYPE_CLOCK; }
   zx_koid_t get_related_koid() const final { return ZX_KOID_INVALID; }

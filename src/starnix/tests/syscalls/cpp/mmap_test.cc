@@ -28,6 +28,7 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <linux/capability.h>
 
 #include "src/lib/files/file.h"
 #include "src/lib/fxl/strings/split_string.h"
@@ -1243,8 +1244,34 @@ TEST_F(MapGrowsdownTest, VmStkUpdatesOnGrowAndUnmap) {
   ASSERT_TRUE(grown_vm_stk_kb.has_value());
   EXPECT_EQ(*grown_vm_stk_kb, *initial_vm_stk_kb + 4 * page_size_kb);
 
-  // Unmap the entire 6-page MAP_GROWSDOWN region (2 initial + 4 grown pages).
-  ASSERT_THAT(munmap(OffsetToAddress(grow_offset), 6 * page_size()), SyscallSucceeds());
+  // Shrink the 6-page MAP_GROWSDOWN region in-place to 4 pages via mremap.
+  void* remapped =
+      mremap(OffsetToAddress(grow_offset), 6 * page_size(), 4 * page_size(), /*flags=*/0);
+  ASSERT_EQ(remapped, OffsetToAddress(grow_offset));
+
+  const std::optional<size_t> after_shrink_vm_stk_kb = ReadVmStkKb();
+  ASSERT_TRUE(after_shrink_vm_stk_kb.has_value());
+  EXPECT_EQ(*after_shrink_vm_stk_kb, *main_stack_kb + (4 * page_size_kb));
+
+  // Split the 4-page MAP_GROWSDOWN mapping into three mappings via mprotect on the middle 2 pages;
+  // all resulting VMAs retain VM_GROWSDOWN so VmStk is unchanged.
+  const intptr_t middle_offset = grow_offset + static_cast<intptr_t>(page_size());
+  ASSERT_THAT(mprotect(OffsetToAddress(middle_offset), 2 * page_size(), PROT_READ),
+              SyscallSucceeds());
+
+  const std::optional<size_t> after_split_vm_stk_kb = ReadVmStkKb();
+  ASSERT_TRUE(after_split_vm_stk_kb.has_value());
+  EXPECT_EQ(*after_split_vm_stk_kb, *main_stack_kb + (4 * page_size_kb));
+
+  // Unmap the middle 2-page split VMA and verify VmStk decreases by 2 pages.
+  ASSERT_THAT(munmap(OffsetToAddress(middle_offset), 2 * page_size()), SyscallSucceeds());
+
+  const std::optional<size_t> after_partial_unmap_vm_stk_kb = ReadVmStkKb();
+  ASSERT_TRUE(after_partial_unmap_vm_stk_kb.has_value());
+  EXPECT_EQ(*after_partial_unmap_vm_stk_kb, *main_stack_kb + (2 * page_size_kb));
+
+  // Unmap the remaining pages of the MAP_GROWSDOWN region.
+  ASSERT_THAT(munmap(OffsetToAddress(grow_offset), 4 * page_size()), SyscallSucceeds());
 
   const std::optional<size_t> after_unmap_vm_stk_kb = ReadVmStkKb();
   ASSERT_TRUE(after_unmap_vm_stk_kb.has_value());
@@ -3132,6 +3159,75 @@ TEST(MmapTest, MmapMinAddr) {
   EXPECT_EQ(try_mmap_unprivileged(k5Mb), 0);
 }
 
+TEST(MmapTest, MapFixedBelowMmapMinAddrFailsWithEperm) {
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+  std::string min_addr_str;
+  ASSERT_TRUE(files::ReadFileToString("/proc/sys/vm/mmap_min_addr", &min_addr_str));
+  size_t mmap_min_addr = std::stoul(min_addr_str);
+  ASSERT_GE(mmap_min_addr, page_size);
+  void* low_addr = reinterpret_cast<void*>(mmap_min_addr - page_size);
+
+  if (test_helper::IsStarnix() && test_helper::HasCapability(CAP_SYS_RAWIO)) {
+    // On Starnix, [0, RESTRICTED_ASPACE_BASE) is reserved outside the user VMAR, so when
+    // CAP_SYS_RAWIO is held, fixed mappings below mmap_min_addr pass the capability check and
+    // fail with EINVAL.
+    EXPECT_THAT(reinterpret_cast<intptr_t>(mmap(nullptr, page_size, PROT_READ | PROT_WRITE,
+                                                MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0)),
+                SyscallFailsWithErrno(EINVAL));
+    EXPECT_THAT(
+        reinterpret_cast<intptr_t>(mmap(nullptr, page_size, PROT_READ | PROT_WRITE,
+                                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0)),
+        SyscallFailsWithErrno(EINVAL));
+    EXPECT_THAT(reinterpret_cast<intptr_t>(mmap(low_addr, page_size, PROT_READ | PROT_WRITE,
+                                                MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0)),
+                SyscallFailsWithErrno(EINVAL));
+    EXPECT_THAT(
+        reinterpret_cast<intptr_t>(mmap(low_addr, page_size, PROT_READ | PROT_WRITE,
+                                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0)),
+        SyscallFailsWithErrno(EINVAL));
+  }
+
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([page_size, mmap_min_addr, low_addr] {
+    test_helper::DropAllCapabilities();
+
+    // Unaligned fixed mappings below mmap_min_addr must fail with EINVAL even without
+    // CAP_SYS_RAWIO.
+    EXPECT_THAT(reinterpret_cast<intptr_t>(mmap(reinterpret_cast<void*>(1), page_size,
+                                                PROT_READ | PROT_WRITE,
+                                                MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0)),
+                SyscallFailsWithErrno(EINVAL));
+
+    // Fixed mappings at NULL (0) without CAP_SYS_RAWIO must fail with EPERM.
+    EXPECT_THAT(reinterpret_cast<intptr_t>(mmap(nullptr, page_size, PROT_READ | PROT_WRITE,
+                                                MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0)),
+                SyscallFailsWithErrno(EPERM));
+    EXPECT_THAT(
+        reinterpret_cast<intptr_t>(mmap(nullptr, page_size, PROT_READ | PROT_WRITE,
+                                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0)),
+        SyscallFailsWithErrno(EPERM));
+
+    // Fixed mappings below mmap_min_addr without CAP_SYS_RAWIO must fail with EPERM (not ENOMEM).
+    EXPECT_THAT(reinterpret_cast<intptr_t>(mmap(low_addr, page_size, PROT_READ | PROT_WRITE,
+                                                MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0)),
+                SyscallFailsWithErrno(EPERM));
+    EXPECT_THAT(
+        reinterpret_cast<intptr_t>(mmap(low_addr, page_size, PROT_READ | PROT_WRITE,
+                                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0)),
+        SyscallFailsWithErrno(EPERM));
+
+    // Non-fixed mapping with a hint below mmap_min_addr must succeed and map at >= mmap_min_addr.
+    if (mmap_min_addr > page_size) {
+      void* hinted = mmap(reinterpret_cast<void*>(page_size), page_size, PROT_READ | PROT_WRITE,
+                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+      ASSERT_NE(hinted, MAP_FAILED);
+      EXPECT_GE(reinterpret_cast<uintptr_t>(hinted), mmap_min_addr);
+      SAFE_SYSCALL(munmap(hinted, page_size));
+    }
+  });
+  EXPECT_TRUE(helper.WaitForChildren());
+}
+
 // Verifies that closing a file descriptor while it remains mapped defers the
 // close event until the memory mapping is unmapped.
 //
@@ -3181,6 +3277,142 @@ TEST(MmapTest, FileCloseDeferredWhileMapped) {
   const auto* event = reinterpret_cast<const struct inotify_event*>(event_buf);
   EXPECT_EQ(event->wd, wd);
   EXPECT_TRUE(event->mask & IN_CLOSE_NOWRITE);
+}
+
+// Regression test for https://fxbug.dev/297433933: When a file is mapped twice
+// (once read-only and once read-write with MAP_PRIVATE) and the process forks,
+// writing to the writable MAP_PRIVATE mapping in the parent after fork() must
+// not be visible through either the read-only mapping or the writable mapping
+// in the child.
+TEST(MmapTest, PrivateReadAndWriteFileMappingsIsolatedAcrossFork) {
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+  test_helper::ScopedTempFD temp_file;
+  ASSERT_TRUE(temp_file);
+
+  const std::string initial_contents(page_size, 'a');
+  ASSERT_THAT(pwrite(temp_file.fd(), initial_contents.data(), initial_contents.size(),
+                     /* offset = */ 0),
+              SyscallSucceedsWithValue(static_cast<ssize_t>(page_size)));
+
+  for (int read_map_flags : {MAP_PRIVATE, MAP_SHARED}) {
+    SCOPED_TRACE(read_map_flags == MAP_PRIVATE ? "read_mapping=MAP_PRIVATE"
+                                               : "read_mapping=MAP_SHARED");
+
+    auto read_mapping = test_helper::ScopedMMap::MMap(
+        /* addr = */ nullptr, page_size, PROT_READ, read_map_flags, temp_file.fd(),
+        /* offset = */ 0);
+    ASSERT_THAT(read_mapping, SyscallResultIsOk());
+
+    auto write_mapping = test_helper::ScopedMMap::MMap(
+        /* addr = */ nullptr, page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, temp_file.fd(),
+        /* offset = */ 0);
+    ASSERT_THAT(write_mapping, SyscallResultIsOk());
+
+    volatile char* read_bytes = static_cast<volatile char*>(read_mapping->mapping());
+    volatile char* write_bytes = static_cast<volatile char*>(write_mapping->mapping());
+
+    // Fault in both mappings before fork().
+    ASSERT_EQ(read_bytes[0], 'a');
+    ASSERT_EQ(write_bytes[0], 'a');
+
+    auto [parent_wrote, wait_for_parent_write] = test_helper::MakeRendezvous();
+    test_helper::ForkHelper helper;
+    helper.KillChildrenOnDestroy();
+    helper.RunInForkedProcess([&] {
+      wait_for_parent_write.hold();
+      EXPECT_EQ(read_bytes[0], 'a');
+      EXPECT_EQ(write_bytes[0], 'a');
+
+      // Writing to the child's writable MAP_PRIVATE mapping must not affect its
+      // read-only mapping or the parent's mappings.
+      write_bytes[0] = 'c';
+      EXPECT_EQ(read_bytes[0], 'a');
+      EXPECT_EQ(write_bytes[0], 'c');
+    });
+
+    // Write to the writable MAP_PRIVATE mapping in the parent after fork().
+    write_bytes[0] = 'b';
+    parent_wrote.poke();
+
+    ASSERT_TRUE(helper.WaitForChildren());
+    EXPECT_EQ(write_bytes[0], 'b');
+    EXPECT_EQ(read_bytes[0], 'a');
+  }
+
+  char file_byte = 0;
+  ASSERT_THAT(pread(temp_file.fd(), &file_byte, /* count = */ 1, /* offset = */ 0),
+              SyscallSucceedsWithValue(1));
+  EXPECT_EQ(file_byte, 'a');
+}
+
+// Regression test for https://fxbug.dev/297433933: When a single MAP_PRIVATE
+// file mapping is split via mprotect() into a read-only page and a read-write
+// page, forking and writing in the parent must keep both pages isolated in the
+// child.
+TEST(MmapTest, SplitPrivateReadAndWriteFileMappingIsolatedAcrossFork) {
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+  test_helper::ScopedTempFD temp_file;
+  ASSERT_TRUE(temp_file);
+
+  const std::string initial_contents(page_size * 2, 'a');
+  ASSERT_THAT(pwrite(temp_file.fd(), initial_contents.data(), initial_contents.size(),
+                     /* offset = */ 0),
+              SyscallSucceedsWithValue(static_cast<ssize_t>(page_size * 2)));
+
+  // Test both starting with PROT_READ (promoting page 1 to PROT_READ | PROT_WRITE)
+  // and starting with PROT_READ | PROT_WRITE (writing a private copy-on-write
+  // value to page 0 before downgrading it to PROT_READ).
+  for (int initial_prot : {PROT_READ, PROT_READ | PROT_WRITE}) {
+    SCOPED_TRACE(initial_prot == PROT_READ ? "initial_prot=PROT_READ"
+                                           : "initial_prot=PROT_READ|PROT_WRITE");
+
+    auto mapping = test_helper::ScopedMMap::MMap(
+        /* addr = */ nullptr, page_size * 2, initial_prot, MAP_PRIVATE, temp_file.fd(),
+        /* offset = */ 0);
+    ASSERT_THAT(mapping, SyscallResultIsOk());
+
+    char* base = static_cast<char*>(mapping->mapping());
+    volatile char* read_page = base;
+    volatile char* write_page = base + page_size;
+
+    const char expected_read_byte = (initial_prot & PROT_WRITE) ? 'p' : 'a';
+    if (initial_prot == PROT_READ) {
+      ASSERT_THAT(mprotect(base + page_size, page_size, PROT_READ | PROT_WRITE), SyscallSucceeds());
+    } else {
+      // Trigger a private CoW copy before downgrading page 0 to PROT_READ.
+      read_page[0] = expected_read_byte;
+      ASSERT_THAT(mprotect(base, page_size, PROT_READ), SyscallSucceeds());
+    }
+
+    // Fault in both pages before fork().
+    ASSERT_EQ(read_page[0], expected_read_byte);
+    ASSERT_EQ(write_page[0], 'a');
+
+    auto [parent_wrote, wait_for_parent_write] = test_helper::MakeRendezvous();
+    test_helper::ForkHelper helper;
+    helper.KillChildrenOnDestroy();
+    helper.RunInForkedProcess([&] {
+      wait_for_parent_write.hold();
+      EXPECT_EQ(read_page[0], expected_read_byte);
+      EXPECT_EQ(write_page[0], 'a');
+
+      write_page[0] = 'd';
+      EXPECT_EQ(read_page[0], expected_read_byte);
+      EXPECT_EQ(write_page[0], 'd');
+    });
+
+    // Modify the writable page in the parent, and also make page 0 writable in
+    // the parent and modify it, verifying that the child's read-only page 0 is
+    // isolated from post-fork writes in the parent.
+    write_page[0] = 'b';
+    SAFE_SYSCALL(mprotect(base, page_size, PROT_READ | PROT_WRITE));
+    read_page[0] = 'c';
+    parent_wrote.poke();
+
+    ASSERT_TRUE(helper.WaitForChildren());
+    EXPECT_EQ(read_page[0], 'c');
+    EXPECT_EQ(write_page[0], 'b');
+  }
 }
 
 }  // namespace

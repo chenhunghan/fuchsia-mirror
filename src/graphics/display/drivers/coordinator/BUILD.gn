@@ -19,10 +19,13 @@ driver_bind_rules("coordinator_bind") {
   deps = [ "//src/devices/bind/fuchsia" ]
 }
 
+# LINT.IfChange
 fuchsia_component_manifest("coordinator-manifest") {
   component_name = "display-coordinator"
   manifest = "meta/coordinator.cml"
 }
+
+# LINT.ThenChange(BUILD.bazel)
 
 fuchsia_structured_config_cpp_elf_lib("structured-config") {
   cm_label = ":coordinator-manifest"

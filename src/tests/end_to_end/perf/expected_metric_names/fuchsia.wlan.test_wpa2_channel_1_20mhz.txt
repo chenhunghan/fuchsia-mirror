@@ -1,0 +1,3 @@
+[no-summarize-metrics]
+fuchsia.wlan.test_wpa2_channel_1_20mhz: Power
+fuchsia.wlan.test_wpa2_channel_1_20mhz: TotalEnergy

@@ -4,8 +4,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-from __future__ import annotations
-
 import logging
 import os
 import time
@@ -15,8 +13,6 @@ from enum import Enum, StrEnum, auto, unique
 
 import fidl_fuchsia_wlan_policy as f_wlan_policy
 import fuchsia_wlan_base_test
-from antlion import utils
-from antlion.controllers import pdu
 from honeydew.affordances.connectivity.netstack.errors import (
     HoneydewNetstackError,
 )
@@ -27,6 +23,7 @@ from honeydew.affordances.connectivity.wlan.utils.errors import (
 from honeydew.affordances.connectivity.wlan.utils.types import (
     KNOWN_COUNTRY_CODES,
 )
+from legacy_access_point.access_point import AddrType
 from legacy_access_point.ap_lib.hostapd_ap_preset import create_ap_preset
 from legacy_access_point.ap_lib.hostapd_constants import AP_SSID_LENGTH_2G
 from legacy_access_point.ap_lib.hostapd_security import (
@@ -115,7 +112,7 @@ class WlanRebootTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
     Testbed Requirement:
     * One ACTS compatible device (dut)
     * One Whirlwind Access Point
-    * One PduDevice
+    * One PowerSwitch (e.g. DMC or PowerSwitchUsingSynaccess)
     """
 
     async def pre_run(self) -> None:
@@ -183,13 +180,8 @@ class WlanRebootTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
             KNOWN_COUNTRY_CODES["UNITED_STATES_OF_AMERICA"]
         )
 
-        self.pdu_devices = await self.register_controller(
-            pdu,
-            required=False,
-        )
-
         if not self.openwrt_ap and not self.access_point:
-            raise signals.TestAbortClass("Requires at least one access point")
+            raise signals.TestError("Requires at least one access point")
 
     async def setup_test(self) -> None:
         await super().setup_test()
@@ -298,14 +290,11 @@ class WlanRebootTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
                 test_interface = self.access_point.wlan_5g
 
             if ip_version == IpVersionType.IPV4:
-                ap_address = utils.get_addr(
-                    self.access_point.ssh, test_interface
-                )
+                ap_address = self.access_point.get_addr(test_interface)
             elif ip_version == IpVersionType.IPV6:
-                ap_address = utils.get_addr(
-                    self.access_point.ssh,
+                ap_address = self.access_point.get_addr(
                     test_interface,
-                    addr_type="ipv6_link_local",
+                    addr_type=AddrType.ipv6_link_local,
                 )
             else:
                 raise TypeError(f"Invalid IP type: {ip_version}")
@@ -469,7 +458,7 @@ class WlanRebootTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
                         "OpenWrt AP power cycling is not supported. (b/520236968)"
                     )
                 elif self.access_point:
-                    self.access_point.hard_power_cycle(self.pdu_devices)
+                    self.access_point.hard_power_cycle()
             self.log.info(
                 f"Waiting for DUT to disconnect from {ssid} after AP reboot. Will retry for "
                 f"{DUT_NETWORK_CONNECTION_TIMEOUT.total_seconds():.0f} seconds."

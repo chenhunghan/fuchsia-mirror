@@ -194,6 +194,8 @@ pub struct DmlChild {
     pub metadata: Vec<DmlStaticMetadata>,
     pub disabled: Option<bool>,
     pub driver_host: Option<String>,
+    /// Devices with a higher priority are published first. See `Device.publish_priority`.
+    pub publish_priority: Option<u32>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Default)]
@@ -214,7 +216,7 @@ pub struct DmlOffer {
     #[serde(default)]
     pub name: Option<String>,
     #[serde(flatten, default)]
-    pub extra: HashMap<String, Value>,
+    pub extra: serde_json::Map<String, Value>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -255,7 +257,7 @@ pub struct DriverMetadataSchemaDef {
     #[serde(default)]
     pub schema: Option<Value>,
     #[serde(flatten, default)]
-    pub extra: HashMap<String, Value>,
+    pub extra: serde_json::Map<String, Value>,
 }
 
 impl DriverMetadataSchemaDef {
@@ -1465,9 +1467,11 @@ mod tests {
             metadata: vec![],
             disabled: None,
             driver_host: None,
+            publish_priority: None,
         };
         assert_eq!(child_none.disabled, None);
         assert_eq!(child_none.driver_host, None);
+        assert_eq!(child_none.publish_priority, None);
 
         let child_disabled = DmlChild { disabled: Some(true), ..child_none.clone() };
         assert_eq!(child_disabled.disabled, Some(true));
@@ -1480,12 +1484,14 @@ mod tests {
             r##"{
                 name: "parsed_child",
                 disabled: true,
-                driver_host: "#gpio"
+                driver_host: "#gpio",
+                publish_priority: 10
             }"##,
         )
         .unwrap();
         assert_eq!(parsed_disabled.disabled, Some(true));
         assert_eq!(parsed_disabled.driver_host.as_deref(), Some("#gpio"));
+        assert_eq!(parsed_disabled.publish_priority, Some(10));
 
         let parsed_enabled: DmlChild = serde_json5::from_str(
             r#"{

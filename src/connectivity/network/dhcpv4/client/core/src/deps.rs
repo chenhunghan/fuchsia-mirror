@@ -207,11 +207,13 @@ pub(crate) mod testutil {
             let FakeSocket { receiver, sender: _ } = self;
             let mut receiver = receiver.lock().await;
             let (bytes, addr) = receiver.next().await.expect("TestSocket receiver closed");
-            if buf.len() < bytes.len() {
-                panic!("TestSocket receiver would produce short read")
-            }
-            (buf[..bytes.len()]).copy_from_slice(&bytes);
-            Ok(DatagramInfo { length: bytes.len(), address: addr })
+            // Standard POSIX datagram sockets (`AF_PACKET` `SOCK_DGRAM` and
+            // `AF_INET` `SOCK_DGRAM` without `MSG_TRUNC`) silently truncate
+            // datagrams that exceed the caller's buffer and return the number
+            // of bytes copied into `buf`.
+            let copy_len = buf.len().min(bytes.len());
+            (buf[..copy_len]).copy_from_slice(&bytes[..copy_len]);
+            Ok(DatagramInfo { length: copy_len, address: addr })
         }
     }
 
@@ -472,16 +474,17 @@ mod test {
     }
 
     #[fuchsia::test(logging = false)]
-    #[should_panic]
-    async fn test_socket_panics_on_short_read() {
+    async fn test_socket_truncates_oversized_datagram() {
         let (a, b) = FakeSocket::new_pair();
 
         let mut buf = [0u8; 10];
         let message = b"this message is way longer than 10 bytes";
         a.send_to(message, "1.2.3.4:5".to_string()).await.unwrap();
 
-        // Should panic here.
-        let _: Result<_, _> = b.recv_from(&mut buf).await;
+        let DatagramInfo { length, address } = b.recv_from(&mut buf).await.unwrap();
+        assert_eq!(length, buf.len());
+        assert_eq!(&buf[..length], &message[..buf.len()]);
+        assert_eq!(address, "1.2.3.4:5".to_string());
     }
 
     #[fuchsia::test(logging = false)]

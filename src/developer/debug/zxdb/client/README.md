@@ -23,9 +23,9 @@ To initialize the debugger client, create a `Session` on a thread with an active
 ### System
 
 `System` represents global target OS state on the client. It owns the list of
-`Target`, `Breakpoint`, `Filter`, and `SymbolServer` objects. `Session` and
-`System` have a 1:1 relationship (`Session` owns connection state, while
-`System` owns target OS state).
+`Target`, `Breakpoint`, `Filter`, `Tracepoint`, and `SymbolServer` objects.
+`Session` and `System` have a 1:1 relationship (`Session` owns connection
+state, while `System` owns target OS state).
 
 ### Target
 
@@ -78,6 +78,15 @@ owned by `System`.
 
 `Filter` watches for matching process names, job KOIDs, or component
 monikers/URLs and attaches automatically when a match starts.
+
+### Tracepoint
+
+`System` owns all `Tracepoint` objects globally. A tracepoint defines a location
+target (function, file/line, address, or watchpoint) and non-stopping capture
+settings. It configures an internal breakpoint with `StopMode::kNone`. When hit,
+the session captures requested frame state (frame summary, backtrace, registers,
+locals, expressions) and continues execution without a user stop notification
+unless a stopping breakpoint hits at the same address.
 
 ## Thread Control
 
@@ -137,16 +146,23 @@ Public headers expose these client classes and observers:
 - `zxdb::Frame`: Physical or inline stack frame interface (`GetThread`,
   `IsInline`, `GetPhysicalFrame`, `GetLocation`, `GetAddress`, `GetTrust`,
   `GetRegisterCategorySync`, `GetRegisterCategoryAsync`, `WriteRegister`,
-  `GetSymbolDataProvider`, `GetEvalContext`, `GetSourceFileProvider`)
-  (`frame.h`).
+  `GetSymbolDataProvider`, `GetEvalContext`, `GetSourceFileProvider`,
+  `GetLocalVariables`) (`frame.h`).
 - `zxdb::AsyncTask`, `zxdb::AsyncTaskProvider`, `zxdb::AsyncTaskTree`,
-  `zxdb::FuchsiaAsyncRustTaskProvider`: Interfaces and tree container for
-  inspecting async tasks (such as Rust futures) on a `Thread` (`async_task.h`,
-  `async_task_tree.h`).
+  `zxdb::FuchsiaAsyncRustTaskProvider`, `zxdb::FdfDispatcherTaskProvider`:
+  Interfaces and tree container for inspecting async tasks (such as Rust futures
+  and C++ driver dispatcher tasks) on a `Thread` (`async_task.h`,
+  `async_task_provider.h`, `async_task_tree.h`, `fdf_dispatcher_task_provider.h`).
 - `zxdb::Breakpoint`, `zxdb::BreakpointSettings`, `zxdb::BreakpointLocation`,
   `zxdb::BreakpointObserver`, `zxdb::ExecutionScope`: Global and scoped
   breakpoints with per-process `BreakpointLocation` controls (`breakpoint.h`,
   `breakpoint_settings.h`, `breakpoint_location.h`).
+- `zxdb::Tracepoint`, `zxdb::TracepointSpec`, `zxdb::TracepointFrameCapture`,
+  `zxdb::TracepointHitRecord`, `zxdb::TracepointMatchResult`,
+  `zxdb::MatchTracepointFrames`, `zxdb::CaptureThreadBacktrace`,
+  `zxdb::CaptureTracepointFrame`: Non-stopping tracepoint with stateless frame
+  capture and hit counting (`tracepoint.h`, `tracepoint_spec.h`,
+  `tracepoint_capture.h`).
 - `zxdb::Filter`: Process, component, and job attach filter synchronized with
   `debug_agent` (`filter.h`).
 - `zxdb::ThreadController`, `zxdb::StepThreadController`,
@@ -193,6 +209,16 @@ Callers and implementations must preserve these invariants:
   the thread stops if all controllers return `kUnexpected`.
 - `Process` bounds `stdout_` and `stderr_` capture buffers to
   `Process::kMaxIOBufferSize` (1 MiB) using circular deques.
+- `Tracepoint` sets `StopMode::kNone` on its internal `Breakpoint` so execution
+  resumes without user stop notifications unless a stopping breakpoint hits at
+  the same address.
+- `Tracepoint` automatically disables after reaching `max_hits` to prevent
+  runaway target tracing.
+- `AsyncTaskProvider` implementations inspect target executor state through
+  `Frame::GetEvalContext()`, DWARF type definitions, and member resolution
+  helpers instead of hardcoded struct byte offsets. When a caller-saved `this`
+  register is unavailable in an inner stack frame, examine outer candidate
+  frames on the stack.
 
 ## Side Effects
 

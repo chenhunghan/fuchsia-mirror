@@ -118,7 +118,9 @@ Generally, this will cause
 [kernel_zbi_test()](/build/testing/boot_tests/kernel_zbi_test.gni) targets to
 also generate test variants for the specified images (e.g.,
 `path/to/test:test.user` alongside `path/to/test:test.eng`), which can then be
-run via `fx run-boot-test`. The above example is what all bringup builders set.
+run via `fx run-boot-test`. A common list of images is applied based on the
+value of
+[`use_common_extra_kernel_test_images`](/build/testing/boot_tests/kernel_zbi_test.gni).
 
 For core tests in particular, one may run
 `fx core-tests --kernel=$kernel_image_name` to locally run core tests against a
@@ -330,3 +332,6 @@ use <crate_name> as _;
 - **Running Tests**:
   - Run with `fx core-tests --kernel-unittest <suite_name>` or
     `fx run-boot-test core-tests.eng`.
+  - When running from a non-interactive shell (e.g. an agent harness), follow
+    the "Kernel boot tests" section of `//AGENTS.md`: detach stdin, pass
+    `-c kernel.halt-on-panic=false`, and bound the run with `timeout`.

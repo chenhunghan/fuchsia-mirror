@@ -163,10 +163,26 @@ pub trait WavlTreeAugmentedInvariantObserverTraits {
     type Value: Copy + PartialEq;
 
     /// Returns the invariant value for the given node.
-    fn get_node_value(node: &Self::Target) -> Self::Value;
+    ///
+    /// # Safety
+    ///
+    /// The caller must hold whatever synchronization guards the state `node`'s value derives from:
+    /// either `node` is linked into a `WavlTree` the caller has access to (shared or exclusive),
+    /// or is being inserted into a `WavlTree` to which the caller has exclusive access, or the
+    /// caller holds the lock under which that state is written. `WavlTree` upholds this for every
+    /// node it calls `get_node_value` on.
+    unsafe fn get_node_value(node: &Self::Target) -> Self::Value;
 
     /// Returns the invariant value for the given node's subtree.
-    fn get_subtree_value(node: &Self::Target) -> Self::Value;
+    ///
+    /// # Safety
+    ///
+    /// The caller must hold whatever synchronization guards `node`'s subtree invariant storage:
+    /// either `node` is linked into a `WavlTree` the caller has access to (shared or exclusive),
+    /// or is being inserted into a `WavlTree` to which the caller has exclusive access, or the
+    /// caller holds the lock under which that storage is written. `WavlTree` upholds this for
+    /// every node it calls `get_subtree_value` on.
+    unsafe fn get_subtree_value(node: &Self::Target) -> Self::Value;
 
     /// Combines subtree and node invariant values to produce a new subtree invariant value.
     ///
@@ -181,10 +197,22 @@ pub trait WavlTreeAugmentedInvariantObserverTraits {
     fn combine_values(a: Self::Value, b: Self::Value) -> Self::Value;
 
     /// Sets the node's subtree invariant value.
-    fn set_subtree_value(node: &Self::Target, val: Self::Value);
+    ///
+    /// # Safety
+    ///
+    /// The caller must hold exclusive access to the `WavlTree` containing `node`, or into which
+    /// `node` is being inserted (or the synchronization guarding `node`'s subtree invariant
+    /// storage). `WavlTree` upholds this for every node it calls `set_subtree_value` on.
+    unsafe fn set_subtree_value(node: &Self::Target, val: Self::Value);
 
     /// Resets the node's subtree invariant value.
-    fn reset_subtree_value(node: &Self::Target);
+    ///
+    /// # Safety
+    ///
+    /// The caller must hold exclusive access to the `WavlTree` from which `node` is being removed
+    /// (or the synchronization guarding `node`'s subtree invariant storage). `WavlTree` upholds
+    /// this for every node it calls `reset_subtree_value` on.
+    unsafe fn reset_subtree_value(node: &Self::Target);
 }
 
 /// A WAVL tree observer that maintains augmented invariants.
@@ -233,7 +261,8 @@ where
     /// # Safety
     ///
     /// `current` must be null, the sentinel, or a valid pointer to a node linked into the tree
-    /// whose ancestor chain is intact.
+    /// whose ancestor chain is intact, and the caller must have exclusive access to that
+    /// `WavlTree`.
     unsafe fn recompute_until_root(
         &self,
         mut current: *mut Traits::Target,
@@ -243,7 +272,8 @@ where
             // SAFETY: `current` is non-null and non-sentinel, so by the caller's contract it is a
             // valid node in the tree, as is every parent reached from it.
             let current_ref = unsafe { &*current };
-            let node_value = Traits::get_node_value(current_ref);
+            // SAFETY: `current_ref` is linked into this tree, which the caller has access to.
+            let node_value = unsafe { Traits::get_node_value(current_ref) };
             let parent = current_ref.get_node().get_parent();
             // SAFETY: As above.
             let changed = unsafe { self.update_subtree_value(node_value, current) };
@@ -259,7 +289,8 @@ where
     ///
     /// # Safety
     ///
-    /// `node` must be a valid, non-null, non-sentinel pointer to a node linked into the tree.
+    /// `node` must be a valid, non-null, non-sentinel pointer to a node linked into the tree,
+    /// and the caller must have exclusive access to that `WavlTree`.
     unsafe fn update_subtree_value(
         &self,
         mut value: Traits::Value,
@@ -271,22 +302,24 @@ where
 
         let left = ns.get_left();
         if valid_sentinel_ptr(left) {
-            let left_ref = unsafe { &*left };
-            let left_val = Traits::get_subtree_value(left_ref);
+            // SAFETY: `left` is linked into this tree, which the caller has access to.
+            let left_val = unsafe { Traits::get_subtree_value(&*left) };
             value = Traits::combine_values(left_val, value);
         }
 
         let right = ns.get_right();
         if valid_sentinel_ptr(right) {
-            let right_ref = unsafe { &*right };
-            let right_val = Traits::get_subtree_value(right_ref);
+            // SAFETY: `right` is linked into this tree, which the caller has access to.
+            let right_val = unsafe { Traits::get_subtree_value(&*right) };
             value = Traits::combine_values(value, right_val);
         }
 
-        if Traits::get_subtree_value(node_ref) == value {
+        // SAFETY: `node_ref` is linked into this tree, which the caller has exclusive access to.
+        if unsafe { Traits::get_subtree_value(node_ref) } == value {
             return false;
         }
-        Traits::set_subtree_value(node_ref, value);
+        // SAFETY: As above.
+        unsafe { Traits::set_subtree_value(node_ref, value) };
         true
     }
 }
@@ -311,8 +344,10 @@ where
         // been linked into the tree.
         let node_ref = unsafe { &*node };
         let parent = node_ref.get_node().get_parent();
-        let val = Traits::get_node_value(node_ref);
-        Traits::set_subtree_value(node_ref, val);
+        // SAFETY: `node_ref` is linked into this tree, which the caller has exclusive access to.
+        let val = unsafe { Traits::get_node_value(node_ref) };
+        // SAFETY: As above.
+        unsafe { Traits::set_subtree_value(node_ref, val) };
         if valid_sentinel_ptr(parent) {
             // SAFETY: `parent` is a valid node in the tree (non-null, non-sentinel).
             unsafe { self.recompute_until_root(parent, true) };
@@ -334,7 +369,8 @@ where
         // If `node`'s subtree value is unchanged by taking `replacement`'s value, so is every
         // ancestor's, and the walk towards the root can be skipped entirely.
         //
-        // SAFETY: `node` is still a valid node linked into the tree at this point.
+        // SAFETY: `node` is still a valid node linked into this tree and `replacement_ref` is
+        // being inserted into `self`, to which the caller has exclusive access.
         let changed =
             unsafe { self.update_subtree_value(Traits::get_node_value(replacement_ref), node) };
         // SAFETY: As above.
@@ -348,8 +384,12 @@ where
 
         // SAFETY: `WavlTree` passes a valid, non-null, non-sentinel node pointer.
         let node_ref = unsafe { &*node };
-        Traits::set_subtree_value(replacement_ref, Traits::get_subtree_value(node_ref));
-        Traits::reset_subtree_value(node_ref);
+        // SAFETY: `node_ref` and `replacement_ref` are the replaced and replacement nodes in this
+        // tree, which the caller has exclusive access to.
+        unsafe {
+            Traits::set_subtree_value(replacement_ref, Traits::get_subtree_value(node_ref));
+            Traits::reset_subtree_value(node_ref);
+        }
     }
 
     fn record_rotation(
@@ -360,8 +400,11 @@ where
         parent: *mut Self::Target,
         sibling: *mut Self::Target,
     ) {
+        // SAFETY: `parent` is a valid node linked into this tree, which the caller has exclusive
+        // access to.
         let parent_ref = unsafe { &*parent };
-        let parent_subtree_val = Traits::get_subtree_value(parent_ref);
+        // SAFETY: As above.
+        let parent_subtree_val = unsafe { Traits::get_subtree_value(parent_ref) };
         let parent_ns = parent_ref.get_node();
 
         // Determine rotation direction before links are updated.
@@ -375,25 +418,31 @@ where
             (lr_child, sibling)
         };
 
-        let mut parent_value = Traits::get_node_value(parent_ref);
+        // SAFETY: `parent_ref` is linked into this tree, which the caller has exclusive access to.
+        let mut parent_value = unsafe { Traits::get_node_value(parent_ref) };
 
         if valid_sentinel_ptr(left_child) {
-            let left_ref = unsafe { &*left_child };
-            let left_val = Traits::get_subtree_value(left_ref);
+            // SAFETY: `left_child` is linked into this tree, which the caller has exclusive access
+            // to.
+            let left_val = unsafe { Traits::get_subtree_value(&*left_child) };
             parent_value = Traits::combine_values(left_val, parent_value);
         }
 
         if valid_sentinel_ptr(right_child) {
-            let right_ref = unsafe { &*right_child };
-            let right_val = Traits::get_subtree_value(right_ref);
+            // SAFETY: `right_child` is linked into this tree, which the caller has exclusive
+            // access to.
+            let right_val = unsafe { Traits::get_subtree_value(&*right_child) };
             parent_value = Traits::combine_values(parent_value, right_val);
         }
 
         // SAFETY: `WavlTree` passes a valid, non-null, non-sentinel pivot pointer.
         let pivot_ref = unsafe { &*pivot };
-        Traits::set_subtree_value(pivot_ref, parent_subtree_val);
-
-        Traits::set_subtree_value(parent_ref, parent_value);
+        // SAFETY: `pivot_ref` and `parent_ref` are linked into this tree, which the caller has
+        // exclusive access to.
+        unsafe {
+            Traits::set_subtree_value(pivot_ref, parent_subtree_val);
+            Traits::set_subtree_value(parent_ref, parent_value);
+        }
     }
 
     fn record_erase(&self, node: *mut Self::Target, invalidated: *mut Self::Target) {
@@ -406,7 +455,9 @@ where
         }
         // SAFETY: `WavlTree` passes a valid, non-null, non-sentinel node pointer.
         let node_ref = unsafe { &*node };
-        Traits::reset_subtree_value(node_ref);
+        // SAFETY: `node_ref` is the node being erased from this tree, which the caller has
+        // exclusive access to.
+        unsafe { Traits::reset_subtree_value(node_ref) };
     }
 }
 
@@ -624,7 +675,14 @@ pub trait WavlTreeKeyable<K: ?Sized> {
         Self: 'a;
 
     /// Returns the key of this object.
-    fn get_key(&self) -> Self::Key<'_>;
+    ///
+    /// # Safety
+    ///
+    /// The caller must hold whatever synchronization guards `self`'s key: either `self` is linked
+    /// into a `WavlTree` the caller has access to (shared or exclusive), or is being inserted into
+    /// a `WavlTree` to which the caller has exclusive access, or the caller holds the lock under
+    /// which the key is written. `WavlTree` upholds this for every node it calls `get_key` on.
+    unsafe fn get_key(&self) -> Self::Key<'_>;
 }
 
 #[allow(dead_code)]
@@ -1562,6 +1620,8 @@ where
                 return Ok(());
             }
 
+            // SAFETY: `raw` is being inserted into `self`, to which the caller has exclusive
+            // access.
             let key = (*raw).get_key();
             let key_borrow = key.borrow();
             let mut is_left_most = true;
@@ -1570,6 +1630,8 @@ where
             let mut owner: *mut *mut P::Target;
 
             loop {
+                // SAFETY: `parent` is linked into this tree, which the caller has exclusive access
+                // to.
                 let parent_key = (*parent).get_key();
                 let parent_key_borrow = parent_key.borrow();
                 self.observer.record_insert_traverse(raw, parent);
@@ -1744,6 +1806,8 @@ where
             debug_assert!(!old_node.is_null());
             let new_raw = P::into_raw(new_node);
             debug_assert!(!new_raw.is_null());
+            // SAFETY: `old_node` is linked into this tree and `new_raw` is being inserted into
+            // `self`, to which the caller has exclusive access.
             debug_assert!((*old_node).get_key().borrow() == (*new_raw).get_key().borrow());
 
             let old_ns = Self::get_node_ref(old_node);
@@ -1878,7 +1942,8 @@ where
     /// # Safety
     ///
     /// The caller must ensure that `ptr` is a valid pointer to a `T` and that the object outlives
-    /// the reference from the tree.
+    /// the reference from the tree. The caller must also uphold the synchronization preconditions
+    /// of `WavlTreeKeyable` and `O` for `ptr` while it resides in the tree.
     pub unsafe fn insert_raw(&mut self, ptr: P) {
         let mut collision = core::ptr::null_mut();
         // SAFETY: The caller guarantees `ptr` is valid and outlives the tree registration.
@@ -1912,7 +1977,8 @@ where
     /// # Safety
     ///
     /// The caller must ensure that `ptr` is a valid pointer to a `T` and that the object outlives
-    /// the reference from the tree.
+    /// the reference from the tree. The caller must also uphold the synchronization preconditions
+    /// of `WavlTreeKeyable` and `O` for `ptr` while it resides in the tree.
     pub unsafe fn insert_or_find_raw<'a>(
         &'a mut self,
         ptr: P,
@@ -1961,7 +2027,8 @@ where
     /// # Safety
     ///
     /// The caller must ensure that `ptr` is a valid pointer to a `T` and that the object outlives
-    /// the reference from the tree.
+    /// the reference from the tree. The caller must also uphold the synchronization preconditions
+    /// of `WavlTreeKeyable` and `O` for `ptr` while it resides in the tree.
     pub unsafe fn insert_or_replace_raw(&mut self, ptr: P) -> Option<P> {
         let mut collision = core::ptr::null_mut();
         // SAFETY: The caller guarantees `ptr` is valid and outlives the tree registration.
@@ -2082,6 +2149,7 @@ where
         unsafe {
             let mut node = self.root;
             while valid_sentinel_ptr(node) {
+                // SAFETY: `node` is linked into this tree, which the caller has access to.
                 let node_key = (*node).get_key();
                 let b = node_key.borrow();
                 if key == b {
@@ -2108,6 +2176,7 @@ where
             let mut found = self.get_sentinel();
 
             while valid_sentinel_ptr(node) {
+                // SAFETY: `node` is linked into this tree, which the caller has access to.
                 let node_key = (*node).get_key();
                 let b = node_key.borrow();
                 let is_eligible = if strictly_greater { b > key } else { b >= key };
@@ -2865,7 +2934,7 @@ mod tests {
 
     impl WavlTreeKeyable<i32> for TestObject {
         type Key<'a> = i32;
-        fn get_key(&self) -> i32 {
+        unsafe fn get_key(&self) -> i32 {
             self.value
         }
     }
@@ -2909,7 +2978,7 @@ mod tests {
 
     impl WavlTreeKeyable<i32> for UniqueTestObject {
         type Key<'a> = i32;
-        fn get_key(&self) -> i32 {
+        unsafe fn get_key(&self) -> i32 {
             self.value
         }
     }
@@ -2931,7 +3000,7 @@ mod tests {
 
     impl WavlTreeKeyable<i32> for RefTestObject {
         type Key<'a> = i32;
-        fn get_key(&self) -> i32 {
+        unsafe fn get_key(&self) -> i32 {
             self.value
         }
     }
@@ -3394,7 +3463,7 @@ mod tests {
 
     impl WavlTreeKeyable<i32> for MultiTreeObject {
         type Key<'a> = i32;
-        fn get_key(&self) -> i32 {
+        unsafe fn get_key(&self) -> i32 {
             self.value
         }
     }
@@ -3541,7 +3610,7 @@ mod tests {
 
     impl WavlTreeKeyable<u64> for BalanceTestObj {
         type Key<'a> = u64;
-        fn get_key(&self) -> u64 {
+        unsafe fn get_key(&self) -> u64 {
             self.key
         }
     }
@@ -4437,7 +4506,7 @@ mod tests {
 
     impl WavlTreeKeyable<LargeKey> for TestRefKeyObject {
         type Key<'a> = &'a LargeKey;
-        fn get_key(&self) -> &LargeKey {
+        unsafe fn get_key(&self) -> &LargeKey {
             &self.key
         }
     }
@@ -4486,7 +4555,7 @@ mod tests {
 
     impl WavlTreeKeyable<i32> for TestAugmentedObject {
         type Key<'a> = i32;
-        fn get_key(&self) -> i32 {
+        unsafe fn get_key(&self) -> i32 {
             self.value
         }
     }
@@ -4496,11 +4565,11 @@ mod tests {
         type Target = TestAugmentedObject;
         type Value = i32;
 
-        fn get_node_value(node: &Self::Target) -> Self::Value {
+        unsafe fn get_node_value(node: &Self::Target) -> Self::Value {
             node.value
         }
 
-        fn get_subtree_value(node: &Self::Target) -> Self::Value {
+        unsafe fn get_subtree_value(node: &Self::Target) -> Self::Value {
             node.subtree_sum.get()
         }
 
@@ -4508,11 +4577,11 @@ mod tests {
             a + b
         }
 
-        fn set_subtree_value(node: &Self::Target, val: Self::Value) {
+        unsafe fn set_subtree_value(node: &Self::Target, val: Self::Value) {
             node.subtree_sum.set(val);
         }
 
-        fn reset_subtree_value(node: &Self::Target) {
+        unsafe fn reset_subtree_value(node: &Self::Target) {
             node.subtree_sum.set(0);
         }
     }
@@ -4629,7 +4698,7 @@ mod tests {
 
     impl WavlTreeKeyable<i32> for TestNonCommutativeObject {
         type Key<'a> = i32;
-        fn get_key(&self) -> i32 {
+        unsafe fn get_key(&self) -> i32 {
             self.value
         }
     }
@@ -4639,11 +4708,11 @@ mod tests {
         type Target = TestNonCommutativeObject;
         type Value = NonCommutativeVal;
 
-        fn get_node_value(node: &Self::Target) -> Self::Value {
+        unsafe fn get_node_value(node: &Self::Target) -> Self::Value {
             NonCommutativeVal::single(node.value)
         }
 
-        fn get_subtree_value(node: &Self::Target) -> Self::Value {
+        unsafe fn get_subtree_value(node: &Self::Target) -> Self::Value {
             node.subtree_val.get()
         }
 
@@ -4651,11 +4720,11 @@ mod tests {
             NonCommutativeVal::combine(a, b)
         }
 
-        fn set_subtree_value(node: &Self::Target, val: Self::Value) {
+        unsafe fn set_subtree_value(node: &Self::Target, val: Self::Value) {
             node.subtree_val.set(val);
         }
 
-        fn reset_subtree_value(node: &Self::Target) {
+        unsafe fn reset_subtree_value(node: &Self::Target) {
             node.subtree_val.set(NonCommutativeVal::default());
         }
     }

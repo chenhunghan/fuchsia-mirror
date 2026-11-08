@@ -14,6 +14,7 @@ const (
 	FlexibleUnionUnknownField          ErrorCode = "FLEXIBLE_UNION_UNKNOWN_FIELD"
 	IncorrectHandleType                ErrorCode = "INCORRECT_HANDLE_TYPE"
 	InvalidBoolean                     ErrorCode = "INVALID_BOOLEAN"
+	InvalidNonZero                     ErrorCode = "INVALID_NON_ZERO"
 	InvalidEmptyStruct                 ErrorCode = "INVALID_EMPTY_STRUCT"
 	InvalidHandlePresenceIndicator     ErrorCode = "INVALID_HANDLE_PRESENCE_INDICATOR"
 	InvalidInlineBitInEnvelope         ErrorCode = "INVALID_INLINE_BIT_IN_ENVELOPE"
@@ -52,6 +53,7 @@ var AllErrorCodes = map[ErrorCode]struct{}{
 	FlexibleUnionUnknownField:          {},
 	IncorrectHandleType:                {},
 	InvalidBoolean:                     {},
+	InvalidNonZero:                     {},
 	InvalidEmptyStruct:                 {},
 	InvalidHandlePresenceIndicator:     {},
 	InvalidInlineBitInEnvelope:         {},

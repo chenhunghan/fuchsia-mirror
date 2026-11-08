@@ -24,6 +24,7 @@ kernel_rust_mod("backtrace-rs") {
   deps = [
     ":backtrace",
     "//src/lib/zr",
+    "//zircon/kernel/lib/libc:rust",
     "//zircon/kernel/lib/object-constants:object-constants-rs",
   ]
 }
@@ -51,6 +52,7 @@ group("tests") {
 
 group("kernel-tests") {
   testonly = true
+  deps = [ "tests" ]
 }
 
 group("phys-tests") {

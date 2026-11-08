@@ -2,9 +2,20 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/components:fx_component.bzl", "fx_component_manifest", "fx_test_component")
 load("//build/bazel/rules/idk:idk_cc_source_library.bzl", "idk_cc_source_library")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":sys_service_tests"],
+    visibility = ["//sdk/lib:__pkg__"],
+)
 
 idk_cc_source_library(
     name = "cpp",
@@ -31,7 +42,6 @@ idk_cc_source_library(
     stable = True,
     target_compatible_with = ["@platforms//os:fuchsia"],
     visibility = [
-        "//build/sdk:__pkg__",
         "//sdk/lib/driver/power/cpp:__pkg__",
         "//sdk/lib/sys/cpp:__pkg__",
         "//src/devices/bus/drivers/platform/test/power-integration-test:__pkg__",
@@ -45,4 +55,67 @@ idk_cc_source_library(
         "//sdk/lib/fdio",
         "//zircon/system/ulib/zx",
     ],
+)
+
+# TODO(https://fxbug.dev/570694755): bazel2gn maps @com_google_googletest//:gtest to //third_party/googletest:gtest, while GN requires //third_party/googletest:gmock.
+# @bazel2gn:skip
+alias(
+    name = "gmock",
+    actual = "@com_google_googletest//:gtest",
+)
+
+fx_cc_test_binary(
+    name = "sys_service_unittests",
+    srcs = [
+        "service_aggregate_test.cc",
+        "service_handler_test.cc",
+        "service_test.cc",
+        "test_base.h",
+    ],
+    deps = [
+        ":cpp",
+        # Ensures GN links gmock to satisfy include dependencies.
+        ":gmock",  # @bazel2gn:path_overwrite://third_party/googletest:gmock
+        "//examples/fidl/fuchsia.examples:fuchsia.examples_hlcpp",
+        "//sdk/lib/async-testing",
+        "//sdk/lib/sys/cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//zircon/system/ulib/fbl",
+    ],
+)
+
+fx_packaged_binary(
+    name = "sys_service_unittests_packaged",
+    testonly = True,
+    binary = ":sys_service_unittests",
+    binary_name = "sys_service_unittests",
+)
+
+fx_component_manifest(
+    name = "sys_service_tests_manifest",
+    testonly = True,
+    component_name = "sys_service_tests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "//sdk/lib/sys/service:meta/sys_service_unittests.cml",
+)
+
+fx_test_component(
+    name = "sys_service_tests_component",
+    compiled_manifest = ":sys_service_tests_manifest",
+    deps = [":sys_service_unittests_packaged"],
+)
+
+fx_package(
+    name = "sys_service_tests_pkg",
+    package_name = "sys_service_tests",
+    testonly = True,
+    test_components = [":sys_service_tests_component"],
+)
+
+fx_test(
+    name = "sys_service_tests",
+    package = ":sys_service_tests_pkg",
 )

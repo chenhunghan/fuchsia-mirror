@@ -14,7 +14,6 @@ fidl_library(
     api_area = "Diagnostics",
     # TODO: https://fxbug.dev/307580082 - This protocol is under construction.
     visibility = [
-        "//sdk/fidl:__pkg__",
         "//src/developer/ffx/plugins/profile/memory:__subpackages__",
         "//src/performance/memory:__subpackages__",
     ],

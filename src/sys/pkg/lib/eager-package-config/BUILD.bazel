@@ -88,7 +88,6 @@ fx_component_manifest(
 fx_test_component(
     name = "eager-package-config-lib-tests-component",
     compiled_manifest = ":eager-package-config-lib-tests-manifest",
-    component_name = "eager-package-config-lib-tests",
     deps = [":eager-package-config_test_packaged_bin"],
 )
 

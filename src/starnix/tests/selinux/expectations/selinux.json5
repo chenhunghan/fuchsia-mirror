@@ -149,6 +149,12 @@
                 "inet_socket/udp/011",
                 "inet_socket/udp/013",
 
+                // See https://fxbug.dev/582388854: `SIOCGIFNAME` with `ifr_ifindex == 0` fails with
+                // `EINVAL` instead of `ENODEV`.
+                "ioctl/008",
+                "ioctl/011",
+                "ioctl/018",
+
                 // See https://fxbug.dev/398696734: Starnix doesn't support AF_KEY socket
                 // operations. Must pass if/when implemented.
                 "key_socket/001",

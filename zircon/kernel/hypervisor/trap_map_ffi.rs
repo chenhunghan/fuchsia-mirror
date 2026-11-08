@@ -5,63 +5,28 @@
 // https://opensource.org/licenses/MIT
 
 use core::ffi::{c_char, c_void};
-use core::ptr::NonNull;
 use fbl::RefPtr;
 use pin_init::PinInit;
 use zx_status::Status;
 use zx_types::{ZX_OK, zx_gpaddr_t, zx_port_packet_t, zx_status_t};
 
-use crate::object::{PortDispatcher, PortPacket};
+use crate::object::PortDispatcher;
 
 use super::state_invalidator::StateInvalidator;
-use super::trap_map::{BlockingPortAllocator, PortPacketArena, RustPortAllocator, Trap, TrapMap};
+use super::trap_map::{PortPacketArena, Trap, TrapMap};
 
 #[allow(improper_ctypes)]
 unsafe extern "C" {
-    pub(super) fn cpp_rust_port_allocator_init(allocator: *mut RustPortAllocator);
     pub(super) fn cpp_port_packet_arena_init(arena: *mut PortPacketArena);
     pub(super) fn cpp_port_packet_arena_destroy(arena: *mut PortPacketArena);
     pub(super) fn cpp_port_packet_arena_init_pool(
         arena: *mut PortPacketArena,
         name: *const c_char,
+        ob_size: usize,
         max_count: usize,
     ) -> zx_status_t;
-    pub(super) fn cpp_port_packet_arena_new(
-        arena: *mut PortPacketArena,
-        handle: *const c_void,
-        allocator: *mut RustPortAllocator,
-    ) -> *mut PortPacket;
-    pub(super) fn cpp_port_packet_arena_delete(
-        arena: *mut PortPacketArena,
-        port_packet: *mut PortPacket,
-    );
-}
-
-/// Allocates a `PortPacket` from the arena for C++ `PortAllocator::Alloc` callers.
-#[allow(improper_ctypes_definitions)]
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_blocking_port_allocator_alloc(
-    allocator: &BlockingPortAllocator,
-) -> *mut PortPacket {
-    allocator.alloc().map_or(core::ptr::null_mut(), NonNull::as_ptr)
-}
-
-/// Frees a `PortPacket` back to the arena and posts to the semaphore for C++ `PortAllocator::Free`
-/// callers.
-///
-/// # Safety
-///
-/// `port_packet` must have been previously allocated from `allocator` and not yet freed.
-#[allow(improper_ctypes_definitions)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_blocking_port_allocator_free(
-    allocator: &BlockingPortAllocator,
-    port_packet: NonNull<PortPacket>,
-) {
-    // SAFETY: Guaranteed by caller.
-    unsafe {
-        allocator.free(port_packet);
-    }
+    pub(super) fn cpp_port_packet_arena_alloc(arena: *mut PortPacketArena) -> *mut c_void;
+    pub(super) fn cpp_port_packet_arena_free(arena: *mut PortPacketArena, port_packet: *mut c_void);
 }
 
 /// Queues `packet` on a `Trap`'s port for C++ callers.

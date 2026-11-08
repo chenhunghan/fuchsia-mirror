@@ -1,0 +1,59 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "uart_fpl",
+    srcs = [
+        "src/error.rs",
+        "src/frame.rs",
+        "src/handshake.rs",
+        "src/lib.rs",
+        "src/parser.rs",
+        "src/resend_sp.rs",
+        "src/window.rs",
+    ],
+    edition = "2024",
+    visibility = [
+        "//src/developer/ffx/tests/uart:__pkg__",
+        "//src/developer/ffx/tools/uart:__pkg__",
+        "//src/developer/ffx/tools/uart_driver/impl:__pkg__",
+        "//src/developer/lib:__pkg__",
+        "//src/developer/remote-control/fdomain-uart-driver:__pkg__",
+    ],
+    deps = [
+        "//third_party/rust_crates/vendor:crc32fast",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)
+
+rustc_test(
+    name = "uart_fpl_test",
+    crate = ":uart_fpl",
+    deps = ["//src/lib/fuchsia"],
+)
+
+wrap_host_rust_test(
+    name = "uart_fpl_host_test",
+    binary_name = "uart_fpl_test",
+    visibility = ["//src/developer:__pkg__"],
+)
+
+fx_unittest_package(
+    name = "uart-fpl-target-tests",
+    # Unit tests validate panic conditions for invalid ResendSender arguments
+    # (zero window size, excessive window size, zero max attempts) via
+    # #[should_panic].
+    max_log_severity = "ERROR",
+    unit_tests = [":uart_fpl_test"],
+)

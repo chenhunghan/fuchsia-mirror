@@ -11,6 +11,7 @@ use once_cell::sync::OnceCell;
 use starnix_core::mm::ProtectionFlags;
 use starnix_core::mm::memory::MemoryObject;
 use starnix_core::task::CurrentTask;
+use starnix_core::vfs::pipe::Pipe;
 use starnix_core::vfs::{
     CacheMode, DEFAULT_BYTES_PER_BLOCK, DirEntry, DirectoryEntryType, DirentSink, FileObject,
     FileOps, FileSystem, FileSystemHandle, FileSystemOps, FileSystemOptions, FsNode, FsNodeFlags,
@@ -89,14 +90,16 @@ impl ExtFilesystem {
         let pager =
             Arc::new(Pager::new(pager_vmo, parser.block_size().map_err(|e| errno!(EIO, e))?)?);
         let fs = Self { parser, pager };
-        let ops = ExtDirectory { inner: Arc::new(ExtNode::new(&fs, ROOT_INODE_NUM)?) };
+        let root_node = ExtNode::new(&fs, ROOT_INODE_NUM)?;
+        let root_info = fs_node_info_from_ext_node(&root_node);
+        let ops = ExtDirectory { inner: Arc::new(root_node) };
         let fs = FileSystem::new(
             current_task.kernel(),
             CacheMode::Cached(current_task.kernel().fs_cache_config()),
             fs,
             options,
         )?;
-        fs.create_root(ROOT_INODE_NUM as ino_t, ops);
+        fs.create_root_with_info(ROOT_INODE_NUM as ino_t, ops, root_info);
         Ok(fs)
     }
 }
@@ -157,19 +160,12 @@ impl FsNodeOps for ExtDirectory {
             .iter()
             .find(|e| e.name_bytes() == name)
             .ok_or_else(|| errno!(ENOENT, name))?;
-        let ext_node = ExtNode::new(fs_ops, entry.e2d_ino.into())?;
-        let inode_num = ext_node.inode_num as ino_t;
+        let raw_inode_num: u32 = entry.e2d_ino.into();
+        let inode_num = raw_inode_num as ino_t;
         fs.get_or_create_node(inode_num, || {
+            let ext_node = ExtNode::new(fs_ops, raw_inode_num)?;
             let entry_type = EntryType::from_u8(entry.e2d_type).map_err(|e| errno!(EIO, e))?;
-            let mode = FileMode::from_bits(ext_node.inode.e2di_mode.into());
-
-            let uid = get_uid_from_node(&ext_node);
-            let gid = get_gid_from_node(&ext_node);
-            let owner = FsCred { uid, gid };
-
-            let size = get_size_from_node(&ext_node, &mode);
-            let blocks = get_blocks_from_node(&ext_node);
-            let nlink = ext_node.inode.e2di_nlink.into();
+            let info = fs_node_info_from_ext_node(&ext_node);
 
             let ops: Box<dyn FsNodeOps> = match entry_type {
                 EntryType::RegularFile => Box::new(ExtFile::new(ext_node, name.to_owned())),
@@ -197,22 +193,23 @@ impl FsNodeOps for ExtDirectory {
                 }
             };
 
-            let child = FsNode::new_uncached(
-                inode_num,
-                ops,
-                &fs,
-                FsNodeInfo { mode, uid: owner.uid, gid: owner.gid, ..Default::default() },
-                FsNodeFlags::empty(),
-            );
-            child.update_info(|info| {
-                info.size = size as usize;
-                info.link_count = nlink;
-                info.blksize = DEFAULT_BYTES_PER_BLOCK;
-                info.blocks = blocks as usize;
-            });
+            let child = FsNode::new_uncached(inode_num, ops, &fs, info, FsNodeFlags::empty());
             Ok(child)
         })
     }
+}
+
+fn fs_node_info_from_ext_node(ext_node: &ExtNode) -> FsNodeInfo {
+    let mode = FileMode::from_bits(ext_node.inode.e2di_mode.into());
+    let uid = get_uid_from_node(ext_node);
+    let gid = get_gid_from_node(ext_node);
+    let owner = FsCred { uid, gid };
+    let mut info = FsNodeInfo::new(mode, owner);
+    info.size = get_size_from_node(ext_node, &mode) as usize;
+    info.blocks = get_blocks_from_node(ext_node) as usize;
+    info.blksize = DEFAULT_BYTES_PER_BLOCK;
+    info.link_count = ext_node.inode.e2di_nlink.into();
+    info
 }
 
 fn merge_low_high_16(low: u32, high: u32) -> u32 {
@@ -261,6 +258,11 @@ struct ExtFile {
     memory: OnceCell<Arc<MemoryObject>>,
 }
 
+fn strip_write_right(vmo: zx::Vmo) -> Result<zx::Vmo, Errno> {
+    let info = vmo.basic_info().map_err(impossible_error)?;
+    vmo.replace_handle(info.rights - zx::Rights::WRITE).map_err(impossible_error)
+}
+
 impl ExtFile {
     fn new(inner: ExtNode, name: FsString) -> Self {
         ExtFile { inner, name, memory: OnceCell::new() }
@@ -274,9 +276,12 @@ impl FsNodeOps for ExtFile {
     fn create_file_ops(
         &self,
         node: &FsNode,
-        _current_task: &CurrentTask,
-        _flags: OpenFlags,
+        current_task: &CurrentTask,
+        flags: OpenFlags,
     ) -> Result<Box<dyn FileOps>, Errno> {
+        if node.is_fifo() {
+            return Pipe::open(current_task, node.fifo(current_task), flags);
+        }
         let fs = node.fs();
         let fs_ops = fs.downcast_ops::<ExtFilesystem>().unwrap();
         let inode_num = self.inner.inode_num;
@@ -296,15 +301,13 @@ impl FsNodeOps for ExtFile {
                 last_block = pager_extent.logical.end;
                 pager_extents.push(pager_extent);
             }
-            Ok(Arc::new(MemoryObject::from(
-                fs_ops
-                    .pager
-                    .register(self.name.as_ref(), inode_num, file_size, &pager_extents)
-                    .map_err(|e| errno!(EINVAL, e))?,
-            )))
+            let vmo = fs_ops
+                .pager
+                .register(self.name.as_ref(), inode_num, file_size, &pager_extents)
+                .map_err(|e| errno!(EINVAL, e))?;
+            Ok(Arc::new(MemoryObject::from(strip_write_right(vmo)?)))
         })?;
 
-        // TODO(https://fxbug.dev/42080696) returned memory shouldn't be writeable
         Ok(Box::new(MemoryRegularFile::new(memory.clone())))
     }
 }
@@ -447,5 +450,25 @@ mod tests {
         inode.e2di_nblock_high = LE16::new(0x3);
         let node = create_test_ext_node(inode);
         assert_eq!(get_blocks_from_node(&node), (0x3 << 32) | 0xABCDE);
+    }
+
+    #[test]
+    fn test_ext_file_memory_strips_write_right() {
+        let vmo = zx::Vmo::create(4096).expect("failed to create VMO");
+        vmo.write(b"hello", 0).expect("failed to write initial contents");
+        let memory =
+            MemoryObject::from(strip_write_right(vmo).expect("failed to strip write right"));
+
+        assert!(
+            !memory.get_rights().contains(zx::Rights::WRITE),
+            "ExtFile memory must not retain WRITE right: {:?}",
+            memory.get_rights()
+        );
+        let vmo = memory.as_vmo().expect("expected VMO-backed MemoryObject");
+        assert_eq!(vmo.write(b"mutate", 0), Err(zx::Status::ACCESS_DENIED));
+
+        let mut buf = [0u8; 5];
+        vmo.read(&mut buf, 0).expect("reading from ExtFile VMO should succeed");
+        assert_eq!(&buf, b"hello");
     }
 }

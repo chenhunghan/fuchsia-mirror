@@ -929,6 +929,96 @@ def _pkg_prefix(pkg: str, parts_count: int = 3) -> str:
     return "//" + "/".join(parts[:parts_count])
 
 
+def _pkg_area(pkg: str) -> str:
+    """Returns the subsystem area key of `pkg` per `scoping_changelists.md`.
+
+    - Any package containing `third_party/<proj>` is scoped to its third-party
+      project prefix (`//.../third_party/<proj>`) so third-party packages are
+      never combined with first-party packages or other third-party projects.
+    - First-party packages under `src`, `sdk`, `tools`, or `zircon` use their
+      2-segment area prefix (`//src/<area>`, `//sdk/lib`, `//sdk/fidl`, etc.).
+    """
+    parts = [p for p in pkg.strip("/").split("/") if p]
+    if not parts:
+        return "//"
+    if "third_party" in parts:
+        tp_idx = parts.index("third_party")
+        return "//" + "/".join(parts[: tp_idx + 2])
+    if parts[0] in ("src", "sdk", "tools", "zircon") and len(parts) >= 2:
+        return f"//{parts[0]}/{parts[1]}"
+    return f"//{parts[0]}"
+
+
+def _is_direct_test_subdir(pkg_a: str, pkg_b: str) -> bool:
+    """True when one package is the direct `/tests` or `/test` subdir of the other."""
+    a = pkg_a.rstrip("/")
+    b = pkg_b.rstrip("/")
+    return a in (f"{b}/tests", f"{b}/test") or b in (f"{a}/tests", f"{a}/test")
+
+
+def _classify_pkg_target_category(
+    pkg: str,
+    tlist: list[str],
+    all_gn_info: dict[str, dict[str, Any]] | None,
+) -> str:
+    """Classifies `pkg`'s primary target category per `scoping_changelists.md` Section 3."""
+    if not all_gn_info:
+        if pkg.startswith("//sdk/fidl/"):
+            return "fidl"
+        if pkg.startswith("//tools/"):
+            return "host_tool"
+        return "unknown"
+    non_test_rules = set()
+    test_rules = set()
+    for t in tlist:
+        info = all_gn_info.get(t, {})
+        rt = info.get("rule_type", "")
+        if not rt or rt == "group":
+            continue
+        if info.get("is_test", False) or rt in GN_TEST_RULE_TYPES:
+            test_rules.add(rt)
+        else:
+            non_test_rules.add(rt)
+    if not non_test_rules:
+        return (
+            "test"
+            if test_rules or pkg.endswith(("/tests", "/test"))
+            else "unknown"
+        )
+    if "fidl" in non_test_rules:
+        return "fidl"
+    if non_test_rules & {"install_host_tools", "compiled_action"}:
+        return "host_tool"
+    if non_test_rules & {
+        "rustc_library",
+        "rustc_binary",
+        "rustc_proc_macro",
+        "rustc_macro",
+        "rustc_staticlib",
+        "rustc_dylib",
+        "ffx_plugin",
+        "ffx_tool",
+        "rustc_library_with_features",
+    }:
+        return "rust"
+    if non_test_rules & {
+        "source_set",
+        "static_library",
+        "shared_library",
+        "executable",
+        "sdk_source_set",
+        "sdk_static_library",
+        "sdk_shared_library",
+        "zx_library",
+    }:
+        return "cc"
+    if non_test_rules & {"go_library", "go_binary"}:
+        return "go"
+    if non_test_rules & {"python_library", "python_binary"}:
+        return "python"
+    return sorted(non_test_rules)[0]
+
+
 def _format_cl_summary(batch_pkgs: list[str]) -> str:
     """Formats a short human-readable summary of package paths for a CL header."""
     short_names = []
@@ -946,6 +1036,7 @@ def plan_stacked_cls(
     statuses: dict[str, tuple[str, str]],
     wave_of: dict[str, int],
     max_pkgs_per_cl: int = 5,
+    all_gn_info: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[
     list[tuple[str, list[str]]],
     list[tuple[str, list[str]]],
@@ -954,7 +1045,7 @@ def plan_stacked_cls(
 ]:
     """Groups unmigrated targets by BUILD.gn package and packs packages into
     reviewable stacked CLs (up to max_pkgs_per_cl packages per CL) in strict
-    topological order, partitioned into:
+    topological order and consistent with scoping_changelists.md, partitioned into:
       - Phase A: Unblocked In-Tree Targets (can land immediately)
       - Phase B: Hard Blockers & Blocked Downstream Stack (packed in a single
         topological pass so blockers and blocked targets respect true dependency order)
@@ -1001,24 +1092,149 @@ def plan_stacked_cls(
                 blocked_set.add(p)
                 frontier.append(p)
     pkg_blocked: dict[str, bool] = {p: p in blocked_set for p in pkg_targets}
+    pkg_category: dict[str, str] = {
+        p: _classify_pkg_target_category(p, tlist, all_gn_info)
+        for p, tlist in pkg_targets.items()
+    }
+
+    def can_group_in_cl(candidate: str, current_batch: list[str]) -> bool:
+        """True if `candidate` can be grouped into `current_batch` per `scoping_changelists.md`."""
+        b0 = current_batch[0]
+        # 1. Same subsystem area (and third_party project isolation)
+        if _pkg_area(candidate) != _pkg_area(b0):
+            return False
+        # 2. Direct test subdirectory (Pattern 2.D) is compatible with its root package
+        if any(
+            _is_direct_test_subdir(candidate, bp) for bp in current_batch
+        ) and (
+            len(current_batch) == 1
+            or all(
+                bp == b0 or bp.startswith(b0.rstrip("/") + "/")
+                for bp in current_batch
+            )
+        ):
+            return True
+        is_subdir_path = any(
+            candidate.startswith(bp.rstrip("/") + "/")
+            or bp.startswith(candidate.rstrip("/") + "/")
+            for bp in current_batch
+        )
+        is_tp_bindings_subdir = (
+            "third_party" in candidate.strip("/").split("/") and is_subdir_path
+        )
+        is_subdir_rel = is_subdir_path and (
+            is_tp_bindings_subdir
+            or any(
+                (
+                    candidate.startswith(bp.rstrip("/") + "/")
+                    or bp.startswith(candidate.rstrip("/") + "/")
+                )
+                and (
+                    bp in pkg_edges.get(candidate, set())
+                    or candidate in pkg_edges.get(bp, set())
+                )
+                for bp in current_batch
+            )
+        )
+        # 3. Same target type category (do not mix FIDL, host tools, C++, Rust, etc.)
+        cand_cat = pkg_category.get(candidate, "unknown")
+        batch_cats = {
+            pkg_category.get(bp, "unknown")
+            for bp in current_batch
+            if pkg_category.get(bp, "unknown") not in ("unknown", "test")
+        }
+        if (
+            not is_tp_bindings_subdir
+            and cand_cat not in ("unknown", "test")
+            and batch_cats
+            and cand_cat not in batch_cats
+        ):
+            return False
+
+        # 4. Single cohesive grouping pattern (scoping_changelists.md Section 2):
+        #    - Pattern 2.B: root target + helper subdirectory
+        #    - Pattern 2.A: target + sole in-scope consumer
+        def _has_test_subpkg(p: str) -> bool:
+            return any(
+                _is_direct_test_subdir(other_p, p) for other_p in pkg_targets
+            )
+
+        is_sole_consumer = len(current_batch) == 1 and any(
+            (
+                reverse_pkg_edges.get(bp, set()) == {candidate}
+                and not _has_test_subpkg(bp)
+                and not _has_test_subpkg(candidate)
+            )
+            or (
+                reverse_pkg_edges.get(candidate, set()) == {bp}
+                and not _has_test_subpkg(candidate)
+                and not _has_test_subpkg(bp)
+            )
+            for bp in current_batch
+        )
+        has_dep_edge = bool(
+            (pkg_edges[candidate] & set(current_batch))
+            or any(candidate in pkg_edges[bp] for bp in current_batch)
+        )
+        batch_has_internal_dep = any(
+            bool(pkg_edges[bp] & set(current_batch))
+            and not any(
+                _is_direct_test_subdir(bp, o)
+                for o in (pkg_edges[bp] & set(current_batch))
+            )
+            for bp in current_batch
+        )
+        if is_subdir_rel or is_sole_consumer:
+            return not (
+                len(current_batch) >= 2
+                and not batch_has_internal_dep
+                and not any(
+                    bp.startswith(b0.rstrip("/") + "/")
+                    or b0.startswith(bp.rstrip("/") + "/")
+                    or _is_direct_test_subdir(bp, b0)
+                    for bp in current_batch[1:]
+                )
+            )
+        # Pattern 2.C: cohesive sibling libraries under the same parent
+        # directory without mixing dependency chains or root+child/test groups
+        parent_dir = os.path.dirname(b0.rstrip("/"))
+        same_parent = os.path.dirname(
+            candidate.rstrip("/")
+        ) == parent_dir and all(
+            os.path.dirname(bp.rstrip("/")) == parent_dir
+            for bp in current_batch[1:]
+        )
+        same_known_cat = (cand_cat in batch_cats) or (
+            cand_cat == "test"
+            and all(pkg_category.get(bp) == "test" for bp in current_batch)
+        )
+        if (
+            is_subdir_path
+            or has_dep_edge
+            or batch_has_internal_dep
+            or not same_parent
+            or not same_known_cat
+        ):
+            return False
+        return True
 
     def affinity_score(
         candidate: str, current_batch: list[str]
-    ) -> tuple[int, int, int, int, str]:
-        """Scores how closely `candidate` belongs in the same CL as `current_batch`.
-
-        Returns a 5-tuple (lower is better):
-          1. `same_p3`: 0 if `candidate` shares a 3-segment directory prefix with `batch[0]`.
-          2. `direct_chain`: 0 if `candidate` directly depends on a package in `current_batch`.
-          3. `same_p2`: 0 if `candidate` shares a 2-segment directory prefix with `batch[0]`.
-          4. `len(pkg_edges[candidate])`: prefers simpler packages with fewer cross-pkg deps.
-          5. `candidate`: lexicographical tie-breaker for determinism.
-        """
+    ) -> tuple[int, int, int, int, int, str]:
+        """Scores how closely `candidate` belongs in the same CL as `current_batch`."""
         b0 = current_batch[0]
+        is_test_sub = (
+            0
+            if any(
+                _is_direct_test_subdir(candidate, bp) for bp in current_batch
+            )
+            else 1
+        )
         same_p3 = 0 if _pkg_prefix(candidate, 3) == _pkg_prefix(b0, 3) else 1
         direct_chain = 0 if (pkg_edges[candidate] & set(current_batch)) else 1
         same_p2 = 0 if _pkg_prefix(candidate, 2) == _pkg_prefix(b0, 2) else 1
         return (
+            is_test_sub,
             same_p3,
             direct_chain,
             same_p2,
@@ -1076,6 +1292,7 @@ def plan_stacked_cls(
                     for p in remaining
                     if p not in batch
                     and pkg_edges[p].issubset(done | set(batch))
+                    and can_group_in_cl(p, batch)
                 ]
                 # If `batch` has an unresolved package-level cycle with another
                 # package in `remaining`, allow pulling that cycle partner into
@@ -1098,21 +1315,13 @@ def plan_stacked_cls(
                     break
                 candidates.sort(key=lambda p: affinity_score(p, batch))
                 best = candidates[0]
-                # Once a batch already contains >= 3 packages, stop adding
-                # unrelated subsystems that neither share a 2-segment prefix
-                # nor directly depend on packages in the current batch.
-                if (
-                    len(batch) >= 3
-                    and _pkg_prefix(best, 2) != _pkg_prefix(batch[0], 2)
-                    and not (pkg_edges[best] & set(batch))
-                ):
-                    break
                 batch.append(best)
             batches.append(batch)
             done.update(batch)
             remaining -= set(batch)
 
-        # Merge any 1-package batch into the preceding batch if topological order and max_pkgs allow
+        # Merge any 1-package batch into the preceding batch if topological order,
+        # scoping_changelists.md grouping rules, and max_pkgs allow.
         merged: list[list[str]] = []
         done_so_far = set(already_done)
         for b in batches:
@@ -1123,6 +1332,7 @@ def plan_stacked_cls(
                 and pkg_edges[b[0]].issubset(done_so_far)
                 and classify_batch_kind(b, phase_label)
                 == classify_batch_kind(merged[-1], phase_label)
+                and can_group_in_cl(b[0], merged[-1])
             ):
                 merged[-1].append(b[0])
             else:
@@ -1330,7 +1540,11 @@ def main() -> int:
 
     # Section 3: Explicit CL-by-CL Migration Order (Targets in Same Step Packed into Same CL)
     phase_a_cls, phase_b_cls, cl_pkg_targets, cl_pkg_edges = plan_stacked_cls(
-        edges, statuses, wave_of, max_pkgs_per_cl=5
+        edges,
+        statuses,
+        wave_of,
+        max_pkgs_per_cl=5,
+        all_gn_info=all_gn_info,
     )
     all_cls = phase_a_cls + phase_b_cls
     pkg_to_cl: dict[str, int] = {}
@@ -1368,6 +1582,22 @@ def main() -> int:
                     req_str = f" *(requires {', '.join(f'CL {c}' for c in prior_cls)})*"
                 else:
                     req_str = " *(leaf CL, no prior CL required)*"
+                if (
+                    len(batch_pkgs) == 2
+                    and (
+                        batch_pkgs[0] in cl_pkg_edges.get(batch_pkgs[1], set())
+                        or batch_pkgs[1]
+                        in cl_pkg_edges.get(batch_pkgs[0], set())
+                    )
+                    and not _is_direct_test_subdir(batch_pkgs[0], batch_pkgs[1])
+                    and not batch_pkgs[0].startswith(
+                        batch_pkgs[1].rstrip("/") + "/"
+                    )
+                    and not batch_pkgs[1].startswith(
+                        batch_pkgs[0].rstrip("/") + "/"
+                    )
+                ):
+                    req_str += " *(verify sole GN consumer via `fx gn refs` before grouping)*"
                 if forward_cls:
                     req_str += (
                         f" *(package-level cycle with {', '.join(f'CL {c}' for c in forward_cls)}; "

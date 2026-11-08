@@ -1,0 +1,53 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_binary(
+    name = "setui_accessibility_bin",
+    testonly = True,
+    srcs = ["setui_accessibility.cc"],
+    gn_output_name = "setui_accessibility",
+    tags = ["manual"],
+    deps = [
+        "//sdk/fidl/fuchsia.settings:fuchsia.settings_hlcpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/sys/cpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "setui_accessibility_bin_packaged",
+    testonly = True,
+    binary = ":setui_accessibility_bin",
+    binary_name = "setui_accessibility",
+)
+
+fx_component_manifest(
+    name = "setui_accessibility_manifest",
+    testonly = True,
+    component_name = "setui_accessibility",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/setui_accessibility.cml",
+)
+
+fx_component(
+    name = "setui_accessibility",
+    testonly = True,
+    compiled_manifest = ":setui_accessibility_manifest",
+    visibility = ["//src/ui/testing/ui_test_realm:__pkg__"],
+    deps = [":setui_accessibility_bin_packaged"],
+)

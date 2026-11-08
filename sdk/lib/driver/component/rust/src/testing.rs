@@ -6,7 +6,10 @@
 
 mod dut;
 pub mod harness;
+pub mod health;
 pub mod node;
+
+pub use health::*;
 
 use crate::{Driver, server};
 use fidl::endpoints::{RequestStream, ServerEnd};

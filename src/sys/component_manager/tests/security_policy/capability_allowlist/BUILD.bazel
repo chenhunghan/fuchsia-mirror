@@ -1,0 +1,231 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load("//build/component:config.bzl", "component_config")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "security_policy_capability_allowlist_integration_test_bin",
+    srcs = ["security_policy_capability_allowlist_integration_test.rs"],
+    crate_name = "security_policy_capability_allowlist_integration_test",
+    crate_root = "security_policy_capability_allowlist_integration_test.rs",
+    edition = "2024",
+    deps = [
+        ":test.policy_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/sys/component_manager/tests/security_policy/util:security_policy_test_util",
+        "//third_party/rust_crates/vendor:anyhow",
+    ],
+)
+
+fx_packaged_binary(
+    name = "security_policy_capability_allowlist_integration_test_packaged_bin",
+    testonly = True,
+    binary = ":security_policy_capability_allowlist_integration_test_bin",
+    binary_name = "security_policy_capability_allowlist_integration_test",
+)
+
+fidl_library(
+    name = "test.policy",
+    testonly = True,
+    srcs = ["policy.test.fidl"],
+    # TODO(https://fxbug.dev/381096879): Fix lint warnings and remove.
+    excluded_checks = ["string-bounds-not-specified"],
+    deps = ["//zircon/vdso/zx"],
+)
+
+rustc_binary(
+    name = "policy_service_bin",
+    testonly = True,
+    srcs = ["policy_service.rs"],
+    crate_root = "policy_service.rs",
+    edition = "2024",
+    deps = [
+        ":test.policy_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "policy_service_packaged_bin",
+    testonly = True,
+    binary = ":policy_service_bin",
+    binary_name = "policy_service_bin",
+)
+
+rustc_binary(
+    name = "dir_service_bin",
+    testonly = True,
+    srcs = ["dir_service.rs"],
+    crate_root = "dir_service.rs",
+    edition = "2024",
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/storage/lib/vfs/rust:vfs",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "dir_service_packaged_bin",
+    testonly = True,
+    binary = ":dir_service_bin",
+    binary_name = "dir_service_bin",
+)
+
+rustc_binary(
+    name = "cap_getter_bin",
+    testonly = True,
+    srcs = ["cap_getter.rs"],
+    crate_root = "cap_getter.rs",
+    edition = "2024",
+    deps = [
+        ":test.policy_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//src/lib/fdio/rust:fdio",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "cap_getter_packaged_bin",
+    testonly = True,
+    binary = ":cap_getter_bin",
+    binary_name = "cap_getter_bin",
+)
+
+component_config(
+    name = "cm_config",
+    testonly = True,
+    srcs = ["cm_config.json5"],
+)
+
+fx_component_manifest(
+    name = "test_root-manifest",
+    testonly = True,
+    component_name = "test_root",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:offer.shard",
+        "//src/sys/component_manager/tests:meta/elf_runner_and_environment.shard",
+    ],
+    manifest = "meta/test_root.cml",
+)
+
+fx_component(
+    name = "test_root",
+    testonly = True,
+    compiled_manifest = ":test_root-manifest",
+)
+
+fx_component_manifest(
+    name = "policy_service-manifest",
+    testonly = True,
+    component_name = "policy_service",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/policy_service.cml",
+)
+
+fx_component(
+    name = "policy_service",
+    testonly = True,
+    compiled_manifest = ":policy_service-manifest",
+    deps = [":policy_service_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "dir_service-manifest",
+    testonly = True,
+    component_name = "dir_service",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/dir_service.cml",
+)
+
+fx_component(
+    name = "dir_service",
+    testonly = True,
+    compiled_manifest = ":dir_service-manifest",
+    deps = [":dir_service_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "cap_getter-manifest",
+    testonly = True,
+    component_name = "cap_getter",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/cap_getter.cml",
+)
+
+fx_component(
+    name = "cap_getter",
+    testonly = True,
+    compiled_manifest = ":cap_getter-manifest",
+    deps = [":cap_getter_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "security-policy-capability-allowlist-integration-test-manifest",
+    testonly = True,
+    component_name = "security-policy-capability-allowlist-integration-test",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/component_manager/tests/security_policy:meta/test.shard.cml",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/security-policy-capability-allowlist-integration-test.cml",
+)
+
+fx_test_component(
+    name = "security-policy-capability-allowlist-integration-test-component",
+    compiled_manifest = ":security-policy-capability-allowlist-integration-test-manifest",
+    deps = [":security_policy_capability_allowlist_integration_test_packaged_bin"],
+)
+
+fx_package(
+    name = "security-policy-capability-allowlist-integration-test-package",
+    package_name = "security-policy-capability-allowlist-integration-test",
+    components = [
+        ":cap_getter",
+        ":dir_service",
+        ":policy_service",
+        ":test_root",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+        "//src/sys/component_manager/tests/security_policy:cm_for_test",
+    ],
+    resources = [":cm_config"],
+    test_components = [":security-policy-capability-allowlist-integration-test-component"],
+)
+
+fx_test(
+    name = "security-policy-capability-allowlist-integration-test",
+    package = ":security-policy-capability-allowlist-integration-test-package",
+    visibility = ["//src/sys/component_manager:__pkg__"],
+)

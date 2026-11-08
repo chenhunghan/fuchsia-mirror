@@ -72,9 +72,6 @@ class JournalWriter {
   fpromise::result<void, zx_status_t> WriteMetadata(JournalWorkItem work,
                                                     std::optional<JournalWorkItem> trim_work);
 
-  // Trims |operations| immediately.
-  fpromise::result<void, zx_status_t> TrimData(std::vector<storage::BufferedOperation> operations);
-
   // Synchronizes the most up-to-date info block back to disk.
   //
   // Returns ZX_ERR_IO_REFUSED if writeback is disabled.

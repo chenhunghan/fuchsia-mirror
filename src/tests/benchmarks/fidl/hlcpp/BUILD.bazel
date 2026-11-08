@@ -1,0 +1,114 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load(
+    "//src/tests/benchmarks/fidl/benchmark_suite:benchmark_suite.bzl",
+    "BENCHMARK_SUITES",
+)
+load("//tools/fidl/gidl:gidl.bzl", "gidl_hlcpp_benchmarks")
+
+package(default_applicable_licenses = ["//:license"])
+
+# LINT.IfChange
+fx_cc_library(
+    name = "benchmark_util",
+    testonly = True,
+    hdrs = [
+        "builder_benchmark_util.h",
+        "coding_table.h",
+        "decode_benchmark_util.h",
+        "echo_call_benchmark_util.h",
+        "encode_benchmark_util.h",
+        "send_event_benchmark_util.h",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//sdk/ctf/tests/pkg/fidl/cpp:handle_util",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/fidl",
+        "//zircon/system/ulib/perftest",
+        "//zircon/system/ulib/sync:sync-cpp",
+    ],
+    alwayslink = True,
+)
+
+_GIDL_DEPS = [
+    ":benchmark_suite__%s" % suite["name"]
+    for suite in BENCHMARK_SUITES
+]
+
+[
+    gidl_hlcpp_benchmarks(
+        name = "benchmark_suite__%s" % suite["name"],
+        testonly = True,
+        extra_args = [
+            "-cpp-benchmarks-fidl-library",
+            suite["fidl_library_suffix"],
+        ],
+        fidl = suite["fidl_target"],
+        inputs = suite["gidl"],
+        target_compatible_with = ["@platforms//os:fuchsia"],
+        visibility = ["//visibility:private"],
+        deps = [":benchmark_util"],
+    )
+    for suite in BENCHMARK_SUITES
+]
+
+fx_cc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["main.cc"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//sdk/lib/fidl",
+        "//src/zircon/lib/zircon",
+        "//zircon/system/ulib/perftest",
+    ] + _GIDL_DEPS,
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "hlcpp_fidl_microbenchmarks",
+    visibility = ["//visibility:private"],
+)
+
+fx_component_manifest(
+    name = "benchmark_manifest",
+    testonly = True,
+    component_name = "benchmark",
+    includes = ["//src/tests/benchmarks/fidl:meta/benchmark.shard"],
+    manifest = "meta/benchmark.cml",
+    visibility = ["//visibility:private"],
+)
+
+fx_component(
+    name = "benchmark",
+    testonly = True,
+    compiled_manifest = ":benchmark_manifest",
+    visibility = ["//visibility:private"],
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "fidl_microbenchmarks_hlcpp",
+    package_name = "fidl_microbenchmarks_hlcpp",
+    testonly = True,
+    components = [":benchmark"],
+    visibility = ["//src/tests/benchmarks:__subpackages__"],
+)
+# LINT.ThenChange(//src/tests/benchmarks/fidl/hlcpp/BUILD.gn)

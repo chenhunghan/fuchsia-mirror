@@ -101,6 +101,7 @@ python_host_test("trace_importing_test") {
 
 python_host_test("trace_importing_fxt_test") {
   main_source = "trace_importing_fxt_test.py"
+  sources = [ "test_utils.py" ]
   libraries = [ "//src/performance/lib/trace_processing" ]
   deps = [ ":trace_importing_test_data" ]
 }

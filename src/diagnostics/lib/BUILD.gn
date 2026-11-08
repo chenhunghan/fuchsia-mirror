@@ -7,6 +7,8 @@ group("tests") {
   deps = [
     "inspect-fetcher:tests",
     "log-command:tests",
+    "redactor:tests",
+    "redactor_client:tests",
     "sampler-config:tests",
     "triage:tests",
     "util:tests",

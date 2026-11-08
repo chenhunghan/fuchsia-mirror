@@ -26,4 +26,17 @@
 		iommus = <&stub_iommu TEST_BTI_ID2>;
 		iommu-names = TEST_BTI_ID2_NAME;
 	};
+
+	arm_smmu: iommu@100000000 {
+		compatible = "arm,smmu-v3";
+		reg = <TEST_ARM_SMMU_REG_HIGH TEST_ARM_SMMU_REG_LOW 0x0 0x80000>;
+		#iommu-cells = <2>;
+		phandle = <TEST_ARM_SMMU_PHANDLE>;
+	};
+
+	sample-bti-device3 {
+		compatible = "fuchsia,sample-bti-device";
+		iommus = <&arm_smmu TEST_BTI_ID3 TEST_BTI_MASK3>;
+		iommu-names = TEST_BTI_ID3_NAME;
+	};
 };

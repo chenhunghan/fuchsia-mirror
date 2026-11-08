@@ -2,14 +2,28 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules/rust:defs.bzl", "rustc_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
 
 package(default_applicable_licenses = ["//:license"])
 
 rustc_binary(
     name = "fake-system-update-committer-bin",
     srcs = ["src/main.rs"],
-    crate_name = "fake_system_update_committer",  # @bazel2gn:raw_overwrite:"fake-system-update-committer"
+    binary_name = "fake-system-update-committer",
     edition = "2024",
     lint_config = "//build/config/rust/lints:clippy_warn_all",
     visibility = ["//visibility:private"],
@@ -21,4 +35,44 @@ rustc_binary(
         "//third_party/rust_crates/vendor:anyhow",
         "//third_party/rust_crates/vendor:futures",
     ],
+)
+
+fx_packaged_binary(
+    name = "fake-system-update-committer-bin_packaged_bin",
+    binary = ":fake-system-update-committer-bin",
+    binary_name = "fake-system-update-committer",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "fake-system-update-committer",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/fake-system-update-committer.cml",
+)
+
+fx_component(
+    name = "fake-system-update-committer",
+    compiled_manifest = ":manifest",
+    visibility = [
+        "//src/sys/pkg/lib/isolated-swd:__pkg__",
+        "//src/sys/pkg/tests/isolated-ota:__pkg__",
+    ],
+    deps = [":fake-system-update-committer-bin_packaged_bin"],
+)
+
+rustc_test(
+    name = "fake-system-update-committer-bin_test",
+    crate = ":fake-system-update-committer-bin",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    deps = [
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+    ],
+)
+
+fx_unittest_package(
+    name = "fake-system-update-committer-tests",
+    unit_tests = [":fake-system-update-committer-bin_test"],
 )

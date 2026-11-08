@@ -2,14 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-
-fuchsia_component("fake-channel-control") {
-  component_name = "fake-channel-control"
-  manifest = "meta/fake-channel-control.cml"
-  deps = [ ":bin" ]
-}
-
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
 #
 #  ________  _________  ________  ________
@@ -49,4 +41,20 @@ rustc_binary("bin") {
     "//third_party/rust_crates:anyhow",
     "//third_party/rust_crates:futures",
   ]
+}
+
+fuchsia_component_manifest("fake-channel-control-manifest") {
+  component_name = "fake-channel-control"
+  manifest = "meta/fake-channel-control.cml"
+}
+
+fuchsia_component("fake-channel-control") {
+  cm_label = ":fake-channel-control-manifest"
+  visibility = [
+    ":*",
+    "//src/cobalt/bin/testapp:*",
+    "//src/sys/pkg/bin/omaha-client:*",
+    "//src/sys/pkg/lib/omaha-client-fuchsia:*",
+  ]
+  deps = [ ":bin" ]
 }

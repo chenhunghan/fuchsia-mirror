@@ -70,7 +70,7 @@ class Change:
         self.status_string: str = json.get("status", "UNKNOWN")
 
     @classmethod
-    def from_json(cls, json: Any) -> "Change":
+    def from_json(cls, json: Any) -> Change:
         return Change(json["change_id"], json=json)
 
     def labels(self) -> Dict[str, Any]:

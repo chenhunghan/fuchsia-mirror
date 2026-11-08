@@ -58,7 +58,7 @@ def _fuchsia_component_common_impl(ctx):
     if ctx.attr.test_realm and not ctx.attr.is_test:
         fail("`test_realm` can only be set for test components (`is_test = True`).")
 
-    component_name = ctx.attr.component_name or ctx.attr.compiled_manifest[FuchsiaComponentManifestInfo].component_name
+    component_name = ctx.attr.compiled_manifest[FuchsiaComponentManifestInfo].component_name
     manifest = ctx.attr.compiled_manifest[FuchsiaComponentManifestInfo].compiled_manifest
 
     resources = []
@@ -127,14 +127,6 @@ number of dependencies which will be included in the final package.
             doc = "The `fuchsia_component_manifest` target.",
             providers = [FuchsiaComponentManifestInfo],
             mandatory = True,
-        ),
-        "component_name": attr.string(
-            doc = """The name of the component.
-
-            This value will override the component name value in the `compiled_manifest`.
-            Defaults to the basename of the `compiled_manifest` file.
-            """,
-            mandatory = False,
         ),
         "is_driver": attr.bool(
             doc = """True if this is a driver component.

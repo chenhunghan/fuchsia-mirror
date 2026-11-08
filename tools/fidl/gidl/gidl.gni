@@ -5,6 +5,8 @@
 import("//build/compiled_action.gni")
 import("//build/fidl/toolchain.gni")
 
+# LINT.IfChange
+
 # Declares a GIDL library.
 #
 # This target generates binding specific tests or benchmarks from GIDL inputs.
@@ -89,7 +91,7 @@ template("_gidl_cc_source_set") {
     fidl_bindings = fidl_bindings + invoker.bindings_suffix
   }
 
-  output_filename = "${target_gen_dir}/gidl_generated_${target_name}.cc"
+  output_filename = "${target_gen_dir}/${target_name}_gidl_generated.cc"
 
   gidl_target = "${target_name}_gidl"
 
@@ -206,6 +208,9 @@ template("gidl_driver_cpp_benchmarks") {
   _gidl_cc_source_set(target_name) {
     type = "benchmark"
     language = "driver_cpp"
+
+    # In GN, the `_cpp` target includes driver headers, whereas Bazel uses
+    # `_cpp_driver_headers`.
     bindings_suffix = "_cpp"
     forward_variables_from(invoker, "*")
   }
@@ -215,6 +220,9 @@ template("gidl_driver_llcpp_benchmarks") {
   _gidl_cc_source_set(target_name) {
     type = "benchmark"
     language = "driver_llcpp"
+
+    # In GN, the `_cpp` target includes driver headers, whereas Bazel uses
+    # `_cpp_driver_headers`.
     bindings_suffix = "_cpp"
     forward_variables_from(invoker, "*")
 
@@ -223,3 +231,4 @@ template("gidl_driver_llcpp_benchmarks") {
     configs = [ "//build/cpp:fidl-wire-deprecated-mutable-tables" ]
   }
 }
+# LINT.ThenChange(//tools/fidl/gidl/gidl.bzl)

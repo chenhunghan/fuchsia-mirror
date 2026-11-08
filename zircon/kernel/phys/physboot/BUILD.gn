@@ -1,0 +1,154 @@
+# Copyright 2026 The Fuchsia Authors
+#
+# Use of this source code is governed by a MIT-style
+# license that can be found in the LICENSE file or at
+# https://opensource.org/licenses/MIT
+
+import("//build/config/compiler_config.gni")
+import("//build/dist/generated_resource.gni")
+import("//build/testing/boot_tests/boot_test.gni")
+import("//build/testing/boot_tests/zbi_test.gni")
+import("//build/zbi/kernel_cmdline.gni")
+import("//build/zbi/zbi.gni")
+import("//build/zircon/zircon_cpu.gni")
+import("//zircon/kernel/kernel_package.gni")
+import("//zircon/kernel/phys/kernel_elf_binary.gni")
+import("//zircon/kernel/phys/kernel_elf_interp.gni")
+import("//zircon/kernel/phys/zbi_executable.gni")
+
+zbi_executable("physboot") {
+  sources = [
+    "${zircon_cpu}-before-init-memory.cc",
+    "zbi-main.cc",
+  ]
+  include_dirs = [
+    "//zircon/kernel/arch/$zircon_cpu/include",
+    "//zircon/kernel/phys",
+  ]
+  deps = [
+    "..:address-space",
+    "..:address-space-map",
+    "..:allocation",
+    "..:elf-image",
+    "..:stdio",
+    "..:symbolize",
+    "../boot-zbi",
+    "../handoff",
+    "../handoff-prep",
+    "../kernel-package",
+    "../log",
+    "../runtime",
+    "../uart",
+    "//sdk/lib/fit",
+    "//src/lib/elfldltl",
+    "//src/lib/zbitl",
+    "//zircon/kernel/arch/$zircon_cpu/code-patches",
+    "//zircon/kernel/lib/arch",
+    "//zircon/kernel/lib/boot-options",
+    "//zircon/kernel/lib/code-patching",
+    "//zircon/kernel/lib/ktl",
+    "//zircon/kernel/lib/libc",
+    "//zircon/system/ulib/zircon-internal",
+  ]
+
+  # Defines the maximum support kernel image size.
+  configs += [ "//zircon/kernel/switch:kernel_image_max_size" ]
+}
+
+if (is_kernel) {
+  # A physboot-compatible ELF kernel depends on this.
+  source_set("physboot.kernel") {
+    public_deps = [ "../handoff" ]
+    public_configs = [ ":physboot.kernel.config" ]
+    deps = [ ":physboot.interp" ]
+  }
+
+  compiler_config("physboot.kernel.config") {
+    visibility = [ ":*" ]
+    linker_flags = [
+      # The <phys/handoff/zircon-abi-spec.h> data structure is used in lieu of
+      # the entry point. physboot will actually jump to *kZirconAbiSpec.entry.
+      "--entry=kZirconAbiSpec",
+    ]
+  }
+}
+
+kernel_elf_interp("physboot.interp") {
+  visibility = [ ":*" ]
+  deps = [ ":physboot($phys_toolchain)" ]
+}
+
+kernel_elf_binary("physboot-hello-world-test") {
+  testonly = true
+  install_name = "vmzircon"
+  sources = [ "physboot-hello-world-test.cc" ]
+  defines = [
+    "HANDOFF_PTR_DEREF=1",
+    "BOOT_TEST_SUCCESS_STRING=\"$boot_test_success_string\"",
+  ]
+
+  deps = [
+    ":physboot.kernel",
+    "..:address-space",
+    "../handoff",
+    "//zircon/kernel/lib/boot-options",
+    "//zircon/kernel/lib/code-patching:self-test",
+    "//zircon/system/ulib/uart",
+  ]
+
+  # This can't use even the phys printf, which the custom ubsan runtime uses.
+  exclude_toolchain_tags = [ "ubsan" ]
+}
+
+kernel_package("physboot-test-data") {
+  visibility = [ ":*" ]
+  testonly = true
+
+  deps = [
+    ":physboot-hello-world-test($phys_toolchain)",
+    ":physboot-test-data.cmdline",
+    ":physboot-test-data.version-string",
+
+    # These won't actually be used by the test kernel, but physboot will panic
+    # if it can't hand off loadable ELF files for vdso and userboot.
+    "//zircon/kernel/lib/userabi/trivial-test-userboot:trivial-test-userboot.basic",
+    "//zircon/kernel/lib/userabi/vdso",
+  ]
+}
+
+kernel_cmdline("physboot-test-data.cmdline") {
+  visibility = [ ":*" ]
+  testonly = true
+
+  args = [
+    "kernel.select=physboot-test-data",
+    "kernel.select.userboot=trivial-test-userboot-with-very-long-name-needing-truncation",
+  ]
+}
+
+generated_resource("physboot-test-data.version-string") {
+  visibility = [ ":*" ]
+  testonly = true
+
+  outputs = [ "version-string.txt" ]
+  contents = "fake-version-for-test"
+}
+
+zbi("physboot-test-data.zbi") {
+  visibility = [ ":*" ]
+  testonly = true
+
+  deps = [
+    ":physboot",
+    ":physboot-test-data($phys_toolchain)",
+  ]
+}
+
+zbi_test("physboot-test") {
+  deps = [ ":physboot-test-data.zbi" ]
+}
+
+group("tests") {
+  testonly = true
+  deps = [ ":physboot-test" ]
+}

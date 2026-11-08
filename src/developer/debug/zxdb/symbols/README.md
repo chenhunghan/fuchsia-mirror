@@ -51,7 +51,9 @@ Public headers expose these symbol classes, factories, and evaluators:
   `zxdb::DwarfDieScanner`, `zxdb::ElfSymbol`, `zxdb::Index`, and
   `zxdb::IndexNode`. Also exposes `zxdb::Identifier`, `zxdb::Location`,
   `zxdb::InputLocation`, `zxdb::LineTable`, `zxdb::LineDetails`,
-  `zxdb::VariableLocation`, and `zxdb::VisitScopes`.
+  `zxdb::VariableLocation`, `zxdb::VisitScopes`, and symbol name helpers in
+  `symbol_utils.h` (`zxdb::GetSymbolScopePrefix`, `zxdb::NameHasTemplate`,
+  `zxdb::StripTemplate`, `zxdb::AddTemplateParameterToName`).
 
 ## Invariants
 
@@ -67,6 +69,10 @@ Callers and implementations must preserve these invariants:
 - `SymbolFactory::CreateSymbol()`, `LazySymbol::Get()`, and
   `UncachedLazySymbol::Get()` never return `nullptr`. On failure or unloaded
   modules, they return an empty `Symbol` with `DwarfTag::kNone`.
+  `UncachedLazySymbol::Get()` constructs a new `fxl::RefPtr<Symbol>` on each
+  call. Store the `fxl::RefPtr<Symbol>` in a local variable before you call
+  `Symbol::As<Derived>()`. When you walk `Symbol::parent()` chains, verify
+  `is_valid()` or `tag() != DwarfTag::kNone`.
 - `Symbol`, `CodeBlock`, and `ModuleSymbols` store module-relative addresses.
   Pass a `SymbolContext` bound to a loaded module's base address to convert to
   or from absolute process addresses.

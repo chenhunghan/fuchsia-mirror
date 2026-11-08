@@ -9,7 +9,7 @@
         },
         {
             name: "netstack",
-            url: "netstack#meta/netstack3-debug.cm",
+            url: "netstack-debug#meta/netstack3-debug.cm",
         },
     ],
     offer: [

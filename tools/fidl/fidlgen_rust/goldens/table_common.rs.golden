@@ -512,15 +512,15 @@ mod internal {
             let mut next_offset = offset;
             let end_offset = offset + bytes_len;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 1 {
+            while _next_ordinal_to_read < 1 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -555,15 +555,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 5 {
+            while _next_ordinal_to_read < 5 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -598,15 +598,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 6 {
+            while _next_ordinal_to_read < 6 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -765,15 +765,15 @@ mod internal {
             let mut next_offset = offset;
             let end_offset = offset + bytes_len;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 1 {
+            while _next_ordinal_to_read < 1 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -984,15 +984,15 @@ mod internal {
             let mut next_offset = offset;
             let end_offset = offset + bytes_len;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 1 {
+            while _next_ordinal_to_read < 1 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -1027,15 +1027,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 2 {
+            while _next_ordinal_to_read < 2 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -1070,15 +1070,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 3 {
+            while _next_ordinal_to_read < 3 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -1263,15 +1263,15 @@ mod internal {
             let mut next_offset = offset;
             let end_offset = offset + bytes_len;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 1 {
+            while _next_ordinal_to_read < 1 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -1306,15 +1306,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 5 {
+            while _next_ordinal_to_read < 5 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -3111,15 +3111,15 @@ mod internal {
             let mut next_offset = offset;
             let end_offset = offset + bytes_len;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 1 {
+            while _next_ordinal_to_read < 1 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -3154,15 +3154,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 2 {
+            while _next_ordinal_to_read < 2 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -3197,15 +3197,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 3 {
+            while _next_ordinal_to_read < 3 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -3240,15 +3240,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 4 {
+            while _next_ordinal_to_read < 4 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -3283,15 +3283,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 5 {
+            while _next_ordinal_to_read < 5 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -3326,15 +3326,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 6 {
+            while _next_ordinal_to_read < 6 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -3369,15 +3369,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 7 {
+            while _next_ordinal_to_read < 7 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -3412,15 +3412,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 8 {
+            while _next_ordinal_to_read < 8 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -3455,15 +3455,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 9 {
+            while _next_ordinal_to_read < 9 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -3498,15 +3498,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 10 {
+            while _next_ordinal_to_read < 10 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -3541,15 +3541,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 11 {
+            while _next_ordinal_to_read < 11 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -3584,15 +3584,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 12 {
+            while _next_ordinal_to_read < 12 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -3627,15 +3627,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 13 {
+            while _next_ordinal_to_read < 13 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -3670,15 +3670,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 14 {
+            while _next_ordinal_to_read < 14 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -3713,15 +3713,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 15 {
+            while _next_ordinal_to_read < 15 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -3756,15 +3756,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 16 {
+            while _next_ordinal_to_read < 16 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -3799,15 +3799,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 17 {
+            while _next_ordinal_to_read < 17 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -3842,15 +3842,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 18 {
+            while _next_ordinal_to_read < 18 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -3885,15 +3885,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 19 {
+            while _next_ordinal_to_read < 19 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -3928,15 +3928,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 20 {
+            while _next_ordinal_to_read < 20 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -3971,15 +3971,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 21 {
+            while _next_ordinal_to_read < 21 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -4014,15 +4014,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 22 {
+            while _next_ordinal_to_read < 22 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -4057,15 +4057,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 23 {
+            while _next_ordinal_to_read < 23 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -4100,15 +4100,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 24 {
+            while _next_ordinal_to_read < 24 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -4143,15 +4143,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 25 {
+            while _next_ordinal_to_read < 25 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -4186,15 +4186,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 26 {
+            while _next_ordinal_to_read < 26 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -4229,15 +4229,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 27 {
+            while _next_ordinal_to_read < 27 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -4272,15 +4272,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 28 {
+            while _next_ordinal_to_read < 28 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -4315,15 +4315,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 29 {
+            while _next_ordinal_to_read < 29 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -4358,15 +4358,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 30 {
+            while _next_ordinal_to_read < 30 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -4401,15 +4401,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 31 {
+            while _next_ordinal_to_read < 31 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -4444,15 +4444,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 32 {
+            while _next_ordinal_to_read < 32 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -4487,15 +4487,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 33 {
+            while _next_ordinal_to_read < 33 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -4530,15 +4530,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 34 {
+            while _next_ordinal_to_read < 34 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -4573,15 +4573,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 35 {
+            while _next_ordinal_to_read < 35 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -4616,15 +4616,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 36 {
+            while _next_ordinal_to_read < 36 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -4659,15 +4659,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 37 {
+            while _next_ordinal_to_read < 37 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -4702,15 +4702,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 38 {
+            while _next_ordinal_to_read < 38 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -4745,15 +4745,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 39 {
+            while _next_ordinal_to_read < 39 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -4788,15 +4788,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 40 {
+            while _next_ordinal_to_read < 40 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -4831,15 +4831,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 41 {
+            while _next_ordinal_to_read < 41 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -4874,15 +4874,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 42 {
+            while _next_ordinal_to_read < 42 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -4917,15 +4917,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 43 {
+            while _next_ordinal_to_read < 43 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -4960,15 +4960,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 44 {
+            while _next_ordinal_to_read < 44 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -5003,15 +5003,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 45 {
+            while _next_ordinal_to_read < 45 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -5046,15 +5046,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 46 {
+            while _next_ordinal_to_read < 46 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -5089,15 +5089,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 47 {
+            while _next_ordinal_to_read < 47 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -5132,15 +5132,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 48 {
+            while _next_ordinal_to_read < 48 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -5175,15 +5175,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 49 {
+            while _next_ordinal_to_read < 49 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -5218,15 +5218,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 50 {
+            while _next_ordinal_to_read < 50 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -5261,15 +5261,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 51 {
+            while _next_ordinal_to_read < 51 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -5304,15 +5304,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 52 {
+            while _next_ordinal_to_read < 52 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -5347,15 +5347,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 53 {
+            while _next_ordinal_to_read < 53 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -5390,15 +5390,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 54 {
+            while _next_ordinal_to_read < 54 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -5433,15 +5433,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 55 {
+            while _next_ordinal_to_read < 55 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -5476,15 +5476,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 56 {
+            while _next_ordinal_to_read < 56 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -5519,15 +5519,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 57 {
+            while _next_ordinal_to_read < 57 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -5562,15 +5562,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 58 {
+            while _next_ordinal_to_read < 58 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -5605,15 +5605,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 59 {
+            while _next_ordinal_to_read < 59 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -5648,15 +5648,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 60 {
+            while _next_ordinal_to_read < 60 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -5691,15 +5691,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 61 {
+            while _next_ordinal_to_read < 61 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -5734,15 +5734,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 62 {
+            while _next_ordinal_to_read < 62 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -5777,15 +5777,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 63 {
+            while _next_ordinal_to_read < 63 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -5820,15 +5820,15 @@ mod internal {
 
             next_offset += envelope_size;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 64 {
+            while _next_ordinal_to_read < 64 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();
@@ -5987,15 +5987,15 @@ mod internal {
             let mut next_offset = offset;
             let end_offset = offset + bytes_len;
             _next_ordinal_to_read += 1;
-            if next_offset >= end_offset {
-                return Ok(());
-            }
 
             // Decode unknown envelopes for gaps in ordinals.
-            while _next_ordinal_to_read < 1 {
+            while _next_ordinal_to_read < 1 && next_offset < end_offset {
                 fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
                 _next_ordinal_to_read += 1;
                 next_offset += envelope_size;
+            }
+            if next_offset >= end_offset {
+                return Ok(());
             }
 
             let next_out_of_line = decoder.next_out_of_line();

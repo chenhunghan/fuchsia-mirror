@@ -14,8 +14,24 @@
     ],
     program: {
         binary: "bin/libfuzzer_engine",
+        environ: [ "FUZZER_SHARED_PROCESS=1" ],
     },
     use: [
-        { protocol: "fuchsia.process.Launcher" },
+        {
+            protocol: [
+                "fuchsia.kernel.Stats",
+                "fuchsia.kernel.VmexResource",
+                "fuchsia.process.Launcher",
+                "fuchsia.sysinfo.SysInfo",
+            ],
+        },
+        {
+            directory: "boot",
+            rights: [ "r*" ],
+            path: "/boot",
+        },
     ],
+    facets: {
+        "fuchsia.test": { type: "system" },
+    },
 }

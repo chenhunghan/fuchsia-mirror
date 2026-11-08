@@ -74,6 +74,7 @@ class Dwc3TestHelper {
     drv.ep0_.cur_speed = speed;
   }
   static uint64_t GetEp0SetupGeneration(const Dwc3& drv) { return drv.ep0_.setup_generation; }
+  static void StopEvents(Dwc3& drv) { drv.StopEvents(); }
   static void ResetUserEndpoints(Dwc3& drv) { drv.ResetUserEndpoints(); }
   static void StopActiveTransfers(Dwc3& drv) { drv.StopActiveTransfers(); }
   // Parks `callback` behind the user-endpoint idle barrier exactly like HandleResetEvent() /
@@ -114,6 +115,7 @@ class Dwc3TestHelper {
   static void SetDeviceState(Dwc3& drv, fuchsia_hardware_usb_policy::DeviceState state) {
     drv.SetDeviceState(state);
   }
+  static size_t PendingCompletersCount(const Dwc3& drv) { return drv.pending_completers_.size(); }
   static PlatformExtension* GetPlatformExtension(Dwc3& drv) {
     return drv.platform_extension_.get();
   }
@@ -124,11 +126,8 @@ class Dwc3TestHelper {
   static void CmdEpStartTransfer(Dwc3& drv, Dwc3::Endpoint& ep, zx_paddr_t trb_phys) {
     drv.CmdEpStartTransfer(ep, trb_phys);
   }
-  static void CmdEpEndTransfer(Dwc3& drv, Dwc3::Endpoint& ep) { drv.CmdEpEndTransfer(ep); }
-  static void ForceCmdEpEndTransfer(Dwc3& drv, uint8_t ep_num) {
-    // Stubbed out: ForceCmdEpEndTransfer is not in production yet.
-    (void)drv;
-    (void)ep_num;
+  static bool CmdEpEndTransfer(Dwc3& drv, Dwc3::Endpoint& ep, bool cmd_ioc = true) {
+    return drv.CmdEpEndTransfer(ep, cmd_ioc);
   }
   static void CmdEpSetStall(Dwc3& drv, Dwc3::Endpoint& ep) { drv.CmdEpSetStall(ep); }
   static void CmdEpClearStall(Dwc3& drv, Dwc3::Endpoint& ep) { drv.CmdEpClearStall(ep); }
@@ -271,6 +270,19 @@ class Dwc3TestHelper {
     return uep ? uep->ep.queued_trbs : 0;
   }
 
+  static size_t EventFifoTotalSlots(const Dwc3& drv) { return drv.event_fifo_.TotalSlots(); }
+
+  static void AdvanceEventFifo(Dwc3& drv, size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+      drv.event_fifo_.WriteForTesting(0);
+    }
+    drv.event_fifo_.Advance(count);
+  }
+
+  static void PushEventToEventFifo(Dwc3& drv, uint32_t event) {
+    drv.event_fifo_.WriteForTesting(event);
+  }
+
   static Dwc3::UserEndpoint* GetUserEndpoint(Dwc3& drv, uint8_t ep_num) {
     return drv.get_user_endpoint(ep_num);
   }
@@ -294,6 +306,9 @@ class Dwc3TestHelper {
   static void EpEnable(Dwc3& drv, Dwc3::Endpoint& ep, bool enable) { drv.EpEnable(ep, enable); }
   static async_dispatcher_t* GetDispatcher(Dwc3& drv) { return drv.dispatcher(); }
   static void SetControllerStarted(Dwc3& drv, bool started) { drv.controller_started_ = started; }
+  static inspect::Inspector RecordMetrics(Dwc3& drv) {
+    return drv.metrics_.RecordMetrics(nullptr, &drv);
+  }
   static void HandleIrq(Dwc3& drv, async_dispatcher_t* dispatcher, async::IrqBase* irq,
                         zx_status_t status, const zx_packet_interrupt_t* interrupt) {
     drv.HandleIrq(dispatcher, irq, status, interrupt);

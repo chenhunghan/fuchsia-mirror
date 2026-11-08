@@ -12,6 +12,12 @@ load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package
 
 package(default_applicable_licenses = ["//:license"])
 
+test_suite(
+    name = "tests",
+    tests = [":bt-map-tests"],
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)
+
 rustc_library(
     name = "bt-map",
     srcs = [
@@ -84,5 +90,4 @@ fx_unittest_package(
     name = "bt-map-tests",
     resources = [":test-files"],
     unit_tests = [":bt-map_test"],
-    visibility = ["//src/connectivity/bluetooth:__pkg__"],
 )

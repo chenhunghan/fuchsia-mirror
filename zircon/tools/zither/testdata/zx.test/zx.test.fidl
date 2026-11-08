@@ -24,6 +24,15 @@ resource_definition Handle : uint32 {
 
 @transport("Syscall")
 closed protocol Channel {
+    // A syscall returning handles, so that the kernel backend goldens cover
+    // the output-handle copy-out path of the generated syscall wrappers.
+    strict Create(struct {
+        options uint32;
+    }) -> (resource struct {
+        out0 Handle;
+        out1 Handle;
+    }) error Status;
+
     @handle_unchecked
     strict Read(resource struct {
         handle Handle:CHANNEL;

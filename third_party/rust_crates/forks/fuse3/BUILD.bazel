@@ -80,13 +80,13 @@ rust_library(
     deps = [
         "//third_party/rust_crates/forks/libc-0.2.190:libc",
         "//third_party/rust_crates/forks/nix-0.29.0:nix",
-        "//third_party/rust_crates/forks/tokio-1.53.1:tokio",
         "//third_party/rust_crates/vendor/async-notify-0.3.4:async_notify",
         "//third_party/rust_crates/vendor/bytes-1.12.1:bytes",
         "//third_party/rust_crates/vendor/futures-util-0.3.34:futures_util",
         "//third_party/rust_crates/vendor/slab-0.4.12:slab",
+        "//third_party/rust_crates/vendor/tokio-1.54.1:tokio",
         "//third_party/rust_crates/vendor/tracing-0.1.44:tracing",
         "//third_party/rust_crates/vendor/which-8.0.6:which",
-        "//third_party/rust_crates/vendor/zerocopy-0.8.48:zerocopy",
+        "//third_party/rust_crates/vendor/zerocopy-0.8.63:zerocopy",
     ],
 )

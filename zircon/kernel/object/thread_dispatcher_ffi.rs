@@ -4,19 +4,21 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-use super::exception_dispatcher::ExceptionDispatcher;
+use super::exceptionate::Exceptionate;
 use super::handle::KernelHandle;
 use super::process_dispatcher::ProcessDispatcher;
 use super::thread_dispatcher::{
     Blocked, CoreThreadObservation, ThreadDispatcher, ThreadDispatcherState,
 };
-use crate::arch_rs::UserEntryState;
+use crate::arch_rs::{ArchExceptionContext, UserEntryState};
 use crate::kernel::scheduler_state::ThreadStateKind;
+use crate::kernel::thread::Thread;
+use core::ffi::c_char;
 use core::mem::MaybeUninit;
-use fbl::RefPtr;
+use fbl::{DoublyLinkedListContainable, RefPtr};
 use zx_status::Status;
 use zx_types::{
-    zx_exception_context_t, zx_excp_type_t, zx_info_task_runtime_t, zx_koid_t, zx_rights_t,
+    ZX_MAX_NAME_LEN, zx_exception_context_t, zx_excp_type_t, zx_info_task_runtime_t, zx_koid_t,
     zx_status_t,
 };
 
@@ -71,7 +73,6 @@ unsafe extern "C" {
     /// `KernelHandle<ThreadDispatcher>`.
     pub(crate) fn cpp_thread_dispatcher_alloc(
         process: *mut ProcessDispatcher,
-        flags: u32,
         out_handle: *mut MaybeUninit<KernelHandle<ThreadDispatcher>>,
     ) -> zx_status_t;
 
@@ -83,7 +84,7 @@ unsafe extern "C" {
     /// valid kernel `Thread`.
     pub(crate) fn cpp_thread_dispatcher_set_core_thread(
         thread: *mut ThreadDispatcher,
-        core_thread: *mut crate::kernel::thread::Thread,
+        core_thread: *mut Thread,
     );
 
     /// Loads the lower level kernel thread from a ThreadDispatcher, which is null once
@@ -95,7 +96,7 @@ unsafe extern "C" {
     /// dispatcher's state lock: `core_thread_` is `TA_GUARDED(get_lock())` on the C++ side.
     pub(crate) fn cpp_thread_dispatcher_get_core_thread(
         thread: *const ThreadDispatcher,
-    ) -> *mut crate::kernel::thread::Thread;
+    ) -> *mut Thread;
 
     /// Stores the register values userspace will start executing with.
     ///
@@ -117,7 +118,7 @@ unsafe extern "C" {
     /// dispatcher's live kernel thread.
     pub(crate) fn cpp_thread_dispatcher_attach_to_core_thread(
         thread: *mut ThreadDispatcher,
-        core_thread: *mut crate::kernel::thread::Thread,
+        core_thread: *mut Thread,
     );
 
     /// Enters userspace on a newly created thread. Does not return.
@@ -129,7 +130,7 @@ unsafe extern "C" {
 
     /// Sends the `ZX_EXCP_THREAD_EXITING` single-shot exception to the process debugger.
     ///
-    /// TRANSITIONAL: while `HandleSingleShotException` remains a C++ method.
+    /// TRANSITIONAL: while `arch_exception_context_t` remains a C++ type on x86_64 and arm64.
     ///
     /// # Safety
     ///
@@ -192,32 +193,6 @@ unsafe extern "C" {
         out_stats: *mut core::mem::MaybeUninit<zx_info_task_runtime_t>,
     );
 
-    /// Reads thread architectural state.
-    ///
-    /// # Safety
-    ///
-    /// `thread` must point to a valid `ThreadDispatcher`.
-    /// `buffer` must point to at least `buffer_size` writable bytes.
-    pub(crate) fn cpp_thread_dispatcher_read_state(
-        thread: *mut ThreadDispatcher,
-        state_kind: u32,
-        buffer: *mut core::ffi::c_void,
-        buffer_size: usize,
-    ) -> zx_status_t;
-
-    /// Writes thread architectural state.
-    ///
-    /// # Safety
-    ///
-    /// `thread` must point to a valid `ThreadDispatcher`.
-    /// `buffer` must point to at least `buffer_size` readable bytes.
-    pub(crate) fn cpp_thread_dispatcher_write_state(
-        thread: *mut ThreadDispatcher,
-        state_kind: u32,
-        buffer: *const core::ffi::c_void,
-        buffer_size: usize,
-    ) -> zx_status_t;
-
     /// Raises an exception for job debugger.
     ///
     /// # Safety
@@ -228,61 +203,9 @@ unsafe extern "C" {
         exception_type: zx_excp_type_t,
         user_context: &zx_exception_context_t,
     ) -> zx_status_t;
-
-    /// Legacy thread yield.
-    ///
-    /// # Safety
-    ///
-    /// Yields execution of the current thread to the scheduler.
-    pub(crate) fn cpp_sys_thread_legacy_yield(options: u32) -> zx_status_t;
-
-    /// Retrieves exception report from thread.
-    ///
-    /// # Safety
-    ///
-    /// `thread` must point to a valid `ThreadDispatcher`.
-    /// `out_report` must point to valid uninitialized memory for `zx_exception_report_t`.
-    pub(crate) fn cpp_thread_dispatcher_get_exception_report(
-        thread: *const ThreadDispatcher,
-        out_report: *mut zx_types::zx_exception_report_t,
-    ) -> zx_status_t;
 }
 
 // Exported FFI functions for C++ callers:
-
-/// Creates a new ThreadDispatcher.
-///
-/// # Safety
-///
-/// `process` must point to a valid `ProcessDispatcher` whose reference count was transferred.
-/// `name_ptr` must point to at least `name_len` readable bytes.
-/// `out_handle` and `out_rights` must point to valid uninitialized memory.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_thread_dispatcher_create(
-    process: *mut ProcessDispatcher,
-    flags: u32,
-    name_ptr: *const core::ffi::c_char,
-    name_len: usize,
-    out_handle: *mut MaybeUninit<KernelHandle<ThreadDispatcher>>,
-    out_rights: *mut MaybeUninit<zx_rights_t>,
-) -> zx_status_t {
-    // SAFETY: The caller transferred a reference count on `process`.
-    let process_ref = unsafe { RefPtr::from_raw(process) };
-    // SAFETY: The caller guarantees `name_ptr` points to `name_len` readable bytes
-    // whenever `name_len > 0`.
-    let name_slice = unsafe { zr::slice_from_raw_parts(name_ptr.cast(), name_len) };
-    match ThreadDispatcher::create(process_ref, flags, name_slice) {
-        Ok((handle, rights)) => {
-            // SAFETY: The caller guarantees both out pointers are valid for writes.
-            unsafe {
-                (*out_handle).write(handle);
-                (*out_rights).write(rights);
-            }
-            zx_types::ZX_OK
-        }
-        Err(status) => status.into_raw(),
-    }
-}
 
 /// Initializes `ThreadDispatcherState` in-place.
 ///
@@ -323,22 +246,6 @@ pub extern "C" fn rust_thread_dispatcher_get_process(
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_thread_dispatcher_assert_canary(thread: &ThreadDispatcher) {
     thread.assert_canary();
-}
-
-/// Completes initialization of a newly constructed thread.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_thread_dispatcher_initialize(thread: &ThreadDispatcher) -> zx_status_t {
-    Status::result_into_raw(thread.initialize())
-}
-
-/// Starts this thread running inside its parent process with the provided entry state.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_thread_dispatcher_start(
-    thread: &ThreadDispatcher,
-    entry: &UserEntryState,
-    ensure_initial_thread: bool,
-) -> zx_status_t {
-    Status::result_into_raw(thread.start(*entry, ensure_initial_thread))
 }
 
 /// Transitions a thread from the initialized state to either running or suspended.
@@ -408,10 +315,16 @@ pub unsafe extern "C" fn rust_thread_dispatcher_get_runtime_stats(
 ///
 /// # Safety
 ///
-/// Must only be called on the current running thread.
+/// `thread` must be the `ThreadDispatcher` of the currently running user thread, which is exiting
+/// (from `Thread::Current::Exit`) and will never reenter userspace, and the calling thread must
+/// hold no spinlocks or chain locks and be in a valid state to block.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rust_thread_dispatcher_exiting_current(thread: &ThreadDispatcher) {
-    thread.exiting_current();
+    // SAFETY: `Thread::Current::Exit` calls this (via `ThreadDispatcher::ExitingCurrent`) on the
+    // exiting current thread's own `user_thread_` with interrupts enabled, before disabling
+    // preemption or acquiring any spinlocks or chain locks, and the thread never returns to
+    // userspace afterwards.
+    unsafe { thread.exiting_current() };
 }
 
 /// Sets the blocked reason of the current thread and returns the previous one.
@@ -426,56 +339,12 @@ pub unsafe extern "C" fn rust_thread_dispatcher_set_blocked_reason(reason: u32) 
     ThreadDispatcher::set_blocked_reason(reason).0
 }
 
-/// Sets the exception dispatcher on the thread.
-///
-/// # Safety
-///
-/// `exception` must be a valid `ExceptionDispatcher` reference, and the caller must hold
-/// `thread`'s state lock (`get_lock()`).
+/// Returns a pointer to the thread's doubly linked list node in the process thread list.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_thread_dispatcher_set_exception_locked(
+pub extern "C" fn rust_thread_dispatcher_get_dll_node(
     thread: &ThreadDispatcher,
-    exception: &ExceptionDispatcher,
-    exceptionate_type: u32,
-) {
-    let exception = RefPtr::from_ref(exception);
-    // SAFETY: The caller holds `thread`'s state lock.
-    unsafe {
-        let mut token = ksync::LockToken::new();
-        thread.set_exception_dispatcher_locked(&mut token, exception, exceptionate_type);
-    }
-}
-
-/// Clears the exception dispatcher on the thread and returns whether the thread is dying or dead.
-///
-/// # Safety
-///
-/// The caller must hold `thread`'s state lock (`get_lock()`).
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_thread_dispatcher_clear_exception_locked(
-    thread: &ThreadDispatcher,
-) -> bool {
-    // SAFETY: The caller holds `thread`'s state lock.
-    unsafe {
-        let mut token = ksync::LockToken::new();
-        thread.clear_exception_locked(&mut token)
-    }
-}
-
-/// Returns true if suspended or in exception.
-///
-/// # Safety
-///
-/// The caller must hold `thread`'s state lock (`get_lock()`).
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_thread_dispatcher_suspended_or_in_exception_locked(
-    thread: &ThreadDispatcher,
-) -> bool {
-    // SAFETY: The caller holds `thread`'s state lock.
-    unsafe {
-        let token = ksync::LockToken::new();
-        thread.suspended_or_in_exception_locked(&token)
-    }
+) -> *mut core::ffi::c_void {
+    core::ptr::from_ref(thread.get_node()).cast_mut().cast()
 }
 
 /// Returns a pointer to the thread's core thread spinlock, as a C++ `Lock<SpinLock>`.
@@ -486,31 +355,57 @@ pub extern "C" fn rust_thread_dispatcher_get_core_thread_lock(
     core::ptr::from_ref(thread.state().core_thread_lock.raw_mutex()).cast_mut().cast()
 }
 
-/// Returns a pointer to the thread's exceptionate storage.
+/// Returns a pointer to the thread's `Exceptionate`.
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_thread_dispatcher_get_exceptionate(
     thread: &ThreadDispatcher,
 ) -> *mut core::ffi::c_void {
-    thread.state().exceptionate.as_void_ptr()
+    core::ptr::from_ref(&thread.state().exceptionate).cast_mut().cast()
 }
 
-/// Retrieves the thread's current exception dispatcher, or null if not in an exception.
+/// Sends a single-shot exception over `exceptionate` and waits for the handler response.
 ///
 /// # Safety
 ///
-/// The caller must hold `thread`'s state lock (`get_lock()`).
+/// * `thread` must be the currently executing user thread (`thread.is_current()`).
+/// * `thread`'s dispatcher lock must not be held (`TA_EXCL(get_lock())`), nor any thread lock,
+///   spinlock, or active `ChainLockTransaction`.
+/// * `arch_context` must point to a valid, initialized `arch_exception_context_t` for the current
+///   thread that outlives this call, and if `(*arch_context).frame` is non-null, it must point to
+///   a valid, initialized, writable `iframe_t` for the duration of the call without conflicting
+///   Rust references.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_thread_dispatcher_get_exception_locked(
+pub unsafe extern "C" fn rust_thread_dispatcher_handle_single_shot_exception(
     thread: &ThreadDispatcher,
-) -> *mut ExceptionDispatcher {
-    // SAFETY: The caller holds `thread`'s state lock.
-    unsafe {
-        let token = ksync::LockToken::new();
-        thread
-            .state()
-            .exception
-            .get(&token)
-            .as_ref()
-            .map_or(core::ptr::null_mut(), |e| core::ptr::from_ref(&**e).cast_mut())
-    }
+    exceptionate: &Exceptionate,
+    exception_type: zx_excp_type_t,
+    arch_context: *const ArchExceptionContext,
+) -> bool {
+    // SAFETY: Caller upholds all preconditions of `handle_single_shot_exception`.
+    unsafe { thread.handle_single_shot_exception(exceptionate, exception_type, arch_context) }
+}
+
+/// Sets the thread's name from C++.
+///
+/// # Safety
+///
+/// `name` must point to `len` initialized bytes whenever `len > 0`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_thread_dispatcher_set_name(
+    thread: &ThreadDispatcher,
+    name: *const c_char,
+    len: usize,
+) -> Result<(), Status> {
+    // SAFETY: Caller guarantees `name` points to `len` initialized bytes whenever `len > 0`.
+    let name_bytes = unsafe { zr::slice_from_raw_parts(name.cast(), len) };
+    thread.set_name(name_bytes)
+}
+
+/// Gets the thread's name for C++.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_thread_dispatcher_get_name(
+    thread: &ThreadDispatcher,
+    out_name: &mut [u8; ZX_MAX_NAME_LEN],
+) -> Result<(), Status> {
+    thread.get_name(out_name)
 }

@@ -22,6 +22,7 @@ source_set("hypervisor") {
     "//zircon/kernel/lib/fbl",
     "//zircon/kernel/lib/ktl",
     "//zircon/kernel/lib/ktrace",
+    "//zircon/kernel/lib/object-constants",
     "//zircon/kernel/lib/page",
     "//zircon/system/ulib/bitmap",
   ]
@@ -48,6 +49,7 @@ kernel_rust_mod("hypervisor-rs") {
     "//src/lib/ksync",
     "//src/lib/zr",
     "//third_party/rust_crates:pin-init",
+    "//zircon/kernel/lib/object-constants:object-constants-rs",
     "//zircon/kernel/lib/page",
     "//zircon/kernel/lib/range_check:range_check_rs",
     "//zircon/system/ulib/fbl/rust:fbl",

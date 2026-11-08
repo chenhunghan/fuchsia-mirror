@@ -70,6 +70,14 @@ as they cause the `gemini-cli` to hang and run out of input tokens.
 If you must glob all source files, it is advised to exclude or separately glob
 the contents of `//out`.
 
+## Code search
+
+A Fuchsia checkout managed by `jiri` is a set of plain git repositories, not a
+Cog/CitC workspace, so `cs --corpus=local` does not work in it. Do not attempt
+`cs` in such a checkout. Instead, search with `git grep` (run from the root of
+the relevant repository, e.g. `//` or `//vendor/google`) or `rg`, excluding
+`//out`. Do not include `cs` commands in subagent prompts.
+
 ## Code Authoring Requirements
 
 1.  **Verify with Build:** After implementation of a change, run `fx build` to
@@ -107,6 +115,11 @@ tools to analyze the code before making changes.
 When working with Rust (`.rs`), a common pitfall is specifying the wrong
 "edition" in new targets defined in `BUILD.gn` files. The current correct
 edition is "2024".
+
+When changing Rust code, consider whether you should use one of the existing
+third-party dependencies in `third_party/rust_crates` (see
+`third_party/rust_crates/Cargo.toml` and `third_party/rust_crates/BUILD.gn`)
+instead of writing duplicate functionality.
 
 **Common Agent Pitfalls in Rust:**
 
@@ -271,14 +284,36 @@ yield more detailed logs than `ffx log`.
 
 `fx run-boot-test` runs kernel boot tests and provides more control over the
 test environment than `fx test`. It is useful to run Zircon's core tests.
+`fx core-tests` wraps `fx run-boot-test core-tests.eng`, and
+`--kernel-unittest <suite>` runs a kernel `ut` suite (C++ or Rust) before the
+core tests.
 
-By default (`kernel.halt-on-panic=false`) Zircon reboots on a kernel panic, and
-`fx run-boot-test` runs QEMU with `-no-reboot`, so a panic causes QEMU to exit
-and the command to return a failing exit code. Do **not** pass
-`kernel.halt-on-panic=true` when running boot tests from a shell command
-harness: it makes the kernel halt in the panic shell instead of rebooting, so
-QEMU never exits and the command hangs. Only use `kernel.halt-on-panic=true`
-when you explicitly intend to interact with the panic shell.
+When running QEMU boot tests (`fx run-boot-test`, `fx core-tests`, `fx qemu`)
+from a shell command harness or other non-interactive shell:
+
+*   **Detach stdin.** QEMU runs with `-nographic`, which connects the serial
+    console to stdin. If it is started from a background job, the shell stops
+    it with SIGTTIN/SIGTTOU (state `T` in `ps`, no CPU time) and it looks like
+    a hang. Start it with `setsid -w ... </dev/null` (use `-w`/`--wait` so `setsid` blocks until completion).
+*   **Disable halt-on-panic.** `fx qemu` (`zircon/scripts/run-zircon`) always
+    adds `kernel.halt-on-panic=true`, so a kernel panic halts in the panic
+    shell and QEMU never exits. Override it with
+    `-c kernel.halt-on-panic=false` (the last value wins). Together with the
+    `-no-reboot` that `fx run-boot-test` passes, a panic then makes QEMU exit.
+    Only leave `kernel.halt-on-panic=true` when you explicitly intend to
+    interact with the panic shell.
+*   **Bound and log.** Wrap the command in `timeout` and redirect its output
+    to a file. Do not pipe it into `grep`, which hides all progress until QEMU
+    exits.
+*   **Check the log, not just the exit code.** Look for `All tests passed`
+    (kernel `ut` suites) and `[  PASSED  ]` (core-tests). A fully passing run
+    can still exit nonzero (e.g. 31 on x64 after `graceful-shutdown`).
+
+```bash
+setsid -w timeout 1800 fx run-boot-test core-tests.eng \
+  -c kernel.halt-on-panic=false --kernel-unittest <suite> \
+  </dev/null > /tmp/boot-test.log 2>&1
+```
 
 #### Core tests
 
@@ -414,14 +449,15 @@ guide](docs/contribute/commit-message-style-guide.md).
 
 *   **Footer:**
     *   **Bug:** Include a `Bug: <issue-id>` line to link to an issue. This
-        is recommended when applicable but not required. Use `Fixed:` to
-        automatically close the issue. Do not make up an issue-id. If you do
-        not know a relevant issue-id, ask the user for one.
-    *   **Test:** A `Test:` line is required to describe how the change was
-        verified. Describe how the change is tested, whether new tests were
-        added, and what kind of tests they are (unit, integration, or end-to-end
-        tests). If no new tests are needed (e.g., for a documentation
-        change), you can use `Test: None` with a brief explanation.
+        is recommended when applicable but not required. Use `Fixed:` or
+        `Fixes:` to automatically close the issue. Do not make up an
+        issue-id. If you do not know a relevant issue-id, ask the user for
+        one.
+    *   **Test:** A `Test:` line is optional and only serves as an indicator
+        to human reviewers; it has no effect on presubmit tests (use
+        `Multiply: <test_name>` to trigger deflake runs for new or modified
+        tests). If included, describe the actual verification performed; omit
+        it rather than writing `Test: None` when no tests were run.
     *   **Change-Ids:** Preserve `Change-Id` footers when editing, amending,
         squashing, or rebasing commits. Gerrit uses these to link git commits
         to Change Lists. If multiple commits are combined, ensure ONLY the
@@ -437,7 +473,5 @@ guide for quick reference within the agent's primary
 context file.
 
 Bug: 12345
-Test: None, documentation change.
-
 Change-Id: Iabcdef1234567890abcdef1234567890abcdef12
 ```

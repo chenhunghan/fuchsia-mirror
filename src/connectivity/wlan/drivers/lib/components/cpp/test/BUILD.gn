@@ -34,7 +34,7 @@ test("components_test") {
     "priority_queue_test.cc",
     "test_driver.cc",
   ]
-  public_deps = [
+  deps = [
     ":support",
     "//sdk/lib/async:async-cpp",
     "//sdk/lib/driver/testing/cpp",

@@ -1,0 +1,56 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "bin",
+    srcs = ["src/lib.rs"],
+    crate_name = "echo_integration_testing",
+    edition = "2024",
+    deps = [
+        "//examples/components/routing/fidl:echo_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged_bin",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "echo_integration_testing",
+)
+
+fx_component_manifest(
+    name = "echo-integration-test-manifest",
+    testonly = True,
+    component_name = "echo_integration_testing",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/echo_integration_test.cml",
+)
+
+fx_component(
+    name = "echo-integration-test",
+    testonly = True,
+    compiled_manifest = ":echo-integration-test-manifest",
+    visibility = ["//src/sys/test_runners/rust/test_data:__pkg__"],
+    deps = [":bin_packaged_bin"],
+)

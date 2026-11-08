@@ -54,6 +54,7 @@ _ZXTEST_HDRS = [
     "include/zxtest/cpp/assert_streams.h",
     "include/zxtest/cpp/internal.h",
     "include/zxtest/cpp/scoped_trace.h",
+    "include/zxtest/cpp/streams_helper.h",
     "include/zxtest/cpp/zxtest.h",
     "include/zxtest/zxtest.h",
 ]

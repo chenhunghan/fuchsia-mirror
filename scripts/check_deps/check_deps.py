@@ -12,7 +12,7 @@ import subprocess
 import sys
 
 HOST_PLATFORM = "%s-%s" % (
-    platform.system().lower().replace("darwin", "mac"),
+    platform.system().lower(),
     {
         "x86_64": "x64",
         "aarch64": "arm64",

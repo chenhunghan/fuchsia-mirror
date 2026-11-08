@@ -46,7 +46,10 @@ def format(target):
         "cpu": test_info.cpu,
         "environments": test_info.environments,
         "build_only": test_info.build_only,
+        "create_no_exception_channel": test_info.create_no_exception_channel,
         "max_log_severity": test_info.max_log_severity,
+        "min_log_severity": test_info.min_log_severity,
+        "parallel": test_info.parallel,
         "test_components": [
             {
                 "component_name": component.component_name,

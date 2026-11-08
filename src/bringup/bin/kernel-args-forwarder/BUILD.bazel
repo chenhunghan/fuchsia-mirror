@@ -2,9 +2,77 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
 package(default_applicable_licenses = ["//:license"])
 
 exports_files(
     ["meta/kernel_args_forwarder.bootstrap_shard.cml"],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    binary_name = "kernel-args-forwarder",
+    build_flags = ["//build/config/rust:bootfs"],
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.boot:fuchsia.boot_rust",
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+# @bazel2gn:skip
+rustc_test(
+    name = "kernel_args_forwarder_bin_test",
+    crate = ":bin",
+    deps = ["//src/lib/fuchsia-async"],
+)
+
+# Run with `fx test kernel-args-forwarder-unittests`.
+# @bazel2gn:skip
+fx_unittest_package(
+    name = "kernel-args-forwarder-unittests",
+    unit_tests = [":kernel_args_forwarder_bin_test"],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged_bin",
+    binary = ":bin",
+    binary_name = "kernel-args-forwarder",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "kernel-args-forwarder",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/kernel_args_forwarder.cml",
+    restricted_features = ["dynamic_dictionaries"],
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":manifest",
+    deps = [":bin_packaged_bin"],
 )

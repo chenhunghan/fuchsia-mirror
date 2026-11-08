@@ -85,6 +85,11 @@ ExecutionScope ExecutionScopeForCommand(const Command& cmd);
 Err ResolveBreakpointsForModification(const Command& cmd, const char* command_name,
                                       std::vector<Breakpoint*>* output);
 
+// Enables or disables the tracepoints resolved from |cmd| and prints updated status lines.
+void ModifyTracepointsEnabled(ConsoleContext* context, const Command& cmd, bool enabled,
+                              const char* verb_past_tense,
+                              const fxl::RefPtr<CommandContext>& cmd_context);
+
 // The |show_context| flag will cause some source code to be included annotated with the breakpoint,
 // or a message about pending breakpoints if there is no location.
 OutputBuffer FormatBreakpoint(const ConsoleContext* context, const Breakpoint* breakpoint,

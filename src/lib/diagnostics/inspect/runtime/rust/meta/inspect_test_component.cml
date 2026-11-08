@@ -10,13 +10,19 @@
         runner: "elf",
         binary: "bin/inspect_test_component_bin",
     },
+    use: [
+        {
+            config: "fuchsia.inspect.test.PublishNTrees",
+            key: "publish_n_trees",
+            type: "uint64",
+            availability: "transitional",
+            default: 1,
+        },
+    ],
     expose: [
         {
             protocol: "fuchsia.component.Binder",
             from: "framework",
         },
     ],
-    config: {
-        publish_n_trees: { type: "uint64" },
-    },
 }

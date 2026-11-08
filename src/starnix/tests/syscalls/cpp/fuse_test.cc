@@ -1295,6 +1295,109 @@ TEST_F(FuseTest, Rmdir) {
   ASSERT_NE(rmdir(dir.c_str()), 0);
 }
 
+TEST_F(FuseServerTest, ShortReadAndMalformedWriteErrorPreserveQueue) {
+  test_helper::ScopedTempDir temp_dir;
+  std::string mount_dir = temp_dir.path() + "/mnt";
+  ASSERT_EQ(mkdir(mount_dir.c_str(), 0700), 0) << strerror(errno);
+
+  fbl::unique_fd fuse_fd(open("/dev/fuse", O_RDWR | O_CLOEXEC));
+  if (!fuse_fd.is_valid() && (errno == ENOENT || errno == ENODEV)) {
+    GTEST_SKIP() << "/dev/fuse is not available";
+  }
+  ASSERT_TRUE(fuse_fd.is_valid()) << strerror(errno);
+
+  struct stat stat_buffer = {};
+  ASSERT_EQ(stat(mount_dir.c_str(), &stat_buffer), 0) << strerror(errno);
+  std::string options = fxl::StringPrintf("fd=%i,rootmode=%o,user_id=%u,group_id=%u", fuse_fd.get(),
+                                          stat_buffer.st_mode & S_IFMT, getuid(), getgid());
+  ASSERT_EQ(mount("fuse", mount_dir.c_str(), "fuse", 0, options.c_str()), 0) << strerror(errno);
+  auto cleanup = fit::defer([&]() { umount2(mount_dir.c_str(), MNT_DETACH); });
+
+  // Trigger a lookup on a background thread in case the kernel defers queueing FUSE_INIT until
+  // the first filesystem access.
+  std::thread trigger_thread([&]() {
+    struct stat st = {};
+    stat((mount_dir + "/probe").c_str(), &st);
+  });
+  auto join_trigger = fit::defer([&]() {
+    fuse_fd.reset();
+    if (trigger_thread.joinable()) {
+      trigger_thread.join();
+    }
+  });
+
+  struct pollfd pfd = {.fd = fuse_fd.get(), .events = POLLIN, .revents = 0};
+  ASSERT_EQ(HANDLE_EINTR(poll(&pfd, 1, 5000)), 1) << strerror(errno);
+  ASSERT_NE(pfd.revents & POLLIN, 0);
+
+  // Reading into a buffer smaller than the queued FUSE message must fail with EINVAL without
+  // dropping the queued FUSE_INIT request.
+  uint8_t short_buf[4] = {};
+  EXPECT_EQ(read(fuse_fd.get(), short_buf, sizeof(short_buf)), -1);
+  EXPECT_EQ(errno, EINVAL);
+
+  uint8_t header_only_buf[sizeof(fuse_in_header)] = {};
+  EXPECT_EQ(read(fuse_fd.get(), header_only_buf, sizeof(header_only_buf)), -1);
+  EXPECT_EQ(errno, EINVAL);
+
+  // Reading with a sufficiently sized buffer must still receive FUSE_INIT.
+  std::vector<uint8_t> req_buf(FUSE_MIN_READ_BUFFER * 2);
+  ssize_t read_len = read(fuse_fd.get(), req_buf.data(), req_buf.size());
+  ASSERT_GE(read_len, static_cast<ssize_t>(sizeof(fuse_in_header) + sizeof(fuse_init_in)))
+      << strerror(errno);
+
+  fuse_in_header in_header = {};
+  memcpy(&in_header, req_buf.data(), sizeof(in_header));
+  ASSERT_EQ(in_header.opcode, static_cast<uint32_t>(FUSE_INIT));
+
+  // Malformed error codes (INT32_MIN causing negation overflow, <= -1000, or positive error
+  // values) must be rejected with EINVAL without consuming the in-flight FUSE_INIT operation.
+  fuse_out_header min_err_reply = {
+      .len = sizeof(fuse_out_header),
+      .error = std::numeric_limits<int32_t>::min(),
+      .unique = in_header.unique,
+  };
+  EXPECT_EQ(write(fuse_fd.get(), &min_err_reply, sizeof(min_err_reply)), -1);
+  EXPECT_EQ(errno, EINVAL);
+
+  fuse_out_header out_of_range_err_reply = {
+      .len = sizeof(fuse_out_header),
+      .error = -1000,
+      .unique = in_header.unique,
+  };
+  EXPECT_EQ(write(fuse_fd.get(), &out_of_range_err_reply, sizeof(out_of_range_err_reply)), -1);
+  EXPECT_EQ(errno, EINVAL);
+
+  fuse_out_header pos_err_reply = {
+      .len = sizeof(fuse_out_header),
+      .error = 1,
+      .unique = in_header.unique,
+  };
+  EXPECT_EQ(write(fuse_fd.get(), &pos_err_reply, sizeof(pos_err_reply)), -1);
+  EXPECT_EQ(errno, EINVAL);
+
+  // A valid FUSE_INIT response for the same unique ID must still succeed.
+  struct {
+    fuse_out_header header;
+    fuse_init_out init_out;
+  } valid_reply = {
+      .header =
+          {
+              .len = sizeof(valid_reply),
+              .error = 0,
+              .unique = in_header.unique,
+          },
+      .init_out =
+          {
+              .major = FUSE_KERNEL_VERSION,
+              .minor = FUSE_KERNEL_MINOR_VERSION,
+          },
+  };
+  EXPECT_EQ(write(fuse_fd.get(), &valid_reply, sizeof(valid_reply)),
+            static_cast<ssize_t>(sizeof(valid_reply)))
+      << strerror(errno);
+}
+
 TEST_F(FuseServerTest, NoReqsUntilInitResponse) {
   class NoReqsUntilInitResponseServer : public FuseServer {
    public:
@@ -2590,5 +2693,69 @@ TEST_F(FuseServerTest, CreateWriteAndReadWithValidEntry) {
   EXPECT_EQ(server->LookupCount(), lookups_after_create);
   if (test_helper::IsStarnix()) {
     EXPECT_EQ(server->NonRootGetAttrCount(), 1u);
+  }
+}
+
+TEST_F(FuseServerTest, ConcurrentLazyUnmountDuringLookupAndEscape) {
+  test_helper::ScopedTempDir temp_dir;
+  std::string mount_dir = temp_dir.path() + "/mnt";
+  ASSERT_EQ(mkdir(mount_dir.c_str(), 0700), 0) << strerror(errno);
+
+  {
+    fbl::unique_fd probe_fd(open("/dev/fuse", O_RDWR | O_CLOEXEC));
+    if (!probe_fd.is_valid() && (errno == ENOENT || errno == ENODEV)) {
+      GTEST_SKIP() << "/dev/fuse is not available";
+    }
+    ASSERT_TRUE(probe_fd.is_valid()) << strerror(errno);
+  }
+
+  struct stat stat_buffer = {};
+  ASSERT_EQ(stat(mount_dir.c_str(), &stat_buffer), 0) << strerror(errno);
+  const mode_t root_mode = stat_buffer.st_mode & S_IFMT;
+
+  std::atomic<bool> stop{false};
+  std::string probe_child = mount_dir + "/probe";
+  std::string probe_parent = mount_dir + "/..";
+
+  std::thread enter_thread([&]() {
+    struct stat st = {};
+    while (!stop.load(std::memory_order_relaxed)) {
+      stat(probe_child.c_str(), &st);
+    }
+  });
+  std::thread escape_thread([&]() {
+    struct stat st = {};
+    while (!stop.load(std::memory_order_relaxed)) {
+      stat(probe_parent.c_str(), &st);
+    }
+  });
+  auto cleanup_threads = fit::defer([&]() {
+    stop.store(true, std::memory_order_relaxed);
+    if (enter_thread.joinable()) {
+      enter_thread.join();
+    }
+    if (escape_thread.joinable()) {
+      escape_thread.join();
+    }
+  });
+
+  for (int i = 0; i < 32; ++i) {
+    fbl::unique_fd fuse_fd1(open("/dev/fuse", O_RDWR | O_CLOEXEC));
+    ASSERT_TRUE(fuse_fd1.is_valid()) << strerror(errno);
+    std::string options1 = fxl::StringPrintf("fd=%i,rootmode=%o,user_id=%u,group_id=%u",
+                                             fuse_fd1.get(), root_mode, getuid(), getgid());
+    ASSERT_EQ(mount("fuse", mount_dir.c_str(), "fuse", 0, options1.c_str()), 0) << strerror(errno);
+    fuse_fd1.reset();
+
+    fbl::unique_fd fuse_fd2(open("/dev/fuse", O_RDWR | O_CLOEXEC));
+    ASSERT_TRUE(fuse_fd2.is_valid()) << strerror(errno);
+    std::string options2 = fxl::StringPrintf("fd=%i,rootmode=%o,user_id=%u,group_id=%u",
+                                             fuse_fd2.get(), root_mode, getuid(), getgid());
+    ASSERT_EQ(mount("fuse", mount_dir.c_str(), "fuse", 0, options2.c_str()), 0) << strerror(errno);
+    fuse_fd2.reset();
+
+    // Detach both stacked mounts while lookup threads traverse enter_mount/escape_mount.
+    ASSERT_EQ(umount2(mount_dir.c_str(), MNT_DETACH), 0) << strerror(errno);
+    ASSERT_EQ(umount2(mount_dir.c_str(), MNT_DETACH), 0) << strerror(errno);
   }
 }

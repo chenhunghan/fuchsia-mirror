@@ -272,19 +272,39 @@ if (current_toolchain == default_toolchain) {
       # enough to fix the issue.
       exclude_variant_tags = [ "fuzzer" ]
 
-      # The Asan-based variants are needed to generate binaries for the SDK.
-      enable_variants = [ "asan" ]
+      # LINT.IfChange(sysroot_variants)
+      # The asan and hwasan variants are always exported to the IDK sysroot,
+      # while the other instrumented variants are needed by the in-tree Bazel
+      # sysroot (and when -fuzzer variants redirect to their base variant).
+      enable_variants = [
+        "asan",
+        "asan-sancov",
+        "asan-ubsan",
+        "ubsan",
+        "ubsan-sancov",
+        "coverage",
+        "coverage-rust",
+        "profile",
+        "profile-rust",
+      ]
 
       # TODO(https://fxbug.dev/327442322): Support hwasan for x64 and riscv64.
       if (cpu == "arm64") {
-        enable_variants += [ "hwasan" ]
+        enable_variants += [
+          "hwasan",
+          "hwasan-ubsan",
+        ]
       }
+
+      # LINT.ThenChange(
+      #   //build/toolchain/zircon/BUILD.gn:sysroot_variants,
+      #   //sdk/lib/c/sysroot_entries.gni:sysroot_variants,
+      # )
     }
   }
-} else if (toolchain_variant.base == "//sdk/lib/c:user.libc_$target_cpu") {
+} else if (toolchain_environment == "user.libc") {
   config("libc_config") {
     configs = [
-      "//build/config/zircon:user",
       "//build/config/zircon:user-link",
       "//build/config:shared_library_config",
       "//build/config:symbol_no_undefined",
@@ -342,12 +362,18 @@ if (current_toolchain == default_toolchain) {
 
 # When in a toolchain variant of the Fuchsia base toolchain, find the
 # corresponding toolchain variant of user.libc_$target_cpu to build
-# the C library with it.
-libc_toolchain = sysroot_libc_base_toolchain
-if (toolchain_variant.suffix != "") {
-  libc_toolchain += string_replace(toolchain_variant.suffix, "-fuzzer", "")
+# the C library with it. If already in a user.libc toolchain (e.g. when building
+# libc for a non-default target architecture), libc_toolchain is the current
+# toolchain itself.
+if (toolchain_environment == "user.libc") {
+  libc_toolchain = current_toolchain
 } else {
-  libc_toolchain = system_libc_toolchain
+  libc_toolchain = sysroot_libc_base_toolchain
+  if (toolchain_variant.suffix != "") {
+    libc_toolchain += string_replace(toolchain_variant.suffix, "-fuzzer", "")
+  } else {
+    libc_toolchain = system_libc_toolchain
+  }
 }
 
 if (current_toolchain == libc_toolchain) {
@@ -519,7 +545,6 @@ if (current_toolchain == libc_toolchain) {
   # putting a separate new-libc.ifs into the source tree, generate it as a
   # subset of the libc.ifs that lives in the source tree.
   new_libc_missing_symbols = [
-    "__tls_get_addr",
     "_dl_debug_addr",
     "dl_set_loader_service",
     "dlclose",
@@ -528,7 +553,6 @@ if (current_toolchain == libc_toolchain) {
     "dlopen",
     "dlopen_vmo",
     "dlopen_vmo_vmar",
-    "dlsym",
   ]
 
   toolchain_utils_action("new-libc.ifs") {

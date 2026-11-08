@@ -151,6 +151,9 @@ variant("asan") {
     ]
   }
 
+  # Uses :variant-libprefix ("-dynamic-linker=asan/ld.so.1"). In Bazel, this
+  # corresponds to "-Wl,-dynamic-linker=asan/ld.so.1" (or "asan-ubsan/ld.so.1"
+  # when ubsan is enabled) in sanitizer.bzl:asan_feature.
   configs = [
     ":variant-libprefix",
     ":asan.rustflags",
@@ -182,6 +185,7 @@ sanitizer_rustflags("asan.rustflags") {
   shared_runtime = is_fuchsia
 }
 
+# LINT.IfChange(asan_and_lsan_options)
 sanitizer_default_options("asan_default_options") {
   # The asan runtime includes the lsan and ubsan runtimes, which parse their
   # own options.
@@ -205,7 +209,7 @@ sanitizer_default_options("lsan_default_options") {
 # marked that way, the asan_default_options default above will be removed.
 #
 # To trim this allowlist:
-# scripts/gn/trim_visibility.py --target="//build/config/sanitizers:suppress-lsan.DO-NOT-USE-THIS"
+# build/bazel/scripts/trim_visibility.py --target="//build/config/sanitizers:suppress-lsan.DO-NOT-USE-THIS"
 sanitizer_extra_options("suppress-lsan.DO-NOT-USE-THIS") {
   visibility = [
     "//src/cobalt/bin/system-metrics/*",
@@ -265,6 +269,8 @@ sanitizer_extra_options(
   tags = [ "asan" ]
   sanitizer = "asan"
 }
+
+# LINT.ThenChange(//build/config/sanitizers/BUILD.bazel:asan_and_lsan_options)
 
 config("no_sanitizers") {
   cflags = [ "-fno-sanitize=all" ]
@@ -347,6 +353,10 @@ variant("ubsan") {
   if (_prebuilt_runtime && toolchain_variant.tags + [ "asan" ] - [ "asan" ] ==
                            toolchain_variant.tags) {
     executable_deps = [ ":ubsan_default_options" ]
+
+    # In GN, standalone ubsan uses :variant-libprefix ("ubsan/ld.so.1").
+    # In Bazel, standalone ubsan uses ubsan/ld.so.1 via
+    # sanitizer.bzl:ubsan_feature.
     configs += [
       ":variant-libprefix",
       ":ubsan.rustflags",
@@ -361,16 +371,26 @@ sanitizer_rustflags("ubsan.rustflags") {
   shared_runtime = is_fuchsia
 }
 
+# LINT.IfChange(ubsan_default_options)
 sanitizer_default_options("ubsan_default_options") {
 }
 
+# LINT.ThenChange(//build/config/sanitizers/BUILD.bazel:ubsan_default_options)
+
+# LINT.IfChange(sancov)
 variant("sancov") {
   c_family_flags = [ "-fsanitize-coverage=trace-pc-guard" ]
 }
 
+# LINT.ThenChange(//build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/sanitizer.bzl:sancov)
+
 # LINT.IfChange(tsan)
 variant("tsan") {
   c_family_flags = [ "-fsanitize=thread" ]
+
+  # In GN, tsan on Fuchsia includes :variant-libprefix ("tsan/ld.so.1").
+  # In Bazel, tsan is currently host-only so no Fuchsia dynamic linker flag
+  # is set in sanitizer.bzl:tsan_feature.
   configs = [
     ":variant-libprefix",
     ":tsan.rustflags",
@@ -384,12 +404,20 @@ sanitizer_rustflags("tsan.rustflags") {
   shared_runtime = false
 }
 
+# LINT.IfChange(tsan_default_options)
 sanitizer_default_options("tsan_default_options") {
 }
+
+# LINT.ThenChange(//build/config/sanitizers/BUILD.bazel:tsan_default_options)
 
 # LINT.IfChange(hwasan)
 variant("hwasan") {
   c_family_flags = [ "-fsanitize=hwaddress" ]
+
+  # Uses :variant-libprefix ("-dynamic-linker=hwasan/ld.so.1"). In Bazel, this
+  # corresponds to "-Wl,-dynamic-linker=hwasan/ld.so.1" (or
+  # "hwasan-ubsan/ld.so.1" when ubsan is enabled) in
+  # sanitizer.bzl:hwasan_feature.
   configs = [
     ":variant-libprefix",
     ":hwasan.rustflags",
@@ -404,6 +432,7 @@ sanitizer_rustflags("hwasan.rustflags") {
   shared_runtime = is_fuchsia
 }
 
+# LINT.IfChange(hwasan_default_options)
 sanitizer_default_options("hwasan_default_options") {
   # The hwasan runtime includes the ubsan and lsan runtime, which parses its
   # own options.
@@ -413,6 +442,10 @@ sanitizer_default_options("hwasan_default_options") {
   ]
 }
 
+# LINT.ThenChange(//build/config/sanitizers/BUILD.bazel:hwasan_default_options)
+
+# LINT.IfChange(sanitizers_use_symbolizer_markup)
 extra_options_for_all_sanitizers("sanitizers_use_symbolizer_markup") {
   args = [ "enable_symbolizer_markup=1" ]
 }
+# LINT.ThenChange(//build/config/sanitizers/BUILD.bazel:sanitizers_use_symbolizer_markup)

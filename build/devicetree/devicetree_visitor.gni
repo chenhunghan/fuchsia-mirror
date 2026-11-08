@@ -84,11 +84,15 @@ template("devicetree_visitor") {
   source_set("${target_name}.static") {
     forward_variables_from(invoker,
                            [
+                             "check_includes",
                              "sources",
                              "deps",
                              "public_deps",
                              "testonly",
                            ])
+    if (defined(invoker.check_includes_strict)) {
+      check_includes_strict = invoker.check_includes_strict
+    }
     if (defined(invoker.non_sdk_deps)) {
       if (!defined(deps)) {
         deps = []

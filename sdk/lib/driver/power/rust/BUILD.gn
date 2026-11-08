@@ -32,6 +32,7 @@ rustc_library("rust") {
   test_deps = [
     "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust_next",
     "//src/lib/fuchsia",
+    "//src/lib/fuchsia-sync",
   ]
 
   sources = [ "src/lib.rs" ]

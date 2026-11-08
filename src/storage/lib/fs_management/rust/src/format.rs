@@ -149,11 +149,79 @@ async fn detect_disk_format_res(block_proxy: &BlockProxy) -> Result<DiskFormat, 
         return Ok(DiskFormat::VbMeta);
     }
 
-    if &data[1024..1024 + constants::F2FS_MAGIC.len()] == &constants::F2FS_MAGIC {
+    if &data[constants::F2FS_MAGIC_OFFSET as usize
+        ..constants::F2FS_MAGIC_OFFSET as usize + constants::F2FS_MAGIC.len()]
+        == &constants::F2FS_MAGIC
+    {
         return Ok(DiskFormat::F2fs);
     }
 
     if data.starts_with(&constants::FXFS_MAGIC) {
+        return Ok(DiskFormat::Fxfs);
+    }
+
+    // Check secondary/backup superblocks and headers before falling back to MBR/FAT (which only
+    // have two bytes of magic and are also present in a GPT protective MBR).
+    let check_magic = async |offset: u64, magic: &[u8]| -> Result<bool, Error> {
+        let Some(end) = offset.checked_add(magic.len() as u64) else {
+            return Ok(false);
+        };
+        if end <= data.len() as u64 {
+            return Ok(&data[offset as usize..end as usize] == magic);
+        }
+        let block_size = block_info.block_size as u64;
+        let aligned_offset = offset - offset % block_size;
+        let offset_in_block = (offset - aligned_offset) as usize;
+        let read_size = round_up(offset_in_block as u64 + magic.len() as u64, block_size)
+            .ok_or_else(|| anyhow!("overflow rounding read size up"))?;
+        if aligned_offset.checked_add(read_size).is_none_or(|end| end > device_size) {
+            return Ok(false);
+        }
+        let mut buf = vec![0; read_size as usize];
+        client
+            .read_at(MutableBufferSlice::Memory(&mut buf), aligned_offset)
+            .await
+            .context("read_at failed")?;
+        Ok(&buf[offset_in_block..offset_in_block + magic.len()] == magic)
+    };
+
+    let vpartition_table_size = u64::from_le_bytes(data[40..48].try_into().unwrap());
+    let allocation_table_size = u64::from_le_bytes(data[48..56].try_into().unwrap());
+    if vpartition_table_size == constants::FVM_PARTITION_TABLE_SIZE
+        && allocation_table_size > 0
+        && allocation_table_size % constants::FVM_BLOCK_SIZE == 0
+    {
+        if let Some(offset) = constants::FVM_BLOCK_SIZE
+            .checked_add(vpartition_table_size)
+            .and_then(|o| o.checked_add(allocation_table_size))
+        {
+            if check_magic(offset, &constants::FVM_MAGIC).await? {
+                return Ok(DiskFormat::Fvm);
+            }
+        }
+    }
+
+    if check_magic(device_size - block_info.block_size as u64, &constants::GPT_MAGIC).await? {
+        return Ok(DiskFormat::Gpt);
+    }
+
+    if check_magic(constants::MINFS_FVM_BACKUP_SUPERBLOCK_OFFSET, &constants::MINFS_MAGIC).await?
+        || check_magic(constants::MINFS_NON_FVM_BACKUP_SUPERBLOCK_OFFSET, &constants::MINFS_MAGIC)
+            .await?
+    {
+        return Ok(DiskFormat::Minfs);
+    }
+
+    if check_magic(constants::BLOBFS_FVM_BACKUP_SUPERBLOCK_OFFSET, &constants::BLOBFS_MAGIC).await?
+    {
+        return Ok(DiskFormat::Blobfs);
+    }
+
+    if check_magic(constants::F2FS_BACKUP_MAGIC_OFFSET, &constants::F2FS_MAGIC).await? {
+        return Ok(DiskFormat::F2fs);
+    }
+
+    if check_magic(constants::FXFS_BACKUP_SUPERBLOCK_OFFSET, &constants::FXFS_MAGIC).await? {
         return Ok(DiskFormat::Fxfs);
     }
 
@@ -191,6 +259,22 @@ mod tests {
 
         let fake_server = VmoBackedServer::new(block_count, block_size, content)
             .expect("Failed to create VmoBackedServer");
+        let mut request_handler = pin!(fake_server.serve(stream).fuse());
+
+        select! {
+          _ = request_handler => unreachable!(),
+          format = detect_disk_format_res(&proxy).fuse() => format,
+        }
+    }
+
+    async fn get_detected_disk_format_vmo(
+        vmo: zx::Vmo,
+        block_size: u32,
+    ) -> Result<DiskFormat, Error> {
+        let (proxy, stream) = create_proxy_and_stream::<BlockMarker>();
+
+        let fake_server =
+            VmoBackedServer::from_vmo(block_size, vmo).expect("Failed to create VmoBackedServer");
         let mut request_handler = pin!(fake_server.serve(stream).fuse());
 
         select! {
@@ -259,6 +343,13 @@ mod tests {
     }
 
     #[fuchsia::test]
+    async fn detect_format_gpt_unusual_block_size() {
+        let mut data = vec![0; 8192];
+        data[4096..4096 + 16].copy_from_slice(&constants::GPT_MAGIC);
+        assert_eq!(get_detected_disk_format(&data, 2, 4096).await.unwrap(), DiskFormat::Gpt);
+    }
+
+    #[fuchsia::test]
     async fn detect_format_minfs() {
         let mut data = vec![0; 4096];
         data[0..constants::MINFS_MAGIC.len()].copy_from_slice(&constants::MINFS_MAGIC);
@@ -286,6 +377,11 @@ mod tests {
     async fn detect_format_vb_meta() {
         let mut data = vec![0; 4096];
         data[0..constants::VB_META_MAGIC.len()].copy_from_slice(&constants::VB_META_MAGIC);
+        // Add the MBR magic string to the end of the first sector. These bytes in vbmeta tend to
+        // be randomish, and previously we've had bugs where if these bytes happened to match the
+        // MBR magic, we would misrecognise the partition (c.f. https://fxbug.dev/42137435).
+        data[510] = 0x55;
+        data[511] = 0xAA;
         assert_eq!(get_detected_disk_format(&data, 1000, 512).await.unwrap(), DiskFormat::VbMeta);
     }
 
@@ -331,6 +427,67 @@ mod tests {
         let mut data = vec![0; 4096];
         data[0..constants::FXFS_MAGIC.len()].copy_from_slice(&constants::FXFS_MAGIC);
         assert_eq!(get_detected_disk_format(&data, 1000, 512).await.unwrap(), DiskFormat::Fxfs);
+    }
+
+    #[fuchsia::test]
+    async fn detect_format_fvm_backup() {
+        let vmo = zx::Vmo::create(256 * 1024).unwrap();
+        vmo.write(&constants::FVM_PARTITION_TABLE_SIZE.to_le_bytes(), 40).unwrap();
+        vmo.write(&constants::FVM_BLOCK_SIZE.to_le_bytes(), 48).unwrap();
+        let secondary_offset = constants::FVM_BLOCK_SIZE
+            + constants::FVM_PARTITION_TABLE_SIZE
+            + constants::FVM_BLOCK_SIZE;
+        vmo.write(&constants::FVM_MAGIC, secondary_offset).unwrap();
+        assert_eq!(get_detected_disk_format_vmo(vmo, 512).await.unwrap(), DiskFormat::Fvm);
+    }
+
+    #[fuchsia::test]
+    async fn detect_format_gpt_backup() {
+        let block_size = 512u32;
+        let block_count = 128u64;
+        let vmo = zx::Vmo::create(block_count * block_size as u64).unwrap();
+        // Even with a protective MBR signature at LBA 0, a backup GPT header at the last LBA
+        // should be detected as Gpt.
+        vmo.write(&[0x55, 0xAA], 510).unwrap();
+        vmo.write(&constants::GPT_MAGIC, (block_count - 1) * block_size as u64).unwrap();
+        assert_eq!(get_detected_disk_format_vmo(vmo, block_size).await.unwrap(), DiskFormat::Gpt);
+    }
+
+    #[fuchsia::test]
+    async fn detect_format_minfs_non_fvm_backup() {
+        let vmo = zx::Vmo::create(128 * 1024).unwrap();
+        vmo.write(&constants::MINFS_MAGIC, constants::MINFS_NON_FVM_BACKUP_SUPERBLOCK_OFFSET)
+            .unwrap();
+        assert_eq!(get_detected_disk_format_vmo(vmo, 512).await.unwrap(), DiskFormat::Minfs);
+    }
+
+    #[fuchsia::test]
+    async fn detect_format_minfs_fvm_backup() {
+        let vmo = zx::Vmo::create(constants::MINFS_FVM_BACKUP_SUPERBLOCK_OFFSET + 8192).unwrap();
+        vmo.write(&constants::MINFS_MAGIC, constants::MINFS_FVM_BACKUP_SUPERBLOCK_OFFSET).unwrap();
+        assert_eq!(get_detected_disk_format_vmo(vmo, 512).await.unwrap(), DiskFormat::Minfs);
+    }
+
+    #[fuchsia::test]
+    async fn detect_format_blobfs_backup() {
+        let vmo = zx::Vmo::create(64 * 1024).unwrap();
+        vmo.write(&constants::BLOBFS_MAGIC, constants::BLOBFS_FVM_BACKUP_SUPERBLOCK_OFFSET)
+            .unwrap();
+        assert_eq!(get_detected_disk_format_vmo(vmo, 512).await.unwrap(), DiskFormat::Blobfs);
+    }
+
+    #[fuchsia::test]
+    async fn detect_format_f2fs_backup() {
+        let vmo = zx::Vmo::create(64 * 1024).unwrap();
+        vmo.write(&constants::F2FS_MAGIC, constants::F2FS_BACKUP_MAGIC_OFFSET).unwrap();
+        assert_eq!(get_detected_disk_format_vmo(vmo, 4096).await.unwrap(), DiskFormat::F2fs);
+    }
+
+    #[fuchsia::test]
+    async fn detect_format_fxfs_backup() {
+        let vmo = zx::Vmo::create(1024 * 1024).unwrap();
+        vmo.write(&constants::FXFS_MAGIC, constants::FXFS_BACKUP_SUPERBLOCK_OFFSET).unwrap();
+        assert_eq!(get_detected_disk_format_vmo(vmo, 4096).await.unwrap(), DiskFormat::Fxfs);
     }
 
     #[fuchsia::test]

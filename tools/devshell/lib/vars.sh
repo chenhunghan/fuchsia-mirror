@@ -12,7 +12,7 @@ readonly lib_vars_sh_sourced=true
 if [[ -n "${ZSH_VERSION:-}" ]]; then
   # shellcheck disable=SC2296,SC2298
   devshell_lib_dir=${${(%):-%x}:a:h}
-  FUCHSIA_DIR="$(dirname "$(dirname "$(dirname "${devshell_lib_dir}")")")"
+  FUCHSIA_DIR=${devshell_lib_dir:h:h:h}
 else
   # NOTE: Replace use of dirname with BASH substitutions to save 20ms of
   # startup time for all fx commands.
@@ -1076,34 +1076,88 @@ function get-device-addr-url {
   get-device-addr-resource | sed 's#%#%25#'
 }
 
-function fx-command-run {
+# Resolves the given fx command into:
+#   _fx_command_resolve_result (array): the command and any leading arguments
+#   _fx_command_inject_prebuilt_paths (int): 0 or 1
+#   _fx_command_child_path (string): the calculated PATH for the child process
+# Exits with an error if not found.
+#
+# Callers should declare `local -a _fx_command_resolve_result` and
+# `local _fx_command_inject_prebuilt_paths _fx_command_child_path` first to keep
+# the results scoped to the calling function.
+#
+# Args:
+#   $1: The fx command name.
+function _fx-command-resolve {
   local -r command_name="$1"
-  local command_path
-  # Use an array because the command may be multiple elements, if it comes from
-  # a .fx metadata file.
-  command_path="$(find_executable "${command_name}")"
-  if [[ $? -ne 0 || ! -x "${command_path}" ]]; then
+  local dispatch_info dispatch_rc
+  dispatch_info="$(resolve_fx_command_dispatch "${command_name}")"
+  dispatch_rc=$?
+  if [[ ${dispatch_rc} -eq 2 ]]; then
+    exit 2
+  elif [[ ${dispatch_rc} -ne 0 ]]; then
+    fx-error "Unknown command ${command_name}"
+    exit 1
+  fi
+  local -a df
+  mapfile -t df <<< "${dispatch_info}"
+  local d_kind="${df[0]:-}"
+  local d_vendor="${df[1]:-}"
+  local d_target="${df[2]:-}"
+  local d_script_or_path="${df[3]:-}"
+  local d_inject="${df[4]:-1}"
+  local raw_command_path=""
+  if [[ "${d_kind}" == "registered" ]]; then
+    fx-ensure-registered-host-tool "${command_name}" "${d_vendor}" "${d_target}" "${d_script_or_path}" || exit $?
+    raw_command_path="$(_find_registered_executable_from_entry "${command_name}" "${d_target}" "${d_script_or_path}" "${d_vendor}")" || {
+      fx-error "Unknown command ${command_name}"
+      exit 1
+    }
+    if [[ -n "${raw_command_path}" ]]; then
+      mapfile -t _fx_command_resolve_result <<< "${raw_command_path}"
+    else
+      _fx_command_resolve_result=()
+    fi
+  else
+    raw_command_path="$(find_exec_from_path "${d_script_or_path}")" || {
+      fx-error "Unknown command ${command_name}"
+      exit 1
+    }
+    read -r -a _fx_command_resolve_result <<< "${raw_command_path}"
+  fi
+  if [[ ${#_fx_command_resolve_result[@]} -eq 0 || ! -x "${_fx_command_resolve_result[0]}" ]]; then
     fx-error "Unknown command ${command_name}"
     exit 1
   fi
 
+  _fx_command_inject_prebuilt_paths="${d_inject}"
+  _fx_command_child_path="$(_fx_compute_command_path "${d_inject}" "${PATH}")"
+}
+
+function fx-command-run {
+  local -a _fx_command_resolve_result
+  local _fx_command_inject_prebuilt_paths
+  local _fx_command_child_path
+  _fx-command-resolve "$1"
   shift
-  env FX_CALLER="$0" "${command_path}" "$@"
+  env \
+    FX_CALLER="$0" \
+    FX_INJECT_PREBUILT_PATHS="${_fx_command_inject_prebuilt_paths}" \
+    PATH="${_fx_command_child_path}" \
+    "${_fx_command_resolve_result[@]}" "$@"
 }
 
 function fx-command-exec {
-  local -r command_name="$1"
-  local command_path
-  # Use an array because the command may be multiple elements, if it comes from
-  # a .fx metadata file.
-  command_path="$(find_executable "${command_name}")"
-  if [[ $? -ne 0 || ! -x "${command_path}" ]]; then
-    fx-error "Unknown command ${command_name}"
-    exit 1
-  fi
-
+  local -a _fx_command_resolve_result
+  local _fx_command_inject_prebuilt_paths
+  local _fx_command_child_path
+  _fx-command-resolve "$1"
   shift
-  exec env FX_CALLER="$0" "${command_path}" "$@"
+  exec env \
+    FX_CALLER="$0" \
+    FX_INJECT_PREBUILT_PATHS="${_fx_command_inject_prebuilt_paths}" \
+    PATH="${_fx_command_child_path}" \
+    "${_fx_command_resolve_result[@]}" "$@"
 }
 
 function fx-print-command-help {
@@ -1257,6 +1311,12 @@ function fx-run-build-command {
     # MAX_BUILD_CONCURRENCY comes from fx.config, written by `gn gen`.
     "--max-concurrency=${MAX_BUILD_CONCURRENCY:-0}"
   )
+  local summarize_failures="${SUMMARIZE_FAILURES:-${FX_BUILD_SUMMARIZE_FAILURES:-}}"
+  if [[ "${summarize_failures}" == "1" ]]; then
+    args+=("--summarize-failures")
+  elif [[ "${summarize_failures}" == "0" ]]; then
+    args+=("--no-summarize-failures")
+  fi
   if [[ "${print_full_cmd}" == "true" ]]; then
     args+=("--verbose")
   fi

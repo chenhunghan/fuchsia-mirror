@@ -5,7 +5,7 @@
 use crate::log::*;
 use crate::lsm_tree::types::ItemRef;
 use crate::object_store::allocator::{AllocatorKey, AllocatorValue};
-use crate::object_store::{AttributeId, ObjectDescriptor, ProjectId};
+use crate::object_store::{AttributeId, ObjectDescriptor, PosixOwner, ProjectId};
 use fxfs_crypto::WrappingKeyId;
 use std::ops::Range;
 
@@ -262,6 +262,7 @@ pub enum FsckError {
     MultipleLinksToDirectory(u64, u64),
     NextObjectIdInUse(u64, u64),
     NonFileMarkedAsVerified(u64, u64),
+    NonRootPosixOwnerMetadata(u64, u64, PosixOwner),
     NonRootProjectIdMetadata(u64, u64, ProjectId),
     ObjectCountMismatch(u64, u64, u64),
     ObjectHasChildren(u64, u64),
@@ -399,6 +400,12 @@ impl FsckError {
             }
             FsckError::MultipleLinksToDirectory(store_id, object_id) => {
                 format!("Directory {object_id} in store {store_id} has multiple links")
+            }
+            FsckError::NonRootPosixOwnerMetadata(store_id, object_id, owner) => {
+                format!(
+                    "PosixOwner {owner:?} metadata in store {store_id} attached to object \
+                     {object_id}"
+                )
             }
             FsckError::NonRootProjectIdMetadata(store_id, object_id, project_id) => {
                 format!(
@@ -642,6 +649,12 @@ impl FsckError {
             }
             FsckError::MultipleLinksToDirectory(store_id, oid) => {
                 error!(store_id, oid; "Directory with multiple links");
+            }
+            FsckError::NonRootPosixOwnerMetadata(store_id, object_id, owner) => {
+                error!(
+                    store_id,
+                    object_id, owner:?; "Non root object in volume with posix owner metadata"
+                );
             }
             FsckError::NonRootProjectIdMetadata(store_id, object_id, project_id) => {
                 error!(
@@ -982,6 +995,7 @@ mod tests {
             FsckError::MultipleLinksToDirectory(10, 20),
             FsckError::NextObjectIdInUse(10, 20),
             FsckError::NonFileMarkedAsVerified(10, 20),
+            FsckError::NonRootPosixOwnerMetadata(10, 20, PosixOwner::User(1000)),
             FsckError::NonRootProjectIdMetadata(10, 20, proj_id),
             FsckError::ObjectCountMismatch(10, 20, 3),
             FsckError::ObjectHasChildren(10, 20),

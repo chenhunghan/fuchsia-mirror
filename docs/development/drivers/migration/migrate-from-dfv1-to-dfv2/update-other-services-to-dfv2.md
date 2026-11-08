@@ -497,8 +497,6 @@ All the **documentation pages** mentioned in this section:
 - [Create a composite node][composite-node]
 - [Expose the driver capabilities][codelab-driver-service]
 - [Fuchsia component inspection overview][driver-inspect]
-- [An Example of the Tear-Down Sequence][device-lifecycle]
-  (from _Device driver lifecycle_)
 - [Parent Driver (The Server)][parent-driver-the-server]
   (from _FIDL tutorial_)
 
@@ -510,7 +508,6 @@ All the **documentation pages** mentioned in this section:
 [fake-pdev-h]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/devices/bus/testing/fake-pdev/fake-pdev.h
 [driver-testing-cpp]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/lib/driver/testing/cpp/
 [driver-base-test-cc]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/lib/driver/component/cpp/tests/driver_base_test.cc
-[device-lifecycle]: /docs/development/drivers/concepts/device_driver_model/device-lifecycle.md#an_example_of_the_tear-down_sequence
 [ddk-device-h-77]: https://source.corp.google.com/fuchsia/src/lib/ddk/include/lib/ddk/device.h;l=77
 [ddk-driver-h-29]: https://source.corp.google.com/fuchsia/src/lib/ddk/include/lib/ddk/driver.h;l=29
 [load-firmware]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/lib/ddk/include/lib/ddk/driver.h;l=416

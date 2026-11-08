@@ -82,18 +82,35 @@ impl MacAddrBytes for MacAddr {
     }
 }
 
-pub(crate) trait MacFmt {
-    fn to_mac_string(&self) -> String
-    where
-        Self: MacAddrBytes,
-    {
-        let mac = self.to_array();
-        format!(
-            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
-        )
+/// The single place in this crate that knows how to render 6 octets as a MAC
+/// address: colon-separated lowercase hex. Shared by [`MacAddr`] and
+/// [`crate::Bssid`].
+pub(crate) fn fmt_mac_octets(mac: MacAddrByteArray, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(
+        f,
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    )
+}
+
+impl redactor::Redactable for MacAddr {
+    fn fmt_unredacted(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_mac_octets(self.0, f)
+    }
+
+    fn fmt_redacted(
+        &self,
+        redactor: &dyn redactor::Redactor,
+        f: &mut fmt::Formatter<'_>,
+    ) -> fmt::Result {
+        fmt_mac_octets(redactor.redact_mac(self.0), f)?;
+        f.write_str(redactor::REDACTED_MARKER)
     }
 }
+
+// `Display` goes through the global redactor (if one has been installed), to
+// prevent leaking the raw address in sensitive contexts. `Debug` wraps it.
+redactor::impl_display_via_redactable!(MacAddr);
 
 pub trait OuiFmt {
     fn to_oui_uppercase(&self, sep: &str) -> String
@@ -105,7 +122,6 @@ pub trait OuiFmt {
     }
 }
 
-impl MacFmt for MacAddr {}
 impl OuiFmt for MacAddr {}
 
 impl From<Bssid> for MacAddr {
@@ -117,12 +133,6 @@ impl From<Bssid> for MacAddr {
 impl From<MacAddrByteArray> for MacAddr {
     fn from(bytes: MacAddrByteArray) -> MacAddr {
         MacAddr(bytes)
-    }
-}
-
-impl fmt::Display for MacAddr {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_mac_string())
     }
 }
 

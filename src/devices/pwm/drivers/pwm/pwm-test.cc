@@ -9,6 +9,7 @@
 #include <lib/driver/metadata/cpp/metadata_server.h>
 #include <lib/driver/testing/cpp/driver_test.h>
 
+#include <bind/fuchsia/cpp/bind.h>
 #include <gtest/gtest.h>
 
 #include "src/lib/testing/predicates/status.h"
@@ -130,6 +131,16 @@ class PwmTestEnvironment : public fdf_testing::Environment {
               std::format("channels.{}.period_ns", i),
               fuchsia_driver_metadata::DictionaryValue::WithInt64(
                   channels[i].period_ns().value())));
+        }
+        if (channels[i].global_id().has_value()) {
+          entries.push_back(fuchsia_driver_metadata::DictionaryEntry(
+              std::format("channels.{}.id", i), fuchsia_driver_metadata::DictionaryValue::WithInt64(
+                                                    channels[i].global_id().value())));
+        }
+        if (channels[i].name().has_value()) {
+          entries.push_back(fuchsia_driver_metadata::DictionaryEntry(
+              std::format("channels.{}.name", i),
+              fuchsia_driver_metadata::DictionaryValue::WithStr(channels[i].name().value())));
         }
       }
     }
@@ -355,6 +366,49 @@ TEST_F(PwmGenericMetadataTest, GenericMetadataTest) {
 
   zx::result pwm = driver_test_.Connect<fuchsia_hardware_pwm::Service::Pwm>("pwm-0");
   ASSERT_OK(pwm);
+
+  driver_test_.RunInNodeContext([](fdf_testing::TestNode& node) {
+    std::vector<fuchsia_driver_framework::NodeProperty2> properties =
+        node.children().at("pwm-0").GetProperties();
+    ASSERT_EQ(properties.size(), 2ul);
+    EXPECT_EQ(properties[0].key(), bind_fuchsia::ID);
+    ASSERT_TRUE(properties[0].value().int_value().has_value());
+    EXPECT_EQ(properties[0].value().int_value().value(), 0u);
+    EXPECT_EQ(properties[1].key(), bind_fuchsia::SERVICE);
+  });
+}
+
+// The DML global ID replaces the channel number as the child's `fuchsia.ID`.
+TEST_F(PwmGenericMetadataTest, GlobalId) {
+  static const fuchsia_hardware_pwm::PwmChannelsMetadata kTestMetadataChannels{{
+      .channels{{
+          {{.id = 0, .period_ns = 1000, .name = "pwm-a", .global_id = 0x12345678}},
+          {{.id = 1, .period_ns = 1000}},
+      }},
+  }};
+  driver_test_.RunInEnvironmentTypeContext(
+      [&](PwmTestEnvironment& env) { env.InitGeneric(kTestMetadataChannels); });
+  ASSERT_OK(driver_test_.StartDriver());
+
+  driver_test_.RunInNodeContext([](fdf_testing::TestNode& node) {
+    std::vector<fuchsia_driver_framework::NodeProperty2> properties =
+        node.children().at("pwm-0").GetProperties();
+    ASSERT_EQ(properties.size(), 3ul);
+    EXPECT_EQ(properties[0].key(), bind_fuchsia::ID);
+    ASSERT_TRUE(properties[0].value().int_value().has_value());
+    EXPECT_EQ(properties[0].value().int_value().value(), 0x12345678u);
+    EXPECT_EQ(properties[1].key(), bind_fuchsia::SERVICE);
+    EXPECT_EQ(properties[2].key(), bind_fuchsia::NAME);
+    ASSERT_TRUE(properties[2].value().string_value().has_value());
+    EXPECT_EQ(properties[2].value().string_value().value(), "pwm-a");
+
+    // Channels without a global ID keep the channel number.
+    properties = node.children().at("pwm-1").GetProperties();
+    ASSERT_EQ(properties.size(), 2ul);
+    EXPECT_EQ(properties[0].key(), bind_fuchsia::ID);
+    ASSERT_TRUE(properties[0].value().int_value().has_value());
+    EXPECT_EQ(properties[0].value().int_value().value(), 1u);
+  });
 }
 }  // namespace
 

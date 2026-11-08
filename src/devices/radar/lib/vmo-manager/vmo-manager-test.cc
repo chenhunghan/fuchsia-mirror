@@ -76,6 +76,52 @@ TEST(VmoManagerTest, VmoAlreadyRegistered) {
   EXPECT_NO_FAILURES(KoidsEqual(unregistered_vmos[1].get(), vmos[9]->get()));
 }
 
+TEST(VmoManagerTest, LockedVmoStaysValidAfterFailedRegistration) {
+  VmoManager manager(kTestBurstSize);
+
+  zx::vmo original_vmo;
+  ASSERT_OK(zx::vmo::create(kTestBurstSize, 0, &original_vmo));
+  const zx::unowned_vmo unowned_original = original_vmo.borrow();
+
+  uint32_t vmo_id = 7;
+  auto status = manager.RegisterVmos(fidl::VectorView<const uint32_t>::FromExternal(&vmo_id, 1),
+                                     fidl::VectorView<zx::vmo>::FromExternal(&original_vmo, 1));
+  ASSERT_EQ(status, fuchsia_hardware_radar::wire::StatusCode::kSuccess);
+
+  constexpr uint8_t kTestBurstData1[] = "first burst data";
+  fit::result locked_id =
+      manager.WriteUnlockedVmoAndGetId({kTestBurstData1, sizeof(kTestBurstData1)});
+  ASSERT_TRUE(locked_id.is_ok());
+  EXPECT_EQ(*locked_id, 7u);
+
+  // Attempt to register the same VMO ID with a read-only VMO while VMO 7 is locked.
+  zx::vmo read_only_vmo;
+  ASSERT_OK(zx::vmo::create(kTestBurstSize, 0, &read_only_vmo));
+  ASSERT_OK(read_only_vmo.replace(ZX_RIGHT_READ | ZX_RIGHT_MAP, &read_only_vmo));
+
+  status = manager.RegisterVmos(fidl::VectorView<const uint32_t>::FromExternal(&vmo_id, 1),
+                                fidl::VectorView<zx::vmo>::FromExternal(&read_only_vmo, 1));
+  EXPECT_EQ(status, fuchsia_hardware_radar::wire::StatusCode::kVmoAlreadyRegistered);
+
+  // Unlock VMO 7 and write to it again. The original VMO mapping must still be valid.
+  manager.UnlockVmo(7);
+
+  constexpr uint8_t kTestBurstData2[] = "second burst data";
+  locked_id = manager.WriteUnlockedVmoAndGetId({kTestBurstData2, sizeof(kTestBurstData2)});
+  ASSERT_TRUE(locked_id.is_ok());
+  EXPECT_EQ(*locked_id, 7u);
+
+  char buffer[sizeof(kTestBurstData2)];
+  EXPECT_OK(unowned_original->read(buffer, 0, sizeof(buffer)));
+  EXPECT_BYTES_EQ(buffer, kTestBurstData2, sizeof(kTestBurstData2));
+
+  zx::vmo unregistered_vmo;
+  status = manager.UnregisterVmos(fidl::VectorView<const uint32_t>::FromExternal(&vmo_id, 1),
+                                  fidl::VectorView<zx::vmo>::FromExternal(&unregistered_vmo, 1));
+  EXPECT_EQ(status, fuchsia_hardware_radar::wire::StatusCode::kSuccess);
+  EXPECT_NO_FAILURES(KoidsEqual(unregistered_vmo.get(), unowned_original->get()));
+}
+
 TEST(VmoManagerTest, VmoTooSmall) {
   VmoManager manager(kTestBurstSize);
 

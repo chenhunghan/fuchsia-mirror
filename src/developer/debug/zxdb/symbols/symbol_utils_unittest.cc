@@ -6,7 +6,6 @@
 
 #include <gtest/gtest.h>
 
-#include "src/developer/debug/zxdb/symbols/base_type.h"
 #include "src/developer/debug/zxdb/symbols/collection.h"
 #include "src/developer/debug/zxdb/symbols/data_member.h"
 #include "src/developer/debug/zxdb/symbols/function.h"
@@ -17,6 +16,8 @@
 #include "src/developer/debug/zxdb/symbols/variable.h"
 
 namespace zxdb {
+
+namespace {
 
 // This tests GetSymbolScopePrefix and checks Symbol::GetFullName() for those types.
 TEST(SymbolUtils, GetSymbolScopePrefix) {
@@ -135,5 +136,14 @@ TEST(SymbolUtils, AddAllTemplateParametersToNameUnresolvedValueType) {
   // Since the type is unresolved, AddTemplateValueToName will return early and do nothing.
   EXPECT_EQ("MyClass", name);
 }
+
+TEST(SymbolUtils, StripTemplate) {
+  EXPECT_EQ("", StripTemplate(""));
+  EXPECT_EQ("ns::MyClass", StripTemplate("ns::MyClass"));
+  EXPECT_EQ("ns::MyClass", StripTemplate("ns::MyClass<int>"));
+  EXPECT_EQ("ns::MyClass", StripTemplate("ns::MyClass<std::vector<int>, bool>"));
+}
+
+}  // namespace
 
 }  // namespace zxdb

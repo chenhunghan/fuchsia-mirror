@@ -17,15 +17,11 @@ import typing as T
 
 _DEBUG = False
 
+from build.bazel.scripts import build_utils
+from build.beads.scripts import compare_utils, flags_differences
+from build.beads.scripts.compare_utils import CompareCommandsResult
+
 _FUCHSIA_DIR = pathlib.Path(__file__).parent.parent.parent.parent
-
-sys.path.insert(0, str(_FUCHSIA_DIR / "build/bazel/scripts"))
-import build_utils
-
-sys.path.insert(0, str(_FUCHSIA_DIR / "build/beads/scripts"))
-import compare_utils
-import flags_differences
-from compare_utils import CompareCommandsResult
 
 BEADS_TOOLCHAINS_FILENAME = "beads_toolchains.json"
 
@@ -81,6 +77,12 @@ def resolve_gn_label_for_toolchains(
         target_host_tc = host_variant_tc or host_tc
         if target_host_tc and target_host_tc != tc:
             return f"{base_label}({target_host_tc})"
+    elif tc.startswith("//build/toolchain/fuchsia:"):
+        target_fuchsia_tc = fuchsia_tc or default_tc
+        if target_fuchsia_tc:
+            if tc.endswith("-shared"):
+                return f"{base_label}({target_fuchsia_tc}-shared)"
+            return f"{base_label}({target_fuchsia_tc})"
     return gn_label
 
 

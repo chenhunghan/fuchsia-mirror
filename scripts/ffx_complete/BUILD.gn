@@ -8,7 +8,7 @@ if (is_host) {
   python_host_test("ffx_gen_complete_test") {
     main_source = "ffx_gen_complete_test.py"
     sources = [ "ffx_gen_complete.py" ]
-    deps = [ "//scripts/memory/dataclasses_json_lite" ]
+    deps = [ "//src/memory/tools/dataclasses_json_lite" ]
     extra_args = [
       "--ffx_path",
       rebase_path("${host_tools_dir}/ffx", root_build_dir),

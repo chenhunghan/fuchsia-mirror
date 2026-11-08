@@ -27,7 +27,8 @@
 #include <fbl/string_printf.h>
 #include <fbl/vector.h>
 #include <perftest/runner.h>
-#include <re2/re2.h>
+
+#include "re2/re2.h"
 
 namespace perftest {
 namespace {

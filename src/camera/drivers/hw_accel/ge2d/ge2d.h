@@ -138,10 +138,9 @@ class Ge2dDevice : public Ge2dDeviceType, public ddk::Ge2dProtocol<Ge2dDevice, d
 
   struct TaskInfo {
     Ge2dOp op;
-    Ge2dTask* task;
-    uint32_t index;
-    rect_t crop_rect;
-    uint32_t task_index;
+    uint32_t index = 0;
+    rect_t crop_rect = {};
+    uint32_t task_index = 0;
     uint64_t capture_timestamp = 0;
   };
 
@@ -158,6 +157,9 @@ class Ge2dDevice : public Ge2dDeviceType, public ddk::Ge2dProtocol<Ge2dDevice, d
   void InitializeScalingCoefficients();
   void InitializeScaler(uint32_t input_width, uint32_t input_height, uint32_t output_width,
                         uint32_t output_height);
+  // Looks up |task_index| under |interface_lock_|. The returned pointer is only guaranteed to
+  // remain valid on |processing_thread_|, which is the sole thread that erases from |task_map_|.
+  Ge2dTask* LookupTask(uint32_t task_index);
   void ProcessSetCropRect(TaskInfo& info);
   void ProcessTask(TaskInfo& info);
   void ProcessChangeResolution(TaskInfo& info);

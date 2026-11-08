@@ -1,0 +1,49 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/host_tests:host_test.bzl", "host_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":perftest-pkg"],
+    visibility = ["//zircon/system/ulib:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":perftest_host_test"],
+    visibility = ["//zircon/system/ulib:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "perftest",
+    srcs = [
+        "results-test.cc",
+        "runner-test.cc",
+    ],
+    gn_output_name = "perf-test",
+    deps = [
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/perftest",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "perftest-pkg",
+    package_name = "perf-test",
+    unit_tests = [":perftest"],
+)
+
+host_test(
+    name = "perftest_host_test",
+    binary = ":perftest",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)

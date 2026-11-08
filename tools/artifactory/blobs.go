@@ -32,6 +32,16 @@ func BlobsUploads(blobManifestPath, deliveryBlobConfigPath, srcDir, dstDir strin
 		return nil, fmt.Errorf("unable to unmarshal blob manifest: %w", err)
 	}
 
+	// Upload delivery blobs if the config exists, otherwise upload uncompressed blobs.
+	blobType, err := build.GetDeliveryBlobType(deliveryBlobConfigPath)
+	if err != nil {
+		return nil, fmt.Errorf("unable to get delivery blob type: %w", err)
+	}
+	if blobType != nil {
+		blobTypeString := fmt.Sprint(*blobType)
+		srcDir = path.Join(srcDir, blobTypeString)
+		dstDir = path.Join(dstDir, blobTypeString)
+	}
 	for _, blob := range blobs {
 		uploads = append(uploads,
 			Upload{
@@ -39,23 +49,6 @@ func BlobsUploads(blobManifestPath, deliveryBlobConfigPath, srcDir, dstDir strin
 				Destination: path.Join(dstDir, blob.Merkle),
 				Deduplicate: true,
 			})
-	}
-
-	// Also upload delivery blobs if the config exists.
-	blobType, err := build.GetDeliveryBlobType(deliveryBlobConfigPath)
-	if err != nil {
-		return nil, fmt.Errorf("unable to get delivery blob type: %w", err)
-	}
-	if blobType != nil {
-		blobTypeString := fmt.Sprint(*blobType)
-		for _, blob := range blobs {
-			uploads = append(uploads,
-				Upload{
-					Source:      path.Join(srcDir, blobTypeString, blob.Merkle),
-					Destination: path.Join(dstDir, blobTypeString, blob.Merkle),
-					Deduplicate: true,
-				})
-		}
 	}
 	return uploads, nil
 }

@@ -7,6 +7,7 @@
 #include <assert.h>
 #include <zircon/types.h>
 
+#include <arch/mp.h>
 #include <arch/mp_unplug_event.h>
 #include <kernel/cpu.h>
 #include <kernel/deadline.h>
@@ -25,102 +26,92 @@ static_assert(static_cast<uint8_t>(mp_ipi::HALT) == 3);
 
 extern "C" {
 
-void cpp_mp_set_cpu_online(cpu_num_t cpu, bool online);
-void cpp_mp_set_curr_cpu_online(bool online);
-cpu_mask_t cpp_mp_get_online_mask();
-bool cpp_mp_is_cpu_online(cpu_num_t cpu);
-
-void cpp_mp_signal_curr_cpu_ready();
-zx_status_t cpp_mp_wait_for_all_cpus_ready(const Deadline* deadline);
-
-void cpp_mp_reschedule(cpu_mask_t mask, uint32_t flags);
-void cpp_mp_reschedule_self();
-void cpp_mp_interrupt(mp_ipi_target target, cpu_mask_t mask);
-
-void cpp_mp_mbx_generic_irq();
-void cpp_mp_mbx_reschedule_irq();
-void cpp_mp_mbx_interrupt_irq();
-
-void cpp_mp_sync_exec(mp_ipi_target target, cpu_mask_t mask, mp_sync_task_t task, void* context);
-
-zx_status_t cpp_mp_hotplug_cpu_mask(cpu_mask_t mask);
-zx_status_t cpp_mp_hotplug_cpu(cpu_num_t cpu);
-void cpp_mp_unplug_current_cpu();
 void cpp_mp_unplug_event_signal(MpUnplugEvent* event);
-zx_status_t cpp_mp_unplug_cpu_mask(cpu_mask_t mask, zx_instant_mono_t deadline);
-zx_status_t cpp_mp_unplug_cpu(cpu_num_t cpu);
+zx_status_t cpp_mp_unplug_event_unsignal(MpUnplugEvent* event);
+zx_status_t cpp_mp_unplug_event_wait_deadline(MpUnplugEvent* event, zx_instant_mono_t deadline,
+                                              Interruptible interruptible);
+
+void rust_mp_init();
+void rust_mp_reschedule(cpu_mask_t mask, uint32_t flags);
+void rust_mp_reschedule_self();
+void rust_mp_interrupt(uint8_t target, cpu_mask_t mask);
+void rust_mp_sync_exec(uint8_t target, cpu_mask_t mask, mp_sync_task_t task, void* context);
+zx_status_t rust_mp_hotplug_cpu_mask(cpu_mask_t mask);
+__NO_RETURN void rust_mp_unplug_current_cpu();
+zx_status_t rust_mp_unplug_cpu_mask(cpu_mask_t mask, zx_instant_mono_t deadline);
+void rust_mp_mbx_reschedule_irq();
+void rust_mp_mbx_generic_irq();
+void rust_mp_mbx_interrupt_irq();
+void rust_mp_set_cpu_online(cpu_num_t cpu, bool online);
+cpu_mask_t rust_mp_get_online_mask();
+bool rust_mp_is_cpu_online(cpu_num_t cpu);
+void rust_mp_signal_curr_cpu_ready();
+zx_status_t rust_mp_wait_for_all_cpus_ready(const Deadline* deadline);
+zx_status_t rust_platform_mp_cpu_hotplug(cpu_num_t cpu_id);
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_mp_unplug_event_signal(MpUnplugEvent* event) { event->Signal(); }
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_mp_set_cpu_online(cpu_num_t cpu, bool online) {
-  mp_set_cpu_online(cpu, online);
+FFI_ALWAYS_INLINE void cpp_mp_unplug_event_signal(MpUnplugEvent* event) {
+  DEBUG_ASSERT(event != nullptr);
+  event->Signal();
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_mp_set_curr_cpu_online(bool online) { mp_set_curr_cpu_online(online); }
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE cpu_mask_t cpp_mp_get_online_mask() { return mp_get_online_mask(); }
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE bool cpp_mp_is_cpu_online(cpu_num_t cpu) { return mp_is_cpu_online(cpu); }
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_mp_signal_curr_cpu_ready() { mp_signal_curr_cpu_ready(); }
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE zx_status_t cpp_mp_wait_for_all_cpus_ready(const Deadline* deadline) {
-  DEBUG_ASSERT(deadline != nullptr);
-  return mp_wait_for_all_cpus_ready(*deadline);
+FFI_ALWAYS_INLINE zx_status_t cpp_mp_unplug_event_unsignal(MpUnplugEvent* event) {
+  DEBUG_ASSERT(event != nullptr);
+  return event->Unsignal();
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_mp_reschedule(cpu_mask_t mask, uint32_t flags) {
-  mp_reschedule(mask, flags);
+FFI_ALWAYS_INLINE zx_status_t cpp_mp_unplug_event_wait_deadline(MpUnplugEvent* event,
+                                                                zx_instant_mono_t deadline,
+                                                                Interruptible interruptible) {
+  DEBUG_ASSERT(event != nullptr);
+  return event->WaitDeadline(deadline, interruptible);
 }
 
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_mp_reschedule_self() { mp_reschedule_self(); }
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_mp_interrupt(mp_ipi_target target, cpu_mask_t mask) {
-  mp_interrupt(target, mask);
+zx_status_t platform_mp_cpu_hotplug(cpu_num_t cpu_id) {
+  return rust_platform_mp_cpu_hotplug(cpu_id);
 }
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_mp_mbx_generic_irq() { mp_mbx_generic_irq(); }
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_mp_mbx_reschedule_irq() { mp_mbx_reschedule_irq(); }
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_mp_mbx_interrupt_irq() { mp_mbx_interrupt_irq(); }
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_mp_sync_exec(mp_ipi_target target, cpu_mask_t mask, mp_sync_task_t task,
-                                        void* context) {
-  mp_sync_exec(target, mask, task, context);
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE zx_status_t cpp_mp_hotplug_cpu_mask(cpu_mask_t mask) {
-  return mp_hotplug_cpu_mask(mask);
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE zx_status_t cpp_mp_hotplug_cpu(cpu_num_t cpu) { return mp_hotplug_cpu(cpu); }
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_mp_unplug_current_cpu() { mp_unplug_current_cpu(); }
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE zx_status_t cpp_mp_unplug_cpu_mask(cpu_mask_t mask, zx_instant_mono_t deadline) {
-  return mp_unplug_cpu_mask(mask, deadline);
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE zx_status_t cpp_mp_unplug_cpu(cpu_num_t cpu) { return mp_unplug_cpu(cpu); }
 
 }  // extern "C"
+
+void mp_init() { rust_mp_init(); }
+
+void mp_reschedule(cpu_mask_t mask, uint flags) { rust_mp_reschedule(mask, flags); }
+
+void mp_reschedule_self() { rust_mp_reschedule_self(); }
+
+void mp_interrupt(mp_ipi_target target, cpu_mask_t mask) {
+  rust_mp_interrupt(static_cast<uint8_t>(target), mask);
+}
+
+void mp_sync_exec(mp_ipi_target target, cpu_mask_t mask, mp_sync_task_t task, void* context) {
+  DEBUG_ASSERT(task != nullptr);
+  rust_mp_sync_exec(static_cast<uint8_t>(target), mask, task, context);
+}
+
+zx_status_t mp_hotplug_cpu_mask(cpu_mask_t mask) { return rust_mp_hotplug_cpu_mask(mask); }
+
+__NO_RETURN void mp_unplug_current_cpu() { rust_mp_unplug_current_cpu(); }
+
+zx_status_t mp_unplug_cpu_mask(cpu_mask_t mask, zx_instant_mono_t deadline) {
+  return rust_mp_unplug_cpu_mask(mask, deadline);
+}
+
+void mp_mbx_reschedule_irq() { rust_mp_mbx_reschedule_irq(); }
+
+void mp_mbx_generic_irq() { rust_mp_mbx_generic_irq(); }
+
+void mp_mbx_interrupt_irq() { rust_mp_mbx_interrupt_irq(); }
+
+void mp_set_cpu_online(cpu_num_t cpu, bool online) { rust_mp_set_cpu_online(cpu, online); }
+
+cpu_mask_t mp_get_online_mask() { return rust_mp_get_online_mask(); }
+
+bool mp_is_cpu_online(cpu_num_t cpu) { return rust_mp_is_cpu_online(cpu); }
+
+void mp_signal_curr_cpu_ready() { rust_mp_signal_curr_cpu_ready(); }
+
+zx_status_t mp_wait_for_all_cpus_ready(Deadline deadline) {
+  return rust_mp_wait_for_all_cpus_ready(&deadline);
+}

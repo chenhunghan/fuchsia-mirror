@@ -44,8 +44,11 @@ use starnix_modules_gpu::gpu_device_init;
 use starnix_modules_gralloc::gralloc_device_init;
 use starnix_modules_hvdcp_opti::hvdcp_opti_init;
 use starnix_modules_inotify::inotify::inotify_init;
+pub use starnix_modules_input::serve_input_device_registry;
 use starnix_modules_input::uinput::register_uinput_device;
-use starnix_modules_input::{EventProxyMode, StartRelaysArgs, new_input_relay};
+use starnix_modules_input::{
+    EventProxyMode, StartRelaysArgs, get_or_init_direct_input, new_input_relay,
+};
 use starnix_modules_kgsl::kgsl_device_init;
 pub use starnix_modules_layeredfs::{LayeredFsBuilder, LayeredFsMounts};
 use starnix_modules_loop::{create_loop_control_device, loop_device_init};
@@ -60,6 +63,7 @@ use starnix_modules_procfs::proc_fs;
 use starnix_modules_pstore::pstore_fs;
 use starnix_modules_rtc::rtc_device_init;
 use starnix_modules_selinuxfs::selinux_fs;
+use starnix_modules_system_mode::init_system_mode;
 use starnix_modules_touch_power_policy::TouchPowerPolicyDevice;
 use starnix_modules_tracefs::trace_fs;
 use starnix_modules_tun::DevTun;
@@ -74,17 +78,7 @@ use std::sync::Arc;
 
 /// Modules that are enabled by default for all containers unless explicitly disabled via
 /// `"-<module>"` in `program.modules`.
-const DEFAULT_MODULES: &[&str] = &[
-    "battery_manager",
-    "device_mapper",
-    "goog_chip_info",
-    "hw_random",
-    "loop",
-    "power_residency",
-    "rtc",
-    "tun",
-    "zram",
-];
+const DEFAULT_MODULES: &[&str] = &["device_mapper", "hw_random", "loop", "rtc", "tun", "zram"];
 
 /// Validates that `name` is a known container module and that `args` (if `Some`) are valid for
 /// that module.
@@ -114,6 +108,7 @@ pub fn validate_module(name: &str, args: Option<&[&str]>) -> Result<(), Error> {
         | "network_manager"
         | "power_residency"
         | "rtc"
+        | "system_mode"
         | "tun"
         | "usbfs"
         | "wakeup_test"
@@ -145,7 +140,7 @@ impl Modules {
             "boot_notifier" => starnix_modules_boot::module_init(kernel, args)?,
             "data_collection_consent_sync" => consent_sync_init(kernel),
             "device_mapper" => {
-                registry.register_device(
+                registry.add_device(
                     kernel,
                     "device-mapper".into(),
                     DeviceMetadata::new(
@@ -155,7 +150,7 @@ impl Modules {
                     ),
                     registry.objects.misc_class(),
                     create_device_mapper,
-                )?;
+                );
                 device_mapper_init(kernel)?;
             }
             "fastrpc" => fastrpc_device_init(kernel),
@@ -179,17 +174,17 @@ impl Modules {
             "gralloc" => gralloc_device_init(kernel),
             "hvdcp_opti" => hvdcp_opti_init(kernel),
             "hw_random" => {
-                registry.register_device(
+                registry.add_device(
                     kernel,
                     "hw_random".into(),
                     DeviceMetadata::new("hwrng".into(), DeviceId::HW_RANDOM, DeviceMode::Char),
                     registry.objects.misc_class(),
                     simple_device_ops::<DevRandom>,
-                )?;
+                );
             }
             "kgsl" => kgsl_device_init(kernel),
             "loop" => {
-                registry.register_device(
+                registry.add_device(
                     kernel,
                     "loop-control".into(),
                     DeviceMetadata::new(
@@ -199,7 +194,7 @@ impl Modules {
                     ),
                     registry.objects.misc_class(),
                     create_loop_control_device,
-                )?;
+                );
                 loop_device_init(kernel)?;
             }
             "magma" => starnix_modules_magma::module_init(kernel, args)?,
@@ -215,15 +210,16 @@ impl Modules {
             "perfetto" => starnix_modules_perfetto_consumer::module_init(kernel, args)?,
             "power_residency" => init_power_residency_device(kernel),
             "rtc" => rtc_device_init(kernel)?,
+            "system_mode" => init_system_mode(kernel),
             "thermal" => starnix_modules_thermal::module_init(kernel, args)?,
             "tun" => {
-                registry.register_device(
+                registry.add_device(
                     kernel,
                     "tun".into(),
                     DeviceMetadata::new("tun".into(), DeviceId::TUN, DeviceMode::Char),
                     registry.objects.misc_class(),
                     simple_device_ops::<DevTun>,
-                )?;
+                );
             }
             "usbfs" => {
                 usbfs_init(kernel).context("Failed to initialize usbfs")?;
@@ -236,27 +232,20 @@ impl Modules {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ModuleState {
-    DefaultEnabled,
-    Enabled(Vec<String>),
-    Disabled,
-}
-
 /// Configuration and initialization registry for container kernel modules.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Modules {
-    entries: BTreeMap<String, ModuleState>,
+    /// Map from module name to `Some(args)` when enabled, or `None` when explicitly disabled via
+    /// `"-<module>"`.
+    entries: BTreeMap<String, Option<Vec<String>>>,
     enable_visual_debugging: bool,
     initial_view_id_annotation: String,
 }
 
 impl Default for Modules {
     fn default() -> Self {
-        let entries = DEFAULT_MODULES
-            .iter()
-            .map(|&module| (module.to_string(), ModuleState::DefaultEnabled))
-            .collect();
+        let entries =
+            DEFAULT_MODULES.iter().map(|&module| (module.to_string(), Some(Vec::new()))).collect();
         Self { entries, enable_visual_debugging: false, initial_view_id_annotation: String::new() }
     }
 }
@@ -296,7 +285,7 @@ impl Modules {
     /// Disables `module`, preventing it from being initialized even if enabled by default or in an
     /// included manifest shard.
     fn disable(&mut self, module: &str) {
-        self.entries.insert(module.to_string(), ModuleState::Disabled);
+        self.entries.insert(module.to_string(), None);
     }
 
     /// Enables `module` with no arguments, preserving any arguments or explicit disablement already
@@ -312,14 +301,14 @@ impl Modules {
     /// manifest shard) do not overwrite explicit module arguments.
     pub fn add_with_args(&mut self, module: &str, args: Vec<String>) {
         match self.entries.get_mut(module) {
-            Some(ModuleState::Disabled) => {}
-            Some(ModuleState::Enabled(existing_args)) => {
+            Some(None) => {}
+            Some(Some(existing_args)) => {
                 if !args.is_empty() {
                     *existing_args = args;
                 }
             }
-            Some(ModuleState::DefaultEnabled) | None => {
-                self.entries.insert(module.to_string(), ModuleState::Enabled(args));
+            None => {
+                self.entries.insert(module.to_string(), Some(args));
             }
         }
     }
@@ -331,28 +320,14 @@ impl Modules {
 
     /// Returns the arguments configured for `module`, if enabled.
     pub fn args(&self, module: &str) -> Option<&[String]> {
-        match self.entries.get(module)? {
-            ModuleState::DefaultEnabled => {
-                // `hvdcp_opti` registers its own `power_supply/battery` device, superseding the
-                // default `battery_manager` module unless `battery_manager` was explicitly enabled.
-                if module == "battery_manager"
-                    && matches!(self.entries.get("hvdcp_opti"), Some(ModuleState::Enabled(_)))
-                {
-                    None
-                } else {
-                    Some(&[])
-                }
-            }
-            ModuleState::Enabled(args) => Some(args.as_slice()),
-            ModuleState::Disabled => None,
-        }
+        self.entries.get(module)?.as_deref()
     }
 
     /// Validates all configured module names, module arguments, and cross-module constraints.
     pub fn validate(&self) -> Result<(), Error> {
-        for module in self.entries.keys() {
+        for (module, args) in &self.entries {
             let arg_refs: Option<Vec<&str>> =
-                self.args(module).map(|a| a.iter().map(String::as_str).collect());
+                args.as_ref().map(|a| a.iter().map(String::as_str).collect());
             validate_module(module, arg_refs.as_deref())?;
         }
         if self.is_enabled("battery_manager") && self.is_enabled("hvdcp_opti") {
@@ -376,8 +351,8 @@ impl Modules {
     /// Records the enabled modules and their arguments under a `"modules"` child Inspect node.
     pub fn record_inspect(&self, parent_node: &fuchsia_inspect::Node) {
         parent_node.record_child("modules", |inspect_node| {
-            for module in self.entries.keys() {
-                if let Some(args) = self.args(module) {
+            for (module, args) in &self.entries {
+                if let Some(args) = args {
                     inspect_node.record_string(module, args.join(" "));
                 }
             }
@@ -386,8 +361,8 @@ impl Modules {
 
     /// Initializes all enabled modules in `kernel`.
     pub fn init_modules(&self, kernel: &Arc<Kernel>) -> Result<(), Error> {
-        for module in self.entries.keys() {
-            if let Some(args) = self.args(module) {
+        for (module, args) in &self.entries {
+            if let Some(args) = args {
                 let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
                 self.init_module(module, kernel, &arg_refs)?;
             }
@@ -445,6 +420,8 @@ fn init_framebuffer_module(
     };
 
     let (input_events_relay, input_events_relay_handle) = new_input_relay();
+    let direct_input_manager = get_or_init_direct_input(kernel);
+    let input_events_relay = input_events_relay.with_direct_input_manager(direct_input_manager);
     input_events_relay.start_relays(
         kernel,
         StartRelaysArgs {
@@ -479,13 +456,13 @@ fn init_framebuffer_module(
 /// `kernel.kthreads`, so this function must be called after `kernel.kthreads` has been initialized.
 pub fn init_common_devices(kernel: &Kernel) -> Result<(), Errno> {
     let registry = &kernel.device_registry;
-    registry.register_device(
+    registry.add_device(
         kernel,
         "fuse".into(),
         DeviceMetadata::new("fuse".into(), DeviceId::FUSE, DeviceMode::Char),
         registry.objects.misc_class(),
         open_fuse_device,
-    )?;
+    );
     mem_device_init(kernel)?;
     tty_device_init(kernel)?;
     Ok(())

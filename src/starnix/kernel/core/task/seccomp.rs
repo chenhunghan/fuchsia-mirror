@@ -5,7 +5,7 @@
 use crate::mm::MemoryAccessorExt;
 use crate::signals::{SignalDetail, SignalInfo, send_standard_signal};
 use crate::task::{
-    CurrentTask, EventHandler, ExitStatus, Kernel, Task, TaskFlags, WaitCanceler, WaitQueue, Waiter,
+    CurrentTask, EventHandler, ExitStatus, Kernel, Task, WaitCanceler, WaitQueue, Waiter,
 };
 use crate::vfs::buffers::{InputBuffer, OutputBuffer};
 use crate::vfs::{
@@ -14,10 +14,10 @@ use crate::vfs::{
 };
 use bstr::ByteSlice;
 use ebpf::{
-    BPF_A, BPF_ABS, BPF_IMM, BPF_IND, BPF_JA, BPF_JEQ, BPF_JGE, BPF_JGT, BPF_JMP, BPF_JSET, BPF_K,
-    BPF_LD, BPF_RET, BPF_SRC_MASK, BPF_ST, BPF_SUB_OP_MASK, BPF_W, BpfProgramContext, CbpfConfig,
-    EbpfProgram, MemoryId, NoMap, PointerOrigin, ProgramArgument, Type, bpf_addressing_mode,
-    bpf_class, bpf_size, convert_and_link_cbpf,
+    BPF_A, BPF_ABS, BPF_ALU, BPF_IMM, BPF_IND, BPF_JA, BPF_JEQ, BPF_JGE, BPF_JGT, BPF_JMP,
+    BPF_JSET, BPF_K, BPF_LD, BPF_MOD, BPF_RET, BPF_SRC_MASK, BPF_ST, BPF_SUB_OP_MASK, BPF_W,
+    BpfProgramContext, CbpfConfig, EbpfProgram, NoMap, PointerOrigin, ProgramArgument, Type,
+    bpf_addressing_mode, bpf_class, bpf_op, bpf_size, convert_and_link_cbpf, new_memory_id,
 };
 use ebpf_api::SECCOMP_CBPF_CONFIG;
 use linux_uapi::AUDIT_SECCOMP;
@@ -215,6 +215,10 @@ impl SeccompFilter {
             if (bpf_class(insn) == BPF_LD || bpf_class(insn) == BPF_ST) && bpf_size(insn) != BPF_W {
                 return error!(EINVAL);
             }
+            // Modulo (BPF_MOD) is not supported in seccomp filters.
+            if bpf_class(insn) == BPF_ALU && bpf_op(insn) == BPF_MOD {
+                return error!(EINVAL);
+            }
         }
 
         let program = convert_and_link_cbpf::<SeccompFilter>(code).map_err(|errmsg| {
@@ -252,7 +256,7 @@ impl BpfProgramContext for SeccompFilter {
 ebpf::empty_static_helper_set!(SeccompFilter);
 
 static SECCOMP_DATA_TYPE: LazyLock<Type> = LazyLock::new(|| Type::PtrToMemory {
-    id: MemoryId::new(),
+    id: new_memory_id(),
     offset: 0.into(),
     buffer_size: 0,
     origin: PointerOrigin::KernelReadOnly,
@@ -636,21 +640,19 @@ impl SeccompState {
             SeccompAction::Allow => None,
             SeccompAction::Errno(code) => Some(Err(errno_from_code!(code as i16))),
             SeccompAction::KillThread => {
-                let siginfo = SignalInfo::kernel(SIGSYS);
-
                 let is_last_thread = current_task.thread_group().read().tasks_count() == 1;
                 let mut task_state = current_task.write();
 
                 if is_last_thread {
-                    task_state.set_flags(TaskFlags::DUMP_ON_EXIT, true);
-                    task_state.set_exit_status_if_not_already(ExitStatus::CoreDump(siginfo));
+                    task_state.set_exiting(ExitStatus::CoreDump(SIGSYS));
+                    task_state.core_dump_signal = Some(SignalInfo::kernel(SIGSYS));
                 } else {
-                    task_state.set_exit_status_if_not_already(ExitStatus::Kill(siginfo));
+                    task_state.set_exiting(ExitStatus::Kill(SIGSYS));
                 }
                 Some(Err(errno_from_code!(0)))
             }
             SeccompAction::KillProcess => {
-                current_task.kill_thread_group(ExitStatus::CoreDump(SignalInfo::kernel(SIGSYS)));
+                current_task.kill_thread_group(ExitStatus::CoreDump(SIGSYS));
                 Some(Err(errno_from_code!(0)))
             }
             SeccompAction::Log => {

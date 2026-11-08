@@ -1,0 +1,51 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "snapshotter",
+    srcs = ["snapshotter.cc"],
+    hdrs = ["snapshotter.h"],
+    implementation_deps = [
+        "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_hlcpp",
+        "//zircon/system/ulib/zx",
+    ],
+    visibility = ["//src/developer/forensics/snapshot/tests:__pkg__"],
+    deps = ["//sdk/lib/sys/cpp"],
+    alwayslink = True,
+)
+
+# Only consumed by Bazel fx_package(":pkg") below.
+# @bazel2gn:skip
+fx_cc_binary(
+    name = "main",
+    srcs = ["main.cc"],
+    tags = ["manual"],
+    deps = [
+        ":snapshotter",
+        "//sdk/lib/sys/cpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "main_packaged",
+    binary = ":main",
+    binary_name = "snapshot",
+)
+
+fx_package(
+    name = "pkg",
+    package_name = "snapshot",
+    resources = [":main_packaged"],
+    visibility = ["//bundles/assembly:__subpackages__"],
+)

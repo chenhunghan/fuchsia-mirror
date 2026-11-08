@@ -49,6 +49,9 @@ class PlatformBuffer : public PlatformObject {
   enum Flags {
     kMapRead = 1,
     kMapWrite = 2,
+    // Populates CPU page table entries for committed pages at map time, avoiding page faults on
+    // first access. Pages that aren't committed are not populated.
+    kMapPopulate = 4,
   };
 
   static std::unique_ptr<PlatformBuffer> Create(uint64_t size, const char* name);

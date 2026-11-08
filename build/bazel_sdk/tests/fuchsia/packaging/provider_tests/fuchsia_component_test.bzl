@@ -7,6 +7,7 @@ load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts")
 load("@rules_fuchsia//fuchsia:defs.bzl", "fuchsia_component", "fuchsia_component_manifest", "fuchsia_driver_component", "fuchsia_package")
 load("@rules_fuchsia//fuchsia/private:providers.bzl", "FuchsiaComponentInfo")
 load("@rules_fuchsia//fuchsia_rules_common/packages:providers.bzl", "FuchsiaPackageInfo")
+load("//fuchsia/packaging:common_utils.bzl", "failure_test")
 load("//test_utils:make_file.bzl", "make_fake_component_manifest", "make_file")
 
 def _local_name(name):
@@ -112,7 +113,6 @@ def _test_provider():
     fuchsia_component(
         name = _local_name("component"),
         tags = ["manual"],
-        component_name = "component",
         manifest = _local_target("manifest_component"),
     )
 
@@ -131,7 +131,6 @@ def _test_provider():
     fuchsia_driver_component(
         name = _local_name("driver"),
         tags = ["manual"],
-        component_name = "driver",
         manifest = _local_target("manifest_driver"),
         driver_lib = _local_target("lib"),
         bind_bytecode = _local_target("bind"),
@@ -210,9 +209,9 @@ def _test_setting_component_names():
         cm_file_name = "component_A.cm",
     )
 
-    # 3) Check that the component name is taken from the `component_name`
-    # attribute passed to `fuchsia_component()` and not the basename of the
-    # `.cml` manifest file passed to `fuchsia_component_manifest()`.
+    # 3) Check that specifying `component_name` on `fuchsia_component()` fails
+    # when `manifest` is a `fuchsia_component_manifest()` target without
+    # `component_name`.
     fuchsia_component(
         name = "component_with_name_specified_named_component_R",
         manifest = ":component_manifest_for_foo_cml_without_component_name_attribute",
@@ -224,19 +223,17 @@ def _test_setting_component_names():
             ":component_with_name_specified_named_component_R",
         ],
         fuchsia_api_level = "HEAD",
+        tags = ["manual"],
     )
-    _check_component_name_test(
-        name = "check_component_name_taken_from_component_name_attribute_not_from_compiled_manifest_without_component_name_attribute",
+    failure_test(
+        name = "check_component_name_attribute_fails_with_compiled_manifest_without_component_name_attribute",
         target_under_test = ":package_to_wrap_component_R",
-        component_name = "component_R",
-        # TODO(http://b/525461025): Fix the implementation such that this is
-        # "component_R" per the `fuchsia_component()` docstring.
-        cm_file_name = "foo.cm",
+        expected_failure_message = "`component_name` must not be set when `manifest` is a `fuchsia_component_manifest` target.",
     )
 
-    # 4) Check that the component name is taken from the `component_name`
-    # attribute passed to`fuchsia_component()` and not the `component_name`
-    # attribute passed to `fuchsia_component_manifest()`.
+    # 4) Check that specifying `component_name` on `fuchsia_component()` fails
+    # when `manifest` is a `fuchsia_component_manifest()` target with
+    # `component_name`.
     fuchsia_component(
         name = "component_with_name_specified_named_component_S",
         manifest = ":component_manifest_for_foo_cml_with_component_name_A",
@@ -248,14 +245,12 @@ def _test_setting_component_names():
             ":component_with_name_specified_named_component_S",
         ],
         fuchsia_api_level = "HEAD",
+        tags = ["manual"],
     )
-    _check_component_name_test(
-        name = "check_component_name_taken_from_component_name_attribute_not_from_compiled_manifest_with_component_name_attribute",
+    failure_test(
+        name = "check_component_name_attribute_fails_with_compiled_manifest_with_component_name_attribute",
         target_under_test = ":package_to_wrap_component_S",
-        component_name = "component_S",
-        # TODO(http://b/525461025): Fix the implementation such that this is
-        # "component_S" per the `fuchsia_component()` docstring.
-        cm_file_name = "component_A.cm",
+        expected_failure_message = "`component_name` must not be set when `manifest` is a `fuchsia_component_manifest` target.",
     )
 
     # 5) Check that the component name is taken from the basename of the
@@ -309,9 +304,7 @@ def _test_setting_component_names():
         name = "check_component_name_taken_from_component_name_attribute_not_from_uncompiled_cml_manifest_file",
         target_under_test = ":package_to_wrap_component_D",
         component_name = "component_D",
-        # TODO(http://b/525461025): Fix the implementation such that this is
-        # "component_D" per the `fuchsia_component()` docstring.
-        cm_file_name = "component_C.cm",
+        cm_file_name = "component_D.cm",
     )
 
 # Entry point from the BUILD file; macro for running each test case's macro and
@@ -330,8 +323,8 @@ def fuchsia_component_test_suite(name, **kwargs):
             # _test_setting_component_names
             ":check_component_name_taken_from_compiled_manifest_without_component_name_attribute",
             ":check_component_name_taken_from_compiled_manifest_with_component_name_attribute",
-            ":check_component_name_taken_from_component_name_attribute_not_from_compiled_manifest_without_component_name_attribute",
-            ":check_component_name_taken_from_component_name_attribute_not_from_compiled_manifest_with_component_name_attribute",
+            ":check_component_name_attribute_fails_with_compiled_manifest_without_component_name_attribute",
+            ":check_component_name_attribute_fails_with_compiled_manifest_with_component_name_attribute",
             ":check_component_name_taken_from_uncompiled_cml_manifest_file_when_component_name_attribute_not_specified",
             ":check_component_name_taken_from_component_name_attribute_not_from_uncompiled_cml_manifest_file",
         ],

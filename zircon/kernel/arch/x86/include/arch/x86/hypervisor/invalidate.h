@@ -9,6 +9,22 @@
 
 #include <zircon/types.h>
 
+enum class InvVpid : uint64_t;
+enum class InvEpt : uint64_t;
+
+// Implemented in Rust in arch/x86/hypervisor/invalidate.rs; exported from invalidate_ffi.rs.
+//
+// `invalidation` must be one of the named enumerators, as any other value is undefined behavior
+// in Rust.
+//
+// TODO(https://fxbug.dev/576430432): Remove rust_invvpid and rust_invept once their C++ callers
+// are ported to Rust.
+extern "C" {
+void rust_invvpid(InvVpid invalidation, uint16_t vpid, zx_vaddr_t address);
+void rust_invept(InvEpt invalidation, uint64_t eptp);
+uint64_t rust_ept_pointer_from_pml4(zx_paddr_t ept_pml4);
+}  // extern "C"
+
 // INVVPID invalidation types.
 //
 // From Volume 3, Section 30.3: There are four INVVPID types currently defined:
@@ -28,6 +44,8 @@
 //   VPID specified in the INVVPID descriptor except global translations. In
 //   some cases, it may invalidate global translations (and mappings with other
 //   VPIDs) as well.
+//
+// Must match the Rust `InvVpid` in arch/x86/hypervisor/invalidate.rs, as it is passed across FFI.
 enum class InvVpid : uint64_t {
   INDIVIDUAL_ADDRESS = 0,
   SINGLE_CONTEXT = 1,
@@ -35,7 +53,9 @@ enum class InvVpid : uint64_t {
   SINGLE_CONTEXT_RETAIN_GLOBALS = 3,
 };
 
-void invvpid(InvVpid invalidation, uint16_t vpid, zx_vaddr_t address);
+inline void invvpid(InvVpid invalidation, uint16_t vpid, zx_vaddr_t address) {
+  rust_invvpid(invalidation, vpid, address);
+}
 
 // INVEPT invalidation types.
 //
@@ -46,15 +66,19 @@ void invvpid(InvVpid invalidation, uint16_t vpid, zx_vaddr_t address);
 //   mappings as well.
 // * Global invalidation. If the INVEPT type is 2, the logical processor
 //   invalidates mappings associated with all EPTPs.
+//
+// Must match the Rust `InvEpt` in arch/x86/hypervisor/invalidate.rs, as it is passed across FFI.
 enum class InvEpt : uint64_t {
   SINGLE_CONTEXT = 1,
   GLOBAL = 2,
 };
 
-void invept(InvEpt invalidation, uint64_t eptp);
+inline void invept(InvEpt invalidation, uint64_t eptp) { rust_invept(invalidation, eptp); }
 
 // Returns an EPT pointer based on an EPT PML4 address.
-uint64_t ept_pointer_from_pml4(zx_paddr_t ept_pml4);
+inline uint64_t ept_pointer_from_pml4(zx_paddr_t ept_pml4) {
+  return rust_ept_pointer_from_pml4(ept_pml4);
+}
 
 // Performs CPU invalidations of the EPT TLB state using the given EPT pointer.
 // This invalidates on all necessary CPUs and will perform IPIs.

@@ -20,12 +20,15 @@ load(
     "expect_includes",
 )
 
+visibility("private")
+
 def _empty_target_impl(_ctx):
     pass
 
 _empty_target = rule(
     implementation = _empty_target_impl,
     attrs = {
+        "actual": attr.label(),
         "deps": attr.label_list(),
     },
 )
@@ -318,16 +321,56 @@ def component_manifests_test_suite(name):
         expected_shards = [],
     )
 
+    # Traversal through `actual` attribute (used by transition rules and alias).
+    _empty_target(
+        name = "actual_wrapper_leaf",
+        actual = ":runner_gtest_leaf",
+    )
+
+    _runner_shard_aspect_test(
+        name = "runner_shard_actual_attribute_test",
+        target_under_test = ":actual_wrapper_leaf",
+        expected_shards = ["//src/sys/test_runners/gtest/default.shard.cml"],
+    )
+
+    _empty_target(
+        name = "actual_wrapper_includes",
+        actual = ":includes_diamond_root",
+    )
+
+    _expected_includes_aspect_test(
+        name = "expected_includes_actual_attribute_test",
+        target_under_test = ":actual_wrapper_includes",
+        expected_enforced_shards = [
+            "//sdk/lib/syslog/client.shard.cml",
+            "//src/sys/test_runners/gtest/zxtest.shard.cml",
+        ],
+        expected_auto_include_shards = [
+            "//sdk/lib/syslog/client.shard.cml",
+            "//src/sys/test_runners/gtest/zxtest.shard.cml",
+            "//src/sys/test_runners/rust/next-vdso.shard.cml",
+        ],
+        expected_transitive_shards = [
+            "//sdk/lib/syslog/client.shard.cml",
+            "//sdk/lib/syslog/offer.shard.cml",
+            "//sdk/lib/syslog/use.shard.cml",
+            "//src/sys/test_runners/gtest/zxtest.shard.cml",
+            "//src/sys/test_runners/rust/next-vdso.shard.cml",
+        ],
+    )
+
     native.test_suite(
         name = name,
-        visibility = ["//visibility:public"],
+        visibility = ["//visibility:private"],
         tests = [
+            ":expected_includes_actual_attribute_test",
             ":expected_includes_component_barrier_test",
             ":expected_includes_empty_test",
             ":expected_includes_enforced_and_unenforced_test",
             ":runner_conflicting_shards_test",
             ":runner_direct_hint_test",
             ":runner_no_shard_test",
+            ":runner_shard_actual_attribute_test",
             ":runner_shard_component_barrier_test",
             ":runner_transitive_and_diamond_test",
         ],

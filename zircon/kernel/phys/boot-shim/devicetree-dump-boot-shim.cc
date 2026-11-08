@@ -9,8 +9,7 @@
 #include <fbl/alloc_checker.h>
 #include <phys/address-space.h>
 #include <phys/allocation.h>
-#include <phys/main.h>
-#include <phys/stdio.h>
+#include <phys/runtime/main.h>
 #include <phys/symbolize.h>
 
 namespace {
@@ -37,12 +36,11 @@ size_t Base64Encode(const uint8_t* src, size_t len, char* dst) {
 }  // namespace
 
 void PhysMain(void* flat_devicetree_blob, arch::EarlyTicks ticks) {
-  InitStdout();
   ApplyRelocations();
 
   AddressSpace aspace;
   InitMemory(flat_devicetree_blob, {}, &aspace);
-  MainSymbolize symbolize(kShimName);
+  Symbolize symbolize(kShimName);
 
   // At this point UART should be available, and we should just encode.
   devicetree::ByteView fdt_blob(static_cast<const uint8_t*>(flat_devicetree_blob),

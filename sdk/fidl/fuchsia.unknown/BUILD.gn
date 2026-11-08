@@ -33,7 +33,6 @@ fidl("fuchsia.unknown") {
   sources = [ "unknown.fidl" ]
   sdk_area = "FIDL"
   sdk_category = "partner"
-  enable_banjo = true
   enable_hlcpp = true
   enable_rust_next = true
   stable = true

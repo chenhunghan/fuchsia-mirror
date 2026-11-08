@@ -6,7 +6,6 @@
 #define SRC_CAMERA_DRIVERS_CONTROLLER_PASSTHROUGH_NODE_H_
 
 #include <fuchsia/camera2/cpp/fidl.h>
-#include <fuchsia/hardware/ge2d/cpp/banjo.h>
 
 #include <utility>
 

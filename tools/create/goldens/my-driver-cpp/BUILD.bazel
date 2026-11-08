@@ -19,6 +19,21 @@ load(
 
 package(default_applicable_licenses = ["//:license"])
 
+exports_files(
+    [
+        "BUILD.bazel",
+        "BUILD.gn",
+        "README.md",
+        "meta/my_driver_cpp.bind",
+        "meta/my_driver_cpp.cml",
+        "meta/my_driver_cpp_info.json",
+        "my_driver_cpp.cc",
+        "my_driver_cpp.h",
+        "tests/my_driver_cpp_test.cc",
+    ],
+    visibility = ["//tools/create/goldens:__pkg__"],
+)
+
 fuchsia_driver_bind_bytecode(
     name = "bind_bytecode",
     output = "my_driver_cpp.bindbc",

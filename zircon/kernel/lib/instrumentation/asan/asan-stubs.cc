@@ -44,23 +44,23 @@ void* __asan_memcpy(void* dst, const void* src, size_t n) {
     asan_check_memory_overlap(dstptr, n, srcptr, n);
   }
 
-  asan_check(srcptr, n, /*is_write=*/false, __builtin_return_address(0));
-  asan_check(dstptr, n, /*is_write=*/true, __builtin_return_address(0));
+  asan_check(srcptr, n, AccessType::Read, __builtin_return_address(0));
+  asan_check(dstptr, n, AccessType::Write, __builtin_return_address(0));
   return __unsanitized_memcpy(dst, src, n);
 }
 
 void* __asan_memset(void* dst, int c, size_t n) {
   if (n == 0)
     return dst;
-  asan_check(reinterpret_cast<uintptr_t>(dst), n, /*is_write=*/true, __builtin_return_address(0));
+  asan_check(reinterpret_cast<uintptr_t>(dst), n, AccessType::Write, __builtin_return_address(0));
   return __unsanitized_memset(dst, c, n);
 }
 
 void* __asan_memmove(void* dst, const void* src, size_t n) {
   if (n == 0)
     return dst;
-  asan_check(reinterpret_cast<uintptr_t>(src), n, /*is_write=*/false, __builtin_return_address(0));
-  asan_check(reinterpret_cast<uintptr_t>(dst), n, /*is_write=*/true, __builtin_return_address(0));
+  asan_check(reinterpret_cast<uintptr_t>(src), n, AccessType::Read, __builtin_return_address(0));
+  asan_check(reinterpret_cast<uintptr_t>(dst), n, AccessType::Write, __builtin_return_address(0));
   return __unsanitized_memmove(dst, src, n);
 }
 
@@ -99,45 +99,45 @@ ASAN_SET_SHADOW_XX(f8)
 // This is the same macro used in compiler-rt/lib/asan/asan_rtl.cc,
 // where it makes use of the is_write argument.  The list of invocations
 // of this macro below is taken verbatim from that file.
-#define ASAN_REPORT_ERROR(type, is_write, size)                       \
+#define ASAN_REPORT_ERROR(type, access_type, size)                    \
   void __asan_report_##type##size(uintptr_t addr) {                   \
-    asan_check(addr, size, is_write, __builtin_return_address(0));    \
+    asan_check(addr, size, access_type, __builtin_return_address(0)); \
   }                                                                   \
   void __asan_report_exp_##type##size(uintptr_t addr, uint32_t exp) { \
-    asan_check(addr, size, is_write, __builtin_return_address(0));    \
+    asan_check(addr, size, access_type, __builtin_return_address(0)); \
   }                                                                   \
   void __asan_report_##type##size##_noabort(uintptr_t addr) {         \
-    asan_check(addr, size, is_write, __builtin_return_address(0));    \
+    asan_check(addr, size, access_type, __builtin_return_address(0)); \
   }
 
-ASAN_REPORT_ERROR(load, false, 1)
-ASAN_REPORT_ERROR(load, false, 2)
-ASAN_REPORT_ERROR(load, false, 4)
-ASAN_REPORT_ERROR(load, false, 8)
-ASAN_REPORT_ERROR(load, false, 16)
-ASAN_REPORT_ERROR(store, true, 1)
-ASAN_REPORT_ERROR(store, true, 2)
-ASAN_REPORT_ERROR(store, true, 4)
-ASAN_REPORT_ERROR(store, true, 8)
-ASAN_REPORT_ERROR(store, true, 16)
+ASAN_REPORT_ERROR(load, AccessType::Read, 1)
+ASAN_REPORT_ERROR(load, AccessType::Read, 2)
+ASAN_REPORT_ERROR(load, AccessType::Read, 4)
+ASAN_REPORT_ERROR(load, AccessType::Read, 8)
+ASAN_REPORT_ERROR(load, AccessType::Read, 16)
+ASAN_REPORT_ERROR(store, AccessType::Write, 1)
+ASAN_REPORT_ERROR(store, AccessType::Write, 2)
+ASAN_REPORT_ERROR(store, AccessType::Write, 4)
+ASAN_REPORT_ERROR(store, AccessType::Write, 8)
+ASAN_REPORT_ERROR(store, AccessType::Write, 16)
 
 void __asan_report_load_n(uintptr_t addr, size_t size) {
-  asan_check(addr, size, /*is_write=*/false, __builtin_return_address(0));
+  asan_check(addr, size, AccessType::Read, __builtin_return_address(0));
 }
 void __asan_report_load_n_noabort(uintptr_t addr, size_t size) {
-  asan_check(addr, size, /*is_write=*/false, __builtin_return_address(0));
+  asan_check(addr, size, AccessType::Read, __builtin_return_address(0));
 }
 void __asan_report_exp_load_n(uintptr_t addr, size_t size, uint32_t exp) {
-  asan_check(addr, size, /*is_write=*/false, __builtin_return_address(0));
+  asan_check(addr, size, AccessType::Read, __builtin_return_address(0));
 }
 void __asan_report_store_n(uintptr_t addr, size_t size) {
-  asan_check(addr, size, /*is_write=*/true, __builtin_return_address(0));
+  asan_check(addr, size, AccessType::Write, __builtin_return_address(0));
 }
 void __asan_report_store_n_noabort(uintptr_t addr, size_t size) {
-  asan_check(addr, size, /*is_write=*/true, __builtin_return_address(0));
+  asan_check(addr, size, AccessType::Write, __builtin_return_address(0));
 }
 void __asan_report_exp_store_n(uintptr_t addr, size_t size) {
-  asan_check(addr, size, /*is_write=*/true, __builtin_return_address(0));
+  asan_check(addr, size, AccessType::Write, __builtin_return_address(0));
 }
 
 // These are called when not using the inline instrumentation that calls the
@@ -146,33 +146,51 @@ void __asan_report_exp_store_n(uintptr_t addr, size_t size) {
 // poison check.
 
 void __asan_loadN(uintptr_t addr, size_t size) {
-  asan_check(addr, size, /*is_write=*/false, __builtin_return_address(0));
+  asan_check(addr, size, AccessType::Read, __builtin_return_address(0));
 }
 void __asan_storeN(uintptr_t addr, size_t size) {
-  asan_check(addr, size, /*is_write=*/true, __builtin_return_address(0));
+  asan_check(addr, size, AccessType::Write, __builtin_return_address(0));
+}
+
+// Emitted unconditionally for large Rust references under
+// `-Cllvm-args=-asan-instrument-assume-dereferenceable=1` (e.g., `&PerCpu`).
+// Despite the `__asan_report_*` naming prefix, LLVM invokes these helpers directly on the normal
+// execution path when `size > 64` expecting a normal return when unpoisoned, so they must call
+// `asan_check(...)` rather than panicking unconditionally.
+void __asan_report_assume_dereferenceable(uintptr_t addr, size_t size) {
+  if (size == 0) {
+    return;
+  }
+  asan_check(addr, size, AccessType::Assumption, __builtin_return_address(0));
+}
+void __asan_report_assume_dereferenceable_noabort(uintptr_t addr, size_t size) {
+  if (size == 0) {
+    return;
+  }
+  asan_check(addr, size, AccessType::Assumption, __builtin_return_address(0));
 }
 
 // This is the same macro used in compiler-rt/lib/asan/asan_rtl.cc,
 // where it makes use of the is_write argument.  The list of invocations
 // of this macro below is taken verbatim from that file.
-#define ASAN_MEMORY_ACCESS_CALLBACK(type, is_write, size)          \
-  void __asan_##type##size(uintptr_t addr) {                       \
-    asan_check(addr, size, is_write, __builtin_return_address(0)); \
-  }                                                                \
-  void __asan_exp_##type##size(uintptr_t addr, uint32_t exp) {     \
-    asan_check(addr, size, is_write, __builtin_return_address(0)); \
+#define ASAN_MEMORY_ACCESS_CALLBACK(type, access_type, size)          \
+  void __asan_##type##size(uintptr_t addr) {                          \
+    asan_check(addr, size, access_type, __builtin_return_address(0)); \
+  }                                                                   \
+  void __asan_exp_##type##size(uintptr_t addr, uint32_t exp) {        \
+    asan_check(addr, size, access_type, __builtin_return_address(0)); \
   }
 
-ASAN_MEMORY_ACCESS_CALLBACK(load, false, 1)
-ASAN_MEMORY_ACCESS_CALLBACK(load, false, 2)
-ASAN_MEMORY_ACCESS_CALLBACK(load, false, 4)
-ASAN_MEMORY_ACCESS_CALLBACK(load, false, 8)
-ASAN_MEMORY_ACCESS_CALLBACK(load, false, 16)
-ASAN_MEMORY_ACCESS_CALLBACK(store, true, 1)
-ASAN_MEMORY_ACCESS_CALLBACK(store, true, 2)
-ASAN_MEMORY_ACCESS_CALLBACK(store, true, 4)
-ASAN_MEMORY_ACCESS_CALLBACK(store, true, 8)
-ASAN_MEMORY_ACCESS_CALLBACK(store, true, 16)
+ASAN_MEMORY_ACCESS_CALLBACK(load, AccessType::Read, 1)
+ASAN_MEMORY_ACCESS_CALLBACK(load, AccessType::Read, 2)
+ASAN_MEMORY_ACCESS_CALLBACK(load, AccessType::Read, 4)
+ASAN_MEMORY_ACCESS_CALLBACK(load, AccessType::Read, 8)
+ASAN_MEMORY_ACCESS_CALLBACK(load, AccessType::Read, 16)
+ASAN_MEMORY_ACCESS_CALLBACK(store, AccessType::Write, 1)
+ASAN_MEMORY_ACCESS_CALLBACK(store, AccessType::Write, 2)
+ASAN_MEMORY_ACCESS_CALLBACK(store, AccessType::Write, 4)
+ASAN_MEMORY_ACCESS_CALLBACK(store, AccessType::Write, 8)
+ASAN_MEMORY_ACCESS_CALLBACK(store, AccessType::Write, 16)
 
 // This is called before calling any [[noreturn]] function.  In the userland
 // runtime, it's used to clean up per-thread "fake stack" allocations.  In the

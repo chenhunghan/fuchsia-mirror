@@ -3,9 +3,9 @@
 // found in the LICENSE file.
 
 #include <fidl/fuchsia.feedback.internal/cpp/fidl.h>
+#include <fidl/fuchsia.process.lifecycle/cpp/fidl.h>
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async-loop/default.h>
-#include <lib/fidl/cpp/binding.h>
 #include <lib/sys/cpp/component_context.h>
 #include <lib/syslog/cpp/log_settings.h>
 #include <lib/syslog/cpp/macros.h>
@@ -73,9 +73,6 @@ int main() {
           .logs_dir = feedback::kCurrentLogsDir,
           .max_num_files = max_num_files,
           .total_log_size = feedback_config->persisted_logs_total_size,
-          .metadata_path = feedback::kCurrentDiskBackedLogsMetadataPath,
-          .enable_periodic_metadata_writes =
-              feedback_config->disk_endurance == feedback::DiskEndurance::kHigh,
           .fallback_buffer_size = feedback_data::kFallbackLogBufferSize,
       },
       // Don't set up Inspect because all messages in the previous boot log
@@ -95,8 +92,10 @@ int main() {
   // Set up the controller to shut down or flush the buffers of the system log recorder when it gets
   // the signal to do so.
   Controller controller;
-  ::fidl::Binding<fuchsia::process::lifecycle::Lifecycle> lifecycle_binding(
-      &controller, std::move(lifecycle_channel), main_loop.dispatcher());
+  fidl::ServerBinding<fuchsia_process_lifecycle::Lifecycle> lifecycle_binding(
+      main_loop.dispatcher(),
+      fidl::ServerEnd<fuchsia_process_lifecycle::Lifecycle>(std::move(lifecycle_channel)),
+      &controller, fidl::kIgnoreBindingClosure);
 
   controller.SetStop([&] {
     recorder.Flush(ShutdownMessage(timekeeper::SystemClock().BootNow()),

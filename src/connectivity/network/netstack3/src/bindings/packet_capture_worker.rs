@@ -26,11 +26,11 @@ use vfs::file::File as _;
 use crate::bindings::bpf::{SocketFilterProgram, ValidVerifiedProgram};
 use crate::bindings::devices::HasDeviceName as _;
 use crate::bindings::socket::packet::SocketState;
+use crate::bindings::sync::CoreMutex;
 use crate::bindings::util::{ErrorLogExt as _, RemoveResourceResultExt as _, ResultExt as _};
 use crate::bindings::{BindingId, BindingsCtx, Ctx};
 use netstack3_core::device::DeviceId;
 use netstack3_core::device_socket::{Protocol, SocketId, TargetDevice};
-use netstack3_core::sync::Mutex;
 
 const TIMEOUT: std::time::Duration = std::time::Duration::from_mins(30);
 
@@ -124,12 +124,12 @@ impl RollingCaptureState {
 }
 
 pub(crate) struct PacketCaptures {
-    state: Mutex<RollingCaptureState>,
+    state: CoreMutex<RollingCaptureState>,
 }
 
 impl Default for PacketCaptures {
     fn default() -> Self {
-        Self { state: Mutex::new(RollingCaptureState::Empty) }
+        Self { state: CoreMutex::new(RollingCaptureState::Empty) }
     }
 }
 
@@ -562,7 +562,7 @@ where
 
 // Serve a stream of fuchsia.net.debug.PacketCaptureProvider API requests for a single
 // channel (e.g. a single client connection).
-fn handle_start_rolling(
+async fn handle_start_rolling(
     ctx: &mut Ctx,
     common_params: fnet_debug::CommonPacketCaptureParams,
     params: fnet_debug::RollingPacketCaptureParams,
@@ -579,8 +579,32 @@ fn handle_start_rolling(
     } = common_params;
     let fnet_debug::RollingPacketCaptureParams { capture_size, __source_breaking: _ } = params;
 
+    let bpf_filter = match bpf_program {
+        Some(program) => {
+            let valid_program: ValidVerifiedProgram = program.try_into().map_err(|e| {
+                warn!("invalid BPF program: {e:?}");
+                fnet_debug::PacketCaptureStartError::InvalidBpfFilter
+            })?;
+
+            if !valid_program.maps.is_empty() {
+                warn!("maps not allowed in socket filter");
+                return Err(fnet_debug::PacketCaptureStartError::InvalidBpfFilter);
+            }
+
+            let maps_cache = ctx.bindings_ctx().ebpf_manager.maps_cache();
+            let program =
+                SocketFilterProgram::new(valid_program, maps_cache).await.map_err(|e| {
+                    warn!("failed to create BPF program: {e:?}");
+                    fnet_debug::PacketCaptureStartError::InvalidBpfFilter
+                })?;
+
+            Some(program)
+        }
+        None => None,
+    };
+
     let ctx_clone = ctx.clone();
-    // Note that this lock is held across the entirety of this function and the
+    // Note that this lock is held across the remainder of this function and the
     // Attached state is written into the protected state at the end.
     let mut state_lock = ctx_clone.bindings_ctx().packet_captures.state.lock();
     match *state_lock {
@@ -646,36 +670,6 @@ fn handle_start_rolling(
 
     const MIN_CHUNK_COUNT: u32 = 8;
     let chunk_size = std::cmp::min(fnet_debug::DEFAULT_SNAP_LEN, capture_size / MIN_CHUNK_COUNT);
-
-    let bpf_filter = match bpf_program {
-        Some(program) => {
-            let valid_program: ValidVerifiedProgram = program.try_into().map_err(|e| {
-                warn!("invalid BPF program: {e:?}");
-                fnet_debug::PacketCaptureStartError::InvalidBpfFilter
-            })?;
-
-            if valid_program.code.is_empty() {
-                warn!("empty BPF code not allowed");
-                return Err(fnet_debug::PacketCaptureStartError::InvalidBpfFilter);
-            }
-
-            if !valid_program.struct_access_instructions.is_empty()
-                || !valid_program.maps.is_empty()
-            {
-                warn!("struct access or maps not allowed in socket filter");
-                return Err(fnet_debug::PacketCaptureStartError::InvalidBpfFilter);
-            }
-
-            let maps_cache = ctx.bindings_ctx().ebpf_manager.maps_cache();
-            let program = SocketFilterProgram::new(valid_program, maps_cache).map_err(|e| {
-                warn!("failed to create BPF program: {e:?}");
-                fnet_debug::PacketCaptureStartError::InvalidBpfFilter
-            })?;
-
-            Some(program)
-        }
-        None => None,
-    };
 
     let snap_len = match snap_len {
         None | Some(0) => fnet_debug::DEFAULT_SNAP_LEN,
@@ -808,7 +802,7 @@ pub(crate) async fn serve_packet_captures(
                 params,
                 responder,
             } => {
-                let result = handle_start_rolling(&mut ctx, common_params, params, guard);
+                let result = handle_start_rolling(&mut ctx, common_params, params, guard).await;
                 responder.send(result).unwrap_or_log("failed to respond");
             }
         }

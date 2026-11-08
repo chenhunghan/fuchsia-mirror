@@ -4,7 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-/// VmPageList tests duplicated from vmpl_unittest.cc.
+/// VmPageList unit tests.
 #[cfg(ktest)]
 #[unittest::suite]
 mod vmpl_rs {

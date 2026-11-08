@@ -63,27 +63,12 @@ class FileConnection : public Connection, public fidl::WireServer<fuchsia_io::Fi
   // |fuchsia.io/Node| operations.
   //
 
-#if FUCHSIA_API_LEVEL_LESS_THAN(29) || FUCHSIA_API_LEVEL_AT_LEAST(PLATFORM)
-  void DeprecatedClone(DeprecatedCloneRequestView request,
-                       DeprecatedCloneCompleter::Sync& completer) final;
-#endif
   void Clone(CloneRequestView request, CloneCompleter::Sync& completer) final;
   void Close(CloseCompleter::Sync& completer) final;
   void Query(QueryCompleter::Sync& completer) final;
   void Sync(SyncCompleter::Sync& completer) final;
-#if FUCHSIA_API_LEVEL_AT_LEAST(28)
-  void DeprecatedGetAttr(DeprecatedGetAttrCompleter::Sync& completer) final;
-  void DeprecatedSetAttr(DeprecatedSetAttrRequestView request,
-                         DeprecatedSetAttrCompleter::Sync& completer) final;
-#else
-  void GetAttr(GetAttrCompleter::Sync& completer) final;
-  void SetAttr(SetAttrRequestView request, SetAttrCompleter::Sync& completer) final;
-#endif  // FUCHSIA_API_LEVEL_AT_LEAST(28)
   void GetFlags(GetFlagsCompleter::Sync& completer) final;
   void SetFlags(SetFlagsRequestView request, SetFlagsCompleter::Sync& completer) final;
-  void DeprecatedGetFlags(DeprecatedGetFlagsCompleter::Sync& completer) final;
-  void DeprecatedSetFlags(DeprecatedSetFlagsRequestView request,
-                          DeprecatedSetFlagsCompleter::Sync& completer) final;
   void QueryFilesystem(QueryFilesystemCompleter::Sync& completer) final;
   void GetAttributes(fuchsia_io::wire::NodeGetAttributesRequest* request,
                      GetAttributesCompleter::Sync& completer) final;
@@ -105,6 +90,12 @@ class FileConnection : public Connection, public fidl::WireServer<fuchsia_io::Fi
                                RemoveExtendedAttributeCompleter::Sync& completer) final {
     completer.ReplyError(ZX_ERR_NOT_SUPPORTED);
   }
+#if FUCHSIA_API_LEVEL_AT_LEAST(NEXT)
+  void DeprecatedLinkInto(DeprecatedLinkIntoRequestView request,
+                          DeprecatedLinkIntoCompleter::Sync& completer) final {
+    completer.ReplyError(ZX_ERR_NOT_SUPPORTED);
+  }
+#endif
   void LinkInto(fuchsia_io::wire::LinkableLinkIntoRequest* request,
                 LinkIntoCompleter::Sync& completer) final {
     completer.ReplyError(ZX_ERR_NOT_SUPPORTED);

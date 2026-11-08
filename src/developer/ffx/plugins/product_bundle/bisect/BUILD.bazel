@@ -1,0 +1,90 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/host_tests:host_test_data.bzl", "host_test_data_files")
+load("//src/developer/ffx/build:ffx_plugin.bzl", "ffx_plugin")
+
+package(default_applicable_licenses = ["//:license"])
+
+host_test_data_files(
+    name = "test_data",
+    testonly = True,
+    srcs = [
+        "test_data/test_fail.sh",
+        "test_data/test_infra.sh",
+        "test_data/test_pass.sh",
+    ],
+    dest_dir = "test_data",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+ffx_plugin(
+    name = "ffx_product_bundle_bisect",
+    srcs = [
+        "src/assembly.rs",
+        "src/controller.rs",
+        "src/dimension.rs",
+        "src/lib.rs",
+        "src/mos.rs",
+        "src/search_space.rs",
+        "src/strategy.rs",
+        "src/testing.rs",
+    ],
+    args_deps = [
+        "//src/developer/ffx/core:lib",
+        "//src/developer/ffx/lib/pbms:lib",
+        "//src/lib/assembly/artifact_cache",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:camino",
+    ],
+    args_srcs = ["src/args.rs"],
+    edition = "2024",
+    sdk_category = "not-yet-specified",
+    version = "0.1.0",
+    visibility = ["//src/developer/ffx/plugins/product_bundle:__pkg__"],
+    deps = [
+        "//src/developer/ffx/config:lib",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/developer/ffx/lib/pbms:lib",
+        "//src/developer/ffx/lib/writer:lib",
+        "//src/lib/assembly/api",
+        "//src/lib/assembly/artifact_cache",
+        "//src/lib/assembly/assembled_system",
+        "//src/lib/assembly/cli_args",
+        "//src/lib/assembly/config_schema",
+        "//src/lib/assembly/container",
+        "//src/lib/assembly/platform_artifacts",
+        "//src/lib/assembly/product_bundle",
+        "//src/lib/assembly/tool",
+        "//src/lib/assembly/util",
+        "//src/lib/gcs",
+        "//src/lib/structured_ui",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:camino",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:tempfile",
+    ],
+)
+
+# bazel2gn cannot translate `test_data`, so this test is wired into
+# //src/developer/ffx:tests in Bazel.
+# @bazel2gn:skip
+host_rustc_test(
+    name = "ffx_product_bundle_bisect_test",
+    crate = ":ffx_product_bundle_bisect",
+    # Tests repeatedly construct `anyhow::Error` on failure paths; capturing
+    # unstripped DWARF backtraces under `RUST_BACKTRACE=1` causes timeouts.
+    test_args = ["env RUST_LIB_BACKTRACE=0"],
+    test_data = [":test_data"],
+    visibility = ["//src/developer/ffx:__pkg__"],
+    deps = [
+        "//src/developer/ffx/lib/writer:lib",
+        "//third_party/rust_crates/vendor:futures-lite",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:tempfile",
+    ],
+)

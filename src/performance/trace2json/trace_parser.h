@@ -14,9 +14,9 @@
 #include <string>
 #include <vector>
 
-#include <re2/re2.h>
 #include <trace-reader/reader.h>
 
+#include "re2/re2.h"
 #include "src/performance/lib/trace_converters/chromium_exporter.h"
 
 namespace tracing {

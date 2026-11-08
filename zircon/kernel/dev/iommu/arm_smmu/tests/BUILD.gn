@@ -5,33 +5,92 @@
 # https://opensource.org/licenses/MIT
 
 import("//build/components.gni")
+import("//build/rust/rustc_staticlib.gni")
 import("//build/test.gni")
+
+rustc_staticlib("arm_smmu_host_rs") {
+  edition = "2024"
+  source_root = "host_lib.rs"
+  sources = [
+    "../../escaped_name.rs",
+    "../common/constants.rs",
+    "../common/device_aspace.rs",
+    "../common/env.rs",
+    "../common/mod.rs",
+    "../common/page_cache.rs",
+    "../common/smmu_mode.rs",
+    "../common/translation_table.rs",
+    "../common/vmsav8_64.rs",
+    "../mod.rs",
+    "../unit_tests.rs",
+    "../v2/context_bank.rs",
+    "../v2/mod.rs",
+    "../v2/registers.rs",
+    "../v2/smmu.rs",
+    "../v2/smmu_bti.rs",
+    "../v2/smmu_pmt.rs",
+    "../v2/stream_match_reg.rs",
+    "../v2/utils.rs",
+    "cross_test_ffi.rs",
+    "host_lib.rs",
+  ]
+  deps = [
+    "//sdk/rust/zx-status",
+    "//src/lib/kalloc",
+    "//src/lib/ksync",
+    "//src/lib/regio",
+    "//src/lib/zr",
+    "//third_party/rust_crates:pin-init",
+    "//zircon/kernel/lib/arch:arch-rs",
+    "//zircon/kernel/lib/debug",
+    "//zircon/system/ulib/fbl/rust:fbl",
+    "//zircon/system/ulib/region-alloc/rust:region-alloc",
+  ]
+}
 
 cc_test_executable("arm_smmu_tests_binary") {
   # Tests
   sources = [
+    "cross_test_ffi.cc",
     "device_aspace_test.cc",
     "page_cache_test.cc",
+    "rust_unit_tests.cc",
     "smmu_mode_string_tests.cc",
+    "smmu_model_tests.cc",
   ]
 
   # The subset of code being tested on the host
   sources += [
+    "../context_bank.cc",
     "../device_aspace.cc",
+    "../smmu.cc",
+    "../smmu_bti.cc",
+    "../smmu_env_ffi.cc",
     "../smmu_mode.cc",
+    "../smmu_pmt.cc",
+    "../stream_match_reg_group.cc",
     "../translation_table_helper.cc",
+    "../utils.cc",
   ]
 
   # Mocks and other dependencies
   sources += [
     "//zircon/system/ulib/region-alloc/region-alloc.cc",
+    "mocks/iommu.cc",
     "mocks/pmm.cc",
   ]
 
+  defines = [ "ARM_SMMU_HOST_TEST=1" ]
+
   deps = [
+    ":arm_smmu_host_rs",
+    "//sdk/lib/zbi-format",
     "//sdk/lib/zircon-assert",
     "//zircon/system/ulib/fbl",
+    "//zircon/system/ulib/hwreg:headers",
+    "//zircon/system/ulib/mmio-ptr",
     "//zircon/system/ulib/region-alloc:headers",
+    "//zircon/system/ulib/zircon-internal",
     "//zircon/system/ulib/zx",
     "//zircon/system/ulib/zxtest",
   ]

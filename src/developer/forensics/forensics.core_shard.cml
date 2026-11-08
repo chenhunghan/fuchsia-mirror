@@ -28,8 +28,14 @@
             to: "#exceptions",
         },
         {
+            // NOTE: fuchsia.diagnostics.ArchiveAccessor.logs exposes unredacted
+            // system logs prior to redaction by Feedback. Routing this protocol
+            // to any component other than #feedback is restricted by security
+            // policy in //src/security/policy/component_manager_policy_base.json5
+            // and requires a Fuchsia Privacy review.
             protocol: [
                 "fuchsia.boot.ReadOnlyLog",
+                "fuchsia.diagnostics.ArchiveAccessor.logs",
                 "fuchsia.hardware.power.statecontrol.ShutdownWatcherRegister",
                 "fuchsia.kernel.RootJobForInspect",
                 "fuchsia.process.Launcher",
@@ -96,7 +102,7 @@
             to: "#feedback",
         },
         {
-            protocol: "fuchsia.net.interfaces.State",
+            protocol: "fuchsia.net.reachability.Monitor",
             from: "#network",
             to: "#feedback",
         },

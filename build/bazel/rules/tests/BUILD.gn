@@ -4,6 +4,7 @@
 
 import("//build/bazel/bazel_build_action.gni")
 import("//build/bazel/bazel_test_suite.gni")
+import("//build/bazel/bazel_tool_paths.gni")
 
 visibility = [ ":*" ]
 
@@ -18,6 +19,7 @@ bazel_test_suite("bazel_tests") {
 group("all") {
   testonly = true
   deps = [
+    ":bazel_tool_paths_test($host_toolchain)",
     ":quick_tests",
     ":tests",
   ]
@@ -45,9 +47,11 @@ bazel_build_action("tests") {
   ]
   bazel_config = "fuchsia_platform"
   deps = [
-    # The following are currently needed by `fx_package()`.
-    # TODO(b/519244675): Remove once `package-tool` is migrated to Bazel.
-    "//src/sys/pkg/bin/package-tool:bazel_input($host_toolchain)",
+    # Needed by `//sdk/fidl/zbi:zbi.c.checked-in` via
+    # `//build/bazel/bazel_idk/tests:test-source-library_idk` and
+    # `//sdk/lib/zbi-format:zbi-format_idk`.
+    # TODO(https://fxbug.dev/427976639): Remove once `zither_golden_files` is migrated to Bazel.
+    "//sdk/fidl/zbi:zbi.c.checked-in.bazel_input",
   ]
 }
 
@@ -62,8 +66,77 @@ bazel_build_action("quick_tests") {
   ]
   bazel_config = "fuchsia_platform"
   deps = [
-    # The following are currently needed by `fx_package()`.
-    # TODO(b/519244675): Remove once `package-tool` is migrated to Bazel.
-    "//src/sys/pkg/bin/package-tool:bazel_input($host_toolchain)",
+    # Needed by `//sdk/fidl/zbi:zbi.c.checked-in` via
+    # `//build/bazel/bazel_idk/tests:test-source-library_idk` and
+    # `//sdk/lib/zbi-format:zbi-format_idk`.
+    # TODO(https://fxbug.dev/427976639): Remove once `zither_golden_files` is migrated to Bazel.
+    "//sdk/fidl/zbi:zbi.c.checked-in.bazel_input",
   ]
+}
+
+if (is_host) {
+  bazel_tool_paths("test_bazel_tool_paths") {
+    testonly = true
+    tools = [
+      {
+        name = "bazel_tool_paths_test_go_bin"
+        bazel_target = "//build/bazel/rules/host_tests/tests/go:lib_test_bin"
+        is_go = true
+      },
+      {
+        name = "bazel_tool_paths_test_cc_bin"
+        bazel_target =
+            "//build/bazel/rules/host_tests/tests/host_test_data:test_bin"
+      },
+    ]
+  }
+
+  _tool_paths_manifest = "$target_gen_dir/test_bazel_tool_paths.json"
+
+  generated_file("test_bazel_tool_paths.json") {
+    testonly = true
+    data_keys = [ "tool_paths" ]
+    walk_keys = [ "tool_barrier" ]
+    output_conversion = "json"
+    outputs = [ _tool_paths_manifest ]
+    deps = [ ":test_bazel_tool_paths" ]
+  }
+
+  action("bazel_tool_paths_test") {
+    testonly = true
+    script = "verify_bazel_tool_paths.py"
+    _go_bin = "${root_out_dir}/bazel_tool_paths_test_go_bin"
+    _cc_bin = "${root_out_dir}/bazel_tool_paths_test_cc_bin"
+    _stamp = "${target_out_dir}/bazel_tool_paths_test.stamp"
+    inputs = [
+      _tool_paths_manifest,
+      _go_bin,
+      _cc_bin,
+    ]
+    outputs = [ _stamp ]
+    deps = [
+      ":test_bazel_tool_paths",
+      ":test_bazel_tool_paths.json",
+    ]
+    args = [
+      "--manifest",
+      rebase_path(_tool_paths_manifest, root_build_dir),
+      "--cpu",
+      current_cpu,
+      "--os",
+      current_os,
+      "--expected-tool",
+      "bazel_tool_paths_test_go_bin=" + rebase_path(_go_bin, root_build_dir) +
+          "=" +
+          get_label_info(":test_bazel_tool_paths.bazel_tool_paths_test_go_bin",
+                         "label_with_toolchain"),
+      "--expected-tool",
+      "bazel_tool_paths_test_cc_bin=" + rebase_path(_cc_bin, root_build_dir) +
+          "=" +
+          get_label_info(":test_bazel_tool_paths.bazel_tool_paths_test_cc_bin",
+                         "label_with_toolchain"),
+      "--stamp",
+      rebase_path(_stamp, root_build_dir),
+    ]
+  }
 }

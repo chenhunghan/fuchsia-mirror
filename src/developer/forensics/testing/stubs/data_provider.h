@@ -7,7 +7,6 @@
 
 #include <fidl/fuchsia.feedback/cpp/fidl.h>
 #include <fidl/fuchsia.feedback/cpp/test_base.h>
-#include <fuchsia/feedback/cpp/fidl.h>
 #include <lib/syslog/cpp/macros.h>
 #include <zircon/errors.h>
 

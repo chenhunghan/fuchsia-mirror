@@ -2,17 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#pragma once
+#ifndef TRACE_TEST_UTILS_SQUELCH_H_
+#define TRACE_TEST_UTILS_SQUELCH_H_
 
 #include <memory>
 #include <string>
 #include <vector>
 
-#include <re2/re2.h>
-
 // TODO(dje): Conversion to std::string needs to be done in conjunction with
 // converting trace-reader.
 #include <fbl/string.h>
+
+#include "re2/re2.h"
 
 namespace trace_testing {
 
@@ -49,3 +50,5 @@ class Squelcher {
 };
 
 }  // namespace trace_testing
+
+#endif  // TRACE_TEST_UTILS_SQUELCH_H_

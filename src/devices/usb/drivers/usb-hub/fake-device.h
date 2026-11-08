@@ -41,7 +41,6 @@ struct IOEntry : fbl::DoublyLinkedListable<std::unique_ptr<IOEntry>> {
   void* ctx;
   usb_request_t* request;
   IOQueue* request_dispatch_queue;
-  /* zx_device_t* */ uint64_t hub_device;
   uint32_t port;
   zx_status_t status;
   usb_hub_descriptor_t hub_desc;
@@ -357,8 +356,8 @@ class FakeDevice : public ddk::UsbBusProtocol<FakeDevice>, public ddk::UsbProtoc
 
   void SetChildContextDispatch(void* ctx) { ctx_ = ctx; }
 
-  zx_status_t UsbBusConfigureHub(/* zx_device_t* */ uint64_t hub_device, usb_speed_t speed,
-                                 const usb_hub_descriptor_t* desc, bool multi_tt) {
+  zx_status_t UsbBusConfigureHub(usb_speed_t speed, const usb_hub_descriptor_t* desc,
+                                 bool multi_tt) {
     if (desc->b_nbr_ports != emulation_.port_count) {
       return ZX_ERR_INVALID_ARGS;
     }
@@ -375,10 +374,8 @@ class FakeDevice : public ddk::UsbBusProtocol<FakeDevice>, public ddk::UsbProtoc
     state_change_queue_.Insert(std::move(entry));
   }
 
-  zx_status_t UsbBusDeviceAdded(/* zx_device_t* */ uint64_t hub_device, uint32_t port,
-                                usb_speed_t speed) {
+  zx_status_t UsbBusDeviceAdded(uint32_t port, usb_speed_t speed) {
     auto entry = MakeSyncEntry(OperationType::kUsbBusDeviceAdded);
-    entry->hub_device = hub_device;
     entry->port = port;
     entry->speed = speed;
     return SendMessageSync(std::move(entry))->status;
@@ -388,9 +385,8 @@ class FakeDevice : public ddk::UsbBusProtocol<FakeDevice>, public ddk::UsbProtoc
     state_change_queue_.Insert(std::move(entry));
   }
 
-  zx_status_t UsbBusDeviceRemoved(/* zx_device_t* */ uint64_t hub_device, uint32_t port) {
+  zx_status_t UsbBusDeviceRemoved(uint32_t port) {
     auto entry = MakeSyncEntry(OperationType::kUsbBusDeviceRemoved);
-    entry->hub_device = hub_device;
     entry->port = port;
     return SendMessageSync(std::move(entry))->status;
   }
@@ -401,10 +397,8 @@ class FakeDevice : public ddk::UsbBusProtocol<FakeDevice>, public ddk::UsbProtoc
     Complete(std::move(entry));
   }
 
-  zx_status_t UsbBusSetHubInterface(/* zx_device_t* */ uint64_t usb_device,
-                                    const usb_hub_interface_protocol_t* hub) {
+  zx_status_t UsbBusSetHubInterface(const usb_hub_interface_protocol_t* hub) {
     auto entry = MakeSyncEntry(OperationType::kUsbBusSetHubInterface);
-    entry->hub_device = usb_device;
     entry->hub_interface = *hub;
     return SendMessageSync(std::move(entry))->status;
   }

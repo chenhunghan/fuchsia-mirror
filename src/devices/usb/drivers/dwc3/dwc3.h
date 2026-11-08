@@ -322,6 +322,9 @@ class Dwc3 : public fdf::DriverBase2,
       for (size_t i = 0; i < count_; ++i) {
         UserEndpoint& uep = endpoints_[i];
         const_cast<uint8_t&>(uep.ep.ep_num) = static_cast<uint8_t>(i) + kUserEndpointStartNum;
+        // TODO(https://fxbug.dev/582492128): User endpoints default to bulk until the allocated
+        // endpoint type is plumbed before ConfigureEndpoint.
+        uep.ep.type = fdescriptor::EndpointType::kBulk;
         uep.server.emplace(bti, dwc3, &uep);
       }
     }
@@ -538,14 +541,17 @@ class Dwc3 : public fdf::DriverBase2,
   // teardown the function drivers have already disabled their endpoints and this finds them idle.
   void StopActiveTransfers();
 
+  void InitHardwareInfo();
+
   // Commands
   bool CmdStartNewConfig(const Endpoint& ep, uint32_t rsrc_id_base);
   void CmdEpSetConfig(const Endpoint& ep, bool modify);
   void CmdEpTransferConfig(const Endpoint& ep);
   void CmdEpStartTransfer(const Endpoint& ep, zx_paddr_t trb_phys);
   void CmdEpUpdateTransfer(const Endpoint& ep);
-  // This method is safe to call with the core powered down.
+  // These methods are safe to call with the core powered down.
   bool CmdEpEndTransfer(const Endpoint& ep, bool cmd_ioc = true);
+  bool CmdEpEndTransfer(const Endpoint& ep, uint32_t rsrc_id, bool cmd_ioc);
   void CmdEpSetStall(const Endpoint& ep);
   void CmdEpClearStall(const Endpoint& ep);
 

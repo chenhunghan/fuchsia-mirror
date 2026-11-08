@@ -5,9 +5,13 @@
 #include "src/performance/trace_manager/tests/trace_manager_test.h"
 
 #include <lib/syslog/cpp/macros.h>
+#include <lib/trace-engine/fields.h>
 
+#include <cstring>
 #include <memory>
 #include <utility>
+
+#include <trace-reader/reader.h>
 
 namespace tracing {
 namespace test {
@@ -421,6 +425,44 @@ void TraceManagerTest::VerifyCounts(int expected_start_count, int expected_stop_
         },
         binding);
   }
+}
+
+std::vector<trace::Record> TraceManagerTest::ReadRecordsFromSocket() {
+  std::vector<uint8_t> bytes;
+  uint8_t chunk_buf[4096];
+  while (true) {
+    size_t actual = 0;
+    zx_status_t status = destination_.read(0, chunk_buf, sizeof(chunk_buf), &actual);
+    if (status == ZX_ERR_SHOULD_WAIT) {
+      break;
+    }
+    EXPECT_EQ(status, ZX_OK);
+    if (status != ZX_OK) {
+      break;
+    }
+    bytes.insert(bytes.end(), chunk_buf, chunk_buf + actual);
+  }
+  EXPECT_EQ(bytes.size() % sizeof(uint64_t), 0u);
+
+  std::vector<uint64_t> words(trace::BytesToWords(bytes.size()));
+  if (!words.empty()) {
+    std::memcpy(words.data(), bytes.data(), trace::WordsToBytes(words.size()));
+  }
+
+  std::vector<trace::Record> records;
+  trace::TraceReader reader(
+      [&records](trace::Record record) { records.push_back(std::move(record)); },
+      [](std::string_view error) { ADD_FAILURE() << "TraceReader error: " << error; });
+  trace::Chunk chunk(words.data(), words.size());
+  EXPECT_TRUE(reader.ReadRecords(chunk));
+  EXPECT_EQ(chunk.remaining_words(), 0u);
+  return records;
+}
+
+bool TraceManagerTest::IsSocketEmpty() const {
+  zx_signals_t pending = 0;
+  return destination_.wait_one(ZX_SOCKET_READABLE, zx::time::infinite_past(), &pending) ==
+         ZX_ERR_TIMED_OUT;
 }
 
 // fidl event

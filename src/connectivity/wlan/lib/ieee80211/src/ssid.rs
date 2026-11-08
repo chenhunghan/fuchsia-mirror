@@ -48,7 +48,7 @@ pub enum SsidError {
 /// assert_eq!(ssid, vec![0x01, 0x02, 0x03, 0x04, 0x05]);
 /// ```
 #[derive(Arbitrary)] // Derive Arbitrary for fuzzer
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Ssid(Box<[u8]>);
 
 impl AsRef<[u8]> for Ssid {
@@ -65,11 +65,43 @@ impl Deref for Ssid {
     }
 }
 
-impl fmt::Display for Ssid {
-    /// Return an SSID formatted as <ssid-BYTES> where BYTES are the bytes of the
-    /// SSID encoded as uppercase hexadecimal characters.
+impl Ssid {
+    /// The single place that knows how to render SSID bytes: `<ssid-HEX>`.
+    fn fmt_bytes(bytes: &[u8], f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<ssid-")?;
+        for byte in bytes {
+            write!(f, "{byte:02x}")?;
+        }
+        write!(f, ">")
+    }
+}
+
+impl redactor::Redactable for Ssid {
+    fn fmt_unredacted(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Self::fmt_bytes(&self.0, f)
+    }
+
+    fn fmt_redacted(
+        &self,
+        redactor: &dyn redactor::Redactor,
+        f: &mut fmt::Formatter<'_>,
+    ) -> fmt::Result {
+        Self::fmt_bytes(&redactor.redact_ssid(&self.0), f)?;
+        f.write_str(redactor::REDACTED_MARKER)
+    }
+}
+
+// `Display` returns an SSID formatted as `<ssid-BYTES>` where BYTES are the
+// bytes of the SSID encoded as lowercase hexadecimal characters. It goes
+// through the global redactor (if one has been installed), in which case
+// BYTES is a digest instead, to prevent leaking the raw SSID in sensitive
+// contexts. `Debug` wraps it.
+redactor::impl_display_via_redactable!(Ssid);
+
+impl fmt::Debug for Ssid {
+    /// Delegates to `Display` so `{:?}` never leaks the raw byte array.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "<ssid-{}>", hex::encode(self.0.clone()))
+        write!(f, "Ssid({})", self)
     }
 }
 
@@ -271,6 +303,11 @@ mod tests {
     #[test]
     fn format_ssid() {
         assert_eq!(format!("{}", *SSID_12345), "<ssid-0102030405>");
+    }
+
+    #[test]
+    fn debug_ssid_does_not_leak_raw_bytes() {
+        assert_eq!(format!("{:?}", *SSID_12345), "Ssid(<ssid-0102030405>)");
     }
 
     #[test]

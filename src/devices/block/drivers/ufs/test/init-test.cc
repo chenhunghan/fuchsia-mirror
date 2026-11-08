@@ -29,8 +29,6 @@ TEST_F(InitTest, DeviceNotFound) {
       UicCommandOpcode::kDmeLinkStartUp,
       [](ufs_mock_device::UfsMockDevice&, uint32_t, uint32_t, uint32_t) {});
 
-  driver_test().RunInEnvironmentTypeContext(
-      [&](Environment& env) { env.pci_server().SetMockDevice(&mock_device_); });
   TestUfs::SetMockDevice(&mock_device_);
 
   zx::result result = driver_test().StartDriverWithCustomStartArgs([&](fdf::DriverStartArgs& args) {
@@ -54,8 +52,6 @@ TEST_F(InitTest, LinkStartupFailure) {
             .WriteTo(mock_device.GetRegisters());
       });
 
-  driver_test().RunInEnvironmentTypeContext(
-      [&](Environment& env) { env.pci_server().SetMockDevice(&mock_device_); });
   TestUfs::SetMockDevice(&mock_device_);
 
   zx::result result = driver_test().StartDriverWithCustomStartArgs([&](fdf::DriverStartArgs& args) {
@@ -139,7 +135,7 @@ TEST_F(InitTest, Inspect) {
 
   for (const char* prop_name :
        {"block.read.count", "block.write.count", "block.flush.count", "block.trim.count",
-        "block.read.bytes", "block.write.bytes", "block.flush.bytes", "block.trim.bytes"}) {
+        "block.read.kib", "block.write.kib", "block.flush.kib", "block.trim.kib"}) {
     auto prop = ufs->node().get_property<inspect::UintPropertyValue>(prop_name);
     ASSERT_NE(prop, nullptr);
     EXPECT_EQ(prop->value(), 0U);
@@ -320,8 +316,6 @@ TEST_F(InitTest, CancelIrqOnInitFailure) {
       [](ufs_mock_device::UfsMockDevice& mock_device, uint32_t ucmdarg1, uint32_t ucmdarg2,
          uint32_t ucmdarg3) {});
 
-  driver_test().RunInEnvironmentTypeContext(
-      [&](Environment& env) { env.pci_server().SetMockDevice(&mock_device_); });
   TestUfs::SetMockDevice(&mock_device_);
 
   zx::result result = driver_test().StartDriverWithCustomStartArgs([&](fdf::DriverStartArgs& args) {
@@ -369,8 +363,6 @@ TEST_F(InitTest, AutoHibernateDisabledByConfig) {
       .set_auto_hibernation_support(true)
       .WriteTo(mock_device_.GetRegisters());
 
-  driver_test().RunInEnvironmentTypeContext(
-      [&](Environment& env) { env.pci_server().SetMockDevice(&mock_device_); });
   TestUfs::SetMockDevice(&mock_device_);
 
   zx::result result = driver_test().StartDriverWithCustomStartArgs([&](fdf::DriverStartArgs& args) {
@@ -394,8 +386,6 @@ TEST_F(InitTest, AutoHibernateCustomTimerConfig) {
       .set_auto_hibernation_support(true)
       .WriteTo(mock_device_.GetRegisters());
 
-  driver_test().RunInEnvironmentTypeContext(
-      [&](Environment& env) { env.pci_server().SetMockDevice(&mock_device_); });
   TestUfs::SetMockDevice(&mock_device_);
 
   zx::result result = driver_test().StartDriverWithCustomStartArgs([&](fdf::DriverStartArgs& args) {
@@ -433,7 +423,10 @@ TEST_F(InitTest, AutoHibernateQemuQuirk) {
   driver_test().RunInEnvironmentTypeContext([](Environment& env) {
     constexpr uint16_t kRedHatVendorId = 0x1b36;
     constexpr uint16_t kQemuUfsHostController = 0x0013;
-    env.pci_server().SetDeviceInfo(kRedHatVendorId, kQemuUfsHostController);
+    env.pci_server().SetDeviceInfo({
+        .vendor_id = kRedHatVendorId,
+        .device_id = kQemuUfsHostController,
+    });
   });
   ASSERT_NO_FATAL_FAILURE(StartDriver());
 

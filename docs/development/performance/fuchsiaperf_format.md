@@ -39,6 +39,7 @@ of the result's `values`.
 * `percent`
 * `count`
 * `W` (watts)
+* `J` (joules)
 
 ### Metric direction
 

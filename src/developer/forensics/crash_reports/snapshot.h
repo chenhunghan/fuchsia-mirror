@@ -5,7 +5,7 @@
 #ifndef SRC_DEVELOPER_FORENSICS_CRASH_REPORTS_SNAPSHOT_H_
 #define SRC_DEVELOPER_FORENSICS_CRASH_REPORTS_SNAPSHOT_H_
 
-#include <fuchsia/feedback/cpp/fidl.h>
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
 
 #include <map>
 #include <memory>
@@ -28,7 +28,7 @@ bool IsSpecialCaseSnapshot(const std::string& uuid);
 class ManagedSnapshot {
  public:
   struct Archive {
-    explicit Archive(const fuchsia::feedback::Attachment& attachment);
+    explicit Archive(const fuchsia_feedback::Attachment& attachment);
     Archive(std::string archive_key, SizedData archive);
     std::string key;
     SizedData value;

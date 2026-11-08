@@ -14,6 +14,10 @@ serving Inspect, etc. Internally it implements the buddy allocation algorithm de
 For an introduction to Inspect concepts and the rust libraries, see the
 [codelab][codelab].
 
+For guidance on configuring Virtual Memory Object (VMO) buffer capacity and
+monitoring memory allocation health, see
+[Managing VMO size and capacity][quickstart-vmo-size].
+
 ## [`inspect-runtime`][inspect_runtime]
 
 This library enables components to serve Inspect and make it available to the
@@ -95,3 +99,4 @@ This library provides an API for reading and writing the blocks of the
 [bounded-list-node]: https://fuchsia-docs.firebaseapp.com/rust/fuchsia_inspect_contrib/nodes/struct.BoundedListNode.html
 [inspect-log-macro]: https://fuchsia-docs.firebaseapp.com/rust/fuchsia_inspect_contrib/macro.inspect_log.html
 [node-time-ext]: https://fuchsia-docs.firebaseapp.com/rust/fuchsia_inspect_contrib/nodes/trait.NodeTimeExt.html
+[quickstart-vmo-size]: /docs/development/diagnostics/inspect/quickstart.md#managing-vmo-size-and-capacity

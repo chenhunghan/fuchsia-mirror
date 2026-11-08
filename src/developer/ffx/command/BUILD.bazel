@@ -2,7 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
 
 package(default_applicable_licenses = ["//:license"])
@@ -20,10 +20,7 @@ rustc_library(
     ],
     crate_name = "ffx_command",
     edition = "2024",
-    proc_macro_deps = [
-        "//third_party/rust_crates/vendor:async-trait",
-    ],
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     test_deps = [
         "//src/lib/fuchsia",
         "//third_party/rust_crates/vendor:assert_matches",
@@ -68,6 +65,7 @@ rustc_library(
         "//src/developer/ffx/lib/addr:lib",
         "//src/developer/ffx/lib/errors:lib",
         "//src/developer/ffx/lib/fho/metadata:lib",
+        "//src/developer/ffx/lib/futures:lib",
         "//src/developer/ffx/lib/metrics:lib",
         "//src/developer/ffx/lib/timeout:lib",
         "//src/developer/lib/writer:lib",

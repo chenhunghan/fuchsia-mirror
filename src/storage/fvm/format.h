@@ -354,9 +354,6 @@ struct VPartitionEntry {
   VPartitionEntry(const uint8_t type[kGuidSize], const uint8_t guid[kGuidSize], uint32_t slices,
                   std::string name, uint32_t flags = 0);
 
-  // Creates an entry which is used to retain slices for future use.
-  static VPartitionEntry CreateReservedPartition();
-
   // Creates a string from the given possibly-null-terminated fixed-length buffer. If there is a
   // null terminator it will indicate the end of the string. if there is none, the string will use
   // up the entire input buffer.
@@ -384,9 +381,6 @@ struct VPartitionEntry {
 
   // Returns true if the partition is flagged as inactive.
   bool IsInactive() const;
-
-  // Returns true if the partition is an internal one used for reserving slices for future uses.
-  bool IsInternalReservationPartition() const;
 
   // Marks this entry active status as |is_active|.
   void SetActive(bool is_active);
@@ -619,37 +613,5 @@ inline size_t Header::GetSliceDataOffset(size_t pslice) const {
 }
 
 }  // namespace fvm
-
-// Following describes the android sparse format
-
-constexpr uint32_t kAndroidSparseHeaderMagic = 0xed26ff3a;
-
-struct AndroidSparseHeader {
-  const uint32_t kMagic = kAndroidSparseHeaderMagic;
-  const uint16_t kMajorVersion = 0x1;
-  const uint16_t kMinorVersion = 0x0;
-  uint16_t file_header_size = 0;
-  uint16_t chunk_header_size = 0;
-  uint32_t block_size = 0;
-  uint32_t total_blocks = 0;
-  uint32_t total_chunks = 0;
-  // CRC32 checksum of the original data, including dont-care chunk
-  uint32_t image_checksum = 0;
-};
-
-enum AndroidSparseChunkType : uint16_t {
-  kChunkTypeRaw = 0xCAC1,
-  kChunkTypeFill = 0xCAC2,
-  kChunkTypeDontCare = 0xCAC3,
-};
-
-struct AndroidSparseChunkHeader {
-  AndroidSparseChunkType chunk_type;
-  uint16_t reserved1 = 0;
-  // In the unit of blocks
-  uint32_t chunk_blocks = 0;
-  // In the unit of bytes
-  uint32_t total_size = 0;
-};
 
 #endif  // SRC_STORAGE_FVM_FORMAT_H_

@@ -7,9 +7,6 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
-#include <rapidjson/document.h>
-#include <rapidjson/error/en.h>
-#include <rapidjson/pointer.h>
 
 #include "log_decoder.h"
 #include "log_decoder_api.h"
@@ -17,13 +14,23 @@
 namespace log_decoder {
 namespace {
 
+struct ScopedLogMessages {
+  LogMessages messages;
+  explicit ScopedLogMessages(LogMessages m) : messages(m) {}
+  ScopedLogMessages(const ScopedLogMessages&) = delete;
+  ScopedLogMessages& operator=(const ScopedLogMessages&) = delete;
+  ~ScopedLogMessages() { fuchsia_free_log_messages(messages); }
+};
+
 fuchsia::logger::LogMessage DecodeBuffer(fuchsia_logging::LogBuffer& buffer) {
   std::span<const uint8_t> span = buffer.EndRecord();
-  auto messages = fuchsia_decode_log_messages_to_struct(span.data(), span.size(), true, nullptr);
-  EXPECT_EQ(messages.messages.len, 1u);
-  auto fidl_res = ToFidlLogMessage(*messages.messages.ptr[0]);
+  ZX_ASSERT(!span.empty() && span.data() != nullptr);
+  ScopedLogMessages decoded(fuchsia_decode_log_messages_to_struct(
+      span.data(), span.size(), /*expect_extended_attribution=*/false, nullptr));
+  EXPECT_EQ(decoded.messages.error_str, nullptr);
+  EXPECT_EQ(decoded.messages.messages.len, 1u);
+  auto fidl_res = ToFidlLogMessage(*decoded.messages.messages.ptr[0]);
   EXPECT_TRUE(fidl_res.is_ok());
-  fuchsia_free_log_messages(messages);
   return fidl_res.take_value();
 }
 
@@ -34,28 +41,37 @@ TEST(LogDecoder, DecodesCorrectly) {
   buffer.WriteKeyValue("tag", "some other tag");
   buffer.WriteKeyValue("user property", 5.2);
   std::span<const uint8_t> span = buffer.EndRecord();
-  const char* json = fuchsia_decode_log_message_to_json(span.data(), span.size());
-
-  rapidjson::Document d;
-  d.Parse(json);
-  auto& entry = d[rapidjson::SizeType(0)];
-  auto& tags = entry["metadata"]["tags"];
-  auto& payload = entry["payload"]["root"];
-  auto& keys = payload["keys"];
-  ASSERT_EQ(tags[0].GetString(), std::string("some tag"));
-  ASSERT_EQ(tags[1].GetString(), std::string("some other tag"));
-  ASSERT_EQ(keys["user property"].GetDouble(), 5.2);
-  ASSERT_EQ(payload["message"]["value"].GetString(), std::string("test message"));
-  fuchsia_free_decoded_log_message(const_cast<char*>(json));
+  ASSERT_FALSE(span.empty());
+  ASSERT_NE(span.data(), nullptr);
+  ScopedLogMessages decoded(fuchsia_decode_log_messages_to_struct(
+      span.data(), span.size(), /*expect_extended_attribution=*/false, nullptr));
+  ASSERT_EQ(decoded.messages.error_str, nullptr);
+  ASSERT_EQ(decoded.messages.messages.len, 1u);
+  const LogMessage* raw_msg = decoded.messages.messages.ptr[0];
+  ASSERT_EQ(raw_msg->tags.len, 2u);
+  EXPECT_EQ(std::string_view(reinterpret_cast<const char*>(raw_msg->tags.ptr[0].ptr),
+                             raw_msg->tags.ptr[0].len),
+            "some tag");
+  EXPECT_EQ(std::string_view(reinterpret_cast<const char*>(raw_msg->tags.ptr[1].ptr),
+                             raw_msg->tags.ptr[1].len),
+            "some other tag");
+  ASSERT_EQ(raw_msg->kvps.len, 1u);
+  EXPECT_EQ(std::string_view(reinterpret_cast<const char*>(raw_msg->kvps.ptr[0].key.ptr),
+                             raw_msg->kvps.ptr[0].key.len),
+            "user property");
+  EXPECT_EQ(raw_msg->kvps.ptr[0].value.tag, CppValue::Tag::CPP_VALUE_FLOATING);
+  EXPECT_DOUBLE_EQ(raw_msg->kvps.ptr[0].value.FLOATING._0, 5.2);
+  EXPECT_EQ(
+      std::string_view(reinterpret_cast<const char*>(raw_msg->message.ptr), raw_msg->message.len),
+      "test message");
 }
 
-TEST(LogDecoder, DecodeInvalidBytesReturnsNull) {
+TEST(LogDecoder, DecodeInvalidBytesReturnsError) {
   const uint8_t invalid_bytes[] = {0x01, 0x02, 0x03, 0x04};
-  const char* json = fuchsia_decode_log_message_to_json(invalid_bytes, sizeof(invalid_bytes));
-  EXPECT_EQ(json, nullptr);
-
-  const char* json_null = fuchsia_decode_log_message_to_json(nullptr, 0);
-  EXPECT_EQ(json_null, nullptr);
+  ScopedLogMessages decoded(fuchsia_decode_log_messages_to_struct(
+      invalid_bytes, sizeof(invalid_bytes), /*expect_extended_attribution=*/false, nullptr));
+  EXPECT_NE(decoded.messages.error_str, nullptr);
+  EXPECT_EQ(decoded.messages.messages.len, 0u);
 }
 
 TEST(LogDecoder, DecodesArchivistArguments) {
@@ -182,10 +198,11 @@ TEST(LogDecoderApi, ToFidlLogMessageRootMonikerOmitsDotTag) {
 TEST(LogDecoder, HandlesInvalidInput) {
   // A simple invalid byte sequence. A valid log message would have a different structure.
   const uint8_t invalid_data[] = {0xDE, 0xAD, 0xBE, 0xEF};
-  auto messages =
-      fuchsia_decode_log_messages_to_struct(invalid_data, sizeof(invalid_data), true, nullptr);
-  ASSERT_EQ(std::string(messages.error_str), std::string("couldn't parse message: InvalidHeader"));
-  fuchsia_free_log_messages(messages);
+  ScopedLogMessages decoded(fuchsia_decode_log_messages_to_struct(
+      invalid_data, sizeof(invalid_data), /*expect_extended_attribution=*/true, nullptr));
+  ASSERT_NE(decoded.messages.error_str, nullptr);
+  ASSERT_EQ(std::string(decoded.messages.error_str),
+            std::string("couldn't parse message: InvalidHeader"));
 }
 
 TEST(LogDecoderApi, ToFidlLogMessageMultipleArguments) {

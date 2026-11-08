@@ -1,6 +1,6 @@
 ---
 name: fuchsia-debugger
-description: Use fx debug cli to debug test failures.
+description: Use fx debug cli to debug test failures, processes, and live device drivers.
 ---
 
 # Overview
@@ -49,6 +49,7 @@ fx debug cli --json '{"command": "wait-for-event", "last_seen_seq": 0, "timeout"
 > initial command fails with `Daemon socket not found`, wait briefly and retry.
 
 #### Example `wait-for-event` Response (Test Failure / Breakpoint):
+
 ```json
 {
   "success": true,
@@ -86,10 +87,13 @@ breakpoint hit. Perform diagnostics:
 
 1.  **Query Session State:** Retrieve all threads and processes active in the
     session to identify the failing thread:
+
     ```bash
     fx debug cli --json '{"command": "get-state"}'
     ```
+
     Example Response:
+
     ```json
     {
       "success": true,
@@ -101,11 +105,13 @@ breakpoint hit. Perform diagnostics:
       }
     }
     ```
+
     *Note: In the `get-state` thread list representation, the key is `"id"`. Map
     this value to the `"thread_id"` parameter in subsequent requests.*
 
 2.  **Retrieve Stack Trace:** Get the stack trace for a suspended thread
     (`thread_id`) or across all threads in a process (`pid`):
+
     ```bash
     # Thread-level stack trace
     fx debug cli --json '{"command": "stack-trace", "thread_id": 1}'
@@ -113,7 +119,9 @@ breakpoint hit. Perform diagnostics:
     # Process-level stack trace (all threads in "pid")
     fx debug cli --json '{"command": "stack-trace", "pid": 12345}'
     ```
+
     Example Thread Response:
+
     ```json
     {
       "success": true,
@@ -135,7 +143,9 @@ breakpoint hit. Perform diagnostics:
       }
     }
     ```
+
     Example Process Response:
+
     ```json
     {
       "success": true,
@@ -181,27 +191,26 @@ breakpoint hit. Perform diagnostics:
 
 3.  **Inspect Local Variables:** Retrieve variables and arguments within a
     specific stack frame:
+
     ```bash
     fx debug cli --json '{"command": "variables", "thread_id": 1, "frame_index": 0}'
     ```
 
-4.  **Evaluate Dynamic Expressions / Commands:** Run dynamic expression
-    evaluation or debugger commands within a stack frame. The underlying
-    debugger handles `evaluate` requests in the `"repl"` context, executing the
-    expression directly as a zxdb console command line.
+4.  **Evaluate Dynamic Expressions:** Evaluate expressions directly within a
+    stack frame via `evaluate`.
 
     Note that `evaluate` requires the target thread to be stopped prior to
-    invocation. If the thread is running, the request immediately returns an
-    error (`success: false`). Ensure the thread is suspended via a breakpoint or
-    `pause` command before evaluating.
+    invocation. Ensure the thread is suspended via a breakpoint or `pause`
+    command before evaluating.
 
-    To evaluate an expression or print a variable, prefix the expression with
-    the debugger's print command:
+    Pass the expression directly (do not prefix with `print`):
+
     ```bash
-    fx debug cli --json '{"command": "evaluate", "thread_id": 1, "frame_index": 0, "expression": "print my_var"}'
+    fx debug cli --json '{"command": "evaluate", "thread_id": 1, "frame_index": 0, "expression": "my_var"}'
     ```
 
     Example Response:
+
     ```json
     {
       "success": true,
@@ -212,15 +221,18 @@ breakpoint hit. Perform diagnostics:
     }
     ```
 
-    You can also execute arbitrary zxdb console commands such as symbol
-    inspection:
+    To execute raw `zxdb` console commands that do not have a dedicated CLI
+    subcommand (such as symbol inspection or disassembly), use the `console`
+    command (optionally scoped to a `thread_id` and `frame_index`):
+
     ```bash
-    fx debug cli --json '{"command": "evaluate", "thread_id": 1, "frame_index": 0, "expression": "sym-info my_var"}'
+    fx debug cli --json '{"command": "console", "thread_id": 1, "frame_index": 0, "input": "sym-info my_var"}'
     ```
 
 5.  **Teardown Session:** Once diagnostics are complete, terminate the debugging
     session. This detaches from targets and lets the background test runner exit
     cleanly:
+
     ```bash
     fx debug cli --json '{"command": "stop"}'
     ```
@@ -249,9 +261,11 @@ To debug a passing path or install breakpoints before test execution begins:
 1.  Start the test with the `--breakpoint` option to force a normal attach with
     immediate symbol loading (paths must be fully qualified from the workspace
     root):
+
     ```bash
     fx test <test_name> --agent-debugging-mode --breakpoint <source_file>:<line>
     ```
+
 2.  Poll for the breakpoint hit stopped event via `wait-for-event`.
 3.  Once suspended, perform diagnostics and resume execution using `continue`.
 
@@ -265,14 +279,22 @@ All commands are sent as serialized JSON payloads to `fx debug cli --json
 | Action | Command Input Payload |
 |---|---|
 | **Wait for Event** | `{"command": "wait-for-event", "last_seen_seq": <seq>, "timeout": <secs>}` |
-| **Get State** | `{"command": "get-state"}` *(Returns active threads, processes, and breakpoints)* |
+| **Get State** | `{"command": "get-state"}` *(Returns active threads, processes, breakpoints, and tracepoints)* |
 | **List Threads** | `{"command": "threads"}` |
-| **Set/Delete Breakpoint** | `{"command": "break", "file": "<workspace_root_path>", "line": <line_num>, "delete": <optional_bool>}` *(To delete, specify matching file and line)* |
-| **Attach Process** | `{"command": "attach", "filter": "<name_or_pid>"}` |
-| **Detach Process** | `{"command": "detach", "pid": <pid>}` or `{"command": "detach", "all": true}` |
-| **Get Stack Trace** | `{"command": "stack-trace", "thread_id": <thread_id>}` or `{"command": "stack-trace", "pid": <pid>, "raw": <optional_bool>}` *(CLI: `stack-trace -t <id>` or `stack-trace -p <pid>`)* |
+| **Set/Delete Breakpoint** | `{"command": "break", "file": "<workspace_root_path>", "line": <line_num>, "condition": "<optional_expr>", "delete": <optional_bool>}` or `{"command": "break", "function": "<symbol>", "condition": "<optional_expr>", "delete": <optional_bool>}` *(CLI: `break <file>:<line>` or `break --file <file> --line <line>` or `break -f <symbol> [-c <expr>]`)* |
+| **Set/Manage Tracepoint** | `{"command": "tracepoint", "file": "<workspace_root_path>", "line": <line_num>, ...}` or `{"command": "tracepoint", "function": "<symbol>", ...}` or `{"command": "tracepoint", "watch": "<expr_or_hex_addr>", "thread_id": <optional_tid>, "frame_index": <optional_idx>, "size": <optional_bytes>, "access_type": "write" \| "readWrite", ...}` with optional `"condition": "<expr>"`, `"expressions": ["<expr>"]`, `"capture": ["frame", "backtrace", "locals", "registers"]`, `"raw_backtrace": <bool>`, `"max_matching_frames": <int>`, `"max_hits": <int>`. For management, pass `{"command": "tracepoint", "list_all": true}`, `{"command": "tracepoint", "clear": true}`, or `{"command": "tracepoint", "tracepoint_id": <id>, "enabled": <bool> \| "delete": true}` *(CLI: `tracepoint (<file>:<line> \| -f <sym> \| -w <expr> [-t <id>]) [-c <expr>] [-e <expr>] [--locals] [--registers] [--backtrace] [-r] [--max-frames <n>] [--max-hits <n>]` or `tracepoint (--list \| --clear \| --enable <id> \| --disable <id> \| <id> -d)`. Aliases: `tp`, `trace`)* |
+| **Attach Process / Driver** | `{"command": "attach", "filter": "<name_or_pid>", "weak": <optional_bool>, "exact": <optional_bool>, "recursive": <optional_bool>, "job_only": <optional_bool>}` or `{"command": "attach", "driver": "<driver_name_or_url>", "weak": <optional_bool>, "wait": <optional_bool>}` or `{"command": "attach", "node": "<moniker>", "weak": <optional_bool>, "wait": <optional_bool>}` *(CLI: `attach (<filter> | --driver <drv> | --node <moniker>)`)* |
+| **List Driver Hosts** | `{"command": "driver-list", "filter": "<optional_substr>"}` *(CLI: `driver-list [<filter>]` or `driver-list -f <filter>`)* |
+| **List Modules** | `{"command": "modules", "pid": <optional_pid>, "filter": "<optional_substr>", "force_reload": <optional_bool>}` *(CLI: `modules [-p <pid>] [-f <filter>] [-r]`)* |
+| **Inspect Address Space** | `{"command": "aspace", "pid": <optional_pid>, "address": "<optional_addr>", "filter": "<optional_substr>"}` *(CLI: `aspace [addr] [-p <pid>] [-f <filter>]`)* |
+| **Inspect Handles** | `{"command": "handles", "pid": <optional_pid>, "type": "<optional_type>", "koid": <optional_koid>, "detail": <optional_bool>}` *(CLI: `handles [-p <pid>] [--type <type>] [-k <koid>] [--detail]`)* |
+| **Read Memory** | `{"command": "mem-read", "address": "<addr_or_expr>", "size": <bytes>, "pid": <optional_pid>, "thread_id": <optional_thread_id>, "frame_index": <frame_index>}` *(CLI: `mem-read <addr_or_expr> [-s <size>] [-p <pid>] [-t <id> [--frame-index <idx>]]`)* |
+| **Async Backtrace** | `{"command": "async-backtrace", "pid": <optional_pid>}` *(CLI: `async-backtrace [-p <pid>]`)* |
+| **Detach Process** | `{"command": "detach", "pid": <pid>}` or `{"command": "detach", "all": true}` *(CLI: `detach [<pid>] [--all]`)* |
+| **Get Stack Trace** | `{"command": "stack-trace", "thread_id": <thread_id>}` or `{"command": "stack-trace", "pid": <pid>, "raw": <optional_bool>}`; optional `"force_remote_unwind": <bool>`, `"unwinder": "cfi" \| "fp" \| "scs" \| "plt" \| "armehabi" \| "sigreturn"` *(CLI: `stack-trace (-t <id> \| -p <pid>) [-r] [--force-remote-unwind] [--unwinder <name>]`)* |
 | **List Variables** | `{"command": "variables", "thread_id": <thread_id>, "frame_index": <frame_index>}` *(CLI: `variables -t <id> --frame-index <idx>`)* |
-| **Evaluate Expression** | `{"command": "evaluate", "thread_id": <thread_id>, "frame_index": <frame_index>, "expression": "<expr>", "start": <start>, "count": <count>}` *(CLI: `evaluate -t <id> --frame-index <idx> <expr>`)* |
+| **Evaluate Expression** | `{"command": "evaluate", "thread_id": <thread_id>, "frame_index": <frame_index>, "expression": "<expr>"}` *(CLI: `evaluate -t <id> [--frame-index <idx>] <expr>`)* |
+| **Run Console Command** | `{"command": "console", "input": "<cmd>", "thread_id": <optional_thread_id>, "frame_index": <frame_index>}` *(CLI: `console [-t <id>] [--frame-index <idx>] <cmd>`)* |
 | **Step In** | `{"command": "step-in", "thread_id": <thread_id>}` *(CLI: `step-in <id>`)* |
 | **Step Over (Next)** | `{"command": "next", "thread_id": <thread_id>}` *(CLI: `next <id>`)* |
 | **Step Out (Finish)** | `{"command": "finish", "thread_id": <thread_id>}` *(CLI: `finish <id>`)* |
@@ -281,13 +303,165 @@ All commands are sent as serialized JSON payloads to `fx debug cli --json
 | **Stop Session** | `{"command": "stop"}` |
 
 ### Global Parameters
+
 * **Event History Pruning (`ack_seq`)**: Any command payload can include
   `"ack_seq": <seq>` (e.g., `{"command": "get-state", "ack_seq": 5}`). The
   daemon will prune all event history up to the acknowledged sequence to
   optimize memory.
 
 ### Performance & Blocking
+
 * **Smart Blocking**: Commands like `pause`, `stack-trace`, and `wait-for-event`
   are blocking operations and may take up to 10 seconds depending on the
   target's execution state. Unlike those commands, `evaluate` is non-blocking
   and fails immediately if the target thread is not already stopped.
+
+---
+
+## Live Process & Driver Debugging (`fx debug cli`)
+
+`fx debug cli` also provides workflows for live process inspection and DFv2
+driver bring-up on running targets.
+
+### 1. Discover & Safely Attach to a Driver Host
+
+Because pausing a `driver_host` freezes all colocated drivers in that process
+(which can sever USB/CDC-NCM/ADB transport if transport or watchdog drivers are
+colocated), inspect driver host topology with `driver-list` before attaching:
+
+```bash
+# List running driver_hosts, colocated drivers, and transport hazards
+fx debug cli driver-list --filter xhci
+
+# Attach by driver name/URL or device node moniker (warns on transport hazards)
+fx debug cli attach --driver xhci
+fx debug cli attach --node dev.sys.platform.xhci
+```
+
+#### Driver Host Transport Hazards & Guidance
+
+When a `driver_host` colocates transport or watchdog drivers (such as USB,
+CDC-NCM, ethernet, serial, or watchdog), avoid stopping breakpoints or manual
+pause commands to prevent severing host `ffx` communication. Instead:
+
+* Prefer weak attach (`--weak`) to catch crashes without stopping threads.
+* Use non-stopping inspection commands (`modules`, `aspace`, `handles`,
+  `mem-read`) to examine process state safely.
+* Use non-stopping tracepoints (`tracepoint`) instead of breakpoints to sample
+  variables or expressions without pausing threads.
+
+```bash
+# Attach weakly for crash-only catch on transport-sensitive driver hosts
+fx debug cli attach --driver xhci --weak
+```
+
+#### Pending or Unbound Drivers (`--wait`)
+
+When attaching to a driver that has not yet started or bound, pass `--wait`. If
+no running `driver_host` matches, `fx debug cli` installs a zxdb process filter
+on `"driver_host"` that attaches to every newly started driver host (since zxdb
+matches process names rather than driver URLs or device monikers).
+
+Attach flags (`--weak`, `--recursive`, `--job-only`) are forwarded to this
+filter, and the response includes `requested_target` and `filter_warning`
+alerting the user that all new driver hosts will be attached.
+
+```bash
+# Pre-arm a filter before a driver binds or starts
+fx debug cli attach --driver my_driver --wait
+```
+
+### 2. Inspect a Live Process
+
+These commands return structured JSON and do not stop the target. When more than
+one process is attached, pass `--pid` (`-p`) to choose one.
+
+```bash
+# Inspect loaded modules/DSOs, virtual memory mappings, and Zircon handles
+fx debug cli modules --filter xhci
+fx debug cli aspace --filter mmio
+fx debug cli handles --type interrupt --detail
+
+# Read memory at an address (or at a frame-relative expression with -t)
+fx debug cli mem-read 0x7ffee1234000 -s 32
+```
+
+`modules` requests the module list from `debug_agent`, which ends a weak attach.
+
+### 3. Breakpoints and Stack Traces
+
+```bash
+# Set function or conditional breakpoints
+fx debug cli break --function usb_xhci::UsbXhci::Init --condition "status != 0"
+
+# If an unwind stops early, retry on the target or force a specific unwinder
+fx debug cli stack-trace -p <pid> --force-remote-unwind
+fx debug cli stack-trace -t <tid> --unwinder fp
+```
+
+### 4. Tracepoints (`tracepoint`)
+
+A tracepoint (`tracepoint`, `tp`, or `trace`) captures state when a thread hits
+a code location or hardware watchpoint, then resumes the thread immediately. The
+backend emits a `zxdb.Tracepoint` event to `wait-for-event` and disables the
+tracepoint after `max_hits` events (20 by default).
+
+```bash
+# Capture an expression and local variables on a function (aliases: tp, trace)
+fx debug cli tracepoint usb_xhci::UsbXhci::HandleEvent -e status --locals --max-hits 10
+
+# Capture a backtrace on a source line when a condition holds
+fx debug cli tp src/devices/usb/drivers/xhci/usb-xhci.cc:142 -c "ring != nullptr" --backtrace
+
+# Set a watchpoint tracepoint on an expression (requires -t) or hex address
+fx debug cli tp -w my_var -t 1 -a readWrite --size 4
+
+# List, disable, re-enable (resets hit_count), delete, or clear tracepoints
+fx debug cli tp --list
+fx debug cli tp --disable 1
+fx debug cli tp --enable 1
+fx debug cli tp 1 -d
+fx debug cli tp --clear
+```
+
+Poll `wait-for-event` to read `zxdb.Tracepoint` hit events:
+
+```json
+{
+  "success": true,
+  "events": [
+    {
+      "seq": 2,
+      "event": "zxdb.Tracepoint",
+      "body": {
+        "tracepointId": 1,
+        "location": "usb_xhci::UsbXhci::HandleEvent",
+        "hitCount": 1,
+        "maxHits": 10,
+        "autoDisabled": false,
+        "truncated": false,
+        "threadKoid": 34567,
+        "dwellMs": 1.4,
+        "capture": {
+          "matched": true,
+          "frame": {
+            "name": "usb_xhci::UsbXhci::HandleEvent()",
+            "file": "src/devices/usb/drivers/xhci/usb-xhci.cc",
+            "line": 98,
+            "ip": 4398046515200,
+            "sp": 140732920758272,
+            "trust": "CFI"
+          },
+          "locals": {
+            "ring": { "value": "0x20004000", "type": "usb_xhci::EventRing*" }
+          },
+          "evaluations": {
+            "status": { "result": "0", "type": "zx_status_t", "error": null }
+          },
+          "errors": []
+        }
+      }
+    }
+  ]
+}
+```

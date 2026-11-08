@@ -778,7 +778,7 @@ design.
     unifying ACPI and devicetree interfaces in Linux.
 
 [acpi-rfc]: /docs/contribute/governance/rfcs/0112_acpi_support_on_x86.md
-[dt-parser]: https://cs.opensource.google/fuchsia/fuchsia/+/main:zircon/kernel/lib/devicetree/include/lib/devicetree/devicetree.h;drc=4d5a960a88ecfa5b1763111cc88b47838f799e2f
+[dt-parser]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/lib/devicetree/include/lib/devicetree/devicetree.h;drc=4d5a960a88ecfa5b1763111cc88b47838f799e2f
 [dt-schema]: https://github.com/devicetree-org/dt-schema
 [dt-specification]: https://github.com/devicetree-org/devicetree-specification/releases/tag/v0.3
 [product-assembly]: /docs/contribute/roadmap/2021/product_assembly.md

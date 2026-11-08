@@ -7,20 +7,17 @@
 #define ZIRCON_KERNEL_INCLUDE_KERNEL_PERCPU_H_
 
 #include <align.h>
-#include <lib/lazy_init/lazy_init.h>
 #include <lib/stall.h>
 #include <stddef.h>
 #include <sys/types.h>
 #include <zircon/compiler.h>
 
 #include <arch/ops.h>
-#include <fbl/intrusive_double_list.h>
 #include <kernel/cpu_search_set.h>
 #include <kernel/dpc.h>
 #include <kernel/idle_power_thread.h>
 #include <kernel/scheduler.h>
 #include <kernel/stats.h>
-#include <kernel/thread.h>
 #include <kernel/timer.h>
 #include <ktl/atomic.h>
 #include <ktl/forward.h>
@@ -30,8 +27,20 @@
 // Fwd decl.  Concrete definition is in lib/kconcurrent/chainlock_transaction.h
 class ChainLockTransaction;
 
+struct percpu;
+
+// TODO(https://fxbug.dev/575987745): Remove these transitional FFI declarations once all C++
+// callers of `struct percpu` are migrated to Rust.
+extern "C" {
+extern size_t rust_percpu_processor_count;
+extern percpu** rust_percpu_processor_index;
+void rust_percpu_initialize_boot();
+void rust_percpu_initialize_secondaries_begin();
+void rust_percpu_initialize_secondary_finish();
+}
+
 struct percpu {
-  explicit percpu(cpu_num_t cpu_num);
+  percpu() = delete;
 
   // percpus cannot be moved or copied.
   percpu(const percpu&) = delete;
@@ -76,22 +85,22 @@ struct percpu {
   // Each cpu maintains a DpcRunner.
   DpcRunner dpc_runner;
 
-  // Page state counts are percpu because they change frequently and we don't want to pay for either
-  // heavy synchronization, or transferring the counters between CPUs a lot. Using percpu relaxed
-  // atomics we minimize the need for synchronization (no locks, interrupt or preemption disabling
-  // needed), and avoid cache line bouncing the counters around different CPUs.
+  // Page state counts are percpu because they change frequently and we don't want to pay for
+  // either heavy synchronization, or transferring the counters between CPUs a lot. Using percpu
+  // relaxed atomics we minimize the need for synchronization (no locks, interrupt or preemption
+  // disabling needed), and avoid cache line bouncing the counters around different CPUs.
   //
   // While it's OK for an observer to temporarily see incorrect values, the counts need to
   // eventually quiesce. It's important that we don't "drop" changes and that the values don't
   // drift over time.
   //
   // When modifying it is not necessary to disable preemption, and can just use
-  // percpu::GetCurrent()| and then modify the counts. In the unlikely event a CPU migration happens
-  // this does not effect correctness, and paying for the rare cache line transfer is preferable to
-  // consistently paying to avoid migration.
+  // percpu::GetCurrent() and then modify the counts. In the unlikely event a CPU migration
+  // happens this does not effect correctness, and paying for the rare cache line transfer is
+  // preferable to consistently paying to avoid migration.
   //
-  // When reading, use |ForEachPreemptDisable|. Although it is not possible to guarantee a
-  // consistent snapshot of these counters, it should be good enough for diagnostic uses.
+  // When reading, use `PerCpu::for_each_preempt_disable`. Although it is not possible to guarantee
+  // a consistent snapshot of these counters, it should be good enough for diagnostic uses.
   vm_page_counts_t vm_page_counts{};
 
   // lockup_detector state.
@@ -106,8 +115,8 @@ struct percpu {
   // functions.  See also gLockupDetectorPerCpuState.
   Timer lockup_detector_timer{ZX_CLOCK_BOOT};
 
-  // When thread sampling is enabled, we use this timer to periodically mark that the active thread
-  // should be sampled when safe to do so.
+  // When thread sampling is enabled, we use this timer to periodically mark that the active
+  // thread should be sampled when safe to do so.
   Timer sampling_timer{ZX_CLOCK_MONOTONIC};
 
   // The accumulated memory stall timers for this CPU.
@@ -119,49 +128,28 @@ struct percpu {
   // Returns a reference to the percpu instance for given CPU number.
   static percpu& Get(cpu_num_t cpu_num) {
     DEBUG_ASSERT(cpu_num < processor_count());
-    return *processor_index_[cpu_num];
+    return *ktl::atomic_ref<percpu**>(rust_percpu_processor_index)
+                .load(ktl::memory_order_relaxed)[cpu_num];
   }
 
   // Returns a reference to the percpu instance for the calling CPU.
   static percpu& GetCurrent() { return *arch_get_curr_percpu(); }
 
   // Returns the number of percpu instances.
-  static size_t processor_count() { return processor_count_; }
+  static size_t processor_count() {
+    return ktl::atomic_ref<size_t>(rust_percpu_processor_count).load(ktl::memory_order_relaxed);
+  }
 
   // Called once during early init by the boot processor to initalize the percpu
   // data for the boot processor.
-  static void InitializeBoot();
+  static void InitializeBoot() { rust_percpu_initialize_boot(); }
 
   // Called once by the boot processor after heap init to initialize the percpu
   // data for the secondary processors.
-  static void InitializeSecondariesBegin();
+  static void InitializeSecondariesBegin() { rust_percpu_initialize_secondaries_begin(); }
 
-  // Called on each secondary processors immediately after booting.
-  static void InitializeSecondaryFinish();
-
-  // Call |Func| with the current CPU's percpu struct with preemption disabled.
-  //
-  // |Func| should accept a |percpu*|.
-  template <typename Func>
-  static void WithCurrentPreemptDisable(Func&& func) {
-    PreemptionState& preemption_state = Thread::Current::preemption_state();
-    preemption_state.PreemptDisable();
-    ktl::forward<Func>(func)(&GetCurrent());
-    preemption_state.PreemptReenable();
-  }
-
-  // Call |Func| once per CPU with each CPU's percpu struct with preemption disabled.
-  //
-  // |Func| should accept a |percpu*|.
-  template <typename Func>
-  static void ForEachPreemptDisable(Func&& func) {
-    PreemptionState& preemption_state = Thread::Current::preemption_state();
-    preemption_state.PreemptDisable();
-    for (cpu_num_t cpu_num = 0; cpu_num < processor_count(); ++cpu_num) {
-      ktl::forward<Func>(func)(&Get(cpu_num));
-    }
-    preemption_state.PreemptReenable();
-  }
+  // Called on each secondary processor immediately after booting or on hotplug re-entry.
+  static void InitializeSecondaryFinish() { rust_percpu_initialize_secondary_finish(); }
 
   // Call |Func| once per CPU with each CPU's percpu struct.
   //
@@ -172,24 +160,6 @@ struct percpu {
       ktl::forward<Func>(func)(cpu_num, &Get(cpu_num));
     }
   }
-
- private:
-  // Number of percpu entries.
-  static size_t processor_count_;
-
-  // The percpu for the boot processor.
-  static lazy_init::LazyInit<percpu, lazy_init::CheckType::Basic> boot_processor_
-      __CPU_ALIGN_EXCLUSIVE;
-
-  // Pointer to heap memory allocated for additional percpu instances.
-  static percpu* secondary_processors_;
-
-  // Translates from CPU number to percpu instance. Some or all instances
-  // of percpu may be discontiguous.
-  static percpu** processor_index_;
-
-  // Temporary translation table with one entry for use in early boot.
-  static percpu* boot_index_[1];
 } __CPU_ALIGN;
 
 #endif  // ZIRCON_KERNEL_INCLUDE_KERNEL_PERCPU_H_

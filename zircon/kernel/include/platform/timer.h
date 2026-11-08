@@ -387,6 +387,9 @@ bool cpp_timer_convert_mono_to_raw_ticks(zx_instant_mono_ticks_t mono_ticks,
                                          zx_ticks_t* out_raw_ticks);
 zx_status_t cpp_platform_set_oneshot_timer(zx_ticks_t deadline);
 void cpp_platform_stop_timer();
+void cpp_timer_pause_monotonic();
+void cpp_timer_unpause_monotonic();
+bool cpp_timer_is_monotonic_paused();
 
 }  // extern "C"
 

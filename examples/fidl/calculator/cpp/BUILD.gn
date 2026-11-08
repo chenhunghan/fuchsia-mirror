@@ -4,8 +4,5 @@
 
 group("hermetic_tests") {
   testonly = true
-  deps = [
-    "client:calculator-client-cpp-parser-unittests",
-    "integration_test:calculator-integration-test-cpp",
-  ]
+  deps = [ "client:calculator-client-cpp-parser-unittests" ]
 }

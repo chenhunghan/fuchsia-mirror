@@ -9,15 +9,17 @@
     },
     use: [
         { protocol: "examples.keyvaluestore.baseline.Store" },
-    ],
-    config: {
-        write_items: {
+        {
+            config: "fuchsia.examples.keyvaluestore.baseline.WriteItems",
+            key: "write_items",
             type: "vector",
             max_count: 16,
             element: {
                 type: "string",
                 max_size: 64,
             },
+            availability: "transitional",
+            default: [],
         },
-    },
+    ],
 }

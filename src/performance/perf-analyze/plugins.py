@@ -52,7 +52,7 @@ class SectionResult:
         return data
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "SectionResult":
+    def from_dict(cls, data: dict[str, Any]) -> SectionResult:
         """Creates a SectionResult from a dictionary representation."""
         return cls(
             name=data.get("name", ""),

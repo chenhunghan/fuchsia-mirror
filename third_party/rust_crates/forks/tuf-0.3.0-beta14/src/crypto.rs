@@ -403,7 +403,7 @@ impl<'de> Deserialize<'de> for KeyType {
 }
 
 /// A structure containing information about a private key.
-pub trait PrivateKey {
+pub trait PrivateKey: Send + Sync {
     /// Sign a message.
     fn sign(&self, msg: &[u8]) -> Result<Signature>;
 

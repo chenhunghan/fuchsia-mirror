@@ -12,6 +12,7 @@
 #include <iterator>
 #include <memory>
 #include <string>
+#include <tuple>
 
 #include <fbl/alloc_checker.h>
 #include <gmock/gmock.h>
@@ -448,6 +449,102 @@ INSTANTIATE_TEST_SUITE_P(/*no prefix*/, MerkleTreeStaticMethodsTest,
                          [](const TestParamInfo<const TestData *> &param) {
                            return param.param->description;
                          });
+
+struct CarryBoundaryCase {
+  size_t data_len;
+  const char *digest;
+  const char *description;
+};
+
+// Streaming 0xAB-byte test cases around the 65,281..=65,535 leaf-block carry
+// window, matching `AB_BLOCK` in //src/sys/pkg/lib/fuchsia-merkle. Streamed
+// block-by-block to avoid allocating ~512 MiB of leaf data on the heap.
+constexpr CarryBoundaryCase kCarryBoundaryCases[] = {
+    {
+        .data_len = kNodeSize * kDigestsPerNode * (kDigestsPerNode - 1),
+        .digest = "a68780a9adba83fdc1180732d974ca73a56b41629b84ee8f6046767348c2356a",
+        .description = "DataLen534773760",
+    },
+    {
+        .data_len = (kNodeSize * kDigestsPerNode * (kDigestsPerNode - 1)) + 1,
+        .digest = "966a09567323e8d368ca25d55e797ef887cd14a1eafaba57b7cafe80d458a7b1",
+        .description = "DataLen534773761",
+    },
+    {
+        .data_len = kNodeSize * ((kDigestsPerNode * kDigestsPerNode) - 1),
+        .digest = "da4fc0125b29f5b652f66f545238dbed714f997c6dba9d823e9f9f41580cb784",
+        .description = "DataLen536862720",
+    },
+    {
+        .data_len = (kNodeSize * kDigestsPerNode * kDigestsPerNode) - 1,
+        .digest = "799bb12a5f633f9949f4619e4e0af447c980f895e7261521abf69a2dba67ce9e",
+        .description = "DataLen536870911",
+    },
+};
+
+class MerkleTreeCarryBoundaryTest : public TestWithParam<std::tuple<CarryBoundaryCase, bool>> {};
+
+TEST_P(MerkleTreeCarryBoundaryTest, CreateAndVerify) {
+  const auto &[test_case, use_compact_format] = GetParam();
+  const size_t node_size = static_cast<size_t>(kNodeSize);
+  std::unique_ptr<uint8_t[]> block = AllocateBuffer(node_size, 0xab);
+  std::unique_ptr<uint8_t[]> tree;
+  uint8_t root[kSha256Length] = {};
+
+  MerkleTreeCreator creator;
+  creator.SetNodeSize(node_size);
+  creator.SetUseCompactFormat(use_compact_format);
+  ASSERT_OK(creator.SetDataLength(test_case.data_len));
+
+  size_t tree_len = creator.GetTreeLength();
+  tree = AllocateBuffer(tree_len, 0x00);
+  ASSERT_OK(creator.SetTree(tree.get(), tree_len, root, sizeof(root)));
+
+  size_t remaining = test_case.data_len;
+  while (remaining > 0) {
+    size_t chunk = std::min(remaining, node_size);
+    ASSERT_OK(creator.Append(block.get(), chunk));
+    remaining -= chunk;
+  }
+
+  Digest expected;
+  ASSERT_OK(expected.Parse(test_case.digest));
+  EXPECT_THAT(root, ElementsAreArray(expected.get(), sizeof(root)));
+
+  MerkleTreeVerifier verifier;
+  verifier.SetNodeSize(node_size);
+  verifier.SetUseCompactFormat(use_compact_format);
+  ASSERT_OK(verifier.SetDataLength(test_case.data_len));
+  ASSERT_OK(verifier.SetTree(tree.get(), tree_len, root, sizeof(root)));
+  EXPECT_OK(verifier.Verify(block.get(), node_size, 0));
+
+  size_t last_block_off = ((test_case.data_len - 1) / node_size) * node_size;
+  size_t last_block_len = test_case.data_len - last_block_off;
+  EXPECT_OK(verifier.Verify(block.get(), last_block_len, last_block_off));
+
+  root[0] ^= 0xffU;
+  EXPECT_STATUS(verifier.Verify(block.get(), last_block_len, last_block_off),
+                ZX_ERR_IO_DATA_INTEGRITY);
+  root[0] ^= 0xffU;
+
+  block[0] ^= 0xffU;
+  EXPECT_STATUS(verifier.Verify(block.get(), last_block_len, last_block_off),
+                ZX_ERR_IO_DATA_INTEGRITY);
+}
+
+std::string CarryBoundaryTestParamName(
+    const TestParamInfo<std::tuple<CarryBoundaryCase, bool>> &param) {
+  const auto &[test_case, use_compact_format] = param.param;
+  std::string name = test_case.description;
+  if (use_compact_format) {
+    name += "Compact";
+  }
+  return name;
+}
+
+INSTANTIATE_TEST_SUITE_P(/*no prefix*/, MerkleTreeCarryBoundaryTest,
+                         Combine(ValuesIn(kCarryBoundaryCases), testing::Bool()),
+                         CarryBoundaryTestParamName);
 
 }  // namespace
 }  // namespace digest

@@ -148,7 +148,6 @@ async fn resolve_component() {
         .await;
 
     let fcomponent_resolution::Component {
-        url,
         decl,
         package,
         config_values,
@@ -160,7 +159,6 @@ async fn resolve_component() {
         .await
         .unwrap();
 
-    assert_eq!(url.unwrap(), "fuchsia-pkg://fuchsia.com/a-base-package/0#meta/manifest.cm");
     assert_eq!(mem_util::bytes_from_data(decl.as_ref().unwrap()).unwrap(), manifest);
     let fcomponent_resolution::Package { url, directory, .. } = package.unwrap();
     assert_eq!(url.unwrap(), "fuchsia-pkg://fuchsia.com/a-base-package/0");
@@ -214,7 +212,6 @@ async fn resolve_with_context_component() {
         .unwrap();
 
     let fcomponent_resolution::Component {
-        url,
         decl,
         package,
         config_values,
@@ -229,7 +226,6 @@ async fn resolve_with_context_component() {
         .await
         .unwrap();
 
-    assert_eq!(url.unwrap(), "sub-sub-package-url#meta/manifest.cm");
     assert_eq!(mem_util::bytes_from_data(decl.as_ref().unwrap()).unwrap(), manifest);
     let fcomponent_resolution::Package { url, directory, .. } = package.unwrap();
     assert_eq!(url.unwrap(), "sub-sub-package-url");
@@ -237,4 +233,43 @@ async fn resolve_with_context_component() {
     assert_eq!(config_values, None);
     assert!(resolution_context.is_some());
     assert_eq!(abi_revision, Some(0xeccea2f70acd6fc0));
+}
+
+#[fuchsia::test]
+async fn resolve_component_with_percent_encoded_resource() {
+    // The resolver must look up the manifest at the percent-decoded resource path.
+    let manifest = fidl::persist(&fcomponent_decl::Component::default()).unwrap();
+    let sub_pkg = PackageBuilder::new("a-sub-package")
+        .add_resource_at("meta/a b%c.cm", &*manifest)
+        .build()
+        .await
+        .unwrap();
+    let base_pkg = PackageBuilder::new("a-base-package")
+        .add_resource_at("meta/a b%c.cm", &*manifest)
+        .add_subpackage("sub-package-url", &sub_pkg)
+        .build()
+        .await
+        .unwrap();
+    let system_image_package =
+        SystemImageBuilder::new().static_packages(&[&base_pkg]).build().await;
+    let env = TestEnv::builder()
+        .blobfs_from_system_image_and_extra_packages(&system_image_package, &[&base_pkg])
+        .await
+        .build()
+        .await;
+
+    let component = env
+        .resolve_base_component("fuchsia-pkg://fuchsia.com/a-base-package/0#meta/a%20b%25c.cm")
+        .await
+        .unwrap();
+    assert_eq!(mem_util::bytes_from_data(component.decl.as_ref().unwrap()).unwrap(), manifest);
+
+    let fcomponent_resolution::Component { decl, .. } = env
+        .resolve_with_context_base_component(
+            "sub-package-url#meta/a%20b%25c.cm",
+            &component.resolution_context.unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(mem_util::bytes_from_data(decl.as_ref().unwrap()).unwrap(), manifest);
 }

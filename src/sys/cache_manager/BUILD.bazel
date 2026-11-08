@@ -2,9 +2,130 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load(
+    "//build/bazel/rules/components:structured_config.bzl",
+    "fuchsia_structured_config_rust_lib",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load("//third_party/cobalt:metrics_registry.bzl", "metrics_registry")
+
 package(default_applicable_licenses = ["//:license"])
 
 exports_files(
     ["meta/cache_manager.core_shard.cml"],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    crate_name = "cache_manager",
+    edition = "2024",
+    deps = [
+        ":cache_manager_config_lib",
+        ":component_framework_cache_metrics_registry_rustlib",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.metrics:fuchsia.metrics_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+rustc_test(
+    name = "cache_manager_bin_test",
+    crate = ":bin",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+metrics_registry(
+    name = "component_framework_cache_metrics_registry",
+    generate_rust = True,  # Generates a rust target with '_rustlib' appended
+    # This must match the ID of our Cobalt project as specified in:
+    # //third_party/cobalt_config/projects.yaml
+    project_id = 21,
+)
+
+fx_component_manifest(
+    name = "cache_manager_component_manifest",
+    component_name = "cache_manager",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/cache_manager.cml",
+)
+
+fuchsia_structured_config_rust_lib(
+    name = "cache_manager_config_lib",
+    cm_label = ":cache_manager_component_manifest",
+)
+
+fx_packaged_binary(
+    name = "cache_manager_packaged_bin",
+    binary = ":bin",
+    binary_name = "cache_manager",
+)
+
+fx_component(
+    name = "cache_manager_component",
+    compiled_manifest = ":cache_manager_component_manifest",
+    deps = [":cache_manager_packaged_bin"],
+)
+
+fx_packaged_binary(
+    name = "bin_test_packaged_bin",
+    testonly = True,
+    binary = ":cache_manager_bin_test",
+    binary_name = "cache_manager_bin_test",
+)
+
+fx_component_manifest(
+    name = "cache_manager_tests_manifest",
+    testonly = True,
+    component_name = "cache_manager_tests",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/cache_manager_tests.cml",
+)
+
+# GN previously attached the fake_cobalt package through :bin's test_deps. A
+# fuchsia_package is not a Rust crate, so it cannot be a rustc_test dep; keep
+# it on the GN copy of this test component instead.
+# @bazel2gn:raw_attribute:deps += [ "//src/cobalt/bin/testing/fake_cobalt" ]
+fx_test_component(
+    name = "cache_manager_tests_component",
+    compiled_manifest = ":cache_manager_tests_manifest",
+    deps = [":bin_test_packaged_bin"],
+)
+
+fx_package(
+    name = "cache_manager_tests_package",
+    package_name = "cache_manager_tests",
+    test_components = [":cache_manager_tests_component"],
+)
+
+fx_test(
+    name = "cache_manager_tests",
+    package = ":cache_manager_tests_package",
+    visibility = ["//src/sys:__pkg__"],
 )

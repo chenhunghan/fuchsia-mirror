@@ -8,6 +8,12 @@ load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package
 
 package(default_applicable_licenses = ["//:license"])
 
+test_suite(
+    name = "tests",
+    tests = [":vigil-tests"],
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)
+
 rustc_library(
     name = "vigil",
     srcs = [
@@ -24,7 +30,7 @@ rustc_library(
     ],
     deps = [
         "//src/lib/diagnostics/inspect/derive",
-        "//src/lib/diagnostics/inspect/rust:fuchsia-inspect",  # @bazel2gn:path_overwrite://src/lib/diagnostics/inspect/rust
+        "//src/lib/diagnostics/inspect/rust",
         "//src/lib/fuchsia-sync",
         "//third_party/rust_crates/vendor:futures",
     ],
@@ -45,5 +51,4 @@ fx_unittest_package(
     name = "vigil-tests",
     package_name = "vigil-tests",
     unit_tests = [":vigil_test"],
-    visibility = ["//src/connectivity/bluetooth:__pkg__"],
 )

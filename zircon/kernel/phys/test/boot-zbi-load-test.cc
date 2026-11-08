@@ -20,7 +20,7 @@
 #include <ktl/iterator.h>
 #include <phys/address-space.h>
 #include <phys/allocation.h>
-#include <phys/boot-zbi.h>
+#include <phys/boot-zbi/boot-zbi.h>
 
 #include "turducken.h"
 

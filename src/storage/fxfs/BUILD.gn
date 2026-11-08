@@ -395,6 +395,7 @@ group("tests") {
     "//src/storage/fxfs/benches:tests",
     "//src/storage/fxfs/test:tests",
     "//src/storage/fxfs/tools:tests",
+    "//src/storage/fxfs/transaction_fifo:tests",
     "//src/storage/fxfs/unicode:tests",
   ]
 }
@@ -472,6 +473,7 @@ rustc_macro("fxfs_macros") {
   visibility = [
     ":*",
     "//src/storage/fxfs/*",
+    "//src/storage/lib/blob_metadata:*",
   ]
   deps = [
     "//third_party/rust_crates:proc-macro2",
@@ -479,6 +481,7 @@ rustc_macro("fxfs_macros") {
     "//third_party/rust_crates:syn",
   ]
 }
+
 rustc_library("lib") {
   sources = [
     "src/blob_metadata.rs",

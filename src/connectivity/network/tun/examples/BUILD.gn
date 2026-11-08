@@ -38,8 +38,8 @@ fuchsia_component("tun-rust-example") {
 fuchsia_test_package("examples") {
   package_name = "network-tun-examples"
   test_components = [ ":tun-rust-example" ]
-  deps = [
-    "//src/connectivity/network/netstack3:component-debug",
-    "//src/connectivity/network/tun/network-tun:component",
+  subpackages = [
+    "//src/connectivity/network/netstack3:package-debug",
+    "//src/connectivity/network/tun/network-tun",
   ]
 }

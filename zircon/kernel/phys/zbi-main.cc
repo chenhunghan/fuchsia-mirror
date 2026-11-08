@@ -10,10 +10,9 @@
 
 #include <ktl/utility.h>
 #include <phys/boot-options.h>
-#include <phys/early-boot.h>
-#include <phys/main.h>
-#include <phys/stdio.h>
-#include <phys/uart-console.h>
+#include <phys/runtime/early-boot.h>
+#include <phys/runtime/main.h>
+#include <phys/uart/driver.h>
 
 #include <ktl/enforce.h>
 
@@ -23,9 +22,6 @@ void PhysMain(void* zbi_ptr, arch::EarlyTicks ticks) {
 
   // Perform any architecture-specific set-up dependent on machine state.
   ArchSetUpCpu();
-
-  // Initially set up stdout to write to nowhere.
-  InitStdout();
 
   static BootOptions boot_options;
   InstallBootOptions(&boot_options);

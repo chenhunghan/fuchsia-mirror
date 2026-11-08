@@ -1,0 +1,46 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_go_test.bzl", "host_go_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+go_library(
+    name = "device",
+    testonly = True,
+    srcs = [
+        "device.go",
+        "finder.go",
+        "monotonic.go",
+        "resolver.go",
+        "serial.go",
+    ],
+    importpath = "go.fuchsia.dev/fuchsia/src/testing/host-target-testing/device",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//src/testing/host-target-testing/artifacts",
+        "//src/testing/host-target-testing/build",
+        "//src/testing/host-target-testing/ffx",
+        "//src/testing/host-target-testing/packages",
+        "//src/testing/host-target-testing/paver",
+        "//src/testing/host-target-testing/sl4f",
+        "//src/testing/host-target-testing/util",
+        "//third_party/golibs:golang.org/x/crypto/ssh",
+        "//tools/botanist:targets",
+        "//tools/lib/logger",
+        "//tools/lib/retry",
+        "//tools/net/sshutil",
+    ],
+)
+
+host_go_test(
+    name = "host-target-testing-device-test",
+    srcs = ["device_test.go"],
+    embed = [":device"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/testing/host-target-testing:__pkg__"],
+)

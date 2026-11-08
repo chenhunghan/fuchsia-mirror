@@ -55,7 +55,7 @@ type HarnessConfig = struct {
     supports_truncate bool;
 
     /// The set of attributes the filesystem supports. If mutable attributes are reported, the
-    /// harness must support [`fuchsia.io/Node.SetAttr`] and [`fuchsia.io/Node.UpdateAttributes`].
+    /// harness must support [`fuchsia.io/Node.UpdateAttributes`].
     supported_attributes fuchsia.io.NodeAttributesQuery;
 
     /// Directories support creating files, Rename, Link, and Unlink.
@@ -66,6 +66,9 @@ type HarnessConfig = struct {
 
     /// Supports unnamed temporary files.
     supports_unnamed_temporary_file bool;
+
+    /// Supports LinkInto with REPLACE_EXISTING.
+    supports_link_into_replace_existing bool;
 
     /// Supports extended attributes (xattrs).
     supports_xattrs bool;

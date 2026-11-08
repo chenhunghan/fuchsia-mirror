@@ -13,10 +13,23 @@
 #include <fbl/vector.h>
 #include <kernel/cpu.h>
 #include <kernel/cpu_distance_map.h>
+#include <kernel/ffi.h>
 #include <ktl/algorithm.h>
 #include <ktl/array.h>
 #include <ktl/span.h>
 #include <ktl/unique_ptr.h>
+
+class CpuSearchSet;
+
+extern "C" {
+void cpp_cpu_search_set_init(ffi::Uninitialized<CpuSearchSet>* out);
+void cpp_cpu_search_set_set_perf_scale(cpu_num_t cpu, int64_t perf_scale);
+void cpp_cpu_search_set_auto_cluster(size_t cpu_count);
+void cpp_cpu_search_set_dump_clusters();
+void cpp_cpu_search_set_initialize(CpuSearchSet* set, cpu_num_t this_cpu, size_t cpu_count);
+void cpp_cpu_search_set_dump(const CpuSearchSet* set);
+size_t cpp_cpu_search_set_cluster(const CpuSearchSet* set);
+}
 
 // CpuSearchSet is a cache/cluster-aware search list that minimizes cache
 // crossings and maximizes remote CPU access distribution when searching for a
@@ -59,8 +72,10 @@ class CpuSearchSet {
   }
 
  private:
-  friend struct percpu;
   friend struct CpuSearchSetTestAccess;
+  friend void cpp_cpu_search_set_auto_cluster(size_t cpu_count);
+  friend void cpp_cpu_search_set_initialize(CpuSearchSet* set, cpu_num_t this_cpu,
+                                            size_t cpu_count);
 
   // Private non-const CPU search list and cluster iterators.
   auto iterator() { return ktl::span{ordered_cpus_.begin(), cpu_count_}; }

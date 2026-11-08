@@ -76,16 +76,16 @@ class AndroidSessionAffordanceTests(fuchsia_base_test.FuchsiaBaseTest):
         self.dut.adb.run(["reboot"])
         self.dut.wait_for_offline()
         await self.dut.wait_for_online()
-        await self.dut.on_device_boot()
 
         after: types.SessionId = self.session.fetch_current()
         asserts.assert_not_equal(before, after)
         with asserts.assert_raises(errors.AndroidSessionError):
             self.session.verify_same_session()
 
-        # Leave the affordance in a clean state for subsequent tests.
+        # Reconnect Fuchsia transports and leave the affordance in a clean
+        # state for subsequent tests.
         self.session.session_will_change()
-        self.session.record_session()
+        await self.dut.on_device_boot()
 
 
 if __name__ == "__main__":

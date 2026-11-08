@@ -1997,10 +1997,6 @@ TEST_F(Dfv2NodeTest, HealthCheckBackstopDeadlineMirrorsDriverHost) {
             Node::HealthCheckBackstopDeadline(fuchsia_driver_framework::HealthCheckRequest::kFast));
   EXPECT_EQ(zx::sec(120) + Node::kHealthCheckBackstopSlack,
             Node::HealthCheckBackstopDeadline(fuchsia_driver_framework::HealthCheckRequest::kDeep));
-  // Unknown levels get the longest deadline.
-  EXPECT_EQ(zx::sec(120) + Node::kHealthCheckBackstopSlack,
-            Node::HealthCheckBackstopDeadline(
-                static_cast<fuchsia_driver_framework::HealthCheckRequest>(0xffff)));
 }
 
 TEST_F(Dfv2NodeTest, RunHealthCheckBackstopTimesOutWedgedDriverHost) {
@@ -2073,6 +2069,12 @@ TEST_F(Dfv2NodeTest, RunHealthCheckBackstopTimesOutWedgedDriverHost) {
                        });
   RunLoopUntilIdle();
   EXPECT_EQ(1, ping_calls);
+  // The status-less DRIVER_HOST_TIMEOUT record is not retained as the hardware baseline, so the
+  // recovered OK PING is published as-is.
+  ASSERT_TRUE(node->last_health_check().has_value());
+  EXPECT_FALSE(node->last_health_check()->error.has_value());
+  EXPECT_EQ(fuchsia_driver_framework::HealthStatus::kOk, node->last_health_check()->status);
+  EXPECT_EQ(fuchsia_driver_framework::HealthCheckRequest::kPing, node->last_health_check()->level);
   RunLoopFor(
       Node::HealthCheckBackstopDeadline(fuchsia_driver_framework::HealthCheckRequest::kDeep));
   EXPECT_EQ(1, ping_calls);
@@ -2189,21 +2191,39 @@ TEST_F(Dfv2NodeTest, RunHealthCheckPingFailureDoesNotLaunderHardwareFault) {
   run(fuchsia_driver_framework::HealthCheckRequest::kFast);
   ASSERT_TRUE(node->last_health_check().has_value());
   EXPECT_EQ(fuchsia_driver_framework::HealthStatus::kUnhealthy, node->last_health_check()->status);
+  const zx::time fast_timestamp = node->last_health_check()->timestamp;
 
   // A PING timeout is the more urgent news, so it is published...
+  RunLoopFor(zx::sec(1));
   run(fuchsia_driver_framework::HealthCheckRequest::kPing);
   EXPECT_EQ(fuchsia_driver_framework::HealthCheckError::kTimeout, node->last_health_check()->error);
   EXPECT_EQ(fuchsia_driver_framework::HealthCheckRequest::kPing, node->last_health_check()->level);
+  EXPECT_NE(fast_timestamp, node->last_health_check()->timestamp);
 
   // ...but once the dispatcher answers again, the hardware fault from the FAST check is published
-  // again rather than being replaced by the OK liveness ping.
+  // again (with its original timestamp) rather than being replaced by the OK liveness ping.
+  RunLoopFor(zx::sec(1));
   ping_result = fit::ok(fuchsia_driver_framework::HealthCheckResponse{});
+  run(fuchsia_driver_framework::HealthCheckRequest::kPing);
+  ASSERT_TRUE(node->last_health_check().has_value());
+  EXPECT_EQ(fuchsia_driver_framework::HealthStatus::kUnhealthy, node->last_health_check()->status);
+  EXPECT_EQ(fuchsia_driver_framework::HealthCheckRequest::kFast, node->last_health_check()->level);
+  EXPECT_EQ(fast_timestamp, node->last_health_check()->timestamp);
+  ASSERT_EQ(1u, node->last_health_check()->conditions.size());
+  EXPECT_EQ("PHY_UNLOCKED", node->last_health_check()->conditions[0].reason_code());
+
+  // A DEGRADED PING also does not hide the higher-severity UNHEALTHY FAST record.
+  ping_result = fit::ok(fuchsia_driver_framework::HealthCheckResponse().conditions(
+      {{fuchsia_driver_framework::HealthCondition()
+            .status(fuchsia_driver_framework::HealthStatus::kDegraded)
+            .reason_code("PING_DEGRADED")}}));
   run(fuchsia_driver_framework::HealthCheckRequest::kPing);
   ASSERT_TRUE(node->last_health_check().has_value());
   EXPECT_EQ(fuchsia_driver_framework::HealthStatus::kUnhealthy, node->last_health_check()->status);
   EXPECT_EQ(fuchsia_driver_framework::HealthCheckRequest::kFast, node->last_health_check()->level);
   ASSERT_EQ(1u, node->last_health_check()->conditions.size());
   EXPECT_EQ("PHY_UNLOCKED", node->last_health_check()->conditions[0].reason_code());
+  ping_result = fit::ok(fuchsia_driver_framework::HealthCheckResponse{});
 
   // A later OK FAST check clears it, after which an OK PING is published as-is.
   fake_driver.SetHealthCheckCallback(
@@ -2220,40 +2240,442 @@ TEST_F(Dfv2NodeTest, RunHealthCheckPingFailureDoesNotLaunderHardwareFault) {
   EXPECT_EQ(fuchsia_driver_framework::HealthCheckRequest::kPing, node->last_health_check()->level);
 }
 
-TEST_F(Dfv2NodeTest, OnHealthAlertSelfFaultRecordsDetails) {
-  auto child = CreateNode("child-sf-details");
-  StartTestDriver(child);
-  auto [child_server, child_node_client] =
-      node_manager->driver_host().TakeDriver("child-sf-details");
-  FakeDriver child_driver(dispatcher(), std::move(child_server), std::move(child_node_client));
+namespace {
 
-  ASSERT_EQ(ZX_OK, child_driver
-                       .SendHealthAlert(fuchsia_driver_framework::HealthAlert::WithSelfFault(
-                           fuchsia_driver_framework::HealthCheckResponse{{
-                               .conditions = {{{{
-                                   .status = fuchsia_driver_framework::HealthStatus::kUnhealthy,
-                                   .reason_code = "FW_CRASH",
-                                   .message = "Firmware crashed",
-                               }}}},
-                           }}))
-                       .status_value());
-  RunLoopUntilIdle();
+TEST_F(Dfv2NodeTest, RunHealthCheckFastTimeoutDoesNotPoisonSubsequentOkPing) {
+  auto node = CreateNode("test-hc-fast-timeout");
+  StartTestDriver(node);
+  auto [driver_server_end, node_client_end] =
+      node_manager->driver_host().TakeDriver("test-hc-fast-timeout");
+  FakeDriver fake_driver(dispatcher(), std::move(driver_server_end), std::move(node_client_end));
 
-  ASSERT_TRUE(child->last_health_check().has_value());
-  EXPECT_EQ(fuchsia_driver_framework::HealthStatus::kUnhealthy, child->last_health_check()->status);
-  ASSERT_EQ(1u, child->last_health_check()->conditions.size());
-  EXPECT_EQ("FW_CRASH", child->last_health_check()->first_reason_code());
-  EXPECT_EQ("Firmware crashed", child->last_health_check()->conditions[0].message());
+  // Initially the driver dispatcher stalls on a FAST check (e.g. during a neighbor sweep).
+  fake_driver.SetHealthCheckCallback(
+      [](const fuchsia_driver_framework::HealthCheckRequest& req)
+          -> fit::result<fuchsia_driver_framework::HealthCheckError,
+                         fuchsia_driver_framework::HealthCheckResponse> {
+        return fit::error(fuchsia_driver_framework::HealthCheckError::kTimeout);
+      });
 
-  // A self_fault alert with no conditions derives status kOk (recovery).
-  ASSERT_EQ(ZX_OK, child_driver
+  auto run = [&](fuchsia_driver_framework::HealthCheckRequest level) {
+    bool done = false;
+    node->RunHealthCheck(level, [&done](const auto&) { done = true; });
+    RunLoopUntilIdle();
+    EXPECT_TRUE(done);
+  };
+
+  run(fuchsia_driver_framework::HealthCheckRequest::kFast);
+  ASSERT_TRUE(node->last_health_check().has_value());
+  EXPECT_EQ(fuchsia_driver_framework::HealthCheckError::kTimeout, node->last_health_check()->error);
+
+  // Once the dispatcher unblocks and answers a liveness PING with OK, the stale FAST TIMEOUT must
+  // not overwrite the recovered OK PING.
+  fake_driver.SetHealthCheckCallback(
+      [](const fuchsia_driver_framework::HealthCheckRequest& req)
+          -> fit::result<fuchsia_driver_framework::HealthCheckError,
+                         fuchsia_driver_framework::HealthCheckResponse> {
+        return fit::ok(fuchsia_driver_framework::HealthCheckResponse{});
+      });
+
+  RunLoopFor(zx::sec(1));
+  auto before_ping = Now();
+  run(fuchsia_driver_framework::HealthCheckRequest::kPing);
+  ASSERT_TRUE(node->last_health_check().has_value());
+  EXPECT_EQ(fuchsia_driver_framework::HealthStatus::kOk, node->last_health_check()->status);
+  EXPECT_FALSE(node->last_health_check()->error.has_value());
+  EXPECT_EQ(fuchsia_driver_framework::HealthCheckRequest::kPing, node->last_health_check()->level);
+  EXPECT_GE(node->last_health_check()->timestamp, before_ping);
+}
+
+TEST_F(Dfv2NodeTest, RunHealthCheckFastInternalErrorDoesNotPoisonSubsequentOkPing) {
+  auto node = CreateNode("test-hc-fast-internal-error");
+  StartTestDriver(node);
+  auto [driver_server_end, node_client_end] =
+      node_manager->driver_host().TakeDriver("test-hc-fast-internal-error");
+  FakeDriver fake_driver(dispatcher(), std::move(driver_server_end), std::move(node_client_end));
+
+  fake_driver.SetHealthCheckCallback(
+      [](const fuchsia_driver_framework::HealthCheckRequest& req)
+          -> fit::result<fuchsia_driver_framework::HealthCheckError,
+                         fuchsia_driver_framework::HealthCheckResponse> {
+        return fit::error(fuchsia_driver_framework::HealthCheckError::kInternalError);
+      });
+
+  auto run = [&](fuchsia_driver_framework::HealthCheckRequest level) {
+    bool done = false;
+    node->RunHealthCheck(level, [&done](const auto&) { done = true; });
+    RunLoopUntilIdle();
+    EXPECT_TRUE(done);
+  };
+
+  run(fuchsia_driver_framework::HealthCheckRequest::kFast);
+  ASSERT_TRUE(node->last_health_check().has_value());
+  EXPECT_EQ(fuchsia_driver_framework::HealthCheckError::kInternalError,
+            node->last_health_check()->error);
+
+  fake_driver.SetHealthCheckCallback(
+      [](const fuchsia_driver_framework::HealthCheckRequest& req)
+          -> fit::result<fuchsia_driver_framework::HealthCheckError,
+                         fuchsia_driver_framework::HealthCheckResponse> {
+        return fit::ok(fuchsia_driver_framework::HealthCheckResponse{});
+      });
+
+  RunLoopFor(zx::sec(1));
+  auto before_ping = Now();
+  run(fuchsia_driver_framework::HealthCheckRequest::kPing);
+  ASSERT_TRUE(node->last_health_check().has_value());
+  EXPECT_EQ(fuchsia_driver_framework::HealthStatus::kOk, node->last_health_check()->status);
+  EXPECT_FALSE(node->last_health_check()->error.has_value());
+  EXPECT_EQ(fuchsia_driver_framework::HealthCheckRequest::kPing, node->last_health_check()->level);
+  EXPECT_GE(node->last_health_check()->timestamp, before_ping);
+}
+
+TEST_F(Dfv2NodeTest, DhcLogThrottleSuppressesFlappingTransitionsAndFiresTrailingSummary) {
+  auto node = CreateNode("test-hc-throttle");
+  StartTestDriver(node);
+  auto [driver_server_end, node_client_end] =
+      node_manager->driver_host().TakeDriver("test-hc-throttle");
+  FakeDriver fake_driver(dispatcher(), std::move(driver_server_end), std::move(node_client_end));
+  using NodeType = std::remove_reference_t<decltype(*node)>;
+
+  auto flap_to = [&](bool unhealthy) {
+    fuchsia_driver_framework::HealthCheckResponse response;
+    if (unhealthy) {
+      response.conditions({{fuchsia_driver_framework::HealthCondition()
+                                .status(fuchsia_driver_framework::HealthStatus::kUnhealthy)
+                                .reason_code("FLAP")}});
+    }
+    EXPECT_EQ(ZX_OK, fake_driver
+                         .SendHealthAlert(fuchsia_driver_framework::HealthAlert::WithSelfFault(
+                             std::move(response)))
+                         .status_value());
+    RunLoopUntilIdle();
+  };
+
+  RunLoopFor(zx::sec(100));
+  for (int i = 0; i < 10; ++i) {
+    flap_to(/*unhealthy=*/i % 2 == 0);
+    RunLoopFor(zx::msec(1));
+  }
+  const uint64_t suppressed_in_window = 10u - NodeType::kMaxDhcLogsPerWindow;
+  EXPECT_EQ(suppressed_in_window, node->dhc_logs_suppressed());
+  EXPECT_EQ(suppressed_in_window, node->dhc_logs_suppressed_pending());
+
+  // The trailing summary fires when the window ends and reports the pending count.
+  RunLoopFor(NodeType::kDhcLogWindow);
+  EXPECT_EQ(0u, node->dhc_logs_suppressed_pending());
+  EXPECT_EQ(suppressed_in_window, node->dhc_logs_suppressed());
+
+  // A subsequent transition is in a new window and starts logging again.
+  flap_to(/*unhealthy=*/true);
+  EXPECT_EQ(suppressed_in_window, node->dhc_logs_suppressed());
+  EXPECT_EQ(0u, node->dhc_logs_suppressed_pending());
+
+  // Suppressed lines pending when the driver restarts are flushed by the restart rather than
+  // leaking onto the new driver instance's first transition.
+  for (int i = 0; i < 6; ++i) {
+    flap_to(/*unhealthy=*/i % 2 == 1);
+    RunLoopFor(zx::msec(1));
+  }
+  EXPECT_GT(node->dhc_logs_suppressed_pending(), 0u);
+  node->ResetHealthCheckState();
+  EXPECT_EQ(0u, node->dhc_logs_suppressed_pending());
+}
+
+TEST_F(Dfv2NodeTest, GlobalDhcWarnTokenBucketCapsLogsAcrossNodes) {
+  // The bucket is process-wide; start from a known state and leave the window expired so other
+  // tests are unaffected by the 40 WARN attempts below. Log output itself is not observable here,
+  // so this exercises the bucket's bookkeeping across many nodes without crashing.
+  driver_manager::Node::ResetGlobalDhcWarnBucketForTesting();
+  RunLoopFor(zx::sec(100));
+  for (int i = 0; i < 40; ++i) {
+    auto node = CreateNode("test-global-bucket-" + std::to_string(i));
+    StartTestDriver(node);
+    auto [driver_server_end, node_client_end] =
+        node_manager->driver_host().TakeDriver("test-global-bucket-" + std::to_string(i));
+    FakeDriver fake_driver(dispatcher(), std::move(driver_server_end), std::move(node_client_end));
+
+    EXPECT_EQ(ZX_OK, fake_driver
+                         .SendHealthAlert(fuchsia_driver_framework::HealthAlert::WithSelfFault(
+                             fuchsia_driver_framework::HealthCheckResponse().conditions(
+                                 {{fuchsia_driver_framework::HealthCondition()
+                                       .status(fuchsia_driver_framework::HealthStatus::kUnhealthy)
+                                       .reason_code("BUCKET_TEST")}})))
+                         .status_value());
+    RunLoopUntilIdle();
+    EXPECT_EQ(1u, node->unhealthy_count());
+  }
+  driver_manager::Node::ResetGlobalDhcWarnBucketForTesting();
+}
+
+TEST(DhcSanitizeTest, SanitizeDhcStrings) {
+  EXPECT_EQ("OK", driver_manager::Node::SanitizeDhcReason("OK"));
+  EXPECT_EQ("invalid_chars", driver_manager::Node::SanitizeDhcReason("invalid\nchars"));
+
+  EXPECT_EQ("Clean message", driver_manager::Node::SanitizeDhcMessage("Clean message"));
+  EXPECT_EQ("Clean 'message'", driver_manager::Node::SanitizeDhcMessage("Clean \"message\""));
+  EXPECT_EQ("Clean  message ", driver_manager::Node::SanitizeDhcMessage("Clean \nmessage\t"));
+
+  // Truncation at 256 bytes on valid UTF-8
+  std::string long_msg(300, 'A');
+  EXPECT_EQ(256u, driver_manager::Node::SanitizeDhcMessage(long_msg).size());
+
+  // Multi-byte UTF-8 character ("\xc3\xa9", 2 bytes) starting at index 255 (split across 256)
+  // must drop the split character without corrupting a preceding multi-byte character at 253..254.
+  std::string utf8_split = std::string(253, 'A') + "\xc3\xa9" + "\xc3\xa9" + "BC";
+  EXPECT_EQ(255u, driver_manager::Node::SanitizeDhcMessage(utf8_split).size());
+
+  // Multi-byte UTF-8 character starting cleanly at index 256 must keep all 256 preceding bytes.
+  std::string utf8_boundary = std::string(254, 'A') + "\xc3\xa9" + "\xc3\xa9" + "BC";
+  EXPECT_EQ(256u, driver_manager::Node::SanitizeDhcMessage(utf8_boundary).size());
+}
+
+TEST_F(Dfv2NodeTest, HealthTransitionHistoryBoundedAndTracksFlapping) {
+  auto node = CreateNode("test-hc-flap");
+  StartTestDriver(node);
+  auto [driver_server_end, node_client_end] =
+      node_manager->driver_host().TakeDriver("test-hc-flap");
+  FakeDriver fake_driver(dispatcher(), std::move(driver_server_end), std::move(node_client_end));
+
+  // Initial OK check does not record a transition entry.
+  EXPECT_EQ(ZX_OK, fake_driver
                        .SendHealthAlert(fuchsia_driver_framework::HealthAlert::WithSelfFault(
                            fuchsia_driver_framework::HealthCheckResponse{}))
                        .status_value());
   RunLoopUntilIdle();
-  EXPECT_EQ(fuchsia_driver_framework::HealthStatus::kOk, child->last_health_check()->status);
-  EXPECT_TRUE(child->last_health_check()->conditions.empty());
+  EXPECT_EQ(0u, node->unhealthy_count());
+  EXPECT_EQ(0u, node->recovered_count());
+  EXPECT_TRUE(node->health_history().empty());
+
+  // Flap between UNHEALTHY and OK 10 times (20 transitions total, exceeding
+  // kMaxHealthHistoryEntries=16).
+  for (size_t i = 0; i < 10; ++i) {
+    EXPECT_EQ(ZX_OK, fake_driver
+                         .SendHealthAlert(fuchsia_driver_framework::HealthAlert::WithSelfFault(
+                             fuchsia_driver_framework::HealthCheckResponse().conditions(
+                                 {{fuchsia_driver_framework::HealthCondition()
+                                       .status(fuchsia_driver_framework::HealthStatus::kUnhealthy)
+                                       .reason_code("FLAP_ERR_" + std::to_string(i))
+                                       .message("Flap error")}})))
+                         .status_value());
+    RunLoopUntilIdle();
+
+    // Duplicate identical alert does not add a redundant transition entry or bump unhealthy_count.
+    EXPECT_EQ(ZX_OK, fake_driver
+                         .SendHealthAlert(fuchsia_driver_framework::HealthAlert::WithSelfFault(
+                             fuchsia_driver_framework::HealthCheckResponse().conditions(
+                                 {{fuchsia_driver_framework::HealthCondition()
+                                       .status(fuchsia_driver_framework::HealthStatus::kUnhealthy)
+                                       .reason_code("FLAP_ERR_" + std::to_string(i))
+                                       .message("Flap error")}})))
+                         .status_value());
+    RunLoopUntilIdle();
+
+    EXPECT_EQ(ZX_OK, fake_driver
+                         .SendHealthAlert(fuchsia_driver_framework::HealthAlert::WithSelfFault(
+                             fuchsia_driver_framework::HealthCheckResponse{}))
+                         .status_value());
+    RunLoopUntilIdle();
+  }
+
+  EXPECT_EQ(10u, node->unhealthy_count());
+  EXPECT_EQ(10u, node->recovered_count());
+  ASSERT_EQ(driver_manager::Node::kMaxHealthHistoryEntries, node->health_history().size());
+  // The ring retains the latest 16 of the 20 transitions (starting at i=2's UNHEALTHY).
+  EXPECT_EQ("FLAP_ERR_2", node->health_history().front().reason_code);
+  EXPECT_EQ(fuchsia_driver_framework::HealthStatus::kOk, node->health_history().back().status);
 }
+
+TEST_F(Dfv2NodeTest, OnHealthAlertSelfFaultRecordsDetailsAndCounters) {
+  auto child = CreateNode("child-sf-details");
+  StartTestDriver(child);
+  auto [child_driver_server_end, child_node_client_end] =
+      node_manager->driver_host().TakeDriver("child-sf-details");
+  FakeDriver child_driver(dispatcher(), std::move(child_driver_server_end),
+                          std::move(child_node_client_end));
+
+  EXPECT_EQ(ZX_OK, child_driver
+                       .SendHealthAlert(fuchsia_driver_framework::HealthAlert::WithSelfFault(
+                           fuchsia_driver_framework::HealthCheckResponse().conditions(
+                               {{fuchsia_driver_framework::HealthCondition()
+                                     .status(fuchsia_driver_framework::HealthStatus::kUnhealthy)
+                                     .reason_code("HW_FAILURE")}})))
+                       .status_value());
+  RunLoopUntilIdle();
+  ASSERT_TRUE(child->last_health_check().has_value());
+  EXPECT_EQ(fuchsia_driver_framework::HealthStatus::kUnhealthy, child->last_health_check()->status);
+  EXPECT_EQ(1u, child->unhealthy_count());
+  EXPECT_EQ(0u, child->recovered_count());
+  EXPECT_STREQ("ALERT",
+               driver_manager::Node::HealthCheckLevelString(child->last_health_check()->level));
+  ASSERT_EQ(1u, child->health_history().size());
+  EXPECT_EQ("HW_FAILURE", child->health_history().back().reason_code);
+  EXPECT_STREQ("ALERT",
+               driver_manager::Node::HealthCheckLevelString(child->health_history().back().level));
+
+  EXPECT_EQ(ZX_OK, child_driver
+                       .SendHealthAlert(fuchsia_driver_framework::HealthAlert::WithSelfFault(
+                           fuchsia_driver_framework::HealthCheckResponse{}))
+                       .status_value());
+  RunLoopUntilIdle();
+  EXPECT_EQ(1u, child->unhealthy_count());
+  EXPECT_EQ(1u, child->recovered_count());
+
+  // UNHEALTHY -> DEGRADED increments unhealthy/recovered properly.
+  EXPECT_EQ(ZX_OK, child_driver
+                       .SendHealthAlert(fuchsia_driver_framework::HealthAlert::WithSelfFault(
+                           fuchsia_driver_framework::HealthCheckResponse().conditions(
+                               {{fuchsia_driver_framework::HealthCondition()
+                                     .status(fuchsia_driver_framework::HealthStatus::kUnhealthy)
+                                     .reason_code("HW_FAILURE2")}})))
+                       .status_value());
+  RunLoopUntilIdle();
+  EXPECT_EQ(2u, child->unhealthy_count());
+
+  EXPECT_EQ(ZX_OK, child_driver
+                       .SendHealthAlert(fuchsia_driver_framework::HealthAlert::WithSelfFault(
+                           fuchsia_driver_framework::HealthCheckResponse().conditions(
+                               {{fuchsia_driver_framework::HealthCondition()
+                                     .status(fuchsia_driver_framework::HealthStatus::kDegraded)
+                                     .reason_code("DEG_REASON")}})))
+                       .status_value());
+  RunLoopUntilIdle();
+  EXPECT_EQ(2u, child->unhealthy_count());
+  EXPECT_EQ(2u, child->recovered_count());
+}
+
+TEST_F(Dfv2NodeTest, DriverRestartPreservesHealthCountersAndHistory) {
+  auto node = CreateNode("test-restart-counters");
+  StartTestDriver(node);
+  auto [driver_server_end, node_client_end] =
+      node_manager->driver_host().TakeDriver("test-restart-counters");
+  FakeDriver fake_driver(dispatcher(), std::move(driver_server_end), std::move(node_client_end));
+
+  EXPECT_EQ(ZX_OK, fake_driver
+                       .SendHealthAlert(fuchsia_driver_framework::HealthAlert::WithSelfFault(
+                           fuchsia_driver_framework::HealthCheckResponse().conditions(
+                               {{fuchsia_driver_framework::HealthCondition()
+                                     .status(fuchsia_driver_framework::HealthStatus::kUnhealthy)
+                                     .reason_code("CRASH_SOON")}})))
+                       .status_value());
+  RunLoopUntilIdle();
+
+  EXPECT_EQ(1u, node->unhealthy_count());
+  EXPECT_EQ(0u, node->recovered_count());
+  ASSERT_EQ(1u, node->health_history().size());
+
+  // Simulate a driver restart.
+  node->ResetHealthCheckState();
+
+  // Counters and history must be preserved, and DRIVER_STARTED pushed.
+  EXPECT_EQ(1u, node->unhealthy_count());
+  EXPECT_EQ(0u, node->recovered_count());
+  ASSERT_EQ(2u, node->health_history().size());
+  EXPECT_EQ("DRIVER_STARTED", node->health_history().back().reason_code);
+  EXPECT_FALSE(node->last_health_check().has_value());
+
+  // A crash loop collapses into a single DRIVER_STARTED marker (refreshed in place) so the fault
+  // that caused it is never evicted from the bounded history.
+  RunLoopFor(zx::sec(1));
+  const zx::time second_restart = Now();
+  node->ResetHealthCheckState();
+  node->ResetHealthCheckState();
+  ASSERT_EQ(2u, node->health_history().size());
+  EXPECT_EQ("CRASH_SOON", node->health_history().front().reason_code);
+  EXPECT_EQ("DRIVER_STARTED", node->health_history().back().reason_code);
+  EXPECT_EQ(second_restart, node->health_history().back().timestamp);
+
+  // The first OK after the restart ends the episode: it is recorded in the history and counts as
+  // a recovery even though last_health_check_ was cleared by the restart.
+  EXPECT_EQ(ZX_OK, fake_driver
+                       .SendHealthAlert(fuchsia_driver_framework::HealthAlert::WithSelfFault(
+                           fuchsia_driver_framework::HealthCheckResponse{}))
+                       .status_value());
+  RunLoopUntilIdle();
+  EXPECT_EQ(1u, node->unhealthy_count());
+  EXPECT_EQ(1u, node->recovered_count());
+  ASSERT_EQ(3u, node->health_history().size());
+  EXPECT_EQ(fuchsia_driver_framework::HealthStatus::kOk, node->health_history().back().status);
+
+  // A restart of a healthy node still marks the history, and a second fault starts a new episode.
+  node->ResetHealthCheckState();
+  EXPECT_EQ(ZX_OK, fake_driver
+                       .SendHealthAlert(fuchsia_driver_framework::HealthAlert::WithSelfFault(
+                           fuchsia_driver_framework::HealthCheckResponse().conditions(
+                               {{fuchsia_driver_framework::HealthCondition()
+                                     .status(fuchsia_driver_framework::HealthStatus::kUnhealthy)
+                                     .reason_code("CRASH_AGAIN")}})))
+                       .status_value());
+  RunLoopUntilIdle();
+  EXPECT_EQ(2u, node->unhealthy_count());
+  EXPECT_EQ(1u, node->recovered_count());
+  ASSERT_EQ(5u, node->health_history().size());
+  EXPECT_EQ("CRASH_AGAIN", node->health_history().back().reason_code);
+}
+
+TEST_F(Dfv2NodeTest, HealthHistoryTruncatesMessagesOnUtf8Boundary) {
+  auto node = CreateNode("test-utf8-truncation");
+  StartTestDriver(node);
+  auto [driver_server_end, node_client_end] =
+      node_manager->driver_host().TakeDriver("test-utf8-truncation");
+  FakeDriver fake_driver(dispatcher(), std::move(driver_server_end), std::move(node_client_end));
+
+  // 255 ASCII bytes followed by a 3-byte code point that straddles the 256-byte cap, then more.
+  std::string message(255, 'a');
+  message += "\xe2\x82\xac";
+  message += std::string(20, 'b');
+  EXPECT_EQ(ZX_OK, fake_driver
+                       .SendHealthAlert(fuchsia_driver_framework::HealthAlert::WithSelfFault(
+                           fuchsia_driver_framework::HealthCheckResponse().conditions(
+                               {{fuchsia_driver_framework::HealthCondition()
+                                     .status(fuchsia_driver_framework::HealthStatus::kUnhealthy)
+                                     .reason_code("LONG_MESSAGE")
+                                     .message(message)}})))
+                       .status_value());
+  RunLoopUntilIdle();
+  ASSERT_EQ(1u, node->health_history().size());
+  // The split code point is dropped entirely rather than leaving a dangling lead byte.
+  EXPECT_EQ(255u, node->health_history().back().message.size());
+  EXPECT_EQ(std::string(255, 'a'), node->health_history().back().message);
+}
+
+TEST_F(Dfv2NodeTest, MaskedOkPingDoesNotAppendDuplicateHistoryEntries) {
+  auto node = CreateNode("test-masked-ping-history");
+  StartTestDriver(node);
+  auto [driver_server_end, node_client_end] =
+      node_manager->driver_host().TakeDriver("test-masked-ping-history");
+  FakeDriver fake_driver(dispatcher(), std::move(driver_server_end), std::move(node_client_end));
+
+  fake_driver.SetHealthCheckCallback(
+      [](const fuchsia_driver_framework::HealthCheckRequest& req)
+          -> fit::result<fuchsia_driver_framework::HealthCheckError,
+                         fuchsia_driver_framework::HealthCheckResponse> {
+        if (req == fuchsia_driver_framework::HealthCheckRequest::kFast) {
+          return fit::ok(fuchsia_driver_framework::HealthCheckResponse().conditions(
+              {{fuchsia_driver_framework::HealthCondition()
+                    .status(fuchsia_driver_framework::HealthStatus::kUnhealthy)
+                    .reason_code("FAST_FAULT")}}));
+        }
+        return fit::ok(fuchsia_driver_framework::HealthCheckResponse{});
+      });
+
+  node->RunHealthCheck(fuchsia_driver_framework::HealthCheckRequest::kFast, [](auto) {});
+  RunLoopUntilIdle();
+  ASSERT_EQ(1u, node->health_history().size());
+  EXPECT_EQ("FAST_FAULT", node->health_history().back().reason_code);
+
+  // Subsequent OK PINGs are masked by the retained FAST_FAULT and must not append duplicate
+  // transition history entries.
+  node->RunHealthCheck(fuchsia_driver_framework::HealthCheckRequest::kPing, [](auto) {});
+  RunLoopUntilIdle();
+  EXPECT_EQ(1u, node->health_history().size());
+
+  node->RunHealthCheck(fuchsia_driver_framework::HealthCheckRequest::kPing, [](auto) {});
+  RunLoopUntilIdle();
+  EXPECT_EQ(1u, node->health_history().size());
+}
+
+}  // namespace
 
 TEST_F(Dfv2NodeTest, OnHealthAlertUpstreamNeighborFaultCompositeParents) {
   auto bus_a = CreateNode("bus-a");

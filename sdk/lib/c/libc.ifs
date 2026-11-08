@@ -113,7 +113,6 @@ Symbols:
   - { Name: __stack_chk_fail, Type: Func }
   - { Name: __strftime_fmt_1, Type: Func }
   - { Name: __sysv_signal, Type: Func, Weak: true }
-  - { Name: __tls_get_addr, Type: Func }
   - { Name: __tm_to_tzname, Type: Func }
   - { Name: __tre_mem_alloc_impl, Type: Func }
   - { Name: __tre_mem_destroy, Type: Func }

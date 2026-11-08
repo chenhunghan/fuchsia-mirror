@@ -130,10 +130,6 @@ impl Filesystem {
         self.config.as_ref()
     }
 
-    pub fn into_config(self) -> Box<dyn FSConfig> {
-        self.config
-    }
-
     /// Creates a new `Filesystem`.
     pub fn new<B: BlockConnector + 'static, FSC: FSConfig>(
         block_connector: B,
@@ -403,9 +399,6 @@ impl Drop for NamespaceBinding {
         }
     }
 }
-
-// TODO(https://fxbug.dev/42174810): Soft migration; remove this after completion
-pub type ServingFilesystem = ServingSingleVolumeFilesystem;
 
 /// Asynchronously manages a serving filesystem. Created from [`Filesystem::serve()`].
 pub struct ServingSingleVolumeFilesystem {

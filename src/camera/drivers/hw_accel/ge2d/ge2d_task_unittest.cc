@@ -519,6 +519,70 @@ TEST_F(TaskTest, RemoveTaskTest) {
   ASSERT_OK(ge2d_device_->StopThread());
 }
 
+TEST_F(TaskTest, UseAfterFreeRegressionTest) {
+  mock_mmio::Region fake_regs(sizeof(uint32_t), kNumberOfMmios);
+
+  uint32_t resize_task_id, watermark_task_id;
+  ASSERT_OK(SetupForFrameProcessing(fake_regs, resize_task_id, watermark_task_id));
+
+  struct SyncState {
+    std::mutex lock;
+    std::condition_variable cv;
+    bool removed = false;
+    task_remove_status_t status = TASK_REMOVE_STATUS_ERROR_INVALID;
+  } sync;
+  const hw_accel_remove_task_callback_t sync_remove_callback = {
+      .task_removed =
+          [](void* ctx, task_remove_status_t status) {
+            auto* state = static_cast<SyncState*>(ctx);
+            std::lock_guard lock(state->lock);
+            state->removed = true;
+            state->status = status;
+            state->cv.notify_one();
+          },
+      .ctx = &sync,
+  };
+  struct StopOnExit {
+    Ge2dDevice* device;
+    ~StopOnExit() { device->StopThread(); }
+  } stop_on_exit{ge2d_device_.get()};
+
+  uint32_t sync_task_id = 0;
+  ASSERT_OK(ge2d_device_->Ge2dInitTaskResize(
+      &input_buffer_collection_, &output_buffer_collection_, &resize_info_,
+      &output_image_format_table_[0], output_image_format_table_, kImageFormatTableSize, 0,
+      &frame_callback_, &res_callback_, &sync_remove_callback, &sync_task_id));
+
+  // Gate the processing thread in WaitForInterrupt on an initial resize frame so resize_task_id
+  // and watermark_task_id remain in task_map_ while RemoveTask and subsequent ops are queued.
+  ASSERT_OK(ge2d_device_->Ge2dProcessFrame(resize_task_id, 0, 0));
+
+  const rect_t crop_rect = {.x = 0, .y = 0, .width = 32, .height = 32};
+  ge2d_device_->Ge2dRemoveTask(resize_task_id);
+  ge2d_device_->Ge2dSetCropRect(resize_task_id, &crop_rect);
+  EXPECT_OK(ge2d_device_->Ge2dSetOutputResolution(resize_task_id, 1));
+  EXPECT_OK(ge2d_device_->Ge2dProcessFrame(resize_task_id, 1, 0));
+  ge2d_device_->Ge2dRemoveTask(resize_task_id);
+  ge2d_device_->Ge2dRemoveTask(watermark_task_id);
+  EXPECT_OK(ge2d_device_->Ge2dSetInputAndOutputResolution(watermark_task_id, 1));
+  ge2d_device_->Ge2dRemoveTask(sync_task_id);
+
+  // Unblock the initial frame (plus an extra packet so unfixed code would not block on the second
+  // frame) and wait for the trailing sync_task_id removal to prove the queue drained completely.
+  zx_port_packet packet = {kPortKeyDebugFakeInterrupt, ZX_PKT_TYPE_USER, ZX_OK, {}};
+  ASSERT_OK(port_.queue(&packet));
+  ASSERT_OK(port_.queue(&packet));
+
+  {
+    std::unique_lock lock(sync.lock);
+    sync.cv.wait(lock, [&sync] { return sync.removed; });
+    EXPECT_EQ(TASK_REMOVE_STATUS_OK, sync.status);
+  }
+
+  EXPECT_EQ(1u, GetCallbackSize());
+  ASSERT_OK(ge2d_device_->StopThread());
+}
+
 TEST_F(TaskTest, ProcessInvalidFrameTest) {
   mock_mmio::Region fake_regs(sizeof(uint32_t), kNumberOfMmios);
 

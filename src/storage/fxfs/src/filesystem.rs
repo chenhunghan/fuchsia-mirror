@@ -323,7 +323,6 @@ impl std::ops::Deref for OpenFxFilesystem {
 }
 
 pub struct FxFilesystemBuilder {
-    format: bool,
     trace: bool,
     options: Options,
     journal_options: JournalOptions,
@@ -336,7 +335,6 @@ pub struct FxFilesystemBuilder {
 impl FxFilesystemBuilder {
     pub fn new() -> Self {
         Self {
-            format: false,
             trace: false,
             options: Options::default(),
             journal_options: JournalOptions::default(),
@@ -347,12 +345,6 @@ impl FxFilesystemBuilder {
         }
     }
 
-    /// Sets whether the block device should be formatted when opened. Defaults to `false`.
-    pub fn format(mut self, format: bool) -> Self {
-        self.format = format;
-        self
-    }
-
     /// Enables or disables trace level logging. Defaults to `false`.
     pub fn trace(mut self, trace: bool) -> Self {
         self.trace = trace;
@@ -360,7 +352,6 @@ impl FxFilesystemBuilder {
     }
 
     /// Sets whether the filesystem will be opened in read-only mode. Defaults to `false`.
-    /// Incompatible with `format`.
     pub fn read_only(mut self, read_only: bool) -> Self {
         self.options.read_only = read_only;
         self
@@ -469,10 +460,23 @@ impl FxFilesystemBuilder {
         self
     }
 
-    /// Constructs an `FxFilesystem` object with the specified settings.
+    /// Opens an existing `FxFilesystem` object with the specified settings.
     pub async fn open(self, device: DeviceHolder) -> Result<OpenFxFilesystem, Error> {
+        self.open_or_format(device, /* format: */ false).await
+    }
+
+    /// Formats a new `FxFilesystem` on `device` with the specified settings.
+    pub async fn format(self, device: DeviceHolder) -> Result<OpenFxFilesystem, Error> {
+        self.open_or_format(device, /* format: */ true).await
+    }
+
+    async fn open_or_format(
+        self,
+        device: DeviceHolder,
+        format: bool,
+    ) -> Result<OpenFxFilesystem, Error> {
         let read_only = self.options.read_only;
-        if self.format && read_only {
+        if format && read_only {
             bail!("Cannot initialize a filesystem as read-only");
         }
 
@@ -505,7 +509,7 @@ impl FxFilesystemBuilder {
                 Some(Box::new(move || Box::pin(instance.clone().run())));
         }
 
-        if !read_only && !self.format {
+        if !read_only && !format {
             // See comment in JournalRecord::DidFlushDevice for why we need to flush the device
             // before replay.
             device.flush().await.context("Device flush failed")?;
@@ -545,7 +549,7 @@ impl FxFilesystemBuilder {
         filesystem.journal().set_image_builder_mode(image_builder_mode);
 
         filesystem.journal.set_trace(self.trace);
-        if self.format {
+        if format {
             filesystem.journal.init_empty(filesystem.clone()).await?;
             if image_builder_mode.is_none() {
                 // The filesystem isn't valid until superblocks are written but we want to defer
@@ -648,7 +652,7 @@ pub struct FxFilesystem {
 #[fxfs_trace::trace]
 impl FxFilesystem {
     pub async fn new_empty(device: DeviceHolder) -> Result<OpenFxFilesystem, Error> {
-        FxFilesystemBuilder::new().format(true).open(device).await
+        FxFilesystemBuilder::new().format(device).await
     }
 
     pub async fn open(device: DeviceHolder) -> Result<OpenFxFilesystem, Error> {
@@ -1509,11 +1513,10 @@ mod tests {
         {
             let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
             let fs = FxFilesystemBuilder::new()
-                .format(true)
                 .image_builder_mode(Some(SuperBlockInstance::A))
-                .open(device)
+                .format(device)
                 .await
-                .expect("open failed");
+                .expect("format failed");
             let root_store = fs.root_store();
             let root_directory =
                 Directory::open(&root_store, root_store.root_directory_object_id())
@@ -1738,10 +1741,9 @@ mod tests {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystemBuilder::new()
             .trim_config(Some((Duration::ZERO, Duration::ZERO)))
-            .format(true)
-            .open(device)
+            .format(device)
             .await
-            .expect("open failed");
+            .expect("format failed");
         // Do a small sleep so trim has time to get going.
         fasync::Timer::new(Duration::from_millis(10)).await;
 
@@ -1776,7 +1778,7 @@ mod tests {
             std::mem::drop(object);
 
             let mut transaction = root_directory
-                .acquire_context_for_replace(None, "test", true)
+                .acquire_context_for_replace(None, "test", true, &[])
                 .await
                 .expect("acquire_context_for_replace failed")
                 .transaction;
@@ -1800,8 +1802,7 @@ mod tests {
                 let fs = if barriers_enabled {
                     FxFilesystemBuilder::new()
                         .barriers_enabled(true)
-                        .format(true)
-                        .open(device)
+                        .format(device)
                         .await
                         .expect("new filesystem failed")
                 } else {
@@ -2078,8 +2079,7 @@ mod tests {
         let device = DeviceHolder::new(fake_device);
         let fs = FxFilesystemBuilder::new()
             .barriers_enabled(true)
-            .format(true)
-            .open(device)
+            .format(device)
             .await
             .expect("new filesystem failed");
 
@@ -2168,8 +2168,7 @@ mod tests {
         let device = DeviceHolder::new(fake_device);
         let fs = FxFilesystemBuilder::new()
             .barriers_enabled(true)
-            .format(true)
-            .open(device)
+            .format(device)
             .await
             .expect("new filesystem failed");
 
@@ -2255,8 +2254,7 @@ mod tests {
         let device = DeviceHolder::new(fake_device);
         let fs: super::OpenFxFilesystem = FxFilesystemBuilder::new()
             .barriers_enabled(original_barrier_mode)
-            .format(true)
-            .open(device)
+            .format(device)
             .await
             .expect("new filesystem failed");
 
@@ -2371,11 +2369,10 @@ mod tests {
         let device = DeviceHolder::new(FakeDevice::new(2048, BLOCK_SIZE));
         device.reopen(true);
         let fs = FxFilesystemBuilder::new()
-            .format(true)
             .image_builder_mode(Some(SuperBlockInstance::A))
-            .open(device)
+            .format(device)
             .await
-            .expect("open failed");
+            .expect("format failed");
         fs.enable_allocations();
         // fs.close() now performs compaction (writing superblock), so device must be writable.
         fs.device().reopen(false);
@@ -2400,11 +2397,10 @@ mod tests {
 
         let device = {
             let fs = FxFilesystemBuilder::new()
-                .format(true)
                 .image_builder_mode(Some(SuperBlockInstance::B))
-                .open(device)
+                .format(device)
                 .await
-                .expect("open failed");
+                .expect("format failed");
             fs.enable_allocations();
             {
                 let root_store = fs.root_store();
@@ -2468,11 +2464,10 @@ mod tests {
         let device = DeviceHolder::new(FakeDevice::new(8192, BLOCK_SIZE));
         let device = {
             let fs = FxFilesystemBuilder::new()
-                .format(true)
                 .image_builder_mode(Some(SuperBlockInstance::A))
-                .open(device)
+                .format(device)
                 .await
-                .expect("open failed");
+                .expect("format failed");
             fs.enable_allocations();
             {
                 let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
@@ -2579,8 +2574,7 @@ mod tests {
     #[fuchsia::test]
     async fn test_read_only_mount_on_full_filesystem() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
-        let fs =
-            FxFilesystemBuilder::new().format(true).open(device).await.expect("new_empty failed");
+        let fs = FxFilesystemBuilder::new().format(device).await.expect("new_empty failed");
         let root_store = fs.root_store();
         let root_directory = Directory::open(&root_store, root_store.root_directory_object_id())
             .await
@@ -2643,11 +2637,10 @@ mod tests {
         // 1. Initialize in image_builder_mode
         device.reopen(true);
         let fs = FxFilesystemBuilder::new()
-            .format(true)
             .image_builder_mode(Some(target_sb))
-            .open(device)
+            .format(device)
             .await
-            .expect("open failed");
+            .expect("format failed");
 
         fs.enable_allocations();
 
@@ -2842,13 +2835,12 @@ mod tests {
         });
 
         let fs = FxFilesystemBuilder::new()
-            .format(true)
             .power_manager(pm.clone())
             .trim_config(Some((Duration::ZERO, Duration::from_millis(100))))
             .trim_charger_wait(Duration::from_millis(10))
-            .open(device)
+            .format(device)
             .await
-            .expect("open failed");
+            .expect("format failed");
 
         // Initially on battery, so no trim should happen.
         TestExecutor::advance_to(fasync::MonotonicInstant::after(
@@ -2938,10 +2930,9 @@ mod tests {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystemBuilder::new()
             .trim_config(None)
-            .format(true)
-            .open(device)
+            .format(device)
             .await
-            .expect("open failed");
+            .expect("format failed");
 
         let max_extent_size = fs.device().size() as usize;
         const EXTENTS_PER_BATCH: usize = usize::MAX;

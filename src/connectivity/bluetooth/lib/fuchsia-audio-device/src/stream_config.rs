@@ -49,11 +49,52 @@ pub(crate) fn frames_from_duration(
         duration >= zx::MonotonicDuration::from_nanos(0),
         "frames_from_duration is not defined for negative durations"
     );
-    let mut frames = duration.into_seconds() * frames_per_second as i64;
-    let frames_partial =
-        ((duration.into_nanos() % 1_000_000_000) as f64 / 1e9) * frames_per_second as f64;
-    frames += frames_partial as i64;
-    frames as usize
+    checked_frames_from_duration(frames_per_second, duration)
+        .expect("frames_from_duration overflowed usize")
+}
+
+fn checked_frames_from_duration(
+    frames_per_second: usize,
+    duration: fasync::MonotonicDuration,
+) -> Option<usize> {
+    let nanos = u128::try_from(duration.into_nanos()).ok()?;
+    let fps = u128::try_from(frames_per_second).ok()?;
+    let seconds = nanos / 1_000_000_000;
+    let subsec_nanos = nanos % 1_000_000_000;
+    let frames = seconds.checked_mul(fps)?;
+    let frames_partial = ((subsec_nanos as f64 / 1e9) * frames_per_second as f64) as u128;
+    usize::try_from(frames.checked_add(frames_partial)?).ok()
+}
+
+/// Validates a linear `PcmFormat2` (`bits_per_sample` in `8 | 16 | 24 | 32`, `bytes_per_sample`
+/// omitted or matching a supported sample container, non-zero `frames_per_second`, and
+/// `1..=MAX_PCM_FORMAT2_CHANNEL_COUNT` channels) and returns `(frame_bytes, frames_per_second)`.
+pub fn validate_pcm_format2(pcm_format: &fidl_fuchsia_media::PcmFormat2) -> Result<(usize, u32)> {
+    let fidl_fuchsia_media::PcmFormat2 {
+        pcm_mode: Some(fidl_fuchsia_media::AudioPcmMode2::Linear),
+        bits_per_sample: Some(bits_per_sample),
+        frames_per_second: Some(frames_per_second),
+        channel_map: Some(ref channel_map),
+        ..
+    } = *pcm_format
+    else {
+        return Err(Error::InvalidArgs);
+    };
+    let effective_bytes_per_sample =
+        pcm_format.bytes_per_sample.unwrap_or_else(|| bits_per_sample.div_ceil(8));
+    if !matches!(
+        (bits_per_sample, effective_bytes_per_sample),
+        (8, 1) | (16, 2) | (24, 3 | 4) | (32, 4)
+    ) || frames_per_second == 0
+        || channel_map.is_empty()
+        || channel_map.len() > fidl_fuchsia_media::MAX_PCM_FORMAT2_CHANNEL_COUNT as usize
+    {
+        return Err(Error::InvalidArgs);
+    }
+    let frame_bytes = (effective_bytes_per_sample as usize)
+        .checked_mul(channel_map.len())
+        .ok_or(Error::InvalidArgs)?;
+    Ok((frame_bytes, frames_per_second))
 }
 
 /// A software fuchsia audio output, which implements Audio Driver Streaming Interface
@@ -145,7 +186,7 @@ impl SoftStreamConfig {
         manufacturer: &str,
         product: &str,
         clock_domain: u32,
-        pcm_format: fidl_fuchsia_media::PcmFormat,
+        pcm_format: fidl_fuchsia_media::PcmFormat2,
         packet_duration: zx::MonotonicDuration,
         initial_external_delay: zx::MonotonicDuration,
     ) -> Result<(ClientEnd<StreamConfigMarker>, AudioFrameStream)> {
@@ -167,7 +208,7 @@ impl SoftStreamConfig {
         manufacturer: &str,
         product: &str,
         clock_domain: u32,
-        pcm_format: fidl_fuchsia_media::PcmFormat,
+        pcm_format: fidl_fuchsia_media::PcmFormat2,
         buffer: zx::MonotonicDuration,
     ) -> Result<(ClientEnd<StreamConfigMarker>, AudioFrameSink)> {
         let (client, soft_stream_config) = SoftStreamConfig::build(
@@ -189,31 +230,56 @@ impl SoftStreamConfig {
         product: &str,
         clock_domain: u32,
         is_output: bool,
-        pcm_format: fidl_fuchsia_media::PcmFormat,
+        pcm_format: fidl_fuchsia_media::PcmFormat2,
         packet_duration: zx::MonotonicDuration,
         initial_external_delay: zx::MonotonicDuration,
     ) -> Result<(ClientEnd<StreamConfigMarker>, SoftStreamConfig)> {
-        if pcm_format.bits_per_sample % 8 != 0 {
-            // Non-byte-aligned format not allowed.
+        let (frame_bytes, frames_per_second) = validate_pcm_format2(&pcm_format)?;
+        let fidl_fuchsia_media::PcmFormat2 {
+            bits_per_sample: Some(bits_per_sample),
+            channel_map: Some(channel_map),
+            ..
+        } = pcm_format
+        else {
+            return Err(Error::InvalidArgs);
+        };
+        let effective_bytes_per_sample =
+            pcm_format.bytes_per_sample.unwrap_or_else(|| bits_per_sample.div_ceil(8));
+        if channel_map.len() > MAX_COUNT_CHANNELS_IN_RING_BUFFER as usize {
+            return Err(Error::InvalidArgs);
+        }
+        if packet_duration.into_nanos() <= 0 {
+            return Err(Error::InvalidArgs);
+        }
+        let Some(packet_frames) =
+            checked_frames_from_duration(frames_per_second as usize, packet_duration)
+        else {
+            return Err(Error::InvalidArgs);
+        };
+        if packet_frames == 0
+            || packet_frames.checked_mul(frame_bytes).and_then(|b| u32::try_from(b).ok()).is_none()
+            || packet_frames.checked_mul(3).and_then(|f| u32::try_from(f).ok()).is_none()
+            || i64::try_from(packet_frames)
+                .ok()
+                .and_then(|f| f.checked_mul(1_000_000_000))
+                .is_none()
+        {
             return Err(Error::InvalidArgs);
         }
         let (client, request_stream) =
             fidl::endpoints::create_request_stream::<StreamConfigMarker>();
 
-        let number_of_channels = pcm_format.channel_map.len();
+        let number_of_channels = channel_map.len();
         let attributes = vec![ChannelAttributes::default(); number_of_channels];
         let channel_set = ChannelSet { attributes: Some(attributes), ..Default::default() };
         let supported_formats = PcmSupportedFormats {
             channel_sets: Some(vec![channel_set]),
             sample_formats: Some(vec![SampleFormat::PcmSigned]),
-            bytes_per_sample: Some(vec![(pcm_format.bits_per_sample / 8) as u8]),
-            valid_bits_per_sample: Some(vec![pcm_format.bits_per_sample as u8]),
-            frame_rates: Some(vec![pcm_format.frames_per_second]),
+            bytes_per_sample: Some(vec![effective_bytes_per_sample as u8]),
+            valid_bits_per_sample: Some(vec![bits_per_sample as u8]),
+            frame_rates: Some(vec![frames_per_second]),
             ..Default::default()
         };
-
-        let packet_frames =
-            frames_from_duration(pcm_format.frames_per_second as usize, packet_duration);
 
         let soft_stream_config = SoftStreamConfig {
             stream_config_stream: request_stream,
@@ -224,7 +290,7 @@ impl SoftStreamConfig {
             clock_domain,
             supported_formats,
             packet_frames,
-            frame_bytes: (pcm_format.bits_per_sample / 8) as usize,
+            frame_bytes,
             ring_buffer_stream: Default::default(),
             frame_vmo: Arc::new(Mutex::new(frame_vmo::FrameVmo::new()?)),
             external_delay: initial_external_delay,
@@ -421,8 +487,9 @@ impl SoftStreamConfig {
             } => {
                 // Require a minimum amount of frames for three packets.
                 let min_frames_from_duration = 3 * self.packet_frames as u32;
-                let ring_buffer_frames =
-                    (min_frames + self.packet_frames as u32).max(min_frames_from_duration);
+                let ring_buffer_frames = min_frames
+                    .saturating_add(self.packet_frames as u32)
+                    .max(min_frames_from_duration);
                 self.inspect.record_vmo_status("gotten");
                 match self
                     .frame_vmo
@@ -501,7 +568,7 @@ impl SoftStreamConfig {
 pub(crate) mod tests {
     use super::*;
 
-    use fidl_fuchsia_media::{AudioChannelId, AudioPcmMode, PcmFormat};
+    use fidl_fuchsia_media::{AudioChannelId2, AudioPcmMode2, PcmFormat2};
 
     use async_utils::PollExt;
     use fixture::fixture;
@@ -516,11 +583,12 @@ pub(crate) mod tests {
         F: FnOnce(fasync::TestExecutor, StreamConfigProxy, AudioFrameStream) -> (),
     {
         let exec = fasync::TestExecutor::new_with_fake_time();
-        let format = PcmFormat {
-            pcm_mode: AudioPcmMode::Linear,
-            bits_per_sample: 16,
-            frames_per_second: 44100,
-            channel_map: vec![AudioChannelId::Lf, AudioChannelId::Rf],
+        let format = PcmFormat2 {
+            pcm_mode: Some(AudioPcmMode2::Linear),
+            bits_per_sample: Some(16),
+            frames_per_second: Some(44100),
+            channel_map: Some(vec![AudioChannelId2::Fl, AudioChannelId2::Fr]),
+            ..Default::default()
         };
         let (client, frame_stream) = SoftStreamConfig::create_output(
             TEST_UNIQUE_ID,
@@ -577,11 +645,12 @@ pub(crate) mod tests {
 
     #[fuchsia::test]
     fn soft_stream_config_audio_should_end_when_stream_dropped() {
-        let format = PcmFormat {
-            pcm_mode: AudioPcmMode::Linear,
-            bits_per_sample: 16,
-            frames_per_second: 48000,
-            channel_map: vec![AudioChannelId::Lf, AudioChannelId::Rf],
+        let format = PcmFormat2 {
+            pcm_mode: Some(AudioPcmMode2::Linear),
+            bits_per_sample: Some(16),
+            frames_per_second: Some(48000),
+            channel_map: Some(vec![AudioChannelId2::Fl, AudioChannelId2::Fr]),
+            ..Default::default()
         };
 
         let mut exec = fasync::TestExecutor::new_with_fake_time();
@@ -597,6 +666,7 @@ pub(crate) mod tests {
         )
         .expect("should always build");
 
+        assert_eq!(4, frame_stream.frame_bytes);
         drop(frame_stream);
 
         assert_eq!(Poll::Pending, exec.run_until_stalled(&mut future::pending::<()>()));
@@ -748,6 +818,76 @@ pub(crate) mod tests {
                 assert_eq!(zx::MonotonicDuration::from_millis(150).into_nanos(), x)
             }
             other => panic!("Expected the correct delay info, got {other:?}"),
+        }
+    }
+
+    #[fuchsia::test]
+    fn build_invalid_args() {
+        let valid_format = PcmFormat2 {
+            pcm_mode: Some(AudioPcmMode2::Linear),
+            bits_per_sample: Some(16),
+            frames_per_second: Some(48000),
+            channel_map: Some(vec![AudioChannelId2::Fl, AudioChannelId2::Fr]),
+            ..Default::default()
+        };
+
+        let invalid_formats = [
+            PcmFormat2 { pcm_mode: None, ..valid_format.clone() },
+            PcmFormat2 { pcm_mode: Some(AudioPcmMode2::Alaw), ..valid_format.clone() },
+            PcmFormat2 { bits_per_sample: None, ..valid_format.clone() },
+            PcmFormat2 { bits_per_sample: Some(0), ..valid_format.clone() },
+            PcmFormat2 { bits_per_sample: Some(12), ..valid_format.clone() },
+            PcmFormat2 { bits_per_sample: Some(40), ..valid_format.clone() },
+            PcmFormat2 { bits_per_sample: Some(256), ..valid_format.clone() },
+            PcmFormat2 { bits_per_sample: Some(u32::MAX), ..valid_format.clone() },
+            PcmFormat2 { bytes_per_sample: Some(4), ..valid_format.clone() },
+            PcmFormat2 { frames_per_second: None, ..valid_format.clone() },
+            PcmFormat2 { frames_per_second: Some(0), ..valid_format.clone() },
+            PcmFormat2 { channel_map: None, ..valid_format.clone() },
+            PcmFormat2 { channel_map: Some(vec![]), ..valid_format.clone() },
+            PcmFormat2 {
+                channel_map: Some(vec![
+                    AudioChannelId2::Fl;
+                    (MAX_COUNT_CHANNELS_IN_RING_BUFFER as usize) + 1
+                ]),
+                ..valid_format.clone()
+            },
+        ];
+
+        for format in invalid_formats {
+            let res = SoftStreamConfig::build(
+                TEST_UNIQUE_ID,
+                "Google",
+                "UnitTest",
+                TEST_CLOCK_DOMAIN,
+                true,
+                format,
+                zx::MonotonicDuration::from_millis(100),
+                zx::MonotonicDuration::from_millis(50),
+            );
+            assert!(matches!(res, Err(Error::InvalidArgs)));
+        }
+
+        let invalid_durations = [
+            zx::MonotonicDuration::from_millis(-10),
+            zx::MonotonicDuration::from_nanos(0),
+            // Shorter than 1 frame at 48 kHz -> packet_frames == 0.
+            zx::MonotonicDuration::from_nanos(100),
+            // Large enough to overflow u32 ring buffer / transfer byte counts.
+            zx::MonotonicDuration::INFINITE,
+        ];
+        for duration in invalid_durations {
+            let res = SoftStreamConfig::build(
+                TEST_UNIQUE_ID,
+                "Google",
+                "UnitTest",
+                TEST_CLOCK_DOMAIN,
+                true,
+                valid_format.clone(),
+                duration,
+                zx::MonotonicDuration::from_millis(50),
+            );
+            assert!(matches!(res, Err(Error::InvalidArgs)));
         }
     }
 }

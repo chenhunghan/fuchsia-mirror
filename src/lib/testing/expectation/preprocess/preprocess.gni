@@ -5,6 +5,8 @@
 import("//build/compiled_action.gni")
 import("//build/dist/resource.gni")
 
+# LINT.IfChange
+
 # Preprocesses an expectations JSON5 file in order to
 # resolve `include`s and check that the file is valid, and
 # produces a `resource` to be included in a fuchsia package.
@@ -53,6 +55,8 @@ template("preprocess_expectations") {
       rebase_path(invoker.expectations, root_build_dir),
       "--preprocessed-expectations-file",
       rebase_path(_preprocessed_expectations, root_build_dir),
+      "--fuchsia-dir",
+      rebase_path("//", root_build_dir),
       "--depfile",
       rebase_path(depfile, root_build_dir),
     ]
@@ -79,3 +83,4 @@ template("preprocess_expectations") {
     visibility = [ ":*" ]
   }
 }
+# LINT.ThenChange(//src/lib/testing/expectation/rules/preprocess.bzl)

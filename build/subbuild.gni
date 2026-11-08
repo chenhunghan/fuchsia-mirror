@@ -108,6 +108,16 @@ template("subbuild") {
       tools_dir,
     ]
 
+    if (defined(invoker.prebuilt_target_sysroot_dir)) {
+      deps += [ "//zircon/public/sysroot_sdk:sysroot_sdk_export" ]
+      _sysroot_dir =
+          rebase_path(invoker.prebuilt_target_sysroot_dir, root_build_dir)
+      args += [
+        "--prebuilt-target-sysroot-dir",
+        _sysroot_dir,
+      ]
+    }
+
     if (sdk_sub_build_parallelism != "") {
       args += [
         "--parallelism",

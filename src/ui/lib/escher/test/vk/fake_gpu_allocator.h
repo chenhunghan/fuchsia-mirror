@@ -5,6 +5,8 @@
 #ifndef SRC_UI_LIB_ESCHER_TEST_VK_FAKE_GPU_ALLOCATOR_H_
 #define SRC_UI_LIB_ESCHER_TEST_VK_FAKE_GPU_ALLOCATOR_H_
 
+#include <atomic>
+
 #include "src/ui/lib/escher/vk/gpu_allocator.h"
 
 #include <vulkan/vulkan.hpp>
@@ -49,7 +51,7 @@ class FakeGpuAllocator : public GpuAllocator {
   void OnDeallocation(uint64_t size);
 
  private:
-  uint64_t bytes_allocated_ = 0;
+  std::atomic<uint64_t> bytes_allocated_{0};
 };
 
 }  // namespace test

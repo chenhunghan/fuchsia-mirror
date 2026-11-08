@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::emulator::EMULATOR_ROOT_DRIVER_URL;
+use crate::emulator::EMULATOR_COMPONENT_URL;
 use anyhow::{Error, format_err};
 use fidl_fuchsia_bluetooth_bredr as fbredr;
 use fidl_fuchsia_bluetooth_gatt as fbgatt;
@@ -10,7 +10,6 @@ use fidl_fuchsia_bluetooth_le as fble;
 use fidl_fuchsia_bluetooth_snoop::SnoopMarker;
 use fidl_fuchsia_bluetooth_sys as fbsys;
 use fidl_fuchsia_device::NameProviderMarker;
-use fidl_fuchsia_driver_test as fdt;
 use fidl_fuchsia_hardware_bluetooth as fhbt;
 use fidl_fuchsia_io as fio;
 use fidl_fuchsia_logger::LogSinkMarker;
@@ -18,7 +17,6 @@ use fidl_fuchsia_stash::SecureStoreMarker;
 use fuchsia_component_test::{
     Capability, ChildOptions, RealmBuilder, RealmInstance, Ref, Route, ScopedInstance,
 };
-use fuchsia_driver_test::{DriverTestRealmBuilder, DriverTestRealmInstance};
 use futures::FutureExt;
 use realmbuilder_mock_helpers::stateless_mock_responder;
 
@@ -43,6 +41,9 @@ mod constants {
     pub mod mock_snoop {
         pub const MONIKER: &str = "mock-snoop";
     }
+    pub mod bt_hci_virtual {
+        pub const MONIKER: &str = "bt-hci-virtual";
+    }
 }
 
 /// The CoreRealm represents a hermetic, fully-functional instance of the Fuchsia Bluetooth core
@@ -56,23 +57,8 @@ pub struct CoreRealm {
 }
 
 impl CoreRealm {
-    pub async fn create(test_component: String) -> Result<Self, Error> {
-        // We need to resolve our test component manually. Eventually component framework could provide
-        // an introspection way of resolving your own component.
-        let resolved_test_component = {
-            let client = fuchsia_component::client::connect_to_protocol_at_path::<
-                fidl_fuchsia_component_resolution::ResolverMarker,
-            >("/svc/fuchsia.component.resolution.Resolver-hermetic")
-            .unwrap();
-            client
-                .resolve(test_component.as_str())
-                .await
-                .unwrap()
-                .expect("Failed to resolve test component")
-        };
-
+    pub async fn create() -> Result<Self, Error> {
         let builder = RealmBuilder::new().await?;
-        let _ = builder.driver_test_realm_setup().await?;
 
         // Create the components within CoreRealm
         let bt_init = builder
@@ -86,6 +72,13 @@ impl CoreRealm {
             .add_child(
                 constants::secure_stash::MONIKER,
                 constants::secure_stash::URL,
+                ChildOptions::new(),
+            )
+            .await?;
+        let bt_hci_virtual = builder
+            .add_child(
+                constants::bt_hci_virtual::MONIKER,
+                EMULATOR_COMPONENT_URL,
                 ChildOptions::new(),
             )
             .await?;
@@ -129,7 +122,8 @@ impl CoreRealm {
                     .capability(Capability::dictionary("diagnostics"))
                     .from(Ref::parent())
                     .to(&bt_init)
-                    .to(&secure_stash),
+                    .to(&secure_stash)
+                    .to(&bt_hci_virtual),
             )
             .await?;
         builder
@@ -249,33 +243,26 @@ impl CoreRealm {
             )
             .await?;
 
-        let dtr_exposes = vec![Capability::service::<fhbt::ServiceMarker>().into()];
-        let _ = builder.driver_test_realm_add_dtr_exposes(&dtr_exposes).await?;
-
         builder
             .add_route(
                 Route::new()
                     .capability(Capability::service::<fhbt::ServiceMarker>())
-                    .from(Ref::child(fuchsia_driver_test::COMPONENT_NAME))
+                    .from(&bt_hci_virtual)
                     .to(&bt_init),
+            )
+            .await?;
+        builder
+            .add_route(
+                Route::new()
+                    .capability(Capability::service::<fhbt::VirtualControllerServiceMarker>())
+                    .capability(Capability::service::<fhbt::EmulatorServiceMarker>())
+                    .from(&bt_hci_virtual)
+                    .to(Ref::parent()),
             )
             .await?;
 
         crate::host_realm::add_host_routes(&builder, &bt_init).await?;
         let instance = builder.build().await?;
-
-        // Start DriverTestRealm
-        let args = fdt::RealmArgs {
-            root_driver: Some(EMULATOR_ROOT_DRIVER_URL.to_string()),
-            software_devices: Some(vec![fidl_fuchsia_driver_test::SoftwareDevice {
-                device_name: "bt-hci-emulator".to_string(),
-                device_id: bind_fuchsia_platform::BIND_PLATFORM_DEV_DID_BT_HCI_EMULATOR,
-            }]),
-            test_component: Some(resolved_test_component),
-            dtr_exposes: Some(dtr_exposes),
-            ..Default::default()
-        };
-        instance.driver_test_realm_start(args).await?;
 
         Ok(Self { realm: instance })
     }
@@ -284,7 +271,7 @@ impl CoreRealm {
         &self.realm.root
     }
 
-    pub fn dev(&self) -> Result<fio::DirectoryProxy, Error> {
-        self.realm.driver_test_realm_connect_to_dev()
+    pub fn svc(&self) -> &fio::DirectoryProxy {
+        self.realm.root.get_exposed_dir()
     }
 }

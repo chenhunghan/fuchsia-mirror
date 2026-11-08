@@ -49,11 +49,7 @@ int main(int argc, char** argv) {
     return adb.error_value();
   }
 
-  state_controller.set_reset_callback([&]() {
-    if (adb.is_ok()) {
-      adb.value()->Reset();
-    }
-  });
+  state_controller.set_reset_callback([&]() { return adb.value()->Reset(); });
 
   main_loop.Run();
   return ZX_OK;

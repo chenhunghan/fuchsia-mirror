@@ -70,11 +70,43 @@ func TestGetMetadata(t *testing.T) {
 
 		expected := map[string]TestMetadata{
 			"fuchsia-pkg://fuchsia.com/sparky-sparky-boom-test#meta/sparky-sparky-boom-test.cm": {
-				Owners: []string{"carverforbes@google.com", "testgoogler@google.com"},
+				Owners: []string{"testgoogler@google.com", "carverforbes@google.com"},
 			},
 		}
 
 		metadataMap, _ := GetMetadata(getFakeTestSpecs(), checkoutDir)
+		if diff := cmp.Diff(expected, metadataMap); diff != "" {
+			t.Errorf("GetMetadata() failed: (-want +got): \n%s", diff)
+		}
+	})
+
+	t.Run("nested includes preserve proximity order and deduplicate", func(t *testing.T) {
+		checkoutDir := t.TempDir()
+
+		umbrellaOwnersPath := filepath.Join(checkoutDir, "src", "OWNERS")
+		subsystemOwnersPath := filepath.Join(checkoutDir, "src", "sub", "OWNERS")
+		leafOwnersPath := filepath.Join(checkoutDir, "src", "sys", "OWNERS")
+
+		writeFile(t, umbrellaOwnersPath, "include /src/sys/OWNERS\numbrella1@google.com\nleaf@google.com\numbrella2@google.com")
+		writeFile(t, subsystemOwnersPath, "include /src/OWNERS\nsubsystem@google.com")
+		writeFile(t, leafOwnersPath, "include /src/sub/OWNERS\nleaf@google.com\nleaf2@google.com")
+
+		expected := map[string]TestMetadata{
+			"fuchsia-pkg://fuchsia.com/sparky-sparky-boom-test#meta/sparky-sparky-boom-test.cm": {
+				Owners: []string{
+					"leaf@google.com",
+					"leaf2@google.com",
+					"subsystem@google.com",
+					"umbrella1@google.com",
+					"umbrella2@google.com",
+				},
+			},
+		}
+
+		metadataMap, err := GetMetadata(getFakeTestSpecs(), checkoutDir)
+		if err != nil {
+			t.Fatalf("GetMetadata() unexpected error: %v", err)
+		}
 		if diff := cmp.Diff(expected, metadataMap); diff != "" {
 			t.Errorf("GetMetadata() failed: (-want +got): \n%s", diff)
 		}

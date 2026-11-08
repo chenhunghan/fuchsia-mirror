@@ -26,7 +26,7 @@
 #include "src/devices/board/lib/acpi/test/mock-acpi.h"
 #include "src/devices/board/lib/acpi/test/null-iommu-manager.h"
 #include "src/devices/testing/mock-ddk/mock-device.h"
-#include "third_party/acpica-migrating/src/source/include/actypes.h"
+#include "third_party/acpica/src/source/include/actypes.h"
 
 class NotifyHandlerServer : public fidl::WireServer<fuchsia_hardware_acpi::NotifyHandler> {
  public:
@@ -1796,6 +1796,65 @@ TEST_F(AcpiDeviceTest, TestSetWakeDeviceWrongEventInfoType) {
     ASSERT_TRUE(result.ok());
     ASSERT_TRUE(result->is_error());
     ASSERT_EQ(result->error_value(), fuchsia_hardware_acpi::wire::Status::kBadData);
+    QuitLoop();
+  });
+  RunLoop();
+}
+
+namespace {
+
+// Adds a disabled device with one _CRS I/O port range.
+acpi::test::Device* AddDisabledDeviceWithPort(acpi::test::MockAcpi& acpi) {
+  auto test_dev = std::make_unique<acpi::test::Device>("RTC_");
+  test_dev->SetSta(0);
+  test_dev->AddResource(ACPI_RESOURCE{
+      .Type = ACPI_RESOURCE_TYPE_IO,
+      .Length = sizeof(ACPI_RESOURCE),
+      .Data = {.Io = {.IoDecode = ACPI_DECODE_16,
+                      .Alignment = 1,
+                      .AddressLength = 8,
+                      .Minimum = 0x70,
+                      .Maximum = 0x70}},
+  });
+  acpi::test::Device* hnd = test_dev.get();
+  acpi.GetDeviceRoot()->AddChild(std::move(test_dev));
+  return hnd;
+}
+
+}  // namespace
+
+TEST_F(AcpiDeviceTest, TestGetPioOnDisabledDevice) {
+  acpi::test::Device* hnd = AddDisabledDeviceWithPort(acpi_);
+  SetUpFidlServer(std::make_unique<acpi::Device>(Args(hnd)));
+
+  fidl_client_->GetPio(0).Then([&](auto& result) {
+    ASSERT_TRUE(result.ok());
+    ASSERT_TRUE(result->is_error());
+    EXPECT_EQ(result->error_value(), ZX_ERR_OUT_OF_RANGE);
+    QuitLoop();
+  });
+  RunLoop();
+}
+
+TEST_F(AcpiDeviceTest, TestGetPioWhenStaEnabled) {
+  acpi::test::Device* hnd = AddDisabledDeviceWithPort(acpi_);
+  hnd->SetResourcesReadableWhileDisabled();
+  SetUpFidlServer(std::make_unique<acpi::Device>(std::move(Args(hnd).SetStaEnabled(true))));
+
+  // Index 0 finds the _CRS I/O port range; creating the zx::resource fails with ZX_ERR_INTERNAL
+  // because mock_ddk's get_ioport_resource returns ZX_HANDLE_INVALID.
+  fidl_client_->GetPio(0).Then([&](auto& result) {
+    ASSERT_TRUE(result.ok());
+    ASSERT_TRUE(result->is_error());
+    EXPECT_EQ(result->error_value(), ZX_ERR_INTERNAL);
+    QuitLoop();
+  });
+  RunLoop();
+
+  fidl_client_->GetPio(1).Then([&](auto& result) {
+    ASSERT_TRUE(result.ok());
+    ASSERT_TRUE(result->is_error());
+    EXPECT_EQ(result->error_value(), ZX_ERR_OUT_OF_RANGE);
     QuitLoop();
   });
   RunLoop();

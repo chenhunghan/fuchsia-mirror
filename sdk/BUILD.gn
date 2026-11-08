@@ -327,6 +327,7 @@ sdk_molecule("fuchsia_idk_atoms_host_tests") {
 
 bazel_test_suite("bazel_tests") {
   host_tests = [ "//sdk:host_tests" ]
+  target_tests = [ "//sdk:target_tests" ]
 }
 
 group("tests_no_e2e") {
@@ -633,7 +634,6 @@ sdk_molecule("core_bindlib") {
     "//src/devices/bind/fuchsia.test:fuchsia.test_sdk",
     "//src/devices/bind/fuchsia.test.platform:fuchsia.test.platform_sdk",
     "//src/devices/bind/fuchsia.ti.platform:fuchsia.ti.platform_sdk",
-    "//src/devices/bind/fuchsia.usb.phy:fuchsia.usb.phy_sdk",
     "//src/devices/bind/fuchsia.verisilicon.platform:fuchsia.verisilicon.platform_sdk",
   ]
 }
@@ -692,13 +692,13 @@ sdk_molecule("core_cc_prebuilt_libraries") {
     "//sdk/lib/fdio:fdio_sdk",
     "//sdk/lib/magma_client:magma_client_sdk",
     "//sdk/lib/svc:svc_sdk",
+    "//sdk/lib/syslog/cpp:backend_fuchsia_globals_sdk",
     "//sdk/lib/vfs/internal:vfs_internal_sdk",
     "//src/devices/bin/driver_runtime:driver_runtime_sdk",
     "//src/performance/memory/heapdump/instrumentation:instrumentation_sdk",
     "//src/performance/memory/sampler/instrumentation:instrumentation_sdk",
     "//third_party/Vulkan-Loader/src:libvulkan_sdk",
     "//zircon/system/ulib/sync:sync_sdk",
-    "//zircon/system/ulib/syslog:syslog_sdk",
     "//zircon/system/ulib/trace-engine:trace-engine_sdk",
     "//zircon/system/ulib/trace-provider:trace-provider-so_sdk",
     "//zircon/system/ulib/trace-vthread:trace-vthread_sdk",
@@ -1027,9 +1027,11 @@ if (current_toolchain == default_toolchain) {
         "//src/developer/ffx/plugins/profile/stacktrack:verify_ffx_profile_stacktrack_emulator_data",
         "//src/developer/ffx/plugins/target/package/explore/tests:verify_ffx_target_package_explore_emulator_data",
         "//src/developer/ffx/plugins/target/ssh:ffx_target_ssh_e2e_tests_emulator_data",
+        "//src/developer/ffx/tests/uart:ffx_uart_e2e_test_emulator_data",
+        "//src/developer/ffx/tests/uart:ffx_uart_smoke_test_emulator_data",
         "//src/developer/ffx/tools/power:ffx_power_system_activity_application_activity_e2e_tests_emulator_data",
         "//src/developer/fuchsia-controller/tests:core_sdk_host_test_data",
-        "//tools/dupefinder/tests/e2e:verify_dupefinder_e2e_emulator_data",
+        "//src/memory/tools/dupefinder/tests/e2e:verify_dupefinder_e2e_emulator_data",
         "//vendor/*",
       ]
 

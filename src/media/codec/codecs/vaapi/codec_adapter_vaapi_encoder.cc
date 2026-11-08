@@ -62,16 +62,8 @@ bool CodecAdapterVaApiEncoder::HandleInputFormatChange(
                                   mime_type.c_str());
     return false;
   }
-  if (!input_format_details.has_domain()) {
-    events_->onCoreCodecFailCodec("HandleInputFormatChange(): No domain");
-    return false;
-  }
-  if (!input_format_details.domain().is_video()) {
-    events_->onCoreCodecFailCodec("HandleInputFormatChange(): Input not video");
-    return false;
-  }
-  if (!input_format_details.domain().video().is_uncompressed()) {
-    events_->onCoreCodecFailCodec("HandleInputFormatChange(): Input not uncompressed");
+  if (!input_format_details.has_image_format()) {
+    events_->onCoreCodecFailCodec("HandleInputFormatChange(): No image_format");
     return false;
   }
   if (input_format_details.has_profile()) {
@@ -81,32 +73,43 @@ bool CodecAdapterVaApiEncoder::HandleInputFormatChange(
       return false;
     }
   }
-  uint32_t width = input_format_details.domain().video().uncompressed().image_format.display_width;
+  const auto& image_format = input_format_details.image_format();
+  if (image_format.has_display_rect() &&
+      (image_format.display_rect().x != 0 || image_format.display_rect().y != 0)) {
+    events_->onCoreCodecFailCodec(
+        "HandleInputFormatChange(): Non-zero display_rect origin (%u, %u) is not supported",
+        image_format.display_rect().x, image_format.display_rect().y);
+    return false;
+  }
+  uint32_t coded_width = image_format.has_size() ? image_format.size().width : 0;
+  uint32_t coded_height = image_format.has_size() ? image_format.size().height : 0;
+  uint32_t width =
+      image_format.has_display_rect()
+          ? image_format.display_rect().width
+          : (image_format.has_valid_size() ? image_format.valid_size().width : coded_width);
   uint32_t height =
-      input_format_details.domain().video().uncompressed().image_format.display_height;
+      image_format.has_display_rect()
+          ? image_format.display_rect().height
+          : (image_format.has_valid_size() ? image_format.valid_size().height : coded_height);
   auto checked_width = safemath::CheckedNumeric(width).Cast<int>();
   auto checked_height = safemath::CheckedNumeric(height).Cast<int>();
   if (!checked_width.IsValid() || checked_width.ValueOrDie() == 0) {
-    events_->onCoreCodecFailCodec("HandleInputFormatChange(): Initial width %d invalid", width);
+    events_->onCoreCodecFailCodec("HandleInputFormatChange(): Input width %u invalid", width);
     return false;
   }
   if (!checked_height.IsValid() || checked_height.ValueOrDie() == 0) {
-    events_->onCoreCodecFailCodec("HandleInputFormatChange(): Initial height %d invalid", height);
+    events_->onCoreCodecFailCodec("HandleInputFormatChange(): Input height %u invalid", height);
     return false;
   }
-  uint32_t coded_width =
-      input_format_details.domain().video().uncompressed().image_format.coded_width;
-  uint32_t coded_height =
-      input_format_details.domain().video().uncompressed().image_format.coded_height;
   auto checked_coded_width = safemath::CheckedNumeric(coded_width).Cast<int>();
   auto checked_coded_height = safemath::CheckedNumeric(coded_height).Cast<int>();
   if (!checked_coded_width.IsValid() || checked_coded_width.ValueOrDie() == 0) {
-    events_->onCoreCodecFailCodec("HandleInputFormatChange(): Initial coded width %d invalid",
+    events_->onCoreCodecFailCodec("HandleInputFormatChange(): Input coded width %u invalid",
                                   coded_width);
     return false;
   }
   if (!checked_coded_height.IsValid() || checked_coded_height.ValueOrDie() == 0) {
-    events_->onCoreCodecFailCodec("HandleInputFormatChange(): Initial height %d invalid",
+    events_->onCoreCodecFailCodec("HandleInputFormatChange(): Input coded height %u invalid",
                                   coded_height);
     return false;
   }

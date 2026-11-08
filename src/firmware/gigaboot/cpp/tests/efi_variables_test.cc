@@ -12,7 +12,8 @@
 #include <efi/variable/variable_id.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
-#include <phys/efi/main.h>
+
+#include "utils.h"
 
 using ::efi::MockBootServices;
 using ::efi::MockRuntimeServices;

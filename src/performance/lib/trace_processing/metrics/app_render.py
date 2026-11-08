@@ -65,7 +65,7 @@ class AppRenderLatencyMetricsProcessor(trace_metrics.MetricsProcessor):
     ) -> MutableSequence[metrics.TestCaseResult]:
         # This method looks for a possible race between trace event start in Scenic and magma.
         # We can safely skip these events. See https://fxbug.dev/322849857 for more details.
-        model = trace_utils.adjust_to_common_process_start(
+        start_time = trace_utils.get_common_process_start_time(
             model,
             _PRESENT_EVENT_NAME.format(self._debug_name),
             category=_EVENT_CATEGORY,
@@ -83,6 +83,8 @@ class AppRenderLatencyMetricsProcessor(trace_metrics.MetricsProcessor):
         vsync_events: list[trace_model.Event] = []
 
         for present_flow_event in present_flow_events:
+            if present_flow_event.start < start_time:
+                continue
             if not isinstance(present_flow_event, trace_model.FlowEvent):
                 continue
             if present_flow_event.phase not in (
@@ -93,7 +95,10 @@ class AppRenderLatencyMetricsProcessor(trace_metrics.MetricsProcessor):
 
             # Follow the flow event graph.
             vsync = trace_utils.get_nearest_following_flow_event(
-                present_flow_event, _EVENT_CATEGORY, _DISPLAY_VSYNC_EVENT_NAME
+                present_flow_event,
+                _EVENT_CATEGORY,
+                _DISPLAY_VSYNC_EVENT_NAME,
+                min_start=start_time,
             )
 
             # If vsync is None, it could be that a frame was dropped or not rendered, find the next vsync in chronological order.

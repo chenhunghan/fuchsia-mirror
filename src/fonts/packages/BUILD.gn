@@ -9,6 +9,7 @@ import("//src/fonts/build/fonts.gni")
 # Generate all the Fuchsia font `package`s from the values in the files listed
 # in `font_pkgs_paths`.
 
+# LINT.IfChange
 all_packages = []
 
 ################################################################################
@@ -48,3 +49,4 @@ foreach(entry, font_pkg_entries) {
 group("packages") {
   deps = all_packages
 }
+# LINT.ThenChange(BUILD.bazel)

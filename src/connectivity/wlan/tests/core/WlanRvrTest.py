@@ -164,7 +164,7 @@ class WlanRvrTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         await super().setup_class()
 
         if self.openwrt_ap is None and self.access_point is None:
-            raise signals.TestAbortClass("Requires at least one access point")
+            raise signals.TestError("Requires at least one access point")
 
         self.phy = await self.dut.wlan_core.ensure_single_phy()
         await self.phy.set_country(
@@ -173,7 +173,7 @@ class WlanRvrTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         self.iperf_server = await self.setup_iperf_server()
 
         if not self.attenuators:
-            raise signals.TestAbortClass("Requires at least one attenuator")
+            raise signals.TestError("Requires at least one attenuator")
 
         ap_controller_type = (
             "OpenWrtAP" if self.openwrt_ap is not None else "AccessPoint"
@@ -207,17 +207,21 @@ class WlanRvrTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
             self.access_point.stop_all_aps()
         await super().teardown_test()
 
-    async def teardown_class(self) -> None:
-        for attenuator in getattr(self, "attenuators", []):
-            attenuator.set_atten(0)
-        await super().teardown_class()
-
     async def _wait_for_dut_ip(self, ip_version: IPVersion) -> None:
         netstack_iface = await self.dut.netstack.wait_for_interface(
             PortClass.WLAN_CLIENT
         )
         if ip_version is IPVersion.V4:
             await self.dut.netstack.wait_for_ipv4_addr(netstack_iface.id_)
+
+    def _restart_iperf_server(self) -> None:
+        logger.info("Restarting iPerf server")
+        self.iperf_server.stop()
+        self.iperf_server.start()
+
+    @staticmethod
+    def _is_server_busy_error(error: Exception) -> bool:
+        return "the server is busy running a test" in str(error).lower()
 
     async def run_rvr(
         self,
@@ -258,14 +262,19 @@ class WlanRvrTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         # find the network in its scan results.
         associate_counter = 0
         associate_max_attempts = 3
+        target_channel = (
+            band.default_channel
+            if self.openwrt_ap is not None
+            else ConfigMapper.to_hostapd_band(band).default_channel()
+        )
         while associate_counter < associate_max_attempts:
             await iface.disconnect()
 
             if self.openwrt_ap is not None:
-                channel = (
-                    BssChannel(Band.BAND_2G, 1, HeMode(bw=20))
-                    if band == Band.BAND_2G
-                    else BssChannel(Band.BAND_5G, 36, HeMode(bw=80))
+                channel = BssChannel(
+                    band,
+                    target_channel,
+                    HeMode(bw=20 if band == Band.BAND_2G else 80),
                 )
                 config = AccessPointConfig(
                     radios=[
@@ -293,9 +302,7 @@ class WlanRvrTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
                         iface_wlan_2g=self.access_point.wlan_2g,
                         iface_wlan_5g=self.access_point.wlan_5g,
                         profile_name="whirlwind",
-                        channel=ConfigMapper.to_hostapd_band(
-                            band
-                        ).default_channel(),
+                        channel=target_channel,
                         ssid=ssid,
                         security=legacy_security,
                     ),
@@ -308,6 +315,7 @@ class WlanRvrTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
                     ssid=ssid,
                     password=password,
                     security=fidl_sec,
+                    channels=[target_channel],
                 )
                 break
             except HoneydewWlanError as e:
@@ -323,7 +331,7 @@ class WlanRvrTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         await self._wait_for_dut_ip(ip_version)
         if self.openwrt_ap is None:
             self.iperf_server.renew_test_interface_ip_address()
-        iperf_server_ip_address = self.iperf_server.get_addr("ipv4_private")
+        iperf_server_ip_address = self.iperf_server.get_addr()
 
         results = await self.rvr_loop(
             iface=iface,
@@ -334,6 +342,7 @@ class WlanRvrTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
             ssid=ssid,
             security=security,
             password=password,
+            channel=target_channel,
             reverse=False,
         )
         if self.reverse_rvr_after_forward:
@@ -346,6 +355,7 @@ class WlanRvrTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
                 ssid=ssid,
                 security=security,
                 password=password,
+                channel=target_channel,
                 reverse=True,
             )
 
@@ -361,6 +371,7 @@ class WlanRvrTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         ssid: str,
         security: Security,
         password: str | None,
+        channel: int,
         reverse: bool,
     ) -> list[RateByRange]:
         """The loop that goes through each attenuation level and runs the iperf
@@ -402,6 +413,7 @@ class WlanRvrTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
                 ssid=ssid,
                 security=security,
                 password=password,
+                channel=channel,
                 reverse=reverse,
             )
             logger.info(
@@ -422,6 +434,7 @@ class WlanRvrTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         ssid: str,
         security: Security,
         password: str | None,
+        channel: int,
         reverse: bool,
     ) -> float:
         status = await iface.status()
@@ -438,6 +451,7 @@ class WlanRvrTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
                         ssid=ssid,
                         password=password,
                         security=security.to_fidl_wlan_internal(),
+                        channels=[channel],
                     )
                     logger.info("Successfully associated.")
                     try:
@@ -453,6 +467,7 @@ class WlanRvrTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
                         # test.
                         await iface.disconnect()
                         return 0
+                    self._restart_iperf_server()
                 except HoneydewWlanError:
                     logger.info(
                         f"Association failed. Marking a 0 {REPORTING_SPEED_UNITS} "
@@ -510,22 +525,30 @@ class WlanRvrTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
 
         cmd = f"iperf3 {' '.join(args)}"
         iperf_timeout = float(self.dwell_time_in_secs * 2)
-        try:
-            output = await asyncio.to_thread(
-                self.dut.ffx.run,
-                cmd=["target", "ssh", cmd],
-                timeout=iperf_timeout,
-                log_status_on_failure=False,
-                machine=MachineFormat.RAW,
-            )
-        except Exception as e:
-            self.iperf_server.stop()
-            self.iperf_server.start()
-            logger.error(
-                f"Iperf traffic failed or timed out. Marking 0 {REPORTING_SPEED_UNITS} "
-                f"for throughput: {e}"
-            )
-            return 0
+        max_attempts = 2
+        output = None
+        for attempt in range(max_attempts):
+            try:
+                output = await asyncio.to_thread(
+                    self.dut.ffx.run,
+                    cmd=["target", "ssh", cmd],
+                    timeout=iperf_timeout,
+                    log_status_on_failure=False,
+                    machine=MachineFormat.RAW,
+                )
+                break
+            except Exception as e:
+                self._restart_iperf_server()
+                if self._is_server_busy_error(e) and attempt < max_attempts - 1:
+                    logger.warning(
+                        "iPerf server was busy; retrying measurement once..."
+                    )
+                    continue
+                logger.error(
+                    f"Iperf traffic failed or timed out. Marking 0 {REPORTING_SPEED_UNITS} "
+                    f"for throughput: {e}"
+                )
+                return 0
 
         if not output:
             return 0
@@ -536,8 +559,7 @@ class WlanRvrTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
                 reporting_speed_units=REPORTING_SPEED_UNITS,
             )
             if iperf_results.error:
-                self.iperf_server.stop()
-                self.iperf_server.start()
+                self._restart_iperf_server()
                 logger.error(f"Errors in iperf logs:\n{iperf_results.error}")
             if iperf_results.avg_send_rate:
                 return iperf_results.avg_send_rate
@@ -549,16 +571,14 @@ class WlanRvrTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
             )
             return 0
         except ValueError as e:
-            self.iperf_server.stop()
-            self.iperf_server.start()
+            self._restart_iperf_server()
             logger.error(
                 f"No data in iPerf3 output. Marking 0 {REPORTING_SPEED_UNITS} "
                 f"for throughput: {e}"
             )
             return 0
         except Exception as e:
-            self.iperf_server.stop()
-            self.iperf_server.start()
+            self._restart_iperf_server()
             logger.error(
                 f"Unknown exception. Marking 0 {REPORTING_SPEED_UNITS} for "
                 f"throughput: {e}"

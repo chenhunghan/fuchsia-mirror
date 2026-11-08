@@ -13,6 +13,7 @@ function read_host_platform() {
 BT_FILE_DEPS=(
   "scripts/fx"
   "tools/devshell/clean"
+  "tools/devshell/lib/agent_session_ids.txt"
   "tools/devshell/lib/agents.txt"
   "tools/devshell/lib/fx-cmd-locator.sh"
   "tools/devshell/lib/fx-optional-features.sh"

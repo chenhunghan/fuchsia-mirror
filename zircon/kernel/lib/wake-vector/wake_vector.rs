@@ -49,6 +49,17 @@ impl Default for Diagnostics {
     }
 }
 
+impl Diagnostics {
+    /// Copies `s` into `self.extra` as a NUL-terminated UTF-8 byte string, truncating to fit on a
+    /// UTF-8 character boundary and zeroing any trailing bytes.
+    #[inline]
+    pub fn set_extra(&mut self, s: &str) {
+        let copy_len = s.floor_char_boundary(self.extra.len().saturating_sub(1));
+        self.extra[..copy_len].copy_from_slice(&s.as_bytes()[..copy_len]);
+        self.extra[copy_len..].fill(0);
+    }
+}
+
 zr::static_assert!(size_of::<Diagnostics>() == 48);
 zr::static_assert!(align_of::<Diagnostics>() == 8);
 zr::static_assert!(offset_of!(Diagnostics, enabled) == 0);
@@ -128,10 +139,11 @@ fn limit_size_t_u32(size: usize) -> u32 {
 ///   via `call_unlocked`.
 mod lists {
     use super::WakeEvent;
+    use crate::ksync_kernel::{TrackedMutex, TrackedSpinlock};
     use core::marker::PhantomPinned;
     use core::pin::Pin;
     use fbl::{DoublyLinkedList, DoublyLinkedListContainable, DoublyLinkedListNode, TrackingSize};
-    use ksync::{KMutexGuard, KOnceCell, LockToken, RawMutex, RawSpinlock};
+    use ksync::{KMutexGuard, KOnceCell, LockToken};
     use pin_init::{pin_data, pin_init};
 
     struct GlobalListTag;
@@ -143,7 +155,7 @@ mod lists {
     pub struct ListNodes {
         global_node: DoublyLinkedListNode<WakeEvent>,
         pending_node: DoublyLinkedListNode<WakeEvent>,
-        _pin: PhantomPinned,
+        _pin: core::marker::PhantomData<PhantomPinned>,
     }
 
     impl ListNodes {
@@ -158,7 +170,7 @@ mod lists {
             Self {
                 global_node: DoublyLinkedListNode::new(),
                 pending_node: DoublyLinkedListNode::new(),
-                _pin: PhantomPinned,
+                _pin: core::marker::PhantomData,
             }
         }
 
@@ -218,11 +230,11 @@ mod lists {
     // SAFETY: Access to `PendingListHolder` is serialized by `PendingListLock`.
     unsafe impl Send for PendingListHolder {}
 
-    ksync::declare_singleton_mutex!(pub GlobalListLock);
-    ksync::declare_singleton_spinlock!(pub PendingListLock);
+    crate::ksync_kernel::declare_singleton_mutex!(pub GlobalListLock);
+    crate::ksync_kernel::declare_singleton_spinlock!(pub PendingListLock);
 
-    pub type GlobalGuard<'a> = Pin<&'a mut KMutexGuard<'static, GlobalListLock, RawMutex>>;
-    pub type PendingGuard<'a> = Pin<&'a mut KMutexGuard<'static, PendingListLock, RawSpinlock>>;
+    pub type GlobalGuard<'a> = Pin<&'a mut KMutexGuard<'static, GlobalListLock, TrackedMutex>>;
+    pub type PendingGuard<'a> = Pin<&'a mut KMutexGuard<'static, PendingListLock, TrackedSpinlock>>;
 
     static GLOBAL_LIST: KOnceCell<GlobalListHolder, GlobalListLock> = KOnceCell::new();
     static PENDING_LIST: KOnceCell<PendingListHolder, PendingListLock> = KOnceCell::new();
@@ -652,9 +664,9 @@ impl WakeEvent {
     /// Calls to `trigger` and `acknowledge` must be synchronized by the caller to guarantee that
     /// updates are performed by a single actor at a time.
     pub fn trigger(&self, trigger_time: zx_instant_boot_t) -> WakeResult {
-        let _preempt_disabler = AutoPreemptDisabler::new();
+        let preempt_disabler = AutoPreemptDisabler::new();
         ksync::lock!(let mut pending_guard = PendingListLock::get().lock());
-        self.trigger_locked(pending_guard.as_mut(), trigger_time)
+        self.trigger_locked(&preempt_disabler, pending_guard.as_mut(), trigger_time)
     }
 
     /// Acknowledges a pending wake event, allowing the system to enter suspend when all other
@@ -681,15 +693,16 @@ impl WakeEvent {
     /// atomically `trigger`/`acknowledge` the object. For all other wake source objects in the
     /// system, explicit calls to `trigger` and `acknowledge` are what should be used.
     pub fn strobe(&self, trigger_time: zx_instant_boot_t) -> WakeResult {
-        let _preempt_disabler = AutoPreemptDisabler::new();
+        let preempt_disabler = AutoPreemptDisabler::new();
         ksync::lock!(let mut pending_guard = PendingListLock::get().lock());
-        let result = self.trigger_locked(pending_guard.as_mut(), trigger_time);
+        let result = self.trigger_locked(&preempt_disabler, pending_guard.as_mut(), trigger_time);
         self.acknowledge_locked(pending_guard.as_mut(), trigger_time, AckBehavior::ClearSignaled);
         result
     }
 
     fn trigger_locked(
         &self,
+        _preempt_disabler: &AutoPreemptDisabler,
         mut pending_guard: PendingGuard<'_>,
         trigger_time: zx_instant_boot_t,
     ) -> WakeResult {
@@ -773,7 +786,10 @@ impl WakeEvent {
                 set_blocking_disallowed(was_blocking_disallowed);
             });
 
-            return IdlePowerThread::trigger_system_wake_event();
+            // SAFETY: Interrupts are disabled by `pending_guard` (`ints_disabled()`), preemption is
+            // disabled and the current `Thread` is initialized as witnessed by
+            // `_preempt_disabler`, and `blocking_disallowed()` is set on the calling CPU.
+            return unsafe { IdlePowerThread::trigger_system_wake_event() };
         }
 
         WakeResult::BadState

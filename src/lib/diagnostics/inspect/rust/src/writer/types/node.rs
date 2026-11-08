@@ -4,12 +4,12 @@
 
 use crate::writer::private::InspectTypeInternal;
 use crate::writer::{
-    BoolProperty, BytesProperty, DoubleArrayProperty, DoubleExponentialHistogramProperty,
-    DoubleLinearHistogramProperty, DoubleProperty, Error, Inner, InnerData, InnerType, InspectType,
-    InspectTypeReparentable, Inspector, IntArrayProperty, IntExponentialHistogramProperty,
-    IntLinearHistogramProperty, IntProperty, LazyNode, State, StringArrayProperty, StringProperty,
-    UintArrayProperty, UintExponentialHistogramProperty, UintLinearHistogramProperty, UintProperty,
-    ValueList,
+    BlobProperty, BoolProperty, BytesProperty, DoubleArrayProperty,
+    DoubleExponentialHistogramProperty, DoubleLinearHistogramProperty, DoubleProperty, Error,
+    Inner, InnerData, InnerType, InspectType, InspectTypeReparentable, Inspector, IntArrayProperty,
+    IntExponentialHistogramProperty, IntLinearHistogramProperty, IntProperty, LazyNode, State,
+    StringArrayProperty, StringProperty, UintArrayProperty, UintExponentialHistogramProperty,
+    UintLinearHistogramProperty, UintProperty, ValueList,
 };
 use diagnostics_hierarchy::{ArrayFormat, ExponentialHistogramParams, LinearHistogramParams};
 use futures::future::{BoxFuture, LocalBoxFuture};
@@ -598,6 +598,52 @@ impl Node {
         self.record(property);
     }
 
+    /// Creates a new `BlobProperty` backed by a dedicated external VMO with the given `name`
+    /// and `payload_size` (in bytes, excluding the 32-byte `"BLOB"` header).
+    ///
+    /// The underlying VMO allocation is automatically padded up to the next full 4 KiB page
+    /// boundary if `32 + payload_size` is not already page-aligned, while read, write, and
+    /// snapshot operations strictly enforce the requested `payload_size` boundary.
+    #[must_use]
+    pub fn create_blob_property<'a>(
+        &self,
+        name: impl Into<Cow<'a, str>>,
+        payload_size: usize,
+    ) -> BlobProperty {
+        self.inner
+            .inner_ref()
+            .and_then(|inner_ref| {
+                inner_ref
+                    .state
+                    .try_lock()
+                    .and_then(|mut state| {
+                        state.create_blob_property(name.into(), payload_size, inner_ref.block_index)
+                    })
+                    .inspect_err(|err| log::error!("Failed to create blob property: {err}"))
+                    .map(|(block_index, blob)| {
+                        BlobProperty::new_with_buffer(inner_ref.state.clone(), block_index, blob)
+                    })
+                    .ok()
+            })
+            .unwrap_or_else(BlobProperty::new_no_op)
+    }
+
+    /// Creates and keeps track of a `BlobProperty` with the given `name` and `payload_size`
+    /// (in bytes, excluding the 32-byte `"BLOB"` header) for the lifetime of the node,
+    /// invoking `initialize` to populate it.
+    pub fn record_blob_property<'a, F>(
+        &self,
+        name: impl Into<Cow<'a, str>>,
+        payload_size: usize,
+        initialize: F,
+    ) where
+        F: FnOnce(&BlobProperty),
+    {
+        let property = self.create_blob_property(name.into(), payload_size);
+        initialize(&property);
+        self.record(property);
+    }
+
     /// Add a bool property to this node.
     #[must_use]
     pub fn create_bool<'a>(&self, name: impl Into<Cow<'a, str>>, value: bool) -> BoolProperty {
@@ -937,6 +983,10 @@ mod tests {
             root.create_bytes("property1", b"value1"),
             root.create_bytes("property2", b"value2")
         );
+        assert_eq!(
+            root.create_blob_property("property1", 16),
+            root.create_blob_property("property2", 32)
+        );
     }
 
     #[fuchsia::test]
@@ -1068,6 +1118,45 @@ mod tests {
                 my_string_array: vec!["test"]
             }
         });
+    }
+
+    #[fuchsia::test]
+    fn record_blob_property() {
+        use crate::writer::blob_buffer::BLOB_HEADER_SIZE_BYTES;
+
+        let inspector = Inspector::default();
+        {
+            let node = inspector.root().create_child("child");
+            node.record_blob_property("recorded", 32, |blob| {
+                assert_eq!(blob.payload_capacity(), 32);
+                blob.write_at(0, b"retained").unwrap();
+            });
+
+            node.get_block::<_, inspect_format::Node>(|node_block| {
+                assert_eq!(node_block.child_count(), 1);
+            });
+            let raw_bytes = inspector.copy_blob_vmo_data("recorded-0").unwrap();
+            assert_eq!(&raw_bytes[BLOB_HEADER_SIZE_BYTES..BLOB_HEADER_SIZE_BYTES + 8], b"retained");
+
+            // Clearing recorded values frees the recorded `BlobProperty`.
+            node.clear_recorded();
+            node.get_block::<_, inspect_format::Node>(|node_block| {
+                assert_eq!(node_block.child_count(), 0);
+            });
+            assert!(inspector.copy_blob_vmo_data("recorded-0").is_none());
+
+            // Record a second blob property and let `node` drop out of scope.
+            node.record_blob_property("recorded2", 16, |blob| {
+                blob.write_at(0, b"dropped").unwrap();
+            });
+            assert!(inspector.copy_blob_vmo_data("recorded2-1").is_some());
+        }
+
+        // Dropping `node` drops the recorded `BlobProperty` and removes it from `blobs`.
+        assert!(inspector.copy_blob_vmo_data("recorded2-1").is_none());
+        let state = inspector.state().unwrap();
+        let guard = state.try_lock().unwrap();
+        assert!(guard.blobs().is_empty());
     }
 
     #[fuchsia::test]

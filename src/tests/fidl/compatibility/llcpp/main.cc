@@ -15,7 +15,6 @@
 #include <lib/fidl/cpp/interface_request.h>
 #include <lib/fidl/cpp/wire/string_view.h>
 #include <lib/sys/cpp/component_context.h>
-#include <lib/vfs/cpp/service.h>
 #include <zircon/status.h>
 
 #include <cstdlib>
@@ -856,16 +855,13 @@ int main(int argc, const char** argv) {
   auto context = sys::ComponentContext::CreateAndServeOutgoingDirectory();
   std::vector<std::unique_ptr<EchoConnection>> connections;
 
-  context->outgoing()->AddPublicService(
-      std::make_unique<vfs::Service>([&](zx::channel request, async_dispatcher_t* dispatcher) {
+  context->outgoing()->AddProtocol<fidl_test_compatibility::Echo>(
+      [&loop, &connections](fidl::ServerEnd<fidl_test_compatibility::Echo> request) {
         auto conn = std::make_unique<EchoConnection>();
-        auto binding = ::fidl::BindServer(
-            dispatcher, ::fidl::ServerEnd<fidl_test_compatibility::Echo>(std::move(request)),
-            conn.get());
+        auto binding = ::fidl::BindServer(loop.dispatcher(), std::move(request), conn.get());
         conn->set_server_binding(std::move(binding));
         connections.push_back(std::move(conn));
-      }),
-      kEchoInterfaceName);
+      });
 
   loop.Run();
   return EXIT_SUCCESS;

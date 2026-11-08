@@ -21,6 +21,8 @@
 
 #include <format>
 #include <map>
+#include <string_view>
+#include <utility>
 
 #include <perftest/perftest.h>
 
@@ -52,7 +54,22 @@ class AsyncDispatcher {
 
 class RuntimeDispatcher : public AsyncDispatcher {
  public:
-  RuntimeDispatcher(bool use_threads) : AsyncDispatcher(use_threads) {
+  // Additional configuration for the runtime dispatcher.
+  enum class Config {
+    // A synchronized dispatcher with no additional options.
+    kDefault,
+    // A synchronized dispatcher which allows sync calls.
+    kAllowSyncCalls,
+    // A synchronized dispatcher which does not allow thread migration, on a scheduler role with
+    // |FDF_SCHEDULER_ROLE_OPTION_NO_SYNC_CALLS| set. Only supported with |use_threads|.
+    kNoSyncCallsRole,
+  };
+
+  static constexpr std::string_view kNoSyncCallsSchedulerRole =
+      "fuchsia.driver_runtime.microbenchmarks.no_sync_calls";
+
+  explicit RuntimeDispatcher(bool use_threads, Config config = Config::kDefault)
+      : AsyncDispatcher(use_threads) {
     if (!use_threads) {
       // Make sure all dispatchers have completed destruction, otherwise |fdf_env_reset| will
       // complain.
@@ -61,14 +78,31 @@ class RuntimeDispatcher : public AsyncDispatcher {
       fdf_env_reset();
     }
 
+    fdf::SynchronizedDispatcher::Options options;
+    std::string_view scheduler_role;
+    switch (config) {
+      case Config::kDefault:
+        break;
+      case Config::kAllowSyncCalls:
+        options = fdf::SynchronizedDispatcher::Options::kAllowSyncCalls;
+        break;
+      case Config::kNoSyncCallsRole:
+        FX_CHECK(use_threads);
+        scheduler_role = kNoSyncCallsSchedulerRole;
+        ASSERT_OK(fdf_env_set_scheduler_role_opts(scheduler_role.data(), scheduler_role.size(),
+                                                  FDF_SCHEDULER_ROLE_OPTION_NO_SYNC_CALLS));
+        options.value |= FDF_DISPATCHER_OPTION_NO_THREAD_MIGRATION;
+        break;
+    }
+
     zx::result<fdf::SynchronizedDispatcher> sync_dispatcher;
     if (use_threads) {
       sync_dispatcher = fdf_env::DispatcherBuilder::CreateSynchronizedWithOwner(
-          &fake_driver_, {}, "client",
-          [&](fdf_dispatcher_t* dispatcher) { shutdown_completion_.Signal(); });
+          &fake_driver_, options, "client",
+          [&](fdf_dispatcher_t* dispatcher) { shutdown_completion_.Signal(); }, scheduler_role);
     } else {
       sync_dispatcher = fdf_internal::TestDispatcherBuilder::CreateUnmanagedSynchronizedDispatcher(
-          &fake_driver_, {}, "client",
+          &fake_driver_, options, "client",
           [&](fdf_dispatcher_t* dispatcher) { shutdown_completion_.Signal(); });
     }
     ASSERT_OK(sync_dispatcher.status_value());
@@ -136,11 +170,12 @@ class AsyncLoop : public AsyncDispatcher {
   std::unique_ptr<async::Loop> loop_;
 };
 
-std::unique_ptr<AsyncDispatcher> CreateAsyncDispatcher(AsyncDispatcher::Type type, bool use_threads,
-                                                       bool enable_irqs) {
+std::unique_ptr<AsyncDispatcher> CreateAsyncDispatcher(
+    AsyncDispatcher::Type type, bool use_threads, bool enable_irqs,
+    RuntimeDispatcher::Config runtime_config = RuntimeDispatcher::Config::kDefault) {
   switch (type) {
     case AsyncDispatcher::Type::kRuntime:
-      return std::make_unique<RuntimeDispatcher>(use_threads);
+      return std::make_unique<RuntimeDispatcher>(use_threads, runtime_config);
     case AsyncDispatcher::Type::kAsyncLoop:
       return std::make_unique<AsyncLoop>(use_threads, enable_irqs);
     default:
@@ -173,8 +208,9 @@ bool DispatcherTaskTest(perftest::RepeatState* state, AsyncDispatcher::Type disp
 
 // Measure the time taken for a wait callback to be completed.
 bool DispatcherWaitTest(perftest::RepeatState* state, AsyncDispatcher::Type dispatcher_type,
-                        bool use_threads) {
-  auto dispatcher = CreateAsyncDispatcher(dispatcher_type, use_threads, false /* enable_irqs */);
+                        bool use_threads, RuntimeDispatcher::Config runtime_config) {
+  auto dispatcher =
+      CreateAsyncDispatcher(dispatcher_type, use_threads, false /* enable_irqs */, runtime_config);
   FX_CHECK(dispatcher);
 
   zx::event event;
@@ -253,8 +289,9 @@ bool DispatcherChannelReadTest(perftest::RepeatState* state, bool use_threads) {
 
 // Measure the time taken for a irq callback to be completed.
 bool DispatcherIrqTest(perftest::RepeatState* state, AsyncDispatcher::Type dispatcher_type,
-                       bool use_threads) {
-  auto dispatcher = CreateAsyncDispatcher(dispatcher_type, use_threads, true /* enable_irqs */);
+                       bool use_threads, RuntimeDispatcher::Config runtime_config) {
+  auto dispatcher =
+      CreateAsyncDispatcher(dispatcher_type, use_threads, true /* enable_irqs */, runtime_config);
   FX_CHECK(dispatcher);
 
   zx::interrupt irq_object;
@@ -317,12 +354,31 @@ void RegisterTests() {
       }
 
       auto wait_name = std::format("Dispatcher/{}/Wait/{}", dispatcher_name, use_threads_desc);
-      perftest::RegisterTest(wait_name.c_str(), DispatcherWaitTest, type, use_threads);
+      perftest::RegisterTest(wait_name.c_str(), DispatcherWaitTest, type, use_threads,
+                             RuntimeDispatcher::Config::kDefault);
 
       auto irq_name = std::format("Dispatcher/{}/Irq/{}", dispatcher_name, use_threads_desc);
-      perftest::RegisterTest(irq_name.c_str(), DispatcherIrqTest, type, use_threads);
+      perftest::RegisterTest(irq_name.c_str(), DispatcherIrqTest, type, use_threads,
+                             RuntimeDispatcher::Config::kDefault);
     }
   }
+
+  // Waits and irqs on runtime dispatchers with options that affect whether callbacks delivered by
+  // the dispatcher's port loop may be invoked directly, or must be queued.
+  static const std::pair<RuntimeDispatcher::Config, std::string_view> kRuntimeConfigs[] = {
+      {RuntimeDispatcher::Config::kAllowSyncCalls, "AllowSyncCalls"},
+      {RuntimeDispatcher::Config::kNoSyncCallsRole, "NoSyncCallsRole"},
+  };
+  for (auto const& [config, config_name] : kRuntimeConfigs) {
+    auto wait_name = std::format("Dispatcher/Runtime/Wait/Threads/{}", config_name);
+    perftest::RegisterTest(wait_name.c_str(), DispatcherWaitTest, AsyncDispatcher::Type::kRuntime,
+                           true /* use_threads */, config);
+
+    auto irq_name = std::format("Dispatcher/Runtime/Irq/Threads/{}", config_name);
+    perftest::RegisterTest(irq_name.c_str(), DispatcherIrqTest, AsyncDispatcher::Type::kRuntime,
+                           true /* use_threads */, config);
+  }
+
   perftest::RegisterTest("Dispatcher/Runtime/ChannelRead/Threads", DispatcherChannelReadTest, true);
   perftest::RegisterTest("Dispatcher/Runtime/ChannelRead/NoThreads", DispatcherChannelReadTest,
                          false);

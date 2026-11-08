@@ -15,7 +15,6 @@ pub struct TimeInfo {
 use target_holders::RemoteControlProxyHolder;
 
 #[derive(FfxTool)]
-#[target(direct)]
 pub struct GetTimeTool {
     #[command]
     cmd: GetTimeCommand,

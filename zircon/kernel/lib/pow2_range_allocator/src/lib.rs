@@ -501,24 +501,34 @@ impl Inner {
 /// Its primary use is as a utility library for platforms who need to manage
 /// allocating blocks MSI IRQ IDs on behalf of the PCI bus driver, but could (in
 /// theory) be used for other things).
+///
+/// `M` is the raw lock type of the allocator's mutex. There is no default since the kernel's
+/// `TrackedMutex` is not visible to this crate; the kernel supplies its `TrackedMutex`.
 #[ksync::guarded]
-pub struct Pow2RangeAllocator {
+pub struct Pow2RangeAllocator<M: ksync::RawLock> {
     #[guarded_by(lock)]
     #[pin]
     inner: Inner,
 
     #[mutex]
-    lock: ksync::KMutex,
+    lock: ksync::KMutex<M>,
 }
 
 // Like the C++ implementation, a `Pow2RangeAllocator` is meant to live in shared storage and to
 // serialize all of its access on its own mutex.
-const _: fn() = || {
+// `Pow2RangeAllocator<M>` is `Sync` for any `Sync` raw lock `M` (such as the kernel's
+// `TrackedMutex`). This is checked when type-checking the (never called) generic function below,
+// whose leading underscore exempts it from the `dead_code` lint.
+fn _assert_sync_for<M: ksync::RawLock + Sync>() {
     fn assert_sync<T: Sync + ?Sized>() {}
-    assert_sync::<Pow2RangeAllocator>();
-};
+    assert_sync::<Pow2RangeAllocator<M>>();
+}
 
-impl Pow2RangeAllocator {
+impl<M: ksync::RawLock> Pow2RangeAllocator<M>
+where
+    // `M` must be a mutex-like lock which takes no acquisition arguments.
+    M::DefaultPolicy: ksync::ExclusiveLockPolicy<M, AcquireArgs = ()>,
+{
     /// Creates a new, uninitialized `Pow2RangeAllocator`.
     ///
     /// `init` must be called before any range can be added or allocated.

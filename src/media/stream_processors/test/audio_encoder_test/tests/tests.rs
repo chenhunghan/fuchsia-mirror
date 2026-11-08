@@ -295,11 +295,12 @@ fn cvsd_simple_test_suite() -> Result<()> {
             output_tests: vec![AudioEncoderOutputTest {
                 output_file: None,
                 input_audio: PcmAudio::create_from_data(
-                    PcmFormat {
-                        pcm_mode: AudioPcmMode::Linear,
-                        bits_per_sample: 16,
-                        frames_per_second: 64000,
-                        channel_map: vec![AudioChannelId::Cf],
+                    PcmFormat2 {
+                        pcm_mode: Some(AudioPcmMode2::Linear),
+                        bits_per_sample: Some(16),
+                        frames_per_second: Some(64000),
+                        channel_map: Some(vec![AudioChannelId2::Fc]),
+                        ..Default::default()
                     },
                     vec![1, 2, 3, 4, 5, 6, 7, 8].as_slice(),
                 ),
@@ -317,47 +318,118 @@ fn cvsd_simple_test_suite() -> Result<()> {
 
 #[test]
 fn lc3_simple_test_suite() -> Result<()> {
-    const BITS_PER_SAMPLE: u32 = 16;
     const FRAMES_PER_SECOND: u32 = 32000;
     const FRAME_DURATION: Lc3FrameDuration = Lc3FrameDuration::D7P5Ms;
     const FRAME_SIZE: u32 = 240;
     const NBYTES: u16 = 58;
     with_large_stack(|| {
-        let lc3_tests = AudioEncoderTestCase {
-            input_framelength: (FRAME_SIZE).try_into().unwrap(),
-            // We use 32kHz for timestamp testing instead of 44.1kHz that's used
-            // for other codecs.
-            // For LC3, When the sampling frequency of the input signal is 44.1 kHz, the
-            // same frame length is used as for 48 kHz, resulting in the slightly longer
-            // actual frame duration of 10.884 ms for the 10 ms frame interval and of 8.16 ms
-            // for the 7.5 ms frame interval, which makes it hard to test for timestamp
-            // validations.
-            // See LC3 specification v1.0 section 2.1 for more details.
-            input_frames_per_second: 32000,
-            settings: EncoderSettings::Lc3(Lc3EncoderSettings {
-                nbytes: Some(NBYTES),
-                frame_duration: Some(FRAME_DURATION),
-                ..Lc3EncoderSettings::default()
-            }),
-            channel_count: 1,
-            output_tests: vec![AudioEncoderOutputTest {
-                output_file: None,
-                input_audio: PcmAudio::create_from_data(
-                    PcmFormat {
-                        pcm_mode: AudioPcmMode::Linear,
-                        bits_per_sample: BITS_PER_SAMPLE,
-                        frames_per_second: FRAMES_PER_SECOND,
-                        channel_map: vec![AudioChannelId::Lf],
+        let mut executor = fasync::TestExecutor::new();
+        for (bits_per_sample, bytes_per_sample) in
+            [(16, None), (24, Some(4)), (24, Some(3)), (24, None)]
+        {
+            let lc3_tests = AudioEncoderTestCase {
+                input_framelength: (FRAME_SIZE).try_into().unwrap(),
+                // We use 32kHz for timestamp testing instead of 44.1kHz that's used
+                // for other codecs.
+                // For LC3, When the sampling frequency of the input signal is 44.1 kHz, the
+                // same frame length is used as for 48 kHz, resulting in the slightly longer
+                // actual frame duration of 10.884 ms for the 10 ms frame interval and of 8.16 ms
+                // for the 7.5 ms frame interval, which makes it hard to test for timestamp
+                // validations.
+                // See LC3 specification v1.0 section 2.1 for more details.
+                input_frames_per_second: 32000,
+                settings: EncoderSettings::Lc3(Lc3EncoderSettings {
+                    nbytes: Some(NBYTES),
+                    frame_duration: Some(FRAME_DURATION),
+                    ..Lc3EncoderSettings::default()
+                }),
+                channel_count: 1,
+                output_tests: vec![AudioEncoderOutputTest {
+                    output_file: None,
+                    input_audio: PcmAudio::create_from_data(
+                        PcmFormat2 {
+                            pcm_mode: Some(AudioPcmMode2::Linear),
+                            bits_per_sample: Some(bits_per_sample),
+                            bytes_per_sample,
+                            frames_per_second: Some(FRAMES_PER_SECOND),
+                            channel_map: Some(vec![AudioChannelId2::Fl]),
+                            ..Default::default()
+                        },
+                        &INPUT_TEST_S16LE32000MONO,
+                    ),
+                    // Each frame of input is to be converted to 58 bytes of output.
+                    // There are 48 frames worth of input data in total.
+                    expected_output_size: OutputSize::RawBytesCount((NBYTES * 48) as usize),
+                    expected_digests: None,
+                }],
+            };
+            executor.run_singlethreaded(lc3_tests.run())?;
+        }
+        Ok(())
+    })
+}
+
+#[fuchsia::test]
+fn lc3_24bit_format_equivalence_test() -> Result<()> {
+    const FRAMES_PER_SECOND: u32 = 32000;
+    const FRAME_DURATION: Lc3FrameDuration = Lc3FrameDuration::D7P5Ms;
+    const FRAME_SIZE: usize = 240;
+    const NBYTES: u16 = 58;
+    with_large_stack(|| {
+        let settings = EncoderSettings::Lc3(Lc3EncoderSettings {
+            nbytes: Some(NBYTES),
+            frame_duration: Some(FRAME_DURATION),
+            ..Lc3EncoderSettings::default()
+        });
+
+        let mut executor = fasync::TestExecutor::new();
+        executor.run_singlethreaded(async {
+            let mut baseline_encoded: Option<Vec<u8>> = None;
+            for (bits_per_sample, bytes_per_sample) in
+                [(16, Some(2)), (24, Some(4)), (24, Some(3)), (24, None)]
+            {
+                let pcm_audio = PcmAudio::create_from_data(
+                    PcmFormat2 {
+                        pcm_mode: Some(AudioPcmMode2::Linear),
+                        bits_per_sample: Some(bits_per_sample),
+                        bytes_per_sample,
+                        frames_per_second: Some(FRAMES_PER_SECOND),
+                        channel_map: Some(vec![AudioChannelId2::Fl]),
+                        ..Default::default()
                     },
                     &INPUT_TEST_S16LE32000MONO,
-                ),
-                // Each frame of input is to be converted to 58 bytes of output.
-                // There are 48 frames worth of input data in total.
-                expected_output_size: OutputSize::RawBytesCount((NBYTES * 48) as usize),
-                expected_digests: None,
-            }],
-        };
-        fasync::TestExecutor::new().run_singlethreaded(lc3_tests.run())
+                );
+                let stream = Rc::new(PcmAudioStream {
+                    pcm_audio,
+                    encoder_settings: settings.clone(),
+                    frames_per_packet: std::iter::repeat(FRAME_SIZE),
+                    timebase: None,
+                });
+                let stream_processor =
+                    EncoderFactory.connect_to_stream_processor(stream.as_ref(), 1).await?;
+                let mut stream_runner = StreamRunner::new(stream_processor);
+                let output = stream_runner
+                    .run_stream(
+                        stream,
+                        StreamOptions { queue_format_details: false, ..Default::default() },
+                    )
+                    .await?;
+                let encoded_bytes: Vec<u8> =
+                    output_packets(&output).flat_map(|p| p.data.iter().copied()).collect();
+                assert_eq!(encoded_bytes.len(), (NBYTES * 48) as usize);
+                assert!(encoded_bytes.iter().any(|&b| b != 0));
+                if let Some(ref expected) = baseline_encoded {
+                    assert_eq!(
+                        &encoded_bytes, expected,
+                        "LC3 output mismatch for bits_per_sample={}, bytes_per_sample={:?}",
+                        bits_per_sample, bytes_per_sample
+                    );
+                } else {
+                    baseline_encoded = Some(encoded_bytes);
+                }
+            }
+            Ok(())
+        })
     })
 }
 
@@ -370,11 +442,12 @@ fn run_aac_stream_switching_test(close_on_stop: bool) -> Result<()> {
             aot: AacAudioObjectType::Mpeg2AacLc,
         });
 
-        let pcm_format = PcmFormat {
-            pcm_mode: AudioPcmMode::Linear,
-            bits_per_sample: 16,
-            frames_per_second: 44100,
-            channel_map: vec![AudioChannelId::Cf],
+        let pcm_format = PcmFormat2 {
+            pcm_mode: Some(AudioPcmMode2::Linear),
+            bits_per_sample: Some(16),
+            frames_per_second: Some(44100),
+            channel_map: Some(vec![AudioChannelId2::Fc]),
+            ..Default::default()
         };
 
         // Create input PCM saw wave.
@@ -497,11 +570,12 @@ fn run_lc3_stream_switching_test(close_on_stop: bool) -> Result<()> {
             ..Lc3EncoderSettings::default()
         });
 
-        let pcm_format = PcmFormat {
-            pcm_mode: AudioPcmMode::Linear,
-            bits_per_sample: BITS_PER_SAMPLE,
-            frames_per_second: FRAMES_PER_SECOND,
-            channel_map: vec![AudioChannelId::Lf],
+        let pcm_format = PcmFormat2 {
+            pcm_mode: Some(AudioPcmMode2::Linear),
+            bits_per_sample: Some(BITS_PER_SAMPLE),
+            frames_per_second: Some(FRAMES_PER_SECOND),
+            channel_map: Some(vec![AudioChannelId2::Fl]),
+            ..Default::default()
         };
 
         let pcm_audio1 = PcmAudio::create_from_data(pcm_format.clone(), &INPUT_TEST_S16LE32000MONO);
@@ -603,11 +677,12 @@ fn run_sbc_stream_switching_test(close_on_stop: bool) -> Result<()> {
             bit_pool: 59,
         });
 
-        let pcm_format = PcmFormat {
-            pcm_mode: AudioPcmMode::Linear,
-            bits_per_sample: 16,
-            frames_per_second: 44100,
-            channel_map: vec![AudioChannelId::Cf],
+        let pcm_format = PcmFormat2 {
+            pcm_mode: Some(AudioPcmMode2::Linear),
+            bits_per_sample: Some(16),
+            frames_per_second: Some(44100),
+            channel_map: Some(vec![AudioChannelId2::Fc]),
+            ..Default::default()
         };
 
         // Create input PCM saw wave.
@@ -710,11 +785,12 @@ fn run_cvsd_stream_switching_test(close_on_stop: bool) -> Result<()> {
     with_large_stack(move || {
         let settings = EncoderSettings::Cvsd(CvsdEncoderSettings::default());
 
-        let pcm_format = PcmFormat {
-            pcm_mode: AudioPcmMode::Linear,
-            bits_per_sample: 16,
-            frames_per_second: 64000,
-            channel_map: vec![AudioChannelId::Cf],
+        let pcm_format = PcmFormat2 {
+            pcm_mode: Some(AudioPcmMode2::Linear),
+            bits_per_sample: Some(16),
+            frames_per_second: Some(64000),
+            channel_map: Some(vec![AudioChannelId2::Fc]),
+            ..Default::default()
         };
 
         // Create input PCM saw wave.
@@ -846,11 +922,12 @@ fn run_sbc_to_msbc_stream_switching_test(close_on_stop: bool) -> Result<()> {
             bit_pool: 59,
         });
 
-        let pcm_format1 = PcmFormat {
-            pcm_mode: AudioPcmMode::Linear,
-            bits_per_sample: 16,
-            frames_per_second: 44100,
-            channel_map: vec![AudioChannelId::Cf],
+        let pcm_format1 = PcmFormat2 {
+            pcm_mode: Some(AudioPcmMode2::Linear),
+            bits_per_sample: Some(16),
+            frames_per_second: Some(44100),
+            channel_map: Some(vec![AudioChannelId2::Fc]),
+            ..Default::default()
         };
         let pcm_audio1 = PcmAudio::create_saw_wave(pcm_format1, TEST_PCM_FRAME_COUNT);
         let input_framelength1 =
@@ -868,11 +945,12 @@ fn run_sbc_to_msbc_stream_switching_test(close_on_stop: bool) -> Result<()> {
         let block_count2 = 15;
         let settings2 = EncoderSettings::Msbc(MSbcEncoderSettings::default());
 
-        let pcm_format2 = PcmFormat {
-            pcm_mode: AudioPcmMode::Linear,
-            bits_per_sample: 16,
-            frames_per_second: 16000,
-            channel_map: vec![AudioChannelId::Cf],
+        let pcm_format2 = PcmFormat2 {
+            pcm_mode: Some(AudioPcmMode2::Linear),
+            bits_per_sample: Some(16),
+            frames_per_second: Some(16000),
+            channel_map: Some(vec![AudioChannelId2::Fc]),
+            ..Default::default()
         };
         let pcm_audio2 = PcmAudio::create_saw_wave(pcm_format2, TEST_PCM_FRAME_COUNT);
         let input_framelength2 = sub_bands2 * block_count2;
@@ -953,11 +1031,12 @@ fn msbc_rejects_invalid_sample_rate_test() -> Result<()> {
         let settings = EncoderSettings::Msbc(MSbcEncoderSettings::default());
 
         // 44.1 kHz is invalid for mSBC (which requires exactly 16000 Hz).
-        let pcm_format = PcmFormat {
-            pcm_mode: AudioPcmMode::Linear,
-            bits_per_sample: 16,
-            frames_per_second: 44100,
-            channel_map: vec![AudioChannelId::Cf],
+        let pcm_format = PcmFormat2 {
+            pcm_mode: Some(AudioPcmMode2::Linear),
+            bits_per_sample: Some(16),
+            frames_per_second: Some(44100),
+            channel_map: Some(vec![AudioChannelId2::Fc]),
+            ..Default::default()
         };
         let input_framelength = sub_bands * block_count;
         let pcm_audio = PcmAudio::create_saw_wave(pcm_format, input_framelength);
@@ -988,6 +1067,56 @@ fn msbc_rejects_invalid_sample_rate_test() -> Result<()> {
 
             // Because 44.1 kHz is invalid for mSBC, the codec reports a failure and closes the
             // channel without emitting any output packets or EOS.
+            assert_eq!(output, vec![Output::CodecChannelClose]);
+
+            Ok(())
+        })
+    })
+}
+
+#[fuchsia::test]
+fn cvsd_rejects_invalid_bytes_per_sample_test() -> Result<()> {
+    with_large_stack(|| {
+        let settings = EncoderSettings::Cvsd(CvsdEncoderSettings::default());
+
+        // Padded 4-byte sample container (`bytes_per_sample = 4`) is invalid for CVSD, which only
+        // accepts packed 16-bit (`bytes_per_sample = 2` or omitted) linear PCM.
+        let pcm_format = PcmFormat2 {
+            pcm_mode: Some(AudioPcmMode2::Linear),
+            bits_per_sample: Some(16),
+            bytes_per_sample: Some(4),
+            frames_per_second: Some(64000),
+            channel_map: Some(vec![AudioChannelId2::Fc]),
+            ..Default::default()
+        };
+        let input_framelength = 8;
+        let pcm_audio =
+            PcmAudio::create_from_raw_bytes(pcm_format, vec![0u8; input_framelength * 4]);
+
+        let stream = Rc::new(PcmAudioStream {
+            pcm_audio,
+            encoder_settings: settings,
+            frames_per_packet: std::iter::repeat(input_framelength),
+            timebase: None,
+        });
+
+        let mut executor = fasync::TestExecutor::new();
+        executor.run_singlethreaded(async {
+            let stream_processor =
+                EncoderFactory.connect_to_stream_processor(stream.as_ref(), 1).await?;
+            let mut stream_runner = StreamRunner::new(stream_processor);
+
+            let output = stream_runner
+                .run_stream(
+                    stream,
+                    StreamOptions {
+                        queue_format_details: false,
+                        close_on_stop: false,
+                        ..Default::default()
+                    },
+                )
+                .await?;
+
             assert_eq!(output, vec![Output::CodecChannelClose]);
 
             Ok(())

@@ -251,8 +251,6 @@ zx_status_t UsedSize(const fbl::unique_fd& fd, uint64_t* out_size);
 
 zx_status_t blobfs_create(std::unique_ptr<Blobfs>* out, fbl::unique_fd blockfd);
 
-zx_status_t blobfs_fsck(fbl::unique_fd fd, const std::vector<size_t>& extent_lengths);
-
 // Create a blobfs from a sparse file.
 // |start| indicates where the blobfs partition starts within the file (in bytes).
 // |end| indicates the end of the blobfs partition (in bytes).

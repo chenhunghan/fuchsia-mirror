@@ -68,6 +68,7 @@ source_set("common") {
     ":buttons-metadata",
     "//sdk/fidl/fuchsia.buttons:fuchsia.buttons_cpp",
     "//sdk/fidl/fuchsia.driver.compat:fuchsia.driver.compat_cpp",
+    "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_cpp",
     "//sdk/fidl/fuchsia.driver.metadata:fuchsia.driver.metadata_cpp",
     "//sdk/fidl/fuchsia.hardware.gpio:fuchsia.hardware.gpio_cpp",
     "//sdk/fidl/fuchsia.input.report:fuchsia.input.report_cpp",
@@ -108,6 +109,12 @@ test("buttons-test") {
 fuchsia_unittest_package("buttons-test-package") {
   package_name = "buttons-test"
   deps = [ ":buttons-test" ]
+  test_specs = {
+    log_settings = {
+      # Thread termination test intentionally triggers GPIO error path
+      max_severity = "ERROR"
+    }
+  }
 }
 
 group("tests") {

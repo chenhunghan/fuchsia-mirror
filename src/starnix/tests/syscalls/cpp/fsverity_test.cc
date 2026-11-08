@@ -461,7 +461,7 @@ TEST_F(FsverityTest, EnableVerity) {
     uint32_t flags[] = {0xabababab, 0xcdcdcdcd, 0xdededede};
     SAFE_SYSCALL(ioctl(fd, FS_IOC_GETFLAGS, &flags[1]));
     EXPECT_EQ(flags[0], 0xabababab);
-    ASSERT_TRUE(flags[1] | FS_VERITY_FL);
+    EXPECT_NE(flags[1] & FS_VERITY_FL, 0u);
     EXPECT_EQ(flags[2], 0xdededede);
   }
   close(fd);

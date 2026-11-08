@@ -1,0 +1,134 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host:defs.bzl", "rustc_binary_host_tool")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load(
+    "//build/bazel/rules/host_tests:host_test_data.bzl",
+    "host_test_data_files",
+    "host_test_data_map",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":auto_owners_test"],
+    visibility = ["//tools:__pkg__"],
+)
+
+_CRATE_DEPS = [
+    "//third_party/rust_crates/vendor:anyhow",
+    "//third_party/rust_crates/vendor:argh",
+    "//third_party/rust_crates/vendor:camino",
+    "//third_party/rust_crates/vendor:log",
+    "//third_party/rust_crates/vendor:serde_json",
+    "//third_party/rust_crates/vendor:simplelog",
+    "//third_party/rust_crates/vendor:toml",
+    "//third_party/rust_crates/vendor:walkdir",
+    "//third_party/rust_crates/vendor:xml",
+    "//tools/cargo-gnaw:cargo-gnaw-lib",
+    "//tools/gn_desc/gn_graph",
+    "//tools/gn_desc/gn_json",
+]
+
+rustc_binary_host_tool(
+    name = "auto_owners_bin",
+    srcs = ["src/main.rs"],
+    binary_name = "auto_owners",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = _CRATE_DEPS,
+)
+
+host_rustc_test(
+    name = "auto_owners_test",
+    srcs = ["src/main.rs"],
+    crate_root = "src/main.rs",
+    edition = "2024",
+    # The test resolves test_data/ relative to cwd + ROOT_OUT_DIR, and
+    # host_test runs it from its runtime_dir.
+    rustc_env = {"ROOT_OUT_DIR": "."},
+    test_data = [
+        ":auto_owners_gn",
+        ":auto_owners_test_data",
+    ],
+    deps = _CRATE_DEPS + [
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:pretty_assertions",
+        "//third_party/rust_crates/vendor:serial_test",
+        "//third_party/rust_crates/vendor:tempfile",
+    ],
+)
+
+host_test_data_map(
+    name = "auto_owners_test_data",
+    testonly = True,
+    files_map = {
+        "test_data/tools/auto_owners/" + f: f
+        for f in [
+            "tests/common/.gn",
+            "tests/common/build/BUILD.gn",
+            "tests/common/build/BUILDCONFIG.gn",
+            "tests/common/build/toolchain/BUILD.gn",
+            "tests/empty/BUILD.gn",
+            "tests/empty/foo/BUILD.gn",
+            "tests/integration/manifest",
+            "tests/missing/BUILD.gn",
+            "tests/no_auto_owners/BUILD.gn",
+            "tests/no_auto_owners/OWNERS",
+            "tests/no_auto_owners/build/secondary/third_party/baz/foo/OWNERS",
+            "tests/no_auto_owners/dep/BUILD.gn",
+            "tests/no_auto_owners/dep/OWNERS",
+            "tests/no_auto_owners/manifest",
+            "tests/no_auto_owners/owners.toml",
+            "tests/no_auto_owners/rust_metadata.json",
+            "tests/no_auto_owners/third_party/bar/BUILD.gn",
+            "tests/no_auto_owners/third_party/baz/foo/source.c",
+            "tests/no_auto_owners/third_party/baz/src/source.c",
+            "tests/no_auto_owners/third_party/foo/BUILD.gn",
+            "tests/no_auto_owners/third_party/foo/OWNERS",
+            "tests/no_auto_owners/third_party/foo/child/source.c",
+            "tests/no_auto_owners/third_party/rust_crates/BUILD.gn",
+            "tests/no_auto_owners/third_party/rust_crates/vendor/bar/BUILD.gn",
+            "tests/no_auto_owners/third_party/rust_crates/vendor/bar/OWNERS",
+            "tests/no_auto_owners/third_party/rust_crates/vendor/foo/BUILD.gn",
+            "tests/no_auto_owners/third_party/rust_crates/vendor/with-dashes-and-version-0.1.0/BUILD.gn",
+            "tests/owners/BUILD.gn",
+            "tests/owners/OWNERS",
+            "tests/owners/build/secondary/third_party/baz/foo/OWNERS",
+            "tests/owners/dep/BUILD.gn",
+            "tests/owners/dep/OWNERS",
+            "tests/owners/manifest",
+            "tests/owners/owners.toml",
+            "tests/owners/rust_metadata.json",
+            "tests/owners/third_party/bar/BUILD.gn",
+            "tests/owners/third_party/baz/foo/source.c",
+            "tests/owners/third_party/baz/src/source.c",
+            "tests/owners/third_party/foo/BUILD.gn",
+            "tests/owners/third_party/foo/OWNERS",
+            "tests/owners/third_party/foo/child/source.c",
+            "tests/owners/third_party/rust_crates/BUILD.gn",
+            "tests/owners/third_party/rust_crates/vendor/bar/BUILD.gn",
+            "tests/owners/third_party/rust_crates/vendor/bar/OWNERS",
+            "tests/owners/third_party/rust_crates/vendor/foo/BUILD.gn",
+            "tests/owners/third_party/rust_crates/vendor/with-dashes-and-version-0.1.0/BUILD.gn",
+            "tests/pass/BUILD.gn",
+            "tests/pass/foo/BUILD.gn",
+        ]
+    },
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+# we need to copy the GN binary from the builder into the test output
+# directory so we can run it on a different bot than does the builds.
+host_test_data_files(
+    name = "auto_owners_gn",
+    testonly = True,
+    srcs = ["//build/prebuilt/cipd:gn"],
+    dest_dir = "test_data/tools/auto_owners/runfiles/gn",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)

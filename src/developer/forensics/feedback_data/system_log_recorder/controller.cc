@@ -10,7 +10,7 @@ namespace system_log_recorder {
 
 void Controller::SetStop(::fit::closure stop) { stop_ = std::move(stop); }
 
-void Controller::Stop() { stop_(); }
+void Controller::Stop(StopCompleter::Sync& completer) { stop_(); }
 
 }  // namespace system_log_recorder
 }  // namespace feedback_data

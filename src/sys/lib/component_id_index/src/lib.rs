@@ -7,7 +7,7 @@
 use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 use clonable_error::ClonableError;
-use fidl_fuchsia_component_internal as fcomponent_internal;
+use fidl_fuchsia_component_internal_common as fcomponent_internal;
 use moniker::Moniker;
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;

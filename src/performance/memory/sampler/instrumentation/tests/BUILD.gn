@@ -9,11 +9,13 @@ executable("tests_bin") {
   output_name = "memory_sampler_instrumentation_tests"
 
   sources = [
+    "allocation_table_tests.cc",
     "poisson_sampler_tests.cc",
     "recorder_tests.cc",
     "scoped_reentrancy_guard_tests.cc",
   ]
   deps = [
+    "..:allocation_table",
     "..:poisson_sampler",
     "..:recorder",
     "..:scoped_reentrancy_guard",

@@ -50,7 +50,7 @@ fuchsia_power_broker::LevelDependency CreateLevelDependency(
 PowerManager::PowerManager(
     async_dispatcher_t* dispatcher, fidl::ClientEnd<fuchsia_power_broker::Topology> power_topology,
     std::optional<fidl::ClientEnd<fuchsia_power_system::CpuElementManager>> cpu_element_mgr,
-    bool wait_for_storage_token)
+    bool wait_for_storage_token, std::shared_ptr<Node> root_node)
     : dispatcher_(dispatcher),
       power_topology_(power_topology.is_valid() ? fidl::Client<fuchsia_power_broker::Topology>(
                                                       std::move(power_topology), dispatcher)
@@ -60,7 +60,8 @@ PowerManager::PowerManager(
               ? std::make_optional(fidl::Client<fuchsia_power_system::CpuElementManager>(
                     std::move(cpu_element_mgr.value()), dispatcher))
               : std::nullopt),
-      wait_for_storage_token_from_driver_(wait_for_storage_token) {}
+      wait_for_storage_token_from_driver_(wait_for_storage_token),
+      root_node_(root_node) {}
 
 void PowerManager::FetchCpuToken() {
   if (cpu_element_client_.has_value() &&
@@ -76,6 +77,7 @@ void PowerManager::FetchCpuToken() {
           for (auto& callback : callbacks) {
             callback();
           }
+          MaybeCreateAllDriversPowerElement();
         });
   }
 }
@@ -89,6 +91,7 @@ void PowerManager::PublishCpuElementManager(component::OutgoingDirectory& outgoi
 void PowerManager::CreateStoragePowerElement(fuchsia_power_broker::DependencyToken driver_token,
                                              fuchsia_power_broker::PowerLevel power_level,
                                              fit::callback<void()> post_creation) {
+  storage_element_requested_ = true;
   std::get<CallbackSet>(storage_callbacks_or_token_).push_back(std::move(post_creation));
 
   // Make a storage token.
@@ -140,6 +143,7 @@ void PowerManager::CreateStoragePowerElement(fuchsia_power_broker::DependencyTok
         for (auto& cb : after_storage_callbacks) {
           cb();
         }
+        MaybeCreateAllDriversPowerElement();
       });
 
   if (wait_for_storage_token_from_driver_) {
@@ -346,22 +350,35 @@ void PowerManager::AddCpuExecutionStateDependency(
       });
 }
 
-void PowerManager::OnBootupComplete(std::shared_ptr<Node> root_node) {
-  // We only want to create the AllDrivers power element if suspend is enabled.
-  if (!SuspendEnabled()) {
+void PowerManager::OnBootupComplete() {
+  bootup_complete_ = true;
+  if (all_drivers_) {
+    all_drivers_->OnBootupComplete();
     return;
   }
+  // The element has not been created yet (a token is still outstanding, or this is the first
+  // chance to create it). CreateAllDriversPowerElement() notifies the element that bootup is
+  // already complete when it eventually runs.
+  MaybeCreateAllDriversPowerElement();
+}
 
-  // If we need to wait and the storage element token isn't created yet, delay creating all drivers
-  // until it's created.
-  if (wait_for_storage_token_from_driver_ &&
-      !std::holds_alternative<PowerDependencyToken>(storage_callbacks_or_token_)) {
-    std::get<CallbackSet>(storage_callbacks_or_token_).push_back([this, root_node]() {
-      CreateAllDriversPowerElement(root_node);
-    });
+void PowerManager::MaybeCreateAllDriversPowerElement() {
+  // We only want to create the AllDrivers power element once, and only if suspend is enabled.
+  if (!SuspendEnabled() || all_drivers_) {
     return;
   }
-  CreateAllDriversPowerElement(root_node);
+  // AllDrivers depends on the CPU token and, when a storage element is expected, on the storage
+  // token. Wait until both are available so the dependencies are part of the element's schema.
+  if (!std::holds_alternative<PowerDependencyToken>(cpu_callbacks_or_token_)) {
+    return;
+  }
+  if ((wait_for_storage_token_from_driver_ || storage_element_requested_) &&
+      !std::holds_alternative<PowerDependencyToken>(storage_callbacks_or_token_)) {
+    return;
+  }
+  if (std::shared_ptr<Node> root_node = root_node_.lock()) {
+    CreateAllDriversPowerElement(std::move(root_node));
+  }
 }
 
 void PowerManager::OnNodeBound(std::shared_ptr<const Node> node) {
@@ -370,10 +387,33 @@ void PowerManager::OnNodeBound(std::shared_ptr<const Node> node) {
   }
 }
 
+void PowerManager::OnNodeUnbinding(std::shared_ptr<const Node> node) {
+  if (all_drivers_) {
+    all_drivers_->OnNodeUnbinding(std::move(node));
+  }
+}
+
 void PowerManager::CreateAllDriversPowerElement(std::shared_ptr<Node> root_node) {
   ZX_ASSERT_MSG(SuspendEnabled(), "Suspend must be enabled to create AllDrivers power element");
   ZX_ASSERT_MSG(!all_drivers_, "AllDrivers power element already created");
-  all_drivers_ = std::make_shared<AllDriversElement>(this, root_node);
+
+  // Hold an initial bootup lease on AllDrivers at level 1 until BootupTracker completes and
+  // CompleteStartupTransition() establishes dependencies on all leaf drivers. This allows
+  // AllDrivers' token to be handed to System Activity Governor as soon as CPU and storage tokens
+  // are ready, unblocking SAG startup without permitting premature driver or CPU suspension.
+  zx::eventpair bootup_lease, bootup_lease_peer;
+  if (zx_status_t status = zx::eventpair::create(0, &bootup_lease, &bootup_lease_peer);
+      status != ZX_OK) {
+    fdf_log::error("Failed to create bootup lease for AllDrivers: {}",
+                   zx_status_get_string(status));
+    return;
+  }
+  all_drivers_ = std::make_shared<AllDriversElement>(this, root_node, std::move(bootup_lease));
+  if (bootup_complete_) {
+    // Bootup finished before the CPU or storage token arrived. Let the element know now; it will
+    // run its startup transition once Power Broker calls SetLevel(1).
+    all_drivers_->OnBootupComplete();
+  }
 
   zx::event all_drivers_token;
   if (zx::event::create(0, &all_drivers_token) != ZX_OK) {
@@ -400,8 +440,9 @@ void PowerManager::CreateAllDriversPowerElement(std::shared_ptr<Node> root_node)
   }
 
   fuchsia_power_broker::ElementSchema schema = CreateElementSchema(
-      "AllDrivers", /* initial_current_level */ 0, {0, 1}, std::move(lessor_server),
-      std::move(element_control_server), std::move(element_runner_client), std::move(level_deps));
+      "AllDrivers", /* initial_current_level */ 1, {0, 1}, std::move(lessor_server),
+      std::move(element_control_server), std::move(element_runner_client), std::move(level_deps),
+      std::move(bootup_lease_peer));
 
   fidl::Client<fuchsia_power_broker::ElementControl> element_control =
       fidl::Client<fuchsia_power_broker::ElementControl>(std::move(element_control_client),

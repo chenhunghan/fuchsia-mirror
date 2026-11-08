@@ -163,15 +163,17 @@ template("ffx_e2e_product_bundle") {
       testonly = true
       forward_variables_from(_product_config, "*")
 
-      # TODO(https://fxbug.dev/422572400) shouldn't need to manually add debug_agent
-      if (!defined(base_packages)) {
-        base_packages = []
+      if (target_cpu != "riscv64") {
+        # TODO(https://fxbug.dev/422572400) shouldn't need to manually add debug_agent
+        if (!defined(base_packages)) {
+          base_packages = []
+        }
+        base_packages += [
+          {
+            package_target = "//src/developer/debug/debug_agent"
+          },
+        ]
       }
-      base_packages += [
-        {
-          package_target = "//src/developer/debug/debug_agent"
-        },
-      ]
     }
 
     assembled_system(_assembled_label) {

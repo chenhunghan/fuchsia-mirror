@@ -4,8 +4,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# mypy: disable-error-code="no-untyped-def"
-
 import ipaddress
 import unittest
 
@@ -13,20 +11,20 @@ from legacy_access_point.ap_lib.dhcp_config import DhcpConfig, Subnet
 
 
 class DhcpConfigTest(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         super().setUp()
         # These config files may have long diffs, modify this setting to
         # ensure they're printed.
         self.maxDiff = None
 
-    def test_basic_dhcp_config(self):
+    def test_basic_dhcp_config(self) -> None:
         dhcp_conf = DhcpConfig()
 
         expected_config = "default-lease-time 600;\n" "max-lease-time 7200;"
 
         self.assertEqual(expected_config, dhcp_conf.render_config_file())
 
-    def test_dhcp_config_with_lease_times(self):
+    def test_dhcp_config_with_lease_times(self) -> None:
         default_lease_time = 350
         max_lease_time = 5000
         dhcp_conf = DhcpConfig(
@@ -40,7 +38,7 @@ class DhcpConfigTest(unittest.TestCase):
 
         self.assertEqual(expected_config, dhcp_conf.render_config_file())
 
-    def test_dhcp_config_with_subnets(self):
+    def test_dhcp_config_with_subnets(self) -> None:
         default_lease_time = 150
         max_lease_time = 3000
         subnets = [
@@ -99,7 +97,7 @@ class DhcpConfigTest(unittest.TestCase):
 
         self.assertEqual(expected_config, dhcp_conf.render_config_file())
 
-    def test_additional_subnet_parameters_and_options(self):
+    def test_additional_subnet_parameters_and_options(self) -> None:
         default_lease_time = 150
         max_lease_time = 3000
         subnets = [

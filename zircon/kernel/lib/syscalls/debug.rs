@@ -109,14 +109,14 @@ pub fn sys_debug_write(ptr: UserInPtr<u8>, mut len: usize) -> Result<(), Status>
 pub fn sys_debug_suspend(resource: HandleValue) -> Result<(), Status> {
     validate_system_resource(resource, ZX_RSRC_SYSTEM_DEBUG_BASE)?;
 
-    Status::ok(platform_serial_suspend())
+    platform_serial_suspend()
 }
 
 #[syscall]
 pub fn sys_debug_resume(resource: HandleValue) -> Result<(), Status> {
     validate_system_resource(resource, ZX_RSRC_SYSTEM_DEBUG_BASE)?;
 
-    Status::ok(platform_serial_resume())
+    platform_serial_resume()
 }
 
 #[syscall]

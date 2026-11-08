@@ -1,0 +1,66 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    "//build/bazel/rules/components:expect_includes.bzl",
+    "expect_includes",
+)
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+expect_includes(
+    name = "client_includes",
+    includes = ["meta/client.shard.cml"],
+)
+
+fx_cc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["simple.cc"],
+    build_flags = [
+        # TODO(https://fxbug.dev/42176699): This target uses mutable tables which are deprecated,
+        # rather than builders.
+        "//build/cpp:fidl-wire-deprecated-mutable-tables",
+    ],
+    gn_output_name = "simple_driver_test_realm",
+    deps = [
+        "//sdk/fidl/fuchsia.driver.test:fuchsia.driver.test_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/device-watcher/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//zircon/system/ulib/fbl",
+    ],
+)
+
+fx_packaged_binary(
+    name = "simple_driver_test_realm_packaged_bin",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "simple_driver_test_realm",
+)
+
+fx_component_manifest(
+    name = "simple_component_manifest",
+    testonly = True,
+    component_name = "simple_driver_test_realm",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/simple_driver_test_realm.cml",
+)
+
+fx_component(
+    name = "simple_component",
+    testonly = True,
+    compiled_manifest = ":simple_component_manifest",
+    deps = [":simple_driver_test_realm_packaged_bin"],
+)

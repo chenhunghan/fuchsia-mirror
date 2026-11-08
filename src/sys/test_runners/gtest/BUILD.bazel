@@ -3,15 +3,28 @@
 # found in the LICENSE file.
 
 load("//build/bazel/aspects:runner.bzl", "fx_runner_shard")
+load("//build/bazel/rules/components:expect_includes.bzl", "expect_includes")
 
 package(default_applicable_licenses = ["//:license"])
 
 exports_files(
     [
+        "death_test.shard.cml",
         "default.shard.cml",
         "zxtest.shard.cml",
     ],
     visibility = ["//visibility:public"],
+)
+
+# Depend on this (via `aspect_hints`) if your test uses ASSERT_DEATH or
+# EXPECT_DEATH and your test component's cml is generated. Mirrors GN's
+# group("death_test").
+expect_includes(
+    name = "death_test",
+    testonly = True,
+    enforce = False,
+    includes = ["death_test.shard.cml"],
+    visibility = ["//:__subpackages__"],
 )
 
 fx_runner_shard(

@@ -16,6 +16,7 @@ go_library(
         "failure_reason_check.go",
         "lib.go",
         "logprocessing.go",
+        "luci_analysis.go",
         "mass_test_failure_check.go",
         "nearby_string_check.go",
         "no_tests_ran_check.go",
@@ -30,9 +31,14 @@ go_library(
     target_compatible_with = HOST_CONSTRAINTS,
     deps = [
         "//third_party/golibs:golang.org/x/sync/errgroup",
+        "//third_party/golibs:google.golang.org/protobuf/encoding/protojson",
         "//third_party/golibs:gopkg.in/yaml.v2",
+        "//third_party/luci-go/analysis/proto/v1:analysis_proto_go",
+        "//third_party/luci-go/resultdb/pbutil",
         "//tools/botanist:constants",
         "//tools/build",
+        "//tools/lib/jsonutil",
+        "//tools/testing/resultdb:lib",
         "//tools/testing/runtests",
     ],
 )
@@ -57,6 +63,7 @@ host_go_test(
         "failure_reason_check_test.go",
         "lib_test.go",
         "logprocessing_test.go",
+        "luci_analysis_test.go",
         "mass_test_failure_check_test.go",
         "nearby_string_check_test.go",
         "no_tests_ran_check_test.go",
@@ -72,6 +79,10 @@ host_go_test(
     deps = [
         "//third_party/golibs:github.com/google/go-cmp/cmp",
         "//third_party/golibs:github.com/google/go-cmp/cmp/cmpopts",
+        "//third_party/golibs:google.golang.org/protobuf/encoding/protojson",
+        "//third_party/luci-go/analysis/proto/v1:analysis_proto_go",
+        "//tools/build",
+        "//tools/testing/resultdb:lib",
         "//tools/testing/runtests",
     ],
 )

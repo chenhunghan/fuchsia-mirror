@@ -24,7 +24,6 @@
 #include <efi/string/string.h>
 #include <efi/types.h>
 #include <fbl/vector.h>
-#include <phys/efi/main.h>
 #include <pretty/hexdump.h>
 
 #include "boot_zbi_items.h"

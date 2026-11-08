@@ -63,6 +63,7 @@ metrics_registry("wlan_metrics_registry") {
   generate_rust = true
   project_id = 3708719327
 }
+
 rustc_binary("bin") {
   sources = [
     "src/device.rs",
@@ -88,9 +89,10 @@ rustc_binary("bin") {
     "//sdk/rust/zx",
     "//src/connectivity/wlan/lib/fidl-ext:wlan-fidl-ext",
     "//src/connectivity/wlan/lib/ieee80211",
+    "//src/diagnostics/lib/redactor_client",
     "//src/lib/diagnostics/inspect/contrib/rust",
     "//src/lib/diagnostics/inspect/runtime/rust",
-    "//src/lib/diagnostics/inspect/rust:fuchsia-inspect",
+    "//src/lib/diagnostics/inspect/rust",
     "//src/lib/diagnostics/log/rust",
     "//src/lib/fidl/rust/fidl",
     "//src/lib/fuchsia",
@@ -102,7 +104,8 @@ rustc_binary("bin") {
     "//third_party/rust_crates:log",
   ]
 }
-rustc_test("bin_test") {
+
+rustc_test("wlandevicemonitor_bin_test") {
   sources = [
     "src/device.rs",
     "src/device_watch.rs",
@@ -125,9 +128,10 @@ rustc_test("bin_test") {
            "//sdk/rust/zx",
            "//src/connectivity/wlan/lib/fidl-ext:wlan-fidl-ext",
            "//src/connectivity/wlan/lib/ieee80211",
+           "//src/diagnostics/lib/redactor_client",
            "//src/lib/diagnostics/inspect/contrib/rust",
            "//src/lib/diagnostics/inspect/runtime/rust",
-           "//src/lib/diagnostics/inspect/rust:fuchsia-inspect",
+           "//src/lib/diagnostics/inspect/rust",
            "//src/lib/diagnostics/log/rust",
            "//src/lib/fidl/rust/fidl",
            "//src/lib/fuchsia",
@@ -146,12 +150,12 @@ rustc_test("bin_test") {
            "//third_party/rust_crates:test-case",
          ]
   source_root = "src/main.rs"
-  output_name = "wlandevicemonitor_bin_test"
 }
+
 fuchsia_unittest_package("wlandevicemonitor-tests") {
   package_name = "wlandevicemonitor-tests-gn"
   component_name = "wlandevicemonitor-tests"
-  deps = [ ":bin_test" ]
+  deps = [ ":wlandevicemonitor_bin_test" ]
   test_specs = {
     log_settings = {
       max_severity = "ERROR"
@@ -162,6 +166,7 @@ fuchsia_unittest_package("wlandevicemonitor-tests") {
     "//src/connectivity/wlan:*",
   ]
 }
+
 fuchsia_structured_config_rust_lib("wlandevicemonitor_config") {
   cm_label = ":wlandevicemonitor-manifest"
 }

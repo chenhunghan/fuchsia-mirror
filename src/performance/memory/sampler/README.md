@@ -133,10 +133,7 @@ final profile at the end of the process. Both kind of profiles have the same sha
     allocations that have been deallocated *within the period covered by this
     profile*. In particular, if an allocation was deallocated in profile X, it
     won't appear in the list of dead allocations of profile X+N. This is done to
-    restrict the growth of partial profiles.  Partial profiles also come with an
-    iteration number; this number is meaningless, except that profiles come in
-    numerical order (i.e. profile 1000 was captured earlier than profile 9999
-    regardless of when they were captured).
+    restrict the growth of partial profiles.
   * Final profiles: residual allocations are allocations that were never
     deallocated within the lifetime of the process. If an instrumented process
     has memory leaks, they are very likely to appear here (if they were
@@ -150,6 +147,17 @@ process within a single reporting interval are automatically coalesced into one
 profile before being filed. If one needs a picture of the overall allocations of
 a process that spans multiple crash reports, one can similarly merge its partial
 profiles (discarding their residual allocations) with its final profile.
+
+Note: There is a hard limit on the number of attachments that can fit in a
+report. By default, `memory_sampler` adds profiles to a report as separate
+attachments, and merges profiles from the same process, but if more distinct
+processes than allowed attachments produce profiles within the same reporting
+interval, `memory_sampler` will merge the excess profiles into a single
+`combined_profiles.tar` archive (using the same `<process_name>_final_<n>.pb.gz`
+and `<process_name>_partial_<n>.pb.gz` entry names as individual
+attachments). Individual `.pb.gz` profiles can be extracted with `tar -xf
+combined_profiles.tar`, and `pprof` can merge multiple extracted profiles when
+passed together on the command line.
 
 ## Performance tuning
 

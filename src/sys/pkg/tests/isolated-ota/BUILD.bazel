@@ -1,0 +1,54 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# `isolated-ota-integration-test` and `isolated-ota-integration-tests` stay in
+# BUILD.gn above the bazel2gn sentinel because they depend on GN-only
+# `//src/storage/testing/driver_test_realm/meta/client.shard.cml`,
+# `//src/storage/testing:storage_driver_test_realm`,
+# `//src/storage/tools/blobfs-compression`,
+# `//src/connectivity/network/dns:component`,
+# `//src/connectivity/network/netstack3:component-for-tests`, and
+# `//src/sys/pkg/lib/isolated-swd:pkg-component`.
+rustc_test(
+    name = "driver",
+    srcs = ["src/lib.rs"],
+    crate_name = "isolated_ota_integration_test",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.paver:fuchsia.paver_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        # GN depends on the `:fuchsia-component-test` group (which bundles
+        # `:includes` and `realm_builder_server_component`); Bazel depends on
+        # the Rust library target directly.
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-fs",
+        "//src/lib/fuchsia-sync",
+        "//src/lib/fuchsia-url",
+        "//src/storage/lib/vfs/rust:vfs",
+        "//src/sys/lib/cm_rust",
+        "//src/sys/lib/fidl-fuchsia-pkg-ext",
+        "//src/sys/pkg/lib/fuchsia-hash",
+        "//src/sys/pkg/lib/fuchsia-pkg-testing",
+        "//src/sys/pkg/lib/isolated-ota",
+        "//src/sys/pkg/lib/isolated-swd",
+        "//src/sys/pkg/testing/blobfs-ramdisk",
+        "//src/sys/pkg/testing/isolated-ota-env",
+        "//src/sys/pkg/testing/mock-paver",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:http",
+        "//third_party/rust_crates/vendor:mock-omaha-server",
+        "//third_party/rust_crates/vendor:pretty_assertions",
+    ],
+)

@@ -13,10 +13,12 @@ TRB* TransferRing::AdvancePointerHelper(TRB* trb) {
   if ((reinterpret_cast<size_t>(ptr) / zx_system_get_page_size()) !=
       (reinterpret_cast<size_t>(ptr + 1) / zx_system_get_page_size())) {
     CommitLocked();
-    ptr = static_cast<TRB*>(
-        (*virt_to_buffer_.find((reinterpret_cast<size_t>(ptr) / zx_system_get_page_size()) + 1)
-              ->second)
-            .virt());
+    auto buffer =
+        virt_to_buffer_.find((reinterpret_cast<size_t>(ptr) / zx_system_get_page_size()) + 1);
+    if (buffer == virt_to_buffer_.end()) {
+      return nullptr;
+    }
+    ptr = static_cast<TRB*>(buffer->second->virt());
   } else {
     ptr++;
   }
@@ -35,11 +37,14 @@ TRB* TransferRing::AdvancePointerHelper(TRB* trb) {
       if (control.EntTC()) {
         pcs_ = !pcs_;
       }
-      CommitLocked();
+      if (!hci_->HasCoherentState()) {
+        InvalidatePageCache(ptr, ZX_CACHE_FLUSH_DATA);
+      }
     }
-    zx_vaddr_t base_virt = reinterpret_cast<zx_vaddr_t>(
-        (*(phys_to_buffer_.find(addr / zx_system_get_page_size())->second)).virt());
-    ptr = reinterpret_cast<TRB*>(base_virt + (addr % zx_system_get_page_size()));
+    ptr = PhysToVirtLocked(addr);
+    if (!ptr) {
+      return nullptr;
+    }
     control = Control::FromTRB(ptr);
   }
 
@@ -67,13 +72,11 @@ zx_status_t TransferRing::AllocInternal(Control control) {
     trbs_++;
     TRB* spare_trb = trbs_;
     Control spare_control = Control::FromTRB(spare_trb);
+    TRB* new_link_trb =
+        static_cast<TRB*>((*new_trb).virt()) + ((*new_trb).size() / sizeof(TRB)) - 1;
     if (spare_control.Type() == Control::Link) {
       // Special case for link TRBs. Simply swap links and update.
-      reinterpret_cast<TRB*>((reinterpret_cast<size_t>((*new_trb).virt()) + (*new_trb).size()) -
-                             sizeof(TRB))
-          ->ptr = spare_trb->ptr;
-      spare_trb->ptr = (*new_trb).phys();
-      hw_mb();
+      new_link_trb->ptr = spare_trb->ptr;
       if (spare_control.EntTC()) {
         // Special case -- append new segment to last TRB (requires PCS toggle)
         pcs_ = !pcs_;
@@ -83,24 +86,31 @@ zx_status_t TransferRing::AllocInternal(Control control) {
           .set_Type(Control::Link)
           .set_EntTC(spare_control.EntTC())
           .set_Cycle(!pcs_)
-          .ToTrb(reinterpret_cast<TRB*>(
-              (reinterpret_cast<size_t>((*new_trb).virt()) + (*new_trb).size()) - sizeof(TRB)));
+          .ToTrb(new_link_trb);
+      if (!hci_->HasCoherentState()) {
+        InvalidatePageCache(new_link_trb, ZX_CACHE_FLUSH_DATA);
+      }
+      hw_mb();
+      spare_trb->ptr = (*new_trb).phys();
       spare_control.set_EntTC(0).ToTrb(spare_trb);
+      if (!hci_->HasCoherentState()) {
+        InvalidatePageCache(spare_trb, ZX_CACHE_FLUSH_DATA);
+      }
       RestoreLocked(link_state);
       return ZX_OK;
     }
     // Update pointer from new buffer to point to the spare TRB
     ZX_ASSERT((*new_trb).size() == zx_system_get_page_size());
-    reinterpret_cast<TRB*>((reinterpret_cast<size_t>((*new_trb).virt()) + (*new_trb).size()) -
-                           sizeof(TRB))
-        ->ptr = VirtToPhysLocked(spare_trb);
+    new_link_trb->ptr = VirtToPhysLocked(spare_trb);
     Control::Get()
         .FromValue(0)
         .set_Type(Control::Link)
         .set_EntTC(0)
         .set_Cycle(!pcs_)
-        .ToTrb(reinterpret_cast<TRB*>(
-            (reinterpret_cast<size_t>((*new_trb).virt()) + (*new_trb).size()) - sizeof(TRB)));
+        .ToTrb(new_link_trb);
+    if (!hci_->HasCoherentState()) {
+      InvalidatePageCache(new_link_trb, ZX_CACHE_FLUSH_DATA);
+    }
     // Update pointer to new segment (adding the new segment to the ring)
     link_trb->ptr = (*new_trb).phys();
     link_trb->status = 0;
@@ -144,26 +154,37 @@ void TransferRing::CommitLocked() {
 void TransferRing::CommitTransaction(const State& start) {
   if (!hci_->HasCoherentState()) {
     fbl::AutoLock l(&mutex_);
-    size_t current_page = reinterpret_cast<size_t>(start.trbs);
-    current_page = fbl::round_down(current_page, static_cast<size_t>(zx_system_get_page_size()));
+    if (!start.trbs) {
+      return;
+    }
+    const size_t page_size = zx_system_get_page_size();
+    const uintptr_t first_page = reinterpret_cast<uintptr_t>(start.trbs) / page_size;
+    uintptr_t current_page = first_page;
     bool ccs = start.pcs;
     TRB* current = start.trbs;
-    while (Control::FromTRB(current).Cycle() == ccs) {
+    while (current && Control::FromTRB(current).Cycle() == ccs) {
       auto control = Control::FromTRB(current);
       if (control.Type() == Control::Link) {
         if (control.EntTC()) {
           ccs = !ccs;
         }
-        InvalidatePageCache(reinterpret_cast<void*>(current_page), ZX_CACHE_FLUSH_DATA);
+        if (current_page != first_page) {
+          InvalidatePageCache(current, ZX_CACHE_FLUSH_DATA);
+        }
         current = PhysToVirtLocked(current->ptr);
-        current_page = reinterpret_cast<size_t>(current);
-        current_page =
-            fbl::round_down(current_page, static_cast<size_t>(zx_system_get_page_size()));
+        if (!current) {
+          InvalidatePageCache(start.trbs, ZX_CACHE_FLUSH_DATA);
+          return;
+        }
+        current_page = reinterpret_cast<uintptr_t>(current) / page_size;
       } else {
         current++;
       }
     }
-    InvalidatePageCache(current, ZX_CACHE_FLUSH_DATA);
+    if (current && current_page != first_page) {
+      InvalidatePageCache(current, ZX_CACHE_FLUSH_DATA);
+    }
+    InvalidatePageCache(start.trbs, ZX_CACHE_FLUSH_DATA);
   }
 }
 
@@ -200,7 +221,7 @@ zx_status_t TransferRing::AddTRB(const TRB& trb, std::unique_ptr<TRBContext> con
 
 zx_status_t TransferRing::HandleShortPacket(TRB* short_trb, size_t short_length, TRB** last_trb) {
   fbl::AutoLock l(&mutex_);
-  if (pending_trbs_.is_empty()) {
+  if (pending_trbs_.is_empty() || !short_trb) {
     return ZX_ERR_IO;
   }
   auto target_ctx = pending_trbs_.begin();
@@ -231,6 +252,9 @@ zx_status_t TransferRing::HandleShortPacket(TRB* short_trb, size_t short_length,
     }
     while (Control::FromTRB(current).Type() == Control::Link) {
       current = PhysToVirtLocked(current->ptr);
+      if (!current) {
+        return ZX_ERR_IO;
+      }
     }
   }
   return ZX_ERR_IO;
@@ -292,16 +316,20 @@ zx_status_t TransferRing::Init(size_t page_size, const zx::bti& bti, EventRing* 
 }
 
 zx_status_t TransferRing::DeinitIfActive() {
-  if (trbs_) {
-    return Deinit();
+  fbl::AutoLock l(&mutex_);
+  if (!trbs_) {
+    return ZX_OK;
   }
-  return ZX_OK;
+  return DeinitLocked();
 }
 zx_status_t TransferRing::Deinit() {
   fbl::AutoLock l(&mutex_);
   if (!trbs_) {
     return ZX_ERR_BAD_STATE;
   }
+  return DeinitLocked();
+}
+zx_status_t TransferRing::DeinitLocked() {
   trbs_ = nullptr;
   dequeue_trb_ = nullptr;
   pcs_ = true;
@@ -309,7 +337,9 @@ zx_status_t TransferRing::Deinit() {
   virt_to_buffer_.clear();
   isochronous_ = false;
   phys_to_buffer_.clear();
-  ring_->RemovePressure();
+  if (ring_) {
+    ring_->RemovePressure();
+  }
   return ZX_OK;
 }
 
@@ -338,55 +368,84 @@ zx_paddr_t TransferRing::VirtToPhys(TRB* trb) {
   fbl::AutoLock l(&mutex_);
   return VirtToPhysLocked(trb);
 }
+
 zx_paddr_t TransferRing::VirtToPhysLocked(TRB* trb) {
   const auto& buffer =
       virt_to_buffer_.find(reinterpret_cast<zx_vaddr_t>(trb) / zx_system_get_page_size());
+  if (buffer == virt_to_buffer_.end()) {
+    return 0;
+  }
   auto offset = reinterpret_cast<zx_vaddr_t>(trb) % zx_system_get_page_size();
   return buffer->second->phys() + offset;
 }
+
 TRB* TransferRing::PhysToVirt(zx_paddr_t paddr) {
   fbl::AutoLock l(&mutex_);
   return PhysToVirtLocked(paddr);
 }
+
 TRB* TransferRing::PhysToVirtLocked(zx_paddr_t paddr) {
   const auto& buffer = phys_to_buffer_.find(paddr / zx_system_get_page_size());
+  if (buffer == phys_to_buffer_.end()) {
+    return nullptr;
+  }
   auto offset = paddr % zx_system_get_page_size();
   auto vaddr = reinterpret_cast<zx_vaddr_t>(buffer->second->virt()) + offset;
   return reinterpret_cast<TRB*>(vaddr);
 }
+
 bool TransferRing::IsTRBInRange(TRB* trb, TRB* start, TRB* end) {
-  for (auto* cur = start; cur != end; AdvancePointer(cur)) {
+  if (!trb) {
+    return false;
+  }
+
+  if (trb == start || trb == end) {
+    return true;
+  }
+
+  if (!start || !end) {
+    return false;
+  }
+
+  for (auto* cur = start; cur != end && cur != nullptr; AdvancePointer(cur)) {
     if (cur == trb) {
       return true;
     }
   }
-  return end == trb;
+
+  return false;
 }
+
 zx_status_t TransferRing::CompleteTRB(TRB* trb, std::unique_ptr<TRBContext>* context) {
   fbl::AutoLock l(&mutex_);
   if (pending_trbs_.is_empty()) {
     fdf::error("Pending TRB list is empty but we received a completion event");
     return ZX_ERR_CANCELED;
   }
-  dequeue_trb_ = trb;
+
   *context = pending_trbs_.pop_front();
-  if (!IsTRBInRange(trb, (*context)->first_trb, (*context)->trb) &&
-      (trb != (*context)->setup_trb)) {
+  if (trb == nullptr || (!IsTRBInRange(trb, (*context)->first_trb, (*context)->trb) &&
+                         (trb != (*context)->setup_trb))) {
     fdf::error("Lost a TRB! Expected {} but we received an event for {}",
                static_cast<const void*>((*context)->trb), static_cast<const void*>(trb));
     return ZX_ERR_IO;
   }
+  dequeue_trb_ = trb;
+
   if (trb != (*context)->trb) {
     fdf::warn(
         "Received a completion event in response to not the last TRB."
         " This transaction should have failed! Please double check.");
   }
+
   return ZX_OK;
 }
+
 fbl::DoublyLinkedList<std::unique_ptr<TRBContext>> TransferRing::TakePendingTRBs() {
   fbl::AutoLock l(&mutex_);
   return std::move(pending_trbs_);
 }
+
 fbl::DoublyLinkedList<std::unique_ptr<TRBContext>> TransferRing::TakePendingTRBsUntil(TRB* end) {
   fbl::AutoLock l(&mutex_);
   dequeue_trb_ = end;
@@ -432,8 +491,19 @@ zx::result<ContiguousTRBInfo> TransferRing::AllocateContiguous(size_t count) {
   if (count == 0) {
     return zx::error(ZX_ERR_INVALID_ARGS);
   }
+  size_t max_contiguous = 0;
+  {
+    fbl::AutoLock l(&mutex_);
+    if (page_size_ < sizeof(TRB) * 3) {
+      return zx::error(ZX_ERR_BAD_STATE);
+    }
+    max_contiguous = (page_size_ / sizeof(TRB)) - 2;
+  }
+  if (count > max_contiguous) {
+    return zx::error(ZX_ERR_NO_MEMORY);
+  }
   size_t orig_count = count;
-  TRB* contig;
+  TRB* contig = nullptr;
   TRB* nop;
   size_t nop_count = 1;
   zx_status_t status = AllocateTRB(&nop, nullptr);
@@ -450,14 +520,14 @@ zx::result<ContiguousTRBInfo> TransferRing::AllocateContiguous(size_t count) {
     if (status != ZX_OK) {
       return zx::error(status);
     }
-    nop_count++;
-    Control::FromTRB(current).set_Type(Control::Nop).ToTrb(current);
     if (current != prev + 1) {
       discontiguous = true;
       contig = current;
       prev = nullptr;
       break;
     }
+    nop_count++;
+    Control::FromTRB(current).set_Type(Control::Nop).ToTrb(current);
     prev = current;
     count--;
   }
@@ -551,6 +621,9 @@ bool TransferRing::AvailableSlots(size_t count) {
     Control control = Control::FromTRB(current);
     if (control.Type() == Control::Link) {
       current = PhysToVirtLocked(current->ptr);
+      if (!current) {
+        return false;
+      }
       // Don't count link TRBs as available slots. We can't actually
       // put data in them.
       continue;

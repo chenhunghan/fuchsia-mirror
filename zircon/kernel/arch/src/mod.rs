@@ -33,14 +33,30 @@ pub use arch_types_bindings::{GeneralRegsSource, UserEntryState};
 #[macro_use]
 pub mod api;
 
+pub mod debugger;
+
+pub mod exception;
+pub use exception::{
+    ArchExceptionContext, arch_dump_exception_context, arch_exception_context_user_synth_code,
+    arch_exception_context_user_synth_data, arch_fill_in_exception_context,
+};
+
 pub mod ops;
+pub use ops::{enter_idle_state, flush_state_and_halt};
+
+pub mod spinlock;
+
+#[cfg(target_arch = "aarch64")]
+assert_arch_signatures!(arm64);
 
 #[cfg(target_arch = "riscv64")]
 assert_arch_signatures!(riscv64);
 
 use crate::kernel::percpu::PerCpu;
+use crate::kernel::types::cpu_num_t;
 use zx_status::Status;
 
+#[allow(improper_ctypes)]
 unsafe extern "C" {
     fn cpp_arch_blocking_disallowed() -> bool;
     fn cpp_arch_ints_disabled() -> bool;
@@ -52,7 +68,13 @@ unsafe extern "C" {
     fn cpp_arch_max_num_cpus() -> u32;
     fn cpp_arch_set_blocking_disallowed(value: bool);
     fn cpp_arch_set_restricted_flag(restricted: bool);
-    fn cpp_arch_get_curr_percpu() -> *const core::ffi::c_void;
+    // `PerCpu` contains ZST fields which trigger `improper_ctypes`, even though `&'static PerCpu`
+    // is a thin pointer with identical ABI to `void*` and `PerCpu`'s layout is statically asserted
+    // against C++ `struct percpu`.
+    #[allow(improper_ctypes)]
+    fn cpp_arch_get_curr_percpu() -> &'static PerCpu;
+    #[cfg(target_arch = "x86_64")]
+    fn arch_setup_percpu(cpu_num: cpu_num_t, percpu: *mut PerCpu);
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -124,14 +146,21 @@ pub fn enable_ints() {
 /// The saved interrupt state, representing architecture-specific interrupt flags.
 #[cfg(target_arch = "x86_64")]
 #[repr(transparent)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InterruptSavedState(usize);
 
 /// The saved interrupt state, representing architecture-specific interrupt flags.
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 #[repr(transparent)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InterruptSavedState(bool);
+
+// Must match `kExpectedInterruptSavedStateSize` and `kExpectedInterruptSavedStateAlign` in
+// `zircon/kernel/arch/arch_ffi.cc`, which check `interrupt_saved_state_t`.
+#[cfg(target_arch = "x86_64")]
+zr::static_assert_size_and_align!(InterruptSavedState, 8, 8);
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+zr::static_assert_size_and_align!(InterruptSavedState, 1, 1);
 
 /// Save the current interrupt state (specifically, whether interrupts are enabled)
 /// and disable interrupts on the current CPU.
@@ -178,10 +207,43 @@ pub fn max_num_cpus() -> u32 {
     unsafe { cpp_arch_max_num_cpus() }
 }
 
-/// Return a pointer to the high-level percpu struct for the calling CPU.
+/// Return a reference to the high-level percpu struct for the calling CPU.
 #[inline(always)]
-pub fn get_curr_percpu() -> *const PerCpu {
-    unsafe { cpp_arch_get_curr_percpu().cast() }
+pub fn get_curr_percpu() -> &'static PerCpu {
+    // SAFETY: `cpp_arch_get_curr_percpu` returns a valid, non-null, 64-byte-aligned `'static`
+    // `PerCpu` pointer for the calling CPU (initialized during boot before Rust callers run), and
+    // all mutable fields of `PerCpu` use interior mutability (`UnsafeCell` / atomics).
+    unsafe { cpp_arch_get_curr_percpu() }
+}
+
+/// Setup the high-level percpu struct pointer for `cpu_num`.
+///
+/// # Safety
+///
+/// - `cpu_num` must identify the calling CPU and be less than `SMP_MAX_CPUS` with interrupts
+///   disabled.
+/// - `percpu` must point to a valid, initialized `'static` [`PerCpu`] instance dedicated to
+///   `cpu_num`.
+#[inline]
+pub unsafe fn setup_percpu(cpu_num: cpu_num_t, percpu: *mut PerCpu) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: Caller guarantees `cpu_num` identifies the calling CPU (< `SMP_MAX_CPUS`) with
+        // interrupts disabled and `percpu` points to its initialized `'static` `PerCpu` instance.
+        unsafe { arch_arm64::mp::arch_setup_percpu(cpu_num, percpu) };
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        // SAFETY: Caller guarantees `cpu_num` identifies the calling CPU (< `SMP_MAX_CPUS`) with
+        // interrupts disabled and `percpu` points to its initialized `'static` `PerCpu` instance.
+        unsafe { arch_riscv64::mp::arch_setup_percpu(cpu_num, percpu) };
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: Caller guarantees `cpu_num` identifies the calling CPU (< `SMP_MAX_CPUS`) with
+        // interrupts disabled and `percpu` points to its initialized `'static` `PerCpu` instance.
+        unsafe { arch_setup_percpu(cpu_num, percpu) };
+    }
 }
 
 /// Copies `len` bytes from user memory at `src` into kernel memory at `dst`.
@@ -389,4 +451,146 @@ pub unsafe fn arch_copy_to_user_capture_faults(
 #[inline(always)]
 pub fn set_blocking_disallowed(value: bool) {
     unsafe { cpp_arch_set_blocking_disallowed(value) }
+}
+
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+mod sys {
+    unsafe extern "C" {
+        #[cfg(target_arch = "x86_64")]
+        pub fn arch_mp_send_ipi(
+            target: crate::kernel::mp::MpIpiTarget,
+            mask: crate::kernel::types::cpu_mask_t,
+            ipi: crate::kernel::mp::MpIpi,
+        );
+        #[cfg(target_arch = "x86_64")]
+        pub fn arch_mp_reschedule(mask: crate::kernel::types::cpu_mask_t);
+        #[cfg(target_arch = "x86_64")]
+        pub fn arch_mp_cpu_hotplug(
+            cpu_id: crate::kernel::types::cpu_num_t,
+        ) -> zx_types::zx_status_t;
+        #[cfg(target_arch = "aarch64")]
+        pub fn platform_mp_prep_cpu_unplug(
+            cpu_id: crate::kernel::types::cpu_num_t,
+        ) -> zx_types::zx_status_t;
+        #[cfg(target_arch = "aarch64")]
+        pub fn platform_mp_cpu_unplug(
+            cpu_id: crate::kernel::types::cpu_num_t,
+        ) -> zx_types::zx_status_t;
+    }
+}
+
+/// Sends an inter-processor interrupt (IPI) to the specified target CPUs.
+///
+/// Note: Calling with [`crate::kernel::mp::MpIpiTarget::AllButLocal`] requires interrupts to be
+/// disabled on the calling CPU.
+#[inline(always)]
+pub fn mp_send_ipi(
+    target: crate::kernel::mp::MpIpiTarget,
+    mask: crate::kernel::types::cpu_mask_t,
+    ipi: crate::kernel::mp::MpIpi,
+) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        arm64::mp::arch_mp_send_ipi(target, mask, ipi);
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        riscv64::mp::arch_mp_send_ipi(target, mask, ipi);
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: Foreign function call with value arguments.
+        unsafe { sys::arch_mp_send_ipi(target, mask, ipi) };
+    }
+}
+
+pub use mp_send_ipi as arch_mp_send_ipi;
+
+/// Reschedules tasks on the CPUs specified by `mask`.
+#[inline(always)]
+pub fn mp_reschedule(mask: crate::kernel::types::cpu_mask_t) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        arm64::mp::arch_mp_reschedule(mask);
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        riscv64::mp::arch_mp_reschedule(mask);
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: `arch_mp_reschedule` masks `mask` to `< x86_num_cpus` before indexing
+        // `bp_percpu` / `ap_percpus`.
+        unsafe { sys::arch_mp_reschedule(mask) };
+    }
+}
+
+/// Asks the architecture layer to bring a CPU up and enter it into the scheduler.
+///
+/// # Safety
+///
+/// The caller must serialize this with every other hotplug and unplug of `cpu_id`, and `cpu_id`
+/// must be fully stopped (not still booting and not partway through halting).
+#[inline(always)]
+pub unsafe fn mp_cpu_hotplug(cpu_id: crate::kernel::types::cpu_num_t) -> Result<(), Status> {
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: Caller upholds the serialization and stopped-CPU preconditions.
+        unsafe { arm64::mp::arch_mp_cpu_hotplug(cpu_id) }
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        // SAFETY: Caller upholds the serialization and stopped-CPU preconditions.
+        unsafe { riscv64::mp::arch_mp_cpu_hotplug(cpu_id) }
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: Caller upholds the serialization and stopped-CPU preconditions.
+        Status::ok(unsafe { sys::arch_mp_cpu_hotplug(cpu_id) })
+    }
+}
+
+/// Prepares the platform for CPU unplug.
+#[inline(always)]
+pub fn platform_mp_prep_cpu_unplug(cpu_id: crate::kernel::types::cpu_num_t) -> Result<(), Status> {
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: Foreign function call with value argument.
+        Status::ok(unsafe { sys::platform_mp_prep_cpu_unplug(cpu_id) })
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        crate::generic_riscv64::platform::platform_mp_prep_cpu_unplug(cpu_id)
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        crate::platform_pc::platform::platform_mp_prep_cpu_unplug(cpu_id)
+    }
+}
+
+/// Shuts down the specified CPU at the platform level after it is no longer scheduled on.
+///
+/// # Safety
+///
+/// `cpu_id` must not be the calling CPU and must already be offline/halted and no longer scheduled
+/// on.
+#[inline(always)]
+pub unsafe fn platform_mp_cpu_unplug(
+    cpu_id: crate::kernel::types::cpu_num_t,
+) -> Result<(), Status> {
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: Caller guarantees `cpu_id` is not the calling CPU and is already offline/halted.
+        Status::ok(unsafe { sys::platform_mp_cpu_unplug(cpu_id) })
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        crate::generic_riscv64::platform::platform_mp_cpu_unplug(cpu_id)
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: Caller guarantees `cpu_id` is not the calling CPU and is already offline/halted
+        // and no longer scheduled on.
+        unsafe { crate::platform_pc::platform::platform_mp_cpu_unplug(cpu_id) }
+    }
 }

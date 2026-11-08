@@ -126,7 +126,7 @@ zx::result<> VnodeMinfs::BlocksShrink(PendingWork* transaction, blk_t start) {
 zx::result<LazyBuffer*> VnodeMinfs::GetIndirectFile() {
   if (!indirect_file_) {
     zx::result<std::unique_ptr<LazyBuffer>> buffer = LazyBuffer::Create(
-        fs_->bc_.get(), "minfs-indirect-file", static_cast<uint32_t>(fs_->BlockSize()));
+        fs_->GetMutableBcache(), "minfs-indirect-file", static_cast<uint32_t>(fs_->BlockSize()));
     if (buffer.is_error())
       return buffer.take_error();
     indirect_file_ = std::move(buffer).value();
@@ -299,7 +299,7 @@ void VnodeMinfs::RecycleNode() {
 
 VnodeMinfs::~VnodeMinfs() {
   if (indirect_file_) {
-    auto status = indirect_file_->Detach(fs_->bc_.get());
+    auto status = indirect_file_->Detach(fs_->GetMutableBcache());
     ZX_DEBUG_ASSERT_MSG(status.is_ok(), "indirect_file detach failed: status=%d",
                         status.status_value());
   }
@@ -486,7 +486,8 @@ zx::result<> VnodeMinfs::WriteInternal(Transaction* transaction, const uint8_t* 
     }
     ZX_DEBUG_ASSERT(bno_or.value() != 0);
     auto wdata = std::make_unique<char[]>(fs_->BlockSize());
-    if (auto status = fs_->bc_->Readblk(bno_or.value() + fs_->Info().dat_block, wdata.get());
+    if (auto status =
+            fs_->GetMutableBcache()->Readblk(bno_or.value() + fs_->Info().dat_block, wdata.get());
         status.is_error()) {
       break;
     }
@@ -494,7 +495,8 @@ zx::result<> VnodeMinfs::WriteInternal(Transaction* transaction, const uint8_t* 
     if (len < fs_->BlockSize() && max_size >= GetSize()) {
       memset(wdata.get() + adjust + xfer, 0, fs_->BlockSize() - (adjust + xfer));
     }
-    if (auto status = fs_->bc_->Writeblk(bno_or.value() + fs_->Info().dat_block, wdata.get());
+    if (auto status =
+            fs_->GetMutableBcache()->Writeblk(bno_or.value() + fs_->Info().dat_block, wdata.get());
         status.is_error()) {
       break;
     }
@@ -716,11 +718,13 @@ zx::result<> VnodeMinfs::TruncateInternal(Transaction* transaction, size_t len) 
       }
 #else   // __Fuchsia__
       if (bno != 0) {
-        if (fs_->bc_->Readblk(bno + fs_->Info().dat_block, bdata.get()).is_error()) {
+        if (fs_->GetMutableBcache()->Readblk(bno + fs_->Info().dat_block, bdata.get()).is_error()) {
           return zx::error(ZX_ERR_IO);
         }
         memset(bdata.get() + adjust, 0, fs_->BlockSize() - adjust);
-        if (fs_->bc_->Writeblk(bno + fs_->Info().dat_block, bdata.get()).is_error()) {
+        if (fs_->GetMutableBcache()
+                ->Writeblk(bno + fs_->Info().dat_block, bdata.get())
+                .is_error()) {
           return zx::error(ZX_ERR_IO);
         }
       }
@@ -759,7 +763,7 @@ void VnodeMinfs::Sync(SyncCallback closure) {
   fs_->Sync([vn, cb = std::move(closure), event = std::move(event)](zx_status_t status) mutable {
     // This is called on the journal thread. Operations here must be threadsafe.
     if (status == ZX_OK) {
-      status = vn->fs_->bc_->Sync().status_value();
+      status = vn->fs_->GetMutableBcache()->Sync().status_value();
     }
     cb(status);
     event.SetStatus(status);

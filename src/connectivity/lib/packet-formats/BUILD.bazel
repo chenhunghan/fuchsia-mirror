@@ -9,6 +9,15 @@ load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package
 
 package(default_applicable_licenses = ["//:license"])
 
+test_suite(
+    name = "target_tests",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    tests = [
+        ":packet-formats-test",
+        "//src/connectivity/lib/packet-formats/benchmarks:packet-formats-benchmarks-test",
+    ],
+)
+
 rustc_library(
     name = "packet-formats",
     srcs = [

@@ -257,10 +257,6 @@ func IsManifestSubpackage(manifestPath, fuchsiaDir string) bool {
 		return true
 	}
 
-	if strings.HasPrefix(slashRel, "third_party/go/src/") {
-		return true
-	}
-
 	dir := filepath.Dir(slashRel)
 	parts := strings.Split(dir, "/")
 	minDepth := 1

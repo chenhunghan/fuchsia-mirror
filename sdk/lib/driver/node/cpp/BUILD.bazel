@@ -1,0 +1,33 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/idk:idk_cc_source_library.bzl", "idk_cc_source_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# This library is only available in API level 18 and up.
+idk_cc_source_library(
+    name = "cpp",
+    srcs = [
+        "add_child.cc",
+        "provide-resource.cc",
+    ],
+    hdrs = [
+        "add_child.h",
+        "provide-resource.h",
+    ],
+    api_area = "Driver SDK",
+    category = "partner",
+    idk_name = "driver_node_cpp",
+    include_base = "//sdk",
+    public_configs = ["//sdk/config"],
+    stable = True,
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_cpp",
+        "//sdk/lib/driver/logging/cpp",
+        "//sdk/lib/stdcompat",
+    ],
+)

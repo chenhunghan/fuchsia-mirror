@@ -292,22 +292,13 @@ async def args_gn_collector() -> list[data.Result]:
                     ]
 
     # If a product bundle is set, we want to show its name instead of its label.
-    product_bundles_path = build_dir_path / "product_bundles.json"
-    if product_bundles_path.exists():
-        try:
-            with open(product_bundles_path, "r") as f:
-                product_bundles = json.load(f)
-        except (json.JSONDecodeError, IOError):
-            product_bundles = []
-
-        main_pb_label_val = assigned_variables.get("main_pb_label")
-        if main_pb_label_val and isinstance(main_pb_label_val, str):
-            for pb in product_bundles:
-                # The label in product_bundles.json might have a toolchain.
-                label = pb.get("label", "")
-                if label.startswith(main_pb_label_val):
-                    assigned_variables["main_pb_label"] = pb.get("name")
-                    break
+    main_pb_label_val = assigned_variables.get("main_pb_label")
+    if main_pb_label_val and isinstance(main_pb_label_val, str):
+        pb_name = build_dir.resolve_product_bundle_name(
+            build_dir_path, main_pb_label_val
+        )
+        if pb_name:
+            assigned_variables["main_pb_label"] = pb_name
 
     # Parse the import names into pairs of (type, value).
     # For instance, `import("//boards/x64.gni")` would be parsed into

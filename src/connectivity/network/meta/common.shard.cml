@@ -14,6 +14,10 @@
             on_terminate: "reboot",
         },
         {
+            name: "dhcp-client",
+            url: "fuchsia-pkg://fuchsia.com/dhcp-client#meta/dhcp-client.cm",
+        },
+        {
             name: "dhcpd",
             url: "fuchsia-pkg://fuchsia.com/dhcpv4-server#meta/dhcpv4_server.cm",
         },
@@ -35,7 +39,7 @@
         },
         {
             name: "netcfg",
-            url: "fuchsia-pkg://fuchsia.com/netcfg-basic#meta/netcfg-basic.cm",
+            url: "fuchsia-pkg://fuchsia.com/netcfg#meta/netcfg.cm",
             startup: "eager",
         },
         {
@@ -86,15 +90,9 @@
             to: [ "#netcfg" ],
         },
         {
-            protocol: "fuchsia.net.dhcp.ClientProvider",
-
-            // TODO(https://fxbug.dev/42076541): Once the DHCP client component is
-            // being used for all DHCPv4 functionality, make it a child of this
-            // realm, route the protocol from there instead of the netstack
-            // realm, and mark it here as "required".
-            from: "#netstack",
-            to: "#netcfg",
-            availability: "same_as_target",
+            protocol: [ "fuchsia.net.dhcp.ClientProvider" ],
+            from: "#dhcp-client",
+            to: [ "#netcfg" ],
         },
         {
             protocol: [ "fuchsia.net.name.Lookup" ],
@@ -148,7 +146,10 @@
         {
             protocol: [ "fuchsia.posix.socket.packet.Provider" ],
             from: "#netstack",
-            to: [ "#dhcpd" ],
+            to: [
+                "#dhcp-client",
+                "#dhcpd",
+            ],
         },
         {
             protocol: [
@@ -212,6 +213,7 @@
             protocol: [
                 "fuchsia.power.broker.Topology",
                 "fuchsia.power.system.ActivityGovernor",
+                "fuchsia.time.alarms.WakeAlarms",
             ],
             from: "parent",
             to: "#netstack",
@@ -221,6 +223,15 @@
             config: "fuchsia.power.SuspendEnabled",
             from: "parent",
             to: "#netstack",
+        },
+        {
+            config: "fuchsia.connectivity.RedactNetworkIdentifiers",
+            from: "parent",
+            to: [
+                "#netcfg",
+                "#netstack",
+            ],
+            availability: "same_as_target",
         },
         {
             storage: "data",

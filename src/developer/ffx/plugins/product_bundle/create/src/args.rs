@@ -118,4 +118,20 @@ pub struct CreateCommand {
     /// only build the ZBI and copy it to the top level of the output directory.
     #[argh(switch)]
     pub zbi_only: bool,
+
+    /// directory to write Android-compatible partition images and an unsigned ota.zip to (requires --tuf-keys, and --android-base-ota or --android-build-prop).
+    #[argh(option)]
+    pub android: Option<Utf8PathBuf>,
+
+    /// base Android ota.zip whose Android build metadata is copied into the generated ota.zip.
+    #[argh(option)]
+    pub android_base_ota: Option<Utf8PathBuf>,
+
+    /// android build.prop file to derive the Android build metadata of the generated ota.zip from. May be repeated; later files take precedence.
+    #[argh(option)]
+    pub android_build_prop: Vec<Utf8PathBuf>,
+
+    /// optional PEM X.509 certificate to embed in the ota.zip as META-INF/com/android/otacert.
+    #[argh(option)]
+    pub android_ota_cert: Option<Utf8PathBuf>,
 }

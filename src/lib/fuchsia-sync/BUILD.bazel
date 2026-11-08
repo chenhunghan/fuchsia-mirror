@@ -19,7 +19,10 @@ FUCHSIA_SYNC_SRCS = [
 ]
 
 # @bazel2gn:transformer=deps
-FUCHSIA_SYNC_DEPS_COMMON = ["//third_party/rust_crates/vendor:lock_api"]
+FUCHSIA_SYNC_DEPS_COMMON = [
+    "//src/lib/fuchsia-rcu:fuchsia-rcu-traits",
+    "//third_party/rust_crates/vendor:lock_api",
+]
 
 # @bazel2gn:transformer=deps
 FUCHSIA_SYNC_DEPS_FUCHSIA = ["//sdk/rust/zx"]

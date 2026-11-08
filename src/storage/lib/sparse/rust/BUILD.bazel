@@ -54,6 +54,7 @@ host_test_data_files(
         ":simg2img_libcxx",
     ],
     dest_dir = "host_x64/test_data/storage/sparse",
+    visibility = ["//tools/emulator/emulatortest:__pkg__"],
 )
 
 rustc_library(
@@ -142,7 +143,6 @@ fx_component_manifest(
 fx_test_component(
     name = "sparse-test-component",
     compiled_manifest = ":sparse-test-manifest",
-    component_name = "sparse-test",
     deps = [":sparse_lib_test_packaged_bin"],
 )
 

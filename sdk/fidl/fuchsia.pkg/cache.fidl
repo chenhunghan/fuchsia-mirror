@@ -105,6 +105,9 @@ open protocol PackageCache {
     /// with upgradable packages.
     ///
     /// The hash most recently associated with an upgradable package URL will be protected from GC.
+    /// Callers must keep newly associated packages protected from GC until this method returns,
+    /// e.g. by keeping open a package directory obtained from [`PackageCache.Get`] with
+    /// [`GcProtection.OPEN_PACKAGE_TRACKING`]. This method waits for any in-progress GC to finish.
     ///
     /// + request `pinned_urls` packages URLs pinned to the new hash.
     flexible SetUpgradableUrls(struct {

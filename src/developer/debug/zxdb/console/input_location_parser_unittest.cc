@@ -147,6 +147,11 @@ TEST_F(InputLocationParserTest, EvalGlobalInputLocation) {
   EXPECT_EQ(file, result.loc.value().line.file());
   EXPECT_EQ(92, result.loc.value().line.line());
 
+  // A bare 0 line number with an implicit file is rejected like "file:0".
+  result = SyncEvalGlobalInputLocation(eval_context, existing_location_with_file, "0");
+  ASSERT_TRUE(result.loc.has_error());
+  EXPECT_EQ(result.loc.err().msg(), "Can't have a 0 line number.");
+
   // Pointer to a double. This should give a valid expression size.
   result = SyncEvalGlobalInputLocation(eval_context, existing_location, "*(double*)0x123450");
   ASSERT_TRUE(result.loc.ok()) << result.loc.err().msg();

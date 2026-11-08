@@ -1,0 +1,49 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "test",
+    srcs = ["src/lib.rs"],
+    crate_name = "no_rust_tests",
+    edition = "2024",
+)
+
+fx_packaged_binary(
+    name = "test_packaged_bin",
+    testonly = True,
+    binary = ":test",
+    binary_name = "no_rust_tests",
+)
+
+fx_component_manifest(
+    name = "no-rust-tests-manifest",
+    testonly = True,
+    component_name = "no_rust_tests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/no_rust_tests.cml",
+)
+
+fx_component(
+    name = "no-rust-tests",
+    testonly = True,
+    compiled_manifest = ":no-rust-tests-manifest",
+    visibility = ["//src/sys/test_runners/rust:__subpackages__"],
+    deps = [":test_packaged_bin"],
+)

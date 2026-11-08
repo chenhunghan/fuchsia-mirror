@@ -167,7 +167,10 @@ impl<'a, 'b> SocketRef for &'a mut BpfSockAddr<'a> {
 }
 
 // Context for eBPF programs of type BPF_PROG_TYPE_CGROUP_SOCKADDR.
-struct SockAddrProgram(EbpfProgram<SockAddrProgram>);
+struct SockAddrProgram {
+    program: EbpfProgram<SockAddrProgram>,
+    handle: ProgramHandle,
+}
 
 impl EbpfProgramContext for SockAddrProgram {
     type RunContext<'a> = EbpfRunContextImpl<'a>;
@@ -183,25 +186,50 @@ impl EbpfProgramContext for SockAddrProgram {
 
 ebpf_api::ebpf_program_context_type!(SockAddrProgram, CgroupSockAddrProgramContext);
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SockAddrProgramResult {
     Allow,
+    /// Allows `SockAddrOp::Bind` and bypasses the `CAP_NET_BIND_SERVICE` check for privileged
+    /// ports (`< 1024`), corresponding to `BPF_RET_BIND_NO_CAP_NET_BIND_SERVICE`.
+    AllowNoCapNetBindService,
     Block,
 }
+
+// Flag returned in `result >> 1` by `BPF_CGROUP_INET{4,6}_BIND` programs
+// (`BPF_RET_BIND_NO_CAP_NET_BIND_SERVICE` in Linux `include/linux/bpf.h`).
+const BPF_RET_BIND_NO_CAP_NET_BIND_SERVICE: u64 = 1;
 
 impl SockAddrProgram {
     fn run<'a>(
         &self,
         current_task: &'a CurrentTask,
         addr: &'a mut BpfSockAddr<'a>,
-        can_block: bool,
+        op: SockAddrOp,
     ) -> SockAddrProgramResult {
         let mut run_context = EbpfRunContextImpl::new(current_task);
-        match self.0.run_with_1_argument(&mut run_context, addr) {
+        let result = self.program.run_with_1_argument(&mut run_context, addr);
+        match op {
+            // BPF_CGROUP_INET{4,6}_BIND programs encode optional flags in `result >> 1`
+            // (`BPF_RET_BIND_NO_CAP_NET_BIND_SERVICE`) and the allow/reject verdict in `result & 1`.
+            SockAddrOp::Bind if (result >> 1) & !BPF_RET_BIND_NO_CAP_NET_BIND_SERVICE == 0 => {
+                if result & 1 == 0 {
+                    SockAddrProgramResult::Block
+                } else if (result >> 1) & BPF_RET_BIND_NO_CAP_NET_BIND_SERVICE != 0 {
+                    SockAddrProgramResult::AllowNoCapNetBindService
+                } else {
+                    SockAddrProgramResult::Allow
+                }
+            }
+            SockAddrOp::Connect | SockAddrOp::UdpSendMsg if result == 0 => {
+                SockAddrProgramResult::Block
+            }
             // UDP_RECVMSG programs are not allowed to block the packet.
-            0 if can_block => SockAddrProgramResult::Block,
-            1 => SockAddrProgramResult::Allow,
-            result => {
+            SockAddrOp::Connect | SockAddrOp::UdpSendMsg | SockAddrOp::UdpRecvMsg
+                if result == 1 =>
+            {
+                SockAddrProgramResult::Allow
+            }
+            _ => {
                 // TODO(https://fxbug.dev/413490751): Change this to panic once
                 // result validation is implemented in the eBPF verifier.
                 log_error!("eBPF program returned invalid result: {}", result);
@@ -272,7 +300,10 @@ impl<'a> SocketRef for &'_ BpfSock<'a> {
 }
 
 // Context for eBPF programs of type BPF_PROG_TYPE_CGROUP_SOCK.
-struct SockProgram(EbpfProgram<SockProgram>);
+struct SockProgram {
+    program: EbpfProgram<SockProgram>,
+    handle: ProgramHandle,
+}
 
 impl EbpfProgramContext for SockProgram {
     type RunContext<'a> = EbpfRunContextImpl<'a>;
@@ -297,7 +328,7 @@ pub enum SockProgramResult {
 impl SockProgram {
     fn run<'a>(&self, current_task: &'a CurrentTask, sock: &'a BpfSock<'a>) -> SockProgramResult {
         let mut run_context = EbpfRunContextImpl::new(current_task);
-        if self.0.run_with_1_argument(&mut run_context, sock) == 0 {
+        if self.program.run_with_1_argument(&mut run_context, sock) == 0 {
             SockProgramResult::Block
         } else {
             SockProgramResult::Allow
@@ -395,7 +426,10 @@ mod internal {
 use internal::{BpfSockOpt, BpfSockOptWithValue};
 
 // Context for eBPF programs of type BPF_PROG_TYPE_CGROUP_SOCKOPT.
-struct SockOptProgram(EbpfProgram<SockOptProgram>);
+struct SockOptProgram {
+    program: EbpfProgram<SockOptProgram>,
+    handle: ProgramHandle,
+}
 
 // RunContext for eBPF programs of type BPF_PROG_TYPE_CGROUP_SOCKOPT.
 pub struct SockOptEbpfRunContextImpl<'a> {
@@ -479,11 +513,12 @@ impl SockOptProgram {
     fn run<'a>(&self, current_task: &'a CurrentTask, sockopt: &'a mut BpfSockOptWithValue) -> u64 {
         let sockopt_ptr = sockopt.as_ptr();
         let mut run_context = SockOptEbpfRunContextImpl::new(current_task, sockopt_ptr);
-        self.0.run_with_1_argument(&mut run_context, sockopt_ptr)
+        self.program.run_with_1_argument(&mut run_context, sockopt_ptr)
     }
 }
 
 type AttachedSockOptProgramCell = RcuLock<RcuArc<SockOptProgram>, EbpfStateLock>;
+type AttachedNetstackProgramCell = RcuLock<RcuArc<ProgramHandle>, EbpfStateLock>;
 
 #[derive(Default)]
 pub struct CgroupEbpfProgramSet {
@@ -499,6 +534,8 @@ pub struct CgroupEbpfProgramSet {
     sock_release: AttachedSockProgramCell,
     set_sockopt: AttachedSockOptProgramCell,
     get_sockopt: AttachedSockOptProgramCell,
+    inet_ingress: AttachedNetstackProgramCell,
+    inet_egress: AttachedNetstackProgramCell,
 }
 
 #[derive(Eq, PartialEq, Debug, Copy, Clone)]
@@ -554,6 +591,19 @@ impl CgroupEbpfProgramSet {
         match attach_type {
             AttachType::CgroupSetsockopt => Ok(&self.set_sockopt),
             AttachType::CgroupGetsockopt => Ok(&self.get_sockopt),
+            _ => error!(ENOTSUP),
+        }
+    }
+
+    fn get_netstack_program(
+        &self,
+        attach_type: AttachType,
+    ) -> Result<&AttachedNetstackProgramCell, Errno> {
+        assert!(attach_type.is_cgroup());
+
+        match attach_type {
+            AttachType::CgroupInetIngress => Ok(&self.inet_ingress),
+            AttachType::CgroupInetEgress => Ok(&self.inet_egress),
             _ => error!(ENOTSUP),
         }
     }
@@ -621,9 +671,7 @@ impl CgroupEbpfProgramSet {
         bpf_sockaddr.__bindgen_anon_1.sk =
             (uaddr { addr: BpfValue::from(&bpf_sock).into() }).into();
 
-        // UDP recvmsg programs are not allowed to filter packets.
-        let can_block = op != SockAddrOp::UdpRecvMsg;
-        Ok(prog.run(current_task, &mut bpf_sockaddr, can_block))
+        Ok(prog.run(current_task, &mut bpf_sockaddr, op))
     }
 
     pub fn run_sock_prog(
@@ -942,6 +990,53 @@ pub struct EbpfAttachments {
 }
 
 impl EbpfAttachments {
+    pub fn query_prog(
+        &self,
+        current_task: &CurrentTask,
+        target_fd: FdNumber,
+        attach_type: AttachType,
+    ) -> Result<Vec<u32>, Errno> {
+        check_root_cgroup_fd(current_task, target_fd)?;
+        let mut ids = Vec::new();
+
+        let location = match AttachLocation::try_from(attach_type) {
+            Ok(location) => location,
+            Err(e) if e == errno!(ENOTSUP) => {
+                // Return a fake program ID for stubbed attach types.
+                ids.push(1);
+                return Ok(ids);
+            }
+            Err(e) => return Err(e),
+        };
+        let program_type = attach_type.get_program_type();
+        match (location, program_type) {
+            (AttachLocation::Kernel, ProgramType::CgroupSockAddr) => {
+                if let Some(prog) = self.root_cgroup.get_sock_addr_program(attach_type)?.upgrade() {
+                    ids.push(prog.handle.id());
+                }
+            }
+            (AttachLocation::Kernel, ProgramType::CgroupSock) => {
+                if let Some(prog) = self.root_cgroup.get_sock_program(attach_type)?.upgrade() {
+                    ids.push(prog.handle.id());
+                }
+            }
+            (AttachLocation::Kernel, ProgramType::CgroupSockopt) => {
+                if let Some(prog) = self.root_cgroup.get_sock_opt_program(attach_type)?.upgrade() {
+                    ids.push(prog.handle.id());
+                }
+            }
+            (AttachLocation::Kernel, _) => {
+                unreachable!();
+            }
+            (AttachLocation::Netstack, _) => {
+                if let Some(prog) = self.root_cgroup.get_netstack_program(attach_type)?.upgrade() {
+                    ids.push(prog.id());
+                }
+            }
+        }
+        Ok(ids)
+    }
+
     pub fn root_cgroup(&self) -> &CgroupEbpfProgramSet {
         &self.root_cgroup
     }
@@ -966,7 +1061,10 @@ impl EbpfAttachments {
             (AttachLocation::Kernel, ProgramType::CgroupSockAddr) => {
                 check_root_cgroup_fd(current_task, target_fd)?;
 
-                let linked_program = SockAddrProgram(program.link(attach_type.get_program_type())?);
+                let linked_program = SockAddrProgram {
+                    program: program.link(attach_type.get_program_type())?,
+                    handle: program.clone(),
+                };
                 self.root_cgroup
                     .get_sock_addr_program(attach_type)?
                     .lock()
@@ -978,7 +1076,10 @@ impl EbpfAttachments {
             (AttachLocation::Kernel, ProgramType::CgroupSock) => {
                 check_root_cgroup_fd(current_task, target_fd)?;
 
-                let linked_program = SockProgram(program.link(attach_type.get_program_type())?);
+                let linked_program = SockProgram {
+                    program: program.link(attach_type.get_program_type())?,
+                    handle: program.clone(),
+                };
                 self.root_cgroup
                     .get_sock_program(attach_type)?
                     .lock()
@@ -990,7 +1091,10 @@ impl EbpfAttachments {
             (AttachLocation::Kernel, ProgramType::CgroupSockopt) => {
                 check_root_cgroup_fd(current_task, target_fd)?;
 
-                let linked_program = SockOptProgram(program.link(attach_type.get_program_type())?);
+                let linked_program = SockOptProgram {
+                    program: program.link(attach_type.get_program_type())?,
+                    handle: program.clone(),
+                };
                 self.root_cgroup
                     .get_sock_opt_program(attach_type)?
                     .lock()
@@ -1005,7 +1109,12 @@ impl EbpfAttachments {
 
             (AttachLocation::Netstack, _) => {
                 check_root_cgroup_fd(current_task, target_fd)?;
-                self.attach_prog_in_netstack(attach_type, program)
+                self.attach_prog_in_netstack(attach_type, program.clone())?;
+                self.root_cgroup
+                    .get_netstack_program(attach_type)?
+                    .lock()
+                    .update(Some(Arc::new(program)));
+                Ok(SUCCESS)
             }
         }
     }
@@ -1064,7 +1173,10 @@ impl EbpfAttachments {
 
             (AttachLocation::Netstack, _) => {
                 check_root_cgroup_fd(current_task, target_fd)?;
-                self.detach_prog_in_netstack(attach_type)
+                let prog_cell = self.root_cgroup.get_netstack_program(attach_type)?.lock();
+                self.detach_prog_in_netstack(attach_type)?;
+                prog_cell.update(None);
+                Ok(SUCCESS)
             }
         }
     }
@@ -1137,8 +1249,9 @@ mod tests {
         EbpfInstruction, MapFlags, MapSchema, NullVerifierLogger, link_program, verify_program,
     };
     use linux_uapi::{
-        AF_INET, BPF_ALU64, BPF_EXIT, BPF_JMP, BPF_K, BPF_MOV, bpf_map_type_BPF_MAP_TYPE_ARRAY,
-        bpf_map_type_BPF_MAP_TYPE_RINGBUF, sockaddr_in,
+        AF_INET, AF_INET6, BPF_ALU64, BPF_EXIT, BPF_JMP, BPF_K, BPF_MOV,
+        bpf_map_type_BPF_MAP_TYPE_ARRAY, bpf_map_type_BPF_MAP_TYPE_RINGBUF, sockaddr_in,
+        sockaddr_in6,
     };
     use starnix_types::vfs::default_statfs;
     use starnix_uapi::open_flags::OpenFlags;
@@ -1324,11 +1437,17 @@ mod tests {
                 .expect("verify program");
             let linked =
                 link_program::<SockProgram>(&verified, vec![ringbuf_map, array_map]).expect("link");
+            let handle = make_cgroup_program(
+                current_task,
+                ProgramType::CgroupSock,
+                AttachType::CgroupInetSockCreate,
+                0,
+            );
             root_cgroup
                 .get_sock_program(AttachType::CgroupInetSockCreate)
                 .expect("get sock_create slot")
                 .lock()
-                .update(Some(Arc::new(SockProgram(linked))));
+                .update(Some(Arc::new(SockProgram { program: linked, handle })));
 
             assert_eq!(
                 root_cgroup.run_sock_prog(
@@ -1500,6 +1619,174 @@ mod tests {
                 AttachType::CgroupInet4Bind,
                 cgroup_fd,
             );
+            current_task.trigger_delayed_releaser();
+            fuchsia_rcu::rcu_run_callbacks();
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_cgroup_sock_addr_bind_return_flags() {
+        spawn_kernel_and_run(async |current_task| {
+            let ebpf_state = &current_task.kernel().ebpf_state;
+            let root_cgroup = ebpf_state.attachments.root_cgroup();
+            let cgroup_fd = create_root_cgroup_fd(current_task);
+            let dummy_socket = Socket::new(
+                current_task,
+                SocketDomain::Unix,
+                SocketType::Datagram,
+                SocketProtocol::default(),
+                true,
+            )
+            .expect("create socket");
+            let inet4_sockaddr = sockaddr_in { sin_family: AF_INET as u16, ..Default::default() };
+            let inet6_sockaddr =
+                sockaddr_in6 { sin6_family: AF_INET6 as u16, ..Default::default() };
+
+            // BPF_CGROUP_INET{4,6}_BIND accepts verdicts 0..=3, where bit 0 is Allow/Block and
+            // bit 1 is BPF_RET_BIND_NO_CAP_NET_BIND_SERVICE; out-of-range values with unrecognized
+            // flag bits (such as 4 and 7) fall back to Allow rather than Block or
+            // AllowNoCapNetBindService.
+            for (return_value, expected) in [
+                (0, SockAddrProgramResult::Block),
+                (1, SockAddrProgramResult::Allow),
+                (2, SockAddrProgramResult::Block),
+                (3, SockAddrProgramResult::AllowNoCapNetBindService),
+                (4, SockAddrProgramResult::Allow),
+                (7, SockAddrProgramResult::Allow),
+            ] {
+                let bind4_prog = make_cgroup_program(
+                    current_task,
+                    ProgramType::CgroupSockAddr,
+                    AttachType::CgroupInet4Bind,
+                    return_value,
+                );
+                ebpf_state
+                    .attachments
+                    .attach_prog(current_task, AttachType::CgroupInet4Bind, cgroup_fd, bind4_prog)
+                    .expect("attach inet4_bind");
+                assert_eq!(
+                    root_cgroup.run_sock_addr_prog(
+                        current_task,
+                        SockAddrOp::Bind,
+                        SocketDomain::Inet,
+                        SocketType::Stream,
+                        SocketProtocol::TCP,
+                        inet4_sockaddr.as_bytes(),
+                        &dummy_socket,
+                    ),
+                    Ok(expected),
+                    "inet4_bind return_value={return_value}",
+                );
+
+                let bind6_prog = make_cgroup_program(
+                    current_task,
+                    ProgramType::CgroupSockAddr,
+                    AttachType::CgroupInet6Bind,
+                    return_value,
+                );
+                ebpf_state
+                    .attachments
+                    .attach_prog(current_task, AttachType::CgroupInet6Bind, cgroup_fd, bind6_prog)
+                    .expect("attach inet6_bind");
+                assert_eq!(
+                    root_cgroup.run_sock_addr_prog(
+                        current_task,
+                        SockAddrOp::Bind,
+                        SocketDomain::Inet6,
+                        SocketType::Stream,
+                        SocketProtocol::TCP,
+                        inet6_sockaddr.as_bytes(),
+                        &dummy_socket,
+                    ),
+                    Ok(expected),
+                    "inet6_bind return_value={return_value}",
+                );
+            }
+
+            // Connect only accepts 0 (Block) and 1 (Allow); invalid values such as 2 fall back to
+            // Allow rather than Block.
+            for (return_value, expected) in [
+                (0, SockAddrProgramResult::Block),
+                (1, SockAddrProgramResult::Allow),
+                (2, SockAddrProgramResult::Allow),
+            ] {
+                let connect_prog = make_cgroup_program(
+                    current_task,
+                    ProgramType::CgroupSockAddr,
+                    AttachType::CgroupInet4Connect,
+                    return_value,
+                );
+                ebpf_state
+                    .attachments
+                    .attach_prog(
+                        current_task,
+                        AttachType::CgroupInet4Connect,
+                        cgroup_fd,
+                        connect_prog,
+                    )
+                    .expect("attach inet4_connect");
+                assert_eq!(
+                    root_cgroup.run_sock_addr_prog(
+                        current_task,
+                        SockAddrOp::Connect,
+                        SocketDomain::Inet,
+                        SocketType::Stream,
+                        SocketProtocol::TCP,
+                        inet4_sockaddr.as_bytes(),
+                        &dummy_socket,
+                    ),
+                    Ok(expected),
+                    "inet4_connect return_value={return_value}",
+                );
+            }
+
+            // UdpRecvMsg only accepts 1 (Allow); 0 is invalid and falls back to Allow rather than
+            // Block.
+            for (return_value, expected) in
+                [(0, SockAddrProgramResult::Allow), (1, SockAddrProgramResult::Allow)]
+            {
+                let recvmsg_prog = make_cgroup_program(
+                    current_task,
+                    ProgramType::CgroupSockAddr,
+                    AttachType::CgroupUdp4Recvmsg,
+                    return_value,
+                );
+                ebpf_state
+                    .attachments
+                    .attach_prog(
+                        current_task,
+                        AttachType::CgroupUdp4Recvmsg,
+                        cgroup_fd,
+                        recvmsg_prog,
+                    )
+                    .expect("attach udp4_recvmsg");
+                assert_eq!(
+                    root_cgroup.run_sock_addr_prog(
+                        current_task,
+                        SockAddrOp::UdpRecvMsg,
+                        SocketDomain::Inet,
+                        SocketType::Datagram,
+                        SocketProtocol::UDP,
+                        inet4_sockaddr.as_bytes(),
+                        &dummy_socket,
+                    ),
+                    Ok(expected),
+                    "udp4_recvmsg return_value={return_value}",
+                );
+            }
+
+            for attach_type in [
+                AttachType::CgroupInet4Bind,
+                AttachType::CgroupInet6Bind,
+                AttachType::CgroupInet4Connect,
+                AttachType::CgroupUdp4Recvmsg,
+            ] {
+                ebpf_state
+                    .attachments
+                    .detach_prog(current_task, attach_type, cgroup_fd)
+                    .expect("detach program");
+            }
             current_task.trigger_delayed_releaser();
             fuchsia_rcu::rcu_run_callbacks();
         })

@@ -35,7 +35,6 @@ idk_go_binary_host_tool(
     embed = [":lib"],
     idk_name = "device-finder",
     target_compatible_with = HOST_OS_CONSTRAINTS,
-    visibility = ["//sdk:__pkg__"],
 )
 
 host_go_test(

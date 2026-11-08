@@ -5,7 +5,7 @@
 use crate::BatteryInfoSource;
 use crate::battery_info_recorders::{BatteryInfoRecorders, FaultRecoveryEvent, RecorderConfig};
 use crate::cache::{Cache, CachedStatus, StatusFields, Subscription, duplicate_lease};
-use crate::polisher::Polisher;
+use crate::polisher::{LevelChecker, Polisher};
 use anyhow::{Context as _, Error, anyhow};
 use fidl::endpoints::Proxy;
 use fidl_fuchsia_hardware_power_battery as fbattery;
@@ -306,9 +306,66 @@ fn resolve_charger_state(
     (source, status)
 }
 
+/// Overlays simulated field overrides onto a real `BatteryInfo` snapshot.
+///
+/// Fields that are explicitly set (`Some(...)`) in `overrides` replace the corresponding fields in
+/// `info`, while `None` fields in `overrides` leave the existing values in `info` untouched so
+/// live hardware updates (such as charger plug/unplug events) continue to flow through for
+/// non-overridden fields - except that when `overrides.level_percent` is `Some` and
+/// `overrides.level_status` is `None`, `info.level_status` is recomputed from the overridden
+/// `level_percent` and `info.charge_status`. When the underlying hardware reports no available
+/// battery or unknown health, `status` defaults to `Ok` and `health` defaults to `Good` before
+/// applying `overrides`.
+fn apply_simulated_overrides(info: &mut fpower::BatteryInfo, overrides: &fpower::BatteryInfo) {
+    if info.status != Some(fpower::BatteryStatus::Ok) {
+        info.status = Some(fpower::BatteryStatus::Ok);
+    }
+    if matches!(info.health, None | Some(fpower::HealthStatus::Unknown)) {
+        info.health = Some(fpower::HealthStatus::Good);
+    }
+
+    macro_rules! overlay_fields {
+        ($dst:expr, $src:expr, [$($field:ident),+ $(,)?]) => {
+            $(
+                if let Some(v) = &$src.$field {
+                    $dst.$field = Some(v.clone());
+                }
+            )+
+        };
+    }
+
+    overlay_fields!(
+        info,
+        overrides,
+        [
+            status,
+            charge_status,
+            charge_source,
+            level_percent,
+            level_status,
+            health,
+            time_remaining,
+            timestamp,
+            present_voltage_mv,
+            remaining_charge_uah,
+            battery_spec,
+            full_capacity_uah,
+            temperature_mc,
+            present_charging_current_ua,
+            average_charging_current_ua,
+        ]
+    );
+
+    if let (Some(level_percent), None) = (overrides.level_percent, overrides.level_status) {
+        info.level_status =
+            Some(LevelChecker::determine_level_status(level_percent, info.charge_status));
+    }
+}
+
 pub(crate) trait BatterySimulationStateObserver {
     fn update_simulation(&self, new_state: bool);
     fn update_simulated_battery_info(&self, battery_info: fpower::BatteryInfo);
+    fn get_battery_info_copy(&self) -> fpower::BatteryInfo;
 }
 
 impl BatterySimulationStateObserver for BatteryManager {
@@ -321,7 +378,13 @@ impl BatterySimulationStateObserver for BatteryManager {
         }
     }
     fn update_simulated_battery_info(&self, battery_info: fpower::BatteryInfo) {
-        self.update_watchers_conditionally(true, battery_info, None);
+        *self.simulated_battery_info.borrow_mut() = battery_info;
+        if self.is_simulating() {
+            self.common_update_watchers(self.get_battery_info_copy(), None);
+        }
+    }
+    fn get_battery_info_copy(&self) -> fpower::BatteryInfo {
+        BatteryManager::get_battery_info_copy(self)
     }
 }
 
@@ -341,6 +404,11 @@ pub struct BatteryManager {
     cached_battery_info: RefCell<fpower::BatteryInfo>,
     watchers: Rc<RefCell<Vec<fpower::BatteryInfoWatcherProxy>>>,
     simulation_state: RefCell<bool>,
+    /// Per-field overrides set via `fuchsia.power.battery.test.BatterySimulator`.
+    ///
+    /// When `simulation_state` is `true`, any `Some(...)` field here replaces the corresponding
+    /// field in `cached_battery_info`, while `None` fields leave the live `cached_battery_info`
+    /// values untouched.
     simulated_battery_info: RefCell<fpower::BatteryInfo>,
     data_polisher: RefCell<Polisher>,
     info_recorders: BatteryInfoRecorders,
@@ -394,17 +462,7 @@ impl BatteryManager {
             }),
             watchers: watchers_rc,
             simulation_state: RefCell::new(false),
-            simulated_battery_info: RefCell::new(fpower::BatteryInfo {
-                status: Some(fpower::BatteryStatus::NotAvailable),
-                charge_status: Some(fpower::ChargeStatus::Unknown),
-                charge_source: Some(fpower::ChargeSource::Unknown),
-                level_percent: None,
-                level_status: Some(fpower::LevelStatus::Unknown),
-                health: Some(fpower::HealthStatus::Unknown),
-                time_remaining: Some(fpower::TimeRemaining::Indeterminate(0)),
-                timestamp: Some(get_current_time()),
-                ..Default::default()
-            }),
+            simulated_battery_info: RefCell::new(fpower::BatteryInfo::default()),
             data_polisher: RefCell::new(Polisher::new_with_battery_manager_config(
                 battery_manager_config,
             )),
@@ -460,22 +518,16 @@ impl BatteryManager {
         watchers.push(watcher)
     }
 
-    // Call update_watchers if expecting_simulating == simulation_state.
-    // This behavior avoids unnecessary updates.
-    fn update_watchers_conditionally(
+    // Updates the real cached battery info and notifies watchers.
+    // When simulating, real hardware updates still notify watchers with simulated field
+    // overrides layered on top of the updated real state.
+    pub(crate) fn update_cached_battery_info(
         &self,
-        expect_simulating: bool,
         info: fpower::BatteryInfo,
         wake_lease: Option<zx::EventPair>,
     ) {
-        if expect_simulating {
-            *self.simulated_battery_info.borrow_mut() = info.clone();
-        } else {
-            *self.cached_battery_info.borrow_mut() = info.clone();
-        }
-        if self.is_simulating() == expect_simulating {
-            self.common_update_watchers(info, wake_lease);
-        }
+        *self.cached_battery_info.borrow_mut() = info;
+        self.common_update_watchers(self.get_battery_info_copy(), wake_lease);
     }
 
     pub fn common_update_watchers(
@@ -646,7 +698,7 @@ impl BatteryManager {
             }
             DriverUpdate::LegacyBatteryInfo { info, wake_lease } => {
                 let info = self.process_battery_info(info, sag).await;
-                self.update_watchers_conditionally(false, info, wake_lease);
+                self.update_cached_battery_info(info, wake_lease);
                 return true;
             }
             DriverUpdate::ChargerConnected { spec, subscription, proxy } => {
@@ -685,7 +737,7 @@ impl BatteryManager {
             *self.cached_battery_info.borrow_mut() = info;
             return false;
         }
-        self.update_watchers_conditionally(false, info, wake_lease);
+        self.update_cached_battery_info(info, wake_lease);
         true
     }
 
@@ -725,13 +777,11 @@ impl BatteryManager {
     }
 
     pub fn get_battery_info_copy(&self) -> fpower::BatteryInfo {
+        let mut info = self.cached_battery_info.borrow().clone();
         if *self.simulation_state.borrow() {
-            let info_lock = self.simulated_battery_info.borrow();
-            (*info_lock).clone()
-        } else {
-            let info_lock = self.cached_battery_info.borrow();
-            (*info_lock).clone()
+            apply_simulated_overrides(&mut info, &self.simulated_battery_info.borrow());
         }
+        info
     }
 
     pub fn is_simulating(&self) -> bool {
@@ -1694,35 +1744,33 @@ mod tests {
     // Note: Must be `async fn` because `create_manager()` spawns an `fasync::Task`,
     // which requires `#[fuchsia::test]` to initialize a Fuchsia async executor.
     #[fuchsia::test]
-    async fn test_update_watchers_conditionally_updates_simulated_cache() {
+    async fn test_update_simulated_battery_info_updates_simulated_cache() {
         let (_dir, battery_manager) = create_manager();
 
         // Ensure we are initially in real mode (not simulating)
         assert_eq!(battery_manager.is_simulating(), false);
 
-        // Call update_watchers_conditionally with expect_simulating = true (simulated update)
         // Even though is_simulating() is false, simulated_battery_info should still be updated.
         let mut simulated_info = fpower::BatteryInfo::default();
         simulated_info.level_percent = Some(42.0);
-        battery_manager.update_watchers_conditionally(true, simulated_info, None);
+        battery_manager.update_simulated_battery_info(simulated_info);
         assert_eq!(battery_manager.simulated_battery_info.borrow().level_percent, Some(42.0));
     }
 
     // Note: Must be `async fn` because `create_manager()` spawns an `fasync::Task`,
     // which requires `#[fuchsia::test]` to initialize a Fuchsia async executor.
     #[fuchsia::test]
-    async fn test_update_watchers_conditionally_updates_real_cache() {
+    async fn test_update_cached_battery_info_updates_real_cache() {
         let (_dir, battery_manager) = create_manager();
 
         // Switch to simulating mode
         battery_manager.update_simulation(true);
         assert_eq!(battery_manager.is_simulating(), true);
 
-        // Call update_watchers_conditionally with expect_simulating = false (real update)
         // Even though is_simulating() is true, cached_battery_info should still be updated.
         let mut real_info = fpower::BatteryInfo::default();
         real_info.level_percent = Some(84.0);
-        battery_manager.update_watchers_conditionally(false, real_info, None);
+        battery_manager.update_cached_battery_info(real_info, None);
         assert_eq!(battery_manager.cached_battery_info.borrow().level_percent, Some(84.0));
     }
 

@@ -66,10 +66,8 @@ source "${_CONFIG_FILE}"
 [[ -f "${_DOWNLOADER_CONFIG_FILE}" ]] || die "Missing downloader config file: ${_DOWNLOADER_CONFIG_FILE}"
 
 [[ -n "${_BAZEL_VENDOR_DIR}" ]] || die "Missing _BAZEL_VENDOR_DIR config variable"
-[[ -d "${_BAZEL_VENDOR_DIR}" ]] || die "Missing Bazel vendor directory: ${_BAZEL_VENDOR_DIR}"
 
 [[ -n "${_BAZEL_REGISTRY_DIR}" ]] || die "Missing _BAZEL_REGISTRY_DIR config variable"
-[[ -d "${_BAZEL_REGISTRY_DIR}" ]] || die "Missing Bazel registry directory: ${_BAZEL_REGISTRY_DIR}"
 
 [[ -v _EXPLICIT_FUCHSIA_SDK ]] || die "Missing _EXPLICIT_FUCHSIA_SDK config variable"
 
@@ -160,6 +158,7 @@ _BAZEL_STARTUP_ARGS+=("--output_base=${_OUTPUT_BASE}")
 readonly _INVOCATION_BAZELRC="$(mktemp "${_OUTPUT_BASE}/invocation.bazelrc.XXXXXX")"
 trap 'rm -f "${_INVOCATION_BAZELRC}"' EXIT
 
+PYTHONPATH="${_FUCHSIA_SOURCE_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
 "${_PYTHON_PREBUILT_DIR}/bin/python3" -S \
   "${_FUCHSIA_SOURCE_DIR}/build/bazel/scripts/generate_invocation_bazelrc.py" \
   > "${_INVOCATION_BAZELRC}"
@@ -170,6 +169,8 @@ if [[ "${_BAZEL_COMMAND}" == "vendor" ]]; then
   _DOWNLOADER_ARG="--downloader_config=/dev/null"
   _REGISTRY_ARG="--registry=https://bcr.bazel.build/"
 else
+  [[ -d "${_BAZEL_VENDOR_DIR}" ]] || die "Missing Bazel vendor directory: ${_BAZEL_VENDOR_DIR}"
+  [[ -d "${_BAZEL_REGISTRY_DIR}" ]] || die "Missing Bazel registry directory: ${_BAZEL_REGISTRY_DIR}"
   _DOWNLOADER_ARG="--downloader_config=${_DOWNLOADER_CONFIG_FILE}"
   _REGISTRY_ARG="--registry=file://${_BAZEL_REGISTRY_DIR}"
 fi
@@ -205,13 +206,6 @@ if _has_config "remote"; then
   _CPUS="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "")"
   if [[ -n "${_CPUS}" ]]; then
     _JOBS=$(( 10 * _CPUS ))
-  fi
-else
-  if [[ -n "${FUCHSIA_BAZEL_DISK_CACHE:-}" ]]; then
-    _BAZEL_CONFIG_ARGS+=("--disk_cache=${FUCHSIA_BAZEL_DISK_CACHE}")
-    if [[ -n "${FUCHSIA_BAZEL_DISK_CACHE_SIZE:-}" ]]; then
-      _BAZEL_CONFIG_ARGS+=("--experimental_disk_cache_gc_max_size=${FUCHSIA_BAZEL_DISK_CACHE_SIZE}")
-    fi
   fi
 fi
 

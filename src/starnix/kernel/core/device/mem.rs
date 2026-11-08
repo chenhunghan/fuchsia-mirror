@@ -75,6 +75,11 @@ impl FileOps for DevNull {
     ) -> Result<Option<zx::NullableHandle>, Errno> {
         Ok(None)
     }
+
+    fn can_query_events_without_wait(&self) -> bool {
+        // Always ready: `wait_async` and `query_events` are the stateless defaults.
+        true
+    }
 }
 
 #[derive(Default)]
@@ -421,51 +426,51 @@ impl<'a> starnix_logging::ToValue for LogOutputTag<'a> {
     }
 }
 
-pub fn mem_device_init<'a>(kernel: &Kernel) -> Result<(), Errno> {
+pub fn mem_device_init(kernel: &Kernel) -> Result<(), Errno> {
     let registry = &kernel.device_registry;
 
     let mem_class = registry.objects.mem_class();
-    registry.register_device(
+    registry.add_device(
         kernel,
         "null".into(),
         DeviceMetadata::new("null".into(), DeviceId::NULL, DeviceMode::Char),
         mem_class.clone(),
         simple_device_ops::<DevNull>,
-    )?;
-    registry.register_device(
+    );
+    registry.add_device(
         kernel,
         "zero".into(),
         DeviceMetadata::new("zero".into(), DeviceId::ZERO, DeviceMode::Char),
         mem_class.clone(),
         simple_device_ops::<DevZero>,
-    )?;
-    registry.register_device(
+    );
+    registry.add_device(
         kernel,
         "full".into(),
         DeviceMetadata::new("full".into(), DeviceId::FULL, DeviceMode::Char),
         mem_class.clone(),
         simple_device_ops::<DevFull>,
-    )?;
-    registry.register_device(
+    );
+    registry.add_device(
         kernel,
         "random".into(),
         DeviceMetadata::new("random".into(), DeviceId::RANDOM, DeviceMode::Char),
         mem_class.clone(),
         simple_device_ops::<DevRandom>,
-    )?;
-    registry.register_device(
+    );
+    registry.add_device(
         kernel,
         "urandom".into(),
         DeviceMetadata::new("urandom".into(), DeviceId::URANDOM, DeviceMode::Char),
         mem_class.clone(),
         simple_device_ops::<DevRandom>,
-    )?;
-    registry.register_device(
+    );
+    registry.add_device(
         kernel,
         "kmsg".into(),
         DeviceMetadata::new("kmsg".into(), DeviceId::KMSG, DeviceMode::Char),
         mem_class,
         open_kmsg,
-    )?;
+    );
     Ok(())
 }

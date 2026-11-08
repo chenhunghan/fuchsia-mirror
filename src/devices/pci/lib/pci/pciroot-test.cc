@@ -149,3 +149,20 @@ TEST_F(PcirootTests, Inspect) {
       std::size(kTestBoardMmio) + std::size(kTestBoardMmio64),
       pciroot.hierarchy().GetByPath({PcirootInspect::kBoardMmioName})->node().properties().size());
 }
+
+TEST_F(PcirootTests, DriverShouldProxyConfig) {
+  auto parent = MockDevice::FakeRootParent();
+  TestPciroot pciroot(&root_host(), parent.get(), "TestPciroot");
+
+  // When no MCFG (MMIO ECAM) allocations are present, the bus driver must proxy
+  // config space accesses through Pciroot.
+  EXPECT_TRUE(pciroot.PcirootDriverShouldProxyConfig());
+
+  root_host().mcfgs().push_back({
+      .address = 0x10000000,
+      .pci_segment = 0,
+      .start_bus_number = 0,
+      .end_bus_number = 255,
+  });
+  EXPECT_FALSE(pciroot.PcirootDriverShouldProxyConfig());
+}

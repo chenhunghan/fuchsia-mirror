@@ -135,6 +135,9 @@ impl<O: OutputSink> SocketForwarder<O> {
     }
 
     /// Continuously forwards messages from the socket to the writer until the socket is closed.
+    // TODO(https://fxbug.dev/582353224): `raw` is moved into `data` before being reassigned, so
+    // `.clear()` cannot be used (clippy::new_instead_of_clear false positive).
+    #[allow(clippy::new_instead_of_clear)]
     pub async fn forward_text(&self, name: &str) -> Result<()> {
         let mut reader = self.reader.borrow_mut();
         let mut buf: [u8; 2048] = [0; 2048];

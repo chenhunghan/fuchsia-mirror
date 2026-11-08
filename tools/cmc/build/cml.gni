@@ -125,9 +125,14 @@ template("cm") {
     # feature in OOT builds.
     restricted_features += [ "enable_allow_non_hermetic_packages_feature" ]
 
-    # Enable restriction on 'test_type' facet.
+    # Enable restriction on 'test_type' facet unless explicitly allowed (e.g.,
+    # for fuzzer components launched by fuzz-manager via SuiteRunner without
+    # tests.json RealmOptions).
     # Refer https://fuchsia.dev/fuchsia-src/development/testing/components/test_runner_framework?hl=en#non-hermetic_tests
-    restricted_features += [ "restrict_test_type_in_facets" ]
+    if (!(defined(invoker.allow_test_type_in_facets) &&
+          invoker.allow_test_type_in_facets)) {
+      restricted_features += [ "restrict_test_type_in_facets" ]
+    }
 
     # Opt-in to the requested restricted_features.
     args += [ "--features" ] + restricted_features
@@ -190,6 +195,12 @@ template("cm") {
       } else {
         deps += [ "//tools/cmc/build/restricted_features:$feature" ]
       }
+    }
+
+    if (defined(invoker.allow_test_type_in_facets) &&
+        invoker.allow_test_type_in_facets) {
+      deps +=
+          [ "//tools/cmc/build/restricted_features:allow_test_type_in_facets" ]
     }
 
     if (defined(invoker.experimental_force_runner)) {

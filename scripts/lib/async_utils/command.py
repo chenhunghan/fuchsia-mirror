@@ -154,14 +154,14 @@ class AsyncCommand:
 
     @classmethod
     async def create(
-        cls: typing.Type["AsyncCommand"],
+        cls: typing.Type[AsyncCommand],
         program: str,
         *args: str,
         symbolizer_args: list[str] | None = None,
         env: dict[str, str] | None = None,
         timeout: float | None = None,
         input_bytes: bytes | None = None,
-    ) -> "AsyncCommand":
+    ) -> AsyncCommand:
         """Create a new AsyncCommand that runs the given program.
 
         Args:

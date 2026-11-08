@@ -34,7 +34,9 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
+#include <utility>
 
 #include <fbl/alloc_checker.h>
 #include <usb/usb-request.h>
@@ -131,35 +133,129 @@ fpromise::promise<void, zx_status_t> UsbXhci::DisableSlotCommand(uint32_t slot_i
     // TODO(https://fxbug.dev/42067447): Use and test appropriate result status.
     return fpromise::make_error_promise<zx_status_t>(ZX_OK);
   }
-  return DisableSlotCommand(*state);
+  return DisableSlotCommand(*state, state);
 }
 
-fpromise::promise<void, zx_status_t> UsbXhci::DisableSlotCommand(DeviceState& state) {
-  uint8_t port;
+std::vector<fbl::RefPtr<DeviceState>> UsbXhci::CollectDisconnectSubtree(
+    fbl::RefPtr<DeviceState> root) {
+  std::vector<fbl::RefPtr<DeviceState>> targets;
+  std::vector<bool> visited(max_slots_ + 1, false);
+  targets.push_back(root);
+  if (root->device_id() <= max_slots_) {
+    visited[root->device_id()] = true;
+  }
+
+  // The vector is modified in the loop, avoid ranged-for loop here.
+  size_t idx = 0;
+  while (idx < targets.size()) {
+    fbl::RefPtr<DeviceState> cur = targets[idx++];
+    fbl::AutoLock _(&cur->transaction_lock());
+    cur->Disconnect();
+    if (cur->GetHubLocked().has_value()) {
+      for (std::optional<uint8_t>& entry : cur->GetHubLocked()->port_to_device) {
+        std::optional<uint8_t> child_id_opt = std::exchange(entry, std::nullopt);
+        if (child_id_opt.has_value() && IsValidDeviceId(*child_id_opt) && !visited[*child_id_opt]) {
+          visited[*child_id_opt] = true;
+          if (fbl::RefPtr<DeviceState> child = device_state_[*child_id_opt]) {
+            targets.push_back(child);
+          }
+        }
+      }
+    }
+  }
+  return targets;
+}
+
+void UsbXhci::DrainAndResetDeviceOnInterrupter(const fbl::RefPtr<DeviceState>& state) {
+  for (uint8_t i = 0; i < kMaxEndpoints; ++i) {
+    fbl::DoublyLinkedList<std::unique_ptr<TRBContext>> trbs;
+    Endpoint* ep = nullptr;
+    {
+      fbl::AutoLock _(&state->transaction_lock());
+      ep = state->TryGetEndpoint(i);
+      if (!ep) {
+        continue;
+      }
+      trbs = ep->transfer_ring().TakePendingTRBs();
+    }
+    for (auto& trb : trbs) {
+      if (trb.request.has_value()) {
+        ep->RequestComplete(ZX_ERR_IO_NOT_PRESENT, 0, std::move(*trb.request));
+      }
+    }
+  }
+  fbl::DoublyLinkedList<std::unique_ptr<TRBContext>> trbs;
+  Endpoint* ep0 = nullptr;
+  {
+    fbl::AutoLock _(&state->transaction_lock());
+    ep0 = &state->GetEndpoint();
+    trbs = ep0->transfer_ring().TakePendingTRBs();
+  }
+  for (auto& trb : trbs) {
+    if (trb.request.has_value()) {
+      ep0->RequestComplete(ZX_ERR_IO_NOT_PRESENT, 0, std::move(*trb.request));
+    }
+  }
+  state->ResetHci();
+}
+
+fpromise::promise<void, zx_status_t> UsbXhci::DisableSlotCommand(
+    DeviceState& state, fbl::RefPtr<DeviceState> keep_alive) {
+  uint8_t slot = 0;
+  uint8_t port = 0;
   bool connected_to_hub = false;
   {
     fbl::AutoLock _(&state.transaction_lock());
     if (!state.IsValid()) {
       fdf::error("DisableSlotCommand state is not valid");
+      state.Disconnect();
+      state.slot_disabled_.Signal();
       // TODO(https://fxbug.dev/42067447): Use and test appropriate result status.
       return fpromise::make_error_promise<zx_status_t>(ZX_OK);
     }
     state.Disconnect();
+    if (state.ExchangeSlotDisableStarted()) {
+      // A Disable Slot command has already been issued for this slot.
+      if (!running_) {
+        if (dcbaa_) {
+          dcbaa_[state.GetSlot()] = 0;
+        }
+        state.slot_disabled_.Signal();
+        return fpromise::make_error_promise<zx_status_t>(ZX_ERR_IO_NOT_PRESENT);
+      }
+      return fpromise::make_result_promise<void, zx_status_t>(fpromise::ok());
+    }
+    slot = state.GetSlot();
     port = state.GetPort();
-    connected_to_hub = static_cast<bool>(state.GetHubLocked());
+    // A hub attached directly to a root hub port also has HubInfo, but it still owns the root
+    // port's slot. Only devices downstream of an external hub have a non-zero parent port.
+    connected_to_hub =
+        state.GetHubLocked().has_value() && state.GetHubLocked()->parent_port_number != 0;
   }
+
+  auto signal =
+      fit::defer([&state, keep_alive = std::move(keep_alive)] { state.slot_disabled_.Signal(); });
+
+  if (!connected_to_hub && port > 0 && port <= port_state_.size() &&
+      GetPortState(port).slot_id == slot) {
+    GetPortState(port).slot_id = 0;
+  }
+  if (!running_) {
+    if (dcbaa_) {
+      dcbaa_[slot] = 0;
+    }
+    return fpromise::make_error_promise<zx_status_t>(ZX_ERR_IO_NOT_PRESENT);
+  }
+
   DisableSlot cmd;
-  cmd.set_slot(state.GetSlot());
+  cmd.set_slot(slot);
   auto context = command_ring_.AllocateContext();
   if (!context) {
     return fpromise::make_error_promise<zx_status_t>(ZX_ERR_BAD_STATE);
   }
-  if (!connected_to_hub) {
-    GetPortState(port).slot_id = 0;
-  }
 
   return SubmitCommand(cmd, std::move(context))
-      .then([this](fpromise::result<TRB*, zx_status_t>& result)
+      .then([this, slot, signal = std::move(signal)](fpromise::result<TRB*, zx_status_t>& result)
                 -> fpromise::result<void, zx_status_t> {
         if (result.is_error()) {
           return fpromise::error(result.error());
@@ -167,9 +263,13 @@ fpromise::promise<void, zx_status_t> UsbXhci::DisableSlotCommand(DeviceState& st
         TRB* trb = result.value();
         auto completion_event = reinterpret_cast<CommandCompletionEvent*>(trb);
         if (completion_event->CompletionCode() != CommandCompletionEvent::Success) {
-          return fpromise::error(ZX_ERR_BAD_STATE);
+          if (completion_event->CompletionCode() == CommandCompletionEvent::SlotNotEnabledError) {
+            dcbaa_[slot] = 0;
+            return fpromise::ok();
+          }
+          return fpromise::error(ZX_ERR_IO);
         }
-        dcbaa_[completion_event->SlotID()] = 0;
+        dcbaa_[slot] = 0;
         return fpromise::ok();
       })
       .box();
@@ -302,7 +402,7 @@ zx_status_t UsbXhci::DeviceOnline(uint32_t slot, uint16_t port, usb_speed_t spee
     if (state->IsDisconnecting()) {
       return ZX_ERR_IO_NOT_PRESENT;
     }
-    if (state->GetHubLocked()) {
+    if (state->GetHubLocked() && state->GetHubLocked()->hub_state) {
       transaction_lock.release();
       PostCallback([=, this](const ddk::UsbBusInterfaceProtocolClient& bus) {
         uint32_t hub_id;
@@ -316,7 +416,7 @@ zx_status_t UsbXhci::DeviceOnline(uint32_t slot, uint16_t port, usb_speed_t spee
           if (state->IsDisconnecting()) {
             return ZX_ERR_IO_NOT_PRESENT;
           }
-          if (!state->GetHubLocked()) {
+          if (!state->GetHubLocked() || !state->GetHubLocked()->hub_state) {
             // Race condition -- device was unplugged before we got a chance to notify the bus
             // driver.
             return ZX_OK;
@@ -343,6 +443,9 @@ zx_status_t UsbXhci::DeviceOnline(uint32_t slot, uint16_t port, usb_speed_t spee
 }
 
 fpromise::promise<void, zx_status_t> UsbXhci::DeviceOffline(uint32_t slot) {
+  if (slot == 0 || slot > max_slots_) {
+    return fpromise::make_error_promise<zx_status_t>(ZX_ERR_INVALID_ARGS);
+  }
   auto state = device_state_[slot - 1];
   if (!state) {
     fdf::error("{} expects that slot is in use. state should not be nullptr", __func__);
@@ -353,56 +456,66 @@ fpromise::promise<void, zx_status_t> UsbXhci::DeviceOffline(uint32_t slot) {
     if (state->IsDisconnecting()) {
       return fpromise::make_error_promise<zx_status_t>(ZX_ERR_IO_NOT_PRESENT);
     }
-    state->Disconnect();
   }
-  fpromise::bridge<void, zx_status_t> bridge;
-  PostCallback([this, slot, cb = std::move(bridge.completer)](
-                   const ddk::UsbBusInterfaceProtocolClient& bus) mutable {
-    auto state = std::move(device_state_[slot - 1]);
-    if (!state) {
-      fdf::error("{} expects that slot is in use. state should not be nullptr", __func__);
-      return ZX_ERR_IO_NOT_PRESENT;
-    }
-    auto reset_hci = fit::defer([&state] { state->ResetHci(); });
-    for (uint8_t i = 0; i < kMaxEndpoints; i++) {
-      fbl::DoublyLinkedList<std::unique_ptr<TRBContext>> trbs;
-      Endpoint* ep = nullptr;
-      {
-        fbl::AutoLock _(&state->transaction_lock());
-        ep = &state->GetEndpoint(i);
-        trbs = ep->transfer_ring().TakePendingTRBs();
-      }
-      for (auto& trb : trbs) {
-        if (trb.request.has_value()) {
-          ep->RequestComplete(ZX_ERR_IO_NOT_PRESENT, 0, std::move(*trb.request));
+  // Disconnect the device and every device downstream of it if it is a hub. Disable the slots
+  // before completing pending requests. Completing a request unpins its buffers, and the
+  // controller may still be accessing them until the slot is disabled.
+  auto targets = CollectDisconnectSubtree(state);
+  std::vector<fpromise::promise<void, zx_status_t>> disable_promises;
+  for (auto& t : targets) {
+    disable_promises.push_back(DisableSlotCommand(*t, t));
+  }
+  return fpromise::join_promise_vector(std::move(disable_promises))
+      .then([this, slot, targets = std::move(targets)](
+                fpromise::result<std::vector<fpromise::result<void, zx_status_t>>>& results) mutable
+                -> fpromise::promise<void, zx_status_t> {
+        if (results.is_ok()) {
+          for (const auto& r : results.value()) {
+            if (r.is_error() && r.error() != ZX_ERR_IO_NOT_PRESENT && r.error() != ZX_OK) {
+              fdf::warn("DisableSlotCommand failed during DeviceOffline: {}",
+                        zx_status_get_string(r.error()));
+            }
+          }
         }
-      }
-    }
-    fbl::DoublyLinkedList<std::unique_ptr<TRBContext>> trbs;
-    Endpoint* ep0 = nullptr;
-    {
-      fbl::AutoLock _(&state->transaction_lock());
-      ep0 = &state->GetEndpoint();
-      trbs = ep0->transfer_ring().TakePendingTRBs();
-    }
-    for (auto& trb : trbs) {
-      if (trb.request.has_value()) {
-        ep0->RequestComplete(ZX_ERR_IO_NOT_PRESENT, 0, std::move(*trb.request));
-      }
-    }
-    if (!running_ || !bus.is_valid()) {
-      cb.complete_ok();
-      return ZX_OK;
-    }
-    zx_status_t status = bus.RemoveDevice(slot - 1);
-    if (status != ZX_OK) {
-      cb.complete_error(status);
-      return status;
-    }
-    cb.complete_ok();
-    return status;
-  });
-  return bridge.consumer.promise().box();
+        for (auto& t : targets) {
+          DrainAndResetDeviceOnInterrupter(t);
+          if (IsValidDeviceId(t->device_id()) && device_state_[t->device_id()].get() == t.get()) {
+            device_state_[t->device_id()].reset();
+          }
+        }
+        fpromise::bridge<void, zx_status_t> bridge;
+        PostCallback([this, slot, targets = std::move(targets), cb = std::move(bridge.completer)](
+                         const ddk::UsbBusInterfaceProtocolClient& bus) mutable {
+          for (auto& t : targets) {
+            if (t->slot_disabled_.Wait(zx::duration::infinite()) != ZX_OK) {
+              Shutdown(ZX_ERR_BAD_STATE);
+            }
+          }
+          if (!running_ || !bus.is_valid()) {
+            cb.complete_ok();
+            return ZX_OK;
+          }
+          // Skip targets[0] (slot - 1), which is removed below so its status can be returned.
+          for (const fbl::RefPtr<DeviceState>& t : std::span(targets).subspan(1)) {
+            if (running_ && bus.is_valid()) {
+              zx_status_t status = bus.RemoveDevice(t->device_id());
+              if (status != ZX_OK) {
+                fdf::error("Failed to remove downstream device {}: {}", t->device_id(),
+                           zx_status_get_string(status));
+              }
+            }
+          }
+          zx_status_t status = bus.RemoveDevice(slot - 1);
+          if (status != ZX_OK) {
+            cb.complete_error(status);
+            return status;
+          }
+          cb.complete_ok();
+          return status;
+        });
+        return bridge.consumer.promise();
+      })
+      .box();
 }
 
 void UsbXhci::CreateDeviceInspectNode(uint32_t slot, uint16_t vendor_id, uint16_t product_id) {
@@ -481,12 +594,12 @@ fpromise::promise<void, zx_status_t> UsbXhci::ConfigureHubAsync(uint32_t device_
     if (state->IsDisconnecting()) {
       return fpromise::make_error_promise<zx_status_t>(ZX_ERR_IO_NOT_PRESENT);
     }
-    hub.hub_state = state;
     hub.speed = speed;
     hub.hub_speed = speed;
     hub.multi_tt = multi_tt;
     hub.rh_port = state->GetPort();
     if (state->GetHubLocked()) {
+      hub.hub_state = state->GetHubLocked()->hub_state;
       hub.parent_port_number = state->GetHubLocked()->parent_port_number;
       hub.route_string = state->GetHubLocked()->route_string;
       hub.hub_depth = static_cast<uint8_t>(state->GetHubLocked()->hub_depth + 1);
@@ -592,6 +705,7 @@ void UsbXhci::Stop(fdf::StopCompleter completer) {
   for (auto& it : interrupters_) {
     it.Stop();
   }
+  AbortPendingCommands();
   for (auto& it : interrupters_) {
     it.ring().ClearPendingPortStatusChanges();
   }
@@ -601,6 +715,9 @@ void UsbXhci::Stop(fdf::StopCompleter completer) {
     ddk_interaction_dispatcher_ = fdf::SynchronizedDispatcher{};
   }
   AbortPendingCommands();
+  for (auto& it : interrupters_) {
+    it.ring().RunUntilIdle();
+  }
   fdf::info("xhci: Stop() completed cleanly");
   completer(zx::ok());
 }
@@ -653,18 +770,16 @@ UsbXhci::~UsbXhci() {
     auto trbs = command_ring_.TakePendingTRBs();
     for (auto& trb : trbs) {
       pending = true;
-      CommandCompletionEvent evt;
-      evt.ptr = 0;
-      evt.set_Type(Control::CommandCompletionEvent);
-      evt.set_CompletionCode(CommandCompletionEvent::CommandRingStopped);
       if (trb.completer.has_value()) {
-        trb.completer.value().complete_ok(trb.trb);
+        trb.completer.value().complete_error(ZX_ERR_IO_NOT_PRESENT);
       }
     }
     // Ensure that we've actually invoked the completions above
     // before moving to the next step.
     // TODO(https://fxbug.dev/42120782): Migrate to joins
-    RunUntilIdle();
+    for (auto& it : interrupters_) {
+      it.ring().RunUntilIdle();
+    }
     for (size_t i = 0; i < max_slots_; i++) {
       auto state = device_state_[i];
       if (!state) {
@@ -688,7 +803,10 @@ UsbXhci::~UsbXhci() {
         Endpoint* ep = nullptr;
         {
           fbl::AutoLock _(&state->transaction_lock());
-          ep = &state->GetEndpoint(c);
+          ep = state->TryGetEndpoint(c);
+          if (!ep) {
+            continue;
+          }
           trbs = ep->transfer_ring().TakePendingTRBs();
         }
         for (auto& trb : trbs) {
@@ -701,7 +819,9 @@ UsbXhci::~UsbXhci() {
     }
     // Flush any outstanding async I/O
     // TODO(https://fxbug.dev/42120782): Migrate to joins
-    RunUntilIdle();
+    for (auto& it : interrupters_) {
+      it.ring().RunUntilIdle();
+    }
   } while (pending);
 
   for (auto& it : device_state_) {
@@ -1047,21 +1167,7 @@ zx_status_t UsbXhci::UsbHciConfigureHub(uint32_t device_id, usb_speed_t speed,
   if (!running_) {
     return ZX_ERR_IO_NOT_PRESENT;
   }
-  sync_completion_t completion;
-  zx_status_t hub_status = ZX_OK;
-  ScheduleTask(kPrimaryInterrupter, ConfigureHubAsync(device_id, speed, desc, multi_tt)
-                                        .then([&](fpromise::result<void, zx_status_t>& result) {
-                                          if (result.is_ok()) {
-                                            hub_status = ZX_OK;
-                                          } else {
-                                            hub_status = result.error();
-                                          }
-                                          sync_completion_signal(&completion);
-                                          return result;
-                                        })
-                                        .box());
-  sync_completion_wait(&completion, ZX_TIME_INFINITE);
-  return hub_status;
+  return RunSynchronously(kPrimaryInterrupter, ConfigureHubAsync(device_id, speed, desc, multi_tt));
 }
 zx_status_t UsbXhci::UsbHciHubDeviceAdded(uint32_t device_id, uint32_t port, usb_speed_t speed) {
   if (!running_) {
@@ -1088,10 +1194,12 @@ zx_status_t UsbXhci::UsbHciHubDeviceRemoved(uint32_t hub_id, uint32_t port) {
   if (!running_) {
     return ZX_OK;
   }
+  if (!IsValidDeviceId(hub_id) || port == 0 || port > std::size(HubInfo{}.port_to_device)) {
+    return ZX_ERR_INVALID_ARGS;
+  }
   auto hub_state = device_state_[hub_id];
   if (!hub_state) {
-    fdf::error("{} expects that slot is in use. hub_state should not be nullptr", __func__);
-    return ZX_ERR_IO_NOT_PRESENT;
+    return ZX_OK;
   }
   uint32_t device_id;
   {
@@ -1104,55 +1212,79 @@ zx_status_t UsbXhci::UsbHciHubDeviceRemoved(uint32_t hub_id, uint32_t port) {
     if (!hub_state->GetHubLocked()) {
       return ZX_OK;
     }
-    device_id = hub_state->GetHubLocked()->port_to_device[port - 1];
+    auto device_id_opt =
+        std::exchange(hub_state->GetHubLocked()->port_to_device[port - 1], std::nullopt);
+    if (!device_id_opt) {
+      return ZX_ERR_IO_NOT_PRESENT;
+    }
+    device_id = *device_id_opt;
+  }
+  if (!IsValidDeviceId(device_id)) {
+    return ZX_ERR_IO_NOT_PRESENT;
   }
   auto device_state = device_state_[device_id];
   if (!device_state) {
-    fdf::error("{} expects that slot is in use. device_state should not be nullptr", __func__);
     return ZX_ERR_IO_NOT_PRESENT;
   }
-  auto reset_hci = fit::defer([&device_state] { device_state->ResetHci(); });
-  {
-    fbl::AutoLock _(&device_state->transaction_lock());
-    device_state->Disconnect();
-  }
-  device_state_[device_id].reset();
-  for (uint8_t i = 0; i < kMaxEndpoints; i++) {
-    fbl::DoublyLinkedList<std::unique_ptr<TRBContext>> trbs;
-    Endpoint* ep = nullptr;
-    {
-      fbl::AutoLock _(&device_state->transaction_lock());
-      ep = &device_state->GetEndpoint(i);
-      trbs = ep->transfer_ring().TakePendingTRBs();
-    }
-    for (auto& trb : trbs) {
-      if (trb.request.has_value()) {
-        ep->RequestComplete(ZX_ERR_IO_NOT_PRESENT, 0, std::move(*trb.request));
+  // Disconnect the device and every device downstream of it if it is a hub. Disable the slots
+  // before completing pending requests. Completing a request unpins its buffers, and the
+  // controller may still be accessing them until the slot is disabled.
+  std::vector<fbl::RefPtr<DeviceState>> targets;
+  (void)RunSynchronously(
+      kPrimaryInterrupter,
+      fpromise::make_promise([this, device_state,
+                              &targets]() -> fpromise::promise<void, zx_status_t> {
+        targets = CollectDisconnectSubtree(device_state);
+        std::vector<fpromise::promise<void, zx_status_t>> promises;
+        promises.reserve(targets.size());
+        for (auto& t : targets) {
+          promises.push_back(DisableSlotCommand(*t, t));
+        }
+        return fpromise::join_promise_vector(std::move(promises))
+            .then([this, &targets](
+                      fpromise::result<std::vector<fpromise::result<void, zx_status_t>>>& results)
+                      -> fpromise::result<void, zx_status_t> {
+              if (results.is_ok()) {
+                for (const auto& r : results.value()) {
+                  if (r.is_error() && r.error() != ZX_ERR_IO_NOT_PRESENT && r.error() != ZX_OK) {
+                    fdf::warn("DisableSlotCommand failed during UsbHciHubDeviceRemoved: {}",
+                              zx_status_get_string(r.error()));
+                  }
+                }
+              }
+              for (auto& t : targets) {
+                DrainAndResetDeviceOnInterrupter(t);
+                if (IsValidDeviceId(t->device_id()) &&
+                    device_state_[t->device_id()].get() == t.get()) {
+                  device_state_[t->device_id()].reset();
+                }
+              }
+              return fpromise::ok();
+            });
+      }).box());
+
+  if (!IsHaltedOrStopping()) {
+    for (auto& t : targets) {
+      if (t->slot_disabled_.Wait(zx::duration::infinite()) != ZX_OK) {
+        Shutdown(ZX_ERR_BAD_STATE);
       }
-    }
-  }
-  RunUntilIdle();
-  fbl::DoublyLinkedList<std::unique_ptr<TRBContext>> trbs;
-  Endpoint* ep0 = nullptr;
-  {
-    fbl::AutoLock _(&device_state->transaction_lock());
-    ep0 = &device_state->GetEndpoint();
-    trbs = ep0->transfer_ring().TakePendingTRBs();
-  }
-  for (auto& trb : trbs) {
-    if (trb.request.has_value()) {
-      ep0->RequestComplete(ZX_ERR_IO_NOT_PRESENT, 0, std::move(*trb.request));
     }
   }
   RunUntilIdle();
   if (!running_ || !bus_.is_valid()) {
     return ZX_OK;
   }
-  zx_status_t status = bus_.RemoveDevice(device_state->GetSlot() - 1);
-  if (status != ZX_OK) {
-    return status;
+  // Skip targets[0] (device_id), which is removed below so its status can be returned.
+  for (const fbl::RefPtr<DeviceState>& t : std::span(targets).subspan(1)) {
+    if (running_ && bus_.is_valid()) {
+      zx_status_t status = bus_.RemoveDevice(t->device_id());
+      if (status != ZX_OK) {
+        fdf::error("Failed to remove downstream device {}: {}", t->device_id(),
+                   zx_status_get_string(status));
+      }
+    }
   }
-  return ZX_OK;
+  return bus_.RemoveDevice(device_id);
 }
 
 zx_status_t UsbXhci::UsbHciHubDeviceReset(uint32_t device_id, uint32_t port) {
@@ -1282,9 +1414,9 @@ fpromise::promise<void, zx_status_t> UsbXhci::UsbHciCancelAllAsync(uint32_t devi
     Endpoint* ep = nullptr;
     {
       fbl::AutoLock _(&state->transaction_lock());
-      ep = ep_address ? &state->GetEndpoint(XhciEndpointIndex(ep_address) - 1)
+      ep = ep_address ? state->TryGetEndpoint(XhciEndpointIndex(ep_address) - 1)
                       : &state->GetEndpoint();
-      if (ep->transfer_ring().active()) {
+      if (ep && ep->transfer_ring().active()) {
         trbs = ep->transfer_ring().TakePendingTRBs();
       }
     }
@@ -1933,7 +2065,7 @@ zx::result<> UsbXhci::Start(fdf::DriverContext context) {
   }
   zx::result pci_result = incoming_->Connect<fuchsia_hardware_pci::Service::Device>("pdev");
   if (pci_result.is_ok()) {
-    pci_ = ddk::Pci(std::move(*pci_result));
+    pci_ = fdf::Pci(std::move(*pci_result));
   }
 
   if (!(pci_.is_valid() || pdev_.is_valid())) {

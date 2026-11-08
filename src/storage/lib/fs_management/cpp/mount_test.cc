@@ -281,9 +281,7 @@ TEST_F(PartitionOverFvmWithRamdiskCase, MkfsMinfsWithMinFvmSlices) {
   GetPartitionSliceCount(volume.value(), &allocated_slices);
   EXPECT_GE(allocated_slices, base_slices + 10);
 
-  DiskFormat actual_format = DetectDiskFormat(
-      fidl::UnownedClientEnd<fuchsia_storage_block::Block>(volume.value().channel().borrow()));
-  ASSERT_EQ(actual_format, kDiskFormatMinfs);
+  ASSERT_EQ(Fsck(partition_path(), component, FsckOptions()), ZX_OK);
 }
 
 TEST(FvmTest, Basic) {

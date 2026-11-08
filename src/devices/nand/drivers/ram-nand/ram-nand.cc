@@ -236,7 +236,6 @@ zx::result<std::string> NandDevice::Init(
 
   fuchsia_driver_framework::DevfsAddArgs devfs({
       .connector = std::move(connector.value()),
-      .class_name = "nand",
       .connector_supports = fuchsia_device_fs::ConnectionType::kController,
   });
 

@@ -575,25 +575,35 @@ mod tests {
     const SRC_PORT: u16 = 1234;
     const DST_PORT: u16 = 5678;
 
-    #[test_case(
+    /// Returns a `UdpPacketBuilder` from `SRC_PORT` to `DST_PORT`.
+    fn udp_builder<A: IpAddress>(src_ip: A, dst_ip: A) -> UdpPacketBuilder<A> {
         UdpPacketBuilder::new(
-            SRC_IP_V4,
-            DST_IP_V4,
+            src_ip,
+            dst_ip,
             NonZeroU16::new(SRC_PORT),
             NonZeroU16::new(DST_PORT).unwrap(),
-        ),
-        IpProto::Udp ; "udp"
-    )]
-    #[test_case(
+        )
+    }
+
+    /// Returns a `TcpSegmentBuilder` from `SRC_PORT` to `DST_PORT`.
+    fn tcp_builder<A: IpAddress>(src_ip: A, dst_ip: A) -> TcpSegmentBuilder<A> {
         TcpSegmentBuilder::new(
-            SRC_IP_V4,
-            DST_IP_V4,
+            src_ip,
+            dst_ip,
             NonZeroU16::new(SRC_PORT).unwrap(),
             NonZeroU16::new(DST_PORT).unwrap(),
             123,
             None,
             1000,
-        ),
+        )
+    }
+
+    #[test_case(
+        udp_builder(SRC_IP_V4, DST_IP_V4),
+        IpProto::Udp ; "udp"
+    )]
+    #[test_case(
+        tcp_builder(SRC_IP_V4, DST_IP_V4),
         IpProto::Tcp ; "tcp"
     )]
     fn ipv4_no_options_csum_offload(
@@ -628,24 +638,11 @@ mod tests {
     }
 
     #[test_case(
-        UdpPacketBuilder::new(
-            SRC_IP_V4,
-            DST_IP_V4,
-            NonZeroU16::new(SRC_PORT),
-            NonZeroU16::new(DST_PORT).unwrap(),
-        ),
+        udp_builder(SRC_IP_V4, DST_IP_V4),
         IpProto::Udp ; "udp"
     )]
     #[test_case(
-        TcpSegmentBuilder::new(
-            SRC_IP_V4,
-            DST_IP_V4,
-            NonZeroU16::new(SRC_PORT).unwrap(),
-            NonZeroU16::new(DST_PORT).unwrap(),
-            123,
-            None,
-            1000,
-        ),
+        tcp_builder(SRC_IP_V4, DST_IP_V4),
         IpProto::Tcp ; "tcp"
     )]
     fn ipv4_with_options_no_csum_offload(
@@ -672,24 +669,11 @@ mod tests {
     }
 
     #[test_case(
-        UdpPacketBuilder::new(
-            SRC_IP_V6,
-            DST_IP_V6,
-            NonZeroU16::new(SRC_PORT),
-            NonZeroU16::new(DST_PORT).unwrap(),
-        ),
+        udp_builder(SRC_IP_V6, DST_IP_V6),
         IpProto::Udp ; "udp"
     )]
     #[test_case(
-        TcpSegmentBuilder::new(
-            SRC_IP_V6,
-            DST_IP_V6,
-            NonZeroU16::new(SRC_PORT).unwrap(),
-            NonZeroU16::new(DST_PORT).unwrap(),
-            123,
-            None,
-            1000,
-        ),
+        tcp_builder(SRC_IP_V6, DST_IP_V6),
         IpProto::Tcp ; "tcp"
     )]
     fn ipv6_no_extensions_csum_offload(
@@ -724,24 +708,11 @@ mod tests {
     }
 
     #[test_case(
-        UdpPacketBuilder::new(
-            SRC_IP_V6,
-            DST_IP_V6,
-            NonZeroU16::new(SRC_PORT),
-            NonZeroU16::new(DST_PORT).unwrap(),
-        ),
+        udp_builder(SRC_IP_V6, DST_IP_V6),
         IpProto::Udp ; "udp"
     )]
     #[test_case(
-        TcpSegmentBuilder::new(
-            SRC_IP_V6,
-            DST_IP_V6,
-            NonZeroU16::new(SRC_PORT).unwrap(),
-            NonZeroU16::new(DST_PORT).unwrap(),
-            123,
-            None,
-            1000,
-        ),
+        tcp_builder(SRC_IP_V6, DST_IP_V6),
         IpProto::Tcp ; "tcp"
     )]
     fn ipv6_with_extension_hdrs_no_csum_offload(
@@ -774,12 +745,7 @@ mod tests {
     #[test]
     fn generic_csum_offload_preferred_over_protocol_specific() {
         let mut payload = [0u8; 100];
-        let udp = UdpPacketBuilder::new(
-            SRC_IP_V4,
-            DST_IP_V4,
-            NonZeroU16::new(SRC_PORT),
-            NonZeroU16::new(DST_PORT).unwrap(),
-        );
+        let udp = udp_builder(SRC_IP_V4, DST_IP_V4);
         let ip = Ipv4PacketBuilder::new(SRC_IP_V4, DST_IP_V4, 64, Ipv4Proto::Proto(IpProto::Udp));
         let ethernet = EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::Ipv4, 0);
 
@@ -821,25 +787,12 @@ mod tests {
     }
 
     #[test_case(
-        UdpPacketBuilder::new(
-            SRC_IP_V4,
-            DST_IP_V4,
-            NonZeroU16::new(SRC_PORT),
-            NonZeroU16::new(DST_PORT).unwrap(),
-        ),
+        udp_builder(SRC_IP_V4, DST_IP_V4),
         IpProto::Udp,
         UDP_CHECKSUM_OFFSET ; "udp"
     )]
     #[test_case(
-        TcpSegmentBuilder::new(
-            SRC_IP_V4,
-            DST_IP_V4,
-            NonZeroU16::new(SRC_PORT).unwrap(),
-            NonZeroU16::new(DST_PORT).unwrap(),
-            123,
-            None,
-            1000,
-        ),
+        tcp_builder(SRC_IP_V4, DST_IP_V4),
         IpProto::Tcp,
         TCP_CHECKSUM_OFFSET ; "tcp"
     )]
@@ -881,12 +834,7 @@ mod tests {
         let mut payload = [0u8; 100];
         // Use a header length that exceeds u16::MAX (65535).
         let test_packet = TestPacketBuilder { header_len: 66000 };
-        let udp = UdpPacketBuilder::new(
-            SRC_IP_V4,
-            DST_IP_V4,
-            NonZeroU16::new(SRC_PORT),
-            NonZeroU16::new(DST_PORT).unwrap(),
-        );
+        let udp = udp_builder(SRC_IP_V4, DST_IP_V4);
         let ip = Ipv4PacketBuilder::new(SRC_IP_V4, DST_IP_V4, 64, Ipv4Proto::Proto(IpProto::Udp));
         let ethernet = EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::Ipv4, 0);
 
@@ -911,12 +859,7 @@ mod tests {
         let mut payload = [0u8; 100];
         // Use a header length that exceeds u16::MAX (65535).
         let test_packet = TestPacketBuilder { header_len: 66000 };
-        let udp = UdpPacketBuilder::new(
-            SRC_IP_V6,
-            DST_IP_V6,
-            NonZeroU16::new(SRC_PORT),
-            NonZeroU16::new(DST_PORT).unwrap(),
-        );
+        let udp = udp_builder(SRC_IP_V6, DST_IP_V6);
         let ethernet = EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::Ipv6, 0);
 
         // Wrap test_packet *inside* UDP, bypassing IP to avoid IP size limits.
@@ -941,12 +884,7 @@ mod tests {
     #[test]
     fn protocol_specific_csum_offload_with_size_limit() {
         let mut payload = [0u8; 100];
-        let udp = UdpPacketBuilder::new(
-            SRC_IP_V4,
-            DST_IP_V4,
-            NonZeroU16::new(SRC_PORT),
-            NonZeroU16::new(DST_PORT).unwrap(),
-        );
+        let udp = udp_builder(SRC_IP_V4, DST_IP_V4);
         let ip = Ipv4PacketBuilder::new(SRC_IP_V4, DST_IP_V4, 64, Ipv4Proto::Proto(IpProto::Udp));
         let ethernet = EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::Ipv4, 0);
 
@@ -978,20 +916,10 @@ mod tests {
     #[test]
     fn protocol_specific_csum_offload_duplicate_protocol() {
         let mut payload = [0u8; 100];
-        let udp_inner = UdpPacketBuilder::new(
-            SRC_IP_V4,
-            DST_IP_V4,
-            NonZeroU16::new(SRC_PORT),
-            NonZeroU16::new(DST_PORT).unwrap(),
-        );
+        let udp_inner = udp_builder(SRC_IP_V4, DST_IP_V4);
         let ip_inner =
             Ipv4PacketBuilder::new(SRC_IP_V4, DST_IP_V4, 64, Ipv4Proto::Proto(IpProto::Udp));
-        let udp_outer = UdpPacketBuilder::new(
-            SRC_IP_V4,
-            DST_IP_V4,
-            NonZeroU16::new(SRC_PORT),
-            NonZeroU16::new(DST_PORT).unwrap(),
-        );
+        let udp_outer = udp_builder(SRC_IP_V4, DST_IP_V4);
         let ip_outer =
             Ipv4PacketBuilder::new(SRC_IP_V4, DST_IP_V4, 64, Ipv4Proto::Proto(IpProto::Udp));
         let ethernet = EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::Ipv4, 0);
@@ -1060,20 +988,10 @@ mod tests {
     #[test]
     fn generic_csum_offload_duplicate_protocol() {
         let mut payload = [0u8; 100];
-        let udp_inner = UdpPacketBuilder::new(
-            SRC_IP_V4,
-            DST_IP_V4,
-            NonZeroU16::new(SRC_PORT),
-            NonZeroU16::new(DST_PORT).unwrap(),
-        );
+        let udp_inner = udp_builder(SRC_IP_V4, DST_IP_V4);
         let ip_inner =
             Ipv4PacketBuilder::new(SRC_IP_V4, DST_IP_V4, 64, Ipv4Proto::Proto(IpProto::Udp));
-        let udp_outer = UdpPacketBuilder::new(
-            SRC_IP_V4,
-            DST_IP_V4,
-            NonZeroU16::new(SRC_PORT),
-            NonZeroU16::new(DST_PORT).unwrap(),
-        );
+        let udp_outer = udp_builder(SRC_IP_V4, DST_IP_V4);
         let ip_outer =
             Ipv4PacketBuilder::new(SRC_IP_V4, DST_IP_V4, 64, Ipv4Proto::Proto(IpProto::Udp));
         let ethernet = EthernetFrameBuilder::new(SRC_MAC, DST_MAC, EtherType::Ipv4, 0);

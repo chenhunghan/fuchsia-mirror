@@ -9,10 +9,13 @@
 #include <arch/aspace.h>
 #include <arch/vm.h>
 #include <kernel/ffi.h>
+#include <ktl/memory.h>
 #include <vm/arch_vm_aspace.h>
 #include <vm/arch_vm_aspace_ffi.h>
 #include <vm/fault.h>
 #include <vm/handoff-end.h>
+
+#include <ktl/enforce.h>
 
 extern "C" {
 paddr_t cpp_kernel_physical_address_of(uintptr_t va);
@@ -21,6 +24,14 @@ zx_status_t cpp_vmm_page_fault_handler(uint64_t tval, uint32_t flags);
 // TODO(https://fxbug.dev/537458631): Remove the annotations below once
 // cross-language inlining works.
 
+FFI_ALWAYS_INLINE void cpp_arch_vm_aspace_construct(
+    ffi::Uninitialized<ArchVmAspace>* aspace, vaddr_t base, size_t size, arch_mmu_flags_t mmu_flags,
+    ArchVmAspaceInterface::page_alloc_fn_t test_paf) {
+  aspace->Initialize(base, size, mmu_flags, test_paf);
+}
+FFI_ALWAYS_INLINE void cpp_arch_vm_aspace_destruct(ArchVmAspace* aspace) {
+  ktl::destroy_at(aspace);
+}
 FFI_ALWAYS_INLINE zx_status_t cpp_arch_vm_aspace_init(ArchVmAspace* aspace) {
   return aspace->Init();
 }
@@ -90,6 +101,13 @@ FFI_ALWAYS_INLINE bool cpp_arch_vm_aspace_accessed_since_last_check(ArchVmAspace
 }
 FFI_ALWAYS_INLINE paddr_t cpp_arch_vm_aspace_arch_table_phys(ArchVmAspace* aspace) {
   return aspace->arch_table_phys();
+}
+FFI_ALWAYS_INLINE vaddr_t cpp_arch_vm_aspace_next_user_page_table_offset(vaddr_t va) {
+  return ArchVmAspace::NextUserPageTableOffset(va);
+}
+FFI_ALWAYS_INLINE void cpp_arch_vm_aspace_handoff_page_tables_from_physboot(
+    VmPageDoublyLinkedList* mmu_pages) {
+  ArchVmAspace::HandoffPageTablesFromPhysboot(mmu_pages);
 }
 
 FFI_ALWAYS_INLINE paddr_t cpp_kernel_physical_address_of(uintptr_t va) {

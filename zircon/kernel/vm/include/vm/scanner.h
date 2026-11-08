@@ -22,13 +22,6 @@ void scanner_push_disable_count();
 // zero.
 void scanner_pop_disable_count();
 
-// Ask the scanner to dump informational state before issuing a panic. The assumption on calling
-// this is that the panic is due to eviction/scanner going wrong for some hard to infer reason at
-// the panic site, and this method can attempt to provide some additional context in the kernel log.
-// This should only be called if a panic is expected as this performs semi-unsafe operations that
-// might themselves crash or panic the kernel.
-void scanner_debug_dump_state_before_panic();
-
 // AutoVmScannerDisable is an RAII helper for disabling scanning using the
 // scanner_push_disable_count()/scanner_pop_disable_count(). Disabling the scanner is useful in test
 // code where it is not possible or practical to hold locks to prevent the scanner from taking

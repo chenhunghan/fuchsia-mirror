@@ -10,14 +10,12 @@ concrete backends (such as ioctl and mock backends), including lifecycle
 management, configuration switching, transfer operations, and device discovery.
 """
 
-from __future__ import annotations
-
 import contextlib
 import logging
 import os
 import stat
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Self
 
 from .models import TestParams, TestResult, TestStatus
 
@@ -179,7 +177,7 @@ class USBTestBackend(ABC):
             TestResult summarizing outcome and transfer metrics.
         """
 
-    def __enter__(self) -> USBTestBackend:
+    def __enter__(self) -> Self:
         """Open the backend on context manager entry."""
         self.open()
         return self

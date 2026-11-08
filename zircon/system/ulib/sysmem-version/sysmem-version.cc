@@ -479,11 +479,6 @@ PixelFormatAndModifier V2CopyFromV1PixelFormat(const fuchsia_sysmem::PixelFormat
 #if FUCHSIA_API_LEVEL_AT_LEAST(19)
 
 PixelFormatAndModifier V2CopyFromV1PixelFormat(const fuchsia_sysmem::wire::PixelFormat& v1) {
-  PixelFormatAndModifier v2b;
-  v2b.pixel_format = V2CopyFromV1PixelFormatType(v1.type);
-  if (v1.has_format_modifier) {
-    v2b.pixel_format_modifier = V2ConvertFromV1PixelFormatModifier(v1.format_modifier.value);
-  }
   return V2CopyFromV1PixelFormat(fidl::ToNatural(v1));
 }
 

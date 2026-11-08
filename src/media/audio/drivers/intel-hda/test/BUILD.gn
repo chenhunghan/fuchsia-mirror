@@ -48,6 +48,9 @@ fuchsia_unittest_package("pixelbook-eve-test-package") {
   manifest = "pixelbook-eve-test.cml"
   package_name = "pixelbook-eve-test"
   deps = [ ":pixelbook-eve-test-bin" ]
+  test_specs = {
+    environments = [ emu_env ]
+  }
   test_type = "system"
 }
 

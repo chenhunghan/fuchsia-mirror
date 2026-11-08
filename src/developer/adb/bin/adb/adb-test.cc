@@ -7,20 +7,29 @@
 #include <fuchsia/hardware/adb/cpp/fidl.h>
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async-loop/default.h>
+#include <lib/async/cpp/task.h>
 #include <lib/fidl/cpp/binding_set.h>
+#include <lib/fit/defer.h>
 #include <lib/sync/cpp/completion.h>
 #include <lib/sys/component/cpp/testing/realm_builder.h>
+#include <lib/syslog/cpp/log_settings.h>
 #include <lib/syslog/cpp/macros.h>
+#include <sched.h>
 #include <unistd.h>
 
 #include <memory>
+#include <mutex>
 #include <queue>
+#include <thread>
 #include <vector>
 
 #include <fbl/auto_lock.h>
 #include <fbl/mutex.h>
 #include <gtest/gtest.h>
 #include <src/lib/testing/loop_fixture/real_loop_fixture.h>
+
+#include "src/developer/adb/bin/adb/state-controller.h"
+#include "src/developer/adb/third_party/adb/socket.h"
 
 namespace adb {
 
@@ -96,6 +105,7 @@ class FakeAdbDriver {
   }
 
   void TearDown() {
+    impl_.Close();
     impl_.loop_.Shutdown();
 
     EXPECT_EQ(device_.expect_start_, 0UL);
@@ -115,16 +125,41 @@ class FakeAdbDriver {
       EXPECT_EQ(loop_.StartThread("adb-test-impl-thread"), ZX_OK);
     }
 
-    ~UsbAdbImplServer() override {
-      if (receive_completer_.has_value()) {
-        receive_completer_->Reply(fit::error(ZX_ERR_BAD_STATE));
-        receive_completer_.reset();
-        return;
-      }
-    }
+    ~UsbAdbImplServer() override { Close(); }
 
     void Bind(fidl::ServerEnd<fuchsia_hardware_adb::UsbAdbImpl> server) {
-      binding_.emplace(fidl::BindServer(loop_.dispatcher(), std::move(server), this));
+      Close();
+      auto unbound = std::make_shared<libsync::Completion>();
+      fbl::AutoLock _(&lock_);
+      unbound_ = unbound;
+      binding_.emplace(
+          fidl::BindServer(loop_.dispatcher(), std::move(server), this,
+                           [unbound](UsbAdbImplServer* self, fidl::UnbindInfo,
+                                     fidl::ServerEnd<fuchsia_hardware_adb::UsbAdbImpl>) {
+                             {
+                               fbl::AutoLock _(&self->lock_);
+                               self->receive_completer_.reset();
+                               self->receive_armed_.Reset();
+                             }
+                             unbound->Signal();
+                           }));
+    }
+
+    void Close() {
+      std::shared_ptr<libsync::Completion> unbound;
+      {
+        fbl::AutoLock _(&lock_);
+        receive_completer_.reset();
+        receive_armed_.Reset();
+        if (binding_.has_value()) {
+          binding_->Unbind();
+          binding_.reset();
+        }
+        unbound = std::move(unbound_);
+      }
+      if (unbound) {
+        EXPECT_EQ(unbound->Wait(zx::sec(5)), ZX_OK);
+      }
     }
 
     // fuchsia_hardware_adb::UsbAdbImpl functions
@@ -149,6 +184,7 @@ class FakeAdbDriver {
       fbl::AutoLock _(&lock_);
       if (expect_receive_.empty()) {
         receive_completer_.emplace(completer.ToAsync());
+        receive_armed_.Signal();
         return;
       }
       completer.Reply(fit::ok(std::move(expect_receive_.front())));
@@ -159,6 +195,7 @@ class FakeAdbDriver {
       if (receive_completer_.has_value()) {
         receive_completer_->Reply(fit::ok(std::move(vec)));
         receive_completer_.reset();
+        receive_armed_.Reset();
         return;
       }
       expect_receive_.push(std::move(vec));
@@ -177,9 +214,11 @@ class FakeAdbDriver {
     friend class FakeAdbDriver;
 
     async::Loop loop_;
-    std::optional<fidl::ServerBindingRef<fuchsia_hardware_adb::UsbAdbImpl>> binding_;
-
     fbl::Mutex lock_;
+    libsync::Completion receive_armed_;
+    std::shared_ptr<libsync::Completion> unbound_ __TA_GUARDED(lock_);
+    std::optional<fidl::ServerBindingRef<fuchsia_hardware_adb::UsbAdbImpl>> binding_
+        __TA_GUARDED(lock_);
     std::queue<std::vector<uint8_t>> expect_queue_tx_ __TA_GUARDED(lock_);
     std::queue<std::vector<uint8_t>> expect_receive_ __TA_GUARDED(lock_);
     std::optional<ReceiveCompleter::Async> receive_completer_ __TA_GUARDED(lock_);
@@ -206,10 +245,14 @@ class FakeAdbDriver {
 
     void StopAdb(StopAdbCompleter::Sync& completer) override {
       stop_called_++;
+      if (on_stop_) {
+        on_stop_();
+      }
       completer.Reply(fit::success());
     }
 
     std::atomic_uint32_t stop_called_ = 0;
+    fit::closure on_stop_;
 
    private:
     friend class FakeAdbDriver;
@@ -286,10 +329,41 @@ class AdbTest : public testing::Test {
     fidl_loop_.RunUntilIdle();
     dev_.reset();
     fidl_loop_.Shutdown();
+    set_system_type(kCsDevice);
   }
 
  private:
  protected:
+  void WaitForImplTeardown() {
+    if (auto teardown = dev_->impl_teardown_) {
+      EXPECT_EQ(teardown->Wait(zx::sec(5)), ZX_OK);
+    }
+  }
+
+  void SendConnect() {
+    std::string connection_string =
+        "device::ro.product.name=zircon;ro.product.model=zircon;ro.product.device=zircon;";
+    fake_driver_.ExpectQueueTx(
+        0, {
+               .msg =
+                   {
+                       .command = A_CNXN,
+                       .arg0 = A_VERSION,
+                       .arg1 = MAX_PAYLOAD,
+                       .data_length = static_cast<uint32_t>(connection_string.size()),
+                       .data_check = 0,
+                       .magic = A_CNXN ^ 0xffffffff,
+                   },
+               .payload = {},
+           });
+    fake_driver_.ExpectQueueTx(
+        0, std::vector<uint8_t>(connection_string.begin(), connection_string.end()));
+    fake_driver_.SendConnect();
+    while (!fake_driver_.expectations_empty()) {
+      usleep(1'000);
+    }
+  }
+
   async::Loop fidl_loop_;
   FakeAdbDriver fake_driver_;
   std::unique_ptr<FakeAdb> dev_;
@@ -303,6 +377,143 @@ TEST_F(AdbTest, SendUsbPacketTest) {
 
 TEST_F(AdbTest, ConnectTest) {
   // Send A_CNXN
+  std::string connection_string =
+      "device::ro.product.name=zircon;ro.product.model=zircon;ro.product.device=zircon;";
+  fake_driver_.ExpectQueueTx(
+      0, {
+             .msg =
+                 {
+                     .command = A_CNXN,
+                     .arg0 = A_VERSION,
+                     .arg1 = MAX_PAYLOAD,
+                     .data_length = static_cast<uint32_t>(connection_string.size()),
+                     .data_check = 0,
+                     .magic = A_CNXN ^ 0xffffffff,
+                 },
+             .payload = {},
+         });
+  fake_driver_.ExpectQueueTx(
+      0, std::vector<uint8_t>(connection_string.begin(), connection_string.end()));
+  fake_driver_.SendConnect();
+}
+
+TEST_F(AdbTest, SplitHeaderConnectTest) {
+  std::string connection_string =
+      "device::ro.product.name=zircon;ro.product.model=zircon;ro.product.device=zircon;";
+  fake_driver_.ExpectQueueTx(
+      0, {
+             .msg =
+                 {
+                     .command = A_CNXN,
+                     .arg0 = A_VERSION,
+                     .arg1 = MAX_PAYLOAD,
+                     .data_length = static_cast<uint32_t>(connection_string.size()),
+                     .data_check = 0,
+                     .magic = A_CNXN ^ 0xffffffff,
+                 },
+             .payload = {},
+         });
+  fake_driver_.ExpectQueueTx(
+      0, std::vector<uint8_t>(connection_string.begin(), connection_string.end()));
+
+  amessage msg{
+      .command = A_CNXN,
+      .arg0 = A_VERSION,
+      .arg1 = MAX_PAYLOAD,
+      .data_length = 234,
+      .data_check = 0x5b44,
+      .magic = A_CNXN ^ 0xffffffff,
+  };
+  const auto* msg_bytes = reinterpret_cast<const uint8_t*>(&msg);
+  constexpr size_t kFirstFragmentSize = 10;
+  fake_driver_.impl_.ExpectReceive(std::vector<uint8_t>(msg_bytes, msg_bytes + kFirstFragmentSize));
+  fake_driver_.impl_.ExpectReceive(
+      std::vector<uint8_t>(msg_bytes + kFirstFragmentSize, msg_bytes + sizeof(amessage)));
+
+  std::string host_banner = "host::features=shell_v2,cmd,stat_v2,ls_v2,fixed_pu";
+  std::vector<uint8_t> payload(host_banner.begin(), host_banner.end());
+  payload.resize(234);
+  fake_driver_.impl_.ExpectReceive(std::move(payload));
+}
+
+TEST_F(AdbTest, OversizedPayloadHeaderRejectedTest) {
+  fuchsia_logging::LogSettingsBuilder()
+      .WithMinLogSeverity(fuchsia_logging::LogSeverity::Fatal)
+      .BuildAndInitialize();
+  auto restore_logs = fit::defer([this]() {
+    while (!fake_driver_.expectations_empty()) {
+      usleep(1'000);
+    }
+    fuchsia_logging::LogSettingsBuilder()
+        .WithMinLogSeverity(fuchsia_logging::kDefaultLogLevel)
+        .BuildAndInitialize();
+  });
+
+  // Header with untrusted data_length > MAX_PAYLOAD (0xffffffff).
+  fake_driver_.impl_.ExpectReceive({
+      .msg =
+          {
+              .command = A_CNXN,
+              .arg0 = A_VERSION,
+              .arg1 = MAX_PAYLOAD,
+              .data_length = 0xffffffff,
+              .data_check = 0,
+              .magic = A_CNXN ^ 0xffffffff,
+          },
+      .payload = {},
+  });
+
+  // Subsequent valid A_CNXN should still succeed.
+  std::string connection_string =
+      "device::ro.product.name=zircon;ro.product.model=zircon;ro.product.device=zircon;";
+  fake_driver_.ExpectQueueTx(
+      0, {
+             .msg =
+                 {
+                     .command = A_CNXN,
+                     .arg0 = A_VERSION,
+                     .arg1 = MAX_PAYLOAD,
+                     .data_length = static_cast<uint32_t>(connection_string.size()),
+                     .data_check = 0,
+                     .magic = A_CNXN ^ 0xffffffff,
+                 },
+             .payload = {},
+         });
+  fake_driver_.ExpectQueueTx(
+      0, std::vector<uint8_t>(connection_string.begin(), connection_string.end()));
+  fake_driver_.SendConnect();
+}
+
+TEST_F(AdbTest, InvalidMagicHeaderRejectedTest) {
+  fuchsia_logging::LogSettingsBuilder()
+      .WithMinLogSeverity(fuchsia_logging::LogSeverity::Fatal)
+      .BuildAndInitialize();
+  auto restore_logs = fit::defer([this]() {
+    while (!fake_driver_.expectations_empty()) {
+      usleep(1'000);
+    }
+    fuchsia_logging::LogSettingsBuilder()
+        .WithMinLogSeverity(fuchsia_logging::kDefaultLogLevel)
+        .BuildAndInitialize();
+  });
+
+  // Split header with invalid magic, also exercising pending_packet_ and copied_len_ reset.
+  amessage bad_msg{
+      .command = A_CNXN,
+      .arg0 = A_VERSION,
+      .arg1 = MAX_PAYLOAD,
+      .data_length = 234,
+      .data_check = 0,
+      .magic = 0,
+  };
+  const auto* bad_msg_bytes = reinterpret_cast<const uint8_t*>(&bad_msg);
+  constexpr size_t kFirstFragmentSize = 10;
+  fake_driver_.impl_.ExpectReceive(
+      std::vector<uint8_t>(bad_msg_bytes, bad_msg_bytes + kFirstFragmentSize));
+  fake_driver_.impl_.ExpectReceive(
+      std::vector<uint8_t>(bad_msg_bytes + kFirstFragmentSize, bad_msg_bytes + sizeof(amessage)));
+
+  // Subsequent valid A_CNXN should still succeed.
   std::string connection_string =
       "device::ro.product.name=zircon;ro.product.model=zircon;ro.product.device=zircon;";
   fake_driver_.ExpectQueueTx(
@@ -347,12 +558,82 @@ TEST_F(AdbTest, RecoveryConnectTest) {
 
 TEST_F(AdbTest, ResetTest) {
   fake_driver_.ExpectStart();
-  dev_->Reset();
+  EXPECT_EQ(dev_->Reset(), ZX_OK);
   EXPECT_EQ(fake_driver_.device_.stop_called_.load(), 1UL);
 
   while (!fake_driver_.expectations_empty()) {
     usleep(1'000);
   }
+}
+
+TEST_F(AdbTest, ResetClearsIncompletePacketTest) {
+  // Deliver a partial ADB header so |pending_packet_| and |copied_len_| hold incomplete state.
+  ASSERT_EQ(fake_driver_.impl_.receive_armed_.Wait(zx::sec(5)), ZX_OK);
+  fake_driver_.impl_.ExpectReceive(std::vector<uint8_t>(10, 0xff));
+  ASSERT_EQ(fake_driver_.impl_.receive_armed_.Wait(zx::sec(5)), ZX_OK);
+  libsync::Completion callback_done;
+  ASSERT_EQ(async::PostTask(fidl_loop_.dispatcher(), [&]() { callback_done.Signal(); }), ZX_OK);
+  ASSERT_EQ(callback_done.Wait(zx::sec(5)), ZX_OK);
+
+  fake_driver_.ExpectStart();
+  EXPECT_EQ(dev_->Reset(), ZX_OK);
+
+  SendConnect();
+}
+
+TEST_F(AdbTest, ResetWhenDriverClosesImplDuringStopTest) {
+  fake_driver_.device_.on_stop_ = [this]() {
+    fake_driver_.impl_.Close();
+    WaitForImplTeardown();
+  };
+  fake_driver_.ExpectStart();
+  EXPECT_EQ(dev_->Reset(), ZX_OK);
+  EXPECT_EQ(fake_driver_.device_.stop_called_.load(), 1UL);
+  EXPECT_TRUE(fake_driver_.expectations_empty());
+
+  SendConnect();
+}
+
+TEST(StateControllerTest, SetSystemTypeHandlesResetError) {
+  auto restore_type = fit::defer([prev = get_system_type()] { set_system_type(prev); });
+  set_system_type(kCsRecovery);
+  std::atomic<zx_status_t> reset_status = ZX_ERR_PEER_CLOSED;
+  std::atomic<ConnectionState> expected_callback_state = kCsSideload;
+  std::atomic_uint32_t reset_count = 0;
+
+  StateControllerServer server;
+  server.set_reset_callback([&]() {
+    EXPECT_EQ(get_system_type(), expected_callback_state.load());
+    reset_count++;
+    return reset_status.load();
+  });
+
+  async::Loop loop{&kAsyncLoopConfigNeverAttachToThread};
+  ASSERT_EQ(loop.StartThread("state-controller-test-thread"), ZX_OK);
+  auto [client_end, server_end] = fidl::Endpoints<fuchsia_hardware_adb::StateController>::Create();
+  fidl::BindServer(loop.dispatcher(), std::move(server_end), &server);
+  fidl::SyncClient<fuchsia_hardware_adb::StateController> client(std::move(client_end));
+
+  auto failed = client->SetSystemType({fuchsia_hardware_adb::SystemType::kSideload});
+  ASSERT_TRUE(failed.is_error());
+  ASSERT_TRUE(failed.error_value().is_domain_error());
+  EXPECT_EQ(failed.error_value().domain_error(), ZX_ERR_PEER_CLOSED);
+  EXPECT_EQ(get_system_type(), kCsRecovery);
+  EXPECT_EQ(reset_count.load(), 1u);
+
+  // Requesting the restored system type after a failed reset must still reset adb because
+  // UsbAdbImpl was stopped before StartUsbAdbImpl() failed.
+  reset_status = ZX_OK;
+  expected_callback_state = kCsRecovery;
+  EXPECT_TRUE(client->SetSystemType({fuchsia_hardware_adb::SystemType::kRecovery}).is_ok());
+  EXPECT_EQ(get_system_type(), kCsRecovery);
+  EXPECT_EQ(reset_count.load(), 2u);
+
+  // Repeating the active system type once healthy is a no-op.
+  EXPECT_TRUE(client->SetSystemType({fuchsia_hardware_adb::SystemType::kRecovery}).is_ok());
+  EXPECT_EQ(reset_count.load(), 2u);
+
+  loop.Shutdown();
 }
 
 // Integration tests
@@ -631,6 +912,281 @@ TEST_F(AdbRealmTest, ServiceReadWriteTest) {
   while (!fake_driver_.expectations_empty()) {
     usleep(1'000);
   }
+}
+
+namespace {
+
+struct RecordingConnection : public Connection {
+  bool Write(std::unique_ptr<apacket> packet) override {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (packet->msg.command == A_OKAY) {
+      okay_packets.push_back(std::move(packet));
+    }
+    return true;
+  }
+  void Start() override {}
+  void Stop() override {}
+  bool DoTlsHandshake(char* key, std::string* auth_key) override { return true; }
+  void* adb() override { return nullptr; }
+
+  size_t okay_count() {
+    std::lock_guard<std::mutex> lock(mutex);
+    return okay_packets.size();
+  }
+
+  std::mutex mutex;
+  std::vector<std::unique_ptr<apacket>> okay_packets;
+};
+
+size_t FillSocketToCapacity(const zx::socket& sock) {
+  size_t total = 0;
+  std::vector<uint8_t> chunk(4096, 0x5a);
+  while (true) {
+    size_t actual = 0;
+    zx_status_t status = sock.write(0, chunk.data(), chunk.size(), &actual);
+    if (status == ZX_OK) {
+      total += actual;
+    } else {
+      EXPECT_EQ(status, ZX_ERR_SHOULD_WAIT);
+      break;
+    }
+  }
+  uint8_t byte = 0x5a;
+  while (true) {
+    size_t actual = 0;
+    zx_status_t status = sock.write(0, &byte, 1, &actual);
+    if (status == ZX_OK) {
+      total += actual;
+    } else {
+      EXPECT_EQ(status, ZX_ERR_SHOULD_WAIT);
+      break;
+    }
+  }
+  return total;
+}
+
+void CloseAndWaitLocalSocket(asocket* local) {
+  local->zx_socket.reset();
+  const unsigned local_id = local->id;
+  local->close(local);
+  while (find_local_socket(local_id, 0) != nullptr) {
+    sched_yield();
+  }
+}
+
+void DrainSocketBytes(const zx::socket& server, size_t remaining) {
+  std::vector<uint8_t> read_buf(4096);
+  while (remaining > 0) {
+    zx_signals_t pending = 0;
+    zx_status_t status =
+        server.wait_one(ZX_SOCKET_READABLE | ZX_SOCKET_PEER_CLOSED, zx::time::infinite(), &pending);
+    EXPECT_EQ(status, ZX_OK);
+    if (status != ZX_OK) {
+      return;
+    }
+    if (pending & ZX_SOCKET_READABLE) {
+      size_t read_bytes = 0;
+      status = server.read(0, read_buf.data(), std::min(read_buf.size(), remaining), &read_bytes);
+      EXPECT_EQ(status, ZX_OK);
+      if (status != ZX_OK) {
+        return;
+      }
+      remaining -= read_bytes;
+      continue;
+    }
+    ADD_FAILURE() << "Socket peer closed before draining remaining " << remaining << " bytes";
+    return;
+  }
+}
+
+}  // namespace
+
+TEST(AdbSocketFlowControlTest, LegacyModeSendsSingleOkayAfterPartialWritesComplete) {
+  atransport t(kCsDevice);
+  t.online = true;
+  t.SetDelayedAck(false);
+  auto conn = std::make_shared<RecordingConnection>();
+  t.SetConnection(conn);
+
+  asocket* local = create_local_socket();
+  local->transport = &t;
+  local->available_send_bytes = std::nullopt;
+  asocket* remote = create_remote_socket(10, &t);
+  local->peer = remote;
+  remote->peer = local;
+
+  zx::socket server, client;
+  ASSERT_EQ(zx::socket::create(ZX_SOCKET_STREAM, &server, &client), ZX_OK);
+
+  constexpr size_t kInitialFreeSpace = 100;
+  constexpr size_t kPayloadSize = 250;
+  const size_t capacity = FillSocketToCapacity(client);
+  ASSERT_GT(capacity, kInitialFreeSpace);
+
+  std::vector<uint8_t> drain_buf(kInitialFreeSpace);
+  size_t actual = 0;
+  ASSERT_EQ(server.read(0, drain_buf.data(), drain_buf.size(), &actual), ZX_OK);
+  ASSERT_EQ(actual, kInitialFreeSpace);
+
+  local->zx_socket = std::move(client);
+
+  std::thread reader(
+      [&](zx::socket server_end) {
+        // Own `server_end` inside the lambda body so any early return closes the read end
+        // immediately, unblocking `local->enqueue()` via ZX_ERR_PEER_CLOSED instead of deadlocking.
+        zx::socket reader_server = std::move(server_end);
+
+        // Wait until local_socket_flush_incoming writes the first 100 bytes and fills the socket.
+        while (true) {
+          zx_info_socket_t info{};
+          zx_status_t status =
+              reader_server.get_info(ZX_INFO_SOCKET, &info, sizeof(info), nullptr, nullptr);
+          EXPECT_EQ(status, ZX_OK);
+          if (status != ZX_OK) {
+            return;
+          }
+          if (info.rx_buf_available == capacity) {
+            break;
+          }
+          zx_signals_t observed = 0;
+          if (reader_server.wait_one(ZX_SOCKET_PEER_CLOSED, zx::time::infinite_past(), &observed) ==
+              ZX_OK) {
+            status = reader_server.get_info(ZX_INFO_SOCKET, &info, sizeof(info), nullptr, nullptr);
+            EXPECT_EQ(status, ZX_OK);
+            EXPECT_EQ(info.rx_buf_available, capacity);
+            if (status != ZX_OK || info.rx_buf_available != capacity) {
+              return;
+            }
+            break;
+          }
+          sched_yield();
+        }
+        // No A_OKAY should have been sent after only a partial write of the packet.
+        EXPECT_EQ(conn->okay_count(), 0u);
+
+        // Drain the socket so the remaining 150 bytes can be flushed.
+        DrainSocketBytes(reader_server, (capacity - kInitialFreeSpace) + kPayloadSize);
+      },
+      std::move(server));
+
+  apacket::payload_type payload(kPayloadSize);
+  memset(payload.data(), 'A', payload.size());
+  EXPECT_EQ(local->enqueue(local, std::move(payload)), 0);
+  // Reset `zx_socket` before joining `reader` so `ZX_SOCKET_PEER_CLOSED` wakes `reader`
+  // immediately if `enqueue()` returns without writing all expected bytes.
+  local->zx_socket.reset();
+  reader.join();
+
+  ASSERT_EQ(conn->okay_packets.size(), 1u);
+  EXPECT_EQ(conn->okay_packets[0]->msg.command, static_cast<uint32_t>(A_OKAY));
+  EXPECT_EQ(conn->okay_packets[0]->msg.arg0, local->id);
+  EXPECT_EQ(conn->okay_packets[0]->msg.arg1, remote->id);
+  EXPECT_EQ(conn->okay_packets[0]->msg.data_length, 0u);
+
+  CloseAndWaitLocalSocket(local);
+}
+
+TEST(AdbSocketFlowControlTest, DelayedAckModeSkipsZeroByteOkayAndReportsExactFlushedBytes) {
+  atransport t(kCsDevice);
+  t.online = true;
+  t.SetDelayedAck(true);
+  auto conn = std::make_shared<RecordingConnection>();
+  t.SetConnection(conn);
+
+  asocket* local = create_local_socket();
+  local->transport = &t;
+  local->available_send_bytes = INITIAL_DELAYED_ACK_BYTES;
+  asocket* remote = create_remote_socket(20, &t);
+  local->peer = remote;
+  remote->peer = local;
+
+  zx::socket server, client;
+  ASSERT_EQ(zx::socket::create(ZX_SOCKET_STREAM, &server, &client), ZX_OK);
+
+  constexpr size_t kInitialFreeSpace = 100;
+  constexpr size_t kPayloadSize = 250;
+  const size_t capacity = FillSocketToCapacity(client);
+  ASSERT_GT(capacity, kInitialFreeSpace);
+
+  std::vector<uint8_t> drain_buf(kInitialFreeSpace);
+  size_t actual = 0;
+  ASSERT_EQ(server.read(0, drain_buf.data(), drain_buf.size(), &actual), ZX_OK);
+  ASSERT_EQ(actual, kInitialFreeSpace);
+
+  local->zx_socket = std::move(client);
+
+  std::thread reader(
+      [&](zx::socket server_end) {
+        zx::socket reader_server = std::move(server_end);
+
+        // Wait until the first 100-byte flush emits its A_OKAY and fills the socket.
+        while (conn->okay_count() == 0) {
+          zx_signals_t observed = 0;
+          if (reader_server.wait_one(ZX_SOCKET_PEER_CLOSED, zx::time::infinite_past(), &observed) ==
+                  ZX_OK &&
+              conn->okay_count() == 0) {
+            ADD_FAILURE() << "Socket peer closed before initial A_OKAY was sent";
+            return;
+          }
+          sched_yield();
+        }
+        // Give the enqueue loop a chance to hit ZX_ERR_SHOULD_WAIT while the socket is full.
+        for (int i = 0; i < 10; ++i) {
+          sched_yield();
+        }
+        // Verify no 0-byte A_OKAY packets were spammed while the socket was full.
+        EXPECT_EQ(conn->okay_count(), 1u);
+
+        DrainSocketBytes(reader_server, (capacity - kInitialFreeSpace) + kPayloadSize);
+      },
+      std::move(server));
+
+  apacket::payload_type payload(kPayloadSize);
+  memset(payload.data(), 'B', payload.size());
+  EXPECT_EQ(local->enqueue(local, std::move(payload)), 0);
+  local->zx_socket.reset();
+  reader.join();
+
+  ASSERT_EQ(conn->okay_packets.size(), 2u);
+  uint32_t total_acked = 0;
+  for (const auto& pkt : conn->okay_packets) {
+    ASSERT_EQ(pkt->msg.data_length, sizeof(uint32_t));
+    ASSERT_EQ(pkt->payload.size(), sizeof(uint32_t));
+    uint32_t acked = 0;
+    memcpy(&acked, pkt->payload.data(), sizeof(acked));
+    EXPECT_GT(acked, 0u);
+    total_acked += acked;
+  }
+  EXPECT_EQ(total_acked, kPayloadSize);
+
+  CloseAndWaitLocalSocket(local);
+}
+
+TEST(AdbSocketFlowControlTest, DelayedAckModeDoesNotSendZeroByteOkayOnClosedPeer) {
+  atransport t(kCsDevice);
+  t.online = true;
+  t.SetDelayedAck(true);
+  auto conn = std::make_shared<RecordingConnection>();
+  t.SetConnection(conn);
+
+  asocket* local = create_local_socket();
+  local->transport = &t;
+  local->available_send_bytes = INITIAL_DELAYED_ACK_BYTES;
+  asocket* remote = create_remote_socket(30, &t);
+  local->peer = remote;
+  remote->peer = local;
+
+  zx::socket server, client;
+  ASSERT_EQ(zx::socket::create(ZX_SOCKET_STREAM, &server, &client), ZX_OK);
+  server.reset();
+  local->zx_socket = std::move(client);
+
+  apacket::payload_type payload(64);
+  memset(payload.data(), 'C', payload.size());
+  EXPECT_EQ(local->enqueue(local, std::move(payload)), 0);
+  EXPECT_EQ(conn->okay_count(), 0u);
+
+  CloseAndWaitLocalSocket(local);
 }
 
 }  // namespace adb

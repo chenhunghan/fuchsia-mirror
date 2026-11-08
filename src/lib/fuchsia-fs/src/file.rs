@@ -334,10 +334,6 @@ pub enum WriteError {
     #[error("while linking the file: {0}")]
     Link(#[from] zx_status::Status),
 
-    #[error("while renaming the file: {0}")]
-    #[cfg(fuchsia_api_level_at_least = "HEAD")]
-    Rename(#[from] crate::node::RenameError),
-
     #[error("write call failed: {0}")]
     Fidl(#[from] fidl::Error),
 

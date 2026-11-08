@@ -6,6 +6,7 @@
 
 //! Address Space ID (ASID) allocator for RISC-V 64 address spaces.
 
+use crate::ksync_kernel::TrackedMutex;
 use core::pin::Pin;
 use debug::ltracef;
 use id_allocator::IdAllocator;
@@ -33,8 +34,13 @@ const MMU_RISCV64_MAX_USER_ASID: u16 = ((1u32 << MMU_RISCV64_ASID_BITS) - 1) as 
 const MAX_ASIDS: usize = 65536;
 const BITMAP_WORDS: usize = MAX_ASIDS / (usize::BITS as usize);
 
-type GlobalAsidAllocator =
-    IdAllocator<u16, MAX_ASIDS, { MMU_RISCV64_FIRST_USER_ASID as usize }, BITMAP_WORDS>;
+type GlobalAsidAllocator = IdAllocator<
+    u16,
+    TrackedMutex,
+    MAX_ASIDS,
+    { MMU_RISCV64_FIRST_USER_ASID as usize },
+    BITMAP_WORDS,
+>;
 
 /// Constructed once by [`asid_allocator_init`] during early MMU init; the
 /// allocator's own `KMutex` serializes every use after that.

@@ -5,7 +5,7 @@
 #ifndef SRC_DEVICES_BLOCK_DRIVERS_UFS_TEST_MOCK_DEVICE_FAKE_DMA_HANDLER_H_
 #define SRC_DEVICES_BLOCK_DRIVERS_UFS_TEST_MOCK_DEVICE_FAKE_DMA_HANDLER_H_
 
-#include <lib/fake-bti/bti.h>
+#include <lib/driver/fake-bti/cpp/fake-bti.h>
 #include <lib/zx/bti.h>
 #include <lib/zx/result.h>
 

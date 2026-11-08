@@ -21,12 +21,13 @@ use fidl_fuchsia_wlan_ieee80211 as fidl_ieee80211;
 use fidl_fuchsia_wlan_internal as fidl_internal;
 use fidl_fuchsia_wlan_policy as fidl_policy;
 use fidl_fuchsia_wlan_sme as fidl_sme;
+use fidl_fuchsia_wlan_stats as fidl_stats;
 use fuchsia_async::{self as fasync, DurationExt};
 use fuchsia_inspect::Node as InspectNode;
 use fuchsia_inspect_contrib::inspect_insert;
 use fuchsia_inspect_contrib::log::WriteInspect;
 use futures::channel::{mpsc, oneshot};
-use futures::future::{Fuse, FutureExt};
+use futures::future::{BoxFuture, Fuse, FutureExt};
 use futures::select;
 use futures::stream::{self, StreamExt, TryStreamExt};
 use log::{debug, error, info, warn};
@@ -41,6 +42,7 @@ use wlan_common::sequestered::Sequestered;
 const MAX_CONNECTION_ATTEMPTS: u8 = 4; // arbitrarily chosen until we have some data
 const NUM_PAST_SCORES: usize = 91; // number of past periodic connection scores to store for metrics
 const PENDING_ROAM_TIMEOUT: zx::MonotonicDuration = zx::MonotonicDuration::from_seconds(3);
+pub const SIGNAL_REPORT_INTERVAL: zx::MonotonicDuration = zx::MonotonicDuration::from_seconds(2);
 
 type State = state_machine::State<ExitReason>;
 type ReqStream = stream::Fuse<mpsc::Receiver<ManualRequest>>;
@@ -259,9 +261,6 @@ impl CommonStateOptions {
         }
     }
 }
-
-pub type ConnectionStatsSender = mpsc::UnboundedSender<fidl_internal::SignalReportIndication>;
-pub type ConnectionStatsReceiver = mpsc::UnboundedReceiver<fidl_internal::SignalReportIndication>;
 
 fn handle_none_request() -> Result<State, ExitReason> {
     Err(ExitReason(Err(format_err!("The stream of requests ended unexpectedly"))))
@@ -598,6 +597,8 @@ struct ConnectedOptions {
     bss_connect_duration_metric_timer: Pin<Box<fasync::Timer>>,
     pending_roam: Option<PendingRoam>,
     pending_roam_timer: Pin<Box<Fuse<fasync::Timer>>>,
+    signal_report_timer: Pin<Box<Fuse<fasync::Timer>>>,
+    signal_report_fut: Fuse<BoxFuture<'static, Result<fidl_stats::SignalReport, anyhow::Error>>>,
 }
 impl ConnectedOptions {
     pub fn new(
@@ -649,7 +650,21 @@ impl ConnectedOptions {
             )),
             pending_roam: None,
             pending_roam_timer: Box::pin(Fuse::terminated()),
+            signal_report_timer: Box::pin(
+                fasync::Timer::new(SIGNAL_REPORT_INTERVAL.after_now()).fuse(),
+            ),
+            signal_report_fut: Fuse::terminated(),
         }
+    }
+
+    fn pause_signal_report_polling(&mut self) {
+        self.signal_report_timer.set(Fuse::terminated());
+        self.signal_report_fut = Fuse::terminated();
+    }
+
+    fn restart_signal_report_polling(&mut self) {
+        self.signal_report_timer.set(fasync::Timer::new(SIGNAL_REPORT_INTERVAL.after_now()).fuse());
+        self.signal_report_fut = Fuse::terminated();
     }
 }
 /// The CONNECTED state monitors the SME status. It handles the SME status response:
@@ -672,6 +687,9 @@ async fn connected_state(
                 Some(Ok(event)) => {
                     let is_sme_idle = match event {
                         fidl_sme::ConnectTransactionEvent::OnDisconnect { info: fidl_info } => {
+                            if fidl_info.is_sme_reconnecting {
+                                options.pause_signal_report_polling();
+                            }
                             notify_when_disconnect_detected(
                                 &common_options,
                                 &options,
@@ -688,6 +706,7 @@ async fn connected_state(
                                 // to track as a new connection.
                                 options.ess_connect_start_time = fasync::MonotonicInstant::now();
                                 options.bss_connect_start_time = fasync::MonotonicInstant::now();
+                                options.restart_signal_report_polling();
                             }
                             notify_when_reconnect_detected(&common_options, &options, result);
                             !connected
@@ -701,28 +720,7 @@ async fn connected_state(
                                 !connected
                             }
                         }
-                        fidl_sme::ConnectTransactionEvent::OnSignalReport { ind } => {
-                            if let Some(rssi) = ind.rssi_dbm {
-                                options.ap_state.tracked.signal.rssi_dbm = rssi;
-                            }
-                            if let Some(snr) = ind.snr_db {
-                                options.ap_state.tracked.signal.snr_db = snr;
-                            }
-                            // Update list of signals only if RSSI or SNR was present.
-                            if ind.rssi_dbm.is_some() || ind.snr_db.is_some() {
-                                options.tracked_signals.add(types::TimestampedSignal {
-                                    time: fasync::MonotonicInstant::now(),
-                                    signal: options.ap_state.tracked.signal,
-                                });
-                            }
-
-                            notify_on_signal_report(
-                                &common_options,
-                                &mut options,
-                                ind
-                            );
-                            false
-                        }
+                        fidl_sme::ConnectTransactionEvent::OnSignalReport { .. } => false,
                         fidl_sme::ConnectTransactionEvent::OnRssiThresholdBreached { .. } => false,
                         fidl_sme::ConnectTransactionEvent::OnChannelSwitched { info } => {
                             info!(
@@ -853,6 +851,13 @@ async fn connected_state(
                     signals: options.tracked_signals.get_before(fasync::MonotonicInstant::now())
                 });
             },
+            () = &mut options.signal_report_timer => {
+                options.signal_report_fut = common_options.proxy.get_signal_report().boxed().fuse();
+            },
+            signal_report = &mut options.signal_report_fut => {
+                options.signal_report_timer.set(fasync::Timer::new(SIGNAL_REPORT_INTERVAL.after_now()).fuse());
+                handle_signal_report(&common_options, &mut options, signal_report);
+            },
             () = &mut options.pending_roam_timer => {
                 error!("Pending roam request has timed out without a response from SME, cannot proceed with connection");
                 options.pending_roam = None;
@@ -886,12 +891,45 @@ async fn connected_state(
                         _wake_lease: wake_lease,
                     });
                     options.pending_roam_timer.set(fasync::Timer::new(PENDING_ROAM_TIMEOUT.after_now()).fuse());
+                    options.pause_signal_report_polling();
                     common_options.telemetry_sender.send(TelemetryEvent::PolicyRoamAttempt {
                         request: roam_request,
                         connected_duration: fasync::MonotonicInstant::now() - options.bss_connect_start_time,
                     });
                 }
             }
+        }
+    }
+}
+
+fn handle_signal_report(
+    common_options: &CommonStateOptions,
+    options: &mut ConnectedOptions,
+    signal_report: Result<fidl_stats::SignalReport, anyhow::Error>,
+) {
+    match signal_report {
+        Ok(fidl_stats::SignalReport { connection_signal_report: Some(report), .. }) => {
+            if let Some(rssi) = report.rssi_dbm {
+                options.ap_state.tracked.signal.rssi_dbm = rssi;
+            }
+            if let Some(snr) = report.snr_db {
+                options.ap_state.tracked.signal.snr_db = snr;
+            }
+            // Update list of signals only if RSSI or SNR was present.
+            if report.rssi_dbm.is_some() || report.snr_db.is_some() {
+                options.tracked_signals.add(types::TimestampedSignal {
+                    time: fasync::MonotonicInstant::now(),
+                    signal: options.ap_state.tracked.signal,
+                });
+            }
+
+            notify_on_signal_report(common_options, options, report);
+        }
+        Ok(_) => {
+            warn!("Signal report missing connection_signal_report while connected");
+        }
+        Err(e) => {
+            warn!("Failed to get signal report: {:?}", e);
         }
     }
 }
@@ -932,18 +970,18 @@ fn notify_when_reconnect_detected(
 fn notify_on_signal_report(
     common_options: &CommonStateOptions,
     options: &mut ConnectedOptions,
-    ind: fidl_internal::SignalReportIndication,
+    report: fidl_stats::ConnectionSignalReport,
 ) {
     // Update reported state.
     common_options.status_publisher.publish_status(Status::from_ap_state(&options.ap_state));
 
     // Send signal report metrics
-    common_options.telemetry_sender.send(TelemetryEvent::OnSignalReport { ind: ind.clone() });
+    common_options.telemetry_sender.send(TelemetryEvent::OnSignalReport { report: report.clone() });
 
     // Forward signal report data to roam monitor.
     let _ = options
         .roam_monitor_sender
-        .send_signal_report_ind(ind)
+        .send_signal_report(report)
         .inspect_err(|e| error!("Error handling signal report: {}", e));
 }
 
@@ -1038,7 +1076,9 @@ async fn handle_roam_result(
         // Update internals of connected state to proceed with connection.
         update_internal_state_on_roam_success(common_options, options, result)?;
         info!("Roam succeeded!");
-    } else if !result.original_association_maintained {
+    } else if result.original_association_maintained {
+        options.restart_signal_report_polling();
+    } else {
         // RoamResult should always include disconnect_info on failure, but this check prevents
         // issues if it's missing.
         let sme_disconnect_info = match result.disconnect_info {
@@ -1225,6 +1265,7 @@ fn update_internal_state_on_roam_success(
         Box::pin(fasync::Timer::new(AVERAGE_SCORE_DELTA_MINIMUM_DURATION.after_now()));
     options.bss_connect_duration_metric_timer =
         Box::pin(fasync::Timer::new(METRICS_SHORT_CONNECT_DURATION.after_now()));
+    options.restart_signal_report_polling();
     // Re-initialize roam monitor for new BSS
     let (sender, roam_receiver) = mpsc::channel(ROAMING_CHANNEL_BUFFER_SIZE);
     options.roam_request_receiver = roam_receiver;
@@ -1283,6 +1324,7 @@ mod tests {
     struct TestValues {
         common_options: CommonStateOptions,
         sme_req_stream: fidl_sme::ClientSmeRequestStream,
+        telemetry_req_stream: fidl_sme::TelemetryRequestStream,
         saved_networks_manager: Arc<FakeSavedNetworksManager>,
         client_req_sender: mpsc::Sender<ManualRequest>,
         update_receiver: mpsc::UnboundedReceiver<listener::ClientListenerMessage>,
@@ -1298,6 +1340,8 @@ mod tests {
         let (update_sender, update_receiver) = mpsc::unbounded();
         let (sme_proxy, sme_server) = create_proxy::<fidl_sme::ClientSmeMarker>();
         let sme_req_stream = sme_server.into_stream();
+        let (telemetry_proxy, telemetry_server) = create_proxy::<fidl_sme::TelemetryMarker>();
+        let telemetry_req_stream = telemetry_server.into_stream();
         let saved_networks = FakeSavedNetworksManager::new();
         let saved_networks_manager = Arc::new(saved_networks);
         let (telemetry_sender, telemetry_receiver) = mpsc::channel::<TelemetryEvent>(100);
@@ -1310,7 +1354,12 @@ mod tests {
 
         TestValues {
             common_options: CommonStateOptions {
-                proxy: SmeForClientStateMachine::new(sme_proxy, 0, defect_sender.clone()),
+                proxy: SmeForClientStateMachine::new_with_telemetry(
+                    sme_proxy,
+                    telemetry_proxy,
+                    0,
+                    defect_sender.clone(),
+                ),
                 req_stream: client_req_stream.fuse(),
                 update_sender,
                 saved_networks_manager: saved_networks_manager.clone(),
@@ -1322,6 +1371,7 @@ mod tests {
                 power_manager: power_manager.clone(),
             },
             sme_req_stream,
+            telemetry_req_stream,
             saved_networks_manager,
             client_req_sender,
             update_receiver,
@@ -3075,7 +3125,7 @@ mod tests {
         test_values.common_options.saved_networks_manager = Arc::new(saved_networks_manager);
 
         // Set up the state machine, starting at the connected state.
-        let (connect_txn_proxy, connect_txn_stream) =
+        let (connect_txn_proxy, _connect_txn_stream) =
             create_proxy_and_stream::<fidl_sme::ConnectTransactionMarker>();
         let options = ConnectedOptions::new(
             &mut test_values.common_options,
@@ -3089,7 +3139,6 @@ mod tests {
         );
         let initial_state = connected_state(test_values.common_options, options);
 
-        let connect_txn_handle = connect_txn_stream.control_handle();
         let fut = run_state_machine(initial_state);
         let mut fut = pin!(fut);
         let sme_fut = test_values.sme_req_stream.into_future();
@@ -3106,19 +3155,27 @@ mod tests {
             // Run the state machine
             assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
-            // Send the first signal report from SME
+            // Advance time to trigger the first signal report poll
+            exec.set_fake_time(fasync::MonotonicInstant::after(SIGNAL_REPORT_INTERVAL));
+            assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
+
             let rssi_1 = -50;
             let snr_1 = 25;
-            let fidl_signal_report =
-                fidl_internal::SignalReportIndication {
+            let fidl_signal_report = fidl_stats::SignalReport {
+                connection_signal_report: Some(fidl_stats::ConnectionSignalReport {
                     rssi_dbm: Some(rssi_1),
                     snr_db: Some(snr_1),
                     tx_rate_500kbps: Some(0),
                     ..Default::default()
-                };
-            connect_txn_handle
-                .send_on_signal_report(&fidl_signal_report)
-                .expect("failed to send signal report");
+                }),
+                ..Default::default()
+            };
+            assert_matches!(
+                exec.run_until_stalled(&mut test_values.telemetry_req_stream.next()),
+                Poll::Ready(Some(Ok(fidl_sme::TelemetryRequest::GetSignalReport { responder }))) => {
+                    responder.send(Ok(&fidl_signal_report)).expect("failed to send signal report");
+                }
+            );
             assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
             // Do a quick check that state machine does not exist and there's no disconnect to SME
@@ -3130,7 +3187,10 @@ mod tests {
             });
 
             // Verify that signal report is sent to the roam monitor
-            assert_matches!(roam_trigger_data_receiver.try_recv(), Ok(RoamTriggerData::SignalReportInd(_)));
+            assert_matches!(
+                roam_trigger_data_receiver.try_recv(),
+                Ok(RoamTriggerData::ConnectionSignalReport(_))
+            );
 
             // Verify that the status is updated.
             let status = test_values.status_reader.read_status().expect("failed to read status");
@@ -3143,19 +3203,27 @@ mod tests {
                 }
             );
 
-            // Send a second signal report with higher RSSI and SNR than the previous reports.
+            // Advance time and respond to a second signal report with higher RSSI and SNR.
+            exec.set_fake_time(fasync::MonotonicInstant::after(SIGNAL_REPORT_INTERVAL));
+            assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
+
             let rssi_2 = -30;
             let snr_2 = 35;
-            let fidl_signal_report =
-                fidl_internal::SignalReportIndication {
+            let fidl_signal_report = fidl_stats::SignalReport {
+                connection_signal_report: Some(fidl_stats::ConnectionSignalReport {
                     rssi_dbm: Some(rssi_2),
                     snr_db: Some(snr_2),
                     tx_rate_500kbps: Some(0),
                     ..Default::default()
-                };
-            connect_txn_handle
-                .send_on_signal_report(&fidl_signal_report)
-                .expect("failed to send signal report");
+                }),
+                ..Default::default()
+            };
+            assert_matches!(
+                exec.run_until_stalled(&mut test_values.telemetry_req_stream.next()),
+                Poll::Ready(Some(Ok(fidl_sme::TelemetryRequest::GetSignalReport { responder }))) => {
+                    responder.send(Ok(&fidl_signal_report)).expect("failed to send signal report");
+                }
+            );
             assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
 
             // Verify telemetry events;
@@ -3164,8 +3232,122 @@ mod tests {
             });
 
             // Verify that signal report is sent to the roam monitor
-            assert_matches!(roam_trigger_data_receiver.try_recv(), Ok(RoamTriggerData::SignalReportInd(_)));
+            assert_matches!(
+                roam_trigger_data_receiver.try_recv(),
+                Ok(RoamTriggerData::ConnectionSignalReport(_))
+            );
         });
+    }
+
+    #[fuchsia::test]
+    fn connected_state_signal_report_error_rearms_timer() {
+        let mut exec = fasync::TestExecutor::new_with_fake_time();
+        exec.set_fake_time(fasync::MonotonicInstant::from_nanos(0));
+
+        let mut test_values = test_setup();
+        let connect_selection = generate_connect_selection();
+        let bss_description =
+            Sequestered::release(connect_selection.target.bss.bss_description.clone());
+        let ap_state = types::ApState::from(BssDescription::try_from(bss_description).unwrap());
+
+        let (connect_txn_proxy, _connect_txn_stream) =
+            create_proxy_and_stream::<fidl_sme::ConnectTransactionMarker>();
+        let options = ConnectedOptions::new(
+            &mut test_values.common_options,
+            Box::new(ap_state),
+            connect_selection.target.network_has_multiple_bss,
+            connect_selection.target.network.clone(),
+            connect_selection.target.credential.clone(),
+            connect_selection.reason,
+            connect_txn_proxy.take_event_stream(),
+            false,
+        );
+        let initial_state = connected_state(test_values.common_options, options);
+        let fut = run_state_machine(initial_state);
+        let mut fut = pin!(fut);
+
+        assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
+
+        // Advance time and respond to GetSignalReport with an error.
+        exec.set_fake_time(fasync::MonotonicInstant::after(SIGNAL_REPORT_INTERVAL));
+        assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
+        assert_matches!(
+            exec.run_until_stalled(&mut test_values.telemetry_req_stream.next()),
+            Poll::Ready(Some(Ok(fidl_sme::TelemetryRequest::GetSignalReport { responder }))) => {
+                responder.send(Err(zx::Status::INTERNAL.into_raw())).expect("failed to send error");
+            }
+        );
+        assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
+        assert_matches!(test_values.telemetry_receiver.try_recv(), Err(_));
+
+        // Verify the polling timer was re-armed after the error.
+        exec.set_fake_time(fasync::MonotonicInstant::after(SIGNAL_REPORT_INTERVAL));
+        assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
+        assert_matches!(
+            exec.run_until_stalled(&mut test_values.telemetry_req_stream.next()),
+            Poll::Ready(Some(Ok(fidl_sme::TelemetryRequest::GetSignalReport { .. })))
+        );
+    }
+
+    #[fuchsia::test]
+    fn connected_state_signal_report_paused_during_sme_reconnect() {
+        let mut exec = fasync::TestExecutor::new_with_fake_time();
+        exec.set_fake_time(fasync::MonotonicInstant::from_nanos(0));
+
+        let mut test_values = test_setup();
+        let connect_selection = generate_connect_selection();
+        let bss_description =
+            Sequestered::release(connect_selection.target.bss.bss_description.clone());
+        let ap_state = types::ApState::from(BssDescription::try_from(bss_description).unwrap());
+
+        let (connect_txn_proxy, connect_txn_stream) =
+            create_proxy_and_stream::<fidl_sme::ConnectTransactionMarker>();
+        let connect_txn_handle = connect_txn_stream.control_handle();
+        let options = ConnectedOptions::new(
+            &mut test_values.common_options,
+            Box::new(ap_state),
+            connect_selection.target.network_has_multiple_bss,
+            connect_selection.target.network.clone(),
+            connect_selection.target.credential.clone(),
+            connect_selection.reason,
+            connect_txn_proxy.take_event_stream(),
+            false,
+        );
+        let initial_state = connected_state(test_values.common_options, options);
+        let fut = run_state_machine(initial_state);
+        let mut fut = pin!(fut);
+
+        assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
+
+        // Pause signal report polling while SME is reconnecting.
+        connect_txn_handle
+            .send_on_disconnect(&generate_disconnect_info(true))
+            .expect("failed to send disconnect");
+        assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
+
+        exec.set_fake_time(fasync::MonotonicInstant::after(SIGNAL_REPORT_INTERVAL));
+        assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
+        assert_matches!(
+            exec.run_until_stalled(&mut test_values.telemetry_req_stream.next()),
+            Poll::Pending
+        );
+
+        // Resume signal report polling once SME finishes reconnecting.
+        connect_txn_handle
+            .send_on_connect_result(&fidl_sme::ConnectResult {
+                code: fidl_ieee80211::StatusCode::Success,
+                is_credential_rejected: false,
+                is_reconnect: true,
+            })
+            .expect("failed to send connect result");
+        assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
+
+        exec.set_fake_time(fasync::MonotonicInstant::after(SIGNAL_REPORT_INTERVAL));
+        assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
+        assert_matches!(
+            exec.run_until_stalled(&mut test_values.telemetry_req_stream.next()),
+            Poll::Ready(Some(Ok(fidl_sme::TelemetryRequest::GetSignalReport { .. })))
+        );
     }
 
     #[fuchsia::test]

@@ -15,7 +15,9 @@ parser.add_argument("binary", help="Rlocation of python binary to invoke.")
 args = parser.parse_args()
 
 r = runfiles.Create()
+assert r, "Cannot find runfiles"
 test_location = r.Rlocation(args.binary)
+assert test_location, "Cannot find test in runfiles"
 test_env = os.environ.copy()
 test_env.update(r.EnvVars())
 

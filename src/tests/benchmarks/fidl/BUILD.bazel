@@ -1,0 +1,35 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
+
+package(default_applicable_licenses = ["//:license"])
+
+cml_shard(
+    name = "meta/benchmark.shard",
+    includes = [
+        "//sdk/lib/sys/testing:elf_test_runner.shard.cml",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    shard = "meta/benchmark.shard.cml",
+    visibility = ["//src/tests/benchmarks/fidl:__subpackages__"],
+)
+
+filegroup(
+    name = "build_only_tests",
+    testonly = True,
+    srcs = [
+        "//src/tests/benchmarks/fidl/cpp:fidl_microbenchmarks_cpp",
+        "//src/tests/benchmarks/fidl/driver_cpp:fidl_microbenchmarks_driver_cpp",
+        "//src/tests/benchmarks/fidl/driver_llcpp:fidl_microbenchmarks_driver_llcpp",
+        "//src/tests/benchmarks/fidl/fidlc:fidlc_microbenchmarks",
+        "//src/tests/benchmarks/fidl/hlcpp:fidl_microbenchmarks_hlcpp",
+        "//src/tests/benchmarks/fidl/libfidl:fidl_microbenchmarks_libfidl",
+        "//src/tests/benchmarks/fidl/llcpp:fidl_microbenchmarks_llcpp",
+        "//src/tests/benchmarks/fidl/reference:fidl_microbenchmarks_reference",
+        "//src/tests/benchmarks/fidl/rust:fidl_microbenchmarks_rust",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
+)

@@ -13,6 +13,7 @@ BASE_PROVIDED_FEATURES = [
     "fuchsia::shared_registers",
     "fuchsia::real_time_clock",
     "fuchsia::realtek_8211f",
+    "fuchsia::sdmmc",
     "fuchsia::storage_power_management",
     "fuchsia::usb_host",
     "fuchsia::usb_peripheral_support",

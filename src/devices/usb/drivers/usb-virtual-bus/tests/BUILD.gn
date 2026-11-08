@@ -45,19 +45,9 @@ source_set("usb-virtual-bus-test-common") {
   ]
 }
 
-fuchsia_structured_config_values("virtual-bus-tester-default-config") {
-  testonly = true
-  cm_label = "virtual-bus-tester:virtual-bus-tester-manifest"
-  component_name = "virtual-bus-tester"
-  values = {
-    vmo_data_size = 20
-  }
-}
-
 fuchsia_unittest_package("usb-virtual-bus-fidl-test") {
   deps = [
     ":usb-virtual-bus-test-common",
-    ":virtual-bus-tester-default-config",
     "virtual-bus-tester",
     "virtual-bus-tester-function",
   ]

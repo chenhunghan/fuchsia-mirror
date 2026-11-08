@@ -68,6 +68,9 @@ template("audio_core_config_test") {
     if (defined(invoker.policy_sources)) {
       deps += [ ":${test_policy_resource}" ]
     }
+    test_specs = {
+      parallel = 4
+    }
   }
 }
 

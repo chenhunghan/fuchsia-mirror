@@ -6,13 +6,9 @@
 
 #include "object/vm_object_dispatcher.h"
 
-#include <lib/object-constants.h>
 #include <zircon/errors.h>
-#include <zircon/rights.h>
-#include <zircon/types.h>
 
 #include <fbl/alloc_checker.h>
-#include <kernel/ffi.h>
 #include <ktl/utility.h>
 #include <vm/vm_object.h>
 
@@ -67,15 +63,6 @@ zx_status_t VmObjectDispatcher::Create(fbl::RefPtr<VmObject> vmo, uint64_t strea
   *handle = ktl::move(uninit_handle.Get());
   *rights = uninit_rights.Get();
   return ZX_OK;
-}
-
-zx::result<fbl::RefPtr<StreamSizeManager>> VmObjectDispatcher::stream_size_manager() const {
-  ffi::Uninitialized<fbl::RefPtr<StreamSizeManager>> uninit_ssm;
-  zx_status_t status = rust_vm_object_dispatcher_stream_size_manager(this, &uninit_ssm);
-  if (status != ZX_OK) {
-    return zx::error(status);
-  }
-  return zx::ok(ktl::move(uninit_ssm.Get()));
 }
 
 zx_status_t VmObjectDispatcher::CreateChild(uint32_t options, uint64_t offset, uint64_t size,

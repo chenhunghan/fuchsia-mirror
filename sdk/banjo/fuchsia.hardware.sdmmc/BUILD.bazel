@@ -1,0 +1,21 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fidl_library(
+    name = "fuchsia.hardware.sdmmc",
+    srcs = ["sdmmc.fidl"],
+    enable_banjo = True,
+    visibility = [
+        "//sdk/banjo/fuchsia.hardware.sdio:__pkg__",
+        "//src/devices/block/drivers/aml-sdmmc:__pkg__",
+        "//src/devices/block/drivers/sdmmc:__pkg__",
+        "//src/devices/board/drivers/nelson:__pkg__",
+        "//src/devices/board/drivers/sherlock:__pkg__",
+    ],
+    deps = ["//zircon/vdso/zx"],
+)

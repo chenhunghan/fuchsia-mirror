@@ -2,7 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -15,6 +15,7 @@ rustc_library(
     ],
     crate_root = "lib.rs",  # @bazel2gn:raw_overwrite:"$target_gen_dir/lib.rs"
     edition = "2024",
+    visibility = ["//src/starnix/modules/kgsl:__pkg__"],
     deps = [
         "//src/starnix/lib/starnix_uapi",
     ],
@@ -28,6 +29,12 @@ genrule(
     outs = [
         "kgsl_strings.rs",  # @bazel2gn:path_overwrite:$target_gen_dir/kgsl_strings.rs
     ],
-    cmd = "python3 $(location :kgsl_strings.rs.py) $< $@",  # @bazel2gn:skip
-    tools = [":kgsl_strings.rs.py"],
+    # Bazel runs the script with the hermetic prebuilt Python; GN uses
+    # `script` and `args` (set via raw_attribute above) instead of `cmd`.
+    cmd = "$(location @prebuilt_python//:python3) $(location :kgsl_strings.rs.py) $< $@",  # @bazel2gn:skip
+    tools = [
+        ":kgsl_strings.rs.py",
+        "@prebuilt_python//:python3",
+        "@prebuilt_python//:runtime_files",
+    ],
 )

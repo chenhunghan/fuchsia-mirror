@@ -99,9 +99,11 @@ inline ptrdiff_t TpRelativeToOffset(T* ptr) {
 // among the initial-exec set of TLS modules.
 template <class Elf, class AbiTraits>
 constexpr ptrdiff_t TlsInitialExecOffset(const typename abi::Abi<Elf, AbiTraits>& abi,
-                                         typename Elf::size_type modid) {
+                                         typename Elf::size_type modid,
+                                         typename Elf::size_type offset = 0) {
   // The offset is stored as unsigned, but is actually signed.
-  const size_t offset = abi.static_tls_offsets[modid - 1];
+  offset += abi.static_tls_offsets[modid - 1];
+  static_assert(sizeof(ptrdiff_t) == sizeof(offset));
   return std::bit_cast<ptrdiff_t>(offset);
 }
 
@@ -169,12 +171,13 @@ inline void TlsInitialExecDataInit(const typename abi::Abi<Elf, AbiTraits>& abi,
 // set of TLS modules.
 template <class Elf, class AbiTraits>
 inline void* TlsInitialExecData(const typename abi::Abi<Elf, AbiTraits>& abi,
-                                typename Elf::size_type modid) {
+                                typename Elf::size_type modid, typename Elf::size_type offset = 0) {
   if (modid == 0) {
+    assert(offset == 0);
     return nullptr;
   }
 
-  return TpRelative(TlsInitialExecOffset(abi, modid));
+  return TpRelative(TlsInitialExecOffset(abi, modid, offset));
 }
 
 }  // namespace ld

@@ -720,7 +720,7 @@ mod tests {
         )
         .unwrap();
 
-        let verifier = block_server::verifier::Verifier::new(delivery_queue);
+        let verifier = block_server::verifier::Verifier::new(delivery_queue).unwrap();
         let files = Arc::new(mapping::Files::new(
             service,
             verifier,

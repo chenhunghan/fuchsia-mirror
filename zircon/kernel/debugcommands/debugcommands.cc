@@ -32,6 +32,8 @@ __attribute__((noinline)) static void stomp_stack(size_t size) {
   // -Wvla prevents VLAs but not explicit alloca.
   // Neither is allowed anywhere in the kernel outside this test code.
   void* death = __builtin_alloca(size);  // OK in test-only code.
+  // Hide the buffer from the optimizer, which would otherwise delete the dead stores.
+  __asm__("" : "+r"(death));
   memset(death, 0xdb, size);
   Thread::Current::SleepRelative(ZX_USEC(1));
 }
@@ -87,6 +89,9 @@ static int crash_stack_guard() {
   constexpr size_t kSize = 128;
   // alloca should never be used outside of test code.
   char* p = static_cast<char*>(__builtin_alloca(kSize));
+  // Hide the buffer's size from the optimizer, which would otherwise delete the overflowing
+  // stores.
+  __asm__("" : "+r"(p));
   memset(p, 0x45, 2 * kSize);
   return -1;
 }

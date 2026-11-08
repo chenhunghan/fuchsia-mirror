@@ -1,0 +1,91 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "goog_chip_info",
+    srcs = ["lib.rs"],
+    crate_name = "starnix_modules_goog_chip_info",
+    crate_root = "lib.rs",
+    edition = "2024",
+    lint_config = "//src/starnix/build:kernel_library_config",
+    visibility = ["//src/starnix/modules:__subpackages__"],
+    deps = [
+        "//src/starnix/kernel/core",
+        "//src/starnix/lib/starnix_logging",
+        "//src/starnix/lib/starnix_uapi",
+    ],
+)
+
+rustc_test(
+    name = "goog_chip_info_test",
+    crate = ":goog_chip_info",
+    # Matches the binary path in meta/starnix_goog_chip_info_tests.cml.
+    crate_name = "starnix_modules_goog_chip_info_lib_test",
+    lint_config = "//src/starnix/config:starnix_clippy_lints_test",
+    # TODO(https://fxbug.dev/42059075): Re-enable starnix in these environments.
+    tags = [
+        "exclude_toolchain_tags=asan",
+        "exclude_toolchain_tags=hwasan",
+    ],
+    deps = ["//src/lib/fuchsia"],
+)
+
+fx_packaged_binary(
+    name = "goog_chip_info_test_packaged_bin",
+    testonly = True,
+    binary = ":goog_chip_info_test",
+    binary_name = "starnix_modules_goog_chip_info_lib_test",
+)
+
+fx_component_manifest(
+    name = "starnix-goog-chip-info-tests-manifest",
+    testonly = True,
+    component_name = "starnix-goog-chip-info-tests",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/starnix:unit_test.shard.cml",
+    ],
+    manifest = "meta/starnix_goog_chip_info_tests.cml",
+)
+
+fx_test_component(
+    name = "starnix-goog-chip-info-tests-component",
+    compiled_manifest = ":starnix-goog-chip-info-tests-manifest",
+    test_type = "starnix",
+    deps = [
+        ":goog_chip_info_test_packaged_bin",
+        # In GN, //src/starnix/kernel/vdso is a resource() propagated through
+        # //src/starnix/kernel/core's deps.
+        "//src/starnix/kernel/vdso",
+    ],
+)
+
+fx_package(
+    name = "starnix-goog-chip-info-tests-package",
+    package_name = "starnix-goog-chip-info-tests",
+    test_components = [":starnix-goog-chip-info-tests-component"],
+)
+
+fx_test(
+    name = "starnix-goog-chip-info-tests",
+    max_log_severity = "ERROR",
+    package = ":starnix-goog-chip-info-tests-package",
+)

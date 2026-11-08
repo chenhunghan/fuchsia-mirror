@@ -56,18 +56,22 @@ class FpsMetricsProcessor(trace_metrics.MetricsProcessor):
     ) -> MutableSequence[metrics.TestCaseResult]:
         # This method looks for a possible race between trace event start in Scenic and magma.
         # We can safely skip these events. See https://fxbug.dev/322849857 for more details.
-        model = trace_utils.adjust_to_common_process_start(
+        start_time = trace_utils.get_common_process_start_time(
             model,
             _SCENIC_RENDER_EVENT_NAME,
             category=_EVENT_CATEGORY,
             type=trace_model.DurationEvent,
         )
 
-        cpu_render_start_events = trace_utils.filter_events(
-            model.all_events(),
-            category=_EVENT_CATEGORY,
-            name=_SCENIC_RENDER_EVENT_NAME,
-            type=trace_model.DurationEvent,
+        cpu_render_start_events = (
+            e
+            for e in trace_utils.filter_events(
+                model.all_events(),
+                category=_EVENT_CATEGORY,
+                name=_SCENIC_RENDER_EVENT_NAME,
+                type=trace_model.DurationEvent,
+            )
+            if e.start >= start_time
         )
 
         # Since `cpu_render_start_events` is a Generator, it cannot be iterated more than once.
@@ -79,7 +83,10 @@ class FpsMetricsProcessor(trace_metrics.MetricsProcessor):
         for start in cpu_render_start_events:
             cpu_render_start_event_count += 1
             next_event = trace_utils.get_nearest_following_flow_event(
-                start, _EVENT_CATEGORY, _DISPLAY_VSYNC_EVENT_NAME
+                start,
+                _EVENT_CATEGORY,
+                _DISPLAY_VSYNC_EVENT_NAME,
+                min_start=start_time,
             )
             if next_event is not None:
                 vsync_events.append(next_event)

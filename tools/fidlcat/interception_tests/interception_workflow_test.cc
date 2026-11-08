@@ -622,7 +622,6 @@ TEST_F(InterceptionWorkflowTestX64, SyscallsAutomated) {
       "zx_task_create_exception_channel fully automated\n"
       "zx_task_kill doesn't need automation\n"
       "zx_task_suspend fully automated\n"
-      "zx_task_suspend_token fully automated\n"
       "zx_thread_create fully automated\n"
       "zx_thread_exit doesn't need automation\n"
       "zx_thread_read_state partially automated\n"
@@ -655,7 +654,7 @@ TEST_F(InterceptionWorkflowTestX64, SyscallsAutomated) {
       "zx_vmo_set_cache_policy doesn't need automation\n"
       "zx_vmo_set_size doesn't need automation\n"
       "zx_vmo_write fully automated\n";
-  uint32_t expected_fully_automated = 58;
+  uint32_t expected_fully_automated = 57;
   uint32_t expected_cant_be_automated = 52;
   uint32_t expected_partially_automated = 15;
   uint32_t expected_not_automated = 10;

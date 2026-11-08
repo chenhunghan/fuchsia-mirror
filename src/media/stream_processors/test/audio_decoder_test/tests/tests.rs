@@ -44,14 +44,13 @@ fn sbc_decode() -> Result<()> {
     let output_format = FormatDetails {
         format_details_version_ordinal: Some(1),
         mime_type: Some("audio/pcm".to_string()),
-        domain: Some(DomainFormat::Audio(AudioFormat::Uncompressed(AudioUncompressedFormat::Pcm(
-            PcmFormat {
-                pcm_mode: AudioPcmMode::Linear,
-                bits_per_sample: 16,
-                frames_per_second: 44100,
-                channel_map: vec![AudioChannelId::Lf],
-            },
-        )))),
+        pcm_format: Some(PcmFormat2 {
+            pcm_mode: Some(AudioPcmMode2::Linear),
+            bits_per_sample: Some(16),
+            frames_per_second: Some(44100),
+            channel_map: Some(vec![AudioChannelId2::Fl]),
+            ..Default::default()
+        }),
         ..Default::default()
     };
 
@@ -87,14 +86,13 @@ fn sbc_decode_large_input_chunk() -> Result<()> {
     let output_format2 = FormatDetails {
         format_details_version_ordinal: Some(1),
         mime_type: Some("audio/pcm".to_string()),
-        domain: Some(DomainFormat::Audio(AudioFormat::Uncompressed(AudioUncompressedFormat::Pcm(
-            PcmFormat {
-                pcm_mode: AudioPcmMode::Linear,
-                bits_per_sample: 16,
-                frames_per_second: 44100,
-                channel_map: vec![AudioChannelId::Lf],
-            },
-        )))),
+        pcm_format: Some(PcmFormat2 {
+            pcm_mode: Some(AudioPcmMode2::Linear),
+            bits_per_sample: Some(16),
+            frames_per_second: Some(44100),
+            channel_map: Some(vec![AudioChannelId2::Fl]),
+            ..Default::default()
+        }),
         ..Default::default()
     };
 
@@ -130,14 +128,13 @@ fn cvsd_simple_decode() -> Result<()> {
     let output_format = FormatDetails {
         format_details_version_ordinal: Some(1),
         mime_type: Some("audio/pcm".to_string()),
-        domain: Some(DomainFormat::Audio(AudioFormat::Uncompressed(AudioUncompressedFormat::Pcm(
-            PcmFormat {
-                pcm_mode: AudioPcmMode::Linear,
-                bits_per_sample: 16,
-                frames_per_second: 64000,
-                channel_map: vec![AudioChannelId::Lf],
-            },
-        )))),
+        pcm_format: Some(PcmFormat2 {
+            pcm_mode: Some(AudioPcmMode2::Linear),
+            bits_per_sample: Some(16),
+            frames_per_second: Some(64000),
+            channel_map: Some(vec![AudioChannelId2::Fl]),
+            ..Default::default()
+        }),
         ..Default::default()
     };
 
@@ -183,14 +180,13 @@ fn lc3_simple_decode() -> Result<()> {
     let output_format = FormatDetails {
         format_details_version_ordinal: Some(1),
         mime_type: Some("audio/pcm".to_string()),
-        domain: Some(DomainFormat::Audio(AudioFormat::Uncompressed(AudioUncompressedFormat::Pcm(
-            PcmFormat {
-                pcm_mode: AudioPcmMode::Linear,
-                bits_per_sample: BITS_PER_SAMPLE,
-                frames_per_second: FRAMES_PER_SECOND,
-                channel_map: vec![AudioChannelId::Lf],
-            },
-        )))),
+        pcm_format: Some(PcmFormat2 {
+            pcm_mode: Some(AudioPcmMode2::Linear),
+            bits_per_sample: Some(BITS_PER_SAMPLE),
+            frames_per_second: Some(FRAMES_PER_SECOND),
+            channel_map: Some(vec![AudioChannelId2::Fl]),
+            ..Default::default()
+        }),
         ..FormatDetails::default()
     };
 

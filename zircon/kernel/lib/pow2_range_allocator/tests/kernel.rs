@@ -11,9 +11,11 @@
 #[unittest::suite(name = "pow2_range_allocator")]
 mod tests {
     use pin_init::stack_pin_init;
-    use pow2_range_allocator::Pow2RangeAllocator;
     use unittest::{assert_eq, assert_ge, assert_lt, assert_ok, unwrap_ok};
     use zx_status::Status;
+
+    type Pow2RangeAllocator =
+        pow2_range_allocator::Pow2RangeAllocator<crate::ksync_kernel::TrackedMutex>;
 
     /// Tests that `init` accepts only power of two maximum allocation sizes.
     #[test]

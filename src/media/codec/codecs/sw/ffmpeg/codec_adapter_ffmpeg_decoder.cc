@@ -13,13 +13,12 @@ extern "C" {
 #include <lib/async/cpp/task.h>
 #include <lib/fit/defer.h>
 #include <lib/media/codec_impl/codec_buffer.h>
-#include <lib/media/codec_impl/fourcc.h>
 
 namespace {
 
-AVPixelFormat FourccToPixelFormat(uint32_t fourcc) {
-  switch (fourcc) {
-    case make_fourcc('Y', 'V', '1', '2'):
+AVPixelFormat Images2PixelFormatToAvPixelFormat(fuchsia::images2::PixelFormat pixel_format) {
+  switch (pixel_format) {
+    case fuchsia::images2::PixelFormat::YV12:
       return AV_PIX_FMT_YUV420P;
     default:
       return AV_PIX_FMT_NONE;
@@ -104,16 +103,12 @@ std::pair<fuchsia::media::FormatDetails, size_t> CodecAdapterFfmpegDecoder::Outp
   std::lock_guard<std::mutex> lock(lock_);
   ZX_ASSERT(decoded_output_info_.has_value());
 
-  auto& [uncompressed_format, per_packet_buffer_bytes] = decoded_output_info_.value();
+  const auto& [image_format, per_packet_buffer_bytes] = decoded_output_info_.value();
 
   fuchsia::media::FormatDetails format_details;
 
   format_details.set_mime_type("video/raw");
-
-  fuchsia::media::VideoFormat video_format;
-  video_format.set_uncompressed(fidl::Clone(uncompressed_format));
-
-  format_details.mutable_domain()->set_video(std::move(video_format));
+  format_details.set_image_format(fidl::Clone(image_format));
 
   return {std::move(format_details), per_packet_buffer_bytes};
 }
@@ -165,7 +160,8 @@ int CodecAdapterFfmpegDecoder::GetBuffer(
   ZX_ASSERT(decoded_output_info.buffer_bytes_needed + kFfmpegOutputFramePaddingBytes <=
             buffer->raw_vmo_size() - buffer->vmo_offset());
 
-  AVPixelFormat pix_fmt = FourccToPixelFormat(decoded_output_info.format.fourcc);
+  AVPixelFormat pix_fmt =
+      Images2PixelFormatToAvPixelFormat(decoded_output_info.format.pixel_format());
   if (pix_fmt == AV_PIX_FMT_NONE) {
     events_->onCoreCodecFailCodec("Unsupported format: %d", pix_fmt);
     return -1;
@@ -175,10 +171,9 @@ int CodecAdapterFfmpegDecoder::GetBuffer(
   AVBufferRef* buffer_ref = av_buffer_create(buffer->base(), static_cast<int>(buffer->size()),
                                              FfmpegFreeBufferCallback, this, flags);
 
-  int fill_arrays_status =
-      av_image_fill_arrays(frame->data, frame->linesize, buffer_ref->data, pix_fmt,
-                           decoded_output_info.format.primary_width_pixels,
-                           decoded_output_info.format.primary_height_pixels, 1);
+  int fill_arrays_status = av_image_fill_arrays(frame->data, frame->linesize, buffer_ref->data,
+                                                pix_fmt, decoded_output_info.format.size().width,
+                                                decoded_output_info.format.size().height, 1);
   if (fill_arrays_status < 0) {
     events_->onCoreCodecFailCodec("Ffmpeg fill arrays failed: %d", fill_arrays_status);
     return -1;
@@ -294,12 +289,11 @@ CodecAdapterFfmpegDecoder::CoreCodecGetBufferCollectionConstraints2(
     per_packet_buffer_bytes_max = kInputPerPacketBufferBytesMax;
   } else {
     ZX_ASSERT(decoded_output_info_.has_value());
-    auto& [uncompressed_format, per_packet_buffer_bytes] = decoded_output_info_.value();
+    const auto& image_format = decoded_output_info_->format;
 
     ZX_DEBUG_ASSERT(port == kOutputPort);
-    // NV12, based on min stride.
-    per_packet_buffer_bytes_min = uncompressed_format.primary_line_stride_bytes *
-                                  uncompressed_format.primary_height_pixels * 3 / 2;
+    // YV12, based on min stride.
+    per_packet_buffer_bytes_min = image_format.bytes_per_row() * image_format.size().height * 3 / 2;
     // At least for now, don't cap the per-packet buffer size for output.  The
     // HW only cares about the portion we set up for output anyway, and the
     // client has no way to force output to occur into portions of the output
@@ -317,14 +311,14 @@ CodecAdapterFfmpegDecoder::CoreCodecGetBufferCollectionConstraints2(
 
   if (port == kOutputPort) {
     ZX_ASSERT(decoded_output_info_.has_value());
-    auto& [uncompressed_format, per_packet_buffer_bytes] = decoded_output_info_.value();
+    const auto& image_format = decoded_output_info_->format;
 
     auto& image_constraints = result.image_format_constraints().emplace().emplace_back();
     image_constraints.pixel_format() = fuchsia_images2::PixelFormat::kYv12;
 
     // TODO(https://fxbug.dev/42084950): confirm that REC709 is always what we want here, or plumb
     // actual YUV color space if it can ever be REC601_*.  Since 2020 and 2100
-    // are minimum 10 bits per Y sample and we're outputting NV12, 601 is the
+    // are minimum 10 bits per Y sample and we're outputting YV12, 601 is the
     // only other potential possibility here.
     image_constraints.color_spaces() = {fuchsia_images2::ColorSpace::kRec709};
 
@@ -371,18 +365,16 @@ CodecAdapterFfmpegDecoder::CoreCodecGetBufferCollectionConstraints2(
     // larger range of dimensions that includes the required range indicated
     // here (via a-priori knowledge of the potential stream dimensions), an
     // initiator is free to do so.
-    image_constraints.required_min_size() = {uncompressed_format.primary_width_pixels,
-                                             uncompressed_format.primary_height_pixels};
-    image_constraints.required_max_size() = {uncompressed_format.primary_width_pixels,
-                                             uncompressed_format.primary_height_pixels};
+    image_constraints.required_min_size() = {image_format.size().width, image_format.size().height};
+    image_constraints.required_max_size() = {image_format.size().width, image_format.size().height};
 
     // Sysmem2 doesn't have required_min_bytes_per_row or
     // required_max_bytes_per_row (at least for now). If those later prove to be
     // worth adding to sysmem2, we'd set those to
-    // uncompressed_format.primary_line_stride_bytes here.
+    // image_format.bytes_per_row() here.
     //
     // The way we'd know is CoreCodecSetBufferCollectionInfo would fail the
-    // codec when primary_line_stride_bytes isn't within
+    // codec when bytes_per_row() isn't within
     // [min_bytes_per_row..max_bytes_per_row].
     //
     // The decoder is the producer. We're implicitly relying on the consumer(s)
@@ -415,8 +407,8 @@ void CodecAdapterFfmpegDecoder::CoreCodecSetBufferCollectionInfo(
     }
 
     if (decoded_output_info_.has_value()) {
-      auto& [uncompressed_format, per_packet_buffer_bytes] = decoded_output_info_.value();
-      bytes_per_row = uncompressed_format.primary_line_stride_bytes;
+      const auto& image_format = decoded_output_info_->format;
+      bytes_per_row = image_format.bytes_per_row();
     }
   }
 

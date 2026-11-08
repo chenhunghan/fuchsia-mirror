@@ -4,16 +4,27 @@
 
 #include "src/sys/fuzzing/common/child-process.h"
 
+#include <fuchsia/io/cpp/fidl.h>
+#include <fuchsia/process/cpp/fidl.h>
 #include <lib/async/cpp/executor.h>
+#include <lib/fdio/directory.h>
+#include <lib/fdio/fd.h>
+#include <lib/fdio/io.h>
+#include <lib/fdio/namespace.h>
 #include <lib/fdio/spawn.h>
+#include <lib/fit/defer.h>
 #include <lib/syslog/cpp/macros.h>
 #include <poll.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
+#include <zircon/dlfcn.h>
 #include <zircon/process.h>
 #include <zircon/processargs.h>
 #include <zircon/status.h>
 #include <zircon/syscalls.h>
+#include <zircon/utc.h>
 
 #include <algorithm>
 
@@ -313,6 +324,11 @@ zx_status_t ChildProcess::Spawn() {
   spawned_ = true;
 
   // Spawn the process!
+  const char* shared_env = getenv("FUZZER_SHARED_PROCESS");
+  if (shared_env != nullptr && strcmp(shared_env, "1") == 0) {
+    return SpawnShared(envvars);
+  }
+
   auto flags = FDIO_SPAWN_CLONE_ALL & (~FDIO_SPAWN_CLONE_STDIO);
   auto* handle = process_.reset_and_get_address();
   char err_msg[FDIO_SPAWN_ERR_MSG_MAX_LENGTH];
@@ -323,6 +339,218 @@ zx_status_t ChildProcess::Spawn() {
                    << ")";
     return status;
   }
+  return ZX_OK;
+}
+
+zx_status_t ChildProcess::SpawnShared(const std::vector<std::string>& envvars) {
+  if (args_.empty()) {
+    return ZX_ERR_INVALID_ARGS;
+  }
+  const std::string& path = args_[0];
+
+  // Collect action handles/fds up front into RAII wrappers so they are always closed on error.
+  std::vector<fuchsia::process::HandleInfo> handle_infos;
+  std::vector<fuchsia::process::NameInfo> extra_names;
+  zx_status_t action_status = ZX_OK;
+  for (const auto& action : actions_) {
+    switch (action.action) {
+      case FDIO_SPAWN_ACTION_CLONE_FD: {
+        zx_handle_t fd_handle = ZX_HANDLE_INVALID;
+        if (zx_status_t status = fdio_fd_clone(action.fd.local_fd, &fd_handle);
+            status != ZX_OK && action_status == ZX_OK) {
+          action_status = status;
+        } else if (fd_handle != ZX_HANDLE_INVALID) {
+          handle_infos.push_back(fuchsia::process::HandleInfo{
+              .handle = zx::handle(fd_handle),
+              .id = PA_HND(PA_FD, action.fd.target_fd),
+          });
+        }
+        break;
+      }
+      case FDIO_SPAWN_ACTION_TRANSFER_FD: {
+        zx_handle_t fd_handle = ZX_HANDLE_INVALID;
+        if (zx_status_t status = fdio_fd_transfer(action.fd.local_fd, &fd_handle);
+            status != ZX_OK && action_status == ZX_OK) {
+          action_status = status;
+        } else if (fd_handle != ZX_HANDLE_INVALID) {
+          handle_infos.push_back(fuchsia::process::HandleInfo{
+              .handle = zx::handle(fd_handle),
+              .id = PA_HND(PA_FD, action.fd.target_fd),
+          });
+        }
+        break;
+      }
+      case FDIO_SPAWN_ACTION_ADD_HANDLE: {
+        handle_infos.push_back(fuchsia::process::HandleInfo{
+            .handle = zx::handle(action.h.handle),
+            .id = action.h.id,
+        });
+        break;
+      }
+      case FDIO_SPAWN_ACTION_ADD_NS_ENTRY: {
+        extra_names.push_back(fuchsia::process::NameInfo{
+            .path = action.ns.prefix,
+            .directory =
+                fidl::InterfaceHandle<fuchsia::io::Directory>(zx::channel(action.ns.handle)),
+        });
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  actions_.clear();
+  if (action_status != ZX_OK) {
+    FX_LOGS(ERROR) << "Failed to prepare spawn actions: " << zx_status_get_string(action_status);
+    return action_status;
+  }
+
+  int exec_fd = -1;
+  if (zx_status_t status = fdio_open3_fd(
+          path.c_str(),
+          static_cast<uint64_t>(fuchsia::io::PERM_READABLE | fuchsia::io::PERM_EXECUTABLE),
+          &exec_fd);
+      status != ZX_OK) {
+    FX_LOGS(ERROR) << "Failed to open executable '" << path
+                   << "': " << zx_status_get_string(status);
+    return status;
+  }
+  zx::vmo executable;
+  zx_status_t vmo_status = fdio_get_vmo_exec(exec_fd, executable.reset_and_get_address());
+  close(exec_fd);
+  if (vmo_status != ZX_OK) {
+    FX_LOGS(ERROR) << "Failed to get executable VMO: " << zx_status_get_string(vmo_status);
+    return vmo_status;
+  }
+  std::string_view vmo_name(path);
+  if (vmo_name.size() >= ZX_MAX_NAME_LEN) {
+    if (size_t pos = vmo_name.find_last_of('/'); pos != std::string_view::npos) {
+      vmo_name.remove_prefix(pos + 1);
+    }
+  }
+  executable.set_property(ZX_PROP_NAME, vmo_name.data(),
+                          std::min(vmo_name.size(), size_t{ZX_MAX_NAME_LEN - 1}));
+
+  // Create an isolated child job so that if the fuzzed process marks any restricted-mode task as
+  // critical to its default job (as Starnix does via ZX_JOB_CRITICAL_PROCESS_RETCODE_NONZERO), a
+  // panic or crash terminates only `child_job` rather than killing the parent fuzzer runner job.
+  zx::job child_job;
+  if (zx_status_t status = zx::job::create(*zx::job::default_job(), 0, &child_job);
+      status != ZX_OK) {
+    return status;
+  }
+  zx::job job_for_child;
+  if (zx_status_t status = child_job.duplicate(ZX_RIGHT_SAME_RIGHTS, &job_for_child);
+      status != ZX_OK) {
+    return status;
+  }
+  handle_infos.push_back(fuchsia::process::HandleInfo{
+      .handle = std::move(job_for_child),
+      .id = PA_JOB_DEFAULT,
+  });
+
+  zx::channel ldsvc;
+  if (zx_status_t status = dl_clone_loader_service(ldsvc.reset_and_get_address());
+      status != ZX_OK) {
+    return status;
+  }
+  handle_infos.push_back(fuchsia::process::HandleInfo{
+      .handle = std::move(ldsvc),
+      .id = PA_LDSVC_LOADER,
+  });
+
+  if (zx_handle_t utc_clock = zx_utc_reference_get(); utc_clock != ZX_HANDLE_INVALID) {
+    zx::handle utc_dup;
+    if (zx_status_t status =
+            zx_handle_duplicate(utc_clock, ZX_RIGHT_SAME_RIGHTS, utc_dup.reset_and_get_address());
+        status != ZX_OK) {
+      return status;
+    }
+    handle_infos.push_back(fuchsia::process::HandleInfo{
+        .handle = std::move(utc_dup),
+        .id = PA_CLOCK_UTC,
+    });
+  }
+
+  fdio_flat_namespace_t* flat = nullptr;
+  if (zx_status_t status = fdio_ns_export_root(&flat); status != ZX_OK) {
+    return status;
+  }
+  auto flat_cleanup = fit::defer([flat]() { fdio_ns_free_flat_ns(flat); });
+  std::vector<fuchsia::process::NameInfo> names;
+  names.reserve(flat->count + extra_names.size());
+  for (size_t i = 0; i < flat->count; ++i) {
+    names.push_back(fuchsia::process::NameInfo{
+        .path = flat->path[i],
+        .directory = fidl::InterfaceHandle<fuchsia::io::Directory>(zx::channel(flat->handle[i])),
+    });
+    flat->handle[i] = ZX_HANDLE_INVALID;
+  }
+  for (auto& extra : extra_names) {
+    names.push_back(std::move(extra));
+  }
+
+  fuchsia::process::LauncherSyncPtr launcher;
+  if (zx_status_t status = fdio_service_connect("/svc/fuchsia.process.Launcher",
+                                                launcher.NewRequest().TakeChannel().release());
+      status != ZX_OK) {
+    FX_LOGS(ERROR) << "Failed to connect to fuchsia.process.Launcher: "
+                   << zx_status_get_string(status);
+    return status;
+  }
+
+  std::vector<std::vector<uint8_t>> fidl_args;
+  fidl_args.reserve(args_.size());
+  for (const auto& arg : args_) {
+    fidl_args.emplace_back(arg.begin(), arg.end());
+  }
+  if (zx_status_t status = launcher->AddArgs(std::move(fidl_args)); status != ZX_OK) {
+    return status;
+  }
+
+  std::vector<std::vector<uint8_t>> fidl_env;
+  fidl_env.reserve(envvars.size());
+  for (const auto& var : envvars) {
+    fidl_env.emplace_back(var.begin(), var.end());
+  }
+  if (zx_status_t status = launcher->AddEnvirons(std::move(fidl_env)); status != ZX_OK) {
+    return status;
+  }
+
+  if (zx_status_t status = launcher->AddHandles(std::move(handle_infos)); status != ZX_OK) {
+    return status;
+  }
+  if (zx_status_t status = launcher->AddNames(std::move(names)); status != ZX_OK) {
+    return status;
+  }
+  if (zx_status_t status = launcher->SetOptions(ZX_PROCESS_SHARED); status != ZX_OK) {
+    return status;
+  }
+
+  fuchsia::process::LaunchInfo launch_info;
+  launch_info.executable = std::move(executable);
+  if (zx_status_t status = child_job.duplicate(ZX_RIGHT_SAME_RIGHTS, &launch_info.job);
+      status != ZX_OK) {
+    return status;
+  }
+  launch_info.name = path.substr(0, ZX_MAX_NAME_LEN - 1);
+
+  zx_status_t launch_status = ZX_OK;
+  zx::process spawned_proc;
+  if (zx_status_t status = launcher->Launch(std::move(launch_info), &launch_status, &spawned_proc);
+      status != ZX_OK) {
+    FX_LOGS(ERROR) << "Launcher::Launch FIDL call failed: " << zx_status_get_string(status);
+    return status;
+  }
+  if (launch_status != ZX_OK) {
+    FX_LOGS(ERROR) << "Launcher::Launch failed: " << zx_status_get_string(launch_status);
+    return launch_status;
+  }
+  if (!spawned_proc.is_valid()) {
+    return ZX_ERR_BAD_HANDLE;
+  }
+  job_ = std::move(child_job);
+  process_ = std::move(spawned_proc);
   return ZX_OK;
 }
 
@@ -455,6 +683,9 @@ void ChildProcess::KillSync() {
   if (process_) {
     process_.kill();
   }
+  if (job_) {
+    job_.kill();
+  }
 
   CloseStdin();
   if (stdin_thread_.joinable()) {
@@ -481,6 +712,7 @@ void ChildProcess::Reset() {
   args_.clear();
   envvars_.clear();
   process_.reset();
+  job_.reset();
   memset(&info_, 0, sizeof(info_));
   {
     std::lock_guard lock(mutex_);

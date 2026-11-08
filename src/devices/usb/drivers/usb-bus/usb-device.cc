@@ -247,7 +247,8 @@ zx_status_t UsbDevice::DdkGetProtocol(uint32_t proto_id, void* protocol) {
     }
     case ZX_PROTOCOL_USB_BUS: {
       auto* bus_proto = static_cast<usb_bus_protocol_t*>(protocol);
-      bus_.GetProto(bus_proto);
+      bus_proto->ctx = this;
+      bus_proto->ops = &usb_bus_protocol_ops_;
       status = ZX_OK;
       break;
     }
@@ -257,6 +258,24 @@ zx_status_t UsbDevice::DdkGetProtocol(uint32_t proto_id, void* protocol) {
   }
 
   return status;
+}
+
+zx_status_t UsbDevice::UsbBusConfigureHub(usb_speed_t speed, const usb_hub_descriptor_t* desc,
+                                          bool multi_tt) {
+  return hci_.ConfigureHub(device_id_, speed, desc, multi_tt);
+}
+
+zx_status_t UsbDevice::UsbBusDeviceAdded(uint32_t port, usb_speed_t speed) {
+  return hci_.HubDeviceAdded(device_id_, port, speed);
+}
+
+zx_status_t UsbDevice::UsbBusDeviceRemoved(uint32_t port) {
+  return hci_.HubDeviceRemoved(device_id_, port);
+}
+
+zx_status_t UsbDevice::UsbBusSetHubInterface(const usb_hub_interface_protocol_t* hub) {
+  SetHubInterface(hub);
+  return ZX_OK;
 }
 
 void UsbDevice::DdkRelease() {

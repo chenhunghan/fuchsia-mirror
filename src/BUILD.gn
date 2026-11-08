@@ -2,12 +2,19 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//bundles/buildbot/target_tests.gni")
+
 group("tests") {
   testonly = true
   deps = [
     ":e2e_tests",
     ":tests_no_e2e",
   ]
+
+  # Include the fxfs-requiring tests here, since we can't include them below.
+  # This allows developers to include `//src:tests` and get the same set they
+  # previously did.
+  deps += fxfs_required_target_tests
 }
 
 group("tests_no_e2e") {
@@ -43,7 +50,6 @@ group("tests_no_e2e") {
     "sensors:tests",
     "session:tests",
     "settings:tests",
-    "starnix:tests",
     "storage:tests",
     "sys:tests",
     "sysmem:tests",

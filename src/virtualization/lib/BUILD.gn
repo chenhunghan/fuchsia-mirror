@@ -14,20 +14,24 @@ group("lib") {
 # https://fxbug.dev/42073933 for more background.
 group("tests-involving-guests") {
   testonly = true
-  deps = [ "guest_interaction:tests" ]
+  deps = [ "guest_interaction:tests-involving-guests" ]
 }
 
 group("tests") {
   testonly = true
 
-  # Guest interaction tests are heavyweight, so they live in the
-  # tests-involving-guests target.
-  assert_no_deps = [ "guest_interaction:tests" ]
+  # Guest interaction tests that boot guest images are heavyweight, so they live
+  # in the tests-involving-guests target.
+  assert_no_deps = [
+    "guest_interaction:guest_interaction_tests",
+    "guest_interaction:tests-involving-guests",
+  ]
 
   deps = [
     "cli:tests",
     "grpc:tests",
     "guest_config:tests",
+    "guest_interaction:tests",
     "machina-virtio-device:tests",
     "qcow:tests",
     "virtio-device:tests",

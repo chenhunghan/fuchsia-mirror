@@ -6,6 +6,9 @@ import("//build/python/python_host_test.gni")
 
 assert(is_host)
 
+# TODO(https://fxbug.dev/574121341): Remove these hand-written GN copies once
+# bazel2gn supports host_py_test() or //tools/docsgen is migrated to Bazel.
+# LINT.IfChange(docsgen_tests)
 python_host_test("gen_helpdocs_test") {
   main_source = "gen_helpdocs_test.py"
   sources = [ "../gen_helpdocs.py" ]
@@ -15,6 +18,8 @@ python_host_test("docsgen_transforms_test") {
   main_source = "docsgen_transforms_test.py"
   sources = [ "../docsgen_transforms.py" ]
 }
+
+# LINT.ThenChange(BUILD.bazel:docsgen_tests)
 
 group("tests") {
   testonly = true

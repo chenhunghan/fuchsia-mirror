@@ -16,6 +16,13 @@
             to: [ "#input-helper" ],
         },
         {
+            protocol: [ "fuchsia.input.injection.InputDeviceRegistry" ],
+            from: "parent",
+            as: "fuchsia.input.injection.InputDeviceRegistry-starnix",
+            to: [ "#input-helper" ],
+            availability: "optional",
+        },
+        {
             // input-helper use `fuchsia.ui.display.singleton.Info` to get
             // display size to create a touch screen match the screen,
             // input-helper will use default size 1000x1000 if this protocol

@@ -9,12 +9,14 @@
 
 #include <algorithm>
 #include <iterator>
+#include <limits>
 #include <set>
 
 #include "lib/fit/defer.h"
 #include "src/developer/debug/ipc/protocol.h"
 #include "src/developer/debug/ipc/records.h"
 #include "src/developer/debug/shared/message_loop.h"
+#include "src/developer/debug/zxdb/client/fdf_dispatcher_task_provider.h"
 #include "src/developer/debug/zxdb/client/fuchsia_async_rust_task_provider.h"
 #include "src/developer/debug/zxdb/client/memory_dump.h"
 #include "src/developer/debug/zxdb/client/process.h"
@@ -26,6 +28,7 @@
 #include "src/developer/debug/zxdb/client/thread_impl.h"
 #include "src/developer/debug/zxdb/client/until_process_controller.h"
 #include "src/developer/debug/zxdb/client/until_thread_controller.h"
+#include "src/developer/debug/zxdb/common/checked_math.h"
 #include "src/developer/debug/zxdb/common/join_callbacks.h"
 #include "src/developer/debug/zxdb/expr/expr_language.h"
 #include "src/developer/debug/zxdb/symbols/elf_symbol.h"
@@ -52,10 +55,9 @@ ProcessImpl::ProcessImpl(TargetImpl* target, uint64_t koid, const std::string& n
 
   async_task_providers_.emplace(ExprLanguage::kRust, std::move(rust_providers));
 
-  // We don't have any C or C++ providers yet, but make the language available to query the empty
-  // vector.
-  async_task_providers_.emplace(ExprLanguage::kC,
-                                std::vector<std::unique_ptr<AsyncTaskProvider>>{});
+  std::vector<std::unique_ptr<AsyncTaskProvider>> c_providers;
+  c_providers.emplace_back(std::make_unique<FdfDispatcherTaskProvider>());
+  async_task_providers_.emplace(ExprLanguage::kC, std::move(c_providers));
 }
 
 ProcessImpl::~ProcessImpl() {
@@ -172,23 +174,48 @@ void ProcessImpl::SyncThreads(fit::callback<void()> callback) {
 void ProcessImpl::Pause(fit::callback<void()> on_paused) {
   debug_ipc::PauseRequest request;
   request.ids.push_back({.process = koid_, .thread = 0});
-  session()->remote_api()->Pause(
-      request, [weak_process = weak_factory_.GetWeakPtr(), on_paused = std::move(on_paused)](
-                   const Err& err, debug_ipc::PauseReply reply) mutable {
-        if (weak_process) {
-          // Save any new thread metadata (will be empty for errors so don't need to check
-          // explicitly for errors).
-          for (const auto& record : reply.threads) {
-            FX_DCHECK(record.id.process == weak_process->koid_);
-            if (ThreadImpl* thread = weak_process->GetThreadImplFromKoid(record.id.thread))
-              thread->SetMetadata(record);
+  session()->remote_api()->Pause(request, [weak_process = weak_factory_.GetWeakPtr(),
+                                           on_paused = std::move(on_paused)](
+                                              const Err& err, debug_ipc::PauseReply reply) mutable {
+    if (weak_process) {
+      auto update_threads = [weak_process, threads = std::move(reply.threads)]() {
+        if (!weak_process)
+          return;
+        // Save any new thread metadata (will be empty for errors so don't need to check
+        // explicitly for errors).
+        for (const auto& record : threads) {
+          FX_DCHECK(record.id.process == weak_process->koid_);
+          if (ThreadImpl* thread = weak_process->GetThreadImplFromKoid(record.id.thread)) {
+            thread->SetMetadata(record);
+          } else if (record.id.thread != 0) {
+            weak_process->OnThreadStarting(record);
           }
         }
-        on_paused();
-      });
+      };
+
+      // Weakly attached processes do not receive module notifications on attach and may be
+      // paused without ever hitting an exception. Synchronize the module list before updating
+      // thread stack metadata and invoking the completion callback so stack unwinding and
+      // symbol resolution have module metadata.
+      if (!err.has_error() && weak_process->symbols_.GetStatus().empty()) {
+        weak_process->GetModules(
+            false, [update_threads = std::move(update_threads), on_paused = std::move(on_paused)](
+                       const Err&, std::vector<debug_ipc::Module>) mutable {
+              update_threads();
+              on_paused();
+            });
+        return;
+      }
+
+      update_threads();
+    }
+    on_paused();
+  });
 }
 
 void ProcessImpl::Continue(bool forward_exceptions) {
+  ClearCachedMemory();
+
   // Tell each thread to continue as it desires.
   //
   // It would be more efficient to tell the backend to resume all threads in the process but the
@@ -201,6 +228,8 @@ void ProcessImpl::Continue(bool forward_exceptions) {
 
 void ProcessImpl::ContinueUntil(std::vector<InputLocation> locations,
                                 fit::callback<void(const Err&)> cb) {
+  ClearCachedMemory();
+
   auto coordinator = fxl::MakeRefCounted<ProcessUntilThreadController>(
       weak_factory_.GetWeakPtr(), std::move(locations), std::move(cb));
 
@@ -284,6 +313,8 @@ void ProcessImpl::ReadMemory(uint64_t address, uint32_t size,
 
 void ProcessImpl::WriteMemory(uint64_t address, std::vector<uint8_t> data,
                               fit::callback<void(const Err&)> callback) {
+  ClearCachedMemory();
+
   debug_ipc::WriteMemoryRequest request;
   request.process_koid = koid_;
   request.address = address;
@@ -609,8 +640,61 @@ void ProcessImpl::OnSymbolLoadFailure(const Err& err) {
     observer.OnSymbolLoadFailure(this, err);
 }
 
+bool ProcessImpl::IsRangeCached(const AddressRange& range) const {
+  for (const auto& dump : cached_memory_) {
+    for (const auto& block : dump.blocks()) {
+      auto block_end = CheckedAdd(block.address, block.size);
+      if (!block.valid || block.size == 0 || !block_end) {
+        continue;
+      }
+      AddressRange block_range(block.address, *block_end);
+      if (block_range.Contains(range)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+std::vector<AddressRange> ProcessImpl::CoalesceUncachedRanges(
+    const std::vector<std::pair<uint64_t, uint32_t>>& ranges) const {
+  std::vector<AddressRange> uncached;
+  uncached.reserve(ranges.size());
+  for (const auto& [addr, size] : ranges) {
+    auto end = CheckedAdd(addr, size);
+    if (size == 0 || !end) {
+      continue;
+    }
+    AddressRange range(addr, *end);
+    if (!IsRangeCached(range)) {
+      uncached.push_back(range);
+    }
+  }
+
+  std::sort(uncached.begin(), uncached.end(), AddressRangeBeginCmp());
+
+  // Explicitly merge overlapping or adjacent ranges rather than relying on AddressRanges, which
+  // treats already-sorted adjacent ranges as canonical without merging them.
+  std::vector<AddressRange> coalesced;
+  coalesced.reserve(uncached.size());
+  for (const auto& range : uncached) {
+    if (!coalesced.empty() && coalesced.back().OverlapsOrAdjacent(range)) {
+      coalesced.back() = coalesced.back().Union(range);
+    } else {
+      coalesced.push_back(range);
+    }
+  }
+  return coalesced;
+}
+
 void ProcessImpl::FetchMemoryRanges(std::vector<std::pair<uint64_t, uint32_t>> ranges,
                                     fit::callback<void()> done) {
+  std::vector<AddressRange> coalesced_ranges = CoalesceUncachedRanges(ranges);
+  if (coalesced_ranges.empty()) {
+    PostTask(std::move(done));
+    return;
+  }
+
   struct Pack {
     Pack(const Err& err, std::vector<debug_ipc::MemoryBlock> blocks)
         : err(err), blocks(std::move(blocks)) {}
@@ -620,23 +704,31 @@ void ProcessImpl::FetchMemoryRanges(std::vector<std::pair<uint64_t, uint32_t>> r
 
   auto joiner = fxl::MakeRefCounted<JoinCallbacks<Pack>>();
 
-  for (const auto& [addr, size] : ranges) {
-    debug_ipc::ReadMemoryRequest request;
-    request.address = addr;
-    request.size = size;
-    request.process_koid = GetKoid();
+  for (const auto& range : coalesced_ranges) {
+    uint64_t cur_begin = range.begin();
+    uint64_t remaining = range.size();
+    while (remaining > 0) {
+      uint32_t chunk_size = static_cast<uint32_t>(
+          std::min<uint64_t>(remaining, std::numeric_limits<uint32_t>::max()));
+      debug_ipc::ReadMemoryRequest request;
+      request.address = cur_begin;
+      request.size = chunk_size;
+      request.process_koid = GetKoid();
 
-    session()->remote_api()->ReadMemory(
-        request,
-        [cb = joiner->AddCallback()](const Err& err, debug_ipc::ReadMemoryReply reply) mutable {
-          return cb({err, std::move(reply.blocks)});
-        });
+      session()->remote_api()->ReadMemory(
+          request,
+          [cb = joiner->AddCallback()](const Err& err, debug_ipc::ReadMemoryReply reply) mutable {
+            return cb({err, std::move(reply.blocks)});
+          });
+
+      cur_begin += chunk_size;
+      remaining -= chunk_size;
+    }
   }
 
-  joiner->Ready([weak_this = weak_factory_.GetWeakPtr(), joiner,
+  joiner->Ready([weak_this = weak_factory_.GetWeakPtr(),
                  done = std::move(done)](std::vector<Pack> results) mutable {
     if (!weak_this) {
-      joiner->Abandon();
       return;
     }
 
@@ -666,7 +758,7 @@ void ProcessImpl::PostTask(fit::callback<void()> callback) {
 }
 
 unwinder::Error ProcessImpl::ReadBytes(uint64_t addr, uint64_t size, void* dst) {
-  unwinder::Error err = unwinder::Success();
+  unwinder::Error err("Memory not cached");
 
   for (auto& memory : cached_memory_) {
     if (err = memory.ReadBytes(addr, size, dst); err.ok()) {

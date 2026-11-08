@@ -437,36 +437,28 @@ impl JournalXtsCipher {
 }
 
 pub enum JournalCipher {
-    ChaCha20(StreamCipher),
     Aes256Xts(Box<JournalXtsCipher>),
 }
 
 impl JournalCipher {
-    pub fn new_chacha20(key: &UnwrappedKey, offset: u64) -> Self {
-        JournalCipher::ChaCha20(StreamCipher::new(key, offset))
-    }
-
     pub fn new_aes256_xts(key: &UnwrappedKey, current_tweak: u64) -> Self {
         JournalCipher::Aes256Xts(Box::new(JournalXtsCipher::new(key, current_tweak)))
     }
 
     pub fn encrypt(&mut self, buffer: &[u8]) -> Vec<u8> {
         match self {
-            JournalCipher::ChaCha20(_) => unreachable!(),
             JournalCipher::Aes256Xts(c) => c.encrypt(buffer),
         }
     }
 
     pub fn decrypt(&mut self, buffer: &mut [u8]) {
         match self {
-            JournalCipher::ChaCha20(c) => c.decrypt(buffer),
             JournalCipher::Aes256Xts(c) => c.decrypt(buffer),
         }
     }
 
     pub fn sequence_number(&self) -> u64 {
         match self {
-            JournalCipher::ChaCha20(c) => c.offset(),
             JournalCipher::Aes256Xts(c) => c.current_tweak(),
         }
     }
@@ -474,7 +466,6 @@ impl JournalCipher {
     /// If a key has not been used for encrypting for decrypting yet.
     pub fn key_is_new(&self) -> bool {
         match self {
-            JournalCipher::ChaCha20(c) => c.key_is_new(),
             JournalCipher::Aes256Xts(c) => c.key_is_new(),
         }
     }

@@ -1,0 +1,30 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Note: Fuchsia-only target matching platform-only deps via target_compatible_with.
+fx_cc_library(
+    name = "vmar",
+    testonly = True,
+    srcs = [
+        "protect.cc",
+        "vmar.cc",
+    ],
+    # zxtest propagates //build/config:Wno-vla-cxx-extension via public_configs in GN.
+    # @bazel2gn:skip
+    copts = ["-Wno-vla-cxx-extension"],
+    implementation_deps = [
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/fzl",
+        "//zircon/system/ulib/zircon-internal",
+        "//zircon/system/ulib/zx",
+        "//zircon/system/ulib/zxtest",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//zircon/system/utest/core:__pkg__"],
+    alwayslink = True,
+)

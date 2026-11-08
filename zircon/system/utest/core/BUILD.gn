@@ -309,14 +309,22 @@ kernel_cmdline("stable-vdso.args") {
 
 core_tests("core-tests-stable-vdso") {
   deps = [ ":stable-vdso.args" ]
-  environments = kernel_test_environments
+
+  # The expectation here is that any hardware-specific behavior under test
+  # will be adequately exercised by :core-tests across all of its hardware
+  # environments.
+  environments = [ qemu_env ]
 }
 boot_tests += [ ":core-tests-stable-vdso" ]
 
 core_tests("core-tests-ticks_get_force_syscall") {
   deps = [ ":stable-vdso.args" ]
   args = [ "vdso.ticks_get_force_syscall=true" ]
-  environments = kernel_test_environments
+
+  # The expectation here is that any hardware-specific behavior under test
+  # will be adequately exercised by :core-tests across all of its hardware
+  # environments.
+  environments = [ qemu_env ]
 }
 boot_tests += [ ":core-tests-ticks_get_force_syscall" ]
 
@@ -339,40 +347,43 @@ if (current_cpu == "x64") {
 }
 
 if (current_cpu == "arm64") {
+  # This seems like a decent sample of environments for exercising SMCCC
+  # variations.
   _smccc11_environments = [
     aemu_env,
     astro_env,
     qemu_env,
     sherlock_env,
   ]
-  foreach(alternate,
-          [
-            {
-              option = "auto"
-              environments = kernel_test_environments
-            },
-            {
-              option = "arch3"
-              environments = _smccc11_environments
-            },
-            {
-              option = "arch1"
-              environments = _smccc11_environments
-            },
-            {
-              option = "psci"
-              environments = _smccc11_environments
-            },
-            {
-              option = "smccc10"
-              environments = kernel_test_environments
-            },
-          ]) {
-    core_tests("core-tests-workaround-${alternate.option}") {
-      args = [ "kernel.arm64.alternate-vbar=${alternate.option}" ]
-      environments = alternate.environments
-    }
-    boot_tests += [ ":core-tests-workaround-${alternate.option}" ]
+
+  boot_tests += [
+    ":core-tests-workaround-arch3",
+    ":core-tests-workaround-arch1",
+    ":core-tests-workaround-psci",
+    ":core-tests-workaround-smccc10",
+  ]
+
+  # Note that "auto" is the default, and so is already exercised by
+  # :core-tests.
+
+  core_tests("core-tests-workaround-arch1") {
+    args = [ "kernel.arm64.alternate-vbar=arch1" ]
+    environments = _smccc11_environments
+  }
+
+  core_tests("core-tests-workaround-arch3") {
+    args = [ "kernel.arm64.alternate-vbar=arch3" ]
+    environments = _smccc11_environments
+  }
+
+  core_tests("core-tests-workaround-psci") {
+    args = [ "kernel.arm64.alternate-vbar=psci" ]
+    environments = _smccc11_environments
+  }
+
+  core_tests("core-tests-workaround-smccc10") {
+    args = [ "kernel.arm64.alternate-vbar=smccc10" ]
+    environments = _smccc11_environments
   }
 }
 

@@ -7,13 +7,18 @@ package targets
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"go.fuchsia.dev/fuchsia/tools/botanist/constants"
+	"go.fuchsia.dev/fuchsia/tools/lib/ffxutil"
 )
 
 func TestAddressLogic(t *testing.T) {
@@ -241,5 +246,260 @@ func TestResolveIPWrapsError(t *testing.T) {
 	}
 	if errors.Unwrap(err) == nil {
 		t.Errorf("ResolveIP() error is not wrapped: %v", err)
+	}
+}
+
+func TestCaptureSerialLogDrainsOnStop(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	targetOutR, targetOutW := io.Pipe()
+	hostInR, hostInW := io.Pipe()
+	defer hostInR.Close()
+	fakeSerial := &fakePipeSerial{
+		r:  targetOutR,
+		w:  hostInW,
+		in: targetOutW,
+	}
+
+	target, err := newGenericFuchsia(ctx, "fuchsia-test-node", "", nil, fakeSerial)
+	if err != nil {
+		t.Fatalf("newGenericFuchsia() failed: %s", err)
+	}
+	if err := target.StartSerialServer(); err != nil {
+		t.Fatalf("StartSerialServer() failed: %s", err)
+	}
+
+	serialLogPath := filepath.Join(t.TempDir(), "serial_log.txt")
+	captureDone := make(chan error, 1)
+	go func() {
+		captureDone <- target.CaptureSerialLog(serialLogPath)
+	}()
+
+	if _, err := io.WriteString(targetOutW, "first line\n"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if b, err := os.ReadFile(serialLogPath); err == nil && strings.Contains(string(b), "first line") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for first line in serial_log.txt")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Write a line without sleeping for the 50ms poll interval and immediately stop.
+	if _, err := io.WriteString(targetOutW, "final line without newline"); err != nil {
+		t.Fatal(err)
+	}
+	target.Stop()
+
+	if err := <-captureDone; err != nil {
+		t.Fatalf("CaptureSerialLog() returned unexpected error on Stop(): %s", err)
+	}
+	got, err := os.ReadFile(serialLogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "final line without newline") {
+		t.Errorf("serial_log.txt missing final line; got:\n%s", string(got))
+	}
+}
+
+func TestCaptureSerialLogReturnsErrorOnUnexpectedDisconnect(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	socketPath := CreateSocketPath("serial-test")
+	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: socketPath, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.SetUnlinkOnClose(true)
+	defer l.Close()
+
+	go func() {
+		conn, err := l.Accept()
+		if err != nil {
+			return
+		}
+		_, _ = io.WriteString(conn, "line before crash\n")
+		conn.Close()
+	}()
+
+	target, err := newGenericFuchsia(ctx, "fuchsia-test-node", socketPath, nil, nil)
+	if err != nil {
+		t.Fatalf("newGenericFuchsia() failed: %s", err)
+	}
+
+	serialLogPath := filepath.Join(t.TempDir(), "serial_log.txt")
+	err = target.CaptureSerialLog(serialLogPath)
+	if err == nil {
+		t.Fatal("expected error from CaptureSerialLog on unexpected disconnect, got nil")
+	}
+	if !strings.Contains(err.Error(), constants.SerialReadErrorMsg) {
+		t.Errorf("CaptureSerialLog() error = %q, want substring %q", err.Error(), constants.SerialReadErrorMsg)
+	}
+}
+
+func TestAddFFXPackageRepositoryReRegistersOnReconnect(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	registerLog := filepath.Join(tmpDir, "register.log")
+	reconnectTrigger := filepath.Join(tmpDir, "reconnect")
+	ffxPath := filepath.Join(tmpDir, "ffx")
+	script := `#!/bin/bash
+for arg in "$@"; do
+  if [[ "$arg" == "forward" ]]; then
+    echo '{"forwarding":[{"host":{"Tcp":"127.0.0.1:10050"},"target":{"Tcp":"127.0.0.1:64251"},"direction":"TargetToHost"}]}'
+    while [[ ! -f "` + reconnectTrigger + `" ]]; do
+      sleep 0.01
+    done
+    echo '{"forwarding":[{"host":{"Tcp":"127.0.0.1:10050"},"target":{"Tcp":"127.0.0.1:56700"},"direction":"TargetToHost"}]}'
+    sleep 60
+    exit 0
+  fi
+  if [[ "$arg" == "register" ]]; then
+    echo "$@" >> "` + registerLog + `"
+    echo '{"ok":{}}'
+    exit 0
+  fi
+done
+echo '{"ok":{}}'
+`
+	if err := os.WriteFile(ffxPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("failed to write mock ffx tool: %v", err)
+	}
+	sshPriv := filepath.Join(tmpDir, "ssh_priv")
+	sshPub := filepath.Join(tmpDir, "ssh_pub")
+	if err := os.WriteFile(sshPriv, []byte("PRIVATE KEY"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sshPub, []byte("PUBLIC KEY"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ffxInstance, err := ffxutil.NewFFXInstance(ctx, ffxPath, tmpDir, nil, "id:test-serial", &ffxutil.SSHInfo{SshPriv: sshPriv, SshPub: sshPub}, tmpDir, ffxutil.UseFFXStrict)
+	if err != nil {
+		t.Fatalf("failed to create ffx instance: %s", err)
+	}
+	ffxInstance.SetStdoutStderr(io.Discard, io.Discard)
+
+	target := &genericFuchsiaTarget{
+		targetCtx: ctx,
+		nodename:  "fuchsia-test-node",
+		ffx:       &FFXInstance{FFXInstance: ffxInstance},
+	}
+
+	cleanup, err := target.AddFFXPackageRepository(ctx, "fuchsia-package-server", 10050, true)
+	if err != nil {
+		t.Fatalf("AddFFXPackageRepository() failed: %v", err)
+	}
+	defer cleanup()
+
+	gotBytes, err := os.ReadFile(registerLog)
+	if err != nil {
+		t.Fatalf("failed to read register log: %v", err)
+	}
+	if !strings.Contains(string(gotBytes), "--address-override 127.0.0.1:64251") {
+		t.Fatalf("initial registration missing 127.0.0.1:64251; got:\n%s", string(gotBytes))
+	}
+
+	// Simulate target reboot causing ffx forward to reconnect on a new target port.
+	if err := os.WriteFile(reconnectTrigger, []byte("1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		b, err := os.ReadFile(registerLog)
+		if err == nil && strings.Contains(string(b), "--address-override 127.0.0.1:56700") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for re-registration with 127.0.0.1:56700; got:\n%s", string(b))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestIPAddr(t *testing.T) {
+	ctx := context.Background()
+	emu, err := NewEmulator(ctx, EmulatorConfig{Target: "x64"}, Options{}, "aemu")
+	if err != nil {
+		t.Fatalf("NewEmulator failed: %s", err)
+	}
+	emu.addrResolved = true
+	// With emulator internet access, mDNS also reports the guest's SLiRP
+	// address, which isn't reachable from the host.
+	emu.ipv4 = net.ParseIP("10.0.2.15")
+	emu.ipv6 = &net.IPAddr{IP: net.ParseIP("fe80::1"), Zone: "qemu"}
+
+	if ipv4, err := emu.IPv4(); err != nil || ipv4 != nil {
+		t.Errorf("emu.IPv4() = (%v, %v), want (nil, nil)", ipv4, err)
+	}
+	gotEmuAddr, err := IPAddr(emu)
+	if err != nil {
+		t.Fatalf("IPAddr(emu) failed: %s", err)
+	}
+	wantEmuAddr := net.IPAddr{IP: net.ParseIP("fe80::1"), Zone: "qemu"}
+	if diff := cmp.Diff(wantEmuAddr, gotEmuAddr); diff != "" {
+		t.Errorf("IPAddr(emu) mismatch (-want +got):\n%s", diff)
+	}
+
+	nonEmu := &testTarget{
+		ipv4: net.ParseIP("192.168.1.2"),
+		ipv6: &net.IPAddr{IP: net.ParseIP("fe80::2"), Zone: "eth0"},
+	}
+	gotNonEmuAddr, err := IPAddr(nonEmu)
+	if err != nil {
+		t.Fatalf("IPAddr(nonEmu) failed: %s", err)
+	}
+	wantNonEmuAddr := net.IPAddr{IP: net.ParseIP("192.168.1.2")}
+	if diff := cmp.Diff(wantNonEmuAddr, gotNonEmuAddr); diff != "" {
+		t.Errorf("IPAddr(nonEmu) mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestResolveIPWaitsForIPv6(t *testing.T) {
+	answers := []struct {
+		ipv4 net.IP
+		ipv6 net.IPAddr
+	}{
+		// The first answer only has the A record.
+		{ipv4: net.ParseIP("10.0.2.15")},
+		{ipv4: net.ParseIP("10.0.2.15"), ipv6: net.IPAddr{IP: net.ParseIP("fe80::1"), Zone: "qemu"}},
+	}
+	calls := 0
+	origResolveIP := resolveIP
+	defer func() { resolveIP = origResolveIP }()
+	resolveIP = func(ctx context.Context, nodename string) (net.IP, net.IPAddr, error) {
+		a := answers[min(calls, len(answers)-1)]
+		calls++
+		return a.ipv4, a.ipv6, nil
+	}
+
+	target := &genericFuchsiaTarget{targetCtx: context.Background(), nodename: "fuchsia-test", connectionTimeout: time.Minute}
+	if err := target.ResolveIP(); err != nil {
+		t.Fatalf("ResolveIP() failed: %s", err)
+	}
+	if calls != 2 {
+		t.Errorf("expected ResolveIP() to ask again after an IPv4-only answer; got %d calls", calls)
+	}
+	if target.ipv6 == nil || !target.ipv6.IP.Equal(net.ParseIP("fe80::1")) {
+		t.Errorf("target.ipv6 = %v, want fe80::1%%qemu", target.ipv6)
+	}
+
+	// If no IPv6 address is ever resolved, ResolveIP() fails instead of
+	// returning an empty IPv6 address.
+	calls = 0
+	answers = answers[:1]
+	target = &genericFuchsiaTarget{targetCtx: context.Background(), nodename: "fuchsia-test", connectionTimeout: 3 * mDNSQuestionInterval}
+	if err := target.ResolveIP(); err == nil {
+		t.Errorf("expected ResolveIP() to fail without an IPv6 address")
+	}
+	if target.addrResolved {
+		t.Errorf("expected the address to stay unresolved")
 	}
 }

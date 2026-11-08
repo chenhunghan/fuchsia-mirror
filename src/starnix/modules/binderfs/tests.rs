@@ -17,8 +17,8 @@ pub mod tests {
     use crate::shared_memory::{SharedMemory, TransactionBuffers};
     use crate::thread::{
         BinderThread, BinderThreadState, Command, QueuedCommand, RegistrationState,
-        RequeueEventRegistration, TransactionError, TransactionRole, TransactionSender,
-        WeakBinderPeer, generate_dead_replies_for_transactions,
+        TransactionError, TransactionRole, TransactionSender, WeakBinderPeer,
+        generate_dead_replies_for_transactions,
     };
     use crate::user_memory_cursor::UserMemoryCursor;
     use assert_matches::assert_matches;
@@ -32,22 +32,28 @@ pub mod tests {
     use memoffset::offset_of;
     use starnix_core::device::DeviceOps;
     use starnix_core::device::mem::new_null_file;
+    use starnix_core::execution::execute_task;
     use starnix_core::fs::fuchsia::sync_file::{SyncFence, SyncFile, SyncPoint, Timeline};
     use starnix_core::mm::memory::MemoryObject;
     use starnix_core::mm::{
         DesiredAddress, MappingName, MappingOptions, MemoryAccessor, MemoryAccessorExt, PAGE_SIZE,
         ProtectionFlags,
     };
-    use starnix_core::task::{CurrentTask, EventHandler, ExitStatus, Kernel, SimpleWaiter, Waiter};
+    use starnix_core::security;
+    use starnix_core::signals::{SignalInfo, send_standard_signal};
+    use starnix_core::task::{
+        CurrentTask, EventHandler, ExitStatus, Kernel, RoleOverrides, SchedulerManager, Task,
+        Waiter,
+    };
     use starnix_core::testing::*;
     use starnix_core::vfs::{
         Anon, FdFlags, FdNumber, FileHandle, FileObject, FileSystemOptions, VecOutputBuffer,
         WhatToMount, anon_fs,
     };
     use starnix_logging::log_warn;
-    use starnix_sync::InterruptibleEvent;
+    use starnix_task_command::TaskCommand;
     use starnix_types::convert::IntoFidl;
-    use starnix_types::ownership::{OwnedRef, Releasable, TempRef, WeakRef};
+    use starnix_types::ownership::{OwnedRef, Releasable, Share, TempRef, WeakRef};
     use starnix_types::user_buffer::UserBuffer;
     use starnix_uapi::auth::Credentials;
     use starnix_uapi::device_id::DeviceId;
@@ -55,6 +61,7 @@ pub mod tests {
     use starnix_uapi::file_mode::mode;
     use starnix_uapi::mount_flags::MountpointFlags;
     use starnix_uapi::open_flags::OpenFlags;
+    use starnix_uapi::signals::SIGUSR1;
     use starnix_uapi::union::struct_with_union_into_bytes;
     use starnix_uapi::user_address::{UserAddress, UserRef};
     use starnix_uapi::vfs::FdEvents;
@@ -73,7 +80,8 @@ pub mod tests {
     use std::cell::Cell;
     use std::collections::BTreeMap;
     use std::ops::Deref;
-    use std::sync::{Arc, Weak};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier, OnceLock, Weak};
     use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, KnownLayout};
 
     const BASE_ADDR: UserAddress = UserAddress::const_from(0x0000000000000100);
@@ -179,7 +187,7 @@ pub mod tests {
             }
             OwnedRef::take(&mut self.proc).release(&self.kernel);
             if let Some(task) = self.task.as_ref() {
-                task.write().set_exit_status_if_not_already(ExitStatus::Exit(0));
+                task.write().set_exiting(ExitStatus::Exit(0));
             }
         }
     }
@@ -1510,7 +1518,7 @@ pub mod tests {
                 strong_ref_addr: UserAddress::const_from(0x0000000000000100),
             };
 
-            const DATA_PREAMBLE: &[u8; 5] = b"stuff";
+            const DATA_PREAMBLE: &[u8; 8] = b"stuff\0\0\0";
 
             let mut transaction_data = vec![];
             transaction_data.extend(DATA_PREAMBLE);
@@ -1604,7 +1612,7 @@ pub mod tests {
                 sender.proc.lock().handles.dec_strong(handle.object_index(), &mut RefCountActions::default_released()).expect("dec_strong");
             }
 
-            const DATA_PREAMBLE: &[u8; 5] = b"stuff";
+            const DATA_PREAMBLE: &[u8; 8] = b"stuff\0\0\0";
 
             let mut transaction_data = vec![];
             transaction_data.extend(DATA_PREAMBLE);
@@ -1683,7 +1691,7 @@ pub mod tests {
                 .handles
                 .insert_for_transaction(guard, &mut RefCountActions::default_released());
 
-            const DATA_PREAMBLE: &[u8; 5] = b"stuff";
+            const DATA_PREAMBLE: &[u8; 8] = b"stuff\0\0\0";
 
             let mut transaction_data = vec![];
             transaction_data.extend(DATA_PREAMBLE);
@@ -1793,7 +1801,7 @@ pub mod tests {
                 .handles
                 .insert_for_transaction(guard, &mut RefCountActions::default_released());
 
-            const DATA_PREAMBLE: &[u8; 5] = b"stuff";
+            const DATA_PREAMBLE: &[u8; 8] = b"stuff\0\0\0";
 
             let mut transaction_data = vec![];
             let mut offsets = vec![];
@@ -2704,6 +2712,184 @@ pub mod tests {
     }
 
     #[fuchsia::test]
+    async fn transaction_translation_fails_on_unaligned_object_offset() {
+        spawn_kernel_and_run(async |current_task| {
+            let device = BinderDevice::default();
+            let sender = BinderProcessFixture::new_current(current_task, &device);
+            let receiver = BinderProcessFixture::new(current_task, &device);
+            let mut receiver_shared_memory = receiver.lock_shared_memory();
+            let mut allocations =
+                receiver_shared_memory.allocate_buffers(0, 0, 0, 0).expect("allocate buffers");
+
+            const DATA_PREAMBLE: &[u8; 5] = b"stuff";
+
+            let mut transaction_data = vec![];
+            transaction_data.extend(DATA_PREAMBLE);
+            let offsets = [transaction_data.len() as binder_uintptr_t];
+            transaction_data.extend(struct_with_union_into_bytes!(flat_binder_object {
+                hdr.type_: BINDER_TYPE_BINDER,
+                flags: 0,
+                cookie: 0x100,
+                __bindgen_anon_1.binder: 0x10,
+            }));
+
+            let transaction_ref_error = device
+                .translate_objects(
+                    &sender.context(current_task),
+                    &mut Vec::new(),
+                    receiver.task(),
+                    &receiver.proc,
+                    &offsets,
+                    &mut transaction_data,
+                    &mut allocations.scatter_gather_buffer,
+                )
+                .expect_err("translate handles unexpectedly succeeded");
+
+            assert_eq!(transaction_ref_error, TransactionError::Malformed(errno!(EINVAL)));
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn transaction_fails_when_sg_buffer_fixup_offsets_overlap_or_violate_parent_chain() {
+        spawn_kernel_and_run(async |current_task| {
+            let device = BinderDevice::default();
+            let sender = BinderProcessFixture::new_current(current_task, &device);
+            let receiver = BinderProcessFixture::new(current_task, &device);
+
+            let sender_addr = map_memory(&current_task, UserAddress::default(), *PAGE_SIZE);
+            let mut writer = UserMemoryWriter::new(&current_task, sender_addr);
+
+            const PARENT_LEN: usize = 16;
+            const CHILD_LEN: usize = 8;
+            let parent_buf_addr = writer.write(&[0; PARENT_LEN]);
+            let child0_buf_addr = writer.write(&[0; CHILD_LEN]);
+            let child1_buf_addr = writer.write(&[0; CHILD_LEN]);
+
+            // Case 1: Two child BINDER_TYPE_PTR objects fixing up the same parent_offset (0) in
+            // parent buffer 0 must be rejected.
+            let transaction_data_addr = writer.current_address();
+            let obj0_addr = writer.write_object(&binder_buffer_object {
+                hdr: binder_object_header { type_: BINDER_TYPE_PTR },
+                buffer: parent_buf_addr.ptr() as u64,
+                length: PARENT_LEN as u64,
+                ..binder_buffer_object::default()
+            });
+            let obj1_addr = writer.write_object(&binder_buffer_object {
+                hdr: binder_object_header { type_: BINDER_TYPE_PTR },
+                buffer: child0_buf_addr.ptr() as u64,
+                length: CHILD_LEN as u64,
+                flags: BINDER_BUFFER_FLAG_HAS_PARENT,
+                parent: 0,
+                parent_offset: 0,
+            });
+            let obj2_addr = writer.write_object(&binder_buffer_object {
+                hdr: binder_object_header { type_: BINDER_TYPE_PTR },
+                buffer: child1_buf_addr.ptr() as u64,
+                length: CHILD_LEN as u64,
+                flags: BINDER_BUFFER_FLAG_HAS_PARENT,
+                parent: 0,
+                parent_offset: 0,
+            });
+            let offsets_addr = writer.current_address();
+            writer.write_object(&((obj0_addr - transaction_data_addr) as u64));
+            writer.write_object(&((obj1_addr - transaction_data_addr) as u64));
+            writer.write_object(&((obj2_addr - transaction_data_addr) as u64));
+            let end_data_addr = writer.current_address();
+
+            let input = binder_transaction_data_sg {
+                transaction_data: binder_transaction_data {
+                    target: binder_transaction_data__bindgen_ty_1 { handle: 1 },
+                    data_size: (offsets_addr - transaction_data_addr) as u64,
+                    offsets_size: (end_data_addr - offsets_addr) as u64,
+                    data: binder_transaction_data__bindgen_ty_2 {
+                        ptr: binder_transaction_data__bindgen_ty_2__bindgen_ty_1 {
+                            buffer: transaction_data_addr.ptr() as u64,
+                            offsets: offsets_addr.ptr() as u64,
+                        },
+                    },
+                    ..binder_transaction_data::new_zeroed()
+                },
+                buffers_size: (PARENT_LEN + CHILD_LEN * 2) as u64,
+            };
+            assert_eq!(
+                device
+                    .copy_transaction_buffers(
+                        &sender.context(current_task),
+                        &mut Vec::new(),
+                        receiver.task(),
+                        &receiver.proc,
+                        &input,
+                        None,
+                    )
+                    .expect_err("overlapping BINDER_TYPE_PTR fixups should fail"),
+                TransactionError::Malformed(errno!(EINVAL))
+            );
+
+            // Case 2: A BINDER_TYPE_FDA overlapping an already-written BINDER_TYPE_PTR fixup at
+            // parent_offset = 0 (or targeting an earlier root buffer after a new root buffer resets
+            // the active parent chain) must be rejected.
+            let transaction_data2_addr = writer.current_address();
+            let p0_addr = writer.write_object(&binder_buffer_object {
+                hdr: binder_object_header { type_: BINDER_TYPE_PTR },
+                buffer: parent_buf_addr.ptr() as u64,
+                length: PARENT_LEN as u64,
+                ..binder_buffer_object::default()
+            });
+            let c0_addr = writer.write_object(&binder_buffer_object {
+                hdr: binder_object_header { type_: BINDER_TYPE_PTR },
+                buffer: child0_buf_addr.ptr() as u64,
+                length: CHILD_LEN as u64,
+                flags: BINDER_BUFFER_FLAG_HAS_PARENT,
+                parent: 0,
+                parent_offset: 0,
+            });
+            let fda_addr = writer.write_object(&binder_fd_array_object {
+                hdr: binder_object_header { type_: BINDER_TYPE_FDA },
+                pad: 0,
+                num_fds: 1,
+                parent: 0,
+                parent_offset: 0,
+            });
+            let offsets2_addr = writer.current_address();
+            writer.write_object(&((p0_addr - transaction_data2_addr) as u64));
+            writer.write_object(&((c0_addr - transaction_data2_addr) as u64));
+            writer.write_object(&((fda_addr - transaction_data2_addr) as u64));
+            let end_data2_addr = writer.current_address();
+
+            let input2 = binder_transaction_data_sg {
+                transaction_data: binder_transaction_data {
+                    target: binder_transaction_data__bindgen_ty_1 { handle: 1 },
+                    data_size: (offsets2_addr - transaction_data2_addr) as u64,
+                    offsets_size: (end_data2_addr - offsets2_addr) as u64,
+                    data: binder_transaction_data__bindgen_ty_2 {
+                        ptr: binder_transaction_data__bindgen_ty_2__bindgen_ty_1 {
+                            buffer: transaction_data2_addr.ptr() as u64,
+                            offsets: offsets2_addr.ptr() as u64,
+                        },
+                    },
+                    ..binder_transaction_data::new_zeroed()
+                },
+                buffers_size: (PARENT_LEN + CHILD_LEN) as u64,
+            };
+            assert_eq!(
+                device
+                    .copy_transaction_buffers(
+                        &sender.context(current_task),
+                        &mut Vec::new(),
+                        receiver.task(),
+                        &receiver.proc,
+                        &input2,
+                        None,
+                    )
+                    .expect_err("BINDER_TYPE_FDA overlapping BINDER_TYPE_PTR should fail"),
+                TransactionError::Malformed(errno!(EINVAL))
+            );
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
     async fn transaction_drop_references_on_failed_transaction() {
         spawn_kernel_and_run(async |current_task| {
             let device = BinderDevice::default();
@@ -2975,8 +3161,26 @@ pub mod tests {
 
             // The client process should have a notification waiting.
             assert_matches!(
-                receiver.proc.lock().command_queue.front(),
+                receiver.proc.lock().command_queue.pop_front(),
                 Some(QueuedCommand { command: Command::DeadBinder(DEATH_NOTIFICATION_COOKIE), .. })
+            );
+
+            // While handling BR_DEAD_BINDER, libbinder clears the death notification before calling
+            // the death recipients. BR_CLEAR_DEATH_NOTIFICATION_DONE lets libbinder release the
+            // proxy, so it must wait for BC_DEAD_BINDER_DONE.
+            receiver
+                .proc
+                .handle_clear_death_notification(handle, DEATH_NOTIFICATION_COOKIE)
+                .expect("clear death notification");
+            assert!(receiver.proc.lock().command_queue.is_empty());
+            assert!(receiver.thread.lock().command_queue.is_empty());
+            receiver.proc.handle_dead_binder_done(DEATH_NOTIFICATION_COOKIE);
+            assert_matches!(
+                receiver.proc.lock().command_queue.pop_front(),
+                Some(QueuedCommand {
+                    command: Command::ClearDeathNotificationDone(DEATH_NOTIFICATION_COOKIE),
+                    ..
+                })
             );
         })
         .await;
@@ -3015,19 +3219,63 @@ pub mod tests {
 
             const DEATH_NOTIFICATION_COOKIE: binder_uintptr_t = 0xDEADBEEF;
 
-            // Register a death notification handler.
-            receiver
-                .proc
-                .handle_request_death_notification(handle, DEATH_NOTIFICATION_COOKIE)
-                .expect("request death notification");
+            // Register a death notification handler. A duplicate request before clearing is
+            // ignored, even though the binder is already dead.
+            for _ in 0..2 {
+                receiver
+                    .proc
+                    .handle_request_death_notification(handle, DEATH_NOTIFICATION_COOKIE)
+                    .expect("request death notification");
+            }
 
             // The receiver thread should not have a notification, as the calling thread is not allowed
             // to receive it, or else a deadlock may occur if the thread is in the middle of a
             // transaction. Since there is only one thread, check the process command queue.
+            assert_eq!(receiver.proc.lock().command_queue.len(), 1);
             assert_matches!(
                 receiver.proc.lock().command_queue.front(),
                 Some(QueuedCommand { command: Command::DeadBinder(DEATH_NOTIFICATION_COOKIE), .. })
             );
+
+            // Before reading BR_DEAD_BINDER, the receiver replaces its only death recipient, so
+            // libbinder clears the death notification and requests it again. Like in Linux, this
+            // does not cancel the pending BR_DEAD_BINDER, and fires a new one.
+            receiver
+                .proc
+                .handle_clear_death_notification(handle, DEATH_NOTIFICATION_COOKIE)
+                .expect("clear death notification");
+            receiver
+                .proc
+                .handle_request_death_notification(handle, DEATH_NOTIFICATION_COOKIE)
+                .expect("request death notification again");
+            for _ in 0..2 {
+                assert_matches!(
+                    receiver.proc.lock().command_queue.pop_front(),
+                    Some(QueuedCommand {
+                        command: Command::DeadBinder(DEATH_NOTIFICATION_COOKIE),
+                        ..
+                    })
+                );
+            }
+
+            // Handling the first BR_DEAD_BINDER clears the new notification. Each clear is only
+            // acknowledged once a BR_DEAD_BINDER is done.
+            receiver
+                .proc
+                .handle_clear_death_notification(handle, DEATH_NOTIFICATION_COOKIE)
+                .expect("clear death notification again");
+            assert!(receiver.proc.lock().command_queue.is_empty());
+            for _ in 0..2 {
+                receiver.proc.handle_dead_binder_done(DEATH_NOTIFICATION_COOKIE);
+                assert_matches!(
+                    receiver.proc.lock().command_queue.pop_front(),
+                    Some(QueuedCommand {
+                        command: Command::ClearDeathNotificationDone(DEATH_NOTIFICATION_COOKIE),
+                        ..
+                    })
+                );
+            }
+            assert!(receiver.proc.lock().death_notifications.is_empty());
         })
         .await;
     }
@@ -3068,11 +3316,13 @@ pub mod tests {
                 .handle_request_death_notification(handle, death_notification_cookie)
                 .expect("request death notification");
 
-            // Now clear the death notification handler.
-            client
-                .proc
-                .handle_clear_death_notification(handle, death_notification_cookie)
-                .expect("clear death notification");
+            // Now clear the death notification handler. A second clear is ignored.
+            for _ in 0..2 {
+                client
+                    .proc
+                    .handle_clear_death_notification(handle, death_notification_cookie)
+                    .expect("clear death notification");
+            }
 
             // Check that the client received an acknowlgement
             {
@@ -3088,12 +3338,21 @@ pub mod tests {
             }
 
             // Pretend the client thread is waiting for commands, so that it can be scheduled commands.
-            let fake_waiter = Waiter::new();
-            {
+            let _fake_waiter = {
                 let mut state = client.thread.lock();
                 state.registration = RegistrationState::Main;
-                state.command_queue.waiters.wait_async(&fake_waiter);
-            }
+                state.begin_wait()
+            };
+
+            // Clearing the death notification unsubscribed the client from the owner. Even if it
+            // could not, because the clear raced with the release of the owner, no notification
+            // may follow the acknowledgement.
+            assert!(owner.proc.lock().death_subscribers.is_empty());
+            owner
+                .proc
+                .lock()
+                .death_subscribers
+                .push((client.proc.weak_self.clone(), death_notification_cookie));
 
             // Now the owner process dies.
             std::mem::drop(owner);
@@ -3329,7 +3588,7 @@ pub mod tests {
                 strong_ref_addr: UserAddress::const_from(0x0000000000000100),
             };
 
-            const DATA_PREAMBLE: &[u8; 5] = b"stuff";
+            const DATA_PREAMBLE: &[u8; 8] = b"stuff\0\0\0";
 
             let mut transaction_data = vec![];
             transaction_data.extend(DATA_PREAMBLE);
@@ -4212,12 +4471,11 @@ pub mod tests {
 
             // Make the receiver thread look eligible for transactions.
             // Pretend the client thread is waiting for commands, so that it can be scheduled commands.
-            let fake_waiter = Waiter::new();
-            {
+            let fake_waiter = {
                 let mut thread_state = receiver.thread.lock();
                 thread_state.registration = RegistrationState::Main;
-                thread_state.command_queue.waiters.wait_async(&fake_waiter);
-            }
+                thread_state.begin_wait()
+            };
 
             // Submit the transaction.
             device
@@ -4246,6 +4504,7 @@ pub mod tests {
                     &UserBuffer { address: read_buffer_addr, length: *PAGE_SIZE as usize },
                 )
                 .expect("read command");
+            drop(fake_waiter);
 
             // The thread should now have an empty command list and an ongoing transaction.
             assert!(receiver.thread.lock().command_queue.is_empty());
@@ -4294,12 +4553,11 @@ pub mod tests {
 
             // Make the receiver thread look eligible for transactions.
             // Pretend the client thread is waiting for commands, so that it can be scheduled commands.
-            let fake_waiter = Waiter::new();
-            {
+            let _fake_waiter = {
                 let mut thread_state = receiver.thread.lock();
                 thread_state.registration = RegistrationState::Main;
-                thread_state.command_queue.waiters.wait_async(&fake_waiter);
-            }
+                thread_state.begin_wait()
+            };
 
             // Submit the transaction.
             device
@@ -4452,12 +4710,11 @@ pub mod tests {
                 .expect("register looper thread");
 
             // Make looper_thread registered as Auxiliary looper and waiting for commands.
-            let looper_waiter = Waiter::new();
-            {
+            let looper_waiter = {
                 let mut looper_state = looper_thread.lock();
                 looper_state.registration = RegistrationState::Auxiliary;
-                looper_state.command_queue.waiters.wait_async(&looper_waiter);
-            }
+                looper_state.begin_wait()
+            };
 
             // 1. proc_a.thread (main thread) sends synchronous transaction to proc_b.
             let transaction_to_b = binder_transaction_data_sg {
@@ -4551,6 +4808,7 @@ pub mod tests {
                 "The process queue command should be successfully handled and drained by the looper thread!"
             );
 
+            drop(looper_waiter);
             looper_thread.release(current_task.kernel());
         })
         .await;
@@ -4864,12 +5122,11 @@ pub mod tests {
             // Make the receiver thread look eligible for transactions.
             // Pretend the client thread is waiting for commands, so that it can be scheduled
             // commands.
-            let fake_waiter = Waiter::new();
-            {
+            let _fake_waiter = {
                 let mut thread_state = receiver.thread.lock();
                 thread_state.registration = RegistrationState::Main;
-                thread_state.command_queue.waiters.wait_async(&fake_waiter);
-            }
+                thread_state.begin_wait()
+            };
 
             // Submit the transaction.
             device
@@ -4898,6 +5155,259 @@ pub mod tests {
                 sender.thread.lock().transactions.pop(),
                 Some(TransactionRole::Sender(_))
             );
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn frozen_info_reports_pending_transactions() {
+        spawn_kernel_and_run(async |current_task| {
+            let device = BinderDevice::default();
+            let sender = BinderProcessFixture::new_current(current_task, &device);
+            let receiver = BinderProcessFixture::new(current_task, &device);
+
+            const OBJECT_ADDR: UserAddress = UserAddress::const_from(0x01);
+            let (_, guard) =
+                register_binder_object(&receiver.proc, OBJECT_ADDR, (OBJECT_ADDR + 1u64).unwrap());
+            let handle = sender
+                .proc
+                .lock()
+                .handles
+                .insert_for_transaction(guard, &mut RefCountActions::default_released());
+
+            const FIRST_TRANSACTION_CODE: u32 = 42;
+            let transaction = binder_transaction_data_sg {
+                transaction_data: binder_transaction_data {
+                    code: FIRST_TRANSACTION_CODE,
+                    target: binder_transaction_data__bindgen_ty_1 { handle: handle.into() },
+                    ..binder_transaction_data::default()
+                },
+                buffers_size: 0,
+            };
+
+            device
+                .handle_transaction(&sender.context(current_task), &mut Vec::new(), transaction)
+                .expect("handle_transaction");
+
+            let request_buffer_addr = match receiver.proc.lock().command_queue.front() {
+                Some(QueuedCommand {
+                    command:
+                        Command::Transaction {
+                            data: TransactionData { buffers: TransactionBuffers { data, .. }, .. },
+                            ..
+                        },
+                    ..
+                }) => data.address,
+                other => panic!("expected unread Command::Transaction, got {:?}", other),
+            };
+
+            let status_addr = map_object_anywhere(
+                current_task,
+                &binder_frozen_status_info { pid: 0, sync_recv: 0, async_recv: 0 },
+            );
+            let query_sync_recv = |pid: u32| -> u32 {
+                sender
+                    .proc
+                    .get_memory_accessor(current_task, None)
+                    .write_object(
+                        UserRef::<binder_frozen_status_info>::new(status_addr),
+                        &binder_frozen_status_info { pid, sync_recv: 0, async_recv: 0 },
+                    )
+                    .expect("write binder_frozen_status_info");
+                device
+                    .ioctl(
+                        current_task,
+                        &sender.proc,
+                        None,
+                        uapi::BINDER_GET_FROZEN_INFO,
+                        status_addr.into(),
+                        Vec::new(),
+                    )
+                    .expect("BINDER_GET_FROZEN_INFO ioctl");
+                sender
+                    .proc
+                    .get_memory_accessor(current_task, None)
+                    .read_object(UserRef::<binder_frozen_status_info>::new(status_addr))
+                    .expect("read binder_frozen_status_info")
+                    .sync_recv
+            };
+
+            let receiver_pid = receiver.proc.key.id as u32;
+            let sender_pid = sender.proc.key.id as u32;
+
+            // While the transaction is unread in `active_transactions`, bit 1 of `sync_recv` is
+            // set on both the receiver and the sender.
+            assert_eq!(query_sync_recv(receiver_pid) & 0b10, 0b10);
+            assert_eq!(query_sync_recv(sender_pid) & 0b10, 0b10);
+
+            // Dequeue `BR_TRANSACTION` on the receiver thread and free the transaction buffer
+            // (`BC_FREE_BUFFER`). While the transaction remains on `receiver.thread`'s
+            // `transactions` stack, bit 1 of `sync_recv` stays set.
+            let receiver_context = OperationContext {
+                current_task: receiver.task(),
+                binder_proc: &receiver.proc,
+                binder_thread: &receiver.thread,
+                memory_accessor: receiver.task().task.deref(),
+            };
+            let receiver_read_buf = map_memory(receiver.task(), UserAddress::default(), *PAGE_SIZE);
+            device
+                .handle_thread_read(
+                    &receiver_context,
+                    &UserBuffer { address: receiver_read_buf, length: *PAGE_SIZE as usize },
+                )
+                .expect("receiver handle_thread_read");
+            receiver
+                .proc
+                .handle_free_buffer(request_buffer_addr)
+                .expect("receiver handle_free_buffer");
+            assert!(!receiver.thread.lock().transactions.is_empty());
+            assert_eq!(query_sync_recv(receiver_pid) & 0b10, 0b10);
+            assert_eq!(query_sync_recv(sender_pid) & 0b10, 0b10);
+
+            // Send `BC_REPLY` from the receiver. The receiver's pending transaction state clears,
+            // while the sender's pending transaction state remains set until `BR_REPLY` is read.
+            let reply = binder_transaction_data_sg {
+                transaction_data: binder_transaction_data {
+                    code: FIRST_TRANSACTION_CODE,
+                    ..binder_transaction_data::default()
+                },
+                buffers_size: 0,
+            };
+            device.handle_reply(&receiver_context, &mut Vec::new(), reply).expect("handle_reply");
+            assert_eq!(query_sync_recv(receiver_pid) & 0b10, 0);
+            assert_eq!(query_sync_recv(sender_pid) & 0b10, 0b10);
+
+            // Once the sender reads `BR_REPLY`, bit 1 of `sync_recv` is cleared on the sender too.
+            let sender_read_buf = map_memory(current_task, UserAddress::default(), *PAGE_SIZE);
+            device
+                .handle_thread_read(
+                    &sender.context(current_task),
+                    &UserBuffer { address: sender_read_buf, length: *PAGE_SIZE as usize },
+                )
+                .expect("sender handle_thread_read");
+            assert_eq!(query_sync_recv(receiver_pid) & 0b10, 0);
+            assert_eq!(query_sync_recv(sender_pid) & 0b10, 0);
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn thread_exit_clears_unread_pending_transaction() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let device = BinderDevice::default();
+            let sender = BinderProcessFixture::new_current(current_task, &device);
+            let receiver = BinderProcessFixture::new(current_task, &device);
+
+            const OBJECT_ADDR: UserAddress = UserAddress::const_from(0x01);
+            let (_, guard) =
+                register_binder_object(&receiver.proc, OBJECT_ADDR, (OBJECT_ADDR + 1u64).unwrap());
+            let handle = sender
+                .proc
+                .lock()
+                .handles
+                .insert_for_transaction(guard, &mut RefCountActions::default_released());
+
+            // Register a worker thread on `receiver.proc` and make it available so the incoming
+            // synchronous transaction is queued directly on the worker thread's `command_queue`.
+            let worker_task = create_task(kernel, "worker");
+            let worker_thread = receiver
+                .proc
+                .find_or_register_thread(&worker_task.task)
+                .expect("register worker thread");
+            let fake_waiter = {
+                let mut thread_state = worker_thread.lock();
+                thread_state.registration = RegistrationState::Main;
+                thread_state.begin_wait()
+            };
+
+            const FIRST_TRANSACTION_CODE: u32 = 42;
+            let transaction = binder_transaction_data_sg {
+                transaction_data: binder_transaction_data {
+                    code: FIRST_TRANSACTION_CODE,
+                    target: binder_transaction_data__bindgen_ty_1 { handle: handle.into() },
+                    ..binder_transaction_data::default()
+                },
+                buffers_size: 0,
+            };
+            device
+                .handle_transaction(&sender.context(current_task), &mut Vec::new(), transaction)
+                .expect("handle_transaction");
+            assert_matches!(
+                worker_thread.lock().command_queue.commands.front(),
+                Some(QueuedCommand { command: Command::Transaction { .. }, .. })
+            );
+
+            drop(fake_waiter);
+            worker_thread.release(kernel);
+
+            let freeze_info_addr = map_object_anywhere(
+                current_task,
+                &binder_freeze_info { pid: receiver.proc.key.id as u32, enable: 1, timeout_ms: 0 },
+            );
+            let frozen_status_addr = map_object_anywhere(
+                current_task,
+                &binder_frozen_status_info {
+                    pid: receiver.proc.key.id as u32,
+                    sync_recv: 0,
+                    async_recv: 0,
+                },
+            );
+
+            assert_eq!(
+                device.ioctl(
+                    current_task,
+                    &receiver.proc,
+                    None,
+                    uapi::BINDER_FREEZE,
+                    freeze_info_addr.into(),
+                    Vec::new(),
+                ),
+                Err(errno!(EAGAIN))
+            );
+
+            // Have the target worker thread exit via `BINDER_THREAD_EXIT` while the unread
+            // `Command::Transaction` is still in its thread `command_queue`.
+            device
+                .ioctl(
+                    &worker_task,
+                    &receiver.proc,
+                    None,
+                    uapi::BINDER_THREAD_EXIT,
+                    UserAddress::NULL.into(),
+                    Vec::new(),
+                )
+                .expect("BINDER_THREAD_EXIT ioctl");
+
+            device
+                .ioctl(
+                    current_task,
+                    &receiver.proc,
+                    None,
+                    uapi::BINDER_GET_FROZEN_INFO,
+                    frozen_status_addr.into(),
+                    Vec::new(),
+                )
+                .expect("BINDER_GET_FROZEN_INFO ioctl");
+            let status = receiver
+                .proc
+                .get_memory_accessor(current_task, None)
+                .read_object(UserRef::<binder_frozen_status_info>::new(frozen_status_addr))
+                .expect("read binder_frozen_status_info");
+            assert_eq!(status.sync_recv & 0b10, 0);
+
+            device
+                .ioctl(
+                    current_task,
+                    &receiver.proc,
+                    None,
+                    uapi::BINDER_FREEZE,
+                    freeze_info_addr.into(),
+                    Vec::new(),
+                )
+                .expect("BINDER_FREEZE after BINDER_THREAD_EXIT");
+
+            worker_task.write().set_exiting(ExitStatus::Exit(0));
         })
         .await;
     }
@@ -4989,7 +5499,165 @@ pub mod tests {
                 .read_object(UserRef::<binder_frozen_status_info>::new(frozen_status_info_address))
                 .expect("read returned binder frozen status");
             assert_eq!(read_frozen_status_info.sync_recv, 1);
-            assert_eq!(read_frozen_status_info.async_recv, 0)
+            assert_eq!(read_frozen_status_info.async_recv, 0);
+
+            // Submit two oneway transactions to the frozen receiver process. The first is queued
+            // on `receiver.proc`'s `command_queue` with `handling_oneway_transaction = true` and
+            // the second is queued in `object.oneway_transactions`. Both should be buffered
+            // without setting bit 1 (pending transactions) of sync_recv or causing a subsequent
+            // BINDER_FREEZE(enable=1) to fail with EAGAIN.
+            let oneway_transaction = binder_transaction_data_sg {
+                transaction_data: binder_transaction_data {
+                    code: FIRST_TRANSACTION_CODE,
+                    flags: transaction_flags_TF_ONE_WAY,
+                    target: binder_transaction_data__bindgen_ty_1 { handle: handle.into() },
+                    ..binder_transaction_data::default()
+                },
+                buffers_size: 0,
+            };
+            for _ in 0..2 {
+                device
+                    .handle_transaction(
+                        &sender.context(current_task),
+                        &mut Vec::new(),
+                        oneway_transaction,
+                    )
+                    .expect("oneway transaction to frozen process");
+                assert_matches!(
+                    sender.thread.lock().command_queue.pop_front(),
+                    Some(QueuedCommand { command: Command::PendingFrozen, .. })
+                );
+            }
+            assert!(!receiver.proc.lock().has_runnable_commands());
+
+            device
+                .ioctl(
+                    current_task,
+                    &receiver.proc,
+                    None,
+                    uapi::BINDER_GET_FROZEN_INFO,
+                    frozen_status_info_address.into(),
+                    Vec::new(),
+                )
+                .expect("BINDER_GET_FROZEN_INFO ioctl after oneway");
+            let read_frozen_status_info = receiver
+                .proc
+                .get_memory_accessor(current_task, None)
+                .read_object(UserRef::<binder_frozen_status_info>::new(frozen_status_info_address))
+                .expect("read returned binder frozen status");
+            assert_eq!(read_frozen_status_info.sync_recv, 1);
+            assert_eq!(read_frozen_status_info.async_recv, 1);
+
+            let nonblocking_freeze_address = map_object_anywhere(
+                &current_task,
+                &binder_freeze_info { pid: receiver.proc.key.id as u32, enable: 1, timeout_ms: 0 },
+            );
+            device
+                .ioctl(
+                    current_task,
+                    &receiver.proc,
+                    None,
+                    uapi::BINDER_FREEZE,
+                    nonblocking_freeze_address.into(),
+                    Vec::new(),
+                )
+                .expect("re-freezing process with buffered frozen oneway transaction");
+
+            // Thawing the process promotes the buffered oneway transaction to pending, so
+            // BINDER_GET_FROZEN_INFO reports bit 1 of sync_recv set and a subsequent non-blocking
+            // BINDER_FREEZE(enable=1) fails with EAGAIN until the buffer is freed.
+            let thaw_address = map_object_anywhere(
+                &current_task,
+                &binder_freeze_info { pid: receiver.proc.key.id as u32, enable: 0, timeout_ms: 0 },
+            );
+            device
+                .ioctl(
+                    current_task,
+                    &receiver.proc,
+                    None,
+                    uapi::BINDER_FREEZE,
+                    thaw_address.into(),
+                    Vec::new(),
+                )
+                .expect("thawing process");
+            assert!(receiver.proc.lock().has_runnable_commands());
+
+            device
+                .ioctl(
+                    current_task,
+                    &receiver.proc,
+                    None,
+                    uapi::BINDER_GET_FROZEN_INFO,
+                    frozen_status_info_address.into(),
+                    Vec::new(),
+                )
+                .expect("BINDER_GET_FROZEN_INFO ioctl after thaw");
+            let read_frozen_status_info = receiver
+                .proc
+                .get_memory_accessor(current_task, None)
+                .read_object(UserRef::<binder_frozen_status_info>::new(frozen_status_info_address))
+                .expect("read returned binder frozen status");
+            assert_eq!(read_frozen_status_info.sync_recv, 2);
+            assert_eq!(read_frozen_status_info.async_recv, 0);
+
+            assert_eq!(
+                device.ioctl(
+                    current_task,
+                    &receiver.proc,
+                    None,
+                    uapi::BINDER_FREEZE,
+                    nonblocking_freeze_address.into(),
+                    Vec::new(),
+                ),
+                Err(errno!(EAGAIN))
+            );
+
+            // Dequeue the first promoted `Command::OnewayTransaction` and free its buffer. The
+            // second buffered oneway transaction in `object.oneway_transactions` is scheduled onto
+            // `command_queue` and keeps `BINDER_FREEZE(enable=1)` returning `EAGAIN` until its
+            // buffer is also freed.
+            for i in 0..2 {
+                let oneway_buffer_addr = match receiver.proc.lock().command_queue.pop_front() {
+                    Some(QueuedCommand {
+                        command:
+                            Command::OnewayTransaction(TransactionData {
+                                buffers: TransactionBuffers { data, .. },
+                                ..
+                            }),
+                        ..
+                    }) => data.address,
+                    other => panic!("expected Command::OnewayTransaction, got {:?}", other),
+                };
+                receiver
+                    .proc
+                    .handle_free_buffer(oneway_buffer_addr)
+                    .expect("handle_free_buffer for thawed oneway transaction");
+
+                if i == 0 {
+                    assert_eq!(
+                        device.ioctl(
+                            current_task,
+                            &receiver.proc,
+                            None,
+                            uapi::BINDER_FREEZE,
+                            nonblocking_freeze_address.into(),
+                            Vec::new(),
+                        ),
+                        Err(errno!(EAGAIN))
+                    );
+                }
+            }
+
+            device
+                .ioctl(
+                    current_task,
+                    &receiver.proc,
+                    None,
+                    uapi::BINDER_FREEZE,
+                    nonblocking_freeze_address.into(),
+                    Vec::new(),
+                )
+                .expect("freezing process after freeing thawed oneway transaction buffers");
         })
         .await;
     }
@@ -5024,13 +5692,33 @@ pub mod tests {
 
             const FREEZE_NOTIFICATION_COOKIE: binder_uintptr_t = 0xAAAAAAAA;
 
-            // Register a death notification handler.
+            // Start an in-flight freeze, then thaw, then start a second in-flight freeze. A late
+            // `cancel_freeze` from the pre-thaw generation must not cancel the new freeze.
+            let stale_gen = owner.proc.freeze_state.lock().begin_freeze();
+            owner.proc.freeze_state.lock().thaw(&mut owner.proc.lock());
+            let active_gen = owner.proc.freeze_state.lock().begin_freeze();
+            assert!(
+                !owner.proc.freeze_state.lock().cancel_freeze(stale_gen, &mut owner.proc.lock())
+            );
+            assert!(owner.proc.freeze_state.lock().freeze_status.frozen);
+            assert_eq!(owner.proc.freeze_state.lock().freezing_count, 1);
+            assert!(
+                !owner.proc.freeze_state.lock().cancel_freeze(active_gen, &mut owner.proc.lock())
+            );
+            assert!(!owner.proc.freeze_state.lock().freeze_status.frozen);
+            assert_eq!(owner.proc.freeze_state.lock().freezing_count, 0);
+
+            // Start an in-flight freeze before subscribing. Until `notify_frozen()` commits the
+            // freeze, newly registered subscribers must observe `is_frozen: 0`.
+            owner.proc.freeze_state.lock().begin_freeze();
+
+            // Register a freeze notification handler.
             client
                 .proc
                 .handle_request_freeze_notification(handle, FREEZE_NOTIFICATION_COOKIE)
                 .expect("request freeze notification");
 
-            // The client process should acknowledge the request.
+            // The client process should acknowledge the request with the committed state (0).
             assert_matches!(
                 client.proc.lock().command_queue.pop_front(),
                 Some(QueuedCommand {
@@ -5039,7 +5727,7 @@ pub mod tests {
                 })
             );
 
-            let pending_notifications = owner.proc.freeze_state.lock().freeze();
+            let pending_notifications = owner.proc.freeze_state.lock().notify_frozen();
             for (proc, cmd) in pending_notifications {
                 proc.enqueue_command(cmd.into());
                 proc.release(current_task.kernel());
@@ -5113,12 +5801,11 @@ pub mod tests {
             }
 
             // Pretend the client thread is waiting for commands, so that it can be scheduled commands.
-            let fake_waiter = Waiter::new();
-            {
+            let _fake_waiter = {
                 let mut state = client.thread.lock();
                 state.registration = RegistrationState::Main;
-                state.command_queue.waiters.wait_async(&fake_waiter);
-            }
+                state.begin_wait()
+            };
 
             owner.proc.freeze_state.lock().freeze();
 
@@ -5284,13 +5971,11 @@ pub mod tests {
                 .insert_for_transaction(guard, &mut RefCountActions::default_released());
 
             // Make the receiver thread available for transactions.
-            let event = InterruptibleEvent::new();
-            let (mut fake_waiter, _guard) = SimpleWaiter::new(&event);
-            {
+            let _fake_waiter = {
                 let mut thread_state = receiver.thread.lock();
                 thread_state.registration = RegistrationState::Main;
-                thread_state.command_queue.waiters.wait_async_simple(&mut fake_waiter);
-            }
+                thread_state.begin_wait()
+            };
 
             // Construct a synchronous transaction to send from the sender to the receiver.
             const FIRST_TRANSACTION_CODE: u32 = 42;
@@ -5329,7 +6014,7 @@ pub mod tests {
             let proc_a = BinderProcessFixture::new_current(current_task, &device);
 
             let proc_b = BinderProcessFixture::new_current(current_task, &device);
-            let event = InterruptibleEvent::new();
+            let event = proc_b.thread.command_event.clone();
             let event_clone = event.clone();
 
             let proc_a_thread_handle =
@@ -5337,19 +6022,15 @@ pub mod tests {
             let (tx, rx) = std::sync::mpsc::channel();
 
             let blocked_thread = std::thread::spawn(move || {
-                let (fake_waiter, guard) = SimpleWaiter::new(&event_clone);
-                tx.send(fake_waiter).unwrap();
+                let guard = event_clone.begin_wait();
+                tx.send(()).unwrap();
                 guard
                     .block_until(Some(&proc_a_thread_handle), zx::MonotonicInstant::INFINITE)
                     .unwrap();
             });
 
-            let mut fake_waiter = rx.recv().unwrap();
-            {
-                let mut thread_state = proc_b.thread.lock();
-                thread_state.registration = RegistrationState::Main;
-                thread_state.command_queue.waiters.wait_async_simple(&mut fake_waiter);
-            }
+            rx.recv().unwrap();
+            proc_b.thread.lock().registration = RegistrationState::Main;
 
             let transaction = binder_transaction_data_sg {
                 transaction_data: binder_transaction_data {
@@ -5477,53 +6158,120 @@ pub mod tests {
                 .handle_transaction(&proc_a.context(current_task), &mut Vec::new(), transaction)
                 .expect("A sends transaction to B");
 
-            // 2. proc_a.thread sets its requeue_event as it prepares to wait for the reply.
-            let event = InterruptibleEvent::new();
-            let _requeue_registration =
-                RequeueEventRegistration::new(&proc_a.thread, event.clone());
-
-            // Simulate proc_a starting to wait.
-            let (tx, rx) = std::sync::mpsc::channel();
-            let event_clone = event.clone();
-            let blocked_thread = std::thread::spawn(move || {
-                let (thread_handle, _) = fuchsia_runtime::with_thread_self(|thread| {
-                    (
-                        thread.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
-                        thread.koid().unwrap(),
-                    )
+            // 2. Simulate proc_a.thread starting to wait for the reply via
+            //    `BinderThreadGuard::begin_wait_requeueable`.
+            let event = &proc_a.thread.command_event;
+            std::thread::scope(|s| {
+                let sender_thread = &proc_a.thread;
+                let (tx, rx) = std::sync::mpsc::channel();
+                s.spawn(move || {
+                    let guard = sender_thread.lock().begin_wait_requeueable();
+                    let thread_handle = fuchsia_runtime::with_thread_self(|thread| {
+                        thread.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap()
+                    });
+                    tx.send(thread_handle).unwrap();
+                    let _ = guard.block_until(None, zx::MonotonicInstant::INFINITE);
                 });
-                tx.send(thread_handle).unwrap();
-                let guard = event_clone.begin_wait();
-                let _ = guard.block_until(None, zx::MonotonicInstant::INFINITE);
+                scopeguard::defer! {
+                    event.notify();
+                }
+
+                // Wait until the sender thread is actively sleeping in the kernel on zx_futex_wait.
+                let blocked_thread_handle = rx.recv().unwrap();
+                while blocked_thread_handle.info().unwrap().state
+                    != zx::ThreadState::Blocked(zx::ThreadBlockType::Futex)
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+
+                // Verify before requeue that the event has no owner.
+                assert_eq!(event.get_owner(), None);
+
+                // 3. proc_b.thread (the worker thread) calls handle_thread_read to dequeue the
+                //    transaction from the process queue.
+                let read_buffer_addr = map_memory(current_task, UserAddress::default(), *PAGE_SIZE);
+                device
+                    .handle_thread_read(
+                        &proc_b.context(current_task),
+                        &UserBuffer { address: read_buffer_addr, length: *PAGE_SIZE as usize },
+                    )
+                    .expect("B reads transaction");
+
+                // 4. Verify that Zircon Futex Priority Inheritance ownership was transferred
+                //    synchronously to proc_b.thread!
+                let worker_koid = proc_b.thread.thread.koid().unwrap();
+                assert_eq!(event.get_owner(), Some(worker_koid));
             });
+        })
+        .await;
+    }
 
-            // Wait until blocked_thread is actively sleeping in the kernel on zx_futex_wait.
-            let blocked_thread_handle = rx.recv().unwrap();
-            while blocked_thread_handle.info().unwrap().state
-                != zx::ThreadState::Blocked(zx::ThreadBlockType::Futex)
-            {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
+    #[fuchsia::test]
+    async fn non_requeueable_wait_is_not_requeued_by_worker_thread() {
+        spawn_kernel_and_run(async |current_task| {
+            let device = BinderDevice::default();
+            let proc_a = BinderProcessFixture::new(current_task, &device);
+            let proc_b = BinderProcessFixture::new_current(current_task, &device);
 
-            // Verify before requeue that the event has no owner.
-            assert_eq!(event.get_owner(), None);
+            let transaction = binder_transaction_data_sg {
+                transaction_data: binder_transaction_data {
+                    target: binder_transaction_data__bindgen_ty_1 { handle: 0 },
+                    code: 42,
+                    ..binder_transaction_data::default()
+                },
+                buffers_size: 0,
+            };
 
-            // 3. proc_b.thread (the worker thread) calls handle_thread_read to dequeue the transaction from process queue.
-            let read_buffer_addr = map_memory(current_task, UserAddress::default(), *PAGE_SIZE);
+            let context_manager =
+                BinderObject::new_context_manager_marker(&proc_b.proc, BinderObjectFlags::empty());
+            *device.context_manager.lock() = Some(context_manager);
+
+            // End an earlier requeueable wait cycle first to verify requeue eligibility does not
+            // leak across wait cycles into a subsequent non-requeueable wait.
+            drop(proc_a.thread.lock().begin_wait_requeueable());
+
+            // 1. proc_a sends synchronous transaction to proc_b (queued on process queue).
             device
-                .handle_thread_read(
-                    &proc_b.context(current_task),
-                    &UserBuffer { address: read_buffer_addr, length: *PAGE_SIZE as usize },
-                )
-                .expect("B reads transaction");
+                .handle_transaction(&proc_a.context(current_task), &mut Vec::new(), transaction)
+                .expect("A sends transaction to B");
 
-            // 4. Verify that Zircon Futex Priority Inheritance ownership was transferred synchronously to proc_b.thread!
-            let worker_koid = proc_b.thread.thread.koid().unwrap();
-            assert_eq!(event.get_owner(), Some(worker_koid));
+            // 2. proc_a.thread blocks via non-requeueable `begin_wait()` (e.g. a known-target wait)
+            //    while its earlier transaction is still on proc_b's process queue.
+            let event = &proc_a.thread.command_event;
+            std::thread::scope(|s| {
+                let sender_thread = &proc_a.thread;
+                let (tx, rx) = std::sync::mpsc::channel();
+                s.spawn(move || {
+                    let guard = sender_thread.lock().begin_wait();
+                    let thread_handle = fuchsia_runtime::with_thread_self(|thread| {
+                        thread.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap()
+                    });
+                    tx.send(thread_handle).unwrap();
+                    let _ = guard.block_until(None, zx::MonotonicInstant::INFINITE);
+                });
+                scopeguard::defer! {
+                    event.notify();
+                }
 
-            // Clean up: notify event and join blocked thread.
-            event.notify();
-            blocked_thread.join().unwrap();
+                let blocked_thread_handle = rx.recv().unwrap();
+                while blocked_thread_handle.info().unwrap().state
+                    != zx::ThreadState::Blocked(zx::ThreadBlockType::Futex)
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+
+                // 3. proc_b.thread dequeues the transaction from the process queue and calls
+                //    `try_assign_owner`, which must be rejected because the wait is not requeueable.
+                let read_buffer_addr = map_memory(current_task, UserAddress::default(), *PAGE_SIZE);
+                device
+                    .handle_thread_read(
+                        &proc_b.context(current_task),
+                        &UserBuffer { address: read_buffer_addr, length: *PAGE_SIZE as usize },
+                    )
+                    .expect("B reads transaction");
+
+                assert_eq!(event.get_owner(), None);
+            });
         })
         .await;
     }
@@ -6188,9 +6936,9 @@ pub mod tests {
             // Clean up auxiliary tasks and threads.
             worker_thread.release(current_task.kernel());
             for churn_task in &churn_tasks {
-                churn_task.write().set_exit_status_if_not_already(ExitStatus::Exit(0));
+                churn_task.write().set_exiting(ExitStatus::Exit(0));
             }
-            worker_task.write().set_exit_status_if_not_already(ExitStatus::Exit(0));
+            worker_task.write().set_exiting(ExitStatus::Exit(0));
         })
         .await;
     }
@@ -6261,7 +7009,7 @@ pub mod tests {
             // waiting for the reply.
             client.proc.unregister_thread(client.task().kernel(), &client.thread.tid);
             let leader_task = client.task.take().expect("client leader task");
-            leader_task.write().set_exit_status_if_not_already(ExitStatus::Exit(0));
+            leader_task.write().set_exiting(ExitStatus::Exit(0));
             drop(leader_task);
 
             assert!(client.proc.key.get_task().is_err());
@@ -6280,7 +7028,7 @@ pub mod tests {
             assert_received_fd_reply(&aux_thread, &aux_task, FD_COOKIE, &file);
 
             aux_thread.release(current_task.kernel());
-            aux_task.write().set_exit_status_if_not_already(ExitStatus::Exit(0));
+            aux_task.write().set_exiting(ExitStatus::Exit(0));
         })
         .await;
     }
@@ -7219,11 +7967,9 @@ pub mod tests {
         const HOOKS_TESTS_BINARY_POLICY: &[u8] =
             include_bytes!("../../lib/selinux/testdata/micro_policies/hooks_tests_policy");
 
-        spawn_kernel_with_selinux_and_run(async |current_task, security_server| {
-            security_server
-                .load_policy(HOOKS_TESTS_BINARY_POLICY.to_vec())
-                .expect("policy load failed");
-            starnix_core::security::selinuxfs_policy_loaded(current_task);
+        spawn_kernel_with_selinux_and_run(async |current_task, _security_server| {
+            security::selinuxfs_load_policy(current_task, HOOKS_TESTS_BINARY_POLICY.to_vec())
+                .expect("load policy");
 
             let (memory, secctx_buffer) = execute_security_context_transaction(current_task);
 
@@ -7497,12 +8243,17 @@ pub mod tests {
                 assert_eq!(proc_state.auxiliary_threads_count, 1);
                 assert!(!proc_state.should_request_thread(&proc_fixture.thread));
             }
+            // The auxiliary thread waits for work, which queues it in `available_threads`, then
+            // stops waiting without being popped (e.g. when it is kicked) before exiting.
+            let aux_wait = aux_thread.lock().begin_wait();
+            drop(aux_wait);
             let first_weak = WeakRef::<BinderThread>::from(&aux_thread);
             aux_thread.release(current_task.kernel());
 
-            // Exiting the auxiliary thread must decrement `auxiliary_threads_count` so a new
-            // auxiliary thread can be requested, and re-registering the same task must allocate a
-            // fresh `BinderThread` in `Unregistered` state.
+            // Exiting the auxiliary thread must decrement `auxiliary_threads_count` and remove its
+            // entry from `available_threads` so a new auxiliary thread can be requested, and
+            // re-registering the same task must allocate a fresh `BinderThread` in `Unregistered`
+            // state.
             proc_fixture.proc.unregister_thread(current_task.kernel(), &aux_task.tid);
             assert!(first_weak.upgrade().is_none());
             {
@@ -7520,7 +8271,7 @@ pub mod tests {
 
             reregistered.release(current_task.kernel());
             proc_fixture.proc.unregister_thread(current_task.kernel(), &aux_task.tid);
-            aux_task.write().set_exit_status_if_not_already(ExitStatus::Exit(0));
+            aux_task.write().set_exiting(ExitStatus::Exit(0));
         })
         .await;
     }
@@ -7588,7 +8339,7 @@ pub mod tests {
 
             assert_eq!(proc_fixture.proc.lock().auxiliary_threads_count, 0);
             for worker_task in worker_tasks {
-                worker_task.write().set_exit_status_if_not_already(ExitStatus::Exit(0));
+                worker_task.write().set_exiting(ExitStatus::Exit(0));
             }
         })
         .await;
@@ -7725,9 +8476,7 @@ pub mod tests {
 
             // The thread then blocks in `handle_thread_read` while its poll registration is still
             // in place, which makes it available.
-            let event = InterruptibleEvent::new();
-            let (mut reader_waiter, reader_guard) = SimpleWaiter::new(&event);
-            receiver.thread.lock().command_queue.wait_async_simple(&mut reader_waiter);
+            let reader_guard = receiver.thread.lock().begin_wait();
             assert!(receiver.thread.lock().is_available());
 
             // Work scheduled on the thread must wake the blocked reader, rather than being absorbed
@@ -7880,6 +8629,686 @@ pub mod tests {
                 .handle_free_buffer(second_buffer_addr)
                 .expect("handle_free_buffer second transaction");
             assert!(!target_object.lock().handling_oneway_transaction);
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn enqueue_command_skips_dead_available_thread_entries() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let device = BinderDevice::default();
+            let receiver = BinderProcessFixture::new(current_task, &device);
+
+            // Make the receiver thread available; dropping the guard queues it.
+            receiver.thread.lock().registration = RegistrationState::Main;
+            let reader_guard = receiver.thread.lock().begin_wait();
+
+            // Queue a dead WeakRef on top of the receiver thread. `unregister_thread` removes the
+            // entry of the thread that it releases, so queue it once the thread is released.
+            let dead_task = create_task(kernel, "dead");
+            let dead = receiver.proc.find_or_register_thread(&dead_task.task).expect("register");
+            let dead_weak = dead.weak_self.clone();
+            dead.release(kernel);
+            receiver.proc.unregister_thread(kernel, &dead_task.tid);
+            receiver.proc.available_threads.push(dead_weak);
+
+            // The command must skip the dead entry and be delivered to the live thread.
+            let target =
+                receiver.proc.enqueue_command(Command::DeadBinder(1).into()).expect("thread");
+            assert_eq!(TempRef::as_ptr(&target), OwnedRef::as_ptr(&receiver.thread));
+            drop(target);
+            assert!(receiver.proc.available_threads.is_empty());
+            assert_eq!(reader_guard.block_until(None, zx::MonotonicInstant::ZERO), Ok(()));
+
+            // Queue a live thread that is no longer waiting for work (`begin_wait` not called).
+            // `enqueue_command` must skip it, fall back to the process command queue, and leave
+            // `available_threads` empty.
+            receiver.proc.available_threads.push(receiver.thread.weak_self.clone());
+            assert!(receiver.proc.enqueue_command(Command::DeadBinder(2).into()).is_none());
+            assert!(receiver.proc.available_threads.is_empty());
+            assert_eq!(receiver.proc.lock().command_queue.len(), 1);
+
+            dead_task.write().set_exiting(ExitStatus::Exit(0));
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn enqueue_command_prefers_most_recently_available_thread() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let device = BinderDevice::default();
+            let receiver = BinderProcessFixture::new(current_task, &device);
+            // Enqueues a command, and returns the thread that it is delivered to.
+            let deliver = |cookie| {
+                let thread = receiver.proc.enqueue_command(Command::DeadBinder(cookie).into());
+                TempRef::as_ptr(&thread.expect("thread"))
+            };
+
+            // The receiver thread becomes available first, then a second thread, which gets the
+            // first command.
+            receiver.thread.lock().registration = RegistrationState::Main;
+            let first_guard = receiver.thread.lock().begin_wait();
+            let second_task = create_task(kernel, "second");
+            let second =
+                receiver.proc.find_or_register_thread(&second_task.task).expect("register");
+            second.lock().registration = RegistrationState::Main;
+            let second_guard = second.lock().begin_wait();
+            assert_eq!(deliver(1), OwnedRef::as_ptr(&second));
+            assert_eq!(second_guard.block_until(None, zx::MonotonicInstant::ZERO), Ok(()));
+
+            // The second thread reads its command and waits again, on top of the receiver thread.
+            // Then the receiver thread stops waiting without being popped and without its state
+            // being locked, as when its wait is interrupted, and waits again. This queues it on
+            // top, once, rather than leaving it below the second thread.
+            assert!(second.lock().command_queue.pop_front().is_some());
+            let second_guard = second.lock().begin_wait();
+            drop(first_guard);
+            let first_guard = receiver.thread.lock().begin_wait();
+            assert_eq!(deliver(2), OwnedRef::as_ptr(&receiver.thread));
+            assert_eq!(deliver(3), OwnedRef::as_ptr(&second));
+            assert!(receiver.proc.available_threads.is_empty());
+            assert_eq!(first_guard.block_until(None, zx::MonotonicInstant::ZERO), Ok(()));
+            assert_eq!(second_guard.block_until(None, zx::MonotonicInstant::ZERO), Ok(()));
+
+            second.release(kernel);
+            receiver.proc.unregister_thread(kernel, &second_task.tid);
+            second_task.write().set_exiting(ExitStatus::Exit(0));
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn interrupted_wait_removes_available_thread_entry() {
+        spawn_kernel_and_run(async |current_task| {
+            let device = BinderDevice::default();
+            let receiver = BinderProcessFixture::new(current_task, &device);
+            receiver.thread.lock().registration = RegistrationState::Main;
+
+            // The receiver thread is queued when it starts waiting for work, and its wait is then
+            // interrupted by a pending signal. It must not stay queued, which would make the
+            // process look like it has an idle thread.
+            send_standard_signal(&receiver.task().task, SignalInfo::kernel(SIGUSR1));
+            let address = map_memory(receiver.task(), UserAddress::default(), *PAGE_SIZE);
+            let read_buf = UserBuffer { address, length: *PAGE_SIZE as usize };
+            assert_eq!(
+                device.handle_thread_read(&receiver.context(current_task), &read_buf),
+                Err(errno!(EINTR))
+            );
+            assert!(receiver.proc.available_threads.is_empty());
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn concurrent_available_threads_push_and_pop() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let device = BinderDevice::default();
+            let receiver = BinderProcessFixture::new(current_task, &device);
+
+            const NUM_PRODUCERS: usize = 4;
+            const NUM_CONSUMERS: usize = 4;
+            const ITEMS_PER_PRODUCER: usize = 50;
+            const TOTAL_ITEMS: usize = NUM_PRODUCERS * ITEMS_PER_PRODUCER;
+
+            let threads: Vec<OwnedRef<BinderThread>> = (0..TOTAL_ITEMS)
+                .map(|_| {
+                    BinderThread::new(
+                        &receiver.proc,
+                        receiver.thread.tid.clone(),
+                        Arc::new(zx::Thread::invalid()),
+                    )
+                })
+                .collect();
+
+            let producer_batches: Vec<Vec<WeakRef<BinderThread>>> = threads
+                .chunks(ITEMS_PER_PRODUCER)
+                .map(|chunk| chunk.iter().map(|t| t.weak_self.clone()).collect())
+                .collect();
+
+            let barrier = Arc::new(Barrier::new(NUM_PRODUCERS + NUM_CONSUMERS));
+            let remaining = Arc::new(AtomicUsize::new(TOTAL_ITEMS));
+            let mut producer_handles = Vec::new();
+            let mut consumer_handles = Vec::new();
+
+            for batch in producer_batches {
+                let queue = receiver.proc.available_threads.clone();
+                let barrier = barrier.clone();
+                producer_handles.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    for weak_thread in batch {
+                        queue.push(weak_thread);
+                    }
+                }));
+            }
+
+            for _ in 0..NUM_CONSUMERS {
+                let queue = receiver.proc.available_threads.clone();
+                let barrier = barrier.clone();
+                let remaining = remaining.clone();
+                consumer_handles.push(std::thread::spawn(move || {
+                    let mut popped = Vec::new();
+                    barrier.wait();
+                    while remaining.load(Ordering::Acquire) > 0 {
+                        if let Some(weak_thread) = queue.pop() {
+                            assert!(weak_thread.upgrade().is_some());
+                            popped.push(weak_thread.as_ptr() as usize);
+                            remaining.fetch_sub(1, Ordering::Release);
+                        } else {
+                            std::thread::yield_now();
+                        }
+                    }
+                    popped
+                }));
+            }
+
+            for handle in producer_handles {
+                handle.join().expect("producer thread panicked");
+            }
+            let mut popped_ptrs = Vec::new();
+            for handle in consumer_handles {
+                popped_ptrs.extend(handle.join().expect("consumer thread panicked"));
+            }
+
+            assert!(receiver.proc.available_threads.is_empty());
+            assert!(receiver.proc.available_threads.pop().is_none());
+
+            let mut expected_ptrs: Vec<usize> =
+                threads.iter().map(|t| t.weak_self.as_ptr() as usize).collect();
+            expected_ptrs.sort_unstable();
+            popped_ptrs.sort_unstable();
+            assert_eq!(popped_ptrs, expected_ptrs);
+
+            for thread in threads {
+                thread.release(kernel);
+            }
+        })
+        .await;
+    }
+
+    /// Reproduces the multi-threaded Binder `available_threads` contention pattern where
+    /// looper threads repeatedly push themselves onto `available_threads` via interrupted
+    /// `BC_DEAD_BINDER_DONE` + `BINDER_GET_EXTENDED_ERROR` write/read cycles while unlocked
+    /// `BC_CLEAR_DEATH_NOTIFICATION` readers and futex-synchronized popper waves concurrently
+    /// drain `available_threads`, verifying that pusher progress never livelocks.
+    #[fuchsia::test]
+    async fn available_threads_push_pop_wave_does_not_livelock() {
+        #[repr(C, packed)]
+        #[derive(Copy, Clone, IntoBytes, FromBytes, Immutable, KnownLayout)]
+        struct BcClearDeathPkt {
+            cmd: u32,
+            handle: u32,
+            cookie: u64,
+        }
+
+        #[repr(C, packed)]
+        #[derive(Copy, Clone, IntoBytes, FromBytes, Immutable, KnownLayout)]
+        struct BcDeadBinderDonePkt {
+            cmd: u32,
+            cookie: u64,
+        }
+
+        const NUM_PUSHERS: usize = 10;
+        const MIN_POPPERS: usize = 6;
+        const NUM_SIGNALERS: usize = 2;
+        const WAVE_US: u64 = 20;
+        const BURST_POPS: usize = 2;
+        const MAX_BURST_POPS: usize = 16;
+        const TOTAL_TICKS: usize = 80;
+        const STALL_THRESHOLD_TICKS: usize = 10;
+        const TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+        const CLEAR_DEATH_READ_BUF_SIZE: u64 = 12;
+        const PUSHER_READ_BUF_SIZE: u64 = 4096;
+        const BWR_OFFSET: u64 = 0;
+        const EE_OFFSET: u64 = 64;
+        const WRITE_BUF_OFFSET: u64 = 128;
+        const READ_BUF_OFFSET: u64 = 512;
+
+        let num_cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        let num_poppers = (num_cpus + 2).max(MIN_POPPERS);
+
+        let mut role_overrides = RoleOverrides::new();
+        role_overrides.add(".*", "Blocking Thread", None, "fuchsia.memory-monitor.main");
+        role_overrides.add(".*", "RenderThread", None, "fuchsia.scenic.main");
+        role_overrides.add(
+            ".*",
+            "signaler_wave",
+            None,
+            "fuchsia.devices.usb.drivers.xhci.interrupter",
+        );
+        role_overrides.add(".*", "signaler_spin", None, "fuchsia.memory-monitor.main");
+        role_overrides.add(".*", "watchdog", None, "fuchsia.devices.usb.drivers.xhci.interrupter");
+        role_overrides.add(".*", "demoted", None, "fuchsia.cobalt.main");
+        role_overrides.add(".*", ".*", None, "fuchsia.async.loop");
+        let scheduler =
+            SchedulerManager::new(role_overrides.build().expect("build role overrides"));
+
+        spawn_kernel_with_scheduler_and_run_sync(scheduler, move |current_task| {
+            current_task.thread_group().write().did_exec = true;
+            current_task.set_command_name(TaskCommand::new(b"watchdog"));
+            let _ = current_task.sync_scheduler_state_to_role();
+
+            let device = BinderDevice::default();
+            let receiver = BinderProcessFixture::new_current(current_task, &device);
+
+            let stop = Arc::new(AtomicBool::new(false));
+            let pushes = Arc::new(AtomicUsize::new(0));
+            let pops = Arc::new(AtomicUsize::new(0));
+            let wake_epoch = Arc::new(zx::Futex::new(0));
+            let sig_loops: Arc<[AtomicUsize; NUM_SIGNALERS]> =
+                Arc::new(std::array::from_fn(|_| AtomicUsize::new(0)));
+            let pusher_tasks: Arc<[OnceLock<Weak<Task>>; NUM_PUSHERS]> =
+                Arc::new(std::array::from_fn(|_| OnceLock::new()));
+            let popper_tasks: Arc<Vec<OnceLock<Weak<Task>>>> =
+                Arc::new((0..num_poppers).map(|_| OnceLock::new()).collect());
+            let start_barrier =
+                Arc::new(Barrier::new(1 + NUM_SIGNALERS + NUM_PUSHERS + num_poppers));
+
+            let clone_flags = (uapi::CLONE_VM
+                | uapi::CLONE_FS
+                | uapi::CLONE_FILES
+                | uapi::CLONE_SIGHAND
+                | uapi::CLONE_THREAD) as u64;
+            let mut worker_done_rxs =
+                Vec::with_capacity(NUM_SIGNALERS + NUM_PUSHERS + num_poppers);
+
+            for idx in 0..NUM_SIGNALERS {
+                let task_builder = current_task
+                    .clone_task(
+                        clone_flags,
+                        None,
+                        UserRef::default(),
+                        UserRef::default(),
+                        UserRef::default(),
+                    )
+                    .expect("clone signaler task");
+                let stop = stop.clone();
+                let wake_epoch = wake_epoch.clone();
+                let sig_loops = sig_loops.clone();
+                let pusher_tasks = pusher_tasks.clone();
+                let start_barrier = start_barrier.clone();
+                let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+                worker_done_rxs.push(done_rx);
+
+                execute_task(
+                    task_builder,
+                    move |worker_task| {
+                        let role_cmd = if idx == 0 {
+                            TaskCommand::new(b"signaler_wave")
+                        } else {
+                            TaskCommand::new(b"signaler_spin")
+                        };
+                        worker_task.set_command_name(role_cmd);
+                        let _ = worker_task.sync_scheduler_state_to_role();
+
+                        start_barrier.wait();
+                        while !stop.load(Ordering::Relaxed) {
+                            sig_loops[idx].fetch_add(1, Ordering::Relaxed);
+                            if idx == 0 {
+                                wake_epoch.fetch_add(1, Ordering::Release);
+                                wake_epoch.wake_all();
+                                if WAVE_US > 0 {
+                                    std::thread::sleep(std::time::Duration::from_micros(WAVE_US));
+                                }
+                            } else {
+                                for slot in pusher_tasks.iter() {
+                                    if let Some(task) = slot.get().and_then(Weak::upgrade) {
+                                        task.read().wake();
+                                    }
+                                }
+                                std::thread::yield_now();
+                            }
+                        }
+                        wake_epoch.fetch_add(1, Ordering::Release);
+                        wake_epoch.wake_all();
+
+                        worker_task.write().set_exiting(ExitStatus::Exit(0));
+                        let thread_handle = fuchsia_runtime::with_thread_self(|thread| {
+                            thread.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup thread")
+                        });
+                        done_tx.send(thread_handle).expect("send signaler done");
+                        Err(errno!(EHWPOISON))
+                    },
+                    |_| {},
+                )
+                .expect("execute signaler task");
+            }
+
+            for idx in 0..NUM_PUSHERS {
+                let base_addr = map_memory(current_task, UserAddress::default(), 2 * *PAGE_SIZE);
+                let task_builder = current_task
+                    .clone_task(
+                        clone_flags,
+                        None,
+                        UserRef::default(),
+                        UserRef::default(),
+                        UserRef::default(),
+                    )
+                    .expect("clone pusher task");
+                let device = device.clone();
+                let proc = OwnedRef::share(&receiver.proc);
+                let stop = stop.clone();
+                let pushes = pushes.clone();
+                let pops = pops.clone();
+                let pusher_tasks = pusher_tasks.clone();
+                let start_barrier = start_barrier.clone();
+                let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+                worker_done_rxs.push(done_rx);
+
+                execute_task(
+                    task_builder,
+                    move |worker_task| {
+                        worker_task.set_command_name(TaskCommand::new(b"Blocking Thread"));
+                        let _ = worker_task.sync_scheduler_state_to_role();
+
+                        let bwr_addr = (base_addr + BWR_OFFSET).expect("bwr_addr");
+                        let ee_addr = (base_addr + EE_OFFSET).expect("ee_addr");
+                        let write_buf_addr =
+                            (base_addr + WRITE_BUF_OFFSET).expect("write_buf_addr");
+                        let read_buf_addr = (base_addr + READ_BUF_OFFSET).expect("read_buf_addr");
+                        let bwr_ref = UserRef::<uapi::binder_write_read>::new(bwr_addr);
+
+                        let enter_cmd: u32 = uapi::binder_driver_command_protocol_BC_ENTER_LOOPER;
+                        worker_task
+                            .write_object(UserRef::<u32>::new(write_buf_addr), &enter_cmd)
+                            .expect("write BC_ENTER_LOOPER");
+                        let enter_bwr = uapi::binder_write_read {
+                            write_size: std::mem::size_of::<u32>() as u64,
+                            write_consumed: 0,
+                            write_buffer: write_buf_addr.ptr() as u64,
+                            read_size: 0,
+                            read_consumed: 0,
+                            read_buffer: 0,
+                        };
+                        worker_task
+                            .write_object(bwr_ref, &enter_bwr)
+                            .expect("write enter_looper bwr");
+                        device
+                            .ioctl(
+                                worker_task,
+                                &proc,
+                                None,
+                                uapi::BINDER_WRITE_READ,
+                                bwr_addr.into(),
+                                Vec::new(),
+                            )
+                            .expect("enter_looper ioctl");
+
+                        if (idx % 3) != 2 {
+                            let pkt = BcDeadBinderDonePkt {
+                                cmd: uapi::binder_driver_command_protocol_BC_DEAD_BINDER_DONE,
+                                cookie: 0,
+                            };
+                            worker_task
+                                .write_object(
+                                    UserRef::<BcDeadBinderDonePkt>::new(write_buf_addr),
+                                    &pkt,
+                                )
+                                .expect("write BC_DEAD_BINDER_DONE");
+                        } else {
+                            let pkt = BcClearDeathPkt {
+                                cmd:
+                                    uapi::binder_driver_command_protocol_BC_CLEAR_DEATH_NOTIFICATION,
+                                handle: 0,
+                                cookie: 0,
+                            };
+                            worker_task
+                                .write_object(
+                                    UserRef::<BcClearDeathPkt>::new(write_buf_addr),
+                                    &pkt,
+                                )
+                                .expect("write BC_CLEAR_DEATH_NOTIFICATION");
+                        }
+
+                        let _ = pusher_tasks[idx].set(Arc::downgrade(&worker_task.task));
+                        send_standard_signal(&worker_task.task, SignalInfo::kernel(SIGUSR1));
+                        start_barrier.wait();
+
+                        while !stop.load(Ordering::Relaxed) {
+                            if (idx % 3) != 2 {
+                                loop {
+                                    let bwr = uapi::binder_write_read {
+                                        write_size: std::mem::size_of::<BcDeadBinderDonePkt>()
+                                            as u64,
+                                        write_consumed: 0,
+                                        write_buffer: write_buf_addr.ptr() as u64,
+                                        read_size: PUSHER_READ_BUF_SIZE,
+                                        read_consumed: 0,
+                                        read_buffer: read_buf_addr.ptr() as u64,
+                                    };
+                                    worker_task.write_object(bwr_ref, &bwr).expect("write push bwr");
+                                    let _ = device.ioctl(
+                                        worker_task,
+                                        &proc,
+                                        None,
+                                        uapi::BINDER_WRITE_READ,
+                                        bwr_addr.into(),
+                                        Vec::new(),
+                                    );
+                                    let out =
+                                        worker_task.read_object(bwr_ref).expect("read push bwr");
+                                    if out.read_consumed == 0 || stop.load(Ordering::Relaxed) {
+                                        break;
+                                    }
+                                }
+                                let _ = device.ioctl(
+                                    worker_task,
+                                    &proc,
+                                    None,
+                                    uapi::BINDER_GET_EXTENDED_ERROR,
+                                    ee_addr.into(),
+                                    Vec::new(),
+                                );
+                                pushes.fetch_add(1, Ordering::Relaxed);
+                            } else {
+                                let bwr = uapi::binder_write_read {
+                                    write_size: std::mem::size_of::<BcClearDeathPkt>() as u64,
+                                    write_consumed: 0,
+                                    write_buffer: write_buf_addr.ptr() as u64,
+                                    read_size: CLEAR_DEATH_READ_BUF_SIZE,
+                                    read_consumed: 0,
+                                    read_buffer: read_buf_addr.ptr() as u64,
+                                };
+                                worker_task
+                                    .write_object(bwr_ref, &bwr)
+                                    .expect("write pop_and_wake bwr");
+                                let _ = device.ioctl(
+                                    worker_task,
+                                    &proc,
+                                    None,
+                                    uapi::BINDER_WRITE_READ,
+                                    bwr_addr.into(),
+                                    Vec::new(),
+                                );
+                                pops.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+
+                        proc.unregister_thread(worker_task.kernel(), &worker_task.tid);
+                        proc.release(worker_task.kernel());
+                        worker_task.write().set_exiting(ExitStatus::Exit(0));
+                        let thread_handle = fuchsia_runtime::with_thread_self(|thread| {
+                            thread.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup thread")
+                        });
+                        done_tx.send(thread_handle).expect("send pusher done");
+                        Err(errno!(EHWPOISON))
+                    },
+                    |_| {},
+                )
+                .expect("execute pusher task");
+            }
+
+            for idx in 0..num_poppers {
+                let base_addr = map_memory(current_task, UserAddress::default(), *PAGE_SIZE);
+                let task_builder = current_task
+                    .clone_task(
+                        clone_flags,
+                        None,
+                        UserRef::default(),
+                        UserRef::default(),
+                        UserRef::default(),
+                    )
+                    .expect("clone popper task");
+                let device = device.clone();
+                let proc = OwnedRef::share(&receiver.proc);
+                let stop = stop.clone();
+                let pops = pops.clone();
+                let wake_epoch = wake_epoch.clone();
+                let popper_tasks = popper_tasks.clone();
+                let start_barrier = start_barrier.clone();
+                let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+                worker_done_rxs.push(done_rx);
+
+                execute_task(
+                    task_builder,
+                    move |worker_task| {
+                        worker_task.set_command_name(TaskCommand::new(b"RenderThread"));
+                        let _ = worker_task.sync_scheduler_state_to_role();
+                        let _ = popper_tasks[idx].set(Arc::downgrade(&worker_task.task));
+
+                        let bwr_addr = (base_addr + BWR_OFFSET).expect("bwr_addr");
+                        let write_buf_addr =
+                            (base_addr + WRITE_BUF_OFFSET).expect("write_buf_addr");
+                        let bwr_ref = UserRef::<uapi::binder_write_read>::new(bwr_addr);
+
+                        let write_pkts: [BcClearDeathPkt; MAX_BURST_POPS] =
+                            std::array::from_fn(|i| BcClearDeathPkt {
+                                cmd:
+                                    uapi::binder_driver_command_protocol_BC_CLEAR_DEATH_NOTIFICATION,
+                                handle: 0,
+                                cookie: i as u64,
+                            });
+                        worker_task
+                            .write_object(
+                                UserRef::<[BcClearDeathPkt; MAX_BURST_POPS]>::new(write_buf_addr),
+                                &write_pkts,
+                            )
+                            .expect("write popper packets");
+
+                        start_barrier.wait();
+
+                        let mut last_epoch = wake_epoch.load(Ordering::Acquire);
+                        while !stop.load(Ordering::Relaxed) {
+                            let cur_epoch = wake_epoch.load(Ordering::Acquire);
+                            if cur_epoch == last_epoch {
+                                let _ =
+                                    wake_epoch.wait(cur_epoch, None, zx::MonotonicInstant::INFINITE);
+                                continue;
+                            }
+                            last_epoch = cur_epoch;
+                            for _ in 0..BURST_POPS {
+                                if stop.load(Ordering::Relaxed) {
+                                    break;
+                                }
+                                let count = 1usize.min(MAX_BURST_POPS);
+                                let bwr = uapi::binder_write_read {
+                                    write_size: (count * std::mem::size_of::<BcClearDeathPkt>())
+                                        as u64,
+                                    write_consumed: 0,
+                                    write_buffer: write_buf_addr.ptr() as u64,
+                                    read_size: 0,
+                                    read_consumed: 0,
+                                    read_buffer: 0,
+                                };
+                                worker_task
+                                    .write_object(bwr_ref, &bwr)
+                                    .expect("write pop_write_only bwr");
+                                let _ = device.ioctl(
+                                    worker_task,
+                                    &proc,
+                                    None,
+                                    uapi::BINDER_WRITE_READ,
+                                    bwr_addr.into(),
+                                    Vec::new(),
+                                );
+                                pops.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+
+                        proc.unregister_thread(worker_task.kernel(), &worker_task.tid);
+                        proc.release(worker_task.kernel());
+                        worker_task.write().set_exiting(ExitStatus::Exit(0));
+                        let thread_handle = fuchsia_runtime::with_thread_self(|thread| {
+                            thread.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup thread")
+                        });
+                        done_tx.send(thread_handle).expect("send popper done");
+                        Err(errno!(EHWPOISON))
+                    },
+                    |_| {},
+                )
+                .expect("execute popper task");
+            }
+
+            start_barrier.wait();
+
+            let mut last_pushes = 0;
+            let mut last_pops = 0;
+            let mut stalled_ticks = 0;
+            let mut livelock_detected = false;
+
+            for _tick in 1..=TOTAL_TICKS {
+                std::thread::sleep(TICK_INTERVAL);
+                let cur_pushes = pushes.load(Ordering::Relaxed);
+                let cur_pops = pops.load(Ordering::Relaxed);
+                if cur_pushes == last_pushes && cur_pushes > 0 {
+                    stalled_ticks += 1;
+                    if stalled_ticks == STALL_THRESHOLD_TICKS {
+                        livelock_detected = true;
+                        break;
+                    }
+                } else {
+                    stalled_ticks = 0;
+                }
+                last_pushes = cur_pushes;
+                last_pops = cur_pops;
+            }
+
+            stop.store(true, Ordering::Release);
+            if livelock_detected {
+                // Rescue livelocked popper threads by demoting their scheduler role to
+                // `fuchsia.cobalt.main` (Fair priority 0) so preempted pusher threads can complete
+                // in-flight queue operations and all worker threads can terminate cleanly.
+                for slot in popper_tasks.iter() {
+                    if let Some(task) = slot.get().and_then(Weak::upgrade) {
+                        task.set_command_name(TaskCommand::new(b"demoted"));
+                        let _ = task.sync_scheduler_state_to_role();
+                    }
+                }
+            }
+            wake_epoch.fetch_add(1, Ordering::Release);
+            wake_epoch.wake_all();
+            receiver.proc.lock().closed = true;
+            receiver.proc.kick_all_threads();
+            for slot in pusher_tasks.iter() {
+                if let Some(task) = slot.get().and_then(Weak::upgrade) {
+                    send_standard_signal(&task, SignalInfo::kernel(SIGUSR1));
+                }
+            }
+
+            for done_rx in worker_done_rxs {
+                let thread_handle: zx::Thread = done_rx.recv().expect("worker task finished");
+                thread_handle
+                    .wait_one(zx::Signals::THREAD_TERMINATED, zx::MonotonicInstant::INFINITE)
+                    .expect("wait worker thread terminated");
+            }
+
+            assert!(
+                !livelock_detected,
+                "livelock detected: pushes stalled at {last_pushes} (pops={last_pops}, wake_epoch={}, sig_loops=({}, {}))",
+                wake_epoch.load(Ordering::Relaxed),
+                sig_loops[0].load(Ordering::Relaxed),
+                sig_loops[1].load(Ordering::Relaxed),
+            );
+            assert!(
+                pushes.load(Ordering::Relaxed) > 0,
+                "expected pusher threads to make progress"
+            );
+            assert!(
+                pops.load(Ordering::Relaxed) > 0,
+                "expected popper threads to make progress"
+            );
         })
         .await;
     }

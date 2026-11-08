@@ -9,7 +9,6 @@ connectivity_policy_e2e_tests_for_staging = []
 connectivity_policy_e2e_tests_for_postsubmit = [
   "//src/connectivity/policy/tests/e2e:dhcpv4_duplicate_address_test",
   "//src/connectivity/policy/tests/e2e:dhcpv4_interop_basic_test",
-  "//src/connectivity/policy/tests/e2e:dhcpv4_interop_combinatorial_options_test",
 ]
 
 # End-to-end tests that run in blocking presubmit CQ as well as CI.

@@ -547,7 +547,7 @@ fn name_to_scope_id_checked(name: &str) -> Result<u32, NetExtError> {
 /// assert_eq!(port, Some(1234));
 /// ```
 ///
-/// Works with both IPv6 and IPv4 addresses.
+/// Works with both IPv6 and IPv4 addresses (only IPv6 addresses may include a `%scope` suffix).
 ///
 /// Returns:
 ///
@@ -581,8 +581,13 @@ pub fn parse_address_parts(
         (addr, None)
     };
 
-    let addr =
-        addr.parse::<IpAddr>().map_err(|e| NetExtError::ParseAddress(addr.to_string(), e))?;
+    let addr = if scope.is_some() {
+        IpAddr::V6(
+            addr.parse::<Ipv6Addr>().map_err(|e| NetExtError::ParseAddress(addr.to_string(), e))?,
+        )
+    } else {
+        addr.parse::<IpAddr>().map_err(|e| NetExtError::ParseAddress(addr.to_string(), e))?
+    };
     let port = match port {
         Some(port) => {
             Some(port.parse::<u16>().map_err(|e| NetExtError::ParsePort(port.to_string(), e))?)
@@ -1001,6 +1006,16 @@ mod tests {
     #[test]
     fn test_parse_address_parts_ipv4_in_brackets() {
         assert!(parse_address_parts("[8.8.8.8%eno1]:1234").is_err());
+    }
+
+    #[test]
+    fn test_parse_address_parts_ipv4_with_scope_is_err() {
+        for input in ["8.8.8.8%eno1", "127.0.0.1%lo", "127.0.0.1%eno1:1234"] {
+            assert!(
+                matches!(parse_address_parts(input), Err(NetExtError::ParseAddress(_, _))),
+                "expected ParseAddress error for {input}"
+            );
+        }
     }
 
     #[test]

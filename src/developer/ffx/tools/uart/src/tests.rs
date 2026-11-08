@@ -11,7 +11,9 @@
 use argh::FromArgs;
 
 use super::*;
-use crate::args::{ConnectCommand, DisconnectCommand, ListCommand, ProbeCommand, StatusCommand};
+use crate::args::{
+    ConnectCommand, DisconnectCommand, DoctorCommand, ListCommand, ProbeCommand, StatusCommand,
+};
 use ffx_writer::TestBuffers;
 use fho::FfxMain;
 use fuchsia_async as _;
@@ -69,7 +71,6 @@ fn make_connect_cmd(baud: u32, reconnect: bool) -> UartSubCommand {
     UartSubCommand::Connect(ConnectCommand {
         no_retry: false,
         baud: NonZeroU32::new(baud),
-        socket: None,
         reconnect,
         protocol: None,
     })
@@ -118,6 +119,10 @@ async fn run_tool_with_format(
             let machine_writer = ffx_writer::VerifiedMachineWriter::new_test(format, &buffers);
             tool.main(machine_writer).await?;
         }
+        UartSubCommand::Doctor(cmd) => {
+            let tool = DoctorTool { cmd, context: context_tool };
+            tool.main(writer).await?;
+        }
     }
     Ok((buffers.stdout.into_string(), buffers.stderr.into_string()))
 }
@@ -153,7 +158,6 @@ async fn test_connect() {
     let sub_cmd = UartSubCommand::Connect(ConnectCommand {
         no_retry: false,
         baud: NonZeroU32::new(115200),
-        socket: None,
         reconnect: false,
         protocol: None,
     });
@@ -176,7 +180,6 @@ async fn test_disconnect() {
     let conn_cmd = UartSubCommand::Connect(ConnectCommand {
         no_retry: false,
         baud: NonZeroU32::new(115200),
-        socket: None,
         reconnect: false,
         protocol: None,
     });
@@ -204,7 +207,6 @@ fn test_parse_connect_success() {
         UartSubCommand::Connect(ConnectCommand {
             no_retry: false,
             baud: NonZeroU32::new(9600),
-            socket: None,
             reconnect: false,
             protocol: None,
         })
@@ -220,7 +222,6 @@ fn test_parse_connect_default_baud() {
         UartSubCommand::Connect(ConnectCommand {
             no_retry: false,
             baud: None,
-            socket: None,
             reconnect: false,
             protocol: None,
         })
@@ -413,7 +414,6 @@ async fn test_reconnect_argument_merging() {
     let recon_cmd = UartSubCommand::Connect(ConnectCommand {
         no_retry: false,
         baud: None,
-        socket: None,
         reconnect: true,
         protocol: None,
     });
@@ -513,20 +513,17 @@ async fn test_terminate_process_kills_child() {
 
 #[fuchsia::test]
 async fn test_socket_path_length_limit() {
-    let (env, _temp_dir) = create_test_env("test_socket_path_len");
-    let _guard = DaemonCleanupGuard::new(&env, "placeholder");
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    // A shared data directory this long pushes the derived socket path past the OS limit
+    // (> 108 bytes on Linux, > 104 on macOS).
+    let long_shared_data = temp_dir.path().join("a".repeat(120));
+    std::fs::create_dir_all(&long_shared_data).unwrap();
+    let env = ffx_config::test_env()
+        .runtime_config("shared_data", long_shared_data.to_str().unwrap())
+        .build()
+        .expect("test env");
 
-    // Construct a socket path exceeding the OS limit (> 108 bytes on Linux, > 104 on macOS)
-    let long_socket = format!("/tmp/{}", "a".repeat(120));
-    let conn_cmd = UartSubCommand::Connect(ConnectCommand {
-        no_retry: false,
-        baud: NonZeroU32::new(115200),
-        socket: Some(long_socket),
-        reconnect: false,
-        protocol: None,
-    });
-
-    let res = run_tool(&env, Some("/dev/test_long"), conn_cmd).await;
+    let res = run_tool(&env, Some("/dev/test_long"), make_connect_cmd(115200, false)).await;
     assert!(res.is_err());
     let err = res.unwrap_err();
     assert!(err.to_string().contains("UNIX socket path exceeds limit"));
@@ -1060,8 +1057,694 @@ async fn test_is_pty_target_virtual_socket_detection() {
     fs::write(&regular_file, b"").unwrap();
     assert!(!is_pty_target(&regular_file));
 
-    // 2. Generic UNIX domain socket (e.g. Pontis bridge or test proxy) -> true
+    // 2. Generic UNIX domain socket (e.g. virtual serial bridge or test proxy) -> true
     let generic_socket = temp_dir.path().join("serial-0403-6001.sock");
     let _listener = std::os::unix::net::UnixListener::bind(&generic_socket).unwrap();
     assert!(is_pty_target(&generic_socket));
+}
+
+fn setup_mock_connection_fixture(
+    shared_data_dir: &Path,
+    target: &str,
+    last_read_timestamp_ms: u64,
+    last_write_timestamp_ms: u64,
+) -> (std::process::Child, PathBuf) {
+    fs::create_dir_all(shared_data_dir).unwrap();
+    let target_id = get_target_id(&canonicalize_target(target));
+    let child = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+    let meta = ConnectionMetadata {
+        pid: child.id(),
+        target: target.to_string(),
+        status: ConnectionStatus::Connected,
+        id: Some(target_id.clone()),
+        baud: NonZeroU32::new(115200),
+        protocol: UartProtocol::ResendSP,
+        log_level: None,
+        nodename: None,
+        serial: None,
+    };
+    let meta_path = shared_data_dir.join(format!("ffx_uart_{}.json", target_id));
+    fs::write(&meta_path, serde_json::to_string(&meta).unwrap()).unwrap();
+
+    let socket_path = shared_data_dir.join(format!("ffx_uart_{}.sock", target_id));
+    bind_unlistened_socket(&socket_path);
+    let control_listener =
+        std::os::unix::net::UnixListener::bind(socket_path.with_extension("control")).unwrap();
+
+    let metrics_json = serde_json::to_string(&DaemonMetrics {
+        checksum_errors: 0,
+        retransmissions: 0,
+        active_protocol: UartProtocol::ResendSP,
+        estimated_rtt_ms: 0,
+        connection_drops: 0,
+        handshake_failures: 0,
+        last_read_timestamp_ms,
+        last_write_timestamp_ms,
+        outgoing_queue_len: 0,
+        last_target_error: None,
+    })
+    .unwrap();
+
+    let _mock_server = std::thread::spawn(move || {
+        for _ in 0..2 {
+            if let Ok((mut stream, _)) = control_listener.accept() {
+                let _ = stream.write_all(metrics_json.as_bytes());
+            } else {
+                break;
+            }
+        }
+    });
+
+    (child, meta_path)
+}
+
+#[fuchsia::test]
+async fn test_doctor_no_issues() {
+    let (env, temp_path) = create_test_env("test_doctor_no_issues");
+    let target = "/emu:test-target-healthy";
+    let _guard = DaemonCleanupGuard::new(&env, target);
+    let (mut child, _meta_path) =
+        setup_mock_connection_fixture(&temp_path.path().join("ffx_uart"), target, 0, 0);
+
+    let tool = DoctorTool { cmd: DoctorCommand { fix: false }, context: env.context.clone() };
+    let buffers = TestBuffers::default();
+    let writer = ffx_writer::SimpleWriter::new_test(&buffers);
+
+    tool.main(writer).await.unwrap();
+    let output = buffers.stdout.into_string();
+    assert!(output.contains("Pass"), "Expected pass, output: {}", output);
+    assert!(!output.contains("WARNING"), "Expected no warnings, output: {}", output);
+    assert!(output.contains("Status: 0 issues found"), "Expected 0 issues, output: {}", output);
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Kills and reaps a spawned child process on drop so that a failing assertion does not leak it.
+struct ChildProcessGuard(std::process::Child);
+
+impl ChildProcessGuard {
+    /// Spawns a long-running `sleep` process to stand in for a live driver PID.
+    fn spawn_sleeper() -> Self {
+        Self(std::process::Command::new("sleep").arg("60").spawn().unwrap())
+    }
+
+    fn id(&self) -> u32 {
+        self.0.id()
+    }
+}
+
+impl Drop for ChildProcessGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Writes a `ConnectionMetadata` record for `target` to `ffx_uart_<file_target_id>.json` in
+/// `shared_data_dir` and returns its path.
+fn write_doctor_test_metadata(
+    shared_data_dir: &Path,
+    file_target_id: &str,
+    target: &str,
+    pid: u32,
+) -> PathBuf {
+    fs::create_dir_all(shared_data_dir).unwrap();
+    let meta = ConnectionMetadata {
+        pid,
+        target: target.to_string(),
+        status: ConnectionStatus::Connected,
+        id: Some(file_target_id.to_string()),
+        baud: NonZeroU32::new(115200),
+        protocol: UartProtocol::ResendSP,
+        log_level: None,
+        nodename: None,
+        serial: None,
+    };
+    let meta_path = shared_data_dir.join(format!("ffx_uart_{file_target_id}.json"));
+    fs::write(&meta_path, serde_json::to_string(&meta).unwrap()).unwrap();
+    meta_path
+}
+
+/// Creates a UNIX domain socket file at `path` with no listener behind it.
+///
+/// The socket is bound but never put into the listening state, so connecting to it always fails
+/// with `ECONNREFUSED`. Binding a `UnixListener` and dropping it is not equivalent: a concurrent
+/// test that spawns a process can briefly hold a duplicate of the listening descriptor, letting a
+/// connection succeed and making the socket appear live.
+fn bind_unlistened_socket(path: &Path) {
+    use nix::sys::socket::{AddressFamily, SockFlag, SockType, UnixAddr, bind, socket};
+    use std::os::fd::AsRawFd;
+    let fd = socket(AddressFamily::Unix, SockType::Stream, SockFlag::SOCK_CLOEXEC, None).unwrap();
+    bind(fd.as_raw_fd(), &UnixAddr::new(path).unwrap()).unwrap();
+}
+
+/// Creates a UNIX socket file with no listener for `target_id` in `shared_data_dir`.
+fn create_orphaned_socket(shared_data_dir: &Path, target_id: &str) -> PathBuf {
+    fs::create_dir_all(shared_data_dir).unwrap();
+    let sock_path = shared_data_dir.join(format!("ffx_uart_{target_id}.sock"));
+    bind_unlistened_socket(&sock_path);
+    assert!(
+        std::os::unix::fs::FileTypeExt::is_socket(&fs::metadata(&sock_path).unwrap().file_type()),
+        "Orphan socket fixture must be an actual UNIX domain socket"
+    );
+    sock_path
+}
+
+/// Runs `ffx uart doctor` (with `--fix` if `fix` is set) and returns its result and stdout.
+async fn run_doctor(context: &EnvironmentContext, fix: bool) -> (Result<()>, String) {
+    let tool = DoctorTool { cmd: DoctorCommand { fix }, context: context.clone() };
+    let buffers = TestBuffers::default();
+    let writer = ffx_writer::SimpleWriter::new_test(&buffers);
+    let result = tool.main(writer).await;
+    (result, buffers.stdout.into_string())
+}
+
+#[fuchsia::test]
+async fn test_doctor_detects_and_fixes_stale_metadata() {
+    let (env, temp_path) = create_test_env("test_doctor_stale_metadata");
+    let shared_data_dir = temp_path.path().join("ffx_uart");
+    let target = "/emu:test-target";
+    let target_id = get_target_id(&canonicalize_target(target));
+    let meta_path = write_doctor_test_metadata(&shared_data_dir, &target_id, target, 999999);
+
+    let (result, output) = run_doctor(&env.context, false).await;
+    assert!(result.is_err(), "Doctor should fail when finding issues");
+    assert!(output.contains("Stale metadata found"), "Expected stale metadata report: {output}");
+    assert!(meta_path.exists(), "Metadata file should not be deleted without --fix");
+
+    let (result, output) = run_doctor(&env.context, true).await;
+    assert!(result.is_ok(), "Repair should succeed: {output}");
+    assert!(output.contains("Attempting repair... OK"), "Repair should succeed: {output}");
+    assert!(!meta_path.exists(), "Metadata file should be deleted after fix");
+}
+
+#[fuchsia::test]
+async fn test_doctor_detects_and_fixes_corrupt_metadata() {
+    let (env, temp_path) = create_test_env("test_doctor_corrupt_metadata");
+    let shared_data_dir = temp_path.path().join("ffx_uart");
+    fs::create_dir_all(&shared_data_dir).unwrap();
+    let corrupt_target_id = get_target_id(&canonicalize_target("/emu:test-target-corrupt"));
+    let corrupt_path = shared_data_dir.join(format!("ffx_uart_{corrupt_target_id}.json"));
+    fs::write(&corrupt_path, b"not valid json").unwrap();
+    let unrelated_path = shared_data_dir.join("unrelated.json");
+    fs::write(&unrelated_path, b"not valid json").unwrap();
+
+    let (result, output) = run_doctor(&env.context, false).await;
+    assert!(result.is_err(), "Doctor should fail when finding issues");
+    assert!(
+        output.contains("Corrupted metadata JSON"),
+        "Expected corrupted metadata report: {output}"
+    );
+    assert!(corrupt_path.exists(), "Corrupt metadata file should not be deleted without --fix");
+
+    let (result, output) = run_doctor(&env.context, true).await;
+    assert!(result.is_ok(), "Repair should succeed: {output}");
+    assert!(!corrupt_path.exists(), "Corrupt metadata file should be deleted after fix");
+    assert!(unrelated_path.exists(), "Unrelated JSON file should not be deleted");
+}
+
+#[fuchsia::test]
+async fn test_doctor_detects_and_fixes_orphaned_socket() {
+    let (env, temp_path) = create_test_env("test_doctor_orphaned_socket");
+    let shared_data_dir = temp_path.path().join("ffx_uart");
+    let orphan_target_id = get_target_id(&canonicalize_target("/emu:test-target-orphan"));
+    let orphan_sock_path = create_orphaned_socket(&shared_data_dir, &orphan_target_id);
+
+    let (result, output) = run_doctor(&env.context, false).await;
+    assert!(result.is_err(), "Doctor should fail when finding issues");
+    assert!(output.contains("Orphaned UART file"), "Expected orphaned file report: {output}");
+    assert!(orphan_sock_path.exists(), "Orphan socket file should not be deleted without --fix");
+
+    let (result, output) = run_doctor(&env.context, true).await;
+    assert!(result.is_ok(), "Repair should succeed: {output}");
+    assert!(!orphan_sock_path.exists(), "Orphan socket file should be deleted after fix");
+}
+
+#[fuchsia::test]
+async fn test_doctor_fix_preserves_socket_with_live_listener() {
+    let (env, temp_path) = create_test_env("test_doctor_live_listener_socket");
+    let shared_data_dir = temp_path.path().join("ffx_uart");
+    fs::create_dir_all(&shared_data_dir).unwrap();
+    let target_id = get_target_id(&canonicalize_target("/emu:test-target-starting"));
+    let sock_path = shared_data_dir.join(format!("ffx_uart_{target_id}.sock"));
+    // Keep the listener open to simulate a driver that has bound its socket but not yet
+    // written its metadata.
+    let _listener = std::os::unix::net::UnixListener::bind(&sock_path).unwrap();
+
+    let (result, output) = run_doctor(&env.context, true).await;
+    assert!(result.is_ok(), "A starting driver is not an unresolved issue: {output}");
+    assert!(output.contains("has an active listener"), "Expected live listener warning: {output}");
+    assert!(!output.contains("Orphaned UART file"), "Live socket must not be orphaned: {output}");
+    assert!(sock_path.exists(), "Socket with a live listener must not be deleted by --fix");
+}
+
+#[fuchsia::test]
+async fn test_doctor_fix_preserves_dead_pid_metadata_with_live_listener() {
+    let (env, temp_path) = create_test_env("test_doctor_dead_pid_live_listener");
+    let shared_data_dir = temp_path.path().join("ffx_uart");
+    let target = "/emu:test-target-restarting";
+    let target_id = get_target_id(&canonicalize_target(target));
+    let meta_path = write_doctor_test_metadata(&shared_data_dir, &target_id, target, 999999);
+    let sock_path = shared_data_dir.join(format!("ffx_uart_{target_id}.sock"));
+    let _listener = std::os::unix::net::UnixListener::bind(&sock_path).unwrap();
+
+    let (result, output) = run_doctor(&env.context, true).await;
+    assert!(result.is_ok(), "A restarting driver is not an unresolved issue: {output}");
+    assert!(output.contains("names dead PID"), "Expected restarting driver warning: {output}");
+    assert!(!output.contains("Stale metadata found"), "Metadata must not be stale: {output}");
+    assert!(meta_path.exists(), "Metadata must not be deleted while a listener is active");
+    assert!(sock_path.exists(), "Socket with a live listener must not be deleted by --fix");
+}
+
+#[fuchsia::test]
+async fn test_doctor_fix_preserves_stale_control_socket_of_starting_driver() {
+    let (env, temp_path) = create_test_env("test_doctor_stale_control_starting_driver");
+    let shared_data_dir = temp_path.path().join("ffx_uart");
+    let target_id = get_target_id(&canonicalize_target("/emu:test-target-stale-control"));
+    // A driver that has bound its data socket but has not yet written its metadata or replaced
+    // the control socket left behind by a previous driver.
+    let control_path = shared_data_dir.join(format!("ffx_uart_{target_id}.control"));
+    fs::create_dir_all(&shared_data_dir).unwrap();
+    bind_unlistened_socket(&control_path);
+    let sock_path = shared_data_dir.join(format!("ffx_uart_{target_id}.sock"));
+    let _listener = std::os::unix::net::UnixListener::bind(&sock_path).unwrap();
+
+    let (result, output) = run_doctor(&env.context, true).await;
+    assert!(result.is_ok(), "A starting driver is not an unresolved issue: {output}");
+    assert!(!output.contains("Orphaned UART file"), "Stale control must not be orphaned: {output}");
+    assert!(!output.contains("Attempting repair"), "No repair should be attempted: {output}");
+    assert!(sock_path.exists(), "Socket with a live listener must not be deleted by --fix");
+    assert!(control_path.exists(), "A starting driver's files must not be deleted by --fix");
+}
+
+/// Binds and returns a listener on the UNIX socket for `target_id` with extension `ext`.
+fn bind_doctor_test_socket(
+    shared_data_dir: &Path,
+    target_id: &str,
+    ext: &str,
+) -> std::os::unix::net::UnixListener {
+    fs::create_dir_all(shared_data_dir).unwrap();
+    let path = shared_data_dir.join(format!("ffx_uart_{target_id}.{ext}"));
+    std::os::unix::net::UnixListener::bind(path).unwrap()
+}
+
+#[fuchsia::test]
+async fn test_has_live_connection() {
+    use crate::doctor::has_live_connection;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let shared = temp_dir.path();
+    let live_child = ChildProcessGuard::spawn_sleeper();
+    let live_pid = live_child.id();
+    let dead_pid = 999999;
+
+    let target_for = |name: &str| {
+        let target = format!("/emu:{name}");
+        let id = get_target_id(&canonicalize_target(&target));
+        (target, id)
+    };
+
+    // No files at all.
+    let (_, id) = target_for("no-files");
+    assert!(!has_live_connection(shared, &id).await, "No files is not live");
+
+    // Metadata naming a running driver.
+    let (target, id) = target_for("live-pid");
+    write_doctor_test_metadata(shared, &id, &target, live_pid);
+    assert!(has_live_connection(shared, &id).await, "Running driver is live");
+
+    // Metadata naming a dead driver, with no listener.
+    let (target, id) = target_for("dead-pid");
+    write_doctor_test_metadata(shared, &id, &target, dead_pid);
+    assert!(!has_live_connection(shared, &id).await, "Dead driver without listener is not live");
+
+    // Metadata naming a dead driver, with a listener (a driver is replacing it).
+    let (target, id) = target_for("dead-pid-listener");
+    write_doctor_test_metadata(shared, &id, &target, dead_pid);
+    let _l1 = bind_doctor_test_socket(shared, &id, uart_driver_api::UNIX_SOCKET_EXTENSION);
+    assert!(has_live_connection(shared, &id).await, "Dead driver with listener is live");
+
+    // No metadata, with a listener on the control socket only (a driver is starting).
+    let (_, id) = target_for("no-meta-listener");
+    let _l2 = bind_doctor_test_socket(shared, &id, uart_driver_api::CONTROL_SOCKET_EXTENSION);
+    assert!(has_live_connection(shared, &id).await, "Starting driver is live");
+
+    // No metadata and a socket with no listener.
+    let (_, id) = target_for("no-meta-orphan");
+    create_orphaned_socket(shared, &id);
+    assert!(!has_live_connection(shared, &id).await, "Orphaned socket is not live");
+
+    // Corrupted metadata is never live, even with a listener.
+    let (_, id) = target_for("corrupt-listener");
+    fs::write(shared.join(format!("ffx_uart_{id}.json")), b"not valid json").unwrap();
+    let _l3 = bind_doctor_test_socket(shared, &id, uart_driver_api::UNIX_SOCKET_EXTENSION);
+    assert!(!has_live_connection(shared, &id).await, "Corrupted metadata is not live");
+
+    // Mismatched metadata is never live, even when it names a running driver with a listener.
+    let (_, id) = target_for("mismatch-listener");
+    write_doctor_test_metadata(shared, &id, "/emu:some-other-target", live_pid);
+    let _l4 = bind_doctor_test_socket(shared, &id, uart_driver_api::UNIX_SOCKET_EXTENSION);
+    assert!(!has_live_connection(shared, &id).await, "Mismatched metadata is not live");
+}
+
+#[fuchsia::test]
+async fn test_doctor_apply_fix_skips_targets_with_live_connection() {
+    use crate::doctor::FixType;
+    use crate::subtools::doctor::FixOutcome;
+
+    let (env, temp_path) = create_test_env("test_doctor_apply_fix_skips_live");
+    let shared_data_dir = temp_path.path().join("ffx_uart");
+    let live_id = get_target_id(&canonicalize_target("/emu:test-target-now-live"));
+    let live_sock = shared_data_dir.join(format!("ffx_uart_{live_id}.sock"));
+    let _listener =
+        bind_doctor_test_socket(&shared_data_dir, &live_id, uart_driver_api::UNIX_SOCKET_EXTENSION);
+    let orphan_id = get_target_id(&canonicalize_target("/emu:test-target-still-orphaned"));
+    let orphan_sock = create_orphaned_socket(&shared_data_dir, &orphan_id);
+
+    let tool = DoctorTool { cmd: DoctorCommand { fix: true }, context: env.context.clone() };
+    let buffers = TestBuffers::default();
+    let mut writer = ffx_writer::SimpleWriter::new_test(&buffers);
+
+    // Every target has gained a live connection since diagnosis, so nothing is repaired.
+    let fix = FixType::DeleteMetadataFiles { target_ids: vec![live_id.clone()] };
+    let outcome = tool.apply_fix(fix, &mut writer).await.unwrap();
+    assert_eq!(outcome, FixOutcome::Skipped);
+    assert!(live_sock.exists(), "Socket with a live listener must not be deleted");
+    let output = buffers.stdout.into_string();
+    assert!(output.contains(&format!("skipping target {live_id}")), "Expected skip: {output}");
+
+    // Skipping one target does not prevent repairing another.
+    let buffers = TestBuffers::default();
+    let mut writer = ffx_writer::SimpleWriter::new_test(&buffers);
+    let fix = FixType::DeleteMetadataFiles { target_ids: vec![live_id.clone(), orphan_id] };
+    let outcome = tool.apply_fix(fix, &mut writer).await.unwrap();
+    assert_eq!(outcome, FixOutcome::Repaired);
+    assert!(live_sock.exists(), "Socket with a live listener must not be deleted");
+    assert!(!orphan_sock.exists(), "Orphaned socket should be deleted");
+}
+
+#[fuchsia::test]
+async fn test_doctor_connection_check_matches_metadata_id() {
+    let (mut env, temp_path) = create_test_env("test_doctor_connection_check_meta_id");
+    let shared_data_dir = temp_path.path().join("ffx_uart");
+    let file_target_id = get_target_id(&canonicalize_target("/emu:test-target-file"));
+    let requested_target = "/emu:test-target-requested";
+    let requested_target_id = get_target_id(&canonicalize_target(requested_target));
+    // The file is named after one target but its metadata records the requested target's ID.
+    let meta_path =
+        write_doctor_test_metadata(&shared_data_dir, &file_target_id, requested_target, 999999);
+    let content = fs::read_to_string(&meta_path).unwrap();
+    let mut meta: ConnectionMetadata = serde_json::from_str(&content).unwrap();
+    meta.id = Some(requested_target_id.clone());
+    fs::write(&meta_path, serde_json::to_string(&meta).unwrap()).unwrap();
+
+    env.context.override_target_specifier(&Some(format!("uart:{requested_target_id}")));
+    let (result, output) = run_doctor(&env.context, false).await;
+    assert!(result.is_err(), "Mismatched metadata should be reported: {output}");
+    assert!(
+        !output.contains("No active or stale UART connections"),
+        "Connection check should match the metadata ID like MetadataCheck does: {output}"
+    );
+    assert!(output.contains("Mismatched metadata target ID"), "Expected mismatch: {output}");
+    assert!(meta_path.exists(), "Metadata should not be deleted without --fix");
+}
+
+#[fuchsia::test]
+async fn test_doctor_fix_terminates_mismatched_daemon() {
+    let (env, temp_path) = create_test_env("test_doctor_mismatched_metadata");
+    let shared_data_dir = temp_path.path().join("ffx_uart");
+    let mismatch_child = ChildProcessGuard::spawn_sleeper();
+    let mismatch_pid = mismatch_child.id();
+    let mismatch_target_id = get_target_id(&canonicalize_target("/emu:test-target-mismatch"));
+    let different_target = "/emu:different-target";
+    let different_target_id = get_target_id(&canonicalize_target(different_target));
+    let mismatch_path = write_doctor_test_metadata(
+        &shared_data_dir,
+        &mismatch_target_id,
+        different_target,
+        mismatch_pid,
+    );
+
+    let (result, output) = run_doctor(&env.context, false).await;
+    assert!(result.is_err(), "Doctor should fail when finding issues");
+    let expected_mismatch_msg =
+        format!("(expected '{mismatch_target_id}', found '{different_target_id}')");
+    assert!(
+        output.contains("Mismatched metadata target ID") && output.contains(&expected_mismatch_msg),
+        "Output did not contain distinct mismatched metadata IDs ({expected_mismatch_msg}): {output}",
+    );
+    assert!(mismatch_path.exists(), "Mismatched metadata file should not be deleted without --fix");
+    assert!(
+        crate::sys::is_running(mismatch_pid),
+        "Mismatched daemon should remain running without --fix"
+    );
+
+    let (result, output) = run_doctor(&env.context, true).await;
+    assert!(result.is_ok(), "Repair should succeed: {output}");
+    assert!(
+        !crate::sys::is_running(mismatch_pid),
+        "Mismatched daemon process should be terminated by --fix before deleting files"
+    );
+    assert!(!mismatch_path.exists(), "Mismatched metadata file should be deleted after fix");
+}
+
+#[fuchsia::test]
+async fn test_doctor_scoped_fix_leaves_other_targets_alone() {
+    let (mut env, temp_path) = create_test_env("test_doctor_scoped_fix");
+    let shared_data_dir = temp_path.path().join("ffx_uart");
+    fs::create_dir_all(&shared_data_dir).unwrap();
+    let scoped_target_id = get_target_id(&canonicalize_target("/dev/ttyUSB80"));
+    let scoped_path = shared_data_dir.join(format!("ffx_uart_{scoped_target_id}.json"));
+    fs::write(&scoped_path, b"not valid json").unwrap();
+    let other_target_id = get_target_id(&canonicalize_target("/dev/ttyUSB81"));
+    let other_sock_path = create_orphaned_socket(&shared_data_dir, &other_target_id);
+
+    env.context.override_target_specifier(&Some(format!("uart:{scoped_target_id}")));
+    let (result, output) = run_doctor(&env.context, true).await;
+    assert!(result.is_ok(), "Scoped repair should succeed: {output}");
+    assert!(!scoped_path.exists(), "Scoped target's corrupt metadata should be deleted");
+    assert!(other_sock_path.exists(), "Other target's orphaned socket must not be deleted");
+    assert!(
+        !output.contains(&other_target_id),
+        "Scoped run should not report other targets: {output}"
+    );
+}
+
+#[fuchsia::test]
+async fn test_doctor_reports_unreadable_metadata() {
+    use std::os::unix::fs::PermissionsExt;
+    let (env, temp_path) = create_test_env("test_doctor_unreadable_metadata");
+    let shared_data_dir = temp_path.path().join("ffx_uart");
+    fs::create_dir_all(&shared_data_dir).unwrap();
+    let target_id = get_target_id(&canonicalize_target("/dev/ttyUSB82"));
+    let meta_path = shared_data_dir.join(format!("ffx_uart_{target_id}.json"));
+    fs::write(&meta_path, b"{}").unwrap();
+    fs::set_permissions(&meta_path, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read(&meta_path).is_ok() {
+        // Permission bits are not enforced (e.g. running as root), so the file stays readable.
+        return;
+    }
+
+    let (result, output) = run_doctor(&env.context, false).await;
+    assert!(result.is_err(), "Doctor should fail when finding issues");
+    assert!(
+        output.contains("Unreadable metadata file"),
+        "Expected unreadable metadata report: {output}"
+    );
+}
+
+#[fuchsia::test]
+async fn test_doctor_reports_failed_repair() {
+    use std::os::unix::fs::PermissionsExt;
+    let (env, temp_path) = create_test_env("test_doctor_failed_repair");
+    let shared_data_dir = temp_path.path().join("ffx_uart");
+    fs::create_dir_all(&shared_data_dir).unwrap();
+    let target_id = get_target_id(&canonicalize_target("/dev/ttyUSB83"));
+    let corrupt_path = shared_data_dir.join(format!("ffx_uart_{target_id}.json"));
+    fs::write(&corrupt_path, b"not valid json").unwrap();
+    fs::set_permissions(&shared_data_dir, fs::Permissions::from_mode(0o555)).unwrap();
+    let probe_path = shared_data_dir.join("write_probe");
+    if fs::write(&probe_path, b"").is_ok() {
+        // Permission bits are not enforced (e.g. running as root), so removal cannot fail.
+        let _ = fs::remove_file(&probe_path);
+        fs::set_permissions(&shared_data_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        return;
+    }
+
+    let (result, output) = run_doctor(&env.context, true).await;
+    fs::set_permissions(&shared_data_dir, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(result.is_err(), "Doctor should fail when a repair fails: {output}");
+    assert!(
+        output.contains("Attempting repair... FAILED"),
+        "Expected failed repair report: {output}"
+    );
+    assert!(output.contains("1 issues found (0 repaired)"), "Expected 0 repaired: {output}");
+    assert!(corrupt_path.exists(), "Corrupt metadata should remain after a failed repair");
+}
+
+#[test]
+fn test_resolve_target_filter_id() {
+    let hex_id = "0123456789abcdef";
+    assert_eq!(crate::doctor::resolve_target_filter_id(hex_id), hex_id);
+    assert_eq!(crate::doctor::resolve_target_filter_id(&format!("uart:{hex_id}")), hex_id);
+    assert_eq!(crate::doctor::resolve_target_filter_id("0123456789ABCDEF"), hex_id);
+    assert_eq!(
+        crate::doctor::resolve_target_filter_id("0123456789abcde"),
+        get_target_id(&canonicalize_target("0123456789abcde")),
+        "IDs with the wrong length should be hashed"
+    );
+    assert_eq!(
+        crate::doctor::resolve_target_filter_id("uart:/dev/ttyUSB0"),
+        get_target_id(&canonicalize_target("/dev/ttyUSB0")),
+        "Non-hex targets should be hashed after stripping the `uart:` prefix"
+    );
+}
+
+#[fuchsia::test]
+async fn test_terminate_process_refuses_current_process() {
+    crate::driver::terminate_process(std::process::id()).await.unwrap();
+    assert!(crate::sys::is_running(std::process::id()), "Current process must not be terminated");
+}
+
+#[fuchsia::test]
+async fn test_doctor_target_specifier_without_healthy_metadata() {
+    let (mut env, temp_path) = create_test_env("test_doctor_target_filter");
+    let shared_data_dir = temp_path.path().join("ffx_uart");
+    fs::create_dir_all(&shared_data_dir).unwrap();
+
+    // 1. Disconnected nodename specifier should warn cleanly rather than failing in resolve_target.
+    env.context.override_target_specifier(&Some("fuchsia-disconnected-node".to_string()));
+    let tool = DoctorTool { cmd: DoctorCommand { fix: false }, context: env.context.clone() };
+    let buffers = TestBuffers::default();
+    let writer = ffx_writer::SimpleWriter::new_test(&buffers);
+    tool.main(writer).await.unwrap();
+    let output = buffers.stdout.into_string();
+    assert!(
+        output.contains(
+            "No active or stale UART connections detected for target 'fuchsia-disconnected-node'"
+        ),
+        "Expected target-scoped warning, output: {output}"
+    );
+
+    // 2. Orphaned UNIX socket targeted by 16-hex ID (without .json) should be detected and fixed.
+    let orphan_id = get_target_id(&canonicalize_target("/dev/ttyUSB77"));
+    let orphan_sock = shared_data_dir.join(format!("ffx_uart_{orphan_id}.sock"));
+    bind_unlistened_socket(&orphan_sock);
+
+    env.context.override_target_specifier(&Some(format!("uart:{orphan_id}")));
+    let tool_detect =
+        DoctorTool { cmd: DoctorCommand { fix: false }, context: env.context.clone() };
+    let buffers_detect = TestBuffers::default();
+    let writer_detect = ffx_writer::SimpleWriter::new_test(&buffers_detect);
+    assert!(
+        tool_detect.main(writer_detect).await.is_err(),
+        "Doctor without --fix should fail when an orphaned socket is present"
+    );
+    let detect_output = buffers_detect.stdout.into_string();
+    assert!(
+        detect_output.contains("Orphaned UART file"),
+        "Expected orphaned socket detection, output: {detect_output}"
+    );
+
+    let tool_fix = DoctorTool { cmd: DoctorCommand { fix: true }, context: env.context.clone() };
+    let buffers_fix = TestBuffers::default();
+    let writer_fix = ffx_writer::SimpleWriter::new_test(&buffers_fix);
+    tool_fix.main(writer_fix).await.unwrap();
+    assert!(!orphan_sock.exists(), "Orphaned socket should be removed by --fix");
+}
+
+fn setup_stalled_connection_fixture(
+    shared_data_dir: &Path,
+    target: &str,
+) -> (std::process::Child, PathBuf) {
+    let now =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+            as u64;
+    setup_mock_connection_fixture(
+        shared_data_dir,
+        target,
+        now.saturating_sub(10000),
+        now.saturating_sub(6000),
+    )
+}
+
+#[fuchsia::test]
+async fn test_doctor_stall_no_fix() {
+    let (env, temp_path) = create_test_env("test_doctor_stall_no_fix");
+    let target = "/emu:test-target-stall";
+    let _guard = DaemonCleanupGuard::new(&env, target);
+    let (mut child, meta_path) =
+        setup_stalled_connection_fixture(&temp_path.path().join("ffx_uart"), target);
+
+    let tool = DoctorTool { cmd: DoctorCommand { fix: false }, context: env.context.clone() };
+    let buffers = TestBuffers::default();
+    let writer = ffx_writer::SimpleWriter::new_test(&buffers);
+
+    let res = tool.main(writer).await;
+    assert!(res.is_err());
+    let output = buffers.stdout.into_string();
+    assert!(
+        output.contains("Connection Health & Stall Detection"),
+        "Should run StallCheck, output: {}",
+        output
+    );
+    assert!(output.contains("appears to be stalled"), "Should report stall, output: {}", output);
+    assert!(meta_path.exists(), "Metadata file should not be deleted without --fix");
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[fuchsia::test]
+async fn test_doctor_stall_with_fix() {
+    let (env, temp_path) = create_test_env("test_doctor_stall_with_fix");
+    let target = "/emu:test-target-stall-fix";
+    let _guard = DaemonCleanupGuard::new(&env, target);
+    let (mut child, meta_path) =
+        setup_stalled_connection_fixture(&temp_path.path().join("ffx_uart"), target);
+
+    let tool_fix = DoctorTool { cmd: DoctorCommand { fix: true }, context: env.context.clone() };
+    let buffers_fix = TestBuffers::default();
+    let writer_fix = ffx_writer::SimpleWriter::new_test(&buffers_fix);
+
+    tool_fix.main(writer_fix).await.unwrap();
+    let output_fix = buffers_fix.stdout.into_string();
+    assert!(
+        output_fix.contains("appears to be stalled"),
+        "Should report stall, output: {}",
+        output_fix
+    );
+    assert!(
+        output_fix.contains("Reconnecting to target path"),
+        "Should trigger reconnect: {}",
+        output_fix
+    );
+    assert!(output_fix.contains("Connect called"), "Should call connect: {}", output_fix);
+    assert!(meta_path.exists(), "Metadata file should exist (recreated by reconnect)");
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[fuchsia::test]
+async fn test_doctor_no_connections_warning() {
+    let (env, _temp_path) = create_test_env("test_doctor_no_connections_warning");
+
+    let tool = DoctorTool { cmd: DoctorCommand { fix: false }, context: env.context.clone() };
+    let buffers = TestBuffers::default();
+    let writer = ffx_writer::SimpleWriter::new_test(&buffers);
+
+    tool.main(writer).await.unwrap();
+    let output = buffers.stdout.into_string();
+    assert!(
+        output.contains("No active or stale UART connections detected"),
+        "Should report warning when no connections exist, output: {}",
+        output
+    );
+    assert!(
+        output.contains("0 issues found (0 repaired)"),
+        "Should report 0 issues, output: {}",
+        output
+    );
 }

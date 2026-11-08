@@ -44,20 +44,17 @@ cc_test_executable("unittests") {
     "run_all_unittests.cc",
   ]
 
-  public_deps = [
+  deps = [
     ":testing_deps",
     "//sdk/fidl/fuchsia.ui.composition:fuchsia.ui.composition_cpp",
     "//sdk/lib/async-default",
     "//sdk/lib/async-testing",
-    "//src/lib/fsl",
-    "//src/ui/scenic/lib/flatland:flatland_types",
-  ]
-
-  deps = [
     "//src/graphics/display/lib/coordinator-getter:client",
+    "//src/lib/fsl",
     "//src/lib/testing/loop_fixture:gtest",
     "//src/ui/lib/escher/test/common:gtest_escher",
     "//src/ui/lib/escher/test/common:readback_fixtures",
+    "//src/ui/scenic/lib/flatland:flatland_types",
     "//src/ui/scenic/lib/flatland/renderer",
     "//src/ui/scenic/lib/screen_capture",
     "//src/ui/scenic/lib/utils",

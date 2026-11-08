@@ -11,32 +11,23 @@
 #include <zircon/syscalls.h>
 
 #include <algorithm>
-#include <optional>
 
 #include <openthread/platform/alarm-milli.h>
 #include <openthread/tasklet.h>
 
 namespace ot_rcp {
 
-void Platform::Create(async_dispatcher_t* dispatcher, uint32_t node_id) {
-  Instance().emplace(dispatcher, node_id);
-}
-
-void Platform::Destroy() { Instance().reset(); }
+Platform* Platform::current_ = nullptr;
 
 Platform& Platform::Get() {
-  std::optional<Platform>& instance = Instance();
-  ZX_ASSERT_MSG(instance.has_value(), "Platform::Create() has not been called");
-  return *instance;
-}
-
-std::optional<Platform>& Platform::Instance() {
-  static std::optional<Platform>& instance = *new std::optional<Platform>();
-  return instance;
+  ZX_ASSERT_MSG(current_ != nullptr, "no live Platform");
+  return *current_;
 }
 
 Platform::Platform(async_dispatcher_t* dispatcher, uint32_t node_id)
     : dispatcher_(dispatcher), node_id_(node_id) {
+  ZX_ASSERT_MSG(current_ == nullptr, "only one Platform may exist at a time");
+  current_ = this;
   tasklet_task_.set_handler([this]() {
     if (IsLive(tasklet_instance_)) {
       otTaskletsProcess(tasklet_instance_);
@@ -49,10 +40,18 @@ Platform::Platform(async_dispatcher_t* dispatcher, uint32_t node_id)
   });
 }
 
+Platform::~Platform() {
+  // Cancel explicitly so that nothing posted to the dispatcher can reach this object after it is
+  // gone; the TaskClosure destructors would do the same, but this keeps the intent visible.
+  milli_task_.Cancel();
+  tasklet_task_.Cancel();
+  current_ = nullptr;
+}
+
 void Platform::SignalTaskletPending(otInstance* instance) {
-  // A single otInstance should be used between Create() and Destroy().
+  // A single otInstance should be used for the lifetime of a Platform.
   ZX_ASSERT_MSG(tasklet_instance_ == nullptr || tasklet_instance_ == instance,
-                "otInstance changed without Platform::Destroy()");
+                "otInstance changed without a new Platform");
   tasklet_instance_ = instance;
   if (tasklet_task_.is_pending()) {
     return;
@@ -65,7 +64,7 @@ void Platform::SignalTaskletPending(otInstance* instance) {
 
 void Platform::StartMilliAlarm(otInstance* instance, uint32_t t0, uint32_t dt) {
   ZX_ASSERT_MSG(milli_instance_ == nullptr || milli_instance_ == instance,
-                "otInstance changed without Platform::Destroy()");
+                "otInstance changed without a new Platform");
   milli_instance_ = instance;
   milli_task_.Cancel();
 

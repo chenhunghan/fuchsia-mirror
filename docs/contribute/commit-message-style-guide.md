@@ -65,11 +65,12 @@ Bug: 82658
 Test: Added test X.
 ```
 
-The difference between `Bug:` and `Fixed:` is that `Fixed:` automatically closes
-the issue for you once your change is submitted, whereas `Bug:` only comments on
-your issue once submitted. If you have multiple changes attached to your issue,
-use the `Bug:` tag for all the changes up until the final change. Use `Fixed:`
-on the final change, so that the issue is closed.
+The difference between `Bug:` and `Fixed:` (or `Fixes:`) is that `Fixed:` and
+`Fixes:` automatically close the issue for you once your change is submitted,
+whereas `Bug:` only comments on your issue once submitted. If you have multiple
+changes attached to your issue, use the `Bug:` tag for all the changes up until
+the final change. Use `Fixed:` or `Fixes:` on the final change, so that the
+issue is closed.
 
 ## Indicate multiple steps {#indicate-multiple-steps}
 

@@ -17,13 +17,23 @@
 # --desc into the commit body; footer lines (e.g. `Bug:`,
 # `Bazel-Migration-Target:`) in the last paragraph of --desc become footers.
 # Planter itself adds the `Test:` footers, TAG: and Change-Id.
+# Planter replaces any TAG: line in --desc with its own
+# `TAG: planter planter-<freshness>` footer, so never write one in --desc.
+#
+# Both `planter run` steps run with --speed-force, or with --speed-force=false
+# if --no-speed-force is given. They get --model and --model-fallbacks only if
+# those are given; otherwise, Planter picks the models from its own settings.
+#
+# Before adding the task, scripts/planter_freshness.sh checks that Planter is
+# not too far out of date; if it is, no new migration is started.
 
 set -euo pipefail
 
 usage() {
   cat <<EOF
 Usage: $(basename "$0") --target-dir=<DIR> --title=<TITLE> [--desc=<DESC>]
-         [--task-id=<ID>] [--add-only]
+         [--task-id=<ID>] [--add-only] [--model=<MODELS>]
+         [--model-fallbacks=<MODELS>] [--no-speed-force]
 
 Required:
   --target-dir=<DIR>   Directory to migrate, relative to \$FUCHSIA_DIR
@@ -43,11 +53,40 @@ Optional:
                        src_connectivity_bluetooth_lib_bt-obex_objects).
   --add-only           Only queue the Planter task; do not run or upload it.
                        Used to queue several tasks for \`planter fleet\`.
+  --model=<MODELS>     Comma-separated models for Planter's agents, in order of
+                       preference, passed to \`planter run\` only if given. By
+                       default, Planter picks the models itself.
+  --model-fallbacks=<MODELS>
+                       Comma-separated models to fall back to after --model,
+                       passed to \`planter run\` only if given. An empty value
+                       disables the fallbacks. By default, Planter uses its own
+                       fallback models.
+  --no-speed-force     Pass --speed-force=false to \`planter run\` instead of
+                       --speed-force, so that Planter does not use speed force
+                       even if its own settings (\$PLANTER_SPEED_FORCE or the
+                       fleet's setting) turn it on. By default, Planter runs
+                       its coder, review assistant and explainer agents on a
+                       faster model first.
   -h, --help           Show this help.
+
+The task is added with \`planter add-task --check-gerrit\`, so it fails if an
+open Gerrit CL already claims one of the target directories.
+
+Before adding the task, scripts/planter_freshness.sh checks how out of date
+Planter is. If the Planter binary (with a newer binary available) or non-clean
+shared machinery is out of date by more than PLANTER_MAX_STALE_HOURS, the
+script refuses to start the new migration.
 
 Environment:
   FUCHSIA_DIR          Fuchsia checkout (default: \$HOME/fuchsia).
   DRY_RUN              If set, print the planter command instead of running it.
+  PLANTER_MAX_STALE_HOURS
+                       How many hours Planter may be out of date before new
+                       migrations are refused (default: 24).
+  PLANTER_ALLOW_STALE  If set to 1, start the migration even if Planter is
+                       out of date. Only for a user who explicitly asks to
+                       migrate with an out-of-date Planter; agents must not
+                       set it on their own.
 EOF
 }
 
@@ -58,23 +97,34 @@ TITLE=""
 DESC=""
 TASK_ID=""
 ADD_ONLY=""
+# The Planter speed force of SKILL.md, and the Planter model and Planter model
+# fallbacks, which are passed to Planter only if given.
+MODEL=""
+MODEL_FALLBACKS=""
+MODEL_FALLBACKS_SET=""
+SPEED_FORCE=1
 
 # Accepts both "--flag=value" and "--flag value".
 while (( $# > 0 )); do
   case "$1" in
     -h|--help) usage; exit 0 ;;
     --add-only) ADD_ONLY=1 ;;
+    --no-speed-force) SPEED_FORCE="" ;;
     --target-dir=*) TARGET_DIR="${1#*=}" ;;
     --title=*) TITLE="${1#*=}" ;;
     --desc=*) DESC="${1#*=}" ;;
     --task-id=*) TASK_ID="${1#*=}" ;;
-    --target-dir|--title|--desc|--task-id)
+    --model=*) MODEL="${1#*=}" ;;
+    --model-fallbacks=*) MODEL_FALLBACKS="${1#*=}"; MODEL_FALLBACKS_SET=1 ;;
+    --target-dir|--title|--desc|--task-id|--model|--model-fallbacks)
       (( $# >= 2 )) || die "$1 requires a value"
       case "$1" in
         --target-dir) TARGET_DIR="$2" ;;
         --title) TITLE="$2" ;;
         --desc) DESC="$2" ;;
         --task-id) TASK_ID="$2" ;;
+        --model) MODEL="$2" ;;
+        --model-fallbacks) MODEL_FALLBACKS="$2"; MODEL_FALLBACKS_SET=1 ;;
       esac
       shift ;;
     *) usage >&2; die "unknown argument: $1" ;;
@@ -127,12 +177,26 @@ printf 'Commit message (Planter appends Test:, TAG: and Change-Id):\n\n%s\n\n' \
   "$TITLE"
 [[ -z "$DESC" ]] || printf '%s\n\n' "$DESC"
 
+# --check-gerrit (the default, passed explicitly): Planter refuses to add the
+# task if an open Gerrit CL already claims one of the target directories.
 add_cmd=("$PLANTER" add-task --workdir="$FUCHSIA_DIR" --id="$TASK_ID"
-         --target-dir="$TARGET_DIR" --title="$TITLE")
+         --target-dir="$TARGET_DIR" --title="$TITLE" --check-gerrit)
 [[ -z "$DESC" ]] || add_cmd+=(--desc="$DESC")
+# The model flags of both `planter run` steps. --model and --model-fallbacks
+# are passed only if given, so that Planter picks the models by default. Speed
+# force is always passed, as --speed-force=false when it is off: without the
+# flag, Planter would take it from $PLANTER_SPEED_FORCE or the fleet's setting.
+model_flags=()
+[[ -z "$MODEL" ]] || model_flags+=(--model="$MODEL")
+[[ -z "$MODEL_FALLBACKS_SET" ]] \
+  || model_flags+=(--model-fallbacks="$MODEL_FALLBACKS")
+speed_flag=--speed-force
+[[ -n "$SPEED_FORCE" ]] || speed_flag=--speed-force=false
+model_flags+=("$speed_flag")
 # Step 1, no --gerrit: Planter migrates the directory, runs the checks and the
 # review panel, and stops in UPLOADING without committing or pushing.
-run_cmd=("$PLANTER" run --repo-root="$FUCHSIA_DIR" --task="$TASK_ID")
+run_cmd=("$PLANTER" run --repo-root="$FUCHSIA_DIR" --task="$TASK_ID"
+         "${model_flags[@]}")
 # Step 2, --gerrit: Planter commits, uploads the CL and stops in
 # MONITORING_REVIEW.
 upload_cmd=("${run_cmd[@]}" --gerrit)
@@ -148,9 +212,37 @@ if [[ -n "${DRY_RUN:-}" ]]; then
   exit 0
 fi
 
+# Refuse to start a new migration with a Planter that is too far out of date:
+# it would migrate without the latest checks and lessons. The freshness script
+# prints Planter's warnings; relay them to the user.
+freshness_status=0
+FUCHSIA_DIR="$FUCHSIA_DIR" "$(dirname "${BASH_SOURCE[0]}")/planter_freshness.sh" \
+  || freshness_status=$?
+case "$freshness_status" in
+  0) ;;
+  2)
+    if [[ "${PLANTER_ALLOW_STALE:-}" == 1 ]]; then
+      echo "warning: PLANTER_ALLOW_STALE=1; starting the migration with an" \
+           "out-of-date Planter." >&2
+    else
+      die "Planter is too far out of date to start a new migration;" \
+          "update Planter and its shared machinery (see the warnings above)," \
+          "then try again"
+    fi
+    ;;
+  *) die "failed to check whether Planter is up to date" ;;
+esac
+echo
+
 if [[ -n "$ADD_ONLY" ]]; then
   "${add_cmd[@]}"
-  echo "Queued Planter task $TASK_ID; run it with 'planter fleet --task=$TASK_ID'."
+  model_hint=""
+  [[ -z "$MODEL" ]] || model_hint+=" --model=\"$MODEL\""
+  [[ -z "$MODEL_FALLBACKS_SET" ]] \
+    || model_hint+=" --model-fallbacks=\"$MODEL_FALLBACKS\""
+  model_hint+=" $speed_flag"
+  echo "Queued Planter task $TASK_ID; run it with" \
+       "'planter fleet --task=$TASK_ID$model_hint'."
   exit 0
 fi
 

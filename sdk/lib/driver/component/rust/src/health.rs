@@ -4,8 +4,8 @@
 
 //! Support for running a driver's [`crate::Driver::health_check`] on behalf of the lifecycle
 //! server (the per-level deadlines and the root dispatcher liveness check that precedes every
-//! check), the [`HealthAlertReporter`] through which a driver proactively reports faults, and the
-//! opt-in [`HealthCheckInspect`] helper that mirrors results into Inspect.
+//! check), the [`HealthAlertReporter`] and [`HealthAlertLatch`] through which a driver proactively
+//! reports faults, and the opt-in [`HealthCheckInspect`] helper that mirrors results into Inspect.
 
 use std::sync::Arc;
 
@@ -13,7 +13,8 @@ use fdf::{AsAsyncDispatcherRef, DriverDispatcherRef};
 use fidl_next::Server;
 use fidl_next_fuchsia_driver_framework::{
     Driver as DriverProtocol, HealthAlert, HealthCheckError, HealthCheckRequest,
-    HealthCheckResponse, HealthDiagnosticItem, HealthDiagnosticValue, HealthStatus,
+    HealthCheckResponse, HealthCondition, HealthDiagnosticItem, HealthDiagnosticValue,
+    HealthStatus,
 };
 use fuchsia_sync::Mutex;
 use futures::channel::{mpsc, oneshot};
@@ -34,16 +35,14 @@ const FAST_HEALTH_CHECK_DEADLINE: zx::MonotonicDuration = zx::MonotonicDuration:
 const DEEP_HEALTH_CHECK_DEADLINE: zx::MonotonicDuration = zx::MonotonicDuration::from_seconds(120);
 const HEALTH_CHECK_TIMEOUT_MARGIN: zx::MonotonicDuration = zx::MonotonicDuration::from_millis(100);
 
-/// Returns how long the server lets a check at `level` run before answering `TIMEOUT` itself,
-/// or `None` for unknown flexible enum levels.
-fn health_check_timeout(level: HealthCheckRequest) -> Option<zx::MonotonicDuration> {
+/// Returns how long the server lets a check at `level` run before answering `TIMEOUT` itself.
+fn health_check_timeout(level: HealthCheckRequest) -> zx::MonotonicDuration {
     let deadline = match level {
         HealthCheckRequest::Ping => PING_HEALTH_CHECK_DEADLINE,
         HealthCheckRequest::Fast => FAST_HEALTH_CHECK_DEADLINE,
         HealthCheckRequest::Deep => DEEP_HEALTH_CHECK_DEADLINE,
-        _ => return None,
     };
-    Some(deadline + HEALTH_CHECK_TIMEOUT_MARGIN)
+    deadline + HEALTH_CHECK_TIMEOUT_MARGIN
 }
 
 /// Confirms that `root_dispatcher` is still processing tasks.
@@ -74,9 +73,7 @@ pub(crate) async fn run_health_check<D: Driver>(
     root_dispatcher: DriverDispatcherRef<'static>,
     request: HealthCheckRequest,
 ) -> HealthCheckResult {
-    let Some(timeout) = health_check_timeout(request) else {
-        return Err(HealthCheckError::NotSupported);
-    };
+    let timeout = health_check_timeout(request);
     let check = async move {
         ping_root_dispatcher(root_dispatcher).await?;
         driver.health_check(request).await
@@ -178,6 +175,342 @@ impl Default for HealthAlertReporter {
     fn default() -> Self {
         Self { sink: Arc::new(Mutex::new(HealthAlertSink::Closed)) }
     }
+}
+
+/// Maximum number of active conditions stored in a [`HealthAlertLatch`] or merged into a
+/// [`HealthCheckResponse`], matching the FIDL `vector<HealthCondition>:16` bound.
+pub const MAX_HEALTH_CONDITIONS: usize = 16;
+
+trait HealthAlertMirror: Send + Sync {
+    fn record_self_fault(&self, alert: &HealthAlert);
+}
+
+impl HealthAlertMirror for HealthCheckInspect {
+    fn record_self_fault(&self, alert: &HealthAlert) {
+        self.record_alert(alert);
+    }
+}
+
+struct LatchState {
+    conditions: Vec<HealthCondition>,
+    inspect: Option<Arc<dyn HealthAlertMirror>>,
+}
+
+struct HealthAlertLatchInner {
+    reporter: HealthAlertReporter,
+    state: Mutex<LatchState>,
+}
+
+/// Thread-safe helper that maintains a driver's active self-fault condition set and emits
+/// edge-triggered `OnHealthAlert` ([`HealthAlert::SelfFault`]) transitions via
+/// [`HealthAlertReporter`].
+///
+/// Obtained from [`crate::DriverContext::health_alert_latch`]. Cloning a `HealthAlertLatch` shares
+/// the underlying condition table so a driver and any SDK wrappers (such as
+/// `fdf_power::Suspendable`) can independently raise and clear distinct `reason_code` conditions
+/// without overwriting each other's state in `driver_manager`.
+#[derive(Clone, Default)]
+pub struct HealthAlertLatch {
+    inner: Arc<HealthAlertLatchInner>,
+}
+
+impl Default for HealthAlertLatchInner {
+    fn default() -> Self {
+        Self {
+            reporter: HealthAlertReporter::default(),
+            state: Mutex::new(LatchState { conditions: Vec::new(), inspect: None }),
+        }
+    }
+}
+
+impl HealthAlertLatch {
+    /// Creates a new latch backed by `reporter`.
+    pub fn new(reporter: HealthAlertReporter) -> Self {
+        Self {
+            inner: Arc::new(HealthAlertLatchInner {
+                reporter,
+                state: Mutex::new(LatchState { conditions: Vec::new(), inspect: None }),
+            }),
+        }
+    }
+
+    /// Creates a latch and alert receiver pair for standalone unit tests without a lifecycle
+    /// server.
+    pub fn new_for_testing() -> (Self, mpsc::Receiver<HealthAlert>) {
+        let (reporter, rx) = HealthAlertReporter::new_for_testing();
+        (Self::new(reporter), rx)
+    }
+
+    /// Registers a [`HealthCheckInspect`] recorder so every emitted [`HealthAlert::SelfFault`]
+    /// transition (including alerts emitted by shared wrapper libraries) is mirrored to Inspect in
+    /// lockstep with the `Driver` channel.
+    pub fn set_inspect(&self, inspect: Arc<HealthCheckInspect>) {
+        self.inner.state.lock().inspect = Some(inspect);
+    }
+
+    /// Inserts or updates an active self-fault condition keyed by `condition.reason_code`.
+    ///
+    /// - On the first raise of an active `reason_code`, `first_observed` and `last_observed`
+    ///   default to the current boot instant if unset, and `occurrence_count` defaults to `1` if
+    ///   unset or `0`.
+    /// - On subsequent raises of an already-active `reason_code`, `first_observed` is preserved
+    ///   from the initial raise of the episode, `last_observed` is updated (to
+    ///   `condition.last_observed` if set, else now), and `occurrence_count` is incremented unless
+    ///   a larger count is supplied.
+    /// - An omitted `status` is normalized to [`HealthStatus::Unhealthy`]. Passing
+    ///   [`HealthStatus::Ok`] clears `reason_code`.
+    /// - An omitted or empty `reason_code` is normalized to `"UNKNOWN"`.
+    /// - When [`MAX_HEALTH_CONDITIONS`] conditions are already active, an incoming
+    ///   [`HealthStatus::Unhealthy`] condition evicts an active [`HealthStatus::Degraded`] one;
+    ///   otherwise the new condition is dropped. Both cases log a warning naming the
+    ///   `reason_code`.
+    ///
+    /// Emits a [`HealthAlert::SelfFault`] containing all active conditions when `reason_code` is
+    /// newly added or when its `status` changes. Repeated raises at the same `status` update the
+    /// in-memory entry without emitting redundant alerts.
+    pub fn raise(&self, mut condition: HealthCondition) {
+        let reason_code = match condition.reason_code.take() {
+            Some(code) if !code.is_empty() => code,
+            _ => "UNKNOWN".to_string(),
+        };
+        let status = condition.status.unwrap_or(HealthStatus::Unhealthy);
+        if status == HealthStatus::Ok {
+            self.clear(&reason_code);
+            return;
+        }
+
+        let now = zx::BootInstant::get().into_nanos();
+        let mut state = self.inner.state.lock();
+
+        if let Some(existing) =
+            state.conditions.iter_mut().find(|c| c.reason_code.as_deref() == Some(&reason_code))
+        {
+            let prev_status = existing.status.unwrap_or(HealthStatus::Unhealthy);
+            let first_observed =
+                existing.first_observed.or(condition.first_observed).unwrap_or(now);
+            let last_observed = condition.last_observed.unwrap_or(now);
+            let prev_count = existing.occurrence_count.unwrap_or(1);
+            let next_count = match condition.occurrence_count {
+                Some(c) if c > prev_count => c,
+                _ => prev_count.saturating_add(1),
+            };
+
+            existing.status = Some(status);
+            existing.first_observed = Some(first_observed);
+            existing.last_observed = Some(last_observed);
+            existing.occurrence_count = Some(next_count);
+            if condition.message.is_some() {
+                existing.message = condition.message;
+            }
+            if condition.diagnostics.is_some() {
+                existing.diagnostics = condition.diagnostics;
+            }
+
+            if prev_status != status {
+                self.emit_locked(&state);
+            }
+            return;
+        }
+
+        if state.conditions.len() >= MAX_HEALTH_CONDITIONS {
+            if status != HealthStatus::Degraded
+                && let Some(degraded_idx) =
+                    state.conditions.iter().position(|c| c.status == Some(HealthStatus::Degraded))
+            {
+                let evicted = state.conditions.remove(degraded_idx);
+                warn!(
+                    "HealthAlertLatch: evicting DEGRADED condition {} to make room for UNHEALTHY \
+                     condition {reason_code} (MAX_HEALTH_CONDITIONS)",
+                    evicted.reason_code.as_deref().unwrap_or("UNKNOWN")
+                );
+            } else {
+                warn!(
+                    "HealthAlertLatch capacity ({MAX_HEALTH_CONDITIONS}) reached; dropping condition {reason_code}"
+                );
+                return;
+            }
+        }
+
+        condition.reason_code = Some(reason_code);
+        condition.status = Some(status);
+        condition.first_observed = Some(condition.first_observed.unwrap_or(now));
+        condition.last_observed = Some(condition.last_observed.unwrap_or(now));
+        condition.occurrence_count =
+            Some(condition.occurrence_count.filter(|&c| c > 0).unwrap_or(1));
+
+        state.conditions.push(condition);
+        self.emit_locked(&state);
+    }
+
+    /// Raises a [`HealthStatus::Degraded`] self-fault condition with the given `reason_code` and
+    /// `message`.
+    ///
+    /// Convenience wrapper around [`Self::raise`] that fills in `first_observed`, `last_observed`,
+    /// and `occurrence_count` automatically.
+    pub fn raise_degraded(&self, reason_code: impl Into<String>, message: impl Into<String>) {
+        self.raise(HealthCondition {
+            status: Some(HealthStatus::Degraded),
+            reason_code: Some(reason_code.into()),
+            message: Some(message.into()),
+            ..Default::default()
+        });
+    }
+
+    /// Raises a [`HealthStatus::Unhealthy`] self-fault condition with the given `reason_code` and
+    /// `message`.
+    ///
+    /// Convenience wrapper around [`Self::raise`] that fills in `first_observed`, `last_observed`,
+    /// and `occurrence_count` automatically.
+    pub fn raise_unhealthy(&self, reason_code: impl Into<String>, message: impl Into<String>) {
+        self.raise(HealthCondition {
+            status: Some(HealthStatus::Unhealthy),
+            reason_code: Some(reason_code.into()),
+            message: Some(message.into()),
+            ..Default::default()
+        });
+    }
+
+    /// Removes the condition with `reason_code` if active. An empty `reason_code` refers to the
+    /// `"UNKNOWN"` condition, matching how [`Self::raise`] normalizes it.
+    ///
+    /// If a condition was removed, emits a [`HealthAlert::SelfFault`] with the remaining active
+    /// conditions (or an empty response to report [`HealthStatus::Ok`] recovery when none remain).
+    pub fn clear(&self, reason_code: &str) {
+        let reason_code = if reason_code.is_empty() { "UNKNOWN" } else { reason_code };
+        let mut state = self.inner.state.lock();
+        let Some(idx) =
+            state.conditions.iter().position(|c| c.reason_code.as_deref() == Some(reason_code))
+        else {
+            return;
+        };
+        state.conditions.remove(idx);
+        self.emit_locked(&state);
+    }
+
+    /// Clears all active conditions. If at least one condition was active, emits a single recovery
+    /// [`HealthAlert::SelfFault`] with an empty response ([`HealthStatus::Ok`]).
+    pub fn clear_all(&self) {
+        let mut state = self.inner.state.lock();
+        if state.conditions.is_empty() {
+            return;
+        }
+        state.conditions.clear();
+        self.emit_locked(&state);
+    }
+
+    /// Returns a snapshot of all currently active conditions, suitable for returning from
+    /// [`crate::Driver::health_check`] (`Ping`).
+    pub fn snapshot(&self) -> Vec<HealthCondition> {
+        self.inner.state.lock().conditions.clone()
+    }
+
+    /// Builds a [`HealthCheckResponse`] containing all currently active conditions (or `None` when
+    /// no conditions are active, reporting [`HealthStatus::Ok`]), suitable for returning directly
+    /// from [`crate::Driver::health_check`] on [`HealthCheckRequest::Ping`].
+    pub fn to_response(&self) -> HealthCheckResponse {
+        let state = self.inner.state.lock();
+        HealthCheckResponse {
+            diagnostics: None,
+            conditions: (!state.conditions.is_empty()).then(|| state.conditions.clone()),
+        }
+    }
+
+    /// Appends any active conditions whose `reason_code` is not already present in
+    /// `response.conditions` into `response` (up to [`MAX_HEALTH_CONDITIONS`]). Once `response`
+    /// is full, an active [`HealthStatus::Unhealthy`] condition replaces a
+    /// [`HealthStatus::Degraded`] entry (preferring one this call merged over one the caller
+    /// measured live) rather than being dropped, so merging never downgrades the overall status
+    /// the response reports.
+    pub fn merge_into(&self, response: &mut HealthCheckResponse) {
+        let state = self.inner.state.lock();
+        if state.conditions.is_empty() {
+            return;
+        }
+        let dst = response.conditions.get_or_insert_with(Vec::new);
+        let merged_begin = dst.len();
+        for cond in &state.conditions {
+            if dst.iter().any(|existing| existing.reason_code == cond.reason_code) {
+                continue;
+            }
+            if dst.len() < MAX_HEALTH_CONDITIONS {
+                dst.push(cond.clone());
+                continue;
+            }
+            if cond.status.unwrap_or(HealthStatus::Unhealthy) != HealthStatus::Unhealthy {
+                continue;
+            }
+            let is_degraded = |c: &HealthCondition| c.status == Some(HealthStatus::Degraded);
+            let victim = dst[merged_begin..]
+                .iter()
+                .position(is_degraded)
+                .map(|i| i + merged_begin)
+                .or_else(|| dst[..merged_begin].iter().position(is_degraded));
+            if let Some(idx) = victim {
+                dst[idx] = cond.clone();
+            }
+        }
+    }
+
+    /// Returns the overall status derived from the active condition set
+    /// (`Unhealthy > Degraded > Ok`).
+    pub fn status(&self) -> HealthStatus {
+        let state = self.inner.state.lock();
+        overall_status(&state.conditions)
+    }
+
+    fn emit_locked(&self, state: &LatchState) {
+        let response = HealthCheckResponse {
+            diagnostics: None,
+            conditions: (!state.conditions.is_empty()).then(|| state.conditions.clone()),
+        };
+        let alert = HealthAlert::SelfFault(response);
+        if let Some(inspect) = &state.inspect {
+            inspect.record_self_fault(&alert);
+        }
+        self.inner.reporter.report_health_alert(alert);
+    }
+}
+
+/// Derives the overall [`HealthStatus`] (`Unhealthy > Degraded > Ok`) from `conditions`.
+///
+/// Any condition with [`HealthStatus::Unhealthy`] (or an omitted `status`) makes the overall
+/// status [`HealthStatus::Unhealthy`]; otherwise any [`HealthStatus::Degraded`] condition makes it
+/// [`HealthStatus::Degraded`]. Returns [`HealthStatus::Ok`] when `conditions` is empty.
+pub fn overall_status(conditions: &[HealthCondition]) -> HealthStatus {
+    let mut overall = HealthStatus::Ok;
+    for condition in conditions {
+        match condition.status.unwrap_or(HealthStatus::Unhealthy) {
+            HealthStatus::Ok => {}
+            HealthStatus::Degraded => overall = HealthStatus::Degraded,
+            HealthStatus::Unhealthy => return HealthStatus::Unhealthy,
+        }
+    }
+    overall
+}
+
+/// Constructs a string [`HealthDiagnosticItem`].
+pub fn diag_str(key: impl Into<String>, val: impl Into<String>) -> HealthDiagnosticItem {
+    HealthDiagnosticItem { key: key.into(), value: HealthDiagnosticValue::StringValue(val.into()) }
+}
+
+/// Constructs an unsigned 64-bit integer [`HealthDiagnosticItem`].
+pub fn diag_uint(key: impl Into<String>, val: u64) -> HealthDiagnosticItem {
+    HealthDiagnosticItem { key: key.into(), value: HealthDiagnosticValue::UintValue(val) }
+}
+
+/// Constructs a signed 64-bit integer [`HealthDiagnosticItem`].
+pub fn diag_int(key: impl Into<String>, val: i64) -> HealthDiagnosticItem {
+    HealthDiagnosticItem { key: key.into(), value: HealthDiagnosticValue::IntValue(val) }
+}
+
+/// Constructs a boolean [`HealthDiagnosticItem`].
+pub fn diag_bool(key: impl Into<String>, val: bool) -> HealthDiagnosticItem {
+    HealthDiagnosticItem { key: key.into(), value: HealthDiagnosticValue::BoolValue(val) }
+}
+
+/// Constructs a boot-timeline timestamp [`HealthDiagnosticItem`] (in nanoseconds).
+pub fn diag_timestamp(key: impl Into<String>, val: i64) -> HealthDiagnosticItem {
+    HealthDiagnosticItem { key: key.into(), value: HealthDiagnosticValue::Timestamp(val) }
 }
 
 /// Name of the Inspect node that holds the most recent health check result or self-reported
@@ -284,22 +617,11 @@ impl HealthCheckInspect {
     }
 }
 
-/// Derives the overall status of `response` from its conditions: any non-`OK`, non-`DEGRADED`
+/// Derives the overall status of `response` from its conditions: any `UNHEALTHY` (or omitted)
 /// condition makes the whole response `UNHEALTHY`; otherwise any `DEGRADED` condition makes it
 /// `DEGRADED`.
 fn derive_health_status(response: &HealthCheckResponse) -> HealthStatus {
-    let mut overall = HealthStatus::Ok;
-    if let Some(conditions) = &response.conditions {
-        for condition in conditions {
-            let status = condition.status.unwrap_or(HealthStatus::Unhealthy);
-            if status == HealthStatus::Degraded {
-                overall = HealthStatus::Degraded;
-            } else if status != HealthStatus::Ok {
-                return HealthStatus::Unhealthy;
-            }
-        }
-    }
-    overall
+    response.conditions.as_deref().map_or(HealthStatus::Ok, overall_status)
 }
 
 fn health_status_str(status: HealthStatus) -> &'static str {
@@ -307,7 +629,6 @@ fn health_status_str(status: HealthStatus) -> &'static str {
         HealthStatus::Ok => "OK",
         HealthStatus::Degraded => "DEGRADED",
         HealthStatus::Unhealthy => "UNHEALTHY",
-        _ => "UNKNOWN",
     }
 }
 
@@ -316,7 +637,6 @@ fn health_level_str(level: HealthCheckRequest) -> &'static str {
         HealthCheckRequest::Ping => "PING",
         HealthCheckRequest::Fast => "FAST",
         HealthCheckRequest::Deep => "DEEP",
-        _ => "UNKNOWN",
     }
 }
 
@@ -652,5 +972,250 @@ mod tests {
         drop(reporter);
         let received: Vec<_> = alerts.collect().await;
         assert_eq!(received.len(), HEALTH_ALERT_QUEUE_CAPACITY);
+    }
+
+    #[fuchsia::test]
+    async fn latch_deduplicates_repeated_raises_and_tracks_episode_counts() {
+        let (latch, mut rx) = HealthAlertLatch::new_for_testing();
+        assert_eq!(latch.status(), HealthStatus::Ok);
+        assert!(latch.snapshot().is_empty());
+
+        latch.raise(HealthCondition {
+            status: Some(HealthStatus::Degraded),
+            reason_code: Some("BUS_TIMEOUT".to_string()),
+            message: Some("timeout #1".to_string()),
+            first_observed: Some(100),
+            last_observed: Some(100),
+            ..Default::default()
+        });
+
+        let Some(HealthAlert::SelfFault(first_alert)) = rx.try_recv().ok() else {
+            panic!("expected initial SelfFault alert");
+        };
+        let conds = first_alert.conditions.expect("conditions");
+        assert_eq!(conds.len(), 1);
+        assert_eq!(conds[0].reason_code.as_deref(), Some("BUS_TIMEOUT"));
+        assert_eq!(conds[0].status, Some(HealthStatus::Degraded));
+        assert_eq!(conds[0].first_observed, Some(100));
+        assert_eq!(conds[0].last_observed, Some(100));
+        assert_eq!(conds[0].occurrence_count, Some(1));
+
+        // Repeated raises at the same status update in-memory state without emitting new alerts.
+        for i in 2..=4 {
+            latch.raise(HealthCondition {
+                status: Some(HealthStatus::Degraded),
+                reason_code: Some("BUS_TIMEOUT".to_string()),
+                message: Some(format!("timeout #{i}")),
+                first_observed: Some(999),
+                last_observed: Some(100 * i),
+                ..Default::default()
+            });
+        }
+        assert!(rx.try_recv().is_err(), "duplicate status raises must not emit alerts");
+
+        let snap = latch.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].first_observed, Some(100));
+        assert_eq!(snap[0].last_observed, Some(400));
+        assert_eq!(snap[0].occurrence_count, Some(4));
+        assert_eq!(snap[0].message.as_deref(), Some("timeout #4"));
+    }
+
+    #[fuchsia::test]
+    async fn latch_merges_shared_clones_and_emits_partial_and_full_recovery() {
+        let (driver_latch, mut rx) = HealthAlertLatch::new_for_testing();
+        let wrapper_latch = driver_latch.clone();
+        assert!(driver_latch.to_response().conditions.is_none());
+
+        // Inner driver raises BUS_TIMEOUT (DEGRADED) via convenience helper.
+        driver_latch.raise_degraded("BUS_TIMEOUT", "bus transfer timed out");
+        assert!(rx.try_recv().is_ok());
+        assert_eq!(driver_latch.to_response().conditions.as_ref().map(Vec::len), Some(1));
+
+        // Wrapper raises POWER_TRANSITION_STALLED (DEGRADED) on its clone; alert carries BOTH.
+        wrapper_latch.raise_degraded("POWER_TRANSITION_STALLED", "suspend exceeded 5s");
+        let Some(HealthAlert::SelfFault(both)) = rx.try_recv().ok() else {
+            panic!("expected merged SelfFault alert");
+        };
+        assert_eq!(both.conditions.as_ref().map(Vec::len), Some(2));
+        assert_eq!(driver_latch.to_response().conditions.as_ref().map(Vec::len), Some(2));
+
+        // Escalate stall to UNHEALTHY -> emits transition alert, overall status becomes Unhealthy.
+        wrapper_latch.raise_unhealthy("POWER_TRANSITION_STALLED", "suspend wedged");
+        assert_eq!(driver_latch.status(), HealthStatus::Unhealthy);
+        assert!(rx.try_recv().is_ok());
+
+        // Wrapper clears stall -> partial recovery alert still preserves BUS_TIMEOUT!
+        wrapper_latch.clear("POWER_TRANSITION_STALLED");
+        assert_eq!(driver_latch.status(), HealthStatus::Degraded);
+        let Some(HealthAlert::SelfFault(partial)) = rx.try_recv().ok() else {
+            panic!("expected partial recovery SelfFault alert");
+        };
+        let remaining = partial.conditions.expect("remaining conditions");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].reason_code.as_deref(), Some("BUS_TIMEOUT"));
+        assert_eq!(remaining[0].message.as_deref(), Some("bus transfer timed out"));
+
+        // Clearing an already-inactive code is a no-op.
+        wrapper_latch.clear("POWER_TRANSITION_STALLED");
+        assert!(rx.try_recv().is_err());
+
+        // Driver clears BUS_TIMEOUT -> full OK recovery (empty conditions).
+        driver_latch.clear("BUS_TIMEOUT");
+        assert_eq!(driver_latch.status(), HealthStatus::Ok);
+        assert!(driver_latch.to_response().conditions.is_none());
+        let Some(HealthAlert::SelfFault(recovered)) = rx.try_recv().ok() else {
+            panic!("expected full recovery SelfFault alert");
+        };
+        assert!(recovered.conditions.is_none());
+    }
+
+    #[fuchsia::test]
+    async fn latch_omitted_status_ok_clear_clear_all_and_capacity_eviction() {
+        let (latch, mut rx) = HealthAlertLatch::new_for_testing();
+
+        // Omitted status normalizes to Unhealthy; empty reason_code normalizes to UNKNOWN.
+        latch.raise(HealthCondition::default());
+        assert_eq!(latch.status(), HealthStatus::Unhealthy);
+        assert_eq!(latch.snapshot()[0].reason_code.as_deref(), Some("UNKNOWN"));
+        assert!(rx.try_recv().is_ok());
+
+        // clear("") refers to the same UNKNOWN condition (parity with raise and with C++ Clear).
+        latch.clear("");
+        assert_eq!(latch.status(), HealthStatus::Ok);
+        assert!(latch.snapshot().is_empty());
+        assert!(rx.try_recv().is_ok());
+
+        // Raising HealthStatus::Ok clears the condition.
+        latch.raise(HealthCondition::default());
+        assert!(rx.try_recv().is_ok());
+        latch.raise(HealthCondition {
+            status: Some(HealthStatus::Ok),
+            reason_code: Some("UNKNOWN".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(latch.status(), HealthStatus::Ok);
+        assert!(rx.try_recv().is_ok());
+
+        // Fill capacity with 16 Degraded conditions, then verify an Unhealthy condition evicts one.
+        for i in 0..MAX_HEALTH_CONDITIONS {
+            latch.raise(HealthCondition {
+                status: Some(HealthStatus::Degraded),
+                reason_code: Some(format!("DEG_{i}")),
+                ..Default::default()
+            });
+            let _ = rx.try_recv();
+        }
+        assert_eq!(latch.snapshot().len(), MAX_HEALTH_CONDITIONS);
+
+        latch.raise(HealthCondition {
+            status: Some(HealthStatus::Unhealthy),
+            reason_code: Some("CRITICAL_FAULT".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(latch.snapshot().len(), MAX_HEALTH_CONDITIONS);
+        assert_eq!(latch.status(), HealthStatus::Unhealthy);
+        assert!(
+            latch.snapshot().iter().any(|c| c.reason_code.as_deref() == Some("CRITICAL_FAULT"))
+        );
+        let _ = rx.try_recv();
+
+        // merge_into deduplicates by reason_code (keeping the caller's live entry) and caps at
+        // MAX_HEALTH_CONDITIONS.
+        let mut resp = HealthCheckResponse {
+            diagnostics: None,
+            conditions: Some(vec![HealthCondition {
+                status: Some(HealthStatus::Unhealthy),
+                reason_code: Some("CRITICAL_FAULT".to_string()),
+                message: Some("live FAST measurement".to_string()),
+                ..Default::default()
+            }]),
+        };
+        latch.merge_into(&mut resp);
+        let merged = resp.conditions.as_ref().expect("conditions");
+        assert_eq!(merged.len(), MAX_HEALTH_CONDITIONS);
+        assert_eq!(
+            merged.iter().filter(|c| c.reason_code.as_deref() == Some("CRITICAL_FAULT")).count(),
+            1
+        );
+        assert_eq!(merged[0].message.as_deref(), Some("live FAST measurement"));
+
+        // When the response already holds a live Degraded condition, the 15 latched Degraded
+        // entries fill it before the latched Unhealthy entry is reached; merge_into must replace
+        // a latched Degraded entry with it rather than drop it or the caller's live entry.
+        let mut live_only = HealthCheckResponse {
+            diagnostics: None,
+            conditions: Some(vec![HealthCondition {
+                status: Some(HealthStatus::Degraded),
+                reason_code: Some("LIVE_ONLY".to_string()),
+                ..Default::default()
+            }]),
+        };
+        latch.merge_into(&mut live_only);
+        let merged = live_only.conditions.as_ref().expect("conditions");
+        assert_eq!(merged.len(), MAX_HEALTH_CONDITIONS);
+        assert!(merged.iter().any(|c| c.reason_code.as_deref() == Some("CRITICAL_FAULT")
+            && c.status == Some(HealthStatus::Unhealthy)));
+        assert_eq!(merged[0].reason_code.as_deref(), Some("LIVE_ONLY"));
+
+        // clear_all emits a single empty recovery alert and resets episode count.
+        latch.clear_all();
+        assert_eq!(latch.status(), HealthStatus::Ok);
+        let Some(HealthAlert::SelfFault(cleared)) = rx.try_recv().ok() else {
+            panic!("expected clear_all recovery alert");
+        };
+        assert!(cleared.conditions.is_none());
+        assert!(rx.try_recv().is_err());
+
+        // A re-raise after clear_all starts a fresh episode.
+        latch.raise(HealthCondition {
+            status: Some(HealthStatus::Unhealthy),
+            reason_code: Some("CRITICAL_FAULT".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(latch.snapshot().len(), 1);
+        assert_eq!(latch.snapshot()[0].occurrence_count, Some(1));
+        assert!(rx.try_recv().is_ok());
+    }
+
+    #[fuchsia::test]
+    async fn latch_set_inspect_stays_consistent_across_threads() {
+        let inspector = fuchsia_inspect::Inspector::default();
+        let health_inspect = Arc::new(HealthCheckInspect::new(inspector.root()));
+        let (latch, _rx) = HealthAlertLatch::new_for_testing();
+        latch.set_inspect(health_inspect);
+
+        let l1 = latch.clone();
+        let t1 = std::thread::spawn(move || {
+            for _ in 0..30 {
+                l1.raise(HealthCondition {
+                    status: Some(HealthStatus::Degraded),
+                    reason_code: Some("THREAD_1".to_string()),
+                    ..Default::default()
+                });
+                l1.clear("THREAD_1");
+            }
+        });
+
+        let l2 = latch.clone();
+        let t2 = std::thread::spawn(move || {
+            for _ in 0..30 {
+                l2.raise(HealthCondition {
+                    status: Some(HealthStatus::Unhealthy),
+                    reason_code: Some("THREAD_2".to_string()),
+                    ..Default::default()
+                });
+                l2.clear("THREAD_2");
+            }
+        });
+
+        t1.join().expect("t1");
+        t2.join().expect("t2");
+
+        assert_eq!(latch.status(), HealthStatus::Ok);
+        assert!(latch.snapshot().is_empty());
+        assert_data_tree!(inspector, root: {
+            driver_health_check: { status: "OK" },
+        });
     }
 }

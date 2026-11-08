@@ -6,15 +6,15 @@ use anyhow::{Context, Error};
 use diagnostics_reader::{ArchiveReader, ComponentSelector, DiagnosticsHierarchy};
 use fidl_fuchsia_bluetooth_sys::AccessProxy;
 use fuchsia_async::DurationExt;
-use fuchsia_bluetooth::expectation::asynchronous::{
-    expectable, Expectable, ExpectableExt, ExpectableState, ExpectableStateExt,
-};
 use fuchsia_bluetooth::expectation::Predicate;
-use futures::future::BoxFuture;
+use fuchsia_bluetooth::expectation::asynchronous::{
+    Expectable, ExpectableExt, ExpectableState, ExpectableStateExt, expectable,
+};
 use futures::FutureExt;
+use futures::future::BoxFuture;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
-use test_harness::{SharedState, TestHarness, SHARED_STATE_TEST_COMPONENT_INDEX};
+use test_harness::{SharedState, TestHarness};
 use zx::MonotonicDuration;
 
 use crate::core_realm::{CoreRealm, SHARED_STATE_INDEX};
@@ -102,12 +102,8 @@ impl TestHarness for InspectHarness {
     ) -> BoxFuture<'static, Result<(Self, Self::Env, Self::Runner), Error>> {
         let shared_state = shared_state.clone();
         async move {
-            let test_component: Arc<String> = shared_state
-                .get(SHARED_STATE_TEST_COMPONENT_INDEX)
-                .expect("SharedState must have TEST-COMPONENT")?;
-            let inserter = move || CoreRealm::create(test_component.to_string());
-            let realm = shared_state.get_or_insert_with(SHARED_STATE_INDEX, inserter).await?;
-            // Publish emulator to driver stack
+            let realm =
+                shared_state.get_or_insert_with(SHARED_STATE_INDEX, CoreRealm::create).await?;
             let fake_host = ActivatedFakeHost::new(realm.clone()).await?;
 
             let access_proxy = realm

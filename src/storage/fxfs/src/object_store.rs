@@ -52,9 +52,9 @@ use crate::object_store::graveyard::Graveyard;
 use crate::object_store::journal::{JournalCheckpoint, JournalCheckpointV32, JournaledTransaction};
 use crate::object_store::key_manager::KeyManager;
 use crate::object_store::transaction::{
-    AssocObj, AssociatedObject, LockKey, LockKeys, MutationV59, MutationV61, MutationV62,
-    ObjectMutationIterator, ObjectStoreMutation, Operation, Options, ReservationOptions,
-    Transaction, WriteGuard, lock_keys,
+    AssocObj, AssociatedObject, LockKey, LockKeys, MutationV57, MutationV59, MutationV61,
+    MutationV62, MutationV63, ObjectMutationIterator, ObjectStoreMutation, Operation, Options,
+    ReservationOptions, Transaction, WriteGuard, lock_keys,
 };
 use crate::serialized_types::{
     AES_JOURNAL_ENCRYPTION_VERSION, DEFAULT_MAX_SERIALIZED_RECORD_SIZE, Version, Versioned,
@@ -88,7 +88,7 @@ pub use extent_record::{ExtentMode, ExtentValue};
 pub use object_record::{
     AttributeId, AttributeKey, BytesAndNodes, EncryptionKey, EncryptionKeys,
     ExtendedAttributeValue, FsverityMetadata, FxfsKey, FxfsKeyV49, ObjectAttributes, ObjectKey,
-    ObjectKeyData, ObjectKind, ObjectValue, ProjectProperty, RootDigest,
+    ObjectKeyData, ObjectKind, ObjectValue, PosixOwner, ProjectProperty, RootDigest,
 };
 pub use project_id::{ProjectId, ProjectIdExt};
 pub use transaction::Mutation;
@@ -3310,7 +3310,7 @@ impl JournalingObject for ObjectStore {
 
 /// The plaintext serialization of the mutations for a transaction that are encrypted then wrapped
 /// in `Mutation::EncryptedObjectStore`.
-pub type EncryptedTransaction = EncryptedTransactionV62;
+pub type EncryptedTransaction = EncryptedTransactionV63;
 
 static_assertions::const_assert!(EncryptedTransaction::MAX_CHUNK_SIZE % 16 == 0);
 impl EncryptedTransaction {
@@ -3360,24 +3360,49 @@ impl EncryptedTransaction {
 // wrapped in Mutation and the version associated with it will come from some parent type above
 // Mutation.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+pub struct EncryptedTransactionV63(pub Vec<MutationV63>);
+
+impl TypeFingerprint for EncryptedTransactionV63 {
+    fn fingerprint() -> String {
+        format!(
+            "struct{{MAX_CHUNK_SIZE: {}, {}}}",
+            // The MAX_CHUNK_SIZE is an important part of the format.
+            Self::MAX_CHUNK_SIZE,
+            Vec::<MutationV63>::fingerprint()
+        )
+    }
+}
+
+impl Versioned for EncryptedTransactionV63 {
+    // This can serialize much larger sizes. They will be broken up before being wrapped in
+    // EncryptedObjectStore.
+    fn max_serialized_size() -> Option<u64> {
+        None
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EncryptedTransactionV62(pub Vec<MutationV62>);
 
 impl TypeFingerprint for EncryptedTransactionV62 {
     fn fingerprint() -> String {
         format!(
             "struct{{MAX_CHUNK_SIZE: {}, {}}}",
-            // The MAX_CHUNK_SIZE is an important part of the format.
-            Self::MAX_CHUNK_SIZE,
+            EncryptedTransaction::MAX_CHUNK_SIZE,
             Vec::<MutationV62>::fingerprint()
         )
     }
 }
 
 impl Versioned for EncryptedTransactionV62 {
-    // This can serialize much larger sizes. They will be broken up before being wrapped in
-    // EncryptedObjectStore.
     fn max_serialized_size() -> Option<u64> {
         None
+    }
+}
+
+impl From<EncryptedTransactionV62> for EncryptedTransactionV63 {
+    fn from(old: EncryptedTransactionV62) -> Self {
+        Self(old.0.into_iter().map(Into::into).collect())
     }
 }
 
@@ -3432,14 +3457,14 @@ impl From<EncryptedTransactionV59> for EncryptedTransactionV61 {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct EncryptedTransactionV57(pub Vec<crate::object_store::transaction::MutationV57>);
+pub struct EncryptedTransactionV57(pub Vec<MutationV57>);
 
 impl TypeFingerprint for EncryptedTransactionV57 {
     fn fingerprint() -> String {
         format!(
             "struct{{MAX_CHUNK_SIZE: {}, {}}}",
             EncryptedTransaction::MAX_CHUNK_SIZE,
-            Vec::<crate::object_store::transaction::MutationV57>::fingerprint()
+            Vec::<MutationV57>::fingerprint()
         )
     }
 }
@@ -3599,12 +3624,7 @@ mod tests {
 
     async fn test_filesystem_with_hooks(hooks: Arc<HooksHandle>) -> OpenFxFilesystem {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
-        FxFilesystemBuilder::new()
-            .hooks(hooks)
-            .format(true)
-            .open(device)
-            .await
-            .expect("open failed")
+        FxFilesystemBuilder::new().hooks(hooks).format(device).await.expect("format failed")
     }
 
     async fn test_filesystem() -> OpenFxFilesystem {
@@ -4392,10 +4412,9 @@ mod tests {
         let fs = FxFilesystemBuilder::new()
             .hooks(fs_hooks)
             .journal_options(JournalOptions { reclaim_size, ..Default::default() })
-            .format(true)
-            .open(device)
+            .format(device)
             .await
-            .expect("open failed");
+            .expect("format failed");
 
         {
             let crypt = Arc::new(new_insecure_crypt());
@@ -5598,7 +5617,7 @@ mod tests {
     #[fuchsia::test]
     async fn test_fsck_during_key_pre_cache_stall() {
         let device = DeviceHolder::new(FakeDevice::new(16384, TEST_DEVICE_BLOCK_SIZE));
-        let fs = FxFilesystemBuilder::new().format(true).open(device).await.expect("open failed");
+        let fs = FxFilesystemBuilder::new().format(device).await.expect("format failed");
 
         // Initialize crypt without blocker so new_volume doesn't stall.
         let crypt = Arc::new(StallingCrypt::new(Arc::new(new_insecure_crypt())));
@@ -5669,11 +5688,10 @@ mod tests {
     async fn test_writes_to_other_store_not_blocked_by_stall() {
         let device = DeviceHolder::new(FakeDevice::new(16384, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystemBuilder::new()
-            .format(true)
             .journal_options(JournalOptions { reclaim_size: 32_768, ..Default::default() })
-            .open(device)
+            .format(device)
             .await
-            .expect("open failed");
+            .expect("format failed");
 
         // Initialize crypt for store1 with a blocker.
         // We will enable it after volume creation.
@@ -5970,11 +5988,10 @@ mod tests {
     async fn test_unlock_pre_cache_stall_does_not_block_other_stores() {
         let device = DeviceHolder::new(FakeDevice::new(16384, TEST_DEVICE_BLOCK_SIZE));
         let fs = FxFilesystemBuilder::new()
-            .format(true)
             .journal_options(JournalOptions { reclaim_size: 32_768, ..Default::default() })
-            .open(device)
+            .format(device)
             .await
-            .expect("open failed");
+            .expect("format failed");
 
         let crypt1 = Arc::new(StallingCrypt::new(Arc::new(new_insecure_crypt())));
         let crypt2 = Arc::new(new_insecure_crypt());
@@ -6089,11 +6106,10 @@ mod tests {
         let crypt2 = Arc::new(new_insecure_crypt());
         let (store1_id, device) = {
             let fs = FxFilesystemBuilder::new()
-                .format(true)
                 .journal_options(JournalOptions { reclaim_size: 32_768, ..Default::default() })
-                .open(device)
+                .format(device)
                 .await
-                .expect("open failed");
+                .expect("format failed");
 
             let store1_id = {
                 let root_vol = root_volume(fs.clone()).await.expect("root_volume failed");
@@ -6297,11 +6313,7 @@ mod tests {
         // Phase 1: Format and set up store1 with some mutations.
         let (store1_id, device) = {
             let (store1_id, fs) = {
-                let fs = FxFilesystemBuilder::new()
-                    .format(true)
-                    .open(device)
-                    .await
-                    .expect("open failed");
+                let fs = FxFilesystemBuilder::new().format(device).await.expect("format failed");
                 let root_vol = root_volume(fs.clone()).await.expect("root_volume failed");
                 let store1 = root_vol
                     .new_volume(

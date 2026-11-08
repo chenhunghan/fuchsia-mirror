@@ -914,6 +914,14 @@ closed protocol Flatland {
     /// If this method is not called, the default sample region is the rectangle with origin at
     /// (0, 0) and width and height set at ImageProperties from [`CreateImage`].
     ///
+    /// Legacy floating-point tolerance: to tolerate minor precision errors when computing texel
+    /// bounds in floating point, Scenic clamps `rect.width` and `rect.height` downward when
+    /// `rect.x + rect.width - image_width` or `rect.y + rect.height - image_height` is in
+    /// `(0, 1e-3)`. Negative `x`, `y`, `width`, or `height` values (even within `1e-3` of `0`),
+    /// and right/bottom overshoot `>= 1e-3`, are not clamped and close the connection with
+    /// `BAD_OPERATION`. Note when migrating to Flatland2 that `LayerProperties.sample_rect` does
+    /// not apply any epsilon clamping.
+    ///
     /// `image_id` must refer to a valid, unreleased Image.
     @available(deprecated=33)
     strict SetImageSampleRegion(struct {

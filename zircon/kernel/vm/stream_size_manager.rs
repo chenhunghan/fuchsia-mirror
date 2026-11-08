@@ -5,6 +5,7 @@
 // https://opensource.org/licenses/MIT
 
 use crate::kernel::event::Event;
+use crate::ksync_kernel::TrackedMutex;
 use core::pin::Pin;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -12,7 +13,7 @@ use fbl::{
     DoublyLinkedList, DoublyLinkedListContainable, DoublyLinkedListNode, Recyclable, RefPtr,
     ref_counted,
 };
-use ksync::{KMutex, KMutexGuard, LockToken, PhantomMutex, RawMutex, guarded};
+use ksync::{KMutex, KMutexGuard, LockToken, PhantomMutex, guarded};
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
 use zx_types::{ZX_OK, zx_status_t};
@@ -103,7 +104,7 @@ impl Operation {
 
     /// Returns a reference to the parent stream size manager's mutex lock.
     #[inline]
-    pub fn lock(&self) -> &KMutex<StreamSizeManagerLockClass, RawMutex> {
+    pub fn lock(&self) -> &KMutex<StreamSizeManagerLockClass, TrackedMutex> {
         // SAFETY: `self.parent` points to a live, pinned `StreamSizeManager` that outlives this
         // operation because the operation holds a reference/borrow to its parent.
         unsafe { (*self.parent).lock() }
@@ -323,7 +324,7 @@ impl PinnedDrop for Operation {
 pub struct StreamSizeManager {
     #[pin]
     #[mutex]
-    lock: KMutex<RawMutex>,
+    lock: KMutex<TrackedMutex>,
 
     // These queues are usually very shallow, unless stream clients call many operations
     // concurrently.
@@ -356,7 +357,7 @@ impl StreamSizeManager {
 
     /// Returns a reference to the stream size manager's mutex lock.
     #[inline]
-    pub fn lock(&self) -> &KMutex<StreamSizeManagerLockClass, RawMutex> {
+    pub fn lock(&self) -> &KMutex<StreamSizeManagerLockClass, TrackedMutex> {
         &self.lock
     }
 
@@ -470,7 +471,7 @@ impl StreamSizeManager {
     ///  * This function may drop and reacquire the lock guarded by `guard`.
     pub fn begin_write_locked(
         &self,
-        guard: &mut Pin<&mut KMutexGuard<'_, StreamSizeManagerLockClass, RawMutex>>,
+        guard: &mut Pin<&mut KMutexGuard<'_, StreamSizeManagerLockClass, TrackedMutex>>,
         target_size: u64,
         op: &Operation,
     ) -> Option<u64> {
@@ -517,7 +518,7 @@ impl StreamSizeManager {
     ///  * `append_size` must be greater than 0.
     pub fn begin_append_locked(
         &self,
-        guard: &mut Pin<&mut KMutexGuard<'_, StreamSizeManagerLockClass, RawMutex>>,
+        guard: &mut Pin<&mut KMutexGuard<'_, StreamSizeManagerLockClass, TrackedMutex>>,
         append_size: usize,
         op: &Operation,
     ) -> Result<(), Status> {
@@ -589,7 +590,7 @@ impl StreamSizeManager {
     /// Note that this function may drop and reacquire the lock guarded by `guard`.
     pub fn begin_set_stream_size_locked(
         &self,
-        guard: &mut Pin<&mut KMutexGuard<'_, StreamSizeManagerLockClass, RawMutex>>,
+        guard: &mut Pin<&mut KMutexGuard<'_, StreamSizeManagerLockClass, TrackedMutex>>,
         target_size: u64,
         op: &Operation,
     ) {
@@ -653,7 +654,7 @@ impl StreamSizeManager {
     /// reacquires the lock after.
     fn block_until_head_locked(
         &self,
-        guard: &mut Pin<&mut KMutexGuard<'_, StreamSizeManagerLockClass, RawMutex>>,
+        guard: &mut Pin<&mut KMutexGuard<'_, StreamSizeManagerLockClass, TrackedMutex>>,
         op: &Operation,
     ) {
         debug_assert!(core::ptr::eq(op.parent, self));

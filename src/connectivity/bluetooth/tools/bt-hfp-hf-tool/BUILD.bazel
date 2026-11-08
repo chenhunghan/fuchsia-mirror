@@ -1,0 +1,74 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Aggregated into //src/connectivity/bluetooth:bluetooth_tests.
+test_suite(
+    name = "tests",
+    tests = [],  # Include all tests in the package.
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)
+
+# Preserve the hyphenated GN binary output_name for the fuchsia_package.
+# @bazel2gn:raw_attribute:output_name = "bt-hfp-hf-tool"
+rustc_binary(
+    name = "bin",
+    srcs = [
+        "src/fidl.rs",
+        "src/fidl/call.rs",
+        "src/fidl/hands_free.rs",
+        "src/fidl/peer.rs",
+        "src/main.rs",
+        "src/repl.rs",
+        "src/repl/command_handler.rs",
+        "src/repl/commands.rs",
+        "src/repl/runner.rs",
+    ],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.bluetooth:fuchsia.bluetooth_rust",
+        "//sdk/fidl/fuchsia.bluetooth.hfp:fuchsia.bluetooth.hfp_rust",
+        "//src/connectivity/bluetooth/lib/bt-hfp",
+        "//src/connectivity/bluetooth/lib/fuchsia-bluetooth",
+        "//src/lib/async-utils",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-sync",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:rustyline",
+    ],
+)
+
+# Needs reviewer attention (bazel2gn skip): Keeping the dual-built GN
+# fuchsia_unittest_package wired alongside bazel_test_suite fails core.x64-asan
+# testsharder ("some shard names are repeated: affected:AEMU") when
+# use_test_pilot = true sets os = "linux" on the GN test;
+# TODO(https://fxbug.dev/570694755).
+# @bazel2gn:skip
+rustc_test(
+    name = "bt_hfp_hf_tool_bin_test",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate = ":bin",
+    tags = ["manual"],
+)
+
+# Needs reviewer attention (bazel2gn skip): Keeping the dual-built GN
+# fuchsia_unittest_package wired alongside bazel_test_suite fails core.x64-asan
+# testsharder ("some shard names are repeated: affected:AEMU") when
+# use_test_pilot = true sets os = "linux" on the GN test;
+# TODO(https://fxbug.dev/570694755).
+# @bazel2gn:skip
+fx_unittest_package(
+    name = "bt-hfp-hf-tool-unittests",
+    unit_tests = [":bt_hfp_hf_tool_bin_test"],
+)

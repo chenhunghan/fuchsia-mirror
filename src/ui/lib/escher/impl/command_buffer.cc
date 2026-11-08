@@ -94,10 +94,13 @@ bool CommandBuffer::Submit(vk::Queue queue, CommandBufferFinishedCallback callba
       /*signalSemaphoreCount=*/static_cast<uint32_t>(raw_signal_semaphores.size()),
       /*pSignalSemaphores=*/raw_signal_semaphores.data(),
       /*pNext=*/use_protected_memory_ ? &kProtectedSubmitInfo : nullptr);
-  auto submit_result = queue.submit(1, &submit_info, fence_);
+  auto submit_result = queue ? queue.submit(1, &submit_info, fence_) : vk::Result::eErrorDeviceLost;
   if (submit_result != vk::Result::eSuccess) {
     FX_LOGS(WARNING) << "failed queue submission: " << to_string(submit_result);
-    // Clearing these flags allows Retire() to make progress.
+    // Clearing these flags allows Retire() to make progress. Keep `callback_`
+    // alive until Retire() so resources captured by the closure (such as a
+    // FramePtr from Frame::EndFrame()) are not destroyed while earlier command
+    // buffers in the same pool are still in flight.
     is_active_ = is_submitted_ = false;
     return false;
   }
@@ -150,11 +153,6 @@ bool CommandBuffer::ContainsSignalSemaphore(const SemaphorePtr& semaphore) const
 
 void CommandBuffer::KeepAlive(const Resource* resource) {
   FX_DCHECK(is_active_);
-  if (sequence_number_ == resource->sequence_number()) {
-    // The resource is already being kept alive by this CommandBuffer.
-    return;
-  }
-
   resource->KeepAlive(sequence_number_);
 }
 
@@ -438,6 +436,7 @@ bool CommandBuffer::Retire(CommandBufferFinishedCallback* out_callback) {
       return false;
     }
   }
+  const bool submission_succeeded = is_active_;
   is_active_ = is_submitted_ = false;
   ESCHER_CHECKED_VK_RESULT(device_.resetFences(1, &fence_));
 
@@ -448,7 +447,11 @@ bool CommandBuffer::Retire(CommandBufferFinishedCallback* out_callback) {
   auto result = command_buffer_.reset(vk::CommandBufferResetFlags());
   FX_DCHECK(result == vk::Result::eSuccess);
 
-  *out_callback = std::move(callback_);
+  // Only return `callback_` to be invoked if submission succeeded; otherwise
+  // the GPU commands never ran and any wait semaphores were never waited on,
+  // so `callback_` is destroyed here without running (and `Cleanup()`
+  // immediately notifies `sequencer_` afterward to recycle any resources).
+  *out_callback = submission_succeeded ? std::move(callback_) : nullptr;
   callback_ = nullptr;
 
   return true;

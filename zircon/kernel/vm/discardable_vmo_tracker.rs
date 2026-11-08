@@ -4,13 +4,14 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+use crate::ksync_kernel::declare_singleton_critical_mutex;
 use core::cell::UnsafeCell;
 use core::convert::Infallible;
 use core::marker::PhantomPinned;
 use core::pin::{Pin, pin};
 use core::ptr;
 use fbl::{DoublyLinkedList, DoublyLinkedListNode, is_sentinel_ptr};
-use ksync::{KCell, LockToken, declare_singleton_critical_mutex};
+use ksync::{KCell, LockToken};
 use lazy_init::LazyInit;
 use pin_init::{PinInit, pin_data, pin_init};
 use vm_cow_pages_bindings as bindings;

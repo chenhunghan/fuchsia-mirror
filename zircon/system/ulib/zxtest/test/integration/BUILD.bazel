@@ -1,0 +1,98 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/host_tests:host_test.bzl", "host_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [],
+    visibility = ["//zircon/system/ulib:__pkg__"],
+)
+
+# @bazel2gn:transformer=deps
+_COMMON_DEPS = select({
+    "@platforms//os:fuchsia": [
+        "//sdk/lib/fdio",
+        "//zircon/system/ulib/zx",
+    ],
+    "//conditions:default": [],
+})
+
+fx_cc_test_binary(
+    name = "zxtest-context",
+    srcs = ["context_test.cc"],
+    gn_output_name = "zxtest-context-test",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//visibility:private"],
+    deps = ["//zircon/system/ulib/zxtest"],
+)
+
+host_test(
+    name = "zxtest-context_host_test",
+    binary = ":zxtest-context",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+fx_cc_test_binary(
+    name = "zxtest-integration",
+    srcs = [
+        "assertions_test.c",
+        "assertions_test.cc",
+        "helper.cc",
+        "helper.h",
+        "main.cc",
+        "print_test.c",
+        "print_test.cc",
+        "printvalue_test.cc",
+        "register_test.c",
+        "register_test.cc",
+    ],
+    # TODO(https://fxbug.dev/570694755): zxtest uses VLAs; GN propagates
+    # //build/config:Wno-vla-cxx-extension via zxtest's public_configs.
+    # @bazel2gn:skip
+    copts = ["-Wno-vla-cxx-extension"],
+    gn_output_name = "zxtest-integration-test",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/zxtest",
+    ] + _COMMON_DEPS,
+)
+
+host_test(
+    name = "zxtest-integration_host_test",
+    binary = ":zxtest-integration",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+fx_cc_test_binary(
+    name = "zxtest-integration-streams",
+    srcs = [
+        "assertions_streams_test.cc",
+        "helper.cc",
+        "helper.h",
+        "main.cc",
+    ],
+    # TODO(https://fxbug.dev/570694755): zxtest uses VLAs; GN propagates
+    # //build/config:Wno-vla-cxx-extension via zxtest-streams's public_configs.
+    # @bazel2gn:skip
+    copts = ["-Wno-vla-cxx-extension"],
+    gn_output_name = "zxtest-integration-streams-test",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/zxtest:zxtest-streams",
+    ] + _COMMON_DEPS,
+)
+
+host_test(
+    name = "zxtest-integration-streams_host_test",
+    binary = ":zxtest-integration-streams",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)

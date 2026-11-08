@@ -1,0 +1,103 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host:defs.bzl", "rustc_binary_host_tool")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/host_tests:host_test_data.bzl", "host_test_data_map")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":doc_checker_bin_test"],
+    visibility = ["//tools:__pkg__"],
+)
+
+# Builds doc_checker, a Rust based binary.
+rustc_binary_host_tool(
+    name = "doc_checker_bin",
+    testonly = True,
+    srcs = [
+        "src/checker.rs",
+        "src/code_block_checker.rs",
+        "src/include_checker.rs",
+        "src/link_checker.rs",
+        "src/main.rs",
+        "src/md_element.rs",
+        "src/mermaid_checker.rs",
+        "src/parser.rs",
+        "src/path_ext.rs",
+        "src/yaml.rs",
+        "src/yaml/toc_checker.rs",
+    ],
+    binary_name = "doc-checker",
+    compile_data = [
+        "//docs/reference/hardware:_drivers_areas.yaml",
+        "//docs/reference/hardware:_supported_cpu_architecture.yaml",
+    ],
+    crate_name = "doc_checker",
+    edition = "2024",
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:async-trait",
+    ],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-hyper",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:cfg-if",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:glob",
+        "//third_party/rust_crates/vendor:http",
+        "//third_party/rust_crates/vendor:http-body-util",
+        "//third_party/rust_crates/vendor:hyper",
+        "//third_party/rust_crates/vendor:pulldown-cmark",
+        "//third_party/rust_crates/vendor:regex",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:serde_yaml",
+        "//third_party/rust_crates/vendor:url",
+    ],
+)
+
+# Test data for doc_checker.
+host_test_data_map(
+    name = "doc_checker_test_data",
+    testonly = True,
+    files_map = {
+        f: f
+        for f in [
+            "doc_checker_test_data/docs/README.md",
+            "doc_checker_test_data/docs/_common/_included.md",
+            "doc_checker_test_data/docs/_hidden_dir/unreachable.md",
+            "doc_checker_test_data/docs/_hidden_in_toc.md",
+            "doc_checker_test_data/docs/_toc.yaml",
+            "doc_checker_test_data/docs/_unreachable_hidden.md",
+            "doc_checker_test_data/docs/cycle/_toc.yaml",
+            "doc_checker_test_data/docs/cycle/nested/_toc.yaml",
+            "doc_checker_test_data/docs/gen/build_arguments.md",
+            "doc_checker_test_data/docs/images/fuchsia_icon_256x256.png",
+            "doc_checker_test_data/docs/include_here.md",
+            "doc_checker_test_data/docs/no_readme/_toc.yaml",
+            "doc_checker_test_data/docs/no_readme/details.md",
+            "doc_checker_test_data/docs/path.md",
+            "doc_checker_test_data/docs/second.md",
+            "doc_checker_test_data/docs/unreachable.md",
+            "doc_checker_test_data/docs/unused/_toc.yaml",
+        ]
+    },
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+host_rustc_test(
+    name = "doc_checker_bin_test",
+    crate = ":doc_checker_bin",
+    edition = "2024",
+    test_data = [
+        ":doc_checker_test_data",
+    ],
+)

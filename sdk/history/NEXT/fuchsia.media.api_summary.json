@@ -729,6 +729,147 @@
         "type": "uint32"
     },
     {
+        "kind": "enum/member",
+        "name": "fuchsia.media/AudioChannelId2.BC",
+        "value": "9"
+    },
+    {
+        "kind": "enum/member",
+        "name": "fuchsia.media/AudioChannelId2.BFC",
+        "value": "22"
+    },
+    {
+        "kind": "enum/member",
+        "name": "fuchsia.media/AudioChannelId2.BFL",
+        "value": "21"
+    },
+    {
+        "kind": "enum/member",
+        "name": "fuchsia.media/AudioChannelId2.BFR",
+        "value": "23"
+    },
+    {
+        "kind": "enum/member",
+        "name": "fuchsia.media/AudioChannelId2.BL",
+        "value": "5"
+    },
+    {
+        "kind": "enum/member",
+        "name": "fuchsia.media/AudioChannelId2.BR",
+        "value": "6"
+    },
+    {
+        "kind": "enum/member",
+        "name": "fuchsia.media/AudioChannelId2.FC",
+        "value": "3"
+    },
+    {
+        "kind": "enum/member",
+        "name": "fuchsia.media/AudioChannelId2.FL",
+        "value": "1"
+    },
+    {
+        "kind": "enum/member",
+        "name": "fuchsia.media/AudioChannelId2.FLC",
+        "value": "7"
+    },
+    {
+        "kind": "enum/member",
+        "name": "fuchsia.media/AudioChannelId2.FR",
+        "value": "2"
+    },
+    {
+        "kind": "enum/member",
+        "name": "fuchsia.media/AudioChannelId2.FRC",
+        "value": "8"
+    },
+    {
+        "kind": "enum/member",
+        "name": "fuchsia.media/AudioChannelId2.FWL",
+        "value": "25"
+    },
+    {
+        "kind": "enum/member",
+        "name": "fuchsia.media/AudioChannelId2.FWR",
+        "value": "26"
+    },
+    {
+        "kind": "enum/member",
+        "name": "fuchsia.media/AudioChannelId2.LFE",
+        "value": "4"
+    },
+    {
+        "kind": "enum/member",
+        "name": "fuchsia.media/AudioChannelId2.LFE2",
+        "value": "24"
+    },
+    {
+        "kind": "enum/member",
+        "name": "fuchsia.media/AudioChannelId2.SKIP",
+        "value": "0"
+    },
+    {
+        "kind": "enum/member",
+        "name": "fuchsia.media/AudioChannelId2.SL",
+        "value": "10"
+    },
+    {
+        "kind": "enum/member",
+        "name": "fuchsia.media/AudioChannelId2.SR",
+        "value": "11"
+    },
+    {
+        "kind": "enum/member",
+        "name": "fuchsia.media/AudioChannelId2.TBC",
+        "value": "17"
+    },
+    {
+        "kind": "enum/member",
+        "name": "fuchsia.media/AudioChannelId2.TBL",
+        "value": "16"
+    },
+    {
+        "kind": "enum/member",
+        "name": "fuchsia.media/AudioChannelId2.TBR",
+        "value": "18"
+    },
+    {
+        "kind": "enum/member",
+        "name": "fuchsia.media/AudioChannelId2.TC",
+        "value": "12"
+    },
+    {
+        "kind": "enum/member",
+        "name": "fuchsia.media/AudioChannelId2.TFC",
+        "value": "14"
+    },
+    {
+        "kind": "enum/member",
+        "name": "fuchsia.media/AudioChannelId2.TFL",
+        "value": "13"
+    },
+    {
+        "kind": "enum/member",
+        "name": "fuchsia.media/AudioChannelId2.TFR",
+        "value": "15"
+    },
+    {
+        "kind": "enum/member",
+        "name": "fuchsia.media/AudioChannelId2.TSL",
+        "value": "19"
+    },
+    {
+        "kind": "enum/member",
+        "name": "fuchsia.media/AudioChannelId2.TSR",
+        "value": "20"
+    },
+    {
+        "kind": "enum",
+        "name": "fuchsia.media/AudioChannelId2",
+        "strictness": "flexible",
+        "type": "uint32"
+    },
+    {
         "kind": "union/member",
         "name": "fuchsia.media/AudioCompressedFormat.aac",
         "ordinal": "1",
@@ -1777,6 +1918,32 @@
     },
     {
         "kind": "enum/member",
+        "name": "fuchsia.media/AudioPcmMode2.ALAW",
+        "value": "2"
+    },
+    {
+        "kind": "enum/member",
+        "name": "fuchsia.media/AudioPcmMode2.FLOAT",
+        "value": "4"
+    },
+    {
+        "kind": "enum/member",
+        "name": "fuchsia.media/AudioPcmMode2.LINEAR",
+        "value": "1"
+    },
+    {
+        "kind": "enum/member",
+        "name": "fuchsia.media/AudioPcmMode2.MULAW",
+        "value": "3"
+    },
+    {
+        "kind": "enum",
+        "name": "fuchsia.media/AudioPcmMode2",
+        "strictness": "flexible",
+        "type": "uint32"
+    },
+    {
+        "kind": "enum/member",
         "name": "fuchsia.media/AudioRenderUsage.BACKGROUND",
         "value": "0"
     },
@@ -2638,9 +2805,21 @@
     },
     {
         "kind": "table/member",
+        "name": "fuchsia.media/FormatDetails.encrypted_format",
+        "ordinal": "11",
+        "type": "fuchsia.media/EncryptedFormat"
+    },
+    {
+        "kind": "table/member",
         "name": "fuchsia.media/FormatDetails.format_details_version_ordinal",
         "ordinal": "1",
         "type": "uint64"
+    },
+    {
+        "kind": "table/member",
+        "name": "fuchsia.media/FormatDetails.image_format",
+        "ordinal": "9",
+        "type": "fuchsia.images2/ImageFormat"
     },
     {
         "kind": "table/member",
@@ -2659,6 +2838,12 @@
         "name": "fuchsia.media/FormatDetails.pass_through_parameters",
         "ordinal": "5",
         "type": "vector<fuchsia.media/Parameter>"
+    },
+    {
+        "kind": "table/member",
+        "name": "fuchsia.media/FormatDetails.pcm_format",
+        "ordinal": "10",
+        "type": "fuchsia.media/PcmFormat2"
     },
     {
         "kind": "table/member",
@@ -2816,6 +3001,12 @@
     },
     {
         "kind": "const",
+        "name": "fuchsia.media/MAX_AUDIO_CHANNEL_ID2",
+        "type": "uint32",
+        "value": "2147483647"
+    },
+    {
+        "kind": "const",
         "name": "fuchsia.media/MAX_ENCRYPTION_SCHEME_SIZE",
         "type": "uint32",
         "value": "100"
@@ -2843,6 +3034,12 @@
         "name": "fuchsia.media/MAX_PCM_CHANNEL_COUNT",
         "type": "uint32",
         "value": "8"
+    },
+    {
+        "kind": "const",
+        "name": "fuchsia.media/MAX_PCM_FORMAT2_CHANNEL_COUNT",
+        "type": "uint32",
+        "value": "64"
     },
     {
         "kind": "const",
@@ -2933,6 +3130,12 @@
         "name": "fuchsia.media/METADATA_SOURCE_TITLE",
         "type": "string",
         "value": "fuchsia.media.source_title"
+    },
+    {
+        "kind": "const",
+        "name": "fuchsia.media/MIN_EXTENDED_AUDIO_CHANNEL_ID2",
+        "type": "uint32",
+        "value": "1862270976"
     },
     {
         "kind": "const",
@@ -3114,6 +3317,40 @@
     {
         "kind": "struct",
         "name": "fuchsia.media/PcmFormat"
+    },
+    {
+        "kind": "table/member",
+        "name": "fuchsia.media/PcmFormat2.bits_per_sample",
+        "ordinal": "2",
+        "type": "uint32"
+    },
+    {
+        "kind": "table/member",
+        "name": "fuchsia.media/PcmFormat2.bytes_per_sample",
+        "ordinal": "5",
+        "type": "uint32"
+    },
+    {
+        "kind": "table/member",
+        "name": "fuchsia.media/PcmFormat2.channel_map",
+        "ordinal": "4",
+        "type": "vector<fuchsia.media/AudioChannelId2>:64"
+    },
+    {
+        "kind": "table/member",
+        "name": "fuchsia.media/PcmFormat2.frames_per_second",
+        "ordinal": "3",
+        "type": "uint32"
+    },
+    {
+        "kind": "table/member",
+        "name": "fuchsia.media/PcmFormat2.pcm_mode",
+        "ordinal": "1",
+        "type": "fuchsia.media/AudioPcmMode2"
+    },
+    {
+        "kind": "table",
+        "name": "fuchsia.media/PcmFormat2"
     },
     {
         "kind": "enum/member",
@@ -3657,12 +3894,6 @@
         "name": "fuchsia.media/StreamBufferPartialSettings.sysmem2_token",
         "ordinal": "7",
         "type": "fuchsia.sysmem2/BufferCollectionToken"
-    },
-    {
-        "kind": "table/member",
-        "name": "fuchsia.media/StreamBufferPartialSettings.sysmem_token",
-        "ordinal": "6",
-        "type": "fuchsia.sysmem/BufferCollectionToken"
     },
     {
         "kind": "table",

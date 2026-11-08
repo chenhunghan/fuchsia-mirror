@@ -1803,7 +1803,6 @@ enable_msi:
 		return status;
 	}
 
-	trans_pcie->irq_mode = irq_mode;
 	return status;
 }
 

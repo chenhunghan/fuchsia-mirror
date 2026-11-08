@@ -8,6 +8,7 @@ import("//build/python/python_library.gni")
 
 common_deps = [
   "//scripts/lib/async_utils",
+  "//scripts/lib/build_dir",
   "//scripts/lib/fx_cmd",
 ]
 

@@ -76,23 +76,6 @@ impl FileOptions {
         }
         options
     }
-
-    pub(crate) fn to_io1(&self) -> fio::OpenFlags {
-        let mut flags = fio::OpenFlags::empty();
-        if self.rights.contains(fio::Operations::READ_BYTES) {
-            flags |= fio::OpenFlags::RIGHT_READABLE;
-        }
-        if self.rights.contains(fio::Operations::WRITE_BYTES) {
-            flags |= fio::OpenFlags::RIGHT_WRITABLE;
-        }
-        if self.rights.contains(fio::Operations::EXECUTE) {
-            flags |= fio::OpenFlags::RIGHT_EXECUTABLE;
-        }
-        if self.is_append {
-            flags |= fio::OpenFlags::APPEND;
-        }
-        flags
-    }
 }
 
 impl From<&FileOptions> for fio::Flags {

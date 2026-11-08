@@ -18,16 +18,16 @@ bool IsSpecialCaseSnapshot(const std::string& uuid) {
          uuid == kShutdownSnapshotUuid || uuid == kNotPersistedSnapshotUuid;
 }
 
-ManagedSnapshot::Archive::Archive(const fuchsia::feedback::Attachment& attachment)
-    : key(attachment.key), value() {
-  const ::fuchsia::mem::Buffer& archive = attachment.value;
-  if (!archive.vmo.is_valid()) {
+ManagedSnapshot::Archive::Archive(const fuchsia_feedback::Attachment& attachment)
+    : key(attachment.key()), value() {
+  const fuchsia_mem::Buffer& archive = attachment.value();
+  if (!archive.vmo().is_valid()) {
     return;
   }
 
-  value = SizedData(archive.size, 0u);
+  value = SizedData(archive.size(), 0u);
   if (const zx_status_t status =
-          archive.vmo.read(value.data(), /*offset=*/0u, /*len=*/value.size());
+          archive.vmo().read(value.data(), /*offset=*/0u, /*len=*/value.size());
       status != ZX_OK) {
     FX_PLOGS(ERROR, status) << "Failed to read vmo";
     return;

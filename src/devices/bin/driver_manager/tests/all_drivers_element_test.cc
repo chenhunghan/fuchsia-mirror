@@ -24,13 +24,19 @@ class FakeTopology : public fidl::Server<fuchsia_power_broker::Topology> {
   }
 
   void AddElement(AddElementRequest& request, AddElementCompleter::Sync& completer) override {
+    if (on_add_element_) {
+      on_add_element_(request);
+    }
+    added_elements_.push_back(std::move(request));
     completer.Reply(fit::ok());
   }
 
   void handle_unknown_method(fidl::UnknownMethodMetadata<fuchsia_power_broker::Topology> metadata,
                              fidl::UnknownMethodCompleter::Sync& completer) override {}
 
+  fit::function<void(AddElementRequest&)> on_add_element_;
   std::vector<LeaseRequest> lease_requests_;
+  std::vector<AddElementRequest> added_elements_;
 };
 
 class FakeElementControl : public fidl::Server<fuchsia_power_broker::ElementControl> {
@@ -63,6 +69,11 @@ class FakeElementControl : public fidl::Server<fuchsia_power_broker::ElementCont
     }
   }
 
+  void RemoveDependency(RemoveDependencyRequest&,
+                        RemoveDependencyCompleter::Sync& completer) override {
+    completer.Reply(fit::ok());
+  }
+
   // Simulates Power Broker removing the dependency on the element that |token| belongs to. Power
   // Broker does this when the element is removed (e.g. when its node restarts), because the
   // dependency is added with |remove_with_required_element|.
@@ -89,20 +100,33 @@ class FakeElementControl : public fidl::Server<fuchsia_power_broker::ElementCont
   // The number of AddDependency requests rejected because the dependency already existed.
   size_t already_exists_count_ = 0;
 
- private:
   static zx_koid_t GetKoid(const zx::event& event) {
     zx_info_handle_basic_t info;
     ZX_ASSERT(event.get_info(ZX_INFO_HANDLE_BASIC, &info, sizeof(info), nullptr, nullptr) == ZX_OK);
     return info.koid;
   }
 
+ private:
   // The koids of the power tokens of the elements that currently have an accepted dependency.
   std::unordered_set<zx_koid_t> dependency_koids_;
+};
+
+class AllDriversTestNodeManager : public TestNodeManagerBase {
+ public:
+  void OnNodeUnbinding(std::shared_ptr<const Node> node) override {
+    if (element_) {
+      element_->OnNodeUnbinding(std::move(node));
+    }
+  }
+
+  AllDriversElement* element_ = nullptr;
 };
 
 class AllDriversElementTest : public DriverManagerTestBase {
  public:
   NodeManager* GetNodeManager() override { return &node_manager_; }
+
+  void SetElementForNodeManager(AllDriversElement* element) { node_manager_.element_ = element; }
 
   static void CompleteStartupTransition(AllDriversElement& element) {
     element.CompleteStartupTransition();
@@ -117,7 +141,7 @@ class AllDriversElementTest : public DriverManagerTestBase {
   }
 
  private:
-  TestNodeManagerBase node_manager_;
+  AllDriversTestNodeManager node_manager_;
 };
 
 }  // namespace driver_manager
@@ -477,8 +501,9 @@ TEST_F(AllDriversElementTest, TestCompleteStartupTransitionAddsDependencies) {
   ASSERT_EQ(fake_control.added_dependencies_.size(), 1u);
   EXPECT_EQ(fake_control.added_dependencies_[0].dependent_level(), 1u);
 
-  // A node that was already bound when CompleteStartupTransition() ran can still have OnNodeBound()
-  // called for it afterwards. The second request is rejected with ALREADY_EXISTS, which is ignored.
+  // A node that was already bound when CompleteStartupTransition() ran can still have
+  // OnNodeBound() called for it afterwards. The second request is rejected with ALREADY_EXISTS,
+  // which is ignored.
   element.OnNodeBound(child);
   RunLoopUntilIdle();
   EXPECT_EQ(fake_control.added_dependencies_.size(), 1u);
@@ -548,7 +573,7 @@ TEST_F(AllDriversElementTest, TestLeaseAllDrivers) {
   bindings.AddBinding(dispatcher(), std::move(topology_server), &fake_topology,
                       fidl::kIgnoreBindingClosure);
 
-  PowerManager power_manager(dispatcher(), std::move(topology_client), std::nullopt, false);
+  PowerManager power_manager(dispatcher(), std::move(topology_client), std::nullopt, false, root());
 
   // Setup a topology: parent_node (unbound) -> child_a (bound), child_b (unbound) -> grandchild
   // (bound)
@@ -723,13 +748,23 @@ TEST_F(AllDriversElementTest, TestOnNodeBoundWithNonPowerEnabledNodes) {
   EXPECT_EQ(fake_control.added_dependencies_.size(), 1u);
 }
 
+bool IsPeerClosed(const zx::eventpair& handle) {
+  zx_signals_t pending = 0;
+  return handle.wait_one(ZX_EVENTPAIR_PEER_CLOSED, zx::time::infinite_past(), &pending) == ZX_OK;
+}
+
 TEST_F(AllDriversElementTest, TestZeroPowerEnabledDrivers) {
   auto child1 = CreateNode("child1", root());
   auto child2 = CreateNode("child2", child1);
   child1->UpdateBoundStateForTesting(true, false);
   child2->UpdateBoundStateForTesting(true, false);
 
-  AllDriversElement element(nullptr, root());
+  zx::eventpair bootup_lease, bootup_lease_peer;
+  ASSERT_EQ(zx::eventpair::create(0, &bootup_lease, &bootup_lease_peer), ZX_OK);
+
+  AllDriversElement element(nullptr, root(), std::move(bootup_lease));
+  auto [runner_client, runner_server] =
+      fidl::Endpoints<fuchsia_power_broker::ElementRunner>::Create();
   auto [control_client, control_server] =
       fidl::Endpoints<fuchsia_power_broker::ElementControl>::Create();
   FakeElementControl fake_control;
@@ -740,13 +775,24 @@ TEST_F(AllDriversElementTest, TestZeroPowerEnabledDrivers) {
   PowerElementHandles handles{
       .element_control = fidl::Client<fuchsia_power_broker::ElementControl>(
           std::move(control_client), dispatcher()),
+      .element_runner = std::move(runner_server),
   };
   element.AttachElement(dispatcher(), std::move(handles));
-  SetCurrentLevel(element, 1);
 
-  CompleteStartupTransition(element);
+  // OnBootupComplete before SetLevel(1) keeps bootup_lease until SetLevel(1) arrives.
+  element.OnBootupComplete();
+  RunLoopUntilIdle();
+  EXPECT_FALSE(IsPeerClosed(bootup_lease_peer));
+
+  fidl::WireClient<fuchsia_power_broker::ElementRunner> runner(std::move(runner_client),
+                                                               dispatcher());
+  runner->SetLevel(1).Then(
+      [](fidl::WireUnownedResult<fuchsia_power_broker::ElementRunner::SetLevel>& result) {
+        EXPECT_TRUE(result.ok());
+      });
   RunLoopUntilIdle();
   EXPECT_TRUE(fake_control.added_dependencies_.empty());
+  EXPECT_TRUE(IsPeerClosed(bootup_lease_peer));
 }
 
 TEST_F(AllDriversElementTest, TestLeaseAllDriversMixedPowerTopology) {
@@ -758,7 +804,7 @@ TEST_F(AllDriversElementTest, TestLeaseAllDriversMixedPowerTopology) {
   bindings.AddBinding(dispatcher(), std::move(topology_server), &fake_topology,
                       fidl::kIgnoreBindingClosure);
 
-  PowerManager power_manager(dispatcher(), std::move(topology_client), std::nullopt, false);
+  PowerManager power_manager(dispatcher(), std::move(topology_client), std::nullopt, false, root());
 
   auto parent = CreateNode("parent_node");
   parent->UpdateBoundStateForTesting(true, false);  // bound, no PE
@@ -788,6 +834,457 @@ TEST_F(AllDriversElementTest, TestLeaseAllDriversMixedPowerTopology) {
   EXPECT_TRUE(leased_names.contains("grandchild_pe"));
   EXPECT_FALSE(leased_names.contains("parent_node"));
   EXPECT_FALSE(leased_names.contains("child_no_pe"));
+}
+
+class FakeCpuElementManager : public fidl::Server<fuchsia_power_system::CpuElementManager> {
+ public:
+  // NOLINTNEXTLINE(readability-convert-member-functions-to-static)
+  void GetCpuDependencyToken(GetCpuDependencyTokenCompleter::Sync& completer) override {
+    zx::event token;
+    ZX_ASSERT(zx::event::create(0, &token) == ZX_OK);
+    fuchsia_power_system::Cpu res;
+    res.assertive_dependency_token(std::move(token));
+    completer.Reply(std::move(res));
+  }
+
+  // NOLINTNEXTLINE(readability-convert-member-functions-to-static)
+  void AddExecutionStateDependency(AddExecutionStateDependencyRequest& request,
+                                   AddExecutionStateDependencyCompleter::Sync& completer) override {
+    execution_state_deps_.push_back(std::move(request));
+    completer.Reply(fit::ok());
+  }
+
+  void handle_unknown_method(
+      fidl::UnknownMethodMetadata<fuchsia_power_system::CpuElementManager> metadata,
+      fidl::UnknownMethodCompleter::Sync& completer) override {}
+
+  std::vector<AddExecutionStateDependencyRequest> execution_state_deps_;
+};
+
+// Drives a PowerManager with a fake Power Broker topology and a fake SAG CpuElementManager, with
+// |wait_for_storage_token| enabled so AllDrivers creation depends on both the CPU and storage
+// tokens.
+class PowerManagerBootupTest : public AllDriversElementTest {
+ public:
+  void SetUp() override {
+    AllDriversElementTest::SetUp();
+    auto [topology_client, topology_server] =
+        fidl::Endpoints<fuchsia_power_broker::Topology>::Create();
+    topology_bindings_.AddBinding(dispatcher(), std::move(topology_server), &fake_topology_,
+                                  fidl::kIgnoreBindingClosure);
+    fake_topology_.on_add_element_ = [this](fuchsia_power_broker::ElementSchema& req) {
+      control_bindings_.AddBinding(
+          dispatcher(), std::move(*req.element_control()),
+          req.element_name() == "AllDrivers" ? &all_drivers_control_ : &storage_control_,
+          fidl::kIgnoreBindingClosure);
+    };
+
+    auto [cpu_mgr_client, cpu_mgr_server] =
+        fidl::Endpoints<fuchsia_power_system::CpuElementManager>::Create();
+    sag_bindings_.AddBinding(dispatcher(), std::move(cpu_mgr_server), &fake_sag_,
+                             fidl::kIgnoreBindingClosure);
+
+    power_manager_.emplace(dispatcher(), std::move(topology_client), std::move(cpu_mgr_client),
+                           /*wait_for_storage_token=*/true, root());
+
+    auto [dm_cpu_client, dm_cpu_server] =
+        fidl::Endpoints<fuchsia_power_system::CpuElementManager>::Create();
+    power_manager_bindings_.AddBinding(dispatcher(), std::move(dm_cpu_server), &*power_manager_,
+                                       fidl::kIgnoreBindingClosure);
+    storage_driver_client_.Bind(std::move(dm_cpu_client), dispatcher());
+  }
+
+  // Simulates the storage driver handing its token to driver_manager.
+  void SendStorageToken() {
+    zx::event storage_token;
+    ASSERT_EQ(zx::event::create(0, &storage_token), ZX_OK);
+    fuchsia_power_system::CpuElementManagerAddExecutionStateDependencyRequest req;
+    req.dependency_token(std::move(storage_token));
+    req.power_level(1);
+    storage_driver_client_->AddExecutionStateDependency(std::move(req))
+        .Then([](fidl::Result<fuchsia_power_system::CpuElementManager::AddExecutionStateDependency>&
+                     res) { EXPECT_TRUE(res.is_ok()); });
+    RunLoopUntilIdle();
+  }
+
+  // Verifies the AllDrivers schema (level 1, CPU + DF-Storage deps, initial lease) and takes the
+  // bootup lease peer and ElementRunner client out of it.
+  void TakeAllDriversHandles(zx::eventpair* bootup_lease_peer,
+                             fidl::WireClient<fuchsia_power_broker::ElementRunner>* runner) {
+    ASSERT_EQ(fake_topology_.added_elements_.size(), 2u);
+    auto& schema = fake_topology_.added_elements_.back();
+    EXPECT_EQ(schema.element_name(), "AllDrivers");
+    EXPECT_EQ(schema.initial_current_level(), 1u);
+    ASSERT_TRUE(schema.dependencies().has_value());
+    EXPECT_EQ(schema.dependencies()->size(), 2u);
+    ASSERT_TRUE(schema.initial_lease_token().has_value());
+    *bootup_lease_peer = std::move(*schema.initial_lease_token());
+    runner->Bind(std::move(*schema.element_runner()), dispatcher());
+    ASSERT_EQ(fake_sag_.execution_state_deps_.size(), 1u);
+  }
+
+  static void SetLevel1(fidl::WireClient<fuchsia_power_broker::ElementRunner>& runner) {
+    runner->SetLevel(1).Then(
+        [](fidl::WireUnownedResult<fuchsia_power_broker::ElementRunner::SetLevel>& result) {
+          EXPECT_TRUE(result.ok());
+        });
+  }
+
+ protected:
+  FakeTopology fake_topology_;
+  FakeCpuElementManager fake_sag_;
+  FakeElementControl storage_control_;
+  FakeElementControl all_drivers_control_;
+  fidl::ServerBindingGroup<fuchsia_power_broker::Topology> topology_bindings_;
+  fidl::ServerBindingGroup<fuchsia_power_system::CpuElementManager> sag_bindings_;
+  fidl::ServerBindingGroup<fuchsia_power_broker::ElementControl> control_bindings_;
+  std::optional<PowerManager> power_manager_;
+  // Declared after |power_manager_| so it is destroyed first.
+  fidl::ServerBindingGroup<fuchsia_power_system::CpuElementManager> power_manager_bindings_;
+  fidl::Client<fuchsia_power_system::CpuElementManager> storage_driver_client_;
+};
+
+TEST_F(PowerManagerBootupTest, TestEarlyAllDriversCreationBeforeBootup) {
+  power_manager_->FetchCpuToken();
+  RunLoopUntilIdle();
+  // The CPU token alone is not enough while waiting for the storage token.
+  EXPECT_TRUE(fake_topology_.added_elements_.empty());
+
+  // Before OnBootupComplete(), AllDrivers is created at level 1 with a bootup lease and SAG gets
+  // its execution state dependency.
+  SendStorageToken();
+  zx::eventpair bootup_lease_peer;
+  fidl::WireClient<fuchsia_power_broker::ElementRunner> runner;
+  ASSERT_NO_FATAL_FAILURE(TakeAllDriversHandles(&bootup_lease_peer, &runner));
+  all_drivers_control_.auto_reply_add_dependency_ = false;
+  SetLevel1(runner);
+
+  // Nodes binding before OnBootupComplete() must not trigger transition or drop bootup_lease.
+  auto parent = CreateNode("parent", root());
+  parent->UpdateBoundStateForTesting(true);
+  auto child = CreateNode("child", parent);
+  child->UpdateBoundStateForTesting(true);
+  zx::eventpair child_lease, child_lease_peer;
+  ASSERT_EQ(zx::eventpair::create(0, &child_lease, &child_lease_peer), ZX_OK);
+  child->set_startup_lease_for_testing(std::move(child_lease));
+  power_manager_->OnNodeBound(parent);
+  power_manager_->OnNodeBound(child);
+  RunLoopUntilIdle();
+  EXPECT_TRUE(all_drivers_control_.added_dependencies_.empty());
+  EXPECT_FALSE(IsPeerClosed(bootup_lease_peer));
+
+  // OnBootupComplete() adds only leaf child and holds both leases until AddDependency replies.
+  power_manager_->OnBootupComplete();
+  RunLoopUntilIdle();
+  ASSERT_EQ(all_drivers_control_.added_dependencies_.size(), 1u);
+  EXPECT_FALSE(IsPeerClosed(child_lease_peer));
+  EXPECT_FALSE(IsPeerClosed(bootup_lease_peer));
+
+  all_drivers_control_.ReplyAddDependencies();
+  RunLoopUntilIdle();
+  EXPECT_TRUE(IsPeerClosed(child_lease_peer));
+  EXPECT_TRUE(IsPeerClosed(bootup_lease_peer));
+}
+
+TEST_F(PowerManagerBootupTest, TestTokensArriveAfterBootupComplete) {
+  auto child = CreateNode("child", root());
+  child->UpdateBoundStateForTesting(true);
+  zx::eventpair child_lease, child_lease_peer;
+  ASSERT_EQ(zx::eventpair::create(0, &child_lease, &child_lease_peer), ZX_OK);
+  child->set_startup_lease_for_testing(std::move(child_lease));
+
+  // Bootup completes before either token is available: nothing can be created yet.
+  power_manager_->OnBootupComplete();
+  power_manager_->FetchCpuToken();
+  RunLoopUntilIdle();
+  EXPECT_TRUE(fake_topology_.added_elements_.empty());
+
+  // The storage token arrives last and creates AllDrivers, which already knows bootup is done.
+  SendStorageToken();
+  zx::eventpair bootup_lease_peer;
+  fidl::WireClient<fuchsia_power_broker::ElementRunner> runner;
+  ASSERT_NO_FATAL_FAILURE(TakeAllDriversHandles(&bootup_lease_peer, &runner));
+  all_drivers_control_.auto_reply_add_dependency_ = false;
+  RunLoopUntilIdle();
+  EXPECT_TRUE(all_drivers_control_.added_dependencies_.empty());
+  EXPECT_FALSE(IsPeerClosed(bootup_lease_peer));
+
+  // SetLevel(1) runs the startup transition; leases are held until AddDependency replies.
+  SetLevel1(runner);
+  RunLoopUntilIdle();
+  ASSERT_EQ(all_drivers_control_.added_dependencies_.size(), 1u);
+  EXPECT_FALSE(IsPeerClosed(child_lease_peer));
+  EXPECT_FALSE(IsPeerClosed(bootup_lease_peer));
+
+  all_drivers_control_.ReplyAddDependencies();
+  RunLoopUntilIdle();
+  EXPECT_TRUE(IsPeerClosed(child_lease_peer));
+  EXPECT_TRUE(IsPeerClosed(bootup_lease_peer));
+}
+
+TEST_F(AllDriversElementTest, TestOnNodeUnbindingPromotesParentToLeaf) {
+  auto parent = CreateNode("parent", root());
+  auto child = CreateNode("child", parent);
+
+  parent->UpdateBoundStateForTesting(true);
+  child->UpdateBoundStateForTesting(true);
+
+  AllDriversElement element(nullptr, root());
+  auto [control_client, control_server] =
+      fidl::Endpoints<fuchsia_power_broker::ElementControl>::Create();
+  FakeElementControl fake_control;
+  fidl::ServerBindingGroup<fuchsia_power_broker::ElementControl> bindings;
+  bindings.AddBinding(dispatcher(), std::move(control_server), &fake_control,
+                      fidl::kIgnoreBindingClosure);
+
+  PowerElementHandles handles{
+      .element_control = fidl::Client<fuchsia_power_broker::ElementControl>(
+          std::move(control_client), dispatcher()),
+  };
+  element.AttachElement(dispatcher(), std::move(handles));
+  SetCurrentLevel(element, 1);
+
+  CompleteStartupTransition(element);
+  RunLoopUntilIdle();
+
+  ASSERT_EQ(fake_control.added_dependencies_.size(), 1u);
+  EXPECT_EQ(FakeElementControl::GetKoid(*fake_control.added_dependencies_[0].requires_token()),
+            FakeElementControl::GetKoid(child->DuplicatePowerToken()));
+
+  // Unbind the leaf child node; parent should now be promoted to a leaf node.
+  child->UpdateBoundStateForTesting(false);
+  element.OnNodeUnbinding(child);
+  RunLoopUntilIdle();
+
+  ASSERT_EQ(fake_control.added_dependencies_.size(), 2u);
+  EXPECT_EQ(FakeElementControl::GetKoid(*fake_control.added_dependencies_[1].requires_token()),
+            FakeElementControl::GetKoid(parent->DuplicatePowerToken()));
+}
+
+TEST_F(AllDriversElementTest, TestOnNodeUnbindingParentWithRemainingBoundChild) {
+  auto parent = CreateNode("parent", root());
+  auto child_a = CreateNode("child_a", parent);
+  auto child_b = CreateNode("child_b", parent);
+
+  parent->UpdateBoundStateForTesting(true);
+  child_a->UpdateBoundStateForTesting(true);
+  child_b->UpdateBoundStateForTesting(true);
+
+  AllDriversElement element(nullptr, root());
+  auto [control_client, control_server] =
+      fidl::Endpoints<fuchsia_power_broker::ElementControl>::Create();
+  FakeElementControl fake_control;
+  fidl::ServerBindingGroup<fuchsia_power_broker::ElementControl> bindings;
+  bindings.AddBinding(dispatcher(), std::move(control_server), &fake_control,
+                      fidl::kIgnoreBindingClosure);
+
+  PowerElementHandles handles{
+      .element_control = fidl::Client<fuchsia_power_broker::ElementControl>(
+          std::move(control_client), dispatcher()),
+  };
+  element.AttachElement(dispatcher(), std::move(handles));
+  SetCurrentLevel(element, 1);
+
+  CompleteStartupTransition(element);
+  RunLoopUntilIdle();
+
+  ASSERT_EQ(fake_control.added_dependencies_.size(), 2u);
+
+  // Unbinding child_a leaves child_b bound, so parent is not yet a leaf.
+  child_a->UpdateBoundStateForTesting(false);
+  element.OnNodeUnbinding(child_a);
+  RunLoopUntilIdle();
+  EXPECT_EQ(fake_control.added_dependencies_.size(), 2u);
+
+  // Unbinding child_b makes parent a leaf.
+  child_b->UpdateBoundStateForTesting(false);
+  element.OnNodeUnbinding(child_b);
+  RunLoopUntilIdle();
+  ASSERT_EQ(fake_control.added_dependencies_.size(), 3u);
+  EXPECT_EQ(FakeElementControl::GetKoid(*fake_control.added_dependencies_[2].requires_token()),
+            FakeElementControl::GetKoid(parent->DuplicatePowerToken()));
+}
+
+TEST_F(AllDriversElementTest, TestOnNodeUnbindingTraversesThroughUnboundIntermediateNodes) {
+  // Mirrors topology: usb-phy (bound) -> dwc3-phy (unbound) -> dwc3 (bound).
+  auto usb_phy = CreateNode("usb-phy", root());
+  auto dwc3_phy = CreateNode("dwc3-phy", usb_phy);
+  auto dwc3 = CreateNode("dwc3", dwc3_phy);
+
+  usb_phy->UpdateBoundStateForTesting(true);
+  dwc3_phy->UpdateBoundStateForTesting(false);
+  dwc3->UpdateBoundStateForTesting(true);
+
+  AllDriversElement element(nullptr, root());
+  auto [control_client, control_server] =
+      fidl::Endpoints<fuchsia_power_broker::ElementControl>::Create();
+  FakeElementControl fake_control;
+  fidl::ServerBindingGroup<fuchsia_power_broker::ElementControl> bindings;
+  bindings.AddBinding(dispatcher(), std::move(control_server), &fake_control,
+                      fidl::kIgnoreBindingClosure);
+
+  PowerElementHandles handles{
+      .element_control = fidl::Client<fuchsia_power_broker::ElementControl>(
+          std::move(control_client), dispatcher()),
+  };
+  element.AttachElement(dispatcher(), std::move(handles));
+  SetCurrentLevel(element, 1);
+
+  CompleteStartupTransition(element);
+  RunLoopUntilIdle();
+
+  ASSERT_EQ(fake_control.added_dependencies_.size(), 1u);
+  EXPECT_EQ(FakeElementControl::GetKoid(*fake_control.added_dependencies_[0].requires_token()),
+            FakeElementControl::GetKoid(dwc3->DuplicatePowerToken()));
+
+  // Unbind dwc3; AllDriversElement should traverse through unbound dwc3-phy to usb-phy.
+  dwc3->UpdateBoundStateForTesting(false);
+  element.OnNodeUnbinding(dwc3);
+  RunLoopUntilIdle();
+
+  ASSERT_EQ(fake_control.added_dependencies_.size(), 2u);
+  EXPECT_EQ(FakeElementControl::GetKoid(*fake_control.added_dependencies_[1].requires_token()),
+            FakeElementControl::GetKoid(usb_phy->DuplicatePowerToken()));
+}
+
+TEST_F(AllDriversElementTest, TestOnNodeUnbindingDiamondDAG) {
+  auto parent_a = CreateNode("parent_a", root());
+  auto parent_b = CreateNode("parent_b", root());
+
+  std::vector<std::weak_ptr<Node>> parents = {parent_a, parent_b};
+  auto composite = CreateCompositeNode("composite", parents, {{}, {}});
+
+  parent_a->UpdateBoundStateForTesting(true);
+  parent_b->UpdateBoundStateForTesting(true);
+  composite->UpdateBoundStateForTesting(true);
+
+  AllDriversElement element(nullptr, root());
+  auto [control_client, control_server] =
+      fidl::Endpoints<fuchsia_power_broker::ElementControl>::Create();
+  FakeElementControl fake_control;
+  fidl::ServerBindingGroup<fuchsia_power_broker::ElementControl> bindings;
+  bindings.AddBinding(dispatcher(), std::move(control_server), &fake_control,
+                      fidl::kIgnoreBindingClosure);
+
+  PowerElementHandles handles{
+      .element_control = fidl::Client<fuchsia_power_broker::ElementControl>(
+          std::move(control_client), dispatcher()),
+  };
+  element.AttachElement(dispatcher(), std::move(handles));
+  SetCurrentLevel(element, 1);
+
+  CompleteStartupTransition(element);
+  RunLoopUntilIdle();
+
+  ASSERT_EQ(fake_control.added_dependencies_.size(), 1u);
+  EXPECT_EQ(FakeElementControl::GetKoid(*fake_control.added_dependencies_[0].requires_token()),
+            FakeElementControl::GetKoid(composite->DuplicatePowerToken()));
+
+  // Unbind composite; both parent_a and parent_b should become leaves and get dependencies.
+  composite->UpdateBoundStateForTesting(false);
+  element.OnNodeUnbinding(composite);
+  RunLoopUntilIdle();
+
+  ASSERT_EQ(fake_control.added_dependencies_.size(), 3u);
+  std::unordered_set<zx_koid_t> parent_koids = {
+      FakeElementControl::GetKoid(*fake_control.added_dependencies_[1].requires_token()),
+      FakeElementControl::GetKoid(*fake_control.added_dependencies_[2].requires_token()),
+  };
+  EXPECT_TRUE(parent_koids.contains(FakeElementControl::GetKoid(parent_a->DuplicatePowerToken())));
+  EXPECT_TRUE(parent_koids.contains(FakeElementControl::GetKoid(parent_b->DuplicatePowerToken())));
+}
+
+TEST_F(AllDriversElementTest, TestNodeRemovalPromotesGrandparentThroughUnboundParent) {
+  auto usb_phy = CreateNode("usb-phy", root());
+  auto dwc3_phy = CreateNode("dwc3-phy", usb_phy);
+  auto dwc3 = CreateNode("dwc3", dwc3_phy);
+
+  usb_phy->UpdateBoundStateForTesting(true);
+  dwc3->UpdateBoundStateForTesting(true);
+
+  AllDriversElement element(nullptr, root());
+  SetElementForNodeManager(&element);
+  auto [control_client, control_server] =
+      fidl::Endpoints<fuchsia_power_broker::ElementControl>::Create();
+  FakeElementControl fake_control;
+  fidl::ServerBindingGroup<fuchsia_power_broker::ElementControl> bindings;
+  bindings.AddBinding(dispatcher(), std::move(control_server), &fake_control,
+                      fidl::kIgnoreBindingClosure);
+
+  PowerElementHandles handles{
+      .element_control = fidl::Client<fuchsia_power_broker::ElementControl>(
+          std::move(control_client), dispatcher()),
+  };
+  element.AttachElement(dispatcher(), std::move(handles));
+  SetCurrentLevel(element, 1);
+
+  CompleteStartupTransition(element);
+  RunLoopUntilIdle();
+
+  ASSERT_EQ(fake_control.added_dependencies_.size(), 1u);
+  EXPECT_EQ(FakeElementControl::GetKoid(*fake_control.added_dependencies_[0].requires_token()),
+            FakeElementControl::GetKoid(dwc3->DuplicatePowerToken()));
+
+  // Remove the unbound child node dwc3-phy (as usb-phy does when tearing down its child node).
+  // When dwc3 finishes shutdown, OnNodeUnbinding must be called before dwc3-phy's parent link to
+  // usb-phy is cleared, promoting usb-phy to a leaf node.
+  dwc3_phy->Remove(RemovalSet::kAll, nullptr);
+  RunLoopUntilIdle();
+
+  ASSERT_EQ(fake_control.added_dependencies_.size(), 2u);
+  EXPECT_EQ(FakeElementControl::GetKoid(*fake_control.added_dependencies_[1].requires_token()),
+            FakeElementControl::GetKoid(usb_phy->DuplicatePowerToken()));
+  SetElementForNodeManager(nullptr);
+}
+
+TEST_F(AllDriversElementTest, TestSubtreeRemovalSkipsShuttingDownIntermediateBoundNodes) {
+  // Mirrors the full USB peripheral topology:
+  // usb-phy (bound) -> dwc3-phy (unbound) -> dwc3-c400000 (bound) -> dwc3 (bound) ->
+  // usb-peripheral (unbound) -> function-000 (bound).
+  auto usb_phy = CreateNode("usb-phy", root());
+  auto dwc3_phy = CreateNode("dwc3-phy", usb_phy);
+  auto dwc3_core = CreateNode("dwc3-c400000", dwc3_phy);
+  auto dwc3 = CreateNode("dwc3", dwc3_core);
+  auto usb_peripheral = CreateNode("usb-peripheral", dwc3);
+  auto function_000 = CreateNode("function-000", usb_peripheral);
+
+  usb_phy->UpdateBoundStateForTesting(true);
+  dwc3_core->UpdateBoundStateForTesting(true);
+  dwc3->UpdateBoundStateForTesting(true);
+  function_000->UpdateBoundStateForTesting(true);
+
+  AllDriversElement element(nullptr, root());
+  SetElementForNodeManager(&element);
+  auto [control_client, control_server] =
+      fidl::Endpoints<fuchsia_power_broker::ElementControl>::Create();
+  FakeElementControl fake_control;
+  fidl::ServerBindingGroup<fuchsia_power_broker::ElementControl> bindings;
+  bindings.AddBinding(dispatcher(), std::move(control_server), &fake_control,
+                      fidl::kIgnoreBindingClosure);
+
+  PowerElementHandles handles{
+      .element_control = fidl::Client<fuchsia_power_broker::ElementControl>(
+          std::move(control_client), dispatcher()),
+  };
+  element.AttachElement(dispatcher(), std::move(handles));
+  SetCurrentLevel(element, 1);
+
+  CompleteStartupTransition(element);
+  RunLoopUntilIdle();
+
+  ASSERT_EQ(fake_control.added_dependencies_.size(), 1u);
+  EXPECT_EQ(FakeElementControl::GetKoid(*fake_control.added_dependencies_[0].requires_token()),
+            FakeElementControl::GetKoid(function_000->DuplicatePowerToken()));
+
+  // Remove the entire dwc3-phy subtree. Intermediate bound nodes (dwc3, dwc3-c400000) are also
+  // shutting down and must be skipped, promoting usb-phy directly.
+  dwc3_phy->Remove(RemovalSet::kAll, nullptr);
+  RunLoopUntilIdle();
+
+  ASSERT_EQ(fake_control.added_dependencies_.size(), 2u);
+  EXPECT_EQ(FakeElementControl::GetKoid(*fake_control.added_dependencies_[1].requires_token()),
+            FakeElementControl::GetKoid(usb_phy->DuplicatePowerToken()));
+  SetElementForNodeManager(nullptr);
 }
 
 }  // namespace

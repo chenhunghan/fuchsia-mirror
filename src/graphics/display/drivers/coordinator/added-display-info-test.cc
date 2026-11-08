@@ -148,6 +148,83 @@ TEST_F(AddedDisplayInfoTest, CreateFromFidlCopiesDisplayModes) {
   EXPECT_THAT(added_display_info->pixel_formats, ::testing::SizeIs(1));
 }
 
+TEST_F(AddedDisplayInfoTest, CreateFromFidlKeepsModeFlags) {
+  static constexpr display::DisplayId kDisplayId(42);
+  static constexpr std::array<display::PixelFormat, 1> kPixelFormats = {
+      display::PixelFormat::kR8G8B8A8};
+
+  std::array<fuchsia_images2::wire::PixelFormat, 1> fidl_pixel_formats = {
+      kPixelFormats[0].ToFidl()};
+  std::array<fuchsia_hardware_display_types::wire::Mode, 2> fidl_display_modes = {{
+      {
+          .active_area = {.width = 1280, .height = 2856},
+          .refresh_rate_millihertz = 117'794,
+          .flags = fuchsia_hardware_display_types::wire::ModeFlags::kVariableRefreshRate,
+      },
+      {
+          .active_area = {.width = 1280, .height = 2856},
+          .refresh_rate_millihertz = 117'794,
+          .flags = fuchsia_hardware_display_types::wire::ModeFlags(),
+      },
+  }};
+
+  const fuchsia_hardware_display_engine::wire::RawDisplayInfo fidl_display_info = {
+      .display_id = kDisplayId.ToFidl(),
+      .preferred_modes = fidl::VectorView<fuchsia_hardware_display_types::wire::Mode>::FromExternal(
+          fidl_display_modes),
+      .pixel_formats =
+          fidl::VectorView<fuchsia_images2::wire::PixelFormat>::FromExternal(fidl_pixel_formats),
+  };
+
+  zx::result<std::unique_ptr<AddedDisplayInfo>> added_display_info_result =
+      AddedDisplayInfo::Create(fidl_display_info);
+  ASSERT_OK(added_display_info_result);
+  std::unique_ptr<AddedDisplayInfo> added_display_info =
+      std::move(added_display_info_result).value();
+
+  ASSERT_THAT(added_display_info->preferred_modes, ::testing::SizeIs(2));
+
+  EXPECT_EQ(117'794, added_display_info->preferred_modes[0].refresh_rate_millihertz());
+  EXPECT_EQ(fuchsia_hardware_display_types::wire::ModeFlags::kVariableRefreshRate,
+            added_display_info->preferred_modes[0].flags());
+  EXPECT_TRUE(added_display_info->preferred_modes[0].is_variable_refresh_rate());
+
+  EXPECT_EQ(117'794, added_display_info->preferred_modes[1].refresh_rate_millihertz());
+  EXPECT_EQ(fuchsia_hardware_display_types::wire::ModeFlags(),
+            added_display_info->preferred_modes[1].flags());
+  EXPECT_FALSE(added_display_info->preferred_modes[1].is_variable_refresh_rate());
+
+  EXPECT_NE(added_display_info->preferred_modes[0], added_display_info->preferred_modes[1]);
+}
+
+TEST_F(AddedDisplayInfoTest, CreateFromFidlRejectsUnknownModeFlags) {
+  static constexpr display::DisplayId kDisplayId(42);
+  static constexpr std::array<display::PixelFormat, 1> kPixelFormats = {
+      display::PixelFormat::kR8G8B8A8};
+
+  std::array<fuchsia_images2::wire::PixelFormat, 1> fidl_pixel_formats = {
+      kPixelFormats[0].ToFidl()};
+  std::array<fuchsia_hardware_display_types::wire::Mode, 1> fidl_display_modes = {{
+      {
+          .active_area = {.width = 1280, .height = 2856},
+          .refresh_rate_millihertz = 117'794,
+          .flags = static_cast<fuchsia_hardware_display_types::wire::ModeFlags>(0x2),
+      },
+  }};
+
+  const fuchsia_hardware_display_engine::wire::RawDisplayInfo fidl_display_info = {
+      .display_id = kDisplayId.ToFidl(),
+      .preferred_modes = fidl::VectorView<fuchsia_hardware_display_types::wire::Mode>::FromExternal(
+          fidl_display_modes),
+      .pixel_formats =
+          fidl::VectorView<fuchsia_images2::wire::PixelFormat>::FromExternal(fidl_pixel_formats),
+  };
+
+  zx::result<std::unique_ptr<AddedDisplayInfo>> added_display_info_result =
+      AddedDisplayInfo::Create(fidl_display_info);
+  EXPECT_STATUS(added_display_info_result, ZX_ERR_INVALID_ARGS);
+}
+
 }  // namespace
 
 }  // namespace display_coordinator

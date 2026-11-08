@@ -6,19 +6,28 @@
 #define SRC_UI_INPUT_DRIVERS_BUTTONS_BUTTONS_DEVICE_H_
 
 #include <fidl/fuchsia.buttons/cpp/fidl.h>
+#include <fidl/fuchsia.driver.framework/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.gpio/cpp/wire.h>
 #include <fidl/fuchsia.input.report/cpp/fidl.h>
 #include <fidl/fuchsia.power.system/cpp/wire.h>
+#include <lib/driver/component/cpp/health_alert_latch.h>
 #include <lib/driver/logging/cpp/logger.h>
 #include <lib/driver/power/cpp/wake-lease.h>
 #include <lib/fidl/cpp/wire/server.h>
+#include <lib/fit/result.h>
 #include <lib/inspect/cpp/inspect.h>
 #include <lib/sync/cpp/completion.h>
 #include <lib/zx/interrupt.h>
 #include <lib/zx/port.h>
+#include <lib/zx/time.h>
 #include <lib/zx/timer.h>
+#include <zircon/compiler.h>
 #include <zircon/syscalls-next.h>
 #include <zircon/threads.h>
+
+#include <mutex>
+#include <optional>
+#include <string_view>
 
 #include <fbl/array.h>
 
@@ -41,6 +50,25 @@ constexpr uint64_t kDebounceThresholdNs = 50'000'000;
 constexpr uint16_t kMaxReportsPerHalfSecond =
     static_cast<uint16_t>(500'000'000 / kDebounceThresholdNs);
 
+// Health check diagnostic keys and condition reason codes.
+inline constexpr std::string_view kHealthDiagWorkerThreadRunning = "worker_thread_running";
+inline constexpr std::string_view kHealthDiagButtonCount = "button_count";
+inline constexpr std::string_view kHealthDiagGpioCount = "gpio_count";
+inline constexpr std::string_view kHealthDiagTotalReportCount = "total_report_count";
+inline constexpr std::string_view kHealthDiagLastEventTimestamp = "last_event_timestamp";
+inline constexpr std::string_view kHealthDiagThreadTerminatedTimestamp =
+    "thread_terminated_timestamp";
+inline constexpr std::string_view kHealthDiagFastGpioReadFailures = "fast_gpio_read_failures";
+inline constexpr std::string_view kHealthDiagFailedGpioCount = "failed_gpio_count";
+inline constexpr std::string_view kHealthDiagFirstFailedGpioIndex = "first_failed_gpio_index";
+inline constexpr std::string_view kHealthDiagFirstErrorStatus = "first_error_status";
+
+inline constexpr std::string_view kHealthReasonIrqThreadTerminated = "IRQ_THREAD_TERMINATED";
+inline constexpr std::string_view kHealthReasonGpioReadFailed = "GPIO_READ_FAILED";
+
+using HealthCheckResult = fit::result<fuchsia_driver_framework::HealthCheckError,
+                                      fuchsia_driver_framework::HealthCheckResponse>;
+
 class ButtonsDevice : public fidl::WireServer<fuchsia_input_report::InputDevice> {
  public:
   struct Gpio {
@@ -49,12 +77,16 @@ class ButtonsDevice : public fidl::WireServer<fuchsia_input_report::InputDevice>
     fuchsia_buttons::GpioConfig config;
   };
 
+  // `health_latch` must be non-null and must outlive this `ButtonsDevice` instance.
   explicit ButtonsDevice(async_dispatcher_t* dispatcher,
                          std::vector<fuchsia_buttons::GpioButtonConfig> buttons,
                          std::vector<Gpio> gpios,
-                         fidl::ClientEnd<fuchsia_power_system::ActivityGovernor> sag_client);
-  void Notify(size_t button_index);
+                         fidl::ClientEnd<fuchsia_power_system::ActivityGovernor> sag_client,
+                         fdf::HealthAlertLatch* health_latch);
+  bool Notify(size_t button_index);
   void ShutDown();
+
+  HealthCheckResult PerformHealthCheck(fuchsia_driver_framework::HealthCheckRequest request);
 
   // fuchsia_input_report::InputDevice required methods
   void GetInputReportsReader(GetInputReportsReaderRequestView request,
@@ -127,7 +159,7 @@ class ButtonsDevice : public fidl::WireServer<fuchsia_input_report::InputDevice>
     bool enqueued;
     zx::timer timer;
     bool value;
-    zx::time timestamp = zx::time::infinite_past();
+    zx::time_boot timestamp = zx::time_boot::infinite_past();
   };
   fbl::Array<debounce_state> debounce_states_;
   // last_report_ saved to de-duplicate reports
@@ -151,7 +183,19 @@ class ButtonsDevice : public fidl::WireServer<fuchsia_input_report::InputDevice>
   zx::duration total_latency_ = {};
   zx::duration max_latency_ = {};
 
+  struct HealthState {
+    bool shutting_down = false;
+    bool thread_running = false;
+    uint64_t total_reports_emitted = 0;
+    std::optional<zx::time_boot> last_event_timestamp;
+    std::optional<zx::time_boot> thread_terminated_timestamp;
+  };
+
+  std::mutex health_mutex_;
+  HealthState health_state_ __TA_GUARDED(health_mutex_);
+
   fdf_power::TimeoutWakeLease wake_lease_;
+  fdf::HealthAlertLatch* const health_latch_;
 };
 
 }  // namespace buttons

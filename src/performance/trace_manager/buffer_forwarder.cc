@@ -121,9 +121,16 @@ TransferStatus BufferForwarder::WriteChunkBy(BufferForwarder::ForwardStrategy st
                  << std::hex << size
                  << (strategy == ForwardStrategy::Size ? ", by-size" : ", by-record");
 
-  // TODO(gmtr): This is run on the async loop and we may block on the socket write below. We should
-  // instead write as much as possible to the socket and if we get ZX_SHOULD_WAIT we instead
-  // schedule a continuation on the async loop when the socket becomes writable.
+  // There is nothing to forward. Mapping would also fail: if |vmo_offset| is page aligned then the
+  // mapping size below is zero, which zx_vmar_map rejects with ZX_ERR_INVALID_ARGS.
+  if (size == 0) {
+    return TransferStatus::kComplete;
+  }
+
+  // TODO(https://fxbug.dev/578973452): This is run on the async loop and we may block on the socket
+  // write below. We should instead write as much as possible to the socket and if we get
+  // ZX_SHOULD_WAIT we instead schedule a continuation on the async loop when the socket becomes
+  // writable.
 
   uint64_t size_in_words = trace::BytesToWords(size);
   // For paranoia purposes verify size is a multiple of the word size so we
@@ -134,7 +141,8 @@ TransferStatus BufferForwarder::WriteChunkBy(BufferForwarder::ForwardStrategy st
   // requires a page aligned offset, so we'll need to fudge the offset a bit. Truncate the offset to
   // be page aligned and then add back the extra bytes to the size of the region that we are mapping
   // and then also offset the addr we get back from the mapping.
-  uint64_t page_aligned_offset = vmo_offset & (~(zx_system_get_page_size() - 1));
+  uint64_t page_aligned_offset =
+      vmo_offset & ~(static_cast<uint64_t>(zx_system_get_page_size()) - 1);
   uint64_t page_aligned_remainder = vmo_offset % zx_system_get_page_size();
 
   zx_vaddr_t addr;
@@ -160,6 +168,17 @@ TransferStatus BufferForwarder::WriteChunkBy(BufferForwarder::ForwardStrategy st
   }
 
   return WriteBuffer({reinterpret_cast<const uint8_t*>(offset_addr), bytes_written});
+}
+
+bool BufferForwarder::IsDestinationPeerClosed() const {
+  zx_signals_t observed = 0;
+  return destination_.wait_one(ZX_SOCKET_PEER_CLOSED, zx::time::infinite_past(), &observed) ==
+             ZX_OK &&
+         (observed & ZX_SOCKET_PEER_CLOSED);
+}
+
+TransferStatus BufferForwarder::Flush() {
+  return IsDestinationPeerClosed() ? TransferStatus::kReceiverDead : TransferStatus::kComplete;
 }
 
 TransferStatus BufferForwarder::WriteBuffer(cpp20::span<const uint8_t> data) const {

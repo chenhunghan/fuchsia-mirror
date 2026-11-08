@@ -12,9 +12,8 @@ use crate::serialized_types::{Versioned, VersionedLatest};
 use anyhow::{Context, Error};
 use fuchsia_merkle::{Hash, LeafHashCollector, MerkleVerifier};
 
-pub use blob_metadata::{
-    BlobFormat, BlobFormatV53, BlobMetadata, BlobMetadataUnversioned, BlobMetadataV53, MerkleLeaves,
-};
+pub use blob_metadata::{BlobFormat, BlobMetadata, BlobMetadataUnversioned, MerkleLeaves};
+pub(crate) use blob_metadata::{BlobMetadataV53, BlobMetadataV64};
 
 pub trait FxfsBlobMetadataExt: Sized {
     /// Reads the blob metadata from an attribute on `blob_object`. If the attribute doesn't exist
@@ -164,7 +163,14 @@ impl FxfsBlobMetadataExt for BlobMetadata {
     }
 
     fn into_merkle_verifier(self, root: Hash) -> Result<MerkleVerifier, Error> {
-        Ok(BlobMetadataV53::into_merkle_verifier(self, root)?)
+        BlobMetadata::into_merkle_verifier(self, root)
+    }
+}
+
+impl Versioned for BlobMetadataV64 {
+    fn max_serialized_size() -> Option<u64> {
+        // There's no restriction on the size of the blob metadata.
+        None
     }
 }
 
@@ -212,6 +218,7 @@ mod tests {
     use crate::object_store::{
         AttributeId, DataObjectHandle, Directory, HandleOptions, ObjectStore,
     };
+    use crate::serialized_types::{Version, Versioned, VersionedLatest};
     use assert_matches::assert_matches;
     use fuchsia_merkle::MerkleRootBuilder;
     use storage_device::DeviceHolder;
@@ -287,7 +294,7 @@ mod tests {
 
         let metadata = BlobMetadata {
             merkle_leaves: vec![[1; 32], [2; 32], [3; 32], [4; 32]],
-            format: BlobFormat::ChunkedLz4 {
+            format: BlobFormat::ChunkedLz4WithRawChunks {
                 uncompressed_size: 128 * 1024,
                 chunk_size: 32 * 1024,
                 compressed_offsets: vec![0, 100, 200, 400],
@@ -299,6 +306,31 @@ mod tests {
         assert_eq!(read_metadata, metadata);
 
         fs.close().await.expect("close failed");
+    }
+
+    #[fuchsia::test]
+    fn test_v53_compatibility() {
+        let metadata = |format| BlobMetadata { merkle_leaves: vec![[1; 32], [2; 32]], format };
+        let v63 = Version { major: 63, minor: 0 };
+
+        let lz4 = metadata(BlobFormat::ChunkedLz4 {
+            uncompressed_size: 65536,
+            chunk_size: 32768,
+            compressed_offsets: vec![0, 32898],
+        });
+        let mut bytes = Vec::new();
+        lz4.serialize_into(&mut bytes).unwrap();
+        assert_eq!(BlobMetadata::deserialize_from_version(&mut &bytes[..], v63).unwrap(), lz4);
+
+        // Older versions can't decode blobs with raw chunks.
+        let raw = metadata(BlobFormat::ChunkedLz4WithRawChunks {
+            uncompressed_size: 65536,
+            chunk_size: 32768,
+            compressed_offsets: vec![0, 100],
+        });
+        let mut bytes = Vec::new();
+        raw.serialize_into(&mut bytes).unwrap();
+        assert!(BlobMetadata::deserialize_from_version(&mut &bytes[..], v63).is_err());
     }
 
     #[fuchsia::test(threads = 3)]

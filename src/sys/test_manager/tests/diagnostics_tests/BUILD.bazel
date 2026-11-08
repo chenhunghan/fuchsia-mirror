@@ -1,0 +1,72 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# The components and the `test-manager-diagnostics-tests` test package stay in
+# BUILD.gn above the bazel2gn sentinel: `test-root` includes
+# `sys/component/realm_builder.shard.cml` and `:diagnostics_test_bin` depends
+# on `//src/lib/fuchsia-component-test`, which bundles the GN-only
+# `//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component`.
+# The package is also resolved by its `test-manager-diagnostics-tests` URL from
+# the GN test packages in `//src/sys/test_manager/tests`, which list it in
+# their `subpackages`.
+
+rustc_binary(
+    name = "publisher_bin",
+    srcs = ["publisher.rs"],
+    crate_name = "publisher",
+    crate_root = "publisher.rs",
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        "//sdk/fidl/fuchsia.process.lifecycle:fuchsia.process.lifecycle_rust",
+        "//sdk/rust/zx",
+        "//src/lib/diagnostics/inspect/runtime/rust",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-runtime",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+rustc_test(
+    name = "diagnostics_test_bin",
+    srcs = ["main.rs"],
+    crate_name = "diagnostics_test",
+    crate_root = "main.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//src/lib/diagnostics/reader/rust",
+        "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        # GN depends on the `//src/lib/fuchsia-component-test` group; Bazel
+        # depends on the library directly.
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+rustc_test(
+    name = "logger_test_bin",
+    srcs = ["logger.rs"],
+    crate_name = "logger_bin",
+    crate_root = "logger.rs",
+    edition = "2024",
+    deps = [
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)

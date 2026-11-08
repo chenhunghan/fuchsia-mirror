@@ -1,0 +1,117 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load(
+    "//src/tests/benchmarks/fidl/benchmark_suite:benchmark_suite.bzl",
+    "BENCHMARK_SUITES",
+)
+load("//tools/fidl/gidl:gidl.bzl", "gidl_driver_cpp_benchmarks")
+
+package(default_applicable_licenses = ["//:license"])
+
+# LINT.IfChange
+fx_cc_library(
+    name = "benchmark_util",
+    testonly = True,
+    hdrs = [
+        "echo_call_benchmark_util.h",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//sdk/ctf/tests/pkg/fidl/cpp:handle_util",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/driver/runtime:driver_runtime_env",
+        "//sdk/lib/fidl",
+        "//sdk/lib/fidl/cpp",
+        "//sdk/lib/fidl_driver",
+        "//sdk/lib/fidl_driver:fidl_driver_natural",
+        "//src/devices/bin/driver_runtime:driver_runtime_impl",
+        "//zircon/system/ulib/perftest",
+        "//zircon/system/ulib/sync:sync-cpp",
+    ],
+    alwayslink = True,
+)
+
+_GIDL_DEPS = [
+    ":benchmark_suite__%s" % suite["name"]
+    for suite in BENCHMARK_SUITES
+]
+
+[
+    gidl_driver_cpp_benchmarks(
+        name = "benchmark_suite__%s" % suite["name"],
+        testonly = True,
+        extra_args = [
+            "-cpp-benchmarks-fidl-library",
+            suite["fidl_library_suffix"],
+        ],
+        fidl = suite["fidl_target"],
+        inputs = suite["gidl"],
+        target_compatible_with = ["@platforms//os:fuchsia"],
+        visibility = ["//visibility:private"],
+        deps = [":benchmark_util"],
+    )
+    for suite in BENCHMARK_SUITES
+]
+
+fx_cc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["main.cc"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/driver/runtime:driver_runtime_env_cpp",
+        "//sdk/lib/fidl_driver",
+        "//src/devices/bin/driver_runtime:driver_runtime_impl",
+        "//src/zircon/lib/zircon",
+        "//zircon/system/ulib/perftest",
+        "//zircon/system/ulib/sync:sync-cpp",
+    ] + _GIDL_DEPS,
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "driver_cpp_fidl_microbenchmarks",
+    visibility = ["//visibility:private"],
+)
+
+fx_component_manifest(
+    name = "benchmark_manifest",
+    testonly = True,
+    component_name = "benchmark",
+    includes = ["//src/tests/benchmarks/fidl:meta/benchmark.shard"],
+    manifest = "meta/benchmark.cml",
+    visibility = ["//visibility:private"],
+)
+
+fx_component(
+    name = "benchmark",
+    testonly = True,
+    compiled_manifest = ":benchmark_manifest",
+    visibility = ["//visibility:private"],
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "fidl_microbenchmarks_driver_cpp",
+    package_name = "fidl_microbenchmarks_driver_cpp",
+    testonly = True,
+    components = [":benchmark"],
+    visibility = ["//src/tests/benchmarks:__subpackages__"],
+)
+# LINT.ThenChange(//src/tests/benchmarks/fidl/driver_cpp/BUILD.gn)

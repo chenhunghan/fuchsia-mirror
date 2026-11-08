@@ -108,7 +108,7 @@ zx_status_t UsbCdcFunction::cdc_generate_mac_address() {
     fdf::info("ethernet MAC metadata not found. Generating random address");
 
     zx_cprng_draw(mac_addr_.data(), mac_addr_.size());
-    mac_addr_[0] = 0x02;
+    mac_addr_[0] = (mac_addr_[0] & 0xFC) | 0x02;
   }
 
   char buffer[sizeof(mac_addr_) * 3];
@@ -208,7 +208,7 @@ void UsbCdcFunction::CdcIntrComplete(std::vector<fendpoint::Completion> completi
 }
 
 void UsbCdcFunction::CdcSendNotifications() {
-  if (unbound_.load() || !configured_ || !intr_ep_.client().is_valid()) {
+  if (unbound_.load() || !configured_ || !intr_ep_.client().is_valid() || intr_endpoint_dead_) {
     return;
   }
 
@@ -356,7 +356,8 @@ void UsbCdcFunction::ProcessRxCompletions(std::vector<fendpoint::Completion> com
 
   for (auto &completion : completions) {
     zx_status_t status = *completion.status();
-    if (status == ZX_ERR_IO_NOT_PRESENT || status == ZX_ERR_CANCELED || !online_ || !configured_) {
+    if (status == ZX_ERR_IO_NOT_PRESENT || status == ZX_ERR_CANCELED ||
+        status == ZX_ERR_BAD_STATE || !online_ || !configured_) {
       bulk_out_ep_.PutRequest(usb::FidlRequest{std::move(completion.request().value())});
       continue;
     }
@@ -430,12 +431,18 @@ void UsbCdcFunction::ProcessRxCompletions(std::vector<fendpoint::Completion> com
   }
 
   if (reqs_count > 0) {
-    fidl::OneWayStatus queue_status = bulk_out_ep_.client().wire()->QueueRequests(
-        fidl::VectorView<frequest::wire::Request>::FromExternal(reqs.data(), reqs_count));
-    if (!queue_status.ok()) {
-      fdf::error("failed to queue rx requests: {}", queue_status.FormatDescription());
+    if (rx_endpoint_dead_ || !bulk_out_ep_.client().is_valid()) {
       for (size_t i = 0; i < reqs_count; ++i) {
         bulk_out_ep_.PutRequest(usb::FidlRequest(fidl::ToNatural(reqs[i])));
+      }
+    } else {
+      fidl::OneWayStatus queue_status = bulk_out_ep_.client().wire()->QueueRequests(
+          fidl::VectorView<frequest::wire::Request>::FromExternal(reqs.data(), reqs_count));
+      if (!queue_status.ok()) {
+        fdf::error("failed to queue rx requests: {}", queue_status.FormatDescription());
+        for (size_t i = 0; i < reqs_count; ++i) {
+          bulk_out_ep_.PutRequest(usb::FidlRequest(fidl::ToNatural(reqs[i])));
+        }
       }
     }
   }
@@ -567,9 +574,9 @@ struct UsbCdcFunction::SetConfiguredSharedState
 
     self->DrainRxCompletionQueue();
 
-    bool intr_full = self->intr_ep_.RequestsFull();
-    bool bulk_in_full = self->bulk_in_ep_.RequestsFull();
-    bool bulk_out_full = self->bulk_out_ep_.RequestsFull();
+    bool intr_full = self->intr_ep_.RequestsFull() || self->intr_endpoint_dead_;
+    bool bulk_in_full = self->bulk_in_ep_.RequestsFull() || self->tx_endpoint_dead_;
+    bool bulk_out_full = self->bulk_out_ep_.RequestsFull() || self->rx_endpoint_dead_;
 
     if (!intr_cancelled || !intr_full) {
       return;
@@ -789,7 +796,7 @@ void UsbCdcFunction::SetConfigured(SetConfiguredRequest &request,
   state->target_speed = speed;
   set_configured_state_ = state;
 
-  if (!intr_ep_.client().is_valid()) {
+  if (!intr_ep_.client().is_valid() || intr_endpoint_dead_) {
     state->intr_cancelled = true;
     intr_inspect_.SetCancelled(true);
   } else {
@@ -806,7 +813,7 @@ void UsbCdcFunction::SetConfigured(SetConfiguredRequest &request,
         });
   }
 
-  if (!bulk_out_ep_.client().is_valid()) {
+  if (!bulk_out_ep_.client().is_valid() || rx_endpoint_dead_) {
     state->bulk_out_cancelled = true;
     bulk_out_inspect_.SetCancelled(true);
   } else {
@@ -823,7 +830,7 @@ void UsbCdcFunction::SetConfigured(SetConfiguredRequest &request,
         });
   }
 
-  if (!bulk_in_ep_.client().is_valid()) {
+  if (!bulk_in_ep_.client().is_valid() || tx_endpoint_dead_) {
     state->bulk_in_cancelled = true;
     bulk_in_inspect_.SetCancelled(true);
   } else {
@@ -883,8 +890,8 @@ struct UsbCdcFunction::SetInterfaceSharedState
     }
     self->DrainRxCompletionQueue();
 
-    bool bulk_in_full = self->bulk_in_ep_.RequestsFull();
-    bool bulk_out_full = self->bulk_out_ep_.RequestsFull();
+    bool bulk_in_full = self->bulk_in_ep_.RequestsFull() || self->tx_endpoint_dead_;
+    bool bulk_out_full = self->bulk_out_ep_.RequestsFull() || self->rx_endpoint_dead_;
 
     if (!bulk_in_cancelled || !bulk_in_full) {
       return;
@@ -1057,6 +1064,18 @@ struct UsbCdcFunction::SetInterfaceSharedState
   }
 
   void StepCompleteAltSetting1() {
+    auto self_shared = shared_from_this();
+    if (self->rx_endpoint_dead_ || self->tx_endpoint_dead_ ||
+        !self->bulk_out_ep_.client().is_valid() || !self->bulk_in_ep_.client().is_valid()) {
+      fdf::error("Bulk endpoint is invalid or dead when enabling data interface");
+      if (self->set_interface_state_ == self_shared) {
+        self->set_interface_state_.reset();
+      }
+      Reply(zx::error((self->rx_endpoint_dead_ || self->tx_endpoint_dead_) ? ZX_ERR_PEER_CLOSED
+                                                                           : ZX_ERR_INTERNAL));
+      return;
+    }
+
     // Set online and update port status BEFORE queueing rx requests so that any
     // completions that fire immediately are processed normally rather than dropped.
     self->online_ = true;
@@ -1081,19 +1100,7 @@ struct UsbCdcFunction::SetInterfaceSharedState
       popped_reqs[i].reset_buffers(self->bulk_out_ep_.GetMapped());
       reqs[i] = fidl::ToWire(arena, popped_reqs[i].take_request());
     }
-    auto self_shared = shared_from_this();
     if (count > 0) {
-      if (!self->bulk_out_ep_.client().is_valid()) {
-        fdf::error("bulk_out_ep_ client is invalid when queueing rx requests");
-        for (size_t i = 0; i < count; ++i) {
-          self->bulk_out_ep_.PutRequest(usb::FidlRequest(fidl::ToNatural(reqs[i])));
-        }
-        if (self->set_interface_state_ == self_shared) {
-          self->set_interface_state_.reset();
-        }
-        Reply(zx::error(ZX_ERR_INTERNAL));
-        return;
-      }
       fidl::OneWayStatus queue_status = self->bulk_out_ep_.client().wire()->QueueRequests(reqs);
       if (!queue_status.ok()) {
         fdf::error("Failed to queue rx requests: {}", queue_status.FormatDescription());
@@ -1176,7 +1183,7 @@ void UsbCdcFunction::SetInterface(SetInterfaceRequest &request,
   state->self = this;
   set_interface_state_ = state;
 
-  if (!bulk_out_ep_.client().is_valid()) {
+  if (!bulk_out_ep_.client().is_valid() || rx_endpoint_dead_) {
     state->bulk_out_cancelled = true;
     bulk_out_inspect_.SetCancelled(true);
   } else {
@@ -1193,7 +1200,7 @@ void UsbCdcFunction::SetInterface(SetInterfaceRequest &request,
         });
   }
 
-  if (!bulk_in_ep_.client().is_valid()) {
+  if (!bulk_in_ep_.client().is_valid() || tx_endpoint_dead_) {
     state->bulk_in_cancelled = true;
     bulk_in_inspect_.SetCancelled(true);
   } else {
@@ -1230,6 +1237,9 @@ zx::result<> UsbCdcFunction::Start(fdf::DriverContext context) {
   intr_cancelled_ = false;
   bulk_in_cancelled_ = false;
   bulk_out_cancelled_ = false;
+  intr_endpoint_dead_ = false;
+  rx_endpoint_dead_ = false;
+  tx_endpoint_dead_ = false;
   set_configured_state_.reset();
   set_interface_state_.reset();
   stop_completer_.reset();
@@ -1294,6 +1304,7 @@ zx::result<> UsbCdcFunction::Start(fdf::DriverContext context) {
   }
 
   auto &response = alloc_result.value();
+  descriptors_.iad.b_first_interface = response.interface_nums()[0];
   descriptors_.comm_intf.b_interface_number = response.interface_nums()[0];
   descriptors_.cdc_intf_0.b_interface_number = response.interface_nums()[1];
   descriptors_.cdc_intf_1.b_interface_number = descriptors_.cdc_intf_0.b_interface_number;
@@ -1310,6 +1321,11 @@ zx::result<> UsbCdcFunction::Start(fdf::DriverContext context) {
     fdf::error("[bug] intr_ep_.Init(): {}", zx_status_get_string(status));
     return zx::error(status);
   }
+  intr_ep_.SetOnUnbind([this]() {
+    intr_endpoint_dead_ = true;
+    CheckSetConfiguredDone();
+    CheckStopComplete();
+  });
 
   size_t actual = intr_ep_.AddRequests(INTR_COUNT, BULK_REQ_SIZE,
                                        fuchsia_hardware_usb_request::Buffer::Tag::kVmoId);
@@ -1323,6 +1339,13 @@ zx::result<> UsbCdcFunction::Start(fdf::DriverContext context) {
     fdf::error("[bug] bulk_in_ep_.Init(): {}", zx_status_get_string(status));
     return zx::error(status);
   }
+  bulk_in_ep_.SetOnUnbind([this]() {
+    tx_endpoint_dead_ = true;
+    DiscardPendingTxBuffers(ZX_ERR_PEER_CLOSED);
+    CheckSetConfiguredDone();
+    CheckSetInterfaceDone();
+    CheckStopComplete();
+  });
 
   actual = bulk_in_ep_.AddRequests(kTxDepth, BULK_REQ_SIZE,
                                    fuchsia_hardware_usb_request::Buffer::Tag::kVmoId);
@@ -1336,6 +1359,12 @@ zx::result<> UsbCdcFunction::Start(fdf::DriverContext context) {
     fdf::error("[bug] bulk_out_ep_.Init(): {}", zx_status_get_string(status));
     return zx::error(status);
   }
+  bulk_out_ep_.SetOnUnbind([this]() {
+    rx_endpoint_dead_ = true;
+    CheckSetConfiguredDone();
+    CheckSetInterfaceDone();
+    CheckStopComplete();
+  });
 
   actual = bulk_out_ep_.AddRequests(kRxDepth, BULK_REQ_SIZE,
                                     fuchsia_hardware_usb_request::Buffer::Tag::kVmoId);
@@ -1464,7 +1493,7 @@ void UsbCdcFunction::Stop(fdf::StopCompleter completer) {
   DiscardPendingTxBuffers(ZX_ERR_CANCELED);
   ReturnPendingRxSpace();
 
-  if (!intr_ep_.client().is_valid()) {
+  if (!intr_ep_.client().is_valid() || intr_endpoint_dead_) {
     intr_cancelled_ = true;
     intr_inspect_.SetCancelled(true);
   } else {
@@ -1479,7 +1508,7 @@ void UsbCdcFunction::Stop(fdf::StopCompleter completer) {
         });
   }
 
-  if (!bulk_out_ep_.client().is_valid()) {
+  if (!bulk_out_ep_.client().is_valid() || rx_endpoint_dead_) {
     bulk_out_cancelled_ = true;
     bulk_out_inspect_.SetCancelled(true);
   } else {
@@ -1494,7 +1523,7 @@ void UsbCdcFunction::Stop(fdf::StopCompleter completer) {
         });
   }
 
-  if (!bulk_in_ep_.client().is_valid()) {
+  if (!bulk_in_ep_.client().is_valid() || tx_endpoint_dead_) {
     bulk_in_cancelled_ = true;
     bulk_in_inspect_.SetCancelled(true);
   } else {
@@ -1521,9 +1550,9 @@ void UsbCdcFunction::CheckStopComplete() {
   DrainRxCompletionQueue();
   ReturnPendingRxSpace();
 
-  bool intr_full = intr_ep_.RequestsFull();
-  bool bulk_in_full = bulk_in_ep_.RequestsFull();
-  bool bulk_out_full = bulk_out_ep_.RequestsFull();
+  bool intr_full = intr_ep_.RequestsFull() || intr_endpoint_dead_;
+  bool bulk_in_full = bulk_in_ep_.RequestsFull() || tx_endpoint_dead_;
+  bool bulk_out_full = bulk_out_ep_.RequestsFull() || rx_endpoint_dead_;
 
   fdf::info(
       "CheckStopComplete state: intr(full:{}, canc:{}), bulk_in(full:{}, canc:{}), bulk_out(full:{}, canc:{})",
@@ -1583,6 +1612,9 @@ void UsbCdcFunction::CheckStopComplete() {
   } else {
     function_inspect_.SetConfigured(false);
   }
+  bulk_out_ep_.SetOnUnbind(nullptr);
+  bulk_in_ep_.SetOnUnbind(nullptr);
+  intr_ep_.SetOnUnbind(nullptr);
   if (bulk_out_ep_.client().is_valid()) {
     bulk_out_ep_.Close();
   }
@@ -1671,6 +1703,10 @@ void UsbCdcFunction::QueueTx(fnetdev::wire::NetworkDeviceImplQueueTxRequest *req
   for (const auto &buffer : request->buffers) {
     if (unbound_.load() || !online_) {
       results[results_count++] = {.id = buffer.id, .status = ZX_ERR_BAD_STATE};
+      continue;
+    }
+    if (tx_endpoint_dead_) {
+      results[results_count++] = {.id = buffer.id, .status = ZX_ERR_PEER_CLOSED};
       continue;
     }
     if (buffer.data.size() != 1) {

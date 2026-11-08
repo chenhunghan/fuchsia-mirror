@@ -13,7 +13,6 @@ use std::time::Duration;
 use assert_matches::assert_matches;
 use fidl_fuchsia_net as fnet;
 use fidl_fuchsia_net_ext as fnet_ext;
-use fidl_fuchsia_net_ext::IntoExt as _;
 use fidl_fuchsia_net_interfaces_admin as fnet_interfaces_admin;
 use fidl_fuchsia_posix_socket as fposix_socket;
 use fuchsia_async::{self as fasync, DurationExt, TimeoutExt as _};
@@ -1350,9 +1349,7 @@ impl TestPmtuIpExt for Ipv6 {
 
 #[netstack_test]
 #[variant(I, Ip)]
-#[test_case(true; "start by priming cache")]
-#[test_case(false; "start with empty cache")]
-async fn tcp_update_mss_from_pmtu<I: TestPmtuIpExt>(name: &str, prime_cache: bool) {
+async fn tcp_update_mss_from_pmtu<I: TestPmtuIpExt>(name: &str) {
     use packet::NestableSerializer as _;
     use packet_formats::ip::IpPacket as _;
 
@@ -1384,30 +1381,6 @@ async fn tcp_update_mss_from_pmtu<I: TestPmtuIpExt>(name: &str, prime_cache: boo
     };
     let new_mtu = NonZeroU16::new(new_mtu).unwrap();
 
-    if prime_cache {
-        // First, prime the PMTU cache with the value we will send later, as a
-        // regression test for https://fxbug.dev/435260334.
-        let (message, code) = I::packet_too_big(new_mtu);
-        let icmp_error = packet::Buf::new([], ..)
-            .wrap_in(IcmpPacketBuilder::<I, _>::new(I::SERVER_ADDR, I::CLIENT_ADDR, code, message))
-            .wrap_in(I::PacketBuilder::new(
-                I::SERVER_ADDR,
-                I::CLIENT_ADDR,
-                u8::MAX,
-                I::map_ip_out((), |()| Ipv4Proto::Icmp, |()| Ipv6Proto::Icmpv6),
-            ))
-            .wrap_in(EthernetFrameBuilder::new(
-                SERVER_MAC.into_ext(),
-                client_interface.mac().await.into_ext(),
-                EtherType::from_ip_version(I::VERSION),
-                ETHERNET_MIN_BODY_LEN_NO_TAG,
-            ))
-            .serialize_vec_outer(&mut NoOpSerializationContext)
-            .expect("serialize ICMP error")
-            .unwrap_b();
-        fake_ep.write(icmp_error.as_ref()).await.expect("write ICMP error");
-    }
-
     // Filter frames observed on the fake endpoint to just those containing a TCP
     // segment in an IP packet.
     let fake_ep = &fake_ep;
@@ -1418,136 +1391,177 @@ async fn tcp_update_mss_from_pmtu<I: TestPmtuIpExt>(name: &str, prime_cache: boo
             try_parse_frame_as_tcp::<I>(frame)
         })
     });
-
-    let server = async {
-        // Wait for an incoming TCP connection.
-        let (eth, ip, tcp, _frame) = frames.next().await.unwrap();
-        assert!(tcp.syn_set());
-
-        // Send a SYN/ACK in response.
-        let ethernet_builder = EthernetFrameBuilder::new(
-            eth.dst_mac(),
-            eth.src_mac(),
-            EtherType::from_ip_version(I::VERSION),
-            ETHERNET_MIN_BODY_LEN_NO_TAG,
-        );
-
-        let mut syn_ack = TcpSegmentBuilder::new(
-            ip.dst_ip(),
-            ip.src_ip(),
-            tcp.dst_port().unwrap(),
-            tcp.src_port().unwrap(),
-            tcp.seq_num(),
-            Some(tcp.seq_num() + 1),
-            tcp.window_size(),
-        );
-        syn_ack.syn(true);
-        let frame = packet::Buf::new([], ..)
-            .wrap_in(
-                // Advertise an initial MSS that is large enough to fit the sender's payload in
-                // a single segment.
-                TcpSegmentBuilderWithOptions::new(
-                    syn_ack,
-                    TcpOptionsBuilder { mss: Some(1500), ..Default::default() },
-                )
-                .unwrap(),
-            )
-            .wrap_in(I::PacketBuilder::new(ip.dst_ip(), ip.src_ip(), u8::MAX, IpProto::Tcp.into()))
-            .wrap_in(ethernet_builder.clone())
-            .serialize_vec_outer(&mut NoOpSerializationContext)
-            .expect("serialize SYN/ACK")
-            .unwrap_b();
-        fake_ep.write(frame.as_ref()).await.expect("write SYN/ACK");
-
-        // Wait for the ACK response, skipping any other packets (such as retransmitted
-        // SYNs).
+    // Returns the next TCP segment sent from `client_port`.
+    let mut next_frame_from_client = async |client_port: NonZeroU16| {
         loop {
-            let (_eth, _ip, tcp, _frame) = frames.next().await.unwrap();
-            if tcp.ack_num().is_some() {
-                break;
+            let (eth, ip, tcp, frame) = frames.next().await.unwrap();
+            if tcp.src_port() == Some(client_port) {
+                break (eth, ip, tcp, frame);
             }
         }
-
-        // Now that the connection is established, respond to the next packet with an
-        // ICMP error indicating the packet was too big and providing a lower MTU.
-        let (_eth, ip, tcp, too_large_frame) = frames.next().await.unwrap();
-
-        // Ensure that the initial frame sent was larger than the updated PMTU we
-        // provided, so that we can be sure we're actually exercising a reduction in the
-        // PMTU.
-        let too_large_frame =
-            EthernetFrame::parse(&mut &too_large_frame[..], EthernetFrameLengthCheck::NoCheck)
-                .expect("valid ethernet frame");
-        assert_gt!(too_large_frame.body().len(), usize::try_from(new_mtu.get()).unwrap());
-
-        let (message, code) = I::packet_too_big(new_mtu);
-        let icmp_error = packet::Buf::new([], ..)
-            .wrap_in(tcp)
-            .wrap_in(ip.clone())
-            .wrap_in(IcmpPacketBuilder::<I, _>::new(ip.dst_ip(), ip.src_ip(), code, message))
-            .wrap_in(I::PacketBuilder::new(
-                ip.dst_ip(),
-                ip.src_ip(),
-                u8::MAX,
-                I::map_ip_out((), |()| Ipv4Proto::Icmp, |()| Ipv6Proto::Icmpv6),
-            ))
-            .wrap_in(ethernet_builder)
-            .serialize_vec_outer(&mut NoOpSerializationContext)
-            .expect("serialize ICMP error")
-            .unwrap_b();
-        fake_ep.write(icmp_error.as_ref()).await.expect("write ICMP error");
-
-        // The initial segment should be retransmitted in smaller pieces, respecting the
-        // reduced PMTU.
-        let retransmitted_segment = async {
-            loop {
-                let (_eth, _ip, _tcp, frame) = frames.next().await.unwrap();
-                let eth = EthernetFrame::parse(&mut &frame[..], EthernetFrameLengthCheck::NoCheck)
-                    .expect("valid ethernet frame");
-
-                // It's possible the PMTU update wasn't processed by the netstack before the
-                // retransmission timer fired, in which case we'd see the original segment
-                // again.
-                if eth.body().len() != usize::try_from(new_mtu.get()).unwrap() {
-                    continue;
-                }
-
-                let ip = I::Packet::parse(&mut eth.body(), ()).expect("valid IP packet");
-                let tcp =
-                    TcpSegment::parse(&mut ip.body(), TcpParseArgs::new(ip.src_ip(), ip.dst_ip()))
-                        .expect("valid TCP segment");
-                break tcp.body().to_vec();
-            }
-        }
-        .on_timeout(ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT.after_now(), || {
-            panic!("timed out waiting to observe segment with reduced MSS")
-        })
-        .await;
-
-        let ip = I::Packet::parse(&mut too_large_frame.body(), ()).expect("valid IP packet");
-        let too_large_segment =
-            TcpSegment::parse(&mut ip.body(), TcpParseArgs::new(ip.src_ip(), ip.dst_ip()))
-                .expect("valid TCP segment");
-        assert_eq!(retransmitted_segment, &too_large_segment.body()[..retransmitted_segment.len()]);
     };
 
-    let client = async {
-        let server_addr: net_types::ip::IpAddr = I::SERVER_ADDR.into();
-        let server_addr = std::net::SocketAddr::new(server_addr.into(), 8080);
-        let mut socket = fasync::net::TcpStream::connect_in_realm(&client, server_addr)
+    // Run the scenario twice. The first iteration starts with an empty PMTU
+    // cache. The second iteration starts with the PMTU cache already holding
+    // `new_mtu` for the path, and verifies that the ICMP error is still
+    // delivered to the connection even though it does not change the cached
+    // PMTU. This is a regression test for https://fxbug.dev/435260334.
+    //
+    // Use a distinct client port for each iteration to prevent cross
+    // contamination.
+    for client_port in [NonZeroU16::new(10000).unwrap(), NonZeroU16::new(10001).unwrap()] {
+        let server = async {
+            // Wait for an incoming TCP connection.
+            let (eth, ip, tcp, _frame) = next_frame_from_client(client_port).await;
+            assert!(tcp.syn_set());
+
+            // Send a SYN/ACK in response.
+            let ethernet_builder = EthernetFrameBuilder::new(
+                eth.dst_mac(),
+                eth.src_mac(),
+                EtherType::from_ip_version(I::VERSION),
+                ETHERNET_MIN_BODY_LEN_NO_TAG,
+            );
+
+            let mut syn_ack = TcpSegmentBuilder::new(
+                ip.dst_ip(),
+                ip.src_ip(),
+                tcp.dst_port().unwrap(),
+                tcp.src_port().unwrap(),
+                tcp.seq_num(),
+                Some(tcp.seq_num() + 1),
+                tcp.window_size(),
+            );
+            syn_ack.syn(true);
+            let frame = packet::Buf::new([], ..)
+                .wrap_in(
+                    // Advertise an initial MSS that is large enough to fit the sender's payload in
+                    // a single segment.
+                    TcpSegmentBuilderWithOptions::new(
+                        syn_ack,
+                        TcpOptionsBuilder { mss: Some(1500), ..Default::default() },
+                    )
+                    .unwrap(),
+                )
+                .wrap_in(I::PacketBuilder::new(
+                    ip.dst_ip(),
+                    ip.src_ip(),
+                    u8::MAX,
+                    IpProto::Tcp.into(),
+                ))
+                .wrap_in(ethernet_builder.clone())
+                .serialize_vec_outer(&mut NoOpSerializationContext)
+                .expect("serialize SYN/ACK")
+                .unwrap_b();
+            fake_ep.write(frame.as_ref()).await.expect("write SYN/ACK");
+
+            // Wait for the ACK response, skipping any other packets (such as retransmitted
+            // SYNs).
+            loop {
+                let (_eth, _ip, tcp, _frame) = next_frame_from_client(client_port).await;
+                if tcp.ack_num().is_some() {
+                    break;
+                }
+            }
+
+            // Now that the connection is established, respond to the next packet with an
+            // ICMP error indicating the packet was too big and providing a lower MTU.
+            let (_eth, ip, tcp, too_large_frame) = next_frame_from_client(client_port).await;
+
+            // Ensure that the initial frame sent was larger than the updated PMTU we
+            // provided, so that we can be sure we're actually exercising a reduction in the
+            // PMTU.
+            let too_large_frame =
+                EthernetFrame::parse(&mut &too_large_frame[..], EthernetFrameLengthCheck::NoCheck)
+                    .expect("valid ethernet frame");
+            assert_gt!(too_large_frame.body().len(), usize::try_from(new_mtu.get()).unwrap());
+
+            let (message, code) = I::packet_too_big(new_mtu);
+            let icmp_error = packet::Buf::new([], ..)
+                .wrap_in(tcp)
+                .wrap_in(ip.clone())
+                .wrap_in(IcmpPacketBuilder::<I, _>::new(ip.dst_ip(), ip.src_ip(), code, message))
+                .wrap_in(I::PacketBuilder::new(
+                    ip.dst_ip(),
+                    ip.src_ip(),
+                    u8::MAX,
+                    I::map_ip_out((), |()| Ipv4Proto::Icmp, |()| Ipv6Proto::Icmpv6),
+                ))
+                .wrap_in(ethernet_builder)
+                .serialize_vec_outer(&mut NoOpSerializationContext)
+                .expect("serialize ICMP error")
+                .unwrap_b();
+            fake_ep.write(icmp_error.as_ref()).await.expect("write ICMP error");
+
+            // The initial segment should be retransmitted in smaller pieces, respecting the
+            // reduced PMTU.
+            let retransmitted_segment = async {
+                loop {
+                    let (_eth, _ip, _tcp, frame) = next_frame_from_client(client_port).await;
+                    let eth =
+                        EthernetFrame::parse(&mut &frame[..], EthernetFrameLengthCheck::NoCheck)
+                            .expect("valid ethernet frame");
+
+                    // It's possible the PMTU update wasn't processed by the netstack before the
+                    // retransmission timer fired, in which case we'd see the original segment
+                    // again.
+                    if eth.body().len() != usize::try_from(new_mtu.get()).unwrap() {
+                        continue;
+                    }
+
+                    let ip = I::Packet::parse(&mut eth.body(), ()).expect("valid IP packet");
+                    let tcp = TcpSegment::parse(
+                        &mut ip.body(),
+                        TcpParseArgs::new(ip.src_ip(), ip.dst_ip()),
+                    )
+                    .expect("valid TCP segment");
+                    break tcp.body().to_vec();
+                }
+            }
+            .on_timeout(ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT.after_now(), || {
+                panic!("timed out waiting to observe segment with reduced MSS")
+            })
+            .await;
+
+            let ip = I::Packet::parse(&mut too_large_frame.body(), ()).expect("valid IP packet");
+            let too_large_segment =
+                TcpSegment::parse(&mut ip.body(), TcpParseArgs::new(ip.src_ip(), ip.dst_ip()))
+                    .expect("valid TCP segment");
+            assert_eq!(
+                retransmitted_segment,
+                &too_large_segment.body()[..retransmitted_segment.len()]
+            );
+        };
+
+        let client = async {
+            let server_addr: net_types::ip::IpAddr = I::SERVER_ADDR.into();
+            let server_addr = std::net::SocketAddr::new(server_addr.into(), 8080);
+            // Bind to the client address so that both connections share the
+            // same path in the PMTU cache.
+            let client_addr: net_types::ip::IpAddr = I::CLIENT_ADDR.into();
+            let client_addr = std::net::SocketAddr::new(client_addr.into(), client_port.get());
+            let mut socket = fasync::net::TcpStream::connect_in_realm_with_sock(
+                &client,
+                server_addr,
+                |socket| {
+                    socket.bind(&client_addr.into())?;
+                    Ok(())
+                },
+            )
             .await
             .expect("connect to server");
 
-        // Send a payload that will not fit in a single segment. (The PMTU is updated to
-        // `new_mtu`, which is too small due to the need to also fit the TCP
-        // and IP headers).
-        let len = usize::try_from(new_mtu.get()).unwrap();
-        let payload = vec![0xFF; len];
-        socket.write_all(&payload[..]).await.unwrap();
-        socket
-    };
+            // Send a payload that will not fit in a single segment. (The PMTU is updated to
+            // `new_mtu`, which is too small due to the need to also fit the TCP
+            // and IP headers).
+            let len = usize::try_from(new_mtu.get()).unwrap();
+            let payload = vec![0xFF; len];
+            socket.write_all(&payload[..]).await.unwrap();
+            socket
+        };
 
-    let (_socket, ()) = future::join(client, server).await;
+        let (_socket, ()) = future::join(client, server).await;
+    }
 }
 
 /// Tests that a connection pending in an accept queue can be accepted and

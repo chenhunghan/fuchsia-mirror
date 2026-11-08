@@ -58,5 +58,22 @@ group("bin") {
 
 group("tests") {
   testonly = true
-  deps = [ ":ffx_setui_tests($host_toolchain)" ]
+  deps = [
+    ":ffx_setui_tests($host_toolchain)",
+
+    # Plugins migrated to Bazel define standalone unit test targets that are
+    # not aggregated by `:ffx_setui_tests`.
+    "accessibility:tests",
+    "audio:tests",
+    "display:tests",
+    "do_not_disturb:tests",
+    "factory_reset:tests",
+    "input:tests",
+    "intl:tests",
+    "keyboard:tests",
+    "light:tests",
+    "night_mode:tests",
+    "privacy:tests",
+    "setup:tests",
+  ]
 }

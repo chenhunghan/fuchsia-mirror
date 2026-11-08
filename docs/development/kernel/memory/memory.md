@@ -73,7 +73,7 @@ the system.
  1. On your host machine, run the following command from the root of your
     Fuchsia checkout:
 
-    ```./scripts/fx shell memgraph -vt | ./scripts/memory/treemap.py > mem.html```
+    ```./scripts/fx shell memgraph -vt | ./src/memory/tools/treemap.py > mem.html```
 
  2. Open `mem.html` in a browser.
 

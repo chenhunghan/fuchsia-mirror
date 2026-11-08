@@ -11,10 +11,10 @@ if (toolchain_environment == "kernel.phys") {
   source_set("code-patches") {
     sources = [ "code-patches.cc" ]
     deps = [
-      "//zircon/kernel/arch/arm64/phys:arch-phys-info",
       "//zircon/kernel/lib/code-patching",
       "//zircon/kernel/phys:symbolize",
       "//zircon/kernel/phys/handoff",
+      "//zircon/kernel/phys/runtime:headers",
     ]
     public_deps = [ ":headers" ]
   }

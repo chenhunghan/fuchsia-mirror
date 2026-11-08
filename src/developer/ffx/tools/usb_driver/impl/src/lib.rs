@@ -2,12 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use ffx_futures::LocalBoxFuture;
 use ffx_metrics::{UsbDriverConnectionEvent, UsbDriverShutdownEvent, UsbDriverTelemetryEvent};
 use fidl_fuchsia_ffx_usb_common::{
     self as usb_fidl, control_ordinals, ffx_usb_ordinals, list_devices_ordinals,
 };
 use futures::channel::{mpsc, oneshot};
-use futures::future::{Either, LocalBoxFuture, select};
+use futures::future::{Either, select};
 use futures::lock::Mutex as AsyncMutex;
 use futures::{FutureExt, SinkExt, StreamExt};
 use std::collections::hash_map::Entry;
@@ -728,13 +729,19 @@ impl HostDriver {
             Err(e) => (None, Err(e)),
         };
         let resp = fidl_message::encode_response_result(header, connect_result)?;
-        stream.write_with_length(&resp).await?;
+        let write_result = stream.write_with_length(&resp).await;
 
         if let Some(ready) = ready {
+            // Service the connection even if the client already hung up. An
+            // established connection that is never finished leaves its writer
+            // unavailable, so any data the target sends on it (e.g. overnet's
+            // greeting) stalls the whole USB link. Finishing it with the closed
+            // stream tears it down cleanly instead.
             self.record_communicated_cid(cid);
             let _conn_state = ready.finish_connect(stream).await;
         }
 
+        write_result?;
         Ok(())
     }
 
@@ -1129,6 +1136,49 @@ mod test {
         let sock = remove_and_bind_socket(sock_path.clone()).unwrap();
         std::mem::drop(sock);
         let _ = remove_and_bind_socket(sock_path).unwrap();
+    }
+
+    #[fuchsia::test]
+    async fn abandoned_connect_to_does_not_stall_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("test_sock");
+        let (mut conn, _handle) = HostDriver::new_for_test_with_telemetry(sock_path.clone());
+        let cid = conn.cid;
+        let connect_to_msg = |port| {
+            let hdr = fidl::encoding::TransactionHeader::new(
+                1,
+                ffx_usb_ordinals::INITIALIZE_CONNECT_TO,
+                fidl::encoding::DynamicFlags::FLEXIBLE,
+            );
+            fidl_message::encode_message(
+                hdr,
+                usb_fidl::FfxUsbInitializeConnectToRequest { cid, port },
+            )
+            .unwrap()
+        };
+
+        // A client requests a connection, then hangs up before reading the response.
+        let mut abandoned = UnixStream::connect(&sock_path).await.unwrap();
+        abandoned.write_with_length(&connect_to_msg(202)).await.unwrap();
+        std::mem::drop(abandoned);
+
+        // The target accepts it and immediately sends data on it.
+        let req = conn.incoming_requests.next().await.unwrap();
+        let (mut dev_stream_1, other_end_1) = UnixStream::pair().unwrap();
+        let _state_1 = conn.connection.accept(req, other_end_1.into()).await.unwrap();
+        dev_stream_1.write_all(b"greeting").await.unwrap();
+
+        // New connections over the same link must still work.
+        let mut client = UnixStream::connect(&sock_path).await.unwrap();
+        client.write_with_length(&connect_to_msg(203)).await.unwrap();
+        let req = conn.incoming_requests.next().await.unwrap();
+        let (mut dev_stream_2, other_end_2) = UnixStream::pair().unwrap();
+        let _state_2 = conn.connection.accept(req, other_end_2.into()).await.unwrap();
+        let _resp = client.read_with_length().await.unwrap().unwrap();
+        client.write_all(b"ping").await.unwrap();
+        let mut buf = [0u8; 4];
+        dev_stream_2.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"ping");
     }
 
     #[fuchsia::test]

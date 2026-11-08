@@ -7,8 +7,10 @@ package ffxutil
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -39,6 +41,10 @@ const (
 
 	// The name of the ffx env config file.
 	ffxEnvFilename = ".ffx_env"
+
+	// The name of the strict-mode target registry file inside $SHARED_DATA.
+	// Keep in sync with //src/developer/ffx/data/config.json.
+	registeredTargetsFilename = "targets.json"
 )
 
 type FFXInvokeMode int
@@ -74,6 +80,8 @@ type ffxCmdBuilder interface {
 	env() []string
 	// Return whether this builder is strict
 	isStrict() bool
+	// Return a copy of this builder with its own copy of the configuration map
+	clone() ffxCmdBuilder
 }
 
 // legacyFfxCmdBuilder is a builder for ffx commands using the "legacy" approach:
@@ -152,6 +160,10 @@ func (b *legacyFfxCmdBuilder) env() []string {
 
 func (f *legacyFfxCmdBuilder) isStrict() bool {
 	return false
+}
+
+func (b *legacyFfxCmdBuilder) clone() ffxCmdBuilder {
+	return newLegacyFfxCmdBuilder(b.isolateDir, b.configDir)
 }
 
 // strictFfxCmdBuilder is a builder for ffx commands using the 'strict"
@@ -249,6 +261,41 @@ func (f *strictFfxCmdBuilder) isStrict() bool {
 	return true
 }
 
+func (b *strictFfxCmdBuilder) clone() ffxCmdBuilder {
+	cloned := newStrictFfxCmdBuilder(b.outputFile)
+	b.configs.Range(func(k, v any) bool {
+		cloned.configs.Store(k, cloneConfigValue(v))
+		return true
+	})
+	return cloned
+}
+
+// cloneConfigValue returns a deep copy of common slice and map config values.
+// Other config value types (typically strings, bools, and numbers) are expected
+// to be immutable.
+func cloneConfigValue(v any) any {
+	switch val := v.(type) {
+	case []string:
+		return slices.Clone(val)
+	case []any:
+		cloned := slices.Clone(val)
+		for i, elem := range cloned {
+			cloned[i] = cloneConfigValue(elem)
+		}
+		return cloned
+	case map[string]string:
+		return maps.Clone(val)
+	case map[string]any:
+		cloned := maps.Clone(val)
+		for k, elem := range cloned {
+			cloned[k] = cloneConfigValue(elem)
+		}
+		return cloned
+	default:
+		return v
+	}
+}
+
 // FFXInstance takes in a path to the ffx tool and runs ffx commands with the provided config.
 type FFXInstance struct {
 	ctx     context.Context
@@ -263,6 +310,63 @@ type FFXInstance struct {
 	sshInfo        SSHInfo
 	sshKeysChecked bool
 	sharedData     string
+}
+
+// RegisteredTarget represents a minimal target device record stored in
+// $SHARED_DATA/targets.json for strict-mode target resolution.
+// Keep in sync with RegisteredTarget in //src/developer/ffx/lib/target/src/registry.rs.
+type RegisteredTarget struct {
+	Nodename string `json:"nodename,omitempty"`
+	ID       string `json:"id,omitempty"`
+	Address  string `json:"address"`
+}
+
+// TargetListEntry represents a single target entry in the JSON array emitted
+// by `ffx --machine json target list`.
+// Keep in sync with JsonTarget in //src/developer/ffx/plugins/target/list/target_formatter/src/lib.rs.
+type TargetListEntry struct {
+	Nodename  string              `json:"nodename"`
+	RCSState  string              `json:"rcs_state"`
+	Serial    string              `json:"serial"`
+	Addresses []TargetListAddress `json:"addresses"`
+}
+
+// TargetListAddress represents a single transport address of a target entry
+// emitted by `ffx --machine json target list`. Only the fields needed to
+// identify USB addresses are decoded.
+// Keep in sync with JsonTargetAddress in //src/developer/ffx/plugins/target/list/target_formatter/src/lib.rs.
+type TargetListAddress struct {
+	Type string `json:"type"`
+	CID  uint32 `json:"cid"`
+}
+
+// USBAddress returns the entry's first USB transport address formatted as a
+// target address (`usb:cid:<cid>`), or an empty string if it has none.
+func (e TargetListEntry) USBAddress() string {
+	for _, a := range e.Addresses {
+		if a.Type == "Usb" {
+			return fmt.Sprintf("usb:cid:%d", a.CID)
+		}
+	}
+	return ""
+}
+
+// NormalizedNodename returns the entry's nodename, or an empty string if ffx
+// reported an unknown-target placeholder.
+func (e TargetListEntry) NormalizedNodename() string { return normalizeUnknown(e.Nodename) }
+
+// NormalizedSerial returns the entry's serial number, or an empty string if
+// ffx reported an unknown-target placeholder.
+func (e TargetListEntry) NormalizedSerial() string { return normalizeUnknown(e.Serial) }
+
+// normalizeUnknown returns s, or an empty string if ffx reported an
+// unknown-field placeholder ("<unknown>" or "<unknown-N>").
+// Keep in sync with UNKNOWN in //src/developer/ffx/plugins/target/list/target_formatter/src/lib.rs.
+func normalizeUnknown(s string) string {
+	if strings.HasPrefix(s, "<unknown") {
+		return ""
+	}
+	return s
 }
 
 // ConfigSettings contains settings to apply to the ffx configs at the specified config level.
@@ -312,11 +416,15 @@ type ProductImagePath struct {
 // FFXWithTarget returns a copy of the provided ffx instance associated with
 // the provided target. This copy will run commands with the new target.
 func FFXWithTarget(ffx *FFXInstance, target string) *FFXInstance {
+	var cmdBuilder ffxCmdBuilder
+	if ffx.cmdBuilder != nil {
+		cmdBuilder = ffx.cmdBuilder.clone()
+	}
 	return &FFXInstance{
 		ctx:            ffx.ctx,
 		ffxPath:        ffx.ffxPath,
 		runner:         ffx.runner,
-		cmdBuilder:     ffx.cmdBuilder,
+		cmdBuilder:     cmdBuilder,
 		stdout:         ffx.stdout,
 		stderr:         ffx.stderr,
 		target:         target,
@@ -529,6 +637,148 @@ func (f *FFXInstance) Env() []string {
 
 func (f *FFXInstance) SharedData() string {
 	return f.sharedData
+}
+
+// registeredTargetsPath returns the path to $SHARED_DATA/targets.json, or an
+// error if shared_data is not configured.
+func (f *FFXInstance) registeredTargetsPath() (string, error) {
+	if f.sharedData == "" {
+		return "", fmt.Errorf("shared_data directory is not configured")
+	}
+	return filepath.Join(f.sharedData, registeredTargetsFilename), nil
+}
+
+// RegisterTargets atomically writes the given target records to
+// $SHARED_DATA/targets.json. Every record must have an address and at least one
+// of a nodename or ID, since ffx fails to load the whole registry if any entry
+// has an unparsable address.
+func (f *FFXInstance) RegisterTargets(targets []RegisteredTarget) error {
+	path, err := f.registeredTargetsPath()
+	if err != nil {
+		return err
+	}
+	if targets == nil {
+		targets = []RegisteredTarget{}
+	}
+	for _, t := range targets {
+		if t.Address == "" {
+			return fmt.Errorf("registered target %+v has no address", t)
+		}
+		if t.Nodename == "" && t.ID == "" {
+			return fmt.Errorf("registered target %+v has neither a nodename nor an ID", t)
+		}
+	}
+	if err := os.MkdirAll(f.sharedData, os.ModePerm); err != nil {
+		return fmt.Errorf("creating shared_data dir: %w", err)
+	}
+	data, err := json.MarshalIndent(targets, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling registered targets: %w", err)
+	}
+	tmpFile, err := os.CreateTemp(f.sharedData, ".targets.json.*")
+	if err != nil {
+		return fmt.Errorf("creating temp targets.json: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	tmpFile.Close()
+	// Removing the temp file after a successful rename fails harmlessly.
+	defer os.Remove(tmpPath)
+	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
+		return fmt.Errorf("writing temp targets.json: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("renaming temp targets.json: %w", err)
+	}
+	return nil
+}
+
+// LoadRegisteredTargets reads target records from $SHARED_DATA/targets.json.
+// If the registry file does not exist, the returned error wraps os.ErrNotExist.
+func (f *FFXInstance) LoadRegisteredTargets() ([]RegisteredTarget, error) {
+	path, err := f.registeredTargetsPath()
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var targets []RegisteredTarget
+	if err := json.Unmarshal(data, &targets); err != nil {
+		return nil, fmt.Errorf("unmarshaling %s: %w", path, err)
+	}
+	return targets, nil
+}
+
+// upsertRegisteredTargets merges target into existing and returns the updated
+// slice. An entry matches if it has the same non-empty ID, or if it has the
+// same non-empty Nodename, no conflicting ID, and is the only entry with that
+// Nodename (several targets, such as emulators, may share a nodename). Multiple
+// matching entries are coalesced into one, and ID or Nodename fields left empty
+// on target are filled in from the matched entries.
+func upsertRegisteredTargets(existing []RegisteredTarget, target RegisteredTarget) []RegisteredTarget {
+	nameUnique := false
+	if target.Nodename != "" {
+		count, renamed := 0, false
+		for _, entry := range existing {
+			if entry.Nodename == target.Nodename {
+				count++
+			}
+			// An entry with the same ID but a different nodename means the target
+			// was renamed, so a nodename-only match could merge distinct targets.
+			if target.ID != "" && entry.ID == target.ID && entry.Nodename != "" && entry.Nodename != target.Nodename {
+				renamed = true
+			}
+		}
+		nameUnique = count == 1 && !renamed
+	}
+
+	merged, matchedIdx := target, -1
+	updated := make([]RegisteredTarget, 0, len(existing)+1)
+	for _, entry := range existing {
+		idMatch := target.ID != "" && entry.ID == target.ID
+		nameMatch := nameUnique && entry.Nodename == target.Nodename && (target.ID == "" || entry.ID == "")
+		if !idMatch && !nameMatch {
+			updated = append(updated, entry)
+			continue
+		}
+		merged.Nodename = cmp.Or(merged.Nodename, entry.Nodename)
+		merged.ID = cmp.Or(merged.ID, entry.ID)
+		if matchedIdx == -1 {
+			matchedIdx = len(updated)
+		}
+	}
+	if matchedIdx == -1 {
+		matchedIdx = len(updated)
+	}
+	return slices.Insert(updated, matchedIdx, merged)
+}
+
+// UpsertRegisteredTarget loads $SHARED_DATA/targets.json (if present), inserts
+// or updates target, and atomically writes the updated registry back to disk.
+func (f *FFXInstance) UpsertRegisteredTarget(target RegisteredTarget) error {
+	existing, err := f.LoadRegisteredTargets()
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return f.RegisterTargets(upsertRegisteredTargets(existing, target))
+}
+
+// TargetList runs `ffx --machine json target list` with optional per-invocation
+// config overrides and extra arguments, returning the parsed target entries.
+func (f *FFXInstance) TargetList(ctx context.Context, configs map[string]any, args ...string) ([]TargetListEntry, error) {
+	i := f.invoker(append([]string{"target", "list"}, args...)).
+		setMachineFormat(MachineJson).
+		setCaptureOutput().
+		setConfigs(configs)
+	if err := i.run(ctx); err != nil {
+		return nil, err
+	}
+	var entries []TargetListEntry
+	if err := json.Unmarshal(i.output.Bytes(), &entries); err != nil {
+		return nil, fmt.Errorf("unmarshaling ffx target list output %q: %w", i.output.String(), err)
+	}
+	return entries, nil
 }
 
 func (f *FFXInstance) SetTarget(target string) {
@@ -917,30 +1167,6 @@ func (f *FFXInstance) GetLastRebootReason(ctx context.Context) (string, error) {
 // provided writer, and the specified timeout.
 func (f *FFXInstance) RunWithTargetOutputAndTimeout(ctx context.Context, output io.Writer, timeout time.Duration, args ...string) error {
 	return f.invoker(args).setTarget(f.target).setStdout(output).setTimeout(timeout).run(ctx)
-}
-
-func (f *FFXInstance) StartDaemon(ctx context.Context, daemonLog *os.File) *exec.Cmd {
-	args := []string{"daemon", "start"}
-	// Special-case the daemon handling, since it's the one command where we want to redirect the stdout,
-	// _instead_ of specifying "-o ffx.log"
-	invoker := f.invoker(args)
-	ffx_cmd := invoker.ffx.cmdBuilder.command(f.ffxPath, args)
-	// Strip out the "--machine json" and "-o file" flags
-	for i, arg := range ffx_cmd {
-		if arg == "--machine" || arg == "-o" {
-			// Note: i+2 because we want to remove both "--machine"
-			// and the following arg
-			ffx_cmd = append(ffx_cmd[:i], ffx_cmd[i+2:]...)
-		}
-	}
-
-	cmd := f.runner.Command(ffx_cmd, subprocess.RunOptions{
-		Stdout:  daemonLog,
-		Stderr:  f.stderr,
-		Setpgid: true,
-	})
-	logger.Debugf(ctx, "%s", cmd.Args)
-	return cmd
 }
 
 // Deprecated: No-op as the daemon has been removed.

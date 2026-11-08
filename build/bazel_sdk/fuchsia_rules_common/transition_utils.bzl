@@ -1,0 +1,229 @@
+# Copyright 2024 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+"""Common utilities for transition functions."""
+
+load("@fuchsia_rules_common//debug_symbols:providers.bzl", "FuchsiaDebugSymbolInfo", "FuchsiaUnstrippedBinariesInfo")
+load("@fuchsia_rules_common//packages:providers.bzl", "FuchsiaPackageResourcesInfo")
+load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
+load("@rules_cc//cc/common:cc_shared_library_info.bzl", "CcSharedLibraryInfo")
+load("@rules_cc//cc/common:debug_package_info.bzl", "DebugPackageInfo")
+
+visibility("public")
+
+def set_command_line_option_value(input_args, option_prefix, option_value):
+    """Set or reset of command-line option such as "--foo=bar".
+
+    Args:
+        input_args: [list(string)] A input list of command arguments.
+        option_prefix: [string] The option prefix (e.g. "--foo=")
+        option_value: [string] The new option value (e.g. "bar").
+    Returns:
+        If the option already appears in the input, change its value to option_value
+
+        If multiple instances of the option appear in the input, they are all
+        changed to the new value.
+
+        Otherwise (i.e. if the option prefix is not in the input), return the input list
+        with "${option_prefix}${option_value}" appended to it.
+    """
+    new_arg = option_prefix + option_value
+    result = []
+    replaced = False
+    for arg in input_args:
+        if arg.startswith(option_prefix):
+            arg = new_arg
+            replaced = True
+        result.append(arg)
+
+    if not replaced:
+        result.append(new_arg)
+
+    return result
+
+def remove_command_line_option_values(input_args, option_prefix):
+    """Remove all instances of a command-line option from an input arguments list.
+
+    Args:
+        input_args: [list(string)] A input list of command arguments.
+        option_prefix: [string] The option prefix (e.g. "--foo=").
+    Returns:
+        new argument list, with all argument beginning with option_prefix removed.
+    """
+    return [arg for arg in input_args if not arg.startswith(option_prefix)]
+
+def normalize_features_list(features):
+    """Normalize a list of feature flag names.
+
+    Args:
+        features: A string list, each item is a feature flag name, that can be
+            optionally prefixed with '-' to disable it, instead of enabling it.
+
+    Returns:
+        A sorted string list that contains a normalized version of the input list.
+        Duplicates are removed and the last definition wins. The output is sorted
+        to avoid configuration explosion.
+    """
+    features_map = {}
+
+    for feature in reversed(features):
+        key = feature
+        if feature[0] == "-":
+            key = feature[1:]
+        features_map.setdefault(key, feature)
+
+    return sorted(features_map.values())
+
+def _features_list_transition_impl(settings, attr):
+    cur_features = settings["//command_line_option:features"]
+    new_features = normalize_features_list(cur_features + attr.feature_names)
+    return {"//command_line_option:features": new_features}
+
+FEATURES_LIST_TRANSITION_ATTRS = {
+    # NOTE: The "features" attribute name is built-in and reserved by Bazel.
+    "feature_names": attr.string_list(
+        mandatory = True,
+        doc = "A list of feature flag names, each item can be prefixed with '-' to disable it instead of enabling it.",
+    ),
+    "_allowlist_function_transition": attr.label(
+        default = "@bazel_tools//tools/allowlists/function_transition_allowlist",
+    ),
+}
+
+# Attribute dictionary for symbolic macros supporting `transitive_features`.
+TRANSITIVE_FEATURES_ATTRS = {
+    "transitive_features": attr.string_list(
+        doc = """A list of feature flag names that apply to this target and all
+        its transitive dependencies. Non-configurable. Each name can be prefixed with "-"
+        to disable the feature instead of enabling it. If both `features` and
+        `transitive_features` are used, the `features` list will override the
+        `transitive_features` values for this target, but not for its dependencies.""",
+        default = [],
+        configurable = False,
+    ),
+}
+
+features_list_transition = transition(
+    implementation = _features_list_transition_impl,
+    inputs = ["//command_line_option:features"],
+    outputs = ["//command_line_option:features"],
+)
+
+def _apply_features_list_impl(ctx):
+    return [
+        ctx.attr.actual[DefaultInfo],
+    ]
+
+apply_features_list = rule(
+    implementation = _apply_features_list_impl,
+    attrs = {
+        "actual": attr.label(
+            mandatory = True,
+            doc = "Label to actual target to build under the new build configuration.",
+            cfg = features_list_transition,
+        ),
+    } | FEATURES_LIST_TRANSITION_ATTRS,
+)
+
+CC_KNOWN_PROVIDERS = [
+    CcInfo,
+    # This provider is generated by cc_binary/cc_test, but there's no way to
+    # load it.
+    # CcLauncherInfo,
+    CcSharedLibraryInfo,
+    DebugPackageInfo,
+    FuchsiaDebugSymbolInfo,
+    FuchsiaPackageResourcesInfo,
+    FuchsiaUnstrippedBinariesInfo,
+    InstrumentedFilesInfo,
+    OutputGroupInfo,
+]
+
+def cc_apply_transitive_features_impl(ctx):
+    """Implementation of cc_apply_transitive_features.
+
+    Args:
+      ctx: Rule context.
+
+    Returns:
+      List of providers forwarding target outputs and providers.
+    """
+    result = []
+    actual = ctx.attr.actual[0]
+
+    # It is not possible to just return actual[DefaultInfo], as Bazel would
+    # complain with an error such as:
+    #
+    # <builtin> 'executable' provided by an executable rule 'cc_apply_transitive_features' should be created by the same rule.
+    #
+    # So copy/symlink the executable in the current build configuration's output directory.
+    output_name = ctx.attr.output_name or ctx.label.name
+    final_executable = ctx.actions.declare_file(output_name)
+    ctx.actions.symlink(output = final_executable, target_file = actual[DefaultInfo].files.to_list()[0], is_executable = True)
+    result.append(DefaultInfo(
+        files = depset([final_executable]),
+        runfiles = ctx.runfiles(files = [final_executable]).merge(actual[DefaultInfo].default_runfiles),
+        executable = final_executable,
+    ))
+    for provider in CC_KNOWN_PROVIDERS:
+        if provider in actual:
+            result.append(actual[provider])
+    if len(result) == 1:
+        fail("Could not find any providers in: {}".format(actual.label))
+    return result
+
+CC_APPLY_TRANSITIVE_FEATURES_ATTRS = {
+    "actual": attr.label(
+        mandatory = True,
+        doc = "Label to actual target to build under the new build configuration.",
+        providers = [[DefaultInfo, CcInfo], [DefaultInfo, CcSharedLibraryInfo]],
+        cfg = features_list_transition,
+    ),
+    "output_name": attr.string(
+        doc = "Optional output file name. Defaults to the target name.",
+    ),
+} | FEATURES_LIST_TRANSITION_ATTRS
+
+cc_apply_transitive_features = rule(
+    implementation = cc_apply_transitive_features_impl,
+    doc = "Apply a list of feature flag names to a C++ target and its dependencies.",
+    executable = True,
+    attrs = CC_APPLY_TRANSITIVE_FEATURES_ATTRS,
+)
+
+def cc_shared_library_apply_transitive_features_impl(ctx):
+    """Implementation of cc_shared_library_apply_transitive_features.
+
+    Args:
+      ctx: Rule context.
+
+    Returns:
+      List of providers forwarding shared library outputs and providers.
+    """
+    actual = ctx.attr.actual[0]
+    actual_files = actual[DefaultInfo].files.to_list()
+    if len(actual_files) != 1:
+        fail("Expected exactly 1 file for %s, got %s" % (ctx.attr.actual, actual_files))
+
+    src_file = actual_files[0]
+    final_file = ctx.actions.declare_file(src_file.basename)
+    ctx.actions.symlink(output = final_file, target_file = src_file)
+
+    result = [
+        DefaultInfo(
+            files = depset([final_file]),
+            runfiles = ctx.runfiles(files = [final_file]).merge(actual[DefaultInfo].default_runfiles),
+        ),
+    ]
+    for provider in [CcInfo, CcSharedLibraryInfo]:
+        if provider in actual:
+            result.append(actual[provider])
+    return result
+
+cc_shared_library_apply_transitive_features = rule(
+    implementation = cc_shared_library_apply_transitive_features_impl,
+    doc = "Apply a list of feature flag names to a C++ shared library target and its dependencies.",
+    executable = False,
+    attrs = CC_APPLY_TRANSITIVE_FEATURES_ATTRS,
+)

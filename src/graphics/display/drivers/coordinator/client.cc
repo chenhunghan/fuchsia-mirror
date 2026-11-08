@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <memory>
 #include <utility>
@@ -390,10 +391,11 @@ void Client::SetDisplayMode(SetDisplayModeRequestView request,
   DisplayConfig& display_config = *display_configs_it;
 
   if (!display::Mode::IsValid(request->mode)) {
-    fdf::error("SetDisplayMode called with invalid mode: {}x{} @ {}.{:03} Hz",
+    fdf::error("SetDisplayMode called with invalid mode: {}x{} @ {}.{:03} Hz, flags 0x{:x}",
                request->mode.active_area.width, request->mode.active_area.height,
                request->mode.refresh_rate_millihertz / 1000,
-               request->mode.refresh_rate_millihertz % 1000);
+               request->mode.refresh_rate_millihertz % 1000,
+               static_cast<uint32_t>(request->mode.flags));
     completer.Close(ZX_ERR_INVALID_ARGS);
     return;
   }
@@ -580,6 +582,17 @@ void Client::SetLayerPrimaryPosition(SetLayerPrimaryPositionRequestView request,
   }
   Layer& layer = *layers_it;
 
+  // A non-primary layer has empty image metadata: it is a color layer, or a
+  // layer that `SetLayerPrimaryConfig()` was never called on. The FIDL API
+  // makes this call illegal on such a layer, and a non-empty image source on a
+  // layer with empty image metadata would make an invalid
+  // `display::DriverLayer`.
+  if (!layer.is_primary()) {
+    fdf::error("SetLayerPrimaryPosition called on a non-primary layer: {}", layer_id.value());
+    completer.Close(ZX_ERR_BAD_STATE);
+    return;
+  }
+
   if (!display::CoordinateTransformation::IsValid(request->image_source_transformation)) {
     fdf::error("SetLayerPrimaryPosition called with invalid image_source_transformation");
     completer.Close(ZX_ERR_INVALID_ARGS);
@@ -624,6 +637,16 @@ void Client::SetLayerPrimaryAlpha(SetLayerPrimaryAlphaRequestView request,
     return;
   }
   Layer& layer = *layers_it;
+
+  // A non-primary layer has empty image metadata: it is a color layer, or a
+  // layer that `SetLayerPrimaryConfig()` was never called on. The FIDL API
+  // makes this call illegal on such a layer. A color layer's alpha mode is
+  // derived from its color, and a primary alpha would contradict it.
+  if (!layer.is_primary()) {
+    fdf::error("SetLayerPrimaryAlpha called on a non-primary layer: {}", layer_id.value());
+    completer.Close(ZX_ERR_BAD_STATE);
+    return;
+  }
 
   if (!display::AlphaMode::IsValid(request->mode)) {
     fdf::error("Invalid alpha mode {}", static_cast<uint8_t>(request->mode));
@@ -916,6 +939,11 @@ zx_status_t Client::ImportImageForCapture(const display::ImageMetadata& image_me
 void Client::StartCapture(StartCaptureRequestView request, StartCaptureCompleter::Sync& completer) {
   TRACE_DURATION("gfx", "Display::Client::StartCapture");
 
+  if (!is_owner_) {
+    completer.ReplyError(ZX_ERR_NOT_CONNECTED);
+    return;
+  }
+
   // Ensure display driver supports/implements capture.
   if (!controller_.supports_capture()) {
     completer.ReplyError(ZX_ERR_NOT_SUPPORTED);
@@ -979,6 +1007,11 @@ void Client::SetMinimumRgb(SetMinimumRgbRequestView request,
 void Client::SetDisplayPowerMode(SetDisplayPowerModeRequestView request,
                                  SetDisplayPowerModeCompleter::Sync& completer) {
   TRACE_DURATION("gfx", "Display::Client::SetDisplayPowerMode");
+
+  if (!is_owner_) {
+    completer.ReplyError(ZX_ERR_NOT_CONNECTED);
+    return;
+  }
 
   const display::DisplayId display_id = display::DisplayId(request->display_id);
   auto display_configs_it = display_configs_.find(display_id);

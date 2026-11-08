@@ -10,6 +10,7 @@
 #include <lib/hid/boot.h>
 #include <lib/hid/paradise.h>
 
+#include <bind/fuchsia/hid/cpp/bind.h>
 #include <gtest/gtest.h>
 
 #include "src/lib/testing/predicates/status.h"
@@ -1003,6 +1004,96 @@ TEST_F(HidDeviceTest, DeviceReportReaderHangingGet) {
                     }
                   })
                   .is_ok());
+}
+
+TEST_F(HidDeviceTest, GamepadBindProperty) {
+  driver_test().RunInEnvironmentTypeContext([](HidDriverTestEnvironment& env) {
+    const uint8_t kGamepadDesc[] = {
+        0x05, 0x01,  // Usage Page (Generic Desktop)
+        0x09, 0x05,  // Usage (Game Pad)
+        0xA1, 0x01,  // Collection (Application)
+        0x05, 0x09,  //   Usage Page (Button)
+        0x09, 0x01,  //   Usage (Button 1)
+        0x15, 0x00,  //   Logical Minimum (0)
+        0x25, 0x01,  //   Logical Maximum (1)
+        0x75, 0x08,  //   Report Size (8)
+        0x95, 0x01,  //   Report Count (1)
+        0x81, 0x02,  //   Input (Data,Var,Abs)
+        0xC0,        // End Collection
+    };
+    env.fake_hidbus().SetDescriptor(kGamepadDesc, sizeof(kGamepadDesc));
+
+    fidl::Arena<> arena;
+    env.fake_hidbus().SetHidInfo(fhidbus::wire::HidInfo::Builder(arena)
+                                     .boot_protocol(fhidbus::wire::HidBootProtocol::kNone)
+                                     .vendor_id(0x0428)
+                                     .product_id(0x4001)
+                                     .version(0x0100)
+                                     .dev_num(0)
+                                     .polling_rate(0)
+                                     .Build());
+  });
+  ASSERT_TRUE(driver_test().StartDriver().is_ok());
+
+  driver_test().RunInNodeContext([](fdf_testing::TestNode& node) {
+    auto it = node.children().find("hid-device");
+    ASSERT_NE(it, node.children().end());
+    bool found_gamepad = false;
+    for (const auto& prop : it->second.GetProperties()) {
+      if (prop.key() == bind_fuchsia_hid::GENERIC_DESKTOP__GAMEPAD) {
+        ASSERT_TRUE(prop.value().bool_value().has_value());
+        EXPECT_TRUE(prop.value().bool_value().value());
+        found_gamepad = true;
+      }
+      EXPECT_NE(prop.key(), bind_fuchsia_hid::GENERIC_DESKTOP__JOYSTICK);
+    }
+    EXPECT_TRUE(found_gamepad);
+  });
+}
+
+TEST_F(HidDeviceTest, JoystickBindProperty) {
+  driver_test().RunInEnvironmentTypeContext([](HidDriverTestEnvironment& env) {
+    const uint8_t kJoystickDesc[] = {
+        0x05, 0x01,  // Usage Page (Generic Desktop)
+        0x09, 0x04,  // Usage (Joystick)
+        0xA1, 0x01,  // Collection (Application)
+        0x05, 0x09,  //   Usage Page (Button)
+        0x09, 0x01,  //   Usage (Button 1)
+        0x15, 0x00,  //   Logical Minimum (0)
+        0x25, 0x01,  //   Logical Maximum (1)
+        0x75, 0x08,  //   Report Size (8)
+        0x95, 0x01,  //   Report Count (1)
+        0x81, 0x02,  //   Input (Data,Var,Abs)
+        0xC0,        // End Collection
+    };
+    env.fake_hidbus().SetDescriptor(kJoystickDesc, sizeof(kJoystickDesc));
+
+    fidl::Arena<> arena;
+    env.fake_hidbus().SetHidInfo(fhidbus::wire::HidInfo::Builder(arena)
+                                     .boot_protocol(fhidbus::wire::HidBootProtocol::kNone)
+                                     .vendor_id(0x1234)
+                                     .product_id(0x5678)
+                                     .version(0x0100)
+                                     .dev_num(0)
+                                     .polling_rate(0)
+                                     .Build());
+  });
+  ASSERT_TRUE(driver_test().StartDriver().is_ok());
+
+  driver_test().RunInNodeContext([](fdf_testing::TestNode& node) {
+    auto it = node.children().find("hid-device");
+    ASSERT_NE(it, node.children().end());
+    bool found_joystick = false;
+    for (const auto& prop : it->second.GetProperties()) {
+      if (prop.key() == bind_fuchsia_hid::GENERIC_DESKTOP__JOYSTICK) {
+        ASSERT_TRUE(prop.value().bool_value().has_value());
+        EXPECT_TRUE(prop.value().bool_value().value());
+        found_joystick = true;
+      }
+      EXPECT_NE(prop.key(), bind_fuchsia_hid::GENERIC_DESKTOP__GAMEPAD);
+    }
+    EXPECT_TRUE(found_joystick);
+  });
 }
 
 }  // namespace hid_driver

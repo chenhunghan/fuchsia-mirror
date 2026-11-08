@@ -25,15 +25,13 @@
 #include <phys/allocation.h>
 #include <phys/boot-options.h>
 #include <phys/boot-shim/devicetree.h>
-#include <phys/main.h>
-#include <phys/stdio.h>
-#include <phys/uart-console.h>
+#include <phys/runtime/main.h>
+#include <phys/uart/driver.h>
 
 #include "test-main.h"
 
 void PhysMain(void* flat_devicetree_blob, arch::EarlyTicks ticks) {
   ArchSetUpCpu();
-  InitStdout();
   ApplyRelocations();
 
   // For testing purposes, we explicitly initialize the uart from the

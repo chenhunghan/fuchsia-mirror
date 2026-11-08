@@ -26,6 +26,8 @@ mod types;
 /// Software Stream Config Audio Input/Output
 pub mod stream_config;
 
+pub use stream_config::validate_pcm_format2;
+
 /// Audio Frame Stream (output stream)
 /// Produces audio packets as if it was an audio output using a [`stream_config::SoftStreamConfig`]
 pub mod audio_frame_stream;

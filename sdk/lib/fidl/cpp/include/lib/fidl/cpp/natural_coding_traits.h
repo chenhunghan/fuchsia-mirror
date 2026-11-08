@@ -108,6 +108,8 @@ struct DefaultConstructPossiblyInvalidObject<std::array<E, N>> {
 
 struct NaturalCodingConstraintEmpty {};
 
+struct NaturalCodingConstraintNonZero {};
+
 template <zx_obj_type_t ObjType, zx_rights_t Rights, bool IsOptional>
 struct NaturalCodingConstraintHandle {
   static constexpr zx_obj_type_t obj_type = ObjType;
@@ -192,6 +194,30 @@ struct NaturalCodingTraits<bool, NaturalCodingConstraintEmpty> {
     bool b;
     Decode(decoder, &b, offset, recursion_depth);
     *value = b;
+  }
+};
+
+template <typename IntType>
+void NaturalEncodeNonZero(NaturalEncoder* encoder, const IntType* value, size_t offset);
+
+template <typename IntType>
+void NaturalDecodeNonZero(NaturalDecoder* decoder, IntType* value, size_t offset);
+
+template <typename T>
+struct NaturalCodingTraits<T, NaturalCodingConstraintNonZero,
+                           typename std::enable_if<IsInteger<T>::value>::type> {
+  using UnsignedT = std::make_unsigned_t<std::remove_cv_t<T>>;
+  static constexpr size_t kInlineSize =
+      NaturalCodingTraits<T, NaturalCodingConstraintEmpty>::kInlineSize;
+  // Non-zero integers are not memcpy-compatible because they must be validated.
+  static constexpr bool kIsMemcpyCompatible = false;
+
+  static void Encode(NaturalEncoder* encoder, const T* value, size_t offset,
+                     size_t recursion_depth) {
+    NaturalEncodeNonZero<UnsignedT>(encoder, reinterpret_cast<const UnsignedT*>(value), offset);
+  }
+  static void Decode(NaturalDecoder* decoder, T* value, size_t offset, size_t recursion_depth) {
+    NaturalDecodeNonZero<UnsignedT>(decoder, reinterpret_cast<UnsignedT*>(value), offset);
   }
 };
 

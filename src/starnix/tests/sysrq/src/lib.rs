@@ -139,14 +139,17 @@ async fn b_reboot() {
 
     info!("waiting for power admin request");
     let mut admin_client = admin_requests.next().await.unwrap();
-    let reasons = assert_matches!(
+    let (reasons, _responder) = assert_matches!(
         admin_client.next().await.unwrap().unwrap(),
         AdminRequest::Shutdown { options: ShutdownOptions {
             action: Some(ShutdownAction::Reboot),
             reasons: Some(reasons), ..
-        }, .. } => reasons
+        }, responder } => (reasons, responder)
     );
     assert_eq!(&reasons[..], [ShutdownReason::CriticalComponentFailure]);
+    // Destroy the realm before dropping `admin_client` and `_responder` so the kernel doesn't
+    // observe `PEER_CLOSED` on the synchronous `Shutdown` call and trigger a spurious panic.
+    kernel_with_container.destroy().await.unwrap();
 }
 
 #[fuchsia::test]

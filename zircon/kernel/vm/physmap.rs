@@ -19,6 +19,18 @@ pub fn paddr_to_physmap(paddr: PAddr) -> VAddr {
     VAddr(unsafe { bindings::cpp_paddr_to_physmap(paddr.0) })
 }
 
+/// Converts a physical address to a const pointer in the kernel physmap with exposed provenance.
+#[inline]
+pub fn paddr_to_physmap_ptr<T>(paddr: PAddr) -> *const T {
+    core::ptr::with_exposed_provenance(paddr_to_physmap(paddr).0)
+}
+
+/// Converts a physical address to a mutable pointer in the kernel physmap with exposed provenance.
+#[inline]
+pub fn paddr_to_physmap_mut<T>(paddr: PAddr) -> *mut T {
+    core::ptr::with_exposed_provenance_mut(paddr_to_physmap(paddr).0)
+}
+
 /// Converts a virtual address in the kernel physmap to a physical address.
 pub fn physmap_to_paddr(vaddr: VAddr) -> PAddr {
     // SAFETY: FFI call passing virtual address in physmap to get physical address.

@@ -4,6 +4,7 @@
 
 import("//build/components.gni")
 import("//build/rust/rustc_test.gni")
+import("//tools/cmc/build/cmc.gni")
 
 # Defines a SPI system test package.
 #
@@ -33,17 +34,76 @@ template("spi_system_test") {
          "max_expected_latency_nanoseconds must be defined")
   assert(defined(invoker.test_specs), "test_specs must be defined")
 
+  _config_cml_shard_target = "${target_name}_config_cml_shard"
+  _config_cml_shard_file = "${target_gen_dir}/${target_name}_config.shard.cml"
+  _merged_cml_target = "${target_name}_merged_cml"
   _manifest_target = "${target_name}_manifest"
   _config_lib_target = "${target_name}_config_lib"
   _bin_target = "${target_name}_bin"
   _component_target = "${target_name}_component"
-  _config_values_target = "${target_name}_config_values"
   _package_target = target_name
+
+  generated_file(_config_cml_shard_target) {
+    testonly = true
+    outputs = [ _config_cml_shard_file ]
+    output_conversion = "json"
+    contents = {
+      use = [
+        {
+          config = "fuchsia.spi.test.BusAddresses"
+          key = "bus_addresses"
+          type = "vector"
+          element = {
+            type = "string"
+            max_size = 64
+          }
+          max_count = 8
+          availability = "transitional"
+          default = invoker.bus_addresses
+        },
+        {
+          config = "fuchsia.spi.test.MinExpectedThroughputBytesPerSecond"
+          key = "min_expected_throughput_bytes_per_second"
+          type = "vector"
+          element = {
+            type = "uint64"
+          }
+          max_count = 8
+          availability = "transitional"
+          default = invoker.min_expected_throughput_bytes_per_second
+        },
+        {
+          config = "fuchsia.spi.test.MaxExpectedLatencyNanoseconds"
+          key = "max_expected_latency_nanoseconds"
+          type = "vector"
+          element = {
+            type = "uint64"
+          }
+          max_count = 8
+          availability = "transitional"
+          default = invoker.max_expected_latency_nanoseconds
+        },
+      ]
+    }
+  }
+
+  cmc_merge(_merged_cml_target) {
+    testonly = true
+    deps = [ ":$_config_cml_shard_target" ]
+    sources = [
+      "//src/devices/spi/tests/spi-system-test/meta/spi-system-test.cml",
+      _config_cml_shard_file,
+    ]
+    output_name = "${target_name}_merged.cml"
+  }
+
+  _merged_cml_outputs = get_target_outputs(":$_merged_cml_target")
 
   fuchsia_component_manifest(_manifest_target) {
     testonly = true
-    manifest =
-        "//src/devices/spi/tests/spi-system-test/meta/spi-system-test.cml"
+    component_name = "spi-system-test"
+    manifest = _merged_cml_outputs[0]
+    deps = [ ":$_merged_cml_target" ]
   }
 
   fuchsia_structured_config_rust_lib(_config_lib_target) {
@@ -81,21 +141,8 @@ template("spi_system_test") {
     test_type = "driver_system"
   }
 
-  fuchsia_structured_config_values(_config_values_target) {
-    testonly = true
-    cm_label = ":$_manifest_target"
-    values = {
-      bus_addresses = invoker.bus_addresses
-      min_expected_throughput_bytes_per_second =
-          invoker.min_expected_throughput_bytes_per_second
-      max_expected_latency_nanoseconds =
-          invoker.max_expected_latency_nanoseconds
-    }
-  }
-
   fuchsia_test_package(_package_target) {
     test_components = [ ":$_component_target" ]
-    deps = [ ":$_config_values_target" ]
     test_specs = invoker.test_specs
   }
 }

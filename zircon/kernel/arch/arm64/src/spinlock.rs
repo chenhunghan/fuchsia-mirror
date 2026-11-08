@@ -8,6 +8,10 @@
 //!
 //! A lock holds the number of the CPU holding it plus one, so 0 means unheld.
 
+// TODO(https://fxbug.dev/581987928): Remove `#![coverage(off)]` once compiler options can control
+// atomic coverage counter updates.
+#![coverage(off)]
+
 use super::mp::{arch_curr_cpu_num, read_percpu_field, write_percpu_field};
 use crate::kernel::spin_tracing::{EncodedLockId, FinishType, Tracer};
 use crate::kernel::types::cpu_num_t;
@@ -58,7 +62,8 @@ unsafe fn arch_spin_lock_core(lock: &AtomicU32, val: cpu_num_t) {
 /// # Safety
 ///
 /// Interrupts are disabled.
-unsafe fn arch_spin_lock_non_instrumented(lock: &AtomicU32) {
+#[inline]
+pub(crate) unsafe fn arch_spin_lock_non_instrumented(lock: &AtomicU32) {
     let val = arch_curr_cpu_num().wrapping_add(1);
     // SAFETY: The caller has disabled interrupts.
     unsafe { arch_spin_lock_core(lock, val) };
@@ -67,7 +72,11 @@ unsafe fn arch_spin_lock_non_instrumented(lock: &AtomicU32) {
 /// # Safety
 ///
 /// Interrupts are disabled.
-unsafe fn arch_spin_lock_trace_instrumented(lock: &AtomicU32, encoded_lock_id: EncodedLockId) {
+#[inline]
+pub(crate) unsafe fn arch_spin_lock_trace_instrumented(
+    lock: &AtomicU32,
+    encoded_lock_id: EncodedLockId,
+) {
     let val = arch_curr_cpu_num().wrapping_add(1);
 
     if lock.compare_exchange(0, val, Ordering::Acquire, Ordering::Relaxed).is_ok() {
@@ -105,7 +114,8 @@ unsafe fn arch_spin_lock_trace_instrumented_contended(
 /// # Safety
 ///
 /// Interrupts are disabled.
-unsafe fn arch_spin_trylock(lock: &AtomicU32) -> bool {
+#[inline]
+pub(crate) unsafe fn arch_spin_trylock(lock: &AtomicU32) -> bool {
     let val = arch_curr_cpu_num().wrapping_add(1);
     let out: cpu_num_t;
     // SAFETY: See `arch_spin_lock_core`.
@@ -139,7 +149,8 @@ unsafe fn arch_spin_trylock(lock: &AtomicU32) -> bool {
 /// # Safety
 ///
 /// The calling CPU holds `lock`, and interrupts are disabled.
-unsafe fn arch_spin_unlock(lock: &AtomicU32) {
+#[inline]
+pub(crate) unsafe fn arch_spin_unlock(lock: &AtomicU32) {
     let count = read_percpu_field!(num_spinlocks).wrapping_sub(1);
     // SAFETY: `num_spinlocks` counts the spinlocks the calling CPU holds, and it is releasing
     // `lock`, which it holds. Interrupts are disabled, so no interrupt handler on this CPU changes

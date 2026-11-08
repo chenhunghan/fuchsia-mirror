@@ -1,0 +1,60 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//src/developer/ffx/build:ffx_plugin.bzl", "ffx_plugin")
+
+package(default_applicable_licenses = ["//:license"])
+
+ffx_plugin(
+    name = "ffx_repository_packages",
+    srcs = ["src/lib.rs"],
+    args_deps = [
+        "//src/developer/ffx/core:lib",
+        "//third_party/rust_crates/vendor:argh",
+    ],
+    args_srcs = ["src/args.rs"],
+    edition = "2024",
+    sdk_category = "not-yet-specified",
+    version = "0.1.0",
+    visibility = ["//src/developer/ffx/plugins/repository:__pkg__"],
+    deps = [
+        "//src/developer/ffx/config:lib",
+        "//src/developer/ffx/lib/errors:lib",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/developer/ffx/lib/pkg",
+        "//src/developer/ffx/lib/writer:lib",
+        "//src/lib/fuchsia-hyper",
+        "//src/sys/pkg/lib/fuchsia-hash",
+        "//src/sys/pkg/lib/fuchsia-pkg",
+        "//src/sys/pkg/lib/fuchsia-repo",
+        # prettytable-rs is a fork outside vendor/; GN reaches it through
+        # the //third_party/rust_crates:prettytable-rs alias group.
+        "//third_party/rust_crates/forks/prettytable-rs:prettytable",  # @bazel2gn:path_overwrite://third_party/rust_crates:prettytable-rs
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:camino",
+        "//third_party/rust_crates/vendor:chrono",
+        "//third_party/rust_crates/vendor:humansize",
+        "//third_party/rust_crates/vendor:serde",
+    ],
+)
+
+# bazel2gn cannot translate `test_data`, so this test is wired into
+# //src/developer/ffx:tests in Bazel.
+# @bazel2gn:skip
+host_rustc_test(
+    name = "ffx_repository_packages_test",
+    crate = ":ffx_repository_packages",
+    # Required at runtime by `fuchsia_repo::test_utils::make_pm_repo_dir` in `setup_repo`.
+    test_data = ["//src/developer/ffx/lib/pkg:empty-repo-keys"],
+    visibility = ["//src/developer/ffx:__pkg__"],
+    deps = [
+        "//src/developer/ffx/lib/timeout:lib",
+        "//src/developer/ffx/plugins/package/archive:lib",
+        "//src/lib/fuchsia",
+        "//src/sys/lib/fidl-fuchsia-pkg-ext",
+        "//third_party/rust_crates/vendor:pretty_assertions",
+        "//third_party/rust_crates/vendor:tempfile",
+    ],
+)

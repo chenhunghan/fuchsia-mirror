@@ -1,0 +1,73 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/components:expect_includes.bzl", "expect_includes")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Aggregated into //src/ui:target_tests.
+test_suite(
+    name = "tests",
+    tests = [":lib_tests"],
+    visibility = ["//src/ui:__pkg__"],
+)
+
+rustc_library(
+    name = "lib",
+    srcs = [
+        "src/instance_counter.rs",
+        "src/lib.rs",
+    ],
+    crate_name = "focus_chain_provider",
+    edition = "2024",
+    visibility = [
+        "//src/ui/bin/scene_manager:__pkg__",
+        "//src/ui/lib/input_pipeline:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.ui.focus:fuchsia.ui.focus_rust",
+        "//sdk/rust/zx",
+        "//src/lib/async-utils",
+        "//src/lib/fuchsia-async",
+        "//src/lib/ui/fidl_fuchsia_ui_focus_ext:lib",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+expect_includes(
+    name = "lib_includes",
+    includes = ["meta/client.shard.cml"],
+)
+
+# Needs reviewer attention (bazel2gn skip): Keeping the dual-built GN
+# fuchsia_unittest_package wired alongside bazel_test_suite fails core.x64-asan
+# testsharder ("some shard names are repeated: affected:AEMU") when
+# use_test_pilot = true sets os = "linux" on the GN test;
+# TODO(https://fxbug.dev/570694755).
+# @bazel2gn:skip
+rustc_test(
+    name = "focus_chain_provider_lib_test",
+    crate = ":lib",
+    deps = [
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/ui/fidl_fuchsia_ui_focus_ext:test-helpers-lib",
+    ],
+)
+
+# Needs reviewer attention (bazel2gn skip): Keeping the dual-built GN
+# fuchsia_unittest_package wired alongside bazel_test_suite fails core.x64-asan
+# testsharder ("some shard names are repeated: affected:AEMU") when
+# use_test_pilot = true sets os = "linux" on the GN test;
+# TODO(https://fxbug.dev/570694755).
+# @bazel2gn:skip
+fx_unittest_package(
+    name = "lib_tests",
+    unit_tests = [":focus_chain_provider_lib_test"],
+)

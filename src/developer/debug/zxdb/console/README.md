@@ -1,4 +1,4 @@
-<!--* freshness: { reviewed: '2026-10-12' } *-->
+<!--* freshness: { reviewed: '2026-10-22' } *-->
 
 # Zxdb Console (`zxdb/console`)
 
@@ -18,7 +18,7 @@ Public headers and subdirectories expose these console components:
   `console_noninteractive.h`, `console_context.h`): `zxdb::Console`,
   `zxdb::Console::OutputObserver`, `zxdb::ConsoleImpl`,
   `zxdb::ConsoleNoninteractive`, and `zxdb::ConsoleContext` (tracks active
-  1-based target/thread/breakpoint IDs and 0-based frame indices).
+  1-based target/thread/breakpoint/tracepoint IDs and 0-based frame indices).
 - Command parsing, completion, and execution (`command.h`, `command_parser.h`,
   `command_context.h`, `command_sequence.h`, `command_line_options.h`):
   `zxdb::Command`, `zxdb::CommandCallback`, `zxdb::DispatchCommand`,
@@ -40,29 +40,31 @@ Public headers and subdirectories expose these console components:
   `zxdb::AssertAllStoppedThreadsCommand`, `zxdb::CheckHexPrefix`,
   `zxdb::ReadUint64Arg`, `zxdb::ThreadStateToString`,
   `zxdb::ExecutionScopeToString`, `zxdb::ExecutionScopeForCommand`,
-  `zxdb::ResolveBreakpointsForModification`, `zxdb::FormatBreakpoint`,
-  `zxdb::FormatInputLocation`, and `zxdb::FormatInputLocations`. Also exposes
-  `zxdb::GetEvalContextForCommand`, `zxdb::EvalCommandExpression`,
-  `zxdb::EvalCommandAddressExpression`, `zxdb::RewriteCommandExpressionError`,
-  `zxdb::FormatConsoleString`, `zxdb::GetNumberFormatForTarget`,
-  `zxdb::GetRunnableTarget`, `zxdb::GetRunningProcesses`,
-  `zxdb::VerifySystemHasRunningProcess`, `zxdb::ProcessCommandCallback`, and
-  `zxdb::ScheduleAsyncPrintReturnValue`.
+  `zxdb::ResolveBreakpointsForModification`, `zxdb::ModifyTracepointsEnabled`,
+  `zxdb::FormatBreakpoint`, `zxdb::FormatInputLocation`, and
+  `zxdb::FormatInputLocations`. Also exposes `zxdb::GetEvalContextForCommand`,
+  `zxdb::EvalCommandExpression`, `zxdb::EvalCommandAddressExpression`,
+  `zxdb::RewriteCommandExpressionError`, `zxdb::FormatConsoleString`,
+  `zxdb::GetNumberFormatForTarget`, `zxdb::GetRunnableTarget`,
+  `zxdb::GetRunningProcesses`, `zxdb::VerifySystemHasRunningProcess`,
+  `zxdb::ProcessCommandCallback`, and `zxdb::ScheduleAsyncPrintReturnValue`.
 - Input location parsing and resolution (`input_location_parser.h`):
   `zxdb::ParseGlobalInputLocation`, `zxdb::EvalGlobalInputLocation`,
   `zxdb::ParseLocalInputLocation`, `zxdb::EvalLocalInputLocation`,
   `zxdb::ResolveInputLocations`, `zxdb::ResolveUniqueInputLocation`, and
   `zxdb::CompleteInputLocation`.
-- Stack, location, register, target, and table formatters (`format_frame.h`,
-  `format_location.h`, `format_register.h`, `format_table.h`,
-  `format_target.h`): `zxdb::FormatFrameOptions`, `zxdb::FormatStackOptions`,
-  `zxdb::FormatStack`, `zxdb::FormatFrame`, `zxdb::FormatAllThreadStacks`,
-  `zxdb::FormatLocationOptions`, `zxdb::FormatLocation`, `zxdb::FormatFileName`,
-  and `zxdb::FormatFileLine`. Also exposes `zxdb::FormatRegisterOptions`,
-  `zxdb::FormatRegisters`, `zxdb::FormatGeneralRegisters`,
-  `zxdb::FormatGeneralVectorRegisters`, `zxdb::DescribeRegister`, `zxdb::Align`,
-  `zxdb::ColSpec`, `zxdb::FormatTable`, `zxdb::FormatTarget`,
-  `zxdb::FormatTargetList`, and `zxdb::TargetStateToString`.
+- Stack, location, register, target, table, and tracepoint formatters
+  (`format_frame.h`, `format_location.h`, `format_register.h`, `format_table.h`,
+  `format_target.h`, `format_tracepoint.h`): `zxdb::FormatFrameOptions`,
+  `zxdb::FormatStackOptions`, `zxdb::FormatStack`, `zxdb::FormatFrame`,
+  `zxdb::FormatAllThreadStacks`, `zxdb::FormatLocationOptions`,
+  `zxdb::FormatLocation`, `zxdb::FormatFileName`, and `zxdb::FormatFileLine`.
+  Also exposes `zxdb::FormatRegisterOptions`, `zxdb::FormatRegisters`,
+  `zxdb::FormatGeneralRegisters`, `zxdb::FormatGeneralVectorRegisters`,
+  `zxdb::DescribeRegister`, `zxdb::Align`, `zxdb::ColSpec`, `zxdb::FormatTable`,
+  `zxdb::FormatTarget`, `zxdb::FormatTargetList`, `zxdb::TargetStateToString`,
+  `zxdb::FormatTracepoint`, `zxdb::FormatTracepointHit`, and
+  `zxdb::FormatTracepointList`.
 - [commands](./commands/README.md): Individual console verb implementations
   (`attach`, `break`, `step`, `run`, `print`, `backtrace`, and memory/symbol
   inspection) exposing `VerbRecord` descriptors.
@@ -79,18 +81,18 @@ Callers and implementations must preserve these invariants:
 - `Command::targets_` is never empty for valid commands, and `Command::target()`
   asserts `!targets_.empty()`.
 - Single-object getters on `Command` (`frame()`, `thread()`, `breakpoint()`,
-  `filter()`, `sym_server()`) return non-null only when the command has exactly
-  one instance of that noun.
+  `tracepoint()`, `filter()`, `sym_server()`) return non-null only when the command
+  has exactly one instance of that noun.
 - `CommandContext` is reference-counted and must stay alive across asynchronous
   command execution. Pending `AsyncOutputBuffer` instances hold a
   `RefPtr<CommandContext>`, and the completion callback runs when
   `CommandContext` destructs.
 - `ConsoleContext` assigns 1-based user IDs to targets, threads, breakpoints,
-  filters, and symbol servers (`0` means none or invalid). Frame IDs use 0-based
-  indices into the thread's backtrace.
+  tracepoints, filters, and symbol servers (`0` means none or invalid). Frame
+  IDs use 0-based indices into the thread's backtrace.
 - The active target in `ConsoleContext` always exists outside setup and
-  teardown, whereas the active thread, breakpoint, filter, and symbol server may
-  be null or `0`.
+  teardown, whereas the active thread, breakpoint, tracepoint, filter, and
+  symbol server may be null or `0`.
 - `GetNouns()` and `GetVerbs()` return static maps that never change after
   initialization.
 

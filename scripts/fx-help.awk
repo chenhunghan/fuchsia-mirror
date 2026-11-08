@@ -3,6 +3,30 @@
 BEGIN {
   OFS = " | "
   FS = " *= *"
+  if (registry_tsv_file != "") {
+    while ((getline reg_line < registry_tsv_file) > 0) {
+      n_fields = split(reg_line, f, "\t")
+      if (n_fields < 5 || f[1] == "") continue
+      r_tool = f[1]
+      r_cat = f[2]
+      r_contrib = (f[3] == "true")
+      r_deprecated = (f[4] == "true")
+      r_summary = f[5]
+      registered_tools[r_tool] = 1
+
+      if (!show_deprecated && r_deprecated) continue
+      if (hide_contrib && r_contrib) continue
+      if (r_contrib) r_summary = "(contrib) " r_summary
+      if (r_deprecated) r_summary = "(DEPRECATED) " r_summary
+      if (r_cat == "") {
+        r_cat = "unknown category"
+      } else {
+        r_cat = toupper(substr(r_cat, 1, 1)) tolower(substr(r_cat, 2))
+      }
+      reg_by_cat[r_cat] = reg_by_cat[r_cat] "  " r_tool " | " r_summary "\n"
+    }
+    close(registry_tsv_file)
+  }
 }
 
 {
@@ -56,6 +80,11 @@ function process() {
       if (!category) {
         category = "unknown category"
       }
+
+      if (toolname in registered_tools) {
+        return
+      }
+
       if (deprecated == 1) {
         summary = "(DEPRECATED) " summary
       }
@@ -76,6 +105,9 @@ function print_category(category) {
 
 END {
   process()
+  for (cat in reg_by_cat) {
+    by_cat[cat] = by_cat[cat] reg_by_cat[cat]
+  }
   command="sort | column -t -s '|' -c 2"
 
   # print known categories in a specific order

@@ -15,8 +15,8 @@
 #include <ktl/limits.h>
 #include <phys/address-space.h>
 #include <phys/allocation.h>
-#include <phys/early-boot.h>
-#include <phys/main.h>
+#include <phys/runtime/early-boot.h>
+#include <phys/runtime/main.h>
 #include <phys/symbolize.h>
 
 #include <ktl/enforce.h>

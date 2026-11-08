@@ -25,4 +25,5 @@ host_go_test(
     srcs = ["avb_test.go"],
     embed = [":avb"],
     target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/testing/host-target-testing:__pkg__"],
 )

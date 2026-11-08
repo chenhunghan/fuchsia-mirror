@@ -1,0 +1,22 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+package(default_applicable_licenses = ["//:license"])
+
+# GWP-ASan sources and headers used by //sdk/lib/c/scudo:gwp-asan-common.
+exports_files(
+    [
+        "gwp_asan/common.cpp",
+        "gwp_asan/common.h",
+        "gwp_asan/crash_handler.cpp",
+        "gwp_asan/crash_handler.h",
+        "gwp_asan/definitions.h",
+        "gwp_asan/options.h",
+        "gwp_asan/options.inc",
+        "gwp_asan/platform_specific/common_fuchsia.cpp",
+        "gwp_asan/stack_trace_compressor.cpp",
+        "gwp_asan/stack_trace_compressor.h",
+    ],
+    visibility = ["//sdk/lib/c/scudo:__pkg__"],
+)

@@ -79,7 +79,8 @@ impl CpuStats {
     /// counter fields are only mutated via atomic operations.
     pub unsafe fn read_atomic_fields_relaxed(src: *mut Self) -> Self {
         // SAFETY: `src` is a valid, aligned `CpuStats` pointer, and all loaded fields are updated
-        // exclusively via atomic operations.
+        // exclusively via atomic operations. `Ordering::Relaxed` is sufficient because these
+        // independent telemetry counters do not synchronize access to any other memory.
         unsafe {
             Self {
                 last_updated_instant: AtomicI64::from_ptr(&raw mut (*src).last_updated_instant)
@@ -111,8 +112,7 @@ impl CpuStats {
     }
 
     /// Copies all fields of `CpuStats` from `src` using `Ordering::Relaxed` atomic loads for the
-    /// atomically-updated fields, equivalent to
-    /// `concurrent::WellDefinedCopyFrom<concurrent::SyncOpt::None, alignof(cpu_stats)>`.
+    /// atomically-updated counter fields and plain reads for queue-lock-guarded energy fields.
     ///
     /// # Safety
     ///
@@ -130,6 +130,193 @@ impl CpuStats {
         }
     }
 }
+
+/// Per-CPU guest statistics (`struct guest_stats`).
+#[repr(C)]
+#[derive(Debug, Default)]
+pub struct GuestStats {
+    pub vm_entries: AtomicU64,
+    pub vm_exits: AtomicU64,
+    pub arch: ArchGuestStats,
+}
+
+impl GuestStats {
+    /// Creates a zero-initialized [`GuestStats`].
+    pub const fn new() -> Self {
+        Self {
+            vm_entries: AtomicU64::new(0),
+            vm_exits: AtomicU64::new(0),
+            arch: ArchGuestStats::new(),
+        }
+    }
+}
+
+/// Architecture-specific per-CPU guest statistics.
+#[cfg(target_arch = "aarch64")]
+#[repr(C)]
+#[derive(Debug, Default)]
+pub struct ArchGuestStats {
+    pub wfi_wfe_instructions: AtomicU64,
+    pub instruction_aborts: AtomicU64,
+    pub data_aborts: AtomicU64,
+    pub system_instructions: AtomicU64,
+    pub smc_instructions: AtomicU64,
+    pub interrupts: AtomicU64,
+}
+
+#[cfg(target_arch = "aarch64")]
+impl ArchGuestStats {
+    /// Creates a zero-initialized [`ArchGuestStats`].
+    pub const fn new() -> Self {
+        Self {
+            wfi_wfe_instructions: AtomicU64::new(0),
+            instruction_aborts: AtomicU64::new(0),
+            data_aborts: AtomicU64::new(0),
+            system_instructions: AtomicU64::new(0),
+            smc_instructions: AtomicU64::new(0),
+            interrupts: AtomicU64::new(0),
+        }
+    }
+}
+
+/// Architecture-specific per-CPU guest statistics.
+#[cfg(target_arch = "x86_64")]
+#[repr(C)]
+#[derive(Debug, Default)]
+pub struct ArchGuestStats {
+    pub interrupts: AtomicU64,
+    pub interrupt_windows: AtomicU64,
+    pub cpuid_instructions: AtomicU64,
+    pub hlt_instructions: AtomicU64,
+    pub control_register_accesses: AtomicU64,
+    pub io_instructions: AtomicU64,
+    pub rdmsr_instructions: AtomicU64,
+    pub wrmsr_instructions: AtomicU64,
+    pub ept_violations: AtomicU64,
+    pub xsetbv_instructions: AtomicU64,
+    pub pause_instructions: AtomicU64,
+    pub vmcall_instructions: AtomicU64,
+}
+
+#[cfg(target_arch = "x86_64")]
+impl ArchGuestStats {
+    /// Creates a zero-initialized [`ArchGuestStats`].
+    pub const fn new() -> Self {
+        Self {
+            interrupts: AtomicU64::new(0),
+            interrupt_windows: AtomicU64::new(0),
+            cpuid_instructions: AtomicU64::new(0),
+            hlt_instructions: AtomicU64::new(0),
+            control_register_accesses: AtomicU64::new(0),
+            io_instructions: AtomicU64::new(0),
+            rdmsr_instructions: AtomicU64::new(0),
+            wrmsr_instructions: AtomicU64::new(0),
+            ept_violations: AtomicU64::new(0),
+            xsetbv_instructions: AtomicU64::new(0),
+            pause_instructions: AtomicU64::new(0),
+            vmcall_instructions: AtomicU64::new(0),
+        }
+    }
+}
+
+/// Architecture-specific per-CPU guest statistics.
+#[cfg(target_arch = "riscv64")]
+#[derive(Debug, Default)]
+pub struct ArchGuestStats;
+
+#[cfg(target_arch = "riscv64")]
+impl ArchGuestStats {
+    /// Creates a zero-initialized [`ArchGuestStats`].
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+zr::static_assert!(
+    core::mem::size_of::<GuestStats>() == core::mem::size_of::<bindings::guest_stats>()
+);
+zr::static_assert!(
+    core::mem::align_of::<GuestStats>() == core::mem::align_of::<bindings::guest_stats>()
+);
+zr::static_assert!(
+    offset_of!(GuestStats, vm_entries) == offset_of!(bindings::guest_stats, vm_entries)
+);
+zr::static_assert!(offset_of!(GuestStats, vm_exits) == offset_of!(bindings::guest_stats, vm_exits));
+#[cfg(target_arch = "aarch64")]
+const _: () = {
+    zr::static_assert!(
+        offset_of!(GuestStats, arch.wfi_wfe_instructions)
+            == offset_of!(bindings::guest_stats, wfi_wfe_instructions)
+    );
+    zr::static_assert!(
+        offset_of!(GuestStats, arch.instruction_aborts)
+            == offset_of!(bindings::guest_stats, instruction_aborts)
+    );
+    zr::static_assert!(
+        offset_of!(GuestStats, arch.data_aborts) == offset_of!(bindings::guest_stats, data_aborts)
+    );
+    zr::static_assert!(
+        offset_of!(GuestStats, arch.system_instructions)
+            == offset_of!(bindings::guest_stats, system_instructions)
+    );
+    zr::static_assert!(
+        offset_of!(GuestStats, arch.smc_instructions)
+            == offset_of!(bindings::guest_stats, smc_instructions)
+    );
+    zr::static_assert!(
+        offset_of!(GuestStats, arch.interrupts) == offset_of!(bindings::guest_stats, interrupts)
+    );
+};
+#[cfg(target_arch = "x86_64")]
+const _: () = {
+    zr::static_assert!(
+        offset_of!(GuestStats, arch.interrupts) == offset_of!(bindings::guest_stats, interrupts)
+    );
+    zr::static_assert!(
+        offset_of!(GuestStats, arch.interrupt_windows)
+            == offset_of!(bindings::guest_stats, interrupt_windows)
+    );
+    zr::static_assert!(
+        offset_of!(GuestStats, arch.cpuid_instructions)
+            == offset_of!(bindings::guest_stats, cpuid_instructions)
+    );
+    zr::static_assert!(
+        offset_of!(GuestStats, arch.hlt_instructions)
+            == offset_of!(bindings::guest_stats, hlt_instructions)
+    );
+    zr::static_assert!(
+        offset_of!(GuestStats, arch.control_register_accesses)
+            == offset_of!(bindings::guest_stats, control_register_accesses)
+    );
+    zr::static_assert!(
+        offset_of!(GuestStats, arch.io_instructions)
+            == offset_of!(bindings::guest_stats, io_instructions)
+    );
+    zr::static_assert!(
+        offset_of!(GuestStats, arch.rdmsr_instructions)
+            == offset_of!(bindings::guest_stats, rdmsr_instructions)
+    );
+    zr::static_assert!(
+        offset_of!(GuestStats, arch.wrmsr_instructions)
+            == offset_of!(bindings::guest_stats, wrmsr_instructions)
+    );
+    zr::static_assert!(
+        offset_of!(GuestStats, arch.ept_violations)
+            == offset_of!(bindings::guest_stats, ept_violations)
+    );
+    zr::static_assert!(
+        offset_of!(GuestStats, arch.xsetbv_instructions)
+            == offset_of!(bindings::guest_stats, xsetbv_instructions)
+    );
+    zr::static_assert!(
+        offset_of!(GuestStats, arch.pause_instructions)
+            == offset_of!(bindings::guest_stats, pause_instructions)
+    );
+    zr::static_assert!(
+        offset_of!(GuestStats, arch.vmcall_instructions)
+            == offset_of!(bindings::guest_stats, vmcall_instructions)
+    );
+};
 
 zr::static_assert!(core::mem::size_of::<CpuStats>() == 136);
 zr::static_assert!(core::mem::align_of::<CpuStats>() == 8);

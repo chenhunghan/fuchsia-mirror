@@ -26,6 +26,17 @@ _SOURCE_AGENTS_TXT_RELPATH = (
     / "agents.txt"
 )
 
+# Relative path from this file's directory to tools/devshell/lib/agent_session_ids.txt in the source tree.
+_SOURCE_AGENT_SESSION_IDS_TXT_RELPATH = (
+    pathlib.Path("..")
+    / ".."
+    / ".."
+    / "tools"
+    / "devshell"
+    / "lib"
+    / "agent_session_ids.txt"
+)
+
 
 def _get_source_agents_txt_path(
     from_file: str | pathlib.Path,
@@ -35,11 +46,20 @@ def _get_source_agents_txt_path(
     return (base_file.parent / _SOURCE_AGENTS_TXT_RELPATH).resolve()
 
 
-def get_agent_env_vars() -> typing.List[str]:
-    """Read the list of agent environment variable names from agents.txt."""
+def _get_source_agent_session_ids_txt_path(
+    from_file: str | pathlib.Path,
+) -> pathlib.Path:
+    """Resolve the path to tools/devshell/lib/agent_session_ids.txt relative to the given source file."""
+    base_file = pathlib.Path(from_file).resolve()
+    return (base_file.parent / _SOURCE_AGENT_SESSION_IDS_TXT_RELPATH).resolve()
+
+
+def _read_vars_file(
+    resource_name: str, source_path: pathlib.Path
+) -> typing.List[str]:
     if data is not None:
         try:
-            with files(data).joinpath("agents.txt").open(
+            with files(data).joinpath(resource_name).open(
                 "r", encoding="utf-8"
             ) as f:
                 return [
@@ -51,14 +71,13 @@ def get_agent_env_vars() -> typing.List[str]:
             # importlib.resources.files() raises TypeError if `data` is not a
             # package (e.g. when mocked in tests or when imported outside a
             # packaged environment), and open() raises FileNotFoundError if
-            # agents.txt is missing from the package resources. In either case,
-            # fall through to reading agents.txt directly from the source tree.
+            # the file is missing from the package resources. In either case,
+            # fall through to reading the file directly from the source tree.
             pass
 
     # Fallback to source tree location if imported without GN packaging.
-    agents_txt = _get_source_agents_txt_path(__file__)
-    if agents_txt.is_file():
-        with agents_txt.open("r", encoding="utf-8") as f:
+    if source_path.is_file():
+        with source_path.open("r", encoding="utf-8") as f:
             return [
                 line.strip()
                 for line in f
@@ -66,8 +85,27 @@ def get_agent_env_vars() -> typing.List[str]:
             ]
 
     raise FileNotFoundError(
-        f"Could not locate agents.txt in packaged resources or at {agents_txt}"
+        f"Could not locate {resource_name} in packaged resources or at {source_path}"
     )
+
+
+def get_agent_session_id_env_vars() -> typing.List[str]:
+    """Read the list of agent session ID environment variable names from agent_session_ids.txt."""
+    return _read_vars_file(
+        "agent_session_ids.txt",
+        _get_source_agent_session_ids_txt_path(__file__),
+    )
+
+
+def get_agent_env_vars() -> typing.List[str]:
+    """Read the list of agent environment variable names from agents.txt and agent_session_ids.txt."""
+    agent_vars = _read_vars_file(
+        "agents.txt", _get_source_agents_txt_path(__file__)
+    )
+    for var in get_agent_session_id_env_vars():
+        if var not in agent_vars:
+            agent_vars.append(var)
+    return agent_vars
 
 
 def is_invoked_by_agent(env: typing.Mapping[str, str] | None = None) -> bool:

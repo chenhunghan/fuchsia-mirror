@@ -334,7 +334,11 @@ impl<'a> TransportPacket<'a> {
             .ok()
             .map(TransportPacket::Tcp),
             // TODO(https://fxbug.dev/555942793): Implement GRO for UDP.
-            IpProto::Udp | IpProto::Reserved => None,
+            IpProto::Udp
+            | IpProto::Ipv4Encap
+            | IpProto::Ipv6Encap
+            | IpProto::Esp
+            | IpProto::Reserved => None,
         }
     }
 

@@ -1,0 +1,26 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_test_binary(
+    name = "test",
+    srcs = ["main.cc"],
+    tags = ["manual"],
+    deps = [
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//zircon/system/ulib/zx",
+    ],
+)
+
+fx_unittest_package(
+    name = "cpp-examples-synchronization-checker-test",
+    unit_tests = [":test"],
+    visibility = ["//examples:__pkg__"],
+)

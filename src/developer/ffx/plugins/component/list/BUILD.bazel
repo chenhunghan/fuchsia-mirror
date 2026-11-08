@@ -1,0 +1,55 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//src/developer/ffx/build:ffx_plugin.bzl", "ffx_plugin")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [],
+    visibility = ["//src/developer/ffx:__pkg__"],
+)
+
+ffx_plugin(
+    name = "ffx_component_list",
+    srcs = ["src/lib.rs"],
+    args_deps = [
+        "//src/developer/ffx/core:lib",
+        "//src/sys/lib/component_debug:component_debug_fdomain",
+        "//third_party/rust_crates/vendor:argh",
+    ],
+    args_srcs = ["src/args.rs"],
+    edition = "2024",
+    sdk_category = "not-yet-specified",
+    version = "0.1.0",
+    visibility = ["//src/developer/ffx/plugins/component:__pkg__"],
+    deps = [
+        "//src/developer/ffx/lib/errors:lib",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/developer/ffx/lib/target/holders:lib",
+        "//src/developer/ffx/lib/writer:lib",
+        "//src/developer/ffx/plugins/component/common:ffx_component",
+        "//src/sys/lib/component_debug:component_debug_fdomain",
+        "//third_party/rust_crates/vendor:schemars",
+        "//third_party/rust_crates/vendor:serde",
+    ],
+)
+
+host_rustc_test(
+    name = "ffx_component_list_test",
+    crate = ":ffx_component_list",
+    deps = [
+        "//src/developer/ffx/lib/testing:lib",
+        "//src/lib/fdomain/local",
+        "//src/lib/fuchsia",
+        "//src/sys/lib/moniker",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:pretty_assertions",
+        "//third_party/rust_crates/vendor:serde_json",
+    ],
+)

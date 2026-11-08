@@ -1,0 +1,42 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+exports_files(
+    ["meta/echo_client.cml"],
+    visibility = ["//src/testing/fidl/echo_realm_placeholder:__pkg__"],
+)
+
+fx_cc_library(
+    name = "lib",
+    srcs = ["echo_client_app.cc"],
+    hdrs = ["echo_client_app.h"],
+    deps = [
+        "//sdk/lib/sys/cpp",
+        "//src/testing/fidl:placeholders_hlcpp",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_binary(
+    name = "bin",
+    srcs = ["echo_client.cc"],
+    gn_output_name = "echo_client_placeholder",
+    visibility = [
+        "//src/testing/fidl/echo_realm_placeholder:__pkg__",
+        "//src/tests/end_to_end/fidlcat:__pkg__",
+    ],
+    deps = [
+        ":lib",
+        "//sdk/lib/async-default",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/sys/cpp",
+        "//src/testing/fidl:placeholders_hlcpp",
+    ],
+)

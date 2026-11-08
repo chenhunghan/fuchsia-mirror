@@ -7,7 +7,7 @@ use example_tester::{Client, Server, TestKind, assert_logs_eq_to_golden, run_tes
 use fidl::prelude::*;
 use fidl_examples_keyvaluestore_addreaditem::StoreMarker;
 
-use fuchsia_component_test::{ChildRef, RealmBuilder};
+use fuchsia_component_test::{Capability, ChildRef, RealmBuilder, Ref, Route};
 
 #[fuchsia::test]
 async fn test_read_item_success() -> Result<(), Error> {
@@ -20,8 +20,22 @@ async fn test_read_item_success() -> Result<(), Error> {
         StoreMarker::PROTOCOL_NAME,
         TestKind::ClientAndServer { client: &client, server: &server },
         |builder: RealmBuilder, client: ChildRef| async move {
-            builder.init_mutable_config_from_package(&client).await?;
-            builder.set_config_value(&client, "read_items", vec![key].into()).await?;
+            builder
+                .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                    name: "fuchsia.examples.keyvaluestore.addreaditem.ReadItems".parse()?,
+                    value: vec![key].into(),
+                }))
+                .await?;
+            builder
+                .add_route(
+                    Route::new()
+                        .capability(Capability::configuration(
+                            "fuchsia.examples.keyvaluestore.addreaditem.ReadItems",
+                        ))
+                        .from(Ref::self_())
+                        .to(&client),
+                )
+                .await?;
             Ok::<(RealmBuilder, ChildRef), Error>((builder, client))
         },
         |log_reader| {
@@ -47,8 +61,22 @@ async fn test_read_item_error() -> Result<(), Error> {
         StoreMarker::PROTOCOL_NAME,
         TestKind::ClientAndServer { client: &client, server: &server },
         |builder: RealmBuilder, client: ChildRef| async move {
-            builder.init_mutable_config_from_package(&client).await?;
-            builder.set_config_value(&client, "read_items", vec![key].into()).await?;
+            builder
+                .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                    name: "fuchsia.examples.keyvaluestore.addreaditem.ReadItems".parse()?,
+                    value: vec![key].into(),
+                }))
+                .await?;
+            builder
+                .add_route(
+                    Route::new()
+                        .capability(Capability::configuration(
+                            "fuchsia.examples.keyvaluestore.addreaditem.ReadItems",
+                        ))
+                        .from(Ref::self_())
+                        .to(&client),
+                )
+                .await?;
             Ok::<(RealmBuilder, ChildRef), Error>((builder, client))
         },
         |log_reader| {

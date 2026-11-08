@@ -12,6 +12,7 @@ use hex::{decode, encode};
 use log::info;
 use mundane::hash::{Digest, Hasher, Sha256};
 use num_traits::PrimInt;
+use std::borrow::Cow;
 use std::fmt;
 use std::io::Write;
 use std::rc::Rc;
@@ -152,14 +153,21 @@ pub struct FormatValidator {
 #[async_trait(?Send)]
 impl OutputValidator for FormatValidator {
     async fn validate(&self, output: &[Output]) -> Result<(), Error> {
-        let packets: Vec<&OutputPacket> = output_packets(output).collect();
-        let format = &packets
-            .first()
+        let actual_format = &output_packets(output)
+            .next()
             .ok_or_else(|| FatalError(String::from("No packets in output")))?
             .format
             .format_details;
 
-        if self.expected_format != *format {
+        let format = if self.expected_format.domain.is_none() && actual_format.domain.is_some() {
+            let mut cloned = actual_format.clone();
+            cloned.domain = None;
+            Cow::Owned(cloned)
+        } else {
+            Cow::Borrowed(actual_format)
+        };
+
+        if &self.expected_format != format.as_ref() {
             return Err(FatalError(format!(
                 "Expected {:?}; got {:?}",
                 self.expected_format, format

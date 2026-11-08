@@ -98,6 +98,11 @@ acpi::status<acpi::UniquePtr<ACPI_DEVICE_INFO>> AcpiImpl::GetObjectInfo(ACPI_HAN
   return acpi::error(acpi_status);
 }
 
+bool AcpiImpl::HasLegacyCmosRtc() {
+  return (AcpiGbl_FADT.Flags & ACPI_FADT_HW_REDUCED) == 0 &&
+         (AcpiGbl_FADT.BootFlags & ACPI_FADT_NO_CMOS_RTC) == 0;
+}
+
 acpi::status<ACPI_HANDLE> AcpiImpl::GetParent(ACPI_HANDLE child) {
   ACPI_HANDLE out;
   ACPI_STATUS status = AcpiGetParent(child, &out);

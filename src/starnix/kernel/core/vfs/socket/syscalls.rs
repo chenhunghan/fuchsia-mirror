@@ -20,7 +20,6 @@ use starnix_logging::{log_trace, track_stub};
 use starnix_types::augmented::Augmented;
 use starnix_types::time::duration_from_timespec;
 use starnix_types::user_buffer::{UserBuffer, UserBuffers};
-use starnix_uapi::auth::CAP_NET_BIND_SERVICE;
 use starnix_uapi::errors::{EEXIST, EINPROGRESS, Errno};
 use starnix_uapi::file_mode::FileMode;
 use starnix_uapi::math::round_up_to_increment;
@@ -260,19 +259,6 @@ pub fn sys_bind(
                 }
             }
         };
-    }
-    if let Some(port) = address.maybe_inet_port() {
-        // See <https://man7.org/linux/man-pages/man7/ip.7.html>:
-        //
-        //   The port numbers below 1024 are called privileged ports (or
-        //   sometimes: reserved ports).  Only a privileged process (on Linux:
-        //   a process that has the CAP_NET_BIND_SERVICE capability in the
-        //   user namespace governing its network namespace) may bind(2) to
-        //   these sockets.
-        if port != 0 && port < 1024 {
-            security::check_task_capable(current_task, CAP_NET_BIND_SERVICE)
-                .map_err(|_| errno!(EACCES))?;
-        }
     }
     security::check_socket_bind_access(current_task, socket, &address)?;
     match address {
@@ -847,12 +833,13 @@ fn sendmsg_internal_with_header(
             CMsgHdrPtr::new(current_task, (message_header.control + next_message_offset)?);
         let cmsg = current_task.read_multi_arch_object(cmsg_ref)?;
         // If the message header is not long enough to fit the required fields of the
-        // control data, return EINVAL.
-        if (cmsg.cmsg_len as usize) < header_size {
+        // control data, or exceeds the remaining control buffer, return EINVAL.
+        let cmsg_len = cmsg.cmsg_len as usize;
+        if cmsg_len < header_size || cmsg_len > space {
             return error!(EINVAL);
         }
 
-        let data_size = std::cmp::min(cmsg.cmsg_len as usize - header_size, space);
+        let data_size = cmsg_len - header_size;
         let next_data_offset = next_message_offset + header_size;
         let data = current_task
             .read_memory_to_vec((message_header.control + next_data_offset)?, data_size)?;

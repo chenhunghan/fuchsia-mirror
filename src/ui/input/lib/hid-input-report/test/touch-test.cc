@@ -522,3 +522,120 @@ TEST(TouchscreenTest, AtlasTouchpad) {
     EXPECT_EQ(button_switch, static_cast<uint16_t>(kButtonSwitchTestVal));
   }
 }
+
+TEST(TouchscreenTest, CreateDescriptorDoesNotWriteOutOfBounds) {
+  size_t desc_size;
+  const uint8_t* raw_desc = get_paradise_touch_report_desc(&desc_size);
+
+  hid::DeviceDescriptor* hid_desc = nullptr;
+  hid::ReportDescriptor* hid_report_desc = nullptr;
+  HidParseTouchscreen(raw_desc, desc_size, &hid_desc, &hid_report_desc);
+  auto free_descriptor = fit::defer([hid_desc]() { hid::FreeDeviceDescriptor(hid_desc); });
+
+  hid_input_report::Touch touch;
+  ASSERT_EQ(hid_input_report::ParseResult::kOk, touch.ParseReportDescriptor(*hid_report_desc));
+
+  hid_input_report::CanaryArena arena;
+  fuchsia_input_report::wire::DeviceDescriptor descriptor(arena);
+  ASSERT_EQ(hid_input_report::ParseResult::kOk, touch.CreateDescriptor(arena, descriptor));
+  EXPECT_EQ(0UL, descriptor.touch().input().buttons().size());
+  arena.VerifyNoOutOfBoundsWrites();
+}
+
+TEST(TouchscreenTest, MaxButtonsTest) {
+  constexpr uint32_t kMaxButtons = fuchsia_input_report::wire::kTouchMaxNumButtons;
+
+  hid::Collection main_col = {};
+  main_col.type = hid::CollectionType::kApplication;
+  main_col.usage = hid::USAGE(hid::usage::Page::kDigitizer, hid::usage::Digitizer::kTouchScreen);
+
+  hid::ReportField field = {};
+  field.col = &main_col;
+  field.attr.usage = hid::USAGE(hid::usage::Page::kButton, 1);
+  std::vector<hid::ReportField> fields(kMaxButtons, field);
+
+  hid::ReportDescriptor descriptor = {};
+  descriptor.input_count = kMaxButtons;
+  descriptor.input_byte_sz = kMaxButtons;
+  descriptor.input_fields = fields.data();
+
+  hid_input_report::Touch touch;
+  ASSERT_EQ(hid_input_report::ParseResult::kOk, touch.ParseReportDescriptor(descriptor));
+}
+
+TEST(TouchscreenTest, OverMaxButtonsTest) {
+  constexpr uint32_t kOverMaxButtons = 1 + fuchsia_input_report::wire::kTouchMaxNumButtons;
+
+  hid::Collection main_col = {};
+  main_col.type = hid::CollectionType::kApplication;
+  main_col.usage = hid::USAGE(hid::usage::Page::kDigitizer, hid::usage::Digitizer::kTouchScreen);
+
+  hid::ReportField field = {};
+  field.col = &main_col;
+  field.attr.usage = hid::USAGE(hid::usage::Page::kButton, 1);
+  std::vector<hid::ReportField> fields(kOverMaxButtons, field);
+
+  hid::ReportDescriptor descriptor = {};
+  descriptor.input_count = kOverMaxButtons;
+  descriptor.input_byte_sz = kOverMaxButtons;
+  descriptor.input_fields = fields.data();
+
+  hid_input_report::Touch touch;
+  ASSERT_EQ(hid_input_report::ParseResult::kTooManyItems, touch.ParseReportDescriptor(descriptor));
+}
+
+TEST(TouchscreenTest, MaxContactsTest) {
+  constexpr uint32_t kMaxContacts = fuchsia_input_report::wire::kTouchMaxContacts;
+
+  hid::Collection main_col = {};
+  main_col.type = hid::CollectionType::kApplication;
+  main_col.usage = hid::USAGE(hid::usage::Page::kDigitizer, hid::usage::Digitizer::kTouchScreen);
+
+  std::vector<hid::Collection> finger_cols(kMaxContacts);
+  std::vector<hid::ReportField> fields(kMaxContacts);
+  for (size_t i = 0; i < kMaxContacts; i++) {
+    finger_cols[i].type = hid::CollectionType::kLogical;
+    finger_cols[i].usage = hid::USAGE(hid::usage::Page::kDigitizer, hid::usage::Digitizer::kFinger);
+    finger_cols[i].parent = &main_col;
+
+    fields[i].col = &finger_cols[i];
+    fields[i].attr.usage =
+        hid::USAGE(hid::usage::Page::kDigitizer, hid::usage::Digitizer::kContactID);
+  }
+
+  hid::ReportDescriptor descriptor = {};
+  descriptor.input_count = kMaxContacts;
+  descriptor.input_byte_sz = kMaxContacts;
+  descriptor.input_fields = fields.data();
+
+  hid_input_report::Touch touch;
+  ASSERT_EQ(hid_input_report::ParseResult::kOk, touch.ParseReportDescriptor(descriptor));
+}
+
+TEST(TouchscreenTest, OverMaxContactsTest) {
+  constexpr uint32_t kOverMaxContacts = 1 + fuchsia_input_report::wire::kTouchMaxContacts;
+
+  hid::Collection main_col = {};
+  main_col.type = hid::CollectionType::kApplication;
+  main_col.usage = hid::USAGE(hid::usage::Page::kDigitizer, hid::usage::Digitizer::kTouchScreen);
+
+  std::vector<hid::Collection> finger_cols(kOverMaxContacts);
+  std::vector<hid::ReportField> fields(kOverMaxContacts);
+  for (size_t i = 0; i < kOverMaxContacts; i++) {
+    finger_cols[i].type = hid::CollectionType::kLogical;
+    finger_cols[i].usage = hid::USAGE(hid::usage::Page::kDigitizer, hid::usage::Digitizer::kFinger);
+    finger_cols[i].parent = &main_col;
+
+    fields[i].col = &finger_cols[i];
+    fields[i].attr.usage =
+        hid::USAGE(hid::usage::Page::kDigitizer, hid::usage::Digitizer::kContactID);
+  }
+
+  hid::ReportDescriptor descriptor = {};
+  descriptor.input_count = kOverMaxContacts;
+  descriptor.input_byte_sz = kOverMaxContacts;
+  descriptor.input_fields = fields.data();
+
+  hid_input_report::Touch touch;
+  ASSERT_EQ(hid_input_report::ParseResult::kTooManyItems, touch.ParseReportDescriptor(descriptor));
+}

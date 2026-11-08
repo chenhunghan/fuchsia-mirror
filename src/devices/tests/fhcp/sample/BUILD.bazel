@@ -1,0 +1,16 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+# GN's fuchsia_component() expects the binary at test/fhcp-sample-test via distribution_entries metadata, which cc_test_executable() omits.
+# @bazel2gn:raw_attribute:if (is_fuchsia) { metadata = { distribution_entries = [ { source = rebase_path("$root_out_dir/fhcp-sample-test", root_build_dir) destination = "test/fhcp-sample-test" label = get_label_info(":sample-test-bin", "label_with_toolchain") } ] } }
+fx_cc_test_binary(
+    name = "sample-test-bin",
+    srcs = ["sample-test.cc"],
+    gn_output_name = "fhcp-sample-test",
+    deps = ["//zircon/system/ulib/zxtest"],
+)

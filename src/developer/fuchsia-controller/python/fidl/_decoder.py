@@ -100,7 +100,7 @@ class Decoder:
     def read_vector(
         self,
         offset: int,
-        element_decoder_fn: typing.Callable[["Decoder", int], typing.Any],
+        element_decoder_fn: typing.Callable[[Decoder, int], typing.Any],
         element_size: int,
         nullable: bool = False,
     ) -> typing.Any:
@@ -124,7 +124,7 @@ class Decoder:
     def read_array(
         self,
         offset: int,
-        element_decoder_fn: typing.Callable[["Decoder", int], typing.Any],
+        element_decoder_fn: typing.Callable[[Decoder, int], typing.Any],
         element_size: int,
         count: int,
     ) -> list[typing.Any]:
@@ -136,7 +136,7 @@ class Decoder:
     def read_optional_struct(
         self,
         offset: int,
-        decode_fn: typing.Callable[["Decoder", int], typing.Any],
+        decode_fn: typing.Callable[[Decoder, int], typing.Any],
         inline_size: int,
     ) -> typing.Any:
         presence = struct.unpack_from("<Q", self.buf, offset)[0]
@@ -151,7 +151,7 @@ class Decoder:
     def read_envelope(
         self,
         env_offset: int,
-        decode_fn: typing.Callable[["Decoder", int], typing.Any],
+        decode_fn: typing.Callable[[Decoder, int], typing.Any],
         inline_size: int,
     ) -> typing.Any:
         is_empty = self.buf[env_offset : env_offset + 8] == b"\x00" * 8

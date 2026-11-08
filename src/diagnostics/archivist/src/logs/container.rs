@@ -44,8 +44,8 @@ pub struct LogsArtifactsContainer {
     #[derivative(Debug = "ignore")]
     state: Arc<Condition<ContainerState>>,
 
-    /// A callback which is called when the container is inactive i.e. has no channels, sockets or
-    /// stored logs.
+    /// A callback which is called when the container is inactive i.e. has no channels, IOBuffers
+    /// or stored logs.
     #[derivative(Debug = "ignore")]
     on_inactive: Option<OnInactive>,
 }
@@ -92,9 +92,7 @@ impl LogsArtifactsContainer {
         new
     }
 
-    /// Handle `LogSink` protocol on `stream`. Each socket received from the `LogSink` client is
-    /// drained by a `Task` which is sent on `sender`. The `Task`s do not complete until their
-    /// sockets have been closed.
+    /// Handle `LogSink` protocol on `stream`.
     pub fn handle_log_sink(
         self: &Arc<Self>,
         stream: LogSinkRequestStream,
@@ -133,9 +131,6 @@ impl LogsArtifactsContainer {
                 next = stream.next() => {
                     let Some(next) = next else { break };
                     match next {
-                        Ok(LogSinkRequest::ConnectStructured { socket, .. }) => {
-                            self.buffer.add_socket(socket);
-                        }
                         Ok(LogSinkRequest::WaitForInterestChange { responder }) => {
                             // If the interest has changed since we last reported it, we'll report
                             // it below.

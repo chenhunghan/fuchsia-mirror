@@ -1,0 +1,31 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# `package` is conceptually a binary, but it is built as a lib here so it can be
+# aggregated into //src/sys/tools/shared-multi-call-tool-binary to save disk
+# space.
+rustc_library(
+    name = "package",
+    srcs = [
+        "src/args.rs",
+        "src/lib.rs",
+    ],
+    # This is a part of the bootfs image, so attempt to minimize its size impact.
+    build_flags = ["//build/config/rust:bootfs"],
+    edition = "2024",
+    visibility = ["//src/sys/tools/shared-multi-call-tool-binary:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.dash:fuchsia.dash_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-component",
+        "//src/sys/lib/socket-to-stdio",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)

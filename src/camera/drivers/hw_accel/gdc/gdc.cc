@@ -125,11 +125,23 @@ void GdcDevice::Stop() const {
   // clang-format on
 }
 
+GdcTask* GdcDevice::LookupTask(uint32_t task_index) {
+  fbl::AutoLock al(&interface_lock_);
+  auto task_entry = task_map_.find(task_index);
+  if (task_entry == task_map_.end()) {
+    return nullptr;
+  }
+  return task_entry->second.get();
+}
+
 void GdcDevice::ProcessFrame(TaskInfo& info) {
   TRACE_DURATION("camera", "GdcDevice::ProcessFrame", "task_index", info.task_index,
                  "input_buffer_index", info.index);
   TRACE_FLOW_END("camera", "process_frame", info.index);
-  auto task = info.task;
+  GdcTask* task = LookupTask(info.task_index);
+  if (task == nullptr) {
+    return;
+  }
   // The way we have our SW instrumented, GDC should never be busy
   // proccessing at this point. Doing a sanity check here to ensure
   // that its not busy processing an image.
@@ -288,7 +300,10 @@ void GdcDevice::ProcessFrame(TaskInfo& info) {
 void GdcDevice::ChangeOutputResolution(TaskInfo& info) {
   TRACE_DURATION("camera", "GdcDevice::ChangeOutputResolution");
 
-  auto task = info.task;
+  GdcTask* task = LookupTask(info.task_index);
+  if (task == nullptr) {
+    return;
+  }
   task->set_output_format_index(info.index);
   // Invoke the callback function and tell about the output buffer index
   // which is ready to be used.
@@ -303,15 +318,15 @@ void GdcDevice::RemoveTask(TaskInfo& info) {
   TRACE_DURATION("camera", "GdcDevice::RemoveTask");
   fbl::AutoLock al(&interface_lock_);
 
-  auto task = info.task;
   auto task_index = info.task_index;
 
   // Find the entry in hashmap.
   auto task_entry = task_map_.find(task_index);
   if (task_entry == task_map_.end()) {
-    task->RemoveTaskCallback(TASK_REMOVE_STATUS_ERROR_INVALID);
     return;
   }
+
+  auto task = task_entry->second.get();
 
   // Return the GDC VMOs from the task back to GcdDevice so that they can be reused by the
   // next task to be created.
@@ -376,7 +391,6 @@ zx_status_t GdcDevice::GdcSetOutputResolution(uint32_t task_index,
 
   TaskInfo info;
   info.op = GDC_OP_SETOUTPUTRES;
-  info.task = task_entry->second.get();
   info.index = new_output_image_format_index;
   info.task_index = task_index;
 
@@ -406,7 +420,6 @@ zx_status_t GdcDevice::GdcProcessFrame(uint32_t task_index, uint32_t input_buffe
 
   TaskInfo info;
   info.op = GDC_OP_FRAME;
-  info.task = task_entry->second.get();
   info.index = input_buffer_index;
   info.capture_timestamp = capture_timestamp;
   info.task_index = task_index;
@@ -429,6 +442,9 @@ zx_status_t GdcDevice::StopThread() {
   // Signal the worker thread and wait for it to terminate.
   {
     fbl::AutoLock al(&processing_queue_lock_);
+    if (shutdown_) {
+      return ZX_OK;
+    }
     shutdown_ = true;
     frame_processing_signal_.Signal();
   }
@@ -455,7 +471,6 @@ void GdcDevice::GdcRemoveTask(uint32_t task_index) {
 
   TaskInfo info;
   info.op = GDC_OP_REMOVE_TASK;
-  info.task = task_entry->second.get();
   info.task_index = task_index;
 
   // Put the task on the queue.

@@ -1,0 +1,8 @@
+fuchsia.bootfs.memory: Groups/bin
+fuchsia.bootfs.memory: Groups/blob
+fuchsia.bootfs.memory: Groups/config
+fuchsia.bootfs.memory: Groups/data
+fuchsia.bootfs.memory: Groups/lib
+fuchsia.bootfs.memory: Groups/other
+fuchsia.bootfs.memory: Groups/zircon
+fuchsia.bootfs.memory: Total

@@ -51,7 +51,7 @@ func rustcCheckCfgBuildFlagsToGN(call *syntax.CallExpr) ([]string, error) {
 				if !ok {
 					return nil, fmt.Errorf("expected string literal in cfgs list, got %T", lit.Value)
 				}
-				allCfgs = append(allCfgs, val)
+				allCfgs = append(allCfgs, strings.ReplaceAll(val, `"`, `\"`))
 			}
 		case "features":
 			listExpr, ok := unwrapParenExpr(binaryExpr.Y).(*syntax.ListExpr)
@@ -105,7 +105,7 @@ func rustcCheckCfgBuildFlagsToGN(call *syntax.CallExpr) ([]string, error) {
 	}
 
 	if visArg != nil {
-		lines, err := attrAssignmentToGN(visArg, "config", nil /*compiledActionOutputs*/, false /*appendAspectHints*/)
+		lines, err := attrAssignmentToGN(visArg, "config", nil /*compiledActionOutputs*/, false /*appendAspectHints*/, false /*hasWithUnitTests*/)
 		if err != nil {
 			return nil, fmt.Errorf("converting visibility attribute to GN: %v", err)
 		}

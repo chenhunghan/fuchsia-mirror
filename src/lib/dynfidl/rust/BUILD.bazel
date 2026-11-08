@@ -1,0 +1,72 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+load(
+    "//src/tests/fidl/conformance_suite:gidl_conformance_suite.bzl",
+    "CONFORMANCE_SUITE_FIDL_TARGET",
+    "CONFORMANCE_SUITE_GIDL_FILES",
+)
+load("//tools/fidl/gidl:gidl.bzl", "gidl")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "dynfidl",
+    srcs = ["src/lib.rs"],
+    edition = "2024",
+    visibility = [
+        "//src/lib/dynfidl:__pkg__",
+        "//src/sys/lib/config_encoder:__pkg__",
+    ],
+    deps = ["//src/lib/fidl/rust_constants"],
+)
+
+alias(
+    name = "rust",
+    actual = ":dynfidl",
+    visibility = [
+        "//src/lib/dynfidl:__pkg__",
+        "//src/sys/lib/config_encoder:__pkg__",
+    ],
+)
+
+# LINT.IfChange
+
+# @bazel2gn:skip
+_CONFORMANCE_TEST_SOURCE = "src/conformance_test.rs"
+
+# @bazel2gn:skip
+gidl(
+    name = "generate_conformance_test",
+    fidl = CONFORMANCE_SUITE_FIDL_TARGET,
+    inputs = CONFORMANCE_SUITE_GIDL_FILES,
+    language = "dynfidl",
+    output = _CONFORMANCE_TEST_SOURCE,
+    type = "conformance",
+)
+
+# @bazel2gn:skip
+rustc_test(
+    name = "fidl_dynfidl_conformance_tests_bin",
+    srcs = [":generate_conformance_test"],
+    crate_name = "fidl_dynfidl_conformance_tests",
+    crate_root = _CONFORMANCE_TEST_SOURCE,
+    edition = "2024",
+    deps = [":dynfidl"],
+)
+
+# @bazel2gn:skip
+fx_unittest_package(
+    name = "fidl_dynfidl_conformance_tests",
+    unit_tests = [":fidl_dynfidl_conformance_tests_bin"],
+    visibility = [
+        "//src/lib:__pkg__",
+        "//src/lib/dynfidl:__subpackages__",
+    ],
+)
+
+# LINT.ThenChange(//src/lib/dynfidl/rust/BUILD.gn)

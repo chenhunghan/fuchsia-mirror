@@ -1,0 +1,114 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+lib_sources = [
+    "src/diagnostics.rs",
+    "src/lib.rs",
+    "src/zstd_compress.rs",
+]
+
+# @bazel2gn:transformer=deps
+lib_deps = [
+    "//src/lib/diagnostics/data/rust",
+    "//src/lib/fuchsia-async",
+    "//src/lib/fuchsia-sync",
+    "//third_party/rust_crates/vendor:anyhow",
+    "//third_party/rust_crates/vendor:futures",
+    "//third_party/rust_crates/vendor:pin-project",
+    "//third_party/rust_crates/vendor:thiserror",
+    "//third_party/rust_crates/vendor:zstd",
+]
+
+# @bazel2gn:transformer=deps
+shared_test_deps = [
+    "//src/lib/fuchsia",
+    "//third_party/rust_crates/vendor:assert_matches",
+    "//third_party/rust_crates/vendor:pretty_assertions",
+    "//third_party/rust_crates/vendor:rand",
+    "//third_party/rust_crates/vendor:serde_json",
+    "//third_party/rust_crates/vendor:test-case",
+]
+
+# Unrolls the GN `test_diagnostics_tmpl` template into `test_diagnostics`
+# (via `flex_fidl`) and `test_diagnostics_fdomain` (host, via `flex_fdomain`).
+rustc_library(
+    name = "test_diagnostics",
+    srcs = lib_sources,
+    edition = "2024",
+    link_deps = ["//third_party/zstd"],
+    visibility = [
+        "//src/sys/run_test_suite:__pkg__",
+        "//src/sys/test_manager:__pkg__",
+    ],
+    deps = lib_deps + [
+        "//sdk/fidl/fuchsia.test.manager:fuchsia.test.manager_rust_flex",
+        "//src/diagnostics/lib/log-command",
+        "//src/lib/fdomain/client:flex_fidl",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_rust",
+            "//src/lib/diagnostics/reader/rust",
+            "//src/lib/fidl/rust/fidl",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+rustc_library(
+    name = "test_diagnostics_fdomain",
+    srcs = lib_sources,
+    crate_features = ["fdomain"],
+    edition = "2024",
+    link_deps = ["//third_party/zstd"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/sys/run_test_suite:__pkg__"],
+    deps = lib_deps + [
+        "//sdk/fidl/fuchsia.test.manager:fuchsia.test.manager_rust_fdomain_flex",
+        "//src/diagnostics/lib/log-command:log-command_fdomain",
+        "//src/lib/fdomain/client:flex_fdomain",
+    ],
+)
+
+rustc_test(
+    name = "test_diagnostics_test",
+    crate = ":test_diagnostics",
+    # Preserves GN `output_name = "test_diagnostics_lib_test"` for unit test packaging.
+    crate_name = "test_diagnostics_lib_test",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = shared_test_deps + [
+        "//sdk/fidl/fuchsia.mem:fuchsia.mem_rust",
+        "//sdk/rust/zx",
+    ],
+)
+
+fx_unittest_package(
+    name = "test_diagnostics_unittests",
+    package_name = "test_diagnostics_unittests",
+    unit_tests = [":test_diagnostics_test"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+# In GN, `test_diagnostics_host_unittests` compiled `lib_sources` with
+# `features = ["fdomain"]` and the FDomain dependency set, which corresponds
+# to `crate = ":test_diagnostics_fdomain"`. The GN target name is preserved
+# for `tests.json` parity.
+host_rustc_test(
+    name = "test_diagnostics_host_unittests",
+    crate = ":test_diagnostics_fdomain",
+    crate_features = ["fdomain"],
+    edition = "2024",
+    visibility = ["//src/lib:__pkg__"],
+    deps = shared_test_deps + [
+        "//src/lib/fdomain/local",
+        "//src/lib/fidl/rust/fidl",
+    ],
+)

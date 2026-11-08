@@ -1,0 +1,78 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "resolver-api-test-bin",
+    srcs = ["src/resolver_api_test.rs"],
+    crate_root = "src/resolver_api_test.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component.resolution:fuchsia.component.resolution_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-sync",
+        "//src/sys/lib/cm_rust",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "resolver-api-test-packaged-bin",
+    testonly = True,
+    binary = ":resolver-api-test-bin",
+    binary_name = "resolver_api_test_bin",
+)
+
+fx_component_manifest(
+    name = "resolver-api-test-cmp-manifest",
+    testonly = True,
+    component_name = "resolver-api-test",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/resolver_api_test.cml",
+)
+
+fx_test_component(
+    name = "resolver-api-test-cmp",
+    compiled_manifest = ":resolver-api-test-cmp-manifest",
+    deps = [":resolver-api-test-packaged-bin"],
+)
+
+fx_package(
+    name = "resolver-api-test-package",
+    package_name = "resolver-api-test",
+    components = [
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":resolver-api-test-cmp"],
+)
+
+# To run only this test, use:
+#   fx test resolver-api-test
+fx_test(
+    name = "resolver-api-test",
+    package = ":resolver-api-test-package",
+    visibility = ["//src/sys/component_manager:__pkg__"],
+)

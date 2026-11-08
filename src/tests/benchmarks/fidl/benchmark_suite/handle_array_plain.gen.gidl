@@ -6,7 +6,6 @@
 
 // 1 plain handle array in a struct
 benchmark("HandleArray/Plain/1") {
-    bindings_denylist = [go],
     handle_defs = {
         #0 = event(),
     },
@@ -20,7 +19,6 @@ benchmark("HandleArray/Plain/1") {
 
 // 16 plain handle array in a struct
 benchmark("HandleArray/Plain/16") {
-    bindings_denylist = [go],
     handle_defs = {
         #0 = event(),
         #1 = event(),
@@ -64,7 +62,6 @@ benchmark("HandleArray/Plain/16") {
 
 // 64 plain handle array in a struct
 benchmark("HandleArray/Plain/64") {
-    bindings_denylist = [go],
     handle_defs = {
         #0 = event(),
         #1 = event(),

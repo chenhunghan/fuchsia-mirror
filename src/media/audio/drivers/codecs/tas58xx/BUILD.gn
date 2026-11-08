@@ -106,10 +106,11 @@ fuchsia_unittest_package("tas58xx-test-package") {
   deps = [ ":tas58xx-test" ]
 
   test_specs = {
-    environments = basic_envs
+    environments = [ emu_env ]
     log_settings = {
       max_severity = "ERROR"
     }
+    parallel = 4
   }
 }
 

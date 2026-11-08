@@ -1,0 +1,58 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_component.bzl",
+    "fx_unittest_component",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "builtin_dispatcher_component_bin",
+    srcs = ["builtin_dispatcher_component.rs"],
+    aspect_hints = ["//src/lib/fuchsia-component-test:includes"],
+    crate_name = "builtin_dispatcher_component_test",
+    crate_root = "builtin_dispatcher_component.rs",
+    edition = "2024",
+    deps = [
+        "//examples/components/routing/fidl:echo_rust",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/sys/lib/cm_rust",
+        "//src/sys/lib/cm_types",
+        "//src/sys/lib/component-events",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_unittest_component(
+    name = "builtin_dispatcher_component_test_component",
+    binary = ":builtin_dispatcher_component_bin",
+    component_name = "builtin_dispatcher_component_test",
+)
+
+fx_package(
+    name = "builtin_dispatcher_component_test_package",
+    package_name = "builtin_dispatcher_component_test",
+    components = [
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+        "//src/sys/component_manager:component-manager-realm-builder-cmp",
+    ],
+    test_components = [":builtin_dispatcher_component_test_component"],
+)
+
+fx_test(
+    name = "builtin_dispatcher_component_test",
+    package = ":builtin_dispatcher_component_test_package",
+    visibility = ["//src/sys/component_manager:__pkg__"],
+)

@@ -12,9 +12,11 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <chrono>
 #include <thread>
 #include <utility>
 #include <variant>
+#include <vector>
 
 #include "lib/syslog/cpp/macros.h"
 #include "src/developer/debug/ipc/message_reader.h"
@@ -40,6 +42,11 @@
 #include "src/developer/debug/zxdb/client/socket_connect.h"
 #include "src/developer/debug/zxdb/client/target_impl.h"
 #include "src/developer/debug/zxdb/client/thread_impl.h"
+#include "src/developer/debug/zxdb/client/tracepoint.h"
+#include "src/developer/debug/zxdb/client/tracepoint_capture.h"
+#include "src/developer/debug/zxdb/client/tracepoint_spec.h"
+#include "src/developer/debug/zxdb/common/join_callbacks.h"
+#include "src/developer/debug/zxdb/common/string_util.h"
 #include "src/lib/fxl/memory/ref_counted.h"
 #include "src/lib/fxl/strings/string_printf.h"
 
@@ -86,6 +93,159 @@ bool FilterApplicableBreakpoints(StopInfo* info) {
   }
 
   return skip;
+}
+
+std::string FormatTracepointHitLocation(const TracepointSpec& spec) {
+  if (spec.function.has_value()) {
+    return *spec.function;
+  }
+  if (spec.file_line.has_value()) {
+    return fxl::StringPrintf("%s:%d", spec.file_line->file().c_str(), spec.file_line->line());
+  }
+  if (spec.watch.has_value()) {
+    if (!spec.watch->expression.empty()) {
+      return "watch:" + spec.watch->expression;
+    }
+    if (spec.watch->address.has_value()) {
+      return "watch:" + to_hex_string(*spec.watch->address);
+    }
+  }
+  if (spec.address.has_value()) {
+    return to_hex_string(*spec.address);
+  }
+  return {};
+}
+
+// Hit accounting for one stop of a thread at a tracepoint. Every frame that matches in the same
+// stop shares one hit, so max_hits counts stops and not matched inline frames. The first reportable
+// frame capture of the stop counts the hit. Later frames of that stop reuse the same count and are
+// still delivered after the tracepoint auto-disables.
+struct TracepointStopHit : public fxl::RefCountedThreadSafe<TracepointStopHit> {
+  bool counted = false;
+  uint32_t hit_count = 0;
+  bool auto_disabled = false;
+};
+
+TracepointHitRecord BuildTracepointHitRecord(const Tracepoint& tp, const TracepointStopHit& stop,
+                                             uint64_t thread_koid, double dwell_ms, bool truncated,
+                                             TracepointFrameCapture capture) {
+  TracepointHitRecord hit;
+  hit.tracepoint_id = tp.id();
+  hit.location = FormatTracepointHitLocation(tp.spec());
+  hit.hit_count = stop.hit_count;
+  hit.max_hits = tp.max_hits();
+  hit.auto_disabled = stop.auto_disabled;
+  hit.truncated = truncated;
+  hit.thread_koid = thread_koid;
+  hit.dwell_ms = dwell_ms;
+  hit.capture = std::move(capture);
+  return hit;
+}
+
+// Counts one hit for the stop and auto-disables the tracepoint at max_hits. Returns false when the
+// tracepoint was disabled before the stop was counted, for example by another thread.
+bool CountTracepointStopHit(Tracepoint* tp, TracepointStopHit* stop) {
+  if (stop->counted)
+    return true;
+  if (!tp->enabled())
+    return false;
+  tp->set_hit_count(tp->hit_count() + 1);
+  stop->counted = true;
+  stop->hit_count = tp->hit_count();
+  if (tp->hit_count() >= tp->max_hits()) {
+    tp->SetEnabled(false);
+    tp->set_auto_disabled(true);
+    stop->auto_disabled = true;
+  }
+  return true;
+}
+
+void DeliverTracepointHit(fxl::WeakPtr<Session> weak_this, fxl::WeakPtr<Thread> weak_thread,
+                          fxl::WeakPtr<Tracepoint> weak_tp,
+                          const fxl::RefPtr<TracepointStopHit>& stop, uint64_t thread_koid,
+                          std::chrono::steady_clock::time_point start_time, bool truncated,
+                          const Err& unwind_err, ErrOr<TracepointFrameCapture> capture_res) {
+  // Drop late completions if the tracepoint, thread, or session was deleted.
+  if (!weak_this || !weak_thread || !weak_tp)
+    return;
+
+  TracepointFrameCapture capture;
+  if (capture_res.has_error()) {
+    capture.matched = false;
+    capture.errors.push_back(capture_res.err().msg());
+  } else {
+    capture = std::move(capture_res.value());
+  }
+
+  // Only drop hits when the condition evaluated cleanly to false without any error. Evaluation or
+  // capture failures still emit a hit record and count toward max_hits so bad expressions are
+  // visible and cannot flood output.
+  if (!capture.matched && capture.errors.empty())
+    return;
+
+  if (!CountTracepointStopHit(weak_tp.get(), stop.get()))
+    return;
+
+  if (unwind_err.has_error()) {
+    capture.errors.insert(capture.errors.begin(), unwind_err.msg());
+  }
+
+  auto elapsed = std::chrono::steady_clock::now() - start_time;
+  double dwell_ms = std::chrono::duration<double, std::milli>(elapsed).count();
+
+  TracepointHitRecord hit = BuildTracepointHitRecord(*weak_tp, *stop, thread_koid, dwell_ms,
+                                                     truncated, std::move(capture));
+
+  weak_this->system().NotifyTracepointHit(weak_tp.get(), hit);
+}
+
+void CaptureMatchedTracepoint(fxl::WeakPtr<Session> weak_session, fxl::WeakPtr<Thread> weak_thread,
+                              fxl::WeakPtr<Tracepoint> weak_tp, uint64_t thread_koid,
+                              std::chrono::steady_clock::time_point start_time,
+                              const Err& unwind_err,
+                              const fxl::RefPtr<JoinCallbacks<void>>& joiner) {
+  if (!weak_thread || !weak_tp || !weak_tp->enabled())
+    return;
+
+  auto stop = fxl::MakeRefCounted<TracepointStopHit>();
+  ErrOr<TracepointMatchResult> match_res = MatchTracepointFrames(
+      &weak_thread->GetStack(), weak_tp->spec(), FrameMatchMode::kLiveStopTopFrame);
+  if (match_res.has_error()) {
+    DeliverTracepointHit(weak_session, weak_thread, weak_tp, stop, thread_koid, start_time,
+                         /*truncated=*/false, Err(), match_res.err());
+    return;
+  }
+  if (match_res.value().frames.empty()) {
+    if (unwind_err.has_error()) {
+      DeliverTracepointHit(weak_session, weak_thread, weak_tp, stop, thread_koid, start_time,
+                           /*truncated=*/false, Err(), unwind_err);
+    }
+    return;
+  }
+
+  // A capture can finish synchronously, and an observer of that hit can delete the tracepoint or
+  // the thread. Take weak frame pointers and a copy of the spec before the first capture, and stop
+  // when the tracepoint or thread is gone.
+  bool match_truncated = match_res.value().truncated;
+  const TracepointSpec spec = weak_tp->spec();
+  std::vector<fxl::WeakPtr<Frame>> target_frames;
+  target_frames.reserve(match_res.value().frames.size());
+  for (Frame* frame : match_res.value().frames)
+    target_frames.push_back(frame->GetWeakPtr());
+
+  for (fxl::WeakPtr<Frame>& target_frame : target_frames) {
+    if (!weak_thread || !weak_tp)
+      break;
+    CaptureTracepointFrame(
+        weak_thread, std::move(target_frame), spec,
+        [weak_session, weak_thread, weak_tp, stop, start_time, thread_koid, match_truncated,
+         unwind_err,
+         cb = joiner->AddCallback()](ErrOr<TracepointFrameCapture> capture_res) mutable {
+          DeliverTracepointHit(weak_session, weak_thread, weak_tp, stop, thread_koid, start_time,
+                               match_truncated, unwind_err, std::move(capture_res));
+          cb();
+        });
+  }
 }
 
 }  // namespace
@@ -613,6 +773,14 @@ void Session::HandleException(ThreadImpl* thread, const debug_ipc::NotifyExcepti
     }
   }
 
+  // Check whether any tracepoints matched this stop.
+  std::vector<fxl::WeakPtr<Tracepoint>> matched_tracepoints =
+      CollectMatchedTracepoints(info.hit_breakpoints);
+  if (!matched_tracepoints.empty()) {
+    HandleMatchedTracepoints(thread, notify, std::move(info), std::move(matched_tracepoints));
+    return;
+  }
+
   // Continue if it's a conditional breakpoint.
   if (FilterApplicableBreakpoints(&info)) {
     // For simplicity, we're resuming all threads right now.
@@ -625,19 +793,102 @@ void Session::HandleException(ThreadImpl* thread, const debug_ipc::NotifyExcepti
 
   // Delete all one-shot breakpoints the backend deleted. This happens after the thread
   // notifications so observers can tell why the thread stopped.
-  for (const auto& stats : notify.hit_breakpoints) {
+  DeleteHitOneShotBreakpoints(notify.hit_breakpoints);
+}
+
+std::vector<fxl::WeakPtr<Tracepoint>> Session::CollectMatchedTracepoints(
+    const std::vector<fxl::WeakPtr<Breakpoint>>& hit_breakpoints) const {
+  std::vector<fxl::WeakPtr<Tracepoint>> matched_tracepoints;
+  for (const auto& wp : hit_breakpoints) {
+    if (!wp)
+      continue;
+    Breakpoint* bp = wp.get();
+    Tracepoint* tp = system_.GetTracepointForBreakpoint(bp);
+    if (tp && tp->enabled()) {
+      matched_tracepoints.push_back(tp->GetWeakPtr());
+    }
+  }
+  return matched_tracepoints;
+}
+
+void Session::DeleteHitOneShotBreakpoints(
+    const std::vector<debug_ipc::BreakpointStats>& hit_breakpoints) {
+  for (const auto& stats : hit_breakpoints) {
     if (!stats.should_delete)
       continue;
 
-    // Breakpoint needs deleting.
     BreakpointImpl* impl = system_.BreakpointImplForId(stats.id);
     if (impl) {
-      // Need to tell the breakpoint it was removed in the backend before deleting it or it will try
-      // to uninstall itself.
+      FX_DCHECK(impl->GetSettings().one_shot);
       impl->BackendBreakpointRemoved();
       system_.DeleteBreakpoint(impl);
     }
   }
+}
+
+void Session::HandleMatchedTracepoints(ThreadImpl* thread, const debug_ipc::NotifyException& notify,
+                                       StopInfo info,
+                                       std::vector<fxl::WeakPtr<Tracepoint>> matched_tracepoints) {
+  bool skip_stop = FilterApplicableBreakpoints(&info);
+  auto start_time = std::chrono::steady_clock::now();
+  bool need_full_stack = thread->GetStack().empty();
+  for (const auto& weak_tp : matched_tracepoints) {
+    if (weak_tp && (weak_tp->spec().backtrace || weak_tp->spec().raw_backtrace)) {
+      need_full_stack = true;
+      break;
+    }
+  }
+
+  auto run_all_captures = [weak_this = GetWeakPtr(), weak_thread = thread->GetWeakPtr(),
+                           thread_koid = thread->GetKoid(),
+                           matched_tracepoints = std::move(matched_tracepoints), start_time,
+                           skip_stop, info = std::move(info),
+                           hit_bps = notify.hit_breakpoints](const Err& unwind_err) mutable {
+    if (weak_this) {
+      weak_this->RunTracepointCaptures(std::move(weak_thread), thread_koid,
+                                       std::move(matched_tracepoints), start_time, skip_stop,
+                                       std::move(info), std::move(hit_bps), unwind_err);
+    }
+  };
+
+  if (need_full_stack && !thread->GetStack().has_all_frames()) {
+    thread->GetStack().EnsureFrames(Stack::SyncFrameOptions(), std::move(run_all_captures));
+  } else {
+    run_all_captures(Err());
+  }
+}
+
+void Session::RunTracepointCaptures(fxl::WeakPtr<Thread> weak_thread, uint64_t thread_koid,
+                                    std::vector<fxl::WeakPtr<Tracepoint>> matched_tracepoints,
+                                    std::chrono::steady_clock::time_point start_time,
+                                    bool skip_stop, StopInfo info,
+                                    std::vector<debug_ipc::BreakpointStats> hit_bps,
+                                    const Err& unwind_err) {
+  if (!weak_thread) {
+    DeleteHitOneShotBreakpoints(hit_bps);
+    return;
+  }
+
+  auto joiner = fxl::MakeRefCounted<JoinCallbacks<void>>();
+  fxl::WeakPtr<Session> weak_this = GetWeakPtr();
+  for (const auto& weak_tp : matched_tracepoints) {
+    CaptureMatchedTracepoint(weak_this, weak_thread, weak_tp, thread_koid, start_time, unwind_err,
+                             joiner);
+  }
+
+  joiner->Ready([weak_this, weak_thread = std::move(weak_thread), skip_stop, info = std::move(info),
+                 hit_bps = std::move(hit_bps)]() mutable {
+    if (!weak_this)
+      return;
+    if (weak_thread && weak_thread->IsBlockedOnException()) {
+      if (skip_stop) {
+        weak_thread->Continue(false);
+      } else {
+        static_cast<ThreadImpl*>(weak_thread.get())->OnException(info);
+      }
+    }
+    weak_this->DeleteHitOneShotBreakpoints(hit_bps);
+  });
 }
 
 // This is the main entrypoint for all thread stops notifications in the client.

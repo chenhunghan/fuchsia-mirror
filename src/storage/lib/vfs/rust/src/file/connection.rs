@@ -4,7 +4,6 @@
 
 use crate::common::{
     decode_extended_attribute_value, encode_extended_attribute_value, extended_attributes_sender,
-    io1_to_io2_attrs,
 };
 use crate::execution_scope::ExecutionScope;
 use crate::file::common::new_connection_validate_options;
@@ -21,7 +20,6 @@ use crate::{ObjectRequestRef, ProtocolsExt};
 use anyhow::Error;
 use flex_client::fidl::{DiscoverableProtocolMarker as _, ServerEnd};
 use flex_fuchsia_io as fio;
-use static_assertions::assert_eq_size;
 use std::convert::TryInto as _;
 use std::future::Future;
 use std::ops::{ControlFlow, Deref, DerefMut};
@@ -225,24 +223,19 @@ impl<T: 'static + File + FileIo> IoOpHandler for FidlIoConnection<T> {
     }
 
     async fn seek(&mut self, offset: i64, origin: fio::SeekOrigin) -> Result<u64, Status> {
-        // TODO(https://fxbug.dev/42061200) Use mixed_integer_ops when available.
-        let new_seek = match origin {
-            fio::SeekOrigin::Start => offset as i128,
-            fio::SeekOrigin::Current => {
-                assert_eq_size!(usize, i64);
-                self.seek as i128 + offset as i128
-            }
-            fio::SeekOrigin::End => {
-                let size = self.file.get_size().await?;
-                assert_eq_size!(usize, i64, u64);
-                size as i128 + offset as i128
-            }
-        };
-
         // TODO(https://fxbug.dev/42051503): There is an undocumented constraint that the seek offset can
         // never exceed 63 bits, but this is not currently enforced. For now we just ensure that
         // the values remain consistent internally with a 64-bit unsigned seek offset.
-        if let Ok(new_seek) = u64::try_from(new_seek) {
+        let new_seek = match origin {
+            fio::SeekOrigin::Start => u64::try_from(offset).ok(),
+            fio::SeekOrigin::Current => self.seek.checked_add_signed(offset),
+            fio::SeekOrigin::End => {
+                let size = self.file.get_size().await?;
+                size.checked_add_signed(offset)
+            }
+        };
+
+        if let Some(new_seek) = new_seek {
             self.seek = new_seek;
             Ok(self.seek)
         } else {
@@ -569,18 +562,6 @@ impl<T: 'static + File, U: Deref<Target = OpenNode<T>> + DerefMut + IoOpHandler 
         req: fio::FileRequest,
     ) -> Result<ConnectionState, Error> {
         match req {
-            #[cfg(any(
-                fuchsia_api_level_at_least = "PLATFORM",
-                not(fuchsia_api_level_at_least = "29")
-            ))]
-            fio::FileRequest::DeprecatedClone { flags, object, control_handle: _ } => {
-                trace::duration!("storage", "File::DeprecatedClone");
-                crate::common::send_on_open_with_error(
-                    flags.contains(fio::OpenFlags::DESCRIBE),
-                    object,
-                    Status::NOT_SUPPORTED,
-                );
-            }
             fio::FileRequest::Clone { request, control_handle: _ } => {
                 trace::duration!("storage", "File::Clone");
                 this.as_mut().handle_clone(ServerEnd::new(request.into_channel()));
@@ -598,6 +579,37 @@ impl<T: 'static + File, U: Deref<Target = OpenNode<T>> + DerefMut + IoOpHandler 
                 let stream = this.file.duplicate_stream()?;
                 responder.send(fio::FileInfo { stream, ..Default::default() })?;
             }
+            #[cfg(fuchsia_api_level_at_least = "NEXT")]
+            fio::FileRequest::DeprecatedLinkInto { dst_parent_token, dst, responder } => {
+                async move {
+                    responder.send(
+                        this.as_mut()
+                            .handle_link_into(
+                                dst_parent_token,
+                                dst,
+                                fio::LinkIntoOptions::default(),
+                            )
+                            .await
+                            .map_err(Status::into_raw),
+                    )
+                }
+                .trace(trace::trace_future_args!("storage", "File::DeprecatedLinkInto"))
+                .await?;
+            }
+            #[cfg(fuchsia_api_level_at_least = "NEXT")]
+            fio::FileRequest::LinkInto { dst_parent_token, dst, options, responder } => {
+                async move {
+                    responder.send(
+                        this.as_mut()
+                            .handle_link_into(dst_parent_token, dst, options)
+                            .await
+                            .map_err(Status::into_raw),
+                    )
+                }
+                .trace(trace::trace_future_args!("storage", "File::LinkInto"))
+                .await?;
+            }
+            #[cfg(not(fuchsia_api_level_at_least = "NEXT"))]
             fio::FileRequest::LinkInto { dst_parent_token, dst, responder } => {
                 async move {
                     responder.send(
@@ -615,52 +627,6 @@ impl<T: 'static + File, U: Deref<Target = OpenNode<T>> + DerefMut + IoOpHandler 
                     responder.send(this.file.sync(SyncMode::Normal).await.map_err(Status::into_raw))
                 }
                 .trace(trace::trace_future_args!("storage", "File::Sync"))
-                .await?;
-            }
-            #[cfg(fuchsia_api_level_at_least = "28")]
-            fio::FileRequest::DeprecatedGetAttr { responder } => {
-                async move {
-                    let (status, attrs) =
-                        crate::common::io2_to_io1_attrs(this.file.as_ref(), this.options.rights)
-                            .await;
-                    responder.send(status, &attrs)
-                }
-                .trace(trace::trace_future_args!("storage", "File::GetAttr"))
-                .await?;
-            }
-            #[cfg(not(fuchsia_api_level_at_least = "28"))]
-            fio::FileRequest::GetAttr { responder } => {
-                async move {
-                    let (status, attrs) =
-                        crate::common::io2_to_io1_attrs(this.file.as_ref(), this.options.rights)
-                            .await;
-                    responder.send(status, &attrs)
-                }
-                .trace(trace::trace_future_args!("storage", "File::GetAttr"))
-                .await?;
-            }
-            #[cfg(fuchsia_api_level_at_least = "28")]
-            fio::FileRequest::DeprecatedSetAttr { flags, attributes, responder } => {
-                async move {
-                    let result = this
-                        .as_mut()
-                        .handle_update_attributes(io1_to_io2_attrs(flags, attributes))
-                        .await;
-                    responder.send(Status::result_into_raw(result))
-                }
-                .trace(trace::trace_future_args!("storage", "File::SetAttr"))
-                .await?;
-            }
-            #[cfg(not(fuchsia_api_level_at_least = "28"))]
-            fio::FileRequest::SetAttr { flags, attributes, responder } => {
-                async move {
-                    let result = this
-                        .as_mut()
-                        .handle_update_attributes(io1_to_io2_attrs(flags, attributes))
-                        .await;
-                    responder.send(Status::result_into_raw(result))
-                }
-                .trace(trace::trace_future_args!("storage", "File::SetAttr"))
                 .await?;
             }
             fio::FileRequest::GetAttributes { query, responder } => {
@@ -816,19 +782,6 @@ impl<T: 'static + File, U: Deref<Target = OpenNode<T>> + DerefMut + IoOpHandler 
                 } else {
                     responder.send(Err(Status::INVALID_ARGS.into_raw()))?;
                 }
-            }
-            fio::FileRequest::DeprecatedGetFlags { responder } => {
-                trace::duration!("storage", "File::DeprecatedGetFlags");
-                responder.send(zx_status::sys::ZX_OK, this.options.to_io1())?;
-            }
-            fio::FileRequest::DeprecatedSetFlags { flags, responder } => {
-                trace::duration!("storage", "File::DeprecatedSetFlags");
-                // The only supported flag is APPEND.
-                let is_append = flags.contains(fio::OpenFlags::APPEND);
-                let this = this.as_mut().get_mut();
-                this.options.is_append = is_append;
-                let flags = if is_append { fio::Flags::FILE_APPEND } else { fio::Flags::empty() };
-                responder.send(Status::result_into_raw(this.file.set_flags(flags)))?;
             }
             #[cfg(target_os = "fuchsia")]
             fio::FileRequest::GetBackingMemory { flags, responder } => {
@@ -1044,6 +997,7 @@ impl<T: 'static + File, U: Deref<Target = OpenNode<T>> + DerefMut + IoOpHandler 
         &mut self,
         target_parent_token: flex_client::Event,
         target_name: String,
+        #[cfg(fuchsia_api_level_at_least = "NEXT")] options: fio::LinkIntoOptions,
     ) -> Result<(), Status> {
         let target_name = Name::try_from(target_name).map_err(|_| Status::INVALID_ARGS)?;
 
@@ -1073,7 +1027,10 @@ impl<T: 'static + File, U: Deref<Target = OpenNode<T>> + DerefMut + IoOpHandler 
 
         let target_parent = target_parent.into_mutable_directory().ok_or(Status::INVALID_ARGS)?;
 
-        self.file.clone().link_into(target_parent, target_name).await
+        #[cfg(fuchsia_api_level_at_least = "NEXT")]
+        return self.file.clone().link_into(target_parent, target_name, options).await;
+        #[cfg(not(fuchsia_api_level_at_least = "NEXT"))]
+        return self.file.clone().link_into(target_parent, target_name).await;
     }
 
     #[cfg(fuchsia_api_level_at_least = "HEAD")]

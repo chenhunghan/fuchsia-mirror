@@ -20,6 +20,7 @@
 #include <lib/zx/vmo.h>
 #include <zircon/types.h>
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -189,7 +190,15 @@ class Blobfs : public TransactionManager, public BlockIteratorProvider {
   BlobLoader& loader() { return *loader_; }
   PageLoader& page_loader() { return *page_loader_; }
 
+  void DieOnMutationFailure(bool setting) {
+    die_on_mutation_failure_.store(setting, std::memory_order_relaxed);
+  }
+  bool die_on_mutation_failure() const {
+    return die_on_mutation_failure_.load(std::memory_order_relaxed);
+  }
+
   zx_status_t RunRequests(const std::vector<storage::BufferedOperation>& operations) override;
+  zx_status_t Flush() override;
 
   zx::result<std::unique_ptr<Superblock>> ReadBackupSuperblock();
 
@@ -268,15 +277,15 @@ class Blobfs : public TransactionManager, public BlockIteratorProvider {
   // Sequentially migrates blobfs to the latest oldest_minor_version.
   // Performs zero or more passes which each migrate blobfs from oldest_minor_version N -> N+1 by
   // performing some reparative action. See MigrateToRevN.
-  zx_status_t Migrate();
+  void Migrate();
 
   // Repairs the Inode of the null blob (if present) to not have a zero-length extent.
   // NOP if oldest_minor_version >= kBlobfsMinorVersionHostToolHandlesNullBlobCorrectly.
-  zx_status_t MigrateToRev4();
+  void MigrateToRev4();
 
   // Migrates from V8Rev4 and V9Rev4 to V10Rev4 by inserting the blob layout format into each blob's
   // inode header..
-  zx_status_t MigrateToV10Rev4();
+  void MigrateToV10Rev4();
 
   // Walks all the extents of a given inode, updating |extents_per_blob| and |used_fragments|
   // metrics in |out_metrics|. If |out_stats| is provided, also records those values there.
@@ -300,6 +309,8 @@ class Blobfs : public TransactionManager, public BlockIteratorProvider {
   std::unique_ptr<BlockDevice> block_device_;
   fuchsia_storage_block::wire::BlockInfo block_info_ = {};
   Writability writability_;
+  bool clean_unmount_on_reset_ = false;
+  std::atomic<bool> die_on_mutation_failure_ = true;
 
   std::unique_ptr<Allocator> allocator_;
 

@@ -230,9 +230,8 @@ template("sdk_atom") {
         target_label != string_replace(target_label, "devicetree", "", 1)
 
     # TODO(https://fxbug.dev/376105715): Remove once devicetree is in "partner".
-    is_devicetree =
-        type == "cc_prebuilt_library" &&
-        target_label == "//zircon/kernel/lib/devicetree:devicetree_sdk"
+    is_devicetree = type == "cc_prebuilt_library" &&
+                    target_label == "//sdk/lib/devicetree:devicetree_sdk"
 
     # TODO(https://fxbug.dev/42070500): Remove once shard is in "partner".
     is_realm_builder_shard =

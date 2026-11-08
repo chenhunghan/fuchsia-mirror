@@ -171,6 +171,26 @@ generated_file("gn_build_variables_for_bazel") {
 
   # LINT.ThenChange(//src/starnix/build/args.gni:starnix_enable_trace_and_debug_logs_in_release)
 
+  # LINT.IfChange(starnix_kgsl)
+  declaration = "//src/starnix/modules/kgsl/build/args.gni"
+  import(declaration)
+  contents += [
+    {
+      name = "starnix_kgsl_enable"
+      value = starnix_kgsl_enable
+      type = "bool"
+      location = declaration
+    },
+    {
+      name = "starnix_kgsl_debug"
+      value = starnix_kgsl_debug
+      type = "bool"
+      location = declaration
+    },
+  ]
+
+  # LINT.ThenChange(//src/starnix/modules/kgsl/build/args.gni:starnix_kgsl)
+
   # LINT.IfChange
   declaration = "//src/developer/fuchsia-criterion/build/args.gni"
   import(declaration)
@@ -184,6 +204,20 @@ generated_file("gn_build_variables_for_bazel") {
   ]
 
   # LINT.ThenChange(//src/developer/fuchsia-criterion/build/args.gni)
+
+  # LINT.IfChange(include_internal_fonts)
+  declaration = "//src/fonts/build/font_args.gni"
+  import(declaration)
+  contents += [
+    {
+      name = "include_internal_fonts"
+      value = include_internal_fonts
+      type = "bool"
+      location = declaration
+    },
+  ]
+
+  # LINT.ThenChange(//src/fonts/build/font_args.gni:include_internal_fonts)
 
   # LINT.IfChange
   declaration = "//build/info/info.gni"
@@ -233,9 +267,10 @@ generated_file("gn_build_variables_for_bazel") {
 
   # LINT.ThenChange(//build/rust/config.gni)
 
-  # LINT.IfChange
   declaration = "//build/config/compilation_modes.gni"
   import(declaration)
+
+  # LINT.IfChange(compilation_mode)
   contents += [
     {
       name = "compilation_mode"
@@ -245,7 +280,7 @@ generated_file("gn_build_variables_for_bazel") {
     },
   ]
 
-  # LINT.ThenChange(//build/config/compilation_modes.gni)
+  # LINT.ThenChange(//build/config/compilation_modes.gni:compilation_mode)
 
   # LINT.IfChange
   declaration = "//sdk/config.gni"
@@ -461,6 +496,118 @@ generated_file("gn_build_variables_for_bazel") {
   ]
 
   # LINT.ThenChange(//build/config/zircon/levels.gni:zx_assert_level)
+
+  # LINT.IfChange(clang_ml_inliner)
+  declaration = "//build/config/clang/clang.gni"
+  import(declaration)
+  contents += [
+    {
+      name = "clang_ml_inliner"
+      value = clang_ml_inliner
+      type = "bool"
+      location = declaration
+    },
+  ]
+
+  # LINT.ThenChange(//build/config/clang/clang.gni:clang_ml_inliner)
+
+  # BEGIN sanitizer_default_options.gni
+  # LINT.IfChange(sanitizer_default_options)
+  declaration = "//build/config/sanitizers/sanitizer_default_options.gni"
+  import(declaration)
+
+  _asan_default_options = asan_default_options
+  if (_asan_default_options == "") {
+    _asan_default_options = []
+  } else if (_asan_default_options == "$_asan_default_options") {
+    _asan_default_options = [ _asan_default_options ]
+  }
+  _hwasan_default_options = hwasan_default_options
+  if (_hwasan_default_options == "") {
+    _hwasan_default_options = []
+  } else if (_hwasan_default_options == "$_hwasan_default_options") {
+    _hwasan_default_options = [ _hwasan_default_options ]
+  }
+  _lsan_default_options = lsan_default_options
+  if (_lsan_default_options == "") {
+    _lsan_default_options = []
+  } else if (_lsan_default_options == "$_lsan_default_options") {
+    _lsan_default_options = [ _lsan_default_options ]
+  }
+  _scudo_default_options = scudo_default_options
+  if (_scudo_default_options == "") {
+    _scudo_default_options = []
+  } else if (_scudo_default_options == "$_scudo_default_options") {
+    _scudo_default_options = [ _scudo_default_options ]
+  }
+  _tsan_default_options = tsan_default_options
+  if (_tsan_default_options == "") {
+    _tsan_default_options = []
+  } else if (_tsan_default_options == "$_tsan_default_options") {
+    _tsan_default_options = [ _tsan_default_options ]
+  }
+  _ubsan_default_options = ubsan_default_options
+  if (_ubsan_default_options == "") {
+    _ubsan_default_options = []
+  } else if (_ubsan_default_options == "$_ubsan_default_options") {
+    _ubsan_default_options = [ _ubsan_default_options ]
+  }
+
+  contents += [
+    {
+      name = "asan_default_options"
+      value = _asan_default_options
+      type = "array_of_strings"
+      location = declaration
+    },
+    {
+      name = "hwasan_default_options"
+      value = _hwasan_default_options
+      type = "array_of_strings"
+      location = declaration
+    },
+    {
+      name = "lsan_default_options"
+      value = _lsan_default_options
+      type = "array_of_strings"
+      location = declaration
+    },
+    {
+      name = "scudo_default_options"
+      value = _scudo_default_options
+      type = "array_of_strings"
+      location = declaration
+    },
+    {
+      name = "tsan_default_options"
+      value = _tsan_default_options
+      type = "array_of_strings"
+      location = declaration
+    },
+    {
+      name = "ubsan_default_options"
+      value = _ubsan_default_options
+      type = "array_of_strings"
+      location = declaration
+    },
+  ]
+
+  # LINT.ThenChange(//build/config/sanitizers/sanitizer_default_options.gni:sanitizer_default_options)
+  # END sanitizer_default_options.gni
+
+  # LINT.IfChange(exclude_testonly_syscalls)
+  declaration = "//zircon/vdso/vdso.gni"
+  import(declaration)
+  contents += [
+    {
+      name = "exclude_testonly_syscalls"
+      value = exclude_testonly_syscalls
+      type = "bool"
+      location = declaration
+    },
+  ]
+
+  # LINT.ThenChange(//zircon/vdso/vdso.gni:exclude_testonly_syscalls)
 }
 
 if (current_toolchain == default_toolchain) {

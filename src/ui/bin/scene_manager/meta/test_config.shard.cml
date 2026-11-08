@@ -1,0 +1,99 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+// Configuration capabilities with transitional default values used by hermetic
+// scene_manager test components. Production builds use `config.shard.cml`
+// instead so missing routes fail validation rather than falling back to test
+// defaults.
+{
+    use: [
+        // LINT.IfChange
+        {
+            config: "fuchsia.ui.IdleThresholdMs",
+            key: "idle_threshold_ms",
+            type: "uint64",
+            availability: "transitional",
+            default: 5000,
+        },
+        {
+            config: "fuchsia.ui.SupportedInputDevices",
+            key: "supported_input_devices",
+            type: "vector",
+            element: {
+                type: "string",
+                max_size: 12,
+            },
+            max_count: 6,
+            availability: "transitional",
+            default: [
+                "button",
+                "keyboard",
+                "lightsensor",
+                "mouse",
+                "touchscreen",
+            ],
+        },
+        {
+            config: "fuchsia.scenic.DisplayRotation",
+            key: "display_rotation",
+            type: "uint64",
+            availability: "transitional",
+            default: 270,
+        },
+        {
+            config: "fuchsia.ui.DisplayPixelDensity",
+            key: "display_pixel_density",
+            type: "string",
+            max_size: 8,
+            availability: "transitional",
+            default: "4.1668",
+        },
+        {
+            config: "fuchsia.ui.ViewingDistance",
+            key: "viewing_distance",
+            type: "string",
+            max_size: 8,
+            availability: "transitional",
+            default: "near",
+        },
+        {
+            config: "fuchsia.power.SuspendEnabled",
+            from: "parent",
+            key: "suspend_enabled",
+            type: "bool",
+            availability: "transitional",
+            default: false,
+        },
+        {
+            config: "fuchsia.ui.AttachA11yView",
+            key: "attach_a11y_view",
+            type: "bool",
+            availability: "transitional",
+            default: true,
+        },
+        {
+            config: "fuchsia.ui.EnableMergeTouchEvents",
+            key: "enable_merge_touch_events",
+            type: "bool",
+            availability: "transitional",
+            default: false,
+        },
+        {
+            config: "fuchsia.ui.Prefetch",
+            key: "prefetch",
+            type: "bool",
+            availability: "transitional",
+            default: false,
+        },
+        {
+            config: "fuchsia.ui.VisualDebuggingLevel",
+            key: "visual_debugging_level",
+            type: "uint8",
+            availability: "transitional",
+            default: 0,
+        },
+
+        // LINT.ThenChange(//src/ui/bin/scene_manager/meta/config.shard.cml)
+    ],
+}

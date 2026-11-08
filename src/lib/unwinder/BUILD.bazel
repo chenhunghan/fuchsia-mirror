@@ -24,9 +24,7 @@ cc_library(
         "registers.h",
         "scs_unwinder.h",
         "sigreturn_unwinder.h",
-        "third_party/libunwindstack/context.h",
         "unwind.h",
-        "unwind_local.h",
         "unwinder_base.h",
     ] + select({
         "@platforms//os:fuchsia": ["fuchsia.h"],
@@ -73,14 +71,8 @@ cc_library(
         "scs_unwinder.cc",
         "sigreturn_unwinder.cc",
         "unwind.cc",
-        "unwind_local.cc",
         "unwinder_base.cc",
     ] + select({
-        "@platforms//cpu:x86_64": [
-            "third_party/libunwindstack/context_x86_64.S",
-        ],
-        "//conditions:default": [],
-    }) + select({
         "@platforms//os:fuchsia": [
             "fuchsia.cc",
         ],

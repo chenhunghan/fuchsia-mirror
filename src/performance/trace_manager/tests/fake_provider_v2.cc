@@ -21,6 +21,14 @@ void FakeProviderV2::Initialize(InitializeRequest& request, InitializeCompleter:
   FX_LOGS(DEBUG) << PrettyName() << ": Received Initialize message";
   ++initialize_count_;
 
+  if (state_ == State::kTerminating) {
+    // Matches TraceProviderImpl: Terminate releases the provider's session immediately, but
+    // Session::InitializeEngine fails while the trace engine is still shutting down. The provider
+    // stays connected without a session, and the earlier Terminate reply remains pending.
+    FX_LOGS(DEBUG) << "Can't initialize engine, still terminating";
+    return;
+  }
+
   if (state_ != State::kReady && state_ != State::kTerminated) {
     FX_LOGS(DEBUG) << "Can't initialize, state is " << state_;
     completer.Close(ZX_ERR_BAD_STATE);
@@ -46,6 +54,12 @@ void FakeProviderV2::Start(StartRequest& request, StartCompleter::Sync& complete
   FX_LOGS(DEBUG) << PrettyName() << ": Received Start message";
   ++start_count_;
 
+  if (state_ == State::kTerminating) {
+    // No session (see Initialize): TraceProviderImpl replies without starting anything.
+    completer.Reply();
+    return;
+  }
+
   if (request.options().buffer_disposition() == fuchsia_tracing::BufferDisposition::kRetain) {
     FX_LOGS(DEBUG) << "Retaining buffer contents";
   } else {
@@ -62,6 +76,12 @@ void FakeProviderV2::Stop(StopCompleter::Sync& completer) {
   FX_LOGS(DEBUG) << PrettyName() << ": Received Stop message";
   ++stop_count_;
 
+  if (state_ == State::kTerminating) {
+    // No session (see Initialize): TraceProviderImpl replies immediately.
+    completer.Reply();
+    return;
+  }
+
   state_ = State::kStopping;
   stop_completer_ = completer.ToAsync();
 }
@@ -69,6 +89,13 @@ void FakeProviderV2::Stop(StopCompleter::Sync& completer) {
 void FakeProviderV2::Terminate(TerminateCompleter::Sync& completer) {
   FX_LOGS(DEBUG) << PrettyName() << ": Received Terminate message";
   ++terminate_count_;
+
+  if (state_ == State::kTerminating) {
+    // No session (see Initialize): TraceProviderImpl replies immediately. The reply to the earlier
+    // Terminate stays pending until MarkTerminated().
+    completer.Reply();
+    return;
+  }
 
   state_ = State::kTerminating;
   terminate_completer_ = completer.ToAsync();
@@ -143,6 +170,19 @@ void FakeProviderV2::SendOnSaveBuffer(uint32_t wrapped_count, uint64_t durable_d
   auto result = fidl::SendEvent(*binding_)->OnSaveBuffer(
       {{.wrapped_count = wrapped_count, .durable_data_end = durable_data_end}});
   ASSERT_TRUE(result.is_ok());
+}
+
+void FakeProviderV2::SendOnAlert(const std::string& alert_name) {
+  ASSERT_TRUE(binding_.has_value());
+  auto result = fidl::SendEvent(*binding_)->OnAlert({{.name = alert_name}});
+  ASSERT_TRUE(result.is_ok());
+}
+
+void FakeProviderV2::SendLateStopReply() {
+  UpdateBufferHeaderAfterStopped();
+  ASSERT_TRUE(stop_completer_.has_value());
+  stop_completer_->Reply();
+  stop_completer_.reset();
 }
 
 void FakeProviderV2::InitializeBuffer() {

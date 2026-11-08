@@ -419,7 +419,7 @@ encode_success("GoldenHandleBasicRightsStructReEncode") {
 // Backends should assert that the handle gets closed.
 decode_success("GoldenTableUnknownDropped") {
     // TODO(https://fxbug.dev/42166276): Drop unknown data in all bindings.
-    bindings_denylist = [dart, go],
+    bindings_denylist = [dart],
     handle_defs = {
         #0 = event(),
     },

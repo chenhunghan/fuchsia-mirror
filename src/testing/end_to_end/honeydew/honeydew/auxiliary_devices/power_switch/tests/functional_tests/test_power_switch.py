@@ -6,20 +6,14 @@
 import logging
 
 import fuchsia_base_test
-from honeydew.auxiliary_devices.power_switch import (
-    power_switch,
-    power_switch_using_dmc,
-    power_switch_using_pdu,
-)
+from honeydew.auxiliary_devices.power_switch import power_switch
 from mobly import asserts, test_runner
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
-PDU_CONFIG_KEY: str = "pdu_config"
-
 
 class PowerSwitchTest(fuchsia_base_test.FuchsiaBaseTest):
-    """Mobly test for PowerSwitchDmc implementation of PowerSwitch interface."""
+    """Mobly test for PowerSwitch implementations."""
 
     _power_switch: power_switch.PowerSwitch
     _outlet_arg: int | None
@@ -28,42 +22,19 @@ class PowerSwitchTest(fuchsia_base_test.FuchsiaBaseTest):
         """setup_class is called once before running tests."""
         await super().setup_class()
 
-        try:
-            _LOGGER.info(
-                "Attempting to instantiate PowerSwitchUsingDmc (Infra Mode)..."
+        power_switch_dev, outlet = self._lookup_power_switch(self.dut)
+        if power_switch_dev is None:
+            asserts.abort_class(
+                "No PowerSwitch configured (neither DMC_PATH environment "
+                "variable nor power_switch_hw/power_switch_impl in device "
+                "config)."
             )
-            self._power_switch = power_switch_using_dmc.PowerSwitchUsingDmc(
-                device_name=self.dut.device_name
-            )
-            self._outlet_arg = None
-            _LOGGER.info("Successfully configured for DMC.")
-        except power_switch_using_dmc.PowerSwitchDmcError:
-            _LOGGER.info(
-                "DMC environment variable not found. Falling back to PDU (Host Mode)..."
-            )
-
-            pdu_config = self.user_params.get(PDU_CONFIG_KEY)
-
-            if not pdu_config:
-                asserts.abort_class(
-                    f"'{PDU_CONFIG_KEY}' required for PDU mode."
-                )
-            assert pdu_config is not None
-            try:
-                self._power_switch = power_switch_using_pdu.PowerSwitchUsingPdu(
-                    pdu_host=pdu_config["host"],
-                    pdu_username=pdu_config["username"],
-                    priv_key_path=pdu_config["priv_key_path"],
-                )
-                self._outlet_arg = pdu_config["outlet"]
-                _LOGGER.info("Successfully configured for PDU.")
-            except KeyError as e:
-                asserts.abort_class(f"Missing required key in pdu_config: {e}")
-            except power_switch_using_pdu.PowerSwitchPduError as e:
-                asserts.abort_class(f"PDU setup failed: {e}")
+        assert power_switch_dev is not None
+        self._power_switch = power_switch_dev
+        self._outlet_arg = outlet
 
     async def test_power_switch(self) -> None:
-        """Test case for PowerSwitchDmc.power_off and PowerSwitchDmc.power_on"""
+        """Test case for PowerSwitch.power_off and PowerSwitch.power_on."""
         _LOGGER.info(
             "Testing power switch using %s",
             self._power_switch.__class__.__name__,

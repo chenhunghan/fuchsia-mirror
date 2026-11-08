@@ -68,11 +68,8 @@ rustc_library("network_test_realm") {
 fuchsia_component("hermetic_network") {
   manifest = "meta/hermetic_network.cml"
   deps = [
-    "//src/connectivity/network/dhcpv4/client/bindings:component",
-    "//src/connectivity/network/dhcpv4/server:component",
     "//src/connectivity/network/dhcpv6/client:component",
     "//src/connectivity/network/dns:component",
-    "//src/connectivity/network/netstack3:component-conformance",
   ]
   testonly = true
 }
@@ -90,5 +87,10 @@ fuchsia_component("controller") {
 fuchsia_package("network-test-realm") {
   package_name = "network-test-realm"
   deps = [ ":controller" ]
+  subpackages = [
+    "//src/connectivity/network/dhcpv4/client/bindings:package",
+    "//src/connectivity/network/dhcpv4/server:package",
+    "//src/connectivity/network/netstack3:package-conformance",
+  ]
   testonly = true
 }

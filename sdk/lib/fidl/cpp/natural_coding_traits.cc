@@ -8,6 +8,35 @@
 
 namespace fidl::internal {
 
+template <typename IntType>
+void NaturalEncodeNonZero(NaturalEncoder* encoder, const IntType* value, size_t offset) {
+  if (unlikely(*value == 0)) {
+    encoder->SetError(kCodingErrorInvalidNonZero);
+    return;
+  }
+  *encoder->template GetPtr<IntType>(offset) = *value;
+}
+
+template <typename IntType>
+void NaturalDecodeNonZero(NaturalDecoder* decoder, IntType* value, size_t offset) {
+  IntType val = *decoder->template GetPtr<IntType>(offset);
+  if (unlikely(val == 0)) {
+    decoder->SetError(kCodingErrorInvalidNonZero);
+    return;
+  }
+  *value = val;
+}
+
+template void NaturalEncodeNonZero<uint8_t>(NaturalEncoder*, const uint8_t*, size_t);
+template void NaturalEncodeNonZero<uint16_t>(NaturalEncoder*, const uint16_t*, size_t);
+template void NaturalEncodeNonZero<uint32_t>(NaturalEncoder*, const uint32_t*, size_t);
+template void NaturalEncodeNonZero<uint64_t>(NaturalEncoder*, const uint64_t*, size_t);
+
+template void NaturalDecodeNonZero<uint8_t>(NaturalDecoder*, uint8_t*, size_t);
+template void NaturalDecodeNonZero<uint16_t>(NaturalDecoder*, uint16_t*, size_t);
+template void NaturalDecodeNonZero<uint32_t>(NaturalDecoder*, uint32_t*, size_t);
+template void NaturalDecodeNonZero<uint64_t>(NaturalDecoder*, uint64_t*, size_t);
+
 fidl::Status NaturalDecode(::fidl::WireFormatMetadata metadata, size_t inline_size,
                            NaturalTopLevelDecodeFn decode_fn, ::fidl::EncodedMessage& message,
                            void* value) {

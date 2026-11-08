@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/config/sysroot.gni")
 import("//zircon/vdso/vdso.gni")
 
 # This file defines the sysroot entries corresponding to the Zircon VDSO
@@ -11,9 +12,18 @@ import("//zircon/vdso/vdso.gni")
 _rebased_include_dir =
     rebase_path("//src/zircon/lib/zircon/include", root_build_dir)
 
-_vdso_link_label = "//src/zircon/lib/zircon:zircon.stub($default_toolchain)"
-_vdso_link =
-    get_label_info(_vdso_link_label, "target_out_dir") + "/libzircon.so"
+if (target_sysroot != "") {
+  _vdso_link_label = []
+  _vdso_source =
+      rebase_path("${target_sysroot}/lib/libzircon.so", root_build_dir)
+  _vdso_link = _vdso_source
+} else {
+  _vdso_link_target = "//src/zircon/lib/zircon:zircon.stub($default_toolchain)"
+  _vdso_link_label = [ _vdso_link_target ]
+  _vdso_link =
+      get_label_info(_vdso_link_target, "target_out_dir") + "/libzircon.so"
+  _vdso_source = rebase_path(_vdso_link, root_build_dir)
+}
 
 sysroot_vdso_entries = [
   {
@@ -37,9 +47,9 @@ sysroot_vdso_entries = [
   },
   {
     sdk = {
-      source = rebase_path(_vdso_link, root_build_dir)
+      source = _vdso_source
       link = "lib/libzircon.so"
-      deps = [ _vdso_link_label ]
+      deps = _vdso_link_label
     }
   },
 ]

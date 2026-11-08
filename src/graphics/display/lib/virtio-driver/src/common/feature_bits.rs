@@ -18,7 +18,7 @@ bitfield! {
     // @cite(virtio): sec="2.2" title="Feature Bits"
     // @cite(virtio): sec="6" title="Reserved Feature Bits"
     #[derive(Default, Copy, Clone, PartialEq, Eq)]
-    pub struct VirtioFeatureBits(u128);
+    pub struct VirtioFeatureBits(pub u128);
     impl Debug;
 
     /// The device notifies when a virtqueue has no submitted buffers.

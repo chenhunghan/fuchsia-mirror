@@ -34,8 +34,10 @@ unsafe extern "C" {
     fn cpp_serial_write(ptr: *const c_char, len: usize);
     fn cpp_dlog_sync();
     fn cpp_dlog_panic_start();
+    fn cpp_dlog_panic_started() -> bool;
     fn cpp_dlog_bluescreen_init();
     fn cpp_dlog_render_to_crashlog(ptr: *mut c_char, len: usize) -> usize;
+    fn cpp_dlog_bypass() -> bool;
 }
 
 /// Shutdown the debuglog subsystem.
@@ -90,6 +92,12 @@ pub fn dlog_panic_start() {
     unsafe { cpp_dlog_panic_start() }
 }
 
+/// Returns `true` if [`dlog_panic_start`] has been called.
+pub fn dlog_panic_started() -> bool {
+    // SAFETY: takes no arguments and reads an atomic flag.
+    unsafe { cpp_dlog_panic_started() }
+}
+
 /// Switches the debuglog to bluescreen mode for the panic message that follows.
 pub fn dlog_bluescreen_init() {
     // SAFETY: takes no arguments; the debuglog owns all the state it changes.
@@ -103,6 +111,12 @@ pub fn dlog_render_to_crashlog(target: &mut [u8]) -> usize {
     // SAFETY: `target` is valid for writes of `len` bytes for the duration of the call;
     // the callee writes only within that range and does not retain the pointer.
     unsafe { cpp_dlog_render_to_crashlog(target.as_mut_ptr().cast::<c_char>(), len) }
+}
+
+/// Returns `true` if the debuglog bypass is enabled.
+pub fn dlog_bypass() -> bool {
+    // SAFETY: takes no arguments and reads a global boolean.
+    unsafe { cpp_dlog_bypass() }
 }
 
 #[repr(C, align(8))]

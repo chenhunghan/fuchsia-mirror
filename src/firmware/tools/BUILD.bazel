@@ -2,6 +2,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
+
 package(
     default_applicable_licenses = ["//:license"],
 )
@@ -13,4 +16,56 @@ exports_files(
         "zbi_to_android_boot_image.py",
     ],
     visibility = ["//vendor:__subpackages__"],
+)
+
+host_py_test(
+    name = "cipd_utils_test",
+    srcs = [
+        "cipd_utils.py",
+        "cipd_utils_test.py",
+    ],
+    imports = ["."],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+host_py_test(
+    name = "android_boot_image_test",
+    srcs = [
+        "android_boot_image.py",
+        "android_boot_image_test.py",
+        "test_utils.py",
+    ],
+    imports = ["."],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    test_data = [
+        "test_data/android_boot_image/test_boot_image_v2.bin",
+        "test_data/android_boot_image/test_boot_image_v4.bin",
+        "test_data/android_boot_image/test_vendor_boot_image_v4.bin",
+    ],
+)
+
+host_py_test(
+    name = "android_misc_info_test",
+    srcs = [
+        "android_misc_info.py",
+        "android_misc_info_test.py",
+        "test_utils.py",
+    ],
+    imports = ["."],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    test_data = [
+        # Real misc_info.txt from AOSP, specific build/target doesn't matter:
+        # https://ci.android.com/builds/submitted/16102939/aosp_cf_arm64_only_phone-userdebug/latest/misc_info.txt
+        "test_data/android_misc_info/misc_info.aosp_cf_arm64_only_phone-userdebug.16102939.txt",
+    ],
+)
+
+host_py_test(
+    name = "zbi_to_android_boot_image_test",
+    srcs = [
+        "zbi_to_android_boot_image.py",
+        "zbi_to_android_boot_image_test.py",
+    ],
+    imports = ["."],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
 )

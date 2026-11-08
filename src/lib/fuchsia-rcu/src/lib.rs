@@ -16,10 +16,9 @@ mod rcu_weak;
 mod read_counters;
 mod state_machine;
 
-pub use fuchsia_rcu_derive::RcuDroppable;
+pub use fuchsia_rcu_traits::RcuDroppable;
 pub use rcu_arc::RcuArc;
 pub use rcu_box::RcuBox;
-pub use rcu_droppable::RcuDroppable;
 pub use rcu_droppable_arc::RcuDroppableArc;
 pub use rcu_option_arc::RcuOptionArc;
 pub use rcu_option_box::RcuOptionBox;
@@ -28,7 +27,8 @@ pub use rcu_read_scope::RcuReadScope;
 pub use rcu_weak::RcuWeak;
 pub use state_machine::{
     RcuThreadRegistration, rcu_advancer_wait_for_work, rcu_advancer_wake, rcu_drop,
-    rcu_run_callbacks, rcu_synchronize, register_thread, with_thread_block_counters,
+    rcu_run_callbacks, rcu_synchronize, register_thread, try_current_cpu,
+    with_thread_block_counters,
 };
 
 pub mod subtle {

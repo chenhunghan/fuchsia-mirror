@@ -68,9 +68,8 @@ rustc_binary(
 # `//src/connectivity/network/dns:component` and
 # `//src/connectivity/network/netstack3:component-for-tests`, which have no
 # Bazel build yet.
-# @bazel2gn:raw_attribute:output_name = "http_client_bin_test"
 rustc_test(
-    name = "http_client_test",
+    name = "http_client_bin_test",
     build_flags = ["//build/config/rust/lints:deny_unused_results"],
     crate = ":http_client",
     edition = "2024",
@@ -98,7 +97,7 @@ fx_unittest_package(
     name = "http-client-test",
     build_only = True,
     resources = [":fake-ssl-certs"],
-    unit_tests = [":http_client_test"],
+    unit_tests = [":http_client_bin_test"],
 )
 
 fx_packaged_binary(
@@ -122,7 +121,6 @@ fx_component_manifest(
 fx_component(
     name = "component",
     compiled_manifest = ":manifest",
-    component_name = "http-client",
     # `//src/connectivity/policy/http-client/integration` depends on
     # `../:component` in GN.
     # @bazel2gn:skip
@@ -151,7 +149,6 @@ fx_component_manifest(
 fx_component(
     name = "google_component",
     compiled_manifest = ":google_manifest",
-    component_name = "google-http-client",
     deps = [":http_client_packaged_bin"],
 )
 

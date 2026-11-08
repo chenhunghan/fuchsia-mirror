@@ -27,5 +27,20 @@ if (is_host) {
   python_host_test("odpm_utils_test") {
     main_source = "odpm_utils_test.py"
     libraries = [ ":wlan_test_utils" ]
+    data_package_name = "test_data"
+    data_sources = [ "//src/tests/end_to_end/perf/expected_metric_names/fuchsia.wlan.test_scan_while_connected.txt" ]
   }
+
+  python_host_test("throughput_utils_test") {
+    main_source = "throughput_utils_test.py"
+    libraries = [ ":wlan_test_utils" ]
+  }
+}
+
+group("tests_host") {
+  testonly = true
+  public_deps = [
+    ":odpm_utils_test($host_toolchain)",
+    ":throughput_utils_test($host_toolchain)",
+  ]
 }

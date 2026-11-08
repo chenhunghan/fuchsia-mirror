@@ -12,7 +12,7 @@ use fuchsia_rcu::RcuReadScope;
 use hex;
 use linux_uapi::AUDIT_AVC;
 use selinux::permission_check::{PermissionCheck, PermissionCheckResult};
-use selinux::{ClassPermission, KernelClass, KernelPermission, SecurityId};
+use selinux::{KernelClass, KernelPermissionSet, SecurityId};
 use starnix_logging::CATEGORY_STARNIX_SECURITY;
 use starnix_sync::{AuditDenyCountsLock, LockDepMutex};
 use std::collections::HashMap;
@@ -178,6 +178,10 @@ impl<'a, const N: usize> From<&'a [Auditable<'a>; N]> for Auditable<'a> {
 /// The supplied `permission_check` is used to serialize the `source_sid` and `target_sid` into
 /// their string forms.
 ///
+/// `permissions` must be the non-empty subset of permissions to be audited (see
+/// [`PermissionCheckResult::audit_permissions`]). They are logged in kernel permission-Id order,
+/// which may differ from policy declaration order.
+///
 /// If the `result` has a `todo_bug` then the audit entry's decision will be "todo_deny", instead of
 /// the standard "granted" or "denied" decisions, to indicate that the check failed, but was granted
 /// nonetheless, via the todo-deny exceptions configuration.
@@ -190,9 +194,10 @@ pub(super) fn audit_decision(
     result: PermissionCheckResult,
     source_sid: SecurityId,
     target_sid: SecurityId,
-    permission: KernelPermission,
+    permissions: KernelPermissionSet,
     audit_data: Auditable<'_>,
 ) {
+    debug_assert!(!permissions.is_empty());
     fuchsia_trace::instant!(
         CATEGORY_STARNIX_SECURITY,
         match (result.granted, result.todo_bug) {
@@ -209,7 +214,7 @@ pub(super) fn audit_decision(
 
         // Re-using the `track_stub!()` internals to track the denial, and determine whether
         // too many denial audit logs have already been emit for this case.
-        if !should_audit(source_sid, target_sid, permission.class(), todo_bug) {
+        if !should_audit(source_sid, target_sid, permissions.class(), todo_bug) {
             return;
         }
 
@@ -229,8 +234,9 @@ pub(super) fn audit_decision(
     audit_logger.audit_log(
         AUDIT_AVC as u16,
         || {
-            let tclass = permission.class().name();
-            let permission_name = permission.name();
+            let tclass = permissions.class().name();
+            let permission_names =
+                itertools::join(permissions.iter().map(|permission| permission.name()), " ");
 
             // The source and target SIDs are by definition allocated to Security Contexts, so there is no
             // need to handle `sid_to_security_context()` failure.
@@ -243,10 +249,11 @@ pub(super) fn audit_decision(
             // Gather details about the calling task.
             let pid = current_task.get_pid();
             let command = current_task.command();
+            let command = hex_escape(command.comm_name());
 
             let is_permissive = result.permissive as u8;
 
-            format!("avc: {decision} {{ {permission_name} }} for pid={pid} comm=\"{command}\"{audit_data} scontext={scontext} tcontext={tcontext} tclass={tclass} permissive={is_permissive}")
+            format!("avc: {decision} {{ {permission_names} }} for pid={pid} comm={command}{audit_data} scontext={scontext} tcontext={tcontext} tclass={tclass} permissive={is_permissive}")
         }
     );
 }
@@ -275,7 +282,7 @@ impl Display for Auditable<'_> {
                 write!(f, " dev={}", hex_escape(&fs.options.source))
             }
             Auditable::FsNode(node) => {
-                write!(f, " ino={}", node.ino)
+                write!(f, " ino={} dev={}", node.ino, hex_escape(&node.fs().options.source))
             }
             Auditable::IoctlCommand(ioctl) => {
                 write!(f, " ioctlcmd={:#x}", ioctl)
@@ -296,11 +303,11 @@ impl Display for Auditable<'_> {
                 write!(f, " path={}", hex_escape(&path))
             }
             Auditable::SockOptArguments(level, optname) => {
-                write!(f, " level={}, optname={}", level, optname)
+                write!(f, " level={} optname={}", level, optname)
             }
             Auditable::None => Ok(()),
             Auditable::Task(task) => {
-                write!(f, " pid={}, comm={}", task.get_pid(), task.command())
+                write!(f, " pid={} comm={}", task.get_pid(), hex_escape(task.command().comm_name()))
             }
         }
     }
@@ -312,13 +319,13 @@ struct EscapedString<'a> {
 
 impl<'a> Display for EscapedString<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), Error> {
-        // SELinux escapes strings containing spaces or control characters, to prevent userspace
-        // being able to construct names that confuse audit-log parsing tooling.
+        // SELinux escapes strings containing spaces, quotes, or control characters, to prevent
+        // userspace being able to construct names that confuse audit-log parsing tooling.
         // Additionally enforcing that strings are valid UTF-8 encoded allows non-UTF-8 strings to
         // be expressed losslessy (via hex escaping) rather than being formatted lossily by `bstr`.
         let maybe_utf8 = str::from_utf8(self.value).ok();
         if let Some(utf8) = maybe_utf8 {
-            if utf8.find(|c| c <= ' ').is_none() {
+            if utf8.find(|c| c <= ' ' || c == '"' || c == '\x7f').is_none() {
                 return write!(f, "\"{}\"", BStr::new(self.value));
             }
         }
@@ -328,4 +335,25 @@ impl<'a> Display for EscapedString<'a> {
 
 fn hex_escape<'a>(value: &'a [u8]) -> EscapedString<'a> {
     EscapedString { value }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hex_escape;
+
+    #[::fuchsia::test]
+    fn hex_escape_printable_ascii() {
+        assert_eq!(hex_escape(b"normal_name-1.0").to_string(), "\"normal_name-1.0\"");
+        assert_eq!(hex_escape(b"").to_string(), "\"\"");
+    }
+
+    #[::fuchsia::test]
+    fn hex_escape_spaces_quotes_and_control_chars() {
+        assert_eq!(hex_escape(b"has space").to_string(), "686173207370616365");
+        assert_eq!(hex_escape(b"has\"quote").to_string(), "6861732271756F7465");
+        assert_eq!(hex_escape(b"has\nnewline").to_string(), "6861730A6E65776C696E65");
+        assert_eq!(hex_escape(b"has\x01ctrl").to_string(), "686173016374726C");
+        assert_eq!(hex_escape(b"has\x7fdel").to_string(), "6861737F64656C");
+        assert_eq!(hex_escape(b"invalid\xffutf8").to_string(), "696E76616C6964FF75746638");
+    }
 }

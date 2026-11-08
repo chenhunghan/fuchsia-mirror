@@ -14,10 +14,16 @@ filegroup(
         "__init__.py",
         "visibility_utils.py",
         # LINT.IfChange(all_check_files)
+        "bzl_require_load_visibility.py",
+        "fuchsia_wrappers.py",
+        "host_constraints.py",
         "load_visibility.py",
         "package_default_visibility.py",
+        "repository_paths.py",
         "root_package_labels.py",
         "target_visibility.py",
+        "vendor_paths.py",
+        "visibility_for_public_by_default_types.py",
         # LINT.ThenChange(//scripts/shac/bazel_lint/checks/__init__.py:all_checks)
     ],
     visibility = [

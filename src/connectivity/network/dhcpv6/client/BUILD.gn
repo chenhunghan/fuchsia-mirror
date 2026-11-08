@@ -77,10 +77,10 @@ fuchsia_test_with_expectations_package("dhcpv6-client-test-with-err-logs") {
     }
   }
   test_components = [ ":dhcpv6-client-test" ]
-  deps = [
+  subpackages = [
     # The DHCPv6 client creates sockets so it depends on an implementation of
     # `fuchsia.posix.socket.Provider`.
-    "//src/connectivity/network/netstack3:component-debug",
+    "//src/connectivity/network/netstack3:package-debug",
   ]
 }
 
@@ -88,10 +88,10 @@ fuchsia_test_with_expectations_package("dhcpv6-client-test-no-err-logs") {
   expectations = "expects/dhcpv6-client-test-expectations.json5"
   treatment_of_cases_with_error_logs = "SKIP_CASES_WITH_ERROR_LOGS"
   test_components = [ ":dhcpv6-client-test" ]
-  deps = [
+  subpackages = [
     # The DHCPv6 client creates sockets so it depends on an implementation of
     # `fuchsia.posix.socket.Provider`.
-    "//src/connectivity/network/netstack3:component-debug",
+    "//src/connectivity/network/netstack3:package-debug",
   ]
 }
 

@@ -3,20 +3,19 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import os
 import struct
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(__file__))
-from bazel_action_utils import BazelTargetInfosMap
-from bazel_ninja_delayed_actions import (
+from build.api import debug_symbols
+from build.bazel.scripts.bazel_action_utils import BazelTargetInfosMap
+from build.bazel.scripts.bazel_ninja_delayed_actions import (
     TargetWithPlatform,
     compute_sources_by_owner,
     read_extra_bazel_targets,
     should_update_stamp,
+    validate_export_test_packages_owners,
     validate_extra_bazel_targets,
 )
 
@@ -174,6 +173,37 @@ class ValidateExtraBazelTargetsTest(unittest.TestCase):
             },
             _target_infos(("//a:stamp", _HOST), ("//b:stamp", _FUCHSIA)),
         )
+
+
+class ValidateExportTestPackagesOwnersTest(unittest.TestCase):
+    def _infos(self, *exporters: str) -> BazelTargetInfosMap:
+        return BazelTargetInfosMap(
+            [
+                {
+                    "bazel_target": target,
+                    "bazel_platform_label": _FUCHSIA,
+                    "bazel_platform_config": "fuchsia",
+                    "ninja_depfile": f"gen/{target}.d",
+                    "gn_targets_manifest": f"gen/{target}.manifest",
+                    "stamp_path": f"obj/{target}.stamp",
+                    "update_rust_project": False,
+                    "export_test_packages": True,
+                    "type": "file",
+                    "bazel_file": f"bazel-out/{target}",
+                    "ninja_file": f"obj/{target}",
+                }
+                for target in exporters
+            ]
+        )
+
+    def test_one_owner(self) -> None:
+        validate_export_test_packages_owners(self._infos("//a:stamp"))
+
+    def test_two_owners(self) -> None:
+        with self.assertRaisesRegex(ValueError, "//a:stamp, //b:stamp"):
+            validate_export_test_packages_owners(
+                self._infos("//a:stamp", "//b:stamp")
+            )
 
 
 class ComputeSourcesByOwnerTest(unittest.TestCase):
@@ -373,8 +403,9 @@ class MergeDebugSymbolManifestsTest(unittest.TestCase):
                 build_dir / "execroot/bazel-out/x64/bin/bar.debug": "33334444",
             }
 
-            with mock.patch(
-                "debug_symbols.extract_gnu_build_id",
+            with mock.patch.object(
+                debug_symbols,
+                "extract_gnu_build_id",
                 side_effect=lambda p: build_ids[Path(p)],
             ):
                 (

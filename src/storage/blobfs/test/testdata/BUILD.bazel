@@ -1,0 +1,43 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "@fuchsia_rules_common//packages:resources.bzl",
+    "fuchsia_package_resource_group",
+    "resource",
+)
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+# test_binary.zstd results from building this target under core.x64-release and
+# compressing with zstd. For now, this is a manual process, which should be fine
+# since it shouldn't need to change very often.
+fx_cc_binary(
+    name = "test_binary",
+    testonly = True,
+    srcs = ["test_binary_main.cc"],
+    build_flags = ["//build/config/lto:no-fat-lto-objects-linking"],
+)
+
+# Also defined by hand in BUILD.gn, which GN uses.
+resource(
+    name = "test_binary_resource",
+    testonly = True,
+    src = "test_binary.zstd",
+    dest = "data/test_binary.zstd",
+    visibility = ["//src/storage/blobfs:__subpackages__"],
+)
+
+fuchsia_package_resource_group(
+    name = "blobfs_images",
+    testonly = True,
+    srcs = [
+        "blobfs.8.4.img.zstd",
+        "blobfs.9.4.img.zstd",
+    ],
+    basename_only = True,
+    dest = "data",
+    visibility = ["//src/storage/blobfs:__subpackages__"],
+)

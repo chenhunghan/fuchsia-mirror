@@ -164,9 +164,7 @@ type ExtendedCapabilityId = flexible enum : uint16 {
     SYSTEM_FIRMWARE_INTERMEDIARY = 0x2c;
 };
 
-/// Used with ||SetInterruptMode| to configure an interrupt mode for the device.
-/// Devices configured to use the LEGACY Irq mode must ack their interrupt after
-/// servicing by calling |AckInterrupt|.
+/// Used with |SetInterruptMode| to configure an interrupt mode for the device.
 type InterruptMode = strict enum : uint8 {
     DISABLED = 0;
     /// Legacy interrupt mode.
@@ -226,6 +224,9 @@ type Bar = resource struct {
     /// The BAR id, [0-5).
     bar_id uint32;
     size uint64;
+    /// The bus-assigned PCI base address.
+    /// For an I/O BAR, this is the same port address as |IoBar.address|.
+    address uint64;
     result BarResult;
 };
 
@@ -285,14 +286,6 @@ closed protocol Device {
     /// expected amount of time and is presumed to no longer be operating
     /// properly.
     strict ResetDevice() -> () error zx.Status;
-
-    /// Alerts the bus driver to deassert the raised legacy interrupt so that it
-    /// may be waited on again. Only used if |SetInterruptMode| was called with
-    /// |PCI_INTERRUPT_MODE_LEGACY|.
-    ///
-    /// Errors:
-    /// |ZX_ERR_BAD_STATE|: device is not configured to use the Legacy interrupt mode.
-    strict AckInterrupt() -> () error zx.Status;
 
     /// Maps a device's interrupt to a zx:interrupt. The device's interrupt mode
     /// must already be configured with |SetInterruptMode|, and |which_irq| must

@@ -12,8 +12,8 @@ socket over a differnt address space of ports.
 
 ## Building
 
-To add this component to your build, append
-`--with src/paravirtualization/vsock-loopback`
+To add this component's tests to your build, append
+`--with //src/paravirtualization:tests`
 to the `fx set` invocation.
 
 ## Running
@@ -34,10 +34,10 @@ $ ffx component start vsock-loopback
 
 ## Testing
 
-Unit tests for vsock-loopback are available in the `vsock-loopback-tests`
+Unit tests for vsock-loopback are available in the `vsock-loopback-unittests`
 package.
 
 ```
-$ fx test vsock-loopback-tests
+$ fx test vsock-loopback-unittests
 ```
 

@@ -18,6 +18,7 @@
 #include <vector>
 
 #include <gtest/gtest.h>
+#include <trace-reader/records.h>
 
 #include "src/lib/testing/loop_fixture/test_loop_fixture.h"
 #include "src/performance/trace_manager/tests/fake_provider.h"
@@ -180,6 +181,18 @@ class TraceManagerTest : public gtest::TestLoopFixture,
   }
 
   void DropSocket() { destination_.reset(); }
+  void DisconnectAllProviders() {
+    for (auto& binding : fake_provider_bindings_) {
+      std::visit([](auto& p) { p->Disconnect(); }, binding);
+    }
+  }
+  const zx::socket& destination() const { return destination_; }
+
+  // Reads and decodes all records currently buffered on the consumer end of the trace socket.
+  std::vector<trace::Record> ReadRecordsFromSocket();
+
+  // Returns true if the consumer end of the trace socket has no unread data.
+  bool IsSocketEmpty() const;
 
  private:
   // For communication between |BeginStart(),FinishStart()|.

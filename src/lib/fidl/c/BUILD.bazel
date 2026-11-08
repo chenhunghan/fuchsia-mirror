@@ -1,0 +1,33 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load("//build/bazel/rules/testing:fx_unittest_component.bzl", "fx_unittest_component")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [],  # Include all tests in the package.
+    visibility = ["//src/lib:__pkg__"],
+)
+
+fx_unittest_component(
+    name = "coding_tables_tests",
+    # Dropped deprecated_legacy_test_execution = true from GN.
+    binary = "//src/lib/fidl/c/coding_tables_tests:bin",
+)
+
+fx_package(
+    name = "fidl_c_tests_pkg",
+    package_name = "fidl_c_tests",
+    testonly = True,
+    test_components = [":coding_tables_tests"],
+)
+
+fx_test(
+    name = "fidl_c_tests",
+    package = ":fidl_c_tests_pkg",
+)

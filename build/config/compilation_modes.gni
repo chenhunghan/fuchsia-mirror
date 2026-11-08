@@ -16,10 +16,10 @@ declare_args() {
   #                 runtime performance.
   #  * `release`: all the optimizations, used for product releases.
   #  * `sanitizer`: for sanitizer-instrumented builds.
-  # LINT.IfChange
+  # LINT.IfChange(compilation_mode)
   compilation_mode = "balanced"
 
-  # LINT.ThenChange(//build/bazel/BUILD.gn)
+  # LINT.ThenChange(//build/bazel/BUILD.gn:compilation_mode)
 
   # Overridden settings for the compilation mode.  This is a set of override
   # values for variables whose default values are set by the chosen compilation
@@ -160,6 +160,7 @@ _optimize_valid = [
 #   //build/bazel/config/bazel_args.gni:valid_optimize_values,
 #   //build/bazel/config/select/optimize/BUILD.bazel:valid_optimize_values,
 #   //build/bazel/config/variables/BUILD.bazel:valid_optimize_values,
+#   //build/config/lto/BUILD.bazel:valid_optimize_values,
 # )
 
 foreach(_optimize_arg,

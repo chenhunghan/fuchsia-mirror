@@ -190,7 +190,7 @@ class PortableUITest : public LoggingEventLoop, public ::testing::Test {
   fidl::SyncClient<fuchsia_ui_test_input::TouchScreen> fake_touchscreen_;
   fidl::SyncClient<fuchsia_ui_test_input::Mouse> fake_mouse_;
   fidl::SyncClient<fuchsia_ui_test_input::Keyboard> fake_keyboard_;
-  fidl::SyncClient<fuchsia_ui_test_scene::Controller> scene_provider_;
+  fidl::Client<fuchsia_ui_test_scene::Controller> scene_provider_;
   fidl::Client<fuchsia_ui_observation_geometry::ViewTreeWatcher> view_tree_watcher_;
   fidl::SyncClient<fuchsia_ui_composition::Screenshot> screenshotter_;
 

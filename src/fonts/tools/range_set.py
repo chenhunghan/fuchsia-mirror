@@ -70,7 +70,7 @@ class RangeSet:
         return ",".join(segments)
 
     @classmethod
-    def from_offset_string(cls, offsets: str) -> "RangeSet":
+    def from_offset_string(cls, offsets: str) -> RangeSet:
         """Construct a RangeSet from an offset string.
 
         See `to_offset_string` for a description of the format.

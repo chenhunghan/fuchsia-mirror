@@ -11,49 +11,37 @@
 //! `async` method here releases it before awaiting, so no caller can block the dispatcher
 //! thread on it.
 
-use crate::UfsError;
+use crate::constants::{
+    AUTO_HIBERNATE_MAX_TIMER_SCALE, AUTO_HIBERNATE_MAX_TIMER_VALUE, HOST_CONTROLLER_TIMEOUT,
+    LINK_STARTUP_ATTEMPTS, LINK_STARTUP_RETRY_DELAY, PA_PWRMODE, UIC_PHY_ADAPTER_LAYER_LINE_RESET,
+};
 use crate::registers::{
     AutoHibernateIdleTimerReg, CapabilityReg, HostControllerEnableReg, HostControllerStatusReg,
-    HostUicErrorCodeDataLinkLayerReg, HostUicErrorCodeNetworkLayerReg,
-    HostUicErrorCodePhyAdapterLayerReg, HostUicErrorCodeReg, HostUicErrorCodeTransportLayerReg,
-    InterruptEnableReg, InterruptStatusReg, PowerModeStatus, UtmrListDoorBellReg,
-    UtrListDoorBellReg,
+    HostUicErrorCodeDataLinkLayerReg, HostUicErrorCodeDmeReg, HostUicErrorCodeNetworkLayerReg,
+    HostUicErrorCodePhyAdapterLayerReg, HostUicErrorCodeTransportLayerReg, InterruptEnableReg,
+    InterruptStatusReg, PowerModeStatus, UtrListDoorBellReg, VersionReg,
 };
-use crate::uic::{
-    PA_PWRMODE, UicCommand, UicCommandOpcode, check_power_mode_status, clear_interrupt_status,
-    issue_uic_command, poll_uic_command_completion, poll_until, uic_command_ready,
-};
+use crate::uic::{UicCommand, UicCommandOpcode};
+use crate::{UfsError, uic};
 use fuchsia_sync::Mutex;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use mmio::{Mmio, ReadableRegister, Register, WritableRegister};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-
-/// Default timeout for host controller operations.
-pub const HOST_CONTROLLER_TIMEOUT: zx::MonotonicDuration = zx::MonotonicDuration::from_seconds(10);
-/// Number of `DME_LINKSTARTUP` attempts before giving up.
-pub const LINK_STARTUP_ATTEMPTS: u32 = 3;
-/// Delay between `DME_LINKSTARTUP` attempts.
-pub const LINK_STARTUP_RETRY_DELAY: zx::MonotonicDuration = zx::MonotonicDuration::from_millis(10);
-/// Largest `AHIT` timer value (10 bits).
-const AUTO_HIBERNATE_MAX_TIMER_VALUE: u32 = 0x3FF;
-/// Largest `AHIT` timer scale (100 ms units).
-const AUTO_HIBERNATE_MAX_TIMER_SCALE: u32 = 5;
-/// `UECPA` error code indicating a PHY Adapter Layer line reset (`UICPowerModeChangeRequest`).
-/// Matches C++ `Ufs::HandleErrorInterrupt` (`b/572019773`): line resets are non-fatal, whereas
-/// any other PA error code requests link recovery.
-const UIC_PHY_ADAPTER_LAYER_LINE_RESET: u32 = 0x10;
 
 /// Register block and UIC ownership state, guarded by [`UfsController::state`].
 struct ControllerState<M: Mmio> {
     mmio: M,
     /// Set while a UIC command owns the UIC registers.
     uic_busy: bool,
-    /// Number of active [`AutoHibernateHoldGuard`]s temporarily holding Auto-Hibernate disabled
-    /// across multi-DME sequences (`b/572020288`).
+    /// Number of active [`AutoHibernateHoldGuard`]s holding Auto-Hibernate disabled across
+    /// multi-DME sequences.
     ah8_hold_count: u32,
-    /// Configured `AHIT` register value (`0` when Auto-Hibernate is disabled). Temporarily
-    /// cleared on hardware while `uic_busy` is true or `ah8_hold_count > 0` (`b/572020288`).
+    /// Configured `AHIT` register value (`0` when Auto-Hibernate is disabled). Cleared on hardware
+    /// while `uic_busy` is true or `ah8_hold_count > 0`.
     ah8_timer_raw: u32,
+    /// Set once `configure_auto_hibernate` has logged the initial `AHIT` timer at `INFO` level so
+    /// subsequent runtime `Sleep`/wake cycles log at `DEBUG` instead of waking `archivist`/`fxfs`.
+    ah8_logged: bool,
 }
 
 impl<M: Mmio> ControllerState<M> {
@@ -85,7 +73,8 @@ impl<M: Mmio> ControllerState<M> {
         enable.write(&mut self.mmio);
     }
 
-    /// Disables Auto-Hibernate on hardware (`AHIT = 0`, `IE.UHESE = 0`, `IE.UHXSE = 0`).
+    /// Disables Auto-Hibernate on hardware (`AHIT = 0`, `IE.UHESE = 0`, `IE.UHXSE = 0`,
+    /// b/572020288).
     fn disable_ah8_on_hw(&mut self) {
         self.set_ah8_interrupts_enabled(false);
         AutoHibernateIdleTimerReg::from_raw(0).write(&mut self.mmio);
@@ -100,7 +89,7 @@ impl<M: Mmio> ControllerState<M> {
         }
     }
 
-    /// Returns `Some(())` once `HCE` reads back as `enable`; for use with [`poll_until`].
+    /// Returns `Some(())` once `HCE` reads back as `enable`; for use with [`uic::poll_until`].
     fn host_controller_enable_is(&self, enable: bool) -> Option<()> {
         (HostControllerEnableReg::read(&self.mmio).host_controller_enable() == enable).then_some(())
     }
@@ -112,7 +101,7 @@ impl<M: Mmio> ControllerState<M> {
         let dl = HostUicErrorCodeDataLinkLayerReg::read(&self.mmio);
         let n = HostUicErrorCodeNetworkLayerReg::read(&self.mmio);
         let t = HostUicErrorCodeTransportLayerReg::read(&self.mmio);
-        let dme = HostUicErrorCodeReg::read(&self.mmio);
+        let dme = HostUicErrorCodeDmeReg::read(&self.mmio);
         warn!(uecpa = pa.0, uecdl = dl.0, uecn = n.0, uect = t.0, uecdme = dme.0; "UFS UIC error");
         (pa.uic_phy_adapter_layer_error()
             && pa.uic_phy_adapter_layer_error_code() != UIC_PHY_ADAPTER_LAYER_LINE_RESET)
@@ -127,14 +116,12 @@ impl<M: Mmio> ControllerState<M> {
         let hcs = HostControllerStatusReg::read(&self.mmio);
         let ahit = AutoHibernateIdleTimerReg::read(&self.mmio);
         let utrldbr = UtrListDoorBellReg::read(&self.mmio);
-        let utmrldbr = UtmrListDoorBellReg::read(&self.mmio);
         error!(
             is = status.0,
             hcs = hcs.0,
             upmcrs = hcs.uic_power_mode_change_request_status(),
             ahit = ahit.0,
-            utrldbr = utrldbr.0,
-            utmrldbr = utmrldbr.0;
+            utrldbr = utrldbr.0;
             "UFS controller state dump"
         );
     }
@@ -145,6 +132,22 @@ pub struct UfsController<M: Mmio> {
     state: Mutex<ControllerState<M>>,
     recovery_needed: AtomicBool,
     auto_hibern8_error_count: AtomicU64,
+    #[cfg(test)]
+    host_controller_timeout_ns: AtomicU64,
+}
+
+impl<M: Mmio> std::fmt::Debug for UfsController<M> {
+    /// Reports only the lock-free fields; `state` is not read so `fmt` never blocks on the
+    /// register lock.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UfsController")
+            .field("recovery_needed", &self.recovery_needed.load(Ordering::Relaxed))
+            .field(
+                "auto_hibern8_error_count",
+                &self.auto_hibern8_error_count.load(Ordering::Relaxed),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 impl<M: Mmio> UfsController<M> {
@@ -156,25 +159,67 @@ impl<M: Mmio> UfsController<M> {
                 uic_busy: false,
                 ah8_hold_count: 0,
                 ah8_timer_raw: 0,
+                ah8_logged: false,
             }),
             recovery_needed: AtomicBool::new(false),
             auto_hibern8_error_count: AtomicU64::new(0),
+            #[cfg(test)]
+            host_controller_timeout_ns: AtomicU64::new(0),
         }
     }
 
-    /// Marks the controller and link as needing full recovery (`b/572019773`).
+    /// Records the static `version` and `capabilities` child nodes of `ufs_node` from `VER` and
+    /// `CAP`.
+    pub fn record_inspect(&self, ufs_node: &fuchsia_inspect::Node) {
+        let (version, cap) = {
+            let state = self.state.lock();
+            (VersionReg::read(&state.mmio), CapabilityReg::read(&state.mmio))
+        };
+        ufs_node.record_child("version", |node| {
+            node.record_uint("major_version_number", u64::from(version.major_version_number()));
+            node.record_uint("minor_version_number", u64::from(version.minor_version_number()));
+            node.record_uint("version_suffix", u64::from(version.version_suffix()));
+        });
+        ufs_node.record_child("capabilities", |node| {
+            node.record_bool("crypto_support", cap.crypto_support());
+            node.record_bool(
+                "uic_dme_test_mode_command_supported",
+                cap.uic_dme_test_mode_command_supported(),
+            );
+            node.record_bool(
+                "out_of_order_data_delivery_supported",
+                cap.out_of_order_data_delivery_supported(),
+            );
+            node.record_bool("64_bit_addressing_supported", cap.addressing_64_bit_supported());
+            node.record_bool("auto_hibernation_support", cap.auto_hibernation_support());
+            node.record_uint(
+                "number_of_utp_task_management_request_slots",
+                u64::from(cap.number_of_utp_task_management_request_slots()),
+            );
+            node.record_uint(
+                "number_of_outstanding_rtt_requests_supported",
+                u64::from(cap.number_of_outstanding_rtt_requests_supported()),
+            );
+            node.record_uint(
+                "number_of_utp_transfer_request_slots",
+                u64::from(cap.number_of_utp_transfer_request_slots()),
+            );
+        });
+    }
+
+    /// Marks the controller and link as needing full recovery (`https://fxbug.dev/572019773`).
     pub fn request_link_recovery(&self) {
-        self.recovery_needed.store(true, Ordering::Release);
+        self.recovery_needed.store(true, Ordering::SeqCst);
     }
 
     /// Returns whether link recovery has been requested.
     pub fn is_recovery_needed(&self) -> bool {
-        self.recovery_needed.load(Ordering::Acquire)
+        self.recovery_needed.load(Ordering::SeqCst)
     }
 
     /// Atomically takes and clears any pending link recovery request.
     pub fn take_recovery_needed(&self) -> bool {
-        self.recovery_needed.swap(false, Ordering::AcqRel)
+        self.recovery_needed.swap(false, Ordering::SeqCst)
     }
 
     /// Returns the cumulative count of autonomous Auto-Hibernate enter/exit errors observed.
@@ -223,7 +268,7 @@ impl<M: Mmio> UfsController<M> {
         if status.utp_transfer_request_completion_status() {
             clear.set_utp_transfer_request_completion_status(true);
         }
-        // Summary of `CQIS`, which the MCQ handler clears; writing it back matches Linux.
+        // Summary of `CQIS`, which the MCQ handler clears.
         if status.cq_event_status() {
             clear.set_cq_event_status(true);
         }
@@ -319,7 +364,7 @@ impl<M: Mmio> UfsController<M> {
         if timer_us == 0 {
             state.ah8_timer_raw = 0;
             state.disable_ah8_on_hw();
-            info!("UFS Auto-Hibernate (AH8) disabled");
+            debug!("UFS Auto-Hibernate (AH8) disabled");
             return;
         }
         // Scale n means units of 10^n us.
@@ -334,7 +379,12 @@ impl<M: Mmio> UfsController<M> {
         ahit.set_timer_value(value.min(AUTO_HIBERNATE_MAX_TIMER_VALUE));
         state.ah8_timer_raw = ahit.0;
         state.restore_ah8_on_hw();
-        info!(timer_us, scale, value; "UFS Auto-Hibernate (AH8) timer set");
+        if !state.ah8_logged {
+            state.ah8_logged = true;
+            info!(timer_us, scale, value; "UFS Auto-Hibernate (AH8) timer set");
+        } else {
+            debug!(timer_us, scale, value; "UFS Auto-Hibernate (AH8) timer set");
+        }
     }
 
     /// Returns whether autonomous Auto-Hibernate is currently active in hardware (`AHIT != 0` and
@@ -343,12 +393,10 @@ impl<M: Mmio> UfsController<M> {
         self.state.lock().is_ah8_enabled_on_hw()
     }
 
-    /// Temporarily holds autonomous Auto-Hibernate (`AHIT = 0`, `IE.UHESE = 0`, `IE.UHXSE = 0`)
-    /// disabled for the lifetime of the returned [`AutoHibernateHoldGuard`] and waits for any
-    /// in-flight UIC transition to finish (`HCS.UCRDY == 1`) before returning (`b/572020288`).
-    ///
-    /// Use this around multi-command UIC sequences such as gear changes so `AHIT` is not briefly
-    /// restored between back-to-back `DME_GET`/`DME_SET` commands.
+    /// Holds autonomous Auto-Hibernate (`AHIT = 0`, `IE.UHESE = 0`, `IE.UHXSE = 0`) disabled for
+    /// the lifetime of the returned [`AutoHibernateHoldGuard`] and waits for `HCS.UCRDY == 1`.
+    /// Used around multi-command UIC sequences such as gear changes so `AHIT` is not restored
+    /// between back-to-back `DME_GET`/`DME_SET` commands.
     pub async fn hold_auto_hibernate(
         &self,
         timeout: zx::MonotonicDuration,
@@ -363,12 +411,12 @@ impl<M: Mmio> UfsController<M> {
             }
         }
         let guard = AutoHibernateHoldGuard { controller: self };
-        poll_until(timeout, || {
+        uic::poll_until(timeout, || {
             let mut state = self.state.lock();
-            if state.uic_busy || !uic_command_ready(&state.mmio) {
+            if state.uic_busy || !uic::uic_command_ready(&state.mmio) {
                 return None;
             }
-            clear_interrupt_status(&mut state.mmio, |is| {
+            uic::clear_interrupt_status(&mut state.mmio, |is| {
                 is.set_uic_hibernate_enter_status(true);
                 is.set_uic_hibernate_exit_status(true);
             });
@@ -379,7 +427,8 @@ impl<M: Mmio> UfsController<M> {
     }
 
     /// Returns whether the device answered link startup (`HCS.DP`).
-    pub fn device_present(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn device_present(&self) -> bool {
         HostControllerStatusReg::read(&self.state.lock().mmio).device_present()
     }
 
@@ -389,10 +438,29 @@ impl<M: Mmio> UfsController<M> {
         self.state.lock().uic_busy
     }
 
+    /// Overrides [`HOST_CONTROLLER_TIMEOUT`] for `HCE` polling in unit tests.
+    #[cfg(test)]
+    pub(crate) fn set_host_controller_timeout_for_test(&self, timeout: zx::MonotonicDuration) {
+        self.host_controller_timeout_ns.store(timeout.into_nanos() as u64, Ordering::Relaxed);
+    }
+
+    fn host_controller_timeout(&self) -> zx::MonotonicDuration {
+        #[cfg(test)]
+        {
+            let ns = self.host_controller_timeout_ns.load(Ordering::Relaxed);
+            if ns != 0 {
+                return zx::MonotonicDuration::from_nanos(ns as i64);
+            }
+        }
+        HOST_CONTROLLER_TIMEOUT
+    }
+
     /// Waits for `HCE` to read back as `enable`.
     async fn wait_host_controller_enable(&self, enable: bool) -> Result<(), UfsError> {
-        poll_until(HOST_CONTROLLER_TIMEOUT, || self.state.lock().host_controller_enable_is(enable))
-            .await
+        uic::poll_until(self.host_controller_timeout(), || {
+            self.state.lock().host_controller_enable_is(enable)
+        })
+        .await
     }
 
     /// Disables interrupts and resets/enables the host controller (`HCE`).
@@ -403,7 +471,9 @@ impl<M: Mmio> UfsController<M> {
     pub async fn reset_and_enable(&self) -> Result<(), UfsError> {
         let was_enabled = {
             let mut state = self.state.lock();
+            self.recovery_needed.store(false, Ordering::SeqCst);
             state.ah8_timer_raw = 0;
+            state.ah8_logged = false;
             state.write_interrupts_disabled();
             let enabled = HostControllerEnableReg::read(&state.mmio).host_controller_enable();
             if enabled {
@@ -428,6 +498,7 @@ impl<M: Mmio> UfsController<M> {
         {
             let mut state = self.state.lock();
             state.ah8_timer_raw = 0;
+            state.ah8_logged = false;
             state.write_interrupts_disabled();
             state.write_host_controller_enable(false);
         }
@@ -440,17 +511,15 @@ impl<M: Mmio> UfsController<M> {
         &self,
         timeout: zx::MonotonicDuration,
     ) -> Result<(), UfsError> {
-        poll_until(timeout, || {
+        uic::poll_until(timeout, || {
             let state = self.state.lock();
-            uic_command_ready(&state.mmio).then_some(())
+            uic::uic_command_ready(&state.mmio).then_some(())
         })
         .await
     }
 
-    /// Waits until no other UIC command is in flight, claims the UIC registers while temporarily
-    /// holding Auto-Hibernate disabled (`AHIT = 0`, `UHESE = 0`, `UHXSE = 0`) so DME commands
-    /// cannot race with autonomous AH8 transitions (`b/572020288`), waits for `HCS.UCRDY`, runs
-    /// `before_issue`, issues `command`, and returns a [`UicBusyGuard`] held by the caller.
+    /// Claims the UIC registers with Auto-Hibernate held disabled (`AHIT = 0`, `UHESE = 0`,
+    /// `UHXSE = 0`), waits for `HCS.UCRDY`, runs `before_issue`, and issues `command`.
     async fn issue_uic_with_guard(
         &self,
         command: &UicCommand,
@@ -462,7 +531,7 @@ impl<M: Mmio> UfsController<M> {
         }
         let mut guard: Option<UicBusyGuard<'_, M>> = None;
         let mut before_issue = Some(before_issue);
-        poll_until(timeout, || {
+        uic::poll_until(timeout, || {
             let mut state = self.state.lock();
             if guard.is_none() {
                 if state.uic_busy {
@@ -475,13 +544,13 @@ impl<M: Mmio> UfsController<M> {
                 }
                 guard = Some(UicBusyGuard { controller: self });
             }
-            if !uic_command_ready(&state.mmio) {
+            if !uic::uic_command_ready(&state.mmio) {
                 return None;
             }
             if let Some(hook) = before_issue.take() {
                 hook(&mut state.mmio);
             }
-            issue_uic_command(&mut state.mmio, command);
+            uic::issue_uic_command(&mut state.mmio, command);
             Some(())
         })
         .await?;
@@ -494,13 +563,13 @@ impl<M: Mmio> UfsController<M> {
         opcode: UicCommandOpcode,
         timeout: zx::MonotonicDuration,
     ) -> Result<u32, UfsError> {
-        let result = poll_until(timeout, || {
-            self.with_mmio(|mmio| poll_uic_command_completion(mmio, opcode))
+        let result = uic::poll_until(timeout, || {
+            self.with_mmio(|mmio| uic::poll_uic_command_completion(mmio, opcode))
         })
         .await;
         if result.is_err() {
             self.with_mmio(|mmio| {
-                clear_interrupt_status(mmio, |is| is.set_uic_command_completion_status(true))
+                uic::clear_interrupt_status(mmio, |is| is.set_uic_command_completion_status(true))
             });
         }
         result?
@@ -530,7 +599,7 @@ impl<M: Mmio> UfsController<M> {
                 Ok(_) => {
                     let mut state = self.state.lock();
                     if HostControllerStatusReg::read(&state.mmio).device_present() {
-                        clear_interrupt_status(&mut state.mmio, |is| is.set_uic_error(true));
+                        uic::clear_interrupt_status(&mut state.mmio, |is| is.set_uic_error(true));
                         return Ok(());
                     }
                     drop(state);
@@ -612,25 +681,26 @@ impl<M: Mmio> UfsController<M> {
         let command = UicCommand::dme(UicCommandOpcode::DmeSet, PA_PWRMODE, 0, power_mode);
         let _busy = self
             .issue_uic_with_guard(&command, timeout, |mmio| {
-                clear_interrupt_status(mmio, |is| is.set_uic_power_mode_status(true));
+                uic::clear_interrupt_status(mmio, |is| is.set_uic_power_mode_status(true));
             })
             .await?;
         self.poll_uic_completion(command.opcode, timeout).await?;
-        poll_until(timeout, || {
+        uic::poll_until(timeout, || {
             let mut state = self.state.lock();
             if !InterruptStatusReg::read(&state.mmio).uic_power_mode_status() {
                 return None;
             }
-            let result = check_power_mode_status(&state.mmio, UicCommandOpcode::DmeSet);
-            clear_interrupt_status(&mut state.mmio, |is| is.set_uic_power_mode_status(true));
+            let result = uic::check_power_mode_status(&state.mmio, UicCommandOpcode::DmeSet);
+            uic::clear_interrupt_status(&mut state.mmio, |is| is.set_uic_power_mode_status(true));
             Some(result)
         })
         .await?
     }
 }
 
-/// Scope guard that inhibits Auto-Hibernate (`AHIT`). Used to prevent hibernate during
-/// multi-command UIC sequences such as gear changes.
+/// Scope guard that inhibits Auto-Hibernate (`AHIT`, b/572020288). Used to prevent hibernate
+/// during multi-command UIC sequences such as gear changes.
+#[must_use = "dropping the guard immediately re-enables Auto-Hibernate"]
 pub struct AutoHibernateHoldGuard<'a, M: Mmio> {
     controller: &'a UfsController<M>,
 }
@@ -644,6 +714,7 @@ impl<M: Mmio> Drop for AutoHibernateHoldGuard<'_, M> {
 }
 
 /// Releases the UIC registers when a UIC command finishes or is cancelled.
+#[must_use = "dropping the guard immediately releases the UIC registers"]
 struct UicBusyGuard<'a, M: Mmio> {
     controller: &'a UfsController<M>,
 }
@@ -659,11 +730,12 @@ impl<M: Mmio> Drop for UicBusyGuard<'_, M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::{PA_MAXRXHSGEAR, PA_TXGEAR};
     use crate::registers::{UicCommandArgument1Reg, UicCommandReg};
     use crate::testing::fake_ufs::{
-        FakeMmio, HCS_DEVICE_PRESENT, complete_uic_command, uic_hardware, uic_opcode, wait_until,
+        CAP_AUTO_HIBERNATE_SUPPORT, FakeMmio, HCS_DEVICE_PRESENT, complete_uic_command,
+        hcs_power_mode_status, uic_hardware, uic_opcode, wait_until,
     };
-    use crate::uic::{PA_MAXRXHSGEAR, PA_TXGEAR};
 
     #[fuchsia::test]
     async fn test_reset_enable_and_link_startup() {
@@ -750,7 +822,7 @@ mod tests {
         let vmo = zx::Vmo::create(1024).unwrap();
         let controller = UfsController::new(FakeMmio::new(&vmo, 1024));
         let mut regs = uic_hardware(&vmo, 0);
-        regs.store32(CapabilityReg::OFFSET, 1 << 23);
+        regs.store32(CapabilityReg::OFFSET, CAP_AUTO_HIBERNATE_SUPPORT);
 
         controller.enable_interrupts();
         let ie = controller.with_mmio(|mmio| InterruptEnableReg::read(mmio));
@@ -765,8 +837,8 @@ mod tests {
         assert!(ie.uic_hibernate_enter_status_enable());
         assert!(ie.uic_hibernate_exit_status_enable());
 
-        // While a DME command is in flight, AHIT is temporarily cleared to 0 and UHESE/UHXSE are
-        // disabled so autonomous AH8 cannot race with the UIC command (`b/572020288`).
+        // While a DME command is in flight, AHIT is cleared to 0 and UHESE/UHXSE are disabled so
+        // autonomous AH8 cannot race with the UIC command.
         let hardware = std::thread::spawn(move || {
             assert!(wait_until(|| uic_opcode(&regs) == UicCommandOpcode::DmeGet as u32));
             assert_eq!(AutoHibernateIdleTimerReg::read(&regs).0, 0);
@@ -801,7 +873,7 @@ mod tests {
         let vmo = zx::Vmo::create(1024).unwrap();
         let controller = UfsController::new(FakeMmio::new(&vmo, 1024));
         let mut regs = uic_hardware(&vmo, 0);
-        regs.store32(CapabilityReg::OFFSET, 1 << 23);
+        regs.store32(CapabilityReg::OFFSET, CAP_AUTO_HIBERNATE_SUPPORT);
 
         controller.enable_interrupts();
         controller.configure_auto_hibernate(2000);
@@ -855,14 +927,14 @@ mod tests {
         let vmo = zx::Vmo::create(1024).unwrap();
         let controller = UfsController::new(FakeMmio::new(&vmo, 1024));
         let mut regs = uic_hardware(&vmo, 0);
-        regs.store32(CapabilityReg::OFFSET, 1 << 23);
+        regs.store32(CapabilityReg::OFFSET, CAP_AUTO_HIBERNATE_SUPPORT);
         controller.enable_interrupts();
         controller.configure_auto_hibernate(2000);
 
         // Simulate an AH8 exit failure interrupt (IS.UHXS + UPMCRS = PWR_FATAL_ERROR).
         regs.store32(
             HostControllerStatusReg::OFFSET,
-            (PowerModeStatus::PowerFatalError as u32) << 8,
+            hcs_power_mode_status(PowerModeStatus::PowerFatalError),
         );
         let mut is = InterruptStatusReg::from_raw(0);
         is.set_uic_hibernate_exit_status(true);

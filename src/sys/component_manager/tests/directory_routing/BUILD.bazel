@@ -1,0 +1,79 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "directory_routing_bin",
+    srcs = ["src/main.rs"],
+    crate_name = "directory_routing",
+    crate_root = "src/main.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-fs",
+        "//src/sys/lib/cm_rust",
+        "//src/sys/lib/cm_types",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:rand",
+    ],
+)
+
+fx_packaged_binary(
+    name = "directory_routing_packaged_bin",
+    testonly = True,
+    binary = ":directory_routing_bin",
+    binary_name = "directory_routing",
+)
+
+fx_component_manifest(
+    name = "directory_routing-manifest",
+    testonly = True,
+    component_name = "directory_routing",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/lib/fuchsia-component-test:meta/nested_component_manager.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/directory_routing_test.cml",
+)
+
+fx_test_component(
+    name = "directory_routing",
+    compiled_manifest = ":directory_routing-manifest",
+    deps = [":directory_routing_packaged_bin"],
+)
+
+fx_package(
+    name = "directory_routing_test_package",
+    package_name = "directory_routing_test",
+    components = [
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+        "//src/sys/component_manager:component-manager-realm-builder-cmp",
+    ],
+    test_components = [":directory_routing"],
+)
+
+fx_test(
+    name = "directory_routing_test",
+    package = ":directory_routing_test_package",
+    visibility = ["//src/sys/component_manager:__pkg__"],
+)

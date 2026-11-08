@@ -14,14 +14,17 @@
                 "fuchsia.power.battery.BatteryManager",
             ],
         },
-    ],
-    config: {
+
         // Attribute permissions for the battery level characteristic.
         // Options: ["none", "enc", "auth"]
         // Defaults to "none".
-        security: {
+        {
+            config: "fuchsia.bluetooth.le.battery.Security",
+            key: "security",
             type: "string",
             max_size: 4,
+            availability: "transitional",
+            default: "none",
         },
-    },
+    ],
 }

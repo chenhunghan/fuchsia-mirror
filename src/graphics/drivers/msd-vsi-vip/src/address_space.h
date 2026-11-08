@@ -44,7 +44,7 @@ class AddressSpace : public magma::AddressSpace<GpuMapping> {
                     uint32_t guard_page_count) override;
   bool ClearLocked(uint64_t addr, magma::PlatformBusMapper::BusMapping* bus_mapping) override;
 
-  uint64_t Size() const override { return 1ull << 40; }
+  uint64_t Size() const override { return 1ull << kVirtualAddressBits; }
 
   uint64_t bus_addr() { return root_->bus_addr(); }
 
@@ -189,6 +189,15 @@ class AddressSpace : public magma::AddressSpace<GpuMapping> {
     std::vector<std::unique_ptr<PageTable>> page_tables_;
     std::vector<uint32_t> valid_counts_;
   };
+
+  static bool IsValidVirtualAddressRange(uint64_t addr, uint64_t page_count) {
+    const size_t page_shift = PageShift();
+    uint64_t end_page;
+    if (__builtin_add_overflow(addr >> page_shift, page_count, &end_page)) {
+      return false;
+    }
+    return end_page <= (1ull << (kVirtualAddressBits - page_shift));
+  }
 
   bool Init();
   bool ClearLocked(uint64_t addr, uint64_t page_count);

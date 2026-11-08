@@ -41,7 +41,7 @@ These drivers interact directly with `usb-bus` using `UsbHci` or `Usb` protocols
 *   **Media**: `usb-audio`, `usb_video`.
 *   **Serial**: `ftdi`, `usb-cdc-acm`.
 *   **Network**: `asix-88772b`, `asix-88179`, `rndis-host`.
-*   **Other Connectivity**: `qmi-usb-transport`, `bluetooth-hci-usb`.
+*   **Other Connectivity**: `bluetooth-hci-usb`.
 
 ### 2. Peripheral Stack (Related Modernization)
 These drivers use the peripheral equivalent protocols (e.g., `UsbFunction`) but

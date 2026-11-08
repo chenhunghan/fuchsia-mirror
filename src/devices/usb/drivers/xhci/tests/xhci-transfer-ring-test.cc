@@ -254,6 +254,34 @@ TEST_F(TransferRingHarness, Peek) {
   ASSERT_TRUE(result->RCS());
 }
 
+TEST_F(TransferRingHarness, PhysToVirtUnmappedAddressReturnsNullptr) {
+  auto ring = this->ring();
+  EXPECT_EQ(ring->PhysToVirt(0), nullptr);
+  EXPECT_EQ(ring->PhysToVirt(0xdeadbeefdeadbeefULL), nullptr);
+  EXPECT_EQ(ring->PhysToVirt(UINT64_MAX), nullptr);
+}
+
+TEST_F(TransferRingHarness, VirtToPhysUnmappedAddressReturnsZero) {
+  auto ring = this->ring();
+  TRB stack_trb{};
+  EXPECT_EQ(ring->VirtToPhys(nullptr), 0u);
+  EXPECT_EQ(ring->VirtToPhys(&stack_trb), 0u);
+}
+
+TEST_F(TransferRingHarness, CompleteTRBWithUnmappedPhysAddressFails) {
+  auto ring = this->ring();
+  Normal trb;
+  auto context = ring->AllocateContext();
+  ASSERT_OK(ring->AddTRB(trb, std::move(context)));
+
+  TRB* unmapped_trb = ring->PhysToVirt(0xdeadbeefdeadbeefULL);
+  ASSERT_EQ(unmapped_trb, nullptr);
+
+  std::unique_ptr<TRBContext> completed_context;
+  EXPECT_EQ(ring->CompleteTRB(unmapped_trb, &completed_context), ZX_ERR_IO);
+  EXPECT_NE(completed_context, nullptr);
+}
+
 TEST_F(TransferRingHarness, First) {
   ContiguousTRBInfo info;
   TRB a;
@@ -263,5 +291,83 @@ TEST_F(TransferRingHarness, First) {
   info.nop = cpp20::span(&b, 1);
   ASSERT_EQ(info.first().data(), &b);
 }
+
+namespace {
+
+TEST_F(TransferRingHarness, AllocateContiguousAcrossSegmentWrapPreservesLinkTrb) {
+  auto* ring = this->ring();
+  const size_t trbs_per_segment = zx_system_get_page_size() / sizeof(TRB);
+  // Reserve 1 Link TRB + 2 spare TRBs for AllocInternal growth, leaving 3 usable TRBs before
+  // AllocInternal inserts a Link TRB to a newly allocated segment.
+  for (size_t i = 0; i < trbs_per_segment - 6; ++i) {
+    TRB* trb = nullptr;
+    ASSERT_OK(ring->AllocateTRB(&trb, nullptr));
+  }
+
+  // Request 5 contiguous TRBs so the allocation pads the 3 remaining TRBs on segment 0 with NOPs,
+  // inserts/crosses the Link TRB, and allocates 5 contiguous TRBs on the next segment.
+  zx::result<ContiguousTRBInfo> result = ring->AllocateContiguous(5);
+  ASSERT_OK(result);
+  ASSERT_EQ(result->nop.size(), 3u);
+  ASSERT_EQ(result->trbs.size(), 5u);
+
+  for (TRB& nop_trb : result->nop) {
+    EXPECT_EQ(Control::FromTRB(&nop_trb).Type(), Control::Nop);
+  }
+  // Immediately after the NOP span on segment 0 is the Link TRB; it must remain intact.
+  TRB* segment_link_trb = result->nop.data() + result->nop.size();
+  EXPECT_EQ(Control::FromTRB(segment_link_trb).Type(), Control::Link);
+  EXPECT_NE(segment_link_trb->ptr, 0u);
+
+  // None of the contiguous payload TRBs on the new segment should be marked as NOP or Link.
+  for (size_t i = 0; i < result->trbs.size(); ++i) {
+    if (i > 0) {
+      EXPECT_EQ(&result->trbs[i], &result->trbs[i - 1] + 1);
+    }
+    EXPECT_EQ(Control::FromTRB(&result->trbs[i]).Type(), 0u);
+  }
+}
+
+TEST_F(TransferRingHarness, AllocateContiguousOverSegmentSizeLeavesRingUsable) {
+  auto* ring = this->ring();
+  const size_t trbs_per_segment = zx_system_get_page_size() / sizeof(TRB);
+  // Since the last TRB in every segment is a Link TRB, trbs_per_segment cannot fit in any single
+  // segment and must fail upfront without mutating ring state.
+  EXPECT_EQ(ring->AllocateContiguous(trbs_per_segment).error_value(), ZX_ERR_NO_MEMORY);
+  EXPECT_EQ(ring->AllocateContiguous(0).error_value(), ZX_ERR_INVALID_ARGS);
+
+  zx::result<ContiguousTRBInfo> valid = ring->AllocateContiguous(4);
+  ASSERT_OK(valid);
+  EXPECT_TRUE(valid->nop.empty());
+  EXPECT_EQ(valid->trbs.size(), 4u);
+}
+
+TEST_F(TransferRingHarness, NonCoherentSegmentGrowthMaintainsValidLinkChain) {
+  ASSERT_FALSE(driver_test().driver()->HasCoherentState());
+  auto* ring = this->ring();
+  const size_t trbs_per_segment = zx_system_get_page_size() / sizeof(TRB);
+
+  TransferRing::State start_state = ring->SaveState();
+  TRB* first = nullptr;
+  TRB* last = nullptr;
+  for (size_t i = 0; i < trbs_per_segment + 8; ++i) {
+    TRB* current = nullptr;
+    ASSERT_OK(ring->AllocateTRB(&current, nullptr));
+    if (!first) {
+      first = current;
+    }
+    bool pcs = current->status;
+    Control::FromTRB(current).set_Type(Control::Normal).set_Cycle(pcs).ToTrb(current);
+    current->status = 0;
+    last = current;
+  }
+  ASSERT_OK(ring->AssignContext(last, ring->AllocateContext(), first));
+  ring->CommitTransaction(start_state);
+
+  std::unique_ptr<TRBContext> completed;
+  ASSERT_OK(ring->CompleteTRB(last, &completed));
+}
+
+}  // namespace
 
 }  // namespace usb_xhci

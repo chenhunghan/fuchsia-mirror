@@ -8,13 +8,11 @@ load("//build/bazel/rules/idk:idk_cc_source_library.bzl", "idk_cc_source_library
 # This is primarily locations where libraries with `enable_hlcpp = True` are defined.
 # @bazel2gn:transformer=visibility
 hlcpp_bindings_libraries_visibility = [
-    "//build/sdk:__pkg__",
     "//examples/components/routing/fidl:__pkg__",
     "//examples/components/services/fidl:__pkg__",
     "//examples/diagnostics/inspect/codelab/fidl:__pkg__",
     "//examples/fidl/fuchsia.examples:__pkg__",
     "//examples/intl/wisdom/fidl:__pkg__",
-    "//sdk:__pkg__",
     "//sdk/ctf/tests/examples/fidl/fuchsia.examples/testing/fidl:__pkg__",
     "//sdk/ctf/tests/fidl/fuchsia.element/testing/fidl:__pkg__",
     "//sdk/ctf/tests/fidl/fuchsia.settings/testing/fidl:__pkg__",
@@ -51,7 +49,6 @@ hlcpp_bindings_libraries_visibility = [
     "//src/lib/intl/examples:__pkg__",
     "//src/lib/intl/intl_property_provider_impl:__pkg__",
     "//src/lib/intl/lookup/rust:__pkg__",
-    "//src/lib/ui/input-synthesis:__pkg__",
     "//src/power/fidl/testing:__pkg__",
     "//src/sys/component_manager/tests/structured_config/fidl:__pkg__",
     "//src/sys/fuzzing/fidl:__pkg__",
@@ -153,11 +150,6 @@ idk_cc_source_library(
     target_compatible_with = ["@platforms//os:fuchsia"],
     visibility = [
         "//src/tests/fidl/dynsuite/client_suite:__subpackages__",
-        # In Bazel, targets are always visible in the current directory. In GN,
-        # this must be specified. Also, in Bazel, the IDK paths are automatically
-        # added to the atom sub-target's visibility, but they are not in GN.
-        # Overwrite a superfluous private visibility with the paths necessary in GN.
-        "//visibility:private",  # @bazel2gn:raw_overwrite:":*", "//build/sdk:*"
     ],
     deps = [
         ":hlcpp_base",

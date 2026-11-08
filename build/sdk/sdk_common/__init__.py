@@ -41,7 +41,7 @@ class MinimalAtom(object):
         category: str,
         type: str,
         area: str | None = None,
-    ) -> "MinimalAtom":
+    ) -> MinimalAtom:
         json_data = {
             "id": id,
             "gn-label": label,
@@ -196,7 +196,7 @@ class Validator:
         self._valid_areas = valid_areas
 
     @classmethod
-    def from_areas_file_path(cls, areas_file: pathlib.Path) -> "Validator":
+    def from_areas_file_path(cls, areas_file: pathlib.Path) -> Validator:
         """Build a Validator given a path to
         docs/contribute/governance/areas/_areas.yaml."""
         import yaml

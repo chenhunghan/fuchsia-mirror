@@ -459,8 +459,6 @@ enum StrictCheckErrorEnum {
     MustHaveTarget,
     #[error("ffx strict requires that the Target be specified by address or have the prefix \"id:<serial-number>\", \"usb:cid:\", \"vsock:cid:\", or \"uart:\". Actually passed: \"{}\"", .0)]
     TargetSpecificationInvalid(String),
-    #[error("ffx strict requires that the Target be a valid IP address. Invalid scope ID: \"{}\"", .0)]
-    TargetAddressMustHaveValidScopeId(String),
     #[error("When running in strict mode, config flags must be list of Key Value Pairs or valid JSON. Passed: \"{}\"", .0)]
     ConfigArgMustBeJsonOrKeyValuePair(String),
     #[error("Specifying strict mode and isolate dir are mutually exclusive. Specify one or the other, not both. Isolate Dir Passed: {}", .0.display())]
@@ -534,10 +532,10 @@ fn validate_strict_target(target: Option<&str>, errors: &mut Vec<StrictCheckErro
     match target {
         None => errors.push(StrictCheckErrorEnum::MustHaveTarget),
         Some(t) => match t.parse::<addr::TargetAddr>() {
-            Ok(_) => {}
-            Err(addr::TargetAddrParseError::Scope { scope, .. }) => {
-                errors.push(StrictCheckErrorEnum::TargetAddressMustHaveValidScopeId(scope));
-            }
+            // A scope error means the address is well-formed but its network
+            // interface doesn't currently exist on the host. Target resolution
+            // reports that at runtime.
+            Ok(_) | Err(addr::TargetAddrParseError::Scope { .. }) => {}
             Err(_) => {
                 if !VALID_STRICT_PREFIXES.iter().any(|&p| t.starts_with(p) && t != p) {
                     errors.push(StrictCheckErrorEnum::TargetSpecificationInvalid(t.to_string()));
@@ -1004,6 +1002,22 @@ mod test {
                     "echo",
                 ],
                 name: "log.enabled=false does not require log destination".into(),
+                expected_errors: vec![],
+            },
+            TestCase {
+                inputs: vec![
+                    "ffx",
+                    "--strict",
+                    "--log-output",
+                    "/tmp/out.log",
+                    "--target",
+                    "[fe80::1%nonexistent_scope]:8022",
+                    "--machine",
+                    "json",
+                    "target",
+                    "echo",
+                ],
+                name: "Unknown scope passes strict validation".into(),
                 expected_errors: vec![],
             },
         ];

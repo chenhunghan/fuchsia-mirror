@@ -54,6 +54,9 @@ pub(super) async fn update_configuration(
     control: &fnet_interfaces_ext::admin::Control,
     lookup_admin: &fnet_name::LookupAdminProxy,
 ) {
+    // `netcfg` only reads `address`, `dns_servers`, and `routers`; unrequested
+    // options (such as Domain Name and Domain Search) are only unit-tested in
+    // `dhcp_client_core`. Add integration tests if `netcfg` reads more options.
     let fnet_dhcp_ext::Configuration {
         address,
         dns_servers: new_dns_servers,

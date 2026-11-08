@@ -304,7 +304,8 @@ fn put_handles_from_user<'a, T: FromBytes>(
     ) -> Result<HandleOwner, Status>,
 ) -> Result<(&'a mut [T], Result<(), Status>), Status> {
     let num_handles = msg.num_handles();
-    debug_assert!(num_handles <= ZX_CHANNEL_MAX_MSG_HANDLES as usize); // This must be checked before calling.
+    // This must be checked before calling.
+    debug_assert!(num_handles <= ZX_CHANNEL_MAX_MSG_HANDLES as usize);
     // `msg` is created with `owns_handles = false`, so if copying from userspace fails before any
     // handles are written to `handles_ptr`, `MessagePacket::drop` will not inspect `handles_ptr`.
     let items = user_in.copy_slice_from_user(&mut buf[..num_handles])?;
@@ -370,7 +371,8 @@ pub fn remove_user_handles(
         // We process `num_handles` in chunks of `ZX_CHANNEL_MAX_MSG_HANDLES` because we don't have
         // a limit on how large `num_handles` can be.
         let chunk_size = cmp::min(num_handles - offset, ZX_CHANNEL_MAX_MSG_HANDLES as usize);
-        // A copy failure wins over any earlier remove failure, matching the C++ `break`.
+        // Stop immediately and return the copy error if reading from userspace fails, overriding
+        // any earlier handle removal error.
         let chunk =
             user_handles.element_offset(offset).copy_slice_from_user(&mut handles[..chunk_size])?;
 
@@ -477,7 +479,7 @@ impl WriteHandles for UserInOutPtr<zx_handle_disposition_t> {
 #[unittest::suite(name = "user_handles_rust")]
 mod tests {
     use super::remove_user_handles;
-    use crate::object::{EventPairDispatcher, Handle, JobDispatcher, ProcessDispatcher};
+    use crate::object::{EventPairDispatcher, Handle, ProcessDispatcher, get_root_job_dispatcher};
     use crate::user_copy::UserInPtr;
     use crate::user_memory::UserMemory;
     use core::ptr::with_exposed_provenance;
@@ -489,7 +491,7 @@ mod tests {
     #[test]
     fn test_remove_single_user_handle() {
         let (proc_handle, _proc_rights, _vmar, _vmar_rights) =
-            ProcessDispatcher::create(JobDispatcher::get_root_job(), b"test-user-handles", 0)
+            ProcessDispatcher::create(get_root_job_dispatcher().clone(), b"test-user-handles", 0)
                 .expect("failed to create process");
         let process = proc_handle.dispatcher();
 
@@ -517,7 +519,7 @@ mod tests {
     #[test]
     fn test_remove_zero_user_handles() {
         let (proc_handle, _proc_rights, _vmar, _vmar_rights) =
-            ProcessDispatcher::create(JobDispatcher::get_root_job(), b"test-user-handles", 0)
+            ProcessDispatcher::create(get_root_job_dispatcher().clone(), b"test-user-handles", 0)
                 .expect("failed to create process");
         let process = proc_handle.dispatcher();
 
@@ -529,7 +531,7 @@ mod tests {
     #[test]
     fn test_remove_invalid_user_handles() {
         let (proc_handle, _proc_rights, _vmar, _vmar_rights) =
-            ProcessDispatcher::create(JobDispatcher::get_root_job(), b"test-user-handles", 0)
+            ProcessDispatcher::create(get_root_job_dispatcher().clone(), b"test-user-handles", 0)
                 .expect("failed to create process");
         let process = proc_handle.dispatcher();
 
@@ -551,7 +553,7 @@ mod tests {
     #[test]
     fn test_remove_batched_user_handles() {
         let (proc_handle, _proc_rights, _vmar, _vmar_rights) =
-            ProcessDispatcher::create(JobDispatcher::get_root_job(), b"test-user-handles", 0)
+            ProcessDispatcher::create(get_root_job_dispatcher().clone(), b"test-user-handles", 0)
                 .expect("failed to create process");
         let process = proc_handle.dispatcher();
 

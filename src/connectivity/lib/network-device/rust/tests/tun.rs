@@ -454,7 +454,7 @@ async fn create_tun_device_and_port() -> (tun::DeviceProxy, tun::PortProxy, Port
     let (port, server) = endpoints::create_proxy::<tun::PortMarker>();
     device
         .add_port(
-            &tun::DevicePortConfig {
+            tun::DevicePortConfig {
                 base: Some(default_base_port_config()),
                 online: Some(true),
                 ..Default::default()

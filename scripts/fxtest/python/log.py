@@ -154,13 +154,11 @@ class LogSource:
         self._stream = stream
 
     @classmethod
-    def from_env(
-        cls, exec_env: environment.ExecutionEnvironment
-    ) -> "LogSource":
+    def from_env(cls, exec_env: environment.ExecutionEnvironment) -> LogSource:
         return LogSource(cls.__static_key, exec_env=exec_env)
 
     @classmethod
-    def from_stream(cls, stream: typing.TextIO | None = None) -> "LogSource":
+    def from_stream(cls, stream: typing.TextIO | None = None) -> LogSource:
         return LogSource(cls.__static_key, stream=stream)
 
     def read_log(

@@ -389,17 +389,15 @@ impl IoOperation {
             None
         };
 
+        let mm = current_task.mm()?;
         let op = match op_type {
-            OpType::PRead | OpType::PReadV => {
-                let mm = current_task.mm()?;
-                IoOperationType::Read {
-                    file: Arc::downgrade(&file),
-                    mm: Arc::downgrade(&mm),
-                    buffers,
-                }
-            }
+            OpType::PRead | OpType::PReadV => IoOperationType::Read {
+                file: Arc::downgrade(&file),
+                mm: Arc::downgrade(&mm),
+                buffers,
+            },
             OpType::PWrite | OpType::PWriteV => {
-                let buffer = UserBuffersInputBuffer::syscall_new(current_task, buffers)
+                let buffer = UserBuffersInputBuffer::syscall_new(&mm, buffers)
                     .and_then(|mut source| source.read_all())
                     .map(VecInputBuffer::from);
                 IoOperationType::Write { file, buffer }

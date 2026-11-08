@@ -5,9 +5,11 @@
 #include <fcntl.h>
 #include <grp.h>
 #include <signal.h>
+#include <sys/fsuid.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/utsname.h>
 
 #include <filesystem>
 #include <fstream>
@@ -224,6 +226,298 @@ TEST(PrctlTest, SetregidRgidCannotUseSavedGid) {
     EXPECT_EQ(egid, 1000u);
     EXPECT_EQ(sgid, 0u);
   });
+}
+
+// Permanently dropping saved_uid via setresuid() with euid == -1 must still
+// reset fsuid to the current euid, while adjusting capabilities via
+// cap_emulate_setxuid (LSM_SETID_RES) rather than LSM_SETID_FS.
+TEST(PrctlTest, SetresuidPrivilegeDropResetsFsuidAndCapabilities) {
+  if (!test_helper::HasSysAdmin()) {
+    GTEST_SKIP() << "Not running as root";
+  }
+
+  test_helper::ScopedTempFD root_secret;
+  ASSERT_TRUE(root_secret.is_valid());
+  ASSERT_THAT(fchown(root_secret.fd(), 0, 0), SyscallSucceeds());
+  ASSERT_THAT(fchmod(root_secret.fd(), 0600), SyscallSucceeds());
+
+  test_helper::ScopedTempDir temp_dir;
+  ASSERT_FALSE(temp_dir.path().empty());
+  ASSERT_THAT(chmod(temp_dir.path().c_str(), 0777), SyscallSucceeds());
+
+  test_helper::ForkHelper helper;
+
+  // Case 1: Standard privilege drop without SECBIT_KEEP_CAPS.
+  helper.RunInForkedProcess([&] {
+    ASSERT_THAT(setresuid(1000, 1000, 0), SyscallSucceeds());
+    EXPECT_EQ(setfsuid(-1), 1000);
+    EXPECT_FALSE(test_helper::HasCapabilityEffective(CAP_DAC_OVERRIDE));
+
+    // Elevate fsuid to 0 using saved_uid == 0.
+    EXPECT_EQ(setfsuid(0), 1000);
+    ASSERT_EQ(setfsuid(-1), 0);
+    EXPECT_TRUE(test_helper::HasCapabilityEffective(CAP_DAC_OVERRIDE));
+    {
+      fbl::unique_fd fd(open(root_secret.name().c_str(), O_RDONLY));
+      EXPECT_TRUE(fd.is_valid()) << strerror(errno);
+    }
+
+    // Permanently drop saved_uid while leaving ruid/euid as -1.
+    ASSERT_THAT(setresuid(-1, -1, 1000), SyscallSucceeds());
+
+    uid_t ruid, euid, suid;
+    ASSERT_THAT(getresuid(&ruid, &euid, &suid), SyscallSucceeds());
+    EXPECT_EQ(ruid, 1000u);
+    EXPECT_EQ(euid, 1000u);
+    EXPECT_EQ(suid, 1000u);
+
+    // fsuid must have been reset to euid (1000), and cannot be raised back to 0.
+    EXPECT_EQ(setfsuid(-1), 1000);
+    EXPECT_EQ(setfsuid(0), 1000);
+    EXPECT_EQ(setfsuid(-1), 1000);
+    EXPECT_FALSE(test_helper::HasCapabilityEffective(CAP_DAC_OVERRIDE));
+    EXPECT_FALSE(test_helper::HasCapabilityPermitted(CAP_DAC_OVERRIDE));
+    EXPECT_THAT(open(root_secret.name().c_str(), O_RDONLY), SyscallFailsWithErrno(EACCES));
+  });
+
+  // Case 2: With PR_SET_KEEPCAPS and euid already nonzero, dropping saved_uid
+  // resets fsuid to 1000 (and prevents raising it back to 0), while
+  // cap_emulate_setxuid preserves both permitted and effective capabilities.
+  helper.RunInForkedProcess([&] {
+    ASSERT_THAT(prctl(PR_SET_KEEPCAPS, 1), SyscallSucceeds());
+    ASSERT_THAT(setresuid(1000, 1000, 0), SyscallSucceeds());
+    EXPECT_EQ(setfsuid(0), 1000);
+    ASSERT_EQ(setfsuid(-1), 0);
+    EXPECT_TRUE(test_helper::HasCapabilityEffective(CAP_DAC_OVERRIDE));
+
+    std::string before_drop = temp_dir.path() + "/before_setresuid_keepcaps";
+    fbl::unique_fd before_fd(open(before_drop.c_str(), O_CREAT | O_EXCL | O_RDWR, 0600));
+    ASSERT_TRUE(before_fd.is_valid()) << strerror(errno);
+    struct stat st = {};
+    ASSERT_THAT(fstat(before_fd.get(), &st), SyscallSucceeds());
+    EXPECT_EQ(st.st_uid, 0u);
+
+    ASSERT_THAT(setresuid(-1, -1, 1000), SyscallSucceeds());
+    EXPECT_EQ(setfsuid(-1), 1000);
+    EXPECT_EQ(setfsuid(0), 1000);
+    EXPECT_EQ(setfsuid(-1), 1000);
+    EXPECT_TRUE(test_helper::HasCapabilityPermitted(CAP_DAC_OVERRIDE));
+    EXPECT_TRUE(test_helper::HasCapabilityEffective(CAP_DAC_OVERRIDE));
+
+    std::string after_drop = temp_dir.path() + "/after_setresuid_keepcaps";
+    fbl::unique_fd after_fd(open(after_drop.c_str(), O_CREAT | O_EXCL | O_RDWR, 0600));
+    ASSERT_TRUE(after_fd.is_valid()) << strerror(errno);
+    ASSERT_THAT(fstat(after_fd.get(), &st), SyscallSucceeds());
+    EXPECT_EQ(st.st_uid, 1000u);
+  });
+
+  EXPECT_TRUE(helper.WaitForChildren());
+}
+
+// Linux's __sys_setreuid() unconditionally sets fsuid = euid even when the euid
+// argument is -1.
+TEST(PrctlTest, SetreuidResetsFsuidWhenEuidUnchanged) {
+  if (!test_helper::HasSysAdmin()) {
+    GTEST_SKIP() << "Not running as root";
+  }
+
+  test_helper::ScopedTempFD root_secret;
+  ASSERT_TRUE(root_secret.is_valid());
+  ASSERT_THAT(fchown(root_secret.fd(), 0, 0), SyscallSucceeds());
+  ASSERT_THAT(fchmod(root_secret.fd(), 0600), SyscallSucceeds());
+
+  test_helper::ScopedTempFD other_secret;
+  ASSERT_TRUE(other_secret.is_valid());
+  ASSERT_THAT(fchown(other_secret.fd(), 2000, 2000), SyscallSucceeds());
+  ASSERT_THAT(fchmod(other_secret.fd(), 0600), SyscallSucceeds());
+
+  test_helper::ForkHelper helper;
+
+  // Dropping saved_uid via setreuid(1000, -1) after setfsuid(0) must reset fsuid to 1000.
+  helper.RunInForkedProcess([&] {
+    ASSERT_THAT(setresuid(1000, 1000, 0), SyscallSucceeds());
+    EXPECT_EQ(setfsuid(0), 1000);
+    ASSERT_EQ(setfsuid(-1), 0);
+
+    ASSERT_THAT(setreuid(1000, -1), SyscallSucceeds());
+
+    uid_t ruid, euid, suid;
+    ASSERT_THAT(getresuid(&ruid, &euid, &suid), SyscallSucceeds());
+    EXPECT_EQ(ruid, 1000u);
+    EXPECT_EQ(euid, 1000u);
+    EXPECT_EQ(suid, 1000u);
+    EXPECT_EQ(setfsuid(-1), 1000);
+    EXPECT_FALSE(test_helper::HasCapabilityEffective(CAP_DAC_OVERRIDE));
+    EXPECT_THAT(open(root_secret.name().c_str(), O_RDONLY), SyscallFailsWithErrno(EACCES));
+  });
+
+  // setreuid(-1, -1) also unconditionally resets fsuid to the current euid (0),
+  // without re-raising LSM_SETID_FS capabilities when euid is unchanged.
+  helper.RunInForkedProcess([&] {
+    EXPECT_EQ(setfsuid(1000), 0);
+    ASSERT_EQ(setfsuid(-1), 1000);
+    EXPECT_FALSE(test_helper::HasCapabilityEffective(CAP_DAC_OVERRIDE));
+    EXPECT_THAT(open(root_secret.name().c_str(), O_RDONLY), SyscallFailsWithErrno(EACCES));
+    EXPECT_THAT(open(other_secret.name().c_str(), O_RDONLY), SyscallFailsWithErrno(EACCES));
+
+    ASSERT_THAT(setreuid(-1, -1), SyscallSucceeds());
+    EXPECT_EQ(setfsuid(-1), 0);
+    EXPECT_FALSE(test_helper::HasCapabilityEffective(CAP_DAC_OVERRIDE));
+    {
+      fbl::unique_fd fd(open(root_secret.name().c_str(), O_RDONLY));
+      EXPECT_TRUE(fd.is_valid()) << strerror(errno);
+    }
+    EXPECT_THAT(open(other_secret.name().c_str(), O_RDONLY), SyscallFailsWithErrno(EACCES));
+  });
+
+  EXPECT_TRUE(helper.WaitForChildren());
+}
+
+// Permanently dropping saved_gid via setresgid() or setregid() with egid == -1
+// must reset fsgid to the current egid.
+TEST(PrctlTest, SetresgidAndSetregidPrivilegeDropResetsFsgid) {
+  if (!test_helper::HasSysAdmin()) {
+    GTEST_SKIP() << "Not running as root";
+  }
+
+  test_helper::ScopedTempDir temp_dir;
+  ASSERT_FALSE(temp_dir.path().empty());
+  ASSERT_THAT(chmod(temp_dir.path().c_str(), 0777), SyscallSucceeds());
+
+  test_helper::ForkHelper helper;
+
+  // Subcase 1: setresgid(-1, -1, 1000) after setfsgid(0).
+  helper.RunInForkedProcess([&] {
+    ASSERT_THAT(setgroups(0, nullptr), SyscallSucceeds());
+    ASSERT_THAT(setresgid(1000, 1000, 0), SyscallSucceeds());
+    ASSERT_THAT(setresuid(1000, 1000, 1000), SyscallSucceeds());
+    EXPECT_EQ(setfsgid(-1), 1000);
+
+    EXPECT_EQ(setfsgid(0), 1000);
+    ASSERT_EQ(setfsgid(-1), 0);
+
+    std::string before_drop = temp_dir.path() + "/before_setresgid";
+    fbl::unique_fd before_fd(open(before_drop.c_str(), O_CREAT | O_EXCL | O_RDWR, 0600));
+    ASSERT_TRUE(before_fd.is_valid()) << strerror(errno);
+    struct stat st = {};
+    ASSERT_THAT(fstat(before_fd.get(), &st), SyscallSucceeds());
+    EXPECT_EQ(st.st_gid, 0u);
+    ASSERT_THAT(fchmod(before_fd.get(), S_ISGID | 0750), SyscallSucceeds());
+    ASSERT_THAT(fstat(before_fd.get(), &st), SyscallSucceeds());
+    EXPECT_NE(st.st_mode & S_ISGID, 0u);
+
+    ASSERT_THAT(setresgid(-1, -1, 1000), SyscallSucceeds());
+
+    gid_t rgid, egid, sgid;
+    ASSERT_THAT(getresgid(&rgid, &egid, &sgid), SyscallSucceeds());
+    EXPECT_EQ(rgid, 1000u);
+    EXPECT_EQ(egid, 1000u);
+    EXPECT_EQ(sgid, 1000u);
+    EXPECT_EQ(setfsgid(-1), 1000);
+    EXPECT_EQ(setfsgid(0), 1000);
+    EXPECT_EQ(setfsgid(-1), 1000);
+
+    std::string after_drop = temp_dir.path() + "/after_setresgid";
+    fbl::unique_fd after_fd(open(after_drop.c_str(), O_CREAT | O_EXCL | O_RDWR, 0600));
+    ASSERT_TRUE(after_fd.is_valid()) << strerror(errno);
+    ASSERT_THAT(fstat(after_fd.get(), &st), SyscallSucceeds());
+    EXPECT_EQ(st.st_gid, 1000u);
+    ASSERT_THAT(fchmod(before_fd.get(), S_ISGID | 0750), SyscallSucceeds());
+    ASSERT_THAT(fstat(before_fd.get(), &st), SyscallSucceeds());
+    EXPECT_EQ(st.st_mode & S_ISGID, 0u);
+  });
+
+  // Subcase 2: setregid(1000, -1) after setfsgid(0).
+  helper.RunInForkedProcess([&] {
+    ASSERT_THAT(setgroups(0, nullptr), SyscallSucceeds());
+    ASSERT_THAT(setresgid(1000, 1000, 0), SyscallSucceeds());
+    ASSERT_THAT(setresuid(1000, 1000, 1000), SyscallSucceeds());
+
+    EXPECT_EQ(setfsgid(0), 1000);
+    ASSERT_EQ(setfsgid(-1), 0);
+
+    ASSERT_THAT(setregid(1000, -1), SyscallSucceeds());
+
+    gid_t rgid, egid, sgid;
+    ASSERT_THAT(getresgid(&rgid, &egid, &sgid), SyscallSucceeds());
+    EXPECT_EQ(rgid, 1000u);
+    EXPECT_EQ(egid, 1000u);
+    EXPECT_EQ(sgid, 1000u);
+    EXPECT_EQ(setfsgid(-1), 1000);
+
+    std::string after_drop = temp_dir.path() + "/after_setregid";
+    fbl::unique_fd after_fd(open(after_drop.c_str(), O_CREAT | O_EXCL | O_RDWR, 0600));
+    ASSERT_TRUE(after_fd.is_valid()) << strerror(errno);
+    struct stat st = {};
+    ASSERT_THAT(fstat(after_fd.get(), &st), SyscallSucceeds());
+    EXPECT_EQ(st.st_gid, 1000u);
+  });
+
+  EXPECT_TRUE(helper.WaitForChildren());
+}
+
+// Verify Linux 6.3+ parity: pure no-op setresuid/setresgid calls preserve
+// fsuid/fsgid, whereas passing an explicit euid/egid that differs from
+// fsuid/fsgid resets fsuid/fsgid.
+TEST(PrctlTest, SetresuidAndSetresgidNoopPreservesFsIds) {
+  if (!test_helper::HasSysAdmin()) {
+    GTEST_SKIP() << "Not running as root";
+  }
+
+  utsname uts = {};
+  ASSERT_THAT(uname(&uts), SyscallSucceeds());
+  char *end = nullptr;
+  int64_t major = std::strtol(uts.release, &end, 10);
+  ASSERT_NE(end, uts.release);
+  ASSERT_EQ(*end, '.');
+  const char *minor_start = end + 1;
+  int64_t minor = std::strtol(minor_start, &end, 10);
+  ASSERT_NE(end, minor_start);
+  if (major < 6 || (major == 6 && minor < 3)) {
+    GTEST_SKIP() << "Linux >= 6.3 required for setresuid/setresgid no-op fsuid preservation";
+  }
+
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&] {
+#ifdef SYS_setresuid32
+    constexpr int kSysSetresuid = SYS_setresuid32;
+#else
+    constexpr int kSysSetresuid = SYS_setresuid;
+#endif
+#ifdef SYS_setresgid32
+    constexpr int kSysSetresgid = SYS_setresgid32;
+#else
+    constexpr int kSysSetresgid = SYS_setresgid;
+#endif
+    constexpr uid_t kUnchangedUid = static_cast<uid_t>(-1);
+    constexpr gid_t kUnchangedGid = static_cast<gid_t>(-1);
+
+    EXPECT_EQ(setfsuid(1000), 0);
+    EXPECT_EQ(setfsgid(1000), 0);
+    ASSERT_EQ(setfsuid(-1), 1000);
+    ASSERT_EQ(setfsgid(-1), 1000);
+
+    // True no-ops leave fsuid/fsgid untouched (both raw syscall and libc wrapper).
+    ASSERT_THAT(syscall(kSysSetresuid, kUnchangedUid, kUnchangedUid, kUnchangedUid),
+                SyscallSucceeds());
+    ASSERT_THAT(syscall(kSysSetresgid, kUnchangedGid, kUnchangedGid, kUnchangedGid),
+                SyscallSucceeds());
+    ASSERT_THAT(setresuid(-1, -1, -1), SyscallSucceeds());
+    ASSERT_THAT(setresgid(-1, -1, -1), SyscallSucceeds());
+    EXPECT_EQ(setfsuid(-1), 1000);
+    EXPECT_EQ(setfsgid(-1), 1000);
+
+    // Passing explicit euid/egid != fsuid/fsgid is not a no-op and resets them.
+    ASSERT_THAT(syscall(kSysSetresuid, kUnchangedUid, static_cast<uid_t>(0), kUnchangedUid),
+                SyscallSucceeds());
+    ASSERT_THAT(syscall(kSysSetresgid, kUnchangedGid, static_cast<gid_t>(0), kUnchangedGid),
+                SyscallSucceeds());
+    EXPECT_EQ(setfsuid(-1), 0);
+    EXPECT_EQ(setfsgid(-1), 0);
+    EXPECT_FALSE(test_helper::HasCapabilityEffective(CAP_DAC_OVERRIDE));
+  });
+
+  EXPECT_TRUE(helper.WaitForChildren());
 }
 
 TEST(PrctlTest, Argv0SniffingIsUndetectableInUserspace) {

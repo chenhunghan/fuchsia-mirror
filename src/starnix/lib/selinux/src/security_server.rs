@@ -7,21 +7,23 @@ use crate::kernel::{
     AccessVectorCache, CacheStats, KernelAccessDecision, KernelXpermsAccessDecision, PolicyIndex,
     Query,
 };
-use crate::permission_check::{PerThreadCache, PermissionCheck};
+use crate::permission_check::PermissionCheck;
 use crate::policy::{
-    AccessDecision, AccessVector, ClassId, FsUseLabelAndType, FsUseType, HandleUnknown,
-    HasName as _, HasPolicyId as _, PermissionId, Policy, PolicyData, SELINUX_AVD_FLAGS_PERMISSIVE,
+    AccessDecision, AccessVector, ClassId, FsUseLabelAndType, HandleUnknown, HasName as _,
+    HasPolicyId as _, PermissionId, Policy, PolicyData, SELINUX_AVD_FLAGS_PERMISSIVE,
     SecurityContext, XpermsBitmap, XpermsKind,
 };
 use crate::sid_table::{PortableSidTable, SidTable};
 use crate::sync::{LockDepMutex, SeLinuxSecurityServerStateLock, SeLinuxStatusLock};
 use crate::{
     ClassPermission, FileSystemLabel, FileSystemLabelingScheme, FileSystemMountOptions,
-    FileSystemMountSids, InitialSid, KernelClass, KernelPermission, NullessByteStr, ObjectClass,
-    PolicyCap, SeLinuxStatus, SeLinuxStatusPublisher, SecurityId,
+    FileSystemMountSids, HashStats, InitialSid, KernelClass, KernelPermission, NullessByteStr,
+    ObjectClass, PerThreadCache, PolicyCap, SeLinuxStatus, SeLinuxStatusPublisher, SecurityId,
 };
 use anyhow::Context as _;
 use fuchsia_rcu::{RcuDroppable, RcuOptionArc, RcuReadScope};
+use starnix_logging::log_info;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::DerefMut;
 use std::sync::Arc;
@@ -39,6 +41,9 @@ struct ActivePolicy {
 
     /// Describes access checks that should be granted, with associated bug Ids.
     exceptions: ExceptionsConfig,
+
+    /// Size in bytes of the loaded binary policy.
+    binary_policy_size: usize,
 }
 
 impl ActivePolicy {
@@ -71,59 +76,15 @@ impl ActivePolicy {
 }
 
 #[derive(Default)]
-struct SeLinuxBooleans {
-    /// Active values for all of the booleans defined by the policy.
-    /// Entries are created at policy load for each policy-defined conditional.
-    active: HashMap<String, bool>,
-    /// Pending values for any booleans modified since the last commit.
-    pending: HashMap<String, bool>,
-}
-
-impl SeLinuxBooleans {
-    fn reset(&mut self, booleans: Vec<(String, bool)>) {
-        self.active = HashMap::from_iter(booleans);
-        self.pending.clear();
-    }
-    fn names(&self) -> Vec<String> {
-        self.active.keys().cloned().collect()
-    }
-    fn set_pending(&mut self, name: &str, value: bool) -> Result<(), ()> {
-        if !self.active.contains_key(name) {
-            return Err(());
-        }
-        self.pending.insert(name.into(), value);
-        Ok(())
-    }
-    fn get(&self, name: &str) -> Result<(bool, bool), ()> {
-        let active = self.active.get(name).ok_or(())?;
-        let pending = self.pending.get(name).unwrap_or(active);
-        Ok((*active, *pending))
-    }
-    fn commit_pending(&mut self) {
-        self.active.extend(self.pending.drain());
-    }
-}
-
-#[derive(Default)]
 struct SecurityServerState {
-    /// Holds active and pending states for each boolean defined by policy.
-    booleans: SeLinuxBooleans,
+    /// Pending values for any conditional booleans modified since the last commit or policy load.
+    pending_booleans: HashMap<String, bool>,
 
     /// Write-only interface to the data stored in the selinuxfs status file.
     status_publisher: Option<Box<dyn SeLinuxStatusPublisher>>,
 }
 
-pub(crate) struct SecurityServerBackend {
-    /// Currently active policy and its per-policy SID table, read lock-free via RCU.
-    active_policy: RcuOptionArc<ActivePolicy>,
-
-    /// Canonical strings for all dynamic SIDs allocated across policy loads.
-    ///
-    /// Locked when minting new SIDs into `active_policy.sid_table` or replacing `active_policy`.
-    portable_sids: LockDepMutex<PortableSidTable, SeLinuxSecurityServerStateLock>,
-}
-
-/// An opaque identifier for the policy version, which can be used to detect if the policy has changed.
+/// Opaque identifier for the policy version, which can be used to detect if the policy has changed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PolicySeqNo(u32);
 
@@ -135,22 +96,26 @@ impl PolicySeqNo {
 }
 
 pub struct SecurityServer {
+    /// Shared access vector cache.
+    access_vector_cache: AccessVectorCache,
+
     /// Serializes policy loads, boolean changes, enforcing mode changes, AVC resets, and status
     /// publication.
     state: LockDepMutex<SecurityServerState, SeLinuxStatusLock>,
 
-    /// The access vector cache that is shared between threads subject to access control by this
-    /// security server.
-    access_vector_cache: AccessVectorCache,
+    /// Currently active policy and its per-policy SID table, read lock-free via RCU.
+    active_policy: RcuOptionArc<ActivePolicy>,
 
-    /// A shared reference to the security server's policy and SID state.
-    backend: Arc<SecurityServerBackend>,
+    /// Canonical strings for all dynamic SIDs allocated across policy loads.
+    ///
+    /// Locked when minting new SIDs into `active_policy.sid_table` or replacing `active_policy`.
+    portable_sids: LockDepMutex<PortableSidTable, SeLinuxSecurityServerStateLock>,
 
     /// True if the security server is enforcing, rather than permissive.
     /// Only modified with the `state` lock taken.
     is_enforcing: AtomicBool,
 
-    /// Count of changes to the active policy.  Changes include both loads
+    /// Count of changes to the active policy. Changes include both loads
     /// of complete new policies, and modifications to a previously loaded
     /// policy, e.g. by committing new values to conditional booleans in it.
     /// Only modified with the `state` lock taken.
@@ -179,17 +144,11 @@ impl SecurityServer {
             }
         }
 
-        let backend = Arc::new(SecurityServerBackend {
+        Arc::new(Self {
+            access_vector_cache: AccessVectorCache::default(),
+            state: LockDepMutex::new(SecurityServerState::default()),
             active_policy: RcuOptionArc::default(),
             portable_sids: LockDepMutex::new(PortableSidTable::default()),
-        });
-
-        let access_vector_cache = AccessVectorCache::new(backend.clone());
-
-        Arc::new(Self {
-            state: LockDepMutex::new(SecurityServerState::default()),
-            access_vector_cache,
-            backend,
             is_enforcing: AtomicBool::new(false),
             policy_change_count: AtomicU32::new(0),
             exceptions,
@@ -213,10 +172,11 @@ impl SecurityServer {
         &self,
         security_context: NullessByteStr<'_>,
     ) -> Result<SecurityId, anyhow::Error> {
-        self.backend.compute_sid(|_scope, active_policy| {
+        self.compute_sid(|_scope, active_policy| {
             active_policy
                 .parsed
                 .parse_security_context(security_context)
+                .map(Cow::Owned)
                 .map_err(anyhow::Error::from)
         })
     }
@@ -229,7 +189,7 @@ impl SecurityServer {
     /// reload then the "unlabeled" context is returned instead.
     pub fn sid_to_security_context(&self, sid: SecurityId) -> Option<Vec<u8>> {
         let scope = RcuReadScope::new();
-        let active_policy = self.backend.active_policy.as_ref(&scope)?;
+        let active_policy = self.active_policy.as_ref(&scope)?;
         let context = active_policy.sid_table.sid_to_security_context(&scope, sid);
         Some(active_policy.parsed.serialize_security_context(context))
     }
@@ -246,6 +206,7 @@ impl SecurityServer {
     pub fn load_policy(&self, binary_policy: Vec<u8>) -> Result<(), anyhow::Error> {
         // Parse the supplied policy, and reject the load operation if it is
         // malformed or invalid.
+        let binary_policy_size = binary_policy.len();
         let policy = Policy::parse(&binary_policy)?;
         policy.validate()?;
         if !self.allow_unimplemented {
@@ -256,27 +217,34 @@ impl SecurityServer {
         let exceptions = ExceptionsConfig::new(&policy, &exceptions)?;
         let parsed = PolicyIndex::new(policy)?;
 
+        log_info!(
+            "SELinux:  {} users, {} roles, {} types, {} bools, {} sens, {} cats",
+            parsed.users().len(),
+            parsed.roles().len(),
+            parsed.types().primary_names_count(),
+            parsed.conditional_booleans().len(),
+            parsed.sensitivities().len(),
+            parsed.categories().len(),
+        );
+        log_info!(
+            "SELinux:  {} classes, {} rules",
+            parsed.classes().len(),
+            parsed.access_vector_rules().rules_count(),
+        );
+
         // Replace any existing policy and push update to `state.status_publisher`.
         self.with_mut_state_and_reset_cache(|state| {
             // TODO(b/324265752): Determine whether SELinux booleans need to be retained across
             // policy (re)loads.
-            state.booleans.reset(
-                parsed
-                    .conditional_booleans()
-                    .iter()
-                    // TODO(b/324392507): Relax the UTF8 requirement on policy strings.
-                    .map(|boolean| {
-                        (String::from_utf8(boolean.name().to_vec()).unwrap(), boolean.active())
-                    })
-                    .collect(),
-            );
+            state.pending_booleans.clear();
 
-            let portable_sids = self.backend.portable_sids.lock();
+            let portable_sids = self.portable_sids.lock();
             let sid_table = SidTable::new(&parsed, &portable_sids);
-            self.backend.active_policy.update(Some(Arc::new(ActivePolicy {
+            self.active_policy.update(Some(Arc::new(ActivePolicy {
                 parsed,
                 sid_table,
                 exceptions,
+                binary_policy_size,
             })));
         });
 
@@ -286,14 +254,21 @@ impl SecurityServer {
     /// Returns true if a policy has been loaded.
     pub fn has_policy(&self) -> bool {
         let scope = RcuReadScope::new();
-        self.backend.active_policy.as_ref(&scope).is_some()
+        self.active_policy.as_ref(&scope).is_some()
+    }
+
+    /// Returns the size in bytes of the active binary policy, or `None` if no policy is loaded.
+    pub fn binary_policy_size(&self) -> Option<usize> {
+        let scope = RcuReadScope::new();
+        let active_policy = self.active_policy.as_ref(&scope)?;
+        Some(active_policy.binary_policy_size)
     }
 
     /// Returns the active policy in binary form, or `None` if no policy has yet been loaded.
     pub fn get_binary_policy(&self) -> Option<PolicyData> {
         let scope = RcuReadScope::new();
-        let active_policy = self.backend.active_policy.as_ref(&scope)?;
-        let mut bytes = Vec::new();
+        let active_policy = self.active_policy.as_ref(&scope)?;
+        let mut bytes = Vec::with_capacity(active_policy.binary_policy_size);
         active_policy
             .parsed
             .serialize(&mut bytes)
@@ -316,8 +291,7 @@ impl SecurityServer {
     /// denied. Defaults to true until a policy is loaded.
     pub fn deny_unknown(&self) -> bool {
         let scope = RcuReadScope::new();
-        self.backend
-            .active_policy
+        self.active_policy
             .as_ref(&scope)
             .is_none_or(|p| p.parsed.handle_unknown() != HandleUnknown::Allow)
     }
@@ -326,8 +300,7 @@ impl SecurityServer {
     /// rejected. Defaults to false until a policy is loaded.
     pub fn reject_unknown(&self) -> bool {
         let scope = RcuReadScope::new();
-        self.backend
-            .active_policy
+        self.active_policy
             .as_ref(&scope)
             .is_some_and(|p| p.parsed.handle_unknown() == HandleUnknown::Reject)
     }
@@ -335,31 +308,73 @@ impl SecurityServer {
     /// Returns the list of names of boolean conditionals defined by the
     /// loaded policy.
     pub fn conditional_booleans(&self) -> Vec<String> {
-        self.state.lock().booleans.names()
+        let scope = RcuReadScope::new();
+        let Some(active_policy) = self.active_policy.as_ref(&scope) else {
+            return Vec::new();
+        };
+        active_policy
+            .parsed
+            .conditional_booleans()
+            .iter()
+            // TODO(b/324392507): Relax the UTF8 requirement on policy strings.
+            .map(|boolean| std::str::from_utf8(boolean.name()).unwrap().to_owned())
+            .collect()
     }
 
     /// Returns the active and pending values of a policy boolean, if it exists.
     pub fn get_boolean(&self, name: &str) -> Result<(bool, bool), ()> {
-        self.state.lock().booleans.get(name)
+        let state = self.state.lock();
+        let scope = RcuReadScope::new();
+        let active_policy = self.active_policy.as_ref(&scope).ok_or(())?;
+        let active = active_policy
+            .parsed
+            .conditional_booleans()
+            .get_by_name(name.as_bytes())
+            .ok_or(())?
+            .active();
+        let pending = state.pending_booleans.get(name).copied().unwrap_or(active);
+        Ok((active, pending))
     }
 
     /// Sets the pending value of a boolean, if it is defined in the policy.
     pub fn set_pending_boolean(&self, name: &str, value: bool) -> Result<(), ()> {
-        self.state.lock().booleans.set_pending(name, value)
+        let mut state = self.state.lock();
+        let scope = RcuReadScope::new();
+        let active_policy = self.active_policy.as_ref(&scope).ok_or(())?;
+        if active_policy.parsed.conditional_booleans().get_by_name(name.as_bytes()).is_none() {
+            return Err(());
+        }
+        state.pending_booleans.insert(name.into(), value);
+        Ok(())
     }
 
     /// Commits all pending changes to conditional booleans.
     pub fn commit_pending_booleans(&self) {
-        // TODO(b/324264149): Commit values into the stored policy itself.
         self.with_mut_state_and_reset_cache(|state| {
-            state.booleans.commit_pending();
+            let scope = RcuReadScope::new();
+            let Some(active_policy) = self.active_policy.as_ref(&scope) else {
+                return;
+            };
+            let mut parsed = active_policy.parsed.clone();
+            parsed.update_conditional_booleans(state.pending_booleans.drain());
+
+            let portable_sids = self.portable_sids.lock();
+            let sid_table = SidTable::new(&parsed, &portable_sids);
+            let exceptions = active_policy.exceptions.clone();
+            let binary_policy_size = active_policy.binary_policy_size;
+            self.active_policy.update(Some(Arc::new(ActivePolicy {
+                parsed,
+                sid_table,
+                exceptions,
+                binary_policy_size,
+            })));
         });
     }
 
     /// Returns whether a standard policy capability is enabled in the loaded policy.
     pub fn is_policycap_enabled(&self, policy_cap: PolicyCap) -> bool {
         let scope = RcuReadScope::new();
-        let Some(policy) = self.backend.active_policy.as_ref(&scope) else {
+        let Some(policy) = self.active_policy.as_ref(&scope) else {
             return false;
         };
         policy.parsed.has_policycap(policy_cap)
@@ -370,11 +385,25 @@ impl SecurityServer {
         self.access_vector_cache.cache_stats()
     }
 
+    /// Returns a snapshot of the AVC hash distribution statistics.
+    pub fn avc_hash_stats(&self) -> HashStats {
+        self.access_vector_cache.hash_stats()
+    }
+
+    /// Returns a snapshot of the SID table hash distribution statistics.
+    pub fn sid_table_hash_stats(&self) -> HashStats {
+        let scope = RcuReadScope::new();
+        self.active_policy
+            .as_ref(&scope)
+            .map(|policy| policy.sid_table.hash_stats(&scope))
+            .unwrap_or_default()
+    }
+
     /// Returns the current policy version.
     ///
     /// Uses `Ordering::Relaxed` to avoid an acquire barrier on every [`PerThreadCache`] hit;
     /// callers that reset cached state upon observing a changed [`PolicySeqNo`] execute an
-    /// `Ordering::Acquire` fence before querying [`SecurityServerBackend`].
+    /// `Ordering::Acquire` fence before querying [`SecurityServer`].
     pub fn policy_seqno(&self) -> PolicySeqNo {
         PolicySeqNo(self.policy_change_count.load(Ordering::Relaxed))
     }
@@ -383,7 +412,6 @@ impl SecurityServer {
     pub fn class_names(&self) -> Result<Vec<Vec<u8>>, ()> {
         let scope = RcuReadScope::new();
         let names = self
-            .backend
             .expect_active_policy(&scope)
             .parsed
             .classes()
@@ -397,7 +425,6 @@ impl SecurityServer {
     pub fn class_id_by_name(&self, name: &str) -> Result<ClassId, ()> {
         let scope = RcuReadScope::new();
         Ok(self
-            .backend
             .expect_active_policy(&scope)
             .parsed
             .classes()
@@ -414,7 +441,7 @@ impl SecurityServer {
         name: &str,
     ) -> Result<Vec<(PermissionId, Vec<u8>)>, ()> {
         let scope = RcuReadScope::new();
-        self.backend.expect_active_policy(&scope).parsed.find_class_permissions_by_name(name)
+        self.expect_active_policy(&scope).parsed.find_class_permissions_by_name(name)
     }
 
     /// Determines the appropriate [`FileSystemLabel`] for a mounted filesystem given this security
@@ -427,41 +454,41 @@ impl SecurityServer {
     ) -> Result<FileSystemLabel, anyhow::Error> {
         // Lock `portable_sids` upfront so that any new SIDs allocated for mount options or
         // filesystem labels are resolved against a single consistent `active_policy`.
-        let mut portable_sids = self.backend.portable_sids.lock();
+        let mut portable_sids = self.portable_sids.lock();
         let scope = RcuReadScope::new();
-        let active_policy = self.backend.expect_active_policy(&scope);
+        let active_policy = self.expect_active_policy(&scope);
 
-        let mut resolve_sid = |context: &SecurityContext| -> Result<SecurityId, anyhow::Error> {
-            // SAFETY: `self.backend.portable_sids` is locked, ensuring exclusive writer access.
-            unsafe {
-                active_policy
-                    .sid_table
-                    .security_context_to_sid(
-                        &scope,
-                        &active_policy.parsed,
-                        &mut portable_sids,
-                        context,
-                    )
-                    .map_err(anyhow::Error::from)
-            }
-        };
+        let mut resolve_sid =
+            |context: Cow<'_, SecurityContext>| -> Result<SecurityId, anyhow::Error> {
+                // SAFETY: `self.portable_sids` is locked, ensuring exclusive writer access.
+                unsafe {
+                    active_policy
+                        .sid_table
+                        .security_context_to_sid(
+                            &scope,
+                            &active_policy.parsed,
+                            &mut portable_sids,
+                            context,
+                        )
+                        .map_err(anyhow::Error::from)
+                }
+            };
 
         let mut sid_from_mount_option =
-            |mount_option: &Option<Vec<u8>>| -> Result<Option<SecurityId>, anyhow::Error> {
+            |mount_option: Option<&[u8]>| -> Result<Option<SecurityId>, anyhow::Error> {
                 let Some(label) = mount_option else {
                     return Ok(None);
                 };
                 let context = active_policy.parsed.parse_security_context(label.into())?;
-                resolve_sid(&context).map(Some)
+                resolve_sid(Cow::Owned(context)).map(Some)
             };
 
         let mount_sids = FileSystemMountSids {
-            context: sid_from_mount_option(&mount_options.context)?,
-            fs_context: sid_from_mount_option(&mount_options.fs_context)?,
-            def_context: sid_from_mount_option(&mount_options.def_context)?,
-            root_context: sid_from_mount_option(&mount_options.root_context)?,
+            context: sid_from_mount_option(mount_options.context.as_deref())?,
+            fs_context: sid_from_mount_option(mount_options.fs_context.as_deref())?,
+            def_context: sid_from_mount_option(mount_options.def_context.as_deref())?,
+            root_context: sid_from_mount_option(mount_options.root_context.as_deref())?,
         };
-
         let label = if let Some(mountpoint_sid) = mount_sids.context {
             // `mount_options` has `context` set, so the file-system and the nodes it contains are
             // labeled with that value, which is not modifiable. The `fs_context` option, if set,
@@ -475,7 +502,7 @@ impl SecurityServer {
             active_policy.parsed.fs_use_label_and_type(fs_type)
         {
             // There is an `fs_use` statement for this file-system type in the policy.
-            let fs_sid_from_policy = resolve_sid(&context)?;
+            let fs_sid_from_policy = resolve_sid(Cow::Borrowed(context))?;
             let fs_sid = mount_sids.fs_context.unwrap_or(fs_sid_from_policy);
             FileSystemLabel {
                 sid: fs_sid,
@@ -485,11 +512,13 @@ impl SecurityServer {
                 },
                 mount_sids,
             }
-        } else if let Some(context) =
-            active_policy.parsed.genfscon_label_for_fs_and_path(fs_type, ROOT_PATH.into(), None)
-        {
+        } else if let Some(context) = active_policy.parsed.genfscon_label_for_fs_and_path(
+            fs_type,
+            ROOT_PATH.into(),
+            /* class = */ None,
+        ) {
             // There is a `genfscon` statement for this file-system type in the policy.
-            let genfscon_sid = resolve_sid(&context)?;
+            let genfscon_sid = resolve_sid(Cow::Borrowed(context))?;
             let fs_sid = mount_sids.fs_context.unwrap_or(genfscon_sid);
 
             // For relabeling to make sense with `genfscon` labeling they must ensure to persist the
@@ -512,10 +541,7 @@ impl SecurityServer {
             // The name of the filesystem type was not recognized.
             FileSystemLabel {
                 sid: mount_sids.fs_context.unwrap_or_else(|| InitialSid::Unlabeled.into()),
-                scheme: FileSystemLabelingScheme::FsUse {
-                    fs_use_type: FsUseType::Xattr,
-                    default_sid: mount_sids.def_context.unwrap_or_else(|| InitialSid::File.into()),
-                },
+                scheme: FileSystemLabelingScheme::None,
                 mount_sids,
             }
         };
@@ -523,19 +549,20 @@ impl SecurityServer {
     }
 
     /// Returns the [`SecurityId`] with which to label an [`FsNode`] in a filesystem of `fs_type`,
-    /// at the specified filesystem-relative `node_path`.  Callers are responsible for ensuring that
+    /// at the specified filesystem-relative `node_path`. Callers are responsible for ensuring that
     /// this API is never called prior to a policy first being loaded, or for a filesystem that is
     /// not configured to be `genfscon`-labeled.
     pub fn genfscon_label_for_fs_and_path(
         &self,
         fs_type: NullessByteStr<'_>,
         node_path: NullessByteStr<'_>,
-        class_id: Option<KernelClass>,
+        class: Option<KernelClass>,
     ) -> Result<SecurityId, anyhow::Error> {
-        self.backend.compute_sid(|_scope, active_policy| {
+        self.compute_sid(|_scope, active_policy| {
             active_policy
                 .parsed
-                .genfscon_label_for_fs_and_path(fs_type, node_path.into(), class_id)
+                .genfscon_label_for_fs_and_path(fs_type, node_path, class)
+                .map(Cow::Borrowed)
                 .ok_or_else(|| {
                     anyhow::anyhow!("Genfscon label requested for non-genfscon labeled filesystem")
                 })
@@ -548,7 +575,7 @@ impl SecurityServer {
     /// specified in its `bounds`.
     pub fn is_bounded_by(&self, bounded_sid: SecurityId, parent_sid: SecurityId) -> bool {
         let scope = RcuReadScope::new();
-        let active_policy = self.backend.expect_active_policy(&scope);
+        let active_policy = self.expect_active_policy(&scope);
         let (bounded_context, parent_context) =
             active_policy.sid_table.sids_to_security_contexts(&scope, bounded_sid, parent_sid);
         active_policy.parsed.is_bounded_by(bounded_context.type_(), parent_context.type_())
@@ -607,7 +634,10 @@ impl SecurityServer {
 
     /// Returns the security identifier ([`SecurityId`]) with which to label a new object of `target_class`,
     /// based on the specified source & target security SIDs and optional `name`.
-    /// Callers pass an empty slice (`&[]`) for `name` to express nameless transitions.
+    /// For named objects (e.g. directory entries or named `anon_inode` files), a non-empty
+    /// `name` is passed so filename-dependent transition rules are evaluated; for unnamed
+    /// objects (e.g. processes, sockets, `memfd`s, or filesystem root/anonymous nodes), `name`
+    /// is empty.
     // TODO: Move this API to sit alongside the other `compute_*()` APIs.
     // TODO: https://fxbug.dev/335397745 - APIs should not mix SecurityId and (raw) ClassId.
     pub fn compute_create_sid_raw(
@@ -617,27 +647,14 @@ impl SecurityServer {
         target_class: ClassId,
         name: &[u8],
     ) -> Result<SecurityId, anyhow::Error> {
-        self.backend.compute_create_sid_raw(source_sid, target_sid, target_class.into(), name)
+        self.compute_create_sid_uncached(source_sid, target_sid, target_class.into(), name)
     }
 
-    /// Returns the raw `AccessDecision` for a specified source, target and class.
-    // TODO: APIs should not mix SecurityId and (raw) ClassId.
-    pub fn compute_access_decision_raw(
-        &self,
-        source_sid: SecurityId,
-        target_sid: SecurityId,
-        target_class: ClassId,
-    ) -> AccessDecision {
-        self.backend.compute_access_decision_raw(source_sid, target_sid, target_class.into())
-    }
-}
-
-impl SecurityServerBackend {
     fn expect_active_policy<'a>(&self, scope: &'a RcuReadScope) -> &'a ActivePolicy {
         self.active_policy.as_ref(scope).expect("policy should be loaded")
     }
 
-    fn compute_create_sid_raw(
+    fn compute_create_sid_uncached(
         &self,
         source_sid: SecurityId,
         target_sid: SecurityId,
@@ -648,12 +665,12 @@ impl SecurityServerBackend {
             let (source_context, target_context) =
                 active_policy.sid_table.sids_to_security_contexts(scope, source_sid, target_sid);
 
-            Ok(active_policy.parsed.compute_create_context(
+            Ok(Cow::Owned(active_policy.parsed.compute_create_context(
                 source_context,
                 target_context,
                 target_class,
                 name,
-            ))
+            )))
         })
         .context("computing new security context from policy")
     }
@@ -661,7 +678,10 @@ impl SecurityServerBackend {
     /// Helper for call-sites that need to compute a `SecurityContext` and assign a SID to it.
     fn compute_sid(
         &self,
-        compute_context: impl Fn(&RcuReadScope, &ActivePolicy) -> Result<SecurityContext, anyhow::Error>,
+        compute_context: impl for<'a> Fn(
+            &'a RcuReadScope,
+            &'a ActivePolicy,
+        ) -> Result<Cow<'a, SecurityContext>, anyhow::Error>,
     ) -> Result<SecurityId, anyhow::Error> {
         // Initially assume that the computed context will most likely already have a SID assigned,
         // so that the operation can be completed via RCU without taking any lock.
@@ -695,28 +715,35 @@ impl SecurityServerBackend {
                     &scope,
                     &current_policy.parsed,
                     &mut portable_sids,
-                    &context,
+                    context,
                 )
                 .map_err(anyhow::Error::from)
         }
     }
 
-    fn compute_access_decision_raw(
+    /// Returns the raw `AccessDecision` for a specified source, target and class.
+    // TODO: APIs should not mix SecurityId and (raw) ClassId.
+    pub fn compute_access_decision_raw(
         &self,
         source_sid: SecurityId,
         target_sid: SecurityId,
-        target_class: ObjectClass,
+        target_class: ClassId,
     ) -> AccessDecision {
         let scope = RcuReadScope::new();
         let Some(active_policy) = self.active_policy.as_ref(&scope) else {
             // All permissions are allowed when no policy is loaded, regardless of enforcing state.
             return AccessDecision::allow(AccessVector::ALL);
         };
-        active_policy.compute_access_decision_raw(&scope, source_sid, target_sid, target_class)
+        active_policy.compute_access_decision_raw(
+            &scope,
+            source_sid,
+            target_sid,
+            target_class.into(),
+        )
     }
 }
 
-impl Query for SecurityServerBackend {
+impl Query for SecurityServer {
     fn compute_access_decision(
         &self,
         source_sid: SecurityId,
@@ -725,20 +752,20 @@ impl Query for SecurityServerBackend {
     ) -> KernelAccessDecision {
         let scope = RcuReadScope::new();
         let Some(active_policy) = self.active_policy.as_ref(&scope) else {
-            return KernelAccessDecision {
-                allow: AccessVector::ALL,
-                audit: AccessVector::NONE,
-                flags: 0,
-                todo_bug: None,
-            };
+            return KernelAccessDecision::ALLOW_ALL;
         };
-        let decision = active_policy.compute_access_decision_raw(
-            &scope,
-            source_sid,
-            target_sid,
+        let (source_context, target_context) =
+            active_policy.sid_table.sids_to_security_contexts(&scope, source_sid, target_sid);
+        let decision = active_policy.compute_access_decision_for_contexts(
+            source_context,
+            target_context,
             target_class.into(),
         );
-        active_policy.parsed.access_decision_to_kernel_access_decision(target_class, decision)
+        active_policy.parsed.access_decision_to_kernel_access_decision(
+            source_context,
+            target_class,
+            decision,
+        )
     }
 
     fn compute_create_sid(
@@ -748,7 +775,7 @@ impl Query for SecurityServerBackend {
         target_class: KernelClass,
         name: &[u8],
     ) -> Result<SecurityId, anyhow::Error> {
-        self.compute_create_sid_raw(source_sid, target_sid, target_class.into(), name)
+        self.compute_create_sid_uncached(source_sid, target_sid, target_class.into(), name)
     }
 
     fn compute_xperms_access_decision(
@@ -762,50 +789,49 @@ impl Query for SecurityServerBackend {
         let scope = RcuReadScope::new();
         let Some(active_policy) = self.active_policy.as_ref(&scope) else {
             // All permissions are allowed when no policy is loaded, regardless of enforcing state.
-            return KernelXpermsAccessDecision {
-                allow: XpermsBitmap::ALL,
-                audit: XpermsBitmap::NONE,
-                permissive: false,
-                has_todo: false,
-            };
+            return KernelXpermsAccessDecision::ALLOW_ALL;
         };
 
         let (source_context, target_context) =
             active_policy.sid_table.sids_to_security_contexts(&scope, source_sid, target_sid);
+        let target_class = permission.class();
 
         // Look up the decision for the base permission.
         let base_decision_raw = active_policy.compute_access_decision_for_contexts(
             source_context,
             target_context,
-            permission.class().into(),
+            target_class.into(),
         );
-        let base_decision = active_policy
-            .parsed
-            .access_decision_to_kernel_access_decision(permission.class(), base_decision_raw);
-        let permission_access_vector = permission.as_access_vector();
-        let base_permit =
-            base_decision.allow & permission_access_vector == permission_access_vector;
-        let base_audit = base_decision.audit & permission_access_vector == permission_access_vector;
+
+        let (base_permit, base_audit) =
+            match active_policy.parsed.kernel_permission_to_access_vector(permission) {
+                Some(perm_bit) => (
+                    (base_decision_raw.allow & perm_bit) != AccessVector::NONE,
+                    (base_decision_raw.audit() & perm_bit) != AccessVector::NONE,
+                ),
+                None => {
+                    if active_policy.parsed.handle_unknown() == HandleUnknown::Allow {
+                        (true, false)
+                    } else {
+                        (false, !active_policy.parsed.is_neveraudit(source_context.type_()))
+                    }
+                }
+            };
 
         // Look up the extended permission decision.
         let xperms_decision = active_policy.parsed.compute_xperms_access_decision(
             xperms_kind,
             source_context,
             target_context,
-            permission.class(),
+            target_class,
             xperms_prefix,
         );
 
         // Combine the base and extended decisions.
         let allow = if !base_permit { XpermsBitmap::NONE } else { xperms_decision.allow };
-        let audit = if base_audit {
-            XpermsBitmap::ALL
-        } else {
-            (xperms_decision.allow & xperms_decision.auditallow)
-                | (!xperms_decision.allow & xperms_decision.auditdeny)
-        };
-        let permissive = (base_decision.flags & SELINUX_AVD_FLAGS_PERMISSIVE) != 0;
-        let has_todo = base_decision.todo_bug.is_some();
+        let audit = if base_audit { XpermsBitmap::ALL } else { xperms_decision.audit() };
+        let permissive = (base_decision_raw.flags & SELINUX_AVD_FLAGS_PERMISSIVE) != 0;
+        let has_todo = base_decision_raw.todo_bug.is_some();
         KernelXpermsAccessDecision { allow, audit, permissive, has_todo }
     }
 }
@@ -818,23 +844,23 @@ fn check_policy_feature_is_empty<T>(name: &'static str, items: &[T]) -> Result<(
 }
 
 fn validate_no_unsupported_policy_features_used(policy: &Policy) -> Result<(), anyhow::Error> {
-    let ocontexts = policy.object_contexts();
-    check_policy_feature_is_empty("ports", ocontexts.ports())?;
-    check_policy_feature_is_empty("network_interfaces", ocontexts.network_interfaces())?;
-    check_policy_feature_is_empty("nodes", ocontexts.ipv4_nodes())?;
-    check_policy_feature_is_empty("ipv6_nodes", ocontexts.ipv6_nodes())?;
+    let object_contexts = policy.object_contexts();
+    check_policy_feature_is_empty("ports", object_contexts.ports())?;
+    check_policy_feature_is_empty("network_interfaces", object_contexts.network_interfaces())?;
+    check_policy_feature_is_empty("nodes", object_contexts.ipv4_nodes())?;
+    check_policy_feature_is_empty("ipv6_nodes", object_contexts.ipv6_nodes())?;
     check_policy_feature_is_empty(
         "infiniband_partition_keys",
-        ocontexts.infiniband_partition_keys(),
+        object_contexts.infiniband_partition_keys(),
     )?;
-    check_policy_feature_is_empty("infiniband_end_ports", ocontexts.infiniband_end_ports())?;
-    check_policy_feature_is_empty("filesystems", ocontexts.filesystems())?;
+    check_policy_feature_is_empty("infiniband_end_ports", object_contexts.infiniband_end_ports())?;
+    check_policy_feature_is_empty("filesystems", object_contexts.filesystems())?;
 
     Ok(())
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::permission_check::PermissionCheckResult;
     use crate::{
@@ -849,7 +875,7 @@ mod tests {
     const MINIMAL_BINARY_POLICY: &[u8] =
         include_bytes!("../testdata/composite_policies/compiled/minimal_policy");
 
-    fn security_server_with_tests_policy() -> Arc<SecurityServer> {
+    pub(crate) fn security_server_with_tests_policy() -> Arc<SecurityServer> {
         let policy_bytes = TESTS_BINARY_POLICY.to_vec();
         let security_server = SecurityServer::new_default();
         assert_eq!(
@@ -875,10 +901,7 @@ mod tests {
         let sid1 = InitialSid::Kernel.into();
         let sid2 = InitialSid::Unlabeled.into();
         assert_eq!(
-            security_server
-                .backend
-                .compute_access_decision(sid1, sid2, KernelClass::Process.into())
-                .allow,
+            security_server.compute_access_decision(sid1, sid2, KernelClass::Process).allow,
             AccessVector::ALL
         );
     }
@@ -912,49 +935,6 @@ mod tests {
     }
 
     #[test]
-    fn conditional_booleans_can_be_queried() {
-        let policy_bytes = TESTSUITE_BINARY_POLICY.to_vec();
-        let security_server = SecurityServer::new("allow_unimplemented".into(), vec![]);
-        assert_eq!(
-            Ok(()),
-            security_server.load_policy(policy_bytes).map_err(|e| format!("{:?}", e))
-        );
-
-        let booleans = security_server.conditional_booleans();
-        assert!(!booleans.is_empty());
-        let boolean = booleans[0].as_str();
-
-        assert!(security_server.get_boolean("this_is_not_a_valid_boolean_name").is_err());
-        assert!(security_server.get_boolean(boolean).is_ok());
-    }
-
-    #[test]
-    fn conditional_booleans_can_be_changed() {
-        let policy_bytes = TESTSUITE_BINARY_POLICY.to_vec();
-        let security_server = SecurityServer::new("allow_unimplemented".into(), vec![]);
-        assert_eq!(
-            Ok(()),
-            security_server.load_policy(policy_bytes).map_err(|e| format!("{:?}", e))
-        );
-
-        let booleans = security_server.conditional_booleans();
-        assert!(!booleans.is_empty());
-        let boolean = booleans[0].as_str();
-
-        let (active, pending) = security_server.get_boolean(boolean).unwrap();
-        assert_eq!(active, pending, "Initially active and pending values should match");
-
-        security_server.set_pending_boolean(boolean, !active).unwrap();
-        let (active, pending) = security_server.get_boolean(boolean).unwrap();
-        assert!(active != pending, "Before commit pending should differ from active");
-
-        security_server.commit_pending_booleans();
-        let (final_active, final_pending) = security_server.get_boolean(boolean).unwrap();
-        assert_eq!(final_active, pending, "Pending value should be active after commit");
-        assert_eq!(final_active, final_pending, "Active and pending are the same after commit");
-    }
-
-    #[test]
     fn parse_security_context_no_policy() {
         let security_server = SecurityServer::new_default();
         let error = security_server
@@ -970,7 +950,6 @@ mod tests {
         let compute_calls = std::cell::Cell::new(0usize);
 
         let sid = security_server
-            .backend
             .compute_sid(|_scope, active_policy| {
                 let call_index = compute_calls.get();
                 compute_calls.set(call_index + 1);
@@ -985,7 +964,7 @@ mod tests {
                         .load_policy(TESTS_BINARY_POLICY.to_vec())
                         .expect("policy reload succeeds");
                 }
-                Ok(context)
+                Ok(Cow::Owned(context))
             })
             .expect("compute_sid succeeds across policy reload");
 
@@ -996,18 +975,21 @@ mod tests {
         );
     }
 
-    #[test]
-    fn compute_create_sid_no_defaults() {
+    #[track_caller]
+    fn assert_compute_create_sid(
+        policy_bytes: &[u8],
+        source_context: &[u8],
+        target_context: &[u8],
+        expected_context: &[u8],
+    ) {
         let security_server = SecurityServer::new_default();
-        let policy_bytes =
-            include_bytes!("../testdata/micro_policies/file_no_defaults_policy").to_vec();
-        security_server.load_policy(policy_bytes).expect("binary policy loads");
+        security_server.load_policy(policy_bytes.to_vec()).expect("binary policy loads");
 
         let source_sid = security_server
-            .security_context_to_sid(b"user_u:unconfined_r:unconfined_t:s0-s1".into())
+            .security_context_to_sid(source_context.into())
             .expect("creating SID from security context should succeed");
         let target_sid = security_server
-            .security_context_to_sid(b"file_u:object_r:file_t:s0".into())
+            .security_context_to_sid(target_context.into())
             .expect("creating SID from security context should succeed");
 
         let computed_sid = security_server
@@ -1018,218 +1000,108 @@ mod tests {
             .sid_to_security_context(computed_sid)
             .expect("computed sid associated with context");
 
+        assert_eq!(computed_context, expected_context);
+    }
+
+    #[test]
+    fn compute_create_sid_no_defaults() {
         // User and low security level should be copied from the source,
         // and the role and type from the target.
-        assert_eq!(computed_context, b"user_u:object_r:file_t:s0");
+        assert_compute_create_sid(
+            include_bytes!("../testdata/micro_policies/file_no_defaults_policy"),
+            b"user_u:unconfined_r:unconfined_t:s0-s1",
+            b"file_u:object_r:file_t:s0",
+            b"user_u:object_r:file_t:s0",
+        );
     }
 
     #[test]
     fn compute_create_sid_source_defaults() {
-        let security_server = SecurityServer::new_default();
-        let policy_bytes =
-            include_bytes!("../testdata/micro_policies/file_source_defaults_policy").to_vec();
-        security_server.load_policy(policy_bytes).expect("binary policy loads");
-
-        let source_sid = security_server
-            .security_context_to_sid(b"user_u:unconfined_r:unconfined_t:s0-s2:c0".into())
-            .expect("creating SID from security context should succeed");
-        let target_sid = security_server
-            .security_context_to_sid(b"file_u:object_r:file_t:s1-s3:c0".into())
-            .expect("creating SID from security context should succeed");
-
-        let computed_sid = security_server
-            .as_permission_check(&Default::default())
-            .compute_create_sid(source_sid, target_sid, FileClass::File.into(), &[])
-            .expect("new sid computed");
-        let computed_context = security_server
-            .sid_to_security_context(computed_sid)
-            .expect("computed sid associated with context");
-
         // All fields should be copied from the source, but only the "low" part of the security
         // range.
-        assert_eq!(computed_context, b"user_u:unconfined_r:unconfined_t:s0");
+        assert_compute_create_sid(
+            include_bytes!("../testdata/micro_policies/file_source_defaults_policy"),
+            b"user_u:unconfined_r:unconfined_t:s0-s2:c0",
+            b"file_u:object_r:file_t:s1-s3:c0",
+            b"user_u:unconfined_r:unconfined_t:s0",
+        );
     }
 
     #[test]
     fn compute_create_sid_target_defaults() {
-        let security_server = SecurityServer::new_default();
-        let policy_bytes =
-            include_bytes!("../testdata/micro_policies/file_target_defaults_policy").to_vec();
-        security_server.load_policy(policy_bytes).expect("binary policy loads");
-
-        let source_sid = security_server
-            .security_context_to_sid(b"user_u:unconfined_r:unconfined_t:s0-s2:c0".into())
-            .expect("creating SID from security context should succeed");
-        let target_sid = security_server
-            .security_context_to_sid(b"file_u:object_r:file_t:s1-s3:c0".into())
-            .expect("creating SID from security context should succeed");
-
-        let computed_sid = security_server
-            .as_permission_check(&Default::default())
-            .compute_create_sid(source_sid, target_sid, FileClass::File.into(), &[])
-            .expect("new sid computed");
-        let computed_context = security_server
-            .sid_to_security_context(computed_sid)
-            .expect("computed sid associated with context");
-
         // User, role and type copied from target, with source's low security level.
-        assert_eq!(computed_context, b"file_u:object_r:file_t:s0");
+        assert_compute_create_sid(
+            include_bytes!("../testdata/micro_policies/file_target_defaults_policy"),
+            b"user_u:unconfined_r:unconfined_t:s0-s2:c0",
+            b"file_u:object_r:file_t:s1-s3:c0",
+            b"file_u:object_r:file_t:s0",
+        );
     }
 
     #[test]
     fn compute_create_sid_range_source_low_default() {
-        let security_server = SecurityServer::new_default();
-        let policy_bytes =
-            include_bytes!("../testdata/micro_policies/file_range_source_low_policy").to_vec();
-        security_server.load_policy(policy_bytes).expect("binary policy loads");
-
-        let source_sid = security_server
-            .security_context_to_sid(b"user_u:unconfined_r:unconfined_t:s0-s1:c0".into())
-            .expect("creating SID from security context should succeed");
-        let target_sid = security_server
-            .security_context_to_sid(b"file_u:object_r:file_t:s1".into())
-            .expect("creating SID from security context should succeed");
-
-        let computed_sid = security_server
-            .as_permission_check(&Default::default())
-            .compute_create_sid(source_sid, target_sid, FileClass::File.into(), &[])
-            .expect("new sid computed");
-        let computed_context = security_server
-            .sid_to_security_context(computed_sid)
-            .expect("computed sid associated with context");
-
         // User and low security level copied from source, role and type as default.
-        assert_eq!(computed_context, b"user_u:object_r:file_t:s0");
+        assert_compute_create_sid(
+            include_bytes!("../testdata/micro_policies/file_range_source_low_policy"),
+            b"user_u:unconfined_r:unconfined_t:s0-s1:c0",
+            b"file_u:object_r:file_t:s1",
+            b"user_u:object_r:file_t:s0",
+        );
     }
 
     #[test]
     fn compute_create_sid_range_source_low_high_default() {
-        let security_server = SecurityServer::new_default();
-        let policy_bytes =
-            include_bytes!("../testdata/micro_policies/file_range_source_low_high_policy").to_vec();
-        security_server.load_policy(policy_bytes).expect("binary policy loads");
-
-        let source_sid = security_server
-            .security_context_to_sid(b"user_u:unconfined_r:unconfined_t:s0-s1:c0".into())
-            .expect("creating SID from security context should succeed");
-        let target_sid = security_server
-            .security_context_to_sid(b"file_u:object_r:file_t:s1".into())
-            .expect("creating SID from security context should succeed");
-
-        let computed_sid = security_server
-            .as_permission_check(&Default::default())
-            .compute_create_sid(source_sid, target_sid, FileClass::File.into(), &[])
-            .expect("new sid computed");
-        let computed_context = security_server
-            .sid_to_security_context(computed_sid)
-            .expect("computed sid associated with context");
-
         // User and full security range copied from source, role and type as default.
-        assert_eq!(computed_context, b"user_u:object_r:file_t:s0-s1:c0");
+        assert_compute_create_sid(
+            include_bytes!("../testdata/micro_policies/file_range_source_low_high_policy"),
+            b"user_u:unconfined_r:unconfined_t:s0-s1:c0",
+            b"file_u:object_r:file_t:s1",
+            b"user_u:object_r:file_t:s0-s1:c0",
+        );
     }
 
     #[test]
     fn compute_create_sid_range_source_high_default() {
-        let security_server = SecurityServer::new_default();
-        let policy_bytes =
-            include_bytes!("../testdata/micro_policies/file_range_source_high_policy").to_vec();
-        security_server.load_policy(policy_bytes).expect("binary policy loads");
-
-        let source_sid = security_server
-            .security_context_to_sid(b"user_u:unconfined_r:unconfined_t:s0-s1:c0".into())
-            .expect("creating SID from security context should succeed");
-        let target_sid = security_server
-            .security_context_to_sid(b"file_u:object_r:file_t:s0".into())
-            .expect("creating SID from security context should succeed");
-
-        let computed_sid = security_server
-            .as_permission_check(&Default::default())
-            .compute_create_sid(source_sid, target_sid, FileClass::File.into(), &[])
-            .expect("new sid computed");
-        let computed_context = security_server
-            .sid_to_security_context(computed_sid)
-            .expect("computed sid associated with context");
-
         // User and high security level copied from source, role and type as default.
-        assert_eq!(computed_context, b"user_u:object_r:file_t:s1:c0");
+        assert_compute_create_sid(
+            include_bytes!("../testdata/micro_policies/file_range_source_high_policy"),
+            b"user_u:unconfined_r:unconfined_t:s0-s1:c0",
+            b"file_u:object_r:file_t:s0",
+            b"user_u:object_r:file_t:s1:c0",
+        );
     }
 
     #[test]
     fn compute_create_sid_range_target_low_default() {
-        let security_server = SecurityServer::new_default();
-        let policy_bytes =
-            include_bytes!("../testdata/micro_policies/file_range_target_low_policy").to_vec();
-        security_server.load_policy(policy_bytes).expect("binary policy loads");
-
-        let source_sid = security_server
-            .security_context_to_sid(b"user_u:unconfined_r:unconfined_t:s1".into())
-            .expect("creating SID from security context should succeed");
-        let target_sid = security_server
-            .security_context_to_sid(b"file_u:object_r:file_t:s0-s1:c0".into())
-            .expect("creating SID from security context should succeed");
-
-        let computed_sid = security_server
-            .as_permission_check(&Default::default())
-            .compute_create_sid(source_sid, target_sid, FileClass::File.into(), &[])
-            .expect("new sid computed");
-        let computed_context = security_server
-            .sid_to_security_context(computed_sid)
-            .expect("computed sid associated with context");
-
         // User copied from source, low security level from target, role and type as default.
-        assert_eq!(computed_context, b"user_u:object_r:file_t:s0");
+        assert_compute_create_sid(
+            include_bytes!("../testdata/micro_policies/file_range_target_low_policy"),
+            b"user_u:unconfined_r:unconfined_t:s1",
+            b"file_u:object_r:file_t:s0-s1:c0",
+            b"user_u:object_r:file_t:s0",
+        );
     }
 
     #[test]
     fn compute_create_sid_range_target_low_high_default() {
-        let security_server = SecurityServer::new_default();
-        let policy_bytes =
-            include_bytes!("../testdata/micro_policies/file_range_target_low_high_policy").to_vec();
-        security_server.load_policy(policy_bytes).expect("binary policy loads");
-
-        let source_sid = security_server
-            .security_context_to_sid(b"user_u:unconfined_r:unconfined_t:s1".into())
-            .expect("creating SID from security context should succeed");
-        let target_sid = security_server
-            .security_context_to_sid(b"file_u:object_r:file_t:s0-s1:c0".into())
-            .expect("creating SID from security context should succeed");
-
-        let computed_sid = security_server
-            .as_permission_check(&Default::default())
-            .compute_create_sid(source_sid, target_sid, FileClass::File.into(), &[])
-            .expect("new sid computed");
-        let computed_context = security_server
-            .sid_to_security_context(computed_sid)
-            .expect("computed sid associated with context");
-
         // User copied from source, full security range from target, role and type as default.
-        assert_eq!(computed_context, b"user_u:object_r:file_t:s0-s1:c0");
+        assert_compute_create_sid(
+            include_bytes!("../testdata/micro_policies/file_range_target_low_high_policy"),
+            b"user_u:unconfined_r:unconfined_t:s1",
+            b"file_u:object_r:file_t:s0-s1:c0",
+            b"user_u:object_r:file_t:s0-s1:c0",
+        );
     }
 
     #[test]
     fn compute_create_sid_range_target_high_default() {
-        let security_server = SecurityServer::new_default();
-        let policy_bytes =
-            include_bytes!("../testdata/micro_policies/file_range_target_high_policy").to_vec();
-        security_server.load_policy(policy_bytes).expect("binary policy loads");
-
-        let source_sid = security_server
-            .security_context_to_sid(b"user_u:unconfined_r:unconfined_t:s0".into())
-            .expect("creating SID from security context should succeed");
-        let target_sid = security_server
-            .security_context_to_sid(b"file_u:object_r:file_t:s0-s1:c0".into())
-            .expect("creating SID from security context should succeed");
-
-        let computed_sid = security_server
-            .as_permission_check(&Default::default())
-            .compute_create_sid(source_sid, target_sid, FileClass::File.into(), &[])
-            .expect("new sid computed");
-        let computed_context = security_server
-            .sid_to_security_context(computed_sid)
-            .expect("computed sid associated with context");
-
         // User copied from source, high security level from target, role and type as default.
-        assert_eq!(computed_context, b"user_u:object_r:file_t:s1:c0");
+        assert_compute_create_sid(
+            include_bytes!("../testdata/micro_policies/file_range_target_high_policy"),
+            b"user_u:unconfined_r:unconfined_t:s0",
+            b"file_u:object_r:file_t:s0-s1:c0",
+            b"user_u:object_r:file_t:s1:c0",
+        );
     }
 
     #[test]
@@ -1475,7 +1347,7 @@ mod tests {
             permission_check.has_permission(sid, sid, ProcessPermission::Fork),
             PermissionCheckResult {
                 granted: true,
-                audit: false,
+                audit: AccessVector::NONE,
                 permissive: false,
                 todo_bug: None
             }
@@ -1487,7 +1359,12 @@ mod tests {
         let result = permission_check.has_permission(sid, sid, ProcessPermission::GetRlimit);
         assert_eq!(
             result,
-            PermissionCheckResult { granted: false, audit: true, permissive: true, todo_bug: None }
+            PermissionCheckResult {
+                granted: false,
+                audit: ProcessPermission::GetRlimit.as_access_vector(),
+                permissive: true,
+                todo_bug: None
+            }
         );
         assert!(result.permit());
 
@@ -1501,7 +1378,14 @@ mod tests {
         );
         assert_eq!(
             result,
-            PermissionCheckResult { granted: false, audit: true, permissive: true, todo_bug: None }
+            PermissionCheckResult {
+                granted: false,
+                audit: CommonFsNodePermission::GetAttr
+                    .for_class(FileClass::BlkFile)
+                    .as_access_vector(),
+                permissive: true,
+                todo_bug: None
+            }
         );
         assert!(result.permit());
     }
@@ -1523,7 +1407,7 @@ mod tests {
             result,
             PermissionCheckResult {
                 granted: true,
-                audit: false,
+                audit: AccessVector::NONE,
                 permissive: false,
                 todo_bug: None
             }
@@ -1537,7 +1421,7 @@ mod tests {
             result,
             PermissionCheckResult {
                 granted: false,
-                audit: true,
+                audit: ProcessPermission::GetRlimit.as_access_vector(),
                 permissive: false,
                 todo_bug: None
             }
@@ -1555,7 +1439,9 @@ mod tests {
             result,
             PermissionCheckResult {
                 granted: false,
-                audit: true,
+                audit: CommonFsNodePermission::GetAttr
+                    .for_class(FileClass::BlkFile)
+                    .as_access_vector(),
                 permissive: false,
                 todo_bug: None
             }
@@ -1587,7 +1473,12 @@ mod tests {
         );
         assert_eq!(
             result,
-            PermissionCheckResult { granted: true, audit: false, permissive: true, todo_bug: None }
+            PermissionCheckResult {
+                granted: true,
+                audit: AccessVector::NONE,
+                permissive: true,
+                todo_bug: None
+            }
         );
         assert!(result.permit());
         let result = permission_check.has_permission(
@@ -1599,7 +1490,7 @@ mod tests {
             result,
             PermissionCheckResult {
                 granted: true,
-                audit: false,
+                audit: AccessVector::NONE,
                 permissive: false,
                 todo_bug: None
             }
@@ -1615,7 +1506,12 @@ mod tests {
         );
         assert_eq!(
             result,
-            PermissionCheckResult { granted: false, audit: true, permissive: true, todo_bug: None }
+            PermissionCheckResult {
+                granted: false,
+                audit: ProcessPermission::GetSched.as_access_vector(),
+                permissive: true,
+                todo_bug: None
+            }
         );
         assert!(result.permit());
         let result = permission_check.has_permission(
@@ -1627,7 +1523,7 @@ mod tests {
             result,
             PermissionCheckResult {
                 granted: false,
-                audit: true,
+                audit: ProcessPermission::GetSched.as_access_vector(),
                 permissive: false,
                 todo_bug: None
             }
@@ -1645,7 +1541,14 @@ mod tests {
         );
         assert_eq!(
             result,
-            PermissionCheckResult { granted: false, audit: true, permissive: true, todo_bug: None }
+            PermissionCheckResult {
+                granted: false,
+                audit: CommonFsNodePermission::GetAttr
+                    .for_class(FileClass::BlkFile)
+                    .as_access_vector(),
+                permissive: true,
+                todo_bug: None
+            }
         );
         assert!(result.permit());
         let result = permission_check.has_permission(
@@ -1657,7 +1560,9 @@ mod tests {
             result,
             PermissionCheckResult {
                 granted: false,
-                audit: true,
+                audit: CommonFsNodePermission::GetAttr
+                    .for_class(FileClass::BlkFile)
+                    .as_access_vector(),
                 permissive: false,
                 todo_bug: None
             }
@@ -1682,7 +1587,12 @@ mod tests {
         let result = permission_check.has_permission(audit_sid, audit_sid, ProcessPermission::Fork);
         assert_eq!(
             result,
-            PermissionCheckResult { granted: true, audit: true, permissive: false, todo_bug: None }
+            PermissionCheckResult {
+                granted: true,
+                audit: ProcessPermission::Fork.as_access_vector(),
+                permissive: false,
+                todo_bug: None
+            }
         );
         assert!(result.permit());
 
@@ -1693,7 +1603,7 @@ mod tests {
             result,
             PermissionCheckResult {
                 granted: true,
-                audit: false,
+                audit: AccessVector::NONE,
                 permissive: false,
                 todo_bug: None
             }
@@ -1707,7 +1617,7 @@ mod tests {
             result,
             PermissionCheckResult {
                 granted: false,
-                audit: false,
+                audit: AccessVector::NONE,
                 permissive: false,
                 todo_bug: None
             }
@@ -1721,7 +1631,91 @@ mod tests {
             result,
             PermissionCheckResult {
                 granted: false,
-                audit: true,
+                audit: ProcessPermission::GetPgid.as_access_vector(),
+                permissive: false,
+                todo_bug: None
+            }
+        );
+        assert!(!result.permit());
+    }
+
+    #[test]
+    fn auditallow_and_dontaudit_permission_sets() {
+        let security_server = security_server_with_tests_policy();
+        security_server.set_enforcing(true);
+        assert!(security_server.is_enforcing());
+
+        let audit_sid = security_server
+            .security_context_to_sid("user0:object_r:test_audit_t:s0".into())
+            .unwrap();
+
+        let local_cache = Default::default();
+        let permission_check = security_server.as_permission_check(&local_cache);
+
+        // Self-fork (audit-allow) and self-setsched (dont-audit) are granted, and only the
+        // audit-allow permission is audited.
+        let result = permission_check.has_permissions(
+            audit_sid,
+            audit_sid,
+            ProcessPermission::Fork | ProcessPermission::SetSched,
+        );
+        assert_eq!(
+            result,
+            PermissionCheckResult {
+                granted: true,
+                audit: ProcessPermission::Fork.as_access_vector(),
+                permissive: false,
+                todo_bug: None
+            }
+        );
+        assert!(result.permit());
+
+        // Self-getpgid is denied, so the set is denied, and only the denied permission is audited.
+        let result = permission_check.has_permissions(
+            audit_sid,
+            audit_sid,
+            ProcessPermission::Fork | ProcessPermission::GetPgid,
+        );
+        assert_eq!(
+            result,
+            PermissionCheckResult {
+                granted: false,
+                audit: ProcessPermission::GetPgid.as_access_vector(),
+                permissive: false,
+                todo_bug: None
+            }
+        );
+        assert!(!result.permit());
+
+        // Self-getsched and self-getpgid are both denied, but only the latter is audited, since
+        // self-getsched is dont-audit.
+        let result = permission_check.has_permissions(
+            audit_sid,
+            audit_sid,
+            ProcessPermission::GetSched | ProcessPermission::GetPgid,
+        );
+        assert_eq!(
+            result,
+            PermissionCheckResult {
+                granted: false,
+                audit: ProcessPermission::GetPgid.as_access_vector(),
+                permissive: false,
+                todo_bug: None
+            }
+        );
+        assert!(!result.permit());
+
+        // Self-getsched is denied, but dont-audit, so the denial of the set is not audited.
+        let result = permission_check.has_permissions(
+            audit_sid,
+            audit_sid,
+            ProcessPermission::SetSched | ProcessPermission::GetSched,
+        );
+        assert_eq!(
+            result,
+            PermissionCheckResult {
+                granted: false,
+                audit: AccessVector::NONE,
                 permissive: false,
                 todo_bug: None
             }
@@ -1786,7 +1780,7 @@ mod tests {
             result,
             PermissionCheckResult {
                 granted: false,
-                audit: true,
+                audit: ProcessPermission::GetPgid.as_access_vector(),
                 permissive: false,
                 todo_bug: None
             }
@@ -1800,7 +1794,7 @@ mod tests {
             result,
             PermissionCheckResult {
                 granted: true,
-                audit: true,
+                audit: FilePermission::Entrypoint.as_access_vector(),
                 permissive: false,
                 todo_bug: Some(NonZeroU32::new(1).unwrap())
             }
@@ -1814,9 +1808,27 @@ mod tests {
             result,
             PermissionCheckResult {
                 granted: true,
-                audit: false,
+                audit: AccessVector::NONE,
                 permissive: false,
                 todo_bug: None,
+            }
+        );
+        assert!(result.permit());
+
+        // Source SID has only one of the requested "file" permissions to target SID. The exception
+        // applies to the denied permission, which is the only one audited.
+        let result = permission_check.has_permissions(
+            source_sid,
+            target_sid,
+            FilePermission::Entrypoint | FilePermission::ExecuteNoTrans,
+        );
+        assert_eq!(
+            result,
+            PermissionCheckResult {
+                granted: true,
+                audit: FilePermission::Entrypoint.as_access_vector(),
+                permissive: false,
+                todo_bug: Some(NonZeroU32::new(1).unwrap())
             }
         );
         assert!(result.permit());
@@ -1828,7 +1840,7 @@ mod tests {
             result,
             PermissionCheckResult {
                 granted: false,
-                audit: true,
+                audit: FilePermission::Entrypoint.as_access_vector(),
                 permissive: false,
                 todo_bug: None
             }
@@ -1845,7 +1857,9 @@ mod tests {
             result,
             PermissionCheckResult {
                 granted: true,
-                audit: true,
+                audit: CommonFsNodePermission::Read
+                    .for_class(FileClass::ChrFile)
+                    .as_access_vector(),
                 permissive: false,
                 todo_bug: Some(NonZeroU32::new(2).unwrap())
             }
@@ -1859,7 +1873,7 @@ mod tests {
             result,
             PermissionCheckResult {
                 granted: false,
-                audit: true,
+                audit: FilePermission::Entrypoint.as_access_vector(),
                 permissive: false,
                 todo_bug: None
             }
@@ -1873,7 +1887,7 @@ mod tests {
             result,
             PermissionCheckResult {
                 granted: false,
-                audit: true,
+                audit: FilePermission::Entrypoint.as_access_vector(),
                 permissive: false,
                 todo_bug: None
             }
@@ -1887,7 +1901,7 @@ mod tests {
             result,
             PermissionCheckResult {
                 granted: true,
-                audit: true,
+                audit: FilePermission::Entrypoint.as_access_vector(),
                 permissive: true,
                 todo_bug: Some(NonZeroU32::new(4).unwrap())
             }
@@ -1905,7 +1919,7 @@ mod tests {
             result,
             PermissionCheckResult {
                 granted: true,
-                audit: true,
+                audit: FilePermission::Entrypoint.as_access_vector(),
                 permissive: false,
                 todo_bug: Some(NonZeroU32::new(5).unwrap())
             }
@@ -1920,7 +1934,7 @@ mod tests {
             result,
             PermissionCheckResult {
                 granted: true,
-                audit: true,
+                audit: FilePermission::Entrypoint.as_access_vector(),
                 permissive: false,
                 todo_bug: Some(NonZeroU32::new(5).unwrap())
             }
@@ -1935,7 +1949,7 @@ mod tests {
             result,
             PermissionCheckResult {
                 granted: true,
-                audit: true,
+                audit: FilePermission::Entrypoint.as_access_vector(),
                 permissive: false,
                 todo_bug: Some(NonZeroU32::new(5).unwrap())
             }
@@ -1973,7 +1987,7 @@ mod tests {
             result,
             PermissionCheckResult {
                 granted: false,
-                audit: true,
+                audit: ProcessPermission::GetSched.as_access_vector(),
                 permissive: false,
                 todo_bug: None
             }
@@ -1984,7 +1998,7 @@ mod tests {
             result,
             PermissionCheckResult {
                 granted: false,
-                audit: true,
+                audit: DirPermission::AddName.as_access_vector(),
                 permissive: false,
                 todo_bug: None
             }
@@ -1997,7 +2011,7 @@ mod tests {
             result,
             PermissionCheckResult {
                 granted: true,
-                audit: false,
+                audit: AccessVector::NONE,
                 permissive: false,
                 todo_bug: None
             }
@@ -2008,7 +2022,7 @@ mod tests {
             result,
             PermissionCheckResult {
                 granted: false,
-                audit: true,
+                audit: DirPermission::Reparent.as_access_vector(),
                 permissive: false,
                 todo_bug: None
             }
@@ -2028,7 +2042,7 @@ mod tests {
             result,
             PermissionCheckResult {
                 granted: true,
-                audit: false,
+                audit: AccessVector::NONE,
                 permissive: false,
                 todo_bug: None
             }
@@ -2039,7 +2053,7 @@ mod tests {
             result,
             PermissionCheckResult {
                 granted: true,
-                audit: false,
+                audit: AccessVector::NONE,
                 permissive: false,
                 todo_bug: None
             }
@@ -2052,7 +2066,7 @@ mod tests {
             result,
             PermissionCheckResult {
                 granted: true,
-                audit: false,
+                audit: AccessVector::NONE,
                 permissive: false,
                 todo_bug: None
             }
@@ -2064,11 +2078,42 @@ mod tests {
             result,
             PermissionCheckResult {
                 granted: false,
-                audit: true,
+                audit: DirPermission::Reparent.as_access_vector(),
                 permissive: false,
                 todo_bug: None
             }
         );
         assert!(!result.permit());
+    }
+
+    #[test]
+    fn hash_stats() {
+        let security_server = SecurityServer::new_default();
+        assert_eq!(security_server.sid_table_hash_stats(), HashStats::default());
+        let initial_avc_stats = security_server.avc_hash_stats();
+        assert_eq!(initial_avc_stats.entries, 0);
+        assert_eq!(initial_avc_stats.buckets_used, 0);
+        assert_eq!(initial_avc_stats.longest_chain, 0);
+        assert!(initial_avc_stats.total_buckets > 0);
+
+        security_server.load_policy(TESTS_BINARY_POLICY.to_vec()).expect("load policy");
+        assert_eq!(security_server.sid_table_hash_stats().entries, 0);
+
+        let sid = security_server
+            .security_context_to_sid(b"user0:object_r:type0:s0:c0".into())
+            .expect("resolve sid");
+        let sid_stats = security_server.sid_table_hash_stats();
+        assert_eq!(sid_stats.entries, 1);
+        assert_eq!(sid_stats.buckets_used, 1);
+        assert_eq!(sid_stats.longest_chain, 1);
+        assert!(sid_stats.total_buckets > 0);
+
+        let local_cache = PerThreadCache::default();
+        let permission_check = security_server.as_permission_check(&local_cache);
+        let _ = permission_check.has_permission(sid, sid, ProcessPermission::Fork);
+        let avc_stats = security_server.avc_hash_stats();
+        assert_eq!(avc_stats.entries, 1);
+        assert_eq!(avc_stats.buckets_used, 1);
+        assert_eq!(avc_stats.longest_chain, 1);
     }
 }

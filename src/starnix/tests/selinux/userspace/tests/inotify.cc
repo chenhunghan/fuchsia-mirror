@@ -19,6 +19,7 @@ extern std::string DoPrePolicyLoadWork() { return "inotify_policy"; }
 namespace {
 
 constexpr char kFileLabel[] = "test_u:object_r:test_inotify_file_t:s0";
+constexpr char kUnreadableFileLabel[] = "test_u:object_r:test_inotify_unreadable_file_t:s0";
 
 // Verify that setting a watch is denied if the "watch" permission is not granted.
 TEST(InotifyTest, WatchDenied) {
@@ -26,6 +27,20 @@ TEST(InotifyTest, WatchDenied) {
   auto enforcing = ScopedEnforcement::SetEnforcing();
 
   EXPECT_TRUE(RunSubprocessAs("test_u:test_r:test_inotify_no_watch_t:s0", [&]() {
+    fbl::unique_fd fd(inotify_init1(IN_CLOEXEC));
+    ASSERT_TRUE(fd.is_valid()) << "errno: " << errno;
+    EXPECT_THAT(inotify_add_watch(fd.get(), test_file.name().c_str(), IN_MODIFY),
+                SyscallFailsWithErrno(EACCES));
+  }));
+}
+
+// Verify that setting a watch is denied if the "read" permission is not granted on the target
+// file, even if the "watch" permission is granted.
+TEST(InotifyTest, WatchDeniedWithoutRead) {
+  auto test_file = ScopedTempFDWithLabel(kUnreadableFileLabel);
+  auto enforcing = ScopedEnforcement::SetEnforcing();
+
+  EXPECT_TRUE(RunSubprocessAs("test_u:test_r:test_inotify_watch_t:s0", [&]() {
     fbl::unique_fd fd(inotify_init1(IN_CLOEXEC));
     ASSERT_TRUE(fd.is_valid()) << "errno: " << errno;
     EXPECT_THAT(inotify_add_watch(fd.get(), test_file.name().c_str(), IN_MODIFY),

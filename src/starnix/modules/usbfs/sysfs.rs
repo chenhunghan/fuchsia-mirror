@@ -12,7 +12,6 @@ use starnix_uapi::errors::Errno;
 use starnix_uapi::file_mode::mode;
 use std::borrow::Cow;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 struct ConfigurationValueFile {
     usb_device: Arc<UsbDevice>,
@@ -20,7 +19,7 @@ struct ConfigurationValueFile {
 
 impl BytesFileOps for ConfigurationValueFile {
     fn read(&self, _current_task: &CurrentTask) -> Result<Cow<'_, [u8]>, Errno> {
-        let val = self.usb_device.active_config.load(Ordering::Relaxed);
+        let val = self.usb_device.state.lock().active_config;
         Ok(format!("{}\n", val).into_bytes().into())
     }
 }

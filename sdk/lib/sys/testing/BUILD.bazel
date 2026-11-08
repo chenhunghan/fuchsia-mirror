@@ -3,6 +3,7 @@
 # found in the LICENSE file.
 
 load("//build/bazel/aspects:runner.bzl", "fx_runner_shard")
+load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -30,4 +31,16 @@ exports_files(
         "rust_test_runner.shard.cml",
     ],
     visibility = ["//src/lib/atomic-storage:__pkg__"],
+)
+
+cml_shard(
+    name = "gtest_runner.shard",
+    shard = "gtest_runner.shard.cml",
+    visibility = ["//src/devices/block/tests/rpmb-integration-test:__pkg__"],
+)
+
+cml_shard(
+    name = "rust_test_runner.shard",
+    shard = "rust_test_runner.shard.cml",
+    visibility = ["//src/media/haptics:__pkg__"],
 )

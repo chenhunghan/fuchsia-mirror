@@ -62,6 +62,7 @@ rustc_test("trace_test") {
   sources = [ "src/lib.rs" ]
   deps = [
     "//sdk/rust/zx",
+    "//src/lib/fuchsia-rcu:fuchsia-rcu-traits",
     "//src/lib/fuchsia-runtime",
     "//third_party/rust_crates:libc",
     "//third_party/rust_crates:pin-project",
@@ -153,12 +154,14 @@ rustc_library("trace") {
   visibility = [ "//*" ]
   deps = [
     "//sdk/rust/zx",
+    "//src/lib/fuchsia-rcu:fuchsia-rcu-traits",
     "//src/lib/fuchsia-runtime",
     "//third_party/rust_crates:libc",
     "//third_party/rust_crates:pin-project",
     "//third_party/rust_crates:rand",
   ]
 }
+
 source_set("rust-trace-provider-cpp") {
   sources = [ "trace-provider/trace_provider.cc" ]
   deps = [
@@ -168,6 +171,7 @@ source_set("rust-trace-provider-cpp") {
   ]
   visibility = [ ":*" ]
 }
+
 rustc_library("trace-provider") {
   sources = [ "trace-provider/src/lib.rs" ]
   crate_name = "fuchsia_trace_provider"
@@ -184,6 +188,7 @@ rustc_library("trace-provider") {
     "//sdk/rust/zx",
   ]
 }
+
 rustc_library("trace-observer") {
   sources = [ "trace-observer/src/lib.rs" ]
   crate_name = "fuchsia_trace_observer"

@@ -2,20 +2,25 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::hash::{BuildHasher, Hash, Hasher};
+use std::hash::Hash;
 use std::num::NonZeroU32;
 use std::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Not, Sub, SubAssign};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use hashbrown::HashTable;
 use hashbrown::hash_table::Entry;
-use rapidhash::RapidBuildHasher;
 use selinux_policy_derive::{Parse, Serialize, Validate};
+use zerocopy::{ByteEq, ByteHash, Immutable, IntoBytes};
 
 use super::error::{ParseError, SerializeError, ValidateError};
-use super::parser::{Array, PolicyCursor, PolicyWriter};
+use super::indexed::IdAndNameIndexed;
+use super::metadata::PolicyVersion;
+use super::parser::{Array, PolicyCursor, PolicyWriter, SymbolArray};
 use super::traits::{Parse, PolicyId, Serialize, Validate};
-use super::{AccessVector, ClassId, ConditionalBooleanId, Policy, TypeId, U24Index};
+use super::{
+    AccessVector, ClassId, ConditionalBoolean, ConditionalBooleanId, Policy, TypeId, TypeSet,
+    U24Index,
+};
 
 /// Flag bit for standard `allow` rules.
 const AV_ALLOW_RULE_FLAG: u16 = 0x1;
@@ -351,7 +356,8 @@ impl XpermRule {
 }
 
 /// Lookup key for indexing and matching access vector rules by source domain, target domain, and class.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Validate)]
+#[derive(Clone, Copy, Debug, ByteEq, ByteHash, IntoBytes, Immutable, Validate)]
+#[repr(C)]
 pub struct RuleKey {
     source_type: TypeId,
     target_type: TypeId,
@@ -360,15 +366,28 @@ pub struct RuleKey {
 
 impl RuleKey {
     /// Constructs a [`RuleKey`] for the specified source domain, target domain, and security class.
-    fn new(source_type: TypeId, target_type: TypeId, class: ClassId) -> Self {
+    pub(super) fn new(source_type: TypeId, target_type: TypeId, class: ClassId) -> Self {
         Self { source_type, target_type, class }
     }
 
-    /// Hashes this [`RuleKey`] using `hasher`.
-    fn hash(&self, hasher: &RapidBuildHasher) -> u64 {
-        let mut state = hasher.build_hasher();
-        Hash::hash(self, &mut state);
-        state.finish()
+    /// Returns `true` if this key matches `class` and any type or attribute in `source_types` and
+    /// `target_types`.
+    #[inline]
+    pub(super) fn matches(
+        &self,
+        source_types: &TypeSet,
+        target_types: &TypeSet,
+        class: ClassId,
+    ) -> bool {
+        self.class == class
+            && source_types.contains(self.source_type)
+            && target_types.contains(self.target_type)
+    }
+
+    /// Hashes this [`RuleKey`].
+    #[inline(always)]
+    fn hash(&self) -> u64 {
+        rapidhash::rapidhash(self.as_bytes())
     }
 
     /// Constructs a [`BinaryAccessVectorRuleHeader`] for this [`RuleKey`], [`RuleKind`], and enabled flag.
@@ -422,11 +441,11 @@ impl HasRuleKey for XpermRule {
     }
 }
 
-/// Encapsulates the result of a permissions calculation, between
-/// source & target domains, for a specific class. Decisions describe
-/// which permissions are allowed, and whether permissions should be
+/// Result of a permissions calculation between source & target domains for a specific class.
+///
+/// Decisions describe which permissions are allowed, and whether permissions should be
 /// audit-logged when allowed, and when denied.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessDecision {
     pub allow: AccessVector,
     pub auditallow: AccessVector,
@@ -456,22 +475,23 @@ impl AccessDecision {
             todo_bug: None,
         }
     }
+
+    /// Returns the [`AccessVector`] of permissions that should be audit-logged given
+    /// [`Self::allow`], [`Self::auditallow`], and [`Self::auditdeny`].
+    pub fn audit(&self) -> AccessVector {
+        (self.allow & self.auditallow) | (!self.allow & self.auditdeny)
+    }
 }
 
-/// Lookup table for SELinux rules, optimized for fast queries. It maps a [`RuleKey`]
-/// (source, target, class) to matching rules.
+/// Sequence of SELinux access vector rules grouped by payload type while preserving on-wire rule
+/// order for serialization.
 ///
 /// Rules are grouped into three contiguous arrays based on their payload struct:
 /// 1. [`AccessRule`] (`av_rules`): allow, auditallow, dontaudit.
 /// 2. [`TypeRule`] (`type_rules`): transitions.
 /// 3. [`XpermRule`] (`xperm_rules`): allowxperm, auditallowxperm, dontauditxperm.
-///
-/// Three corresponding [`HashTable`]s map [`RuleKey`]s to the index of the **first** matching rule.
-/// Lookups return an iterator that starts at that index and yields rules until the
-/// key changes. This works because binary policies guarantee rules for the same key
-/// are contiguous.
 #[derive(Debug, Clone)]
-struct AccessVectorRules {
+pub(super) struct AccessVectorRules {
     av_rules: Box<[AccessRule]>,
     type_rules: Box<[TypeRule]>,
     xperm_rules: Box<[XpermRule]>,
@@ -479,16 +499,57 @@ struct AccessVectorRules {
 }
 
 impl AccessVectorRules {
-    /// Returns the standard access vector rules.
-    #[cfg(test)]
-    fn av_rules(&self) -> &[AccessRule] {
+    /// Returns the standard [`AccessRule`] slice.
+    pub(super) fn av_rules(&self) -> &[AccessRule] {
         &self.av_rules
+    }
+
+    /// Returns the [`TypeRule`] slice (type transition, change, and member rules).
+    pub(super) fn type_rules(&self) -> &[TypeRule] {
+        &self.type_rules
+    }
+
+    /// Returns the [`XpermRule`] slice (extended permission rules).
+    pub(super) fn xperm_rules(&self) -> &[XpermRule] {
+        &self.xperm_rules
+    }
+
+    /// Returns `true` if all rules in this rule set have `enabled == expected`.
+    fn all_enabled(&self, expected: bool) -> bool {
+        self.av_rules.iter().all(|rule| rule.enabled == expected)
+            && self.type_rules.iter().all(|rule| rule.enabled == expected)
+            && self.xperm_rules.iter().all(|rule| rule.enabled == expected)
+    }
+
+    /// Sets the `enabled` flag on all rules in this rule set.
+    ///
+    /// Although permission queries select the active conditional branch via
+    /// [`ConditionalNode::active_rules`], updating the per-rule `enabled` flag ensures that
+    /// re-serializing the binary policy emits the expected `AV_ENABLED_RULE_FLAG` header bit.
+    fn set_enabled(&mut self, enabled: bool) {
+        for rule in self.av_rules.iter_mut() {
+            rule.enabled = enabled;
+        }
+        for rule in self.type_rules.iter_mut() {
+            rule.enabled = enabled;
+        }
+        for rule in self.xperm_rules.iter_mut() {
+            rule.enabled = enabled;
+        }
     }
 }
 
 impl Parse for AccessVectorRules {
     fn parse(cursor: &mut PolicyCursor<'_>) -> Result<Self, ParseError> {
         let count = u32::parse(cursor)? as usize;
+        let min_bytes = count.saturating_mul(std::mem::size_of::<BinaryAccessVectorRuleHeader>());
+        if min_bytes > cursor.remaining() {
+            return Err(ParseError::MissingData {
+                type_name: std::any::type_name::<BinaryAccessVectorRuleHeader>(),
+                type_size: min_bytes,
+                num_bytes: cursor.remaining(),
+            });
+        }
 
         let mut av_rules = Vec::new();
         let mut type_rules = Vec::new();
@@ -591,35 +652,37 @@ impl Validate for AccessVectorRules {
 /// Binary policies guarantee that rules for the same key in the global table are contiguous.
 /// Three corresponding [`HashTable`]s map [`RuleKey`]s to the index of the **first** matching rule.
 /// Lookups return an iterator that starts at that index and yields rules until the key changes.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct IndexedAccessVectorRules {
     rules: AccessVectorRules,
     av_table: HashTable<U24Index>,
     type_transition_table: HashTable<U24Index>,
     xperms_table: HashTable<U24Index>,
-    hasher: RapidBuildHasher,
 }
 
 impl IndexedAccessVectorRules {
+    /// Returns the total number of unconditional access vector, type, and extended permission rules.
+    pub fn rules_count(&self) -> usize {
+        self.rules.rule_order.len()
+    }
+
     /// Builds an index over the specified access vector rules.
     ///
     /// Returns [`ParseError::DuplicateAccessVectorRule`] if non-contiguous rules share the same key.
     fn new(rules: AccessVectorRules) -> Result<Self, ParseError> {
-        let hasher = RapidBuildHasher::default();
-        let av_table = build_index(&rules.av_rules, &hasher)?;
-        let type_transition_table = build_index(&rules.type_rules, &hasher)?;
-        let xperms_table = build_index(&rules.xperm_rules, &hasher)?;
+        let av_table = build_index(&rules.av_rules)?;
+        let type_transition_table = build_index(&rules.type_rules)?;
+        let xperms_table = build_index(&rules.xperm_rules)?;
 
-        Ok(Self { rules, av_table, type_transition_table, xperms_table, hasher })
+        Ok(Self { rules, av_table, type_transition_table, xperms_table })
     }
 
     fn find_rules<'a, R: HasRuleKey>(
         table: &HashTable<U24Index>,
         rules: &'a [R],
         key: RuleKey,
-        hasher: &RapidBuildHasher,
     ) -> impl Iterator<Item = &'a R> {
-        let hash = key.hash(hasher);
+        let hash = key.hash();
         let slice = match table.find(hash, |&i| rules[usize::from(i)].key() == key) {
             Some(&i) => &rules[usize::from(i)..],
             None => &[],
@@ -634,12 +697,7 @@ impl IndexedAccessVectorRules {
         target: TypeId,
         class: ClassId,
     ) -> impl Iterator<Item = &AccessRule> {
-        Self::find_rules(
-            &self.av_table,
-            &self.rules.av_rules,
-            RuleKey::new(source, target, class),
-            &self.hasher,
-        )
+        Self::find_rules(&self.av_table, &self.rules.av_rules, RuleKey::new(source, target, class))
     }
 
     /// Returns an iterator yielding matching type transition, change, or member rules for the specified tuple.
@@ -653,7 +711,6 @@ impl IndexedAccessVectorRules {
             &self.type_transition_table,
             &self.rules.type_rules,
             RuleKey::new(source, target, class),
-            &self.hasher,
         )
     }
 
@@ -668,7 +725,6 @@ impl IndexedAccessVectorRules {
             &self.xperms_table,
             &self.rules.xperm_rules,
             RuleKey::new(source, target, class),
-            &self.hasher,
         )
     }
 }
@@ -699,22 +755,19 @@ impl Validate for IndexedAccessVectorRules {
 /// and well-ordered.
 ///
 /// Returns [`ParseError::DuplicateAccessVectorRule`] if non-contiguous rules share the same key.
-fn build_index<R: HasRuleKey>(
-    rules: &[R],
-    hasher: &RapidBuildHasher,
-) -> Result<HashTable<U24Index>, ParseError> {
+fn build_index<R: HasRuleKey>(rules: &[R]) -> Result<HashTable<U24Index>, ParseError> {
     let mut table = HashTable::new();
     let mut offset = 0;
 
     for chunk in rules.chunk_by(|a, b| a.key() == b.key()) {
         let key = chunk[0].key();
         let u24_idx = offset.try_into()?;
-        let hash = key.hash(hasher);
+        let hash = key.hash();
 
         let Entry::Vacant(entry) = table.entry(
             hash,
             |&i| rules[usize::from(i)].key() == key,
-            |&i| rules[usize::from(i)].key().hash(hasher),
+            |&i| rules[usize::from(i)].key().hash(),
         ) else {
             return Err(ParseError::DuplicateAccessVectorRule { key, kind: chunk[0].kind() });
         };
@@ -725,33 +778,37 @@ fn build_index<R: HasRuleKey>(
     Ok(table)
 }
 
-/// Expression element kind bit for boolean variable operands.
+/// Expression element kind for boolean variable operands.
 const COND_EXPR_BOOL: u32 = 1;
-/// Expression element kind bit for unary NOT operator.
+/// Expression element kind for unary NOT (`!`) operator.
 const COND_EXPR_NOT: u32 = 2;
-/// Expression element kind bit for binary OR operator.
+/// Expression element kind for binary OR (`||`) operator.
 const COND_EXPR_OR: u32 = 3;
-/// Expression element kind bit for binary AND operator.
+/// Expression element kind for binary AND (`&&`) operator.
 const COND_EXPR_AND: u32 = 4;
-/// Expression element kind bit for binary EQUALS operator.
-const COND_EXPR_EQ: u32 = 5;
-/// Expression element kind bit for binary NOT-EQUALS operator.
-const COND_EXPR_NEQ: u32 = 6;
+/// Expression element kind for binary XOR (`^`) operator.
+const COND_EXPR_XOR: u32 = 5;
+/// Expression element kind for binary EQUALS (`==`) operator.
+const COND_EXPR_EQ: u32 = 6;
+/// Expression element kind for binary NOT-EQUALS (`!=`) operator.
+const COND_EXPR_NEQ: u32 = 7;
 
 /// Individual element in a conditional boolean expression sequence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 enum ConditionalExpressionElement {
     /// Conditional boolean variable operand.
     Boolean(ConditionalBooleanId),
-    /// Unary boolean NOT operator.
+    /// Unary boolean NOT (`!`) operator.
     Not,
-    /// Binary boolean OR operator.
+    /// Binary boolean OR (`||`) operator.
     Or,
-    /// Binary boolean AND operator.
+    /// Binary boolean AND (`&&`) operator.
     And,
-    /// Binary boolean EQUALS operator.
+    /// Binary boolean XOR (`^`) operator.
+    Xor,
+    /// Binary boolean EQUALS (`==`) operator.
     Equals,
-    /// Binary boolean NOT-EQUALS operator.
+    /// Binary boolean NOT-EQUALS (`!=`) operator.
     NotEquals,
 }
 
@@ -768,6 +825,7 @@ impl Parse for ConditionalExpressionElement {
             COND_EXPR_NOT => Ok(Self::Not),
             COND_EXPR_OR => Ok(Self::Or),
             COND_EXPR_AND => Ok(Self::And),
+            COND_EXPR_XOR => Ok(Self::Xor),
             COND_EXPR_EQ => Ok(Self::Equals),
             COND_EXPR_NEQ => Ok(Self::NotEquals),
             invalid => Err(ParseError::InvalidEnumValue {
@@ -785,6 +843,7 @@ impl Serialize for ConditionalExpressionElement {
             Self::Not => (COND_EXPR_NOT, 0),
             Self::Or => (COND_EXPR_OR, 0),
             Self::And => (COND_EXPR_AND, 0),
+            Self::Xor => (COND_EXPR_XOR, 0),
             Self::Equals => (COND_EXPR_EQ, 0),
             Self::NotEquals => (COND_EXPR_NEQ, 0),
         };
@@ -804,12 +863,107 @@ impl Validate for ConditionalExpressionElement {
 }
 
 /// Parsed SELinux conditional node containing expression AST and true/false branch rule sets.
-#[derive(Clone, Debug, Parse, Serialize, Validate)]
-pub struct ConditionalNode {
+#[derive(Clone, Debug, Parse, Serialize)]
+pub(super) struct ConditionalNode {
     state: u32,
     expression_elements: Array<ConditionalExpressionElement>,
     true_rules: AccessVectorRules,
     false_rules: AccessVectorRules,
+}
+
+impl ConditionalNode {
+    /// Returns the active branch's [`AccessVectorRules`] according to the current evaluated state.
+    #[inline]
+    pub fn active_rules(&self) -> &AccessVectorRules {
+        if self.state != 0 { &self.true_rules } else { &self.false_rules }
+    }
+
+    /// Evaluates this conditional node's postfix boolean expression against `booleans`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `self.expression_elements` has not been validated against a policy containing
+    /// `booleans`.
+    fn evaluate(
+        &self,
+        booleans: &IdAndNameIndexed<SymbolArray<ConditionalBoolean>>,
+    ) -> Result<bool, ValidateError> {
+        let mut stack = Vec::with_capacity(self.expression_elements.len());
+        for element in self.expression_elements.iter() {
+            match element {
+                ConditionalExpressionElement::Boolean(id) => {
+                    let boolean = booleans
+                        .get_by_id(*id)
+                        .expect("validated conditional boolean ID must exist");
+                    stack.push(boolean.active());
+                }
+                ConditionalExpressionElement::Not => {
+                    let operand =
+                        stack.last_mut().ok_or(ValidateError::InvalidConditionalExpression)?;
+                    *operand = !*operand;
+                }
+                ConditionalExpressionElement::Or
+                | ConditionalExpressionElement::And
+                | ConditionalExpressionElement::Xor
+                | ConditionalExpressionElement::Equals
+                | ConditionalExpressionElement::NotEquals => {
+                    let right = stack.pop().ok_or(ValidateError::InvalidConditionalExpression)?;
+                    let left =
+                        stack.last_mut().ok_or(ValidateError::InvalidConditionalExpression)?;
+                    *left = match element {
+                        ConditionalExpressionElement::Or => *left || right,
+                        ConditionalExpressionElement::And => *left && right,
+                        ConditionalExpressionElement::Xor => *left ^ right,
+                        ConditionalExpressionElement::Equals => *left == right,
+                        ConditionalExpressionElement::NotEquals => *left != right,
+                        _ => unreachable!(),
+                    };
+                }
+            }
+        }
+        if stack.len() != 1 {
+            return Err(ValidateError::InvalidConditionalExpression);
+        }
+        Ok(stack[0])
+    }
+
+    /// Re-evaluates this conditional node against `booleans`, updating its state and rule
+    /// enabled flags.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `self` has not been validated against a policy containing `booleans`.
+    pub fn update(&mut self, booleans: &IdAndNameIndexed<SymbolArray<ConditionalBoolean>>) {
+        let active = self.evaluate(booleans).expect("validated conditional expression");
+        self.state = u32::from(active);
+        self.true_rules.set_enabled(active);
+        self.false_rules.set_enabled(!active);
+    }
+}
+
+impl Validate for ConditionalNode {
+    fn validate(&self, policy: &Policy) -> Result<(), ValidateError> {
+        self.expression_elements.validate(policy)?;
+        self.true_rules.validate(policy)?;
+        self.false_rules.validate(policy)?;
+
+        if policy.version < PolicyVersion::MIN_CONDITIONAL_XPERMS
+            && (!self.true_rules.xperm_rules().is_empty()
+                || !self.false_rules.xperm_rules().is_empty())
+        {
+            return Err(ValidateError::UnexpectedConditionalXpermRule);
+        }
+
+        let active = self.evaluate(policy.conditional_booleans())?;
+        if self.state != u32::from(active)
+            || !self.true_rules.all_enabled(active)
+            || !self.false_rules.all_enabled(!active)
+        {
+            return Err(ValidateError::InvalidConditionalNodeState);
+        }
+
+        Ok(())
+    }
 }
 
 /// On-wire header identifying the source, target, class, and rule flags of an access vector rule.
@@ -1001,13 +1155,12 @@ mod tests {
     }
 
     #[test]
-    fn test_conditional_nodes() {
+    fn test_conditional_node_validation() {
         let policy_bytes =
             include_bytes!("../../testdata/composite_policies/compiled/conditional_policy");
-        let policy = Policy::parse(policy_bytes).expect("parse conditional policy");
-        policy.validate().expect("validate conditional policy");
+        let policy = Policy::parse_and_validate(policy_bytes);
 
-        let nodes = policy.conditional_nodes();
+        let nodes = &policy.conditional_nodes;
         assert_eq!(nodes.len(), 4);
         assert_eq!(nodes[0].true_rules.av_rules().len(), 1);
         assert_eq!(nodes[0].false_rules.av_rules().len(), 0);
@@ -1017,19 +1170,92 @@ mod tests {
         assert_eq!(nodes[2].false_rules.av_rules().len(), 0);
         assert_eq!(nodes[3].true_rules.av_rules().len(), 1);
         assert_eq!(nodes[3].false_rules.av_rules().len(), 0);
+
+        let first = ConditionalExpressionElement::Boolean(
+            policy.conditional_booleans().get_by_name(b"test_cond_first").unwrap().id(),
+        );
+        let second = ConditionalExpressionElement::Boolean(
+            policy.conditional_booleans().get_by_name(b"test_cond_second").unwrap().id(),
+        );
+        let third = ConditionalExpressionElement::Boolean(
+            policy.conditional_booleans().get_by_name(b"test_cond_third").unwrap().id(),
+        );
+
+        let mut node = policy.conditional_nodes[1].clone();
+
+        // Empty expression is invalid.
+        node.expression_elements = Vec::new().into();
+        assert_eq!(node.validate(&policy), Err(ValidateError::InvalidConditionalExpression));
+
+        // Unary NOT on an empty stack is invalid.
+        node.expression_elements = vec![ConditionalExpressionElement::Not].into();
+        assert_eq!(node.validate(&policy), Err(ValidateError::InvalidConditionalExpression));
+
+        // Binary operators with fewer than two operands on the stack are invalid.
+        for binary_op in [
+            ConditionalExpressionElement::Or,
+            ConditionalExpressionElement::And,
+            ConditionalExpressionElement::Xor,
+            ConditionalExpressionElement::Equals,
+            ConditionalExpressionElement::NotEquals,
+        ] {
+            node.expression_elements = vec![first, binary_op].into();
+            assert_eq!(node.validate(&policy), Err(ValidateError::InvalidConditionalExpression));
+        }
+
+        // Expression leaving more than one value on the stack is invalid.
+        node.expression_elements = vec![first, second].into();
+        assert_eq!(node.validate(&policy), Err(ValidateError::InvalidConditionalExpression));
+
+        // Unknown boolean ID is rejected.
+        let invalid_bool = ConditionalExpressionElement::Boolean(
+            ConditionalBooleanId::from_u32(999).expect("nonzero boolean id"),
+        );
+        node.expression_elements = vec![invalid_bool].into();
+        assert_eq!(
+            node.validate(&policy),
+            Err(ValidateError::UnknownId { kind: "conditional boolean", id: 999 })
+        );
+
+        // Node state or rule enabled flags not matching the evaluated expression is rejected.
+        node.expression_elements =
+            vec![first, third, ConditionalExpressionElement::NotEquals].into();
+        assert_eq!(node.validate(&policy), Err(ValidateError::InvalidConditionalNodeState));
+        node.update(policy.conditional_booleans());
+        assert_eq!(node.validate(&policy), Ok(()));
+
+        // Extended permission rules inside conditional nodes are rejected before v34
+        // (`PolicyVersion::MIN_CONDITIONAL_XPERMS`) and accepted in v34+.
+        let type_id = policy.types().get_by_name(b"test_cond_source_t").unwrap().id();
+        let class_id = policy.classes().get_by_name(b"file").unwrap().id();
+        node.true_rules.xperm_rules = vec![XpermRule {
+            key: RuleKey::new(type_id, type_id, class_id),
+            kind: RuleKind::AllowXperm,
+            extended_permissions: ExtendedPermissions {
+                xperms_type: XPERMS_TYPE_IOCTL_PREFIX_AND_POSTFIXES,
+                xperms_optional_prefix: 0x12,
+                xperms_bitmap: XpermsBitmap::NONE,
+            },
+            enabled: false,
+        }]
+        .into_boxed_slice();
+        assert_eq!(node.validate(&policy), Err(ValidateError::UnexpectedConditionalXpermRule));
+
+        let mut v34_policy = policy;
+        v34_policy.version = PolicyVersion::V34;
+        assert_eq!(node.validate(&v34_policy), Ok(()));
     }
 
     #[test]
     fn parse_allowxperm_one_ioctl() {
         let policy_bytes = include_bytes!("../../testdata/micro_policies/allowxperm_policy");
-        let policy = Policy::parse(policy_bytes).expect("parse policy");
-        policy.validate().expect("validate policy");
+        let policy = Policy::parse_and_validate(policy_bytes);
 
         let class_id =
             policy.classes().get_by_name(b"class_one_ioctl").expect("look up class_one_ioctl").id();
         let type0 = policy.types().get_by_name(b"type0").expect("look up type0").id();
         let rules: Vec<_> = policy
-            .access_vector_rules()
+            .access_vector_rules
             .find_xperm_rules(type0, type0, class_id)
             .filter(|r| r.kind() == RuleKind::AllowXperm)
             .map(|r| r.extended_permissions())
@@ -1045,8 +1271,7 @@ mod tests {
     #[test]
     fn parse_allowxperm_two_ioctls_same_range_coalesced() {
         let policy_bytes = include_bytes!("../../testdata/micro_policies/allowxperm_policy");
-        let policy = Policy::parse(policy_bytes).expect("parse policy");
-        policy.validate().expect("validate policy");
+        let policy = Policy::parse_and_validate(policy_bytes);
 
         let class_id = policy
             .classes()
@@ -1055,7 +1280,7 @@ mod tests {
             .id();
         let type0 = policy.types().get_by_name(b"type0").expect("look up type0").id();
         let rules: Vec<_> = policy
-            .access_vector_rules()
+            .access_vector_rules
             .find_xperm_rules(type0, type0, class_id)
             .filter(|r| r.kind() == RuleKind::AllowXperm)
             .map(|r| r.extended_permissions())
@@ -1072,8 +1297,7 @@ mod tests {
     #[test]
     fn parse_allowxperm_one_driver_range() {
         let policy_bytes = include_bytes!("../../testdata/micro_policies/allowxperm_policy");
-        let policy = Policy::parse(policy_bytes).expect("parse policy");
-        policy.validate().expect("validate policy");
+        let policy = Policy::parse_and_validate(policy_bytes);
 
         let class_id = policy
             .classes()
@@ -1082,7 +1306,7 @@ mod tests {
             .id();
         let type0 = policy.types().get_by_name(b"type0").expect("look up type0").id();
         let rules: Vec<_> = policy
-            .access_vector_rules()
+            .access_vector_rules
             .find_xperm_rules(type0, type0, class_id)
             .filter(|r| r.kind() == RuleKind::AllowXperm)
             .map(|r| r.extended_permissions())
@@ -1098,8 +1322,7 @@ mod tests {
     #[test]
     fn parse_allowxperm_two_ioctls_different_range() {
         let policy_bytes = include_bytes!("../../testdata/micro_policies/allowxperm_policy");
-        let policy = Policy::parse(policy_bytes).expect("parse policy");
-        policy.validate().expect("validate policy");
+        let policy = Policy::parse_and_validate(policy_bytes);
 
         let class_id = policy
             .classes()
@@ -1108,7 +1331,7 @@ mod tests {
             .id();
         let type0 = policy.types().get_by_name(b"type0").expect("look up type0").id();
         let rules: Vec<_> = policy
-            .access_vector_rules()
+            .access_vector_rules
             .find_xperm_rules(type0, type0, class_id)
             .filter(|r| r.kind() == RuleKind::AllowXperm)
             .map(|r| r.extended_permissions())
@@ -1128,14 +1351,13 @@ mod tests {
     #[test]
     fn parse_allowxperm_one_nlmsg() {
         let policy_bytes = include_bytes!("../../testdata/micro_policies/allowxperm_policy");
-        let policy = Policy::parse(policy_bytes).expect("parse policy");
-        policy.validate().expect("validate policy");
+        let policy = Policy::parse_and_validate(policy_bytes);
 
         let class_id =
             policy.classes().get_by_name(b"class_one_nlmsg").expect("look up class_one_nlmsg").id();
         let type0 = policy.types().get_by_name(b"type0").expect("look up type0").id();
         let rules: Vec<_> = policy
-            .access_vector_rules()
+            .access_vector_rules
             .find_xperm_rules(type0, type0, class_id)
             .filter(|r| r.kind() == RuleKind::AllowXperm)
             .map(|r| r.extended_permissions())
@@ -1153,8 +1375,7 @@ mod tests {
     #[test]
     fn parse_auditallowxperm_not_coalesced() {
         let policy_bytes = include_bytes!("../../testdata/micro_policies/allowxperm_policy");
-        let policy = Policy::parse(policy_bytes).expect("parse policy");
-        policy.validate().expect("validate policy");
+        let policy = Policy::parse_and_validate(policy_bytes);
 
         let class_id = policy
             .classes()
@@ -1163,13 +1384,13 @@ mod tests {
             .id();
         let type0 = policy.types().get_by_name(b"type0").expect("look up type0").id();
         let allow_rules: Vec<_> = policy
-            .access_vector_rules()
+            .access_vector_rules
             .find_xperm_rules(type0, type0, class_id)
             .filter(|r| r.kind() == RuleKind::AllowXperm)
             .map(|r| r.extended_permissions())
             .collect();
         let auditallow_rules: Vec<_> = policy
-            .access_vector_rules()
+            .access_vector_rules
             .find_xperm_rules(type0, type0, class_id)
             .filter(|r| r.kind() == RuleKind::AuditAllowXperm)
             .map(|r| r.extended_permissions())
@@ -1186,8 +1407,7 @@ mod tests {
     #[test]
     fn parse_dontauditxperm() {
         let policy_bytes = include_bytes!("../../testdata/micro_policies/allowxperm_policy");
-        let policy = Policy::parse(policy_bytes).expect("parse policy");
-        policy.validate().expect("validate policy");
+        let policy = Policy::parse_and_validate(policy_bytes);
 
         let class_id = policy
             .classes()
@@ -1196,7 +1416,7 @@ mod tests {
             .id();
         let type0 = policy.types().get_by_name(b"type0").expect("look up type0").id();
         let rules: Vec<_> = policy
-            .access_vector_rules()
+            .access_vector_rules
             .find_xperm_rules(type0, type0, class_id)
             .filter(|r| r.kind() == RuleKind::DontAuditXperm)
             .map(|r| r.extended_permissions())
@@ -1211,5 +1431,104 @@ mod tests {
         assert_eq!(rules[1].xperms_optional_prefix(), 0x10);
         assert_eq!(rules[1].count(), 1);
         assert!(rules[1].contains(0x1000));
+    }
+
+    #[test]
+    fn conditional_xperms_v34_roundtrip_and_evaluation() {
+        let policy_bytes =
+            include_bytes!("../../testdata/composite_policies/compiled/conditional_policy");
+        let mut policy = Policy::parse(policy_bytes).expect("parse conditional policy");
+        policy.version = PolicyVersion::V34;
+
+        let source = policy
+            .parse_security_context(b"system_u:unconfined_r:test_cond_source_t:s0".into())
+            .expect("source security context");
+        let target = policy
+            .parse_security_context(b"system_u:object_r:test_cond_target_file_t:s0".into())
+            .expect("target security context");
+        let file_class = policy.classes().get_by_name(b"file").expect("file class");
+        let rule_key = RuleKey::new(source.type_(), target.type_(), file_class.id());
+
+        let set_xperm_rules =
+            |rules: &mut AccessVectorRules, entries: &[(RuleKind, XpermsBitmap)], enabled: bool| {
+                rules.xperm_rules = entries
+                    .iter()
+                    .map(|&(kind, xperms_bitmap)| XpermRule {
+                        key: rule_key,
+                        kind,
+                        extended_permissions: ExtendedPermissions {
+                            xperms_type: XPERMS_TYPE_IOCTL_PREFIX_AND_POSTFIXES,
+                            xperms_optional_prefix: 0x12,
+                            xperms_bitmap,
+                        },
+                        enabled,
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice();
+                let mut order = rules.rule_order.to_vec();
+                order.extend(entries.iter().map(|&(kind, _)| kind));
+                rules.rule_order = order.into_boxed_slice();
+            };
+
+        // Node 1 evaluates `test_cond_first` (initially true): grant + auditallow 0x1200 when
+        // true, and grant 0x1201 + dontaudit 0x1202 when false.
+        let node = &mut policy.conditional_nodes.as_mut()[1];
+        set_xperm_rules(
+            &mut node.true_rules,
+            &[
+                (RuleKind::AllowXperm, XpermsBitmap([1, 0, 0, 0])),
+                (RuleKind::AuditAllowXperm, XpermsBitmap([1, 0, 0, 0])),
+            ],
+            true,
+        );
+        set_xperm_rules(
+            &mut node.false_rules,
+            &[
+                (RuleKind::AllowXperm, XpermsBitmap([2, 0, 0, 0])),
+                (RuleKind::DontAuditXperm, XpermsBitmap([4, 0, 0, 0])),
+            ],
+            false,
+        );
+
+        let mut v34_bytes = Vec::new();
+        policy.serialize(&mut v34_bytes).expect("serialize v34 policy");
+        let mut policy = Policy::parse_and_validate(&v34_bytes);
+
+        let file_class = policy.classes().get_by_name(b"file").expect("file class");
+        let decision = policy.compute_xperms_access_decision(
+            crate::policy::XpermsKind::Ioctl,
+            &source,
+            &target,
+            file_class,
+            /* prefix = */ 0x12,
+        );
+        assert!(decision.allow.contains(0x00));
+        assert!(!decision.allow.contains(0x01));
+        assert!(decision.auditallow.contains(0x00));
+        assert!(decision.auditdeny.contains(0x02));
+
+        // The active conditional `allowxperm` on prefix 0x12 also restricts other ioctl prefixes.
+        let other_prefix = policy.compute_xperms_access_decision(
+            crate::policy::XpermsKind::Ioctl,
+            &source,
+            &target,
+            file_class,
+            /* prefix = */ 0x13,
+        );
+        assert_eq!(other_prefix.allow, XpermsBitmap::NONE);
+
+        policy.update_conditional_booleans([(b"test_cond_first".as_slice(), false)]);
+        let file_class = policy.classes().get_by_name(b"file").expect("file class");
+        let decision = policy.compute_xperms_access_decision(
+            crate::policy::XpermsKind::Ioctl,
+            &source,
+            &target,
+            file_class,
+            /* prefix = */ 0x12,
+        );
+        assert!(!decision.allow.contains(0x00));
+        assert!(decision.allow.contains(0x01));
+        assert_eq!(decision.auditallow, XpermsBitmap::NONE);
+        assert!(!decision.auditdeny.contains(0x02));
     }
 }

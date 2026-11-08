@@ -69,7 +69,7 @@ zx::result client_result =
 One major change in DFv2 is that drivers take control of the life cycle
 of the child [nodes][driver-node] (or devices) created by the drivers.
 This is different from DFv1 where the driver framework manages the life
-cycles of devices, such as [tearing down devices][device-lifecycle],
+cycles of devices, such as tearing down devices,
 through the device tree.
 
 In DFv1, devices are controlled by [`zx_protocol_device`][ddk-device-h-77]
@@ -217,7 +217,6 @@ contains most of the new APIs).
 [driver-dispatcher]: /docs/concepts/drivers/driver-dispatcher-and-threads.md
 [driver-communication]: /docs/concepts/drivers/driver_communication.md
 [driver-node]: /docs/concepts/drivers/drivers_and_nodes.md
-[device-lifecycle]: /docs/development/drivers/concepts/device_driver_model/device-lifecycle.md#an_example_of_the_tear-down_sequence
 [ddk-device-h-77]: https://source.corp.google.com/fuchsia/src/lib/ddk/include/lib/ddk/device.h;l=77
 [ddk-driver-h-29]: https://source.corp.google.com/fuchsia/src/lib/ddk/include/lib/ddk/driver.h;l=29
 [load-firmware]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/lib/ddk/include/lib/ddk/driver.h;l=416

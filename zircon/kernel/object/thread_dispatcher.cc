@@ -10,25 +10,18 @@
 #include <inttypes.h>
 #include <lib/counters.h>
 #include <platform.h>
-#include <string.h>
 #include <trace.h>
 #include <zircon/errors.h>
 #include <zircon/rights.h>
-#include <zircon/syscalls/debug.h>
 #include <zircon/types.h>
 
-#include <arch/debugger.h>
 #include <arch/exception.h>
 #include <arch/regs.h>
 #include <arch/vm.h>
 #include <fbl/algorithm.h>
 #include <fbl/alloc_checker.h>
 #include <kernel/thread.h>
-#include <ktl/optional.h>
-#include <ktl/type_traits.h>
-#include <object/exception_dispatcher.h>
 #include <object/handle.h>
-#include <object/job_dispatcher.h>
 #include <object/process_dispatcher.h>
 #include <vm/kstack.h>
 #include <vm/vm.h>
@@ -38,64 +31,12 @@
 
 #define LOCAL_TRACE 0
 
-// static
-zx_status_t ThreadDispatcher::Create(fbl::RefPtr<ProcessDispatcher> process, uint32_t flags,
-                                     ktl::string_view name,
-                                     KernelHandle<ThreadDispatcher>* out_handle,
-                                     zx_rights_t* out_rights) {
-  ffi::Uninitialized<KernelHandle<ThreadDispatcher>> handle;
-  ffi::Uninitialized<zx_rights_t> rights;
-  zx_status_t status = rust_thread_dispatcher_create(fbl::ExportToRawPtr(&process), flags,
-                                                     name.data(), name.size(), &handle, &rights);
-  if (status == ZX_OK) {
-    *out_handle = ktl::move(handle.Get());
-    *out_rights = rights.Get();
-  }
-  return status;
-}
+IMPLEMENT_DISPATCHER_RUST_STATE(ThreadDispatcher, rust_thread_dispatcher_state_get_lock,
+                                rust_thread_dispatcher_state_destroy)
 
-// |flags| is accepted for symmetry with Create() but is unused.
-ThreadDispatcher::ThreadDispatcher(fbl::RefPtr<ProcessDispatcher> process, uint32_t flags)
-    : Dispatcher(0u) {
+ThreadDispatcher::ThreadDispatcher(fbl::RefPtr<ProcessDispatcher> process) : Dispatcher(0u) {
   DISPATCHER_VERIFY_OFFSET(ThreadDispatcher, kThreadDispatcherStateOffset);
   rust_thread_dispatcher_state_init(&opaque_storage_, this, fbl::ExportToRawPtr(&process));
-}
-
-Lock<CriticalMutex>* ThreadDispatcher::get_lock() const {
-  return rust_thread_dispatcher_state_get_lock(&opaque_storage_);
-}
-
-ThreadDispatcher::~ThreadDispatcher() {
-  LTRACE_ENTRY_OBJ;
-
-  rust_thread_dispatcher_state_destroy(&opaque_storage_);
-}
-
-zx_status_t ThreadDispatcher::set_name(const char* name, size_t len) {
-  AssertCanary();
-
-  Guard<CriticalMutex> thread_guard{get_lock()};
-  if (core_thread_ == nullptr) {
-    return ZX_ERR_BAD_STATE;
-  }
-  core_thread_->set_name({name, len});
-  KTRACE_KERNEL_OBJECT("kernel:meta", get_koid(), ZX_OBJ_TYPE_THREAD, (fxt::StringRef{name, len}),
-                       ("process", ktrace::Koid(process()->get_koid())),
-                       ("job", ktrace::Koid(process()->job()->get_koid())));
-  return ZX_OK;
-}
-
-zx_status_t ThreadDispatcher::get_name(char (&out_name)[ZX_MAX_NAME_LEN]) const {
-  AssertCanary();
-
-  memset(out_name, 0, ZX_MAX_NAME_LEN);
-
-  Guard<CriticalMutex> thread_guard{get_lock()};
-  if (core_thread_ == nullptr) {
-    return ZX_ERR_BAD_STATE;
-  }
-  strlcpy(out_name, core_thread_->name(), ZX_MAX_NAME_LEN);
-  return ZX_OK;
 }
 
 // low level LK entry point for the thread
@@ -140,257 +81,4 @@ int ThreadDispatcher::StartRoutine(void* arg) {
   // switch to user mode and start the process
   arch_enter_uspace(&iframe);
   __UNREACHABLE;
-}
-
-zx_status_t ThreadDispatcher::GetExceptionReport(zx_exception_report_t* report) {
-  AssertCanary();
-
-  LTRACE_ENTRY_OBJ;
-  Guard<CriticalMutex> guard{get_lock()};
-
-  ExceptionDispatcher* exception = rust_thread_dispatcher_get_exception_locked(this);
-  if (exception != nullptr) {
-    // We always leave exception handling before the report gets wiped
-    // so this must succeed.
-    [[maybe_unused]] bool success = exception->FillReport(report);
-    DEBUG_ASSERT(success);
-  } else {
-    return ZX_ERR_BAD_STATE;
-  }
-
-  return ZX_OK;
-}
-
-zx_status_t ThreadDispatcher::HandleException(Exceptionate* exceptionate,
-                                              fbl::RefPtr<ExceptionDispatcher> exception,
-                                              bool* sent) {
-  AssertCanary();
-
-  LTRACE_ENTRY_OBJ;
-
-  *sent = false;
-
-  // Mark as blocked before sending the exception, otherwise a handler could
-  // potentially query our state before we've marked ourself blocked.
-  ThreadDispatcher::AutoBlocked by(ThreadDispatcher::Blocked::EXCEPTION);
-
-  {
-    Guard<CriticalMutex> guard{get_lock()};
-
-    // We send the exception while locked so that if it succeeds we can
-    // atomically update our state.
-    zx_status_t status = exceptionate->SendException(exception);
-    if (status != ZX_OK) {
-      return status;
-    }
-    *sent = true;
-
-    // This state is needed by ThreadDispatcher::get_info_for_userspace() in thread_dispatcher.rs.
-    rust_thread_dispatcher_set_exception_locked(this, exception.get(), exceptionate->type());
-  }
-
-  LTRACEF("blocking on exception response\n");
-
-  zx_status_t status = exception->WaitForHandleClose();
-
-  LTRACEF("received exception response %d\n", status);
-
-  Guard<CriticalMutex> guard{get_lock()};
-
-  // If both the thread was killed and the exception was resumed before we
-  // started waiting, the exception resume status (ZX_OK) might be returned,
-  // but we want thread kill to always take priority and stop exception
-  // handling immediately.
-  //
-  // Note that this logic will always trigger for ZX_EXCP_THREAD_EXITING
-  // whether the thread was killed or is exiting normally, but that's fine
-  // because that exception only ever goes to a single handler so we ignore
-  // the handler return value anyway.
-  if (rust_thread_dispatcher_clear_exception_locked(this)) {
-    status = ZX_ERR_INTERNAL_INTR_KILLED;
-  }
-
-  return status;
-}
-
-bool ThreadDispatcher::HandleSingleShotException(Exceptionate* exceptionate,
-                                                 zx_excp_type_t exception_type,
-                                                 const arch_exception_context_t& arch_context) {
-  AssertCanary();
-
-  LTRACE_ENTRY_OBJ;
-
-  // Do a quick check for valid channel first. It's still possible that the
-  // channel will become invalid immediately after this check, but that will
-  // be caught when we try to send the exception. This is just an
-  // optimization to avoid unnecessary setup/teardown in the common case.
-  if (!exceptionate->HasValidChannel()) {
-    return false;
-  }
-
-  zx_exception_report_t report = ExceptionDispatcher::BuildArchReport(exception_type, arch_context);
-
-  fbl::RefPtr<ExceptionDispatcher> exception =
-      ExceptionDispatcher::Create(fbl::RefPtr(this), exception_type, &report, &arch_context);
-  if (!exception) {
-    printf("KERN: failed to allocate memory for exception type %u in thread %lu.%lu\n",
-           exception_type, process()->get_koid(), get_koid());
-    return false;
-  }
-
-  // We're about to handle the exception (|HandleException|).  Use a |ScopedThreadExceptionContext|
-  // to make the thread's user register state available to debuggers and exception handlers while
-  // the thread is "in exception".
-  ScopedThreadExceptionContext context(&arch_context);
-
-  bool sent = false;
-  HandleException(exceptionate, exception, &sent);
-
-  exception->Clear();
-
-  return sent;
-}
-
-namespace {
-
-// Prior to API level NEXT, zx_arm64_thread_state_vector_regs_t did not include the SVE `p` and
-// `ffr` fields and was 520 bytes (`offsetof(zx_arm64_thread_state_vector_regs_t, p)`). Maintain
-// support for that exact 520-byte size for callers compiled against earlier API levels.
-template <typename T>
-constexpr ktl::optional<size_t> kStateCompatSize = ktl::nullopt;
-
-#if defined(__aarch64__)
-template <>
-constexpr ktl::optional<size_t> kStateCompatSize<zx_arm64_thread_state_vector_regs_t> =
-    offsetof(zx_arm64_thread_state_vector_regs_t, p);
-#endif
-
-}  // namespace
-
-// T is the state type to read.
-// F is a function that gets state T and has signature |zx_status_t (F)(Thread*, T*)|.
-template <typename T, typename F>
-zx_status_t ThreadDispatcher::ReadStateGeneric(F get_state_func, user_out_ptr<void> buffer,
-                                               size_t buffer_size) {
-  size_t copy_size = sizeof(T);
-  if (buffer_size < copy_size) {
-    if (kStateCompatSize<T> && buffer_size == *kStateCompatSize<T>) {
-      copy_size = *kStateCompatSize<T>;
-    } else {
-      return ZX_ERR_BUFFER_TOO_SMALL;
-    }
-  }
-
-  T state{};
-
-  {
-    Guard<CriticalMutex> guard{get_lock()};
-    // We can't be reading regs while the thread transitions from SUSPENDED to RUNNING.
-    if (!SuspendedOrInExceptionLocked()) {
-      return ZX_ERR_BAD_STATE;
-    }
-    zx_status_t status = get_state_func(core_thread_, &state);
-    if (status != ZX_OK) {
-      return status;
-    }
-  }
-
-  // Since copy may fault, copy only after releasing the lock.
-  return buffer.reinterpret<uint8_t>().copy_array_to_user(reinterpret_cast<const uint8_t*>(&state),
-                                                          copy_size);
-}
-
-zx_status_t ThreadDispatcher::ReadState(zx_thread_state_topic_t state_kind,
-                                        user_out_ptr<void> buffer, size_t buffer_size) {
-  AssertCanary();
-
-  LTRACE_ENTRY_OBJ;
-
-  switch (state_kind) {
-    case ZX_THREAD_STATE_GENERAL_REGS:
-      return ReadStateGeneric<zx_thread_state_general_regs_t>(arch_get_general_regs, buffer,
-                                                              buffer_size);
-    case ZX_THREAD_STATE_FP_REGS:
-      return ReadStateGeneric<zx_thread_state_fp_regs_t>(arch_get_fp_regs, buffer, buffer_size);
-    case ZX_THREAD_STATE_VECTOR_REGS:
-      return ReadStateGeneric<zx_thread_state_vector_regs_t>(arch_get_vector_regs, buffer,
-                                                             buffer_size);
-    case ZX_THREAD_STATE_DEBUG_REGS:
-      return ReadStateGeneric<zx_thread_state_debug_regs_t>(arch_get_debug_regs, buffer,
-                                                            buffer_size);
-    case ZX_THREAD_STATE_SINGLE_STEP:
-      return ReadStateGeneric<zx_thread_state_single_step_t>(arch_get_single_step, buffer,
-                                                             buffer_size);
-    default:
-      return ZX_ERR_INVALID_ARGS;
-  }
-}
-
-// T is the state type to write.
-// F is a function that sets state T and has signature |zx_status_t (F)(Thread*, const T*)|.
-template <typename T, typename F>
-zx_status_t ThreadDispatcher::WriteStateGeneric(F set_state_func, user_in_ptr<const void> buffer,
-                                                size_t buffer_size) {
-  size_t copy_size = sizeof(T);
-  if (buffer_size < copy_size) {
-    if (kStateCompatSize<T> && buffer_size == *kStateCompatSize<T>) {
-      copy_size = *kStateCompatSize<T>;
-    } else {
-      return ZX_ERR_BUFFER_TOO_SMALL;
-    }
-  }
-
-  T state{};
-  zx_status_t status = buffer.reinterpret<const uint8_t>().copy_array_from_user(
-      reinterpret_cast<uint8_t*>(&state), copy_size);
-  if (status != ZX_OK) {
-    return status;
-  }
-
-  Guard<CriticalMutex> guard{get_lock()};
-
-  // We can't be writing regs while the thread transitions from SUSPENDED to RUNNING.
-  if (!SuspendedOrInExceptionLocked()) {
-    return ZX_ERR_BAD_STATE;
-  }
-
-  if constexpr (ktl::is_same_v<T, zx_thread_state_vector_regs_t>) {
-    if (copy_size < sizeof(T)) {
-      T current{};
-      zx_status_t get_status = arch_get_vector_regs(core_thread_, &current);
-      if (get_status != ZX_OK) {
-        return get_status;
-      }
-      memcpy(reinterpret_cast<uint8_t*>(&state) + copy_size,
-             reinterpret_cast<const uint8_t*>(&current) + copy_size, sizeof(T) - copy_size);
-    }
-  }
-
-  return set_state_func(core_thread_, &state);
-}
-
-zx_status_t ThreadDispatcher::WriteState(zx_thread_state_topic_t state_kind,
-                                         user_in_ptr<const void> buffer, size_t buffer_size) {
-  AssertCanary();
-
-  LTRACE_ENTRY_OBJ;
-
-  switch (state_kind) {
-    case ZX_THREAD_STATE_GENERAL_REGS:
-      return WriteStateGeneric<zx_thread_state_general_regs_t>(arch_set_general_regs, buffer,
-                                                               buffer_size);
-    case ZX_THREAD_STATE_FP_REGS:
-      return WriteStateGeneric<zx_thread_state_fp_regs_t>(arch_set_fp_regs, buffer, buffer_size);
-    case ZX_THREAD_STATE_VECTOR_REGS:
-      return WriteStateGeneric<zx_thread_state_vector_regs_t>(arch_set_vector_regs, buffer,
-                                                              buffer_size);
-    case ZX_THREAD_STATE_DEBUG_REGS:
-      return WriteStateGeneric<zx_thread_state_debug_regs_t>(arch_set_debug_regs, buffer,
-                                                             buffer_size);
-    case ZX_THREAD_STATE_SINGLE_STEP:
-      return WriteStateGeneric<zx_thread_state_single_step_t>(arch_set_single_step, buffer,
-                                                              buffer_size);
-    default:
-      return ZX_ERR_INVALID_ARGS;
-  }
 }

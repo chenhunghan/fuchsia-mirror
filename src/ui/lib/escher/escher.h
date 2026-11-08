@@ -10,10 +10,10 @@
 #include "src/lib/fxl/macros.h"
 #include "src/lib/fxl/memory/weak_ptr.h"
 #include "src/ui/lib/escher/forward_declarations.h"
-#include "src/ui/lib/escher/impl/image_cache.h"
 #include "src/ui/lib/escher/util/hash.h"
 #include "src/ui/lib/escher/util/hash_map.h"
 #include "src/ui/lib/escher/vk/command_buffer.h"
+#include "src/ui/lib/escher/vk/image_factory.h"
 #include "src/ui/lib/escher/vk/vulkan_context.h"
 #include "src/ui/lib/escher/vk/vulkan_device_queues.h"
 
@@ -122,6 +122,8 @@ class Escher final {
   shaderc::Compiler* shaderc_compiler() { return shaderc_compiler_.get(); }
 #endif
 
+  // Note: Despite the legacy name, returns an uncached `ImageFactory` backed by
+  // `gpu_allocator()` and `resource_recycler()`.
   ImageFactory* image_cache() { return image_cache_.get(); }
   BufferCache* buffer_cache() { return buffer_cache_.get(); }
   SamplerCache* sampler_cache() { return sampler_cache_.get(); }
@@ -176,7 +178,7 @@ class Escher final {
   // before they can be constructed.
 
   std::unique_ptr<ResourceRecycler> resource_recycler_;
-  std::unique_ptr<impl::ImageCache> image_cache_;
+  std::unique_ptr<ImageFactoryAdapter> image_cache_;
 #ifdef __Fuchsia__
   std::unique_ptr<SemaphorePool> semaphore_pool_;
 #endif

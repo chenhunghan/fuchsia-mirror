@@ -2,6 +2,7 @@
 IfsVersion:      3.0
 SoName:          libzircon.so
 Symbols:
+  - { Name: _zx_channel_create, Type: Func }
   - { Name: _zx_channel_read, Type: Func }
   - { Name: _zx_channel_write, Type: Func }
   - { Name: _zx_clock_get_monotonic, Type: Func }
@@ -16,6 +17,7 @@ Symbols:
   - { Name: _zx_syscall_test1, Type: Func }
   - { Name: _zx_syscall_test2, Type: Func }
   - { Name: _zx_system_get_page_size, Type: Func }
+  - { Name: zx_channel_create, Type: Func, Weak: true }
   - { Name: zx_channel_read, Type: Func, Weak: true }
   - { Name: zx_channel_write, Type: Func, Weak: true }
   - { Name: zx_clock_get_monotonic, Type: Func, Weak: true }

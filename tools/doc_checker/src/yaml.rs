@@ -21,7 +21,9 @@ use regex::Regex;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_yaml::{Mapping, Value};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 mod toc_checker;
@@ -213,7 +215,6 @@ pub(crate) struct YamlChecker {
     check_external_links: bool,
     allow_fuchsia_src_links: bool,
     reference_docs_root: Option<PathBuf>,
-    reference_prefix: PathBuf,
     external_links: Vec<LinkReference>,
     problems: Vec<(PathBuf, ProblemEntry)>,
     tools: HashSet<String>,
@@ -224,7 +225,12 @@ pub(crate) struct YamlChecker {
 }
 
 impl YamlChecker {
-    fn validate_problems(&self, problem_keys: &HashSet<String>, errors: &mut Vec<DocCheckError>) {
+    fn validate_problems(
+        &self,
+        problem_keys: &HashSet<String>,
+        external_links: &mut Vec<LinkReference>,
+        errors: &mut Vec<DocCheckError>,
+    ) {
         let mut seen_problems = HashSet::new();
 
         // Check for duplicates
@@ -285,17 +291,19 @@ impl YamlChecker {
         errors.extend(related_errors);
 
         // Check markdown links in use_case and description
-        let markdown_errors = self.problems.iter().flat_map(|(file_name, problem)| {
-            let use_case_errors =
-                self.check_markdown_links(file_name, &problem.use_case, problem_keys);
-            let desc_errors =
-                self.check_markdown_links(file_name, &problem.description, problem_keys);
-            use_case_errors.into_iter().chain(desc_errors)
-        });
-        errors.extend(markdown_errors);
+        for (file_name, problem) in &self.problems {
+            for text in [&problem.use_case, &problem.description] {
+                self.check_markdown_links(file_name, text, problem_keys, external_links, errors);
+            }
+        }
     }
 
-    fn validate_tools(&self, problem_keys: &HashSet<String>, errors: &mut Vec<DocCheckError>) {
+    fn validate_tools(
+        &self,
+        problem_keys: &HashSet<String>,
+        external_links: &mut Vec<LinkReference>,
+        errors: &mut Vec<DocCheckError>,
+    ) {
         let mut seen_tools = HashSet::new();
         let duplicate_tool_errors = self
             .tools_entries
@@ -329,25 +337,29 @@ impl YamlChecker {
         });
         errors.extend(tool_related_errors);
 
-        let tool_markdown_errors = self.tools_entries.iter().flat_map(|(file_name, tool_entry)| {
-            self.check_markdown_links(file_name, &tool_entry.description, problem_keys)
-        });
-        errors.extend(tool_markdown_errors);
+        for (file_name, tool_entry) in &self.tools_entries {
+            self.check_markdown_links(
+                file_name,
+                &tool_entry.description,
+                problem_keys,
+                external_links,
+                errors,
+            );
+        }
     }
 
-    // Helper to parse and check markdown links inside YAML text fields.
-    // It uses pulldown_cmark to find links (inline, reference, collapsed, shortcut, anchor).
-    // Reference links are validated against the known set of tools and problems.
-    //
-    // TODO(https://fxbug.dev/562935840): Incorporate these markdown links into the LinkChecker flow
-    // to validate external links and anchors comprehensively.
+    /// Parses the markdown in a YAML text field and checks its links. `[label]` reference
+    /// links and `#anchor` links are validated against the known tools and problems; every
+    /// other link goes through the shared pipeline as content, so external links are queued
+    /// for batch validation.
     fn check_markdown_links(
         &self,
         filename: &Path,
         text: &str,
         problem_keys: &HashSet<String>,
-    ) -> Vec<DocCheckError> {
-        let mut errors = vec![];
+        external_links: &mut Vec<LinkReference>,
+        errors: &mut Vec<DocCheckError>,
+    ) {
         let mut callback_errors = vec![];
         let doc_line = DocLine { line_num: 1, file_name: filename.to_path_buf() };
 
@@ -389,14 +401,14 @@ impl YamlChecker {
                                         ),
                                     ));
                                 }
-                            } else if let Some(err) = check_path(
+                            } else if let Err(err) = check_yaml_link(
                                 &doc_line,
                                 &self.root_dir,
                                 &self.docs_folder,
                                 &self.project,
                                 &dest_url,
                                 self.allow_fuchsia_src_links,
-                                &self.reference_prefix,
+                                LinkContext::Content(external_links),
                             ) {
                                 errors.push(err);
                             }
@@ -409,7 +421,6 @@ impl YamlChecker {
         }
 
         errors.extend(callback_errors);
-        errors
     }
 
     fn collect_reachability_roots(
@@ -507,7 +518,6 @@ impl DocYamlCheck for YamlChecker {
                     filename,
                     yaml_value,
                     self.allow_fuchsia_src_links,
-                    &self.reference_prefix,
                 ),
                 Some("_drivers_areas.yaml") => check_drivers_areas(filename, yaml_value),
                 Some("_drivers_epitaphs.yaml") => check_drivers_epitaphs(filename, yaml_value),
@@ -545,7 +555,6 @@ impl DocYamlCheck for YamlChecker {
                     filename,
                     yaml_value,
                     self.allow_fuchsia_src_links,
-                    &self.reference_prefix,
                 ),
                 Some("_rfcs.yaml") => check_rfcs(filename, yaml_value),
                 Some("_roadmap.yaml") => check_roadmap(
@@ -562,8 +571,10 @@ impl DocYamlCheck for YamlChecker {
                 }
                 Some("_supported_sys_config.yaml") => check_supported_sys_config(
                     &self.root_dir,
+                    &self.project,
                     filename,
                     yaml_value,
+                    self.allow_fuchsia_src_links,
                     &mut self.external_links,
                 ),
                 Some("_toc.yaml") => toc_checker::check_toc(
@@ -573,11 +584,16 @@ impl DocYamlCheck for YamlChecker {
                     filename,
                     yaml_value,
                     self.allow_fuchsia_src_links,
-                    &self.reference_prefix,
                 ),
                 Some("_tools.yaml") => {
-                    let (entries, errors) =
-                        check_tools(&self.root_dir, filename, yaml_value, &mut self.external_links);
+                    let (entries, errors) = check_tools(
+                        &self.root_dir,
+                        &self.project,
+                        filename,
+                        yaml_value,
+                        self.allow_fuchsia_src_links,
+                        &mut self.external_links,
+                    );
                     if let Some(entries) = entries {
                         for entry in entries {
                             self.tools.insert(entry.name.clone());
@@ -601,16 +617,20 @@ impl DocYamlCheck for YamlChecker {
         yaml_files: &[PathBuf],
     ) -> Result<Option<Vec<DocCheckError>>> {
         let mut yaml_file_set: HashSet<&PathBuf> = HashSet::from_iter(yaml_files.iter());
-        let mut visited: HashMap<PathBuf, IncludedYaml> = HashMap::new();
-        let mut markdown_file_set: HashSet<&PathBuf> = HashSet::from_iter(markdown_files.iter());
-        let mut errors = vec![];
         let mut external_links = self.external_links.clone();
 
-        // Some special paths that are not in the //docs dir that need to be added
+        // Some special paths that are not in the //docs dir that need to be added. They are
+        // declared before the traversal so the file set can borrow them.
         let code_of_conduct_md = self.root_dir.join("CODE_OF_CONDUCT.md");
-        markdown_file_set.insert(&code_of_conduct_md);
         let contrib_md = self.root_dir.join("CONTRIBUTING.md");
-        markdown_file_set.insert(&contrib_md);
+        let mut traversal = TocTraversal {
+            checker: self,
+            visited: HashMap::new(),
+            markdown_file_set: HashSet::from_iter(markdown_files.iter()),
+            errors: vec![],
+        };
+        traversal.markdown_file_set.insert(&code_of_conduct_md);
+        traversal.markdown_file_set.insert(&contrib_md);
 
         // Start with //docs/_toc.yaml
         let mut toc_stack: Vec<IncludedYaml> = vec![IncludedYaml {
@@ -619,8 +639,23 @@ impl DocYamlCheck for YamlChecker {
         }];
         while let Some(current_yaml) = toc_stack.pop() {
             if let Some(yaml_doc) = yaml_file_set.take(&current_yaml.included_file) {
-                visited.insert(yaml_doc.clone(), current_yaml.clone());
-                let toc = Toc::from(yaml_doc)?;
+                traversal.visited.insert(yaml_doc.clone(), current_yaml.clone());
+                // A _toc.yaml that fails to parse is reported against the file that included
+                // it; the rest of the tree is still checked.
+                let toc = match Toc::from(yaml_doc) {
+                    Ok(toc) => toc,
+                    Err(e) => {
+                        traversal.errors.push(DocCheckError::new_error(
+                            0,
+                            current_yaml.container.clone(),
+                            &format!(
+                                "Error parsing {:?} included in {:?}: {}",
+                                yaml_doc, &current_yaml.container, e
+                            ),
+                        ));
+                        continue;
+                    }
+                };
                 // remove paths to markdown
                 if let Some(path_list) = toc.get_paths() {
                     for p in path_list {
@@ -629,34 +664,12 @@ impl DocYamlCheck for YamlChecker {
                                 if p.starts_with("/reference") {
                                     let rel_path =
                                         p.strip_prefix("/reference/").unwrap_or(p.as_str());
-                                    let mut file_path = reference_root.join(rel_path);
-                                    if path_helper::is_dir(&file_path) {
-                                        file_path.push("README.md");
-                                    }
-                                    let file_path = normalize_path(&file_path).unwrap_or(file_path);
-
-                                    if file_path.is_hidden_doc(
-                                        &self.root_dir,
-                                        self.reference_docs_root.as_deref(),
-                                    ) {
-                                        errors.push(DocCheckError::new_error(
-                                            0,
-                                            yaml_doc.clone(),
-                                            &format!("Cannot reference hidden file {} in _toc.yaml. Hidden files are not published by Devsite.", p),
-                                        ));
-                                    }
-
-                                    if markdown_file_set.take(&file_path).is_none()
-                                        && !visited.contains_key(&file_path)
-                                    {
-                                        errors.push(DocCheckError::new_error(
-                                            0,
-                                            yaml_doc.clone(),
-                                            &format!("Reference to missing file: {}", p),
-                                        ));
-                                    } else {
-                                        visited.insert(file_path, current_yaml.clone());
-                                    }
+                                    traversal.check_markdown_target(
+                                        reference_root,
+                                        rel_path,
+                                        &p,
+                                        &current_yaml,
+                                    );
                                 }
                             }
                             if self.check_external_links {
@@ -689,33 +702,12 @@ impl DocYamlCheck for YamlChecker {
                             continue;
                         } else {
                             let rel_path = p.strip_prefix('/').unwrap_or(p.as_str());
-                            let mut file_path = self.root_dir.join(rel_path);
-                            if path_helper::is_dir(&file_path) {
-                                file_path.push("README.md");
-                            }
-                            let file_path = normalize_path(&file_path).unwrap_or(file_path);
-
-                            if file_path
-                                .is_hidden_doc(&self.root_dir, self.reference_docs_root.as_deref())
-                            {
-                                errors.push(DocCheckError::new_error(
-                                    0,
-                                    yaml_doc.clone(),
-                                    &format!("Cannot reference hidden file {} in _toc.yaml. Hidden files are not published by Devsite.", p),
-                                ));
-                            }
-
-                            if markdown_file_set.take(&file_path).is_none()
-                                && !visited.contains_key(&file_path)
-                            {
-                                errors.push(DocCheckError::new_error(
-                                    0,
-                                    yaml_doc.clone(),
-                                    &format!("Reference to missing file: {}", p),
-                                ));
-                            } else {
-                                visited.insert(file_path, current_yaml.clone());
-                            }
+                            traversal.check_markdown_target(
+                                &self.root_dir,
+                                rel_path,
+                                &p,
+                                &current_yaml,
+                            );
                         }
                     }
                 }
@@ -729,7 +721,7 @@ impl DocYamlCheck for YamlChecker {
                         .map(|p| self.root_dir.join(p.strip_prefix('/').unwrap_or(p.as_str())))
                         .filter(|p| {
                             if p == &current_yaml.included_file {
-                                errors.push(DocCheckError::new_error(
+                                traversal.errors.push(DocCheckError::new_error(
                                     0,
                                     p.clone(),
                                     &format!("YAML files cannot include themselves {p:?}"),
@@ -757,7 +749,7 @@ impl DocYamlCheck for YamlChecker {
                             })
                             .filter(|p| {
                                 if p == &current_yaml.included_file {
-                                    errors.push(DocCheckError::new_error(
+                                    traversal.errors.push(DocCheckError::new_error(
                                         0,
                                         p.clone(),
                                         &format!("YAML files cannot include themselves {p:?}"),
@@ -774,8 +766,8 @@ impl DocYamlCheck for YamlChecker {
                         }));
                     }
                 }
-            } else if !visited.contains_key(&current_yaml.included_file) {
-                errors.push(DocCheckError::new_error(
+            } else if !traversal.visited.contains_key(&current_yaml.included_file) {
+                traversal.errors.push(DocCheckError::new_error(
                     0,
                     current_yaml.container.clone(),
                     &format!(
@@ -786,6 +778,7 @@ impl DocYamlCheck for YamlChecker {
             }
         }
 
+        let TocTraversal { visited, mut errors, .. } = traversal;
         let mut reachable = self.collect_reachability_roots(&visited, markdown_files);
         self.traverse_reachability_graph(&mut reachable);
         self.check_file_reachability(markdown_files, &reachable, &mut errors);
@@ -802,18 +795,71 @@ impl DocYamlCheck for YamlChecker {
         let problem_keys: HashSet<String> =
             self.problems.iter().map(|(_, p)| p.key.clone()).collect();
 
-        self.validate_problems(&problem_keys, &mut errors);
-        self.validate_tools(&problem_keys, &mut errors);
+        self.validate_problems(&problem_keys, &mut external_links, &mut errors);
+        self.validate_tools(&problem_keys, &mut external_links, &mut errors);
 
         if self.check_external_links {
             if let Some(link_errors) = check_external_links(&external_links).await {
-                for e in link_errors {
-                    errors.push(e);
-                }
+                errors.extend(link_errors);
             }
         }
 
         if errors.is_empty() { Ok(None) } else { Ok(Some(errors)) }
+    }
+}
+
+/// Mutable state of the `_toc.yaml` include traversal in [`YamlChecker::post_check`].
+struct TocTraversal<'a> {
+    checker: &'a YamlChecker,
+    /// Every yaml and markdown file reached from the root `_toc.yaml`, with the include that
+    /// reached it.
+    visited: HashMap<PathBuf, IncludedYaml>,
+    /// Markdown files not yet reached by any `_toc.yaml` entry.
+    markdown_file_set: HashSet<&'a PathBuf>,
+    errors: Vec<DocCheckError>,
+}
+
+impl TocTraversal<'_> {
+    /// Resolves the `_toc.yaml` path entry `p` of `current_yaml.included_file` to
+    /// `base_dir/rel_path` (or its README.md for a directory), reports hidden or missing
+    /// targets against that file, and marks the target as visited.
+    fn check_markdown_target(
+        &mut self,
+        base_dir: &Path,
+        rel_path: &str,
+        p: &str,
+        current_yaml: &IncludedYaml,
+    ) {
+        let mut file_path = base_dir.join(rel_path);
+        if path_helper::is_dir(&file_path) {
+            file_path.push("README.md");
+        }
+        let file_path = normalize_path(&file_path).unwrap_or(file_path);
+
+        if file_path
+            .is_hidden_doc(&self.checker.root_dir, self.checker.reference_docs_root.as_deref())
+        {
+            self.errors.push(DocCheckError::new_error(
+                0,
+                current_yaml.included_file.clone(),
+                &format!(
+                    "Cannot reference hidden file {} in _toc.yaml. Hidden files are not published by Devsite.",
+                    p
+                ),
+            ));
+        }
+
+        if self.markdown_file_set.take(&file_path).is_none()
+            && !self.visited.contains_key(&file_path)
+        {
+            self.errors.push(DocCheckError::new_error(
+                0,
+                current_yaml.included_file.clone(),
+                &format!("Reference to missing file: {}", p),
+            ));
+        } else {
+            self.visited.insert(file_path, current_yaml.clone());
+        }
     }
 }
 
@@ -825,140 +871,92 @@ fn is_external_path(p: &str) -> bool {
         || p.starts_with("//")
 }
 
-/// Checks the path property from a yaml file.
-/// Returns `Some(DocCheckError)` if validation fails, or `None` if the path is valid.
-// TODO(https://fxbug.dev/562935840): Convert check_path to return Result<(), DocCheckError> and
-// fold it into check_yaml_link, so table of contents entries share the same link pipeline.
-fn check_path(
-    doc_line: &DocLine,
-    root_path: &Path,
-    docs_folder: &Path,
-    project: &str,
-    path: &str,
-    allow_fuchsia_src_links: bool,
-    reference_prefix: &Path,
-) -> Option<DocCheckError> {
-    let root_dir = root_path.display().to_string();
-    match do_check_link(doc_line, path, project, allow_fuchsia_src_links) {
-        Ok(Some(doc_error)) => return Some(doc_error),
-        Err(e) => {
-            return Some(DocCheckError::new_error(
-                doc_line.line_num,
-                doc_line.file_name.clone(),
-                &e.to_string(),
-            ));
-        }
-        Ok(None) => {}
-    };
-
-    // These files are in the root of the project, not in the docs directory, so they need special
-    // treatment.
-    if ["/CONTRIBUTING.md", "/CODE_OF_CONDUCT.md"].contains(&path) {
-        let filepath = root_path.join(path.strip_prefix('/').unwrap_or(path));
-        if !path_helper::exists(&filepath) {
-            return Some(DocCheckError::new_error(
-                doc_line.line_num,
-                doc_line.file_name.clone(),
-                &format!("File: {:?} not found.", filepath),
-            ));
-        }
-        return None;
-    }
-
-    match is_intree_link(project, &root_dir, docs_folder, path) {
-        Ok(Some(in_tree_path)) => {
-            // Handle in-tree paths that are not in the docs_folder.
-            // Since this is a table of contents, all the entries need
-            // to be to the docs_folder, except /reference, which is a special case.
-            if !in_tree_path.starts_with(PathBuf::from("/").join(docs_folder)) {
-                if in_tree_path.starts_with(reference_prefix) {
-                    None
-                } else {
-                    Some(DocCheckError::new_error(
-                        doc_line.line_num,
-                        doc_line.file_name.clone(),
-                        &format!(
-                            "in-tree link to {} must be in '{}' or '{}' directory",
-                            path,
-                            PathBuf::from("/").join(docs_folder).display(),
-                            reference_prefix.display()
-                        ),
-                    ))
-                }
-            } else {
-                do_in_tree_check(doc_line, root_path, docs_folder, path, &in_tree_path).err()
-            }
-        }
-        // Accept external links.
-        Ok(None) if is_external_path(path) => None,
-        Ok(None) => Some(DocCheckError::new_error(
-            doc_line.line_num,
-            doc_line.file_name.clone(),
-            &format!("invalid path {}", path),
-        )),
-        Err(e) => Some(DocCheckError::new_error(
-            doc_line.line_num,
-            doc_line.file_name.clone(),
-            &format!("Error checking path {}: {}", path, e),
-        )),
-    }
+/// Where a YAML link appears, which decides how in-tree and external targets are treated.
+pub(crate) enum LinkContext<'a> {
+    /// Navigation entries (`_toc.yaml`, `_redirects.yaml`, `_deprecated-docs.yaml`): in-tree
+    /// targets must be under the docs folder, under `/reference`, or one of the root files
+    /// published alongside the docs; external links are accepted without being queued.
+    Navigation,
+    /// Content fields (`_glossary.yaml`, `_metadata.yaml`, `_roadmap.yaml`, and the markdown
+    /// text fields of `_problems.yaml` and `_tools.yaml`): any existing in-tree target is
+    /// accepted and external links are queued for batch validation.
+    Content(&'a mut Vec<LinkReference>),
 }
+
+/// Files in the root of the project that navigation entries may link to.
+const ROOT_DOC_FILES: [&str; 2] = ["/CONTRIBUTING.md", "/CODE_OF_CONDUCT.md"];
 
 /// Validates a single link extracted from a YAML file.
 ///
 /// Runs the shared link pipeline: URL policy checks (`do_check_link`), in-tree
 /// resolution (`is_intree_link`), and on-disk verification (`do_in_tree_check`).
-/// External links are queued in `external_links` for batch validation instead of
-/// being resolved here.
-///
-/// Returns `Some(DocCheckError)` if validation fails, or `None` if the link is
-/// valid or was deferred to the external link queue.
-///
-/// `check_path` deliberately does not use this helper: table of contents entries
-/// are additionally restricted to the docs folder and accept external links
-/// without queueing them. See the TODO on `check_markdown_links` for the plan to
-/// unify the remaining paths.
-fn check_yaml_link(
+/// `/reference` targets are published from generated docs, so they are never
+/// checked on disk; see [`LinkContext`] for how each context treats them and
+/// external links.
+pub(crate) fn check_yaml_link(
     doc_line: &DocLine,
     root_dir: &Path,
     docs_folder: &Path,
     project: &str,
     link: &str,
     allow_fuchsia_src_links: bool,
-    external_links: &mut Vec<LinkReference>,
-) -> Option<DocCheckError> {
-    match do_check_link(doc_line, link, project, allow_fuchsia_src_links) {
-        Ok(Some(err)) => Some(err),
-        Err(e) => Some(DocCheckError::new_error(
+    context: LinkContext<'_>,
+) -> Result<(), DocCheckError> {
+    do_check_link(doc_line, link, project, allow_fuchsia_src_links)?;
+
+    match is_intree_link(project, root_dir, docs_folder, link) {
+        Ok(Some(in_tree_path)) if in_tree_path.starts_with("/reference") => {
+            if let LinkContext::Content(external_links) = context {
+                // Queue the published location: the normalized path (is_intree_link strips
+                // the anchor and query) plus the link's own anchor or query, if any.
+                let suffix = &link[link.find(['#', '?']).unwrap_or(link.len())..];
+                external_links.push(LinkReference {
+                    link: format!(
+                        "https://{PUBLISHED_DOCS_HOST}{}{suffix}",
+                        in_tree_path.display()
+                    ),
+                    location: doc_line.clone(),
+                });
+            }
+            Ok(())
+        }
+        Ok(Some(in_tree_path)) => {
+            let docs_prefix = Path::new("/").join(docs_folder);
+            if matches!(context, LinkContext::Navigation)
+                && !in_tree_path.starts_with(&docs_prefix)
+                && !ROOT_DOC_FILES.iter().any(|root_file| in_tree_path == Path::new(root_file))
+            {
+                return Err(DocCheckError::new_error(
+                    doc_line.line_num,
+                    doc_line.file_name.clone(),
+                    &format!(
+                        "in-tree link to {} must be in '{}' or '/reference' directory",
+                        link,
+                        docs_prefix.display(),
+                    ),
+                ));
+            }
+            do_in_tree_check(doc_line, root_dir, docs_folder, link, &in_tree_path).map(|_| ())
+        }
+        Ok(None) if is_external_path(link) => {
+            if let LinkContext::Content(external_links) = context {
+                external_links.push(LinkReference {
+                    link: normalize_external_link(link),
+                    location: doc_line.clone(),
+                });
+            }
+            Ok(())
+        }
+        Ok(None) => Err(DocCheckError::new_error(
             doc_line.line_num,
             doc_line.file_name.clone(),
-            &format!("Error parsing link {}: {}", link, e),
+            &format!("invalid path {}", link),
         )),
-        Ok(None) => {
-            let root_dir_str = root_dir.display().to_string();
-            match is_intree_link(project, &root_dir_str, docs_folder, link) {
-                Ok(Some(in_tree_path)) => {
-                    do_in_tree_check(doc_line, root_dir, docs_folder, link, &in_tree_path).err()
-                }
-                Ok(None) if is_external_path(link) => {
-                    external_links.push(LinkReference {
-                        link: normalize_external_link(link),
-                        location: doc_line.clone(),
-                    });
-                    None
-                }
-                Ok(None) => Some(DocCheckError::new_error(
-                    doc_line.line_num,
-                    doc_line.file_name.clone(),
-                    &format!("invalid path {}", link),
-                )),
-                Err(e) => Some(DocCheckError::new_error(
-                    doc_line.line_num,
-                    doc_line.file_name.clone(),
-                    &format!("Error checking in-tree link {}: {}", link, e),
-                )),
-            }
-        }
+        Err(e) => Err(DocCheckError::new_error(
+            doc_line.line_num,
+            doc_line.file_name.clone(),
+            &format!("Error checking path {}: {}", link, e),
+        )),
     }
 }
 
@@ -972,7 +970,6 @@ fn validate_deprecation_entry(
     filename: &Path,
     allow_fuchsia_src_links: bool,
     docs_prefix: &Path,
-    reference_prefix: &Path,
 ) -> Vec<DocCheckError> {
     let mut errors = vec![];
     let doc_line = DocLine { line_num: 1, file_name: filename.to_path_buf() };
@@ -996,14 +993,13 @@ fn validate_deprecation_entry(
         ));
     } else {
         let path_buf = PathBuf::from(&entry.from);
-        if !path_buf.starts_with(docs_prefix) && !path_buf.starts_with(reference_prefix) {
+        if !path_buf.starts_with(docs_prefix) && !path_buf.starts_with("/reference") {
             errors.push(DocCheckError::new_error(
                 doc_line.line_num,
                 doc_line.file_name.clone(),
                 &format!(
-                    "Deprecation 'from' path must start with '{}' or '{}': {}",
-                    PathBuf::from("/").join(docs_folder).display(),
-                    reference_prefix.display(),
+                    "Deprecation 'from' path must start with '{}' or '/reference': {}",
+                    docs_prefix.display(),
                     entry.from
                 ),
             ));
@@ -1019,15 +1015,15 @@ fn validate_deprecation_entry(
         ));
     }
 
-    // Validate that the target 'to' document exists (using the general check_path helper).
-    if let Some(err) = check_path(
+    // Validate that the target 'to' document exists.
+    if let Err(err) = check_yaml_link(
         &doc_line,
         root_dir,
         docs_folder,
         project,
         &entry.to,
         allow_fuchsia_src_links,
-        reference_prefix,
+        LinkContext::Navigation,
     ) {
         errors.push(err);
     }
@@ -1044,7 +1040,6 @@ fn check_deprecated_docs(
     filename: &Path,
     yaml_value: &Value,
     allow_fuchsia_src_links: bool,
-    reference_prefix: &Path,
 ) -> Option<Vec<DocCheckError>> {
     let result = serde_yaml::from_value::<Deprecations>(yaml_value.clone());
     match result {
@@ -1064,7 +1059,6 @@ fn check_deprecated_docs(
                         filename,
                         allow_fuchsia_src_links,
                         &docs_prefix,
-                        reference_prefix,
                     )
                 })
                 .collect();
@@ -1079,6 +1073,253 @@ fn check_deprecated_docs(
     }
 }
 
+fn rewrite_fuchsia_src_link<'a>(
+    link: &'a str,
+    docs_folder: &Path,
+    allow_fuchsia_src_links: bool,
+) -> Cow<'a, str> {
+    if link.starts_with("//") && !link.starts_with("///") {
+        Cow::Owned(format!("https:{link}"))
+    } else if allow_fuchsia_src_links
+        && (link == "/fuchsia-src" || link.starts_with("/fuchsia-src/"))
+    {
+        Cow::Owned(link.replacen("/fuchsia-src", &format!("/{}", docs_folder.display()), 1))
+    } else {
+        Cow::Borrowed(link)
+    }
+}
+
+fn expected_redirect_dir(root_dir: &Path, docs_folder: &Path, filename: &Path) -> PathBuf {
+    let rel_file = filename.strip_prefix(root_dir).unwrap_or(filename);
+    match rel_file.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() && parent != Path::new(".") => {
+            Path::new("/").join(parent)
+        }
+        _ => Path::new("/").join(docs_folder),
+    }
+}
+
+/// Validates the `from` path of a single `_redirects.yaml` entry.
+fn validate_redirect_from(
+    from: &str,
+    root_dir: &Path,
+    docs_folder: &Path,
+    allow_fuchsia_src_links: bool,
+    docs_prefix: &Path,
+    expected_from_dir: &Path,
+    doc_line: &DocLine,
+) -> Option<DocCheckError> {
+    let err = |msg: String| {
+        Some(DocCheckError::new_error(doc_line.line_num, doc_line.file_name.clone(), &msg))
+    };
+    if from.trim().is_empty() {
+        return err("Redirect 'from' path cannot be empty".to_string());
+    }
+    if !from.starts_with('/') {
+        return err(format!("Redirect 'from' path must start with '/': {from}"));
+    }
+    if from.contains('*') || from.contains('?') {
+        return err(format!(
+            "Wildcards ('*' or '?') are not supported in redirect 'from' path: {from}"
+        ));
+    }
+    if from.contains('#') {
+        return err(format!("Anchors ('#') are not supported in redirect 'from' path: {from}"));
+    }
+
+    let rewritten = rewrite_fuchsia_src_link(from, docs_folder, allow_fuchsia_src_links);
+    let from_str = rewritten.as_ref();
+    let is_dir = from_str.ends_with("...");
+    let base_from = if is_dir {
+        from_str.strip_suffix("...").unwrap_or(from_str).trim_end_matches('/')
+    } else {
+        from_str
+    };
+    if base_from.is_empty() {
+        return err(format!("invalid path {from}"));
+    }
+
+    let normalized_from = match normalize_path(Path::new(base_from)) {
+        Ok(p) => p,
+        Err(e) => return err(format!("Error checking path {from}: {e}")),
+    };
+
+    if !normalized_from.starts_with(docs_prefix) || normalized_from == docs_prefix {
+        return err(format!(
+            "Redirect 'from' path must start with '{}': {from}",
+            docs_prefix.display()
+        ));
+    }
+    if !normalized_from.starts_with(expected_from_dir)
+        || (!is_dir && normalized_from == expected_from_dir)
+    {
+        return err(format!(
+            "Redirect 'from' path '{from}' must be within the '{}' directory",
+            expected_from_dir.display(),
+        ));
+    }
+
+    let rel_from = normalized_from.strip_prefix("/").unwrap_or(normalized_from.as_path());
+    let abs_from = root_dir.join(rel_from);
+
+    let existing_path = if path_helper::exists(&abs_from) && !path_helper::is_dir(&abs_from) {
+        Some(abs_from)
+    } else if path_helper::exists(&abs_from) && path_helper::is_dir(&abs_from) {
+        [abs_from.join("README.md"), abs_from.join("index.md")]
+            .into_iter()
+            .find(|p| path_helper::exists(p))
+    } else if abs_from.extension().is_none() && path_helper::exists(&abs_from.with_extension("md"))
+    {
+        Some(abs_from.with_extension("md"))
+    } else if abs_from.file_name() == Some(OsStr::new("index.md"))
+        && path_helper::exists(&abs_from.with_file_name("README.md"))
+    {
+        Some(abs_from.with_file_name("README.md"))
+    } else {
+        None
+    };
+
+    existing_path.and_then(|p| {
+        err(format!("Redirect 'from' path '{from}' still exists in the repository at {p:?}"))
+    })
+}
+
+/// Validates the `to` path of a single `_redirects.yaml` entry.
+fn validate_redirect_to(
+    entry: &FromTo,
+    root_dir: &Path,
+    docs_folder: &Path,
+    project: &str,
+    allow_fuchsia_src_links: bool,
+    docs_prefix: &Path,
+    doc_line: &DocLine,
+) -> Option<DocCheckError> {
+    let err = |msg: String| {
+        Some(DocCheckError::new_error(doc_line.line_num, doc_line.file_name.clone(), &msg))
+    };
+    if entry.to.trim().is_empty() {
+        return err("Redirect 'to' path cannot be empty".to_string());
+    }
+    if entry.to.contains('*') || (!is_external_path(&entry.to) && entry.to.contains('?')) {
+        return err(format!(
+            "Wildcards ('*' or '?') are not supported in redirect 'to' path: {}",
+            entry.to
+        ));
+    }
+
+    let rewritten_from =
+        rewrite_fuchsia_src_link(&entry.from, docs_folder, allow_fuchsia_src_links);
+    let rewritten_to = rewrite_fuchsia_src_link(&entry.to, docs_folder, allow_fuchsia_src_links);
+    if !entry.from.trim().is_empty() && rewritten_from == rewritten_to {
+        return err(format!("Redirect 'from' and 'to' paths cannot be identical: {}", entry.to));
+    }
+
+    // Redirects ending with "..." redirect an entire directory subtree, so validate
+    // that the target directory exists rather than checking for a single markdown file.
+    if entry.to.ends_with("...") {
+        let link_to_check =
+            rewritten_to.strip_suffix("...").unwrap_or(&rewritten_to).trim_end_matches('/');
+        if link_to_check.is_empty() {
+            return err(format!("invalid path {}", entry.to));
+        }
+        if !entry.from.ends_with("...") {
+            return err(format!(
+                "Wildcard redirect 'to' path '{}' requires 'from' path '{}' to also end with '...'",
+                entry.to, entry.from
+            ));
+        }
+        let from_base = rewritten_from.strip_suffix("...").unwrap_or(&rewritten_from);
+        if rewritten_to.starts_with(from_base) {
+            return err(format!(
+                "Redirect from '{}' to '{}' creates an expanding path loop",
+                entry.from, entry.to
+            ));
+        }
+        if let Err(e) = do_check_link(doc_line, link_to_check, project, allow_fuchsia_src_links) {
+            return Some(e);
+        }
+        return match is_intree_link(project, root_dir, docs_folder, link_to_check) {
+            Ok(Some(in_tree_path))
+                if link_to_check.starts_with("/reference")
+                    && in_tree_path.starts_with("/reference") =>
+            {
+                None
+            }
+            Ok(Some(in_tree_path)) => {
+                if !in_tree_path.starts_with(docs_prefix) {
+                    return err(format!(
+                        "in-tree link to {} must be in '{}' or '/reference' directory",
+                        entry.to,
+                        docs_prefix.display(),
+                    ));
+                }
+                let abs_path =
+                    root_dir.join(in_tree_path.strip_prefix("/").unwrap_or(in_tree_path.as_path()));
+                if !path_helper::exists(&abs_path) || !path_helper::is_dir(&abs_path) {
+                    err(format!("Directory: {abs_path:?} not found for wildcard redirect."))
+                } else {
+                    None
+                }
+            }
+            Ok(None) if is_external_path(link_to_check) => None,
+            Ok(None) => err(format!("invalid path {}", entry.to)),
+            Err(e) => err(format!("Error checking path {}: {e}", entry.to)),
+        };
+    }
+
+    check_yaml_link(
+        doc_line,
+        root_dir,
+        docs_folder,
+        project,
+        &rewritten_to,
+        allow_fuchsia_src_links,
+        LinkContext::Navigation,
+    )
+    .err()
+}
+
+/// Validates a single `from`/`to` entry in `_redirects.yaml`.
+fn validate_redirect_entry(
+    entry: &FromTo,
+    root_dir: &Path,
+    docs_folder: &Path,
+    project: &str,
+    filename: &Path,
+    allow_fuchsia_src_links: bool,
+    docs_prefix: &Path,
+    expected_from_dir: &Path,
+) -> Vec<DocCheckError> {
+    let doc_line = DocLine { line_num: 1, file_name: filename.to_path_buf() };
+    let mut errors = Vec::new();
+
+    if let Some(err) = validate_redirect_from(
+        &entry.from,
+        root_dir,
+        docs_folder,
+        allow_fuchsia_src_links,
+        docs_prefix,
+        expected_from_dir,
+        &doc_line,
+    ) {
+        errors.push(err);
+    }
+
+    if let Some(err) = validate_redirect_to(
+        entry,
+        root_dir,
+        docs_folder,
+        project,
+        allow_fuchsia_src_links,
+        docs_prefix,
+        &doc_line,
+    ) {
+        errors.push(err);
+    }
+
+    errors
+}
+
 fn check_redirects(
     root_dir: &Path,
     docs_folder: &Path,
@@ -1086,50 +1327,35 @@ fn check_redirects(
     filename: &Path,
     yaml_value: &Value,
     allow_fuchsia_src_links: bool,
-    reference_prefix: &Path,
 ) -> Option<Vec<DocCheckError>> {
     let result = serde_yaml::from_value::<Redirects>(yaml_value.clone());
     match result {
         Ok(redirects) => {
+            let docs_prefix = PathBuf::from("/").join(docs_folder);
+            let expected_from_dir = expected_redirect_dir(root_dir, docs_folder, filename);
+            let mut seen_from = HashSet::new();
             let mut errors = vec![];
-            let doc_line = DocLine { line_num: 1, file_name: filename.to_path_buf() };
+
             for r in redirects.redirects.unwrap_or_default() {
-                // Ignore wildcards ending with "..." as they are likely supported by devsite
-                // but fail file existence checks.
-                if r.to.ends_with("...") {
-                    let parts: Vec<&str> = r.to.split("...").collect();
-                    let dir_part = parts[0].trim_end_matches('/');
-                    if !dir_part.is_empty() {
-                        let root_dir_str = root_dir.display().to_string();
-                        if let Ok(Some(in_tree_path)) =
-                            is_intree_link(project, &root_dir_str, docs_folder, dir_part)
-                        {
-                            let abs_path = root_dir.join(
-                                in_tree_path.strip_prefix("/").unwrap_or_else(|_| &in_tree_path),
-                            );
-                            if !path_helper::exists(&abs_path) || !path_helper::is_dir(&abs_path) {
-                                errors.push(DocCheckError::new_error(
-                                    doc_line.line_num,
-                                    doc_line.file_name.clone(),
-                                    &format!(
-                                        "Directory: {:?} not found for wildcard redirect.",
-                                        abs_path
-                                    ),
-                                ));
-                            }
-                        }
-                    }
-                } else if let Some(e) = check_path(
-                    &doc_line,
+                let rewritten_from =
+                    rewrite_fuchsia_src_link(&r.from, docs_folder, allow_fuchsia_src_links);
+                if !r.from.trim().is_empty() && !seen_from.insert(rewritten_from.into_owned()) {
+                    errors.push(DocCheckError::new_error(
+                        1,
+                        filename.to_path_buf(),
+                        &format!("Duplicate redirect 'from' path: {}", r.from),
+                    ));
+                }
+                errors.extend(validate_redirect_entry(
+                    &r,
                     root_dir,
                     docs_folder,
                     project,
-                    &r.to,
+                    filename,
                     allow_fuchsia_src_links,
-                    reference_prefix,
-                ) {
-                    errors.push(e);
-                }
+                    &docs_prefix,
+                    &expected_from_dir,
+                ));
             }
             if errors.is_empty() { None } else { Some(errors) }
         }
@@ -1512,14 +1738,14 @@ fn validate_glossary_links(
                             ),
                         ));
                     }
-                } else if let Some(err) = check_yaml_link(
+                } else if let Err(err) = check_yaml_link(
                     &doc_line,
                     root_dir,
                     docs_folder,
                     project,
                     link,
                     allow_fuchsia_src_links,
-                    external_links,
+                    LinkContext::Content(external_links),
                 ) {
                     errors.push(err);
                 }
@@ -1632,14 +1858,14 @@ fn check_metadata(
                 }
 
                 // Link validation
-                if let Some(err) = check_yaml_link(
+                if let Err(err) = check_yaml_link(
                     &doc_line,
                     root_dir,
                     docs_folder,
                     project,
                     &guide.url,
                     allow_fuchsia_src_links,
-                    external_links,
+                    LinkContext::Content(external_links),
                 ) {
                     errors.push(err);
                 }
@@ -1839,17 +2065,16 @@ fn check_roadmap(
                 ));
             }
 
-            for cap in HREF_REGEX.captures_iter(&entry.workstream) {
-                let link = &cap[1];
+            for link in HREF_REGEX.captures_iter(&entry.workstream).filter_map(|c| c.get(1)) {
                 let doc_line = DocLine { line_num: 1, file_name: filename.to_path_buf() };
-                if let Some(err) = check_yaml_link(
+                if let Err(err) = check_yaml_link(
                     &doc_line,
                     root_dir,
                     docs_folder,
                     project,
-                    link,
+                    link.as_str(),
                     allow_fuchsia_src_links,
-                    external_links,
+                    LinkContext::Content(external_links),
                 ) {
                     errs.push(err);
                 }
@@ -1909,10 +2134,27 @@ static VALID_CPU_ARCHS: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::
     serde_yaml::from_str(s).expect("Failed to parse supported CPU architectures")
 });
 
+/// Applies the URL policy to an external link found in `filename` and, if it passes, queues
+/// it for batch validation.
+fn queue_external_link(
+    filename: &Path,
+    link: &str,
+    project: &str,
+    allow_fuchsia_src_links: bool,
+    external_links: &mut Vec<LinkReference>,
+) -> Result<(), DocCheckError> {
+    let doc_line = DocLine { line_num: 1, file_name: filename.to_path_buf() };
+    do_check_link(&doc_line, link, project, allow_fuchsia_src_links)?;
+    external_links.push(LinkReference { link: normalize_external_link(link), location: doc_line });
+    Ok(())
+}
+
 fn check_supported_sys_config(
     root_dir: &Path,
+    project: &str,
     filename: &Path,
     yaml_value: &Value,
+    allow_fuchsia_src_links: bool,
     external_links: &mut Vec<LinkReference>,
 ) -> Option<Vec<DocCheckError>> {
     let (items, errors) = parse_entries::<SysConfigEntry>(filename, yaml_value);
@@ -1955,10 +2197,15 @@ fn check_supported_sys_config(
             // Check that manufacturer_link is a valid URL if present.
             if let Some(link) = &config.manufacturer_link {
                 if link.starts_with("http://") || link.starts_with("https://") {
-                    external_links.push(LinkReference {
-                        link: normalize_external_link(link),
-                        location: DocLine { line_num: 1, file_name: filename.to_path_buf() },
-                    });
+                    if let Err(err) = queue_external_link(
+                        filename,
+                        link,
+                        project,
+                        allow_fuchsia_src_links,
+                        external_links,
+                    ) {
+                        errs.push(err);
+                    }
                 } else {
                     errs.push(DocCheckError::new_error(
                         1,
@@ -1985,8 +2232,10 @@ fn check_supported_sys_config(
 
 fn check_tools(
     root_dir: &Path,
+    project: &str,
     filename: &Path,
     yaml_value: &Value,
+    allow_fuchsia_src_links: bool,
     external_links: &mut Vec<LinkReference>,
 ) -> (Option<Vec<ToolsEntry>>, Option<Vec<DocCheckError>>) {
     let (items, errors) = parse_entries::<ToolsEntry>(filename, yaml_value);
@@ -2009,10 +2258,15 @@ fn check_tools(
                             ));
                         }
                     } else if link_str.starts_with("http://") || link_str.starts_with("https://") {
-                        external_links.push(LinkReference {
-                            link: normalize_external_link(link_str),
-                            location: DocLine { line_num: 1, file_name: filename.to_path_buf() },
-                        });
+                        if let Err(err) = queue_external_link(
+                            filename,
+                            link_str,
+                            project,
+                            allow_fuchsia_src_links,
+                            external_links,
+                        ) {
+                            errs.push(err);
+                        }
                     } else {
                         errs.push(DocCheckError::new_error(
                             1,
@@ -2094,7 +2348,6 @@ pub fn register_yaml_checks(
     reachability_graph: ReachabilityGraph,
     exemption_set: ExemptionSet,
 ) -> Result<Vec<Box<dyn DocYamlCheck>>> {
-    let reference_prefix = PathBuf::from("/reference");
     let checker = YamlChecker {
         root_dir: opt.root.clone(),
         docs_folder: opt.docs_folder.clone(),
@@ -2102,7 +2355,6 @@ pub fn register_yaml_checks(
         check_external_links: opt.check_external_links,
         allow_fuchsia_src_links: opt.allow_fuchsia_src_links,
         reference_docs_root: opt.reference_docs_root.clone(),
-        reference_prefix,
         external_links: vec![],
         problems: vec![],
         tools: HashSet::new(),
@@ -2201,8 +2453,8 @@ mod test {
     }
 
     #[test]
-    fn test_check_path() -> Result<()> {
-        let doc_line = &DocLine { line_num: 1, file_name: PathBuf::from("test-check-path") };
+    fn test_check_yaml_link_contexts() -> Result<()> {
+        let doc_line = &DocLine { line_num: 1, file_name: PathBuf::from("test-check-yaml-link") };
         let checker = YamlChecker {
             root_dir: PathBuf::from("/some/root"),
             docs_folder: PathBuf::from("docs"),
@@ -2210,7 +2462,6 @@ mod test {
             check_external_links: false,
             allow_fuchsia_src_links: false,
             reference_docs_root: None,
-            reference_prefix: PathBuf::from("/reference"),
             external_links: vec![],
             problems: vec![],
             tools: HashSet::new(),
@@ -2227,7 +2478,7 @@ mod test {
                 "/README.md",
                 Some(DocCheckError::new_error(
                     1,
-                    PathBuf::from("test-check-path"),
+                    PathBuf::from("test-check-yaml-link"),
                     "in-tree link to /README.md must be in '/docs' or '/reference' directory",
                 )),
             ),
@@ -2238,24 +2489,92 @@ mod test {
                 "/src/main.cc",
                 Some(DocCheckError::new_error(
                     1,
-                    PathBuf::from("test-check-path"),
+                    PathBuf::from("test-check-yaml-link"),
                     "in-tree link to /src/main.cc must be in '/docs' or '/reference' directory",
                 )),
             ),
         ];
 
         for (test_path, expected_result) in test_data {
-            let actual_result = check_path(
+            let actual_result = check_yaml_link(
                 doc_line,
                 &checker.root_dir,
                 &checker.docs_folder,
                 &checker.project,
                 test_path,
                 checker.allow_fuchsia_src_links,
-                &checker.reference_prefix,
+                LinkContext::Navigation,
             );
-            assert_eq!(actual_result, expected_result);
+            assert_eq!(actual_result.err(), expected_result, "link: {test_path}");
         }
+
+        // /reference targets are published from generated docs: never checked on disk, accepted
+        // in navigation entries, and queued for external checking in content fields.
+        let reference_links = ["/reference/tools/sdk/ffx.md", "/docs/../reference/x.md#s"];
+        for link in reference_links {
+            assert_eq!(
+                check_yaml_link(
+                    doc_line,
+                    &checker.root_dir,
+                    &checker.docs_folder,
+                    &checker.project,
+                    link,
+                    checker.allow_fuchsia_src_links,
+                    LinkContext::Navigation,
+                )
+                .err(),
+                None,
+                "navigation: {link}"
+            );
+        }
+        let mut external_links = vec![];
+        for link in reference_links {
+            assert_eq!(
+                check_yaml_link(
+                    doc_line,
+                    &checker.root_dir,
+                    &checker.docs_folder,
+                    &checker.project,
+                    link,
+                    checker.allow_fuchsia_src_links,
+                    LinkContext::Content(&mut external_links),
+                )
+                .err(),
+                None,
+                "content: {link}"
+            );
+        }
+        assert_eq!(
+            external_links.iter().map(|l| l.link.as_str()).collect::<Vec<_>>(),
+            [
+                "https://fuchsia.dev/reference/tools/sdk/ffx.md",
+                "https://fuchsia.dev/reference/x.md#s"
+            ]
+        );
+
+        // Content fields accept any existing in-tree target that navigation entries reject,
+        // and queue external links instead of merely accepting them.
+        let mut external_links = vec![];
+        for link in ["/src/OWNERS", "https://somewhere.com/is-ok"] {
+            assert_eq!(
+                check_yaml_link(
+                    doc_line,
+                    &checker.root_dir,
+                    &checker.docs_folder,
+                    &checker.project,
+                    link,
+                    checker.allow_fuchsia_src_links,
+                    LinkContext::Content(&mut external_links),
+                )
+                .err(),
+                None,
+                "content: {link}"
+            );
+        }
+        assert_eq!(
+            external_links.iter().map(|l| l.link.as_str()).collect::<Vec<_>>(),
+            ["https://somewhere.com/is-ok"]
+        );
 
         Ok(())
     }
@@ -2384,6 +2703,10 @@ redirects:
   to: /docs/...
 - from: /docs/old4/...
   to: /docs/nonexistent-no-extension/...
+- from: /docs/old5/...
+  to: https://example.com/rust/...
+- from: /docs/old6/...
+  to: https://fuchsia.dev/fuchsia-src/concepts/...
           "#,
         )?;
 
@@ -2394,12 +2717,11 @@ redirects:
             &filename,
             &yaml_value,
             allow_fuchsia_src_links,
-            &PathBuf::from("/reference"),
         );
 
         assert!(result.is_some());
         let errors = result.unwrap();
-        assert_eq!(errors.len(), 2);
+        assert_eq!(errors.len(), 3, "{errors:?}");
         assert_eq!(
             errors[0].message,
             "in-tree link to /src/main.cc must be in '/docs' or '/reference' directory"
@@ -2407,6 +2729,124 @@ redirects:
         assert_eq!(
             errors[1].message,
             "Directory: \"./docs/nonexistent-no-extension\" not found for wildcard redirect."
+        );
+        // An external wildcard target is subject to the same URL policy as any other link;
+        // https://example.com/rust/... passes and the fuchsia-src one is rejected.
+        assert!(
+            errors[2].message.starts_with("Should not link to https://fuchsia.dev/fuchsia-src"),
+            "{}",
+            errors[2].message
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_check_redirects_from_and_scope_validation() -> Result<()> {
+        let root_dir = PathBuf::from(".");
+        let docs_folder = PathBuf::from("docs");
+        let project = "fuchsia";
+        let filename = PathBuf::from("docs/sub/_redirects.yaml");
+
+        // 1. Valid subdirectory redirects (removed .md, extensionless, index.md in no_readme, and wildcard)
+        let valid_yaml: Value = serde_yaml::from_str(
+            r#"
+redirects:
+- from: /docs/sub/old_page.md
+  to: /docs/are-ok.md
+- from: /docs/sub/old_extensionless
+  to: /docs/are-ok.md
+- from: /docs/sub/no_readme/index.md
+  to: /docs/are-ok.md
+- from: /docs/sub/old_dir/...
+  to: /docs/concepts/...
+- from: /docs/sub/no_readme/...
+  to: /docs/are-ok.md
+            "#,
+        )?;
+        assert_eq!(
+            check_redirects(&root_dir, &docs_folder, project, &filename, &valid_yaml, false,),
+            None
+        );
+
+        // 2. Invalid `from` and `to` cases
+        let invalid_yaml: Value = serde_yaml::from_str(
+            r#"
+redirects:
+- from: ""
+  to: /docs/are-ok.md
+- from: docs/sub/old.md
+  to: /docs/are-ok.md
+- from: /docs/sub/old*.md
+  to: /docs/are-ok.md
+- from: /docs/sub/old?.md
+  to: /docs/are-ok.md
+- from: /docs/sub/old.md#section
+  to: /docs/are-ok.md
+- from: /src/old.md
+  to: /docs/are-ok.md
+- from: /docs/other/old.md
+  to: /docs/are-ok.md
+- from: /docs/sub/../other/old.md
+  to: /docs/are-ok.md
+- from: /docs/sub_other/old.md
+  to: /docs/are-ok.md
+- from: /docs/sub
+  to: /docs/are-ok.md
+- from: /docs/sub/are-ok.md
+  to: /docs/other-ok.md
+- from: /docs/sub/existing_dir
+  to: /docs/other-ok.md
+- from: /docs/sub/existing_dir/index.md
+  to: /docs/other-ok.md
+- from: /docs/sub/existing_dir/...
+  to: /docs/concepts/...
+- from: /docs/sub/old_dup.md
+  to: /docs/are-ok.md
+- from: /docs/sub/old_dup.md
+  to: /docs/other-ok.md
+- from: /docs/sub/old_self.md
+  to: /docs/sub/old_self.md
+- from: /docs/sub/old_empty_to.md
+  to: ""
+- from: /docs/sub/old_wild_to.md
+  to: /docs/are-ok*.md
+- from: /docs/sub/old_non_wild.md
+  to: /docs/concepts/...
+- from: /docs/sub/old_loop/...
+  to: /docs/sub/old_loop/nested/...
+            "#,
+        )?;
+
+        let errors =
+            check_redirects(&root_dir, &docs_folder, project, &filename, &invalid_yaml, false)
+                .expect("Expected redirect validation errors");
+        let messages: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
+
+        assert_eq!(
+            messages,
+            vec![
+                "Redirect 'from' path cannot be empty",
+                "Redirect 'from' path must start with '/': docs/sub/old.md",
+                "Wildcards ('*' or '?') are not supported in redirect 'from' path: /docs/sub/old*.md",
+                "Wildcards ('*' or '?') are not supported in redirect 'from' path: /docs/sub/old?.md",
+                "Anchors ('#') are not supported in redirect 'from' path: /docs/sub/old.md#section",
+                "Redirect 'from' path must start with '/docs': /src/old.md",
+                "Redirect 'from' path '/docs/other/old.md' must be within the '/docs/sub' directory",
+                "Redirect 'from' path '/docs/sub/../other/old.md' must be within the '/docs/sub' directory",
+                "Redirect 'from' path '/docs/sub_other/old.md' must be within the '/docs/sub' directory",
+                "Redirect 'from' path '/docs/sub' must be within the '/docs/sub' directory",
+                "Redirect 'from' path '/docs/sub/are-ok.md' still exists in the repository at \"./docs/sub/are-ok.md\"",
+                "Redirect 'from' path '/docs/sub/existing_dir' still exists in the repository at \"./docs/sub/existing_dir/README.md\"",
+                "Redirect 'from' path '/docs/sub/existing_dir/index.md' still exists in the repository at \"./docs/sub/existing_dir/README.md\"",
+                "Redirect 'from' path '/docs/sub/existing_dir/...' still exists in the repository at \"./docs/sub/existing_dir/README.md\"",
+                "Duplicate redirect 'from' path: /docs/sub/old_dup.md",
+                "Redirect 'from' and 'to' paths cannot be identical: /docs/sub/old_self.md",
+                "Redirect 'to' path cannot be empty",
+                "Wildcards ('*' or '?') are not supported in redirect 'to' path: /docs/are-ok*.md",
+                "Wildcard redirect 'to' path '/docs/concepts/...' requires 'from' path '/docs/sub/old_non_wild.md' to also end with '...'",
+                "Redirect from '/docs/sub/old_loop/...' to '/docs/sub/old_loop/nested/...' creates an expanding path loop",
+            ]
         );
 
         Ok(())
@@ -2421,7 +2861,6 @@ redirects:
             check_external_links: false,
             allow_fuchsia_src_links: false,
             reference_docs_root: None,
-            reference_prefix: PathBuf::from("/reference"),
             external_links: vec![],
             problems: vec![],
             tools: HashSet::new(),
@@ -2452,7 +2891,6 @@ included:
             &filename,
             &yaml_value,
             checker.allow_fuchsia_src_links,
-            &checker.reference_prefix,
         );
         assert!(result.is_none());
 
@@ -2476,7 +2914,6 @@ included:
             &filename,
             &invalid_yaml,
             checker.allow_fuchsia_src_links,
-            &checker.reference_prefix,
         );
         assert!(result.is_some());
         let errors = result.unwrap();
@@ -2510,7 +2947,6 @@ included:
             &filename,
             &wildcard_yaml,
             checker.allow_fuchsia_src_links,
-            &checker.reference_prefix,
         );
         assert!(result.is_some());
         let errors = result.unwrap();
@@ -2591,7 +3027,14 @@ included:
           "#,
         )?;
 
-        let result = check_supported_sys_config(&root_dir, &filename, &yaml_value, &mut vec![]);
+        let result = check_supported_sys_config(
+            &root_dir,
+            "fuchsia",
+            &filename,
+            &yaml_value,
+            false,
+            &mut vec![],
+        );
 
         assert!(result.is_some());
         let errors = result.unwrap();
@@ -2618,13 +3061,39 @@ included:
         let mut external_links = vec![];
         let result = check_supported_sys_config(
             &root_dir,
+            "fuchsia",
             &filename,
             &external_link_yaml,
+            false,
             &mut external_links,
         );
         assert!(result.is_none());
         assert_eq!(external_links.len(), 1);
         assert_eq!(external_links[0].link, "https://external.com/device");
+
+        // manufacturer_link goes through the same URL policy as every other link.
+        let policy_yaml: Value = serde_yaml::from_str(
+            r#"
+- name: 'Policy Board'
+  description: 'Board with a disallowed manufacturer link'
+  architecture: 'x64'
+  manufacturer_link: 'https://fuchsia.googlesource.com/obsolete-project/+/HEAD/README.md'
+  board_driver_location: '/src/devices/board/drivers/vim3'
+"#,
+        )?;
+        let mut external_links = vec![];
+        let errors = check_supported_sys_config(
+            &root_dir,
+            "fuchsia",
+            &filename,
+            &policy_yaml,
+            false,
+            &mut external_links,
+        )
+        .expect("invalid gerrit project must be rejected");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].message.starts_with("Obsolete or invalid project obsolete-project"));
+        assert!(external_links.is_empty());
 
         Ok(())
     }
@@ -2666,7 +3135,8 @@ included:
         )?;
 
         let root_dir = PathBuf::from(".");
-        let (_tools, errors) = check_tools(&root_dir, &filename, &yaml_value, &mut vec![]);
+        let (_tools, errors) =
+            check_tools(&root_dir, "fuchsia", &filename, &yaml_value, false, &mut vec![]);
 
         assert!(errors.is_some());
         let errors = errors.unwrap();
@@ -2690,11 +3160,37 @@ included:
             "#,
         )?;
         let mut external_links = vec![];
-        let (_tools, errors) =
-            check_tools(&root_dir, &filename, &external_link_yaml, &mut external_links);
+        let (_tools, errors) = check_tools(
+            &root_dir,
+            "fuchsia",
+            &filename,
+            &external_link_yaml,
+            false,
+            &mut external_links,
+        );
         assert!(errors.is_none());
         assert_eq!(external_links.len(), 1);
         assert_eq!(external_links[0].link, "https://external.com/tool");
+
+        // External tool links go through the same URL policy as every other link.
+        let policy_yaml: Value = serde_yaml::from_str(
+            r#"
+- name: Policy Tool
+  team: Test
+  links:
+    Published: https://fuchsia.dev/fuchsia-src/development/tools
+  description: ""
+"#,
+        )?;
+        let mut external_links = vec![];
+        let (_tools, errors) =
+            check_tools(&root_dir, "fuchsia", &filename, &policy_yaml, false, &mut external_links);
+        let errors = errors.expect("fuchsia-src link must be rejected");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].message.starts_with("Should not link to https://fuchsia.dev/fuchsia-src")
+        );
+        assert!(external_links.is_empty());
 
         Ok(())
     }
@@ -2986,7 +3482,6 @@ guides:
             check_external_links: false,
             allow_fuchsia_src_links: false,
             reference_docs_root: None,
-            reference_prefix: PathBuf::from("/reference"),
             external_links: vec![],
             problems: vec![],
             tools: HashSet::new(),
@@ -3031,7 +3526,6 @@ guides:
             check_external_links: false,
             allow_fuchsia_src_links: false,
             reference_docs_root: None,
-            reference_prefix: PathBuf::from("/reference"),
             external_links: vec![],
             problems: vec![],
             tools: HashSet::new(),
@@ -3091,6 +3585,94 @@ guides:
         Ok(())
     }
 
+    #[test]
+    fn test_markdown_fields_queue_external_links() -> Result<()> {
+        let checker = YamlChecker {
+            root_dir: PathBuf::from("/some/root"),
+            docs_folder: PathBuf::from("docs"),
+            project: "fuchsia".to_string(),
+            check_external_links: false,
+            allow_fuchsia_src_links: false,
+            reference_docs_root: None,
+            external_links: vec![],
+            problems: vec![],
+            tools: HashSet::from(["ToolA".to_string()]),
+            tools_entries: vec![],
+            reachability_graph: Default::default(),
+            exemption_set: Default::default(),
+            allow_unreferenced_hidden: false,
+        };
+        let problem_keys = HashSet::from(["Problem1".to_string()]);
+        let mut external_links = vec![];
+        let mut errors = vec![];
+        checker.check_markdown_links(
+            Path::new("docs/reference/troubleshooting/_tools.yaml"),
+            "See [ToolA], [the problem](#Problem1), <https://example.com/docs> and [bad](#nope).",
+            &problem_keys,
+            &mut external_links,
+            &mut errors,
+        );
+        // Prose fields are content: the external link is queued for batch validation ...
+        assert_eq!(
+            external_links.iter().map(|l| l.link.as_str()).collect::<Vec<_>>(),
+            ["https://example.com/docs"]
+        );
+        // ... while reference labels and #anchors are still checked against tools and problems.
+        let messages: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            ["Invalid anchor link: #nope (does not match any tool or problem)"],
+            "{messages:?}"
+        );
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_post_check_reports_unparsable_include() -> Result<()> {
+        // Toc::from reads from disk, so stage a root _toc.yaml that includes an unparsable one.
+        let root_dir = std::env::temp_dir()
+            .join(format!("doc_checker_unparsable_include_{}", std::process::id()));
+        let docs_dir = root_dir.join("docs");
+        std::fs::create_dir_all(docs_dir.join("broken"))?;
+        let root_toc = docs_dir.join("_toc.yaml");
+        let broken_toc = docs_dir.join("broken").join("_toc.yaml");
+        std::fs::write(&root_toc, "toc:\n- include: /docs/broken/_toc.yaml\n")?;
+        std::fs::write(&broken_toc, "toc:\n- title: \"x\"\n  path: [not, a, string]\n")?;
+
+        let checker = YamlChecker {
+            root_dir: root_dir.clone(),
+            docs_folder: PathBuf::from("docs"),
+            project: "fuchsia".to_string(),
+            check_external_links: false,
+            allow_fuchsia_src_links: false,
+            reference_docs_root: None,
+            external_links: vec![],
+            problems: vec![],
+            tools: HashSet::new(),
+            tools_entries: vec![],
+            reachability_graph: Default::default(),
+            exemption_set: Default::default(),
+            allow_unreferenced_hidden: false,
+        };
+        let result = checker.post_check(&[], &[root_toc.clone(), broken_toc.clone()]).await;
+        std::fs::remove_dir_all(&root_dir)?;
+
+        // The run completes and reports the parse failure against the including file instead
+        // of aborting with Err.
+        let errors = result?.expect("the unparsable include must be reported");
+        let parse_errors: Vec<&DocCheckError> =
+            errors.iter().filter(|e| e.message.starts_with("Error parsing")).collect();
+        assert_eq!(parse_errors.len(), 1, "{errors:?}");
+        assert_eq!(parse_errors[0].doc_line.file_name, root_toc);
+        assert!(
+            parse_errors[0].message.contains("included in")
+                && parse_errors[0].message.contains("expected a string"),
+            "{}",
+            parse_errors[0].message
+        );
+        Ok(())
+    }
+
     #[fuchsia::test]
     async fn test_problems_validation_extended() -> Result<()> {
         let root_dir = PathBuf::from(".");
@@ -3101,7 +3683,6 @@ guides:
             check_external_links: false,
             allow_fuchsia_src_links: false,
             reference_docs_root: None,
-            reference_prefix: PathBuf::from("/reference"),
             external_links: vec![],
             problems: vec![],
             tools: HashSet::new(),
@@ -3153,7 +3734,6 @@ guides:
             check_external_links: false,
             allow_fuchsia_src_links: false,
             reference_docs_root: None,
-            reference_prefix: PathBuf::from("/reference"),
             external_links: vec![],
             problems: vec![],
             tools: HashSet::new(),
@@ -3190,7 +3770,6 @@ guides:
             check_external_links: false,
             allow_fuchsia_src_links: false,
             reference_docs_root: None,
-            reference_prefix: PathBuf::from("/reference"),
             external_links: vec![],
             problems: vec![],
             tools: HashSet::new(),
@@ -3275,7 +3854,6 @@ guides:
             check_external_links: false,
             allow_fuchsia_src_links: false,
             reference_docs_root: None,
-            reference_prefix: PathBuf::from("/reference"),
             external_links: vec![],
             problems: vec![],
             tools: HashSet::new(),
@@ -3410,7 +3988,6 @@ guides:
             check_external_links: false,
             allow_fuchsia_src_links: false,
             reference_docs_root: None,
-            reference_prefix: PathBuf::from("/reference"),
             external_links: vec![],
             problems: vec![],
             tools: HashSet::new(),

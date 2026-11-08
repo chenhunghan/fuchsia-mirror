@@ -233,8 +233,8 @@ zx::result<> Buttons::Start(fdf::DriverContext context) {
     }
   }
 
-  device_ = std::make_unique<buttons::ButtonsDevice>(dispatcher(), std::move(buttons),
-                                                     std::move(gpios), std::move(sag_client));
+  device_ = std::make_unique<buttons::ButtonsDevice>(
+      dispatcher(), std::move(buttons), std::move(gpios), std::move(sag_client), &health_latch_);
 
   zx::result result = outgoing()->AddService<fuchsia_input_report::Service>(
       fuchsia_input_report::Service::InstanceHandler({
@@ -259,6 +259,15 @@ zx::result<> Buttons::Start(fdf::DriverContext context) {
 void Buttons::Stop(fdf::StopCompleter completer) {
   device_->ShutDown();
   completer(zx::ok());
+}
+
+void Buttons::HealthCheck(fuchsia_driver_framework::HealthCheckRequest request,
+                          HealthCheckCompleter completer) {
+  if (!device_) {
+    completer(fit::error(fuchsia_driver_framework::HealthCheckError::kInvalidState));
+    return;
+  }
+  completer(device_->PerformHealthCheck(request));
 }
 
 }  // namespace buttons

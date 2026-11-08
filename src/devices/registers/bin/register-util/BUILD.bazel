@@ -1,0 +1,98 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":register-util-test-package"],
+    visibility = ["//src/devices:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "bin",
+    testonly = True,
+    srcs = [
+        "register-util.cc",
+        "register-util.h",
+        "register-util-test.cc",
+    ],
+    gn_output_name = "register-util-test",
+    # Packaged into :register-util-test-package via :bin_packaged.
+    tags = ["manual"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.registers:fuchsia.hardware.registers_cpp",
+        "//sdk/lib/async",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/fdio",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "register-util-test",
+    install_root = "test/",
+)
+
+fx_component_manifest(
+    name = "register-util-test-package_manifest",
+    testonly = True,
+    component_name = "register-util-test-package",
+    includes = [
+        "//sdk/lib/sys/testing:elf_test_runner.shard.cml",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/register-util-test.cml",
+)
+
+fx_test_component(
+    name = "register-util-test-package_component",
+    compiled_manifest = ":register-util-test-package_manifest",
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "register-util-test-package_package",
+    package_name = "register-util-test-package",
+    testonly = True,
+    test_components = [":register-util-test-package_component"],
+)
+
+fx_test(
+    name = "register-util-test-package",
+    package = ":register-util-test-package_package",
+)
+
+fx_cc_binary(
+    name = "register-util",
+    srcs = [
+        "main.cc",
+        "register-util.cc",
+        "register-util.h",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.registers:fuchsia.hardware.registers_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/fdio",
+        "//zircon/system/ulib/pretty",
+    ],
+)

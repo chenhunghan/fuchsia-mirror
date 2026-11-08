@@ -37,6 +37,13 @@ template("cc_test_executable") {
       disable_lto = true
     }
 
+    # Like other test executables, emit symbolizer markup from sanitizers on
+    # Linux hosts.
+    if (!defined(deps)) {
+      deps = []
+    }
+    deps += [ "//build/config:test_executable_deps" ]
+
     if (disable_lto && !is_gcc) {
       if (!defined(configs)) {
         configs = []

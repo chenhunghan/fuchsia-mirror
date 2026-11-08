@@ -305,3 +305,227 @@ class TraceUtilsTest(unittest.TestCase):
                 TCR("FooAverage", unit, [5.0], "Foo doc, mean"),
             ],
         )
+
+    def test_common_process_start_time_and_min_start_flows(self) -> None:
+        # Process 1 starts tracing at t=10us; Process 2 starts tracing later at t=50us.
+        # Flow 0 (t=20us -> t=60us) starts before Process 2 began recording;
+        # Flow 1 (t=70us -> t=90us) occurs after both processes are recording.
+        p1_early_dur = trace_model.DurationEvent(
+            duration=trace_time.TimeDelta.from_microseconds(5),
+            parent=None,
+            child_durations=[],
+            child_flows=[],
+            base=trace_model.Event(
+                category="gfx",
+                name="StartFrame",
+                start=trace_time.TimePoint.from_microseconds(20),
+                pid=1,
+                tid=10,
+                args={},
+            ),
+        )
+        p2_first_event = trace_model.DurationEvent(
+            duration=trace_time.TimeDelta.from_microseconds(5),
+            parent=None,
+            child_durations=[],
+            child_flows=[],
+            base=trace_model.Event(
+                category="gfx",
+                name="Init",
+                start=trace_time.TimePoint.from_microseconds(50),
+                pid=2,
+                tid=20,
+                args={},
+            ),
+        )
+        p2_early_vsync = trace_model.DurationEvent(
+            duration=trace_time.TimeDelta.from_microseconds(5),
+            parent=None,
+            child_durations=[],
+            child_flows=[],
+            base=trace_model.Event(
+                category="gfx",
+                name="Vsync",
+                start=trace_time.TimePoint.from_microseconds(60),
+                pid=2,
+                tid=20,
+                args={},
+            ),
+        )
+        f0_end = trace_model.FlowEvent(
+            id="0",
+            phase=trace_model.FlowEventPhase.END,
+            enclosing_duration=p2_early_vsync,
+            previous_flow=None,
+            next_flow=None,
+            base=trace_model.Event(
+                category="gfx",
+                name="frame_flow",
+                start=trace_time.TimePoint.from_microseconds(60),
+                pid=2,
+                tid=20,
+                args={},
+            ),
+        )
+        f0_start = trace_model.FlowEvent(
+            id="0",
+            phase=trace_model.FlowEventPhase.START,
+            enclosing_duration=p1_early_dur,
+            previous_flow=None,
+            next_flow=f0_end,
+            base=trace_model.Event(
+                category="gfx",
+                name="frame_flow",
+                start=trace_time.TimePoint.from_microseconds(20),
+                pid=1,
+                tid=10,
+                args={},
+            ),
+        )
+        f0_end.previous_flow = f0_start
+        p1_early_dur.child_flows = (f0_start,)
+        p2_early_vsync.child_flows = (f0_end,)
+
+        p1_valid_dur = trace_model.DurationEvent(
+            duration=trace_time.TimeDelta.from_microseconds(5),
+            parent=None,
+            child_durations=(),
+            child_flows=(),
+            base=trace_model.Event(
+                category="gfx",
+                name="StartFrame",
+                start=trace_time.TimePoint.from_microseconds(70),
+                pid=1,
+                tid=10,
+                args={},
+            ),
+        )
+        p2_valid_vsync = trace_model.DurationEvent(
+            duration=trace_time.TimeDelta.from_microseconds(5),
+            parent=None,
+            child_durations=(),
+            child_flows=(),
+            base=trace_model.Event(
+                category="gfx",
+                name="Vsync",
+                start=trace_time.TimePoint.from_microseconds(90),
+                pid=2,
+                tid=20,
+                args={},
+            ),
+        )
+        f1_end = trace_model.FlowEvent(
+            id="1",
+            phase=trace_model.FlowEventPhase.END,
+            enclosing_duration=p2_valid_vsync,
+            previous_flow=None,
+            next_flow=None,
+            base=trace_model.Event(
+                category="gfx",
+                name="frame_flow",
+                start=trace_time.TimePoint.from_microseconds(90),
+                pid=2,
+                tid=20,
+                args={},
+            ),
+        )
+        f1_start = trace_model.FlowEvent(
+            id="1",
+            phase=trace_model.FlowEventPhase.START,
+            enclosing_duration=p1_valid_dur,
+            previous_flow=None,
+            next_flow=f1_end,
+            base=trace_model.Event(
+                category="gfx",
+                name="frame_flow",
+                start=trace_time.TimePoint.from_microseconds(70),
+                pid=1,
+                tid=10,
+                args={},
+            ),
+        )
+        f1_end.previous_flow = f1_start
+        p1_valid_dur.child_flows = (f1_start,)
+        p2_valid_vsync.child_flows = (f1_end,)
+
+        model = trace_model.Model(
+            processes=[
+                trace_model.Process(
+                    1,
+                    "scenic",
+                    [
+                        trace_model.Thread(
+                            10,
+                            "main",
+                            [p1_early_dur, f0_start, p1_valid_dur, f1_start],
+                        )
+                    ],
+                ),
+                trace_model.Process(
+                    2,
+                    "display",
+                    [
+                        trace_model.Thread(
+                            20,
+                            "vsync",
+                            [
+                                p2_first_event,
+                                p2_early_vsync,
+                                f0_end,
+                                p2_valid_vsync,
+                                f1_end,
+                            ],
+                        )
+                    ],
+                ),
+            ],
+            scheduling_records={},
+        )
+
+        common_start = trace_utils.get_common_process_start_time(
+            model,
+            "StartFrame",
+            category="gfx",
+            type=trace_model.DurationEvent,
+        )
+        self.assertEqual(
+            common_start, trace_time.TimePoint.from_microseconds(50)
+        )
+
+        # Early flow starting before common_start is ignored when min_start is set.
+        self.assertEqual(
+            list(
+                trace_utils.get_following_flow_events(
+                    p1_early_dur, min_start=common_start
+                )
+            ),
+            [],
+        )
+        self.assertIsNone(
+            trace_utils.get_nearest_following_flow_event(
+                p1_early_dur, "gfx", "Vsync", min_start=common_start
+            )
+        )
+
+        # Valid flow starting after common_start resolves identically to adjust_to_common_process_start.
+        nearest = trace_utils.get_nearest_following_flow_event(
+            p1_valid_dur, "gfx", "Vsync", min_start=common_start
+        )
+        self.assertIs(nearest, p2_valid_vsync)
+
+        sliced_model = trace_utils.adjust_to_common_process_start(
+            model,
+            "StartFrame",
+            category="gfx",
+            type=trace_model.DurationEvent,
+        )
+        sliced_starts = list(
+            trace_utils.filter_events(
+                sliced_model.all_events(),
+                category="gfx",
+                name="StartFrame",
+                type=trace_model.DurationEvent,
+            )
+        )
+        self.assertEqual(len(sliced_starts), 1)
+        self.assertEqual(sliced_starts[0].start, p1_valid_dur.start)

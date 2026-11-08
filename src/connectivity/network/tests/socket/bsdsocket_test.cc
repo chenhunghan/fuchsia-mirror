@@ -939,9 +939,21 @@ TEST_P(SocketOptsTest, NegativeTOS) {
   fbl::unique_fd s;
   ASSERT_TRUE(s = NewSocket()) << strerror(errno);
 
+  SockOption t = GetTOSOption();
+  // Sockets default to 0 so setting a non-zero value first ensures setting -1
+  // below updates the option.
+  int initial = 0xC0;
+  ASSERT_EQ(setsockopt(s.get(), t.level, t.option, &initial, sizeof(initial)), 0)
+      << strerror(errno);
+  {
+    int get = 0;
+    socklen_t get_sz = sizeof(get);
+    ASSERT_EQ(getsockopt(s.get(), t.level, t.option, &get, &get_sz), 0) << strerror(errno);
+    ASSERT_EQ(get_sz, sizeof(int));
+    ASSERT_EQ(get, initial);
+  }
   int set = -1;
   socklen_t set_sz = sizeof(set);
-  SockOption t = GetTOSOption();
   EXPECT_EQ(setsockopt(s.get(), t.level, t.option, &set, set_sz), 0) << strerror(errno);
   int expect;
   if (IsIPv6()) {
@@ -1165,6 +1177,34 @@ TEST_P(SocketOptsTest, GetTcpCongestionWithZeroOptLen) {
   // The above getsockopt should be a no-op: optlen should still be 0 and the buf is not modified.
   ASSERT_EQ(optlen, 0u);
   ASSERT_STREQ(buf, "TEST");
+}
+
+TEST_P(SocketOptsTest, ResetTcpMaxSegToDefault) {
+  if (!IsTCP()) {
+    GTEST_SKIP() << "Skip TCP_MAXSEG tests for non TCP sockets";
+  }
+
+  fbl::unique_fd s;
+  ASSERT_TRUE(s = NewSocket()) << strerror(errno);
+
+  constexpr int kCustomMss = 1024;
+  ASSERT_EQ(setsockopt(s.get(), SOL_TCP, TCP_MAXSEG, &kCustomMss, sizeof(kCustomMss)), 0)
+      << strerror(errno);
+  int get = -1;
+  socklen_t get_len = sizeof(get);
+  ASSERT_EQ(getsockopt(s.get(), SOL_TCP, TCP_MAXSEG, &get, &get_len), 0) << strerror(errno);
+  ASSERT_EQ(get_len, sizeof(get));
+  EXPECT_EQ(get, kCustomMss);
+
+  constexpr int kResetMss = 0;
+  constexpr int kDefaultMss = 536;
+  ASSERT_EQ(setsockopt(s.get(), SOL_TCP, TCP_MAXSEG, &kResetMss, sizeof(kResetMss)), 0)
+      << strerror(errno);
+  ASSERT_EQ(getsockopt(s.get(), SOL_TCP, TCP_MAXSEG, &get, &get_len), 0) << strerror(errno);
+  ASSERT_EQ(get_len, sizeof(get));
+  EXPECT_EQ(get, kDefaultMss);
+
+  EXPECT_EQ(close(s.release()), 0) << strerror(errno);
 }
 
 TEST_P(SocketOptsTest, GetsockoptTruncation) {

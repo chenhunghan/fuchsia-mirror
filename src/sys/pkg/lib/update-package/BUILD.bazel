@@ -137,7 +137,6 @@ fx_component_manifest(
 fx_test_component(
     name = "test-component",
     compiled_manifest = ":test-component-manifest",
-    component_name = "update-package-lib-test",
     deps = [":update-package_test_packaged_bin"],
 )
 

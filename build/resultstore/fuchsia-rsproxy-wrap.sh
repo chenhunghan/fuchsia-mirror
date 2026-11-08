@@ -151,7 +151,7 @@ if [[ "$enable_resultstore" == 0 ]]; then
   debug_msg "ResultStore disabled.  Running original command without rsproxy."
   exec "${wrapped_command[@]}"
 fi
-# LINT.ThenChange(//build/scripts/main_build.py:resultstore_ninja_env_vars)
+# LINT.ThenChange(//build/resultstore/rs_profile.py:resultstore_ninja_env_vars)
 
 rsproxy_options=(
   --project_id=fuchsia

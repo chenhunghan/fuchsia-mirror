@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <optional>
@@ -89,6 +90,23 @@ TEST(ProcAttrTest, AttrsAreSeekable) {
   ASSERT_EQ(result, 9) << strerror(errno);
   ASSERT_TRUE(files::ReadFileDescriptorToString(current_attr.get(), &context));
   EXPECT_EQ(RemoveTrailingNul(context), "unconfined_r:unconfined_t:s0");
+}
+
+TEST(ProcAttrTest, PreadPastEof) {
+  auto current_attr = fbl::unique_fd(open("/proc/self/attr/current", O_RDONLY));
+  ASSERT_TRUE(current_attr.is_valid()) << strerror(errno);
+
+  char buf[256] = {};
+  ssize_t initial = pread(current_attr.get(), buf, sizeof(buf), 0);
+  ASSERT_THAT(initial, SyscallSucceeds());
+  ASSERT_GT(initial, 0);
+  ASSERT_LT(static_cast<size_t>(initial), sizeof(buf));
+
+  EXPECT_THAT(pread(current_attr.get(), buf, sizeof(buf), initial), SyscallSucceedsWithValue(0));
+  EXPECT_THAT(pread(current_attr.get(), buf, sizeof(buf), initial + 1),
+              SyscallSucceedsWithValue(0));
+  EXPECT_THAT(pread(current_attr.get(), buf, sizeof(buf), 4096), SyscallSucceedsWithValue(0));
+  EXPECT_THAT(pread(current_attr.get(), buf, sizeof(buf), 1 << 20), SyscallSucceedsWithValue(0));
 }
 
 // Writable attributes validate the contexts written to them.
@@ -250,6 +268,41 @@ TEST(ProcAttrTest, ZombieCurrentAttr) {
 
     EXPECT_EQ(RemoveTrailingNul(context), my_label.value());
   }));
+}
+
+TEST(ProcAttrTest, RestrictedProcFilesHaveOwnerOnlyReadMode) {
+  constexpr const char* kRequiredRestrictedProcFiles[] = {
+      "/proc/pagetypeinfo",
+      "/proc/vmallocinfo",
+  };
+  for (const char* path : kRequiredRestrictedProcFiles) {
+    struct stat st{};
+    ASSERT_THAT(stat(path, &st), SyscallSucceeds()) << path;
+    EXPECT_EQ(st.st_mode & 0777, 0400u) << path;
+  }
+
+  constexpr const char* kOptionalRestrictedProcFiles[] = {
+      "/proc/allocinfo",
+      "/proc/slabinfo",
+  };
+  for (const char* path : kOptionalRestrictedProcFiles) {
+    struct stat st{};
+    if (stat(path, &st) == 0) {
+      EXPECT_EQ(st.st_mode & 0777, 0400u) << path;
+    }
+  }
+
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&] {
+    constexpr uid_t kUnprivilegedUid = 1000;
+    constexpr gid_t kUnprivilegedGid = 1000;
+    ASSERT_THAT(setresgid(kUnprivilegedGid, kUnprivilegedGid, kUnprivilegedGid), SyscallSucceeds());
+    ASSERT_THAT(setresuid(kUnprivilegedUid, kUnprivilegedUid, kUnprivilegedUid), SyscallSucceeds());
+    for (const char* path : kRequiredRestrictedProcFiles) {
+      EXPECT_THAT(open(path, O_RDONLY), SyscallFailsWithErrno(EACCES)) << path;
+    }
+  });
+  EXPECT_TRUE(helper.WaitForChildren());
 }
 
 }  // namespace

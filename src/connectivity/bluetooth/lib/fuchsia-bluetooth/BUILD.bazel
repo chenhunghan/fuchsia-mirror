@@ -8,6 +8,12 @@ load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package
 
 package(default_applicable_licenses = ["//:license"])
 
+test_suite(
+    name = "tests",
+    tests = [":bluetooth-crate-tests"],
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)
+
 rustc_library(
     name = "fuchsia-bluetooth",
     srcs = [
@@ -78,7 +84,7 @@ rustc_library(
             "//src/lib/async-utils",
             "//src/lib/diagnostics/inspect/contrib/rust",
             "//src/lib/diagnostics/inspect/derive",
-            "//src/lib/diagnostics/inspect/rust:fuchsia-inspect",  # @bazel2gn:path_overwrite://src/lib/diagnostics/inspect/rust
+            "//src/lib/diagnostics/inspect/rust",
             "//src/lib/fuchsia-async",
             "//third_party/rust_crates/vendor:futures",
             "//third_party/rust_crates/vendor:slab",
@@ -103,5 +109,4 @@ fx_unittest_package(
     name = "bluetooth-crate-tests",
     package_name = "bluetooth-crate-tests",
     unit_tests = [":fuchsia-bluetooth_test"],
-    visibility = ["//src/connectivity/bluetooth:__pkg__"],
 )

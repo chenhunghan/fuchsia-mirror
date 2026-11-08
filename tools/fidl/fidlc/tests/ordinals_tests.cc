@@ -9,7 +9,8 @@
 
 #include <gtest/gtest.h>
 #include <openssl/sha.h>
-#include <re2/re2.h>
+
+#include "re2/re2.h"
 
 namespace fidlc {
 namespace {

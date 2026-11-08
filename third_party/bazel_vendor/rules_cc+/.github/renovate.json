@@ -1,8 +1,0 @@
-{
-  "bazel": {
-    "enabled": false
-  },
-  "bazel-module": {
-    "enabled": false
-  }
-}

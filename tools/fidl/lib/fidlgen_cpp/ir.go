@@ -680,8 +680,13 @@ func (c *compiler) compileType(val fidlgen.Type, maybeAlias *fidlgen.PartialType
 		r.nameVariants = NameVariantsForPrimitive(val.PrimitiveSubtype)
 		r.WireFamily = FamilyKinds.TrivialCopy
 		r.Kind = TypeKinds.Primitive
-		r.NaturalFieldConstraint = "fidl::internal::NaturalCodingConstraintEmpty"
-		r.WireFieldConstraint = "fidl::internal::WireCodingConstraintEmpty"
+		if !val.Zeroable {
+			r.NaturalFieldConstraint = "fidl::internal::NaturalCodingConstraintNonZero"
+			r.WireFieldConstraint = "fidl::internal::WireCodingConstraintNonZero"
+		} else {
+			r.NaturalFieldConstraint = "fidl::internal::NaturalCodingConstraintEmpty"
+			r.WireFieldConstraint = "fidl::internal::WireCodingConstraintEmpty"
+		}
 	case fidlgen.InternalType:
 		switch val.InternalSubtype {
 		case fidlgen.FrameworkErr:

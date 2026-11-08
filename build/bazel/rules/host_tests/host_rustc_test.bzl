@@ -16,6 +16,7 @@ def wrap_host_rust_test(
         test_label = None,
         test_args = [],
         test_data = [],
+        target_compatible_with = None,
         visibility = None):
     """Generate a host_test() target to run a rust_test().
 
@@ -32,12 +33,18 @@ def wrap_host_rust_test(
        test_label: (Optional[string]) Optional test_label to pass to host_test(). Default to None.
        test_args: (list[string]) List of test arguments.
        test_data: (list[string]) List of labels to test's runtime requirements.
+       target_compatible_with: (Optional[list[string]]) Platform constraints for the generated
+         targets. Defaults to HOST_OS_CONSTRAINTS.
        visibility: (list[string]) Visibility of the final host_test() target.
     """
+    if target_compatible_with == None:
+        target_compatible_with = HOST_OS_CONSTRAINTS
+
     binary_as_test_data = binary_name + "_as_test_data"
     host_test_data_files(
         name = binary_as_test_data,
         srcs = [":" + binary_name],
+        target_compatible_with = target_compatible_with,
         testonly = True,
         visibility = ["//visibility:private"],
     )
@@ -72,7 +79,7 @@ def wrap_host_rust_test(
         test_label = test_label,
         test_args = test_args,
         data = test_data,
-        target_compatible_with = HOST_OS_CONSTRAINTS,
+        target_compatible_with = target_compatible_with,
         visibility = visibility,
     )
 
@@ -85,6 +92,7 @@ def define_and_wrap_host_rust_test(
         test_args = [],
         test_data = [],
         tags = [],
+        target_compatible_with = None,
         visibility,
         **kwargs):
     """Generate a host_test() target wrapping a new rust_test() target.
@@ -113,6 +121,8 @@ def define_and_wrap_host_rust_test(
       test_args: (string list) Optional arguments to pass to the test binary. Do not use `args`.
       test_data: (string list) Optional. The data dependencies for the test target itself.
       tags: (string list) Optional. List of test tags.
+      target_compatible_with: (Optional[list[string]]) Platform constraints for the generated
+        targets. Defaults to HOST_OS_CONSTRAINTS.
       visibility: (string list) Optional. Visibility of the top-level test target, the leaf
         rust_test() target will have private visibility instead.
       **kwargs: Arguments to pass to `rust_test_rule`.
@@ -121,6 +131,8 @@ def define_and_wrap_host_rust_test(
         fail("Use `test_args` to pass test arguments instead of `args`")
 
     binary_name = binary_name if binary_name else name + "_bin"
+    if target_compatible_with == None:
+        target_compatible_with = HOST_OS_CONSTRAINTS
 
     # When tags comes from expanding the kwargs of an inherited parent rule,
     # attributes such as tags can be set to None instead of an empty list. In
@@ -132,6 +144,7 @@ def define_and_wrap_host_rust_test(
     rust_test_rule(
         name = binary_name,
         tags = tags,
+        target_compatible_with = target_compatible_with,
         visibility = ["//visibility:private"],
         **kwargs
     )
@@ -142,6 +155,7 @@ def define_and_wrap_host_rust_test(
         binary_name = binary_name,
         test_args = test_args,
         test_data = test_data,
+        target_compatible_with = target_compatible_with,
         visibility = visibility,
     )
 
@@ -152,6 +166,7 @@ def legacy_host_rustc_test(
         test_args = [],
         test_data = [],
         tags = [],
+        target_compatible_with = None,
         visibility = None,
         **kwargs):
     """Define a host test wrapping a Rust test that can be used with Fuchsia test runners.
@@ -169,18 +184,24 @@ def legacy_host_rustc_test(
     Args:
       name: The name of the host test.
       binary_name: Optional. The name of the rustc_test target, defaults to 'name + "_bin"'.
+      test_label: Optional test label to appear in tests.json.
       test_args: Arguments to pass to the test binary. Do not use `args`.
       test_data: Optional. The data dependencies for the test target itself.
       tags: Optional: List of test tags.
+      target_compatible_with: Optional. Platform constraints for the generated targets.
+        Defaults to HOST_OS_CONSTRAINTS.
+      visibility: Optional. Visibility of the top-level test target.
       **kwargs: Arguments to pass to `rustc_test`.
     """
     define_and_wrap_host_rust_test(
         name = name,
         rust_test_rule = rustc_test,
+        binary_name = binary_name,
         test_label = test_label,
         test_args = test_args,
         test_data = test_data,
         tags = tags,
+        target_compatible_with = target_compatible_with,
         visibility = visibility,
         **kwargs
     )
@@ -193,6 +214,7 @@ def _host_rustc_test_impl(
         test_args,
         test_data,
         tags,
+        target_compatible_with = None,
         **kwargs):
     legacy_host_rustc_test(
         name = name,
@@ -201,6 +223,7 @@ def _host_rustc_test_impl(
         test_args = test_args,
         test_data = test_data,
         tags = tags,
+        target_compatible_with = target_compatible_with,
         visibility = visibility,
         **kwargs
     )

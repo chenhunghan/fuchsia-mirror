@@ -40,8 +40,6 @@ impl FlatlandEnvironment {
             .unwrap();
         let scenic =
             builder.add_child("scenic", "#meta/scenic.cm", ChildOptions::new()).await.unwrap();
-        let config =
-            builder.add_child("config", "#meta/config.cm", ChildOptions::new()).await.unwrap();
 
         let cobalt = builder
             .add_local_child(
@@ -59,54 +57,6 @@ impl FlatlandEnvironment {
                 Route::new()
                     .capability(Capability::protocol::<MetricEventLoggerFactoryMarker>())
                     .from(&cobalt)
-                    .to(&scenic),
-            )
-            .await
-            .unwrap();
-
-        builder
-            .add_route(
-                Route::new()
-                    .capability(Capability::configuration("fuchsia.scenic.Renderer"))
-                    .capability(Capability::configuration(
-                        "fuchsia.scenic.FrameSchedulerMinPredictedFrameDurationInUs",
-                    ))
-                    .capability(Capability::configuration(
-                        "fuchsia.scenic.FramePredictionMarginInUs",
-                    ))
-                    .capability(Capability::configuration("fuchsia.scenic.PointerAutoFocus"))
-                    .capability(Capability::configuration("fuchsia.scenic.DisplayComposition"))
-                    .capability(Capability::configuration(
-                        "fuchsia.scenic.DisplayCompositionEnableHeuristics",
-                    ))
-                    .capability(Capability::configuration("fuchsia.scenic.ICanHazDisplayId"))
-                    .capability(Capability::configuration("fuchsia.scenic.ICanHazDisplayMode"))
-                    .capability(Capability::configuration("fuchsia.scenic.DisplayRotation"))
-                    .capability(Capability::configuration(
-                        "fuchsia.scenic.MinDisplayHorizontalResolutionPx",
-                    ))
-                    .capability(Capability::configuration(
-                        "fuchsia.scenic.MaxDisplayHorizontalResolutionPx",
-                    ))
-                    .capability(Capability::configuration(
-                        "fuchsia.scenic.MinDisplayVerticalResolutionPx",
-                    ))
-                    .capability(Capability::configuration(
-                        "fuchsia.scenic.MaxDisplayVerticalResolutionPx",
-                    ))
-                    .capability(Capability::configuration(
-                        "fuchsia.scenic.MinDisplayRefreshRateMillihertz",
-                    ))
-                    .capability(Capability::configuration(
-                        "fuchsia.scenic.MaxDisplayRefreshRateMillihertz",
-                    ))
-                    .capability(Capability::configuration("fuchsia.scenic.FrameCounterOverlay"))
-                    .capability(Capability::configuration("fuchsia.scenic.InputNoncritical"))
-                    .capability(Capability::configuration("fuchsia.scenic.UseSeparateInputThread"))
-                    .capability(Capability::configuration("fuchsia.ui.VisualDebuggingLevel"))
-                    .capability(Capability::configuration("fuchsia.ui.Prefetch"))
-                    .capability(Capability::configuration("fuchsia.ui.VisualDebuggingLevel"))
-                    .from(&config)
                     .to(&scenic),
             )
             .await
@@ -167,9 +117,6 @@ impl FlatlandEnvironment {
             )
             .await
             .unwrap();
-
-        // Set up fake-display-stack-host's config.
-        builder.init_mutable_config_from_package(&fake_display_stack_host).await.unwrap();
 
         let realm_instance = Arc::new(builder.build().await.expect("Failed to create realm"));
         Self { args, realm_instance }

@@ -117,13 +117,12 @@ impl TestFixture {
             Arc::new(PageFaultCounter::new().expect("Failed to create PageFaultCounter"));
         let volume_name = if options.as_blob { "blob" } else { "vol" };
         let (filesystem, volume, volumes_directory) = if options.format {
-            let mut builder = FxFilesystemBuilder::new()
-                .format(true)
-                .allow_type3_blobs(options.allow_type3_blobs);
+            let mut builder =
+                FxFilesystemBuilder::new().allow_type3_blobs(options.allow_type3_blobs);
             if let Some(hooks) = options.hooks {
                 builder = builder.hooks(hooks);
             }
-            let filesystem = builder.open(device).await.unwrap();
+            let filesystem = builder.format(device).await.unwrap();
             let root_volume = root_volume(filesystem.clone()).await.unwrap();
             let store = root_volume
                 .new_volume(

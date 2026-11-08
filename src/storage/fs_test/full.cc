@@ -7,6 +7,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <cstdint>
+#include <tuple>
+#include <vector>
+
 #include <fbl/unique_fd.h>
 
 #include "src/storage/fs_test/fs_test_fixture.h"
@@ -25,11 +29,21 @@ class FullTest : public BaseFilesystemTest, public testing::WithParamInterface<F
 };
 
 void FillFile(fbl::unique_fd fd, unsigned char value) {
-  unsigned char buf[4096] = {value};
-  for (;;) {
-    ssize_t written = write(fd.get(), buf, sizeof(buf));
-    if (written < ssize_t{sizeof(buf)}) {
-      break;
+  // We have to try multiple chunks here to support both the legacy File.Write FIDL method,
+  // which will write as much data up to 8 KiB per RPC, as well as zx_stream_writev which
+  // follows an all-or-nothing batched pager request. In the later case `write` will return
+  // ENOSPC, so we need to fall back to single page writes afterwards to make sure we always
+  // fill the file fully regardless of what method fdio delegates writes to (or what the
+  // filesystem supports).
+  constexpr size_t kLargeChunk = 65536;
+  constexpr size_t kSmallChunk = 4096;
+  std::vector<unsigned char> buf(kLargeChunk, value);
+  for (size_t chunk_size : {kLargeChunk, kSmallChunk}) {
+    for (;;) {
+      ssize_t written = write(fd.get(), buf.data(), chunk_size);
+      if (written < static_cast<ssize_t>(chunk_size)) {
+        break;
+      }
     }
   }
   ASSERT_EQ(close(fd.release()), 0);
@@ -145,12 +159,21 @@ TEST_P(FullTest, UnlinkWhenFullSucceeds) {
 }
 
 std::vector<FullTestParamType> GetTestParams() {
+  constexpr uint64_t kMaxVolumeSize = 32ull * 1024 * 1024;  // 32 MiB (65,536 x 512-byte blocks)
   std::vector<FullTestParamType> test_combinations;
-  for (const TestFilesystemOptions& options : AllTestFilesystems()) {
+  for (TestFilesystemOptions options : AllTestFilesystems()) {
     // Filesystems such as memfs cannot run this test because they OOM (as expected, given
     // memory is the limiting factor).
     if (options.filesystem->GetTraits().in_memory)
       continue;
+    if (!options.filesystem->GetTraits().has_min_volume_size &&
+        options.device_block_count * options.device_block_size > kMaxVolumeSize) {
+      // Cap the volume size to keep test runtime reasonably bounded. On some slower builders
+      // (e.g. those with instrumentation), larger volumes can lead to much longer test
+      // runtimes on some filesystems (especially those backed by FVM, which requires repeated
+      // extension of allocated slices).
+      options.device_block_count = kMaxVolumeSize / options.device_block_size;
+    }
     test_combinations.emplace_back(options, true);
     test_combinations.emplace_back(options, false);
   }

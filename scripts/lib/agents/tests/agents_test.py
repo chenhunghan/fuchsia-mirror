@@ -45,7 +45,11 @@ class TestAgents(unittest.TestCase):
     def test_get_agent_env_vars(self) -> None:
         vars_list = agents_lib.get_agent_env_vars()
         self.assertIn("ANTIGRAVITY_AGENT", vars_list)
+        self.assertIn("ANTIGRAVITY_CONVERSATION_ID", vars_list)
         self.assertIn("GEMINI_CLI", vars_list)
+        self.assertIn("CLAUDECODE", vars_list)
+        self.assertIn("CLAUDE_CODE_SESSION_ID", vars_list)
+        self.assertIn("FFX_AGENT_SESSION_ID", vars_list)
 
     def test_source_agents_txt_relative_path(self) -> None:
         """Verify the expected relative path from agents.py to agents.txt exists.
@@ -72,15 +76,34 @@ class TestAgents(unittest.TestCase):
             f"Expected agents.txt at {target_agents_txt} relative to {source_agents_py}, but file does not exist",
         )
 
+        target_session_ids_txt = (
+            agents_lib._get_source_agent_session_ids_txt_path(source_agents_py)
+        )
+        self.assertTrue(
+            target_session_ids_txt.is_file(),
+            f"Expected agent_session_ids.txt at {target_session_ids_txt} relative to {source_agents_py}, but file does not exist",
+        )
+
         with mock.patch.object(agents_lib, "data", None):
-            with mock.patch.object(
-                agents_lib,
-                "_get_source_agents_txt_path",
-                return_value=target_agents_txt,
+            with (
+                mock.patch.object(
+                    agents_lib,
+                    "_get_source_agents_txt_path",
+                    return_value=target_agents_txt,
+                ),
+                mock.patch.object(
+                    agents_lib,
+                    "_get_source_agent_session_ids_txt_path",
+                    return_value=target_session_ids_txt,
+                ),
             ):
                 vars_list = agents_lib.get_agent_env_vars()
                 self.assertIn("ANTIGRAVITY_AGENT", vars_list)
+                self.assertIn("ANTIGRAVITY_CONVERSATION_ID", vars_list)
                 self.assertIn("GEMINI_CLI", vars_list)
+                self.assertIn("CLAUDECODE", vars_list)
+                self.assertIn("CLAUDE_CODE_SESSION_ID", vars_list)
+                self.assertIn("FFX_AGENT_SESSION_ID", vars_list)
 
     def test_get_agent_env_vars_missing_raises(self) -> None:
         """Verify get_agent_env_vars raises FileNotFoundError if agents.txt cannot be found."""
@@ -100,7 +123,19 @@ class TestAgents(unittest.TestCase):
         env = {"ANTIGRAVITY_AGENT": "1"}
         self.assertTrue(agents_lib.is_invoked_by_agent(env))
 
+        env = {"ANTIGRAVITY_CONVERSATION_ID": "1"}
+        self.assertTrue(agents_lib.is_invoked_by_agent(env))
+
         env = {"GEMINI_CLI": "1"}
+        self.assertTrue(agents_lib.is_invoked_by_agent(env))
+
+        env = {"CLAUDECODE": "1"}
+        self.assertTrue(agents_lib.is_invoked_by_agent(env))
+
+        env = {"CLAUDE_CODE_SESSION_ID": "1"}
+        self.assertTrue(agents_lib.is_invoked_by_agent(env))
+
+        env = {"FFX_AGENT_SESSION_ID": "1"}
         self.assertTrue(agents_lib.is_invoked_by_agent(env))
 
 

@@ -140,6 +140,10 @@ _log_severity_allowed_val = [
 #             [string] The path to the metadata file (bin file) accompanying the certificate.
 #             There is no default, the path has to be specified explicitly.
 #
+#           allow_internet (optional, default: false)
+#             [bool] Whether to enable external internet access (via SLiRP IPv4) on the
+#             emulator alongside TAP networking.
+#
 #       tags (optional)
 #         [list of strings] keys on which tests may be grouped. Tests with
 #         given tags will be run (1) together, and (2) only with support from

@@ -8,7 +8,8 @@
 By default, scan all files in the source paths (file or directory) and hash
 their content.
 
-- For symlinks, the link value is used as input (not the target file).
+- For symlinks, the link value is used as input (not the target file). If the
+  link points to another symlink, the whole chain of link values is used.
 
 - For regular files, its sha1 digest is used as input.
 
@@ -30,15 +31,38 @@ import sys
 import typing as T
 from pathlib import Path
 
-_HASH = "sha1"
+from build.bazel.scripts import get_git_head_commit as gghc
 
-sys.path.insert(0, str(Path(__file__).parent))
-import get_git_head_commit as gghc
+_HASH = "sha1"
 
 
 def _depfile_quote(p: Path | str) -> str:
     """Quote a Path value for depfile output."""
     return str(p).replace("\\", "\\\\").replace(" ", "\\ ")
+
+
+def _next_symlink_hop(link_path: Path, target: Path) -> Path:
+    """Return the absolute path of the entry a symlink points to.
+
+    All directory components of the result are resolved, so that a relative
+    target containing '..' is applied to the real directory containing the
+    link, not to a lexical path that may go through symlinked directories.
+    The final component is left unresolved so callers can inspect it to see
+    whether it is itself a symlink (i.e. the next hop in a symlink chain).
+
+    Args:
+        link_path: Path to a symlink.
+        target: The value of the symlink, as returned by readlink().
+    """
+    # Note that os.path.join() ignores the first argument when target is
+    # absolute.
+    joined = os.path.join(os.path.dirname(link_path), target)
+    head, tail = os.path.split(joined)
+    if tail in ("", os.curdir, os.pardir):
+        # The target ends with a directory-only component (e.g. 'foo/' or
+        # '..'), which cannot be a symlink itself, so resolve it entirely.
+        return Path(os.path.realpath(joined))
+    return Path(os.path.realpath(head)) / tail
 
 
 class FileState(object):
@@ -116,8 +140,27 @@ class FileState(object):
             return "G" + head_commit
 
         if source_path.is_symlink():
-            self._input_files.add(source_path)
-            return "S" + str(source_path.readlink())
+            # Follow the whole symlink chain, so that every intermediate link
+            # is an input (a change to any of them must trigger a rehash) and
+            # every link value is part of the descriptor. Only inspecting the
+            # first hop would miss changes to the target of a chained link.
+            #
+            # Intermediate links are recorded relative to the current directory
+            # (like source paths rebased on the build directory) unless
+            # source_path is absolute. The chain is finite because
+            # source_path.exists() is checked above, which fails on loops.
+            link_path = source_path
+            targets = []
+            while link_path.is_symlink():
+                self._input_files.add(link_path)
+                target = link_path.readlink()
+                targets.append(str(target))
+                next_hop = _next_symlink_hop(link_path, target)
+                if source_path.is_absolute():
+                    link_path = next_hop
+                else:
+                    link_path = Path(os.path.relpath(next_hop))
+            return "S" + "->".join(targets)
 
         if source_path.is_file():
             self._input_files.add(source_path)

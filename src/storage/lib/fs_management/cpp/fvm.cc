@@ -5,7 +5,6 @@
 #include "src/storage/lib/fs_management/cpp/fvm.h"
 
 #include <fidl/fuchsia.storage.block/cpp/wire.h>
-#include <lib/fdio/cpp/caller.h>
 #include <string.h>
 #include <zircon/compiler.h>
 
@@ -96,35 +95,6 @@ zx_status_t FvmInit(fidl::UnownedClientEnd<fuchsia_storage_block::Block> device,
   }
 
   return FvmInitWithSize(device, block_info.block_count * block_info.block_size, slice_size);
-}
-
-__EXPORT
-zx::result<fuchsia_storage_block::wire::VolumeManagerInfo> FvmQuery(
-    fidl::UnownedClientEnd<fuchsia_storage_block::VolumeManager> fvm) {
-  const fidl::WireResult result = fidl::WireCall(fvm)->GetInfo();
-  if (!result.ok()) {
-    return zx::error(result.status());
-  }
-  const fidl::WireResponse response = result.value();
-  if (zx_status_t status = response.status; status != ZX_OK) {
-    return zx::error(status);
-  }
-  return zx::ok(*response.info);
-}
-
-__EXPORT
-zx_status_t FvmActivate(int fvm_fd, fuchsia_storage_block::wire::Guid deactivate,
-                        fuchsia_storage_block::wire::Guid activate) {
-  fdio_cpp::UnownedFdioCaller caller(fvm_fd);
-  fidl::UnownedClientEnd<fuchsia_storage_block::VolumeManager> client(caller.borrow_channel());
-  auto response = fidl::WireCall(client)->Activate(deactivate, activate);
-  if (response.status() != ZX_OK) {
-    return response.status();
-  }
-  if (response.value().status != ZX_OK) {
-    return response.value().status;
-  }
-  return ZX_OK;
 }
 
 }  // namespace fs_management

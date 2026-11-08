@@ -47,20 +47,6 @@ source_set("fidl_event_handler") {
   ]
 }
 
-source_set("fidl_oneshot") {
-  sources = [ "fidl_oneshot.h" ]
-
-  public_deps = [
-    ":errors",
-    "//sdk/lib/async",
-    "//sdk/lib/async:async-cpp",
-    "//sdk/lib/fit",
-    "//sdk/lib/fit-promise",
-    "//sdk/lib/sys/cpp",
-    "//sdk/lib/syslog/cpp",
-  ]
-}
-
 source_set("inspect_node_manager") {
   sources = [
     "inspect_node_manager.cc",
@@ -91,12 +77,14 @@ source_set("logs") {
     "log_format.h",
   ]
 
-  public_deps = [ "//sdk/fidl/fuchsia.logger:fuchsia.logger_hlcpp" ]
+  public_deps = [
+    "//sdk/fidl/fuchsia.logger:fuchsia.logger_hlcpp",
+    "//zircon/system/ulib/zx",
+  ]
 
   deps = [
     "//sdk/lib/syslog/cpp",
     "//src/lib/fxl",
-    "//zircon/system/ulib/zx",
   ]
 }
 
@@ -207,7 +195,10 @@ source_set("vmo") {
     "vmo.h",
   ]
 
-  public_deps = [ "//zircon/system/ulib/zx" ]
+  public_deps = [
+    "//sdk/fidl/fuchsia.mem:fuchsia.mem_cpp",
+    "//zircon/system/ulib/zx",
+  ]
 
   deps = [ "//sdk/lib/syslog/cpp" ]
 }

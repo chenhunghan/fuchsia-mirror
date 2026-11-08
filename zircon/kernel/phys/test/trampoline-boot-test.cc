@@ -28,9 +28,9 @@
 #include <ktl/string_view.h>
 #include <ktl/unique_ptr.h>
 #include <phys/allocation.h>
-#include <phys/boot-zbi.h>
-#include <phys/main.h>
+#include <phys/boot-zbi/boot-zbi.h>
 #include <phys/new.h>
+#include <phys/runtime/main.h>
 #include <phys/stdio.h>
 #include <phys/symbolize.h>
 #include <pretty/cpp/sizes.h>

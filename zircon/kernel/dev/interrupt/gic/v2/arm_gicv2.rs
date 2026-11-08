@@ -153,7 +153,7 @@ impl CpuMaskTranslator {
 
 static MASK_TRANSLATOR: CpuMaskTranslator = CpuMaskTranslator::new();
 
-ksync::declare_singleton_spinlock!(
+crate::ksync_kernel::declare_singleton_spinlock!(
     /// Serializes the read-modify-write sequences the driver performs on the shared distributor
     /// registers. Acquired with the spinlock's default policy, which saves and restores interrupts.
     GicLock
@@ -461,7 +461,7 @@ impl InterruptControllerOps for Gicv2 {
     }
 
     fn init_percpu(&self) {
-        crate::kernel::mp::set_curr_cpu_online(true);
+        crate::kernel::mp::set_curr_cpu_online();
         let ipi_base = IPI_BASE.load(Ordering::Relaxed);
         let _ = self.unmask(InterruptVector(MpIpi::Generic as u32 + ipi_base));
         let _ = self.unmask(InterruptVector(MpIpi::Reschedule as u32 + ipi_base));
@@ -633,11 +633,13 @@ unsafe extern "C" {
 }
 
 extern "C" fn sgi_generic_handler(_: *mut c_void) {
-    mbx_generic_irq();
+    // SAFETY: SGI handlers execute in hard-IRQ context with interrupts and preemption disabled.
+    unsafe { mbx_generic_irq() };
 }
 
 extern "C" fn sgi_reschedule_handler(_: *mut c_void) {
-    mbx_reschedule_irq();
+    // SAFETY: SGI handlers execute in hard-IRQ context with interrupts and preemption disabled.
+    unsafe { mbx_reschedule_irq() };
 }
 
 extern "C" fn sgi_interrupt_handler(_: *mut c_void) {

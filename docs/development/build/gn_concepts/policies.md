@@ -155,7 +155,7 @@ group("foo_allowlist") {
   # fx gn refs $(fx get-build-dir) //path/to:foo_allowlist | sed 's|\(.*\):.*|"\1/*",|' | sort | uniq
   #
   # To trim:
-  # scripts/gn/trim_visibility.py --target="//path/to:foo_allowlist"
+  # build/bazel/scripts/trim_visibility.py --target="//path/to:foo_allowlist"
   visibility = [
     "//src/project1/*",
     "//src/project2/*",
@@ -163,6 +163,13 @@ group("foo_allowlist") {
   ]
 }
 ```
+
+`build/bazel/scripts/trim_visibility.py` finds the consumers of the target with
+`fx gn refs` and `fx bazel query`, and prints the trimmed list in the syntax of
+the file it goes into. If the allowlisted target is defined in `BUILD.bazel`,
+including targets that bazel2gn syncs to `BUILD.gn`, write the allowlist in
+Bazel syntax; the script checks it against consumers in both the Bazel and GN
+graphs. For details, see the [bazel2gn documentation][bazel2gn-visibility].
 
 Then elsewhere, automatically add a dependency on the allowlisted target.
 
@@ -200,6 +207,7 @@ Depending on the nature of your change and the third party code in question,
 it may be possible to make changes upstream. Use your best judgement.
 
 [bash-style]: https://google.github.io/styleguide/shellguide.html
+[bazel2gn-visibility]: /build/tools/bazel2gn/README.md#to-maintain-visibility-allowlists
 [python-style]: https://google.github.io/styleguide/pyguide.html
 [shellcheck]: https://www.shellcheck.net/
 [wconversion-project]: /docs/contribute/open_projects/cpp/wconversion.md

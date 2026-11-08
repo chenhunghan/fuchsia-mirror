@@ -95,6 +95,7 @@ typedef int (*thread_start_routine)(void* arg) [[clang::cfi_unchecked_callee]];
 // Sadly, there does not seem to be a good way to statically annotate this.
 typedef void (*thread_trampoline_routine)() __NO_RETURN;
 
+// LINT.IfChange(thread_flags_and_signals)
 // clang-format off
 #define THREAD_FLAG_DETACHED                 (1 << 0)
 #define THREAD_FLAG_FREE_STRUCT              (1 << 1)
@@ -110,6 +111,10 @@ typedef void (*thread_trampoline_routine)() __NO_RETURN;
 #define THREAD_SIGNAL_CHECK_RSEQ             (1 << 5)
 #define THREAD_SIGNAL_POLICY_KILL            (1 << 6)
 // clang-format on
+// LINT.ThenChange(
+//   //zircon/kernel/kernel/thread.rs:thread_flags_and_signals,
+//   //zircon/kernel/kernel/thread_ffi.cc:thread_flags_and_signals,
+// )
 
 // thread priority
 #define NUM_PRIORITIES (32)
@@ -120,6 +125,26 @@ typedef void (*thread_trampoline_routine)() __NO_RETURN;
 #define LOW_PRIORITY (NUM_PRIORITIES / 4)
 #define DEFAULT_PRIORITY (NUM_PRIORITIES / 2)
 #define HIGH_PRIORITY ((NUM_PRIORITIES / 4) * 3)
+
+class PreemptionState;
+
+// Rust implementations of PreemptionState's slow paths and cold methods (see kernel/thread.rs).
+// The Rust mirror holds only relaxed atomics, so every entry point takes a shared reference.
+extern "C" {
+[[gnu::cold]] void rust_preemption_state_preempt_reenable_slow(
+    const PreemptionState& preemption_state, uint32_t old_state);
+[[nodiscard, gnu::cold]] bool rust_preemption_state_preempt_reenable_delay_flush_slow(
+    const PreemptionState& preemption_state, uint32_t old_state);
+[[gnu::cold]] void rust_preemption_state_eager_resched_reenable_slow(
+    const PreemptionState& preemption_state, uint32_t old_state);
+bool rust_preemption_state_set_timeslice_extension(const PreemptionState& preemption_state,
+                                                   zx_duration_mono_t extension_duration);
+void rust_preemption_state_clear_timeslice_extension(const PreemptionState& preemption_state);
+void rust_preemption_state_preempt_set_pending(const PreemptionState& preemption_state,
+                                               cpu_mask_t reschedule_mask);
+bool rust_preemption_state_evaluate_timeslice_extension(const PreemptionState& preemption_state);
+void rust_preemption_state_reset(const PreemptionState& preemption_state);
+}  // extern "C"
 
 class PreemptionState {
  public:
@@ -134,11 +159,11 @@ class PreemptionState {
   static constexpr uint32_t kTimesliceExtensionFlagsShift = 30;
   static constexpr uint32_t kTimesliceExtensionFlagsMask =
       ~(kPreemptDisableMask | kEagerReschedDisableMask);
-  enum TimesliceExtensionFlags {
+  enum TimesliceExtensionFlags : uint32_t {
     // Thread has a timeslice extension that may or may not be Active.
-    Present = 0b01 << kTimesliceExtensionFlagsShift,
+    Present = 0b01u << kTimesliceExtensionFlagsShift,
     // Thread has an Active (in use) timeslice extension.
-    Active = 0b10 << kTimesliceExtensionFlagsShift,
+    Active = 0b10u << kTimesliceExtensionFlagsShift,
   };
 
   cpu_mask_t preempts_pending() const { return preempts_pending_.load(); }
@@ -153,6 +178,13 @@ class PreemptionState {
 
   uint32_t PreemptDisableCount() const { return PreemptDisableCount(state_.load()); }
   uint32_t EagerReschedDisableCount() const { return EagerReschedDisableCount(state_.load()); }
+
+  // TODO(https://fxbug.dev/537458631): PreemptDisable, PreemptReenable,
+  // PreemptReenableDelayFlush, EagerReschedDisable, and EagerReschedReenable
+  // duplicate the Rust fast path on purpose because release kernels do not use
+  // cross-language LTO; they can be removed once kernel LTO is on by default or
+  // the C++ callers are gone.
+  // LINT.IfChange(PreemptionStateFastPaths)
 
   // PreemptDisable() increments the preempt disable counter for the current
   // thread. While preempt disable is non-zero, preemption of the thread is
@@ -177,41 +209,24 @@ class PreemptionState {
   // the immediate preemption of the calling thread.
   void PreemptReenable() {
     const uint32_t old_state = state_.fetch_sub(1);
-    ASSERT_MSG(PreemptDisableCount(old_state) > 0, "unmasked preemption state: %" PRIu32,
-               old_state);
-
-    // First, check for the expected situation of dropping the preempt count to zero
-    // with a zero eager resched disable count and no timeslice extension.
-    if (old_state == 1) {
-      FlushPending(Flush::FlushLocal);
+    // Fast path: count drops to zero, no eager resched count, no extension, nothing pending.
+    if (likely(old_state == 1)) {
+      // Order the state_ RMW before the preempts_pending_ load for same-CPU interrupts.
+      ktl::atomic_signal_fence(ktl::memory_order_seq_cst);
+      if (unlikely(preempts_pending_.load() != 0)) {
+        rust_preemption_state_preempt_reenable_slow(*this, old_state);
+      }
       return;
     }
-
-    // Things must be more complicated.  Check for the various situations in
-    // decreasing order of likeliness.
-
-    // Are either of the counters non-zero?
-    if (EagerReschedDisableCount(old_state) > 0 || PreemptDisableCount(old_state) > 1) {
+    // Are either of the counters non-zero?  Only take the early return when the preempt
+    // disable count was at least one: the underflow case (count already zero) must fall
+    // through to the slow path, which asserts on it.
+    if (PreemptDisableCount(old_state) != 0 &&
+        (old_state & (kPreemptDisableMask | kEagerReschedDisableMask)) > 1) {
       // We've got a non-zero count in one of the counters.
       return;
     }
-
-    // The counters are both zero.  At this point, we must have a timeslice
-    // extension installed.  This extension may be inactive, active and
-    // not-yet-expired, or active and expired.
-
-    // Is there an active extension?
-    if (HasActiveTimesliceExtension(old_state)) {
-      // Has it expired?
-      if (ClearActiveTimesliceExtensionIfExpired()) {
-        // It has.  We can flush.
-        DEBUG_ASSERT(PreemptIsEnabled());
-        FlushPending(Flush::FlushLocal);
-        return;
-      }
-    }
-
-    // We have an extension that's either inactive or active+unexpired.
+    rust_preemption_state_preempt_reenable_slow(*this, old_state);
   }
 
   void PreemptDisableAnnotated() TA_ACQ(preempt_disabled_token) {
@@ -253,39 +268,23 @@ class PreemptionState {
     DEBUG_ASSERT(arch_blocking_disallowed());
 
     const uint32_t old_state = state_.fetch_sub(1);
-    ASSERT(PreemptDisableCount(old_state) > 0);
 
     // First, check for the expected situation of dropping the preempt count to zero
     // with a zero eager resched disable count and no timeslice extension.
-    if (old_state == 1) {
+    if (likely(old_state == 1)) {
       const cpu_mask_t local_mask = cpu_num_to_mask(arch_curr_cpu_num());
       const cpu_mask_t prev_mask = preempts_pending_.fetch_and(~local_mask);
       return (local_mask & prev_mask) != 0;
     }
-
-    if (EagerReschedDisableCount(old_state) > 0 || PreemptDisableCount(old_state) > 1) {
+    // Are either of the counters non-zero?  Only take the early return when the preempt
+    // disable count was at least one: the underflow case (count already zero) must fall
+    // through to the slow path, which asserts on it.
+    if (PreemptDisableCount(old_state) != 0 &&
+        (old_state & (kPreemptDisableMask | kEagerReschedDisableMask)) > 1) {
       // We've got a non-zero count in one of the counters.
       return false;
     }
-
-    // The counters are both zero.  At this point, we must have a timeslice
-    // extension installed.  This extension may be inactive, active and
-    // not-yet-expired, or active and expired.
-
-    // Is there an active extension?
-    if (HasActiveTimesliceExtension(old_state)) {
-      // Has it expired?
-      if (ClearActiveTimesliceExtensionIfExpired()) {
-        // It has.
-        DEBUG_ASSERT(PreemptIsEnabled());
-        const cpu_mask_t local_mask = cpu_num_to_mask(arch_curr_cpu_num());
-        const cpu_mask_t prev_mask = preempts_pending_.fetch_and(~local_mask);
-        return (local_mask & prev_mask) != 0;
-      }
-    }
-
-    // We have an extension that's either inactive or active+unexpired.
-    return false;
+    return rust_preemption_state_preempt_reenable_delay_flush_slow(*this, old_state);
   }
 
   // EagerReschedDisable() increments the eager resched disable counter for the
@@ -301,7 +300,7 @@ class PreemptionState {
   // A call to EagerReschedDisable() must be matched by a later call to
   // EagerReschedReenable() to decrement the eager resched disable counter.
   void EagerReschedDisable() {
-    const uint32_t old_state = state_.fetch_add(1 << kEagerReschedDisableShift);
+    const uint32_t old_state = state_.fetch_add(1u << kEagerReschedDisableShift);
     ASSERT_MSG(EagerReschedDisableCount(old_state) < kMaxCountValue, "old_state: %#" PRIx32,
                old_state);
   }
@@ -309,47 +308,23 @@ class PreemptionState {
   // EagerReschedReenable() decrements the eager resched disable counter and
   // flushes pending local and/or remote preemptions if enabled, respectively.
   void EagerReschedReenable() {
-    const uint32_t old_state = state_.fetch_sub(1 << kEagerReschedDisableShift);
-    ASSERT_MSG(EagerReschedDisableCount(old_state) > 0, "old_state: %#" PRIx32, old_state);
-
-    // First check the expected case.
-    if (old_state == 1 << kEagerReschedDisableShift) {
-      // Counts are both zero and there's no timeslice extension.
-      //
-      // Flushing all might reschedule this CPU, make sure it's OK to block.
-      FlushPending(Flush::FlushAll);
+    const uint32_t old_state = state_.fetch_sub(1u << kEagerReschedDisableShift);
+    // Fast path: count drops to zero, no preempt disable count, no extension, nothing pending.
+    if (likely(old_state == (1u << kEagerReschedDisableShift))) {
+      // Order the state_ RMW before the preempts_pending_ load for same-CPU interrupts.
+      ktl::atomic_signal_fence(ktl::memory_order_seq_cst);
+      if (unlikely(preempts_pending_.load() != 0)) {
+        rust_preemption_state_eager_resched_reenable_slow(*this, old_state);
+      }
       return;
     }
-
     if (EagerReschedDisableCount(old_state) > 1) {
       // Nothing to do since eager resched disable implies preempt disable.
       return;
     }
-
-    // We know we can at least flush remote.  Can we also flush local?
-    if (PreemptDisableCount(old_state) > 0) {
-      // Nope, we've got a non-zero preempt disable count.
-      FlushPending(Flush::FlushRemote);
-      return;
-    }
-
-    // Is there an active extension?
-    if (HasActiveTimesliceExtension(old_state)) {
-      // Has it expired?
-      if (ClearActiveTimesliceExtensionIfExpired()) {
-        // Yes, preempt disable count is zero and the active extension has
-        // expired.  We can flush all.
-        DEBUG_ASSERT(PreemptIsEnabled());
-        FlushPending(Flush::FlushAll);
-        return;
-      }
-      // Extension is active, can't flush local.
-    }
-
-    // We have an inactive extension or an unexpired active extension.  Either
-    // way, we can flush remote, but not local.
-    FlushPending(Flush::FlushRemote);
+    rust_preemption_state_eager_resched_reenable_slow(*this, old_state);
   }
+  // LINT.ThenChange(//zircon/kernel/kernel/thread.rs:PreemptionStateFastPaths)
 
   void EagerReschedDisableAnnotated() TA_ACQ(preempt_disabled_token) {
     preempt_disabled_token.Acquire();
@@ -374,35 +349,14 @@ class PreemptionState {
   // activated, but preemption will not occur until the count has dropped to
   // zero and the extension has expired or has been clear.
   bool SetTimesliceExtension(zx_duration_mono_t extension_duration) {
-    if (extension_duration <= 0) {
-      return false;
-    }
-
-    uint32_t state = state_.load();
-    if (HasTimesliceExtension(state)) {
-      return false;
-    }
-    timeslice_extension_.store(extension_duration);
-    // Make sure that the timeslice extension value becomes visible to an
-    // interrupt handler in this thread prior to the state_ flag becoming
-    // visible.  See comment at |timeslice_extension_|.
-    ktl::atomic_signal_fence(ktl::memory_order_release);
-    state_.fetch_or(TimesliceExtensionFlags::Present);
-    return true;
+    return rust_preemption_state_set_timeslice_extension(*this, extension_duration);
   }
 
   // Unconditionally clears any timeslice extension.
   //
   // This method must be called in normal thread context because it may trigger
   // local preemption.
-  void ClearTimesliceExtension() {
-    // Clear any present timeslice extension.
-    const uint32_t old_state = state_.fetch_and(~kTimesliceExtensionFlagsMask);
-    // Are the counters both zero?
-    if ((old_state & ~kTimesliceExtensionFlagsMask) == 0) {
-      FlushPending(Flush::FlushLocal);
-    }
-  }
+  void ClearTimesliceExtension() { rust_preemption_state_clear_timeslice_extension(*this); }
 
   // PreemptSetPending() marks a pending preemption for the given CPUs.
   //
@@ -411,21 +365,7 @@ class PreemptionState {
   // PreemptDisable() and PreemptReenable(). It is similar to Reschedule(),
   // except that it does not need to be called with thread's lock held.
   void PreemptSetPending(cpu_mask_t reschedule_mask = cpu_num_to_mask(arch_curr_cpu_num())) {
-    DEBUG_ASSERT(arch_ints_disabled());
-    DEBUG_ASSERT(arch_blocking_disallowed());
-    DEBUG_ASSERT(!PreemptIsEnabled());
-
-    preempts_pending_.fetch_or(reschedule_mask);
-
-    // Are we pending for the local CPU?
-    const cpu_mask_t local_cpu_mask = cpu_num_to_mask(arch_curr_cpu_num());
-    const bool local_cpu_in_resched_mask = (reschedule_mask & local_cpu_mask) != 0;
-    if (!local_cpu_in_resched_mask) {
-      // Nope.
-      return;
-    }
-
-    EvaluateTimesliceExtension();
+    rust_preemption_state_preempt_set_pending(*this, reschedule_mask);
   }
 
   // Evaluate the thread's timeslice extension (if present), activating or
@@ -433,55 +373,12 @@ class PreemptionState {
   //
   // Returns whether preemption is enabled.
   bool EvaluateTimesliceExtension() {
-    const uint32_t old_state = state_.load();
-    if (old_state == 0) {
-      // No counts, no extension.  The common case.
-      return true;
-    }
-
-    if (!HasTimesliceExtension(old_state)) {
-      // No extension, but we have a non-zero count.
-      return false;
-    }
-
-    if (HasActiveTimesliceExtension(old_state)) {
-      if (!ClearActiveTimesliceExtensionIfExpired()) {
-        return false;
-      }
-      // The active extension has expired.  If the counts are both zero, then
-      // we're ready for preemption.
-      return (old_state & ~kTimesliceExtensionFlagsMask) == 0;
-    }
-
-    // We have a not-yet-active extension.  Time to activate it.
-    //
-    // See comment at |timeslice_extension_| for why the signal fence is needed.
-    ktl::atomic_signal_fence(ktl::memory_order_acquire);
-    const zx_duration_mono_t extension_duration = timeslice_extension_.load();
-    if (extension_duration <= 0) {
-      // Already expired.
-      state_.fetch_and(~kTimesliceExtensionFlagsMask);
-      return (old_state & ~kTimesliceExtensionFlagsMask) == 0;
-    }
-    const zx_instant_mono_t deadline =
-        zx_time_add_duration(current_mono_time(), extension_duration);
-    timeslice_extension_deadline_.store(deadline);
-    // See comment at |timeslice_extension_deadline_| for why the signal fence
-    // is needed.
-    ktl::atomic_signal_fence(ktl::memory_order_release);
-    state_.fetch_or(TimesliceExtensionFlags::Active);
-    SetPreemptionTimerForExtension(deadline);
-    return false;
+    return rust_preemption_state_evaluate_timeslice_extension(*this);
   }
 
   // Resets the preemption state. This should only be called when reviving an
   // idle/power thread that halted while taking a CPU offline.
-  void Reset() {
-    state_ = 0;
-    preempts_pending_ = 0;
-    timeslice_extension_ = 0;
-    timeslice_extension_deadline_ = 0;
-  }
+  void Reset() { rust_preemption_state_reset(*this); }
 
  private:
   friend class PreemptDisableTestAccess;
@@ -498,53 +395,6 @@ class PreemptionState {
   }
 
   static inline uint32_t PreemptDisableCount(uint32_t state) { return state & kPreemptDisableMask; }
-
-  static inline bool HasTimesliceExtension(uint32_t state) {
-    return (state & TimesliceExtensionFlags::Present) != 0;
-  }
-
-  static inline bool HasActiveTimesliceExtension(uint32_t state) {
-    return (state & TimesliceExtensionFlags::Active) != 0;
-  }
-
-  // A non-inlined helper method to set the preemption timer when a timeslice
-  // has been extended.  This must be non-inline to avoid an #include cycle with
-  // percpu.h and thread.h.
-  static void SetPreemptionTimerForExtension(zx_instant_mono_t deadline);
-
-  // Checks whether the active timeslice extension has expired and if so, clears
-  // it and returns true.
-  //
-  // Should only be called when there is an active timeslice extension.
-  bool ClearActiveTimesliceExtensionIfExpired() {
-    // Has the extension expired?
-    //
-    // See comment at |timeslice_extension_deadline_| for why the signal fence is needed.
-    ktl::atomic_signal_fence(ktl::memory_order_acquire);
-    if (current_mono_time() >= timeslice_extension_deadline_.load()) {
-      state_.fetch_and(~kTimesliceExtensionFlagsMask);
-      return true;
-    }
-    return false;
-  }
-
-  enum Flush { FlushLocal = 0x1, FlushRemote = 0x2, FlushAll = FlushLocal | FlushRemote };
-
-  // Flushes local, remote, or all pending preemptions.
-  //
-  // This method is split in two so that the early out case of no pending
-  // preemptions may be inlined without creating a header include cycle.
-  void FlushPending(Flush flush) {
-    // Early out to avoid unnecessarily taking the thread lock. This check races
-    // any potential flush due to context switch, however, the context switch can
-    // only clear bits that would have been flushed below, no new pending
-    // preemptions are possible in the mask bits indicated by |flush|.
-    if (likely(preempts_pending_.load() == 0)) {
-      return;
-    }
-    FlushPendingContinued(flush);
-  }
-  void FlushPendingContinued(Flush flush);
 
   // state_ contains three fields:
   //
@@ -573,8 +423,8 @@ class PreemptionState {
 
   // The maximum duration of the thread's timeslice extension.
   //
-  // This field is only valid when |state_|'s
-  // |kTimeSliceExtensionFlags::Present| flag it set.
+  // This field is only valid when |state_|'s Present timeslice extension flag
+  // is set.
   //
   // This field may only be accessed by its owning thread or in an interrupt
   // context of the owning thread.  When reading this field, be sure to issue an
@@ -587,8 +437,8 @@ class PreemptionState {
 
   // The deadline at which the thread timeslice extension expires.
   //
-  // This field is only valid when |kTimeSliceExtensionFlags::Active| flag it
-  // set.
+  // This field is only valid when |state_|'s Active timeslice extension flag
+  // is set.
   //
   // This field may only be accessed by its owning thread or in an interrupt
   // context of the owning thread.  When reading this field, be sure to issue an
@@ -600,6 +450,22 @@ class PreemptionState {
   RelaxedAtomic<zx_instant_mono_t> timeslice_extension_deadline_{};
 };
 
+class TaskState;
+
+extern "C" {
+
+// Rust implementations of TaskState::Init, Join and TryWakeJoiners; the C++ methods of the same
+// name in TaskState are thin forwarders to these. Unlike the rust_thread_* accessor entries, the
+// last two deal with chain locks: Join is entered with the queue's lock and the current thread's
+// lock held and releases the queue's lock; TryWakeJoiners acquires (or backs off from) the queue's
+// lock itself.
+void rust_task_state_init(TaskState* task_state, thread_start_routine entry, void* arg);
+zx_status_t rust_task_state_join(TaskState* task_state, Thread* current_thread,
+                                 zx_instant_mono_t deadline);
+bool rust_task_state_try_wake_joiners(const TaskState* task_state, zx_status_t status);
+
+}  // extern "C"
+
 // TaskState is responsible for running the task defined by
 // |entry(arg)|, and reporting its value to any joining threads.
 //
@@ -608,17 +474,23 @@ class TaskState {
  public:
   TaskState() = default;
 
-  void Init(thread_start_routine entry, void* arg);
+  void Init(thread_start_routine entry, void* arg) { rust_task_state_init(this, entry, arg); }
 
   zx_status_t Join(Thread* current_thread, zx_instant_mono_t deadline) TA_REL(get_lock())
-      TA_REQ(chainlock_transaction_token, ChainLockable::GetLock(*current_thread));
+      TA_REQ(chainlock_transaction_token, ChainLockable::GetLock(*current_thread)) {
+    const zx_status_t status = rust_task_state_join(this, current_thread, deadline);
+    get_lock().MarkReleased();
+    return status;
+  }
 
   // Attempt to wake all of our joiners.  This operation might fail because of a
   // conflict while attempting to obtain the required locks, in which case the
   // caller needs to back off (drop all currently held chain locks) and try
-  // again..
+  // again.
   bool TryWakeJoiners(zx_status_t status)
-      TA_REQ(chainlock_transaction_token, preempt_disabled_token);
+      TA_REQ(chainlock_transaction_token, preempt_disabled_token) {
+    return rust_task_state_try_wake_joiners(this, status);
+  }
 
   thread_start_routine entry() const { return entry_; }
   void* arg() const { return arg_; }
@@ -710,8 +582,40 @@ enum class ThreadStallState {
   IgnoredKernelOnly,
   Inactive,
   Progressing,
+  // Safety invariant: a thread only enters `Stalling` while it is the running
+  // thread on its CPU (`ScopedMemoryStall` on `Thread::Current`), so a
+  // `Stalling` thread's `last_cpu` is a valid CPU number (`<
+  // PerCpu::processor_count()`); `last_cpu` is only written at context switch
+  // and idle init and never reset.
   Stalling,
 };
+
+extern "C" {
+
+// Rust implementations of the Thread flags, signals and name accessors and of
+// CheckKillOrSuspendSignal. The C++ methods of the same name below are thin
+// forwarders to these; none of them takes a lock.
+void rust_thread_set_signals(const Thread* thread, uint32_t bits);
+void rust_thread_clear_signals(const Thread* thread, uint32_t bits);
+uint32_t rust_thread_flags(const Thread* thread);
+bool rust_thread_detached(const Thread* thread);
+void rust_thread_set_detached(const Thread* thread, bool value);
+bool rust_thread_free_struct(const Thread* thread);
+void rust_thread_set_free_struct(const Thread* thread, bool value);
+bool rust_thread_idle(const Thread* thread);
+void rust_thread_set_idle(const Thread* thread, bool value);
+bool rust_thread_vcpu(const Thread* thread);
+void rust_thread_set_vcpu(const Thread* thread, bool value);
+const char* rust_thread_name(const Thread* thread);
+void rust_thread_set_name(Thread* thread, const char* name, size_t len);
+zx_status_t rust_thread_check_kill_or_suspend_signal(const Thread* thread);
+
+// The default trampoline used when running the Thread. This can be replaced by the
+// |alt_trampoline| parameter to Thread::CreateEtc(). It is entered with the previous and current
+// thread locks held and interrupts disabled (it releases both locks) and never returns.
+void rust_thread_trampoline() __NO_RETURN;
+
+}  // extern "C"
 
 struct Thread : public ChainLockable {
   // TODO(kulakowski) Are these needed?
@@ -787,11 +691,11 @@ struct Thread : public ChainLockable {
 
   // Returns the koid of the associated ProcessDispatcher for user threads or
   // ZX_KOID_INVLID for kernel threads.
-  zx_koid_t pid() const { return pid_; }
+  zx_koid_t pid() const { return pid_.load(ktl::memory_order_relaxed); }
 
   // Returns the koid of the associated ThreadDispatcher for user threads or an
   // independent koid for kernel threads.
-  zx_koid_t tid() const { return tid_; }
+  zx_koid_t tid() const { return tid_.load(ktl::memory_order_relaxed); }
 
   // Return the pid/tid of the thread as a tracing thread reference.
   fxt::ThreadRef<fxt::RefType::kInline> fxt_ref() const { return {pid(), tid()}; }
@@ -817,7 +721,9 @@ struct Thread : public ChainLockable {
   // raised, then `ZX_ERR_INTERNAL_INTR_KILLED` will be returned. If suspend has
   // been raised, then `ZX_ERR_INTERNAL_INTR_RETRY` will be returned. Otherwise,
   // `ZX_OK` will be returned.
-  zx_status_t CheckKillOrSuspendSignal() const;
+  zx_status_t CheckKillOrSuspendSignal() const {
+    return rust_thread_check_kill_or_suspend_signal(this);
+  }
 
   // Erase this thread from all global lists, where applicable.
   void EraseFromListsLocked() TA_REQ(list_lock_);
@@ -937,7 +843,7 @@ struct Thread : public ChainLockable {
 
   // Return true if thread has been signaled.
   bool IsSignaled() { return signals() != 0; }
-  bool IsIdle() const { return !!(flags_ & THREAD_FLAG_IDLE); }
+  bool IsIdle() const { return idle(); }
 
   // Returns true if this Thread's user state has been saved.
   //
@@ -1124,47 +1030,24 @@ struct Thread : public ChainLockable {
   void set_suspended() TA_REQ(get_lock()) { scheduler_state_.set_state(THREAD_SUSPENDED); }
 
   // Accessors for specific flags_ bits.
-  bool detatched() const { return (flags_ & THREAD_FLAG_DETACHED) != 0; }
-  void set_detached(bool value) {
-    if (value) {
-      flags_ |= THREAD_FLAG_DETACHED;
-    } else {
-      flags_ &= ~THREAD_FLAG_DETACHED;
-    }
-  }
-  bool free_struct() const { return (flags_ & THREAD_FLAG_FREE_STRUCT) != 0; }
-  void set_free_struct(bool value) {
-    if (value) {
-      flags_ |= THREAD_FLAG_FREE_STRUCT;
-    } else {
-      flags_ &= ~THREAD_FLAG_FREE_STRUCT;
-    }
-  }
-  bool idle() const { return (flags_ & THREAD_FLAG_IDLE) != 0; }
-  void set_idle(bool value) {
-    if (value) {
-      flags_ |= THREAD_FLAG_IDLE;
-    } else {
-      flags_ &= ~THREAD_FLAG_IDLE;
-    }
-  }
-  bool vcpu() const { return (flags_ & THREAD_FLAG_VCPU) != 0; }
-  void set_vcpu(bool value) {
-    if (value) {
-      flags_ |= THREAD_FLAG_VCPU;
-    } else {
-      flags_ &= ~THREAD_FLAG_VCPU;
-    }
-  }
+  bool detached() const { return rust_thread_detached(this); }
+  void set_detached(bool value) { rust_thread_set_detached(this, value); }
+  bool free_struct() const { return rust_thread_free_struct(this); }
+  void set_free_struct(bool value) { rust_thread_set_free_struct(this, value); }
+  bool idle() const { return rust_thread_idle(this); }
+  void set_idle(bool value) { rust_thread_set_idle(this, value); }
+  bool vcpu() const { return rust_thread_vcpu(this); }
+  void set_vcpu(bool value) { rust_thread_set_vcpu(this, value); }
 
   // Access to the entire flags_ value, for diagnostics.
-  unsigned int flags() const { return flags_; }
+  unsigned int flags() const { return rust_thread_flags(this); }
 
-  // Only these three methods directly access the signals_ member.
-  // TODO(https://fxbug.dev/42077109): Write down memory order requirements for accessing signals_.
+  // Accessors for pending signals. Reads are inline relaxed loads so IsSignaled() on syscall exit
+  // stays a single load; mutations forward to Rust.
+  // TODO(https://fxbug.dev/42077109): Write down memory order requirements for accessing signals.
   uint32_t signals() const { return signals_.load(ktl::memory_order_relaxed); }
-  void set_signals(uint32_t bits) { signals_.fetch_or(bits, ktl::memory_order_relaxed); }
-  void clear_signals(uint32_t bits) { signals_.fetch_and(~bits, ktl::memory_order_relaxed); }
+  void set_signals(uint32_t bits) { rust_thread_set_signals(this, bits); }
+  void clear_signals(uint32_t bits) { rust_thread_clear_signals(this, bits); }
 
   bool has_migrate_fn() const TA_REQ_SHARED(get_lock()) { return migrate_fn_ != nullptr; }
   bool migrate_pending() const TA_REQ_SHARED(get_lock()) { return migrate_pending_; }
@@ -1277,10 +1160,10 @@ struct Thread : public ChainLockable {
   VmAspace* active_aspace() { return aspace_; }
   const VmAspace* active_aspace() const { return aspace_; }
 
-  const char* name() const { return name_; }
+  const char* name() const { return rust_thread_name(this); }
   // This may truncate |name|, so that it (including a trailing NUL
   // byte) fit in ZX_MAX_NAME_LEN bytes.
-  void set_name(ktl::string_view name);
+  void set_name(ktl::string_view name) { rust_thread_set_name(this, name.data(), name.size()); }
 
   Linebuffer& linebuffer() { return linebuffer_; }
 
@@ -1349,10 +1232,6 @@ struct Thread : public ChainLockable {
   // to SuspendOrKillInternal.
   enum class SuspendOrKillOp { Suspend, Kill };
 
-  // The default trampoline used when running the Thread. This can be
-  // replaced by the |alt_trampoline| parameter to CreateEtc().
-  static void Trampoline() __NO_RETURN;
-
   // Dpc callback used for cleaning up a detached Thread's resources.
   static void FreeDpc(Dpc* dpc);
 
@@ -1375,15 +1254,16 @@ struct Thread : public ChainLockable {
   // Thread.
   bool CheckKillSignal() TA_REQ(get_lock());
 
-  // These should only be accessed from the current thread.
+  // These should only be accessed from the current thread. The kick-pending flag stays
+  // C++-owned, so both accessors work on |flags_| directly.
   bool restricted_kick_pending() const {
-    return (flags_ & THREAD_FLAG_RESTRICTED_KICK_PENDING) != 0;
+    return (flags_.load(ktl::memory_order_relaxed) & THREAD_FLAG_RESTRICTED_KICK_PENDING) != 0;
   }
   void set_restricted_kick_pending(bool value) {
     if (value) {
-      flags_ |= THREAD_FLAG_RESTRICTED_KICK_PENDING;
+      flags_.fetch_or(THREAD_FLAG_RESTRICTED_KICK_PENDING, ktl::memory_order_relaxed);
     } else {
-      flags_ &= ~THREAD_FLAG_RESTRICTED_KICK_PENDING;
+      flags_.fetch_and(~THREAD_FLAG_RESTRICTED_KICK_PENDING, ktl::memory_order_relaxed);
     }
   }
 
@@ -1414,7 +1294,8 @@ struct Thread : public ChainLockable {
   // These fields are among the most active in the thread. They are grouped
   // together near the front to improve cache locality.
   __NO_UNIQUE_ADDRESS mutable fbl::NullLock scheduler_variable_lock_;
-  unsigned int flags_{};
+  // ktl::atomic is used for type parity with the Rust side (RelaxedAtomicU32 / RelaxedAtomicU64).
+  ktl::atomic<uint32_t> flags_{};
   ktl::atomic<uint32_t> signals_;
   SchedulerState scheduler_state_ TA_GUARDED(get_lock());
   SchedulerQueueState scheduler_queue_state_ TA_GUARDED(scheduler_variable_lock_);
@@ -1457,8 +1338,8 @@ struct Thread : public ChainLockable {
 
   // When user_thread_ is set, these values are copied from ThreadDispatcher and
   // its parent ProcessDispatcher. Kernel threads maintain an independent tid.
-  zx_koid_t tid_ = KernelObjectId::Generate();
-  zx_koid_t pid_ = ZX_KOID_INVALID;
+  ktl::atomic<zx_koid_t> tid_{KernelObjectId::Generate()};
+  ktl::atomic<zx_koid_t> pid_{ZX_KOID_INVALID};
 
   // Architecture-specific stuff.
   arch_thread arch_{};
@@ -1756,7 +1637,6 @@ extern "C" {
 cpu_mask_t cpp_thread_get_cpu_affinity(const Thread* thread);
 cpu_mask_t cpp_thread_set_cpu_affinity(Thread* thread, cpu_mask_t affinity);
 ThreadDispatcher* cpp_thread_user_thread(Thread* thread);
-zx_koid_t cpp_thread_tid(const Thread* thread);
 uint64_t cpp_thread_lock_flow_id(const Thread* thread);
 uint64_t cpp_thread_take_next_lock_flow_id(Thread* thread);
 }

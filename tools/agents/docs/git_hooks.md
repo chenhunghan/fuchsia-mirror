@@ -236,8 +236,9 @@ Runtime AI agent execution is detected dynamically at commit time using canonica
 variables:
 
 - **Agent Environment Detection**: Query `is_invoked_by_agent()`, which checks the canonical agent
-  environment variables defined in `AGENT_ENV_VARS` (`ANTIGRAVITY_AGENT`, `GEMINI_CLI`,
-  `ANTIGRAVITY_EDITOR_APP_ROOT`).
+  environment variables defined in `AGENT_ENV_VARS` (`ANTIGRAVITY_AGENT`,
+  `ANTIGRAVITY_CONVERSATION_ID`, `GEMINI_CLI`, `ANTIGRAVITY_EDITOR_APP_ROOT`, `CLAUDECODE`,
+  `CLAUDE_CODE_SESSION_ID`, `FFX_AGENT_SESSION_ID`).
 
 When active runtime agent execution is detected:
 

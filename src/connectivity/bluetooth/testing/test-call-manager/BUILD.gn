@@ -83,12 +83,9 @@ if (is_fuchsia) {
     visibility = [ ":*" ]
   }
 }
+
 fuchsia_unittest_package("test-call-manager-tests") {
   package_name = "test-call-manager-tests-gn"
   component_name = "test-call-manager-tests"
   deps = [ ":test-call-manager_test" ]
-  visibility = [
-    ":*",
-    "//src/connectivity/bluetooth:*",
-  ]
 }

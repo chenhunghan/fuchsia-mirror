@@ -299,8 +299,8 @@ impl<T: Deref<Target = Q>, Q: ReadBytes> Block<T, Header> {
     ///
     /// Returns `None` if the container is smaller than `MIN_ORDER_SIZE`, the block at
     /// `BlockIndex::HEADER` is not of type `BlockType::Header`, the magic number does not
-    /// match `expected_magic`, or the version is not `HEADER_VERSION_NUMBER` (shared by
-    /// both regular Inspect and Blob headers).
+    /// match `expected_magic`, or the version is greater than `HEADER_VERSION_NUMBER`
+    /// (shared by both regular Inspect and Blob headers; older V1 headers are still accepted).
     pub fn parse_header_with_magic(container: T, expected_magic: u32) -> Option<Self> {
         if container.len() < constants::MIN_ORDER_SIZE {
             return None;
@@ -310,7 +310,7 @@ impl<T: Deref<Target = Q>, Q: ReadBytes> Block<T, Header> {
             return None;
         }
         if block.magic_number() != expected_magic
-            || block.version() != constants::HEADER_VERSION_NUMBER
+            || block.version() > constants::HEADER_VERSION_NUMBER
         {
             return None;
         }
@@ -1410,12 +1410,13 @@ mod tests {
             .become_inspect_header(constants::MIN_ORDER_SIZE * 2)
             .unwrap();
 
-        // Version < HEADER_VERSION_NUMBER is rejected.
+        // Version <= HEADER_VERSION_NUMBER (e.g. V1) is still accepted for backwards
+        // compatibility with older V1 format writers (https://fxbug.dev/577950742).
         {
             let mut block = container.block_at_unchecked_mut::<Header>(BlockIndex::HEADER);
             HeaderFields::set_header_version(&mut block, constants::HEADER_VERSION_NUMBER - 1);
         }
-        assert!(Block::parse_inspect_header(&container).is_none());
+        assert!(Block::parse_inspect_header(&container).is_some());
 
         // Version > HEADER_VERSION_NUMBER is rejected.
         {

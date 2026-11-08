@@ -28,8 +28,9 @@ use starnix_crypt::EncryptionKeyId;
 use starnix_lifecycle::{ObjectReleaser, ReleaserAction};
 use starnix_logging::{log_error, track_stub};
 use starnix_sync::{
-    DynamicLockDepRwLock, FsNodeAppend, FsNodeFlockInfoLock, FsNodeFsVerityLock, FsNodeInfoLevel,
-    FsNodeInfoRecursiveLevel, FsNodeWriteGuardStateLock, FuseFsNodeInfoLevel, LockDepMutex,
+    BlockDeviceFsNodeAppendLevel, DynamicLockDepRwLock, FsNodeAppend, FsNodeAppendRecursive,
+    FsNodeFlockInfoLock, FsNodeFsVerityLock, FsNodeInfoLevel, FsNodeInfoRecursiveLevel,
+    FsNodeWriteGuardStateLock, FuseFsNodeAppendLevel, FuseFsNodeInfoLevel, LockDepMutex,
     LockDepReadGuard, allow_subclass,
 };
 use starnix_types::ownership::{Releasable, ReleaseGuard};
@@ -71,8 +72,8 @@ impl Default for FsNodeLinkBehavior {
     }
 }
 
-pub type AppendLockGuard<'a> = RwQueueReadGuard<'a, FsNodeAppend>;
-pub type AppendLockWriteGuard<'a> = RwQueueWriteGuard<'a, FsNodeAppend>;
+pub type AppendLockGuard<'a> = RwQueueReadGuard<'a>;
+pub type AppendLockWriteGuard<'a> = RwQueueWriteGuard<'a>;
 
 bitflags! {
     pub struct FsNodeFlags: u8 {
@@ -101,7 +102,7 @@ pub struct FsNode {
     /// FileObjects writing with O_APPEND should grab a write() lock on this
     /// field to ensure they operate sequentially. FileObjects writing without
     /// O_APPEND should grab read() lock so that they can operate in parallel.
-    pub append_lock: RwQueue<FsNodeAppend>,
+    pub append_lock: RwQueue,
 
     /// Mutable information about this node.
     ///
@@ -468,6 +469,7 @@ pub enum UnlinkKind {
     NonDirectory,
 }
 
+#[derive(Debug)]
 pub enum SymlinkTarget {
     Path(FsString),
     Node(NamespaceNode),
@@ -1184,11 +1186,12 @@ impl FsNodeOps for SpecialNode {
 
     fn create_file_ops(
         &self,
-        _node: &FsNode,
-        _current_task: &CurrentTask,
-        _flags: OpenFlags,
+        node: &FsNode,
+        current_task: &CurrentTask,
+        flags: OpenFlags,
     ) -> Result<Box<dyn FileOps>, Errno> {
-        unreachable!("Special nodes cannot be opened.");
+        assert!(node.is_fifo(), "Only FIFO special nodes can create file ops.");
+        Pipe::open(current_task, node.fifo(current_task), flags)
     }
 }
 
@@ -1225,6 +1228,7 @@ impl FsNode {
         let mut info = info;
         ops.initial_info(&mut info);
 
+        let is_blk = info.mode.is_blk();
         let fs_lockdep_type =
             fs.upgrade().map(|fs| fs.fs_lockdep_type()).unwrap_or(FsLockDepType::Normal);
         let info_lock = match fs_lockdep_type {
@@ -1232,30 +1236,27 @@ impl FsNode {
             FsLockDepType::Fuse => DynamicLockDepRwLock::new::<FuseFsNodeInfoLevel>(info),
             FsLockDepType::Recursive => DynamicLockDepRwLock::new::<FsNodeInfoRecursiveLevel>(info),
         };
-
-        // The linter will fail in non test mode as it will not see the lock check.
-        #[allow(clippy::let_and_return)]
-        {
-            let result = Self {
-                ino,
-                flags,
-                ops,
-                fs,
-                info: info_lock,
-                append_lock: Default::default(),
-                rare_data: Default::default(),
-                write_guard_state: Default::default(),
-                fsverity: Default::default(),
-                security_state: Default::default(),
-            };
-            #[cfg(any(test, debug_assertions))]
-            {
-                let _l1 = result.append_lock.read_for_lock_ordering();
-                let _l2 = result.info.read();
-                let _l3 = result.write_guard_state.lock();
-                let _l4 = result.fsverity.lock();
+        let append_lock = if is_blk {
+            RwQueue::new::<BlockDeviceFsNodeAppendLevel>()
+        } else {
+            match fs_lockdep_type {
+                FsLockDepType::Normal => RwQueue::new::<FsNodeAppend>(),
+                FsLockDepType::Fuse => RwQueue::new::<FuseFsNodeAppendLevel>(),
+                FsLockDepType::Recursive => RwQueue::new::<FsNodeAppendRecursive>(),
             }
-            result
+        };
+
+        Self {
+            ino,
+            flags,
+            ops,
+            fs,
+            info: info_lock,
+            append_lock,
+            rare_data: Default::default(),
+            write_guard_state: Default::default(),
+            fsverity: Default::default(),
+            security_state: Default::default(),
         }
     }
 
@@ -1377,31 +1378,19 @@ impl FsNode {
         };
 
         match mode & FileMode::IFMT {
-            FileMode::IFCHR => {
+            FileMode::IFCHR | FileMode::IFBLK => {
                 if namespace_node.mount.flags().contains(MountFlags::NODEV) {
                     return error!(EACCES);
                 }
+                let device_mode = if mode.is_chr() { DeviceMode::Char } else { DeviceMode::Block };
                 current_task.kernel().open_device(
                     current_task,
                     namespace_node,
                     flags,
                     rdev,
-                    DeviceMode::Char,
+                    device_mode,
                 )
             }
-            FileMode::IFBLK => {
-                if namespace_node.mount.flags().contains(MountFlags::NODEV) {
-                    return error!(EACCES);
-                }
-                current_task.kernel().open_device(
-                    current_task,
-                    namespace_node,
-                    flags,
-                    rdev,
-                    DeviceMode::Block,
-                )
-            }
-            FileMode::IFIFO => Pipe::open(current_task, self.fifo(current_task), flags),
             // UNIX domain sockets can't be opened.
             FileMode::IFSOCK => error!(ENXIO),
             _ => self.create_file_ops(current_task, flags),
@@ -1916,12 +1905,16 @@ impl FsNode {
     ) -> Result<(), Errno> {
         let mut permission_flags = access.into();
         if permission_flags.contains(security::PermissionFlags::WRITE)
+            && let Err(err) = mount.check_readonly_filesystem()
             && !self.info().mode.is_special()
         {
-            mount.check_readonly_filesystem()?;
+            return Err(err);
         }
-        if permission_flags.contains(security::PermissionFlags::EXEC) && !self.is_dir() {
-            mount.check_noexec_filesystem()?;
+        if permission_flags.contains(security::PermissionFlags::EXEC)
+            && let Err(err) = mount.check_noexec_filesystem()
+            && !self.is_dir()
+        {
+            return Err(err);
         }
         if reason == CheckAccessReason::Access {
             permission_flags |= PermissionFlags::ACCESS;
@@ -2327,7 +2320,7 @@ impl FsNode {
         } else if name.starts_with(XATTR_SECURITY_PREFIX.to_bytes()) {
             if access == Access::WRITE {
                 // Writes require `CAP_SYS_ADMIN`, unless the LSM owning `name` specifies to skip.
-                if !security::fs_node_xattr_skipcap(name) {
+                if !security::fs_node_xattr_skipcap(current_task, name) {
                     security::check_task_capable(current_task, CAP_SYS_ADMIN)
                         .map_err(enodata_if_read)?;
                 }
@@ -2642,16 +2635,15 @@ fn check_access(
     mode: FileMode,
 ) -> Result<(), Errno> {
     // Determine which of the access bits apply to the `current_task`.
-    let (fsuid, is_in_group) = {
+    let granted = {
         let current_creds = current_task.current_creds();
-        (current_creds.fsuid, current_creds.is_in_group(node_gid))
-    };
-    let granted = if fsuid == node_uid {
-        mode.user_access()
-    } else if is_in_group {
-        mode.group_access()
-    } else {
-        mode.other_access()
+        if current_creds.fsuid == node_uid {
+            mode.user_access()
+        } else if current_creds.is_in_group(node_gid) {
+            mode.group_access()
+        } else {
+            mode.other_access()
+        }
     };
 
     let access = permission_flags.as_access();

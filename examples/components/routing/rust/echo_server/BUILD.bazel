@@ -1,0 +1,86 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# [START imports]
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+# [END imports]
+
+package(default_applicable_licenses = ["//:license"])
+
+# [START executable]
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    # Set crate_name so bazel2gn emits output_name = "echo_server_rust".
+    crate_name = "echo_server_rust",
+    edition = "2024",
+    tags = ["manual"],
+    visibility = ["//examples/components/realm_builder:__pkg__"],
+    deps = [
+        "//examples/components/routing/fidl:echo_rust",
+        "//src/lib/diagnostics/inspect/runtime/rust",
+        "//src/lib/diagnostics/inspect/rust:fuchsia-inspect",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+# [END executable]
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "echo_server_rust",
+)
+
+fx_component_manifest(
+    name = "echo_server_cmp_for_nested_cm_manifest",
+    component_name = "echo_server",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/component_manager/tests:meta/use_elf_runner.shard",
+    ],
+    manifest = "meta/echo_server_for_nested_cm.cml",
+)
+
+fx_component(
+    name = "echo_server_cmp_for_nested_cm",
+    compiled_manifest = ":echo_server_cmp_for_nested_cm_manifest",
+    visibility = ["//src/sys/component_manager/tests/controller:__pkg__"],
+    deps = [":bin_packaged"],
+)
+
+# [START component]
+fx_component_manifest(
+    name = "echo_server_cmp_manifest",
+    component_name = "echo_server",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/echo_server.cml",
+)
+
+# Unpackaged component "#meta/echo_server.cm"
+fx_component(
+    name = "echo_server_cmp",
+    compiled_manifest = ":echo_server_cmp_manifest",
+    visibility = [
+        "//examples/components/routing:__subpackages__",
+        "//src/sys/run_test_suite/tests:__pkg__",
+        "//src/sys/test_manager/tests:__subpackages__",
+    ],
+    deps = [":bin_packaged"],
+)
+# [END component]

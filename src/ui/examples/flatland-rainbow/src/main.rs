@@ -16,22 +16,26 @@ use crate::render_vk::VulkanRenderer;
 use argh::FromArgs;
 use async_utils::hanging_get::client::HangingGetStream;
 use fidl::endpoints::create_proxy;
+use fidl_fuchsia_element as felement;
+use fidl_fuchsia_math as fmath;
+use fidl_fuchsia_ui_app as fapp;
+use fidl_fuchsia_ui_composition as fland;
+use fidl_fuchsia_ui_pointer as fptr;
+use fidl_fuchsia_ui_views as fviews;
 use flatland_frame_scheduling_lib::*;
+use fuchsia_async as fasync;
 use fuchsia_component::client::connect_to_protocol;
 use fuchsia_component::{self as component};
 use fuchsia_framebuffer::FrameUsage;
-use fuchsia_scenic::flatland::ViewCreationTokenPair;
 use fuchsia_scenic::ViewRefPair;
-use futures::channel::mpsc::{unbounded, UnboundedSender};
+use fuchsia_scenic::flatland::ViewCreationTokenPair;
+use fuchsia_trace as trace;
+use futures::channel::mpsc::{UnboundedSender, unbounded};
 use futures::prelude::*;
+use futures::stream::FuturesOrdered;
 use internal_message::*;
 use log::{error, info, warn};
 use std::ops::DerefMut;
-use {
-    fidl_fuchsia_element as felement, fidl_fuchsia_math as fmath, fidl_fuchsia_ui_app as fapp,
-    fidl_fuchsia_ui_composition as fland, fidl_fuchsia_ui_pointer as fptr,
-    fidl_fuchsia_ui_views as fviews, fuchsia_async as fasync, fuchsia_trace as trace,
-};
 
 const IMAGE_COUNT: usize = 3;
 const IMAGE_IDS: [fland::ContentId; IMAGE_COUNT] =
@@ -85,6 +89,9 @@ pub struct Args {
     #[argh(switch)]
     #[allow(unused)]
     use_graphical_presenter: bool,
+    /// use present fences instead of OnFramePresented event.
+    #[argh(switch)]
+    use_present_fences: bool,
 }
 
 struct AppModel<'a> {
@@ -358,6 +365,7 @@ fn serve_view_provider_service(sender: UnboundedSender<InternalMessage>) {
 fn setup_handle_flatland_events(
     event_stream: fland::FlatlandEventStream,
     sender: UnboundedSender<InternalMessage>,
+    use_present_fences: bool,
 ) {
     fasync::Task::local(
         event_stream
@@ -379,11 +387,18 @@ fn setup_handle_flatland_events(
                         }
                     }
                     fland::FlatlandEvent::OnFramePresented { frame_presented_info } => {
-                        sender
-                            .unbounded_send(InternalMessage::OnFramePresented {
-                                frame_presented_info,
-                            })
-                            .expect("failed to send InternalMessage");
+                        // When we use present fences, we ignore the `-> OnFramePresented` event.
+                        // Scenic still sends `-> OnFramePresented` on classic `Flatland`
+                        // connections even when `present_fences` are provided (suppressing the
+                        // event on the server requires a `Flatland2` session via
+                        // `FlatlandFactory`, or `TrustedFlatlandConfig.skips_on_frame_presented`).
+                        if !use_present_fences {
+                            sender
+                                .unbounded_send(InternalMessage::OnFramePresented {
+                                    frame_presented_info,
+                                })
+                                .expect("failed to send InternalMessage");
+                        }
                     }
                     fland::FlatlandEvent::OnError { error } => {
                         sender
@@ -398,6 +413,14 @@ fn setup_handle_flatland_events(
     .detach();
 }
 
+async fn wait_for_present_fence(fence: zx::Counter) -> zx::MonotonicInstant {
+    fasync::OnSignals::new(&fence, zx::Signals::COUNTER_SIGNALED)
+        .await
+        .expect("failed to wait for present fence signal");
+    let timestamp = fence.read().expect("failed to read present fence counter");
+    zx::MonotonicInstant::from_nanos(timestamp)
+}
+
 #[fuchsia::main(logging_tags = ["flatland-rainbow-example"])]
 async fn main() {
     fuchsia_trace_provider::trace_provider_create_with_fdio();
@@ -405,6 +428,7 @@ async fn main() {
     let args: Args = argh::from_env();
     let frame_usage = if args.use_vulkan { FrameUsage::Gpu } else { FrameUsage::Cpu };
     let use_graphical_presenter = args.use_graphical_presenter;
+    let use_present_fences = args.use_present_fences;
 
     let (internal_sender, mut internal_receiver) = unbounded::<InternalMessage>();
 
@@ -421,7 +445,11 @@ async fn main() {
     if !use_graphical_presenter {
         serve_view_provider_service(internal_sender.clone());
     }
-    setup_handle_flatland_events(flatland.take_event_stream(), internal_sender.clone());
+    setup_handle_flatland_events(
+        flatland.take_event_stream(),
+        internal_sender.clone(),
+        use_present_fences,
+    );
 
     let mut app = AppModel::new(&flatland, internal_sender.clone(), &sched_lib);
     let mut renderer = app.init_scene(frame_usage).await;
@@ -461,6 +489,7 @@ async fn main() {
     }
 
     let mut present_count = 0;
+    let mut pending_present_fences = FuturesOrdered::new();
     loop {
         futures::select! {
           message = internal_receiver.next() => {
@@ -527,21 +556,177 @@ async fn main() {
                 }
             }
           }
+          actual_presentation_time = pending_present_fences.select_next_some() => {
+            trace::duration!("gfx", "FlatlandViewProvider::OnFramePresented");
+            // Present fences only provide `actual_presentation_time` (not
+            // `present_received_time` or `latched_time`), which `ThroughputScheduler`
+            // ignores anyway.
+            sched_lib.on_frame_presented(actual_presentation_time, Vec::new());
+          }
           present_parameters = sched_lib.wait_to_update().fuse() => {
             trace::duration!("gfx", "FlatlandApp::PresentBegin");
             app.draw(present_parameters.expected_presentation_time, renderer.deref_mut());
             trace::flow_begin!("gfx", "Flatland::PerAppPresent[flatland-rainbow-example]", present_count.into());
             present_count += 1;
-            flatland
-                .present(fland::PresentArgs {
-                    requested_presentation_time: Some(present_parameters.requested_presentation_time.into_nanos()),
-                    acquire_fences: None,
-                    release_fences: None,
-                    unsquashable: Some(present_parameters.unsquashable),
-                    ..Default::default()
-                })
-                .unwrap_or(());
+            let mut present_args = fland::PresentArgs::from(present_parameters);
+            let counter_for_wait = use_present_fences.then(|| {
+                let counter = zx::Counter::create();
+                let counter_for_wait = counter
+                    .duplicate_handle(zx::Rights::SAME_RIGHTS)
+                    .expect("failed to duplicate handle");
+                present_args.present_fences = Some(vec![counter]);
+                counter_for_wait
+            });
+
+            if flatland.present(present_args).is_ok() {
+                if let Some(counter) = counter_for_wait {
+                    pending_present_fences.push_back(wait_for_present_fence(counter));
+                }
+            }
           }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fidl::endpoints::{RequestStream, create_proxy_and_stream};
+    use fidl_fuchsia_scenic_scheduling as fsched;
+    use futures::stream::FusedStream;
+    use std::pin::pin;
+    use std::task::Poll;
+
+    fn signal_present_fence(fence: &zx::Counter, presentation_time_ns: i64) {
+        fence.write(presentation_time_ns).expect("failed to write counter");
+        fence
+            .signal(zx::Signals::NONE, zx::Signals::COUNTER_SIGNALED)
+            .expect("failed to signal counter");
+    }
+
+    fn poll_next_fence_in_select<Fut>(
+        exec: &mut fasync::TestExecutor,
+        pending_present_fences: &mut FuturesOrdered<Fut>,
+    ) -> Poll<zx::MonotonicInstant>
+    where
+        Fut: Future<Output = zx::MonotonicInstant>,
+    {
+        let mut select_fut = pin!(async {
+            futures::select! {
+                timestamp = pending_present_fences.select_next_some() => timestamp,
+                () = future::pending::<()>().fuse() => unreachable!(),
+            }
+        });
+        exec.run_until_stalled(&mut select_fut)
+    }
+
+    #[test]
+    fn present_fence_waits_complete_in_order() {
+        let mut exec = fasync::TestExecutor::new();
+        let mut pending_present_fences = FuturesOrdered::new();
+        assert!(pending_present_fences.is_empty());
+        assert_eq!(
+            poll_next_fence_in_select(&mut exec, &mut pending_present_fences),
+            Poll::Pending
+        );
+        assert!(pending_present_fences.is_terminated());
+
+        let fence1 = zx::Counter::create();
+        let fence1_wait = fence1.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap();
+        let fence2 = zx::Counter::create();
+        let fence2_wait = fence2.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap();
+
+        pending_present_fences.push_back(wait_for_present_fence(fence1_wait));
+        pending_present_fences.push_back(wait_for_present_fence(fence2_wait));
+        assert!(!pending_present_fences.is_terminated());
+
+        // Signaling the second fence first should not yield out of order.
+        signal_present_fence(&fence2, 200);
+        assert_eq!(
+            poll_next_fence_in_select(&mut exec, &mut pending_present_fences),
+            Poll::Pending
+        );
+
+        // Signaling the first fence yields both timestamps in FIFO order.
+        signal_present_fence(&fence1, 100);
+        assert_eq!(
+            poll_next_fence_in_select(&mut exec, &mut pending_present_fences),
+            Poll::Ready(zx::MonotonicInstant::from_nanos(100))
+        );
+        assert_eq!(
+            poll_next_fence_in_select(&mut exec, &mut pending_present_fences),
+            Poll::Ready(zx::MonotonicInstant::from_nanos(200))
+        );
+        assert!(pending_present_fences.is_empty());
+        assert_eq!(
+            poll_next_fence_in_select(&mut exec, &mut pending_present_fences),
+            Poll::Pending
+        );
+        assert!(pending_present_fences.is_terminated());
+
+        // Pushing another fence after draining resumes readiness cleanly.
+        let fence3 = zx::Counter::create();
+        let fence3_wait = fence3.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap();
+        pending_present_fences.push_back(wait_for_present_fence(fence3_wait));
+        signal_present_fence(&fence3, 300);
+        assert_eq!(
+            poll_next_fence_in_select(&mut exec, &mut pending_present_fences),
+            Poll::Ready(zx::MonotonicInstant::from_nanos(300))
+        );
+    }
+
+    #[fuchsia::test]
+    async fn flatland_events_ignore_on_frame_presented_when_using_present_fences() {
+        let (flatland_proxy, flatland_stream) = create_proxy_and_stream::<fland::FlatlandMarker>();
+        let control_handle = flatland_stream.control_handle();
+        let (sender, mut receiver) = unbounded::<InternalMessage>();
+
+        setup_handle_flatland_events(flatland_proxy.take_event_stream(), sender, true);
+
+        control_handle
+            .send_on_frame_presented(&fsched::FramePresentedInfo {
+                actual_presentation_time: 123,
+                presentation_infos: vec![],
+                num_presents_allowed: 0,
+            })
+            .expect("failed to send OnFramePresented");
+        control_handle
+            .send_on_next_frame_begin(&fland::OnNextFrameBeginValues {
+                additional_present_credits: Some(1),
+                future_presentation_infos: Some(vec![]),
+                ..Default::default()
+            })
+            .expect("failed to send OnNextFrameBegin");
+
+        match receiver.next().await.expect("expected OnNextFrameBegin message") {
+            InternalMessage::OnNextFrameBegin { additional_present_credits, .. } => {
+                assert_eq!(additional_present_credits, 1);
+            }
+            _ => panic!("expected InternalMessage::OnNextFrameBegin"),
+        }
+    }
+
+    #[fuchsia::test]
+    async fn flatland_events_forward_on_frame_presented_when_not_using_present_fences() {
+        let (flatland_proxy, flatland_stream) = create_proxy_and_stream::<fland::FlatlandMarker>();
+        let control_handle = flatland_stream.control_handle();
+        let (sender, mut receiver) = unbounded::<InternalMessage>();
+
+        setup_handle_flatland_events(flatland_proxy.take_event_stream(), sender, false);
+
+        control_handle
+            .send_on_frame_presented(&fsched::FramePresentedInfo {
+                actual_presentation_time: 456,
+                presentation_infos: vec![],
+                num_presents_allowed: 0,
+            })
+            .expect("failed to send OnFramePresented");
+
+        match receiver.next().await.expect("expected OnFramePresented message") {
+            InternalMessage::OnFramePresented { frame_presented_info } => {
+                assert_eq!(frame_presented_info.actual_presentation_time, 456);
+            }
+            _ => panic!("expected InternalMessage::OnFramePresented"),
         }
     }
 }

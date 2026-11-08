@@ -1,0 +1,119 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_rules_common//packages:resources.bzl", "resource")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "server",
+    srcs = ["src/server.rs"],
+    crate_root = "src/server.rs",
+    edition = "2024",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:async-trait"],
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-fs",
+        "//src/lib/fuchsia-hyper",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:hyper",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+# TODO(https://fxbug.dev/570694755): bazel2gn does not translate resource()
+# targets, so GN retains resource_group("server_data") in data_deps.
+# @bazel2gn:raw_attribute:data_deps = [ ":server_data" ]
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    crate_name = "file_server",
+    edition = "2024",
+    deps = [
+        ":server",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:anyhow",
+    ],
+)
+
+# TODO(https://fxbug.dev/570694755): bazel2gn does not translate resource()
+# targets; GN uses resource_group("server_data") above the sentinel.
+# @bazel2gn:skip
+resource(
+    name = "sample_video",
+    src = "data/test_video.webm",
+    dest = "data/sample_video.webm",
+)
+
+# TODO(https://fxbug.dev/570694755): bazel2gn does not translate resource()
+# targets; GN uses resource_group("server_data") above the sentinel.
+# @bazel2gn:skip
+resource(
+    name = "fuchsia_logo",
+    src = "data/fuchsia_logo.png",
+    dest = "data/fuchsia_logo.png",
+)
+
+# TODO(https://fxbug.dev/570694755): bazel2gn does not translate resource()
+# targets; GN uses resource_group("server_data") above the sentinel.
+# @bazel2gn:skip
+resource(
+    name = "100Hz_tone",
+    src = "data/100Hz_tone.mp3",
+    dest = "data/100Hz_tone.mp3",
+)
+
+fx_packaged_binary(
+    name = "file_server_packaged_bin",
+    binary = ":bin",
+    binary_name = "file_server",
+)
+
+fx_component_manifest(
+    name = "file_server_manifest",
+    component_name = "file_server",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/file_server.cml",
+)
+
+fx_component(
+    name = "file_server_component",
+    compiled_manifest = ":file_server_manifest",
+    visibility = ["//src/testing/system-validation/web:__pkg__"],
+    deps = [
+        ":file_server_packaged_bin",
+        # TODO(https://fxbug.dev/570694755): In GN, these resources are
+        # packaged via data_deps = [ ":server_data" ] on :bin.
+        # @bazel2gn:skip
+        ":100Hz_tone",
+        # TODO(https://fxbug.dev/570694755): In GN, these resources are
+        # packaged via data_deps = [ ":server_data" ] on :bin.
+        # @bazel2gn:skip
+        ":fuchsia_logo",
+        # TODO(https://fxbug.dev/570694755): In GN, these resources are
+        # packaged via data_deps = [ ":server_data" ] on :bin.
+        # @bazel2gn:skip
+        ":sample_video",
+    ],
+)
+
+fx_package(
+    name = "file_server_package",
+    package_name = "file_server",
+    components = [":file_server_component"],
+)

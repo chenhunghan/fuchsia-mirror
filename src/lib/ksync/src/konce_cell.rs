@@ -489,6 +489,7 @@ mod tests {
     struct MyClass;
     impl LockClass for MyClass {
         const ID: *mut core::ffi::c_void = core::ptr::null_mut();
+        const FLAGS: lockdep::LockFlags = lockdep::LOCK_FLAGS_NONE;
     }
 
     #[test]
@@ -604,6 +605,7 @@ mod tests {
     struct SecondClass;
     impl LockClass for SecondClass {
         const ID: *mut core::ffi::c_void = core::ptr::null_mut();
+        const FLAGS: lockdep::LockFlags = lockdep::LOCK_FLAGS_NONE;
     }
 
     #[test]

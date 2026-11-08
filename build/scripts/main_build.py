@@ -34,19 +34,25 @@ import sys
 import time
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import Any, TextIO
+from typing import Any, Self, TextIO
 
-# Ensure the fuchsia root is in sys.path so we can import the build packages hermetically
-_FUCHSIA_ROOT = pathlib.Path(__file__).parent.parent.parent
-if str(_FUCHSIA_ROOT) not in sys.path:
-    sys.path.insert(0, str(_FUCHSIA_ROOT))
-
+# Expects FUCHSIA_DIR to be present in sys.path (via PYTHONPATH).
+# LINT.IfChange(main_build_python_imports)
 from build.auth import gcloud
 from build.bazel.scripts import bazel_invocation as bazel_inv
 from build.profile import procfs
 from build.rbe import build_summary, casfs, rbe_profile, rbe_settings
 from build.resultstore import rs_profile
-from build.scripts import build_timeout, properties, pstree, signal_utils
+from build.scripts import (
+    build_timeout,
+    properties,
+    pstree,
+    python_subprocess,
+    signal_utils,
+    top_build_wrap,
+)
+
+# LINT.ThenChange(//tools/devshell/BUILD.gn:main_build_python_imports, //tools/devshell/tests/subcommands/fx_build_test:main_build_python_imports)
 
 _JSONPrimitive = str | int | float | bool | None
 JSONValue = _JSONPrimitive | dict[str, Any] | list[Any]
@@ -223,6 +229,7 @@ class FuchsiaBuildConfig(object):
     timeout: str | None = None
     timeout_grace_period: str | None = None
     rbe_casfs: bool = False
+    summarize_failures: bool = False
 
     @staticmethod
     def from_args(
@@ -233,6 +240,18 @@ class FuchsiaBuildConfig(object):
         resultstore_val = args.resultstore or default_resultstore or "none"
         rbe_casfs_val = (
             args.rbe_casfs if args.rbe_casfs is not None else default_rbe_casfs
+        )
+        # TODO(b/573624782): Enable failure summarization by default when running
+        # under Fint (infra):
+        #   summarize_failures_val = (
+        #       args.summarize_failures
+        #       if args.summarize_failures is not None
+        #       else bool(args.fint_params_path)
+        #   )
+        summarize_failures_val = (
+            args.summarize_failures
+            if args.summarize_failures is not None
+            else False
         )
 
         return FuchsiaBuildConfig(
@@ -257,6 +276,7 @@ class FuchsiaBuildConfig(object):
             log_dir=args.log_dir,
             timeout=args.timeout,
             timeout_grace_period=args.timeout_grace_period,
+            summarize_failures=summarize_failures_val,
         )
 
 
@@ -270,11 +290,11 @@ def has_loas() -> bool:
     return check_shell_command("gcert") and check_shell_command("gcertstatus")
 
 
-def _collect_rbe_metadata(log_dir: pathlib.Path) -> JSONObject:
-    """Scans the active reproxy logs directory for diagnostic files and CAS logs.
+def _collect_rbe_metadata(reproxy_log_dir: pathlib.Path) -> JSONObject:
+    """Scans the reproxy logs directory for diagnostic files and CAS logs.
 
     Args:
-        log_dir: Path to the active build invocation's log directory.
+        reproxy_log_dir: Path to the reproxy log directory.
 
     Returns:
         A dictionary containing paths to the reproxy log directory, diagnostic
@@ -282,9 +302,6 @@ def _collect_rbe_metadata(log_dir: pathlib.Path) -> JSONObject:
         and summarized metrics.
     """
     rbe_metadata: JSONObject = {}
-    # LINT.IfChange(reproxy_logs_dir)
-    reproxy_log_dir = log_dir / "reproxy_logs"
-    # LINT.ThenChange(//build/scripts/top_build_wrap.sh:reproxy_logs_dir)
     if not reproxy_log_dir.exists():
         return rbe_metadata
 
@@ -331,8 +348,8 @@ def _collect_rbe_metadata(log_dir: pathlib.Path) -> JSONObject:
     return rbe_metadata
 
 
-def _collect_resultstore_metadata(log_dir: pathlib.Path) -> JSONObject:
-    """Scans the active build invocation's log directory for rsproxy diagnostic logs.
+def _collect_resultstore_metadata(rsproxy_log_dir: pathlib.Path) -> JSONObject:
+    """Scans the rsproxy log directory for diagnostic logs.
 
     Collects direct top-level rsproxy logs as well as recursively discovered sub-build
     rsproxy logs. Note: Sub-build log isolation assumes that sub-build directory basenames
@@ -340,15 +357,12 @@ def _collect_resultstore_metadata(log_dir: pathlib.Path) -> JSONObject:
     build/resultstore/fuchsia-rsproxy-wrap.sh).
 
     Args:
-        log_dir: Path to the active build invocation's log directory.
+        rsproxy_log_dir: Path to the rsproxy log directory.
 
     Returns:
         A dictionary containing paths to rsproxy diagnostic log files.
     """
     resultstore_metadata: JSONObject = {}
-    # LINT.IfChange(rsproxy_logs_dir)
-    rsproxy_log_dir = log_dir / "rsproxy_logs"
-    # LINT.ThenChange(//build/scripts/top_build_wrap.sh:rsproxy_logs_dir)
     if not rsproxy_log_dir.exists():
         return resultstore_metadata
 
@@ -410,9 +424,7 @@ def _collect_bazel_metadata(log_dir: pathlib.Path) -> JSONObject:
         A dictionary containing the bazel log_dir and a mapping of invocation
         directory names to the list of artifact filenames present in each invocation.
     """
-    # LINT.IfChange(bazel_logs_dir)
-    bazel_log_dir = log_dir / "bazel_logs"
-    # LINT.ThenChange(//build/bazel/wrapper.bazel.sh:bazel_logs_dir)
+    bazel_log_dir = log_dir / bazel_inv.BAZEL_LOGS_DIRNAME
     invocations = dict(_iter_directory_file_map(bazel_log_dir))
     if not invocations:
         return {}
@@ -603,7 +615,7 @@ class BuildLock:
         self._has_shlock = check_shell_command("shlock")
         self.print_message = print_message
 
-    def __enter__(self) -> "BuildLock":
+    def __enter__(self) -> Self:
         if self._has_shlock:
             while (
                 subprocess.call(
@@ -668,6 +680,22 @@ class FuchsiaBuildContext(object):
         self.build_dir = build_dir
         self.env = env
         self.config = config
+
+    def check_python_output(
+        self,
+        cmd: Sequence[str],
+        **popen_kwargs: Any,
+    ) -> str:
+        """Invokes an in-tree Python helper script and returns its stripped stdout string.
+
+        Ensures that PYTHONPATH is set to resolve in-tree first-party absolute imports.
+        """
+        return python_subprocess.check_output(
+            cmd=cmd,
+            source_dir=self.source_dir,
+            base_env=self.env,
+            **popen_kwargs,
+        )
 
     @functools.cached_property
     def authenticated_user(self) -> str:
@@ -805,9 +833,8 @@ class FuchsiaBuildContext(object):
             return None
 
         try:
-            output = subprocess.check_output(
+            output = self.check_python_output(
                 [
-                    str(PYTHON_BIN),
                     str(isolate_script),
                     "isolate",
                     "--out-dir",
@@ -815,10 +842,8 @@ class FuchsiaBuildContext(object):
                     "--quota-project",
                     quota_project,
                 ],
-                text=True,
                 stderr=None,
-                env=self.env,
-            ).strip()
+            )
             if output:
                 return pathlib.Path(output)
         except subprocess.CalledProcessError:
@@ -950,8 +975,8 @@ class FuchsiaBuildContext(object):
             "MAKEFLAGS",
             "TMPDIR",  # was passed for Goma on macOS, but it might have other uses.
             "CLICOLOR_FORCE",
-            "FUCHSIA_BAZEL_DISK_CACHE",
-            "FUCHSIA_BAZEL_DISK_CACHE_SIZE",
+            bazel_inv.ENV_BAZEL_DISK_CACHE,
+            bazel_inv.ENV_BAZEL_DISK_CACHE_SIZE,
             "FUCHSIA_BAZEL_JOB_COUNT",
             "FUCHSIA_BAZEL_PRINT_COMMANDS",
             "FUCHSIA_DEBUG_BAZEL_SANDBOX",
@@ -971,11 +996,9 @@ class FuchsiaBuildContext(object):
         env.update(self.auth_env)
 
         resultstore = self.config.resultstore
-        # LINT.IfChange(resultstore_ninja_env_vars)
-        env["FX_INTERNAL_RESULTSTORE_NINJA"] = (
+        env[rs_profile.ENV_RESULTSTORE_NINJA] = (
             "1" if resultstore in ("all", "ninja") else "0"
         )
-        # LINT.ThenChange(//build/resultstore/fuchsia-rsproxy-wrap.sh:resultstore_ninja_env_vars)
 
         # FX_INTERNAL_RESULTSTORE_BAZEL convention: "0" indicates disabled
         # to downstream wrapper.bazel.sh and devshell test assertions.
@@ -1145,11 +1168,10 @@ class FuchsiaBuildContext(object):
                     print_artifact_dir=True,
                 )
             )
-            output = subprocess.check_output(
+            output = self.check_python_output(
                 cmd,
-                text=True,
                 stderr=subprocess.PIPE,
-            ).strip()
+            )
             if output:
                 return pathlib.Path(output)
         except (subprocess.CalledProcessError, OSError) as e:
@@ -1172,11 +1194,10 @@ class FuchsiaBuildContext(object):
                     print_job_count=True,
                 )
             )
-            output = subprocess.check_output(
+            output = self.check_python_output(
                 cmd,
-                text=True,
                 stderr=subprocess.PIPE,
-            ).strip()
+            )
             if output:
                 return int(output)
         except (subprocess.CalledProcessError, OSError, ValueError) as e:
@@ -1197,10 +1218,6 @@ class FuchsiaBuildContext(object):
     @property
     def gcloud_creds_script(self) -> pathlib.Path:
         return self.source_dir / "build/auth/gcloud_creds.py"
-
-    @property
-    def top_build_wrapper(self) -> pathlib.Path:
-        return self.source_dir / "build/scripts/top_build_wrap.sh"
 
     @property
     def build_timeout_script(self) -> pathlib.Path:
@@ -1311,13 +1328,11 @@ class FuchsiaBuildContext(object):
         """Invokes select_auth_method.py to determine the auth type."""
         select_script = self.select_auth_script
         try:
-            output = subprocess.check_output(
-                [str(PYTHON_BIN), str(select_script)],
-                text=True,
+            output = self.check_python_output(
+                [str(select_script)],
                 stderr=None,  # Let warnings flow through to the console directly
-                env=self.env,
             )
-            lines = output.strip().splitlines()
+            lines = output.splitlines()
             if lines:
                 return lines[-1]
             raise BuildConfigurationError(
@@ -1412,30 +1427,26 @@ class BuildInvocation(object):
         if gn_trace:
             metadata["gn_trace"] = gn_trace
 
-        # LINT.IfChange(build_profile_filenames)
-        profile_dir = log_dir / "build_profile"
-        system_profile_path = profile_dir / "system_profile.json"
-        hardware_profile_path = profile_dir / "hardware_profile.json"
-
         build_profile: JSONObject = {}
-        if system_profile_path.exists():
-            build_profile["system_profile"] = str(system_profile_path.resolve())
-        if hardware_profile_path.exists():
-            build_profile["hardware_profile"] = str(
-                hardware_profile_path.resolve()
-            )
+        if self.wrap_context.profile:
+            for key, path in self.wrap_context.profile.artifacts.items():
+                if path.exists():
+                    build_profile[key] = str(path.resolve())
 
         if build_profile:
             metadata["build_profile"] = build_profile
-        # LINT.ThenChange(//build/scripts/top_build_wrap.sh:build_profile_filenames)
 
-        rbe_metadata = _collect_rbe_metadata(log_dir)
-        if rbe_metadata:
-            metadata["rbe"] = rbe_metadata
+        if self.wrap_context.rbe:
+            rbe_metadata = _collect_rbe_metadata(self.wrap_context.rbe.log_dir)
+            if rbe_metadata:
+                metadata["rbe"] = rbe_metadata
 
-        resultstore_metadata = _collect_resultstore_metadata(log_dir)
-        if resultstore_metadata:
-            metadata["resultstore"] = resultstore_metadata
+        if self.wrap_context.resultstore:
+            resultstore_metadata = _collect_resultstore_metadata(
+                self.wrap_context.resultstore.log_dir
+            )
+            if resultstore_metadata:
+                metadata["resultstore"] = resultstore_metadata
 
         bazel_metadata = _collect_bazel_metadata(log_dir)
         if bazel_metadata:
@@ -1445,6 +1456,21 @@ class BuildInvocation(object):
         if timeout_metadata:
             metadata["timeout"] = timeout_metadata.to_dict()
 
+        if self.wrap_context.tui:
+            unsuccessful_actions_path = self.wrap_context.tui.artifacts.get(
+                "unsuccessful_actions"
+            )
+            if unsuccessful_actions_path and unsuccessful_actions_path.exists():
+                metadata["unsuccessful_actions"] = str(
+                    unsuccessful_actions_path.resolve()
+                )
+            failure_summary_path = self.wrap_context.tui.artifacts.get(
+                "failure_summary"
+            )
+            if failure_summary_path and failure_summary_path.exists():
+                metadata["failure_summary"] = str(
+                    failure_summary_path.resolve()
+                )
         try:
             mkdir(output_path.parent)
             output_path.write_text(json.dumps(metadata, indent=2) + "\n")
@@ -1458,18 +1484,22 @@ class BuildInvocation(object):
             msg(f"Unexpected error writing metadata JSON: {e}", file=sys.stderr)
             return
 
-        if timeout_metadata and timeout_metadata.active_processes:
-            self._run_fint_ingest_timeout(output_path)
+        has_timeout = bool(
+            timeout_metadata and timeout_metadata.active_processes
+        )
+        has_failure_summary = bool("failure_summary" in metadata)
+        if has_timeout or has_failure_summary:
+            self._run_fint_ingest_metadata(output_path)
 
-    def _run_fint_ingest_timeout(self, metadata_path: pathlib.Path) -> None:
-        """Invokes fint_build.py to ingest timeout diagnostics into build_artifacts.json."""
+    def _run_fint_ingest_metadata(self, metadata_path: pathlib.Path) -> None:
+        """Invokes fint_build.py to ingest failure summary and timeout diagnostics into build_artifacts.json."""
         context_path = self.context.config.fint_context_path
         if not context_path or not self.context.fint_build_py.exists():
             return
         cmd = self.context.fint_build_cmd_prefix + [
             "--context",
             str(context_path),
-            "--ingest-timeout-metadata",
+            "--ingest-build-metadata",
             str(metadata_path),
         ]
         if self.context.config.verbose:
@@ -1485,17 +1515,17 @@ class BuildInvocation(object):
             )
         except subprocess.TimeoutExpired as e:
             msg(
-                f"Timed out after {e.timeout}s ingesting timeout metadata into fint build artifacts",
+                f"Timed out after {e.timeout}s ingesting metadata into fint build artifacts",
                 file=sys.stderr,
             )
         except subprocess.CalledProcessError as e:
             msg(
-                f"Failed to ingest timeout metadata into fint build artifacts: {e.stderr.strip()}",
+                f"Failed to ingest metadata into fint build artifacts: {e.stderr.strip()}",
                 file=sys.stderr,
             )
         except OSError as e:
             msg(
-                f"Failed to execute fint timeout ingestion: {e}",
+                f"Failed to execute fint metadata ingestion: {e}",
                 file=sys.stderr,
             )
 
@@ -1591,54 +1621,61 @@ class BuildInvocation(object):
         """The directory where timeout diagnostics and process snapshots are recorded."""
         return self.log_dir / TIMEOUT_LOGS_DIR
 
-    def top_build_command_prefix(self) -> Iterable[str]:
-        """Construct the prefix command for the top-level wrapper."""
+    def top_build_wrap_config(self) -> top_build_wrap.Config:
+        """Construct the configuration for the top-level build wrappers."""
         context = self.context
-        # top_build_wrapper is a wrapper orchestrator whose purpose is to
-        # auto-start/stop processes around the build.
-        yield str(context.top_build_wrapper)
-
-        if context.config.dry_run:
-            yield "--dry-run"
-
-        if context.config.tui:
-            yield "--tui"
-
-        if context.rbe_enabled:
-            yield "--rbe"
-            for cfg_path in context.get_reproxy_configs():
-                yield "--reproxy-cfg"
-                yield str(cfg_path)
-
-        # Auth type handling
-        yield "--auth-type"
-        yield context.rbe_auth_type
-        # Only pass --use-machine-credentials if ResultStore is disabled or also using machine auth,
-        # avoiding overriding ResultStore's auth_type: none in fuchsia-rsproxy-wrap.sh.
-        if context.rbe_auth_type == "machine" and (
-            context.config.resultstore == "none"
-            or context.resultstore_auth_type == "machine"
-        ):
-            yield "--use-machine-credentials"
-
-        # Log directory setup
-        yield "--build-dir"
-        yield str(context.build_dir)
-        yield "--log-dir"
-        yield str(self.log_dir)
-
+        pre_build_uploads: list[pathlib.Path] = []
+        post_build_uploads: list[pathlib.Path] = []
         if context.config.resultstore in ("all", "ninja"):
-            yield "--resultstore"
             args_gn = context.args_gn
             if exists(args_gn):
-                yield "--pre-build-uploads"
-                yield str(args_gn)
+                pre_build_uploads.append(args_gn)
+            ninja_log_dir = self.log_dir / "ninja_logs"
+            post_build_uploads.extend(
+                [
+                    ninja_log_dir / "ninja_action_metrics.json",
+                    ninja_log_dir / "ninja_dirty_sources.log",
+                    context.ninja_edge_weights_csv,
+                    context.ninja_build_trace_path,
+                ]
+            )
 
-        if context.config.profile:
-            yield "--profile"
+        use_machine_credentials = context.rbe_auth_type == "machine" and (
+            context.config.resultstore == "none"
+            or context.resultstore_auth_type == "machine"
+        )
 
-        if context.config.verbose:
-            yield "--verbose"
+        return top_build_wrap.Config(
+            build_dir=context.build_dir,
+            log_dir=self.log_dir,
+            rbe_auth_type=context.rbe_auth_type,
+            resultstore_auth_type=context.resultstore_auth_type,
+            use_machine_credentials=use_machine_credentials,
+            collect_system_profile=context.config.profile,
+            needs_reproxy_rbe=context.rbe_enabled,
+            reproxy_cfgs=context.get_reproxy_configs(),
+            enable_resultstore=context.config.resultstore in ("all", "ninja"),
+            pre_build_uploads=pre_build_uploads,
+            post_build_uploads=post_build_uploads,
+            tui=context.config.tui,
+            summarize_failures=context.config.summarize_failures,
+            verbose=context.config.verbose,
+            dry_run=context.config.dry_run,
+        )
+
+    @functools.cached_property
+    def wrap_context(self) -> top_build_wrap.WrapContext:
+        """The WrapContext for orchestrating top-level build wrappers."""
+        config = self.top_build_wrap_config()
+        return top_build_wrap.WrapContext(
+            config,
+            environ=self.context.env,
+            source_dir=self.context.source_dir,
+        )
+
+    def top_build_command_prefix(self) -> list[str]:
+        """Construct the prefix command for the top-level wrapper."""
+        return self.wrap_context.command_prefix()
 
     def timeout_command_prefix(self) -> Iterable[str]:
         """Constructs the build_timeout wrapper prefix.
@@ -1689,7 +1726,7 @@ class BuildInvocation(object):
         context = self.context
 
         # For non-build commands (e.g. 'bazel query' or 'bazel info'), we bypass
-        # top_build_wrap.sh completely since no remote execution (reproxy) or
+        # top_build_wrap.py completely since no remote execution (reproxy) or
         # ResultStore (rsproxy) background wrappers/daemons are required.
         if not is_build:
             return BuildCommandExecution(
@@ -1700,26 +1737,7 @@ class BuildInvocation(object):
                 preflight_actions=preflight_actions,
             )
 
-        top_cmd = list(self.top_build_command_prefix())
-        resultstore_post_build_uploads = []
-
-        if context.config.resultstore in ("all", "ninja"):
-            if command_type == "ninja":
-                ninja_log_dir = self.log_dir / "ninja_logs"
-                resultstore_post_build_uploads.extend(
-                    [
-                        ninja_log_dir / "ninja_action_metrics.json",
-                        ninja_log_dir / "ninja_dirty_sources.log",
-                        context.ninja_edge_weights_csv,
-                        context.ninja_build_trace_path,
-                    ]
-                )
-
-        top_cmd.extend(
-            arg
-            for f in resultstore_post_build_uploads
-            for arg in ("--post-build-uploads", str(f))
-        )
+        top_cmd = self.top_build_command_prefix()
 
         # Prepare Ninja-specific options
         if command_type == "ninja":
@@ -1738,7 +1756,12 @@ class BuildInvocation(object):
         if fint_cmd:
             build_command = fint_cmd + list(build_command)
 
-        full_cmd = top_cmd + ["--"] + list(build_command)
+        # Note: Every wrapper layer in top_cmd terminates with '--' (e.g.
+        # [tui_wrap, ..., '--', reproxy_wrap, ..., '--']), so build_command is
+        # naturally protected without needing an artificial '--' between top_cmd
+        # and build_command. If no wrappers are enabled, top_cmd is empty and
+        # build_command executes directly without a preceding '--'.
+        full_cmd = top_cmd + list(build_command)
 
         if is_build and context.config.timeout:
             mkdir(self.timeout_log_dir)
@@ -1838,23 +1861,22 @@ class BuildCommandExecution(object):
                 f"--------------------------------------------------"
             )
             msg(auth_summary)
-        # Note: when config.dry_run is set, we still execute the command,
-        # but we have forwarded --dry-run to the top_build_wrapper, which
-        # will skip the actual build execution. This allows for high-fidelity
-        # verification of the entire wrapper orchestration stack.
+
+        if config.dry_run:
+            print(" ".join(self.full_command))
+            return BuildResult(return_code=0)
 
         # Run preflight actions here so they execute under BuildLock (acquired in
         # run()) and cannot race a concurrent build of the same directory.
-        if not config.dry_run:
-            preflight_failed = False
-            for action in self.preflight_actions:
-                status = action()
-                if status == PreflightStatus.FATAL:
-                    return BuildResult(return_code=1)
-                if status == PreflightStatus.ERROR:
-                    preflight_failed = True
-            if preflight_failed:
+        preflight_failed = False
+        for action in self.preflight_actions:
+            status = action()
+            if status == PreflightStatus.FATAL:
                 return BuildResult(return_code=1)
+            if status == PreflightStatus.ERROR:
+                preflight_failed = True
+        if preflight_failed:
+            return BuildResult(return_code=1)
 
         # If the TUI is enabled, we MUST NOT use a separate process group,
         # otherwise the TUI will be suspended when it tries to interact with
@@ -2344,6 +2366,22 @@ def _main_arg_parser() -> argparse.ArgumentParser:
         "--tui", type=properties.str_to_bool, nargs="?", const=True
     )
     parser.add_argument("--no-tui", action="store_false", dest="tui")
+
+    parser.add_argument(
+        "--summarize-failures",
+        action="store_true",
+        default=False,
+        help=(
+            "Generate a structured report and failure summary upon build completion "
+            f"under the build log directory ({top_build_wrap.FAILURE_SUMMARY_RELPATH})."
+        ),
+    )
+    parser.add_argument(
+        "--no-summarize-failures",
+        action="store_false",
+        dest="summarize_failures",
+        help="Disable failure summarization.",
+    )
 
     parser.add_argument(
         "--auth-mode",

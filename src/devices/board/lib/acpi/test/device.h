@@ -34,6 +34,9 @@ class Device {
   void SetHid(std::string hid) { hid_ = std::move(hid); }
   void SetCids(std::initializer_list<std::string> cids) { cids_ = std::vector<std::string>(cids); }
   void SetSta(uint64_t val) { sta_ = val; }
+  // Allows MockAcpi::WalkResources on this device even when _STA does not report it enabled, for
+  // tests of paths that deliberately override _STA.
+  void SetResourcesReadableWhileDisabled() { resources_readable_while_disabled_ = true; }
   void AddDsd(const acpi::Uuid& uuid, ACPI_OBJECT value) {
     dsd_.emplace(uuid, std::vector<ACPI_OBJECT>{}).first->second.emplace_back(value);
   }
@@ -70,6 +73,7 @@ class Device {
   const std::vector<std::string>& cids() { return cids_; }
   const std::unordered_map<acpi::Uuid, std::vector<ACPI_OBJECT>>& dsd() { return dsd_; }
   uint64_t sta() const { return sta_.value_or(~0); }
+  bool resources_readable_while_disabled() const { return resources_readable_while_disabled_; }
 
   // Equivalent of AcpiEvaluateObject.
   acpi::status<acpi::UniquePtr<ACPI_OBJECT>> EvaluateObject(
@@ -136,6 +140,7 @@ class Device {
   std::optional<std::string> hid_;
   std::vector<std::string> cids_;
   std::optional<uint64_t> sta_;
+  bool resources_readable_while_disabled_ = false;
   std::optional<bool> glk_ = false;
 
   // _DSD, map of uuid to values.

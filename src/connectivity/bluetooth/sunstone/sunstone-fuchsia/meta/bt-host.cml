@@ -34,16 +34,7 @@
             key: "enable_suspend",
             type: "bool",
         },
-        {
-            service: "fuchsia.hardware.bluetooth.Service",
-            availability: "optional",
-        },
-        {
-            directory: "dev-bt-hci-instance",
-            rights: [ "r*" ],
-            path: "/dev/class/bt-hci/default",
-            availability: "optional",
-        },
+        { service: "fuchsia.hardware.bluetooth.Service" },
         {
             protocol: [ "fuchsia.bluetooth.host.Receiver" ],
         },
@@ -165,12 +156,13 @@
             availability: "optional",
             default: 0,
         },
-    ],
-    config: {
-        device_path: {
+        {
+            config: "fuchsia.bluetooth.DevicePath",
+            key: "device_path",
             type: "string",
             max_size: 512,
-            mutability: [ "parent" ],
+            availability: "transitional",
+            default: "/svc/fuchsia.hardware.bluetooth.Service/default/vendor",
         },
-    },
+    ],
 }

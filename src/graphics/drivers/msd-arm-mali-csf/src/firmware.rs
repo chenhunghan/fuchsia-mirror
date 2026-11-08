@@ -67,7 +67,7 @@ mod binary {
     use super::*;
 
     bitfield! {
-        pub struct Flags(u32);
+        pub struct Flags(pub u32);
         impl Debug;
         pub read, set_read: 0, 0;
         pub write, set_write: 1, 1;

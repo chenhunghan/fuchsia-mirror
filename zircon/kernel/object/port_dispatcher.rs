@@ -130,20 +130,23 @@ use super::handle::{HandleRef, KernelHandle};
 use super::port_dispatcher_ffi::*;
 use super::process_dispatcher::ProcessDispatcher;
 use super::thread_dispatcher::{AutoBlocked, Blocked};
+use crate::ksync_kernel::{TrackedCriticalMutex, TrackedSpinlock};
 use boot_options::BootOptions;
 use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
 use core::pin::Pin;
 use core::ptr::NonNull;
 use fbl::{Canary, DefaultObjectTag, DoublyLinkedList, DoublyLinkedListNode, RefPtr, TrackingSize};
-use ksync::{KMutex, RawCriticalMutex, RawSpinlock, guarded};
+use ksync::{KMutex, guarded};
+use lazy_init::{LazyInit, NoCheck};
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop, stack_pin_init};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 use zx_status::Status;
 use zx_types::{
     ZX_EXCP_POLICY_CODE_PORT_TOO_MANY_OBSERVERS, ZX_EXCP_POLICY_CODE_PORT_TOO_MANY_PACKETS,
-    ZX_MAX_NAME_LEN, ZX_OK, ZX_PORT_BIND_TO_INTERRUPT, ZX_SIGNAL_NONE, zx_instant_boot_t,
-    zx_koid_t, zx_packet_type_t, zx_port_packet_t, zx_rights_t, zx_signals_t,
+    ZX_MAX_NAME_LEN, ZX_OK, ZX_PORT_BIND_TO_INTERRUPT, ZX_SIGNAL_NONE,
+    ZX_WAIT_ASYNC_BOOT_TIMESTAMP, ZX_WAIT_ASYNC_TIMESTAMP, zx_instant_boot_t, zx_koid_t,
+    zx_packet_type_t, zx_port_packet_t, zx_rights_t, zx_signals_t,
 };
 
 use crate::counters::define_kcounter;
@@ -151,6 +154,8 @@ use crate::kernel::deadline::Deadline;
 use crate::kernel::owned_wait_queue::OwnedWaitQueue;
 use crate::kernel::semaphore::Semaphore;
 use crate::kernel::thread::signal_policy_exception;
+use crate::object_cache::{ObjectCache, PerCpu, UniquePtr};
+use crate::platform_rs::timer::{current_boot_time, current_mono_time};
 
 use object_constants_rs as object_constants;
 
@@ -179,6 +184,15 @@ define_kcounter!(PORT_DEQUEUE_COUNT, "port.dequeue.count", Sum);
 define_kcounter!(PORT_DEQUEUE_SPURIOUS_COUNT, "port.dequeue.spurious.count", Sum);
 define_kcounter!(DISPATCHER_PORT_CREATE_COUNT, "dispatcher.port.create", Sum);
 define_kcounter!(DISPATCHER_PORT_DESTROY_COUNT, "dispatcher.port.destroy", Sum);
+define_kcounter!(PORT_EPHEMERAL_PACKET_LIVE, "port.ephemeral_packet.live", Sum);
+define_kcounter!(PORT_EPHEMERAL_PACKET_ALLOCATED, "port.ephemeral_packet.allocated", Sum);
+define_kcounter!(PORT_EPHEMERAL_PACKET_FREED, "port.ephemeral_packet.freed", Sum);
+define_kcounter!(PORT_OBSERVER_LIVE, "port.observer.live", Sum);
+define_kcounter!(PORT_OBSERVER_ALLOCATED, "port.observer.allocated", Sum);
+define_kcounter!(PORT_OBSERVER_FREED, "port.observer.freed", Sum);
+
+/// Sentinel stored in [`RawPortPacket::packet_type`] by [`PortPacket::cancel`].
+const PORT_PACKET_TYPE_CANCELED: u32 = 0xffff_ffff;
 
 /// Raw ABI-compatible representation of `zx_port_packet_t` with `packet_type` as a plain `u32`.
 ///
@@ -240,19 +254,33 @@ impl From<zx_port_packet_t> for RawPortPacket {
 // TODO(maniscalco): Enforce this limit per process via the job policy.
 const MAX_ALLOCATED_PACKET_COUNT_PER_PORT: usize = 4096;
 
-/// Opaque facade for the C++ `PortAllocator` interface. Packets are returned to their allocator
-/// through [`PortPacket::free`], which dispatches to the C++ vtable.
+/// Allocator callback table for ephemeral [`PortPacket`]s.
+///
+/// Packets are returned to their allocator through [`PortPacket::free`].
 #[repr(C)]
 pub struct PortAllocator {
-    _opaque: [u8; 0],
+    free: unsafe extern "C" fn(*const PortAllocator, NonNull<PortPacket>),
+}
+
+zr::static_assert!(size_of::<PortAllocator>() == 8);
+zr::static_assert!(align_of::<PortAllocator>() == 8);
+zr::static_assert!(core::mem::offset_of!(PortAllocator, free) == 0);
+
+// SAFETY: `PortAllocator` only holds a function pointer.
+unsafe impl Send for PortAllocator {}
+// SAFETY: `PortAllocator` only holds an immutable function pointer.
+unsafe impl Sync for PortAllocator {}
+
+impl PortAllocator {
+    /// Creates a new `PortAllocator` that invokes `free` when an ephemeral packet is released.
+    pub const fn new(
+        free: unsafe extern "C" fn(*const PortAllocator, NonNull<PortPacket>),
+    ) -> Self {
+        Self { free }
+    }
 }
 
 /// A packet queued on a `PortDispatcher` (`packets`).
-///
-/// Instances are constructed and destroyed by C++ (`object_cache`, `PagerProxy`, the hypervisor
-/// `PortPacketArena`, test allocators), so the C++ `~DoublyLinkedListable` keeps its
-/// `DEBUG_ASSERT(!InContainer())`; the Rust [`DoublyLinkedListNode`] `Drop` performs the same
-/// check for any instance destroyed from Rust.
 ///
 /// Only `packet` is public. The list node, `handle`, `observer` and `allocator` uphold the
 /// invariants that [`Self::free`] and [`Self::reset_observer`] rely on, so they are read through
@@ -290,6 +318,10 @@ zr::static_assert!(
 zr::static_assert!(
     core::mem::offset_of!(PortPacket, allocator) == object_constants::kPortPacketAllocatorOffset
 );
+
+// SAFETY: `PortPacket` instances can be transferred across threads when queued on or dequeued from
+// a `PortDispatcher` or slab cache.
+unsafe impl Send for PortPacket {}
 
 impl PortPacket {
     pub fn new(handle: *const core::ffi::c_void, allocator: *mut PortAllocator) -> Self {
@@ -348,7 +380,9 @@ impl PortPacket {
     /// `this` must point to a valid `PortPacket` that is not linked in any list, the caller must
     /// own it exclusively, no port lock may be held (allocators such as `PagerProxy` take their
     /// own locks and re-enter the port), and the packet must not be accessed again afterwards if
-    /// it is ephemeral.
+    /// it is ephemeral. If `(*this).allocator` is non-null, it must point to a live
+    /// `PortAllocator` that allocated `this` and whose `free` callback preconditions are
+    /// satisfied.
     #[inline]
     pub unsafe fn free(this: *mut Self) {
         // SAFETY: `this` is valid per the caller contract.
@@ -358,19 +392,62 @@ impl PortPacket {
             // from (and is still owned by) that live `PortAllocator`; the caller has relinquished
             // the packet.
             unsafe {
-                cpp_port_allocator_free(allocator, this);
+                let free_fn = (*allocator).free;
+                free_fn(allocator, NonNull::new_unchecked(this));
             }
         }
     }
 
     #[inline]
     pub fn cancel(&mut self) {
-        self.packet.packet_type = object_constants::kPortPacketTypeCanceled;
+        self.packet.packet_type = PORT_PACKET_TYPE_CANCELED;
     }
 
     #[inline]
     pub fn is_canceled(&self) -> bool {
-        self.packet.packet_type == object_constants::kPortPacketTypeCanceled
+        self.packet.packet_type == PORT_PACKET_TYPE_CANCELED
+    }
+
+    /// Reads `packet.key` directly through a raw pointer without forming a whole-struct
+    /// `&PortPacket` reference.
+    ///
+    /// # Safety
+    ///
+    /// `this` must point to a valid `PortPacket` whose `packet.key` field is valid for reading.
+    #[inline]
+    pub unsafe fn key_raw(this: *const Self) -> u64 {
+        // SAFETY: Guaranteed by caller; projects directly to `packet.key` without forming `&Self`.
+        unsafe { (&raw const (*this).packet.key).read() }
+    }
+
+    /// Writes `PORT_PACKET_TYPE_CANCELED` directly to `packet.packet_type` through a raw pointer
+    /// without forming a whole-struct `&mut PortPacket` reference.
+    ///
+    /// # Safety
+    ///
+    /// `this` must point to a valid `PortPacket` whose `packet.packet_type` field is exclusively
+    /// writable by the caller (e.g., under the owning `PortDispatcher`'s `lock`).
+    #[inline]
+    pub unsafe fn cancel_raw(this: *mut Self) {
+        // SAFETY: Guaranteed by caller; projects directly to `packet.packet_type` without forming
+        // `&mut Self`.
+        unsafe {
+            (&raw mut (*this).packet.packet_type).write(PORT_PACKET_TYPE_CANCELED);
+        }
+    }
+
+    /// Reads whether `packet.packet_type == PORT_PACKET_TYPE_CANCELED` directly through a raw
+    /// pointer without forming a whole-struct `&PortPacket` reference.
+    ///
+    /// # Safety
+    ///
+    /// `this` must point to a valid `PortPacket` whose `packet.packet_type` field is valid for
+    /// reading (e.g., under the owning `PortDispatcher`'s `lock`).
+    #[inline]
+    pub unsafe fn is_canceled_raw(this: *const Self) -> bool {
+        // SAFETY: Guaranteed by caller; projects directly to `packet.packet_type` without forming
+        // `&Self`.
+        unsafe { (&raw const (*this).packet.packet_type).read() == PORT_PACKET_TYPE_CANCELED }
     }
 
     /// Destroys the observer owned by the packet at `this`, if any. Mirrors
@@ -394,9 +471,7 @@ impl PortPacket {
         if !observer.is_null() {
             // SAFETY: `observer` was owned by this packet and has been detached, so this is the
             // only remaining reference to it.
-            unsafe {
-                cpp_port_observer_free(observer);
-            }
+            let _destroyer = unsafe { UniquePtr::<PortObserver>::from_raw(observer) };
         }
     }
 }
@@ -423,12 +498,6 @@ pub struct PortInterruptPacket {
     timestamp: UnsafeCell<zx_instant_boot_t>,
     key: UnsafeCell<u64>,
 }
-
-zr::static_assert_size_and_align!(
-    PortInterruptPacket,
-    object_constants::kPortInterruptPacketSize,
-    object_constants::kPortInterruptPacketAlign,
-);
 
 impl PortInterruptPacket {
     /// Returns a pin-initializer for an unlinked, zeroed `PortInterruptPacket`.
@@ -495,16 +564,79 @@ impl PortInterruptPacket {
     }
 }
 
-// Implements the PortAllocator interface and trivially forwards to the
-// ObjectCache allocator for PortPackets defined in C++ (`default_port_allocator`).
-pub struct PortPacketCacheAllocator;
+/// Per-CPU cache allocator for `PortPacket`s.
+static PACKET_ALLOCATOR: LazyInit<ObjectCache<PortPacket, PerCpu>, NoCheck> = LazyInit::uninit();
+
+/// Per-CPU cache allocator for `PortObserver`s.
+static OBSERVER_ALLOCATOR: LazyInit<ObjectCache<PortObserver, PerCpu>, NoCheck> =
+    LazyInit::uninit();
+
+/// A trivial instance of the default `PortAllocator` for comparisons and to supply the free
+/// callback used for ephemeral packets allocated from `PACKET_ALLOCATOR`.
+static DEFAULT_PORT_ALLOCATOR: PortAllocator =
+    PortAllocator::new(PortPacketCacheAllocator::free_callback);
+
+fn initialize_cache_allocators(_level: init::LkInitLevel) {
+    let observer_reserve_pages = BootOptions::get().port_observer_reserve_pages as usize;
+    let observer_cache = ObjectCache::<PortObserver, PerCpu>::try_new(observer_reserve_pages)
+        .expect("failed to create PortObserver ObjectCache");
+
+    // Reserve 1 page per CPU for servicing ephemeral PortPackets, unless
+    // overridden on the command line.
+    let packet_reserve_pages = BootOptions::get().port_packet_reserve_pages as usize;
+    let packet_cache = ObjectCache::<PortPacket, PerCpu>::try_new(packet_reserve_pages)
+        .expect("failed to create PortPacket ObjectCache");
+
+    // SAFETY: Called once during single-threaded kernel init (`LkInitLevel::Kernel`) before any
+    // port packets or observers are allocated.
+    unsafe {
+        OBSERVER_ALLOCATOR.init(observer_cache);
+        PACKET_ALLOCATOR.init(packet_cache);
+    }
+}
+
+// Initialize the cache after the percpu data structures are initialized.
+init::lk_init_hook!(
+    port_observer_cache_init,
+    initialize_cache_allocators,
+    init::LK_INIT_LEVEL_KERNEL
+);
+
+/// Implements the `PortAllocator` interface and trivially forwards to the `ObjectCache` allocator
+/// for `PortPacket`s defined above (`PACKET_ALLOCATOR`).
+struct PortPacketCacheAllocator;
 
 impl PortPacketCacheAllocator {
-    /// Allocates a packet from the per-cpu packet cache; returns null on failure (the C++
-    /// allocator has already logged the warning).
+    /// Allocates a packet from the per-cpu packet cache; returns null on failure.
     pub fn alloc(&self) -> *mut PortPacket {
-        // SAFETY: FFI call to C++ packet cache allocator.
-        unsafe { cpp_port_packet_alloc() }
+        // SAFETY: `PACKET_ALLOCATOR` is initialized at `LkInitLevel::Kernel` before any port
+        // packets can be allocated.
+        let cache = unsafe { PACKET_ALLOCATOR.get_unchecked() };
+        // SAFETY: The closure initializes every field of `PortPacket` in `slot` and returns
+        // `Ok(())`.
+        let init = unsafe {
+            pin_init::init_from_closure(|slot: *mut PortPacket| -> Result<(), Status> {
+                slot.write(PortPacket::new(
+                    core::ptr::null(),
+                    PortDispatcher::default_port_allocator(),
+                ));
+                Ok(())
+            })
+        };
+        match cache.allocate_init(init) {
+            Ok(packet) => {
+                PORT_EPHEMERAL_PACKET_LIVE.add(1);
+                PORT_EPHEMERAL_PACKET_ALLOCATED.add(1);
+                UniquePtr::into_raw(packet)
+            }
+            Err(status) => {
+                kprint::kprintln!(
+                    "WARNING: Could not allocate new port packet: {}",
+                    status.into_raw()
+                );
+                core::ptr::null_mut()
+            }
+        }
     }
 
     /// Returns `port_packet` to the per-cpu packet cache.
@@ -514,10 +646,27 @@ impl PortPacketCacheAllocator {
     /// `port_packet` must have been returned by [`Self::alloc`], must not be linked in any list,
     /// must be exclusively owned by the caller, and must not be accessed again afterwards.
     pub unsafe fn free(&self, port_packet: *mut PortPacket) {
+        PORT_EPHEMERAL_PACKET_LIVE.add(-1);
+        PORT_EPHEMERAL_PACKET_FREED.add(1);
         // SAFETY: `port_packet` is a live, unlinked cache packet owned by the caller per the
         // contract above.
+        let _destroyer = unsafe { UniquePtr::<PortPacket>::from_raw(port_packet) };
+    }
+
+    /// Callback invoked by [`PortPacket::free`] for packets allocated by
+    /// `PortPacketCacheAllocator`.
+    ///
+    /// # Safety
+    ///
+    /// `port_packet` must have been returned by [`Self::alloc`], must not be linked in any list,
+    /// and must be exclusively owned by the caller.
+    unsafe extern "C" fn free_callback(
+        _allocator: *const PortAllocator,
+        port_packet: NonNull<PortPacket>,
+    ) {
+        // SAFETY: Guaranteed by caller.
         unsafe {
-            cpp_port_packet_free(port_packet);
+            Self.free(port_packet.as_ptr());
         }
     }
 }
@@ -546,46 +695,191 @@ fn raise_packet_limit_exception(koid: zx_koid_t, num_packets: usize) {
     signal_policy_exception(ZX_EXCP_POLICY_CODE_PORT_TOO_MANY_PACKETS, 0);
 }
 
-#[derive(fbl::DoublyLinkedListContainable)]
+/// C++ `PortSignalObserver` base subobject (`SignalObserver` subclass).
 #[repr(C, align(8))]
-pub struct PortObserver {
-    _prefix: zr::OpaqueBytes<{ object_constants::kPortObserverListNodeOffset }>,
-    #[dll_node]
-    node: DoublyLinkedListNode<PortObserver>,
-    _suffix: zr::OpaqueBytes<
-        {
-            object_constants::kPortObserverSize
-                - object_constants::kPortObserverListNodeOffset
-                - size_of::<DoublyLinkedListNode<PortObserver>>()
-        },
-    >,
+pub(super) struct PortSignalObserver {
+    _opaque: zr::OpaqueBytes<{ object_constants::kPortSignalObserverSize }>,
 }
 
 zr::static_assert_size_and_align!(
-    PortObserver,
-    object_constants::kPortObserverSize,
-    object_constants::kPortObserverAlign,
+    PortSignalObserver,
+    object_constants::kPortSignalObserverSize,
+    object_constants::kPortSignalObserverAlign,
 );
 
-zr::static_assert!(
-    core::mem::offset_of!(PortObserver, node) == object_constants::kPortObserverListNodeOffset
-);
+/// Observers are weakly contained in `Dispatcher`s.
+#[derive(fbl::DoublyLinkedListContainable)]
+#[repr(C, align(8))]
+pub struct PortObserver {
+    signal_observer: PortSignalObserver,
+    packet: UnsafeCell<PortPacket>,
+    port: RefPtr<PortDispatcher>,
+    /// Guarded by `port`'s lock.
+    #[dll_node]
+    node: DoublyLinkedListNode<PortObserver>,
+    /// Guarded by `port`'s lock.
+    /// This is a raw pointer as the `PortObserver` does not have an ownership stake in the
+    /// dispatcher.
+    dispatcher: UnsafeCell<*mut Dispatcher>,
+}
+
+zr::static_assert!(core::mem::offset_of!(PortObserver, signal_observer) == 0);
+
+// SAFETY: `PortObserver` instances can be transferred across threads via `PortDispatcher` and slab
+// caches; mutable state is synchronized by the dispatcher or port lock.
+unsafe impl Send for PortObserver {}
+
+impl Drop for PortObserver {
+    fn drop(&mut self) {
+        // SAFETY: `self.signal_observer` was initialized by `cpp_port_signal_observer_init` in
+        // `PortObserver::try_new` and is no longer registered with any `Dispatcher`.
+        unsafe {
+            cpp_port_signal_observer_destroy(&raw mut self.signal_observer);
+        }
+        PORT_OBSERVER_LIVE.add(-1);
+        PORT_OBSERVER_FREED.add(1);
+    }
+}
 
 impl PortObserver {
-    /// Returns the `PortObserver*` view of `self` for C++ FFI calls.
+    /// Allocates and initializes a new `PortObserver` from the per-CPU observer cache.
+    fn try_new(
+        options: u32,
+        handle: HandleRef<'_>,
+        port: RefPtr<PortDispatcher>,
+        key: u64,
+        signals: zx_signals_t,
+    ) -> Result<UniquePtr<Self>, Status> {
+        let handle_ptr = handle.as_ptr().cast::<core::ffi::c_void>();
+        let dispatcher_ptr = RefPtr::as_ptr(handle.as_handle().dispatcher()).cast_mut();
+        debug_assert!(!handle_ptr.is_null());
+        debug_assert!(!dispatcher_ptr.is_null());
+
+        // SAFETY: `OBSERVER_ALLOCATOR` is initialized during `LkInitLevel::Kernel` before any
+        // `PortObserver` can be created.
+        let cache = unsafe { OBSERVER_ALLOCATOR.get_unchecked() };
+        // SAFETY: The closure initializes every field of `PortObserver` in `slot` and returns
+        // `Ok(())`.
+        let init = unsafe {
+            pin_init::init_from_closure(move |slot: *mut Self| -> Result<(), Status> {
+                let mut packet = PortPacket::new(handle_ptr, core::ptr::null_mut());
+                packet.packet.status = ZX_OK;
+                packet.packet.key = key;
+                packet.packet.packet_type = zx_packet_type_t::ZX_PKT_TYPE_SIGNAL_ONE as u32;
+                packet.packet.union = zerocopy::transmute!(PacketSignal {
+                    trigger: signals,
+                    ..PacketSignal::default()
+                });
+
+                cpp_port_signal_observer_init((&raw mut (*slot).signal_observer).cast(), options);
+                (&raw mut (*slot).packet).write(UnsafeCell::new(packet));
+                (&raw mut (*slot).port).write(port);
+                (&raw mut (*slot).node).write(DoublyLinkedListNode::new());
+                (&raw mut (*slot).dispatcher).write(UnsafeCell::new(dispatcher_ptr));
+                PORT_OBSERVER_LIVE.add(1);
+                PORT_OBSERVER_ALLOCATED.add(1);
+                Ok(())
+            })
+        };
+        cache.allocate_init(init)
+    }
+
+    /// Invoked by C++ `SignalObserver::OnMatch` under the watched `Dispatcher`'s lock.
     ///
-    /// The observer's storage is interior-mutable (`OpaqueBytes` and the list node), so the C++
-    /// side may mutate it through this pointer while Rust only holds shared references.
-    #[inline]
-    fn as_ffi_mut(&self) -> *mut Self {
-        core::ptr::from_ref(self).cast_mut()
+    /// # Safety
+    ///
+    /// `this` must point to a valid, live `PortObserver` whose watched `Dispatcher`'s lock is
+    /// currently held. This call may destroy `this`, so `this` must not be accessed after it
+    /// returns.
+    pub(super) unsafe fn on_match(
+        this: *mut Self,
+        options: u32,
+        signals: zx_signals_t,
+        queue_to_own: Option<&OwnedWaitQueue>,
+    ) {
+        // SAFETY: `this` is valid at entry and its `packet` and `port` fields are accessible under
+        // the watched `Dispatcher`'s lock before `queue_and_remove_observer`.
+        let packet_ptr = unsafe { (*this).packet.get() };
+        if (options & (ZX_WAIT_ASYNC_TIMESTAMP | ZX_WAIT_ASYNC_BOOT_TIMESTAMP)) != 0 {
+            core::hint::cold_path();
+            // Getting the current time can be somewhat expensive.
+            let timestamp = if (options & ZX_WAIT_ASYNC_TIMESTAMP) != 0 {
+                current_mono_time().0
+            } else {
+                current_boot_time().0
+            };
+            // SAFETY: The watched `Dispatcher`'s lock is held, which guards the embedded packet's
+            // signal payload prior to queuing.
+            unsafe {
+                let union = &mut (*packet_ptr).packet.union;
+                let mut signal: PacketSignal = zerocopy::transmute!(*union);
+                signal.timestamp = timestamp;
+                *union = zerocopy::transmute!(signal);
+            }
+        }
+
+        // Queuing the packet will transfer ownership of the observer's reference to the
+        // `PortDispatcher` to the `observers` container guarded by `lock`. This container
+        // including its reference(s) to the `PortDispatcher` could be destroyed by another
+        // thread. `queue_and_remove_observer` requires that the `PortDispatcher` be alive for the
+        // entire call so we have to retain a reference on this thread until it returns.
+        // SAFETY: `this` is valid at entry prior to `queue_and_remove_observer`.
+        let port_ref = unsafe { (*this).port.clone() };
+
+        // SAFETY: `packet_ptr` is the packet embedded in `this`, and `this` was created on
+        // `port_ref`.
+        let status =
+            unsafe { port_ref.queue_and_remove_observer(packet_ptr, signals, this, queue_to_own) };
+        // The `queue_and_remove_observer` call may have deleted `this`, so it is not safe to
+        // access any members now.
+
+        // The packet is not allocated in the packet arena and does not count against the per-port
+        // limit so `queue_and_remove_observer` cannot fail due to the packet count. However, the
+        // last handle to the port may have been closed so it can still fail with
+        // `Status::BAD_HANDLE`. Just ignore `Status::BAD_HANDLE` because there is nothing to be
+        // done.
+        debug_assert!(
+            matches!(
+                status,
+                Ok(()) | Err(Status::BAD_HANDLE | Status::CANCELED | Status::SHOULD_WAIT)
+            ),
+            "status {}",
+            Status::result_into_raw(status)
+        );
+    }
+
+    /// Invoked by C++ `SignalObserver::OnCancel` under the watched `Dispatcher`'s lock.
+    ///
+    /// # Safety
+    ///
+    /// `this` must point to a valid, live `PortObserver` whose watched `Dispatcher`'s lock is
+    /// currently held. This call may destroy `this`, so `this` must not be accessed after it
+    /// returns.
+    pub(super) unsafe fn on_cancel(this: *mut Self, _signals: zx_signals_t) {
+        // `maybe_reap` may unlink this observer and release the port lock while a concurrent
+        // `on_zero_handles` finishes and drops the last handle's reference; destroying `this`
+        // would then drop `port` (the final reference) while `maybe_reap` still holds
+        // `&PortDispatcher`. Retain a reference on this thread until the call returns, as
+        // `on_match` does above.
+        // SAFETY: `this` is valid at entry prior to `maybe_reap`.
+        let (port_ref, packet_ptr) = unsafe { ((*this).port.clone(), (*this).packet.get()) };
+
+        // SAFETY: `packet_ptr` is the packet embedded in `this`, and `this` was created on
+        // `port_ref`.
+        unsafe {
+            port_ref.maybe_reap(this, packet_ptr);
+        }
+        // The `maybe_reap` call may have deleted `this`, so it is not safe to access any members
+        // now.
     }
 
     /// Returns true if this observer was registered on `port` with `key`.
-    fn matches_key(&self, port: &PortDispatcher, key: u64) -> bool {
-        // SAFETY: FFI call to C++ PortObserver::MatchesKey on a live observer; it only reads
-        // fields that are immutable after construction.
-        unsafe { cpp_port_observer_matches_key(self.as_ffi_mut(), port.as_ffi(), key) }
+    pub(super) fn matches_key(&self, port: *const core::ffi::c_void, key: u64) -> bool {
+        // SAFETY: `packet.key` is immutable after construction in `PortObserver::try_new`. Using
+        // `key_raw` avoids forming a whole-struct `&PortPacket` reference while another thread may
+        // concurrently write `packet.packet_type` under the port lock.
+        let packet_key = unsafe { PortPacket::key_raw(self.packet.get()) };
+        key == packet_key && core::ptr::eq(port, RefPtr::as_ptr(&self.port).cast())
     }
 
     /// Marks the observer's embedded packet canceled (`PortObserver::Cancel`).
@@ -595,10 +889,12 @@ impl PortObserver {
     /// The owning `PortDispatcher`'s `lock` must be held: it guards the packet type field of a
     /// pending observer's packet.
     unsafe fn cancel(&self) {
-        // SAFETY: FFI call to C++ PortObserver::Cancel on a live observer; the caller holds the
-        // port lock that guards the packet type.
+        debug_assert!(self.port.state().lock.raw_mutex().is_held());
+        // SAFETY: The caller holds the port lock that guards the packet type. Using `cancel_raw`
+        // avoids forming a whole-struct `&mut PortPacket` reference while another thread may
+        // concurrently access `packet.union` or `packet.key` under the watched dispatcher's lock.
         unsafe {
-            cpp_port_observer_cancel(self.as_ffi_mut());
+            PortPacket::cancel_raw(self.packet.get());
         }
     }
 
@@ -609,10 +905,13 @@ impl PortObserver {
     /// The owning `PortDispatcher`'s `lock` must be held: it guards the observer's weak
     /// `dispatcher` pointer, which must still be linked (non-null).
     unsafe fn add_dispatcher_ref_locked(&self) {
-        // SAFETY: FFI call to C++ PortObserver::AddDispatcherRefLocked on a live observer; the
-        // caller holds the port lock that guards `dispatcher`.
+        debug_assert!(self.port.state().lock.raw_mutex().is_held());
+        // SAFETY: The caller holds the port lock that guards `dispatcher` and guarantees it is
+        // still linked and live.
         unsafe {
-            cpp_port_observer_add_dispatcher_ref_locked(self.as_ffi_mut());
+            let dispatcher = *self.dispatcher.get();
+            debug_assert!(!dispatcher.is_null());
+            RefPtr::add_ref(&*dispatcher);
         }
     }
 
@@ -623,16 +922,13 @@ impl PortObserver {
     /// The owning `PortDispatcher`'s `lock` must be held: it guards the observer's `dispatcher`
     /// pointer.
     unsafe fn unlink_dispatcher_locked(&self) -> *mut Dispatcher {
-        // SAFETY: FFI call to C++ PortObserver::UnlinkDispatcherLocked on a live observer; the
-        // caller holds the port lock that guards `dispatcher`.
-        unsafe { cpp_port_observer_unlink_dispatcher_locked(self.as_ffi_mut()) }
+        debug_assert!(self.port.state().lock.raw_mutex().is_held());
+        // SAFETY: The caller holds the port lock that guards `dispatcher`.
+        unsafe { core::mem::take(&mut *self.dispatcher.get()) }
     }
 
     /// Deregisters the observer at `observer` from `dispatcher` (`Dispatcher::RemoveObserver`).
     /// Returns `false` if the dispatcher had already removed it.
-    ///
-    /// The `PortObserver` -> `SignalObserver` upcast is performed by the C++ shim, so no
-    /// assumption about the base subobject's offset is made here.
     ///
     /// # Safety
     ///
@@ -640,14 +936,12 @@ impl PortObserver {
     /// owning `PortDispatcher`'s `lock` must *not* be held (lock ordering: `Dispatcher` before
     /// `PortDispatcher`).
     unsafe fn remove_from_dispatcher(observer: *mut Self, dispatcher: &Dispatcher) -> bool {
+        let mut unused_signals: zx_signals_t = 0;
         // SAFETY: `observer` is live and `dispatcher` is a valid reference per the caller
         // contract; the port lock is not held, so acquiring the dispatcher lock inside is safe.
-        // `Dispatcher` is an interior-mutable facade, so handing C++ a mutable pointer is sound.
         unsafe {
-            cpp_port_observer_remove_from_dispatcher(
-                observer,
-                core::ptr::from_ref(dispatcher).cast_mut(),
-            )
+            dispatcher
+                .remove_observer((&raw mut (*observer).signal_observer).cast(), &mut unused_signals)
         }
     }
 }
@@ -669,7 +963,7 @@ pub struct PortDispatcherState {
     sema: Semaphore,
 
     #[mutex]
-    lock: KMutex<RawCriticalMutex>,
+    lock: KMutex<TrackedCriticalMutex>,
 
     #[guarded_by(lock)]
     zero_handles: bool,
@@ -690,7 +984,7 @@ pub struct PortDispatcherState {
 
     // Next two members handle the interrupt notifications.
     #[mutex]
-    spinlock: KMutex<RawSpinlock>,
+    spinlock: KMutex<TrackedSpinlock>,
 
     #[pin]
     #[guarded_by(spinlock)]
@@ -773,14 +1067,10 @@ impl PortDispatcher {
         self.as_ffi() as *mut Self
     }
 
-    /// Returns the address of the C++ `default_port_allocator` singleton.
-    ///
-    /// `cpp_port_default_allocator` is `FFI_ALWAYS_INLINE` and folds to the global's address under
-    /// cross-language LTO, so the queue/dequeue fast paths compare against it without a load.
+    /// Returns the address of the default `PortAllocator` singleton.
     #[inline]
     pub fn default_port_allocator() -> *mut PortAllocator {
-        // SAFETY: Pure accessor of a C++ global with static storage duration; no preconditions.
-        unsafe { cpp_port_default_allocator() }
+        core::ptr::from_ref(&DEFAULT_PORT_ALLOCATOR).cast_mut()
     }
 
     pub fn default_rights() -> zx_rights_t {
@@ -879,9 +1169,7 @@ impl PortDispatcher {
                 // At this point we know the dispatcher no longer has a reference to the observer.
                 // SAFETY: `observer` is unlinked from both lists and no longer referenced by the
                 // dispatcher, so this is the last reference to it.
-                unsafe {
-                    cpp_port_observer_free(observer);
-                }
+                let _destroyer = unsafe { UniquePtr::<PortObserver>::from_raw(observer) };
             });
         }
     }
@@ -894,6 +1182,7 @@ impl PortDispatcher {
         self.state().canary.assert();
 
         let Some(mut port_packet) = NonNull::new(PortPacketCacheAllocator.alloc()) else {
+            core::hint::cold_path();
             return Err(Status::NO_MEMORY);
         };
 
@@ -907,6 +1196,7 @@ impl PortDispatcher {
         // SAFETY: `port_packet` points to a newly allocated valid PortPacket.
         let status = unsafe { self.queue(port_packet) };
         if status.is_err() {
+            core::hint::cold_path();
             // SAFETY: `port_packet` was not queued, so we still own it exclusively, it is
             // unlinked, and no port lock is held.
             unsafe {
@@ -987,7 +1277,7 @@ impl PortDispatcher {
 
         // post() may unblock a waiting thread that will immediately acquire the spinlock.
         // We drop the spinlock before posting to avoid unnecessary spinning.
-        self.state().sema.post();
+        self.state().sema.post(None);
         true
     }
 
@@ -1000,13 +1290,13 @@ impl PortDispatcher {
     /// cancels them before destruction). On `Ok(())`, ownership of `port_packet` is transferred
     /// to the port; on `Err(...)`, the caller retains ownership of `port_packet`.
     pub unsafe fn queue(&self, port_packet: NonNull<PortPacket>) -> Result<(), Status> {
-        // SAFETY: `port_packet` is valid; observer and queue_to_own are null.
+        // SAFETY: `port_packet` is valid per this function's contract, and `observer` is null.
         unsafe {
             self.queue_and_remove_observer(
                 port_packet.as_ptr(),
                 ZX_SIGNAL_NONE,
                 core::ptr::null_mut(),
-                core::ptr::null_mut(),
+                None,
             )
         }
     }
@@ -1020,19 +1310,18 @@ impl PortDispatcher {
     /// `observer` must be either null or point to a valid `PortObserver` that was created on
     /// this `PortDispatcher` (via `make_observer`); when non-null, `port_packet` must be the
     /// packet embedded in `observer`.
-    /// `queue_to_own` must be either null or point to a valid `OwnedWaitQueue`.
-    pub unsafe fn queue_and_remove_observer(
+    unsafe fn queue_and_remove_observer(
         &self,
         port_packet: *mut PortPacket,
         observed: zx_signals_t,
         observer: *mut PortObserver,
-        queue_to_own: *mut OwnedWaitQueue,
+        queue_to_own: Option<&OwnedWaitQueue>,
     ) -> Result<(), Status> {
         self.state().canary.assert();
 
         // This pointer is declared before the guard because we want the destructor to execute
         // outside the critical section below (if it ends up being the last/only references).
-        let mut destroyer: *mut PortObserver = core::ptr::null_mut();
+        let mut destroyer: Option<UniquePtr<PortObserver>> = None;
 
         let status = {
             ksync::lock!(let mut guard = self.state().lock_lock());
@@ -1046,12 +1335,7 @@ impl PortDispatcher {
             status
         };
 
-        if !destroyer.is_null() {
-            // SAFETY: `destroyer` is non-null and unlinked.
-            unsafe {
-                cpp_port_observer_free(destroyer);
-            }
-        }
+        drop(destroyer);
 
         status?;
 
@@ -1061,11 +1345,7 @@ impl PortDispatcher {
         // If post() unblocks a thread, that thread will attempt to acquire the lock. We drop
         // the lock before calling post() to allow the unblocked thread to acquire the lock
         // without blocking.
-        // SAFETY: `queue_to_own` is null or a valid `OwnedWaitQueue` per this function's
-        // contract.
-        unsafe {
-            self.state().sema.post_etc(queue_to_own);
-        }
+        self.state().sema.post(queue_to_own);
         Ok(())
     }
 
@@ -1080,12 +1360,14 @@ impl PortDispatcher {
         let mut fields = guard.as_mut().fields_mut();
 
         if *fields.zero_handles {
+            core::hint::cold_path();
             return Err(Status::BAD_HANDLE);
         }
 
         // We have to acquire lock before we can check the canceled flag.
-        // SAFETY: `port_packet` is non-null.
-        if unsafe { (*port_packet).is_canceled() } {
+        // SAFETY: `port_packet` is non-null and `lock` is held.
+        if unsafe { PortPacket::is_canceled_raw(port_packet) } {
+            core::hint::cold_path();
             return Err(Status::CANCELED);
         }
 
@@ -1096,6 +1378,7 @@ impl PortDispatcher {
         if is_default_ephemeral
             && *fields.num_ephemeral_packets > MAX_ALLOCATED_PACKET_COUNT_PER_PORT
         {
+            core::hint::cold_path();
             PORT_FULL_COUNT.add(1);
             raise_packet_limit_exception(self.get_koid(), *fields.num_ephemeral_packets);
             // The usermode caller sees the exception, not the return code.
@@ -1216,6 +1499,7 @@ impl PortDispatcher {
 
             // Both queues were empty. The packet must have been removed before we were able to
             // dequeue. Loop back and wait again.
+            core::hint::cold_path();
             PORT_DEQUEUE_SPURIOUS_COUNT.add(1);
         }
 
@@ -1240,12 +1524,12 @@ impl PortDispatcher {
     /// list while its dispatcher reference is live.
     /// `port_packet` must point to a valid `PortPacket` and must be the packet embedded in
     /// `observer`.
-    pub unsafe fn maybe_reap(&self, observer: *mut PortObserver, port_packet: *mut PortPacket) {
+    unsafe fn maybe_reap(&self, observer: *mut PortObserver, port_packet: *mut PortPacket) {
         self.state().canary.assert();
 
         // This pointer is declared before the guard because we want the destructor to execute
         // outside the critical section below (if it ends up being the last/only references).
-        let mut destroyer: *mut PortObserver = core::ptr::null_mut();
+        let mut destroyer: Option<UniquePtr<PortObserver>> = None;
 
         {
             ksync::lock!(let mut guard = self.state().lock_lock());
@@ -1253,12 +1537,7 @@ impl PortDispatcher {
             self.maybe_reap_locked(guard.as_mut(), observer, port_packet, &mut destroyer);
         }
 
-        if !destroyer.is_null() {
-            // SAFETY: `destroyer` is non-null and unlinked.
-            unsafe {
-                cpp_port_observer_free(destroyer);
-            }
-        }
+        drop(destroyer);
     }
 
     // Unlinks an observer from its dispatcher and remove it from our observer
@@ -1279,14 +1558,14 @@ impl PortDispatcher {
         mut guard: Pin<&mut PortDispatcherStateLockGuard<'_>>,
         observer: *mut PortObserver,
         port_packet: *mut PortPacket,
-        destroyer: &mut *mut PortObserver,
+        destroyer: &mut Option<UniquePtr<PortObserver>>,
     ) {
         self.state().canary.assert();
 
         // If the packet's already canceled, we do not have to do anything. The canceling thread
         // is responsible for reaping the observer - see PortDispatcher::cancel_key().
-        // SAFETY: `port_packet` is non-null.
-        if unsafe { (*port_packet).is_canceled() } {
+        // SAFETY: `port_packet` is non-null and `lock` is held.
+        if unsafe { PortPacket::is_canceled_raw(port_packet) } {
             return;
         }
 
@@ -1317,8 +1596,10 @@ impl PortDispatcher {
                 }
             } else {
                 // Otherwise, it'll be destroyed after this method returns.
-                debug_assert!(destroyer.is_null());
-                *destroyer = observer;
+                debug_assert!(destroyer.is_none());
+                // SAFETY: `observer` is unlinked from `observers` and its packet was not queued,
+                // so this frame now owns the last reference to `observer`.
+                *destroyer = Some(unsafe { UniquePtr::from_raw(observer) });
             }
         } // else on_zero_handles must have beat us and is responsible for destroying this observer.
     }
@@ -1337,15 +1618,10 @@ impl PortDispatcher {
         self.state().canary.assert();
 
         // Called under the handle table lock.
-        // SAFETY: `handle` is a live `Handle` for the duration of this call (the handle table
-        // lock is held for the `HandleRef`'s lifetime), `self` outlives the call, and the
-        // observer takes its own reference to the port.
-        let observer = unsafe {
-            cpp_port_observer_alloc(options, handle.as_ptr(), self.as_ffi_mut(), key, signals)
-        };
-        let Some(observer) = NonNull::new(observer) else {
-            return Err(Status::NO_MEMORY);
-        };
+        let port_ref = RefPtr::from_ref(self);
+        let observer = PortObserver::try_new(options, handle, port_ref, key, signals)?;
+        // SAFETY: `UniquePtr::into_raw` returns a non-null pointer.
+        let observer = unsafe { NonNull::new_unchecked(UniquePtr::into_raw(observer)) };
 
         {
             ksync::lock!(let mut guard = self.state().lock_lock());
@@ -1354,6 +1630,7 @@ impl PortDispatcher {
 
             // If we're over the limit, raise an exception.
             if fields.observers.len() >= BootOptions::get().max_port_observers as usize {
+                core::hint::cold_path();
                 // We limit the number of observers to prevent a misbehaving program from
                 // impacting system performance or stability.
                 signal_policy_exception(ZX_EXCP_POLICY_CODE_PORT_TOO_MANY_OBSERVERS, 0);
@@ -1428,12 +1705,12 @@ impl PortDispatcher {
                     }
 
                     // cancel_queued_packet checks both in_container and !is_canceled;
-                    // by calling packet.cancel() we can safely add it to free_list.
+                    // by calling PortPacket::cancel_raw() we can safely add it to free_list.
                     // SAFETY: `packet` is unlinked from `packets`, exclusively owned by this
                     // frame (and then the caller) until it is freed, and `lock` is held while
                     // the type field is written.
                     unsafe {
-                        (*packet).cancel();
+                        PortPacket::cancel_raw(packet);
                         free_list.as_mut().push_front_raw(packet);
                     }
                 } else {
@@ -1480,11 +1757,7 @@ impl PortDispatcher {
     /// `handle` is an opaque identity token that is compared, never dereferenced: C++ callers
     /// such as `TrapMap` pass a non-`Handle` pointer, so this takes a raw pointer; Rust callers
     /// should use [`Self::cancel_queued`] or [`Self::cancel_queued_handle`].
-    pub(crate) fn cancel_queued_handle_key(
-        &self,
-        handle: *const core::ffi::c_void,
-        key: u64,
-    ) -> bool {
+    fn cancel_queued_handle_key(&self, handle: *const core::ffi::c_void, key: u64) -> bool {
         self.state().canary.assert();
 
         stack_pin_init!(let free_list = DoublyLinkedList::<*mut PortPacket>::new());
@@ -1516,25 +1789,30 @@ impl PortDispatcher {
     /// `port_packet` must point to a valid, initialized `PortPacket`, and must either not be in
     /// any container or be currently queued in this port's `packets` list (calling this with a
     /// packet queued in another port is undefined behavior: it would be unlinked from that
-    /// port's list without holding its `lock`).
+    /// port's list without holding its `lock`). If `port_packet` owns an attached `PortObserver`
+    /// (i.e. is a non-ephemeral packet to which `maybe_reap_locked` has transferred observer
+    /// ownership by setting `port_packet.observer`), `port_packet` is freed when this returns
+    /// `true` and must not be accessed afterwards.
     pub unsafe fn cancel_queued_packet(&self, port_packet: *mut PortPacket) -> bool {
         self.state().canary.assert();
 
         ksync::lock!(let mut guard = self.state().lock_lock());
         let mut fields = guard.as_mut().fields_mut();
 
-        // Check is_canceled() in addition to in_container(): cancel_key/
+        // Check is_canceled_raw() in addition to in_container(): cancel_key/
         // cancel_queued_packets_locked may move ephemeral packets onto a stack-local
         // free_list before unlocking and freeing them, during which in_container()
         // is true even though the packet has been unlinked from packets.
         //
-        // is_canceled() must be evaluated first: the type field is only written under `lock`, so
-        // it is synchronized here, whereas a canceled packet's list node is relinked by the
+        // is_canceled_raw() must be evaluated first: the type field is only written under `lock`,
+        // so it is synchronized here, whereas a canceled packet's list node is relinked by the
         // free_list drain in cancel_queued_handle_key/cancel_key *after* `lock` is released.
         // Short-circuiting on the canceled flag therefore never reads a node another thread may
         // be writing.
-        // SAFETY: `port_packet` is non-null.
-        if unsafe { !(*port_packet).is_canceled() && (*port_packet).node.in_container() } {
+        // SAFETY: `port_packet` is non-null and `lock` is held.
+        if unsafe {
+            !PortPacket::is_canceled_raw(port_packet) && (*port_packet).node.in_container()
+        } {
             // SAFETY: `port_packet` is non-null.
             if is_default_allocated_ephemeral(unsafe { &*port_packet }) {
                 *fields.num_ephemeral_packets -= 1;
@@ -1574,7 +1852,7 @@ impl PortDispatcher {
                 let mut fields = guard.as_mut().fields_mut();
                 let mut cursor = fields.observers.as_mut().cursor_front_mut();
                 while let Some(obs) = cursor.get() {
-                    if obs.matches_key(self, key) {
+                    if obs.matches_key(self.as_ffi().cast(), key) {
                         // SAFETY: `guard` proves `lock` is held, which guards the packet type
                         // field `cancel` writes.
                         unsafe {
@@ -1639,18 +1917,18 @@ impl PortDispatcher {
                         PortObserver::remove_from_dispatcher(canceled_observer, &dispatcher);
                     }
                     drop(dispatcher);
+
+                    // SAFETY: `canceled_observer` is unlinked from both lists and no longer
+                    // referenced by the dispatcher, so this is the last reference to it.
+                    let _destroyer =
+                        unsafe { UniquePtr::<PortObserver>::from_raw(canceled_observer) };
                 });
-                // SAFETY: `canceled_observer` is unlinked from both lists and no longer
-                // referenced by the dispatcher, so this is the last reference to it.
-                unsafe {
-                    cpp_port_observer_free(canceled_observer);
-                }
             }
         }
 
-        // Free ephemeral packets with the lock dropped. PortPacket::free() dispatches to the
-        // allocator, and PagerProxy::Free() takes the proxy's mtx_, which ClearAsyncRequest
-        // acquires *before* the port lock (pager_proxy.cc:128, :151). Freeing under `lock`
+        // Free ephemeral packets with the lock dropped. `PortPacket::free()` dispatches to the
+        // allocator, and `PagerProxy::free_packet` takes the proxy's `mtx`, which
+        // `PagerProxy::clear_async_request` acquires *before* the port lock. Freeing under `lock`
         // would be an ABBA deadlock.
         while let Some(packet) = free_list.as_mut().pop_front() {
             // SAFETY: `packet` was canceled and unlinked from `packets` under `lock`, is owned
@@ -1665,21 +1943,17 @@ impl PortDispatcher {
 }
 
 #[cfg(ktest)]
-#[unittest::suite(name = "port_rust")]
+#[unittest::suite(name = "port")]
 /// Tests for PortDispatcher.
 mod tests {
     // `dequeue()` cannot be exercised here: it wraps the wait in `ThreadDispatcher::AutoBlocked`,
     // which requires a current user thread, and kernel unittests run on bare kernel threads.
-    // Dequeue is covered by the userspace core tests (`zircon/system/utest/core/port`). Scenarios
-    // that need a custom `PortAllocator` (a C++ virtual interface) live in the C++ `port` suite
-    // in `zircon/kernel/tests/port_tests.cc`.
+    // Dequeue is covered by the userspace core tests (`zircon/system/utest/core/port`).
     use super::super::event_dispatcher::EventDispatcher;
     use super::super::handle::HandleOwner;
-    use super::super::port_dispatcher_ffi::{
-        cpp_port_ephemeral_packet_freed_count, cpp_port_observer_freed_count,
-    };
     use super::{
-        PortDispatcher, PortInterruptPacket, PortPacket, PortPacketCacheAllocator, RawPortPacket,
+        PORT_EPHEMERAL_PACKET_FREED, PORT_OBSERVER_FREED, PortAllocator, PortDispatcher,
+        PortInterruptPacket, PortPacket, PortPacketCacheAllocator, RawPortPacket,
     };
     use core::ptr::NonNull;
     use pin_init::stack_pin_init;
@@ -1693,14 +1967,12 @@ mod tests {
 
     /// Returns the number of ephemeral packets ever returned to the default cache allocator.
     fn ephemeral_packets_freed() -> i64 {
-        // SAFETY: Reads a kernel counter; no preconditions.
-        unsafe { cpp_port_ephemeral_packet_freed_count() }
+        PORT_EPHEMERAL_PACKET_FREED.sum_across_all_cpus()
     }
 
     /// Returns the number of `PortObserver`s ever destroyed.
     fn observers_freed() -> i64 {
-        // SAFETY: Reads a kernel counter; no preconditions.
-        unsafe { cpp_port_observer_freed_count() }
+        PORT_OBSERVER_FREED.sum_across_all_cpus()
     }
 
     /// Allocates a packet from the default cache allocator and queues it on `port` with `key`.
@@ -1719,7 +1991,7 @@ mod tests {
 
     /// Creates an event with a real `Handle` so a `PortObserver` can be registered on it.
     fn make_event_handle() -> HandleOwner {
-        let (event, rights) = EventDispatcher::create(0).unwrap();
+        let (event, rights) = EventDispatcher::create().unwrap();
         HandleOwner::make(event, rights).unwrap()
     }
 
@@ -1738,37 +2010,87 @@ mod tests {
     /// Tests that cancelling by key unlinks an ephemeral packet AND returns it to its allocator.
     #[test]
     fn test_cancel_key_frees_ephemeral_packets() {
-        // The packet is allocated from the genuine C++ `default_port_allocator` so that the
-        // `PortAllocator::Free()` completion protocol is exercised through the real
-        // compiler-generated (relative) vtable rather than a hand-rolled mock.
+        use core::cell::Cell;
+
+        #[repr(C)]
+        struct CountingPortAllocator {
+            allocator: PortAllocator,
+            free_count: Cell<usize>,
+        }
+
+        /// # Safety
+        ///
+        /// `allocator` must point to the `allocator` field at offset 0 of a valid
+        /// `CountingPortAllocator`.
+        unsafe extern "C" fn counting_free(
+            allocator: *const PortAllocator,
+            _packet: NonNull<PortPacket>,
+        ) {
+            // SAFETY: Guaranteed by caller.
+            let state = unsafe { &*allocator.cast::<CountingPortAllocator>() };
+            state.free_count.set(state.free_count.get() + 1);
+        }
+
         let (handle, _) = unwrap_ok!(PortDispatcher::create(0));
         let port = handle.dispatcher();
 
-        const KEY: u64 = 0xF1;
-        let freed_before = ephemeral_packets_freed();
+        let counting_allocator = CountingPortAllocator {
+            allocator: PortAllocator::new(counting_free),
+            free_count: Cell::new(0),
+        };
+        let allocator_ptr: *mut PortAllocator =
+            core::ptr::from_ref(&counting_allocator).cast_mut().cast();
 
-        let mut packet = unwrap_some!(NonNull::new(PortPacketCacheAllocator.alloc()));
-        // SAFETY: `packet` was just allocated from the default cache allocator, is valid and
-        // not yet shared with anyone else.
+        const CANCEL_KEY: u64 = 0xF1;
+        const KEEP_KEY: u64 = 0x72;
+
+        let mut cancel_pkt = PortPacket::new(core::ptr::null(), allocator_ptr);
+        cancel_pkt.packet.key = CANCEL_KEY;
+        cancel_pkt.packet.packet_type = zx_packet_type_t::ZX_PKT_TYPE_USER as u32;
+
+        let mut keep_pkt = PortPacket::new(core::ptr::null(), allocator_ptr);
+        keep_pkt.packet.key = KEEP_KEY;
+        keep_pkt.packet.packet_type = zx_packet_type_t::ZX_PKT_TYPE_USER as u32;
+
+        // SAFETY: `cancel_pkt` and `keep_pkt` are valid stack-allocated `PortPacket`s that outlive
+        // `handle`.
         unsafe {
-            let pkt = packet.as_mut();
+            assert_ok!(port.queue(NonNull::from(&mut cancel_pkt)));
+            assert_ok!(port.queue(NonNull::from(&mut keep_pkt)));
+        }
+        assert_eq!(counting_allocator.free_count.get(), 0);
+
+        // Cancelling `CANCEL_KEY` must free only `cancel_pkt` and leave `keep_pkt` queued.
+        assert_ok!(port.cancel_key(CANCEL_KEY));
+        assert_eq!(counting_allocator.free_count.get(), 1);
+
+        // Subsequent cancellation with `CANCEL_KEY` should find nothing.
+        assert_err!(port.cancel_key(CANCEL_KEY), Status::NOT_FOUND);
+        assert_eq!(counting_allocator.free_count.get(), 1);
+
+        // Dropping the port handle runs `on_zero_handles`, which frees `keep_pkt`.
+        drop(handle);
+        assert_eq!(counting_allocator.free_count.get(), 2);
+
+        // Also exercise the default per-CPU cache allocator through `cancel_key`.
+        let (handle2, _) = unwrap_ok!(PortDispatcher::create(0));
+        let port2 = handle2.dispatcher();
+        let freed_before = ephemeral_packets_freed();
+        let mut cache_pkt = unwrap_some!(NonNull::new(PortPacketCacheAllocator.alloc()));
+        // SAFETY: `cache_pkt` was just allocated from the default cache allocator and is uniquely
+        // owned prior to `queue`.
+        unsafe {
+            let pkt = cache_pkt.as_mut();
             assert_true!(pkt.is_ephemeral());
             assert_eq!(pkt.allocator(), PortDispatcher::default_port_allocator());
             assert_true!(pkt.handle().is_null());
-            pkt.packet.key = KEY;
+            pkt.packet.key = CANCEL_KEY;
             pkt.packet.packet_type = zx_packet_type_t::ZX_PKT_TYPE_USER as u32;
-            assert_ok!(port.queue(packet));
+            assert_ok!(port2.queue(cache_pkt));
         }
-
-        // Cancelling by key must unlink the packet AND return it to its allocator.
-        assert_ok!(port.cancel_key(KEY));
-
-        // Other CPUs may free unrelated ephemeral packets concurrently, so only require that
-        // at least our packet was freed.
+        assert_ok!(port2.cancel_key(CANCEL_KEY));
         assert_true!(ephemeral_packets_freed() > freed_before);
-
-        // Subsequent cancellation with the same key should find nothing.
-        assert_err!(port.cancel_key(KEY), Status::NOT_FOUND);
+        assert_err!(port2.cancel_key(CANCEL_KEY), Status::NOT_FOUND);
     }
 
     /// Tests queueing a user packet via `zx_port_packet_t` and cancelling it by key.
@@ -2014,5 +2336,89 @@ mod tests {
         assert_ok!(port.cancel_key(KEY));
         assert_true!(observers_freed() > freed_before);
         assert_err!(port.cancel_key(KEY), Status::NOT_FOUND);
+    }
+
+    /// Tests that `Free` during `on_zero_handles` drops the port lock and can re-enter the port.
+    #[test]
+    fn test_cancel_queued_from_free_during_on_zero_handles() {
+        use core::cell::Cell;
+        use fbl::RefPtr;
+
+        #[repr(C)]
+        struct FreeContext<'a> {
+            allocator: PortAllocator,
+            freed: Cell<usize>,
+            first_packet: *mut PortPacket,
+            second_packet: *mut PortPacket,
+            port: &'a PortDispatcher,
+            cancel_result: Cell<bool>,
+        }
+
+        /// # Safety
+        ///
+        /// `allocator` must point to the `allocator` field at offset 0 of a valid `FreeContext`.
+        unsafe extern "C" fn on_free(allocator: *const PortAllocator, packet: NonNull<PortPacket>) {
+            // SAFETY: `allocator` is the `allocator` field at offset 0 of a valid `FreeContext`.
+            let state = unsafe { &*allocator.cast::<FreeContext<'_>>() };
+            state.freed.set(state.freed.get() + 1);
+            if packet.as_ptr() == state.first_packet {
+                // Re-enter the port from within Free(). The port must not be holding its lock
+                // here, and the second packet must still be observably queued.
+                // SAFETY: `state.second_packet` is a valid `PortPacket` queued on `state.port`.
+                let canceled = unsafe { state.port.cancel_queued_packet(state.second_packet) };
+                state.cancel_result.set(canceled);
+            }
+        }
+
+        let (handle, _) = unwrap_ok!(PortDispatcher::create(0));
+        let port: RefPtr<PortDispatcher> = handle.dispatcher().clone();
+
+        let mut a = PortPacket::new(core::ptr::null(), core::ptr::null_mut());
+        a.packet.key = 1;
+        a.packet.packet_type = zx_packet_type_t::ZX_PKT_TYPE_USER as u32;
+        let mut b = PortPacket::new(core::ptr::null(), core::ptr::null_mut());
+        b.packet.key = 2;
+        b.packet.packet_type = zx_packet_type_t::ZX_PKT_TYPE_USER as u32;
+        let a_ptr: *mut PortPacket = &raw mut a;
+        let b_ptr: *mut PortPacket = &raw mut b;
+
+        let ctx = FreeContext {
+            allocator: PortAllocator::new(on_free),
+            freed: Cell::new(0),
+            first_packet: a_ptr,
+            second_packet: b_ptr,
+            port: &port,
+            cancel_result: Cell::new(false),
+        };
+        let allocator: *mut PortAllocator = core::ptr::from_ref(&ctx).cast_mut().cast();
+
+        // SAFETY: `a_ptr` and `b_ptr` point to valid stack-pinned `PortPacket`s that outlive
+        // `port`, and writing through `a_ptr` / `b_ptr` preserves their Stacked Borrows provenance.
+        unsafe {
+            (*a_ptr).allocator = allocator;
+            (*b_ptr).allocator = allocator;
+            assert_ok!(port.queue(NonNull::new_unchecked(a_ptr)));
+            assert_ok!(port.queue(NonNull::new_unchecked(b_ptr)));
+        }
+
+        // Dropping the last handle runs `on_zero_handles`, which pops `a` first and frees it with
+        // the port lock dropped; `on_free(a)` cancels `b`.
+        drop(handle);
+
+        // `b` was still queued when `on_free(a)` ran, so `cancel_queued_packet(b)` succeeded and
+        // `b` is now owned by the test again rather than freed by the port.
+        assert_true!(ctx.cancel_result.get());
+        assert_eq!(ctx.freed.get(), 1);
+        assert_false!(b.node.in_container());
+        assert_false!(b.is_canceled());
+
+        // The port must have nothing further to do with `b`.
+        // SAFETY: `b_ptr` is a valid unlinked `PortPacket`.
+        assert_false!(unsafe { port.cancel_queued_packet(b_ptr) });
+        // SAFETY: `b_ptr` is unlinked and owned by the test, and `ctx` is still live.
+        unsafe {
+            PortPacket::free(b_ptr);
+        }
+        assert_eq!(ctx.freed.get(), 2);
     }
 }

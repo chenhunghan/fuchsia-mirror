@@ -90,7 +90,7 @@ class JobDispatcher final
   // Dispatcher implementation.
   zx_obj_type_t get_type() const final { return ZX_OBJ_TYPE_JOB; }
   zx_koid_t get_related_koid() const final;
-  fbl::RefPtr<JobDispatcher> parent() { return fbl::RefPtr<JobDispatcher>(parent_); }
+  fbl::RefPtr<JobDispatcher> parent() const { return fbl::RefPtr<JobDispatcher>(parent_); }
 
   // Job methods.
   [[nodiscard]] zx_status_t get_name(char (&out_name)[ZX_MAX_NAME_LEN]) const final;
@@ -134,7 +134,7 @@ class JobDispatcher final
   // processes.
   zx_status_t SetTimerSlackPolicy(const zx_policy_timer_slack& policy);
 
-  JobPolicy GetPolicy() const;
+  JobPolicy GetPolicy() const TA_EXCL(get_lock());
 
   // Kills its lowest child job that has get_kill_on_oom() set.
   // Returns false if no alive child job had get_kill_on_oom() set.
@@ -158,7 +158,10 @@ class JobDispatcher final
 
   // It's safe to return a raw pointer because the exceptionate is only used by the threads under
   // the current job.
-  Exceptionate* exceptionate();
+  Exceptionate* exceptionate() {
+    canary_.Assert();
+    return &exceptionate_;
+  }
 
   // Enumerate over a snapshot of debug exceptionates. |func| will be called without the lock held.
   zx_status_t ForEachDebugExceptionate(fit::inline_function<void(Exceptionate*)> func);
@@ -301,12 +304,10 @@ class JobDispatcher final
   TaskRuntimeStats exited_process_runtime_stats_ TA_GUARDED(get_lock());
 };
 
-// Returns the job that is the ancestor of all other tasks.
-const fbl::RefPtr<JobDispatcher>& GetRootJobDispatcher();
-const Handle& GetRootJobHandle();
-
 extern "C" {
-bool cpp_job_dispatcher_is_root(const JobDispatcher* job);
+// TODO(adanis): Remove once remaining C++ callers of GetRootJobDispatcher() are ported to Rust.
+JobDispatcher* rust_get_root_job_dispatcher();
+
 zx_status_t cpp_job_dispatcher_create(uint32_t flags, JobDispatcher* parent,
                                       ffi::Uninitialized<KernelHandle<JobDispatcher>>* handle,
                                       ffi::Uninitialized<zx_rights_t>* rights);
@@ -318,8 +319,6 @@ zx_status_t cpp_job_dispatcher_set_basic_policy_v2(JobDispatcher* job, uint32_t 
                                                    size_t count);
 zx_status_t cpp_job_dispatcher_set_timer_slack_policy(JobDispatcher* job,
                                                       const zx_policy_timer_slack_t* policy);
-JobDispatcher* cpp_job_dispatcher_get_root_job();
-const Handle* cpp_job_dispatcher_get_root_job_handle();
 JobDispatcher* cpp_job_dispatcher_create_root_job();
 bool cpp_job_dispatcher_kill(JobDispatcher* job, int64_t return_code);
 void cpp_job_dispatcher_set_kill_on_oom(JobDispatcher* job, bool value);
@@ -336,6 +335,25 @@ zx_status_t cpp_job_dispatcher_create_debug_exceptionate(JobDispatcher* job,
                                                          zx_rights_t process_rights);
 JobDispatcher* cpp_job_dispatcher_lookup_job_by_id(JobDispatcher* job, zx_koid_t koid);
 ProcessDispatcher* cpp_job_dispatcher_lookup_process_by_id(JobDispatcher* job, zx_koid_t koid);
+JobDispatcher* cpp_job_dispatcher_parent(const JobDispatcher* job);
+void cpp_job_dispatcher_get_policy(const JobDispatcher* job,
+                                   ffi::Uninitialized<JobPolicy>* out_policy);
+
+typedef bool (*cpp_job_enumerator_on_job_fn)(void* ctx, JobDispatcher* job);
+typedef bool (*cpp_job_enumerator_on_process_fn)(void* ctx, ProcessDispatcher* proc);
+bool cpp_job_dispatcher_enumerate_children_recursive(JobDispatcher* job, void* ctx,
+                                                     cpp_job_enumerator_on_job_fn on_job,
+                                                     cpp_job_enumerator_on_process_fn on_process);
+bool cpp_job_dispatcher_enumerate_direct_children(JobDispatcher* job, void* ctx,
+                                                  cpp_job_enumerator_on_job_fn on_job,
+                                                  cpp_job_enumerator_on_process_fn on_process);
+}
+
+// Returns the job that is the ancestor of all other tasks.
+//
+// TODO(adanis): Remove once remaining C++ callers are ported to Rust.
+inline fbl::RefPtr<JobDispatcher> GetRootJobDispatcher() {
+  return fbl::RefPtr<JobDispatcher>(rust_get_root_job_dispatcher());
 }
 
 #endif  // ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_JOB_DISPATCHER_H_

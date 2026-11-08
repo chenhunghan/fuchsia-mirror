@@ -22,7 +22,7 @@ use starnix_core::vfs::{
 };
 use starnix_ext::map_ext::EntryExt;
 use starnix_logging::track_stub;
-use starnix_sync::{LockDepMutex, LoopDeviceStateLock, LoopDevicesLock};
+use starnix_sync::{LockDepMutex, LoopDeviceStateLock, LoopDevicesLock, allow_subclass};
 use starnix_syscalls::{SUCCESS, SyscallArg, SyscallResult};
 use starnix_types::user_buffer::UserBuffer;
 use starnix_uapi::device_id::{DeviceId, LOOP_MAJOR};
@@ -187,7 +187,7 @@ impl LoopDevice {
         let block_class = registry.objects.block_class();
         let device = Arc::new(Self { number: minor, state: Default::default() });
         let device_weak = Arc::<LoopDevice>::downgrade(&device);
-        let k_device = registry.add_device(
+        let k_device = registry.add_major_device(
             kernel,
             loop_device_name.as_ref(),
             DeviceMetadata::new(
@@ -201,7 +201,7 @@ impl LoopDevice {
             /* parent = */ None,
             block_class,
             |k_device, dir| build_block_device_directory(k_device, device_weak, dir),
-        )?;
+        );
         {
             let mut state = device.state.lock();
             state.set_k_device(k_device);
@@ -223,6 +223,23 @@ impl LoopDevice {
 
     fn offset_for_backing_file(&self, offset: usize) -> usize {
         self.state.lock().offset.saturating_add(offset as u64) as usize
+    }
+
+    /// Validates that if `backing_file` is a loop device, its backing chain is bound and does not
+    /// cycle through `self`.
+    ///
+    /// Must be called without holding `self.state` so that inspecting `LoopDevice::state` along
+    /// the backing chain does not violate lock ordering or self-deadlock.
+    fn validate_backing_file(self: &Arc<Self>, backing_file: &FileHandle) -> Result<(), Errno> {
+        let mut current_file = Cow::Borrowed(backing_file);
+        while let Some(loop_file) = current_file.downcast_file::<LoopDeviceFile>() {
+            if Arc::ptr_eq(&loop_file.device, self) {
+                return error!(EBADF);
+            }
+            let next_backing = loop_file.device.backing_file().ok_or_else(|| errno!(EINVAL))?;
+            current_file = Cow::Owned(next_backing);
+        }
+        Ok(())
     }
 }
 
@@ -260,14 +277,17 @@ impl<'a> CroppedInputBuffer<'a> {
 
 impl<'a> Buffer for CroppedInputBuffer<'a> {
     fn segments_count(&self) -> Result<usize, Errno> {
-        error!(ENOTSUP)
+        if self.drained { Ok(0) } else { self.base.segments_count() }
     }
 
     fn peek_each_segment(
         &mut self,
         callback: &mut PeekBufferSegmentsCallback<'_>,
     ) -> Result<(), Errno> {
-        let mut pos = 0;
+        if self.drained {
+            return Ok(());
+        }
+        let mut pos = self.base.bytes_read();
         self.base.peek_each_segment(&mut |buffer: &UserBuffer| {
             if pos >= self.size {
                 return;
@@ -366,11 +386,11 @@ impl FileOps for LoopDeviceFile {
             } else {
                 data
             };
-            let r = backing_file.write_at(
-                current_task,
-                self.device.offset_for_backing_file(offset),
-                data,
-            );
+            let backing_offset = self.device.offset_for_backing_file(offset);
+            // Safe because LoopDevice::validate_backing_file ensures the loop backing chain is
+            // acyclic.
+            let _token = allow_subclass();
+            let r = backing_file.write_at(current_task, backing_offset, data);
             r
         } else {
             error!(ENOSPC)
@@ -487,6 +507,7 @@ impl FileOps for LoopDeviceFile {
             LOOP_SET_FD => {
                 let fd = arg.into();
                 let backing_file = current_task.files().get(fd)?;
+                self.device.validate_backing_file(&backing_file)?;
                 let mut state = self.device.state.lock();
                 state.set_backing_file(current_task, &self.device, backing_file)?;
                 Ok(SUCCESS)
@@ -538,6 +559,9 @@ impl FileOps for LoopDeviceFile {
             LOOP_CHANGE_FD => {
                 let fd = arg.into();
                 let backing_file = current_task.files().get(fd)?;
+                let registry = current_task.kernel().expando.get::<LoopDeviceRegistry>();
+                let _devices_lock = registry.devices.lock();
+                self.device.validate_backing_file(&backing_file)?;
                 let mut state = self.device.state.lock();
                 if let Some(_existing_file) = &state.backing_file {
                     // https://man7.org/linux/man-pages/man4/loop.4.html says:
@@ -580,8 +604,14 @@ impl FileOps for LoopDeviceFile {
                 let config = current_task.read_object(user_config)?;
                 let fd = FdNumber::from_raw(config.fd as i32);
                 check_block_size(config.block_size)?;
+                let backing_file = if let Ok(backing_file) = current_task.files().get(fd) {
+                    self.device.validate_backing_file(&backing_file)?;
+                    Some(backing_file)
+                } else {
+                    None
+                };
                 let mut state = self.device.state.lock();
-                if let Ok(backing_file) = current_task.files().get(fd) {
+                if let Some(backing_file) = backing_file {
                     state.set_backing_file(current_task, &self.device, backing_file)?;
                 }
                 state.block_size = config.block_size;
@@ -967,6 +997,38 @@ mod tests {
 
             assert_eq!(registry.remove(current_task, minor), error!(EINVAL));
             assert!(registry.get(minor).is_ok());
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn cropped_input_buffer_segments() {
+        spawn_kernel_and_run(async |current_task| {
+            let addr1 = map_object_anywhere(current_task, b"0123456789");
+            let addr2 = map_object_anywhere(current_task, b"abcdef");
+            let buffers = starnix_types::user_buffer::UserBuffers::from_iter([
+                UserBuffer { address: addr1, length: 10 },
+                UserBuffer { address: addr2, length: 6 },
+            ]);
+            let mut base = UserBuffersInputBuffer::unified_new(current_task, buffers).unwrap();
+            base.advance(4).unwrap();
+
+            // Crop to 8 unread bytes (total size = 4 bytes_read + 8 = 12):
+            // 6 remaining bytes from addr1 + 2 bytes from addr2.
+            let mut cropped = CroppedInputBuffer::new(&mut base, 12);
+            assert_eq!(cropped.segments_count().unwrap(), 2);
+
+            let iovecs = cropped.peek_all_segments_as_iovecs().unwrap();
+            assert_eq!(iovecs.len(), 2);
+            assert_eq!(iovecs[0].iov_base as usize, (addr1 + 4usize).unwrap().ptr());
+            assert_eq!(iovecs[0].iov_len, 6);
+            assert_eq!(iovecs[1].iov_base as usize, addr2.ptr());
+            assert_eq!(iovecs[1].iov_len, 2);
+            drop(iovecs);
+
+            cropped.drain();
+            assert_eq!(cropped.segments_count().unwrap(), 0);
+            assert!(cropped.peek_all_segments_as_iovecs().unwrap().is_empty());
         })
         .await;
     }

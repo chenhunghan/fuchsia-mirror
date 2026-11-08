@@ -2,11 +2,22 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
 package(default_applicable_licenses = ["//:license"])
 
-# The unit tests stay hand-written in BUILD.gn, see the comment there.
 rustc_library(
     name = "app_event_conversion",
     srcs = [
@@ -38,4 +49,58 @@ rustc_library(
         "//third_party/rust_crates/vendor:bit-vec",
         "//third_party/rust_crates/vendor:thiserror",
     ],
+)
+
+rustc_test(
+    name = "app_event_conversion_test",
+    crate = ":app_event_conversion",
+    # Matches the binary path in meta/starnix_app_input_event_conversion_tests.cml.
+    crate_name = "starnix_modules_input_app_event_conversion_lib_test",
+    # TODO(https://fxbug.dev/42059075): Re-enable starnix in these environments.
+    tags = [
+        "exclude_toolchain_tags=asan",
+        "exclude_toolchain_tags=hwasan",
+    ],
+    deps = [
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:pretty_assertions",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+fx_packaged_binary(
+    name = "app_event_conversion_test_packaged_bin",
+    testonly = True,
+    binary = ":app_event_conversion_test",
+    binary_name = "starnix_modules_input_app_event_conversion_lib_test",
+)
+
+fx_component_manifest(
+    name = "starnix-app-input-event-conversion-tests-manifest",
+    testonly = True,
+    component_name = "starnix-app-input-event-conversion-tests",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/starnix:unit_test.shard.cml",
+    ],
+    manifest = "meta/starnix_app_input_event_conversion_tests.cml",
+)
+
+fx_test_component(
+    name = "starnix-app-input-event-conversion-tests-component",
+    compiled_manifest = ":starnix-app-input-event-conversion-tests-manifest",
+    test_type = "starnix",
+    deps = [":app_event_conversion_test_packaged_bin"],
+)
+
+fx_package(
+    name = "starnix-app-input-event-conversion-tests-package",
+    package_name = "starnix-app-input-event-conversion-tests",
+    test_components = [":starnix-app-input-event-conversion-tests-component"],
+)
+
+fx_test(
+    name = "starnix-app-input-event-conversion-tests",
+    package = ":starnix-app-input-event-conversion-tests-package",
 )

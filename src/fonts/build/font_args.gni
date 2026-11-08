@@ -4,7 +4,9 @@
 
 declare_args() {
   # Set to true to include internal fonts in the build.
+  # LINT.IfChange(include_internal_fonts)
   include_internal_fonts = false
+  # LINT.ThenChange(//build/bazel/BUILD.gn:include_internal_fonts)
 }
 
 declare_args() {

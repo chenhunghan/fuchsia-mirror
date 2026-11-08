@@ -11,8 +11,9 @@ use crate::ptrace::{
 use crate::security;
 use crate::signals::syscalls::RUsagePtr;
 use crate::task::{
-    CurrentTask, ExitStatus, NormalPriority, SchedulingPolicy, SeccompAction, SeccompStateValue,
-    SyslogAccess, Task, ThreadGroup, max_priority_for_sched_policy, min_priority_for_sched_policy,
+    CurrentTask, ExitStatus, NormalPriority, RealtimePriority, SCHED_CAPACITY_SCALE,
+    SchedulerState, SchedulingPolicy, SeccompAction, SeccompStateValue, SyslogAccess, Task,
+    ThreadGroup, max_priority_for_sched_policy, min_priority_for_sched_policy,
 };
 use crate::vfs::{
     FdNumber, FileHandle, MountNamespaceFile, PidFdFileObject, UserBuffersOutputBuffer,
@@ -20,7 +21,6 @@ use crate::vfs::{
 };
 use starnix_logging::{log_error, log_info, log_trace, track_stub};
 use starnix_syscalls::SyscallResult;
-use starnix_task_command::TaskCommand;
 use starnix_types::time::timeval_from_duration;
 use starnix_uapi::auth::{
     CAP_SETGID, CAP_SETPCAP, CAP_SETUID, CAP_SYS_ADMIN, CAP_SYS_NICE, CAP_SYS_RESOURCE,
@@ -47,12 +47,14 @@ use starnix_uapi::{
     PR_GET_TIMERSLACK, PR_SET_CHILD_SUBREAPER, PR_SET_DUMPABLE, PR_SET_KEEPCAPS, PR_SET_NAME,
     PR_SET_NO_NEW_PRIVS, PR_SET_PDEATHSIG, PR_SET_PTRACER, PR_SET_SECCOMP, PR_SET_SECUREBITS,
     PR_SET_TIMERSLACK, PR_SET_VMA, PR_SET_VMA_ANON_NAME, PRIO_PROCESS, PTRACE_ATTACH, PTRACE_SEIZE,
-    PTRACE_TRACEME, RUSAGE_CHILDREN, SCHED_RESET_ON_FORK, SECCOMP_FILTER_FLAG_LOG,
-    SECCOMP_FILTER_FLAG_NEW_LISTENER, SECCOMP_FILTER_FLAG_SPEC_ALLOW, SECCOMP_FILTER_FLAG_TSYNC,
-    SECCOMP_FILTER_FLAG_TSYNC_ESRCH, SECCOMP_GET_ACTION_AVAIL, SECCOMP_GET_NOTIF_SIZES,
-    SECCOMP_MODE_FILTER, SECCOMP_MODE_STRICT, SECCOMP_SET_MODE_FILTER, SECCOMP_SET_MODE_STRICT,
-    c_char, c_int, clone_args, errno, error, gid_t, pid_t, rusage, sched_param, sock_filter, uapi,
-    uid_t,
+    PTRACE_TRACEME, RUSAGE_CHILDREN, SCHED_ATTR_SIZE_VER0, SCHED_ATTR_SIZE_VER1,
+    SCHED_FLAG_KEEP_ALL, SCHED_FLAG_KEEP_PARAMS, SCHED_FLAG_KEEP_POLICY, SCHED_FLAG_RESET_ON_FORK,
+    SCHED_FLAG_UTIL_CLAMP, SCHED_FLAG_UTIL_CLAMP_MAX, SCHED_FLAG_UTIL_CLAMP_MIN,
+    SCHED_RESET_ON_FORK, SECCOMP_FILTER_FLAG_LOG, SECCOMP_FILTER_FLAG_NEW_LISTENER,
+    SECCOMP_FILTER_FLAG_SPEC_ALLOW, SECCOMP_FILTER_FLAG_TSYNC, SECCOMP_FILTER_FLAG_TSYNC_ESRCH,
+    SECCOMP_GET_ACTION_AVAIL, SECCOMP_GET_NOTIF_SIZES, SECCOMP_MODE_FILTER, SECCOMP_MODE_STRICT,
+    SECCOMP_SET_MODE_FILTER, SECCOMP_SET_MODE_STRICT, c_char, c_int, clone_args, errno, error,
+    gid_t, pid_t, rusage, sched_attr, sched_param, sock_filter, uapi, uid_t,
 };
 use static_assertions::const_assert;
 use std::cmp;
@@ -155,33 +157,39 @@ pub fn sys_clone3(
     do_clone(current_task, &clone_args)
 }
 
+/// Reads a null-terminated vector of C strings from user memory, enforcing a per-element byte
+/// limit (`elem_limit`) and deducting the bytes consumed by pointers and string data (including
+/// null terminators) from `total_limit`.
 fn read_c_string_vector(
     mm: &CurrentTask,
     user_vector: UserCStringPtr,
     elem_limit: usize,
-    vec_limit: usize,
-) -> Result<(Vec<CString>, usize), Errno> {
+    total_limit: &mut usize,
+) -> Result<Vec<CString>, Errno> {
     let mut user_current = user_vector;
     let mut vector: Vec<CString> = vec![];
-    let mut vec_size: usize = 0;
+    let ptr_size = std::mem::size_of::<*const u8>();
+
     loop {
+        // Account for the size of the pointer in the vector.
+        *total_limit = total_limit.checked_sub(ptr_size).ok_or_else(|| errno!(E2BIG))?;
+
         let user_string = mm.read_multi_arch_ptr(user_current)?;
         if user_string.is_null() {
-            break;
+            return Ok(vector);
         }
         let string = mm
             .read_c_string_to_vec(user_string, elem_limit)
             .map_err(|e| if e.code == ENAMETOOLONG { errno!(E2BIG) } else { e })?;
         let cstring = CString::new(string).map_err(|_| errno!(EINVAL))?;
-        vec_size =
-            vec_size.checked_add(cstring.as_bytes_with_nul().len()).ok_or_else(|| errno!(E2BIG))?;
-        if vec_size > vec_limit {
-            return error!(E2BIG);
-        }
+        let arg_size = cstring.as_bytes_with_nul().len();
+
+        // Account for the size of the string data.
+        *total_limit = total_limit.checked_sub(arg_size).ok_or_else(|| errno!(E2BIG))?;
+
         vector.push(cstring);
         user_current = user_current.next()?;
     }
-    Ok((vector, vec_size))
 }
 
 pub fn sys_execve(
@@ -210,27 +218,22 @@ pub fn sys_execveat(
     // See the Limits sections in https://man7.org/linux/man-pages/man2/execve.2.html
     const PAGE_LIMIT: usize = 32;
     let page_limit_size: usize = PAGE_LIMIT * *PAGE_SIZE as usize;
-    let rlimit = current_task.thread_group().get_rlimit(Resource::STACK);
-    let stack_limit = cmp::min(rlimit / 4, uapi::_STK_LIM as u64 / 4 * 3);
-    let argv_env_limit = cmp::max(page_limit_size, stack_limit as usize);
+    let stack_rlimit = current_task.thread_group().get_rlimit(Resource::STACK);
+    let stack_limit = cmp::min(stack_rlimit / 4, uapi::_STK_LIM as u64 / 4 * 3);
+    let mut argv_env_limit = cmp::max(page_limit_size, stack_limit as usize);
 
     // The limit per argument or environment variable is 32 pages.
     // See the Limits sections in https://man7.org/linux/man-pages/man2/execve.2.html
-    let (argv, argv_size) = if user_argv.is_null() {
-        (Vec::new(), 0)
+    let argv = if user_argv.is_null() {
+        Vec::new()
     } else {
-        read_c_string_vector(current_task, user_argv, page_limit_size, argv_env_limit)?
+        read_c_string_vector(current_task, user_argv, page_limit_size, &mut argv_env_limit)?
     };
 
-    let (environ, _) = if user_environ.is_null() {
-        (Vec::new(), 0)
+    let environ = if user_environ.is_null() {
+        Vec::new()
     } else {
-        read_c_string_vector(
-            current_task,
-            user_environ,
-            page_limit_size,
-            argv_env_limit - argv_size,
-        )?
+        read_c_string_vector(current_task, user_environ, page_limit_size, &mut argv_env_limit)?
     };
 
     let path = &current_task.read_path(user_path)?;
@@ -417,7 +420,7 @@ pub fn sys_setuid(current_task: &CurrentTask, uid: uid_t) -> Result<(), Errno> {
         creds.saved_uid = uid;
     }
 
-    creds.update_capabilities(&prev);
+    creds.update_capabilities_on_uid_change(&prev);
     std::mem::drop(prev);
     current_task.set_creds(creds);
     Ok(())
@@ -453,10 +456,10 @@ pub fn sys_getegid(current_task: &CurrentTask) -> Result<gid_t, Errno> {
 pub fn sys_setfsuid(current_task: &CurrentTask, fsuid: uid_t) -> Result<uid_t, Errno> {
     let prev = current_task.current_creds();
     let prev_fsuid = prev.fsuid;
-    if fsuid != u32::MAX && new_uid_allowed(&current_task, fsuid) {
+    if fsuid != u32::MAX && fsuid != prev_fsuid && new_uid_allowed(&current_task, fsuid) {
         let mut creds = Credentials::clone(&prev);
         creds.fsuid = fsuid;
-        creds.update_capabilities(&prev);
+        creds.update_capabilities_on_fsuid_change(&prev);
         std::mem::drop(prev);
         current_task.set_creds(creds);
     }
@@ -468,10 +471,9 @@ pub fn sys_setfsgid(current_task: &CurrentTask, fsgid: gid_t) -> Result<gid_t, E
     let prev = current_task.current_creds();
     let prev_fsgid = prev.fsgid;
 
-    if fsgid != u32::MAX && new_gid_allowed(&current_task, fsgid) {
+    if fsgid != u32::MAX && fsgid != prev_fsgid && new_gid_allowed(&current_task, fsgid) {
         let mut creds = Credentials::clone(&prev);
         creds.fsgid = fsgid;
-        creds.update_capabilities(&prev);
         std::mem::drop(prev);
         current_task.set_creds(creds);
     }
@@ -537,7 +539,6 @@ pub fn sys_setreuid(current_task: &CurrentTask, ruid: uid_t, euid: uid_t) -> Res
     let is_euid_set = euid != u32::MAX;
     if is_euid_set {
         creds.euid = euid;
-        creds.fsuid = euid;
     }
 
     // If the real user ID is set (i.e., ruid is not -1) or the effective
@@ -546,8 +547,9 @@ pub fn sys_setreuid(current_task: &CurrentTask, ruid: uid_t, euid: uid_t) -> Res
     if is_ruid_set || (is_euid_set && euid != prev.uid) {
         creds.saved_uid = creds.euid;
     }
+    creds.fsuid = creds.euid;
 
-    creds.update_capabilities(&prev);
+    creds.update_capabilities_on_uid_change(&prev);
     std::mem::drop(prev);
     current_task.set_creds(creds);
     Ok(())
@@ -583,7 +585,6 @@ pub fn sys_setregid(current_task: &CurrentTask, rgid: gid_t, egid: gid_t) -> Res
     let is_egid_set = egid != u32::MAX;
     if is_egid_set {
         creds.egid = egid;
-        creds.fsgid = egid;
     }
 
     // If the real group ID is set (i.e., rgid is not -1) or the effective
@@ -592,6 +593,7 @@ pub fn sys_setregid(current_task: &CurrentTask, rgid: gid_t, egid: gid_t) -> Res
     if is_rgid_set || (is_egid_set && egid != previous_rgid) {
         creds.saved_gid = creds.egid;
     }
+    creds.fsgid = creds.egid;
 
     current_task.set_creds(creds);
     Ok(())
@@ -609,18 +611,25 @@ pub fn sys_setresuid(
     }
 
     let prev = current_task.current_creds();
+    if (ruid == u32::MAX || ruid == prev.uid)
+        && (euid == u32::MAX || (euid == prev.euid && euid == prev.fsuid))
+        && (suid == u32::MAX || suid == prev.saved_uid)
+    {
+        return Ok(());
+    }
+
     let mut creds = Credentials::clone(&prev);
     if ruid != u32::MAX {
         creds.uid = ruid;
     }
     if euid != u32::MAX {
         creds.euid = euid;
-        creds.fsuid = euid;
     }
     if suid != u32::MAX {
         creds.saved_uid = suid;
     }
-    creds.update_capabilities(&prev);
+    creds.fsuid = creds.euid;
+    creds.update_capabilities_on_uid_change(&prev);
     std::mem::drop(prev);
     current_task.set_creds(creds);
     Ok(())
@@ -637,25 +646,32 @@ pub fn sys_setresgid(
         return error!(EPERM);
     }
 
-    let mut creds = Credentials::clone(&current_task.current_creds());
+    let prev = current_task.current_creds();
+    if (rgid == u32::MAX || rgid == prev.gid)
+        && (egid == u32::MAX || (egid == prev.egid && egid == prev.fsgid))
+        && (sgid == u32::MAX || sgid == prev.saved_gid)
+    {
+        return Ok(());
+    }
+
+    let mut creds = Credentials::clone(&prev);
     if rgid != u32::MAX {
         creds.gid = rgid;
     }
     if egid != u32::MAX {
         creds.egid = egid;
-        creds.fsgid = egid;
     }
     if sgid != u32::MAX {
         creds.saved_gid = sgid;
     }
+    creds.fsgid = creds.egid;
+    std::mem::drop(prev);
     current_task.set_creds(creds);
     Ok(())
 }
 
 pub fn sys_exit(current_task: &CurrentTask, code: i32) -> Result<(), Errno> {
-    // Only change the current exit status if this has not been already set by exit_group, as
-    // otherwise it has priority.
-    current_task.write().set_exit_status_if_not_already(ExitStatus::Exit(code as u8));
+    current_task.write().set_exiting(ExitStatus::Exit(code as u8));
     Ok(())
 }
 
@@ -672,6 +688,40 @@ pub fn sys_sched_getscheduler(current_task: &CurrentTask, pid: pid_t) -> Result<
     let target_task = get_task_or_current(current_task, pid)?;
     security::check_task_getscheduler_access(current_task, target_task.as_ref())?;
     Ok(target_task.scheduler_state.lock().policy_for_sched_getscheduler())
+}
+
+fn verify_sched_permissions(
+    current_task: &CurrentTask,
+    target_task: &Task,
+    current_state: &SchedulerState,
+    new_policy: SchedulingPolicy,
+    new_realtime_priority: RealtimePriority,
+    new_normal_priority: NormalPriority,
+    new_reset_on_fork: bool,
+) -> Result<(), Errno> {
+    let euid_friendly = current_task.is_euid_friendly_with(target_task);
+    let rt_strengthening = current_state.realtime_priority < new_realtime_priority;
+    let rt_rlimited = rt_strengthening
+        && new_realtime_priority.exceeds(target_task.thread_group().get_rlimit(Resource::RTPRIO));
+    let nice_strengthening = current_state.normal_priority < new_normal_priority;
+    let nice_rlimited = nice_strengthening
+        && new_normal_priority.exceeds(target_task.thread_group().get_rlimit(Resource::NICE));
+    let clearing_reset_on_fork = current_state.reset_on_fork && !new_reset_on_fork;
+    let caught_in_idle_trap = current_state.policy == SchedulingPolicy::Idle
+        && new_policy != SchedulingPolicy::Idle
+        && current_state
+            .normal_priority
+            .exceeds(target_task.thread_group().get_rlimit(Resource::NICE));
+    if !euid_friendly
+        || rt_rlimited
+        || nice_rlimited
+        || clearing_reset_on_fork
+        || caught_in_idle_trap
+    {
+        security::check_task_capable(current_task, CAP_SYS_NICE)?;
+    }
+
+    security::check_task_setscheduler_access(current_task, target_task)
 }
 
 pub fn sys_sched_setscheduler(
@@ -693,35 +743,23 @@ pub fn sys_sched_setscheduler(
     let realtime_priority =
         policy.realtime_priority_from(current_task.read_object(param)?.sched_priority)?;
 
-    // TODO: https://fxbug.dev/425143440 - we probably want to improve the locking here.
-    let (current_policy, current_realtime_priority, current_normal_priority, current_reset_on_fork) = {
-        let state = target_task.scheduler_state.lock();
-        (state.policy, state.realtime_priority, state.normal_priority, state.reset_on_fork)
-    };
+    target_task.update_scheduler_state_then_role(|scheduler_state| {
+        // Check capabilities and permissions, if required, for the operation.
+        verify_sched_permissions(
+            current_task,
+            &target_task,
+            scheduler_state,
+            policy,
+            realtime_priority,
+            scheduler_state.normal_priority,
+            reset_on_fork,
+        )?;
 
-    // Check capabilities and permissions, if required, for the operation.
-    let euid_friendly = current_task.is_euid_friendly_with(&target_task);
-    let strengthening = current_realtime_priority < realtime_priority;
-    let rlimited = strengthening
-        && realtime_priority.exceeds(target_task.thread_group().get_rlimit(Resource::RTPRIO));
-    let clearing_reset_on_fork = current_reset_on_fork && !reset_on_fork;
-    let caught_in_idle_trap = current_policy == SchedulingPolicy::Idle
-        && policy != SchedulingPolicy::Idle
-        && current_normal_priority.exceeds(target_task.thread_group().get_rlimit(Resource::NICE));
-    if !euid_friendly || rlimited || clearing_reset_on_fork || caught_in_idle_trap {
-        security::check_task_capable(current_task, CAP_SYS_NICE)?;
-    }
-
-    security::check_task_setscheduler_access(current_task, &target_task)?;
-
-    // Apply the new scheduler configuration to the task.
-    target_task.set_scheduler_policy_priority_and_reset_on_fork(
-        policy,
-        realtime_priority,
-        reset_on_fork,
-    )?;
-
-    Ok(())
+        scheduler_state.policy = policy;
+        scheduler_state.realtime_priority = realtime_priority;
+        scheduler_state.reset_on_fork = reset_on_fork;
+        Ok(())
+    })
 }
 
 const CPU_SET_SIZE: usize = 128;
@@ -855,28 +893,214 @@ pub fn sys_sched_setparam(
     let target_task = get_task_or_current(current_task, pid)?;
     let param = current_task.read_object(param)?;
 
-    // TODO: https://fxbug.dev/425143440 - we probably want to improve the locking here.
-    let (policy, current_priority) = {
-        let state = target_task.scheduler_state.lock();
-        (state.policy, state.realtime_priority)
-    };
+    target_task.update_scheduler_state_then_role(|scheduler_state| {
+        let realtime_priority =
+            scheduler_state.policy.realtime_priority_from(param.sched_priority)?;
 
-    let realtime_priority = policy.realtime_priority_from(param.sched_priority)?;
+        // Check capabilities and permissions, if required, for the operation.
+        verify_sched_permissions(
+            current_task,
+            &target_task,
+            scheduler_state,
+            scheduler_state.policy,
+            realtime_priority,
+            scheduler_state.normal_priority,
+            scheduler_state.reset_on_fork,
+        )?;
 
-    // Check capabilities and permissions, if required, for the operation.
-    let euid_friendly = current_task.is_euid_friendly_with(&target_task);
-    let strengthening = current_priority < realtime_priority;
-    let rlimited = strengthening
-        && realtime_priority.exceeds(target_task.thread_group().get_rlimit(Resource::RTPRIO));
-    if !euid_friendly || rlimited {
-        security::check_task_capable(current_task, CAP_SYS_NICE)?;
+        scheduler_state.realtime_priority = realtime_priority;
+        Ok(())
+    })
+}
+
+const_assert!(std::mem::size_of::<sched_attr>() == SCHED_ATTR_SIZE_VER1 as usize);
+
+/// Reads a `sched_attr` structure from userspace, following the Linux size-extensible ABI
+/// (`sched_setattr(2)`):
+/// - `size == 0` defaults to `SCHED_ATTR_SIZE_VER0` (48 bytes).
+/// - If `size` is out of bounds (`< SCHED_ATTR_SIZE_VER0` or `> PAGE_SIZE`) or has non-zero
+///   trailing bytes beyond `size_of::<sched_attr>()`, writes the kernel's `sched_attr` size back
+///   to `attr_addr` and returns `E2BIG`.
+/// - If `size < size_of::<sched_attr>()`, zero-fills the remaining fields via
+///   `read_object_partial`.
+fn read_sched_attr(
+    current_task: &CurrentTask,
+    attr_addr: UserAddress,
+) -> Result<sched_attr, Errno> {
+    let size_ref = UserRef::<u32>::new(attr_addr);
+    let mut attr_size = current_task.read_object(size_ref)?;
+    if attr_size == 0 {
+        attr_size = SCHED_ATTR_SIZE_VER0;
+    }
+    if attr_size < SCHED_ATTR_SIZE_VER0 || (attr_size as usize) > *PAGE_SIZE as usize {
+        let _ = current_task.write_object(size_ref, &SCHED_ATTR_SIZE_VER1);
+        return error!(E2BIG);
     }
 
-    security::check_task_setscheduler_access(current_task, &target_task)?;
+    let mut attr_size = attr_size as usize;
+    let sizeof_attr = std::mem::size_of::<sched_attr>();
+    if attr_size > sizeof_attr {
+        let tail_addr = attr_addr.checked_add(sizeof_attr).ok_or_else(|| errno!(EFAULT))?;
+        let tail = current_task.read_memory_to_vec(tail_addr, attr_size - sizeof_attr)?;
+        if tail.into_iter().any(|byte| byte != 0) {
+            let _ = current_task.write_object(size_ref, &SCHED_ATTR_SIZE_VER1);
+            return error!(E2BIG);
+        }
+        attr_size = sizeof_attr;
+    }
 
-    // Apply the new scheduler configuration to the task.
-    target_task.set_scheduler_priority(realtime_priority)?;
+    let kattr: sched_attr = current_task.read_object_partial(UserRef::new(attr_addr), attr_size)?;
+    if (kattr.sched_flags & (SCHED_FLAG_UTIL_CLAMP as u64)) != 0 && attr_size < sizeof_attr {
+        return error!(EINVAL);
+    }
+    Ok(kattr)
+}
 
+pub fn sys_sched_setattr(
+    current_task: &CurrentTask,
+    pid: pid_t,
+    attr: UserAddress,
+    flags: u32,
+) -> Result<(), Errno> {
+    if pid < 0 || attr.is_null() || flags != 0 {
+        return error!(EINVAL);
+    }
+
+    let kattr = read_sched_attr(current_task, attr)?;
+    const SUPPORTED_SCHED_FLAGS: u64 =
+        (SCHED_FLAG_RESET_ON_FORK | SCHED_FLAG_KEEP_ALL | SCHED_FLAG_UTIL_CLAMP) as u64;
+    if (kattr.sched_flags & !SUPPORTED_SCHED_FLAGS) != 0 {
+        return error!(EINVAL);
+    }
+
+    let target_task = get_task_or_current(current_task, pid)?;
+    let keep_policy = (kattr.sched_flags & (SCHED_FLAG_KEEP_POLICY as u64)) != 0;
+    let keep_params = (kattr.sched_flags & (SCHED_FLAG_KEEP_PARAMS as u64)) != 0;
+
+    target_task.update_scheduler_state_then_role(|scheduler_state| {
+        let reset_on_fork = if keep_policy {
+            scheduler_state.reset_on_fork
+        } else {
+            (kattr.sched_flags & (SCHED_FLAG_RESET_ON_FORK as u64)) != 0
+        };
+
+        let policy = if keep_policy {
+            scheduler_state.policy
+        } else {
+            if (kattr.sched_policy & SCHED_RESET_ON_FORK) != 0 {
+                return error!(EINVAL);
+            }
+            SchedulingPolicy::try_from(kattr.sched_policy)?
+        };
+
+        let (realtime_priority, normal_priority) = if keep_params {
+            let rt_priority = if keep_policy {
+                scheduler_state.realtime_priority
+            } else {
+                policy.realtime_priority_from(scheduler_state.get_sched_param().sched_priority)?
+            };
+            (rt_priority, scheduler_state.normal_priority)
+        } else {
+            let priority_i32 = i32::try_from(kattr.sched_priority).map_err(|_| errno!(EINVAL))?;
+            let rt_priority = policy.realtime_priority_from(priority_i32)?;
+            let normal_priority = match policy {
+                SchedulingPolicy::Normal | SchedulingPolicy::Batch => {
+                    NormalPriority::from_setpriority_syscall(kattr.sched_nice)
+                }
+                SchedulingPolicy::Idle | SchedulingPolicy::Fifo | SchedulingPolicy::RoundRobin => {
+                    scheduler_state.normal_priority
+                }
+            };
+            (rt_priority, normal_priority)
+        };
+
+        const UCLAMP_RESET_TO_DEFAULT: u32 = u32::MAX;
+        let uclamp_min = if (kattr.sched_flags & (SCHED_FLAG_UTIL_CLAMP_MIN as u64)) != 0 {
+            if kattr.sched_util_min == UCLAMP_RESET_TO_DEFAULT { 0 } else { kattr.sched_util_min }
+        } else {
+            scheduler_state.uclamp_min
+        };
+        let uclamp_max = if (kattr.sched_flags & (SCHED_FLAG_UTIL_CLAMP_MAX as u64)) != 0 {
+            if kattr.sched_util_max == UCLAMP_RESET_TO_DEFAULT {
+                SCHED_CAPACITY_SCALE
+            } else {
+                kattr.sched_util_max
+            }
+        } else {
+            scheduler_state.uclamp_max
+        };
+        if uclamp_min > SCHED_CAPACITY_SCALE
+            || uclamp_max > SCHED_CAPACITY_SCALE
+            || uclamp_min > uclamp_max
+        {
+            return error!(EINVAL);
+        }
+
+        verify_sched_permissions(
+            current_task,
+            &target_task,
+            scheduler_state,
+            policy,
+            realtime_priority,
+            normal_priority,
+            reset_on_fork,
+        )?;
+
+        // The SCHED_FLAG_KEEP_PARAMS flag always preserves the existing policy, even when
+        // SCHED_FLAG_KEEP_POLICY is unset.
+        if !keep_params {
+            scheduler_state.policy = policy;
+            scheduler_state.realtime_priority = realtime_priority;
+            scheduler_state.normal_priority = normal_priority;
+        }
+        scheduler_state.reset_on_fork = reset_on_fork;
+        scheduler_state.uclamp_min = uclamp_min;
+        scheduler_state.uclamp_max = uclamp_max;
+        Ok(())
+    })
+}
+
+pub fn sys_sched_getattr(
+    current_task: &CurrentTask,
+    pid: pid_t,
+    attr: UserAddress,
+    size: u32,
+    flags: u32,
+) -> Result<(), Errno> {
+    if pid < 0
+        || attr.is_null()
+        || size < SCHED_ATTR_SIZE_VER0
+        || (size as usize) > *PAGE_SIZE as usize
+        || flags != 0
+    {
+        return error!(EINVAL);
+    }
+
+    let target_task = get_task_or_current(current_task, pid)?;
+    security::check_task_getscheduler_access(current_task, &target_task)?;
+
+    let state = target_task.scheduler_state.lock().clone();
+    let copy_size = std::cmp::min(size, SCHED_ATTR_SIZE_VER1) as usize;
+
+    let kattr = sched_attr {
+        size: copy_size as u32,
+        sched_policy: state.policy_for_sched_getscheduler() & !SCHED_RESET_ON_FORK,
+        sched_flags: if state.reset_on_fork { SCHED_FLAG_RESET_ON_FORK as u64 } else { 0 },
+        sched_nice: match state.policy {
+            SchedulingPolicy::Normal | SchedulingPolicy::Batch | SchedulingPolicy::Idle => {
+                state.normal_priority.as_nice() as i32
+            }
+            SchedulingPolicy::Fifo | SchedulingPolicy::RoundRobin => 0,
+        },
+        sched_priority: state.get_sched_param().sched_priority as u32,
+        sched_runtime: 0,
+        sched_deadline: 0,
+        sched_period: 0,
+        sched_util_min: state.uclamp_min,
+        sched_util_max: state.uclamp_max,
+    };
+
+    current_task.write_memory(attr, &kattr.as_bytes()[..copy_size])?;
     Ok(())
 }
 
@@ -978,7 +1202,8 @@ pub fn sys_prctl(
         }
         PR_SET_NAME => {
             let addr = UserAddress::from(arg2);
-            let name = TaskCommand::new(&current_task.read_memory_to_array::<16>(addr)?);
+            let name =
+                current_task.command_from_comm(&current_task.read_memory_to_array::<16>(addr)?);
             current_task.set_command_name(name);
             if current_task.tid == current_task.pid {
                 current_task.thread_group.sync_syscall_log_level();
@@ -1050,7 +1275,7 @@ pub fn sys_prctl(
             } else if arg2 == SECCOMP_MODE_FILTER as u64 {
                 return sys_seccomp(current_task, SECCOMP_SET_MODE_FILTER, 0, arg3.into());
             }
-            Ok(().into())
+            error!(EINVAL)
         }
         PR_GET_CHILD_SUBREAPER => {
             let addr = UserAddress::from(arg2);
@@ -1404,12 +1629,7 @@ pub fn sys_capget(
 
     let target_task = get_task_or_current(current_task, header.pid)?;
 
-    security::check_getcap_access(current_task, &target_task)?;
-
-    let (permitted, effective, inheritable) = {
-        let creds = &target_task.real_creds();
-        (creds.cap_permitted, creds.cap_effective, creds.cap_inheritable)
-    };
+    let (effective, inheritable, permitted) = security::capget(current_task, &target_task)?;
 
     match header.version {
         _LINUX_CAPABILITY_VERSION_1 => {
@@ -1486,41 +1706,8 @@ pub fn sys_capset(
         }
     };
 
-    // Permission checks. Copied out of TLPI section 39.7.
     let mut creds = Credentials::clone(&current_task.current_creds());
-    {
-        log_trace!(
-            "Capabilities({{permitted={:?} from {:?}, effective={:?} from {:?}, inheritable={:?} from {:?}}}, bounding={:?})",
-            new_permitted,
-            creds.cap_permitted,
-            new_effective,
-            creds.cap_effective,
-            new_inheritable,
-            creds.cap_inheritable,
-            creds.cap_bounding
-        );
-        if !creds.cap_inheritable.union(creds.cap_permitted).contains(new_inheritable) {
-            security::check_task_capable(current_task, CAP_SETPCAP)?;
-        }
-
-        if !creds.cap_inheritable.union(creds.cap_bounding).contains(new_inheritable) {
-            return error!(EPERM);
-        }
-        if !creds.cap_permitted.contains(new_permitted) {
-            return error!(EPERM);
-        }
-        if !new_permitted.contains(new_effective) {
-            return error!(EPERM);
-        }
-    }
-    let target_task = get_task_or_current(current_task, header.pid)?;
-
-    security::check_setcap_access(current_task, &target_task)?;
-
-    creds.cap_permitted = new_permitted;
-    creds.cap_effective = new_effective;
-    creds.cap_inheritable = new_inheritable;
-    creds.cap_ambient = new_permitted & new_inheritable & creds.cap_ambient;
+    security::capset(current_task, &mut creds, new_effective, new_inheritable, new_permitted)?;
     current_task.set_creds(creds);
     Ok(())
 }
@@ -1992,8 +2179,10 @@ mod arch32 {
         sys_sched_get_priority_max as sys_arch32_sched_get_priority_max,
         sys_sched_get_priority_min as sys_arch32_sched_get_priority_min,
         sys_sched_getaffinity as sys_arch32_sched_getaffinity,
+        sys_sched_getattr as sys_arch32_sched_getattr,
         sys_sched_getparam as sys_arch32_sched_getparam,
         sys_sched_setaffinity as sys_arch32_sched_setaffinity,
+        sys_sched_setattr as sys_arch32_sched_setattr,
         sys_sched_setparam as sys_arch32_sched_setparam,
         sys_sched_setscheduler as sys_arch32_sched_setscheduler, sys_seccomp as sys_arch32_seccomp,
         sys_setfsgid as sys_arch32_setfsgid, sys_setfsgid as sys_arch32_setfsgid32,
@@ -2015,13 +2204,22 @@ pub use arch32::*;
 mod tests {
     use super::*;
     use crate::mm::syscalls::sys_munmap;
-    use crate::testing::{AutoReleasableTask, map_memory, spawn_kernel_and_run};
+    use crate::task::{RoleOverrides, SchedulerManager};
+    use crate::testing::{
+        AutoReleasableTask, map_memory, spawn_kernel_and_run,
+        spawn_kernel_with_scheduler_and_run_sync,
+    };
+    use fidl_fuchsia_scheduler::{
+        RoleManagerMarker, RoleManagerRequest, RoleManagerSetRoleResponse,
+    };
+    use futures::StreamExt;
+    use starnix_sync::Mutex;
     use starnix_syscalls::SUCCESS;
     use starnix_task_command::TaskCommand;
-    use starnix_uapi::auth::Credentials;
+    use starnix_uapi::auth::{CAP_DAC_OVERRIDE, Credentials};
     use starnix_uapi::signals::SIGCHLD;
     use starnix_uapi::uapi::{kcmp_type_KCMP_SYSVSEM, kcmp_type_KCMP_TYPES, kcmp_type_KCMP_VM};
-    use starnix_uapi::{SCHED_FIFO, SCHED_NORMAL};
+    use starnix_uapi::{SCHED_BATCH, SCHED_FIFO, SCHED_FLAG_KEEP_ALL, SCHED_NORMAL};
     use std::ffi::CString;
 
     #[::fuchsia::test]
@@ -2902,6 +3100,103 @@ mod tests {
     }
 
     #[::fuchsia::test]
+    async fn test_setxid_resets_fsuid_and_fsgid() {
+        spawn_kernel_and_run(async |current_task| {
+            // 1. setresuid(-1, -1, 1000) after setfsuid(0) resets fsuid and drops capabilities.
+            current_task.set_creds(Credentials::with_ids(0, 0));
+            sys_setresuid(&current_task, 1000, 1000, 0).expect("setresuid");
+            assert_eq!(current_task.current_creds().fsuid, 1000);
+            assert!(!current_task.current_creds().cap_effective.contains(CAP_DAC_OVERRIDE));
+
+            assert_eq!(sys_setfsuid(&current_task, 0).expect("setfsuid"), 1000);
+            assert_eq!(current_task.current_creds().fsuid, 0);
+            assert!(current_task.current_creds().cap_effective.contains(CAP_DAC_OVERRIDE));
+
+            sys_setresuid(&current_task, u32::MAX, u32::MAX, 1000).expect("setresuid");
+            assert_eq!(current_task.current_creds().uid, 1000);
+            assert_eq!(current_task.current_creds().euid, 1000);
+            assert_eq!(current_task.current_creds().saved_uid, 1000);
+            assert_eq!(current_task.current_creds().fsuid, 1000);
+            assert!(!current_task.current_creds().cap_effective.contains(CAP_DAC_OVERRIDE));
+            assert!(!current_task.current_creds().cap_permitted.contains(CAP_DAC_OVERRIDE));
+
+            // 2. With KEEP_CAPS and euid already nonzero, dropping saved_uid resets fsuid while
+            // cap_emulate_setxuid preserves both permitted and effective capabilities.
+            let mut root_creds = Credentials::with_ids(0, 0);
+            root_creds.securebits.insert(SecureBits::KEEP_CAPS);
+            current_task.set_creds(root_creds);
+            sys_setresuid(&current_task, 1000, 1000, 0).expect("setresuid");
+            assert_eq!(sys_setfsuid(&current_task, 0).expect("setfsuid"), 1000);
+            assert!(current_task.current_creds().cap_effective.contains(CAP_DAC_OVERRIDE));
+
+            sys_setresuid(&current_task, u32::MAX, u32::MAX, 1000).expect("setresuid");
+            assert_eq!(current_task.current_creds().fsuid, 1000);
+            assert!(current_task.current_creds().cap_permitted.contains(CAP_DAC_OVERRIDE));
+            assert!(current_task.current_creds().cap_effective.contains(CAP_DAC_OVERRIDE));
+
+            // 3. setreuid(1000, -1) and setreuid(-1, -1) unconditionally sync fsuid to euid,
+            // without re-raising LSM_SETID_FS capabilities when euid stays 0.
+            current_task.set_creds(Credentials::with_ids(0, 0));
+            sys_setresuid(&current_task, 1000, 1000, 0).expect("setresuid");
+            assert_eq!(sys_setfsuid(&current_task, 0).expect("setfsuid"), 1000);
+            sys_setreuid(&current_task, 1000, u32::MAX).expect("setreuid");
+            assert_eq!(current_task.current_creds().saved_uid, 1000);
+            assert_eq!(current_task.current_creds().fsuid, 1000);
+            assert!(!current_task.current_creds().cap_effective.contains(CAP_DAC_OVERRIDE));
+
+            current_task.set_creds(Credentials::with_ids(0, 0));
+            assert_eq!(sys_setfsuid(&current_task, 1000).expect("setfsuid"), 0);
+            assert_eq!(current_task.current_creds().fsuid, 1000);
+            assert!(!current_task.current_creds().cap_effective.contains(CAP_DAC_OVERRIDE));
+            sys_setreuid(&current_task, u32::MAX, u32::MAX).expect("setreuid");
+            assert_eq!(current_task.current_creds().fsuid, 0);
+            assert!(!current_task.current_creds().cap_effective.contains(CAP_DAC_OVERRIDE));
+
+            // 4. setresuid no-op keeps fsuid, while explicit euid != fsuid (and setuid(0))
+            // resets fsuid without re-raising filesystem capabilities when euid stays 0.
+            current_task.set_creds(Credentials::with_ids(0, 0));
+            assert_eq!(sys_setfsuid(&current_task, 1000).expect("setfsuid"), 0);
+            sys_setresuid(&current_task, u32::MAX, u32::MAX, u32::MAX).expect("setresuid");
+            assert_eq!(current_task.current_creds().fsuid, 1000);
+            sys_setresuid(&current_task, u32::MAX, 0, u32::MAX).expect("setresuid");
+            assert_eq!(current_task.current_creds().fsuid, 0);
+            assert!(!current_task.current_creds().cap_effective.contains(CAP_DAC_OVERRIDE));
+
+            current_task.set_creds(Credentials::with_ids(0, 0));
+            assert_eq!(sys_setfsuid(&current_task, 1000).expect("setfsuid"), 0);
+            sys_setuid(&current_task, 0).expect("setuid");
+            assert_eq!(current_task.current_creds().fsuid, 0);
+            assert!(!current_task.current_creds().cap_effective.contains(CAP_DAC_OVERRIDE));
+
+            // 5. setresgid and setregid reset fsgid (and setresgid no-op preserves fsgid).
+            current_task.set_creds(Credentials::with_ids(0, 0));
+            sys_setresgid(&current_task, 1000, 1000, 0).expect("setresgid");
+            sys_setresuid(&current_task, 1000, 1000, 1000).expect("setresuid");
+            assert_eq!(sys_setfsgid(&current_task, 0).expect("setfsgid"), 1000);
+            assert_eq!(current_task.current_creds().fsgid, 0);
+            sys_setresgid(&current_task, u32::MAX, u32::MAX, 1000).expect("setresgid");
+            assert_eq!(current_task.current_creds().saved_gid, 1000);
+            assert_eq!(current_task.current_creds().fsgid, 1000);
+
+            current_task.set_creds(Credentials::with_ids(0, 0));
+            sys_setresgid(&current_task, 1000, 1000, 0).expect("setresgid");
+            sys_setresuid(&current_task, 1000, 1000, 1000).expect("setresuid");
+            assert_eq!(sys_setfsgid(&current_task, 0).expect("setfsgid"), 1000);
+            sys_setregid(&current_task, 1000, u32::MAX).expect("setregid");
+            assert_eq!(current_task.current_creds().saved_gid, 1000);
+            assert_eq!(current_task.current_creds().fsgid, 1000);
+
+            current_task.set_creds(Credentials::with_ids(0, 0));
+            assert_eq!(sys_setfsgid(&current_task, 1000).expect("setfsgid"), 0);
+            sys_setresgid(&current_task, u32::MAX, u32::MAX, u32::MAX).expect("setresgid");
+            assert_eq!(current_task.current_creds().fsgid, 1000);
+            sys_setresgid(&current_task, u32::MAX, 0, u32::MAX).expect("setresgid");
+            assert_eq!(current_task.current_creds().fsgid, 0);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
     async fn test_prlimit64_stack() {
         spawn_kernel_and_run(async |current_task| {
             let mapped_address = map_memory(&current_task, UserAddress::default(), *PAGE_SIZE);
@@ -3016,15 +3311,24 @@ mod tests {
                 .write_multi_arch_ptr(argv_addr.next().unwrap().addr(), null_usercstr)
                 .expect("failed to write UserCString");
 
-            // The arguments size limit should include the null terminator.
-            assert!(read_c_string_vector(&current_task, argv_addr, 100, arg.len()).is_ok());
+            // The arguments size limit should include the null terminator as well as the pointers.
+            let ptr_size = std::mem::size_of::<*const u8>();
+            let expected_ptr_cost = 2 * ptr_size;
+            let mut limit = arg.len() + expected_ptr_cost;
+            assert!(read_c_string_vector(&current_task, argv_addr, 100, &mut limit).is_ok());
+            assert_eq!(limit, 0);
+
+            // 1 byte short of the first string's null terminator (before the trailing null pointer).
+            let mut limit = ptr_size + arg.len() - 1;
             assert_eq!(
-                read_c_string_vector(
-                    &current_task,
-                    argv_addr,
-                    100,
-                    std::str::from_utf8(arg).unwrap().trim_matches('\0').len()
-                ),
+                read_c_string_vector(&current_task, argv_addr, 100, &mut limit),
+                error!(E2BIG)
+            );
+
+            // 1 byte short of the trailing null pointer.
+            let mut limit = expected_ptr_cost + arg.len() - 1;
+            assert_eq!(
+                read_c_string_vector(&current_task, argv_addr, 100, &mut limit),
                 error!(E2BIG)
             );
         })
@@ -3088,5 +3392,179 @@ mod tests {
             );
         })
         .await;
+    }
+
+    #[fuchsia::test]
+    async fn test_sched_setattr_getattr_uclamp_and_role_override() {
+        let committed_role = Arc::new(Mutex::new(None::<String>));
+        let committed_role_server = committed_role.clone();
+        let (stop_tx, stop_rx) = futures::channel::oneshot::channel::<()>();
+        let (role_manager, server_end) = fidl::endpoints::create_sync_proxy::<RoleManagerMarker>();
+        let server_thread = std::thread::spawn(move || {
+            let mut executor = fuchsia_async::LocalExecutor::default();
+            executor.run_singlethreaded(async move {
+                let mut stream = server_end.into_stream().take_until(stop_rx);
+                while let Some(Ok(request)) = stream.next().await {
+                    match request {
+                        RoleManagerRequest::GetProfileForRole { responder, .. } => {
+                            let _ = responder.send(Err(zx::Status::NOT_SUPPORTED.into_raw()));
+                        }
+                        RoleManagerRequest::SetRole { payload, responder } => {
+                            *committed_role_server.lock() = payload.role.map(|r| r.role);
+                            let _ = responder.send(Ok(RoleManagerSetRoleResponse::default()));
+                        }
+                        _ => panic!("unexpected RoleManagerRequest"),
+                    }
+                }
+            });
+        });
+
+        let mut builder = RoleOverrides::new();
+        builder.add_with_filters(
+            ".*",
+            "^RenderThread$",
+            None,
+            None,
+            None,
+            None,
+            Some((1, 1024)),
+            None,
+            "render_thread_boosted",
+        );
+        builder.add(".*", "^RenderThread$", None, "render_thread_default");
+        let overrides = builder.build().unwrap();
+        let scheduler_manager = SchedulerManager::new_for_tests(Some(role_manager), overrides);
+
+        spawn_kernel_with_scheduler_and_run_sync(scheduler_manager, move |current_task| {
+            current_task.thread_group().write().did_exec = true;
+            current_task.set_command_name(TaskCommand::new(b"RenderThread"));
+
+            let attr_addr = map_memory(current_task, UserAddress::default(), *PAGE_SIZE);
+            let attr_ref = UserRef::<sched_attr>::new(attr_addr);
+
+            let current_role = || {
+                let state = current_task.scheduler_state.lock().clone();
+                current_task.kernel().scheduler.role_name(current_task, &state).unwrap()
+            };
+
+            // Initial sched_getattr returns default uclamp values (0, 1024).
+            sys_sched_getattr(current_task, 0, attr_addr, SCHED_ATTR_SIZE_VER1, 0)
+                .expect("sched_getattr");
+            let initial: sched_attr = current_task.read_object(attr_ref).unwrap();
+            assert_eq!(initial.size, SCHED_ATTR_SIZE_VER1);
+            assert_eq!(initial.sched_policy, SCHED_NORMAL);
+            assert_eq!(initial.sched_util_min, 0);
+            assert_eq!(initial.sched_util_max, 1024);
+            assert_eq!(current_role(), "render_thread_default");
+            assert_eq!(committed_role.lock().as_deref(), Some("render_thread_default"));
+
+            // Apply a uclamp_min boost via SCHED_FLAG_KEEP_ALL | SCHED_FLAG_UTIL_CLAMP.
+            let boost_attr = sched_attr {
+                size: SCHED_ATTR_SIZE_VER1,
+                sched_flags: (SCHED_FLAG_KEEP_ALL | SCHED_FLAG_UTIL_CLAMP) as u64,
+                sched_util_min: 384,
+                sched_util_max: 1024,
+                ..Default::default()
+            };
+            current_task.write_object(attr_ref, &boost_attr).unwrap();
+            sys_sched_setattr(current_task, 0, attr_addr, 0).expect("sched_setattr boost");
+
+            sys_sched_getattr(current_task, 0, attr_addr, SCHED_ATTR_SIZE_VER1, 0)
+                .expect("sched_getattr after boost");
+            let boosted: sched_attr = current_task.read_object(attr_ref).unwrap();
+            assert_eq!(boosted.sched_util_min, 384);
+            assert_eq!(boosted.sched_util_max, 1024);
+            assert_eq!(current_role(), "render_thread_boosted");
+            assert_eq!(committed_role.lock().as_deref(), Some("render_thread_boosted"));
+
+            // Reset uclamp_min using UINT32_MAX (-1) and verify role reverts to default.
+            let reset_attr = sched_attr {
+                size: SCHED_ATTR_SIZE_VER1,
+                sched_flags: (SCHED_FLAG_KEEP_ALL | SCHED_FLAG_UTIL_CLAMP_MIN) as u64,
+                sched_util_min: u32::MAX,
+                ..Default::default()
+            };
+            current_task.write_object(attr_ref, &reset_attr).unwrap();
+            sys_sched_setattr(current_task, 0, attr_addr, 0).expect("sched_setattr reset");
+            assert_eq!(current_task.scheduler_state.lock().uclamp_min, 0);
+            assert_eq!(current_role(), "render_thread_default");
+            assert_eq!(committed_role.lock().as_deref(), Some("render_thread_default"));
+
+            // SCHED_FLAG_KEEP_PARAMS (without SCHED_FLAG_KEEP_POLICY) updates reset_on_fork while
+            // preserving the existing policy and nice value;
+            // SCHED_FLAG_KEEP_POLICY (without SCHED_FLAG_KEEP_PARAMS) updates nice while
+            // preserving policy and reset_on_fork.
+            let initial_batch = sched_attr {
+                size: SCHED_ATTR_SIZE_VER1,
+                sched_policy: SCHED_BATCH,
+                sched_nice: 3,
+                ..Default::default()
+            };
+            current_task.write_object(attr_ref, &initial_batch).unwrap();
+            sys_sched_setattr(current_task, 0, attr_addr, 0).expect("sched_setattr initial_batch");
+
+            let keep_params_attr = sched_attr {
+                size: SCHED_ATTR_SIZE_VER1,
+                sched_policy: SCHED_NORMAL,
+                sched_flags: (SCHED_FLAG_KEEP_PARAMS | SCHED_FLAG_RESET_ON_FORK) as u64,
+                sched_nice: 15,
+                ..Default::default()
+            };
+            current_task.write_object(attr_ref, &keep_params_attr).unwrap();
+            sys_sched_setattr(current_task, 0, attr_addr, 0).expect("sched_setattr keep_params");
+            sys_sched_getattr(current_task, 0, attr_addr, SCHED_ATTR_SIZE_VER1, 0)
+                .expect("sched_getattr after keep_params");
+            let after_keep_params: sched_attr = current_task.read_object(attr_ref).unwrap();
+            assert_eq!(after_keep_params.sched_policy, SCHED_BATCH);
+            assert_eq!(after_keep_params.sched_flags, SCHED_FLAG_RESET_ON_FORK as u64);
+            assert_eq!(after_keep_params.sched_nice, 3);
+
+            let keep_policy_attr = sched_attr {
+                size: SCHED_ATTR_SIZE_VER1,
+                sched_policy: SCHED_NORMAL,
+                sched_flags: SCHED_FLAG_KEEP_POLICY as u64,
+                sched_nice: 7,
+                ..Default::default()
+            };
+            current_task.write_object(attr_ref, &keep_policy_attr).unwrap();
+            sys_sched_setattr(current_task, 0, attr_addr, 0).expect("sched_setattr keep_policy");
+            sys_sched_getattr(current_task, 0, attr_addr, SCHED_ATTR_SIZE_VER1, 0)
+                .expect("sched_getattr after keep_policy");
+            let after_keep_policy: sched_attr = current_task.read_object(attr_ref).unwrap();
+            assert_eq!(after_keep_policy.sched_policy, SCHED_BATCH);
+            assert_eq!(after_keep_policy.sched_flags, SCHED_FLAG_RESET_ON_FORK as u64);
+            assert_eq!(after_keep_policy.sched_nice, 7);
+
+            // Validation errors: uclamp_min > uclamp_max, uclamp_max > 1024, non-zero syscall flags.
+            let invalid_order = sched_attr {
+                size: SCHED_ATTR_SIZE_VER1,
+                sched_flags: (SCHED_FLAG_KEEP_ALL | SCHED_FLAG_UTIL_CLAMP) as u64,
+                sched_util_min: 800,
+                sched_util_max: 400,
+                ..Default::default()
+            };
+            current_task.write_object(attr_ref, &invalid_order).unwrap();
+            assert_eq!(sys_sched_setattr(current_task, 0, attr_addr, 0), error!(EINVAL));
+
+            let invalid_scale = sched_attr {
+                size: SCHED_ATTR_SIZE_VER1,
+                sched_flags: (SCHED_FLAG_KEEP_ALL | SCHED_FLAG_UTIL_CLAMP_MAX) as u64,
+                sched_util_max: 1025,
+                ..Default::default()
+            };
+            current_task.write_object(attr_ref, &invalid_scale).unwrap();
+            assert_eq!(sys_sched_setattr(current_task, 0, attr_addr, 0), error!(EINVAL));
+
+            let valid_attr = sched_attr {
+                size: SCHED_ATTR_SIZE_VER1,
+                sched_flags: SCHED_FLAG_KEEP_ALL as u64,
+                ..Default::default()
+            };
+            current_task.write_object(attr_ref, &valid_attr).unwrap();
+            assert_eq!(sys_sched_setattr(current_task, 0, attr_addr, 1), error!(EINVAL));
+        })
+        .await;
+        let _ = stop_tx.send(());
+        server_thread.join().unwrap();
     }
 }

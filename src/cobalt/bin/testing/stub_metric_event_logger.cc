@@ -66,6 +66,10 @@ zx_status_t StubMetricEventLogger_Sync::LogMetricEvents(
   last_log_metric_method_invoked_ = LogMetricMethod::kLogMetricEvents;
   last_event_codes_ = events.back().event_codes;
   last_metric_id_ = events.back().metric_id;
+  if (error_to_return_.has_value()) {
+    *out_result = fpromise::error(*error_to_return_);
+    return ZX_OK;
+  }
   *out_result = fpromise::ok();
   event_count_ = events.size();
   logged_events_ = std::move(events);

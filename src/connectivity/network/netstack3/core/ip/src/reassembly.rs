@@ -441,8 +441,12 @@ struct FragmentCacheData {
 
 impl Default for FragmentCacheData {
     fn default() -> FragmentCacheData {
+        // NB: Use `insert` rather than `collect` because `BTreeSet`'s
+        // `FromIterator` impl sorts its input, pulling in the stable sort code.
+        let mut missing_blocks = BTreeSet::new();
+        let _: bool = missing_blocks.insert(BlockRange { start: 0, end: u16::MAX });
         FragmentCacheData {
-            missing_blocks: core::iter::once(BlockRange { start: 0, end: u16::MAX }).collect(),
+            missing_blocks,
             body_fragments: BinaryHeap::new(),
             header: None,
             total_size: 0,

@@ -96,6 +96,43 @@
             event_stream: "filtered",
             from: "parent",
         },
+        {
+            config: "fuchsia.config.MyFlag",
+            key: "my_flag",
+            type: "bool",
+            availability: "optional",
+            default: true,
+        },
+        {
+            config: "fuchsia.config.MyUint8",
+            key: "my_uint8",
+            type: "uint8",
+            availability: "optional",
+            default: 42,
+        },
+        {
+            config: "fuchsia.config.MyString",
+            key: "my_string",
+            type: "string",
+            max_size: 100,
+            availability: "optional",
+            default: "test_string",
+        },
+        {
+            config: "fuchsia.config.MyVectorOfString",
+            key: "my_vector_of_string",
+            type: "vector",
+            max_count: 100,
+            element: {
+                type: "string",
+                max_size: 50,
+            },
+            availability: "optional",
+            default: [
+                "hello, world!",
+                "hello, again!",
+            ],
+        },
     ],
     offer: [
         {
@@ -216,21 +253,5 @@
         author: "Fuchsia",
         year: "2018",
         metadata: { publisher: "The Books Publisher" },
-    },
-    config: {
-        my_flag: { type: "bool" },
-        my_uint8: { type: "uint8" },
-        my_string: {
-            type: "string",
-            max_size: 100,
-        },
-        my_vector_of_string: {
-            type: "vector",
-            max_count: 100,
-            element: {
-                type: "string",
-                max_size: 50,
-            },
-        },
     },
 }

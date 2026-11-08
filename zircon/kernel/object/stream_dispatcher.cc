@@ -6,19 +6,36 @@
 
 #include "object/stream_dispatcher.h"
 
-#include <lib/user_copy/user_iovec.h>
+#include <zircon/errors.h>
 
+#include <fbl/alloc_checker.h>
 #include <fbl/ref_ptr.h>
+#include <ktl/utility.h>
 #include <vm/stream_size_manager.h>
 #include <vm/vm_object_paged.h>
+
+extern "C" zx_status_t cpp_stream_dispatcher_create(
+    uint32_t options, VmObjectPaged* raw_vmo, StreamSizeManager* raw_ssm, zx_off_t seek,
+    ffi::Uninitialized<KernelHandle<StreamDispatcher>>* handle_out) {
+  fbl::RefPtr<VmObjectPaged> vmo = fbl::ImportFromRawPtr(raw_vmo);
+  fbl::RefPtr<StreamSizeManager> ssm = fbl::ImportFromRawPtr(raw_ssm);
+  fbl::AllocChecker ac;
+  auto dispatcher =
+      fbl::AdoptRef(new (&ac) StreamDispatcher(options, ktl::move(vmo), ktl::move(ssm), seek));
+  if (!ac.check()) {
+    return ZX_ERR_NO_MEMORY;
+  }
+
+  handle_out->Initialize(ktl::move(dispatcher));
+  return ZX_OK;
+}
 
 StreamDispatcher::StreamDispatcher(uint32_t options, fbl::RefPtr<VmObjectPaged> vmo,
                                    fbl::RefPtr<StreamSizeManager> stream_size_manager,
                                    zx_off_t seek)
     : Dispatcher(options) {
   DISPATCHER_VERIFY_OFFSET(StreamDispatcher, kStreamDispatcherStateOffset);
-  rust_stream_dispatcher_state_init(&opaque_storage_, this, options, seek,
-                                    fbl::ExportToRawPtr(&vmo),
+  rust_stream_dispatcher_state_init(&opaque_storage_, options, seek, fbl::ExportToRawPtr(&vmo),
                                     fbl::ExportToRawPtr(&stream_size_manager));
 }
 

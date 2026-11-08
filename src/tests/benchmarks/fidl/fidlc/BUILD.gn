@@ -5,6 +5,7 @@
 import("//build/components.gni")
 import("//build/testing/perf/test.gni")
 
+# LINT.IfChange
 executable("bin") {
   output_name = "fidlc_microbenchmarks"
   testonly = true
@@ -20,6 +21,8 @@ fuchsia_package_with_single_component("fidlc_microbenchmarks") {
   deps = [ ":bin" ]
   manifest = "meta/fidlc_microbenchmarks.cml"
 }
+
+# LINT.ThenChange(//src/tests/benchmarks/fidl/fidlc/BUILD.bazel)
 
 fuchsia_component_perf_test("fidlc_microbenchmarks_test") {
   package = ":fidlc_microbenchmarks"

@@ -29,8 +29,10 @@ test("profile-config") {
   sources = [ "profile-config.cc" ]
   deps = [
     ":profile-config-files",
+    "//sdk/lib/async-testing",
     "//sdk/lib/fdio",
     "//src/zircon/bin/role_manager:config",
+    "//src/zircon/bin/role_manager:role",
     "//zircon/system/ulib/zx",
     "//zircon/system/ulib/zxtest",
   ]

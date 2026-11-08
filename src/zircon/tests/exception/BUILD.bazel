@@ -1,0 +1,82 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# @bazel2gn:skip
+test_suite(
+    name = "tests",
+    tests = [":exception-tests"],
+    visibility = ["//src/zircon:__pkg__"],
+)
+
+# GN bootfs_test("exception-bootfs-test") expects distribution_entries metadata to install to /boot/test/exception-test.
+# @bazel2gn:raw_attribute:metadata = { distribution_entries = [ { source = rebase_path("$root_out_dir/exception-test", root_build_dir) destination = "test/exception-test" label = get_label_info(":exception-test", "label_with_toolchain") } ] }
+fx_cc_test_binary(
+    name = "exception-test",
+    srcs = [
+        "exception.cc",
+        "exception_to_string.cc",
+    ],
+    # GN uses the //build/config:all_source config to define _ALL_SOURCE.
+    copts = [
+        "-D_ALL_SOURCE",
+    ],  # @bazel2gn:raw_overwrite:[ "//build/config:all_source" ]
+    deps = [
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/test-exceptions",
+        "//zircon/system/ulib/test-utils",
+        "//zircon/system/ulib/zx",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "exception-test-packaged",
+    testonly = True,
+    binary = ":exception-test",
+    binary_name = "exception-test",
+    install_root = "test/",
+)
+
+fx_component_manifest(
+    name = "exception-test-manifest",
+    testonly = True,
+    component_name = "exception-tests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:zxtest.shard.cml",
+    ],
+    manifest = "meta/exception-test.cml",
+)
+
+fx_test_component(
+    name = "exception-test-component",
+    compiled_manifest = ":exception-test-manifest",
+    deps = [":exception-test-packaged"],
+)
+
+fx_package(
+    name = "exception-tests-package",
+    package_name = "exception-tests",
+    test_components = [":exception-test-component"],
+)
+
+fx_test(
+    name = "exception-tests",
+    package = ":exception-tests-package",
+)

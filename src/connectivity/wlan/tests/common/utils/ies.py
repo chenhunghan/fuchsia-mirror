@@ -47,7 +47,7 @@ class Ie:
         self.element_id_extension = element_id_extension
 
     @staticmethod
-    def read_ies(ies_bytes: bytes) -> list["Ie"]:
+    def read_ies(ies_bytes: bytes) -> list[Ie]:
         ies = []
         i = 0
         while True:

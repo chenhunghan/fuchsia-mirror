@@ -43,7 +43,7 @@ class HandleRegistration:
     """
 
     def __init__(
-        self, waker: "HandleWaker", h: fc.BaseHandle, *, name: str
+        self, waker: HandleWaker, h: fc.BaseHandle, *, name: str
     ) -> None:
         self.waker = waker
         self.handle = h

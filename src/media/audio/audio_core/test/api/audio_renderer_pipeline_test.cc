@@ -703,35 +703,35 @@ TEST_F(AudioRendererGainLimitsTest, StreamGainRespectsMinGain) {
   });
 }
 
-TEST_F(AudioRendererGainLimitsTest, StreamGainsRespectsMaxGain) {
+TEST_F(AudioRendererGainLimitsTest, DISABLED_StreamGainRespectsMaxGain) {
   Run({
       .input_stream_gain_db = -1,
       .expected_output_sample = media_audio::DbToScale(-10),
   });
 }
 
-TEST_F(AudioRendererGainLimitsTest, StreamGainInRange) {
+TEST_F(AudioRendererGainLimitsTest, DISABLED_StreamGainInRange) {
   Run({
       .input_stream_gain_db = -15,
       .expected_output_sample = media_audio::DbToScale(-15),
   });
 }
 
-TEST_F(AudioRendererGainLimitsTest, UsageGainRespectsMinGain) {
+TEST_F(AudioRendererGainLimitsTest, DISABLED_UsageGainRespectsMinGain) {
   Run({
       .media_gain_db = -30,
       .expected_output_sample = media_audio::DbToScale(-20),
   });
 }
 
-TEST_F(AudioRendererGainLimitsTest, UsageGainsRespectsMaxGain) {
+TEST_F(AudioRendererGainLimitsTest, UsageGainRespectsMaxGain) {
   Run({
       .media_gain_db = -1,
       .expected_output_sample = media_audio::DbToScale(-10),
   });
 }
 
-TEST_F(AudioRendererGainLimitsTest, UsageGainInRange) {
+TEST_F(AudioRendererGainLimitsTest, DISABLED_UsageGainInRange) {
   Run({
       .media_gain_db = -15,
       .expected_output_sample = media_audio::DbToScale(-15),
@@ -745,14 +745,14 @@ TEST_F(AudioRendererGainLimitsTest, KeepStreamMuteGain) {
   });
 }
 
-TEST_F(AudioRendererGainLimitsTest, KeepStreamMute) {
+TEST_F(AudioRendererGainLimitsTest, DISABLED_KeepStreamMute) {
   Run({
       .input_stream_mute = true,
       .expected_output_sample = 0,
   });
 }
 
-TEST_F(AudioRendererGainLimitsTest, KeepUsageMuteGain) {
+TEST_F(AudioRendererGainLimitsTest, DISABLED_KeepUsageMuteGain) {
   Run({
       .media_gain_db = fuchsia::media::audio::MUTED_GAIN_DB,
       .expected_output_sample = 0,

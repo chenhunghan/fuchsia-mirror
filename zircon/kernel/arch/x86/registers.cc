@@ -775,3 +775,10 @@ void PrintFrame(const iframe_t& frame, FILE* file) {
           frame.r12, frame.r13, frame.r14, frame.r15);
   fprintf(file, " vector: %#15" PRIx64 " errc: %#17" PRIx64 "\n", frame.vector, frame.err_code);
 }
+
+extern "C" {
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_x86_print_frame(const iframe_t* frame) { PrintFrame(*frame); }
+
+}  // extern "C"

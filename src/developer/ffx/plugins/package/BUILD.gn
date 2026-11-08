@@ -2,58 +2,80 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//src/developer/ffx/build/ffx_plugin.gni")
+import("//build/sdk/sdk_atom.gni")
+import("//build/testing/host_test_data.gni")
 import("//src/developer/ffx/build/ffx_tool.gni")
-
-ffx_plugin("ffx_package") {
-  sdk_category = "partner"
-  version = "0.1.0"
-  edition = "2024"
-  plugin_deps = [
-    "archive:ffx_package_archive",
-    "blob:ffx_package_blob",
-    "build:ffx_package_build",
-    "far:ffx_package_far",
-    "file-hash:ffx_package_file_hash",
-    "ota-manifest:ffx_package_ota_manifest",
-  ]
-
-  args_sources = [ "src/args.rs" ]
-  args_deps = [
-    "//src/developer/ffx/core:lib",
-    "//third_party/rust_crates:argh",
-  ]
-}
 
 group("tests") {
   testonly = true
   deps = [
-    ":ffx_package_tests($host_toolchain)",
+    # Plugins migrated to Bazel define standalone unit test targets that are
+    # not aggregated by `:ffx_package_tests`.
     "archive:tests",
-    "blob/hash:tests",
+    "archive/cat:tests",
+    "archive/list:tests",
   ]
 }
 
-ffx_tool("ffx_package_tool") {
-  edition = "2024"
-  output_name = "ffx-package"
-  deps = [
-    ":ffx_package_suite",
-    "//src/lib/fuchsia-async",
-  ]
-  sources = [ "src/main.rs" ]
+if (is_host) {
+  # LINT.IfChange(ffx_package_tool)
+  bazel_ffx_tool("ffx_package_tool") {
+    output_name = "ffx-package"
+    sdk_category = "partner"
+  }
 
-  sdk_target_name = "sdk"
-  sdk_category = "partner"
-}
+  # LINT.ThenChange(//src/developer/ffx/plugins/package/BUILD.bazel:ffx_package_tool)
 
-group("package") {
-  public_deps = [
-    ":ffx_package_tool",
-    ":ffx_package_tool_host_tool",
-  ]
-}
+  host_test_data("ffx_package_tool_test_data") {
+    visibility = [
+      "//src/sys/pkg/tests/system-tests:*",
+      "//src/testing/end_to_end/honeydew:*",
+      "//src/testing/host-target-testing/packages:*",
+    ]
+    data_deps = [ ":ffx_package_tool_host_tool" ]
+    sources = [
+      "${host_tools_dir}/ffx-package",
+      "${host_tools_dir}/ffx-package.json",
+    ]
+  }
 
-group("bin") {
-  public_deps = [ ":ffx_package_tool_versioned" ]
+  group("package") {
+    public_deps = [
+      ":ffx_package_tool",
+      ":ffx_package_tool_host_tool",
+    ]
+  }
+
+  group("bin") {
+    public_deps = [ ":ffx_package_tool_versioned" ]
+  }
+
+  # TODO(https://fxbug.dev/438572714): Remove once the IDK uses the Bazel atom.
+  _idk_path = "tools/$current_cpu/ffx_tools/ffx-package"
+
+  sdk_atom("sdk") {
+    category = "partner"
+    sdk_area = "Developer"
+    id = "sdk://$_idk_path"
+    idk_name = "ffx-package"
+    meta = {
+      dest = "$_idk_path-meta.json"
+      type = "ffx_tool"
+      source_prebuild_info = {
+        arch = current_cpu
+        file_base = "tools"
+      }
+    }
+    files = [
+      {
+        source = "$root_out_dir/ffx-package"
+        dest = _idk_path
+      },
+      {
+        source = "$root_out_dir/ffx-package.json"
+        dest = "$_idk_path.json"
+      },
+    ]
+    non_sdk_deps = [ ":ffx_package_tool_versioned" ]
+  }
 }

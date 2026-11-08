@@ -12,6 +12,16 @@ pub const LOCK_FLAGS_NONE: LockFlags = 0;
 /// Apply the irq-safety rules in addition to the common rules for all locks.
 pub const LOCK_FLAGS_IRQ_SAFE: LockFlags = 1 << 0;
 /// Apply the nestable rules in addition to the common rules for all locks.
+///
+/// Several instances of a nestable class may be held at once by one thread, provided each is
+/// acquired with an external order that is strictly greater than that of every instance of the
+/// class already held. Lockdep validates same-class nesting solely by comparing orders on the
+/// current thread; it does not record dependency edges within a class. An acquisition without an
+/// explicit order records order `0`, so acquiring a nestable lock unordered while holding any
+/// instance of its class fails validation, whereas acquiring with a nonzero order while holding
+/// an unordered instance passes without checking that the held instance genuinely belongs below
+/// that order. Only mix unordered and ordered acquisitions of one class when the unordered
+/// instance truly occupies order `0` in the class's ordering.
 pub const LOCK_FLAGS_NESTABLE: LockFlags = 1 << 1;
 /// Apply the multi-acquire rules in additioon to the common rules for all
 /// locks.
@@ -36,9 +46,21 @@ pub const LOCK_FLAGS_TRACKING_DISABLED: LockFlags = 1 << 8;
 // Keep dependency alive even when lockdep is disabled to satisfy unused dependency lints.
 use zr as _;
 
-/// Trait implemented by lock class types to expose their dynamic LockClassId pointer.
+/// Trait implemented by lock class types to expose their dynamic LockClassId pointer and the
+/// validation flags the class is registered with.
 pub trait LockClass {
     const ID: *mut core::ffi::c_void;
+
+    /// The `LOCK_FLAGS_*` of this class, including the raw lock's own flags.
+    ///
+    /// A class registered from Rust must report the flags it is registered with; a class
+    /// mirroring a C++-owned lock (whose `ID` is null because the class state lives in C++) must
+    /// report that lock's flags; a class that is not tracked at all (`#[mutex(untracked)]` or an
+    /// untracked storage type, also with a null `ID`) reports [`LOCK_FLAGS_NONE`].
+    ///
+    /// This is a lockdep-validity requirement, not a soundness one: a mismatch degrades lock
+    /// validation or trips a debug assertion but cannot cause memory unsafety.
+    const FLAGS: LockFlags;
 }
 
 #[cfg(any(feature = "lock_dep", feature = "lock_metadata_only"))]
@@ -85,8 +107,9 @@ mod enabled {
 
         pub const fn with_flags(
             name: &'static ::kstring::interned_string::InternedString,
-            flags: u16,
+            flags: crate::LockFlags,
         ) -> Self {
+            crate::validate_lock_flags(flags);
             Self { name, flags, state_storage: LockClassStateStorage::uninit() }
         }
 
@@ -117,8 +140,9 @@ mod disabled {
 
         pub const fn with_flags(
             _name: &'static ::kstring::interned_string::InternedString,
-            _flags: u16,
+            flags: crate::LockFlags,
         ) -> Self {
+            crate::validate_lock_flags(flags);
             Self
         }
 
@@ -148,4 +172,35 @@ pub fn assert_no_locks_held() {
         // and does not violate Rust memory safety or aliasing invariants.
         unsafe { lockdep_assert_no_locks_held() }
     }
+}
+
+/// Checks that `flags` is a valid combination of `LOCK_FLAGS_*`, mirroring the `static_assert`
+/// checks in C++ `DefaultLockFlags` and `SingletonLockFlags` (`<lockdep/lock_traits.h>`), and
+/// panics (fails compilation in `const` context) otherwise.
+///
+/// This is applied to every [`LockClassRegistration`] and, by the `ksync` guards, to
+/// [`LockClass::FLAGS`] of every lock class that is locked, so that manual `LockClass`
+/// implementations are checked too.
+pub const fn validate_lock_flags(flags: LockFlags) {
+    let is_multi_acquire = (flags & LOCK_FLAGS_MULTI_ACQUIRE) != 0;
+    let is_nestable = (flags & LOCK_FLAGS_NESTABLE) != 0;
+    let is_re_acquire_fatal = (flags & LOCK_FLAGS_RE_ACQUIRE_FATAL) != 0;
+    let is_singleton = (flags & LOCK_FLAGS_SINGLETON_LOCK) != 0;
+
+    assert!(
+        !(is_multi_acquire && is_nestable),
+        "LOCK_FLAGS_MULTI_ACQUIRE and LOCK_FLAGS_NESTABLE are mutually exclusive"
+    );
+    assert!(
+        !(is_multi_acquire && is_re_acquire_fatal),
+        "LOCK_FLAGS_MULTI_ACQUIRE and LOCK_FLAGS_RE_ACQUIRE_FATAL are mutually exclusive"
+    );
+    assert!(
+        !(is_singleton && is_multi_acquire),
+        "LOCK_FLAGS_MULTI_ACQUIRE may not be used with a singleton lock"
+    );
+    assert!(
+        !(is_singleton && is_nestable),
+        "LOCK_FLAGS_NESTABLE may not be used with a singleton lock"
+    );
 }

@@ -1,0 +1,39 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "lib",
+    srcs = ["src/lib.rs"],
+    crate_name = "driver_connector",
+    edition = "2024",
+    visibility = ["//src/devices/bin/driver_tools:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.driver.development:fuchsia.driver.development_rust_flex",
+        "//sdk/fidl/fuchsia.driver.registrar:fuchsia.driver.registrar_rust_flex",
+        "//sdk/fidl/fuchsia.test.manager:fuchsia.test.manager_rust_flex",
+        "//third_party/rust_crates/vendor:anyhow",
+    ],
+)
+
+rustc_library(
+    name = "lib_fdomain",
+    srcs = ["src/lib.rs"],
+    crate_features = ["fdomain"],
+    crate_name = "driver_connector_fdomain",
+    edition = "2024",
+    visibility = [
+        "//src/developer/ffx/tools/driver:__pkg__",
+        "//src/devices/bin/driver_tools:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.driver.development:fuchsia.driver.development_rust_fdomain_flex",
+        "//sdk/fidl/fuchsia.driver.registrar:fuchsia.driver.registrar_rust_fdomain_flex",
+        "//sdk/fidl/fuchsia.test.manager:fuchsia.test.manager_rust_fdomain_flex",
+        "//third_party/rust_crates/vendor:anyhow",
+    ],
+)

@@ -12,7 +12,7 @@
 #include <lib/uart/all.h>
 
 #include <phys/boot-options.h>
-#include <phys/uart.h>
+#include <phys/uart/driver.h>
 
 #include "../legacy-boot.h"
 

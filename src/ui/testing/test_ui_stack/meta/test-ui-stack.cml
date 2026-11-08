@@ -62,6 +62,67 @@
             ],
             from: "parent/diagnostics",
         },
+        {
+            config: "fuchsia.ui.test.DisplayRotation",
+            key: "display_rotation",
+            type: "uint32",
+            availability: "transitional",
+            default: 0,
+        },
+
+        // If zero, uses component default configuration.
+        //
+        // `display_width_px` and `display_height_px` must be either both zero
+        // or both non-zero.
+        {
+            config: "fuchsia.ui.test.DisplayWidthPx",
+            key: "display_width_px",
+            type: "uint32",
+            availability: "transitional",
+            default: 0,
+        },
+        {
+            config: "fuchsia.ui.test.DisplayHeightPx",
+            key: "display_height_px",
+            type: "uint32",
+            availability: "transitional",
+            default: 0,
+        },
+
+        // If zero, uses component default configuration.
+        {
+            config: "fuchsia.ui.test.DisplayRefreshRateMillihertz",
+            key: "display_refresh_rate_millihertz",
+            type: "uint32",
+            availability: "transitional",
+            default: 0,
+        },
+
+        // If zero, uses component default configuration.
+        {
+            config: "fuchsia.ui.test.DisplayMaxLayerCount",
+            key: "display_max_layer_count",
+            type: "uint32",
+            availability: "transitional",
+            default: 0,
+        },
+
+        // Structured configuration doesn't support floats.
+        {
+            config: "fuchsia.ui.test.DevicePixelRatio",
+            key: "device_pixel_ratio",
+            type: "string",
+            max_size: 100,
+            availability: "transitional",
+            default: "1.0",
+        },
+        {
+            config: "fuchsia.ui.test.SuspendEnabled",
+            key: "suspend_enabled",
+            type: "bool",
+            availability: "transitional",
+            default: false,
+        },
     ],
     offer: [
         // [START collection_offers]
@@ -181,27 +242,4 @@
             ],
         },
     ],
-    config: {
-        display_rotation: { type: "uint32" },
-
-        // If zero, uses component default configuration.
-        //
-        // `display_width_px` and `display_height_px` must be either both zero
-        // or both non-zero.
-        display_width_px: { type: "uint32" },
-        display_height_px: { type: "uint32" },
-
-        // If zero, uses component default configuration.
-        display_refresh_rate_millihertz: { type: "uint32" },
-
-        // If zero, uses component default configuration.
-        display_max_layer_count: { type: "uint32" },
-
-        // Structured configuration doesn't support floats.
-        device_pixel_ratio: {
-            type: "string",
-            max_size: 100,
-        },
-        suspend_enabled: { type: "bool" },
-    },
 }

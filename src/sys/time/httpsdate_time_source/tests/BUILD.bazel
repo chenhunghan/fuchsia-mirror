@@ -1,0 +1,41 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# NOTE: `bin`, `httpsdate_time_source_integration_test`, and
+# `httpsdate-time-source-integration-tests` remain in BUILD.gn until
+# `//src/diagnostics/archivist:archivist-for-embedding-bundle` and
+# `//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component`
+# are migrated to Bazel.
+rustc_test(
+    name = "bin",
+    srcs = ["test.rs"],
+    crate_name = "httpsdate_time_source_tests",
+    crate_root = "test.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.time.external:fuchsia.time.external_rust",
+        "//sdk/rust/zx",
+        "//src/lib/diagnostics/reader/rust",
+        "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        # GN depends on the `//src/lib/fuchsia-component-test` group; Bazel
+        # depends on the library directly.
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/sys/lib/cm_rust",
+        "//src/sys/lib/cm_types",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)

@@ -47,7 +47,6 @@ group("tests") {
     ":cleanpath-tests",
     ":fdio-unittest-package",
     "constructors:tests",
-    "getaddrinfo:tests",
   ]
   if (host_os == "linux") {
     deps += [

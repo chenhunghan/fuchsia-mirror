@@ -1,0 +1,75 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "lib",
+    srcs = [
+        "src/args.rs",
+        "src/lib.rs",
+    ],
+    crate_name = "bootpkg",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//src/lib/fdio/rust:fdio",
+        "//src/sys/pkg/lib/far/rust:fuchsia-archive",
+        "//src/sys/pkg/lib/fuchsia-pkg",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+    ],
+)
+
+# @bazel2gn:skip
+rustc_test(
+    name = "bootpkg_lib_test",
+    crate = ":lib",
+    deps = [
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//src/storage/lib/vfs/rust:vfs",
+        "//src/sys/pkg/lib/fuchsia-merkle",
+    ],
+)
+
+# @bazel2gn:skip
+fx_unittest_package(
+    name = "bootpkg-lib-tests",
+    unit_tests = [":bootpkg_lib_test"],
+)
+
+rustc_binary(
+    name = "bootpkg",
+    srcs = ["src/main.rs"],
+    build_flags = ["//build/config/rust:bootfs"],
+    edition = "2024",
+    deps = [
+        ":lib",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//src/lib/fdio/rust:fdio",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+    ],
+)
+
+fx_cc_test_binary(
+    name = "bootpkg-test-bin",
+    srcs = ["test.cc"],
+    gn_output_name = "bootpkg-test",
+    deps = [
+        "//sdk/lib/fdio",
+        "//zircon/system/ulib/zx",
+        "//zircon/system/ulib/zxtest",
+    ],
+)

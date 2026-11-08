@@ -57,7 +57,6 @@ fx_component_manifest(
 fx_test_component(
     name = "fuchsia-component-runtime-unittests-component",
     compiled_manifest = ":fuchsia-component-runtime-unittests-manifest",
-    component_name = "fuchsia-component-runtime-unittests",
     deps = [":runtime_test_packaged_bin"],
 )
 

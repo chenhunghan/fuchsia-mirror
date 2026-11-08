@@ -100,7 +100,7 @@ class FfxLogVerificationTest(fuchsia_base_test.FuchsiaBaseTest):
             self._collect_streaming_logs(
                 cmd_args=[
                     "target",
-                    "ssh",
+                    "shell",
                     "log_listener --encoding fxt --json",
                 ],
                 machine_format=MachineFormat.RAW,
@@ -113,7 +113,7 @@ class FfxLogVerificationTest(fuchsia_base_test.FuchsiaBaseTest):
             self._collect_streaming_logs(
                 cmd_args=[
                     "target",
-                    "ssh",
+                    "shell",
                     "log_listener --encoding json --json",
                 ],
                 machine_format=MachineFormat.RAW,

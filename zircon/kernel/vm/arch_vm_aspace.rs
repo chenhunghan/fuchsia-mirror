@@ -5,11 +5,38 @@
 // https://opensource.org/licenses/MIT
 
 use crate::kernel::types::PAddr;
+use crate::vm::page::{VmPage, VmPageDoublyLinkedList};
 use arch_vm_aspace_bindings as bindings;
 use bindings::zx_status_t;
-use core::ptr;
-use zr::{OpaqueFacade, ToMutPtr};
+use pin_init::{PinInit, pin_data};
+use zr::{Opaque, pin_init_ffi, unsafe_pinned_drop_ffi};
 use zx_status::Status;
+
+/// Function pointer to allocate a single page that the MMU routine uses to allocate
+/// page tables.
+pub type PageAllocFn = unsafe extern "C" fn(
+    alloc_flags: u32,
+    p: *mut *mut VmPage,
+    pa: *mut PAddr,
+) -> Result<(), Status>;
+
+zr::static_assert!(
+    core::mem::size_of::<Option<PageAllocFn>>()
+        == core::mem::size_of::<bindings::ArchVmAspaceInterface_page_alloc_fn_t>()
+);
+zr::static_assert!(core::mem::size_of::<u32>() == core::mem::size_of::<bindings::uint>());
+zr::static_assert!(core::mem::size_of::<PAddr>() == core::mem::size_of::<bindings::paddr_t>());
+zr::static_assert!(core::mem::align_of::<PAddr>() == core::mem::align_of::<bindings::paddr_t>());
+zr::static_assert!(
+    core::mem::size_of::<Result<(), Status>>() == core::mem::size_of::<zx_status_t>()
+);
+zr::static_assert!(
+    core::mem::align_of::<Result<(), Status>>() == core::mem::align_of::<zx_status_t>()
+);
+zr::static_assert!(
+    // SAFETY: `Result<(), Status>` and `zx_status_t` have identical 4-byte layouts.
+    unsafe { core::mem::transmute::<Result<(), Status>, zx_status_t>(Ok(())) } == 0
+);
 
 // TODO(https://fxbug.dev/529507187): Use bitflags! or equivalent once available.
 pub type ArchMmuFlags = u8;
@@ -63,15 +90,15 @@ zr::static_assert!(ARCH_ASPACE_FLAG_KERNEL == bindings::ARCH_ASPACE_FLAG_KERNEL 
 zr::static_assert!(ARCH_ASPACE_FLAG_GUEST == bindings::ARCH_ASPACE_FLAG_GUEST as ArchAspaceFlags);
 
 // TODO(https://fxbug.dev/529507187): Use bitflags! or equivalent once available.
-// Options for unmapping the given virtual address range.
+/// Options for unmapping the given virtual address range.
 pub type ArchUnmapOptions = u8;
 
 pub const ARCH_UNMAP_OPTION_NONE: ArchUnmapOptions = 0;
-// Controls whether the unmap region can be extended to be larger, or if only the exact region may
-// be unmapped. The unmap region might be extended, even if only temporarily, if large pages need to
-// be split.
+/// Controls whether the unmap region can be extended to be larger, or if only the exact region may
+/// be unmapped. The unmap region might be extended, even if only temporarily, if large pages need
+/// to be split.
 pub const ARCH_UNMAP_OPTION_ENLARGE: ArchUnmapOptions = 1 << 0;
-// Requests that the accessed bit be harvested, and the page queues updated.
+/// Requests that the accessed bit be harvested, and the page queues updated.
 pub const ARCH_UNMAP_OPTION_HARVEST: ArchUnmapOptions = 1 << 1;
 
 zr::static_assert!(
@@ -148,34 +175,100 @@ zr::static_assert!(
     TerminalAction::UpdateAge as u8 == bindings::ArchVmAspaceInterface_TerminalAction::UpdateAge.0
 );
 
-#[repr(C)]
+/// Per-arch interface to encapsulate the MMU routines on an aspace.
+///
+/// Beyond construction/destruction lifetimes users of this object must ensure that none of the
+/// main methods are called before calling `init` or after calling `destroy`. Doing so is allowed
+/// to cause a panic.
+/// Aside from `init` and `destroy`, the main methods are all thread-safe.
+#[pin_data(PinnedDrop)]
+#[repr(transparent)]
 pub struct ArchVmAspace {
-    // TODO(https://fxbug.dev/529915725): Use zx::OpaqueBytes with the correct size and alignment of
-    // the underlying arch specific aspace structure to allow for correct Rust allocation.
-    _data: OpaqueFacade,
+    #[pin]
+    opaque: Opaque<bindings::ArchVmAspace>,
 }
 
+zr::static_assert!(core::mem::size_of::<ArchVmAspace>() == bindings::kArchVmAspaceSize);
+zr::static_assert!(core::mem::align_of::<ArchVmAspace>() == bindings::kArchVmAspaceAlign);
+
+// SAFETY: `cpp_arch_vm_aspace_destruct` invokes `~ArchVmAspace()` in place without moving the
+// object, and all backends initialize internal pointers in their constructors so dropping an
+// uninitialized or destroyed `ArchVmAspace` is well-defined.
+unsafe_pinned_drop_ffi!(ArchVmAspace, bindings::cpp_arch_vm_aspace_destruct);
+
 impl ArchVmAspace {
+    /// Constructs an `ArchVmAspace` in place using the default PMM page allocator.
+    ///
+    /// # Safety
+    ///
+    /// `base`, `size`, and `flags` must define a valid address space configuration for the target
+    /// architecture, and the caller must uphold the `ArchVmAspace` lifecycle invariants:
+    /// - Operational methods must not be called before an `init*` method succeeds or after
+    ///   `destroy` is called.
+    /// - Whenever any `init*` method has been called (even if it failed), all mappings must be
+    ///   cleaned up as required and `destroy` must be called before the `ArchVmAspace` is dropped.
+    pub unsafe fn new(base: usize, size: usize, flags: ArchAspaceFlags) -> impl PinInit<Self> {
+        pin_init_ffi!(bindings::cpp_arch_vm_aspace_construct, base, size, flags, None)
+    }
+
+    /// Constructs an `ArchVmAspace` in place with a custom page table allocator callback.
+    ///
+    /// # Safety
+    ///
+    /// In addition to the safety requirements of [`ArchVmAspace::new`]:
+    /// - `page_alloc_fn` must be safe for the `ArchVmAspace` implementation to invoke whenever it
+    ///   allocates page tables (including while `ArchVmAspace`'s internal lock is held, so it must
+    ///   not re-enter `ArchVmAspace`, violate lock ordering, or unwind), requiring at most that
+    ///   `p` and `pa` are non-null, valid, aligned, and non-overlapping for writes.
+    /// - Whenever `page_alloc_fn` returns `Ok(())`, it must write a freshly allocated, exclusively
+    ///   owned PMM `VmPage` pointer in `ALLOC` state to `*p` and its physical address to `*pa`,
+    ///   transferring ownership of that page to the `ArchVmAspace`.
+    pub unsafe fn new_with_page_alloc_fn(
+        base: usize,
+        size: usize,
+        flags: ArchAspaceFlags,
+        page_alloc_fn: PageAllocFn,
+    ) -> impl PinInit<Self> {
+        // SAFETY: `VmPage` has the exact same layout as C++ `vm_page`, `PAddr` is
+        // `#[repr(transparent)]` over `usize` (`paddr_t`), and `Result<(), Status>` has the exact
+        // same 4-byte niche layout and C ABI as `zx_status_t`, so `Option<PageAllocFn>` and
+        // `ArchVmAspaceInterface_page_alloc_fn_t` have identical function pointer ABIs.
+        let page_alloc_fn: bindings::ArchVmAspaceInterface_page_alloc_fn_t =
+            unsafe { core::mem::transmute::<Option<PageAllocFn>, _>(Some(page_alloc_fn)) };
+        pin_init_ffi!(bindings::cpp_arch_vm_aspace_construct, base, size, flags, page_alloc_fn)
+    }
+
     /// This is used to create a regular address space with no special features. In
     /// architectures that do not support unified address spaces, it is also used to create
     /// shared and restricted address spaces. However, when unified address spaces are
     /// supported, the shared and restricted address spaces should be created with `init_shared`
     /// and `init_restricted`.
-    pub fn init(&self) -> Result<(), Status> {
-        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be a newly constructed, uninitialized `ArchVmAspace` with no concurrent
+    /// accesses, and early architecture MMU initialization must have completed (at most one
+    /// `ARCH_ASPACE_FLAG_KERNEL` instance may be initialized).
+    pub unsafe fn init(&self) -> Result<(), Status> {
+        // SAFETY: Caller upholds the lifecycle and synchronization preconditions of `Init()`.
         let status: zx_status_t = unsafe { bindings::cpp_arch_vm_aspace_init(self.as_ffi_ptr()) };
         Status::ok(status)
     }
 
     fn as_ffi_ptr(&self) -> *mut bindings::ArchVmAspace {
-        ptr::from_ref(self).cast_mut().cast()
+        self.opaque.get()
     }
 
     /// This is used to create a shared address space, whose contents can be
     /// accessed from multiple unified address spaces. These address spaces have a statically
     /// initialized top level page.
-    pub fn init_shared(&self) -> Result<(), Status> {
-        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be a newly constructed, uninitialized user `ArchVmAspace` (`flags == 0`) with
+    /// valid shared-aspace `base`/`size` bounds and no concurrent accesses.
+    pub unsafe fn init_shared(&self) -> Result<(), Status> {
+        // SAFETY: Caller upholds the lifecycle and synchronization preconditions of `InitShared()`.
         let status: zx_status_t =
             unsafe { bindings::cpp_arch_vm_aspace_init_shared(self.as_ffi_ptr()) };
         Status::ok(status)
@@ -183,8 +276,14 @@ impl ArchVmAspace {
 
     /// This is used to create a restricted address space, whose contents can be
     /// accessed from a single unified address space.
-    pub fn init_restricted(&self) -> Result<(), Status> {
-        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be a newly constructed, uninitialized user `ArchVmAspace` (`flags == 0`) with
+    /// valid restricted-aspace `base`/`size` bounds and no concurrent accesses.
+    pub unsafe fn init_restricted(&self) -> Result<(), Status> {
+        // SAFETY: Caller upholds the lifecycle and synchronization preconditions of
+        // `InitRestricted()`.
         let status: zx_status_t =
             unsafe { bindings::cpp_arch_vm_aspace_init_restricted(self.as_ffi_ptr()) };
         Status::ok(status)
@@ -195,17 +294,26 @@ impl ArchVmAspace {
     /// restricted address space. As a result, it expects `init_shared` to have been called
     /// on the shared address space, and expects `init_restricted` to have been called on the
     /// restricted address space.
-    pub fn init_unified(
+    ///
+    /// # Safety
+    ///
+    /// `self` must be a newly constructed, uninitialized user `ArchVmAspace` (`flags == 0`)
+    /// distinct from `shared` and `restricted` with no concurrent accesses. `shared` must be
+    /// initialized via `init_shared`, `restricted` must be initialized via `init_restricted` with
+    /// non-overlapping top-level entries, and both `shared` and `restricted` must remain live and
+    /// undestroyed until after `self.destroy()` completes.
+    pub unsafe fn init_unified(
         &self,
         shared: &ArchVmAspace,
         restricted: &ArchVmAspace,
     ) -> Result<(), Status> {
-        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`.
+        // SAFETY: Caller upholds the lifecycle, distinctness, and lifetime preconditions of
+        // `InitUnified()`.
         let status: zx_status_t = unsafe {
             bindings::cpp_arch_vm_aspace_init_unified(
                 self.as_ffi_ptr(),
-                shared.to_mut_ptr().cast(),
-                restricted.to_mut_ptr().cast(),
+                shared.as_ffi_ptr(),
+                restricted.as_ffi_ptr(),
             )
         };
         Status::ok(status)
@@ -221,7 +329,7 @@ impl ArchVmAspace {
     /// The purpose of this method is to help enforce lifecycle and state transitions of VmAspace
     /// and ArchVmAspaceInterface.
     pub fn disable_updates(&self) {
-        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`.
+        // SAFETY: `self.as_ffi_ptr()` points to a live `ArchVmAspace`.
         unsafe { bindings::cpp_arch_vm_aspace_disable_updates(self.as_ffi_ptr()) }
     }
 
@@ -232,8 +340,15 @@ impl ArchVmAspace {
     /// It is safe to call destroy even if init, init_shared, init_restricted, or init_unified
     /// failed. Once destroy has been called it is a user error to call any of the other methods on
     /// the aspace, unless specifically stated otherwise, and doing so may cause a panic.
-    pub fn destroy(&self) -> Result<(), Status> {
-        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`.
+    ///
+    /// # Safety
+    ///
+    /// `self` must not be the active kernel address space or active on any CPU, must have no
+    /// remaining mappings (unless unified) or live unified dependents, and no other methods (such
+    /// as `mark_accessed`) may execute concurrently with or after `destroy`.
+    pub unsafe fn destroy(&self) -> Result<(), Status> {
+        // SAFETY: Caller upholds the lifecycle, unmapped, and non-concurrency preconditions of
+        // `Destroy()`.
         let status: zx_status_t =
             unsafe { bindings::cpp_arch_vm_aspace_destroy(self.as_ffi_ptr()) };
         Status::ok(status)
@@ -244,7 +359,8 @@ impl ArchVmAspace {
     ///
     /// # Safety
     ///
-    /// The caller must ensure the virtual and physical range are valid to map.
+    /// `self` must be an initialized, non-unified `ArchVmAspace`, and the virtual and physical
+    /// ranges must be valid to map.
     pub unsafe fn map_contiguous(
         &self,
         vaddr: usize,
@@ -252,7 +368,7 @@ impl ArchVmAspace {
         count: usize,
         mmu_flags: ArchMmuFlags,
     ) -> Result<(), Status> {
-        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`.
+        // SAFETY: `self.as_ffi_ptr()` points to a live `ArchVmAspace`.
         let status: zx_status_t = unsafe {
             bindings::cpp_arch_vm_aspace_map_contiguous(
                 self.as_ffi_ptr(),
@@ -265,24 +381,27 @@ impl ArchVmAspace {
         Status::ok(status)
     }
 
-    // Map the given array of pages into the virtual address space starting at
-    // `vaddr`, in the order they appear in `phys`.
-    //
-    // If any address in the range [vaddr, vaddr + count * kPageSize) is already
-    // mapped when this is called, `existing_action` controls the behavior used:
-    //  - `Skip` - Skip updating any existing mappings.
-    //  - `Error` - Existing mappings result in a ZX_ERR_ALREADY_EXISTS error.
-    //  - `Upgrade` - Upgrade any existing mappings, meaning a read-only mapping
-    //                can be converted to read-write, or the mapping can have its
-    //                paddr changed.
-    //
-    // On error none of the provided pages will be mapped. In the case of `Upgrade` the state of any
-    // previous mappings is undefined, and could either still be present or be unmapped.
+    /// Map the given array of pages into the virtual address space starting at
+    /// `vaddr`, in the order they appear in `phys`.
+    ///
+    /// If any address in the range `[vaddr, vaddr + count * page::SIZE)` is already
+    /// mapped when this is called, `existing_action` controls the behavior used:
+    ///  - `Skip` - Skip updating any existing mappings.
+    ///  - `Error` - Existing mappings result in a `Status::ALREADY_EXISTS` error.
+    ///  - `Upgrade` - Upgrade any existing mappings, meaning a read-only mapping
+    ///    can be converted to read-write, or the mapping can have its
+    ///    paddr changed. Must not be used on kernel address spaces, as
+    ///    changing an existing mapping's paddr may perform
+    ///    break-before-make and transiently unmap the page.
+    ///
+    /// On error none of the provided pages will be mapped. In the case of `Upgrade` the state of
+    /// any previous mappings is undefined, and could either still be present or be unmapped.
     ///
     /// # Safety
     ///
-    /// The caller must ensure `phys` points to an array of at least `count` physical addresses and
-    /// that the virtual and physical ranges are valid to map.
+    /// `self` must be an initialized, non-unified `ArchVmAspace`. When `count > 0`, `phys` must be
+    /// non-null, aligned, and valid to read `count` initialized `PAddr` elements without concurrent
+    /// mutation, and the virtual and physical ranges must be valid to map.
     pub unsafe fn map(
         &self,
         vaddr: usize,
@@ -293,7 +412,8 @@ impl ArchVmAspace {
     ) -> Result<(), Status> {
         let existing_action: bindings::ArchVmAspaceInterface_ExistingEntryAction =
             bindings::ArchVmAspaceInterface_ExistingEntryAction(existing_action as _);
-        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace` and `phys` points to `count` entries.
+        // SAFETY: `self.as_ffi_ptr()` points to a live `ArchVmAspace` and `phys` points to
+        // `count` entries.
         let status: zx_status_t = unsafe {
             bindings::cpp_arch_vm_aspace_map(
                 self.as_ffi_ptr(),
@@ -311,14 +431,16 @@ impl ArchVmAspace {
     ///
     /// # Safety
     ///
-    /// The caller must ensure the specified virtual range is no longer in use.
+    /// `self` must be an initialized, non-unified `ArchVmAspace`, the specified virtual range must
+    /// no longer be in use, and if `ARCH_UNMAP_OPTION_HARVEST` is set, any mapped pages in the
+    /// range must be valid PMM-managed `VmPage`s.
     pub unsafe fn unmap(
         &self,
         vaddr: usize,
         count: usize,
         enlarge: ArchUnmapOptions,
     ) -> Result<(), Status> {
-        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`.
+        // SAFETY: `self.as_ffi_ptr()` points to a live `ArchVmAspace`.
         let status: zx_status_t =
             unsafe { bindings::cpp_arch_vm_aspace_unmap(self.as_ffi_ptr(), vaddr, count, enlarge) };
         Status::ok(status)
@@ -328,7 +450,7 @@ impl ArchVmAspace {
     /// being out of memory. If this returns true, then unmapping a partial large page will fail
     /// always require an enlarged operation.
     pub fn unmap_only_enlarge_on_oom(&self) -> bool {
-        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`.
+        // SAFETY: `self.as_ffi_ptr()` points to a live `ArchVmAspace`.
         unsafe { bindings::cpp_arch_vm_aspace_unmap_only_enlarge_on_oom(self.as_ffi_ptr()) }
     }
 
@@ -344,7 +466,9 @@ impl ArchVmAspace {
     ///
     /// # Safety
     ///
-    /// The caller must ensure the permissions for the given virtual address range are valid.
+    /// `self` must be an initialized, non-unified `ArchVmAspace`, the permissions for the given
+    /// virtual address range must be valid, and if `ARCH_UNMAP_OPTION_HARVEST` is set, any mapped
+    /// pages in the range must be valid PMM-managed `VmPage`s.
     pub unsafe fn protect(
         &self,
         vaddr: usize,
@@ -352,7 +476,7 @@ impl ArchVmAspace {
         mmu_flags: ArchMmuFlags,
         enlarge: ArchUnmapOptions,
     ) -> Result<(), Status> {
-        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`.
+        // SAFETY: `self.as_ffi_ptr()` points to a live `ArchVmAspace`.
         let status: zx_status_t = unsafe {
             bindings::cpp_arch_vm_aspace_protect(
                 self.as_ffi_ptr(),
@@ -369,7 +493,8 @@ impl ArchVmAspace {
     pub fn query(&self, vaddr: usize) -> Result<(PAddr, ArchMmuFlags), Status> {
         let mut paddr: usize = 0;
         let mut mmu_flags: ArchMmuFlags = 0;
-        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`, and `paddr` and `mmu_flags` are valid out-pointers.
+        // SAFETY: `self.as_ffi_ptr()` points to a live `ArchVmAspace`, and `paddr` and
+        // `mmu_flags` are valid out-pointers.
         let status: zx_status_t = unsafe {
             bindings::cpp_arch_vm_aspace_query(self.as_ffi_ptr(), vaddr, &mut paddr, &mut mmu_flags)
         };
@@ -385,7 +510,7 @@ impl ArchVmAspace {
         size: usize,
         mmu_flags: ArchMmuFlags,
     ) -> usize {
-        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`.
+        // SAFETY: `self.as_ffi_ptr()` points to a live `ArchVmAspace`.
         unsafe {
             bindings::cpp_arch_vm_aspace_pick_spot(
                 self.as_ffi_ptr(),
@@ -400,10 +525,16 @@ impl ArchVmAspace {
 
     /// Walks the given range of pages and for any pages that are mapped and have their access bit
     /// set:
-    ///  * Tells the page queues it has been accessed via PageQueues::MarkAccessed
-    ///  * Potentially removes the accessed flag.
-    ///  * Potentially frees unaccessed page tables.
-    pub fn harvest_accessed(
+    /// - Tells the page queues it has been accessed via `PageQueues::mark_accessed`.
+    /// - Potentially removes the accessed flag.
+    /// - Potentially frees unaccessed page tables.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be an initialized, non-unified `ArchVmAspace`, all mapped pages in the range
+    /// must be valid PMM-managed `VmPage`s eligible for `PageQueues::mark_accessed`, and freeing
+    /// unaccessed page tables (when `NonTerminalAction::FreeUnaccessed` is used) must be valid.
+    pub unsafe fn harvest_accessed(
         &self,
         vaddr: usize,
         count: usize,
@@ -414,7 +545,8 @@ impl ArchVmAspace {
             bindings::ArchVmAspaceInterface_NonTerminalAction(non_terminal_action as u8);
         let terminal_action: bindings::ArchVmAspaceInterface_TerminalAction =
             bindings::ArchVmAspaceInterface_TerminalAction(terminal_action as u8);
-        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`.
+        // SAFETY: Caller upholds the lifecycle and PMM page-queue preconditions of
+        // `HarvestAccessed()`.
         let status: zx_status_t = unsafe {
             bindings::cpp_arch_vm_aspace_harvest_accessed(
                 self.as_ffi_ptr(),
@@ -428,8 +560,14 @@ impl ArchVmAspace {
     }
 
     /// Marks any pages in the given virtual address range as being accessed.
-    pub fn mark_accessed(&self, vaddr: usize, count: usize) -> Result<(), Status> {
-        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be an initialized, non-unified `ArchVmAspace`, and `destroy` must not be called
+    /// concurrently with `mark_accessed`.
+    pub unsafe fn mark_accessed(&self, vaddr: usize, count: usize) -> Result<(), Status> {
+        // SAFETY: Caller upholds the lifecycle and non-concurrent `destroy` preconditions of
+        // `MarkAccessed()`.
         let status: zx_status_t =
             unsafe { bindings::cpp_arch_vm_aspace_mark_accessed(self.as_ffi_ptr(), vaddr, count) };
         Status::ok(status)
@@ -451,7 +589,7 @@ impl ArchVmAspace {
     /// Not clearing makes this function const and not modify any state. If `clear` is true then
     /// this method is only thread-compatible and must be externally synchronized.
     pub fn accessed_since_last_check(&self, clear: bool) -> bool {
-        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`.
+        // SAFETY: `self.as_ffi_ptr()` points to a live `ArchVmAspace`.
         unsafe { bindings::cpp_arch_vm_aspace_accessed_since_last_check(self.as_ffi_ptr(), clear) }
     }
 
@@ -460,9 +598,35 @@ impl ArchVmAspace {
     /// This should be treated as an opaque value outside of
     /// architecture-specific components.
     pub fn arch_table_phys(&self) -> PAddr {
-        // SAFETY: `self.to_mut_ptr()` points to a live `ArchVmAspace`.
+        // SAFETY: `self.as_ffi_ptr()` points to a live `ArchVmAspace`.
         let phys: bindings::paddr_t =
             unsafe { bindings::cpp_arch_vm_aspace_arch_table_phys(self.as_ffi_ptr()) };
         PAddr(phys)
+    }
+
+    #[inline(always)]
+    pub fn next_user_page_table_offset(va: usize) -> usize {
+        // SAFETY: This has no preconditions.
+        unsafe { bindings::cpp_arch_vm_aspace_next_user_page_table_offset(va) }
+    }
+
+    /// Transfer ownership of pre-PMM kernel page table pages from physboot to the arch VM
+    /// backend.
+    ///
+    /// # Safety
+    ///
+    /// Every page in `mmu_pages` must be a valid allocated kernel page table page handed off from
+    /// physboot during early boot.
+    pub unsafe fn handoff_page_tables_from_physboot(
+        mmu_pages: core::pin::Pin<&mut VmPageDoublyLinkedList>,
+    ) {
+        // SAFETY: `VmPageDoublyLinkedList` is binary layout compatible with C++'s
+        // `DoublyLinkedList`, so a typecast here is fine.  The called function also does not move
+        // the mmu_pages list, so the pinned invariant is maintained.
+        unsafe {
+            bindings::cpp_arch_vm_aspace_handoff_page_tables_from_physboot(
+                (mmu_pages.get_unchecked_mut() as *mut VmPageDoublyLinkedList).cast(),
+            );
+        }
     }
 }

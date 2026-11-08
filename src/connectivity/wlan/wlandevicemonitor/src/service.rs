@@ -1005,7 +1005,11 @@ mod tests {
     }
 
     fn fake_wlandevicemonitor_config() -> wlandevicemonitor_config::Config {
-        wlandevicemonitor_config::Config { wep_supported: false, wpa1_supported: false }
+        wlandevicemonitor_config::Config {
+            wep_supported: false,
+            wpa1_supported: false,
+            redact_network_identifiers: false,
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2986,7 +2990,11 @@ mod tests {
             fidl_wlan_common::WlanMacRole::Client,
             NULL_ADDR,
             &iface_counter,
-            &wlandevicemonitor_config::Config { wep_supported: true, wpa1_supported: true },
+            &wlandevicemonitor_config::Config {
+                wep_supported: true,
+                wpa1_supported: true,
+                redact_network_identifiers: false,
+            },
         );
         let mut fut = pin!(fut);
         assert_matches!(

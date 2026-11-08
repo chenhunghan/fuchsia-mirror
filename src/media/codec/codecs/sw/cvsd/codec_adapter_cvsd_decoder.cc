@@ -29,22 +29,16 @@ CodecAdapterCvsdDecoder::CodecAdapterCvsdDecoder(std::mutex& lock,
 std::pair<fuchsia::media::FormatDetails, size_t> CodecAdapterCvsdDecoder::OutputFormatDetails() {
   std::lock_guard<std::mutex> lock(lock_);
   ZX_DEBUG_ASSERT(codec_params_);
-  fuchsia::media::PcmFormat out;
-  out.pcm_mode = fuchsia::media::AudioPcmMode::LINEAR;
-  out.bits_per_sample = kPcmBitsPerSample;
-  out.frames_per_second = kExpectedSamplingFreq;
+  fuchsia::media::PcmFormat2 out;
+  out.set_pcm_mode(fuchsia::media::AudioPcmMode2::LINEAR);
+  out.set_bits_per_sample(kPcmBitsPerSample);
+  out.set_frames_per_second(kExpectedSamplingFreq);
   // For CVSD, we assume MONO channel.
-  out.channel_map = {fuchsia::media::AudioChannelId::LF};
-
-  fuchsia::media::AudioUncompressedFormat uncompressed;
-  uncompressed.set_pcm(out);
-
-  fuchsia::media::AudioFormat audio_format;
-  audio_format.set_uncompressed(std::move(uncompressed));
+  out.set_channel_map({fuchsia::media::AudioChannelId2::FL});
 
   fuchsia::media::FormatDetails format_details;
   format_details.set_mime_type(kPcmMimeType);
-  format_details.mutable_domain()->set_audio(std::move(audio_format));
+  format_details.set_pcm_format(std::move(out));
 
   return {std::move(format_details), kOutputFrameSize};
 }

@@ -67,8 +67,10 @@ pub(crate) enum BlobWriteError {
     TooLong,
     /// The buffer stayed full until the drain deadline passed.
     DeadlineExpired,
-    /// No trace context could be acquired.
-    TracingStopped,
+    /// No trace context could be acquired. `saw_buffer_full` is true if an earlier retry of the
+    /// same blob returned `WriteAttempt::BufferFull` (so `trace_context_alloc_record()` already
+    /// counted a dropped record).
+    TracingStopped { saw_buffer_full: bool },
 }
 
 /// Why a drain stopped forwarding Perfetto packets before it ran out of packets.
@@ -100,6 +102,10 @@ pub(crate) struct PacketForwarder<S, C> {
     pub(crate) packets_written: usize,
     /// Packets that were not written in full.
     pub(crate) packets_dropped: usize,
+    /// Packets counted by `packets_dropped` that did not hit `WriteAttempt::BufferFull` in
+    /// `TraceBufferSink::try_write_blob()` (which already increments trace-engine's dropped
+    /// record counter inside `trace_context_alloc_record`).
+    pub(crate) records_dropped_uncounted: usize,
     /// Bytes in the packets counted by `packets_dropped`. Packets skipped after the drain
     /// stopped are counted before framing and PID rewriting, so this is approximate.
     pub(crate) bytes_dropped: usize,
@@ -121,6 +127,7 @@ impl<S: BlobSink, C: Clock> PacketForwarder<S, C> {
             skipped_packet_len: 0,
             packets_written: 0,
             packets_dropped: 0,
+            records_dropped_uncounted: 0,
             bytes_dropped: 0,
         }
     }
@@ -146,26 +153,42 @@ impl<S: BlobSink, C: Clock> PacketForwarder<S, C> {
     /// one starts with a field tag and a length.
     fn forward_packet(&mut self, packet: &[u8]) {
         if self.check_stopped() {
-            self.drop_packet(packet.len());
+            self.drop_packet(packet.len(), true);
             return;
         }
         for chunk in packet.chunks(MAX_BLOB_PAYLOAD_SIZE) {
             if let Err(error) = self.write_blob(chunk) {
-                match error {
-                    BlobWriteError::NoSpace | BlobWriteError::TooLong => {}
-                    BlobWriteError::DeadlineExpired => self.stop(StopReason::DeadlineExpired),
-                    BlobWriteError::TracingStopped => self.stop(StopReason::TracingStopped),
-                }
-                self.drop_packet(packet.len());
+                let uncounted = match error {
+                    // `try_write_blob()` returned `WriteAttempt::BufferFull` at least once, so
+                    // `trace_context_alloc_record()` already counted a dropped record.
+                    BlobWriteError::NoSpace => false,
+                    BlobWriteError::DeadlineExpired => {
+                        self.stop(StopReason::DeadlineExpired);
+                        false
+                    }
+                    // `try_write_blob()` returned before `trace_context_alloc_record()`, unless
+                    // an earlier retry of this chunk already hit `WriteAttempt::BufferFull`.
+                    BlobWriteError::TooLong => true,
+                    BlobWriteError::TracingStopped { saw_buffer_full } => {
+                        self.stop(StopReason::TracingStopped);
+                        !saw_buffer_full
+                    }
+                };
+                self.drop_packet(packet.len(), uncounted);
                 return;
             }
         }
         self.packets_written += 1;
     }
 
-    /// Counts a packet of `len` bytes that is not written.
-    fn drop_packet(&mut self, len: usize) {
+    /// Counts a packet of `len` bytes that is not written. `uncounted` is true when
+    /// `TraceBufferSink::try_write_blob()` did not already record the drop via a failed
+    /// `trace_context_alloc_record()` call.
+    fn drop_packet(&mut self, len: usize, uncounted: bool) {
         self.packets_dropped += 1;
+        if uncounted {
+            self.records_dropped_uncounted += 1;
+        }
         self.bytes_dropped += len;
     }
 
@@ -176,22 +199,26 @@ impl<S: BlobSink, C: Clock> PacketForwarder<S, C> {
         self.skipped_packet_len += len;
         if last_slice {
             let packet_len = std::mem::take(&mut self.skipped_packet_len);
-            self.drop_packet(packet_len);
+            self.drop_packet(packet_len, true);
         }
     }
 
     /// Writes `chunk` as one blob record. With `retry_on_full`, retries until the drain deadline
     /// passes.
     fn write_blob(&mut self, chunk: &[u8]) -> Result<(), BlobWriteError> {
+        let mut saw_buffer_full = false;
         loop {
             match self.sink.try_write_blob(chunk) {
                 WriteAttempt::Wrote => return Ok(()),
-                WriteAttempt::TracingStopped => return Err(BlobWriteError::TracingStopped),
+                WriteAttempt::TracingStopped => {
+                    return Err(BlobWriteError::TracingStopped { saw_buffer_full });
+                }
                 WriteAttempt::TooLong => return Err(BlobWriteError::TooLong),
                 WriteAttempt::BufferFull if !self.retry_on_full => {
                     return Err(BlobWriteError::NoSpace);
                 }
                 WriteAttempt::BufferFull => {
+                    saw_buffer_full = true;
                     let now = self.clock.now();
                     if now >= self.deadline {
                         return Err(BlobWriteError::DeadlineExpired);
@@ -462,6 +489,7 @@ mod tests {
         );
         assert_eq!(forwarder.packets_written, 0, "full, then tracing stopped");
         assert_eq!(forwarder.packets_dropped, 1, "full, then tracing stopped");
+        assert_eq!(forwarder.records_dropped_uncounted, 0, "full, then tracing stopped");
         assert_eq!(forwarder.bytes_dropped, data.len(), "full, then tracing stopped");
         assert_eq!(forwarder.sink.attempts, 2, "full, then tracing stopped: no more attempts");
         assert_eq!(clock.sleeps(), vec![STREAMING_RETRY_DELAY], "full, then tracing stopped");
@@ -475,11 +503,11 @@ mod tests {
         // passes, so the fake stands in for it here to check that `write_blob()` gives up on
         // such a blob instead of retrying it.
         let cases = [
-            (WriteAttempt::BufferFull, false),
-            (WriteAttempt::TracingStopped, true),
-            (WriteAttempt::TooLong, true),
+            (WriteAttempt::BufferFull, false, 0),
+            (WriteAttempt::TracingStopped, true, 1),
+            (WriteAttempt::TooLong, true, 1),
         ];
-        for (result, retry_on_full) in cases {
+        for (result, retry_on_full, expected_uncounted) in cases {
             let data = test_bytes(2 * MAX_BLOB_PAYLOAD_SIZE + 10);
             let clock = FakeClock::new();
             // Every attempt after the failed one would succeed.
@@ -491,6 +519,7 @@ mod tests {
 
             assert_eq!(forwarder.packets_written, 0, "{case}");
             assert_eq!(forwarder.packets_dropped, 1, "{case}");
+            assert_eq!(forwarder.records_dropped_uncounted, expected_uncounted, "{case}");
             assert_eq!(forwarder.bytes_dropped, data.len(), "{case}");
             assert_eq!(
                 forwarder.sink.attempts, 2,
@@ -517,6 +546,7 @@ mod tests {
 
         assert_eq!(forwarder.stop_reason, None, "no retry_on_full");
         assert_eq!(forwarder.packets_dropped, 1, "no retry_on_full");
+        assert_eq!(forwarder.records_dropped_uncounted, 0, "no retry_on_full");
         assert_eq!(forwarder.bytes_dropped, 100, "no retry_on_full");
         assert_eq!(forwarder.packets_written, 1, "no retry_on_full");
         assert!(clock.sleeps().is_empty(), "no retry_on_full: sleeps {:?}", clock.sleeps());
@@ -543,6 +573,9 @@ mod tests {
         );
         assert_eq!(forwarder.packets_written, 1, "always-full buffer after 1 packet");
         assert_eq!(forwarder.packets_dropped, 2, "always-full buffer after 1 packet");
+        // The first dropped packet hit `BufferFull` before the deadline; the second was dropped
+        // after `stop()` without calling `try_write_blob()`.
+        assert_eq!(forwarder.records_dropped_uncounted, 1, "always-full buffer after 1 packet");
         assert_eq!(forwarder.bytes_dropped, data.len() + 10, "always-full buffer after 1 packet");
         // The last wait is cut short so the drain does not run past its deadline.
         assert_eq!(
@@ -571,6 +604,7 @@ mod tests {
         assert_eq!(forwarder.stop_reason, Some(StopReason::DeadlineExpired), "packet at deadline");
         assert_eq!(forwarder.packets_written, 1, "packet at deadline");
         assert_eq!(forwarder.packets_dropped, 1, "packet at deadline");
+        assert_eq!(forwarder.records_dropped_uncounted, 1, "packet at deadline");
         assert_eq!(forwarder.sink.attempts, 1, "packet at deadline: no write attempt");
     }
 
@@ -585,6 +619,7 @@ mod tests {
 
         assert_eq!(forwarder.stop_reason, Some(StopReason::TracingStopped), "TracingStopped");
         assert_eq!(forwarder.packets_dropped, 2, "TracingStopped");
+        assert_eq!(forwarder.records_dropped_uncounted, 2, "TracingStopped");
         assert_eq!(forwarder.sink.attempts, 1, "TracingStopped: no attempts after the stop");
     }
 
@@ -679,6 +714,7 @@ mod tests {
         assert_eq!(rewritten.len(), 0, "packets framed and rewritten after the deadline");
         assert!(packet_data.is_empty(), "packet data kept after the deadline");
         assert_eq!(forwarder.packets_dropped, 2, "packets that ended after the deadline");
+        assert_eq!(forwarder.records_dropped_uncounted, 2, "packets that ended after the deadline");
         assert_eq!(forwarder.bytes_dropped, 100 + 50 + 10 + 20, "unframed bytes of 2 packets");
         assert_eq!(forwarder.sink.attempts, 0, "write attempts after the deadline");
     }
@@ -709,6 +745,7 @@ mod tests {
         assert_eq!(rewrites, 1, "only the packet before the deadline is rewritten");
         assert!(packet_data.is_empty(), "packet data kept after the deadline");
         assert_eq!(forwarder.packets_dropped, 3, "all 3 packets");
+        assert_eq!(forwarder.records_dropped_uncounted, 3, "all 3 packets");
         // The first packet was framed: 2 bytes of tag and length.
         assert_eq!(forwarder.bytes_dropped, 12 + 50 + 40, "bytes of the dropped packets");
         assert_eq!(forwarder.sink.attempts, 0, "write attempts after the deadline");

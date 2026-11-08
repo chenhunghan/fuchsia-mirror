@@ -20,12 +20,12 @@ use pin_init::pin_data;
 /// # Example
 ///
 /// ```
-/// use ksync::{KCell, KMutex, PhantomMutex, guarded};
+/// use ksync::{KCell, KMutex, PhantomMutex, RawMutex, guarded};
 ///
 /// #[guarded]
 /// struct RealObject {
 ///     #[mutex]
-///     mu: KMutex,
+///     mu: KMutex<RawMutex>,
 /// }
 ///
 /// #[guarded]

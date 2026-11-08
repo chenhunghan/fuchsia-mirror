@@ -14,6 +14,11 @@ class EventFifo : public Fifo<uint32_t> {
   std::vector<uint32_t> Read(size_t count) { return Fifo::Read(read_, count); }
   void Advance(size_t count) { Fifo::Advance(read_, count); }
   zx_paddr_t GetPhys() const { return Fifo::GetPhys(first_); }
+  void WriteForTesting(uint32_t event) {
+    uint32_t* ptr = Fifo::Advance(write_);
+    *ptr = event;
+    Fifo::Write(ptr);
+  }
 };
 
 }  // namespace dwc3

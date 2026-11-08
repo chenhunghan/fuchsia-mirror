@@ -19,7 +19,10 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <mutex>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 #include <safemath/safe_conversions.h>
@@ -52,6 +55,10 @@ zx::result<> Ufs::NotifyEventCallback(NotifyEvent event, uint64_t data) {
     case NotifyEvent::kPostSuspend:
     case NotifyEvent::kPreResume:
     case NotifyEvent::kPostResume:
+    case NotifyEvent::kLinkIdle:
+    case NotifyEvent::kLinkActive:
+    case NotifyEvent::kEnterSleep:
+    case NotifyEvent::kExitSleep:
       return zx::ok();
     default:
       return zx::error(ZX_ERR_INVALID_ARGS);
@@ -223,6 +230,7 @@ void Ufs::ProcessIoSubmissions() {
       data_vmo = unmap_vmo.is_valid() ? unmap_vmo.borrow() : io_cmd.request.data_vmo();
     }
     const uint8_t lun = io_cmd.lun;
+    const uint32_t block_size = io_cmd.block_size;
     const auto inline_crypto = io_cmd.request.inline_crypto();
     const scsi::Opcode opcode = io_cmd.request.opcode();
     uint64_t io_bytes = static_cast<uint64_t>(io_cmd.request.transfer_length()) * io_cmd.block_size;
@@ -234,31 +242,62 @@ void Ufs::ProcessIoSubmissions() {
       io_bytes = static_cast<uint64_t>(betoh32(desc->blocks)) * io_cmd.block_size;
     }
 
-    auto cb = [this, req = std::move(io_cmd.request), vmo = std::move(unmap_vmo), opcode,
-               io_bytes](zx_status_t status) mutable {
+    auto cb = [this, lun, block_size, req = std::move(io_cmd.request), vmo = std::move(unmap_vmo),
+               opcode, io_bytes](zx_status_t status) mutable {
       vmo.reset();
+      if (status == ZX_ERR_CANCELED) {
+        // The slot gate closed between ReserveSlot() and the doorbell (see
+        // TransferRequestProcessor::SendRequestUsingSlot()): nothing reached the hardware, so the
+        // request is simply retried once the gate re-opens.
+        std::scoped_lock lock(lock_);
+        if (shutdown_) {
+          req.Complete(ZX_ERR_IO_NOT_PRESENT);
+          return;
+        }
+        pending_commands_.push_front(IoCommand{
+            .request = std::move(req),
+            .lun = lun,
+            .block_size = block_size,
+        });
+        return;
+      }
       if (status == ZX_OK) {
+        // Note: completions are currently processed on a single thread. If this becomes
+        // multithreaded, we should only use Add() rather than Set() here (and handle KiB
+        // alignment) to prevent out-of-order updates from causing non-monotonic changes.
         switch (opcode) {
           case scsi::Opcode::READ_10:
           case scsi::Opcode::READ_12:
-          case scsi::Opcode::READ_16:
+          case scsi::Opcode::READ_16: {
             properties_.read_ops.Add(1);
-            properties_.read_bytes.Add(io_bytes);
+            uint64_t total =
+                properties_.total_read_bytes.fetch_add(io_bytes, std::memory_order_relaxed) +
+                io_bytes;
+            properties_.read_kib.Set(total / 1024);
             break;
+          }
           case scsi::Opcode::WRITE_10:
           case scsi::Opcode::WRITE_12:
-          case scsi::Opcode::WRITE_16:
+          case scsi::Opcode::WRITE_16: {
             properties_.write_ops.Add(1);
-            properties_.write_bytes.Add(io_bytes);
+            uint64_t total =
+                properties_.total_write_bytes.fetch_add(io_bytes, std::memory_order_relaxed) +
+                io_bytes;
+            properties_.write_kib.Set(total / 1024);
             break;
+          }
           case scsi::Opcode::SYNCHRONIZE_CACHE_10:
           case scsi::Opcode::SYNCHRONIZE_CACHE_16:
             properties_.flush_ops.Add(1);
             break;
-          case scsi::Opcode::UNMAP:
+          case scsi::Opcode::UNMAP: {
             properties_.trim_ops.Add(1);
-            properties_.trim_bytes.Add(io_bytes);
+            uint64_t total =
+                properties_.total_trim_bytes.fetch_add(io_bytes, std::memory_order_relaxed) +
+                io_bytes;
+            properties_.trim_kib.Set(total / 1024);
             break;
+          }
           default:
             break;
         }
@@ -297,74 +336,154 @@ zx::result<> Ufs::Isr() {
     return zx::ok();
   }
 
+  // Keep the link (and its clocks) up for the duration of the ISR; the idle timer re-arms when the
+  // guard and the last allocated slot are released.
+  ScopedLinkActive link_active(*this);
   const fdf::MmioBuffer& mmio = mmio_.value();
   auto interrupt_status = InterruptStatusReg::Get().ReadFrom(&mmio);
+  bool dump_error_registers = false;
+  uint64_t fatal_errors = 0;
 
-  // TODO(https://fxbug.dev/42075643): implement error handlers
+  // Software hibernate commands poll UHES/UHXS with UHESE/UHXSE masked; only consume them here
+  // when their interrupt enable bit is set so software polling is not raced.
+  if (interrupt_status.uic_hibernate_enter_status() ||
+      interrupt_status.uic_hibernate_exit_status()) {
+    auto ie = InterruptEnableReg::Get().ReadFrom(&mmio);
+    const bool is_enter =
+        interrupt_status.uic_hibernate_enter_status() && ie.uic_hibernate_enter_status_enable();
+    const bool is_exit =
+        interrupt_status.uic_hibernate_exit_status() && ie.uic_hibernate_exit_status_enable();
+    if (is_enter || is_exit) {
+      auto upmcrs =
+          HostControllerStatusReg::Get().ReadFrom(&mmio).uic_power_mode_change_request_status();
+      InterruptStatusReg::Get()
+          .FromValue(0)
+          .set_uic_hibernate_enter_status(is_enter)
+          .set_uic_hibernate_exit_status(is_exit)
+          .WriteTo(&mmio);
+      if (upmcrs != HostControllerStatusReg::PowerModeStatus::kPowerOk &&
+          upmcrs != HostControllerStatusReg::PowerModeStatus::kPowerLocal &&
+          upmcrs != HostControllerStatusReg::PowerModeStatus::kPowerRemote) {
+        fdf::error("UFS: Auto Hibern8 {} failed - status: 0x{:08x}, upmcrs: 0x{:08x}",
+                   is_enter ? "Enter" : "Exit", interrupt_status.reg_value(),
+                   static_cast<uint32_t>(upmcrs));
+        properties_.auto_hibern8_error_count.Add(1);
+        dump_error_registers = true;
+      }
+    }
+  }
+
+  uint32_t uecpa_val = 0;
+  uint32_t uecdl_val = 0;
+  uint32_t uecn_val = 0;
+  uint32_t uect_val = 0;
+  uint32_t uecdme_val = 0;
   if (interrupt_status.uic_error()) {
     fdf::error("UFS: UIC error on ISR");
     InterruptStatusReg::Get().FromValue(0).set_uic_error(true).WriteTo(&mmio);
+    properties_.uic_error_count.Add(1);
 
-    // UECPA for Host UIC Error Code within PHY Adapter Layer.
-    if (HostUicErrorCodePhyAdapterLayerReg::Get().ReadFrom(&mmio).uic_phy_adapter_layer_error()) {
-      fdf::error("UECPA error code: 0x{:x}", HostUicErrorCodePhyAdapterLayerReg::Get()
-                                                 .ReadFrom(&mmio)
-                                                 .uic_phy_adapter_layer_error_code());
+    // Reading the UEC* registers clears them. Transient PHY adapter / Data Link errors (CRC, NAC,
+    // frame syntax) are recovered by UniPro replay and Network, Transport, and DME errors are left
+    // to the affected request to time out; a Data Link PA_INIT error dumps the full controller
+    // error register snapshot for diagnostics.
+    auto uecpa = HostUicErrorCodePhyAdapterLayerReg::Get().ReadFrom(&mmio);
+    uecpa_val = uecpa.reg_value();
+    if (uecpa.uic_phy_adapter_layer_error()) {
+      fdf::error("UECPA error code: 0x{:x}", uecpa.uic_phy_adapter_layer_error_code());
     }
-    // UECDL for Host UIC Error Code within Data Link Layer.
-    if (HostUicErrorCodeDataLinkLayerReg::Get().ReadFrom(&mmio).uic_data_link_layer_error()) {
-      fdf::error(
-          "UECDL error code: 0x{:x}",
-          HostUicErrorCodeDataLinkLayerReg::Get().ReadFrom(&mmio).uic_data_link_layer_error_code());
+    auto uecdl = HostUicErrorCodeDataLinkLayerReg::Get().ReadFrom(&mmio);
+    uecdl_val = uecdl.reg_value();
+    if (uecdl.uic_data_link_layer_error()) {
+      fdf::error("UECDL error code: 0x{:x}", uecdl.uic_data_link_layer_error_code());
+      if (uecdl.uic_data_link_layer_error_code() & kUicDataLinkLayerErrorPaInit) {
+        dump_error_registers = true;
+      }
     }
-    // UECN for Host UIC Error Code within Network Layer.
-    if (HostUicErrorCodeNetworkLayerReg::Get().ReadFrom(&mmio).uic_network_layer_error()) {
-      fdf::error(
-          "UECN error code: 0x{:x}",
-          HostUicErrorCodeNetworkLayerReg::Get().ReadFrom(&mmio).uic_network_layer_error_code());
+    auto uecn = HostUicErrorCodeNetworkLayerReg::Get().ReadFrom(&mmio);
+    uecn_val = uecn.reg_value();
+    if (uecn.uic_network_layer_error()) {
+      fdf::error("UECN error code: 0x{:x}", uecn.uic_network_layer_error_code());
     }
-    // UECT for Host UIC Error Code within Transport Layer.
-    if (HostUicErrorCodeTransportLayerReg::Get().ReadFrom(&mmio).uic_transport_layer_error()) {
-      fdf::error("UECT error code: 0x{:x}", HostUicErrorCodeTransportLayerReg::Get()
-                                                .ReadFrom(&mmio)
-                                                .uic_transport_layer_error_code());
+    auto uect = HostUicErrorCodeTransportLayerReg::Get().ReadFrom(&mmio);
+    uect_val = uect.reg_value();
+    if (uect.uic_transport_layer_error()) {
+      fdf::error("UECT error code: 0x{:x}", uect.uic_transport_layer_error_code());
     }
-    // UECDME for Host UIC Error Code within DME subcomponent.
-    if (HostUicErrorCodeReg::Get().ReadFrom(&mmio).uic_dme_error()) {
-      fdf::error("UECDME error code: 0x{:x}",
-                 HostUicErrorCodeReg::Get().ReadFrom(&mmio).uic_dme_error_code());
+    auto uecdme = HostUicErrorCodeReg::Get().ReadFrom(&mmio);
+    uecdme_val = uecdme.reg_value();
+    if (uecdme.uic_dme_error()) {
+      fdf::error("UECDME error code: 0x{:x}", uecdme.uic_dme_error_code());
     }
+  }
+  if (interrupt_status.uic_link_lost_status()) {
+    fdf::error("UFS: UIC link lost on ISR");
+    InterruptStatusReg::Get().FromValue(0).set_uic_link_lost_status(true).WriteTo(&mmio);
+    ++fatal_errors;
+    dump_error_registers = true;
+  }
+  if (interrupt_status.utp_error_status()) {
+    fdf::error("UFS: UTP error on ISR");
+    InterruptStatusReg::Get().FromValue(0).set_utp_error_status(true).WriteTo(&mmio);
   }
   if (interrupt_status.device_fatal_error_status()) {
     fdf::error("UFS: Device fatal error on ISR");
     InterruptStatusReg::Get().FromValue(0).set_device_fatal_error_status(true).WriteTo(&mmio);
+    ++fatal_errors;
+    dump_error_registers = true;
   }
   if (interrupt_status.host_controller_fatal_error_status()) {
     fdf::error("UFS: Host controller fatal error on ISR");
     InterruptStatusReg::Get().FromValue(0).set_host_controller_fatal_error_status(true).WriteTo(
         &mmio);
+    ++fatal_errors;
+    dump_error_registers = true;
   }
   if (interrupt_status.system_bus_fatal_error_status()) {
     fdf::error("UFS: System bus fatal error on ISR");
     InterruptStatusReg::Get().FromValue(0).set_system_bus_fatal_error_status(true).WriteTo(&mmio);
+    ++fatal_errors;
+    dump_error_registers = true;
   }
   if (interrupt_status.crypto_engine_fatal_error_status()) {
     fdf::error("UFS: Crypto engine fatal error on ISR");
     InterruptStatusReg::Get().FromValue(0).set_crypto_engine_fatal_error_status(true).WriteTo(
         &mmio);
+    ++fatal_errors;
+    dump_error_registers = true;
+  }
+  if (fatal_errors > 0) {
+    properties_.fatal_error_count.Add(fatal_errors);
+  }
+  if (dump_error_registers) {
+    if (!interrupt_status.uic_error()) {
+      uecpa_val = HostUicErrorCodePhyAdapterLayerReg::Get().ReadFrom(&mmio).reg_value();
+      uecdl_val = HostUicErrorCodeDataLinkLayerReg::Get().ReadFrom(&mmio).reg_value();
+      uecn_val = HostUicErrorCodeNetworkLayerReg::Get().ReadFrom(&mmio).reg_value();
+      uect_val = HostUicErrorCodeTransportLayerReg::Get().ReadFrom(&mmio).reg_value();
+      uecdme_val = HostUicErrorCodeReg::Get().ReadFrom(&mmio).reg_value();
+    }
+    auto hcs = HostControllerStatusReg::Get().ReadFrom(&mmio);
+    auto ahit = AutoHibernateIdleTimerReg::Get().ReadFrom(&mmio);
+    fdf::error(
+        "UFS error dump: HCS=0x{:08x} (UPMCRS=0x{:x}), IS=0x{:08x}, AHIT=0x{:08x}, "
+        "UECPA=0x{:08x}, UECDL=0x{:08x}, UECN=0x{:08x}, UECT=0x{:08x}, UECDME=0x{:08x}",
+        hcs.reg_value(), static_cast<uint32_t>(hcs.uic_power_mode_change_request_status()),
+        interrupt_status.reg_value(), ahit.reg_value(), uecpa_val, uecdl_val, uecn_val, uect_val,
+        uecdme_val);
   }
   // Handle command completion interrupts.
   if (interrupt_status.utp_transfer_request_completion_status()) {
     InterruptStatusReg::Get().FromValue(0).set_utp_transfer_request_completion_status(true).WriteTo(
         &mmio);
-    TriggerIoWork();
+    if (transfer_request_processor_->GetInflightIoCount() > 0 || GetPendingCommandsCount() > 0) {
+      TriggerIoWork();
+    }
   }
 
-  // Check admin command completion if an admin command is active.
-  uint32_t door_bell = UtrListDoorBellReg::Get().ReadFrom(&mmio).door_bell();
-  if (transfer_request_processor_->CheckAdminCommandCompleted(door_bell)) {
-    TriggerAdminWork();
-  }
+  // Complete an active admin command directly from the ISR to avoid an extra ufs-admin-worker
+  // thread hop.
+  transfer_request_processor_->ProcessCompletionOfAdminRequests();
   if (interrupt_status.utp_task_management_request_completion_status()) {
     InterruptStatusReg::Get()
         .FromValue(0)
@@ -394,7 +513,6 @@ void Ufs::HandleIrq(async_dispatcher_t* dispatcher, async::IrqBase* irq, zx_stat
   if (zx::result<> result = Isr(); result.is_error()) {
     fdf::error("Failed to run interrupt service routine: {}", result);
   }
-  OnIrqComplete();
 
   if (zx_status_t ack_status = irq_.ack(); ack_status != ZX_OK) {
     if (ack_status != ZX_ERR_CANCELED) {
@@ -431,11 +549,13 @@ void Ufs::ProcessIo() {
   // can complete even during power transitions.
   ProcessIoCompletions();
 
-  {
-    std::lock_guard<std::mutex> lock(lock_);
-    if (!device_manager_->IsResumed()) {
-      return;
+  if (!device_manager_->IsResumed()) {
+    // Queued I/O is what wakes the device from runtime Sleep; the wake runs on the exception-event
+    // worker because it issues synchronous UPIUs (see ScheduleRuntimeWake()).
+    if (GetPendingCommandsCount() > 0 && device_manager_->IsRuntimeSleeping()) {
+      ScheduleRuntimeWake();
     }
+    return;
   }
 
   ProcessIoSubmissions();
@@ -476,8 +596,8 @@ void Ufs::SetHardwarePoweredOff(bool powered_off) {
       continue;
     }
     libsync::Completion barrier;
-    zx_status_t status =
-        async::PostTask(worker->async_dispatcher(), [&barrier]() { barrier.Signal(); });
+    zx_status_t status = async::PostTask(
+        worker->async_dispatcher(), [on_destroy = fit::defer([&barrier] { barrier.Signal(); })] {});
     if (status == ZX_OK) {
       barrier.Wait();
     } else {
@@ -495,17 +615,24 @@ zx_status_t Ufs::StopHostControllerForPowerDown() {
   // IsHardwarePoweredOff() check (see uic_lock()).
   std::lock_guard<std::mutex> lock(uic_lock_);
 
-  // Mask interrupts and disable the host controller before powering down the PHY and clocks
-  // (matching ufshcd_hba_stop in Linux ufshcd) so that link-loss events during PHY power-down do
-  // not trigger interrupt handling while UFSHCI clocks/power domains are off.
-  InterruptEnableReg::Get().FromValue(0).WriteTo(&GetMmio());
-  zx_status_t status = DisableHostController();
-  if (status != ZX_OK) {
-    fdf::error("Failed to disable host controller before PowerDown: {}",
-               zx_status_get_string(status));
+  zx_status_t status = ZX_OK;
+  {
+    // Also hold ah8_lock_ so that an Auto-Hibern8 enable/disable that passed its own
+    // IsHardwarePoweredOff() check cannot write IE/AHIT between the IE = 0 below and the flag.
+    std::scoped_lock ah8_lock(ah8_lock_);
+    // Disable interrupt generation before powering down the PHY so link-loss events during
+    // power-down do not raise spurious error interrupts.
+    InterruptEnableReg::Get().FromValue(0).WriteTo(&GetMmio());
+    status = DisableHostController();
+    if (status != ZX_OK) {
+      fdf::error("Failed to disable host controller before PowerDown: {}",
+                 zx_status_get_string(status));
+    }
+    hardware_powered_off_.store(true, std::memory_order_release);
   }
   // From here on the ISR / I/O paths must not touch UFSHCI registers: the PHY driver is about to
-  // gate the UFSHCI power domains and clocks.
+  // gate the UFSHCI power domains and clocks. (Drains the IRQ and admin workers; done outside
+  // ah8_lock_.)
   SetHardwarePoweredOff(true);
   return status;
 }
@@ -559,6 +686,17 @@ void Ufs::ExecuteCommandsAsync(uint8_t target, uint16_t lun, std::span<scsi::Scs
 
 zx_status_t Ufs::ExecuteCommandSync(uint8_t target, uint16_t lun, iovec cdb, bool is_write,
                                     iovec data) {
+  // Wake from runtime Sleep before issuing SCSI commands. START STOP UNIT is exempt because it is
+  // what ExitRuntimeSleep() / SuspendPower() themselves issue while holding power_lock_.
+  const bool is_start_stop_unit =
+      cdb.iov_len > 0 && static_cast<const uint8_t*>(cdb.iov_base)[0] ==
+                             std::to_underlying(scsi::Opcode::START_STOP_UNIT);
+  if (!is_start_stop_unit) {
+    if (zx::result<> wake = WakeFromRuntimeSleep(); wake.is_error()) {
+      return wake.status_value();
+    }
+  }
+
   auto lun_id = TranslateScsiLunToUfsLun(lun);
   if (lun_id.is_error()) {
     return lun_id.status_value();
@@ -577,28 +715,47 @@ zx_status_t Ufs::ExecuteCommandSync(uint8_t target, uint16_t lun, iovec cdb, boo
     data_direction = DataDirection::kDeviceToHost;
   }
 
-  zx::vmo data_vmo;
-  fzl::VmoMapper mapper;
+  zx::vmo temp_data_vmo;
+  fzl::VmoMapper temp_mapper;
+  zx::unowned_vmo data_vmo;
+  void* mapped_data = nullptr;
+  std::unique_lock<std::mutex> sync_lock;
 
   if (data_direction != DataDirection::kNone) {
-    // Allocate a response data buffer.
-    // TODO(https://fxbug.dev/42075643): We need to pre-allocate a data buffer that will be used in
-    // the Sync command.
-    if (zx::result<> result = AllocatePages(data_vmo, mapper, data.iov_len); result.is_error()) {
-      return result.error_value();
+    const size_t page_size = zx_system_get_page_size();
+    if (data.iov_len <= page_size) {
+      sync_lock = std::unique_lock<std::mutex>(sync_cmd_lock_);
+      if (!sync_cmd_vmo_.is_valid()) {
+        if (zx::result<> result = AllocatePages(sync_cmd_vmo_, sync_cmd_mapper_, page_size);
+            result.is_error()) {
+          return result.error_value();
+        }
+      }
+      if (data_direction == DataDirection::kDeviceToHost) {
+        memset(sync_cmd_mapper_.start(), 0, data.iov_len);
+      }
+      data_vmo = sync_cmd_vmo_.borrow();
+      mapped_data = sync_cmd_mapper_.start();
+    } else {
+      if (zx::result<> result = AllocatePages(temp_data_vmo, temp_mapper, data.iov_len);
+          result.is_error()) {
+        return result.error_value();
+      }
+      data_vmo = temp_data_vmo.borrow();
+      mapped_data = temp_mapper.start();
     }
   }
 
   if (data_direction == DataDirection::kHostToDevice) {
-    memcpy(mapper.start(), data.iov_base, data.iov_len);
+    memcpy(mapped_data, data.iov_base, data.iov_len);
   }
 
   ScsiCommandUpiu upiu(static_cast<uint8_t*>(cdb.iov_base),
                        safemath::checked_cast<uint8_t>(cdb.iov_len), data_direction,
                        safemath::checked_cast<uint32_t>(data.iov_len));
 
-  auto response = transfer_request_processor_->SendAdminScsiCmd(upiu, lun_id.value(),
-                                                                zx::unowned_vmo(data_vmo));
+  auto response =
+      transfer_request_processor_->SendAdminScsiCmd(upiu, lun_id.value(), std::move(data_vmo));
   if (response.is_error()) {
     return response.error_value();
   }
@@ -634,7 +791,7 @@ zx_status_t Ufs::ExecuteCommandSync(uint8_t target, uint16_t lun, iovec cdb, boo
   }
 
   if (data_direction == DataDirection::kDeviceToHost) {
-    memcpy(data.iov_base, mapper.start(), data.iov_len);
+    memcpy(data.iov_base, mapped_data, data.iov_len);
   }
   return ZX_OK;
 }
@@ -709,10 +866,10 @@ zx_status_t Ufs::Init() {
     properties_.write_ops = inspect_node_.CreateUint("block.write.count", 0);
     properties_.flush_ops = inspect_node_.CreateUint("block.flush.count", 0);
     properties_.trim_ops = inspect_node_.CreateUint("block.trim.count", 0);
-    properties_.read_bytes = inspect_node_.CreateUint("block.read.bytes", 0);
-    properties_.write_bytes = inspect_node_.CreateUint("block.write.bytes", 0);
-    properties_.flush_bytes = inspect_node_.CreateUint("block.flush.bytes", 0);
-    properties_.trim_bytes = inspect_node_.CreateUint("block.trim.bytes", 0);
+    properties_.read_kib = inspect_node_.CreateUint("block.read.kib", 0);
+    properties_.write_kib = inspect_node_.CreateUint("block.write.kib", 0);
+    properties_.flush_kib = inspect_node_.CreateUint("block.flush.kib", 0);
+    properties_.trim_kib = inspect_node_.CreateUint("block.trim.kib", 0);
     PopulateVersionInspect(&inspect_node_);
     PopulateCapabilitiesInspect(&inspect_node_);
   }
@@ -779,10 +936,20 @@ zx_status_t Ufs::Init() {
   logical_unit_count_ = lun_count.value();
   properties_.logical_unit_count =
       controller_node.CreateUint("logical_unit_count", logical_unit_count_);
-  // 14 buckets spanning from 1us to ~8ms.
-  properties_.wake_latency_us = inspect_node_.CreateExponentialUintHistogram(
-      "wake_latency_us", /*floor=*/1, /*initial_step=*/1, /*step_multiplier=*/2,
-      /*buckets=*/14);
+  // 14 buckets spanning from 1us to ~8ms; 16 reach ~32ms for the runtime Sleep round trips,
+  // which include a START STOP UNIT each way.
+  auto make_latency_histogram = [this](const char* name, size_t buckets = 14) {
+    return inspect_node_.CreateExponentialUintHistogram(name, /*floor=*/1, /*initial_step=*/1,
+                                                        /*step_multiplier=*/2, buckets);
+  };
+  properties_.wake_latency_us = make_latency_histogram("wake_latency_us");
+  properties_.link_active_latency_us = make_latency_histogram("link_active_latency_us");
+  properties_.link_idle_latency_us = make_latency_histogram("link_idle_latency_us");
+  properties_.ah8_exit_latency_us = make_latency_histogram("ah8_exit_latency_us");
+  properties_.runtime_sleep_enter_latency_us =
+      make_latency_histogram("runtime_sleep_enter_latency_us", /*buckets=*/16);
+  properties_.runtime_sleep_wake_latency_us =
+      make_latency_histogram("runtime_sleep_wake_latency_us", /*buckets=*/16);
 
   if (component_inspector_) {
     component_inspector_->inspector().emplace(std::move(controller_node));
@@ -801,6 +968,15 @@ zx_status_t Ufs::Init() {
       rpmb_device_.reset();
     }
   }
+
+  // Size the link-idle timer to a multiple of AHIT (default 2x) so the link has normally entered
+  // Auto-Hibern8 before the timer fires; HandleLinkIdleTimer() verifies that against HCS.
+  if (config_.enable_auto_hibernate()) {
+    const uint32_t multiplier = std::max<uint32_t>(config_.link_idle_ahit_multiplier(), 1);
+    link_idle_timeout_ =
+        std::max(link_idle_timeout_, zx::usec(config_.auto_hibernate_timer_us()) * multiplier);
+  }
+  ScheduleRuntimeIdleTimers();
 
   fdf::info("Bind Success");
 
@@ -824,7 +1000,9 @@ zx::result<> Ufs::InitController() {
     return zx::error(status);
   }
 
-  if (CapabilityReg::Get().ReadFrom(&mmio).crypto_support()) {
+  const auto caps = CapabilityReg::Get().ReadFrom(&mmio);
+  auto_hibernation_supported_ = caps.auto_hibernation_support();
+  if (caps.crypto_support()) {
     auto inline_crypto_client =
         incoming_->Connect<fuchsia_hardware_ufs_phy::Service::InlineCrypto>("phy");
     if (inline_crypto_client.is_error()) {
@@ -866,8 +1044,8 @@ zx::result<> Ufs::InitController() {
   }
 
   // Create Task Management Request Processor
-  uint8_t number_of_task_management_request_slots = safemath::checked_cast<uint8_t>(
-      CapabilityReg::Get().ReadFrom(&mmio).number_of_utp_task_management_request_slots() + 1);
+  uint8_t number_of_task_management_request_slots =
+      safemath::checked_cast<uint8_t>(caps.number_of_utp_task_management_request_slots() + 1);
   fdf::debug("number_of_task_management_request_slots={}", number_of_task_management_request_slots);
 
   auto task_management_request_processor =
@@ -881,8 +1059,8 @@ zx::result<> Ufs::InitController() {
   task_management_request_processor_ = std::move(*task_management_request_processor);
 
   // Create Transfer Request Processor
-  uint8_t number_of_transfer_request_slots = safemath::checked_cast<uint8_t>(
-      CapabilityReg::Get().ReadFrom(&mmio).number_of_utp_transfer_request_slots() + 1);
+  uint8_t number_of_transfer_request_slots =
+      safemath::checked_cast<uint8_t>(caps.number_of_utp_transfer_request_slots() + 1);
   fdf::debug("number_of_transfer_request_slots={}", number_of_transfer_request_slots);
 
   auto transfer_request_processor = TransferRequestProcessor::Create(
@@ -930,7 +1108,7 @@ zx::result<> Ufs::InitController() {
   {
     auto ee_dispatcher = fdf::SynchronizedDispatcher::Create(
         fdf::SynchronizedDispatcher::Options::kAllowSyncCalls, "ufs-exception-event-worker",
-        [this](fdf_dispatcher_t*) { OnDispatcherShutdown(); });
+        [this](fdf_dispatcher_t*) { OnExceptionDispatcherShutdown(); });
     if (ee_dispatcher.is_error()) {
       fdf::error("Failed to create Exception Event dispatcher: {}",
                  zx_status_get_string(ee_dispatcher.status_value()));
@@ -1040,8 +1218,16 @@ zx::result<> Ufs::InitDeviceInterface(inspect::Node& controller_node) {
     }
   }
   properties_.power_suspended = inspect_node_.CreateBool("power_suspended", false);
+  properties_.runtime_sleeping = inspect_node_.CreateBool("runtime_sleeping", false);
+  properties_.link_idle = inspect_node_.CreateBool("link_idle", false);
   properties_.suspend_failures = inspect_node_.CreateUint("suspend_failures", 0);
   properties_.resume_failures = inspect_node_.CreateUint("resume_failures", 0);
+  properties_.runtime_sleep_count = inspect_node_.CreateUint("runtime_sleep_count", 0);
+  properties_.link_idle_count = inspect_node_.CreateUint("link_idle_count", 0);
+  properties_.link_vote_error_count = inspect_node_.CreateUint("link_vote_error_count", 0);
+  properties_.auto_hibern8_error_count = inspect_node_.CreateUint("auto_hibern8_error_count", 0);
+  properties_.uic_error_count = inspect_node_.CreateUint("uic_error_count", 0);
+  properties_.fatal_error_count = inspect_node_.CreateUint("fatal_error_count", 0);
 
   zx::result<uint32_t> result = device_manager_->GetBootLunEnabled();
   if (result.is_error()) {
@@ -1076,16 +1262,39 @@ zx::result<> Ufs::ConfigureAutoHibernate() {
     return zx::ok();
   }
 
+  ScopedLinkActive link_active(*this);
   const fdf::MmioBuffer& mmio = mmio_.value();
-  if (!CapabilityReg::Get().ReadFrom(&mmio).auto_hibernation_support()) {
+  if (!auto_hibernation_supported_) {
     fdf::info("UFS Auto-Hibernate not supported by controller");
     return zx::ok();
   }
 
   auto ahit_reg = AutoHibernateIdleTimerReg::FromTimeoutUs(config_.auto_hibernate_timer_us());
-  ahit_reg.WriteTo(&mmio);
-  fdf::info("UFS Auto-Hibernate enabled (scale: {}, value: {})",
-            static_cast<uint32_t>(ahit_reg.timer_scale()), ahit_reg.timer_value());
+  bool log_info = false;
+  {
+    std::scoped_lock lock(ah8_lock_);
+    saved_ahit_reg_ = ahit_reg.reg_value();
+    ah8_enabled_ = true;
+    if (!ah8_logged_) {
+      ah8_logged_ = true;
+      log_info = true;
+    }
+    if (ah8_disable_depth_ == 0 && !IsHardwarePoweredOff()) {
+      ahit_reg.WriteTo(&mmio);
+      InterruptEnableReg::Get()
+          .ReadFrom(&mmio)
+          .set_uic_hibernate_enter_status_enable(true)
+          .set_uic_hibernate_exit_status_enable(true)
+          .WriteTo(&mmio);
+    }
+  }
+  if (log_info) {
+    fdf::info("UFS Auto-Hibernate enabled (scale: {}, value: {})",
+              std::to_underlying(ahit_reg.timer_scale()), ahit_reg.timer_value());
+  } else {
+    fdf::debug("UFS Auto-Hibernate enabled (scale: {}, value: {})",
+               std::to_underlying(ahit_reg.timer_scale()), ahit_reg.timer_value());
+  }
   return zx::ok();
 }
 
@@ -1093,15 +1302,38 @@ zx::result<> Ufs::DisableAutoHibernate() {
   if (qemu_quirk_) {
     return zx::ok();
   }
-  const fdf::MmioBuffer& mmio = mmio_.value();
-  if (!CapabilityReg::Get().ReadFrom(&mmio).auto_hibernation_support()) {
+  ScopedLinkActive link_active(*this);
+  if (!auto_hibernation_supported_) {
     return zx::ok();
   }
-  AutoHibernateIdleTimerReg::Get().FromValue(0).WriteTo(&mmio);
+  std::scoped_lock lock(ah8_lock_);
+  if (!ah8_enabled_) {
+    return zx::ok();
+  }
+  ah8_enabled_ = false;
+  if (!IsHardwarePoweredOff() && mmio_.has_value()) {
+    const fdf::MmioBuffer& mmio = *mmio_;
+    InterruptEnableReg::Get()
+        .ReadFrom(&mmio)
+        .set_uic_hibernate_enter_status_enable(false)
+        .set_uic_hibernate_exit_status_enable(false)
+        .WriteTo(&mmio);
+    AutoHibernateIdleTimerReg::Get().FromValue(0).WriteTo(&mmio);
+    InterruptStatusReg::Get()
+        .FromValue(0)
+        .set_uic_hibernate_enter_status(true)
+        .set_uic_hibernate_exit_status(true)
+        .WriteTo(&mmio);
+  }
   return zx::ok();
 }
 
 zx::result<> Ufs::ReinitAfterPowerDown() {
+  {
+    std::scoped_lock lock(ah8_lock_);
+    ah8_enabled_ = false;
+    saved_ahit_reg_ = 0;
+  }
   const fdf::MmioBuffer& mmio = mmio_.value();
   InterruptEnableReg::Get().FromValue(0).WriteTo(&mmio);
 
@@ -1109,7 +1341,11 @@ zx::result<> Ufs::ReinitAfterPowerDown() {
     return result.take_error();
   }
   if (HostControllerEnableReg::Get().ReadFrom(&mmio).host_controller_enable()) {
-    DisableHostController();
+    if (zx_status_t status = DisableHostController(); status != ZX_OK) {
+      fdf::error("Failed to disable host controller before re-init: {}",
+                 zx_status_get_string(status));
+      return zx::error(status);
+    }
   }
   if (zx_status_t status = EnableHostController(); status != ZX_OK) {
     fdf::error("Failed to re-enable host controller: {}", zx_status_get_string(status));
@@ -1199,6 +1435,46 @@ zx::result<> Ufs::ReinitAfterPowerDown() {
   return zx::ok();
 }
 
+zx_status_t Ufs::ClearLunUnitAttention(uint16_t scsi_lun) {
+  zx::result<uint8_t> lun_id = TranslateScsiLunToUfsLun(scsi_lun);
+  if (lun_id.is_error()) {
+    return lun_id.status_value();
+  }
+
+  scsi::TestUnitReadyCDB cdb{};
+  cdb.opcode = scsi::Opcode::TEST_UNIT_READY;
+  ScsiCommandUpiu upiu(reinterpret_cast<uint8_t*>(&cdb), sizeof(cdb), DataDirection::kNone, 0);
+
+  zx::result<std::unique_ptr<ResponseUpiu>> response =
+      transfer_request_processor_->SendAdminScsiCmd(upiu, lun_id.value());
+  if (response.is_error()) {
+    return response.status_value();
+  }
+
+  const auto header_response = response.value()->GetHeader().response;
+  const uint8_t scsi_status = response.value()->GetHeader().status;
+  if (header_response != UpiuHeaderResponseCode::kTargetSuccess &&
+      header_response != UpiuHeaderResponseCode::kTargetFailure) {
+    return ZX_ERR_BAD_STATE;
+  }
+  if (scsi_status == std::to_underlying(scsi::StatusCode::GOOD)) {
+    return ZX_OK;
+  }
+  if (scsi_status == std::to_underlying(scsi::StatusCode::CHECK_CONDITION)) {
+    auto* sense_data =
+        reinterpret_cast<scsi::FixedFormatSenseDataHeader*>(response.value()->GetSenseData());
+    // Per JEDEC UFS 3.1 Section 11.2.1 / 10.7.2, UFS devices return autosense in the Response
+    // UPIU and clear the pending UNIT ATTENTION condition upon delivering the response.
+    if (sense_data->sense_key() == scsi::SenseKey::UNIT_ATTENTION) {
+      return ZX_OK;
+    }
+    if (sense_data->sense_key() == scsi::SenseKey::NOT_READY) {
+      return ZX_ERR_UNAVAILABLE;
+    }
+  }
+  return ZX_ERR_BAD_STATE;
+}
+
 zx::result<> Ufs::ClearUnitAttentions() {
   // Well-known LUs use the extended addressing produced by TranslateUfsLunToScsiLun(). The UFS
   // device W-LUN is cleared first because ResumePower() sends START STOP UNIT to it next, and it
@@ -1210,12 +1486,11 @@ zx::result<> Ufs::ClearUnitAttentions() {
   }
 
   std::vector<uint16_t> luns;
-  for (WellKnownLuns wlun :
-       {WellKnownLuns::kRpmb, WellKnownLuns::kBoot, WellKnownLuns::kReportLuns}) {
-    if (!HasWellKnownLun(wlun)) {
-      continue;
-    }
-    zx::result<uint16_t> scsi_lun = TranslateUfsLunToScsiLun(static_cast<uint8_t>(wlun));
+  // kBoot and kReportLuns are never accessed after initial boot discovery, so only clear kRpmb
+  // here (in addition to kUfsDevice and bound regular LUs).
+  if (HasWellKnownLun(WellKnownLuns::kRpmb)) {
+    zx::result<uint16_t> scsi_lun =
+        TranslateUfsLunToScsiLun(std::to_underlying(WellKnownLuns::kRpmb));
     if (scsi_lun.is_error()) {
       return scsi_lun.take_error();
     }
@@ -1242,10 +1517,10 @@ zx::result<> Ufs::ClearUnitAttentions() {
   auto clear = [this](uint16_t lun) -> zx_status_t {
     zx_status_t status = ZX_ERR_INTERNAL;
     for (int retry = 0; retry < kMaxRetries; ++retry) {
-      // UFS devices return autosense in the response UPIU, so the TEST UNIT READY that reports the
-      // UNIT ATTENTION also clears it; an immediate retry confirms the LU is ready. Only back off
-      // if the LU is still NOT READY after that.
-      status = TestUnitReady(kPlaceholderTarget, lun);
+      // UFS devices return autosense in the response UPIU, so a single TEST UNIT READY that
+      // receives CHECK CONDITION / UNIT ATTENTION has already cleared the condition (JEDEC UFS 3.1
+      // Section 11.2.1). Only retry if the LU reports NOT READY (ZX_ERR_UNAVAILABLE).
+      status = ClearLunUnitAttention(lun);
       if (status != ZX_ERR_UNAVAILABLE) {
         break;
       }
@@ -1358,7 +1633,7 @@ zx::result<uint32_t> Ufs::AddLogicalUnits() {
     }
     zx_status_t status = ZX_OK;
     for (int retry = 0; retry < kMaxRetries; ++retry) {
-      status = TestUnitReady(kPlaceholderTarget, scsi_lun.value());
+      status = ClearLunUnitAttention(scsi_lun.value());
       if (status == ZX_OK) {
         break;
       }
@@ -1376,6 +1651,10 @@ zx::result<uint32_t> Ufs::AddLogicalUnits() {
 }
 
 void Ufs::DumpRegisters() {
+  if (IsHardwarePoweredOff() || !mmio_.has_value()) {
+    return;
+  }
+  ScopedLinkActive link_active(*this);
   const fdf::MmioBuffer& mmio = mmio_.value();
   CapabilityReg::Get().ReadFrom(&mmio).Print(
       [](const char* arg) { fdf::debug("CapabilityReg::{}", arg); });
@@ -1424,13 +1703,288 @@ void Ufs::DumpRegisters() {
       [](const char* arg) { fdf::debug("UicCommandArgument3Reg::{}", arg); });
 }
 
+void Ufs::DumpErrorRegisters() {
+  if (IsHardwarePoweredOff() || !mmio_.has_value()) {
+    return;
+  }
+  ScopedLinkActive link_active(*this);
+  const fdf::MmioBuffer& mmio = mmio_.value();
+  auto hcs = HostControllerStatusReg::Get().ReadFrom(&mmio);
+  auto is = InterruptStatusReg::Get().ReadFrom(&mmio);
+  auto ahit = AutoHibernateIdleTimerReg::Get().ReadFrom(&mmio);
+  auto uecpa = HostUicErrorCodePhyAdapterLayerReg::Get().ReadFrom(&mmio);
+  auto uecdl = HostUicErrorCodeDataLinkLayerReg::Get().ReadFrom(&mmio);
+  auto uecn = HostUicErrorCodeNetworkLayerReg::Get().ReadFrom(&mmio);
+  auto uect = HostUicErrorCodeTransportLayerReg::Get().ReadFrom(&mmio);
+  auto uecdme = HostUicErrorCodeReg::Get().ReadFrom(&mmio);
+  fdf::error(
+      "UFS error dump: HCS=0x{:08x} (UPMCRS=0x{:x}), IS=0x{:08x}, AHIT=0x{:08x}, "
+      "UECPA=0x{:08x}, UECDL=0x{:08x}, UECN=0x{:08x}, UECT=0x{:08x}, UECDME=0x{:08x}",
+      hcs.reg_value(), static_cast<uint32_t>(hcs.uic_power_mode_change_request_status()),
+      is.reg_value(), ahit.reg_value(), uecpa.reg_value(), uecdl.reg_value(), uecn.reg_value(),
+      uect.reg_value(), uecdme.reg_value());
+}
+
+void Ufs::AcquireAutoHibernateDisable() {
+  bool link_parked = false;
+  {
+    std::scoped_lock lock(ah8_lock_);
+    if (ah8_disable_depth_++ == 0 && ah8_enabled_ && !IsHardwarePoweredOff() && mmio_.has_value()) {
+      const fdf::MmioBuffer& mmio = mmio_.value();
+      InterruptEnableReg::Get()
+          .ReadFrom(&mmio)
+          .set_uic_hibernate_enter_status_enable(false)
+          .set_uic_hibernate_exit_status_enable(false)
+          .WriteTo(&mmio);
+      AutoHibernateIdleTimerReg::Get().FromValue(0).WriteTo(&mmio);
+      // AHIT = 0 only stops future Auto-Hibern8 entries. If the link is already parked in (or
+      // entering) Hibern8 the controller reports DP = 0 / UTRLRDY = 0 in HCS until something wakes
+      // it; make sure that happens before the caller's link management access rather than during
+      // it.
+      auto hcs = HostControllerStatusReg::Get().ReadFrom(&mmio);
+      link_parked = !hcs.device_present() || !hcs.utp_transfer_request_list_ready();
+    }
+  }
+  if (link_parked) {
+    ExitAutoHibernate();
+  }
+}
+
+void Ufs::ExitAutoHibernate() {
+  // Issued outside ah8_lock_: SendCommand() nests its own ScopedAutoHibernateDisable (a no-op at
+  // depth > 0) and takes uic_lock(). UHES/UHXS interrupts are masked by the outermost acquire, so
+  // the command can poll IS.UHXS without racing the ISR.
+  const zx::time start = zx::clock::get_monotonic();
+  DmeHibernateExitCommand dme_hibernate_exit_command(*this);
+  if (auto result = dme_hibernate_exit_command.SendCommand(); result.is_error()) {
+    fdf::error("Failed to exit Auto-Hibern8 before link management access: {}", result);
+    properties_.auto_hibern8_error_count.Add(1);
+    DumpErrorRegisters();
+    return;
+  }
+  if (!mmio_.has_value()) {
+    return;
+  }
+  const fdf::MmioBuffer& mmio = *mmio_;
+  auto wait_for = [&] {
+    auto hcs = HostControllerStatusReg::Get().ReadFrom(&mmio);
+    return hcs.device_present() && hcs.utp_transfer_request_list_ready();
+  };
+  fbl::String timeout_message = "Timeout waiting for the link to leave Auto-Hibern8";
+  if (zx_status_t status =
+          WaitWithTimeout(wait_for, zx::usec(kAutoHibernateExitTimeoutUs), timeout_message);
+      status != ZX_OK) {
+    properties_.auto_hibern8_error_count.Add(1);
+    DumpErrorRegisters();
+    return;
+  }
+  properties_.ah8_exit_latency_us.Insert((zx::clock::get_monotonic() - start).to_usecs());
+}
+
+void Ufs::ReleaseAutoHibernateDisable() {
+  {
+    std::scoped_lock lock(ah8_lock_);
+    ZX_DEBUG_ASSERT(ah8_disable_depth_ > 0);
+    const bool restore_ah8 = (--ah8_disable_depth_ == 0);
+    if (restore_ah8 && ah8_enabled_ && !IsHardwarePoweredOff() && mmio_.has_value()) {
+      const fdf::MmioBuffer& mmio = *mmio_;
+      InterruptStatusReg::Get()
+          .FromValue(0)
+          .set_uic_hibernate_enter_status(true)
+          .set_uic_hibernate_exit_status(true)
+          .WriteTo(&mmio);
+      AutoHibernateIdleTimerReg::Get().FromValue(saved_ahit_reg_).WriteTo(&mmio);
+      InterruptEnableReg::Get()
+          .ReadFrom(&mmio)
+          .set_uic_hibernate_enter_status_enable(true)
+          .set_uic_hibernate_exit_status_enable(true)
+          .WriteTo(&mmio);
+    }
+  }
+}
+
+void Ufs::AcquireLinkActive() {
+  std::scoped_lock lock(ah8_lock_);
+  ++link_active_depth_;
+  // Any armed or pending idle timer is stale from here on.
+  ++idle_timer_generation_;
+  if (!link_idle_) {
+    return;
+  }
+  // Wake the link under ah8_lock_ so that HandleLinkIdleTimer() cannot vote LINK_IDLE between
+  // this check and the PHY call (see the lock comment in ufs.h).
+  const zx::time start = zx::clock::get_monotonic();
+  zx::result<> res = Notify(NotifyEvent::kLinkActive, 0);
+  // Either the link is active again or the PHY failed to make it so; in both cases stop asking on
+  // every access. A failed PHY vote is not a link error: the UniPro link itself was never torn
+  // down, so it is logged and counted.
+  link_idle_ = false;
+  properties_.link_idle.Set(false);
+  if (res.is_error()) {
+    fdf::error("Failed to restore the link-idle platform vote: {}", res);
+    properties_.link_vote_error_count.Add(1);
+    return;
+  }
+  properties_.link_active_latency_us.Insert((zx::clock::get_monotonic() - start).to_usecs());
+}
+
+void Ufs::ReleaseLinkActive() {
+  std::scoped_lock lock(ah8_lock_);
+  ZX_DEBUG_ASSERT(link_active_depth_ > 0);
+  if (--link_active_depth_ == 0) {
+    ScheduleRuntimeIdleTimersLocked();
+  }
+}
+
+void Ufs::ScheduleRuntimeIdleTimers() {
+  std::scoped_lock lock(ah8_lock_);
+  if (link_active_depth_ == 0) {
+    ScheduleRuntimeIdleTimersLocked();
+  }
+}
+
+void Ufs::ScheduleRuntimeIdleTimersLocked() {
+  if (!SupportsRuntimePowerManagement() || !ah8_enabled_ || link_idle_ || stopping_ ||
+      !exception_event_dispatcher_.get()) {
+    return;
+  }
+  const uint64_t generation = ++idle_timer_generation_;
+  // link_idle_task_ is confined to exception_event_dispatcher_.
+  if (zx_status_t status = async::PostTask(exception_event_dispatcher_.async_dispatcher(),
+                                           [this, generation] { ArmLinkIdleTimer(generation); });
+      status != ZX_OK) {
+    fdf::debug("Failed to schedule the link-idle timer: {}", zx_status_get_string(status));
+  }
+}
+
+void Ufs::ArmLinkIdleTimer(uint64_t generation) {
+  {
+    std::scoped_lock lock(ah8_lock_);
+    if (stopping_ || idle_timer_generation_ != generation || link_active_depth_ > 0) {
+      return;
+    }
+  }
+  link_idle_task_.Cancel();
+  runtime_sleep_task_.Cancel();
+  scheduled_link_idle_gen_ = generation;
+  link_idle_rearm_count_ = 0;
+  link_idle_task_.PostDelayed(exception_event_dispatcher_.async_dispatcher(), link_idle_timeout_);
+}
+
+void Ufs::HandleLinkIdleTimer(async_dispatcher_t* dispatcher, async::TaskBase* task,
+                              zx_status_t status) {
+  if (status != ZX_OK || stopping_ || !device_manager_) {
+    return;
+  }
+  // Checked outside ah8_lock_ (lock order): queued commands are about to allocate slots, and a
+  // device that is not resumed is handled by the suspend/resume sequence.
+  if (GetPendingCommandsCount() > 0 || !device_manager_->IsResumed()) {
+    return;
+  }
+  std::scoped_lock lock(ah8_lock_);
+  if (idle_timer_generation_ != scheduled_link_idle_gen_ || link_active_depth_ > 0 ||
+      ah8_disable_depth_ > 0 || !ah8_enabled_ || link_idle_ || IsHardwarePoweredOff() ||
+      !mmio_.has_value()) {
+    return;
+  }
+  // Only drop the link-idle clocks once the controller has actually parked the link in
+  // Auto-Hibern8 (DP / UTRLRDY clear in HCS); waking the M-PHY out of Hibern8 needs them. If the
+  // link is still active (the device kept it up, or AHIT has not expired yet) try again a bounded
+  // number of times, then wait for the next activity to re-arm.
+  auto hcs = HostControllerStatusReg::Get().ReadFrom(&*mmio_);
+  if (hcs.device_present() && hcs.utp_transfer_request_list_ready()) {
+    if (++link_idle_rearm_count_ <= kMaxLinkIdleRearms) {
+      scheduled_link_idle_gen_ = ++idle_timer_generation_;
+      link_idle_task_.PostDelayed(exception_event_dispatcher_.async_dispatcher(),
+                                  link_idle_timeout_);
+      return;
+    }
+  } else {
+    const zx::time start = zx::clock::get_monotonic();
+    if (zx::result<> res = Notify(NotifyEvent::kLinkIdle, 0); res.is_ok()) {
+      link_idle_ = true;
+      properties_.link_idle.Set(true);
+      properties_.link_idle_count.Add(1);
+      properties_.link_idle_latency_us.Insert((zx::clock::get_monotonic() - start).to_usecs());
+    } else if (res.status_value() != ZX_ERR_NOT_SUPPORTED) {
+      fdf::warn("Failed to vote the link idle: {}", res);
+      properties_.link_vote_error_count.Add(1);
+      return;
+    }
+  }
+  // Start the (much longer) runtime device-Sleep countdown from here, whether the link entered
+  // hardware Auto-Hibern8 or stayed up past the bounded link-idle re-arms. It shares the
+  // idle-timer generation, so the next AcquireLinkActive() makes it stale as well.
+  runtime_sleep_task_.Cancel();
+  scheduled_runtime_sleep_gen_ = scheduled_link_idle_gen_;
+  runtime_sleep_task_.PostDelayed(exception_event_dispatcher_.async_dispatcher(),
+                                  runtime_sleep_timeout_);
+}
+
+void Ufs::HandleRuntimeSleepTimer(async_dispatcher_t* dispatcher, async::TaskBase* task,
+                                  zx_status_t status) {
+  if (status != ZX_OK || stopping_ || !device_manager_) {
+    return;
+  }
+  // Same ordering as HandleLinkIdleTimer(): lock_ / power_lock_ are taken outside ah8_lock_.
+  if (GetPendingCommandsCount() > 0 || !device_manager_->IsResumed()) {
+    return;
+  }
+  {
+    std::scoped_lock lock(ah8_lock_);
+    if (idle_timer_generation_ != scheduled_runtime_sleep_gen_ || link_active_depth_ > 0 ||
+        ah8_disable_depth_ > 0 || !ah8_enabled_ || IsHardwarePoweredOff()) {
+      return;
+    }
+  }
+  // EnterRuntimeSleep() issues UPIUs and DME commands, which take ScopedLinkActive guards of their
+  // own (and bump the idle-timer generation), so it runs outside ah8_lock_; it re-checks that the
+  // device is still idle under power_lock_ and once the slot gate is closed.
+  if (zx::result<> res = device_manager_->EnterRuntimeSleep(); res.is_error()) {
+    fdf::warn("Runtime sleep entry failed: {}", res);
+  }
+}
+
+zx::result<> Ufs::WakeFromRuntimeSleep() {
+  if (!device_manager_) {
+    return zx::ok();
+  }
+  if (device_manager_->IsRuntimeSleeping()) {
+    return device_manager_->ExitRuntimeSleep();
+  }
+  return zx::ok();
+}
+
+void Ufs::ScheduleRuntimeWake() {
+  if (stopping_ || !exception_event_dispatcher_.get()) {
+    return;
+  }
+  bool expected = false;
+  // Only coalesces posts: the task re-reads all state under its own locks and PostTask() orders
+  // the poster before the task, so no acquire/release pairing is needed on this flag.
+  if (!runtime_wake_scheduled_.compare_exchange_strong(expected, true, std::memory_order_relaxed)) {
+    return;
+  }
+  // Runs on the exception-event worker, which also runs EnterRuntimeSleep(): a wake posted while
+  // the sleep entry is still in progress is therefore ordered after it.
+  async::PostTask(exception_event_dispatcher_.async_dispatcher(), [this] {
+    runtime_wake_scheduled_.store(false, std::memory_order_relaxed);
+    if (stopping_) {
+      return;
+    }
+    if (zx::result<> res = WakeFromRuntimeSleep(); res.is_error()) {
+      fdf::error("Failed to exit runtime sleep on I/O wake: {}", res);
+    } else if (device_manager_ && device_manager_->IsResumed() && GetPendingCommandsCount() > 0) {
+      // If EnterRuntimeSleep() aborted while this wake was queued, IsRuntimeSleeping() is already
+      // false so WakeFromRuntimeSleep() skipped ExitRuntimeSleep(); ensure pending I/O is kicked.
+      TriggerIoWork();
+    }
+  });
+}
+
 zx_status_t Ufs::EnableHostController() {
   const fdf::MmioBuffer& mmio = mmio_.value();
-  HostControllerEnableReg::Get()
-      .FromValue(0)
-      .set_host_controller_enable(true)
-      .set_crypto_general_enable(CapabilityReg::Get().ReadFrom(&mmio).crypto_support())
-      .WriteTo(&mmio);
+  HostControllerEnableReg::Get().FromValue(0).set_host_controller_enable(true).WriteTo(&mmio);
 
   auto wait_for = [&]() -> bool {
     return HostControllerEnableReg::Get().ReadFrom(&mmio).host_controller_enable();
@@ -1623,6 +2177,7 @@ void Ufs::RetryResume(async_dispatcher_t* dispatcher, async::TaskBase* task, zx_
 }
 
 zx::result<> Ufs::Start(fdf::DriverContext context) {
+  component_inspector_.emplace(context.CreateInspector(this));
   incoming_ = std::shared_ptr<fdf::Namespace>(context.take_incoming());
   node_name_ = context.node_name();
   config_ = context.take_config<ufs_config::Config>();
@@ -1659,16 +2214,6 @@ zx::result<> Ufs::Start(fdf::DriverContext context) {
 
   if (!host_controller_callback_) {
     SetHostControllerCallback(NotifyEventCallback);
-  }
-
-  auto connect_result = incoming_->Connect<fuchsia_inspect::InspectSink>();
-  if (connect_result.is_ok()) {
-    component_inspector_.emplace(dispatcher(), inspect::PublishOptions{
-                                                   .tree_name = "ufs",
-                                                   .client_end = std::move(connect_result.value()),
-                                               });
-  } else {
-    fdf::warn("Failed to connect to InspectSink: {}", connect_result.status_string());
   }
 
   if (zx_status_t status = Init(); status != ZX_OK) {
@@ -1708,6 +2253,9 @@ zx::result<uint8_t> Ufs::ProgramKeySlot(fidl::VectorView<uint8_t> wrapped_key,
   if (du < kMinCryptoDataUnitSize || du > kMaxCryptoDataUnitSize || !std::has_single_bit(du)) {
     return zx::error(ZX_ERR_INVALID_ARGS);
   }
+  if (zx::result<> wake = WakeFromRuntimeSleep(); wake.is_error()) {
+    return wake.take_error();
+  }
   auto result = inline_encryption_client_->ProgramKeySlot(wrapped_key, data_unit_size);
   if (!result.ok()) {
     return zx::error(result.status());
@@ -1729,13 +2277,19 @@ zx::result<uint8_t> Ufs::ProgramKeySlot(fidl::VectorView<uint8_t> wrapped_key,
 
 zx::result<> Ufs::ConfigureCryptoSlot(uint8_t slot, uint32_t data_unit_size) {
   ZX_DEBUG_ASSERT(slot < kMaxCryptoSlots);
-  // CRYPTOCFG lives in the UFSHCI register space, which is gated during a PowerDown suspend.
-  std::lock_guard<std::mutex> lock(uic_lock_);
-  if (IsHardwarePoweredOff()) {
-    return zx::error(ZX_ERR_BAD_STATE);
+  if (zx::result<> wake = WakeFromRuntimeSleep(); wake.is_error()) {
+    return wake.take_error();
   }
-  WriteCryptoConfigLocked(slot, data_unit_size);
-  crypto_slot_data_unit_size_[slot] = data_unit_size;
+  {
+    // CRYPTOCFG lives in the UFSHCI register space, which is gated during a PowerDown suspend.
+    ScopedLinkActive link_active(*this);
+    std::scoped_lock lock(uic_lock_);
+    if (IsHardwarePoweredOff()) {
+      return zx::error(ZX_ERR_BAD_STATE);
+    }
+    WriteCryptoConfigLocked(slot, data_unit_size);
+    crypto_slot_data_unit_size_[slot] = data_unit_size;
+  }
   return zx::ok();
 }
 
@@ -1769,6 +2323,7 @@ zx::result<> Ufs::RestoreCryptoState() {
 
   uint32_t restored_slots = 0;
   {
+    ScopedLinkActive link_active(*this);
     std::lock_guard<std::mutex> lock(uic_lock_);
     if (IsHardwarePoweredOff()) {
       return zx::error(ZX_ERR_BAD_STATE);
@@ -1786,13 +2341,15 @@ zx::result<> Ufs::RestoreCryptoState() {
     return zx::ok();
   }
 
-  // TODO(https://fxbug.dev/568465123): CRYPTOCFG has been rewritten above, but the key material in
-  // the host controller's key table is also lost across PowerDown and must be re-pushed by the
-  // inline encryption provider (e.g. GSA KDN RESTORE_KEYS on Iris) before encrypted I/O can be
-  // resumed. Until that is plumbed through fuchsia.hardware.inlineencryption, fail resume rather
-  // than let encrypted I/O silently proceed with an empty key table. DeviceManager::SuspendPower()
-  // falls back to Sleep when keys are programmed, so this is not reachable in practice.
-  fdf::error("Cannot restore {} inline encryption key(s) after PowerDown suspend", restored_slots);
+  // TODO(https://fxbug.dev/568465123): CRYPTOCFG has been rewritten above, but HCE = 0 also clears
+  // the key material in the host controller's key table, and that must be re-pushed by the
+  // platform inline encryption provider (the driver never holds the keys) before encrypted I/O
+  // can resume. Until a provider-side key restore is plumbed through the PHY protocol (part of
+  // https://fxbug.dev/527952709), fail the resume rather than let encrypted I/O silently proceed
+  // with an empty key table. DeviceManager::SuspendPower() falls back to Sleep when keys are
+  // programmed, so normal suspend/resume avoids reaching this.
+  fdf::error("Cannot restore {} inline encryption key(s) after a host controller reset",
+             restored_slots);
   return zx::error(ZX_ERR_NOT_SUPPORTED);
 }
 
@@ -1811,6 +2368,14 @@ zx::result<std::vector<uint8_t>> Ufs::DeriveRawSecret(fidl::VectorView<uint8_t> 
   return zx::ok(std::vector<uint8_t>(secret.begin(), secret.end()));
 }
 
+void Ufs::OnExceptionDispatcherShutdown() {
+  // Hop back to the driver dispatcher: StopResources() blocks on the UFSHCI server shutdown and on
+  // synchronous PHY calls, which must not run from inside a dispatcher shutdown observer.
+  if (async::PostTask(dispatcher(), [this] { FinishStopWorkers(); }) != ZX_OK) {
+    FinishStopWorkers();
+  }
+}
+
 void Ufs::OnDispatcherShutdown() {
   std::optional<fdf::StopCompleter> completer;
   {
@@ -1826,9 +2391,18 @@ void Ufs::OnDispatcherShutdown() {
   }
 }
 
-void Ufs::FinishStop(fdf::StopCompleter completer) {
+void Ufs::FinishStopWorkers() {
   if (zx_status_t status = StopResources(); status != ZX_OK) {
-    completer(zx::error(status));
+    std::optional<fdf::StopCompleter> completer;
+    {
+      std::scoped_lock lock(lock_);
+      if (auto old = std::exchange(stop_completer_, std::nullopt); old.has_value()) {
+        completer.emplace(std::move(*old));
+      }
+    }
+    if (completer.has_value()) {
+      (*completer)(zx::error(status));
+    }
     return;
   }
 
@@ -1837,8 +2411,6 @@ void Ufs::FinishStop(fdf::StopCompleter completer) {
   }
 
   uint32_t dispatchers_to_shutdown = 0;
-  if (exception_event_dispatcher_.get())
-    dispatchers_to_shutdown++;
   if (irq_worker_dispatcher_.get())
     dispatchers_to_shutdown++;
   if (io_worker_dispatcher_.get())
@@ -1847,19 +2419,24 @@ void Ufs::FinishStop(fdf::StopCompleter completer) {
     dispatchers_to_shutdown++;
 
   if (dispatchers_to_shutdown == 0) {
-    completer(zx::ok());
+    std::optional<fdf::StopCompleter> completer;
+    {
+      std::scoped_lock lock(lock_);
+      if (auto old = std::exchange(stop_completer_, std::nullopt); old.has_value()) {
+        completer.emplace(std::move(*old));
+      }
+    }
+    if (completer.has_value()) {
+      (*completer)(zx::ok());
+    }
     return;
   }
 
   {
     std::lock_guard<std::mutex> lock(lock_);
-    stop_completer_.emplace(std::move(completer));
     pending_dispatcher_shutdowns_ = dispatchers_to_shutdown;
   }
 
-  if (exception_event_dispatcher_.get()) {
-    exception_event_dispatcher_.ShutdownAsync();
-  }
   if (irq_worker_dispatcher_.get()) {
     irq_worker_dispatcher_.ShutdownAsync();
   }
@@ -1869,6 +2446,21 @@ void Ufs::FinishStop(fdf::StopCompleter completer) {
   if (admin_worker_dispatcher_.get()) {
     admin_worker_dispatcher_.ShutdownAsync();
   }
+}
+
+void Ufs::FinishStop(fdf::StopCompleter completer) {
+  {
+    std::scoped_lock lock(lock_);
+    stop_completer_.emplace(std::move(completer));
+  }
+  // Shut down exception_event_dispatcher_ first so any in-progress runtime idle timer or runtime
+  // wake task finishes before StopResources() and irq_.destroy() tear down the IRQ and worker
+  // dispatchers.
+  if (exception_event_dispatcher_.get()) {
+    exception_event_dispatcher_.ShutdownAsync();
+    return;
+  }
+  FinishStopWorkers();
 }
 
 void Ufs::Stop(fdf::StopCompleter completer) {

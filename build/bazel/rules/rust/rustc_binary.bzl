@@ -10,7 +10,13 @@ load(
     "wrap_rust_macro_args_with_build_flags",
 )
 load("@rules_rust//rust:defs.bzl", "rust_binary")
-load("//build/bazel/rules/rust:common.bzl", "with_fuchsia_rust_stdlib_link_deps", "with_fuchsia_rust_tags", "with_fuchsia_rustc_flags")
+load(
+    "//build/bazel/rules/rust:common.bzl",
+    "with_fuchsia_rust_link_exec_properties",
+    "with_fuchsia_rust_stdlib_link_deps",
+    "with_fuchsia_rust_tags",
+    "with_fuchsia_rustc_flags",
+)
 load("//build/bazel/rules/rust:generate_unit_tests.bzl", "generate_unit_tests")
 
 def _rustc_binary_impl(
@@ -25,7 +31,9 @@ def _rustc_binary_impl(
         visibility,
         **kwargs):
     if lint_config == None:
-        lint_config = "//build/config/rust/lints:clippy_warn_production"
+        lint_config = (
+            "//build/config/rust/lints:clippy_warn_default" if kwargs.get("testonly") else "//build/config/rust/lints:clippy_warn_production"
+        )
         test_lint_config = "//build/config/rust/lints:clippy_warn_default"
     else:
         test_lint_config = lint_config
@@ -39,6 +47,9 @@ def _rustc_binary_impl(
         rust_rule_name = "rust_binary",
         build_flags = build_flags,
         target_type = "rust_executable",
+        default_build_flags = [
+            Label("//build/config/fuchsia:maybe_scudo_default_options"),
+        ],
     )
 
     rust_binary(
@@ -46,6 +57,7 @@ def _rustc_binary_impl(
         lint_config = lint_config,
         visibility = visibility,
         **(binary_kwargs | {
+            "exec_properties": with_fuchsia_rust_link_exec_properties(binary_kwargs.get("exec_properties")),
             "link_deps": with_fuchsia_rust_stdlib_link_deps(binary_kwargs.get("link_deps")),
         })
     )
@@ -81,7 +93,8 @@ with_unit_tests is enabled. The test target will be named "<name>_test"
 and will include extra dependencies from test_deps.
 
 The default lint_config value is //build/config/rust/lints:clippy_warn_production
-for the target, and //build/config/rust/lints:clippy_warn_default for the test target.
+for non-testonly targets, and //build/config/rust/lints:clippy_warn_default when
+testonly = True is set on the target or for the generated test target.
 If specified by the caller, lint_config is applied to both main and test targets.
 
 Also used to allow easier syncing between Bazel and GN targets.

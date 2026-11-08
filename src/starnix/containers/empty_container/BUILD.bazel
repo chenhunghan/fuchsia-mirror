@@ -26,7 +26,6 @@ fx_package(
 fx_component(
     name = "empty_container_component",
     compiled_manifest = ":empty_container_manifest",
-    component_name = "empty_container",
     deps = [
         "//src/starnix/containers:default_init",
     ],

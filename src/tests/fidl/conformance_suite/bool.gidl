@@ -33,3 +33,52 @@ decode_failure("BadInvalidBoolean") {
     },
     err = INVALID_BOOLEAN,
 }
+
+decode_failure("BadInvalidBooleanInArray") {
+    type = BoolArrayStruct,
+    bytes = {
+        v2 = [
+            0x01, 0x00, 0x02, 0x01, padding:4,
+        ],
+    },
+    err = INVALID_BOOLEAN,
+}
+
+decode_failure("BadInvalidBooleanInVector") {
+    // TODO(https://fxbug.dev/579638284): Fix uninitialized bool read on decode error in cpp.
+    bindings_denylist = [cpp],
+    type = BoolVectorStruct,
+    bytes = {
+        v2 = [
+            num(4):8,
+            repeat(0xff):8,
+            0x01, 0x00, 0x02, 0x01, padding:4,
+        ],
+    },
+    err = INVALID_BOOLEAN,
+}
+
+decode_failure("BadInvalidBooleanInTable") {
+    type = TableFieldUnsetFlexibleEnumInlinedStruct,
+    bytes = {
+        v2 = [
+            num(3):8,
+            repeat(0xff):8,
+            num(0):8,
+            num(0):8,
+            0x02, padding:3, num(0):2, num(1):2,
+        ],
+    },
+    err = INVALID_BOOLEAN,
+}
+
+decode_failure("BadInvalidBooleanInUnion") {
+    type = ReverseOrdinalUnionStruct,
+    bytes = {
+        v2 = [
+            num(2):8,
+            0x02, padding:3, num(0):2, num(1):2,
+        ],
+    },
+    err = INVALID_BOOLEAN,
+}

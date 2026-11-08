@@ -43,6 +43,9 @@ pub use zx_status::sys as __sys;
 /// Disabling a test can be done with a further annotation of #[ignore]. Such a
 /// test will still be compiled; it just will not contribute test metadata.
 ///
+/// Any other attributes on a test function (e.g., #[sanitize]) are applied to
+/// the generated test function, other than #[cfg], which is not supported.
+///
 /// # Example
 /// ```rust,ignore
 /// /// Brief test suite description.
@@ -83,6 +86,8 @@ pub struct ComparisonFailure<'a> {
 }
 
 #[doc(hidden)]
+#[cold]
+#[inline(never)]
 pub fn print_comparison_failure(failure: &ComparisonFailure<'_>) {
     kprintln!(
         "\n    [FAILED]\n    {:s}:{}:\n    expected {:s} ({}) {:s} {:s} ({})\n    {:s}",
@@ -98,6 +103,8 @@ pub fn print_comparison_failure(failure: &ComparisonFailure<'_>) {
 }
 
 #[doc(hidden)]
+#[cold]
+#[inline(never)]
 pub fn print_condition_failure(file: &str, line: u32, desc: &str, actual: &str, msg: &str) {
     kprintln!(
         "\n    [FAILED]\n    {:s}:{}:\n    {:s} {:s}\n    {:s}",
@@ -471,21 +478,24 @@ macro_rules! assert_nonnull {
 }
 
 #[doc(hidden)]
-pub fn status_name_and_raw<T>(res: Result<T, __Status>) -> (&'static str, core::ffi::c_int) {
+#[inline]
+pub fn status_name_and_raw(res: Result<(), __Status>) -> (&'static str, core::ffi::c_int) {
     match res {
-        Ok(_) => ("OK", __sys::ZX_OK),
+        Ok(()) => ("OK", __sys::ZX_OK),
         Err(err) => (err.as_str(), err.into_raw()),
     }
 }
 
 #[doc(hidden)]
-pub fn print_status_comparison_failure<T>(
+#[cold]
+#[inline(never)]
+pub fn print_status_comparison_failure(
     file: &str,
     line: u32,
     expected: &str,
-    expected_status: Result<T, __Status>,
+    expected_status: Result<(), __Status>,
     actual: &str,
-    actual_status: Result<T, __Status>,
+    actual_status: Result<(), __Status>,
     msg: &str,
 ) {
     let (expected_name, expected_raw) = status_name_and_raw(expected_status);
@@ -567,9 +577,10 @@ macro_rules! expect_err {
     };
     ($actual:expr, $expected_err:expr, $msg:expr) => {
         let a: Result<_, ::unittest::__Status> = $actual.into();
+        let a: Result<(), ::unittest::__Status> = a.map(core::mem::drop);
         let e: ::unittest::__Status = $expected_err.into();
         $crate::check_status_comparison!(
-            a.as_ref().is_err_and(|err| *err == e),
+            a == Err(e),
             false,
             $expected_err,
             Err(e),
@@ -589,9 +600,10 @@ macro_rules! assert_err {
     };
     ($actual:expr, $expected_err:expr, $msg:expr) => {
         let a: Result<_, ::unittest::__Status> = $actual.into();
+        let a: Result<(), ::unittest::__Status> = a.map(core::mem::drop);
         let e: ::unittest::__Status = $expected_err.into();
         $crate::check_status_comparison!(
-            a.as_ref().is_err_and(|err| *err == e),
+            a == Err(e),
             true,
             $expected_err,
             Err(e),
@@ -656,6 +668,9 @@ macro_rules! unwrap_some {
 /// Returns `bool`: `true` if all assertions in the subtest passed, `false` otherwise.
 #[macro_export]
 macro_rules! subtest {
+    (|| $body:block) => {
+        $crate::subtest!(| | $body)
+    };
     (|$($param:ident : $ty:ty),* $(,)?| $body:block) => {
         |$($param : $ty),*| -> bool {
             // Unused when the subtest body contains no soft assertions.
@@ -781,6 +796,17 @@ mod tests {
         fn normal_test() {}
     }
 
+    /// Suite with a test that has other attributes.
+    #[suite(name = "with_other_attributes")]
+    mod suite_with_other_attributes {
+        /// Test with an attribute that must be forwarded.
+        #[test]
+        #[expect(unused_variables)]
+        fn attributed_test() {
+            let unused = 0;
+        }
+    }
+
     /// Assertion tests description.
     #[suite]
     mod assertions {
@@ -805,6 +831,10 @@ mod tests {
             assert_ok!(Ok::<(), zx_status::Status>(()));
             assert_err!(
                 Err::<(), _>(zx_status::Status::INVALID_ARGS),
+                zx_status::Status::INVALID_ARGS
+            );
+            assert_err!(
+                Err::<Vec<i32>, _>(zx_status::Status::INVALID_ARGS),
                 zx_status::Status::INVALID_ARGS
             );
             assert_err!(zx_status::Status::INVALID_ARGS, zx_status::Status::INVALID_ARGS);
@@ -895,7 +925,7 @@ mod tests {
         /// Test that assert_err fails when error does not match.
         #[test]
         fn fail_assert_err() {
-            assert_err!(Ok::<(), _>(()), zx_status::Status::INTERNAL);
+            assert_err!(Ok::<Vec<i32>, _>(std::vec![1, 2, 3]), zx_status::Status::INTERNAL);
             mark_end_as_reached();
         }
 
@@ -947,6 +977,10 @@ mod tests {
             expect_ok!(Ok::<(), zx_status::Status>(()), "should be OK");
             expect_err!(
                 Err::<(), _>(zx_status::Status::INVALID_ARGS),
+                zx_status::Status::INVALID_ARGS
+            );
+            expect_err!(
+                Err::<Vec<i32>, _>(zx_status::Status::INVALID_ARGS),
                 zx_status::Status::INVALID_ARGS
             );
             expect_err!(
@@ -1038,7 +1072,7 @@ mod tests {
         /// Test that expect_err fails when error does not match.
         #[test]
         fn fail_expect_err() {
-            expect_err!(Ok::<(), _>(()), zx_status::Status::INTERNAL);
+            expect_err!(Ok::<Vec<i32>, _>(std::vec![1, 2, 3]), zx_status::Status::INTERNAL);
             mark_end_as_reached();
         }
     }
@@ -1062,7 +1096,7 @@ mod tests {
     #[test]
     fn check_suite_count() {
         let suites = get_suites();
-        std::assert_eq!(suites.len(), 6);
+        std::assert_eq!(suites.len(), 7);
     }
 
     #[test]
@@ -1176,5 +1210,18 @@ mod tests {
         std::assert_eq!(suite.test_cnt, 1);
         let case = unsafe { &*suite.tests };
         std::assert_eq!(unsafe { CStr::from_ptr(case.name) }.to_bytes(), b"normal_test");
+    }
+
+    #[test]
+    fn check_suite_with_other_attributes() {
+        let suites = get_suites();
+        std::assert!(suites.len() > 6);
+        let suite = &suites[6];
+
+        std::assert_eq!(unsafe { CStr::from_ptr(suite.name) }.to_bytes(), b"with_other_attributes");
+        std::assert_eq!(suite.test_cnt, 1);
+        let case = unsafe { &*suite.tests };
+        std::assert_eq!(unsafe { CStr::from_ptr(case.name) }.to_bytes(), b"attributed_test");
+        assert!((case.fn_)());
     }
 }

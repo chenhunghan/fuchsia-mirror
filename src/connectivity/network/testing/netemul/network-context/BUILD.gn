@@ -24,19 +24,21 @@ fuchsia_component("network-context") {
   testonly = true
   manifest = "meta/network-context.cml"
   deps = [ ":bin" ]
+  visibility = [
+    ":*",
+    "//src/connectivity/network/testing/netemul/service:*",
+  ]
 }
 
 fuchsia_component("network-test") {
   testonly = true
   manifest = "meta/network-test.cml"
-  deps = [
-    "lib:network_test_bin",
-    "//src/connectivity/network/tun/network-tun:component",
-  ]
+  deps = [ "lib:network_test_bin" ]
 }
 
 fuchsia_test_package("network-tests") {
   test_components = [ ":network-test" ]
+  subpackages = [ "//src/connectivity/network/tun/network-tun" ]
 }
 
 group("tests") {

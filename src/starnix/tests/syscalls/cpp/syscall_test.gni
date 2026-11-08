@@ -66,6 +66,11 @@ template("syscall_test") {
     _test_deps = []
   }
 
+  _test_defines = []
+  if (defined(invoker.defines)) {
+    _test_defines = invoker.defines
+  }
+
   _test_resources = []
   if (defined(invoker.resources)) {
     _test_resources = invoker.resources
@@ -176,6 +181,7 @@ template("syscall_test") {
       # TODO(https://fxbug.dev/297293167) enable ASan instrumentation for Linux binaries in Starnix
       exclude_toolchain_tags = [ "instrumented" ]
       sources = _test_sources
+      defines = _test_defines
       deps = _test_deps
       configs += _test_configs
     }
@@ -185,6 +191,7 @@ template("syscall_test") {
         exclude_toolchain_tags = [ "instrumented" ]
       }
       sources = _test_sources
+      defines = _test_defines
       deps = _test_deps
       configs += _test_configs
     }
@@ -193,6 +200,7 @@ template("syscall_test") {
                  "_test_binary_name",
                  "_host_test_label",
                  "_disable_sanitizers_on_host",
+                 "_test_defines",
                ])
   }
 

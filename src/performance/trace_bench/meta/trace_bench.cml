@@ -22,6 +22,16 @@
             startup: "eager",
         },
     ],
+    capabilities: [
+        // Enable trace event emission in #tracee for the streaming
+        // throughput benchmark (whereas trace_bench_many_providers.cml
+        // relies on the false default so its 20 providers stay idle).
+        {
+            config: "fuchsia.trace.test.EmitTraceData",
+            type: "bool",
+            value: true,
+        },
+    ],
     use: [
         {
             protocol: [
@@ -39,6 +49,11 @@
         {
             protocol: [ "fuchsia.tracing.provider.Registry" ],
             from: "#trace_manager",
+            to: "#tracee",
+        },
+        {
+            config: "fuchsia.trace.test.EmitTraceData",
+            from: "self",
             to: "#tracee",
         },
     ],

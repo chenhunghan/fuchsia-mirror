@@ -1,0 +1,28 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    tests = [":fidl_crates_bin_test"],
+    visibility = ["//examples:__pkg__"],
+)
+
+rustc_binary(
+    name = "fidl_crates_bin",
+    srcs = ["src/main.rs"],
+    edition = "2024",
+)
+
+host_rustc_test(
+    name = "fidl_crates_bin_test",
+    crate = ":fidl_crates_bin",
+    deps = [
+        "//examples/fidl/fuchsia.examples:fuchsia.examples_rust",
+    ],
+)

@@ -27,10 +27,6 @@ class DiagnosticsArchive : public DiagnosticsArchiveBase {
   void StreamDiagnostics(StreamDiagnosticsRequest& request,
                          StreamDiagnosticsCompleter::Sync& completer) override;
 
- protected:
-  async_dispatcher_t* dispatcher() const { return dispatcher_; }
-  std::unique_ptr<DiagnosticsBatchIteratorBase>& BatchIterator() { return batch_iterator_; }
-
  private:
   async_dispatcher_t* dispatcher_;
   std::unique_ptr<DiagnosticsBatchIteratorBase> batch_iterator_;
@@ -71,32 +67,11 @@ class DiagnosticsArchiveCaptureParameters : public DiagnosticsArchiveBase {
   fuchsia_diagnostics::StreamParameters* parameters_;
 };
 
-class DiagnosticsArchiveClosesArchiveConnection : public DiagnosticsArchiveBase {
- public:
-  // |fuchsia_diagnostics::ArchiveAccessor|
-  void StreamDiagnostics(StreamDiagnosticsRequest& request,
-                         StreamDiagnosticsCompleter::Sync& completer) override {
-    CloseConnection(ZX_ERR_PEER_CLOSED);
-  }
-};
-
 class DiagnosticsArchiveClosesIteratorConnection : public DiagnosticsArchiveBase {
  public:
   // |fuchsia_diagnostics::ArchiveAccessor|
   void StreamDiagnostics(StreamDiagnosticsRequest& request,
                          StreamDiagnosticsCompleter::Sync& completer) override;
-};
-
-class DiagnosticsArchiveClosesFirstIteratorConnection : public DiagnosticsArchive {
- public:
-  using DiagnosticsArchive::DiagnosticsArchive;
-
-  // |fuchsia_diagnostics::ArchiveAccessor|
-  void StreamDiagnostics(StreamDiagnosticsRequest& request,
-                         StreamDiagnosticsCompleter::Sync& completer) override;
-
- private:
-  bool is_first_{true};
 };
 
 }  // namespace stubs

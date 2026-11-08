@@ -162,6 +162,8 @@ class FlatlandObserverRegistryIntegrationTest : public ScenicCtfTest,
             .is_ok());
     EXPECT_EQ(CountReceivedFocusChains(), 0u);
     RunLoopUntil([this] { return CountReceivedFocusChains() >= 1u; });
+    EXPECT_EQ(CountReceivedFocusChains(), 1u);
+    EXPECT_FALSE(LastFocusChain()->focus_chain().has_value());
     observed_focus_chains_.clear();
 
     scoped_observer_registry_client_.Bind(ConnectIntoRealm<fuos::Registry>(), dispatcher());
@@ -212,10 +214,44 @@ class FlatlandObserverRegistryIntegrationTest : public ScenicCtfTest,
     RunLoopUntil([this] {
       return CountReceivedFocusChains() >= 1u && display_width_ != 0 && display_height_ != 0;
     });
-    EXPECT_TRUE(LastFocusChain()->focus_chain().has_value());
+    ASSERT_TRUE(LastFocusChain()->focus_chain().has_value());
+    root_view_focused_ = true;
     ASSERT_EQ(LastFocusChain()->focus_chain()->size(), 1u);
+    ASSERT_EQ(ExtractKoid(LastFocusChain()->focus_chain()->front()), root_view_ref_koid_);
 
     observed_focus_chains_.clear();
+  }
+
+  void TearDown() override {
+    // `TearDown()` requires the root view to still be attached so closing `root_session_`
+    // dispatches a fresh empty focus chain.
+    const bool can_await_empty_focus_chain =
+        root_view_focused_ && root_session_ && root_session_->is_bound() &&
+        (observed_focus_chains_.empty() || LastFocusChain()->focus_chain().has_value());
+    EXPECT_TRUE(root_session_ && root_session_->is_bound());
+    EXPECT_TRUE(root_view_focused_ &&
+                (observed_focus_chains_.empty() || LastFocusChain()->focus_chain().has_value()));
+    observed_focus_chains_.clear();
+
+    // Close the root Flatland session and its view-bound protocols.
+    root_session_.reset();
+    root_focuser_ = {};
+    scoped_observer_registry_client_ = {};
+
+    // Wait until Scenic tears down the scene, publishes an empty ViewTreeSnapshot,
+    // and FocusManager repairs the focus chain back to empty (focus_chain == std::nullopt).
+    // Because Scenic is shared across tests, awaiting the empty focus chain here prevents
+    // asynchronous session destruction from leaking into the next test's SetUp().
+    if (can_await_empty_focus_chain) {
+      RunLoopUntil([this] {
+        return CountReceivedFocusChains() >= 1u && !LastFocusChain()->focus_chain().has_value();
+      });
+    }
+
+    // Now that FocusManager's focus_chain_ is empty, unbind this test's listener.
+    focus_chain_listener_binding_.reset();
+
+    ScenicCtfTest::TearDown();
   }
 
   // Create a new transform and viewport, then call |BlockingPresent| to wait for it to take
@@ -272,6 +308,7 @@ class FlatlandObserverRegistryIntegrationTest : public ScenicCtfTest,
   fidl::Client<fuv::Focuser> root_focuser_;
 
  private:
+  bool root_view_focused_ = false;
   std::vector<fuf::FocusChain> observed_focus_chains_;
 
   // Owns the FocusChainListener binding for |this|. Last member, so it is destroyed first; a

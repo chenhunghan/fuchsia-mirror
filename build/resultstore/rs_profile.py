@@ -25,6 +25,11 @@ _ENV_RESULTS_URL = "RS_results_url"
 _ENV_AUTH_TYPE = "FX_BUILD_INTERNAL_RS_AUTH_TYPE"
 _ENV_PROFILE_NAME = "FX_BUILD_RS_PROFILE"
 
+# LINT.IfChange(resultstore_ninja_env_vars)
+# Environment variable controlling ResultStore enablement in Ninja build wrappers.
+ENV_RESULTSTORE_NINJA = "FX_INTERNAL_RESULTSTORE_NINJA"
+# LINT.ThenChange(//build/resultstore/fuchsia-rsproxy-wrap.sh:resultstore_ninja_env_vars)
+
 # Path relative to fuchsia directory for ResultStore profiles directory
 _PROFILES_DIR = Path("build/resultstore/profiles")
 

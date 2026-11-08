@@ -28,6 +28,10 @@ static_assert(static_cast<uint64_t>(MapFlags::kGrowable) == MAGMA_MAP_FLAG_GROWA
 static_assert(static_cast<uint64_t>(MapFlags::kVendorFlag0) == MAGMA_MAP_FLAG_VENDOR_0, "mismatch");
 using fuchsia_gpu_magma::wire::ImportFlags;
 static_assert(static_cast<uint64_t>(ImportFlags::kSemaphoreOneShot) == MAGMA_IMPORT_SEMAPHORE_ONE_SHOT, "mismatch");
+#if FUCHSIA_API_LEVEL_AT_LEAST(NEXT)
+using fuchsia_gpu_magma::wire::CreateBufferFlags;
+static_assert(static_cast<uint64_t>(CreateBufferFlags::kVendorFlag0) == MAGMA_BUFFER_FLAG_VENDOR_0, "mismatch");
+#endif
 
 // clang-format on
 
@@ -235,6 +239,38 @@ magma_status_t PrimaryWrapper::ReleaseObject(uint64_t object_id,
     UpdateFlowControl();
   }
   return magma::FromZxStatus(status).get();
+}
+
+magma_status_t PrimaryWrapper::CreateBuffer(uint64_t size, uint64_t flags, uint64_t object_id,
+                                            zx::vmo* vmo_out) {
+#if FUCHSIA_API_LEVEL_AT_LEAST(NEXT)
+  fidl::Arena allocator;
+  auto builder = fuchsia_gpu_magma::wire::PrimaryCreateBufferRequest::Builder(allocator);
+  builder.size(size).object_id(object_id).flags(
+      static_cast<fuchsia_gpu_magma::wire::CreateBufferFlags>(flags));
+
+  // This is a two-way call, so it isn't subject to flow control.
+  auto result = client_.sync()->CreateBuffer(builder.Build());
+  if (!result.ok()) {
+    return DRET_MSG(magma::FromZxStatus(result.status()).get(), "CreateBuffer failed: %s",
+                    result.FormatDescription().c_str());
+  }
+
+  if (result->is_error()) {
+    return DRET_MSG(magma::FromZxStatus(result->error_value()).get(), "CreateBuffer error: %d",
+                    result->error_value());
+  }
+
+  auto* response = result->value();
+  if (!response->has_buffer()) {
+    return DRET_MSG(MAGMA_STATUS_INTERNAL_ERROR, "CreateBuffer response missing buffer");
+  }
+
+  *vmo_out = std::move(response->buffer());
+  return MAGMA_STATUS_OK;
+#else
+  return MAGMA_STATUS_UNIMPLEMENTED;
+#endif
 }
 
 magma_status_t PrimaryWrapper::CreateContext(uint32_t context_id) {
@@ -570,6 +606,18 @@ class ZirconPlatformConnectionClient : public PlatformConnectionClient {
     if (result != MAGMA_STATUS_OK)
       return DRET_MSG(result, "failed to write to channel");
 
+    return MAGMA_STATUS_OK;
+  }
+
+  magma_status_t CreateBuffer(uint64_t size, uint64_t flags, uint64_t object_id,
+                              uint32_t* handle_out) override {
+    DLOG("ZirconPlatformConnectionClient: CreateBuffer");
+    zx::vmo vmo;
+    magma_status_t result = client_.CreateBuffer(size, flags, object_id, &vmo);
+    if (result != MAGMA_STATUS_OK)
+      return result;
+
+    *handle_out = vmo.release();
     return MAGMA_STATUS_OK;
   }
 

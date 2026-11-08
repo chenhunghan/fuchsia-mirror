@@ -7,16 +7,15 @@ import json
 import os
 import re
 import shutil
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).parent
-sys.path.insert(0, str(_SCRIPT_DIR))
 
-import bazel_tests_utils
-from build_utils import BazelPaths, MockCommandRunner
+from build.bazel.scripts import bazel_tests_utils
+from build.bazel.scripts.bazel_test_packages import export_path_for_manifest
+from build.bazel.scripts.build_utils import BazelPaths, MockCommandRunner
 
 
 class BazelTestsUtilsTest(unittest.TestCase):
@@ -328,9 +327,8 @@ class BazelTestsUtilsTest(unittest.TestCase):
             self.bazel_paths, command_runner=mock_runner
         ).tests
 
-        execroot_path = "gen/build/bazel/output_base/execroot/_main"
-        package_manifest = (
-            f"{execroot_path}/bazel-out/my_test/package_manifest.json"
+        package_manifest = export_path_for_manifest(
+            "bazel-out/my_test/package_manifest.json"
         )
         self.assertEqual(
             tests_json,
@@ -526,7 +524,6 @@ class BazelTestsUtilsTest(unittest.TestCase):
             "fuchsia-pkg://fuchsia.com/my-test-package#meta/my_test.cm",
         )
 
-        execroot_path = "gen/build/bazel/output_base/execroot/_main"
         packages_list = (
             self.bazel_paths.ninja_build_dir / "bazel_test_packages.list"
         )
@@ -535,7 +532,9 @@ class BazelTestsUtilsTest(unittest.TestCase):
             {
                 "content": {
                     "manifests": [
-                        f"{execroot_path}/bazel-out/my_test/package_manifest.json"
+                        export_path_for_manifest(
+                            "bazel-out/my_test/package_manifest.json"
+                        )
                     ]
                 },
                 "version": "1",
@@ -626,7 +625,6 @@ class BazelTestsUtilsTest(unittest.TestCase):
         # The barriered test is excluded from tests_json and grouped_tests, but
         # its package manifest is included in bazel_test_packages.list and its
         # BUILD.bazel is tracked in inputs.
-        execroot_path = "gen/build/bazel/output_base/execroot/_main"
         packages_list = (
             self.bazel_paths.ninja_build_dir / "bazel_test_packages.list"
         )
@@ -635,9 +633,15 @@ class BazelTestsUtilsTest(unittest.TestCase):
             {
                 "content": {
                     "manifests": [
-                        f"{execroot_path}/bazel-out/barriered_test/package_manifest.json",
-                        f"{execroot_path}/bazel-out/suite_test/package_manifest.json",
-                        f"{execroot_path}/bazel-out/top_test/package_manifest.json",
+                        export_path_for_manifest(
+                            "bazel-out/barriered_test/package_manifest.json"
+                        ),
+                        export_path_for_manifest(
+                            "bazel-out/suite_test/package_manifest.json"
+                        ),
+                        export_path_for_manifest(
+                            "bazel-out/top_test/package_manifest.json"
+                        ),
                     ]
                 },
                 "version": "1",
@@ -645,7 +649,7 @@ class BazelTestsUtilsTest(unittest.TestCase):
         )
         self.assertIn(barriered_build_file, inputs)
 
-    def test_generate_device_tests_json_max_log_severity(self) -> None:
+    def test_generate_device_tests_json_log_settings(self) -> None:
         self._setUpDeviceTests(["//fake/device_tests"])
 
         mock_runner = MockCommandRunner()
@@ -657,6 +661,7 @@ class BazelTestsUtilsTest(unittest.TestCase):
                     "os": "fuchsia",
                     "cpu": "riscv64",
                     "max_log_severity": "ERROR",
+                    "min_log_severity": "TRACE",
                     "test_components": [
                         {
                             "component_name": "my_test",
@@ -674,7 +679,7 @@ class BazelTestsUtilsTest(unittest.TestCase):
         self.assertEqual(len(tests_json), 1)
         self.assertEqual(
             tests_json[0]["test"]["log_settings"],
-            {"max_severity": "ERROR"},
+            {"max_severity": "ERROR", "min_severity": "TRACE"},
         )
         # Environments are resolved later by build_tests_json.py, for any CPU.
         self.assertEqual(tests_json[0]["environments"], [])
@@ -755,6 +760,108 @@ class BazelTestsUtilsTest(unittest.TestCase):
             "/core/testing/starnix-tests",
         )
         self.assertNotIn("realm", tests_json[1]["test"])
+
+    def test_generate_device_tests_json_create_no_exception_channel(
+        self,
+    ) -> None:
+        self._setUpDeviceTests(["//fake/device_tests"])
+
+        mock_runner = MockCommandRunner()
+        mock_runner.push_result(
+            stdout="\n".join(
+                [
+                    json.dumps(
+                        {
+                            "label": "@@//src/my_test:no_exc_test",
+                            "package_manifest_execroot_path": "bazel-out/no_exc_test/package_manifest.json",
+                            "os": "fuchsia",
+                            "cpu": "x64",
+                            "create_no_exception_channel": True,
+                            "test_components": [
+                                {
+                                    "component_name": "no_exc_test",
+                                    "package_url": "fuchsia-pkg://fuchsia.com/no-exc-test#meta/no_exc_test.cm",
+                                },
+                            ],
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "label": "@@//src/my_test:normal_test",
+                            "package_manifest_execroot_path": "bazel-out/normal_test/package_manifest.json",
+                            "os": "fuchsia",
+                            "cpu": "x64",
+                            "create_no_exception_channel": False,
+                            "test_components": [
+                                {
+                                    "component_name": "normal_test",
+                                    "package_url": "fuchsia-pkg://fuchsia.com/normal-test#meta/normal_test.cm",
+                                },
+                            ],
+                        }
+                    ),
+                ]
+            )
+        )
+
+        tests_json = bazel_tests_utils.generate_tests_json(
+            self.bazel_paths, command_runner=mock_runner
+        ).tests
+
+        self.assertEqual(len(tests_json), 2)
+        self.assertIs(
+            tests_json[0]["test"].get("create_no_exception_channel"), True
+        )
+        self.assertNotIn("create_no_exception_channel", tests_json[1]["test"])
+
+    def test_generate_device_tests_json_parallel(self) -> None:
+        self._setUpDeviceTests(["//fake/device_tests"])
+
+        mock_runner = MockCommandRunner()
+        mock_runner.push_result(
+            stdout="\n".join(
+                [
+                    json.dumps(
+                        {
+                            "label": "@@//src/my_test:serial_test",
+                            "package_manifest_execroot_path": "bazel-out/serial_test/package_manifest.json",
+                            "os": "fuchsia",
+                            "cpu": "x64",
+                            "parallel": 1,
+                            "test_components": [
+                                {
+                                    "component_name": "serial_test",
+                                    "package_url": "fuchsia-pkg://fuchsia.com/serial-test#meta/serial_test.cm",
+                                },
+                            ],
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "label": "@@//src/my_test:default_test",
+                            "package_manifest_execroot_path": "bazel-out/default_test/package_manifest.json",
+                            "os": "fuchsia",
+                            "cpu": "x64",
+                            "parallel": 0,
+                            "test_components": [
+                                {
+                                    "component_name": "default_test",
+                                    "package_url": "fuchsia-pkg://fuchsia.com/default-test#meta/default_test.cm",
+                                },
+                            ],
+                        }
+                    ),
+                ]
+            )
+        )
+
+        tests_json = bazel_tests_utils.generate_tests_json(
+            self.bazel_paths, command_runner=mock_runner
+        ).tests
+
+        self.assertEqual(len(tests_json), 2)
+        self.assertEqual(tests_json[0]["test"].get("parallel"), 1)
+        self.assertNotIn("parallel", tests_json[1]["test"])
 
     def test_generate_device_tests_json_build_file_inputs(self) -> None:
         self._setUpDeviceTests(["//fake/device_tests:suite"])
@@ -876,6 +983,57 @@ class BazelTestsUtilsTest(unittest.TestCase):
             bazel_tests_utils.generate_tests_json(
                 self.bazel_paths, command_runner=MockCommandRunner()
             )
+
+    def test_merges_host_tests_gn_targets_manifest(self) -> None:
+        self._setUpDeviceTests([])
+        host_tool = self.bazel_paths.ninja_build_dir / "host-tools/ffx"
+        host_tool.parent.mkdir(parents=True, exist_ok=True)
+        host_tool.write_text("#!/bin/sh\n")
+        host_spdx = self.bazel_paths.ninja_build_dir / "ffx.licenses.spdx.json"
+        host_spdx.write_text("{}")
+        (
+            self.bazel_paths.ninja_build_dir
+            / "host_tests.gn_targets_manifest.json"
+        ).write_text(
+            json.dumps(
+                [
+                    {
+                        "bazel_name": "test_data",
+                        "bazel_package": "toolchain_host_x64/src/developer/ffx",
+                        "generator_label": "//src/developer/ffx:host(//build/toolchain:host_x64)",
+                        "license_spdx_file": "ffx.licenses.spdx.json",
+                        "output_files": ["host-tools/ffx"],
+                    }
+                ]
+            )
+        )
+        (
+            self.bazel_paths.ninja_build_dir / "bazel_target_infos.json"
+        ).write_text(
+            json.dumps(
+                [
+                    {
+                        "bazel_target": "//build/bazel/target_tests:target_tests_stamp",
+                        "gn_targets_manifest": "target_tests.gn_targets_manifest.json",
+                    },
+                    {
+                        "bazel_target": "//build/bazel/host_tests:host_tests_stamp",
+                        "gn_targets_manifest": "host_tests.gn_targets_manifest.json",
+                    },
+                ]
+            )
+        )
+
+        bazel_tests_utils.generate_tests_json(
+            self.bazel_paths, command_runner=MockCommandRunner()
+        )
+
+        ffx_gn_targets_build = (
+            self.bazel_paths.ninja_build_dir
+            / "build/bazel/tests_json.gn_targets/toolchain_host_x64/src/developer/ffx/BUILD.bazel"
+        )
+        self.assertTrue(ffx_gn_targets_build.is_file())
+        self.assertIn("test_data", ffx_gn_targets_build.read_text())
 
     def test_write_bazel_test_packages_list_only_writes_if_changed(
         self,

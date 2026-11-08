@@ -39,6 +39,8 @@ namespace fidl::internal {
 
 struct WireCodingConstraintEmpty {};
 
+struct WireCodingConstraintNonZero {};
+
 template <zx_obj_type_t ObjType, zx_rights_t Rights, bool IsOptional>
 struct WireCodingConstraintHandle {
   static constexpr zx_obj_type_t obj_type = ObjType;
@@ -114,6 +116,31 @@ struct WireCodingTraits<bool, WireCodingConstraintEmpty, IsRecursive> {
       decoder->SetError(kCodingErrorInvalidBoolean);
       return;
     }
+  }
+};
+
+template <typename IntType>
+void WireEncodeNonZero(WireEncoder* encoder, const IntType* value, WirePosition position);
+
+template <typename IntType>
+void WireDecodeNonZero(WireDecoder* decoder, WirePosition position);
+
+template <typename T, bool IsRecursive>
+struct WireCodingTraits<T, WireCodingConstraintNonZero, IsRecursive,
+                        typename std::enable_if<IsInteger<T>::value>::type> {
+  using UnsignedT = std::make_unsigned_t<std::remove_cv_t<T>>;
+  static constexpr size_t kInlineSize =
+      WireCodingTraits<T, WireCodingConstraintEmpty, IsRecursive>::kInlineSize;
+  // Non-zero integers are not memcpy-compatible because they must be validated.
+  static constexpr bool kIsMemcpyCompatible = false;
+
+  static void Encode(WireEncoder* encoder, const T* value, WirePosition position,
+                     RecursionDepth<IsRecursive> recursion_depth) {
+    WireEncodeNonZero<UnsignedT>(encoder, reinterpret_cast<const UnsignedT*>(value), position);
+  }
+  static void Decode(WireDecoder* decoder, WirePosition position,
+                     RecursionDepth<IsRecursive> recursion_depth) {
+    WireDecodeNonZero<UnsignedT>(decoder, position);
   }
 };
 

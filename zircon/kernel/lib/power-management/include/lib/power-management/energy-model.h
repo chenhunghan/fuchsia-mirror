@@ -21,14 +21,17 @@
 
 #include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <utility>
 
 #ifdef _KERNEL
 #include <kernel/cpu.h>
+#include <kernel/ffi.h>
 #else
 using cpu_mask_t = uint64_t;
 constexpr cpu_mask_t cpu_num_to_mask(uint64_t num) { return cpu_mask_t{1} << num; }
@@ -38,36 +41,14 @@ constexpr cpu_mask_t cpu_num_to_mask(uint64_t num) { return cpu_mask_t{1} << num
 #include <fbl/ref_ptr.h>
 #include <fbl/vector.h>
 
-__BEGIN_CDECLS
-
-struct processor_power_level_ffi {
-  uint32_t options;
-  uint64_t processing_rate;
-  uint64_t power_coefficient_nw;
-  uint32_t control_interface;  // 0 = kArmWfi, 1 = kCpuDriver
-  uint64_t control_argument;
-  const char* diagnostic_name;
-};
-
-struct power_domain_config_ffi {
-  uint32_t domain_id;
-  uint64_t cpu_mask;
-  const processor_power_level_ffi* levels;
-  size_t level_count;
-};
-
-static_assert(sizeof(processor_power_level_ffi) == 48, "processor_power_level_ffi size mismatch");
-static_assert(alignof(processor_power_level_ffi) == 8, "processor_power_level_ffi align mismatch");
-
-static_assert(sizeof(power_domain_config_ffi) == 32, "power_domain_config_ffi size mismatch");
-static_assert(alignof(power_domain_config_ffi) == 8, "power_domain_config_ffi align mismatch");
-
-__END_CDECLS
-
 namespace power_management {
 
-// forward declaration.
+// forward declarations.
 class EnergyModel;
+class PowerDomain;
+class PowerDomainSet;
+class PowerLevel;
+class PowerLevelTransition;
 
 struct ProcessorPowerLevel {
   uint64_t options;
@@ -78,6 +59,15 @@ struct ProcessorPowerLevel {
   const char* diagnostic_name;
 };
 
+static_assert(sizeof(ProcessorPowerLevel) == 48);
+static_assert(alignof(ProcessorPowerLevel) == 8);
+static_assert(offsetof(ProcessorPowerLevel, options) == 0);
+static_assert(offsetof(ProcessorPowerLevel, processing_rate) == 8);
+static_assert(offsetof(ProcessorPowerLevel, power_coefficient_nw) == 16);
+static_assert(offsetof(ProcessorPowerLevel, control_interface) == 24);
+static_assert(offsetof(ProcessorPowerLevel, control_argument) == 32);
+static_assert(offsetof(ProcessorPowerLevel, diagnostic_name) == 40);
+
 struct ProcessorPowerLevelTransition {
   zx_duration_mono_t latency;
   uint64_t energy_nj;
@@ -85,7 +75,124 @@ struct ProcessorPowerLevelTransition {
   uint8_t to;
 };
 
-constexpr uint64_t kPowerLevelOptionsDomainIndependent = 1u << 0;
+static_assert(sizeof(ProcessorPowerLevelTransition) == 24);
+static_assert(alignof(ProcessorPowerLevelTransition) == 8);
+static_assert(offsetof(ProcessorPowerLevelTransition, latency) == 0);
+static_assert(offsetof(ProcessorPowerLevelTransition, energy_nj) == 8);
+static_assert(offsetof(ProcessorPowerLevelTransition, from) == 16);
+static_assert(offsetof(ProcessorPowerLevelTransition, to) == 17);
+
+constexpr uint64_t kPowerLevelOptionsDomainIndependent = 1ull << 0u;
+
+}  // namespace power_management
+
+#ifdef __clang__
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wreturn-type-c-linkage"
+#endif
+
+extern "C" {
+
+power_management::ProcessingRate rust_power_level_to_processing_rate(uint64_t processing_rate,
+                                                                     uint64_t max_processing_rate);
+uint64_t rust_power_level_from_processing_rate(power_management::ProcessingRate processing_rate,
+                                               uint64_t max_processing_rate);
+void rust_power_level_init(power_management::PowerLevel* out_level, uint8_t level_index,
+                           const power_management::ProcessorPowerLevel& level,
+                           uint64_t max_processing_rate);
+
+void rust_energy_model_init(power_management::EnergyModel* model);
+void rust_energy_model_move(power_management::EnergyModel* dst, power_management::EnergyModel* src);
+void rust_energy_model_move_assign(power_management::EnergyModel* dst,
+                                   power_management::EnergyModel* src);
+void rust_energy_model_destroy(power_management::EnergyModel* model);
+zx_status_t rust_energy_model_create(
+    const power_management::ProcessorPowerLevel* levels, size_t level_count,
+    const power_management::ProcessorPowerLevelTransition* transitions, size_t transition_count,
+    uint64_t max_processing_rate, power_management::EnergyModel& out_model);
+uint64_t rust_energy_model_max_processing_rate_scale(const power_management::EnergyModel* model);
+power_management::ProcessingRate rust_energy_model_to_processing_rate(
+    const power_management::EnergyModel* model, uint64_t processing_rate);
+uint64_t rust_energy_model_from_processing_rate(const power_management::EnergyModel* model,
+                                                power_management::ProcessingRate processing_rate);
+const power_management::PowerLevel* rust_energy_model_levels(
+    const power_management::EnergyModel* model, size_t* out_len);
+size_t rust_energy_model_idle_power_levels(const power_management::EnergyModel* model);
+bool rust_energy_model_max_idle_power_level(const power_management::EnergyModel* model,
+                                            uint8_t* out);
+bool rust_energy_model_max_idle_power_coefficient_nw(const power_management::EnergyModel* model,
+                                                     uint64_t* out);
+bool rust_energy_model_max_idle_power_level_interface(const power_management::EnergyModel* model,
+                                                      power_management::ControlInterface* out);
+power_management::ProcessingRate rust_energy_model_max_processing_rate(
+    const power_management::EnergyModel* model);
+const power_management::PowerLevelTransition* rust_energy_model_transitions(
+    const power_management::EnergyModel* model, size_t* out_len);
+bool rust_energy_model_find_power_level(const power_management::EnergyModel* model,
+                                        uint64_t interface_id, uint64_t control_argument,
+                                        uint8_t* out_level);
+const power_management::PowerLevel* rust_energy_model_find_active_power_level_for_rate(
+    const power_management::EnergyModel* model, power_management::ProcessingRate processing_rate);
+
+zx_status_t rust_power_domain_set_create(const fbl::RefPtr<power_management::PowerDomain>* domains,
+                                         size_t domain_count,
+                                         power_management::PowerDomainSet* out_set);
+void rust_power_domain_set_create_for_test(const fbl::RefPtr<power_management::PowerDomain>& domain,
+                                           power_management::PowerDomainSet* out_set);
+power_management::PowerDomain* rust_power_domain_set_find_by_domain_id(
+    const power_management::PowerDomainSet* set, uint32_t domain_id);
+power_management::PowerDomain* rust_power_domain_set_find_by_cpu_num(
+    const power_management::PowerDomainSet* set, uint32_t cpu_num);
+uint64_t rust_power_domain_set_lookup_active_power_coefficient(
+    const power_management::PowerDomainSet* set, uint32_t cpu_num,
+    power_management::ProcessingRate processing_rate);
+uint64_t rust_power_domain_set_lookup_power_cost(const power_management::PowerDomainSet* set,
+                                                 uint32_t cpu_num,
+                                                 power_management::ProcessingRate processing_rate);
+bool rust_power_domain_set_lookup_power_level(const power_management::PowerDomainSet* set,
+                                              uint32_t cpu_num,
+                                              power_management::ProcessingRate processing_rate,
+                                              uint8_t* out_level);
+power_management::Utilization rust_power_domain_set_lookup_total_normalized_utilization(
+    const power_management::PowerDomainSet* set, uint32_t cpu_num);
+size_t rust_power_domain_set_count(const power_management::PowerDomainSet* set);
+bool rust_power_domain_set_is_empty(const power_management::PowerDomainSet* set);
+
+void cpp_power_domain_recycle(power_management::PowerDomain* ptr);
+uint32_t cpp_power_domain_id(const power_management::PowerDomain* domain);
+uint64_t cpp_power_domain_cpus(const power_management::PowerDomain* domain);
+const power_management::EnergyModel* cpp_power_domain_model(
+    const power_management::PowerDomain* domain);
+const power_management::PowerLevelController* cpp_power_domain_controller(
+    const power_management::PowerDomain* domain);
+bool cpp_power_domain_scheduler_control_enabled(const power_management::PowerDomain* domain);
+void cpp_power_domain_set_scheduler_control_enabled(const power_management::PowerDomain* domain,
+                                                    bool enabled);
+const std::atomic<int64_t>* cpp_power_domain_total_normalized_utilization_ptr(
+    const power_management::PowerDomain* domain);
+
+#ifdef _KERNEL
+power_management::PowerDomain* cpp_power_domain_create(
+    uint32_t domain_id, uint64_t cpu_mask, power_management::EnergyModel* model,
+    power_management::PowerLevelController* controller);
+void cpp_power_management_set_power_domain_set(power_management::PowerDomainSet* domain_set);
+#ifdef UNITTESTS_ENABLED
+// Creates a test `PowerDomain` with a no-op `PowerLevelController` and returns a raw pointer
+// exported via `fbl::ExportToRawPtr` with an acquired reference count that must be adopted by the
+// caller (e.g., via `RefPtr::try_from_raw` in Rust) to avoid leaking the test domain, or `nullptr`
+// on allocation failure.
+power_management::PowerDomain* cpp_power_domain_create_for_test(
+    uint32_t domain_id, uint64_t cpu_mask, power_management::EnergyModel* model);
+#endif
+#endif
+
+}  // extern "C"
+
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
+
+namespace power_management {
 
 // Kernel representation of `zx_processor_power_level_t` with useful accessors and option support.
 class PowerLevel {
@@ -103,44 +210,17 @@ class PowerLevel {
   static constexpr uint64_t kUserProcessingRateScale = 1000u;
 
   // Normalizes an integer processing rate relative to the maximum rate.
-  static constexpr ProcessingRate ToProcessingRate(uint64_t processing_rate,
-                                                   uint64_t max_processing_rate) {
-    if (max_processing_rate == 0) {
-      return ProcessingRate{0};
-    }
-    return ffl::FromRatio<uint64_t>(processing_rate, max_processing_rate);
+  static ProcessingRate ToProcessingRate(uint64_t processing_rate, uint64_t max_processing_rate) {
+    return rust_power_level_to_processing_rate(processing_rate, max_processing_rate);
   }
-  static constexpr uint64_t FromProcessingRate(ProcessingRate processing_rate,
-                                               uint64_t max_processing_rate) {
-    return ffl::Round<uint64_t>(processing_rate * max_processing_rate);
+  static uint64_t FromProcessingRate(ProcessingRate processing_rate, uint64_t max_processing_rate) {
+    return rust_power_level_from_processing_rate(processing_rate, max_processing_rate);
   }
 
   constexpr PowerLevel() = default;
   explicit PowerLevel(uint8_t level_index, const ProcessorPowerLevel& level,
-                      uint64_t max_processing_rate = 0)
-      : options_(level.options),
-        control_(level.control_interface),
-        control_argument_(level.control_argument),
-        processing_rate_(ToProcessingRate(
-            level.processing_rate, max_processing_rate > 0
-                                       ? max_processing_rate
-                                       : (level.processing_rate > 0 ? level.processing_rate : 1))),
-        power_coefficient_nw_(level.power_coefficient_nw),
-        power_cost_nw_per_rate_(
-            level.processing_rate > 0
-                ? (level.power_coefficient_nw *
-                   (max_processing_rate > 0 ? max_processing_rate : level.processing_rate)) /
-                      level.processing_rate
-                : 0),
-        level_(level_index) {
-    if (level.diagnostic_name) {
-      size_t i = 0;
-      for (; i < name_.size() - 1 && level.diagnostic_name[i] != '\0'; ++i) {
-        name_[i] = level.diagnostic_name[i];
-      }
-      name_[i] = '\0';
-      name_len_ = i;
-    }
+                      uint64_t max_processing_rate = 0) {
+    rust_power_level_init(this, level_index, level, max_processing_rate);
   }
 
   // Power level type. Idle and Active power levels are orthogonal, that is, an entity may be idle
@@ -269,6 +349,13 @@ class PowerLevelTransition {
 
   // Amount of energy consumed to perform the transition.
   uint64_t energy_cost_nj_ = std::numeric_limits<uint64_t>::max();
+
+  static void CheckLayout() {
+    static_assert(sizeof(PowerLevelTransition) == 16);
+    static_assert(alignof(PowerLevelTransition) == 8);
+    static_assert(offsetof(PowerLevelTransition, latency_) == 0);
+    static_assert(offsetof(PowerLevelTransition, energy_cost_nj_) == 8);
+  }
 };
 
 // Represents a view of the `zx_processor_power_level_transition_t` array as
@@ -311,21 +398,42 @@ struct TransitionMatrix {
 // count to detect stale values derived from the previous energy model.
 class EnergyModel {
  public:
+  static constexpr size_t kStorageSize = 88;
+
   static zx::result<EnergyModel> Create(std::span<const ProcessorPowerLevel> levels,
                                         std::span<const ProcessorPowerLevelTransition> transitions,
-                                        uint64_t max_processing_rate = 0);
+                                        uint64_t max_processing_rate = 0) {
+    EnergyModel model;
+    const zx_status_t status =
+        rust_energy_model_create(levels.data(), levels.size(), transitions.data(),
+                                 transitions.size(), max_processing_rate, model);
+    if (status != ZX_OK) {
+      return zx::error(status);
+    }
+    return zx::ok(std::move(model));
+  }
 
-  EnergyModel() = default;
+  EnergyModel() { rust_energy_model_init(this); }
   EnergyModel(const EnergyModel&) = delete;
-  EnergyModel(EnergyModel&&) = default;
+  EnergyModel& operator=(const EnergyModel&) = delete;
+  EnergyModel(EnergyModel&& other) noexcept { rust_energy_model_move(this, &other); }
+  EnergyModel& operator=(EnergyModel&& other) noexcept {
+    if (this != &other) {
+      rust_energy_model_move_assign(this, &other);
+    }
+    return *this;
+  }
+  ~EnergyModel() { rust_energy_model_destroy(this); }
 
   // Scale used to normalize raw integer rates into fixed-point ProcessingRate.
-  constexpr uint64_t max_processing_rate_scale() const { return max_processing_rate_scale_; }
-  constexpr ProcessingRate ToProcessingRate(uint64_t processing_rate) const {
-    return PowerLevel::ToProcessingRate(processing_rate, max_processing_rate_scale_);
+  uint64_t max_processing_rate_scale() const {
+    return rust_energy_model_max_processing_rate_scale(this);
   }
-  constexpr uint64_t FromProcessingRate(ProcessingRate processing_rate) const {
-    return PowerLevel::FromProcessingRate(processing_rate, max_processing_rate_scale_);
+  ProcessingRate ToProcessingRate(uint64_t processing_rate) const {
+    return rust_energy_model_to_processing_rate(this, processing_rate);
+  }
+  uint64_t FromProcessingRate(ProcessingRate processing_rate) const {
+    return rust_energy_model_from_processing_rate(this, processing_rate);
   }
 
   // All power levels described in the model, sorted by processing power and energy consumption.
@@ -333,20 +441,26 @@ class EnergyModel {
   // (1) The processing rate of power level i is less or equal than the processing rate of power
   // level j, where i <= j.
   //
-  // (2) The energy cost of power level i is less or equal than the processing rate of power level
-  // j, where i <= j.
-  constexpr std::span<const PowerLevel> levels() const { return power_levels_; }
+  // (2) The processing rate of power level i is equal to the processing rate of power level j and
+  // the energy cost of power level i is less than or equal to the energy cost of power level j,
+  // where i <= j.
+  std::span<const PowerLevel> levels() const {
+    size_t len = 0;
+    const PowerLevel* data = rust_energy_model_levels(this, &len);
+    return {data, len};
+  }
 
   // Following the same rules as `levels()` but returns only the set of power levels whose type is
   // `PowerLevel::Type::kIdle`. This set may be empty.
-  constexpr std::span<const PowerLevel> idle_levels() const {
-    return levels().subspan(0, idle_power_levels_);
+  std::span<const PowerLevel> idle_levels() const {
+    return levels().subspan(0, rust_energy_model_idle_power_levels(this));
   }
 
   // Returns the idle power level with the maximum power consumption.
-  constexpr std::optional<uint8_t> max_idle_power_level() const {
-    if (idle_power_levels_ > 0) {
-      return idle_power_levels_ - 1;
+  std::optional<uint8_t> max_idle_power_level() const {
+    uint8_t level = 0;
+    if (rust_energy_model_max_idle_power_level(this, &level)) {
+      return level;
     }
     return std::nullopt;
   }
@@ -354,72 +468,70 @@ class EnergyModel {
   // Returns the power coefficient of the idle power level with the maximum power consumption. This
   // idle power level typically corresponds to clock gating, such that the power consumption is
   // almost entirely leakage power loss.
-  constexpr std::optional<uint64_t> max_idle_power_coefficient_nw() const {
-    if (idle_power_levels_ > 0) {
-      return power_levels_[idle_power_levels_ - 1].power_coefficient_nw();
+  std::optional<uint64_t> max_idle_power_coefficient_nw() const {
+    uint64_t coeff = 0;
+    if (rust_energy_model_max_idle_power_coefficient_nw(this, &coeff)) {
+      return coeff;
     }
     return std::nullopt;
   }
 
   // Returns the control interface of the idle power level with the maximum power consumption.
-  constexpr std::optional<ControlInterface> max_idle_power_level_interface() const {
-    if (idle_power_levels_ > 0) {
-      return power_levels_[idle_power_levels_ - 1].control();
+  std::optional<ControlInterface> max_idle_power_level_interface() const {
+    ControlInterface iface{};
+    if (rust_energy_model_max_idle_power_level_interface(this, &iface)) {
+      return iface;
     }
     return std::nullopt;
   }
 
   // Returns the processing rate of the fastest power level.
-  constexpr ProcessingRate max_processing_rate() const {
-    return levels().size() > 0 ? levels().back().processing_rate() : ProcessingRate{0};
-  }
+  ProcessingRate max_processing_rate() const { return rust_energy_model_max_processing_rate(this); }
 
   // Following the same rules as `levels()` but returns only the set of power levels whose type is
   // `PowerLevel::Type::kActive`. This set may be empty.
-  constexpr std::span<const PowerLevel> active_levels() const {
-    return levels().subspan(idle_power_levels_);
+  std::span<const PowerLevel> active_levels() const {
+    return levels().subspan(rust_energy_model_idle_power_levels(this));
   }
 
   // Returns a transition matrix, where the entry <i,j> represents the transition costs for
   // transitioning from i to j.
   TransitionMatrix transitions() const {
-    return TransitionMatrix(transitions_, power_levels_.size());
+    size_t len = 0;
+    const PowerLevelTransition* data = rust_energy_model_transitions(this, &len);
+    return TransitionMatrix({data, len}, levels().size());
   }
 
   std::optional<uint8_t> FindPowerLevel(ControlInterface interface_id,
-                                        uint64_t control_argument) const;
+                                        uint64_t control_argument) const {
+    uint8_t level = 0;
+    if (rust_energy_model_find_power_level(this, static_cast<uint64_t>(interface_id),
+                                           control_argument, &level)) {
+      return level;
+    }
+    return std::nullopt;
+  }
 
   // Returns the lowest active power level that is compatible with (i.e. has a
   // processing rate greater or equal to) the given processing rate. However, to
   // simplify power calculations, the maximum active power level is returned if
   // the given rate exceeds the maximum processing rate for the power domain.
-  const PowerLevel* FindActivePowerLevelForRate(ProcessingRate processing_rate) const;
+  const PowerLevel* FindActivePowerLevelForRate(ProcessingRate processing_rate) const {
+    return rust_energy_model_find_active_power_level_for_rate(this, processing_rate);
+  }
 
  private:
-  EnergyModel(fbl::Vector<PowerLevel> levels, fbl::Vector<PowerLevelTransition> transitions,
-              fbl::Vector<size_t> control_lookup, size_t idle_levels,
-              uint64_t max_processing_rate_scale)
-      : power_levels_(std::move(levels)),
-        transitions_(std::move(transitions)),
-        control_lookup_(std::move(control_lookup)),
-        idle_power_levels_(idle_levels),
-        max_processing_rate_scale_(max_processing_rate_scale) {}
+#ifdef _KERNEL
+  [[maybe_unused]] OpaqueStorage<kStorageSize, 8> storage_{};
+#else
+  [[maybe_unused]] alignas(8) uint8_t storage_[kStorageSize]{};
+#endif
 
-  fbl::Vector<PowerLevel> power_levels_;
-  fbl::Vector<PowerLevelTransition> transitions_;
-  fbl::Vector<size_t> control_lookup_;
-  size_t idle_power_levels_ = 0;
-  uint64_t max_processing_rate_scale_ = 1;
+  static void CheckLayout() {
+    static_assert(sizeof(EnergyModel) == 88);
+    static_assert(alignof(EnergyModel) == 8);
+  }
 };
-
-class PowerDomain;
-
-}  // namespace power_management
-
-extern "C" const std::atomic<int64_t>* cpp_power_domain_total_normalized_utilization_ptr(
-    const power_management::PowerDomain* domain);
-
-namespace power_management {
 
 // PowerDomain establishes the relationship between a set of CPUs, the energy
 // model that describes their characteristics, and the power level controller
@@ -470,7 +582,7 @@ class PowerDomain : public fbl::RefCounted<PowerDomain> {
 
   // Sets whether the kernel scheduler should send power level update requests through the control
   // interface. When set to false, the scheduler must not send requests to avoid confusing tests.
-  void SetSchedulerControlEnabled(bool enabled) {
+  void SetSchedulerControlEnabled(bool enabled) const {
     scheduler_control_enabled_.store(enabled, std::memory_order_relaxed);
   }
 
@@ -489,7 +601,7 @@ class PowerDomain : public fbl::RefCounted<PowerDomain> {
 
   const fbl::RefPtr<PowerLevelController> controller_ = nullptr;
 
-  std::atomic<bool> scheduler_control_enabled_ = false;
+  mutable std::atomic<bool> scheduler_control_enabled_ = false;
 };
 
 // Maintains an array of ref pointers to the power domains in the system. This is used for both the
@@ -514,25 +626,12 @@ class PowerDomainSet {
   // each domain has a non-zero CPU mask, and no two domains share a domain ID or
   // have intersecting CPU masks.
   static zx::result<PowerDomainSet> Create(std::span<const fbl::RefPtr<PowerDomain>> domains) {
-    if (domains.size() > kMaxPowerDomains) {
-      return zx::error(ZX_ERR_OUT_OF_RANGE);
+    PowerDomainSet set;
+    const zx_status_t status = rust_power_domain_set_create(domains.data(), domains.size(), &set);
+    if (status != ZX_OK) {
+      return zx::error(status);
     }
-
-    ArrayType array{};
-    for (size_t i = 0; i < domains.size(); ++i) {
-      const auto& domain = domains[i];
-      if (!domain || domain->cpus() == 0) {
-        return zx::error(ZX_ERR_INVALID_ARGS);
-      }
-      for (size_t j = 0; j < i; ++j) {
-        if (array[j]->id() == domain->id() || (array[j]->cpus() & domain->cpus()) != 0) {
-          return zx::error(ZX_ERR_INVALID_ARGS);
-        }
-      }
-      array[i] = domain;
-    }
-
-    return zx::ok(PowerDomainSet{std::move(array)});
+    return zx::ok(std::move(set));
   }
 
   static zx::result<PowerDomainSet> Create(
@@ -540,81 +639,48 @@ class PowerDomainSet {
     return Create(std::span<const fbl::RefPtr<PowerDomain>>{domains.begin(), domains.size()});
   }
 
-  // Creates a PowerDomainSet from a span of FFI domain configurations.
-  // Validates domain configs, determines system-wide peak rate normalization,
-  // creates an EnergyModel for each domain, binds to the corresponding
-  // PDevPowerLevelController, and constructs the PowerDomain instances.
-  static zx::result<PowerDomainSet> Create(std::span<const power_domain_config_ffi> domain_configs);
-
   // Creates a PowerDomainSet with the given PowerDomain as its only entry for testing.
   static PowerDomainSet CreateForTest(const fbl::RefPtr<PowerDomain>& domain) {
-    return PowerDomainSet{{domain}};
+    PowerDomainSet set;
+    rust_power_domain_set_create_for_test(domain, &set);
+    return set;
   }
 
   // Returns a borrowed pointer to the power domain with the given id, or nullptr if there isn't
   // one. Returns a raw pointer to avoid unnecessary ref count changes in contexts where the set is
   // guaranteed not to change and maintain the lifetime of its power domain elements.
   PowerDomain* FindByDomainId(uint32_t domain_id) const {
-    for (const auto& element : domains_) {
-      if (element && element->id() == domain_id) {
-        return element.get();
-      }
-    }
-    return nullptr;
+    return rust_power_domain_set_find_by_domain_id(this, domain_id);
   }
 
   // Returns a borrowed pointer to the power domain for the given CPU id, or nullptr if there isn't
   // one. Returns a raw pointer to avoid unnecessary ref count changes in contexts where the set is
   // guaranteed not to change and maintain the lifetime of its power domain elements.
   PowerDomain* FindByCpuNum(uint32_t cpu_num) const {
-    ZX_DEBUG_ASSERT(cpu_num < sizeof(cpu_mask_t) * 8);
-    const cpu_mask_t cpu_mask = cpu_num_to_mask(cpu_num);
-    for (const auto& element : domains_) {
-      if (element && (element->cpus() & cpu_mask)) {
-        return element.get();
-      }
-    }
-    return nullptr;
+    return rust_power_domain_set_find_by_cpu_num(this, cpu_num);
   }
 
   // Looks up the active power coefficient for the given CPU operating at the given processing rate.
   // Returns 0 if there is no power domain for the given CPU or if there is no active power level
   // that lower bounds the given processing rate.
   uint64_t LookupActivePowerCoefficient(uint32_t cpu_num, ProcessingRate processing_rate) const {
-    if (const PowerDomain* power_domain = FindByCpuNum(cpu_num)) {
-      if (const PowerLevel* power_level =
-              power_domain->model().FindActivePowerLevelForRate(processing_rate)) {
-        return power_level->power_coefficient_nw();
-      }
-    }
-    return 0u;
+    return rust_power_domain_set_lookup_active_power_coefficient(this, cpu_num, processing_rate);
   }
 
   uint64_t LookupPowerCost(uint32_t cpu_num, ProcessingRate processing_rate) const {
-    if (const PowerDomain* power_domain = FindByCpuNum(cpu_num)) {
-      if (const PowerLevel* power_level =
-              power_domain->model().FindActivePowerLevelForRate(processing_rate)) {
-        return power_level->power_cost_nw_per_rate();
-      }
-    }
-    return 0u;
+    return rust_power_domain_set_lookup_power_cost(this, cpu_num, processing_rate);
   }
 
   std::optional<uint8_t> LookupPowerLevel(uint32_t cpu_num, ProcessingRate processing_rate) const {
-    if (PowerDomain* power_domain = FindByCpuNum(cpu_num)) {
-      if (const PowerLevel* power_level =
-              power_domain->model().FindActivePowerLevelForRate(processing_rate)) {
-        return power_level->level();
-      }
+    uint8_t level = 0;
+    if (rust_power_domain_set_lookup_power_level(this, cpu_num, processing_rate, &level)) {
+      return level;
     }
     return std::nullopt;
   }
 
   Utilization LookupTotalNormalizedUtilization(uint32_t cpu_num) const {
-    if (const PowerDomain* power_domain = FindByCpuNum(cpu_num)) {
-      return power_domain->total_normalized_utilization();
-    }
-    return Utilization{0};
+    return rust_power_domain_set_lookup_total_normalized_utilization(this, cpu_num);
   }
 
   // Visits each non-empty power domain element with the given callable.
@@ -636,18 +702,12 @@ class PowerDomainSet {
   constexpr const ArrayType& domains() const { return domains_; }
 
   // Returns the count of non-empty array elements.
-  constexpr size_t count() const {
-    return std::ranges::count_if(domains_.begin(), domains_.end(),
-                                 [](const auto& element) { return bool{element}; });
-  }
+  size_t count() const { return rust_power_domain_set_count(this); }
 
   // Returns true if all of the array elements are empty.
-  constexpr bool is_empty() const { return count() == 0u; }
+  bool is_empty() const { return rust_power_domain_set_is_empty(this); }
 
  private:
-  // Private constructor used by the testing named constructors.
-  explicit PowerDomainSet(ArrayType domains) : domains_{std::move(domains)} {}
-
   ArrayType domains_;
 
   static void CheckLayout() {
@@ -660,42 +720,5 @@ class PowerDomainSet {
 };
 
 }  // namespace power_management
-
-__BEGIN_CDECLS
-
-zx_status_t cpp_power_management_register_domains(const power_domain_config_ffi* domains,
-                                                  size_t domain_count);
-
-zx_status_t cpp_power_management_set_rate_limits(uint64_t cpu_mask, uint64_t min_rate,
-                                                 uint64_t max_rate);
-
-bool cpp_power_management_boot_boost_enabled();
-
-void cpp_power_domain_recycle(power_management::PowerDomain* ptr);
-uint32_t cpp_power_domain_id(const power_management::PowerDomain* domain);
-uint64_t cpp_power_domain_cpus(const power_management::PowerDomain* domain);
-const power_management::EnergyModel* cpp_power_domain_model(
-    const power_management::PowerDomain* domain);
-const power_management::PowerLevelController* cpp_power_domain_controller(
-    const power_management::PowerDomain* domain);
-bool cpp_power_domain_scheduler_control_enabled(const power_management::PowerDomain* domain);
-
-bool cpp_power_level_controller_is_serving(
-    const power_management::PowerLevelController* controller);
-power_management::ControlInterface cpp_power_level_controller_control_interface(
-    const power_management::PowerLevelController* controller);
-zx_status_t cpp_power_level_controller_get_current_power_level(
-    const power_management::PowerLevelController* controller, uint32_t domain_id,
-    uint64_t* out_level);
-
-const power_management::PowerLevel* cpp_energy_model_levels_data(
-    const power_management::EnergyModel* model);
-size_t cpp_energy_model_levels_size(const power_management::EnergyModel* model);
-size_t cpp_energy_model_idle_levels_size(const power_management::EnergyModel* model);
-bool cpp_energy_model_find_power_level(const power_management::EnergyModel* model,
-                                       power_management::ControlInterface interface_id,
-                                       uint64_t control_argument, uint8_t* out_level);
-
-__END_CDECLS
 
 #endif  // ZIRCON_KERNEL_LIB_POWER_MANAGEMENT_INCLUDE_LIB_POWER_MANAGEMENT_ENERGY_MODEL_H_

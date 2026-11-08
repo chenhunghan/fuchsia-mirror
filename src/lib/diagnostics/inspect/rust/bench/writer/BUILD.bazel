@@ -1,0 +1,59 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "writer-bin",
+    srcs = ["src/main.rs"],
+    crate_name = "inspect_rust_writer_benchmarks",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:paste",
+    ],
+    tags = ["manual"],
+    deps = [
+        "//src/developer/fuchsia-criterion",
+        "//src/lib/diagnostics/inspect/format/rust:lib",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/diagnostics/inspect/rust/bench/utils:fuchsia_inspect_bench_utils",
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:num-traits",
+        "//third_party/rust_crates/vendor:rand",
+    ],
+)
+
+fx_packaged_binary(
+    name = "writer-bin_packaged_bin",
+    binary = ":writer-bin",
+    binary_name = "inspect_rust_writer_benchmarks",
+)
+
+fx_component_manifest(
+    name = "writer-component-manifest",
+    component_name = "writer",
+    includes = [
+        "//src/lib/diagnostics/inspect/rust/bench/meta:benchmark.shard",
+    ],
+    manifest = "meta/writer.cml",
+)
+
+fx_component(
+    name = "writer-component",
+    compiled_manifest = ":writer-component-manifest",
+    visibility = ["//src/lib/diagnostics/inspect/rust/bench:__pkg__"],
+    deps = [":writer-bin_packaged_bin"],
+)

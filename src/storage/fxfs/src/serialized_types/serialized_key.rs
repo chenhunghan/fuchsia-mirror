@@ -475,7 +475,7 @@ mod tests {
     use super::*;
     use crate::lsm_tree::types::OrdUpperBound;
     use crate::object_store::allocator::AllocatorKey;
-    use crate::object_store::object_record::{ObjectKey, ObjectKeyData};
+    use crate::object_store::object_record::{ObjectKey, ObjectKeyData, PosixOwner};
     use crate::object_store::{AttributeId, Extent};
 
     #[test]
@@ -511,6 +511,13 @@ mod tests {
         keys.push(ObjectKey::extent(2, AttributeId::TEST_ID, 100 * 512..200 * 512));
         keys.push(ObjectKey::extent(1, AttributeId::TEST_ID, 0..100 * 512));
         keys.push(ObjectKey::extent(1, AttributeId::TEST_ID, 50 * 512..100 * 512));
+
+        // PosixOwner edge cases
+        keys.push(ObjectKey::posix_owner_usage(1, PosixOwner::User(0)));
+        keys.push(ObjectKey::posix_owner_usage(1, PosixOwner::User(1000)));
+        keys.push(ObjectKey::posix_owner_usage(1, PosixOwner::Group(0)));
+        keys.push(ObjectKey::posix_owner_usage(1, PosixOwner::Group(1000)));
+        keys.push(ObjectKey::posix_owner_usage(2, PosixOwner::User(1000)));
 
         // Compare all pairs. We compare against `cmp_upper_bound` which is now a total order
         // for ranges (comparing end then start), matching serialization order.

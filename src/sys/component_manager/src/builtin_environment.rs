@@ -683,8 +683,12 @@ impl BuiltinEnvironment {
         // Set up Boot Controller service.
         let node = params.inspector.root().create_child("boot");
         let boot_controller = BootController::new(node);
+        let boot_notifier = boot_controller.clone();
         root_input_builder.add_builtin_protocol_if_enabled::<fsys::BootControllerMarker>(
             move |stream| boot_controller.clone().serve(stream).boxed(),
+        );
+        root_input_builder.add_builtin_protocol_if_enabled::<fsys::BootNotifierMarker>(
+            move |stream| boot_notifier.clone().serve_notifier(stream).boxed(),
         );
 
         root_input_builder.add_event_stream_capabilities();

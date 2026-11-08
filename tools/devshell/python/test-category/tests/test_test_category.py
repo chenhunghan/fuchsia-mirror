@@ -88,6 +88,14 @@ class TestTestCategory(unittest.IsolatedAsyncioTestCase):
             shutil.copy(
                 metadata_path, os.path.join(outdir, "testing_metadata.json")
             )
+            ownership_path = os.path.join(
+                os.path.dirname(metadata_path), "directory_owners.json"
+            )
+            if os.path.exists(ownership_path):
+                shutil.copy(
+                    ownership_path,
+                    os.path.join(outdir, "directory_owners.json"),
+                )
 
             print(f"Stored artifacts in {outdir}")
         else:

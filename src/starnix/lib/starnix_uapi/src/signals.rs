@@ -4,6 +4,7 @@
 
 use crate::errors::{Errno, errno, error};
 use crate::sigset_t;
+use fuchsia_rcu::RcuDroppable;
 use linux_uapi as uapi;
 use static_assertions::assert_eq_size;
 use std::fmt;
@@ -42,7 +43,7 @@ impl From<u32> for UncheckedSignal {
 }
 
 /// The `Signal` struct represents a valid signal.
-#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, RcuDroppable)]
 pub struct Signal {
     number: u32,
 }

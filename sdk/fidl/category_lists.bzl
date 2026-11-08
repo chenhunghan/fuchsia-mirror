@@ -320,6 +320,9 @@ HOST_TOOL_FIDL_LIBRARY_ATOMS_LIST = [
 COMPAT_TEST_FIDL_LIBRARY_ATOMS_LIST = [
     # buildifier: keep sorted
     "//examples/fidl/fuchsia.examples:fuchsia.examples_idk",
+    "//sdk/ctf/tests/fidl/fuchsia.element/testing/fidl:fuchsia.element.test_idk",
+    "//sdk/ctf/tests/fidl/fuchsia.intl/testing/fidl:fuchsia.intl.test_idk",
+    "//sdk/ctf/tests/fidl/fuchsia.settings/testing/fidl:fuchsia.settings.test_idk",
     "//sdk/fidl/fuchsia.testing.harness:fuchsia.testing.harness_idk",
     "//sdk/fidl/fuchsia.ui.focus:fuchsia.ui.focus_idk",
     "//sdk/fidl/fuchsia.ui.observation.scope:fuchsia.ui.observation.scope_idk",
@@ -327,6 +330,7 @@ COMPAT_TEST_FIDL_LIBRARY_ATOMS_LIST = [
     "//sdk/fidl/fuchsia.ui.pointer.augment:fuchsia.ui.pointer.augment_idk",
     "//sdk/fidl/fuchsia.ui.test.conformance:fuchsia.ui.test.conformance_idk",
     "//sdk/fidl/fuchsia.ui.test.context:fuchsia.ui.test.context_idk",
+    "//src/diagnostics/archivist/tests/integration/realm_factory/fidl:fuchsia.archivist.test_idk",
     "//src/sys/pkg/tests/pkgdir/test_realm_proxy/fidl:fuchsia.pkg.test_idk",
 ]
 # LINT.ThenChange(fidl_category_lists.gni:compat_test_libraries)

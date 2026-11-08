@@ -15,8 +15,8 @@ use fidl_fuchsia_wlan_device_service as fidl_svc;
 use fuchsia_component::server::ServiceFs;
 use fuchsia_inspect::{Inspector, InspectorConfig};
 use futures::channel::mpsc;
-use futures::future::{BoxFuture, try_join5};
-use futures::{StreamExt, TryFutureExt, TryStreamExt};
+use futures::future::{BoxFuture, OptionFuture};
+use futures::{FutureExt, StreamExt, TryFutureExt, TryStreamExt};
 use log::{error, info};
 use std::sync::Arc;
 
@@ -54,6 +54,11 @@ async fn main() -> Result<(), Error> {
     let _inspect_server_task =
         inspect_runtime::publish(&inspector, inspect_runtime::PublishOptions::default());
     let cfg = wlandevicemonitor_config::Config::take_from_startup_handle();
+    // Enable redaction of BSSIDs/MAC addresses/SSIDs in logs and Inspect before anything
+    // else can log them. `enable()` installs masking synchronously; the returned future
+    // fetches the per-boot salt and is driven alongside the other futures below.
+    let redactor_fut =
+        OptionFuture::from(cfg.redact_network_identifiers.then(redactor_client::enable));
     inspector.root().record_child("config", |config_node| cfg.record_inspect(config_node));
     let ifaces_tree = Arc::new(inspect::IfacesTree::new(inspector.clone()));
     let inspect_tree = Arc::new(inspect::WlanMonitorTree::new(inspector));
@@ -102,14 +107,14 @@ async fn main() -> Result<(), Error> {
 
     let new_iface_fut = service::handle_new_iface_stream(&phys, &ifaces_wrapper, new_iface_stream);
 
-    let ((), (), (), (), ()) = try_join5(
+    let ((), (), (), (), (), _) = futures::try_join!(
         fidl_fut,
         phy_server.map_ok(|_: std::convert::Infallible| ()),
         watcher_fut.map_ok(|_: std::convert::Infallible| ()),
         phy_event_fut.map_ok(|_: std::convert::Infallible| ()),
         new_iface_fut,
-    )
-    .await?;
+        redactor_fut.map(Ok),
+    )?;
     error!("Exiting");
     // wlandevicemonitor should never exit. Return an error to trigger device reboot via the
     // component's `on_terminate: "reboot"` setting.

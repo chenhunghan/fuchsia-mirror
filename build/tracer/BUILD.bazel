@@ -1,0 +1,44 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# LINT.IfChange
+
+# TODO(https://fxbug.dev/346606208): Resolve mypy errors and enable type checking (enable_mypy = false in GN).
+host_py_test(
+    name = "action_tracer_test",
+    srcs = [
+        "action_tracer.py",
+        "action_tracer_test.py",
+    ],
+    imports = ["."],
+    visibility = ["//build:__pkg__"],
+)
+
+# TODO(https://fxbug.dev/346606208): Resolve mypy errors and enable type checking (enable_mypy = false in GN).
+host_py_test(
+    name = "output_cacher_test",
+    srcs = [
+        "output_cacher.py",
+        "output_cacher_test.py",
+    ],
+    imports = ["."],
+    visibility = ["//build:__pkg__"],
+)
+
+# TODO(https://fxbug.dev/346606208): Resolve mypy errors and enable type checking (enable_mypy = false in GN).
+host_py_test(
+    name = "restat_cacher_test",
+    srcs = [
+        "restat_cacher.py",
+        "restat_cacher_test.py",
+    ],
+    imports = ["."],
+    visibility = ["//build:__pkg__"],
+)
+
+# LINT.ThenChange(BUILD.gn)

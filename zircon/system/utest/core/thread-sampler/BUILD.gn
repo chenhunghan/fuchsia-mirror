@@ -2,9 +2,38 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+# Skip ThreadSampler.HighFrequency when Fuchsia or kernel coverage is enabled
+# (https://fxbug.dev/579382913). Also check `select_variant` directly in case a
+# targeted coverage selector instruments the kernel without setting
+# `is_fuchsia_coverage` on userspace toolchains.
+_skip_high_frequency_sampler_test = is_fuchsia_coverage
+foreach(_selector, select_variant) {
+  if (_selector != "$_selector") {
+    if (defined(_selector.variant) &&
+        _selector.variant == "${_selector.variant}" &&
+        !(defined(_selector.host) && _selector.host) &&
+        string_replace(_selector.variant, "coverage", "") !=
+        _selector.variant) {
+      _skip_high_frequency_sampler_test = true
+    }
+  } else {
+    _shortcut = _selector
+    if (get_path_info(_selector, "file") != _selector) {
+      _shortcut = get_path_info(_selector, "dir")
+    }
+    if (string_replace(_shortcut, "host_", "") == _shortcut &&
+        string_replace(_shortcut, "coverage", "") != _shortcut) {
+      _skip_high_frequency_sampler_test = true
+    }
+  }
+}
+
 source_set("thread-sampler") {
   testonly = true
   sources = [ "thread-sampler.cc" ]
+  if (_skip_high_frequency_sampler_test) {
+    defines = [ "SKIP_HIGH_FREQUENCY_SAMPLER_TEST=1" ]
+  }
   deps = [
     "..:needs-next",
     "../threads:test-thread",

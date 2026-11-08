@@ -2,19 +2,21 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
 
 package(default_applicable_licenses = ["//:license"])
 
 rustc_library(
-    name = "kgsl_libmagma",
+    name = "libmagma",
     srcs = [
         "kgsl_libmagma.rs",
         "lib.rs",
     ],
+    crate_name = "kgsl_libmagma",
     crate_root = "lib.rs",
     edition = "2024",
     lint_config = "//src/starnix/build:kernel_library_config",
+    visibility = ["//src/starnix/modules/kgsl:__pkg__"],
     deps = [
         "//sdk/rust/zx",
         "//src/starnix/lib/magma",

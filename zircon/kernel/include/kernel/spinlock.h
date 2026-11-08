@@ -32,6 +32,11 @@ enum class SpinLockOptions : uint32_t {
 };
 FBL_ENABLE_ENUM_BITS(SpinLockOptions)
 
+// Rust code uses its own implementation of SpinLockBase, in
+// //zircon/kernel/kernel/spinlock.rs, which places its fields at the same
+// offsets as this one (though it may be over-aligned, and so larger), so that a
+// lock may be acquired and released from either language, and must be kept in
+// sync with it.
 template <SpinLockOptions Options>
 class TA_CAP("mutex") SpinLockBase
     : public spin_tracing::LockNameStorage<spin_tracing::LockType::kSpinlock,
@@ -133,7 +138,7 @@ class TA_CAP("mutex") SpinLockBase
     Acquire(name);
   }
 
-  // Just like |Release|, but restores interrupt state before unlocking.
+  // Just like |Release|, but restores interrupt state after unlocking.
   void ReleaseIrqRestore(interrupt_saved_state_t state) TA_REL() {
     Release();
     arch_interrupt_restore(state);

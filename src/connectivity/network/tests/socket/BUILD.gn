@@ -264,8 +264,6 @@ socket_tests = [
 test_component_names = []
 
 socket_test_package_deps = [
-  "//src/connectivity/network/netstack3:component-debug",
-
   # dns_resolver is under test.
   "//src/connectivity/network/dns:component",
 
@@ -275,6 +273,9 @@ socket_test_package_deps = [
   # used to run tests with expectations.
   "//src/lib/testing/expectation:expectation_comparer",
 ]
+
+socket_test_subpackages =
+    [ "//src/connectivity/network/netstack3:package-debug" ]
 
 all_packages = []
 
@@ -302,6 +303,7 @@ foreach(test, socket_tests) {
       test_components = _test_components
       expectations = _expects_path
       deps = socket_test_package_deps
+      subpackages = socket_test_subpackages
       treatment_of_cases_with_error_logs = "SKIP_CASES_WITH_ERROR_LOGS"
     }
 
@@ -313,6 +315,7 @@ foreach(test, socket_tests) {
       test_components = _test_components
       expectations = _expects_path
       deps = socket_test_package_deps
+      subpackages = socket_test_subpackages
       treatment_of_cases_with_error_logs = "RUN_ONLY_CASES_WITH_ERROR_LOGS"
       test_specs = {
         log_settings = {
@@ -333,6 +336,7 @@ fuchsia_test_package("netstack-c-api-tests") {
     test_components += [ ":${test}_component" ]
   }
   deps = socket_test_package_deps
+  subpackages = socket_test_subpackages
 }
 
 all_packages += [ ":netstack-c-api-tests" ]

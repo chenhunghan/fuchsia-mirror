@@ -333,7 +333,7 @@ void JobDispatcher::UpdateSignalsLocked() {
 }
 
 JobPolicy JobDispatcher::GetPolicy() const {
-  Guard<CriticalMutex> guard{get_lock()};
+  Guard<CriticalMutex> guard{AssertOrderedLock, get_lock(), LockOrder()};
   return policy_;
 }
 
@@ -677,11 +677,6 @@ zx_status_t JobDispatcher::set_name(const char* name, size_t len) {
   canary_.Assert();
 
   return name_.set(name, len);
-}
-
-Exceptionate* JobDispatcher::exceptionate() {
-  canary_.Assert();
-  return &exceptionate_;
 }
 
 zx_status_t JobDispatcher::ForEachDebugExceptionate(

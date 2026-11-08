@@ -38,8 +38,6 @@ idk_cc_source_library(
     stable = True,
     target_compatible_with = ["@platforms//os:fuchsia"],
     visibility = [
-        "//build/sdk:__pkg__",
-        "//sdk:__pkg__",
         "//sdk/lib/async_patterns/cpp/tests:__pkg__",
         "//sdk/lib/async_patterns/testing/cpp:__pkg__",
         "//sdk/lib/driver/devicetree/manager:__pkg__",

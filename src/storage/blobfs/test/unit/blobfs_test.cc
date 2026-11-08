@@ -585,5 +585,63 @@ TEST_F(BlobfsTest, MemoryUse) {
   ADD_FAILURE() << "Unable to find nodemap VMO";
 }
 
+TEST_F(BlobfsTest, DestroyArmedTransactionDies) {
+  ASSERT_DEATH(
+      {
+        BlobTransaction transaction(/*die_on_mutation_failure=*/true);
+        transaction.AddTrimOperation({});
+      },
+      "BlobTransaction destroyed while armed with pending mutations!");
+}
+
+TEST_F(BlobfsTest, PartialFreeInodeFailurePanicsWhenDieOnMutationFailureEnabled) {
+  auto delivery_blob = TestDeliveryBlob::CreateUncompressed(64);
+  auto blob = CreateBlob(*blobfs(), delivery_blob);
+  ASSERT_OK(blob);
+
+  // Corrupt the in-memory inode so FreeInode() frees the primary node (mutating allocator and
+  // superblock state and arming BlobTransaction) and then fails internally when advancing to the
+  // invalid extent container.
+  {
+    auto inode = blobfs()->GetNode(blob->Ino());
+    ASSERT_OK(inode);
+    inode->extent_count = 2;
+    inode->header.next_node = blob->Ino();
+  }
+
+  ASSERT_DEATH(
+      { [[maybe_unused]] zx_status_t status = blob->QueueUnlink(); },
+      "BlobTransaction destroyed while armed with pending mutations!");
+
+  {
+    auto inode = blobfs()->GetNode(blob->Ino());
+    ASSERT_OK(inode);
+    inode->extent_count = 1;
+    inode->header.next_node = kMaxNodeId;
+  }
+}
+
+TEST_F(BlobfsTest, WriteFailurePanicsWhenDieOnMutationFailureEnabled) {
+  auto delivery_blob = TestDeliveryBlob::CreateUncompressed(64);
+  sync_completion_t completion;
+  blobfs()->Sync([&completion](zx_status_t status) {
+    EXPECT_OK(status);
+    sync_completion_signal(&completion);
+  });
+  ASSERT_OK(sync_completion_wait(&completion, zx::duration::infinite().get()));
+
+  ASSERT_DEATH(
+      {
+        device_->set_hook([](const BlockFifoRequest& req, const zx::vmo* _vmo) {
+          if (req.command.opcode == BLOCK_OPCODE_WRITE) {
+            return ZX_ERR_IO;
+          }
+          return ZX_OK;
+        });
+        [[maybe_unused]] auto res = CreateBlob(*blobfs(), delivery_blob);
+      },
+      "Mutation failure\\. Disk no longer consistent");
+}
+
 }  // namespace
 }  // namespace blobfs

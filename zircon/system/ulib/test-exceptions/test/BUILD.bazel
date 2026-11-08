@@ -1,0 +1,32 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":test-exceptions-test-pkg"],
+    visibility = ["//zircon/system/ulib:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "test-exceptions",
+    srcs = ["exception-catcher-test.cc"],
+    gn_output_name = "test-exceptions-test",
+    deps = [
+        "//sdk/lib/fdio",
+        "//zircon/system/ulib/test-exceptions",
+        "//zircon/system/ulib/zx",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "test-exceptions-test-pkg",
+    package_name = "test-exceptions-test",
+    unit_tests = [":test-exceptions"],
+)

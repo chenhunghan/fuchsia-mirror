@@ -171,36 +171,6 @@ source_set("file_backed_provider") {
   deps = [ "//sdk/lib/syslog/cpp" ]
 }
 
-source_set("system_log") {
-  sources = [
-    "system_log.cc",
-    "system_log.h",
-  ]
-
-  public_deps = [
-    ":attachments",
-    "//sdk/lib/async",
-    "//sdk/lib/fit",
-    "//sdk/lib/fit-promise",
-    "//sdk/lib/sys/cpp",
-    "//src/developer/forensics/feedback_data:log_buffer",
-    "//src/developer/forensics/feedback_data:log_source",
-    "//src/developer/forensics/utils/redact",
-    "//src/lib/fxl",
-    "//src/lib/timekeeper",
-    "//zircon/system/ulib/zx",
-  ]
-
-  deps = [
-    "//sdk/fidl/fuchsia.logger:fuchsia.logger_hlcpp",
-    "//sdk/lib/syslog/cpp",
-    "//src/developer/forensics/feedback_data:constants",
-    "//src/developer/forensics/utils:errors",
-    "//src/developer/forensics/utils:purge_memory",
-    "//src/lib/backoff",
-  ]
-}
-
 source_set("process_tree") {
   sources = [
     "process_tree.cc",

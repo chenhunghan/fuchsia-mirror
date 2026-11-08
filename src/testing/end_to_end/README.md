@@ -17,7 +17,7 @@ At a high level, the Lacewing test framework consists of three layers of
 abstraction:
 * Test framework - [Mobly](https://cs.opensource.google/fuchsia/fuchsia/+/main:third_party/mobly/)
 * Device Controller - [Honeydew](honeydew/README.md)
-* Host-Target Transport - [Fuchsia Controller](https://cs.opensource.google/fuchsia/fuchsia/+/main:src/developer/fuchsia-controller/)
+* Host-Target Transport - [Fuchsia Controller](https://cs.opensource.google/fuchsia/fuchsia/+/main:src/developer/fuchsia-controller/) and [FFX](https://cs.opensource.google/fuchsia/fuchsia/+/main:src/developer/ffx/)
 
 Why the name Lacewing? Lacewings are insects that keep the Fuchsia plant healthy
 and free of harmful bugs - which is something that this framework aspires to be.
@@ -150,7 +150,7 @@ Once the Lacewing target has been defined, trigger the test to run locally via
 $ fx set workbench_eng.x64 \
     --with-host //src/testing/end_to_end/examples/my_test_dir:my_test_target
 
-# Step 2- Start the emulator, package server and monitor (in separate terminals)
+# Step 2 - Start the emulator, package server and monitor (in separate terminals)
 $ fx serve
 $ ffx emu stop ; ffx emu start -H --net tap
 $ ffx monitor start
@@ -165,6 +165,64 @@ override this by supplying `--artifact-output-directory <custom_path>` option
 with `fx test` invocation.
 
 You've just written and run your first Lacewing test!
+
+#### Filtering test cases locally
+
+<!-- TODO(https://fxbug.dev/581806427): Support glob patterns and parameterized pre_run in fx test --test-filter for Mobly tests. -->
+While `fx test --test-filter` has known limitations with Python Mobly tests
+(such as glob wildcards and dynamically parameterized test cases), you can pass
+`--test_cases` (supporting exact names or `re:` regexes) directly to Mobly after
+`--`:
+
+```sh
+$ fx test //src/testing/end_to_end/examples/my_test_dir:my_test_target --e2e \
+    --output -- --test_cases test_an_async_testcase
+```
+
+#### Local target selection and SSH options
+
+When generating a Mobly config from the local environment, `mobly_driver`
+discovers targets via `ffx target list`:
+
+* For single-device tests, if a default target is configured (`ffx target
+  default set <nodename>`), only that target is used; otherwise, all discovered
+  targets are used.
+* For multi-device tests (`multi_fuchsia_device = true` or `--multi-device`),
+  all discovered targets are used.
+
+Additional flags can be passed after `--` to customize local target connection
+settings:
+
+* `--target-address-type {ip,usb}`: Address the Fuchsia target by IP or USB
+  address when using FFX and Fuchsia-Controller transports.
+* `--ssh-key <path>`: Path to the SSH private key for the Fuchsia device
+  (passed to `ffx` via `-c ssh.priv` when running in strict mode).
+* `--ssh-auth-sock <path>`: Path to the `SSH_AUTH_SOCK` socket to use for
+  FFX/SSH.
+* `--ssh-identities-only`: Instruct OpenSSH to only offer explicit identity
+  keys (`-i`) and ignore other `ssh-agent` identities.
+
+#### Running tests with an Access Point locally
+
+For connectivity and WLAN tests that interact with an Access Point (see
+[WLAN End-to-End Tests](../../connectivity/wlan/tests/README.md)), `mobly_driver`
+can generate an `OpenWrtAP` controller configuration automatically from CLI
+flags passed after `--`:
+
+```sh
+$ fx test --build --e2e --output //src/connectivity/wlan/tests/core:connect_to_ap_test -- \
+    --ap-ip <IP address> --ap-ssh-port <port>
+```
+
+* `--ap-ip <ip>`: IP address of the Access Point.
+* `--ap-ssh-port <port>`: SSH port of the Access Point (defaults to `22`).
+* `--ap-ssh-key <path>`: Path to the SSH private key for the Access Point. If
+  omitted, `mobly_driver` searches `~/.ssh/openwrt_testing_rsa` and
+  `~/.ssh/testing_rsa`.
+
+NOTE: Passing `--ap-ip` always generates an `OpenWrtAP` controller. To use the
+legacy `AccessPoint` controller, provide a manual Mobly config YAML via
+`--config-yaml-path` (see [Local Manual Mobly Config](#local-manual-mobly-config)).
 
 ### Infra test execution
 
@@ -270,6 +328,25 @@ TestBeds:
     Controllers:
       FuchsiaDevice:
         - name: $FUCHSIA_NODENAME
+```
+
+Because the `--ap-ip` CLI flag always generates an `OpenWrtAP` controller, a
+manual Mobly config YAML is required to use the legacy `AccessPoint` controller
+(or to customize `OpenWrtAP` settings). Add it under `Controllers`:
+
+```yaml
+TestBeds:
+  - Name: My_Wlan_Testbed
+    Controllers:
+      FuchsiaDevice:
+        - name: $FUCHSIA_NODENAME
+      AccessPoint:
+        - wan_interface: eth0
+          ssh_config:
+            host: 192.168.42.11
+            port: 22
+            user: root
+            identity_file: /path/to/ssh_key
 ```
 
 `$FUCHSIA_NODENAME` need to be manually substituted to fit your

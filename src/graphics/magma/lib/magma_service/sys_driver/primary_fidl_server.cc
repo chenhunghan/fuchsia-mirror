@@ -438,6 +438,43 @@ void PrimaryFidlServer::BufferRangeOp2(BufferRangeOp2RequestView request,
   }
 }
 
+#if FUCHSIA_API_LEVEL_AT_LEAST(NEXT)
+void PrimaryFidlServer::CreateBuffer(CreateBufferRequestView request,
+                                     CreateBufferCompleter::Sync& completer) {
+  TRACE_DURATION("magma", "PrimaryFidlServer::CreateBuffer");
+  MAGMA_DLOG("PrimaryFidlServer::CreateBuffer");
+  // Two-way calls aren't counted by the client for flow control.
+
+  if (!request->has_size() || !request->has_object_id()) {
+    MAGMA_DMESSAGE("CreateBuffer: Bad request");
+    SetError(&completer, MAGMA_STATUS_INVALID_ARGS);
+    return;
+  }
+
+  uint64_t flags = request->has_flags() ? static_cast<uint64_t>(request->flags()) : 0;
+
+  zx::vmo vmo;
+  magma::Status status =
+      delegate_->CreateBuffer(request->size(), flags, request->object_id(), &vmo);
+  if (!status) {
+    if (status.get() == MAGMA_STATUS_INVALID_ARGS) {
+      // A client error.
+      SetError(&completer, status.get());
+    } else {
+      // Allocation failures and object ids already in use (MAGMA_STATUS_ALREADY_EXISTS) are
+      // returned to the client, which may recover.
+      completer.ReplyError(magma::ToZxStatus(status.get()));
+    }
+    return;
+  }
+
+  fidl::Arena arena;
+  completer.ReplySuccess(fuchsia_gpu_magma::wire::PrimaryCreateBufferResponse::Builder(arena)
+                             .buffer(std::move(vmo))
+                             .Build());
+}
+#endif
+
 void PrimaryFidlServer::EnablePerformanceCounterAccess(
     EnablePerformanceCounterAccessRequestView request,
     EnablePerformanceCounterAccessCompleter::Sync& completer) {

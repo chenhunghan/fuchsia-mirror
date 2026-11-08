@@ -1,0 +1,106 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/components:structured_config.bzl",
+    "fuchsia_structured_config_rust_lib",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "bin",
+    srcs = [
+        "src/host_server.rs",
+        "src/main.rs",
+        "src/vendor.rs",
+    ],
+    crate_name = "bt_host",
+    edition = "2024",
+    deps = [
+        ":bt_host_config",
+        "//sdk/fidl/fuchsia.bluetooth:fuchsia.bluetooth_rust",
+        "//sdk/fidl/fuchsia.bluetooth.host:fuchsia.bluetooth.host_rust",
+        "//sdk/fidl/fuchsia.bluetooth.sys:fuchsia.bluetooth.sys_rust",
+        "//sdk/fidl/fuchsia.hardware.bluetooth:fuchsia.hardware.bluetooth_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fdio/rust:fdio",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:futures-util",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:tracing",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged_bin",
+    binary = ":bin",
+    binary_name = "bt_host",
+)
+
+# The GN build uses the `fuchsia_component_manifest("manifest")` target defined
+# above the bazel2gn sentinel in BUILD.gn instead, because
+# `fuchsia_structured_config_values("default_config_values")` calls
+# `get_target_outputs(":manifest")`.
+# @bazel2gn:skip
+fx_component_manifest(
+    name = "manifest",
+    component_name = "bt-host",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/bt-host.cml",
+)
+
+fuchsia_structured_config_rust_lib(
+    name = "bt_host_config",
+    cm_label = ":manifest",
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":manifest",
+    deps = [":bin_packaged_bin"],
+)
+
+# `with_unit_tests` on `rustc_binary()` is not allowed in Bazel, so this is a
+# standalone `rustc_test()`.
+rustc_test(
+    name = "bin_test",
+    crate = ":bin",
+    # Preserves the `bt_host_bin_test` GN output_name to avoid a generic
+    # `bin_test` binary name collision.
+    crate_name = "bt_host_bin_test",
+)
+
+fx_unittest_package(
+    name = "sunstone-fuchsia-tests",
+    unit_tests = [":bin_test"],
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)
+
+fx_unittest_package(
+    name = "sunstone-bt-host-tests",
+    unit_tests = [":bin_test"],
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)

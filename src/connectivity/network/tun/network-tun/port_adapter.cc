@@ -4,6 +4,8 @@
 
 #include "port_adapter.h"
 
+#include <zircon/status.h>
+
 #include <utility>
 
 #include <fbl/auto_lock.h>
@@ -55,7 +57,14 @@ void PortAdapter::Removed(fdf::Arena& arena, RemovedCompleter::Sync& completer) 
 
 void PortAdapter::GetPowerDependencyToken(fdf::Arena& arena,
                                           GetPowerDependencyTokenCompleter::Sync& completer) {
-  completer.buffer(arena).Reply(zx::event{});
+  zx::event token;
+  if (power_dependency_token_.is_valid()) {
+    // `DevicePortConfig::Create` rejects tokens without ZX_RIGHT_DUPLICATE, so this can't fail.
+    zx_status_t status = power_dependency_token_.duplicate(ZX_RIGHT_SAME_RIGHTS, &token);
+    ZX_ASSERT_MSG(status == ZX_OK, "Failed to duplicate power dependency token: %s",
+                  zx_status_get_string(status));
+  }
+  completer.buffer(arena).Reply(std::move(token));
 }
 
 fdf::ClientEnd<fuchsia_hardware_network_driver::NetworkPort> PortAdapter::BindDriver() {
@@ -66,11 +75,13 @@ fdf::ClientEnd<fuchsia_hardware_network_driver::NetworkPort> PortAdapter::BindDr
 
 PortAdapter::PortAdapter(PortAdapterParent* parent, const BasePortConfig& config,
                          std::unique_ptr<MacAdapter> mac,
-                         fdf::UnownedUnsynchronizedDispatcher dispatcher)
+                         fdf::UnownedUnsynchronizedDispatcher dispatcher,
+                         zx::event power_dependency_token)
     : parent_(parent),
       dispatcher_(std::move(dispatcher)),
       mac_(std::move(mac)),
       config_(config),
+      power_dependency_token_(std::move(power_dependency_token)),
       port_status_({
           .online = false,
           .mtu = config.mtu,

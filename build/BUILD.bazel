@@ -3,13 +3,30 @@
 # found in the LICENSE file.
 
 load("@fuchsia_build_config//:defs.bzl", "build_config")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load("//build/bazel/rules/host_tests:host_shac_test.bzl", "host_shac_test")
 
 package(default_applicable_licenses = ["//:license"])
 
+exports_files(
+    ["drivers/FHCP.json"],
+    visibility = ["//src/devices/lib/driver-static-checks:__pkg__"],
+)
+
 test_suite(
     name = "host_tests",
-    tests = [":shac_test"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        ":shac_test",
+        "//build/assembly/tools/generate_assembly_scrutiny_configs:host_tests",
+        "//build/bazel/scripts:fetch_cipd_prebuilt_test",
+        "//build/bazel/scripts:generate_fx_host_tool_test",
+        "//build/go:verify_golden_go_proto_file_test",
+        "//build/sdk/generate_version_history:generate_version_history_unittest",
+        "//build/tracer:action_tracer_test",
+        "//build/tracer:output_cacher_test",
+        "//build/tracer:restat_cacher_test",
+    ],
 )
 
 host_shac_test(

@@ -117,6 +117,14 @@ asm_headers = [
     arch = "x86"
     name = "cpuid"
   },
+  {
+    arch = "x86"
+    name = "descriptor"
+  },
+  {
+    arch = "x86"
+    name = "system"
+  },
 ]
 gen_asm_deps = []
 foreach(header, asm_headers) {
@@ -147,8 +155,10 @@ rustc_library("arch-rs") {
   name = "libarch"
   edition = "2024"
 
-  # Since the crate name is already "lib"-prefixed.
-  output_prefix_override = true
+  # Since the crate name is already "lib"-prefixed, GN's `output_prefix = "lib"`
+  # in `zircon_toolchain` elides the extra "lib" prefix, whereas
+  # `clang_toolchain` hardcodes `"lib{{target_output_name}}"`.
+  output_prefix_override = zircon_toolchain != false
 
   sources = [
     "src/arm64/cache.rs",
@@ -191,4 +201,11 @@ rustc_library("arch-rs") {
   } else {
     deps += [ "//src/lib/regio" ]
   }
+
+  # TODO(https://fxbug.dev/581987928): Remove once compiler options can control
+  # atomic coverage counter updates without `#![feature(coverage_attribute)]`.
+  # Allow unstable features such as `#![feature(coverage_attribute)]` so
+  # spin-wait intrinsics (`arch::yield`) can use `#[coverage(off)]`.
+  configs += [ "//build/config/rust:no_features" ]
+  configs -= [ "//build/config/rust:no_features" ]
 }

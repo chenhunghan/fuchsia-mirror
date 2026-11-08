@@ -73,6 +73,7 @@ cc_test_executable("diagnostics-log-test-bin") {
     "//sdk/lib/fit",
     "//sdk/lib/sys/cpp",
     "//sdk/lib/syslog/cpp",
+    "//zircon/system/ulib/fbl",
     "//zircon/system/ulib/zxtest",
 
     # TODO(81398): Include this in the SDK.

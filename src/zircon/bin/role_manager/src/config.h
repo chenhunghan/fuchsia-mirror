@@ -23,7 +23,8 @@
 
 #include <fbl/enum_bits.h>
 #include <fbl/macros.h>
-#include <re2/re2.h>
+
+#include "re2/re2.h"
 
 namespace zircon_profile {
 

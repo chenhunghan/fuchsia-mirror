@@ -25,7 +25,7 @@ build_flags(
     ],
     visibility = ["//visibility:public"],
 )
-# LINT.ThenChange(//build/config/linux/BUILD.gn:compiler)
+# LINT.ThenChange(BUILD.gn:compiler)
 
 # LINT.IfChange(default_pie)
 # NOTE: This assumes toolchain_variant.is_pic_default=false in Bazel.
@@ -41,7 +41,7 @@ build_flags(
     rustflags = ["-Clink-arg=" + flag for flag in _DEFAULT_PIE_LDFLAGS],
     visibility = ["//visibility:public"],
 )
-# LINT.ThenChange(//build/config/linux/BUILD.gn:default_pie)
+# LINT.ThenChange(BUILD.gn:default_pie)
 
 # LINT.IfChange(implicit_host_libs)
 # NOTE: The `rustflags` assume is_fuchsia=false, since this config is only used
@@ -62,7 +62,7 @@ compiler_build_flags(
     rustflags = ["-Clink-arg=" + flag for flag in _IMPLICIT_HOST_LIBS_LDFLAGS],
     visibility = ["//visibility:public"],
 )
-# LINT.ThenChange(//build/config/linux/BUILD.gn:implicit_host_libs)
+# LINT.ThenChange(BUILD.gn:implicit_host_libs)
 
 # LINT.IfChange(sysroot)
 # In Bazel, `--sysroot=...` cannot be set via raw flags in `build_flags()` because
@@ -73,7 +73,7 @@ build_flags(
     name = "sysroot",
     visibility = ["//visibility:public"],
 )
-# LINT.ThenChange(//build/config/linux/BUILD.gn:sysroot)
+# LINT.ThenChange(BUILD.gn:sysroot)
 
 # LINT.IfChange(target)
 # In Bazel, `--target=<tuple>` is configured by the C++ and Rust toolchain
@@ -83,7 +83,7 @@ build_flags(
     name = "target",
     visibility = ["//visibility:public"],
 )
-# LINT.ThenChange(//build/config/linux/BUILD.gn:target)
+# LINT.ThenChange(BUILD.gn:target)
 
 # LINT.IfChange(clang_defaults)
 _CLANG_DEFAULTS_LDFLAGS = [
@@ -108,4 +108,4 @@ build_flags(
     rustflags = ["-Clink-arg=" + flag for flag in _CLANG_DEFAULTS_LDFLAGS],
     visibility = ["//visibility:public"],
 )
-# LINT.ThenChange(//build/config/linux/BUILD.gn:clang_defaults)
+# LINT.ThenChange(BUILD.gn:clang_defaults)

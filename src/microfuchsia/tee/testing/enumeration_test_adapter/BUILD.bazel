@@ -1,0 +1,75 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["src/main.rs"],
+    crate_name = "enumeration_test_adapter",
+    edition = "2024",
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:serde_derive",
+    ],
+    tags = ["manual"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.test:fuchsia.test_rust",
+        "//sdk/fidl/fuchsia.test:rust_measure_tape_for_case",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json5",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "enumeration_test_adapter",
+)
+
+fx_component_manifest(
+    name = "enumeration-test-adapter-manifest",
+    testonly = True,
+    component_name = "enumeration-test-adapter",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/enumeration_test_adapter.cml",
+    visibility = ["//visibility:private"],
+)
+
+fx_component(
+    name = "enumeration-test-adapter-component",
+    testonly = True,
+    compiled_manifest = ":enumeration-test-adapter-manifest",
+    visibility = ["//visibility:private"],
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "enumeration-test-adapter",
+    testonly = True,
+    components = [":enumeration-test-adapter-component"],
+)

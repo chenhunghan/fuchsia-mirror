@@ -37,3 +37,12 @@ type RecursiveOptionalStructWithString = struct {
     inner box<RecursiveOptionalStructWithString>;
     str string:optional;
 };
+
+type InlineUint32Union = strict union {
+    1: x uint32;
+};
+
+type RecursiveOptionalWithInlineUnion = struct {
+    inner box<RecursiveOptionalWithInlineUnion>;
+    u InlineUint32Union:optional;
+};

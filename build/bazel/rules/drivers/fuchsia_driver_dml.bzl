@@ -5,6 +5,7 @@
 """Rules for generating driver bindings and manifests from DML."""
 
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_rules_extension_support.bzl", _cc_library_for_inherit_attrs = "cc_library")
 load("@rules_fuchsia//fuchsia:defs.bzl", "COMPATIBILITY")
 
 visibility([
@@ -160,9 +161,7 @@ dml_cc_library = macro(
     - `<name>_cml`: The generated `.cml` file.
     """,
     implementation = _dml_cc_library_impl,
-    # TODO(https://fxbug.dev/446694542): Remove `native.` once the
-    # rules_cc provides `cc_library()` as a symbolic macro.
-    inherit_attrs = native.cc_library,
+    inherit_attrs = _cc_library_for_inherit_attrs,
     attrs = _DML_ATTRS | {
         # Do not inherit as these are specified in the implementation.
         "srcs": None,

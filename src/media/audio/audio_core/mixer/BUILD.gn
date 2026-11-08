@@ -85,5 +85,9 @@ cc_test_executable("mixer_unittest_bin") {
 }
 
 fuchsia_unittest_package("audio_mixer_unittests") {
+  test_specs = {
+    parallel = 4
+  }
+
   deps = [ ":mixer_unittest_bin" ]
 }

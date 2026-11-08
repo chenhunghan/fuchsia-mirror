@@ -2,12 +2,14 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules/rust:defs.bzl", "rustc_library", "rustc_proc_macro")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_proc_macro.bzl", "rustc_proc_macro")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
-package(
-    default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
-)
+package(default_applicable_licenses = ["//:license"])
 
 rustc_library(
     name = "split_enum_storage",
@@ -17,6 +19,7 @@ rustc_library(
     proc_macro_deps = [
         ":split_enum_storage_macro",
     ],
+    visibility = ["//src/starnix/kernel/core:__pkg__"],
 )
 
 rustc_proc_macro(
@@ -25,9 +28,36 @@ rustc_proc_macro(
     crate_name = "split_enum_storage_macro",
     crate_root = "src/macro.rs",
     edition = "2024",
+    # GN `rustc_macro` redirects non-host toolchains to `$host_toolchain`
+    # internally instead of wrapping the target in `if (is_host)`.
+    # @bazel2gn:skip
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     deps = [
         "//third_party/rust_crates/vendor:proc-macro2",
         "//third_party/rust_crates/vendor:quote",
         "//third_party/rust_crates/vendor:syn",
     ],
+)
+
+rustc_test(
+    name = "split_enum_storage_test",
+    srcs = ["src/test.rs"],
+    crate_root = "src/test.rs",
+    edition = "2024",
+    deps = [
+        ":split_enum_storage",
+        "//src/lib/fuchsia",
+    ],
+)
+
+wrap_host_rust_test(
+    name = "split_enum_storage_host_test",
+    binary_name = "split_enum_storage_test",
+    visibility = ["//src/starnix/lib:__pkg__"],
+)
+
+fx_unittest_package(
+    name = "split_enum_storage_unittests",
+    unit_tests = [":split_enum_storage_test"],
+    visibility = ["//src/starnix/lib:__pkg__"],
 )

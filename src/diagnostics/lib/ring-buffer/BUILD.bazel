@@ -61,10 +61,11 @@ fx_component_manifest(
 fx_test_component(
     name = "ring-buffer-tests-component",
     compiled_manifest = ":ring-buffer-tests-manifest",
-    component_name = "ring-buffer-tests",
     deps = [":ring-buffer_test_packaged_bin"],
 )
 
+# Bazel-only test, because the unit tests of `:ring-buffer` are skipped.
+# @bazel2gn:skip
 fx_package(
     name = "ring-buffer-tests-package",
     package_name = "ring-buffer-tests",

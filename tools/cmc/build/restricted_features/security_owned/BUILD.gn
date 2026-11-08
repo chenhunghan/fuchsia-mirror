@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+# LINT.IfChange(use_dictionaries)
 # The allowlist of components that can use a dictionary in CML.
 group("use_dictionaries") {
   visibility = [
@@ -10,3 +11,4 @@ group("use_dictionaries") {
     "//src/sys/component_manager/tests/*",
   ]
 }
+# LINT.ThenChange(//tools/cmc/build/restricted_features/security_owned/allowlists.bzl:use_dictionaries)

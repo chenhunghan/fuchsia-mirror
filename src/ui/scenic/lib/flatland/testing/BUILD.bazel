@@ -1,0 +1,31 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "build_display_realm",
+    testonly = True,
+    srcs = [
+        "build_display_realm.cc",
+    ],
+    hdrs = [
+        "build_display_realm.h",
+    ],
+    visibility = [
+        "//src/ui/scenic/lib/flatland/engine/tests/pixeltests:__pkg__",
+        "//src/ui/scenic/lib/flatland/engine/tests/smoketests:__pkg__",
+        "//src/ui/scenic/lib/flatland/renderer/tests:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.display:fuchsia.hardware.display_cpp",
+        "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        # Bazel depends on cpp_library, but GN expects the cpp group alias.
+        "//sdk/lib/sys/component/cpp/testing:cpp_library",  # @bazel2gn:path_overwrite://sdk/lib/sys/component/cpp/testing:cpp
+    ],
+    alwayslink = True,
+)

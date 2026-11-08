@@ -12,10 +12,12 @@ package(default_applicable_licenses = ["//:license"])
 go_library(
     name = "proto_lib",
     srcs = [
-        "proto/build_artifacts.pb.go",
-        "proto/context.pb.go",
-        "proto/set_artifacts.pb.go",
-        "proto/static.pb.go",
+        # Bazel references the subpackage exports; GN go_library expects paths
+        # relative to source_dir.
+        "//tools/integration/fint/proto:build_artifacts.pb.go",  # @bazel2gn:path_overwrite:proto/build_artifacts.pb.go
+        "//tools/integration/fint/proto:context.pb.go",  # @bazel2gn:path_overwrite:proto/context.pb.go
+        "//tools/integration/fint/proto:set_artifacts.pb.go",  # @bazel2gn:path_overwrite:proto/set_artifacts.pb.go
+        "//tools/integration/fint/proto:static.pb.go",  # @bazel2gn:path_overwrite:proto/static.pb.go
     ],
     importpath = "go.fuchsia.dev/fuchsia/tools/integration/fint/proto",
     target_compatible_with = HOST_OS_CONSTRAINTS,

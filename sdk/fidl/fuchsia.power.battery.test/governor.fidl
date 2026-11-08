@@ -1,0 +1,121 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+library fuchsia.power.battery.test;
+
+using fuchsia.hardware.power.charger;
+using zx;
+
+/// Maximum length of a charge governor name, which is its component child name.
+const MAX_GOVERNOR_NAME_LENGTH uint32 = 255;
+
+/// Name of a charge governor, which is its component child name (e.g. "msc").
+alias GovernorName = string:MAX_GOVERNOR_NAME_LENGTH;
+
+/// Maximum length of a charge governor component URL.
+const MAX_GOVERNOR_URL_LENGTH uint32 = 4096;
+
+/// Maximum number of charge governors in a `ChargeControlState`.
+const MAX_GOVERNORS uint32 = 16;
+
+/// Lifecycle of a charge governor component.
+type GovernorLifecycle = flexible enum {
+    /// Not running: starting, or waiting to restart after it stopped or failed to start.
+    STOPPED = 1;
+
+    /// Running.
+    RUNNING = 2;
+
+    /// Stopped by `Governor.Pause` until `Governor.Resume` is called.
+    PAUSED = 3;
+};
+
+/// One charge governor that battery-manager runs.
+type GovernorState = table {
+    /// Name of the governor, which its votes are recorded under.
+    1: name GovernorName;
+
+    /// Component URL of the governor.
+    2: url string:MAX_GOVERNOR_URL_LENGTH;
+
+    /// Lifecycle of the governor component.
+    3: lifecycle GovernorLifecycle;
+
+    /// Number of times battery-manager restarted the governor after it stopped or failed to start.
+    4: restarts uint64;
+
+    /// The governor's `max_interval` vote on `fuchsia.hardware.power.battery/Battery`, if any:
+    /// how often it asks battery-manager to sample the battery.
+    5: sample_interval zx.Duration;
+
+    /// The votes the governor casts through its `fuchsia.hardware.power.charger/Controller`.
+    6: votes fuchsia.hardware.power.charger.ControlOptions;
+
+    /// Overrides set through the governor's `Governor`, which win over `votes` on the fields they
+    /// set while the governor is connected.
+    7: overrides fuchsia.hardware.power.charger.ControlOptions;
+};
+
+/// The charge governors' votes, and the charge control values they combine into.
+type ChargeControlState = table {
+    /// Inputs: every configured governor, ordered by name.
+    1: governors vector<GovernorState>:MAX_GOVERNORS;
+
+    /// Overrides set through `GovernorDebug`, which win over every governor's votes on the fields
+    /// they set.
+    2: overrides fuchsia.hardware.power.charger.ControlOptions;
+
+    /// Output: the values sent to the charger driver. `overrides` wins where it sets a field;
+    /// otherwise the governor vote that charges least wins.
+    3: effective fuchsia.hardware.power.charger.ControlOptions;
+};
+
+/// Debug interface to the charge governors that battery-manager runs and to the charger control
+/// values their votes combine into.
+///
+/// Each scope is debugged like a charger: the composed [`fuchsia.hardware.power.charger/Debug`]
+/// sets sticky overrides, which win over the votes they apply to until cleared or until
+/// battery-manager restarts. Here, they win over every governor's votes; through a `Governor`,
+/// over one governor's votes.
+@discoverable
+open protocol GovernorDebug {
+    compose fuchsia.hardware.power.charger.Debug;
+
+    /// Returns the governors and the charge control values their votes combine into, read
+    /// together.
+    flexible GetState() -> (ChargeControlState);
+
+    /// Opens `governor` for governor `name`. It is served until it closes or this connection
+    /// closes.
+    ///
+    /// If no governor is named `name`, returns `ZX_ERR_NOT_FOUND` in the response and closes
+    /// `governor` without an epitaph.
+    flexible OpenGovernor(resource struct {
+        name GovernorName;
+        governor server_end:Governor;
+    }) -> () error zx.Status;
+};
+
+/// Debug interface to one charge governor, opened through `GovernorDebug.OpenGovernor`.
+///
+/// The composed [`fuchsia.hardware.power.charger/Debug`] overrides the governor's votes, which
+/// still compete with the other governors' votes. The overrides apply while the governor is
+/// connected, including after it restarts.
+open protocol Governor {
+    compose fuchsia.hardware.power.charger.Debug;
+
+    /// Returns the governor's state.
+    flexible GetState() -> (GovernorState);
+
+    /// Stops the governor and withdraws its votes until `Resume` is called or battery-manager
+    /// restarts. Returns once the governor is stopped and its votes are withdrawn.
+    ///
+    /// Pausing is sticky across connections: closing this `Governor` or the parent
+    /// `GovernorDebug` channel leaves the governor paused. Calling `Pause` when the governor is
+    /// already paused is a no-op.
+    flexible Pause() -> ();
+
+    /// Restarts the governor if it was paused. Calling `Resume` when the governor is not paused
+    /// is a no-op.
+    flexible Resume() -> ();
+};

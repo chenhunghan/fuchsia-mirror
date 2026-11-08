@@ -2,14 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 {
-    include: [
-        "//sdk/lib/driver/compat/compat.shard.cml",
-        "syslog/client.shard.cml",
-    ],
+    include: [ "syslog/client.shard.cml" ],
     program: {
         runner: "driver",
+        binary: "driver/fake-bus-pci.so",
         bind: "meta/bind/fake_pci_bus_driver_bind.bindbc",
-        compat: "driver/fake-bus-pci.so",
         default_dispatcher_opts: [ "allow_sync_calls" ],
     },
     capabilities: [

@@ -45,20 +45,6 @@ pub trait BufferAllocator: Send + Sync + std::fmt::Debug + 'static {
     }
 }
 
-pub(super) fn round_down<T>(value: T, granularity: T) -> T
-where
-    T: num_traits::Num + Copy,
-{
-    value - value % granularity
-}
-
-pub(super) fn round_up<T>(value: T, granularity: T) -> T
-where
-    T: num_traits::Num + Copy,
-{
-    round_down(value + granularity - T::one(), granularity)
-}
-
 // Returns a range within a range.
 // For example, subrange(100..200, 20..30) = 120..130.
 fn subrange<R: RangeBounds<usize>>(source: &Range<usize>, bounds: &R) -> Range<usize> {
@@ -231,6 +217,18 @@ impl<'a, H: Borrow<A>, A: ?Sized + BufferAllocator> BufferImpl<'a, H, A> {
         self.slice.copy_from_ptr_slice(src.into());
     }
 
+    /// Copies the contents of this buffer into `dest` starting at `offset`.
+    #[cfg(target_os = "fuchsia")]
+    pub fn copy_to_vmo(&self, dest: &zx::Vmo, offset: u64) -> Result<(), zx::Status> {
+        self.slice.copy_to_vmo(dest, offset)
+    }
+
+    /// Copies `self.len()` bytes from `src` starting at `offset` into this buffer.
+    #[cfg(target_os = "fuchsia")]
+    pub fn copy_from_vmo(&mut self, src: &zx::Vmo, offset: u64) -> Result<(), zx::Status> {
+        self.slice.copy_from_vmo(src, offset)
+    }
+
     /// Copies the contents of `src` buffer into this buffer.
     ///
     /// # Panics
@@ -392,6 +390,12 @@ impl<'a> BufferRef<'a> {
     /// Panics if `dest.len() != self.len()`.
     pub fn copy_to_slice(&self, dest: &mut [u8]) {
         self.slice.copy_to_slice(dest);
+    }
+
+    /// Copies the contents of this buffer into `dest` starting at `offset`.
+    #[cfg(target_os = "fuchsia")]
+    pub fn copy_to_vmo(&self, dest: &zx::Vmo, offset: u64) -> Result<(), zx::Status> {
+        self.slice.copy_to_vmo(dest, offset)
     }
 
     /// Returns the buffer's contents as a Vec.
@@ -599,6 +603,18 @@ impl<'a> MutableBufferRef<'a> {
         self.slice.copy_from_ptr_slice(src.into());
     }
 
+    /// Copies the contents of this buffer into `dest` starting at `offset`.
+    #[cfg(target_os = "fuchsia")]
+    pub fn copy_to_vmo(&self, dest: &zx::Vmo, offset: u64) -> Result<(), zx::Status> {
+        self.slice.copy_to_vmo(dest, offset)
+    }
+
+    /// Copies `self.len()` bytes from `src` starting at `offset` into this buffer.
+    #[cfg(target_os = "fuchsia")]
+    pub fn copy_from_vmo(&mut self, src: &zx::Vmo, offset: u64) -> Result<(), zx::Status> {
+        self.slice.copy_from_vmo(src, offset)
+    }
+
     /// Copies the contents of `src` buffer into this buffer.
     ///
     /// # Panics
@@ -655,11 +671,6 @@ impl<'a> MutableBufferRef<'a> {
             allocator_id: self.allocator_id,
             trusted: self.trusted,
         }
-    }
-
-    /// Consumes this reference and returns a mutable pointer slice.
-    pub fn into_mut_ptr_slice(self) -> MutPtrByteSlice<'a> {
-        self.slice
     }
 }
 

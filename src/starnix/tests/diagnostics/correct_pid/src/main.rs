@@ -29,7 +29,7 @@ async fn main() {
         .initialize_tracing(
             server_end,
             &TraceConfig {
-                categories: Some(vec!["starnix".to_string()]),
+                categories: Some(vec!["starnix".to_string(), "starnix:syscalls".to_string()]),
                 // Since oneshot mode is used, set the buffer size as large
                 // as possible so that trace events don't get dropped.
                 buffer_size_megabytes_hint: Some(64),
@@ -125,7 +125,11 @@ async fn main() {
         .collect::<Vec<_>>();
     assert!(!hello_world_trace_events.is_empty(), "must see trace events with expected pid/tid");
     for event in hello_world_trace_events {
-        assert_eq!(event.category, "starnix", "starnix trace events should have starnix category");
+        assert!(
+            event.category == "starnix" || event.category == "starnix:syscalls",
+            "starnix trace events should have a starnix category, got {}",
+            event.category
+        );
     }
 
     let mut logs = ArchiveReader::logs().snapshot_then_subscribe().unwrap();

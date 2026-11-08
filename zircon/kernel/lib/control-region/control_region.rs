@@ -5,8 +5,9 @@
 mod control_region_ffi;
 
 use crate::kernel::relaxed_atomic::RelaxedAtomicU32;
+use crate::ksync_kernel::{NoIrqSavePolicy, TrackedSpinlock};
 use core::convert::Infallible;
-use ksync::{KMutex, LockToken, RawSpinlock, guarded};
+use ksync::{KMutex, LockToken, guarded};
 use pin_init::{PinInit, pin_init};
 
 /// ControlRegion is a CPU synchronization tool.
@@ -57,7 +58,7 @@ use pin_init::{PinInit, pin_init};
 #[repr(C)]
 pub struct ControlRegion {
     #[mutex]
-    lock: KMutex<RawSpinlock>,
+    lock: KMutex<TrackedSpinlock>,
 
     /// Note, this field is an atomic so that it may be read via `peek_state` without holding the
     /// lock.
@@ -74,7 +75,7 @@ pub struct ControlRegion {
     count: u32,
 }
 
-zr::static_assert!(size_of::<ControlRegion>() == size_of::<RawSpinlock>() + 8);
+zr::static_assert!(size_of::<ControlRegion>() == size_of::<TrackedSpinlock>() + 8);
 zr::static_assert!(align_of::<ControlRegion>() == 8);
 
 #[repr(u32)]
@@ -183,7 +184,7 @@ impl ControlRegion {
     /// It is an error to call this method with interrupts enabled.
     #[must_use]
     pub fn try_enter(&self) -> bool {
-        ksync::lock!(let mut guard = self.lock_lock_policy::<ksync::NoIrqSavePolicy>());
+        ksync::lock!(let mut guard = self.lock_lock_policy::<NoIrqSavePolicy>());
         let fields = guard.as_mut().fields_mut();
         debug_assert!(
             fields.state.load() == State::Open as u32 && *fields.count > 0,
@@ -206,7 +207,7 @@ impl ControlRegion {
     ///
     /// It is an error to call this method with interrupts enabled.
     pub fn close_enter(&self) {
-        ksync::lock!(let mut guard = self.lock_lock_policy::<ksync::NoIrqSavePolicy>());
+        ksync::lock!(let mut guard = self.lock_lock_policy::<NoIrqSavePolicy>());
         let fields = guard.as_mut().fields_mut();
         debug_assert!(
             fields.state.load() == State::Closing as u32 && *fields.count == 1,
@@ -234,7 +235,7 @@ impl ControlRegion {
     pub fn try_leave(&self) -> bool {
         loop {
             {
-                ksync::lock!(let mut guard = self.lock_lock_policy::<ksync::NoIrqSavePolicy>());
+                ksync::lock!(let mut guard = self.lock_lock_policy::<NoIrqSavePolicy>());
                 let fields = guard.as_mut().fields_mut();
                 let state = fields.state.load();
                 match State::try_from(state) {
@@ -282,7 +283,7 @@ impl ControlRegion {
     ///
     /// It is an error to call this method with interrupts enabled.
     pub fn open_leave(&self) {
-        ksync::lock!(let mut guard = self.lock_lock_policy::<ksync::NoIrqSavePolicy>());
+        ksync::lock!(let mut guard = self.lock_lock_policy::<NoIrqSavePolicy>());
         let fields = guard.as_mut().fields_mut();
         if cfg!(debug_assertions) {
             let s = fields.state.load();

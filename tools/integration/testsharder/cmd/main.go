@@ -7,6 +7,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"flag"
 	"fmt"
@@ -114,7 +116,7 @@ func main() {
 	defer cancel()
 
 	if err := mainImpl(ctx); err != nil {
-		logger.Fatalf(ctx, err.Error())
+		logger.Fatalf(ctx, "%s", err.Error())
 	}
 }
 
@@ -364,19 +366,23 @@ func execute(ctx context.Context, flags testsharderFlags, params *proto.Params, 
 		shards = append(shards, nonhermeticShards...)
 	}
 
+	maxShardsPerEnv := int(params.MaxShardsPerEnv)
+	if flags.preserveTestOrder {
+		// With preserveTestOrder, all tests for a given environment should run in the same shard.
+		maxShardsPerEnv = 1
+	}
+	var newTargetDuration time.Duration
+	shards, newTargetDuration = testsharder.WithTargetDuration(shards, targetDuration, int(params.TargetTestCount), int(params.MaxShardSize), maxShardsPerEnv, testDurations)
+
+	// Add the multiplied shards back into the list of shards to run.
+	if newTargetDuration > targetDuration {
+		targetDuration = newTargetDuration
+	}
 	if flags.preserveTestOrder {
 		// Set the target duration and target test count to 0 to force
 		// SplitOutMultipliers() to keep all multiplied tests in one shard.
 		targetDuration = 0
 		params.TargetTestCount = 0
-	} else {
-		var newTargetDuration time.Duration
-		shards, newTargetDuration = testsharder.WithTargetDuration(shards, targetDuration, int(params.TargetTestCount), int(params.MaxShardSize), int(params.MaxShardsPerEnv), testDurations)
-
-		// Add the multiplied shards back into the list of shards to run.
-		if newTargetDuration > targetDuration {
-			targetDuration = newTargetDuration
-		}
 	}
 	multipliedShards = testsharder.SplitOutMultipliers(ctx, multipliedShards, testDurations, targetDuration, int(params.TargetTestCount), testsharder.MaxMultipliedRunsPerShard, testsharder.MultipliedShardPrefix, flags.ignoreMultiplyIsolatedLimit)
 	multipliedAffectedShards = testsharder.SplitOutMultipliers(ctx, multipliedAffectedShards, testDurations, targetDuration, int(params.TargetTestCount), testsharder.MaxMultipliedRunsPerShard, testsharder.AffectedShardPrefix, flags.ignoreMultiplyIsolatedLimit)
@@ -521,10 +527,15 @@ func execute(ctx context.Context, flags testsharderFlags, params *proto.Params, 
 		return strings.Compare(a.Name, b.Name)
 	})
 
-	encoder := json.NewEncoder(f)
 	// Use 4-space indents so golden files are compatible with `fx format-code`.
-	encoder.SetIndent("", "    ")
-	if err := encoder.Encode(&shards); err != nil {
+	encoder := jsontext.NewEncoder(f, jsontext.WithIndent("    "))
+	if err := jsonv2.MarshalEncode(
+		encoder,
+		&shards,
+		jsonv2.Deterministic(true),
+		json.FormatDurationAsNano(true),
+		json.OmitEmptyWithLegacySemantics(true),
+	); err != nil {
 		return fmt.Errorf("failed to encode shards: %v", err)
 	}
 

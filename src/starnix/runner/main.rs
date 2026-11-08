@@ -3,7 +3,9 @@
 // found in the LICENSE file.
 
 use anyhow::{Context as _, Error};
+use fidl::endpoints::ServerEnd;
 use fidl_fuchsia_component_runner as frunner;
+use fidl_fuchsia_input_injection as finputinjection;
 use fidl_fuchsia_memory_attribution as fattribution;
 use fidl_fuchsia_settings as fsettings;
 use fidl_fuchsia_starnix_runner as fstarnixrunner;
@@ -21,6 +23,7 @@ use zx;
 enum Services {
     ComponentRunner(frunner::ComponentRunnerRequestStream),
     StarnixManager(fstarnixrunner::ManagerRequestStream),
+    InputDeviceRegistry(ServerEnd<finputinjection::InputDeviceRegistryMarker>),
 }
 
 const MEMORY_ROLE_NAME: &str = "fuchsia.starnix.runner";
@@ -63,6 +66,7 @@ async fn main() -> Result<(), Error> {
 
     fs.dir("svc").add_fidl_service(Services::ComponentRunner);
     fs.dir("svc").add_fidl_service(Services::StarnixManager);
+    fs.dir("svc").add_service_connector(Services::InputDeviceRegistry);
     fs.take_and_serve_directory_handle()?;
     let suspend_context = Arc::new(SuspendContext::default());
     let (suspend_sender, suspend_receiver) = async_channel::unbounded();
@@ -109,6 +113,9 @@ async fn main() -> Result<(), Error> {
                         error!(e:%; "failed to serve starnix manager");
                     }
                 }
+                Services::InputDeviceRegistry(server_end) => {
+                    kernels.forward_to_kernel(server_end);
+                }
             }
         }
     });
@@ -139,4 +146,36 @@ async fn serve_component_runner(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[fuchsia::test]
+    async fn test_input_device_registry_no_kernel_closes_channel() {
+        let kernels = Kernels::new();
+        let mut fs = ServiceFs::new_local();
+        fs.add_service_connector(Services::InputDeviceRegistry);
+        let connector = fs.create_protocol_connector().unwrap();
+
+        let proxy =
+            connector.connect_to_protocol::<finputinjection::InputDeviceRegistryMarker>().unwrap();
+
+        let request = fs.next().await.expect("service fs stream ended");
+        match request {
+            Services::InputDeviceRegistry(server_end) => {
+                kernels.forward_to_kernel(server_end);
+            }
+            Services::ComponentRunner(_) | Services::StarnixManager(_) => unreachable!(),
+        }
+
+        let mut event_stream = proxy.take_event_stream();
+        let event = event_stream.next().await;
+        assert!(matches!(
+            event,
+            Some(Err(fidl::Error::ClientChannelClosed { epitaph, .. }))
+                if epitaph == zx::Status::UNAVAILABLE
+        ));
+    }
 }

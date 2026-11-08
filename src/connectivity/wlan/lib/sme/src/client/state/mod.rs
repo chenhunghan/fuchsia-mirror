@@ -20,10 +20,11 @@ use fidl_fuchsia_wlan_internal as fidl_internal;
 use fidl_fuchsia_wlan_internal::Authentication;
 use fidl_fuchsia_wlan_mlme::{self as fidl_mlme, MlmeEvent};
 use fidl_fuchsia_wlan_sme as fidl_sme;
+use fidl_fuchsia_wlan_stats as fidl_stats;
 use fuchsia_inspect_contrib::inspect_log;
 use fuchsia_inspect_contrib::log::InspectBytes;
 use ieee80211::{Bssid, MacAddr, MacAddrBytes, Ssid};
-use link_state::LinkState;
+use link_state::{LinkState, LinkStateFailure};
 use log::{error, info, warn};
 use wlan_common::bss::BssDescription;
 use wlan_common::channel::{Bandwidth, Channel};
@@ -460,7 +461,10 @@ impl Connecting {
                 // TODO(https://fxbug.dev/359842400) Check that peer_sta_address matches request.
                 match LinkState::new(self.cmd.protection, self.wake_lease, context) {
                     Ok(link_state) => link_state,
-                    Err(failure_reason) => {
+                    Err(LinkStateFailure {
+                        reason: failure_reason,
+                        wake_lease: _sme_wake_lease,
+                    }) => {
                         let msg = "Connect terminated; failed to initialize LinkState".to_string();
                         error!("{}", msg);
                         state_change_ctx.set_msg(msg);
@@ -672,7 +676,7 @@ impl Associated {
         state_change_ctx: &mut Option<StateChangeContext>,
         context: &mut Context,
     ) -> Result<Connecting, Disconnecting> {
-        let (mut protection, connected_duration) = self.link_state.disconnect();
+        let (mut protection, connected_duration, _sme_wake_lease) = self.link_state.disconnect();
 
         let disconnect_reason = fidl_sme::DisconnectCause {
             mlme_event_name: fidl_sme::DisconnectMlmeEventName::DisassociateIndication,
@@ -750,7 +754,7 @@ impl Associated {
         ind: fidl_mlme::DeauthenticateIndication,
         state_change_ctx: &mut Option<StateChangeContext>,
     ) -> Idle {
-        let (_, connected_duration) = self.link_state.disconnect();
+        let (_, connected_duration, _sme_wake_lease) = self.link_state.disconnect();
 
         let disconnect_reason = fidl_sme::DisconnectCause {
             mlme_event_name: fidl_sme::DisconnectMlmeEventName::DeauthenticateIndication,
@@ -822,7 +826,7 @@ impl Associated {
             &BssDescription,
             &mut Option<StateChangeContext>,
             &mut Context,
-        ) -> Result<LinkState, EstablishRsnaFailureReason>,
+        ) -> Result<LinkState, LinkStateFailure>,
     {
         let was_establishing_rsna = match &self.link_state {
             LinkState::EstablishingRsna(_) => true,
@@ -837,7 +841,7 @@ impl Associated {
             context,
         ) {
             Ok(link_state) => link_state,
-            Err(failure_reason) => {
+            Err(LinkStateFailure { reason: failure_reason, wake_lease: _sme_wake_lease }) => {
                 send_deauthenticate_request(&self.latest_ap_state.bssid, &context.mlme_sink);
 
                 let timeout = context.timer.schedule(event::DeauthenticateTimeout);
@@ -993,7 +997,7 @@ impl Associated {
     ) -> Result<Self, Disconnecting> {
         match self.link_state.handle_timeout(event, state_change_ctx, context) {
             Ok(link_state) => Ok(Associated { link_state, ..self }),
-            Err(failure_reason) => {
+            Err(LinkStateFailure { reason: failure_reason, wake_lease: _sme_wake_lease }) => {
                 send_deauthenticate_request(&self.latest_ap_state.bssid, &context.mlme_sink);
                 let timeout = context.timer.schedule(event::DeauthenticateTimeout);
                 match self.roam_in_progress {
@@ -1038,7 +1042,7 @@ impl Associated {
     }
 
     fn disconnect(self, context: &mut Context, action: PostDisconnectAction) -> Disconnecting {
-        let (_, _) = self.link_state.disconnect();
+        let (_, _, _sme_wake_lease) = self.link_state.disconnect();
         send_deauthenticate_request(&self.latest_ap_state.bssid, &context.mlme_sink);
         let timeout = context.timer.schedule(event::DeauthenticateTimeout);
         Disconnecting {
@@ -1829,6 +1833,22 @@ impl ClientState {
             },
         }
     }
+
+    pub fn on_signal_report(&mut self, report: &fidl_stats::ConnectionSignalReport) -> bool {
+        if let Self::Associated(state) = self {
+            if let Some(rssi) = report.rssi_dbm {
+                state.latest_ap_state.rssi_dbm = rssi;
+            }
+            if let Some(snr) = report.snr_db {
+                state.latest_ap_state.snr_db = snr;
+            }
+            if report.rssi_dbm.is_some() || report.snr_db.is_some() {
+                state.last_signal_report_time = now();
+                return true;
+            }
+        }
+        false
+    }
 }
 
 #[allow(clippy::result_large_err)] // TODO(https://fxbug.dev/401255153)
@@ -1841,7 +1861,8 @@ fn roam_internal(
     roam_initiator: RoamInitiator,
 ) -> Result<Roaming, Disconnecting> {
     // Reassociation is imminent, so consider client disassociated from original BSS. Need a new ESS-SA.
-    let (mut orig_bss_protection, _connected_duration) = state.link_state.disconnect();
+    let (mut orig_bss_protection, _connected_duration, _sme_wake_lease) =
+        state.link_state.disconnect();
     if let Protection::Rsna(rsna) | Protection::LegacyWpa(rsna) = &mut orig_bss_protection {
         // Reset the state of the ESS-SA and its replay counter to zero per IEEE 802.11-2016 12.7.2.
         rsna.supplicant.reset();
@@ -2056,7 +2077,7 @@ fn roam_handle_result(
             // Get started with link state before going to Associated.
             let link_state = match LinkState::new(state.cmd.protection, state.wake_lease, context) {
                 Ok(link_state) => link_state,
-                Err(failure_reason) => {
+                Err(LinkStateFailure { reason: failure_reason, wake_lease: _sme_wake_lease }) => {
                     let disconnect_info = make_roam_disconnect_info(mlme_event_name, None);
                     let failure = RoamFailure {
                         failure_type: RoamFailureType::EstablishRsnaFailure,
@@ -6198,6 +6219,7 @@ mod tests {
         let event = Event::RsnaCompletionTimeout(event::RsnaCompletionTimeout {});
         let state = state.handle_timeout(event, &mut h.context);
         assert_matches!(&state, ClientState::Disconnecting(_));
+        assert!(h.fake_power_manager.was_lease_held_at_take("sme-connecting", "sme-disconnecting"));
         assert!(h.fake_power_manager.is_lease_dropped("sme-connecting"));
         assert!(!h.fake_power_manager.is_lease_dropped("sme-disconnecting"));
         assert_matches!(h.mlme_stream.try_recv(), Ok(MlmeRequest::Deauthenticate(req)) => {
@@ -6240,6 +6262,7 @@ mod tests {
         let connect_conf = create_connect_conf(bss.bssid, fidl_ieee80211::StatusCode::Success);
         let state = state.on_mlme_event(connect_conf, &mut h.context);
         assert_matches!(&state, ClientState::Disconnecting(_));
+        assert!(h.fake_power_manager.was_lease_held_at_take("sme-connecting", "sme-disconnecting"));
         assert!(h.fake_power_manager.is_lease_dropped("sme-connecting"));
         assert!(!h.fake_power_manager.is_lease_dropped("sme-disconnecting"));
         assert_matches!(h.mlme_stream.try_recv(), Ok(MlmeRequest::Deauthenticate(req)) => {
@@ -6339,6 +6362,7 @@ mod tests {
         };
         let state = state.on_mlme_event(MlmeEvent::RoamResultInd { ind }, &mut h.context);
         assert_matches!(&state, ClientState::Disconnecting(_));
+        assert!(h.fake_power_manager.was_lease_held_at_take("sme-roaming", "sme-disconnecting"));
         assert!(h.fake_power_manager.is_lease_dropped("sme-roaming"));
         assert!(!h.fake_power_manager.is_lease_dropped("sme-disconnecting"));
         assert_matches!(h.mlme_stream.try_recv(), Ok(MlmeRequest::Deauthenticate(req)) => {
@@ -6382,6 +6406,7 @@ mod tests {
         let event = Event::RsnaCompletionTimeout(event::RsnaCompletionTimeout {});
         let state = state.handle_timeout(event, &mut h.context);
         assert_matches!(&state, ClientState::Disconnecting(_));
+        assert!(h.fake_power_manager.was_lease_held_at_take("sme-connecting", "sme-disconnecting"));
         assert!(h.fake_power_manager.is_lease_dropped("sme-connecting"));
         assert!(!h.fake_power_manager.is_lease_dropped("sme-disconnecting"));
         assert_matches!(h.mlme_stream.try_recv(), Ok(MlmeRequest::Deauthenticate(req)) => {
@@ -6423,6 +6448,9 @@ mod tests {
         };
         let state = state.on_mlme_event(MlmeEvent::SetKeysConf { conf }, &mut h.context);
         assert_matches!(&state, ClientState::Disconnecting(_));
+        assert!(
+            h.fake_power_manager.was_lease_held_at_take("sme-eapol-rekey", "sme-disconnecting")
+        );
         assert!(h.fake_power_manager.is_lease_dropped("sme-eapol-rekey"));
         assert!(!h.fake_power_manager.is_lease_dropped("sme-disconnecting"));
 
@@ -6432,6 +6460,88 @@ mod tests {
         let state = state.on_mlme_event(deauth_conf, &mut h.context);
         assert_idle(state);
         assert!(h.fake_power_manager.is_lease_dropped("sme-disconnecting"));
+    }
+
+    #[test]
+    fn disconnect_during_establishing_rsna_holds_connecting_lease_until_disconnecting() {
+        let mut h = TestHelper::new();
+        let (supplicant, suppl_mock) = mock_psk_supplicant();
+        let (cmd, _connect_txn_stream) = connect_command_wpa2(supplicant);
+        let bss = (*cmd.bss).clone();
+        let state = idle_state().connect(cmd, &mut h.context);
+        assert_matches!(h.mlme_stream.try_recv(), Ok(MlmeRequest::Connect(_)));
+        assert!(!h.fake_power_manager.is_lease_dropped("sme-connecting"));
+
+        suppl_mock
+            .set_start_updates(vec![SecAssocUpdate::Status(SecAssocStatus::PmkSaEstablished)]);
+        let connect_conf = create_connect_conf(bss.bssid, fidl_ieee80211::StatusCode::Success);
+        let state = state.on_mlme_event(connect_conf, &mut h.context);
+        assert_matches!(&state, ClientState::Associated(state) => {
+            assert_matches!(&state.link_state, LinkState::EstablishingRsna { .. });
+        });
+        assert!(!h.fake_power_manager.is_lease_dropped("sme-connecting"));
+
+        let state =
+            disconnect(state, &mut h, fidl_sme::UserDisconnectReason::WlanServiceUtilTesting);
+        assert_idle(state);
+        assert!(h.fake_power_manager.was_lease_held_at_take("sme-connecting", "sme-disconnecting"));
+        assert!(h.fake_power_manager.is_lease_dropped("sme-connecting"));
+    }
+
+    #[test]
+    fn disconnect_and_roam_during_rekey_hold_rekey_lease_until_next_lease() {
+        // 1. User disconnect during LinkUpReconfiguring holds sme-eapol-rekey until sme-disconnecting
+        {
+            let mut h = TestHelper::new();
+            let (supplicant, suppl_mock) = mock_psk_supplicant();
+            let (cmd, _connect_txn_stream) = connect_command_wpa2(supplicant);
+            let bss = (*cmd.bss).clone();
+            let state = link_up_state(cmd);
+
+            let update_tx = SecAssocUpdate::TxEapolKeyFrame {
+                frame: test_utils::eapol_key_frame(),
+                expect_response: false,
+            };
+            let state = on_eapol_ind(state, &mut h, bss.bssid, &suppl_mock, vec![update_tx]);
+            expect_eapol_req(&mut h.mlme_stream, bss.bssid);
+            assert!(!h.fake_power_manager.is_lease_dropped("sme-eapol-rekey"));
+
+            let state =
+                disconnect(state, &mut h, fidl_sme::UserDisconnectReason::WlanServiceUtilTesting);
+            assert_idle(state);
+            assert!(
+                h.fake_power_manager.was_lease_held_at_take("sme-eapol-rekey", "sme-disconnecting")
+            );
+            assert!(h.fake_power_manager.is_lease_dropped("sme-eapol-rekey"));
+        }
+
+        // 2. Policy roam during LinkUpReconfiguring holds sme-eapol-rekey until sme-roaming
+        {
+            let mut h = TestHelper::new();
+            let (supplicant, suppl_mock) = mock_psk_supplicant();
+            let (cmd, _connect_txn_stream) = connect_command_wpa2(supplicant);
+            let bss = (*cmd.bss).clone();
+            let state = link_up_state(cmd);
+
+            let update_tx = SecAssocUpdate::TxEapolKeyFrame {
+                frame: test_utils::eapol_key_frame(),
+                expect_response: false,
+            };
+            let state = on_eapol_ind(state, &mut h, bss.bssid, &suppl_mock, vec![update_tx]);
+            expect_eapol_req(&mut h.mlme_stream, bss.bssid);
+            assert!(!h.fake_power_manager.is_lease_dropped("sme-eapol-rekey"));
+
+            let selected_bss = fake_bss_description!(
+                Wpa2,
+                ssid: Ssid::try_from("wpa2").unwrap(),
+                bssid: [8, 8, 8, 8, 8, 8]
+            );
+            let state = state.roam(&mut h.context, selected_bss.into());
+            assert_roaming(&state);
+            assert!(h.fake_power_manager.was_lease_held_at_take("sme-eapol-rekey", "sme-roaming"));
+            assert!(h.fake_power_manager.is_lease_dropped("sme-eapol-rekey"));
+            assert!(!h.fake_power_manager.is_lease_dropped("sme-roaming"));
+        }
     }
 
     #[test]

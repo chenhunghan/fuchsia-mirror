@@ -15,6 +15,8 @@ use diagnostics_hierarchy::Property;
 use diagnostics_log::{OnInterestChanged, Publisher, PublisherOptions, TestRecord};
 use diagnostics_log_encoding::Argument;
 use fidl::endpoints::{ClientEnd, create_request_stream};
+use fidl_fuchsia_archivist_test as fpuppet;
+use fidl_fuchsia_diagnostics_types as fdiagnostics;
 use fidl_table_validation::ValidFidlTable;
 use fuchsia_async::{Scope, Timer};
 use fuchsia_component::server::ServiceFs;
@@ -27,7 +29,6 @@ use inspect_runtime::{EscrowOptions, EscrowToken, PublishedInspectController};
 use inspect_testing::ExampleInspectData;
 use log::{debug, error, info, trace, warn};
 use std::sync::Arc;
-use {fidl_fuchsia_archivist_test as fpuppet, fidl_fuchsia_diagnostics_types as fdiagnostics};
 
 enum IncomingServices {
     Puppet(fpuppet::PuppetRequestStream),
@@ -172,7 +173,6 @@ async fn handle_inspect_writer(
                 component::health().set_ok();
                 responder.send().expect("response succeeds")
             }
-            #[cfg(fuchsia_api_level_at_least = "29")]
             fpuppet::InspectWriterRequest::SetHealthStartingUp { responder } => {
                 component::health().set_starting_up();
                 responder.send().expect("response succeeds")
@@ -194,7 +194,6 @@ async fn handle_inspect_writer(
                     .expect("response succeeds");
                 std::process::exit(0);
             }
-            #[cfg(fuchsia_api_level_at_least = "28")]
             fpuppet::InspectWriterRequest::RecordLazyValues { key, responder } => {
                 let (client, requests) = create_request_stream();
                 responder.send(client).expect("response succeeds");
@@ -310,11 +309,6 @@ async fn handle_puppet_request(
         fpuppet::PuppetRequest::Crash { message, .. } => {
             panic!("{message}");
         }
-        fpuppet::PuppetRequest::RecordLazyValues { key, responder } => {
-            let (client, requests) = create_request_stream();
-            responder.send(client).expect("response succeeds");
-            record_lazy_values(key, requests, component::inspector()).await
-        }
         fpuppet::PuppetRequest::Println { message, responder } => {
             println!("{message}");
             responder.send().context("response succeeds")
@@ -420,13 +414,11 @@ async fn record_lazy_values(
             fpuppet::LazyInspectPuppetRequest::_UnknownMethod { .. } => unreachable!(),
             fpuppet::LazyInspectPuppetRequest::EmitExampleInspectData { .. }
             | fpuppet::LazyInspectPuppetRequest::SetHealthOk { .. }
-            | fpuppet::LazyInspectPuppetRequest::EscrowAndExit { .. } => {
+            | fpuppet::LazyInspectPuppetRequest::SetHealthStartingUp { .. }
+            | fpuppet::LazyInspectPuppetRequest::EscrowAndExit { .. }
+            | fpuppet::LazyInspectPuppetRequest::RecordLazyValues { .. } => {
                 unimplemented!()
             }
-            #[cfg(fuchsia_api_level_at_least = "28")]
-            fpuppet::LazyInspectPuppetRequest::RecordLazyValues { .. } => unimplemented!(),
-            #[cfg(fuchsia_api_level_at_least = "29")]
-            fpuppet::LazyInspectPuppetRequest::SetHealthStartingUp { .. } => unimplemented!(),
         };
     }
 

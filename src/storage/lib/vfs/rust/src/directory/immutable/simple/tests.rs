@@ -14,8 +14,8 @@ use crate::file::{self, FidlIoConnection, File, FileIo, FileLike, FileOptions};
 use crate::node::Node;
 use crate::path::Path;
 use crate::{
-    assert_close, assert_get_attr, assert_query, assert_read, assert_read_dirents, assert_seek,
-    assert_write, pseudo_directory,
+    assert_close, assert_get_attributes, assert_query, assert_read, assert_read_dirents,
+    assert_seek, assert_write, pseudo_directory,
 };
 use assert_matches::assert_matches;
 use flex_client::fidl::DiscoverableProtocolMarker as _;
@@ -32,7 +32,6 @@ use fuchsia_fs_fdomain::directory::{
 };
 use fuchsia_sync::Mutex;
 use futures::StreamExt as _;
-use libc::{S_IFDIR, S_IRUSR, S_IXUSR};
 use static_assertions::assert_eq_size;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -97,17 +96,19 @@ async fn empty_directory_get_attr() {
     #[cfg(not(feature = "fdomain"))]
     let scope = crate::execution_scope::ExecutionScope::new();
     let root = serve(dir, scope.clone(), fio::PERM_READABLE);
-    assert_get_attr!(
+    assert_get_attributes!(
         root,
-        fio::NodeAttributes {
-            mode: S_IFDIR | S_IRUSR | S_IXUSR,
-            id: fio::INO_UNKNOWN,
-            content_size: 0,
-            storage_size: 0,
-            link_count: 1,
-            creation_time: 0,
-            modification_time: 0,
-        }
+        fio::NodeAttributesQuery::all(),
+        immutable_attributes!(
+            fio::NodeAttributesQuery::all(),
+            Immutable {
+                protocols: fio::NodeProtocolKinds::DIRECTORY,
+                abilities: fio::Operations::GET_ATTRIBUTES
+                    | fio::Operations::ENUMERATE
+                    | fio::Operations::TRAVERSE,
+                id: fio::INO_UNKNOWN,
+            }
+        )
     );
     let _ = &client;
     assert_close!(root);
@@ -128,17 +129,19 @@ async fn empty_directory_with_custom_inode_get_attr() {
     #[cfg(not(feature = "fdomain"))]
     let scope = crate::execution_scope::ExecutionScope::new();
     let root = serve(dir, scope.clone(), fio::PERM_READABLE);
-    assert_get_attr!(
+    assert_get_attributes!(
         root,
-        fio::NodeAttributes {
-            mode: S_IFDIR | S_IRUSR | S_IXUSR,
-            id: 12345,
-            content_size: 0,
-            storage_size: 0,
-            link_count: 1,
-            creation_time: 0,
-            modification_time: 0,
-        }
+        fio::NodeAttributesQuery::all(),
+        immutable_attributes!(
+            fio::NodeAttributesQuery::all(),
+            Immutable {
+                protocols: fio::NodeProtocolKinds::DIRECTORY,
+                abilities: fio::Operations::GET_ATTRIBUTES
+                    | fio::Operations::ENUMERATE
+                    | fio::Operations::TRAVERSE,
+                id: 12345,
+            }
+        )
     );
     let _ = &client;
     assert_close!(root);

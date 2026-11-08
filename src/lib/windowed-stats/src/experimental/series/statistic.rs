@@ -254,7 +254,7 @@ impl Statistic for ArithmeticMean<f32> {
     fn aggregation(&self) -> Option<Self::Aggregation> {
         // This is lossy and lossiness correlates to the magnitude of `n`. See details of
         // `u64 as f32` casts.
-        (self.n > 0).then(|| self.sum / (self.n as f32))
+        if self.n > 0 { Some(self.sum / (self.n as f32)) } else { None }
     }
 }
 
@@ -283,7 +283,7 @@ impl Statistic for ArithmeticMean<i64> {
     fn aggregation(&self) -> Option<Self::Aggregation> {
         // This is lossy and lossiness correlates to the magnitude of `n`. See details of
         // `i64 as f32` casts.
-        (self.n > 0).then(|| self.sum as f32 / (self.n as f32))
+        if self.n > 0 { Some(self.sum as f32 / (self.n as f32)) } else { None }
     }
 }
 
@@ -312,7 +312,7 @@ impl Statistic for ArithmeticMean<u64> {
     fn aggregation(&self) -> Option<Self::Aggregation> {
         // This is lossy and lossiness correlates to the magnitude of `n`. See details of
         // `u64 as f32` casts.
-        (self.n > 0).then(|| self.sum as f32 / (self.n as f32))
+        if self.n > 0 { Some(self.sum as f32 / (self.n as f32)) } else { None }
     }
 }
 

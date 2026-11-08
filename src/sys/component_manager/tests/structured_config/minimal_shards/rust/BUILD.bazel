@@ -1,0 +1,46 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/components:structured_config.bzl",
+    "fuchsia_structured_config_rust_lib",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["src/main.rs"],
+    crate_name = "structured_config_rust_receiver_minimal_shards",
+    edition = "2024",
+    deps = [":config_lib"],
+)
+
+# The GN build uses the `fuchsia_component_manifest("manifest")` target defined
+# above the bazel2gn sentinel in BUILD.gn instead, because
+# `fuchsia_structured_config_values("values")` calls
+# `get_target_outputs(":manifest")`.
+# @bazel2gn:skip
+fx_component_manifest(
+    name = "manifest",
+    testonly = True,
+    component_name = "rust_receiver",
+    includes = [
+        "//src/sys/component_manager/tests/structured_config:all_config_types.shard.cml",
+    ],
+    manifest = "meta/receiver.cml",
+)
+
+fuchsia_structured_config_rust_lib(
+    name = "config_lib",
+    testonly = True,
+    cm_label = ":manifest",
+    crate_name = "receiver_config",
+)

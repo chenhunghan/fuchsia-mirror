@@ -30,38 +30,34 @@ const char *kAllowAllUses = "Allow_all_uses";
 const std::unordered_map<std::string, std::unordered_set<std::string_view>> kControllerAllowlists({
     {"ConnectToController",
      {
-         "block",  // zxcrypt-test
          "No_class_name_but_driver_url_is_fuchsia-boot:///dtr#meta/sample_driver.cm",  // device_controller_fidl
          "driver_runner_test",  // driver-runner-test
      }},
     {"ConnectToDeviceFidl",
      {
-         "block",               // Allow qemu to boot
          "driver_runner_test",  // driver_runner_death_test
-         "nand",                // Some internal bot
          "skip-block",          // Temporary usage for paver
          "No_class_name_but_driver_url_is_fuchsia-boot:///dtr#meta/fvm.cm",  // paver-test
          "No_class_name_but_driver_url_is_fuchsia-boot:///fvm#meta/fvm.cm",  // installer_test.sh
          "No_class_name_but_driver_url_is_fuchsia-boot:///gpt#meta/gpt.cm",  // storage-verity-benchmarks
          "No_class_name_but_driver_url_is_fuchsia-boot:///dtr#meta/gpt.cm",  // storage-benchmarks
          "No_class_name_but_driver_url_is_fuchsia-boot:///dtr#meta/sample_driver.cm",
+         "No_class_name_but_driver_url_is_owned by parent",  // ram-nand
      }},
     {"Bind",
      {
-         "block",                                                             // allow vim3 to boot
          "No_class_name_but_driver_url_is_fuchsia-boot:///dtr#meta/test.cm",  //  bind-fail-test
          "driver_runner_test",                                                // driver-runner-test
      }},
     {"Rebind",
      {
-         "block",               // ramdisk-tests
          "driver_runner_test",  // driver-runner-test
-         "nand",                // nandpart-broker-test
+         // nandpart-broker-test
+         "No_class_name_but_driver_url_is_owned by parent",
          "No_class_name_but_driver_url_is_fuchsia-boot:///dtr#meta/ddk-lifecycle-test.cm",  // ddk-lifecycle-test
      }},
     {"UnbindChildren",
      {
-         "block",               // fshost_integration_tests_fxfs_no_fxblob.cm
          "driver_runner_test",  // driver-runner-test
      }},
     {"ScheduleUnbind",

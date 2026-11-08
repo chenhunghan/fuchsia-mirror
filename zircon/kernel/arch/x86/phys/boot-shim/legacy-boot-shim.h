@@ -7,7 +7,6 @@
 #ifndef ZIRCON_KERNEL_ARCH_X86_PHYS_BOOT_SHIM_LEGACY_BOOT_SHIM_H_
 #define ZIRCON_KERNEL_ARCH_X86_PHYS_BOOT_SHIM_LEGACY_BOOT_SHIM_H_
 
-#include <lib/acpi_lite.h>
 #include <lib/boot-shim/acpi.h>
 #include <lib/boot-shim/boot-shim.h>
 #include <lib/boot-shim/pool-mem-config.h>
@@ -67,24 +66,7 @@ class LegacyBootShim : public LegacyBootShimBase {
  private:
   using SerialNumber = boot_shim::TestSerialNumberItem;
 
-  bool StandardLoad(BootZbi& boot);
-
-  // This gets first crack before StandardLoad.
-  // If it returns false then StandardLoad  is done.
-  bool BootQuirksLoad(BootZbi& boot);
-
-  // Helper for BootQuirksLoad to recognize an apparently valid bootable ZBI
-  // (or a simply empty one, which can get the standard error path).
-  bool IsProperZbi() const;
-
   InputZbi input_zbi_;
 };
-
-// If |zbi| contains a uart driver, |uart| is overwritten with such configuration.
-uart::all::Config<> UartFromZbi(LegacyBootShim::InputZbi zbi,
-                                const uart::all::Config<>& uart_config);
-
-std::optional<uart::all::Config<>> GetUartFromRange(LegacyBootShim::InputZbi::iterator start,
-                                                    LegacyBootShim::InputZbi::iterator end);
 
 #endif  // ZIRCON_KERNEL_ARCH_X86_PHYS_BOOT_SHIM_LEGACY_BOOT_SHIM_H_

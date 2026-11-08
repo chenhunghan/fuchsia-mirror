@@ -9,8 +9,8 @@ use camino::{Utf8Path, Utf8PathBuf};
 use clap::Parser;
 use diagnostics_log_types::Severity;
 use fidl::unpersist;
-use fidl_fuchsia_component_decl::Component;
-use fidl_fuchsia_data as fdata;
+use fidl_fuchsia_component_decl_common::{self as fidl_fuchsia_component_decl, Component};
+use fidl_fuchsia_data_common as fdata;
 use maplit::btreeset;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -554,7 +554,7 @@ fn run_tool() -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fidl_fuchsia_component_decl as fdecl;
+    use fidl_fuchsia_component_decl_common as fdecl;
     use tempfile::tempdir;
 
     #[test]

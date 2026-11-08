@@ -6,6 +6,7 @@ mod assembly;
 
 use anyhow::{Context, Result, anyhow};
 use assembly::Assembly;
+use assembly_android_config::OtaMetadataSource;
 use assembly_artifact_cache::{ArtifactCache, ArtifactError};
 use assembly_tool::PlatformToolProvider;
 use assembly_util::{fast_copy, shorten_path};
@@ -130,6 +131,31 @@ struct SanitizedCreateCommand {
 
     /// The product input bundles to use.
     pub pibs: Vec<String>,
+
+    /// Android artifacts to generate alongside the product bundle, if requested.
+    pub android: Option<AndroidOutput>,
+}
+
+/// Inputs for generating Android-compatible artifacts.
+#[derive(Debug, PartialEq)]
+struct AndroidOutput {
+    /// Directory to write Android-compatible partition images and ota.zip to.
+    pub out_dir: Utf8PathBuf,
+
+    /// Where the Android build metadata of the ota.zip comes from.
+    pub metadata: AndroidOtaMetadata,
+
+    /// Optional X.509 certificate to embed as META-INF/com/android/otacert.
+    pub ota_cert: Option<Utf8PathBuf>,
+}
+
+/// Source of the Android device and build metadata recorded in the ota.zip.
+#[derive(Debug, PartialEq)]
+enum AndroidOtaMetadata {
+    /// Copy the metadata from an existing Android ota.zip.
+    BaseOta(Utf8PathBuf),
+    /// Derive the metadata from Android build.prop files.
+    BuildProps(Vec<Utf8PathBuf>),
 }
 
 /// What result we want from running `ffx product create`.
@@ -197,6 +223,10 @@ impl TryFrom<CreateCommand> for SanitizedCreateCommand {
             zbi_only,
             bib_set,
             pib,
+            android,
+            android_base_ota,
+            android_build_prop,
+            android_ota_cert,
             ..
         } = cmd;
 
@@ -205,6 +235,43 @@ impl TryFrom<CreateCommand> for SanitizedCreateCommand {
                 "--recovery-product-config is required if --recovery-board-config is specified."
             );
         }
+
+        let android = match android {
+            None => {
+                for (flag, is_set) in [
+                    ("--android-base-ota", android_base_ota.is_some()),
+                    ("--android-build-prop", !android_build_prop.is_empty()),
+                    ("--android-ota-cert", android_ota_cert.is_some()),
+                ] {
+                    if is_set {
+                        anyhow::bail!("--android is required when {flag} is specified.");
+                    }
+                }
+                None
+            }
+            Some(out_dir) => {
+                if matches!(result, CreateResult::Stage) {
+                    anyhow::bail!("--android and --stage cannot be used together.");
+                }
+                if zbi_only {
+                    anyhow::bail!("--android and --zbi-only cannot be used together.");
+                }
+                if tuf_keys.is_none() {
+                    anyhow::bail!("--tuf-keys is required when --android is specified.");
+                }
+                let metadata = match (android_base_ota, android_build_prop.is_empty()) {
+                    (Some(base_ota), true) => AndroidOtaMetadata::BaseOta(base_ota),
+                    (None, false) => AndroidOtaMetadata::BuildProps(android_build_prop),
+                    (Some(_), false) => anyhow::bail!(
+                        "--android-base-ota and --android-build-prop cannot be used together."
+                    ),
+                    (None, true) => anyhow::bail!(
+                        "--android-base-ota or --android-build-prop is required when --android is specified."
+                    ),
+                };
+                Some(AndroidOutput { out_dir, metadata, ota_cert: android_ota_cert })
+            }
+        };
 
         Ok(Self {
             platform,
@@ -220,6 +287,7 @@ impl TryFrom<CreateCommand> for SanitizedCreateCommand {
             zbi_only,
             bib_sets: bib_set,
             pibs: pib,
+            android,
         })
     }
 }
@@ -349,10 +417,28 @@ async fn sanitized_product_bundle_create(
         builder = builder.system(recovery_system, Slot::R);
     }
 
-    let _ = builder
+    let product_bundle = builder
         .build(Box::new(tools), &out)
         .await
         .map_err(|e| ArtifactError::new(anyhow::anyhow!("{}", e)))?;
+
+    if let Some(android) = &cmd.android {
+        writer
+            .line(format!("Generating Android artifacts into {} ...", android.out_dir))
+            .map_err(|e| ArtifactError::new(anyhow::anyhow!("{}", e)))?;
+        let metadata_source = match &android.metadata {
+            AndroidOtaMetadata::BaseOta(path) => OtaMetadataSource::BaseOta(path),
+            AndroidOtaMetadata::BuildProps(paths) => OtaMetadataSource::BuildProps(paths),
+        };
+        assembly_android_config::create_android_artifacts(
+            &product_bundle,
+            &android.out_dir,
+            metadata_source,
+            android.ota_cert.as_deref(),
+        )
+        .with_context(|| format!("Generating Android artifacts into {}", android.out_dir))?;
+    }
+
     cache.purge()?;
 
     println!(
@@ -374,15 +460,14 @@ mod test {
     use super::*;
     use pbms::AuthFlowChoice;
 
-    #[test]
-    fn test_recovery_board_config_requires_recovery_product_config() {
-        let cmd = CreateCommand {
+    fn base_create_command() -> CreateCommand {
+        CreateCommand {
             product_config_board_config_combo: None,
             platform: None,
             product_config: Some("product".to_string()),
             recovery_product_config: None,
             board_config: Some("board".to_string()),
-            recovery_board_config: Some("recovery_board".to_string()),
+            recovery_board_config: None,
             output_name: None,
             tuf_keys: None,
             developer_overrides: None,
@@ -392,7 +477,25 @@ mod test {
             zbi_only: false,
             bib_set: vec![],
             pib: vec![],
-        };
+            android: None,
+            android_base_ota: None,
+            android_build_prop: vec![],
+            android_ota_cert: None,
+        }
+    }
+
+    fn android_create_command() -> CreateCommand {
+        let mut cmd = base_create_command();
+        cmd.tuf_keys = Some("keys".into());
+        cmd.android = Some("android_out".into());
+        cmd.android_base_ota = Some("base-ota.zip".into());
+        cmd
+    }
+
+    #[test]
+    fn test_recovery_board_config_requires_recovery_product_config() {
+        let mut cmd = base_create_command();
+        cmd.recovery_board_config = Some("recovery_board".to_string());
 
         let result = SanitizedCreateCommand::try_from(cmd);
         assert!(result.is_err());
@@ -404,23 +507,9 @@ mod test {
 
     #[test]
     fn test_recovery_board_config_success() {
-        let cmd = CreateCommand {
-            product_config_board_config_combo: None,
-            platform: None,
-            product_config: Some("product".to_string()),
-            recovery_product_config: Some("recovery_product".to_string()),
-            board_config: Some("board".to_string()),
-            recovery_board_config: Some("recovery_board".to_string()),
-            output_name: None,
-            tuf_keys: None,
-            developer_overrides: None,
-            stage: false,
-            out: None,
-            auth: AuthFlowChoice::Default,
-            zbi_only: false,
-            bib_set: vec![],
-            pib: vec![],
-        };
+        let mut cmd = base_create_command();
+        cmd.recovery_product_config = Some("recovery_product".to_string());
+        cmd.recovery_board_config = Some("recovery_board".to_string());
 
         let result = SanitizedCreateCommand::try_from(cmd);
         assert!(result.is_ok());
@@ -448,5 +537,109 @@ mod test {
         let custom_path = default_path_for_product_bundle_name(&env_with_home.context, "my_pb")
             .expect("custom pb path");
         assert_eq!(custom_path, Utf8PathBuf::from("/custom/home/.fuchsia/product_bundles/my_pb"));
+    }
+
+    #[test]
+    fn test_android_requires_tuf_keys() {
+        let mut cmd = android_create_command();
+        cmd.tuf_keys = None;
+
+        let err = SanitizedCreateCommand::try_from(cmd).unwrap_err();
+        assert_eq!(err.to_string(), "--tuf-keys is required when --android is specified.");
+    }
+
+    #[test]
+    fn test_android_sub_flags_require_android() {
+        let mut base_ota = base_create_command();
+        base_ota.android_base_ota = Some("base-ota.zip".into());
+        assert_eq!(
+            SanitizedCreateCommand::try_from(base_ota).unwrap_err().to_string(),
+            "--android is required when --android-base-ota is specified."
+        );
+
+        let mut build_prop = base_create_command();
+        build_prop.android_build_prop = vec!["build.prop".into()];
+        assert_eq!(
+            SanitizedCreateCommand::try_from(build_prop).unwrap_err().to_string(),
+            "--android is required when --android-build-prop is specified."
+        );
+
+        let mut cert = base_create_command();
+        cert.android_ota_cert = Some("ota.x509.pem".into());
+        assert_eq!(
+            SanitizedCreateCommand::try_from(cert).unwrap_err().to_string(),
+            "--android is required when --android-ota-cert is specified."
+        );
+    }
+
+    #[test]
+    fn test_android_conflicts_with_stage_and_zbi_only() {
+        let mut stage_cmd = android_create_command();
+        stage_cmd.stage = true;
+        assert_eq!(
+            SanitizedCreateCommand::try_from(stage_cmd).unwrap_err().to_string(),
+            "--android and --stage cannot be used together."
+        );
+
+        let mut zbi_cmd = android_create_command();
+        zbi_cmd.zbi_only = true;
+        zbi_cmd.out = Some("pb_out".into());
+        assert_eq!(
+            SanitizedCreateCommand::try_from(zbi_cmd).unwrap_err().to_string(),
+            "--android and --zbi-only cannot be used together."
+        );
+    }
+
+    #[test]
+    fn test_android_requires_exactly_one_metadata_source() {
+        let mut neither = android_create_command();
+        neither.android_base_ota = None;
+        assert_eq!(
+            SanitizedCreateCommand::try_from(neither).unwrap_err().to_string(),
+            "--android-base-ota or --android-build-prop is required when --android is specified."
+        );
+
+        let mut both = android_create_command();
+        both.android_build_prop = vec!["build.prop".into()];
+        assert_eq!(
+            SanitizedCreateCommand::try_from(both).unwrap_err().to_string(),
+            "--android-base-ota and --android-build-prop cannot be used together."
+        );
+    }
+
+    #[test]
+    fn test_android_with_base_ota_succeeds() {
+        let mut cmd = android_create_command();
+        cmd.android_ota_cert = Some("ota.x509.pem".into());
+
+        let sanitized = SanitizedCreateCommand::try_from(cmd).unwrap();
+        assert_eq!(
+            sanitized.android,
+            Some(AndroidOutput {
+                out_dir: "android_out".into(),
+                metadata: AndroidOtaMetadata::BaseOta("base-ota.zip".into()),
+                ota_cert: Some("ota.x509.pem".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn test_android_with_build_props_succeeds() {
+        let mut cmd = android_create_command();
+        cmd.android_base_ota = None;
+        cmd.android_build_prop = vec!["system/build.prop".into(), "vendor/build.prop".into()];
+
+        let sanitized = SanitizedCreateCommand::try_from(cmd).unwrap();
+        assert_eq!(
+            sanitized.android,
+            Some(AndroidOutput {
+                out_dir: "android_out".into(),
+                metadata: AndroidOtaMetadata::BuildProps(vec![
+                    "system/build.prop".into(),
+                    "vendor/build.prop".into(),
+                ]),
+                ota_cert: None,
+            })
+        );
     }
 }

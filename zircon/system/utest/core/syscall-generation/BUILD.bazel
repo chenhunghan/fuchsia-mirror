@@ -1,0 +1,23 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_build_info//:args.bzl", "exclude_testonly_syscalls")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# TODO: Verify whether syscall-generation should use target_compatible_with (was not gated by if (is_fuchsia) in GN).
+fx_cc_library(
+    name = "syscall-generation",
+    testonly = True,
+    srcs = [] if exclude_testonly_syscalls else ["syscall-generation.cc"],
+    implementation_deps = [] if exclude_testonly_syscalls else [
+        "//sdk/lib/stdcompat",
+        "//zircon/system/ulib/zx",
+        "//zircon/system/ulib/zxtest",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//zircon/system/utest/core:__pkg__"],
+    alwayslink = True,
+)

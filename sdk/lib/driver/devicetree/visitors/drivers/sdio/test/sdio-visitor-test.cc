@@ -71,6 +71,7 @@ TEST(SdioVisitorTest, TestSdioFunctionDevices) {
       {{
           fdf::MakeAcceptBindRule(bind_fuchsia::PROTOCOL, bind_fuchsia_sdio::BIND_PROTOCOL_DEVICE),
           fdf::MakeAcceptBindRule(bind_fuchsia::SDIO_FUNCTION, uint32_t{SDIO_FUNCTION_1}),
+          fdf::MakeAcceptBindRule(bind_fuchsia::SERVICE, "fuchsia.hardware.sdio.Service"),
       }},
       sdio_nodes[0].bind_rules(), false));
 
@@ -85,6 +86,7 @@ TEST(SdioVisitorTest, TestSdioFunctionDevices) {
       {{
           fdf::MakeAcceptBindRule(bind_fuchsia::PROTOCOL, bind_fuchsia_sdio::BIND_PROTOCOL_DEVICE),
           fdf::MakeAcceptBindRule(bind_fuchsia::SDIO_FUNCTION, uint32_t{SDIO_FUNCTION_2}),
+          fdf::MakeAcceptBindRule(bind_fuchsia::SERVICE, "fuchsia.hardware.sdio.Service"),
       }},
       sdio_nodes[1].bind_rules(), false));
 }

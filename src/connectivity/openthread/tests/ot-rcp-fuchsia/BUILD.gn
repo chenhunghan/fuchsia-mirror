@@ -7,7 +7,41 @@ import("//build/test.gni")
 
 group("tests") {
   testonly = true
-  deps = [ ":ot-rcp-fuchsia-platform-unittests" ]
+  deps = [
+    # Not launched by any test yet; listed so that CQ builds main.cc and
+    # validates the manifest.
+    ":ot-rcp-fuchsia-component",
+    ":ot-rcp-fuchsia-platform-unittests",
+    ":ot-rcp-fuchsia-spinel-device-server-unittests",
+    "tests/mock-spinel-host:tests",
+  ]
+}
+
+# Header-only view of the RCP's host-facing contract (EUI-64 base, max frame
+# size, flow-control defaults), for code that needs the constants without
+# linking :platform or :rcp-lib (which pull in otPlat* symbols and the
+# OpenThread core).
+source_set("rcp-test-headers") {
+  testonly = true
+  visibility = [ "//src/connectivity/openthread/tests/ot-rcp-fuchsia/*" ]
+  sources = [
+    "rcp/platform/platform.h",
+    "rcp/platform/radio.h",
+    "rcp/rcp_instance.h",
+    "rcp/spinel_device_server.h",
+  ]
+  public_deps = [
+    "//sdk/fidl/fuchsia.lowpan.spinel:fuchsia.lowpan.spinel_cpp",
+    "//sdk/lib/async:async-cpp",
+    "//sdk/lib/fit",
+    "//third_party/openthread/include/openthread",
+    "//zircon/system/ulib/zx",
+  ]
+
+  # Every RCP translation unit must see OPENTHREAD_RADIO=1 so that
+  # openthread-config-fuchsia.h selects the RCP branch (and not the host
+  # stack's), even in targets that only use the public headers.
+  public_configs = [ "//third_party/openthread:openthread_radio_config" ]
 }
 
 # The OpenThread platform: the ot_rcp::Platform class (platform.{h,cc}), the
@@ -28,11 +62,74 @@ source_set("platform") {
     "rcp/platform/radio.h",
   ]
   public_deps = [
+    ":rcp-test-headers",
     "//sdk/lib/async:async-cpp",
     "//sdk/lib/syslog/cpp",
     "//third_party/openthread/include/openthread",
     "//zircon/system/ulib/zx",
   ]
+}
+
+# Everything except main(): the OpenThread RADIO core + NCP, NcpAdapter,
+# RcpInstance and SpinelDeviceServer.
+source_set("rcp-lib") {
+  testonly = true
+  visibility = [ ":*" ]
+  sources = [
+    "rcp/ncp_fidl.cc",
+    "rcp/ncp_fidl.h",
+    "rcp/rcp_instance.cc",
+    "rcp/spinel_device_server.cc",
+  ]
+  public_deps = [
+    ":platform",
+    ":rcp-test-headers",
+    "//sdk/fidl/fuchsia.lowpan.spinel:fuchsia.lowpan.spinel_cpp",
+    "//sdk/lib/async:async-cpp",
+    "//sdk/lib/fit",
+    "//third_party/openthread:libopenthread-rcp",
+    "//zircon/system/ulib/zx",
+  ]
+  deps = [ "//sdk/lib/syslog/cpp" ]
+}
+
+executable("bin") {
+  testonly = true
+  visibility = [ ":*" ]
+  output_name = "ot_rcp_fuchsia"
+  sources = [ "rcp/main.cc" ]
+  deps = [
+    ":ot-rcp-fuchsia-config",
+    ":rcp-lib",
+    "//sdk/lib/async-loop:async-loop-cpp",
+    "//sdk/lib/async-loop:async-loop-default",
+    "//sdk/lib/component/outgoing/cpp",
+    "//sdk/lib/syslog/cpp",
+  ]
+}
+
+fuchsia_component_manifest("ot-rcp-fuchsia-manifest") {
+  testonly = true
+  visibility = [ ":*" ]
+  component_name = "ot-rcp-fuchsia"
+  manifest = "rcp/meta/ot-rcp-fuchsia.cml"
+}
+
+# Generated accessors (ot_rcp_fuchsia_config::Config, header
+# ot_rcp_fuchsia_config.h) for the config capabilities the manifest uses:
+# `node_id` is routed in as `fuchsia.openthread.rcp.NodeId` by the parent.
+fuchsia_structured_config_cpp_elf_lib("ot-rcp-fuchsia-config") {
+  testonly = true
+  visibility = [ ":*" ]
+  cm_label = ":ot-rcp-fuchsia-manifest"
+}
+
+# Included by packages that launch the RCP as a component.
+fuchsia_component("ot-rcp-fuchsia-component") {
+  testonly = true
+  visibility = [ "//src/connectivity/openthread/tests/ot-rcp-fuchsia/*" ]
+  cm_label = ":ot-rcp-fuchsia-manifest"
+  deps = [ ":bin" ]
 }
 
 # The platform calls back into the OpenThread core (otTaskletsProcess,
@@ -56,4 +153,32 @@ test("platform_unittests") {
 fuchsia_unittest_package("ot-rcp-fuchsia-platform-unittests") {
   visibility = [ ":*" ]
   deps = [ ":platform_unittests" ]
+}
+
+# Links the whole RCP (SpinelDeviceServer, RcpInstance, the OpenThread core and
+# the platform) and serves it on the test's own loop, driven over FIDL by
+# MockSpinelHost. Does not cover the component manifest, the
+# fuchsia.lowpan.spinel.Service route, the node id config capability or main.cc.
+test("spinel_device_server_unittests") {
+  output_name = "ot_rcp_fuchsia_spinel_device_server_unittests"
+  visibility = [ ":*" ]
+  sources = [ "rcp/spinel_device_server_unittest.cc" ]
+  deps = [
+    ":rcp-lib",
+    "//sdk/fidl/fuchsia.lowpan.spinel:fuchsia.lowpan.spinel_cpp",
+    "//sdk/lib/fidl/cpp",
+    "//src/connectivity/openthread/tests/ot-rcp-fuchsia/tests/mock-spinel-host",
+    "//src/connectivity/openthread/tests/ot-rcp-fuchsia/tests/mock-spinel-host:mac-frame",
+    "//src/connectivity/openthread/tests/ot-rcp-fuchsia/tests/mock-spinel-host:mock-spinel-host-fixture",
+    "//src/lib/fxl/test:gtest_main",
+    "//src/lib/testing/predicates",
+    "//third_party/googletest:gtest",
+    "//third_party/openthread/include/openthread",
+    "//zircon/system/ulib/zx",
+  ]
+}
+
+fuchsia_unittest_package("ot-rcp-fuchsia-spinel-device-server-unittests") {
+  visibility = [ ":*" ]
+  deps = [ ":spinel_device_server_unittests" ]
 }

@@ -8,6 +8,29 @@ exports_files(
     [
         "meta/ui.core_shard.cml",
         "meta/ui_routes_base.shard.cml",
+        "meta/ui_with_synthetic_device_support.core_shard.cml",
     ],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+# The web-pixel-tests directory has no BUILD.bazel yet, so this package owns
+# its shared header.
+exports_files(
+    ["tests/integration_graphics_tests/web-pixel-tests/constants.h"],
+    visibility = ["//src/ui/tests/integration_graphics_tests/web-pixel-tests/http_server:__pkg__"],
+)
+
+test_suite(
+    name = "target_tests",
+    tests = [
+        "//src/ui/lib/focus_chain_provider:tests",
+        "//src/ui/tools/print-input-report:tests",
+    ],
+)
+
+test_suite(
+    name = "host_tests",
+    tests = [
+        "//src/ui/lib/yuv:host_tests",
+    ],
 )

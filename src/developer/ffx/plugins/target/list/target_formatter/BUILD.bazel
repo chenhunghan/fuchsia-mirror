@@ -1,0 +1,71 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":target_formatter_test"],
+    visibility = ["//src/developer/ffx:__pkg__"],
+)
+
+rustc_library(
+    name = "target_formatter",
+    srcs = ["src/lib.rs"],
+    compile_data = [
+        "test_data/target_formatter_addresses_format_golden",
+        "test_data/target_formatter_build_config_board_missing_golden",
+        "test_data/target_formatter_build_config_full_golden",
+        "test_data/target_formatter_build_config_product_missing_golden",
+        "test_data/target_formatter_device_finder_format_golden",
+        "test_data/target_formatter_device_finder_format_ipv4_only_golden",
+        "test_data/target_formatter_device_finder_format_ipv6_only_golden",
+        "test_data/target_formatter_empty_formatter_golden",
+        "test_data/target_formatter_empty_nodename_no_default_golden",
+        "test_data/target_formatter_empty_nodename_with_default_golden",
+        "test_data/target_formatter_empty_nodename_with_default_multiple_unknown_golden",
+        "test_data/target_formatter_json_build_config_board_missing_golden",
+        "test_data/target_formatter_json_build_config_both_missing_golden",
+        "test_data/target_formatter_json_build_config_full_default_target_golden",
+        "test_data/target_formatter_json_build_config_full_golden",
+        "test_data/target_formatter_json_build_config_product_missing_golden",
+        "test_data/target_formatter_name_only_formatter_with_default_golden",
+        "test_data/target_formatter_name_only_multiple_unknown_formatter_with_default_golden",
+        "test_data/target_formatter_one_target_no_default_golden",
+        "test_data/target_formatter_one_target_with_default_golden",
+        "test_data/target_formatter_simple_formatter_with_default_golden",
+    ],
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//src/developer/ffx/plugins/devices:__pkg__",
+        "//src/developer/ffx/plugins/target:__subpackages__",
+        "//src/developer/ffx/tools/monitor:__pkg__",
+    ],
+    deps = [
+        "//src/developer/ffx/lib/addr:lib",
+        "//src/developer/ffx/lib/netext:lib",
+        "//src/developer/ffx/lib/target:lib",
+        "//src/developer/ffx/lib/target_errors:lib",
+        "//src/developer/ffx/plugins/target/list:ffx_list_args",
+        "//third_party/rust_crates/vendor:schemars",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+host_rustc_test(
+    name = "target_formatter_test",
+    crate = ":target_formatter",
+    deps = [
+        "//src/connectivity/lib/net-declare",
+        "//src/lib/fuchsia",
+    ],
+)

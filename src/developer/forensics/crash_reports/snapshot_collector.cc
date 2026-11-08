@@ -157,7 +157,7 @@ std::string SnapshotCollector::MakeNewSnapshotRequest(const zx::time_monotonic s
     zx::duration collection_timeout_per_data = timeout;
     data_provider_->GetSnapshotInternal(
         collection_timeout_per_data, uuid,
-        [this, uuid](feedback::Annotations annotations, fuchsia::feedback::Attachment archive) {
+        [this, uuid](feedback::Annotations annotations, fuchsia_feedback::Attachment archive) {
           CompleteWithSnapshot(uuid, std::move(annotations), std::move(archive));
         });
   });
@@ -169,7 +169,7 @@ std::string SnapshotCollector::MakeNewSnapshotRequest(const zx::time_monotonic s
 
 void SnapshotCollector::CompleteWithSnapshot(const std::string& uuid,
                                              feedback::Annotations annotations,
-                                             fuchsia::feedback::Attachment archive) {
+                                             fuchsia_feedback::Attachment archive) {
   // We clear snapshot_requests_ as soon as we receive the shutdown signal.
   if (shutdown_) {
     return;
@@ -183,7 +183,7 @@ void SnapshotCollector::CompleteWithSnapshot(const std::string& uuid,
   AddAnnotation("debug.snapshot.shared-request.num-clients", request->promise_ids.size(),
                 annotations);
 
-  if (archive.key.empty() || !archive.value.vmo.is_valid()) {
+  if (archive.key().empty() || !archive.value().vmo().is_valid()) {
     AddAnnotation(feedback::kDebugSnapshotPresentKey, std::string("false"), annotations);
   }
 

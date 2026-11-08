@@ -17,6 +17,7 @@ use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use futures::channel::oneshot;
 use input_controller::InputError;
+pub use settings_camera::CameraWatcherEvent;
 use settings_common::config::default_settings::DefaultSetting;
 use settings_common::inspect::event::{
     ExternalEventPublisher, RequestType, ResponseType, SettingValuePublisher, UsagePublisher,
@@ -29,7 +30,7 @@ use types::InputInfo;
 
 pub struct SetupResult {
     pub input_fidl_handler: InputFidlHandler,
-    pub camera_watcher_event_tx: UnboundedSender<bool>,
+    pub camera_watcher_event_tx: UnboundedSender<CameraWatcherEvent>,
     pub media_buttons_event_tx: UnboundedSender<settings_media_buttons::Event>,
     pub task: fuchsia_async::Task<()>,
 }
@@ -63,8 +64,11 @@ where
     let inner_camera_event_rx =
         event_request_logger(camera_watcher_event_rx, usage_publisher.clone(), RequestType::Camera);
     let (media_buttons_event_tx, media_buttons_event_rx) = mpsc::unbounded();
-    let inner_media_buttons_event_rx =
-        event_request_logger(media_buttons_event_rx, usage_publisher.clone(), RequestType::Camera);
+    let inner_media_buttons_event_rx = event_request_logger(
+        media_buttons_event_rx,
+        usage_publisher.clone(),
+        RequestType::MediaButtons,
+    );
     let task = input_controller
         .handle(inner_camera_event_rx, inner_media_buttons_event_rx, request_rx)
         .await;

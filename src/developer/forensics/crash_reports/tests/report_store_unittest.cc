@@ -4,6 +4,7 @@
 
 #include "src/developer/forensics/crash_reports/report_store.h"
 
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
 #include <lib/syslog/cpp/macros.h>
 
 #include <filesystem>
@@ -22,6 +23,7 @@
 #include "src/developer/forensics/testing/unit_test_fixture.h"
 #include "src/developer/forensics/utils/sized_data.h"
 #include "src/developer/forensics/utils/storage_size.h"
+#include "src/developer/forensics/utils/vmo.h"
 #include "src/lib/files/directory.h"
 #include "src/lib/files/file.h"
 #include "src/lib/files/path.h"
@@ -883,9 +885,9 @@ TEST_F(ReportStoreTest, Succeed_MoveSnapshotToPersistence) {
   const std::string expected_snapshot_uuid = "snapshot_uuid";
   const std::string expected_minidump = "mindump";
 
-  fuchsia::feedback::Attachment snapshot;
-  snapshot.key = "snapshot.key";
-  FX_CHECK(fsl::VmoFromString("", &snapshot.value));
+  fuchsia_feedback::Attachment snapshot;
+  snapshot.key("snapshot.key");
+  snapshot.value(BufferFromString("").value());
 
   report_store_->GetSnapshotStore()->AddSnapshot(expected_snapshot_uuid, std::move(snapshot));
   ASSERT_EQ(report_store_->GetSnapshotStore()->SnapshotLocation(expected_snapshot_uuid),

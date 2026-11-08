@@ -4,7 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-use crate::arch_rs::{UserCopyCaptureFaultsError, max_num_cpus};
+use crate::arch_rs::max_num_cpus;
 use crate::kernel::mp::is_cpu_online;
 use crate::kernel::percpu::PerCpu;
 use crate::kernel::scheduler::get_projected_cpu_stats;
@@ -20,6 +20,7 @@ use crate::vm::memory_stats::{
     MapsInfoVersion, VmoInfoVersion, get_compression_stats, get_memory_stats, get_stall_stats,
     kernel_stats_info_to_version, maps_info_to_version, vmo_info_to_version,
 };
+use core::sync::atomic::Ordering;
 use debug::ltracef;
 use fbl::Array;
 use syscalls_macro::syscall;
@@ -53,17 +54,6 @@ impl<T: VmoInfoVersion + IntoBytes + Immutable> VmoInfoWriter for SubsetVmoInfoW
         self.out.element_offset(offset + self.base_offset).copy_to_user(&versioned_vmo)
     }
 
-    fn write_capture_faults(
-        &mut self,
-        vmo: &zx_info_vmo_t,
-        offset: usize,
-    ) -> Result<(), UserCopyCaptureFaultsError> {
-        let versioned_vmo: T = vmo_info_to_version(vmo);
-        self.out
-            .element_offset(offset + self.base_offset)
-            .copy_to_user_capture_faults(&versioned_vmo)
-    }
-
     fn add_offset(&mut self, offset: usize) {
         self.base_offset += offset;
     }
@@ -90,17 +80,6 @@ impl<T: MapsInfoVersion + IntoBytes + Immutable> VmarMapsInfoWriter
     fn write(&mut self, maps: &zx_info_maps_t, offset: usize) -> Result<(), Status> {
         let versioned_maps: T = maps_info_to_version(maps);
         self.out.element_offset(offset + self.base_offset).copy_to_user(&versioned_maps)
-    }
-
-    fn write_capture_faults(
-        &mut self,
-        maps: &zx_info_maps_t,
-        offset: usize,
-    ) -> Result<(), UserCopyCaptureFaultsError> {
-        let versioned_maps: T = maps_info_to_version(maps);
-        self.out
-            .element_offset(offset + self.base_offset)
-            .copy_to_user_capture_faults(&versioned_maps)
     }
 
     fn add_offset(&mut self, offset: usize) {
@@ -135,39 +114,42 @@ fn get_cpu_stats(cpu_num: u32) -> zx_info_cpu_stats_t {
     }
 }
 
-fn get_guest_cpu_stats(cpu_num: u32) -> zx_info_guest_stats_t {
-    let cpu = PerCpu::get(cpu_num);
+fn get_guest_cpu_stats(cpu_num: u32, cpu: &PerCpu) -> zx_info_guest_stats_t {
+    // `Ordering::Relaxed` is sufficient because guest telemetry counters are independent
+    // monotonically increasing counters updated via `GUEST_STATS_INC` (`__ATOMIC_RELAXED`) and do
+    // not synchronize access to any other memory.
     #[cfg_attr(target_arch = "riscv64", allow(unused_mut))]
     let mut stats = zx_info_guest_stats_t {
         cpu_number: cpu_num,
         flags: if is_cpu_online(cpu_num) { ZX_INFO_CPU_STATS_FLAG_ONLINE } else { 0 },
-        vm_entries: cpu.gstats.vm_entries,
-        vm_exits: cpu.gstats.vm_exits,
+        vm_entries: cpu.gstats.vm_entries.load(Ordering::Relaxed),
+        vm_exits: cpu.gstats.vm_exits.load(Ordering::Relaxed),
         ..Default::default()
     };
     #[cfg(target_arch = "aarch64")]
     {
-        stats.wfi_wfe_instructions = cpu.gstats.wfi_wfe_instructions;
-        stats.system_instructions = cpu.gstats.system_instructions;
-        stats.instruction_aborts = cpu.gstats.instruction_aborts;
-        stats.data_aborts = cpu.gstats.data_aborts;
-        stats.smc_instructions = cpu.gstats.smc_instructions;
-        stats.interrupts = cpu.gstats.interrupts;
+        stats.wfi_wfe_instructions = cpu.gstats.arch.wfi_wfe_instructions.load(Ordering::Relaxed);
+        stats.system_instructions = cpu.gstats.arch.system_instructions.load(Ordering::Relaxed);
+        stats.instruction_aborts = cpu.gstats.arch.instruction_aborts.load(Ordering::Relaxed);
+        stats.data_aborts = cpu.gstats.arch.data_aborts.load(Ordering::Relaxed);
+        stats.smc_instructions = cpu.gstats.arch.smc_instructions.load(Ordering::Relaxed);
+        stats.interrupts = cpu.gstats.arch.interrupts.load(Ordering::Relaxed);
     }
     #[cfg(target_arch = "x86_64")]
     {
-        stats.vmcall_instructions = cpu.gstats.vmcall_instructions;
-        stats.pause_instructions = cpu.gstats.pause_instructions;
-        stats.xsetbv_instructions = cpu.gstats.xsetbv_instructions;
-        stats.ept_violations = cpu.gstats.ept_violations;
-        stats.wrmsr_instructions = cpu.gstats.wrmsr_instructions;
-        stats.rdmsr_instructions = cpu.gstats.rdmsr_instructions;
-        stats.io_instructions = cpu.gstats.io_instructions;
-        stats.control_register_accesses = cpu.gstats.control_register_accesses;
-        stats.hlt_instructions = cpu.gstats.hlt_instructions;
-        stats.cpuid_instructions = cpu.gstats.cpuid_instructions;
-        stats.interrupt_windows = cpu.gstats.interrupt_windows;
-        stats.interrupts = cpu.gstats.interrupts;
+        stats.vmcall_instructions = cpu.gstats.arch.vmcall_instructions.load(Ordering::Relaxed);
+        stats.pause_instructions = cpu.gstats.arch.pause_instructions.load(Ordering::Relaxed);
+        stats.xsetbv_instructions = cpu.gstats.arch.xsetbv_instructions.load(Ordering::Relaxed);
+        stats.ept_violations = cpu.gstats.arch.ept_violations.load(Ordering::Relaxed);
+        stats.wrmsr_instructions = cpu.gstats.arch.wrmsr_instructions.load(Ordering::Relaxed);
+        stats.rdmsr_instructions = cpu.gstats.arch.rdmsr_instructions.load(Ordering::Relaxed);
+        stats.io_instructions = cpu.gstats.arch.io_instructions.load(Ordering::Relaxed);
+        stats.control_register_accesses =
+            cpu.gstats.arch.control_register_accesses.load(Ordering::Relaxed);
+        stats.hlt_instructions = cpu.gstats.arch.hlt_instructions.load(Ordering::Relaxed);
+        stats.cpuid_instructions = cpu.gstats.arch.cpuid_instructions.load(Ordering::Relaxed);
+        stats.interrupt_windows = cpu.gstats.arch.interrupt_windows.load(Ordering::Relaxed);
+        stats.interrupts = cpu.gstats.arch.interrupts.load(Ordering::Relaxed);
     }
     stats
 }
@@ -537,15 +519,15 @@ pub fn sys_object_get_info(
         ZX_INFO_GUEST_STATS => {
             validate_ranged_resource(handle, ZX_RSRC_KIND_SYSTEM, ZX_RSRC_SYSTEM_INFO_BASE, 1)?;
 
-            let num_cpus = max_num_cpus() as usize;
+            let num_cpus = PerCpu::processor_count();
             let num_space_for = buffer_size / core::mem::size_of::<zx_info_guest_stats_t>();
             let num_to_copy = num_cpus.min(num_space_for);
             let guest_buf = buffer.reinterpret::<zx_info_guest_stats_t>();
 
-            for i in 0..num_to_copy {
-                let stats = get_guest_cpu_stats(i as u32);
+            for (i, percpu) in PerCpu::iter().take(num_to_copy) {
+                let stats = get_guest_cpu_stats(i, percpu);
                 guest_buf
-                    .element_offset(i)
+                    .element_offset(i as usize)
                     .copy_to_user(&stats)
                     .map_err(|_| Status::INVALID_ARGS)?;
             }

@@ -1,0 +1,109 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    crate_name = "storage_example",
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        "//src/lib/diagnostics/inspect/runtime/rust",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:byteorder",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "storage_example",
+)
+
+fx_component_manifest(
+    name = "component_manifest",
+    component_name = "storage_example",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/storage_example.cml",
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":component_manifest",
+    deps = [":bin_packaged"],
+)
+
+rustc_test(
+    name = "bin_test",
+    crate = ":bin",
+    # Sets the GN output_name to match meta/storage_example_unittests.cml's program.binary.
+    crate_name = "storage_example_bin_test",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+        "//third_party/rust_crates/vendor:tempfile",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_test_packaged",
+    testonly = True,
+    binary = ":bin_test",
+    binary_name = "storage_example_bin_test",
+)
+
+fx_component_manifest(
+    name = "unittest_component_manifest",
+    testonly = True,
+    component_name = "storage_example_unittests",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners:tmp_storage.shard.cml",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/storage_example_unittests.cml",
+)
+
+fx_test_component(
+    name = "unittest_component",
+    compiled_manifest = ":unittest_component_manifest",
+    deps = [":bin_test_packaged"],
+)
+
+fx_package(
+    name = "unittest_package",
+    package_name = "storage_example_unittests",
+    testonly = True,
+    test_components = [":unittest_component"],
+)
+
+fx_test(
+    name = "unittest_package_test",
+    package = ":unittest_package",
+    visibility = ["//examples:__pkg__"],
+)

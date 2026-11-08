@@ -3,11 +3,22 @@ TestBeds:
     Controllers:
       FuchsiaDevice:
         - name: "fuchsia-emulator"
-    TestParams:
-      power_switch_mode: "pdu"
-      pdu_config:
-        host: "192.168.42.48"
-        username: "admin"
-        priv_key_path: "/usr/local/google/home/shashidharj/.ssh/pdu_key"
-        outlet: 2
+          # Example 1: Digital Loggers PDU via SSH (PowerSwitchUsingPdu)
+          power_switch_hw:
+            pdu_host: "192.168.42.48"
+            pdu_username: "admin"
+            priv_key_path: "/usr/local/google/home/shashidharj/.ssh/pdu_key"
+          power_switch_outlet: 2
+          power_switch_impl:
+            module: "honeydew.auxiliary_devices.power_switch.power_switch_using_pdu"
+            class: "PowerSwitchUsingPdu"
 
+          # Example 2: Synaccess NP-02B PDU via HTTP (PowerSwitchUsingSynaccess)
+          # power_switch_hw:
+          #   host: "192.168.42.33"
+          #   username: "admin"
+          #   password: "admin"
+          # power_switch_outlet: 1
+          # power_switch_impl:
+          #   module: "honeydew.auxiliary_devices.power_switch.power_switch_using_synaccess"
+          #   class: "PowerSwitchUsingSynaccess"

@@ -1,0 +1,42 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/idk:idk_ffx_tool.bzl", "idk_ffx_tool")
+load("//src/developer/ffx/build:ffx_plugin.bzl", "ffx_plugin")
+
+package(default_applicable_licenses = ["//:license"])
+
+ffx_plugin(
+    name = "ffx_session",
+    args_deps = [
+        "//src/developer/ffx/core:lib",
+        "//third_party/rust_crates/vendor:argh",
+    ],
+    args_srcs = ["src/args.rs"],
+    edition = "2024",
+    plugin_deps = [
+        "//src/developer/ffx/plugins/session/add:ffx_session_add",
+        "//src/developer/ffx/plugins/session/drop-power-lease:ffx_session_drop_power_lease",
+        "//src/developer/ffx/plugins/session/launch:ffx_session_launch",
+        "//src/developer/ffx/plugins/session/remove:ffx_session_remove",
+        "//src/developer/ffx/plugins/session/restart:ffx_session_restart",
+        "//src/developer/ffx/plugins/session/show:ffx_session_show",
+        "//src/developer/ffx/plugins/session/start:ffx_session_start",
+        "//src/developer/ffx/plugins/session/stop:ffx_session_stop",
+    ],
+    sdk_category = "not-yet-specified",
+    version = "0.1.0",
+)
+
+idk_ffx_tool(
+    name = "ffx_session_tool",
+    srcs = ["src/main.rs"],
+    category = "partner",
+    edition = "2024",
+    idk_name = "ffx-session",
+    deps = [
+        ":ffx_session_suite",
+        "//src/lib/fuchsia-async",
+    ],
+)

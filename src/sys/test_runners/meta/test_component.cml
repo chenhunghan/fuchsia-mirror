@@ -1,0 +1,28 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    include: [
+        "//sdk/lib/syslog/offer.shard.cml",
+        "//src/sys/test_runners/rust/default.shard.cml",
+        "syslog/client.shard.cml",
+    ],
+    program: {
+        binary: "bin/test_runners_lib_lib_test",
+    },
+    children: [
+        {
+            name: "lib_loader_cache",
+            url: "#meta/lib_loader_runner_cache.cm",
+        },
+    ],
+    use: [
+        {
+            protocol: [ "fuchsia.process.Launcher" ],
+        },
+        {
+            protocol: [ "fuchsia.test.runner.LibraryLoaderCacheBuilder" ],
+            from: "#lib_loader_cache",
+        },
+    ],
+}

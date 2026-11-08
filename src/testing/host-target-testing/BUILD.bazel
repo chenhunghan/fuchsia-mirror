@@ -1,0 +1,25 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        "//src/testing/host-target-testing/artifacts:host-target-testing-artifacts-test",
+        "//src/testing/host-target-testing/avb:host-target-testing-avb-test",
+        "//src/testing/host-target-testing/build:host-target-testing-build-test",
+        "//src/testing/host-target-testing/cli:host-target-testing-cli-test",
+        "//src/testing/host-target-testing/device:host-target-testing-device-test",
+        "//src/testing/host-target-testing/ffx:host-target-testing-ffx-test",
+        "//src/testing/host-target-testing/ignores:pm_ignores_test",
+        "//src/testing/host-target-testing/paver:host-target-testing-paver-test",
+        "//src/testing/host-target-testing/pkg:pm_pkg_test",
+        "//src/testing/host-target-testing/util:host-target-testing-util-test",
+        "//src/testing/host-target-testing/zbi:host-target-testing-zbi-test",
+    ],
+)

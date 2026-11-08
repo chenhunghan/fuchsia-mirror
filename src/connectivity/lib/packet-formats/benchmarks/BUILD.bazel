@@ -1,0 +1,56 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "packet-formats-benchmarks",
+    testonly = True,
+    srcs = [
+        "src/ip.rs",
+        "src/main.rs",
+        "src/tcp.rs",
+        "src/udp.rs",
+    ],
+    build_flags = [
+        "//build/config/rust/lints:deny_unused_results",
+        # Use the same configs as netstack3, since this is how we mostly use this
+        # crate in release mode.
+        "//src/connectivity/network/netstack3:netstack3_configs",
+    ],
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/connectivity/lib/net-declare",
+        "//src/connectivity/lib/net-types",
+        "//src/connectivity/lib/packet-formats",
+        "//src/developer/fuchsia-criterion",
+        "//src/lib/network/packet",
+        "//third_party/rust_crates/vendor:criterion",
+        "//third_party/rust_crates/vendor:itertools",
+    ],
+)
+
+rustc_test(
+    name = "packet-formats-benchmarks_test",
+    build_flags = [
+        "//build/config/rust/lints:deny_unused_results",
+        "//src/connectivity/network/netstack3:netstack3_configs",
+    ],
+    crate = ":packet-formats-benchmarks",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_unittest_package(
+    name = "packet-formats-benchmarks-test",
+    unit_tests = [":packet-formats-benchmarks_test"],
+    visibility = ["//src/connectivity/lib/packet-formats:__pkg__"],
+)

@@ -878,3 +878,35 @@ success("FidlvizDemo") {
         v2 = [#0],
     },
 }
+
+decode_failure("OptionalStructInvalidPresenceIndicatorWithOutOfLineBytes") {
+    // TODO(https://fxbug.dev/579582830): Validate Box<T> presence indicator in cpp.
+    bindings_denylist = [cpp],
+    type = PaddingEndOfOutOfLineObject4Byte,
+    bytes = {
+        v2 = [
+            repeat(0xab):8,
+            num(1):4, padding:4,
+        ],
+    },
+    err = INVALID_PRESENCE_INDICATOR,
+}
+
+success("NestedStructWithStringBeforeUint8") {
+    // TODO(https://fxbug.dev/579580990): Fix nested struct out-of-line ordering in dynfidl.
+    bindings_denylist = [dynfidl],
+    value = NestedStructWithStringBeforeUint8{
+        inner: InnerStructWithString{
+            s: "hello",
+        },
+        trailing: 0x42,
+    },
+    bytes = {
+        v2 = [
+            num(5):8, // inner.s length
+            repeat(0xff):8, // inner.s present
+            0x42, padding:7, // trailing uint8 + padding
+            'h', 'e', 'l', 'l', 'o', padding:3, // inner.s out-of-line payload
+        ],
+    },
+}

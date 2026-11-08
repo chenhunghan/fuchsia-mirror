@@ -44,6 +44,11 @@ class PlatformConnectionClient {
   // Releases the connection's reference to the given object.
   virtual magma_status_t ReleaseObject(uint64_t object_id, PlatformObject::Type object_type) = 0;
 
+  // Asks the system driver to allocate a buffer of at least |size| bytes and import it into the
+  // connection as |object_id|. Returns a handle to the buffer's memory.
+  virtual magma_status_t CreateBuffer(uint64_t size, uint64_t flags, uint64_t object_id,
+                                      uint32_t* handle_out) = 0;
+
   // Creates a context and returns the context id
   virtual magma_status_t CreateContext(uint32_t* context_id_out) = 0;
   virtual magma_status_t CreateContext2(uint32_t* context_id_out, uint64_t priority) = 0;

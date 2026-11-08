@@ -1,0 +1,84 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_rules_common//packages:resources.bzl", "resource")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "lib",
+    srcs = [
+        "src/bridge.rs",
+        "src/capability.rs",
+        "src/config.rs",
+        "src/db.rs",
+        "src/device.rs",
+        "src/filter.rs",
+        "src/lib.rs",
+        "src/util.rs",
+    ],
+    crate_name = "lspci",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.pci:fuchsia.hardware.pci_rust",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:bitfield",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)
+
+rustc_test(
+    name = "lib_test",
+    crate = ":lib",
+    # Unique crate_name matching the library crate name `lspci` to avoid a GN
+    # output_name collision for the generic `lib_test` target name.
+    crate_name = "lspci_lib_test",
+)
+
+rustc_binary(
+    name = "lspci",
+    srcs = ["src/main.rs"],
+    build_flags = ["//build/config/rust:bootfs"],
+    edition = "2024",
+    visibility = ["//src/devices/pci/bin:__pkg__"],
+    deps = [
+        ":lib",
+        "//sdk/fidl/fuchsia.hardware.pci:fuchsia.hardware.pci_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+    ],
+)
+
+# bazel2gn does not support resource() targets; kept in BUILD.gn above the
+# sentinel. TODO(https://fxbug.dev/570694755)
+# @bazel2gn:skip
+resource(
+    name = "database",
+    # third_party/pciids has no BUILD.bazel file, so //:pci_ids wraps pci.ids in
+    # the root package.
+    src = "//:pci_ids",
+    dest = "data/lspci/pci.ids",
+)
+
+# bazel2gn does not support `resources` on fx_unittest_package(); the GN test
+# package is defined above the sentinel in BUILD.gn.
+# TODO(https://fxbug.dev/570694755)
+# @bazel2gn:skip
+fx_unittest_package(
+    name = "lspci-tests",
+    resources = [":database"],
+    unit_tests = [":lib_test"],
+    visibility = ["//src/devices:__pkg__"],
+)

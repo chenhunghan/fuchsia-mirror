@@ -4,7 +4,6 @@
 
 //! Connection to a directory that can be modified by the client though a FIDL connection.
 
-use crate::common::io1_to_io2_attrs;
 use crate::directory::connection::{BaseConnection, ConnectionState};
 use crate::directory::entry_container::MutableDirectory;
 use crate::execution_scope::ExecutionScope;
@@ -102,20 +101,6 @@ impl<DirectoryType: MutableDirectory> MutableConnection<DirectoryType> {
                 }
                 .trace(trace::trace_future_args!("storage", "Directory::Rename"))
                 .await?;
-            }
-            #[cfg(fuchsia_api_level_at_least = "28")]
-            fio::DirectoryRequest::DeprecatedSetAttr { flags, attributes, responder } => {
-                let raw_status = Status::result_into_raw(
-                    this.handle_update_attributes(io1_to_io2_attrs(flags, attributes)).await,
-                );
-                responder.send(raw_status)?;
-            }
-            #[cfg(not(fuchsia_api_level_at_least = "28"))]
-            fio::DirectoryRequest::SetAttr { flags, attributes, responder } => {
-                let raw_status = Status::result_into_raw(
-                    this.handle_update_attributes(io1_to_io2_attrs(flags, attributes)).await,
-                );
-                responder.send(raw_status)?;
             }
             fio::DirectoryRequest::Sync { responder } => {
                 async move {

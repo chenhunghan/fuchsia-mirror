@@ -156,7 +156,7 @@ def main() -> int:
     for dest, src in merged.dest_to_src.items():
         dest_path = output_dir / dest
         dest_path.parent.mkdir(exist_ok=True, parents=True)
-        dest_path.symlink_to(os.path.relpath(src, dest_path.parent))
+        generate_idk.create_relative_symlink(dest_path, src)
 
     # Write the overall manifest.
     manifest_json = merged.sdk_manifest_json(

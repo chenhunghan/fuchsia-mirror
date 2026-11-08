@@ -76,8 +76,7 @@ class TunDevice : public fbl::DoublyLinkedListable<std::unique_ptr<TunDevice>>,
     Port(Port&&) = delete;
     ~Port() override;
 
-    static zx::result<std::unique_ptr<Port>> Create(TunDevice* parent,
-                                                    const DevicePortConfig& config);
+    static zx::result<std::unique_ptr<Port>> Create(TunDevice* parent, DevicePortConfig&& config);
     // MacAdapterParent implementation:
     void OnMacStateChanged(MacAdapter* adapter) override;
 

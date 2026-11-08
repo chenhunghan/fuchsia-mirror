@@ -1,0 +1,31 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "arena",
+    srcs = [
+        "gesture_arena.cc",
+        "recognizer.cc",
+    ],
+    hdrs = [
+        "contest_member.h",
+        "gesture_arena.h",
+        "recognizer.h",
+    ],
+    implementation_deps = [
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+    ],
+    visibility = ["//src/ui/a11y/lib:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.ui.input.accessibility:fuchsia.ui.input.accessibility_hlcpp",
+        "//sdk/lib/fit",
+        "//src/lib/fxl",
+    ],
+    alwayslink = True,
+)

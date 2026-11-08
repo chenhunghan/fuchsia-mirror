@@ -20,7 +20,6 @@ use std::fs;
 use test_pilot_lib::test_output::OutputDirectory;
 
 const INVALID_ARGS_CONFIG_EXIT_CODE: i32 = 222;
-const ENV_PATH: &str = "PATH";
 
 // We need multiple threads to stream stdout/err in parallel until we can switch this to use tokio.
 #[fuchsia::main(threads = 2)]
@@ -83,13 +82,7 @@ async fn main() {
             );
 
             // TODO(b/294567715): Map error to output format.
-            match run_tests::run_test(
-                &test_config,
-                &outdir,
-                std::env::var(ENV_PATH).unwrap().as_str(),
-            )
-            .await
-            {
+            match run_tests::run_test(&test_config, &outdir, &env).await {
                 Ok(exit_code) => std::process::exit(exit_code.code().unwrap()),
                 Err(e) => {
                     eprintln!("Error running test: {}", e);

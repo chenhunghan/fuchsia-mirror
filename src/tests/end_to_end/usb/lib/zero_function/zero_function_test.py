@@ -13,7 +13,6 @@ import fuchsia_base_test
 from honeydew.transports.ffx import errors as ffx_errors
 from mobly import records
 from testusb import TestResult, TestStatus
-from usb_lib import usb_config
 from zero_function import (
     ALL_SUPPORTED_TEST_IDS,
     KNOWN_TEST_DEVICES,
@@ -133,12 +132,9 @@ class ZeroFunctionBaseTestLifecycleTest(unittest.IsolatedAsyncioTestCase):
                 zf_mod, "get_dut_serial", return_value="test_serial"
             ),
             mock.patch.object(
-                zf_mod, "get_usb_config", return_value="sourcesink"
-            ),
-            mock.patch.object(
                 zf_mod,
-                "parse_usb_config_functions",
-                return_value=["sourcesink"],
+                "read_usb_functions_over_serial",
+                return_value=("sourcesink", ["sourcesink"]),
             ),
             mock.patch.object(
                 zf_mod, "set_usb_config", self.mock_set_usb_config
@@ -177,18 +173,37 @@ class ZeroFunctionBaseTestLifecycleTest(unittest.IsolatedAsyncioTestCase):
         test_instance.current_test_info.name = "test_mock"
         return test_instance
 
+    def _mock_configure_zero_function(
+        self,
+        test_instance: ZeroFunctionBaseTest,
+        dev_node: str = "/dev/bus/usb/001/002",
+    ) -> Any:
+        def _side_effect(config_name: str = "sourcesink;loopback") -> str:
+            test_instance._usb_config_modified = True
+            test_instance.dev_node = dev_node
+            return dev_node
+
+        return mock.patch.object(
+            test_instance,
+            "configure_zero_function",
+            side_effect=_side_effect,
+        )
+
     async def test_teardown_class_without_setup_does_not_crash(self) -> None:
-        """Verifies teardown_class handles uninitialized attributes."""
+        """Verifies teardown_class skips USB restore when setup_class never switched."""
         test_instance = self._create_test_instance()
         with mock.patch.object(
             test_instance, "teardown_class", wraps=test_instance.teardown_class
         ):
             await test_instance.teardown_class()
+        await ZeroFunctionBaseTest(mock.MagicMock()).teardown_class()
+        self.mock_set_usb_config.assert_not_called()
 
     async def test_teardown_class_restores_initial_functions(self) -> None:
         """Verifies teardown_class restores initial functions without reboot flag."""
         test_instance = self._create_test_instance()
         test_instance._initial_functions = ["cdc", "adb"]
+        test_instance._usb_config_modified = True
         mock_controller = mock.MagicMock()
         test_instance.driver_controller = mock_controller
 
@@ -197,12 +212,21 @@ class ZeroFunctionBaseTestLifecycleTest(unittest.IsolatedAsyncioTestCase):
         self.mock_set_usb_config.assert_called_once_with(
             test_instance.dut, "cdc,adb"
         )
+        dut: Any = test_instance.dut
+        dut.ffx.run.assert_called_once_with(
+            ["target", "wait", "--timeout", "60"],
+            timeout=65,
+            log_status_on_failure=False,
+            disable_controlmaster=True,
+        )
+        dut.fuchsia_controller.after_usb_reconnect.assert_called_once()
         mock_controller.unload_driver.assert_called_once()
 
     async def test_teardown_class_raises_if_restore_fails(self) -> None:
         """Verifies teardown_class propagates error if set_usb_config fails."""
         test_instance = self._create_test_instance()
         test_instance._initial_functions = ["cdc", "adb"]
+        test_instance._usb_config_modified = True
         mock_controller = mock.MagicMock()
         test_instance.driver_controller = mock_controller
 
@@ -382,6 +406,21 @@ class ZeroFunctionBaseTestLifecycleTest(unittest.IsolatedAsyncioTestCase):
         )
 
     @mock.patch("zero_function.UsbTestController")
+    async def test_setup_class_skips_usbtest_driver_when_disabled(
+        self, mock_controller: mock.MagicMock
+    ) -> None:
+        """Verifies setup_class skips loading usbtest when LOAD_USBTEST_DRIVER is False."""
+        test_instance = self._create_test_instance()
+        test_instance.LOAD_USBTEST_DRIVER = False
+        dut: Any = test_instance.dut
+        dut.ffx.run.return_value = f"Registered: {USB_ZERO_FUNCTION_DRIVER_URL}"
+        with self._mock_configure_zero_function(test_instance):
+            await test_instance.setup_class()
+
+        mock_controller.assert_not_called()
+        self.assertIsNone(test_instance.driver_controller)
+
+    @mock.patch("zero_function.UsbTestController")
     async def test_setup_class_registers_driver_successfully(
         self, _mock_controller: mock.MagicMock
     ) -> None:
@@ -393,11 +432,7 @@ class ZeroFunctionBaseTestLifecycleTest(unittest.IsolatedAsyncioTestCase):
             if cmd[:2] == ["driver", "list"]
             else "Registered"
         )
-        with mock.patch.object(
-            test_instance,
-            "configure_zero_function",
-            return_value="/dev/bus/usb/001/002",
-        ):
+        with self._mock_configure_zero_function(test_instance):
             await test_instance.setup_class()
 
         calls = [call[0][0] for call in dut.ffx.run.call_args_list]
@@ -415,11 +450,7 @@ class ZeroFunctionBaseTestLifecycleTest(unittest.IsolatedAsyncioTestCase):
         test_instance = self._create_test_instance()
         dut: Any = test_instance.dut
         dut.ffx.run.return_value = f"Registered: {USB_ZERO_FUNCTION_DRIVER_URL}"
-        with mock.patch.object(
-            test_instance,
-            "configure_zero_function",
-            return_value="/dev/bus/usb/001/002",
-        ):
+        with self._mock_configure_zero_function(test_instance):
             await test_instance.setup_class()
 
         calls = [call[0][0] for call in dut.ffx.run.call_args_list]
@@ -445,11 +476,7 @@ class ZeroFunctionBaseTestLifecycleTest(unittest.IsolatedAsyncioTestCase):
             return "Restarted"
 
         dut.ffx.run.side_effect = ffx_run
-        with mock.patch.object(
-            test_instance,
-            "configure_zero_function",
-            return_value="/dev/bus/usb/001/002",
-        ):
+        with self._mock_configure_zero_function(test_instance):
             await test_instance.setup_class()
 
         calls = [call[0][0] for call in dut.ffx.run.call_args_list]
@@ -489,112 +516,69 @@ class ZeroFunctionBaseTestLifecycleTest(unittest.IsolatedAsyncioTestCase):
             return ""
 
         dut.ffx.run.side_effect = ffx_run
-        with mock.patch.object(
-            test_instance,
-            "configure_zero_function",
-            return_value="/dev/bus/usb/001/002",
-        ):
+        with self._mock_configure_zero_function(test_instance):
             with self.assertRaisesRegex(
                 ffx_errors.FfxCommandError, "DEVICE_UNREACHABLE"
             ):
                 await test_instance.setup_class()
 
-
-class UsbConfigTest(unittest.TestCase):
-    """Tests set_usb_config serial dispatch, error handling, and recovery."""
-
-    def test_set_usb_config_missing_serial_raises_without_ssh_fallback(
+    @mock.patch.object(zf_mod, "UsbTestController")
+    async def test_setup_class_aborts_before_switching_when_config_unresolvable(
         self,
+        _mock_controller: mock.MagicMock,
     ) -> None:
-        dut = mock.MagicMock()
-        dut.serial = None
+        """Verifies setup_class aborts before switching and skips teardown restore."""
+        test_instance = self._create_test_instance()
+        with (
+            mock.patch.object(
+                zf_mod,
+                "read_usb_functions_over_serial",
+                return_value=("", []),
+            ),
+            mock.patch.object(
+                test_instance,
+                "configure_zero_function",
+                return_value="/dev/bus/usb/001/002",
+            ) as mock_configure,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "refusing to switch USB mode"
+            ):
+                await test_instance.setup_class()
 
-        with self.assertRaises(RuntimeError) as ctx:
-            usb_config.set_usb_config(dut, "sourcesink")
-        self.assertIn(
-            "Failed to dispatch USB config 'sourcesink'", str(ctx.exception)
-        )
-        dut.ffx.run_ssh_cmd.assert_not_called()
+        mock_configure.assert_not_called()
+        await test_instance.teardown_class()
+        self.mock_set_usb_config.assert_not_called()
 
-    def test_set_usb_config_dispatch_failure_raises_without_reboot(
+    @mock.patch.object(zf_mod, "UsbTestController")
+    async def test_setup_class_restores_when_configure_zero_function_fails(
         self,
+        _mock_controller: mock.MagicMock,
     ) -> None:
-        dut = mock.MagicMock()
-        dut.serial.send_and_recv.side_effect = OSError("Serial write error")
-
-        with self.assertRaises(RuntimeError) as ctx:
-            usb_config.set_usb_config(dut, "cdc,adb")
-        self.assertIn(
-            "Failed to dispatch USB config 'cdc,adb'", str(ctx.exception)
-        )
-        dut.reboot.assert_not_called()
-        dut.ffx.run_ssh_cmd.assert_not_called()
-
-    def test_set_usb_config_success(self) -> None:
-        dut = mock.MagicMock()
-        dut.serial.send_and_recv.return_value = "[usb-cli:DONE]"
-
-        usb_config.set_usb_config(dut, "cdc,adb")
-        dut.serial.send_and_recv.assert_called_once_with(
-            cmd="usb-cli set-config cdc,adb",
-            stop_tokens=("[usb-cli:DONE]", "[usb-cli:ERROR]"),
-            timeout_sec=8.0,
-        )
-        dut.reboot.assert_not_called()
-        dut.ffx.run_ssh_cmd.assert_not_called()
-
-    def test_get_usb_config_uses_serial_only(self) -> None:
-        dut = mock.MagicMock()
-        dut.serial.send_and_recv.return_value = (
-            '{"functions": ["cdc"]} [usb-cli:DONE]'
-        )
-
-        res = usb_config.get_usb_config(dut)
-        self.assertIn('"functions": ["cdc"]', res)
-        dut.serial.send_and_recv.assert_called_once_with(
-            cmd="usb-cli get-config",
-            stop_tokens=("[usb-cli:DONE]", "[usb-cli:ERROR]"),
-            timeout_sec=5.0,
-        )
-        dut.ffx.run_ssh_cmd.assert_not_called()
-
-    def test_get_usb_config_missing_serial_raises(self) -> None:
-        dut = mock.MagicMock()
-        dut.serial = None
-
-        with self.assertRaises(RuntimeError):
-            usb_config.get_usb_config(dut)
-        dut.ffx.run_ssh_cmd.assert_not_called()
-
-    def test_parse_usb_config_functions_with_interleaved_logs(self) -> None:
-        raw_output = """
-        [00002.645] 30058:34264> [netstack] INFO: Added PBR rule: RuleMatcher { from: None, bound: None }
-        {
-          "configurations": [
-            [
-              "cdc",
-              "vsock"
-            ]
-          ],
-          "id_vendor": 6353,
-          "id_product": 41001,
-          "product": "CDC Ethernet & VSOCK Bridge"
-        }
-        [00002.664] 06425:06434> [fshost] INFO: publishing device to /block/dram_init_5_a
-        [usb-cli:DONE]
-        """
-        funcs = usb_config.parse_usb_config_functions(raw_output)
-        self.assertEqual(funcs, ["cdc", "vsock"])
-
-    def test_parse_usb_config_functions_legacy_format(self) -> None:
-        raw_output = '{"functions": ["cdc", "adb"]} [usb-cli:DONE]'
-        funcs = usb_config.parse_usb_config_functions(raw_output)
-        self.assertEqual(funcs, ["cdc", "adb"])
-
-    def test_parse_usb_config_functions_fallback_comma_separated(self) -> None:
-        raw_output = "cdc,adb [usb-cli:DONE]"
-        funcs = usb_config.parse_usb_config_functions(raw_output)
-        self.assertEqual(funcs, ["cdc", "adb"])
+        """Verifies teardown restores initial config if configure_zero_function fails."""
+        test_instance = self._create_test_instance()
+        dut: Any = test_instance.dut
+        dut.ffx.run.return_value = f"Registered: {USB_ZERO_FUNCTION_DRIVER_URL}"
+        with (
+            mock.patch.object(
+                zf_mod,
+                "read_usb_functions_over_serial",
+                return_value=(
+                    '{"functions": ["cdc", "adb", "vsock"]}',
+                    ["cdc", "adb", "vsock"],
+                ),
+            ),
+            mock.patch.object(
+                zf_mod,
+                "wait_for_zero_function",
+                side_effect=TimeoutError("Timed out waiting for zero function"),
+            ),
+        ):
+            with self.assertRaises(TimeoutError):
+                await test_instance.setup_class()
+        self.mock_set_usb_config.reset_mock()
+        await test_instance.teardown_class()
+        self.mock_set_usb_config.assert_called_once_with(dut, "cdc,adb,vsock")
 
 
 if __name__ == "__main__":

@@ -109,6 +109,7 @@ if (is_host && has_board) {
   host_test_data("zxdb_e2e_test_data") {
     # These tests are reliable on all architectures.
     sources = [
+      "scripts/async_backtrace_cpp.script",
       "scripts/starnix_proc_exception.script",
       "scripts/starnix_proc_hardware_breakpoint.script",
       "scripts/status.script",
@@ -146,6 +147,7 @@ if (is_host && has_board) {
         "scripts/template_functions.script",
         "scripts/until.script",
         "scripts/unwind_plt.script",
+        "scripts/weak_attach_pause.script",
       ]
     }
 
@@ -160,6 +162,7 @@ if (is_host && has_board) {
       "inferiors:zxdb_e2e_inferiors($target_toolchain)",
       "//src/developer/forensics/crasher:crasher($target_toolchain)",
       "//src/developer/forensics/crasher:crasher_test($target_toolchain)",
+      "//src/devices/bin/driver_runtime:driver_runtime($target_toolchain)",
       "//src/starnix/kernel:starnix_kernel_package($target_toolchain)",
     ]
   }

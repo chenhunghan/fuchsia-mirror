@@ -4,7 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-/// Slab allocator tests duplicated from slab_unittest.cc.
+/// Slab allocator unit tests.
 #[cfg(ktest)]
 #[unittest::suite]
 mod slab_rs {

@@ -11,18 +11,20 @@ use super::dispatcher_ffi::{
     cpp_dispatcher_get_related_koid, cpp_dispatcher_get_type,
     cpp_dispatcher_increment_handle_count, cpp_dispatcher_is_waitable,
     cpp_dispatcher_make_port_observer, cpp_dispatcher_notify_observers_locked,
-    cpp_dispatcher_on_zero_handles, cpp_dispatcher_raise_signals_locked, cpp_dispatcher_recycle,
-    cpp_dispatcher_remove_observer, cpp_dispatcher_set_name, cpp_dispatcher_set_owner,
-    cpp_dispatcher_signals_state_locked, cpp_dispatcher_update_state,
+    cpp_dispatcher_on_zero_handles, cpp_dispatcher_poll_signals,
+    cpp_dispatcher_raise_signals_locked, cpp_dispatcher_recycle, cpp_dispatcher_remove_observer,
+    cpp_dispatcher_set_name, cpp_dispatcher_signals_state_locked, cpp_dispatcher_update_state,
     cpp_dispatcher_update_state_locked, cpp_dispatcher_user_signal_peer,
     cpp_dispatcher_user_signal_self,
 };
 use super::handle::HandleRef;
 use crate::kernel::owned_wait_queue::OwnedWaitQueue;
+use crate::ksync_kernel::TrackedCriticalMutex;
+use core::convert::Infallible;
 use core::marker::PhantomData;
 use fbl::{Recyclable, RefPtr, pin_make_ref_counted, ref_counted};
 use kalloc::AllocError;
-use ksync::{KMutex, LockToken, RawCriticalMutex, guarded};
+use ksync::{KMutex, LockToken, guarded};
 use relaxed_atomic::RelaxedAtomicU64;
 use zx_status::Status;
 use zx_types::zx_rights_t;
@@ -188,7 +190,6 @@ macro_rules! impl_dispatcher_facade_with_state {
         $obj_type:expr,
         $offset_const:expr,
         $lock_class:ty,
-        $lock_ret:ty,
         $get_lock:expr
     ) => {
         paste::paste! {
@@ -212,16 +213,16 @@ macro_rules! impl_dispatcher_facade_with_state {
             ///
             /// # Safety
             ///
-            /// When `$type` has a lock, `ptr` must point to a valid, initialized `$state`.
-            ///
-            /// # Panics
-            ///
-            /// Panics if `$type` does not have an internal lock (e.g. configured with `no_lock`).
+            /// `ptr` must point to a valid, initialized `$state`.
             #[unsafe(no_mangle)]
             pub unsafe extern "C" fn [<rust_ $type:snake _state_get_lock>](
                 ptr: *const $state,
-            ) -> $lock_ret {
-                ($get_lock)(ptr)
+            ) -> *mut ksync::KMutex<$lock_class, $crate::ksync_kernel::TrackedCriticalMutex> {
+                let lock_ref: &ksync::KMutex<
+                    $lock_class,
+                    $crate::ksync_kernel::TrackedCriticalMutex,
+                > = ($get_lock)(ptr);
+                zr::ToMutPtr::to_mut_ptr(lock_ref)
             }
 
             /// Destroys a `$state` in-place.
@@ -241,29 +242,6 @@ macro_rules! impl_dispatcher_facade_with_state {
             }
         }
     };
-    (
-        @base
-        $(#[$meta:meta])* $vis:vis struct $type:ident,
-        $state:ident,
-        $obj_type:expr,
-        $offset_const:expr,
-        $lock_class:ty,
-        $get_lock:expr
-    ) => {
-        $crate::object::dispatcher::impl_dispatcher_facade_with_state!(
-            @base
-            $(#[$meta])* $vis struct $type,
-            $state,
-            $obj_type,
-            $offset_const,
-            $lock_class,
-            *mut ksync::KMutex<$lock_class, ksync::RawCriticalMutex>,
-            |ptr: *const $state| {
-                let lock_ref: &ksync::KMutex<$lock_class, ksync::RawCriticalMutex> = ($get_lock)(ptr);
-                zr::ToMutPtr::to_mut_ptr(lock_ref)
-            }
-        );
-    };
     ($(#[$meta:meta])* $vis:vis struct $type:ident, $state:ident, $obj_type:expr, $offset_const:expr) => {
         paste::paste! {
             $crate::object::dispatcher::impl_dispatcher_facade_with_state!(
@@ -278,24 +256,6 @@ macro_rules! impl_dispatcher_facade_with_state {
                 |ptr: *const $state| unsafe { &(*ptr).lock }
             );
         }
-    };
-    (
-        $(#[$meta:meta])* $vis:vis struct $type:ident,
-        $state:ident,
-        $obj_type:expr,
-        $offset_const:expr,
-        no_lock $(,)?
-    ) => {
-        $crate::object::dispatcher::impl_dispatcher_facade_with_state!(
-            @base
-            $(#[$meta])* $vis struct $type,
-            $state,
-            $obj_type,
-            $offset_const,
-            (),
-            *mut core::ffi::c_void,
-            |_ptr: *const $state| panic!(concat!(stringify!($type), " does not have a lock"))
-        );
     };
 }
 pub(crate) use impl_dispatcher_facade_with_state;
@@ -605,12 +565,6 @@ impl Dispatcher {
         unsafe { cpp_dispatcher_cancel(self, handle) };
     }
 
-    /// Sets the owner PID for this dispatcher.
-    pub fn set_owner(&self, new_owner: zx_types::zx_koid_t) {
-        // SAFETY: self is a valid Dispatcher reference.
-        unsafe { cpp_dispatcher_set_owner(self, new_owner) };
-    }
-
     /// Like [`Self::cancel`], but issued via `zx_port_cancel()`.
     ///
     /// Returns `true` if an observer was canceled.
@@ -688,6 +642,31 @@ impl Dispatcher {
             ..Default::default()
         }
     }
+
+    /// Polls the currently active signals on this dispatcher.
+    ///
+    /// Might be raced with other threads modifying the signals, so only use when checking for
+    /// signals that once set, aren't unset, or when synchronization is done by other means.
+    #[inline]
+    pub fn poll_signals(&self) -> zx_types::zx_signals_t {
+        // SAFETY: `self` is a valid `Dispatcher` reference.
+        unsafe { cpp_dispatcher_poll_signals(self) }
+    }
+
+    /// Cancels observers matching `handle`, `port`, and `key`.
+    #[cfg(ktest)]
+    #[inline]
+    pub fn cancel_by_key_raw(
+        &self,
+        handle: *const core::ffi::c_void,
+        port: *const core::ffi::c_void,
+        key: u64,
+    ) -> bool {
+        assert!(self.is_waitable());
+        // SAFETY: `self` is a valid `Dispatcher` reference, and `cpp_dispatcher_cancel_by_key`
+        // only compares `handle` and `port` by address without dereferencing them.
+        unsafe { cpp_dispatcher_cancel_by_key(self, handle, port.cast(), key) }
+    }
 }
 
 impl DispatcherOps for Dispatcher {
@@ -709,7 +688,7 @@ impl DispatcherOps for Dispatcher {
 #[repr(C)]
 pub struct PeerHolder<Endpoint> {
     #[mutex]
-    pub mu: KMutex<RawCriticalMutex>,
+    pub mu: KMutex<TrackedCriticalMutex>,
     _phantom: PhantomData<Endpoint>,
 }
 
@@ -740,9 +719,7 @@ pub struct PeeredState<T: fbl::IsOpaqueRefCounted> {
 
 impl<T: fbl::IsOpaqueRefCounted> PeeredState<T> {
     /// Initializes a `PeeredState` with the given `PeerHolder`.
-    pub fn init(
-        holder: RefPtr<PeerHolder<T>>,
-    ) -> impl pin_init::PinInit<Self, core::convert::Infallible> {
+    pub fn init(holder: RefPtr<PeerHolder<T>>) -> impl pin_init::PinInit<Self, Infallible> {
         pin_init::pin_init!(Self {
             peer_koid: RelaxedAtomicU64::new(0),
             holder,
@@ -768,9 +745,334 @@ impl<T: fbl::IsOpaqueRefCounted> PeeredState<T> {
     #[inline]
     pub fn lock(
         &self,
-    ) -> impl pin_init::PinInit<PeeredStateMuGuard<'_, T, RawCriticalMutex>, core::convert::Infallible>
-    {
+    ) -> impl pin_init::PinInit<PeeredStateMuGuard<'_, T, TrackedCriticalMutex>, Infallible> {
         // SAFETY: `self.holder` is the immutable `PeerHolder` whose `mu` synchronizes `self`.
         unsafe { self.lock_mu(&self.holder.mu) }
+    }
+}
+
+/// Dispatcher state tracker unit tests.
+#[cfg(ktest)]
+#[unittest::suite(name = "statetracker")]
+mod tests {
+    use super::{Dispatcher, DispatcherOps};
+    use crate::object::EventDispatcher;
+    use crate::object::dispatcher_ffi::{
+        cpp_callback_signal_observer_destroy, cpp_callback_signal_observer_init,
+    };
+    use core::cell::Cell;
+    use core::ffi::c_void;
+    use core::marker::PhantomPinned;
+    use core::ptr;
+    use unittest::{expect_eq, expect_false, expect_ok, expect_true, unwrap_ok};
+    use zr::OpaqueBytes;
+    use zx_types::{ZX_SIGNAL_NONE, zx_signals_t};
+
+    const TEST_SIGNAL1: zx_signals_t = 1;
+    const TEST_SIGNAL2: zx_signals_t = 2;
+
+    #[repr(align(8))]
+    struct ObserverStorage(OpaqueBytes<80>);
+
+    struct TestSignalObserverState {
+        signals: Cell<zx_signals_t>,
+        cancel_called: Cell<bool>,
+        match_called: Cell<bool>,
+        port: *const c_void,
+        key: u64,
+    }
+
+    struct TestSignalObserver<'a> {
+        storage: ObserverStorage,
+        observer_ptr: Cell<*mut c_void>,
+        dispatcher: &'a Dispatcher,
+        state: TestSignalObserverState,
+        _pin: PhantomPinned,
+    }
+
+    impl<'a> TestSignalObserver<'a> {
+        fn new_in_place(dispatcher: &'a Dispatcher) -> Self {
+            Self::new_with_key(dispatcher, ptr::null(), 0)
+        }
+
+        fn new_with_key(dispatcher: &'a Dispatcher, port: *const c_void, key: u64) -> Self {
+            Self {
+                storage: ObserverStorage(OpaqueBytes::uninit()),
+                observer_ptr: Cell::new(ptr::null_mut()),
+                dispatcher,
+                state: TestSignalObserverState {
+                    signals: Cell::new(ZX_SIGNAL_NONE),
+                    cancel_called: Cell::new(false),
+                    match_called: Cell::new(false),
+                    port,
+                    key,
+                },
+                _pin: PhantomPinned,
+            }
+        }
+
+        fn init(&self) -> *mut c_void {
+            /// # Safety
+            ///
+            /// `ctx` must point to a valid `TestSignalObserverState`.
+            unsafe extern "C" fn on_match(ctx: *const c_void, signals: zx_signals_t) {
+                // SAFETY: `ctx` points to a valid `TestSignalObserverState`.
+                let state = unsafe { &*ctx.cast::<TestSignalObserverState>() };
+                assert!(!state.cancel_called.get() && !state.match_called.get());
+                state.signals.set(signals);
+                state.match_called.set(true);
+            }
+            /// # Safety
+            ///
+            /// `ctx` must point to a valid `TestSignalObserverState`.
+            unsafe extern "C" fn on_cancel(ctx: *const c_void, signals: zx_signals_t) {
+                // SAFETY: `ctx` points to a valid `TestSignalObserverState`.
+                let state = unsafe { &*ctx.cast::<TestSignalObserverState>() };
+                assert!(!state.cancel_called.get() && !state.match_called.get());
+                state.signals.set(signals);
+                state.cancel_called.set(true);
+            }
+            /// # Safety
+            ///
+            /// `ctx` must point to a valid `TestSignalObserverState`.
+            unsafe extern "C" fn matches_key(
+                ctx: *const c_void,
+                port: *const c_void,
+                key: u64,
+            ) -> bool {
+                // SAFETY: `ctx` points to a valid `TestSignalObserverState`.
+                let state = unsafe { &*ctx.cast::<TestSignalObserverState>() };
+                !state.port.is_null() && port == state.port && key == state.key
+            }
+
+            if self.observer_ptr.get().is_null() {
+                // SAFETY: `self.storage` is 8-byte aligned and 80 bytes large (`OpaqueBytes<80>`
+                // provides interior mutability), and `self.state` remains pinned on the caller's
+                // stack for the lifetime of `self`.
+                let ptr = unsafe {
+                    cpp_callback_signal_observer_init(
+                        self.storage.0.get().cast(),
+                        ptr::from_ref(&self.state).cast(),
+                        on_match,
+                        on_cancel,
+                        matches_key,
+                    )
+                };
+                self.observer_ptr.set(ptr);
+            }
+            self.observer_ptr.get()
+        }
+
+        fn match_called(&self) -> bool {
+            self.state.match_called.get()
+        }
+
+        fn cancel_called(&self) -> bool {
+            self.state.cancel_called.get()
+        }
+
+        fn signals(&self) -> zx_signals_t {
+            self.state.signals.get()
+        }
+    }
+
+    impl Drop for TestSignalObserver<'_> {
+        fn drop(&mut self) {
+            let obs_ptr = self.observer_ptr.get();
+            if !obs_ptr.is_null() {
+                let mut signals: zx_signals_t = 0;
+                // SAFETY: `obs_ptr` was initialized by `cpp_callback_signal_observer_init`.
+                // Ensure it is unlinked from `self.dispatcher` before destroying the C++
+                // `CallbackSignalObserver` so `~DoublyLinkedListable()` does not assert if a test
+                // exits early while the observer is still registered.
+                unsafe {
+                    let _ = self.dispatcher.remove_observer(obs_ptr, &mut signals);
+                    cpp_callback_signal_observer_destroy(obs_ptr);
+                }
+            }
+        }
+    }
+
+    /// TestBasicMatch
+    #[test]
+    fn test_basic_match() {
+        let (handle, _rights) = unwrap_ok!(EventDispatcher::create());
+        let tracker = handle.dispatcher();
+        let observer = TestSignalObserver::new_in_place(tracker);
+        let obs_ptr = observer.init();
+
+        // Add observer.
+        // SAFETY: `obs_ptr` is a valid `SignalObserver`.
+        expect_ok!(unsafe { tracker.add_observer(obs_ptr, ptr::null(), TEST_SIGNAL1) });
+        expect_false!(observer.match_called());
+        expect_false!(observer.cancel_called());
+
+        // Trigger a signal we are not watching.
+        tracker.update_state(0, TEST_SIGNAL2);
+        expect_false!(observer.match_called());
+        expect_false!(observer.cancel_called());
+
+        // Trigger the observer's signal.
+        tracker.update_state(0, TEST_SIGNAL1);
+        expect_true!(observer.match_called());
+        expect_false!(observer.cancel_called());
+        expect_eq!(TEST_SIGNAL1 | TEST_SIGNAL2, observer.signals());
+    }
+
+    /// TestAlreadyMatched
+    #[test]
+    fn test_already_matched() {
+        let (handle, _rights) = unwrap_ok!(EventDispatcher::create());
+        let tracker = handle.dispatcher();
+
+        // Set the signal.
+        tracker.update_state(0, TEST_SIGNAL1);
+
+        // Add observer waiting on the already-set signal.
+        let observer = TestSignalObserver::new_in_place(tracker);
+        let obs_ptr = observer.init();
+        // SAFETY: `obs_ptr` is a valid `SignalObserver`.
+        expect_ok!(unsafe { tracker.add_observer(obs_ptr, ptr::null(), TEST_SIGNAL1) });
+        expect_true!(observer.match_called());
+        expect_false!(observer.cancel_called());
+        expect_eq!(TEST_SIGNAL1, observer.signals());
+    }
+
+    /// TestCancelled
+    #[test]
+    fn test_cancelled() {
+        let (handle, _rights) = unwrap_ok!(EventDispatcher::create());
+        let tracker = handle.dispatcher();
+        let observer = TestSignalObserver::new_in_place(tracker);
+        let obs_ptr = observer.init();
+        let dummy_handle: usize = 0;
+        let handle_ptr = ptr::from_ref(&dummy_handle).cast::<c_void>();
+        let dummy_handle2: usize = 0;
+        let handle2_ptr = ptr::from_ref(&dummy_handle2).cast::<c_void>();
+
+        // Add observer.
+        // SAFETY: `obs_ptr` is a valid `SignalObserver`.
+        expect_ok!(unsafe { tracker.add_observer(obs_ptr, handle_ptr, TEST_SIGNAL1) });
+
+        // Unrelated signal arrives.
+        tracker.update_state(0, TEST_SIGNAL2);
+        expect_false!(observer.match_called());
+        expect_false!(observer.cancel_called());
+
+        // Cancel a different handle.
+        tracker.cancel_raw(handle2_ptr);
+        expect_false!(observer.match_called());
+        expect_false!(observer.cancel_called());
+
+        // Cancel observer.
+        tracker.cancel_raw(handle_ptr);
+        expect_false!(observer.match_called());
+        expect_true!(observer.cancel_called());
+        expect_eq!(TEST_SIGNAL2, observer.signals());
+    }
+
+    /// TestRemoveObserver
+    #[test]
+    fn test_remove_observer() {
+        let (handle, _rights) = unwrap_ok!(EventDispatcher::create());
+        let tracker = handle.dispatcher();
+        let observer = TestSignalObserver::new_in_place(tracker);
+        let obs_ptr = observer.init();
+
+        // Add observer.
+        // SAFETY: `obs_ptr` is a valid `SignalObserver`.
+        expect_ok!(unsafe { tracker.add_observer(obs_ptr, ptr::null(), TEST_SIGNAL1) });
+
+        // Unrelated signal arrives.
+        tracker.update_state(0, TEST_SIGNAL2);
+        expect_false!(observer.match_called());
+        expect_false!(observer.cancel_called());
+
+        // Remove observer.
+        let mut signals: zx_signals_t = 0;
+        // SAFETY: `obs_ptr` is a valid `SignalObserver`.
+        expect_true!(unsafe { tracker.remove_observer(obs_ptr, &mut signals) });
+        expect_false!(observer.match_called());
+        expect_false!(observer.cancel_called());
+        expect_eq!(TEST_SIGNAL2, signals);
+
+        // Removing again fails.
+        // SAFETY: `obs_ptr` is a valid `SignalObserver`.
+        expect_false!(unsafe { tracker.remove_observer(obs_ptr, &mut signals) });
+
+        // Trigger the observer's signal after removal.
+        tracker.update_state(0, TEST_SIGNAL1);
+        expect_false!(observer.match_called());
+        expect_false!(observer.cancel_called());
+    }
+
+    /// TestRemoveObserverAfterMatch
+    #[test]
+    fn test_remove_observer_after_match() {
+        let (handle, _rights) = unwrap_ok!(EventDispatcher::create());
+        let tracker = handle.dispatcher();
+        let observer = TestSignalObserver::new_in_place(tracker);
+        let obs_ptr = observer.init();
+
+        // Add observer.
+        // SAFETY: `obs_ptr` is a valid `SignalObserver`.
+        expect_ok!(unsafe { tracker.add_observer(obs_ptr, ptr::null(), TEST_SIGNAL1) });
+
+        // Trigger the observer's signal.
+        tracker.update_state(0, TEST_SIGNAL1);
+        expect_true!(observer.match_called());
+        expect_false!(observer.cancel_called());
+        expect_eq!(TEST_SIGNAL1, observer.signals());
+
+        // Remove observer.
+        let mut signals: zx_signals_t = 0;
+        // SAFETY: `obs_ptr` is a valid `SignalObserver`.
+        expect_false!(unsafe { tracker.remove_observer(obs_ptr, &mut signals) });
+        expect_true!(observer.match_called());
+        expect_false!(observer.cancel_called());
+        expect_eq!(TEST_SIGNAL1, observer.signals());
+    }
+
+    /// TestRemoveByKey
+    #[test]
+    fn test_remove_by_key() {
+        let (handle, _rights) = unwrap_ok!(EventDispatcher::create());
+        let tracker = handle.dispatcher();
+        let dummy_handle: usize = 0;
+        let handle_ptr = ptr::from_ref(&dummy_handle).cast::<c_void>();
+        let dummy_handle2: usize = 0;
+        let handle2_ptr = ptr::from_ref(&dummy_handle2).cast::<c_void>();
+        let dummy_port: usize = 0;
+        let port_ptr = ptr::from_ref(&dummy_port).cast::<c_void>();
+        let dummy_port2: usize = 0;
+        let port2_ptr = ptr::from_ref(&dummy_port2).cast::<c_void>();
+        const KEY1: u64 = 1;
+        const KEY2: u64 = 2;
+
+        // Add two observers with different keys.
+        let observer1 = TestSignalObserver::new_with_key(tracker, port_ptr, KEY1);
+        let observer2 = TestSignalObserver::new_with_key(tracker, port_ptr, KEY2);
+        let obs1_ptr = observer1.init();
+        let obs2_ptr = observer2.init();
+        // SAFETY: `obs1_ptr` and `obs2_ptr` are valid `SignalObserver`s.
+        expect_ok!(unsafe { tracker.add_observer(obs1_ptr, handle_ptr, TEST_SIGNAL1) });
+        expect_ok!(unsafe { tracker.add_observer(obs2_ptr, handle_ptr, TEST_SIGNAL2) });
+
+        // Cancelling with wrong handle, wrong port, or wrong key does not match.
+        expect_false!(tracker.cancel_by_key_raw(handle2_ptr, port_ptr, KEY1));
+        expect_false!(tracker.cancel_by_key_raw(handle_ptr, port2_ptr, KEY1));
+        expect_false!(tracker.cancel_by_key_raw(handle_ptr, port_ptr, 0x321));
+
+        // Cancel observer 1 by key.
+        expect_true!(tracker.cancel_by_key_raw(handle_ptr, port_ptr, KEY1));
+        expect_false!(observer1.match_called());
+        expect_true!(observer1.cancel_called());
+        expect_false!(observer2.match_called());
+        expect_false!(observer2.cancel_called());
+
+        // Ensure observer 2 still works.
+        tracker.update_state(0, TEST_SIGNAL1 | TEST_SIGNAL2);
+        expect_false!(observer1.match_called());
+        expect_true!(observer2.match_called());
     }
 }

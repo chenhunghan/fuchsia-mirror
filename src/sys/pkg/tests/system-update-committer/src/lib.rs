@@ -384,7 +384,10 @@ async fn system_pending_commit(idle_timeout_millis: i64) {
         PaverEvent::SetConfigurationUnbootable { configuration: Configuration::B },
         PaverEvent::BootManagerFlush,
     ]);
-    assert_eq!(OnSignals::new(&event_pair, zx::Signals::USER_0).await, Ok(zx::Signals::USER_0));
+    assert_eq!(
+        OnSignals::new(&event_pair, zx::Signals::USER_0).await,
+        Ok(zx::Signals::USER_0 | zx::Signals::USER_1)
+    );
 
     let () = fasync::Timer::new(std::time::Duration::from_millis(500)).await;
 
@@ -468,7 +471,10 @@ async fn inspect_health_status_ok(idle_timeout_millis: i64) {
 
     // Wait for verifications to complete.
     let p = env.commit_status_provider_proxy().is_current_system_committed().await.unwrap();
-    assert_eq!(OnSignals::new(&p, zx::Signals::USER_0).await, Ok(zx::Signals::USER_0));
+    assert_eq!(
+        OnSignals::new(&p, zx::Signals::USER_0).await,
+        Ok(zx::Signals::USER_0 | zx::Signals::USER_1)
+    );
 
     // Observe verification shows up in inspect.
     let hierarchy = env.system_update_committer_inspect_hierarchy().await;
@@ -823,7 +829,10 @@ async fn stop_on_idle_resume_on_use() {
         PaverEvent::SetConfigurationUnbootable { configuration: Configuration::B },
         PaverEvent::BootManagerFlush,
     ]);
-    assert_eq!(OnSignals::new(&event_pair0, zx::Signals::USER_0).await, Ok(zx::Signals::USER_0));
+    assert_eq!(
+        OnSignals::new(&event_pair0, zx::Signals::USER_0).await,
+        Ok(zx::Signals::USER_0 | zx::Signals::USER_1)
+    );
 
     // With the system committed, the component should stop even though we have a connection to it.
     env.wait_for_clean_stopped(&mut event_stream).await;
@@ -846,7 +855,7 @@ async fn stop_on_idle_resume_on_use() {
     // The signal should still be asserted.
     assert_eq!(
         event_pair1.wait_one(zx::Signals::USER_0, zx::MonotonicInstant::INFINITE_PAST).to_result(),
-        Ok(zx::Signals::USER_0)
+        Ok(zx::Signals::USER_0 | zx::Signals::USER_1)
     );
 
     // Component should stop again.
@@ -873,7 +882,7 @@ async fn stop_on_idle_resume_on_use() {
     // The signal should still be asserted.
     assert_eq!(
         event_pair2.wait_one(zx::Signals::USER_0, zx::MonotonicInstant::INFINITE_PAST).to_result(),
-        Ok(zx::Signals::USER_0)
+        Ok(zx::Signals::USER_0 | zx::Signals::USER_1)
     );
 
     // The server's end of the event pair should still be alive.

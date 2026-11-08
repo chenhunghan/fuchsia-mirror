@@ -5,9 +5,10 @@
 #ifndef SRC_DEVELOPER_FORENSICS_CRASH_REPORTS_CRASH_REPORTER_H_
 #define SRC_DEVELOPER_FORENSICS_CRASH_REPORTS_CRASH_REPORTER_H_
 
-#include <fuchsia/feedback/cpp/fidl.h>
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
 #include <lib/async/cpp/executor.h>
 #include <lib/async/dispatcher.h>
+#include <lib/fit/function.h>
 #include <lib/sys/cpp/service_directory.h>
 #include <lib/zx/clock.h>
 
@@ -15,12 +16,12 @@
 #include <string>
 
 #include "src/developer/forensics/crash_reports/crash_register.h"
+#include "src/developer/forensics/crash_reports/crash_reporter_internal.h"
 #include "src/developer/forensics/crash_reports/crash_server.h"
 #include "src/developer/forensics/crash_reports/info/crash_reporter_info.h"
 #include "src/developer/forensics/crash_reports/info/info_context.h"
 #include "src/developer/forensics/crash_reports/log_tags.h"
 #include "src/developer/forensics/crash_reports/product_quotas.h"
-#include "src/developer/forensics/crash_reports/program_shortname.h"
 #include "src/developer/forensics/crash_reports/queue.h"
 #include "src/developer/forensics/crash_reports/report_id.h"
 #include "src/developer/forensics/crash_reports/report_store.h"
@@ -34,7 +35,8 @@
 namespace forensics {
 namespace crash_reports {
 
-class CrashReporter : public fuchsia::feedback::CrashReporter {
+class CrashReporter : public fidl::Server<fuchsia_feedback::CrashReporter>,
+                      public CrashReporterInternal {
  public:
   CrashReporter(async_dispatcher_t* dispatcher,
                 const std::shared_ptr<sys::ServiceDirectory>& services, timekeeper::Clock* clock,
@@ -53,12 +55,16 @@ class CrashReporter : public fuchsia::feedback::CrashReporter {
   // reports.
   void PersistAllCrashReports();
 
-  // |fuchsia::feedback::CrashReporter|
-  void FileReport(fuchsia::feedback::CrashReport report, FileReportCallback callback) override;
+  // |fuchsia_feedback::CrashReporter|
+  void FileReport(FileReportRequest& request, FileReportCompleter::Sync& completer) override;
+
+  // |CrashReporterInternal|
+  void FileReportInternal(fuchsia_feedback::CrashReport report,
+                          FileReportInternalCallback callback) override;
 
  private:
-  void File(fuchsia::feedback::CrashReport report, ProgramShortname program_shortname,
-            bool is_hourly_snapshot, FileReportCallback callback);
+  void File(fuchsia_feedback::CrashReport report, bool is_hourly_snapshot,
+            FileReportInternalCallback callback);
   void ScheduleHourlySnapshot(zx::duration delay);
 
   async_dispatcher_t* dispatcher_;

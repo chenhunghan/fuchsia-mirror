@@ -2,25 +2,14 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//bundles/buildbot/target_tests.gni")
+
 assert(is_fuchsia, "These can only be defined in the default toolchain")
 
 # WARNING: Known to infrastructure.
 group("terminal") {
   testonly = true
-
-  deps = [
-    # E2E Product Tests.
-    "//src/tests/end_to_end/perf:test",
-    "//src/tests/end_to_end/sl4f:test",
-    "//src/tests/end_to_end/time_sync:test",
-
-    # Doesn't have any tests that are included in bundles.
-    "//products/terminal/terminal_session",
-    "//src/media/audio/drivers/tests:admin",
-
-    # General end to end dependencies.
-    "//src/tests/end_to_end/bundles:end_to_end_deps",
-  ]
+  deps = terminal_target_tests
 }
 
 # For use with the 'hermetic_test_package_labels' GN build argument.

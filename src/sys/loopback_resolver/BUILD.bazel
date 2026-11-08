@@ -1,0 +1,53 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_binary(
+    name = "bin",
+    srcs = ["main.cc"],
+    gn_output_name = "loopback_resolver",
+    tags = ["manual"],
+    deps = [
+        "//sdk/fidl/fuchsia.component.resolution:fuchsia.component.resolution_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/component/outgoing/cpp",
+        "//sdk/lib/fidl/cpp/wire",
+    ],
+)
+
+fx_packaged_binary(
+    name = "loopback_resolver_packaged_bin",
+    binary = ":bin",
+    binary_name = "loopback_resolver",
+)
+
+fx_component_manifest(
+    name = "component-manifest",
+    component_name = "loopback_resolver",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/loopback_resolver.cml",
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":component-manifest",
+    visibility = [
+        "//src/sys/component_manager/tests/lifecycle_benchmark:__pkg__",
+    ],
+    deps = [":loopback_resolver_packaged_bin"],
+)

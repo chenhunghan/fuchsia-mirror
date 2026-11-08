@@ -14,6 +14,7 @@
 //! collection of ranges behaves nicely.
 
 use core::cmp::Ordering;
+use core::iter::Peekable;
 use core::mem::offset_of;
 use core::slice;
 
@@ -351,6 +352,7 @@ pub unsafe trait NormalizedRangeIterator: Iterator<Item = Range> {
 /// An iterator over a normalized collection of range which uses `f` to filter map the ranges.
 ///
 /// The normalized invariant of the underylying collection is preserved.
+#[derive(Clone)]
 pub struct FilterMapRanges<Ranges, F> {
     ranges: Ranges,
     f: F,
@@ -377,34 +379,35 @@ where
     fn next(&mut self) -> Option<Range> {
         // The strategy here is to run a sliding window [prev, cur] across the underlying ranges,
         // using `self.pending` to both store `cur` and collect adjacent ranges of the same type.
-        // A tail-recursive call indicates we slide the window by one without yielding anything.
+        // A `continue` indicates we slide the window by one without yielding anything.
+        loop {
+            let Some(cur) = self.ranges.next() else {
+                // Our sliding window has reached the end.
+                return self.pending.take();
+            };
 
-        let Some(cur) = self.ranges.next() else {
-            // Our sliding window has reached the end.
-            return self.pending.take();
-        };
+            // Send cur to f(cur).
+            let Some(ty) = (self.f)(cur.ty) else {
+                // The `f` map discards this range.
+                continue;
+            };
 
-        // Send cur to f(cur).
-        let Some(ty) = (self.f)(cur.ty) else {
-            // The `f` map discards this range.
-            return self.next();
-        };
+            let cur = Range { addr: cur.addr, size: cur.size, ty };
 
-        let cur = Range { addr: cur.addr, size: cur.size, ty };
+            let Some(prev) = self.pending.take() else {
+                // This is the first call to `next()`.
+                self.pending = Some(cur);
+                continue;
+            };
 
-        let Some(prev) = self.pending.take() else {
-            // This is the first call to `next()`.
+            if prev.end() == cur.addr && prev.ty == cur.ty {
+                self.pending = Some(Range::new(prev.addr, prev.size + cur.size, prev.ty));
+                continue;
+            }
+
             self.pending = Some(cur);
-            return self.next();
-        };
-
-        if prev.end() == cur.addr && prev.ty == cur.ty {
-            self.pending = Some(Range::new(prev.addr, prev.size + cur.size, prev.ty));
-            return self.next();
+            return Some(prev);
         }
-
-        self.pending = Some(cur);
-        Some(prev)
     }
 }
 
@@ -413,6 +416,54 @@ unsafe impl<I, F> NormalizedRangeIterator for FilterMapRanges<I, F>
 where
     I: NormalizedRangeIterator,
     F: Fn(Type) -> Option<Type>,
+{
+}
+
+/// Safety:
+///
+/// `Peekable` yields the exact same items in the exact same order as the underlying iterator.
+unsafe impl<I> NormalizedRangeIterator for Peekable<I> where I: NormalizedRangeIterator {}
+
+/// An iterator over a collection of ranges that the caller asserts is normalized.
+#[derive(Debug, Clone)]
+pub struct NormalizedRangeUncheckedIterator<I> {
+    iter: I,
+}
+
+impl<I> NormalizedRangeUncheckedIterator<I>
+where
+    I: Iterator<Item = Range>,
+{
+    /// Creates a normalized range iterator over `ranges` without verifying them.
+    ///
+    /// # Safety
+    ///
+    /// `ranges` must be normalized: lexicographically sorted on endpoint, mutually disjoint, and
+    /// maximally contiguous (see [`NormalizedRangeIterator`]).
+    pub unsafe fn new(ranges: impl IntoIterator<IntoIter = I>) -> Self {
+        Self { iter: ranges.into_iter() }
+    }
+}
+
+impl<I> Iterator for NormalizedRangeUncheckedIterator<I>
+where
+    I: Iterator<Item = Range>,
+{
+    type Item = Range;
+
+    fn next(&mut self) -> Option<Range> {
+        self.iter.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.iter.size_hint()
+    }
+}
+
+/// Safety: The caller of [`NormalizedRangeUncheckedIterator::new`] guarantees that the underlying
+/// ranges are normalized.
+unsafe impl<I> NormalizedRangeIterator for NormalizedRangeUncheckedIterator<I> where
+    I: Iterator<Item = Range>
 {
 }
 
@@ -705,6 +756,20 @@ mod tests {
     fn normalized_range_iterator_test_filter_map_ram() {
         let mut actual =
             testing::NormalizedRangeCheckingIterator::new(TEST_RANGES).filter_map_ram();
+        assert_eq!(actual.next(), Some(Range::new(0, 0x3000, Type::FreeRam)));
+        assert_eq!(actual.next(), Some(Range::new(0x5000, 0x2000, Type::FreeRam)));
+        assert_eq!(actual.next(), None);
+    }
+
+    // The unchecked iterator yields the ranges unmodified, so it composes like the checking one.
+    //
+    // Input:  [ Book ][ Zbi ][ Test ][Peri ]     [ Test ][Kern ]
+    // Output: [      FreeRam        ]            [   FreeRam   ]
+    #[test]
+    fn normalized_range_unchecked_iterator_test_filter_map_ram() {
+        // SAFETY: `TEST_RANGES` is sorted, disjoint, and maximally contiguous.
+        let mut actual =
+            unsafe { NormalizedRangeUncheckedIterator::new(TEST_RANGES) }.filter_map_ram();
         assert_eq!(actual.next(), Some(Range::new(0, 0x3000, Type::FreeRam)));
         assert_eq!(actual.next(), Some(Range::new(0x5000, 0x2000, Type::FreeRam)));
         assert_eq!(actual.next(), None);

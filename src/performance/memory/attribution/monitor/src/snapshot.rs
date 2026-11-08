@@ -19,7 +19,7 @@ pub struct AttributionSnapshot(fplugin::Snapshot);
 
 impl AttributionSnapshot {
     pub fn new(
-        attribution_data: AttributionData,
+        attribution_data: &AttributionData,
         kernel_statistics: fplugin::KernelStatistics,
         memory_stalls: MemoryStallMetrics,
         page_fault_provider: impl PageFaultProvider,
@@ -27,12 +27,14 @@ impl AttributionSnapshot {
     ) -> AttributionSnapshot {
         AttributionSnapshot(fplugin::Snapshot {
             attributions: Some(
-                attribution_data.attributions.into_iter().map(|a| a.into()).collect(),
+                attribution_data.attributions.iter().cloned().map(|a| a.into()).collect(),
             ),
             principals: Some(
-                attribution_data.principals_vec.into_iter().map(|p| p.into()).collect(),
+                attribution_data.principals_vec.iter().cloned().map(|p| p.into()).collect(),
             ),
-            resources: Some(attribution_data.resources_vec.into_iter().map(|r| r.into()).collect()),
+            resources: Some(
+                attribution_data.resources_vec.iter().cloned().map(|r| r.into()).collect(),
+            ),
             resource_names: Some(
                 attribution_data.resource_names.iter().map(|n| *n.buffer()).collect(),
             ),
@@ -48,9 +50,9 @@ impl AttributionSnapshot {
                     .iter()
                     .map(|b| fplugin::BucketDefinition {
                         name: Some(b.name.clone()),
-                        process: b.process.as_ref().map(|r| r.as_str().into()),
-                        vmo: b.vmo.as_ref().map(|r| r.as_str().into()),
-                        principal: b.principal.as_ref().map(|r| r.as_str().into()),
+                        process: (!b.process.is_empty()).then(|| b.process.clone()),
+                        vmo: (!b.vmo.is_empty()).then(|| b.vmo.clone()),
+                        principal: (!b.principal.is_empty()).then(|| b.principal.clone()),
                         ..Default::default()
                     })
                     .collect(),

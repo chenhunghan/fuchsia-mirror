@@ -116,11 +116,13 @@ bool x86_is_vaddr_canonical(vaddr_t vaddr);
 bool x86_mmu_check_paddr(paddr_t paddr);
 bool x86_is_ip_canonical(vaddr_t ip);
 
+extern "C" {
 void x86_mmu_percpu_init();
 void x86_mmu_early_init();
 void x86_mmu_init();
 // Called once on the BSP after CPU init has been completed.
 void x86_mmu_prevm_init();
+}
 
 volatile pt_entry_t* x86_upper_512gib_page_table();
 

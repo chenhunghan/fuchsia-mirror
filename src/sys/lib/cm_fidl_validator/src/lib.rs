@@ -1034,7 +1034,7 @@ impl<'a> ValidationContext<'a> {
             // a more ergonomic and easy to understand error. The logic below will also fire for
             return;
         }
-        for (use_a, use_b) in uses.iter().tuple_combinations() {
+        for [use_a, use_b] in uses.iter().array_combinations() {
             let Some(path_a) = use_to_path(use_a) else {
                 continue;
             };

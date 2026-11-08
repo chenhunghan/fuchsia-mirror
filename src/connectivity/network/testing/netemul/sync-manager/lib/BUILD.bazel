@@ -1,0 +1,64 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "sync_service",
+    srcs = [
+        "bus.cc",
+        "counter_barrier.cc",
+        "sync_manager.cc",
+    ],
+    hdrs = [
+        "bus.h",
+        "callback_watch.h",
+        "counter_barrier.h",
+        "sync_manager.h",
+    ],
+    # Preserve unrestricted visibility from the original BUILD.gn target.
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-default",
+        "//sdk/lib/fdio",
+        "//src/connectivity/network/testing/netemul/sync-manager/fidl:sync_hlcpp",
+        "//src/lib/fxl",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/fzl",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "sync_test_bin",
+    srcs = [
+        "barrier_unittest.cc",
+        "bus_unittest.cc",
+    ],
+    gn_output_name = "sync_test",
+    tags = ["manual"],
+    # Preserve unrestricted visibility from the original BUILD.gn target.
+    visibility = ["//:__subpackages__"],
+    deps = [
+        ":sync_service",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+        "//src/lib/testing/predicates",
+        "//zircon/system/ulib/fzl",
+    ],
+)
+
+fx_packaged_binary(
+    name = "sync_test_bin_packaged",
+    testonly = True,
+    binary = ":sync_test_bin",
+    binary_name = "sync_test",
+    visibility = ["//src/connectivity/network/testing/netemul/sync-manager:__pkg__"],
+)

@@ -1,0 +1,63 @@
+# Copyright 2026 The Fuchsia Authors
+#
+# Use of this source code is governed by a MIT-style
+# license that can be found in the LICENSE file or at
+# https://opensource.org/licenses/MIT
+
+import("//build/cpp/library_headers.gni")
+import("//build/zircon/zircon_cpu.gni")
+
+library_headers("headers") {
+  headers = [
+    "phys/boot-zbi/boot-zbi.h",
+    "phys/boot-zbi/fixed-address-boot-zbi.h",
+  ]
+
+  public_deps = [
+    "//zircon/kernel/lib/ktl:headers",
+    "//zircon/kernel/lib/libc:headers",
+
+    # <phys/boot-zbi/boot-zbi.h> has #include <lib/fit/result.h>
+    "//sdk/lib/fit:headers",
+
+    # <phys/boot-zbi/boot-zbi.h> has #include <lib/zbitl/image.h>
+    # <phys/boot-zbi/boot-zbi.h> has #include <lib/zbitl/items/kernel.h>
+    # <phys/boot-zbi/boot-zbi.h> has #include <lib/zbitl/view.h>
+    "//src/lib/zbitl:headers",
+
+    # <phys/boot-zbi/boot-zbi.h> has #include <phys/allocation.h>
+    "//zircon/kernel/phys:allocation",
+  ]
+}
+
+source_set("boot-zbi") {
+  public_deps = [ ":headers" ]
+
+  sources = [
+    "${zircon_cpu}-boot-zbi.cc",
+    "boot-zbi.cc",
+  ]
+  deps = [
+    "..:stdio",
+    "../runtime:headers",
+    "//sdk/lib/fit",
+    "//sdk/lib/zbi-format",
+    "//src/lib/zbitl",
+    "//zircon/kernel/lib/arch",
+    "//zircon/kernel/lib/ktl",
+    "//zircon/kernel/lib/libc",
+    "//zircon/kernel/phys/lib/memalloc:headers",
+    "//zircon/system/ulib/pretty",
+  ]
+
+  # UEFI has its own allocation story, so FixedAddressBootZbi (which relies
+  # on the phys Allocation pool) is not built in that environment.
+  if (!is_efi_toolchain) {
+    sources += [ "fixed-address-boot-zbi.cc" ]
+    deps += [
+      "..:address-space",
+      "//zircon/kernel/phys/lib/memalloc",
+      "//zircon/system/ulib/fbl",
+    ]
+  }
+}

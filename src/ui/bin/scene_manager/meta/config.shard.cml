@@ -1,0 +1,71 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+// Required configuration capabilities used by scene_manager in production.
+// See `test_config.shard.cml` for test-only default values.
+{
+    use: [
+        // LINT.IfChange
+        {
+            config: "fuchsia.ui.IdleThresholdMs",
+            key: "idle_threshold_ms",
+            type: "uint64",
+        },
+        {
+            config: "fuchsia.ui.SupportedInputDevices",
+            key: "supported_input_devices",
+            type: "vector",
+            element: {
+                type: "string",
+                max_size: 12,
+            },
+            max_count: 6,
+        },
+        {
+            config: "fuchsia.scenic.DisplayRotation",
+            key: "display_rotation",
+            type: "uint64",
+        },
+        {
+            config: "fuchsia.ui.DisplayPixelDensity",
+            key: "display_pixel_density",
+            type: "string",
+            max_size: 8,
+        },
+        {
+            config: "fuchsia.ui.ViewingDistance",
+            key: "viewing_distance",
+            type: "string",
+            max_size: 8,
+        },
+        {
+            config: "fuchsia.power.SuspendEnabled",
+            from: "parent",
+            key: "suspend_enabled",
+            type: "bool",
+        },
+        {
+            config: "fuchsia.ui.AttachA11yView",
+            key: "attach_a11y_view",
+            type: "bool",
+        },
+        {
+            config: "fuchsia.ui.EnableMergeTouchEvents",
+            key: "enable_merge_touch_events",
+            type: "bool",
+        },
+        {
+            config: "fuchsia.ui.Prefetch",
+            key: "prefetch",
+            type: "bool",
+        },
+        {
+            config: "fuchsia.ui.VisualDebuggingLevel",
+            key: "visual_debugging_level",
+            type: "uint8",
+        },
+
+        // LINT.ThenChange(//src/ui/bin/scene_manager/meta/test_config.shard.cml)
+    ],
+}

@@ -1,0 +1,155 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":raw_unittests"],
+    visibility = ["//src/camera:__pkg__"],
+)
+
+# TODO(https://fxbug.dev/570694755): Preserve GN cflags_cc = [ "--std=c++20" ]
+# alongside disable_build_flags = ["//build/config:language"] until
+# bazel2gn can map copts to cflags_cc.
+# @bazel2gn:raw_attribute:cflags_cc = [ "--std=c++20" ]
+fx_cc_library(
+    name = "base",
+    srcs = [
+        "pointer_list.h",
+        "raw.cc",
+        "raw_bit_depth.h",
+        "raw_color_filter.h",
+        "raw_hash.h",
+        "raw_packing.h",
+    ],
+    hdrs = ["raw.h"],
+    # TODO(https://fxbug.dev/570694755): bazel2gn maps copts to GN
+    # configs += [...]; cflags_cc is emitted via raw_attribute above.
+    # @bazel2gn:skip
+    copts = ["--std=c++20"],
+    disable_build_flags = ["//build/config:language"],
+    implementation_deps = [
+        "//sdk/lib/syslog/cpp",
+        "//zircon/system/ulib/zx",
+    ],
+    visibility = ["//visibility:private"],
+    alwayslink = True,
+)
+
+# TODO(https://fxbug.dev/570694755): Preserve GN cflags_cc = [ "--std=c++20" ]
+# alongside disable_build_flags = ["//build/config:language"] until
+# bazel2gn can map copts to cflags_cc.
+# @bazel2gn:raw_attribute:cflags_cc = [ "--std=c++20" ]
+fx_cc_library(
+    name = "raw10",
+    hdrs = ["raw10.h"],
+    # TODO(https://fxbug.dev/570694755): bazel2gn maps copts to GN
+    # configs += [...]; cflags_cc is emitted via raw_attribute above.
+    # @bazel2gn:skip
+    copts = ["--std=c++20"],
+    disable_build_flags = ["//build/config:language"],
+    visibility = ["//src/camera:__subpackages__"],
+    deps = [":base"],
+    alwayslink = True,
+)
+
+# TODO(https://fxbug.dev/570694755): Preserve GN cflags_cc = [ "--std=c++20" ]
+# alongside disable_build_flags = ["//build/config:language"] until
+# bazel2gn can map copts to cflags_cc.
+# @bazel2gn:raw_attribute:cflags_cc = [ "--std=c++20" ]
+fx_cc_library(
+    name = "raw_ipu3",
+    hdrs = ["raw_ipu3.h"],
+    # TODO(https://fxbug.dev/570694755): bazel2gn maps copts to GN
+    # configs += [...]; cflags_cc is emitted via raw_attribute above.
+    # @bazel2gn:skip
+    copts = ["--std=c++20"],
+    disable_build_flags = ["//build/config:language"],
+    visibility = ["//src/camera:__subpackages__"],
+    deps = [":base"],
+    alwayslink = True,
+)
+
+# TODO(https://fxbug.dev/570694755): Preserve GN cflags_cc = [ "--std=c++20" ]
+# alongside disable_build_flags = ["//build/config:language"] until
+# bazel2gn can map copts to cflags_cc.
+# @bazel2gn:raw_attribute:cflags_cc = [ "--std=c++20" ]
+fx_cc_library(
+    name = "format_collection",
+    hdrs = ["raw_formats.h"],
+    # TODO(https://fxbug.dev/570694755): bazel2gn maps copts to GN
+    # configs += [...]; cflags_cc is emitted via raw_attribute above.
+    # @bazel2gn:skip
+    copts = ["--std=c++20"],
+    disable_build_flags = ["//build/config:language"],
+    visibility = ["//src/camera:__subpackages__"],
+    deps = [
+        ":base",
+        ":raw10",
+        ":raw_ipu3",
+    ],
+    alwayslink = True,
+)
+
+# TODO(https://fxbug.dev/570694755): Preserve GN cflags_cc = [ "--std=c++20" ]
+# alongside disable_build_flags = ["//build/config:language"] until
+# bazel2gn can map copts to cflags_cc.
+# @bazel2gn:raw_attribute:cflags_cc = [ "--std=c++20" ]
+fx_cc_library(
+    name = "lookups",
+    srcs = ["raw_lookups.cc"],
+    hdrs = ["raw_lookups.h"],
+    # TODO(https://fxbug.dev/570694755): bazel2gn maps copts to GN
+    # configs += [...]; cflags_cc is emitted via raw_attribute above.
+    # @bazel2gn:skip
+    copts = ["--std=c++20"],
+    disable_build_flags = ["//build/config:language"],
+    visibility = ["//src/camera:__subpackages__"],
+    deps = [":base"],
+    alwayslink = True,
+)
+
+# TODO(https://fxbug.dev/570694755): Preserve GN cflags_cc = [ "--std=c++20" ]
+# alongside disable_build_flags = ["//build/config:language"] until
+# bazel2gn can map copts to cflags_cc.
+# @bazel2gn:raw_attribute:cflags_cc = [ "--std=c++20" ]
+fx_cc_test_binary(
+    name = "raw_unittests_bin",
+    srcs = [
+        "raw10_unittest.cc",
+        "raw_formats_unittest.cc",
+        "raw_ipu3_unittest.cc",
+        "raw_unittest.cc",
+    ],
+    # The tests use EXPECT_DEATH, so the generated manifest needs the gtest
+    # death test shard.
+    aspect_hints = ["//src/sys/test_runners/gtest:death_test"],
+    copts = [
+        # TODO(https://fxbug.dev/570694755): bazel2gn maps copts to GN
+        # configs += [...]; cflags_cc is emitted via raw_attribute above.
+        # @bazel2gn:skip
+        "--std=c++20",
+        # TODO(https://fxbug.dev/42085293): delete the below and fix compiler warnings
+        "-Wno-vla-cxx-extension",
+    ],
+    disable_build_flags = ["//build/config:language"],
+    deps = [
+        ":format_collection",
+        ":lookups",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl/test:gtest_main",
+        # Bazel's gtest target bundles gmock; GN's :gmock publicly depends on :gtest.
+        "@com_google_googletest//:gtest",  # @bazel2gn:path_overwrite://third_party/googletest:gmock
+    ],
+)
+
+fx_unittest_package(
+    name = "raw_unittests",
+    unit_tests = [":raw_unittests_bin"],
+)

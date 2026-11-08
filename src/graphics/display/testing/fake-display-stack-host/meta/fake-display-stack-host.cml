@@ -19,6 +19,34 @@
             protocol: [ "fuchsia.sysmem2.Allocator" ],
             from: "parent",
         },
+        {
+            config: "fuchsia.display.testing.ActiveWidthPx",
+            key: "active_width_px",
+            type: "uint32",
+            availability: "transitional",
+            default: 1280,
+        },
+        {
+            config: "fuchsia.display.testing.ActiveHeightPx",
+            key: "active_height_px",
+            type: "uint32",
+            availability: "transitional",
+            default: 800,
+        },
+        {
+            config: "fuchsia.display.testing.RefreshRateMillihertz",
+            key: "refresh_rate_millihertz",
+            type: "uint32",
+            availability: "transitional",
+            default: 60000,
+        },
+        {
+            config: "fuchsia.display.testing.MaxLayerCount",
+            key: "max_layer_count",
+            type: "uint32",
+            availability: "transitional",
+            default: 1,
+        },
     ],
     expose: [
         {
@@ -26,10 +54,4 @@
             from: "self",
         },
     ],
-    config: {
-        active_width_px: { type: "uint32" },
-        active_height_px: { type: "uint32" },
-        refresh_rate_millihertz: { type: "uint32" },
-        max_layer_count: { type: "uint32" },
-    },
 }

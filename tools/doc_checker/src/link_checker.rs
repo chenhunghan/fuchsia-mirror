@@ -18,7 +18,7 @@ use http_body_util::Full;
 use hyper::body::Bytes;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
-use std::path::{self, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use url::Url;
 
 // path_help is a wrapper to allow mocking path checks
@@ -44,10 +44,11 @@ const DISALLOWED_ALT_IMAGE_TEXT: [&str; 1] = [""];
 // TODO(https://fxbug.dev/42064332): disallow "drawing, "image" for alt text";
 
 /// List of active repos under fuchsia.googlesource.com which can be linked to.
-const VALID_PROJECTS: [&str; 22] = [
+const VALID_PROJECTS: [&str; 23] = [
     "", // root page of all projects
     "antlion",
     "cobalt",
+    "cobalt-registry",
     "drivers", // This is a family of projects.
     "experiences",
     "fargo",
@@ -227,7 +228,7 @@ impl DocCheck for LinkChecker {
                                         link_url, link_title
                                     ),
                                 ));
-                                link_url
+                                continue;
                             }
                             LinkType::Shortcut => link_url,
                             LinkType::ShortcutUnknown => {
@@ -246,16 +247,19 @@ impl DocCheck for LinkChecker {
                                 }
                             }
                             LinkType::Autolink => link_url,
-                            LinkType::Email => return Ok(None),
+                            LinkType::Email => continue,
                             LinkType::WikiLink { .. } => link_url,
                         };
                         if link.starts_with("mailto:") {
                             // do nothing.
-                            return Ok(None);
+                            continue;
                         }
                         link
                     }
                     Element::Image(link_type, link_url, link_title, elements, _) => {
+                        // Unknown reference labels are reported here; the alt text is still
+                        // checked, but there is no target to look up on disk.
+                        let mut is_unknown_ref = false;
                         let link = match link_type {
                             LinkType::Inline => link_url,
                             LinkType::Reference => link_url,
@@ -268,10 +272,22 @@ impl DocCheck for LinkChecker {
                                         link_url, link_title
                                     ),
                                 ));
+                                is_unknown_ref = true;
                                 link_url
                             }
                             LinkType::Collapsed => link_url,
-                            LinkType::CollapsedUnknown => todo!(),
+                            LinkType::CollapsedUnknown => {
+                                errors.push(DocCheckError::new_error(
+                                    ele.doc_line().line_num,
+                                    ele.doc_line().file_name.clone(),
+                                    &format!(
+                                        "Unknown collapsed image link to {} ({})",
+                                        link_url, link_title
+                                    ),
+                                ));
+                                is_unknown_ref = true;
+                                link_url
+                            }
                             LinkType::Shortcut => link_url,
                             LinkType::ShortcutUnknown => {
                                 // Check if this is a case where the text is in [].
@@ -303,16 +319,17 @@ impl DocCheck for LinkChecker {
                                             link_url, link_title
                                         ),
                                     ));
+                                    is_unknown_ref = true;
                                 }
                                 link_url
                             }
                             LinkType::Autolink => link_url,
-                            LinkType::Email => return Ok(None),
+                            LinkType::Email => continue,
                             LinkType::WikiLink { .. } => link_url,
                         };
                         if link.starts_with("mailto:") {
                             // do nothing.
-                            return Ok(None);
+                            continue;
                         }
                         // Check for alt text
                         let alt = ele.get_contents().trim().to_string();
@@ -325,6 +342,9 @@ impl DocCheck for LinkChecker {
                                     alt, DISALLOWED_ALT_IMAGE_TEXT
                                 ),
                             ))
+                        }
+                        if is_unknown_ref {
+                            continue;
                         }
                         link
                     }
@@ -354,12 +374,16 @@ impl DocCheck for LinkChecker {
                     &link_to_check,
                     &self.project,
                     self.allow_fuchsia_src_links,
-                )?
-                .map(|err| errors.push(err))
-                .is_some();
+                )
+                .map_err(|err| errors.push(err))
+                .is_err();
 
-                let root_dir = self.root_dir.display().to_string();
-                match is_intree_link(&self.project, &root_dir, &self.docs_folder, &link_to_check) {
+                match is_intree_link(
+                    &self.project,
+                    &self.root_dir,
+                    &self.docs_folder,
+                    &link_to_check,
+                ) {
                     Ok(Some(in_tree_path)) => {
                         match do_in_tree_check(
                             &element.doc_line(),
@@ -461,7 +485,8 @@ pub(crate) fn do_in_tree_check(
     link_to_check: &str,
     in_tree_path: &Path,
 ) -> Result<PathBuf, DocCheckError> {
-    let filepath = root_dir.join(in_tree_path.strip_prefix("/").unwrap_or(in_tree_path));
+    let rel_path = in_tree_path.strip_prefix("/").unwrap_or(in_tree_path);
+    let filepath = root_dir.join(rel_path);
     if !path_helper::exists(&filepath) {
         // Look for missing the file extension.
         if filepath.extension().is_none() {
@@ -493,26 +518,22 @@ pub(crate) fn do_in_tree_check(
         ));
     }
 
-    let is_dir = path_helper::is_dir(&filepath);
-    let target_file = if is_dir {
-        if in_tree_path
-            .components()
-            .position(|c| c == path::Component::Normal(OsStr::new(&docs_folder)))
-            == Some(1)
-        {
-            let readme_path = filepath.join("README.md");
-            if !path_helper::exists(&readme_path) {
-                return Err(DocCheckError::new_error(
-                    doc_line.line_num,
-                    doc_line.file_name.clone(),
-                    &format!(
-                        "in-tree link to {} could not be found at {:?} or  {:?}",
-                        link_to_check, filepath, readme_path
-                    ),
-                ));
-            }
+    // Directories under the docs folder publish their README.md; any other directory is the
+    // target itself. docs_folder may be spelled with or without a leading slash.
+    let docs_rel = docs_folder.strip_prefix("/").unwrap_or(docs_folder);
+    let target_file = if path_helper::is_dir(&filepath) && rel_path.starts_with(docs_rel) {
+        let readme_path = filepath.join("README.md");
+        if !path_helper::exists(&readme_path) {
+            return Err(DocCheckError::new_error(
+                doc_line.line_num,
+                doc_line.file_name.clone(),
+                &format!(
+                    "in-tree link to {} could not be found at {:?} or  {:?}",
+                    link_to_check, filepath, readme_path
+                ),
+            ));
         }
-        filepath.join("README.md")
+        readme_path
     } else {
         filepath.clone()
     };
@@ -547,21 +568,17 @@ pub(crate) fn do_check_link(
     link: &str,
     project_being_checked: &str,
     allow_fuchsia_src_links: bool,
-) -> Result<Option<DocCheckError>> {
+) -> Result<(), DocCheckError> {
     match link.parse::<Uri>() {
         Ok(uri) => {
             match uri.scheme() {
                 Some(scheme) => match scheme.as_str() {
                     "http" | "https" => {}
-                    _ => return Ok(None),
+                    _ => return Ok(()),
                 },
-                None => return Ok(None),
+                None => return Ok(()),
             }
-            if let Some(errors) =
-                check_link_authority(doc_line, &uri, project_being_checked, allow_fuchsia_src_links)
-            {
-                return Ok(Some(errors));
-            }
+            check_link_authority(doc_line, &uri, project_being_checked, allow_fuchsia_src_links)?;
 
             // Check for host language parameter on google owned urls.
             if uri
@@ -571,36 +588,38 @@ pub(crate) fn do_check_link(
                 .unwrap_or(false)
                 && uri.query().map(|query| query.contains("hl=")).unwrap_or(false)
             {
-                return Ok(Some(DocCheckError::new_error(
+                return Err(DocCheckError::new_error(
                     doc_line.line_num,
                     doc_line.file_name.clone(),
                     &format!("Do not add host language parameter `hl` {}", link),
-                )));
+                ));
             }
 
-            Ok(None)
+            Ok(())
         }
-        Err(e) => Ok(Some(DocCheckError::new_error(
+        Err(e) => Err(DocCheckError::new_error(
             doc_line.line_num,
             doc_line.file_name.clone(),
             &format!("Invalid link {} : {}", link, e),
-        ))),
+        )),
     }
 }
 
 /// Returns the relative path from the root_dir if the link it to a file in the fuchsia source tree.
 pub(crate) fn is_intree_link(
     project: &str,
-    root_dir: &str,
+    root_dir: impl AsRef<Path>,
     docs_folder: &Path,
     link_to_check: &str,
 ) -> Result<Option<PathBuf>> {
-    if link_to_check.starts_with(root_dir) {
-        let mut filepath = link_to_check.strip_prefix(root_dir).unwrap_or(link_to_check);
-        (filepath, _) = filepath.split_once('#').unwrap_or((filepath, ""));
-        // Split off the query parameters, if any
-        (filepath, _) = filepath.split_once('?').unwrap_or((filepath, ""));
-        return Ok(Some(PathBuf::from(filepath)));
+    let root_path = root_dir.as_ref();
+    let (mut filepath, _) = link_to_check.split_once('#').unwrap_or((link_to_check, ""));
+    // Split off the query parameters, if any
+    (filepath, _) = filepath.split_once('?').unwrap_or((filepath, ""));
+    if !root_path.as_os_str().is_empty()
+        && let Ok(stripped) = Path::new(filepath).strip_prefix(root_path)
+    {
+        return normalize_path(&Path::new("/").join(stripped)).map(Some);
     } else if link_to_check.starts_with(&format!("https://{}/{}", GERRIT_HOST, project)) {
         let uri: Uri = match link_to_check.parse::<Uri>() {
             Ok(uri) => uri,
@@ -614,12 +633,20 @@ pub(crate) fn is_intree_link(
             }
         }
         // skip over any branch spec. The first part is empty. It is +, or +show, or +log, etc.
+        // Short URLs such as .../+/HEAD, .../+/refs/heads or .../+/refs/heads/main have no file
+        // path; they are not in-tree links and must not index past the end of `parts`.
         if parts.len() > 3 && parts[2].starts_with('+') {
             let filepath = PathBuf::from("/");
             // Include all refs/heads except for "releases", which should be directly linked.
-            if parts[3] == "refs" && parts[4] == "heads" && parts[5] != "releases" {
+            if parts[3] == "refs"
+                && parts.get(4) == Some(&"heads")
+                && parts.get(5).is_some_and(|branch| *branch != "releases")
+                && parts.get(6).is_some_and(|segment| !segment.is_empty())
+            {
                 return Ok(Some(filepath.join(parts[6..].join("/"))));
-            } else if parts[3] == "HEAD" && parts[4] == docs_folder.to_string_lossy() {
+            } else if parts[3] == "HEAD"
+                && parts.get(4).is_some_and(|folder| *folder == docs_folder.to_string_lossy())
+            {
                 return Ok(Some(filepath.join(parts[4..].join("/"))));
             } else {
                 return Ok(None);
@@ -628,13 +655,7 @@ pub(crate) fn is_intree_link(
             return Ok(Some(PathBuf::from(parts.join("/"))));
         }
     } else if link_to_check.starts_with('/') {
-        let (mut filepath, _) = link_to_check.split_once('#').unwrap_or((link_to_check, ""));
-        (filepath, _) = filepath.split_once('?').unwrap_or((filepath, ""));
-
-        return match normalize_path(Path::new(filepath)) {
-            Ok(normalized) => Ok(Some(normalized)),
-            Err(e) => Err(e),
-        };
+        return normalize_path(Path::new(filepath)).map(Some);
     }
     Ok(None)
 }
@@ -645,7 +666,7 @@ fn check_link_authority(
     uri: &Uri,
     project_being_checked: &str,
     allow_fuchsia_src_links: bool,
-) -> Option<DocCheckError> {
+) -> Result<(), DocCheckError> {
     let link_to_fuchsia_gerrit_host = match uri.authority() {
         Some(a) => *a == GERRIT_HOST,
         None => false,
@@ -664,26 +685,32 @@ fn check_link_authority(
      */
     if link_to_fuchsia_gerrit_host {
         if !VALID_PROJECTS.contains(&project) {
-            return Some(DocCheckError::new_error(
+            return Err(DocCheckError::new_error(
                 doc_line.line_num,
                 doc_line.file_name.clone(),
                 &format!("Obsolete or invalid project {}: {}", project, uri),
             ));
         }
-        if !on_gerrit_master(uri) && project == project_being_checked {
-            let branch_index = parts.iter().position(|x| *x == "+").unwrap();
-            let file_path =
-                if parts[branch_index + 1] == "refs" && parts[branch_index + 2] == "heads" {
-                    parts[branch_index + 4..].join("/")
-                } else {
-                    parts[branch_index + 2..].join("/")
-                };
+        if !on_gerrit_main(uri) && project == project_being_checked {
+            // on_gerrit_main returns true when there is no "+" segment, so one exists here.
+            let Some(branch_index) = parts.iter().position(|x| *x == "+") else {
+                return Ok(());
+            };
+            // `file_path` is only the hint in the error below; a branch spec with no trailing
+            // path (.../+/refs/heads) yields an empty hint rather than a panic.
+            let file_path = if parts.get(branch_index + 1) == Some(&"refs")
+                && parts.get(branch_index + 2) == Some(&"heads")
+            {
+                parts.get(branch_index + 4..).map_or_else(String::new, |rest| rest.join("/"))
+            } else {
+                parts.get(branch_index + 2..).map_or_else(String::new, |rest| rest.join("/"))
+            };
 
             //Possible point of discussion: Non-HEAD links are open discussion for non- //docs links.
 
             // Allow files that are not markdown, such as OWNERS to be links.
             if parts.contains(&"docs") && uri.path().ends_with(".md") {
-                return Some(DocCheckError::new_error_helpful(
+                return Err(DocCheckError::new_error_helpful(
                     doc_line.line_num,
                     doc_line.file_name.clone(),
                     &format!("Invalid link to non-main branch: {}", uri),
@@ -713,7 +740,7 @@ fn check_link_authority(
             // If the link is to the published docs directory (fuchsia-src), then
             // a path should be used instead.
             if parts.contains(&"fuchsia-src") && !allow_fuchsia_src_links {
-                return Some(DocCheckError::new_error(
+                return Err(DocCheckError::new_error(
                     doc_line.line_num,
                     doc_line.file_name.clone(),
                     &format!(
@@ -725,7 +752,7 @@ fn check_link_authority(
             }
         }
     }
-    None
+    Ok(())
 }
 
 fn handle_shortcut_unknown(
@@ -775,35 +802,21 @@ fn handle_shortcut_unknown(
     errors
 }
 
-/// Checks whether the URI points to the master branch of a Gerrit (i.e.,
+/// Checks whether the URI points to the main branch of a Gerrit (i.e.,
 /// googlesource.com) project.
-fn on_gerrit_master(uri: &Uri) -> bool {
-    let path_segments: Vec<&str> =
-        uri.path().split('/').skip_while(|p| p != &"+").skip(1).take(3).collect();
-    if path_segments.is_empty() {
+fn on_gerrit_main(uri: &Uri) -> bool {
+    let parts: Vec<&str> = uri.path().split('/').collect();
+    let Some(branch_index) = parts.iter().position(|p| *p == "+") else {
         // no + branch spec in the URL, so defaults to main.
         return true;
-    }
+    };
     // Links to gerrit are of the form:
-    // https://fuchsia.googlesource.com/fuchsia/+/refs/heads/main/docs/README.md
-    //  https://fuchsia.googlesource.com/<project>/+/refs/heads/<branch>/<path>
-
-    // path_segments is the path (everything after the server name) split on /
-    // branch_index is the index of the + in the path.
-
-    match path_segments[0] {
-        "master" | "main" | "HEAD" => true,
-        "refs" => {
-            // There can be refs/ to other things, so make sure there are at least 3 segments after
-            // the +. Then join these together for comparison.
-            if 3 < path_segments.len() {
-                let ref_path = path_segments[1..4].join("/");
-                return ref_path == "refs/heads/main" || ref_path == "refs/heads/master";
-            }
-            false
-        }
-        _ => false,
-    }
+    // https://fuchsia.googlesource.com/<project>/+/refs/heads/<branch>/<path>
+    // https://fuchsia.googlesource.com/<project>/+/<HEAD|main>/<path>
+    matches!(
+        parts.get(branch_index + 1..),
+        Some([]) | Some(["main" | "HEAD", ..]) | Some(["refs", "heads", "main", ..])
+    )
 }
 
 pub async fn check_external_links(links: &Vec<LinkReference>) -> Option<Vec<DocCheckError>> {
@@ -1090,10 +1103,79 @@ mod tests {
             ),
             // Exclude releases
             ("https://fuchsia.googlesource.com/fuchsia/+/refs/heads/releases/f16", None),
+            // A branch spec followed by a single path segment is the shortest in-tree form.
+            (
+                "https://fuchsia.googlesource.com/fuchsia/+/refs/heads/main/.gitignore",
+                Some(PathBuf::from("/.gitignore")),
+            ),
+            // Absolute paths under root_dir are re-rooted at "/", with anchors stripped.
+            ("/some/root/dir/docs/README.md#heading", Some(PathBuf::from("/docs/README.md"))),
+            // A sibling directory sharing a string prefix with root_dir is not under root_dir.
+            (
+                "/some/root/dir_sibling/docs/README.md",
+                Some(PathBuf::from("/some/root/dir_sibling/docs/README.md")),
+            ),
         ];
         for (link_to_check, expected) in test_cases {
             let result = is_intree_link(project, root_dir, &docs_folder, link_to_check)?;
-            assert_eq!(result, expected);
+            assert_eq!(result, expected, "link: {link_to_check}");
+        }
+        // An empty root_dir never matches as a prefix.
+        assert_eq!(
+            is_intree_link(project, "", &docs_folder, "https://google.com/x")?,
+            None,
+            "empty root_dir must not strip-prefix a URL"
+        );
+        // Gerrit URLs with a branch spec but no file path are not in-tree links and must not
+        // index past the end of the path segments or resolve to the repository root.
+        for short_url in [
+            "https://fuchsia.googlesource.com/fuchsia/+/HEAD",
+            "https://fuchsia.googlesource.com/fuchsia/+/refs",
+            "https://fuchsia.googlesource.com/fuchsia/+/refs/heads",
+            "https://fuchsia.googlesource.com/fuchsia/+/refs/heads/main",
+            "https://fuchsia.googlesource.com/fuchsia/+/refs/heads/main/",
+        ] {
+            assert_eq!(
+                is_intree_link(project, root_dir, &docs_folder, short_url)?,
+                None,
+                "link: {short_url}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_gerrit_branch_links() -> Result<()> {
+        let doc_line = DocLine { line_num: 1, file_name: PathBuf::from("/docs/README.md") };
+        // The project being checked is "cobalt" so these fixtures exercise the same-project
+        // branch rules without being documentation links to fuchsia/+/.../docs.
+        // Links to the main branch of the project being checked are valid.
+        for ok_link in [
+            "https://fuchsia.googlesource.com/cobalt/+/HEAD/docs/README.md",
+            "https://fuchsia.googlesource.com/cobalt/+/main/docs/README.md",
+            "https://fuchsia.googlesource.com/cobalt/+/refs/heads/main/docs/README.md",
+            // Branch specs with no file path report nothing rather than panicking.
+            "https://fuchsia.googlesource.com/cobalt/+/refs",
+            "https://fuchsia.googlesource.com/cobalt/+/refs/heads",
+            "https://fuchsia.googlesource.com/cobalt/+/HEAD",
+        ] {
+            assert!(
+                do_check_link(&doc_line, ok_link, "cobalt", false).is_ok(),
+                "expected ok: {ok_link}"
+            );
+        }
+        // Markdown links to docs on any other branch, including the legacy default branch
+        // name, are rejected with a filepath hint.
+        for bad_link in [
+            "https://fuchsia.googlesource.com/cobalt/+/refs/heads/feature/docs/README.md",
+            "https://fuchsia.googlesource.com/cobalt/+/refs/heads/master/docs/README.md",
+            "https://fuchsia.googlesource.com/cobalt/+/master/docs/README.md",
+            "https://fuchsia.googlesource.com/cobalt/+/abc123/docs/README.md",
+        ] {
+            let err = do_check_link(&doc_line, bad_link, "cobalt", false)
+                .expect_err(&format!("expected non-main branch error: {bad_link}"));
+            assert!(err.message.contains("Invalid link to non-main branch"), "{}", err.message);
+            assert_eq!(err.help_suggestion.as_deref(), Some("filepath: /docs/README.md"));
         }
         Ok(())
     }
@@ -1164,6 +1246,13 @@ mod tests {
 
             Some([DocCheckError::new_error(1, PathBuf::from("/docs/README.md"),
              "Obsolete or invalid project garnet: https://fuchsia.googlesource.com/garnet/+/HEAD/src/file.cc")].to_vec())
+        ),
+        (
+
+                PathBuf::from("/docs/README.md"),
+                "valid project link [cobalt-registry](https://fuchsia.googlesource.com/cobalt-registry)",
+
+            None,
         ),
         (
 
@@ -1270,6 +1359,73 @@ mod tests {
             );
             assert_eq!(result.err(), expected_error);
         }
+
+        // A directory under the docs folder resolves to its README.md; any other directory is
+        // the target itself. The docs folder may be spelled with a leading slash.
+        for docs_folder in [Path::new("docs"), Path::new("/docs")] {
+            assert_eq!(
+                do_in_tree_check(
+                    &doc_line,
+                    &root_dir,
+                    docs_folder,
+                    "/docs/exists",
+                    Path::new("/docs/exists")
+                )
+                .ok(),
+                Some(PathBuf::from("/path/to/fuchsia/docs/exists/README.md")),
+                "docs_folder = {docs_folder:?}"
+            );
+            assert_eq!(
+                do_in_tree_check(
+                    &doc_line,
+                    &root_dir,
+                    docs_folder,
+                    "/src/lib",
+                    Path::new("/src/lib")
+                )
+                .ok(),
+                Some(PathBuf::from("/path/to/fuchsia/src/lib")),
+                "docs_folder = {docs_folder:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_email_and_collapsed_unknown_do_not_swallow_or_panic() -> Result<()> {
+        let opt = DocCheckerArgs {
+            root: PathBuf::from("/path/to/fuchsia"),
+            project: "fuchsia".to_string(),
+            docs_folder: PathBuf::from("docs"),
+            check_external_links: false,
+            json: false,
+            allow_fuchsia_src_links: false,
+            reference_docs_root: None,
+            skip_link_check: false,
+            allow_unreferenced_hidden: false,
+        };
+        let mut checks = register_markdown_checks(&opt, Default::default())?;
+        let file = PathBuf::from("/docs/README.md");
+        // An e-mail autolink or mailto: link used to return early and drop every error already
+        // collected for the paragraph; collapsed unknown references used to panic.
+        let input = "Broken [l](/docs/../../escape.md) and <user@example.com> and [m](mailto:a@b.c) \
+                     and [also](/docs/missing.md) and ![ci][] and [cl][].";
+        let callback = &mut |broken_link: pulldown_cmark::BrokenLink<'_>| {
+            DocContext::handle_broken_link(broken_link, input)
+        };
+        let mut messages = vec![];
+        for ele in DocContext::new(file, input, Some(callback)) {
+            if let Some(errors) = checks[0].check(&ele)? {
+                messages.extend(errors.into_iter().map(|e| e.message));
+            }
+        }
+        let has = |needle: &str| messages.iter().any(|m| m.contains(needle));
+        assert!(has("Cannot normalize /docs/../../escape.md"), "{messages:?}");
+        assert!(has("/docs/missing.md could not be found"), "{messages:?}");
+        assert!(has("Unknown collapsed image link to ci"), "{messages:?}");
+        assert!(has("Unknown collapsed link to cl"), "{messages:?}");
+        // Unknown references are reported once, not followed by a second not-found error.
+        assert!(!has("ci could not be found") && !has("cl could not be found"), "{messages:?}");
         Ok(())
     }
 

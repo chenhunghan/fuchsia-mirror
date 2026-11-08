@@ -4,24 +4,94 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT
 
+import("//zircon/kernel/kernel_bindgen_crate.gni")
+import("//zircon/kernel/kernel_rust_mod.gni")
+
 source_set("hypervisor") {
   sources = [
     "guest.cc",
-    "invalidate.cc",
-    "pv.cc",
     "vcpu.cc",
     "vmexit.cc",
     "vmx.S",
     "vmx_cpu_state.cc",
   ]
   deps = [
+    ":hypervisor-rs",
     "//zircon/kernel/arch/x86:headers",
     "//zircon/kernel/hypervisor:headers",
     "//zircon/kernel/lib/boot-options",
     "//zircon/kernel/lib/page",
-    "//zircon/kernel/lib/syscalls:headers",
     "//zircon/kernel/platform/pc",
   ]
+}
+
+kernel_bindgen_crate("guest-bindings") {
+  visibility = [ ":*" ]
+  headers = [ "//zircon/kernel/arch/x86/include/arch/hypervisor.h" ]
+  non_rust_deps = [
+    "//zircon/kernel/arch/x86:headers",
+    "//zircon/kernel/hypervisor:headers",
+  ]
+  cpp = true
+
+  notice_year = 2026
+
+  # Layout contract only: the Rust `Guest` and `VmxPage` assert their size,
+  # alignment and field offsets against the C++ `Guest` and `VmxPage`. The
+  # remaining field types are opaque C++ facades over Rust types, so only their
+  # sizes and alignments are taken from C++.
+  type_allowlist = [
+    "Guest",
+    "VmxPage",
+    "VpidAllocator",
+    "hypervisor::Page",
+    "hypervisor::GuestPhysicalAspace",
+    "hypervisor::TrapMap",
+    "vm_page",
+  ]
+  opaque_types = [
+    "VpidAllocator",
+    "hypervisor::GuestPhysicalAspace",
+    "hypervisor::TrapMap",
+    "vm_page",
+  ]
+
+  # bindgen still emits nested types of allowlisted opaque classes.
+  type_blocklist = [
+    "hypervisor::TrapMap_LockType",
+    "vm_page_.*",
+  ]
+  function_blocklist = [ ".*" ]
+  var_allowlist = [ "Guest_kMaxGuestVcpus" ]
+  additional_bindgen_flags = [ "--no-recursive-allowlist" ]
+  deps = [ "//sdk/rust/zx-types" ]
+  expect_lints = [ "non_upper_case_globals" ]
+  raw_lines = [
+    "#![no_std]",
+    "pub use zx_types::zx_paddr_t;",
+  ]
+}
+
+kernel_rust_mod("hypervisor-rs") {
+  sources = [
+    "guest.rs",
+    "guest_ffi.rs",
+    "invalidate.rs",
+    "invalidate_ffi.rs",
+    "mod.rs",
+    "pv.rs",
+    "pv_ffi.rs",
+  ]
+  deps = [
+    ":guest-bindings",
+    "//sdk/rust/zx-status",
+    "//sdk/rust/zx-types",
+    "//src/lib/zr",
+    "//third_party/rust_crates:pin-init",
+    "//zircon/kernel/hypervisor:hypervisor-rs",
+    "//zircon/kernel/lib/id_allocator:id-allocator-rs",
+  ]
+  test_deps = [ "//zircon/kernel/lib/unittest:unittest-rs" ]
 }
 
 source_set("tests") {

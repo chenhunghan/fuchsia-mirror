@@ -8,9 +8,9 @@
 
 #include <ktl/array.h>
 #include <ktl/string_view.h>
-#include <phys/main.h>
+#include <phys/runtime/main.h>
 #include <phys/stdio.h>
-#include <phys/uart-console.h>
+#include <phys/uart/driver.h>
 
 #include "test-main.h"
 

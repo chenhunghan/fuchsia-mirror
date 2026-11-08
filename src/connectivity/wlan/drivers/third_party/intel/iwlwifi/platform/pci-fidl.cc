@@ -17,10 +17,6 @@ struct iwl_pci_fidl {
   std::optional<fdf::MmioBuffer> mmio;
 };
 
-void iwl_pci_ack_interrupt(const struct iwl_pci_fidl* fidl) {
-  auto result = fidl->client_->AckInterrupt();
-}
-
 zx_status_t iwl_pci_read_config16(const struct iwl_pci_fidl* fidl, uint16_t offset,
                                   uint16_t* out_value) {
   auto result = fidl->client_->ReadConfig16(offset);

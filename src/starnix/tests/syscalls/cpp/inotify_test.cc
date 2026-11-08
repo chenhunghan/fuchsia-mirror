@@ -13,7 +13,9 @@
 
 #include <fbl/unique_fd.h>
 #include <gtest/gtest.h>
+#include <linux/capability.h>
 
+#include "src/starnix/tests/syscalls/cpp/capabilities_helper.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
 
 namespace {
@@ -171,6 +173,58 @@ TEST(InotifyTest, UnlinkOneOfTwoHardLinksDoesNotEmitDeleteSelf) {
 // unlinked.
 TEST(InotifyTest, UnlinkWatchedHardLinkFirstEmitsDeleteSelfOnLastUnlink) {
   ASSERT_NO_FATAL_FAILURE(CheckHardLinkUnlinkOrder(/*watch_first=*/true));
+}
+
+TEST(InotifyTest, AddWatchRequiresReadPermission) {
+  test_helper::ScopedTempDir temp_dir;
+  std::string watched_file = temp_dir.path() + "/file";
+  std::string watched_dir = temp_dir.path() + "/dir";
+
+  fbl::unique_fd created(open(watched_file.c_str(), O_CREAT | O_WRONLY, 0200));
+  ASSERT_TRUE(created.is_valid()) << strerror(errno);
+  created.reset();
+  ASSERT_EQ(chmod(watched_file.c_str(), 0200), 0) << strerror(errno);
+
+  ASSERT_EQ(mkdir(watched_dir.c_str(), 0300), 0) << strerror(errno);
+  ASSERT_EQ(chmod(watched_dir.c_str(), 0300), 0) << strerror(errno);
+
+  if (test_helper::HasCapabilityEffective(CAP_DAC_OVERRIDE) ||
+      test_helper::HasCapabilityEffective(CAP_DAC_READ_SEARCH)) {
+    fbl::unique_fd fd(inotify_init1(IN_NONBLOCK | IN_CLOEXEC));
+    ASSERT_TRUE(fd.is_valid()) << strerror(errno);
+
+    int file_wd = inotify_add_watch(fd.get(), watched_file.c_str(), IN_MODIFY);
+    EXPECT_GE(file_wd, 0) << strerror(errno);
+    EXPECT_EQ(inotify_rm_watch(fd.get(), file_wd), 0) << strerror(errno);
+
+    int dir_wd = inotify_add_watch(fd.get(), watched_dir.c_str(), IN_CREATE);
+    EXPECT_GE(dir_wd, 0) << strerror(errno);
+    EXPECT_EQ(inotify_rm_watch(fd.get(), dir_wd), 0) << strerror(errno);
+  }
+
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&] {
+    test_helper::UnsetCapability(CAP_DAC_OVERRIDE);
+    test_helper::UnsetCapability(CAP_DAC_READ_SEARCH);
+
+    fbl::unique_fd fd(inotify_init1(IN_NONBLOCK | IN_CLOEXEC));
+    ASSERT_TRUE(fd.is_valid()) << strerror(errno);
+
+    EXPECT_EQ(inotify_add_watch(fd.get(), watched_file.c_str(), IN_MODIFY), -1);
+    EXPECT_EQ(errno, EACCES);
+
+    EXPECT_EQ(inotify_add_watch(fd.get(), watched_dir.c_str(), IN_CREATE), -1);
+    EXPECT_EQ(errno, EACCES);
+
+    ASSERT_EQ(chmod(watched_file.c_str(), 0400), 0) << strerror(errno);
+    int file_wd = inotify_add_watch(fd.get(), watched_file.c_str(), IN_MODIFY);
+    EXPECT_GE(file_wd, 0) << strerror(errno);
+
+    ASSERT_EQ(chmod(watched_dir.c_str(), 0500), 0) << strerror(errno);
+    int dir_wd = inotify_add_watch(fd.get(), watched_dir.c_str(), IN_CREATE);
+    EXPECT_GE(dir_wd, 0) << strerror(errno);
+  });
+  EXPECT_TRUE(helper.WaitForChildren());
 }
 
 }  // namespace

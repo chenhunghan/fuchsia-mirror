@@ -13,16 +13,17 @@
 #include <lib/elfldltl/link.h>
 #include <lib/fit/defer.h>
 #include <lib/zbitl/error-stdio.h>
+#include <stdio.h>
 #include <string.h>
 #include <zircon/assert.h>
 
+#include <ktl/algorithm.h>
 #include <ktl/atomic.h>
 #include <ktl/span.h>
 #include <ktl/utility.h>
 #include <ktl/variant.h>
 #include <phys/address-space.h>
 #include <phys/allocation.h>
-#include <phys/symbolize.h>
 
 #include <ktl/enforce.h>
 
@@ -161,16 +162,15 @@ ktl::span<ktl::byte> ElfImage::GetBytesToPatch(const code_patching::Directive& p
   return file.subspan(static_cast<size_t>(patch.range_start - image_.base()), patch.range_size);
 }
 
-Allocation ElfImage::Load(memalloc::Type type, ktl::optional<uint64_t> relocation_address,
-                          bool in_place_ok) {
+Allocation ElfImage::Load(memalloc::Type type, EmitMarkupFunction emit_markup,
+                          ktl::optional<uint64_t> relocation_address, bool in_place_ok) {
   auto endof = [](const auto& last) { return last.offset() + last.filesz(); };
   const uint64_t load_size = ktl::visit(endof, load_info_.segments().back());
 
-  auto update_load_address_and_symbolize = fit::defer([relocation_address, this]() {
-    // Update the load address before having emitting otherwise-misleading
-    // markup.
+  auto update_load_address_and_emit_markup = fit::defer([&]() {
+    // Update the load address before emitting otherwise-misleading markup.
     set_load_address(relocation_address.value_or(physical_load_address()));
-    gSymbolize->OnLoad(*this);
+    emit_markup(*this);
   });
 
   if (in_place_ok && CanLoadInPlace()) {
@@ -300,8 +300,8 @@ void ElfImage::InitSelf(ktl::string_view name, elfldltl::DirectMemory& memory, u
 
 void ElfImage::PrintPatch(const code_patching::Directive& patch,
                           ktl::initializer_list<ktl::string_view> strings) const {
-  printf("%s: code-patching on %.*s: ", gSymbolize->name(), static_cast<int>(name_.size()),
-         name_.data());
+  printf("%.*s: code-patching on %.*s: ", static_cast<int>(name_.size()), name_.data(),
+         static_cast<int>(name_.size()), name_.data());
   for (ktl::string_view str : strings) {
     stdout->Write(str);
   }
@@ -354,9 +354,9 @@ fit::result<ElfImage::Error> ElfImage::SeparateZeroFill() {
 }
 
 void ElfImage::Printf() const {
-  printf("%s: In ELF file \"%.*s/%.*s\" from STORAGE_KERNEL item BOOTFS: ", gSymbolize->name(),
-         static_cast<int>(package_.size()), package_.data(), static_cast<int>(name_.size()),
-         name_.data());
+  printf("%.*s: In ELF file \"%.*s/%.*s\" from STORAGE_KERNEL item BOOTFS: ",
+         static_cast<int>(name_.size()), name_.data(), static_cast<int>(package_.size()),
+         package_.data(), static_cast<int>(name_.size()), name_.data());
 }
 
 void ElfImage::Printf(const char* fmt, ...) const {

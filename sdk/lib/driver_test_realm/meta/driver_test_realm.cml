@@ -99,6 +99,13 @@
             protocol: "fuchsia.pkg.PackageResolver-hermetic",
             from: "parent",
         },
+        {
+            config: "fuchsia.driver.testrealm.TunnelBootItems",
+            key: "tunnel_boot_items",
+            type: "bool",
+            availability: "transitional",
+            default: false,
+        },
     ],
 
     // LINT.ThenChange(/sdk/lib/driver_test_realm/realm_builder/rust/src/lib.rs)
@@ -160,10 +167,4 @@
     ],
 
     // LINT.ThenChange(/sdk/lib/driver_test_realm/realm_builder/rust/src/lib.rs)
-    config: {
-        tunnel_boot_items: {
-            type: "bool",
-            mutability: [ "parent" ],
-        },
-    },
 }

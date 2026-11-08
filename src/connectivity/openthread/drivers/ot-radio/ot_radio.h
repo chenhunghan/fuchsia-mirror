@@ -24,6 +24,7 @@
 #include <vector>
 
 #include <ddktl/device.h>
+#include <fbl/auto_lock.h>
 #include <fbl/mutex.h>
 
 #include "spinel_framer.h"
@@ -102,7 +103,10 @@ class OtRadioDevice : public DeviceType {
   fidl::WireSyncClient<fuchsia_hardware_spi::Device> spi_;
   sync_completion_t spi_rx_complete_;
 
-  uint8_t spi_rx_buffer_[kMaxFrameSize];
+  // Mutex to protect spi_rx_buffer_ and spi_rx_buffer_len_, as a public member
+  // for being able to use in the test code.
+  fbl::Mutex spi_rx_lock_;
+  uint8_t spi_rx_buffer_[kMaxFrameSize] __TA_GUARDED(spi_rx_lock_);
 
   std::array<fidl::WireSyncClient<fuchsia_hardware_gpio::Gpio>, OT_RADIO_PIN_COUNT> gpio_;
 
@@ -141,7 +145,7 @@ class OtRadioDevice : public DeviceType {
   fbl::Mutex spi_tx_lock_;
   std::list<std::vector<uint8_t>> spi_tx_queue_ __TA_GUARDED(spi_tx_lock_);
 
-  uint16_t spi_rx_buffer_len_ = 0;
+  uint16_t spi_rx_buffer_len_ __TA_GUARDED(spi_rx_lock_) = 0;
 
   class LowpanSpinelDeviceFidlImpl : public fidl::WireServer<fuchsia_lowpan_spinel::Device> {
    public:

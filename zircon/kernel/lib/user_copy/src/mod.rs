@@ -5,6 +5,7 @@
 // https://opensource.org/licenses/MIT
 
 pub mod internal;
+mod internal_ffi;
 mod user_iovec;
 mod user_ptr;
 mod user_string_view;

@@ -5,45 +5,67 @@ Each check is implemented as a small module in this directory that subclasses
 
 ## Step-by-Step Guide
 
-1. **Create a check module** in `scripts/shac/bazel_lint/checks/<rule>.py`
+1. **Create a check module** in `scripts/shac/bazel_lint/checks/<check_name>.py`
    subclassing `BazelCheck` from `framework` (see
    [`BazelCheck` Attributes](#bazelcheck-attributes) below) and decorating it
    with `@register_check`.
+   * Optionally, add implementation documentation, explanations, design
+     rationale, or caveats in `scripts/shac/bazel_lint/checks/<check_name>.md`
+     (the same base name as the check module) and reference it from the
+     docstring at the top of `<check_name>.py`. (User-facing style guidelines
+     belong in `//docs/development/languages/bazel/style/`, whereas
+     `<check_name>.md` is for check-specific implementation documentation.)
 2. **Import the module** in [`__init__.py`](./__init__.py) so the check is
    registered when `bazel_lint` loads.
 3. **Register the `shac` check** in
    [`//scripts/shac/bazel.star`](../../bazel.star) using `_make_bazel_lint_check`
    and `shac.register_check(...)` (in alphabetical order). Pass the file globs
    matching your check's `file_kinds` to `applies_to_globs` (e.g.
-   `_make_bazel_lint_check("my_check", applies_to_globs = _BUILD_FILES)`).
+   `_make_bazel_lint_check("bazel_<check_name>", applies_to_globs = _BUILD_FILES)`).
    Leave `enforcement` at its default (`"all"`) during development and verification.
 4. **Add tests and build targets** (kept in sync with
    [`__init__.py`](./__init__.py) via `LINT.IfChange`):
    * Add a Starlark check test file in
-     `scripts/shac/bazel_lint/checks/tests/<rule>_test.star` and invoke its
+     `scripts/shac/bazel_lint/checks/tests/<check_name>_test.star` and invoke its
      test runner function in [`tests/checks_test.star`](./tests/checks_test.star)
      (which is executed by
      [`//scripts/shac/tests/bazel_test.star`](../../tests/bazel_test.star)).
    * Update build targets so the new files are staged into the runfiles of
      `//scripts/shac/tests:bazel_test`:
-     * Add `<rule>.py` to [`BUILD.bazel`](./BUILD.bazel).
-     * Add `<rule>_test.star` to [`tests/BUILD.bazel`](./tests/BUILD.bazel).
+     * Add `<check_name>.py` to [`BUILD.bazel`](./BUILD.bazel).
+     * Add `<check_name>_test.star` to [`tests/BUILD.bazel`](./tests/BUILD.bazel).
    * Structure tests with clear separation between passing and failing cases:
+     * Load `run_lint_test` from `./base_test.star` and define a file-local
+       `_run_<check_name>_test(files)` wrapper at the top of
+       `<check_name>_test.star` (which automatically removes any disk
+       `.json` allowlist for the check in the virtual test root). Always call
+       `_run_<check_name>_test(...)` in test functions. Never call
+       `testing.run()` directly.
      * Separate tests that produce findings from tests that assert no findings
        (`asserts.eq(res.findings, ())`).
-     * In tests producing findings, keep the test file narrow so each line produces
-       a finding on consecutive line numbers, making it easy to spot if a finding
-       is missed. Avoid mixing passing lines into a multi-finding file.
+     * For multi-line virtual file contents using `"""`, begin the actual file
+       content on a new line after the opening `"""` for readability (not on the
+       same line as `"""`). Single-line file contents can use a single-line
+       string literal (e.g. `'...\n'`).
+     * In tests producing findings, keep the test file narrow so each line of
+       content produces a finding on consecutive line numbers (starting at
+       `line = 2` for multi-line `"""` strings, or `line = 1` for single-line
+       strings), making it easy to spot if a finding is missed. Avoid mixing
+       passing lines into a multi-finding file.
+     * Use descriptive, meaningful target, function, symbol, and file names in
+       test cases rather than single-letter placeholders (`a`, `b`, `f`, `g`),
+       and explain non-obvious test cases or expected findings in comments or
+       descriptive string literals.
      * Use dedicated test functions for each category: allowed syntax, policy
        exemptions, and unsupported file types. (Framework-level exclusions such
-       as `third_party/**/src/**` are tested in framework test suites rather
-       than individual check tests.)
+       as `third_party/**/src/**` and `.json` allowlist matching are tested in
+       framework test suites rather than individual check tests.)
 5. **Verify the check**:
    Whenever adding or modifying a check, run the following tests:
    * **Starlark check tests (for fast iteration)**:
      To test only your check:
      ```sh
-     fx host-tool shac test scripts/shac/bazel_lint/checks/tests/<rule>_test.star
+     fx host-tool shac test scripts/shac/bazel_lint/checks/tests/<check_name>_test.star
      ```
      To test all checks, run one of the following (the latter also runs the other Bazel shac tests):
      ```sh
@@ -56,7 +78,7 @@ Each check is implemented as a small module in this directory that subclasses
      ```
      This runs `bazel_test.star` inside Bazel's hermetic sandbox. While individual
      `shac test` commands above are faster for iteration, this test MUST pass
-     before landing to ensure all necessary Python modules, AST rules, and test
+     before landing to ensure all necessary Python modules, AST checks, and test
      files are declared in `BUILD.bazel` files and staged in runfiles.
      If the target is not recognized by `fx test`, register it first by running:
      ```sh
@@ -65,14 +87,18 @@ Each check is implemented as a small module in this directory that subclasses
    * **Full-workspace check (`--all`)** (also run this whenever modifying an
      allowlist):
      ```sh
-     fx host-tool shac check --only <check_name> --all
+     fx host-tool shac check --only bazel_<check_name> --all --fail-level warning
      ```
-     A new check MUST have no findings for this check (errors, warnings or
-     notices) across the entire workspace before landing so that developers
-     modifying an existing file do not encounter unrelated failures. Any
-     existing violations in the tree must either be fixed first or added to
-     [`allowlists/<check_name>.json`](../allowlists/README.md) with a tracking
-     bug.
+     Pass `--fail-level warning` so `shac` fails on `warning`-level findings
+     (such as those emitted on untouched files when
+     `enforcement = "unchanged_lines_warning_only"` is set, since `shac check`
+     defaults to `--fail-level error`), and verify the output reports zero
+     findings (errors, warnings, or notices). A new check MUST have no findings
+     across the entire workspace before landing so that developers modifying an
+     existing file do not encounter unrelated failures. Any existing violations
+     in the tree must either be fixed first or added to
+     [`allowlists/bazel_<check_name>.json`](../allowlists/README.md) with a
+     tracking bug.
 6. **Configure rollout enforcement**:
    Before uploading the CL, update the `_make_bazel_lint_check(...)` declaration
    in [`//scripts/shac/bazel.star`](../../bazel.star) to set:
@@ -88,7 +114,7 @@ Each check is implemented as a small module in this directory that subclasses
    commands from Step 5 as `Test:` footers in the commit message:
    ```
    Test: fx test --host @//scripts/shac/tests:bazel_test
-   Test: fx host-tool shac check --only <check_name> --all
+   Test: fx host-tool shac check --only bazel_<check_name> --all --fail-level warning
    ```
 7. **Promote to full enforcement after rollout**:
    After landing a new or modified check, allow the period for which CQ results
@@ -100,10 +126,10 @@ Each check is implemented as a small module in this directory that subclasses
      `"all"`).
    * Run the full-workspace check:
      ```sh
-     fx host-tool shac check --all --only <check_name>
+     fx host-tool shac check --all --only bazel_<check_name> --fail-level warning
      ```
    * If new violations are found, fix them or update
-     [`allowlists/<check_name>.json`](../allowlists/README.md).
+     [`allowlists/bazel_<check_name>.json`](../allowlists/README.md).
    * Land the change. Multiple checks can be updated at once.
 
 ## `BazelCheck` Attributes {:#bazelcheck-attributes}
@@ -122,24 +148,54 @@ Each check is implemented as a small module in this directory that subclasses
   patterns using Bazel `glob()` syntax (evaluated via
   `PurePosixPath.full_match`, where `*` matches within a single path segment and
   `**` matches zero or more path segments, e.g.
-  `"build/bazel_sdk/bazel_rules_fuchsia/**"` or `"build/config/**"`; patterns
-  must not end with `"/"`) for paths that are permanently exempt by policy (no
-  tracking bug required). Authors should clearly document the reason for each
-  exemption in comments. Use [`allowlists/`](../allowlists/README.md) instead
-  for temporary exceptions that require a tracking bug.
+  `"build/bazel_sdk/bazel_rules_fuchsia/**"` or
+  `"build/bazel_sdk/fuchsia_rules_common/**"`; patterns must not end with `"/"`)
+  for paths that are permanently exempt by policy (no tracking bug required).
+  Authors should clearly document the reason for each exemption in comments. Use
+  [`allowlists/`](../allowlists/README.md) instead for temporary exceptions that
+  require a tracking bug.
+* `supports_allowlist: bool` - Controls whether temporary bug-tracked exemptions
+  in [`allowlists/<name>.json`](../allowlists/README.md) are permitted for this
+  check:
+  * Defaults to `False`. Authors should determine whether there are reasonable
+    use cases for allowing exceptions to the check, such as to unblock work
+    where the check cannot be reasonably resolved, or whether the check is
+    non-negotiable.
+  * Set to `True` when there are reasonable use cases for temporary, bug-tracked
+    exceptions (for example, while migrating existing targets or to unblock work
+    where the check cannot be reasonably resolved), **even if there are
+    currently zero violations and no `allowlists/<name>.json` file on disk**.
+    When `True`, `allowlists/<name>.json` is optional (if no file exists on
+    disk, the allowlist is empty).
+  * Leave as `False` when a check is **non-negotiable** and violations must
+    never be committed or allowlisted (for example, `bazel_vendor_paths`, where
+    vendor subpaths must never be referenced in public Fuchsia code). When
+    `False`, no allowlist is loaded and the linter fails if
+    `allowlists/<name>.json` exists on disk.
 * `supports_targets_allowlist: bool` - Controls whether entries in
   `allowlists/<name>.json` that specify a single file `"path"` may also specify
   a `"targets"` list to exempt only specific rule/macro targets in that file
-  rather than the entire file:
-  * Set to `True` when a check's findings are associated with named targets
-    (e.g., `call.target_name` in `check_call()` or `s.enclosing_call.target_name`
-    in `check_string()`) and the check passes `targets=(...)` to `fc.report()`
-    or `fc.report_string()`.
-  * Leave as `False` (the default) for file-wide or load-level checks where
-    findings do not belong to a specific target (such as `package()` checks or
-    `.bzl` `visibility()` checks). When `False`, `load_allowlist()` rejects
-    `"targets"` in the JSON allowlist so ineffective target-scoped entries
-    cannot be added.
+  rather than the entire file (requires `supports_allowlist = True`):
+  * Set to `True` when a check's findings can be associated with named targets
+    in `BUILD.bazel` files. When `True` and `node` is passed to `fc.report()`
+    or `fc.report_string()`, `FileContext` automatically infers which target(s)
+    in the file own `node` so checks do not need to pass `targets=` explicitly:
+    * For a rule/macro call or an expression inside one (including inside
+      `select(...)` or `glob(...)`), the finding is attributed to that call's
+      `name` attribute.
+    * For a finding reported on a `load()` statement (either a loaded symbol in
+      `check_load()` or the `.bzl` module label string in `check_string()`), the
+      finding is attributed to the named target(s) in the file that reference the
+      loaded symbol(s). That way, allowlisting `"targets": ["my_target"]` in a
+      `BUILD.bazel` file also suppresses findings on a `load()` statement in that
+      file when the loaded symbol(s) are only used by `"my_target"`.
+    * Note that functions and rules without a `name` parameter (such as
+      `exports_files()`, `package()`, and `expect_includes()`) are not targets
+      and are not covered by target-specific `"targets"` allowlists.
+  * Leave as `False` (the default) for file-wide checks where findings never
+    belong to a specific target (such as `package()` checks or `.bzl`
+    `visibility()` checks). When `False`, `load_allowlist()` rejects `"targets"`
+    in the JSON allowlist so ineffective target-scoped entries cannot be added.
 
 ## Semantic Hook Points & Examples
 
@@ -161,16 +217,10 @@ statement).
 
 ```python
 def check_module(self, fc: FileContext) -> None:
-    has_visibility = any(
-        isinstance(stmt, ast.Expr)
-        and isinstance(stmt.value, ast.Call)
-        and isinstance(stmt.value.func, ast.Name)
-        and stmt.value.func.id == "visibility"
-        for stmt in fc.tree.body
-    )
+    has_visibility = any(is_load_visibility(call) for call in fc.calls)
     if not has_visibility:
         fc.report(
-            "All .bzl files must declare load visibility() at the top level.",
+            "Every `.bzl` file must declare `visibility(...)` at the top level.",
             level="error",
             url="https://fuchsia.dev/fuchsia-src/development/languages/bazel/style/bzl_files#load-visibility",
         )
@@ -178,21 +228,23 @@ def check_module(self, fc: FileContext) -> None:
 
 ### 2. `check_load(self, fc: FileContext, load: LoadInfo)`
 
-Called for every `load()` statement. `load.module_label` is the source `.bzl`
-label, and `load.symbols` is a tuple of `(local_name, exported_name, ast_node)`.
+Called for every `load()` statement. `load.module_label` is the normalized
+source `.bzl` label (converting `@@repo//...` to `@repo//...` and `@//...` to
+`//...`), `load.raw_module_label` is the exact un-normalized label string, and
+`load.symbols` is a tuple of `(local_name, exported_name, ast_node)`.
 
 ```python
 def check_load(self, fc: FileContext, load: LoadInfo) -> None:
-    if load.module_label == "@platforms//host:constraints.bzl":
-        for _local, exported, sym_node in load.symbols:
-            if exported == "HOST_CONSTRAINTS":
-                fc.report(
-                    "Do not use HOST_CONSTRAINTS; load HOST_OS_CONSTRAINTS from "
-                    "//build/bazel/platforms:constraints.bzl instead.",
-                    sym_node,
-                    level="error",
-                    url=None,
-                )
+    if load.module_label != _HOST_CONSTRAINTS_MODULE:
+        return
+    for _, exported_name, sym_node in load.symbols:
+        if exported_name == "HOST_CONSTRAINTS":
+            fc.report(
+                "Do not load `HOST_CONSTRAINTS`; use `HOST_OS_CONSTRAINTS` from `//build/bazel/platforms:constraints.bzl` instead.",
+                sym_node,
+                level="error",
+                url="https://fuchsia.dev/fuchsia-src/development/languages/bazel/style/build_files#target-compatible-with-host-targets",
+            )
 ```
 
 ### 3. `check_call(self, fc: FileContext, call: CallInfo)`
@@ -210,21 +262,20 @@ def check_call(self, fc: FileContext, call: CallInfo) -> None:
         kw = call.keywords["default_visibility"]
         is_broad = _has_broad_visibility(kw.value)
         fc.report(
-            "Do not set default_visibility in package(); specify visibility on individual targets.",
+            "Avoid `default_visibility` in `package()`; set `visibility` on individual targets.",
             kw,
             level="error" if is_broad else "warning",
             url="https://fuchsia.dev/fuchsia-src/development/languages/bazel/style/build_files#avoid-package-default-visibility",
         )
 
-    # Require a keyword argument unless a macro forwards **kwargs:
+    # Require a keyword argument on a rule call:
     if call.func_name in ("config_setting", "exports_files"):
         if "visibility" not in call.keywords and not call.forwards_kwargs:
             fc.report(
-                f"{call.func_name}() must explicitly specify 'visibility'.",
+                f"`{call.func_name}()` must explicitly specify `visibility` because it is public by default.",
                 call.node,
                 level="error",
-                url="https://fuchsia.dev/fuchsia-src/development/languages/bazel/style/common#visibility",
-                targets=(call.target_name,) if call.target_name else (),
+                url="https://fuchsia.dev/fuchsia-src/development/languages/bazel/style/build_files#always-specify-visibility-for-types-that-are-public-by-default",
             )
 ```
 
@@ -244,64 +295,72 @@ Called for every string literal in the file:
   time, so `check_string()` is called once with `"foobar"`. Multiline strings
   preserve newline characters (`\n`), and whitespace inside strings is
   unmodified and un-normalized.
-* **Included strings**: Every string constant in the parsed AST, except
-  module-level `load()` arguments (which are passed to `check_load()` instead).
-* **Docstrings**: Module, class, and function docstrings are included and have
-  `s.is_docstring == True`. Checks that do not want to inspect docstrings should
-  return early when `s.is_docstring` is `True`. Note that Bazel `doc` parameter
-  strings (such as `doc = "..."` on `rule()`, `macro()`, `aspect()`, or
-  `attr.*()`) are *not* docstrings; they are normal string literals with
-  `s.is_docstring == False` and `s.keyword_arg == "doc"`. Checks that wish to
-  ignore or inspect Bazel documentation attributes can check
-  `if s.keyword_arg == "doc": ...`.
+* **Included strings**: Every string constant in the parsed AST is visited,
+  including:
+  * **`load()` arguments**: Both the `.bzl` module label argument (which has
+    `s.is_load_source == True`) and the loaded symbol name arguments (which have
+    `s.is_load_source == False`). Checks that already inspect `load()`
+    statements in `check_load()` (or that should not inspect `load()` module
+    labels) should return early when `s.is_load_source` is `True`.
+  * **Docstrings**: Module, class, and function docstrings (which have
+    `s.is_docstring == True`). Checks that do not want to inspect docstrings
+    should return early when `s.is_docstring` is `True`. Note that Bazel `doc`
+    parameter strings (such as `doc = "..."` on `rule()`, `macro()`, `aspect()`,
+    or `attr.*()`) are *not* docstrings; they are normal string literals with
+    `s.is_docstring == False` and `s.keyword_arg == "doc"`. Checks that wish to
+    ignore or inspect Bazel documentation attributes can check
+    `if s.keyword_arg == "doc": ...`.
 * **Comments**: `#` comments are stripped by `ast.parse()` during tokenization
   and are never passed to `check_string()` or any other hook point function.
 
+`s.enclosing_statement_call` is the outermost enclosing rule/macro `CallInfo`
+for the statement (even when nested inside helper calls like `select(...)`),
 `s.enclosing_call` is the nearest enclosing `CallInfo`, `s.keyword_arg` is the
-enclosing keyword name (if any), `s.in_compare` is `True` inside comparison
-expressions (`==`, `!=`, `in`), and `s.in_fail` is `True` inside `fail(...)`.
+keyword argument name on `s.enclosing_statement_call` (or `s.enclosing_call` if
+different), `s.in_compare` is `True` inside comparison expressions (`==`, `!=`,
+`in`), and `s.in_fail` is `True` inside `fail(...)`.
 
 ```python
 def check_string(self, fc: FileContext, s: StringInfo) -> None:
-    if s.is_docstring:
+    if s.in_compare or s.in_fail:
         return
-    if s.value == "//visibility:public" and not (s.in_compare or s.in_fail):
-        targets = (
-            (s.enclosing_call.target_name,)
-            if (s.enclosing_call and s.enclosing_call.target_name)
-            else ()
-        )
+
+    if s.keyword_arg == "visibility" and s.value == "//visibility:public":
         fc.report_string(
-            'Do not use "//visibility:public"; restrict visibility to narrow package groups.',
+            'Do not use `"//visibility:public"`; restrict visibility to specific packages or subtrees.',
             s.node,
             s.value,
             level="error",
             url="https://fuchsia.dev/fuchsia-src/development/languages/bazel/style/common#do-not-use-public-visibility",
-            targets=targets,
         )
 ```
 
 ## Emitting Findings
 
-* `fc.report(message, node=None, *, level, url, targets=())`: Emits a finding
+* `fc.report(message, node=None, *, level, url, targets=None)`: Emits a finding
   spanning `node` (converting UTF-8 byte offsets to 1-based character columns),
-  or a file-level finding when `node=None`.
-* `fc.report_string(message, node, substring=None, *, level, url, targets=())`:
+  or a file-level finding when `node=None`. When
+  `check.supports_targets_allowlist = True` and `targets` is omitted (`None`),
+  `FileContext` automatically infers the target name(s) associated with `node`.
+* `fc.report_string(message, node, substring=None, *, level, url, targets=None)`:
   Highlights `substring` (defaulting to `node.value`) inside a single-line
   string literal excluding quotes, falling back to `fc.report` for multi-line or
-  concatenated strings.
+  concatenated strings. Automatically infers `targets` from `node` when
+  `check.supports_targets_allowlist = True` and `targets` is omitted (`None`).
 
 ### Documentation URLs (`url`)
 
 Both `fc.report()` and `fc.report_string()` require a keyword-only `url`
 argument (`str | None`):
 
-* **Provide a URL whenever documentation exists**: If the check enforces a
-  section of the Fuchsia Bazel style guide (under
-  `//docs/development/languages/bazel/style/`) or another documentation page,
-  pass its `https://fuchsia.dev/fuchsia-src/...` URL. `fc.report*` automatically
-  appends `" See <url>."` to `message`. Pass `url=None` only when no relevant
-  documentation exists.
+* **Link to the Fuchsia Bazel style guide**: `url` should generally come from
+  the Fuchsia Bazel style guide (under
+  `//docs/development/languages/bazel/style/`, using its
+  `https://fuchsia.dev/fuchsia-src/development/languages/bazel/style/...` URL).
+  `fc.report*` automatically appends `" See <url>."` to `message`. If the
+  Fuchsia Bazel style guide does not yet have an entry for the rule being
+  enforced, ask the user whether you should create one before falling back to
+  another documentation page or `url=None`.
 * **Verify explicit Markdown anchors**: When linking to a section heading in a
   Markdown file under `//docs/`, ensure the heading in the `.md` file defines an
   explicit `{:#anchor-name}` attribute and use that exact anchor to help ensure
@@ -327,7 +386,8 @@ traversal helpers:
   newlines (1-indexed line numbers correspond to `fc.lines[lineno - 1]`).
 * `fc.loaded_symbols: dict[str, tuple[str, str]]` - Mapping from local symbol
   name to `(module_label, exported_symbol_name)` for all symbols imported via
-  `load()`.
+  `load()`, where `module_label` is normalized via `normalize_repo_prefix()`
+  (converting `@@repo//...` to `@repo//...` and `@//...` to `//...`).
 * `fc.loads: list[LoadInfo]` - Pre-extracted `LoadInfo` metadata for all
   `load()` statements in file order.
 * `fc.calls: list[CallInfo]` - Pre-extracted `CallInfo` metadata for all
@@ -339,8 +399,22 @@ traversal helpers:
 
 * `fc.parent(node: ast.AST) -> ast.AST | None`: Returns the parent AST node of
   `node`, or `None` if `node` is the root module.
+* `fc.enclosing_statement_call(node: ast.AST) -> CallInfo | None`: Returns the
+  outermost non-`load()` `CallInfo` enclosing `node` within the current
+  statement, or `None` if `node` is not inside a call. Most checks should prefer
+  `enclosing_statement_call` over `enclosing_call` because arguments inside a
+  rule or macro call may be wrapped in helper calls such as `select(...)` or
+  `glob(...)`; `enclosing_statement_call` returns the outer rule/macro call
+  (which carries `target_name` and the rule's `func_name`), whereas
+  `enclosing_call` returns the innermost call (`select` or `glob`). (`load()`
+  statements are represented as `LoadInfo` in `fc.loads` rather than `CallInfo`
+  in `fc.calls`, so nodes inside `load(...)` return `None`.)
 * `fc.enclosing_call(node: ast.AST) -> CallInfo | None`: Returns the nearest
-  enclosing non-`load()` `CallInfo`, or `None` if the node is at module scope.
+  (innermost) enclosing non-`load()` `CallInfo`, or `None` if `node` is not
+  inside a call. Use this only when inspecting the immediate call directly
+  wrapping `node` (such as checking whether `node` is an argument to
+  `select(...)` or `glob(...)`); most checks should use
+  `fc.enclosing_statement_call(node)` instead.
 <!-- LINT.ThenChange(//scripts/shac/bazel_lint/framework.py:file_context) -->
 
 ## AST Metadata Classes (`*Info`)
@@ -352,8 +426,15 @@ Passed to `check_load(self, fc, load)`:
 
 * `load.node: ast.Call` - Underlying AST `Call` node for the `load(...)`
   statement.
-* `load.module_label: str` - First argument to `load()` (e.g.
-  `"@rules_cc//cc:defs.bzl"`).
+* `load.module_label: str` - Normalized first argument to `load()`, with leading
+  `@@` normalized to `@` and `@//` normalized to `//` via
+  `normalize_repo_prefix()` (e.g. `"@rules_cc//cc:defs.bzl"`). Almost all checks
+  should match against `load.module_label` so they handle `@` and `@@` forms
+  uniformly.
+* `load.raw_module_label: str` - Exact un-normalized module label string as
+  written in the `load()` statement (e.g. `"@@rules_cc//cc:defs.bzl"`). Use this
+  when formatting finding messages or calling `fc.report_string(...)` so the
+  emitted message and span match the source text.
 * `load.symbols: tuple[tuple[str, str, ast.AST], ...]` - Tuple of loaded
   symbols where each entry is `(local_name, exported_name, symbol_ast_node)`.
   When aliasing is used (`local = "exported"`), `local_name` holds the alias.
@@ -369,10 +450,12 @@ Passed to `check_call(self, fc, call)`:
   (e.g. `cc_library(...)` or `my_macro(...)`), `func_name` matches the
   function identifier. For calls via `native.<rule>` (e.g.
   `native.cc_library(...)`), `func_name` is normalized to strip `native.`
-  (becoming `"cc_library"`).
+  (becoming `"cc_library"`). Almost all checks should use `call.func_name` so
+  they handle both forms uniformly.
 * `call.raw_func_name: str` - Exact function expression string (e.g.
   `"native.cc_library"` or `"my_macro"`). This is identical to `func_name` for
-  all calls except those using the `native.` prefix.
+  all calls except those using the `native.` prefix. Only use this when a check
+  explicitly needs to distinguish `native.<func>` from `<func>`.
 * `call.target_name: str | None` - String value of `name = "..."` keyword
   argument if present as a string literal, otherwise `None`.
 * `call.keywords: dict[str, ast.keyword]` - Mapping of keyword argument names
@@ -396,10 +479,20 @@ Passed to `check_string(self, fc, s)`:
   string (`"foobar"`) by the parser. Multiline strings preserve `\n` and
   whitespace is un-normalized.
 * `s.value: str` - Decoded string value.
-* `s.enclosing_call: CallInfo | None` - Nearest enclosing non-`load()` call,
-  if any.
+* `s.enclosing_statement_call: CallInfo | None` - Outermost non-`load()`
+  `CallInfo` enclosing this string within the current statement, if any. Most
+  checks should use `enclosing_statement_call` rather than `enclosing_call` so
+  strings nested inside helper calls like `select(...)` or `glob(...)` still
+  resolve to the enclosing rule/macro call (and its `target_name`).
+* `s.enclosing_call: CallInfo | None` - Nearest (innermost) enclosing
+  non-`load()` `CallInfo`, if any. Use this only when checking the immediate
+  call wrapping the string (e.g., `select(...)`); most checks should use
+  `s.enclosing_statement_call` instead. (`load()` statements are represented as
+  `LoadInfo` rather than `CallInfo`, so strings inside `load(...)` have
+  `enclosing_call = None` and `enclosing_statement_call = None`.)
 * `s.keyword_arg: str | None` - Keyword argument name if this string is
-  passed directly as or inside a keyword argument to `enclosing_call` (e.g.
+  passed directly as or inside a keyword argument to
+  `enclosing_statement_call` (or `enclosing_call` if different, e.g.
   `"visibility"` or `"doc"`).
 * `s.is_load_source: bool` - `True` if this string is the module label of a
   `load()` statement.

@@ -110,11 +110,12 @@ impl RoundTripTestSuite {
     async fn run_through_encoder(&self) -> Result<TestCaseOutputs> {
         let easy_framelength = self.encoder_stream.pcm_framelength;
         let pcm_audio = PcmAudio::create_from_data(
-            PcmFormat {
-                pcm_mode: AudioPcmMode::Linear,
-                bits_per_sample: 16,
-                frames_per_second: self.encoder_stream.frames_per_second,
-                channel_map: vec![AudioChannelId::Cf],
+            PcmFormat2 {
+                pcm_mode: Some(AudioPcmMode2::Linear),
+                bits_per_sample: Some(16),
+                frames_per_second: Some(self.encoder_stream.frames_per_second),
+                channel_map: Some(vec![AudioChannelId2::Fc]),
+                ..Default::default()
             },
             self.encoder_stream.pcm_data.as_slice(),
         );

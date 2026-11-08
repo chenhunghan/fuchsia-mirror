@@ -12,14 +12,16 @@ use super::vm_address_region::VmAddressRegion;
 use super::vm_mapping::VmMapping;
 use super::vm_object::VmObject;
 use crate::kernel::thread::ThreadPtr;
-use crate::kernel::types::PAddr;
+use crate::kernel::types::{PAddr, VAddr};
+use crate::ksync_kernel::TrackedCriticalMutex;
 use core::ffi::{CStr, c_void};
 use core::pin::Pin;
-use core::ptr::{self, NonNull};
+use core::ptr::NonNull;
 use fbl::RefPtr;
-use ksync::{KMutex, LockClass, LockToken, RawCriticalMutex};
+use ksync::{KMutex, LockClass, LockToken};
 use lazy_init::{LazyInit, NoCheck};
 use vm_aspace_bindings as bindings;
+use zr::Opaque;
 use zx_status::Status;
 
 /// For region creation routines
@@ -76,6 +78,7 @@ pub struct VmAspaceLockClass;
 
 impl LockClass for VmAspaceLockClass {
     const ID: *mut c_void = core::ptr::null_mut();
+    const FLAGS: ksync::LockFlags = TrackedCriticalMutex::LOCK_FLAGS;
 }
 
 /// Conceptually the `region_lock` represents the authority to manipulate the portions of the
@@ -90,15 +93,16 @@ pub struct VmAspaceRegionLockClass;
 
 impl LockClass for VmAspaceRegionLockClass {
     const ID: *mut c_void = core::ptr::null_mut();
+    const FLAGS: ksync::LockFlags = TrackedCriticalMutex::LOCK_FLAGS;
 }
 
-pub type VmAspaceMutex = KMutex<VmAspaceLockClass, RawCriticalMutex>;
+pub type VmAspaceMutex = KMutex<VmAspaceLockClass, TrackedCriticalMutex>;
 
-pub type VmAspaceRegionMutex = KMutex<VmAspaceRegionLockClass, RawCriticalMutex>;
+pub type VmAspaceRegionMutex = KMutex<VmAspaceRegionLockClass, TrackedCriticalMutex>;
 
-#[repr(C)]
+#[repr(transparent)]
 pub struct VmAspace {
-    _facade: fbl::OpaqueRefCountedFacade,
+    raw: Opaque<bindings::VmAspace>,
 }
 
 impl fbl::HasRefCount for VmAspace {
@@ -124,6 +128,12 @@ unsafe impl fbl::Recyclable for VmAspace {
     }
 }
 
+// SAFETY: `VmAspace` is not tied to the thread that created it.
+unsafe impl Send for VmAspace {}
+// SAFETY: Mutable state of `VmAspace` is only accessed with the aspace lock, the region lock or
+// the aspace list lock held, atomically, or through internally synchronized members.
+unsafe impl Sync for VmAspace {}
+
 impl VmAspace {
     /// Creates an address space of the type specified in `type_` with name `name`.
     ///
@@ -143,7 +153,7 @@ impl VmAspace {
     }
 
     pub(super) fn as_ffi_ptr(&self) -> *mut bindings::VmAspace {
-        ptr::from_ref(self).cast_mut().cast()
+        self.raw.get()
     }
 
     /// # Safety
@@ -157,17 +167,14 @@ impl VmAspace {
     }
 
     pub fn lock(&self) -> &VmAspaceMutex {
-        // SAFETY: `core::ptr::from_ref(self)` points to a live `VmAspace`.
-        unsafe {
-            &*bindings::cpp_vm_aspace_lock(core::ptr::from_ref(self).cast()).cast::<VmAspaceMutex>()
-        }
+        // SAFETY: `self.as_ffi_ptr()` points to a live `VmAspace`.
+        unsafe { &*bindings::cpp_vm_aspace_lock(self.as_ffi_ptr()).cast::<VmAspaceMutex>() }
     }
 
     pub fn region_lock(&self) -> &VmAspaceRegionMutex {
-        // SAFETY: `core::ptr::from_ref(self)` points to a live `VmAspace`.
+        // SAFETY: `self.as_ffi_ptr()` points to a live `VmAspace`.
         unsafe {
-            &*bindings::cpp_vm_aspace_region_lock(core::ptr::from_ref(self).cast())
-                .cast::<VmAspaceRegionMutex>()
+            &*bindings::cpp_vm_aspace_region_lock(self.as_ffi_ptr()).cast::<VmAspaceRegionMutex>()
         }
     }
 
@@ -289,6 +296,21 @@ impl VmAspace {
         unsafe { bindings::cpp_vm_aspace_is_user(self.as_ffi_ptr()) }
     }
 
+    /// Returns whether this aspace is a guest physical address space.
+    ///
+    /// TODO(https://fxbug.dev/42054461): Rationalize usage of `is_user` and `is_guest_physical`.
+    #[inline]
+    pub(super) fn is_guest_physical(&self) -> bool {
+        // SAFETY: `self.as_ffi_ptr()` points to a live `VmAspace`.
+        unsafe { bindings::cpp_vm_aspace_is_guest_physical(self.as_ffi_ptr()) }
+    }
+
+    #[inline]
+    pub(super) fn can_enlarge_arch_unmap(&self) -> bool {
+        // SAFETY: `self.as_ffi_ptr()` points to a live `VmAspace`.
+        unsafe { bindings::cpp_vm_aspace_can_enlarge_arch_unmap(self.as_ffi_ptr()) }
+    }
+
     /// Encodes the idea that we can always unmap from user aspaces.
     pub(super) fn enlarge_arch_unmap(&self) -> ArchUnmapOptions {
         // SAFETY: `self.as_ffi_ptr()` points to a live `VmAspace`.
@@ -323,6 +345,29 @@ impl VmAspace {
     ) -> *const VmMapping {
         // SAFETY: The aspace lock is held, proven by `_token`.
         unsafe { bindings::cpp_vm_aspace_vdso_code_mapping_locked(self.as_ffi_ptr()).cast() }
+    }
+
+    /// Helper function to test for collision with `vdso_code_mapping`.
+    pub(super) fn intersects_vdso_code_locked(
+        &self,
+        token: &LockToken<'_, VmAspaceLockClass>,
+        base: VAddr,
+        size: usize,
+    ) -> bool {
+        let vdso_code_mapping = self.vdso_code_mapping_locked(token);
+        if !vdso_code_mapping.is_null() {
+            // SAFETY: `vdso_code_mapping` is non-null and kept alive by `self` while the aspace
+            // lock (`token`) is held.
+            let vdso_code_mapping = unsafe { &*vdso_code_mapping };
+            return range_check::intersects_offset_len(
+                vdso_code_mapping.base().0 as u64,
+                vdso_code_mapping.size() as u64,
+                base.0 as u64,
+                size as u64,
+            );
+        }
+
+        false
     }
 
     pub fn is_aslr_enabled(&self) -> bool {

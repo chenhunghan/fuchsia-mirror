@@ -10,9 +10,9 @@
 #include <lib/zx/vmo.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <string>
 
-#include "src/developer/forensics/feedback_data/system_log_recorder/disk_backed_logs_metadata.h"
 #include "src/developer/forensics/feedback_data/system_log_recorder/reader.h"
 #include "src/developer/forensics/utils/vmo.h"
 #include "src/lib/files/directory.h"
@@ -24,16 +24,11 @@ namespace feedback_data {
 namespace system_log_recorder {
 
 SystemLogWriter::SystemLogWriter(const std::string& logs_dir, size_t max_num_files,
-                                 StorageSize total_log_size, std::unique_ptr<Decoder> decoder,
-                                 const bool enable_periodic_metadata_writes,
-                                 const std::string& metadata_path)
+                                 StorageSize total_log_size, std::unique_ptr<Decoder> decoder)
     : logs_dir_(logs_dir),
       max_num_files_(max_num_files),
       total_log_size_(total_log_size),
       decoder_(std::move(decoder)),
-      enable_periodic_metadata_writes_(enable_periodic_metadata_writes),
-      metadata_({}, kFirstFileNumber),
-      metadata_path_(metadata_path),
       recovering_from_purge_(false) {
   FX_CHECK(max_num_files_ > 0);
   if (!files::CreateDirectory(logs_dir)) {
@@ -47,28 +42,23 @@ SystemLogWriter::SystemLogWriter(const std::string& logs_dir, size_t max_num_fil
 
   // Get the numbers the previous writer assigned to the files – there should only be previous
   // files in case of a component restart.
-  std::vector<size_t> existing_files;
   for (const std::string& fname : current_log_files) {
     size_t file_num = 0;
     if (fxl::StringToNumberWithError(fname, &file_num)) {
-      existing_files.push_back(file_num);
+      file_queue_.push_back(file_num);
     }
   }
 
-  metadata_ = DiskBackedLogsMetadata::FromFile(metadata_path_, kFirstFileNumber)
-                  .value_or(DiskBackedLogsMetadata({}, kFirstFileNumber));
-  metadata_.ReconcileWithExistingFiles(existing_files);
+  // Sort the files such that the oldest files will be deleted first.
+  std::sort(file_queue_.begin(), file_queue_.end());
 
-  // If at capacity, starting a new file will erase the oldest file so we'll need to immediately
-  // rewrite the new metadata after a component restart.
   StartNewFile();
-  metadata_.ToFile(metadata_path_);
 }
 
 bool SystemLogWriter::RecreateDirectoryIfCachePurged() {
   if (!files::IsDirectory(logs_dir_)) {
     recovering_from_purge_ = true;
-    metadata_.Clear();
+    file_queue_.clear();
 
     // Invalidate the current file descriptor. The current in-flight write will be discarded because
     // it was encoded against a pre-purge dictionary. A new file will be started at the end of
@@ -101,18 +91,17 @@ void SystemLogWriter::StartNewFile() {
     return;
   }
 
-  const size_t next_file_num = metadata_.NextFileNumber();
-  if (metadata_.NumFiles() >= max_num_files_) {
+  const size_t next_file_num = (file_queue_.empty()) ? 0u : file_queue_.back() + 1;
+  if (file_queue_.size() >= max_num_files_) {
     TRACE_DURATION("feedback:io", "SystemLogWriter::RemoveFile");
-    const size_t oldest_file_num = metadata_.OldestFileNumber();
-    remove(Path(oldest_file_num).c_str());
-    metadata_.RemoveStats(oldest_file_num);
+    remove(Path(file_queue_.front()).c_str());
+    file_queue_.pop_front();
   }
 
-  metadata_.NewStats(next_file_num);
+  file_queue_.push_back(next_file_num);
 
   if (recovering_from_purge_ &&
-      metadata_.NumFiles() >= std::min(max_num_files_, kMinFilesForSufficientCoverage)) {
+      file_queue_.size() >= std::min(max_num_files_, kMinFilesForSufficientCoverage)) {
     recovering_from_purge_ = false;
   }
 
@@ -128,8 +117,6 @@ SystemLogWriter::WriteResult SystemLogWriter::Write(const LogMessageStore::Consu
 
   // The file descriptor could be negative if the file failed to open.
   if (current_file_descriptor_.is_valid()) {
-    metadata_.MergeInto(metadata_.LatestFileNumber(), result.stats);
-
     // Overcommit, i.e. write everything we consumed before starting a new file for the next
     // block as we cannot have a block spanning multiple files.
     write(current_file_descriptor_.get(), result.log.c_str(), result.log.size());
@@ -139,9 +126,6 @@ SystemLogWriter::WriteResult SystemLogWriter::Write(const LogMessageStore::Consu
     StartNewFile();
   }
 
-  if (enable_periodic_metadata_writes_ || result.end_of_block || cache_purged) {
-    metadata_.ToFile(metadata_path_);
-  }
   return cache_purged ? WriteResult::kCachePurge : WriteResult::kOk;
 }
 
@@ -150,7 +134,6 @@ bool SystemLogWriter::Fsync() {
     return false;
   }
 
-  metadata_.ToFile(metadata_path_);
   return fsync(current_file_descriptor_.get()) == 0;
 }
 
@@ -165,9 +148,8 @@ SystemLogWriter::FlushAndReadLogsResult SystemLogWriter::FlushAndReadLogs(
     };
   }
 
-  float compression_ratio;
-  const fit::result<ReaderError, std::string> uncompressed_log =
-      Concatenate(logs_dir_, total_log_size_, decoder_.get(), &compression_ratio);
+  const fit::result<ReaderError, ConcatenateResult> uncompressed_log =
+      Concatenate(logs_dir_, total_log_size_, decoder_.get());
 
   if (uncompressed_log.is_error()) {
     switch (uncompressed_log.error_value()) {
@@ -184,9 +166,7 @@ SystemLogWriter::FlushAndReadLogsResult SystemLogWriter::FlushAndReadLogs(
     }
   }
 
-  const std::string& log_str = *uncompressed_log;
-
-  zx::result<zx::vmo> vmo = VmoFromString(log_str);
+  zx::result<zx::vmo> vmo = VmoFromString(uncompressed_log->logs);
   if (vmo.is_error()) {
     return {
         .logs = fit::error(WriterError::kVmoError),
@@ -197,8 +177,8 @@ SystemLogWriter::FlushAndReadLogsResult SystemLogWriter::FlushAndReadLogs(
   return {
       .logs = fit::ok(Logs{
           .vmo = std::move(*vmo),
-          .first_timestamp = metadata_.FirstTimestamp(),
-          .last_timestamp = metadata_.LastTimestamp(),
+          .first_timestamp = uncompressed_log->first_timestamp,
+          .last_timestamp = uncompressed_log->last_timestamp,
       }),
       .cache_purged = cache_purged,
   };

@@ -48,8 +48,8 @@ class LogsData {
 
   struct Metadata final {
     std::string component_url;
-    uint64_t timestamp;
-    fuchsia_diagnostics_types::Severity severity;
+    uint64_t timestamp = 0;
+    fuchsia_diagnostics_types::Severity severity = fuchsia_diagnostics_types::Severity::kInfo;
     std::vector<std::string> tags;
     std::optional<uint64_t> pid;
     std::optional<uint64_t> tid;
@@ -57,6 +57,10 @@ class LogsData {
     std::optional<uint64_t> line;
     std::vector<Error> errors;
   };
+
+  // Create a new LogsData wrapper from structured values.
+  explicit LogsData(std::string moniker, Metadata metadata, std::string message,
+                    std::vector<inspect::PropertyValue> keys, uint64_t version = 1);
 
   // Create a new LogsData wrapper from a JSON document.
   explicit LogsData(rapidjson::Document document);

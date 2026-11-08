@@ -1,0 +1,56 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+# @bazel2gn:transformer=file_paths
+handle_test_sources = [
+    "src/channel.rs",
+    "src/lib.rs",
+    "src/socket.rs",
+]
+
+# @bazel2gn:transformer=deps
+handle_test_deps = [
+    "//src/lib/fidl/rust/fidl",
+    "//third_party/rust_crates/vendor:futures",
+]
+
+rustc_test(
+    name = "fidl_rust_handle_tests_bin",
+    srcs = handle_test_sources,
+    crate_name = "fidl_rust_handle_tests",
+    edition = "2024",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:async-trait"],
+    deps = handle_test_deps + ["//src/lib/fuchsia-async"],
+)
+
+fx_unittest_package(
+    name = "fidl_rust_handle_tests",
+    package_name = "fidl_rust_handle_tests",
+    unit_tests = [":fidl_rust_handle_tests_bin"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+wrap_host_rust_test(
+    name = "fidl_rust_handle_tests_host_test",
+    binary_name = "fidl_rust_handle_tests_bin",
+    visibility = ["//src/lib:__pkg__"],
+)
+
+# Also build as a library for use in overnet tests.
+rustc_library(
+    name = "fidl_handle_tests",
+    srcs = handle_test_sources,
+    crate_name = "fidl_handle_tests",
+    edition = "2024",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:async-trait"],
+    visibility = ["//src/connectivity/overnet/tests/fidl:__pkg__"],
+    deps = handle_test_deps,
+)

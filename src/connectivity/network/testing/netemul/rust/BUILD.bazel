@@ -1,0 +1,60 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/components:expect_includes.bzl", "expect_includes")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "lib",
+    testonly = True,
+    srcs = ["src/lib.rs"],
+    aspect_hints = [":lib_includes"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate_name = "netemul",
+    edition = "2024",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.network:fuchsia.hardware.network_rust",
+        "//sdk/fidl/fuchsia.net.dhcp:fuchsia.net.dhcp_rust",
+        "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
+        "//sdk/fidl/fuchsia.net.interfaces.admin:fuchsia.net.interfaces.admin_rust",
+        "//sdk/fidl/fuchsia.net.interfaces:fuchsia.net.interfaces_rust",
+        "//sdk/fidl/fuchsia.net.neighbor:fuchsia.net.neighbor_rust",
+        "//sdk/fidl/fuchsia.net.resources:fuchsia.net.resources_rust",
+        "//sdk/fidl/fuchsia.net.root:fuchsia.net.root_rust",
+        "//sdk/fidl/fuchsia.net.routes.admin:fuchsia.net.routes.admin_rust",
+        "//sdk/fidl/fuchsia.net.routes:fuchsia.net.routes_rust",
+        "//sdk/fidl/fuchsia.net.stack:fuchsia.net.stack_rust",
+        "//sdk/fidl/fuchsia.posix.socket:fuchsia.posix.socket_rust",
+        "//sdk/fidl/fuchsia.posix.socket.packet:fuchsia.posix.socket.packet_rust",
+        "//sdk/fidl/fuchsia.posix.socket.raw:fuchsia.posix.socket.raw_rust",
+        "//sdk/rust/zx",
+        "//src/connectivity/lib/net-declare",
+        "//src/connectivity/lib/net-types",
+        "//src/connectivity/lib/ping",
+        "//src/connectivity/network/testing/netemul/fidl:fuchsia.netemul_rust",
+        "//src/connectivity/network/testing/netemul/network-context/fidl:network_rust",
+        "//src/lib/fdio/rust:fdio",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-sync",
+        "//src/lib/network/fidl_fuchsia_net_dhcp_ext",
+        "//src/lib/network/fidl_fuchsia_net_ext",
+        "//src/lib/network/fidl_fuchsia_net_interfaces_ext",
+        "//src/lib/network/fidl_fuchsia_net_routes_ext",
+        "//src/lib/network/fidl_fuchsia_posix_socket_ext",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:socket2",
+    ],
+)
+
+expect_includes(
+    name = "lib_includes",
+    includes = ["//src/connectivity/network/testing/netemul/service/meta:client.shard"],
+)

@@ -1,0 +1,38 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# TODO(https://fxbug.dev/570694755): Re-enable unit tests once the unbuilt
+# `#[cfg(test)]` module in `src/checks.rs` is updated for `cm_rust::ComponentDecl`
+# API changes (`Box<[_]>` fields and `debug_info`).
+rustc_library(
+    name = "lib",
+    srcs = [
+        "src/args.rs",
+        "src/checks.rs",
+        "src/lib.rs",
+        "src/utils.rs",
+    ],
+    compile_data = ["//build:drivers/FHCP.json"],
+    crate_name = "static_checks_lib",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/devices/bin/driver_tools:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust_common",
+        "//sdk/fidl/fuchsia.data:fuchsia.data_rust_common",
+        "//src/devices/lib/bind:lib",
+        "//src/lib/fidl/rust/fidl",
+        "//src/sys/lib/cm_rust",
+        "//src/sys/pkg/lib/far/rust:fuchsia-archive",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+    ],
+)

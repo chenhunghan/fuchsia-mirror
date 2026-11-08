@@ -8,6 +8,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -61,6 +63,62 @@ func TestObjectExistence(t *testing.T) {
 		_, err := errBkt.objectExists(ctx, existingObject)
 		if err == nil {
 			t.Fatalf("Expected error; got %v", err)
+		}
+	})
+}
+
+func TestGCSBucketObjectExistence(t *testing.T) {
+	const (
+		bucketName     = "test-bucket"
+		newObject      = "new.debug"
+		existingObject = "exists.debug"
+		unknownObject  = "unknown.debug"
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case fmt.Sprintf("/storage/v1/b/%s/o/%s", bucketName, newObject):
+			http.Error(w, `{"error": {"code": 404, "message": "Not Found"}}`, http.StatusNotFound)
+		case fmt.Sprintf("/storage/v1/b/%s/o/%s", bucketName, existingObject):
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"name": %q, "bucket": %q}`, existingObject, bucketName)
+		default:
+			http.Error(w, `{"error": {"code": 403, "message": "Forbidden"}}`, http.StatusForbidden)
+		}
+	}))
+	defer srv.Close()
+
+	t.Setenv("STORAGE_EMULATOR_HOST", srv.URL)
+	ctx := context.Background()
+	bkt, err := newGCSBucket(ctx, bucketName)
+	if err != nil {
+		t.Fatalf("newGCSBucket(%q) failed: %v", bucketName, err)
+	}
+
+	t.Run("object does not exist", func(t *testing.T) {
+		exists, err := bkt.objectExists(ctx, newObject)
+		if err != nil {
+			t.Fatalf("Expected nil error, got %v", err)
+		}
+		if exists {
+			t.Fatalf("Object should not exist; expected %t, got %t", false, exists)
+		}
+	})
+	t.Run("object exists", func(t *testing.T) {
+		exists, err := bkt.objectExists(ctx, existingObject)
+		if err != nil {
+			t.Fatalf("Expected nil error; got %v", err)
+		}
+		if !exists {
+			t.Fatalf("Object should exist; expected %t, got %t", true, exists)
+		}
+	})
+	t.Run("unknown object state", func(t *testing.T) {
+		exists, err := bkt.objectExists(ctx, unknownObject)
+		if err == nil {
+			t.Fatalf("Expected error; got nil")
+		}
+		if exists {
+			t.Fatalf("Object should not exist; expected %t, got %t", false, exists)
 		}
 	})
 }

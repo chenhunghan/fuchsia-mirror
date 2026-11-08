@@ -39,6 +39,7 @@ where
     F: Fn(cpu_num_t) -> Result<(), Status> + Sync,
 {
     let state = PerCpuState::new(task);
-    sync_exec(MpIpiTarget::All, 0, || percpu_task(&state));
+    // SAFETY: `MpIpiTarget::All` does not require interrupts to be disabled.
+    unsafe { sync_exec(MpIpiTarget::All, 0, || percpu_task(&state)) };
     state.cpu_mask.load(Ordering::SeqCst)
 }

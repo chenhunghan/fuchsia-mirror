@@ -7,9 +7,9 @@
 #include <lib/driver/compat/cpp/banjo_client.h>
 #include <lib/driver/compat/cpp/device_server.h>
 #include <lib/driver/component/cpp/driver_export2.h>
+#include <lib/driver/fake-bti/cpp/fake-bti.h>
 #include <lib/driver/testing/cpp/driver_test.h>
 #include <lib/driver/testing/cpp/minimal_compat_environment.h>
-#include <lib/fake-bti/bti.h>
 #include <lib/virtio/backends/fake.h>
 
 #include <atomic>
@@ -162,11 +162,11 @@ class TestVirtioNetDriver : public VirtioNetDriver {
       backend->SetSupportFeatureV1(support_feature_v1_.value());
     }
     backend_ = backend.get();
-    zx::bti bti(ZX_HANDLE_INVALID);
-    if (zx_status_t status = fake_bti_create(bti.reset_and_get_address()); status != ZX_OK) {
-      return zx::error(status);
+    zx::result bti = fake_bti::CreateFakeBti();
+    if (bti.is_error()) {
+      return bti.take_error();
     }
-    return zx::ok(std::make_unique<NetworkDevice>(this, std::move(bti), std::move(backend),
+    return zx::ok(std::make_unique<NetworkDevice>(this, std::move(*bti), std::move(backend),
                                                   incoming, node_name));
   }
 

@@ -56,28 +56,28 @@ type ExtendedAttributeValue = flexible resource union {
 type EmptyStruct = struct {};
 
 type NodeAttributesQuery = flexible bits : uint64 {
-    /// Requests [`NodeAttributes.protocols`].
+    /// Requests [`ImmutableNodeAttributes.protocols`].
     PROTOCOLS = 0x1;
 
-    /// Requests [`NodeAttributes.abilities`].
+    /// Requests [`ImmutableNodeAttributes.abilities`].
     ABILITIES = 0x2;
 
-    /// Requests [`NodeAttributes.content_size`].
+    /// Requests [`ImmutableNodeAttributes.content_size`].
     CONTENT_SIZE = 0x4;
 
-    /// Requests [`NodeAttributes.storage_size`].
+    /// Requests [`ImmutableNodeAttributes.storage_size`].
     STORAGE_SIZE = 0x8;
 
-    /// Requests [`NodeAttributes.link_count`].
+    /// Requests [`ImmutableNodeAttributes.link_count`].
     LINK_COUNT = 0x10;
 
-    /// Requests [`NodeAttributes.id`].
+    /// Requests [`ImmutableNodeAttributes.id`].
     ID = 0x20;
 
-    /// Requests [`NodeAttributes.creation_time`].
+    /// Requests [`MutableNodeAttributes.creation_time`].
     CREATION_TIME = 0x40;
 
-    /// Requests [`NodeAttributes.modification_time`].
+    /// Requests [`MutableNodeAttributes.modification_time`].
     MODIFICATION_TIME = 0x80;
 
     /// Posix attributes.
@@ -233,16 +233,6 @@ type FscryptPolicy = struct {
     flags FscryptPolicyFlags;
 };
 
-type ConnectionInfo = resource table {
-    /// The rights possessed by the current connection. Note: `rights` limits
-    /// the set of operations allowed on the connection, but does not guarantee
-    /// their availability. For example, one may have the [`Rights.EXECUTE`]
-    /// right on a file connection, but the file itself does not have the
-    /// `EXECUTE` ability, and hence cannot be executed. See
-    /// [`ConnectionOptions.rights`].
-    1: rights Rights;
-};
-
 type NodeAttributes2 = struct {
     // TODO(https://fxbug.dev/42124231): fostr does not escape C++ keywords.
     // Drop the `_attributes` suffixes when fostr is fixed or retired.
@@ -291,32 +281,6 @@ type NodeAttributes2 = struct {
 // Legacy protocol identifier. Use generated discoverable protocol name instead.
 @available(removed=29)
 const NODE_PROTOCOL_NAME string = "fuchsia.io/Node";
-
-/// The fields of 'attributes' which are used to update the Node are indicated
-/// by the 'flags' argument.
-@strict_audit(bug="https://fxbug.dev/467128288", state="PENDING_REVIEW")
-type NodeAttributeFlags = strict bits : uint32 {
-    CREATION_TIME = 0x00000001;
-    MODIFICATION_TIME = 0x00000002;
-};
-
-/// NodeAttributes defines generic information about a filesystem node.
-type NodeAttributes = struct {
-    /// Protection bits and node type information describe in 'mode'.
-    mode uint32;
-    /// A filesystem-unique ID.
-    id uint64;
-    /// Node size, in bytes.
-    content_size uint64;
-    /// Space needed to store node (possibly larger than size), in bytes.
-    storage_size uint64;
-    /// Hard link count.
-    link_count uint64;
-    /// Time of creation (may be updated manually after creation) in ns since Unix epoch, UTC.
-    creation_time uint64;
-    /// Time of last modification in ns since Unix epoch, UTC.
-    modification_time uint64;
-};
 
 const MAX_FS_NAME_BUFFER uint64 = 32;
 
@@ -405,104 +369,6 @@ open protocol Node {
                 target SymlinkTarget;
             };
         }:optional;
-    });
-
-    /// Acquires information about the node.
-    ///
-    /// This method requires the [`Rights.GET_ATTRIBUTES`] right.
-    @available(replaced=28, renamed="DeprecatedGetAttr")
-    @selector("fuchsia.io1/Node.GetAttr")
-    strict GetAttr() -> (struct {
-        s zx.Result;
-        attributes NodeAttributes;
-    });
-
-    /// DEPRECATED - Use `Node.GetAttributes` instead.
-    ///
-    /// This method requires the [`Rights.GET_ATTRIBUTES`] right.
-    // TODO(https://fxbug.dev/324081103): Delete (don't just set removed=NEXT)  // NEVER_REPLACE_NEXT
-    // this method once we have no remaining out-of-tree callers, or when we
-    // drop support for API level 28.
-    @available(added=28, deprecated=HEAD, note="Use fuchsia.io/Node.GetAttributes instead.")
-    @selector("fuchsia.io1/Node.GetAttr")
-    strict DeprecatedGetAttr() -> (struct {
-        s zx.Result;
-        attributes NodeAttributes;
-    });
-
-    /// Updates information about the node.
-    ///
-    /// Returns `ZX_ERR_NOT_SUPPORTED` if any attributes specified by [`flags`] are not supported.
-    ///
-    /// This method requires following rights: `OpenFlags.RIGHT_WRITABLE`, otherwise returns
-    /// `ZX_ERR_BAD_HANDLE`.
-    @available(replaced=28, renamed="DeprecatedSetAttr")
-    @selector("fuchsia.io1/Node.SetAttr")
-    strict SetAttr(struct {
-        flags NodeAttributeFlags;
-        attributes NodeAttributes;
-    }) -> (struct {
-        s zx.Result;
-    });
-
-
-    /// DEPRECATED - Use `Node.UpdateAttributes` instead.
-    // TODO(https://fxbug.dev/324081103): Delete (don't just set removed=NEXT)  // NEVER_REPLACE_NEXT
-    // this method once  we have no remaining out-of-tree callers, or when we
-    // drop support for API level 28.
-    @available(added=28, deprecated=HEAD, note="Use fuchsia.io/Node.UpdateAttributes instead.")
-    @selector("fuchsia.io1/Node.SetAttr")
-    strict DeprecatedSetAttr(struct {
-        flags NodeAttributeFlags;
-        attributes NodeAttributes;
-    }) -> (struct {
-        s zx.Result;
-    });
-
-    /// Acquires the `Directory.Open` rights and flags used to access this file.
-    ///
-    /// This method does not require any rights.
-    @available(replaced=27, renamed="DeprecatedGetFlags")
-    @selector("fuchsia.io1/Node.NodeGetFlags")
-    strict GetFlags() -> (struct {
-        s zx.Result;
-        flags OpenFlags;
-    });
-
-    /// [DEPRECATED - Use new GetFlags method instead.]
-    // TODO(https://fxbug.dev/376509077): Remove this when all out-of-tree servers support the new
-    // GetFlags method. We can't gracefully remove this method since changing it to flexible breaks
-    // wire compatibility with older clients.
-    @available(added=27, deprecated=HEAD)
-    @selector("fuchsia.io1/Node.NodeGetFlags")
-    strict DeprecatedGetFlags() -> (struct {
-        s zx.Result;
-        flags OpenFlags;
-    });
-
-    /// Changes the `Directory.Open` flags used to access the file.
-    /// Supported flags which can be turned on / off:
-    /// - `OpenFlags.APPEND`
-    ///
-    /// This method does not require any rights.
-    @available(replaced=27, renamed="DeprecatedSetFlags")
-    @selector("fuchsia.io1/Node.NodeSetFlags")
-    strict SetFlags(struct {
-        flags OpenFlags;
-    }) -> (struct {
-        s zx.Result;
-    });
-
-    /// [DEPRECATED - Use new SetFlags method instead.]
-    // TODO(https://fxbug.dev/376509077): Remove this when all out-of-tree servers support the new
-    // GetFlags method. We can't gracefully remove this method since changing it to flexible breaks
-    // wire compatibility with older clients.
-    @available(added=27, deprecated=HEAD)
-    @selector("fuchsia.io1/Node.NodeSetFlags")
-    strict DeprecatedSetFlags(struct {
-        flags OpenFlags;
-    }) -> (struct {
-        s zx.Result;
     });
 
     /// Queries the flags that apply to this node after it has been opened/created. This method does
@@ -644,7 +510,7 @@ open protocol Node {
     strict GetAttributes(struct {
         /// Set the corresponding bit to one to query that particular attribute.
         ///
-        /// The elements here correspond one-to-one with [`NodeAttributes`].
+        /// The elements here correspond one-to-one with [`NodeAttributes2`].
         query NodeAttributesQuery;
     }) -> (NodeAttributes2) error zx.Status;
 
@@ -751,9 +617,26 @@ closed protocol ExtendedAttributeIterator {
     }) error zx.Status;
 };
 
+/// Servers should return `ZX_ERR_INVALID_ARGS` for unknown flags. If a flag is known but not
+/// supported by the server, it should return `ZX_ERR_NOT_SUPPORTED`.
+@available(added=NEXT)
+type LinkIntoFlags = flexible bits : uint64 {
+    /// If set, and if there is an existing link with the destination name, the existing link will
+    /// be atomically replaced to point to this object. This is semantically equivalent to unlinking
+    /// the destination and then linking the new object.
+    ///
+    /// If the existing destination is a directory, the request fails with `ZX_ERR_NOT_FILE`.
+    REPLACE_EXISTING = 0x01;
+};
+
+@available(added=NEXT)
+type LinkIntoOptions = table {
+    1: flags LinkIntoFlags;
+};
+
 // Not all nodes support Linkable (e.g. Directories don't).
 @available(added=18)
-closed protocol Linkable {
+closed(removed=NEXT) open(added=NEXT) protocol Linkable {
     /// Creates a link to this this object with name `dst` in the directory represented by
     /// `dst_parent_token`.
     ///
@@ -776,9 +659,47 @@ closed protocol Linkable {
     /// This method does not have the same atomicity properties has the `Directory::Link` method,
     /// which means that calling `Open` then `LinkInto` is not equivalent to `Directory::Link`
     /// because `LinkInto` will not prevent the source from being renamed or unlinked.
+    @available(replaced=NEXT, renamed="DeprecatedLinkInto")
     @selector("fuchsia.io/Linkable.LinkInto")
     strict LinkInto(resource struct {
         dst_parent_token Token;
         dst Name;
+    }) -> () error zx.Status;
+
+    @available(added=NEXT)
+    @selector("fuchsia.io/Linkable.LinkInto")
+    strict DeprecatedLinkInto(resource struct {
+        dst_parent_token Token;
+        dst Name;
+    }) -> () error zx.Status;
+
+    /// Creates a link to this object with name `dst` in the directory represented by
+    /// `dst_parent_token`.
+    ///
+    /// `dst` must be a resolved object name. Including "/" in the string will return
+    /// `ZX_ERR_INVALID_ARGS`.
+    ///
+    /// This method requires the maximal set of rights supported by the filesystem for this object.
+    /// For files this would typically be [`Rights.READ_BYTES`], [`Rights.WRITE_BYTES`],
+    /// [`Rights.GET_ATTRIBUTES`] and [`Rights.UPDATE_ATTRIBUTES`]. Some filesystems might also
+    /// support the [`Rights.EXECUTE`] right. Insufficient rights will result in
+    /// `ZX_ERR_ACCESS_DENIED`.
+    ///
+    /// If this object has no links and is *NOT* an unnamed temporary object (objects opened with
+    /// `Flags.FLAG_CREATE_AS_UNNAMED_TEMPORARY`), it will fail with `ZX_ERR_NOT_FOUND`.
+    ///
+    /// For unnamed temporary objects, use LinkInto to give it a name. Upon successful completion,
+    /// the object will be permanently linked to the filesystem. Requires that the unnamed temporary
+    /// object is linkable, if not, it will fail with `ZX_ERR_NOT_FOUND`.
+    ///
+    /// This method does not have the same atomicity properties has the `Directory::Link` method,
+    /// which means that calling `Open` then `LinkInto` is not equivalent to `Directory::Link`
+    /// because `LinkInto` will not prevent the source from being renamed or unlinked.
+    @available(added=NEXT)
+    @selector("fuchsia.io/Linkable.LinkInto2")
+    flexible LinkInto(resource struct {
+        dst_parent_token Token;
+        dst Name;
+        options LinkIntoOptions;
     }) -> () error zx.Status;
 };

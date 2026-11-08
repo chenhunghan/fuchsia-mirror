@@ -11,6 +11,7 @@ exports_files(
         "meta/driver_framework.bootstrap_shard.cml",
         "meta/full_drivers.bootstrap_shard.cml",
         "meta/heapdump.bootstrap_shard.cml",
+        "meta/no_full_drivers.bootstrap_shard.cml",
     ],
     visibility = ["//bundles/assembly:__subpackages__"],
 )

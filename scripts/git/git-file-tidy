@@ -13,7 +13,6 @@ staged or touched by any commits introduced on the local branch.
 import argparse
 import multiprocessing
 import os
-import platform
 import re
 import subprocess
 import sys
@@ -28,14 +27,11 @@ FUCHSIA_ROOT = os.path.dirname(  # $root
     os.path.abspath(__file__))))
 PREBUILT_ROOT = os.path.join(FUCHSIA_ROOT, "prebuilt/third_party")
 
-local_os = "linux"
-if platform.platform().startswith("Darwin"):
-    local_os = "mac"
 CLANG_TIDY_TOOL = os.path.join(PREBUILT_ROOT, "clang",
-                               "%s-x64" % local_os, "bin",
+                               "linux-x64", "bin",
                                "clang-tidy")
 NINJA_TOOL = os.path.join(PREBUILT_ROOT, "ninja",
-                               "%s-x64" % local_os, "ninja")
+                          "linux-x64", "ninja")
 
 def find_ancestor_with(filepath, relpath):
     """Returns the lowest ancestor of |filepath| that contains |relpath|."""

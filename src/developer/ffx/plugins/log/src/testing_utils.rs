@@ -26,7 +26,7 @@ use moniker::Moniker;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use target_behavior::ConnectionBehavior;
+use target_behavior::DirectConnector;
 use target_connector::Connector;
 use target_holders::RemoteControlProxyHolder;
 
@@ -43,6 +43,60 @@ pub struct TestEnvironmentConfig {
     pub fail_device_connection: bool,
     pub hang_device_connection: bool,
     pub use_legacy_archive_accessor: bool,
+    pub support_fxt: bool,
+    pub fxt_bytes: Vec<u8>,
+}
+
+#[allow(dead_code)]
+pub fn test_fxt_bytes() -> Vec<u8> {
+    test_fxt_bytes_with_message("Hello world!")
+}
+
+#[allow(dead_code)]
+pub fn test_fxt_bytes_with_message(msg: &str) -> Vec<u8> {
+    use diagnostics_log_encoding::encode::{Encoder, EncoderOpts};
+    use diagnostics_log_encoding::{Argument, Header, LOG_CONTROL_BIT, MONIKER, Record, URL, zx};
+    use zerocopy::{FromBytes, IntoBytes};
+
+    fn encode_tagged(record: Record<'_>, tag: u32) -> Vec<u8> {
+        let mut encoder =
+            Encoder::new(std::io::Cursor::new(vec![0u8; 1024]), EncoderOpts::default());
+        encoder.write_record(record).unwrap();
+        let cursor = encoder.take();
+        let position = cursor.position();
+        let mut bytes = cursor.into_inner();
+        bytes.truncate(position as usize);
+        let mut header = Header::read_from_bytes(&bytes[0..8]).unwrap();
+        header.set_tag(tag);
+        bytes[0..8].copy_from_slice(header.as_bytes());
+        bytes
+    }
+
+    let mut out = Vec::new();
+    let manifest = encode_tagged(
+        Record {
+            timestamp: zx::BootInstant::from_nanos(0),
+            severity: Severity::Info as u8,
+            arguments: vec![Argument::other(MONIKER, "host/ffx"), Argument::other(URL, "ffx")],
+        },
+        1 | LOG_CONTROL_BIT,
+    );
+    out.extend_from_slice(&manifest);
+
+    let log = encode_tagged(
+        Record {
+            timestamp: zx::BootInstant::from_nanos(0),
+            severity: Severity::Info as u8,
+            arguments: vec![
+                Argument::pid(zx::Koid::from_raw(1)),
+                Argument::tid(zx::Koid::from_raw(2)),
+                Argument::message(msg),
+            ],
+        },
+        1,
+    );
+    out.extend_from_slice(&log);
+    out
 }
 
 pub fn test_log_with_severity(timestamp: i64, severity: Severity) -> LogsData {
@@ -117,6 +171,8 @@ impl Default for TestEnvironmentConfig {
             fail_device_connection: false,
             hang_device_connection: false,
             use_legacy_archive_accessor: false,
+            support_fxt: false,
+            fxt_bytes: Vec::new(),
         }
     }
 }
@@ -196,8 +252,8 @@ impl TestEnvironment {
         let conn = ffx_target::Connection::from_fdomain_client(client.clone());
         let resolution = ffx_target::Resolution::mock(|| unreachable!());
         resolution.set_connection_for_test(Some(conn)).await;
-        let behavior = ConnectionBehavior::fake_direct_connector(resolution);
-        target_env.set_behavior_for_test(behavior);
+        let connector = DirectConnector::from_resolution_for_test(resolution);
+        target_env.set_behavior_for_test(connector);
 
         Self { fho_env, state, event_rcv: Some(event_rcv), disconnect_snd }
     }
@@ -243,6 +299,8 @@ struct State {
     instances: Vec<Moniker>,
     send_connected_event: bool,
     use_legacy_archive_accessor: bool,
+    support_fxt: bool,
+    fxt_bytes: Vec<u8>,
     event_snd: mpsc::UnboundedSender<TestEvent>,
     mutable: RefCell<MutableState>,
 }
@@ -258,6 +316,8 @@ impl State {
             instances: config.instances,
             send_connected_event: config.send_connected_event,
             use_legacy_archive_accessor: config.use_legacy_archive_accessor,
+            support_fxt: config.support_fxt,
+            fxt_bytes: config.fxt_bytes,
             event_snd: snd,
             mutable: RefCell::new(MutableState {
                 boot_timestamp: config.boot_timestamp,
@@ -428,11 +488,11 @@ struct ArchiveIteratorRequest {
 }
 
 trait ArchiveAccessorTranslator {
-    async fn next(&mut self) -> Option<ArchiveIteratorRequest>;
+    async fn next(&mut self, state: &State) -> Option<ArchiveIteratorRequest>;
 }
 
 impl ArchiveAccessorTranslator for fhost::ArchiveAccessorRequestStream {
-    async fn next(&mut self) -> Option<ArchiveIteratorRequest> {
+    async fn next(&mut self, _state: &State) -> Option<ArchiveIteratorRequest> {
         match StreamExt::next(self).await {
             Some(Ok(fhost::ArchiveAccessorRequest::StreamDiagnostics {
                 parameters,
@@ -448,7 +508,7 @@ impl ArchiveAccessorTranslator for fhost::ArchiveAccessorRequestStream {
 }
 
 impl ArchiveAccessorTranslator for ArchiveAccessorRequestStream {
-    async fn next(&mut self) -> Option<ArchiveIteratorRequest> {
+    async fn next(&mut self, state: &State) -> Option<ArchiveIteratorRequest> {
         loop {
             match StreamExt::next(self).await {
                 Some(Ok(ArchiveAccessorRequest::StreamDiagnosticsToSocket {
@@ -456,6 +516,12 @@ impl ArchiveAccessorTranslator for ArchiveAccessorRequestStream {
                     stream,
                     responder,
                 })) => {
+                    if stream_parameters.format == Some(fidl_fuchsia_diagnostics::Format::Fxt)
+                        && !state.support_fxt
+                    {
+                        drop(responder);
+                        continue;
+                    }
                     let _ = responder.send();
                     return Some(ArchiveIteratorRequest { parameters: stream_parameters, stream });
                 }
@@ -469,14 +535,19 @@ impl ArchiveAccessorTranslator for ArchiveAccessorRequestStream {
 }
 
 async fn handle_archive_accessor(mut stream: impl ArchiveAccessorTranslator, state: Rc<State>) {
-    while let Some(ArchiveIteratorRequest { parameters, stream }) = stream.next().await {
+    while let Some(ArchiveIteratorRequest { parameters, stream }) = stream.next(&state).await {
         if state.send_connected_event {
             let _ = state
                 .event_snd
                 .unbounded_send(TestEvent::Connected(parameters.stream_mode.unwrap()));
         }
         let mut socket = fidl::AsyncSocket::from_socket(stream);
-        let _ = socket.write_all(serde_json::to_string(&state.messages).unwrap().as_bytes()).await;
+        if parameters.format == Some(fidl_fuchsia_diagnostics::Format::Fxt) {
+            let _ = socket.write_all(&state.fxt_bytes).await;
+        } else {
+            let _ =
+                socket.write_all(serde_json::to_string(&state.messages).unwrap().as_bytes()).await;
+        }
 
         match parameters.stream_mode.unwrap() {
             StreamMode::Snapshot => {}

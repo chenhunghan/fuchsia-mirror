@@ -188,13 +188,14 @@ closed protocol Sandbox {
                 ///
                 /// If not set, interpreted as false.
                 6: eager bool;
-                /// Configuration capability values to *override* when launching
-                /// the child.
+                /// Configuration capabilities to route from the realm to the
+                /// child.
                 ///
                 /// If not set, interpreted as an empty vector.
                 7: config_values vector<@generated_name("ChildConfigValue") struct {
-                    /// The configuration key (`use` target name) to override.
-                    key fuchsia.component.decl.ConfigKey;
+                    /// The configuration capability name (`use` source name)
+                    /// to offer to the child.
+                    capability fuchsia.component.name;
                     /// The configuration value to route to the child.
                     value fuchsia.component.decl.ConfigValue;
                 }>:MAX;

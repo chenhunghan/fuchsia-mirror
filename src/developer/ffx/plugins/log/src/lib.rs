@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 use agents::{EnvironmentSource, SystemEnvironment, is_invoked_by_agent};
-use async_trait::async_trait;
 use diagnostics_data::{BuilderArgs, LogsDataBuilder, LogsProperty, Severity};
 use error::LogError;
 use fdomain_client::fidl::Proxy;
@@ -20,8 +19,9 @@ use fho::{FfxMain, FfxTool};
 use futures::future::select;
 use futures::{FutureExt, select};
 use log_command_fdomain::{
-    BootTimeAccessor, DefaultLogFormatter, LogData, LogEntry, LogProcessingResult, LogSubCommand,
-    Symbolize, Timestamp, WriterContainer, dump_logs_from_socket,
+    BootTimeAccessor, DefaultLogFormatter, JsonDeserializeError, LogData, LogEntry,
+    LogProcessingResult, LogSubCommand, Symbolize, Timestamp, WriterContainer,
+    dump_fxt_logs_from_socket, dump_logs_from_socket,
 };
 use std::io::Write;
 use std::pin::pin;
@@ -57,15 +57,6 @@ pub struct LogTool {
     cmd: LogCommand,
     rcs_connector: Connector<RemoteControlProxyHolder>,
     context: EnvironmentContext,
-}
-
-struct NoOpSymoblizer;
-
-#[async_trait(?Send)]
-impl Symbolize for NoOpSymoblizer {
-    async fn symbolize(&self, entry: LogEntry) -> Option<LogEntry> {
-        Some(entry)
-    }
 }
 
 fho::embedded_plugin!(LogTool);
@@ -147,6 +138,7 @@ struct DeviceConnection {
     boot_id: Option<u64>,
     realm_query: RealmQueryProxy,
     was_reboot: bool,
+    is_fxt: bool,
 }
 
 async fn connect_to_rcs(
@@ -229,19 +221,45 @@ async fn connect_to_target(
         rcs::toolbox::connect_with_timeout::<LogSettingsMarker>(&rcs_client, TIMEOUT)
             .await
             .map_err(anyhow::Error::from)?;
-    // Setup stream
-    let params = StreamParameters {
+    // Setup stream: attempt FXT streaming over newer protocol, falling back to JSON.
+    let fxt_params = StreamParameters {
         data_type: Some(fdomain_fuchsia_diagnostics::DataType::Logs),
         stream_mode: Some(*stream_mode),
-        format: Some(fdomain_fuchsia_diagnostics::Format::Json),
+        format: Some(fdomain_fuchsia_diagnostics::Format::Fxt),
         client_selector_configuration: Some(
             fdomain_fuchsia_diagnostics::ClientSelectorConfiguration::SelectAll(true),
         ),
         ..Default::default()
     };
-    let local = match connect_and_stream::<ArchiveAccessorMarker>(&rcs_client, &params).await {
-        Ok(socket) => socket,
-        Err(_) => connect_and_stream::<fhost::ArchiveAccessorMarker>(&rcs_client, &params).await?,
+    let json_params = StreamParameters {
+        format: Some(fdomain_fuchsia_diagnostics::Format::Json),
+        ..fxt_params.clone()
+    };
+    let (local, is_fxt) = match connect_and_stream::<ArchiveAccessorMarker>(
+        &rcs_client,
+        &fxt_params,
+    )
+    .await
+    {
+        Ok(socket) => (socket, true),
+        Err(e) => {
+            log::warn!(
+                "Failed to stream logs using FXT over newer protocol ({e:?}); falling back to JSON"
+            );
+            let socket = match connect_and_stream::<ArchiveAccessorMarker>(
+                &rcs_client,
+                &json_params,
+            )
+            .await
+            {
+                Ok(socket) => socket,
+                Err(_) => {
+                    connect_and_stream::<fhost::ArchiveAccessorMarker>(&rcs_client, &json_params)
+                        .await?
+                }
+            };
+            (socket, false)
+        }
     };
     Ok(DeviceConnection {
         boot_timestamp,
@@ -250,6 +268,7 @@ async fn connect_to_target(
         boot_id,
         realm_query,
         was_reboot,
+        is_fxt,
     })
 }
 
@@ -267,10 +286,6 @@ where
     C: Clock,
     E: EnvironmentSource,
 {
-    let symbolizer_channel: Box<dyn Symbolize> = match symbolizer {
-        Some(inner) => Box::new(inner),
-        None => Box::new(NoOpSymoblizer {}),
-    };
     let disable_reconnect = cmd.disable_reconnect();
     let mut stream_mode = get_stream_mode(cmd.clone())?;
     // This plugin needs special logic to handle reconnects as logging should tolerate
@@ -313,11 +328,6 @@ where
                 }
                 let err = format!("{:?}", err);
                 if matches!(&last_error, Some(value) if *value == err) {
-                    eprintln!("Error connecting to device, retrying in {backoff} seconds.");
-                } else {
-                    if err.contains("FFX Daemon was told not to autostart and no existing Daemon instance was found") {
-                        return Err(LogError::DaemonRetriesDisabled);
-                    }
                     eprintln!(
                         "Error connecting to device, retrying in {backoff} seconds. Error: {err}",
                     );
@@ -369,13 +379,24 @@ where
                 .push_unfiltered_log(LogEntry { data: LogData::TargetLog(builder.build()) })
                 .await?;
         }
-        let result = dump_logs_from_socket(
-            connection.log_socket,
-            &mut formatter,
-            symbolizer_channel.as_ref(),
-            include_timestamp,
-        )
-        .await;
+        let result = if connection.is_fxt {
+            dump_fxt_logs_from_socket(
+                connection.log_socket,
+                &mut formatter,
+                &symbolizer,
+                include_timestamp,
+            )
+            .await
+            .map_err(JsonDeserializeError::from)
+        } else {
+            dump_logs_from_socket(
+                connection.log_socket,
+                &mut formatter,
+                &symbolizer,
+                include_timestamp,
+            )
+            .await
+        };
         if stream_mode == fdomain_fuchsia_diagnostics::StreamMode::Snapshot {
             break;
         }
@@ -429,8 +450,9 @@ mod tests {
     use fuchsia_async as fasync;
     use futures::StreamExt;
     use log_command_fdomain::{
-        LogData, LogFilterArgs, OneOrMany, RawDumpCommand, RawWatchCommand, SymbolizeMode,
-        TIMESTAMP_FORMAT, TimeFormat, parse_seconds_string_as_duration, parse_time, parse_utc_time,
+        LogData, LogFilterArgs, NoOpSymbolizer, OneOrMany, RawDumpCommand, RawWatchCommand,
+        SymbolizeMode, TIMESTAMP_FORMAT, TimeFormat, parse_seconds_string_as_duration, parse_time,
+        parse_utc_time,
     };
     use moniker::Moniker;
     use selectors::parse_log_interest_selector;
@@ -467,6 +489,10 @@ mod tests {
         fn has_var(&self, key: &str) -> bool {
             self.vars.contains_key(key)
         }
+
+        fn var(&self, key: &str) -> Option<String> {
+            self.vars.get(key).cloned()
+        }
     }
 
     struct FakeClock;
@@ -489,7 +515,7 @@ mod tests {
         let writer = CommandOutputMachineWriter::new_test(None, &buffers);
 
         let result =
-            log_main(writer, cmd, None::<NoOpSymoblizer>, rcs_connector, false, clock, env).await;
+            log_main(writer, cmd, None::<NoOpSymbolizer>, rcs_connector, false, clock, env).await;
 
         match result {
             Ok(()) => Ok(buffers.into_stdout_str()),
@@ -662,7 +688,7 @@ ffx log --force-set-severity.
         let handle = fasync::Task::local(log_main(
             writer,
             cmd,
-            None::<NoOpSymoblizer>,
+            None::<NoOpSymbolizer>,
             rcs_connector,
             false,
             clock,
@@ -1352,7 +1378,7 @@ ffx log --force-set-severity.
         fn is_machine(&self) -> bool {
             false
         }
-        fn stderr(&mut self) -> &mut dyn std::io::Write {
+        fn stderr(&mut self) -> &mut (dyn std::io::Write + Send + Sync) {
             self
         }
         fn item(&mut self, _value: &Self::OutputItem) -> ffx_writer::Result<()> {
@@ -1533,5 +1559,35 @@ ffx log --force-set-severity.
         .await;
         environment.disconnect_target();
         assert_matches!(event_stream.next().await, Some(TestEvent::LogSettingsClosed));
+    }
+
+    #[fuchsia::test]
+    async fn logger_dump_fxt_streaming() {
+        logger_dump_test(
+            TestEnvironmentConfig {
+                support_fxt: true,
+                fxt_bytes: testing_utils::test_fxt_bytes_with_message("Hello from FXT!"),
+                messages: vec![testing_utils::test_log(0)],
+                ..Default::default()
+            },
+            LogCommand::default(),
+            "[00000.000000][ffx] INFO: Hello from FXT!\u{1b}[m\n",
+        )
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn logger_dump_fxt_fallback_to_json() {
+        logger_dump_test(
+            TestEnvironmentConfig {
+                support_fxt: false,
+                fxt_bytes: testing_utils::test_fxt_bytes_with_message("Hello from FXT!"),
+                messages: vec![testing_utils::test_log(0)],
+                ..Default::default()
+            },
+            LogCommand::default(),
+            "[00000.000000][ffx] INFO: Hello world!\u{1b}[m\n",
+        )
+        .await;
     }
 }

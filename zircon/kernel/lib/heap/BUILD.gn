@@ -5,7 +5,6 @@
 # https://opensource.org/licenses/MIT
 
 import("//build/cpp/library_headers.gni")
-import("//zircon/kernel/kernel_bindgen_crate.gni")
 import("//zircon/kernel/kernel_rust_mod.gni")
 
 library_headers("headers") {
@@ -21,60 +20,42 @@ library_headers("headers.internal") {
 source_set("heap") {
   public_deps = [ ":headers" ]
 
-  sources = [
-    "cxx_allocator.cc",
-    "heap_ffi.cc",
-    "heap_wrapper.cc",
-  ]
+  sources = [ "cxx_allocator.cc" ]
   deps = [
-    ":headers.internal",
     "cmpctmalloc",
-    "profile",
-    "//src/lib/lazy_init",
-    "//zircon/kernel/lib/console",
-    "//zircon/kernel/lib/page",
-    "//zircon/kernel/lib/virtual_alloc",
-    "//zircon/kernel/phys/handoff",
-    "//zircon/kernel/vm:headers",
-
-    # TODO(https://fxbug.dev/42128324): Remove headers when possible.
     "//zircon/kernel/lib/instrumentation:headers",
+    "//zircon/kernel/phys/handoff:headers",
   ]
-}
-
-kernel_bindgen_crate("heap-bindings") {
-  visibility = [
-    ":*",
-    "//zircon/kernel/*",
-  ]
-  headers = [ "include/lib/heap_ffi.h" ]
-  non_rust_deps = [ ":heap" ]
-  output_name = "heap_bindings.rs"
-  cpp = true
-
-  notice_year = 2026
-  function_allowlist = [
-    "cpp_get_heap_profile",
-    "cpp_heap_get_info",
-    "cpp_profile_track_alloc",
-    "cpp_profile_track_free",
-  ]
-  additional_bindgen_flags = [ "--no-recursive-allowlist" ]
-
-  edition = "2024"
-  raw_lines = [ "#![no_std]" ]
 }
 
 kernel_rust_mod("heap-rs") {
-  sources = [ "heap.rs" ]
+  sources = [
+    "heap.rs",
+    "heap_ffi.rs",
+    "heap_wrapper.rs",
+  ]
   deps = [
-    ":heap-bindings",
+    "cmpctmalloc:cmpctmalloc-rs",
+    "profile:profile-rs",
+    "//src/lib/kprint",
+    "//src/lib/ksync",
+    "//src/lib/zr",
+    "//third_party/rust_crates:pin-init",
+    "//zircon/kernel/lib/backtrace:backtrace-rs",
+    "//zircon/kernel/lib/debug",
+    "//zircon/kernel/lib/instrumentation/asan:asan-rs",
+    "//zircon/kernel/lib/page:page-rs",
     "//zircon/kernel/lib/virtual_alloc:virtual_alloc-rs",
+    "//zircon/system/ulib/fbl/rust:fbl",
   ]
 }
 
 group("tests") {
   testonly = true
+  deps = [
+    "cmpctmalloc:tests",
+    "profile:tests",
+  ]
 }
 
 group("kernel-tests") {

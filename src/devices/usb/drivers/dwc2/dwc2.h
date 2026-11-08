@@ -24,9 +24,11 @@
 #include <threads.h>
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <queue>
 #include <utility>
+#include <vector>
 
 #include "src/devices/usb/drivers/dwc2/dwc2_config.h"
 #include "src/devices/usb/drivers/dwc2/usb_dwc_regs.h"
@@ -186,8 +188,6 @@ class Dwc2 : public fdf::DriverBase2, public fidl::Server<fuchsia_hardware_usb_d
   zx::result<> ResetCore() __TA_REQUIRES(lock_);
   void FlushTxFifo(uint32_t fifo_num) __TA_REQUIRES(lock_);
   void FlushRxFifo() __TA_REQUIRES(lock_);
-  void FlushTxFifoRetryIndefinite(uint32_t fifo_num) __TA_REQUIRES(lock_);
-  void FlushRxFifoRetryIndefinite() __TA_REQUIRES(lock_);
   zx::result<> InitController() __TA_REQUIRES(lock_);
   void SetConnected(bool connected);
   void StartEp0();
@@ -199,6 +199,10 @@ class Dwc2 : public fdf::DriverBase2, public fidl::Server<fuchsia_hardware_usb_d
   void HandleEp0TransferComplete(bool is_in) __TA_EXCLUDES(lock_);
   void HandleTransferComplete(uint8_t ep_num);
   void EnableEp(uint8_t ep_num, bool enable);
+  bool StopEndpointTransferLocked(uint8_t ep_num, bool deactivate) __TA_REQUIRES(lock_);
+  static void DrainEndpointLocked(Endpoint* ep, std::optional<usb::RequestVariant>* in_flight_req,
+                                  std::queue<usb::RequestVariant>* complete_reqs)
+      __TA_REQUIRES(ep->lock);
   void QueueNextRequest(Endpoint* ep) __TA_REQUIRES(ep->lock);
   void StartTransfer(Endpoint* ep, uint32_t length) __TA_REQUIRES(ep->lock);
   void SoftDisconnect() __TA_REQUIRES(lock_);
@@ -241,6 +245,9 @@ class Dwc2 : public fdf::DriverBase2, public fidl::Server<fuchsia_hardware_usb_d
   // Endpoint.lock should be acquired first
   // when acquiring both locks.
   std::mutex lock_;
+  // Retains in-flight requests whose endpoint failed to clear EPEna during halt until ResetCore()
+  // resets core DMA, preventing pages from being unpinned while DMA may still be armed.
+  std::vector<usb::RequestVariant> quarantined_reqs_ __TA_GUARDED(lock_);
 
   zx::bti bti_;
   // DMA buffer for endpoint zero requests
@@ -261,7 +268,7 @@ class Dwc2 : public fdf::DriverBase2, public fidl::Server<fuchsia_hardware_usb_d
 
   fuchsia_hardware_usb_dwc2::Metadata metadata_;
   std::atomic<bool> connected_ = false;
-  bool configured_ = false;
+  std::atomic<bool> configured_ = false;
   // The length of the last IN-data sent to the host.
   uint32_t last_transmission_len_;
   // Raw IRQ timestamp from kernel

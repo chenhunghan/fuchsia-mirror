@@ -126,6 +126,8 @@ Err ParseGlobalInputLocation(const Location& location, const std::string& input,
   if (!err.has_error()) {
     if (location.file_line().file().empty())
       return Err(kMissingFileError);
+    if (line == 0)
+      return Err("Can't have a 0 line number.");
 
     *output = InputLocation(FileLine(location.file_line().file(), static_cast<int>(line)));
     return Err();

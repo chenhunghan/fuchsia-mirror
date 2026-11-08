@@ -46,7 +46,11 @@ _FUCHSIA_TEST_INFO_FIELDS = {
                     "in which the test should run, or an empty list to use the build's " +
                     "default environments.",
     "build_only": "True if the test should only be built, not run.",
+    "create_no_exception_channel": "True if the test runner should not create an exception channel on the test's job.",
     "max_log_severity": "The maximum log severity allowed before the test fails.",
+    "min_log_severity": "The minimum severity of logs for the test's components to " +
+                        "emit, or an empty string to use the components' defaults.",
+    "parallel": "The maximum number of test cases to run concurrently, or 0 to use the runner's default.",
     # The fields below are specific to packaged component tests and will
     # become optional when `fx_test()` is extended to other target test
     # types (such as boot tests).
@@ -120,6 +124,9 @@ def _fx_test_impl(ctx):
     # `testonly = False`, which would let non-test targets depend on this one.
     if not ctx.attr.testonly:
         fail("`fx_test()` targets are always testonly.")
+
+    if ctx.attr.parallel < 0:
+        fail("`parallel` must be non-negative, got {}.".format(ctx.attr.parallel))
 
     package_info = ctx.attr.package[FuchsiaPackageInfo]
     current_platform = get_current_platform_info(ctx)
@@ -205,7 +212,10 @@ def _fx_test_impl(ctx):
             cpu = current_platform.cpu,
             environments = _collect_environments(ctx),
             build_only = ctx.attr.build_only,
+            create_no_exception_channel = ctx.attr.create_no_exception_channel,
             max_log_severity = ctx.attr.max_log_severity,
+            min_log_severity = ctx.attr.min_log_severity,
+            parallel = ctx.attr.parallel,
             package_name = package_info.package_name,
             package_manifest = package_manifest,
             test_components = test_component_entries,
@@ -277,10 +287,25 @@ fx_test = rule(
             doc = "True if the test should only be built, not run. Environments must not be specified if this is true.",
             default = False,
         ),
+        "create_no_exception_channel": attr.bool(
+            doc = "True if the test runner should not create an exception channel on the test's job. Defaults to False.",
+            default = False,
+        ),
         "max_log_severity": attr.string(
             doc = "The maximum log severity allowed before the test fails. Defaults to `WARN`.",
             default = "WARN",
             values = ["TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"],
+        ),
+        "min_log_severity": attr.string(
+            doc = "The minimum severity of logs for the test's components to " +
+                  "emit, overriding the components' defaults (usually `INFO`). " +
+                  "Messages below this severity aren't printed. If omitted, " +
+                  "the components' defaults are used.",
+            values = ["", "TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"],
+        ),
+        "parallel": attr.int(
+            doc = "The maximum number of test cases to run concurrently, or 0 to use the runner's default.",
+            default = 0,
         ),
         "test_type": attr.string(
             doc = "The non-hermetic test realm type to run the test components " +

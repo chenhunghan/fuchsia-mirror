@@ -10,7 +10,7 @@
 #include <lib/syslog/cpp/macros.h>
 #include <unistd.h>
 
-#include <re2/re2.h>
+#include "re2/re2.h"
 
 // An implementation of the |Store| protocol.
 class StoreImpl final : public fidl::Server<examples_keyvaluestore_baseline::Store> {

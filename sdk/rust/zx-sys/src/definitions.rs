@@ -864,8 +864,6 @@ unsafe extern "C" {
 
     pub fn zx_task_suspend(handle: zx_handle_t, token: *mut zx_handle_t) -> zx_status_t;
 
-    pub fn zx_task_suspend_token(handle: zx_handle_t, token: *mut zx_handle_t) -> zx_status_t;
-
     pub fn zx_thread_create(
         process: zx_handle_t,
         name: *const u8,

@@ -5,6 +5,7 @@
 // https://opensource.org/licenses/MIT
 
 use crate::counters::define_kcounter;
+use crate::ksync_kernel::{TrackedCriticalMutex, TrackedMutex, declare_singleton_critical_mutex};
 #[cfg(console_enabled)]
 use core::ffi::CStr;
 use core::mem::MaybeUninit;
@@ -16,10 +17,7 @@ use fbl::{
 use init::LkInitLevel;
 #[cfg(console_enabled)]
 use kprint::kprintln;
-use ksync::{
-    KCell, KMutex, LockToken, PhantomMutex, RawCriticalMutex, declare_singleton_critical_mutex,
-    guarded, kcell_init, lock,
-};
+use ksync::{KCell, KMutex, LockToken, PhantomMutex, guarded, kcell_init, lock};
 use object_constants_rs::{
     kResourceDispatcherStateAlign, kResourceDispatcherStateOffset, kResourceDispatcherStateSize,
 };
@@ -28,7 +26,7 @@ use pin_init::{
     InPlaceWrite as _, PinInit, pin_data, pin_init, pin_init_array_from_fn, pinned_drop,
 };
 use range_check::{RangeExt, from_offset_len};
-use region_alloc::{AllowOverlap, Region, RegionAllocator, RegionPool, RegionSpan};
+use region_alloc::{AllowOverlap, RegionSpan};
 use zx_status::Status;
 use zx_types::{
     ZX_DEFAULT_RESOURCE_RIGHTS, ZX_MAX_NAME_LEN, ZX_OBJ_TYPE_RESOURCE, ZX_RSRC_FLAG_EXCLUSIVE,
@@ -39,6 +37,10 @@ use zx_types::{
 
 use super::KernelHandle;
 use super::resource_dispatcher_ffi::cpp_resource_dispatcher_create;
+
+type Region = region_alloc::Region<TrackedMutex>;
+type RegionAllocator = region_alloc::RegionAllocator<TrackedMutex>;
+type RegionPool = region_alloc::RegionPool<TrackedMutex>;
 
 /// Maximum size for the global region pool (64 KiB).
 const MAX_REGION_POOL_SIZE: usize = 64 << 10;
@@ -100,7 +102,7 @@ unsafe impl Sync for ResourceStorage {}
 
 impl ResourceStorage {
     /// In-place initializer for `ResourceStorage`.
-    pub fn init() -> impl PinInit<Self, core::convert::Infallible> {
+    pub(super) fn init() -> impl PinInit<Self, core::convert::Infallible> {
         pin_init!(Self {
             mu: KMutex::new(PhantomMutex),
             resource_list <- kcell_init(DoublyLinkedList::new()),
@@ -109,7 +111,7 @@ impl ResourceStorage {
     }
 
     /// Returns a reference to the global static storage.
-    pub fn get() -> &'static Self {
+    fn get() -> &'static Self {
         // SAFETY: `STATIC_STORAGE` is initialized during early boot via `lk_init_hook` at
         // `LK_INIT_LEVEL_PLATFORM_EARLY`, before any concurrent access or dispatcher creation.
         unsafe { &*ptr::addr_of!(STATIC_STORAGE).cast::<ResourceStorage>() }
@@ -117,7 +119,7 @@ impl ResourceStorage {
 
     /// Returns the count of tracked active resources in this storage.
     #[cfg(ktest)]
-    pub fn resource_count(&self) -> usize {
+    fn resource_count(&self) -> usize {
         lock!(let mut guard = ResourcesLock::lock());
         // SAFETY: `ResourcesLock` is the singleton lock synchronizing `ResourceStorage`.
         let storage_guard = unsafe { self.guard_mu(guard.as_mut().token_mut()) };
@@ -178,7 +180,7 @@ pub struct ResourceDispatcherState {
     node: DoublyLinkedListNode<ResourceDispatcher>,
 
     #[mutex]
-    lock: KMutex<RawCriticalMutex>,
+    lock: KMutex<TrackedCriticalMutex>,
 
     kind: zx_rsrc_kind_t,
     flags: u32,
@@ -311,11 +313,6 @@ struct ResourceParams<'a> {
 }
 
 impl ResourceDispatcher {
-    /// Default rights for resources.
-    pub fn default_rights() -> zx_rights_t {
-        ZX_DEFAULT_RESOURCE_RIGHTS
-    }
-
     /// Creates a ResourceDispatcher object representing access rights to a given region of address
     /// space from a particular address space allocator.
     pub fn create(
@@ -331,7 +328,8 @@ impl ResourceDispatcher {
     }
 
     /// Creates a ResourceDispatcher object in a specific `ResourceStorage` instance.
-    pub fn create_with_storage(
+    #[cfg(ktest)]
+    pub(super) fn create_with_storage(
         kind: zx_rsrc_kind_t,
         base: u64,
         size: usize,
@@ -403,7 +401,8 @@ impl ResourceDispatcher {
     }
 
     /// Creates a ranged root ResourceDispatcher object in a specific `ResourceStorage` instance.
-    pub fn create_ranged_root_with_storage(
+    #[cfg(ktest)]
+    pub(super) fn create_ranged_root_with_storage(
         kind: zx_rsrc_kind_t,
         name: &[u8],
         storage: &ResourceStorage,
@@ -487,7 +486,8 @@ impl ResourceDispatcher {
     }
 
     /// Initializes the allocator for a specified resource kind in a specific `ResourceStorage`.
-    pub fn initialize_allocator_with_storage(
+    #[cfg(ktest)]
+    pub(super) fn initialize_allocator_with_storage(
         kind: zx_rsrc_kind_t,
         base: u64,
         size: usize,

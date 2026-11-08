@@ -5,6 +5,44 @@
 # https://opensource.org/licenses/MIT
 
 import("//build/cpp/library_headers.gni")
+import("//zircon/kernel/kernel_rust_mod.gni")
+
+kernel_rust_mod("arm_smmu_rs") {
+  sources = [
+    "common/constants.rs",
+    "common/device_aspace.rs",
+    "common/env.rs",
+    "common/mod.rs",
+    "common/page_cache.rs",
+    "common/smmu_mode.rs",
+    "common/translation_table.rs",
+    "common/vmsav8_64.rs",
+    "mod.rs",
+    "unit_tests.rs",
+    "v2/context_bank.rs",
+    "v2/mod.rs",
+    "v2/registers.rs",
+    "v2/smmu.rs",
+    "v2/smmu_bti.rs",
+    "v2/smmu_pmt.rs",
+    "v2/stream_match_reg.rs",
+    "v2/utils.rs",
+  ]
+  deps = [
+    "//sdk/rust/zx-status",
+    "//sdk/rust/zx-types",
+    "//src/lib/kalloc",
+    "//src/lib/ksync",
+    "//src/lib/regio",
+    "//src/lib/zr",
+    "//third_party/rust_crates:pin-init",
+    "//zircon/kernel/lib/arch:arch-rs",
+    "//zircon/kernel/lib/boot-options:boot-options-rs",
+    "//zircon/kernel/lib/debug",
+    "//zircon/system/ulib/fbl/rust:fbl",
+    "//zircon/system/ulib/region-alloc/rust:region-alloc",
+  ]
+}
 
 source_set("arm_smmu") {
   public_deps = [ ":headers" ]
@@ -15,6 +53,7 @@ source_set("arm_smmu") {
     "device_aspace.cc",
     "smmu.cc",
     "smmu_bti.cc",
+    "smmu_env_ffi.cc",
     "smmu_mode.cc",
     "smmu_pmt.cc",
     "stream_match_reg_group.cc",
@@ -22,6 +61,7 @@ source_set("arm_smmu") {
     "utils.cc",
   ]
   deps = [
+    ":arm_smmu_rs",
     "//zircon/kernel/dev/iommu",
     "//zircon/kernel/dev/iommu/stub",
     "//zircon/kernel/lib/boot-options",

@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 
 #include "src/starnix/tests/selinux/userspace/util.h"
+#include "src/starnix/tests/syscalls/cpp/capabilities_helper.h"
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
 
@@ -127,5 +128,41 @@ INSTANTIATE_TEST_SUITE_P(MMapTest, MMapDeniedTest,
                          [](const testing::TestParamInfo<const char*>& info) {
                            return info.param;
                          });
+
+// Verifies that fixed mappings below mmap_min_addr check DAC CAP_SYS_RAWIO before SELinux
+// `memprotect { mmap_zero }`.
+TEST(MMapTest, MMapZeroChecks) {
+  auto enforce = ScopedEnforcement::SetEnforcing();
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+
+  // With CAP_SYS_RAWIO, a domain lacking `memprotect { mmap_zero }` fails with EACCES and
+  // generates an `mmap_zero` AVC denial.
+  ASSERT_TRUE(RunSubprocessAs(MakeTestSecurityContext("test_mmap_parent_t"), [&] {
+    EXPECT_THAT(reinterpret_cast<intptr_t>(mmap(nullptr, page_size, PROT_READ | PROT_WRITE,
+                                                MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0)),
+                SyscallFailsWithErrno(EACCES));
+    EXPECT_THAT(
+        reinterpret_cast<intptr_t>(mmap(nullptr, page_size, PROT_READ | PROT_WRITE,
+                                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0)),
+        SyscallFailsWithErrno(EACCES));
+  }));
+
+  // Without CAP_SYS_RAWIO, the common_cap `mmap_addr` hook rejects the mapping with EPERM before
+  // reaching the SELinux `mmap_addr` hook, so no `mmap_zero` AVC denial is generated.
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&] {
+    test_helper::UnsetCapability(CAP_SYS_RAWIO);
+    ASSERT_THAT(WriteTaskAttr("current", MakeTestSecurityContext("test_mmap_parent_t")),
+                SyscallResultIsOk());
+    EXPECT_THAT(reinterpret_cast<intptr_t>(mmap(nullptr, page_size, PROT_READ | PROT_WRITE,
+                                                MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0)),
+                SyscallFailsWithErrno(EPERM));
+    EXPECT_THAT(
+        reinterpret_cast<intptr_t>(mmap(nullptr, page_size, PROT_READ | PROT_WRITE,
+                                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0)),
+        SyscallFailsWithErrno(EPERM));
+  });
+  EXPECT_TRUE(helper.WaitForChildren());
+}
 
 }  // namespace

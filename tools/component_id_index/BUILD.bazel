@@ -1,0 +1,43 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Skipped by bazel2gn because BUILD.gn defines component_id_index with install_host_tools.
+# @bazel2gn:skip
+rustc_binary(
+    name = "component_id_index",
+    srcs = ["src/main.rs"],
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//build/component:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.component.internal:fuchsia.component.internal_rust_common",
+        "//src/lib/fidl/rust/fidl",
+        "//src/sys/lib/component_id_index",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:camino",
+        "//third_party/rust_crates/vendor:clap",
+        "//third_party/rust_crates/vendor:serde_json",
+    ],
+)
+
+host_rustc_test(
+    name = "component_id_index_test",
+    crate = ":component_id_index",
+    crate_name = "component_id_index_lib_test",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//tools:__pkg__"],
+    deps = [
+        "//src/sys/lib/moniker",
+        "//third_party/rust_crates/vendor:pretty_assertions",
+        "//third_party/rust_crates/vendor:serde_json5",
+        "//third_party/rust_crates/vendor:tempfile",
+    ],
+)

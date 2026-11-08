@@ -22,10 +22,10 @@ class TempFileTransformTests(unittest.TestCase):
 
     def test_temp_dir_only(self):
         self.assertTrue(
-            output_cacher.TempFileTransform(temp_dir="my_tmp").valid
+            output_cacher.TempFileTransform(temp_dir=Path("my_tmp")).valid
         )
         self.assertTrue(
-            output_cacher.TempFileTransform(temp_dir="/my_tmp").valid
+            output_cacher.TempFileTransform(temp_dir=Path("/my_tmp")).valid
         )
 
     def test_basename_prefix_only(self):
@@ -39,7 +39,7 @@ class TempFileTransformTests(unittest.TestCase):
     def test_temp_dir_and_suffix(self):
         self.assertTrue(
             output_cacher.TempFileTransform(
-                temp_dir="throw/away", suffix=".tmp"
+                temp_dir=Path("throw/away"), suffix=".tmp"
             ).valid
         )
 
@@ -84,7 +84,7 @@ class TempFileTransformTests(unittest.TestCase):
     def test_transform_basename_prefix_and_temp_dir(self):
         self.assertEqual(
             output_cacher.TempFileTransform(
-                temp_dir="/t/m/p", basename_prefix="xyz-"
+                temp_dir=Path("/t/m/p"), basename_prefix="xyz-"
             ).transform(Path("foo/bar.o")),
             Path("/t/m/p/foo/xyz-bar.o"),
         )
@@ -180,30 +180,28 @@ class LexicallyRewriteTokenTest(unittest.TestCase):
 class EnsureFileExists(unittest.TestCase):
     def test_file_exists(self):
         with mock.patch.object(
-            Path, "exists", return_value=True
+            Path, "exists", autospec=True, return_value=True
         ) as mock_exists:
             output_cacher.ensure_file_exists(Path("some/file.txt"))
-        mock_exists.assert_called()
-        # just make sure no exception raised
+        mock_exists.assert_called_once_with(Path("some/file.txt"))
 
     def test_file_not_exists(self):
         with mock.patch.object(
-            Path, "exists", return_value=False
+            Path, "exists", autospec=True, return_value=False
         ) as mock_exists:
             with mock.patch.object(time, "sleep") as mock_sleep:
                 with self.assertRaises(FileNotFoundError):
                     output_cacher.ensure_file_exists(Path("not/a/file.txt"))
-        mock_exists.assert_called()
+        mock_exists.assert_called_with(Path("not/a/file.txt"))
 
     def test_file_exists_later(self):
         with mock.patch.object(
-            Path, "exists", side_effect=[False, True]
+            Path, "exists", autospec=True, side_effect=[False, True]
         ) as mock_exists:
             with mock.patch.object(time, "sleep") as mock_sleep:
                 output_cacher.ensure_file_exists(Path("late/file.txt"))
-        mock_exists.assert_called()
+        mock_exists.assert_called_with(Path("late/file.txt"))
         mock_sleep.assert_called()
-        # just make sure no exception raised
 
 
 @contextlib.contextmanager
@@ -557,7 +555,7 @@ class ReplaceOutputArgsTest(unittest.TestCase):
         )
 
     def test_command_passed_using_relative_temp_dir(self):
-        transform = output_cacher.TempFileTransform(temp_dir="temp/temp")
+        transform = output_cacher.TempFileTransform(temp_dir=Path("temp/temp"))
         action = output_cacher.Action(
             command=["run.sh", "in.put", "foo/out.put"],
             substitutions={"foo/out.put": ""},

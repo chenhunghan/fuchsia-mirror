@@ -47,6 +47,7 @@
                 "fuchsia.driver.UseHardwareIommu",
                 "fuchsia.pkgcache.AllPackagesExecutable",
                 "fuchsia.pkgcache.EnableUpgradablePackages",
+                "fuchsia.pkgcache.PostCommitGcEarliestBootSeconds",
                 "fuchsia.pkgcache.RequireSystemImage",
                 "fuchsia.pkgcache.UseDriverBlobPaging",
                 "fuchsia.platform.bus.SoftwareDeviceIds",
@@ -175,6 +176,7 @@
         {
             protocol: [
                 "fuchsia.component.resolution.Resolver",
+                "fuchsia.sys2.BootNotifier",
                 "fuchsia.sys2.SystemController",
             ],
             from: "parent",

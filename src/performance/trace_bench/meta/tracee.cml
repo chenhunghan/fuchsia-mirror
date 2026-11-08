@@ -7,7 +7,16 @@
         runner: "elf",
         binary: "bin/tracee",
     },
-    config: {
-        emit_trace_data: { type: "bool" },
-    },
+    use: [
+        // Whether the tracee component should continuously emit trace events
+        // (false for idle provider configuration benchmarks, routed as true by
+        // trace_bench.cml for streaming throughput benchmarks).
+        {
+            config: "fuchsia.trace.test.EmitTraceData",
+            key: "emit_trace_data",
+            type: "bool",
+            availability: "transitional",
+            default: false,
+        },
+    ],
 }

@@ -62,7 +62,6 @@ fx_component_manifest(
 fx_test_component(
     name = "page_buf_tests-component",
     compiled_manifest = ":page_buf_tests-manifest",
-    component_name = "page_buf_tests",
     # Runs in the Starnix test realm, which provides the
     # `starnix_unit_test_runner` used by `unit_test.shard.cml`.
     test_type = "starnix",

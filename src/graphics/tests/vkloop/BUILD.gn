@@ -28,13 +28,10 @@ executable("vkloop_bin") {
     "//src/graphics/magma/lib/magma_client/test_util:test_device_helper",
     "//src/graphics/tests/common",
     "//src/graphics/tests/common:gtest_main",
-  ]
-  public_deps = [
     "//src/lib/fxl/test:test_settings",
+    "//src/lib/vulkan",
     "//third_party/googletest:gtest_no_testonly",
   ]
-
-  public_deps += [ "//src/lib/vulkan" ]
 }
 
 resource("shaders") {

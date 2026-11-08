@@ -21,9 +21,8 @@ rustc_library("bt-test-harness") {
     "//sdk/fidl/fuchsia.bluetooth.sys:fuchsia.bluetooth.sys_rust",
     "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
     "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
-    "//sdk/fidl/fuchsia.component.resolution:fuchsia.component.resolution_rust",
+    "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_rust",
     "//sdk/fidl/fuchsia.device:fuchsia.device_rust",
-    "//sdk/fidl/fuchsia.driver.test:fuchsia.driver.test_rust",
     "//sdk/fidl/fuchsia.hardware.bluetooth:fuchsia.hardware.bluetooth_rust",
     "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
     "//sdk/fidl/fuchsia.logger:fuchsia.logger_rust",
@@ -47,13 +46,8 @@ rustc_library("bt-test-harness") {
   # HostRealm
   deps += [
     ":test-bt-init",
-    "//sdk/lib/driver_test_realm/realm_builder/rust",
     "//src/connectivity/bluetooth/core/bt-gap:test-stash-secure",
     "//src/connectivity/bluetooth/hci/virtual",
-    "//src/devices/bind/fuchsia.platform:fuchsia.platform_rust",
-    "//src/devices/bus/drivers/platform",
-    "//src/devices/misc/drivers/test",
-    "//src/devices/tests/sysdev",
     "//src/sys/lib/cm_rust",
     "//src/sys/lib/cm_types",
   ]

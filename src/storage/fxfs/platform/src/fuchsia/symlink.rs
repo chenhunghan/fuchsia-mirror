@@ -17,6 +17,7 @@ use fxfs::object_store::{
     AttributeId, AttributeKey, DirType, FSCRYPT_KEY_ID, HandleOptions, ObjectAttributes,
     ObjectDescriptor, ObjectKey, ObjectKeyData, ObjectKind, ObjectValue, StoreObjectHandle,
 };
+use fxfs_crypto::WrappingKeyId;
 use fxfs_macros::ToWeakNode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -201,6 +202,27 @@ impl FxSymlink {
     pub fn to_be_purged(&self) -> bool {
         (self.open_count.load(Ordering::Relaxed) & TO_BE_PURGED) != 0
     }
+
+    async fn fscrypt_wrapping_key_id(&self) -> Result<Option<WrappingKeyId>, zx::Status> {
+        let store = self.handle.store();
+        if !store.is_encrypted() {
+            return Ok(None);
+        }
+        match store
+            .tree()
+            .find_map(&ObjectKey::keys(self.object_id()), |item| match item.value {
+                ObjectValue::Keys(keys) => {
+                    Ok(keys.get(FSCRYPT_KEY_ID).and_then(|k| k.wrapping_key_id()))
+                }
+                _ => Err(zx::Status::IO_DATA_INTEGRITY),
+            })
+            .await
+            .map_err(map_to_status)?
+        {
+            Some(res) => res,
+            None => Ok(None),
+        }
+    }
 }
 
 impl Symlink for FxSymlink {
@@ -262,26 +284,73 @@ impl Node for FxSymlink {
         self: Arc<Self>,
         destination_dir: Arc<dyn MutableDirectory>,
         name: Name,
+        options: fio::LinkIntoOptions,
     ) -> Result<(), zx::Status> {
-        if self.to_be_purged() {
-            return Err(zx::Status::NOT_FOUND);
+        let flags = options.flags.unwrap_or_default();
+        if flags.has_unknown_bits() {
+            return Err(zx::Status::INVALID_ARGS);
         }
+        if !(flags - fio::LinkIntoFlags::REPLACE_EXISTING).is_empty() {
+            return Err(zx::Status::NOT_SUPPORTED);
+        }
+        let replace = flags.contains(fio::LinkIntoFlags::REPLACE_EXISTING);
+
         let dir = destination_dir
             .into_any()
             .downcast::<FxDirectory>()
             .map_err(|_| zx::Status::INVALID_ARGS)?;
-        let store = self.handle.store();
-        let transaction = store
-            .new_transaction(
-                lock_keys![
-                    LockKey::object(store.store_object_id(), self.object_id()),
-                    LockKey::object(store.store_object_id(), dir.object_id()),
-                ],
-                Options::default(),
+        let object_id = self.object_id();
+
+        if replace {
+            let extra_keys = [LockKey::object(dir.store().store_object_id(), object_id)];
+            let replace_context = dir
+                .directory()
+                .acquire_context_for_replace(None, &name, false, &extra_keys)
+                .await
+                .map_err(map_to_status)?;
+            if dir.directory().wrapping_key_id().is_some() {
+                dir.check_fscrypt_policy_equivalence(self.fscrypt_wrapping_key_id().await?)?;
+            }
+            if self.to_be_purged() {
+                return Err(zx::Status::NOT_FOUND);
+            }
+            dir.link_object_into_allowing_replacement(
+                replace_context,
+                &name,
+                object_id,
+                ObjectDescriptor::Symlink,
+                false,
+                || {},
             )
             .await
-            .map_err(map_to_status)?;
-        dir.link_object(transaction, &name, self.object_id(), ObjectDescriptor::Symlink).await
+        } else {
+            let store = dir.store();
+            let transaction = store
+                .new_transaction(
+                    lock_keys![
+                        LockKey::object(store.store_object_id(), dir.object_id()),
+                        LockKey::object(store.store_object_id(), object_id),
+                    ],
+                    Options::default(),
+                )
+                .await
+                .map_err(map_to_status)?;
+            if dir.directory().wrapping_key_id().is_some() {
+                dir.check_fscrypt_policy_equivalence(self.fscrypt_wrapping_key_id().await?)?;
+            }
+            if self.to_be_purged() {
+                return Err(zx::Status::NOT_FOUND);
+            }
+            dir.link_object_into(
+                transaction,
+                &name,
+                object_id,
+                ObjectDescriptor::Symlink,
+                false,
+                || {},
+            )
+            .await
+        }
     }
 
     fn query_filesystem(&self) -> Result<fio::FilesystemInfo, zx::Status> {

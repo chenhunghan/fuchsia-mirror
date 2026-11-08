@@ -17,7 +17,6 @@ go_library(
     target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = [
         "//src/connectivity/network/testing/conformance/ffx:__pkg__",
-        "//src/tests/memory_budget:__pkg__",
         "//tools:__subpackages__",
     ],
 )

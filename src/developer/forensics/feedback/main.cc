@@ -4,10 +4,8 @@
 
 #include <fidl/fuchsia.feedback/cpp/fidl.h>
 #include <fidl/fuchsia.kernel/cpp/fidl.h>
-#include <fuchsia/feedback/cpp/fidl.h>
-#include <fuchsia/process/lifecycle/cpp/fidl.h>
+#include <fidl/fuchsia.process.lifecycle/cpp/fidl.h>
 #include <lib/component/incoming/cpp/protocol.h>
-#include <lib/fidl/cpp/interface_request.h>
 #include <lib/syslog/cpp/log_settings.h>
 #include <lib/syslog/cpp/macros.h>
 #include <lib/zx/job.h>
@@ -25,8 +23,6 @@
 #include "src/developer/forensics/feedback/namespace_init.h"
 #include "src/developer/forensics/feedback/reboot_log/reboot_log.h"
 #include "src/developer/forensics/feedback/redactor_factory.h"
-#include "src/developer/forensics/feedback_data/system_log_recorder/disk_backed_logs_metadata.h"
-#include "src/developer/forensics/feedback_data/system_log_recorder/writer.h"
 #include "src/developer/forensics/utils/cobalt/logger.h"
 #include "src/developer/forensics/utils/component/component.h"
 #include "src/developer/forensics/utils/storage_size.h"
@@ -99,9 +95,7 @@ int main() {
              /*to=*/kLegacyPreviousGracefulRebootReasonFile);
     MoveFile(/*from=*/kCurrentGracefulShutdownInfoFile, /*to=*/kPreviousGracefulShutdownInfoFile);
     MoveFile(/*from=*/kCurrentSystemTimePath, /*to=*/kPreviousSystemTimePath);
-    MoveFile(/*from=*/kCurrentDiskBackedLogsMetadataPath,
-             /*to=*/kPreviousDiskBackedLogsMetadataPath);
-    CreatePreviousLogsFile(cobalt.get(), feedback_config->persisted_logs_total_size);
+    files::DeletePath(kLegacyDiskBackedLogsMetadataPath, /*recursive=*/false);
     MoveAndRecordBootId(uuid::Generate());
     if (std::string build_version; files::ReadFileToString(kBuildVersionPath, &build_version)) {
       MoveAndRecordBuildVersion(build_version, kPreviousBuildVersionPath, kCurrentBuildVersionPath);
@@ -133,14 +127,8 @@ int main() {
       redactor.get());
 
   if (component.IsFirstInstance()) {
-    const std::optional<feedback_data::system_log_recorder::DiskBackedLogsMetadata> metadata =
-        feedback_data::system_log_recorder::DiskBackedLogsMetadata::FromFile(
-            kPreviousDiskBackedLogsMetadataPath,
-            feedback_data::system_log_recorder::SystemLogWriter::kFirstFileNumber);
-    if (metadata.has_value()) {
-      metadata->LogToCobalt(*cobalt, reboot_log.GetFinalShutdownInfo().Uptime());
-    }
-    files::DeletePath(kPreviousDiskBackedLogsMetadataPath, /*recursive=*/false);
+    CreatePreviousLogsFile(cobalt.get(), feedback_config->persisted_logs_total_size,
+                           reboot_log.GetFinalShutdownInfo().Uptime());
   }
 
   std::optional<std::string> local_device_id_path = kDeviceIdPath;
@@ -161,7 +149,7 @@ int main() {
   std::unique_ptr<MainService> main_service = std::make_unique<MainService>(
       component.Dispatcher(), component.Services(), component.Clock(), component.InspectRoot(),
       cobalt.get(), startup_annotations,
-      fidl::InterfaceRequest<fuchsia::process::lifecycle::Lifecycle>(std::move(lifecycle_channel)),
+      fidl::ServerEnd<fuchsia_process_lifecycle::Lifecycle>(std::move(lifecycle_channel)),
       std::move(redactor),
       MainService::Options{
           local_device_id_path, kCurrentGracefulShutdownInfoFile, kCurrentSystemTimePath,
@@ -194,12 +182,12 @@ int main() {
               .root_job = GetRootJobForInspect(),
           }});
 
-  component.AddPublicService(main_service->GetHandler<fuchsia::feedback::LastRebootInfoProvider>());
-  component.AddPublicService(main_service->GetHandler<fuchsia::feedback::CrashReporter>());
+  component.AddPublicService(main_service->GetHandler<fuchsia_feedback::LastRebootInfoProvider>());
+  component.AddPublicService(main_service->GetHandler<fuchsia_feedback::CrashReporter>());
   component.AddPublicService(
-      main_service->GetHandler<fuchsia::feedback::CrashReportingProductRegister>());
+      main_service->GetHandler<fuchsia_feedback::CrashReportingProductRegister>());
   component.AddPublicService(main_service->GetHandler<fuchsia_feedback::ComponentDataRegister>());
-  component.AddPublicService(main_service->GetHandler<fuchsia::feedback::DataProvider>());
+  component.AddPublicService(main_service->GetHandler<fuchsia_feedback::DataProvider>());
 
   component.RunLoop();
   return EXIT_SUCCESS;

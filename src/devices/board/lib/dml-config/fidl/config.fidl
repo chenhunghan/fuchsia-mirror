@@ -22,6 +22,10 @@ type Device = table {
     6: interrupt_controller_id uint32;
     7: disabled bool;
     8: driver_host string:MAX;
+    /// Devices with a higher value are published before devices with a lower
+    /// value. Devices without a value have priority 0. Ties keep config order,
+    /// and a device's providers are always published before the device itself.
+    9: publish_priority uint32;
 };
 
 type ResourceEntry = table {

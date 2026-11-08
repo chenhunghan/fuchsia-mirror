@@ -8,15 +8,14 @@
 #define ZIRCON_KERNEL_VM_INCLUDE_VM_ANONYMOUS_PAGE_REQUEST_FFI_H_
 
 #include <zircon/compiler.h>
+#include <zircon/types.h>
 
-#include <kernel/ffi.h>
 #include <vm/anonymous_page_request.h>
 
 __BEGIN_CDECLS
 
-void cpp_anonymous_page_request_construct(ffi::Uninitialized<AnonymousPageRequest>* req);
-void cpp_anonymous_page_request_destroy(AnonymousPageRequest* req);
-void cpp_anonymous_page_request_cancel(AnonymousPageRequest* req);
+zx_status_t rust_anonymous_page_request_allocate(AnonymousPageRequest* req, bool suspendable);
+void rust_anonymous_page_request_free_page(AnonymousPageRequest* req);
 
 __END_CDECLS
 

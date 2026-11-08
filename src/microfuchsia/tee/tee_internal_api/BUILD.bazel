@@ -1,0 +1,59 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "headers",
+    hdrs = [
+        "include/lib/tee_internal_api/tee_internal_api.h",
+        "include/lib/tee_internal_api/tee_internal_api_types.h",
+    ],
+    includes = ["include"],
+    public_configs = [":config"],
+    visibility = [
+        "//src/microfuchsia/tee:__subpackages__",
+        "//src/tee/tee_internal_api:__pkg__",
+        "//vendor:__subpackages__",
+    ],
+    alwayslink = True,
+)
+
+rustc_library(
+    name = "tee_internal",
+    srcs = [
+        "src/binding.rs",
+        "src/lib.rs",
+    ],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:num-derive",
+    ],
+    visibility = ["//src/microfuchsia/tee:__subpackages__"],
+    deps = [
+        "//third_party/rust_crates/vendor:bitflags",
+        "//third_party/rust_crates/vendor:num-traits",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+# @bazel2gn:skip
+rustc_test(
+    name = "tee_internal_test",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate = ":tee_internal",
+)
+
+# @bazel2gn:skip
+fx_unittest_package(
+    name = "tee_internal_tests",
+    unit_tests = [":tee_internal_test"],
+    visibility = ["//src/microfuchsia:__pkg__"],
+)

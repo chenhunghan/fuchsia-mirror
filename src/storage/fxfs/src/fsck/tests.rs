@@ -22,8 +22,9 @@ use crate::object_store::volume::root_volume;
 use crate::object_store::{
     AttributeId, AttributeKey, BytesAndNodes, ChildValue, DirType, EncryptionKeys, ExtentMode,
     ExtentValue, FsverityMetadata, HandleOptions, Mutation, NewChildStoreOptions, ObjectAttributes,
-    ObjectDescriptor, ObjectKey, ObjectKeyData, ObjectKind, ObjectStore, ObjectValue, ProjectId,
-    RootDigest, StoreInfo, StoreOptions, Timestamp, VOLUME_DATA_KEY_ID,
+    ObjectDescriptor, ObjectKey, ObjectKeyData, ObjectKind, ObjectStore, ObjectValue, PosixOwner,
+    ProjectId, RootDigest, SetExtendedAttributeMode, StoreInfo, StoreOptions, Timestamp,
+    VOLUME_DATA_KEY_ID,
 };
 use crate::serialized_types::{OLD_KEY_SERIALIZATION_VERSION, VersionedLatest};
 use crate::testing::writer::Writer;
@@ -2041,7 +2042,10 @@ async fn test_incorrect_merkle_tree_size_empty_file() {
             .create_child_file(&mut transaction, "verified file")
             .await
             .expect("Create child failed");
-        transaction.commit_and_continue().await.expect("commit_and_continue transaction failed");
+        transaction
+            .commit_and_continue(|| {})
+            .await
+            .expect("commit_and_continue transaction failed");
 
         object
             .enable_verity(fio::VerificationOptions {
@@ -2126,7 +2130,10 @@ async fn test_incorrect_merkle_tree_size_one_data_block() {
             .create_child_file(&mut transaction, "verified file")
             .await
             .expect("Create child failed");
-        transaction.commit_and_continue().await.expect("commit_and_continue transaction failed");
+        transaction
+            .commit_and_continue(|| {})
+            .await
+            .expect("commit_and_continue transaction failed");
 
         let mut buf = object.allocate_buffer(fs.block_size().get() as usize).await;
         buf.fill(1);
@@ -2216,7 +2223,10 @@ async fn test_incorrect_merkle_tree_size_data_unaligned() {
             .create_child_file(&mut transaction, "verified file")
             .await
             .expect("Create child failed");
-        transaction.commit_and_continue().await.expect("commit_and_continue transaction failed");
+        transaction
+            .commit_and_continue(|| {})
+            .await
+            .expect("commit_and_continue transaction failed");
 
         let mut buf = object.allocate_buffer((1 + 5 * fs.block_size()) as usize).await;
         buf.fill(1);
@@ -3629,7 +3639,7 @@ async fn test_project_accounting() {
             store_id,
             Mutation::insert_object(
                 ObjectKey::project_limit(root_directory.object_id(), ProjectId::new(4).unwrap()),
-                ObjectValue::BytesAndNodes { bytes: 0, nodes: 0 },
+                ObjectValue::BytesAndNodes(BytesAndNodes { bytes: 0, nodes: 0 }),
             ),
         );
         let object_id = root_directory
@@ -3675,7 +3685,7 @@ async fn test_project_accounting() {
             store_id,
             Mutation::insert_object(
                 ObjectKey::project_limit(root_directory.object_id(), ProjectId::new(5).unwrap()),
-                ObjectValue::BytesAndNodes { bytes: 0, nodes: 0 },
+                ObjectValue::BytesAndNodes(BytesAndNodes { bytes: 0, nodes: 0 }),
             ),
         );
         let object_id = root_directory
@@ -3715,6 +3725,213 @@ async fn test_project_accounting() {
         (0, 1)
     ))));
     assert_eq!(test.errors().len(), 2);
+}
+
+#[fuchsia::test]
+async fn test_project_directory_with_large_extended_attribute() {
+    let mut test = FsckTest::new().await;
+    let store_id = {
+        let fs = test.filesystem();
+        let root_volume = root_volume(fs.clone()).await.unwrap();
+        let store = root_volume
+            .new_volume(
+                "vol",
+                NewChildStoreOptions {
+                    options: StoreOptions {
+                        crypt: Some(test.get_crypt()),
+                        ..StoreOptions::default()
+                    },
+                    ..NewChildStoreOptions::default()
+                },
+            )
+            .await
+            .unwrap();
+        let root_directory =
+            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
+
+        // Case 1: set project ID, then set a large extended attribute.
+        let mut transaction = store
+            .new_transaction(
+                lock_keys![LockKey::object(store.store_object_id(), root_directory.object_id())],
+                Options::default(),
+            )
+            .await
+            .expect("new_transaction failed");
+        let dir1 = root_directory
+            .create_child_dir(&mut transaction, "dir1")
+            .await
+            .expect("create_child_dir failed");
+        transaction.commit().await.expect("commit failed");
+
+        let project_id1 = ProjectId::new(10).unwrap();
+        store
+            .set_project_for_node(dir1.object_id(), project_id1)
+            .await
+            .expect("set_project_for_node failed");
+
+        dir1.set_extended_attribute(
+            b"user.large_xattr1".to_vec(),
+            vec![0xab; 500],
+            SetExtendedAttributeMode::Set,
+        )
+        .await
+        .expect("set_extended_attribute failed");
+
+        // Case 2: set a large extended attribute, then set project ID.
+        let mut transaction = store
+            .new_transaction(
+                lock_keys![LockKey::object(store.store_object_id(), root_directory.object_id())],
+                Options::default(),
+            )
+            .await
+            .expect("new_transaction failed");
+        let dir2 = root_directory
+            .create_child_dir(&mut transaction, "dir2")
+            .await
+            .expect("create_child_dir failed");
+        transaction.commit().await.expect("commit failed");
+
+        dir2.set_extended_attribute(
+            b"user.large_xattr2".to_vec(),
+            vec![0xcd; 500],
+            SetExtendedAttributeMode::Set,
+        )
+        .await
+        .expect("set_extended_attribute failed");
+
+        let project_id2 = ProjectId::new(20).unwrap();
+        store
+            .set_project_for_node(dir2.object_id(), project_id2)
+            .await
+            .expect("set_project_for_node failed");
+
+        store.store_object_id()
+    };
+
+    test.remount().await.expect("Remount failed");
+    test.run(TestOptions { volume_store_id: Some(store_id), ..Default::default() })
+        .await
+        .expect("Fsck should succeed with zero warnings");
+    assert!(test.errors().is_empty());
+}
+
+#[fuchsia::test]
+async fn test_project_negative_usage_with_no_nodes() {
+    let mut test = FsckTest::new().await;
+    let (store_id, project_id) = {
+        let fs = test.filesystem();
+        let store = fs.root_store();
+        let store_id = store.store_object_id();
+        let root_directory =
+            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
+        let project_id = ProjectId::new(42).unwrap();
+
+        let mut transaction = fs
+            .root_store()
+            .new_transaction(
+                lock_keys![
+                    LockKey::object(store_id, root_directory.object_id()),
+                    LockKey::ProjectId { store_object_id: store_id, project_id },
+                ],
+                Options::default(),
+            )
+            .await
+            .expect("new_transaction failed");
+        transaction.merge_bytes_and_nodes(
+            store_id,
+            ObjectKey::project_usage(root_directory.object_id(), project_id),
+            BytesAndNodes { bytes: -100, nodes: -1 },
+        );
+        transaction.commit().await.expect("commit failed");
+        (store_id, project_id)
+    };
+
+    test.remount().await.expect("Remount failed");
+    test.run(TestOptions { volume_store_id: Some(store_id), ..Default::default() })
+        .await
+        .expect_err("Fsck should fail on negative usage warning");
+
+    assert_matches!(
+        &test.errors()[..],
+        [FsckIssue::Warning(FsckWarning::ProjectUsageInconsistent(
+            sid,
+            pid,
+            (-100, -1),
+            (0, 0)
+        ))] if *sid == store_id && *pid == project_id
+    );
+}
+
+#[fuchsia::test]
+async fn test_project_non_root_usage_metadata() {
+    let mut test = FsckTest::new().await;
+    let (store_id, project_id, non_root_object_id) = {
+        let fs = test.filesystem();
+        let store = fs.root_store();
+        let store_id = store.store_object_id();
+        let root_directory =
+            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
+        let project_id = ProjectId::new(7).unwrap();
+
+        // Create a valid child file with project_id and valid root project usage.
+        let mut transaction = fs
+            .root_store()
+            .new_transaction(
+                lock_keys![
+                    LockKey::object(store_id, root_directory.object_id()),
+                    LockKey::ProjectId { store_object_id: store_id, project_id },
+                ],
+                Options::default(),
+            )
+            .await
+            .expect("new_transaction failed");
+        let file = root_directory
+            .create_child_file(&mut transaction, "file")
+            .await
+            .expect("create_child_file failed");
+        let mut mutation = transaction
+            .get_object_mutation(store_id, ObjectKey::object(file.object_id()))
+            .unwrap()
+            .clone();
+        if let ObjectValue::Object {
+            attributes: ObjectAttributes { project_id: child_pid, .. },
+            ..
+        } = &mut mutation.item.value
+        {
+            *child_pid = Some(project_id);
+        } else {
+            panic!("Unexpected object type");
+        }
+        transaction.add(store_id, Mutation::ObjectStore(mutation));
+        transaction.merge_bytes_and_nodes(
+            store_id,
+            ObjectKey::project_usage(root_directory.object_id(), project_id),
+            BytesAndNodes { bytes: 0, nodes: 1 },
+        );
+
+        // Also add a rogue non-root ProjectProperty::Usage record under file.object_id().
+        let non_root_object_id = file.object_id();
+        transaction.merge_bytes_and_nodes(
+            store_id,
+            ObjectKey::project_usage(non_root_object_id, project_id),
+            BytesAndNodes { bytes: 9999, nodes: 99 },
+        );
+        transaction.commit().await.expect("commit failed");
+        (store_id, project_id, non_root_object_id)
+    };
+
+    test.remount().await.expect("Remount failed");
+    test.run(TestOptions { volume_store_id: Some(store_id), ..Default::default() })
+        .await
+        .expect_err("Fsck should fail on NonRootProjectIdMetadata error");
+
+    // Only NonRootProjectIdMetadata should be emitted; root's project_usage must not be clobbered
+    // (that would have produced a bogus ProjectUsageInconsistent warning).
+    assert_matches!(
+        &test.errors()[..],
+        [FsckIssue::Error(FsckError::NonRootProjectIdMetadata(sid, oid, pid))]
+            if *sid == store_id && *oid == non_root_object_id && *pid == project_id
+    );
 }
 
 #[fuchsia::test]
@@ -3923,7 +4140,7 @@ async fn test_empty_volume() {
             file.object_id()
         };
         let mut transaction = root_directory
-            .acquire_context_for_replace(None, "child_file", true)
+            .acquire_context_for_replace(None, "child_file", true, &[])
             .await
             .expect("acquire_context_for_replace failed")
             .transaction;
@@ -5229,5 +5446,51 @@ async fn test_oversized_inline_symlink_warning() {
         &test.errors()[..],
         [FsckIssue::Warning(FsckWarning::OversizedInlineSymlink(warn_store_id, warn_object_id))]
             if *warn_store_id == store_id && *warn_object_id == symlink_id
+    );
+}
+
+#[fuchsia::test]
+async fn test_non_root_posix_owner_metadata() {
+    let mut test = FsckTest::new().await;
+
+    let (store_id, child_id) = {
+        let fs = test.filesystem();
+        let store = fs.root_store();
+        let store_id = store.store_object_id();
+        let root_directory =
+            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
+
+        let mut transaction = store
+            .new_transaction(
+                lock_keys![LockKey::object(store_id, root_directory.object_id())],
+                Options::default(),
+            )
+            .await
+            .expect("new_transaction failed");
+        let child_id = root_directory
+            .create_child_file(&mut transaction, "child")
+            .await
+            .expect("create_child_file failed")
+            .object_id();
+        transaction.merge_bytes_and_nodes(
+            store_id,
+            ObjectKey::posix_owner_usage(child_id, PosixOwner::User(1000)),
+            BytesAndNodes { bytes: 0, nodes: 1 },
+        );
+        transaction.commit().await.expect("commit failed");
+        (store_id, child_id)
+    };
+
+    test.remount().await.expect("remount failed");
+    test.run(TestOptions { volume_store_id: Some(store_id), ..Default::default() })
+        .await
+        .expect_err("Fsck should fail");
+    assert_matches!(
+        &test.errors()[..],
+        [FsckIssue::Error(FsckError::NonRootPosixOwnerMetadata(
+            err_store_id,
+            err_object_id,
+            PosixOwner::User(1000),
+        ))] if *err_store_id == store_id && *err_object_id == child_id
     );
 }

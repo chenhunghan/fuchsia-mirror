@@ -12,15 +12,15 @@
     children: [
         {
             name: "netstack",
-            url: "#meta/netstack3-conformance.cm",
+            url: "netstack-conformance#meta/netstack3-conformance.cm",
         },
         {
             name: "dhcp-client",
-            url: "#meta/dhcp-client.cm",
+            url: "dhcp-client#meta/dhcp-client.cm",
         },
         {
             name: "dhcpd",
-            url: "#meta/dhcpv4_server.cm",
+            url: "dhcpv4-server#meta/dhcpv4_server.cm",
         },
         {
             name: "dhcpv6-client",

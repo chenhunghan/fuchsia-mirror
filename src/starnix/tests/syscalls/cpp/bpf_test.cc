@@ -286,7 +286,7 @@ class BpfMapTest : public BpfTestBase {
     bpf_attr attr = {
         .info =
             {
-                .bpf_fd = (unsigned)map_fd_.get(),
+                .bpf_fd = (unsigned)map_fd,
                 .info_len = sizeof(map_info),
                 .info = (uintptr_t)&map_info,
             },
@@ -476,7 +476,7 @@ class BpfMapTest : public BpfTestBase {
   int map_fd() const { return map_fd_.get(); }
   int ringbuf_fd() const { return ringbuf_fd_.get(); }
 
- private:
+ protected:
   fbl::unique_fd array_fd_;
   fbl::unique_fd map_fd_;
   fbl::unique_fd ringbuf_fd_;
@@ -650,6 +650,7 @@ TEST_F(BpfMapTest, MapReadOnly) {
 
 TEST_F(BpfMapTest, PinMap) {
   const char* pin_path = "/sys/fs/bpf/foo";
+  unlink(pin_path);
 
   Pin(map_fd(), pin_path);
   EXPECT_EQ(access(pin_path, F_OK), 0) << strerror(errno);
@@ -658,15 +659,15 @@ TEST_F(BpfMapTest, PinMap) {
   ASSERT_EQ(statx(AT_FDCWD, pin_path, 0, STATX_ATIME, &statx1), 0) << strerror(errno);
 
   // Close the map fd.
-  EXPECT_EQ(close(map_fd()), 0);
+  map_fd_.reset();
 
   // Sleep a bit to allow the atime to change.
   usleep(10000);
 
   union bpf_attr attr = {.pathname = (uintptr_t)pin_path};
-  int map_fd = bpf(BPF_OBJ_GET, &attr);
-  ASSERT_GE(map_fd, 0) << strerror(errno);
-  CheckMapInfo(map_fd);
+  fbl::unique_fd pinned_map_fd(bpf(BPF_OBJ_GET, &attr));
+  ASSERT_TRUE(pinned_map_fd.is_valid()) << strerror(errno);
+  CheckMapInfo(pinned_map_fd.get());
 
   // The atime should have changed.
   struct statx statx2;
@@ -674,6 +675,7 @@ TEST_F(BpfMapTest, PinMap) {
   EXPECT_TRUE(statx1.stx_atime.tv_sec < statx2.stx_atime.tv_sec ||
               (statx1.stx_atime.tv_sec == statx2.stx_atime.tv_sec &&
                statx1.stx_atime.tv_nsec < statx2.stx_atime.tv_nsec));
+  EXPECT_EQ(unlink(pin_path), 0) << strerror(errno);
 }
 
 TEST_F(BpfMapTest, FreezeMap) {
@@ -1300,6 +1302,257 @@ TEST_F(BpfMapTest, ObjGetInfoByFdOnlyWritesRequestedSize) {
   munmap(mem, page_size * 2);
 }
 
+TEST_F(BpfTestBase, DivByZeroConstant) {
+  const uint8_t kDivByZeroCodes[] = {
+      BPF_ALU | BPF_DIV | BPF_K,
+      BPF_ALU64 | BPF_DIV | BPF_K,
+  };
+  for (uint8_t code : kDivByZeroCodes) {
+    bpf_insn prog[] = {
+        BPF_MOV_IMM(0, 42),
+        // r0 /= 0
+        bpf_insn{
+            .code = code,
+            .dst_reg = 0,
+            .src_reg = 0,
+            .off = 0,
+            .imm = 0,
+        },
+        BPF_RETURN(),
+    };
+    fbl::unique_fd prog_fd = TryLoadProgram(prog, std::size(prog), BPF_PROG_TYPE_SOCKET_FILTER, 0);
+    EXPECT_THAT(prog_fd.get(), SyscallFailsWithErrno(EINVAL));
+  }
+}
+
+TEST_F(BpfTestBase, ModByZeroConstant) {
+  const uint8_t kModByZeroCodes[] = {
+      BPF_ALU | BPF_MOD | BPF_K,
+      BPF_ALU64 | BPF_MOD | BPF_K,
+  };
+  for (uint8_t code : kModByZeroCodes) {
+    bpf_insn prog[] = {
+        BPF_MOV_IMM(0, 42),
+        // r0 %= 0
+        bpf_insn{
+            .code = code,
+            .dst_reg = 0,
+            .src_reg = 0,
+            .off = 0,
+            .imm = 0,
+        },
+        BPF_RETURN(),
+    };
+    fbl::unique_fd prog_fd = TryLoadProgram(prog, std::size(prog), BPF_PROG_TYPE_SOCKET_FILTER, 0);
+    EXPECT_THAT(prog_fd.get(), SyscallFailsWithErrno(EINVAL));
+  }
+}
+
+TEST_F(BpfTestBase, ShiftOutOfBound) {
+  const std::pair<uint8_t, int32_t> kInvalidShifts[] = {
+      {BPF_ALU | BPF_LSH | BPF_K, 32},
+      {BPF_ALU | BPF_RSH | BPF_K, -1},
+      {BPF_ALU64 | BPF_LSH | BPF_K, 64},
+      {BPF_ALU64 | BPF_ARSH | BPF_K, -1},
+  };
+  for (const auto& [code, imm] : kInvalidShifts) {
+    bpf_insn prog[] = {
+        BPF_MOV_IMM(0, 1),
+        bpf_insn{
+            .code = code,
+            .dst_reg = 0,
+            .src_reg = 0,
+            .off = 0,
+            .imm = imm,
+        },
+        BPF_RETURN(),
+    };
+    fbl::unique_fd prog_fd = TryLoadProgram(prog, std::size(prog), BPF_PROG_TYPE_SOCKET_FILTER, 0);
+    EXPECT_THAT(prog_fd.get(), SyscallFailsWithErrno(EINVAL));
+  }
+}
+
+TEST_F(BpfTestBase, ContextUnalignedRead) {
+  bpf_insn unaligned_prog[] = {
+      // r0 = *(uint32_t*)(r1 + 1) - unaligned read from __sk_buff.
+      BPF_LOAD_OFFSET(0, 1, 1),
+      BPF_RETURN(),
+  };
+  fbl::unique_fd prog_fd =
+      TryLoadProgram(unaligned_prog, std::size(unaligned_prog), BPF_PROG_TYPE_SOCKET_FILTER, 0);
+  EXPECT_THAT(prog_fd.get(), SyscallFailsWithErrno(EACCES));
+
+  // Variable-offset read from __sk_buff must also be rejected, even when aligned and in bounds.
+  bpf_insn variable_offset_prog[] = {
+      // r2 = *(uint32_t*)(r1 + 0)
+      BPF_LOAD_OFFSET(2, 1, 0),
+      // r2 &= 4 (so r2 is 0 or 4, both aligned 4-byte __sk_buff fields)
+      bpf_insn{
+          .code = BPF_ALU64 | BPF_AND | BPF_K,
+          .dst_reg = 2,
+          .src_reg = 0,
+          .off = 0,
+          .imm = 4,
+      },
+      // r1 += r2
+      bpf_insn{
+          .code = BPF_ALU64 | BPF_ADD | BPF_X,
+          .dst_reg = 1,
+          .src_reg = 2,
+          .off = 0,
+          .imm = 0,
+      },
+      // r0 = *(uint32_t*)(r1 + 0)
+      BPF_LOAD_OFFSET(0, 1, 0),
+      BPF_RETURN(),
+  };
+  prog_fd = TryLoadProgram(variable_offset_prog, std::size(variable_offset_prog),
+                           BPF_PROG_TYPE_SOCKET_FILTER, 0);
+  EXPECT_THAT(prog_fd.get(), SyscallFailsWithErrno(EACCES));
+}
+
+TEST_F(BpfTestBase, LdAbsUninitializedR0) {
+  bpf_insn prog[] = {
+      // r6 = r1 (BPF_LD | BPF_ABS expects skb in r6).
+      BPF_MOV_REG(6, 1),
+      // r0 = *(uint8_t*)(skb->data + 0) without initializing r0 first.
+      bpf_insn{
+          .code = BPF_LD | BPF_B | BPF_ABS,
+          .dst_reg = 0,
+          .src_reg = 0,
+          .off = 0,
+          .imm = 0,
+      },
+      BPF_RETURN(),
+  };
+  fbl::unique_fd prog_fd = TryLoadProgram(prog, std::size(prog), BPF_PROG_TYPE_SOCKET_FILTER, 0);
+  EXPECT_THAT(prog_fd.get(), SyscallSucceeds());
+}
+
+TEST_F(BpfMapTest, PointerHugeOffset) {
+  bpf_insn prog[] = {
+      // *(uint32_t*)(r10 - 4) = 0
+      bpf_insn{
+          .code = BPF_ST | BPF_MEM | BPF_W,
+          .dst_reg = 10,
+          .src_reg = 0,
+          .off = -4,
+          .imm = 0,
+      },
+      BPF_MOV_REG(2, 10),
+      BPF_ADD_IMM(2, -4),
+      BPF_LOAD_MAP(1, array_fd()),
+      BPF_CALL_EXTERNAL(BPF_FUNC_map_lookup_elem),
+      bpf_insn{
+          .code = BPF_JMP | BPF_JEQ | BPF_K,
+          .dst_reg = 0,
+          .src_reg = 0,
+          .off = 6,
+          .imm = 0,
+      },
+      BPF_MOV_REG(6, 0),
+      // r1 = 1ULL << 32 (exceeds the 1 << 29 pointer offset limit)
+      bpf_insn{
+          .code = BPF_LD | BPF_DW | BPF_IMM,
+          .dst_reg = 1,
+          .src_reg = 0,
+          .off = 0,
+          .imm = 0,
+      },
+      bpf_insn{
+          .code = 0,
+          .dst_reg = 0,
+          .src_reg = 0,
+          .off = 0,
+          .imm = 1,
+      },
+      // Add and then subtract `r1` so the pointer returns in bounds before the dereference,
+      // verifying that `1 << 29` is enforced at the pointer-arithmetic step itself.
+      // r6 += r1
+      bpf_insn{
+          .code = BPF_ALU64 | BPF_ADD | BPF_X,
+          .dst_reg = 6,
+          .src_reg = 1,
+          .off = 0,
+          .imm = 0,
+      },
+      // r6 -= r1
+      bpf_insn{
+          .code = BPF_ALU64 | BPF_SUB | BPF_X,
+          .dst_reg = 6,
+          .src_reg = 1,
+          .off = 0,
+          .imm = 0,
+      },
+      // r0 = *(uint32_t*)(r6 + 0)
+      BPF_LOAD_OFFSET(0, 6, 0),
+      BPF_MOV_IMM(0, 0),
+      BPF_RETURN(),
+  };
+  fbl::unique_fd prog_fd = TryLoadProgram(prog, std::size(prog), BPF_PROG_TYPE_SOCKET_FILTER, 0);
+  EXPECT_THAT(prog_fd.get(), SyscallFailsWithErrno(EINVAL));
+}
+
+TEST_F(BpfTestBase, PointerLeakByEnd) {
+  bpf_insn ptr_swap_prog[] = {
+      // r0 = r10 (frame pointer)
+      BPF_MOV_REG(0, 10),
+      // r0 = htobe64(r0)
+      bpf_insn{
+          .code = BPF_ALU | BPF_END | BPF_TO_BE,
+          .dst_reg = 0,
+          .src_reg = 0,
+          .off = 0,
+          .imm = 64,
+      },
+      BPF_MOV_IMM(0, 0),
+      BPF_RETURN(),
+  };
+
+  // Byte-swapping a pointer register is permitted (coercing the register to an unknown scalar)
+  // when the caller holds CAP_SYS_ADMIN or CAP_PERFMON.
+  fbl::unique_fd prog_fd =
+      TryLoadProgram(ptr_swap_prog, std::size(ptr_swap_prog), BPF_PROG_TYPE_SOCKET_FILTER, 0);
+  EXPECT_THAT(prog_fd.get(), SyscallSucceeds());
+
+  test_helper::ForkHelper fork_helper;
+  fork_helper.RunInForkedProcess([&]() {
+    test_helper::UnsetCapabilityEffective(CAP_SYS_ADMIN);
+    fbl::unique_fd prog_fd =
+        TryLoadProgram(ptr_swap_prog, std::size(ptr_swap_prog), BPF_PROG_TYPE_SOCKET_FILTER, 0);
+    EXPECT_THAT(prog_fd.get(), SyscallSucceeds());
+  });
+  EXPECT_TRUE(fork_helper.WaitForChildren());
+
+  // Without CAP_SYS_ADMIN or CAP_PERFMON (retaining CAP_BPF to load the program), byte-swapping a
+  // pointer register must be rejected with EACCES.
+  fork_helper.RunInForkedProcess([&]() {
+    test_helper::UnsetCapabilityEffective(CAP_SYS_ADMIN);
+    test_helper::UnsetCapabilityEffective(CAP_PERFMON);
+    fbl::unique_fd prog_fd =
+        TryLoadProgram(ptr_swap_prog, std::size(ptr_swap_prog), BPF_PROG_TYPE_SOCKET_FILTER, 0);
+    EXPECT_THAT(prog_fd.get(), SyscallFailsWithErrno(EACCES));
+  });
+  EXPECT_TRUE(fork_helper.WaitForChildren());
+
+  // Byte-swapping an uninitialized register must always be rejected, even with CAP_SYS_ADMIN.
+  bpf_insn uninit_swap_prog[] = {
+      // r2 = htobe64(r2) where r2 is uninitialized.
+      bpf_insn{
+          .code = BPF_ALU | BPF_END | BPF_TO_BE,
+          .dst_reg = 2,
+          .src_reg = 0,
+          .off = 0,
+          .imm = 64,
+      },
+      BPF_MOV_IMM(0, 0),
+      BPF_RETURN(),
+  };
+  prog_fd =
+      TryLoadProgram(uninit_swap_prog, std::size(uninit_swap_prog), BPF_PROG_TYPE_SOCKET_FILTER, 0);
+  EXPECT_THAT(prog_fd.get(), SyscallFailsWithErrno(EACCES));
+}
+
 class BpfMapCapabilityTest
     : public BpfTestBase,
       public ::testing::WithParamInterface<std::tuple<uint32_t, bool, bool, bool, bool>> {
@@ -1633,27 +1886,53 @@ class BpfCgroupTest : public BpfTestBase {
     assert(root_cgroup_);
   }
 
-  fbl::unique_fd LoadBlockPortProgram(uint32_t expected_attach_type) {
-    // A bpf program that blocks bind on 42.
+  fbl::unique_fd LoadBlockPortProgram(uint32_t expected_attach_type, int32_t block_ret = 0,
+                                      int32_t allow_ret = 1) {
+    // A bpf program that blocks bind on BLOCKED_PORT.
     bpf_insn program[] = {
         // r0 <- [r1+24] (bpf_sock_addr.user_port)
         BPF_LOAD_OFFSET(0, 1, offsetof(bpf_sock_addr, user_port)),
         // r0 != BLOCKED_PORT -> JMP 2
         BPF_JNE_IMM(0, htons(BLOCKED_PORT), 2),
 
-        // r0 <- 0
-        BPF_MOV_IMM(0, 0),
+        // r0 <- block_ret
+        BPF_MOV_IMM(0, block_ret),
         // exit
         BPF_RETURN(),
 
-        // r0 <- 1
-        BPF_MOV_IMM(0, 1),
+        // r0 <- allow_ret
+        BPF_MOV_IMM(0, allow_ret),
         // exit
         BPF_RETURN(),
     };
 
     return LoadProgram(program, sizeof(program) / sizeof(program[0]),
                        BPF_PROG_TYPE_CGROUP_SOCK_ADDR, expected_attach_type);
+  }
+
+  fbl::unique_fd LoadConstSockAddrProgram(uint32_t expected_attach_type, int32_t return_value) {
+    bpf_insn program[] = {
+        BPF_MOV_IMM(0, return_value),
+        BPF_RETURN(),
+    };
+
+    return LoadProgram(program, sizeof(program) / sizeof(program[0]),
+                       BPF_PROG_TYPE_CGROUP_SOCK_ADDR, expected_attach_type);
+  }
+
+  std::optional<uint16_t> FindAvailablePrivilegedPort(int domain, int upper_bound) {
+    int limit = std::min(upper_bound, 1024);
+    for (int port = std::min(600, limit); port < limit; ++port) {
+      if (TryBind(static_cast<uint16_t>(port), 0, domain)) {
+        return static_cast<uint16_t>(port);
+      }
+    }
+    for (int port = 1; port < std::min(600, limit); ++port) {
+      if (TryBind(static_cast<uint16_t>(port), 0, domain)) {
+        return static_cast<uint16_t>(port);
+      }
+    }
+    return std::nullopt;
   }
 
   fbl::unique_fd LoadCgroupSkbProgram(uint32_t expected_attach_type) {
@@ -1691,12 +1970,12 @@ class BpfCgroupTest : public BpfTestBase {
     ASSERT_THAT(TryDetachFromRootCgroup(attach_type), SyscallSucceeds());
   }
 
-  testing::AssertionResult TryBind(uint16_t port, int expected_errno) {
-    fbl::unique_fd sock(socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP));
+  testing::AssertionResult TryBind(uint16_t port, int expected_errno, int domain = AF_INET) {
+    fbl::unique_fd sock(socket(domain, SOCK_DGRAM, IPPROTO_UDP));
     if (!sock) {
       return testing::AssertionFailure() << "socket failed: " << strerror(errno);
     }
-    sockaddr_in addr = {
+    sockaddr_in addr4 = {
         .sin_family = AF_INET,
         .sin_port = htons(port),
         .sin_addr =
@@ -1704,7 +1983,15 @@ class BpfCgroupTest : public BpfTestBase {
                 .s_addr = htonl(INADDR_LOOPBACK),
             },
     };
-    int r = bind(sock.get(), reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+    sockaddr_in6 addr6 = {
+        .sin6_family = AF_INET6,
+        .sin6_port = htons(port),
+        .sin6_addr = IN6ADDR_ANY_INIT,
+    };
+    sockaddr* addr = domain == AF_INET6 ? reinterpret_cast<sockaddr*>(&addr6)
+                                        : reinterpret_cast<sockaddr*>(&addr4);
+    socklen_t addrlen = domain == AF_INET6 ? sizeof(addr6) : sizeof(addr4);
+    int r = bind(sock.get(), addr, addrlen);
     if (expected_errno) {
       if (r != -1) {
         return testing::AssertionFailure() << "bind succeeded when it expected to fail";
@@ -1774,6 +2061,120 @@ TEST_F(BpfCgroupTest, BlockBind) {
 
   // Should be unblocked now.
   ASSERT_TRUE(TryBind(BLOCKED_PORT, 0));
+}
+
+TEST_F(BpfCgroupTest, BlockBindWithReturnFlags) {
+  if (!test_helper::IsStarnix() && !test_helper::IsKernelVersionAtLeast(5, 12)) {
+    GTEST_SKIP() << "BPF_RET_BIND_NO_CAP_NET_BIND_SERVICE return values require Linux >= 5.12.";
+  }
+
+  // BPF_CGROUP_INET{4,6}_BIND encodes BPF_RET_BIND_NO_CAP_NET_BIND_SERVICE (1) in result >> 1
+  // and the allow/reject verdict in result & 1: 2 rejects the bind, 3 allows it.
+  constexpr int32_t kRejectWithNoCapNetBindService = 2;
+  constexpr int32_t kAllowWithNoCapNetBindService = 3;
+
+  {
+    SCOPED_TRACE("BPF_CGROUP_INET4_BIND");
+    ASSERT_TRUE(TryBind(BLOCKED_PORT, 0, AF_INET));
+    auto prog = LoadBlockPortProgram(BPF_CGROUP_INET4_BIND, kRejectWithNoCapNetBindService,
+                                     kAllowWithNoCapNetBindService);
+    AttachToRootCgroup(BPF_CGROUP_INET4_BIND, prog.get());
+    EXPECT_TRUE(TryBind(BLOCKED_PORT, EPERM, AF_INET));
+    EXPECT_TRUE(TryBind(BLOCKED_PORT + 1, 0, AF_INET));
+    DetachFromRootCgroup(BPF_CGROUP_INET4_BIND);
+    EXPECT_TRUE(TryBind(BLOCKED_PORT, 0, AF_INET));
+  }
+
+  {
+    SCOPED_TRACE("BPF_CGROUP_INET6_BIND");
+    ASSERT_TRUE(TryBind(BLOCKED_PORT, 0, AF_INET6));
+    auto prog = LoadBlockPortProgram(BPF_CGROUP_INET6_BIND, kRejectWithNoCapNetBindService,
+                                     kAllowWithNoCapNetBindService);
+    AttachToRootCgroup(BPF_CGROUP_INET6_BIND, prog.get());
+    EXPECT_TRUE(TryBind(BLOCKED_PORT, EPERM, AF_INET6));
+    EXPECT_TRUE(TryBind(BLOCKED_PORT + 1, 0, AF_INET6));
+    DetachFromRootCgroup(BPF_CGROUP_INET6_BIND);
+    EXPECT_TRUE(TryBind(BLOCKED_PORT, 0, AF_INET6));
+  }
+}
+
+TEST_F(BpfCgroupTest, BindBypassCapNetBindService) {
+  if (!test_helper::IsStarnix() && !test_helper::IsKernelVersionAtLeast(5, 12)) {
+    GTEST_SKIP() << "BPF_RET_BIND_NO_CAP_NET_BIND_SERVICE requires Linux >= 5.12.";
+  }
+  if (!test_helper::HasCapability(CAP_NET_BIND_SERVICE)) {
+    GTEST_SKIP() << "Test requires CAP_NET_BIND_SERVICE initially.";
+  }
+
+  int unprivileged_port_start = 1024;
+  if (!test_helper::IsStarnix()) {
+    std::ifstream sysctl_file("/proc/sys/net/ipv4/ip_unprivileged_port_start");
+    if (sysctl_file.is_open()) {
+      sysctl_file >> unprivileged_port_start;
+    }
+    if (unprivileged_port_start <= 1) {
+      GTEST_SKIP() << "ip_unprivileged_port_start=" << unprivileged_port_start
+                   << " leaves no privileged ports to test.";
+    }
+  }
+
+  constexpr int32_t kAllowDefault = 1;
+  constexpr int32_t kRejectWithNoCapNetBindService = 2;
+  constexpr int32_t kAllowWithNoCapNetBindService = 3;
+
+  struct Case {
+    const char* name;
+    int domain;
+    uint32_t attach_type;
+  };
+  for (const auto& tc : {
+           Case{"BPF_CGROUP_INET4_BIND", AF_INET, BPF_CGROUP_INET4_BIND},
+           Case{"BPF_CGROUP_INET6_BIND", AF_INET6, BPF_CGROUP_INET6_BIND},
+       }) {
+    SCOPED_TRACE(tc.name);
+    auto priv_port = FindAvailablePrivilegedPort(tc.domain, unprivileged_port_start);
+    ASSERT_TRUE(priv_port.has_value()) << "No available privileged port found";
+
+    auto expect_unprivileged_bind = [&](int expected_errno) {
+      test_helper::ForkHelper fork_helper;
+      fork_helper.RunInForkedProcess([&]() {
+        test_helper::UnsetCapabilityEffective(CAP_NET_BIND_SERVICE);
+        EXPECT_TRUE(TryBind(*priv_port, expected_errno, tc.domain));
+      });
+      EXPECT_TRUE(fork_helper.WaitForChildren());
+    };
+
+    // 1. Without a cgroup bind program, binding < 1024 without CAP_NET_BIND_SERVICE fails with
+    // EACCES.
+    expect_unprivileged_bind(EACCES);
+
+    // 2. Returning 1 (Allow without BPF_RET_BIND_NO_CAP_NET_BIND_SERVICE) still enforces
+    // CAP_NET_BIND_SERVICE -> EACCES.
+    {
+      auto allow_prog = LoadConstSockAddrProgram(tc.attach_type, kAllowDefault);
+      AttachToRootCgroup(tc.attach_type, allow_prog.get());
+      expect_unprivileged_bind(EACCES);
+      DetachFromRootCgroup(tc.attach_type);
+    }
+
+    // 3. Returning 3 (Allow with BPF_RET_BIND_NO_CAP_NET_BIND_SERVICE) bypasses
+    // CAP_NET_BIND_SERVICE -> bind succeeds.
+    {
+      auto bypass_prog = LoadConstSockAddrProgram(tc.attach_type, kAllowWithNoCapNetBindService);
+      AttachToRootCgroup(tc.attach_type, bypass_prog.get());
+      expect_unprivileged_bind(0);
+      DetachFromRootCgroup(tc.attach_type);
+    }
+
+    // 4. Returning 2 (Block with BPF_RET_BIND_NO_CAP_NET_BIND_SERVICE) rejects in eBPF before
+    // CAP_NET_BIND_SERVICE -> EPERM.
+    {
+      auto reject_prog = LoadConstSockAddrProgram(tc.attach_type, kRejectWithNoCapNetBindService);
+      AttachToRootCgroup(tc.attach_type, reject_prog.get());
+      expect_unprivileged_bind(EPERM);
+      DetachFromRootCgroup(tc.attach_type);
+    }
+  }
 }
 
 TEST_F(BpfCgroupTest, BlockConnect) {
@@ -1977,6 +2378,78 @@ TEST_F(BpfIdTest, RequiresSysAdmin) {
     EXPECT_EQ(errno, EPERM);
   });
   EXPECT_TRUE(fork_helper.WaitForChildren());
+}
+
+TEST_F(BpfCgroupTest, QueryProg) {
+  // Load program
+  bpf_insn program[] = {
+      BPF_MOV_IMM(0, 1),
+      BPF_RETURN(),
+  };
+  fbl::unique_fd prog_fd = LoadProgram(program, sizeof(program) / sizeof(program[0]),
+                                       BPF_PROG_TYPE_CGROUP_SOCK_ADDR, BPF_CGROUP_INET4_BIND);
+  ASSERT_TRUE(prog_fd.is_valid());
+
+  // Attach program
+  AttachToRootCgroup(BPF_CGROUP_INET4_BIND, prog_fd.get());
+
+  // Query program
+  uint32_t prog_ids[4] = {};
+  bpf_attr attr;
+  memset(&attr, 0, sizeof(attr));
+  attr.query.target_fd = root_cgroup_.get();
+  attr.query.attach_type = BPF_CGROUP_INET4_BIND;
+  attr.query.prog_cnt = 4;
+  attr.query.prog_ids = reinterpret_cast<uint64_t>(prog_ids);
+
+  ASSERT_THAT(bpf(BPF_PROG_QUERY, &attr), SyscallSucceeds());
+  EXPECT_EQ(attr.query.prog_cnt, 1u);
+  EXPECT_NE(prog_ids[0], 0u);
+
+  // Query program count with prog_cnt = 0 and prog_ids = NULL.
+  memset(&attr, 0, sizeof(attr));
+  attr.query.target_fd = root_cgroup_.get();
+  attr.query.attach_type = BPF_CGROUP_INET4_BIND;
+  attr.query.prog_cnt = 0;
+  attr.query.prog_ids = 0;
+
+  ASSERT_THAT(bpf(BPF_PROG_QUERY, &attr), SyscallSucceeds());
+  EXPECT_EQ(attr.query.prog_cnt, 1u);
+
+  // Querying without CAP_NET_ADMIN fails with EPERM.
+  test_helper::ForkHelper fork_helper;
+  fork_helper.RunInForkedProcess([&]() {
+    test_helper::UnsetCapabilityEffective(CAP_NET_ADMIN);
+    EXPECT_THAT(bpf(BPF_PROG_QUERY, &attr), SyscallFailsWithErrno(EPERM));
+  });
+  EXPECT_TRUE(fork_helper.WaitForChildren());
+
+  DetachFromRootCgroup(BPF_CGROUP_INET4_BIND);
+
+  // Query after detach returns 0 programs.
+  memset(&attr, 0, sizeof(attr));
+  attr.query.target_fd = root_cgroup_.get();
+  attr.query.attach_type = BPF_CGROUP_INET4_BIND;
+  attr.query.prog_cnt = 4;
+  attr.query.prog_ids = reinterpret_cast<uint64_t>(prog_ids);
+  ASSERT_THAT(bpf(BPF_PROG_QUERY, &attr), SyscallSucceeds());
+  EXPECT_EQ(attr.query.prog_cnt, 0u);
+
+  // Query netstack-attached cgroup skb program (BPF_CGROUP_INET_INGRESS).
+  auto skb_prog_fd = LoadCgroupSkbProgram(BPF_CGROUP_INET_INGRESS);
+  AttachToRootCgroup(BPF_CGROUP_INET_INGRESS, skb_prog_fd.get());
+
+  memset(prog_ids, 0, sizeof(prog_ids));
+  memset(&attr, 0, sizeof(attr));
+  attr.query.target_fd = root_cgroup_.get();
+  attr.query.attach_type = BPF_CGROUP_INET_INGRESS;
+  attr.query.prog_cnt = 4;
+  attr.query.prog_ids = reinterpret_cast<uint64_t>(prog_ids);
+  ASSERT_THAT(bpf(BPF_PROG_QUERY, &attr), SyscallSucceeds());
+  EXPECT_EQ(attr.query.prog_cnt, 1u);
+  EXPECT_NE(prog_ids[0], 0u);
+
+  DetachFromRootCgroup(BPF_CGROUP_INET_INGRESS);
 }
 
 }  // namespace

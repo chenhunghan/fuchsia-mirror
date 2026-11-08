@@ -2,8 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Blanket ignores to enable mypy in Antlion
-# mypy: disable-error-code="no-untyped-def"
 import logging
 import os
 import re
@@ -12,7 +10,8 @@ import subprocess
 import tempfile
 import threading
 import time
-from typing import IO
+from types import TracebackType
+from typing import IO, Self
 
 from libs.proc import job
 from libs.proc.runner import (
@@ -21,6 +20,7 @@ from libs.proc.runner import (
     Runner,
 )
 from libs.ssh import formatter
+from libs.ssh import settings as ssh_settings
 from mobly import logger
 
 
@@ -36,7 +36,7 @@ class SshConnection(Runner):
     """
 
     @property
-    def socket_path(self):
+    def socket_path(self) -> str:
         """Returns: The os path to the main socket file."""
         if self._main_ssh_tempdir is None:
             raise AttributeError(
@@ -44,7 +44,7 @@ class SshConnection(Runner):
             )
         return os.path.join(self._main_ssh_tempdir, "socket")
 
-    def __init__(self, settings):
+    def __init__(self, settings: ssh_settings.SshSettings) -> None:
         """
         Args:
             settings: The ssh settings to use for this connection.
@@ -54,7 +54,7 @@ class SshConnection(Runner):
         self._settings = settings
         self._formatter = formatter.SshFormatter()
         self._lock = threading.Lock()
-        self._main_ssh_proc = None
+        self._main_ssh_proc: subprocess.Popen[bytes] | None = None
         self._main_ssh_tempdir: str | None = None
 
         self.log = logger.PrefixLoggerAdapter(
@@ -64,16 +64,21 @@ class SshConnection(Runner):
             },
         )
 
-    def __enter__(self):
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, _, __, ___):
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         self.close()
 
-    def __del__(self):
+    def __del__(self) -> None:
         self.close()
 
-    def setup_main_ssh(self, timeout_sec: int = 5):
+    def setup_main_ssh(self, timeout_sec: int = 5) -> None:
         """Sets up the main ssh connection.
 
         Sets up the initial main ssh connection if it has not already been

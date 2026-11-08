@@ -9,8 +9,7 @@
     },
     use: [
         { protocol: "examples.keyvaluestore.usegenericvalues.Store" },
-    ],
-    config: {
+
         // [START diff_1]
         // A vector of values for every easily representible type in our key-value store. For
         // brevity's sake, the 8, 16, and 32 bit integer types and booleans are omitted.
@@ -19,43 +18,75 @@
         //   deal of string parsing if we were able to use all FIDL constructs directly here. In
         //   particular, floats and nested types are very difficult to represent, and have been
         //   excluded from this example for the time being.
-        set_concat_option: { type: "bool" },
-        set_overwrite_option: { type: "bool" },
-        write_bytes: {
+        {
+            config: "fuchsia.examples.keyvaluestore.usegenericvalues.SetConcatOption",
+            key: "set_concat_option",
+            type: "bool",
+            availability: "transitional",
+            default: false,
+        },
+        {
+            config: "fuchsia.examples.keyvaluestore.usegenericvalues.SetOverwriteOption",
+            key: "set_overwrite_option",
+            type: "bool",
+            availability: "transitional",
+            default: false,
+        },
+        {
+            config: "fuchsia.examples.keyvaluestore.usegenericvalues.WriteBytes",
+            key: "write_bytes",
             type: "vector",
             max_count: 16,
             element: {
                 type: "string",
                 max_size: 64,
             },
+            availability: "transitional",
+            default: [],
         },
-        write_strings: {
+        {
+            config: "fuchsia.examples.keyvaluestore.usegenericvalues.WriteStrings",
+            key: "write_strings",
             type: "vector",
             max_count: 16,
             element: {
                 type: "string",
                 max_size: 64,
             },
+            availability: "transitional",
+            default: [],
         },
-        write_uint64s: {
+        {
+            config: "fuchsia.examples.keyvaluestore.usegenericvalues.WriteUint64s",
+            key: "write_uint64s",
             type: "vector",
             max_count: 16,
             element: { type: "uint64" },
+            availability: "transitional",
+            default: [],
         },
-        write_int64s: {
+        {
+            config: "fuchsia.examples.keyvaluestore.usegenericvalues.WriteInt64s",
+            key: "write_int64s",
             type: "vector",
             max_count: 16,
             element: { type: "int64" },
+            availability: "transitional",
+            default: [],
         },
 
         // Note: due to the limitation of structured config not allowing vectors nested in vectors,
         // we only set the lower half of the uint128 for simplicity's sake.
-        write_uint128s: {
+        {
+            config: "fuchsia.examples.keyvaluestore.usegenericvalues.WriteUint128s",
+            key: "write_uint128s",
             type: "vector",
             max_count: 16,
             element: { type: "uint64" },
+            availability: "transitional",
+            default: [],
         },
 
         // [END diff_1]
-    },
+    ],
 }

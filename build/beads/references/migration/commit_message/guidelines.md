@@ -102,7 +102,7 @@ Follow the line length limits from the [Fuchsia commit message style guide](/doc
 - **Subject line (Line 1):** Aim for **50 characters or fewer** when possible, and keep it **65 characters or fewer** (or at most 72 characters). Omitting redundant verbs like `"Migrate "` helps keep full `//...` labels within this limit. However, if necessary, **clarity and accuracy are more important than line length** for the subject line.
 - **Blank line (Line 2):** Always leave a single blank line between the subject line and the body.
 - **Body lines:** Wrap all prose body lines at **72 characters or fewer**.
-- **Footer line length exceptions:** `Test:` and `Bazel-Migration-Target:` footer lines may exceed the 72-character limit to fit the entire command or target label. These lines **MUST NOT** be broken into multiple lines.
+- **Line length exceptions:** `Test:` and `Bazel-Migration-Target:` footer lines, as well as preserved human-added `NO_IFTTT=<reason>` lines placed in their own paragraph above the footer block, may exceed the 72-character limit to fit the entire command, target label, or justification. These lines **MUST NOT** be broken into multiple lines.
 
 ---
 
@@ -126,7 +126,11 @@ The commit body must clearly explain the scope and details of the migration so h
    - Explicitly note any targets in `BUILD.bazel` that do **not** use `bazel2gn` (such as targets marked with `# @bazel2gn:skip`).
 
 4. **Other Non-Trivial Conversion Details:**
-   - Note any non-trivial aspects of the migration, such as visibility scoping, `target_compatible_with` constraints, IDK atom registration, or changes to shared `.bzl` files outside the migrated directory.
+   - Note any non-trivial aspects of the migration, such as:
+     - **Unrolled GN templates:** When unrolling a file-local GN `template("<name>")` into explicit targets in `BUILD.bazel`, name the unrolled template in the commit body.
+     - **Unreachable/unreferenced template unit tests:** If a GN template generated unit tests (`with_unit_tests = true`) for an instance whose `<instance>_test` target was never wired into `group("tests")` or a test package in `BUILD.gn`, note this in the commit body and leave a `# TODO` comment in `BUILD.bazel` asking owners whether the test should be enabled or removed.
+     - **Platform compatibility narrowing (`target_compatible_with`):** Never silently restrict a library to Fuchsia-only just because its unit tests only ran on Fuchsia. If a target was not enclosed in `if (is_fuchsia)` or `if (is_host)` in `BUILD.gn` but requires `target_compatible_with` in `BUILD.bazel` (for example, due to unconditional Fuchsia-only dependencies), explicitly explain this in the commit body and flag it with a comment in `BUILD.bazel` so reviewers can confirm whether the platform restriction is intended.
+     - **Visibility scoping, IDK atom registration, or shared `.bzl` changes:** Note any non-obvious visibility decisions, IDK atom updates, or edits to `.bzl` files outside the migrated directory.
 
 ---
 
@@ -137,13 +141,17 @@ The commit body must clearly explain the scope and details of the migration so h
 - **Single Contiguous Block:** All footers **MUST** be grouped in a single contiguous block at the very bottom of the commit message, separated from the body by a single blank line, with **no blank lines between any footers**. Any footer separated from the final block by an empty line may not be parsed as a footer by Gerrit (for example, Gerrit searches such as `hasfooter:Bazel-Migration-Target` will fail to match footers placed above a blank line).
 - **No Line Wrapping on `Test:` or `Bazel-Migration-Target:`:** Both `Test:` and `Bazel-Migration-Target:` lines may exceed the 72-character line limit to fit the entire command or label, and **MUST NOT** be broken across multiple lines.
 - **Do NOT Use `No-Try: true`:** Do **not** include the `No-Try: true` footer. The one exception is when uploading Planter learnings in CLs that **only** contain files in `//build/beads/planter`.
+- **Never Add `NO_IFTTT` Lines Automatically; Preserve Human-Added `NO_IFTTT` Lines Above the Footer Block:**
+  - Planter and AI agents **MUST NEVER** add `NO_IFTTT=...` (or `NO_IFTTT:`) lines to commit messages. Humans must review any `LINT.IfChange`/`LINT.ThenChange` (IFTTT) warnings or errors, evaluate whether the paired file needs updating, and add their own `NO_IFTTT=<reason>` message as appropriate.
+  - Because `NO_IFTTT=<reason>` uses `=` rather than `:`, Git (`git interpret-trailers`) and Gerrit do not recognize it as a `Key: value` trailer; placing `NO_IFTTT=...` inside the contiguous footer block splits the trailer block and causes Gerrit to stop indexing any footers above it (such as `Bazel-Migration-Target:`).
+  - When amending an existing commit where a human has already added a `NO_IFTTT=<reason>` line, preserve that line verbatim on a single unwrapped line (it may exceed 72 characters) in its own paragraph at the end of the commit body, separated from the contiguous footer block (`Bug:`, `Test:`, `Bazel-Migration-Target:`, `TAG:`, `Change-Id:`) by a single blank line.
 
 ### Footer Order and Definitions
 
 List footers in the following exact order (from most relevant to human reviewers to automated metadata):
 
-1. **`Bug:` / `Fixed:`** *(Optional)*
-   - Include a `Bug: <issue-id>` (or `Fixed: <issue-id>`) line when applicable. Omit this line if there is no relevant issue.
+1. **`Bug:` / `Fixed:` / `Fixes:`** *(Optional)*
+   - Include a `Bug: <issue-id>` (or `Fixed: <issue-id>` / `Fixes: <issue-id>`) line when applicable. Omit this line if there is no relevant issue.
    - Agents **MUST** verify that any specified bug ID(s) are valid, in a Fuchsia Buganizer component, and relevant to the change.
    - See [`determining_appropriate_bug_footer.md`](/build/beads/references/migration/commit_message/determining_appropriate_bug_footer.md) for details.
 
@@ -155,7 +163,12 @@ List footers in the following exact order (from most relevant to human reviewers
    - Specify the canonical `//...` label(s) of the migrated target(s) in alphabetical order to enable Gerrit tracking queries (may exceed 72 characters and **MUST NOT** be wrapped across multiple lines).
    - See [`determining_appropriate_bazel_migration_target_footer.md`](/build/beads/references/migration/commit_message/determining_appropriate_bazel_migration_target_footer.md) for guidelines on selecting target values.
 
-4. **`Change-Id:`** *(Automated - must be the final line)*
+4. **`TAG:`** *(Generated by Planter - required on CLs that Planter generated)*
+   - Planter adds a `TAG: planter planter-<freshness>` footer (e.g., `TAG: planter planter-20261008-633b8b4b94a`) to every CL it generates. `<freshness>` identifies the Planter machinery that generated the CL, and the footer is how Planter-generated CLs are found and tracked. Only Planter knows its value.
+   - **Never manually write or fabricate a `TAG:` line.** Do not make up a `<freshness>` value, copy one from another CL, or add a `TAG:` line to satisfy a check. If a CL has no `TAG:` footer, leave it without one.
+   - When amending a commit that Planter generated (e.g., to address review comments, fix the commit message, or rebase and re-upload), preserve its `TAG:` line verbatim, right before the `Change-Id:` line. Never remove or change it.
+
+5. **`Change-Id:`** *(Automated - must be the final line)*
    - Automatically added by the Gerrit `commit-msg` Git hook when creating a commit (`Change-Id: I...`).
    - **Never manually write or fabricate a `Change-Id:` line** when creating a new commit.
    - When amending an existing commit, preserve the existing `Change-Id:` line at the very bottom of the footer block (exactly once, with no blank lines between it and the preceding footers).
@@ -185,7 +198,7 @@ Test: <executed-verification-command-2>
 Bazel-Migration-Target: //<dir_path>:<target_1>
 Bazel-Migration-Target: //<dir_path>:<target_2>
 ```
-*(Note: `Change-Id: I...` will be appended automatically by the Git `commit-msg` hook immediately after the last `Bazel-Migration-Target:` line.)*
+*(Note: `Change-Id: I...` will be appended automatically by the Git `commit-msg` hook immediately after the last `Bazel-Migration-Target:` line. When Planter generates the CL, it adds its `TAG: planter planter-<freshness>` footer right before `Change-Id:`; keep that line verbatim and never write one yourself.)*
 
 ### B. Concrete Examples
 

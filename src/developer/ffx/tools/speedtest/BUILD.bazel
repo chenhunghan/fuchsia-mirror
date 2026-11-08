@@ -1,0 +1,49 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//src/developer/ffx/build:ffx_plugin.bzl", "ffx_plugin")
+load("//src/developer/ffx/build:ffx_tool.bzl", "ffx_tool")
+
+package(default_applicable_licenses = ["//:license"])
+
+ffx_plugin(
+    name = "ffx_speedtest",
+    srcs = ["src/lib.rs"],
+    args_deps = [
+        "//sdk/fidl/fuchsia.developer.ffx.speedtest:fuchsia.developer.ffx.speedtest_rust_fdomain",
+        "//src/developer/ffx/core:lib",
+        "//third_party/rust_crates/vendor:argh",
+    ],
+    args_srcs = ["src/args.rs"],
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.developer.ffx.speedtest:fuchsia.developer.ffx.speedtest_rust_fdomain",
+        "//src/developer/ffx/lib/errors:lib",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/developer/ffx/lib/rcs:lib",
+        "//src/developer/ffx/lib/target/holders:lib",
+        "//src/developer/ffx/lib/writer:lib",
+        "//src/developer/ffx/plugins/component/common:ffx_component",
+        "//src/developer/ffx/tools/speedtest/common:speedtest_fdomain",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-url",
+        "//src/sys/lib/cm_types",
+        "//src/sys/lib/component_debug:component_debug_fdomain",
+        "//src/sys/lib/moniker",
+    ],
+)
+
+ffx_tool(
+    name = "ffx_speedtest_tool",
+    srcs = ["src/main.rs"],
+    binary_name = "ffx-speedtest",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        ":ffx_speedtest",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/lib/fuchsia-async",
+    ],
+)

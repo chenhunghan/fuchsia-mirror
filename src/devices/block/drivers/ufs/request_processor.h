@@ -8,7 +8,9 @@
 #include <lib/driver/mmio/cpp/mmio.h>
 #include <lib/zircon-internal/thread_annotations.h>
 
+#include <atomic>
 #include <condition_variable>
+#include <mutex>
 
 #include "request_list.h"
 
@@ -67,6 +69,7 @@ class RequestProcessor {
   // |drain_timeout|; allocation stays blocked in that case as well.
   zx::result<> BlockSlotAllocation(zx::duration drain_timeout) TA_EXCL(slot_lock_);
   void UnblockSlotAllocation() TA_EXCL(slot_lock_);
+  bool HasAllocatedSlots() const TA_EXCL(slot_lock_);
 
  protected:
   zx::unowned_bti &GetBti() { return bti_; }

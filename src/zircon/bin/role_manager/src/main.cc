@@ -21,7 +21,7 @@ int main(int argc, const char** argv) {
 
   fuchsia_logging::LogSettingsBuilder builder;
   builder.WithDispatcher(loop.dispatcher()).BuildAndInitialize();
-  zx::result create_result = RoleManager::Create(inspector.root());
+  zx::result create_result = RoleManager::Create(dispatcher, inspector.root());
   if (create_result.is_error()) {
     FX_LOGS(ERROR) << "Failed to create role manager service: " << create_result.status_string();
     return -1;

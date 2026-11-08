@@ -15,8 +15,6 @@ library_headers("headers") {
     "lib/boot-shim/debugdata.h",
     "lib/boot-shim/devicetree.h",
     "lib/boot-shim/devicetree-boot-shim.h",
-    "lib/boot-shim/efi.h",
-    "lib/boot-shim/efi-boot-shim.h",
     "lib/boot-shim/item-base.h",
     "lib/boot-shim/pool-mem-config.h",
     "lib/boot-shim/reboot-reason.h",
@@ -43,13 +41,10 @@ library_headers("headers") {
     # <lib/boot-shim/item-base.h> has #include <lib/fit/result.h>
     "//zircon/system/ulib/zx",
 
-    # <lib/boot-shim/efi.h> #include <efi/system-table.h>
-    "//zircon/kernel/lib/efi",
-
     # <lib/boot-shim/devicetree-boot-shim> has #include
     # <lib/devictree/matcher.h> <lib/boot-shim/devicetree-boot-shim> has
     # #include <lib/devicetree/devicetree.h>
-    "//zircon/kernel/lib/devicetree",
+    "//sdk/lib/devicetree",
 
     # <lib/boot-shim/devicetree-boot-shim> has #include <fbl/macros.h>
     # <lib/boot-shim/devicetree.h> has #include <fbl/intrusive_hash_table.h>
@@ -92,8 +87,6 @@ static_library("boot-shim") {
     "devicetree-riscv-timer-item.cc",
     "devicetree-secure-entropy-item.cc",
     "devicetree-serial-number-item.cc",
-    "efi-boot-shim.cc",
-    "efi.cc",
     "pool-mem-config.cc",
     "reboot-reason.cc",
     "test-serial-number.cc",
@@ -105,7 +98,6 @@ static_library("boot-shim") {
     "//sdk/lib/zbi-format:internal",
     "//zircon/kernel/lib/acpi_lite",
     "//zircon/kernel/lib/boot-options",
-    "//zircon/kernel/phys/efi:page-size",
     "//zircon/kernel/phys/lib/linux-boot-config",
     "//zircon/kernel/phys/lib/memalloc",
     "//zircon/system/ulib/explicit-memory",
@@ -139,8 +131,8 @@ if (!is_kernel) {
 
     public_deps = [
       ":headers",
+      "//sdk/lib/devicetree/testing",
       "//sdk/lib/zbi-format",
-      "//zircon/kernel/lib/devicetree/testing",
     ]
   }
 
@@ -197,8 +189,6 @@ if (!is_kernel) {
       "boot-properties-test.cc",
       "boot-shim-tests.cc",
       "debugdata-tests.cc",
-      "efi-boot-shim-tests.cc",
-      "efi-tests.cc",
       "pool-mem-config-tests.cc",
       "reboot-reason-test.cc",
       "test-serial-number-tests.cc",
@@ -208,9 +198,9 @@ if (!is_kernel) {
     deps = [
       ":boot-shim",
       ":boot-shim-test",
+      "//sdk/lib/devicetree/testing",
       "//sdk/lib/zbi-format:internal",
       "//zircon/kernel/lib/acpi_lite",
-      "//zircon/kernel/lib/devicetree/testing",
       "//zircon/kernel/phys/lib/linux-boot-config",
       "//zircon/kernel/phys/lib/memalloc",
       "//zircon/system/ulib/zxtest",

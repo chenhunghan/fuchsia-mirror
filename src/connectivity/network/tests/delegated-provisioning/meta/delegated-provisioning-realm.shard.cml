@@ -65,11 +65,11 @@
         },
         {
             name: "client-netstack",
-            url: "#meta/configurable-netstack-netstack3.cm",
+            url: "configurable-netstack#meta/configurable-netstack.cm",
         },
         {
             name: "server-netstack",
-            url: "#meta/configurable-netstack-netstack3.cm",
+            url: "configurable-netstack#meta/configurable-netstack.cm",
         },
         {
             name: "dhcpd",

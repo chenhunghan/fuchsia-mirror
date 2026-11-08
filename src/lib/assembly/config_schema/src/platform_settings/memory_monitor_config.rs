@@ -12,7 +12,7 @@ pub enum MemoryMonitorVersion {
     /// Use the default configuration for the given feature support level and build type.
     #[default]
     Default,
-    /// Memory Monitor 1, as implemented in //src/developer/memory/monitor/,
+    /// Memory Monitor 1, as implemented in //src/memory/legacy/monitor/,
     /// which uses process-based memory attribution.
     V1,
     /// Memory Monitor 1, with memory profiling enabled.

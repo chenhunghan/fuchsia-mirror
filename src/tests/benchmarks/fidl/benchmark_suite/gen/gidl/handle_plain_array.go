@@ -26,7 +26,6 @@ func init() {
 				// a type, chosen here to be 'event' for better comparison with the
 				// event_handle_array benchmark.
 				HandleDefs: util.RepeatHandleDef(config.HandleDef{Subtype: config.Event}, 1),
-				Denylist:   []config.Binding{config.Go},
 			},
 			{
 				Name:    "HandleArray/Plain/16",
@@ -38,7 +37,6 @@ func init() {
 				// a type, chosen here to be 'event' for better comparison with the
 				// event_handle_array benchmark.
 				HandleDefs: util.RepeatHandleDef(config.HandleDef{Subtype: config.Event}, 16),
-				Denylist:   []config.Binding{config.Go},
 			},
 			{
 				Name:    "HandleArray/Plain/64",
@@ -50,7 +48,6 @@ func init() {
 				// a type, chosen here to be 'event' for better comparison with the
 				// event_handle_array benchmark.
 				HandleDefs: util.RepeatHandleDef(config.HandleDef{Subtype: config.Event}, 64),
-				Denylist:   []config.Binding{config.Go},
 			},
 		},
 	})

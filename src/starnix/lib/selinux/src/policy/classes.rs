@@ -8,6 +8,7 @@ use fuchsia_rcu::RcuDroppable;
 use selinux_policy_derive::{HasName, HasPolicyId, Parse, Serialize, Validate};
 
 use super::Policy;
+use super::access_vector::AccessVector;
 use super::constraints::{Constraint, ConstraintTerm};
 use super::error::{ParseError, SerializeError, ValidateError};
 use super::id_type::IdType;
@@ -60,7 +61,7 @@ pub enum ClassDefaultRange {
 }
 
 /// Set of rules for computing default security context fields for a class.
-#[derive(Debug, Parse, Serialize, Validate)]
+#[derive(Clone, Copy, Debug, Parse, Serialize, Validate)]
 pub struct ClassDefaults {
     default_user: ClassDefault,
     default_role: ClassDefault,
@@ -87,7 +88,7 @@ impl ClassDefaults {
 }
 
 /// Parsed SELinux object class definition, including permissions and constraints.
-#[derive(Debug, HasName, HasPolicyId)]
+#[derive(Clone, Debug, HasName, HasPolicyId)]
 pub struct Class {
     id: ClassId,
     name: Box<[u8]>,
@@ -142,18 +143,13 @@ impl Parse for Class {
         let common_name = Box::from(cursor.read_bytes(common_name_len)?);
 
         let permissions_count = metadata.permission_count as usize;
-        let mut permissions = Vec::with_capacity(permissions_count);
-        for _ in 0..permissions_count {
-            permissions.push(Permission::parse(cursor)?);
-        }
-        let permissions = IdAndNameIndexed::new(permissions.into_boxed_slice())?;
+        let permissions = IdAndNameIndexed::new(
+            cursor.parse_elements(permissions_count)?,
+            AccessVector::MAX_PERMISSIONS,
+        )?;
 
         let constraint_count = metadata.constraint_count as usize;
-        let mut constraints = Vec::with_capacity(constraint_count);
-        for _ in 0..constraint_count {
-            constraints.push(Constraint::parse(cursor)?);
-        }
-        let constraints = constraints.into_boxed_slice();
+        let constraints = cursor.parse_elements(constraint_count)?;
 
         let validate_transitions = Array::<ConstraintTerm>::parse(cursor)?;
         let defaults = ClassDefaults::parse(cursor)?;
@@ -204,7 +200,7 @@ impl Validate for Class {
         let mut common_permissions_count = 0;
         if !self.common_name.is_empty() {
             let common_symbol =
-                policy.common_symbols().get_by_name(&self.common_name).ok_or_else(|| {
+                policy.common_symbols.get_by_name(&self.common_name).ok_or_else(|| {
                     ValidateError::UndefinedCommonSymbol { name: self.common_name.as_ref().into() }
                 })?;
             common_permissions_count = common_symbol.permissions().len();
@@ -225,7 +221,7 @@ impl Validate for Class {
 impl Validate for ClassId {
     fn validate(&self, policy: &Policy) -> Result<(), ValidateError> {
         policy
-            .classes()
+            .classes
             .get_by_id(*self)
             .map(|_| ())
             .ok_or_else(|| ValidateError::UnknownId { kind: "class", id: self.as_u32() })

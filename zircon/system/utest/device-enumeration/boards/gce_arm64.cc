@@ -9,10 +9,9 @@ namespace {
 TEST_F(DeviceEnumerationTest, GceArm64Test) {
 #ifdef __aarch64__
   static const char* kNodeMonikers[] = {
-      // TODO(https://fxbug.dev/42052364): Once we use userspace PCI, add PCI devices we expect to
-      // see.
-      "acpi",
-      "acpi._SB_",
+      "qemu-bus",
+      "pl031",
+      "pci0.pci-root.bus.00_00_0",
   };
 
   VerifyNodes(kNodeMonikers);

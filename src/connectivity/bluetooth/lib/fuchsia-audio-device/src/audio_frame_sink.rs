@@ -119,7 +119,7 @@ mod tests {
 
     use async_utils::PollExt;
     use fidl_fuchsia_hardware_audio::*;
-    use fidl_fuchsia_media::{AudioChannelId, AudioPcmMode, PcmFormat};
+    use fidl_fuchsia_media::{AudioChannelId2, AudioPcmMode2, PcmFormat2};
     use fixture::fixture;
     use fuchsia_async as fasync;
     use futures::AsyncWriteExt;
@@ -132,11 +132,12 @@ mod tests {
         F: FnOnce(fasync::TestExecutor, StreamConfigProxy, AudioFrameSink) -> (),
     {
         let exec = fasync::TestExecutor::new_with_fake_time();
-        let format = PcmFormat {
-            pcm_mode: AudioPcmMode::Linear,
-            bits_per_sample: 16,
-            frames_per_second: 44100,
-            channel_map: vec![AudioChannelId::Lf, AudioChannelId::Rf],
+        let format = PcmFormat2 {
+            pcm_mode: Some(AudioPcmMode2::Linear),
+            bits_per_sample: Some(16),
+            frames_per_second: Some(44100),
+            channel_map: Some(vec![AudioChannelId2::Fl, AudioChannelId2::Fr]),
+            ..Default::default()
         };
         let (client, frame_sink) = SoftStreamConfig::create_input(
             TEST_UNIQUE_ID,

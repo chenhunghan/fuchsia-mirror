@@ -31,7 +31,7 @@ struct BinaryRoleMetadata {
 }
 
 /// Parsed SELinux [`Role`] definition.
-#[derive(Debug, Validate, HasName, HasPolicyId)]
+#[derive(Clone, Debug, Validate, HasName, HasPolicyId)]
 pub struct Role {
     id: RoleId,
     name: Box<[u8]>,
@@ -84,7 +84,7 @@ impl Serialize for Role {
 impl Validate for RoleId {
     fn validate(&self, policy: &Policy) -> Result<(), ValidateError> {
         policy
-            .roles()
+            .roles
             .get_by_id(*self)
             .map(|_| ())
             .ok_or_else(|| ValidateError::UnknownId { kind: "role", id: self.as_u32() })
@@ -92,7 +92,7 @@ impl Validate for RoleId {
 }
 
 /// SELinux policy role transition rule (`role_transition`).
-#[derive(Debug, Parse, Serialize, Validate)]
+#[derive(Clone, Copy, Debug, Parse, Serialize, Validate)]
 pub struct RoleTransition {
     current_role: RoleId,
     type_: TypeId,
@@ -119,7 +119,7 @@ impl RoleTransition {
 }
 
 /// SELinux policy role allow rule (`allow` for roles).
-#[derive(Debug, Parse, Serialize, Validate)]
+#[derive(Clone, Copy, Debug, Parse, Serialize, Validate)]
 pub struct RoleAllow {
     source_role: RoleId,
     new_role: RoleId,
@@ -217,7 +217,7 @@ mod tests {
         let policy = Policy::parse(policy_bytes).expect("parse role_transition policy");
         policy.validate().expect("validate role_transition policy");
 
-        assert_eq!(policy.role_transitions().len(), 2);
-        assert_eq!(policy.role_allowlist().len(), 1);
+        assert_eq!(policy.role_transitions.len(), 2);
+        assert_eq!(policy.role_allowlist.len(), 1);
     }
 }

@@ -1,0 +1,27 @@
+Name: acpica
+URL: https://github.com/acpica/acpica
+Version: 20260930
+Revision: e85aa3bebaae81ed1e6d163511ac7e1eafe732cf
+Security Critical: yes
+
+License: BSD
+License File: src/LICENSE
+
+Description:
+  operating system-independent implementation of
+  the Advanced Configuration and Power Interface specification.
+  Utilizing version 20260930.
+
+Local Modifications:
+  - Added README.fuchsia
+  - Removed optional GPL license banner from legacy headers in sources
+  - Added LICENSE containing copy of source license banner
+  - Added BUILD.gn and OWNERS
+  - Added symlink to wrap source/include as include/acpica
+  - Modified source/include/platform/acenv.h to include acfuchsia.h
+  - Guarded ACPI_FLEX_ARRAY in source/include/platform/acgcc.h for C++
+  - Wrapped source/include/acpi.h with extern "C"
+  - Added workaround for use-after-free on NuC in AcpiNsTerminate
+  - Modified AcpiHwLegacySleep to fail transitions to S-states other than S5,
+    which are not supported because ACPICA runs in usermode and cannot disable
+    interrupts

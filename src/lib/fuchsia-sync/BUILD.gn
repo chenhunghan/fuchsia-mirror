@@ -63,7 +63,10 @@ FUCHSIA_SYNC_SRCS = [
 # It's possible this variable is only used in if conditions (e.g. is_host).
 not_needed([ "FUCHSIA_SYNC_SRCS" ])
 
-FUCHSIA_SYNC_DEPS_COMMON = [ "//third_party/rust_crates:lock_api" ]
+FUCHSIA_SYNC_DEPS_COMMON = [
+  "//src/lib/fuchsia-rcu:fuchsia-rcu-traits",
+  "//third_party/rust_crates:lock_api",
+]
 
 # To avoid "Assignment had no effect" from GN.
 # It's possible this variable is only used in if conditions (e.g. is_host).
@@ -134,6 +137,7 @@ rustc_library("fuchsia-sync") {
     deps += DETECT_LOCK_CYCLE_DEPS
   }
 }
+
 rustc_test("fuchsia-sync-tests-detect-cycles") {
   sources = FUCHSIA_SYNC_SRCS
   edition = "2024"
@@ -149,6 +153,7 @@ rustc_test("fuchsia-sync-tests-detect-cycles") {
     deps += FUCHSIA_SYNC_DEPS_HOST
   }
 }
+
 rustc_test("fuchsia-sync-tests-no-detect-cycles") {
   sources = FUCHSIA_SYNC_SRCS
   edition = "2024"

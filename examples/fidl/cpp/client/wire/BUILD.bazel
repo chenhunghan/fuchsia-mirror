@@ -1,0 +1,60 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# [START imports]
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+
+# [END imports]
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_binary(
+    name = "bin",
+    srcs = ["main.cc"],
+    gn_output_name = "fidl_echo_cpp_wire_client",
+    tags = ["manual"],
+    # [START deps]
+    deps = [
+        "//examples/fidl/fuchsia.examples:fuchsia.examples_cpp",
+
+        # This library provides an the asynchronous event loop implementation.
+        "//sdk/lib/async-loop:async-loop-cpp",
+
+        # This library is used to consume capabilities, e.g. protocols,
+        # from the component's incoming directory.
+        "//sdk/lib/component/incoming/cpp",
+
+        # This library is used to log messages.
+        "//sdk/lib/syslog/cpp",
+    ],
+    # [END deps]
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "fidl_echo_cpp_wire_client",
+)
+
+# [START rest]
+fx_component_manifest(
+    name = "echo-client_manifest",
+    component_name = "echo_client",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/client.cml",
+)
+
+fx_component(
+    name = "echo-client",
+    compiled_manifest = ":echo-client_manifest",
+    visibility = ["//examples/fidl/echo-realm:__pkg__"],
+    deps = [":bin_packaged"],
+)
+# [END rest]

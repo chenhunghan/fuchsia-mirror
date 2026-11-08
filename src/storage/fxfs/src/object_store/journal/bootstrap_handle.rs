@@ -120,6 +120,12 @@ impl ReadObjectHandle for BootstrapObjectHandle {
         };
         for extent in extents {
             let device_range = &extent.device_range;
+            ensure!(
+                block_size.is_aligned(device_range.start)
+                    && block_size.is_aligned(device_range.end)
+                    && device_range.end <= self.device.size(),
+                FxfsError::Inconsistent
+            );
             let extent_len = device_range.end - device_range.start;
             if offset < file_offset + extent_len {
                 if trace {

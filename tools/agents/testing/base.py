@@ -4,8 +4,6 @@
 
 """Hermetic base test case providing tempdir, stream capture, and test utilities."""
 
-from __future__ import annotations
-
 import io
 import os
 import subprocess
@@ -37,8 +35,12 @@ class BaseTestCase(unittest.TestCase):
         self.enterContext(mock.patch.dict(os.environ))
         for var in (
             "ANTIGRAVITY_AGENT",
+            "ANTIGRAVITY_CONVERSATION_ID",
             "GEMINI_CLI",
             "ANTIGRAVITY_EDITOR_APP_ROOT",
+            "CLAUDECODE",
+            "CLAUDE_CODE_SESSION_ID",
+            "FFX_AGENT_SESSION_ID",
         ):
             os.environ.pop(var, None)
 

@@ -11,7 +11,7 @@ assert(
     "Product definitions and assemblies should only be defined in the fuchsia toolchain")
 
 common_bazel_inputs = [
-  "//src/fonts/asset_providers:open-fonts-collection-bazel",
+  "//src/fonts/asset_providers:bazel_inputs",
 
   # Cache packages.
   "//products/terminal/terminal_session:terminal_session.bazel_input",

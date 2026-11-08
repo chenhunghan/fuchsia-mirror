@@ -86,6 +86,7 @@ async fn run(mut stream: TestHarnessRequestStream, fixture: &TestFixture) -> Res
                     supports_modify_directory: true,
                     supports_mutable_file: true,
                     supports_unnamed_temporary_file: true,
+                    supports_link_into_replace_existing: true,
                     supported_attributes: fio::NodeAttributesQuery::PROTOCOLS
                         | fio::NodeAttributesQuery::ABILITIES
                         | fio::NodeAttributesQuery::CONTENT_SIZE

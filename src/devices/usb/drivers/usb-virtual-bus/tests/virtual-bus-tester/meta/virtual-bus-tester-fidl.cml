@@ -21,6 +21,13 @@
         {
             service: [ "fuchsia.hardware.usb.UsbService" ],
         },
+        {
+            config: "fuchsia.usb.test.VmoDataSize",
+            key: "vmo_data_size",
+            type: "uint64",
+            availability: "transitional",
+            default: 20,
+        },
     ],
     expose: [
         {
@@ -28,7 +35,4 @@
             from: "self",
         },
     ],
-    config: {
-        vmo_data_size: { type: "uint64" },
-    },
 }

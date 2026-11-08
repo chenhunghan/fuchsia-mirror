@@ -227,8 +227,6 @@ class FakeMmio : public e1000::test::MmioInterceptor {
   std::mutex rx_tail_mutex_;
 };
 
-// We want to receive notifications when the interrupt is acked, override this class and provide our
-// own implementation of AckInterrupt.
 class FakePci : public pci::FakePciProtocol {
  public:
   zx::result<> AddService(fdf::OutgoingDirectory& outgoing) {
@@ -236,20 +234,6 @@ class FakePci : public pci::FakePciProtocol {
         fuchsia_hardware_pci::Service::InstanceHandler(
             {.device = bind_handler(fdf::Dispatcher::GetCurrent()->async_dispatcher())}));
   }
-
-  void AckInterrupt(AckInterruptCompleter::Sync& completer) override {
-    pci::FakePciProtocol::AckInterrupt(completer);
-    interrupt_acked_.Signal();
-  }
-
-  void WaitUntilInterruptAcked() {
-    interrupt_acked_.Wait();
-    interrupt_acked_.Reset();
-  }
-
- private:
-  std::optional<fidl::ServerBindingRef<fuchsia_hardware_pci::Device>> binding_;
-  libsync::Completion interrupt_acked_;
 };
 
 class TestFixtureEnvironment : fdf_testing::Environment {
@@ -383,7 +367,7 @@ class E1000Test : public ::testing::Test {
     const bool initial_online_status = IsOnline();
     netdev_ifc_.ResetPortStatusChangedCalled();
 
-    FakePci* pci = nullptr;
+    zx::interrupt* interrupt = nullptr;
     // Triggering the interrupt that should cause the link status to change.
     driver_test().RunInEnvironmentTypeContext([&](TestFixtureEnvironment& env) {
       // Set the link-up bit in the status register.
@@ -392,13 +376,12 @@ class E1000Test : public ::testing::Test {
       E1000_WRITE_REG(&adapter_->hw, E1000_ICR, E1000_ICR_LSC);
       env.interrupt_->trigger(0, zx::time_boot(zx_clock_get_boot()));
 
-      // Store a pointer to the fake PCI for waiting. We can't wait on the environment dispatcher
-      // because that's what the fake PCI uses for serving the ack request.
-      pci = &env.fake_pci_;
+      interrupt = env.interrupt_;
     });
     // Wait until the interrupt has been acked, this ensures that all processing has already
-    // happened when this return. This makes it easier to inspect the state of the driver.
-    pci->WaitUntilInterruptAcked();
+    // happened when this returns. This makes it easier to inspect the state of the driver.
+    ASSERT_OK(
+        interrupt->wait_one(ZX_VIRTUAL_INTERRUPT_UNTRIGGERED, zx::time::infinite(), nullptr));
 
     if (initial_online_status != link_online) {
       // If the state changed we should receive a port status changed call.

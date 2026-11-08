@@ -1,0 +1,39 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/components:fx_component.bzl", "fx_component", "fx_component_manifest")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+# TODO(https://fxbug.dev/422826819): fx_cc_binary does not have an output_name
+# attribute; fx_packaged_binary sets the packaged binary name in Bazel.
+# @bazel2gn:raw_attribute:output_name = "c_time_example"
+fx_cc_binary(
+    name = "bin",
+    srcs = ["main.c"],
+    tags = ["manual"],
+    deps = ["//zircon/system/ulib/zx"],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "c_time_example",
+)
+
+fx_component_manifest(
+    name = "c-time-example-component-manifest",
+    component_name = "c-time-example",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/c-time-example.cml",
+)
+
+fx_component(
+    name = "c-time-example-component",
+    compiled_manifest = ":c-time-example-component-manifest",
+    visibility = ["//examples/time:__subpackages__"],
+    deps = [":bin_packaged"],
+)

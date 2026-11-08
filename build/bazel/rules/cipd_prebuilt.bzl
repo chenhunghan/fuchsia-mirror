@@ -2,13 +2,26 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-"""cipd_prebuilt_file() and cipd_prebuilt_directory() custom rule definitions for on-demand prebuilts."""
+"""cipd_prebuilt_file() and cipd_prebuilt_directory() rule definitions for on-demand prebuilts."""
 
 load("@fuchsia_build_config//:defs.bzl", "build_config")
 load("@fuchsia_rules_common//:local_actions.bzl", "LOCAL_ONLY_ACTION_KWARGS")
 
+CipdPrebuiltInfo = provider(
+    doc = (
+        "Marks a target materialized from a CIPD prebuilt under FUCHSIA_DIR " +
+        "(so fx_host_tool does not mark it .always_build) and records its " +
+        "checkout-relative path."
+    ),
+    fields = {
+        "source_rel_path": "Source-tree relative path under FUCHSIA_DIR for CIPD prebuilts.",
+    },
+)
+
 def _cipd_prebuilt_file_impl(ctx):
-    out = ctx.actions.declare_file(ctx.attr.path.removeprefix("//"))
+    source_rel_path = ctx.attr.path.removeprefix("//").strip("/")
+    rel_out = ctx.attr.out if ctx.attr.out else source_rel_path
+    out = ctx.actions.declare_file(rel_out)
 
     ctx.actions.run(
         executable = ctx.file._python_bin,
@@ -26,11 +39,16 @@ def _cipd_prebuilt_file_impl(ctx):
     )
 
     return [
-        DefaultInfo(files = depset([out])),
+        DefaultInfo(
+            files = depset([out]),
+            runfiles = ctx.runfiles(files = [out]),
+        ),
+        CipdPrebuiltInfo(source_rel_path = source_rel_path),
     ]
 
 def _cipd_prebuilt_directory_impl(ctx):
-    out = ctx.actions.declare_directory(ctx.attr.path.removeprefix("//"))
+    source_rel_path = ctx.attr.path.removeprefix("//").strip("/")
+    out = ctx.actions.declare_directory(source_rel_path)
 
     ctx.actions.run(
         executable = ctx.file._python_bin,
@@ -48,13 +66,21 @@ def _cipd_prebuilt_directory_impl(ctx):
     )
 
     return [
-        DefaultInfo(files = depset([out])),
+        DefaultInfo(
+            files = depset([out]),
+            runfiles = ctx.runfiles(files = [out]),
+        ),
+        CipdPrebuiltInfo(source_rel_path = source_rel_path),
     ]
 
 cipd_prebuilt_file = rule(
     implementation = _cipd_prebuilt_file_impl,
     doc = "Fetches an on-demand prebuilt file via `jiri fetch-package` and materializes it in bazel-out/.",
     attrs = {
+        "out": attr.string(
+            default = "",
+            doc = "Optional package-relative output file path when multiple targets in one package share a CIPD directory prefix.",
+        ),
         "path": attr.string(
             mandatory = True,
             doc = "File path under prebuilt/ to fetch (e.g. 'prebuilt/third_party/...' or '//prebuilt/third_party/...').",

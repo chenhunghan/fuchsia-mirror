@@ -1,0 +1,29 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+# GN puts the binary in a per-target directory so the `server_bin` outputs
+# of the sibling canvas examples don't collide.
+# @bazel2gn:raw_attribute:output_dir = target_out_dir + "/rust"
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    crate_name = "server_bin",
+    edition = "2024",
+    visibility = ["//examples/fidl/new/canvas/baseline/rust:__pkg__"],
+    deps = [
+        "//examples/fidl/new/canvas/baseline/fidl:examples.canvas.baseline_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-sync",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)

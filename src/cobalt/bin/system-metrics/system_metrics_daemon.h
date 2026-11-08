@@ -205,17 +205,6 @@ class SystemMetricsDaemon {
   zx::duration unlogged_active_duration_;
   std::mutex active_time_mutex_;
 
-  template <typename T>
-  T GetCobaltEventCodeForDeviceState(fuchsia::ui::activity::State state) {
-    switch (state) {
-      case fuchsia::ui::activity::State::IDLE:
-        return T::Idle;
-      case fuchsia::ui::activity::State::ACTIVE:
-        return T::Active;
-      case fuchsia::ui::activity::State::UNKNOWN:
-        return T::Unknown;
-    }
-  }
   struct CpuWithActivityState {
     double cpu_percentage;
     fuchsia::ui::activity::State state;

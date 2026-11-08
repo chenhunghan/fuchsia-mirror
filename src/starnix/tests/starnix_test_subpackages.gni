@@ -5,6 +5,7 @@
 # The subpackages a Starnix test including `starnix_test_common.shard.cml` needs
 # to boot a container.
 starnix_test_subpackages = [
+  "//src/connectivity/network/netstack3:package-for-tests",
   "//src/connectivity/network/tun/network-tun",
   "//src/devices/haptics/testing/fake_haptics_service:package",
   "//src/media/audio/services/device_registry/testing/stub_adr:stub_adr_pkg",
@@ -14,7 +15,6 @@ starnix_test_subpackages = [
   "//src/power/system-activity-governor:package",
   "//src/starnix/kernel:starnix_kernel_package",
   "//src/starnix/runner:starnix_package",
-  "//src/starnix/tests:netstack_package",
   "//src/storage/erofs/component:erofs",
   "//src/storage/fxfs/test-fxfs:test-fxfs-package",
   "//src/sys/time/timekeeper:timekeeper-with-config-for-starnix-tests",

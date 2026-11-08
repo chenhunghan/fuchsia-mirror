@@ -4,13 +4,14 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+use super::page::VmPageDoublyLinkedList;
 use core::marker::{PhantomData, PhantomPinned};
 use core::pin::Pin;
 use core::ptr::NonNull;
 use fbl::{HasRefCount, Recyclable, RefCounted, RefPtr};
 use page_source_bindings as bindings;
 use pin_init::pin_data;
-use zr::{Opaque, pin_init_ffi, unsafe_pinned_drop_ffi};
+use zr::{Opaque, pin_init_ffi, static_assert, unsafe_pinned_drop_ffi};
 use zx_status::Status;
 
 /// The different types of page requests that can exist.
@@ -30,6 +31,7 @@ pub type PageSourceProperties = bindings::PageSourceProperties;
 /// and callers are expected to use the correct method.
 /// TODO(adanis): Implement an enforcement strategy.
 #[pin_data(PinnedDrop)]
+#[repr(transparent)]
 pub struct MultiPageRequest {
     /// The optional inner `PageRequest` can appear in intrusive containers, so this object must be
     /// pinned.
@@ -39,18 +41,13 @@ pub struct MultiPageRequest {
 
 unsafe_pinned_drop_ffi!(MultiPageRequest, bindings::cpp_multi_page_request_destroy);
 
+static_assert!(size_of::<MultiPageRequest>() == size_of::<bindings::MultiPageRequest>());
+static_assert!(align_of::<MultiPageRequest>() == align_of::<bindings::MultiPageRequest>());
+
 impl MultiPageRequest {
     /// Returns an in-place initializer for stack-pinning a `MultiPageRequest`.
     pub fn new() -> impl pin_init::PinInit<Self> {
-        /// # Safety
-        /// `ptr` must point to uninitialized `MultiPageRequest` storage.
-        unsafe fn init_shim(ptr: *mut core::ffi::c_void) {
-            let req_ptr: *mut bindings::MultiPageRequest = ptr.cast();
-            // SAFETY: `ptr` is guaranteed by `pin_init_ffi!` to point to valid `MultiPageRequest`
-            // storage.
-            unsafe { bindings::cpp_multi_page_request_construct(req_ptr) }
-        }
-        pin_init_ffi!(init_shim)
+        pin_init_ffi!(bindings::cpp_multi_page_request_construct)
     }
 
     /// Waits on the currently active page request.
@@ -69,8 +66,114 @@ impl MultiPageRequest {
     ///
     /// Callers must not use the returned raw pointer to move the object in memory.
     pub fn as_raw(self: Pin<&mut Self>) -> *mut bindings::MultiPageRequest {
-        // SAFETY: Obtaining a raw pointer to `opaque` does not move the pinned object.
-        unsafe { self.get_unchecked_mut().opaque.get() }
+        self.opaque.get()
+    }
+
+    /// Retrieve the anonymous page request. The caller may or may not arm the
+    /// `AnonymousPageRequest`, if it does the anonymous request becomes considered active and no
+    /// other request may be retrieved.
+    #[inline]
+    pub fn get_anonymous(
+        self: Pin<&mut Self>,
+    ) -> &mut super::anonymous_page_request::AnonymousPageRequest {
+        // SAFETY: `self.as_raw()` points to a valid `MultiPageRequest`. The C++ method returns
+        // a pointer to its inline `AnonymousPageRequest`, which is valid and uniquely borrowed
+        // for the lifetime of `self`.
+        unsafe { &mut *bindings::cpp_multi_page_request_get_anonymous(self.as_raw()).cast() }
+    }
+
+    /// Retrieve and commit to initializing the page request for read. After calling this it is
+    /// assumed that the page request will be made waitable and no other request may be retrieved.
+    ///
+    /// # Safety
+    ///
+    /// No request may currently be active on `self`. Because this marks the read request active,
+    /// the caller must either initialize the returned request via [`PageSource::get_pages`] (such
+    /// that it returns `Err(Status::SHOULD_WAIT)`) before calling [`MultiPageRequest::wait`], or
+    /// call [`MultiPageRequest::cancel_requests`] before waiting.
+    #[inline]
+    pub unsafe fn get_read_request(self: Pin<&mut Self>) -> Pin<&mut PageRequestRef> {
+        // SAFETY: `self.as_raw()` points to a valid `MultiPageRequest`. The C++ method returns a
+        // pointer to its inline `PageRequest`. Since `self` is pinned, the inline struct is
+        // also pinned.
+        unsafe {
+            let ptr = bindings::cpp_multi_page_request_get_read_request(self.as_raw()).cast();
+            Pin::new_unchecked(&mut *ptr)
+        }
+    }
+
+    /// Retrieve a lazy accessor to page request. If a dirty request is generated the caller must
+    /// then call `made_dirty_request` so that this helper knows that the page request is active
+    /// and should be waited on.
+    #[inline]
+    pub fn get_lazy_dirty_request(self: Pin<&mut Self>) -> Pin<&mut LazyPageRequest> {
+        // SAFETY: `self.as_raw()` points to a valid `MultiPageRequest`.
+        unsafe {
+            let ptr = bindings::cpp_multi_page_request_get_lazy_dirty_request(self.as_raw()).cast();
+            Pin::new_unchecked(&mut *ptr)
+        }
+    }
+
+    /// Indicate that the page request retrieved by `get_lazy_dirty_request` was used and should be
+    /// waited on.
+    ///
+    /// # Safety
+    ///
+    /// No request may currently be active on `self`, and the request retrieved via
+    /// [`MultiPageRequest::get_lazy_dirty_request`] must have been initialized by a call to
+    /// [`PageSource::request_dirty_transition`] that returned `Err(Status::SHOULD_WAIT)` (or must
+    /// be cancelled via [`MultiPageRequest::cancel_requests`] before calling
+    /// [`MultiPageRequest::wait`]).
+    #[inline]
+    pub unsafe fn made_dirty_request(self: Pin<&mut Self>) {
+        // SAFETY: `self.as_raw()` points to a valid `MultiPageRequest`.
+        unsafe { bindings::cpp_multi_page_request_made_dirty_request(self.as_raw()) }
+    }
+}
+
+/// Wrapper around PageRequest that performs construction on first access. This is useful when a
+/// PageRequest needs to be allocated eagerly in case it is used, even if the common case is that it
+/// will not be needed.
+#[repr(transparent)]
+pub struct LazyPageRequest {
+    opaque: Opaque<bindings::LazyPageRequest>,
+}
+
+impl LazyPageRequest {
+    /// Initialize and return the internal `PageRequest`.
+    #[inline]
+    pub fn get(self: Pin<&mut Self>) -> Pin<&mut PageRequestRef> {
+        // SAFETY: `self` is pinned.
+        let raw = unsafe { self.get_unchecked_mut().opaque.get() };
+        // SAFETY: `raw` points to a valid `LazyPageRequest`.
+        unsafe { Pin::new_unchecked(&mut *bindings::cpp_lazy_page_request_get(raw).cast()) }
+    }
+
+    /// Returns whether this request has been initialized.
+    #[inline]
+    pub fn is_initialized(&self) -> bool {
+        // SAFETY: `self.opaque.get()` points to a valid `LazyPageRequest`.
+        unsafe { bindings::cpp_lazy_page_request_is_initialized(self.opaque.get()) }
+    }
+}
+
+/// Opaque client handle to a `PageRequest` owned by a `MultiPageRequest` or `LazyPageRequest`.
+///
+/// Unlike [`PageRequest`], which represents a provider-owned request view with `PageProvider`
+/// accessors (`request_type`, `offset`, `len`) and intrusive list membership, `PageRequestRef`
+/// is used by requestors (`VmCowPages` / `VmObject`) solely to initialize a request via
+/// [`PageSource::get_pages`] or [`PageSource::request_dirty_transition`].
+#[repr(C)]
+pub struct PageRequestRef {
+    raw: Opaque<bindings::PageRequest>,
+    phantom: PhantomData<PhantomPinned>,
+}
+
+impl PageRequestRef {
+    /// Domain-specific conversion: returns raw pointer for `PageRequestRef`.
+    pub fn as_raw(self: Pin<&mut Self>) -> *mut bindings::PageRequest {
+        // SAFETY: Obtaining a raw pointer to `raw` does not move the pinned object.
+        unsafe { self.get_unchecked_mut().raw.get() }
     }
 }
 
@@ -158,13 +261,11 @@ impl PageRequest {
 pub struct PageProviderTag;
 
 // Mirrors the C++ `PageProviderNodeState` layout assertions in `page_source_ffi.cc`.
-zr::static_assert!(
-    core::mem::size_of::<fbl::DoublyLinkedListNode<PageRequest>>()
-        == 2 * core::mem::size_of::<*mut PageRequest>()
+static_assert!(
+    size_of::<fbl::DoublyLinkedListNode<PageRequest>>() == 2 * size_of::<*mut PageRequest>()
 );
-zr::static_assert!(
-    core::mem::align_of::<fbl::DoublyLinkedListNode<PageRequest>>()
-        == core::mem::align_of::<*mut PageRequest>()
+static_assert!(
+    align_of::<fbl::DoublyLinkedListNode<PageRequest>>() == align_of::<*mut PageRequest>()
 );
 
 impl fbl::DoublyLinkedListContainable<PageRequest, PageProviderTag> for PageRequest {
@@ -290,4 +391,198 @@ impl PageSource {
         // SAFETY: The C++ helper only inspects the status value.
         unsafe { bindings::cpp_page_source_is_valid_internal_failure_code(error_status.into_raw()) }
     }
+
+    /// Prints state of the page source and any pending requests. The maximum number of requests
+    /// printed is capped by `max_items`.
+    pub fn dump(&self, depth: u32, max_items: u32) {
+        // SAFETY: `self.as_raw()` points to an initialized C++ `PageSource`.
+        unsafe {
+            bindings::cpp_page_source_dump(self.as_raw(), depth, max_items);
+        }
+    }
+
+    /// The returned properties can be assumed to be const and never change. As such the caller may
+    /// cache them.
+    #[inline]
+    pub fn properties(&self) -> PageSourceProperties {
+        // SAFETY: `self.as_raw()` points to an initialized C++ `PageSource`.
+        unsafe { bindings::cpp_page_source_properties(self.as_raw()) }
+    }
+
+    /// Whether transitions from clean to dirty should be trapped.
+    #[inline]
+    pub fn should_trap_dirty_transitions(&self) -> bool {
+        // SAFETY: `self.as_raw()` points to an initialized C++ `PageSource`.
+        unsafe { bindings::cpp_page_source_should_trap_dirty_transitions(self.as_raw()) }
+    }
+
+    /// Sends a request to the backing source to provide the requested page at `offset`.
+    ///
+    /// Returns `Err(Status::NOT_FOUND)` if the request cannot be fulfilled.
+    /// Returns `Err(Status::SHOULD_WAIT)` if the request will be asynchronously fulfilled and the
+    /// caller should wait on `req`. Depending on the state of pages in the range, `req` might be
+    /// generated for a range that is a subset of `[offset, offset + len)`. Never returns `Ok(())`.
+    #[inline]
+    pub fn get_pages(
+        &self,
+        offset: u64,
+        len: u64,
+        req: Pin<&mut PageRequestRef>,
+        vmo_debug_info: bindings::VmoDebugInfo,
+    ) -> Result<(), Status> {
+        // SAFETY: `self.as_raw()` points to an initialized C++ `PageSource`.
+        // `req.as_raw()` gets a pointer to a valid `PageRequest` without moving it.
+        Status::ok(unsafe {
+            bindings::cpp_page_source_get_pages(
+                self.as_raw(),
+                offset,
+                len,
+                req.as_raw(),
+                vmo_debug_info,
+            )
+        })
+    }
+
+    /// Request the page provider for clean pages in the range `[offset, offset + len)` to become
+    /// dirty, in order for a write to proceed. Returns `Err(Status::SHOULD_WAIT)` if the request
+    /// will be asynchronously fulfilled; the caller should wait on `req`. Depending on the state
+    /// of pages in the range, `req` might be generated for a range that is a subset of
+    /// `[offset, offset + len)`. Never returns `Ok(())`.
+    #[inline]
+    pub fn request_dirty_transition(
+        &self,
+        req: Pin<&mut PageRequestRef>,
+        offset: u64,
+        len: u64,
+        vmo_debug_info: bindings::VmoDebugInfo,
+    ) -> Result<(), Status> {
+        // SAFETY: `self.as_raw()` points to an initialized C++ `PageSource`.
+        // `req.as_raw()` gets a pointer to a valid `PageRequest` without moving it.
+        Status::ok(unsafe {
+            bindings::cpp_page_source_request_dirty_transition(
+                self.as_raw(),
+                req.as_raw(),
+                offset,
+                len,
+                vmo_debug_info,
+            )
+        })
+    }
+
+    /// Updates the request tracking metadata to account for pages `[offset, offset + len)` having
+    /// been supplied to the owning VMO.
+    ///
+    /// Note that the range `[offset, offset + len)` should not have been previously supplied. The
+    /// page request tracking in `PageSource` works by tracking only a fulfilled length, and not
+    /// exact fulfilled offsets, to save on memory required for metadata. So in order to prevent
+    /// over-accounting errors, the caller must ensure that they are only calling
+    /// `on_pages_supplied` for newly supplied ranges.
+    // TODO(rashaeqbal): Consider relaxing this constraint by more precise tracking of fulfilled
+    // offsets with a bitmap. Might require capping the max permissible length of a page request.
+    #[inline]
+    pub fn on_pages_supplied(&self, offset: u64, len: u64) {
+        // SAFETY: `self.as_raw()` points to an initialized C++ `PageSource`.
+        unsafe { bindings::cpp_page_source_on_pages_supplied(self.as_raw(), offset, len) }
+    }
+
+    /// Updates the request tracking metadata to account for pages `[offset, offset + len)` having
+    /// been dirtied in the owning VMO.
+    ///
+    /// Note that the range `[offset, offset + len)` should not have been previously dirtied. The
+    /// page request tracking in `PageSource` works by tracking only a fulfilled length, and not
+    /// exact fulfilled offsets, to save on memory required for metadata. So in order to prevent
+    /// over-accounting errors, the caller must ensure that they are only calling
+    /// `on_pages_dirtied` for newly dirtied ranges.
+    // TODO(rashaeqbal): Consider relaxing this constraint by more precise tracking of fulfilled
+    // offsets with a bitmap. Might require capping the max permissible length of a page request.
+    #[inline]
+    pub fn on_pages_dirtied(&self, offset: u64, len: u64) {
+        // SAFETY: `self.as_raw()` points to an initialized C++ `PageSource`.
+        unsafe { bindings::cpp_page_source_on_pages_dirtied(self.as_raw(), offset, len) }
+    }
+
+    /// Frees `pages`.
+    ///
+    /// # Safety
+    ///
+    /// `pages` must contain valid pages owned by this page source's VMO.
+    #[inline]
+    pub unsafe fn free_pages(&self, pages: Pin<&mut VmPageDoublyLinkedList>) {
+        // SAFETY: `self.as_raw()` points to an initialized C++ `PageSource`, and `pages` is a valid
+        // pinned `VmPageDoublyLinkedList` whose layout matches C++ `VmPageDoublyLinkedList`.
+        // `PageSource::FreePages` only pops elements in place and never moves the list header.
+        unsafe {
+            bindings::cpp_page_source_free_pages(
+                self.as_raw(),
+                core::ptr::from_mut(pages.get_unchecked_mut()).cast(),
+            )
+        }
+    }
+}
+
+/// Kernel console `vm_page_source` command implementation.
+#[cfg(console_enabled)]
+mod console {
+    use crate::console::{CMD_AVAIL_NORMAL, CmdArgs, static_command};
+    use core::ffi::c_int;
+    use kprint::kprintln;
+    use zx_status::Status;
+
+    /// Console command handler for `k vm_page_source`.
+    ///
+    /// # Safety
+    ///
+    /// - `argc` must be `>= 1` and `argv` must be non-null and valid for reads of `argc`
+    ///   initialized `CmdArgs` entries for the duration of the call.
+    /// - For the `dump` subcommand, `argv[2].arg_uint` must be the aligned address of a live
+    ///   `PageSource` that remains valid for the duration of the call.
+    unsafe extern "C" fn cmd_page_source(argc: c_int, argv: *const CmdArgs, _flags: u32) -> c_int {
+        if argc <= 0 || argv.is_null() {
+            return Status::INTERNAL.into_raw();
+        }
+        // SAFETY: `argv` is non-null and points to `argc` initialized `CmdArgs` entries from the
+        // console dispatcher.
+        let args = unsafe { core::slice::from_raw_parts(argv, argc as usize) };
+        let cmd_name = args[0].as_str();
+        let usage = || -> c_int {
+            kprintln!("usage:");
+            kprintln!("{:s} dump <address>", cmd_name);
+            Status::INTERNAL.into_raw()
+        };
+        let not_enough_args = || -> c_int {
+            kprintln!("not enough arguments");
+            usage()
+        };
+
+        if args.len() < 2 {
+            return not_enough_args();
+        }
+
+        if args[1].as_str() == "dump" {
+            if args.len() < 3 {
+                return not_enough_args();
+            }
+            let ps =
+                core::ptr::with_exposed_provenance::<super::PageSource>(args[2].arg_uint as usize);
+            if ps.is_null() || !ps.is_aligned() {
+                kprintln!("invalid address");
+                return usage();
+            }
+            // SAFETY: Console debugging command dumping a user-supplied `PageSource` pointer.
+            unsafe { (*ps).dump(0, u32::MAX) };
+        } else {
+            kprintln!("unknown command");
+            return usage();
+        }
+
+        zx_status::sys::ZX_OK
+    }
+
+    static_command!(
+        PS_OBJECT,
+        c"vm_page_source".as_ptr(),
+        c"page source debug commands".as_ptr(),
+        cmd_page_source,
+        CMD_AVAIL_NORMAL
+    );
 }

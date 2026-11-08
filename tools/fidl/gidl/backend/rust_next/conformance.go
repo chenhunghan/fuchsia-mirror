@@ -252,6 +252,7 @@ var decodeErrorPatternMap = map[ir.ErrorCode]string{
 	ir.ExceededMaxOutOfLineDepth:          `"TODO: ExceededMaxOutOfLineDepth"`,
 	ir.IncorrectHandleType:                "DecodeError::ExpectedDriverHandle", // probably wrong
 	ir.InvalidBoolean:                     "DecodeError::InvalidBool(_)",
+	ir.InvalidNonZero:                     `"TODO: InvalidNonZero"`,
 	ir.InvalidEmptyStruct:                 "DecodeError::InvalidUnit(_)",
 	ir.InvalidHandlePresenceIndicator:     "DecodeError::InvalidHandlePresence(_)",
 	ir.InvalidInlineBitInEnvelope:         `"TODO: InvalidInlineBitInEnvelope"`,

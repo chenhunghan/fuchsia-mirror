@@ -45,6 +45,18 @@ func (m *mockFFX) GetPBArtifacts(ctx context.Context, pbPath, group string) ([]s
 	return []string{"zbi"}, nil
 }
 
+type testCase struct {
+	name          string
+	flags         testsharderFlags
+	params        *proto.Params
+	testSpecs     []build.TestSpec
+	testDurations []build.TestDuration
+	testList      []build.TestListEntry
+	modifiers     []testsharder.TestModifier
+	packageRepos  []build.PackageRepo
+	affectedTests []string
+}
+
 // TestExecute runs golden tests for the execute() function.
 //
 // To add a new test case:
@@ -53,8 +65,6 @@ func (m *mockFFX) GetPBArtifacts(ctx context.Context, pbPath, group string) ([]s
 //     new golden file and automatically adds it to goldens.bzl, so no BUILD
 //     file edits are needed.
 func TestExecute(t *testing.T) {
-	ctx := context.Background()
-
 	// Clear pre-existing golden files to avoid leaving stale ones around.
 	if *updateGoldens {
 		files, err := filepath.Glob(filepath.Join(*goldensDir, "*.golden.json"))
@@ -68,17 +78,7 @@ func TestExecute(t *testing.T) {
 		}
 	}
 
-	testCases := []struct {
-		name          string
-		flags         testsharderFlags
-		params        *proto.Params
-		testSpecs     []build.TestSpec
-		testDurations []build.TestDuration
-		testList      []build.TestListEntry
-		modifiers     []testsharder.TestModifier
-		packageRepos  []build.PackageRepo
-		affectedTests []string
-	}{
+	testCases := []testCase{
 		{
 			name: "no tests",
 		},
@@ -589,10 +589,177 @@ func TestExecute(t *testing.T) {
 				MaxShardsPerEnv: 1,
 			},
 		},
-		{
-			name: "randomize test order",
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, outputFile := runTestsharder(t, tc)
+
+			goldenBasename := strings.ReplaceAll(tc.name, " ", "_") + ".golden.json"
+			goldenFile := filepath.Join(*goldensDir, goldenBasename)
+
+			if *updateGoldens {
+				if err := osmisc.CopyFile(outputFile, goldenFile); err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+
+			want := readShards(t, goldenFile)
+			if diff := cmp.Diff(want, got, cmp.FilterValues(func(s1, s2 fintpb.SetArtifacts_Metadata) bool {
+				return true
+			}, cmp.Ignore())); diff != "" {
+				t.Errorf("%s", strings.Join([]string{
+					"Golden file mismatch!",
+					"To fix, run `tools/integration/testsharder/update_goldens.sh",
+					diff,
+				}, "\n"))
+			}
+		})
+	}
+}
+
+// runTestsharder sets up the test environment for a testCase, executes
+// testsharder, and returns the resulting shards and output file path.
+func runTestsharder(t *testing.T, tc testCase) ([]testsharder.Shard, string) {
+	if tc.params == nil {
+		tc.params = &proto.Params{}
+	}
+
+	// testsharder assumes the build dir is two subdirectories down from the checkout root.
+	tc.flags.checkoutDir = t.TempDir()
+	tc.flags.buildDir = filepath.Join(tc.flags.checkoutDir, "out", "temp")
+	if tc.flags.depsFile != "" {
+		tc.flags.depsFile = filepath.Join(t.TempDir(), tc.flags.depsFile)
+		// When using depsFile, the outputFile must be within the checkoutDir.
+		tc.flags.outputFile = filepath.Join(tc.flags.checkoutDir, "output.json")
+	} else {
+		tc.flags.outputFile = filepath.Join(t.TempDir(), "output.json")
+	}
+
+	tc.params.ProductBundleName = "core.x64"
+	tc.params.Pave = true
+	if len(tc.modifiers) > 0 {
+		tc.flags.modifiersPath = writeTempJSONFile(t, tc.modifiers)
+	}
+	if len(tc.affectedTests) > 0 {
+		// Add a newline to the end of the file to test that it still calculates the
+		// correct number of affected tests even with extra whitespace.
+		tc.flags.affectedTestsPath = writeTempFile(t, strings.Join(tc.affectedTests, "\n")+"\n")
+	}
+	if err := os.MkdirAll(tc.flags.buildDir, os.ModePerm); err != nil {
+		t.Fatal(err)
+	}
+	// Write test-list.json.
+	if err := jsonutil.WriteToFile(
+		filepath.Join(tc.flags.buildDir, testListPath),
+		build.TestList{Data: tc.testList, SchemaID: "experimental"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	origGetHostPlatform := getHostPlatform
+	origGetFFX := testsharder.GetFFX
+	defer func() {
+		getHostPlatform = origGetHostPlatform
+		testsharder.GetFFX = origGetFFX
+	}()
+	getHostPlatform = func() (string, error) {
+		return "linux-x64", nil
+	}
+	testsharder.GetFFX = func(ctx context.Context, ffxPath, outputsDir string) (testsharder.FFXInterface, error) {
+		return &mockFFX{}, nil
+	}
+	writeDeps(t, tc.flags.buildDir, tc.testSpecs)
+	for _, repo := range tc.packageRepos {
+		if err := os.MkdirAll(filepath.Join(tc.flags.buildDir, repo.Path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m := &fakeModules{
+		testSpecs:           tc.testSpecs,
+		testDurations:       tc.testDurations,
+		packageRepositories: tc.packageRepos,
+		productBundles: []build.ProductBundle{
+			{Name: "core.x64", Path: "product_bundle"},
+			{Name: "boot-test_product_bundle", Path: "boot-test_product_bundle"},
+		},
+	}
+	if err := execute(context.Background(), tc.flags, tc.params, m); err != nil {
+		t.Fatal(err)
+	}
+
+	return readShards(t, tc.flags.outputFile), tc.flags.outputFile
+}
+
+func TestPreserveTestOrder(t *testing.T) {
+	// Regression test for https://fxbug.dev/579930542 to check that we
+	// don't get a shard timeout of zero when using "-preserve-order".
+	tc := testCase{
+		flags: testsharderFlags{
+			preserveTestOrder: true,
+			affectedOnly:      true,
+			skipUnaffected:    true,
+		},
+		params: &proto.Params{
+			TargetDuration: durationpb.New(30 * time.Minute),
+		},
+		testSpecs: []build.TestSpec{
+			fuchsiaTestSpec("test1"),
+			fuchsiaTestSpec("test2"),
+			fuchsiaTestSpec("test3"),
+		},
+		modifiers: []testsharder.TestModifier{
+			{
+				Name:        packageURL("test2"),
+				TotalRuns:   -1,
+				MaxAttempts: 1,
+				Affected:    true,
+			},
+			{
+				Name:        packageURL("test1"),
+				TotalRuns:   -1,
+				MaxAttempts: 1,
+				Affected:    true,
+			},
+		},
+	}
+
+	shards, _ := runTestsharder(t, tc)
+
+	if len(shards) != 1 {
+		t.Fatalf("expected 1 shard, got %d", len(shards))
+	}
+
+	// Verify that the tests ran in the order specified by the modifiers.
+	var gotTests []string
+	for _, test := range shards[0].Tests {
+		gotTests = append(gotTests, test.Name)
+	}
+	expectedTests := []string{packageURL("test2"), packageURL("test1")}
+	if diff := cmp.Diff(expectedTests, gotTests); diff != "" {
+		t.Errorf("shards[0].Tests mismatch (-want +got):\n%s", diff)
+	}
+
+	// We expect a timeout of 604 seconds computed by computeShardTimeout:
+	// - Shard overhead: 10 minutes (600s)
+	// - Per-test overhead: 1s * perTestMultiplier (2) = 2s per test; for 2 tests = 4s
+	// - Expected test durations: 0s (no durations specified in testSpecs/testDurations)
+	// - Test timeout overhead: 0s (no per-test timeout specified)
+	// - Target startup duration: 0s (AEMU emulator target)
+	// - Shard bootup timeout: 0s
+	// Total = 600s + 4s = 604s.
+	const expectedTimeoutSecs = 604
+	if got := shards[0].TimeoutSecs; got != expectedTimeoutSecs {
+		t.Errorf("shards[0].TimeoutSecs = %d, want %d", got, expectedTimeoutSecs)
+	}
+}
+
+func TestRandomizeTestOrder(t *testing.T) {
+	runWithSeed := func(seed uint64) []string {
+		tc := testCase{
 			flags: testsharderFlags{
-				randomOrderInShardsSeed: 12345,
+				randomOrderInShardsSeed: seed,
 			},
 			testSpecs: []build.TestSpec{
 				fuchsiaTestSpec("test1"),
@@ -600,103 +767,47 @@ func TestExecute(t *testing.T) {
 				fuchsiaTestSpec("test3"),
 				fuchsiaTestSpec("test4"),
 			},
-		},
+		}
+		shards, _ := runTestsharder(t, tc)
+		if len(shards) != 1 {
+			t.Fatalf("expected 1 shard, got %d", len(shards))
+		}
+		var names []string
+		for _, test := range shards[0].Tests {
+			names = append(names, test.Name)
+		}
+		return names
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			goldenBasename := strings.ReplaceAll(tc.name, " ", "_") + ".golden.json"
-			goldenFile := filepath.Join(*goldensDir, goldenBasename)
+	const seed1 = 12345
+	const seed2 = 54321
 
-			if tc.params == nil {
-				tc.params = &proto.Params{}
-			}
+	order1 := runWithSeed(seed1)
+	order2 := runWithSeed(seed2)
 
-			// testsharder assumes the build dir is two subdirectories down from the checkout root.
-			tc.flags.checkoutDir = t.TempDir()
-			tc.flags.buildDir = filepath.Join(tc.flags.checkoutDir, "out", "temp")
-			if tc.flags.depsFile != "" {
-				tc.flags.depsFile = filepath.Join(t.TempDir(), tc.flags.depsFile)
-				// When using depsFile, the outputFile must be within the checkoutDir.
-				tc.flags.outputFile = filepath.Join(tc.flags.checkoutDir, goldenBasename)
-			} else {
-				tc.flags.outputFile = filepath.Join(t.TempDir(), goldenBasename)
-			}
+	if diff := cmp.Diff(order1, order2); diff == "" {
+		t.Fatalf("expected seeds %d and %d to produce different orderings, but both produced: %v", seed1, seed2, order1)
+	}
 
-			if *updateGoldens {
-				defer func() {
-					if err := osmisc.CopyFile(tc.flags.outputFile, goldenFile); err != nil {
-						t.Fatal(err)
-					}
-				}()
-			}
+	// Assert the specific orderings produced by each seed.
+	expectedOrder1 := []string{
+		packageURL("test4"),
+		packageURL("test2"),
+		packageURL("test1"),
+		packageURL("test3"),
+	}
+	if diff := cmp.Diff(expectedOrder1, order1); diff != "" {
+		t.Errorf("order for seed %d mismatch (-want +got):\n%s", seed1, diff)
+	}
 
-			tc.params.ProductBundleName = "core.x64"
-			tc.params.Pave = true
-			if len(tc.modifiers) > 0 {
-				tc.flags.modifiersPath = writeTempJSONFile(t, tc.modifiers)
-			}
-			if len(tc.affectedTests) > 0 {
-				// Add a newline to the end of the file to test that it still calculates the
-				// correct number of affected tests even with extra whitespace.
-				tc.flags.affectedTestsPath = writeTempFile(t, strings.Join(tc.affectedTests, "\n")+"\n")
-			}
-			if err := os.MkdirAll(tc.flags.buildDir, os.ModePerm); err != nil {
-				t.Fatal(err)
-			}
-			// Write test-list.json.
-			if err := jsonutil.WriteToFile(
-				filepath.Join(tc.flags.buildDir, testListPath),
-				build.TestList{Data: tc.testList, SchemaID: "experimental"},
-			); err != nil {
-				t.Fatal(err)
-			}
-			origGetHostPlatform := getHostPlatform
-			origGetFFX := testsharder.GetFFX
-			defer func() {
-				getHostPlatform = origGetHostPlatform
-				testsharder.GetFFX = origGetFFX
-			}()
-			getHostPlatform = func() (string, error) {
-				return "linux-x64", nil
-			}
-			testsharder.GetFFX = func(ctx context.Context, ffxPath, outputsDir string) (testsharder.FFXInterface, error) {
-				return &mockFFX{}, nil
-			}
-			writeDeps(t, tc.flags.buildDir, tc.testSpecs)
-			for _, repo := range tc.packageRepos {
-				if err := os.MkdirAll(filepath.Join(tc.flags.buildDir, repo.Path), 0o700); err != nil {
-					t.Fatal(err)
-				}
-			}
-
-			m := &fakeModules{
-				testSpecs:           tc.testSpecs,
-				testDurations:       tc.testDurations,
-				packageRepositories: tc.packageRepos,
-				productBundles: []build.ProductBundle{
-					{Name: "core.x64", Path: "product_bundle"},
-					{Name: "boot-test_product_bundle", Path: "boot-test_product_bundle"},
-				},
-			}
-			if err := execute(ctx, tc.flags, tc.params, m); err != nil {
-				t.Fatal(err)
-			}
-
-			if !*updateGoldens {
-				want := readShards(t, goldenFile)
-				got := readShards(t, tc.flags.outputFile)
-				if diff := cmp.Diff(want, got, cmp.FilterValues(func(s1, s2 fintpb.SetArtifacts_Metadata) bool {
-					return true
-				}, cmp.Ignore())); diff != "" {
-					t.Errorf(strings.Join([]string{
-						"Golden file mismatch!",
-						"To fix, run `tools/integration/testsharder/update_goldens.sh",
-						diff,
-					}, "\n"))
-				}
-			}
-		})
+	expectedOrder2 := []string{
+		packageURL("test2"),
+		packageURL("test3"),
+		packageURL("test4"),
+		packageURL("test1"),
+	}
+	if diff := cmp.Diff(expectedOrder2, order2); diff != "" {
+		t.Errorf("order for seed %d mismatch (-want +got):\n%s", seed2, diff)
 	}
 }
 
@@ -783,7 +894,7 @@ func (m *fakeModules) Tools() build.Tools {
 		"ffx", "botanist", "ssh", "llvm-profdata",
 		"fvm", "zbi", "llvm-symbolizer", "symbolizer",
 		"tefmocheck", "triage", "resultdb", "perfcompare",
-		"test_filterer", "resummarize", "test-pilot",
+		"test_filterer", "test-pilot",
 	} {
 		tools = append(tools, build.Tool{
 			Name: tool,

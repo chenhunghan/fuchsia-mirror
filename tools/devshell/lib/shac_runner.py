@@ -4,14 +4,38 @@
 
 """Common SHAC execution helpers for fx lint and fx format-code."""
 
+import json
 import os
 import pathlib
+import platform
 import shutil
 import subprocess
 import sys
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 
 import scm
+
+_STATIC_CHECKS_TARGET = "//bundles/buildbot/static_checks"
+
+# Tool names in tool_paths.json corresponding to the dependencies of
+# //bundles/buildbot/static_checks/BUILD.gn invoked via compiled_tool_path() in
+# //scripts/shac/common.star.
+_STATIC_CHECK_TOOLS = frozenset(
+    (
+        "bazel2gn",
+        "check-licenses",
+        "clippy-reporter",
+        "cmc",
+        "doc-checker",
+        "fidl-format",
+        "fidl-lint",
+        "formatjson5",
+        "gidl-format",
+        "mdlint",
+        "readme_fuchsia",
+        "rfcmeta",
+    )
+)
 
 
 def _resolve_shac_binary() -> pathlib.Path:
@@ -145,6 +169,91 @@ def _build_shac_command(
     return tuple(command)
 
 
+def _host_platform_and_cpu() -> tuple[str, str]:
+    """Returns the current host (os, cpu) matching tool_paths.json."""
+    host_os = "mac" if sys.platform == "darwin" else sys.platform
+    machine = platform.machine()
+    if machine == "x86_64":
+        host_cpu = "x64"
+    elif machine in ("aarch64", "arm64"):
+        host_cpu = "arm64"
+    else:
+        host_cpu = machine
+    return (host_os, host_cpu)
+
+
+def _are_static_check_tools_built(build_dir: pathlib.Path) -> bool:
+    """Returns True if tool_paths.json and all static_checks binaries exist."""
+    tool_paths_file = build_dir / "tool_paths.json"
+    if not tool_paths_file.is_file():
+        return False
+
+    try:
+        entries = json.loads(tool_paths_file.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    if not isinstance(entries, list):
+        return False
+
+    host_os, host_cpu = _host_platform_and_cpu()
+    tool_paths = {
+        entry["name"]: entry["path"]
+        for entry in entries
+        if isinstance(entry, dict)
+        and entry.get("os") == host_os
+        and entry.get("cpu") == host_cpu
+        and isinstance(entry.get("name"), str)
+        and isinstance(entry.get("path"), str)
+    }
+
+    for tool_name in _STATIC_CHECK_TOOLS:
+        if (relative_path := tool_paths.get(tool_name)) is None:
+            return False
+        tool_binary = build_dir / relative_path
+        if not tool_binary.is_file() or not os.access(tool_binary, os.X_OK):
+            return False
+
+    return True
+
+
+# SHAC executes checks inside a read-only sandbox and cannot invoke `fx build`
+# on demand when resolving compiled host tools via `compiled_tool_path()` in
+# //scripts/shac/common.star. In clean checkouts or `fx worktree` environments
+# where a full build has not been run, missing host binaries in
+# $FUCHSIA_BUILD_DIR would otherwise cause SHAC to fail.
+#
+# When tool_paths.json or any binary in //bundles/buildbot/static_checks is
+# missing on disk, building the static_checks umbrella group as a pre-flight
+# step ensures all required host tools are compiled while skipping the `fx build`
+# overhead and avoiding clobbering last_ninja_build_targets.txt when already
+# present.
+def _ensure_static_check_tools_built(
+    fuchsia_dir: pathlib.Path,
+    build_dir: pathlib.Path,
+    env: Mapping[str, str],
+    *,
+    verbose: bool,
+    dry_run: bool,
+) -> None:
+    """Builds the static_checks host tool bundle if any binary is missing."""
+    if _are_static_check_tools_built(build_dir):
+        return
+
+    command = (
+        str(fuchsia_dir / "scripts" / "fx"),
+        "build",
+        "--host",
+        _STATIC_CHECKS_TARGET,
+    )
+    if verbose:
+        print(f"Running: {' '.join(command)}")
+    if dry_run:
+        print(f"[dry-run] Would execute: {' '.join(command)}")
+        return
+    subprocess.run(command, cwd=fuchsia_dir, env=env, check=True)
+
+
 def run_shac(
     subcommand: str,
     fuchsia_dir: pathlib.Path,
@@ -179,8 +288,8 @@ def run_shac(
         dry_run: If True, prints the SHAC command lines without executing them.
 
     Raises:
-        subprocess.CalledProcessError: If `shac` or `git` exits with a non-zero
-            status code.
+        subprocess.CalledProcessError: If `fx build`, `shac`, or `git` exits
+            with a non-zero status code.
         FileNotFoundError: If the `shac` binary cannot be found or if a target
             path requires invoking `git` and the `git` executable cannot be
             found.
@@ -193,18 +302,29 @@ def run_shac(
 
     shac_binary = _resolve_shac_binary()
 
-    shac_env = os.environ | {"FUCHSIA_DIR": str(fuchsia_dir)}
+    shac_env = os.environ | {
+        "FUCHSIA_DIR": str(fuchsia_dir),
+        "FUCHSIA_BUILD_DIR": str(build_dir),
+    }
 
     repo_groups = scm.get_repo_groups(
         fuchsia_dir,
         cwd,
         explicit_files=valid_files,
     )
+    shac_groups = tuple(group for group in repo_groups if group.has_shac)
+    if not shac_groups:
+        return
 
-    for group in repo_groups:
-        if not group.has_shac:
-            continue
+    _ensure_static_check_tools_built(
+        fuchsia_dir,
+        build_dir,
+        shac_env,
+        verbose=verbose,
+        dry_run=dry_run,
+    )
 
+    for group in shac_groups:
         command = _build_shac_command(
             shac_binary,
             subcommand,

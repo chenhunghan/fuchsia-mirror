@@ -217,6 +217,57 @@ As with any other argument, but especially
 the argument to all macros and rules that support it since these will not be in
 `**kwargs`.
 
+## Configurable attributes in symbolic macros {:#configurable-attributes}
+
+In [symbolic macros][bazel-symbolic-macros]{:.external}, attributes are
+[configurable][bazel-macros-configurability]{:.external} by default, meaning
+callers can pass `select()` expressions. On optional attributes, omitted or
+`None` arguments resolve to the attribute's default (passing `None` to a
+`mandatory = True` attribute is treated as omitted and fails). For configurable
+attributes, Bazel automatically wraps every non-`None` resolved value (including
+non-`None` defaults such as `False`, `""`, or `[]`) into a `select()`
+(`SelectorList`) before passing it to the macro's `implementation` function
+(whereas non-configurable attributes such as `configurable = False`,
+`attr.output()`, and `attr.output_list()` receive concrete values). Only
+configurable attributes whose default is `None` - `attr.label()` (with no
+default or `default = None`) and non-mandatory attributes inherited via
+`inherit_attrs` (whose default value is
+[overridden to `None`][bazel-macros-attribute-inheritance]{:.external} unless
+overridden with a non-`None` default in `attrs`) - arrive as `None` when omitted
+or passed `None` (whereas passing `select({"//conditions:default": None})`
+passes a `SelectorList`).
+
+Because a `select()` value is always truthy in Starlark, compares unequal to
+concrete values (for example, `attr == []` is always `False`), and cannot be
+iterated over, indexed, formatted, or placed inside list or dictionary
+literals, do not perform operations that require concrete values on
+configurable attributes or `select()` values
+_\[<span style="color:red">SHAC error</span>\]_:
+
+* **Boolean evaluation**: Do not use `if attr:`, `not attr`, `attr or default`,
+  or `bool(attr)`. Use `attr == None` or `attr != None` to check whether a
+  `None`-defaulted configurable attribute (`attr.label()` without a non-`None`
+  default or a non-mandatory inherited attribute) was omitted or passed `None`.
+  For configurable attributes with non-`None` defaults (such as `attr.bool()`,
+  `attr.string()`, or `attr.string_list()`), Bazel wraps the default in a
+  `select()`, so `attr == None` is always `False`.
+
+* **Container literals and iteration**: Do not place a configurable attribute
+  inside a list, tuple, or dictionary literal (for example, `[attr]` or
+  `{"key": attr}`), iterate over it (`for x in attr`), or pass it to sequence
+  functions (`len(attr)`, `list(attr)`). Use `+` to concatenate lists and `|`
+  to merge dictionaries.
+
+* **Value comparisons, string formatting, and method calls**: Do not compare a
+  configurable attribute to a non-`None` value (`attr == "foo"`), format it
+  (`"%s" % attr` or `"{}".format(attr)`), call methods on it, or pass it to a
+  non-configurable attribute (such as `name`, `tags`, `testonly`, or
+  `visibility`).
+
+If a macro implementation must inspect, format, iterate over, or branch on an
+attribute's value - or pass it to a non-configurable attribute - declare the
+attribute with `configurable = False` in `attrs`.
+
 ## Comments
 
 * Provide function-level comments for all public functions (those that do not
@@ -296,6 +347,11 @@ SDK][fuchsia-prefix-sdk].
 
 Note: `rustc_*` are an exception because these do not conflict with `rust_*`.
 
+When adding a new C/C++ or Rust wrapper macro or rule, see
+`//build/bazel/rules/cc/README.md` or `//build/bazel/rules/rust/README.md` for
+instructions on updating the `bazel_fuchsia_wrappers` SHAC check and related
+documentation.
+
 ## Avoid configuration transitions
 
 Fuchsia platform targets should already build in the right configuration. If
@@ -340,6 +396,8 @@ See [Avoiding caching for large artifacts][avoiding-caching-large-artifacts].
 [bazel-common-attributes-tests]: https://bazel.build/reference/be/common-definitions#common-attributes-tests
 [bazel-common-tags]: https://bazel.build/reference/be/common-definitions#common.tags
 [bazel-common-visibility]: https://bazel.build/reference/be/common-definitions#common.visibility
+[bazel-macros-attribute-inheritance]: https://bazel.build/extending/macros#attribute-inheritance
+[bazel-macros-configurability]: https://bazel.build/extending/macros#configurability
 [bazel-no-legacy-macros]: https://bazel.build/extending/legacy-macros#no-legacy-macros
 [bazel-official-build-style-damp]: https://bazel.build/build/style-guide#prefer-damp-build-files-over-dry
 [bazel-official-build-style-python-diff]: https://bazel.build/build/style-guide#differences-python-style-guide

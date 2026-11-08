@@ -30,7 +30,6 @@ group("tools") {
     "//third_party/openssh-portable:ssh-keygen-shell-pkg",
     "//third_party/openssh-portable:ssh-shell-pkg",
   ]
-  deps = [ "//build/validate:non_production_tag" ]
 
   # These are libraries that were being included in tools?
   # "//src/security/lib/scrutiny",
@@ -44,6 +43,7 @@ _host_tools = [
   "//src/diagnostics/triage:install",
   "//src/lib/chunked-compression:chunked-compress",
   "//src/lib/icu/tools/extractor:host",
+  "//src/memory/tools/dupefinder",
   "//src/performance/lib/trace_processing:run_cpu_breakdown",
   "//src/performance/lib/trace_processing:run_graphics_metrics",
   "//src/performance/fxtdump",

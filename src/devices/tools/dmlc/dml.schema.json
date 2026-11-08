@@ -639,6 +639,11 @@
                     "type": "string",
                     "description": "Optional driver host colocation identifier (e.g. '#gpio', '#usb')."
                 },
+                "publish_priority": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional priority for publishing this device. Devices with a higher priority are published first."
+                },
                 "metadata": {
                     "type": "array",
                     "description": "Static metadata payloads attached to this child node.",

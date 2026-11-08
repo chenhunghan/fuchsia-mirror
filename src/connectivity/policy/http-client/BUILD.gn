@@ -50,18 +50,18 @@ resource("fake-ssl-certs") {
 }
 
 # Kept in GN because `http-client-test` packages
-# `//src/connectivity/network/dns:component` and
-# `//src/connectivity/network/netstack3:component-for-tests`, which have no
+# `//src/connectivity/network/dns:component` and subpackages
+# `//src/connectivity/network/netstack3:package-for-tests`, which have no
 # Bazel build yet.
 fuchsia_unittest_package("http-client-test") {
   package_name = "http-client-test-gn"
   manifest = "meta/http_client_test.cml"
   deps = [
     ":fake-ssl-certs",
-    ":http_client_test",
+    ":http_client_bin_test",
     "//src/connectivity/network/dns:component",
-    "//src/connectivity/network/netstack3:component-for-tests",
   ]
+  subpackages = [ "//src/connectivity/network/netstack3:package-for-tests" ]
 }
 
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
@@ -126,7 +126,8 @@ rustc_binary("http_client") {
     "//third_party/rust_crates:thiserror",
   ]
 }
-rustc_test("http_client_test") {
+
+rustc_test("http_client_bin_test") {
   sources = [
     "src/main.rs",
     "src/pkg.rs",
@@ -163,26 +164,28 @@ rustc_test("http_client_test") {
          ] + [ "//third_party/rust_crates:assert_matches" ]
   source_root = "src/main.rs"
   configs += [ "//build/config/rust/lints:deny_unused_results" ]
-  output_name = "http_client_bin_test"
 }
+
 fuchsia_component_manifest("manifest") {
   component_name = "http-client"
   manifest = "meta/http_client.cml"
 }
+
 fuchsia_component("component") {
   cm_label = ":manifest"
-  component_name = "http-client"
   deps = [ ":http_client" ]
 }
+
 fuchsia_component_manifest("google_manifest") {
   component_name = "google-http-client"
   manifest = "meta/google_http_client.cml"
 }
+
 fuchsia_component("google_component") {
   cm_label = ":google_manifest"
-  component_name = "google-http-client"
   deps = [ ":http_client" ]
 }
+
 fuchsia_structured_config_rust_lib("http_client_config") {
   cm_label = ":manifest"
 }

@@ -2,11 +2,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/bazel/bazel_test_suite.gni")
 import("//build/components.gni")
-import("//build/rust/rustc_binary.gni")
-import("//build/rust/rustc_library.gni")
 import("//build/rust/rustc_link_attribute.gni")
-import("//build/rust/rustc_test.gni")
 
 # The Rust stdlib has an implicit link attribute to libfdio.
 # Any Rust executable should depend on this target to link
@@ -15,73 +13,16 @@ rustc_link_attribute("fdio_for_rust_stdlib") {
   lib_shared_target = "//sdk/lib/fdio"
 }
 
-rustc_library("fdio_zxio") {
-  with_unit_tests = true
-  version = "0.1.0"
-  edition = "2024"
-  source_root = "src/fdio_zxio.rs"
-  sources = [
-    "src/fdio_sys.rs",
-    "src/fdio_zxio.rs",
-    "src/zxio_sys.rs",
-  ]
-  deps = [
-    "//sdk/lib/zxio",
-    "//sdk/rust/zx",
-  ]
-  test_deps = [
-    "//src/lib/fuchsia",
-    "//third_party/rust_crates:libc",
-  ]
-}
-
-rustc_binary("spawn_test_target") {
-  version = "0.2.0"
-  edition = "2024"
-  source_root = "test/spawn_test_target.rs"
-  sources = [ "test/spawn_test_target.rs" ]
-
-  configs += [ "//build/config/rust/lints:deny_unused_results" ]
-}
-
-rustc_binary("spawn_builder_test_target") {
-  edition = "2024"
-  visibility = [ ":*" ]
-  source_root = "test/spawn_builder_test_target.rs"
-  sources = [ "test/spawn_builder_test_target.rs" ]
-
-  configs += [ "//build/config/rust/lints:deny_unused_results" ]
-}
-
-fuchsia_component("test-component") {
-  testonly = true
-  visibility = [ ":*" ]
-  component_name = "fdio_lib_test"
-  deps = [
-    ":fdio_test",
-    ":spawn_builder_test_target",
-    ":spawn_test_target",
-  ]
-  manifest = "meta/fdio_lib_test.cml"
-}
-
-fuchsia_unittest_component("fdio_zxio_test_component") {
-  visibility = [ ":*" ]
-  component_name = "fdio_zxio_test"
-  deps = [ ":fdio_zxio_test" ]
-}
-
-fuchsia_test_package("test-package") {
-  package_name = "fdio-rust-tests"
-  test_components = [
-    ":test-component",
-    ":fdio_zxio_test_component",
-  ]
+bazel_test_suite("bazel_tests") {
+  target_tests = [ "//src/lib/fdio/rust:fdio-rust-tests" ]
 }
 
 group("tests") {
   testonly = true
-  deps = [ ":test-package" ]
+  deps = [
+    ":bazel_tests",
+    ":test-package",
+  ]
 }
 
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
@@ -138,4 +79,72 @@ if (is_fuchsia) {
       "//third_party/rust_crates:thiserror",
     ]
   }
+}
+if (is_fuchsia) {
+  rustc_library("fdio_zxio") {
+    sources = [
+      "src/fdio_sys.rs",
+      "src/fdio_zxio.rs",
+      "src/zxio_sys.rs",
+    ]
+    source_root = "src/fdio_zxio.rs"
+    edition = "2024"
+    link_deps = [ "//sdk/lib/zxio" ]
+    test_deps = [
+      "//src/lib/fuchsia",
+      "//third_party/rust_crates:libc",
+    ]
+    version = "0.1.0"
+    visibility = [
+      ":*",
+      "//src/diagnostics/archivist:*",
+    ]
+    with_unit_tests = true
+    deps = [ "//sdk/rust/zx" ]
+  }
+}
+if (is_fuchsia) {
+  rustc_binary("spawn_test_target") {
+    sources = [ "test/spawn_test_target.rs" ]
+    configs += [ "//build/config/rust/lints:deny_unused_results" ]
+    source_root = "test/spawn_test_target.rs"
+    edition = "2024"
+    version = "0.2.0"
+  }
+}
+if (is_fuchsia) {
+  rustc_binary("spawn_builder_test_target") {
+    sources = [ "test/spawn_builder_test_target.rs" ]
+    configs += [ "//build/config/rust/lints:deny_unused_results" ]
+    source_root = "test/spawn_builder_test_target.rs"
+    edition = "2024"
+  }
+}
+
+fuchsia_component_manifest("test-component-manifest") {
+  testonly = true
+  component_name = "fdio_lib_test"
+  manifest = "meta/fdio_lib_test.cml"
+}
+
+fuchsia_test_component("test-component") {
+  cm_label = ":test-component-manifest"
+  deps = [
+    ":fdio_test",
+    ":spawn_builder_test_target",
+    ":spawn_test_target",
+  ]
+}
+
+fuchsia_unittest_component("fdio_zxio_test_component") {
+  deps = [ ":fdio_zxio_test" ]
+  component_name = "fdio_zxio_test"
+}
+
+fuchsia_test_package("test-package") {
+  package_name = "fdio-rust-tests-gn"
+  test_components = [
+    ":fdio_zxio_test_component",
+    ":test-component",
+  ]
 }

@@ -3,16 +3,66 @@
 # found in the LICENSE file.
 """Trace model data structures."""
 
+# Memory layout of the model classes
+#
+# A trace model can hold millions of Event and SchedulingRecord objects, so
+# their per-instance overhead dominates host memory during trace import. To
+# keep it down:
+#
+#   * Event, SchedulingRecord, and every subclass of either declare
+#     __slots__, as do trace_time.TimePoint and trace_time.TimeDelta. A
+#     subclass must declare its own __slots__ (listing only the attributes it
+#     adds, or `()` if it adds none); a class without one silently gets a
+#     per-instance __dict__ back, and nothing fails except memory usage.
+#   * Empty args are stored as a single shared, empty, read-only mapping, and
+#     non-empty args are wrapped in a read-only view rather than copied, so
+#     neither reading args nor constructing an event allocates a dict.
+#   * Event interns its category and name with sys.intern(). A trace has few
+#     distinct values for these, but the importers create a new string object
+#     for every event, so without interning each event carries its own copy.
+#     Interned strings are not immortal, so they are freed with the model.
+#   * DurationEvent stores child_durations and child_flows as tuples (defaulting
+#     to the singleton `()`), avoiding two empty list allocations per leaf
+#     slice.
+#
+# Nothing enforces the __slots__ convention. If that ever becomes necessary,
+# add a test that walks Event.__subclasses__() and
+# SchedulingRecord.__subclasses__() recursively and asserts that no instance
+# has a __dict__.
+
 import copy
 import enum
+import sys
 import typing
 from collections.abc import Iterator, Mapping, Sequence
 from functools import total_ordering
+from types import MappingProxyType
 from typing import Any, Self
 
 from trace_processing import trace_time
 
 INT32_MIN = -0x80000000
+
+_EMPTY_ARGS: MappingProxyType[str, Any] = MappingProxyType({})
+
+
+# TODO(b/577959138): Switch to frozendict (PEP 814) once the in-tree Python is
+# 3.15 or newer. It would make args truly immutable and isolated from the
+# caller without the extra MappingProxyType object per set of args.
+def _read_only_args(
+    args: Mapping[str, Any] | None,
+) -> MappingProxyType[str, Any]:
+    """Returns a read-only view of `args` without copying it.
+
+    The view reflects later changes the caller makes to `args`; callers that
+    need isolation must pass a copy. Empty or missing args map to a shared
+    empty view.
+    """
+    if not args:
+        return _EMPTY_ARGS
+    if isinstance(args, MappingProxyType):
+        return args
+    return MappingProxyType(args)
 
 
 class InstantEventScope(enum.Enum):
@@ -36,6 +86,10 @@ class Event:
     are common to all trace event types.
     """
 
+    # Subclasses must declare their own __slots__; see "Memory layout of the
+    # model classes" at the top of this file.
+    __slots__ = ("category", "name", "start", "pid", "tid", "_args")
+
     def __init__(
         self,
         category: str,
@@ -43,38 +97,43 @@ class Event:
         start: trace_time.TimePoint,
         pid: int,
         tid: int,
-        args: dict[str, Any] | None,
+        args: Mapping[str, Any] | None,
     ) -> None:
-        self.category = category
-        self.name = name
+        # Intern category and name: a trace has few distinct values for each
+        # but the importers produce a separate string object per event. See
+        # "Memory layout of the model classes" at the top of this file.
+        self.category = sys.intern(category)
+        self.name = sys.intern(name)
         self.start = start
         self.pid = pid
         self.tid = tid
-        # Any extra arguments that the event contains.
-        self._args = args if args else None
+        # Any extra arguments that the event contains. These are not copied:
+        # the FXT importer deliberately passes one dict to every event that
+        # shares an arg set, and copying would duplicate it per event.
+        self._args: MappingProxyType[str, Any] = _read_only_args(args)
 
     @property
-    def args(self) -> dict[str, Any]:
-        return self._args if self._args else {}
+    def args(self) -> MappingProxyType[str, Any]:
+        return self._args
 
     @args.setter
-    def args(self, rhs: dict[str, Any]) -> None:
-        self._args = rhs if rhs else None
+    def args(self, rhs: Mapping[str, Any] | None) -> None:
+        self._args = _read_only_args(rhs)
+
+    def _init_from_dict(self, event_dict: Mapping[str, Any]) -> None:
+        self.category = sys.intern(event_dict["cat"])
+        self.name = sys.intern(event_dict["name"])
+        self.start = trace_time.TimePoint.from_microseconds(event_dict["ts"])
+        self.pid = event_dict["pid"]
+        self.tid = event_dict["tid"]
+        self._args = _read_only_args(event_dict.get("args"))
 
     @classmethod
     def _consume_dict(cls, event_dict: dict[str, Any]) -> Self:
         """Factory-style constructor. Intended for use by subclasses."""
-        category: str = event_dict["cat"]
-        name: str = event_dict["name"]
-        start: trace_time.TimePoint = trace_time.TimePoint.from_epoch_delta(
-            trace_time.TimeDelta.from_microseconds(event_dict["ts"])
-        )
-        pid: int = event_dict["pid"]
-        tid: int = event_dict["tid"]
-        args: dict[str, Any] = event_dict.get("args", {})
-
-        del event_dict  # So that we get ownership of `args`.
-        return cls(category, name, start, pid, tid, args)
+        instance = cls.__new__(cls)
+        instance._init_from_dict(event_dict)
+        return instance
 
     def end_time(self) -> trace_time.TimePoint | None:
         """Get the ending time for this Event
@@ -88,6 +147,9 @@ class Event:
 
 class InstantEvent(Event):
     """An event that corresponds to a single moment in time."""
+
+    # See "Memory layout of the model classes" at the top of this file.
+    __slots__ = ("scope",)
 
     INSTANT_EVENT_SCOPE_MAP: dict[str, InstantEventScope] = {
         "g": InstantEventScope.GLOBAL,
@@ -125,11 +187,17 @@ class InstantEvent(Event):
             scope_str
         ]
 
-        return cls(scope, base=Event._consume_dict(event_dict))
+        instance = cls.__new__(cls)
+        instance._init_from_dict(event_dict)
+        instance.scope = scope
+        return instance
 
 
 class CounterEvent(Event):
     """An event that tracks the count of some quantity."""
+
+    # See "Memory layout of the model classes" at the top of this file.
+    __slots__ = ("id",)
 
     def __init__(self, id: int | None, base: Event) -> None:
         super().__init__(
@@ -151,7 +219,10 @@ class CounterEvent(Event):
                     f"parses as int: {event_dict}"
                 ) from t
 
-        return cls(id, base=Event._consume_dict(event_dict))
+        instance = cls.__new__(cls)
+        instance._init_from_dict(event_dict)
+        instance.id = id
+        return instance
 
 
 class DurationEvent(Event):
@@ -164,17 +235,20 @@ class DurationEvent(Event):
     (i.e. they don't have a matching end/begin event) are dropped.
     """
 
+    # See "Memory layout of the model classes" at the top of this file.
+    __slots__ = ("duration", "parent", "_child_durations", "_child_flows")
+
     duration: trace_time.TimeDelta | None
     parent: Self | None
-    child_durations: list[Self]
-    child_flows: list[FlowEvent]
+    _child_durations: tuple[Self, ...]
+    _child_flows: tuple[FlowEvent, ...]
 
     def __init__(
         self,
         duration: trace_time.TimeDelta | None,
         parent: Self | None,
-        child_durations: list[Self],
-        child_flows: list[FlowEvent],
+        child_durations: Sequence[Self],
+        child_flows: Sequence[FlowEvent],
         base: Event,
     ) -> None:
         super().__init__(
@@ -182,8 +256,24 @@ class DurationEvent(Event):
         )
         self.duration = duration
         self.parent = parent
-        self.child_durations = child_durations
-        self.child_flows = child_flows
+        self._child_durations = tuple(child_durations)
+        self._child_flows = tuple(child_flows)
+
+    @property
+    def child_durations(self) -> tuple[Self, ...]:
+        return self._child_durations
+
+    @child_durations.setter
+    def child_durations(self, rhs: Sequence[Self]) -> None:
+        self._child_durations = tuple(rhs)
+
+    @property
+    def child_flows(self) -> tuple[FlowEvent, ...]:
+        return self._child_flows
+
+    @child_flows.setter
+    def child_flows(self, rhs: Sequence[FlowEvent]) -> None:
+        self._child_flows = tuple(rhs)
 
     @classmethod
     def consume_dict(cls, event_dict: dict[str, Any]) -> Self:
@@ -201,13 +291,13 @@ class DurationEvent(Event):
                 float(microseconds)
             )
 
-        return cls(
-            duration=duration,
-            parent=None,
-            child_durations=[],
-            child_flows=[],
-            base=Event._consume_dict(event_dict),
-        )
+        instance = cls.__new__(cls)
+        instance._init_from_dict(event_dict)
+        instance.duration = duration
+        instance.parent = None
+        instance._child_durations = ()
+        instance._child_flows = ()
+        return instance
 
     @typing.override
     def end_time(self) -> trace_time.TimePoint | None:
@@ -224,6 +314,9 @@ class AsyncEvent(Event):
     Dangling Chrome async begin/end events are dropped.
     """
 
+    # See "Memory layout of the model classes" at the top of this file.
+    __slots__ = ("id", "duration")
+
     def __init__(
         self, id: int, duration: trace_time.TimeDelta | None, base: Event
     ) -> None:
@@ -236,7 +329,11 @@ class AsyncEvent(Event):
     @classmethod
     def consume_dict(cls, id: int, event_dict: dict[str, Any]) -> Self:
         """Factory-style constructor."""
-        return cls(id, duration=None, base=Event._consume_dict(event_dict))
+        instance = cls.__new__(cls)
+        instance._init_from_dict(event_dict)
+        instance.id = id
+        instance.duration = None
+        return instance
 
     @typing.override
     def end_time(self) -> trace_time.TimePoint | None:
@@ -256,6 +353,15 @@ class FlowEvent(Event):
       * A step flow event with no preceding (category, name, id) tuple.
       * An end flow event with no preceding (category, name, id) tuple.
     """
+
+    # See "Memory layout of the model classes" at the top of this file.
+    __slots__ = (
+        "id",
+        "phase",
+        "enclosing_duration",
+        "previous_flow",
+        "next_flow",
+    )
 
     FLOW_EVENT_PHASE_MAP: dict[str, FlowEventPhase] = {
         "s": FlowEventPhase.START,
@@ -308,14 +414,14 @@ class FlowEvent(Event):
             )
         phase: FlowEventPhase = FlowEvent.FLOW_EVENT_PHASE_MAP[phase_str]
 
-        return cls(
-            id,
-            phase,
-            enclosing_duration,
-            previous_flow=None,
-            next_flow=None,
-            base=Event._consume_dict(event_dict),
-        )
+        instance = cls.__new__(cls)
+        instance._init_from_dict(event_dict)
+        instance.id = id
+        instance.phase = phase
+        instance.enclosing_duration = enclosing_duration
+        instance.previous_flow = None
+        instance.next_flow = None
+        return instance
 
 
 @total_ordering
@@ -353,17 +459,34 @@ class ThreadState(enum.Enum):
 class SchedulingRecord:
     """A record giving us information about cpu scheduling decisions"""
 
+    # Subclasses must declare their own __slots__; see "Memory layout of the
+    # model classes" at the top of this file.
+    __slots__ = ("start", "tid", "prio", "_args")
+
     def __init__(
         self,
         start: trace_time.TimePoint,
         tid: int,
         prio: int | None,
-        args: dict[str, Any],
+        args: Mapping[str, Any] | None = None,
     ) -> None:
         self.start: trace_time.TimePoint = start
         self.tid: int = tid
         self.prio: int | None = prio
-        self.args: dict[str, Any] = args.copy()
+        # Copy non-empty args so the record is isolated from later changes to
+        # the caller's mapping, even if that mapping is itself a read-only
+        # view of something mutable.
+        self._args: MappingProxyType[str, Any] = _read_only_args(
+            dict(args) if args else None
+        )
+
+    @property
+    def args(self) -> MappingProxyType[str, Any]:
+        return self._args
+
+    @args.setter
+    def args(self, rhs: Mapping[str, Any] | None) -> None:
+        self._args = _read_only_args(rhs)
 
     def is_idle(self) -> bool:
         """
@@ -375,6 +498,9 @@ class SchedulingRecord:
 class ContextSwitch(SchedulingRecord):
     """A record indicating that a thread has been scheduled on a given cpu"""
 
+    # See "Memory layout of the model classes" at the top of this file.
+    __slots__ = ("outgoing_tid", "outgoing_prio", "outgoing_state")
+
     def __init__(
         self,
         start: trace_time.TimePoint,
@@ -383,9 +509,9 @@ class ContextSwitch(SchedulingRecord):
         incoming_prio: int | None,
         outgoing_prio: int | None,
         outgoing_state: ThreadState,
-        args: dict[str, Any],
+        args: Mapping[str, Any] | None = None,
     ):
-        super().__init__(start, incoming_tid, incoming_prio, args.copy())
+        super().__init__(start, incoming_tid, incoming_prio, args)
         self.outgoing_tid = outgoing_tid
         self.outgoing_prio = outgoing_prio
         self.outgoing_state = outgoing_state
@@ -394,14 +520,18 @@ class ContextSwitch(SchedulingRecord):
 class Waking(SchedulingRecord):
     """A record indicating that a thread has been unblocked and is waiting to run on a given cpu"""
 
+    # Empty, but required: without it Waking gets a per-instance __dict__.
+    # See "Memory layout of the model classes" at the top of this file.
+    __slots__ = ()
+
     def __init__(
         self,
         start: trace_time.TimePoint,
         tid: int,
         prio: int | None,
-        args: dict[str, Any],
+        args: Mapping[str, Any] | None = None,
     ) -> None:
-        super().__init__(start, tid, prio, args.copy())
+        super().__init__(start, tid, prio, args)
 
 
 class Thread:
@@ -507,7 +637,7 @@ class Model:
 
                     new_event = copy.copy(event)
                     new_thread.events.append(new_event)
-                    new_event.args = event.args.copy()
+                    new_event.args = event.args
                     new_event_map[event] = new_event
 
         # Step 2: Replace all referenced events by their corresponding ones in

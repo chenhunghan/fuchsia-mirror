@@ -35,7 +35,6 @@ use starnix_uapi::{
     MAP_SHARED, MAP_SHARED_VALIDATE, MAP_STACK, PROT_EXEC, errno, error, robust_list_head, tid_t,
     uapi,
 };
-use std::ops::Deref as _;
 use zx;
 
 #[cfg(target_arch = "x86_64")]
@@ -163,7 +162,6 @@ pub fn do_mmap(
 
     let addr = match (addr, flags & MAP_FIXED != 0, flags & MAP_FIXED_NOREPLACE != 0) {
         (UserAddress::NULL, false, false) => DesiredAddress::Any,
-        (UserAddress::NULL, true, _) | (UserAddress::NULL, _, true) => return error!(EINVAL),
         (addr, false, false) => DesiredAddress::Hint(addr),
         (addr, _, true) => DesiredAddress::Fixed(addr),
         (addr, true, false) => DesiredAddress::FixedOverwrite(addr),
@@ -195,6 +193,12 @@ pub fn do_mmap(
     }
 
     security::mmap_file(current_task, file.as_ref(), prot_flags, options)?;
+    if let DesiredAddress::Fixed(addr) | DesiredAddress::FixedOverwrite(addr) = addr {
+        if !addr.is_aligned(*PAGE_SIZE) {
+            return error!(EINVAL);
+        }
+        security::mmap_addr(current_task, addr)?;
+    }
 
     if flags & MAP_ANONYMOUS != 0 {
         fuchsia_trace::duration!(
@@ -316,6 +320,7 @@ pub fn sys_process_vm_readv(
     let remote_task = current_task.get_task(tid)?;
 
     current_task.check_ptrace_access_mode(PTRACE_MODE_ATTACH_REALCREDS, &remote_task)?;
+    let remote_mm = remote_task.mm().ok();
 
     let local_iov = current_task.read_iovec(local_iov_addr, local_iov_count)?;
     let remote_iov = current_task.read_iovec(remote_iov_addr, remote_iov_count)?;
@@ -331,12 +336,12 @@ pub fn sys_process_vm_readv(
     // avoid doing two copies like other IPC mechanisms require. We should avoid this too at some
     // point.
     let mut output = UserBuffersOutputBuffer::unified_new(current_task, local_iov)?;
-    let remote_mm = remote_task.mm().ok();
     if current_task.has_same_address_space(remote_mm.as_ref()) {
         let mut input = UserBuffersInputBuffer::unified_new(current_task, remote_iov)?;
         output.write_buffer(&mut input)
     } else {
-        let mut input = UserBuffersInputBuffer::syscall_new(remote_task.deref(), remote_iov)?;
+        let remote_mm = remote_mm.ok_or_else(|| errno!(ESRCH))?;
+        let mut input = UserBuffersInputBuffer::syscall_new(&remote_mm, remote_iov)?;
         output.write_buffer(&mut input)
     }
 }
@@ -366,6 +371,7 @@ pub fn sys_process_vm_writev(
     let remote_task = current_task.get_task(tid)?;
 
     current_task.check_ptrace_access_mode(PTRACE_MODE_ATTACH_REALCREDS, &remote_task)?;
+    let remote_mm = remote_task.mm().ok();
 
     let local_iov = current_task.read_iovec(local_iov_addr, local_iov_count)?;
     let remote_iov = current_task.read_iovec(remote_iov_addr, remote_iov_count)?;
@@ -381,12 +387,12 @@ pub fn sys_process_vm_writev(
     // avoid doing two copies like other IPC mechanisms require. We should avoid this too at some
     // point.
     let mut input = UserBuffersInputBuffer::unified_new(current_task, local_iov)?;
-    let remote_mm = remote_task.mm().ok();
     if current_task.has_same_address_space(remote_mm.as_ref()) {
         let mut output = UserBuffersOutputBuffer::unified_new(current_task, remote_iov)?;
         output.write_buffer(&mut input)
     } else {
-        let mut output = UserBuffersOutputBuffer::syscall_new(remote_task.deref(), remote_iov)?;
+        let remote_mm = remote_mm.ok_or_else(|| errno!(ESRCH))?;
+        let mut output = UserBuffersOutputBuffer::syscall_new(&remote_mm, remote_iov)?;
         output.write_buffer(&mut input)
     }
 }
@@ -421,7 +427,7 @@ pub fn sys_process_mrelease(
         //
         //   EINVAL The memory of the task cannot be released because the
         //          process is not exiting, or by other reasons.
-        if thread_group_state.is_running() {
+        if thread_group.is_running() {
             return error!(EINVAL);
         }
 
@@ -1490,6 +1496,132 @@ mod tests {
                     }
                 }
             }
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_process_vm_writev_pins_memory_manager() {
+        use crate::mm::MemoryAccessor;
+        use crate::vfs::buffers::{OutputBuffer, UserBuffersInputBuffer, UserBuffersOutputBuffer};
+        use starnix_types::user_buffer::UserBuffer;
+
+        spawn_kernel_and_run(async |current_task| {
+            let target_task = create_task(current_task.kernel(), "target");
+            let page_size = *PAGE_SIZE;
+            let local_buf = map_memory(&current_task, UserAddress::default(), page_size);
+            let target_buf = map_memory(&target_task, UserAddress::default(), page_size);
+
+            let pattern = [0x42u8; 16];
+            current_task.write_memory(local_buf, &pattern).expect("write local");
+
+            let local_iov = UserBuffer { address: local_buf, length: pattern.len() };
+            let remote_iov = UserBuffer { address: target_buf, length: pattern.len() };
+
+            let mm1 = target_task.mm().unwrap();
+
+            // Construct an output buffer pinned to target_task's initial MemoryManager (mm1).
+            let mut output_buffer =
+                UserBuffersOutputBuffer::syscall_new(&mm1, smallvec::smallvec![remote_iov])
+                    .unwrap();
+
+            // Simulate an execve in target_task: swap target_task's MemoryManager to mm2.
+            let other_task = create_task(current_task.kernel(), "other");
+            let mm2 = other_task.mm().unwrap();
+            target_task.running_state().mm.update(Some(mm2.clone()));
+
+            // Write through the pre-constructed output_buffer.
+            let mut input_buffer =
+                UserBuffersInputBuffer::unified_new(&current_task, smallvec::smallvec![local_iov])
+                    .unwrap();
+            assert_eq!(output_buffer.write_buffer(&mut input_buffer), Ok(pattern.len()));
+
+            // The write affected mm1, NOT mm2 (target_buf is unmapped in mm2).
+            assert_eq!(mm1.read_memory_to_array::<16>(target_buf).unwrap(), pattern);
+            assert_eq!(mm2.read_memory_to_array::<16>(target_buf), error!(EFAULT));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_process_vm_readv_pins_memory_manager() {
+        use crate::mm::MemoryAccessor;
+        use crate::vfs::buffers::{OutputBuffer, UserBuffersInputBuffer, UserBuffersOutputBuffer};
+        use starnix_types::user_buffer::UserBuffer;
+
+        spawn_kernel_and_run(async |current_task| {
+            let target_task = create_task(current_task.kernel(), "target");
+            let page_size = *PAGE_SIZE;
+            let local_buf = map_memory(&current_task, UserAddress::default(), page_size);
+            let target_buf = map_memory(&target_task, UserAddress::default(), page_size);
+
+            let mm1 = target_task.mm().unwrap();
+            let pattern = [0x5au8; 16];
+            mm1.write_memory(target_buf, &pattern).expect("write target");
+
+            let local_iov = UserBuffer { address: local_buf, length: pattern.len() };
+            let remote_iov = UserBuffer { address: target_buf, length: pattern.len() };
+
+            // Construct an input buffer pinned to target_task's initial MemoryManager (mm1).
+            let mut input_buffer =
+                UserBuffersInputBuffer::syscall_new(&mm1, smallvec::smallvec![remote_iov]).unwrap();
+
+            // Simulate an execve in target_task: swap target_task's MemoryManager to mm2.
+            let other_task = create_task(current_task.kernel(), "other");
+            let mm2 = other_task.mm().unwrap();
+            target_task.running_state().mm.update(Some(mm2.clone()));
+
+            // Reading through the pre-constructed input_buffer reads from mm1, NOT mm2.
+            let mut output_buffer =
+                UserBuffersOutputBuffer::unified_new(&current_task, smallvec::smallvec![local_iov])
+                    .unwrap();
+            assert_eq!(output_buffer.write_buffer(&mut input_buffer), Ok(pattern.len()));
+            assert_eq!(current_task.read_memory_to_array::<16>(local_buf).unwrap(), pattern);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_process_vm_no_mm_returns_esrch() {
+        use starnix_types::user_buffer::UserBuffer;
+
+        spawn_kernel_and_run(async |current_task| {
+            let page_size = *PAGE_SIZE;
+            let local_buf = map_memory(&current_task, UserAddress::default(), page_size);
+            let iov_addr = map_memory(&current_task, UserAddress::default(), page_size);
+            let iov = UserBuffer { address: local_buf, length: 16 };
+            current_task.write_object(UserRef::new(iov_addr), &iov).expect("write iov");
+
+            let system_task =
+                current_task.kernel().kthreads.system_thread_group().leader.get_task().unwrap();
+            assert!(current_task.get_task(system_task.get_tid()).is_ok());
+            assert_eq!(system_task.mm().map(drop), error!(EINVAL));
+
+            let iov_ptr = IOVecPtr::new(&*current_task, iov_addr);
+            assert_eq!(
+                sys_process_vm_readv(
+                    &current_task,
+                    system_task.get_tid(),
+                    iov_ptr,
+                    1.into(),
+                    iov_ptr,
+                    1.into(),
+                    0,
+                ),
+                error!(ESRCH)
+            );
+            assert_eq!(
+                sys_process_vm_writev(
+                    &current_task,
+                    system_task.get_tid(),
+                    iov_ptr,
+                    1.into(),
+                    iov_ptr,
+                    1.into(),
+                    0,
+                ),
+                error!(ESRCH)
+            );
         })
         .await;
     }

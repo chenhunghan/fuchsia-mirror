@@ -4,6 +4,7 @@
 
 import("//build/compiled_action.gni")
 import("//build/components.gni")
+import("//build/rust/rustc_binary.gni")
 import("//build/rust/rustc_library.gni")
 import("//build/testing/golden_files.gni")
 
@@ -355,5 +356,120 @@ template("fuchsia_board_dml") {
     component_name = _board_name
     manifest = "$target_gen_dir/${_board_name}.cml"
     deps = [ ":${_action_target}_golden" ]
+  }
+}
+
+# Defines a parsed DML board output and verifies it against a golden file.
+#
+# This template runs a host DML parser dumper on the compiled
+# `board-config.fidl` produced by `dml_label` to generate a text-based
+# `.dml.parsed` representation (platform bus nodes, composite node specs, and
+# IOMMUs in publish order), and compares that output against `golden`.
+#
+# Parameters
+#
+#   dml_label (required)
+#     The label of the `fuchsia_board_dml` target.
+#
+#   golden (required)
+#     Path to the golden `.dml.parsed` file to compare against.
+#
+#   sources (optional)
+#     Rust source files for a board-specific host dumper binary (calling
+#     `dml_config::dump::run_dump_parsed_cli` with the board's custom
+#     `DmlParserConfig`, `DriverSpecificMetadata`, and
+#     `DriverSpecificPowerConfigs`). When omitted, uses the default
+#     `//src/devices/board/lib/dml-config:dml-dump-parsed` binary.
+#
+#   source_root (optional)
+#     Crate root for the board-specific host dumper binary when `sources` is
+#     provided. Defaults to `sources[0]`.
+#
+#   deps (optional)
+#     Additional Rust crate dependencies for the board-specific host dumper
+#     binary when `sources` is provided.
+#
+template("dml_parsed") {
+  assert(defined(invoker.dml_label),
+         "dml_label must be defined for $target_name")
+  assert(defined(invoker.golden), "golden must be defined for $target_name")
+
+  _dml_outputs = get_target_outputs(invoker.dml_label)
+  _fidl_outputs = filter_include(_dml_outputs, [ "*board-config.fidl" ])
+  assert(_fidl_outputs != [],
+         "No board-config.fidl found in dml_label outputs for $target_name")
+  _config_file = _fidl_outputs[0]
+
+  _dump_target = "${target_name}_dump"
+  _output_file = "$target_gen_dir/${target_name}.dml.parsed"
+
+  if (defined(invoker.sources)) {
+    _dumper_target = "${target_name}_dumper"
+    _dumper_output_name = string_replace(_dumper_target, "-", "_")
+    if (is_host) {
+      rustc_binary(_dumper_target) {
+        forward_variables_from(invoker, [ "testonly" ])
+        edition = "2024"
+        output_name = _dumper_output_name
+        sources = invoker.sources
+        if (defined(invoker.source_root)) {
+          source_root = invoker.source_root
+        } else {
+          source_root = sources[0]
+        }
+        deps = [
+          "//src/devices/board/lib/dml-config",
+          "//third_party/rust_crates:anyhow",
+        ]
+        if (defined(invoker.deps)) {
+          deps += invoker.deps
+        }
+      }
+    } else {
+      not_needed(invoker,
+                 [
+                   "deps",
+                   "source_root",
+                   "sources",
+                 ])
+    }
+    _tool = ":${_dumper_target}"
+    _tool_output_name = _dumper_output_name
+  } else {
+    not_needed(invoker,
+               [
+                 "deps",
+                 "source_root",
+               ])
+    _tool = "//src/devices/board/lib/dml-config:dml-dump-parsed"
+    _tool_output_name = "dml_dump_parsed"
+  }
+
+  compiled_action(_dump_target) {
+    forward_variables_from(invoker, [ "testonly" ])
+    tool = _tool
+    tool_output_name = _tool_output_name
+    inputs = [ _config_file ]
+    outputs = [ _output_file ]
+    args = [
+      rebase_path(_config_file, root_build_dir),
+      rebase_path(_output_file, root_build_dir),
+    ]
+    deps = [ invoker.dml_label ]
+  }
+
+  golden_files(target_name) {
+    forward_variables_from(invoker,
+                           [
+                             "testonly",
+                             "visibility",
+                           ])
+    deps = [ ":${_dump_target}" ]
+    comparisons = [
+      {
+        golden = invoker.golden
+        candidate = _output_file
+      },
+    ]
   }
 }

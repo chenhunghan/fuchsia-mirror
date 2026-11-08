@@ -36,8 +36,6 @@ cc_test_executable("unittests") {
     "uber_struct_system_unittest.cc",
   ]
 
-  public_deps = [ "//third_party/glm" ]
-
   deps = [
     "//sdk/fidl/fuchsia.scenic.scheduling:fuchsia.scenic.scheduling_cpp",
     "//sdk/fidl/fuchsia.ui.composition:fuchsia.ui.composition_cpp",
@@ -55,6 +53,7 @@ cc_test_executable("unittests") {
     "//src/ui/scenic/lib/scheduling/tests/mocks:frame_scheduler_mocks",
     "//src/ui/scenic/lib/utils",
     "//src/ui/scenic/tests:promise",
+    "//third_party/glm",
     "//third_party/googletest:gmock",
     "//zircon/system/ulib/sync:sync-cpp",
   ]

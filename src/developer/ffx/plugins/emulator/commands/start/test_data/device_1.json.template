@@ -137,7 +137,7 @@
                 "-netdev",
                 "type=user,id=net0,restrict=off
                 {{~#each host.port_map~}}
-                    ,hostfwd=tcp::{{this.host}}-:{{this.guest}}
+                    ,hostfwd=tcp::{{#if this.host}}{{this.host}}{{else}}0{{/if}}-:{{this.guest}}
                 {{~/each~}}",
                 "-device",
                 "virtio-net-pci,vectors=8,netdev=net0,mac={{runtime.mac_address}}",
@@ -229,5 +229,8 @@
             "DISPLAY": "{{env "DISPLAY"}}",
         {{/unless}}
         "QEMU_AUDIO_DRV": "none"
+        {{#if (eq host.gpu "lavapipe")}}
+          ,"ANDROID_EMU_LAVAPIPE_GL_MODE_SWIFTSHADER": "1"
+        {{/if}}
     }
 }

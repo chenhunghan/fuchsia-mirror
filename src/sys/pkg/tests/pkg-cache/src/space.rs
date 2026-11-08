@@ -3,20 +3,23 @@
 // found in the LICENSE file.
 
 use crate::{
-    TestEnv, WriteErrorExt as _, blob_written, compress_and_write_blob, get_missing_blobs,
+    EMPTY_REPO_PATH, MockPkgAuthority, TestEnv, WriteErrorExt as _, blob_written,
+    compress_and_write_blob, get_missing_blobs,
 };
 use assert_matches::assert_matches;
+use diagnostics_assertions::{assert_data_tree, tree_assertion};
 use fidl_fuchsia_io as fio;
 use fidl_fuchsia_paver as fpaver;
 use fidl_fuchsia_pkg::{self as fpkg, NeededBlobsMarker};
 use fidl_fuchsia_pkg_ext::BlobId;
 use fidl_fuchsia_pkg_garbagecollector::GcError;
 use fuchsia_async as fasync;
-use fuchsia_pkg_testing::{PackageBuilder, SystemImageBuilder};
+use fuchsia_pkg_testing::{PackageBuilder, RepositoryBuilder, SystemImageBuilder};
 use futures::TryFutureExt as _;
 use mock_paver::{MockPaverServiceBuilder, PaverEvent, hooks as mphooks};
 use rand::prelude::*;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 use zx::{self as zx, Status};
 
 #[fuchsia::test]
@@ -55,9 +58,9 @@ async fn gc_error_pending_commit() {
     ]);
     let event_pair =
         env.proxies.commit_status_provider.is_current_system_committed().await.unwrap();
-    assert_eq!(
+    assert_matches!(
         fasync::OnSignals::new(&event_pair, zx::Signals::USER_0).await,
-        Ok(zx::Signals::USER_0)
+        Ok(signals) if signals.contains(zx::Signals::USER_0)
     );
     assert_matches!(env.proxies.space_manager.gc().await, Ok(Ok(())));
 }
@@ -549,4 +552,236 @@ async fn upgradable_packages_protected_from_gc() {
     assert_matches!(env.proxies.space_manager.gc().await, Ok(Ok(())));
     assert!(env.blobfs.list_blobs().unwrap().is_superset(&pkg1_protected));
     assert!(env.blobfs.list_blobs().unwrap().is_disjoint(&pkg0_protected));
+}
+
+#[fuchsia::test]
+async fn post_commit_gc_enabled_committed_during_boot() {
+    let (throttle_hook, throttler) = mphooks::throttle();
+
+    let system_image_package = SystemImageBuilder::new().build().await;
+    let env = TestEnv::builder()
+        .blobfs_from_system_image(&system_image_package)
+        .await
+        .post_commit_gc_earliest_boot_seconds(0)
+        .paver_service_builder(
+            MockPaverServiceBuilder::new().insert_hook(throttle_hook).insert_hook(
+                mphooks::config_status_and_boot_attempts(|_| {
+                    Ok((fpaver::ConfigurationStatus::Pending, Some(1)))
+                }),
+            ),
+        )
+        .build()
+        .await;
+
+    // Emit enough paver events to unblock CommitStatusProvider while keeping the commit pending.
+    let () = throttler.emit_next_paver_events(&[
+        PaverEvent::QueryCurrentConfiguration,
+        PaverEvent::QueryConfigurationStatusAndBootAttempts {
+            configuration: fpaver::Configuration::A,
+        },
+    ]);
+    let () = env.block_until_started().await;
+    assert_data_tree!(
+        env.inspect_hierarchy().await,
+        root: contains {
+            "post_commit_gc": "waiting for commit",
+        }
+    );
+
+    let unowned_content = b"blob not referenced by any protected packages";
+    let unowned_hash = fuchsia_merkle::root_from_slice(unowned_content);
+    let () = env.write_to_blobfs(&unowned_hash, unowned_content).await;
+    assert!(env.blobfs.list_blobs().unwrap().contains(&unowned_hash));
+
+    // Complete the commit, which asserts USER_0 | USER_1 and triggers post-commit GC in pkg-cache.
+    let () = throttler.emit_next_paver_events(&[
+        PaverEvent::SetConfigurationHealthy { configuration: fpaver::Configuration::A },
+        PaverEvent::SetConfigurationUnbootable { configuration: fpaver::Configuration::B },
+        PaverEvent::BootManagerFlush,
+    ]);
+    let event_pair =
+        env.proxies.commit_status_provider.is_current_system_committed().await.unwrap();
+    assert_eq!(
+        fasync::OnSignals::new(&event_pair, zx::Signals::USER_0).await,
+        Ok(zx::Signals::USER_0 | zx::Signals::USER_1)
+    );
+
+    // Wait for pkg-cache's background post-commit GC task to complete and update inspect.
+    let _ = env
+        .wait_for_and_return_inspect_state(tree_assertion!(
+            root: contains {
+                "post_commit_gc": "gc completed",
+            }
+        ))
+        .await;
+
+    assert!(!env.blobfs.list_blobs().unwrap().contains(&unowned_hash));
+    assert!(env.blobfs.list_blobs().unwrap().is_superset(&system_image_package.list_blobs()));
+}
+
+#[fuchsia::test]
+async fn post_commit_gc_enabled_already_committed_on_boot() {
+    let blobfs = blobfs_ramdisk::BlobfsRamdisk::builder().impl_from_env().start().await.unwrap();
+    let system_image_package = SystemImageBuilder::new().build().await;
+    let () = system_image_package.write_to_blobfs(&blobfs).await;
+    let unowned_content = b"blob not referenced by any protected packages";
+    let unowned_hash = fuchsia_merkle::root_from_slice(unowned_content);
+    let () = blobfs.add_blob_from(unowned_hash, &unowned_content[..]).await.unwrap();
+
+    let env = TestEnv::builder()
+        .blobfs_and_system_image_hash(blobfs, Some(*system_image_package.hash()))
+        .post_commit_gc_earliest_boot_seconds(0)
+        .build()
+        .await;
+    let () = env.block_until_started().await;
+
+    let event_pair =
+        env.proxies.commit_status_provider.is_current_system_committed().await.unwrap();
+    assert_eq!(
+        fasync::OnSignals::new(&event_pair, zx::Signals::USER_0).await,
+        Ok(zx::Signals::USER_0)
+    );
+
+    // Wait for pkg-cache's background task to observe USER_0 without USER_1 and update inspect.
+    let _ = env
+        .wait_for_and_return_inspect_state(tree_assertion!(
+            root: contains {
+                "post_commit_gc": "gc unnecessary",
+            }
+        ))
+        .await;
+    assert!(env.blobfs.list_blobs().unwrap().contains(&unowned_hash));
+
+    // Confirm a manual GC still deletes the unowned blob.
+    let () = env.proxies.space_manager.gc().await.unwrap().unwrap();
+    assert!(!env.blobfs.list_blobs().unwrap().contains(&unowned_hash));
+}
+
+#[fuchsia::test]
+async fn post_commit_gc_disabled_committed_during_boot() {
+    let blobfs = blobfs_ramdisk::BlobfsRamdisk::builder().impl_from_env().start().await.unwrap();
+    let system_image_package = SystemImageBuilder::new().build().await;
+    let () = system_image_package.write_to_blobfs(&blobfs).await;
+    let unowned_content = b"blob not referenced by any protected packages";
+    let unowned_hash = fuchsia_merkle::root_from_slice(unowned_content);
+    let () = blobfs.add_blob_from(unowned_hash, &unowned_content[..]).await.unwrap();
+
+    let env = TestEnv::builder()
+        .blobfs_and_system_image_hash(blobfs, Some(*system_image_package.hash()))
+        .paver_service_builder(MockPaverServiceBuilder::new().insert_hook(
+            mphooks::config_status_and_boot_attempts(|_| {
+                Ok((fpaver::ConfigurationStatus::Pending, Some(1)))
+            }),
+        ))
+        .build()
+        .await;
+    let () = env.block_until_started().await;
+    assert_data_tree!(
+        env.inspect_hierarchy().await,
+        root: contains {
+            "post_commit_gc": "disabled",
+        }
+    );
+
+    let event_pair =
+        env.proxies.commit_status_provider.is_current_system_committed().await.unwrap();
+    assert_eq!(
+        fasync::OnSignals::new(&event_pair, zx::Signals::USER_0).await,
+        Ok(zx::Signals::USER_0 | zx::Signals::USER_1)
+    );
+
+    // Post-commit GC is disabled by default, so the unowned blob should remain.
+    assert!(env.blobfs.list_blobs().unwrap().contains(&unowned_hash));
+
+    // Confirm a manual GC still deletes the unowned blob.
+    let () = env.proxies.space_manager.gc().await.unwrap().unwrap();
+    assert!(!env.blobfs.list_blobs().unwrap().contains(&unowned_hash));
+}
+
+#[fuchsia::test]
+async fn post_commit_gc_waits_for_upgradable_packages() {
+    let subpkg0 = PackageBuilder::new("upgradable-subpackage0")
+        .add_resource_at("content-blob", "upgradable-subpackage0-contents".as_bytes())
+        .build()
+        .await
+        .unwrap();
+    let pkg0 = PackageBuilder::new("upgradable-package")
+        .add_subpackage("subpackage", &subpkg0)
+        .add_resource_at("content-blob", "v0-contents".as_bytes())
+        .build()
+        .await
+        .unwrap();
+    let pkg0_protected = pkg0.list_blobs();
+
+    let repo = Arc::new(
+        RepositoryBuilder::from_template_dir(EMPTY_REPO_PATH)
+            .add_package(&pkg0)
+            .build()
+            .await
+            .unwrap(),
+    );
+    let served_repository = Arc::clone(&repo).server().start().unwrap();
+    let repo_config =
+        served_repository.make_repo_config("fuchsia-pkg://fuchsia.com".parse().unwrap());
+
+    let blobfs = blobfs_ramdisk::BlobfsRamdisk::builder().impl_from_env().start().await.unwrap();
+    let system_image_package = SystemImageBuilder::new().build().await;
+    let () = system_image_package.write_to_blobfs(&blobfs).await;
+    let unowned_content = b"blob not referenced by any protected packages";
+    let unowned_hash = fuchsia_merkle::root_from_slice(unowned_content);
+    let () = blobfs.add_blob_from(unowned_hash, &unowned_content[..]).await.unwrap();
+
+    let env = TestEnv::builder()
+        .blobfs_and_system_image_hash(blobfs, Some(*system_image_package.hash()))
+        .pkg_authority(MockPkgAuthority::from_repo_config_and_packages(&repo_config, &[&pkg0]))
+        .enable_upgradable_packages()
+        .post_commit_gc_earliest_boot_seconds(0)
+        .paver_service_builder(MockPaverServiceBuilder::new().insert_hook(
+            mphooks::config_status_and_boot_attempts(|_| {
+                Ok((fpaver::ConfigurationStatus::Pending, Some(1)))
+            }),
+        ))
+        .build()
+        .await;
+    let () = env.block_until_started().await;
+
+    let event_pair =
+        env.proxies.commit_status_provider.is_current_system_committed().await.unwrap();
+    assert_eq!(
+        fasync::OnSignals::new(&event_pair, zx::Signals::USER_0).await,
+        Ok(zx::Signals::USER_0 | zx::Signals::USER_1)
+    );
+
+    // Once post-commit GC is waiting for SetUpgradableUrls, the OTA package resolver must not
+    // block.
+    let _ = env
+        .wait_for_and_return_inspect_state(tree_assertion!(
+            root: contains {
+                "post_commit_gc": "waiting for upgradable packages",
+            }
+        ))
+        .await;
+    let (dir0, context) =
+        env.resolve_ota("fuchsia-pkg://fuchsia.com/upgradable-package").await.unwrap();
+    let () = pkg0.verify_contents(&dir0).await.unwrap();
+    let (subdir0, _context) = env.resolve_with_context_ota("subpackage", &context).await.unwrap();
+    let () = subpkg0.verify_contents(&subdir0).await.unwrap();
+
+    // Clear the retained index (which PackageResolver-ota populated) so only SetUpgradableUrls
+    // protects pkg0 when post-commit GC runs.
+    let () = env.proxies.retained_packages.clear().await.unwrap();
+    assert!(env.blobfs.list_blobs().unwrap().contains(&unowned_hash));
+
+    let () = env.set_upgradable_urls([pkg0.pinned_fuchsia_url()]).await.unwrap();
+
+    let _ = env
+        .wait_for_and_return_inspect_state(tree_assertion!(
+            root: contains {
+                "post_commit_gc": "gc completed",
+            }
+        ))
+        .await;
+
+    assert!(!env.blobfs.list_blobs().unwrap().contains(&unowned_hash));
+    assert!(env.blobfs.list_blobs().unwrap().is_superset(&pkg0_protected));
 }

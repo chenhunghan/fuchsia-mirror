@@ -1,0 +1,28 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    include: [ "syslog/client.shard.cml" ],
+    program: {
+        runner: "elf",
+        binary: "bin/ot_rcp_fuchsia",
+    },
+    capabilities: [
+        { service: "fuchsia.lowpan.spinel.Service" },
+    ],
+    use: [
+        {
+            // Selects the RCP's EUI-64 and log tag. Required: the parent (e.g. a netemul or
+            // RealmBuilder test) picks a distinct value for each RCP it runs.
+            config: "fuchsia.openthread.rcp.NodeId",
+            key: "node_id",
+            type: "uint32",
+        },
+    ],
+    expose: [
+        {
+            service: "fuchsia.lowpan.spinel.Service",
+            from: "self",
+        },
+    ],
+}

@@ -1,0 +1,55 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Note: Host-only target matching platform-only deps via target_compatible_with.
+rustc_library(
+    name = "lib",
+    srcs = [
+        "src/args.rs",
+        "src/lib.rs",
+    ],
+    crate_name = "ffx_product_get_artifacts",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/developer/ffx/plugins/product:__pkg__"],
+    deps = [
+        "//build/sdk/meta:rust",
+        "//src/developer/ffx/config:lib",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/developer/ffx/lib/writer:lib",
+        "//src/lib/assembly/assembled_system",
+        "//src/lib/assembly/product_bundle",
+        "//src/lib/utf8_path",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:camino",
+        "//third_party/rust_crates/vendor:schemars",
+        "//third_party/rust_crates/vendor:serde",
+    ],
+)
+
+host_rustc_test(
+    name = "lib_test",
+    compile_data = ["//build/sdk/meta:test_data/single_vd_manifest.json"],
+    crate = ":lib",
+    # Unique output_name in GN for generic lib_test target.
+    crate_name = "ffx_product_get_artifacts_lib_test",
+    edition = "2024",
+    visibility = [
+        "//src/developer/ffx:__pkg__",
+        "//src/developer/ffx/plugins/product:__pkg__",
+    ],
+    deps = [
+        "//src/lib/assembly/container",
+        "//src/lib/assembly/partitions_config",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:tempfile",
+    ],
+)

@@ -167,12 +167,16 @@ def _is_exempt_from_linting(package, excluded_checks):
         "//sdk/testing/fidl/protocols_tests",
         "//sdk/testing/fidl/types_tests",
         "//src/devices/tools/fidlgen_banjo/tests/fidl",
-        "//src/lib/fidl/c/coding_tables_tests",
+        "//src/lib/fidl/c/coding_tables_tests",  # Bazel-only.
         "//src/lib/fidl/c/walker_tests",
         "//src/lib/fidl/llcpp/tests",
         "//src/lib/fidl/rust/external_tests",
         "//src/tests/benchmarks/fidl/benchmark_suite",
         "//src/tests/fidl",
+        "//src/tests/fidl/compatibility/fidl",
+        "//src/tests/fidl/conformance_suite",
+        "//src/tests/fidl/dynsuite/client_suite/fidl",
+        "//src/tests/fidl/dynsuite/server_suite/fidl",
         "//tools/fidl/fidlc/testdata",
     ]
 
@@ -328,6 +332,7 @@ def fidl_ir(
                     the command line flag `-x some-check-id` for each value)
         excluded_checks: List of `fidl-lint` check IDs to ignore (by passing
                     the command line flag `-e some-check-id` for each value)
+        experimental_flags: List of experimental flags to pass to `fidlc`.
         skip_linting_and_validation: Whether to skip linting and JSON validation.
         testonly: Standard meaning.
         visibility: Standard meaning.

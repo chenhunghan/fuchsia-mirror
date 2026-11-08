@@ -6,7 +6,9 @@
 #define SRC_PERFORMANCE_TRACE_MANAGER_DEFERRED_BUFFER_FORWARDER_H_
 #include <lib/stdcompat/span.h>
 #include <lib/zx/socket.h>
+#include <sys/types.h>
 
+#include <cstdio>
 #include <filesystem>
 #include <vector>
 
@@ -48,11 +50,13 @@ class DeferredBufferForwarder : public BufferForwarder {
   // TransferStatus::kReceiverDead indicates that the peer was closed
   // during the transfer.
   TransferStatus WriteBuffer(cpp20::span<const uint8_t> data) const override;
-  bool flushed_{false};
+  mutable bool flushed_{false};
 
  private:
   std::filesystem::path buffer_path_;
-  FILE* buffer_file_;
+  FILE* buffer_file_ = nullptr;
+  off_t read_offset_ = 0;
+  mutable bool reading_from_file_ = false;
   std::vector<uint8_t> chunk_buffer_;
 };
 }  // namespace tracing

@@ -5,13 +5,17 @@
 load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
 load("@fuchsia_rules_common//build_flags:compiler_build_flags.bzl", "compiler_build_flags")
 load("@fuchsia_rules_common//build_flags:extra_linker_flags.bzl", "extra_linker_flags")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
 load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_shared_library.bzl", "fx_cc_shared_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
 load("//build/bazel/rules/host_tests:host_test.bzl", "host_test")
 load(
     ":host_tests.bzl",
     "build_flags_cc_binary_host_test",
     "build_flags_cc_library",
+    "verify_build_flags_labels_test",
 )
 
 package(default_applicable_licenses = ["//:license"])
@@ -141,11 +145,84 @@ build_flags(
     defines = ["IN_FX_CC_LIBRARY=1"],
 )
 
+build_flags(
+    name = "flags_custom_soname",
+    ldflags = ["-Wl,-soname=libcustom_soname.so"],
+)
+
 fx_cc_library(
     name = "fx_cc_library_for_test",
     srcs = ["fx_cc_library_for_test.cc"],
     build_flags = [":fx_cc_library_flags"],
     disable_build_flags = [":flags2"],
+)
+
+fx_cc_binary(
+    name = "fx_cc_binary_linkshared_default_soname_for_test",
+    srcs = ["fx_cc_library_for_test.cc"],
+    build_flags = [
+        ":fx_cc_library_flags",
+        ":flags_invalid_ldflags",
+    ],
+    disable_build_flags = [
+        ":flags2",
+        ":flags_invalid_ldflags",
+    ],
+    linkshared = True,
+)
+
+fx_cc_binary(
+    name = "fx_cc_binary_linkshared_for_test",
+    srcs = ["fx_cc_library_for_test.cc"],
+    build_flags = [
+        ":fx_cc_library_flags",
+        ":flags_custom_soname",
+        ":flags_invalid_ldflags",
+    ],
+    disable_build_flags = [
+        ":flags2",
+        ":flags_invalid_ldflags",
+    ],
+    linkshared = True,
+)
+
+fx_cc_binary(
+    name = "fx_cc_binary_linkshared_transitive_features_for_test",
+    srcs = ["fx_cc_library_for_test.cc"],
+    build_flags = [":fx_cc_library_flags"],
+    linkshared = True,
+    transitive_features = ["pic"],
+)
+
+fx_cc_binary(
+    name = "libfx_cc_binary_linkshared_so_name_transitive_features_for_test.so",
+    srcs = ["fx_cc_library_for_test.cc"],
+    build_flags = [":fx_cc_library_flags"],
+    linkshared = True,
+    transitive_features = ["pic"],
+)
+
+fx_cc_shared_library(
+    name = "fx_cc_shared_library_default_soname_for_test",
+    build_flags = [":flags_invalid_ldflags"],
+    disable_build_flags = [
+        ":flags2",
+        ":flags_invalid_ldflags",
+    ],
+    deps = [":fx_cc_library_for_test"],
+)
+
+fx_cc_shared_library(
+    name = "fx_cc_shared_library_for_test",
+    build_flags = [
+        ":flags_custom_soname",
+        ":flags_invalid_ldflags",
+    ],
+    disable_build_flags = [
+        ":flags2",
+        ":flags_invalid_ldflags",
+    ],
+    deps = [":fx_cc_library_for_test"],
 )
 
 build_flags(
@@ -160,6 +237,14 @@ fx_cc_binary(
         ":flags1",
         ":flags2",
     ],
+    data = [
+        ":fx_cc_binary_linkshared_default_soname_for_test",
+        ":fx_cc_binary_linkshared_for_test",
+        ":fx_cc_binary_linkshared_transitive_features_for_test",
+        ":fx_cc_shared_library_default_soname_for_test",
+        ":fx_cc_shared_library_for_test",
+        ":libfx_cc_binary_linkshared_so_name_transitive_features_for_test.so",
+    ],
     disable_build_flags = [":flags2"],
     deps = [":fx_cc_library_for_test"],
 )
@@ -167,6 +252,125 @@ fx_cc_binary(
 host_test(
     name = "fx_cc_binary_test",
     binary = ":fx_cc_binary_test_bin",
+    data = [
+        ":fx_cc_binary_linkshared_default_soname_for_test",
+        ":fx_cc_binary_linkshared_for_test",
+        ":fx_cc_binary_linkshared_transitive_features_for_test",
+        ":fx_cc_shared_library_default_soname_for_test",
+        ":fx_cc_shared_library_for_test",
+        ":libfx_cc_binary_linkshared_so_name_transitive_features_for_test.so",
+    ],
+    test_args = [
+        "$(location :fx_cc_binary_linkshared_default_soname_for_test)=libfx_cc_binary_linkshared_default_soname_for_test.so",
+        "$(location :fx_cc_binary_linkshared_for_test)=libcustom_soname.so",
+        "$(location :fx_cc_binary_linkshared_transitive_features_for_test)=libfx_cc_binary_linkshared_transitive_features_for_test.so:libfx_cc_binary_linkshared_transitive_features_for_test.so",
+        "$(location :libfx_cc_binary_linkshared_so_name_transitive_features_for_test.so)=libfx_cc_binary_linkshared_so_name_transitive_features_for_test.so:libfx_cc_binary_linkshared_so_name_transitive_features_for_test.so",
+        "$(location :fx_cc_shared_library_default_soname_for_test)=libfx_cc_shared_library_default_soname_for_test.so",
+        "$(location :fx_cc_shared_library_for_test)=libcustom_soname.so",
+    ],
+)
+
+# Checks for fx_cc_test_binary(): implicit `testonly = True` (verified by depending on
+# a testonly library without setting `testonly` on `fx_cc_test_binary`), `build_flags`
+# / `disable_build_flags` forwarding, and `disable_lto = False` + explicit
+# `testonly = True`.
+fx_cc_library(
+    name = "fx_cc_testonly_lib",
+    testonly = True,
+)
+
+fx_cc_test_binary(
+    name = "fx_cc_test_bin",
+    srcs = ["fx_cc_binary_test.cc"],
+    build_flags = [":flags1"] + select({
+        "//conditions:default": [":flags2"],
+    }),
+    disable_build_flags = [":flags2"],
+    deps = [
+        ":fx_cc_library_for_test",
+        ":fx_cc_testonly_lib",
+    ],
+)
+
+host_test(
+    name = "fx_cc_test_test",
+    binary = ":fx_cc_test_bin",
+)
+
+fx_cc_test_binary(
+    name = "fx_cc_test_lto_enabled_bin",
+    testonly = True,
+    srcs = ["fx_cc_binary_test.cc"],
+    build_flags = select({
+        "//conditions:default": [":flags1"],
+    }),
+    disable_lto = False,
+    deps = [":fx_cc_library_for_test"],
+)
+
+host_test(
+    name = "fx_cc_test_lto_enabled_test",
+    binary = ":fx_cc_test_lto_enabled_bin",
+)
+
+fx_cc_test_binary(
+    name = "fx_cc_test_default_flags_bin",
+    srcs = ["check_library_with_ldflags_main.cc"],
+    deps = [":check_library_with_ldflags_lib"],
+)
+
+host_test(
+    name = "fx_cc_test_default_flags_test",
+    binary = ":fx_cc_test_default_flags_bin",
+)
+
+fx_cc_test_binary(
+    name = "fx_cc_test_lto_enabled_default_flags_bin",
+    srcs = ["check_library_with_ldflags_main.cc"],
+    disable_lto = False,
+    deps = [":check_library_with_ldflags_lib"],
+)
+
+host_test(
+    name = "fx_cc_test_lto_enabled_default_flags_test",
+    binary = ":fx_cc_test_lto_enabled_default_flags_bin",
+)
+
+verify_build_flags_labels_test(
+    name = "verify_fx_cc_test_build_flags",
+    expected_ordered_labels = [
+        "//build/config/fuchsia:fdio_config",
+        ":flags1",
+        "//build/config/lto:no-fat-lto-objects-linking",
+    ],
+    target_under_test = ":fx_cc_test_bin",
+    unexpected_labels = [":flags2"],
+)
+
+verify_build_flags_labels_test(
+    name = "verify_fx_cc_test_default_flags",
+    expected_ordered_labels = [
+        "//build/config/fuchsia:fdio_config",
+        "//build/config/lto:no-fat-lto-objects-linking",
+    ],
+    target_under_test = ":fx_cc_test_default_flags_bin",
+)
+
+verify_build_flags_labels_test(
+    name = "verify_fx_cc_test_lto_enabled_build_flags",
+    expected_ordered_labels = [
+        "//build/config/fuchsia:fdio_config",
+        ":flags1",
+    ],
+    target_under_test = ":fx_cc_test_lto_enabled_bin",
+    unexpected_labels = ["//build/config/lto:no-fat-lto-objects-linking"],
+)
+
+verify_build_flags_labels_test(
+    name = "verify_fx_cc_test_lto_enabled_default_flags",
+    expected_ordered_labels = ["//build/config/fuchsia:fdio_config"],
+    target_under_test = ":fx_cc_test_lto_enabled_default_flags_bin",
+    unexpected_labels = ["//build/config/lto:no-fat-lto-objects-linking"],
 )
 
 # Verify compiler_build_flags() with configurable (select()) attributes in C++.
@@ -211,14 +415,27 @@ build_flags_cc_binary_host_test(
     build_flags = [":flags_includes_lib_dirs_and_link_inputs"],
 )
 
+# A library with `defines = ["SHOULD_NOT_BE_DEFINED"]` in its compilation
+# context. `fx_cc_binary_test.cc` fails to compile if `SHOULD_NOT_BE_DEFINED`
+# is defined, verifying that `extra_linker_flags` (`link_deps` and
+# `executable_link_deps`) only propagates `CcInfo.linking_context` and never
+# leaks `CcInfo.compilation_context`.
+fx_cc_library(
+    name = "fx_cc_library_for_link_deps_test",
+    srcs = ["fx_cc_library_for_test.cc"],
+    build_flags = [":fx_cc_library_flags"],
+    defines = ["SHOULD_NOT_BE_DEFINED"],
+)
+
 extra_linker_flags(
     name = "flags_link_deps",
-    link_deps = [":fx_cc_library_for_test"],
+    link_deps = [":fx_cc_library_for_link_deps_test"],
 )
 
 # Notice: Unlike fx_cc_binary_test_bin above, this target does NOT set
 # deps = [":fx_cc_library_for_test"] manually on the binary; the library is
-# automatically linked via flags_link_deps!
+# automatically linked via flags_link_deps without propagating its
+# compilation_context!
 build_flags_cc_binary_host_test(
     name = "check_extra_linker_flags_link_deps",
     srcs = ["fx_cc_binary_test.cc"],
@@ -246,7 +463,7 @@ build_flags_cc_binary_host_test(
 
 extra_linker_flags(
     name = "flags_executable_link_deps",
-    executable_link_deps = [":fx_cc_library_for_test"],
+    executable_link_deps = [":fx_cc_library_for_link_deps_test"],
 )
 
 # Notice: Like check_extra_linker_flags_link_deps, this executable binary
@@ -292,4 +509,54 @@ build_flags_cc_binary_host_test(
     srcs = ["check_cflags_cpp.cc"],
     build_flags = [":flags1"],
     data = [":shared_lib_ignoring_exec_link_deps"],
+)
+
+# A shared library that directly depends on undefined_symbol_lib and uses
+# //build/config:symbol_allow_undefined to override the default -Wl,--no-undefined.
+fx_cc_binary(
+    name = "shared_lib_with_symbol_allow_undefined",
+    srcs = ["check_cflags_cpp.cc"],
+    build_flags = [
+        ":flags1",
+        "//build/config:symbol_allow_undefined",
+    ],
+    linkshared = True,
+    deps = [":undefined_symbol_lib"],
+)
+
+build_flags_cc_binary_host_test(
+    name = "check_shared_library_symbol_allow_undefined",
+    srcs = ["check_cflags_cpp.cc"],
+    build_flags = [":flags1"],
+    data = [":shared_lib_with_symbol_allow_undefined"],
+)
+
+# Tests for transitive_features on fx_cc_binary(), including override via features.
+
+fx_cc_library(
+    name = "transitive_features_lib",
+    srcs = ["transitive_features_lib.cc"],
+)
+
+build_flags_cc_binary_host_test(
+    name = "check_fx_cc_binary_transitive_features",
+    srcs = ["transitive_features_main.cc"],
+    copts = ["-DEXPECT_LIB_NO_PIC=1"],
+    transitive_features = [
+        "prefer_pic_for_opt_binaries",
+        "-pic",
+    ],
+    deps = [":transitive_features_lib"],
+)
+
+build_flags_cc_binary_host_test(
+    name = "check_fx_cc_binary_features_override_transitive_features",
+    srcs = ["transitive_features_main.cc"],
+    copts = ["-DEXPECT_LIB_NO_PIC=0"],
+    features = ["-pic"],
+    transitive_features = [
+        "prefer_pic_for_opt_binaries",
+        "pic",
+    ],
+    deps = [":transitive_features_lib"],
 )

@@ -23,8 +23,8 @@ namespace pci {
 
 class Bridge : public pci::Device, public UpstreamNode {
  public:
-  static zx_status_t Create(zx_device_t* parent, std::unique_ptr<Config>&& config,
-                            UpstreamNode* upstream, BusDeviceInterface* bdi, uint8_t mbus_id,
+  static zx_status_t Create(std::unique_ptr<Config>&& config, UpstreamNode* upstream,
+                            BusDeviceInterface* bdi, uint8_t managed_bus_id,
                             fbl::RefPtr<pci::Bridge>* out_bridge);
   // Derived device objects need to have refcounting implemented
   PCI_IMPLEMENT_REFCOUNTED;
@@ -59,8 +59,8 @@ class Bridge : public pci::Device, public UpstreamNode {
   void Disable() final __TA_EXCLUDES(dev_lock_);
 
  private:
-  Bridge(zx_device_t* parent, std::unique_ptr<Config>&&, UpstreamNode* upstream,
-         BusDeviceInterface* bdi, uint8_t managed_bus_id);
+  Bridge(std::unique_ptr<Config>&& config, UpstreamNode* upstream, BusDeviceInterface* bdi,
+         uint8_t mbus_id);
   zx_status_t Init() __TA_EXCLUDES(dev_lock_);
 
   zx_status_t ParseBusWindowsLocked() __TA_REQUIRES(dev_lock_);

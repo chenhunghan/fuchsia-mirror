@@ -4,6 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+use crate::ksync_kernel::TrackedCriticalMutex;
 use crate::vm::compression::{MemoryUsage, VmCompressedStorage};
 use crate::vm::compressor::CompressedRef;
 use crate::vm::page::{VmPage, VmPageDoublyLinkedList, VmPagePtr};
@@ -17,7 +18,7 @@ use core::ptr::{self, NonNull};
 use fbl::{Canary, DoublyLinkedListContainable};
 use kalloc::Box;
 use kprint::kprintln;
-use ksync::{KMutex, RawCriticalMutex, guarded, kcell_init};
+use ksync::{KMutex, guarded, kcell_init};
 use page_bindings::vm_page_state;
 use pin_init::{PinInit, pin_data, pin_init, pin_init_array_from_fn, pinned_drop};
 
@@ -265,7 +266,7 @@ pub struct VmSlotPageStorage {
     canary: Canary<{ fbl::magic(b"SPS_") }>,
 
     #[mutex]
-    lock: KMutex<RawCriticalMutex>,
+    lock: KMutex<TrackedCriticalMutex>,
 
     /// Maintain a list of pages for every possible max contiguous free slots in those pages. The 0
     /// entry, i.e. pages that have no free slots, represent completely full pages and are tracked

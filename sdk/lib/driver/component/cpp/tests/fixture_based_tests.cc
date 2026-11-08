@@ -4,9 +4,15 @@
 
 #include <fidl/fuchsia.driver.component.test/cpp/driver/wire.h>
 #include <fidl/fuchsia.driver.component.test/cpp/wire.h>
+#include <lib/async/cpp/task.h>
+#include <lib/driver/component/cpp/driver_export2.h>
 #include <lib/driver/component/cpp/tests/test_driver.h>
 #include <lib/driver/testing/cpp/driver_test.h>
 #include <lib/driver/testing/cpp/minimal_compat_environment.h>
+
+#include <algorithm>
+#include <mutex>
+#include <string>
 
 #include <gtest/gtest.h>
 
@@ -417,3 +423,280 @@ TEST_F(FixtureBasedTestManualForeground, MultiStartAndValidateIncoming) {
   EXPECT_EQ(ZX_OK, stop_result.status_value());
   driver_test().ShutdownAndDestroyDriver();
 }
+
+namespace {
+
+using fuchsia_driver_framework::HealthAlert;
+using fuchsia_driver_framework::HealthCheckError;
+using fuchsia_driver_framework::HealthCheckRequest;
+using fuchsia_driver_framework::HealthCheckResponse;
+using fuchsia_driver_framework::HealthCondition;
+using fuchsia_driver_framework::HealthDiagnosticItem;
+using fuchsia_driver_framework::HealthDiagnosticValue;
+using fuchsia_driver_framework::HealthStatus;
+
+class HealthFixtureTestDriver;
+
+class TestHealthLatch final {
+ public:
+  explicit TestHealthLatch(HealthFixtureTestDriver& driver) : driver_(driver) {}
+
+  void RaiseDegraded(std::string reason_code, std::string message) {
+    Raise(HealthStatus::kDegraded, std::move(reason_code), std::move(message));
+  }
+
+  void RaiseUnhealthy(std::string reason_code, std::string message) {
+    Raise(HealthStatus::kUnhealthy, std::move(reason_code), std::move(message));
+  }
+
+  void Clear(std::string_view reason_code) {
+    HealthCheckResponse resp;
+    {
+      std::scoped_lock lock(mutex_);
+      std::erase_if(conditions_, [&](const HealthCondition& c) {
+        return c.reason_code().has_value() && *c.reason_code() == reason_code;
+      });
+      resp.conditions(conditions_);
+    }
+    PostSelfFault(std::move(resp));
+  }
+
+  HealthCheckResponse ToResponse() const {
+    std::scoped_lock lock(mutex_);
+    return HealthCheckResponse{{.conditions = conditions_}};
+  }
+
+  void MergeInto(HealthCheckResponse& resp) const {
+    std::scoped_lock lock(mutex_);
+    if (!resp.conditions().has_value()) {
+      resp.conditions(conditions_);
+      return;
+    }
+    resp.conditions()->insert(resp.conditions()->end(), conditions_.begin(), conditions_.end());
+  }
+
+  // Posts a SelfFault alert carrying |resp| to the driver dispatcher.
+  void PostSelfFault(HealthCheckResponse resp);
+
+ private:
+  void Raise(HealthStatus status, std::string reason_code, std::string message) {
+    HealthCheckResponse resp;
+    {
+      std::scoped_lock lock(mutex_);
+      conditions_.push_back(HealthCondition{{
+          .status = status,
+          .reason_code = std::move(reason_code),
+          .message = std::move(message),
+      }});
+      resp.conditions(conditions_);
+    }
+    PostSelfFault(std::move(resp));
+  }
+
+  HealthFixtureTestDriver& driver_;
+  mutable std::mutex mutex_;
+  std::vector<HealthCondition> conditions_;
+};
+
+class HealthFixtureTestDriver final : public fdf::DriverBase2 {
+ public:
+  using fdf::DriverBase2::dispatcher;
+  using Server = fdf_internal::DriverServer2<HealthFixtureTestDriver>;
+
+  HealthFixtureTestDriver() : fdf::DriverBase2("health_fixture_test_driver") {}
+
+  static DriverRegistration GetDriverRegistration() {
+    return FUCHSIA_DRIVER_REGISTRATION_V1(Server::initialize, Server::destroy);
+  }
+
+  zx::result<> Start(fdf::DriverContext context) override { return zx::ok(); }
+
+  void HealthCheck(HealthCheckRequest request, HealthCheckCompleter completer) override {
+    if (request == HealthCheckRequest::kPing) {
+      completer(fit::ok(latch_.ToResponse()));
+      return;
+    }
+    if (request == HealthCheckRequest::kFast) {
+      HealthCheckResponse resp{{
+          .diagnostics =
+              std::vector<HealthDiagnosticItem>{
+                  {{.key = "link_up", .value = HealthDiagnosticValue::WithBoolValue(true)}},
+                  {{.key = "rx_packets", .value = HealthDiagnosticValue::WithUintValue(42u)}},
+                  {{.key = "temp_c", .value = HealthDiagnosticValue::WithIntValue(-7)}},
+                  {{.key = "mode", .value = HealthDiagnosticValue::WithStringValue("hs-g4")}},
+                  {{.key = "last_irq",
+                    .value = HealthDiagnosticValue::WithTimestamp(zx::time_boot(987654))}},
+              },
+          .conditions =
+              std::vector<HealthCondition>{
+                  {{
+                      .status = HealthStatus::kDegraded,
+                      .reason_code = "LIVE_FIFO_WARN",
+                      .message = "FIFO 75% full",
+                      .diagnostics =
+                          std::vector<HealthDiagnosticItem>{
+                              {{.key = "depth",
+                                .value = HealthDiagnosticValue::WithUintValue(12u)}},
+                          },
+                  }},
+              },
+      }};
+      latch_.MergeInto(resp);
+      completer(fit::ok(std::move(resp)));
+      return;
+    }
+    completer(fit::error(HealthCheckError::kNotSupported));
+  }
+
+  TestHealthLatch& latch() { return latch_; }
+
+ private:
+  TestHealthLatch latch_{*this};
+};
+
+void TestHealthLatch::PostSelfFault(HealthCheckResponse resp) {
+  async::PostTask(driver_.dispatcher(), [driver = &driver_, resp = std::move(resp)] mutable {
+    driver->ReportHealthAlert(HealthAlert::WithSelfFault(std::move(resp)));
+  });
+}
+
+struct HealthFixtureConfig final {
+  using DriverType = HealthFixtureTestDriver;
+  using EnvironmentType = fdf_testing::MinimalCompatEnvironment;
+};
+
+TEST(DriverTestHealthHelpers, ForegroundCheckHealthAndTakeHealthAlerts) {
+  fdf_testing::ForegroundDriverTest<HealthFixtureConfig> driver_test;
+  ASSERT_EQ(ZX_OK, driver_test.StartDriver().status_value());
+  EXPECT_EQ(0u, driver_test.PendingHealthAlertCount());
+  EXPECT_TRUE(driver_test.TakeHealthAlerts().empty());
+
+  // 1. Default PING is OK with no conditions.
+  auto ping_res = driver_test.CheckHealth();
+  ASSERT_EQ(ZX_OK, ping_res.status_value());
+  ASSERT_TRUE(ping_res.value().is_ok());
+  EXPECT_EQ(HealthStatus::kOk, fdf_testing::OverallHealthStatus(ping_res.value().value()));
+  EXPECT_EQ(nullptr, fdf_testing::FindCondition(ping_res.value().value(), "LIVE_FIFO_WARN"));
+
+  // 2. Raising a degraded fault emits a SelfFault alert and reflects in PING/FAST.
+  driver_test.driver()->latch().RaiseDegraded("BUS_RETRY", "retrying transfer");
+  EXPECT_EQ(1u, driver_test.PendingHealthAlertCount());
+  auto alerts = driver_test.TakeHealthAlerts();
+  ASSERT_EQ(1u, alerts.size());
+  EXPECT_EQ(0u, driver_test.PendingHealthAlertCount());
+  ASSERT_TRUE(alerts[0].self_fault().has_value());
+  EXPECT_EQ(HealthStatus::kDegraded,
+            fdf_testing::OverallHealthStatus(alerts[0].self_fault().value()));
+  const auto* retry_cond = fdf_testing::FindCondition(alerts[0].self_fault().value(), "BUS_RETRY");
+  ASSERT_NE(nullptr, retry_cond);
+  EXPECT_EQ("retrying transfer", retry_cond->message());
+
+  // 3. FAST returns both live and latched conditions + typed diagnostics.
+  auto fast_res = driver_test.CheckHealth(HealthCheckRequest::kFast);
+  ASSERT_EQ(ZX_OK, fast_res.status_value());
+  ASSERT_TRUE(fast_res.value().is_ok());
+  const auto& fast_resp = fast_res.value().value();
+  EXPECT_EQ(HealthStatus::kDegraded, fdf_testing::OverallHealthStatus(fast_resp));
+  EXPECT_EQ(true, fdf_testing::GetDiagnosticBool(fast_resp, "link_up"));
+  EXPECT_EQ(42u, fdf_testing::GetDiagnosticUint(fast_resp, "rx_packets"));
+  EXPECT_EQ(-7, fdf_testing::GetDiagnosticInt(fast_resp, "temp_c"));
+  EXPECT_EQ("hs-g4", fdf_testing::GetDiagnosticString(fast_resp, "mode"));
+  EXPECT_EQ(zx::time_boot(987654), fdf_testing::GetDiagnosticTimestamp(fast_resp, "last_irq"));
+  EXPECT_EQ(std::nullopt, fdf_testing::GetDiagnosticBool(fast_resp, "rx_packets"));
+  EXPECT_EQ(std::nullopt, fdf_testing::GetDiagnosticUint(fast_resp, "missing_key"));
+
+  const auto* fifo_cond = fdf_testing::FindCondition(fast_resp, "LIVE_FIFO_WARN");
+  ASSERT_NE(nullptr, fifo_cond);
+  EXPECT_EQ(12u, fdf_testing::GetDiagnosticUint(*fifo_cond, "depth"));
+  EXPECT_NE(nullptr, fdf_testing::FindCondition(fast_resp, "BUS_RETRY"));
+
+  // 4. DEEP returns kNotSupported.
+  auto deep_res = driver_test.CheckHealth(HealthCheckRequest::kDeep);
+  ASSERT_EQ(ZX_OK, deep_res.status_value());
+  ASSERT_TRUE(deep_res.value().is_error());
+  EXPECT_EQ(HealthCheckError::kNotSupported, deep_res.value().error_value());
+
+  ASSERT_EQ(ZX_OK, driver_test.StopDriver().status_value());
+}
+
+TEST(DriverTestHealthHelpers, BackgroundCheckHealthAndTakeHealthAlerts) {
+  fdf_testing::BackgroundDriverTest<HealthFixtureConfig> driver_test;
+  ASSERT_EQ(ZX_OK, driver_test.StartDriver().status_value());
+
+  driver_test.RunInDriverContext([](HealthFixtureTestDriver& driver) {
+    driver.latch().RaiseUnhealthy("DMA_HUNG", "ring 0 wedged");
+    driver.ReportHealthAlert(HealthAlert::WithUpstreamNeighborFault(HealthCheckResponse{{
+        .conditions = std::vector<HealthCondition>{{{
+            .status = HealthStatus::kUnhealthy,
+            .reason_code = "PARENT_CLOCK_OFF",
+        }}},
+    }}));
+  });
+
+  EXPECT_EQ(2u, driver_test.PendingHealthAlertCount());
+  auto alerts = driver_test.TakeHealthAlerts();
+  ASSERT_EQ(2u, alerts.size());
+  EXPECT_EQ(0u, driver_test.PendingHealthAlertCount());
+
+  // Direct ReportHealthAlert executes synchronously inside RunInDriverContext (first on the wire),
+  // whereas TestHealthLatch::RaiseUnhealthy posts a task to the driver dispatcher (second).
+  ASSERT_TRUE(alerts[0].upstream_neighbor_fault().has_value());
+  ASSERT_NE(nullptr, fdf_testing::FindCondition(alerts[0].upstream_neighbor_fault().value(),
+                                                "PARENT_CLOCK_OFF"));
+
+  ASSERT_TRUE(alerts[1].self_fault().has_value());
+  EXPECT_EQ(HealthStatus::kUnhealthy,
+            fdf_testing::OverallHealthStatus(alerts[1].self_fault().value()));
+  ASSERT_NE(nullptr, fdf_testing::FindCondition(alerts[1].self_fault().value(), "DMA_HUNG"));
+
+  auto ping_res = driver_test.CheckHealth(HealthCheckRequest::kPing);
+  ASSERT_EQ(ZX_OK, ping_res.status_value());
+  ASSERT_TRUE(ping_res.value().is_ok());
+  EXPECT_EQ(HealthStatus::kUnhealthy, fdf_testing::OverallHealthStatus(ping_res.value().value()));
+
+  driver_test.RunInDriverContext(
+      [](HealthFixtureTestDriver& driver) { driver.latch().Clear("DMA_HUNG"); });
+  auto recovery_alerts = driver_test.TakeHealthAlerts();
+  ASSERT_EQ(1u, recovery_alerts.size());
+  ASSERT_TRUE(recovery_alerts[0].self_fault().has_value());
+  EXPECT_EQ(HealthStatus::kOk,
+            fdf_testing::OverallHealthStatus(recovery_alerts[0].self_fault().value()));
+
+  ASSERT_EQ(ZX_OK, driver_test.StopDriver().status_value());
+}
+
+// Several alerts posted asynchronously to the driver dispatcher are all drained in one call: the
+// driver transport delivers one event per channel-read callback, so the harness has to keep
+// pumping the dispatcher until no more events arrive rather than barrier once.
+TEST(DriverTestHealthHelpers, BackgroundTakeHealthAlertsDrainsManyQueuedAlerts) {
+  fdf_testing::BackgroundDriverTest<HealthFixtureConfig> driver_test;
+  ASSERT_EQ(ZX_OK, driver_test.StartDriver().status_value());
+
+  constexpr size_t kAlertCount = 5;
+  driver_test.RunInDriverContext([](HealthFixtureTestDriver& driver) {
+    for (size_t i = 0; i < kAlertCount; ++i) {
+      // Each PostSelfFault posts a task; none of the events are on the wire yet when this returns.
+      driver.latch().PostSelfFault(HealthCheckResponse{{
+          .conditions = std::vector<HealthCondition>{{{
+              .status = HealthStatus::kDegraded,
+              .reason_code = "BURST_" + std::to_string(i),
+          }}},
+      }});
+    }
+  });
+
+  EXPECT_EQ(kAlertCount, driver_test.PendingHealthAlertCount());
+  auto alerts = driver_test.TakeHealthAlerts();
+  ASSERT_EQ(kAlertCount, alerts.size());
+  for (size_t i = 0; i < kAlertCount; ++i) {
+    ASSERT_TRUE(alerts[i].self_fault().has_value());
+    EXPECT_NE(nullptr, fdf_testing::FindCondition(alerts[i].self_fault().value(),
+                                                  "BURST_" + std::to_string(i)));
+  }
+  EXPECT_EQ(0u, driver_test.PendingHealthAlertCount());
+  EXPECT_TRUE(driver_test.TakeHealthAlerts().empty());
+
+  ASSERT_EQ(ZX_OK, driver_test.StopDriver().status_value());
+}
+
+}  // namespace

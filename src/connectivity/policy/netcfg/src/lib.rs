@@ -596,7 +596,6 @@ impl InterfaceState {
         watchers: &mut DnsServerWatchers<'_>,
         dhcpv4_configuration_streams: &mut dhcpv4::ConfigurationStreamMap,
         dhcpv6_prefixes_streams: &mut dhcpv6::PrefixesStreamMap,
-        enable_socket_proxy: bool,
     ) -> Result<(), errors::Error> {
         let Self { config, provisioning, device_class, .. } = self;
         let fnet_interfaces_ext::Properties {
@@ -617,30 +616,26 @@ impl InterfaceState {
             return Ok(());
         }
 
-        // TODO(https://fxbug.dev/498654191): Add Locally provisioned networks to
-        // the networks service even when socket-proxy is absent.
-        if enable_socket_proxy {
-            // TODO(https://fxbug.dev/390709467): Involve Reachability state when
-            // evaluating whether to add discovered interfaces with Internet to the
-            // socketproxy.
-            //
-            // Verify that the interface has a v4 or v6 default route, as this
-            // is a signal that there might be a higher layer of connectivity.
-            if *has_default_ipv4_route || *has_default_ipv6_route {
-                netpol_networks_service
-                    .update(network::NetworkRegistryUpdate::ChangeNetwork(
-                        network::NetworkId::fuchsia(properties.id),
-                        network::NetworkUpdate::Properties(network::NetworkPropertiesChange {
-                            added: true,
-                            delegated: None,
-                            dns_servers: None,
-                            connectivity_state: None,
-                            name: Some(properties.name.clone()),
-                            network_type: Some((*device_class).into()),
-                        }),
-                    ))
-                    .await;
-            }
+        // TODO(https://fxbug.dev/390709467): Involve Reachability state when
+        // evaluating whether to add discovered interfaces with Internet to the
+        // socketproxy.
+        //
+        // Verify that the interface has a v4 or v6 default route, as this
+        // is a signal that there might be a higher layer of connectivity.
+        if *has_default_ipv4_route || *has_default_ipv6_route {
+            netpol_networks_service
+                .update(network::NetworkRegistryUpdate::ChangeNetwork(
+                    network::NetworkId::fuchsia(properties.id),
+                    network::NetworkUpdate::Properties(network::NetworkPropertiesChange {
+                        added: true,
+                        delegated: None,
+                        dns_servers: None,
+                        connectivity_state: None,
+                        name: Some(properties.name.clone()),
+                        network_type: Some((*device_class).into()),
+                    }),
+                ))
+                .await;
         }
 
         match config {
@@ -1969,7 +1964,6 @@ impl<'a> NetCfg<'a> {
             allowed_upstream_device_classes,
             dhcpv6_prefix_provider_handler,
             ndp_dns_servers,
-            enable_socket_proxy,
             ..
         } = self;
         let update_result = interface_properties
@@ -2023,7 +2017,6 @@ impl<'a> NetCfg<'a> {
             dhcpv6_client_provider,
             route_set_v4_provider,
             ndp_dns_servers,
-            *enable_socket_proxy,
         )
         .await
         .context("handle interface update");
@@ -2075,7 +2068,6 @@ impl<'a> NetCfg<'a> {
             (InterfaceId, net_types::ip::Ipv6Addr),
             Vec<fnet_name::DnsServer_>,
         >,
-        enable_socket_proxy: bool,
     ) -> Result<Option<InterfaceId>, errors::Error> {
         match update_result {
             fnet_interfaces_ext::UpdateResult::Added { properties, state: _ } => {
@@ -2091,7 +2083,6 @@ impl<'a> NetCfg<'a> {
                             watchers,
                             dhcpv4_configuration_streams,
                             dhcpv6_prefixes_streams,
-                            enable_socket_proxy,
                         )
                         .await
                         .context("failed to handle interface added event")
@@ -2113,7 +2104,6 @@ impl<'a> NetCfg<'a> {
                             watchers,
                             dhcpv4_configuration_streams,
                             dhcpv6_prefixes_streams,
-                            enable_socket_proxy,
                         )
                         .await
                         .context("failed to handle existing interface event")
@@ -2166,9 +2156,7 @@ impl<'a> NetCfg<'a> {
                             .await?;
                         }
 
-                        // TODO(https://fxbug.dev/498654191): Add locally provisioned networks to
-                        // the network registry even when socket-proxy is absent.
-                        if enable_socket_proxy && provisioning.track_in_network_registry() {
+                        if provisioning.track_in_network_registry() {
                             // Determine whether the interface has gained or lost candidacy, and
                             // update the network registry accordingly.
                             match crate::network::determine_interface_state_changed(
@@ -2383,7 +2371,7 @@ impl<'a> NetCfg<'a> {
             }
             fnet_interfaces_ext::UpdateResult::Removed(
                 fnet_interfaces_ext::PropertiesAndState {
-                    properties: fnet_interfaces_ext::Properties { id, name, .. },
+                    properties: properties @ fnet_interfaces_ext::Properties { id, name, .. },
                     state: (),
                 },
             ) => {
@@ -2393,18 +2381,16 @@ impl<'a> NetCfg<'a> {
                     // nothing.
                     None => return Ok(None),
                     Some(InterfaceState { config, control, provisioning, .. }) => {
-                        // TODO(https://fxbug.dev/498654191): Add locally provisioned networks to
-                        // the network registry even when socket-proxy is absent.
-                        if enable_socket_proxy {
-                            if provisioning.track_in_network_registry() {
-                                let network_id = network::NetworkId::fuchsia(*id);
-                                netpol_networks_service
-                                    .update(network::NetworkRegistryUpdate::ChangeNetwork(
-                                        network_id,
-                                        network::NetworkUpdate::Remove,
-                                    ))
-                                    .await;
-                            }
+                        if provisioning.track_in_network_registry()
+                            && network::is_default_candidate(properties)
+                        {
+                            let network_id = network::NetworkId::fuchsia(*id);
+                            netpol_networks_service
+                                .update(network::NetworkRegistryUpdate::ChangeNetwork(
+                                    network_id,
+                                    network::NetworkUpdate::Remove,
+                                ))
+                                .await;
                         }
                         let res = match config {
                             InterfaceConfigState::Host(HostInterfaceState {
@@ -3695,6 +3681,18 @@ pub async fn run() -> Result<(), anyhow::Error> {
         diagnostics_log::PublishOptions::default().minimum_severity(*min_severity),
     )?;
 
+    // Enable redaction of MAC addresses in logs and Inspect before anything
+    // else can log them. `enable()` installs masking synchronously; the
+    // returned future fetches the per-boot salt and is awaited before netcfg
+    // starts so that the identifiers it logs are hashed rather than masked.
+    // TODO(https://fxbug.dev/576752502): Initialize the redactor synchronously
+    // once the salt is provided at startup.
+    let netcfg_structured_config::Config { redact_network_identifiers } =
+        netcfg_structured_config::Config::take_from_startup_handle();
+    if redact_network_identifiers {
+        redactor_client::enable().await;
+    }
+
     info!("starting");
     debug!("starting with options = {:?}", opt);
 
@@ -4573,9 +4571,6 @@ mod tests {
                     assert_eq!(params, dhcpv4::new_client_params());
                     request.into_stream()
                 }
-                fnet_dhcp::ClientProviderRequest::CheckPresence { responder: _ } => {
-                    unreachable!("only called at startup")
-                }
             };
 
             let responder = expect_watch_dhcpv4_configuration(&mut client_req_stream);
@@ -4941,9 +4936,6 @@ mod tests {
                 assert_eq!(params, dhcpv4::new_client_params());
                 request.into_stream()
             }
-            fnet_dhcp::ClientProviderRequest::CheckPresence { responder: _ } => {
-                unreachable!("only called at startup")
-            }
         };
 
         let responder = expect_watch_dhcpv4_configuration(&mut client_req_stream);
@@ -5089,9 +5081,6 @@ mod tests {
                     assert_eq!(interface_id, INTERFACE_ID.get());
                     assert_eq!(params, dhcpv4::new_client_params());
                     request.into_stream_and_control_handle()
-                }
-                fnet_dhcp::ClientProviderRequest::CheckPresence { responder: _ } => {
-                    unreachable!("only called at startup")
                 }
             };
 
@@ -6013,12 +6002,13 @@ mod tests {
     async fn default_network_fallback_helper(
         interfaces: &[(InterfaceId, interface::ProvisioningType)],
         final_event: fnet_interfaces::Event,
+        enable_socket_proxy: bool,
     ) {
         // The provided interface id list must be non-empty.
         assert!(interfaces.len() > 0);
 
         let (mut netcfg, _server_ends) =
-            test_netcfg(NetcfgTestArgs { serve_noop_dhcpv4: true, enable_socket_proxy: true })
+            test_netcfg(NetcfgTestArgs { serve_noop_dhcpv4: true, enable_socket_proxy })
                 .expect("error creating test netcfg");
         let mut dns_watchers = DnsServerWatchers::empty();
 
@@ -6184,7 +6174,18 @@ mod tests {
     ) {
         let interfaces: Vec<(InterfaceId, interface::ProvisioningType)> =
             interface_ids.iter().map(|id| (*id, Local)).collect();
-        default_network_fallback_helper(&interfaces, final_event).await
+        default_network_fallback_helper(
+            &interfaces,
+            final_event.clone(),
+            /* enable_socket_proxy = */ false,
+        )
+        .await;
+        default_network_fallback_helper(
+            &interfaces,
+            final_event,
+            /* enable_socket_proxy = */ true,
+        )
+        .await;
     }
 
     // Test the default network fallback behavior when there are delegated
@@ -6202,7 +6203,18 @@ mod tests {
         interfaces: &[(InterfaceId, interface::ProvisioningType)],
         final_event: fnet_interfaces::Event,
     ) {
-        default_network_fallback_helper(&interfaces, final_event).await
+        default_network_fallback_helper(
+            &interfaces,
+            final_event.clone(),
+            /* enable_socket_proxy = */ false,
+        )
+        .await;
+        default_network_fallback_helper(
+            &interfaces,
+            final_event,
+            /* enable_socket_proxy = */ true,
+        )
+        .await;
     }
 
     #[test]

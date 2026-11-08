@@ -1,0 +1,23 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "handle-dup",
+    testonly = True,
+    srcs = ["handle-dup.cc"],
+    implementation_deps = [
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/zx",
+        "//zircon/system/ulib/zxtest",
+    ],
+    # Need to disable null checks as we are going to pass nullptrs to functions
+    # that say they don't take nullptrs
+    public_configs = [":no_nonnull"],
+    visibility = ["//zircon/system/utest/core:__pkg__"],
+    alwayslink = True,
+)

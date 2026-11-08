@@ -7,6 +7,5 @@ group("tests") {
   deps = [
     "cpp:tests",
     "testing/cpp:tests",
-    "testing/next/cpp:tests",
   ]
 }

@@ -1,0 +1,20 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        "//src/memory/tools/dataclasses_json_lite:dataclasses_json_lite_test",
+        "//src/memory/tools/debug_json:debug_json_test",
+        "//src/memory/tools/images_json:images_json_test",
+        "//src/memory/tools/multidict:multidict_test",
+        "//src/memory/tools/smaps:smaps_test",
+        "//src/memory/tools/snapshots:snapshots_test",
+    ],
+)

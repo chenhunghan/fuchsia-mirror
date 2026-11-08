@@ -1,0 +1,37 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [],
+    visibility = ["//zircon/system/ulib:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "affine",
+    srcs = [
+        "ratio.cc",
+        "transform.cc",
+        "utils.cc",
+    ],
+    gn_output_name = "affine-test",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//sdk/lib/fdio",
+        "//sdk/lib/fit",
+        "//zircon/system/ulib/affine",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "affine-test-pkg",
+    unit_tests = [":affine"],
+    visibility = ["//visibility:private"],
+)

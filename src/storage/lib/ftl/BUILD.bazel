@@ -1,0 +1,58 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Preserve GN friend = [ "test:*" ] for bazel2gn; fx_cc_library has no friend
+# attribute (TODO(https://fxbug.dev/570694755)).
+# @bazel2gn:raw_attribute:friend = [ "test:*" ]
+fx_cc_library(
+    name = "ftl",
+    srcs = [
+        "ftl.h",
+        "ftl_private.h",
+        "ftln/diagnose.cc",
+        "ftln/diagnose.h",
+        "ftln/ftln_init.c",
+        "ftln/ftln_intrnl.c",
+        "ftln/ftln_rd.c",
+        "ftln/ftln_util.c",
+        "ftln/ftlnp.h",
+        "ftln/ndm-driver.cc",
+        "ftln/stats.c",
+        "ftln/volume.cc",
+        "ndm/ndm_init.c",
+        "ndm/ndm_intrnl.c",
+        "ndm/ndm_vols.c",
+        "ndm/ndmp.h",
+        "utils/aalloc.c",
+        "utils/crc32_tbl.c",
+        "utils/fsmem.c",
+        "utils/fsysinit.c",
+        "utils/ftl_mc.c",
+        "utils/ftl_mc.h",
+        "utils/kernel.h",
+    ] + select({
+        "@platforms//os:fuchsia": ["utils/semaphore.cc"],
+        "//conditions:default": ["utils/semaphore_posix.cc"],
+    }),
+    hdrs = [
+        "ftln/logger.h",
+        "ftln/ndm-driver.h",
+        "ftln/volume.h",
+    ],
+    defines = ["NDM_DEBUG"],
+    implementation_deps = [
+        "//sdk/lib/zircon-assert",
+        "//src/lib/debug:backtrace-request",
+    ],
+    visibility = [
+        "//src/devices/block/drivers/ftl:__subpackages__",
+        "//src/storage/lib/ftl/test:__pkg__",
+        "//src/storage/volume_image/ftl:__pkg__",
+    ],
+    alwayslink = True,
+)

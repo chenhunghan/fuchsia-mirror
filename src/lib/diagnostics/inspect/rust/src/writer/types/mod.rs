@@ -3,6 +3,8 @@
 // found in the LICENSE file.
 
 mod base;
+mod blob_property;
+mod blob_reader_writer;
 mod bool_property;
 mod bytes_property;
 mod double_array;
@@ -27,6 +29,8 @@ mod uint_property;
 mod value_list;
 
 pub use base::*;
+pub use blob_property::*;
+pub use blob_reader_writer::*;
 pub use bool_property::*;
 pub use bytes_property::*;
 pub use double_array::*;

@@ -4,47 +4,10 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-#include <lib/suspend_wakeup_timer.h>
-
-#include <kernel/ffi.h>
-#include <ktl/memory.h>
-#include <ktl/utility.h>
-
 #ifdef __aarch64__
 #include <dev/timer/armv7_mmio_timer.h>
-#endif
+#include <kernel/ffi.h>
 
-static_assert(sizeof(SuspendWakeupTimer) == kSuspendWakeupTimerStorageSize);
-static_assert(alignof(SuspendWakeupTimer) == kSuspendWakeupTimerStorageAlign);
-static_assert(sizeof(SuspendWakeupTimer::Callback) == 16);
-static_assert(alignof(SuspendWakeupTimer::Callback) == 8);
-static_assert(sizeof(ffi::Uninitialized<SuspendWakeupTimer::Callback>) ==
-              sizeof(SuspendWakeupTimer::Callback));
-static_assert(alignof(ffi::Uninitialized<SuspendWakeupTimer::Callback>) ==
-              alignof(SuspendWakeupTimer::Callback));
-
-extern "C" {
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_suspend_wakeup_timer_callback_move(
-    ffi::Uninitialized<SuspendWakeupTimer::Callback>* dst, SuspendWakeupTimer::Callback* src) {
-  dst->Initialize(ktl::move(*src));
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_suspend_wakeup_timer_callback_call(
-    const SuspendWakeupTimer::Callback* cb, zx_instant_boot_t now, zx_instant_boot_t resume_at) {
-  (*cb)(now, resume_at);
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_suspend_wakeup_timer_callback_destroy(SuspendWakeupTimer::Callback* cb) {
-  ktl::destroy_at(cb);
-}
-
-}  // extern "C"
-
-#ifdef __aarch64__
 static_assert(Armv7MmioTimer::kMaxTimers == 8);
 static_assert(sizeof(Armv7MmioTimer::IrqHandlerResult) == sizeof(uint32_t));
 static_assert(static_cast<uint32_t>(Armv7MmioTimer::IrqHandlerResult::RemainRegistered) == 0);

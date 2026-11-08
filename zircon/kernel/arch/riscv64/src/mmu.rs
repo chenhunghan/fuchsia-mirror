@@ -724,7 +724,10 @@ fn flush_tlb_entry_run(vaddr: usize, count: usize, target: &FlushTarget) {
 
 /// Executes `sfence.vma` for `args` on every CPU.
 fn mp_sync_sfence(args: &SfenceVmaArgs) {
-    crate::kernel::mp::sync_exec(crate::kernel::mp::MpIpiTarget::All, 0, || sfence_vma(args));
+    // SAFETY: `MpIpiTarget::All` does not require interrupts to be disabled.
+    unsafe {
+        crate::kernel::mp::sync_exec(crate::kernel::mp::MpIpiTarget::All, 0, || sfence_vma(args));
+    }
 }
 
 /// Flush an entire ASID on all CPUs.
@@ -1746,14 +1749,12 @@ unsafe fn map_page_table(
                     cm.as_mut().flush_entry(cursor.vaddr(), Flush::Terminal);
                 }
             } else {
-                // Either no current entry, or we need to upgrade the existing one,
-                // potentially performing a break-before-make.
-                if valid && !ro {
-                    // If the output address were not changing we would have hit the protect
-                    // case above, so if the new entry is not read only then we must perform
-                    // break-before-make before installing it.  Failing to do this could
-                    // result in writes being temporarily lost due to the different output
-                    // addresses.
+                // Either no current entry, or we are replacing an existing entry with a
+                // different output address.
+                if valid {
+                    // Output address is changing: perform break-before-make before installing
+                    // `new_pte` so stale translations are invalidated across all CPUs and
+                    // concurrent writes cannot be lost across differing output addresses.
                     // SAFETY: `index` is a page-table index below NUM_PAGE_TABLE_ENTRIES, so the
                     // write stays inside the 512-entry table `page_table` points at.
                     unsafe {
@@ -2349,6 +2350,7 @@ unsafe fn aspace_map(
     if top_table.is_null() {
         return Err(Status::BAD_STATE);
     }
+    debug_assert!(!aspace.is_kernel() || existing_action != ExistingEntryAction::Upgrade);
     debug_assert!(aspace.is_valid_vaddr(vaddr));
     debug_assert!((vaddr & PAGE_MASK) == 0);
     let count = phys.len();
@@ -2701,11 +2703,14 @@ pub extern "C" fn rust_riscv64_icache_sync_addr(start: usize, len: usize) {
 pub extern "C" fn rust_riscv64_icache_finish() {
     // Shootdown on all cores.  Using mp::sync_exec instead of an SBI remote fence
     // to handle race conditions with cores going offline.
-    // SAFETY: `fence.i` only invalidates this hart's instruction cache, which is a
-    // cache of memory that has already been written.
-    crate::kernel::mp::sync_exec(crate::kernel::mp::MpIpiTarget::All, 0, || unsafe {
-        core::arch::asm!("fence.i", options(nostack, preserves_flags))
-    });
+    // SAFETY: `MpIpiTarget::All` does not require interrupts to be disabled, and `fence.i` only
+    // invalidates this hart's instruction cache, which is a cache of memory that has already been
+    // written.
+    unsafe {
+        crate::kernel::mp::sync_exec(crate::kernel::mp::MpIpiTarget::All, 0, || {
+            core::arch::asm!("fence.i", options(nostack, preserves_flags))
+        });
+    }
 }
 
 /// C++ `ArchVmAspaceInterface::page_alloc_fn_t`: the hook a test can install to
@@ -2747,7 +2752,7 @@ pub struct Riscv64ArchVmAspace {
     /// `UnmapPageTable()`.  Lockdep classifies by class, not by instance, hence the
     /// flag.
     #[mutex(flags = lockdep::LOCK_FLAGS_NESTABLE)]
-    pub(crate) mutex: ksync::KMutex,
+    pub(crate) mutex: ksync::KMutex<crate::ksync_kernel::TrackedMutex>,
 
     pub(crate) base: usize,
     pub(crate) size: usize,
@@ -3603,7 +3608,10 @@ const _: () = assert!(core::mem::size_of::<SfenceVmaArgs>() == 32);
 /// Unit tests for RISC-V 64 MMU encodings and TLB flush coalescing.
 #[unittest::suite(name = "riscv64_mmu")]
 mod tests {
-    use unittest::{assert_eq, assert_false, assert_true};
+    use super::super::{USER_ASPACE_BASE, USER_ASPACE_SIZE};
+    use unittest::{
+        assert_eq, assert_false, assert_ne, assert_ok, assert_true, expect_eq, expect_ok,
+    };
 
     /// Test virtual address to page table index calculation across levels.
     #[test]
@@ -3741,5 +3749,139 @@ mod tests {
         let flush_needed = cm.flush_entry(0x50000, Flush::Terminal, false);
         assert_false!(flush_needed);
         assert_true!(cm.full_flush);
+    }
+
+    /// Test `ExistingEntryAction::Upgrade` read-only flush behavior.
+    #[test]
+    fn test_upgrade_ro_output_addr_bbm() {
+        const VA: usize = 1usize << 30;
+        const RW_FLAGS: u8 =
+            ARCH_MMU_FLAG_PERM_USER | ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE;
+        const RO_FLAGS: u8 = ARCH_MMU_FLAG_PERM_USER | ARCH_MMU_FLAG_PERM_READ;
+
+        let (page0, pa0_typed) = crate::vm::pmm::alloc_page(0).expect("pmm::alloc_page failed");
+        let (page1, pa1_typed) = crate::vm::pmm::alloc_page(0).expect("pmm::alloc_page failed");
+        let pa0 = pa0_typed.0 as u64;
+        let pa1 = pa1_typed.0 as u64;
+        assert_ne!(pa0, pa1);
+
+        let mut storage = core::mem::MaybeUninit::<Riscv64ArchVmAspace>::uninit();
+        let ptr = storage.as_mut_ptr();
+        // SAFETY: `ptr` points to aligned stack storage that stays pinned in `storage` until
+        // `rust_riscv64_aspace_destruct` drops it below.
+        unsafe {
+            rust_riscv64_aspace_construct(
+                ptr,
+                USER_ASPACE_BASE,
+                USER_ASPACE_SIZE,
+                AspaceType::User,
+                None,
+            );
+        }
+        // SAFETY: `ptr` was just constructed above and is never switched onto any hart.
+        assert_ok!(unsafe { rust_riscv64_aspace_init(ptr) });
+        let init_paddrs = [pa0, pa1];
+        // SAFETY: `ptr` is initialized and `init_paddrs` holds two valid page-aligned addresses.
+        assert_ok!(unsafe {
+            rust_riscv64_aspace_map(
+                ptr,
+                VA,
+                init_paddrs.as_ptr(),
+                init_paddrs.len(),
+                RW_FLAGS,
+                ExistingEntryAction::Error,
+            )
+        });
+
+        {
+            // SAFETY: `ptr` is a live initialized `Riscv64ArchVmAspace`.
+            let aspace = unsafe { &*ptr };
+            lock!(let guard = aspace.lock_mutex());
+            let locked = LockedAspace::new(aspace, &guard);
+            let top_table = locked.top_table();
+            let ro_attrs = mmu_flags_to_pte_attr(RO_FLAGS as u32, false);
+
+            // Same output address with `ro = true` must neither downgrade permissions nor flush.
+            {
+                stack_pin_init!(let cm = ConsistencyManager::new(&locked));
+                cm.as_mut().flush_entry(VA + 2 * page::SIZE, Flush::Terminal);
+                expect_eq!(cm.tracker.num_pending_tlb_runs, 1);
+
+                let paddrs = [pa0];
+                let mut cursor = MappingCursor::new(&paddrs, page::SIZE, VA);
+                // SAFETY: `top_table` is the root translation table protected by `guard`.
+                expect_ok!(unsafe {
+                    map_page_table(
+                        ro_attrs,
+                        true,
+                        NUM_PAGE_TABLE_LEVELS - 1,
+                        top_table,
+                        ExistingEntryAction::Upgrade,
+                        &mut cursor,
+                        cm.as_mut(),
+                        &locked,
+                    )
+                });
+                expect_eq!(cm.tracker.num_pending_tlb_runs, 1);
+                let mut query_pa = 0;
+                let mut query_flags = 0;
+                expect_ok!(query_page_table(top_table, aspace.base, aspace.size, VA).map(
+                    |(pa_out, flags_out)| {
+                        query_pa = pa_out;
+                        query_flags = flags_out;
+                    },
+                ));
+                expect_eq!(pa0, query_pa);
+                expect_eq!(RW_FLAGS, query_flags);
+            }
+
+            // Different output address with `ro = true` must perform synchronous break-before-make
+            // (draining `cm` via `cm.flush()`) before installing the new PTE.
+            {
+                stack_pin_init!(let cm = ConsistencyManager::new(&locked));
+                cm.as_mut().flush_entry(VA + 2 * page::SIZE, Flush::Terminal);
+                expect_eq!(cm.tracker.num_pending_tlb_runs, 1);
+
+                let paddrs = [pa1];
+                let mut cursor = MappingCursor::new(&paddrs, page::SIZE, VA);
+                // SAFETY: `top_table` is the root translation table protected by `guard`.
+                expect_ok!(unsafe {
+                    map_page_table(
+                        ro_attrs,
+                        true,
+                        NUM_PAGE_TABLE_LEVELS - 1,
+                        top_table,
+                        ExistingEntryAction::Upgrade,
+                        &mut cursor,
+                        cm.as_mut(),
+                        &locked,
+                    )
+                });
+                expect_eq!(cm.tracker.num_pending_tlb_runs, 0);
+                let mut query_pa = 0;
+                let mut query_flags = 0;
+                expect_ok!(query_page_table(top_table, aspace.base, aspace.size, VA).map(
+                    |(pa_out, flags_out)| {
+                        query_pa = pa_out;
+                        query_flags = flags_out;
+                    },
+                ));
+                expect_eq!(pa1, query_pa);
+                expect_eq!(RO_FLAGS, query_flags);
+            }
+        }
+
+        // SAFETY: `ptr` is local and inactive; unmap both pages, destroy, and drop.
+        let unmap_res = unsafe { rust_riscv64_aspace_unmap(ptr, VA, 2, ARCH_UNMAP_OPTION_NONE) };
+        expect_ok!(unmap_res);
+        expect_ok!(unsafe { rust_riscv64_aspace_destroy(ptr) });
+        unsafe { rust_riscv64_aspace_destruct(ptr) };
+        if unmap_res.is_ok() {
+            // SAFETY: `page0` and `page1` were allocated exclusively for this test and unmapped.
+            unsafe {
+                crate::vm::pmm::free_page(page0);
+                crate::vm::pmm::free_page(page1);
+            }
+        }
     }
 }

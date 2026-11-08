@@ -5,9 +5,10 @@
 use crate::TargetEvent;
 use crate::error::Error;
 use crate::events::{TargetHandle, TargetState};
-use crate::instance_watcher::{InstanceSource, InstanceWatcher, is_pid_running};
+use crate::instance_watcher::{InstanceSource, InstanceWatcher};
 use addr::TargetAddr;
 use ffx_config::EnvironmentContext;
+use ffx_process::is_pid_running;
 use futures::channel::mpsc::UnboundedSender;
 use serde::{Deserialize, Serialize};
 use std::io::{BufWriter, Write as _};

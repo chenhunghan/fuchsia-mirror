@@ -1,8 +1,8 @@
 ---
 name: review-fuchsia-rust-dep-updates
-description: >-
-  Review updates to third-party Rust crate dependencies in Fuchsia and check for
-  common errors, unintended changes, and missed steps in the process.
+description: >
+  Review updates to third-party Rust crate dependencies in Fuchsia and check
+  for common errors, unintended changes, and missed steps in the process.
 ---
 
 # Reviewing Fuchsia Rust Dependency updates
@@ -13,7 +13,14 @@ documented processes were correctly followed.
 
 ---
 
-## 1. Identify which crates were intended to be changed
+## 1. Get the change
+
+Check out a clean baseline (e.g. `git checkout origin/main`). Then cherry-pick
+the change with `fx gh pr cherry-pick <change_id>`.
+
+---
+
+## 2. Identify which crates were intended to be changed
 
 Sometimes, crates get updated unintentionally by our tooling. Read the commit
 message and look for a description of which crates were intended to be updated.
@@ -37,7 +44,7 @@ every crate.
 
 ---
 
-## 2. Verify that only the identified crates were changed
+## 3. Verify that only the identified crates were changed
 
 Each changed crate will be added, updated, or removed, and those changes will be
 reflected in the `third_party/rust_crates/vendor` directory. Check each changed
@@ -46,7 +53,7 @@ message.
 
 ---
 
-## 3. Ensure that OSRB processes were followed
+## 4. Ensure that OSRB processes were followed
 
 ### When OSRB processes need to be followed
 
@@ -54,18 +61,19 @@ In some situations, the Open-Source Review Board must approve additions to the
 set of third-party crates. This is needed when any of the following conditions
 are met:
 
-1. A new crate is added that was not already vendored at an older version. Any
-new crates need OSRB approval, but this doesn't apply to crates that are already
-in-tree at an older version.
-2. A crate is updated in a way that changes its licensing. Sometimes, updating a
-crate will change its licensing. For example, a crate update may change its
-licensing from `MIT OR Apache-2.0` to `LGPL` - this requires OSRB approval.
+1.  A new crate is added that was not already vendored at an older version. Any
+    new crates need OSRB approval, but this doesn't apply to crates that are
+    already in-tree at an older version.
+2.  A crate is updated in a way that changes its licensing. Sometimes, updating
+    a crate will change its licensing. For example, a crate update may change
+    its licensing from `MIT OR Apache-2.0` to `LGPL` - this requires OSRB
+    approval.
 
 Some kinds of licensing changes are more serious problems than others. Licensing
 changes that add more allowed licenses are not uncommon, and are typically not a
-serious issue. An example of this would be changing from `MIT` to
-`MIT OR Apache-2.0`. We previously used the crate under the `MIT` license and
-can continue to do so. Other kinds of licensing changes are serious issues. If a
+serious issue. An example of this would be changing from `MIT` to `MIT OR
+Apache-2.0`. We previously used the crate under the `MIT` license and can
+continue to do so. Other kinds of licensing changes are serious issues. If a
 crate changes its licensing completely (for example, `MIT` to `LGPL`) then the
 OSRB must approve the crate update. Another serious issue is if a crate changes
 its licensing to add an unapproved license. Look in
@@ -82,7 +90,7 @@ ask for OSRB approval for the required updates.
 
 ---
 
-## 4. Check that `build.rs` changes were accounted for
+## 5. Check that `build.rs` changes were accounted for
 
 Some third-party crates have `build.rs` scripts. These scripts cannot be
 executed by our build system. Instead, the effects of these scripts are computed

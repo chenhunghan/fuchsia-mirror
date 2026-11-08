@@ -1,0 +1,132 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "shutdown_integration_test_bin",
+    srcs = ["shutdown_integration.rs"],
+    crate_name = "shutdown_integration_test",
+    crate_root = "shutdown_integration.rs",
+    edition = "2024",
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/sys/lib/component-events",
+    ],
+)
+
+fx_packaged_binary(
+    name = "shutdown_integration_test_packaged_bin",
+    testonly = True,
+    binary = ":shutdown_integration_test_bin",
+    binary_name = "shutdown_integration_test",
+)
+
+rustc_binary(
+    name = "system_controller_client_bin",
+    testonly = True,
+    srcs = ["system_controller_client.rs"],
+    crate_name = "system_controller_client",
+    crate_root = "system_controller_client.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "system_controller_client_packaged_bin",
+    testonly = True,
+    binary = ":system_controller_client_bin",
+    binary_name = "system_controller_client",
+)
+
+fx_component_manifest(
+    name = "shutdown_integration_root-manifest",
+    testonly = True,
+    component_name = "shutdown_integration_root",
+    includes = [
+        "//src/sys/component_manager:meta/passthrough_diagnostics.shard.cml",
+        "//src/sys/component_manager/tests:meta/elf_runner_and_environment.shard",
+    ],
+    manifest = "meta/shutdown_integration_root.cml",
+)
+
+fx_component(
+    name = "shutdown_integration_root",
+    testonly = True,
+    compiled_manifest = ":shutdown_integration_root-manifest",
+)
+
+fx_component_manifest(
+    name = "system_controller_consumer-manifest",
+    testonly = True,
+    component_name = "system_controller_consumer",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/system_controller_consumer.cml",
+)
+
+fx_component(
+    name = "system_controller_consumer",
+    testonly = True,
+    compiled_manifest = ":system_controller_consumer-manifest",
+    deps = [":system_controller_client_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "shutdown_integration_test-manifest",
+    testonly = True,
+    component_name = "shutdown_integration_test",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/lib/fuchsia-component-test:meta/nested_component_manager.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/shutdown_integration_test.cml",
+)
+
+fx_test_component(
+    name = "shutdown_integration_test_component",
+    compiled_manifest = ":shutdown_integration_test-manifest",
+    deps = [":shutdown_integration_test_packaged_bin"],
+)
+
+fx_package(
+    name = "shutdown_integration_test_package",
+    package_name = "shutdown_integration_test",
+    components = [
+        ":shutdown_integration_root",
+        ":system_controller_consumer",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+        "//src/sys/component_manager:component-manager-realm-builder-cmp",
+    ],
+    test_components = [":shutdown_integration_test_component"],
+)
+
+fx_test(
+    name = "shutdown_integration_test",
+    package = ":shutdown_integration_test_package",
+    visibility = ["//src/sys/component_manager:__pkg__"],
+)

@@ -33,7 +33,7 @@
 // incoming Callbacks to signaling registered events.
 
 use crate::{addr, port};
-use anyhow::{Context as _, format_err};
+use anyhow::Context as _;
 use fidl::endpoints;
 use fidl::endpoints::{ControlHandle, RequestStream};
 use fidl_fuchsia_hardware_vsock::{
@@ -47,10 +47,10 @@ use fidl_fuchsia_vsock::{
 };
 use fuchsia_async as fasync;
 use futures::channel::{mpsc, oneshot};
+use futures::stream::FuturesUnordered;
 use futures::{Future, FutureExt, Stream, StreamExt, TryFutureExt, TryStreamExt, future, select};
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::{HashMap, VecDeque};
-use std::convert::Infallible;
 use std::ops::Deref;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -248,13 +248,12 @@ impl Vsock {
     /// The creation is asynchronous due to need to invoke methods on the given `DeviceProxy`. On
     /// success a pair of `Self, impl Future<Result<_, Error>>` is returned. The `impl Future` is
     /// a future that is listening for and processing messages from the `device`. This future needs
-    /// to be evaluated for other methods on the returned `Self` to complete successfully. Unless
-    /// a fatal error occurs the future will never yield a result and will execute infinitely.
+    /// to be evaluated for other methods on the returned `Self` to complete successfully, and
+    /// resolves when a device callback stream disconnects.
     pub async fn new(
         guest_vsock_device: Option<DeviceProxy>,
         loopback_vsock_device: Option<DeviceProxy>,
-    ) -> Result<(Self, impl Future<Output = Result<Vec<Infallible>, anyhow::Error>>), anyhow::Error>
-    {
+    ) -> Result<(Self, impl Future<Output = Result<(), anyhow::Error>>), anyhow::Error> {
         let mut server_streams = Vec::new();
         let mut start_device = |device: &DeviceProxy| {
             let (callbacks_client, callbacks_server) =
@@ -282,23 +281,23 @@ impl Vsock {
         };
 
         let service = Vsock(Rc::new(RefCell::new(service)));
-        let callback_loops: Vec<_> = server_streams
+        let mut callback_loops: FuturesUnordered<_> = server_streams
             .into_iter()
             .map(|stream| service.clone().run_callbacks(stream))
             .collect();
 
-        Ok((service, future::try_join_all(callback_loops)))
+        Ok((service, async move { callback_loops.next().await.unwrap_or(Ok(())) }))
     }
     async fn run_callbacks(
         self,
         mut callbacks: CallbacksRequestStream,
-    ) -> Result<Infallible, anyhow::Error> {
-        while let Some(Ok(cb)) = callbacks.next().await {
+    ) -> Result<(), anyhow::Error> {
+        while let Some(cb) = callbacks.try_next().await? {
             self.borrow_mut().do_callback(cb);
         }
-        // The only way to get here is if our callbacks stream ended, since our notifications
-        // cannot disconnect as we are holding a reference to them in |service|.
-        Err(format_err!("Driver disconnected"))
+        // The callbacks stream ends when the underlying vsock driver unbinds or shuts down.
+        log::info!("VSOCK driver disconnected; stopping vsock callback loop");
+        Ok(())
     }
 
     // Spawns a new asynchronous task for listening for incoming connections on a port.
@@ -866,5 +865,36 @@ impl Stream for ListenStream {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.stream.poll_next_unpin(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fidl_fuchsia_hardware_vsock::{DeviceMarker, DeviceRequest};
+
+    #[fuchsia::test(allow_stalls = false)]
+    async fn driver_disconnect_completes_event_loop_cleanly() -> Result<(), anyhow::Error> {
+        let (driver_client, driver_server) = endpoints::create_endpoints::<DeviceMarker>();
+        let mut driver_server = driver_server.into_stream();
+
+        let (tx, rx) = oneshot::channel();
+        let scope = fasync::Scope::new();
+        scope.spawn_local(async move {
+            let Some(Ok(DeviceRequest::Start { cb, responder })) = driver_server.next().await
+            else {
+                panic!("Expected DeviceRequest::Start");
+            };
+            let driver_callbacks = cb.into_proxy();
+            responder.send(Ok(())).expect("Failed to send Start response");
+            let _ = tx.send((driver_server, driver_callbacks));
+        });
+
+        let (_service, event_loops) = Vsock::new(None, Some(driver_client.into_proxy())).await?;
+        let (_driver_server, driver_callbacks) = rx.await?;
+
+        drop(driver_callbacks);
+        assert!(event_loops.await.is_ok());
+        Ok(())
     }
 }

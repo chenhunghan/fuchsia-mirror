@@ -866,7 +866,7 @@ mod tests {
             output_directory: PathBuf::from("/out/dir"),
             unknown: [
                 ("processor_dir".to_string(), Value::String("/tools/bin".to_string())),
-                ("processor_name".to_string(), Value::String("resummarize".to_string())),
+                ("processor_name".to_string(), Value::String("post_processor".to_string())),
             ]
             .into_iter()
             .collect(),
@@ -888,7 +888,7 @@ mod tests {
         };
         assert_eq!(
             output_processor.resolved_binary(&test_config),
-            PathBuf::from("/tools/bin/resummarize")
+            PathBuf::from("/tools/bin/post_processor")
         );
 
         // Built-in parameters {host_test_binary} and {output_directory}.

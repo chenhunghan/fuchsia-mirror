@@ -84,6 +84,7 @@ def _sanitizer_mode_feature(
         mode,
         extra_compile_flags = [],
         extra_link_flags = [],
+        extra_flag_sets = [],
         enabled = False):
     """Define a feature that corresponds to Clang -fsanitize=<mode>.
 
@@ -114,6 +115,8 @@ def _sanitizer_mode_feature(
                 flag_groups = [flag_group(flags = extra_link_flags)],
             ),
         )
+    if extra_flag_sets:
+        flag_sets.extend(extra_flag_sets)
 
     return feature(
         name = name,
@@ -156,15 +159,37 @@ def get_sanitizer_features(
 
     clang_sanitizer_feature = _get_clang_sanitizer_feature(use_default_build_flags)
 
-    # NOTE: Unlike GN (which sets toolchain_variant.libprefix to "asan-ubsan/"
-    # or "hwasan-ubsan/" when combined with ubsan), the IDK sysroot
-    # (//sdk/lib/c/sysroot_entries.gni) and Bazel packaging rules
-    # (clang_package_resources.bzl, generate_sdk_build_rules.bzl) only export
-    # and package instrumented libraries under lib/asan/ and lib/hwasan/.
-    # Until the IDK sysroot and packaging rules also support asan-ubsan and
-    # hwasan-ubsan directories, always use asan/ld.so.1 and hwasan/ld.so.1.
+    # Dynamic-linker path configuration per variant:
+    # On Fuchsia, each single and composite variant specifies a dedicated
+    # dynamic linker path corresponding to its lib/<variant>/ directory:
+    # - asan: asan/ld.so.1 (when not ubsan/sancov)
+    # - asan-ubsan: asan-ubsan/ld.so.1 (when ubsan and not sancov)
+    # - asan-sancov: asan-sancov/ld.so.1 (when sancov and not ubsan)
+    # - hwasan: hwasan/ld.so.1 (when not ubsan)
+    # - hwasan-ubsan: hwasan-ubsan/ld.so.1 (when ubsan)
+    # - ubsan: ubsan/ld.so.1 (when not asan/hwasan/sancov)
+    # - ubsan-sancov: ubsan-sancov/ld.so.1 (when sancov and not asan/hwasan)
 
     # LINT.IfChange(asan)
+    asan_flag_sets = []
+    if is_fuchsia:
+        asan_flag_sets.extend([
+            flag_set(
+                actions = ALL_CC_LINK_ACTION_NAMES,
+                flag_groups = [flag_group(flags = ["-Wl,-dynamic-linker=asan/ld.so.1"])],
+                with_features = [with_feature_set(not_features = ["ubsan", "sancov"])],
+            ),
+            flag_set(
+                actions = ALL_CC_LINK_ACTION_NAMES,
+                flag_groups = [flag_group(flags = ["-Wl,-dynamic-linker=asan-ubsan/ld.so.1"])],
+                with_features = [with_feature_set(features = ["ubsan"], not_features = ["sancov"])],
+            ),
+            flag_set(
+                actions = ALL_CC_LINK_ACTION_NAMES,
+                flag_groups = [flag_group(flags = ["-Wl,-dynamic-linker=asan-sancov/ld.so.1"])],
+                with_features = [with_feature_set(features = ["sancov"], not_features = ["ubsan"])],
+            ),
+        ])
     asan_feature = _sanitizer_mode_feature(
         "asan",
         "address",
@@ -176,20 +201,30 @@ def get_sanitizer_features(
             "-mllvm",
             "-asan-instrument-assume-dereferenceable=1",
         ],
-        extra_link_flags = [
-            "-Wl,-dynamic-linker=asan/ld.so.1",
-        ] if is_fuchsia else [],
+        extra_flag_sets = asan_flag_sets,
         enabled = "asan" in enabled_features,
     )
     # LINT.ThenChange(//build/config/sanitizers/BUILD.gn:asan)
 
     # LINT.IfChange(hwasan)
+    hwasan_flag_sets = []
+    if is_fuchsia:
+        hwasan_flag_sets.extend([
+            flag_set(
+                actions = ALL_CC_LINK_ACTION_NAMES,
+                flag_groups = [flag_group(flags = ["-Wl,-dynamic-linker=hwasan/ld.so.1"])],
+                with_features = [with_feature_set(not_features = ["ubsan"])],
+            ),
+            flag_set(
+                actions = ALL_CC_LINK_ACTION_NAMES,
+                flag_groups = [flag_group(flags = ["-Wl,-dynamic-linker=hwasan-ubsan/ld.so.1"])],
+                with_features = [with_feature_set(features = ["ubsan"])],
+            ),
+        ])
     hwasan_feature = _sanitizer_mode_feature(
         "hwasan",
         "hwaddress",
-        extra_link_flags = [
-            "-Wl,-dynamic-linker=hwasan/ld.so.1",
-        ] if is_fuchsia else [],
+        extra_flag_sets = hwasan_flag_sets,
         enabled = "hwasan" in enabled_features,
     )
     # LINT.ThenChange(//build/config/sanitizers/BUILD.gn:hwasan)
@@ -200,20 +235,10 @@ def get_sanitizer_features(
         enabled = "msan" in enabled_features,
     )
 
-    # Out-of-tree SDK workspaces (when use_default_build_flags is False) only
-    # export and package ld.so.1 under lib/, lib/asan/, and lib/hwasan/ (via
-    # @fuchsia_clang//:novariant, :asan_variant, and :hwasan_variant). Passing
-    # -Wl,-dynamic-linker={tsan,ubsan}/ld.so.1 out-of-tree would set
-    # PT_INTERP to a path that does not exist in the package. Only pass these
-    # flags in-tree (when use_default_build_flags is True) to match GN's
-    # //build/config/sanitizers:variant-libprefix.
     # LINT.IfChange(tsan)
     tsan_feature = _sanitizer_mode_feature(
         "tsan",
         "thread",
-        extra_link_flags = [
-            "-Wl,-dynamic-linker=tsan/ld.so.1",
-        ] if (is_fuchsia and use_default_build_flags) else [],
         enabled = "tsan" in enabled_features,
     )
     # LINT.ThenChange(//build/config/sanitizers/BUILD.gn:tsan)
@@ -222,9 +247,6 @@ def get_sanitizer_features(
     # with either -fsanitize=address or -fsanitize=hwaddress, because their
     # respective runtime (e.g. libclang_rt.asan.so) does implement the
     # required support.
-    #
-    # To support this, only add the linker flag when neither asan or hwasan
-    # are enabled.
     # LINT.IfChange(lsan)
     lsan_feature = feature(
         name = "lsan",
@@ -258,22 +280,31 @@ def get_sanitizer_features(
             flag_groups = [flag_group(flags = ubsan_c_family_flags)],
         ),
     ]
-    if is_fuchsia and use_default_build_flags:
-        # Only set ubsan/ld.so.1 in-tree (when use_default_build_flags is
-        # True); out-of-tree SDK packaging only provides lib/ld.so.1 under
-        # :novariant when neither asan nor hwasan is enabled.
-        ubsan_flag_sets.append(
+    if is_fuchsia:
+        # Pass ubsan/ld.so.1 when standalone ubsan is active.
+        ubsan_flag_sets.extend([
             flag_set(
                 actions = ALL_CC_LINK_ACTION_NAMES,
                 flag_groups = [flag_group(flags = ["-Wl,-dynamic-linker=ubsan/ld.so.1"])],
                 with_features = [
                     with_feature_set(
+                        not_features = ["asan", "hwasan", "sancov"],
+                    ),
+                ],
+            ),
+            flag_set(
+                actions = ALL_CC_LINK_ACTION_NAMES,
+                flag_groups = [flag_group(flags = ["-Wl,-dynamic-linker=ubsan-sancov/ld.so.1"])],
+                with_features = [
+                    with_feature_set(
+                        features = ["sancov"],
                         not_features = ["asan", "hwasan"],
                     ),
                 ],
             ),
-        )
+        ])
 
+    if is_fuchsia and use_default_build_flags:
         # In-tree (when use_default_build_flags is True), UBSan's vptr check
         # requires RTTI (matching _ubsan_remove_common_configs removing
         # //build/config:no_rtti in //build/config/BUILDCONFIG.gn).
@@ -300,9 +331,30 @@ def get_sanitizer_features(
     #   //build/config/sanitizers/BUILD.gn:ubsan,
     # )
 
+    # LINT.IfChange(sancov)
+    sancov_feature = feature(
+        name = "sancov",
+        enabled = "sancov" in enabled_features,
+        flag_sets = [
+            flag_set(
+                actions = ALL_CC_COMPILE_ACTION_NAMES + ALL_CC_LINK_ACTION_NAMES,
+                flag_groups = [
+                    flag_group(
+                        flags = [
+                            "-fsanitize-coverage=trace-pc-guard",
+                        ],
+                    ),
+                ],
+            ),
+        ],
+        implies = ["clang_sanitizer"],
+    )
+    # LINT.ThenChange(//build/config/sanitizers/BUILD.gn:sancov)
+
+    # Note: _INSTRUMENTATION_FEATURES in instrumentation.bzl includes these sanitizer
+    # features plus "coverage", "coverage-rust", "profile", and "profile-rust"
+    # (defined in toolchain_utils.bzl).
     # LINT.IfChange(sanitizer_features)
-    # Note: _INSTRUMENTATION_FEATURES in fx_cc_binary.bzl includes these sanitizer
-    # features plus "coverage" (defined in toolchain_utils.bzl).
     return [
         clang_sanitizer_feature,
         asan_feature,
@@ -311,11 +363,13 @@ def get_sanitizer_features(
         tsan_feature,
         lsan_feature,
         ubsan_feature,
+        sancov_feature,
     ]
-    # LINT.ThenChange(//build/bazel/rules/cc/fx_cc_binary.bzl:instrumentation_features)
+    # LINT.ThenChange(//build/bazel/rules/cc/instrumentation.bzl:instrumentation_features)
 
 sanitizer_features = get_sanitizer_features("fuchsia", False)
 
+# LINT.IfChange(variant_config_settings)
 # buildifier: disable=unnamed-macro
 def define_clang_sanitizer_config_settings():
     """Create sanitizer-related feature_flag() and config_setting() targets.
@@ -333,52 +387,180 @@ def define_clang_sanitizer_config_settings():
         visibility = ["//visibility:private"],
     )
 
-    # Holds True if --features=hwasan is used in the current build configuration
-    # or through a target-specific `features = [...]` definition.
     feature_flag(
         name = "hwasan_feature_flag",
         feature_name = "hwasan",
         visibility = ["//visibility:private"],
     )
 
-    # The following config_setting() determine which sanitizer mode
-    # is enabled.
-    #
-    # IMPORTANT: The hwasan feature takes precedence over the asan one.
-    # Keep this in sync with the definition of sanitizer_features in
-    # //common:toolchains/clang/sanitizer.bzl
+    feature_flag(
+        name = "ubsan_feature_flag",
+        feature_name = "ubsan",
+        visibility = ["//visibility:private"],
+    )
 
-    # Holds True if no Asan features are enabled.
-    native.config_setting(
-        name = "novariant",
-        flag_values = {
+    feature_flag(
+        name = "coverage_feature_flag",
+        feature_name = "coverage",
+        visibility = ["//visibility:private"],
+    )
+
+    feature_flag(
+        name = "coverage-rust_feature_flag",
+        feature_name = "coverage-rust",
+        visibility = ["//visibility:private"],
+    )
+
+    feature_flag(
+        name = "sancov_feature_flag",
+        feature_name = "sancov",
+        visibility = ["//visibility:private"],
+    )
+
+    feature_flag(
+        name = "profile_feature_flag",
+        feature_name = "profile",
+        visibility = ["//visibility:private"],
+    )
+
+    feature_flag(
+        name = "profile-rust_feature_flag",
+        feature_name = "profile-rust",
+        visibility = ["//visibility:private"],
+    )
+
+    _ALL_VARIANTS = {
+        # Note: :sancov_feature_flag is intentionally omitted from novariant so
+        # standalone `--features=sancov` (which has no separate runtime/sysroot
+        # directory) still matches novariant.
+        "novariant": {
             ":asan_feature_flag": "False",
             ":hwasan_feature_flag": "False",
+            ":ubsan_feature_flag": "False",
+            ":coverage_feature_flag": "False",
+            ":coverage-rust_feature_flag": "False",
+            ":profile_feature_flag": "False",
+            ":profile-rust_feature_flag": "False",
         },
-        visibility = ["//visibility:public"],
-    )
-
-    # Holds True if 'asan' feature is enabled, but 'hwasan' is not.
-    native.config_setting(
-        name = "asan_variant",
-        flag_values = {
+        "asan_variant": {
             ":asan_feature_flag": "True",
             ":hwasan_feature_flag": "False",
+            ":ubsan_feature_flag": "False",
+            ":coverage_feature_flag": "False",
+            ":coverage-rust_feature_flag": "False",
+            ":profile_feature_flag": "False",
+            ":profile-rust_feature_flag": "False",
+            ":sancov_feature_flag": "False",
         },
-        visibility = ["//visibility:public"],
-    )
-
-    # Holds True if 'hwasan' feature is enabled.
-    native.config_setting(
-        name = "hwasan_variant",
-        flag_values = {
+        "asan-ubsan_variant": {
+            ":asan_feature_flag": "True",
+            ":hwasan_feature_flag": "False",
+            ":ubsan_feature_flag": "True",
+            ":coverage_feature_flag": "False",
+            ":coverage-rust_feature_flag": "False",
+            ":profile_feature_flag": "False",
+            ":profile-rust_feature_flag": "False",
+            ":sancov_feature_flag": "False",
+        },
+        "asan-sancov_variant": {
+            ":asan_feature_flag": "True",
+            ":hwasan_feature_flag": "False",
+            ":ubsan_feature_flag": "False",
+            ":coverage_feature_flag": "False",
+            ":coverage-rust_feature_flag": "False",
+            ":profile_feature_flag": "False",
+            ":profile-rust_feature_flag": "False",
+            ":sancov_feature_flag": "True",
+        },
+        "hwasan_variant": {
+            ":asan_feature_flag": "False",
             ":hwasan_feature_flag": "True",
-            # ignore asan_feature_flag intentionally.
+            ":ubsan_feature_flag": "False",
+            ":coverage_feature_flag": "False",
+            ":coverage-rust_feature_flag": "False",
+            ":profile_feature_flag": "False",
+            ":profile-rust_feature_flag": "False",
+            ":sancov_feature_flag": "False",
         },
-        visibility = ["//visibility:public"],
-    )
+        "hwasan-ubsan_variant": {
+            ":asan_feature_flag": "False",
+            ":hwasan_feature_flag": "True",
+            ":ubsan_feature_flag": "True",
+            ":coverage_feature_flag": "False",
+            ":coverage-rust_feature_flag": "False",
+            ":profile_feature_flag": "False",
+            ":profile-rust_feature_flag": "False",
+            ":sancov_feature_flag": "False",
+        },
+        "ubsan_variant": {
+            ":asan_feature_flag": "False",
+            ":hwasan_feature_flag": "False",
+            ":ubsan_feature_flag": "True",
+            ":coverage_feature_flag": "False",
+            ":coverage-rust_feature_flag": "False",
+            ":profile_feature_flag": "False",
+            ":profile-rust_feature_flag": "False",
+            ":sancov_feature_flag": "False",
+        },
+        "ubsan-sancov_variant": {
+            ":asan_feature_flag": "False",
+            ":hwasan_feature_flag": "False",
+            ":ubsan_feature_flag": "True",
+            ":coverage_feature_flag": "False",
+            ":coverage-rust_feature_flag": "False",
+            ":profile_feature_flag": "False",
+            ":profile-rust_feature_flag": "False",
+            ":sancov_feature_flag": "True",
+        },
+        "coverage_variant": {
+            ":asan_feature_flag": "False",
+            ":hwasan_feature_flag": "False",
+            ":ubsan_feature_flag": "False",
+            ":coverage_feature_flag": "True",
+            ":coverage-rust_feature_flag": "False",
+            ":profile_feature_flag": "False",
+            ":profile-rust_feature_flag": "False",
+            ":sancov_feature_flag": "False",
+        },
+        "coverage-rust_variant": {
+            ":asan_feature_flag": "False",
+            ":hwasan_feature_flag": "False",
+            ":ubsan_feature_flag": "False",
+            ":coverage_feature_flag": "False",
+            ":coverage-rust_feature_flag": "True",
+            ":profile_feature_flag": "False",
+            ":profile-rust_feature_flag": "False",
+            ":sancov_feature_flag": "False",
+        },
+        "profile_variant": {
+            ":asan_feature_flag": "False",
+            ":hwasan_feature_flag": "False",
+            ":ubsan_feature_flag": "False",
+            ":coverage_feature_flag": "False",
+            ":coverage-rust_feature_flag": "False",
+            ":profile_feature_flag": "True",
+            ":profile-rust_feature_flag": "False",
+            ":sancov_feature_flag": "False",
+        },
+        "profile-rust_variant": {
+            ":asan_feature_flag": "False",
+            ":hwasan_feature_flag": "False",
+            ":ubsan_feature_flag": "False",
+            ":coverage_feature_flag": "False",
+            ":coverage-rust_feature_flag": "False",
+            ":profile_feature_flag": "False",
+            ":profile-rust_feature_flag": "True",
+            ":sancov_feature_flag": "False",
+        },
+    }
+    for variant_name, flag_values in _ALL_VARIANTS.items():
+        native.config_setting(
+            name = variant_name,
+            flag_values = flag_values,
+            visibility = ["//visibility:public"],
+        )
 
-    # Cpu specific config_filters for novariant/asan/hwasan.
+    # Cpu specific config_filters.
     native.config_setting(
         name = "arm64_build",
         constraint_values = ["@platforms//cpu:aarch64"],
@@ -391,84 +573,19 @@ def define_clang_sanitizer_config_settings():
         name = "riscv64_build",
         constraint_values = ["@platforms//cpu:riscv64"],
     )
-    #
-    # Note that since that the SDK's fuchsia_transition() function
-    # always changes --platforms, checking against @platforms//cpu:<name>
-    # is enough here.
-    #
-    # The SDK Bazel rules used to also check against the command-line
-    # --cpu value (also changed by the transition function), which
-    # is not needed anymore since the introduction of --platforms
-    # in Bazel 7.
+    for arch in ("arm64", "x64", "riscv64"):
+        for variant_name in _ALL_VARIANTS.keys():
+            selects.config_setting_group(
+                name = "%s_%s" % (arch, variant_name),
+                match_all = [
+                    ":%s_build" % arch,
+                    ":%s" % variant_name,
+                ],
+                visibility = ["//visibility:public"],
+            )
 
-    selects.config_setting_group(
-        name = "arm64_novariant",
-        match_all = [
-            ":arm64_build",
-            ":novariant",
-        ],
-    )
-
-    selects.config_setting_group(
-        name = "arm64_asan_variant",
-        match_all = [
-            ":arm64_build",
-            ":asan_variant",
-        ],
-    )
-
-    selects.config_setting_group(
-        name = "arm64_hwasan_variant",
-        match_all = [
-            ":arm64_build",
-            ":hwasan_variant",
-        ],
-    )
-
-    selects.config_setting_group(
-        name = "x64_novariant",
-        match_all = [
-            ":x64_build",
-            ":novariant",
-        ],
-    )
-
-    selects.config_setting_group(
-        name = "x64_asan_variant",
-        match_all = [
-            ":x64_build",
-            ":asan_variant",
-        ],
-    )
-
-    selects.config_setting_group(
-        name = "x64_hwasan_variant",
-        match_all = [
-            ":x64_build",
-            ":hwasan_variant",
-        ],
-    )
-
-    selects.config_setting_group(
-        name = "riscv64_novariant",
-        match_all = [
-            ":riscv64_build",
-            ":novariant",
-        ],
-    )
-
-    selects.config_setting_group(
-        name = "riscv64_asan_variant",
-        match_all = [
-            ":riscv64_build",
-            ":asan_variant",
-        ],
-    )
-
-    selects.config_setting_group(
-        name = "riscv64_hwasan_variant",
-        match_all = [
-            ":riscv64_build",
-            ":hwasan_variant",
-        ],
-    )
+# LINT.ThenChange(
+#   //build/bazel/toolchains/clang/BUILD.bazel:sysroot_variants,
+#   //build/bazel_sdk/bazel_rules_fuchsia/fuchsia/workspace/sdk_templates/generate_sdk_build_rules.bzl:sysroot_variants,
+#   //build/bazel_sdk/fuchsia_rules_common/packages/clang_package_resources.bzl:variant_config_settings,
+# )

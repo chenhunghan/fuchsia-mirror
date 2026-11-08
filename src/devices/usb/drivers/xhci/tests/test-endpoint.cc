@@ -11,7 +11,11 @@
 namespace usb_xhci {
 
 Endpoint::Endpoint(UsbXhci* hci, uint32_t device_id, uint8_t address)
-    : usb::EndpointServer(hci->bti(), address, usb::ScatterGatherSupport::kSupported), hci_(hci) {}
+    : usb::EndpointServer(hci->bti(), address, usb::ScatterGatherSupport::kSupported),
+      hci_(hci),
+      device_id_(device_id) {
+  ZX_DEBUG_ASSERT(hci_ != nullptr);
+}
 
 zx_status_t Endpoint::Init(EventRing* event_ring, fdf::MmioBuffer* mmio) {
   return transfer_ring_.Init(zx_system_get_page_size(), kFakeBti, event_ring, false, mmio, hci_);

@@ -150,7 +150,6 @@ group("tests") {
   testonly = true
   deps = [
     ":cpu-manager-tests",
-    "energy_model_config:tests",
     "integration/tests",
   ]
 }

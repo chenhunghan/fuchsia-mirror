@@ -6,11 +6,11 @@ import("//build/components.gni")
 import("//build/rust/rustc_binary.gni")
 import("//build/rust/rustc_test.gni")
 
-# Kept in GN because `inspect-runtime-tests` includes `inspect_test_component`
-# (which uses `fuchsia_structured_config_rust_lib` and
-# `fuchsia_structured_config_values`, neither of which has a platform Bazel
-# rule) and `lib_test` depends on `//src/lib/diagnostics/reader/rust`,
-# `//src/lib/fuchsia-component-test`, and `//src/sys/lib/component-events`.
+# Kept in GN because `lib_test` depends on `//src/lib/fuchsia-component-test`
+# (which bundles the unmigrated GN-only
+# `//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component`),
+# and `inspect_test_component_default` is depended on by the GN-only
+# `//src/lib/diagnostics/reader/rust:diagnostics-reader-tests` package.
 rustc_test("lib_test") {
   output_name = "inspect_runtime_lib_test"
   edition = "2024"
@@ -55,7 +55,6 @@ fuchsia_unittest_package("inspect-runtime-tests") {
   manifest = "meta/inspect_runtime_lib_test.cml"
   deps = [
     ":inspect_test_component",
-    ":inspect_test_component_default_config",
     ":lib_test",
   ]
 }
@@ -84,13 +83,6 @@ fuchsia_component_manifest("inspect_test_component_manifest") {
   manifest = "meta/inspect_test_component.cml"
 }
 
-fuchsia_structured_config_values("inspect_test_component_default_config") {
-  cm_label = ":inspect_test_component_manifest"
-  values = {
-    publish_n_trees = 1
-  }
-}
-
 fuchsia_structured_config_rust_lib("inspect_test_component_config_bindings") {
   cm_label = ":inspect_test_component_manifest"
 }
@@ -103,10 +95,7 @@ fuchsia_component("inspect_test_component") {
 
 group("inspect_test_component_default") {
   testonly = true
-  public_deps = [
-    ":inspect_test_component",
-    ":inspect_test_component_default_config",
-  ]
+  public_deps = [ ":inspect_test_component" ]
 }
 
 group("tests") {

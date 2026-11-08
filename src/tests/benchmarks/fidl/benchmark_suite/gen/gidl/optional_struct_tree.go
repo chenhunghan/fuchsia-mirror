@@ -22,9 +22,8 @@ func init() {
 				Config: config.Config{
 					"depth": 8,
 				},
-				// Go runs into a stack overflow.
 				// Dart doesn't support recursive type generation.
-				Denylist: []config.Binding{config.Go, config.Dart},
+				Denylist: []config.Binding{config.Dart},
 			},
 			{
 				Name:    "OptionalStructTree/Depth6",
@@ -32,7 +31,7 @@ func init() {
 				Config: config.Config{
 					"depth": 6,
 				},
-				Denylist: []config.Binding{config.Go, config.Dart},
+				Denylist: []config.Binding{config.Dart},
 			},
 			{
 				Name:    "OptionalStructTree/Depth4",
@@ -40,7 +39,7 @@ func init() {
 				Config: config.Config{
 					"depth": 4,
 				},
-				Denylist: []config.Binding{config.Go, config.Dart},
+				Denylist: []config.Binding{config.Dart},
 			},
 		},
 	})

@@ -5,8 +5,8 @@
 import("//build/components.gni")
 import("//build/rust/rustc_test.gni")
 
-# Kept in GN because `mock-omaha-server-fuchsia-tests` packages
-# `//src/connectivity/network/netstack3:component-for-tests`, which has no
+# Kept in GN because `mock-omaha-server-fuchsia-tests` subpackages
+# `//src/connectivity/network/netstack3:package-for-tests`, which has no
 # Bazel build yet.
 rustc_test("mock-omaha-server-fuchsia_test") {
   edition = "2024"
@@ -24,10 +24,8 @@ rustc_test("mock-omaha-server-fuchsia_test") {
 
 fuchsia_unittest_package("mock-omaha-server-fuchsia-tests") {
   manifest = "meta/mock-omaha-server-fuchsia-tests.cml"
-  deps = [
-    ":mock-omaha-server-fuchsia_test",
-    "//src/connectivity/network/netstack3:component-for-tests",
-  ]
+  deps = [ ":mock-omaha-server-fuchsia_test" ]
+  subpackages = [ "//src/connectivity/network/netstack3:package-for-tests" ]
 }
 
 group("hermetic_tests") {

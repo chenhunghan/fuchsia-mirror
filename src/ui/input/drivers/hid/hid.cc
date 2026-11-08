@@ -35,6 +35,8 @@ std::map<HidPageUsage, const std::string> kBindPropKeyMap({
     {MAKE_KEY(Digitizer, TouchScreenConfiguration),
      bind_fuchsia_hid::DIGITIZER__TOUCH_SCREEN_CONFIGURATION},
     {MAKE_KEY(FidoAlliance, Undefined), bind_fuchsia_hid::FIDO_ALLIANCE},  // only match page
+    {MAKE_KEY(GenericDesktop, GamePad), bind_fuchsia_hid::GENERIC_DESKTOP__GAMEPAD},
+    {MAKE_KEY(GenericDesktop, Joystick), bind_fuchsia_hid::GENERIC_DESKTOP__JOYSTICK},
     {MAKE_KEY(GenericDesktop, Keyboard), bind_fuchsia_hid::GENERIC_DESKTOP__KEYBOARD},
     {MAKE_KEY(GenericDesktop, Mouse), bind_fuchsia_hid::GENERIC_DESKTOP__MOUSE},
     {MAKE_KEY(Sensor, Undefined), bind_fuchsia_hid::SENSOR},  // only match page

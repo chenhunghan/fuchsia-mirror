@@ -2,7 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 {
-    include: [ "//src/ui/bin/scene_manager/meta/scene_manager-impl.shard.cml" ],
+    include: [
+        "//src/ui/bin/scene_manager/meta/config.shard.cml",
+        "//src/ui/bin/scene_manager/meta/scene_manager-impl.shard.cml",
+    ],
     program: {
         runner: "elf",
         binary: "bin/scene_manager",

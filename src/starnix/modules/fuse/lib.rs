@@ -15,6 +15,7 @@ use starnix_core::task::{CurrentTask, EventHandler, Kernel, WaitCanceler, WaitQu
 use starnix_core::vfs::buffers::{
     Buffer, InputBuffer, InputBufferExt as _, OutputBuffer, OutputBufferCallback,
 };
+use starnix_core::vfs::pipe::Pipe;
 use starnix_core::vfs::pseudo::dynamic_file::{DynamicFile, DynamicFileBuf, DynamicFileSource};
 use starnix_core::vfs::pseudo::simple_directory::SimpleDirectory;
 use starnix_core::vfs::pseudo::simple_file::SimpleFileNode;
@@ -1346,9 +1347,12 @@ impl FsNodeOps for FuseNode {
         current_task: &CurrentTask,
         flags: OpenFlags,
     ) -> Result<Box<dyn FileOps>, Errno> {
+        let mode = node.info().mode;
+        if mode.is_fifo() {
+            return Pipe::open(current_task, node.fifo(current_task), flags);
+        }
         // The node already exists. The creation has been handled before calling this method.
         let flags = flags & !(OpenFlags::CREAT | OpenFlags::EXCL);
-        let mode = node.info().mode;
         let response = self.connection.lock().execute_operation(
             current_task,
             self,
@@ -2157,11 +2161,22 @@ impl FuseMutableState {
             FuseConnectionState::Disconnected => return error!(ENODEV),
             _ => {}
         }
-        if let Some(message) = self.message_queue.pop_front() {
-            message.serialize(data)
-        } else {
-            error!(EAGAIN)
+        let Some(message) = self.message_queue.front() else {
+            return error!(EAGAIN);
+        };
+        let min_size = match &message.operation {
+            FuseOperation::Write { write_in, content } => {
+                message.header.as_bytes().len()
+                    + write_in.as_bytes().len()
+                    + usize::from(!content.is_empty())
+            }
+            _ => message.header.len as usize,
+        };
+        if data.available() < min_size {
+            return error!(EINVAL);
         }
+        let message = self.message_queue.pop_front().expect("checked non-empty above");
+        message.serialize(data)
     }
 
     fn write(&mut self, data: &mut dyn InputBuffer) -> Result<usize, Errno> {
@@ -2181,7 +2196,9 @@ impl FuseMutableState {
             track_stub!(TODO("https://fxbug.dev/322873416"), "Fuse notification from userspace");
             return error!(ENOTSUP);
         }
-        self.waiters.notify_value(header.unique);
+        if header.error <= -1000 || header.error > 0 {
+            return error!(EINVAL);
+        }
         let mut running_operation = match self.operations.entry(header.unique) {
             Entry::Occupied(e) => e,
             Entry::Vacant(_) => return error!(EINVAL),
@@ -2189,8 +2206,15 @@ impl FuseMutableState {
         let operation = &running_operation.get().operation;
         let is_async = operation.is_async();
         if header.error < 0 {
+            if payload_size != 0 {
+                return error!(EINVAL);
+            }
             log_trace!("Fuse: {operation:?} -> {header:?}");
-            let code = i16::try_from(-header.error).unwrap_or_else(|_| EINVAL.error_code() as i16);
+            let code = header
+                .error
+                .checked_neg()
+                .and_then(|e| i16::try_from(e).ok())
+                .unwrap_or_else(|| EINVAL.error_code() as i16);
             let errno = errno_from_code!(code);
             let response = operation.handle_error(&mut self.operations_state, errno);
             if is_async {
@@ -2212,6 +2236,7 @@ impl FuseMutableState {
                 running_operation.get_mut().response = Some(Ok(response));
             }
         }
+        self.waiters.notify_value(header.unique);
         Ok(data.bytes_read())
     }
 
@@ -2296,7 +2321,9 @@ impl FuseKernelMessage {
     }
 
     fn serialize(&self, data: &mut dyn OutputBuffer) -> Result<usize, Errno> {
-        let size = data.write(self.header.as_bytes())?;
+        let mut header = self.header;
+        header.len = std::cmp::min(header.len, u32::try_from(data.available()).unwrap_or(u32::MAX));
+        let size = data.write_all(header.as_bytes())?;
         Ok(size + self.operation.serialize(data)?)
     }
 }
@@ -2845,8 +2872,12 @@ impl FuseOperation {
             &Self::Write { mut write_in, ref content } => {
                 let mut write_in_size = write_in.size as usize;
                 assert!(write_in_size == content.len());
-                if write_in_size + write_in.as_bytes().len() > data.available() {
-                    write_in_size = data.available() - write_in.as_bytes().len();
+                let header_len = write_in.as_bytes().len();
+                if data.available() < header_len {
+                    return error!(EINVAL);
+                }
+                if write_in_size.saturating_add(header_len) > data.available() {
+                    write_in_size = data.available() - header_len;
                     write_in.size = write_in_size as u32;
                 }
                 let mut len = data.write_all(write_in.as_bytes())?;

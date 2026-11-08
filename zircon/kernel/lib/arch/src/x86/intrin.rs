@@ -1,6 +1,9 @@
 // Copyright 2026 The Fuchsia Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+// TODO(https://fxbug.dev/581987928): Remove `#![coverage(off)]` once compiler options can control
+// atomic coverage counter updates.
+#![coverage(off)]
 
 use core::arch::asm;
 

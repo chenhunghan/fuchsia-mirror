@@ -14,6 +14,7 @@ const char* const kCodingErrorNullByteBuffer = "null byte buffer";
 const char* const kCodingErrorNullHandleBufferButNonzeroCount =
     "null handle buffer but handle count is non-zero";
 const char* const kCodingErrorInvalidBoolean = "invalid boolean value";
+const char* const kCodingErrorInvalidNonZero = "invalid nonzero value";
 const char* const kCodingErrorVectorLimitExceeded = "vector limit exceeded";
 const char* const kCodingErrorNullDataReceivedForNonNullableVector =
     "null data received for non-nullable vector";

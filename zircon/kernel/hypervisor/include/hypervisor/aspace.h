@@ -24,7 +24,6 @@ class GuestPhysicalAspace;
 
 extern "C" {
 void rust_guest_ptr_reset(hypervisor::GuestPtr* guest_ptr);
-void* rust_guest_ptr_as(const hypervisor::GuestPtr* guest_ptr, size_t type_size);
 zx_status_t rust_guest_physical_aspace_create(hypervisor::GuestPhysicalAspace* out);
 void rust_guest_physical_aspace_destroy(hypervisor::GuestPhysicalAspace* gpa);
 size_t rust_guest_physical_aspace_size(const hypervisor::GuestPhysicalAspace* gpa);
@@ -39,10 +38,6 @@ zx_status_t rust_guest_physical_aspace_unmap_range(hypervisor::GuestPhysicalAspa
                                                    zx_gpaddr_t guest_paddr, size_t len);
 zx_status_t rust_guest_physical_aspace_page_fault(hypervisor::GuestPhysicalAspace* gpa,
                                                   zx_gpaddr_t guest_paddr);
-zx_status_t rust_guest_physical_aspace_create_guest_ptr(hypervisor::GuestPhysicalAspace* gpa,
-                                                        zx_gpaddr_t guest_paddr, size_t len,
-                                                        const char* name,
-                                                        hypervisor::GuestPtr* out);
 }  // extern "C"
 
 namespace hypervisor {
@@ -67,11 +62,6 @@ class GuestPtr {
   GuestPtr& operator=(const GuestPtr&) = delete;
 
   void reset() { rust_guest_ptr_reset(this); }
-
-  template <typename T>
-  T* as() const {
-    return static_cast<T*>(rust_guest_ptr_as(this, sizeof(T)));
-  }
 
  private:
   [[maybe_unused]] OpaqueStorage<40, 8> storage_{};
@@ -121,15 +111,6 @@ class GuestPhysicalAspace {
   }
   zx::result<> PageFault(zx_gpaddr_t guest_paddr) {
     return zx::make_result(rust_guest_physical_aspace_page_fault(this, guest_paddr));
-  }
-  zx::result<GuestPtr> CreateGuestPtr(zx_gpaddr_t guest_paddr, size_t len, const char* name) {
-    GuestPtr guest_ptr;
-    if (zx_status_t status =
-            rust_guest_physical_aspace_create_guest_ptr(this, guest_paddr, len, name, &guest_ptr);
-        status != ZX_OK) {
-      return zx::error(status);
-    }
-    return zx::ok(ktl::move(guest_ptr));
   }
 
  private:

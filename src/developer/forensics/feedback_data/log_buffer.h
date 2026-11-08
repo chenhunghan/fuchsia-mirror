@@ -5,14 +5,15 @@
 #ifndef SRC_DEVELOPER_FORENSICS_FEEDBACK_DATA_LOG_BUFFER_H_
 #define SRC_DEVELOPER_FORENSICS_FEEDBACK_DATA_LOG_BUFFER_H_
 
-#include <lib/fit/function.h>
+#include <fuchsia/logger/cpp/fidl.h>
+#include <lib/fpromise/result.h>
 #include <lib/zx/time.h>
 
 #include <deque>
 #include <optional>
 #include <string>
+#include <vector>
 
-#include "src/developer/forensics/feedback_data/log_source.h"
 #include "src/developer/forensics/utils/redact/redactor.h"
 #include "src/developer/forensics/utils/storage_size.h"
 
@@ -20,23 +21,15 @@ namespace forensics::feedback {
 
 // Stores up to |capacity| bytes of system log messages, dropping the earliest messages when the
 // stored messages occupy too much space.
-class LogBuffer : public feedback_data::LogSink {
+class LogBuffer {
  public:
   LogBuffer(StorageSize capacity, RedactorBase* redactor);
 
-  virtual ~LogBuffer() = default;
-
   // Adds |message| to the buffer and drops messages as required to keep the total size under
-  // |capacity|. Always returns true.
+  // |capacity|.
   //
   // Messages are assumed to be received mostly in order.
-  bool Add(LogSink::MessageOr message) override;
-
-  // Records the log stream was interrupted and clears the contents.
-  void NotifyInterruption() override;
-
-  // It's safe continue to writing to a LogBuffer if the log source has been interrupted.
-  bool SafeAfterInterruption() const override { return true; }
+  void Add(::fpromise::result<fuchsia::logger::LogMessage, std::string> message);
 
   // Returns std::nullopt if the buffer is empty.
   std::optional<zx::time_boot> FirstTimestamp() const;
@@ -46,20 +39,16 @@ class LogBuffer : public feedback_data::LogSink {
 
   std::string ToString();
 
-  // Executes |action| after a message with a time greater than or equal to |timestamp| is received
-  // or NotifyInterruption is called.
-  void ExecuteAfter(zx::time_boot timestamp, ::fit::closure action);
-
  private:
   struct Message {
-    Message(const LogSink::MessageOr& message, zx::time_boot default_timestamp);
+    Message(const ::fpromise::result<fuchsia::logger::LogMessage, std::string>& message,
+            zx::time_boot default_timestamp);
 
     zx::time_boot timestamp;
     std::string msg;
   };
 
   void Sort();
-  void RunActions(zx::time_boot timestamp);
   void EnforceCapacity();
 
   // Resets variables keeping track of the last message
@@ -74,8 +63,6 @@ class LogBuffer : public feedback_data::LogSink {
   size_t last_msg_repeated_{0u};
 
   bool is_sorted_{true};
-
-  std::multimap<zx::time_boot, ::fit::closure, std::greater<>> actions_at_time_;
 
   size_t size_{0u};
   const size_t capacity_;

@@ -15,22 +15,46 @@
 #include "test/util/socket_util.h"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/ip.h>
+#include <netinet/ip6.h>
+#include <netinet/ip_icmp.h>
+#include <netinet/udp.h>
 #include <poll.h>
+#include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/un.h>
+#include <unistd.h>
 
+#include <array>
+#include <cerrno>
 #include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <memory>
 #include <stack>
+#include <string>
+#include <utility>
+#include <vector>
 
+#include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
 #include "absl/strings/str_split.h"
 #include "absl/time/clock.h"
+#include "absl/time/time.h"
 #include "absl/types/optional.h"
 #include "test/util/file_descriptor.h"
+#include "test/util/fs_util.h"
 #include "test/util/posix_error.h"
+#include "test/util/save_util.h"
 #include "test/util/temp_path.h"
 #include "test/util/test_util.h"
 #include "test/util/thread_util.h"
@@ -463,21 +487,35 @@ Creator<SocketPair> TCPAcceptBindPersistentListenerSocketPairCreator(
     }
 
     // Bind the listener once, but create a new connect/accept pair each
-    // time.
+    // time. On bind/listen failure (e.g. EADDRINUSE because a prior test in
+    // the same shard left connections in TIME-WAIT against the small
+    // ephemeral pool) propagate the error and close the listener so the
+    // caller can retry; otherwise the cached (unbound) listener would
+    // poison every subsequent invocation.
     if (domain == AF_INET) {
       if (!addr4->has_value()) {
-        addr4->emplace(
-            TCPBindAndListen<sockaddr_in>(listener->value(), dual_stack)
-                .ValueOrDie());
+        PosixErrorOr<sockaddr_in> bound =
+            TCPBindAndListen<sockaddr_in>(listener->value(), dual_stack);
+        if (!bound.ok()) {
+          close(listener->value());
+          listener->reset();
+          return bound.error();
+        }
+        addr4->emplace(bound.ValueOrDie());
       }
       return CreateTCPConnectAcceptSocketPair(listener->value(),
                                               std::move(connected), type,
                                               dual_stack, addr4->value());
     }
     if (!addr6->has_value()) {
-      addr6->emplace(
-          TCPBindAndListen<sockaddr_in6>(listener->value(), dual_stack)
-              .ValueOrDie());
+      PosixErrorOr<sockaddr_in6> bound =
+          TCPBindAndListen<sockaddr_in6>(listener->value(), dual_stack);
+      if (!bound.ok()) {
+        close(listener->value());
+        listener->reset();
+        return bound.error();
+      }
+      addr6->emplace(bound.ValueOrDie());
     }
     return CreateTCPConnectAcceptSocketPair(listener->value(),
                                             std::move(connected), type,

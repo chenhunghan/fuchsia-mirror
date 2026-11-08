@@ -4,12 +4,11 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT
 
-source_set("init") {
-  sources = [ "init.cc" ]
-  deps = [
-    "//zircon/kernel/lib/boot-options",
-    "//zircon/kernel/phys/handoff",
-  ]
+import("//zircon/kernel/kernel_rust_mod.gni")
+
+kernel_rust_mod("init") {
+  sources = [ "init.rs" ]
+  deps = [ "//zircon/kernel/phys/handoff:handoff-rs" ]
 }
 
 group("kernel-tests") {

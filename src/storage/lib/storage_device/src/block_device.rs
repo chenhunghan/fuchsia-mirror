@@ -26,12 +26,32 @@ const TRANSFER_VMO_SIZE: usize = 128 * 1024 * 1024;
 impl<T: BlockClient> BlockDevice<T> {
     /// Creates a new BlockDevice over `remote`.
     pub async fn new(remote: T, read_only: bool) -> Result<Self, Error> {
-        let buffer_source = BufferSource::new(TRANSFER_VMO_SIZE);
+        Self::with_transfer_vmo_size(remote, read_only, TRANSFER_VMO_SIZE).await
+    }
+
+    /// Creates a new BlockDevice over `remote` with a custom transfer VMO size in bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `transfer_vmo_size` is not a power of two or is smaller than
+    /// `remote.block_size()`.
+    pub async fn with_transfer_vmo_size(
+        remote: T,
+        read_only: bool,
+        transfer_vmo_size: usize,
+    ) -> Result<Self, Error> {
+        assert!(transfer_vmo_size.is_power_of_two());
+        let buffer_source = BufferSource::new(transfer_vmo_size);
         // SAFETY: We only attach this VMO once here, and we ensure no references are held
         // during I/O via the BufferAllocator and pointer-based BufferRef types.
         let vmoid = unsafe { remote.attach_vmo(buffer_source.vmo()) }.await?;
         let allocator = BufferAllocator::new(remote.block_size() as usize, buffer_source);
         Ok(Self { allocator, remote, read_only, vmoid })
+    }
+
+    /// Returns a reference to the underlying block client.
+    pub fn remote(&self) -> &T {
+        &self.remote
     }
 
     async fn read_with_opts_internal(

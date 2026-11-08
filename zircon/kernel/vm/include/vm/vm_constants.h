@@ -53,8 +53,12 @@ constexpr size_t kVmAddressRegionOrMappingStateAlign = 8;
 constexpr bool kRefCountedAdoptionValidator = ZX_DEBUG_ASSERT_IMPLEMENTED;
 
 // Size and alignment for VmCowPages state stored in C++ OpaqueStorage.
-constexpr size_t kVmCowPagesStateSize = 12;
-constexpr size_t kVmCowPagesStateAlign = 4;
+#if EXPERIMENTAL_CONTINUOUS_PER_VMO_ATTRIBUTION_ENABLED
+constexpr size_t kVmCowPagesStateSize = 96;
+#else
+constexpr size_t kVmCowPagesStateSize = 88;
+#endif
+constexpr size_t kVmCowPagesStateAlign = 8;
 
 // Size and alignment for VmAddressRegion state stored in C++ OpaqueStorage.
 constexpr size_t kVmAddressRegionStateSize = 36;
@@ -109,5 +113,7 @@ constexpr uint32_t kVmPageListIntervalBits =
 
 // Fanout of a single VmPageListNode (number of page slots in a node).
 constexpr size_t kVmPageListFanOut = 16;
+
+constexpr uint64_t kVmMappingPageFaultMaxOptimisticPages = 16;
 
 #endif  // ZIRCON_KERNEL_VM_INCLUDE_VM_VM_CONSTANTS_H_

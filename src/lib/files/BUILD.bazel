@@ -2,7 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 load("@rules_cc//cc:defs.bzl", "cc_library")
-load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
 load(
     "//build/bazel/rules/components:fx_component.bzl",
     "fx_component_manifest",
@@ -63,9 +63,8 @@ cc_library(
 )
 
 # @bazel2gn:raw_attribute:deps += [ "//third_party/googletest:gmock" ]
-fx_cc_binary(
+fx_cc_test_binary(
     name = "files_unittests",
-    testonly = True,
     srcs = [
         "directory_unittest.cc",
         "file_descriptor_unittest.cc",
@@ -107,7 +106,6 @@ fx_component_manifest(
 fx_test_component(
     name = "files-tests-component",
     compiled_manifest = ":files-tests-manifest",
-    component_name = "files-tests",
     deps = [
         ":files_unittests_packaged_bin",
     ],

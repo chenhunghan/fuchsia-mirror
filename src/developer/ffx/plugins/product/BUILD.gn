@@ -81,7 +81,10 @@ if (is_host) {
 group("tests") {
   testonly = true
   deps = [ "common:tests($host_toolchain)" ]
-  foreach(subtool, _subtools) {
+
+  # create_old:lib_test uses Bazel host_test_data and is wired into
+  # //src/developer/ffx:tests.
+  foreach(subtool, _subtools - [ "create_old" ]) {
     deps += [ "$subtool:lib_test($host_toolchain)" ]
   }
 }

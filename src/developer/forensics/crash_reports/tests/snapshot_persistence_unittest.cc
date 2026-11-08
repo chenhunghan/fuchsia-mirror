@@ -4,6 +4,7 @@
 
 #include "src/developer/forensics/crash_reports/snapshot_persistence.h"
 
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
 #include <lib/syslog/cpp/macros.h>
 
 #include <filesystem>
@@ -17,11 +18,11 @@
 #include "src/developer/forensics/testing/scoped_memfs_manager.h"
 #include "src/developer/forensics/testing/unit_test_fixture.h"
 #include "src/developer/forensics/utils/storage_size.h"
+#include "src/developer/forensics/utils/vmo.h"
 #include "src/lib/files/directory.h"
 #include "src/lib/files/file.h"
 #include "src/lib/files/path.h"
 #include "src/lib/files/scoped_temp_dir.h"
-#include "src/lib/fsl/vmo/strings.h"
 
 namespace forensics::crash_reports {
 namespace {
@@ -89,9 +90,9 @@ class SnapshotPersistenceTest : public UnitTestFixture {
   }
 
   bool AddArchive(const std::string& uuid, std::string archive_value) {
-    fuchsia::feedback::Attachment snapshot;
-    snapshot.key = feedback_data::kSnapshotFilename;
-    FX_CHECK(fsl::VmoFromString(std::move(archive_value), &snapshot.value));
+    fuchsia_feedback::Attachment snapshot;
+    snapshot.key(feedback_data::kSnapshotFilename);
+    snapshot.value(BufferFromString(std::move(archive_value)).value());
 
     auto archive = ManagedSnapshot::Archive(snapshot);
     auto archive_size = StorageSize::Bytes(archive.key.size());
@@ -342,9 +343,9 @@ TEST_F(SnapshotPersistenceTest, Check_AddOnlyConsiderTmp) {
   const std::string kTestUuid = "test uuid";
   const std::string kArchiveValue = "snapshot.data";
 
-  fuchsia::feedback::Attachment snapshot;
-  snapshot.key = feedback_data::kSnapshotFilename;
-  FX_CHECK(fsl::VmoFromString(kArchiveValue, &snapshot.value));
+  fuchsia_feedback::Attachment snapshot;
+  snapshot.key(feedback_data::kSnapshotFilename);
+  snapshot.value(BufferFromString(kArchiveValue).value());
 
   const auto expected_archive = ManagedSnapshot::Archive(snapshot);
   auto expected_archive_size = StorageSize::Bytes(expected_archive.key.size());
@@ -380,9 +381,9 @@ TEST_F(SnapshotPersistenceTest, Check_ContainsSyncsWithFilesystem) {
   const std::string kTestUuid = "test uuid";
   const std::string kArchiveValue = "snapshot.data";
 
-  fuchsia::feedback::Attachment snapshot;
-  snapshot.key = feedback_data::kSnapshotFilename;
-  FX_CHECK(fsl::VmoFromString(kArchiveValue, &snapshot.value));
+  fuchsia_feedback::Attachment snapshot;
+  snapshot.key(feedback_data::kSnapshotFilename);
+  snapshot.value(BufferFromString(kArchiveValue).value());
 
   const auto expected_archive = ManagedSnapshot::Archive(snapshot);
   auto expected_archive_size = StorageSize::Bytes(expected_archive.key.size());
@@ -403,9 +404,9 @@ TEST_F(SnapshotPersistenceTest, Check_SnapshotLocationSyncsWithFilesystem) {
   const std::string kTestUuid = "test uuid";
   const std::string kArchiveValue = "snapshot.data";
 
-  fuchsia::feedback::Attachment snapshot;
-  snapshot.key = feedback_data::kSnapshotFilename;
-  FX_CHECK(fsl::VmoFromString(kArchiveValue, &snapshot.value));
+  fuchsia_feedback::Attachment snapshot;
+  snapshot.key(feedback_data::kSnapshotFilename);
+  snapshot.value(BufferFromString(kArchiveValue).value());
 
   const auto expected_archive = ManagedSnapshot::Archive(snapshot);
   auto expected_archive_size = StorageSize::Bytes(expected_archive.key.size());

@@ -36,7 +36,6 @@ use selinux_policy_derive::{Parse, Serialize, Validate};
 
 use crate::InitialSid;
 pub use access_vector::AccessVector;
-use bitmap::IdSpan;
 use booleans::{ConditionalBoolean, ConditionalBooleanId};
 pub(crate) use classes::Class;
 pub use classes::ClassId;
@@ -51,10 +50,7 @@ use initial_sids::InitialSids;
 pub(crate) use metadata::HandleUnknown;
 pub use metadata::POLICYDB_VERSION_MAX;
 use metadata::{Config, Counts, Magic, PolicyVersion, Signature};
-use mls::{
-    Category, CategoryId, CategorySet, CategorySetBuilder, RangeTransition, Sensitivity,
-    SensitivityId,
-};
+use mls::{Category, MlsLevel, MlsRange, RangeTransition, Sensitivity};
 pub use object_contexts::FsUseType;
 use object_contexts::{GenfsCon, GenfsConPath, ObjectContexts};
 pub use parser::PolicyData;
@@ -67,13 +63,12 @@ use roles::{Role, RoleAllow, RoleSet, RoleTransition};
 pub use rules::AccessDecision;
 use rules::{ConditionalNode, IndexedAccessVectorRules};
 pub(crate) use rules::{SELINUX_AVD_FLAGS_PERMISSIVE, XpermsBitmap};
-use security_context::{MlsLevel, MlsRange};
 pub(crate) use security_context::{SecurityContext, SecurityContextError};
 pub use traits::PolicyId;
 pub(crate) use traits::{HasName, HasPolicyId};
 use traits::{Serialize, Validate};
 pub(crate) use types::TypeId;
-use types::{PermissiveTypeSet, TypeAttributeMaps, TypeSet, Types};
+use types::{NeverAuditTypeSet, PermissiveTypeSet, TypeAttributeMaps, TypeSet, Types};
 use u24_index::U24Index;
 use users::{User, UserId};
 
@@ -88,7 +83,7 @@ const OBJECT_R_ROLE_NAME: &[u8] = b"object_r";
 const OBJECT_R_ROLE_ID: RoleId = RoleId::new(NonZeroU16::MIN);
 
 /// Top-level parsed SELinux binary policy.
-#[derive(Debug, Parse, Serialize, Validate)]
+#[derive(Clone, Debug, Parse, Serialize, Validate)]
 pub(crate) struct Policy {
     magic: Magic,
     signature: Signature,
@@ -97,6 +92,7 @@ pub(crate) struct Policy {
     counts: Counts,
     policy_capabilities: PolicyCapSet,
     permissive_map: PermissiveTypeSet,
+    neveraudit_map: NeverAuditTypeSet,
     common_symbols: IdAndNameIndexed<SymbolArray<CommonSymbol>>,
     classes: IdAndNameIndexed<SymbolArray<Class>>,
     roles: IdAndNameIndexed<SymbolArray<Role>>,
@@ -140,27 +136,27 @@ impl Policy {
         Validate::validate(self, self)?;
 
         // Validate that all kernel-required initial SIDs are present in the policy.
-        let need_init_sid = self.has_policycap(PolicyCap::UserspaceInitialContext);
         for initial_sid in InitialSid::all_variants() {
-            if *initial_sid == InitialSid::Init && !need_init_sid {
-                continue;
-            }
-            self.initial_sids()
-                .get_by_id(*initial_sid as u32)
+            self.resolve_initial_context(*initial_sid)
                 .ok_or(ValidateError::MissingInitialSid { initial_sid: *initial_sid })?;
         }
 
         // Validate that the well-known "object_r" role is defined at role ID 1.
-        if self.roles().get_by_id(OBJECT_R_ROLE_ID).map(|role| role.name())
+        if self.roles.get_by_id(OBJECT_R_ROLE_ID).map(|role| role.name())
             != Some(OBJECT_R_ROLE_NAME)
         {
             return Err(ValidateError::MissingObjectRRole);
         }
 
-        // TODO: https://fxbug.dev/575728936 - Validate that `typebounds` hierarchies do not
-        // contain cycles, exceed maximum depth, or reference attributes.
-
         Ok(())
+    }
+
+    /// Parses and validates a [`Policy`] from raw binary data for tests.
+    #[cfg(test)]
+    pub(crate) fn parse_and_validate(data: &[u8]) -> Self {
+        let policy = Self::parse(data).expect("parse policy");
+        policy.validate().expect("validate policy");
+        policy
     }
 
     /// Serializes the policy to binary representation.
@@ -169,30 +165,16 @@ impl Policy {
         Serialize::serialize(self, &mut policy_writer)
     }
 
-    /// Returns the policy version.
-    #[cfg(test)]
-    fn version(&self) -> PolicyVersion {
-        self.version
-    }
-
     /// Returns the [`HandleUnknown`] configuration.
     pub fn handle_unknown(&self) -> HandleUnknown {
         self.config.handle_unknown()
     }
 
-    /// Returns the policy capabilities set.
-    fn policy_capabilities(&self) -> &PolicyCapSet {
-        &self.policy_capabilities
-    }
-
-    /// Returns the permissive types set.
-    fn permissive_map(&self) -> &PermissiveTypeSet {
-        &self.permissive_map
-    }
-
-    /// Returns the common symbols table.
-    fn common_symbols(&self) -> &IdAndNameIndexed<SymbolArray<CommonSymbol>> {
-        &self.common_symbols
+    /// Replaces the `neveraudit` types set and sets the policy version to v35 for testing.
+    #[cfg(test)]
+    pub(crate) fn set_neveraudit(&mut self, ids: impl IntoIterator<Item = TypeId>) {
+        self.version = PolicyVersion::V35;
+        self.neveraudit_map = NeverAuditTypeSet::from_ids(ids);
     }
 
     /// Returns the object classes table.
@@ -201,7 +183,7 @@ impl Policy {
     }
 
     /// Returns the roles table.
-    fn roles(&self) -> &IdAndNameIndexed<SymbolArray<Role>> {
+    pub(crate) fn roles(&self) -> &IdAndNameIndexed<SymbolArray<Role>> {
         &self.roles
     }
 
@@ -211,7 +193,7 @@ impl Policy {
     }
 
     /// Returns the users table.
-    fn users(&self) -> &IdAndNameIndexed<SymbolArray<User>> {
+    pub(crate) fn users(&self) -> &IdAndNameIndexed<SymbolArray<User>> {
         &self.users
     }
 
@@ -220,65 +202,41 @@ impl Policy {
         &self.conditional_booleans
     }
 
+    /// Updates the active values of the specified conditional booleans and re-evaluates which
+    /// conditional rules are active in the policy. Any boolean names not defined in the policy are
+    /// ignored.
+    pub fn update_conditional_booleans(
+        &mut self,
+        booleans: impl IntoIterator<Item = (impl AsRef<[u8]>, bool)>,
+    ) {
+        for (name, active) in booleans {
+            if let Some(boolean) = self.conditional_booleans.get_mut_by_name(name.as_ref()) {
+                boolean.set_active(active);
+            }
+        }
+        for node in self.conditional_nodes.as_mut() {
+            node.update(&self.conditional_booleans);
+        }
+    }
+
     /// Returns the sensitivities table.
-    fn sensitivities(&self) -> &IdAndNameIndexed<SymbolArray<Sensitivity>> {
+    pub(crate) fn sensitivities(&self) -> &IdAndNameIndexed<SymbolArray<Sensitivity>> {
         &self.sensitivities
     }
 
     /// Returns the categories table.
-    fn categories(&self) -> &IdAndNameIndexed<SymbolArray<Category>> {
+    pub(crate) fn categories(&self) -> &IdAndNameIndexed<SymbolArray<Category>> {
         &self.categories
     }
 
     /// Returns the access vector rules table.
-    fn access_vector_rules(&self) -> &IndexedAccessVectorRules {
+    pub(crate) fn access_vector_rules(&self) -> &IndexedAccessVectorRules {
         &self.access_vector_rules
-    }
-
-    /// Returns the list of conditional nodes.
-    #[cfg(test)]
-    fn conditional_nodes(&self) -> &[ConditionalNode] {
-        self.conditional_nodes.as_ref()
-    }
-
-    /// Returns the role transitions rules array.
-    fn role_transitions(&self) -> &[RoleTransition] {
-        self.role_transitions.as_ref()
-    }
-
-    /// Returns the role allow rules array.
-    fn role_allowlist(&self) -> &[RoleAllow] {
-        self.role_allowlist.as_ref()
-    }
-
-    /// Returns the filename transitions table.
-    fn filename_transitions(&self) -> &FilenameTransitions {
-        &self.filename_transitions
-    }
-
-    /// Returns the initial SIDs table.
-    fn initial_sids(&self) -> &InitialSids {
-        &self.initial_sids
     }
 
     /// Returns the object contexts table.
     pub fn object_contexts(&self) -> &ObjectContexts {
         &self.object_contexts
-    }
-
-    /// Returns generic filesystem labeling statements (`genfscon`).
-    fn generic_fs_contexts(&self) -> &[GenfsCon] {
-        &self.generic_fs_contexts
-    }
-
-    /// Returns the MLS range transitions array.
-    fn range_transitions(&self) -> &[RangeTransition] {
-        &self.range_transitions
-    }
-
-    /// Returns the type attribute maps table.
-    fn type_attribute_maps(&self) -> &TypeAttributeMaps {
-        &self.type_attribute_maps
     }
 }
 
@@ -383,7 +341,7 @@ mod parse_tests {
                 .unwrap_or_else(|e| panic!("Failed to parse {name}: {e:?}"));
             policy.validate().unwrap_or_else(|e| panic!("Failed to validate {name}: {e:?}"));
 
-            if policy.version() >= PolicyVersion::V33 {
+            if policy.version >= PolicyVersion::MIN_COMPRESSED_FILENAME_TRANSITIONS {
                 let mut serialized = Vec::new();
                 policy
                     .serialize(&mut serialized)
@@ -400,37 +358,35 @@ mod parse_tests {
         let policy = Policy::parse(policy_bytes).expect("parse minimal policy");
         policy.validate().expect("validate minimal policy");
 
-        assert!(!policy.initial_sids().is_empty());
-        assert!(policy.initial_sids().len() >= crate::InitialSid::all_variants().len() - 1);
+        assert!(!policy.initial_sids.is_empty());
+        assert!(policy.initial_sids.len() >= crate::InitialSid::all_variants().len() - 1);
 
-        let kernel_context =
-            policy.initial_sids().get_by_id(crate::InitialSid::Kernel as u32).unwrap();
-        assert!(policy.users().get_by_id(kernel_context.user()).is_some());
-        assert!(policy.roles().get_by_id(kernel_context.role()).is_some());
+        let kernel_context = policy.initial_sids.get_by_id(crate::InitialSid::Kernel).unwrap();
+        assert!(policy.users.get_by_id(kernel_context.user()).is_some());
+        assert!(policy.roles.get_by_id(kernel_context.role()).is_some());
 
         let unlabeled_context =
-            policy.initial_sids().get_by_id(crate::InitialSid::Unlabeled as u32).unwrap();
-        assert!(policy.users().get_by_id(unlabeled_context.user()).is_some());
-        assert!(policy.roles().get_by_id(unlabeled_context.role()).is_some());
+            policy.initial_sids.get_by_id(crate::InitialSid::Unlabeled).unwrap();
+        assert!(policy.users.get_by_id(unlabeled_context.user()).is_some());
+        assert!(policy.roles.get_by_id(unlabeled_context.role()).is_some());
     }
 
     #[test]
     fn test_object_r_role_id_validation() {
         let policy_bytes =
             include_bytes!("../../testdata/composite_policies/compiled/minimal_policy");
-        let mut policy = Policy::parse(policy_bytes).expect("parse minimal policy");
-        policy.validate().expect("validate minimal policy");
+        let mut policy = Policy::parse_and_validate(policy_bytes);
 
         // Swap the role ID of "object_r" (ID 1) with another role so that role ID 1 still exists
         // in the policy, but is no longer assigned to "object_r".
+        let roles = policy.roles.as_mut_slice();
         let object_r_index =
-            policy.roles.iter().position(|role| role.name() == OBJECT_R_ROLE_NAME).unwrap();
-        let other_index =
-            policy.roles.iter().position(|role| role.name() != OBJECT_R_ROLE_NAME).unwrap();
-        let object_r_id = policy.roles[object_r_index].id();
-        let other_id = policy.roles[other_index].id();
-        policy.roles[object_r_index].set_id(other_id);
-        policy.roles[other_index].set_id(object_r_id);
+            roles.iter().position(|role| role.name() == OBJECT_R_ROLE_NAME).unwrap();
+        let other_index = roles.iter().position(|role| role.name() != OBJECT_R_ROLE_NAME).unwrap();
+        let object_r_id = roles[object_r_index].id();
+        let other_id = roles[other_index].id();
+        roles[object_r_index].set_id(other_id);
+        roles[other_index].set_id(object_r_id);
 
         let mut serialized = Vec::new();
         policy.serialize(&mut serialized).expect("serialize modified policy");

@@ -15,7 +15,9 @@ namespace usb_xhci {
 Endpoint::Endpoint(UsbXhci* hci, uint32_t device_id, uint8_t address)
     : usb::EndpointServer(hci->bti(), address, usb::ScatterGatherSupport::kSupported),
       hci_(hci),
-      device_id_(device_id) {}
+      device_id_(device_id) {
+  ZX_DEBUG_ASSERT(hci_ != nullptr);
+}
 
 namespace {
 
@@ -31,7 +33,22 @@ inline usb_setup_t ToBanjo(fdescriptor::UsbSetup setup) {
 
 }  // namespace
 
+struct Endpoint::LockedQueue {
+  static zx_status_t QueueRequestLocked(Endpoint& ep, DeviceState& state,
+                                        std::optional<usb::RequestVariant>& request)
+      __TA_REQUIRES(state.transaction_lock());
+  static zx_status_t ControlRequestQueueLocked(Endpoint& ep, DeviceState& state,
+                                               std::optional<usb::RequestVariant>& request)
+      __TA_REQUIRES(state.transaction_lock());
+  static zx_status_t NormalRequestQueueLocked(Endpoint& ep, DeviceState& state,
+                                              std::optional<usb::RequestVariant>& request)
+      __TA_REQUIRES(state.transaction_lock());
+};
+
 zx_status_t Endpoint::Init(EventRing* event_ring, fdf::MmioBuffer* mmio) {
+  if (!hci_->Running()) {
+    return ZX_ERR_BAD_STATE;
+  }
   return transfer_ring_.Init(hci_->GetPageSize(), hci_->bti(), event_ring,
                              hci_->Is32BitController(), mmio, hci_);
 }
@@ -44,7 +61,7 @@ void Endpoint::Connect(async_dispatcher_t* dispatcher,
   if (state) {
     fbl::AutoLock _(&binding_lock_);
     binding_refs_.push_back(std::move(state));
-  } else if (hci_ && hci_->GetDeviceState()) {
+  } else if (hci_->GetDeviceState()) {
     auto dev_state = hci_->GetDeviceState()[device_id_];
     if (dev_state) {
       fbl::AutoLock _(&binding_lock_);
@@ -71,10 +88,10 @@ void Endpoint::OnUnbound(fidl::UnbindInfo info,
   bool disconnecting = true;
   if (state_ref) {
     fbl::AutoLock _(&state_ref->transaction_lock());
-    disconnecting = state_ref->IsDisconnecting();
+    disconnecting = state_ref->IsDisconnecting() || !state_ref->GetSlot();
   }
 
-  if (hci_ && hci_->Running() && !disconnecting) {
+  if (hci_->Running() && !disconnecting) {
     auto status = hci_->UsbHciCancelAll(device_id_, ep_addr());
     if (status != ZX_OK && status != ZX_ERR_IO_NOT_PRESENT) {
       fdf::error("Could not cancel all {}", zx_status_get_string(status));
@@ -91,13 +108,13 @@ void Endpoint::OnUnbound(fidl::UnbindInfo info,
 }
 void Endpoint::QueueRequests(QueueRequestsRequest& request,
                              QueueRequestsCompleter::Sync& completer) {
-  if (!hci_ || !hci_->Running() || !hci_->GetDeviceState()) {
+  if (!hci_->Running()) {
     for (auto& req : request.req()) {
-      RequestComplete(ZX_ERR_IO_NOT_PRESENT, 0, usb::FidlRequest{std::move(req)});
+      RequestComplete(ZX_ERR_BAD_STATE, 0, usb::FidlRequest{std::move(req)});
     }
     return;
   }
-  auto state = hci_->GetDeviceState()[device_id_];
+  auto state = hci_->GetDeviceState() ? hci_->GetDeviceState()[device_id_] : nullptr;
   if (!state) {
     for (auto& req : request.req()) {
       RequestComplete(ZX_ERR_IO_NOT_PRESENT, 0, usb::FidlRequest{std::move(req)});
@@ -107,11 +124,7 @@ void Endpoint::QueueRequests(QueueRequestsRequest& request,
   for (auto& req : request.req()) {
     QueueRequest(usb::FidlRequest{std::move(req)});
   }
-  if (!hci_ || !hci_->Running() || !hci_->GetDeviceState()) {
-    return;
-  }
-  state = hci_->GetDeviceState()[device_id_];
-  if (!state) {
+  if (!hci_->Running() || !hci_->GetDeviceState() || !hci_->GetDeviceState()[device_id_]) {
     return;
   }
   uint8_t slot = 0;
@@ -127,9 +140,21 @@ void Endpoint::QueueRequests(QueueRequestsRequest& request,
 }
 
 void Endpoint::CancelAll(CancelAllCompleter::Sync& completer) {
-  if (!hci_ || !hci_->Running()) {
+  if (!hci_->Running()) {
+    completer.Reply(fit::as_error(ZX_ERR_BAD_STATE));
+    return;
+  }
+  auto state = hci_->GetDeviceState() ? hci_->GetDeviceState()[device_id_] : nullptr;
+  if (!state) {
     completer.Reply(fit::as_error(ZX_ERR_IO_NOT_PRESENT));
     return;
+  }
+  {
+    fbl::AutoLock _(&state->transaction_lock());
+    if (state->IsDisconnecting() || !state->GetSlot()) {
+      completer.Reply(fit::as_error(ZX_ERR_IO_NOT_PRESENT));
+      return;
+    }
   }
   auto status = hci_->UsbHciCancelAll(device_id_, ep_addr());
   if (status != ZX_OK) {
@@ -140,93 +165,83 @@ void Endpoint::CancelAll(CancelAllCompleter::Sync& completer) {
 }
 
 void Endpoint::QueueRequest(usb::RequestVariant request) {
-  if (!hci_ || !hci_->Running() || !hci_->GetDeviceState()) {
-    RequestComplete(ZX_ERR_IO_NOT_PRESENT, 0, std::move(request));
+  if (!hci_->Running()) {
+    RequestComplete(ZX_ERR_BAD_STATE, 0, std::move(request));
     return;
   }
-  auto state = hci_->GetDeviceState()[device_id_];
+  auto state = hci_->GetDeviceState() ? hci_->GetDeviceState()[device_id_] : nullptr;
   if (!state) {
     RequestComplete(ZX_ERR_IO_NOT_PRESENT, 0, std::move(request));
     return;
   }
+  std::optional<usb::RequestVariant> pending_request(std::move(request));
+  zx_status_t status = ZX_OK;
   {
     fbl::AutoLock transaction_lock(&state->transaction_lock());
-    if (!state->GetSlot() || state->IsDisconnecting()) {
-      transaction_lock.release();
-      RequestComplete(ZX_ERR_IO_NOT_PRESENT, 0, std::move(request));
-      return;
-    }
+    status = LockedQueue::QueueRequestLocked(*this, *state, pending_request);
   }
-  if (unlikely(ep_addr() == 0)) {
-    return ControlRequestQueue(std::move(request));
+  if (status != ZX_OK) {
+    RequestComplete(status, 0, std::move(*pending_request));
   }
-  NormalRequestQueue(std::move(request));
 }
 
-void Endpoint::ControlRequestQueue(usb::RequestVariant request) {
-  auto device_state =
-      (hci_ && hci_->GetDeviceState()) ? hci_->GetDeviceState()[device_id_] : nullptr;
-  if (!device_state) {
-    RequestComplete(ZX_ERR_IO_NOT_PRESENT, 0, std::move(request));
-    return;
+zx_status_t Endpoint::LockedQueue::QueueRequestLocked(Endpoint& ep, DeviceState& state,
+                                                      std::optional<usb::RequestVariant>& request) {
+  if (!state.GetSlot() || state.IsDisconnecting()) {
+    return ZX_ERR_IO_NOT_PRESENT;
   }
-  fbl::AutoLock transaction_lock(&device_state->transaction_lock());
-  if (device_state->IsDisconnecting()) {
-    // Device is disconnecting. Release lock because we no longer will be using device_state,
-    // complete request, and return from function.
-    transaction_lock.release();
-    RequestComplete(ZX_ERR_IO_NOT_PRESENT, 0, std::move(request));
-    return;
+  if (unlikely(ep.ep_addr() == 0)) {
+    return ControlRequestQueueLocked(ep, state, request);
   }
-  if (transfer_ring_.stalled()) {
-    transaction_lock.release();
-    RequestComplete(ZX_ERR_IO_REFUSED, 0, std::move(request));
-    return;
+  return NormalRequestQueueLocked(ep, state, request);
+}
+
+zx_status_t Endpoint::LockedQueue::ControlRequestQueueLocked(
+    Endpoint& ep, DeviceState& state, std::optional<usb::RequestVariant>& request) {
+  if (state.IsDisconnecting() || !state.GetSlot()) {
+    return ZX_ERR_IO_NOT_PRESENT;
   }
-  auto context = transfer_ring_.AllocateContext();
+  if (ep.transfer_ring_.stalled()) {
+    return ZX_ERR_IO_REFUSED;
+  }
+  auto context = ep.transfer_ring_.AllocateContext();
   if (!context) {
-    transaction_lock.release();
-    RequestComplete(ZX_ERR_NO_MEMORY, 0, std::move(request));
-    return;
+    return ZX_ERR_NO_MEMORY;
   }
   TransferRing::State transaction;
   TRB* setup;
-  zx_status_t status = transfer_ring_.AllocateTRB(&setup, &transaction);
-  auto rollback_transaction = [=, this]() __TA_NO_THREAD_SAFETY_ANALYSIS {
-    transfer_ring_.Restore(transaction);
-  };
+  zx_status_t status = ep.transfer_ring_.AllocateTRB(&setup, &transaction);
   if (status != ZX_OK) {
-    rollback_transaction();
-    transaction_lock.release();
-    RequestComplete(status, 0, std::move(request));
-    return;
+    ep.transfer_ring_.Restore(transaction);
+    return status;
   }
 
-  context->request.emplace(std::move(request));
+  context->request.emplace(std::move(*request));
+  request.reset();
   UsbRequestState pending_transfer;
   pending_transfer.context = std::move(context);
   pending_transfer.setup = setup;
   pending_transfer.transaction = transaction;
-  status = ControlRequestAllocationPhase(&pending_transfer);
-  auto call = fit::defer([&]() __TA_NO_THREAD_SAFETY_ANALYSIS {
-    rollback_transaction();
-    transaction_lock.release();
-    RequestComplete(status, 0, std::move(*context->request));
+  auto rollback = fit::defer([&] {
+    ep.transfer_ring_.Restore(transaction);
+    request.emplace(std::move(*pending_transfer.context->request));
   });
+  status = ep.ControlRequestAllocationPhase(&pending_transfer);
   if (status != ZX_OK) {
-    return;
+    return status;
   }
-  status = ControlRequestStatusPhase(&pending_transfer);
+  status = ep.ControlRequestStatusPhase(&pending_transfer);
   if (status != ZX_OK) {
-    return;
+    return status;
   }
-  status = ControlRequestDataPhase(&pending_transfer);
+  status = ep.ControlRequestDataPhase(&pending_transfer);
   if (status != ZX_OK) {
-    return;
+    return status;
   }
-  ControlRequestSetupPhase(&pending_transfer);
-  ControlRequestCommit(&pending_transfer);
-  call.cancel();
+  ep.ControlRequestSetupPhase(&pending_transfer);
+  rollback.cancel();
+  ep.ControlRequestCommit(&pending_transfer);
+  return ZX_OK;
 }
 
 zx_status_t Endpoint::ControlRequestAllocationPhase(UsbRequestState* state) {
@@ -386,10 +401,22 @@ void Endpoint::ControlRequestSetupPhase(UsbRequestState* state) {
 
 void Endpoint::ControlRequestCommit(UsbRequestState* state) {
   // Start the transaction!
-  if (std::holds_alternative<Request>(*state->context->request) && !hci_->HasCoherentCache()) {
-    usb_request_cache_flush_invalidate(
-        std::get<Request>(*state->context->request).request(), 0,
-        std::get<Request>(*state->context->request).request()->header.length);
+  if (!hci_->HasCoherentCache()) {
+    if (std::holds_alternative<Request>(*state->context->request)) {
+      usb_request_cache_flush_invalidate(
+          std::get<Request>(*state->context->request).request(), 0,
+          std::get<Request>(*state->context->request).request()->header.length);
+    } else {
+      auto& fidl_req = std::get<usb::FidlRequest>(*state->context->request);
+      if (fidl_req.length() > 0) {
+        zx_status_t status =
+            fidl_req.CacheFlushInvalidate([this](const auto& buffer) { return GetMapped(buffer); });
+        if (status != ZX_OK) {
+          fdf::warn("ControlRequestCommit CacheFlushInvalidate failed: {}",
+                    zx_status_get_string(status));
+        }
+      }
+    }
   }
   transfer_ring_.AssignContext(state->status_trb_ptr, std::move(state->context), state->first_trb,
                                state->setup);
@@ -400,112 +427,93 @@ void Endpoint::ControlRequestCommit(UsbRequestState* state) {
   transfer_ring_.CommitTransaction(state->transaction);
 }
 
-void Endpoint::NormalRequestQueue(usb::RequestVariant request) {
+zx_status_t Endpoint::LockedQueue::NormalRequestQueueLocked(
+    Endpoint& ep, DeviceState& state, std::optional<usb::RequestVariant>& request) {
   UsbRequestState pending_transfer;
-  uint8_t index = static_cast<uint8_t>(XhciEndpointIndex(ep_addr()) - 1);
-  auto device_state =
-      (hci_ && hci_->GetDeviceState()) ? hci_->GetDeviceState()[device_id_] : nullptr;
-  if (!device_state) {
-    RequestComplete(ZX_ERR_IO_NOT_PRESENT, 0, std::move(request));
-    return;
+  uint8_t index = static_cast<uint8_t>(XhciEndpointIndex(ep.ep_addr()) - 1);
+  if (state.IsDisconnecting() || !state.GetSlot()) {
+    return ZX_ERR_IO_NOT_PRESENT;
   }
-  fbl::AutoLock transaction_lock(&device_state->transaction_lock());
-  if (device_state->IsDisconnecting()) {
-    transaction_lock.release();
-    RequestComplete(ZX_ERR_IO_NOT_PRESENT, 0, std::move(request));
-    return;
+  if (ep.transfer_ring_.stalled()) {
+    return ZX_ERR_IO_REFUSED;
   }
-  if (transfer_ring_.stalled()) {
-    transaction_lock.release();
-    RequestComplete(ZX_ERR_IO_REFUSED, 0, std::move(request));
-    return;
+  if (!state.GetInputContext()) {
+    return ZX_ERR_IO_NOT_PRESENT;
   }
-  auto* control = reinterpret_cast<uint32_t*>(device_state->GetInputContext()->virt());
+  auto* control = reinterpret_cast<uint32_t*>(state.GetInputContext()->virt());
   auto* endpoint_context = reinterpret_cast<EndpointContext*>(
-      reinterpret_cast<unsigned char*>(control) + (hci_->slot_size_bytes() * (2 + (index + 1))));
-  if (!transfer_ring_.active()) {
-    transaction_lock.release();
-    RequestComplete(ZX_ERR_INTERNAL, 0, std::move(request));
-    return;
+      reinterpret_cast<unsigned char*>(control) + (ep.hci_->slot_size_bytes() * (2 + (index + 1))));
+  if (!ep.transfer_ring_.active()) {
+    return ZX_ERR_INTERNAL;
   }
   pending_transfer.burst_size = endpoint_context->MaxBurstSize() + 1;
   pending_transfer.max_packet_size = endpoint_context->MAX_PACKET_SIZE();
-  pending_transfer.context = transfer_ring_.AllocateContext();
+  pending_transfer.context = ep.transfer_ring_.AllocateContext();
   if (!pending_transfer.context) {
-    transaction_lock.release();
-    RequestComplete(ZX_ERR_NO_MEMORY, 0, std::move(request));
-    return;
+    return ZX_ERR_NO_MEMORY;
   }
-  pending_transfer.context->request.emplace(std::move(request));
+  pending_transfer.context->request.emplace(std::move(*request));
+  request.reset();
+  auto restore_request =
+      fit::defer([&] { request.emplace(std::move(*pending_transfer.context->request)); });
 
-  if (transfer_ring_.IsIsochronous()) {
+  if (ep.transfer_ring_.IsIsochronous()) {
     // Isoc endpoints of the default interface (i.e. b_alternate_setting=0) are required to have a
     // w_max_packet_size=0 to prevent enumerated devices from reserving bandwidth by default. We'll
     // consider any request for a zero-length pipe as invalid (see USB 2.0 spec. 5.6.2).
     if (pending_transfer.max_packet_size == 0) {
-      transaction_lock.release();
-      RequestComplete(ZX_ERR_INVALID_ARGS, 0, std::move(*pending_transfer.context->request));
-      return;
+      return ZX_ERR_INVALID_ARGS;
     }
 
     // Release the lock while we're sleeping to avoid blocking
     // other operations.
-    device_state->transaction_lock().Release();
-    auto status = WaitForIsochronousReady(
+    uint64_t target_frame =
         std::holds_alternative<usb::FidlRequest>(*pending_transfer.context->request)
             ? *std::get<usb::FidlRequest>(*pending_transfer.context->request)
                    ->information()
                    ->isochronous()
                    ->frame_id()
-            : std::get<Request>(*pending_transfer.context->request).request()->header.frame);
-    device_state->transaction_lock().Acquire();
+            : std::get<Request>(*pending_transfer.context->request).request()->header.frame;
+    state.transaction_lock().Release();
+    auto status = ep.WaitForIsochronousReady(target_frame);
+    state.transaction_lock().Acquire();
     if (status != ZX_OK) {
-      transaction_lock.release();
-      RequestComplete(status, 0, std::move(*pending_transfer.context->request));
-      return;
+      return status;
     }
 
     // Check again since we've re-acquired lock
-    if (!hci_ || !hci_->Running() || device_state->IsDisconnecting()) {
-      transaction_lock.release();
-      RequestComplete(ZX_ERR_IO_NOT_PRESENT, 0, std::move(*pending_transfer.context->request));
-      return;
+    if (!ep.hci_->Running()) {
+      return ZX_ERR_BAD_STATE;
     }
-    if (transfer_ring_.stalled()) {
-      transaction_lock.release();
-      RequestComplete(ZX_ERR_IO_REFUSED, 0, std::move(*pending_transfer.context->request));
-      return;
+    if (state.IsDisconnecting() || !state.GetSlot()) {
+      return ZX_ERR_IO_NOT_PRESENT;
     }
-    if (!transfer_ring_.active()) {
-      transaction_lock.release();
-      RequestComplete(ZX_ERR_INTERNAL, 0, std::move(*pending_transfer.context->request));
-      return;
+    if (ep.transfer_ring_.stalled()) {
+      return ZX_ERR_IO_REFUSED;
+    }
+    if (!ep.transfer_ring_.active()) {
+      return ZX_ERR_INTERNAL;
     }
   }
 
   // Start the transaction
-  pending_transfer.transaction = transfer_ring_.SaveState();
-  auto rollback_transaction = [&]() __TA_NO_THREAD_SAFETY_ANALYSIS {
-    transfer_ring_.Restore(pending_transfer.transaction);
-  };
-  auto status = StartNormalTransaction(&pending_transfer,
-                                       static_cast<uint8_t>(device_state->GetInterrupterTarget()));
+  pending_transfer.transaction = ep.transfer_ring_.SaveState();
+  auto status = ep.StartNormalTransaction(&pending_transfer,
+                                          static_cast<uint8_t>(state.GetInterrupterTarget()));
   if (status != ZX_OK) {
-    rollback_transaction();
-    transaction_lock.release();
-    RequestComplete(status, 0, std::move(*pending_transfer.context->request));
-    return;
+    ep.transfer_ring_.Restore(pending_transfer.transaction);
+    return status;
   }
   // Continue the transaction
-  status = ContinueNormalTransaction(&pending_transfer);
+  status = ep.ContinueNormalTransaction(&pending_transfer);
   if (status != ZX_OK) {
-    rollback_transaction();
-    transaction_lock.release();
-    RequestComplete(status, 0, std::move(*pending_transfer.context->request));
-    return;
+    ep.transfer_ring_.Restore(pending_transfer.transaction);
+    return status;
   }
   // Commit the transaction -- starting the actual transfer
-  CommitNormalTransaction(&pending_transfer);
+  restore_request.cancel();
+  ep.CommitNormalTransaction(&pending_transfer);
+  return ZX_OK;
 }
 
 zx_status_t Endpoint::WaitForIsochronousReady(uint64_t target_frame) {
@@ -513,10 +521,16 @@ zx_status_t Endpoint::WaitForIsochronousReady(uint64_t target_frame) {
   // in the xHCI specification (revision 1.2)
   constexpr int kMaxSchedulingInterval = 895;
   if (target_frame) {
+    if (!hci_->Running()) {
+      return ZX_ERR_BAD_STATE;
+    }
     uint64_t frame = hci_->UsbHciGetCurrentFrame();
     while (static_cast<int32_t>(target_frame - frame) > kMaxSchedulingInterval) {
       uint32_t time = static_cast<uint32_t>((target_frame - frame) - kMaxSchedulingInterval);
       zx::nanosleep(zx::deadline_after(zx::msec(time)));
+      if (!hci_->Running()) {
+        return ZX_ERR_BAD_STATE;
+      }
       frame = hci_->UsbHciGetCurrentFrame();
     }
 
@@ -587,15 +601,11 @@ zx_status_t Endpoint::ContinueNormalTransaction(UsbRequestState* state) {
   size_t pending_len = std::holds_alternative<usb::FidlRequest>(*state->context->request)
                            ? std::get<usb::FidlRequest>(*state->context->request).length()
                            : std::get<Request>(*state->context->request).request()->header.length;
-  auto current_nop = state->info.nop.data();
-  if (current_nop) {
-    while (Control::FromTRB(current_nop).Type() == Control::Nop) {
-      bool producer_cycle_state = current_nop->status;
-      bool cycle = (current_nop == state->first_trb) ? !producer_cycle_state : producer_cycle_state;
-      Control::FromTRB(current_nop).set_Cycle(cycle).ToTrb(current_nop);
-      current_nop->status = 0;
-      current_nop++;
-    }
+  for (TRB& nop_trb : state->info.nop) {
+    bool producer_cycle_state = nop_trb.status;
+    bool cycle = (&nop_trb == state->first_trb) ? !producer_cycle_state : producer_cycle_state;
+    Control::FromTRB(&nop_trb).set_Cycle(cycle).ToTrb(&nop_trb);
+    nop_trb.status = 0;
   }
   if (state->first_trb) {
     TRB* current = state->info.trbs.data();
@@ -619,7 +629,7 @@ zx_status_t Endpoint::ContinueNormalTransaction(UsbRequestState* state) {
         uint32_t pcs = current->status;
         current->status = 0;
         enum Control::Type type;
-        if ((transfer_ring_.IsIsochronous() && state->first_trb == current)) {
+        if (transfer_ring_.IsIsochronous() && (current == state->info.trbs.data())) {
           // Force direct mode as workaround for USB audio latency issue.
           type = Control::Isoch;
           Isoch* data = reinterpret_cast<Isoch*>(current);
@@ -684,13 +694,31 @@ zx_status_t Endpoint::ContinueNormalTransaction(UsbRequestState* state) {
 void Endpoint::CommitNormalTransaction(UsbRequestState* state) {
   hw_mb();
   // Start the transaction!
-  if (std::holds_alternative<Request>(*state->context->request) && !hci_->HasCoherentCache()) {
-    usb_request_cache_flush_invalidate(
-        std::get<Request>(*state->context->request).request(), 0,
-        std::get<Request>(*state->context->request).request()->header.length);
+  if (!hci_->HasCoherentCache()) {
+    if (std::holds_alternative<Request>(*state->context->request)) {
+      usb_request_cache_flush_invalidate(
+          std::get<Request>(*state->context->request).request(), 0,
+          std::get<Request>(*state->context->request).request()->header.length);
+    } else {
+      auto& fidl_req = std::get<usb::FidlRequest>(*state->context->request);
+      if (fidl_req.length() > 0) {
+        zx_status_t status =
+            fidl_req.CacheFlushInvalidate([this](const auto& buffer) { return GetMapped(buffer); });
+        if (status != ZX_OK) {
+          fdf::warn("CommitNormalTransaction CacheFlushInvalidate failed: {}",
+                    zx_status_get_string(status));
+        }
+      }
+    }
   }
-  // In FIDL mode, we expect cache to be flushed already
   transfer_ring_.AssignContext(state->last_trb, std::move(state->context), state->first_trb);
+  if (!hci_->HasCoherentState()) {
+    if (!state->info.nop.empty()) {
+      zx_cache_flush(state->info.nop.data(), state->info.nop.size_bytes(), ZX_CACHE_FLUSH_DATA);
+    }
+    zx_cache_flush(state->info.trbs.data(), state->info.trbs.size_bytes(), ZX_CACHE_FLUSH_DATA);
+  }
+  hw_mb();
   Control::FromTRB(state->first_trb).set_Cycle(state->first_cycle).ToTrb(state->first_trb);
 
   transfer_ring_.CommitTransaction(state->transaction);

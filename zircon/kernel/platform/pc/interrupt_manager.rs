@@ -13,9 +13,10 @@ use crate::arch_rs::x86::interrupts::{
 use crate::dev_interrupt::{
     InterruptHandler, InterruptPolarity, InterruptTriggerMode, MAX_MSI_IRQS, MsiBlock,
 };
+use crate::ksync_kernel::TrackedSpinlock;
 use bitmap::{Bitmap, FixedStorage, RawBitmapGeneric};
 use core::sync::atomic::{AtomicBool, Ordering};
-use ksync::{KMutex, RawSpinlock, guarded, lock};
+use ksync::{KMutex, guarded, lock};
 use pin_init::{PinInit, pin_init, pin_init_array_from_fn};
 use zx_status::Status;
 
@@ -60,7 +61,7 @@ pub trait IoApic {
 #[guarded]
 pub struct InterruptTableEntry {
     #[mutex]
-    mu: KMutex<RawSpinlock>,
+    mu: KMutex<TrackedSpinlock>,
 
     #[guarded_by(mu)]
     handler: InterruptHandler,
@@ -103,7 +104,7 @@ impl InterruptTableEntry {
             }
             true
         } else {
-            lock!(let guard = self.lock_mu_policy::<ksync::NoIrqSavePolicy>());
+            lock!(let guard = self.lock_mu_policy::<crate::ksync_kernel::NoIrqSavePolicy>());
             let fields = guard.fields();
             if fields.handler.present() {
                 fields.handler.invoke();
@@ -151,7 +152,7 @@ impl InterruptTableEntry {
 pub struct InterruptManager<I: IoApic> {
     /// This lock guards against concurrent access to the IOAPIC and handler allocation bitmap.
     #[mutex]
-    mu: KMutex<RawSpinlock>,
+    mu: KMutex<TrackedSpinlock>,
     /// Handler table with one entry per CPU interrupt vector.
     #[pin]
     handler_table: [InterruptTableEntry; X86InterruptVector::COUNT],

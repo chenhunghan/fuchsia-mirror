@@ -40,9 +40,8 @@ use net_declare::{
 use net_types::ethernet::Mac;
 use net_types::ip::{AddrSubnetEither, Ip, IpAddr, IpInvariant, Ipv4, Ipv6};
 use net_types::{SpecifiedAddr, UnicastAddr, Witness as _};
-use netstack3_core::device::{DeviceId, EthernetLinkDevice};
+use netstack3_core::device::{DeviceId, EthernetDeviceId, EthernetLinkDevice};
 use netstack3_core::error::AddressResolutionFailed;
-use netstack3_core::ip::{IpDeviceConfigurationUpdate, Ipv6DeviceConfigurationUpdate};
 use netstack3_core::neighbor::LinkResolutionResult;
 use netstack3_core::routes::{AddableEntry, AddableEntryEither, AddableMetric, Entry, RawMetric};
 use packet_formats::ip::Ipv4Proto;
@@ -562,7 +561,9 @@ impl TestSetupBuilder {
                 // to the netstack side of it too.
                 device_control.detach().expect("detach");
 
-                let (interface_control, server_end) = fidl::endpoints::create_proxy();
+                let (interface_control, server_end) =
+                    fnet_interfaces_ext::admin::Control::create_endpoints()
+                        .expect("create interface control endpoints");
                 device_control
                     .create_interface(
                         &port_id,
@@ -581,6 +582,41 @@ impl TestSetupBuilder {
                 // device_control.
                 interface_control.detach().expect("detach");
 
+                // Disable DAD for simplicity of testing, and set NUD multicast
+                // solicitations to the maximum to avoid timing flakes on slow
+                // or contended test bots.
+                let _: fnet_interfaces_admin::Configuration = interface_control
+                    .set_configuration(&fnet_interfaces_admin::Configuration {
+                        ipv4: Some(fnet_interfaces_admin::Ipv4Configuration {
+                            arp: Some(fnet_interfaces_admin::ArpConfiguration {
+                                nud: Some(fnet_interfaces_admin::NudConfiguration {
+                                    max_multicast_solicitations: Some(u16::MAX),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                        ipv6: Some(fnet_interfaces_admin::Ipv6Configuration {
+                            ndp: Some(fnet_interfaces_admin::NdpConfiguration {
+                                nud: Some(fnet_interfaces_admin::NudConfiguration {
+                                    max_multicast_solicitations: Some(u16::MAX),
+                                    ..Default::default()
+                                }),
+                                dad: Some(fnet_interfaces_admin::DadConfiguration {
+                                    transmits: Some(0),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    })
+                    .await
+                    .expect("calling set_configuration")
+                    .expect("set_configuration failed");
+
                 assert!(
                     interface_control
                         .enable()
@@ -594,31 +630,11 @@ impl TestSetupBuilder {
                 // be 100% sure of the state once the setup is done.
                 stack.wait_for_interface_online(if_id).await;
 
-                // Disable DAD for simplicity of testing.
-                stack.with_ctx(|ctx| {
-                    let devices: &Devices<_> = ctx.bindings_ctx().as_ref();
-                    let device = devices.get_core_id(if_id).unwrap();
-                    let _: Ipv6DeviceConfigurationUpdate = ctx
-                        .api()
-                        .device_ip::<Ipv6>()
-                        .update_configuration(
-                            &device,
-                            Ipv6DeviceConfigurationUpdate {
-                                ip_config: IpDeviceConfigurationUpdate {
-                                    dad_transmits: Some(None),
-                                    ..Default::default()
-                                },
-                                ..Default::default()
-                            },
-                        )
-                        .unwrap();
-                });
                 if let Some(addr) = addr {
-                    let control = fnet_interfaces_ext::admin::Control::new(interface_control);
                     let (address_state_provider, server_end) = fidl::endpoints::create_proxy::<
                         fnet_interfaces_admin::AddressStateProviderMarker,
                     >();
-                    control
+                    interface_control
                         .add_address(
                             &addr.into_fidl(),
                             &fnet_interfaces_admin::AddressParameters {
@@ -628,6 +644,25 @@ impl TestSetupBuilder {
                             server_end,
                         )
                         .expect("add address should succeed");
+
+                    fnet_interfaces_ext::admin::wait_for_address_added_event(
+                        &mut address_state_provider.take_event_stream(),
+                    )
+                    .await
+                    .expect("wait for address added event");
+
+                    {
+                        let state_stream = fnet_interfaces_ext::admin::assignment_state_stream(
+                            address_state_provider.clone(),
+                        );
+                        let mut state_stream = pin!(state_stream);
+                        fnet_interfaces_ext::admin::wait_assignment_state(
+                            &mut state_stream,
+                            fnet_interfaces::AddressAssignmentState::Assigned,
+                        )
+                        .await
+                        .expect("wait for address assigned");
+                    }
 
                     address_state_provider.detach().expect("detach should succeed");
                 }
@@ -1033,7 +1068,7 @@ async fn test_neighbor_table_inspect() {
                 "0": {
                     IpAddress: "192.168.0.1",
                     State: "Static",
-                    LinkAddress: "AA:BB:CC:DD:EE:FF",
+                    LinkAddress: "aa:bb:cc:dd:ee:ff",
                 },
                 "1": {
                     IpAddress: "2001:db8::1",
@@ -1174,6 +1209,20 @@ async fn remove_dynamic_neighbor_entry<I: IpExt>() {
 }
 
 #[netstack3_core::context_ip_bounds(I, BindingsCtx)]
+fn resolve_neighbor_addr<I: IpExt>(
+    ctx: &mut Ctx,
+    device: &EthernetDeviceId<BindingsCtx>,
+) -> Option<Mac> {
+    // TODO(https://fxbug.dev/582466317): Inline once rustc can normalize
+    // `<<I as IpExt>::OtherIp as Ip>::Addr` directly under
+    // `-Znext-solver=globally`.
+    match ctx.api().neighbor::<I, EthernetLinkDevice>().resolve_link_addr(device, &I::ADDR) {
+        LinkResolutionResult::Resolved(mac) => Some(mac.get()),
+        LinkResolutionResult::Pending(_) => None,
+    }
+}
+
+#[netstack3_core::context_ip_bounds(I, BindingsCtx)]
 #[netstack3_core::context_ip_bounds(I::OtherIp, BindingsCtx)]
 #[fixture::teardown(TestSetup::shutdown)]
 #[ip_test(I)]
@@ -1210,18 +1259,8 @@ async fn clear_entries<I: IpExt>() {
         .expect("clear_entries FIDL")
         .expect("clear_entries");
 
-    assert_matches!(
-        ctx.api()
-            .neighbor::<I, EthernetLinkDevice>()
-            .resolve_link_addr(&ethernet_device_id, &I::ADDR),
-        LinkResolutionResult::Pending(_)
-    );
-    assert_matches!(
-        ctx.api()
-           .neighbor::<I::OtherIp, EthernetLinkDevice>()
-           .resolve_link_addr(&ethernet_device_id, &I::OtherIp::ADDR),
-        LinkResolutionResult::Resolved(mac) => assert_eq!(mac.get(), MAC)
-    );
+    assert_eq!(resolve_neighbor_addr::<I>(&mut ctx, &ethernet_device_id), None);
+    assert_eq!(resolve_neighbor_addr::<I::OtherIp>(&mut ctx, &ethernet_device_id), Some(MAC));
 
     t
 }

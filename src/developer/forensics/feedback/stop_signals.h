@@ -5,10 +5,9 @@
 #ifndef SRC_DEVELOPER_FORENSICS_FEEDBACK_STOP_SIGNALS_H_
 #define SRC_DEVELOPER_FORENSICS_FEEDBACK_STOP_SIGNALS_H_
 
-#include <fuchsia/hardware/power/statecontrol/cpp/fidl.h>
-#include <fuchsia/process/lifecycle/cpp/fidl.h>
+#include <fidl/fuchsia.hardware.power.statecontrol/cpp/fidl.h>
+#include <fidl/fuchsia.process.lifecycle/cpp/fidl.h>
 #include <lib/async/dispatcher.h>
-#include <lib/fidl/cpp/interface_request.h>
 #include <lib/fit/function.h>
 #include <lib/fpromise/promise.h>
 #include <lib/zx/channel.h>
@@ -54,7 +53,7 @@ class GracefulShutdownInfoSignal {
 // already been sent.
 fpromise::promise<LifecycleStopSignal, Error> WaitForLifecycleStop(
     async_dispatcher_t* dispatcher,
-    fidl::InterfaceRequest<fuchsia::process::lifecycle::Lifecycle> request);
+    fidl::ServerEnd<fuchsia_process_lifecycle::Lifecycle> server_end);
 
 // Returns a promise which will complete successfully when the shutdown signal is received.
 //
@@ -62,7 +61,7 @@ fpromise::promise<LifecycleStopSignal, Error> WaitForLifecycleStop(
 // hasn't already been sent.
 fpromise::promise<GracefulShutdownInfoSignal, Error> WaitForShutdownInfo(
     async_dispatcher_t* dispatcher,
-    fidl::InterfaceRequest<fuchsia::hardware::power::statecontrol::ShutdownWatcher> request);
+    fidl::ServerEnd<fuchsia_hardware_power_statecontrol::ShutdownWatcher> server_end);
 
 }  // namespace forensics::feedback
 

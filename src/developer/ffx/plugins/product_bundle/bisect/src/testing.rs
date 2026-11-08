@@ -102,9 +102,7 @@ mod tests {
     #[test]
     fn test_run_automated_test_pass() {
         futures_lite::future::block_on(async move {
-            let script = Utf8PathBuf::from(
-                "../../src/developer/ffx/plugins/product_bundle/bisect/test_data/test_pass.sh",
-            );
+            let script = Utf8PathBuf::from("test_data/test_pass.sh");
             let pb_path = Utf8PathBuf::from("/fake/pb");
 
             let result = run_automated_test(&script, &pb_path, |_| {}).await;
@@ -116,9 +114,7 @@ mod tests {
     #[test]
     fn test_run_automated_test_fail() {
         futures_lite::future::block_on(async move {
-            let script = Utf8PathBuf::from(
-                "../../src/developer/ffx/plugins/product_bundle/bisect/test_data/test_fail.sh",
-            );
+            let script = Utf8PathBuf::from("test_data/test_fail.sh");
             let pb_path = Utf8PathBuf::from("/fake/pb");
 
             let result = run_automated_test(&script, &pb_path, |_| {}).await;
@@ -130,9 +126,7 @@ mod tests {
     #[test]
     fn test_run_automated_test_infra_failure_code_128() {
         futures_lite::future::block_on(async move {
-            let script = Utf8PathBuf::from(
-                "../../src/developer/ffx/plugins/product_bundle/bisect/test_data/test_infra.sh",
-            );
+            let script = Utf8PathBuf::from("test_data/test_infra.sh");
             let pb_path = Utf8PathBuf::from("/fake/pb");
 
             let result = run_automated_test(&script, &pb_path, |_| {}).await;

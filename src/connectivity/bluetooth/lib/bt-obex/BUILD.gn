@@ -128,12 +128,9 @@ if (is_fuchsia) {
     configs += [ "//build/config/rust/lints:deny_unused_results" ]
   }
 }
+
 fuchsia_unittest_package("bt-obex-tests") {
   package_name = "bt-obex-tests-gn"
   component_name = "bt-obex-tests"
   deps = [ ":bt-obex_test" ]
-  visibility = [
-    ":*",
-    "//src/connectivity/bluetooth:*",
-  ]
 }

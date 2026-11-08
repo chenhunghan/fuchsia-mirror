@@ -11,7 +11,7 @@ use argh::FromArgs;
 use assembled_system::{AssembledSystem, Image, PackageSetMetadata, PackagesMetadata};
 use assembly_container::AssemblyContainer;
 use camino::{Utf8Path, Utf8PathBuf};
-use fidl_fuchsia_component_decl as fdecl;
+use fidl_fuchsia_component_decl_common as fdecl;
 use fuchsia_archive::Reader as FARReader;
 use fuchsia_pkg::PackageManifest;
 use fuchsia_repo::repo_client::RepoClient;

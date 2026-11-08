@@ -4,7 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-use core::ffi::{CStr, c_char, c_void};
+use core::ffi::c_void;
 use core::ptr;
 use fbl::RefPtr;
 use zx_status::Status;
@@ -17,12 +17,6 @@ use crate::kernel::types::PAddr;
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_guest_ptr_reset(guest_ptr: &mut GuestPtr) {
     guest_ptr.reset();
-}
-
-/// FFI entry point for `hypervisor::GuestPtr::as`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_guest_ptr_as(guest_ptr: &GuestPtr, type_size: usize) -> *mut c_void {
-    guest_ptr.as_raw_ptr(type_size)
 }
 
 /// FFI entry point for `hypervisor::GuestPhysicalAspace::Create`.
@@ -100,23 +94,4 @@ pub extern "C" fn rust_guest_physical_aspace_page_fault(
     guest_paddr: zx_gpaddr_t,
 ) -> Result<(), Status> {
     gpa.page_fault(guest_paddr)
-}
-
-/// FFI entry point for `hypervisor::GuestPhysicalAspace::CreateGuestPtr`.
-///
-/// # Safety
-///
-/// `name` must be a valid NUL-terminated C string.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_guest_physical_aspace_create_guest_ptr(
-    gpa: &mut GuestPhysicalAspace,
-    guest_paddr: zx_gpaddr_t,
-    len: usize,
-    name: *const c_char,
-    out: &mut GuestPtr,
-) -> Result<(), Status> {
-    // SAFETY: Caller guarantees `name` is a valid NUL-terminated C string.
-    let name_bytes = unsafe { CStr::from_ptr(name) }.to_bytes();
-    *out = gpa.create_guest_ptr(guest_paddr, len, name_bytes)?;
-    Ok(())
 }

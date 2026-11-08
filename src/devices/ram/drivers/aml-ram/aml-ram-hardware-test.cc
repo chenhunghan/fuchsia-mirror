@@ -48,7 +48,7 @@ class AmlRamHardwareTest : public zxtest::Test {
   static constexpr uint32_t kUnitTestIterations = 200;
   static constexpr uint32_t kUnitTestIterationsHighPrecision = 10'000;
 
-  // Test values taken from //src/developer/memory/monitor/monitor.cc.
+  // Test values taken from //src/memory/legacy/monitor/monitor.cc.
   static constexpr uint32_t kMemCyclesToMeasure = 792'000'000 / 20;
   static constexpr uint64_t kMemCyclesToMeasureHighPrecision = 792'000'000 / 1'000;
 

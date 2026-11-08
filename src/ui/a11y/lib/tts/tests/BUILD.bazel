@@ -1,0 +1,29 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_test_binary(
+    name = "tts_manager_tests",
+    srcs = ["tts_manager_unittest.cc"],
+    tags = ["manual"],
+    deps = [
+        "//sdk/fidl/fuchsia.accessibility.tts:fuchsia.accessibility.tts_hlcpp",
+        "//sdk/lib/sys/cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+        "//src/ui/a11y/lib/tts",
+    ],
+)
+
+# //src/ui/a11y/lib:a11y-lib-tests packages the GN cc_test_executable.
+# @bazel2gn:skip
+fx_unittest_package(
+    name = "tts-tests-package",
+    unit_tests = [":tts_manager_tests"],
+    visibility = ["//src/ui/a11y/lib:__pkg__"],
+)

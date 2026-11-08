@@ -4,13 +4,29 @@
 
 package(default_applicable_licenses = ["//:license"])
 
+# Diagnostics host tests defined in Bazel. These are exported to `fx test`
+# and infra builders through the `bazel_tests` target in
+# //src/diagnostics/BUILD.gn.
+test_suite(
+    name = "host_tests",
+    tests = [
+        "//src/developer/ffx/tools/triage:ffx_triage_lib_test",
+        "//src/diagnostics/lib/sampler-config:sampler-config_host_test",
+        "//src/diagnostics/tools/inspect-hierarchy-analyzer:inspect_hierarchy_analyzer_bin_test",
+        "//src/diagnostics/triage:triage_lib_test",
+        "//src/diagnostics/triage/build/triage_config_test_runner:triage_config_test_runner_test",
+    ],
+)
+
 # Diagnostics device tests defined in Bazel. These are exported to `fx test`
 # and infra builders through the `bazel_tests` target in
 # //src/diagnostics/BUILD.gn.
 test_suite(
     name = "target_tests",
-    target_compatible_with = ["@platforms//os:fuchsia"],
     tests = [
+        "//src/diagnostics/lib/log-command:log-command-test",
         "//src/diagnostics/lib/ring-buffer:ring-buffer-tests",
+        "//src/diagnostics/lib/sampler-config:sampler-config-tests",
+        "//src/diagnostics/tests/inspect-system:tests",
     ],
 )

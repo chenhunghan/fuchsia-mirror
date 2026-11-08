@@ -8,6 +8,7 @@ use super::handle::KernelHandle;
 use super::vm_address_region_dispatcher_ffi::cpp_vmar_dispatcher_create;
 use crate::counters::define_kcounter;
 use crate::kernel::types::VAddr;
+use crate::ksync_kernel::TrackedCriticalMutex;
 use crate::user_copy::UserInOutPtr;
 use crate::vm::arch_vm_aspace::{
     ARCH_MMU_FLAG_PERM_EXECUTE, ARCH_MMU_FLAG_PERM_READ, ARCH_MMU_FLAG_PERM_WRITE, ArchMmuFlags,
@@ -18,7 +19,7 @@ use crate::vm::vm_address_region::{
 };
 use crate::vm::vm_object::VmObject;
 use fbl::{Canary, RefPtr};
-use ksync::{KMutex, RawCriticalMutex, guarded};
+use ksync::{KMutex, guarded};
 use object_constants_rs as object_constants;
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
@@ -108,7 +109,7 @@ pub struct VmAddressRegionDispatcherState {
     vmar: RefPtr<VmAddressRegion>,
     base_arch_mmu_flags: ArchMmuFlags,
     #[mutex]
-    lock: KMutex<RawCriticalMutex>,
+    lock: KMutex<TrackedCriticalMutex>,
 }
 
 impl VmAddressRegionDispatcherState {
@@ -303,7 +304,10 @@ impl VmAddressRegionDispatcher {
             return Err(Status::INVALID_ARGS);
         }
 
-        state.vmar.protect(base, len, arch_mmu_flags, op_children)
+        // SAFETY: `VmAddressRegionDispatcher` only wraps user or guest address regions, so
+        // changing permissions or unmapping addresses within it cannot invalidate active kernel
+        // memory references.
+        unsafe { state.vmar.protect(base, len, arch_mmu_flags, op_children) }
     }
 
     /// Converts a syscall `ZX_VMAR_OP_*` code to a `RangeOpType`.

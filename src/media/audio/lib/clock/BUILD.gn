@@ -88,6 +88,9 @@ cc_test_executable("unittest_bin") {
 
 fuchsia_unittest_package("audio_lib_clock_unittests") {
   deps = [ ":unittest_bin" ]
+  test_specs = {
+    parallel = 4
+  }
 }
 
 group("tests") {

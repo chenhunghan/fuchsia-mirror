@@ -776,7 +776,7 @@ mod test {
     use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex, OnceLock};
     use std::time;
-    use target_behavior::{ConnectionBehavior, target_interface};
+    use target_behavior::{DirectConnector, target_interface};
     use target_connector::Connector;
     use test_case::test_case;
     use timeout::timeout;
@@ -1076,11 +1076,11 @@ mod test {
             .runtime_config("connectivity.enable_network", false)
     }
 
-    fn make_direct_connector_behavior(client: Arc<fdomain_client::Client>) -> ConnectionBehavior {
+    fn make_direct_connector(client: Arc<fdomain_client::Client>) -> DirectConnector {
         let resolution = ffx_target::Resolution::mock(move || {
             Ok(ffx_target::Connection::from_fdomain_client(client.clone()))
         });
-        ConnectionBehavior::fake_direct_connector(resolution)
+        DirectConnector::from_resolution_for_test(resolution)
     }
 
     async fn make_fake_rcs_proxy_connector(
@@ -1090,12 +1090,12 @@ mod test {
         let (fake_engine, _content) = FakeEngine::new();
         let (fdomain_client, _) = setup_fake_target(fake_repo, fake_engine);
 
-        let behavior = make_direct_connector_behavior(fdomain_client);
+        let connector = make_direct_connector(fdomain_client);
 
         let env =
             FhoEnvironment::new_with_args(&test_env.context, &["some", "repo", "start", "test"]);
         let target_env = target_interface(&env);
-        target_env.set_behavior_for_test(behavior);
+        target_env.set_behavior_for_test(connector);
 
         Connector::try_from_env(&env).await.expect("Could not make RCS test connector")
     }
@@ -1108,12 +1108,12 @@ mod test {
             target_source: None,
         };
         let resolution = ffx_target::Resolution::mock(move || Err(anyhow::anyhow!(err.clone())));
-        let behavior = ConnectionBehavior::fake_direct_connector(resolution);
+        let connector = DirectConnector::from_resolution_for_test(resolution);
 
         let env =
             FhoEnvironment::new_with_args(&test_env.context, &["some", "repo", "start", "test"]);
         let target_env = target_interface(&env);
-        target_env.set_behavior_for_test(behavior);
+        target_env.set_behavior_for_test(connector);
 
         Connector::try_from_env(&env).await.expect("Could not make RCS test connector")
     }
@@ -1126,12 +1126,12 @@ mod test {
             target_source: None,
         };
         let resolution = ffx_target::Resolution::mock(move || Err(anyhow::anyhow!(err.clone())));
-        let behavior = ConnectionBehavior::fake_direct_connector(resolution);
+        let connector = DirectConnector::from_resolution_for_test(resolution);
 
         let env =
             FhoEnvironment::new_with_args(&test_env.context, &["some", "repo", "start", "test"]);
         let target_env = target_interface(&env);
-        target_env.set_behavior_for_test(behavior);
+        target_env.set_behavior_for_test(connector);
 
         Connector::try_from_env(&env).await.expect("Could not make RCS test connector")
     }
@@ -1644,12 +1644,12 @@ mod test {
 
         let (fdomain_client, _) = setup_fake_target(fake_repo.clone(), fake_engine.clone());
 
-        let behavior = make_direct_connector_behavior(fdomain_client);
+        let connector = make_direct_connector(fdomain_client);
 
         let env =
             FhoEnvironment::new_with_args(&test_env.context, &["some", "repo", "start", "test"]);
         let target_env = target_interface(&env);
-        target_env.set_behavior_for_test(behavior);
+        target_env.set_behavior_for_test(connector);
 
         let tmp_port_file = tempfile::NamedTempFile::new().unwrap();
 
@@ -1791,12 +1791,12 @@ mod test {
 
         let (fdomain_client, _) = setup_fake_target(fake_repo.clone(), fake_engine.clone());
 
-        let behavior = make_direct_connector_behavior(fdomain_client);
+        let connector = make_direct_connector(fdomain_client);
 
         let env =
             FhoEnvironment::new_with_args(&test_env.context, &["some", "repo", "start", "test"]);
         let target_env = target_interface(&env);
-        target_env.set_behavior_for_test(behavior);
+        target_env.set_behavior_for_test(connector);
 
         let tmp_port_file = tempfile::NamedTempFile::new().unwrap();
         let tmp_port_file_path = tmp_port_file.path().to_owned();
@@ -2095,12 +2095,12 @@ mod test {
             setup_fake_target(fake_repo.clone(), fake_engine.clone());
         let socket_provider = fake_netstack.new_socket_provider();
 
-        let behavior = make_direct_connector_behavior(fdomain_client);
+        let connector = make_direct_connector(fdomain_client);
 
         let env =
             FhoEnvironment::new_with_args(&test_env.context, &["some", "repo", "start", "test"]);
         let target_env = target_interface(&env);
-        target_env.set_behavior_for_test(behavior);
+        target_env.set_behavior_for_test(connector);
 
         let (listen_addr, repo_host) = if direct_target_connection {
             (REPO_UNSPECIFIED_IPV4_ADDR, HOST_ADDR)
@@ -2293,12 +2293,12 @@ mod test {
 
         let (fdomain_client, _) = setup_fake_target(fake_repo.clone(), fake_engine.clone());
 
-        let behavior = make_direct_connector_behavior(fdomain_client);
+        let connector = make_direct_connector(fdomain_client);
 
         let env =
             FhoEnvironment::new_with_args(&test_env.context, &["some", "repo", "start", "test"]);
         let target_env = target_interface(&env);
-        target_env.set_behavior_for_test(behavior);
+        target_env.set_behavior_for_test(connector);
 
         // Prepare serving the repo without passing the trusted root, and
         // passing of the trusted root 2.root.json explicitly
@@ -2362,12 +2362,12 @@ mod test {
 
         let (fdomain_client, _) = setup_fake_target(fake_repo.clone(), fake_engine.clone());
 
-        let behavior = make_direct_connector_behavior(fdomain_client);
+        let connector = make_direct_connector(fdomain_client);
 
         let env =
             FhoEnvironment::new_with_args(&test_env.context, &["some", "repo", "start", "test"]);
         let target_env = target_interface(&env);
-        target_env.set_behavior_for_test(behavior);
+        target_env.set_behavior_for_test(connector);
 
         let serve_cmd_with_root = StartCommand {
             repository: Some(REPO_NAME.to_string()),

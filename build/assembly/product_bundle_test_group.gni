@@ -62,6 +62,14 @@ import("//build/python/python_action.gni")
 #   build_only (optional; default = false)
 #     [bool] If true, the tests in this group are built but not run.
 #
+#   dedupe_against (optional; default = [])
+#     [list of labels] Other product_bundle_test_group targets to deduplicate
+#     this group's tests against. If a test in this group would run in an
+#     environment that the same test also runs in from one of these groups,
+#     that environment is removed from this group's copy of the test. If no
+#     environments remain, the test is only built (not run) for this group.
+#     The listed groups must also be included in the build.
+#
 template("product_bundle_test_group") {
   assert(defined(invoker.tests) || defined(invoker.target_tests) ||
              defined(invoker.host_tests),
@@ -117,14 +125,19 @@ template("product_bundle_test_group") {
         _allowed_environments = invoker.allowed_environments
       }
       if (defined(invoker.default_environments)) {
-        assert(invoker.default_environments != [],
-               "'default_environments' cannot be empty if provided.")
         _default_environments = invoker.default_environments
         assert(_default_environments + _allowed_environments -
                    _allowed_environments == [],
                "default_environments must be a subset of allowed_environments")
       } else {
         _default_environments = _allowed_environments
+      }
+    }
+
+    _dedupe_against = []
+    if (defined(invoker.dedupe_against)) {
+      foreach(group_label, invoker.dedupe_against) {
+        _dedupe_against += [ get_label_info(group_label, "label_no_toolchain") ]
       }
     }
 
@@ -179,8 +192,10 @@ template("product_bundle_test_group") {
         tests_barrier = []
         pb_test_groups = [
           {
+            label = get_label_info(":${target_name}", "label_no_toolchain")
             product_bundle_name = _product_bundle_name
             build_only = _build_only
+            dedupe_against = _dedupe_against
             environments = _environments
             allowed_environments = _allowed_environments
             default_environments = _default_environments

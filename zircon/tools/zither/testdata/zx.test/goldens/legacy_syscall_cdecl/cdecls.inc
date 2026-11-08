@@ -9,6 +9,10 @@
 #error "<zircon/syscalls.h> is the public API header"
 #endif
 
+_ZX_SYSCALL_DECL(channel_create, zx_status_t, _ZX_SYSCALL_EXTERN_C, 3, (options, out0, out1),
+                 (uint32_t options, _ZX_SYSCALL_ANNO(acquire_handle("Fuchsia")) zx_handle_t* out0,
+                  _ZX_SYSCALL_ANNO(acquire_handle("Fuchsia")) zx_handle_t* out1))
+
 _ZX_SYSCALL_DECL(
     channel_read, zx_status_t, _ZX_SYSCALL_EXTERN_C, 8,
     (handle, options, bytes, handles, num_bytes, num_handles, actual_bytes, actual_handles),

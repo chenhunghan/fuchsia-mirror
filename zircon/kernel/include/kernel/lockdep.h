@@ -56,7 +56,11 @@ using lockdep::NullGuard;
   LOCK_DEP_SINGLETON_LOCK_WRAPPER(name, global_lock, ##__VA_ARGS__)
 
 #if WITH_LOCK_DEP
+#include <kernel/ffi.h>
+
 extern "C" {
+void cpp_lockdep_thread_lock_state_init(ffi::Uninitialized<lockdep::ThreadLockState>* out);
+void cpp_lockdep_system_init_thread_lock_state(lockdep::ThreadLockState* state);
 void* cpp_lockdep_iter_begin();
 void* cpp_lockdep_iter_next(void* state);
 const char* cpp_lockdep_state_name(const void* state);

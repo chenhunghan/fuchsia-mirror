@@ -16,3 +16,11 @@ fuchsia_prebuilt_package(
         "meta/ufs-pdev.cm",
     ],
 )
+
+fuchsia_prebuilt_package(
+    name = "ufs_rust_pdev_package",
+    archive = "@gn_targets//src/devices/block/drivers/ufs:ufs-rust-pdev-package",
+    drivers = [
+        "meta/ufs-rust-pdev.cm",
+    ],
+)

@@ -25,6 +25,7 @@
 #include "src/developer/debug/zxdb/symbols/function.h"
 #include "src/developer/debug/zxdb/symbols/identifier.h"
 #include "src/developer/debug/zxdb/symbols/modified_type.h"
+#include "src/developer/debug/zxdb/symbols/symbol_utils.h"
 #include "src/developer/debug/zxdb/symbols/template_parameter.h"
 #include "src/lib/fxl/memory/ref_ptr.h"
 #include "src/lib/fxl/strings/split_string.h"
@@ -74,10 +75,6 @@ class FuchsiaAsyncRustTask : public AsyncTask {
   std::vector<NamedValue> values_;
   std::vector<std::unique_ptr<AsyncTask>> children_;
 };
-
-std::string_view StripTemplate(std::string_view type_name) {
-  return type_name.substr(0, type_name.find('<'));
-}
 
 bool IsAsyncFunctionOrBlock(Type* type) {
   if (type->GetIdentifier().components().empty())

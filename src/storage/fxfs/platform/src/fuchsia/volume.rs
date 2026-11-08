@@ -78,10 +78,6 @@ pub struct MemoryPressureLevelConfig {
 
     /// The limit of cached nodes.
     pub cache_size_limit: usize,
-
-    /// The initial delay before the background task runs. The background task has a longer initial
-    /// delay to avoid running the task during boot.
-    pub background_task_initial_delay: Duration,
 }
 
 impl Default for MemoryPressureLevelConfig {
@@ -89,7 +85,6 @@ impl Default for MemoryPressureLevelConfig {
         Self {
             background_task_period: Duration::from_secs(20),
             cache_size_limit: DIRENT_CACHE_LIMIT,
-            background_task_initial_delay: Duration::from_secs(70),
         }
     }
 }
@@ -124,17 +119,14 @@ impl Default for MemoryPressureConfig {
             mem_normal: MemoryPressureLevelConfig {
                 background_task_period: Duration::from_secs(20),
                 cache_size_limit: DIRENT_CACHE_LIMIT,
-                background_task_initial_delay: Duration::from_secs(70),
             },
             mem_warning: MemoryPressureLevelConfig {
                 background_task_period: Duration::from_secs(5),
                 cache_size_limit: 100,
-                background_task_initial_delay: Duration::from_secs(5),
             },
             mem_critical: MemoryPressureLevelConfig {
                 background_task_period: Duration::from_millis(1500),
                 cache_size_limit: 20,
-                background_task_initial_delay: Duration::from_millis(1500),
             },
         }
     }
@@ -447,7 +439,7 @@ impl FxVolume {
     }
 
     /// Replays a profile if one exists, and only records if one does not exist.
-    pub async fn replay_xor_record_profile(
+    pub async fn record_xor_replay_profile(
         self: &Arc<Self>,
         mut state: Box<dyn ProfileState>,
         node: OpenedNode<dyn FxNode>,
@@ -732,8 +724,7 @@ impl FxVolume {
         let mut terminate = terminate.fuse();
         // Default to the normal period until updates come from the `level_stream`.
         let mut level = MemoryPressureLevel::Normal;
-        let mut timer =
-            pin!(fasync::Timer::new(config.for_level(&level).background_task_initial_delay));
+        let mut timer = pin!(fasync::Timer::new(config.for_level(&level).background_task_period));
 
         loop {
             let mut should_terminate = false;
@@ -1082,18 +1073,6 @@ impl FxVolume {
                 DebugRequest::Compact { responder } => {
                     responder.send(Err(zx::Status::NOT_SUPPORTED.into_raw()))?;
                 }
-                DebugRequest::DeleteProfile { responder, .. } => {
-                    responder.send(Err(zx::Status::NOT_SUPPORTED.into_raw()))?;
-                }
-                DebugRequest::RecordAndReplayProfile { responder, .. } => {
-                    responder.send(Err(zx::Status::NOT_SUPPORTED.into_raw()))?;
-                }
-                DebugRequest::ReplayXorRecordProfile { responder, .. } => {
-                    responder.send(Err(zx::Status::NOT_SUPPORTED.into_raw()))?;
-                }
-                DebugRequest::StopProfileTasks { responder } => {
-                    responder.send(Err(zx::Status::NOT_SUPPORTED.into_raw()))?;
-                }
             }
         }
         Ok(())
@@ -1129,14 +1108,14 @@ impl FxVolume {
         // At least one of them needs to be around to return anything.
         ensure!(limit.is_some() || usage.is_some(), FxfsError::NotFound);
         Ok((
-            limit.map_or_else(
-                || BytesAndNodes { bytes: u64::MAX, nodes: u64::MAX },
-                |v| BytesAndNodes { bytes: v.0, nodes: v.1 },
-            ),
-            usage.map_or_else(
-                || BytesAndNodes { bytes: 0, nodes: 0 },
-                |v| BytesAndNodes { bytes: v.0, nodes: v.1 },
-            ),
+            limit.map_or(BytesAndNodes { bytes: u64::MAX, nodes: u64::MAX }, |v| BytesAndNodes {
+                bytes: v.0,
+                nodes: v.1,
+            }),
+            usage.map_or(BytesAndNodes { bytes: 0, nodes: 0 }, |v| BytesAndNodes {
+                bytes: v.0,
+                nodes: v.1,
+            }),
         ))
     }
 }
@@ -1326,7 +1305,7 @@ mod tests {
     use fuchsia_component_client::connect_to_protocol_at_dir_svc;
     use fuchsia_fs::file;
     use fxfs::filesystem::{FxFilesystem, FxFilesystemBuilder};
-    use fxfs::fsck::{fsck, fsck_volume};
+    use fxfs::fsck::{FsckOptions, fsck, fsck_volume, fsck_volume_with_options, fsck_with_options};
     use fxfs::object_store::directory::replace_child;
     use fxfs::object_store::transaction::{LockKey, Options, lock_keys};
     use fxfs::object_store::volume::root_volume;
@@ -1666,7 +1645,6 @@ mod tests {
                 MemoryPressureConfig {
                     mem_normal: MemoryPressureLevelConfig {
                         background_task_period: Duration::from_millis(100),
-                        background_task_initial_delay: Duration::from_millis(100),
                         ..Default::default()
                     },
                     mem_warning: Default::default(),
@@ -1746,7 +1724,6 @@ mod tests {
                 mem_warning: MemoryPressureLevelConfig {
                     background_task_period: Duration::from_millis(100),
                     cache_size_limit: 100,
-                    background_task_initial_delay: Duration::from_millis(100),
                     ..Default::default()
                 },
                 mem_critical: MemoryPressureLevelConfig {
@@ -2631,7 +2608,16 @@ mod tests {
 
             let BytesAndNodes { nodes, .. } =
                 project_proxy.info(PROJECT_ID).await.unwrap().expect("Fetching project info").1;
+            assert_eq!(nodes, 4);
+
+            // Closing the unnamed temporary file queues it to be reaped in the graveyard; flush
+            // the graveyard before unmounting so we verify project usage and fsck after reaping.
+            file::close(tmpfile_proxy).await.expect("close tmpfile failed");
+            filesystem.graveyard().flush().await;
+            let BytesAndNodes { nodes, .. } =
+                project_proxy.info(PROJECT_ID).await.unwrap().expect("Fetching project info").1;
             assert_eq!(nodes, 3);
+
             volumes_directory.terminate().await;
             filesystem.close().await.expect("close filesystem failed");
         }
@@ -2639,10 +2625,16 @@ mod tests {
         device.ensure_unique();
         device.reopen(false);
         let filesystem = FxFilesystem::open(device as DeviceHolder).await.unwrap();
-        fsck(filesystem.clone()).await.expect("Fsck");
-        fsck_volume(filesystem.as_ref(), volume_store_id, Some(Arc::new(new_insecure_crypt())))
-            .await
-            .expect("Fsck volume");
+        let options = FsckOptions { fail_on_warning: true, ..Default::default() };
+        fsck_with_options(filesystem.clone(), &options).await.expect("Fsck");
+        fsck_volume_with_options(
+            filesystem.as_ref(),
+            &options,
+            volume_store_id,
+            Some(Arc::new(new_insecure_crypt())),
+        )
+        .await
+        .expect("Fsck volume");
         filesystem.close().await.expect("close filesystem failed");
     }
 

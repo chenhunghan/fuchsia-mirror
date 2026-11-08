@@ -30,8 +30,8 @@ use netstack3_base::{
 };
 use netstack3_filter::{DynTransportSerializer, DynamicTransportSerializer, FilterIpExt};
 use packet::{
-    BufferMut, InnerPacketBuilder as _, NestablePacketBuilder as _, ParsablePacket as _,
-    ParseBuffer, TruncateDirection, TruncatingSerializer,
+    Buf, BufferMut, InnerPacketBuilder as _, NestablePacketBuilder as _, ParsablePacket as _,
+    ParseBuffer, ShrinkBuffer as _, TruncateDirection, TruncatingSerializer,
 };
 use packet_formats::icmp::ndp::options::{NdpOption, NdpOptionBuilder};
 use packet_formats::icmp::ndp::{
@@ -43,8 +43,8 @@ use packet_formats::icmp::{
     IcmpPacketBuilder, IcmpPacketRaw, IcmpParseArgs, IcmpTimeExceeded, IcmpZeroCode,
     Icmpv4DestUnreachableCode, Icmpv4Packet, Icmpv4ParameterProblem, Icmpv4ParameterProblemCode,
     Icmpv4TimeExceededCode, Icmpv6DestUnreachableCode, Icmpv6Packet, Icmpv6PacketTooBig,
-    Icmpv6ParameterProblem, Icmpv6ParameterProblemCode, Icmpv6TimeExceededCode, MessageBody,
-    OriginalPacket, peek_message_type,
+    Icmpv6ParameterProblem, Icmpv6ParameterProblemCode, Icmpv6TimeExceededCode, OriginalPacket,
+    peek_message_type,
 };
 use packet_formats::ip::{DscpAndEcn, Ipv4Proto, Ipv6Proto};
 use packet_formats::ipv4::Ipv4Header;
@@ -66,7 +66,7 @@ use crate::internal::device::{
 };
 use crate::internal::icmp::counters::{IcmpCountersIpExt, IcmpRxCounters, IcmpTxCounters};
 use crate::internal::local_delivery::{IpHeaderInfo, LocalDeliveryPacketInfo, ReceiveIpPacketMeta};
-use crate::internal::path_mtu::PmtuHandler;
+use crate::internal::path_mtu::{PmtuDstAddr, PmtuHandler, PmtuSrcAddr};
 use crate::internal::socket::{
     DelegatedRouteResolutionOptions, DelegatedSendOptions, IpSocketArgs, IpSocketHandler,
     OptionDelegationMarker, RouteResolutionOptions, SendOptions,
@@ -675,7 +675,7 @@ impl<BC: IcmpBindingsContext, CC: IcmpSendContext<Ipv4, BC> + CounterContext<Icm
         frame_dst: Option<LocalFrameDestination>,
         src_ip: SocketIpAddr<Ipv4Addr>,
         dst_ip: SocketIpAddr<Ipv4Addr>,
-        original_packet: B,
+        mut original_packet: B,
         icmp_error: Icmpv4Error,
         header_len: usize,
         proto: Ipv4Proto,
@@ -697,7 +697,7 @@ impl<BC: IcmpBindingsContext, CC: IcmpSendContext<Ipv4, BC> + CounterContext<Icm
             src_ip,
             dst_ip,
             icmp_error.create_message(),
-            original_packet,
+            Buf::new(original_packet.as_mut(), ..),
             header_len,
             marks,
         );
@@ -714,7 +714,7 @@ impl<BC: IcmpBindingsContext, CC: IcmpSendContext<Ipv6, BC> + CounterContext<Icm
         frame_dst: Option<LocalFrameDestination>,
         src_ip: SocketIpAddr<Ipv6Addr>,
         dst_ip: SocketIpAddr<Ipv6Addr>,
-        original_packet: B,
+        mut original_packet: B,
         error: Icmpv6Error,
         header_len: usize,
         proto: Ipv6Proto,
@@ -736,7 +736,7 @@ impl<BC: IcmpBindingsContext, CC: IcmpSendContext<Ipv6, BC> + CounterContext<Icm
             src_ip,
             dst_ip,
             error.create_message(),
-            original_packet,
+            Buf::new(original_packet.as_mut(), ..),
             error.allow_dst_multicast(),
             marks,
         )
@@ -931,6 +931,7 @@ impl<
     BC: IcmpBindingsContext,
     CC: InnerIcmpv4Context<BC>
         + PmtuHandler<Ipv4, BC>
+        + IpDeviceIngressStateContext<Ipv4>
         + CounterContext<IcmpRxCounters<Ipv4>>
         + CounterContext<IcmpTxCounters<Ipv4>>,
 > IpTransportContext<Ipv4, BC, CC> for IcmpIpTransportContext
@@ -1139,80 +1140,83 @@ impl<
                 let error = if dest_unreachable.code()
                     == Icmpv4DestUnreachableCode::FragmentationRequired
                 {
-                    let mtu = if let Some(next_hop_mtu) = dest_unreachable.message().next_hop_mtu()
-                    {
-                        // We are updating the path MTU from the destination
-                        // address of this `packet` (which is an IP address on
-                        // this node) to some remote (identified by the source
-                        // address of this `packet`).
-                        //
-                        // `update_pmtu_if_less` will only update the PMTU if
-                        // the Dest Unreachable message's MTU field had a value
-                        // that was at least the IPv4 minimum MTU (which is
-                        // required by IPv4 RFC 791).
-                        core_ctx.update_pmtu_if_less(
-                            bindings_ctx,
-                            dst_ip.get(),
-                            src_ip.get(),
-                            Mtu::new(u32::from(next_hop_mtu.get())),
-                        )
-                    } else {
-                        // If the Next-Hop MTU from an incoming ICMP message is
-                        // `0`, then we assume the source node of the ICMP
-                        // message does not implement RFC 1191 and therefore
-                        // does not actually use the Next-Hop MTU field and
-                        // still considers it as an unused field.
-                        //
-                        // In this case, the only information we have is the
-                        // size of the original IP packet that was too big (the
-                        // original packet header should be included in the ICMP
-                        // response). Here we will simply reduce our PMTU
-                        // estimate to a value less than the total length of the
-                        // original packet. See RFC 1191 Section 5.
-                        //
-                        // `update_pmtu_next_lower` may return an error, but it
-                        // will only happen if no valid lower value exists from
-                        // the original packet's length. It is safe to silently
-                        // ignore the error when we have no valid lower PMTU
-                        // value as the node from `src_ip` would not be IP RFC
-                        // compliant and we expect this to be very rare (for
-                        // IPv4, the lowest MTU value for a link can be 68
-                        // bytes).
-                        let (original_packet_buf, inner_body) = dest_unreachable.body().bytes();
-                        // Note: ICMP Dest Unreachable messages don't have a variable size body.
-                        debug_assert!(inner_body.is_none());
-                        if original_packet_buf.len() >= 4 {
-                            // We need the first 4 bytes as the total length
-                            // field is at bytes 2/3 of the original packet
-                            // buffer.
-                            let total_len =
-                                u16::from_be_bytes(original_packet_buf[2..4].try_into().unwrap());
+                    // PMTUD applies to the path between the source and
+                    // destination of the original packet. Ignore the source
+                    // of the ICMP packet, which may well be an intermediate
+                    // router.
+                    let mtu = dest_unreachable.with_original_packet(|res| match res {
+                        Ok(original_packet) => {
+                            let (src_ip, dst_ip) = pmtu_path_from_original_packet::<Ipv4, _>(
+                                core_ctx,
+                                device,
+                                original_packet.src_ip(),
+                                original_packet.dst_ip(),
+                            )?;
+                            if let Some(next_hop_mtu) = dest_unreachable.message().next_hop_mtu() {
+                                // `update_pmtu_if_less` will only update the
+                                // PMTU if the Dest Unreachable message's MTU
+                                // field had a value that was at least the IPv4
+                                // minimum MTU (which is required by IPv4 RFC
+                                // 791).
+                                core_ctx.update_pmtu_if_less(
+                                    bindings_ctx,
+                                    src_ip,
+                                    dst_ip,
+                                    Mtu::new(u32::from(next_hop_mtu.get())),
+                                )
+                            } else {
+                                // If the Next-Hop MTU from an incoming ICMP
+                                // message is `0`, then we assume the source
+                                // node of the ICMP message does not implement
+                                // RFC 1191 and therefore does not actually use
+                                // the Next-Hop MTU field and still considers it
+                                // as an unused field.
+                                //
+                                // In this case, the only information we have is
+                                // the size of the original IP packet that was
+                                // too big (the original packet header should be
+                                // included in the ICMP response). Here we will
+                                // simply reduce our PMTU estimate to a value
+                                // less than the total length of the original
+                                // packet. See RFC 1191 Section 5.
+                                //
+                                // `update_pmtu_next_lower` may return an error,
+                                // but it will only happen if no valid lower
+                                // value exists from the original packet's
+                                // length. It is safe to silently ignore the
+                                // error when we have no valid lower PMTU value
+                                // as the node from `src_ip` would not be IP RFC
+                                // compliant and we expect this to be very rare
+                                // (for IPv4, the lowest MTU value for a link
+                                // can be 68 bytes).
+                                let total_len = original_packet.total_len();
 
-                            trace!(
-                                "<IcmpIpTransportContext as IpTransportContext<Ipv4>>::\
-                                receive_ip_packet: Next-Hop MTU is 0 so using the next best PMTU \
-                                value from {total_len}"
-                            );
+                                trace!(
+                                    "<IcmpIpTransportContext as IpTransportContext<Ipv4>>::\
+                                    receive_ip_packet: Next-Hop MTU is 0 so using the next best \
+                                    PMTU value from {total_len}"
+                                );
 
-                            core_ctx.update_pmtu_next_lower(
-                                bindings_ctx,
-                                dst_ip.get(),
-                                src_ip.get(),
-                                Mtu::new(u32::from(total_len)),
-                            )
-                        } else {
+                                core_ctx.update_pmtu_next_lower(
+                                    bindings_ctx,
+                                    src_ip,
+                                    dst_ip,
+                                    Mtu::new(u32::from(total_len)),
+                                )
+                            }
+                        }
+                        Err(_) => {
                             // Ok to silently ignore as RFC 792 requires nodes
                             // to send the original IP packet header + 64 bytes
                             // of the original IP packet's body so the node
                             // itself is already violating the RFC.
-                            trace!(
-                                "<IcmpIpTransportContext as IpTransportContext<Ipv4>>::\
-                                receive_ip_packet: Original packet buf is too small to get \
-                                original packet len so ignoring"
+                            debug!(
+                                "Ignoring Fragmentation Required with an unparseable original \
+                                IPv4 packet"
                             );
                             None
                         }
-                    };
+                    });
                     mtu.and_then(|mtu| {
                         let mtu = u16::try_from(mtu.get()).unwrap_or(u16::MAX);
                         let mtu = NonZeroU16::new(mtu)?;
@@ -1792,6 +1796,8 @@ fn receive_ndp_packet<
                 p.message().router_lifetime().map(NonZeroNdpLifetime::Finite),
             );
 
+            Ipv6DeviceHandler::handle_router_advertisement(core_ctx, bindings_ctx, &device_id, p);
+
             for option in p.body().iter() {
                 match option {
                     NdpOption::TargetLinkLayerAddress(_)
@@ -2091,31 +2097,43 @@ impl<
                 trace!(
                     "<IcmpIpTransportContext as IpTransportContext<Ipv6>>::receive_ip_packet: Received a Packet Too Big message"
                 );
-                if let Ipv6SourceAddr::Unicast(src_ip) = src_ip {
-                    // We are updating the path MTU from the destination address
-                    // of this `packet` (which is an IP address on this node) to
-                    // some remote (identified by the source address of this
-                    // `packet`).
-                    //
-                    // `update_pmtu_if_less` will only update the PMTU if the
-                    // Packet Too Big message's MTU field had a value that was
-                    // at least the IPv6 minimum MTU (which is required by IPv6
-                    // RFC 8200).
-                    let mtu = core_ctx.update_pmtu_if_less(
-                        bindings_ctx,
-                        dst_ip.get(),
-                        src_ip.get(),
-                        Mtu::new(packet_too_big.message().mtu()),
-                    );
-                    if let Some(mtu) = mtu {
-                        receive_icmpv6_error(
+                // PMTUD applies to the path between the source and
+                // destination of the original packet. Ignore the source
+                // of the ICMP packet, which may well be an intermediate
+                // router.
+                //
+                // `update_pmtu_if_less` will only update the PMTU if the
+                // Packet Too Big message's MTU field had a value that was
+                // at least the IPv6 minimum MTU (which is required by IPv6
+                // RFC 8200).
+                let mtu = packet_too_big.with_original_packet(|res| match res {
+                    Ok(original_packet) => {
+                        let (src_ip, dst_ip) = pmtu_path_from_original_packet::<Ipv6, _>(
                             core_ctx,
-                            bindings_ctx,
                             device,
-                            &packet_too_big,
-                            Icmpv6ErrorCode::PacketTooBig(mtu),
-                        );
+                            original_packet.src_ip(),
+                            original_packet.dst_ip(),
+                        )?;
+                        core_ctx.update_pmtu_if_less(
+                            bindings_ctx,
+                            src_ip,
+                            dst_ip,
+                            Mtu::new(packet_too_big.message().mtu()),
+                        )
                     }
+                    Err(_) => {
+                        debug!("Ignoring Packet Too Big with an unparseable original IPv6 packet");
+                        None
+                    }
+                });
+                if let Some(mtu) = mtu {
+                    receive_icmpv6_error(
+                        core_ctx,
+                        bindings_ctx,
+                        device,
+                        &packet_too_big,
+                        Icmpv6ErrorCode::PacketTooBig(mtu),
+                    );
                 }
             }
             Icmpv6Packet::Mld(packet) => {
@@ -2239,6 +2257,48 @@ fn send_icmp_reply<I, BC, CC, S, F, O>(
         })
 }
 
+/// Validates the addresses of the original packet included in a PMTU error
+/// (IPv4 Fragmentation Required or IPv6 Packet Too Big) received on `device`,
+/// returning the path they identify.
+///
+/// The original packet must have been sent by this node for the error to be
+/// meaningful, so its source must be a unicast address assigned to `device`.
+/// Its destination must be a valid socket address (specified and non-mapped),
+/// and may be multicast: PMTUD applies to multicast as well as unicast
+/// destinations (RFC 8201 section 1).
+///
+/// Returns `None` if the addresses do not meet these requirements, in which
+/// case the error should be ignored.
+fn pmtu_path_from_original_packet<I: IpLayerIpExt, CC: IpDeviceIngressStateContext<I>>(
+    core_ctx: &mut CC,
+    device: &CC::DeviceId,
+    original_src_ip: I::Addr,
+    original_dst_ip: I::Addr,
+) -> Option<(PmtuSrcAddr<I::Addr>, PmtuDstAddr<I::Addr>)> {
+    let Some(src_ip) = PmtuSrcAddr::new(original_src_ip) else {
+        debug!("ignoring PMTU error for original packet with invalid source {original_src_ip}");
+        return None;
+    };
+    let Some(dst_ip) = PmtuDstAddr::new(original_dst_ip) else {
+        debug!(
+            "ignoring PMTU error for original packet with invalid destination {original_dst_ip}"
+        );
+        return None;
+    };
+    let assigned = match core_ctx.address_status_for_device(src_ip.into(), device) {
+        AddressStatus::Present(status) => crate::internal::base::is_unicast_assigned::<I>(&status),
+        AddressStatus::Unassigned => false,
+    };
+    if !assigned {
+        debug!(
+            "ignoring PMTU error for path {src_ip} -> {dst_ip}: source is not assigned to \
+            {device:?}"
+        );
+        return None;
+    }
+    Some((src_ip, dst_ip))
+}
+
 /// Receive an ICMP(v4) error message.
 ///
 /// `receive_icmpv4_error` handles an incoming ICMP error message by parsing the
@@ -2333,7 +2393,10 @@ fn receive_icmpv6_error<
     })
 }
 
-fn send_icmpv4_error_message<B, BC, CC>(
+// NB: Use a concrete `Buf<&mut [u8]>` instead of being generic over `B:
+// BufferMut` to avoid extra monomorphization. Care must be taken to avoid
+// monomorphization explosion if we're to move away from the slice form.
+fn send_icmpv4_error_message<BC, CC>(
     core_ctx: &mut CC,
     bindings_ctx: &mut BC,
     device: Option<&CC::DeviceId>,
@@ -2341,11 +2404,10 @@ fn send_icmpv4_error_message<B, BC, CC>(
     original_src_ip: SocketIpAddr<Ipv4Addr>,
     original_dst_ip: SocketIpAddr<Ipv4Addr>,
     message: Icmpv4ErrorMessage,
-    mut original_packet: B,
+    mut original_packet: Buf<&mut [u8]>,
     header_len: usize,
     marks: &Marks,
 ) where
-    B: BufferMut,
     BC: IcmpBindingsContext,
     CC: IcmpSendContext<Ipv4, BC> + CounterContext<IcmpTxCounters<Ipv4>>,
 {
@@ -2400,7 +2462,10 @@ fn send_icmpv4_error_message<B, BC, CC>(
     }
 }
 
-fn send_icmpv6_error_message<B, BC, CC>(
+// NB: Use a concrete `Buf<&mut [u8]>` instead of being generic over `B:
+// BufferMut` to avoid extra monomorphization. Care must be taken to avoid
+// monomorphization explosion if we're to move away from the slice form.
+fn send_icmpv6_error_message<BC, CC>(
     core_ctx: &mut CC,
     bindings_ctx: &mut BC,
     device: Option<&CC::DeviceId>,
@@ -2408,11 +2473,10 @@ fn send_icmpv6_error_message<B, BC, CC>(
     original_src_ip: SocketIpAddr<Ipv6Addr>,
     original_dst_ip: SocketIpAddr<Ipv6Addr>,
     message: Icmpv6ErrorMessage,
-    original_packet: B,
+    original_packet: Buf<&mut [u8]>,
     allow_dst_multicast: bool,
     marks: &Marks,
 ) where
-    B: BufferMut,
     BC: IcmpBindingsContext,
     CC: IcmpSendContext<Ipv6, BC> + CounterContext<IcmpTxCounters<Ipv6>>,
 {
@@ -2713,11 +2777,14 @@ mod tests {
     use packet_formats::utils::NonZeroDuration;
 
     use super::*;
-    use crate::internal::base::{IpDeviceEgressStateContext, RouterAdvertisementEvent};
+    use crate::internal::base::{
+        IpDeviceEgressStateContext, Ipv4PresentAddressStatus, RouterAdvertisementEvent,
+    };
     use crate::internal::gso::MaybeSegmentableTransportSerializer;
     use crate::internal::socket::testutil::{FakeDeviceConfig, FakeIpSocketCtx};
     use crate::internal::socket::{
         IpSock, IpSockCreationError, IpSockSendError, IpSocketHandler, SendOptions,
+        TransportGsoInfo,
     };
     use crate::socket::RouteResolutionOptions;
 
@@ -3120,6 +3187,7 @@ mod tests {
             bindings_ctx: &mut FakeIcmpBindingsCtx<I>,
             socket: &IpSock<I, Self::WeakDeviceId>,
             body: S,
+            gso_info: Option<TransportGsoInfo>,
             options: &O,
             tx_meta: FakeTxMetadata,
         ) -> Result<(), IpSockSendError>
@@ -3128,7 +3196,14 @@ mod tests {
             S::Buffer: BufferMut,
             O: SendOptions<I> + RouteResolutionOptions<I>,
         {
-            self.ip_socket_ctx.send_ip_packet(bindings_ctx, socket, body, options, tx_meta)
+            self.ip_socket_ctx.send_ip_packet(
+                bindings_ctx,
+                socket,
+                body,
+                gso_info,
+                options,
+                tx_meta,
+            )
         }
 
         fn confirm_reachable<O>(
@@ -3177,6 +3252,16 @@ mod tests {
         }
 
         fn get_hop_limit(&mut self, _device_id: &Self::DeviceId) -> NonZeroU8 {
+            unimplemented!()
+        }
+    }
+
+    impl IpDeviceIngressStateContext<Ipv4> for FakeIcmpCoreCtx<Ipv4> {
+        fn address_status_for_device(
+            &mut self,
+            _addr: SpecifiedAddr<Ipv4Addr>,
+            _device_id: &Self::DeviceId,
+        ) -> AddressStatus<Ipv4PresentAddressStatus> {
             unimplemented!()
         }
     }
@@ -3241,6 +3326,15 @@ mod tests {
             _dst_ip: SpecifiedAddr<Ipv6Addr>,
             _packet: MldPacket<B>,
             _header_info: &H,
+        ) {
+            unimplemented!()
+        }
+
+        fn handle_router_advertisement<B: SplitByteSlice>(
+            &mut self,
+            _bindings_ctx: &mut FakeIcmpBindingsCtx<Ipv6>,
+            _device_id: &Self::DeviceId,
+            _packet: &IcmpPacket<Ipv6, B, packet_formats::icmp::ndp::RouterAdvertisement>,
         ) {
             unimplemented!()
         }

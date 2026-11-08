@@ -8,17 +8,19 @@ import copy
 import dataclasses
 import json
 import os
-import sys
 import tempfile
 import typing as T
 from pathlib import Path
 
+from build.bazel.scripts import (
+    bazel_action_utils,
+    bazel_test_packages,
+    build_utils,
+    workspace_utils,
+)
+from build.bazel.scripts.build_utils import BazelLauncher, BazelPaths
+
 _SCRIPT_DIR = Path(__file__).parent
-sys.path.append(str(_SCRIPT_DIR))
-import bazel_action_utils
-import build_utils
-import workspace_utils
-from build_utils import BazelLauncher, BazelPaths
 
 # A single tests.json entry.
 TestSpec = dict[str, T.Any]
@@ -457,8 +459,11 @@ def _generate_device_tests_json(
         # LINT.IfChange(device_cquery_output_schema)
         label = cquery_test["label"]
         normalized_label = _normalize_label(label)
-        package_manifest = _execroot_path_to_ninja_path(
-            bazel_paths, cquery_test["package_manifest_execroot_path"]
+        # Point consumers at the copy of the package that //build/bazel/target_tests
+        # exports to the Ninja build directory, rather than at the Bazel
+        # output base, where a later Bazel invocation may delete its files.
+        package_manifest = bazel_test_packages.export_path_for_manifest(
+            cquery_test["package_manifest_execroot_path"]
         )
         package_manifests.append(package_manifest)
 
@@ -490,8 +495,16 @@ def _generate_device_tests_json(
                     "max_severity": cquery_test.get("max_log_severity", "WARN")
                 },
             }
+            if cquery_test.get("min_log_severity"):
+                test_entry["log_settings"]["min_severity"] = cquery_test[
+                    "min_log_severity"
+                ]
             if test_component.get("realm"):
                 test_entry["realm"] = test_component["realm"]
+            if cquery_test.get("create_no_exception_channel"):
+                test_entry["create_no_exception_channel"] = True
+            if cquery_test.get("parallel"):
+                test_entry["parallel"] = cquery_test["parallel"]
             test_dict: TestSpec = {
                 "expects_ssh": True,
                 "test": test_entry,
@@ -630,23 +643,30 @@ def _main_workspace_build_files(
 # `_write_target_tests_gn_targets_dir` once `cmc` and `package-tool` are
 # migrated to Bazel and `fx_package()` no longer depends on `@gn_targets`.
 def _write_target_tests_gn_targets_dir(bazel_paths: BazelPaths) -> Path:
-    """Populate `build/bazel/tests_json.gn_targets` from `//build/bazel/target_tests`."""
+    """Populate `build/bazel/tests_json.gn_targets` from `//build/bazel/{target,host}_tests`."""
     target_infos_file = bazel_paths.ninja_build_dir / "bazel_target_infos.json"
     bazel_target_infos = json.loads(target_infos_file.read_text())
     # LINT.IfChange(target_tests_bazel_target)
     target_tests_label = "//build/bazel/target_tests:target_tests_stamp"
     # LINT.ThenChange(//build/bazel/target_tests/BUILD.gn:target_tests_bazel_target)
-    manifests = sorted(
-        {
-            bazel_paths.ninja_build_dir / info["gn_targets_manifest"]
-            for info in bazel_target_infos
-            if info["bazel_target"] == target_tests_label
-        }
-    )
-    if not manifests:
+    # LINT.IfChange(host_tests_bazel_target)
+    host_tests_label = "//build/bazel/host_tests:host_tests_stamp"
+    # LINT.ThenChange(//build/bazel/host_tests/BUILD.gn:host_tests_bazel_target)
+    target_tests_manifests = {
+        bazel_paths.ninja_build_dir / info["gn_targets_manifest"]
+        for info in bazel_target_infos
+        if info["bazel_target"] == target_tests_label
+    }
+    if not target_tests_manifests:
         raise RuntimeError(
             f"No entry for {target_tests_label} found in {target_infos_file}"
         )
+    host_tests_manifests = {
+        bazel_paths.ninja_build_dir / info["gn_targets_manifest"]
+        for info in bazel_target_infos
+        if info["bazel_target"] == host_tests_label
+    }
+    manifests = sorted(target_tests_manifests | host_tests_manifests)
 
     # LINT.IfChange(tests_json_gn_targets_dir)
     gn_targets_dir = (
@@ -698,9 +718,7 @@ def write_bazel_test_packages_list(
     `export_bazel_tests = false`, so that downstream consumers can always load
     it as valid JSON.
     """
-    # LINT.IfChange(bazel_test_packages_list)
-    output = ninja_build_dir / "bazel_test_packages.list"
-    # LINT.ThenChange(//scripts/fxtest/python/main.py:bazel_test_packages_list)
+    output = ninja_build_dir / bazel_test_packages.PACKAGES_LIST
     content = (
         json.dumps(
             {"content": {"manifests": package_manifests}, "version": "1"},

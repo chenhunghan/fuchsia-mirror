@@ -1,0 +1,20 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        "//tools/devshell/fx_cli:builder_test",
+        "//tools/devshell/fx_cli:locator_test",
+        "//tools/devshell/fx_cli:registry_test",
+        "//tools/devshell/host_tools/get_main_pb_path:get_main_pb_path_test",
+        "//tools/devshell/host_tools/get_src_dir:get_src_dir_test",
+    ],
+    visibility = ["//tools:__pkg__"],
+)

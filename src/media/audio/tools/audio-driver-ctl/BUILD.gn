@@ -65,6 +65,9 @@ fuchsia_package("audio-driver-ctl") {
 
 fuchsia_unittest_package("audio-driver-ctl-test-pkg") {
   deps = [ ":audio-driver-ctl-test" ]
+  test_specs = {
+    parallel = 4
+  }
 }
 
 group("tests") {

@@ -14,7 +14,7 @@ use crate::vfs::buffers::{InputBuffer, OutputBuffer, with_iovec_segments};
 use crate::vfs::file_server::serve_file_tagged;
 use crate::vfs::fs_args::MountParams;
 use crate::vfs::fsverity::FsVerityState;
-use crate::vfs::pipe::new_pipe_file;
+use crate::vfs::pipe::{Pipe, new_pipe_file};
 use crate::vfs::socket::{Socket, SocketFile, SocketHandle, ZxioBackedSocket};
 use crate::vfs::{
     Anon, AppendLockWriteGuard, CacheMode, DEFAULT_BYTES_PER_BLOCK, DirEntry, DirectoryEntryType,
@@ -327,6 +327,18 @@ impl<'a, I: SyncIo> sync_io_client::Factory<I> for Factory<'a> {
         let dirty = info.attributes.is_none();
         let attrs = get_attributes(&info.attributes);
         let id = attrs.immutable_attributes.id.unwrap_or(fio::INO_UNKNOWN);
+        if let Some(mode) = attrs.mutable_attributes.mode {
+            let mode = FileMode::from_bits(mode);
+            if mode.is_dir() {
+                self.node_info.mode = mode;
+            }
+        }
+        if let Some(uid) = attrs.mutable_attributes.uid {
+            self.node_info.uid = uid;
+        }
+        if let Some(gid) = attrs.mutable_attributes.gid {
+            self.node_info.gid = gid;
+        }
         update_info_from_fidl(
             self.node_info,
             &attrs.mutable_attributes,
@@ -524,7 +536,12 @@ impl<I: SyncIo> RemoteFs<I> {
         };
 
         // The OnRepresentation response will return an initial set of `attrs`.
-        let mut node_info = FsNodeInfo::new(mode!(IFDIR, 0o777), FsCred::root());
+        let default_mode = if root_rights.contains(fio::PERM_WRITABLE) {
+            mode!(IFDIR, 0o777)
+        } else {
+            mode!(IFDIR, 0o555)
+        };
+        let mut node_info = FsNodeInfo::new(default_mode, FsCred::root());
         let (remote_node, node_id) = root_io
             .open(
                 ".",
@@ -535,7 +552,11 @@ impl<I: SyncIo> RemoteFs<I> {
                 None,
                 NODE_INFO_ATTRIBUTES
                     | fio::NodeAttributesQuery::ID
-                    | fio::NodeAttributesQuery::ENCRYPTION_POLICY,
+                    | fio::NodeAttributesQuery::CASEFOLD
+                    | fio::NodeAttributesQuery::ENCRYPTION_POLICY
+                    | fio::NodeAttributesQuery::MODE
+                    | fio::NodeAttributesQuery::UID
+                    | fio::NodeAttributesQuery::GID,
                 Factory::new(&mut node_info, false),
             )
             .map_err(map_sync_io_client_error)?;
@@ -761,6 +782,7 @@ impl<I: SyncIo> RemoteNode<I> {
                     }),
                     NODE_INFO_ATTRIBUTES
                         | fio::NodeAttributesQuery::ID
+                        | fio::NodeAttributesQuery::CASEFOLD
                         | fio::NodeAttributesQuery::ENCRYPTION_POLICY,
                     Factory::new(&mut node_info, !(mode.is_reg() || mode.is_dir())),
                 )
@@ -977,7 +999,7 @@ fn new_remote_fs_node_file(
     flags: OpenFlags,
 ) -> Result<FileHandle, Errno> {
     let fs = remote_null_fs(current_task)?;
-    let is_xattr_labeled = security::fs_is_xattr_labeled(fs.clone());
+    let is_xattr_labeled = security::fs_is_xattr_labeled(&fs);
     let mut query = MODE_ATTRIBUTES | NODE_INFO_ATTRIBUTES;
     if is_xattr_labeled {
         query |= fio::NodeAttributesQuery::SELINUX_CONTEXT;
@@ -1046,7 +1068,7 @@ pub fn create_fuchsia_pipe(
     flags: OpenFlags,
 ) -> Result<FileHandle, Errno> {
     let zxio = Zxio::create(socket.into()).map_err(|status| from_status_like_fdio!(status))?;
-    new_pipe_file(current_task, Box::new(RemotePipeObject::new(zxio)), flags)
+    new_pipe_file(current_task, RemotePipeObject::new(zxio), flags)
 }
 
 // This only needs to include attributes that can be out of date.  There are other attributes that
@@ -1328,7 +1350,7 @@ impl<I: SyncIo> FsNodeOps for RemoteNode<I> {
             | fio::NodeAttributesQuery::VERITY_ENABLED
             | fio::NodeAttributesQuery::CASEFOLD;
 
-        if security::fs_is_xattr_labeled(fs.clone()) {
+        if security::fs_is_xattr_labeled(&fs) {
             query |= fio::NodeAttributesQuery::SELINUX_CONTEXT;
         }
 
@@ -1361,7 +1383,7 @@ impl<I: SyncIo> FsNodeOps for RemoteNode<I> {
             | fio::NodeAttributesQuery::VERITY_ENABLED
             | fio::NodeAttributesQuery::CASEFOLD;
 
-        if security::fs_is_xattr_labeled(fs.clone()) {
+        if security::fs_is_xattr_labeled(&fs) {
             query |= fio::NodeAttributesQuery::SELINUX_CONTEXT;
         }
 
@@ -1672,11 +1694,12 @@ impl<I: SyncIo> FsNodeOps for RemoteSpecialNode<I> {
 
     fn create_file_ops(
         &self,
-        _node: &FsNode,
-        _current_task: &CurrentTask,
-        _flags: OpenFlags,
+        node: &FsNode,
+        current_task: &CurrentTask,
+        flags: OpenFlags,
     ) -> Result<Box<dyn FileOps>, Errno> {
-        unreachable!("Special nodes cannot be opened.");
+        assert!(node.is_fifo(), "Only FIFO special nodes can create file ops.");
+        Pipe::open(current_task, node.fifo(current_task), flags)
     }
 
     fn update_attributes(
@@ -2201,13 +2224,14 @@ pub fn is_remote_file(file: &FileObject) -> bool {
 }
 
 /// [`FileOps`] implementation for Fuchsia stream/datagram pipes backed by [`Zxio`].
+#[derive(Clone)]
 struct RemotePipeObject {
-    zxio: Zxio,
+    zxio: Arc<Zxio>,
 }
 
 impl RemotePipeObject {
     fn new(zxio: Zxio) -> Self {
-        Self { zxio }
+        Self { zxio: Arc::new(zxio) }
     }
 }
 
@@ -2656,7 +2680,10 @@ mod test {
     use crate::testing::*;
     use crate::vfs::buffers::{VecInputBuffer, VecOutputBuffer};
     use crate::vfs::socket::{SocketFile, SocketMessageFlags};
-    use crate::vfs::{EpollFileObject, LookupContext, Namespace, SymlinkMode, TimeUpdateType};
+    use crate::vfs::{
+        DirectoryMode, EpollFileObject, LookupContext, Namespace, SymlinkMode, TimeUpdateType,
+        UnlinkKind,
+    };
     use assert_matches::assert_matches;
     use fidl::endpoints::{ServerEnd, create_request_stream};
     use fidl_fuchsia_io as fio;
@@ -2758,6 +2785,13 @@ mod test {
             );
             let mut server_buf = [0u8; 64];
             assert_eq!(server.read(&mut server_buf).unwrap(), bytes.len());
+
+            let reopened = pipe.name.open(&current_task, OpenFlags::RDONLY).unwrap();
+            assert_eq!(bytes.len(), server.write(&bytes).unwrap());
+            assert_eq!(
+                reopened.read(&current_task, &mut VecOutputBuffer::new(64)).unwrap(),
+                bytes.len()
+            );
 
             std::mem::drop(server);
             assert_eq!(pipe.read(&current_task, &mut VecOutputBuffer::new(64)).unwrap(), 0);
@@ -3748,6 +3782,7 @@ mod test {
             )
             .expect("new_fs failed");
             let ns: Arc<Namespace> = Namespace::new(fs);
+            ns.root().entry.set_casefold(&current_task, true).expect("enable casefold on root");
             let child = ns
                 .root()
                 .create_node(
@@ -3757,18 +3792,12 @@ mod test {
                     DeviceId::NONE,
                 )
                 .expect("create_node failed");
-            child
-                .entry
-                .node
-                .update_attributes(&current_task, |info| {
-                    info.casefold = true;
-                    Ok(())
-                })
-                .expect("enable casefold")
+            assert!(child.entry.node.info().casefold);
         })
         .await;
 
-        // Tear down the kernel and open the dir again. Check that casefold is preserved.
+        // Tear down the kernel and open the dir again. Check that casefold is preserved on both
+        // the remounted root directory (`RemoteFs::new_with_io`) and the child directory.
         let fixture = TestFixture::open(
             fixture.close().await,
             TestFixtureOptions { format: false, ..Default::default() },
@@ -3776,7 +3805,7 @@ mod test {
         .await;
         let (server, client) = zx::Channel::create();
         fixture.root().clone(server.into()).expect("clone failed");
-        let casefold = spawn_kernel_and_run(async move |current_task| {
+        spawn_kernel_and_run(async move |current_task| {
             let kernel = current_task.kernel();
             let rights = fio::PERM_READABLE | fio::PERM_WRITABLE;
             let fs = RemoteFs::new_fs(
@@ -3787,21 +3816,30 @@ mod test {
             )
             .expect("new_fs failed");
             let ns = Namespace::new(fs);
+            assert!(ns.root().entry.node.info().casefold);
             let mut context = LookupContext::new(SymlinkMode::NoFollow);
             let child = ns
                 .root()
-                .lookup_child(&current_task, &mut context, "dir".into())
-                .expect("lookup_child failed");
-            let casefold = child
-                .entry
-                .node
-                .fetch_and_refresh_info(&current_task)
-                .expect("fetch_and_refresh_info failed")
-                .casefold;
-            casefold
+                .lookup_child(&current_task, &mut context, "DIR".into())
+                .expect("casefolded lookup_child on remounted root");
+            for dir in [ns.root(), child] {
+                let _file = dir
+                    .create_node(&current_task, "file.txt".into(), FileMode::IFREG, DeviceId::NONE)
+                    .expect("create file.txt");
+                dir.unlink(
+                    &current_task,
+                    "FILE.TXT".into(),
+                    UnlinkKind::NonDirectory,
+                    DirectoryMode::AllowAny,
+                )
+                .expect("unlink FILE.TXT");
+                assert_eq!(
+                    dir.lookup_child(&current_task, &mut context, "file.txt".into()).map(|_| ()),
+                    error!(ENOENT)
+                );
+            }
         })
         .await;
-        assert!(casefold);
 
         fixture.close().await;
     }
@@ -4707,8 +4745,8 @@ mod test {
 
         spawn_kernel_with_selinux_and_run(async move |current_task, security_server| {
             security_server.set_enforcing(false);
-            security_server.load_policy(TEST_POLICY.to_vec()).expect("policy load failed");
-            security::selinuxfs_policy_loaded(current_task);
+            security::selinuxfs_load_policy(current_task, TEST_POLICY.to_vec())
+                .expect("load policy");
 
             let fs = RemoteFs::new_fs(
                 &current_task.kernel(),

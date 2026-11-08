@@ -777,7 +777,7 @@ pub fn read_gce_ssh_pubkey(ctx: &EnvironmentContext) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use discovery::instance_watcher::is_pid_running;
+    use ffx_process::is_pid_running;
     use std::os::unix::fs::PermissionsExt as _;
 
     #[fuchsia::test]

@@ -11,6 +11,7 @@ use crate::vm::page_state::{VmPageState, page_state_to_string};
 use crate::vm::physmap;
 use crate::vm::pmm_node::PmmNode;
 use core::ptr::NonNull;
+use core::sync::atomic::{AtomicU64, Ordering};
 use debug::{dprintf, ltracef};
 use kprint::kprintln;
 use page_bindings::{self, vm_page_state};
@@ -73,7 +74,7 @@ pub const PMM_ARENA_FLAG_LO_MEM: u32 = bindings::PMM_ARENA_FLAG_LO_MEM;
 pub struct PmmArena {
     info: PmmArenaInfo,
     page_array: *mut VmPage,
-    search_hint: u64,
+    search_hint: AtomicU64,
 }
 
 // Compile-time layout assertions against the C++ PmmArena type via bindgen.
@@ -103,7 +104,11 @@ fn align(offset: u64, alignment_log2: u8, first_aligned_offset: u64) -> u64 {
 impl PmmArena {
     /// Creates an empty `PmmArena`.
     pub const fn new() -> Self {
-        Self { info: PmmArenaInfo::DEFAULT, page_array: core::ptr::null_mut(), search_hint: 0 }
+        Self {
+            info: PmmArenaInfo::DEFAULT,
+            page_array: core::ptr::null_mut(),
+            search_hint: AtomicU64::new(0),
+        }
     }
 
     /// Initializes the arena and allocates memory for internal data structures.
@@ -113,7 +118,7 @@ impl PmmArena {
         selected_arena_size: u64,
         selected_bookkeeping_base: u64,
         selected_bookkeeping_size: u64,
-        node: &mut PmmNode,
+        node: &PmmNode,
     ) {
         debug_assert!(kernel_page::is_aligned(selected_arena_base as usize));
         debug_assert!(kernel_page::is_aligned(selected_arena_size as usize));
@@ -134,7 +139,7 @@ impl PmmArena {
             selected_arena_base,
             selected_arena_base + selected_arena_size
         );
-        // Intentionally similar to the logging in PmmNode::InitReservedRange().
+        // Intentionally similar to the logging in PmmNode::init_reserved_range().
         dprintf!(
             INFO,
             "PMM: reserved [{:#x}, {:#x}): bookkeeping\n",
@@ -158,6 +163,7 @@ impl PmmArena {
         let page_array_size = selected_bookkeeping_size as usize;
         self.page_array =
             physmap::paddr_to_physmap(PAddr(selected_bookkeeping_base as usize)).0 as *mut VmPage;
+        self.search_hint.store(0, Ordering::Relaxed);
 
         ltracef!(
             "arena for base {:#x} size {:#x} page array at {:p} size {:#x}\n",
@@ -219,9 +225,11 @@ impl PmmArena {
     ///
     /// `page_array` must point to a valid array of `VmPage` structs of at least
     /// `info.size / PAGE_SIZE` elements, or be null if size is 0.
+    #[cfg(ktest)]
     pub unsafe fn init_for_test(&mut self, info: &PmmArenaInfo, page_array: *mut VmPage) {
         self.info = info.clone();
         self.page_array = page_array;
+        self.search_hint.store(0, Ordering::Relaxed);
     }
 
     /// Returns a reference to the arena's info structure.
@@ -289,7 +297,7 @@ impl PmmArena {
 
     /// Finds a free run of contiguous pages.
     pub fn find_free_contiguous(
-        &mut self,
+        &self,
         count: usize,
         mut alignment_log2: u8,
     ) -> Option<NonNull<VmPage>> {
@@ -308,7 +316,7 @@ impl PmmArena {
         let first_aligned_offset = (aligned_base - (base.0 as u64)) / (kernel_page::SIZE as u64);
         // Start our search at the hint so that we can skip over regions previously
         // known to be in use.
-        let initial = self.search_hint;
+        let initial = self.search_hint.load(Ordering::Relaxed);
         debug_assert!(initial < arena_count, "initial {initial}");
         let mut candidate = align(initial, alignment_log2, first_aligned_offset);
         // Keep track of how many runs of pages we examine before finding a
@@ -337,7 +345,8 @@ impl PmmArena {
                 match self.find_last_non_free(candidate, count) {
                     Err(_) => {
                         // Candidate region is free.  We're done.
-                        self.search_hint = (candidate + count as u64) % arena_count;
+                        self.search_hint
+                            .store((candidate + count as u64) % arena_count, Ordering::Relaxed);
                         // SAFETY: `candidate` is within `arena_count`.
                         result = Some(unsafe { self.get_page(candidate as usize) });
                         debug_assert!(
@@ -401,7 +410,7 @@ impl PmmArena {
         let flags = self.flags();
         let this_ptr = self as *const Self;
         let page_array_ptr = self.page_array;
-        let search_hint = self.search_hint;
+        let search_hint = self.search_hint.load(Ordering::Relaxed);
 
         kprintln!(
             "  arena {:p}: name '{:s}' base {:#x} size ({:#x}) flags {:#x}",
@@ -514,68 +523,6 @@ pub fn print_page_state_counts(state_count: &PmmStateCount) {
     }
 }
 
-// -------------------------------------------------------------------------------------------------
-// C++ FFI Export Functions
-// -------------------------------------------------------------------------------------------------
-
-/// # Safety
-///
-/// The caller must ensure `arena` points to an allocated `PmmArena` and `node` is a valid
-/// `PmmNode`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_pmm_arena_init(
-    arena: *mut PmmArena,
-    selected_arena_base: u64,
-    selected_arena_size: u64,
-    selected_bookkeeping_base: u64,
-    selected_bookkeeping_size: u64,
-    node: *mut PmmNode,
-) {
-    // SAFETY: The caller ensures `arena` and `node` are valid pointers.
-    let arena = unsafe { &mut *arena };
-    let node = unsafe { &mut *node };
-    arena.init(
-        selected_arena_base,
-        selected_arena_size,
-        selected_bookkeeping_base,
-        selected_bookkeeping_size,
-        node,
-    );
-}
-
-/// # Safety
-///
-/// The caller must ensure `arena` points to a valid `PmmArena` and `info` is a valid pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_pmm_arena_init_for_test(
-    arena: *mut PmmArena,
-    info: *const PmmArenaInfo,
-    page_array: *mut page_bindings::vm_page_t,
-) {
-    // SAFETY: The caller ensures `arena` and `info` are valid pointers.
-    let arena = unsafe { &mut *arena };
-    let info = unsafe { &*info };
-    unsafe {
-        arena.init_for_test(info, page_array.cast());
-    }
-}
-
-/// # Safety
-///
-/// The caller must ensure `arena` points to an initialized `PmmArena`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_pmm_arena_find_free_contiguous(
-    arena: *mut PmmArena,
-    count: usize,
-    alignment_log2: u8,
-) -> *mut page_bindings::vm_page_t {
-    // SAFETY: The caller ensures `arena` points to an initialized `PmmArena`.
-    let arena = unsafe { &mut *arena };
-    arena
-        .find_free_contiguous(count, alignment_log2)
-        .map_or(core::ptr::null_mut(), |p| p.as_ptr().cast())
-}
-
 /// Unit tests for PmmArena.
 #[cfg(ktest)]
 #[unittest::suite(name = "pmm_arena_rust")]
@@ -586,8 +533,9 @@ mod pmm_arena_rust {
     use crate::vm::page_state::VmPageState;
     use ::page as kernel_page;
     use core::ptr::NonNull;
+    use fbl::Vector;
     use page_bindings::vm_page_state;
-    use unittest::{assert_true, unwrap_ok};
+    use unittest::{assert_true, expect_true, unwrap_ok};
     use zx_status::Status;
 
     unsafe fn set_page_state_range(state: vm_page_state, start: NonNull<VmPage>, count: usize) {
@@ -681,5 +629,57 @@ mod pmm_arena_rust {
         //
         // See there are none left.
         assert_true!(arena.find_free_contiguous(1, k_page_shift).is_none());
+    }
+
+    /// Tests single-page slab allocations on a checkerboard-fragmented arena.
+    #[test]
+    fn checkerboard_fragmented_slab_alloc() {
+        // Regression test for https://fxbug.dev/573602747:
+        // Verifies that on a checkerboard-fragmented arena (64 free pages, 64 allocated pages, max
+        // contiguous run = 1 page), multi-page contiguous searches fail while 64 individual 1-page
+        // allocations succeed.
+        const SLAB_PAGES: usize = 64;
+        const ARENA_PAGES: usize = SLAB_PAGES * 2;
+        const BASE: usize = 0x2000000;
+
+        let mut name = [0u8; 16];
+        name[..9].copy_from_slice(b"frag test");
+        let info = PmmArenaInfo {
+            name,
+            flags: 0,
+            base: PAddr(BASE),
+            size: ARENA_PAGES * kernel_page::SIZE,
+        };
+
+        // Heap-allocate `page_array` (~6 KiB) to avoid overflowing 8 KiB kernel stacks.
+        let mut page_array = Vector::<VmPage>::new();
+        assert_true!(page_array.resize_with(ARENA_PAGES, VmPage::default).is_ok());
+
+        let mut arena = PmmArena::new();
+        // SAFETY: `page_array` holds `ARENA_PAGES` initialized `VmPage` elements and outlives
+        // `arena`.
+        unsafe { arena.init_for_test(&info, page_array.as_mut_ptr()) };
+
+        // Fragment the arena in a checkerboard pattern: 64 free pages, 64 allocated pages, max
+        // contiguous run = 1 page.
+        for i in (1..ARENA_PAGES).step_by(2) {
+            // SAFETY: `i < ARENA_PAGES` is within bounds of `arena`'s `page_array` exclusively
+            // owned by this test.
+            unsafe { set_page_state_range(vm_page_state::ALLOC, arena.get_page(i), 1) };
+        }
+
+        // Any multi-page contiguous search (including 64-page MMU page-table imports) must fail,
+        // while 64 individual 1-page allocations succeed.
+        let page_shift = kernel_page::SHIFT as u8;
+        expect_true!(arena.find_free_contiguous(SLAB_PAGES, page_shift).is_none());
+        expect_true!(arena.find_free_contiguous(2, page_shift).is_none());
+        for _ in 0..SLAB_PAGES {
+            let page =
+                unwrap_ok!(arena.find_free_contiguous(1, page_shift).ok_or(Status::NO_MEMORY));
+            // SAFETY: `page` points to a valid element within `page_array` returned by
+            // `find_free_contiguous`.
+            unsafe { set_page_state_range(vm_page_state::ALLOC, page, 1) };
+        }
+        expect_true!(arena.find_free_contiguous(1, page_shift).is_none());
     }
 }

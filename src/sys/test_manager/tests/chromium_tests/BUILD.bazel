@@ -1,0 +1,71 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [],  # Include all tests in the package.
+    visibility = ["//src/sys:__pkg__"],
+)
+
+# Inner test binary wrapped by :chromium-routing-test-cmp.
+rustc_test(
+    name = "chromium-routing-test-bin",
+    srcs = ["test.rs"],
+    crate_name = "chromium_routing_test",
+    crate_root = "test.rs",
+    edition = "2024",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_packaged_binary(
+    name = "chromium-routing-test-bin_packaged_bin",
+    testonly = True,
+    binary = ":chromium-routing-test-bin",
+    binary_name = "chromium_routing_test",
+)
+
+fx_component_manifest(
+    name = "chromium-routing-test-cmp-manifest",
+    testonly = True,
+    component_name = "chromium_routing_test",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/chromium_routing_test.cml",
+)
+
+fx_test_component(
+    name = "chromium-routing-test-cmp",
+    compiled_manifest = ":chromium-routing-test-cmp-manifest",
+    test_type = "chromium",
+    deps = [":chromium-routing-test-bin_packaged_bin"],
+)
+
+fx_package(
+    name = "chromium-routing-test-package",
+    package_name = "chromium-routing-test",
+    test_components = [":chromium-routing-test-cmp"],
+)
+
+fx_test(
+    name = "chromium-routing-test",
+    package = ":chromium-routing-test-package",
+)

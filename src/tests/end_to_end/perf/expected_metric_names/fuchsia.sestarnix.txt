@@ -7,6 +7,7 @@ fuchsia.sestarnix: sid_to_security_context_simple
 fuchsia.sestarnix: sid_to_security_context_c0_c255
 fuchsia.sestarnix: compute_access_decision_simple
 fuchsia.sestarnix: compute_access_decision_c0_c255
+fuchsia.sestarnix: compute_access_decision_constraints
 fuchsia.sestarnix: compute_access_decision_read_contended
 fuchsia.sestarnix: compute_access_decision_write_contended
 fuchsia.sestarnix: compute_create_sid_simple
@@ -26,5 +27,7 @@ fuchsia.sestarnix: concurrent_access_cache_get
 fuchsia.sestarnix: concurrent_access_cache_get_contended
 fuchsia.sestarnix: binder_transaction
 fuchsia.sestarnix: check_file_ioctl_access
+fuchsia.sestarnix: file_open_tmpfs
 fuchsia.sestarnix: file_permission
 fuchsia.sestarnix: fs_node_permission
+fuchsia.sestarnix: fs_node_permission_tmpfs

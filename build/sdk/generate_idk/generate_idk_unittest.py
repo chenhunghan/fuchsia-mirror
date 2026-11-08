@@ -4,22 +4,15 @@
 
 import pathlib
 import tempfile
-import typing
 import unittest
 from pathlib import Path
 
 import generate_idk
 
-# Access to type hints via get_type_hints is well-defined and sound,
-# resolving string annotations that arise from 'from __future__ import annotations'.
-UNMERGEABLE_TYPES = typing.get_args(
-    typing.get_type_hints(generate_idk.UnmergeableMeta)["type"]
-)
-
 
 class GenerateIdkTests(unittest.TestCase):
     def test_unmergeables_error(self) -> None:
-        for atom_type in UNMERGEABLE_TYPES:
+        for atom_type in generate_idk.UNMERGEABLE_ATOM_TYPES:
             meta_a: generate_idk.UnmergeableMeta = {
                 "name": "fallback",
                 "type": atom_type,
@@ -58,7 +51,7 @@ class GenerateIdkTests(unittest.TestCase):
             )
 
     def test_unmergeables_pass(self) -> None:
-        for atom_type in UNMERGEABLE_TYPES:
+        for atom_type in generate_idk.UNMERGEABLE_ATOM_TYPES:
             meta_a1: generate_idk.UnmergeableMeta = {
                 "name": "fallback",
                 "type": atom_type,
@@ -361,6 +354,68 @@ class GenerateIdkTests(unittest.TestCase):
                 dest_to_src={},
             ),
         )
+
+    def test_sysroot_multi_variant_get_file_list(self) -> None:
+        sysroot_meta = {
+            "name": "sysroot",
+            "type": "sysroot",
+            "ifs_files": ["pkg/sysroot/libc.ifs", "pkg/sysroot/zircon.ifs"],
+            "versions": {
+                "arm64": {
+                    "root": "arch/arm64/sysroot",
+                    "include_dir": "arch/arm64/sysroot/include",
+                    "dist_dir": "arch/arm64/sysroot",
+                    "link_libs": ["arch/arm64/sysroot/lib/libc.so"],
+                    "dist_libs": ["arch/arm64/sysroot/dist/lib/ld.so.1"],
+                    "debug_libs": ["arch/arm64/sysroot/debug/libc.so"],
+                },
+                "x64": {
+                    "root": "arch/x64/sysroot",
+                    "include_dir": "arch/x64/sysroot/include",
+                    "dist_dir": "arch/x64/sysroot",
+                    "link_libs": ["arch/x64/sysroot/lib/libc.so"],
+                    "dist_libs": ["arch/x64/sysroot/dist/lib/ld.so.1"],
+                    "debug_libs": ["arch/x64/sysroot/debug/libc.so"],
+                },
+            },
+            "variants": [
+                {
+                    "constraints": {"api_level": "27", "arch": "arm64"},
+                    "values": {
+                        "root": "obj/arm64-api-27/sysroot",
+                        "include_dir": "obj/arm64-api-27/sysroot/include",
+                        "sysroot_dir": "obj/arm64-api-27/sysroot",
+                        "link_libs": ["obj/arm64-api-27/sysroot/lib/libc.so"],
+                        "dist_libs": [
+                            "obj/arm64-api-27/sysroot/dist/lib/ld.so.1"
+                        ],
+                        "debug_libs": [
+                            "obj/arm64-api-27/sysroot/debug/libc.so"
+                        ],
+                    },
+                },
+                {
+                    "constraints": {"api_level": "27", "arch": "x64"},
+                    "values": {
+                        "root": "obj/x64-api-27/sysroot",
+                        "include_dir": "obj/x64-api-27/sysroot/include",
+                        "sysroot_dir": "obj/x64-api-27/sysroot",
+                        "link_libs": ["obj/x64-api-27/sysroot/lib/libc.so"],
+                        "dist_libs": [
+                            "obj/x64-api-27/sysroot/dist/lib/ld.so.1"
+                        ],
+                        "debug_libs": ["obj/x64-api-27/sysroot/debug/libc.so"],
+                    },
+                },
+            ],
+        }
+        files = generate_idk.PartialIDK._get_file_list("sysroot", sysroot_meta)
+        self.assertEqual(files.count("pkg/sysroot/libc.ifs"), 1)
+        self.assertEqual(files.count("pkg/sysroot/zircon.ifs"), 1)
+        self.assertIn("arch/arm64/sysroot/lib/libc.so", files)
+        self.assertIn("arch/x64/sysroot/lib/libc.so", files)
+        self.assertIn("obj/arm64-api-27/sysroot/lib/libc.so", files)
+        self.assertIn("obj/x64-api-27/sysroot/lib/libc.so", files)
 
     def test_merge_variants_cc_prebuilt_library_pass(self) -> None:
         meta_a: generate_idk.CCPrebuiltLibraryMeta = {
@@ -831,6 +886,67 @@ class GenerateIdkTests(unittest.TestCase):
             with self.assertRaises(AssertionError) as e:
                 generate_idk.MergedIDK().merge_with(a).merge_with(b)
             self.assertIn("Multiple non-identical files", str(e.exception))
+
+    def test_create_relative_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as dir:
+            d = pathlib.Path(dir)
+            src = d / "src" / "lib" / "foo.h"
+            src.parent.mkdir(parents=True)
+            src.write_text("foo")
+
+            dest = d / "idk" / "pkg" / "foo" / "foo.h"
+            dest.parent.mkdir(parents=True)
+            generate_idk.create_relative_symlink(dest, src)
+
+            self.assertEqual(
+                dest.readlink(), pathlib.Path("../../../src/lib/foo.h")
+            )
+            self.assertEqual(dest.read_text(), "foo")
+
+    def test_create_relative_symlink_resolves_symlinked_src(self) -> None:
+        # The source may be a symlink itself, like the files in
+        # sdk/exported/bazel_internal_only. The IDK must link directly to the
+        # real file instead of chaining through the intermediate symlink.
+        with tempfile.TemporaryDirectory() as dir:
+            d = pathlib.Path(dir)
+            real = d / "src" / "lib" / "foo.h"
+            real.parent.mkdir(parents=True)
+            real.write_text("foo")
+            exported = d / "exported" / "pkg" / "foo" / "foo.h"
+            exported.parent.mkdir(parents=True)
+            exported.symlink_to("../../../src/lib/foo.h")
+
+            dest = d / "idk" / "pkg" / "foo" / "foo.h"
+            dest.parent.mkdir(parents=True)
+            generate_idk.create_relative_symlink(dest, exported)
+
+            self.assertEqual(
+                dest.readlink(), pathlib.Path("../../../src/lib/foo.h")
+            )
+            self.assertEqual(dest.read_text(), "foo")
+
+    def test_create_relative_symlink_resolves_symlinked_dest(self) -> None:
+        # The output directory may be reached through a symlink. The link
+        # value must be relative to the real location of the output file.
+        with tempfile.TemporaryDirectory() as dir:
+            d = pathlib.Path(dir)
+            src = d / "src" / "lib" / "foo.h"
+            src.parent.mkdir(parents=True)
+            src.write_text("foo")
+            real_out = d / "disk" / "build" / "out"
+            real_out.mkdir(parents=True)
+            (d / "out").symlink_to("disk/build/out")
+
+            dest = d / "out" / "idk" / "foo.h"
+            dest.parent.mkdir(parents=True)
+            generate_idk.create_relative_symlink(dest, src)
+
+            # A lexical relative path from `out/idk` would be
+            # `../../src/lib/foo.h`, which dangles from `disk/build/out/idk`.
+            self.assertEqual(
+                dest.readlink(), pathlib.Path("../../../../src/lib/foo.h")
+            )
+            self.assertEqual(dest.read_text(), "foo")
 
 
 if __name__ == "__main__":

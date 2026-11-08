@@ -443,7 +443,6 @@ struct iwl_trans_pcie {
 	/* PCI bus related data */
 	struct iwl_pci_dev *pci_dev;
 	struct iwl_pci_fidl *pci;
-	pci_interrupt_mode_t irq_mode;
 	MMIO_PTR void *mmio_vaddr;
 
 	bool ucode_write_complete;

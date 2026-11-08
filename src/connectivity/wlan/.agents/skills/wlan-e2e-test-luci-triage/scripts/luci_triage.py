@@ -12,6 +12,8 @@ import sys
 from collections import defaultdict
 from typing import Any, Dict, List
 
+FAILED_STATUSES = ("FAIL", "CRASH", "ABORT")
+
 
 def check_prerequisites() -> None:
     missing = []
@@ -70,9 +72,9 @@ def fetch_builds(builder: str, bucket: str, cutoff_date: str) -> List[str]:
                 date_str = create_time[:10]
                 if date_str < cutoff_date:
                     break
-                status = build.get("status")
-                summary = build.get("summaryMarkdown", "").lower()
-                if status == "FAILURE" or "flake" in summary:
+                # Filter out incomplete (SCHEDULED, STARTED), CANCELED, and
+                # INFRA_FAILURE builds, keeping only completed test runs.
+                if build.get("status") in ("SUCCESS", "FAILURE"):
                     relevant_builds.append(build["id"])
 
         # If we broke out early because the cutoff date was reached, terminate the
@@ -136,6 +138,50 @@ def fetch_results_with_bot_ids(
     return all_results
 
 
+def filter_leaf_results(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Drops skipped runs and suite wrappers that have sub-test results."""
+    # ResultDB `name` has the form:
+    #   "invocations/u-swarming-.../tests/<encoded_test_id>/results/<id>"
+    # Grouping by invocation isolates separate Swarming runs (e.g. retries).
+    #
+    # Mobly E2E tests emit both a top-level suite wrapper result, e.g.:
+    #   testId = "host_x64/.../ping_test.sh-for-testing-wlan-platform.astro"
+    # and sub-test case results prefixed with "<suite_testId>/", e.g.:
+    #   testId = ".../ping_test.sh.../PingTest:test_simultaneous_pings"
+    all_ids = defaultdict(set)
+    for r in results:
+        inv = r.get("name", "").split("/tests/", 1)[0]
+        tid = r.get("testId", "")
+        if tid:
+            all_ids[inv].add(tid)
+
+    results_without_skips = [r for r in results if r.get("status") != "SKIP"]
+    active_ids = defaultdict(set)
+    for r in results_without_skips:
+        inv = r.get("name", "").split("/tests/", 1)[0]
+        tid = r.get("testId", "")
+        if tid:
+            active_ids[inv].add(tid)
+
+    filtered = []
+    for r in results_without_skips:
+        inv = r.get("name", "").split("/tests/", 1)[0]
+        prefix = f"{r.get('testId', '')}/"
+        # Drop the suite wrapper when non-skipped sub-test results exist in the
+        # same invocation so runs are not double-counted.
+        if any(t.startswith(prefix) for t in active_ids[inv]):
+            continue
+        # If all sub-tests were SKIP, keep the suite wrapper only if it failed
+        # (e.g. Mobly setup_class failed before any test case ran); drop it if
+        # it passed so an all-skipped suite is not counted as a passing run.
+        if r.get("status") not in FAILED_STATUSES and any(
+            t.startswith(prefix) for t in all_ids[inv]
+        ):
+            continue
+        filtered.append(r)
+    return filtered
+
+
 def main() -> None:
     check_prerequisites()
 
@@ -164,7 +210,9 @@ def main() -> None:
     args = parser.parse_args()
 
     builds = fetch_builds(args.builder, args.bucket, args.cutoff_date)
-    results = fetch_results_with_bot_ids(builds, args.test_pattern)
+    results = filter_leaf_results(
+        fetch_results_with_bot_ids(builds, args.test_pattern)
+    )
 
     bot_stats = defaultdict(lambda: {"total": 0, "failed": 0})
     for r in results:
@@ -175,7 +223,7 @@ def main() -> None:
                 break
 
         bot_stats[bot_id]["total"] += 1
-        if r.get("status") == "FAIL":
+        if r.get("status") in FAILED_STATUSES:
             bot_stats[bot_id]["failed"] += 1
 
     print("\n=== Bot ID Failure Distribution ===")

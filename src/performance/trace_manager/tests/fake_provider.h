@@ -68,6 +68,10 @@ class FakeProvider : public fidl::Server<fuchsia_tracing_provider::Provider> {
   // Helper to move the provider to a start where it does not respond to fidl calls
   void MarkUnresponsive();
   void MarkResponsive();
+  void Disconnect() {
+    fifo_.reset();
+    pending_cat_completers_.clear();
+  }
 
   // Raw state advancement.
   // This should only be called under exceptional circumstances, e.g., to
@@ -85,6 +89,8 @@ class FakeProvider : public fidl::Server<fuchsia_tracing_provider::Provider> {
   int terminate_count() const { return terminate_count_; }
 
   void SendAlert(const char* alert_name);
+  void SendSaveBuffer(uint32_t wrapped_count, uint64_t durable_data_end);
+  void SendStoppedPacket();
   const std::vector<std::string>& GetEnabledCategories() const { return enabled_categories_; }
 
   void SetKnownCategories(std::vector<fuchsia_tracing::KnownCategory> known_categories) {
@@ -141,6 +147,14 @@ struct FakeProviderBinding {
   explicit FakeProviderBinding(std::unique_ptr<FakeProvider> p) : provider(std::move(p)) {}
 
   fidl::ClientEnd<fuchsia_tracing_provider::Provider> NewBinding(async_dispatcher_t* dispatcher);
+
+  void Disconnect() {
+    provider->Disconnect();
+    if (binding) {
+      binding->Unbind();
+      binding.reset();
+    }
+  }
 
   std::unique_ptr<FakeProvider> provider;
   std::optional<fidl::ServerBindingRef<fuchsia_tracing_provider::Provider>> binding;

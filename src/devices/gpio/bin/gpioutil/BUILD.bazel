@@ -1,0 +1,69 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+# //src/lib/ddk remains GN-only (TODO(b/572590277)) and is not used by gpioutil.
+# @bazel2gn:raw_attribute:deps += [ "//src/lib/ddk" ]
+fx_cc_binary(
+    name = "gpioutil",
+    srcs = [
+        "gpioutil.cc",
+        "gpioutil.h",
+        "main.cc",
+    ],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.gpio:fuchsia.hardware.gpio_cpp",
+        "//sdk/fidl/fuchsia.hardware.pin:fuchsia.hardware.pin_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/fdio",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/zx",
+    ],
+)
+
+# //src/lib/ddk remains GN-only (TODO(b/572590277)) and is not used by gpioutil.
+# test/gpioutil-test.cc includes "gpioutil.h" from the package root.
+# @bazel2gn:raw_attribute:deps += [ "//src/lib/ddk" ]
+# @bazel2gn:raw_attribute:include_dirs = [ "." ]
+fx_cc_test_binary(
+    name = "gpioutil-test-bin",
+    srcs = [
+        "gpioutil.cc",
+        "gpioutil.h",
+        "test/gpioutil-test.cc",
+    ],
+    gn_output_name = "gpioutil-test",
+    # bazel2gn does not translate `includes` on `fx_cc_test_binary`; GN uses
+    # `include_dirs = [ "." ]` via `@bazel2gn:raw_attribute` above.
+    # TODO(https://fxbug.dev/570694755): Support `includes` on `fx_cc_test_binary` in bazel2gn.
+    # @bazel2gn:skip
+    includes = ["."],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.gpio:fuchsia.hardware.gpio_cpp",
+        "//sdk/fidl/fuchsia.hardware.pin:fuchsia.hardware.pin_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/fdio",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/mock-function",
+        "//zircon/system/ulib/zx",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "gpioutil-test",
+    unit_tests = [":gpioutil-test-bin"],
+    visibility = ["//src/devices:__pkg__"],
+)

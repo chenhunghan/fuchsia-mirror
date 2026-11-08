@@ -1,0 +1,17 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Package bundling the C, C++, and Rust time example components.
+fx_package(
+    name = "time-examples",
+    components = [
+        "//examples/time/c:c-time-example-component",
+        "//examples/time/cpp:cpp-time-example-component",
+        "//examples/time/rust:rust-time-example-component",
+    ],
+)

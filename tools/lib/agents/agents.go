@@ -15,20 +15,25 @@ import (
 //go:embed agents.txt
 var agentsTxt string
 
+//go:embed agent_session_ids.txt
+var agentSessionIdsTxt string
+
 var bakedAgentVars []string
 
 func init() {
-	// Parse the embedded agents.txt content at startup.
-	for _, line := range strings.Split(agentsTxt, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		// Strip inline comments.
-		parts := strings.SplitN(line, "#", 2)
-		val := strings.TrimSpace(parts[0])
-		if val != "" {
-			bakedAgentVars = append(bakedAgentVars, val)
+	// Parse the embedded agents.txt and agent_session_ids.txt content at startup.
+	for _, content := range []string{agentsTxt, agentSessionIdsTxt} {
+		for _, line := range strings.Split(content, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			// Strip inline comments.
+			parts := strings.SplitN(line, "#", 2)
+			val := strings.TrimSpace(parts[0])
+			if val != "" {
+				bakedAgentVars = append(bakedAgentVars, val)
+			}
 		}
 	}
 }

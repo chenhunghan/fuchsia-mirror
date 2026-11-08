@@ -5,7 +5,7 @@
 //! toc_checker checks the _toc.yaml files that part of the //docs publishing process
 //! for correctness.
 
-use super::check_path;
+use super::{LinkContext, check_yaml_link};
 use crate::checker::{DocCheckError, DocLine};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -100,6 +100,111 @@ impl Toc {
     }
 }
 
+/// Per-file inputs for validating `_toc.yaml` entries at any nesting depth.
+struct TocEntryChecker<'a> {
+    root_dir: &'a Path,
+    docs_folder: &'a Path,
+    project: &'a str,
+    allow_fuchsia_src_links: bool,
+    /// Line 1 of the `_toc.yaml` being checked; its `file_name` is the file reported on.
+    doc_line: &'a DocLine,
+}
+
+impl TocEntryChecker<'_> {
+    /// Validates each entry and recurses into its `section` and `contents` entries, which
+    /// carry the same keys as top-level entries.
+    fn check_entries(&self, entries: &[TocEntry], errors: &mut Vec<DocCheckError>) {
+        for toc_entry in entries {
+            if let Some(path) = toc_entry.path.as_ref() {
+                // This is a shorthand used in _toc.yaml paths.
+                let path_to_check = if path.starts_with("//") {
+                    format!("https:{}", path)
+                } else {
+                    path.to_string()
+                };
+                if let Err(e) = check_yaml_link(
+                    self.doc_line,
+                    self.root_dir,
+                    self.docs_folder,
+                    self.project,
+                    &path_to_check,
+                    self.allow_fuchsia_src_links,
+                    LinkContext::Navigation,
+                ) {
+                    errors.push(e);
+                }
+            }
+            if let Some(status) = toc_entry.status.as_ref() {
+                if !KNOWN_STATUS.contains(&status.as_str()) {
+                    errors.push(DocCheckError::new_error(
+                        1,
+                        self.doc_line.file_name.clone(),
+                        &format!(
+                            "Invalid status {}. Valid statuses are {:?}",
+                            &status, KNOWN_STATUS
+                        ),
+                    ))
+                }
+            }
+            if toc_entry.step_group.is_some() {
+                // Cannot have Section, and needs Path
+                if toc_entry.section.is_some() {
+                    errors.push(DocCheckError::new_error(
+                        1,
+                        self.doc_line.file_name.clone(),
+                        &format!(
+                            "Invalid toc_entry {:?}. Cannot specify step_group and section",
+                            &toc_entry
+                        ),
+                    ))
+                }
+                if toc_entry.path.is_none() {
+                    errors.push(DocCheckError::new_error(
+                        1,
+                        self.doc_line.file_name.clone(),
+                        &format!(
+                            "Invalid toc_entry {:?}. Cannot specify step_group and not path",
+                            &toc_entry
+                        ),
+                    ))
+                }
+            }
+            if let Some(style) = toc_entry.style.as_ref() {
+                if !["divider", "accordion"].contains(&style.as_str()) {
+                    errors.push(DocCheckError::new_error(
+                        1,self.doc_line.file_name.clone(),
+                    &format!(
+                        "Invalid toc_entry {:?}. style must be  one of [\"divider\", \"accordion\"]", &toc_entry)))
+                }
+                if toc_entry.vertical_break.is_some() {
+                    errors.push(DocCheckError::new_error(
+                        1,self.doc_line.file_name.clone(),
+                        &format!(
+                            "Invalid toc_entry {:?}. Cannot use break, include, style are mutually exclusive", &toc_entry)))
+                }
+                if toc_entry.include.is_some() {
+                    errors.push(DocCheckError::new_error(
+                        1,self.doc_line.file_name.clone(),
+                        &format!(
+                            "Invalid toc_entry {:?}. Cannot use break, include, style are mutually exclusive", &toc_entry)))
+                }
+                if toc_entry.heading.is_none() && toc_entry.section.is_none() {
+                    errors.push(DocCheckError::new_error(
+                        1,self.doc_line.file_name.clone(),
+                        &format!(
+                            "Invalid toc_entry {:?}. Use of style requires \"heading\" or \"section\"", &toc_entry)))
+                }
+            }
+            if let Some(section) = toc_entry.section.as_ref() {
+                self.check_entries(section, errors);
+            }
+            if let Some(contents) = toc_entry.contents.as_ref() {
+                self.check_entries(contents, errors);
+            }
+        }
+    }
+}
+
 pub(crate) fn check_toc(
     root_dir: &Path,
     docs_folder: &Path,
@@ -107,7 +212,6 @@ pub(crate) fn check_toc(
     filename: &Path,
     yaml_value: &Value,
     allow_fuchsia_src_links: bool,
-    reference_prefix: &Path,
 ) -> Option<Vec<DocCheckError>> {
     let doc_line = &DocLine { line_num: 1, file_name: filename.to_path_buf() };
     let result = serde_yaml::from_value::<Toc>(yaml_value.clone());
@@ -121,88 +225,8 @@ pub(crate) fn check_toc(
                     &format!("The toc element cannot be empty: {:?}", &yaml_value),
                 ));
             }
-            for toc_entry in toc.toc {
-                if let Some(path) = toc_entry.path.as_ref() {
-                    // This is a shorthand used in _toc.yaml paths.
-                    let path_to_check = if path.starts_with("//") {
-                        format!("https:{}", path)
-                    } else {
-                        path.to_string()
-                    };
-                    if let Some(e) = check_path(
-                        doc_line,
-                        root_dir,
-                        docs_folder,
-                        project,
-                        &path_to_check,
-                        allow_fuchsia_src_links,
-                        reference_prefix,
-                    ) {
-                        errors.push(e);
-                    }
-                }
-                if let Some(status) = toc_entry.status.as_ref() {
-                    if !KNOWN_STATUS.contains(&status.as_str()) {
-                        errors.push(DocCheckError::new_error(
-                            1,
-                            filename.to_path_buf(),
-                            &format!(
-                                "Invalid status {}. Valid statuses are {:?}",
-                                &status, KNOWN_STATUS
-                            ),
-                        ))
-                    }
-                }
-                if toc_entry.step_group.is_some() {
-                    // Cannot have Section, and needs Path
-                    if toc_entry.section.is_some() {
-                        errors.push(DocCheckError::new_error(
-                            1,
-                            filename.to_path_buf(),
-                            &format!(
-                                "Invalid toc_entry {:?}. Cannot specify step_group and section",
-                                &toc_entry
-                            ),
-                        ))
-                    }
-                    if toc_entry.path.is_none() {
-                        errors.push(DocCheckError::new_error(
-                            1,
-                            filename.to_path_buf(),
-                            &format!(
-                                "Invalid toc_entry {:?}. Cannot specify step_group and not path",
-                                &toc_entry
-                            ),
-                        ))
-                    }
-                }
-                if let Some(style) = toc_entry.style.as_ref() {
-                    if !["divider", "accordion"].contains(&style.as_str()) {
-                        errors.push(DocCheckError::new_error(
-                            1,filename.to_path_buf(),
-                        &format!(
-                            "Invalid toc_entry {:?}. style must be  one of [\"divider\", \"accordion\"]", &toc_entry)))
-                    }
-                    if toc_entry.vertical_break.is_some() {
-                        errors.push(DocCheckError::new_error(
-                            1,filename.to_path_buf(),
-                            &format!(
-                                "Invalid toc_entry {:?}. Cannot use break, include, style are mutually exclusive", &toc_entry)))
-                    }
-                    if toc_entry.include.is_some() {
-                        errors.push(DocCheckError::new_error(
-                            1,filename.to_path_buf(),
-                            &format!(
-                                "Invalid toc_entry {:?}. Cannot use break, include, style are mutually exclusive", &toc_entry)))
-                    }
-                    if toc_entry.heading.is_none() && toc_entry.section.is_none() {
-                        errors.push(DocCheckError::new_error(
-                            1,filename.to_path_buf(),
-                            &format!(
-                                "Invalid toc_entry {:?}. Use of style requires \"heading\" or \"section\"", &toc_entry)))
-                    }
-                }
-            }
+            TocEntryChecker { root_dir, docs_folder, project, allow_fuchsia_src_links, doc_line }
+                .check_entries(&toc.toc, &mut errors);
             if !errors.is_empty() { Some(errors) } else { None }
         }
         Err(e) => Some(vec![DocCheckError::new_error(
@@ -234,7 +258,6 @@ mod test {
             &filename,
             &yaml_value,
             allow_fuchsia_src_links,
-            &PathBuf::from("/reference"),
         ) {
             assert_eq!(result.len(), 1);
             if let Some(err) = result.get(0) {
@@ -283,7 +306,6 @@ mod test {
             &filename,
             &yaml_value,
             allow_fuchsia_src_links,
-            &PathBuf::from("/reference"),
         ) {
             if let Some(err) = result.get(0) {
                 panic!("Unexpected error: {:?}", err)
@@ -327,7 +349,6 @@ mod test {
             &filename,
             &yaml_value,
             allow_fuchsia_src_links,
-            &PathBuf::from("/reference"),
         ) {
             assert_eq!(result.len(), 1);
             if let Some(err) = result.get(0) {
@@ -397,7 +418,6 @@ mod test {
             &filename,
             &yaml_value,
             allow_fuchsia_src_links,
-            &PathBuf::from("/reference"),
         ) {
             panic!("Expected no errors, but got {:?}", result);
         }
@@ -584,7 +604,6 @@ mod test {
             &filename,
             &yaml_value,
             allow_fuchsia_src_links,
-            &PathBuf::from("/reference"),
         ) {
             let expected_result = [
                 DocCheckError::new_error(
@@ -622,6 +641,45 @@ mod test {
         } else {
             panic!("Expected  errors, but got None");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_nested_toc_entries_validated() -> Result<()> {
+        // Entries under `section:` and `contents:` carry the same keys as top-level entries
+        // and are validated at every depth.
+        let yaml_value: Value = serde_yaml::from_str(
+            r#"
+toc:
+- title: "Top"
+  path: /docs/README.md
+- title: "Group"
+  section:
+  - title: "Nested bad path"
+    path: /src/main.cc
+  - title: "Deeper"
+    contents:
+    - title: "Nested bad status"
+      path: /docs/README.md
+      status: bogus
+"#,
+        )?;
+        let errors = check_toc(
+            &PathBuf::from("/some/root/dir"),
+            &PathBuf::from("docs"),
+            "some_test_project",
+            &PathBuf::from("_toc.yaml"),
+            &yaml_value,
+            false,
+        )
+        .expect("nested entries must be validated");
+        let messages: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        assert_eq!(
+            messages[0],
+            "in-tree link to /src/main.cc must be in '/docs' or '/reference' directory"
+        );
+        assert!(messages[1].starts_with("Invalid status bogus."), "{}", messages[1]);
         Ok(())
     }
 }

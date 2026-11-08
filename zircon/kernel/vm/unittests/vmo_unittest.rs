@@ -4,7 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-/// VMO tests duplicated from vmo_unittest.cc.
+/// VMO unit tests.
 #[cfg(ktest)]
 #[unittest::suite]
 mod vmo_rs {
@@ -30,7 +30,9 @@ mod vmo_rs {
     use crate::vm::pmm_node::PmmOptDelayReuse;
     use crate::vm::scanner::AutoVmScannerDisable;
     use crate::vm::vm_aspace::{Type, VmAspace, vmm_flag};
-    use crate::vm::vm_cow_pages::{EvictionAction, VmCowPages, VmCowRange, VmCowReclaimFailure};
+    use crate::vm::vm_cow_pages::{
+        DeferredOps, EvictionAction, RangeChangeOp, VmCowPages, VmCowRange, VmCowReclaimFailure,
+    };
     use crate::vm::vm_object::{EvictionHint, Resizability, SnapshotType, SupplyOptions, VmObject};
     use crate::vm::vm_object_paged::VmObjectPaged;
     use crate::vm::vm_object_physical::VmObjectPhysical;
@@ -49,6 +51,7 @@ mod vmo_rs {
     use core::{ptr, slice};
     use debug::dprintf;
     use fbl::{RefPtr, Vector};
+    use kprint::kprintln;
     use page::SIZE as PAGE_SIZE_USIZE;
     use pin_init::stack_pin_init;
     use rand::RngExt as _;
@@ -81,9 +84,9 @@ mod vmo_rs {
                 let page = paddr_to_vm_page(pa).expect("paddr must map to vm_page");
                 if !pred(page) {
                     **pred_matches = false;
-                    Err(Status::STOP)
+                    Status::STOP
                 } else {
-                    Err(Status::NEXT)
+                    Status::NEXT
                 }
             },
         );
@@ -338,10 +341,10 @@ mod vmo_rs {
         let mut last_pa = PAddr(0);
         let lookup_func = |offset, pa: PAddr, last_pa: &mut PAddr| {
             if offset != 0 && PAddr(last_pa.0 + PAGE_SIZE as usize) != pa {
-                return Err(Status::BAD_STATE);
+                return Status::BAD_STATE;
             }
             *last_pa = pa;
-            Err(Status::NEXT)
+            Status::NEXT
         };
         let status = vmo.lookup(0, alloc_size, &mut last_pa, lookup_func);
         expect_ok!(status, "vmo lookup\n");
@@ -1113,7 +1116,7 @@ mod vmo_rs {
         let mut pages_seen = 0;
         let lookup_fn = |_offset: u64, _pa: PAddr, pages_seen: &mut usize| {
             *pages_seen += 1;
-            Err(Status::NEXT)
+            Status::NEXT
         };
         expect_ok!(vmo.lookup(0, alloc_size, &mut pages_seen, lookup_fn));
         expect_eq!(0, pages_seen, "lookup on uncommitted pages\n");
@@ -1201,7 +1204,7 @@ mod vmo_rs {
         let lookup_fn = |offset, _pa: PAddr, offset_seen: &mut u64| {
             assert!(*offset_seen == u64::MAX);
             *offset_seen = offset;
-            Err(Status::NEXT)
+            Status::NEXT
         };
         expect_ok!(slice.lookup(0, slice_size, &mut offset_seen, lookup_fn));
 
@@ -1245,11 +1248,11 @@ mod vmo_rs {
         let mut clone_lookup = [0u64; PAGE_COUNT];
         let vmo_lookup_func = |offset, pa: PAddr, vmo_lookup: &mut [u64; PAGE_COUNT]| {
             vmo_lookup[(offset / PAGE_SIZE) as usize] = pa.into();
-            Err(Status::NEXT)
+            Status::NEXT
         };
         let clone_lookup_func = |offset, pa: PAddr, clone_lookup: &mut [u64; PAGE_COUNT]| {
             clone_lookup[(offset / PAGE_SIZE) as usize] = pa.into();
-            Err(Status::NEXT)
+            Status::NEXT
         };
         // vmo lookup
         expect_ok!(vmo.lookup(0, alloc_size, &mut vmo_lookup, vmo_lookup_func));
@@ -2022,7 +2025,7 @@ mod vmo_rs {
             let mut rand = TestRand::new(state.vmo.addr() as u32);
 
             // Randomly decide between try-lock and lock.
-            if rand.random_bool(0.5) {
+            if rand.random() {
                 if let Err(status) = vmo.try_lock_range(0, K_SIZE) {
                     return status.into_raw();
                 }
@@ -2033,7 +2036,7 @@ mod vmo_rs {
             }
 
             // Randomly decide whether to unlock, or leave the vmo locked.
-            if rand.random_bool(0.5) {
+            if rand.random() {
                 if let Err(status) = vmo.unlock_range(0, K_SIZE) {
                     return status.into_raw();
                 }
@@ -2255,10 +2258,10 @@ mod vmo_rs {
             expect_ok!(vmo.try_lock_range(0, (i as u64 + 1) * PAGE_SIZE));
             expect_ok!(vmo.commit_range(0, (i as u64 + 1) * PAGE_SIZE));
 
-            if rand.random_bool(0.5) {
+            if rand.random() {
                 expect_ok!(vmo.unlock_range(0, (i as u64 + 1) * PAGE_SIZE));
 
-                if rand.random_bool(0.5) {
+                if rand.random() {
                     // Discarded pages won't show up under locked or unlocked counts.
                     let (page, _) = unwrap_ok!(vmo.get_page_blocking(0, 0));
                     let cow = vmo.debug_get_cow_pages().expect("vmo has cow pages");
@@ -2750,7 +2753,7 @@ mod vmo_rs {
             assert!(*base_pa == PAddr(usize::MAX));
             assert!(offset == 0);
             *base_pa = pa;
-            Err(Status::NEXT)
+            Status::NEXT
         });
         assert_ok!(status, "stash base pa works\n");
         assert_true!(base_pa != PAddr(usize::MAX));
@@ -2780,9 +2783,9 @@ mod vmo_rs {
                 assert!(!ctx.page_seen[index]);
                 ctx.page_seen[index] = true;
                 if pa.0.wrapping_sub(ctx.base_pa.0) != offset as usize {
-                    return Err(Status::BAD_STATE);
+                    return Status::BAD_STATE;
                 }
-                Err(Status::NEXT)
+                Status::NEXT
             });
             assert!(
                 status.is_ok(),
@@ -3070,7 +3073,7 @@ mod vmo_rs {
         assert_ok!(vmo.lookup(0, PAGE_SIZE, &mut base_pa, |offset, pa, base_pa| {
             debug_assert_eq!(offset, 0);
             *base_pa = pa;
-            Err(Status::NEXT)
+            Status::NEXT
         }));
         assert_true!(base_pa != PAddr::from(!0));
 
@@ -3093,7 +3096,7 @@ mod vmo_rs {
                     **page_absent = false;
                     debug_assert_eq!(*offset, lookup_offset);
                     debug_assert_eq!(base_pa.0 + *offset as usize, pa.0);
-                    Err(Status::NEXT)
+                    Status::NEXT
                 },
             );
             let absent_expected = (offset < 5 * PAGE_SIZE) || (offset == alloc_size - PAGE_SIZE);
@@ -4556,7 +4559,7 @@ mod vmo_rs {
         let mut pages_seen = 0;
         let lookup_fn = |_offset: u64, _pa: PAddr, pages_seen: &mut u64| {
             *pages_seen += 1;
-            Err(Status::NEXT)
+            Status::NEXT
         };
 
         let vmo_cow = vmo.debug_get_cow_pages().expect("vmo has cow pages");
@@ -4609,7 +4612,7 @@ mod vmo_rs {
         let mut pages_seen = 0;
         let lookup_fn = |_offset: u64, _pa: PAddr, pages_seen: &mut u64| {
             *pages_seen += 1;
-            Err(Status::NEXT)
+            Status::NEXT
         };
 
         let clone_cow = clone.debug_get_cow_pages().unwrap();
@@ -6150,5 +6153,392 @@ mod vmo_rs {
             ));
             expect_true!(test_with_vmo(unwrap_some!(VmObject::downcast_paged(vmo))));
         }
+    }
+
+    /// Verifies pinning and per-page lookup on a 64-page non-contiguous VMO.
+    #[test]
+    fn vmo_non_contiguous_slab_pin_test() {
+        // Regression test for https://fxbug.dev/573602747:
+        // Verifies that a 64-page (256 KiB) non-contiguous VMO created with `ALLOC_FLAG_CAN_WAIT`
+        // and pinned via `PinnedVmObject::create` wires all 64 pages and allows per-page physical
+        // address lookup for 4 KiB page-table sub-allocation without requiring physical contiguity
+        // across pages.
+        const SLAB_PAGES: u64 = 64;
+        const SLAB_SIZE: u64 = SLAB_PAGES * PAGE_SIZE;
+
+        let _scanner_disable = AutoVmScannerDisable::new();
+
+        let slab_vmo = unwrap_ok!(VmObjectPaged::create(
+            pmm::ALLOC_FLAG_ANY | pmm::ALLOC_FLAG_CAN_WAIT,
+            0,
+            SLAB_SIZE,
+        ));
+        expect_false!(slab_vmo.is_contiguous());
+
+        let pinned_slab = unwrap_ok!(PinnedVmObject::create(
+            VmObjectPaged::into_vm_object(slab_vmo.clone()),
+            0,
+            SLAB_SIZE,
+            /*write=*/ true,
+        ));
+        // SAFETY: `pinned_slab` keeps all pages in `[0, SLAB_SIZE)` pinned and attached to
+        // `slab_vmo` for the duration of this check.
+        expect_true!(unsafe { pages_in_wired_queue(&slab_vmo, 0, SLAB_SIZE) });
+
+        for i in 0..SLAB_PAGES {
+            let page_pa = unwrap_ok!(slab_vmo.lookup_contiguous(i * PAGE_SIZE, PAGE_SIZE));
+            expect_ne!(page_pa.0, 0);
+            expect_eq!(page_pa.0 & (PAGE_SIZE_USIZE - 1), 0);
+        }
+
+        drop(pinned_slab);
+    }
+
+    /// Check that committed ranges in children correctly have range updates skipped.
+    #[test]
+    fn vmo_skip_range_update_test() {
+        let _scanner_disable = AutoVmScannerDisable::new();
+        const NUM_PAGES: u64 = 16;
+
+        let vmo = unwrap_ok!(VmObjectPaged::create(ALLOC_FLAG_ANY, 0, PAGE_SIZE * NUM_PAGES));
+
+        expect_ok!(vmo.commit_range(0, PAGE_SIZE * NUM_PAGES));
+
+        let child = unwrap_ok!(vmo.create_clone(
+            Resizability::NonResizable,
+            SnapshotType::Full,
+            0,
+            PAGE_SIZE * NUM_PAGES,
+            false,
+        ));
+
+        // Fork some pages into the child to have some regions that should be able to avoid range
+        // updates.
+        for page in [4, 5, 6, 10, 11, 12] {
+            let data: u64 = 42;
+            expect_ok!(child.write(PAGE_SIZE * page, &data.to_ne_bytes()));
+        }
+
+        // Create a user memory mapping to check if unmaps do and do not get performed.
+        let user_memory = unwrap_some!(UserMemory::create_from_vmo(child, 0, 0));
+
+        // Reach into the hidden parent so we can directly perform range updates.
+        let hidden_parent =
+            unwrap_some!(unwrap_some!(vmo.debug_get_cow_pages()).debug_get_parent());
+
+        struct TestRange {
+            page_start: u64,
+            num_pages: u64,
+            unmapped: &'static [usize],
+        }
+        let test_ranges: &[TestRange] = &[
+            // Simple range that is not covered in the child should get unmapped
+            TestRange { page_start: 0, num_pages: 1, unmapped: &[0] },
+            // Various ranges fully covered by the child should have no unmappings
+            TestRange { page_start: 4, num_pages: 1, unmapped: &[] },
+            TestRange { page_start: 4, num_pages: 3, unmapped: &[] },
+            TestRange { page_start: 6, num_pages: 1, unmapped: &[] },
+            // Ranges that partially touch a single committed range should get trimmed
+            TestRange { page_start: 3, num_pages: 2, unmapped: &[3] },
+            TestRange { page_start: 6, num_pages: 2, unmapped: &[7] },
+            // Range that spans a single gap that sees the parent should get trimmed at both ends to
+            // just that gap.
+            TestRange { page_start: 4, num_pages: 9, unmapped: &[7, 8, 9] },
+            // Spanning across a committed range causes us to still have to unnecessarily unmap.
+            TestRange { page_start: 3, num_pages: 10, unmapped: &[3, 4, 5, 6, 7, 8, 9] },
+            TestRange { page_start: 4, num_pages: 10, unmapped: &[7, 8, 9, 10, 11, 12, 13] },
+            TestRange {
+                page_start: 3,
+                num_pages: 11,
+                unmapped: &[3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+            },
+        ];
+
+        for range in test_ranges {
+            // Ensure all the mappings start populated.
+            for i in 0..NUM_PAGES {
+                let _ = unwrap_ok!(user_memory.get::<u8>((i * PAGE_SIZE) as usize));
+                expect_ok!(
+                    user_memory
+                        .aspace()
+                        .arch_aspace()
+                        .query(user_memory.base() + (i * PAGE_SIZE) as usize)
+                        .map(|_| ())
+                );
+            }
+            // Perform the requested range update.
+            {
+                stack_pin_init!(let deferred = DeferredOps::new(&hidden_parent));
+                ksync::lock!(let guard = hidden_parent.lock());
+                let range_update =
+                    VmCowRange::new(range.page_start * PAGE_SIZE, range.num_pages * PAGE_SIZE);
+                hidden_parent.range_change_update_locked(
+                    guard.token(),
+                    range_update,
+                    RangeChangeOp::Unmap,
+                    Some(deferred),
+                );
+            }
+            // Check all the mappings are either there or not there as expected.
+            let mut expected = [true; NUM_PAGES as usize];
+            for &page in range.unmapped {
+                expected[page] = false;
+            }
+            for i in 0..NUM_PAGES {
+                let res = user_memory
+                    .aspace()
+                    .arch_aspace()
+                    .query(user_memory.base() + (i * PAGE_SIZE) as usize);
+                let expected_res =
+                    if expected[i as usize] { Ok(()) } else { Err(Status::NOT_FOUND) };
+                expect_eq!(
+                    Status::result_into_raw(expected_res),
+                    Status::result_into_raw(res.map(|_| ()))
+                );
+            }
+        }
+    }
+
+    /// Attempts to transfer data over a parent content marker slot backed by a zero marker.
+    #[test]
+    fn vmo_zero_marker_transfer_test() {
+        // Need a compressor.
+        let Some(compression) = pmm::node().get_page_compression() else {
+            return true;
+        };
+
+        let _scanner_disable = AutoVmScannerDisable::new();
+
+        const NUM_PAGES: u64 = 1;
+        let alloc_size = NUM_PAGES * PAGE_SIZE;
+
+        let vmo = unwrap_ok!(VmObjectPaged::create(ALLOC_FLAG_ANY, 0, alloc_size));
+
+        assert_ok!(vmo.commit_range(0, alloc_size));
+
+        let _clone1 = unwrap_ok!(vmo.create_clone(
+            Resizability::NonResizable,
+            SnapshotType::Full,
+            0,
+            alloc_size,
+            false,
+        ));
+
+        assert_ok!(vmo.commit_range(0, alloc_size));
+
+        // A second level clone is needed so that the compressor actually inserts a zero marker
+        // instead of simply freeing up the deduped zero page.
+        let _clone2 = unwrap_ok!(vmo.create_clone(
+            Resizability::NonResizable,
+            SnapshotType::Full,
+            0,
+            alloc_size,
+            false,
+        ));
+
+        // Compress the parent page by reaching into the hidden VMO parent.
+        let hidden_root = unwrap_some!(unwrap_some!(vmo.debug_get_cow_pages()).debug_get_parent());
+        let page = unwrap_some!(hidden_root.debug_get_page(0));
+        {
+            stack_pin_init!(let compressor = compression.acquire_compressor());
+            assert_ok!(compressor.as_mut().get().arm());
+            // Attempt to reclaim the page in the hidden parent.
+            // SAFETY: `page` is at offset 0 of `hidden_root`.
+            let reclaimed = unsafe {
+                reclaim_cow_pages(
+                    &hidden_root,
+                    page,
+                    0,
+                    EvictionAction::FollowHint,
+                    Some(compressor.as_mut().get()),
+                )
+            };
+            expect_eq!(reclaimed, 1u64);
+        }
+        assert_true!(hidden_root.debug_is_marker(0));
+
+        // Transfer data, overwriting the parent content marker.
+        let aux = unwrap_ok!(VmObjectPaged::create(ALLOC_FLAG_ANY, 0, alloc_size));
+        assert_ok!(aux.commit_range(0, alloc_size));
+
+        stack_pin_init!(let pages = VmPageSpliceList::new());
+        assert_ok!(aux.take_pages(0, alloc_size, pages.as_mut()));
+        assert_ok!(vmo.supply_pages(0, alloc_size, pages.as_mut(), SupplyOptions::TransferData));
+    }
+
+    /// Tests compressing zero pages into a marker in a pager-backed COW hierarchy.
+    #[test]
+    fn vmo_compress_to_marker_pager_test() {
+        let _scanner_disable = AutoVmScannerDisable::new();
+
+        const NUM_PAGES: usize = 2;
+        const VMO_SIZE: u64 = PAGE_SIZE * NUM_PAGES as u64;
+
+        let mut zero_buff = Vector::<u8>::new();
+        assert_true!(zero_buff.resize(VMO_SIZE as usize, 0).is_ok());
+
+        let val: u32 = 42;
+
+        let Some(compression) = pmm::node().get_page_compression() else {
+            kprintln!("No compression, skipping");
+            return true;
+        };
+
+        // Pager VMO
+        let (vmo, _) = unwrap_ok!(make_committed_pager_vmo::<NUM_PAGES>(
+            /*trap_dirty=*/ false, /*resizable=*/ false,
+        ));
+
+        // Clone with pages of zeros
+        let clone1 = unwrap_ok!(vmo.create_clone(
+            Resizability::NonResizable,
+            SnapshotType::Modified,
+            0,
+            VMO_SIZE,
+            true,
+        ));
+
+        assert_ok!(clone1.write(0, &zero_buff));
+
+        // Clone again to move zero pages into hidden node.
+        let clone2 = unwrap_ok!(clone1.create_clone(
+            Resizability::NonResizable,
+            SnapshotType::Modified,
+            0,
+            VMO_SIZE,
+            true,
+        ));
+
+        let clone1_paged = unwrap_some!(VmObject::downcast_paged(clone1.clone()));
+        let cow_pages_hidden =
+            unwrap_some!(unwrap_some!(clone1_paged.debug_get_cow_pages()).debug_get_parent());
+        assert_false!(cow_pages_hidden.tree_has_parent_content_markers());
+        let page0 = unwrap_some!(cow_pages_hidden.debug_get_page(0));
+        // SAFETY: `page0` is attached to `cow_pages_hidden` (so `object` is the active variant),
+        // and nothing can change its share count concurrently: the scanner is disabled and this
+        // test holds the only references to the hierarchy.
+        assert_eq!(1u32, unsafe { page0.get_share_count() });
+        assert_true!(cow_pages_hidden.debug_is_page(0));
+
+        // Compress pages into marker.
+        let page = unwrap_some!(cow_pages_hidden.debug_get_page(0));
+
+        {
+            stack_pin_init!(let compressor = compression.acquire_compressor());
+            assert_ok!(compressor.as_mut().get().arm());
+
+            // SAFETY: `page` is at offset 0 of `cow_pages_hidden`.
+            let reclaimed = unsafe {
+                reclaim_cow_pages(
+                    &cow_pages_hidden,
+                    page,
+                    0,
+                    EvictionAction::FollowHint,
+                    Some(compressor.as_mut().get()),
+                )
+            };
+            expect_eq!(reclaimed, 1u64);
+        }
+
+        assert_true!(cow_pages_hidden.debug_is_marker(0));
+        assert_eq!(1u32, cow_pages_hidden.debug_get_marker_share_count(0));
+
+        assert_ok!(clone1.write(0, &val.to_ne_bytes()));
+        assert_eq!(0u32, cow_pages_hidden.debug_get_marker_share_count(0));
+
+        drop(clone2);
+        drop(clone1_paged);
+        drop(clone1);
+        drop(vmo);
+    }
+
+    /// Tests compressing zero pages into a marker in an anonymous COW hierarchy.
+    #[test]
+    fn vmo_compress_to_marker_anon_test() {
+        let _scanner_disable = AutoVmScannerDisable::new();
+
+        const NUM_PAGES: usize = 2;
+        const VMO_SIZE: u64 = PAGE_SIZE * NUM_PAGES as u64;
+
+        let mut zero_buff = Vector::<u8>::new();
+        assert_true!(zero_buff.resize(VMO_SIZE as usize, 0).is_ok());
+
+        let val: u32 = 42;
+
+        let Some(compression) = pmm::node().get_page_compression() else {
+            kprintln!("No compression, skipping");
+            return true;
+        };
+
+        // Write to pages.
+        let anon_vmo = unwrap_ok!(VmObjectPaged::create(ALLOC_FLAG_ANY, 0, VMO_SIZE));
+        expect_ok!(anon_vmo.write(0, &val.to_ne_bytes()));
+        expect_ok!(anon_vmo.write(PAGE_SIZE, &val.to_ne_bytes()));
+
+        let anon_clone1 = unwrap_ok!(anon_vmo.create_clone(
+            Resizability::NonResizable,
+            SnapshotType::Modified,
+            0,
+            VMO_SIZE,
+            true,
+        ));
+
+        // Write zeros into clone.
+        assert_ok!(anon_clone1.write(0, &zero_buff));
+
+        let anon_clone2 = unwrap_ok!(anon_clone1.create_clone(
+            Resizability::NonResizable,
+            SnapshotType::Modified,
+            0,
+            VMO_SIZE,
+            true,
+        ));
+
+        let anon_clone1_paged = unwrap_some!(VmObject::downcast_paged(anon_clone1.clone()));
+        let cow_pages_hidden =
+            unwrap_some!(unwrap_some!(anon_clone1_paged.debug_get_cow_pages()).debug_get_parent());
+        assert_true!(cow_pages_hidden.tree_has_parent_content_markers());
+        let page0 = unwrap_some!(cow_pages_hidden.debug_get_page(0));
+        // SAFETY: `page0` is attached to `cow_pages_hidden` (so `object` is the active variant),
+        // and nothing can change its share count concurrently: the scanner is disabled and this
+        // test holds the only references to the hierarchy.
+        assert_eq!(1u32, unsafe { page0.get_share_count() });
+        assert_true!(cow_pages_hidden.debug_is_page(0));
+
+        // Compress pages into marker.
+        let page = unwrap_some!(cow_pages_hidden.debug_get_page(0));
+
+        {
+            stack_pin_init!(let compressor = compression.acquire_compressor());
+            assert_ok!(compressor.as_mut().get().arm());
+
+            // SAFETY: `page` is at offset 0 of `cow_pages_hidden`.
+            let reclaimed = unsafe {
+                reclaim_cow_pages(
+                    &cow_pages_hidden,
+                    page,
+                    0,
+                    EvictionAction::FollowHint,
+                    Some(compressor.as_mut().get()),
+                )
+            };
+            expect_eq!(reclaimed, 1u64);
+        }
+
+        assert_true!(cow_pages_hidden.debug_is_marker(0));
+        assert_eq!(1u32, cow_pages_hidden.debug_get_marker_share_count(0));
+
+        // Writing to the clone should decrement marker share count.
+        assert_ok!(anon_clone1.write(0, &val.to_ne_bytes()));
+        assert_eq!(0u32, cow_pages_hidden.debug_get_marker_share_count(0));
+
+        // Writing to the second clone should clear the marker from the hidden node
+        assert_ok!(anon_clone2.write(0, &val.to_ne_bytes()));
+        assert_true!(cow_pages_hidden.debug_is_empty(0));
+
+        drop(anon_clone1_paged);
+        drop(anon_clone1);
+        drop(anon_clone2);
+        drop(anon_vmo);
     }
 }

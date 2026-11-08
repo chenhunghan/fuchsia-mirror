@@ -20,7 +20,7 @@ pub struct UserTag;
 pub type UserId = IdType<NonZeroU16, UserTag>;
 
 /// Parsed SELinux user definition.
-#[derive(Debug, Validate, HasName, HasPolicyId)]
+#[derive(Clone, Debug, Validate, HasName, HasPolicyId)]
 pub struct User {
     id: UserId,
     name: Box<[u8]>,
@@ -88,7 +88,7 @@ impl Serialize for User {
 impl Validate for UserId {
     fn validate(&self, policy: &Policy) -> Result<(), ValidateError> {
         policy
-            .users()
+            .users
             .get_by_id(*self)
             .map(|_| ())
             .ok_or_else(|| ValidateError::UnknownId { kind: "user", id: self.as_u32() })

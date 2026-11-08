@@ -39,6 +39,14 @@ pub enum TestRunError {
         source: io::Error,
     },
 
+    #[error("Error copying output summary from {from} to {to}: {source}")]
+    FailedToCopySummary {
+        from: PathBuf,
+        to: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+
     #[error("Output operation failed: {0}")]
     OutputOperationFailed(#[from] TestOutputError),
 }

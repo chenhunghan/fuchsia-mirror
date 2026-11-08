@@ -11,18 +11,22 @@
 #include <fidl/fuchsia.hardware.camera/cpp/fidl.h>
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async-loop/default.h>
+#include <lib/async/cpp/task.h>
 #include <lib/fidl/cpp/binding.h>
 #include <lib/fit/function.h>
 #include <lib/fpromise/result.h>
+#include <lib/zx/time.h>
 #include <zircon/status.h>
 
 #include <memory>
 #include <queue>
 #include <set>
+#include <string>
 #include <unordered_map>
 
 #include "lib/async/dispatcher.h"
 #include "src/camera/bin/device_watcher/device_instance.h"
+#include "src/lib/backoff/backoff.h"
 
 namespace camera {
 
@@ -48,16 +52,33 @@ enum CameraType {
 };
 
 struct UniqueDevice {
-  TransientDeviceId id;
+  TransientDeviceId id = 0;
+  // Null while the device waits to be relaunched. Clients do not see the device then.
   std::unique_ptr<DeviceInstance> instance;
+  // What is needed to launch the device again after its instance exits.
+  CameraType type = kCameraTypeMipiCsi;
+  std::string path;
+  uint32_t launch_count = 0;
+  uint32_t relaunch_attempts = 0;
+  // Delays between relaunch attempts.
+  std::unique_ptr<backoff::Backoff> relaunch_backoff;
+  zx::time launch_time;
+  std::unique_ptr<async::TaskClosure> relaunch_task;
 };
 
 using DevicesMap = std::unordered_map<PersistentDeviceId, UniqueDevice>;
 
 class DeviceWatcherImpl {
  public:
+  // Connects to the camera device at |full_path|. Tests replace the default, which connects
+  // through the component's namespace.
+  using CameraConnector =
+      fit::function<fpromise::result<fidl::ClientEnd<fuchsia_hardware_camera::Device>, zx_status_t>(
+          const std::string& full_path)>;
+
   static fpromise::result<std::unique_ptr<DeviceWatcherImpl>, zx_status_t> Create(
-      fidl::ClientEnd<fuchsia_component::Realm> realm, async_dispatcher_t* dispatcher);
+      fidl::ClientEnd<fuchsia_component::Realm> realm, async_dispatcher_t* dispatcher,
+      CameraConnector camera_connector = nullptr);
 
   fpromise::result<CameraType, zx_status_t> GetDeviceInfoAndIdentifyCameraType(
       fidl::SyncClient<fuchsia_hardware_camera::Device>& dev,
@@ -79,6 +100,16 @@ class DeviceWatcherImpl {
   fpromise::result<PersistentDeviceId, zx_status_t> AddUvcDevice(
       fidl::ClientEnd<fuchsia_hardware_camera::Device> camera,
       fuchsia_camera2::DeviceInfo& device_info, const std::string& path);
+
+  // Launches a child for the device in |devices_| and gives the device a new transient ID.
+  fpromise::result<PersistentDeviceId, zx_status_t> LaunchDevice(
+      PersistentDeviceId persistent_id, fidl::ClientEnd<fuchsia_hardware_camera::Device> camera);
+  // Hides the device from clients and schedules a relaunch. Ignored if the device has been
+  // launched again since |launch_count|.
+  void OnDeviceExited(PersistentDeviceId persistent_id, uint32_t launch_count);
+  void ScheduleRelaunch(PersistentDeviceId persistent_id);
+  void RelaunchDevice(PersistentDeviceId persistent_id);
+  void NotifyClients();
 
   // Implements the server endpoint for a single client, and maintains per-client state.
   class Client : public fidl::Server<fuchsia_camera3::DeviceWatcher> {
@@ -108,6 +139,7 @@ class DeviceWatcherImpl {
   async_dispatcher_t* dispatcher_;
 
   fidl::Client<fuchsia_component::Realm> realm_;
+  CameraConnector camera_connector_;
   TransientDeviceId device_id_next_ = 1;
   DevicesMap devices_;
   ClientId client_id_next_ = 1;

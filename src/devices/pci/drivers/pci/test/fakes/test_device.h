@@ -4,8 +4,7 @@
 #ifndef SRC_DEVICES_PCI_DRIVERS_PCI_TEST_FAKES_TEST_DEVICE_H_
 #define SRC_DEVICES_PCI_DRIVERS_PCI_TEST_FAKES_TEST_DEVICE_H_
 
-#include <fuchsia/hardware/pciroot/c/banjo.h>
-#include <lib/device-protocol/pci.h>
+#include <fidl/fuchsia.hardware.pci.root/cpp/fidl.h>
 #include <lib/pci/constants.h>
 #include <lib/pci/hw.h>
 
@@ -344,24 +343,23 @@ constexpr size_t kFakeQuadroMsiXIrqCnt = 5;
 // BAR metadata for the fake Quadro. Refer to the BAR lines above for an
 // explanation.
 static constexpr struct test_bar_info_t {
-    pci_bar_type_t bar_type;
-    pci_address_space_t address_type;
+    bool is_mmio;
+    fuchsia_hardware_pci_root::AddressSpace address_type;
     bool is_upper_half;
     uint16_t address;
     uint32_t size;
 } kTestDeviceBars[6] = {
-    { .bar_type = PCI_BAR_TYPE_MMIO, .address_type = PCI_ADDRESS_SPACE_MEMORY, .is_upper_half = false, .address = UINT16_MAX, .size = 16 * 1024 * 1024 },
-    { .bar_type = PCI_BAR_TYPE_MMIO, .address_type = PCI_ADDRESS_SPACE_MEMORY, .is_upper_half = false, .address = UINT16_MAX, .size = 256 * 1024 * 1024 },
-    { .bar_type = PCI_BAR_TYPE_MMIO, .address_type = PCI_ADDRESS_SPACE_MEMORY, .is_upper_half = false, .address = UINT16_MAX, .size = 1 * 1024 * 1024  },
-    { .bar_type = PCI_BAR_TYPE_MMIO, .address_type = PCI_ADDRESS_SPACE_MEMORY, .is_upper_half = false, .address = UINT16_MAX, .size = 32 * 1024 * 1024 },
-    { .bar_type = PCI_BAR_TYPE_MMIO, .address_type = PCI_ADDRESS_SPACE_MEMORY, .is_upper_half = true,  .address = UINT16_MAX, .size = 0 },
+    { .is_mmio = true, .address_type = fuchsia_hardware_pci_root::AddressSpace::kMemory, .is_upper_half = false, .address = UINT16_MAX, .size = 16 * 1024 * 1024 },
+    { .is_mmio = true, .address_type = fuchsia_hardware_pci_root::AddressSpace::kMemory, .is_upper_half = false, .address = UINT16_MAX, .size = 256 * 1024 * 1024 },
+    { .is_mmio = true, .address_type = fuchsia_hardware_pci_root::AddressSpace::kMemory, .is_upper_half = false, .address = UINT16_MAX, .size = 1 * 1024 * 1024  },
+    { .is_mmio = true, .address_type = fuchsia_hardware_pci_root::AddressSpace::kMemory, .is_upper_half = false, .address = UINT16_MAX, .size = 32 * 1024 * 1024 },
+    { .is_mmio = true, .address_type = fuchsia_hardware_pci_root::AddressSpace::kMemory, .is_upper_half = true,  .address = UINT16_MAX, .size = 0 },
 #ifdef __x86_64__
-    { .bar_type = PCI_BAR_TYPE_IO, .address_type = PCI_ADDRESS_SPACE_IO, .is_upper_half = false, .address = 0x2000,     .size = 128 },
+    { .is_mmio = false, .address_type = fuchsia_hardware_pci_root::AddressSpace::kIo, .is_upper_half = false, .address = 0x2000,     .size = 128 },
 #elif defined(__aarch64__) || defined(__riscv)
-    { .bar_type = PCI_BAR_TYPE_IO, .address_type = PCI_ADDRESS_SPACE_MEMORY, .is_upper_half = false, .address = 0x2000,     .size = 4096 },
+    { .is_mmio = false, .address_type = fuchsia_hardware_pci_root::AddressSpace::kMemory, .is_upper_half = false, .address = 0x2000,     .size = 4096 },
 #else
-    // Trigger an error on unsupported architectures.
-    { .address_type = PCI_ADDRESS_SPACE_NONE }
+#error "Unsupported architecture"
 #endif
 
 
@@ -370,6 +368,7 @@ static constexpr struct test_bar_info_t {
 
 // This is the configuration space dump of a virtio-input device. It should
 // contain an MSIX capability along with 5 Vendor capabilities.
+constexpr uint8_t kFakeVirtioInputMsixCapabilityOffset = 0x98;
 static std::array<uint8_t, pci::kBaseConfigSize> kFakeVirtioInputDeviceConfig = {
     0xf4, 0x1a, // Vendor Id
     0x52, 0x10, // Device Id

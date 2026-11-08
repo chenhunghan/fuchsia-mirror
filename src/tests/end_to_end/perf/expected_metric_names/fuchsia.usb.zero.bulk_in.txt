@@ -1,0 +1,2 @@
+fuchsia.usb.zero.bulk_in: Rate
+fuchsia.usb.zero.bulk_in: WallTime

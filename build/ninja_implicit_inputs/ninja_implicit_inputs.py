@@ -204,7 +204,7 @@ class ImplicitInputs:
         return missing_paths_map
 
     @staticmethod
-    def create_from_build_dir(build_dir: str | Path) -> "ImplicitInputs":
+    def create_from_build_dir(build_dir: str | Path) -> ImplicitInputs:
         """Load the GN-generated manifest of known implicit inputs.
 
         Args:

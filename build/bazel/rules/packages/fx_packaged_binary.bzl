@@ -2,15 +2,17 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-"""Defines fx_packaged_binary rule and macro for wrapping C++ and Rust binaries.
+"""Defines fx_packaged_binary rule and macro for wrapping C++ and Rust binaries and shared objects.
 
 `fx_packaged_binary` is a convenience macro that wraps a C++ or Rust executable
-binary so it can be packaged into a Fuchsia package by providing the necessary
-providers and data files.
+binary or shared library / DSO (e.g. `rustc_cdylib`, `fuchsia_cc_dso`,
+`fuchsia_rust_dso`) so it can be packaged into a Fuchsia package by providing
+the necessary providers and data files.
 
 `fx_packaged_binary` must be used instead of the underlying binary rule
-(e.g., `fx_cc_binary`, `rustc_binary`) when the binary needs to be included
-in a Fuchsia package.
+(e.g., `fx_cc_binary`, `rustc_binary`, `rustc_cdylib`, `fuchsia_cc_dso`,
+`fuchsia_rust_dso`) when the binary or shared object needs to be included in a
+Fuchsia package.
 
 `_fx_packaged_binary` is the internal rule implementation. A wrapping symbolic
 macro is necessary because `shared_lib_dest` uses `select()` to choose the
@@ -38,43 +40,84 @@ load(
 )
 load(
     "@fuchsia_rules_common//packages:clang_package_resources.bzl",
-    "get_clang_package_resources",
+    "get_variant_dest_select_map",
 )
 load(
     "@fuchsia_rules_common//packages:providers.bzl",
     "FuchsiaPackageResourcesInfo",
 )
-load("@prebuilt_clang//:generated_constants.bzl", clang_constants = "constants")
-load("@rules_cc//cc/common:cc_shared_library_info.bzl", "CcSharedLibraryInfo")
+load("@rules_cc//cc/common:debug_package_info.bzl", "DebugPackageInfo")
 load("@rules_rust//rust:defs.bzl", "rust_common")
 
-_SUPPORTED_CPUS = [
-    "arm64",
-    "riscv64",
-    "x64",
-]
+def _get_rust_runtime_shared_libraries(binary):
+    """Returns the shared libraries a Rust executable links against at runtime.
+
+    On Bazel 8 (`< 9.0.0-pre.20250911`), `@rules_cc`'s
+    `@cc_compatibility_proxy//:proxy.bzl` (`rules_cc+/cc/extensions.bzl`)
+    aliases `cc_import` to `native.cc_import`, whose built-in implementation
+    (`builtins_bzl/common/cc/cc_import.bzl`) returns `[merged_cc_info]` with no
+    `DefaultInfo` runfiles. In addition, `@rules_rust` (`rustc.bzl`) only adds
+    shared libraries from `CcInfo` to runfiles for `bin`/`cdylib`/`dylib`/
+    `staticlib` targets and only inspects the target's own `deps` and
+    `link_deps`. As a result, shared libraries reached through an `rlib`'s
+    `link_deps` in a `rust_test(crate = ...)` are linked (via `DepInfo`) but
+    missing from the test binary's runfiles, and the test fails to load on
+    device with `Error loading shared library lib<name>.so: ZX_ERR_NOT_FOUND`.
+
+    `DepInfo.transitive_noncrates` contains every native library that rustc
+    linked into the executable, so collect the shared libraries from there.
+    These are the same `File` objects that @rules_rust adds to runfiles for
+    executables' direct dependencies, so they deduplicate when merged.
+
+    Args:
+        binary: The binary target.
+
+    Returns:
+        A list of shared library `File`s.
+    """
+    if rust_common.dep_info not in binary:
+        return []
+    return [
+        library.dynamic_library
+        for linker_input in binary[rust_common.dep_info].transitive_noncrates.to_list()
+        for library in linker_input.libraries
+        if library.dynamic_library and not (library.static_library or library.pic_static_library)
+    ]
 
 def _fx_packaged_binary_impl(ctx):
-    if CcSharedLibraryInfo in ctx.attr.binary:
-        fail("fx_packaged_binary does not support cc_shared_library target")
-
     binary_outputs = ctx.attr.binary.files.to_list()
     if len(binary_outputs) != 1:
         fail("Expected exactly 1 native output for %s" % ctx.attr.binary)
 
     target_in = binary_outputs[0]
 
+    # If the binary is wrapped by a transition rule (e.g., for `transitive_features`),
+    # `DefaultInfo.files` contains an executable symlink in the outer configuration,
+    # whereas the actual unstripped ELF binary is exposed via `DebugPackageInfo` (C++)
+    # or `CrateInfo` / `TestCrateInfo` (Rust) and is what `collect_debug_symbols_manifest_aspect` records.
+    if DebugPackageInfo in ctx.attr.binary:
+        unstripped_file = ctx.attr.binary[DebugPackageInfo].unstripped_file
+    elif rust_common.crate_info in ctx.attr.binary:
+        unstripped_file = ctx.attr.binary[rust_common.crate_info].output
+    elif rust_common.test_crate_info in ctx.attr.binary:
+        unstripped_file = ctx.attr.binary[rust_common.test_crate_info].crate.output
+    else:
+        unstripped_file = target_in
+
     unstripped_binaries = [
         make_fuchsia_unstripped_binary_info(
             dest = ctx.attr.install_root + ctx.attr.binary_name,
-            unstripped_file = target_in,
+            unstripped_file = unstripped_file,
         ),
     ] + get_runfiles_shared_lib_binary_info(
         # TODO(https://fxbug.dev/532024842): Consider collecting from @rules_cc providers instead.
-        runfiles = ctx.attr.binary[DefaultInfo].default_runfiles,
+        runfiles = ctx.attr.binary[DefaultInfo].default_runfiles.merge(
+            ctx.runfiles(files = _get_rust_runtime_shared_libraries(ctx.attr.binary)),
+        ),
         shared_lib_dest = ctx.attr.shared_lib_dest,
         exclude_libs = [
             target_in.basename,
+            unstripped_file.basename,
         ],
     )
 
@@ -90,10 +133,12 @@ def _fx_packaged_binary_impl(ctx):
     # equivalent of GN adding //build/toolchain/runtime:shared-rust-libstd-deps
     # to every Rust target built with -Cprefer-dynamic.
     #
-    # This is keyed off CrateInfo rather than an attribute so that callers do
-    # not have to declare what language their binary is written in, and so that
-    # C++ packages never pick up an unnecessary copy of libstd.
-    if rust_common.crate_info in ctx.attr.binary:
+    # This is keyed off CrateInfo / TestCrateInfo rather than an attribute so
+    # that callers do not have to declare what language their binary or cdylib
+    # is written in, and so that C++ packages never pick up an unnecessary copy
+    # of libstd. (`rust_binary` / `rust_test` provide `CrateInfo`;
+    # `rust_shared_library` / `rustc_cdylib` provide `TestCrateInfo`.)
+    if rust_common.crate_info in ctx.attr.binary or rust_common.test_crate_info in ctx.attr.binary:
         extra_providers.append(FuchsiaPackageResourcesInfo(resources = [
             make_resource_struct(
                 src = f,
@@ -108,7 +153,7 @@ def _fx_packaged_binary_impl(ctx):
         }))
 
     return [
-        DefaultInfo(files = depset([target_in])),
+        DefaultInfo(files = depset([unstripped_file])),
         merge_debug_symbol_infos(debug_symbol_infos),
         # The wrapped binary is newly built, so stripping and debug symbol extraction are consolidated
         # in fx_package, and this rule only propagates the unstripped binaries.
@@ -119,7 +164,7 @@ _fx_packaged_binary = rule(
     implementation = _fx_packaged_binary_impl,
     attrs = {
         "binary_name": attr.string(
-            doc = "The name of the executable binary generated by `binary` when it is placed in `install_root`",
+            doc = "The name of the binary or shared object generated by `binary` when it is placed in `install_root`",
             mandatory = True,
         ),
         "install_root": attr.string(
@@ -132,9 +177,8 @@ _fx_packaged_binary = rule(
             mandatory = True,
         ),
         "binary": attr.label(
-            doc = "The target that generates the executable binary to be packaged. It will be named `binary_name` in the package.",
+            doc = "The target that generates the executable binary or shared object to be packaged. It will be named `binary_name` in the package.",
             mandatory = True,
-            executable = True,
             providers = [DefaultInfo],
             cfg = "target",
         ),
@@ -175,27 +219,22 @@ _fx_packaged_binary = rule(
 )
 
 def _fx_packaged_binary_macro_impl(name, visibility, **kwargs):
-    clang_package_resources = get_clang_package_resources(
-        clang_repo_prefix = "@prebuilt_clang//",
-        lib_clang_internal_dir = clang_constants.lib_clang_internal_dir,
-        supported_cpus = _SUPPORTED_CPUS,
-    )
-
     _fx_packaged_binary(
         name = name,
         visibility = visibility,
         # `select()` cannot be used as `default` in `attr.string()` on `_fx_packaged_binary`,
         # so it must be passed at target instantiation time here in the symbolic macro.
-        shared_lib_dest = select(clang_package_resources.sanitizers_dest_select_map),
+        shared_lib_dest = select(get_variant_dest_select_map("@prebuilt_clang//")),
         **kwargs
     )
 
 fx_packaged_binary = macro(
-    doc = """Wraps a C++ or Rust executable binary target so it can be installed in a Fuchsia package.
+    doc = """Wraps a C++ or Rust executable binary or shared library target so it can be installed in a Fuchsia package.
 
     `fx_packaged_binary` attaches `FuchsiaUnstrippedBinariesInfo` and prebuilt Clang
-    debug symbols to the underlying native target so the executable and its runtime shared
-    libraries can be installed to their corresponding locations in an `fx_package`.
+    (and Rust, when applicable) debug symbols to the underlying native target so the
+    binary or shared object and its runtime shared libraries can be installed to their
+    corresponding locations in an `fx_package`.
 
     Note: A symbolic macro wrapping `_fx_packaged_binary` is required because `shared_lib_dest`
     is selected based on build configuration/variant (e.g. `lib/asan` vs. `lib`) using `select()`.

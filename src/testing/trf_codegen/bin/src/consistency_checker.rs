@@ -5,8 +5,9 @@
 // Validates the parsed TRF AST against explicit component manifest routing rules.
 
 use crate::parser::{ConfigValue, ParsedAstResult};
+use anyhow::{Context, Result as AnyhowResult};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 const INJECTABLE_UNIVERSE_MONIKER: &str = "IU";
 const COMPONENT_UNDER_TEST_MONIKER: &str = "CUT";
@@ -21,12 +22,140 @@ pub enum ConfigType {
     Vector,
 }
 
-/// Representation of a compiled `.cm` manifest for the Component Under Test (CUT).
+/// Representation of a component manifest (`.cml` or `.cm` JSON) for the Component Under Test (CUT).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ComponentManifest {
+    #[serde(default)]
     pub config_schema: HashMap<String, ConfigType>,
+    #[serde(default)]
+    pub config_capabilities: BTreeMap<String, String>,
+    #[serde(default)]
     pub used_protocols: Vec<String>,
+    #[serde(default)]
     pub exposed_protocols: Vec<String>,
+    #[serde(default)]
+    pub has_includes: bool,
+}
+
+fn parse_cml_config_type(type_name: &str) -> Option<ConfigType> {
+    match type_name {
+        "bool" => Some(ConfigType::Boolean),
+        "uint8" | "uint16" | "uint32" | "uint64" | "int8" | "int16" | "int32" | "int64" => {
+            Some(ConfigType::Integer)
+        }
+        "string" => Some(ConfigType::String),
+        "vector" => Some(ConfigType::Vector),
+        _ => None,
+    }
+}
+
+fn collect_protocol_values(value: &serde_json::Value, output: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(protocol) => {
+            if !output.contains(protocol) {
+                output.push(protocol.clone());
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                if let Some(protocol) = item.as_str() {
+                    let protocol_string = protocol.to_string();
+                    if !output.contains(&protocol_string) {
+                        output.push(protocol_string);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+impl ComponentManifest {
+    /// Parses either a Fuchsia `.cml` JSON5 manifest or a serialized `ComponentManifest` JSON document.
+    pub fn parse(content: &str) -> AnyhowResult<Self> {
+        let root_value: serde_json::Value =
+            serde_json5::from_str(content).context("Failed to parse component manifest")?;
+        let root_object = root_value
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("Component manifest root must be an object"))?;
+
+        if root_object.contains_key("config_schema")
+            || root_object.contains_key("config_capabilities")
+            || root_object.contains_key("used_protocols")
+            || root_object.contains_key("exposed_protocols")
+        {
+            return serde_json::from_value(root_value)
+                .context("Failed to deserialize structured ComponentManifest JSON");
+        }
+
+        let mut manifest = ComponentManifest::default();
+        manifest.has_includes = root_object
+            .get("include")
+            .and_then(|value| value.as_array())
+            .is_some_and(|includes| !includes.is_empty());
+
+        if let Some(use_entries) = root_object.get("use").and_then(|value| value.as_array()) {
+            for entry in use_entries {
+                let Some(entry_object) = entry.as_object() else {
+                    continue;
+                };
+                if let Some(protocol_value) = entry_object.get("protocol") {
+                    collect_protocol_values(protocol_value, &mut manifest.used_protocols);
+                }
+                if let Some(capability_name) =
+                    entry_object.get("config").and_then(|value| value.as_str())
+                    && let Some(config_key) =
+                        entry_object.get("key").and_then(|value| value.as_str())
+                {
+                    manifest
+                        .config_capabilities
+                        .insert(config_key.to_string(), capability_name.to_string());
+                    if let Some(config_type) = entry_object
+                        .get("type")
+                        .and_then(|value| value.as_str())
+                        .and_then(parse_cml_config_type)
+                    {
+                        manifest.config_schema.insert(config_key.to_string(), config_type);
+                    }
+                }
+            }
+        }
+
+        if let Some(config_block) = root_object.get("config").and_then(|value| value.as_object()) {
+            for (config_key, declaration) in config_block {
+                if let Some(config_type) = declaration
+                    .get("type")
+                    .and_then(|value| value.as_str())
+                    .and_then(parse_cml_config_type)
+                {
+                    manifest.config_schema.entry(config_key.clone()).or_insert(config_type);
+                }
+            }
+        }
+
+        if let Some(expose_entries) = root_object.get("expose").and_then(|value| value.as_array()) {
+            for entry in expose_entries {
+                let Some(entry_object) = entry.as_object() else {
+                    continue;
+                };
+                let Some(protocol_value) = entry_object.get("protocol") else {
+                    continue;
+                };
+                if protocol_value.is_string()
+                    && let Some(alias) = entry_object.get("as").and_then(|value| value.as_str())
+                {
+                    let alias_string = alias.to_string();
+                    if !manifest.exposed_protocols.contains(&alias_string) {
+                        manifest.exposed_protocols.push(alias_string);
+                    }
+                } else {
+                    collect_protocol_values(protocol_value, &mut manifest.exposed_protocols);
+                }
+            }
+        }
+
+        Ok(manifest)
+    }
 }
 
 /// Capability route automatically inferred between components in the TRF topology.
@@ -164,12 +293,17 @@ fn derive_config_type(value: &ConfigValue) -> ConfigType {
 fn validate_config_overrides(
     ast: &ParsedAstResult,
     manifest: &ComponentManifest,
+    has_namespace_fallback: bool,
     lint_errors: &mut Vec<LintError>,
 ) {
+    let allow_shard_defined_keys = has_namespace_fallback && manifest.has_includes;
     for test_function in &ast.test_functions {
         for config_override in &test_function.config_overrides {
             match manifest.config_schema.get(&config_override.key) {
                 None => {
+                    if allow_shard_defined_keys {
+                        continue;
+                    }
                     let suggestion = find_closest_config_key_suggestion(
                         &config_override.key,
                         manifest.config_schema.keys(),
@@ -290,18 +424,19 @@ fn infer_capability_routes(
     AutoRoutes { routes: inferred_routes }
 }
 
-/// Validates parsed AST test annotations against a compiled Component Under Test (`.cm`) manifest.
+/// Validates parsed AST test annotations against a Component Under Test manifest.
 ///
 /// Returns auto-inferred capability routes on success, or a list of lint errors/warnings on
 /// failure.
 pub fn check_consistency(
     ast: &ParsedAstResult,
     manifest: Option<&ComponentManifest>,
+    has_namespace_fallback: bool,
 ) -> Result<AutoRoutes, Vec<LintError>> {
     let mut lint_errors = Vec::new();
 
     if let Some(m) = manifest {
-        validate_config_overrides(ast, m, &mut lint_errors);
+        validate_config_overrides(ast, m, has_namespace_fallback, &mut lint_errors);
         validate_mocked_protocols(ast, m, &mut lint_errors);
     }
 
@@ -329,6 +464,7 @@ mod tests {
             config_schema,
             used_protocols: vec!["fuchsia.logger.LogSink".to_string()],
             exposed_protocols: vec!["fuchsia.example.Echo".to_string()],
+            ..Default::default()
         };
 
         let ast = ParsedAstResult {
@@ -364,7 +500,7 @@ mod tests {
             protocol_connections: vec![],
         };
 
-        let result = check_consistency(&ast, Some(&manifest));
+        let result = check_consistency(&ast, Some(&manifest), false);
 
         assert!(result.is_ok(), "Expected linting to pass with valid config keys and types");
     }
@@ -374,8 +510,7 @@ mod tests {
         let mut config_schema = HashMap::new();
         config_schema.insert("fix_capitalization".to_string(), ConfigType::Boolean);
 
-        let manifest =
-            ComponentManifest { config_schema, used_protocols: vec![], exposed_protocols: vec![] };
+        let manifest = ComponentManifest { config_schema, ..Default::default() };
 
         let ast = ParsedAstResult {
             mock_declarations: vec![],
@@ -391,7 +526,7 @@ mod tests {
             protocol_connections: vec![],
         };
 
-        let result = check_consistency(&ast, Some(&manifest));
+        let result = check_consistency(&ast, Some(&manifest), false);
 
         assert!(result.is_err(), "Expected linting to fail due to unknown config key");
         let errors = result.unwrap_err();
@@ -411,8 +546,7 @@ mod tests {
         let mut config_schema = HashMap::new();
         config_schema.insert("max_threads".to_string(), ConfigType::Integer);
 
-        let manifest =
-            ComponentManifest { config_schema, used_protocols: vec![], exposed_protocols: vec![] };
+        let manifest = ComponentManifest { config_schema, ..Default::default() };
 
         let ast = ParsedAstResult {
             mock_declarations: vec![],
@@ -428,7 +562,7 @@ mod tests {
             protocol_connections: vec![],
         };
 
-        let result = check_consistency(&ast, Some(&manifest));
+        let result = check_consistency(&ast, Some(&manifest), false);
 
         assert!(result.is_err(), "Expected linting to fail due to config type mismatch");
         let errors = result.unwrap_err();
@@ -447,9 +581,8 @@ mod tests {
     #[test]
     fn test_lint_unmatched_mock_protocol_warning() {
         let manifest = ComponentManifest {
-            config_schema: HashMap::new(),
             used_protocols: vec!["fuchsia.logger.LogSink".to_string()],
-            exposed_protocols: vec![],
+            ..Default::default()
         };
 
         let ast = ParsedAstResult {
@@ -463,7 +596,7 @@ mod tests {
             protocol_connections: vec![],
         };
 
-        let result = check_consistency(&ast, Some(&manifest));
+        let result = check_consistency(&ast, Some(&manifest), false);
 
         assert!(
             result.is_err(),
@@ -483,9 +616,9 @@ mod tests {
     #[test]
     fn test_auto_inferred_capability_routes() {
         let manifest = ComponentManifest {
-            config_schema: HashMap::new(),
             used_protocols: vec!["fuchsia.emoji.EmojiReverser".to_string()],
             exposed_protocols: vec!["fuchsia.text.Text".to_string()],
+            ..Default::default()
         };
 
         let ast = ParsedAstResult {
@@ -499,7 +632,7 @@ mod tests {
             protocol_connections: vec![],
         };
 
-        let result = check_consistency(&ast, Some(&manifest));
+        let result = check_consistency(&ast, Some(&manifest), false);
 
         assert!(result.is_ok(), "Expected linting to succeed and auto-infer routes");
         let auto_routes = result.unwrap();
@@ -552,5 +685,63 @@ mod tests {
 
         // Entirely different string
         assert_eq!(find_closest_config_key_suggestion("totally_unrelated", valid.iter()), None);
+    }
+
+    #[test]
+    fn test_parse_cml_manifest_extracts_config_capabilities_and_protocols() {
+        let cml = r#"
+            // Copyright 2026 The Fuchsia Authors. All rights reserved.
+            {
+                include: [ "syslog/client.shard.cml" ],
+                use: [
+                    {
+                        protocol: [ "fuchsia.diagnostics.ArchiveAccessor", "fuchsia.net.NameLookup" ],
+                    },
+                    {
+                        config: "fuchsia.diagnostics.sampler.BindServices",
+                        key: "bind_services",
+                        type: "bool",
+                        availability: "transitional",
+                        default: false,
+                    },
+                    {
+                        config: "fuchsia.diagnostics.sampler.PollRateSec",
+                        key: "poll_rate_sec",
+                        type: "int64",
+                    },
+                ],
+                expose: [
+                    {
+                        protocol: "fuchsia.diagnostics.sampler.InternalController",
+                        as: "fuchsia.diagnostics.sampler.Controller",
+                        from: "self",
+                    },
+                ],
+            }
+        "#;
+
+        let manifest = ComponentManifest::parse(cml).expect("CML should parse");
+        assert!(manifest.has_includes);
+        assert_eq!(
+            manifest.config_capabilities.get("bind_services").map(String::as_str),
+            Some("fuchsia.diagnostics.sampler.BindServices")
+        );
+        assert_eq!(
+            manifest.config_capabilities.get("poll_rate_sec").map(String::as_str),
+            Some("fuchsia.diagnostics.sampler.PollRateSec")
+        );
+        assert_eq!(manifest.config_schema.get("bind_services"), Some(&ConfigType::Boolean));
+        assert_eq!(manifest.config_schema.get("poll_rate_sec"), Some(&ConfigType::Integer));
+        assert_eq!(
+            manifest.used_protocols,
+            vec![
+                "fuchsia.diagnostics.ArchiveAccessor".to_string(),
+                "fuchsia.net.NameLookup".to_string(),
+            ]
+        );
+        assert_eq!(
+            manifest.exposed_protocols,
+            vec!["fuchsia.diagnostics.sampler.Controller".to_string()]
+        );
     }
 }

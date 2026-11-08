@@ -8,9 +8,6 @@ use core::ffi::{CStr, c_char};
 use zx_types::{zx_koid_t, zx_obj_type_t};
 
 unsafe extern "C" {
-    fn cpp_dump_process_list();
-    fn cpp_dump_job_list();
-    fn cpp_dump_job_policies(id: zx_koid_t);
     fn cpp_dump_process_handles(id: zx_koid_t);
     fn cpp_dump_peer_dispatchers_by_koid(obj_type: zx_obj_type_t, id: zx_koid_t);
     fn cpp_dump_all_peer_dispatchers(obj_type: zx_obj_type_t);
@@ -19,30 +16,9 @@ unsafe extern "C" {
     fn cpp_dump_orphaned_mapped_vmos(format_unit: c_char);
     fn cpp_dump_process_vm_objects(id: zx_koid_t, format_unit: c_char);
     fn cpp_dump_vm_object_cow_tree(id: zx_koid_t);
-    fn cpp_kill_process(id: zx_koid_t);
     fn cpp_dump_process_address_space(id: zx_koid_t);
     fn cpp_dump_process_memory_usage(prefix: *const c_char, min_bytes: usize);
     fn cpp_dump_handles_for_koid(id: zx_koid_t);
-    fn cpp_handle_diagnostics_outstanding_handles() -> usize;
-    fn cpp_handle_diagnostics_dump_table_info();
-}
-
-/// Dumps all processes in the system to the kernel console.
-pub(super) fn dump_process_list() {
-    // SAFETY: Takes no pointers and synchronizes access to the job/process tree internally.
-    unsafe { cpp_dump_process_list() };
-}
-
-/// Dumps all jobs in the system to the kernel console.
-pub(super) fn dump_job_list() {
-    // SAFETY: Takes no pointers and synchronizes access to the job tree internally.
-    unsafe { cpp_dump_job_list() };
-}
-
-/// Dumps policies for the job with koid `id` to the kernel console.
-pub(super) fn dump_job_policies(id: zx_koid_t) {
-    // SAFETY: Takes only a scalar koid and synchronizes access to the job tree internally.
-    unsafe { cpp_dump_job_policies(id) };
 }
 
 /// Dumps handles for the process with koid `id` to the kernel console.
@@ -94,12 +70,6 @@ pub(super) fn dump_vm_object_cow_tree(id: zx_koid_t) {
     unsafe { cpp_dump_vm_object_cow_tree(id) };
 }
 
-/// Sends a kill signal to the process with koid `id` if found.
-pub(super) fn kill_process(id: zx_koid_t) {
-    // SAFETY: Takes only a scalar koid and synchronizes process lookup internally.
-    unsafe { cpp_kill_process(id) };
-}
-
 /// Dumps the address space of the process with koid `id`.
 pub(super) fn dump_process_address_space(id: zx_koid_t) {
     // SAFETY: Takes only a scalar koid and synchronizes process/aspace access internally.
@@ -117,16 +87,4 @@ pub(super) fn dump_process_memory_usage(prefix: &CStr, min_bytes: usize) {
 pub(super) fn dump_handles_for_koid(id: zx_koid_t) {
     // SAFETY: Takes only a scalar koid and synchronizes process/handle-table access internally.
     unsafe { cpp_dump_handles_for_koid(id) };
-}
-
-/// Returns the number of outstanding handles in the global handle table arena.
-pub(super) fn handle_diagnostics_outstanding_handles() -> usize {
-    // SAFETY: Takes no pointers and queries atomic/locked arena diagnostic state internally.
-    unsafe { cpp_handle_diagnostics_outstanding_handles() }
-}
-
-/// Dumps diagnostic information about the global handle table arena.
-pub(super) fn handle_diagnostics_dump_table_info() {
-    // SAFETY: Takes no pointers and synchronizes arena diagnostic access internally.
-    unsafe { cpp_handle_diagnostics_dump_table_info() };
 }

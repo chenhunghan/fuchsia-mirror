@@ -14,7 +14,7 @@ class Deny:
     uses: List[str] = field(default_factory=list)
     bindings: List[str] = field(default_factory=list)
 
-    def matches(self, style: "Style", use: "Use") -> bool:
+    def matches(self, style: Style, use: Use) -> bool:
         return not (
             self.styles
             and style.name not in self.styles
@@ -32,7 +32,7 @@ class Identifier:
     def parts(self) -> List[str]:
         return self.name.split("_")
 
-    def scoped(self, style: "Style", use: "Use") -> "ScopedIdentifier":
+    def scoped(self, style: Style, use: Use) -> ScopedIdentifier:
         # All the deny rules for this style & use
         denies = [deny for deny in self.deny if deny.matches(style, use)]
         # Bindings deny list
@@ -52,8 +52,8 @@ class Identifier:
 @dataclass
 class ScopedIdentifier:
     name: str
-    style: "Style"
-    use: "Use"
+    style: Style
+    use: Use
     denied: bool
     bindings_denylist: str
 

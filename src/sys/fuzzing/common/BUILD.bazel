@@ -1,0 +1,258 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Note: Fuchsia-only target matching platform-only deps via target_compatible_with.
+fx_cc_library(
+    name = "common",
+    srcs = [
+        "artifact.cc",
+        "async-eventpair.cc",
+        "async-socket.cc",
+        "async-types.cc",
+        "child-process.cc",
+        "component-context.cc",
+        "controller.cc",
+        "controller-provider.cc",
+        "corpus-reader-client.cc",
+        "dictionary.cc",
+        "engine.cc",
+        "input.cc",
+        "monitor-clients.cc",
+        "options.cc",
+        "runner.cc",
+        "shared-memory.cc",
+        "status.cc",
+    ],
+    hdrs = [
+        "artifact.h",
+        "async-deque.h",
+        "async-eventpair.h",
+        "async-socket.h",
+        "async-types.h",
+        "child-process.h",
+        "component-context.h",
+        "controller.h",
+        "controller-provider.h",
+        "corpus-reader-client.h",
+        "dictionary.h",
+        "engine.h",
+        "input.h",
+        "module.h",
+        "monitor-clients.h",
+        "options.h",
+        "options.inc",
+        "options-literal.inc",
+        "result.h",
+        "runner.h",
+        "sancov.h",
+        "shared-memory.h",
+        "status.h",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/sys:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.mem:fuchsia.mem_hlcpp",
+        "//sdk/fidl/fuchsia.process:fuchsia.process_hlcpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/debug:backtrace-request",
+        "//src/lib/fxl",
+        "//src/lib/pkg_url",
+        "//src/sys/fuzzing/fidl:fuchsia.fuzzer_hlcpp",
+        "//zircon/system/ulib/sync",
+        "//zircon/system/ulib/zx",
+        "@re2",
+    ],
+    alwayslink = True,
+)
+
+# Note: Fuchsia-only target matching platform-only deps via target_compatible_with.
+fx_cc_library(
+    name = "runner-unittests-common",
+    testonly = True,
+    srcs = ["runner-unittest.cc"],
+    hdrs = ["runner-unittest.h"],
+    implementation_deps = ["//src/sys/fuzzing/common/testing"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//visibility:private"],
+    deps = [
+        ":common",
+        "@com_google_googletest//:gtest",
+    ],
+    alwayslink = True,
+)
+
+# Note: Fuchsia-only target matching platform-only deps via target_compatible_with.
+fx_cc_library(
+    name = "runner-unittests",
+    testonly = True,
+    hdrs = ["runner-unittest.inc"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/sys/fuzzing:__subpackages__"],
+    deps = [":runner-unittests-common"],
+    alwayslink = True,
+)
+
+# Note: Fuchsia-only target matching platform-only deps via target_compatible_with.
+fx_cc_library(
+    name = "runner-fatal-unittests",
+    testonly = True,
+    hdrs = ["runner-fatal-unittest.inc"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/sys/fuzzing:__subpackages__"],
+    deps = [":runner-unittests-common"],
+    alwayslink = True,
+)
+
+# Note: Fuchsia-only target matching platform-only deps via target_compatible_with.
+fx_cc_test_binary(
+    name = "unittests-bin",
+    srcs = [
+        "async-deque-unittest.cc",
+        "async-eventpair-unittest.cc",
+        "async-socket-unittest.cc",
+        "controller-provider-unittest.cc",
+        "controller-unittest.cc",
+        "corpus-reader-client-unittest.cc",
+        "dictionary-unittest.cc",
+        "input-unittest.cc",
+        "monitor-clients-unittest.cc",
+        "options-unittest.cc",
+        "shared-memory-unittest.cc",
+    ],
+    gn_output_name = "fuzzing_common_unittests",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//visibility:private"],
+    deps = [
+        ":common",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/sys/fuzzing/common/testing",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+# Note: Fuchsia-only target matching platform-only deps via target_compatible_with.
+fx_cc_test_binary(
+    name = "error-unittests-bin",
+    srcs = [
+        "child-process-unittest.cc",
+        "engine-unittest.cc",
+    ],
+    gn_output_name = "fuzzing_common_error_unittests",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//visibility:private"],
+    deps = [
+        ":common",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/sys/fuzzing/common/testing",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "unittests-bin_packaged_bin",
+    testonly = True,
+    binary = ":unittests-bin",
+    binary_name = "fuzzing_common_unittests",
+    install_root = "test/",
+)
+
+fx_packaged_binary(
+    name = "error-unittests-bin_packaged_bin",
+    testonly = True,
+    binary = ":error-unittests-bin",
+    binary_name = "fuzzing_common_error_unittests",
+    install_root = "test/",
+)
+
+fx_component_manifest(
+    name = "unittests-manifest",
+    testonly = True,
+    component_name = "unittests",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners:tmp_storage.shard.cml",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/unittests.cml",
+)
+
+fx_component_manifest(
+    name = "error-unittests-manifest",
+    testonly = True,
+    component_name = "error-unittests",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners:tmp_storage.shard.cml",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/error-unittests.cml",
+)
+
+fx_test_component(
+    name = "unittests",
+    compiled_manifest = ":unittests-manifest",
+    visibility = ["//visibility:private"],
+    deps = [":unittests-bin_packaged_bin"],
+)
+
+fx_test_component(
+    name = "error-unittests",
+    compiled_manifest = ":error-unittests-manifest",
+    test_type = "system",
+    visibility = ["//visibility:private"],
+    deps = [
+        # GN packages the echo executable directly; Bazel wraps it in an
+        # fx_packaged_binary in the testing package.
+        "//src/sys/fuzzing/common/testing:echo_packaged_bin",  # @bazel2gn:path_overwrite://src/sys/fuzzing/common/testing:echo
+        ":error-unittests-bin_packaged_bin",
+    ],
+)
+
+fx_package(
+    name = "unittests-pkg",
+    package_name = "fuzzing-common-tests",
+    test_components = [":unittests"],
+)
+
+fx_package(
+    name = "error-unittests-pkg",
+    package_name = "fuzzing-common-error-tests",
+    test_components = [":error-unittests"],
+)
+
+fx_test(
+    name = "fuzzing-common-tests",
+    package = ":unittests-pkg",
+    visibility = ["//src/sys:__pkg__"],
+)
+
+fx_test(
+    name = "fuzzing-common-error-tests",
+    # Some tests involve handling intentional crashes.
+    max_log_severity = "ERROR",
+    package = ":error-unittests-pkg",
+    visibility = ["//src/sys:__pkg__"],
+)

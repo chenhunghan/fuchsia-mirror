@@ -42,20 +42,92 @@ pub use pin_init;
 #[macro_export]
 macro_rules! lock {
     (let mut $guard:ident = $lock_init:expr) => {
-        $crate::pin_init::stack_pin_init!(let $guard = $lock_init);
+        $crate::lock!(let $guard = $lock_init);
         let mut $guard = $guard;
     };
     (let $guard:ident = $lock_init:expr) => {
-        $crate::pin_init::stack_pin_init!(let $guard = $lock_init);
+        let lock_init = $lock_init;
+        let $guard = ::core::pin::pin!($crate::GuardSlot::uninit());
+        #[allow(unused_mut)]
+        let mut $guard = $crate::GuardSlot::init($guard, lock_init);
     };
     ($lock_init:expr) => {
-        $crate::pin_init::stack_pin_init!(let _guard = $lock_init);
+        $crate::lock!(let _guard = $lock_init);
     };
+}
+
+/// Pinned stack slot holding the guard of a [`lock!`]. Use [`lock!`] instead of this primitive.
+///
+/// This is `pin_init::stack_pin_init!`'s `StackInit`, except that [`GuardSlot::init`] is always
+/// inlined and keeps the re-initialization path (which [`lock!`] never takes) out of line. Once
+/// inlined, the dead re-initialization path folds away, so the guard's acquisition and release
+/// are inlined into the caller and the guard can be kept in registers. Otherwise the size of the
+/// re-initialization path (which drops a guard, i.e. inlines a release) can keep `init`, and so
+/// the lock acquisition, out of line.
+///
+/// # Invariants
+///
+/// If `self.is_init` is true, then `self.value` is initialized.
+#[doc(hidden)]
+pub struct GuardSlot<T> {
+    value: core::mem::MaybeUninit<T>,
+    is_init: bool,
+}
+
+impl<T> GuardSlot<T> {
+    /// Creates a new, uninitialized `GuardSlot`.
+    #[inline(always)]
+    pub fn uninit() -> Self {
+        Self { value: core::mem::MaybeUninit::uninit(), is_init: false }
+    }
+
+    /// Initializes the contents with `init` and returns them, pinned.
+    #[inline(always)]
+    pub fn init(
+        self: core::pin::Pin<&mut Self>,
+        init: impl pin_init::PinInit<T, core::convert::Infallible>,
+    ) -> core::pin::Pin<&mut T> {
+        // SAFETY: We never move out of `this`.
+        let this = unsafe { core::pin::Pin::into_inner_unchecked(self) };
+        // The value is currently initialized, so it needs to be dropped before the memory can be
+        // reused (this is a safety guarantee of `Pin`).
+        if this.is_init {
+            this.drop_value();
+        }
+        // SAFETY: The memory slot is valid and this type ensures that it will stay pinned.
+        let Ok(()) = unsafe { init.__pinned_init(this.value.as_mut_ptr()) };
+        // INVARIANT: `this.value` is initialized above.
+        this.is_init = true;
+        // SAFETY: The slot is now pinned, since we never give access to `&mut T`.
+        unsafe { core::pin::Pin::new_unchecked(this.value.assume_init_mut()) }
+    }
+
+    /// Drops the initialized contents. Must only be called when `self.is_init` is true.
+    #[cold]
+    #[inline(never)]
+    fn drop_value(&mut self) {
+        debug_assert!(self.is_init);
+        self.is_init = false;
+        // SAFETY: Only called when `self.is_init` was true, so `self.value` is initialized.
+        unsafe { self.value.assume_init_drop() };
+    }
+}
+
+impl<T> Drop for GuardSlot<T> {
+    #[inline]
+    fn drop(&mut self) {
+        if self.is_init {
+            // SAFETY: As we are being dropped, we only call this once. And since `self.is_init` is
+            // true, `self.value` is initialized.
+            unsafe { self.value.assume_init_drop() };
+        }
+    }
 }
 
 /// A static C-string tag identifying the source location (`"file:line"`) where a lock is acquired.
 ///
-/// Used with `RawMonitoredSpinlock` to pass critical section names to the kernel lockup detector.
+/// Used with `TrackedMonitoredSpinlock` to pass critical section names to the kernel lockup
+/// detector.
 /// Construct via the [`source_tag!`] macro, which is the Rust equivalent of C++ `SOURCE_TAG`.
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -117,10 +189,12 @@ macro_rules! source_tag {
     }};
 }
 
+mod brwlock;
 mod kcell;
 mod kmutex;
 mod konce_cell;
 mod lock_token;
+mod lockdep_tracked;
 mod phantom_mutex;
 mod raw_lock;
 mod singleton;
@@ -128,56 +202,43 @@ mod singleton;
 #[cfg(not(feature = "kernel"))]
 mod raw_userspace_mutex;
 
-#[cfg(feature = "kernel")]
-mod raw_kernel_mutex;
-#[cfg(feature = "kernel")]
-mod raw_spin_lock;
-
-pub use kcell::{KCell, KCellInit, kcell_init};
-pub use konce_cell::{KOnceCell, KOnceCellGuard};
-#[cfg(any(feature = "kernel", test))]
-mod brwlock;
-
-#[cfg(feature = "kernel")]
-mod raw_kernel_brwlock;
-
 #[cfg(all(not(feature = "kernel"), test))]
 mod raw_userspace_brwlock;
 
+pub use brwlock::{BrwLockPi, BrwLockPiReadGuard, BrwLockPiWriteGuard};
+pub use kcell::{KCell, KCellInit, kcell_init};
 pub use kmutex::{
     AliasedLock, KMutex, KMutexAliasedGuard, KMutexGuard, KMutexGuardMultiple, aliased_lock,
     aliased_lock_policy, aliased_lock_policy_with, aliased_lock_with, guard_multiple,
     guard_multiple_policy, guard_multiple_policy_with, guard_multiple_with,
 };
+pub use konce_cell::{KOnceCell, KOnceCellGuard};
 pub use lock_token::{ExclusiveLockToken, LockToken, LockTokenRead, LockTokenWrite};
 pub use lockdep::{
-    LOCK_FLAGS_MULTI_ACQUIRE, LOCK_FLAGS_SINGLETON_LOCK, LockClass, LockClassRegistration,
+    LOCK_FLAGS_IRQ_SAFE, LOCK_FLAGS_MULTI_ACQUIRE, LOCK_FLAGS_NESTABLE, LOCK_FLAGS_NONE,
+    LOCK_FLAGS_SINGLETON_LOCK, LOCK_FLAGS_TRACKING_DISABLED, LockClass, LockClassRegistration,
     LockFlags,
 };
+pub use lockdep_tracked::{
+    LockdepTracked, LockdepTrackedGuardState, OrderedGuardState, OrderedLockPolicy,
+};
 pub use phantom_mutex::PhantomMutex;
-pub use raw_lock::{LockPolicy, RawLock};
+pub use raw_lock::{
+    ConstRawLock, ExclusiveLockPolicy, LockPolicy, RawAssertHeldLock, RawLock, RawSharedLock,
+    RawUntrackedIrqLock, RawUntrackedLock,
+};
 pub use singleton::SingletonMutex;
 
+// The kernel's raw lock implementations (`TrackedMutex`, `TrackedCriticalMutex`,
+// `TrackedSpinlock`, `TrackedMonitoredSpinlock`, `RawBrwLockPi`, and `RawBrwLockNoPi`) are not
+// part of this crate: they live in the kernel crate itself, and are re-exported from its
+// `crate::ksync_kernel` (see `//zircon/kernel/lib/ksync`). Generic code using
+// `ksync` must therefore be parameterized over its `RawLock` type, with the kernel supplying the
+// concrete raw lock. Only userspace implementations are provided here, for host builds and tests.
 #[cfg(not(feature = "kernel"))]
-pub use raw_userspace_mutex::RawMutex;
+pub use raw_userspace_mutex::{RawMutex, RawMutexStorage};
 
-#[cfg(not(feature = "kernel"))]
-pub type LockEntryStorage = ();
-
-#[cfg(feature = "kernel")]
-pub use raw_spin_lock::{
-    InterruptSavedState, IrqSavePolicy, MonitoredSpinlockGuardState, NoIrqSavePolicy,
-    RawMonitoredSpinlock, RawSpinlock,
-};
-#[cfg(feature = "kernel")]
-pub type KSpinlock<Class> = KMutex<Class, RawSpinlock>;
-#[cfg(feature = "kernel")]
-pub type KMonitoredSpinlock<Class> = KMutex<Class, RawMonitoredSpinlock>;
-#[cfg(any(feature = "kernel", test))]
-pub use brwlock::{BrwLockPi, BrwLockPiReadGuard, BrwLockPiWriteGuard};
-#[cfg(feature = "kernel")]
-pub use raw_kernel_brwlock::RawBrwLockPi;
-#[cfg(feature = "kernel")]
-pub use raw_kernel_mutex::{LockEntryStorage, RawCriticalMutex, RawMutex};
 #[cfg(all(not(feature = "kernel"), test))]
-pub use raw_userspace_brwlock::RawBrwLockPi;
+pub use raw_userspace_brwlock::{
+    RawBrwLockPi, RawBrwLockPiReadPolicy, RawBrwLockPiStorage, RawBrwLockPiWritePolicy,
+};

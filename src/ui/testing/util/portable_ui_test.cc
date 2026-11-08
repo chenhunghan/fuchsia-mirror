@@ -91,23 +91,48 @@ void PortableUITest::SetUpRealmBase() {
       .targets = {ParentRef{}}});
 
   // Configure test-ui-stack.
-  realm_builder_.InitMutableConfigFromPackage(kTestUIStack);
-  realm_builder_.SetConfigValue(kTestUIStack, "display_rotation",
-                                ConfigValue::Uint32(display_rotation()));
-
   FX_CHECK((display_width_px() == 0) == (display_height_px() == 0))
       << "display_width_px() and display_height_px() must be either both zero or both non-zero.";
-  realm_builder_.SetConfigValue(kTestUIStack, "display_width_px",
-                                ConfigValue::Uint32(display_width_px()));
-  realm_builder_.SetConfigValue(kTestUIStack, "display_height_px",
-                                ConfigValue::Uint32(display_height_px()));
-  realm_builder_.SetConfigValue(kTestUIStack, "display_refresh_rate_millihertz",
-                                ConfigValue::Uint32(display_refresh_rate_millihertz()));
 
-  realm_builder_.SetConfigValue(kTestUIStack, "device_pixel_ratio",
-                                ConfigValue(std::to_string(device_pixel_ratio())));
-  realm_builder_.SetConfigValue(kTestUIStack, "suspend_enabled",
-                                ConfigValue::Bool(suspend_enabled()));
+  std::vector<component_testing::ConfigCapability> configurations;
+  configurations.push_back({
+      .name = "fuchsia.ui.test.DisplayRotation",
+      .value = ConfigValue::Uint32(display_rotation()),
+  });
+  configurations.push_back({
+      .name = "fuchsia.ui.test.DisplayWidthPx",
+      .value = ConfigValue::Uint32(display_width_px()),
+  });
+  configurations.push_back({
+      .name = "fuchsia.ui.test.DisplayHeightPx",
+      .value = ConfigValue::Uint32(display_height_px()),
+  });
+  configurations.push_back({
+      .name = "fuchsia.ui.test.DisplayRefreshRateMillihertz",
+      .value = ConfigValue::Uint32(display_refresh_rate_millihertz()),
+  });
+  configurations.push_back({
+      .name = "fuchsia.ui.test.DevicePixelRatio",
+      .value = ConfigValue(std::to_string(device_pixel_ratio())),
+  });
+  configurations.push_back({
+      .name = "fuchsia.ui.test.SuspendEnabled",
+      .value = ConfigValue::Bool(suspend_enabled()),
+  });
+  realm_builder_.AddConfiguration(std::move(configurations));
+  realm_builder_.AddRoute(Route{
+      .capabilities =
+          {
+              component_testing::Config{.name = "fuchsia.ui.test.DisplayRotation"},
+              component_testing::Config{.name = "fuchsia.ui.test.DisplayWidthPx"},
+              component_testing::Config{.name = "fuchsia.ui.test.DisplayHeightPx"},
+              component_testing::Config{.name = "fuchsia.ui.test.DisplayRefreshRateMillihertz"},
+              component_testing::Config{.name = "fuchsia.ui.test.DevicePixelRatio"},
+              component_testing::Config{.name = "fuchsia.ui.test.SuspendEnabled"},
+          },
+      .source = component_testing::SelfRef{},
+      .targets = {kTestUIStackRef},
+  });
 }
 
 void PortableUITest::SetUp() {
@@ -172,7 +197,7 @@ void PortableUITest::SetUpSceneProvider() {
   ASSERT_TRUE(realm_.has_value());
   auto scene_provider_connect = realm_->component().Connect<fuchsia_ui_test_scene::Controller>();
   ZX_ASSERT_OK(scene_provider_connect);
-  scene_provider_ = fidl::SyncClient(std::move(scene_provider_connect.value()));
+  scene_provider_ = fidl::Client(std::move(scene_provider_connect.value()), dispatcher());
 }
 
 void PortableUITest::WatchViewGeometry() {
@@ -191,8 +216,12 @@ void PortableUITest::WatchViewGeometry() {
 void PortableUITest::WaitForViewPresentation() {
   SetUpSceneProvider();
 
-  // WatchViewPresentation() will hang until a ClientView has `Present()`
-  ZX_ASSERT_OK(scene_provider_->WatchViewPresentation());
+  bool presented = false;
+  scene_provider_->WatchViewPresentation().Then([&presented](auto& res) {
+    ZX_ASSERT_OK(res);
+    presented = true;
+  });
+  RunLoopUntil([&presented] { return presented; });
 }
 
 bool PortableUITest::HasViewConnected(zx_koid_t view_ref_koid) {
@@ -204,7 +233,13 @@ void PortableUITest::RegisterViewTreeWatcher() {
   auto [watcher_client, watcher_server] =
       fidl::Endpoints<fuchsia_ui_observation_geometry::ViewTreeWatcher>::Create();
   view_tree_watcher_ = fidl::Client(std::move(watcher_client), dispatcher());
-  ZX_ASSERT_OK(scene_provider_->RegisterViewTreeWatcher({std::move(watcher_server)}));
+  bool registered = false;
+  scene_provider_->RegisterViewTreeWatcher({std::move(watcher_server)})
+      .Then([&registered](auto& res) {
+        ZX_ASSERT_OK(res);
+        registered = true;
+      });
+  RunLoopUntil([&registered] { return registered; });
 }
 
 void PortableUITest::LaunchClient() {
@@ -217,10 +252,10 @@ void PortableUITest::LaunchClient() {
   fuchsia_ui_test_scene::ControllerAttachClientViewRequest request;
   request.view_provider() = std::move(view_provider_connect.value());
 
-  auto attach_client_view_res = scene_provider_->AttachClientView(std::move(request));
-  ZX_ASSERT_OK(attach_client_view_res);
-
-  client_root_view_ref_koid_ = attach_client_view_res->view_ref_koid();
+  scene_provider_->AttachClientView(std::move(request)).Then([this](auto& res) {
+    ZX_ASSERT_OK(res);
+    client_root_view_ref_koid_ = res->view_ref_koid();
+  });
 
   FX_LOGS(INFO) << "Waiting for client view ref koid";
   RunLoopUntil([this] { return client_root_view_ref_koid_.has_value(); });

@@ -185,10 +185,9 @@ impl FxBlobBuilder {
     /// Creates a new [`FxBlobBuilder`] backed by the given `device`.
     pub async fn new(device: DeviceHolder) -> Result<Self, Error> {
         let filesystem = FxFilesystemBuilder::new()
-            .format(true)
             .trim_config(None)
             .image_builder_mode(Some(SuperBlockInstance::A))
-            .open(device)
+            .format(device)
             .await
             .context("Failed to format filesystem")?;
         filesystem.enable_allocations();
@@ -248,7 +247,10 @@ impl FxBlobBuilder {
                     writer.write_bytes(data).await.context("write blob contents")?;
                 }
                 BlobData::CompressedZstd(archive) | BlobData::CompressedLz4(archive) => {
-                    for chunk in archive.chunks() {
+                    for (padding, chunk) in archive.chunks_with_padding() {
+                        if !padding.is_empty() {
+                            writer.write_bytes(padding).await.context("write blob padding")?;
+                        }
                         writer
                             .write_bytes(&chunk.compressed_data)
                             .await
@@ -279,16 +281,6 @@ enum BlobData {
     Uncompressed(Vec<u8>),
     CompressedZstd(ChunkedArchive),
     CompressedLz4(ChunkedArchive),
-}
-
-fn compressed_offsets(chunked_archive: &ChunkedArchive) -> Vec<u64> {
-    let mut offsets = Vec::with_capacity(chunked_archive.chunks().len());
-    let mut offset: u64 = 0;
-    for chunk in chunked_archive.chunks() {
-        offsets.push(offset);
-        offset += chunk.compressed_data.len() as u64;
-    }
-    offsets
 }
 
 /// Represents a blob ready to be installed into an FxBlob instance.
@@ -331,15 +323,15 @@ impl BlobToInstall {
                 format: BlobFormat::ChunkedZstd {
                     uncompressed_size: uncompressed_size as u64,
                     chunk_size: chunked_archive.chunk_size() as u64,
-                    compressed_offsets: compressed_offsets(&chunked_archive),
+                    compressed_offsets: chunked_archive.compressed_offsets(),
                 },
             },
             BlobData::CompressedLz4(chunked_archive) => BlobMetadata {
                 merkle_leaves: hashes,
-                format: BlobFormat::ChunkedLz4 {
+                format: BlobFormat::ChunkedLz4WithRawChunks {
                     uncompressed_size: uncompressed_size as u64,
                     chunk_size: chunked_archive.chunk_size() as u64,
-                    compressed_offsets: compressed_offsets(&chunked_archive),
+                    compressed_offsets: chunked_archive.compressed_offsets(),
                 },
             },
         };
@@ -550,76 +542,36 @@ pub async fn extract_blobs(image: PathBuf, out_dir: PathBuf) -> anyhow::Result<(
 
             let metadata = BlobMetadata::read_from(&handle).await?;
             blob_extraction_futures.push(fasync::unblock(move || -> Result<(), Error> {
-                match metadata.format {
-                    BlobFormat::ChunkedZstd {
-                        uncompressed_size,
-                        compressed_offsets,
-                        chunk_size,
-                    } => decompress_blob(
-                        &read_buf,
-                        uncompressed_size,
-                        compressed_offsets,
-                        chunk_size,
-                        CompressionAlgorithm::Zstd,
-                        &mut file,
-                    ),
-                    BlobFormat::ChunkedLz4 {
-                        uncompressed_size,
-                        compressed_offsets,
-                        chunk_size,
-                    } => decompress_blob(
-                        &read_buf,
-                        uncompressed_size,
-                        compressed_offsets,
-                        chunk_size,
-                        CompressionAlgorithm::Lz4,
-                        &mut file,
-                    ),
-                    BlobFormat::Uncompressed => {
-                        file.write_all(&read_buf)?;
-                        Ok(())
-                    }
+                let compressed_size = read_buf.len() as u64;
+                let Some(compression_info) = metadata.format.compression_info(compressed_size)?
+                else {
+                    file.write_all(&read_buf)?;
+                    return Ok(());
+                };
+                let uncompressed_size = metadata.format.uncompressed_size().unwrap();
+                let chunk_size = compression_info.chunk_size();
+                let mut buf = vec![0; chunk_size as usize];
+                let mut offset = 0;
+                while offset < uncompressed_size {
+                    let len = std::cmp::min(chunk_size, uncompressed_size - offset);
+                    let compressed_range = compression_info
+                        .compressed_range_for_uncompressed_range(&(offset..offset + len))?;
+                    let dst = &mut buf[..len as usize];
+                    compression_info.decompress(
+                        &read_buf[compressed_range.start as usize..compressed_range.end as usize],
+                        dst,
+                        offset,
+                    )?;
+                    file.write_all(dst)?;
+                    offset += len;
                 }
+                Ok(())
             }));
         }
         iter.advance().await?;
     }
     blob_extraction_futures.try_collect::<()>().await?;
     Ok(())
-}
-
-fn decompress_blob(
-    blob_data: &[u8],
-    uncompressed_size: u64,
-    compressed_offsets: Vec<u64>,
-    chunk_size: u64,
-    compression_algorithm: CompressionAlgorithm,
-    out: &mut std::fs::File,
-) -> Result<(), Error> {
-    let mut decompressor = compression_algorithm.decompressor();
-    let mut buf = vec![0; chunk_size as usize];
-    let mut total_decompressed_size = 0;
-    for i in 0..compressed_offsets.len() {
-        let start_offset = compressed_offsets[i] as usize;
-        let end_offset = if i + 1 == compressed_offsets.len() {
-            blob_data.len()
-        } else {
-            compressed_offsets[i + 1] as usize
-        };
-        let decompressed_size =
-            decompressor.decompress_into(&blob_data[start_offset..end_offset], &mut buf, i)?;
-        total_decompressed_size += decompressed_size;
-        out.write_all(&buf[..decompressed_size])?;
-    }
-    if total_decompressed_size != uncompressed_size as usize {
-        Err(anyhow!(
-            "Decompressed size does not match expected size {} {}",
-            total_decompressed_size,
-            uncompressed_size
-        ))
-    } else {
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -697,10 +649,19 @@ mod tests {
         let sparse_path = dir.join("fxfs1.sparse.blk");
         let out_dir = dir.join("extracted_out");
 
-        let data = "C".repeat(128 * 1024);
+        // Mix compressible and incompressible chunks so that some chunks are stored raw.
+        let chunk_size = 32 * 1024;
+        let mut data = vec![b'C'; chunk_size];
+        // Generate pseudo-random incompressible bytes with a linear congruential generator.
+        let mut rng_state = 1u64;
+        data.extend((0..chunk_size).map(|_| {
+            rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (rng_state >> 32) as u8
+        }));
+        data.extend(std::iter::repeat_n(b'D', chunk_size * 2));
         std::fs::write(&input_blob_path, &data).unwrap();
 
-        let merkle_hash = fuchsia_merkle::root_from_slice(data.as_bytes());
+        let merkle_hash = fuchsia_merkle::root_from_slice(&data);
 
         make_blob_image(
             image_path.to_str().unwrap(),
@@ -724,13 +685,9 @@ mod tests {
             .expect("Failed to read directory entry");
 
         let extracted_blob_path = first_entry.path();
-        let final_len = std::fs::metadata(&extracted_blob_path).unwrap().len();
+        let extracted_data = std::fs::read(&extracted_blob_path).unwrap();
 
-        assert_eq!(
-            final_len,
-            data.len() as u64,
-            "Decompressed data size does not match original size",
-        );
+        assert_eq!(extracted_data, data, "Decompressed data does not match original data");
     }
 
     #[fuchsia::test(threads = 10)]
@@ -980,10 +937,9 @@ mod tests {
         let device =
             DeviceHolder::new(FileBackedDevice::new(output_image, BLOCK_SIZE.get() as u32));
         let fs = FxFilesystemBuilder::new()
-            .format(true)
             .trim_config(None)
             .image_builder_mode(Some(SuperBlockInstance::A))
-            .open(device)
+            .format(device)
             .await
             .unwrap();
         fs.enable_allocations();

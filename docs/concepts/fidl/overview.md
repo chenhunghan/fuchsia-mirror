@@ -414,7 +414,7 @@ the language:
 *   **Callback-based**: received messages are dispatched asynchronously as
     callbacks on an event loop (C++, Dart)
 *   **Port-based**: received messages are delivered to a port or future (Rust)
-*   **Synchronous call**: waits for reply and return it (Go, C++ unit tests)
+*   **Synchronous call**: waits for reply and return it (C++, Rust)
 
 Bindings provide some or all of the following principal operations:
 
@@ -554,7 +554,7 @@ particular, the design of FIDL aims to satisfy the following goals:
 #### Ergonomics
 
 *   Programming language bindings maintained by Fuchsia team:
-    *   C, New C++, High-Level C++ (Old), Dart, Go, Rust
+    *   C, New C++, High-Level C++ (Old), Dart, Rust
 *   Keeping in mind we might want to support other languages in the future, such
     as:
     *   Java, JavaScript, etc.

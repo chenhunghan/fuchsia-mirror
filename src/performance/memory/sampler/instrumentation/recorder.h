@@ -14,11 +14,11 @@
 
 #include <atomic>
 #include <cstdint>
-#include <unordered_set>
 
 #include <fbl/macros.h>
 #include <fbl/mutex.h>
 
+#include "allocation_table.h"
 #include "poisson_sampler.h"
 
 namespace memory_sampler {
@@ -94,7 +94,7 @@ class Recorder {
   std::atomic<bool> is_disabled_{false};
   std::atomic<bool> peer_signaled_{false};
   std::atomic<uint64_t> current_sampling_interval_bytes_{kDefaultSamplingIntervalBytes};
-  std::unordered_set<void *> recorded_allocations_ __TA_GUARDED(&lock_);
+  AllocationTable recorded_allocations_;
   std::function<PoissonSampler &()> GetPoissonSampler;
 
   // Records an allocation's address and size and communicates it to

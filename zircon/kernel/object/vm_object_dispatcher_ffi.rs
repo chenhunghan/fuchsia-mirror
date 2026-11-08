@@ -142,28 +142,6 @@ pub unsafe extern "C" fn rust_vm_object_dispatcher_set_name(
     Status::result_into_raw(disp.set_name(name_bytes))
 }
 
-/// Returns the `StreamSizeManager` for `disp`, lazily creating one if needed.
-///
-/// # Safety
-///
-/// `out_ssm` must point to valid uninitialized memory for `RefPtr<StreamSizeManager>`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_vm_object_dispatcher_stream_size_manager(
-    disp: &VmObjectDispatcher,
-    out_ssm: *mut MaybeUninit<RefPtr<StreamSizeManager>>,
-) -> zx_status_t {
-    match disp.stream_size_manager() {
-        Ok(ssm) => {
-            // SAFETY: Caller guarantees `out_ssm` points to valid uninitialized memory.
-            unsafe {
-                (*out_ssm).write(ssm);
-            }
-            ZX_OK
-        }
-        Err(status) => status.into_raw(),
-    }
-}
-
 /// Creates a child VMO from C++.
 ///
 /// # Safety
@@ -188,15 +166,6 @@ pub unsafe extern "C" fn rust_vm_object_dispatcher_create_child(
         }
         Err(status) => status.into_raw(),
     }
-}
-
-/// Sets the stream size of `disp` from C++.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_vm_object_dispatcher_set_stream_size(
-    disp: &VmObjectDispatcher,
-    stream_size: u64,
-) -> zx_status_t {
-    Status::result_into_raw(disp.set_stream_size(stream_size))
 }
 
 /// Returns the stream size of `disp` from C++.

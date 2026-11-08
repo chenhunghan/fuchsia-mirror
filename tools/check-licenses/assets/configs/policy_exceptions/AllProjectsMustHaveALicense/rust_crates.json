@@ -31,16 +31,17 @@
                     "third_party/rust_crates/empty/wasm-bindgen-125",
                     "third_party/rust_crates/empty/winapi",
                     "third_party/rust_crates/empty/winapi-util",
-                    "third_party/rust_crates/empty/windows-0.61.3",
                     "third_party/rust_crates/empty/windows-core-0.62.2",
                     "third_party/rust_crates/empty/windows-link-0.2.1",
+                    "third_party/rust_crates/empty/windows-result-0.3.4",
                     "third_party/rust_crates/empty/windows-sys-0.52.0",
                     "third_party/rust_crates/empty/windows-sys-0.60.2",
                     "third_party/rust_crates/empty/windows-sys-0.61.2",
+                    "third_party/rust_crates/empty/zlib-rs",
                     "third_party/rust_crates/forks/libm",
                     "third_party/rust_crates/forks/zstd-sys",
                     "third_party/rust_crates/vendor/ansi_term-0.12.1",
-                    "third_party/rust_crates/vendor/crc-catalog-2.4.0"
+                    "third_party/rust_crates/vendor/crc-catalog-2.5.0"
                 ]
             }
         ]

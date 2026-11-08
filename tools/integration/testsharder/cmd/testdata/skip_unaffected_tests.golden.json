@@ -68,7 +68,6 @@
             "host_x64/ffx",
             "host_x64/fvm",
             "host_x64/llvm-profdata",
-            "host_x64/resummarize",
             "host_x64/ssh",
             "host_x64/test-pilot",
             "host_x64/zbi",
@@ -77,14 +76,14 @@
         ],
         "timeout_secs": 0,
         "summary": {
-            "tests": null
+            "tests": []
         },
         "summary_if_skipped": {
             "tests": [
                 {
-                    "output_files": null,
+                    "output_files": [],
                     "output_dir": "",
-                    "cases": null,
+                    "cases": [],
                     "name": "fuchsia-pkg://fuchsia.com/affected-nonhermetic-test#meta/affected-nonhermetic-test.cm",
                     "gn_label": "//src/something:affected-nonhermetic-test(//build/toolchain/fuchsia:x64)",
                     "source_label": "//src/something:affected-nonhermetic-test",
@@ -106,9 +105,9 @@
                     "metadata": {}
                 },
                 {
-                    "output_files": null,
+                    "output_files": [],
                     "output_dir": "",
-                    "cases": null,
+                    "cases": [],
                     "name": "fuchsia-pkg://fuchsia.com/unaffected-nonhermetic-test#meta/unaffected-nonhermetic-test.cm",
                     "gn_label": "//src/something:unaffected-nonhermetic-test(//build/toolchain/fuchsia:x64)",
                     "source_label": "//src/something:unaffected-nonhermetic-test",
@@ -232,7 +231,6 @@
             "host_x64/ffx",
             "host_x64/fvm",
             "host_x64/llvm-profdata",
-            "host_x64/resummarize",
             "host_x64/ssh",
             "host_x64/test-pilot",
             "host_x64/zbi",
@@ -241,14 +239,14 @@
         ],
         "timeout_secs": 0,
         "summary": {
-            "tests": null
+            "tests": []
         },
         "summary_if_skipped": {
             "tests": [
                 {
-                    "output_files": null,
+                    "output_files": [],
                     "output_dir": "",
-                    "cases": null,
+                    "cases": [],
                     "name": "fuchsia-pkg://fuchsia.com/affected-hermetic-test#meta/affected-hermetic-test.cm",
                     "gn_label": "//src/something:affected-hermetic-test(//build/toolchain/fuchsia:x64)",
                     "source_label": "//src/something:affected-hermetic-test",
@@ -368,9 +366,9 @@
         "summary": {
             "tests": [
                 {
-                    "output_files": null,
+                    "output_files": [],
                     "output_dir": "",
-                    "cases": null,
+                    "cases": [],
                     "name": "fuchsia-pkg://fuchsia.com/unaffected-hermetic-test#meta/unaffected-hermetic-test.cm",
                     "gn_label": "//src/something:unaffected-hermetic-test(//build/toolchain/fuchsia:x64)",
                     "source_label": "//src/something:unaffected-hermetic-test",
@@ -396,9 +394,9 @@
         "summary_if_skipped": {
             "tests": [
                 {
-                    "output_files": null,
+                    "output_files": [],
                     "output_dir": "",
-                    "cases": null,
+                    "cases": [],
                     "name": "fuchsia-pkg://fuchsia.com/unaffected-hermetic-test#meta/unaffected-hermetic-test.cm",
                     "gn_label": "//src/something:unaffected-hermetic-test(//build/toolchain/fuchsia:x64)",
                     "source_label": "//src/something:unaffected-hermetic-test",
@@ -422,7 +420,7 @@
             ]
         },
         "expects_ssh": true,
-        "bot_dimensions": null,
+        "bot_dimensions": {},
         "build_metadata": {}
     }
 ]

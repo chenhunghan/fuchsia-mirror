@@ -6,7 +6,6 @@
 
 #include <lib/driver/component/cpp/driver_export2.h>
 #include <lib/driver/logging/cpp/logger.h>
-#include <lib/fake-bti/bti.h>
 
 #include <memory>
 
@@ -14,23 +13,28 @@ namespace ufs {
 
 ufs_mock_device::UfsMockDevice *TestUfs::mock_device_;
 bool TestUfs::supports_power_down_suspend_ = false;
+bool TestUfs::supports_runtime_power_management_ = false;
 
 void UfsTest::InitMockDevice() {
   TestUfs::SetSupportsPowerDownSuspend(false);
+  TestUfs::SetSupportsRuntimePowerManagement(false);
   std::unique_ptr<zx::interrupt> irq = std::make_unique<zx::interrupt>();
-  ZX_ASSERT(zx::interrupt::create(zx::resource(), 0, ZX_INTERRUPT_VIRTUAL, irq.get()) == ZX_OK);
+  driver_test().RunInEnvironmentTypeContext([&](Environment &env) {
+    env.pci_server().CreateBar(0, RegisterMap::kRegisterSize, /*is_mmio=*/true);
+    ZX_ASSERT(env.pci_server().AddLegacyInterrupt().duplicate(ZX_RIGHT_SAME_RIGHTS, irq.get()) ==
+              ZX_OK);
+  });
 
   // Configure mock device.
   mock_device_.Init(std::move(irq));
   ZX_ASSERT(mock_device_.AddLun(0) == ZX_OK);
+
+  // Init resets dma_handler_, so bind its new fake BTI afterward.
+  driver_test().RunInEnvironmentTypeContext(
+      [&](Environment &env) { env.pci_server().SetBti(mock_device_.GetFakeBti()); });
 }
 
 void UfsTest::StartDriver(bool supply_power_framework) {
-  driver_test().RunInEnvironmentTypeContext([&](Environment &env) {
-    // Device parameters for physical (parent) device
-    env.pci_server().SetMockDevice(&mock_device_);
-  });
-
   TestUfs::SetMockDevice(&mock_device_);
 
   // Emulate the power element that driver_manager creates for a node whose manifest sets
@@ -68,6 +72,7 @@ void UfsTest::StartDriver(bool supply_power_framework) {
     fake_config.storage_power_management_enabled() = supply_power_framework;
     fake_config.enable_auto_hibernate() = true;
     fake_config.auto_hibernate_timer_us() = 1000;
+    fake_config.link_idle_ahit_multiplier() = 2;
     args.config(fake_config.ToVmo());
     if (power_args.has_value()) {
       args.power_element_args(std::move(power_args.value()));
@@ -99,6 +104,7 @@ void UfsTest::TearDown() {
     ASSERT_OK(result);
   }
   TestUfs::SetSupportsPowerDownSuspend(false);
+  TestUfs::SetSupportsRuntimePowerManagement(false);
   mock_device_.GetRegisterMmioProcessor().Reset();
   mock_device_.GetUicCmdProcessor().Reset();
   mock_device_.GetTransferRequestProcessor().Reset();

@@ -4,12 +4,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Blanket ignores to enable mypy in Antlion
-# mypy: disable-error-code="no-untyped-def"
-from __future__ import annotations
-
 import enum
 import logging
+from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
 from libs.proc import job
@@ -69,8 +66,8 @@ def create(configs: list[ControllerConfig]) -> list[Attenuator]:
                     else:
                         logging.error("Able to ping attenuator at %s", address)
                     raise
-        for i in range(instrument_count):
-            attenuators.append(Attenuator(attenuator_instrument, idx=i))
+        for port_idx in attenuator_instrument.ports:
+            attenuators.append(Attenuator(attenuator_instrument, idx=port_idx))
     return attenuators
 
 
@@ -155,19 +152,37 @@ def get_attenuators_for_device(
     Returns:
         A list of attenuator objects for the specified device and the key in
         that device's config.
+
+    Raises:
+        ValueError: If no attenuators are found for an address.
+        IndexError: If a requested port is out of range.
     """
-    attenuator_list = []
+    attenuator_list: list[Attenuator] = []
     for device_attenuator_config in device_attenuator_configs:
         c = MapValidator(device_attenuator_config)
+        address = c.get(str, "Address")
         ports = c.list(attenuator_key).all(int)
+
+        device_attenuators = [
+            a for a in attenuators if a.instrument.address == address
+        ]
+        if not device_attenuators:
+            raise ValueError(f"No attenuators found for address: {address}")
+
+        instrument = device_attenuators[0].instrument
+        port_to_attenuator = {a.idx: a for a in device_attenuators}
         for port in ports:
-            for attenuator in attenuators:
-                if (
-                    attenuator.instrument.address
-                    == device_attenuator_config["Address"]
-                    and attenuator.idx is port
-                ):
-                    attenuator_list.append(attenuator)
+            if port not in instrument.ports:
+                raise IndexError(
+                    f"Attenuator port {port} is out of bounds for {address}. "
+                    f"Valid ports are {list(instrument.ports)}."
+                )
+            if port not in port_to_attenuator:
+                raise ValueError(
+                    f"No attenuator object found for address {address} and port {port}."
+                )
+            attenuator_list.append(port_to_attenuator[port])
+
     return attenuator_list
 
 
@@ -228,6 +243,11 @@ class AttenuatorInstrument(Protocol):
         ...
 
     @property
+    def ports(self) -> Sequence[int]:
+        """Return the sequence of valid port identifiers for this instrument."""
+        ...
+
+    @property
     def max_atten(self) -> float:
         """Return the maximum allowed attenuation value."""
         ...
@@ -282,15 +302,18 @@ class Attenuator(object):
     """
 
     def __init__(
-        self, instrument: AttenuatorInstrument, idx: int = 0, offset: int = 0
+        self,
+        instrument: AttenuatorInstrument,
+        idx: int,
+        offset: int = 0,
     ) -> None:
         """This is the constructor for Attenuator
 
         Args:
             instrument: Reference to an AttenuatorInstrument on which the
                 Attenuator resides
-            idx: This zero-based index is the identifier for a particular
-                attenuator in an instrument.
+            idx: The identifier for a particular attenuator port in an
+                instrument.
             offset: A power offset value for the attenuator to be used when
                 performing future operations. This could be used for either
                 calibration or to allow group operations with offsets between
@@ -306,9 +329,10 @@ class Attenuator(object):
         self.idx = idx
         self.offset = offset
 
-        if self.idx >= instrument.num_atten:
+        if self.idx not in instrument.ports:
             raise IndexError(
-                "Attenuator index out of range for attenuator instrument"
+                f"Attenuator port {self.idx} is invalid for instrument at "
+                f"{instrument.address}. Valid ports are {list(instrument.ports)}."
             )
 
     def set_atten(

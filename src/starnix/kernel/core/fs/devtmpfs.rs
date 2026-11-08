@@ -15,7 +15,7 @@ use crate::vfs::{
 use starnix_uapi::auth::FsCred;
 use starnix_uapi::device_id::DeviceId;
 use starnix_uapi::errors::Errno;
-use starnix_uapi::file_mode::mode;
+use starnix_uapi::file_mode::{FileMode, mode};
 use std::sync::OnceLock;
 
 pub fn dev_tmp_fs(
@@ -59,6 +59,7 @@ impl DevTmpFs {
     fn init_on_kthread(current_task: &CurrentTask) -> FileSystemHandle {
         let kernel = current_task.kernel();
         let fs = TmpFs::new_fs_with_name(kernel, "devtmpfs".into());
+        fs.root().node.update_info(|info| info.chmod(mode!(IFDIR, 0o755)));
         security::file_system_resolve_security(current_task, &fs)
             .expect("resolve devtmpfs security");
         let root = fs.root();
@@ -141,10 +142,7 @@ fn devtmpfs_create_device_node(
     device_mode: DeviceMode,
     devt: DeviceId,
 ) -> Result<(), Errno> {
-    let mode = match device_mode {
-        DeviceMode::Char => mode!(IFCHR, 0o666),
-        DeviceMode::Block => mode!(IFBLK, 0o666),
-    };
+    let mode = device_mode.file_type() | FileMode::from_bits(0o666);
     // This creates content inside the temporary FS. This doesn't depend on the mount
     // information.
     parent_dir.create_entry(
@@ -156,11 +154,20 @@ fn devtmpfs_create_device_node(
     Ok(())
 }
 
-pub fn devtmpfs_remove_path(current_task: &CurrentTask, path: &FsStr) -> Result<(), Errno> {
+/// Removes the device node for `device_metadata` from `devtmpfs` if its file mode and device ID
+/// match `device_metadata`.
+pub fn devtmpfs_remove_device(
+    current_task: &CurrentTask,
+    device_metadata: &DeviceMetadata,
+) -> Result<(), Errno> {
     let root_node =
         NamespaceNode::new_anonymous(DevTmpFs::from_kernel(current_task.kernel()).root().clone());
     let mut context = LookupContext::default();
-    let (parent_node, device_name) = current_task.lookup_parent(&mut context, &root_node, path)?;
-    parent_node.entry.remove_child(device_name.into(), &current_task.kernel().mounts);
+    let (parent_node, device_name) =
+        current_task.lookup_parent(&mut context, &root_node, device_metadata.devname.as_ref())?;
+    parent_node.entry.remove_child_if(device_name, &current_task.kernel().mounts, |child| {
+        let info = child.node.info();
+        info.mode.fmt() == device_metadata.mode.file_type() && info.rdev == device_metadata.devt
+    });
     Ok(())
 }

@@ -4,7 +4,6 @@
 
 #include "src/media/codec/examples/encode_file/encoder_client.h"
 
-#include <fidl/fuchsia.sysmem/cpp/hlcpp_conversion.h>
 #include <fidl/fuchsia.sysmem2/cpp/hlcpp_conversion.h>
 #include <lib/async/cpp/task.h>
 #include <lib/fit/function.h>
@@ -12,6 +11,7 @@
 
 #include <algorithm>
 #include <iostream>
+#include <limits>
 #include <random>
 
 namespace {
@@ -77,34 +77,47 @@ EncoderClient::EncoderClient(uint32_t bitrate, uint32_t gop_size, const std::str
 EncoderClient::~EncoderClient() {}
 
 zx_status_t EncoderClient::Start(fuchsia::images2::ImageFormat image_format, uint32_t framerate) {
-  if (image_format.pixel_format() != fuchsia::images2::PixelFormat::NV12 &&
-      image_format.pixel_format() != fuchsia::images2::PixelFormat::I420) {
+  if (!image_format.has_pixel_format() ||
+      (image_format.pixel_format() != fuchsia::images2::PixelFormat::NV12 &&
+       image_format.pixel_format() != fuchsia::images2::PixelFormat::I420)) {
     std::cout << "Unsupported pixel format" << std::endl;
     return ZX_ERR_INVALID_ARGS;
   }
+  if (image_format.has_pixel_format_modifier() &&
+      image_format.pixel_format_modifier() != fuchsia::images2::PixelFormatModifier::LINEAR) {
+    std::cout << "Unsupported non-linear pixel format modifier" << std::endl;
+    return ZX_ERR_INVALID_ARGS;
+  }
+  if (!image_format.has_size() || image_format.size().width == 0 ||
+      image_format.size().height == 0) {
+    std::cout << "Missing or zero image size" << std::endl;
+    return ZX_ERR_INVALID_ARGS;
+  }
+  const uint32_t bytes_per_row =
+      image_format.has_bytes_per_row() ? image_format.bytes_per_row() : image_format.size().width;
+  if (bytes_per_row < image_format.size().width) {
+    std::cout << "Invalid bytes_per_row < image width" << std::endl;
+    return ZX_ERR_INVALID_ARGS;
+  }
+  const uint64_t luma_bytes =
+      static_cast<uint64_t>(image_format.size().height) * static_cast<uint64_t>(bytes_per_row);
+  // Bounding `luma_bytes` to `uint32_t` also ensures `luma_bytes * 3` below cannot wrap `uint64_t`.
+  if (luma_bytes > std::numeric_limits<uint32_t>::max()) {
+    std::cout << "Input luma plane byte size overflows uint32_t" << std::endl;
+    return ZX_ERR_INVALID_ARGS;
+  }
+  const uint64_t frame_bytes = (luma_bytes * 3) / 2;
+  if (frame_bytes > std::numeric_limits<uint32_t>::max()) {
+    std::cout << "Input NV12 frame byte size overflows uint32_t" << std::endl;
+    return ZX_ERR_INVALID_ARGS;
+  }
 
-  input_frame_size_ = image_format.size().height * image_format.bytes_per_row() * 3 / 2;
+  input_frame_size_ = static_cast<uint32_t>(frame_bytes);
 
   std::cout << "Starting encoder at frame rate " << framerate << " frame size " << input_frame_size_
             << std::endl;
 
-  auto v2_natural_image_format = fidl::HLCPPToNatural(fidl::Clone(image_format));
-  auto v1_image_format_result = sysmem::V1CopyFromV2ImageFormat(v2_natural_image_format);
-  if (v1_image_format_result.is_error()) {
-    std::cout << "sysmem::V1CopyFromV2ImageFormat failed";
-    return ZX_ERR_INVALID_ARGS;
-  }
-  auto v1_image_format = fidl::NaturalToHLCPP(std::move(v1_image_format_result.value()));
-
-  fuchsia::media::VideoUncompressedFormat uncompressed;
-  uncompressed.image_format = std::move(v1_image_format);
-
-  fuchsia::media::VideoFormat video_format;
-  video_format.set_uncompressed(uncompressed);
-
-  fuchsia::media::DomainFormat domain;
   fuchsia::media::EncoderSettings encoder_settings;
-  domain.set_video(std::move(video_format));
 
   if (mime_type_ == kH264MimeType) {
     fuchsia::media::H264EncoderSettings h264_settings;
@@ -127,7 +140,7 @@ zx_status_t EncoderClient::Start(fuchsia::images2::ImageFormat image_format, uin
   input_details.set_format_details_version_ordinal(0)
       .set_mime_type(mime_type_)
       .set_encoder_settings(std::move(encoder_settings))
-      .set_domain(std::move(domain));
+      .set_image_format(std::move(image_format));
 
   fuchsia::mediacodec::CreateEncoder_Params encoder_params;
   encoder_params.set_input_details(std::move(input_details));
@@ -285,8 +298,7 @@ void EncoderClient::ConfigurePortBufferCollection(
   settings.set_buffer_lifetime_ordinal(new_buffer_lifetime_ordinal);
   settings.set_buffer_constraints_version_ordinal(buffer_constraints_version_ordinal);
 
-  settings.set_sysmem_token(
-      fidl::InterfaceHandle<fuchsia::sysmem::BufferCollectionToken>(token.TakeChannel()));
+  settings.set_sysmem2_token(std::move(token));
 
   fuchsia::sysmem2::BufferCollectionConstraints constraints;
   constraints.mutable_usage()->set_cpu(fuchsia::sysmem2::CPU_USAGE_READ_OFTEN |

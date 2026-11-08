@@ -59,9 +59,7 @@ class FileEntry:
 
     # TODO(https://fxbug.dev/42170926) Move to python module at //build/python/modules/fini_manfest
     @staticmethod
-    def write_fini_manifest(
-        entries: Iterable["FileEntry"], file: TextIO
-    ) -> None:
+    def write_fini_manifest(entries: Iterable[FileEntry], file: TextIO) -> None:
         """Write out the FileEntry instances into a FINI manifest.
 
         The fini manifest is in the format of::

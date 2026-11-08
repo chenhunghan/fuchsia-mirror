@@ -1,0 +1,26 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fidl_library(
+    name = "fidl",
+    srcs = ["fake_clock.fidl"],
+    enable_hlcpp = True,
+    library_name = "fuchsia.testing",
+    visibility = [
+        "//src/connectivity:__subpackages__",
+        "//src/diagnostics:__subpackages__",
+        "//src/lib/fake-clock:__subpackages__",
+        "//src/power:__subpackages__",
+        "//src/recovery:__subpackages__",
+        "//src/sys:__subpackages__",
+    ],
+    deps = [
+        "//src/lib/fake-clock/named-timer:fidl",
+        "//zircon/vdso/zx",
+    ],
+)

@@ -178,19 +178,19 @@ class Merge(Enum):
 class CrateConfig:
     merge: Merge | None = None
     parts_out_dir: bool = False
-    include_parts_dir: frozenset["Crate"] = frozenset()
+    include_parts_dir: frozenset[Crate] = frozenset()
     enable_index_page: bool = False
     separate_out_dir: bool = False
     extra_flags: tuple[str, ...] = tuple()
-    examples: tuple["Crate", str] | None = None  # crate, path
+    examples: tuple[Crate, str] | None = None  # crate, path
 
 
 @dataclass(frozen=True)
 class Crate:
     contents: str
     name: str
-    deps: frozenset["Crate"]
-    transdeps: frozenset["Crate"]
+    deps: frozenset[Crate]
+    transdeps: frozenset[Crate]
     crate_type: str
     ext: str
 
@@ -198,10 +198,10 @@ class Crate:
     def new(
         contents: str,
         name: str,
-        deps: Collection["Crate"],
+        deps: Collection[Crate],
         crate_type: str = "lib",
         ext: str = "rmeta",
-    ) -> "Crate":
+    ) -> Crate:
         return Crate(
             contents=contents,
             name=name,
@@ -274,7 +274,7 @@ document-{self.name}: {self.name}/lib.rs {dep_meta} {dep_touch}
         self,
         path: Path,
         aux: Path,
-        configs: dict["Crate", CrateConfig],
+        configs: dict[Crate, CrateConfig],
         extra_header: str,
     ) -> None:
         header = ""
@@ -325,7 +325,7 @@ document-{self.name}: {self.name}/lib.rs {dep_meta} {dep_touch}
     def render_as_gn_target(
         self,
         config_root: Path,
-        configs: dict["Crate", CrateConfig],
+        configs: dict[Crate, CrateConfig],
         targets: dict[str, tuple[str, str]],
         is_index: bool,
     ) -> str:
@@ -413,7 +413,7 @@ document-{self.name}: {self.name}/lib.rs {dep_meta} {dep_touch}
         return self.name
 
 
-def target_name(c: "Crate") -> str:
+def target_name(c: Crate) -> str:
     if c.crate_type == "proc-macro":
         return f":{c.name}_proc_macro.rustdoc"
     return f":{c.name}.rustdoc"

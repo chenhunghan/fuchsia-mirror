@@ -124,6 +124,7 @@ library_headers("headers") {
   include_dir = "include"
   visibility = [ "*" ]
 }
+
 library_headers("inception") {
   public = [
     "include/lib/zxio/cpp/inception.h",
@@ -135,11 +136,12 @@ library_headers("inception") {
     "//sdk/lib/fdio/*",
     "//sdk/lib/zxio/*",
   ]
-  deps = [
+  public_deps = [
     ":headers",
     "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
   ]
 }
+
 library_headers("udp_socket_private") {
   public = [ "include/lib/zxio/cpp/udp_socket_private.h" ]
   include_dir = "include"
@@ -148,8 +150,9 @@ library_headers("udp_socket_private") {
     "//sdk/lib/zxio/*",
     "//src/connectivity/network/lib/udp_serde:*",
   ]
-  deps = [ "//sdk/fidl/fuchsia.posix.socket:fuchsia.posix.socket_cpp" ]
+  public_deps = [ "//sdk/fidl/fuchsia.posix.socket:fuchsia.posix.socket_cpp" ]
 }
+
 source_set("zxio_private_headers") {
   public = [
     "dgram_cache.h",
@@ -161,6 +164,7 @@ source_set("zxio_private_headers") {
     "//sdk/lib/zxio/*",
   ]
 }
+
 source_set("zxio") {
   sources = [
     "create.cc",

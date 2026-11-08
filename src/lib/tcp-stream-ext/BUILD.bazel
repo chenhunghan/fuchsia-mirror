@@ -1,0 +1,51 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "tcp-stream-ext",
+    srcs = ["src/lib.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    visibility = ["//src/connectivity/network/tests/connect:__pkg__"],
+    deps = [
+        "//third_party/rust_crates/vendor:libc",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+rustc_test(
+    name = "tcp-stream-ext_test",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate = ":tcp-stream-ext",
+    # Needed so bazel2gn emits `output_name = "tcp_stream_ext_lib_test"` to
+    # match `meta/tcp_stream_ext_lib_test.cml`.
+    crate_name = "tcp_stream_ext_lib_test",
+    deps = [
+        "//third_party/rust_crates/vendor:proptest",
+        "//third_party/rust_crates/vendor:socket2",
+    ],
+)
+
+rustc_test(
+    name = "stub-netstack-test",
+    srcs = ["src/stub_netstack_test.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate_root = "src/stub_netstack_test.rs",
+    edition = "2024",
+    deps = [
+        ":tcp-stream-ext",
+        "//sdk/fidl/fuchsia.posix.socket:fuchsia.posix.socket_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fdio/rust:fdio",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)

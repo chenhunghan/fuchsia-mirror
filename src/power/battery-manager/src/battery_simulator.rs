@@ -10,12 +10,13 @@ use futures::lock::Mutex;
 use std::sync::{Arc, Weak};
 
 fn get_current_time() -> Option<i64> {
-    let t = fuchsia_runtime::utc_time();
-    Some((t.into_nanos() / 1000) as i64)
+    Some(zx::BootInstant::get().into_nanos())
 }
 
-// SimulatedBatteryInfoSource is another source of BatteryInfo for the
-// BatteryManager. This BatteryInfo is modified through FIDL calls
+// SimulatedBatteryInfoSource stores per-field BatteryInfo overrides modified
+// through BatterySimulator FIDL calls. Only fields explicitly set via simulator
+// calls are populated (`Some(...)`); unset fields remain `None` so
+// BatteryManager keeps the existing live hardware values for those fields.
 pub(crate) struct SimulatedBatteryInfoSource {
     battery_info: Arc<Mutex<fpower::BatteryInfo>>,
     observer: Weak<dyn BatterySimulationStateObserver>,
@@ -30,97 +31,73 @@ impl SimulatedBatteryInfoSource {
     }
 
     pub async fn get_battery_info_copy(&self) -> fpower::BatteryInfo {
-        let battery_info = self.battery_info.lock().await;
-        (*battery_info).clone()
+        if let Some(observer) = self.observer.upgrade() {
+            observer.get_battery_info_copy()
+        } else {
+            let battery_info = self.battery_info.lock().await;
+            (*battery_info).clone()
+        }
+    }
+
+    async fn update_override(&self, f: impl FnOnce(&mut fpower::BatteryInfo)) -> Result<(), Error> {
+        {
+            let mut battery_info = self.battery_info.lock().await;
+            f(&mut battery_info);
+            battery_info.timestamp = get_current_time();
+        }
+        self.notify_battery_info_changed().await
     }
 
     async fn set_battery_percentage(&self, level_percent: f32) -> Result<(), Error> {
-        let mut battery_info = self.battery_info.lock().await;
-        battery_info.level_percent = Some(level_percent);
-        battery_info.timestamp = get_current_time();
-        drop(battery_info);
-        self.notify_battery_info_changed().await?;
-        Ok(())
+        self.update_override(|info| info.level_percent = Some(level_percent)).await
     }
 
     async fn set_present_voltage(&self, present_voltage: u32) -> Result<(), Error> {
-        let mut battery_info = self.battery_info.lock().await;
-        battery_info.present_voltage_mv = Some(present_voltage);
-        battery_info.timestamp = get_current_time();
-        drop(battery_info);
-        self.notify_battery_info_changed().await?;
-        Ok(())
+        self.update_override(|info| info.present_voltage_mv = Some(present_voltage)).await
     }
 
     async fn set_remaining_charge(&self, remaining_charge: u32) -> Result<(), Error> {
-        let mut battery_info = self.battery_info.lock().await;
-        battery_info.remaining_charge_uah = Some(remaining_charge);
-        battery_info.timestamp = get_current_time();
-        drop(battery_info);
-        self.notify_battery_info_changed().await?;
-        Ok(())
+        self.update_override(|info| info.remaining_charge_uah = Some(remaining_charge)).await
     }
 
     async fn set_charge_source(&self, charge_source: fpower::ChargeSource) -> Result<(), Error> {
-        let mut battery_info = self.battery_info.lock().await;
-        battery_info.charge_source = Some(charge_source);
-        battery_info.timestamp = get_current_time();
-        drop(battery_info);
-        self.notify_battery_info_changed().await?;
-        Ok(())
+        self.update_override(|info| info.charge_source = Some(charge_source)).await
     }
 
     async fn set_level_status(&self, level_status: fpower::LevelStatus) -> Result<(), Error> {
-        let mut battery_info = self.battery_info.lock().await;
-        battery_info.level_status = Some(level_status);
-        battery_info.timestamp = get_current_time();
-        drop(battery_info);
-        self.notify_battery_info_changed().await?;
-        Ok(())
+        self.update_override(|info| info.level_status = Some(level_status)).await
     }
 
     async fn set_charge_status(&self, charge_status: fpower::ChargeStatus) -> Result<(), Error> {
-        let mut battery_info = self.battery_info.lock().await;
-        battery_info.charge_status = Some(charge_status);
-        battery_info.timestamp = get_current_time();
-        drop(battery_info);
-        self.notify_battery_info_changed().await?;
-        Ok(())
+        self.update_override(|info| info.charge_status = Some(charge_status)).await
     }
 
     async fn set_battery_status(&self, battery_status: fpower::BatteryStatus) -> Result<(), Error> {
-        let mut battery_info = self.battery_info.lock().await;
-        battery_info.status = Some(battery_status);
-        battery_info.timestamp = get_current_time();
-        drop(battery_info);
-        self.notify_battery_info_changed().await?;
-        Ok(())
+        self.update_override(|info| info.status = Some(battery_status)).await
     }
 
     async fn set_time_remaining(&self, time: i64) -> Result<(), Error> {
-        let mut battery_info = self.battery_info.lock().await;
-        if battery_info.charge_status.unwrap() == fpower::ChargeStatus::Charging {
-            battery_info.time_remaining = Some(fpower::TimeRemaining::FullCharge(time));
-        } else if battery_info.charge_status.unwrap() == fpower::ChargeStatus::Discharging
-            || battery_info.charge_status.unwrap() == fpower::ChargeStatus::NotCharging
-        {
-            battery_info.time_remaining = Some(fpower::TimeRemaining::BatteryLife(time));
-        } else {
-            battery_info.time_remaining = Some(fpower::TimeRemaining::Indeterminate(time));
-        }
-        battery_info.timestamp = get_current_time();
-        drop(battery_info);
-        self.notify_battery_info_changed().await?;
-        Ok(())
+        self.update_override(|battery_info| {
+            let charge_status = battery_info.charge_status.or_else(|| {
+                self.observer.upgrade().and_then(|o| o.get_battery_info_copy().charge_status)
+            });
+            battery_info.time_remaining =
+                Some(if charge_status == Some(fpower::ChargeStatus::Charging) {
+                    fpower::TimeRemaining::FullCharge(time)
+                } else if matches!(
+                    charge_status,
+                    Some(fpower::ChargeStatus::Discharging | fpower::ChargeStatus::NotCharging)
+                ) {
+                    fpower::TimeRemaining::BatteryLife(time)
+                } else {
+                    fpower::TimeRemaining::Indeterminate(time)
+                });
+        })
+        .await
     }
 
     async fn set_battery_spec(&self, spec: fpower::BatterySpec) -> Result<(), Error> {
-        let mut battery_info = self.battery_info.lock().await;
-        battery_info.battery_spec = Some(spec);
-        battery_info.timestamp = get_current_time();
-        drop(battery_info);
-        self.notify_battery_info_changed().await?;
-        Ok(())
+        self.update_override(|info| info.battery_spec = Some(spec)).await
     }
 
     // Updates the simulated_battery_info in BatteryManager
@@ -130,19 +107,18 @@ impl SimulatedBatteryInfoSource {
         Ok(())
     }
 
-    // Updates BatteryManager as well as store the most up to date BatteryInfo
+    // Updates BatteryManager as well as store the simulated override BatteryInfo
     pub async fn update_simulation(
         &self,
         is_simulating: bool,
-        real_battery_info: fpower::BatteryInfo,
+        battery_info: fpower::BatteryInfo,
     ) -> Result<(), Error> {
+        let mut overrides = self.battery_info.lock().await;
+        *overrides = battery_info;
+        drop(overrides);
+
         let observer = self.observer.upgrade().ok_or_else(|| format_err!("Observer not found"))?;
         observer.update_simulation(is_simulating);
-
-        // Copy real_battery_info
-        let mut battery_info = self.battery_info.lock().await;
-        *battery_info = real_battery_info;
-        drop(battery_info);
         self.notify_battery_info_changed().await?;
         Ok(())
     }
@@ -276,5 +252,96 @@ mod tests {
         };
 
         join(serve_fut, request_fut).await;
+    }
+
+    #[fuchsia::test(allow_stalls = false)]
+    async fn test_set_battery_percentage_preserves_and_propagates_real_fields() {
+        let battery_manager = create_manager();
+        let initial_real_info = fpower::BatteryInfo {
+            status: Some(fpower::BatteryStatus::NotAvailable),
+            charge_status: Some(fpower::ChargeStatus::Charging),
+            charge_source: Some(fpower::ChargeSource::Usb),
+            level_percent: Some(25.0),
+            level_status: Some(fpower::LevelStatus::Low),
+            health: Some(fpower::HealthStatus::Unknown),
+            present_voltage_mv: Some(4100),
+            temperature_mc: Some(25000),
+            ..Default::default()
+        };
+        battery_manager.update_cached_battery_info(initial_real_info, None);
+
+        let simulated = SimulatedBatteryInfoSource::new(
+            fpower::BatteryInfo::default(),
+            Arc::downgrade(&battery_manager) as Weak<dyn BatterySimulationStateObserver>,
+        );
+
+        simulated.update_simulation(true, fpower::BatteryInfo::default()).await.unwrap();
+        simulated.set_battery_percentage(77.0).await.unwrap();
+
+        let updated = simulated.get_battery_info_copy().await;
+        assert_eq!(updated.level_percent, Some(77.0));
+        assert_eq!(updated.level_status, Some(fpower::LevelStatus::Warning));
+        assert_eq!(updated.status, Some(fpower::BatteryStatus::Ok));
+        assert_eq!(updated.health, Some(fpower::HealthStatus::Good));
+        assert_eq!(updated.charge_status, Some(fpower::ChargeStatus::Charging));
+        assert_eq!(updated.charge_source, Some(fpower::ChargeSource::Usb));
+        assert_eq!(updated.present_voltage_mv, Some(4100));
+        assert_eq!(updated.temperature_mc, Some(25000));
+
+        // Setting time_remaining without overriding charge_status uses the live charge_status
+        // (`Charging` -> `FullCharge`).
+        simulated.set_time_remaining(1800).await.unwrap();
+        assert_eq!(
+            battery_manager.get_battery_info_copy().time_remaining,
+            Some(fpower::TimeRemaining::FullCharge(1800))
+        );
+
+        // An explicit SetLevelStatus override is preserved across a subsequent SetBatteryPercentage.
+        simulated.set_level_status(fpower::LevelStatus::Critical).await.unwrap();
+        simulated.set_battery_percentage(90.0).await.unwrap();
+        let with_explicit_level_status = battery_manager.get_battery_info_copy();
+        assert_eq!(with_explicit_level_status.level_percent, Some(90.0));
+        assert_eq!(with_explicit_level_status.level_status, Some(fpower::LevelStatus::Critical));
+
+        // Reset overrides back to percentage-only (77%) before testing live hardware unplug.
+        simulated.update_simulation(true, fpower::BatteryInfo::default()).await.unwrap();
+        simulated.set_battery_percentage(77.0).await.unwrap();
+
+        // When a real hardware update arrives while simulating (e.g. USB unplugged),
+        // non-overridden fields update while the overridden level_percent remains 77%.
+        let unplugged_real_info = fpower::BatteryInfo {
+            status: Some(fpower::BatteryStatus::Ok),
+            charge_status: Some(fpower::ChargeStatus::Discharging),
+            charge_source: Some(fpower::ChargeSource::None),
+            level_percent: Some(24.0),
+            level_status: Some(fpower::LevelStatus::Low),
+            health: Some(fpower::HealthStatus::Good),
+            present_voltage_mv: Some(3800),
+            temperature_mc: Some(26000),
+            ..Default::default()
+        };
+        battery_manager.update_cached_battery_info(unplugged_real_info, None);
+
+        let after_unplug = battery_manager.get_battery_info_copy();
+        assert_eq!(after_unplug.level_percent, Some(77.0));
+        assert_eq!(after_unplug.charge_status, Some(fpower::ChargeStatus::Discharging));
+        assert_eq!(after_unplug.charge_source, Some(fpower::ChargeSource::None));
+        assert_eq!(after_unplug.present_voltage_mv, Some(3800));
+        assert_eq!(after_unplug.temperature_mc, Some(26000));
+
+        // Setting time_remaining after unplug uses the updated live charge_status
+        // (`Discharging` -> `BatteryLife`).
+        simulated.set_time_remaining(3600).await.unwrap();
+        assert_eq!(
+            battery_manager.get_battery_info_copy().time_remaining,
+            Some(fpower::TimeRemaining::BatteryLife(3600))
+        );
+
+        // Reconnecting the real battery clears the override and restores the real level_percent.
+        simulated.update_simulation(false, fpower::BatteryInfo::default()).await.unwrap();
+        let reconnected = battery_manager.get_battery_info_copy();
+        assert_eq!(reconnected.level_percent, Some(24.0));
+        assert_eq!(reconnected.charge_status, Some(fpower::ChargeStatus::Discharging));
+        assert_eq!(reconnected.charge_source, Some(fpower::ChargeSource::None));
     }
 }

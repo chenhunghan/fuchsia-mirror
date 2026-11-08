@@ -58,69 +58,75 @@ group("tests") {
   testonly = true
 }
 
-if (is_host) {
+if (target_cpu == "riscv64") {
   group("host_tests") {
     testonly = true
-    if (has_board) {
-      deps = [ ":ffx_power_system_activity_application_activity_e2e_tests" ]
-    }
   }
-
-  if (has_board) {
-    ffx_e2e_test("ffx_power_system_activity_application_activity_e2e_tests") {
-      edition = "2024"
-      source_root = "tests/e2e.rs"
-      sources = [ source_root ]
-
-      product_bundle = ":product_bundle($default_toolchain)"
-
-      deps = [
-        "//src/developer/ffx/tools/power:ffx_power_tool_test_data",
-        "//src/lib/diagnostics/data",
-        "//src/lib/fuchsia",
-        "//src/lib/fuchsia-async",
-        "//third_party/rust_crates:serde_json",
-      ]
-    }
-  }
-}
-
-if (is_fuchsia && has_board) {
-  files = {
-    outdir = target_out_dir + "/fuchsia"
-  }
-
-  product_bundle("product_bundle") {
-    testonly = true
-    name = "application-activity-test"
-
-    system_a = files.outdir
-
-    deps = [ ":assembly" ]
-  }
-
-  assembled_system("assembly") {
-    testonly = true
-    image_name = "fuchsia"
-
-    if (target_cpu == "arm64") {
-      board_config_label = "//boards/arm64"
-    } else if (target_cpu == "x64") {
-      board_config_label = "//boards/x64"
-    }
-    generate_fxfs = true
-    generate_vbmeta = true
-    product_assembly_config_label = ":product_assembly_config"
-  }
-
-  product_assembly_configuration("product_assembly_config") {
-    testonly = true
-    platform = {
-      build_type = "eng"
-      power = {
-        suspend_enabled = true
+} else {
+  if (is_host) {
+    group("host_tests") {
+      testonly = true
+      if (has_board) {
+        deps = [ ":ffx_power_system_activity_application_activity_e2e_tests" ]
       }
     }
-    version = build_info_version
+
+    if (has_board) {
+      ffx_e2e_test("ffx_power_system_activity_application_activity_e2e_tests") {
+        edition = "2024"
+        source_root = "tests/e2e.rs"
+        sources = [ source_root ]
+
+        product_bundle = ":product_bundle($default_toolchain)"
+
+        deps = [
+          "//src/developer/ffx/tools/power:ffx_power_tool_test_data",
+          "//src/lib/diagnostics/data",
+          "//src/lib/fuchsia",
+          "//src/lib/fuchsia-async",
+          "//third_party/rust_crates:serde_json",
+        ]
+      }
+    }
+  }
+
+  if (is_fuchsia && has_board) {
+    files = {
+      outdir = target_out_dir + "/fuchsia"
+    }
+
+    product_bundle("product_bundle") {
+      testonly = true
+      name = "application-activity-test"
+
+      system_a = files.outdir
+
+      deps = [ ":assembly" ]
+    }
+
+    assembled_system("assembly") {
+      testonly = true
+      image_name = "fuchsia"
+
+      if (target_cpu == "arm64") {
+        board_config_label = "//boards/arm64"
+      } else if (target_cpu == "x64") {
+        board_config_label = "//boards/x64"
+      }
+      generate_fxfs = true
+      generate_vbmeta = true
+      product_assembly_config_label = ":product_assembly_config"
+    }
+
+    product_assembly_configuration("product_assembly_config") {
+      testonly = true
+      platform = {
+        build_type = "eng"
+        power = {
+          suspend_enabled = true
+        }
+      }
+      version = build_info_version
+    }
   }
 }

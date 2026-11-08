@@ -224,7 +224,7 @@ impl DmDevice {
             ..Default::default()
         });
         let device_weak = Arc::<DmDevice>::downgrade(&device);
-        let k_device = registry.add_device(
+        let k_device = registry.add_major_device(
             current_task.kernel(),
             dm_device_name.as_ref(),
             DeviceMetadata::new(
@@ -236,7 +236,7 @@ impl DmDevice {
             /* parent = */ None,
             block_class,
             |device, dir| build_block_device_directory(device, device_weak, dir),
-        )?;
+        );
         {
             let mut state = device.state.lock();
             state.set_k_device(k_device);

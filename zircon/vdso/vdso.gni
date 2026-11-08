@@ -5,8 +5,10 @@
 import("//build/fidl/toolchain.gni")
 
 declare_args() {
+  # LINT.IfChange(exclude_testonly_syscalls)
   # If true, excludes syscalls with the [testonly] attribute.
   exclude_testonly_syscalls = false
+  # LINT.ThenChange(//build/bazel/BUILD.gn:exclude_testonly_syscalls)
 }
 
 _fidl_root_gen_dir =

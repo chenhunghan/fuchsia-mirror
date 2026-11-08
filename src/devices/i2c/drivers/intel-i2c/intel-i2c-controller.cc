@@ -97,6 +97,13 @@ zx_status_t IntelI2cController::Init() {
 
   acpi_.Bind(std::move(*acpi_result));
 
+  auto pci_result = DdkConnectFragmentFidlProtocol<fuchsia_hardware_pci::Service::Device>(
+      fdf::Pci::kFragmentName);
+  if (pci_result.is_error()) {
+    return pci_result.error_value();
+  }
+  pci_ = fdf::Pci(std::move(*pci_result));
+
   uint16_t vendor_id;
   uint16_t device_id;
   pci_.ReadConfig16(fuchsia_hardware_pci::Config::kVendorId, &vendor_id);
@@ -110,7 +117,7 @@ zx_status_t IntelI2cController::Init() {
 
   regs_ = reinterpret_cast<MMIO_PTR I2cRegs*>(mmio_->get());
 
-  status = pci_.ConfigureInterruptMode(1, &irq_mode_);
+  status = pci_.ConfigureInterruptMode(1, nullptr);
   if (status != ZX_OK) {
     zxlogf(ERROR, "i2c: failed to set irq mode: %d", status);
     return status;
@@ -458,10 +465,6 @@ zx_status_t IntelI2cController::SetBusFrequency(const uint32_t frequency) {
 int IntelI2cController::IrqThread() {
   zx_status_t status;
   for (;;) {
-    if (irq_mode_ == fuchsia_hardware_pci::InterruptMode::kLegacy) {
-      pci_.AckInterrupt();
-    }
-
     status = irq_handle_.wait(nullptr);
     if (status != ZX_OK) {
       zxlogf(ERROR, "i2c: error waiting for interrupt: %d", status);

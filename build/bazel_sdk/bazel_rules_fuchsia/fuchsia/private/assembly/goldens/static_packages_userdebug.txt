@@ -24,6 +24,7 @@ build-info-service
 ?codec_factory
 ?config-data
 ?core
+?dhcp-client
 ?dhcpv4-server
 ?dhcpv6-client
 ?diagnostics
@@ -65,7 +66,7 @@ mdns
 ?memory_sampler
 ?metrics-logger-standalone
 ?net-cli
-?netcfg-basic
+?netcfg
 ?netcfg-config
 ?netdevice-migration
 ?netstack3

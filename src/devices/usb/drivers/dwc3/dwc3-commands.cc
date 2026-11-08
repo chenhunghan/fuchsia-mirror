@@ -155,6 +155,10 @@ void Dwc3::CmdEpUpdateTransfer(const Endpoint& ep) {
 }
 
 bool Dwc3::CmdEpEndTransfer(const Endpoint& ep, bool cmd_ioc) {
+  return CmdEpEndTransfer(ep, ep.rsrc_id, cmd_ioc);
+}
+
+bool Dwc3::CmdEpEndTransfer(const Endpoint& ep, uint32_t rsrc_id, bool cmd_ioc) {
   TRACE_DURATION("dwc3", "Dwc3::CmdEpEndTransfer", "ep_num", ep.ep_num);
   if (!power_on_) {
     return false;
@@ -163,12 +167,11 @@ bool Dwc3::CmdEpEndTransfer(const Endpoint& ep, bool cmd_ioc) {
   auto* mmio = get_mmio();
 
   const uint8_t ep_num = ep.ep_num;
-  const uint32_t rsrc_id = ep.rsrc_id;
 
   ZX_DEBUG_ASSERT_MSG(rsrc_id != Endpoint::kInvalidResourceId,
                       "%s: Called before rsrc_id was initialized with a valid value "
                       "ep.ep_num=%d ep.enabled=%d ep.type=%d ep.transfer_state=%d "
-                      "ep.stalled=%d ep.rsrc_id=0x%08x",
+                      "ep.stalled=%d rsrc_id=0x%08x",
                       __func__, ep_num, ep.enabled, static_cast<uint8_t>(ep.type),
                       ep.transfer_state, ep.stalled, rsrc_id);
 

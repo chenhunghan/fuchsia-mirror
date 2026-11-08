@@ -164,7 +164,7 @@ pub struct DisconnectInfo {
     pub disconnect_source: fidl_sme::DisconnectSource,
     pub original_bss_desc: Box<BssDescription>,
     pub current_rssi_dbm: i8,
-    pub current_snr_db: i8,
+    pub current_snr_db: Option<i8>,
     pub current_channel: Channel,
 }
 
@@ -418,7 +418,7 @@ impl ConnectDisconnectLogger {
             disconnect_source_id: disconnect_source_id,
             network_id: connected_network_id,
             rssi_dbm: info.current_rssi_dbm,
-            snr_db: info.current_snr_db,
+            snr_db?: info.current_snr_db,
             channel: format!("{}", info.current_channel),
         });
 
@@ -1965,7 +1965,7 @@ mod tests {
             }),
             original_bss_desc: Box::new(bss_description),
             current_rssi_dbm: -30,
-            current_snr_db: 25,
+            current_snr_db: Some(25),
             current_channel: channel,
         };
         let mut test_fut = pin!(logger.log_disconnect(&disconnect_info));
@@ -2031,6 +2031,47 @@ mod tests {
             &time_matrix_calls.drain::<u64>("disconnect_sources")[..],
             &[TimeMatrixCall::Fold(Timed::now(1 << 0))]
         );
+    }
+
+    #[fuchsia::test]
+    fn test_log_disconnect_inspect_without_snr() {
+        let mut test_helper = setup_test();
+        let logger = ConnectDisconnectLogger::new(
+            test_helper.filtered_cobalt_logger(),
+            &test_helper.inspect_node,
+            &test_helper.inspect_metadata_node,
+            &test_helper.inspect_metadata_path,
+            &test_helper.mock_time_matrix_client,
+            DeviceMobility::Mobile,
+        );
+
+        let disconnect_info = DisconnectInfo {
+            connected_duration: zx::BootDuration::from_seconds(30),
+            current_rssi_dbm: -30,
+            current_snr_db: None,
+            ..fake_disconnect_info()
+        };
+        let mut test_fut = pin!(logger.log_disconnect(&disconnect_info));
+        assert_eq!(
+            test_helper.run_until_stalled_drain_cobalt_events(&mut test_fut),
+            Poll::Ready(())
+        );
+
+        let data = test_helper.get_inspect_data_tree();
+        assert_data_tree!(@executor test_helper.exec, data, root: contains {
+            test_stats: contains {
+                disconnect_events: {
+                    "0": {
+                        "@time": AnyNumericProperty,
+                        connected_duration: zx::BootDuration::from_seconds(30).into_nanos(),
+                        disconnect_source_id: 0u64,
+                        network_id: 0u64,
+                        rssi_dbm: -30i64,
+                        channel: AnyStringProperty,
+                    }
+                }
+            }
+        });
     }
 
     #[fuchsia::test]
@@ -2529,7 +2570,7 @@ mod tests {
             ),
             original_bss_desc: bss_description.into(),
             current_rssi_dbm: -30,
-            current_snr_db: 25,
+            current_snr_db: Some(25),
             current_channel: channel,
         }
     }

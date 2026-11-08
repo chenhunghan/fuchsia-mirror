@@ -79,9 +79,17 @@ class Manager {
 
  private:
   friend acpi_host_test::AcpiHostTest;
+
+  struct CmosRtcDiscovery {
+    ACPI_HANDLE hidden = nullptr;
+    bool present = false;
+  };
+
   // Returns true if the device is not present, and it and its children should be ignored.
   // Returns false if the device is present and its children can be enumerated.
-  acpi::status<bool> DiscoverDevice(ACPI_HANDLE handle);
+  // When |force_enable| is true, overrides _STA to present and enabled on a hidden CMOS RTC.
+  acpi::status<bool> DiscoverDevice(ACPI_HANDLE handle, CmosRtcDiscovery* cmos_rtc,
+                                    bool force_enable = false);
 
   // Call pci_init for the given device.
   acpi::status<> PublishPciBus(zx_device_t* platform_bus, DeviceBuilder* device);

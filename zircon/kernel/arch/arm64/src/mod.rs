@@ -4,18 +4,22 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+mod arch;
 mod asid_allocator;
-mod asid_allocator_ffi;
 pub mod cache;
-mod crashlog;
+pub mod crashlog;
+pub mod debugger;
+mod exceptions;
 mod feature;
 mod fpu;
-mod mp;
+mod mmu;
+mod mmu_ffi;
+pub mod mp;
 mod periphmap;
 mod registers;
 pub mod restricted;
 pub mod smccc;
-mod spinlock;
+pub(crate) mod spinlock;
 #[cfg(console_enabled)]
 mod sysreg;
 mod thread;
@@ -23,32 +27,21 @@ mod uarch;
 mod user_copy;
 pub mod vm;
 
-use crate::kernel::types::cpu_num_t;
 use arch_arm64_aspace_bindings as aspace_bindings;
-
-unsafe extern "C" {
-    fn cpp_arm64_cpu_num_to_mpidr(cpu_num: cpu_num_t) -> u64;
-}
 
 /// The maximum cache line seen on any known ARM hardware.
 pub const MAX_CACHE_LINE: usize = 64;
 #[repr(align(64))]
 pub struct CpuAlignMarker;
 
+pub use cache::clean_dcache_range;
+pub use libarch::arm64::{device_memory_barrier, isb, thread_memory_barrier, wfi, r#yield};
+pub(crate) use mmu::arch_address_tagging_features;
 /// Translates a CPU number back to the MPIDR of that CPU.
-///
-/// Mirrors `arch_cpu_num_to_mpidr()` from
-/// `zircon/kernel/arch/arm64/include/arch/arm64/mp.h`.
-#[inline]
-pub fn cpu_num_to_mpidr(cpu_num: cpu_num_t) -> u64 {
-    // SAFETY: `cpp_arm64_cpu_num_to_mpidr` is a read-only FFI call into the arm64 percpu
-    // topology table with no side effects. Out of range CPU numbers are handled by the C++
-    // implementation.
-    unsafe { cpp_arm64_cpu_num_to_mpidr(cpu_num) }
-}
-
-pub use libarch::arm64::{device_memory_barrier, isb, thread_memory_barrier, wfi};
-pub use periphmap::periph_paddr_to_vaddr;
+pub use mp::arch_cpu_num_to_mpidr as cpu_num_to_mpidr;
+pub use mp::arch_quirks_needs_arm_erratum_858921_mitigation;
+pub use periphmap::{periph_paddr_to_vaddr, periph_vaddr_to_paddr};
+pub(crate) use registers::{arm64_hw_breakpoint_count, arm64_hw_watchpoint_count};
 pub use user_copy::{
     arch_copy_from_user, arch_copy_from_user_capture_faults, arch_copy_to_user,
     arch_copy_to_user_capture_faults,
@@ -58,6 +51,8 @@ pub use user_copy::{
 pub const ARM_NCZV_FLAGS: u32 = 0xf000_0000;
 // [arm/v8]: FEAT_BTI (Branch Target Identification) branch type flags.
 pub const ARM64_BTYPE_FLAGS: u32 = 0x0000_0c00;
+/// The flags a normal mode aarch64 thread may set: NCZV and BTYPE.
+const ARM64_USER_VISIBLE_FLAGS: u32 = ARM_NCZV_FLAGS | ARM64_BTYPE_FLAGS;
 // [arm/v8]: C5.2.19 CPSR M[4] / nRW bit indicating AArch32 execution state.
 pub const ARM32_BIT_MODE: u32 = 1 << 4; // 0x10
 // [arm/v8]: C5.2.19 CPSR T bit indicating AArch32 Thumb execution state.
@@ -70,6 +65,9 @@ pub const ARM32_IT_BITS: u32 = 0x0600_fc00;
 pub const ARM64_USER_RESTRICTED_VISIBLE_FLAGS: u32 = ARM_NCZV_FLAGS | ARM64_BTYPE_FLAGS; // 0xf000_0c00
 pub const ARM32_USER_RESTRICTED_VISIBLE_FLAGS: u32 =
     ARM_NCZV_FLAGS | ARM32_BIT_MODE | ARM32_BIT_THUMB_MODE | ARM32_GE_Q_BITS | ARM32_IT_BITS; // 0xfe0f_fc30
+/// These bits are user restricted bits for any thread, 32 or 64 bit.
+const ARM_USER_RESTRICTED_VISIBLE_FLAGS: u32 =
+    ARM64_USER_RESTRICTED_VISIBLE_FLAGS | ARM32_USER_RESTRICTED_VISIBLE_FLAGS;
 pub const ARM32_BIT_MODE_REGISTER_COUNT: usize = 15;
 
 #[inline]
@@ -77,6 +75,19 @@ fn arm64_feature_test(feature: u32) -> bool {
     // SAFETY: Only the boot CPU's `arm64_feature_init` writes the mask, before any other CPU
     // starts, so no write races with this read.
     unsafe { (feature::arm64_isa_features & feature) != 0 }
+}
+
+/// Returns whether FEAT_PAN (Privileged Access Never) is enabled on this system.
+///
+/// # Safety
+///
+/// Must only be called after the boot CPU's `arm64_feature_init` has completed in
+/// `arch_early_init`.
+#[inline]
+pub(crate) unsafe fn arm64_mmu_features_pan() -> bool {
+    // SAFETY: Caller guarantees `arm64_feature_init` on the boot CPU has completed, and
+    // `arm64_mmu_features` is read-only thereafter.
+    unsafe { feature::arm64_mmu_features.pan }
 }
 
 /// Architectural interrupt frame for aarch64 user space entry/exit.
@@ -138,13 +149,24 @@ zr::static_assert!(
 /// size due to the 40-bit physical address range on Cortex-A53.
 pub const MMU_GUEST_SIZE_SHIFT: usize = aspace_bindings::MMU_GUEST_SIZE_SHIFT as usize;
 
-// Submodule names the rest of the kernel resolves directly under `arch::arm64`: the
-// restricted-mode part of the arch API contract in //zircon/kernel/arch/src/api.rs.
+// Submodule names the rest of the kernel resolves directly under `arch::arm64`: the arch API
+// contract checked by `assert_arch_signatures!` in //zircon/kernel/arch/src/api.rs, and
+// `arch_curr_cpu_num`, as riscv64 has it.
+pub use arch::{
+    arch_early_init, arch_enter_idle_state, arch_enter_uspace, arch_init, arch_late_init_percpu,
+    arch_prepare_uspace, arch_prevm_init,
+};
+pub use mp::{arch_curr_cpu_num, arch_flush_state_and_halt, arch_mp_cpu_hotplug};
 pub use restricted::{
     ArchSavedNormalState, dump, enter_full, enter_restricted,
     redirect_restricted_exception_to_normal, save_restricted_exception_state,
     save_restricted_iframe_state, save_restricted_syscall_state, save_state_pre_restricted_entry,
     validate_state_pre_restricted_entry,
+};
+pub use thread::{
+    arch_context_switch, arch_dump_thread, arch_reset_suspended_general_regs,
+    arch_restore_user_state, arch_save_user_state, arch_set_suspended_general_regs,
+    arch_thread_construct_first, arch_thread_get_blocked_fp, arch_thread_initialize,
 };
 
 #[cfg(ktest)]

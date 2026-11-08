@@ -28,7 +28,7 @@ class DummyProfile:
         self.auth_type = auth_type
 
     @classmethod
-    def from_dict(cls, data: service_profile.JSONObject) -> "DummyProfile":
+    def from_dict(cls, data: service_profile.JSONObject) -> DummyProfile:
         return cls(
             endpoint=str(data.get("endpoint", "")),
             threads=int(str(data.get("threads", 0))),
@@ -217,6 +217,21 @@ class TestServiceProfileManager(unittest.TestCase):
             )
         self.assertEqual(ret, 0)
         self.assertEqual(buf.getvalue().strip(), "none")
+
+    def test_workspace_symlinks_empty_when_no_active_config(self) -> None:
+        symlinks = self.manager.workspace_symlinks(self.fuchsia_dir)
+        self.assertEqual(symlinks, [])
+
+    def test_workspace_symlinks_present_when_active_config_exists(self) -> None:
+        self.manager.select(self.fuchsia_dir, "custom")
+        symlinks = self.manager.workspace_symlinks(self.fuchsia_dir)
+        expected = [
+            service_profile.WorkspaceSymlink(
+                workspace_relpath=self.config_relpath,
+                target_path=self.fuchsia_dir / self.config_relpath,
+            )
+        ]
+        self.assertEqual(symlinks, expected)
 
 
 if __name__ == "__main__":

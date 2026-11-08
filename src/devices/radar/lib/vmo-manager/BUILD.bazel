@@ -1,0 +1,46 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "vmo-manager",
+    srcs = ["vmo-manager.cc"],
+    hdrs = ["vmo-manager.h"],
+    visibility = [
+        "//src/devices/radar/bin/radar-proxy:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.radar:fuchsia.hardware.radar_cpp",
+        "//sdk/lib/fit",
+        "//sdk/lib/stdcompat",
+        "//src/lib/vmo_store",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/zircon-internal",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "vmo-manager-test-bin",
+    srcs = ["vmo-manager-test.cc"],
+    gn_output_name = "vmo-manager-test",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":vmo-manager",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "vmo-manager-test",
+    package_name = "radar-vmo-manager-test",
+    unit_tests = [":vmo-manager-test-bin"],
+    visibility = ["//src/devices:__pkg__"],
+)

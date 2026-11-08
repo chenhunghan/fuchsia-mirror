@@ -270,6 +270,24 @@ TEST_F(LoggingFixture, PlogT) {
       HasSubstr("qwerty] ERROR: [sdk/lib/syslog/cpp/logging_unittest.cc(" + std::to_string(line2) +
                 ")] got access denied: -30 (ZX_ERR_ACCESS_DENIED)"));
 }
+
+TEST_F(LoggingFixture, DroppedLogs) {
+  FakeLogSink sink;
+  LogBufferBuilder builder(LogSeverity::Error);
+  auto buffer = builder.WithFile("foo.cc", 42).WithMsg("Log with drops").Build();
+  buffer.WriteKeyValue("num_dropped", static_cast<uint64_t>(5));
+  EXPECT_EQ(FlushToGlobalLogger(buffer).status_value(), ZX_OK);
+
+  auto data = sink.ReadLogsData();
+  ASSERT_TRUE(data.has_value());
+  EXPECT_EQ(data->moniker(), "test_moniker");
+  EXPECT_EQ(data->message(), "Log with drops");
+  ASSERT_EQ(data->metadata().errors.size(), 1u);
+  const auto* dropped =
+      std::get_if<diagnostics::reader::LogsData::DroppedLogsError>(&data->metadata().errors[0]);
+  ASSERT_NE(dropped, nullptr);
+  EXPECT_EQ(dropped->count, 5u);
+}
 #endif  // defined(__Fuchsia__)
 
 TEST_F(LoggingFixture, SLog) {
@@ -294,6 +312,10 @@ TEST_F(LoggingFixture, SLog) {
   int line7 = __LINE__ + 1;
   FX_LOG_KV(ERROR, "String with quotes", FX_KV("value", "char is '\"'"));
 
+  int line8 = __LINE__ + 2;
+  FX_LOG_KV(ERROR, nullptr, FX_KV("uint_val", 42u), FX_KV("bool_true", true),
+            FX_KV("bool_false", false));
+
   std::string log = ReadLogs(state);
   EXPECT_THAT(log, HasSubstr("ERROR: [" + std::string("sdk/lib/syslog/cpp/logging_unittest.cc") +
                              "(" + std::to_string(line1) + ")] some_msg=\"String log\""));
@@ -309,6 +331,9 @@ TEST_F(LoggingFixture, SLog) {
   EXPECT_THAT(log,
               HasSubstr("ERROR: [" + std::string("sdk/lib/syslog/cpp/logging_unittest.cc") + "(" +
                         std::to_string(line7) + ")] String with quotes value=\"char is '\\\"'\""));
+  EXPECT_THAT(log,
+              HasSubstr("ERROR: [" + std::string("sdk/lib/syslog/cpp/logging_unittest.cc") + "(" +
+                        std::to_string(line8) + ")] uint_val=42 bool_true=true bool_false=false"));
 }
 
 TEST_F(LoggingFixture, BackendDirect) {

@@ -15,7 +15,6 @@ template("net_cli_lib") {
     edition = "2024"
 
     deps = [
-             "//sdk/fidl/fuchsia.ebpf:fuchsia.ebpf_rust",
              "//sdk/rust/zx-status",
              "//sdk/rust/zx-types",
              "//src/connectivity/lib/fidl_fuchsia_net_stack_ext",
@@ -159,10 +158,7 @@ rustc_binary("bin") {
 }
 
 fuchsia_package("net-cli") {
-  deps = [
-    ":bin",
-    "//build/validate:non_production_tag",
-  ]
+  deps = [ ":bin" ]
 }
 
 fuchsia_unittest_package("net-cli-tests") {

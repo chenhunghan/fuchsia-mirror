@@ -6,18 +6,19 @@
 
 //! Restricted execution mode state management, transitions, and register handling for arm64.
 
+use super::arch::arch_enter_uspace;
+use super::debugger::{arch_get_general_regs, arch_set_general_regs};
 use super::{
     ARM32_BIT_MODE, ARM32_BIT_MODE_REGISTER_COUNT, ARM32_BIT_THUMB_MODE,
     ARM32_USER_RESTRICTED_VISIBLE_FLAGS, ARM64_USER_RESTRICTED_VISIBLE_FLAGS, Iframe, SyscallRegs,
     arm64_feature_test, vm,
 };
+use crate::kernel::thread::current_get;
 use core::fmt::Write;
 use debug::ltrace::KernelConsoleWriter;
 use debug::ltracef;
 use zx_status::Status;
-use zx_types::{
-    ZX_ARM64_FEATURE_ISA_ARM32, zx_restricted_state_t, zx_status_t, zx_thread_state_general_regs_t,
-};
+use zx_types::{ZX_ARM64_FEATURE_ISA_ARM32, zx_restricted_state_t, zx_thread_state_general_regs_t};
 
 const LOCAL_TRACE: u32 = 0;
 
@@ -34,9 +35,6 @@ unsafe extern "C" {
     fn cpp_arm64_set_tpidr_regs(tpidr_el0: u64, tpidrro_el0: u64);
     fn cpp_arm64_enter_restricted_tpidr(tpidr_el0: u64, is_arm32: bool);
     fn cpp_arm64_get_tpidr_el0() -> u64;
-    fn arch_enter_uspace(iframe: *const Iframe) -> !;
-    fn cpp_arm64_get_general_regs(regs: *mut zx_thread_state_general_regs_t) -> zx_status_t;
-    fn cpp_arm64_set_general_regs(regs: *const zx_thread_state_general_regs_t) -> zx_status_t;
 }
 
 /// Validate that the restricted state is safe and well-formed before entering restricted mode.
@@ -153,11 +151,11 @@ pub fn enter_restricted(state: &zx_restricted_state_t) -> ! {
     // This allows aarch32 userland to read TPIDRURO which is needed
     // by some libc implementations.
     // Load the new state and enter restricted mode.
-    // SAFETY: Sets TPIDR registers and enters user space in restricted mode. Does not return.
-    unsafe {
-        cpp_arm64_enter_restricted_tpidr(state.tpidr_el0, is_arm32);
-        arch_enter_uspace(&iframe);
-    }
+    // SAFETY: Takes plain values and only writes TPIDR_EL0 (and TPIDRRO_EL0).
+    unsafe { cpp_arm64_enter_restricted_tpidr(state.tpidr_el0, is_arm32) };
+    // SAFETY: `iframe` is a local `Iframe` filled in above for the current thread. Interrupts are
+    // disabled, as restricted mode transitions require and the `debug_assert!` above checks.
+    unsafe { arch_enter_uspace(&iframe) }
 }
 
 /// Save restricted mode architectural state upon returning from a syscall (`zx_restricted_enter`).
@@ -205,14 +203,20 @@ pub fn save_restricted_iframe_state(state: &mut zx_restricted_state_t, frame: &I
 
 /// Save restricted mode architectural state upon receiving an exception.
 ///
-/// Reads general registers via `cpp_arm64_get_general_regs` and stores them in `state`.
+/// Reads the current thread's general registers via `arch_get_general_regs` and stores them in
+/// `state`.
 ///
 /// [arm/sysreg]: TPIDR_EL0
 pub fn save_restricted_exception_state(state: &mut zx_restricted_state_t) {
     let mut regs = zx_thread_state_general_regs_t::default();
-    // SAFETY: cpp_arm64_get_general_regs retrieves saved register state for current thread.
-    let status = unsafe { cpp_arm64_get_general_regs(&mut regs) };
-    debug_assert_eq!(Status::ok(status), Ok(()));
+    // SAFETY: `regs` is a local. `current_get()` is the calling thread, so it is live and makes
+    // none of its lock-free `arch_thread` writes during the call. This runs only from the
+    // `kRestrictedModeVectoredException` case of `ExceptionHandlerIterator::Next`, inside the
+    // `ScopedThreadExceptionContext` that `dispatch_user_exception` sets up. That context saved
+    // this thread's user state, and its constructor took and released the thread lock, so no chain
+    // lock transaction is active.
+    let status = unsafe { arch_get_general_regs(current_get(), &mut regs) };
+    debug_assert_eq!(status, Ok(()));
 
     // Save the registers from restricted mode.
     if (regs.cpsr as u32 & ARM32_BIT_MODE) != 0 {
@@ -254,13 +258,13 @@ pub fn redirect_restricted_exception_to_normal(
     // Set the PC such that we return to the vector_table after entering normal mode.
     regs.pc = vector_table as u64;
 
-    // SAFETY: Overwrites current thread general registers to jump to vector_table in normal mode.
-    let status = unsafe { cpp_arm64_set_general_regs(&regs) };
-    debug_assert_eq!(Status::ok(status), Ok(()));
+    // SAFETY: As for `save_restricted_exception_state`; `regs` is a local.
+    let status = unsafe { arch_set_general_regs(current_get(), &regs) };
+    debug_assert_eq!(status, Ok(()));
 
     // Restore TPIDR_EL0 and TPIDRRO_EL0 registers from saved normal state and update thread state.
-    // SAFETY: The shim writes the EL0 thread pointer registers and the current thread's copies of
-    // them in its `arch_thread`, which `arch_state` does not point into.
+    // SAFETY: The shim takes both values by value. It writes the EL0 thread pointer registers and
+    // the calling thread's copies of them in its `arch_thread`, which only that thread writes.
     unsafe {
         cpp_arm64_set_tpidr_regs(arch_state.tpidr_el0, arch_state.tpidrro_el0);
     }
@@ -290,14 +294,15 @@ pub fn enter_full(
     // mode.
     iframe.elr = vector_table as u64;
     // Load the new state and exit.
-    // SAFETY: Restores normal TPIDR registers and enters user space. Does not return.
-    unsafe {
-        // Restore TPIDR_EL0 from saved normal state.
-        // TODO(https://fxbug.dev/42076040): Eventually the TPIDR register should be
-        // inside the iframe.
-        cpp_arm64_set_tpidr_regs(arch_state.tpidr_el0, arch_state.tpidrro_el0);
-        arch_enter_uspace(&iframe);
-    }
+    // Restore TPIDR_EL0 from saved normal state.
+    // TODO(https://fxbug.dev/42076040): Eventually the TPIDR register should be
+    // inside the iframe.
+    // SAFETY: Takes plain values and only writes the TPIDR registers and the current thread's
+    // saved copies of them.
+    unsafe { cpp_arm64_set_tpidr_regs(arch_state.tpidr_el0, arch_state.tpidrro_el0) };
+    // SAFETY: `iframe` is a local `Iframe` filled in above for the current thread. Interrupts are
+    // disabled, as restricted mode transitions require and the `debug_assert!` above checks.
+    unsafe { arch_enter_uspace(&iframe) }
 }
 
 #[cfg(ktest)]

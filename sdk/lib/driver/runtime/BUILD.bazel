@@ -30,7 +30,6 @@ idk_cc_source_library(
     public_configs = [":include"],
     stable = True,
     visibility = [
-        "//build/sdk:__pkg__",
         "//sdk/lib/driver/runtime/rust/fdf_sys:__pkg__",
         "//sdk/lib/driver/symbols:__pkg__",
         "//sdk/lib/fidl_driver:__pkg__",
@@ -69,7 +68,6 @@ idk_cc_source_library(
     public_configs = [":include"],
     stable = True,
     visibility = [
-        "//build/sdk:__pkg__",
         "//examples/drivers:__subpackages__",
         "//sdk/lib/driver:__subpackages__",
         "//sdk/lib/fidl_driver:__pkg__",
@@ -99,16 +97,12 @@ idk_cc_source_library(
     public_configs = [":include"],
     stable = True,
     visibility = [
-        "//build/sdk:__pkg__",
         "//sdk/lib/driver/runtime:__subpackages__",
         "//src/devices/bin/driver_runtime:__subpackages__",
         "//src/devices/tee/drivers/optee:__pkg__",
-        "//src/devices/testing/driver-runtime-main:__subpackages__",
 
         # These can be removed when the tests stop using the
         # fdf_env_register_driver_entry/exit calls.
-        "//sdk/lib/fidl_driver/tests/transport:__subpackages__",
-        "//src/lib/fidl/llcpp/tests/integration:__pkg__",
         "//src/tests/benchmarks/fidl/driver_cpp:__pkg__",
         "//src/tests/benchmarks/fidl/driver_llcpp:__pkg__",
     ],
@@ -128,7 +122,6 @@ idk_cc_source_library(
     public_configs = [":include"],
     stable = True,
     visibility = [
-        "//build/sdk:__pkg__",
         "//sdk/lib/driver/runtime/testing/cpp:__pkg__",
         "//sdk/lib/driver/testing/cpp:__pkg__",
         "//src/connectivity:__subpackages__",
@@ -154,13 +147,9 @@ idk_cc_source_library(
     public_configs = [":include"],
     stable = True,
     visibility = [
-        "//build/sdk:__pkg__",
         "//sdk/lib/driver/runtime:__subpackages__",
         "//sdk/lib/driver/testing:__subpackages__",
-        "//sdk/lib/fidl_driver/tests/transport:__subpackages__",
         "//src/devices/bin/driver_runtime:__subpackages__",
-        "//src/devices/testing/driver-runtime-main:__subpackages__",
-        "//src/lib/fidl/llcpp/tests/integration:__pkg__",
         "//src/tests/benchmarks/fidl/driver_cpp:__subpackages__",
         "//src/tests/benchmarks/fidl/driver_llcpp:__subpackages__",
     ],

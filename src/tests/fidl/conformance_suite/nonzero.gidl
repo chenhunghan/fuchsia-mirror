@@ -1,0 +1,315 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+success("StructOfNonZeroUInt8_one") {
+    bindings_allowlist = [cpp, llcpp],
+    value = StructOfNonZeroUInt8{
+        foo: 1,
+    },
+    bytes = {
+        v2 = [
+            num(1):1, padding:7,
+        ],
+    },
+}
+
+encode_failure("StructOfNonZeroUInt8_encode_zero") {
+    bindings_allowlist = [cpp, llcpp],
+    value = StructOfNonZeroUInt8{
+        foo: 0,
+    },
+    err = INVALID_NON_ZERO,
+}
+
+decode_failure("StructOfNonZeroUInt8_decode_zero") {
+    bindings_allowlist = [cpp, llcpp],
+    type = StructOfNonZeroUInt8,
+    bytes = {
+        v2 = [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0 + 7 bytes of padding
+        ],
+    },
+    err = INVALID_NON_ZERO,
+}
+
+success("StructOfNonZeroUInt16_one") {
+    bindings_allowlist = [cpp, llcpp],
+    value = StructOfNonZeroUInt16{
+        foo: 1,
+    },
+    bytes = {
+        v2 = [
+            num(1):2, padding:6,
+        ],
+    },
+}
+
+encode_failure("StructOfNonZeroUInt16_encode_zero") {
+    bindings_allowlist = [cpp, llcpp],
+    value = StructOfNonZeroUInt16{
+        foo: 0,
+    },
+    err = INVALID_NON_ZERO,
+}
+
+decode_failure("StructOfNonZeroUInt16_decode_zero") {
+    bindings_allowlist = [cpp, llcpp],
+    type = StructOfNonZeroUInt16,
+    bytes = {
+        v2 = [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0 + 6 bytes of padding
+        ],
+    },
+    err = INVALID_NON_ZERO,
+}
+
+success("StructOfNonZeroUInt32_one") {
+    bindings_allowlist = [cpp, llcpp],
+    value = StructOfNonZeroUInt32{
+        foo: 1,
+    },
+    bytes = {
+        v2 = [
+            num(1):4, padding:4,
+        ],
+    },
+}
+
+encode_failure("StructOfNonZeroUInt32_encode_zero") {
+    bindings_allowlist = [cpp, llcpp],
+    value = StructOfNonZeroUInt32{
+        foo: 0,
+    },
+    err = INVALID_NON_ZERO,
+}
+
+decode_failure("StructOfNonZeroUInt32_decode_zero") {
+    bindings_allowlist = [cpp, llcpp],
+    type = StructOfNonZeroUInt32,
+    bytes = {
+        v2 = [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0 + 4 bytes of padding
+        ],
+    },
+    err = INVALID_NON_ZERO,
+}
+
+success("StructOfNonZeroUInt64_one") {
+    bindings_allowlist = [cpp, llcpp],
+    value = StructOfNonZeroUInt64{
+        foo: 1,
+    },
+    bytes = {
+        v2 = [
+            num(1):8,
+        ],
+    },
+}
+
+encode_failure("StructOfNonZeroUInt64_encode_zero") {
+    bindings_allowlist = [cpp, llcpp],
+    value = StructOfNonZeroUInt64{
+        foo: 0,
+    },
+    err = INVALID_NON_ZERO,
+}
+
+decode_failure("StructOfNonZeroUInt64_decode_zero") {
+    bindings_allowlist = [cpp, llcpp],
+    type = StructOfNonZeroUInt64,
+    bytes = {
+        v2 = [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0
+        ],
+    },
+    err = INVALID_NON_ZERO,
+}
+
+success("StructOfNonZeroInt8_one") {
+    bindings_allowlist = [cpp, llcpp],
+    value = StructOfNonZeroInt8{
+        foo: 1,
+    },
+    bytes = {
+        v2 = [
+            num(1):1, padding:7,
+        ],
+    },
+}
+
+encode_failure("StructOfNonZeroInt8_encode_zero") {
+    bindings_allowlist = [cpp, llcpp],
+    value = StructOfNonZeroInt8{
+        foo: 0,
+    },
+    err = INVALID_NON_ZERO,
+}
+
+decode_failure("StructOfNonZeroInt8_decode_zero") {
+    bindings_allowlist = [cpp, llcpp],
+    type = StructOfNonZeroInt8,
+    bytes = {
+        v2 = [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0 + 7 bytes of padding
+        ],
+    },
+    err = INVALID_NON_ZERO,
+}
+
+success("StructOfNonZeroInt16_one") {
+    bindings_allowlist = [cpp, llcpp],
+    value = StructOfNonZeroInt16{
+        foo: 1,
+    },
+    bytes = {
+        v2 = [
+            num(1):2, padding:6,
+        ],
+    },
+}
+
+encode_failure("StructOfNonZeroInt16_encode_zero") {
+    bindings_allowlist = [cpp, llcpp],
+    value = StructOfNonZeroInt16{
+        foo: 0,
+    },
+    err = INVALID_NON_ZERO,
+}
+
+decode_failure("StructOfNonZeroInt16_decode_zero") {
+    bindings_allowlist = [cpp, llcpp],
+    type = StructOfNonZeroInt16,
+    bytes = {
+        v2 = [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0 + 6 bytes of padding
+        ],
+    },
+    err = INVALID_NON_ZERO,
+}
+
+success("StructOfNonZeroInt32_one") {
+    bindings_allowlist = [cpp, llcpp],
+    value = StructOfNonZeroInt32{
+        foo: 1,
+    },
+    bytes = {
+        v2 = [
+            num(1):4, padding:4,
+        ],
+    },
+}
+
+encode_failure("StructOfNonZeroInt32_encode_zero") {
+    bindings_allowlist = [cpp, llcpp],
+    value = StructOfNonZeroInt32{
+        foo: 0,
+    },
+    err = INVALID_NON_ZERO,
+}
+
+decode_failure("StructOfNonZeroInt32_decode_zero") {
+    bindings_allowlist = [cpp, llcpp],
+    type = StructOfNonZeroInt32,
+    bytes = {
+        v2 = [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0 + 4 bytes of padding
+        ],
+    },
+    err = INVALID_NON_ZERO,
+}
+
+success("StructOfNonZeroInt64_one") {
+    bindings_allowlist = [cpp, llcpp],
+    value = StructOfNonZeroInt64{
+        foo: 1,
+    },
+    bytes = {
+        v2 = [
+            num(1):8,
+        ],
+    },
+}
+
+encode_failure("StructOfNonZeroInt64_encode_zero") {
+    bindings_allowlist = [cpp, llcpp],
+    value = StructOfNonZeroInt64{
+        foo: 0,
+    },
+    err = INVALID_NON_ZERO,
+}
+
+decode_failure("StructOfNonZeroInt64_decode_zero") {
+    bindings_allowlist = [cpp, llcpp],
+    type = StructOfNonZeroInt64,
+    bytes = {
+        v2 = [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0
+        ],
+    },
+    err = INVALID_NON_ZERO,
+}
+
+success("ArrayOfNonZeroInt32_non_zero") {
+    bindings_allowlist = [cpp, llcpp],
+    value = ArrayOfNonZeroInt32{
+        foo: [1, 2],
+    },
+    bytes = {
+        v2 = [
+            num(1):4, num(2):4,
+        ],
+    },
+}
+
+encode_failure("ArrayOfNonZeroInt32_encode_zero") {
+    bindings_allowlist = [cpp, llcpp],
+    value = ArrayOfNonZeroInt32{
+        foo: [1, 0],
+    },
+    err = INVALID_NON_ZERO,
+}
+
+decode_failure("ArrayOfNonZeroInt32_decode_zero") {
+    bindings_allowlist = [cpp, llcpp],
+    type = ArrayOfNonZeroInt32,
+    bytes = {
+        v2 = [
+            num(1):4, num(0):4,
+        ],
+    },
+    err = INVALID_NON_ZERO,
+}
+
+success("VectorOfNonZeroInt32_non_zero") {
+    bindings_allowlist = [cpp, llcpp],
+    value = VectorOfNonZeroInt32{
+        foo: [1, 2],
+    },
+    bytes = {
+        v2 = [
+            num(2):8, repeat(0xff):8,
+            num(1):4, num(2):4,
+        ],
+    },
+}
+
+encode_failure("VectorOfNonZeroInt32_encode_zero") {
+    bindings_allowlist = [cpp, llcpp],
+    value = VectorOfNonZeroInt32{
+        foo: [1, 0],
+    },
+    err = INVALID_NON_ZERO,
+}
+
+decode_failure("VectorOfNonZeroInt32_decode_zero") {
+    bindings_allowlist = [cpp, llcpp],
+    type = VectorOfNonZeroInt32,
+    bytes = {
+        v2 = [
+            num(2):8, repeat(0xff):8,
+            num(1):4, num(0):4,
+        ],
+    },
+    err = INVALID_NON_ZERO,
+}

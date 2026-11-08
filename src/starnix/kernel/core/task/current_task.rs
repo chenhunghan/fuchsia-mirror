@@ -5,7 +5,8 @@
 use crate::arch::task::handle_hardware_exception;
 use crate::execution::{CreateDuringShutdown, TaskInfo, create_zircon_process};
 use crate::mm::{
-    DumpPolicy, MappingAccess, MemoryAccessor, MemoryAccessorExt, MemoryManager, TaskMemoryAccessor,
+    CompareExchangeResult, DumpPolicy, MappingAccess, MemoryAccessor, MemoryAccessorExt,
+    MemoryManager, TaskMemoryAccessor,
 };
 use crate::ptrace::{PtraceEvent, PtraceEventData, PtraceOptions, StopState};
 use crate::security;
@@ -21,7 +22,7 @@ use crate::task::{
 use crate::vfs::{
     AccessCheck, CreationStatus, DirEntry, DirectoryMode, FdFlags, FdNumber, FdTable, FileHandle,
     FileMapping, FileWriteGuardMode, FsContext, FsStr, LookupContext, LookupVec,
-    MAX_SYMLINK_FOLLOWS, NamespaceNode, OpenAccessCheck, ResolveBase, SymlinkMode, SymlinkTarget,
+    MAX_SYMLINK_FOLLOWS, NamespaceNode, OpenAccessCheck, ResolveBase, ResolvedSymlink, SymlinkMode,
     new_pidfd,
 };
 use futures::FutureExt;
@@ -265,7 +266,7 @@ impl CurrentTask {
 
         *self.files.borrow_mut() = None;
         self.mm = None;
-        self.task.running_state.update(None);
+        self.write().set_exited();
 
         self.trigger_delayed_releaser();
 
@@ -437,20 +438,39 @@ impl CurrentTask {
     /// Change the current and real creds of the task. This is invalid to call while temporary
     /// credentials are present.
     pub fn set_creds(&self, creds: Credentials) {
-        // From <https://man7.org/linux/man-pages/man2/PR_SET_PDEATHSIG.2const.html>:
-        //
-        //   The parent-death signal setting is also cleared upon changes
-        //   to any of the following thread credentials: effective user ID,
-        //   effective group ID, filesystem user ID, or filesystem group ID.
         let prev = self.current_creds();
-        let clear_parent_death_signal = creds.euid != prev.euid
+        let effective_or_fs_ugid_changed = creds.euid != prev.euid
             || creds.egid != prev.egid
             || creds.fsuid != prev.fsuid
             || creds.fsgid != prev.fsgid;
         std::mem::drop(prev);
 
-        if clear_parent_death_signal {
+        if effective_or_fs_ugid_changed {
+            // From <https://man7.org/linux/man-pages/man2/PR_SET_PDEATHSIG.2const.html>:
+            //
+            //   The parent-death signal setting is also cleared upon changes
+            //   to any of the following thread credentials: effective user ID,
+            //   effective group ID, filesystem user ID, or filesystem group ID.
             self.thread_group().write().set_parent_death_signal(None);
+
+            // From <https://man7.org/linux/man-pages/man2/PR_SET_DUMPABLE.2const.html>:
+            //
+            //   Normally, the "dumpable" attribute is set to 1. However, it is
+            //   reset to the current value contained in the file
+            //   /proc/sys/fs/suid_dumpable (which by default has the value 0),
+            //   in the following circumstances:
+            //
+            //   - The process's effective user or group ID is changed.
+            //   - The process's filesystem user or group ID is changed (see
+            //     credentials(7)).
+            //
+            // Reset `dumpable` before publishing the new credentials so
+            // concurrent `check_ptrace_access_mode` callers cannot see
+            // downgraded credentials while the address space is still marked
+            // dumpable.
+            if let Ok(mm) = self.mm() {
+                mm.dumpable.store(self.kernel().system_limits.suid_dumpable.load());
+            }
         }
 
         let creds = Arc::new(creds);
@@ -848,55 +868,40 @@ impl CurrentTask {
         match child {
             Ok(name) => {
                 if name.entry.node.is_lnk() {
-                    if flags.contains(OpenFlags::PATH)
-                        && context.symlink_mode == SymlinkMode::NoFollow
-                    {
-                        // When O_PATH is specified in flags, if pathname is a symbolic link
-                        // and the O_NOFOLLOW flag is also specified, then the call returns
-                        // a file descriptor referring to the symbolic link.
-                        // See https://man7.org/linux/man-pages/man2/openat.2.html
-                        //
-                        // If the trailing component (i.e., basename) of
-                        // pathname is a symbolic link, how.resolve contains
-                        // RESOLVE_NO_SYMLINKS, and how.flags contains both
-                        // O_PATH and O_NOFOLLOW, then an O_PATH file
-                        // descriptor referencing the symbolic link will be
-                        // returned.
-                        // See https://man7.org/linux/man-pages/man2/openat2.2.html
-                        return Ok((name, false));
-                    }
-
-                    if (!flags.contains(OpenFlags::PATH)
-                        && context.symlink_mode == SymlinkMode::NoFollow)
-                        || context.resolve_flags.contains(ResolveFlags::NO_SYMLINKS)
-                        || context.remaining_follows == 0
-                    {
+                    if context.symlink_mode == SymlinkMode::NoFollow {
+                        if flags.contains(OpenFlags::PATH) {
+                            // When O_PATH is specified in flags, if pathname is a symbolic link
+                            // and the O_NOFOLLOW flag is also specified, then the call returns
+                            // a file descriptor referring to the symbolic link.
+                            // See https://man7.org/linux/man-pages/man2/openat.2.html
+                            //
+                            // If the trailing component (i.e., basename) of
+                            // pathname is a symbolic link, how.resolve contains
+                            // RESOLVE_NO_SYMLINKS, and how.flags contains both
+                            // O_PATH and O_NOFOLLOW, then an O_PATH file
+                            // descriptor referencing the symbolic link will be
+                            // returned.
+                            // See https://man7.org/linux/man-pages/man2/openat2.2.html
+                            return Ok((name, false));
+                        }
                         if must_create {
                             // Since `must_create` is set, and a node was found, this returns EEXIST
                             // instead of ELOOP.
                             return error!(EEXIST);
                         }
-                        // A symlink was found, but one of the following is true:
-                        // * flags specified O_NOFOLLOW but not O_PATH.
-                        // * how.resolve contains RESOLVE_NO_SYMLINKS
-                        // * too many symlink traversals have been attempted
+                        // flags specified O_NOFOLLOW, but not O_PATH.
                         return error!(ELOOP);
                     }
 
-                    context.remaining_follows -= 1;
-                    match name.readlink(self)? {
-                        SymlinkTarget::Path(path) => {
-                            let dir = if path[0] == b'/' { self.fs().root() } else { parent };
+                    match name.resolve_symlink(self, context)? {
+                        ResolvedSymlink::Path(dir, path) => {
                             self.resolve_open_path(context, &dir, path.as_ref(), mode, flags)
                         }
-                        SymlinkTarget::Node(name) => {
-                            if context.resolve_flags.contains(ResolveFlags::NO_MAGICLINKS)
-                                || name.entry.node.is_lnk()
-                            {
-                                error!(ELOOP)
-                            } else {
-                                Ok((name, false))
+                        ResolvedSymlink::Node(target) => {
+                            if target.entry.node.is_lnk() {
+                                return error!(ELOOP);
                             }
+                            Ok((target, false))
                         }
                     }
                 } else {
@@ -950,7 +955,7 @@ impl CurrentTask {
         path: &FsStr,
         open_check: impl Into<OpenAccessCheck>,
         mode: FileMode,
-        mut resolve_flags: ResolveFlags,
+        resolve_flags: ResolveFlags,
     ) -> Result<FileHandle, Errno> {
         let open_check = open_check.into();
         // 64-bit kernels force the O_LARGEFILE flag to be on.
@@ -987,13 +992,6 @@ impl CurrentTask {
             (false, true) => ResolveBase::InRoot(dir.clone()),
             (true, true) => return error!(EINVAL),
         };
-
-        // `RESOLVE_BENEATH` and `RESOLVE_IN_ROOT` imply `RESOLVE_NO_MAGICLINKS`. This matches
-        // Linux behavior. Strictly speaking it's is not really required, but it's hard to
-        // implement `BENEATH` and `IN_ROOT` flags correctly otherwise.
-        if resolve_base != ResolveBase::None {
-            resolve_flags.insert(ResolveFlags::NO_MAGICLINKS);
-        }
 
         let mut context = LookupContext {
             symlink_mode,
@@ -1217,17 +1215,31 @@ impl CurrentTask {
         self.notify_robust_list();
 
         // Tear down the old address space and create a new one for the resolved ELF.
-        let mm = {
-            let new_mm = MemoryManager::exec(
-                self.thread_group().root_vmar.unowned(),
-                self.mm().ok().cloned(),
-                resolved_program.file.name().to_passive(),
-                elf_arch_width,
-            )?;
-            self.running_state().mm.update(Some(new_mm.clone()));
-            self.mm = Some(new_mm.clone());
-            new_mm
+        let new_mm = MemoryManager::exec(
+            self.thread_group().root_vmar.unowned(),
+            self.mm().ok().cloned(),
+            resolved_program.file.name().to_passive(),
+            elf_arch_width,
+        )?;
+
+        // From <https://man7.org/linux/man-pages/man2/execve.2.html>:
+        //
+        //   The process's "dumpable" attribute is set to the value 1,
+        //   unless a set-user-ID program, a set-group-ID program, or a
+        //   program with capabilities is being executed, in which case the
+        //   dumpable flag may instead be reset to the value in
+        //   /proc/sys/fs/suid_dumpable, in the circumstances described
+        //   under PR_SET_DUMPABLE in prctl(2).
+        let dumpable = if resolved_program.secure_exec {
+            self.kernel().system_limits.suid_dumpable.load()
+        } else {
+            DumpPolicy::User
         };
+        new_mm.dumpable.store(dumpable);
+
+        self.running_state().mm.update(Some(new_mm.clone()));
+        self.mm = Some(new_mm);
+
         // From <https://man7.org/linux/man-pages/man2/execve.2.html>:
         //
         //   All threads other than the calling thread are destroyed during an
@@ -1258,22 +1270,11 @@ impl CurrentTask {
 
         {
             let mut state = self.write();
-
-            // From <https://man7.org/linux/man-pages/man2/execve.2.html>:
-            //
-            //   The process's "dumpable" attribute is set to the value 1,
-            //   unless a set-user-ID program, a set-group-ID program, or a
-            //   program with capabilities is being executed, in which case the
-            //   dumpable flag may instead be reset to the value in
-            //   /proc/sys/fs/suid_dumpable, in the circumstances described
-            //   under PR_SET_DUMPABLE in prctl(2).
-            let dumpable =
-                if resolved_program.secure_exec { DumpPolicy::Disable } else { DumpPolicy::User };
-            mm.dumpable.store(dumpable);
-
             state.set_sigaltstack(None);
             state.robust_list_head = RobustListHeadPtr::null(self);
         }
+
+        self.set_command_name(resolved_program.command_name());
 
         security::bprm_committing_creds(self, &resolved_program)?;
 
@@ -1288,7 +1289,6 @@ impl CurrentTask {
         self.thread_group().signal_actions.reset_for_exec();
         security::bprm_committed_creds(self)?;
 
-        let command_name = TaskCommand::from_path_bytes(resolved_program.path().to_bytes());
         let start_info = load_executable(self, resolved_program)?;
 
         let regs: zx_restricted_state_t = start_info.into();
@@ -1311,15 +1311,18 @@ impl CurrentTask {
 
         self.thread_group().write().did_exec = true;
 
-        self.set_command_name(command_name);
-
         Ok(())
     }
 
     pub fn set_command_name(&self, new_name: TaskCommand) {
-        // set_command_name needs to run before leader_command() in cases where self is the leader.
-        self.task.set_command_name(new_name.clone());
-        let leader_command = self.thread_group().read().leader_command();
+        if !self.task.set_command_name(new_name.clone()) {
+            return;
+        }
+        let leader_command = if self.is_leader() {
+            new_name.clone()
+        } else {
+            self.thread_group().read().leader_command()
+        };
         starnix_logging::set_current_task_info(new_name, leader_command, self.pid.id, self.tid.id);
     }
 
@@ -1448,7 +1451,7 @@ impl CurrentTask {
     // Notify all futexes in robust list.  The robust list is in user space, so we
     // are very careful about walking it, and there are a lot of quiet returns if
     // we fail to walk it.
-    // TODO(https://fxbug.dev/42079081): This only sets the FUTEX_OWNER_DIED bit; it does
+    // TODO(https://fxbug.dev/297374796): This only sets the FUTEX_OWNER_DIED bit; it does
     // not wake up a waiter.
     pub fn notify_robust_list(&self) {
         let task_state = self.write();
@@ -1493,16 +1496,16 @@ impl CurrentTask {
                 log_error!("Asked to notify robust list futexes in system task.");
                 return;
             };
-            let futex = if let Ok(futex) = mm.atomic_load_u32_relaxed(futex_addr) {
-                futex
-            } else {
+            let Ok(mut futex) = mm.atomic_load_u32_relaxed(futex_addr) else {
                 return;
             };
 
-            if (futex & FUTEX_TID_MASK) as i32 == self.tid.id {
+            while (futex & FUTEX_TID_MASK) as i32 == self.tid.id {
                 let owner_died = FUTEX_OWNER_DIED | futex;
-                if mm.atomic_store_u32_relaxed(futex_addr, owner_died).is_err() {
-                    return;
+                match mm.atomic_compare_exchange_weak_u32_acq_rel(futex_addr, futex, owner_died) {
+                    CompareExchangeResult::Success => break,
+                    CompareExchangeResult::Stale { observed } => futex = observed,
+                    CompareExchangeResult::Error(_) => return,
                 }
             }
             curr_ptr = curr.next;
@@ -2434,9 +2437,11 @@ mod tests {
             assert_eq!(res, error!(EPERM));
 
             // Non-dumpable target requires CAP_SYS_PTRACE even with matching UID/GID.
+            // Changing effective/filesystem UID/GID should have reset `dumpable` to
+            // `DumpPolicy::Disable`.
             let target_task = create_task(&current_task.kernel(), "target");
             target_task.set_creds(Credentials::with_ids(1000, 1000));
-            target_task.mm().unwrap().dumpable.store(DumpPolicy::Disable);
+            assert_eq!(target_task.mm().unwrap().dumpable.load(), DumpPolicy::Disable);
 
             let res = current_task.override_creds(unpriv_creds.clone(), || {
                 current_task.check_ptrace_access_mode(mode, &target_task)

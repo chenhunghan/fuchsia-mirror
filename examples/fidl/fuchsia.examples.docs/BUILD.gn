@@ -4,6 +4,7 @@
 
 # Import the fidl GN template.
 import("//build/fidl/fidl.gni")
+
 group("all") {
   testonly = true
   deps = [
@@ -54,12 +55,17 @@ fidl("fuchsia.examples.docs") {
     "vector-bounds-not-specified",
   ]
   experimental_flags = []
+  visibility = [
+    ":*",
+    "//build/bazel/rules/fidl/tests:*",
+  ]
   public_deps = [
     "//sdk/fidl/fuchsia.math",
     "//sdk/fidl/fuchsia.mem",
     "//zircon/vdso/zx",
   ]
 }
+
 fidl("versioning") {
   testonly = true
   sources = [ "versioning.test.fidl" ]
@@ -67,4 +73,8 @@ fidl("versioning") {
   name = "fuchsia.examples.docs"
   versioned = "fuchsia"
   available = [ "fuchsia:HEAD" ]
+  visibility = [
+    ":*",
+    "//build/bazel/rules/fidl/tests:*",
+  ]
 }

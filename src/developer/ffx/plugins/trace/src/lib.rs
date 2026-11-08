@@ -10,12 +10,13 @@ use fdomain_fuchsia_tracing_controller::{
     SessionManagerProxy, StopResult, TraceConfig, TraceOptions, Trigger,
 };
 use ffx_config::EnvironmentContext;
+use ffx_futures::BoxFuture;
 use ffx_target::get_target_specifier;
 use ffx_trace_args::{Start, Stop, Symbolize, TraceCommand, TraceSubCommand, Upload};
 use ffx_tracing::{self as ffx_trace, FidlLibraries};
 use ffx_writer::{MachineWriter, ToolIO as _};
 use fho::{Deferred, FfxMain, FfxTool, bug, deferred};
-use futures::future::{BoxFuture, Future, FutureExt as _};
+use futures::future::{Future, FutureExt as _};
 use prettytable::format::FormatBuilder;
 use prettytable::{Table, row};
 use serde::{Deserialize, Serialize};
@@ -387,7 +388,6 @@ fn print_grid(writer: &mut Writer, values: Vec<String>) -> Result<()> {
 
 type Writer = MachineWriter<TraceOutput>;
 #[derive(FfxTool)]
-#[target(direct)]
 pub struct TraceTool {
     #[with(deferred(moniker("/core/trace_manager")))]
     provisioner: Deferred<ProvisionerProxy>,
@@ -626,8 +626,6 @@ impl TraceTool {
             };
         }
 
-        // For the background we need a background task, so still use the daemon.
-        // Otherwise use a direct connection.
         if opts.background {
             return match trace_proxy {
                 SessionManagerProxyType::Provisioner(_) => {
@@ -1207,9 +1205,8 @@ https://fuchsia.dev/fuchsia-src/development/sdk/ffx/record-traces"
         RecordingError::RecordingStart => {
             let log_file: String = context.get("log.dir").unwrap();
             format!(
-                "Error starting Fuchsia trace. See {log_file}/ffx.daemon.log\n
-Search for lines tagged with `ffx_daemon_service_tracing`. A common issue is a
-peer closed error from `fuchsia.tracing.controller.Controller`. If this is the
+                "Error starting Fuchsia trace. See {log_file}/ffx.log\n
+A common issue is a peer closed error from `fuchsia.tracing.controller.Controller`. If this is the
 case either tracing is not supported in the product configuration or the tracing
 package is missing from the device's system image."
             )
@@ -1217,9 +1214,8 @@ package is missing from the device's system image."
         RecordingError::RecordingStop => {
             let log_file: String = context.get("log.dir").unwrap();
             format!(
-                "Error stopping Fuchsia trace. See {log_file}/ffx.daemon.log\n
-Search for lines tagged with `ffx_daemon_service_tracing`. A common issue is a
-peer closed error from `fuchsia.tracing.controller.Controller`. If this is the
+                "Error stopping Fuchsia trace. See {log_file}/ffx.log\n
+A common issue is a peer closed error from `fuchsia.tracing.controller.Controller`. If this is the
 case either tracing is not supported in the product configuration or the tracing
 package is missing from the device's system image."
             )
@@ -2937,7 +2933,7 @@ Triggers:
         assert_eq!(expected_output, actual_output);
 
         // No output on missing stats if not verbose
-        expected_output = vec![];
+        expected_output.clear();
         actual_output = stats_to_output(vec![stats.clone()], false);
         assert_eq!(expected_output, actual_output);
 

@@ -74,27 +74,35 @@ class ArmCpuTopologyItemTest
     loaded_dtb = LoadDtb("cpus_arm_single_cell.dtb");
     ASSERT_TRUE(loaded_dtb.is_ok(), "%s", loaded_dtb.error_value().c_str());
     cpus_single_cell_dtb_ = std::move(loaded_dtb).value();
+
+    loaded_dtb = LoadDtb("cpus_arm_dynamiq.dtb");
+    ASSERT_TRUE(loaded_dtb.is_ok(), "%s", loaded_dtb.error_value().c_str());
+    cpus_dynamiq_dtb_ = std::move(loaded_dtb).value();
   }
   static void TearDownTestSuite() {
     cpus_dtb_ = std::nullopt;
     cpus_no_cpu_map_dtb_ = std::nullopt;
     cpus_single_cell_dtb_ = std::nullopt;
+    cpus_dynamiq_dtb_ = std::nullopt;
     Mixin::TearDownTestSuite();
   }
 
   devicetree::Devicetree cpus() { return cpus_dtb_->fdt(); }
   devicetree::Devicetree cpus_single_cell() { return cpus_single_cell_dtb_->fdt(); }
   devicetree::Devicetree cpus_no_cpu_map() { return cpus_no_cpu_map_dtb_->fdt(); }
+  devicetree::Devicetree cpus_dynamiq() { return cpus_dynamiq_dtb_->fdt(); }
 
  private:
   static std::optional<LoadedDtb> cpus_dtb_;
   static std::optional<LoadedDtb> cpus_single_cell_dtb_;
   static std::optional<LoadedDtb> cpus_no_cpu_map_dtb_;
+  static std::optional<LoadedDtb> cpus_dynamiq_dtb_;
 };
 
 std::optional<LoadedDtb> ArmCpuTopologyItemTest::cpus_dtb_ = std::nullopt;
 std::optional<LoadedDtb> ArmCpuTopologyItemTest::cpus_single_cell_dtb_ = std::nullopt;
 std::optional<LoadedDtb> ArmCpuTopologyItemTest::cpus_no_cpu_map_dtb_ = std::nullopt;
+std::optional<LoadedDtb> ArmCpuTopologyItemTest::cpus_dynamiq_dtb_ = std::nullopt;
 
 TEST_F(ArmCpuTopologyItemTest, CpusMultipleCells) {
   constexpr std::array kExpectedTopology = {
@@ -1111,7 +1119,7 @@ TEST_F(ArmCpuTopologyItemTest, KhadasVim3) {
                       },
                   .parent_index = 3,
               },
-          };
+  };
 
   std::array<std::byte, 1024> image_buffer;
   zbitl::Image<std::span<std::byte>> image(image_buffer);
@@ -1122,6 +1130,91 @@ TEST_F(ArmCpuTopologyItemTest, KhadasVim3) {
   shim.set_allocator(TestAllocator());
 
   shim.Init();
+  auto clear_errors = fit::defer([&]() { image.ignore_error(); });
+  ASSERT_TRUE(shim.AppendItems(image).is_ok());
+  bool present = false;
+  for (auto [header, payload] : image) {
+    if (header->type == ZBI_TYPE_CPU_TOPOLOGY) {
+      present = true;
+      std::span<zbi_topology_node_t> nodes(reinterpret_cast<zbi_topology_node_t*>(payload.data()),
+                                           payload.size() / sizeof(zbi_topology_node_t));
+      boot_shim::testing::CheckCpuTopology(nodes, kExpectedTopology);
+    }
+  }
+  ASSERT_TRUE(present);
+}
+
+TEST_F(ArmCpuTopologyItemTest, CpusDynamiqSingleCluster) {
+  auto make_cluster = [](uint8_t performance_class) {
+    return zbi_topology_node_t{
+        .entity =
+            {
+                .discriminant = ZBI_TOPOLOGY_ENTITY_CLUSTER,
+                .cluster = {.performance_class = performance_class},
+            },
+        .parent_index = ZBI_TOPOLOGY_NO_PARENT,
+    };
+  };
+  auto make_cpu = [](uint8_t aff1, uint8_t logical_id, uint16_t parent_index, uint16_t flags = 0) {
+    return zbi_topology_node_t{
+        .entity =
+            {
+                .discriminant = ZBI_TOPOLOGY_ENTITY_PROCESSOR,
+                .processor =
+                    {
+                        .architecture_info =
+                            {
+                                .discriminant = ZBI_TOPOLOGY_ARCHITECTURE_INFO_ARM64,
+                                .arm64 =
+                                    {
+                                        .cluster_1_id = aff1,
+                                        .cluster_2_id = 0,
+                                        .cluster_3_id = 0,
+                                        .cpu_id = 0,
+                                        .gic_id = logical_id,
+                                    },
+                            },
+                        .flags = flags,
+                        .logical_ids = {logical_id, 0, 0, 0},
+                        .logical_id_count = 1,
+                    },
+            },
+        .parent_index = parent_index,
+    };
+  };
+
+  const std::array kExpectedTopology = {
+      // Little cluster (0x102 * 255 / 0x400 = 0x40): CPUs 0, 1
+      make_cluster(0x40),
+      make_cpu(0, 0, 0, ZBI_TOPOLOGY_PROCESSOR_FLAGS_PRIMARY),
+      make_cpu(1, 1, 0),
+      // Mid-low cluster (0x37b * 255 / 0x400 = 0xDD): CPUs 2, 3, 4
+      make_cluster(0xDD),
+      make_cpu(2, 2, 3),
+      make_cpu(3, 3, 3),
+      make_cpu(4, 4, 3),
+      // Mid-high cluster (0x37c * 255 / 0x400 = 0xDE): CPUs 5, 6
+      make_cluster(0xDE),
+      make_cpu(5, 5, 7),
+      make_cpu(6, 6, 7),
+      // Big cluster (0x400 * 255 / 0x400 = 0xFF): CPU 7
+      make_cluster(0xFF),
+      make_cpu(7, 7, 10),
+  };
+
+  std::array<std::byte, 2048> image_buffer;
+  zbitl::Image<std::span<std::byte>> image(image_buffer);
+  ASSERT_TRUE(image.clear().is_ok());
+
+  auto fdt = cpus_dynamiq();
+  boot_shim::DevicetreeBootShim<ArmDevicetreeCpuTopologyItem<0>> shim("test", fdt);
+  shim.set_allocator(TestAllocator());
+
+  ASSERT_TRUE(shim.Init());
+  const auto& topo_item = shim.Get<ArmDevicetreeCpuTopologyItem<0>>();
+  EXPECT_EQ(topo_item.size_bytes(),
+            boot_shim::ItemBase::ItemSize(kExpectedTopology.size() * sizeof(zbi_topology_node_t)));
+
   auto clear_errors = fit::defer([&]() { image.ignore_error(); });
   ASSERT_TRUE(shim.AppendItems(image).is_ok());
   bool present = false;

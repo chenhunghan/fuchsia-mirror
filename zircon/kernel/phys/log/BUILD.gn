@@ -1,0 +1,28 @@
+# Copyright 2026 The Fuchsia Authors
+#
+# Use of this source code is governed by a MIT-style
+# license that can be found in the LICENSE file or at
+# https://opensource.org/licenses/MIT
+
+import("//build/cpp/library_headers.gni")
+
+library_headers("headers") {
+  headers = [ "phys/log/log.h" ]
+  public_deps = [
+    "//zircon/kernel/lib/ktl:headers",
+    "//zircon/kernel/lib/libc:headers",
+
+    # <phys/log/log.h> has #include <phys/allocation.h>
+    "//zircon/kernel/phys:allocation",
+  ]
+}
+
+source_set("log") {
+  public_deps = [ ":headers" ]
+  sources = [ "log.cc" ]
+  deps = [
+    "//zircon/kernel/lib/boot-options",
+    "//zircon/kernel/phys:address-space.header",
+    "//zircon/kernel/phys:stdio",
+  ]
+}

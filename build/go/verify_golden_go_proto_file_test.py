@@ -33,3 +33,7 @@ class VerifyGoldenGoProtoFileTests(unittest.TestCase):
         ]
         for input, expected in cases:
             self.assertEqual(filter_line(input), expected)
+
+
+if __name__ == "__main__":
+    unittest.main()

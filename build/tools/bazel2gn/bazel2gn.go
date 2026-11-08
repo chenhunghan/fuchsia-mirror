@@ -48,7 +48,13 @@ func FileToGN(f *syntax.File) ([]string, error) {
 	if err := inlineRustTestCrates(f); err != nil {
 		return nil, err
 	}
+	if err := resolveTestPackages(f); err != nil {
+		return nil, err
+	}
 	if err := resolveComponentTargets(f); err != nil {
+		return nil, err
+	}
+	if err := resolveLinuxResourceTargets(f); err != nil {
 		return nil, err
 	}
 	var lines []string
@@ -293,10 +299,23 @@ func callExprToGN(expr *syntax.CallExpr, stmtComments *syntax.Comments) ([]strin
 		}
 		return rustcCheckCfgBuildFlagsToGN(expr)
 	}
+	if bazelRule == internalFxTestPackageRule {
+		if len(rawAttrs) > 0 {
+			return nil, errors.New("raw_attribute annotation is not supported on fx_package")
+		}
+		return fxTestPackageToGN(expr)
+	}
+	if bazelRule == internalFxUnittestComponentRule {
+		if len(rawAttrs) > 0 {
+			return nil, errors.New("raw_attribute annotation is not supported on fx_unittest_component")
+		}
+		return fxUnittestComponentToGN(expr)
+	}
 	var gnTemplateName string
-	if bazelRule == internalRenamedBinaryRule {
+	switch bazelRule {
+	case internalRenamedBinaryRule:
 		gnTemplateName = "renamed_binary"
-	} else {
+	default:
 		var ok bool
 		gnTemplateName, ok = bazelRuleToGNTemplate[bazelRule]
 		if !ok {
@@ -305,16 +324,32 @@ func callExprToGN(expr *syntax.CallExpr, stmtComments *syntax.Comments) ([]strin
 	}
 
 	switch bazelRule {
+	case "cmc_merge":
+		if err := prepareCmcMerge(expr, rawAttrs); err != nil {
+			return nil, err
+		}
 	case "cml_shard":
 		if err := validateCmlShard(expr); err != nil {
 			return nil, err
 		}
-	case "fx_component_manifest":
+	case "fx_component_manifest", "fx_component_manifest_with_expectations":
 		if err := validateFxComponentManifest(expr); err != nil {
 			return nil, err
 		}
-	case "fx_component":
+	case "fx_compiled_manifest":
+		if err := prepareFxCompiledManifest(expr); err != nil {
+			return nil, err
+		}
+	case "fx_component", internalFxTestComponentRule, internalFxTestComponentWithExpectationsRule:
 		if err := validateFxComponent(expr); err != nil {
+			return nil, err
+		}
+	case "rustc_test", "host_rustc_test":
+		if err := validateRustTestOutputName(expr, rawAttrs); err != nil {
+			return nil, err
+		}
+	case compiledActionRule:
+		if err := validateCompiledAction(expr); err != nil {
 			return nil, err
 		}
 	}
@@ -331,6 +366,12 @@ func callExprToGN(expr *syntax.CallExpr, stmtComments *syntax.Comments) ([]strin
 		}
 		return fxUnittestPackageToGN(expr)
 	}
+	if bazelRule == "linux_resource" {
+		if len(rawAttrs) > 0 {
+			return nil, fmt.Errorf("raw_attribute annotation is not supported on %s", bazelRule)
+		}
+		return linuxResourceToGN(expr)
+	}
 
 	attrsToOmit := attrsToOmitByRules[bazelRule]
 	unsupportedAttrs := unsupportedAttrsByRules[bazelRule]
@@ -339,6 +380,9 @@ func callExprToGN(expr *syntax.CallExpr, stmtComments *syntax.Comments) ([]strin
 	var name string
 	var remainingArgs []*syntax.BinaryExpr
 	var wrappingConditions []string
+	var hasWithUnitTests bool
+	var isLinkShared bool
+	var hasOutputNameAttr bool
 	for _, arg := range expr.Args {
 		binaryExpr, ok := arg.(*syntax.BinaryExpr)
 		if !ok || binaryExpr.Op != syntax.EQ {
@@ -360,6 +404,34 @@ func callExprToGN(expr *syntax.CallExpr, stmtComments *syntax.Comments) ([]strin
 		ident, ok := binaryExpr.X.(*syntax.Ident)
 		if !ok {
 			return nil, fmt.Errorf("unexpected node type on the left hand side of binary expression in target definition, want syntax.Ident, got %T", binaryExpr.X)
+		}
+		if ident.Name == "with_unit_tests" || ident.Name == "with_host_unit_tests" {
+			if rhsIdent, ok := unwrapParenExpr(binaryExpr.Y).(*syntax.Ident); !ok || rhsIdent.Name != "False" {
+				hasWithUnitTests = true
+			}
+		}
+		// Validate `testonly` on `fx_cc_test_binary` before `attrsToOmit` drops
+		// it so `testonly = False` (or any non-`True` expression) fails
+		// conversion rather than silently generating a `testonly = true` GN
+		// `cc_test_executable()`.
+		if bazelRule == "fx_cc_test_binary" && ident.Name == "testonly" {
+			if rhsIdent, ok := unwrapParenExpr(binaryExpr.Y).(*syntax.Ident); !ok || rhsIdent.Name != "True" {
+				return nil, errors.New("fx_cc_test_binary targets are always testonly; testonly must be True if specified")
+			}
+		}
+		// `gn_output_name` on `fx_cc_binary` and `fx_cc_test_binary` is renamed to GN
+		// `output_name` through `attrMapsByRules`. Only validate it here:
+		// require a string literal so that `fx_packaged_binary` and
+		// `linux_resource` lookups (see `indexGNBinaries`) see the same name as
+		// GN, and reject a conflicting raw `output_name` annotation.
+		if (bazelRule == "fx_cc_binary" || bazelRule == "fx_cc_test_binary") && ident.Name == "gn_output_name" {
+			if _, err := stringLiteralValue(binaryExpr.Y); err != nil {
+				return nil, fmt.Errorf("gn_output_name of %s must be a string literal: %v", bazelRule, err)
+			}
+			if hasRawOutputNameAttr(rawAttrs) {
+				return nil, fmt.Errorf("%s sets both gn_output_name and a `# @bazel2gn:raw_attribute:output_name` annotation; remove the annotation", bazelRule)
+			}
+			hasOutputNameAttr = true
 		}
 		if attrsToOmit[ident.Name] {
 			continue
@@ -393,6 +465,19 @@ func callExprToGN(expr *syntax.CallExpr, stmtComments *syntax.Comments) ([]strin
 			// Regardless of its value, `alwayslink` is not field in GN, so ignore it.
 			continue
 		}
+		isCCBinary := bazelRule == "cc_binary" || bazelRule == "fx_cc_binary"
+		if isCCBinary && ident.Name == "linkshared" {
+			rhsIdent, ok := unwrapParenExpr(binaryExpr.Y).(*syntax.Ident)
+			if !ok || (rhsIdent.Name != "True" && rhsIdent.Name != "False") {
+				return nil, fmt.Errorf("linkshared must be set to True or False, got %T", binaryExpr.Y)
+			}
+			if rhsIdent.Name == "True" {
+				gnTemplateName = "loadable_module"
+				isLinkShared = true
+			}
+			// Regardless of its value, `linkshared` is not a field in GN, so ignore it.
+			continue
+		}
 		remainingArgs = append(remainingArgs, binaryExpr)
 	}
 	if name == "" {
@@ -402,17 +487,24 @@ func callExprToGN(expr *syntax.CallExpr, stmtComments *syntax.Comments) ([]strin
 		wrappingConditions = append(wrappingConditions, cond)
 	}
 
-	// `compiled_action()` args can refer to outputs, so collect them first.
+	// `compiled_action()` args can refer to outputs, depfile, or overwritten srcs, so collect them first.
 	var compiledActionOutputs map[string]string
 	if bazelRule == compiledActionRule {
 		var err error
-		compiledActionOutputs, err = compiledActionOuts(expr)
+		compiledActionOutputs, err = compiledActionPaths(expr)
 		if err != nil {
-			return nil, fmt.Errorf("converting compiled_action outs: %v", err)
+			return nil, fmt.Errorf("converting compiled_action paths: %v", err)
 		}
 	}
 
 	ret := []string{fmt.Sprintf("%s(%s) {", gnTemplateName, name)}
+	if isLinkShared {
+		// GN `loadable_module()` automatically appends `.so`, so strip a trailing
+		// `.so` from `name` into `output_name` to avoid `<name>.so.so`.
+		if baseName, hasSOSuffix := strings.CutSuffix(strings.Trim(name, `"`), ".so"); hasSOSuffix && !hasRawOutputNameAttr(rawAttrs) && !hasOutputNameAttr {
+			ret = append(ret, indent([]string{fmt.Sprintf("output_name = %s", gnQuote(baseName))}, 1)...)
+		}
+	}
 
 	// `aspect_hints` maps to `deps` in GN, but Buildifier places `aspect_hints`
 	// near the top of the target before `deps` or `implementation_deps`. If
@@ -425,7 +517,7 @@ func callExprToGN(expr *syntax.CallExpr, stmtComments *syntax.Comments) ([]strin
 
 	// Loop through all args again to actually build the content of this target.
 	for _, arg := range remainingArgs {
-		lines, err := attrAssignmentToGN(arg, bazelRule, compiledActionOutputs, appendAspectHints)
+		lines, err := attrAssignmentToGN(arg, bazelRule, compiledActionOutputs, appendAspectHints, hasWithUnitTests)
 		if err != nil {
 			return nil, fmt.Errorf("converting Bazel attribute to GN: %v", err)
 		}
@@ -433,7 +525,17 @@ func callExprToGN(expr *syntax.CallExpr, stmtComments *syntax.Comments) ([]strin
 	}
 
 	if extra, ok := extraGnExpressionByRules[bazelRule]; ok {
-		ret = append(ret, indent([]string{extra}, 1)...)
+		// GN fails on a second assignment to the same variable, so reject raw
+		// attributes that set a variable bazel2gn already sets for this rule.
+		for _, e := range extra {
+			extraName := strings.TrimSpace(strings.SplitN(e, "=", 2)[0])
+			for _, raw := range rawAttrs {
+				if strings.TrimSpace(strings.SplitN(raw, "=", 2)[0]) == extraName {
+					return nil, fmt.Errorf("bazel2gn always sets `%s` on %s; remove the `# @bazel2gn:raw_attribute:%s` annotation", e, bazelRule, extraName)
+				}
+			}
+		}
+		ret = append(ret, indent(extra, 1)...)
 	}
 	ret = append(ret, indent(rawAttrs, 1)...)
 
@@ -559,6 +661,28 @@ func disableInstrumentationToGN(expr syntax.Expr) ([]string, error) {
 	}
 }
 
+// execPropertiesToGN converts a Bazel `exec_properties` attribute to GN.
+//
+// Only `exec_properties = RBE_USE_LARGE_WORKER` on Rust targets is supported,
+// which becomes `rustHighmemGN`. Other values are an error, because GN
+// templates don't accept `exec_properties`.
+func execPropertiesToGN(expr *syntax.BinaryExpr, bazelRule string) ([]string, error) {
+	if _, ok := overwrittenRaw(expr); ok {
+		return nil, fmt.Errorf("%q is not supported on %s; use %q and %q instead", rawOverwriteAnnotationPrefix, execPropertiesAttr, skipAnnotation, rawAttributeAnnotationPrefix)
+	}
+	if !rustHighmemGNTemplates[bazelRuleToGNTemplate[bazelRule]] {
+		return nil, fmt.Errorf("bazel2gn only supports %s on Rust binary, library, and test rules, got %s; use %q and %q instead", execPropertiesAttr, bazelRule, skipAnnotation, rawAttributeAnnotationPrefix)
+	}
+	ident, ok := unwrapParenExpr(expr.Y).(*syntax.Ident)
+	if !ok {
+		return nil, fmt.Errorf("bazel2gn only supports `%s = %s`, got %T; use %q and %q instead", execPropertiesAttr, rbeUseLargeWorker, expr.Y, skipAnnotation, rawAttributeAnnotationPrefix)
+	}
+	if ident.Name != rbeUseLargeWorker {
+		return nil, fmt.Errorf("bazel2gn only supports `%s = %s`, got %s; use %q and %q instead", execPropertiesAttr, rbeUseLargeWorker, ident.Name, skipAnnotation, rawAttributeAnnotationPrefix)
+	}
+	return slices.Clone(rustHighmemGN), nil
+}
+
 // reorderAspectHints moves `aspect_hints` to immediately follow the last other
 // attribute that converts to `deps` in GN, if any such attribute exists.
 // Returns the reordered slice, whether `aspect_hints` should use `+=`, and
@@ -662,12 +786,18 @@ func selectHasDefault(expr *syntax.CallExpr) bool {
 // NOTE: Assignment is a special binary expression with operator =.
 //
 // [0] https://github.com/bazelbuild/starlark/blob/master/spec.md#assignments
-func attrAssignmentToGN(expr *syntax.BinaryExpr, bazelRule string, compiledActionOutputs map[string]string, appendAspectHints bool) ([]string, error) {
+func attrAssignmentToGN(expr *syntax.BinaryExpr, bazelRule string, compiledActionOutputs map[string]string, appendAspectHints bool, hasWithUnitTests bool) ([]string, error) {
 	lhs, ok := expr.X.(*syntax.Ident)
 	if !ok {
 		return nil, fmt.Errorf("expecting an identifier on the left hand side of attribute assignment, got %T", expr.X)
 	}
 	attrName := convertAttrName(lhs.Name, bazelRule)
+
+	// `exec_properties` has no GN equivalent attribute and must never be
+	// emitted verbatim, even with an overwrite annotation.
+	if lhs.Name == execPropertiesAttr {
+		return execPropertiesToGN(expr, bazelRule)
+	}
 
 	// First, handle overwrite annotations for the entire right hand side.
 	//
@@ -714,9 +844,10 @@ func attrAssignmentToGN(expr *syntax.BinaryExpr, bazelRule string, compiledActio
 		return genruleCmdToGN(expr.Y)
 	}
 
-	// Intercept tags attribute to sync assert_no_deps.
+	// Intercept tags attribute to sync assert_no_deps and
+	// exclude_toolchain_tags.
 	if attrName == "tags" {
-		return tagsToGN(expr.Y)
+		return tagsToGN(expr.Y, bazelRule, hasWithUnitTests)
 	}
 
 	// Intercept rustenv attribute to convert dict to list of strings.
@@ -732,7 +863,7 @@ func attrAssignmentToGN(expr *syntax.BinaryExpr, bazelRule string, compiledActio
 	switch attrName {
 	case "visibility":
 		transformers = append(transformers, bazelVisibilityToGN)
-	case "deps", "test_deps", "proc_macro_deps", "link_deps", "args_deps", "plugin_deps", "fidls", "non_rust_deps", "sdk_deps", "validations", "cm_label", "source_deps":
+	case "deps", "test_deps", "proc_macro_deps", "link_deps", "args_deps", "plugin_deps", "fidls", "non_rust_deps", "sdk_deps", "non_sdk_deps", "validations", "cm_label", "source_deps":
 		transformers = append(transformers, bazelDepToGN)
 	case "public_deps":
 		transformers = append(transformers, bazelDepToGN)
@@ -750,16 +881,32 @@ func attrAssignmentToGN(expr *syntax.BinaryExpr, bazelRule string, compiledActio
 	case "api", "outputs", "sources", "inputs", "args_sources", "args_source_root":
 		if bazelRule == compiledActionRule && attrName == "outputs" {
 			transformers = append(transformers, compiledActionOutsTransformer)
+		} else if bazelRule == "cmc_merge" && attrName == "sources" {
+			transformers = append(transformers, bazelCmcMergeSrcsToGN)
 		} else {
 			transformers = append(transformers, bazelFilePathsToGN)
 		}
 	case "includes":
-		if bazelRule == "expect_includes" {
+		switch bazelRule {
+		case "expect_includes":
 			transformers = append(transformers, bazelCmlIncludesToGN)
+		case "fx_generated_expectations":
+			transformers = append(transformers, bazelFilePathsToGN)
 		}
 	case "manifest":
-		if bazelRule == "fx_component_manifest" {
+		if isFxManifestRule(bazelRule) {
+			transformers = append(transformers, bazelManifestToGN(bazelRule))
+		}
+	case "depfile":
+		if bazelRule == compiledActionRule {
+			transformers = append(transformers, compiledActionScalarOutTransformer(expr))
+		}
+	case "expectations":
+		switch bazelRule {
+		case "fx_expectations":
 			transformers = append(transformers, bazelFilePathsToGN)
+		case internalFxTestComponentWithExpectationsRule:
+			transformers = append(transformers, bazelExpectationsToGN)
 		}
 	case "args":
 		if bazelRule == compiledActionRule {
@@ -767,7 +914,11 @@ func attrAssignmentToGN(expr *syntax.BinaryExpr, bazelRule string, compiledActio
 		}
 	case "tool":
 		if bazelRule == compiledActionRule {
-			transformers = append(transformers, bazelDepToGN)
+			transformers = append(transformers, compiledActionToolTransformer(expr))
+		}
+	case "tool_output_name", "mnemonic":
+		if bazelRule == compiledActionRule {
+			transformers = append(transformers, compiledActionStringAttrTransformer(attrName))
 		}
 	case "config_data":
 		if bazelRule == "ffx_plugin" {

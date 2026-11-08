@@ -8,6 +8,8 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 
+#include <utility>
+
 #include <fbl/unique_fd.h>
 #include <gtest/gtest.h>
 
@@ -42,8 +44,7 @@ void FaultTest::SetUpTestSuite() {
 }
 
 void FaultTest::TearDownTestSuite() {
-  faulting_ptr_ = mmap(nullptr, kFaultingSize_, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  ASSERT_NE(faulting_ptr_, MAP_FAILED);
+  ASSERT_EQ(munmap(std::exchange(faulting_ptr_, nullptr), kFaultingSize_), 0) << strerror(errno);
 }
 
 void FaultFileTest::SetUp() {

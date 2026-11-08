@@ -211,6 +211,45 @@ class TestPlatformBuffer {
     EXPECT_FALSE(
         buffer->MapCpuWithFlags(0u, magma::page_size(), magma::PlatformBuffer::kMapWrite, &bad));
   }
+
+  static void MapWithPopulate() {
+    constexpr uint32_t kNumPages = 4;
+    std::unique_ptr<magma::PlatformBuffer> buffer =
+        magma::PlatformBuffer::Create(kNumPages * magma::page_size(), "test");
+    ASSERT_TRUE(buffer);
+
+    // Commit only part of the buffer; populating must tolerate uncommitted pages.
+    ASSERT_TRUE(buffer->CommitPages(0, kNumPages / 2));
+
+    std::unique_ptr<magma::PlatformBuffer::Mapping> mapping;
+    ASSERT_TRUE(buffer->MapCpuWithFlags(0, kNumPages * magma::page_size(),
+                                        magma::PlatformBuffer::kMapRead |
+                                            magma::PlatformBuffer::kMapWrite |
+                                            magma::PlatformBuffer::kMapPopulate,
+                                        &mapping));
+    ASSERT_TRUE(mapping);
+
+    // Every page, committed or not, must be accessible through the mapping.
+    auto* base = reinterpret_cast<uint8_t*>(mapping->address());
+    for (uint32_t i = 0; i < kNumPages; i++) {
+      uint32_t value = i + 1;
+      memcpy(base + i * magma::page_size(), &value, sizeof(value));
+    }
+    for (uint32_t i = 0; i < kNumPages; i++) {
+      uint32_t value = 0;
+      EXPECT_TRUE(buffer->Read(&value, i * magma::page_size(), sizeof(value)));
+      EXPECT_EQ(i + 1, value);
+    }
+
+    // Populate on a buffer with no committed pages also succeeds.
+    std::unique_ptr<magma::PlatformBuffer> empty_buffer =
+        magma::PlatformBuffer::Create(magma::page_size(), "test");
+    ASSERT_TRUE(empty_buffer);
+    std::unique_ptr<magma::PlatformBuffer::Mapping> empty_mapping;
+    EXPECT_TRUE(empty_buffer->MapCpuWithFlags(
+        0, magma::page_size(),
+        magma::PlatformBuffer::kMapRead | magma::PlatformBuffer::kMapPopulate, &empty_mapping));
+  }
 #endif
 
   static void CachePolicy() {
@@ -591,6 +630,8 @@ TEST(PlatformBuffer, AddressRegionSize) { TestPlatformBuffer::CheckAddressRegion
 TEST(PlatformBuffer, MappingAddressRange) { TestPlatformBuffer::MappingAddressRange(); }
 
 TEST(PlatformBuffer, MapSpecific) { TestPlatformBuffer::MapSpecific(); }
+
+TEST(PlatformBuffer, MapWithPopulate) { TestPlatformBuffer::MapWithPopulate(); }
 
 TEST(PlatformBuffer, Name) { TestPlatformBuffer::Name(); }
 

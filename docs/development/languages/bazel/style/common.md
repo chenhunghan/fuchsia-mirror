@@ -120,7 +120,8 @@ depend on platform targets or load symbols from platform `.bzl` files.
 ### Do not use Fuchsia Bazel SDK paths {:#do-not-use-fuchsia-bazel-sdk-paths}
 
 Platform code should never access file paths containing `bazel_sdk` or Fuchsia
-Bazel SDK repository paths such as:
+Bazel SDK repository paths _\[<span style="color:red">SHAC error</span>\]_ such
+as:
 
 * `@fuchsia_sdk//`
 
@@ -209,16 +210,18 @@ See [Wrapping built-in and common rules, macros, and
 functions][wrapping-rules-macros] for one pattern used when needing to
 differentiate Fuchsia platform from general Bazel identifiers.
 
-## Use Fuchsia-specific wrappers
+## Use Fuchsia-specific wrappers {:#use-fuchsia-specific-wrappers}
 
-When Fuchsia-specific wrappers exist, use those rather than external
+When Fuchsia-specific wrappers exist, use those
+_\[<span style="color:red">SHAC error</span>\]_ rather than external
 repositories, macros, etc. This helps ensure that Fuchsia build configurations
 are applied consistently.
 
 Specifically, there are wrappers for the following languages:
 
-* C/C++: Use `fx_cc_...()` from `//build/bazel/rules/cc/...` rather than
-  `cc_...` from `@rules_cc//`.
+* C/C++: Use `fx_cc_...()` from `//build/bazel/rules/cc/...` (or
+  `cc_*_library_zx()` from `//build/bazel/rules:zx_library.bzl` for Zircon
+  libraries) rather than `cc_...` from `@rules_cc//`.
 
 * Rust: Use `rustc_...()` from `//build/bazel/rules/rust/...` rather than
   `rust_...` from `@rules_rust//`.

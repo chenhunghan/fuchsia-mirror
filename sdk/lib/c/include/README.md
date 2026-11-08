@@ -281,8 +281,15 @@ These changes thus will also be [manual rolls].  Whenever possible, commit an
 isolated change that is just the manual roll along with the golden file updates
 and no other changes that aren't strictly necessary to let the roll land.
 
+While human API review is always required, an agent using the [`libc-rollers`
+agent skill] can detect when the [auto-rollers] fail due to upstream header
+changes, run [`manual-roll.sh`](../manual-roll.sh) with `update_goldens=true`
+in an isolated `jiri worktree` to regenerate [`gen`](gen) and
+[`sysroot.api`](#sysroot_api), and prepare the manual roll commit for review.
+
 ---
 
+[`libc-rollers` agent skill]: ../skills/libc-rollers/SKILL.md
 [auto-rollers]: ../#auto_rollers
 [llvm-libc]: ../#llvm_libc
 [manifests]: /manifests

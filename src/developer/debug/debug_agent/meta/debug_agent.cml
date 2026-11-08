@@ -47,6 +47,13 @@
             ],
             from: "parent",
         },
+        {
+            config: "fuchsia.debugger.MonitorRootJob",
+            key: "monitor_root_job",
+            type: "bool",
+            availability: "transitional",
+            default: true,
+        },
     ],
     expose: [
         {
@@ -54,10 +61,4 @@
             from: "self",
         },
     ],
-    config: {
-        monitor_root_job: {
-            type: "bool",
-            mutability: [ "parent" ],
-        },
-    },
 }

@@ -13,6 +13,7 @@ import("//build/drivers/check_included_drivers.gni")
 import("//build/drivers/create_all_drivers_doc.gni")
 import("//build/images/args.gni")
 import("//build/info/info.gni")
+import("//build/prebuilt/cipd_prebuilt.gni")
 import("//build/product.gni")
 import("//build/product_bundles_json.gni")
 import("//build/rust/config.gni")
@@ -378,6 +379,11 @@ build_api_module("rules_fuchsia_info") {
   deps = [ ":rules_fuchsia.export" ]
 }
 
+cipd_prebuilt("buildifier_prebuilt") {
+  visibility = [ ":rules_fuchsia.export" ]
+  paths = [ "//prebuilt/third_party/buildifier/${host_platform}/buildifier" ]
+}
+
 # An action to generate the final version of rules_fuchsia to be used OOT
 # This ensures that the content of @fuchsia_rules_common is stored under
 # @rules_fuchsia/fuchsia_rules_common, and changes all instances of
@@ -388,6 +394,9 @@ action("rules_fuchsia.export") {
   _output_dir = "$target_out_dir/$target_name"
   _stamp = "$target_out_dir/$target_name.stamp"
   _depfile = "$target_out_dir/$target_name.d"
+  _buildifier_tool = "${cipd_prebuilt_root}/prebuilt/third_party/buildifier/${host_platform}/buildifier"
+  deps = [ ":buildifier_prebuilt" ]
+  inputs = [ _buildifier_tool ]
   outputs = [ _stamp ]
   depfile = _depfile
   args = [
@@ -395,6 +404,8 @@ action("rules_fuchsia.export") {
     rebase_path("//", root_build_dir),
     "--output-dir",
     rebase_path(_output_dir, root_build_dir),
+    "--buildifier",
+    rebase_path(_buildifier_tool, root_build_dir),
     "--depfile",
     rebase_path(_depfile, root_build_dir),
     "--stamp",
@@ -1604,7 +1615,6 @@ build_api_module("tool_paths") {
     "//tools/fidl/fidlc:host($host_toolchain)",
     "//zircon/third_party/uapp/mkfs-msdosfs($host_toolchain)",
     "//src/storage/blobfs/tools:blobfs($host_toolchain)",
-    "//zircon/tools/lz4($host_toolchain)",
     "//src/storage/minfs/tools:minfs($host_toolchain)",
     "//zircon/tools/zbi($host_toolchain)",
     "//zircon/tools/zither($host_toolchain)",
@@ -2276,6 +2286,11 @@ build_api_module("nuc11_fastboot_images_location") {
 #                 Bazel as top-level command line targets alongside 'bazel_target'.
 #     - Type: string
 #
+#   export_test_packages:
+#     - Optional: Whether to export the Bazel test packages to the Ninja build directory
+#                 after building. See bazel_test_packages.py.
+#     - Type: bool
+#
 #   debug_symbols_manifest:
 #     - Optional: Path in the ninja outdir to write the debug symbols manifest to.
 #     - Type: string
@@ -2314,6 +2329,10 @@ build_api_module("nuc11_fastboot_images_location") {
 #
 #        ninja_archive:
 #          - Required: path the package archive (far) file
+#          - Type: string
+#
+#        ninja_package_out_dir:
+#          - Required: path in the ninja outdir where the package archive is extracted to
 #          - Type: string
 #
 #        copy_debug_symbols:

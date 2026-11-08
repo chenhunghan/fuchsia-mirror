@@ -2,9 +2,82 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "title": "zxdb-cli Protocol Schema",
     "description": "JSON schema for requests and responses in the zxdb-cli UDS protocol",
-    "version": 17,
+    "version": 22,
     "requests": {
         "$defs": {
+            "AspaceRequest": {
+                "description": "Request the virtual address space map for a target process.",
+                "properties": {
+                    "command": {
+                        "const": "aspace",
+                        "default": "aspace",
+                        "title": "Command",
+                        "type": "string"
+                    },
+                    "last_seen_seq": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Last Seen Seq"
+                    },
+                    "ack_seq": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Ack Seq"
+                    },
+                    "pid": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Pid"
+                    },
+                    "address": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Address"
+                    },
+                    "filter": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Filter"
+                    }
+                },
+                "title": "AspaceRequest",
+                "type": "object"
+            },
             "AsyncBacktraceRequest": {
                 "description": "Request asynchronous backtrace (async task tree) for a process.",
                 "properties": {
@@ -55,7 +128,7 @@
                 "type": "object"
             },
             "AttachRequest": {
-                "description": "Request to attach to a process.",
+                "description": "Request to attach to a process or driver_host.",
                 "properties": {
                     "command": {
                         "const": "attach",
@@ -94,19 +167,69 @@
                             },
                             {
                                 "type": "string"
+                            },
+                            {
+                                "type": "null"
                             }
                         ],
+                        "default": null,
                         "title": "Filter"
+                    },
+                    "driver": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Driver"
+                    },
+                    "node": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Node"
+                    },
+                    "weak": {
+                        "default": false,
+                        "title": "Weak",
+                        "type": "boolean"
+                    },
+                    "exact": {
+                        "default": false,
+                        "title": "Exact",
+                        "type": "boolean"
+                    },
+                    "recursive": {
+                        "default": false,
+                        "title": "Recursive",
+                        "type": "boolean"
+                    },
+                    "job_only": {
+                        "default": false,
+                        "title": "Job Only",
+                        "type": "boolean"
+                    },
+                    "wait": {
+                        "default": false,
+                        "title": "Wait",
+                        "type": "boolean"
                     }
                 },
-                "required": [
-                    "filter"
-                ],
                 "title": "AttachRequest",
                 "type": "object"
             },
             "BreakRequest": {
-                "description": "Request to set or delete a breakpoint at a file and line.\n\nThe file path must be fully qualified from the workspace root, an absolute\npath, or exist relative to the current working directory.\nTo delete a breakpoint, set delete=True and ensure the file and line match\nan existing breakpoint.\nTo view currently installed breakpoints, use the get-state command.",
+                "description": "Request to set or delete a source or function breakpoint.\n\nExactly one target mode must be specified:\n1. Source breakpoint: both `file` and `line` are set.\n2. Function breakpoint: `function` is set.",
                 "properties": {
                     "command": {
                         "const": "break",
@@ -139,12 +262,52 @@
                         "title": "Ack Seq"
                     },
                     "file": {
-                        "title": "File",
-                        "type": "string"
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "File"
                     },
                     "line": {
-                        "title": "Line",
-                        "type": "integer"
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Line"
+                    },
+                    "function": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Function"
+                    },
+                    "condition": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Condition"
                     },
                     "delete": {
                         "default": false,
@@ -152,10 +315,6 @@
                         "type": "boolean"
                     }
                 },
-                "required": [
-                    "file",
-                    "line"
-                ],
                 "title": "BreakRequest",
                 "type": "object"
             },
@@ -330,6 +489,111 @@
                 "title": "DetachRequest",
                 "type": "object"
             },
+            "DiagnoseHangRequest": {
+                "description": "Capture a hang/concurrency diagnostic snapshot of a process.",
+                "properties": {
+                    "command": {
+                        "const": "diagnose-hang",
+                        "default": "diagnose-hang",
+                        "title": "Command",
+                        "type": "string"
+                    },
+                    "last_seen_seq": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Last Seen Seq"
+                    },
+                    "ack_seq": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Ack Seq"
+                    },
+                    "pid": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "description": "Target process KOID (defaults to attached process).",
+                        "title": "Pid"
+                    },
+                    "auto_resume": {
+                        "default": true,
+                        "description": "Automatically resume threads paused during snapshot (guaranteed via finally).",
+                        "title": "Auto Resume",
+                        "type": "boolean"
+                    }
+                },
+                "title": "DiagnoseHangRequest",
+                "type": "object"
+            },
+            "DriverListRequest": {
+                "description": "Request to list running driver_hosts, drivers, and device nodes.",
+                "properties": {
+                    "command": {
+                        "const": "driver-list",
+                        "default": "driver-list",
+                        "title": "Command",
+                        "type": "string"
+                    },
+                    "last_seen_seq": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Last Seen Seq"
+                    },
+                    "ack_seq": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Ack Seq"
+                    },
+                    "filter": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Filter"
+                    }
+                },
+                "title": "DriverListRequest",
+                "type": "object"
+            },
             "EvaluateRequest": {
                 "description": "Request evaluation of an expression in a given stack frame.",
                 "properties": {
@@ -477,6 +741,89 @@
                 "title": "GetStateRequest",
                 "type": "object"
             },
+            "HandlesRequest": {
+                "description": "Request the Zircon handle table for a target process.",
+                "properties": {
+                    "command": {
+                        "const": "handles",
+                        "default": "handles",
+                        "title": "Command",
+                        "type": "string"
+                    },
+                    "last_seen_seq": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Last Seen Seq"
+                    },
+                    "ack_seq": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Ack Seq"
+                    },
+                    "pid": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Pid"
+                    },
+                    "type": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Type"
+                    },
+                    "koid": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Koid"
+                    },
+                    "hex": {
+                        "default": true,
+                        "title": "Hex",
+                        "type": "boolean"
+                    },
+                    "detail": {
+                        "default": false,
+                        "title": "Detail",
+                        "type": "boolean"
+                    }
+                },
+                "title": "HandlesRequest",
+                "type": "object"
+            },
             "HelloRequest": {
                 "description": "Initial handshake request to verify protocol version.",
                 "properties": {
@@ -519,6 +866,150 @@
                     "version"
                 ],
                 "title": "HelloRequest",
+                "type": "object"
+            },
+            "MemReadRequest": {
+                "description": "Read memory from a target process or stack frame.",
+                "properties": {
+                    "command": {
+                        "const": "mem-read",
+                        "default": "mem-read",
+                        "title": "Command",
+                        "type": "string"
+                    },
+                    "last_seen_seq": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Last Seen Seq"
+                    },
+                    "ack_seq": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Ack Seq"
+                    },
+                    "address": {
+                        "title": "Address",
+                        "type": "string"
+                    },
+                    "size": {
+                        "default": 64,
+                        "title": "Size",
+                        "type": "integer"
+                    },
+                    "pid": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Pid"
+                    },
+                    "thread_id": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Thread Id"
+                    },
+                    "frame_index": {
+                        "default": 0,
+                        "title": "Frame Index",
+                        "type": "integer"
+                    }
+                },
+                "required": [
+                    "address"
+                ],
+                "title": "MemReadRequest",
+                "type": "object"
+            },
+            "ModulesRequest": {
+                "description": "Request loaded modules and symbol status for a target process.",
+                "properties": {
+                    "command": {
+                        "const": "modules",
+                        "default": "modules",
+                        "title": "Command",
+                        "type": "string"
+                    },
+                    "last_seen_seq": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Last Seen Seq"
+                    },
+                    "ack_seq": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Ack Seq"
+                    },
+                    "pid": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Pid"
+                    },
+                    "filter": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Filter"
+                    },
+                    "force_reload": {
+                        "default": false,
+                        "title": "Force Reload",
+                        "type": "boolean"
+                    }
+                },
+                "title": "ModulesRequest",
                 "type": "object"
             },
             "NextRequest": {
@@ -959,6 +1450,227 @@
                 "title": "ThreadsRequest",
                 "type": "object"
             },
+            "TracepointRequest": {
+                "description": "Request to set, update, enable, disable, delete, clear, or list tracepoints.\n\nWhen hit, the backend captures requested state and emits a structured\ntracepoint event into the event stream without stopping the target thread.",
+                "properties": {
+                    "command": {
+                        "const": "tracepoint",
+                        "default": "tracepoint",
+                        "title": "Command",
+                        "type": "string"
+                    },
+                    "last_seen_seq": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Last Seen Seq"
+                    },
+                    "ack_seq": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Ack Seq"
+                    },
+                    "id": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Id"
+                    },
+                    "file": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "File"
+                    },
+                    "line": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Line"
+                    },
+                    "function": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Function"
+                    },
+                    "watch": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Watch"
+                    },
+                    "size": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Size"
+                    },
+                    "access_type": {
+                        "default": "write",
+                        "enum": [
+                            "write",
+                            "readWrite"
+                        ],
+                        "title": "Access Type",
+                        "type": "string"
+                    },
+                    "thread_id": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Thread Id"
+                    },
+                    "frame_index": {
+                        "default": 0,
+                        "title": "Frame Index",
+                        "type": "integer"
+                    },
+                    "condition": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Condition"
+                    },
+                    "expressions": {
+                        "items": {
+                            "type": "string"
+                        },
+                        "title": "Expressions",
+                        "type": "array"
+                    },
+                    "capture": {
+                        "items": {
+                            "enum": [
+                                "frame",
+                                "backtrace",
+                                "locals",
+                                "registers"
+                            ],
+                            "type": "string"
+                        },
+                        "title": "Capture",
+                        "type": "array"
+                    },
+                    "raw_backtrace": {
+                        "default": false,
+                        "title": "Raw Backtrace",
+                        "type": "boolean"
+                    },
+                    "max_matching_frames": {
+                        "default": 10,
+                        "title": "Max Matching Frames",
+                        "type": "integer"
+                    },
+                    "max_hits": {
+                        "default": 20,
+                        "title": "Max Hits",
+                        "type": "integer"
+                    },
+                    "delete": {
+                        "default": false,
+                        "title": "Delete",
+                        "type": "boolean"
+                    },
+                    "clear": {
+                        "default": false,
+                        "title": "Clear",
+                        "type": "boolean"
+                    },
+                    "enabled": {
+                        "anyOf": [
+                            {
+                                "type": "boolean"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Enabled"
+                    },
+                    "tracepoint_id": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Tracepoint Id"
+                    },
+                    "list_all": {
+                        "default": false,
+                        "title": "List All",
+                        "type": "boolean"
+                    }
+                },
+                "title": "TracepointRequest",
+                "type": "object"
+            },
             "VariablesRequest": {
                 "description": "Request variables for a frame in a thread.",
                 "properties": {
@@ -1164,16 +1876,22 @@
         },
         "discriminator": {
             "mapping": {
+                "aspace": "#/$defs/AspaceRequest",
                 "async-backtrace": "#/$defs/AsyncBacktraceRequest",
                 "attach": "#/$defs/AttachRequest",
                 "break": "#/$defs/BreakRequest",
                 "console": "#/$defs/ConsoleRequest",
                 "continue": "#/$defs/ContinueRequest",
                 "detach": "#/$defs/DetachRequest",
+                "diagnose-hang": "#/$defs/DiagnoseHangRequest",
+                "driver-list": "#/$defs/DriverListRequest",
                 "evaluate": "#/$defs/EvaluateRequest",
                 "finish": "#/$defs/FinishRequest",
                 "get-state": "#/$defs/GetStateRequest",
+                "handles": "#/$defs/HandlesRequest",
                 "hello": "#/$defs/HelloRequest",
+                "mem-read": "#/$defs/MemReadRequest",
+                "modules": "#/$defs/ModulesRequest",
                 "next": "#/$defs/NextRequest",
                 "pause": "#/$defs/PauseRequest",
                 "stack-trace": "#/$defs/StackTraceRequest",
@@ -1181,6 +1899,7 @@
                 "step-in": "#/$defs/StepInRequest",
                 "stop": "#/$defs/StopRequest",
                 "threads": "#/$defs/ThreadsRequest",
+                "tracepoint": "#/$defs/TracepointRequest",
                 "variables": "#/$defs/VariablesRequest",
                 "wait-for-event": "#/$defs/WaitForEventRequest",
                 "watch": "#/$defs/WatchRequest"
@@ -1188,6 +1907,9 @@
             "propertyName": "command"
         },
         "oneOf": [
+            {
+                "$ref": "#/$defs/AspaceRequest"
+            },
             {
                 "$ref": "#/$defs/AsyncBacktraceRequest"
             },
@@ -1207,6 +1929,12 @@
                 "$ref": "#/$defs/DetachRequest"
             },
             {
+                "$ref": "#/$defs/DiagnoseHangRequest"
+            },
+            {
+                "$ref": "#/$defs/DriverListRequest"
+            },
+            {
                 "$ref": "#/$defs/EvaluateRequest"
             },
             {
@@ -1216,7 +1944,16 @@
                 "$ref": "#/$defs/GetStateRequest"
             },
             {
+                "$ref": "#/$defs/HandlesRequest"
+            },
+            {
                 "$ref": "#/$defs/HelloRequest"
+            },
+            {
+                "$ref": "#/$defs/MemReadRequest"
+            },
+            {
+                "$ref": "#/$defs/ModulesRequest"
             },
             {
                 "$ref": "#/$defs/NextRequest"
@@ -1240,6 +1977,9 @@
                 "$ref": "#/$defs/ThreadsRequest"
             },
             {
+                "$ref": "#/$defs/TracepointRequest"
+            },
+            {
                 "$ref": "#/$defs/VariablesRequest"
             },
             {
@@ -1252,6 +1992,157 @@
     },
     "responses": {
         "$defs": {
+            "AddressRegionEntry": {
+                "additionalProperties": false,
+                "description": "Information about a mapped VMAR or VMO region in the target process.",
+                "properties": {
+                    "start": {
+                        "title": "Start",
+                        "type": "string"
+                    },
+                    "end": {
+                        "title": "End",
+                        "type": "string"
+                    },
+                    "prot": {
+                        "title": "Prot",
+                        "type": "string"
+                    },
+                    "size": {
+                        "title": "Size",
+                        "type": "string"
+                    },
+                    "vmo_koid": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Vmo Koid"
+                    },
+                    "vmo_offset": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Vmo Offset"
+                    },
+                    "committed_pages": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Committed Pages"
+                    },
+                    "name": {
+                        "title": "Name",
+                        "type": "string"
+                    },
+                    "depth": {
+                        "default": 0,
+                        "title": "Depth",
+                        "type": "integer"
+                    }
+                },
+                "required": [
+                    "start",
+                    "end",
+                    "prot",
+                    "size",
+                    "name"
+                ],
+                "title": "AddressRegionEntry",
+                "type": "object"
+            },
+            "AspaceResponse": {
+                "additionalProperties": false,
+                "description": "Structured response for the aspace command.",
+                "properties": {
+                    "pid": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Pid"
+                    },
+                    "regions": {
+                        "items": {
+                            "$ref": "#/$defs/AddressRegionEntry"
+                        },
+                        "title": "Regions",
+                        "type": "array"
+                    },
+                    "page_size": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Page Size"
+                    },
+                    "total_mapped_bytes": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Total Mapped Bytes"
+                    },
+                    "total_committed_pages": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Total Committed Pages"
+                    },
+                    "total_committed_bytes": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Total Committed Bytes"
+                    }
+                },
+                "title": "AspaceResponse",
+                "type": "object"
+            },
             "AsyncBacktraceResponse": {
                 "description": "Response containing async tasks for a process.",
                 "properties": {
@@ -1335,6 +2226,70 @@
                 "title": "AsyncTaskNode",
                 "type": "object"
             },
+            "ClassifiedThread": {
+                "additionalProperties": false,
+                "description": "Stack and concurrency classification for a target thread.",
+                "properties": {
+                    "thread_id": {
+                        "description": "Thread KOID.",
+                        "title": "Thread Id",
+                        "type": "integer"
+                    },
+                    "name": {
+                        "description": "Thread name.",
+                        "title": "Name",
+                        "type": "string"
+                    },
+                    "classification": {
+                        "description": "Concurrency state classification: blocked_lock, blocked_ipc, port_wait, interrupt_wait, sleeping, active, or unknown.",
+                        "enum": [
+                            "blocked_lock",
+                            "blocked_ipc",
+                            "port_wait",
+                            "interrupt_wait",
+                            "sleeping",
+                            "active",
+                            "unknown"
+                        ],
+                        "title": "Classification",
+                        "type": "string"
+                    },
+                    "blocking_symbol": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "description": "Top blocking syscall or synchronization primitive symbol, if applicable.",
+                        "title": "Blocking Symbol"
+                    },
+                    "summary": {
+                        "description": "Concise human/agent-readable explanation of what this thread is doing.",
+                        "title": "Summary",
+                        "type": "string"
+                    },
+                    "top_frames": {
+                        "description": "Formatted top stack frames for this thread.",
+                        "items": {
+                            "type": "string"
+                        },
+                        "title": "Top Frames",
+                        "type": "array"
+                    }
+                },
+                "required": [
+                    "thread_id",
+                    "name",
+                    "classification",
+                    "summary"
+                ],
+                "title": "ClassifiedThread",
+                "type": "object"
+            },
             "ConsoleResponse": {
                 "additionalProperties": false,
                 "description": "Response containing the console command output.",
@@ -1348,6 +2303,161 @@
                     "output"
                 ],
                 "title": "ConsoleResponse",
+                "type": "object"
+            },
+            "DiagnoseHangResponse": {
+                "additionalProperties": false,
+                "description": "Single-shot concurrency and hang snapshot of a process.",
+                "properties": {
+                    "pid": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "description": "Target process KOID.",
+                        "title": "Pid"
+                    },
+                    "dwell_ms": {
+                        "default": 0.0,
+                        "description": "Total time (ms) the process was paused during the snapshot.",
+                        "title": "Dwell Ms",
+                        "type": "number"
+                    },
+                    "auto_resumed": {
+                        "default": true,
+                        "description": "Whether threads paused for the snapshot were automatically resumed.",
+                        "title": "Auto Resumed",
+                        "type": "boolean"
+                    },
+                    "summary": {
+                        "description": "High-level diagnostic findings (blocked locks, sync IPCs, async tasks, unserviced interrupts).",
+                        "items": {
+                            "type": "string"
+                        },
+                        "title": "Summary",
+                        "type": "array"
+                    },
+                    "threads": {
+                        "description": "All threads in the process classified by their current wait/execution state.",
+                        "items": {
+                            "$ref": "#/$defs/ClassifiedThread"
+                        },
+                        "title": "Threads",
+                        "type": "array"
+                    },
+                    "async_tasks": {
+                        "description": "Active async task trees in the process (from zxdb async-backtrace).",
+                        "items": {
+                            "$ref": "#/$defs/AsyncTaskNode"
+                        },
+                        "title": "Async Tasks",
+                        "type": "array"
+                    },
+                    "interrupt_handles": {
+                        "description": "Open ZX_OBJ_TYPE_INTERRUPT handles in the process.",
+                        "items": {
+                            "$ref": "#/$defs/HandleEntry"
+                        },
+                        "title": "Interrupt Handles",
+                        "type": "array"
+                    },
+                    "channel_handles": {
+                        "description": "Open ZX_OBJ_TYPE_CHANNEL handles in the process.",
+                        "items": {
+                            "$ref": "#/$defs/HandleEntry"
+                        },
+                        "title": "Channel Handles",
+                        "type": "array"
+                    },
+                    "port_handles": {
+                        "description": "Open ZX_OBJ_TYPE_PORT handles in the process.",
+                        "items": {
+                            "$ref": "#/$defs/HandleEntry"
+                        },
+                        "title": "Port Handles",
+                        "type": "array"
+                    }
+                },
+                "title": "DiagnoseHangResponse",
+                "type": "object"
+            },
+            "DriverHostEntry": {
+                "additionalProperties": false,
+                "description": "Information about a driver_host process and its loaded drivers.",
+                "properties": {
+                    "host_koid": {
+                        "title": "Host Koid",
+                        "type": "integer"
+                    },
+                    "host_name": {
+                        "default": "",
+                        "title": "Host Name",
+                        "type": "string"
+                    },
+                    "drivers": {
+                        "items": {
+                            "type": "string"
+                        },
+                        "title": "Drivers",
+                        "type": "array"
+                    },
+                    "devices": {
+                        "items": {
+                            "type": "string"
+                        },
+                        "title": "Devices",
+                        "type": "array"
+                    },
+                    "colocated": {
+                        "default": false,
+                        "title": "Colocated",
+                        "type": "boolean"
+                    },
+                    "attached": {
+                        "default": false,
+                        "title": "Attached",
+                        "type": "boolean"
+                    },
+                    "transport_hazard": {
+                        "default": false,
+                        "title": "Transport Hazard",
+                        "type": "boolean"
+                    },
+                    "transport_sensitive": {
+                        "items": {
+                            "type": "string"
+                        },
+                        "title": "Transport Sensitive",
+                        "type": "array"
+                    }
+                },
+                "required": [
+                    "host_koid"
+                ],
+                "title": "DriverHostEntry",
+                "type": "object"
+            },
+            "DriverListResponse": {
+                "additionalProperties": false,
+                "description": "Response for driver-list command.",
+                "properties": {
+                    "driver_hosts": {
+                        "items": {
+                            "$ref": "#/$defs/DriverHostEntry"
+                        },
+                        "title": "Driver Hosts",
+                        "type": "array"
+                    }
+                },
+                "required": [
+                    "driver_hosts"
+                ],
+                "title": "DriverListResponse",
                 "type": "object"
             },
             "EvaluateResponse": {
@@ -1439,12 +2549,339 @@
                         ],
                         "default": null,
                         "title": "Watchpoints"
+                    },
+                    "function_breakpoints": {
+                        "anyOf": [
+                            {
+                                "items": {
+                                    "type": "string"
+                                },
+                                "type": "array"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Function Breakpoints"
+                    },
+                    "tracepoints": {
+                        "anyOf": [
+                            {
+                                "items": {
+                                    "$ref": "#/$defs/TracepointInfo"
+                                },
+                                "type": "array"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Tracepoints"
                     }
                 },
                 "required": [
                     "threads"
                 ],
                 "title": "GetStateResponse",
+                "type": "object"
+            },
+            "HandleEntry": {
+                "additionalProperties": false,
+                "description": "Information about an open Zircon handle or mapped VMO.",
+                "properties": {
+                    "handle_value": {
+                        "title": "Handle Value",
+                        "type": "string"
+                    },
+                    "type": {
+                        "title": "Type",
+                        "type": "string"
+                    },
+                    "koid": {
+                        "title": "Koid",
+                        "type": "integer"
+                    },
+                    "related_koid": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Related Koid"
+                    },
+                    "peer_owner_koid": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Peer Owner Koid"
+                    },
+                    "rights": {
+                        "items": {
+                            "type": "string"
+                        },
+                        "title": "Rights",
+                        "type": "array"
+                    },
+                    "vmo_name": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Vmo Name"
+                    },
+                    "vmo_size_bytes": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Vmo Size Bytes"
+                    },
+                    "cache_policy": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Cache Policy"
+                    }
+                },
+                "required": [
+                    "handle_value",
+                    "type",
+                    "koid"
+                ],
+                "title": "HandleEntry",
+                "type": "object"
+            },
+            "HandlesResponse": {
+                "additionalProperties": false,
+                "description": "Structured response for the handles command.",
+                "properties": {
+                    "pid": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Pid"
+                    },
+                    "handles": {
+                        "items": {
+                            "$ref": "#/$defs/HandleEntry"
+                        },
+                        "title": "Handles",
+                        "type": "array"
+                    }
+                },
+                "title": "HandlesResponse",
+                "type": "object"
+            },
+            "MemReadResponse": {
+                "additionalProperties": false,
+                "description": "Structured response for the mem-read command.",
+                "properties": {
+                    "address": {
+                        "title": "Address",
+                        "type": "string"
+                    },
+                    "size": {
+                        "title": "Size",
+                        "type": "integer"
+                    },
+                    "hex_bytes": {
+                        "title": "Hex Bytes",
+                        "type": "string"
+                    },
+                    "u32_le": {
+                        "items": {
+                            "type": "string"
+                        },
+                        "title": "U32 Le",
+                        "type": "array"
+                    },
+                    "u64_le": {
+                        "items": {
+                            "type": "string"
+                        },
+                        "title": "U64 Le",
+                        "type": "array"
+                    },
+                    "rows": {
+                        "items": {
+                            "$ref": "#/$defs/MemoryRowEntry"
+                        },
+                        "title": "Rows",
+                        "type": "array"
+                    }
+                },
+                "required": [
+                    "address",
+                    "size",
+                    "hex_bytes"
+                ],
+                "title": "MemReadResponse",
+                "type": "object"
+            },
+            "MemoryRowEntry": {
+                "additionalProperties": false,
+                "description": "A 16-byte row from a memory dump.",
+                "properties": {
+                    "address": {
+                        "title": "Address",
+                        "type": "string"
+                    },
+                    "bytes_hex": {
+                        "title": "Bytes Hex",
+                        "type": "string"
+                    },
+                    "ascii": {
+                        "title": "Ascii",
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "address",
+                    "bytes_hex",
+                    "ascii"
+                ],
+                "title": "MemoryRowEntry",
+                "type": "object"
+            },
+            "ModuleEntry": {
+                "additionalProperties": false,
+                "description": "Information about a loaded module (.so / binary) and symbol status.",
+                "properties": {
+                    "name": {
+                        "title": "Name",
+                        "type": "string"
+                    },
+                    "base": {
+                        "title": "Base",
+                        "type": "string"
+                    },
+                    "build_id": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Build Id"
+                    },
+                    "symbols_loaded": {
+                        "anyOf": [
+                            {
+                                "type": "boolean"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Symbols Loaded"
+                    },
+                    "symbol_file": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Symbol File"
+                    },
+                    "files_indexed": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Files Indexed"
+                    },
+                    "functions_indexed": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Functions Indexed"
+                    }
+                },
+                "required": [
+                    "name",
+                    "base"
+                ],
+                "title": "ModuleEntry",
+                "type": "object"
+            },
+            "ModulesResponse": {
+                "additionalProperties": false,
+                "description": "Structured response for the modules command.",
+                "properties": {
+                    "pid": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Pid"
+                    },
+                    "modules": {
+                        "items": {
+                            "$ref": "#/$defs/ModuleEntry"
+                        },
+                        "title": "Modules",
+                        "type": "array"
+                    }
+                },
+                "title": "ModulesResponse",
                 "type": "object"
             },
             "ProcessStackTraceResponse": {
@@ -1634,6 +3071,212 @@
                 "title": "ThreadStackTraceResponse",
                 "type": "object"
             },
+            "TracepointInfo": {
+                "additionalProperties": false,
+                "description": "Configuration and runtime state of a non-stopping tracepoint.",
+                "properties": {
+                    "id": {
+                        "title": "Id",
+                        "type": "integer"
+                    },
+                    "location": {
+                        "title": "Location",
+                        "type": "string"
+                    },
+                    "file": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "File"
+                    },
+                    "line": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Line"
+                    },
+                    "function": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Function"
+                    },
+                    "watch": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Watch"
+                    },
+                    "data_id": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Data Id"
+                    },
+                    "size": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Size"
+                    },
+                    "access_type": {
+                        "anyOf": [
+                            {
+                                "enum": [
+                                    "write",
+                                    "readWrite"
+                                ],
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Access Type"
+                    },
+                    "condition": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "title": "Condition"
+                    },
+                    "expressions": {
+                        "items": {
+                            "type": "string"
+                        },
+                        "title": "Expressions",
+                        "type": "array"
+                    },
+                    "capture": {
+                        "items": {
+                            "enum": [
+                                "frame",
+                                "backtrace",
+                                "locals",
+                                "registers"
+                            ],
+                            "type": "string"
+                        },
+                        "title": "Capture",
+                        "type": "array"
+                    },
+                    "raw_backtrace": {
+                        "default": false,
+                        "title": "Raw Backtrace",
+                        "type": "boolean"
+                    },
+                    "max_matching_frames": {
+                        "default": 10,
+                        "title": "Max Matching Frames",
+                        "type": "integer"
+                    },
+                    "max_hits": {
+                        "default": 20,
+                        "title": "Max Hits",
+                        "type": "integer"
+                    },
+                    "hit_count": {
+                        "default": 0,
+                        "title": "Hit Count",
+                        "type": "integer"
+                    },
+                    "enabled": {
+                        "default": true,
+                        "title": "Enabled",
+                        "type": "boolean"
+                    },
+                    "auto_disabled": {
+                        "default": false,
+                        "title": "Auto Disabled",
+                        "type": "boolean"
+                    },
+                    "verified": {
+                        "default": false,
+                        "title": "Verified",
+                        "type": "boolean"
+                    },
+                    "message": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "default": null,
+                        "description": "Verification or error message from DAP",
+                        "title": "Message"
+                    }
+                },
+                "required": [
+                    "id",
+                    "location"
+                ],
+                "title": "TracepointInfo",
+                "type": "object"
+            },
+            "TracepointResponse": {
+                "additionalProperties": false,
+                "description": "Response for tracepoint command.",
+                "properties": {
+                    "tracepoints": {
+                        "items": {
+                            "$ref": "#/$defs/TracepointInfo"
+                        },
+                        "title": "Tracepoints",
+                        "type": "array"
+                    }
+                },
+                "required": [
+                    "tracepoints"
+                ],
+                "title": "TracepointResponse",
+                "type": "object"
+            },
             "WatchpointInfo": {
                 "description": "Information about an active data breakpoint (watchpoint).\n\n`verified` and `message` reflect the latest status reported by zxdb, either\nfrom the `setDataBreakpoints` response or from a later asynchronous\n`breakpoint` \"changed\" event.",
                 "properties": {
@@ -1751,6 +3394,27 @@
                     },
                     {
                         "$ref": "#/$defs/AsyncBacktraceResponse"
+                    },
+                    {
+                        "$ref": "#/$defs/ModulesResponse"
+                    },
+                    {
+                        "$ref": "#/$defs/AspaceResponse"
+                    },
+                    {
+                        "$ref": "#/$defs/HandlesResponse"
+                    },
+                    {
+                        "$ref": "#/$defs/MemReadResponse"
+                    },
+                    {
+                        "$ref": "#/$defs/DriverListResponse"
+                    },
+                    {
+                        "$ref": "#/$defs/TracepointResponse"
+                    },
+                    {
+                        "$ref": "#/$defs/DiagnoseHangResponse"
                     },
                     {
                         "additionalProperties": true,

@@ -138,7 +138,10 @@ template("go_build") {
                            ])
 
     script = "//build/go/gen_hermetic_inputs.py"
-    sources = [ "//build/go/gen_library_metadata.py" ]
+    sources = [
+      "${prebuilt_go_dir}/bin/go",
+      "//build/go/gen_library_metadata.py",
+    ]
     outputs = [ hermetic_inputs_target_output ]
     args = [
       "--output",
@@ -296,7 +299,12 @@ template("go_build") {
       }
     }
 
-    inputs = []
+    # build.py reads these when synthesizing go.mod and vendor/modules.txt for
+    # non-module packages (see NON_MODULE_PACKAGE_PATH_COMPONENTS in build.py).
+    inputs = [
+      "//third_party/golibs/go.mod",
+      "//third_party/golibs/vendor/modules.txt",
+    ]
 
     # Add needed arguments for the buildidtool. We should add the stamp file
     # output by buildidtool to the list of outputs for this action but because

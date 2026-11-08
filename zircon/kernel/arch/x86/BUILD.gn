@@ -81,10 +81,8 @@ compiler_config("integer-register-abi") {
 compiler_config("thread-pointer-abi") {
   # Clang needs -mcmodel=kernel to tell it to use the right safe-stack ABI for
   # the kernel.  It doesn't have any other effects that matter when using -fPIE
-  # as we do; it doesn't exist for x86-32.
-  if (toolchain_environment != "kernel.phys32") {
-    c_family_flags = [ "-mcmodel=kernel" ]
-  }
+  # as we do.
+  c_family_flags = [ "-mcmodel=kernel" ]
   if (rust_custom_target) {
     rust_target_edits = [
       {
@@ -127,19 +125,8 @@ compiler_config("safe-stack-abi") {
   if (toolchain_environment == "kernel" &&
       toolchain_variant.tags + [ "asan" ] - [ "asan" ] ==
       toolchain_variant.tags) {
+    sanitize = [ "safe-stack" ]
     rustflags = [ "-Zexternal-clangrt" ]
-    rust_target_edits = [
-      {
-        key = "supported-sanitizers"
-        action = "append"
-        value = "safestack"
-      },
-      {
-        key = "default-sanitizers"
-        action = "set"
-        value = [ "safestack" ]
-      },
-    ]
   }
 }
 
@@ -175,9 +162,6 @@ config("kernel") {
   # TODO(digit): Once the dependencies below have been migrated to the Fuchsia
   # build, only use configs to add the include paths.
   include_dirs += [
-    # <arch/aspace.h> has #include <bitmap/rle-bitmap.h>
-    "//zircon/system/ulib/bitmap/include",
-
     # <arch/aspace.h> has #include <arch/x86/page_tables/constants.h>.
     "page_tables/include",
 
@@ -191,7 +175,7 @@ config("kernel") {
     # <page_tables/x86/constants.h>.
     "//zircon/system/ulib/page_tables/include",
 
-    # <arch/x86/idle_states.h> has #include <ktl/atomic.h>.
+    # <arch/x86/idle_states.h> has #include <kernel/ffi.h> -> <ktl/byte.h>.
     "//zircon/kernel/lib/ktl/include",
 
     # <arch/x86.h> has #include <lib/arch/intrin.h>.
@@ -201,38 +185,20 @@ config("kernel") {
 
 source_set("x86") {
   sources = [
-    "amd.cc",
-    "arch.cc",
     "asm.S",
-    "bootstrap16.cc",
-    "cache.cc",
-    "crashlog.cc",
     "debugger.cc",
-    "descriptor.cc",
     "exceptions.S",
     "exceptions_c.cc",
     "feature.cc",
     "gdt.S",
-    "handoff.cc",
-    "hwp.cc",
-    "idle_states.cc",
-    "idt.cc",
-    "intel.cc",
-    "ioport.cc",
     "mmu.cc",
-    "mmu_mem_types.cc",
     "mp.cc",
-    "msr.cc",
-    "msr_bench.cc",
     "ops.S",
     "registers.cc",
-    "restricted.cc",
-    "smp.cc",
     "spinlock.cc",
     "start.S",
     "start16.S",
     "thread.cc",
-    "timer_freq.cc",
     "uspace_entry.S",
   ]
   deps = [
@@ -252,19 +218,18 @@ source_set("x86") {
     "//zircon/kernel/lib/crashlog",
     "//zircon/kernel/lib/debuglog",
     "//zircon/kernel/lib/fbl",
+    "//zircon/kernel/lib/id_allocator",
     "//zircon/kernel/lib/init",
     "//zircon/kernel/lib/instrumentation",
     "//zircon/kernel/lib/ktl",
     "//zircon/kernel/lib/ktrace",
     "//zircon/kernel/lib/page",
-    "//zircon/kernel/lib/perfmon",
     "//zircon/kernel/lib/root_resource_filter",
     "//zircon/kernel/lib/topology",
     "//zircon/kernel/object",
     "//zircon/kernel/phys/handoff",
     "//zircon/kernel/platform:headers",
     "//zircon/kernel/platform/pc",
-    "//zircon/system/ulib/bitmap",
     "//zircon/system/ulib/pretty",
   ]
   public_deps = [ ":headers" ]
@@ -283,22 +248,16 @@ library_headers("headers") {
     # <arch/x86/hypervisor.h> has #include <hypervisor/aspace.h>.
     "//zircon/kernel/hypervisor:headers",
 
-    # <arch/x86/hypervisor.h> has #include <lib/id_allocator.h>.
-    "//zircon/kernel/lib/id_allocator:headers",
+    # <arch/hypervisor.h> has #include <lib/object-constants.h>.
+    "//zircon/kernel/lib/object-constants:headers",
 
-    # <arch/x86/bootstrap16.h> has #include <lib/page/size.h>
-    # <arch/x86/pv.h> has #include <lib/page/size.h>
     # <arch/aspace.h> has #include <lib/page/size.h>
     "//zircon/kernel/lib/page:headers",
-
-    # <arch/aspace.h> has #include <bitmap/rle-bitmap.h>.
-    # <arch/x86/ioport.h> has #include <bitmap/rle-bitmap.h>.
-    "//zircon/system/ulib/bitmap:headers",
 
     # <arch/aspace.h> uses various fbl things
     "//zircon/system/ulib/fbl:headers",
 
-    # <arch/x86/idle_states.h> has #include <ktl/atomic.h>.
+    # <arch/x86/idle_states.h> has #include <kernel/ffi.h> -> <ktl/byte.h>.
     "//zircon/kernel/lib/ktl:headers",
 
     # <arch/x86.h> has #include <lib/arch/intrin.h>.
@@ -342,42 +301,155 @@ kernel_bindgen_crate("arch-x86-aspace-bindings") {
     "USER_ASPACE_BASE",
     "USER_ASPACE_SIZE",
     "USER_RESTRICTED_ASPACE_SIZE",
+    "X86_PAT_.*",
   ]
   notice_year = 2026
+}
+
+kernel_bindgen_crate("x86-crashlog-bindings") {
+  headers = [ "include/arch/crashlog_regs.h" ]
+  cpp = true
+  non_rust_deps = [ ":headers" ]
+  notice_year = 2026
+  raw_lines = [ "#![no_std]" ]
+  type_allowlist = [ "crashlog_regs_t" ]
+  opaque_types = [ "iframe_t" ]
+  explicit_padding = false
+}
+
+kernel_bindgen_crate("x86-idle-states-bindings") {
+  visibility = [ ":*" ]
+  headers = [ "include/arch/x86/idle_states.h" ]
+  cpp = true
+  non_rust_deps = [ ":headers" ]
+  type_blocklist = [
+    "zx_.*",
+    "X86IdleState.*",
+  ]
+  type_allowlist = [
+    "x86_idle_state_t",
+    "x86_idle_states_t",
+  ]
+  var_allowlist = [
+    "X86_CSTATE_C1_MWAIT_HINT",
+    "X86_MAX_CSTATES",
+    "kX86IdleStateMaskC1Only",
+  ]
+  explicit_padding = false
+  std_derives = [
+    "default",
+    "eq",
+    "partialeq",
+  ]
+  expect_lints = [
+    "non_camel_case_types",
+    "non_upper_case_globals",
+  ]
+  raw_lines = [
+    "#![no_std]",
+    "// SAFETY: Raw pointers cannot be dereferenced in safe Rust; `unsafe`",
+    "// constructors validate `name`.",
+    "unsafe impl Sync for x86_idle_state_t {}",
+    "// SAFETY: Contains only `[x86_idle_state_t; X86_MAX_CSTATES]` and `u32`",
+    "// fields.",
+    "unsafe impl Sync for x86_idle_states_t {}",
+  ]
+  notice_year = 2026
+}
+
+kernel_bindgen_crate("x86-feature-bindings") {
+  visibility = [ ":*" ]
+  headers = [ "include/arch/x86/feature.h" ]
+  cpp = true
+  non_rust_deps = [
+    ":headers",
+    "//zircon/kernel/lib/ktl:headers",
+  ]
+  deps = [ ":x86-idle-states-bindings" ]
+  notice_year = 2026
+  raw_lines = [
+    "#![no_std]",
+    "pub use x86_idle_states_bindings::{x86_idle_state_t, x86_idle_states_t};",
+  ]
+  type_blocklist = [ "x86_idle_state.*" ]
+  type_allowlist = [
+    "x86_model_info",
+    "x86_microarch_config_t",
+    "x86_microarch_list",
+    "x86_vendor_list",
+  ]
+  rustified_enum = [
+    "x86_microarch_list",
+    "x86_vendor_list",
+  ]
+  layout_tests = true
+  explicit_padding = false
+  expect_lints = [ "non_camel_case_types" ]
 }
 
 kernel_rust_mod("arch-x86-rs") {
   output_name = "arch_x86"
   source_root = "src/mod.rs"
   sources = [
+    "src/amd.rs",
+    "src/amd_ffi.rs",
     "src/apic.rs",
     "src/arch.rs",
     "src/arch_ffi.rs",
+    "src/bootstrap16.rs",
+    "src/bootstrap16_ffi.rs",
     "src/cache.rs",
+    "src/cache_ffi.rs",
+    "src/cpuid.rs",
+    "src/crashlog.rs",
+    "src/descriptor.rs",
+    "src/descriptor_ffi.rs",
     "src/fake_msr_access.rs",
     "src/feature.rs",
+    "src/handoff.rs",
+    "src/handoff_ffi.rs",
     "src/hwp.rs",
     "src/hwp_ffi.rs",
+    "src/idle_states.rs",
+    "src/idle_states_ffi.rs",
+    "src/idt.rs",
+    "src/idt_ffi.rs",
+    "src/intel.rs",
+    "src/intel_ffi.rs",
     "src/interrupts.rs",
     "src/ioapic.rs",
+    "src/ioport.rs",
+    "src/ioport_ffi.rs",
     "src/lapic.rs",
     "src/mmu_mem_types.rs",
     "src/mmu_mem_types_ffi.rs",
     "src/mod.rs",
     "src/mp.rs",
     "src/mp_ffi.rs",
+    "src/msr.rs",
     "src/msr_bench.rs",
-    "src/msr_bench_ffi.rs",
+    "src/msr_ffi.rs",
     "src/platform_access.rs",
     "src/pv.rs",
     "src/registers.rs",
+    "src/restricted.rs",
+    "src/restricted_ffi.rs",
+    "src/smp.rs",
+    "src/smp_ffi.rs",
+    "src/spinlock.rs",
+    "src/spinlock_ffi.rs",
     "src/system_topology.rs",
+    "src/timer_freq.rs",
     "src/vm.rs",
     "src/x86.rs",
   ]
   deps = [
     ":arch-x86-aspace-bindings",
     ":arch-x86-vm-bindings",
+    ":x86-crashlog-bindings",
+    ":x86-feature-bindings",
+    ":x86-idle-states-bindings",
+    "hypervisor:hypervisor-rs",
     "//sdk/rust/zbi",
     "//sdk/rust/zx-status",
     "//sdk/rust/zx-types",
@@ -388,11 +460,17 @@ kernel_rust_mod("arch-x86-rs") {
     "//src/lib/regio",
     "//src/lib/zr",
     "//third_party/rust_crates:pin-init",
+    "//third_party/rust_crates:zerocopy",
     "//zircon/kernel/arch:arch-types-bindings",
     "//zircon/kernel/lib/acpi_lite/rust:acpi_lite",
     "//zircon/kernel/lib/arch:arch-rs",
+    "//zircon/kernel/lib/boot-options:boot-options-rs",
     "//zircon/kernel/lib/debug",
+    "//zircon/kernel/lib/init:init_rust",
+    "//zircon/kernel/lib/libc:rust",
     "//zircon/kernel/lib/page:page-rs",
+    "//zircon/system/ulib/affine/rust:affine",
+    "//zircon/system/ulib/bitmap/rust:bitmap",
     "//zircon/system/ulib/fbl/rust:fbl",
   ]
   test_deps = [ "//zircon/kernel/lib/unittest:unittest-rs" ]
@@ -401,8 +479,6 @@ kernel_rust_mod("arch-x86-rs") {
 source_set("tests") {
   testonly = true
   sources = [
-    "hwp_tests.cc",
-    "idle_states_test.cc",
     "mmu_tests.cc",
     "platform_tests.cc",
   ]
@@ -415,6 +491,7 @@ source_set("tests") {
     "//zircon/kernel/lib/page",
     "//zircon/kernel/lib/topology:headers",
     "//zircon/kernel/lib/unittest",
+    "//zircon/kernel/platform/pc:headers",
   ]
 }
 

@@ -10,17 +10,13 @@ use crate::identity::ComponentIdentity;
 use crate::logs::repository::ARCHIVIST_MONIKER;
 use crate::logs::stats::{LogStreamStats, SaturationCurve};
 use derivative::Derivative;
-use diagnostics_log_encoding::encode::add_dropped_count;
 use diagnostics_log_encoding::{Header, TRACING_FORMAT_LOG_RECORD_TYPE};
 use fidl_fuchsia_diagnostics::{ComponentSelector, StreamMode};
-use fidl_fuchsia_logger::MAX_DATAGRAM_LEN_BYTES;
 use fuchsia_async as fasync;
 use fuchsia_async::condition::{Condition, ConditionGuard};
 use fuchsia_inspect::Node;
-use fuchsia_sync::Mutex;
-use futures::channel::oneshot;
 use log::debug;
-use ring_buffer::{self, RingBuffer, ring_buffer_record_len};
+use ring_buffer::{MAX_MESSAGE_SIZE, Reader, RingBuffer, ring_buffer_record_len};
 use std::collections::VecDeque;
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut, Range};
@@ -28,7 +24,7 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 use zerocopy::FromBytes;
 
-// Aim to keep 25% of the buffer free. This is expressed as a fraction: numerator / denominator.
+// Aim to keep 25% of the ring buffer free. This is expressed as a fraction: numerator / denominator.
 const SPACE_THRESHOLD_NUMERATOR: usize = 1;
 const SPACE_THRESHOLD_DENOMINATOR: usize = 4;
 
@@ -36,45 +32,65 @@ const SPACE_THRESHOLD_DENOMINATOR: usize = 4;
 // handle log messages.
 const DEFAULT_SLEEP_TIME: Duration = Duration::from_millis(200);
 
-pub fn create_ring_buffer(capacity: usize) -> ring_buffer::Reader {
-    RingBuffer::create(calculate_real_size_given_desired_capacity(capacity))
+// Target uncompressed size of each LZ4-compressed chunk.
+const CHUNK_SIZE: usize = 65536;
+
+pub struct Buffer {
+    // The underlying IOBuffer ring buffer reader used as the ingestion staging area.
+    reader: Reader,
+
+    // Target budget in bytes for the compressed log buffer (`logs_max_cached_original_bytes`).
+    capacity: usize,
 }
 
-fn calculate_real_size_given_desired_capacity(capacity: usize) -> usize {
-    // We always keep spare space in the buffer so that we don't drop messages.  This is controlled
-    // by SPACE_THRESHOLD_NUMERATOR & SPACE_THRESHOLD_DENOMINATOR.  Round up capacity so that
-    // `capacity` reflects the actual amount of log data we can store.
+impl Deref for Buffer {
+    type Target = Reader;
+
+    fn deref(&self) -> &Self::Target {
+        &self.reader
+    }
+}
+
+impl DerefMut for Buffer {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.reader
+    }
+}
+
+pub fn create_ring_buffer(capacity: usize) -> Buffer {
     let page_size = zx::system_get_page_size() as usize;
-    (capacity * SPACE_THRESHOLD_DENOMINATOR
-        / (SPACE_THRESHOLD_DENOMINATOR - SPACE_THRESHOLD_NUMERATOR))
-        .next_multiple_of(page_size)
+    let iob_capacity = (capacity * SPACE_THRESHOLD_NUMERATOR / SPACE_THRESHOLD_DENOMINATOR)
+        .max(MAX_MESSAGE_SIZE)
+        .next_multiple_of(page_size);
+    Buffer {
+        reader: RingBuffer::create(iob_capacity),
+        capacity: capacity.max(CHUNK_SIZE).max(MAX_MESSAGE_SIZE),
+    }
 }
-
-const IOB_PEER_CLOSED_KEY_BASE: u64 = 0x8000_0000_0000_0000;
 
 pub type OnInactive = Box<dyn Fn(Arc<ComponentIdentity>) + Send + Sync>;
+
+struct CompressedChunk {
+    // Monotonic byte range `start..end` in `Inner::data` (guaranteed not to cross a multiple of
+    // `Inner::data.len()`).
+    range: Range<u64>,
+
+    // Uncompressed byte length of this chunk. If equal to `range.end - range.start`, the chunk
+    // was not compressible and is stored uncompressed in `Inner::data`.
+    uncompressed_len: u32,
+
+    // Contiguous range of message IDs stored in this chunk.
+    msg_ids: Range<u64>,
+}
 
 pub struct SharedBuffer {
     inner: Condition<Inner>,
 
-    // Sockets. This *must* be locked after `inner` and the lock *must* be dropped before
-    // `InnerGuard` is dropped.
-    sockets: Mutex<Slab<Socket>>,
-
-    // Callback for when a container is inactive (i.e. no logs and no sockets).
+    // Callback for when a container is inactive (i.e. no logs and no IOBuffers).
     on_inactive: OnInactive,
 
-    // The port that we use to service the sockets.
-    port: zx::Port,
-
-    // Event used for termination.
-    event: zx::Event,
-
-    // The thread that we use to service the sockets.
-    socket_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
-
-    // The task responsible for monitoring the space in the IOBuffer and popping messages when it
-    // gets full. It will also wake cursors whenever new data arrives.
+    // The task responsible for draining the IOBuffer ring buffer into the compressed buffer and
+    // waking cursors whenever new data arrives.
     _buffer_monitor_task: fasync::Task<()>,
 
     /// Metric for tracking buffer saturation.
@@ -100,6 +116,7 @@ impl Drop for InnerGuard<'_> {
                 waker.wake();
             }
         }
+
         // SAFETY: This is the only place we drop the guard.
         unsafe {
             ManuallyDrop::drop(&mut self.guard);
@@ -131,40 +148,40 @@ struct Inner {
     // Registered containers.
     containers: Containers,
 
-    // Socket thread message queue.
-    thread_msg_queue: VecDeque<ThreadMessage>,
-
-    // The index in the buffer that we have scanned for messages.
-    last_scanned: u64,
-
-    // The ID of the message that was last scanned.
-    last_scanned_message_id: u64,
-
     // A copy of the tail index in the ring buffer.
     tail: u64,
 
-    // The ID of the message at the tail.  This is just a counter that increments one per message.
-    tail_message_id: u64,
+    // Single pre-allocated circular buffer holding all sealed compressed chunks.
+    data: Box<[u8]>,
+
+    // Monotonic byte offset in `data` where the next sealed compressed chunk will be written.
+    compressed_head: u64,
+
+    // Metadata for sealed chunks in `data` in chronological order.
+    chunks: VecDeque<CompressedChunk>,
+
+    // Pre-allocated 64 KiB (`CHUNK_SIZE`) staging buffer for the uncompressed chunk currently being
+    // built.
+    active_chunk: Vec<u8>,
+
+    // Contiguous range of message IDs currently stored in `active_chunk`.
+    active_msg_ids: Range<u64>,
+
+    // Monotonically increasing message ID assigned to the next record extracted into `active_chunk`.
+    next_msg_id: u64,
 
     // The IOBuffer peers that we must watch.
-    iob_peers: Slab<(ContainerId, zx::Iob)>,
+    iob_peers: Slab<fasync::ReceiverRegistration<IobPacketReceiver>>,
 
     // True, when the buffer has been terminated.
     terminated: bool,
-}
-
-enum ThreadMessage {
-    // The thread should terminate.
-    Terminate,
-
-    // Process all pending socket messages and report via the Sender when done.
-    Flush(oneshot::Sender<()>),
 }
 
 pub struct SharedBufferOptions {
     // To reduce how often Archivist wakes when new messages are written, Archivist will sleep for
     // this time. This will impact how quickly messages show up via the cursors.
     pub sleep_time: Duration,
+
     /// The size of the circular buffer for the saturation curve.
     pub saturation_curve_size: usize,
 }
@@ -176,45 +193,38 @@ impl Default for SharedBufferOptions {
 }
 
 impl SharedBuffer {
-    /// Returns a new shared buffer and the container for Archivist.
+    /// Returns a new shared buffer.
     pub fn new(
-        ring_buffer: ring_buffer::Reader,
+        ring_buffer: Buffer,
         on_inactive: OnInactive,
         options: SharedBufferOptions,
         inspect_node: &Node,
     ) -> Arc<Self> {
+        let Buffer { reader: ring_buffer, capacity } = ring_buffer;
         let saturation_curve =
             Arc::new(SaturationCurve::new(inspect_node, options.saturation_curve_size));
-        let this = Arc::new_cyclic(|weak: &Weak<Self>| Self {
+        Arc::new_cyclic(|weak: &Weak<Self>| Self {
             inner: Condition::new(Inner {
                 ring_buffer: Arc::clone(&ring_buffer),
                 containers: Containers::default(),
-                thread_msg_queue: VecDeque::default(),
-                last_scanned: 0,
-                last_scanned_message_id: 0,
                 tail: 0,
-                tail_message_id: 0,
+                data: vec![0; capacity].into_boxed_slice(),
+                compressed_head: 0,
+                chunks: VecDeque::new(),
+                active_chunk: Vec::with_capacity(CHUNK_SIZE),
+                active_msg_ids: 0..0,
+                next_msg_id: 0,
                 iob_peers: Slab::default(),
                 terminated: false,
             }),
-            sockets: Mutex::new(Slab::default()),
             on_inactive,
-            port: zx::Port::create(),
-            event: zx::Event::create(),
-            socket_thread: Mutex::default(),
             saturation_curve,
             _buffer_monitor_task: fasync::Task::spawn(Self::buffer_monitor_task(
                 Weak::clone(weak),
                 ring_buffer,
                 options.sleep_time,
             )),
-        });
-
-        *this.socket_thread.lock() = Some({
-            let this = Arc::clone(&this);
-            std::thread::spawn(move || this.socket_thread(options.sleep_time))
-        });
-        this
+        })
     }
 
     pub fn new_container_buffer(
@@ -222,20 +232,16 @@ impl SharedBuffer {
         identity: Arc<ComponentIdentity>,
         stats: Arc<LogStreamStats>,
     ) -> ContainerBuffer {
-        let mut inner = self.inner.lock();
-        let Inner { containers, ring_buffer, .. } = &mut *inner;
         ContainerBuffer {
             shared_buffer: Arc::clone(self),
-            container_id: containers.new_container(ring_buffer, Arc::clone(&identity), stats),
+            container_id: self.inner.lock().containers.new_container(identity, stats),
         }
     }
 
-    pub async fn flush(&self) {
-        let (sender, receiver) = oneshot::channel();
-        self.inner.lock().thread_msg_queue.push_back(ThreadMessage::Flush(sender));
-        self.event.signal(zx::Signals::empty(), zx::Signals::USER_0).unwrap();
-        // Ignore failure if Archivist is shutting down.
-        let _ = receiver.await;
+    pub fn flush(self: &Arc<Self>) {
+        let mut inner = InnerGuard::new(self);
+        let head = inner.ring_buffer.head();
+        inner.drain_ring_buffer(head);
     }
 
     /// Returns the number of registered containers in use by the buffer.
@@ -244,25 +250,18 @@ impl SharedBuffer {
         self.inner.lock().containers.len()
     }
 
-    /// Terminates the socket thread. The socket thread will drain the sockets before terminating.
-    /// Returns a future that may be awaited if the caller wants to wait for the socket thread to
-    /// terminate.
-    pub fn terminate(self: &Arc<Self>) -> impl Future<Output = ()> {
-        {
-            let mut inner = InnerGuard::new(self);
-            self.flush_sockets(&mut inner);
-            inner.thread_msg_queue.push_back(ThreadMessage::Terminate);
-        }
-        self.event.signal(zx::Signals::empty(), zx::Signals::USER_0).unwrap();
-        let join_handle = self.socket_thread.lock().take().unwrap();
-        fasync::unblock(|| {
-            let _ = join_handle.join();
-        })
+    /// Terminates the shared buffer, draining any remaining messages from the ring buffer and
+    /// waking all cursors.
+    pub fn terminate(self: &Arc<Self>) {
+        let mut inner = InnerGuard::new(self);
+        let head = inner.ring_buffer.head();
+        inner.drain_ring_buffer(head);
+        inner.terminated = true;
+        inner.wake = true;
     }
 
-    /// Returns a cursor that will return messages that match selector. There will be a limited
-    /// attempt to reorder messages by timestamp.  If no selectors are specified, *all* messages
-    /// will be returned.
+    /// Returns a cursor that will return messages that match `selectors`. If no selectors are
+    /// specified, *all* messages will be returned.
     pub fn cursor(
         self: &Arc<Self>,
         mode: StreamMode,
@@ -271,131 +270,7 @@ impl SharedBuffer {
         InnerGuard::new(self).cursor(mode, selectors)
     }
 
-    fn socket_thread(self: Arc<Self>, sleep_time: Duration) {
-        const INTERRUPT_KEY: u64 = u64::MAX;
-        let mut sockets_ready = Vec::new();
-        let mut iob_peer_closed = Vec::new();
-        let mut interrupt_needs_arming = true;
-        let mut msg = None;
-
-        loop {
-            let mut deadline = if msg.is_some() {
-                zx::MonotonicInstant::INFINITE_PAST
-            } else {
-                if interrupt_needs_arming {
-                    self.event
-                        .wait_async(
-                            &self.port,
-                            INTERRUPT_KEY,
-                            zx::Signals::USER_0,
-                            zx::WaitAsyncOpts::empty(),
-                        )
-                        .unwrap();
-                    interrupt_needs_arming = false;
-                }
-
-                // Wait so that we're not constantly waking up for every log message that is queued.
-                // Ignore errors here.
-                let _ = self
-                    .event
-                    .wait_one(zx::Signals::USER_0, zx::MonotonicInstant::after(sleep_time.into()));
-                zx::MonotonicInstant::INFINITE
-            };
-
-            // Gather the list of sockets that are ready to read.
-            loop {
-                match self.port.wait(deadline) {
-                    Ok(packet) => {
-                        if packet.key() == INTERRUPT_KEY {
-                            interrupt_needs_arming = true;
-                            // To maintain proper ordering, we must capture the message here whilst
-                            // we are still gathering the list of sockets that are ready to read.
-                            // If we wait till later, we introduce windows where we might miss a
-                            // socket that should be read.
-                            if msg.is_none() {
-                                msg = self.inner.lock().thread_msg_queue.pop_front();
-                            }
-                        } else if packet.key() & IOB_PEER_CLOSED_KEY_BASE != 0 {
-                            iob_peer_closed.push(packet.key() as u32);
-                        } else {
-                            sockets_ready.push(SocketId(packet.key() as u32))
-                        }
-                    }
-                    Err(zx::Status::TIMED_OUT) => break,
-                    Err(status) => panic!("port wait error: {status:?}"),
-                }
-                deadline = zx::MonotonicInstant::INFINITE_PAST;
-            }
-
-            let mut inner = InnerGuard::new(&self);
-
-            if !iob_peer_closed.is_empty() {
-                // See the comment on `is_active()` for why this is required.
-                inner.update_message_ids(inner.ring_buffer.head());
-
-                for iob_peer_closed in iob_peer_closed.drain(..) {
-                    let container_id = inner.iob_peers.free(iob_peer_closed).0;
-                    if let Some(container) = inner.containers.get_mut(container_id) {
-                        container.iob_count -= 1;
-                        if container.iob_count == 0 && !container.is_active() {
-                            if container.should_free() {
-                                inner.containers.free(container_id);
-                            } else {
-                                let identity = Arc::clone(&container.identity);
-                                inner.on_inactive.push(identity);
-                            }
-                        }
-                    }
-                }
-            }
-
-            {
-                let mut sockets = self.sockets.lock();
-                for socket_id in sockets_ready.drain(..) {
-                    inner.read_socket(&mut sockets, socket_id, |socket| {
-                        socket
-                            .socket
-                            .wait_async(
-                                &self.port,
-                                socket_id.0 as u64,
-                                zx::Signals::OBJECT_READABLE | zx::Signals::OBJECT_PEER_CLOSED,
-                                zx::WaitAsyncOpts::empty(),
-                            )
-                            .unwrap();
-                    });
-                }
-            }
-
-            // Now that we've processed the sockets, we can process the message.
-            if let Some(m) = msg.take() {
-                match m {
-                    ThreadMessage::Terminate => {
-                        inner.terminated = true;
-                        inner.wake = true;
-                        return;
-                    }
-                    ThreadMessage::Flush(sender) => {
-                        let _ = sender.send(());
-                    }
-                }
-
-                // See if there's another message.
-                msg = inner.thread_msg_queue.pop_front();
-                if msg.is_none() {
-                    // If there are no more messages, we must clear the signal so that we get
-                    // notified when the next message arrives. This must be done whilst we are
-                    // holding the lock.
-                    self.event.signal(zx::Signals::USER_0, zx::Signals::empty()).unwrap();
-                }
-            }
-        }
-    }
-
-    async fn buffer_monitor_task(
-        this: Weak<Self>,
-        mut ring_buffer: ring_buffer::Reader,
-        sleep_time: Duration,
-    ) {
+    async fn buffer_monitor_task(this: Weak<Self>, mut ring_buffer: Reader, sleep_time: Duration) {
         let mut last_head = 0;
         loop {
             // Sleep to limit how often we wake up.
@@ -403,28 +278,163 @@ impl SharedBuffer {
             let head = ring_buffer.wait(last_head).await;
             let Some(this) = this.upgrade() else { return };
             let mut inner = InnerGuard::new(&this);
-            inner.check_space(head);
-            last_head = head;
+            inner.drain_ring_buffer(head);
+            last_head = inner.tail;
         }
-    }
-
-    /// Flushes sockets and returns the head index.
-    fn flush_sockets(&self, inner: &mut InnerGuard<'_>) -> u64 {
-        let mut sockets = self.sockets.lock();
-        let mut socket_id = 0;
-        while let Some(next_id) = sockets.next_used(socket_id) {
-            // The socket doesn't need to be rearmed here.
-            inner.read_socket(&mut sockets, SocketId(next_id), |_| {});
-            socket_id = next_id + 1;
-        }
-        let head = inner.ring_buffer.head();
-        inner.update_message_ids(head);
-        head
     }
 }
 
 impl Inner {
-    // Returns list of containers that no longer have any messages.
+    fn compressed_tail_message_id(&self) -> u64 {
+        self.chunks.front().map(|c| c.msg_ids.start).unwrap_or(self.active_msg_ids.start)
+    }
+
+    fn chunk_bytes(&self, chunk: &CompressedChunk) -> &[u8] {
+        let phys_start = (chunk.range.start % self.data.len() as u64) as usize;
+        let len = (chunk.range.end - chunk.range.start) as usize;
+        &self.data[phys_start..phys_start + len]
+    }
+
+    /// Compresses `self.active_chunk` into the circular `self.data` buffer and records a new
+    /// `CompressedChunk` in `self.chunks`.
+    fn seal_active_chunk(&mut self) {
+        if self.active_chunk.is_empty() {
+            return;
+        }
+        let cap = self.data.len();
+        let uncompressed_len = self.active_chunk.len();
+        let phys_start = (self.compressed_head % cap as u64) as usize;
+        // We only want to store the compressed output if it is strictly smaller than
+        // `uncompressed_len` (since `stored_len == uncompressed_len` indicates an uncompressed
+        // chunk) and fits before the physical end of `self.data`.
+        let max_dst = (cap - phys_start).min(uncompressed_len - 1);
+
+        // Evict any oldest chunks that would be overwritten by writing up to `uncompressed_len`
+        // bytes at `self.compressed_head`.
+        while self.chunks.front().is_some_and(|oldest| {
+            self.compressed_head + uncompressed_len as u64 - oldest.range.start > cap as u64
+        }) {
+            self.chunks.pop_front();
+        }
+
+        let stored_len = if let Ok(compressed_len) =
+            lz4::compress_into(&self.active_chunk, &mut self.data[phys_start..phys_start + max_dst])
+        {
+            // Fast path: the compressed chunk fit in the remaining tail of `self.data` and was
+            // strictly smaller than `uncompressed_len`.
+            compressed_len
+        } else if max_dst < uncompressed_len - 1 {
+            // We are near the physical end of `self.data` (`cap - phys_start < uncompressed_len`)
+            // and the compressed output did not fit in the remaining tail space. Since a chunk
+            // cannot straddle the end of `self.data`, advance `self.compressed_head` to wrap to
+            // physical index 0.
+            self.compressed_head += (cap - phys_start) as u64;
+            // Evict any oldest chunks that would be overwritten by writing up to `uncompressed_len`
+            // bytes at physical index 0.
+            while self.chunks.front().is_some_and(|oldest| {
+                self.compressed_head + uncompressed_len as u64 - oldest.range.start > cap as u64
+            }) {
+                self.chunks.pop_front();
+            }
+            // Retry compressing at the start of `self.data`. If compression still fails, the data
+            // is incompressible, so store it uncompressed at `0..uncompressed_len`.
+            if let Ok(compressed_len) =
+                lz4::compress_into(&self.active_chunk, &mut self.data[0..uncompressed_len - 1])
+            {
+                compressed_len
+            } else {
+                self.data[0..uncompressed_len].copy_from_slice(&self.active_chunk);
+                uncompressed_len
+            }
+        } else {
+            // `max_dst == uncompressed_len - 1`, meaning there was at least `uncompressed_len`
+            // bytes of contiguous space at `phys_start`, so compression failed only because the
+            // chunk did not compress to fewer than `uncompressed_len` bytes. Store the raw bytes
+            // uncompressed; cursors detect this via
+            // `chunk.range.end - chunk.range.start == chunk.uncompressed_len`.
+            self.data[phys_start..phys_start + uncompressed_len]
+                .copy_from_slice(&self.active_chunk);
+            uncompressed_len
+        };
+
+        let range = self.compressed_head..self.compressed_head + stored_len as u64;
+        self.chunks.push_back(CompressedChunk {
+            range: range.clone(),
+            uncompressed_len: uncompressed_len as u32,
+            msg_ids: self.active_msg_ids.clone(),
+        });
+        self.compressed_head = range.end;
+        self.active_chunk.clear();
+        self.active_msg_ids = self.next_msg_id..self.next_msg_id;
+    }
+
+    fn append_message(&mut self, container_id: ContainerId, message: &[u8]) {
+        let msg_len = message.len();
+        let record_bytes = 8 + msg_len;
+
+        // If appending this record would cause `active_chunk` to exceed `CHUNK_SIZE` (64 KiB),
+        // compress and seal the current `active_chunk` into `self.data` first.
+        if !self.active_chunk.is_empty() && self.active_chunk.len() + record_bytes > CHUNK_SIZE {
+            self.seal_active_chunk();
+        }
+
+        let severity = (msg_len >= 8)
+            .then(|| Header::read_from_bytes(&message[0..8]).unwrap().severity().into());
+        self.active_chunk.extend_from_slice(&container_id.0.to_ne_bytes());
+        self.active_chunk.extend_from_slice(&(msg_len as u32).to_ne_bytes());
+        self.active_chunk.extend_from_slice(message);
+
+        let msg_id = self.next_msg_id;
+        self.next_msg_id += 1;
+        self.active_msg_ids.end = self.next_msg_id;
+
+        let container = self.containers.get_mut(container_id).unwrap();
+        container.last_msg_id = Some(msg_id);
+        if let Some(severity) = severity {
+            container.stats.ingest_message(msg_len, severity);
+        }
+    }
+}
+
+impl<'a> InnerGuard<'a> {
+    fn new(buffer: &'a Arc<SharedBuffer>) -> Self {
+        Self {
+            buffer,
+            guard: ManuallyDrop::new(buffer.inner.lock()),
+            on_inactive: Vec::new(),
+            wake: false,
+        }
+    }
+
+    fn finish_ingest(&mut self, old_compressed_tail: u64) {
+        // If any old chunks were evicted while sealing chunks above, check whether any containers
+        // had their last message evicted and are now inactive.
+        let new_compressed_tail = self.compressed_tail_message_id();
+        if new_compressed_tail > old_compressed_tail {
+            let mut id = 0;
+            while let Some(used_id) = self.containers.slab.next_used(id) {
+                id = used_id + 1;
+                let container = self.containers.slab.get_mut(used_id).unwrap();
+                if container.last_msg_id.is_some_and(|msg_id| msg_id < new_compressed_tail) {
+                    container.last_msg_id = None;
+                    if !container.is_active() {
+                        if container.should_free() {
+                            self.containers.slab.free(used_id);
+                        } else {
+                            let identity = Arc::clone(&container.identity);
+                            self.on_inactive.push(identity);
+                        }
+                    }
+                }
+            }
+        }
+
+        self.wake = true;
+        let boot_time = zx::BootInstant::get().into_nanos();
+        let count = self.next_msg_id - new_compressed_tail;
+        self.buffer.saturation_curve.record(boot_time, count);
+    }
+
     fn ingest(&mut self, msg: &[u8], container_id: ContainerId) {
         if msg.len() < std::mem::size_of::<Header>() {
             debug!("message too short ({})", msg.len());
@@ -449,253 +459,93 @@ impl Inner {
             return;
         }
 
-        let Some(container) = self.containers.get_mut(container_id) else {
+        if self.containers.get(container_id).is_none() {
             return;
-        };
-
-        let mut data;
-        let msg = if container.dropped_count > 0 {
-            data = msg.to_vec();
-            if !add_dropped_count(&mut data, container.dropped_count) {
-                debug!("unable to add dropped count to invalid message");
-                container.stats.increment_invalid(data.len());
-                return;
-            }
-            &data
-        } else {
-            msg
-        };
-
-        if container.iob.write(Default::default(), 0, msg).is_err() {
-            // We were unable to write the message to the buffer, most likely due to lack of
-            // space. We drop this message and then we'll add to the dropped count for the next
-            // message.
-            container.dropped_count += 1
-        } else {
-            container.dropped_count = 0;
-        }
-    }
-
-    /// Parses the first message within `range` returns (container_id, message, timestamp).
-    ///
-    /// # Panics
-    ///
-    /// This will panic if the ring buffer has been corrupted. Only the kernel and Archivist can
-    /// write to the ring buffer and so we trust both not to corrupt the ring buffer.
-    ///
-    /// # Safety
-    ///
-    /// `range` *must* be within the written range of the ring buffer so that there is no concurrent
-    /// write access to that range. The returned slice is only valid whilst this remains true.
-    unsafe fn parse_message(
-        &self,
-        range: Range<u64>,
-    ) -> (ContainerId, &[u8], Option<zx::BootInstant>) {
-        let (tag, msg) = unsafe { self.ring_buffer.first_message_in(range) }
-            .expect("Unable to read message from ring buffer");
-        (
-            ContainerId(tag as u32),
-            msg,
-            (msg.len() >= 16)
-                .then(|| zx::BootInstant::from_nanos(i64::read_from_bytes(&msg[8..16]).unwrap())),
-        )
-    }
-}
-
-impl<'a> InnerGuard<'a> {
-    fn new(buffer: &'a Arc<SharedBuffer>) -> Self {
-        Self {
-            buffer,
-            guard: ManuallyDrop::new(buffer.inner.lock()),
-            on_inactive: Vec::new(),
-            wake: false,
-        }
-    }
-
-    /// Pops a message and returns its total size. The caller should call `update_message_ids(head)`
-    /// prior to calling this.
-    ///
-    /// NOTE: This will pop the oldest message in terms of when it was inserted which is *not*
-    /// necessarily the message with the *oldest* timestamp because we might not have received the
-    /// messages in perfect timestamp order. This should be close enough for all use cases we care
-    /// about, and besides, the timestamps can't be trusted anyway.
-    fn pop(&mut self, head: u64) -> Option<usize> {
-        if head == self.tail {
-            return None;
         }
 
-        // SAFETY: There can be no concurrent writes between `tail..head` and the *only* place
-        // we increment the tail index is just before we leave this function.
-        let record_len = {
-            let (container_id, message, _) = unsafe { self.parse_message(self.tail..head) };
-            let record_len = ring_buffer_record_len(message.len());
+        self.drain_ring_buffer(self.ring_buffer.head());
+        let old_compressed_tail = self.compressed_tail_message_id();
+        self.append_message(container_id, &msg[..msg_len]);
+        self.finish_ingest(old_compressed_tail);
+    }
 
-            let container = self.containers.get_mut(container_id).unwrap();
+    /// Drains all records in `self.tail..head` from the ring buffer into `self.active_chunk`
+    /// (sealing chunks into `self.data` as needed) and updates container stats and liveness.
+    fn drain_ring_buffer(&mut self, head: u64) {
+        if self.tail >= head {
+            return;
+        }
+        let old_compressed_tail = self.compressed_tail_message_id();
+        while self.tail < head {
+            let index = self.tail;
+            // Read the message length first so we can seal `active_chunk` before copying if needed.
+            //
+            // SAFETY: `index..head` is within the written range of the ring buffer
+            // (`self.tail..head`), so there is no concurrent write access to this range. Only the
+            // kernel and Archivist can write to the ring buffer and so we trust both not to corrupt
+            // it.
+            let msg_len = unsafe { self.ring_buffer.first_message_in(index..head) }
+                .expect("Unable to read message from ring buffer")
+                .1
+                .len();
+            let record_len = ring_buffer_record_len(msg_len);
+            let record_bytes = 8 + msg_len;
 
-            container.stats.increment_rolled_out(record_len);
-            container.msg_ids.start += 1;
-            if !container.is_active() {
-                if container.should_free() {
-                    self.containers.free(container_id);
-                } else {
-                    let identity = Arc::clone(&container.identity);
-                    self.on_inactive.push(identity);
-                }
+            // If appending this record would cause `active_chunk` to exceed `CHUNK_SIZE` (64 KiB),
+            // compress and seal the current `active_chunk` into `self.data` first.
+            if !self.active_chunk.is_empty() && self.active_chunk.len() + record_bytes > CHUNK_SIZE
+            {
+                self.seal_active_chunk();
             }
 
-            record_len
-        };
-
-        // NOTE: This should go last. After incrementing `tail`, the `message` can be overwritten.
-        self.ring_buffer.increment_tail(record_len);
-        self.tail += record_len as u64;
-        self.tail_message_id += 1;
-
-        // The caller should have called `update_message_ids(head)` prior to calling this.
-        assert!(self.last_scanned >= self.tail);
-
-        Some(record_len)
-    }
-
-    /// Reads a socket. Calls `rearm` to rearm the socket once it has been drained.
-    fn read_socket(
-        &mut self,
-        sockets: &mut Slab<Socket>,
-        socket_id: SocketId,
-        rearm: impl FnOnce(&mut Socket),
-    ) {
-        let Some(socket) = sockets.get_mut(socket_id.0) else { return };
-        let container_id = socket.container_id;
-
-        loop {
-            self.check_space(self.ring_buffer.head());
-
-            let mut data = Vec::with_capacity(MAX_DATAGRAM_LEN_BYTES as usize);
-
-            // Read directly into the buffer leaving space for the header.
-            let len = match socket.socket.read_uninit(data.spare_capacity_mut()) {
-                Ok(d) => d.len(),
-                Err(zx::Status::SHOULD_WAIT) => {
-                    // The socket has been drained.
-                    rearm(socket);
-                    return;
-                }
-                Err(_) => break,
+            // Copy `[container_id, msg_len, message]` from the ring buffer into `active_chunk`.
+            let (container_id, severity) = {
+                let Inner { ring_buffer, active_chunk, .. } = &mut **self;
+                // SAFETY: `index..head` is within `self.tail..head`.
+                let (tag, message) = unsafe { ring_buffer.first_message_in(index..head) }
+                    .expect("Unable to read message from ring buffer");
+                let container_id = ContainerId(tag as u32);
+                let severity = (msg_len >= 8)
+                    .then(|| Header::read_from_bytes(&message[0..8]).unwrap().severity().into());
+                active_chunk.extend_from_slice(&container_id.0.to_ne_bytes());
+                active_chunk.extend_from_slice(&(msg_len as u32).to_ne_bytes());
+                active_chunk.extend_from_slice(message);
+                (container_id, severity)
             };
 
-            // SAFETY: `read_uninit` will have written to `len` bytes.
-            unsafe {
-                data.set_len(len);
-            }
+            self.ring_buffer.increment_tail(record_len);
+            self.tail += record_len as u64;
+
+            let msg_id = self.next_msg_id;
+            self.next_msg_id += 1;
+            self.active_msg_ids.end = self.next_msg_id;
 
             let container = self.containers.get_mut(container_id).unwrap();
-            if data.len() < 16 {
-                container.stats.increment_invalid(data.len());
-                continue;
-            }
-
-            let header = Header::read_from_bytes(&data[..std::mem::size_of::<Header>()]).unwrap();
-            let msg_len = header.size_words() as usize * 8;
-            if header.raw_type() != TRACING_FORMAT_LOG_RECORD_TYPE || msg_len != data.len() {
-                debug!("bad type or size ({}, {}, {})", header.raw_type(), msg_len, data.len());
-                container.stats.increment_invalid(data.len());
-                continue;
-            }
-
-            if container.dropped_count > 0 && !add_dropped_count(&mut data, container.dropped_count)
-            {
-                debug!("unable to add dropped count to invalid message");
-                container.stats.increment_invalid(data.len());
-                continue;
-            }
-
-            if container.iob.write(Default::default(), 0, &data).is_err() {
-                // We were unable to write the message to the buffer, most likely due to lack of
-                // space. We drop this message and then we'll add to the dropped count for the next
-                // message.
-                container.dropped_count += 1
-            } else {
-                container.dropped_count = 0;
-            }
-        }
-
-        // This path is taken when the socket should be closed.
-
-        // See the comment on `is_active()` for why this is required.
-        self.update_message_ids(self.ring_buffer.head());
-
-        let container = self.containers.get_mut(container_id).unwrap();
-        container.remove_socket(socket_id, sockets);
-        if !container.is_active() {
-            if container.should_free() {
-                self.containers.free(container_id);
-            } else {
-                let identity = Arc::clone(&container.identity);
-                self.on_inactive.push(identity);
-            }
-        }
-    }
-
-    /// Scans the ring buffer and updates `msg_ids` for the containers.
-    fn update_message_ids(&mut self, head: u64) {
-        while self.last_scanned < head {
-            // SAFETY: This is safe because `head` must be within the ring buffer range and we make
-            // sure that `self.last_scanned` is always >= `tail` in `pop()`.
-            let (container_id, message, _) = unsafe { self.parse_message(self.last_scanned..head) };
-            let msg_len = message.len();
-            let severity = (msg_len >= 8)
-                .then(|| Header::read_from_bytes(&message[0..8]).unwrap().severity().into());
-            let container = self.containers.get_mut(container_id).unwrap();
-            container.msg_ids.end += 1;
+            container.last_msg_id = Some(msg_id);
             if let Some(severity) = severity {
                 container.stats.ingest_message(msg_len, severity);
             }
-            self.last_scanned += ring_buffer_record_len(msg_len) as u64;
-            self.last_scanned_message_id += 1;
-            self.wake = true;
         }
-        if self.wake {
-            let boot_time = zx::BootInstant::get().into_nanos();
-            let count = self.last_scanned_message_id - self.tail_message_id;
-            self.buffer.saturation_curve.record(boot_time, count);
-        }
-    }
 
-    /// Ensures the buffer keeps the required amount of space.
-    fn check_space(&mut self, head: u64) {
-        self.update_message_ids(head);
-        let capacity = self.ring_buffer.capacity();
-        let mut space = capacity
-            .checked_sub((head - self.tail) as usize)
-            .unwrap_or_else(|| panic!("bad range: {:?}", self.tail..head));
-        let required_space = capacity * SPACE_THRESHOLD_NUMERATOR / SPACE_THRESHOLD_DENOMINATOR;
-        while space < required_space {
-            let Some(amount) = self.pop(head) else { break };
-            space += amount;
-        }
+        self.finish_ingest(old_compressed_tail);
     }
 
     /// Returns a cursor.
     fn cursor(&mut self, mode: StreamMode, selectors: Vec<ComponentSelector>) -> FilterCursor {
-        // NOTE: It is not safe to use on_inactive in this function because this function can be
-        // called whilst locks are held which are the same locks that the on_inactive notification
-        // uses.
-        let (index, message_id) = match mode {
-            StreamMode::Snapshot => (self.tail, self.tail_message_id),
+        let (message_id, end_msg_id) = match mode {
+            StreamMode::Snapshot => {
+                let head = self.ring_buffer.head();
+                self.drain_ring_buffer(head);
+                (self.compressed_tail_message_id(), Some(self.next_msg_id))
+            }
+            StreamMode::SnapshotThenSubscribe => (self.compressed_tail_message_id(), None),
             StreamMode::Subscribe => {
                 let head = self.ring_buffer.head();
-                self.update_message_ids(head);
-                (self.last_scanned, self.last_scanned_message_id)
+                self.drain_ring_buffer(head);
+                (self.next_msg_id, None)
             }
-            StreamMode::SnapshotThenSubscribe => (self.tail, self.tail_message_id),
         };
-        FilterCursor::new(
-            Arc::clone(self.buffer),
-            index,
-            message_id,
-            matches!(mode, StreamMode::Snapshot),
-            selectors,
-        )
+        FilterCursor::new(Arc::clone(self.buffer), message_id, end_msg_id, selectors)
     }
 }
 
@@ -723,14 +573,10 @@ impl Containers {
 
     fn new_container(
         &mut self,
-        buffer: &RingBuffer,
         identity: Arc<ComponentIdentity>,
         stats: Arc<LogStreamStats>,
     ) -> ContainerId {
-        ContainerId(self.slab.insert(|id| {
-            let (iob, _) = buffer.new_iob_writer(id as u64).unwrap();
-            ContainerInfo::new(identity, stats, iob)
-        }))
+        ContainerId(self.slab.insert(|_| ContainerInfo::new(identity, stats)))
     }
 
     fn free(&mut self, id: ContainerId) {
@@ -744,9 +590,9 @@ struct ContainerInfo {
     // The identity of the container.
     identity: Arc<ComponentIdentity>,
 
-    // The first and last message IDs stored in the shared buffer. The last message ID can be out of
-    // date if there are concurrent writers.
-    msg_ids: Range<u64>,
+    // Message ID of the most recently extracted message for this container, if it is still present
+    // in the compressed buffer.
+    last_msg_id: Option<u64>,
 
     // Whether the container is terminated.
     terminated: bool,
@@ -755,68 +601,28 @@ struct ContainerInfo {
     #[derivative(Debug = "ignore")]
     stats: Arc<LogStreamStats>,
 
-    // The first socket ID for this container.
-    first_socket_id: SocketId,
-
-    // The IOBuffer used for writing.
-    iob: zx::Iob,
-
     // The number of client IOBuffers.
     iob_count: usize,
-
-    // The number of messages dropped when forwarding from a socket to an IOBuffer.
-    dropped_count: u64,
 }
 
 impl ContainerInfo {
-    fn new(identity: Arc<ComponentIdentity>, stats: Arc<LogStreamStats>, iob: zx::Iob) -> Self {
-        Self {
-            identity,
-            msg_ids: 0..0,
-            terminated: false,
-            stats,
-            first_socket_id: SocketId::NULL,
-            iob,
-            iob_count: 0,
-            dropped_count: 0,
-        }
+    fn new(identity: Arc<ComponentIdentity>, stats: Arc<LogStreamStats>) -> Self {
+        Self { identity, last_msg_id: None, terminated: false, stats, iob_count: 0 }
     }
 
     fn should_free(&self) -> bool {
         self.terminated && !self.is_active()
     }
 
-    // Returns true if the container is considered active which is the case if it has sockets, io
-    // buffers, or buffered messages.
+    // Returns true if the container is considered active which is the case if it has IOBuffers or
+    // buffered messages.
     //
-    // NOTE: Whenever a socket or iob is closed, `update_message_ids` must called to ensure
-    // `msg_ids.end` is correctly set.
+    // NOTE: Whenever an IOBuffer is closed, `drain_ring_buffer` must be called to ensure
+    // `last_msg_id` is up to date.
     fn is_active(&self) -> bool {
-        self.first_socket_id != SocketId::NULL
-            || self.iob_count > 0
-            || self.msg_ids.end != self.msg_ids.start
+        self.iob_count > 0
+            || self.last_msg_id.is_some()
             || ARCHIVIST_MONIKER.get().is_some_and(|m| *self.identity == *m)
-    }
-
-    // # Panics
-    //
-    // This will panic if the socket isn't found.
-    fn remove_socket(&mut self, socket_id: SocketId, sockets: &mut Slab<Socket>) {
-        let Socket { prev, next, .. } = *sockets.get(socket_id.0).unwrap();
-        if prev == SocketId::NULL {
-            self.first_socket_id = next;
-        } else {
-            sockets.get_mut(prev.0).unwrap().next = next;
-        }
-        if next != SocketId::NULL {
-            sockets
-                .get_mut(next.0)
-                .unwrap_or_else(|| panic!("next {next:?} has been freed!"))
-                .prev = prev;
-        }
-        sockets.free(socket_id.0);
-        self.stats.close_socket();
-        debug!(identity:% = self.identity; "Socket closed.");
     }
 }
 
@@ -835,7 +641,7 @@ impl ContainerBuffer {
     ///
     /// If the message is invalid, it is dropped.
     pub fn push_back(&self, msg: &[u8]) {
-        self.shared_buffer.inner.lock().ingest(msg, self.container_id);
+        InnerGuard::new(&self.shared_buffer).ingest(msg, self.container_id);
     }
 
     /// Returns the identity of the container if it still exists.
@@ -851,46 +657,43 @@ impl ContainerBuffer {
     /// Returns an IOBuffer for the container.
     pub fn iob(&self) -> zx::Iob {
         let mut inner = self.shared_buffer.inner.lock();
-
         inner.containers.get_mut(self.container_id).unwrap().iob_count += 1;
-
         let (ep0, ep1) = inner.ring_buffer.new_iob_writer(self.container_id.0 as u64).unwrap();
-
-        inner.iob_peers.insert(|idx| {
-            ep1.wait_async(
-                &self.shared_buffer.port,
-                idx as u64 | IOB_PEER_CLOSED_KEY_BASE,
-                zx::Signals::IOB_PEER_CLOSED,
-                zx::WaitAsyncOpts::empty(),
-            )
-            .unwrap();
-
-            (self.container_id, ep1)
+        let buffer = Arc::downgrade(&self.shared_buffer);
+        let container_id = self.container_id;
+        inner.iob_peers.insert(|peer_id| {
+            let reg = fasync::EHandle::local().register_receiver(IobPacketReceiver {
+                buffer,
+                container_id,
+                iob: ep1,
+                peer_id,
+            });
+            reg.iob
+                .wait_async(
+                    reg.port(),
+                    reg.key(),
+                    zx::Signals::IOB_PEER_CLOSED,
+                    zx::WaitAsyncOpts::empty(),
+                )
+                .unwrap();
+            reg
         });
 
         ep0
     }
 
-    /// Marks the buffer as terminated which will force all cursors to end and close all sockets.
-    /// The component's data will remain in the buffer until the messages are rolled out. This will
-    /// *not* drain sockets or close IOBuffers.
+    /// Marks the buffer as terminated which will force all cursors to end. The component's data
+    /// will remain in the buffer until the messages are rolled out. This will *not* close
+    /// IOBuffers.
     pub fn terminate(&self) {
         let mut inner = InnerGuard::new(&self.shared_buffer);
 
         // See the comment on `is_active()` for why this is required.
-        inner.update_message_ids(inner.ring_buffer.head());
+        let head = inner.ring_buffer.head();
+        inner.drain_ring_buffer(head);
 
         if let Some(container) = inner.containers.get_mut(self.container_id) {
             container.terminated = true;
-            if container.first_socket_id != SocketId::NULL {
-                let mut sockets = self.shared_buffer.sockets.lock();
-                loop {
-                    container.remove_socket(container.first_socket_id, &mut sockets);
-                    if container.first_socket_id == SocketId::NULL {
-                        break;
-                    }
-                }
-            }
             if container.should_free() {
                 inner.containers.free(self.container_id);
             }
@@ -898,7 +701,7 @@ impl ContainerBuffer {
         }
     }
 
-    /// Returns true if the container has messages, sockets or IOBuffers.
+    /// Returns true if the container has messages or IOBuffers.
     pub fn is_active(&self) -> bool {
         self.shared_buffer
             .inner
@@ -907,35 +710,42 @@ impl ContainerBuffer {
             .get(self.container_id)
             .is_some_and(|c| c.is_active())
     }
-
-    /// Adds a socket for this container.
-    pub fn add_socket(&self, socket: zx::Socket) {
-        let mut inner = self.shared_buffer.inner.lock();
-        let Some(container) = inner.containers.get_mut(self.container_id) else { return };
-        container.stats.open_socket();
-        let next = container.first_socket_id;
-        let mut sockets = self.shared_buffer.sockets.lock();
-        let socket_id = SocketId(sockets.insert(|socket_id| {
-            socket
-                .wait_async(
-                    &self.shared_buffer.port,
-                    socket_id as u64,
-                    zx::Signals::OBJECT_READABLE | zx::Signals::OBJECT_PEER_CLOSED,
-                    zx::WaitAsyncOpts::empty(),
-                )
-                .unwrap();
-            Socket { socket, container_id: self.container_id, prev: SocketId::NULL, next }
-        }));
-        if next != SocketId::NULL {
-            sockets.get_mut(next.0).unwrap().prev = socket_id;
-        }
-        container.first_socket_id = socket_id;
-    }
 }
 
 impl Drop for ContainerBuffer {
     fn drop(&mut self) {
         self.terminate();
+    }
+}
+
+struct IobPacketReceiver {
+    buffer: Weak<SharedBuffer>,
+    container_id: ContainerId,
+    iob: zx::Iob,
+    peer_id: u32,
+}
+
+impl fasync::PacketReceiver for IobPacketReceiver {
+    fn receive_packet(&self, _packet: zx::Packet) {
+        let Some(buffer) = self.buffer.upgrade() else { return };
+        let mut inner = InnerGuard::new(&buffer);
+
+        // See the comment on `is_active()` for why this is required.
+        let head = inner.ring_buffer.head();
+        inner.drain_ring_buffer(head);
+
+        inner.iob_peers.free(self.peer_id);
+        if let Some(container) = inner.containers.get_mut(self.container_id) {
+            container.iob_count -= 1;
+            if container.iob_count == 0 && !container.is_active() {
+                if container.should_free() {
+                    inner.containers.free(self.container_id);
+                } else {
+                    let identity = Arc::clone(&container.identity);
+                    inner.on_inactive.push(identity);
+                }
+            }
+        }
     }
 }
 
@@ -999,8 +809,6 @@ impl<T> Slab<T> {
             };
             free_index as u32
         } else {
-            // This is < rather than <= because we reserve 0xffff_ffff to be used as a NULL value
-            // (see SocketId::NULL below).
             assert!(self.slab.len() < u32::MAX as usize);
             self.slab.push(Slot::Used(value(self.slab.len() as u32)));
             (self.slab.len() - 1) as u32
@@ -1020,21 +828,6 @@ impl<T> Slab<T> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct SocketId(u32);
-
-impl SocketId {
-    const NULL: Self = SocketId(0xffff_ffff);
-}
-
-struct Socket {
-    socket: zx::Socket,
-    container_id: ContainerId,
-    // Sockets are stored as a linked list for each container.
-    prev: SocketId,
-    next: SocketId,
-}
-
 #[cfg(test)]
 mod tests {
     use super::{SharedBuffer, SharedBufferOptions, Slab, create_ring_buffer};
@@ -1046,7 +839,7 @@ mod tests {
     use fidl_fuchsia_diagnostics::StreamMode;
     use fuchsia_async as fasync;
     use fuchsia_async::TimeoutExt;
-    use fuchsia_inspect::Inspector;
+    use fuchsia_inspect::{Inspector, Node};
     use futures::FutureExt;
     use futures::channel::mpsc;
     use futures::future::OptionFuture;
@@ -1201,7 +994,7 @@ mod tests {
             yield_to_executor().await;
 
             let inner = buffer.inner.lock();
-            if inner.ring_buffer.head() > inner.ring_buffer.capacity() as u64 {
+            if inner.compressed_head > inner.data.len() as u64 {
                 break;
             }
         }
@@ -1404,7 +1197,7 @@ mod tests {
         assert!(cursor_b.next().await.is_some());
         assert!(cursor_c.next().await.is_some());
 
-        drop(buffer.terminate());
+        buffer.terminate();
 
         // All cursors should return the 4 remaining messages.
         assert_eq!(cursor_a.count().await, 4);
@@ -1428,7 +1221,7 @@ mod tests {
             container_cursor(&buffer, &container, StreamMode::SnapshotThenSubscribe).unwrap();
         let cursor_c = container_cursor(&buffer, &container, StreamMode::Snapshot).unwrap();
 
-        drop(buffer.terminate());
+        buffer.terminate();
 
         assert_eq!(cursor_a.count().await, 0);
         assert_eq!(cursor_b.count().await, 0);
@@ -1476,22 +1269,21 @@ mod tests {
     }
 
     #[fuchsia::test]
-    async fn socket_increments_logstats() {
+    async fn iob_increments_logstats() {
         let inspector = Inspector::default();
         let identity =
             Arc::new(ComponentIdentity::new(ExtendedMoniker::parse_str("./test").unwrap(), ""));
         let stats = Arc::new(LogStreamStats::new(inspector.root(), &identity));
-        let buffer = Arc::new(SharedBuffer::new(
+        let buffer = SharedBuffer::new(
             create_ring_buffer(65536),
             Box::new(|_| {}),
             Default::default(),
             &fuchsia_inspect::Node::default(),
-        ));
+        );
         let container_a = Arc::new(buffer.new_container_buffer(Arc::new(vec!["a"].into()), stats));
         let msg = make_message("a", None, zx::BootInstant::from_nanos(1));
 
-        let (local, remote) = zx::Socket::create_datagram();
-        container_a.add_socket(remote);
+        let iob = container_a.iob();
 
         let cursor_a = container_cursor(&buffer, &container_a, StreamMode::Subscribe).unwrap();
 
@@ -1505,7 +1297,7 @@ mod tests {
         let mut next = futures.next();
         assert!(futures::poll!(&mut next).is_pending());
 
-        local.write(msg.bytes()).unwrap();
+        iob.write(Default::default(), 0, msg.bytes()).unwrap();
 
         let cursor_b = pin!(container_cursor(&buffer, &container_a, StreamMode::Snapshot).unwrap());
 
@@ -1513,15 +1305,14 @@ mod tests {
 
         // If cursor_a wasn't woken, this will hang.
         next.await;
-        // Validate logstats (must happen after the socket was handled)
+
+        // Validate logstats (must happen after the ring buffer was drained).
         assert_data_tree!(
             inspector,
             root: contains {
                 test: {
                     url: "",
                     last_timestamp: AnyProperty,
-                    sockets_closed: 0u64,
-                    sockets_opened: 1u64,
                     invalid: {
                         number: 0u64,
                         bytes: 0u64,
@@ -1529,10 +1320,6 @@ mod tests {
                     total: {
                         number: 1u64,
                         bytes: 88u64,
-                    },
-                    rolled_out: {
-                        number: 0u64,
-                        bytes: 0u64,
                     },
                     trace: {
                         number: 0u64,
@@ -1564,47 +1351,10 @@ mod tests {
     }
 
     #[fuchsia::test]
-    async fn socket() {
-        let buffer = Arc::new(SharedBuffer::new(
-            create_ring_buffer(MAX_MESSAGE_SIZE),
-            Box::new(|_| {}),
-            Default::default(),
-            &fuchsia_inspect::Node::default(),
-        ));
-        let container_a =
-            Arc::new(buffer.new_container_buffer(Arc::new(vec!["a"].into()), test_stats()));
-        let msg = make_message("a", None, zx::BootInstant::from_nanos(1));
-
-        let (local, remote) = zx::Socket::create_datagram();
-        container_a.add_socket(remote);
-
-        let cursor_a = container_cursor(&buffer, &container_a, StreamMode::Subscribe).unwrap();
-
-        // Use FuturesUnordered so that we can make sure that the cursor is woken when a message is
-        // received (FuturesUnordered uses separate wakers for all the futures it manages).
-        let mut futures = FuturesUnordered::new();
-        futures.push(async move {
-            let mut cursor_a = pin!(cursor_a);
-            cursor_a.next().await
-        });
-        let mut next = futures.next();
-        assert!(futures::poll!(&mut next).is_pending());
-
-        local.write(msg.bytes()).unwrap();
-
-        let cursor_b = pin!(container_cursor(&buffer, &container_a, StreamMode::Snapshot).unwrap());
-
-        assert_eq!(cursor_b.map(|item| assert_eq!(&*item, msg.bytes())).count().await, 1);
-
-        // If cursor_a wasn't woken, this will hang.
-        next.await;
-    }
-
-    #[fuchsia::test]
-    async fn socket_on_inactive() {
+    async fn iob_on_inactive() {
         let on_inactive = Arc::new(AtomicU64::new(0));
         let a_identity = Arc::new(vec!["a"].into());
-        let buffer = Arc::new(SharedBuffer::new(
+        let buffer = SharedBuffer::new(
             create_ring_buffer(MAX_MESSAGE_SIZE),
             {
                 let on_inactive = Arc::clone(&on_inactive);
@@ -1616,14 +1366,12 @@ mod tests {
             },
             SharedBufferOptions { sleep_time: Duration::ZERO, ..Default::default() },
             &fuchsia_inspect::Node::default(),
-        ));
+        );
         let container_a = Arc::new(buffer.new_container_buffer(a_identity, test_stats()));
         let msg = make_message("a", None, zx::BootInstant::from_nanos(1));
 
-        let (local, remote) = zx::Socket::create_datagram();
-        container_a.add_socket(remote);
-
-        local.write(msg.bytes()).unwrap();
+        let iob = container_a.iob();
+        iob.write(Default::default(), 0, msg.bytes()).unwrap();
 
         let cursor = pin!(container_cursor(&buffer, &container_a, StreamMode::Snapshot).unwrap());
 
@@ -1642,49 +1390,45 @@ mod tests {
 
         assert_eq!(on_inactive.load(Ordering::Relaxed), 0);
 
-        // Close the socket.
-        std::mem::drop(local);
+        // Close the IOBuffer.
+        std::mem::drop(iob);
 
-        // We don't know when the socket thread will run so we have to loop.
         while on_inactive.load(Ordering::Relaxed) != 1 {
-            fasync::Timer::new(Duration::from_millis(50)).await;
+            yield_to_executor().await;
         }
     }
 
+    // `SharedBuffer::new` spawns a task, which requires an active executor (provided by
+    // `#[fuchsia::test]` when the test function is `async`).
     #[fuchsia::test]
+    #[allow(clippy::unused_async)]
     async fn flush() {
         let a_identity = Arc::new(vec!["a"].into());
-        let buffer = Arc::new(SharedBuffer::new(
+        let buffer = SharedBuffer::new(
             create_ring_buffer(1024 * 1024),
             Box::new(|_| {}),
             Default::default(),
             &fuchsia_inspect::Node::default(),
-        ));
+        );
         let container_a = Arc::new(buffer.new_container_buffer(a_identity, test_stats()));
         let msg = make_message("a", None, zx::BootInstant::from_nanos(1));
 
-        let (local, remote) = zx::Socket::create_datagram();
-        container_a.add_socket(remote);
+        let iob = container_a.iob();
 
         let cursor = pin!(container_cursor(&buffer, &container_a, StreamMode::Subscribe).unwrap());
 
         const COUNT: usize = 1000;
         for _ in 0..COUNT {
-            local.write(msg.bytes()).unwrap();
+            iob.write(Default::default(), 0, msg.bytes()).unwrap();
         }
 
-        // Race two flush futures.
-        let mut flush_futures = FuturesUnordered::from_iter([buffer.flush(), buffer.flush()]);
-        flush_futures.next().await;
+        buffer.flush();
 
         let messages: Option<Vec<_>> = cursor.take(COUNT).collect().now_or_never();
-        assert!(messages.is_some());
-
-        // Make sure the other one finishes too.
-        flush_futures.next().await;
+        assert_eq!(messages.map(|m| m.len()), Some(COUNT));
 
         // Make sure we can still terminate the buffer.
-        buffer.terminate().await;
+        buffer.terminate();
     }
 
     #[fuchsia::test]
@@ -1698,5 +1442,36 @@ mod tests {
         assert_eq!(slab.next_used(ids[1]), Some(ids[1]));
         assert_eq!(slab.next_used(ids[1] + 1), Some(ids[3]));
         assert_eq!(slab.next_used(ids[3] + 1), None);
+    }
+
+    #[fuchsia::test]
+    async fn small_capacity_incompressible_chunk() {
+        let buffer = SharedBuffer::new(
+            create_ring_buffer(0),
+            Box::new(|_| {}),
+            Default::default(),
+            &Node::default(),
+        );
+        let container = buffer.new_container_buffer(Arc::new(vec!["a"].into()), test_stats());
+
+        // Push > 64 KiB (`CHUNK_SIZE`) of incompressible messages to force sealing an
+        // incompressible chunk when the requested capacity was smaller than `CHUNK_SIZE`.
+        let mut rng_state = 0x1234_5678_9abc_def0u64;
+        for ts in 0..70 {
+            let text: String = (0..1000)
+                .map(|_| {
+                    rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    (b'!' + ((rng_state >> 32) % 94) as u8) as char
+                })
+                .collect();
+            let msg = make_message(&text, None, zx::BootInstant::from_nanos(ts));
+            container.push_back(msg.bytes());
+        }
+
+        let cursor = pin!(container_cursor(&buffer, &container, StreamMode::Snapshot).unwrap());
+        let messages: Vec<_> = cursor.collect().await;
+        assert!(!messages.is_empty());
+
+        buffer.terminate();
     }
 }

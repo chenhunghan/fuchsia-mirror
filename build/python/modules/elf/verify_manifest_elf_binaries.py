@@ -188,7 +188,9 @@ def find_unstripped_file(
                 build_id_dir = os.path.join(lib_dir, ".build-id")
             if not os.path.exists(build_id_dir):
                 return None
-            build_id = get_elf_info(filename).build_id
+            info = get_elf_info(filename)
+            assert info is not None, "%s: not an ELF file" % filename
+            build_id = info.build_id
             # The build-id value is an hexadecimal string, used to locate the
             # debug file under debug/.build-id/XX/YYYYYY.debug where XX are its
             # first two chars, and YYYYYY is the rest (typically longer than
@@ -210,6 +212,19 @@ def find_unstripped_file(
             else:
                 subdir = "exe.unstripped"
             debugfile = os.path.join(dir, subdir, file)
+            if (
+                subdir == "lib.unstripped"
+                and not os.path.exists(debugfile)
+                and os.path.basename(dir) == "dist"
+            ):
+                # Rust dylibs emit a stripped distribution copy under
+                # .../dist/libfoo.so while keeping the unstripped file under
+                # .../lib.unstripped/libfoo.so.
+                dist_debugfile = os.path.join(
+                    os.path.dirname(dir), subdir, file
+                )
+                if os.path.exists(dist_debugfile):
+                    debugfile = dist_debugfile
             while not os.path.exists(debugfile):
                 # For dir/foo/bar, if dir/foo/exe.unstripped/bar
                 # didn't exist, try dir/exe.unstripped/foo/bar.

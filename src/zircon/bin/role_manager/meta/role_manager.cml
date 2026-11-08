@@ -27,6 +27,7 @@
         {
             protocol: [ "fuchsia.kernel.ProfileResource" ],
         },
+        { protocol: "fuchsia.sys2.BootNotifier" },
     ],
     expose: [
         {

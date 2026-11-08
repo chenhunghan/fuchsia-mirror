@@ -13,6 +13,10 @@ load(
 )
 load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
 load(
+    "//build/bazel/rules/packages:fx_package.bzl",
+    "fx_package",
+)
+load(
     "//build/bazel/rules/packages:fx_packaged_binary.bzl",
     "fx_packaged_binary",
 )
@@ -73,7 +77,6 @@ rustc_binary(
         "src/security/wep.rs",
     ],
     binary_name = "wlanix",
-    crate_root = "src/main.rs",
     edition = "2024",
     lint_config = "//build/config/rust/lints:clippy_warn_all",
     proc_macro_deps = [
@@ -100,8 +103,9 @@ rustc_binary(
         "//src/connectivity/wlan/lib/ieee80211",
         "//src/connectivity/wlan/lib/power_manager",
         "//src/connectivity/wlan/lib/telemetry:wlan-telemetry",
+        "//src/diagnostics/lib/redactor_client",
         "//src/lib/diagnostics/inspect/runtime/rust",
-        "//src/lib/diagnostics/inspect/rust:fuchsia-inspect",
+        "//src/lib/diagnostics/inspect/rust",
         "//src/lib/diagnostics/log/rust",
         "//src/lib/fidl/rust/fidl",
         "//src/lib/fuchsia",
@@ -125,6 +129,7 @@ rustc_binary(
 rustc_test(
     name = "wlanix_bin_test",
     crate = ":wlanix_bin",
+    edition = "2024",
     deps = [
         "//src/connectivity/wlan/lib/power_manager:power_manager_testing",
         "//third_party/rust_crates/vendor:assert_matches",
@@ -165,6 +170,12 @@ fuchsia_structured_config_rust_lib(
 fx_component(
     name = "component",
     compiled_manifest = ":wlanix-manifest",
-    component_name = "wlanix",
     deps = [":wlanix_packaged_bin"],
+)
+
+fx_package(
+    name = "wlanix",
+    package_name = "wlanix",
+    components = [":component"],
+    visibility = ["//bundles/assembly:__subpackages__"],
 )

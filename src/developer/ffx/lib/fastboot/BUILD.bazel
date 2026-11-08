@@ -1,0 +1,90 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "lib",
+    srcs = [
+        "src/boot/mod.rs",
+        "src/common/caching.rs",
+        "src/common/crypto.rs",
+        "src/common/mod.rs",
+        "src/common/vars.rs",
+        "src/error.rs",
+        "src/file_resolver/mod.rs",
+        "src/file_resolver/resolvers.rs",
+        "src/info/mod.rs",
+        "src/lib.rs",
+        "src/lock/mod.rs",
+        "src/manifest/mod.rs",
+        "src/manifest/resolvers.rs",
+        "src/manifest/v1.rs",
+        "src/manifest/v2.rs",
+        "src/manifest/v3.rs",
+        "src/manifest/v4.rs",
+        "src/unlock/mod.rs",
+        "src/util.rs",
+    ],
+    crate_name = "ffx_fastboot",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//src/developer/ffx/lib/diagnostics/checks:__pkg__",
+        "//src/developer/ffx/lib/fastboot/connection_factory:__pkg__",
+        "//src/developer/ffx/plugins/product/create:__pkg__",
+        "//src/developer/ffx/plugins/target/bootloader:__pkg__",
+        "//src/developer/ffx/plugins/target/fastboot:__pkg__",
+        "//src/developer/ffx/plugins/target/flash:__pkg__",
+    ],
+    deps = [
+        "//src/developer/fastboot:lib",
+        "//src/developer/ffx/config:lib",
+        "//src/developer/ffx/lib/fastboot/flash_manifest:lib",
+        "//src/developer/ffx/lib/fastboot/interface:lib",
+        "//src/developer/ffx/lib/futures:lib",
+        "//src/developer/ffx/lib/pbms:lib",
+        "//src/developer/ffx/lib/sdk:lib",
+        "//src/lib/assembly/partitions_config",
+        "//src/lib/assembly/product_bundle",
+        "//src/storage/lib/sparse/rust:lib",
+        "//third_party/rust_crates/vendor:async-fs",
+        "//third_party/rust_crates/vendor:base64",
+        "//third_party/rust_crates/vendor:byteorder",
+        "//third_party/rust_crates/vendor:camino",
+        "//third_party/rust_crates/vendor:chrono",
+        "//third_party/rust_crates/vendor:flate2",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:ring",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:tar",
+        "//third_party/rust_crates/vendor:tempfile",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:tokio",
+        "//third_party/rust_crates/vendor:walkdir",
+        "//third_party/rust_crates/vendor:zerocopy",
+        "//third_party/rust_crates/vendor:zip",
+    ],
+)
+
+host_rustc_test(
+    name = "lib_test",
+    crate = ":lib",
+    crate_name = "ffx_fastboot_lib_test",
+    edition = "2024",
+    visibility = [
+        "//src/developer/ffx:__subpackages__",
+    ],
+    deps = [
+        "//src/lib/assembly/partitions_config",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:serde_json",
+    ],
+)

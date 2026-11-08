@@ -1,0 +1,32 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":crust"],
+    visibility = ["//examples:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "unittests",
+    srcs = [
+        "crust.cc",
+        "//examples/rust/staticlib/rust:crust.h",
+    ],
+    tags = ["manual"],
+    deps = [
+        "//examples/rust/staticlib/rust:crust",
+        "//src/lib/fxl/test:gtest_main",
+    ],
+)
+
+fx_unittest_package(
+    name = "crust",
+    unit_tests = [":unittests"],
+)

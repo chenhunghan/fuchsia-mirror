@@ -20,6 +20,7 @@
 #include <arch/vm.h>
 #include <ktl/span.h>
 #include <vm/arch_vm_aspace.h>
+#include <vm/vm_ffi.h>
 
 #ifndef VM_TRACING_LEVEL
 #define VM_TRACING_LEVEL 0

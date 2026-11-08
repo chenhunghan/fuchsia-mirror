@@ -1,6 +1,9 @@
 // Copyright 2026 The Fuchsia Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+// TODO(https://fxbug.dev/581987928): Remove `#![coverage(off)]` once compiler options can control
+// atomic coverage counter updates.
+#![coverage(off)]
 
 use core::arch::asm;
 
@@ -46,6 +49,17 @@ pub fn store_memory_barrier() {
     // without modifying memory or register state.
     unsafe {
         asm!("fence w, w", options(nostack, preserves_flags));
+    }
+}
+
+/// Force the processor to complete all modifications to register state and
+/// memory by previous instructions before the next instruction is fetched.
+#[inline(always)]
+pub fn serialize_instructions() {
+    // SAFETY: `fence.i` synchronizes the instruction and data streams without modifying
+    // memory or register state.
+    unsafe {
+        asm!("fence.i", options(nostack, preserves_flags));
     }
 }
 

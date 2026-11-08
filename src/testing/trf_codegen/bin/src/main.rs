@@ -38,6 +38,10 @@ struct Args {
     #[argh(option)]
     cut_component_name: Option<String>,
 
+    /// configuration capability namespace prefix for the component under test
+    #[argh(option)]
+    cut_config_namespace: Option<String>,
+
     /// mock paths
     #[argh(option)]
     mock: Vec<String>,
@@ -76,6 +80,7 @@ struct CodeGenInputs<'a> {
     manifest_content: Option<&'a str>,
     target_name: Option<&'a str>,
     cut_component_name: Option<&'a str>,
+    cut_config_namespace: Option<&'a str>,
     mock_paths: &'a [String],
 }
 
@@ -83,18 +88,14 @@ fn process_pipeline(inputs: CodeGenInputs<'_>) -> Result<generator::GeneratedArt
     let parse_result = parse_source(inputs.source_code, inputs.mock_sources)
         .map_err(|err| anyhow::anyhow!("Failed to parse TRF AST annotations: {}", err))?;
 
-    let manifest = inputs
-        .manifest_content
-        .map(|content| {
-            serde_json::from_str::<ComponentManifest>(content)
-                .context("Failed to parse component manifest JSON")
-        })
-        .transpose()?;
+    let manifest = inputs.manifest_content.map(ComponentManifest::parse).transpose()?;
 
-    let auto_routes = check_consistency(&parse_result, manifest.as_ref()).map_err(|errors| {
-        let error_messages: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
-        anyhow::anyhow!("Manifest linting errors:\n{}", error_messages.join("\n"))
-    })?;
+    let auto_routes =
+        check_consistency(&parse_result, manifest.as_ref(), inputs.cut_config_namespace.is_some())
+            .map_err(|errors| {
+                let error_messages: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
+                anyhow::anyhow!("Manifest linting errors:\n{}", error_messages.join("\n"))
+            })?;
 
     let generated_artifacts = generate_artifacts(
         &parse_result,
@@ -102,6 +103,8 @@ fn process_pipeline(inputs: CodeGenInputs<'_>) -> Result<generator::GeneratedArt
         inputs.target_name,
         inputs.cut_component_name,
         inputs.mock_paths,
+        manifest.as_ref().map(|parsed_manifest| &parsed_manifest.config_capabilities),
+        inputs.cut_config_namespace,
     )
     .context("Failed to generate code and manifest artifacts")?;
 
@@ -128,6 +131,7 @@ fn run_pipeline(args: Args) -> Result<()> {
         manifest_content: manifest_content.as_deref(),
         target_name: args.target_name.as_deref(),
         cut_component_name: args.cut_component_name.as_deref(),
+        cut_config_namespace: args.cut_config_namespace.as_deref(),
         mock_paths: &args.mock,
     };
 
@@ -212,9 +216,50 @@ mod tests {
             manifest_content: None,
             target_name: Some("test_foo"),
             cut_component_name: Some("test_foo"),
+            cut_config_namespace: None,
             mock_paths: &[],
         };
         let result = process_pipeline(inputs);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_process_pipeline_resolves_config_capabilities_from_cml() {
+        let source_code = r#"
+            #[trf::test(config(switch_case = true, max_items = 16))]
+            async fn test_custom_service() {}
+        "#;
+        let cml = r#"
+            {
+                use: [
+                    {
+                        config: "fuchsia.sys.custom.SwitchCase",
+                        key: "switch_case",
+                        type: "bool",
+                    },
+                    {
+                        config: "fuchsia.sys.custom.MaxItems",
+                        key: "max_items",
+                        type: "uint32",
+                    },
+                ],
+                expose: [
+                    { protocol: "fuchsia.sys.custom.Service", from: "self" },
+                ],
+            }
+        "#;
+        let inputs = CodeGenInputs {
+            source_code,
+            mock_sources: &[],
+            manifest_content: Some(cml),
+            target_name: Some("custom_trf_test"),
+            cut_component_name: Some("custom_service"),
+            cut_config_namespace: None,
+            mock_paths: &[],
+        };
+        let artifacts = process_pipeline(inputs).expect("pipeline should succeed");
+        assert!(artifacts.realm_factory_rs.contains("fuchsia.sys.custom.SwitchCase"));
+        assert!(artifacts.realm_factory_rs.contains("fuchsia.sys.custom.MaxItems"));
+        assert!(!artifacts.realm_factory_rs.contains("fuchsia.examples."));
     }
 }

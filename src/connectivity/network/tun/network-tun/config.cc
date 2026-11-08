@@ -45,7 +45,7 @@ std::optional<BasePortConfig> BasePortConfig::Create(
 }
 
 std::optional<DevicePortConfig> DevicePortConfig::Create(
-    const fuchsia_net_tun::wire::DevicePortConfig& config) {
+    fuchsia_net_tun::wire::DevicePortConfig&& config) {
   if (!config.has_base()) {
     return std::nullopt;
   }
@@ -58,6 +58,18 @@ std::optional<DevicePortConfig> DevicePortConfig::Create(
   out.online = config.has_online() && config.online();
   if (config.has_mac()) {
     out.mac = config.mac();
+  }
+  if (config.has_power_dependency_token()) {
+    zx::event& token = config.power_dependency_token();
+    // PortAdapter hands out duplicates of the token over FIDL, so a token that
+    // can't be duplicated and transferred is an invalid configuration.
+    constexpr zx_rights_t kRequiredRights = ZX_RIGHT_DUPLICATE | ZX_RIGHT_TRANSFER;
+    zx_info_handle_basic_t info;
+    if (token.get_info(ZX_INFO_HANDLE_BASIC, &info, sizeof(info), nullptr, nullptr) != ZX_OK ||
+        (info.rights & kRequiredRights) != kRequiredRights) {
+      return std::nullopt;
+    }
+    out.power_dependency_token = std::move(token);
   }
   return out;
 }

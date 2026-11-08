@@ -14,7 +14,8 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
-#include <re2/re2.h>
+
+#include "re2/re2.h"
 
 using ::testing::Invoke;
 using ::testing::Return;

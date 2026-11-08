@@ -357,10 +357,13 @@ pub(crate) struct PowerState {
     recorder: Option<power_observability_state_recorder::EnumStateRecorder<StaIfacePowerLevel>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ConnectedNetwork {
     pub bssid: Bssid,
     pub rssi: i8,
+    /// `None` when `rssi` was last updated by an RSSI monitor threshold breach, which does not
+    /// report SNR.
+    pub snr: Option<i8>,
 }
 
 #[async_trait]
@@ -380,7 +383,7 @@ pub(crate) trait ClientIface: Sync + Send {
     fn get_connected_network(&self) -> Option<ConnectedNetwork>;
 
     fn on_disconnect(&self, info: &fidl_sme::DisconnectSource);
-    fn on_signal_report(&self, ind: fidl_internal::SignalReportIndication);
+    fn on_rssi_threshold_breached(&self, rssi_dbm: i8);
     async fn set_bt_coexistence_mode(
         &self,
         mode: fidl_internal::BtCoexistenceMode,
@@ -814,6 +817,7 @@ impl ClientIface for SmeClientIface {
             *self.connected_network.lock() = Some(ConnectedNetwork {
                 bssid: bss_description.bssid,
                 rssi: bss_description.rssi_dbm,
+                snr: Some(bss_description.snr_db),
             });
             Ok(ConnectResult::Success(ConnectSuccess {
                 bss: Box::new(bss_description),
@@ -858,11 +862,10 @@ impl ClientIface for SmeClientIface {
         self.connected_network.lock().take();
     }
 
-    fn on_signal_report(&self, ind: fidl_internal::SignalReportIndication) {
-        if let Some(connected_network) = self.connected_network.lock().as_mut()
-            && let Some(rssi) = ind.rssi_dbm
-        {
-            connected_network.rssi = rssi;
+    fn on_rssi_threshold_breached(&self, rssi_dbm: i8) {
+        if let Some(connected_network) = self.connected_network.lock().as_mut() {
+            connected_network.rssi = rssi_dbm;
+            connected_network.snr = None;
         }
     }
 
@@ -1035,10 +1038,27 @@ impl ClientIface for SmeClientIface {
     }
 
     async fn get_signal_report(&self) -> Result<fidl_stats::SignalReport, Error> {
-        self.telemetry_proxy
+        let bssid_before = self.connected_network.lock().as_ref().map(|n| n.bssid);
+        let report = self
+            .telemetry_proxy
             .get_signal_report()
             .await?
-            .map_err(|e| format_err!("Failed to get signal report: {:?}", e))
+            .map_err(|e| format_err!("Failed to get signal report: {:?}", e))?;
+        let mut connected_network = self.connected_network.lock();
+        let same_bssid =
+            bssid_before.is_some() && bssid_before == connected_network.as_ref().map(|n| n.bssid);
+        if same_bssid
+            && let Some(connected_network) = connected_network.as_mut()
+            && let Some(conn_report) = &report.connection_signal_report
+        {
+            if let Some(rssi) = conn_report.rssi_dbm {
+                connected_network.rssi = rssi;
+            }
+            if let Some(snr) = conn_report.snr_db {
+                connected_network.snr = Some(snr);
+            }
+        }
+        Ok(report)
     }
 
     async fn get_iface_stats(&self) -> Result<fidl_stats::IfaceStats, Error> {
@@ -1186,6 +1206,9 @@ pub mod test_utils {
     use ieee80211::{MacAddrBytes, Ssid};
     use wlan_common::random_bss_description;
 
+    pub const FAKE_STA_ADDR: fidl_ieee80211::MacAddr = [13, 37, 13, 37, 13, 37];
+    pub const FAKE_FACTORY_ADDR: fidl_ieee80211::MacAddr = [12, 34, 56, 78, 90, 12];
+
     pub static FAKE_IFACE_RESPONSE: fidl_device_service::QueryIfaceResponse =
         fidl_device_service::QueryIfaceResponse {
             role: fidl_fuchsia_wlan_common::WlanMacRole::Client,
@@ -1241,7 +1264,7 @@ pub mod test_utils {
     }
 
     pub fn fake_connected_network() -> ConnectedNetwork {
-        ConnectedNetwork { bssid: Bssid::from([1, 2, 3, 4, 5, 6]), rssi: -35 }
+        ConnectedNetwork { bssid: Bssid::from([1, 2, 3, 4, 5, 6]), rssi: -35, snr: Some(20) }
     }
 
     #[derive(Debug, Clone)]
@@ -1259,12 +1282,12 @@ pub mod test_utils {
             key_mgmt: Option<fidl_wlanix::KeyMgmtMask>,
         },
         Disconnect,
-        GetConnectedNetworkRssi,
+        GetConnectedNetwork,
         OnDisconnect {
             info: fidl_sme::DisconnectSource,
         },
-        OnSignalReport {
-            ind: fidl_internal::SignalReportIndication,
+        OnRssiThresholdBreached {
+            rssi_dbm: i8,
         },
         SetBtCoexistenceMode {
             mode: fidl_internal::BtCoexistenceMode,
@@ -1298,9 +1321,11 @@ pub mod test_utils {
         pub connect_yielding_rx: Mutex<Option<mpsc::Receiver<()>>>,
         pub calls: Arc<Mutex<Vec<ClientIfaceCall>>>,
         pub connect_success: Mutex<bool>,
+        pub connected_network: Mutex<Option<ConnectedNetwork>>,
         pub scan_results: Mutex<Vec<fidl_sme::ScanResult>>,
         pub signal_report: Mutex<Option<fidl_stats::SignalReport>>,
         pub iface_stats: Mutex<Option<fidl_stats::IfaceStats>>,
+        pub fail_query: Mutex<bool>,
         pub fail_start_sched_scan: Mutex<bool>,
         pub start_sched_scan_yielding_rx: Mutex<Option<mpsc::Receiver<()>>>,
     }
@@ -1314,9 +1339,11 @@ pub mod test_utils {
                 connect_yielding_rx: Mutex::new(None),
                 calls: Arc::new(Mutex::new(vec![])),
                 connect_success: Mutex::new(true),
+                connected_network: Mutex::new(None),
                 scan_results: Mutex::new(vec![fake_scan_result()]),
                 signal_report: Mutex::new(None),
                 iface_stats: Mutex::new(None),
+                fail_query: Mutex::new(false),
                 fail_start_sched_scan: Mutex::new(false),
                 start_sched_scan_yielding_rx: Mutex::new(None),
             }
@@ -1327,13 +1354,16 @@ pub mod test_utils {
     impl ClientIface for TestClientIface {
         async fn query(&self) -> Result<fidl_device_service::QueryIfaceResponse, Error> {
             self.calls.lock().push(ClientIfaceCall::Query);
+            if *self.fail_query.lock() {
+                return Err(format_err!("query failed"));
+            }
             Ok(fidl_device_service::QueryIfaceResponse {
                 role: fidl_common::WlanMacRole::Client,
                 id: 1,
                 phy_id: 42,
                 phy_assigned_id: 1337,
-                sta_addr: [13, 37, 13, 37, 13, 37],
-                factory_addr: [13, 37, 13, 37, 13, 37],
+                sta_addr: FAKE_STA_ADDR,
+                factory_addr: FAKE_FACTORY_ADDR,
             })
         }
 
@@ -1416,16 +1446,16 @@ pub mod test_utils {
         }
 
         fn get_connected_network(&self) -> Option<ConnectedNetwork> {
-            self.calls.lock().push(ClientIfaceCall::GetConnectedNetworkRssi);
-            None
+            self.calls.lock().push(ClientIfaceCall::GetConnectedNetwork);
+            self.connected_network.lock().clone()
         }
 
         fn on_disconnect(&self, info: &fidl_sme::DisconnectSource) {
             self.calls.lock().push(ClientIfaceCall::OnDisconnect { info: *info });
         }
 
-        fn on_signal_report(&self, ind: fidl_internal::SignalReportIndication) {
-            self.calls.lock().push(ClientIfaceCall::OnSignalReport { ind });
+        fn on_rssi_threshold_breached(&self, rssi_dbm: i8) {
+            self.calls.lock().push(ClientIfaceCall::OnRssiThresholdBreached { rssi_dbm });
         }
 
         async fn set_bt_coexistence_mode(
@@ -2594,6 +2624,7 @@ mod tests {
             ssid: Ssid::try_from("foo").unwrap(),
             bssid: [1, 2, 3, 4, 5, 6],
             rssi_dbm: -30,
+            snr_db: 22,
         );
         *test_values.iface.last_scan_results.lock() = Some(LastScanResults::new(
             fasync::BootInstant::now(),
@@ -2634,6 +2665,7 @@ mod tests {
             assert_matches!(test_values.iface.get_connected_network(), Some(n) => n);
         assert_eq!(connected_network.bssid, Bssid::from([1, 2, 3, 4, 5, 6]));
         assert_eq!(connected_network.rssi, -30);
+        assert_eq!(connected_network.snr, Some(22));
     }
 
     #[fuchsia::test]
@@ -3404,41 +3436,33 @@ mod tests {
     }
 
     #[test]
-    fn test_on_signal_report() {
+    fn test_on_rssi_threshold_breached() {
         let test_values = setup_test_manager_with_iface();
 
         assert_matches!(test_values.iface.get_connected_network(), None);
-        test_values.iface.on_signal_report(fidl_internal::SignalReportIndication {
-            rssi_dbm: Some(-40),
-            snr_db: Some(20),
-            tx_rate_500kbps: Some(0),
-            ..Default::default()
-        });
+        test_values.iface.on_rssi_threshold_breached(-40);
         assert_matches!(test_values.iface.get_connected_network(), None);
 
         *test_values.iface.connected_network.lock() = Some(test_utils::fake_connected_network());
-        assert_matches!(test_values.iface.get_connected_network().map(|n| n.rssi), Some(-35));
-        test_values.iface.on_signal_report(fidl_internal::SignalReportIndication {
-            rssi_dbm: Some(-40),
-            snr_db: Some(20),
-            tx_rate_500kbps: Some(0),
-            ..Default::default()
-        });
-        assert_matches!(test_values.iface.get_connected_network().map(|n| n.rssi), Some(-40));
-
-        // When rssi_dbm is None, the previous RSSI is retained.
-        test_values.iface.on_signal_report(fidl_internal::SignalReportIndication {
-            rssi_dbm: None,
-            snr_db: Some(20),
-            tx_rate_500kbps: Some(0),
-            ..Default::default()
-        });
-        assert_matches!(test_values.iface.get_connected_network().map(|n| n.rssi), Some(-40));
+        assert_eq!(
+            test_values.iface.get_connected_network(),
+            Some(ConnectedNetwork {
+                bssid: Bssid::from([1, 2, 3, 4, 5, 6]),
+                rssi: -35,
+                snr: Some(20),
+            })
+        );
+        test_values.iface.on_rssi_threshold_breached(-40);
+        assert_eq!(
+            test_values.iface.get_connected_network(),
+            Some(ConnectedNetwork { bssid: Bssid::from([1, 2, 3, 4, 5, 6]), rssi: -40, snr: None })
+        );
     }
 
     #[test]
     fn test_get_signal_poll_results_success() {
         let mut test_values = setup_test_manager_with_iface();
+        *test_values.iface.connected_network.lock() = Some(test_utils::fake_connected_network());
 
         let mut signal_report_fut = test_values.iface.get_signal_report();
         assert_matches!(test_values.exec.run_until_stalled(&mut signal_report_fut), Poll::Pending);
@@ -3474,6 +3498,71 @@ mod tests {
         let conn_report = response.connection_signal_report.expect("No connection report");
         assert_eq!(conn_report.tx_rate_500kbps, Some(300));
         assert_eq!(conn_report.rssi_dbm, Some(-53));
+
+        let connected_network =
+            test_values.iface.get_connected_network().expect("Expected connected network");
+        assert_eq!(connected_network.rssi, -53);
+        assert_eq!(connected_network.snr, Some(25));
+    }
+
+    #[test]
+    fn test_get_signal_poll_results_missing_fields_preserve_previous_values() {
+        let mut test_values = setup_test_manager_with_iface();
+        let initial_network = test_utils::fake_connected_network();
+        *test_values.iface.connected_network.lock() = Some(initial_network.clone());
+
+        let mut signal_report_fut = test_values.iface.get_signal_report();
+        assert_matches!(test_values.exec.run_until_stalled(&mut signal_report_fut), Poll::Pending);
+        let responder = assert_matches!(
+            test_values.exec.run_until_stalled(&mut test_values.telemetry_stream.next()),
+            Poll::Ready(Some(Ok(fidl_sme::TelemetryRequest::GetSignalReport { responder }))) => responder
+        );
+        let partial_report = fidl_stats::SignalReport {
+            connection_signal_report: Some(fidl_stats::ConnectionSignalReport {
+                rssi_dbm: None,
+                snr_db: None,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        responder.send(Ok(&partial_report)).expect("Failed to send mock signal report response");
+        assert_matches!(
+            test_values.exec.run_until_stalled(&mut signal_report_fut),
+            Poll::Ready(Ok(_))
+        );
+        assert_eq!(test_values.iface.get_connected_network(), Some(initial_network));
+    }
+
+    #[test]
+    fn test_get_signal_poll_results_bssid_changed_ignores_update() {
+        let mut test_values = setup_test_manager_with_iface();
+        *test_values.iface.connected_network.lock() = Some(test_utils::fake_connected_network());
+
+        let mut signal_report_fut = test_values.iface.get_signal_report();
+        assert_matches!(test_values.exec.run_until_stalled(&mut signal_report_fut), Poll::Pending);
+        let responder = assert_matches!(
+            test_values.exec.run_until_stalled(&mut test_values.telemetry_stream.next()),
+            Poll::Ready(Some(Ok(fidl_sme::TelemetryRequest::GetSignalReport { responder }))) => responder
+        );
+
+        let new_network =
+            ConnectedNetwork { bssid: Bssid::from([9, 9, 9, 9, 9, 9]), rssi: -60, snr: Some(15) };
+        *test_values.iface.connected_network.lock() = Some(new_network.clone());
+
+        let report = fidl_stats::SignalReport {
+            connection_signal_report: Some(fidl_stats::ConnectionSignalReport {
+                rssi_dbm: Some(-53),
+                snr_db: Some(25),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        responder.send(Ok(&report)).expect("Failed to send mock signal report response");
+        assert_matches!(
+            test_values.exec.run_until_stalled(&mut signal_report_fut),
+            Poll::Ready(Ok(_))
+        );
+        assert_eq!(test_values.iface.get_connected_network(), Some(new_network));
     }
 
     #[test]

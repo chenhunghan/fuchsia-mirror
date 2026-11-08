@@ -85,7 +85,7 @@ from os.path import relpath
 from pathlib import Path
 from subprocess import CalledProcessError, run
 from sys import argv, stderr
-from typing import Any, Optional
+from typing import Any
 
 from rust import HOST_PLATFORM, GnTarget
 from rustdoc_link_actions import (
@@ -119,7 +119,7 @@ class Metadata:
         return self.actual_label.endswith("-shared)")
 
     @staticmethod
-    def parse(m: dict[str, Any], build_dir: Path) -> Optional["Metadata"]:
+    def parse(m: dict[str, Any], build_dir: Path) -> Metadata | None:
         if m["disable_rustdoc"]:
             return None
         rustdoc_out_dir = Path(build_dir, m["rustdoc_out_dir"])

@@ -43,6 +43,11 @@
 #include "src/starnix/tests/syscalls/cpp/capabilities_helper.h"
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
+#include "third_party/android/platform/bionic/libc/kernel/uapi/linux/openat2.h"
+
+#ifndef SYS_openat2
+#define SYS_openat2 437
+#endif
 
 namespace {
 
@@ -112,6 +117,25 @@ TEST(FsTest, DevTmpFsInitialDirectoryLinkCount) {
   // Under POSIX, each child subdirectory increments the parent's link count for its ".." entry,
   // so /dev must have at least 2 + 2 = 4 links.
   EXPECT_GE(st.st_nlink, 4u);
+}
+
+TEST(FsTest, RootAndStandardMountPermissions) {
+  struct stat st = {};
+  ASSERT_THAT(stat("/", &st), SyscallSucceeds());
+  EXPECT_TRUE(S_ISDIR(st.st_mode));
+  EXPECT_EQ(st.st_mode & 07777u, 0755u);
+
+  ASSERT_THAT(stat("/dev", &st), SyscallSucceeds());
+  EXPECT_TRUE(S_ISDIR(st.st_mode));
+  EXPECT_EQ(st.st_mode & 07777u, 0755u);
+
+  ASSERT_THAT(stat("/proc", &st), SyscallSucceeds());
+  EXPECT_TRUE(S_ISDIR(st.st_mode));
+  EXPECT_EQ(st.st_mode & 07777u, 0555u);
+
+  ASSERT_THAT(stat("/sys", &st), SyscallSucceeds());
+  EXPECT_TRUE(S_ISDIR(st.st_mode));
+  EXPECT_EQ(st.st_mode & static_cast<mode_t>(S_IWGRP | S_IWOTH), 0u);
 }
 
 TEST(FsTest, DirectoryLinkCountAndRmdirEmptiness) {
@@ -2362,6 +2386,14 @@ TEST_P(FsCasefoldTest, UnicodeCanonicalEquivalenceWithMultiByteExpansion) {
 }
 
 TEST(FsTest, GetdentsLazyAndUnmappedBuffer) {
+  struct linux_dirent64 {
+    uint64_t d_ino;
+    int64_t d_off;
+    uint16_t d_reclen;
+    uint8_t d_type;
+    char d_name[];
+  };
+
   const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
 
   test_helper::ScopedTempDir temp_dir;
@@ -2373,6 +2405,8 @@ TEST(FsTest, GetdentsLazyAndUnmappedBuffer) {
 
   for (const std::string &dir_path :
        {temp_dir.path(), std::string("/proc"), std::string("/sys"), std::string("/")}) {
+    SCOPED_TRACE(dir_path);
+
     // 1. Fresh un-faulted anonymous mapping exercises lazy mapping materialization inside
     // getdents64.
     auto lazy_buf = test_helper::ScopedMMap::MMap(nullptr, page_size, PROT_READ | PROT_WRITE,
@@ -2381,11 +2415,17 @@ TEST(FsTest, GetdentsLazyAndUnmappedBuffer) {
 
     fbl::unique_fd dir_fd(open(dir_path.c_str(), O_RDONLY | O_DIRECTORY));
     ASSERT_THAT(dir_fd.get(), SyscallSucceeds());
-    EXPECT_THAT(syscall(SYS_getdents64, dir_fd.get(), lazy_buf->mapping(), page_size),
-                SyscallSucceedsWithValue(::testing::Gt(0)));
+    long nread = syscall(SYS_getdents64, dir_fd.get(), lazy_buf->mapping(), page_size);
+    ASSERT_THAT(nread,
+                SyscallSucceedsWithValue(::testing::Ge(static_cast<long>(sizeof(linux_dirent64)))));
+    ASSERT_LE(static_cast<size_t>(nread), page_size);
 
-    // 2. Buffer adjacent to a PROT_NONE guard page exercises partial usercopy faults after `.` and
-    // `..` entries have been emitted.
+    const size_t first_reclen = static_cast<const linux_dirent64 *>(lazy_buf->mapping())->d_reclen;
+    ASSERT_GE(first_reclen, sizeof(linux_dirent64));
+    ASSERT_LE(first_reclen, static_cast<size_t>(nread));
+
+    // 2. Buffer adjacent to a PROT_NONE guard page exercises partial usercopy faults after the
+    // first directory entry has been emitted.
     auto two_pages = test_helper::ScopedMMap::MMap(nullptr, 2 * page_size, PROT_READ | PROT_WRITE,
                                                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     ASSERT_THAT(two_pages, SyscallResultIsOk());
@@ -2393,11 +2433,240 @@ TEST(FsTest, GetdentsLazyAndUnmappedBuffer) {
     ASSERT_THAT(mprotect(bytes + page_size, page_size, PROT_NONE), SyscallSucceeds());
 
     ASSERT_THAT(lseek(dir_fd.get(), 0, SEEK_SET), SyscallSucceeds());
-    // Leave room for `.` and `..` (24 bytes each = 48 bytes) before hitting the PROT_NONE page.
-    void *straddling_buf = bytes + page_size - 48;
+    // Place the buffer so that exactly the first entry fits before hitting the PROT_NONE page.
+    void *straddling_buf = bytes + page_size - first_reclen;
     EXPECT_THAT(syscall(SYS_getdents64, dir_fd.get(), straddling_buf, page_size),
-                SyscallSucceedsWithValue(::testing::Gt(0)));
+                SyscallSucceedsWithValue(static_cast<long>(first_reclen)));
   }
+}
+
+long Openat2Call(int dfd, const char *path, open_how how) {
+  return syscall(SYS_openat2, dfd, path, &how, sizeof(how));
+}
+
+TEST(FsTest, Openat2TrailingAbsoluteSymlinkWithResolveBeneathFailsWithExdev) {
+  test_helper::ScopedTempDir temp_dir;
+  const std::string outside_file = temp_dir.path() + "/outside";
+  ASSERT_TRUE(files::WriteFile(outside_file, "outside"));
+
+  const std::string jail_dir = temp_dir.path() + "/jail";
+  ASSERT_THAT(mkdir(jail_dir.c_str(), 0700), SyscallSucceeds());
+  ASSERT_TRUE(files::WriteFile(jail_dir + "/outside", "inside"));
+
+  ASSERT_THAT(symlink(outside_file.c_str(), (jail_dir + "/escape_abs").c_str()), SyscallSucceeds());
+  ASSERT_THAT(symlink("/outside", (jail_dir + "/confined_abs").c_str()), SyscallSucceeds());
+
+  fbl::unique_fd jail_fd(open(jail_dir.c_str(), O_RDONLY | O_DIRECTORY));
+  ASSERT_THAT(jail_fd.get(), SyscallSucceeds());
+
+  EXPECT_THAT(Openat2Call(jail_fd.get(), "escape_abs",
+                          open_how{.flags = O_RDONLY, .resolve = RESOLVE_BENEATH}),
+              SyscallFailsWithErrno(EXDEV));
+  EXPECT_THAT(Openat2Call(jail_fd.get(), "confined_abs",
+                          open_how{.flags = O_RDONLY, .resolve = RESOLVE_BENEATH}),
+              SyscallFailsWithErrno(EXDEV));
+}
+
+TEST(FsTest, Openat2TrailingAbsoluteSymlinkWithResolveInRootResolvesWithinRoot) {
+  test_helper::ScopedTempDir temp_dir;
+  const std::string outside_file = temp_dir.path() + "/outside";
+  ASSERT_TRUE(files::WriteFile(outside_file, "outside"));
+
+  const std::string jail_dir = temp_dir.path() + "/jail";
+  ASSERT_THAT(mkdir(jail_dir.c_str(), 0700), SyscallSucceeds());
+  ASSERT_TRUE(files::WriteFile(jail_dir + "/outside", "inside"));
+  ASSERT_THAT(symlink("/outside", (jail_dir + "/confined_abs").c_str()), SyscallSucceeds());
+
+  fbl::unique_fd jail_fd(open(jail_dir.c_str(), O_RDONLY | O_DIRECTORY));
+  ASSERT_THAT(jail_fd.get(), SyscallSucceeds());
+
+  fbl::unique_fd confined_fd(static_cast<int>(Openat2Call(
+      jail_fd.get(), "confined_abs", open_how{.flags = O_RDONLY, .resolve = RESOLVE_IN_ROOT})));
+  ASSERT_THAT(confined_fd.get(), SyscallSucceeds());
+  char buf[16] = {};
+  ASSERT_THAT(read(confined_fd.get(), buf, sizeof(buf)), SyscallSucceedsWithValue(6));
+  EXPECT_EQ(std::string_view(buf, 6), "inside");
+}
+
+TEST(FsTest, Openat2SymlinkWithResolveNoXdevSucceedsOnSameMountAndFailsAcrossMounts) {
+  test_helper::ScopedTempDir temp_dir;
+  const std::string jail_dir = temp_dir.path() + "/jail";
+  ASSERT_THAT(mkdir(jail_dir.c_str(), 0700), SyscallSucceeds());
+  ASSERT_TRUE(files::WriteFile(jail_dir + "/inside", "inside"));
+  ASSERT_THAT(symlink("inside", (jail_dir + "/same_mount_link").c_str()), SyscallSucceeds());
+  ASSERT_THAT(symlink("/inside", (jail_dir + "/same_mount_abs_link").c_str()), SyscallSucceeds());
+  ASSERT_THAT(symlink("/proc/self/stat", (jail_dir + "/proc_link").c_str()), SyscallSucceeds());
+
+  fbl::unique_fd jail_fd(open(jail_dir.c_str(), O_RDONLY | O_DIRECTORY));
+  ASSERT_THAT(jail_fd.get(), SyscallSucceeds());
+
+  // Same-mount relative and RESOLVE_IN_ROOT absolute symlinks succeed under RESOLVE_NO_XDEV.
+  fbl::unique_fd rel_fd(static_cast<int>(Openat2Call(
+      jail_fd.get(), "same_mount_link", open_how{.flags = O_RDONLY, .resolve = RESOLVE_NO_XDEV})));
+  ASSERT_THAT(rel_fd.get(), SyscallSucceeds());
+
+  fbl::unique_fd abs_fd(static_cast<int>(
+      Openat2Call(jail_fd.get(), "same_mount_abs_link",
+                  open_how{.flags = O_RDONLY, .resolve = RESOLVE_IN_ROOT | RESOLVE_NO_XDEV})));
+  ASSERT_THAT(abs_fd.get(), SyscallSucceeds());
+
+  // Cross-mount symlink fails with EXDEV under RESOLVE_NO_XDEV.
+  EXPECT_THAT(Openat2Call(jail_fd.get(), "proc_link",
+                          open_how{.flags = O_RDONLY, .resolve = RESOLVE_NO_XDEV}),
+              SyscallFailsWithErrno(EXDEV));
+}
+
+TEST(FsTest, Openat2IntermediateRegularSymlinkEnforcesResolveFlags) {
+  test_helper::ScopedTempDir temp_dir;
+  const std::string outside_dir = temp_dir.path() + "/outside_dir";
+  ASSERT_THAT(mkdir(outside_dir.c_str(), 0700), SyscallSucceeds());
+  ASSERT_TRUE(files::WriteFile(outside_dir + "/file", "outside"));
+
+  const std::string jail_dir = temp_dir.path() + "/jail";
+  ASSERT_THAT(mkdir(jail_dir.c_str(), 0700), SyscallSucceeds());
+  const std::string target_dir = jail_dir + "/target_dir";
+  ASSERT_THAT(mkdir(target_dir.c_str(), 0700), SyscallSucceeds());
+  ASSERT_TRUE(files::WriteFile(target_dir + "/file", "inside"));
+  const std::string sub_dir = jail_dir + "/sub";
+  ASSERT_THAT(mkdir(sub_dir.c_str(), 0700), SyscallSucceeds());
+
+  ASSERT_THAT(symlink("../target_dir", (sub_dir + "/rel_dir_link").c_str()), SyscallSucceeds());
+  ASSERT_THAT(symlink("/target_dir", (sub_dir + "/abs_dir_link").c_str()), SyscallSucceeds());
+  ASSERT_THAT(symlink(outside_dir.c_str(), (sub_dir + "/escape_dir_link").c_str()),
+              SyscallSucceeds());
+  ASSERT_THAT(symlink("/proc/self", (sub_dir + "/proc_dir_link").c_str()), SyscallSucceeds());
+
+  fbl::unique_fd jail_fd(open(jail_dir.c_str(), O_RDONLY | O_DIRECTORY));
+  ASSERT_THAT(jail_fd.get(), SyscallSucceeds());
+
+  // RESOLVE_BENEATH allows confined relative intermediate directory symlinks, but rejects absolute
+  // intermediate directory symlinks.
+  fbl::unique_fd beneath_ok_fd(
+      static_cast<int>(Openat2Call(jail_fd.get(), "sub/rel_dir_link/file",
+                                   open_how{.flags = O_RDONLY, .resolve = RESOLVE_BENEATH})));
+  ASSERT_THAT(beneath_ok_fd.get(), SyscallSucceeds());
+  EXPECT_THAT(Openat2Call(jail_fd.get(), "sub/abs_dir_link/file",
+                          open_how{.flags = O_RDONLY, .resolve = RESOLVE_BENEATH}),
+              SyscallFailsWithErrno(EXDEV));
+  EXPECT_THAT(Openat2Call(jail_fd.get(), "sub/escape_dir_link/file",
+                          open_how{.flags = O_RDONLY, .resolve = RESOLVE_BENEATH}),
+              SyscallFailsWithErrno(EXDEV));
+
+  // RESOLVE_IN_ROOT anchors intermediate absolute directory symlinks from a subdirectory to
+  // jail_fd.
+  fbl::unique_fd in_root_fd(
+      static_cast<int>(Openat2Call(jail_fd.get(), "sub/abs_dir_link/file",
+                                   open_how{.flags = O_RDONLY, .resolve = RESOLVE_IN_ROOT})));
+  ASSERT_THAT(in_root_fd.get(), SyscallSucceeds());
+  char buf[16] = {};
+  ASSERT_THAT(read(in_root_fd.get(), buf, sizeof(buf)), SyscallSucceedsWithValue(6));
+  EXPECT_EQ(std::string_view(buf, 6), "inside");
+
+  // RESOLVE_NO_XDEV allows same-mount intermediate directory symlinks and rejects cross-mount ones.
+  fbl::unique_fd no_xdev_fd(
+      static_cast<int>(Openat2Call(jail_fd.get(), "sub/rel_dir_link/file",
+                                   open_how{.flags = O_RDONLY, .resolve = RESOLVE_NO_XDEV})));
+  ASSERT_THAT(no_xdev_fd.get(), SyscallSucceeds());
+  EXPECT_THAT(Openat2Call(jail_fd.get(), "sub/proc_dir_link/stat",
+                          open_how{.flags = O_RDONLY, .resolve = RESOLVE_NO_XDEV}),
+              SyscallFailsWithErrno(EXDEV));
+
+  // RESOLVE_NO_SYMLINKS rejects intermediate directory symlinks with ELOOP.
+  EXPECT_THAT(Openat2Call(jail_fd.get(), "sub/rel_dir_link/file",
+                          open_how{.flags = O_RDONLY, .resolve = RESOLVE_NO_SYMLINKS}),
+              SyscallFailsWithErrno(ELOOP));
+}
+
+TEST(FsTest, Openat2TrailingMagicLinkEnforcesResolveFlags) {
+  test_helper::ScopedTempDir temp_dir;
+  const std::string outside_file = temp_dir.path() + "/outside";
+  ASSERT_TRUE(files::WriteFile(outside_file, "outside"));
+
+  fbl::unique_fd proc_fd(open("/proc/self", O_RDONLY | O_DIRECTORY));
+  ASSERT_THAT(proc_fd.get(), SyscallSucceeds());
+  fbl::unique_fd outside_fd(open(outside_file.c_str(), O_RDONLY));
+  ASSERT_THAT(outside_fd.get(), SyscallSucceeds());
+  const std::string magic_rel = fxl::StringPrintf("fd/%d", outside_fd.get());
+
+  fbl::unique_fd ok_magic_fd(
+      static_cast<int>(Openat2Call(proc_fd.get(), magic_rel.c_str(), open_how{.flags = O_RDONLY})));
+  ASSERT_THAT(ok_magic_fd.get(), SyscallSucceeds());
+
+  EXPECT_THAT(Openat2Call(proc_fd.get(), magic_rel.c_str(),
+                          open_how{.flags = O_RDONLY, .resolve = RESOLVE_NO_MAGICLINKS}),
+              SyscallFailsWithErrno(ELOOP));
+  EXPECT_THAT(Openat2Call(proc_fd.get(), magic_rel.c_str(),
+                          open_how{.flags = O_RDONLY, .resolve = RESOLVE_BENEATH}),
+              SyscallFailsWithErrno(EXDEV));
+  EXPECT_THAT(Openat2Call(proc_fd.get(), magic_rel.c_str(),
+                          open_how{.flags = O_RDONLY, .resolve = RESOLVE_IN_ROOT}),
+              SyscallFailsWithErrno(EXDEV));
+  EXPECT_THAT(Openat2Call(proc_fd.get(), magic_rel.c_str(),
+                          open_how{.flags = O_RDONLY, .resolve = RESOLVE_NO_XDEV}),
+              SyscallFailsWithErrno(EXDEV));
+  EXPECT_THAT(
+      Openat2Call(proc_fd.get(), magic_rel.c_str(), open_how{.flags = O_RDONLY | O_DIRECTORY}),
+      SyscallFailsWithErrno(ENOTDIR));
+  EXPECT_THAT(Openat2Call(proc_fd.get(), magic_rel.c_str(),
+                          open_how{.flags = O_RDWR | O_CREAT | O_EXCL, .mode = 0600}),
+              SyscallFailsWithErrno(EEXIST));
+
+  // A magic link targeting a file on the same (procfs) mount succeeds with RESOLVE_NO_XDEV.
+  fbl::unique_fd proc_stat_fd(open("/proc/self/stat", O_RDONLY));
+  ASSERT_THAT(proc_stat_fd.get(), SyscallSucceeds());
+  const std::string same_mount_magic = fxl::StringPrintf("fd/%d", proc_stat_fd.get());
+  fbl::unique_fd same_mount_fd(
+      static_cast<int>(Openat2Call(proc_fd.get(), same_mount_magic.c_str(),
+                                   open_how{.flags = O_RDONLY, .resolve = RESOLVE_NO_XDEV})));
+  ASSERT_THAT(same_mount_fd.get(), SyscallSucceeds());
+}
+
+TEST(FsTest, Openat2IntermediateMagicLinkEnforcesResolveFlags) {
+  test_helper::ScopedTempDir temp_dir;
+  const std::string outside_file = temp_dir.path() + "/outside";
+  ASSERT_TRUE(files::WriteFile(outside_file, "outside"));
+
+  fbl::unique_fd proc_fd(open("/proc/self", O_RDONLY | O_DIRECTORY));
+  ASSERT_THAT(proc_fd.get(), SyscallSucceeds());
+  fbl::unique_fd temp_dir_fd(open(temp_dir.path().c_str(), O_RDONLY | O_DIRECTORY));
+  ASSERT_THAT(temp_dir_fd.get(), SyscallSucceeds());
+  const std::string intermediate_magic = fxl::StringPrintf("fd/%d/outside", temp_dir_fd.get());
+
+  fbl::unique_fd ok_fd(static_cast<int>(
+      Openat2Call(proc_fd.get(), intermediate_magic.c_str(), open_how{.flags = O_RDONLY})));
+  ASSERT_THAT(ok_fd.get(), SyscallSucceeds());
+
+  EXPECT_THAT(Openat2Call(proc_fd.get(), intermediate_magic.c_str(),
+                          open_how{.flags = O_RDONLY, .resolve = RESOLVE_NO_MAGICLINKS}),
+              SyscallFailsWithErrno(ELOOP));
+  EXPECT_THAT(Openat2Call(proc_fd.get(), intermediate_magic.c_str(),
+                          open_how{.flags = O_RDONLY, .resolve = RESOLVE_BENEATH}),
+              SyscallFailsWithErrno(EXDEV));
+  EXPECT_THAT(Openat2Call(proc_fd.get(), intermediate_magic.c_str(),
+                          open_how{.flags = O_RDONLY, .resolve = RESOLVE_IN_ROOT}),
+              SyscallFailsWithErrno(EXDEV));
+  EXPECT_THAT(Openat2Call(proc_fd.get(), intermediate_magic.c_str(),
+                          open_how{.flags = O_RDONLY, .resolve = RESOLVE_NO_XDEV}),
+              SyscallFailsWithErrno(EXDEV));
+
+  // An intermediate magic link targeting a directory on the same (procfs) mount succeeds with
+  // RESOLVE_NO_XDEV.
+  const std::string same_mount_intermediate = fxl::StringPrintf("fd/%d/stat", proc_fd.get());
+  fbl::unique_fd same_mount_fd(
+      static_cast<int>(Openat2Call(proc_fd.get(), same_mount_intermediate.c_str(),
+                                   open_how{.flags = O_RDONLY, .resolve = RESOLVE_NO_XDEV})));
+  ASSERT_THAT(same_mount_fd.get(), SyscallSucceeds());
+}
+
+TEST(FsTest, Openat2EmptyPathAndSymlinkTargetFailsWithEnoent) {
+  test_helper::ScopedTempDir temp_dir;
+  fbl::unique_fd dir_fd(open(temp_dir.path().c_str(), O_RDONLY | O_DIRECTORY));
+  ASSERT_THAT(dir_fd.get(), SyscallSucceeds());
+
+  EXPECT_THAT(symlink("", (temp_dir.path() + "/empty_target").c_str()),
+              SyscallFailsWithErrno(ENOENT));
+  EXPECT_THAT(Openat2Call(dir_fd.get(), "", open_how{.flags = O_RDONLY}),
+              SyscallFailsWithErrno(ENOENT));
 }
 
 }  // namespace

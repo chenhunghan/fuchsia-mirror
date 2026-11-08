@@ -3,6 +3,8 @@
 # found in the LICENSE file.
 
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -10,5 +12,18 @@ rustc_library(
     name = "reverser_crate",
     srcs = ["src/lib.rs"],
     edition = "2024",
-    with_unit_tests = True,
+)
+
+rustc_test(
+    name = "reverser_crate_test",
+    crate = ":reverser_crate",
+)
+
+fx_unittest_package(
+    name = "reverser_rust_unittest",
+    unit_tests = [":reverser_crate_test"],
+    visibility = [
+        "//examples:__pkg__",
+        "//examples/assembly/test_product_bundle:__pkg__",
+    ],
 )

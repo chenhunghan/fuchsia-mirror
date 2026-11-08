@@ -3,31 +3,11 @@
 // found in the LICENSE file.
 
 #include <fidl/fuchsia.accessibility.semantics/cpp/fidl.h>
-#include <fidl/fuchsia.buildinfo/cpp/fidl.h>
-#include <fidl/fuchsia.component.decl/cpp/hlcpp_conversion.h>
-#include <fidl/fuchsia.element/cpp/fidl.h>
-#include <fidl/fuchsia.fonts/cpp/fidl.h>
 #include <fidl/fuchsia.input.injection/cpp/fidl.h>
 #include <fidl/fuchsia.input.virtualkeyboard/cpp/fidl.h>
-#include <fidl/fuchsia.intl/cpp/fidl.h>
-#include <fidl/fuchsia.io/cpp/fidl.h>
-#include <fidl/fuchsia.io/cpp/hlcpp_conversion.h>
-#include <fidl/fuchsia.kernel/cpp/fidl.h>
-#include <fidl/fuchsia.logger/cpp/fidl.h>
-#include <fidl/fuchsia.memorypressure/cpp/fidl.h>
-#include <fidl/fuchsia.metrics/cpp/fidl.h>
-#include <fidl/fuchsia.net.interfaces/cpp/fidl.h>
-#include <fidl/fuchsia.posix.socket/cpp/fidl.h>
-#include <fidl/fuchsia.process/cpp/fidl.h>
-#include <fidl/fuchsia.scheduler/cpp/fidl.h>
-#include <fidl/fuchsia.sysmem/cpp/fidl.h>
-#include <fidl/fuchsia.sysmem2/cpp/fidl.h>
-#include <fidl/fuchsia.tracing.provider/cpp/fidl.h>
-#include <fidl/fuchsia.ui.app/cpp/fidl.h>
+#include <fidl/fuchsia.ui.composition/cpp/fidl.h>
 #include <fidl/fuchsia.ui.input/cpp/fidl.h>
-#include <fidl/fuchsia.vulkan.loader/cpp/fidl.h>
-#include <fidl/fuchsia.web/cpp/fidl.h>
-#include <fidl/test.virtualkeyboard/cpp/fidl.h>
+#include <fidl/fuchsia.ui.input3/cpp/fidl.h>
 #include <lib/async/cpp/task.h>
 #include <lib/fidl/cpp/channel.h>
 #include <lib/sys/component/cpp/testing/realm_builder.h>
@@ -44,6 +24,9 @@
 #include <src/lib/timekeeper/clock.h>
 #include <src/ui/testing/util/fidl_cpp_helpers.h>
 #include <src/ui/testing/util/portable_ui_test.h>
+#include <src/ui/testing/util/web_view_client.h>
+
+#include "src/lib/json_parser/json_parser.h"
 
 // This test exercises the virtual keyboard visibility interactions between
 // Chromium and Virtual Keyboard Manager. It is a multi-component test, and
@@ -67,85 +50,17 @@ namespace {
 
 // Types imported for the realm_builder library.
 using component_testing::ChildRef;
-using component_testing::Config;
-using component_testing::Directory;
-using component_testing::LocalComponentImpl;
-using component_testing::ParentRef;
 using component_testing::Protocol;
 using component_testing::Route;
-using component_testing::VoidRef;
 
 // Alias for Component child name as provided to Realm Builder.
 using ChildName = std::string;
 
-constexpr auto kResponseListener = "response_listener";
-
-using time_utc = timekeeper::time_utc;
-
-class InputPositionState {
- public:
-  const std::optional<test_virtualkeyboard::BoundingBox>& input_position() const {
-    return input_position_;
-  }
-
-  // If true, the web app is ready to handling input events.
-  bool IsReadyForInput() const { return ready_for_input_; }
-
- private:
-  friend class InputPositionListenerServer;
-  std::optional<test_virtualkeyboard::BoundingBox> input_position_;
-  bool ready_for_input_ = false;
-};
-
-// This component implements the interface for a RealmBuilder
-// LocalComponent and the test.virtualkeyboard.InputPositionListener
-// protocol.
-class InputPositionListenerServer
-    : public fidl::Server<test_virtualkeyboard::InputPositionListener>,
-      public fidl::Server<fuchsia_ui_test_input::TestAppStatusListener>,
-      public LocalComponentImpl {
- public:
-  explicit InputPositionListenerServer(async_dispatcher_t* dispatcher,
-                                       std::weak_ptr<InputPositionState> state)
-      : dispatcher_(dispatcher), state_(std::move(state)) {}
-
-  // |test_virtualkeyboard::InputPositionListener|
-  void Notify(NotifyRequest& req, NotifyCompleter::Sync& completer) override {
-    if (auto state = state_.lock()) {
-      state->input_position_ = req.bounding_box();
-    }
-  }
-
-  void ReportStatus(ReportStatusRequest& req, ReportStatusCompleter::Sync& completer) override {
-    if (req.status() == fuchsia_ui_test_input::TestAppStatus::kHandlersRegistered) {
-      if (auto state = state_.lock()) {
-        state->ready_for_input_ = true;
-      }
-    }
-
-    completer.Reply();
-  }
-
-  void handle_unknown_method(
-      fidl::UnknownMethodMetadata<fuchsia_ui_test_input::TestAppStatusListener> metadata,
-      fidl::UnknownMethodCompleter::Sync& completer) override {
-    FX_LOGS(WARNING) << "TestAppStatusListener Received an unknown method with ordinal "
-                     << metadata.method_ordinal;
-  }
-
-  // |LocalComponentImpl::OnStart|
-  void OnStart() override {
-    outgoing()->AddProtocol<test_virtualkeyboard::InputPositionListener>(
-        position_listener_bindings_.CreateHandler(this, dispatcher_, fidl::kIgnoreBindingClosure));
-    outgoing()->AddProtocol<fuchsia_ui_test_input::TestAppStatusListener>(
-        app_status_bindings_.CreateHandler(this, dispatcher_, fidl::kIgnoreBindingClosure));
-  }
-
- private:
-  async_dispatcher_t* dispatcher_ = nullptr;
-  fidl::ServerBindingGroup<test_virtualkeyboard::InputPositionListener> position_listener_bindings_;
-  fidl::ServerBindingGroup<fuchsia_ui_test_input::TestAppStatusListener> app_status_bindings_;
-  std::weak_ptr<InputPositionState> state_;
+struct BoundingBox {
+  uint32_t x0 = 0;
+  uint32_t y0 = 0;
+  uint32_t x1 = 0;
+  uint32_t y1 = 0;
 };
 
 class VirtualKeyboardTest : public ui_testing::PortableUITest {
@@ -156,98 +71,58 @@ class VirtualKeyboardTest : public ui_testing::PortableUITest {
   }
 
   void LaunchWebEngineClient() {
-    WaitForViewPresentation();
+    LaunchClient();
+    ASSERT_NE(web_client_, nullptr);
 
-    FX_LOGS(INFO) << "Waiting on app ready to handle input events";
-    RunLoopUntil([this]() { return input_position_state_->IsReadyForInput(); });
+    web_client_->LoadUrl("about:blank");
+    RunLoopUntil([this]() { return web_client_->is_main_document_loaded(); });
+
+    bool is_port_registered = false;
+    web_client_->RegisterMessagePort([&is_port_registered]() { is_port_registered = true; });
+    RunLoopUntil([&is_port_registered]() { return is_port_registered; });
+
+    RunLoopUntil([this]() { return web_client_->is_window_resized(); });
+
+    web_client_->ReceiveMessage([this](std::string message) {
+      rapidjson::Document input_pos =
+          json::JSONParser().ParseFromString(message, "web-virtual-keyboard-response");
+      FX_CHECK(!input_pos.HasParseError()) << input_pos.GetParseError();
+      for (const auto& element : {"left", "right", "top", "bottom"}) {
+        FX_CHECK(input_pos.HasMember(element)) << "HasMember failed for " << element;
+        FX_CHECK(input_pos[element].IsNumber()) << "IsNumber failed for " << element;
+      }
+      input_position_ = BoundingBox{
+          .x0 = static_cast<uint32_t>(input_pos["left"].GetFloat()),
+          .y0 = static_cast<uint32_t>(input_pos["top"].GetFloat()),
+          .x1 = static_cast<uint32_t>(input_pos["right"].GetFloat()),
+          .y1 = static_cast<uint32_t>(input_pos["bottom"].GetFloat()),
+      };
+    });
+
+    bool is_js_executed = false;
+    web_client_->ExecuteJavaScript(kAppCode, [&is_js_executed]() { is_js_executed = true; });
+    RunLoopUntil([&is_js_executed]() { return is_js_executed; });
+
+    FX_LOGS(INFO) << "Waiting on input box position";
+    RunLoopUntil([this]() { return input_position_.has_value(); });
   }
 
   std::string GetTestUIStackUrl() override { return "#meta/test-ui-stack.cm"; }
 
   void ExtendRealm() override {
-    // Key part of service setup: have this test component vend the
-    // |ResponseListener| service in the constructed realm.
-    realm_builder().AddLocalChild(kResponseListener,
-                                  [d = dispatcher(), s = input_position_state_]() {
-                                    return std::make_unique<InputPositionListenerServer>(d, s);
-                                  });
-  }
-
-  std::vector<std::pair<ChildName, std::string>> GetEagerTestComponents() override {
-    return {
-        std::make_pair(kWebVirtualKeyboardClient, kWebVirtualKeyboardUrl),
-    };
-  }
-
-  std::vector<std::pair<ChildName, std::string>> GetTestComponents() override {
-    return {
-        std::make_pair(kBuildInfoProvider, kBuildInfoProviderUrl),
-        std::make_pair(kFontsProvider, kFontsProviderUrl),
-        std::make_pair(kIntl, kIntlUrl),
-        std::make_pair(kMemoryPressureSignaler, kMemoryPressureSignalerUrl),
-        std::make_pair(kFakeCobalt, kFakeCobaltUrl),
-        std::make_pair(kNetstack, kNetstackUrl),
-        std::make_pair(kWebContextProvider, kWebContextProviderUrl),
-    };
+    ui_testing::WebViewClient::AddToRealm(realm_builder().root(), dispatcher(), &web_client_,
+                                          fuchsia::web::ContextFeatureFlags::VULKAN |
+                                              fuchsia::web::ContextFeatureFlags::NETWORK |
+                                              fuchsia::web::ContextFeatureFlags::KEYBOARD |
+                                              fuchsia::web::ContextFeatureFlags::VIRTUAL_KEYBOARD);
   }
 
   std::vector<Route> GetTestRoutes() override {
-    return GetChromiumRoutes(ChildRef{kWebVirtualKeyboardClient});
-  }
-
-  // Routes needed to setup Chromium client.
-  static std::vector<Route> GetChromiumRoutes(ChildRef target) {
-    auto r_star_dir = fuchsia_io::kRStarDir;
-
     return {
-        {
-            .capabilities =
-                {
-                    Protocol{fidl::DiscoverableProtocolName<fuchsia_logger::LogSink>},
-                },
-            .source = ParentRef(),
-            .targets =
-                {
-                    target,
-                    ChildRef{kFontsProvider},
-                    ChildRef{kMemoryPressureSignaler},
-                    ChildRef{kBuildInfoProvider},
-                    ChildRef{kWebContextProvider},
-                    ChildRef{kIntl},
-                    ChildRef{kFakeCobalt},
-                    // Not including kNetstack here, since it emits spurious
-                    // FATAL errors.
-                },
-        },
-        {.capabilities =
-             {Protocol{fidl::DiscoverableProtocolName<test_virtualkeyboard::InputPositionListener>},
-              Protocol{
-                  fidl::DiscoverableProtocolName<fuchsia_ui_test_input::TestAppStatusListener>}},
-         .source = ChildRef{kResponseListener},
-         .targets = {target}},
-        {.capabilities = {Protocol{fidl::DiscoverableProtocolName<fuchsia_fonts::Provider>}},
-         .source = ChildRef{kFontsProvider},
-         .targets = {target}},
-        {.capabilities = {Protocol{
-                              fidl::DiscoverableProtocolName<fuchsia_tracing_provider::Registry>},
-                          Directory{.name = "config-data",
-                                    .rights = fidl::NaturalToHLCPP(r_star_dir),
-                                    .path = "/config/data"}},
-         .source = ParentRef(),
-         .targets = {ChildRef{kFontsProvider}}},
-        {.capabilities =
-             {
-                 Protocol{fidl::DiscoverableProtocolName<fuchsia_kernel::VmexResource>},
-                 Protocol{fidl::DiscoverableProtocolName<fuchsia_process::Launcher>},
-                 Protocol{fidl::DiscoverableProtocolName<fuchsia_vulkan_loader::Loader>},
-             },
-         .source = ParentRef(),
-         .targets = {target}},
         {.capabilities =
              {
                  Protocol{fidl::DiscoverableProtocolName<
                      fuchsia_accessibility_semantics::SemanticsManager>},
-                 Protocol{fidl::DiscoverableProtocolName<fuchsia_element::GraphicalPresenter>},
                  Protocol{fidl::DiscoverableProtocolName<fuchsia_ui_input3::Keyboard>},
                  Protocol{fidl::DiscoverableProtocolName<fuchsia_ui_composition::Allocator>},
                  Protocol{fidl::DiscoverableProtocolName<fuchsia_ui_composition::Flatland>},
@@ -257,86 +132,40 @@ class VirtualKeyboardTest : public ui_testing::PortableUITest {
                      fuchsia_input_virtualkeyboard::ControllerCreator>},
              },
          .source = kTestUIStackRef,
-         .targets = {target}},
-        {.capabilities = {Protocol{fidl::DiscoverableProtocolName<fuchsia_intl::PropertyProvider>}},
-         .source = ChildRef{kIntl},
-         .targets = {target}},
-        {.capabilities = {Protocol{
-             fidl::DiscoverableProtocolName<fuchsia_memorypressure::Provider>}},
-         .source = ChildRef{kMemoryPressureSignaler},
-         .targets = {target}},
-        {.capabilities = {Protocol{fidl::DiscoverableProtocolName<fuchsia_posix_socket::Provider>},
-                          Protocol{fidl::DiscoverableProtocolName<fuchsia_net_interfaces::State>}},
-         .source = ChildRef{kNetstack},
-         .targets = {target}},
-        {.capabilities = {Protocol{fidl::DiscoverableProtocolName<fuchsia_web::ContextProvider>}},
-         .source = ChildRef{kWebContextProvider},
-         .targets = {target}},
-        {.capabilities = {Protocol{
-             fidl::DiscoverableProtocolName<fuchsia_metrics::MetricEventLoggerFactory>}},
-         .source = ChildRef{kFakeCobalt},
-         .targets = {ChildRef{kMemoryPressureSignaler}}},
-        {.capabilities = {Protocol{fidl::DiscoverableProtocolName<fuchsia_sysmem::Allocator>},
-                          Protocol{fidl::DiscoverableProtocolName<fuchsia_sysmem2::Allocator>}},
-         .source = ParentRef(),
-         .targets = {ChildRef{kMemoryPressureSignaler}, target}},
-        {.capabilities = {Protocol{
-             fidl::DiscoverableProtocolName<fuchsia_tracing_provider::Registry>}},
-         .source = ParentRef(),
-         .targets = {ChildRef{kMemoryPressureSignaler}}},
-        {.capabilities = {Protocol{fidl::DiscoverableProtocolName<fuchsia_scheduler::RoleManager>}},
-         .source = ParentRef(),
-         .targets = {ChildRef{kMemoryPressureSignaler}, target}},
-        {.capabilities = {Protocol{fidl::DiscoverableProtocolName<fuchsia_buildinfo::Provider>}},
-         .source = ChildRef{kBuildInfoProvider},
-         .targets = {ChildRef{kWebContextProvider}, target}},
-        {.capabilities =
-             {
-                 Directory{
-                     .name = "root-ssl-certificates",
-                     .type = fidl::NaturalToHLCPP(fuchsia_component_decl::DependencyType::kStrong),
-                 },
-
-                 Directory{
-                     .name = "tzdata-icu",
-                     .type = fidl::NaturalToHLCPP(fuchsia_component_decl::DependencyType::kStrong),
-                 },
-             },
-         .source = ParentRef(),
-         .targets = {ChildRef{kWebContextProvider}}},
+         .targets = {ui_testing::WebViewClient::kChildRef}},
     };
   }
 
-  std::shared_ptr<InputPositionState> input_position_state() const { return input_position_state_; }
+  const std::optional<BoundingBox>& input_position() const { return input_position_; }
 
  private:
-  std::shared_ptr<InputPositionState> input_position_state_ =
-      std::make_shared<InputPositionState>();
+  static constexpr std::string_view kAppCode = R"JS(
+    console.info('injecting body');
+    // Create a page with a single input box.
+    // * When the user taps inside the input box (and the keyboard is currently hidden),
+    //   web-engine should request the virtual keyboard be made visible.
+    // * When the user taps outside the input box (and the keyboard is currently visible),
+    //   web-engine should request the virtual keyboard me made hidden.
+    document.body.innerHTML = '<input id="textbox" />';
+    document.body.style.backgroundColor='#ff00ff';
+    document.body.onclick = function(event) {
+      document.body.style.backgroundColor='#40e0d0';
+      let touch_event = JSON.stringify({
+        x: event.screenX,
+        y: event.screenY,
+      });
+      console.info('Got touch event ', touch_event);
+    };
 
-  static constexpr auto kFakeCobalt = "cobalt";
-  static constexpr auto kFakeCobaltUrl = "#meta/fake_cobalt.cm";
+    waitForVisible("textbox").then((element) => {
+      let message = JSON.stringify(element.getBoundingClientRect());
+      console.info('sending input position ', message);
+      port.postMessage(message);
+    });
+  )JS";
 
-  static constexpr auto kWebVirtualKeyboardClient = "web_virtual_keyboard_client";
-  static constexpr auto kWebVirtualKeyboardUrl = "#meta/web-virtual-keyboard-client.cm";
-
-  static constexpr auto kFontsProvider = "fonts_provider";
-  static constexpr auto kFontsProviderUrl = "#meta/font_provider_hermetic_for_test.cm";
-
-  static constexpr auto kIntl = "intl";
-  static constexpr auto kIntlUrl = "#meta/intl_property_manager.cm";
-
-  static constexpr auto kMemoryPressureSignaler = "memory_pressure_signaler";
-  static constexpr auto kMemoryPressureSignalerUrl = "#meta/memory_pressure_signaler.cm";
-
-  static constexpr auto kNetstack = "netstack";
-  static constexpr auto kNetstackUrl = "#meta/netstack3.cm";
-
-  static constexpr auto kWebContextProvider = "web_context_provider";
-  static constexpr auto kWebContextProviderUrl =
-      "fuchsia-pkg://fuchsia.com/web_engine#meta/context_provider.cm";
-
-  static constexpr auto kBuildInfoProvider = "build_info_provider";
-  static constexpr auto kBuildInfoProviderUrl = "#meta/fake_build_info.cm";
+  ui_testing::WebViewClient* web_client_ = nullptr;
+  std::optional<BoundingBox> input_position_;
 };
 
 TEST_F(VirtualKeyboardTest, ShowAndHideKeyboard) {
@@ -356,13 +185,10 @@ TEST_F(VirtualKeyboardTest, ShowAndHideKeyboard) {
   ASSERT_FALSE(is_keyboard_visible.value());
   is_keyboard_visible.reset();
 
-  FX_LOGS(INFO) << "Getting input box position";
-  RunLoopUntil([this]() { return input_position_state()->input_position().has_value(); });
-
   FX_LOGS(INFO) << "Tapping _inside_ input box";
-  auto input_pos = *input_position_state()->input_position();
-  int32_t input_center_x_local = static_cast<int32_t>((input_pos.x0() + input_pos.x1()) / 2);
-  int32_t input_center_y_local = static_cast<int32_t>((input_pos.y0() + input_pos.y1()) / 2);
+  auto input_pos = *input_position();
+  int32_t input_center_x_local = static_cast<int32_t>((input_pos.x0 + input_pos.x1) / 2);
+  int32_t input_center_y_local = static_cast<int32_t>((input_pos.y0 + input_pos.y1) / 2);
 
   // TODO(b/477639582): Repeating the tap may not be necessary, but adding
   // it for now to stable the test after chromium 145.0.7622.0 roll.
@@ -391,7 +217,7 @@ TEST_F(VirtualKeyboardTest, ShowAndHideKeyboard) {
 
   for (int i = 0; i < kMaxRetries; i++) {
     FX_LOGS(INFO) << "Tapping outside: " << i + 1 << "/" << kMaxRetries;
-    InjectTap(static_cast<int32_t>(input_pos.x1() + 1), static_cast<int32_t>(input_pos.y1() + 1));
+    InjectTap(static_cast<int32_t>(input_pos.x1 + 1), static_cast<int32_t>(input_pos.y1 + 1));
     FX_LOGS(INFO) << "Waiting for keyboard to be hidden";
     RunLoopWithTimeoutOrUntil([&]() { return is_keyboard_visible.has_value(); }, zx::sec(1));
     if (is_keyboard_visible.has_value()) {

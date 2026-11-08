@@ -239,9 +239,9 @@ impl PtraceState {
     }
 
     // Gets the last signal, and optionally clears the wait state of the ptrace.
-    pub fn get_last_signal(&mut self, keep_signal_waitable: bool) -> Option<SignalInfo> {
+    pub fn get_last_signal(&mut self, keep_signal_waitable: bool) -> Option<Signal> {
         self.last_signal_waitable = keep_signal_waitable;
-        self.last_signal.clone()
+        self.last_signal.as_ref().map(|siginfo| siginfo.signal)
     }
 
     pub fn has_option(&self, option: PtraceOptions) -> bool {
@@ -1052,7 +1052,7 @@ fn do_attach(
 ) -> Result<(), Errno> {
     let mut ptracees = thread_group.ptracees.lock();
 
-    if !thread_group.read().is_running() {
+    if !thread_group.is_running() {
         return error!(ESRCH);
     }
 
@@ -1153,27 +1153,22 @@ pub fn ptrace_attach(
 ) -> Result<SyscallResult, Errno> {
     let tracee = pid.get_task()?;
 
+    let options = if attach_type == PtraceAttachType::Seize {
+        // When seizing, |data| should be used as the options bitmask.
+        let bits = u32::try_from(data.ptr()).map_err(|_| errno!(EIO))?;
+        PtraceOptions::from_bits(bits).ok_or_else(|| errno!(EIO))?
+    } else {
+        PtraceOptions::empty()
+    };
+
     if tracee.thread_group == current_task.thread_group || tracee.mm().is_err() {
         return error!(EPERM);
     }
-
     current_task.check_ptrace_access_mode(PTRACE_MODE_ATTACH_REALCREDS, &tracee)?;
     let tracer_task = Arc::downgrade(&current_task.task);
-    do_attach(
-        current_task.thread_group(),
-        tracer_task,
-        &tracee,
-        attach_type,
-        PtraceOptions::empty(),
-    )?;
+    do_attach(current_task.thread_group(), tracer_task, &tracee, attach_type, options)?;
     if attach_type == PtraceAttachType::Attach {
         send_standard_signal(&tracee, SignalInfo::kernel(SIGSTOP));
-    } else if attach_type == PtraceAttachType::Seize {
-        // When seizing, |data| should be used as the options bitmask.
-        let mut state = tracee.write();
-        if let Some(ptrace) = &mut state.ptrace {
-            ptrace.set_options_from_bits(data.ptr() as u32)?;
-        }
     }
     Ok(starnix_syscalls::SUCCESS)
 }

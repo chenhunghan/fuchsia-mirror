@@ -70,7 +70,6 @@
 //src/connectivity/openthread/drivers/ot-radio:ot-radio-sherlock_driver
 //src/connectivity/openthread/tests/fake-drivers/fake-ot-radio:fake-ot-radio-driver-driver
 //src/connectivity/telephony/drivers/qmi-fake-transport:fake_qmi_driver-driver
-//src/connectivity/telephony/drivers/qmi-usb-transport:qmi_driver-driver
 //src/connectivity/telephony/tests/fake-drivers/at-fake-transport:fake_at_driver-driver
 //src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac:fuchsia_driver-driver
 //src/connectivity/wlan/drivers/wlan-virtio-hwsim:wlan-virtio-hwsim-driver
@@ -100,6 +99,7 @@
 //src/devices/block/drivers/sdmmc:sdmmc-driver
 //src/devices/block/drivers/ufs:ufs-pci-driver
 //src/devices/block/drivers/ufs:ufs-pdev-driver
+//src/devices/block/drivers/ufs:ufs_rust
 //src/devices/block/drivers/ums-function:ums-function-driver
 //src/devices/block/drivers/usb-mass-storage:usb-mass-storage-driver
 //src/devices/block/drivers/virtio:virtio_block-driver

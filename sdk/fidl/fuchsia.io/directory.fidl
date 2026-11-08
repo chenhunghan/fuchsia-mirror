@@ -219,9 +219,9 @@ type OpenFlags = strict bits : uint32 {
     /// otherwise an error is returned.
     /// If an object is opened or cloned using this method, the resulting connection does not carry
     /// any permission flags.
-    /// The resulting connection allows a limited set of operations: `GetAttr`, `Clone`, `Close`,
-    /// `Describe`, and `GetFlags`. The connection will speak the `Node` protocol. Calling `SetAttr`
-    /// or `SetFlags` will result in `ZX_ERR_BAD_HANDLE`.
+    /// The resulting connection allows a limited set of operations: `GetAttributes`, `Clone`,
+    /// `Close`, `Query`, and `GetFlags`. The connection will speak the `Node` protocol. Calling
+    /// `UpdateAttributes` or `SetFlags` will result in `ZX_ERR_BAD_HANDLE`.
     NODE_REFERENCE = 0x00400000;
     /// Requests that an "OnOpen" event is sent to the interface request.
     ///
@@ -311,7 +311,7 @@ type DirentType = flexible enum : uint8 {
 };
 
 /// Nodes which do not have ino values should return this value
-/// from Readdir and GetAttr.
+/// from Readdir and GetAttributes.
 const INO_UNKNOWN uint64 = 0xFFFFFFFFFFFFFFFF;
 
 /// DirectoryWatcher transmits messages from a filesystem server

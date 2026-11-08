@@ -113,7 +113,7 @@ class AsyncTaskNode(DapBaseModel):
     name: str | None = None
     file: str | None = None
     line: int | None = None
-    children: list["AsyncTaskNode"] = Field(default_factory=list)
+    children: list[AsyncTaskNode] = Field(default_factory=list)
 
 
 class AsyncBacktraceUpdateBody(DapBaseModel):
@@ -198,4 +198,144 @@ class ZxdbConsoleCommandResponse(Response):
     )
 
 
+# LINT.IfChange
+class ZxdbTracepointWatchSpec(DapBaseModel):
+    """Specification for a watchpoint on a memory expression."""
+
+    data_id: str | None = None
+    address: int | None = None
+    expression: str | None = None
+    byte_size: int | None = None
+    access_type: Literal["write", "readWrite"] | None = None
+
+
+class ZxdbTracepointSpec(DapBaseModel):
+    """Specification for creating or updating a tracepoint."""
+
+    id: int | None = None
+    function: str | None = None
+    file: str | None = None
+    line: int | None = None
+    address: int | None = None
+    watch: ZxdbTracepointWatchSpec | None = None
+    condition: str | None = None
+    frame: bool | None = None
+    backtrace: bool | None = None
+    raw_backtrace: bool | None = None
+    expressions: list[str] | None = None
+    max_matching_frames: int | None = None
+    locals: bool | None = None
+    registers: bool | None = None
+    max_hits: int | None = None
+    enabled: bool | None = None
+
+
+class ZxdbTracepointInfo(DapBaseModel):
+    """Status information for an installed tracepoint."""
+
+    id: int
+    verified: bool = False
+    max_matching_frames: int | None = None
+    hit_count: int = 0
+    max_hits: int = 0
+    enabled: bool = True
+    auto_disabled: bool = False
+    message: str | None = None
+
+
+class ZxdbSetTracepointsArguments(DapBaseModel):
+    """Arguments for zxdb.SetTracepoints request."""
+
+    tracepoints: list[ZxdbTracepointSpec] = Field(default_factory=list)
+
+
+class ZxdbSetTracepointsResponseBody(DapBaseModel):
+    """Body of response to zxdb.SetTracepoints request."""
+
+    tracepoints: list[ZxdbTracepointInfo] = Field(default_factory=list)
+
+
+class ZxdbSetTracepointsResponse(Response):
+    """Response to zxdb.SetTracepoints request."""
+
+    body: ZxdbSetTracepointsResponseBody = Field(
+        default_factory=ZxdbSetTracepointsResponseBody
+    )
+
+
+class ZxdbTracepointFrameSummary(DapBaseModel):
+    """Summary of the frame where a tracepoint hit occurred."""
+
+    name: str = ""
+    file: str | None = None
+    line: int | None = None
+    ip: int = 0
+    sp: int = 0
+    trust: str | None = None
+
+
+class ZxdbTracepointFrameRecord(DapBaseModel):
+    """Single stack frame record in a captured tracepoint backtrace."""
+
+    frame_index: int = 0
+    name: str = ""
+    file: str | None = None
+    line: int | None = None
+    ip: int = 0
+    sp: int = 0
+    trust: str | None = None
+    elided: bool = False
+    elide_description: str | None = None
+
+
+class ZxdbTracepointValue(DapBaseModel):
+    """Captured local variable value and its type name."""
+
+    value: str
+    type: str | None = None
+
+
+class ZxdbTracepointEvaluation(DapBaseModel):
+    """Captured result, type, or error for an expression evaluation."""
+
+    result: str | None = None
+    type: str | None = None
+    error: str | None = None
+
+
+class ZxdbTracepointFrameCapture(DapBaseModel):
+    """Full snapshot of state captured when a tracepoint triggered."""
+
+    matched: bool = True
+    frame: ZxdbTracepointFrameSummary | None = None
+    backtrace: list[ZxdbTracepointFrameRecord] | None = None
+    locals: dict[str, ZxdbTracepointValue] | None = None
+    registers: dict[str, str] | None = None
+    evaluations: dict[str, ZxdbTracepointEvaluation] | None = None
+    errors: list[str] = Field(default_factory=list)
+
+
+class ZxdbTracepointEventBody(DapBaseModel):
+    """Body of the zxdb.Tracepoint event."""
+
+    tracepoint_id: int
+    location: str
+    hit_count: int
+    max_hits: int
+    auto_disabled: bool
+    truncated: bool = False
+    thread_koid: int
+    dwell_ms: float
+    capture: ZxdbTracepointFrameCapture
+
+
+class ZxdbTracepointEvent(Event):
+    """DAP event emitted when a tracepoint triggers."""
+
+    type: Literal["event"] = "event"
+    event: Literal["zxdb.Tracepoint"] = "zxdb.Tracepoint"
+    body: ZxdbTracepointEventBody
+
+
+# LINT.ThenChange(//src/developer/debug/zxdb/debug_adapter/handlers/request_tracepoint.h)
 AsyncTaskNode.model_rebuild()

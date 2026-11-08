@@ -215,6 +215,16 @@ impl PrimaryFidlServer {
                 fuchsia_trace::duration!("magma", "PrimaryFidlServer::Flush");
                 responder.send().context("Failed to flush")?;
             }
+            fidl_fuchsia_gpu_magma::PrimaryRequest::CreateBuffer { responder, .. } => {
+                fuchsia_trace::duration!("magma", "PrimaryFidlServer::CreateBuffer");
+                // Two-way calls aren't counted by the client for flow control.
+
+                // TODO(b/582362510): Support remote allocation. Until then the error is returned to
+                // the client, which may fall back to local allocation.
+                responder
+                    .send(Err(zx::Status::NOT_SUPPORTED.into_raw()))
+                    .context("Failed to send CreateBuffer response")?;
+            }
             fidl_fuchsia_gpu_magma::PrimaryRequest::MapBuffer { payload, control_handle: _ } => {
                 fuchsia_trace::duration!("magma", "PrimaryFidlServer::MapBuffer");
                 self.flow_control(0, &control_handle);

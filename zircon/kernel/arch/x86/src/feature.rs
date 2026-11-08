@@ -8,28 +8,38 @@ pub const MAX_SUPPORTED_CPUID: u32 = 0x17;
 pub const MAX_SUPPORTED_CPUID_HYP: u32 = 0x40000001;
 pub const MAX_SUPPORTED_CPUID_EXT: u32 = 0x80000021;
 
-pub const X86_MAX_CSTATES: usize = 12;
+pub const X86_MAX_CSTATES: usize = x86_idle_states_bindings::X86_MAX_CSTATES as usize;
+
+/// Transparent `UnsafeCell` wrapper for `extern "C"` globals populated during early boot.
+#[repr(transparent)]
+struct BootExtern<T>(core::cell::UnsafeCell<T>);
+
+// SAFETY: Values wrapped in `BootExtern` are populated exclusively on the boot CPU during
+// single-threaded early boot before secondary CPUs start, and are read-only thereafter.
+unsafe impl<T: Sync> Sync for BootExtern<T> {}
 
 unsafe extern "C" {
     #[link_name = "_cpuid"]
-    static mut CPUID: [CpuidLeaf; (MAX_SUPPORTED_CPUID + 1) as usize];
+    static CPUID: BootExtern<[CpuidLeaf; (MAX_SUPPORTED_CPUID + 1) as usize]>;
 
     #[link_name = "_cpuid_hyp"]
-    static mut CPUID_HYP:
-        [CpuidLeaf; (MAX_SUPPORTED_CPUID_HYP - X86CpuidLeafNum::HypVendor as u32 + 1) as usize];
+    static CPUID_HYP: BootExtern<
+        [CpuidLeaf; (MAX_SUPPORTED_CPUID_HYP - X86CpuidLeafNum::HypVendor as u32 + 1) as usize],
+    >;
 
     #[link_name = "_cpuid_ext"]
-    static mut CPUID_EXT:
-        [CpuidLeaf; (MAX_SUPPORTED_CPUID_EXT - X86CpuidLeafNum::ExtBase as u32 + 1) as usize];
+    static CPUID_EXT: BootExtern<
+        [CpuidLeaf; (MAX_SUPPORTED_CPUID_EXT - X86CpuidLeafNum::ExtBase as u32 + 1) as usize],
+    >;
 
     #[link_name = "max_cpuid"]
-    static mut MAX_CPUID: u32;
+    static MAX_CPUID: BootExtern<u32>;
 
     #[link_name = "max_hyp_cpuid"]
-    static mut MAX_HYP_CPUID: u32;
+    static MAX_HYP_CPUID: BootExtern<u32>;
 
     #[link_name = "max_ext_cpuid"]
-    static mut MAX_EXT_CPUID: u32;
+    static MAX_EXT_CPUID: BootExtern<u32>;
 
     #[link_name = "x86_vendor"]
     static mut X86_VENDOR: X86VendorList;
@@ -90,6 +100,34 @@ unsafe extern "C" {
 
     #[link_name = "g_has_meltdown"]
     static mut G_HAS_MELTDOWN: bool;
+
+    #[link_name = "x86_get_model"]
+    fn c_x86_get_model() -> *const X86ModelInfo;
+
+    safe fn cpp_x86_get_microarch_config(
+        is_intel: bool,
+        is_amd: bool,
+        family: u16,
+        model: u16,
+    ) -> *const core::ffi::c_void;
+}
+
+/// Returns the microarchitecture configuration entry for `cpuid`.
+#[inline]
+pub(super) fn get_microarch_config(
+    cpuid: &impl super::cpuid::CpuId,
+) -> &'static X86MicroarchConfig {
+    let mfg = cpuid.read_manufacturer_info().manufacturer();
+    let processor_id = cpuid.read_processor_id();
+    let is_intel = mfg == super::cpuid::Manufacturer::Intel;
+    let is_amd = mfg == super::cpuid::Manufacturer::Amd;
+    let ptr =
+        cpp_x86_get_microarch_config(is_intel, is_amd, processor_id.family(), processor_id.model())
+            .cast::<X86MicroarchConfig>();
+    // SAFETY: `cpp_x86_get_microarch_config` always returns a non-null, properly aligned pointer
+    // to a static `x86_microarch_config_t` table entry in `feature.cc` whose layout matches
+    // bindgen-generated `X86MicroarchConfig`.
+    unsafe { &*ptr }
 }
 
 macro_rules! x86_cpuid_bit {
@@ -153,61 +191,15 @@ pub struct X86CpuidBit {
 zr::static_assert!(core::mem::size_of::<X86CpuidBit>() == 8);
 zr::static_assert!(core::mem::align_of::<X86CpuidBit>() == 4);
 
-#[repr(u32)]
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub enum X86VendorList {
-    #[default]
-    Unknown = 0,
-    Intel = 1,
-    Amd = 2,
-}
+pub use x86_feature_bindings::{
+    x86_get_timer_freq_func_t as X86GetTimerFreqFunc, x86_idle_state_t, x86_idle_states_t,
+    x86_microarch_config_t as X86MicroarchConfig, x86_microarch_list as X86MicroarchList,
+    x86_model_info as X86ModelInfo, x86_reboot_reason_func_t as X86RebootReasonFunc,
+    x86_reboot_system_func_t as X86RebootSystemFunc, x86_vendor_list as X86VendorList,
+};
 
-zr::static_assert!(core::mem::size_of::<X86VendorList>() == 4);
-zr::static_assert!(core::mem::align_of::<X86VendorList>() == 4);
-
-#[repr(C)]
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct X86ModelInfo {
-    pub processor_type: u8,
-    pub family: u8,
-    pub model: u8,
-    pub stepping: u8,
-
-    pub display_family: u32,
-    pub display_model: u32,
-
-    pub patch_level: u32,
-}
-
-zr::static_assert!(core::mem::size_of::<X86ModelInfo>() == 16);
-zr::static_assert!(core::mem::align_of::<X86ModelInfo>() == 4);
-
-#[repr(u32)]
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub enum X86MicroarchList {
-    #[default]
-    Unknown = 0,
-    IntelNehalem = 1,
-    IntelWestmere = 2,
-    IntelSandyBridge = 3,
-    IntelIvyBridge = 4,
-    IntelBroadwell = 5,
-    IntelHaswell = 6,
-    IntelSkylake = 7,
-    IntelCannonlake = 8,
-    IntelIcelake = 9,
-    IntelTigerlake = 10,
-    IntelAlderlake = 11,
-    IntelSilvermont = 12,
-    IntelGoldmont = 13,
-    IntelGoldmontPlus = 14,
-    AmdBulldozer = 15,
-    AmdJaguar = 16,
-    AmdZen = 17,
-}
-
-zr::static_assert!(core::mem::size_of::<X86MicroarchList>() == 4);
-zr::static_assert!(core::mem::align_of::<X86MicroarchList>() == 4);
+zr::static_assert!(core::mem::size_of::<X86MicroarchConfig>() == 344);
+zr::static_assert!(core::mem::align_of::<X86MicroarchConfig>() == 8);
 
 #[repr(u32)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -220,48 +212,6 @@ pub enum X86HypervisorList {
 
 zr::static_assert!(core::mem::size_of::<X86HypervisorList>() == 4);
 zr::static_assert!(core::mem::align_of::<X86HypervisorList>() == 4);
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct X86IdleStateT {
-    pub name: *const core::ffi::c_char,
-    pub mwait_hint: u32,
-    pub exit_latency: u32,
-    pub flushes_tlb: bool,
-}
-
-zr::static_assert!(core::mem::size_of::<X86IdleStateT>() == 24);
-zr::static_assert!(core::mem::align_of::<X86IdleStateT>() == 8);
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct X86IdleStatesT {
-    pub states: [X86IdleStateT; X86_MAX_CSTATES],
-    pub default_state_mask: u32,
-}
-
-zr::static_assert!(core::mem::size_of::<X86IdleStatesT>() == 296);
-zr::static_assert!(core::mem::align_of::<X86IdleStatesT>() == 8);
-
-pub type X86GetTimerFreqFuncT = Option<unsafe extern "C" fn() -> u64>;
-pub type X86RebootSystemFuncT = Option<unsafe extern "C" fn()>;
-pub type X86RebootReasonFuncT = Option<unsafe extern "C" fn(reason: u64)>;
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct X86MicroarchConfig {
-    pub x86_microarch: X86MicroarchList,
-    pub get_apic_freq: X86GetTimerFreqFuncT,
-    pub get_tsc_freq: X86GetTimerFreqFuncT,
-    pub reboot_system: X86RebootSystemFuncT,
-    pub reboot_reason: X86RebootReasonFuncT,
-    pub disable_c1e: bool,
-    pub idle_prefer_hlt: bool,
-    pub idle_states: X86IdleStatesT,
-}
-
-zr::static_assert!(core::mem::size_of::<X86MicroarchConfig>() == 344);
-zr::static_assert!(core::mem::align_of::<X86MicroarchConfig>() == 8);
 
 x86_cpuid_bit! {X86_FEATURE_SSE3, ModelFeatures, 2, 0}
 x86_cpuid_bit! {X86_FEATURE_MON, ModelFeatures, 2, 3}
@@ -349,40 +299,40 @@ x86_cpuid_bit! {X86_FEATURE_RDTSCP, ExtModelFeatures, 3, 27}
 x86_cpuid_bit! {X86_FEATURE_INVAR_TSC, ExtPowerManagement, 3, 8}
 x86_cpuid_bit! {X86_FEATURE_INVLPGB, ExtAddressSizes, 1, 3}
 
+#[inline]
 pub fn x86_get_cpuid_leaf(leaf: X86CpuidLeafNum) -> Option<&'static CpuidLeaf> {
     let leaf_val = leaf as u32;
     // SAFETY: Values are only written to during single-threaded startup.
     unsafe {
         if leaf_val < X86CpuidLeafNum::HypVendor as u32 {
-            let max = core::ptr::addr_of!(MAX_CPUID).read();
-            if leaf_val > max {
+            if leaf_val > *MAX_CPUID.0.get() || leaf_val > MAX_SUPPORTED_CPUID {
+                core::hint::cold_path();
                 return None;
             }
-            let ptr = core::ptr::addr_of!(CPUID).cast::<CpuidLeaf>();
-            Some(&*ptr.add(leaf_val as usize))
+            Some(&(*CPUID.0.get())[leaf_val as usize])
         } else if leaf_val < X86CpuidLeafNum::ExtBase as u32 {
-            let max_hyp = core::ptr::addr_of!(MAX_HYP_CPUID).read();
-            if leaf_val > max_hyp {
+            if leaf_val > *MAX_HYP_CPUID.0.get() || leaf_val > MAX_SUPPORTED_CPUID_HYP {
+                core::hint::cold_path();
                 return None;
             }
             let offset = (leaf_val - X86CpuidLeafNum::HypVendor as u32) as usize;
-            let ptr = core::ptr::addr_of!(CPUID_HYP).cast::<CpuidLeaf>();
-            Some(&*ptr.add(offset))
+            Some(&(*CPUID_HYP.0.get())[offset])
         } else {
-            let max_ext = core::ptr::addr_of!(MAX_EXT_CPUID).read();
-            if leaf_val > max_ext {
+            if leaf_val > *MAX_EXT_CPUID.0.get() || leaf_val > MAX_SUPPORTED_CPUID_EXT {
+                core::hint::cold_path();
                 return None;
             }
             let offset = (leaf_val - X86CpuidLeafNum::ExtBase as u32) as usize;
-            let ptr = core::ptr::addr_of!(CPUID_EXT).cast::<CpuidLeaf>();
-            Some(&*ptr.add(offset))
+            Some(&(*CPUID_EXT.0.get())[offset])
         }
     }
 }
 
+#[inline]
 pub fn x86_feature_test(bit: X86CpuidBit) -> bool {
     debug_assert!(bit.word <= 3 && bit.bit <= 31);
     if bit.word > 3 || bit.bit > 31 {
+        core::hint::cold_path();
         return false;
     }
     let Some(leaf) = x86_get_cpuid_leaf(bit.leaf_num) else {
@@ -442,6 +392,15 @@ pub fn x86_get_microarch_config() -> Option<&'static X86MicroarchConfig> {
         ptr.as_ref()
     }
 }
+
+#[inline]
+pub fn x86_get_model() -> &'static X86ModelInfo {
+    // SAFETY: `x86_get_model` returns a valid pointer to static `model_info` initialized during
+    // single-threaded early boot.
+    unsafe { &*c_x86_get_model() }
+}
+
+pub use super::timer_freq::{x86_lookup_core_crystal_freq, x86_lookup_tsc_freq};
 
 #[inline]
 pub fn x86_cpu_has_ibpb() -> bool {
@@ -508,4 +467,12 @@ pub fn x86_cpu_has_meltdown() -> bool {
 pub fn x86_feature_has_smap() -> bool {
     // SAFETY: Value is only written to during single threaded startup
     unsafe { core::ptr::addr_of!(G_X86_FEATURE_HAS_SMAP).read() }
+}
+
+/// Returns whether the CPU supports FSGSBASE instructions (`rdfsbase`, `rdgsbase`, `wrfsbase`,
+/// `wrgsbase`).
+#[inline]
+pub fn x86_feature_fsgsbase() -> bool {
+    // SAFETY: Value is only written to during single threaded startup
+    unsafe { core::ptr::addr_of!(G_X86_FEATURE_FSGSBASE).read() }
 }

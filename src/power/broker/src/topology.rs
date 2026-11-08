@@ -20,7 +20,7 @@ use std::{fmt, ops};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct IndexedPowerLevel {
     pub level: fpb::PowerLevel,
-    pub index: usize,
+    index: usize,
 }
 
 impl IndexedPowerLevel {
@@ -29,6 +29,11 @@ impl IndexedPowerLevel {
     #[allow(dead_code)]
     #[cfg(test)]
     pub const MAX: IndexedPowerLevel = Self { level: fpb::PowerLevel::MAX, index: usize::MAX };
+
+    #[cfg(test)]
+    pub const fn new(level: fpb::PowerLevel, index: usize) -> Self {
+        Self { level, index }
+    }
 
     #[cfg(test)]
     pub const fn from_same_level_and_index(level_and_index: u8) -> Self {
@@ -423,6 +428,16 @@ impl Topology {
         element_id: ElementID,
     ) -> impl Iterator<Item = &Dependency> {
         self.deps_by_dependent_element.get(&element_id).into_iter().flat_map(|deps| deps.iter())
+    }
+
+    /// Returns whether the given dependency exists in the topology graph.
+    pub fn contains_dependency(&self, dep: &Dependency) -> bool {
+        let Some(dependent) = &dep.dependent else {
+            return false;
+        };
+        self.deps_by_dependent_element
+            .get(&dependent.element_id)
+            .is_some_and(|deps| deps.contains(dep))
     }
 
     /// Gets direct and transitive dependencies for the given Element and
@@ -1606,5 +1621,34 @@ mod tests {
         assert_eq!(a_deps, []);
         assert!(t.deps_by_required_element.is_empty());
         assert!(t.deps_by_dependent_element.is_empty());
+    }
+
+    #[fuchsia::test]
+    fn test_contains_dependency() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut t = Topology::new(inspect.root(), 0);
+
+        let a = t.add_element_with_inspect("A", vec![0, 1], 0, 0).expect("add_element failed");
+        let b = t.add_element_with_inspect("B", vec![0, 1], 0, 0).expect("add_element failed");
+
+        let dep = Dependency {
+            dependent: Some(ElementLevel { element_id: a, level: ONE }),
+            requires: ElementLevel { element_id: b, level: ONE },
+        };
+        assert!(!t.contains_dependency(&dep));
+
+        let root_dep = Dependency::new_root(ElementLevel { element_id: a, level: ONE });
+        assert!(!t.contains_dependency(&root_dep));
+
+        t.add_dependency(
+            &dep,
+            OnRequiredElementRemoval::MakeUnsatisfiable,
+            &mut EagerInspectWriter,
+        )
+        .expect("add_dependency failed");
+        assert!(t.contains_dependency(&dep));
+
+        t.remove_dependency(&dep).expect("remove_dependency failed");
+        assert!(!t.contains_dependency(&dep));
     }
 }

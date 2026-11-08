@@ -3,6 +3,7 @@
 # found in the LICENSE file.
 
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -18,11 +19,17 @@ rustc_library(
     edition = "2024",
     target_compatible_with = ["@platforms//os:fuchsia"],
     visibility = [
+        "//src/firmware/paver/rust:__subpackages__",
+        "//src/starnix/kernel/core:__pkg__",
         "//src/storage/benchmarks/fuchsia:__pkg__",
+        "//src/storage/block_adapter:__pkg__",
         "//src/storage/ext4:__pkg__",
+        "//src/storage/fxfs/platform:__pkg__",
         "//src/storage/gpt/component:__pkg__",
         "//src/storage/lib/fs_management/rust:__pkg__",
         "//src/storage/lib/storage_device:__pkg__",
+        "//src/storage/tools/logs/run-with-logs:__pkg__",
+        "//src/virtualization/tests/virtio_block_test_util:__pkg__",
         "//vendor/google:__subpackages__",
     ],
     deps = [
@@ -47,6 +54,7 @@ rustc_library(
     edition = "2024",
     target_compatible_with = ["@platforms//os:fuchsia"],
     visibility = [
+        "//src/firmware/paver/rust:__subpackages__",
         "//src/storage/fvm:__pkg__",
         "//src/storage/lib/storage_device:__pkg__",
         "//vendor/google:__subpackages__",
@@ -56,5 +64,21 @@ rustc_library(
         "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_rust",
         "//sdk/rust/zx",
         "//src/lib/fuchsia-sync",
+    ],
+)
+
+# The libraries are defined in BUILD.bazel. The block-client unit tests stay
+# in GN because //src/storage/lib/block_server and
+# //src/storage/lib/ramdevice_client have no Bazel build yet.
+rustc_test(
+    name = "block-client_test",
+    crate = ":block-client",
+    # Avoids a name collision in GN.
+    crate_name = "block_client_lib_test",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/storage/lib/block_server",
+        "//src/storage/lib/ramdevice_client",
     ],
 )

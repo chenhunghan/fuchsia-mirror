@@ -3,10 +3,10 @@
 // found in the LICENSE file.
 
 use crate::mm::{
-    MappingAccess, MemoryAccessorExt, NumberOfElementsRead, TaskMemoryAccessor, read_to_array,
-    read_to_object_as_bytes, read_to_vec,
+    MappingAccess, MemoryAccessorExt, MemoryManager, NumberOfElementsRead, TaskMemoryAccessor,
+    read_to_array, read_to_object_as_bytes, read_to_vec,
 };
-use crate::task::{CurrentTask, Task};
+use crate::task::CurrentTask;
 use smallvec::{SmallVec, smallvec};
 use starnix_types::user_buffer::{UserBuffer, UserBuffers};
 use starnix_uapi::errors::{ENOTSUP, Errno};
@@ -181,6 +181,16 @@ pub trait OutputBuffer: Buffer {
             buffer = remaining;
             Ok(size)
         })
+    }
+
+    /// Write the content of `buffer[offset..]` into this buffer, or return `Ok(0)` if `offset` is
+    /// at or past the end of `buffer`.
+    #[inline]
+    fn write_tail(&mut self, buffer: &[u8], offset: usize) -> Result<usize, Errno> {
+        if offset >= buffer.len() {
+            return Ok(0);
+        }
+        self.write(&buffer[offset..])
     }
 
     /// Write the content of `buffer` into this buffer. It is an error to pass a buffer larger than
@@ -415,9 +425,9 @@ impl<'a> UserBuffersOutputBuffer<'a, CurrentTask> {
     }
 }
 
-impl<'a> UserBuffersOutputBuffer<'a, Task> {
-    pub fn syscall_new(task: &'a Task, buffers: UserBuffers) -> Result<Self, Errno> {
-        Self::new_inner(task, buffers)
+impl<'a> UserBuffersOutputBuffer<'a, MemoryManager> {
+    pub fn syscall_new(mm: &'a MemoryManager, buffers: UserBuffers) -> Result<Self, Errno> {
+        Self::new_inner(mm, buffers)
     }
 }
 
@@ -615,15 +625,15 @@ impl<'a> UserBuffersInputBuffer<'a, CurrentTask> {
     }
 }
 
-impl<'a> UserBuffersInputBuffer<'a, Task> {
-    pub fn syscall_new(task: &'a Task, buffers: UserBuffers) -> Result<Self, Errno> {
-        Self::new_inner(task, buffers)
+impl<'a> UserBuffersInputBuffer<'a, MemoryManager> {
+    pub fn syscall_new(mm: &'a MemoryManager, buffers: UserBuffers) -> Result<Self, Errno> {
+        Self::new_inner(mm, buffers)
     }
 }
 
 impl<'a, M: TaskMemoryAccessor> Buffer for UserBuffersInputBuffer<'a, M> {
     fn segments_count(&self) -> Result<usize, Errno> {
-        Ok(self.buffers.iter().filter(|b| b.is_null()).count())
+        Ok(self.buffers.iter().filter(|b| !b.is_null()).count())
     }
 
     fn peek_each_segment(
@@ -1132,6 +1142,21 @@ mod tests {
         assert_eq!(output_buffer.available(), 9);
         assert_eq!(output_buffer.write_all(b"bcdefghij").expect("write"), 9);
         assert_eq!(output_buffer.data(), b"abcdefghij");
+    }
+
+    #[::fuchsia::test]
+    async fn test_user_buffers_input_buffer_segments_count() {
+        spawn_kernel_and_run(async |current_task| {
+            let input_iovec = smallvec![
+                UserBuffer { address: UserAddress::default(), length: 0 },
+                UserBuffer { address: UserAddress::from(0x1000), length: 12 },
+                UserBuffer { address: UserAddress::from(0x2000), length: 12 },
+            ];
+            let input_buffer =
+                UserBuffersInputBuffer::unified_new(&current_task, input_iovec).unwrap();
+            assert_eq!(input_buffer.segments_count().unwrap(), 2);
+        })
+        .await;
     }
 
     #[::fuchsia::test]

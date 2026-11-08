@@ -1,0 +1,135 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "input",
+    srcs = [
+        "direct_input.rs",
+        "input_device.rs",
+        "input_event_relay.rs",
+        "input_file.rs",
+        "lib.rs",
+        "test_injection.rs",
+        "uinput.rs",
+    ],
+    crate_name = "starnix_modules_input",
+    crate_root = "lib.rs",
+    edition = "2024",
+    lint_config = "//src/starnix/build:kernel_library_config",
+    visibility = ["//src/starnix/modules:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.input.injection:fuchsia.input.injection_rust",
+        "//sdk/fidl/fuchsia.input.report:fuchsia.input.report_rust",
+        "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_rust",
+        "//sdk/fidl/fuchsia.ui.input.internal:fuchsia.ui.input.internal_rust",
+        "//sdk/fidl/fuchsia.ui.input3:fuchsia.ui.input3_rust",
+        "//sdk/fidl/fuchsia.ui.pointer:fuchsia.ui.pointer_rust",
+        "//sdk/fidl/fuchsia.ui.policy:fuchsia.ui.policy_rust",
+        "//sdk/fidl/fuchsia.ui.test.input:fuchsia.ui.test.input_rust",
+        "//sdk/fidl/fuchsia.ui.views:fuchsia.ui.views_rust",
+        "//sdk/rust/zx",
+        "//src/lib/collections/sorted-vec-map",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/trace/rust:trace",
+        "//src/starnix/kernel/core",
+        "//src/starnix/lib/starnix_logging",
+        "//src/starnix/lib/starnix_sync",
+        "//src/starnix/lib/starnix_syscalls",
+        "//src/starnix/lib/starnix_types",
+        "//src/starnix/lib/starnix_uapi",
+        "//src/starnix/modules/input/event_conversion/app_event_conversion",
+        "//src/starnix/modules/input/event_conversion/input_report_event_conversion",
+        "//third_party/rust_crates/vendor:bit-vec",
+        "//third_party/rust_crates/vendor:crossbeam",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)
+
+rustc_test(
+    name = "input_test",
+    crate = ":input",
+    # Matches program.binary in meta/starnix_input_tests.cml for the generated GN test.
+    crate_name = "starnix_modules_input_lib_test",
+    lint_config = "//src/starnix/config:starnix_clippy_lints_test",
+    # TODO(https://fxbug.dev/42059075): Re-enable starnix in these environments.
+    tags = [
+        "exclude_toolchain_tags=asan",
+        "exclude_toolchain_tags=hwasan",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.input:fuchsia.input_rust",
+        "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+        "//src/lib/fuchsia",
+        "//src/lib/test_util",
+        "//src/lib/ui/fuchsia-scenic",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:pretty_assertions",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+fx_packaged_binary(
+    name = "input_test_packaged_bin",
+    testonly = True,
+    binary = ":input_test",
+    binary_name = "starnix_modules_input_lib_test",
+)
+
+fx_component_manifest(
+    name = "starnix-input-tests-manifest",
+    testonly = True,
+    component_name = "starnix-input-tests",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/starnix:unit_test.shard.cml",
+    ],
+    manifest = "meta/starnix_input_tests.cml",
+)
+
+fx_test_component(
+    name = "starnix-input-tests-component",
+    compiled_manifest = ":starnix-input-tests-manifest",
+    test_type = "starnix",
+    deps = [
+        ":input_test_packaged_bin",
+        # In GN, //src/starnix/kernel/vdso is a resource() propagated through
+        # //src/starnix/kernel/core's deps.
+        "//src/starnix/kernel/vdso",
+    ],
+)
+
+fx_package(
+    name = "starnix-input-tests-package",
+    package_name = "starnix-input-tests",
+    test_components = [":starnix-input-tests-component"],
+)
+
+fx_test(
+    name = "starnix-input-tests",
+    # Tests exercise failure cases, so ERROR logs are expected.
+    max_log_severity = "ERROR",
+    package = ":starnix-input-tests-package",
+)

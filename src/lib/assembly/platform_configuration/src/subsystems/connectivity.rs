@@ -62,6 +62,23 @@ impl DefineSubsystemConfiguration<PlatformConnectivityConfig> for ConnectivitySu
             })?;
         }
 
+        // Whether WLAN and Netstack redact MAC addresses, BSSIDs and SSIDs in
+        // logs and Inspect. Enabled by default on all non-eng builds; user
+        // builds cannot opt out.
+        let redact_network_identifiers =
+            match (context.build_type, connectivity_config.redact_network_identifiers) {
+                (BuildType::User, Some(false)) => {
+                    bail!("'redact_network_identifiers' cannot be disabled on user builds")
+                }
+                (BuildType::User | BuildType::UserDebug, None) => true,
+                (BuildType::Eng, None) => false,
+                (_, Some(b)) => b,
+            };
+        builder.set_config_capability(
+            "fuchsia.connectivity.RedactNetworkIdentifiers",
+            Config::new(ConfigValueType::Bool, redact_network_identifiers.into()),
+        )?;
+
         // Whether networking is enabled is dependent on all three of:
         // - the feature_set_level
         // - the build_type

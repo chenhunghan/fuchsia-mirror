@@ -1,0 +1,73 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = [
+        "main.cc",
+    ],
+    gn_output_name = "server_suite_under_test_cpp",
+    visibility = [":__pkg__"],
+    deps = [
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/outgoing/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/tests/fidl/dynsuite/server_suite/fidl:fidl.serversuite_cpp",
+        "//src/tests/fidl/dynsuite/server_suite/runners/cpp_util",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "server_suite_under_test_cpp",
+    visibility = [":__pkg__"],
+)
+
+fx_component_manifest(
+    name = "manifest",
+    testonly = True,
+    component_name = "server",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/server.cml",
+    visibility = [":__pkg__"],
+)
+
+fx_component(
+    name = "server",
+    testonly = True,
+    compiled_manifest = ":manifest",
+    visibility = [":__pkg__"],
+    deps = [
+        ":bin_packaged",
+    ],
+)
+
+fx_package(
+    name = "cpp",
+    package_name = "fidl_server_suite_cpp_server",
+    testonly = True,
+    components = [
+        ":server",
+    ],
+    visibility = [
+        "//src/tests/fidl/dynsuite/server_suite:__pkg__",
+    ],
+)

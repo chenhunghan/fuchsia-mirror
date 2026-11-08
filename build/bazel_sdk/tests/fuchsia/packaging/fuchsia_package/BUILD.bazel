@@ -29,7 +29,7 @@ REPO_DEFAULT_ABI_REVISION = [
     level.abi_revision
     for level in get_fuchsia_api_levels()
     # TODO(https://fxbug.dev/354047162): Figure out a way to automate the API level name.
-    if level.api_level == "28"
+    if level.api_level == "30"
 ][0]
 
 _COMMON_EXPECTED_BLOBS_IN_PKG_WITH_CC_COMPONENT = {
@@ -247,9 +247,6 @@ fuchsia_package_checker_test(
         "meta/test_driver.cm",
     ],
     package_under_test = "//fuchsia/packaging/fuchsia_package/cc_driver:pkg",
-    structured_config_files = [
-        "meta/test_driver.cvf",
-    ],
 )
 
 fuchsia_package_checker_test(
@@ -281,9 +278,6 @@ fuchsia_package_checker_test(
         "meta/test_driver.cm",
     ],
     package_under_test = "//fuchsia/packaging/fuchsia_package/cc_driver:pkg_with_tool",
-    structured_config_files = [
-        "meta/test_driver.cvf",
-    ],
 )
 
 fuchsia_package_checker_test(

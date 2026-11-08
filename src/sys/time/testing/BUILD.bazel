@@ -1,0 +1,50 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "timekeeper_integration",
+    testonly = True,
+    srcs = ["lib/lib.rs"],
+    crate_name = "timekeeper_integration_lib",
+    crate_root = "lib/lib.rs",
+    edition = "2024",
+    # In GN, `testonly = true` targets use `clippy_warn_default` (omitting
+    # `clippy_warn_production`, which enables `clippy::collection_is_never_read`).
+    lint_config = "//build/config/rust/lints:clippy_warn_default",  # @bazel2gn:skip
+    visibility = [
+        "//src/sys/time/testing/realm-proxy:__pkg__",
+        "//src/sys/time/timekeeper_integration:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.rtc:fuchsia.hardware.rtc_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.metrics:fuchsia.metrics_rust",
+        "//sdk/fidl/fuchsia.metrics.test:fuchsia.metrics.test_rust",
+        "//sdk/fidl/fuchsia.time:fuchsia.time_rust",
+        "//sdk/fidl/fuchsia.time.external:fuchsia.time.external_rust",
+        "//sdk/rust/zx",
+        "//src/lib/async-utils",
+        "//src/lib/fake-clock/fidl:fidl_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        # GN's `//src/lib/fuchsia-component-test` group bundles the Rust library
+        # with the unmigrated `realm_builder_server_component`.
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-sync",
+        "//src/storage/lib/vfs/rust:vfs",
+        "//src/sys/time/lib/push-source",
+        "//src/sys/time/lib/time_metrics_registry",
+        "//src/sys/time/testing/fidl/test.time:fidl_rust",
+        "//src/sys/time/testing/fidl/test.time.realm:fidl_rust",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:chrono",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)

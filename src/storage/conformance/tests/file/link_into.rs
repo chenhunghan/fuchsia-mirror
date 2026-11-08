@@ -39,7 +39,23 @@ async fn file_link_into() {
 
     fixture
         .file
-        .link_into(fixture.get_token().await, "linked")
+        .link_into(fixture.get_token().await, "linked", &fio::LinkIntoOptions::default())
+        .await
+        .expect("link_into (FIDL) failed")
+        .expect("link_into failed");
+
+    assert_eq!(read_file(&fixture.dir, "linked").await, CONTENTS);
+}
+
+#[fuchsia::test]
+async fn file_deprecated_link_into() {
+    let Some(fixture) = Fixture::new(fio::PERM_READABLE | fio::PERM_WRITABLE).await else {
+        return;
+    };
+
+    fixture
+        .file
+        .deprecated_link_into(fixture.get_token().await, "linked")
         .await
         .expect("link_into (FIDL) failed")
         .expect("link_into failed");
@@ -57,7 +73,7 @@ async fn file_link_into_bad_name() {
         assert_eq!(
             fixture
                 .file
-                .link_into(fixture.get_token().await, bad_name)
+                .link_into(fixture.get_token().await, bad_name, &fio::LinkIntoOptions::default())
                 .await
                 .expect("link_into (FIDL) failed")
                 .expect_err("link_into succeeded"),
@@ -73,7 +89,7 @@ async fn file_link_into_insufficient_rights() {
         assert_eq!(
             fixture
                 .file
-                .link_into(fixture.get_token().await, "linked")
+                .link_into(fixture.get_token().await, "linked", &fio::LinkIntoOptions::default())
                 .await
                 .expect("link_into (FIDL) failed")
                 .expect_err("link_into succeeded"),
@@ -98,7 +114,7 @@ async fn file_link_into_for_unlinked_file() {
     assert_eq!(
         fixture
             .file
-            .link_into(fixture.get_token().await, "linked")
+            .link_into(fixture.get_token().await, "linked", &fio::LinkIntoOptions::default())
             .await
             .expect("link_into (FIDL) failed")
             .expect_err("link_into succeeded"),
@@ -115,7 +131,7 @@ async fn file_link_into_existing() {
     assert_eq!(
         fixture
             .file
-            .link_into(fixture.get_token().await, "existing")
+            .link_into(fixture.get_token().await, "existing", &fio::LinkIntoOptions::default())
             .await
             .expect("link_into (FIDL) failed")
             .expect_err("link_into succeeded"),
@@ -154,7 +170,7 @@ async fn file_link_into_target_unlinked_dir() {
     assert_eq!(
         fixture
             .file
-            .link_into(token, "existing")
+            .link_into(token, "existing", &fio::LinkIntoOptions::default())
             .await
             .expect("link_into (FIDL) failed")
             .expect_err("link_into succeeded"),
@@ -191,7 +207,7 @@ async fn unnamed_temporary_file_can_link_into_named_file() {
     let token = get_token(&dir).await.into();
 
     temporary_file
-        .link_into(token, "foo")
+        .link_into(token, "foo", &fio::LinkIntoOptions::default())
         .await
         .expect("link_into (FIDL) failed")
         .expect("link_into failed");
@@ -224,11 +240,111 @@ async fn unlinkable_unnamed_temporary_should_fail_link_into() {
 
     assert_eq!(
         temporary_file
-            .link_into(token, "foo")
+            .link_into(token, "foo", &fio::LinkIntoOptions::default())
             .await
             .expect("link_into (FIDL) failed")
             .map_err(zx::Status::err_from_raw)
             .expect_err("link_into passed unexpectedly for unlinkable file"),
         zx::Status::NOT_FOUND
     );
+}
+
+#[fuchsia::test]
+async fn file_link_into_unknown_flags() {
+    let Some(fixture) = Fixture::new(fio::PERM_READABLE | fio::PERM_WRITABLE).await else {
+        return;
+    };
+
+    assert_eq!(
+        fixture
+            .file
+            .link_into(
+                fixture.get_token().await,
+                "linked",
+                &fio::LinkIntoOptions {
+                    flags: Some(fio::LinkIntoFlags::from_bits_retain(1 << 63)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("link_into (FIDL) failed")
+            .expect_err("link_into succeeded with unknown flags"),
+        zx::Status::INVALID_ARGS.into_raw()
+    );
+}
+
+#[fuchsia::test]
+async fn unnamed_temporary_file_link_into_replace_existing() {
+    let harness = TestHarness::new().await;
+    if !harness.config.supports_unnamed_temporary_file
+        || !harness.config.supports_link_into_replace_existing
+    {
+        return;
+    }
+
+    let dir = harness.get_directory(vec![], harness.dir_rights.all_flags());
+
+    // Create an existing file "foo" with original contents.
+    let existing_file = dir
+        .open_node::<fio::FileMarker>(
+            "foo",
+            fio::Flags::FLAG_MAYBE_CREATE
+                | fio::Flags::PROTOCOL_FILE
+                | fio::PERM_READABLE
+                | fio::PERM_WRITABLE,
+            None,
+        )
+        .await
+        .expect("open failed");
+    existing_file.write(b"original").await.expect("write FIDL failed").expect("write failed");
+
+    // Create unnamed temporary file with new contents.
+    let temporary_file = dir
+        .open_node::<fio::FileMarker>(
+            ".",
+            fio::Flags::PROTOCOL_FILE
+                | fio::Flags::FLAG_CREATE_AS_UNNAMED_TEMPORARY
+                | fio::PERM_READABLE
+                | fio::PERM_WRITABLE,
+            None,
+        )
+        .await
+        .expect("open failed to open unnamed temporary file");
+    temporary_file
+        .write(b"replaced")
+        .await
+        .expect("write (FIDL) failed")
+        .expect("write to file failed");
+
+    let token = get_token(&dir).await.into();
+
+    // Without REPLACE_EXISTING, linking into "foo" must fail with ALREADY_EXISTS.
+    assert_eq!(
+        temporary_file
+            .link_into(token, "foo", &fio::LinkIntoOptions::default())
+            .await
+            .expect("link_into (FIDL) failed")
+            .map_err(zx::Status::err_from_raw)
+            .expect_err("link_into succeeded unexpectedly"),
+        zx::Status::ALREADY_EXISTS
+    );
+
+    let token = get_token(&dir).await.into();
+
+    // With REPLACE_EXISTING, linking into "foo" should succeed and replace the file.
+    temporary_file
+        .link_into(
+            token,
+            "foo",
+            &fio::LinkIntoOptions {
+                flags: Some(fio::LinkIntoFlags::REPLACE_EXISTING),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("link_into (FIDL) failed")
+        .map_err(zx::Status::err_from_raw)
+        .expect("link_into failed");
+
+    assert_eq!(read_file(&dir, "foo").await, b"replaced");
 }

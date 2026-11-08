@@ -294,9 +294,8 @@ async fn main() -> Result<(), Error> {
     );
 
     let filesystem = FxFilesystemBuilder::new()
-        .format(true)
         .barriers_enabled(true)
-        .open(DeviceHolder::new(
+        .format(DeviceHolder::new(
             BlockDevice::new(
                 new_block_client(block_server.connect())
                     .await
@@ -307,7 +306,7 @@ async fn main() -> Result<(), Error> {
             .expect("failed to create block device"),
         ))
         .await
-        .expect("failed to open filesystem");
+        .expect("failed to format filesystem");
 
     let inspector = fuchsia_inspect::component::inspector();
     let _inspect_server_task =

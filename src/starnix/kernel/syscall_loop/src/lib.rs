@@ -37,13 +37,13 @@ pub fn enter(current_task: &mut CurrentTask) -> ExitStatus {
                 Ok(ok) => ok,
                 Err(error) => {
                     log_warn!("Died unexpectedly from {error:?}! treating as SIGKILL");
-                    ExitStatus::Kill(SignalInfo::kernel(SIGKILL))
+                    ExitStatus::Kill(SIGKILL)
                 }
             }
         }
         Err(error) => {
             log_error!("failed to map mode state vmo, {error:?}! treating as SIGKILL");
-            ExitStatus::Kill(SignalInfo::kernel(SIGKILL))
+            ExitStatus::Kill(SIGKILL)
         }
     }
 }
@@ -295,6 +295,12 @@ fn process_restricted_exit(
         }
     }
 
+    // Most restricted exits (e.g. syscalls that leave no signal, stop, exit or restart behind) give
+    // `process_completed_restricted_exit` nothing to do: only run it if work may be pending.
+    if !has_pending_exit_work(current_task) {
+        return Ok(None);
+    }
+
     if let Some(exit_status) = process_completed_restricted_exit(current_task, &error_context)? {
         return Ok(Some(exit_status));
     }
@@ -355,7 +361,7 @@ pub fn execute_syscall(current_task: &mut CurrentTask, error_context: &mut Optio
         current_task.thread_state.arch_width(),
     );
 
-    fuchsia_trace::duration!(CATEGORY_STARNIX, syscall_decl.trace_name());
+    let _syscall_trace = starnix_core::task::begin_syscall_trace(|| syscall_decl.trace_name());
     let syscall = new_syscall(syscall_decl, current_task);
 
     log_syscall!(current_task, "{syscall:?}");
@@ -396,9 +402,38 @@ pub fn execute_syscall(current_task: &mut CurrentTask, error_context: &mut Optio
     current_task.ptrace().on_syscall_exit(is_error);
 }
 
+/// Returns whether `process_completed_restricted_exit` may have work to do for `current_task`.
+///
+/// When this returns `false`, `process_completed_restricted_exit` would return `Ok(None)` without
+/// any side effect, because each of its steps is guarded by the state checked here:
+///
+/// * `dequeue_signal` is skipped for exited tasks and otherwise returns early unless
+///   `should_check_for_pending_signals()`, i.e. unless signals or kernel signals (e.g. freeze) are
+///   pending for the task or its thread group, or a temporary signal mask is set. The latter also
+///   guards restoring the temporary signal mask.
+/// * `prepare_to_restart_syscall` does nothing without a `restart_code`.
+/// * `exit_status()` is `None` unless the task is marked `EXITED`.
+/// * `block_if_stopped()` does nothing unless the task or its thread group is stopping or stopped
+///   (group stop or ptrace stop).
+///
+/// These are the same relaxed atomic loads that the full path performs, so this cannot observe a
+/// state that the full path could not have observed. A change made concurrently by another thread
+/// is handled at the next restricted exit, as when it lands just after the full path's checks.
+#[inline(always)]
+fn has_pending_exit_work(current_task: &CurrentTask) -> bool {
+    current_task.thread_state.restart_code.is_some()
+        || current_task.is_exitted()
+        || current_task.should_check_for_pending_signals()
+        || current_task.load_stopped().is_stopping_or_stopped()
+        || current_task.thread_group().load_stopped().is_stopping_or_stopped()
+}
+
 /// Finishes `current_task` updates after a restricted mode exit such as a syscall, exception, or kick.
 ///
 /// Returns an `ExitStatus` if the task is meant to exit.
+///
+/// `process_restricted_exit` skips this function when `has_pending_exit_work` returns `false`, so
+/// any work added here must be guarded by state that `has_pending_exit_work` checks.
 pub fn process_completed_restricted_exit(
     current_task: &mut CurrentTask,
     error_context: &Option<ErrorContext>,
@@ -456,8 +491,9 @@ pub fn process_completed_restricted_exit(
         }
     }
 
-    if let Some(ExitStatus::CoreDump(signal_info)) = &result {
-        if current_task.flags().contains(TaskFlags::DUMP_ON_EXIT) {
+    if let Some(ExitStatus::CoreDump(_)) = &result {
+        let core_dump_signal = current_task.write().core_dump_signal.take();
+        if let Some(signal_info) = core_dump_signal {
             // Avoid taking a backtrace if the signal was sent by the same task.
             if !signal_info.is_sent_by(&current_task.weak_task()) {
                 // Request a backtrace before reporting the crash to increase chance of a backtrace
@@ -472,7 +508,7 @@ pub fn process_completed_restricted_exit(
             {
                 current_task.kernel().crash_reporter.handle_core_dump(
                     &current_task,
-                    signal_info,
+                    &signal_info,
                     pending_report,
                 );
             }

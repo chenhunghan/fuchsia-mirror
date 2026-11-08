@@ -50,6 +50,10 @@ pub struct Message<D: MessageData = Vec<u8>> {
     /// The Unix credentials associated with the message.
     pub credentials: Option<uapi::ucred>,
 
+    /// The opaque security token associated with a datagram message, resolved to a security
+    /// context string only if `SO_PASSSEC` is enabled when receiving.
+    pub security_state: Option<security::SecurityContextToken>,
+
     /// The ancillary data that is associated with this message.
     pub ancillary_data: Vec<AncillaryData>,
 }
@@ -63,7 +67,7 @@ impl<D: MessageData> Message<D> {
         ancillary_data: Vec<AncillaryData>,
     ) -> Self {
         debug_assert!(!ancillary_data.iter().any(AncillaryData::is_credentials));
-        Message { data, address, credentials, ancillary_data }
+        Message { data, address, credentials, security_state: None, ancillary_data }
     }
 
     /// Returns the length of the message in bytes.
@@ -78,6 +82,7 @@ impl<D: MessageData> Message<D> {
             data: self.data.clone_at_most(limit),
             address: self.address.clone(),
             credentials: self.credentials,
+            security_state: self.security_state,
             ancillary_data: self.ancillary_data.clone(),
         }
     }
@@ -102,7 +107,13 @@ impl<D: MessageData> Message<D> {
 
 impl<D: MessageData> From<D> for Message<D> {
     fn from(data: D) -> Self {
-        Message { data, address: None, credentials: None, ancillary_data: Vec::new() }
+        Message {
+            data,
+            address: None,
+            credentials: None,
+            security_state: None,
+            ancillary_data: Vec::new(),
+        }
     }
 }
 
@@ -728,8 +739,7 @@ mod tests {
             )
             .to_vec();
             security_server.set_enforcing(true);
-            security_server.load_policy(policy_bytes).expect("policy load failed");
-            security::selinuxfs_policy_loaded(current_task);
+            security::selinuxfs_load_policy(current_task, policy_bytes).expect("load policy");
 
             let data_size = data.total_size(current_task);
             let header_size = CMsgHdrPtr::size_of_object_for(current_task);

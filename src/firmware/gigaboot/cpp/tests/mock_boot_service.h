@@ -26,12 +26,12 @@
 #include <efi/types.h>
 #include <fbl/no_destructor.h>
 #include <gtest/gtest.h>
-#include <phys/efi/main.h>
-#include <phys/efi/protocol.h>
 
 #include "acpi.h"
 #include "gpt.h"
 #include "network.h"
+#include "protocol.h"
+#include "utils.h"
 
 namespace gigaboot {
 

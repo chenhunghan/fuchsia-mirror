@@ -25,6 +25,15 @@ impl AtomicStopState {
     }
 }
 
+impl starnix_sync::AtomicRead for AtomicStopState {
+    type Value = StopState;
+
+    #[inline(always)]
+    fn load(&self, ordering: Ordering) -> Self::Value {
+        Self::load(self, ordering)
+    }
+}
+
 /// This enum describes the state that a task or thread group can be in when being stopped.
 /// The names are taken from ptrace(2).
 #[derive(Clone, Copy, Debug, PartialEq)]

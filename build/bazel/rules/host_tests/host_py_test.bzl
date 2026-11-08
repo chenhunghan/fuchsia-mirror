@@ -6,6 +6,7 @@
 
 load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_python//python:py_info.bzl", "PyInfo")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load(":host_test.bzl", "host_test")
 
 def _host_py_test_info_impl(ctx):
@@ -59,6 +60,7 @@ def legacy_host_py_test(
         test_args = [],
         test_data = [],
         tags = [],
+        target_compatible_with = None,
         visibility = None,
         **kwargs):
     """Define a host test wrapping a Python binary that can be used with Fuchsia test runners.
@@ -74,6 +76,10 @@ def legacy_host_py_test(
       main: Optional. The main entry point for the py_binary, defaults to 'name + ".py"'.
       test_args: Arguments to pass to the test binary. Do not use `args`.
       test_data: Optional. The data dependencies for the test target itself.
+      tags: Optional. Tags applied to both the test target and inner `py_binary`.
+      target_compatible_with: Optional. Platform constraints for the generated targets.
+        Defaults to HOST_OS_CONSTRAINTS.
+      visibility: Optional. Visibility of the generated host test target.
       **kwargs: Arguments to pass to `py_binary`.
     """
     if "args" in kwargs:
@@ -81,9 +87,11 @@ def legacy_host_py_test(
 
     binary_name = binary_name if binary_name else name + "_bin"
     host_py_test_info = name + ".host_py_test_info"
+    if target_compatible_with == None:
+        target_compatible_with = HOST_OS_CONSTRAINTS
 
-    if "manual" not in tags:
-        tags = tags + ["manual"]
+    test_tags = list(tags or [])
+    binary_tags = test_tags if "manual" in test_tags else test_tags + ["manual"]
 
     if not main:
         main = name + ".py"
@@ -91,14 +99,19 @@ def legacy_host_py_test(
     py_binary(
         name = binary_name,
         main = main,
+        tags = binary_tags,
+        target_compatible_with = target_compatible_with,
         visibility = ["//visibility:private"],
         **kwargs
     )
 
     _host_py_test_info(
         name = host_py_test_info,
+        testonly = kwargs.get("testonly", False),
         binary = ":" + binary_name,
         main = main,
+        tags = binary_tags,
+        target_compatible_with = target_compatible_with,
         visibility = ["//visibility:private"],
     )
 
@@ -115,6 +128,7 @@ def legacy_host_py_test(
         binary = binary_name,
         test_args = test_args,
         data = test_data,
+        tags = test_tags,
         list_cases_argument = "list_host_python_unittests",
         host_test_wrapper_template = "//build/bazel:templates/template.host_py_test_wrapper.sh",
         host_test_wrapper_generator_deps = [
@@ -125,10 +139,20 @@ def legacy_host_py_test(
             "--python-test-interpreter=test_data/python3",
             "--python-test-info=$(location :{})".format(host_py_test_info),
         ],
+        target_compatible_with = target_compatible_with,
         visibility = visibility,
     )
 
-def _host_py_test_impl(name, visibility, binary_name = "", main = None, test_args = [], test_data = [], tags = [], **kwargs):
+def _host_py_test_impl(
+        name,
+        visibility,
+        binary_name = "",
+        main = None,
+        test_args = [],
+        test_data = [],
+        tags = [],
+        target_compatible_with = None,
+        **kwargs):
     legacy_host_py_test(
         name = name,
         binary_name = binary_name,
@@ -136,6 +160,7 @@ def _host_py_test_impl(name, visibility, binary_name = "", main = None, test_arg
         test_args = test_args,
         test_data = test_data,
         tags = tags,
+        target_compatible_with = target_compatible_with,
         visibility = visibility,
         **kwargs
     )

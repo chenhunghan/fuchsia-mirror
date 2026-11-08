@@ -48,3 +48,7 @@ type RecursiveEmptyStructArrayWrapper = struct {
 type RecursiveEmptyStructVectorWrapper = struct {
     vec vector<RecursiveEmptyStruct>;
 };
+
+type StructOfTableWithEmptyStruct = struct {
+    t TableWithEmptyStruct;
+};

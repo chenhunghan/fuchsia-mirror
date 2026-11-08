@@ -45,7 +45,7 @@ class Location:
     length: int
 
     @staticmethod
-    def from_json_value(json_val: Dict[str, Any]) -> "Location":
+    def from_json_value(json_val: Dict[str, Any]) -> Location:
         return Location(
             filename=json_val["filename"],
             line=json_val["line"],
@@ -59,7 +59,7 @@ class Value:
     value: str
 
     @staticmethod
-    def from_json_value(json_val: Dict[str, Any]) -> "Value":
+    def from_json_value(json_val: Dict[str, Any]) -> Value:
         return Value(value=json_val["value"])
 
 
@@ -69,7 +69,7 @@ class Argument:
     value: Value
 
     @staticmethod
-    def from_json_value(json_val: Dict[str, Any]) -> "Argument":
+    def from_json_value(json_val: Dict[str, Any]) -> Argument:
         return Argument(
             name=json_val["name"],
             value=Value.from_json_value(json_val["value"]),
@@ -82,7 +82,7 @@ class Attribute:
     arguments: List[Argument] = field(default_factory=list)
 
     @staticmethod
-    def from_json_value(json_val: Dict[str, Any]) -> "Attribute":
+    def from_json_value(json_val: Dict[str, Any]) -> Attribute:
         return Attribute(
             name=json_val["name"],
             arguments=[
@@ -103,7 +103,7 @@ class Declaration:
     maybe_attributes: List[Attribute] = field(default_factory=list)
 
     @staticmethod
-    def from_json_value(json_val: Dict[str, Any]) -> "Declaration":
+    def from_json_value(json_val: Dict[str, Any]) -> Declaration:
         return Declaration(
             name=json_val["name"],
             strict=json_val["strict"],

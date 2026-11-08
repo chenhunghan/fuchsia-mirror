@@ -1,0 +1,28 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_component_manifest(
+    name = "intl_wisdom_realm-manifest",
+    component_name = "intl_wisdom_realm",
+    manifest = "meta/intl_wisdom_realm.cml",
+)
+
+# Common component realm to perform example capability routing
+fx_component(
+    name = "intl_wisdom_realm",
+    compiled_manifest = ":intl_wisdom_realm-manifest",
+    visibility = [
+        "//examples/intl/wisdom/cpp:__pkg__",
+        "//examples/intl/wisdom/rust:__pkg__",
+        "//examples/intl/wisdom/tests:__pkg__",
+    ],
+)

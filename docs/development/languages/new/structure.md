@@ -56,7 +56,6 @@ using
 * [async](/sdk/lib/async)
   (C and C++)
 * [fuchsia-async](/src/lib/fuchsia-async/) (Rust)
-* [zxwait](https://fuchsia.googlesource.com/third_party/go/+/HEAD/src/syscall/zx/zxwait/) (Go)
 
 ## FIDL
 
@@ -155,7 +154,6 @@ deserialization, and dispatch.
 * [C](/sdk/lib/fidl_base)
 * [C++](/sdk/lib/fidl/cpp/)
 * [Rust](/src/lib/fidl/rust/fidl)
-* [Go](https://fuchsia.googlesource.com/third_party/go/+/HEAD/src/syscall/zx/fidl/)
 
 ## POSIX-style IO
 

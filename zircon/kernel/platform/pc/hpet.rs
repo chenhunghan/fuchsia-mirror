@@ -4,13 +4,14 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+use crate::ksync_kernel::{NoIrqSavePolicy, TrackedSpinlock};
 use crate::platform_pc::acpi::global_acpi_lite_parser;
 use crate::vm::arch_vm_aspace::{
     ARCH_MMU_FLAG_PERM_READ, ARCH_MMU_FLAG_PERM_WRITE, ARCH_MMU_FLAG_UNCACHED_DEVICE,
 };
 use core::pin::Pin;
 use debug::dprintf;
-use ksync::{KMutex, RawSpinlock, guarded, lock};
+use ksync::{KMutex, guarded, lock};
 use lazy_init::LazyInit;
 use pin_init::pin_init;
 use zx_status::Status;
@@ -70,7 +71,7 @@ struct HpetState {
     ticks_per_ms: u64,
     num_timers: u8,
     #[mutex]
-    mu: KMutex<RawSpinlock>,
+    mu: KMutex<TrackedSpinlock>,
 }
 
 // SAFETY: HpetState contains a raw pointer to registers, but it is only initialized
@@ -84,11 +85,6 @@ const MAX_PERIOD_IN_FS: u64 = 0x05F5E100;
 const GEN_CONF_EN: u64 = 1;
 /// Bit masks for the per-time conf_caps register
 const TIMER_CONF_INT_EN: u64 = 1 << 2;
-
-// FFI Declarations
-unsafe extern "C" {
-    fn cpp_hpet_set_ticks_to_clock_monotonic(n: u32, d: u32);
-}
 
 struct Hpet {
     registers: *mut HpetRegisters,
@@ -203,9 +199,10 @@ fn probe_hpet() -> Option<Hpet> {
         return cleanup_and_fail();
     }
 
-    // SAFETY: FFI call to set global ratio in timer.cc.
+    // SAFETY: Called once during single-threaded HPET initialization (`LK_INIT_LEVEL_VM + 2`)
+    // before `pc_init_timer` (`LK_INIT_LEVEL_VM + 3`).
     unsafe {
-        cpp_hpet_set_ticks_to_clock_monotonic(n as u32, d as u32);
+        super::timer::hpet_set_ticks_to_clock_monotonic(n as u32, d as u32);
     }
 
     let ticks_per_ms = hpet_nominal_frequency / 1000;
@@ -246,12 +243,7 @@ fn platform_hpet_init(_level: init::LkInitLevel) {
 
 /// Returns the current main counter value of the HPET.
 /// If HPET is not present, returns 0.
-///
-/// # Safety
-/// This is safe to call from any context after driver initialization. It performs volatile
-/// MMIO reads from mapped HPET registers.
-#[unsafe(no_mangle)]
-pub extern "C" fn hpet_get_value() -> u64 {
+pub(super) fn hpet_get_value() -> u64 {
     let state = &*HPET_STATE;
     if !state.present {
         return 0;
@@ -275,54 +267,43 @@ pub extern "C" fn hpet_get_value() -> u64 {
 
 /// Sets the main counter value of the HPET to `v`.
 /// Returns `Status::BAD_STATE` if the HPET is enabled or not present.
-///
-/// # Safety
-/// Safe to call after driver initialization. Acquires the global HPET lock and performs
-/// volatile MMIO writes.
-#[unsafe(no_mangle)]
-pub extern "C" fn hpet_set_value(v: u64) -> zx_types::zx_status_t {
+pub(super) fn hpet_set_value(v: u64) -> Result<(), Status> {
     let state = &*HPET_STATE;
     if !state.present {
-        return Status::BAD_STATE.into_raw();
+        return Err(Status::BAD_STATE);
     }
     let regs = state.registers;
     if regs.is_null() {
-        return Status::BAD_STATE.into_raw();
+        return Err(Status::BAD_STATE);
     }
 
-    lock!(state.lock_mu_policy::<ksync::NoIrqSavePolicy>());
+    lock!(state.lock_mu_policy::<NoIrqSavePolicy>());
 
     // SAFETY: regs is valid and we hold the lock.
     unsafe {
         let general_config = core::ptr::read_volatile(core::ptr::addr_of!((*regs).general_config));
         if (general_config & GEN_CONF_EN) != 0 {
-            return Status::BAD_STATE.into_raw();
+            return Err(Status::BAD_STATE);
         }
         core::ptr::write_volatile(core::ptr::addr_of_mut!((*regs).main_counter_value), v);
     }
-    zx_status::sys::ZX_OK
+    Ok(())
 }
 
 /// Returns true if the HPET is present and initialized.
-#[unsafe(no_mangle)]
-pub extern "C" fn hpet_is_present() -> bool {
+pub(super) fn hpet_is_present() -> bool {
     HPET_STATE.present
 }
 
 /// Enables the HPET main counter.
-///
-/// # Safety
-/// Safe to call after driver initialization. Acquires the global HPET lock and performs
-/// volatile MMIO writes.
-#[unsafe(no_mangle)]
-pub extern "C" fn hpet_enable() {
+pub(super) fn hpet_enable() {
     debug_assert!(hpet_is_present());
     let state = &*HPET_STATE;
     let regs = state.registers;
     if regs.is_null() {
         return;
     }
-    lock!(state.lock_mu_policy::<ksync::NoIrqSavePolicy>());
+    lock!(state.lock_mu_policy::<NoIrqSavePolicy>());
     // SAFETY: regs is valid and we hold the lock.
     unsafe {
         let general_config = core::ptr::read_volatile(core::ptr::addr_of!((*regs).general_config));
@@ -334,19 +315,14 @@ pub extern "C" fn hpet_enable() {
 }
 
 /// Disables the HPET main counter.
-///
-/// # Safety
-/// Safe to call after driver initialization. Acquires the global HPET lock and performs
-/// volatile MMIO writes.
-#[unsafe(no_mangle)]
-pub extern "C" fn hpet_disable() {
+pub(super) fn hpet_disable() {
     debug_assert!(hpet_is_present());
     let state = &*HPET_STATE;
     let regs = state.registers;
     if regs.is_null() {
         return;
     }
-    lock!(state.lock_mu_policy::<ksync::NoIrqSavePolicy>());
+    lock!(state.lock_mu_policy::<NoIrqSavePolicy>());
     // SAFETY: regs is valid and we hold the lock.
     unsafe {
         let general_config = core::ptr::read_volatile(core::ptr::addr_of!((*regs).general_config));
@@ -358,11 +334,7 @@ pub extern "C" fn hpet_disable() {
 }
 
 /// Busy-waits for approximately `ms` milliseconds using the HPET main counter.
-///
-/// # Safety
-/// Safe to call after driver initialization. Performs volatile MMIO reads.
-#[unsafe(no_mangle)]
-pub extern "C" fn hpet_wait_ms(ms: u16) {
+pub(super) fn hpet_wait_ms(ms: u16) {
     let state = &*HPET_STATE;
     let regs = state.registers;
     if regs.is_null() {
@@ -383,8 +355,7 @@ pub extern "C" fn hpet_wait_ms(ms: u16) {
 }
 
 /// Returns the nominal frequency of the HPET in ticks per millisecond.
-#[unsafe(no_mangle)]
-pub extern "C" fn hpet_ticks_per_ms() -> u64 {
+pub(super) fn hpet_ticks_per_ms() -> u64 {
     HPET_STATE.ticks_per_ms
 }
 

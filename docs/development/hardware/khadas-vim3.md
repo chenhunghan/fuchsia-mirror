@@ -166,7 +166,7 @@ Now you need to get the VIM3 firmware and software to a known-good state:
 
 1. Click the following URL to download an Android image that is known to work
    well with subsequent Fuchsia installations:
-   <https://dl.khadas.com/firmware/vim3/android/VIM3_Pie_V211220.7z>
+   <https://dl.khadas.com/products/vim3/firmware/Android/VIM3_Pie_V211220.7z>
 
 1. Extract the compressed archive file (`VIM3_Pie_V211220.7z`). After the
    extraction you should have a `VIM3_Pie_V211220` directory with an

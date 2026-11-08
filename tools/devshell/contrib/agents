@@ -12,7 +12,6 @@
 ## Use "fx agents <command> --help" for detailed information on each command.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"/../lib/vars.sh || exit $?
-fx-config-read
 
 export PYTHONPATH="${FUCHSIA_DIR}/tools${PYTHONPATH:+:$PYTHONPATH}"
 exec "${PREBUILT_PYTHON3}" "${FUCHSIA_DIR}/tools/agents/main.py" "$@"

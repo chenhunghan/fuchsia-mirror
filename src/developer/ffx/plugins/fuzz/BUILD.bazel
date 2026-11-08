@@ -1,0 +1,98 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/idk:idk_ffx_tool.bzl", "idk_ffx_tool")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "ffx_fuzz_args",
+    srcs = ["src/args.rs"],
+    crate_root = "src/args.rs",
+    edition = "2024",
+    proc_macro_deps = [
+        "//src/developer/ffx/plugins/fuzz/shell_args",
+    ],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        "//third_party/rust_crates/vendor:argh",
+    ],
+)
+
+rustc_library(
+    name = "ffx_fuzz",
+    srcs = [
+        "src/autocomplete.rs",
+        "src/fuzzer.rs",
+        "src/lib.rs",
+        "src/options.rs",
+        "src/reader.rs",
+        "src/shell.rs",
+    ],
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        ":ffx_fuzz_args",
+        "//sdk/fidl/fuchsia.developer.remotecontrol:fuchsia.developer.remotecontrol_rust_fdomain",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust",
+        "//src/developer/ffx/config:lib",
+        "//src/developer/ffx/lib/errors:lib",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/developer/ffx/lib/target/holders:lib",
+        "//src/developer/ffx/lib/writer:lib",
+        "//src/lib/fdomain/client",
+        "//src/lib/fuchsia-async",
+        "//src/sys/fuzzing/fidl:fuchsia.fuzzer_rust_fdomain",
+        "//src/sys/fuzzing/fuzzctl:lib_fdomain",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:glob",
+        "//third_party/rust_crates/vendor:regex",
+        "//third_party/rust_crates/vendor:rustyline",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:termion",
+        "//third_party/rust_crates/vendor:url",
+        "//third_party/rust_crates/vendor:walkdir",
+    ],
+)
+
+# LINT.IfChange(ffx_fuzz_tool)
+idk_ffx_tool(
+    name = "ffx_fuzz_tool",
+    srcs = ["src/main.rs"],
+    category = "partner",
+    edition = "2024",
+    idk_name = "ffx-fuzz",
+    deps = [
+        ":ffx_fuzz",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/lib/fuchsia-async",
+    ],
+)
+# LINT.ThenChange(//src/developer/ffx/plugins/fuzz/BUILD.gn:ffx_fuzz_tool)
+
+host_rustc_test(
+    name = "ffx_fuzz_args_test",
+    crate = ":ffx_fuzz_args",
+    visibility = ["//src/developer/ffx:__pkg__"],
+    deps = [
+        "//src/lib/fuchsia",
+    ],
+)
+
+host_rustc_test(
+    name = "ffx_fuzz_test",
+    crate = ":ffx_fuzz",
+    visibility = ["//src/developer/ffx:__pkg__"],
+    deps = [
+        "//sdk/rust/zx-status",
+        "//src/lib/fuchsia",
+        "//src/sys/fuzzing/fuzzctl/testing:testing_fdomain",
+        "//third_party/rust_crates/vendor:hex",
+    ],
+)

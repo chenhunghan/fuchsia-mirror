@@ -8,7 +8,7 @@ use fidl_fuchsia_bluetooth_sys::{
     AccessStartDiscoveryResult, ProcedureTokenMarker,
 };
 use fuchsia_bluetooth::expectation::asynchronous::{
-    expectable, Expectable, ExpectableExt, ExpectableState,
+    Expectable, ExpectableExt, ExpectableState, expectable,
 };
 use fuchsia_bluetooth::types::{Peer, PeerId};
 use futures::future::{self, BoxFuture, FutureExt};
@@ -16,7 +16,7 @@ use log::warn;
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
-use test_harness::{SharedState, TestHarness, SHARED_STATE_TEST_COMPONENT_INDEX};
+use test_harness::{SharedState, TestHarness};
 
 use crate::core_realm::{CoreRealm, SHARED_STATE_INDEX};
 
@@ -118,11 +118,8 @@ impl TestHarness for AccessHarness {
     ) -> BoxFuture<'static, Result<(Self, Self::Env, Self::Runner), Error>> {
         let shared_state = shared_state.clone();
         async move {
-            let test_component: Arc<String> = shared_state
-                .get(SHARED_STATE_TEST_COMPONENT_INDEX)
-                .expect("SharedState must have TEST-COMPONENT")?;
-            let inserter = move || CoreRealm::create(test_component.to_string());
-            let realm = shared_state.get_or_insert_with(SHARED_STATE_INDEX, inserter).await?;
+            let realm =
+                shared_state.get_or_insert_with(SHARED_STATE_INDEX, CoreRealm::create).await?;
             let access = realm
                 .instance()
                 .connect_to_protocol_at_exposed_dir()

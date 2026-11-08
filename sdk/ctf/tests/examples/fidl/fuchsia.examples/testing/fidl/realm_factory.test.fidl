@@ -24,8 +24,10 @@ open protocol RealmFactory {
     /// Specifies the options to use when creating the realm.
     ///
     /// Returns OperationError.INVALID if called more than once.
+    @deprecated
     flexible CreateRealm(resource struct {
         options RealmOptions;
+        @deprecated
         dictionary server_end:fuchsia.component.sandbox.Dictionary;
     }) -> () error fuchsia.testing.harness.OperationError;
 };

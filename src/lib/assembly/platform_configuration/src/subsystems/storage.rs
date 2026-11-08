@@ -312,6 +312,15 @@ impl DefineSubsystemConfiguration<(&StorageConfig, &StorageToolsConfig, &Recover
             builder.set_config_capability(config.0, config.1)?;
         }
 
+        // Include SDMMC core driver through a platform AIB when SDMMC, SDHCI, or
+        // CQHCI support is enabled on the board.
+        if context.board_config.provides_feature(BoardFeature::Sdmmc)
+            || context.board_config.provides_feature(BoardFeature::Sdhci)
+            || sdmmc_command_queueing
+        {
+            builder.platform_bundle("sdmmc_driver")?;
+        }
+
         // Include SDHCI driver through a platform AIB.
         if context.board_config.provides_feature(BoardFeature::Sdhci) {
             builder.platform_bundle("sdhci_driver")?;
@@ -532,5 +541,140 @@ mod tests {
         assert!(result.is_ok());
         let zxcrypt_content = std::fs::read_to_string(gendir_path.join("zxcrypt")).unwrap();
         assert_eq!(zxcrypt_content, "null");
+    }
+
+    #[test]
+    fn test_sdmmc_driver_not_included_by_default() {
+        let board_config = BoardConfig::default();
+        let gendir = tempdir().unwrap();
+        let gendir_path = Utf8Path::from_path(gendir.path()).unwrap();
+        let context = setup_test_context(&board_config, gendir_path);
+        let storage_config = StorageConfig::default();
+        let mut builder: ConfigurationBuilderImpl = Default::default();
+
+        StorageSubsystemConfig::define_configuration(
+            &context,
+            &(&storage_config, &StorageToolsConfig::default(), &RecoveryConfig::default()),
+            &mut builder,
+        )
+        .unwrap();
+
+        let completed = builder.build();
+        assert!(!completed.bundles.contains("sdmmc_driver"));
+        assert!(!completed.bundles.contains("sdhci_driver"));
+        assert!(!completed.bundles.contains("cqhci_driver"));
+    }
+
+    #[test]
+    fn test_sdmmc_feature_includes_sdmmc_driver() {
+        let board_config = BoardConfig {
+            provided_features: vec![BoardFeature::Sdmmc.as_ref().to_string()],
+            ..Default::default()
+        };
+        let gendir = tempdir().unwrap();
+        let gendir_path = Utf8Path::from_path(gendir.path()).unwrap();
+        let context = setup_test_context(&board_config, gendir_path);
+        let storage_config = StorageConfig::default();
+        let mut builder: ConfigurationBuilderImpl = Default::default();
+
+        StorageSubsystemConfig::define_configuration(
+            &context,
+            &(&storage_config, &StorageToolsConfig::default(), &RecoveryConfig::default()),
+            &mut builder,
+        )
+        .unwrap();
+
+        let completed = builder.build();
+        assert!(completed.bundles.contains("sdmmc_driver"));
+        assert!(!completed.bundles.contains("sdhci_driver"));
+        assert!(!completed.bundles.contains("cqhci_driver"));
+    }
+
+    #[test]
+    fn test_sdhci_feature_includes_sdmmc_and_sdhci_drivers() {
+        let board_config = BoardConfig {
+            provided_features: vec![BoardFeature::Sdhci.as_ref().to_string()],
+            ..Default::default()
+        };
+        let gendir = tempdir().unwrap();
+        let gendir_path = Utf8Path::from_path(gendir.path()).unwrap();
+        let context = setup_test_context(&board_config, gendir_path);
+        let storage_config = StorageConfig::default();
+        let mut builder: ConfigurationBuilderImpl = Default::default();
+
+        StorageSubsystemConfig::define_configuration(
+            &context,
+            &(&storage_config, &StorageToolsConfig::default(), &RecoveryConfig::default()),
+            &mut builder,
+        )
+        .unwrap();
+
+        let completed = builder.build();
+        assert!(completed.bundles.contains("sdmmc_driver"));
+        assert!(completed.bundles.contains("sdhci_driver"));
+        assert!(!completed.bundles.contains("cqhci_driver"));
+    }
+
+    #[test]
+    fn test_sdmmc_cqe_feature_includes_sdmmc_and_cqhci_drivers() {
+        let board_config = BoardConfig {
+            provided_features: vec![BoardFeature::SdmmcCqe.as_ref().to_string()],
+            ..Default::default()
+        };
+        let gendir = tempdir().unwrap();
+        let gendir_path = Utf8Path::from_path(gendir.path()).unwrap();
+        let context = setup_test_context(&board_config, gendir_path);
+        let storage_config = StorageConfig::default();
+        let mut builder: ConfigurationBuilderImpl = Default::default();
+
+        StorageSubsystemConfig::define_configuration(
+            &context,
+            &(&storage_config, &StorageToolsConfig::default(), &RecoveryConfig::default()),
+            &mut builder,
+        )
+        .unwrap();
+
+        let completed = builder.build();
+        assert!(completed.bundles.contains("sdmmc_driver"));
+        assert!(!completed.bundles.contains("sdhci_driver"));
+        assert!(completed.bundles.contains("cqhci_driver"));
+    }
+
+    #[test]
+    fn test_sdmmc_feature_bootstrap_vs_embeddable() {
+        let board_config = BoardConfig {
+            provided_features: vec![BoardFeature::Sdmmc.as_ref().to_string()],
+            ..Default::default()
+        };
+        let mut storage_config = StorageConfig::default();
+        storage_config.filesystems.image_mode = FilesystemImageMode::NoImage;
+
+        // Bootstrap includes sdmmc_driver when BoardFeature::Sdmmc is provided.
+        let gendir = tempdir().unwrap();
+        let gendir_path = Utf8Path::from_path(gendir.path()).unwrap();
+        let mut bootstrap_context = setup_test_context(&board_config, gendir_path);
+        bootstrap_context.feature_set_level = &FeatureSetLevel::Bootstrap;
+        let mut bootstrap_builder: ConfigurationBuilderImpl = Default::default();
+        StorageSubsystemConfig::define_configuration(
+            &bootstrap_context,
+            &(&storage_config, &StorageToolsConfig::default(), &RecoveryConfig::default()),
+            &mut bootstrap_builder,
+        )
+        .unwrap();
+        assert!(bootstrap_builder.build().bundles.contains("sdmmc_driver"));
+
+        // Embeddable returns early before storage drivers and does not include sdmmc_driver.
+        let gendir = tempdir().unwrap();
+        let gendir_path = Utf8Path::from_path(gendir.path()).unwrap();
+        let mut embeddable_context = setup_test_context(&board_config, gendir_path);
+        embeddable_context.feature_set_level = &FeatureSetLevel::Embeddable;
+        let mut embeddable_builder: ConfigurationBuilderImpl = Default::default();
+        StorageSubsystemConfig::define_configuration(
+            &embeddable_context,
+            &(&storage_config, &StorageToolsConfig::default(), &RecoveryConfig::default()),
+            &mut embeddable_builder,
+        )
+        .unwrap();
+        assert!(!embeddable_builder.build().bundles.contains("sdmmc_driver"));
     }
 }

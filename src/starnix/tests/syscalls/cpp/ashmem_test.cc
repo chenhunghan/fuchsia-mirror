@@ -809,13 +809,13 @@ TEST_F(AshmemTest, PinUnsignedOverflow) {
   void *addr = mmap(nullptr, kMapSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd.get(), 0);
   ASSERT_TRUE(addr != MAP_FAILED && addr != nullptr);
 
-  int status = ioctl(fd.get(), ASHMEM_PIN, pin);
+  int status = ioctl(fd.get(), ASHMEM_PIN, &pin);
   EXPECT_EQ(-1, status);
   EXPECT_EQ(EFAULT, errno);
-  status = ioctl(fd.get(), ASHMEM_UNPIN, pin);
+  status = ioctl(fd.get(), ASHMEM_UNPIN, &pin);
   EXPECT_EQ(-1, status);
   EXPECT_EQ(EFAULT, errno);
-  status = ioctl(fd.get(), ASHMEM_GET_PIN_STATUS, pin);
+  status = ioctl(fd.get(), ASHMEM_GET_PIN_STATUS, &pin);
   EXPECT_EQ(-1, status);
   EXPECT_EQ(EFAULT, errno);
 
@@ -1118,7 +1118,7 @@ TEST_F(AshmemTest, DistinctAshmemVMO) {
 
   auto fd_2 = CreateRegion(nullptr, PAGE_SIZE);
   void *addr_2 = mmap(nullptr, kMapSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd_2.get(), 0);
-  ASSERT_TRUE(addr_2 != MAP_FAILED && addr_1 != nullptr);
+  ASSERT_TRUE(addr_2 != MAP_FAILED && addr_2 != nullptr);
   int *data_2 = (int *)addr_2;
 
   *data_1 = 1;

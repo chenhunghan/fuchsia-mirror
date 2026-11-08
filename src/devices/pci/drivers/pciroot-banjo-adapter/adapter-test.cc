@@ -4,6 +4,7 @@
 
 #include "src/devices/pci/drivers/pciroot-banjo-adapter/adapter.h"
 
+#include <fidl/fuchsia.hardware.pci.root/cpp/driver/fidl.h>
 #include <fidl/fuchsia.hardware.pci.root/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.pci/cpp/fidl.h>
 #include <lib/driver/compat/cpp/banjo_server.h>
@@ -22,7 +23,7 @@
 #include <bind/fuchsia/cpp/bind.h>
 #include <gtest/gtest.h>
 
-#include "src/devices/pci/drivers/pci/test/fakes/fake_pciroot.h"
+#include "src/devices/pci/drivers/pciroot-banjo-adapter/fake_pciroot.h"
 #include "src/lib/testing/predicates/status.h"
 
 namespace pciroot_banjo_adapter::testing {
@@ -80,8 +81,8 @@ class FixtureConfig final {
 
 class PcirootBanjoAdapterTest : public ::testing::Test {
  protected:
-  inline static const fuchsia_hardware_pci::Bdf kBdf0{
-      {.bus_id = 0, .device_id = 0, .function_id = 0}};
+  inline static const fuchsia_hardware_pci::wire::Bdf kBdf0{
+      .bus_id = 0, .device_id = 0, .function_id = 0};
 
   void TearDown() override {
     if (driver_started_) {
@@ -91,7 +92,7 @@ class PcirootBanjoAdapterTest : public ::testing::Test {
 
   struct Clients {
     fidl::SyncClient<fuchsia_hardware_pci_root::Root> root;
-    fidl::SyncClient<fuchsia_hardware_pci_root::Config> config;
+    fdf::WireSyncClient<fuchsia_hardware_pci_root::Config> config;
   };
 
   Clients StartDriver() {
@@ -105,7 +106,7 @@ class PcirootBanjoAdapterTest : public ::testing::Test {
     return Clients{
         .root =
             fidl::SyncClient<fuchsia_hardware_pci_root::Root>(std::move(root_client_end.value())),
-        .config = fidl::SyncClient<fuchsia_hardware_pci_root::Config>(
+        .config = fdf::WireSyncClient<fuchsia_hardware_pci_root::Config>(
             std::move(config_client_end.value())),
     };
   }
@@ -289,17 +290,21 @@ TEST_F(PcirootBanjoAdapterTest, BanjoErrorStatusForwarded) {
   });
 
   Clients clients = StartDriver();
-  auto r8 = clients.config->Read8({{.address = kBdf0, .offset = 0}});
-  ASSERT_TRUE(r8.is_error());
-  EXPECT_EQ(r8.error_value().domain_error(), ZX_ERR_NOT_SUPPORTED);
+  fdf::Arena arena('PCIR');
+  auto r8 = clients.config.buffer(arena)->Read8(kBdf0, 0);
+  ASSERT_TRUE(r8.ok());
+  ASSERT_TRUE(r8->is_error());
+  EXPECT_EQ(r8->error_value(), ZX_ERR_NOT_SUPPORTED);
 
-  auto r16 = clients.config->Read16({{.address = kBdf0, .offset = 0}});
-  ASSERT_TRUE(r16.is_error());
-  EXPECT_EQ(r16.error_value().domain_error(), ZX_ERR_NOT_SUPPORTED);
+  auto r16 = clients.config.buffer(arena)->Read16(kBdf0, 0);
+  ASSERT_TRUE(r16.ok());
+  ASSERT_TRUE(r16->is_error());
+  EXPECT_EQ(r16->error_value(), ZX_ERR_NOT_SUPPORTED);
 
-  auto r32 = clients.config->Read32({{.address = kBdf0, .offset = 0}});
-  ASSERT_TRUE(r32.is_error());
-  EXPECT_EQ(r32.error_value().domain_error(), ZX_ERR_NOT_SUPPORTED);
+  auto r32 = clients.config.buffer(arena)->Read32(kBdf0, 0);
+  ASSERT_TRUE(r32.ok());
+  ASSERT_TRUE(r32->is_error());
+  EXPECT_EQ(r32->error_value(), ZX_ERR_NOT_SUPPORTED);
 }
 
 TEST_F(PcirootBanjoAdapterTest, ChildNodeAndProperties) {
@@ -370,10 +375,10 @@ TEST_F(PcirootBanjoAdapterTest, ConfigProxyFalse) {
       [](auto& env) { env.fake().enable_driver_should_proxy_config(false); });
 
   Clients clients = StartDriver();
-  auto result = clients.config->Read8({{.address = kBdf0, .offset = 0}});
-  EXPECT_TRUE(result.is_error());
-  EXPECT_TRUE(result.error_value().is_framework_error());
-  EXPECT_EQ(result.error_value().framework_error().status(), ZX_ERR_PEER_CLOSED);
+  fdf::Arena arena('PCIR');
+  auto result = clients.config.buffer(arena)->Read8(kBdf0, 0);
+  EXPECT_FALSE(result.ok());
+  EXPECT_EQ(result.status(), ZX_ERR_PEER_CLOSED);
 }
 
 TEST_F(PcirootBanjoAdapterTest, ConfigReadWriteRoundTrip) {
@@ -383,24 +388,33 @@ TEST_F(PcirootBanjoAdapterTest, ConfigReadWriteRoundTrip) {
   });
 
   Clients clients = StartDriver();
+  fdf::Arena arena('PCIR');
 
-  const fuchsia_hardware_pci::Bdf kTargetBdf{{.bus_id = 0, .device_id = 3, .function_id = 5}};
+  const fuchsia_hardware_pci::wire::Bdf kTargetBdf{.bus_id = 0, .device_id = 3, .function_id = 5};
 
-  ASSERT_OK(clients.config->Write8({{.address = kTargetBdf, .offset = 0x10, .value = 0xAB}}));
-  auto r8 = clients.config->Read8({{.address = kTargetBdf, .offset = 0x10}});
-  ASSERT_TRUE(r8.is_ok());
-  EXPECT_EQ(r8->value(), 0xAB);
+  auto w8 = clients.config.buffer(arena)->Write8(kTargetBdf, 0x10, 0xAB);
+  ASSERT_TRUE(w8.ok());
+  ASSERT_TRUE(w8->is_ok());
+  auto r8 = clients.config.buffer(arena)->Read8(kTargetBdf, 0x10);
+  ASSERT_TRUE(r8.ok());
+  ASSERT_TRUE(r8->is_ok());
+  EXPECT_EQ(r8->value()->value, 0xAB);
 
-  ASSERT_OK(clients.config->Write16({{.address = kTargetBdf, .offset = 0x20, .value = 0x1234}}));
-  auto r16 = clients.config->Read16({{.address = kTargetBdf, .offset = 0x20}});
-  ASSERT_TRUE(r16.is_ok());
-  EXPECT_EQ(r16->value(), 0x1234);
+  auto w16 = clients.config.buffer(arena)->Write16(kTargetBdf, 0x20, 0x1234);
+  ASSERT_TRUE(w16.ok());
+  ASSERT_TRUE(w16->is_ok());
+  auto r16 = clients.config.buffer(arena)->Read16(kTargetBdf, 0x20);
+  ASSERT_TRUE(r16.ok());
+  ASSERT_TRUE(r16->is_ok());
+  EXPECT_EQ(r16->value()->value, 0x1234);
 
-  ASSERT_OK(
-      clients.config->Write32({{.address = kTargetBdf, .offset = 0x104, .value = 0x89ABCDEF}}));
-  auto r32 = clients.config->Read32({{.address = kTargetBdf, .offset = 0x104}});
-  ASSERT_TRUE(r32.is_ok());
-  EXPECT_EQ(r32->value(), 0x89ABCDEF);
+  auto w32 = clients.config.buffer(arena)->Write32(kTargetBdf, 0x104, 0x89ABCDEF);
+  ASSERT_TRUE(w32.ok());
+  ASSERT_TRUE(w32->is_ok());
+  auto r32 = clients.config.buffer(arena)->Read32(kTargetBdf, 0x104);
+  ASSERT_TRUE(r32.ok());
+  ASSERT_TRUE(r32->is_ok());
+  EXPECT_EQ(r32->value()->value, 0x89ABCDEF);
 
   driver_test_.RunInEnvironmentTypeContext([](auto& env) {
     auto view = env.fake().ecam().get_config_view({.bus_id = 0, .device_id = 3, .function_id = 5});
@@ -546,17 +560,21 @@ TEST_F(PcirootBanjoAdapterTest, ConfigWriteErrorForwarded) {
   });
 
   Clients clients = StartDriver();
-  auto w8 = clients.config->Write8({{.address = kBdf0, .offset = 0, .value = 0x12}});
-  ASSERT_TRUE(w8.is_error());
-  EXPECT_EQ(w8.error_value().domain_error(), ZX_ERR_NOT_SUPPORTED);
+  fdf::Arena arena('PCIR');
+  auto w8 = clients.config.buffer(arena)->Write8(kBdf0, 0, 0x12);
+  ASSERT_TRUE(w8.ok());
+  ASSERT_TRUE(w8->is_error());
+  EXPECT_EQ(w8->error_value(), ZX_ERR_NOT_SUPPORTED);
 
-  auto w16 = clients.config->Write16({{.address = kBdf0, .offset = 0, .value = 0x1234}});
-  ASSERT_TRUE(w16.is_error());
-  EXPECT_EQ(w16.error_value().domain_error(), ZX_ERR_NOT_SUPPORTED);
+  auto w16 = clients.config.buffer(arena)->Write16(kBdf0, 0, 0x1234);
+  ASSERT_TRUE(w16.ok());
+  ASSERT_TRUE(w16->is_error());
+  EXPECT_EQ(w16->error_value(), ZX_ERR_NOT_SUPPORTED);
 
-  auto w32 = clients.config->Write32({{.address = kBdf0, .offset = 0, .value = 0x12345678}});
-  ASSERT_TRUE(w32.is_error());
-  EXPECT_EQ(w32.error_value().domain_error(), ZX_ERR_NOT_SUPPORTED);
+  auto w32 = clients.config.buffer(arena)->Write32(kBdf0, 0, 0x12345678);
+  ASSERT_TRUE(w32.ok());
+  ASSERT_TRUE(w32->is_error());
+  EXPECT_EQ(w32->error_value(), ZX_ERR_NOT_SUPPORTED);
 }
 
 TEST_F(PcirootBanjoAdapterTest, GetAddressSpaceErrorForwarded) {

@@ -3,7 +3,7 @@
 # found in the LICENSE file.
 
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
 load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
@@ -16,6 +16,7 @@ cc_library(
         "exponential_backoff.h",
     ],
     visibility = [
+        "//src/camera/bin/device_watcher:__pkg__",
         "//src/camera/lib/cobalt_logger:__pkg__",
         "//src/cobalt/bin/app:__pkg__",
         "//src/connectivity/weave/adaptation:__pkg__",
@@ -32,9 +33,8 @@ cc_library(
     alwayslink = True,
 )
 
-fx_cc_binary(
+fx_cc_test_binary(
     name = "backoff_unittests",
-    testonly = True,
     srcs = ["exponential_backoff_unittest.cc"],
     tags = ["manual"],
     deps = [

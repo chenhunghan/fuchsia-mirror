@@ -196,8 +196,8 @@ TEST(RobustFutexTest, DoesNotModifyReadOnlyMapping) {
   test_helper::ForkHelper helper;
   helper.RunInForkedProcess([] {
     const size_t page_size = sysconf(_SC_PAGESIZE);
-    void *addr = mmap(nullptr, sizeof(page_size), PROT_READ | PROT_WRITE,
-                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    void *addr =
+        mmap(nullptr, page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     ASSERT_NE(addr, MAP_FAILED);
 
     robust_list_head head = {.list = {.next = nullptr},

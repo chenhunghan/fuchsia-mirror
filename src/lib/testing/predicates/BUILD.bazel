@@ -17,11 +17,7 @@ cc_library(
         "status.h",
     ],
     target_compatible_with = ["@platforms//os:fuchsia"],
-    visibility = [
-        "//src/devices:__subpackages__",
-        "//src/media:__subpackages__",
-        "//vendor/google:__subpackages__",
-    ],
+    visibility = ["//:__subpackages__"],
     deps = [
         "@com_google_googletest//:gtest_main",
         "@fuchsia_sdk//pkg/zx",

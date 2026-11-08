@@ -34,7 +34,6 @@
 #include <fbl/algorithm.h>
 #include <fbl/alloc_checker.h>
 #include <fbl/vector.h>
-#include <pretty/hexdump.h>
 
 #include "fidl/fuchsia.io/cpp/markers.h"
 #include "src/storage/lib/fs_management/cpp/admin.h"

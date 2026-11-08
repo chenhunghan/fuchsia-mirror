@@ -10,6 +10,7 @@ import("//zircon/kernel/kernel_rust_mod.gni")
 
 library_headers("headers") {
   headers = [
+    "lib/user_copy/internal.h",
     "lib/user_copy/user_ptr.h",
     "lib/user_copy/user_iovec.h",
   ]
@@ -19,13 +20,10 @@ library_headers("headers") {
   ]
 }
 
-static_library("user_copy") {
-  public_deps = [ ":headers" ]
-
-  sources = [ "internal.cc" ]
-  deps = [
+group("user_copy") {
+  public_deps = [
+    ":headers",
     ":user-copy-rs",
-    "//zircon/kernel/vm:headers",
   ]
 }
 
@@ -33,17 +31,9 @@ group("tests") {
   testonly = true
 }
 
-source_set("kernel-tests") {
+group("kernel-tests") {
   testonly = true
-
-  sources = [ "user_copy_tests.cc" ]
-  deps = [
-    ":headers",
-    ":user_copy_rs_kernel_tests",
-    "//zircon/kernel/lib/page",
-    "//zircon/kernel/lib/unittest",
-    "//zircon/system/ulib/zircon-internal",
-  ]
+  deps = [ ":user_copy_rs_kernel_tests" ]
 }
 
 group("phys-tests") {
@@ -59,6 +49,7 @@ kernel_rust_mod("user-copy-rs") {
   source_root = "src/mod.rs"
   sources = [
     "src/internal.rs",
+    "src/internal_ffi.rs",
     "src/mod.rs",
     "src/user_iovec.rs",
     "src/user_ptr.rs",
@@ -80,5 +71,8 @@ kernel_rust_mod("user_copy_rs_kernel_tests") {
     "//sdk/rust/zx-status",
     "//sdk/rust/zx-types",
   ]
-  test_deps = [ "//zircon/kernel/lib/unittest:unittest-rs" ]
+  test_deps = [
+    "//src/lib/ksync",
+    "//zircon/kernel/lib/unittest:unittest-rs",
+  ]
 }

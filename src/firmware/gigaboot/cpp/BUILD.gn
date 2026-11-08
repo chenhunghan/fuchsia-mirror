@@ -4,9 +4,110 @@
 
 import("//build/bazel/bazel_inputs.gni")
 import("//build/board.gni")
+import("//build/config/zircon/standard.gni")
+import("//build/toolchain/variant.gni")
+import("//build/toolchain/zircon/zircon_toolchain_suite.gni")
 import("//src/firmware/gigaboot/cpp/backends.gni")
+import("//src/firmware/gigaboot/cpp/efi_executable.gni")
 import("//src/firmware/gigaboot/cpp/esp.gni")
-import("//zircon/kernel/phys/efi/efi_executable.gni")
+
+if (current_toolchain == default_toolchain) {
+  # The default toolchain just defines the EFI environment.
+  foreach(cpu, standard_fuchsia_cpus) {
+    zircon_toolchain_suite("kernel.efi_$cpu") {
+      cpu = cpu
+
+      # TODO(https://fxbug.dev/460196031): Remove this x64 check when aarch64-uefi triple is supported.
+      if (cpu == "x64") {
+        os = "uefi"
+      } else {
+        os = "win"
+      }
+      environment = "kernel.efi"
+      with_shared = false
+
+      toolchain_tags = [
+        "efi",
+        "kernel",
+        "no-floating-point",
+        "standalone",
+      ]
+
+      configs = [ "//src/firmware/gigaboot/cpp:efi_config" ]
+
+      # Always enable frame pointers.  This works because frame_pointers
+      # is added as part of :efi_config below.
+      remove_common_configs = [ "//build/config:default_frame_pointers" ]
+
+      exclude_variant_tags = [
+        # There is no GCC toolchain for EFI, only Clang.
+        "gcc",
+
+        # There is no possibility of fancy runtimes like ASan for EFI.
+        "instrumentation-runtime",
+      ]
+    }
+  }
+} else if (is_efi_toolchain) {
+  variant("efi_config") {
+    configs = [
+      "//zircon/kernel/switch:standalone",
+      "//zircon/kernel/switch:warnings",
+      "//zircon/kernel/phys:defines",
+
+      # Don't emit extra code making static initializers thread-safe (we don't
+      # have threads or any of the corresponding library support.)
+      "//build/config/zircon:no_threadsafe_statics",
+
+      # All EFI code is inherently sensitive and in a position for any bug to
+      # be unusually dangerous.  So compile with minimal undefined behavior
+      # checking in all builds, regardless of variant.
+      # TODO(https://fxbug.dev/42063975): Re enable this config EFI programs work again.
+      # "//build/config/zircon/instrumentation:ubsan-trap",
+    ]
+
+    # Always enable frame pointers.
+    configs += [ "//build/config:frame_pointers" ]
+
+    if (is_win) {
+      # Don't set MSVC predefines which are set by the compiler when Windows
+      # target triples are used.
+      cflags = [
+        "-Wno-builtin-macro-redefined",
+        "-U_MSC_VER",
+        "-U_MSC_FULL_VER",
+      ]
+    }
+
+    # TODO(https://fxbug.dev/435771251): Support __PE_COFF__ predefine upstream
+    defines = [ "__PE_COFF__" ]
+
+    ldflags = [
+      # Generate an EFI executable with EfiMain as its entry point.
+      "-Wl,/subsystem:efi_application",
+      "-Wl,/entry:EfiMain",
+
+      # There are no toolchain-provided libraries that can be used with EFI.
+      "-Wl,/nodefaultlib",
+    ]
+
+    # We need -noprofilelib in coverage builds to prevent the toolchain from
+    # linking profile runtimes that don't exist for EFI.
+    if (is_coverage) {
+      ldflags += [ "-noprofilelib" ]
+    }
+
+    deps = [
+      "//zircon/kernel/phys:ubsan-runtime",
+
+      # In instrumented builds, every TU has a reference that needs to be
+      # satisfied by the runtime even if the data isn't being used.  The
+      # library is tiny to build and doesn't bring anything into the link for
+      # uninstrumented builds.  It's simplest to just always include it.
+      "//src/lib/llvm-profdata",
+    ]
+  }
+}
 
 config("board_name") {
   cflags = [ "-DBOARD_NAME=\"${board_name}\"" ]
@@ -42,12 +143,15 @@ source_set("lib") {
     "gpt.h",
     "input.cc",
     "input.h",
+    "main.h",
     "mdns.cc",
     "mdns.h",
     "network.cc",
     "network.h",
     "partition.cc",
     "partition.h",
+    "protocol.cc",
+    "protocol.h",
     "tss2_uefi.cc",
     "tss2_uefi.h",
     "utils.cc",
@@ -69,8 +173,6 @@ source_set("lib") {
     "//third_party/tpm2-tss:tss2-sys",
     "//zircon/kernel/lib/efi",
     "//zircon/kernel/lib/efi/variable",
-    "//zircon/kernel/phys/efi:main",
-    "//zircon/kernel/phys/efi:protocol",
     "//zircon/system/ulib/ddk-platform-defs",
     "//zircon/system/ulib/fbl",
     "//zircon/system/ulib/pretty",
@@ -168,6 +270,7 @@ template("gigaboot_esp") {
 
   source_set(_main_target) {
     sources = [
+      "allocation.cc",
       "fastboot_tcp.cc",
       "fastboot_tcp.h",
       "gbl_dt.cc",
@@ -175,6 +278,7 @@ template("gigaboot_esp") {
       "gbl_loader.h",
       "main.cc",
       "malloc.cc",
+      "stdout.cc",
       "sysdeps.cc",
       "zircon_boot_ops.cc",
     ]
@@ -184,10 +288,12 @@ template("gigaboot_esp") {
       "legacy_c_gigaboot",
       "//src/firmware/lib/zircon_boot:in_tree",
       "//src/lib/zbitl",
+      "//zircon/kernel/lib/boot-options",
       "//zircon/kernel/lib/ktl",
       "//zircon/kernel/lib/libc",
-      "//zircon/kernel/phys:boot-zbi",
-      "//zircon/kernel/phys:symbolize",
+      "//zircon/kernel/phys/boot-zbi",
+      "//zircon/kernel/phys/runtime",
+      "//zircon/system/ulib/uart",
       "//zircon/third_party/ulib/cksum",
       gigaboot_backends,
     ]

@@ -35,7 +35,7 @@ class MethodWithUnstable:
     unstable: bool
 
     @staticmethod
-    def from_method(m: Method) -> "MethodWithUnstable":
+    def from_method(m: Method) -> MethodWithUnstable:
         return MethodWithUnstable(name=m.name, ordinal=m.ordinal, unstable=True)
 
 

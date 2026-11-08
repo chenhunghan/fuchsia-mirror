@@ -5,8 +5,8 @@
 """Defines an IDK C/C++ source library."""
 
 load("@bazel_skylib//lib:paths.bzl", "paths")
-load("@rules_cc//cc:defs.bzl", "cc_library")
 load("//build/bazel/rules:zx_library.bzl", "apply_common_zx_library_modifications")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
 load(
     ":cc_verification.bzl",
     "create_verify_no_duplicate_files_target",
@@ -110,10 +110,6 @@ build_configurable_info = rule(
     },
 )
 
-# TODO(https://fxbug.dev/428229472): When migrating "zbi-format":
-# * add `non_idk_implementation_deps` (GN equivalent: `non_sdk_deps`) argument.
-# * assert that it is only used for "//sdk/fidl/zbi:zbi.c.checked-in".
-# * Add TODO for https://fxbug.dev/42062786 to remove the argument when fixing the bug.
 def _idk_cc_source_library_impl(
         name,
         idk_name,
@@ -128,6 +124,7 @@ def _idk_cc_source_library_impl(
         non_fuchsia_deps,
         implementation_deps,
         fuchsia_implementation_deps,
+        non_idk_implementation_deps,
         include_base,
         api_file_path,
         testonly,
@@ -149,6 +146,11 @@ def _idk_cc_source_library_impl(
     if api_file_path and not stable:
         fail("Unstable targets do not require/support modification acknowledgement.")
 
+    # TODO(https://fxbug.dev/42062786): Remove once "zbi-format" no longer
+    # needs a dependency on its checked-in header verification target.
+    if non_idk_implementation_deps and non_idk_implementation_deps != [Label("//sdk/fidl/zbi:zbi.c.checked-in")]:
+        fail('`non_idk_implementation_deps` is restricted to `["//sdk/fidl/zbi:zbi.c.checked-in"]`. Got: %s' % non_idk_implementation_deps)
+
     # Group the source files for various uses.
     # Per https://bazel.build/reference/be/c-cpp#cc_library.hdrs,
     # "Headers not meant to be included by a client of this library should be
@@ -167,7 +169,7 @@ def _idk_cc_source_library_impl(
     # `default_common_binary_configs` using the `copts` attribute.
     # TODO(https://fxbug.dev/421888626): Add "//build/config:sdk_extra_warnings"
     # using the `copts` attribute.
-    cc_library(
+    fx_cc_library(
         name = name,
         srcs = srcs_for_bazel_library,
         hdrs = hdrs_for_bazel_library,
@@ -175,8 +177,8 @@ def _idk_cc_source_library_impl(
             fuchsia_deps,
             non_fuchsia_value = non_fuchsia_deps,
         ),
-        # TODO(https://fxbug.dev/428229472): If we must support
-        # `non_idk_implementation_deps`, include it below.
+        # `non_idk_implementation_deps` is for verification targets that do not
+        # provide `CcInfo` and is included in `atom_build_deps` below instead.
         implementation_deps = implementation_deps + select_for_fuchsia(fuchsia_implementation_deps),
         includes = [_get_include_path_for_cc_library(include_base)],
         testonly = testonly,
@@ -198,8 +200,6 @@ def _idk_cc_source_library_impl(
     atom_idk_deps = get_idk_deps(deps + fuchsia_deps + implementation_deps + fuchsia_implementation_deps)
 
     # Dependencies for generating the actual IDK atom (not the underlying library).
-    # TODO(https://fxbug.dev/428229472): If we must support
-    # `non_idk_implementation_deps`, add it here.
     atom_build_deps = [
         # All this target really does is provide a clearer error message than if
         # we relied on combining the lists in the `verify_no_pragma_once()` rule
@@ -225,7 +225,7 @@ def _idk_cc_source_library_impl(
             # Required for tests using `create_test_atom_info()`.
             visibility = ["//build/bazel/bazel_idk/tests:__subpackages__"],
         ),
-    ]
+    ] + non_idk_implementation_deps
 
     api_path = api_file_path if stable else None
 
@@ -299,9 +299,7 @@ The values of all deps args must be iterable. That means they cannot contain
 `select()` statements. Instead, use `fuchsia_deps` for public dependencies
 that only apply to Fuchsia.""",
     implementation = _idk_cc_source_library_impl,
-    # TODO(https://fxbug.dev/446694542): Remove `native.` once the
-    # `cc_library()` wrapper is a symbolic macro.
-    inherit_attrs = native.cc_library,
+    inherit_attrs = fx_cc_library,
     attrs = {
         "idk_name": attr.string(
             doc = """Name of the library in the IDK. Usually matches `name`.
@@ -405,6 +403,18 @@ the formatter.""",
             default = [],
             configurable = False,
         ),
+        # TODO(https://fxbug.dev/42062786): Remove once "zbi-format" no longer
+        # needs a dependency on its checked-in header verification target.
+        "non_idk_implementation_deps": attr.label_list(
+            doc = """List of labels that the IDK atom depends on at build time
+but that are not reflected in the IDK, such as verification targets.
+Only `"//sdk/fidl/zbi:zbi.c.checked-in"` (used by "zbi-format" to verify that
+the checked-in headers match those generated from FIDL) is allowed.
+Emitted as GN's `non_sdk_deps` by `bazel2gn`.
+GN equivalent: `non_sdk_deps`""",
+            default = [],
+            configurable = False,
+        ),
         "include_base": attr.string(
             doc = """Path to the root directory for includes.
 This path will be added to the underlying library's `includes`.
@@ -456,7 +466,8 @@ GN equivalent: `api`""",
         ),
         # Rumtime dependencies are not supported for source libraries. Do not inherit.
         "data": None,
-        # Do not inherit as this attribute is specified to `cc_library()` in the implementation.
+        # Do not inherit as this attribute is specified to `fx_cc_library()` in
+        # the implementation.
         "includes": None,
     },
 )
@@ -517,5 +528,7 @@ GN note: Unlike the GN template, the "include/" part of the path must be specifi
         ),
         # zx libraries always use "include" (the default) as the include base. Do not inherit.
         "include_base": None,
+        # No need to support this for zx libraries.
+        "non_idk_implementation_deps": None,
     },
 )

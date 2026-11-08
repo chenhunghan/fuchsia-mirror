@@ -1,6 +1,10 @@
 {
     "audit-skip": [
+        // Reads the raw `AUDIT_AVC` records directly to verify the `comm=` field.
+        "InheritTest.UnauthorizedFdDenialLogsPostExecComm",
+
         // These tests do not produce any useful audit logs.
+        "NetlinkAuditTest.AvcHexEscapesComm",
         "NetlinkAuditTest.ChildDaemonReadsParentsMessageFromNewSocket",
         "NetlinkAuditTest.DeregisterInexistentAuditDaemon",
         "NetlinkAuditTest.ForkedChildReadsParentsQueuedMessage",

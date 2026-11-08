@@ -85,18 +85,6 @@ impl<DirectoryType: Directory> BaseConnection<DirectoryType> {
         request: fio::DirectoryRequest,
     ) -> Result<ConnectionState, Error> {
         match request {
-            #[cfg(any(
-                fuchsia_api_level_at_least = "PLATFORM",
-                not(fuchsia_api_level_at_least = "29")
-            ))]
-            fio::DirectoryRequest::DeprecatedClone { flags, object, control_handle: _ } => {
-                trace::duration!("storage", "Directory::DeprecatedClone");
-                crate::common::send_on_open_with_error(
-                    flags.contains(fio::OpenFlags::DESCRIBE),
-                    object,
-                    Status::NOT_SUPPORTED,
-                );
-            }
             fio::DirectoryRequest::Clone { request, control_handle: _ } => {
                 trace::duration!("storage", "Directory::Clone");
                 self.handle_clone(request.into_channel());
@@ -105,32 +93,6 @@ impl<DirectoryType: Directory> BaseConnection<DirectoryType> {
                 trace::duration!("storage", "Directory::Close");
                 responder.send(Ok(()))?;
                 return Ok(ConnectionState::Closed);
-            }
-            #[cfg(fuchsia_api_level_at_least = "28")]
-            fio::DirectoryRequest::DeprecatedGetAttr { responder } => {
-                async move {
-                    let (status, attrs) = crate::common::io2_to_io1_attrs(
-                        self.directory.as_ref(),
-                        self.options.rights,
-                    )
-                    .await;
-                    responder.send(status, &attrs)
-                }
-                .trace(trace::trace_future_args!("storage", "Directory::GetAttr"))
-                .await?;
-            }
-            #[cfg(not(fuchsia_api_level_at_least = "28"))]
-            fio::DirectoryRequest::GetAttr { responder } => {
-                async move {
-                    let (status, attrs) = crate::common::io2_to_io1_attrs(
-                        self.directory.as_ref(),
-                        self.options.rights,
-                    )
-                    .await;
-                    responder.send(status, &attrs)
-                }
-                .trace(trace::trace_future_args!("storage", "Directory::GetAttr"))
-                .await?;
             }
             fio::DirectoryRequest::GetAttributes { query, responder } => {
                 async move {
@@ -192,14 +154,6 @@ impl<DirectoryType: Directory> BaseConnection<DirectoryType> {
             fio::DirectoryRequest::SetFlags { flags: _, responder } => {
                 trace::duration!("storage", "Directory::SetFlags");
                 responder.send(Err(Status::NOT_SUPPORTED.into_raw()))?;
-            }
-            fio::DirectoryRequest::DeprecatedGetFlags { responder } => {
-                trace::duration!("storage", "Directory::DeprecatedGetFlags");
-                responder.send(zx_status::sys::ZX_OK, self.options.to_io1())?;
-            }
-            fio::DirectoryRequest::DeprecatedSetFlags { flags: _, responder } => {
-                trace::duration!("storage", "Directory::DeprecatedSetFlags");
-                responder.send(Status::NOT_SUPPORTED.into_raw())?;
             }
             #[cfg(any(
                 fuchsia_api_level_at_least = "PLATFORM",
@@ -288,14 +242,6 @@ impl<DirectoryType: Directory> BaseConnection<DirectoryType> {
             }
             fio::DirectoryRequest::Rename { src: _, dst_parent_token: _, dst: _, responder } => {
                 responder.send(Err(Status::NOT_SUPPORTED.into_raw()))?;
-            }
-            #[cfg(fuchsia_api_level_at_least = "28")]
-            fio::DirectoryRequest::DeprecatedSetAttr { flags: _, attributes: _, responder } => {
-                responder.send(Status::NOT_SUPPORTED.into_raw())?;
-            }
-            #[cfg(not(fuchsia_api_level_at_least = "28"))]
-            fio::DirectoryRequest::SetAttr { flags: _, attributes: _, responder } => {
-                responder.send(Status::NOT_SUPPORTED.into_raw())?;
             }
             fio::DirectoryRequest::Sync { responder } => {
                 responder.send(Err(Status::NOT_SUPPORTED.into_raw()))?;

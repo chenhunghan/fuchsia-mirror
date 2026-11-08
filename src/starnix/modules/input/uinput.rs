@@ -54,13 +54,13 @@ pub fn register_uinput_device(
     let registry = &kernel.device_registry;
     let misc_class = registry.objects.misc_class();
     let device = UinputDevice::new(input_relay_handle);
-    registry.register_device(
+    registry.add_device(
         kernel,
         "uinput".into(),
         DeviceMetadata::new("uinput".into(), device_id::DeviceId::UINPUT, DeviceMode::Char),
         misc_class,
         device,
-    )?;
+    );
     Ok(())
 }
 #[derive(Clone)]
@@ -572,6 +572,7 @@ impl FileOps for UinputDeviceFile {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_types)]
 mod test {
     use super::*;
     use crate::{EventProxyMode, start_input_relays_for_test};

@@ -677,8 +677,13 @@ template <typename Protocol>
 zx_status_t Remote<Protocol>::LinkInto(zx_handle_t dst_token_handle, const char* dst_path,
                                        size_t dst_path_len) {
   zx::event dst_token(dst_token_handle);
+#if FUCHSIA_API_LEVEL_AT_LEAST(NEXT)
+  const fidl::WireResult result = client()->LinkInto(
+      std::move(dst_token), fidl::StringView::FromExternal(dst_path, dst_path_len), {});
+#else
   const fidl::WireResult result = client()->LinkInto(
       std::move(dst_token), fidl::StringView::FromExternal(dst_path, dst_path_len));
+#endif
   if (!result.ok()) {
     return result.status();
   }

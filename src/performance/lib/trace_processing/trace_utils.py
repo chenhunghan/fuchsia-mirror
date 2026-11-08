@@ -285,15 +285,20 @@ def get_arg_values_from_events(
 
 def get_following_flow_events(
     event: trace_model.Event,
+    min_start: trace_time.TimePoint | None = None,
 ) -> Iterator[trace_model.Event]:
     """Find all Events that are flow connected and follow |event|.
 
     Args:
       event: The starting event.
+      min_start: Optional minimum start timestamp; events starting earlier than
+        this timestamp are not traversed (matching `model.slice(start=min_start)`).
 
     Returns:
       An iterator of flow connected events.
     """
+    if min_start is not None and event.start < min_start:
+        return
     frontier = [event]
     visited: set[trace_model.Event] = set()
 
@@ -306,6 +311,8 @@ def get_following_flow_events(
 
     while frontier:
         current: trace_model.Event = frontier.pop()
+        if min_start is not None and current.start < min_start:
+            continue
         added = set_add(visited, current)
         if not added:
             continue
@@ -318,8 +325,8 @@ def get_following_flow_events(
             if current.next_flow:
                 frontier.append(current.next_flow)
 
-    def by_start_time(event: trace_model.Event) -> trace_time.TimePoint:
-        return event.start
+    def by_start_time(event: trace_model.Event) -> int:
+        return event.start.to_epoch_nanoseconds()
 
     for connected_event in sorted(visited, key=by_start_time):
         yield connected_event
@@ -329,6 +336,7 @@ def get_nearest_following_flow_event(
     event: trace_model.Event,
     following_event_category: str,
     following_event_name: str,
+    min_start: trace_time.TimePoint | None = None,
 ) -> trace_model.Event | None:
     """Find the nearest target event that is flow connected and follow |event|.
 
@@ -336,17 +344,60 @@ def get_nearest_following_flow_event(
       event: The starting event.
       following_event_category: Trace category of the target event.
       following_event_name: Trace event name of the target event.
+      min_start: Optional minimum start timestamp; events starting earlier than
+        this timestamp are ignored.
 
     Returns:
       Flow connected events. If nothing is found, None.
     """
     filtered_following_events = filter_events(
-        get_following_flow_events(event),
+        get_following_flow_events(event, min_start=min_start),
         category=following_event_category,
         name=following_event_name,
         type=trace_model.DurationEvent,
     )
     return next(iter(filtered_following_events), None)
+
+
+def get_common_process_start_time[
+    E: trace_model.Event
+](
+    model: trace_model.Model,
+    name: str,
+    type: type[E],
+    category: str | None = None,
+) -> trace_time.TimePoint:
+    """Return a consistent start time tracking the latest first event recorded
+    across all processes participating in the first matched event flow.
+
+    Raises:
+      KeyError if no matched event is found.
+    """
+    filtered = filter_events(
+        model.all_events(), category=category, name=name, type=type
+    )
+    # Get the first matched event.
+    begin_event = next(filtered, None)
+
+    if begin_event is None:
+        raise KeyError(f"Error, expected event with name '{name}'")
+
+    process_ids = {begin_event.pid}
+    for event in get_following_flow_events(begin_event):
+        process_ids.add(event.pid)
+
+    process_matches = [p for p in model.processes if p.pid in process_ids]
+    return max(
+        min(
+            (
+                event.start
+                for thread in process.threads
+                for event in thread.events
+            ),
+            default=trace_time.TimePoint(),
+        )
+        for process in process_matches
+    )
 
 
 # This method looks for a possible race between trace collection start in multiple processes.
@@ -387,32 +438,8 @@ def adjust_to_common_process_start[
     Raises:
       KeyError if no matched event is found.
     """
-
-    filtered = filter_events(
-        model.all_events(), category=category, name=name, type=type
-    )
-    # Get the first matched event.
-    begin_event = next(filtered, None)
-
-    if begin_event is None:
-        raise KeyError(f"Error, expected event with name '{name}'")
-
-    process_ids = set()
-    process_ids.add(begin_event.pid)
-    for event in get_following_flow_events(begin_event):
-        process_ids.add(event.pid)
-
-    process_matches = [p for p in model.processes if p.pid in process_ids]
-    consistent_start_time = max(
-        min(
-            (
-                event.start
-                for thread in process.threads
-                for event in thread.events
-            ),
-            default=trace_time.TimePoint(),
-        )
-        for process in process_matches
+    consistent_start_time = get_common_process_start_time(
+        model, name, type=type, category=category
     )
     return model.slice(start=consistent_start_time)
 

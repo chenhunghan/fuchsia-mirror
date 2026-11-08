@@ -1,0 +1,3 @@
+[no-summarize-metrics]
+fuchsia.wlan.test_pm_mode_ultra_low_power: Power
+fuchsia.wlan.test_pm_mode_ultra_low_power: TotalEnergy

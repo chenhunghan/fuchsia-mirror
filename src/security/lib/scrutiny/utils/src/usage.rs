@@ -63,7 +63,7 @@ impl UsageBuilder {
         for word in desc_words.iter() {
             if count + word.len() > WRAP_COUNT {
                 usage.push_str(&format!("{:<5}{}\n", " ", current.join(" ")));
-                current = Vec::new();
+                current.clear();
                 count = 0;
             }
             count += word.len();

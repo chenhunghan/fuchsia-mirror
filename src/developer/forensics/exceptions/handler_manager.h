@@ -4,7 +4,6 @@
 #ifndef SRC_DEVELOPER_FORENSICS_EXCEPTIONS_HANDLER_MANAGER_H_
 #define SRC_DEVELOPER_FORENSICS_EXCEPTIONS_HANDLER_MANAGER_H_
 
-#include <fuchsia/exception/cpp/fidl.h>
 #include <lib/async/cpp/wait.h>
 #include <lib/async/dispatcher.h>
 #include <lib/zx/exception.h>

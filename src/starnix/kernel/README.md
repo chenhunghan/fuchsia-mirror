@@ -291,6 +291,14 @@ To start a trace with an increased buffer size, run:
 ffx trace start --categories "kernel:meta,starnix" --buffer-size 64
 ```
 
+The `starnix` category does not include the duration of every syscall (`sys_*`
+events), which is high volume. To trace syscalls, include the
+`starnix:syscalls` category:
+
+```
+ffx trace start --categories "kernel:meta,starnix,starnix:syscalls" --buffer-size 64
+```
+
 To include Zircon task runtime stats at each restricted enter/exit transition,
 include the `starnix:task_runtime` category:
 

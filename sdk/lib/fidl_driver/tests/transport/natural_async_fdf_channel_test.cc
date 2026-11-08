@@ -3,8 +3,8 @@
 // found in the LICENSE file.
 
 #include <fidl/test.transport/cpp/driver/fidl.h>
+#include <lib/driver/testing/cpp/driver_runtime.h>
 #include <lib/fdf/cpp/dispatcher.h>
-#include <lib/fit/defer.h>
 #include <lib/sync/cpp/completion.h>
 #include <zircon/errors.h>
 
@@ -12,7 +12,6 @@
 
 #include <zxtest/zxtest.h>
 
-#include "sdk/lib/fidl_driver/tests/transport/scoped_fake_driver.h"
 #include "sdk/lib/fidl_driver/tests/transport/server_on_unbound_helper.h"
 
 namespace {
@@ -25,7 +24,7 @@ class TestServer : public fdf::Server<test_transport::SendFdfChannelTest> {
 };
 
 TEST(DriverTransport, NaturalSendFdfChannelAsync) {
-  fidl_driver_testing::ScopedFakeDriver driver;
+  fdf_testing::DriverRuntime runtime;
 
   libsync::Completion dispatcher_shutdown;
   auto dispatcher = fdf::UnsynchronizedDispatcher::Create(

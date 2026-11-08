@@ -23,7 +23,6 @@ executable("ram-info") {
   sources = [ "main.cc" ]
   deps = [
     ":lib",
-    "//build/validate:non_production_tag",
     "//sdk/lib/component/incoming/cpp",
   ]
 }

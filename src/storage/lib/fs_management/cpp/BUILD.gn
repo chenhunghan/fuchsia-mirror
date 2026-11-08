@@ -57,7 +57,6 @@ if (is_fuchsia) {
       "//src/storage/lib/vfs/cpp",
       "//zircon/system/ulib/fbl",
       "//zircon/system/ulib/fzl",
-      "//zircon/system/ulib/pretty",
       "//zircon/system/ulib/zx",
     ]
   }
@@ -96,7 +95,6 @@ test("fs-management-test") {
   configs += [ "//build/config:all_source" ]
   sources = [
     "admin_test.cc",
-    "format_test.cc",
     "mount_test.cc",
   ]
   deps = [

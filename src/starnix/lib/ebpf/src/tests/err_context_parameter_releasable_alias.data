@@ -1,0 +1,17 @@
+# Verify ContextParameter does not unwrap a Releasable pointer to match a
+# non-Releasable program argument.
+-- asm
+mov %r1, 8
+call 103
+jeq %r0, 0, +6
+mov %r6, %r0
+mov %r1, %r6
+call 107
+mov %r1, %r6
+call 104
+mov %r0, 0
+exit
+-- mem
+00 00 00 00 00 00 00 00
+-- error
+helper expects program argument 0

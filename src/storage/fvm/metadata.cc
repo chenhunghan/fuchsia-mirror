@@ -72,12 +72,6 @@ void Metadata::UpdateHash() {
   ::fvm::UpdateHash(static_cast<uint8_t*>(data_->data()), GetHeader().GetMetadataUsedBytes());
 }
 
-size_t Metadata::GetInactiveHeaderOffset() const {
-  return GetHeader().GetSuperblockOffset(inactive_header());
-}
-
-void Metadata::SwitchActiveHeaders() { active_header_ = OppositeHeader(active_header_); }
-
 Header& Metadata::GetHeader() const {
   return *reinterpret_cast<Header*>(static_cast<uint8_t*>(data_->data()));
 }

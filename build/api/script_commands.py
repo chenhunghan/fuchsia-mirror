@@ -135,13 +135,13 @@ class ScriptCommandList(object):
         """
         kwargs: dict[str, T.Any] = command.PARSER_KWARGS.copy()
         assert isinstance(kwargs, dict)
+        class_name = type(command).__name__
         if "name" not in kwargs:
             # Compute name from class name, remove the Command suffix then
             # convert PascalCase into smaller_caps
             #
             # E.g. FooBarCommand -> "foo_bar"
             #
-            class_name = type(command).__name__
             pascal_name = class_name.removesuffix("Command")
             assert pascal_name != class_name, (
                 f"ScriptCommandBase derived class name ({class_name}) does not end with Command suffix. "

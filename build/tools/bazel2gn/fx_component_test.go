@@ -43,7 +43,6 @@ fx_component_manifest(
 fx_component(
 	name = "component",
 	compiled_manifest = ":manifest",
-	component_name = "http-client",
 	deps = [":http_client_packaged_bin"],
 )
 
@@ -57,7 +56,6 @@ fx_component_manifest(
 fx_component(
 	name = "google_component",
 	compiled_manifest = ":google_manifest",
-	component_name = "google-http-client",
 	deps = [":http_client_packaged_bin"],
 )
 
@@ -80,7 +78,6 @@ fuchsia_component_manifest("manifest") {
 }
 fuchsia_component("component") {
 	cm_label = ":manifest"
-	component_name = "http-client"
 	deps = [
 		":http_client",
 	]
@@ -91,7 +88,6 @@ fuchsia_component_manifest("google_manifest") {
 }
 fuchsia_component("google_component") {
 	cm_label = ":google_manifest"
-	component_name = "google-http-client"
 	deps = [
 		":http_client",
 	]
@@ -129,7 +125,6 @@ fx_component(
 	name = "component",
 	testonly = True,
 	compiled_manifest = ":component-manifest",
-	component_name = "exit-with-error",
 	deps = [":exit-with-error-bin_packaged_bin"],
 )`,
 			wantGN: `rustc_binary("exit-with-error-bin") {
@@ -148,7 +143,6 @@ fuchsia_component_manifest("component-manifest") {
 fuchsia_component("component") {
 	testonly = true
 	cm_label = ":component-manifest"
-	component_name = "exit-with-error"
 	deps = [
 		":exit-with-error-bin",
 	]
@@ -235,7 +229,6 @@ fuchsia_component("comp_b") {
 fx_component(
 	name = "empty_container_component",
 	compiled_manifest = ":empty_container_manifest",
-	component_name = "empty_container",
 	deps = ["//src/starnix/containers:default_init"],
 )
 
@@ -251,7 +244,6 @@ fx_component_manifest(
 }
 fuchsia_component("empty_container_component") {
 	cm_label = ":empty_container_manifest"
-	component_name = "empty_container"
 	deps = [
 		"//src/starnix/containers:default_init",
 	]
@@ -382,7 +374,6 @@ fx_component_manifest(
 fx_test_component(
 	name = "test-component",
 	compiled_manifest = ":test-manifest",
-	component_name = "lib-test",
 	deps = [":lib_test_packaged_bin"],
 )
 
@@ -425,6 +416,381 @@ fuchsia_structured_config_rust_lib("shared_config") {
 	cm_label = ":shared-manifest"
 }`,
 		},
+		{
+			name: "fx_component_manifest with restricted_features",
+			bazel: `fx_component_manifest(
+	name = "manifest",
+	component_name = "dispatcher",
+	manifest = "meta/dispatcher.cml",
+	restricted_features = ["dynamic_dictionaries"],
+)
+
+fx_component(
+	name = "component",
+	compiled_manifest = ":manifest",
+)`,
+			wantGN: `fuchsia_component_manifest("manifest") {
+	component_name = "dispatcher"
+	manifest = "meta/dispatcher.cml"
+	restricted_features = [
+		"dynamic_dictionaries",
+	]
+}
+fuchsia_component("component") {
+	cm_label = ":manifest"
+}`,
+		},
+		{
+			name: "fx_compiled_manifest converts to cm",
+			bazel: `fuchsia_structured_config_rust_lib(
+	name = "dispatcher_config",
+	cm_label = ":dispatcher_cm",
+)
+
+fx_compiled_manifest(
+	name = "elf_runner_cm",
+	component_name = "elf_runner",
+	includes = ["//sdk/lib/syslog:client.shard"],
+	manifest = "meta/elf_runner.cml",
+)
+
+fx_compiled_manifest(
+	name = "dispatcher_cm",
+	testonly = True,
+	component_name = "dispatcher",
+	manifest = "meta/dispatcher.cml",
+	output_name = "custom/dispatcher.cm",
+	restricted_features = ["dynamic_dictionaries"],
+	visibility = [":__subpackages__"],
+)
+
+fx_compiled_manifest(
+	name = "default_name",
+	manifest = "meta/default_name.cml",
+)`,
+			wantGN: `cm("dispatcher_cm") {
+	testonly = true
+	manifest = "meta/dispatcher.cml"
+	output_name = "custom/dispatcher.cm"
+	config_values_package_path = "meta/dispatcher.cvf"
+	restricted_features = [
+		"dynamic_dictionaries",
+	]
+	visibility = [
+		"./*",
+	]
+}
+fuchsia_structured_config_rust_lib("dispatcher_config") {
+	cm_label = ":dispatcher_cm"
+}
+cm("elf_runner_cm") {
+	manifest = "meta/elf_runner.cml"
+	output_name = "cml/elf_runner_cm/elf_runner.cm"
+	config_values_package_path = "meta/elf_runner.cvf"
+}
+cm("default_name") {
+	manifest = "meta/default_name.cml"
+	output_name = "cml/default_name/default_name.cm"
+	config_values_package_path = "meta/default_name.cvf"
+}`,
+		},
+		{
+			name: "DSO and cdylib fx_packaged_binary unwrapping and renamed_binary",
+			bazel: `fuchsia_cc_dso(
+	name = "cc_dso",
+	is_async = True,
+	srcs = ["main.cc"],
+	output_name = "custom_cc_dso",
+)
+
+fx_packaged_binary(
+	name = "cc_dso_packaged",
+	binary = ":cc_dso",
+	binary_name = "libcustom_cc_dso.so",
+	install_root = "lib/",
+)
+
+fuchsia_rust_dso(
+	name = "rust_dso",
+	srcs = ["src/lib.rs"],
+	edition = "2024",
+)
+
+fx_packaged_binary(
+	name = "rust_dso_packaged",
+	binary = ":rust_dso",
+	binary_name = "librust_dso.so",
+	install_root = "lib/",
+)
+
+rustc_cdylib(
+	name = "plugin_cdylib",
+	srcs = ["src/plugin.rs"],
+	crate_name = "my-plugin",
+	edition = "2024",
+)
+
+fx_packaged_binary(
+	name = "plugin_cdylib_default_packaged",
+	binary = ":plugin_cdylib",
+	binary_name = "libmy_plugin.so",
+	install_root = "lib/",
+)
+
+fx_packaged_binary(
+	name = "plugin_cdylib_renamed_packaged",
+	binary = ":plugin_cdylib",
+	binary_name = "plugin.so",
+	install_root = "plugins/",
+)
+
+fx_component_manifest(
+	name = "dso_manifest",
+	manifest = "meta/dso.cml",
+)
+
+fx_component(
+	name = "dso_component",
+	compiled_manifest = ":dso_manifest",
+	deps = [
+		":cc_dso_packaged",
+		":rust_dso_packaged",
+		":plugin_cdylib_default_packaged",
+		":plugin_cdylib_renamed_packaged",
+	],
+)`,
+			wantGN: `fuchsia_cc_dso("cc_dso") {
+	async = true
+	sources = [
+		"main.cc",
+	]
+	output_name = "custom_cc_dso"
+}
+fuchsia_rust_dso("rust_dso") {
+	sources = [
+		"src/lib.rs",
+	]
+	edition = "2024"
+}
+rustc_cdylib("plugin_cdylib") {
+	sources = [
+		"src/plugin.rs",
+	]
+	crate_name = "my-plugin"
+	edition = "2024"
+}
+renamed_binary("plugin_cdylib_renamed_packaged") {
+	source = "$root_out_dir/libmy_plugin.so"
+	source_deps = [
+		":plugin_cdylib",
+	]
+	dest = "plugins/plugin.so"
+}
+fuchsia_component_manifest("dso_manifest") {
+	manifest = "meta/dso.cml"
+}
+fuchsia_component("dso_component") {
+	cm_label = ":dso_manifest"
+	deps = [
+		":cc_dso",
+		":rust_dso",
+		":plugin_cdylib",
+		":plugin_cdylib_renamed_packaged",
+	]
+}`,
+		},
+		{
+			name: "skipped fx_component using fx_compiled_manifest",
+			bazel: `fx_compiled_manifest(
+	name = "manifest",
+	manifest = "meta/foo.cml",
+)
+
+# @bazel2gn:skip
+fx_component(
+	name = "component",
+	compiled_manifest = ":manifest",
+)`,
+			wantGN: `cm("manifest") {
+	manifest = "meta/foo.cml"
+	output_name = "cml/manifest/manifest.cm"
+	config_values_package_path = "meta/manifest.cvf"
+}`,
+		},
+		{
+			name: "fx_packaged_binary wrapping fx_cc_test_binary unwraps when install_root is bin/",
+			bazel: `fx_cc_test_binary(
+	name = "foo_test",
+	srcs = ["foo_test.cc"],
+)
+
+fx_cc_test_binary(
+	name = "bar_test_bin",
+	srcs = ["bar_test.cc"],
+	gn_output_name = "custom_bar_test",
+)
+
+fx_packaged_binary(
+	name = "foo_test_in_bin_dir",
+	testonly = True,
+	binary = ":foo_test",
+	binary_name = "foo_test",
+)
+
+fx_packaged_binary(
+	name = "bar_test_in_bin_dir",
+	testonly = True,
+	binary = ":bar_test_bin",
+	binary_name = "custom_bar_test",
+	install_root = "bin/",
+)
+
+fx_component_manifest(
+	name = "test_manifest",
+	testonly = True,
+	manifest = "meta/foo_test.cml",
+)
+
+fx_test_component(
+	name = "foo_test_component",
+	compiled_manifest = ":test_manifest",
+	deps = [
+		":foo_test_in_bin_dir",
+		":bar_test_in_bin_dir",
+	],
+)
+
+fx_package(
+	name = "foo_test_pkg",
+	test_components = [":foo_test_component"],
+)`,
+			wantGN: `cc_test_executable("foo_test") {
+	sources = [
+		"foo_test.cc",
+	]
+	testonly = true
+	emit_tool_path = false
+}
+cc_test_executable("bar_test_bin") {
+	sources = [
+		"bar_test.cc",
+	]
+	output_name = "custom_bar_test"
+	testonly = true
+	emit_tool_path = false
+}
+fuchsia_component_manifest("test_manifest") {
+	testonly = true
+	manifest = "meta/foo_test.cml"
+}
+fuchsia_test_component("foo_test_component") {
+	cm_label = ":test_manifest"
+	deps = [
+		":foo_test",
+		":bar_test_bin",
+	]
+}
+fuchsia_test_package("foo_test_pkg") {
+	package_name = "foo_test_pkg-gn"
+	test_components = [
+		":foo_test_component",
+	]
+}`,
+		},
+		{
+			name: "fx_packaged_binary wrapping fx_cc_test_binary emits renamed_binary when install_root is test/ or custom",
+			bazel: `fx_cc_test_binary(
+	name = "foo_test",
+	srcs = ["foo_test.cc"],
+)
+
+fx_cc_test_binary(
+	name = "bar_test",
+	srcs = ["bar_test.cc"],
+)
+
+fx_packaged_binary(
+	name = "foo_test_in_test_dir",
+	testonly = True,
+	binary = ":foo_test",
+	binary_name = "foo_test",
+	install_root = "test/",
+)
+
+fx_packaged_binary(
+	name = "bar_test_renamed",
+	testonly = True,
+	binary = ":bar_test",
+	binary_name = "renamed_bar_test",
+)
+
+fx_component_manifest(
+	name = "test_manifest",
+	testonly = True,
+	manifest = "meta/foo_test.cml",
+)
+
+fx_test_component(
+	name = "foo_test_component",
+	compiled_manifest = ":test_manifest",
+	deps = [
+		":foo_test_in_test_dir",
+		":bar_test_renamed",
+	],
+)
+
+fx_package(
+	name = "foo_test_pkg",
+	test_components = [":foo_test_component"],
+)`,
+			wantGN: `cc_test_executable("foo_test") {
+	sources = [
+		"foo_test.cc",
+	]
+	testonly = true
+	emit_tool_path = false
+}
+cc_test_executable("bar_test") {
+	sources = [
+		"bar_test.cc",
+	]
+	testonly = true
+	emit_tool_path = false
+}
+renamed_binary("foo_test_in_test_dir") {
+	testonly = true
+	source = "$root_out_dir/foo_test"
+	source_deps = [
+		":foo_test",
+	]
+	dest = "test/foo_test"
+}
+renamed_binary("bar_test_renamed") {
+	testonly = true
+	source = "$root_out_dir/bar_test"
+	source_deps = [
+		":bar_test",
+	]
+	dest = "bin/renamed_bar_test"
+}
+fuchsia_component_manifest("test_manifest") {
+	testonly = true
+	manifest = "meta/foo_test.cml"
+}
+fuchsia_test_component("foo_test_component") {
+	cm_label = ":test_manifest"
+	deps = [
+		":foo_test_in_test_dir",
+		":bar_test_renamed",
+	]
+}
+fuchsia_test_package("foo_test_pkg") {
+	package_name = "foo_test_pkg-gn"
+	test_components = [
+		":foo_test_component",
+	]
+}`,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := toSyntaxFile(t, tc.bazel)
@@ -455,7 +821,7 @@ func TestFxComponentErrors(t *testing.T) {
 			bazel: `fx_component_manifest(
 	name = "manifest",
 	manifest = "meta/foo.cml",
-	restricted_features = ["allow_non_hermetic_packages"],
+	required_offers = ["fuchsia.logger.LogSink"],
 )`,
 		},
 		{
@@ -546,6 +912,98 @@ fx_component(
 	name = "component",
 	compiled_manifest = ":manifest",
 	deps = [":pkg_bin"],
+)`,
+		},
+		{
+			name: "fx_compiled_manifest missing manifest",
+			bazel: `fx_compiled_manifest(
+	name = "manifest",
+)`,
+		},
+		{
+			name: "fx_compiled_manifest unsupported attribute",
+			bazel: `fx_compiled_manifest(
+	name = "manifest",
+	manifest = "meta/foo.cml",
+	required_offers = ["fuchsia.logger.LogSink"],
+)`,
+		},
+		{
+			name: "fx_compiled_manifest non-literal component_name",
+			bazel: `fx_compiled_manifest(
+	name = "manifest",
+	component_name = NAME,
+	manifest = "meta/foo.cml",
+)`,
+		},
+		{
+			name: "fx_packaged_binary with non-default destination for fuchsia_cc_dso",
+			bazel: `fuchsia_cc_dso(
+	name = "my_dso",
+	is_async = True,
+	srcs = ["main.cc"],
+)
+
+fx_packaged_binary(
+	name = "my_dso_packaged",
+	binary = ":my_dso",
+	binary_name = "libmy_dso.so",
+)
+
+fx_component_manifest(
+	name = "manifest",
+	manifest = "meta/dso.cml",
+)
+
+fx_component(
+	name = "component",
+	compiled_manifest = ":manifest",
+	deps = [":my_dso_packaged"],
+)`,
+		},
+		{
+			name: "fx_component using fx_compiled_manifest",
+			bazel: `fx_compiled_manifest(
+	name = "manifest",
+	manifest = "meta/foo.cml",
+)
+
+fx_component(
+	name = "component",
+	compiled_manifest = ":manifest",
+)`,
+		},
+		{
+			name: "skipped fx_packaged_binary wrapping fx_cc_test_binary with test/ install_root",
+			bazel: `fx_cc_test_binary(
+	name = "foo_test",
+	srcs = ["foo_test.cc"],
+)
+
+# @bazel2gn:skip
+fx_packaged_binary(
+	name = "pkg_test_bin",
+	testonly = True,
+	binary = ":foo_test",
+	binary_name = "foo_test",
+	install_root = "test/",
+)
+
+fx_component_manifest(
+	name = "manifest",
+	testonly = True,
+	manifest = "meta/foo_test.cml",
+)
+
+fx_test_component(
+	name = "test_component",
+	compiled_manifest = ":manifest",
+	deps = [":pkg_test_bin"],
+)
+
+fx_package(
+	name = "test_pkg",
+	test_components = [":test_component"],
 )`,
 		},
 	} {

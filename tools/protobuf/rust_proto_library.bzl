@@ -11,11 +11,20 @@ template.
 
 load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
 
+visibility([
+    "//src/starnix/modules/perfetto_consumer/lib/perfetto/...",
+    "//src/sys/pkg/lib/update-package/...",
+])
+
 def _include_dir_to_exec_path(include_dir):
-    """Converts a source-absolute GN-style directory to an execroot path."""
+    """Converts a source-absolute or external-repo directory to an execroot path."""
+    if include_dir.startswith("@"):
+        repo, _, pkg = include_dir.partition("//")
+        label = Label(repo + "//" + pkg.rstrip("/") + ":__pkg__")
+        return "/".join([p for p in [label.workspace_root, label.package] if p]) or "."
     if not include_dir.startswith("//"):
         fail("rust_proto_library() include_dirs must be source-absolute paths " +
-             "starting with \"//\", got: %s" % include_dir)
+             "starting with \"//\" or \"@\", got: %s" % include_dir)
     path = include_dir[2:].rstrip("/")
     return path if path else "."
 

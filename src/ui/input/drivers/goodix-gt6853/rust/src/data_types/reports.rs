@@ -99,7 +99,7 @@ bitfield! {
     // @alias(gt6853-programming-guide): theirs="track_id"
     #[derive(Copy, Clone, PartialEq, Eq, IntoBytes, FromBytes, KnownLayout, Immutable)]
     #[repr(transparent)]
-    pub struct TrackIdAndStatus(u8);
+    pub struct TrackIdAndStatus(pub u8);
     impl Debug;
 
     /// Contact tracking identifier.

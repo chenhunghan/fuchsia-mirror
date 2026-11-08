@@ -1063,4 +1063,29 @@ TEST_F(NetlinkGenericTest, ShortTaskstatsMessage) {
   ASSERT_THAT(recv(nl_sock_.get(), &buffer, sizeof(buffer), MSG_TRUNC), SyscallSucceeds());
 }
 
+TEST_F(NetlinkRouteTest, ShortNduseroptMessage) {
+  for (size_t payload_len : {size_t{1}, size_t{2}, size_t{15}}) {
+    test_helper::NetlinkEncoder encoder(RTM_NEWNDUSEROPT, NLM_F_REQUEST | NLM_F_ACK);
+    std::vector<uint8_t> payload(payload_len, 0xff);
+    encoder.WriteSpan(payload);
+    ASSERT_THAT(SendMsg(encoder), SyscallSucceeds());
+
+    char buf[256];
+    ssize_t received = recv(nl_sock_.get(), buf, sizeof(buf), 0);
+    ASSERT_THAT(received, SyscallSucceeds());
+    ASSERT_GE(static_cast<size_t>(received), sizeof(nlmsghdr) + sizeof(nlmsgerr));
+    const auto* hdr = reinterpret_cast<const nlmsghdr*>(buf);
+    EXPECT_EQ(hdr->nlmsg_type, NLMSG_ERROR);
+    const auto* err = reinterpret_cast<const nlmsgerr*>(NLMSG_DATA(hdr));
+    if (test_helper::IsStarnix()) {
+      EXPECT_EQ(err->error, -EINVAL);
+    } else {
+      // Linux's rtnetlink_rcv_msg checks CAP_NET_ADMIN (-EPERM) and then
+      // handler registration (-EOPNOTSUPP) before parsing RTM_NEWNDUSEROPT.
+      EXPECT_THAT(err->error, testing::AnyOf(-EPERM, -EOPNOTSUPP));
+    }
+  }
+  CheckNetlinkAlive();
+}
+
 }  // namespace

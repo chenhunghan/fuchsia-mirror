@@ -2,33 +2,64 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::task::{RoleOverrides, Task};
+use crate::task::{Kernel, RoleOverrides, Task};
 use fidl_fuchsia_scheduler::{
     RoleManagerGetProfileForRoleRequest, RoleManagerMarker, RoleManagerSetRoleRequest,
     RoleManagerSynchronousProxy, RoleName, RoleTarget, RoleType,
 };
 use fuchsia_component::client::connect_to_protocol_sync;
-use starnix_logging::{impossible_error, log_debug, log_warn, track_stub};
-use starnix_sync::{LockDepMutex, ProfileHandleCacheLock};
+use fuchsia_rcu::{RcuBox, RcuReadScope};
+use starnix_logging::{impossible_error, log_debug, log_error, log_warn, track_stub};
+use starnix_rcu::RcuHashMap;
+use starnix_sync::{LockDepMutex, ProfileHandleCacheLock, SystemModeLock};
 use starnix_task_command::TaskCommand;
 use starnix_uapi::errors::Errno;
 use starnix_uapi::{
     SCHED_BATCH, SCHED_DEADLINE, SCHED_FIFO, SCHED_IDLE, SCHED_NORMAL, SCHED_RESET_ON_FORK,
     SCHED_RR, errno, error, sched_param,
 };
-use std::collections::HashMap;
+use std::sync::Arc;
+
+/// Maximum Linux utilization clamp value (`SCHED_CAPACITY_SCALE`, 1024 = 100% capacity).
+pub const SCHED_CAPACITY_SCALE: u32 = 1024;
+
+/// Default system power/scheduling mode active before any mode transition occurs.
+pub(super) const DEFAULT_SYSTEM_MODE: &str = "NOMINAL";
+
+/// Bounded timeout for synchronous `fuchsia.scheduler.RoleManager` FIDL calls.
+const ROLE_MANAGER_TIMEOUT: zx::MonotonicDuration = zx::MonotonicDuration::from_seconds(5);
+
+/// `zx::Profile` handles for the roles that have been applied so far, keyed by role name.
+///
+/// Lookups are lock-free, so threads changing roles do not serialize on this cache. Entries are
+/// only ever added: a role's profile does not change once `RoleManager` has returned it.
+type ProfileHandleCache = RcuHashMap<String, Arc<zx::Profile>, ProfileHandleCacheLock>;
 
 pub struct SchedulerManager {
     role_manager: Option<RoleManagerSynchronousProxy>,
     role_overrides: RoleOverrides,
-    profile_handle_cache: LockDepMutex<HashMap<String, zx::Profile>, ProfileHandleCacheLock>,
+    profile_handle_cache: ProfileHandleCache,
+    system_mode: RcuBox<String>,
+    system_mode_update_lock: LockDepMutex<(), SystemModeLock>,
+}
+
+impl Default for SchedulerManager {
+    fn default() -> Self {
+        Self {
+            role_manager: None,
+            role_overrides: RoleOverrides::default(),
+            profile_handle_cache: ProfileHandleCache::new(),
+            system_mode: RcuBox::new(DEFAULT_SYSTEM_MODE.to_string()),
+            system_mode_update_lock: Default::default(),
+        }
+    }
 }
 
 impl SchedulerManager {
     /// Create a new SchedulerManager which will apply any provided `role_overrides` before
     /// computing a role name based on a Task's scheduler state.
     pub fn new(role_overrides: RoleOverrides) -> SchedulerManager {
-        let profile_handle_cache = Default::default();
+        let profile_handle_cache = ProfileHandleCache::new();
         let role_manager = fuchsia_runtime::with_thread_self(|thread| {
             let role_manager = connect_to_protocol_sync::<RoleManagerMarker>().unwrap();
             if let Err(e) = Self::set_zx_thread_role(
@@ -45,16 +76,17 @@ impl SchedulerManager {
             }
         });
 
-        SchedulerManager { role_manager, role_overrides, profile_handle_cache }
+        SchedulerManager {
+            role_manager,
+            role_overrides,
+            profile_handle_cache,
+            ..Default::default()
+        }
     }
 
     /// Create a new empty SchedulerManager for testing.
     pub(crate) fn empty_for_tests() -> Self {
-        Self {
-            role_manager: None,
-            role_overrides: RoleOverrides::new().build().unwrap(),
-            profile_handle_cache: Default::default(),
-        }
+        Self::default()
     }
 
     /// Create a new SchedulerManager with a custom role manager and overrides for testing.
@@ -63,7 +95,84 @@ impl SchedulerManager {
         role_manager: Option<RoleManagerSynchronousProxy>,
         role_overrides: RoleOverrides,
     ) -> Self {
-        Self { role_manager, role_overrides, profile_handle_cache: Default::default() }
+        Self { role_manager, role_overrides, ..Default::default() }
+    }
+
+    /// Returns the currently active system power mode.
+    pub fn system_mode(&self) -> String {
+        self.system_mode.cloned()
+    }
+
+    /// Sets the active system power mode and re-evaluates roles for running tasks whose role
+    /// overrides depend on the changed system mode.
+    ///
+    /// Pre-resolves `zx::Profile` handles for all override rules matching `mode` before mutating
+    /// `self.system_mode`, and rolls back `self.system_mode` and any already-updated tasks if a
+    /// task fails to sync its role.
+    // TODO(https://fxbug.dev/576068113): Delegate system_mode transitions to
+    // fuchsia.scheduler.RoleManager once the 2D profile matrix mode API
+    // (https://fxbug.dev/323263024) lands.
+    pub fn set_system_mode(&self, kernel: &Kernel, mode: impl Into<String>) -> Result<(), Errno> {
+        let new_mode = mode.into();
+        let _update_guard = self.system_mode_update_lock.lock();
+        let previous_mode = self.system_mode.cloned();
+        if previous_mode == new_mode {
+            return Ok(());
+        }
+        let Some(role_manager) = self.role_manager.as_ref() else {
+            self.system_mode.update(new_mode);
+            return Ok(());
+        };
+        if !self.role_overrides.has_system_mode_transition(&previous_mode, &new_mode) {
+            self.system_mode.update(new_mode);
+            return Ok(());
+        }
+
+        for role_name in self.role_overrides.role_names_for_system_mode(&new_mode) {
+            Self::prewarm_role_profile(role_manager, role_name, &self.profile_handle_cache)?;
+        }
+
+        self.system_mode.update(new_mode);
+        let tasks: Vec<_> = {
+            let scope = RcuReadScope::new();
+            kernel.pids.running_task_ids(&scope).filter_map(|pid| pid.get_task().ok()).collect()
+        };
+        for task in &tasks {
+            if !task.scheduler_state.lock().is_system_mode_dependent {
+                continue;
+            }
+            if let Err(err) = task.sync_scheduler_state_to_role() {
+                log_warn!(
+                    tid:% = task.tid,
+                    err:?,
+                    previous_mode:%;
+                    "Failed to update thread role on system mode change, rolling back"
+                );
+                self.system_mode.update(previous_mode);
+                let rollback_tasks: Vec<_> = {
+                    let scope = RcuReadScope::new();
+                    kernel
+                        .pids
+                        .running_task_ids(&scope)
+                        .filter_map(|pid| pid.get_task().ok())
+                        .collect()
+                };
+                for updated_task in &rollback_tasks {
+                    if !updated_task.scheduler_state.lock().is_system_mode_dependent {
+                        continue;
+                    }
+                    if let Err(rollback_err) = updated_task.sync_scheduler_state_to_role() {
+                        log_error!(
+                            tid:% = updated_task.tid,
+                            rollback_err:?;
+                            "Failed to roll back thread role after system mode transition failure"
+                        );
+                    }
+                }
+                return Err(err);
+            }
+        }
+        Ok(())
     }
 
     /// Return the currently active role name for this task. Requires read access to `task`'s state,
@@ -87,13 +196,15 @@ impl SchedulerManager {
                 task.pid.get_task().map_err(|_| errno!(EINVAL))?.command()
             };
 
-            return Ok(self.resolve_role_name(
-                &process_name,
-                &thread_name,
-                &task.read().cpuset_path,
-                task.is_leader(),
-                scheduler_state,
-            ));
+            return Ok(self
+                .resolve_role_name(
+                    &process_name,
+                    &thread_name,
+                    &task.read().cpuset_path,
+                    task.is_leader(),
+                    scheduler_state,
+                )
+                .0);
         }
         Ok(scheduler_state.role_name())
     }
@@ -105,17 +216,19 @@ impl SchedulerManager {
         cgroup_path: &str,
         is_leader: bool,
         scheduler_state: &SchedulerState,
-    ) -> &str {
-        if let Some(name) = self.role_overrides.get_role_name_with_filters(
-            process_name,
-            thread_name,
-            cgroup_path,
-            is_leader,
-            scheduler_state.normal_priority().as_nice(),
-        ) {
-            return name;
-        }
-        scheduler_state.role_name()
+    ) -> (&str, bool) {
+        let scope = RcuReadScope::new();
+        let (override_name, is_system_mode_dependent) =
+            self.role_overrides.get_role_name_with_filters(
+                process_name,
+                thread_name,
+                cgroup_path,
+                is_leader,
+                scheduler_state.normal_priority().as_nice(),
+                scheduler_state.uclamp_min,
+                self.system_mode.as_ref(&scope),
+            );
+        (override_name.unwrap_or_else(|| scheduler_state.role_name()), is_system_mode_dependent)
     }
 
     /// Resolves the target scheduler role for `task` and commits the corresponding profile to its
@@ -139,7 +252,7 @@ impl SchedulerManager {
                 .map(|l| l.command())
                 .unwrap_or_else(|_| TaskCommand::new(b"<leader exited>"))
         };
-        let role_name = self.resolve_role_name(
+        let (role_name, is_system_mode_dependent) = self.resolve_role_name(
             &process_name,
             &thread_name,
             &task.read().cpuset_path,
@@ -147,6 +260,7 @@ impl SchedulerManager {
             scheduler_state,
         );
         if scheduler_state.committed_role_name.as_deref() == Some(role_name) {
+            scheduler_state.is_system_mode_dependent = is_system_mode_dependent;
             return Ok(());
         }
 
@@ -154,6 +268,7 @@ impl SchedulerManager {
             let running_state = match task.running_state() {
                 Ok(live) => live,
                 Err(_) => {
+                    scheduler_state.is_system_mode_dependent = is_system_mode_dependent;
                     log_debug!(
                         "thread role update requested for task without live state, skipping"
                     );
@@ -161,6 +276,7 @@ impl SchedulerManager {
                 }
             };
             let Some(zircon_thread) = running_state.thread.get() else {
+                scheduler_state.is_system_mode_dependent = is_system_mode_dependent;
                 log_debug!("thread role update requested for task without thread, skipping");
                 return Ok(());
             };
@@ -174,6 +290,7 @@ impl SchedulerManager {
             &self.profile_handle_cache,
         )?;
         scheduler_state.committed_role_name = Some(role_name.to_string());
+        scheduler_state.is_system_mode_dependent = is_system_mode_dependent;
 
         Ok(())
     }
@@ -182,7 +299,7 @@ impl SchedulerManager {
         role_manager: &RoleManagerSynchronousProxy,
         thread: &zx::Thread,
         role_name: &str,
-        cache: &LockDepMutex<HashMap<String, zx::Profile>, ProfileHandleCacheLock>,
+        cache: &ProfileHandleCache,
     ) -> Result<(), Errno> {
         Self::set_zx_thread_role_with_profile_setter(
             role_manager,
@@ -197,16 +314,13 @@ impl SchedulerManager {
         role_manager: &RoleManagerSynchronousProxy,
         thread: &zx::Thread,
         role_name: &str,
-        cache: &LockDepMutex<HashMap<String, zx::Profile>, ProfileHandleCacheLock>,
+        cache: &ProfileHandleCache,
         set_profile: impl FnOnce(&zx::Profile) -> Result<(), zx::Status>,
     ) -> Result<(), Errno> {
         log_debug!(role_name; "setting thread role");
 
-        {
-            let params = cache.lock();
-            if let Some(profile) = params.get(role_name) {
-                return Self::set_zx_thread_profile(role_name, profile, set_profile);
-            }
+        if let Some(profile) = Self::get_cached_profile(cache, role_name) {
+            return Self::set_zx_thread_profile(role_name, &profile, set_profile);
         }
 
         let request = RoleManagerGetProfileForRoleRequest {
@@ -214,26 +328,68 @@ impl SchedulerManager {
             target: Some(RoleType::Task),
             ..Default::default()
         };
-        match role_manager.get_profile_for_role(request, zx::MonotonicInstant::INFINITE) {
+        match role_manager
+            .get_profile_for_role(request, zx::MonotonicInstant::after(ROLE_MANAGER_TIMEOUT))
+        {
             Ok(Ok(response)) => {
                 let Some(profile) = response.profile else {
                     log_warn!("GetRole returned success but no profile handle");
                     return error!(EINVAL);
                 };
 
-                let mut params = cache.lock();
-                let profile = params.entry(role_name.to_string()).or_insert(profile);
-                Self::set_zx_thread_profile(role_name, profile, set_profile)
+                let profile = Self::cache_profile(cache, role_name, profile);
+                Self::set_zx_thread_profile(role_name, &profile, set_profile)
+            }
+            Ok(Err(status)) if status == zx::Status::TIMED_OUT.into_raw() => {
+                log_warn!(status:%; "GetRole returned TIMED_OUT");
+                error!(ETIMEDOUT)
             }
             Ok(Err(e)) => {
                 log_warn!(e:%; "GetRole returned error");
                 Self::set_zx_thread_role_legacy(role_manager, thread, role_name)
+            }
+            Err(err) if Self::is_fidl_timeout(&err) => {
+                log_warn!(err:%; "GetRole FIDL call timed out");
+                error!(ETIMEDOUT)
             }
             Err(e) => {
                 log_warn!(e:%; "GetRole FIDL call failed");
                 Self::set_zx_thread_role_legacy(role_manager, thread, role_name)
             }
         }
+    }
+
+    fn is_fidl_timeout(err: &fidl::Error) -> bool {
+        matches!(
+            err,
+            fidl::Error::ClientCall(zx::Status::TIMED_OUT)
+                | fidl::Error::ClientRead(fidl::TransportError::Status(zx::Status::TIMED_OUT))
+                | fidl::Error::ClientWrite(fidl::TransportError::Status(zx::Status::TIMED_OUT))
+        )
+    }
+
+    fn map_role_manager_fidl_error(err: &fidl::Error) -> Errno {
+        if Self::is_fidl_timeout(err) { errno!(ETIMEDOUT) } else { errno!(EINVAL) }
+    }
+
+    fn map_role_manager_status(status: i32) -> Errno {
+        if status == zx::Status::TIMED_OUT.into_raw() { errno!(ETIMEDOUT) } else { errno!(EINVAL) }
+    }
+
+    /// Returns the cached profile for `role_name`, if any.
+    fn get_cached_profile(cache: &ProfileHandleCache, role_name: &str) -> Option<Arc<zx::Profile>> {
+        let scope = RcuReadScope::new();
+        cache.get(&scope, role_name).cloned()
+    }
+
+    /// Caches `profile` for `role_name`, unless another thread cached one first, and returns the
+    /// cached profile.
+    fn cache_profile(
+        cache: &ProfileHandleCache,
+        role_name: &str,
+        profile: zx::Profile,
+    ) -> Arc<zx::Profile> {
+        cache.lock().entry(role_name.to_string()).or_insert_with(|| Arc::new(profile)).get()
     }
 
     /// Applies `profile` to the target thread via `set_profile`.
@@ -269,6 +425,47 @@ impl SchedulerManager {
         }
     }
 
+    /// Pre-resolves and caches the `zx::Profile` handle for `role_name` if not already cached.
+    ///
+    /// If `RoleManager` returns `ZX_ERR_NOT_SUPPORTED` (indicating a legacy `SetRole`-only test
+    /// server), returns `Ok(())` so per-task updates can proceed through
+    /// `set_zx_thread_role_legacy`.
+    fn prewarm_role_profile(
+        role_manager: &RoleManagerSynchronousProxy,
+        role_name: &str,
+        cache: &ProfileHandleCache,
+    ) -> Result<(), Errno> {
+        if Self::get_cached_profile(cache, role_name).is_some() {
+            return Ok(());
+        }
+        let request = RoleManagerGetProfileForRoleRequest {
+            role: Some(RoleName { role: role_name.to_string() }),
+            target: Some(RoleType::Task),
+            ..Default::default()
+        };
+        match role_manager
+            .get_profile_for_role(request, zx::MonotonicInstant::after(ROLE_MANAGER_TIMEOUT))
+        {
+            Ok(Ok(response)) => {
+                let Some(profile) = response.profile else {
+                    log_warn!(role_name; "GetRole returned success but no profile handle");
+                    return error!(EINVAL);
+                };
+                Self::cache_profile(cache, role_name, profile);
+                Ok(())
+            }
+            Ok(Err(status)) if status == zx::Status::NOT_SUPPORTED.into_raw() => Ok(()),
+            Ok(Err(status)) => {
+                log_warn!(role_name, status:%; "GetRole returned error during system mode prewarm");
+                Err(Self::map_role_manager_status(status))
+            }
+            Err(err) => {
+                log_warn!(role_name, err:%; "GetRole FIDL call failed during system mode prewarm");
+                Err(Self::map_role_manager_fidl_error(&err))
+            }
+        }
+    }
+
     fn set_zx_thread_role_legacy(
         role_manager: &RoleManagerSynchronousProxy,
         thread: &zx::Thread,
@@ -280,11 +477,32 @@ impl SchedulerManager {
             role: Some(RoleName { role: role_name.to_string() }),
             ..Default::default()
         };
-        let _ = role_manager.set_role(request, zx::MonotonicInstant::INFINITE).map_err(|err| {
-            log_warn!(err:%; "Unable to set thread role.");
-            errno!(EINVAL)
-        })?;
-        Ok(())
+        match role_manager
+            .set_role(request, zx::MonotonicInstant::after(ROLE_MANAGER_TIMEOUT))
+            .map_err(|err| {
+                log_warn!(err:%; "Unable to set thread role.");
+                Self::map_role_manager_fidl_error(&err)
+            })? {
+            Ok(_) => Ok(()),
+            // Ignore `BAD_STATE` for dead or dying threads, and ignore `NOT_FOUND` so
+            // board-specific `RoleOverrides` do not fail `setpriority(2)` or `sched_setattr(2)` on
+            // emulator configurations where board `.profiles` are not loaded into `RoleManager`.
+            Err(status)
+                if status == zx::Status::BAD_STATE.into_raw()
+                    || status == zx::Status::NOT_FOUND.into_raw() =>
+            {
+                log_debug!(
+                    role_name,
+                    status:%;
+                    "SetRole skipped for thread"
+                );
+                Ok(())
+            }
+            Err(status) => {
+                log_warn!(status:%; "Unable to set thread role.");
+                Err(Self::map_role_manager_status(status))
+            }
+        }
     }
 }
 
@@ -432,8 +650,18 @@ pub struct SchedulerState {
     /// sched_setparam(). Only used for Fifo and Round-Robin.
     pub(crate) realtime_priority: RealtimePriority,
     pub(crate) reset_on_fork: bool,
+    /// Per-thread utilization clamp minimum (`0..=1024`), set via `sched_setattr(2)`.
+    pub(crate) uclamp_min: u32,
+    /// Per-thread utilization clamp maximum (`0..=1024`), set via `sched_setattr(2)`.
+    ///
+    /// Note: Starnix and Zircon do not currently support `uclamp_max` clamping when
+    /// assigning scheduler roles; this value is only stored and reported for
+    /// `sched_setattr(2)` and `sched_getattr(2)` fidelity.
+    pub(crate) uclamp_max: u32,
     /// The last committed scheduler role name.
     committed_role_name: Option<String>,
+    /// Whether the task's resolved role override depends on the active `system_mode`.
+    is_system_mode_dependent: bool,
 }
 
 impl SchedulerState {
@@ -443,6 +671,8 @@ impl SchedulerState {
             && self.normal_priority == default.normal_priority
             && self.realtime_priority == default.realtime_priority
             && self.reset_on_fork == default.reset_on_fork
+            && self.uclamp_min == default.uclamp_min
+            && self.uclamp_max == default.uclamp_max
             && self.committed_role_name.as_deref().is_none_or(|role| role == default.role_name())
     }
 
@@ -470,16 +700,10 @@ impl SchedulerState {
                     RealtimePriority::NON_REAL_TIME,
                 )
             };
-            Self {
-                policy,
-                normal_priority,
-                realtime_priority,
-                // This flag is disabled in child processes created by fork(2).
-                reset_on_fork: false,
-                committed_role_name: None,
-            }
+            // reset_on_fork and utilization clamps revert to their defaults in the child.
+            Self { policy, normal_priority, realtime_priority, ..Self::default() }
         } else {
-            Self { committed_role_name: None, ..*self }
+            Self { committed_role_name: None, is_system_mode_dependent: false, ..*self }
         }
     }
 
@@ -518,6 +742,11 @@ impl SchedulerState {
 
     pub fn normal_priority(&self) -> NormalPriority {
         self.normal_priority
+    }
+
+    /// Returns whether a scheduler role has been committed to the task's Zircon thread.
+    pub(crate) fn has_committed_role(&self) -> bool {
+        self.committed_role_name.is_some()
     }
 
     /// Returns a monotonic priority key (`0..=139`) for ordering `FUTEX_WAIT` waiters:
@@ -607,7 +836,10 @@ impl std::default::Default for SchedulerState {
             normal_priority: NormalPriority::default(),
             realtime_priority: RealtimePriority::NON_REAL_TIME,
             reset_on_fork: false,
+            uclamp_min: 0,
+            uclamp_max: SCHED_CAPACITY_SCALE,
             committed_role_name: None,
+            is_system_mode_dependent: false,
         }
     }
 }
@@ -671,6 +903,18 @@ const REALTIME_ROLE_NAME: &str = "fuchsia.starnix.realtime";
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{spawn_kernel_and_run_sync, spawn_kernel_with_scheduler_and_run_sync};
+    use fidl_fuchsia_scheduler::{
+        RoleManagerGetProfileForRoleResponse, RoleManagerRequest, RoleManagerSetRoleResponse,
+    };
+    use fuchsia_async::LocalExecutor;
+    use futures::StreamExt;
+    use futures::channel::oneshot;
+    use starnix_sync::Mutex;
+    use starnix_uapi::signals::SIGCHLD;
+    use starnix_uapi::{CLONE_SIGHAND, CLONE_THREAD, CLONE_VM};
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     #[fuchsia::test]
     fn default_role_name() {
@@ -683,6 +927,14 @@ mod tests {
         assert!(
             SchedulerState {
                 committed_role_name: Some("fuchsia.starnix.fair.16".to_string()),
+                ..SchedulerState::default()
+            }
+            .is_default()
+        );
+        assert!(
+            SchedulerState {
+                committed_role_name: Some("fuchsia.starnix.fair.16".to_string()),
+                is_system_mode_dependent: true,
                 ..SchedulerState::default()
             }
             .is_default()
@@ -706,6 +958,8 @@ mod tests {
             .is_default()
         );
         assert!(!SchedulerState { reset_on_fork: true, ..SchedulerState::default() }.is_default());
+        assert!(!SchedulerState { uclamp_min: 128, ..SchedulerState::default() }.is_default());
+        assert!(!SchedulerState { uclamp_max: 512, ..SchedulerState::default() }.is_default());
     }
 
     #[fuchsia::test]
@@ -715,7 +969,10 @@ mod tests {
             normal_priority: NormalPriority { value: 30 },
             realtime_priority: RealtimePriority { value: 50 },
             reset_on_fork: false,
+            uclamp_min: 256,
+            uclamp_max: 768,
             committed_role_name: Some("fuchsia.starnix.realtime".to_string()),
+            is_system_mode_dependent: true,
         };
         assert_eq!(
             state.fork(),
@@ -724,7 +981,10 @@ mod tests {
                 normal_priority: NormalPriority { value: 30 },
                 realtime_priority: RealtimePriority { value: 50 },
                 reset_on_fork: false,
+                uclamp_min: 256,
+                uclamp_max: 768,
                 committed_role_name: None,
+                is_system_mode_dependent: false,
             }
         );
 
@@ -736,7 +996,10 @@ mod tests {
                 normal_priority: NormalPriority::default(),
                 realtime_priority: RealtimePriority::NON_REAL_TIME,
                 reset_on_fork: false,
+                uclamp_min: 0,
+                uclamp_max: SCHED_CAPACITY_SCALE,
                 committed_role_name: None,
+                is_system_mode_dependent: false,
             }
         );
 
@@ -745,7 +1008,10 @@ mod tests {
             normal_priority: NormalPriority { value: 30 },
             realtime_priority: RealtimePriority::NON_REAL_TIME,
             reset_on_fork: true,
+            uclamp_min: 512,
+            uclamp_max: 512,
             committed_role_name: Some("fuchsia.starnix.fair.21".to_string()),
+            is_system_mode_dependent: true,
         };
         assert_eq!(
             reset_normal_state.fork(),
@@ -754,7 +1020,10 @@ mod tests {
                 normal_priority: NormalPriority::default(),
                 realtime_priority: RealtimePriority::NON_REAL_TIME,
                 reset_on_fork: false,
+                uclamp_min: 0,
+                uclamp_max: SCHED_CAPACITY_SCALE,
                 committed_role_name: None,
+                is_system_mode_dependent: false,
             }
         );
     }
@@ -765,9 +1034,7 @@ mod tests {
             SchedulerState {
                 policy: SchedulingPolicy::Normal,
                 normal_priority: NormalPriority { value: 10 },
-                realtime_priority: RealtimePriority::NON_REAL_TIME,
-                reset_on_fork: false,
-                committed_role_name: None,
+                ..SchedulerState::default()
             }
             .role_name(),
             "fuchsia.starnix.fair.11"
@@ -776,9 +1043,7 @@ mod tests {
             SchedulerState {
                 policy: SchedulingPolicy::Normal,
                 normal_priority: NormalPriority { value: 27 },
-                realtime_priority: RealtimePriority::NON_REAL_TIME,
-                reset_on_fork: false,
-                committed_role_name: None,
+                ..SchedulerState::default()
             }
             .role_name(),
             "fuchsia.starnix.fair.19"
@@ -790,10 +1055,8 @@ mod tests {
         assert_eq!(
             SchedulerState {
                 policy: SchedulingPolicy::Fifo,
-                normal_priority: NormalPriority::default(),
                 realtime_priority: RealtimePriority { value: 1 },
-                reset_on_fork: false,
-                committed_role_name: None,
+                ..SchedulerState::default()
             }
             .role_name(),
             "fuchsia.starnix.realtime",
@@ -801,10 +1064,8 @@ mod tests {
         assert_eq!(
             SchedulerState {
                 policy: SchedulingPolicy::Fifo,
-                normal_priority: NormalPriority::default(),
                 realtime_priority: RealtimePriority { value: 2 },
-                reset_on_fork: false,
-                committed_role_name: None,
+                ..SchedulerState::default()
             }
             .role_name(),
             "fuchsia.starnix.realtime",
@@ -812,10 +1073,8 @@ mod tests {
         assert_eq!(
             SchedulerState {
                 policy: SchedulingPolicy::Fifo,
-                normal_priority: NormalPriority::default(),
                 realtime_priority: RealtimePriority { value: 99 },
-                reset_on_fork: false,
-                committed_role_name: None,
+                ..SchedulerState::default()
             }
             .role_name(),
             "fuchsia.starnix.realtime",
@@ -828,31 +1087,21 @@ mod tests {
             SchedulerState {
                 policy: SchedulingPolicy::Idle,
                 normal_priority: NormalPriority { value: 1 },
-                realtime_priority: RealtimePriority::NON_REAL_TIME,
-                reset_on_fork: false,
-                committed_role_name: None,
+                ..SchedulerState::default()
             }
             .role_name(),
             "fuchsia.starnix.fair.0"
         );
         assert_eq!(
-            SchedulerState {
-                policy: SchedulingPolicy::Idle,
-                normal_priority: NormalPriority::default(),
-                realtime_priority: RealtimePriority::NON_REAL_TIME,
-                reset_on_fork: false,
-                committed_role_name: None,
-            }
-            .role_name(),
+            SchedulerState { policy: SchedulingPolicy::Idle, ..SchedulerState::default() }
+                .role_name(),
             "fuchsia.starnix.fair.0"
         );
         assert_eq!(
             SchedulerState {
                 policy: SchedulingPolicy::Idle,
                 normal_priority: NormalPriority { value: 40 },
-                realtime_priority: RealtimePriority::NON_REAL_TIME,
-                reset_on_fork: false,
-                committed_role_name: None,
+                ..SchedulerState::default()
             }
             .role_name(),
             "fuchsia.starnix.fair.0"
@@ -861,19 +1110,15 @@ mod tests {
 
     #[fuchsia::test]
     async fn role_overrides_non_realtime() {
-        crate::testing::spawn_kernel_and_run_sync(|current_task| {
+        spawn_kernel_and_run_sync(|current_task| {
             let mut builder = RoleOverrides::new();
             builder.add("my_task", "my_task", None, "overridden_role");
             let overrides = builder.build().unwrap();
-            let manager = SchedulerManager {
-                role_manager: None,
-                role_overrides: overrides,
-                profile_handle_cache: Default::default(),
-            };
+            let manager = SchedulerManager::new_for_tests(None, overrides);
 
             // Set did_exec = true so custom role overrides are applied.
             current_task.thread_group().write().did_exec = true;
-            current_task.set_command_name(starnix_task_command::TaskCommand::new(b"my_task"));
+            current_task.set_command_name(TaskCommand::new(b"my_task"));
 
             let mut state = SchedulerState::default();
             state.policy = SchedulingPolicy::Normal;
@@ -882,6 +1127,428 @@ mod tests {
             assert_eq!(role, "overridden_role");
         })
         .await;
+    }
+
+    #[fuchsia::test]
+    async fn set_system_mode_updates_matching_task_roles() {
+        let committed_roles = Arc::new(Mutex::new(Vec::<String>::new()));
+        let committed_roles_server = committed_roles.clone();
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        let (role_manager, server_end) = fidl::endpoints::create_sync_proxy::<RoleManagerMarker>();
+        let server_thread = thread::spawn(move || {
+            let mut executor = LocalExecutor::default();
+            executor.run_singlethreaded(async move {
+                let mut stream = server_end.into_stream().take_until(stop_rx);
+                while let Some(Ok(request)) = stream.next().await {
+                    match request {
+                        RoleManagerRequest::GetProfileForRole { responder, .. } => {
+                            let _ = responder.send(Err(zx::Status::NOT_SUPPORTED.into_raw()));
+                        }
+                        RoleManagerRequest::SetRole { payload, responder } => {
+                            if let Some(role) = payload.role {
+                                committed_roles_server.lock().push(role.role);
+                            }
+                            let _ = responder.send(Ok(RoleManagerSetRoleResponse::default()));
+                        }
+                        _ => panic!("unexpected RoleManagerRequest"),
+                    }
+                }
+            });
+        });
+
+        let mut builder = RoleOverrides::new();
+        builder.add_with_filters(
+            "app_proc",
+            "app_proc",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("^(LAUNCH|LAUNCH_EXTEND)$".to_string()),
+            "launch_boost_role",
+        );
+        builder.add("app_proc", "app_proc", None, "default_app_role");
+        builder.add("static_proc", "static_proc", None, "default_app_role");
+        let overrides = builder.build().unwrap();
+        let scheduler_manager = SchedulerManager::new_for_tests(Some(role_manager), overrides);
+
+        spawn_kernel_with_scheduler_and_run_sync(scheduler_manager, move |current_task| {
+            current_task.thread_group().write().did_exec = true;
+            current_task.set_command_name(TaskCommand::new(b"app_proc"));
+
+            let kernel = current_task.kernel();
+            let current_role = || {
+                let state = current_task.scheduler_state.lock().clone();
+                kernel.scheduler.role_name(current_task, &state).unwrap()
+            };
+            assert_eq!(kernel.scheduler.system_mode(), DEFAULT_SYSTEM_MODE);
+            assert_eq!(current_role(), "default_app_role");
+            assert!(current_task.scheduler_state.lock().is_system_mode_dependent);
+            assert_eq!(
+                current_task.scheduler_state.lock().committed_role_name.as_deref(),
+                Some("default_app_role")
+            );
+            assert_eq!(committed_roles.lock().last().map(String::as_str), Some("default_app_role"));
+            let baseline_calls = committed_roles.lock().len();
+
+            kernel.scheduler.set_system_mode(kernel, "LAUNCH").expect("set LAUNCH");
+            assert_eq!(kernel.scheduler.system_mode(), "LAUNCH");
+            assert_eq!(current_role(), "launch_boost_role");
+            assert!(current_task.scheduler_state.lock().is_system_mode_dependent);
+            assert_eq!(
+                current_task.scheduler_state.lock().committed_role_name.as_deref(),
+                Some("launch_boost_role")
+            );
+            assert_eq!(committed_roles.lock().len(), baseline_calls + 1);
+            assert_eq!(
+                committed_roles.lock().last().map(String::as_str),
+                Some("launch_boost_role")
+            );
+
+            // Transitioning between two modes that match the same rule ("LAUNCH" ->
+            // "LAUNCH_EXTEND") updates system_mode without re-committing task roles.
+            kernel.scheduler.set_system_mode(kernel, "LAUNCH_EXTEND").expect("set LAUNCH_EXTEND");
+            assert_eq!(kernel.scheduler.system_mode(), "LAUNCH_EXTEND");
+            assert_eq!(
+                current_task.scheduler_state.lock().committed_role_name.as_deref(),
+                Some("launch_boost_role")
+            );
+            assert_eq!(committed_roles.lock().len(), baseline_calls + 1);
+
+            kernel
+                .scheduler
+                .set_system_mode(kernel, DEFAULT_SYSTEM_MODE)
+                .expect("set DEFAULT_SYSTEM_MODE");
+            assert_eq!(kernel.scheduler.system_mode(), DEFAULT_SYSTEM_MODE);
+            assert_eq!(
+                current_task.scheduler_state.lock().committed_role_name.as_deref(),
+                Some("default_app_role")
+            );
+            assert_eq!(committed_roles.lock().len(), baseline_calls + 2);
+            assert_eq!(committed_roles.lock().last().map(String::as_str), Some("default_app_role"));
+
+            // Renaming to a task that only matches an unconditional rule with the same role
+            // clears `is_system_mode_dependent` even when `committed_role_name` is unchanged,
+            // so subsequent system_mode transitions skip the task.
+            current_task.set_command_name(TaskCommand::new(b"static_proc"));
+            assert!(!current_task.scheduler_state.lock().is_system_mode_dependent);
+            assert_eq!(
+                current_task.scheduler_state.lock().committed_role_name.as_deref(),
+                Some("default_app_role")
+            );
+            kernel.scheduler.set_system_mode(kernel, "LAUNCH").expect("set LAUNCH");
+            assert_eq!(
+                current_task.scheduler_state.lock().committed_role_name.as_deref(),
+                Some("default_app_role")
+            );
+            assert_eq!(committed_roles.lock().len(), baseline_calls + 2);
+            kernel
+                .scheduler
+                .set_system_mode(kernel, DEFAULT_SYSTEM_MODE)
+                .expect("set DEFAULT_SYSTEM_MODE");
+
+            current_task.set_command_name(TaskCommand::new(b"app_proc"));
+            assert!(current_task.scheduler_state.lock().is_system_mode_dependent);
+
+            // Verify rapid transitions (ending on distinct modes DEFAULT_SYSTEM_MODE vs
+            // "LAUNCH_EXTEND") are serialized so committed_role_name and the RoleManager server
+            // always match the winning final system_mode.
+            let barrier = Barrier::new(3);
+            let barrier_ref = &barrier;
+            thread::scope(|scope| {
+                scope.spawn(move || {
+                    barrier_ref.wait();
+                    for mode in ["LAUNCH", "LAUNCH_EXTEND", DEFAULT_SYSTEM_MODE] {
+                        kernel.scheduler.set_system_mode(kernel, mode).expect("set_system_mode");
+                    }
+                });
+                scope.spawn(move || {
+                    barrier_ref.wait();
+                    for mode in [DEFAULT_SYSTEM_MODE, "LAUNCH", "LAUNCH_EXTEND"] {
+                        kernel.scheduler.set_system_mode(kernel, mode).expect("set_system_mode");
+                    }
+                });
+                barrier_ref.wait();
+            });
+
+            let final_mode = kernel.scheduler.system_mode();
+            let expected_role = if final_mode == DEFAULT_SYSTEM_MODE {
+                "default_app_role"
+            } else {
+                "launch_boost_role"
+            };
+            assert_eq!(
+                current_task.scheduler_state.lock().committed_role_name.as_deref(),
+                Some(expected_role)
+            );
+            assert_eq!(committed_roles.lock().last().map(String::as_str), Some(expected_role));
+        })
+        .await;
+        let _ = stop_tx.send(());
+        server_thread.join().unwrap();
+    }
+
+    #[fuchsia::test]
+    async fn set_system_mode_prewarm_failure_rejects_without_mutating_mode_or_tasks() {
+        let get_profile_calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let get_profile_calls_server = get_profile_calls.clone();
+        let set_role_calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let set_role_calls_server = set_role_calls.clone();
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        let (role_manager, server_end) = fidl::endpoints::create_sync_proxy::<RoleManagerMarker>();
+        let server_thread = thread::spawn(move || {
+            let mut executor = LocalExecutor::default();
+            executor.run_singlethreaded(async move {
+                let mut stream = server_end.into_stream().take_until(stop_rx);
+                while let Some(Ok(request)) = stream.next().await {
+                    match request {
+                        RoleManagerRequest::GetProfileForRole { payload, responder } => {
+                            let role = payload.role.as_ref().map(|r| r.role.as_str()).unwrap_or("");
+                            get_profile_calls_server.lock().push(role.to_string());
+                            if role == "missing_launch_role" {
+                                let _ = responder.send(Err(zx::Status::NOT_FOUND.into_raw()));
+                            } else {
+                                let _ = responder.send(Err(zx::Status::NOT_SUPPORTED.into_raw()));
+                            }
+                        }
+                        RoleManagerRequest::SetRole { payload, responder } => {
+                            if let Some(role) = payload.role {
+                                set_role_calls_server.lock().push(role.role);
+                            }
+                            let _ = responder.send(Ok(RoleManagerSetRoleResponse::default()));
+                        }
+                        _ => panic!("unexpected RoleManagerRequest"),
+                    }
+                }
+            });
+        });
+
+        let mut builder = RoleOverrides::new();
+        builder.add_with_filters(
+            "app_proc",
+            "app_proc",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("^LAUNCH$".to_string()),
+            "missing_launch_role",
+        );
+        builder.add("app_proc", "app_proc", None, "default_app_role");
+        let overrides = builder.build().unwrap();
+        let scheduler_manager = SchedulerManager::new_for_tests(Some(role_manager), overrides);
+
+        spawn_kernel_with_scheduler_and_run_sync(scheduler_manager, move |current_task| {
+            current_task.thread_group().write().did_exec = true;
+            current_task.set_command_name(TaskCommand::new(b"app_proc"));
+
+            let kernel = current_task.kernel();
+            assert_eq!(kernel.scheduler.system_mode(), DEFAULT_SYSTEM_MODE);
+            assert_eq!(
+                current_task.scheduler_state.lock().committed_role_name.as_deref(),
+                Some("default_app_role")
+            );
+            get_profile_calls.lock().clear();
+            let baseline_set_role_calls = set_role_calls.lock().len();
+
+            assert_eq!(kernel.scheduler.set_system_mode(kernel, "LAUNCH"), error!(EINVAL));
+            assert_eq!(kernel.scheduler.system_mode(), DEFAULT_SYSTEM_MODE);
+            assert_eq!(
+                current_task.scheduler_state.lock().committed_role_name.as_deref(),
+                Some("default_app_role")
+            );
+            assert_eq!(get_profile_calls.lock().as_slice(), &["missing_launch_role".to_string()]);
+            assert_eq!(set_role_calls.lock().len(), baseline_set_role_calls);
+        })
+        .await;
+        let _ = stop_tx.send(());
+        server_thread.join().unwrap();
+    }
+
+    #[fuchsia::test]
+    fn prewarm_role_profile_caches_handle_and_maps_errors() {
+        let get_profile_calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let get_profile_calls_server = get_profile_calls.clone();
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        let (role_manager, server_end) = fidl::endpoints::create_sync_proxy::<RoleManagerMarker>();
+        let server_thread = thread::spawn(move || {
+            let mut executor = LocalExecutor::default();
+            executor.run_singlethreaded(async move {
+                let mut stream = server_end.into_stream().take_until(stop_rx);
+                while let Some(Ok(request)) = stream.next().await {
+                    match request {
+                        RoleManagerRequest::GetProfileForRole { payload, responder } => {
+                            let role = payload.role.as_ref().map(|r| r.role.as_str()).unwrap_or("");
+                            get_profile_calls_server.lock().push(role.to_string());
+                            match role {
+                                "legacy_role" => {
+                                    let _ =
+                                        responder.send(Err(zx::Status::NOT_SUPPORTED.into_raw()));
+                                }
+                                "empty_profile_role" => {
+                                    let _ = responder
+                                        .send(Ok(RoleManagerGetProfileForRoleResponse::default()));
+                                }
+                                "timed_out_role" => {
+                                    let _ = responder.send(Err(zx::Status::TIMED_OUT.into_raw()));
+                                }
+                                _ => {
+                                    let _ = responder.send(Err(zx::Status::NOT_FOUND.into_raw()));
+                                }
+                            }
+                        }
+                        _ => panic!("unexpected RoleManagerRequest"),
+                    }
+                }
+            });
+        });
+
+        let cache = cache_with_profile_for_test("cached_role");
+        // Roles already present in `cache` short-circuit without issuing a FIDL RPC.
+        assert_eq!(
+            SchedulerManager::prewarm_role_profile(&role_manager, "cached_role", &cache),
+            Ok(())
+        );
+        assert!(get_profile_calls.lock().is_empty());
+
+        assert_eq!(
+            SchedulerManager::prewarm_role_profile(&role_manager, "legacy_role", &cache),
+            Ok(())
+        );
+        assert_eq!(
+            SchedulerManager::prewarm_role_profile(&role_manager, "empty_profile_role", &cache),
+            error!(EINVAL)
+        );
+        assert_eq!(
+            SchedulerManager::prewarm_role_profile(&role_manager, "missing_role", &cache),
+            error!(EINVAL)
+        );
+        assert_eq!(
+            SchedulerManager::prewarm_role_profile(&role_manager, "timed_out_role", &cache),
+            error!(ETIMEDOUT)
+        );
+        assert_eq!(
+            get_profile_calls.lock().as_slice(),
+            &[
+                "legacy_role".to_string(),
+                "empty_profile_role".to_string(),
+                "missing_role".to_string(),
+                "timed_out_role".to_string(),
+            ]
+        );
+
+        let _ = stop_tx.send(());
+        server_thread.join().unwrap();
+    }
+
+    #[fuchsia::test]
+    fn prewarm_role_profile_cached_role_does_not_wait_for_cache_lock() {
+        let (role_manager, server_end) = fidl::endpoints::create_sync_proxy::<RoleManagerMarker>();
+        // Drop the server endpoint so any fallback FIDL call would fail with PEER_CLOSED.
+        drop(server_end);
+
+        let cache = cache_with_profile_for_test("cached_role");
+
+        run_while_holding_cache_lock(&cache, || {
+            assert_eq!(
+                SchedulerManager::prewarm_role_profile(&role_manager, "cached_role", &cache),
+                Ok(())
+            );
+        });
+    }
+
+    #[fuchsia::test]
+    async fn set_system_mode_task_failure_rolls_back_mode_and_updated_tasks() {
+        let committed_roles = Arc::new(Mutex::new(Vec::<String>::new()));
+        let committed_roles_server = committed_roles.clone();
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        let (role_manager, server_end) = fidl::endpoints::create_sync_proxy::<RoleManagerMarker>();
+        let server_thread = thread::spawn(move || {
+            let mut executor = LocalExecutor::default();
+            executor.run_singlethreaded(async move {
+                let mut launch_attempts = 0usize;
+                let mut stream = server_end.into_stream().take_until(stop_rx);
+                while let Some(Ok(request)) = stream.next().await {
+                    match request {
+                        RoleManagerRequest::GetProfileForRole { responder, .. } => {
+                            let _ = responder.send(Err(zx::Status::NOT_SUPPORTED.into_raw()));
+                        }
+                        RoleManagerRequest::SetRole { payload, responder } => {
+                            let role = payload.role.map(|r| r.role).unwrap_or_default();
+                            if role == "launch_boost_role" {
+                                launch_attempts += 1;
+                                if launch_attempts == 2 {
+                                    let _ = responder.send(Err(zx::Status::INTERNAL.into_raw()));
+                                    continue;
+                                }
+                            }
+                            committed_roles_server.lock().push(role);
+                            let _ = responder.send(Ok(RoleManagerSetRoleResponse::default()));
+                        }
+                        _ => panic!("unexpected RoleManagerRequest"),
+                    }
+                }
+            });
+        });
+
+        let mut builder = RoleOverrides::new();
+        builder.add_with_filters(
+            "app_proc",
+            ".*",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("^LAUNCH$".to_string()),
+            "launch_boost_role",
+        );
+        builder.add("app_proc", ".*", None, "default_app_role");
+        let overrides = builder.build().unwrap();
+        let scheduler_manager = SchedulerManager::new_for_tests(Some(role_manager), overrides);
+
+        spawn_kernel_with_scheduler_and_run_sync(scheduler_manager, move |current_task| {
+            current_task.thread_group().write().did_exec = true;
+            let sibling = current_task.clone_task_for_test(
+                (CLONE_THREAD | CLONE_VM | CLONE_SIGHAND) as u64,
+                Some(SIGCHLD),
+            );
+            let leader_thread = current_task.running_state().thread.get().unwrap().clone();
+            sibling.running_state().thread.set(leader_thread).unwrap();
+            sibling.set_command_name(TaskCommand::new(b"worker"));
+            current_task.set_command_name(TaskCommand::new(b"app_proc"));
+
+            assert_eq!(
+                current_task.scheduler_state.lock().committed_role_name.as_deref(),
+                Some("default_app_role")
+            );
+            assert_eq!(
+                sibling.scheduler_state.lock().committed_role_name.as_deref(),
+                Some("default_app_role")
+            );
+            committed_roles.lock().clear();
+
+            let kernel = current_task.kernel();
+            assert_eq!(kernel.scheduler.set_system_mode(kernel, "LAUNCH"), error!(EINVAL));
+            assert_eq!(kernel.scheduler.system_mode(), DEFAULT_SYSTEM_MODE);
+            assert_eq!(
+                current_task.scheduler_state.lock().committed_role_name.as_deref(),
+                Some("default_app_role")
+            );
+            assert_eq!(
+                sibling.scheduler_state.lock().committed_role_name.as_deref(),
+                Some("default_app_role")
+            );
+            assert_eq!(
+                committed_roles.lock().as_slice(),
+                &["launch_boost_role".to_string(), "default_app_role".to_string()]
+            );
+        })
+        .await;
+        let _ = stop_tx.send(());
+        server_thread.join().unwrap();
     }
 
     /// Creates a `zx::Profile` wrapping a `zx::Socket` handle.
@@ -895,20 +1562,33 @@ mod tests {
         zx::Profile::from(zx::NullableHandle::from(client))
     }
 
+    fn cache_with_profile_for_test(role_name: &str) -> ProfileHandleCache {
+        let cache = ProfileHandleCache::new();
+        cache.insert(role_name.to_string(), Arc::new(invalid_profile_for_test()));
+        cache
+    }
+
+    /// Runs `f` on another thread while the current thread holds `cache`'s lock.
+    ///
+    /// If `f` waits for the cache lock, it never returns and the test times out.
+    fn run_while_holding_cache_lock(cache: &ProfileHandleCache, f: impl FnOnce() + Send) {
+        let _guard = cache.lock();
+        thread::scope(|scope| {
+            scope.spawn(f);
+        });
+    }
+
     #[fuchsia::test]
     async fn commit_thread_role_failure_does_not_update_committed_role_name() {
-        crate::testing::spawn_kernel_and_run_sync(|current_task| {
+        spawn_kernel_and_run_sync(|current_task| {
             let (role_manager, server_end) =
                 fidl::endpoints::create_sync_proxy::<RoleManagerMarker>();
             drop(server_end);
 
             let manager = SchedulerManager {
                 role_manager: Some(role_manager),
-                role_overrides: RoleOverrides::new().build().unwrap(),
-                profile_handle_cache: LockDepMutex::new(HashMap::from([(
-                    "fuchsia.starnix.fair.16".to_string(),
-                    invalid_profile_for_test(),
-                )])),
+                profile_handle_cache: cache_with_profile_for_test("fuchsia.starnix.fair.16"),
+                ..Default::default()
             };
 
             assert_eq!(current_task.scheduler_state.lock().committed_role_name, None);
@@ -938,10 +1618,7 @@ mod tests {
         // Drop the server endpoint so any fallback FIDL call would fail with PEER_CLOSED.
         drop(server_end);
 
-        let cache = LockDepMutex::new(HashMap::from([(
-            "fuchsia.starnix.fair.16".to_string(),
-            invalid_profile_for_test(),
-        )]));
+        let cache = cache_with_profile_for_test("fuchsia.starnix.fair.16");
 
         fuchsia_runtime::with_thread_self(|thread| {
             let mut called = false;
@@ -961,15 +1638,39 @@ mod tests {
     }
 
     #[fuchsia::test]
+    fn set_zx_thread_role_cached_profile_does_not_wait_for_cache_lock() {
+        let (role_manager, server_end) = fidl::endpoints::create_sync_proxy::<RoleManagerMarker>();
+        // Drop the server endpoint so any fallback FIDL call would fail with PEER_CLOSED.
+        drop(server_end);
+
+        let cache = cache_with_profile_for_test("fuchsia.starnix.fair.16");
+
+        run_while_holding_cache_lock(&cache, || {
+            fuchsia_runtime::with_thread_self(|thread| {
+                let mut called = false;
+                let result = SchedulerManager::set_zx_thread_role_with_profile_setter(
+                    &role_manager,
+                    thread,
+                    "fuchsia.starnix.fair.16",
+                    &cache,
+                    |_| {
+                        called = true;
+                        Ok(())
+                    },
+                );
+                assert_eq!(result, Ok(()));
+                assert!(called);
+            });
+        });
+    }
+
+    #[fuchsia::test]
     fn set_zx_thread_role_cached_profile_bad_state_is_ignored() {
         let (role_manager, server_end) = fidl::endpoints::create_sync_proxy::<RoleManagerMarker>();
         // Drop the server endpoint so any fallback FIDL call to RoleManager would fail.
         drop(server_end);
 
-        let cache = LockDepMutex::new(HashMap::from([(
-            "fuchsia.starnix.fair.16".to_string(),
-            invalid_profile_for_test(),
-        )]));
+        let cache = cache_with_profile_for_test("fuchsia.starnix.fair.16");
 
         fuchsia_runtime::with_thread_self(|thread| {
             let result = SchedulerManager::set_zx_thread_role_with_profile_setter(
@@ -998,10 +1699,7 @@ mod tests {
             signals.contains(zx::Signals::CHANNEL_READABLE)
         });
 
-        let cache = LockDepMutex::new(HashMap::from([(
-            "fuchsia.starnix.fair.16".to_string(),
-            invalid_profile_for_test(),
-        )]));
+        let cache = cache_with_profile_for_test("fuchsia.starnix.fair.16");
 
         fuchsia_runtime::with_thread_self(|thread| {
             let result = SchedulerManager::set_zx_thread_role(
@@ -1041,6 +1739,82 @@ mod tests {
             )),
             error!(EINVAL)
         );
+    }
+
+    #[fuchsia::test]
+    fn set_zx_thread_role_legacy_handles_not_found_and_errors() {
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        let (role_manager, server_end) = fidl::endpoints::create_sync_proxy::<RoleManagerMarker>();
+        let server_thread = thread::spawn(move || {
+            let mut executor = LocalExecutor::default();
+            executor.run_singlethreaded(async move {
+                let mut stream = server_end.into_stream().take_until(stop_rx);
+                while let Some(Ok(request)) = stream.next().await {
+                    match request {
+                        RoleManagerRequest::SetRole { payload, responder } => {
+                            let role = payload.role.map(|r| r.role).unwrap_or_default();
+                            match role.as_str() {
+                                "missing_board_role" => {
+                                    let _ = responder.send(Err(zx::Status::NOT_FOUND.into_raw()));
+                                }
+                                "dead_thread_role" => {
+                                    let _ = responder.send(Err(zx::Status::BAD_STATE.into_raw()));
+                                }
+                                "timed_out_role" => {
+                                    let _ = responder.send(Err(zx::Status::TIMED_OUT.into_raw()));
+                                }
+                                "internal_err_role" => {
+                                    let _ = responder.send(Err(zx::Status::INTERNAL.into_raw()));
+                                }
+                                _ => {
+                                    let _ =
+                                        responder.send(Ok(RoleManagerSetRoleResponse::default()));
+                                }
+                            }
+                        }
+                        _ => panic!("unexpected RoleManagerRequest"),
+                    }
+                }
+            });
+        });
+
+        fuchsia_runtime::with_thread_self(|thread| {
+            assert_eq!(
+                SchedulerManager::set_zx_thread_role_legacy(
+                    &role_manager,
+                    thread,
+                    "missing_board_role"
+                ),
+                Ok(())
+            );
+            assert_eq!(
+                SchedulerManager::set_zx_thread_role_legacy(
+                    &role_manager,
+                    thread,
+                    "dead_thread_role"
+                ),
+                Ok(())
+            );
+            assert_eq!(
+                SchedulerManager::set_zx_thread_role_legacy(
+                    &role_manager,
+                    thread,
+                    "timed_out_role"
+                ),
+                error!(ETIMEDOUT)
+            );
+            assert_eq!(
+                SchedulerManager::set_zx_thread_role_legacy(
+                    &role_manager,
+                    thread,
+                    "internal_err_role"
+                ),
+                error!(EINVAL)
+            );
+        });
+
+        let _ = stop_tx.send(());
+        server_thread.join().unwrap();
     }
 
     #[fuchsia::test]

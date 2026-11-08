@@ -21,9 +21,10 @@ shard to the `core_realm_shards` list in [workstation.gni](/products/common/work
 
 ## Component configuration
 
-The security level of the published GATT battery service can be configured via
-[structured configuration](https://fuchsia.dev/fuchsia-src/development/components/configuration/structured_config).
-Update the [default configuration file](config/default.json5) with the desired security level.
+The security level of the published GATT battery service can be configured via the
+`fuchsia.bluetooth.le.battery.Security` (`string`, `max_size: 4`, default `"none"`, options:
+`["none", "enc", "auth"]`) [structured configuration](https://fuchsia.dev/fuchsia-src/development/components/configuration/structured_config)
+capability in [meta/bt-le-battery-service.cml](meta/bt-le-battery-service.cml).
 
 ## Component startup
 

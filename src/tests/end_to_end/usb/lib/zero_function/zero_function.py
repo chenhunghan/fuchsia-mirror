@@ -42,8 +42,7 @@ from testusb.ioctl import (
 from usb_lib.sysfs_usb import find_usb_device_node, wait_for_usb_device
 from usb_lib.usb_config import (
     get_dut_serial,
-    get_usb_config,
-    parse_usb_config_functions,
+    read_usb_functions_over_serial,
     set_usb_config,
 )
 from zero_function.usbtest_controller import UsbTestController
@@ -290,6 +289,12 @@ class LoopbackDevice:
 class ZeroFunctionBaseTest(fuchsia_base_test.FuchsiaBaseTest):
     """Base Mobly test class for USB Zero Function test suites."""
 
+    # Default to True for existing functional tests that use the Linux
+    # `usbtest` kernel driver. Subclasses that use userspace usbdevfs set this
+    # to False because `usbtest` can hang the host in an unkillable D state on
+    # transfer stalls (b/559943380) and does not support loopback.
+    LOAD_USBTEST_DRIVER: bool = True
+
     def __init__(
         self,
         mobly_configs: Any,
@@ -302,6 +307,7 @@ class ZeroFunctionBaseTest(fuchsia_base_test.FuchsiaBaseTest):
         self.target_serial: str | None = None
         self._initial_config_raw: str = ""
         self._initial_functions: list[str] = []
+        self._usb_config_modified: bool = False
         self.driver_controller: UsbTestController | None = None
         self.test_case_path: str = ""
 
@@ -342,18 +348,25 @@ class ZeroFunctionBaseTest(fuchsia_base_test.FuchsiaBaseTest):
 
         self.target_serial = await self._resolve_target_serial()
 
-        self.driver_controller = UsbTestController(
-            vendor=USB_ZERO_VID, product=USB_ZERO_PID, alt=0
-        )
-        try:
-            self.driver_controller.load_driver()
-        except Exception as e:
-            _LOGGER.warning("Could not load usbtest driver: %s", e)
+        if self.LOAD_USBTEST_DRIVER:
+            self.driver_controller = UsbTestController(
+                vendor=USB_ZERO_VID, product=USB_ZERO_PID, alt=0
+            )
+            try:
+                self.driver_controller.load_driver()
+            except Exception as e:
+                _LOGGER.warning("Could not load usbtest driver: %s", e)
 
-        self._initial_config_raw = get_usb_config(self.dut)
-        self._initial_functions = parse_usb_config_functions(
-            self._initial_config_raw
-        )
+        (
+            self._initial_config_raw,
+            self._initial_functions,
+        ) = read_usb_functions_over_serial(self.dut)
+        if not self._initial_functions:
+            raise RuntimeError(
+                "Unable to determine initial USB peripheral configuration over "
+                f"serial (last output: {self._initial_config_raw!r}); refusing "
+                "to switch USB mode without a known restore configuration."
+            )
         _LOGGER.info(
             "Saved initial USB peripheral configuration: %s",
             self._initial_functions,
@@ -477,22 +490,45 @@ class ZeroFunctionBaseTest(fuchsia_base_test.FuchsiaBaseTest):
         """Restore initial USB configuration and clean up test resources."""
         restore_err: Exception | None = None
         try:
-            # Restoring initial functions unbinds usb-zero-function. Ephemerally
-            # registered drivers remain cached until reboot and do not persist.
-            if self._initial_functions:
-                restore_str = ",".join(self._initial_functions)
-                _LOGGER.info(
-                    "Restoring initial USB peripheral configuration: %s",
-                    restore_str,
-                )
-                try:
-                    set_usb_config(self.dut, restore_str)
-                except Exception as e:
-                    _LOGGER.error(
-                        "Failed to restore initial USB configuration: %s",
-                        e,
+            # Only restore USB peripheral configuration when this test class
+            # actually switched USB modes. Mobly runs teardown_class even when
+            # setup_class fails before configure_zero_function, in which case
+            # the DUT's original configuration is still active and untouched.
+            dut = getattr(self, "dut", None)
+            if dut is not None and getattr(self, "_usb_config_modified", False):
+                if self._initial_functions:
+                    restore_str = ",".join(self._initial_functions)
+                    _LOGGER.info(
+                        "Restoring initial USB peripheral configuration: %s",
+                        restore_str,
                     )
-                    restore_err = e
+                    try:
+                        set_usb_config(dut, restore_str)
+                        # set_usb_config runs over serial and returns before the
+                        # host finishes re-enumerating CDC Ethernet. Wait for FFX
+                        # reachability and re-open Fuchsia Controller before
+                        # super().teardown_class() runs over FFX.
+                        if "cdc" in self._initial_functions:
+                            dut.ffx.run(
+                                ["target", "wait", "--timeout", "60"],
+                                timeout=65,
+                                log_status_on_failure=False,
+                                disable_controlmaster=True,
+                            )
+                            dut.fuchsia_controller.after_usb_reconnect()
+                    except Exception as e:
+                        _LOGGER.error(
+                            "Failed to restore initial USB configuration or "
+                            "reconnect to the device (%s): %s",
+                            restore_str,
+                            e,
+                        )
+                        restore_err = e
+                else:
+                    _LOGGER.error(
+                        "USB configuration was modified without a saved "
+                        "restore configuration; cannot restore automatically."
+                    )
             if self.driver_controller:
                 try:
                     self.driver_controller.unload_driver()
@@ -507,6 +543,11 @@ class ZeroFunctionBaseTest(fuchsia_base_test.FuchsiaBaseTest):
     def configure_zero_function(self, config_name: str = "sourcesink") -> str:
         """Switch device to Zero Function mode and wait for host enumeration."""
         old_node = self.dev_node
+        # Set _usb_config_modified before entering set_usb_config so any socket
+        # error after sendall() (or enumeration failure before returning) triggers
+        # an idempotent teardown restore of the verified _initial_functions,
+        # while failures prior to configure_zero_function skip set_usb_config.
+        self._usb_config_modified = True
         set_usb_config(self.dut, config_name)
         # If an old device node was already present, wait for it to disconnect
         # before polling.

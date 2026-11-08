@@ -12,6 +12,8 @@
 #include <zircon/compiler.h>
 #include <zircon/status.h>
 
+#include <cinttypes>
+#include <cstring>
 #include <memory>
 
 #include <acpica/acpi.h>
@@ -23,6 +25,19 @@
 
 namespace acpi {
 
+namespace {
+constexpr char kCmosRtcHid[] = "PNP0B00";
+
+// Whether the device is bindable by the CMOS RTC driver, which matches the HID or the first CID.
+bool IsCmosRtc(const ACPI_DEVICE_INFO& info) {
+  if ((info.Valid & ACPI_VALID_HID) && !strcmp(info.HardwareId.String, kCmosRtcHid)) {
+    return true;
+  }
+  return (info.Valid & ACPI_VALID_CID) && info.CompatibleIdList.Count > 0 &&
+         !strcmp(info.CompatibleIdList.Ids[0].String, kCmosRtcHid);
+}
+}  // namespace
+
 acpi::status<> Manager::DiscoverDevices() {
   // Make sure our "ACPI root device" corresponds to the root of the ACPI tree.
   auto root = acpi_->GetHandle(nullptr, "\\");
@@ -33,40 +48,55 @@ acpi::status<> Manager::DiscoverDevices() {
 
   devices_.emplace(root.value(), DeviceBuilder::MakeRootDevice(root.value(), acpi_root_));
   uint32_t ignored_depth = Acpi::kMaxNamespaceDepth + 1;
-  return acpi_->WalkNamespace(ACPI_TYPE_DEVICE, ACPI_ROOT_OBJECT, Acpi::kMaxNamespaceDepth,
-                              [this, &ignored_depth](ACPI_HANDLE handle, uint32_t depth,
-                                                     WalkDirection dir) -> acpi::status<> {
-                                if (depth > ignored_depth) {
-                                  // If we're ignoring this branch of the tree, do nothing.
-                                  return acpi::ok();
-                                }
-                                if (dir == WalkDirection::Ascending) {
-                                  if (depth == ignored_depth) {
-                                    // We've come back to where we set 'ignored_depth', reset it.
-                                    ignored_depth = Acpi::kMaxNamespaceDepth + 1;
-                                  }
-                                  // Nothing to do when ascending the tree.
-                                  return acpi::ok();
-                                }
-                                auto status = DiscoverDevice(handle);
-                                if (status.is_error()) {
-                                  auto path = acpi_->GetPath(handle).value_or("(get path failed)");
-                                  zxlogf(WARNING,
-                                         "Failed to discover device '%s': %d. Any children will "
-                                         "not be enumerated, the system may not function fully.",
-                                         path.data(), status.error_value());
-                                  // We failed to enumerate this device, so we don't enumerate any
-                                  // of its children.
-                                  ignored_depth = depth;
-                                  return acpi::ok();
-                                }
-                                if (status.value()) {
-                                  // This device is not present, so we should not enumerate its
-                                  // children. Mark this branch of the tree as ignored.
-                                  ignored_depth = depth;
-                                }
-                                return acpi::ok();
-                              });
+  CmosRtcDiscovery cmos_rtc;
+  auto walk_status =
+      acpi_->WalkNamespace(ACPI_TYPE_DEVICE, ACPI_ROOT_OBJECT, Acpi::kMaxNamespaceDepth,
+                           [this, &ignored_depth, &cmos_rtc](ACPI_HANDLE handle, uint32_t depth,
+                                                             WalkDirection dir) -> acpi::status<> {
+                             if (depth > ignored_depth) {
+                               // If we're ignoring this branch of the tree, do nothing.
+                               return acpi::ok();
+                             }
+                             if (dir == WalkDirection::Ascending) {
+                               if (depth == ignored_depth) {
+                                 // We've come back to where we set 'ignored_depth', reset
+                                 // it.
+                                 ignored_depth = Acpi::kMaxNamespaceDepth + 1;
+                               }
+                               // Nothing to do when ascending the tree.
+                               return acpi::ok();
+                             }
+                             auto status = DiscoverDevice(handle, &cmos_rtc);
+                             if (status.is_error()) {
+                               auto path = acpi_->GetPath(handle).value_or("(get path failed)");
+                               zxlogf(WARNING,
+                                      "Failed to discover device '%s': %d. Any children "
+                                      "will not be enumerated, the system may not "
+                                      "function fully.",
+                                      path.data(), status.error_value());
+                               // We failed to enumerate this device, so we don't
+                               // enumerate any of its children.
+                               ignored_depth = depth;
+                               return acpi::ok();
+                             }
+                             if (status.value()) {
+                               // This device is not present, so we should not enumerate
+                               // its children. Mark this branch of the tree as ignored.
+                               ignored_depth = depth;
+                             }
+                             return acpi::ok();
+                           });
+  if (walk_status.is_error()) {
+    return walk_status.take_error();
+  }
+
+  if (acpi_->HasLegacyCmosRtc() && !cmos_rtc.present && cmos_rtc.hidden != nullptr) {
+    auto rtc_status = DiscoverDevice(cmos_rtc.hidden, nullptr, /*force_enable=*/true);
+    if (rtc_status.is_error()) {
+      zxlogf(WARNING, "Failed to discover hidden CMOS RTC: %d", rtc_status.error_value());
+    }
+  }
+  return acpi::ok();
 }
 
 acpi::status<> Manager::ConfigureDiscoveredDevices() {
@@ -214,7 +244,8 @@ zx_status_t Manager::DereferencePowerResources(
   return ZX_OK;
 }
 
-acpi::status<bool> Manager::DiscoverDevice(ACPI_HANDLE handle) {
+acpi::status<bool> Manager::DiscoverDevice(ACPI_HANDLE handle, CmosRtcDiscovery* cmos_rtc,
+                                           bool force_enable) {
   auto result = acpi_->GetObjectInfo(handle);
   if (result.is_error()) {
     zxlogf(INFO, "get object info failed");
@@ -239,6 +270,23 @@ acpi::status<bool> Manager::DiscoverDevice(ACPI_HANDLE handle) {
     examine_children = state & (ACPI_STA_DEVICE_PRESENT | ACPI_STA_DEVICE_FUNCTIONING);
   } else {
     return state_result.take_error();
+  }
+
+  // Some firmware (e.g. Intel NUC11) hides the legacy CMOS RTC with _STA=0 while the FADT still
+  // declares one present; record the first hidden PNP0B00 node so DiscoverDevices can enable it if
+  // no other PNP0B00 node is present.
+  if (force_enable) {
+    zxlogf(WARNING,
+           "CMOS RTC '%s' reports _STA=0x%" PRIx64 " but the FADT declares one; enabling it",
+           name.data(), state);
+    state = ACPI_STA_DEVICE_PRESENT | ACPI_STA_DEVICE_ENABLED | ACPI_STA_DEVICE_FUNCTIONING;
+    examine_children = true;
+  } else if (cmos_rtc != nullptr && IsCmosRtc(*info)) {
+    if (examine_children) {
+      cmos_rtc->present = true;
+    } else if (cmos_rtc->hidden == nullptr) {
+      cmos_rtc->hidden = handle;
+    }
   }
 
   // See ACPI 6.4, Table 6.66.

@@ -1,0 +1,28 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "logging",
+    hdrs = ["logging.h"],
+    deps = ["//zircon/system/public"],
+    alwayslink = True,
+)
+
+# Headers defining logging macros that are compatible with both DFv1 and DFv2
+# runtimes.
+fx_cc_library(
+    name = "zxlogf",
+    hdrs = ["zxlogf.h"],
+    visibility = [
+        "//src/devices/bus/lib/virtio:__pkg__",
+        "//src/devices/lib/goldfish/pipe_io:__pkg__",
+        "//src/graphics/display/lib/driver-framework-migration-utils/logging/testing:__pkg__",
+    ],
+    deps = [":logging"],
+    alwayslink = True,
+)

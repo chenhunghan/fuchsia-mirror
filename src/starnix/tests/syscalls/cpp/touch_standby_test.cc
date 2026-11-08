@@ -57,8 +57,8 @@ TEST_F(TouchStandbyTest, WriteTouchStandbyState) {
   EXPECT_EQ(read_nl_standby, 1);
 
   // Expected failure: can't write multiple chars at a time
-  const void* write_long_standby = "10011";
-  res = write(touch_standby_fd_.get(), write_long_standby, sizeof(write_long_standby));
+  constexpr std::string_view kLongStandby = "10011";
+  res = write(touch_standby_fd_.get(), kLongStandby.data(), kLongStandby.size());
   EXPECT_EQ(res, -1);
 
   // Expected failure: can only write '0' or '1'

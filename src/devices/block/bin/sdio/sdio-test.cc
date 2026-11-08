@@ -7,7 +7,6 @@
 #include <fidl/fuchsia.hardware.sdio/cpp/wire_test_base.h>
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async-loop/default.h>
-#include <lib/fdf/arena.h>
 
 #include <optional>
 #include <vector>
@@ -21,7 +20,7 @@ namespace {
 class SdioTest : public zxtest::Test,
                  public fidl::testing::WireTestBase<fuchsia_hardware_sdio::Device> {
  public:
-  SdioTest() : loop_(&kAsyncLoopConfigAttachToCurrentThread), arena_(fdf::Arena('S')) {
+  SdioTest() : loop_(&kAsyncLoopConfigAttachToCurrentThread) {
     auto endpoints = fidl::Endpoints<Device>::Create();
     client_ = std::move(endpoints.client);
     fidl::BindServer(loop_.dispatcher(), std::move(endpoints.server), this);
@@ -154,8 +153,8 @@ class SdioTest : public zxtest::Test,
  private:
   std::optional<uint8_t> byte_;
   std::optional<uint32_t> address_;
+  fidl::Arena<> arena_;
   std::vector<wire::SdioRwTxn> txns_;
-  fdf::Arena arena_;
   bool reset_ = false;
 };
 

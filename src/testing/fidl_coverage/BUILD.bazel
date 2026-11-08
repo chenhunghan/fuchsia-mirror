@@ -1,0 +1,19 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = ["//:license"])
+
+# The binary isn't used - this is just to make Mypy run.
+py_binary(
+    name = "fidl_coverage_py_bin",
+    srcs = ["fidl_coverage.py"],
+    main = "fidl_coverage.py",
+    # Bazel only registers a host Python toolchain; GN python_binary is not gated on is_host.
+    target_compatible_with = HOST_OS_CONSTRAINTS,  # @bazel2gn:skip
+    visibility = ["//sdk/ctf:__pkg__"],
+    deps = ["//build/python/modules/depfile"],
+)

@@ -12,7 +12,6 @@ group("kernel_cmdline") {
 
 kernel_cmdline("serial-legacy") {
   args = [ "kernel.serial=legacy" ]
-  deps = [ "//build/validate:non_production_tag" ]
 }
 
 # This collects settings not specific to any particular machine that are

@@ -18,7 +18,8 @@
 #include <gbl/uefi/protocols/gbl_efi_fastboot_protocol.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
-#include <phys/efi/main.h>
+
+#include "utils.h"
 
 namespace gigaboot {
 namespace {

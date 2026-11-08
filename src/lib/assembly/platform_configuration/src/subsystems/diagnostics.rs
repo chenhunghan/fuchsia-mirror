@@ -8,8 +8,8 @@ use anyhow::{Context, anyhow};
 use assembly_component_id_index::{ComponentIdIndexBuilder, Index};
 use assembly_config_capabilities::{Config, ConfigNestedValueType, ConfigValueType};
 use assembly_config_schema::platform_settings::diagnostics_config::{
-    ArchivistConfig, ArchivistPipeline, DiagnosticsConfig, FireConfig, PersistenceConfig,
-    PipelineType, SamplerConfig, Severity,
+    ArchivistConfig, ArchivistPipeline, DiagnosticsConfig, FireConfig, PeriodicCaptureConfig,
+    PeriodicCaptureEnabledConfig, PersistenceConfig, PipelineType, SamplerConfig, Severity,
 };
 use assembly_config_schema::platform_settings::storage_config::StorageConfig;
 use assembly_constants::{
@@ -21,6 +21,7 @@ use sampler_config::assembly::{
     ComponentIdInfoList, MergedSamplerConfig, ProjectConfig, ProjectTemplate,
 };
 use std::collections::BTreeSet;
+use std::num::NonZeroU32;
 
 const ALLOWED_SERIAL_LOG_COMPONENTS: &[&str] = &[
     "/bootstrap/**",
@@ -335,6 +336,26 @@ impl<'a> DefineSubsystemConfiguration<DiagnosticsSubsystemConfig<'a>> for Diagno
             Config::new(ConfigValueType::Uint32, memory_monitor.normal_capture_delay_s.into()),
         )?;
 
+        // When periodic captures are disabled, the delay is left unset so that
+        // its route remains valid.
+        let (capture_periodically, periodic_capture_delay_s) =
+            match &memory_monitor.capture_periodically {
+                PeriodicCaptureConfig::Disabled => (false, None),
+                PeriodicCaptureConfig::Enabled(PeriodicCaptureEnabledConfig { delay_s }) => {
+                    (true, delay_s.map(NonZeroU32::get))
+                }
+            };
+
+        builder.set_config_capability(
+            "fuchsia.memory.CapturePeriodically",
+            Config::new(ConfigValueType::Bool, capture_periodically.into()),
+        )?;
+
+        builder.set_config_capability(
+            "fuchsia.memory.PeriodicCaptureDelay",
+            Config::new(ConfigValueType::Uint32, periodic_capture_delay_s.into()),
+        )?;
+
         // LINT.IfChange
         let PersistenceConfig {
             skip_update_check,
@@ -502,7 +523,8 @@ mod tests {
     use crate::subsystems::BoardConfig;
     use assembly_config_schema::BoardProvidedConfig;
     use assembly_config_schema::platform_settings::diagnostics_config::{
-        ComponentInitialInterest, PersistenceConfig, SamplerConfig, UrlOrMoniker,
+        ComponentInitialInterest, MemoryMonitorConfig, PersistenceConfig, SamplerConfig,
+        UrlOrMoniker,
     };
     use camino::Utf8PathBuf;
     use sampler_config::runtime::{DataSetConfig, MetricConfig};
@@ -1422,5 +1444,63 @@ mod tests {
                 "{build_type:?}, product_enabled={product_enabled}"
             );
         }
+    }
+
+    fn memory_monitor_config_capabilities(memory_monitor: MemoryMonitorConfig) -> Vec<Value> {
+        let resource_dir = ResourceDir::new();
+        let context = ConfigurationContext {
+            feature_set_level: &FeatureSetLevel::Standard,
+            build_type: &BuildType::Eng,
+            resource_dir: resource_dir.path(),
+            ..ConfigurationContext::default_for_tests()
+        };
+        let diagnostics = DiagnosticsConfig { memory_monitor, ..Default::default() };
+        let mut builder = ConfigurationBuilderImpl::default();
+        DiagnosticsSubsystem::define_configuration(
+            &context,
+            &DiagnosticsSubsystemConfig {
+                diagnostics: &diagnostics,
+                storage: &StorageConfig::default(),
+            },
+            &mut builder,
+        )
+        .unwrap();
+        let config = builder.build();
+        ["fuchsia.memory.CapturePeriodically", "fuchsia.memory.PeriodicCaptureDelay"]
+            .iter()
+            .map(|name| config.configuration_capabilities[*name].value())
+            .collect()
+    }
+
+    #[test]
+    fn test_memory_monitor_periodic_capture_default() {
+        assert_eq!(
+            memory_monitor_config_capabilities(MemoryMonitorConfig::default()),
+            vec![Value::Bool(true), Value::Null]
+        );
+    }
+
+    #[test]
+    fn test_memory_monitor_periodic_capture_enabled_with_delay() {
+        assert_eq!(
+            memory_monitor_config_capabilities(MemoryMonitorConfig {
+                capture_periodically: PeriodicCaptureConfig::Enabled(
+                    PeriodicCaptureEnabledConfig { delay_s: NonZeroU32::new(600) }
+                ),
+                ..Default::default()
+            }),
+            vec![Value::Bool(true), Value::Number(Number::from(600))]
+        );
+    }
+
+    #[test]
+    fn test_memory_monitor_periodic_capture_disabled() {
+        assert_eq!(
+            memory_monitor_config_capabilities(MemoryMonitorConfig {
+                capture_periodically: PeriodicCaptureConfig::Disabled,
+                ..Default::default()
+            }),
+            vec![Value::Bool(false), Value::Null]
+        );
     }
 }

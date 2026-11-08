@@ -128,6 +128,10 @@ OtRadioBlResult OtRadioDeviceBootloader::SendSpiCmdAndGetResponse(uint8_t *cmd, 
       size_t rx_actual = 0;
       size_t read_length = exp_resp_size;
       auto receive_result = dev_handle_->spi_->ReceiveVector(read_length);
+
+      // Acquire the lock before accessing the spi_rx_buffer_ below.
+      fbl::AutoLock lock(&dev_handle_->spi_rx_lock_);
+
       if (receive_result.ok() && receive_result->status == ZX_OK) {
         rx_actual = receive_result->data.size();
         memcpy(dev_handle_->spi_rx_buffer_, receive_result->data.data(), rx_actual);
@@ -284,6 +288,8 @@ OtRadioBlResult OtRadioDeviceBootloader::GetBootloaderVersion(std::string &bl_ve
     return result;
   }
 
+  // Acquire the lock before accessing the spi_rx_buffer_.
+  fbl::AutoLock lock(&dev_handle_->spi_rx_lock_);
   NlSpiBlGetVersionResponse *response =
       reinterpret_cast<NlSpiBlGetVersionResponse *>(dev_handle_->spi_rx_buffer_);
 
@@ -369,7 +375,9 @@ OtRadioBlResult OtRadioDeviceBootloader::UploadFirmware(const std::vector<uint8_
       return result;
     }
 
-    // Response is stored in dev_handle_->spi_rx_buffer_ so read that
+    // Response is stored in dev_handle_->spi_rx_buffer_ so read that. Acquire the lock
+    // before accessing the buffer_ before reading.
+    fbl::AutoLock lock(&dev_handle_->spi_rx_lock_);
     NlSpiBlBasicResponse *basic_response =
         reinterpret_cast<NlSpiBlBasicResponse *>(dev_handle_->spi_rx_buffer_);
 
@@ -414,6 +422,8 @@ OtRadioBlResult OtRadioDeviceBootloader::VerifyUpload(const std::vector<uint8_t>
     return result;
   }
 
+  // Acquire the lock before accessing the spi_rx_buffer_.
+  fbl::AutoLock lock(&dev_handle_->spi_rx_lock_);
   NlSpiBlBasicResponse *basic_response =
       reinterpret_cast<NlSpiBlBasicResponse *>(dev_handle_->spi_rx_buffer_);
 

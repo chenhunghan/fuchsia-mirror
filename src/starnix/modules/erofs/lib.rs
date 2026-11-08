@@ -21,8 +21,7 @@
 
 use erofs::readers::VmoReader;
 use erofs::{
-    DirectoryEntry as ErofsDirEntry, DirectoryNode, ErofsFilesystem, FileNode, FileType, Node,
-    NodeInner, SymlinkNode, VolumeMapper,
+    DirectoryNode, ErofsFilesystem, FileNode, FileType, Node, NodeInner, SymlinkNode, VolumeMapper,
 };
 use fidl_fuchsia_erofs::{ErofsMarker, ErofsServeRequest};
 use fidl_fuchsia_io as fio;
@@ -66,9 +65,6 @@ static FILE_MAPPER_AVAILABLE: AtomicBool = AtomicBool::new(true);
 /// Number of synthetic directory entries (`"."` and `".."`) emitted by `emit_dotdot` before
 /// reading entries from `ErofsFilesystem`.
 const DOT_DOTDOT_OFFSET: off_t = 2;
-
-/// Number of directory entries fetched per `ErofsFilesystem::read_directory` batch.
-const READDIR_BATCH_SIZE: usize = 16;
 
 /// Starnix `FileSystemOps` implementation for an in-process EROFS volume.
 struct ErofsFileSystem {
@@ -262,44 +258,33 @@ impl FileOps for ErofsDirFileObject {
 
         let fs = file.node().fs();
         let fs_ops = fs.downcast_ops::<ErofsFileSystem>().unwrap();
-        let mut entry_offset = (sink.offset() - DOT_DOTDOT_OFFSET) as usize;
-        let mut buffer = vec![ErofsDirEntry::default(); READDIR_BATCH_SIZE];
+        let entry_offset = (sink.offset() - DOT_DOTDOT_OFFSET) as usize;
 
-        loop {
-            let filled = fs_ops
-                .fs
-                .read_directory(&self.node, entry_offset, &mut buffer)
-                .map_err(|e| errno!(EIO, e))?;
-            for i in 0..filled {
-                let entry = &buffer[i];
-                let next_entry_offset = entry_offset + i + 1;
-                // On-disk EROFS directories include `"."` and `".."` entries, which were already
-                // emitted by `emit_dotdot` above. Skip them while still advancing
-                // `next_entry_offset` so subsequent entries map to stable offsets.
-                if entry.name == "." || entry.name == ".." {
-                    continue;
-                }
-                let entry_type = match entry.file_type {
-                    FileType::RegFile => DirectoryEntryType::REG,
-                    FileType::Dir => DirectoryEntryType::DIR,
-                    FileType::ChrDev => DirectoryEntryType::CHR,
-                    FileType::BlkDev => DirectoryEntryType::BLK,
-                    FileType::Fifo => DirectoryEntryType::FIFO,
-                    FileType::Sock => DirectoryEntryType::SOCK,
-                    FileType::Symlink => DirectoryEntryType::LNK,
-                    FileType::Unknown => DirectoryEntryType::UNKNOWN,
-                };
-                sink.add(
-                    entry.nid as ino_t,
-                    next_entry_offset as off_t + DOT_DOTDOT_OFFSET,
-                    entry_type,
-                    entry.name.as_bytes().into(),
-                )?;
+        for (i, entry) in fs_ops.fs.read_directory(&self.node).enumerate().skip(entry_offset) {
+            let entry = entry.map_err(|e| errno!(EIO, e))?;
+            let next_entry_offset = i + 1;
+            // On-disk EROFS directories include `"."` and `".."` entries, which were already
+            // emitted by `emit_dotdot` above. Skip them while still advancing
+            // `next_entry_offset` so subsequent entries map to stable offsets.
+            if entry.name == "." || entry.name == ".." {
+                continue;
             }
-            if filled < buffer.len() {
-                break;
-            }
-            entry_offset += filled;
+            let entry_type = match entry.file_type {
+                FileType::RegFile => DirectoryEntryType::REG,
+                FileType::Dir => DirectoryEntryType::DIR,
+                FileType::ChrDev => DirectoryEntryType::CHR,
+                FileType::BlkDev => DirectoryEntryType::BLK,
+                FileType::Fifo => DirectoryEntryType::FIFO,
+                FileType::Sock => DirectoryEntryType::SOCK,
+                FileType::Symlink => DirectoryEntryType::LNK,
+                FileType::Unknown => DirectoryEntryType::UNKNOWN,
+            };
+            sink.add(
+                entry.nid as ino_t,
+                next_entry_offset as off_t + DOT_DOTDOT_OFFSET,
+                entry_type,
+                entry.name.as_bytes().into(),
+            )?;
         }
         Ok(())
     }

@@ -55,7 +55,7 @@ power-manager
 role_manager
 ?root
 ?sdhci
-sdmmc
+?sdmmc
 shutdown-shim
 spi
 sysinfo

@@ -912,13 +912,15 @@ zx_status_t X86ArchVmAspace::Destroy() {
   canary_.Assert();
   DEBUG_ASSERT(active_cpus_.load() == 0);
 
-  if (flags_ & ARCH_ASPACE_FLAG_GUEST) {
-    static_cast<X86PageTableEpt*>(pt_)->Destroy(base_, size_);
-  } else {
-    static_cast<X86PageTableMmu*>(pt_)->Destroy(base_, size_);
-    if (pcid_ != MMU_X86_UNUSED_PCID) {
-      auto result = pcid_allocator->Free(pcid_);
-      DEBUG_ASSERT(result.is_ok());
+  if (pt_) {
+    if (flags_ & ARCH_ASPACE_FLAG_GUEST) {
+      static_cast<X86PageTableEpt*>(pt_)->Destroy(base_, size_);
+    } else {
+      static_cast<X86PageTableMmu*>(pt_)->Destroy(base_, size_);
+      if (pcid_ != MMU_X86_UNUSED_PCID) {
+        auto result = pcid_allocator->Free(pcid_);
+        DEBUG_ASSERT(result.is_ok());
+      }
     }
   }
   return ZX_OK;
@@ -947,6 +949,8 @@ zx_status_t X86ArchVmAspace::MapContiguous(vaddr_t vaddr, paddr_t paddr, size_t 
 zx_status_t X86ArchVmAspace::Map(vaddr_t vaddr, paddr_t* phys, size_t count,
                                  arch_mmu_flags_t mmu_flags, ExistingEntryAction existing_action) {
   DEBUG_ASSERT(!pt_->IsUnified());
+  DEBUG_ASSERT(!(flags_ & ARCH_ASPACE_FLAG_KERNEL) ||
+               existing_action != ExistingEntryAction::Upgrade);
   if (!IsValidVaddr(vaddr))
     return ZX_ERR_INVALID_ARGS;
 
@@ -1054,8 +1058,21 @@ void X86ArchVmAspace::ContextSwitch(X86ArchVmAspace* old_aspace, X86ArchVmAspace
     x86_set_tss_io_bitmap(aspace->io_bitmap());
 }
 
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+extern "C" FFI_ALWAYS_INLINE const IoBitmap* cpp_x86_arch_aspace_io_bitmap(
+    const X86ArchVmAspace* aspace) {
+  return &aspace->io_bitmap();
+}
+
 zx_status_t X86ArchVmAspace::Query(vaddr_t vaddr, paddr_t* paddr, arch_mmu_flags_t* mmu_flags) {
+  DEBUG_ASSERT(pt_);
+  if (!pt_) {
+    return ZX_ERR_BAD_STATE;
+  }
   DEBUG_ASSERT(!pt_->IsUnified());
+  if (pt_->IsUnified()) {
+    return ZX_ERR_BAD_STATE;
+  }
   if (!IsValidVaddr(vaddr))
     return ZX_ERR_INVALID_ARGS;
 

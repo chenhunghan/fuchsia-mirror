@@ -771,6 +771,11 @@ mod test {
         let v6_unspec_port: TargetAddr = "[::]:8022".parse().expect("valid v6 unspecified addr");
         assert_eq!(v6_unspec_port, TargetAddr::Net("[::]:8022".parse().unwrap()));
         assert!(matches!("not-an-ip".parse::<TargetAddr>(), Err(TargetAddrParseError::Net(_))));
+        assert!(matches!("127.0.0.1%lo".parse::<TargetAddr>(), Err(TargetAddrParseError::Net(_))));
+        assert!(matches!(
+            "127.0.0.1%nonexistent_scope".parse::<TargetAddr>(),
+            Err(TargetAddrParseError::Net(_))
+        ));
         assert!(matches!(
             "127.0.0.1:65536".parse::<TargetAddr>(),
             Err(TargetAddrParseError::Port(_))

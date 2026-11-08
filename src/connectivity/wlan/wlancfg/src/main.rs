@@ -294,6 +294,12 @@ async fn run_all_futures() -> Result<(), Error> {
     // Get wlancfg product config data.
     let cfg = wlancfg_config::Config::take_from_startup_handle();
 
+    // Enable redaction of BSSIDs/MAC addresses/SSIDs in logs and Inspect before anything
+    // else can log them. `enable()` installs masking synchronously; the returned future
+    // fetches the per-boot salt and is driven alongside the other futures in `main_fut`.
+    let redactor_fut =
+        future::OptionFuture::from(cfg.redact_network_identifiers.then(redactor_client::enable));
+
     // Set up power framework
     info!("Power Framework Enabled: {}", cfg.power_framework_enabled);
     let proxies = if cfg.power_framework_enabled {
@@ -511,6 +517,7 @@ async fn run_all_futures() -> Result<(), Error> {
             roam_manager_service_fut.map(Ok),
             connection_selection_service.map(Ok),
             suspend_blocker_fut,
+            redactor_fut.map(Ok),
         )?;
         Err(format_err!("WLAN policy layer stopped"))
     };

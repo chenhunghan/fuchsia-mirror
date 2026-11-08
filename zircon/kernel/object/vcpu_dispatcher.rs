@@ -5,8 +5,9 @@
 // https://opensource.org/licenses/MIT
 
 use crate::counters::define_kcounter;
+use crate::ksync_kernel::TrackedCriticalMutex;
 use fbl::{Canary, RefPtr, UniquePtr};
-use ksync::{KMutex, RawCriticalMutex, guarded};
+use ksync::{KMutex, guarded};
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
 use zx_types::{
@@ -57,7 +58,7 @@ pub struct VcpuDispatcherState {
 
     /// Mutex guarding state operations.
     #[mutex]
-    lock: KMutex<RawCriticalMutex>,
+    lock: KMutex<TrackedCriticalMutex>,
 }
 
 impl VcpuDispatcherState {

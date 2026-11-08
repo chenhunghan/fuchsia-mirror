@@ -20,7 +20,7 @@ use smallvec::smallvec;
 use starnix_logging::{log_error, log_trace, log_warn, track_stub};
 use starnix_syscalls::{SUCCESS, SyscallResult};
 use starnix_types::user_buffer::UserBuffer;
-use starnix_uapi::auth::CAP_SYS_ADMIN;
+use starnix_uapi::auth::{CAP_NET_ADMIN, CAP_SYS_ADMIN};
 use starnix_uapi::errors::Errno;
 use starnix_uapi::open_flags::OpenFlags;
 use starnix_uapi::user_address::{UserAddress, UserCString, UserRef};
@@ -320,8 +320,12 @@ pub fn sys_bpf(
             log_trace!("BPF_PROG_LOAD");
             security::check_bpf_access(current_task, cmd, &prog_attr, attr_size)?;
 
-            let user_code = UserRef::<EbpfInstruction>::new(UserAddress::from(prog_attr.insns));
-            let code = current_task.read_objects_to_vec(user_code, prog_attr.insn_cnt as usize)?;
+            let user_code = UserRef::<u64>::new(UserAddress::from(prog_attr.insns));
+            let code = current_task
+                .read_objects_to_vec(user_code, prog_attr.insn_cnt as usize)?
+                .into_iter()
+                .map(EbpfInstruction::from)
+                .collect::<Vec<_>>();
 
             let mut log_buffer =
                 if prog_attr.log_level != 0 && prog_attr.log_buf != 0 && prog_attr.log_size > 1 {
@@ -378,11 +382,43 @@ pub fn sys_bpf(
                 read_attr(current_task, attr_addr, attr_size)?;
             log_trace!("BPF_PROG_QUERY");
             security::check_bpf_access(current_task, cmd, &prog_attr, attr_size)?;
-            track_stub!(TODO("https://fxbug.dev/322873416"), "Bpf::BPF_PROG_QUERY");
-            current_task.write_memory(UserAddress::from(prog_attr.prog_ids), 1.as_bytes())?;
-            prog_attr.__bindgen_anon_2.prog_cnt = std::mem::size_of::<u64>() as u32;
+            security::check_task_capable(current_task, CAP_NET_ADMIN)?;
+
+            // SAFETY: reading target_fd from a union is always safe.
+            let target_fd = unsafe { prog_attr.__bindgen_anon_1.target_fd };
+            let target_fd = FdNumber::from_raw(target_fd as i32);
+            let attach_type = ebpf_api::AttachType::from(prog_attr.attach_type);
+
+            let ids = current_task.kernel().ebpf_state.attachments.query_prog(
+                current_task,
+                target_fd,
+                attach_type,
+            )?;
+
+            let count = ids.len() as u32;
+            let mut res = Ok(SUCCESS);
+
+            // Limit to caller's provided buffer size. When `prog_cnt == 0` or `prog_ids == 0`,
+            // only the total program count is written to `prog_cnt` without returning `ENOSPC`.
+            // SAFETY: reading prog_cnt from a union is always safe.
+            let user_prog_cnt = unsafe { prog_attr.__bindgen_anon_2.prog_cnt };
+            if user_prog_cnt != 0 && prog_attr.prog_ids != 0 {
+                let to_copy = std::cmp::min(user_prog_cnt, count) as usize;
+                if to_copy > 0 {
+                    current_task.write_memory(
+                        UserAddress::from(prog_attr.prog_ids),
+                        ids[..to_copy].as_bytes(),
+                    )?;
+                }
+                if user_prog_cnt < count {
+                    res = error!(ENOSPC);
+                }
+            }
+
+            prog_attr.__bindgen_anon_2.prog_cnt = count;
+            prog_attr.attach_flags = 0;
             current_task.write_memory(attr_addr, prog_attr.as_bytes())?;
-            Ok(SUCCESS)
+            res
         }
 
         // Pin an eBPF program or map referred by the specified bpf_fd to the provided pathname on

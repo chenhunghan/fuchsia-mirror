@@ -202,6 +202,12 @@ void BlobCreator::Create(fuchsia_fxfs::wire::BlobCreatorCreateRequest* request,
   if (result.is_error()) {
     if (result.status_value() == ZX_ERR_ALREADY_EXISTS) {
       completer.ReplyError(fuchsia_fxfs::wire::CreateBlobError::kAlreadyExists);
+    }
+    // CreateImpl cannot currently return ZX_ERR_NO_SPACE, so this branch is unreachable, but we
+    // check in case it ever becomes reachable because system-updater uses kOutOfSpace to trigger GC
+    // during OTA.
+    else if (result.status_value() == ZX_ERR_NO_SPACE) {
+      completer.ReplyError(fuchsia_fxfs::wire::CreateBlobError::kOutOfSpace);
     } else {
       completer.ReplyError(fuchsia_fxfs::wire::CreateBlobError::kInternal);
     }

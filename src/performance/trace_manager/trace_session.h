@@ -138,11 +138,15 @@ class TraceSession {
   void OnV2ProviderStarted(ProviderConnection* connection);
   void CheckAllProvidersStarted();
   void NotifyStarted();
+  // Replies Ok to a StartTracing request still pending when Stop() or
+  // Terminate() interrupts startup. Does not change |state_|.
+  void CompletePendingStart();
 
   // Provider stopping processing.
   void OnProviderStopped(TraceProviderBundle* bundle, bool write_results);
   void OnV2ProviderStopped(ProviderConnection* connection, bool write_results);
   void CheckAllProvidersStopped();
+  void FinishStop();
   void NotifyStopped();
   void FinishStoppingDueToTimeout();
 
@@ -210,6 +214,8 @@ class TraceSession {
 
   // If true then write results when the session terminates.
   bool write_results_on_terminate_ = true;
+
+  bool write_results_on_stop_ = false;
 
   // Trace stats from each provider are stored here on terminate.
   std::vector<fuchsia_tracing_controller::ProviderStats> trace_stats_;

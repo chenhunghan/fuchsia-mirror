@@ -121,13 +121,6 @@ pub fn to_xts_key(main_key: &[u8], uuid: [u8; 16]) -> [u8; 64] {
     hkdf::fscrypt_hkdf(&main_key, &hdkf_info, hkdf::HKDF_CONTEXT_IV_INO_LBLK_32_KEY)
 }
 
-pub fn to_xts_key_lblk64(main_key: &[u8], uuid: [u8; 16]) -> [u8; 64] {
-    let mut hkdf_info = [0; 17];
-    hkdf_info[0] = ENCRYPTION_MODE_AES_256_XTS;
-    hkdf_info[1..17].copy_from_slice(&uuid);
-    hkdf::fscrypt_hkdf(main_key, &hkdf_info, hkdf::HKDF_CONTEXT_IV_INO_LBLK_64_KEY)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

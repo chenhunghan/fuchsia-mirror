@@ -14,6 +14,7 @@ extern const char* const kCodingErrorNullIovecBuffer;
 extern const char* const kCodingErrorNullByteBuffer;
 extern const char* const kCodingErrorNullHandleBufferButNonzeroCount;
 extern const char* const kCodingErrorInvalidBoolean;
+extern const char* const kCodingErrorInvalidNonZero;
 extern const char* const kCodingErrorVectorLimitExceeded;
 extern const char* const kCodingErrorNullDataReceivedForNonNullableVector;
 extern const char* const kCodingErrorNullVectorMustHaveSizeZero;

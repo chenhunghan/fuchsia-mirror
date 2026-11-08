@@ -1,0 +1,36 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["src/main.rs"],
+    crate_name = "archivist_test_puppet",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    deps = [
+        "//sdk/fidl/fuchsia.diagnostics.types:fuchsia.diagnostics.types_rust",
+        "//sdk/rust/zx",
+        "//src/diagnostics/archivist/tests/integration/realm_factory/fidl:fuchsia.archivist.test_rust",
+        # TODO(https://fxbug.dev/570694755): GN uses forwarding group //src/lib/diagnostics/hierarchy/rust.
+        "//src/lib/diagnostics/hierarchy/rust:diagnostics-hierarchy",  # @bazel2gn:path_overwrite://src/lib/diagnostics/hierarchy/rust
+        "//src/lib/diagnostics/inspect/runtime/rust",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/diagnostics/inspect/rust/testing:inspect_testing",
+        "//src/lib/diagnostics/log/encoding/rust",
+        "//src/lib/diagnostics/log/rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fidl_table_validation",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)

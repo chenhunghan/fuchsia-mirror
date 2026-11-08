@@ -1,0 +1,81 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "rust",
+    srcs = [
+        "src/context.rs",
+        "src/error.rs",
+        "src/health.rs",
+        "src/incoming.rs",
+        "src/lib.rs",
+        "src/macros.rs",
+        "src/node.rs",
+        "src/node/offers.rs",
+        "src/node/properties.rs",
+        "src/server.rs",
+        "src/testing.rs",
+        "src/testing/dut.rs",
+        "src/testing/harness.rs",
+        "src/testing/health.rs",
+        "src/testing/node.rs",
+    ],
+    crate_name = "fdf_component",
+    edition = "2024",
+    link_deps = [
+        "//src/devices/lib/driver:driver_runtime",  # @bazel2gn:path_overwrite://src/devices/bin/driver_runtime
+    ],
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    visibility = [
+        "//examples/drivers:__subpackages__",
+        "//sdk/lib/driver:__subpackages__",
+        "//src/connectivity:__subpackages__",
+        "//src/developer:__subpackages__",
+        "//src/devices:__subpackages__",
+        "//src/graphics:__subpackages__",
+        "//src/ui:__subpackages__",
+        "//tools/create/goldens/my-driver-rust:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust_next",
+        "//sdk/fidl/fuchsia.component.runner:fuchsia.component.runner_rust_next",
+        "//sdk/fidl/fuchsia.device.fs:fuchsia.device.fs_rust",
+        "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust",
+        "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust_next",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust_next",
+        "//sdk/fidl/fuchsia.logger:fuchsia.logger_rust",
+        "//sdk/lib/async/rust/fidl",
+        "//sdk/lib/driver/runtime/rust",
+        "//sdk/lib/driver/runtime/rust/core",
+        "//sdk/lib/driver/runtime/rust/env",
+        "//sdk/lib/driver/runtime/rust/fdf_sys",
+        "//sdk/lib/driver/runtime/rust/fidl",
+        "//sdk/rust/zx",
+        "//src/lib/diagnostics/inspect/contrib/rust",
+        "//src/lib/diagnostics/inspect/runtime/rust",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/diagnostics/log/rust:no_startup_handle",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fidl/rust_next/fidl_next",
+        "//src/lib/fidl/rust_next/fidl_next_bind",
+        "//src/lib/fidl/rust_next/fidl_next_protocol",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-component/config",
+        "//src/lib/fuchsia-runtime",
+        "//src/lib/fuchsia-sync",
+        "//src/sys/lib/cm_types",
+        "//src/sys/lib/namespace",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)

@@ -380,8 +380,12 @@ class E2EGitHooksTest(unittest.TestCase):
         excluded_vars = {
             "FUCHSIA_SKIP_HOOKS",
             "ANTIGRAVITY_AGENT",
+            "ANTIGRAVITY_CONVERSATION_ID",
             "GEMINI_CLI",
             "ANTIGRAVITY_EDITOR_APP_ROOT",
+            "CLAUDECODE",
+            "CLAUDE_CODE_SESSION_ID",
+            "FFX_AGENT_SESSION_ID",
             "GIT_CONFIG_PARAMETERS",
             "GIT_DIR",
             "GIT_WORK_TREE",

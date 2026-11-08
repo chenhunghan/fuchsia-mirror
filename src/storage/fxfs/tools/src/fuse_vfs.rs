@@ -93,7 +93,7 @@ impl FuseFs {
         let dir = self.open_dir(parent).await?;
 
         let replace_context =
-            dir.acquire_context_for_replace(None, name.osstr_to_str()?, true).await?;
+            dir.acquire_context_for_replace(None, name.osstr_to_str()?, true, &[]).await?;
         let mut transaction = replace_context.transaction;
 
         let object_descriptor = match replace_context.dst_id_and_descriptor {
@@ -135,7 +135,7 @@ impl FuseFs {
         let dir = self.open_dir(parent).await?;
 
         let replace_context =
-            dir.acquire_context_for_replace(None, name.osstr_to_str()?, true).await?;
+            dir.acquire_context_for_replace(None, name.osstr_to_str()?, true, &[]).await?;
         let mut transaction = replace_context.transaction;
         let object_descriptor = match replace_context.dst_id_and_descriptor {
             Some((_, object_descriptor)) => object_descriptor,
@@ -172,6 +172,7 @@ impl FuseFs {
                 Some((&old_dir, name.osstr_to_str()?)),
                 new_name.osstr_to_str()?,
                 true,
+                &[],
             )
             .await?;
         let mut transaction = replace_context.transaction;

@@ -24,4 +24,7 @@ test("unittest-bin") {
 
 fuchsia_unittest_package("unique_id_unittests") {
   deps = [ ":unittest-bin" ]
+  test_specs = {
+    parallel = 4
+  }
 }

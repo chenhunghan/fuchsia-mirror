@@ -41,7 +41,7 @@ const TX_STAT_NAMES: [&str; 8] = [
 ];
 
 impl starnix_core::vfs::pseudo::dynamic_file::DynamicFileSource for ProcNetDev {
-    fn generate_locked(
+    fn generate(
         &self,
         current_task: &CurrentTask,
         sink: &mut starnix_core::vfs::pseudo::dynamic_file::DynamicFileBuf,

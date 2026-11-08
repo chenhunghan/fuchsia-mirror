@@ -34,11 +34,14 @@ separates the lock state (`KMutex`, `BrwLockPi`) from the actual data storage
 1.  **`LockToken<'a, Class>`**: A zero-sized type (ZST) that serves as
     compile-time proof that the lock for `Class` is currently held by the
     current thread. It has a lifetime `'a` bound to the active lock guard.
-2.  **`KMutex<Class>`**: The mutual exclusion lock state representation. Locking
-    it acquires the raw lock and returns a `KMutexGuard` holding the
-    `LockToken`.
-3.  **`BrwLockPi<Class>`**: The priority-inheriting reader-writer lock state
-    representation. Locking it returns a `BrwLockPiReadGuard` or
+2.  **`KMutex<Class, M>`**: The mutual exclusion lock state representation,
+    wrapping a raw lock `M: RawLock`. Locking it acquires the raw lock and
+    returns a `KMutexGuard` holding the `LockToken`. There is no default `M`:
+    the kernel's `TrackedMutex` is not part of this crate (see
+    [Raw lock implementations](#raw-lock-implementations)).
+3.  **`BrwLockPi<Class, L>`**: The priority-inheriting reader-writer lock state
+    representation, wrapping a raw reader-writer lock `L: RawSharedLock` (again
+    with no default). Locking it returns a `BrwLockPiReadGuard` or
     `BrwLockPiWriteGuard` holding the `LockToken`.
 4.  **`KCell<T, Class>`**: A wrapper around `core::cell::UnsafeCell<T>`. It
     provides token-gated accessors (`get(&self, token)` and `get_mut(&self,
@@ -57,6 +60,37 @@ These custom guards expose safe, compiler-checked projection accessors (such as
 `.field()` or `.fields_mut()`). This guarantees safe access to guarded
 fields without requiring any `unsafe` block or risking cross-instance token
 mixing.
+
+### Raw Lock Implementations
+
+`ksync` is split into two parts:
+
+*   The `ksync` crate (`//src/lib/ksync:ksync`) holds the lock traits
+    (`RawLock`, `RawSharedLock`, `LockPolicy`, ...), the generic lock types
+    (`KMutex`, `BrwLockPi`, `KCell`, ...), the macros, and the userspace raw
+    locks used for host builds and tests.
+*   The kernel's raw locks (`TrackedMutex`, `TrackedCriticalMutex`,
+    `TrackedSpinlock`, `TrackedMonitoredSpinlock`, `RawBrwLockPi`,
+    `RawBrwLockNoPi`), their policies, the `KSpinlock` / `KMonitoredSpinlock`
+    aliases, and the `declare_singleton_mutex!`,
+    `declare_singleton_critical_mutex!`, `declare_singleton_spinlock!` and
+    `declare_singleton_monitored_spinlock!` macros live in
+    `//zircon/kernel/lib/ksync`. This is a `kernel_rust_mod` that is compiled
+    directly into the kernel crate and mounted at `crate::ksync_kernel`. The
+    mutexes are implemented directly on the Rust kernel `Mutex` in
+    `//zircon/kernel/kernel/mutex.rs`, and the spinlocks on the Rust kernel
+    `SpinLock` and `MonitoredSpinLock` in `//zircon/kernel/kernel/spinlock.rs`,
+    and re-exported from `crate::ksync_kernel`; `RawBrwLockPi` and
+    `RawBrwLockNoPi` wrap the C++ kernel `BrwLockPi` and `BrwLockNoPi`.
+
+As a result, neither the `ksync` crate nor any other non-kernel crate (such as
+`fbl` or `region_alloc`) can name the kernel's raw locks. Generic code is
+instead parameterized over its raw lock type (`M: RawLock`), and the final
+usage site in the kernel crate supplies the concrete raw lock (e.g.
+`crate::ksync_kernel::TrackedMutex`). For the same reason there is no default
+raw lock type: `KMutex` and `BrwLockPi` fields in a `#[guarded]` struct (e.g.
+`KMutex<TrackedSpinlock>` or `BrwLockPi<RawBrwLockPi>`) and
+`declare_singleton_lock!` must always name their raw lock type explicitly.
 
 ## 2. Safe Exclusive Access
 
@@ -82,10 +116,10 @@ fields, and generates the lock acquisition methods.
 #[guarded]
 pub struct MyStruct {
     #[mutex]
-    pub mu: KMutex,
+    pub mu: KMutex<TrackedMutex>,
 
     #[brwlock]
-    pub lock: BrwLockPi,
+    pub lock: BrwLockPi<RawBrwLockPi>,
 
     #[guarded_by(mu)]
     pub data1: u32,
@@ -104,8 +138,8 @@ pub struct MyStructLockClass;
 
 // 2. Struct fields rewritten to KMutex/BrwLockPi and KCell
 pub struct MyStruct {
-    pub mu: ::ksync::KMutex<MyStructMuClass>,
-    pub lock: ::ksync::BrwLockPi<MyStructLockClass>,
+    pub mu: ::ksync::KMutex<MyStructMuClass, TrackedMutex>,
+    pub lock: ::ksync::BrwLockPi<MyStructLockClass, RawBrwLockPi>,
     pub data1: ::ksync::KCell<u32, MyStructMuClass>,
     pub data2: ::ksync::KCell<i32, MyStructLockClass>,
 }
@@ -115,21 +149,21 @@ pub struct MyStruct {
 pub struct MyStructMuGuard<'a> {
     parent: &'a MyStruct,
     #[pin]
-    inner: ::ksync::KMutexGuard<'a, MyStructMuClass>,
+    inner: ::ksync::KMutexGuard<'a, MyStructMuClass, TrackedMutex>,
 }
 
 #[pin_data(PinnedDrop)]
 pub struct MyStructLockReadGuard<'a> {
     parent: &'a MyStruct,
     #[pin]
-    inner: ::ksync::BrwLockPiReadGuard<'a, MyStructLockClass>,
+    inner: ::ksync::BrwLockPiReadGuard<'a, MyStructLockClass, RawBrwLockPi>,
 }
 
 #[pin_data(PinnedDrop)]
 pub struct MyStructLockWriteGuard<'a> {
     parent: &'a MyStruct,
     #[pin]
-    inner: ::ksync::BrwLockPiWriteGuard<'a, MyStructLockClass>,
+    inner: ::ksync::BrwLockPiWriteGuard<'a, MyStructLockClass, RawBrwLockPi>,
 }
 
 // 4. Safe projection accessors and field projection structs

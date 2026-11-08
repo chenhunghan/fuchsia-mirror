@@ -232,14 +232,14 @@ pub mod sync {
     pub use netstack3_base::sync::{
         BindingsSyncTypes, DebugReferences, DynDebugReferences, LockGuard, MapRcNotifier, Mutex,
         Once, OnceLock, PrimaryRc, RcNotifier, ResourceToken, ResourceTokenValue, RwLock,
-        RwLockReadGuard, RwLockWriteGuard, StrongRc, WeakRc, lock_impl,
+        RwLockReadGuard, RwLockWriteGuard, StrongRc, WeakRc,
     };
     pub use netstack3_base::{RemoveResourceResult, RemoveResourceResultWithContext};
 }
 
 /// Methods for dealing with TCP sockets.
 pub mod tcp {
-    pub use netstack3_base::{FragmentedPayload, Payload, PayloadLen, TcpSocketState};
+    pub use netstack3_base::{FragmentedPayload, Mss, Payload, PayloadLen, TcpSocketState};
     pub use netstack3_tcp::{
         AcceptError, AcceptQueueChange, BindError, BoundInfo, Buffer, BufferLimits, BufferSizes,
         CongestionControlState, ConnectError, ConnectionError, ConnectionInfo,
@@ -276,12 +276,12 @@ pub use context::{CoreCtx, UnlockedCoreCtx};
 pub use inspect::Inspector;
 pub use marker::{BindingsContext, BindingsTypes, CoreContext, IpBindingsContext, IpExt};
 pub use netstack3_base::{
-    BindingsSyncTypes, ChecksumOffloadResult, ChecksumOffloadSpec, ChecksumRxOffloading, CtxPair,
-    DeferredResourceRemovalContext, EventContext, GsoInfo, InstantBindingsTypes, InstantContext,
-    Ipv4IdMode, MapDerefExt, MatcherBindingsTypes, NetworkParsingContext,
-    NetworkSerializationContext, ProtocolSpecificOffloadSpec, ReferenceNotifiers, RngContext,
-    SettingsContext, SocketDiagnosticsSeed, TimerBindingsTypes, TimerContext, TxMetadata,
-    TxMetadataBindingsTypes,
+    BindingsSyncTypes, ChecksumOffloadResult, ChecksumOffloadSpec, ChecksumRxOffloading,
+    CounterContext, CtxPair, DeferredResourceRemovalContext, EventContext, GsoInfo,
+    InstantBindingsTypes, InstantContext, Ipv4IdMode, MapDerefExt, MatcherBindingsTypes,
+    NetworkParsingContext, NetworkSerializationContext, ProtocolSpecificOffloadSpec,
+    ReferenceNotifiers, RngContext, SettingsContext, SocketDiagnosticsSeed, TimerBindingsTypes,
+    TimerContext, TxMetadata, TxMetadataBindingsTypes,
 };
 pub use netstack3_datagram::PendingDatagramSocketError;
 pub use state::{StackState, StackStateBuilder};

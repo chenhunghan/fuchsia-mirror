@@ -13,13 +13,11 @@ use libarch::arm64::{
 };
 
 use super::isb;
-use super::thread::thread_arch;
 use super::vm::is_user_accessible;
-use crate::kernel::thread::Thread;
 
 /// Kernel tracking of the current state of the debug registers for a particular thread
 /// (`arm64_debug_state_t`).
-type Arm64DebugState = arm64_thread_bindings::arm64_debug_state_t;
+pub(super) type Arm64DebugState = arm64_thread_bindings::arm64_debug_state_t;
 
 const ARM64_MAX_HW_BREAKPOINTS: usize = arm64_thread_bindings::ARM64_MAX_HW_BREAKPOINTS as usize;
 const ARM64_MAX_HW_WATCHPOINTS: usize = arm64_thread_bindings::ARM64_MAX_HW_WATCHPOINTS as usize;
@@ -49,8 +47,8 @@ const ARM64_DBGWCR_ACTIVE_MASK: u32 = (WatchpointControlRegister::E_MASK
 /// ```
 const ARM64_DBGWVR_USER_MASK: u64 = 0xffff_ffff_fffc;
 
-// Each mask and field used here has the value of its C macro in `<zircon/hw/debug/arm64.h>` or
-// `<arch/arm64/registers.h>`.
+// These masks and field positions match the architecture, and the DBGBCR and DBGWCR layouts in
+// <zircon/hw/debug/arm64.h>.
 zr::static_assert!(ARM64_DBGBCR_ACTIVE_MASK == 0x1e5);
 zr::static_assert!(ARM64_DBGWCR_ACTIVE_MASK == 0x1ff9);
 zr::static_assert!(BreakpointControlRegister::E_MASK == 1);
@@ -70,24 +68,8 @@ zr::static_assert!(
 zr::static_assert!(MonitorDebugSystemControlRegister::MDE_MASK == 1 << 15);
 zr::static_assert!(MonitorDebugSystemControlRegister::KDE_MASK == 1 << 13);
 
-/// Enables or disables the HW debug functionalities for `thread`.
-///
-/// # Safety
-///
-/// `thread` points to a live `Thread` whose lock the caller holds and whose user state is saved:
-/// `arch_set_debug_regs` in debugger.cc checks `suspended_general_regs` under that lock, and the
-/// field is cleared only under it before a return to user mode. Exception entry from user mode and
-/// the return to it access `mdscr_el1` without the lock; the saved user state keeps the thread in
-/// the kernel, and restoring it needs the lock, so neither runs meanwhile.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arm64_set_debug_state_for_thread(thread: *mut Thread, active: bool) {
-    // SAFETY: `thread` points to a live `Thread`, per the caller's contract.
-    let arch = unsafe { thread_arch(thread) };
-    // SAFETY: `arch` is the thread's live `arch_thread`. The caller holds the thread's lock, which
-    // keeps out the other accesses that take it, and the thread stays in the kernel with its user
-    // state saved, away from the unlocked ones on exception entry and return, while the reference
-    // lives.
-    let mdscr_el1 = unsafe { &mut (*arch).mdscr_el1 };
+/// Enables or disables the HW debug functionalities in `mdscr_el1`, a thread's saved MDSCR_EL1.
+pub(super) fn arm64_set_debug_state_for_thread(mdscr_el1: &mut u64, active: bool) {
     let mut mdscr = MonitorDebugSystemControlRegister::from(*mdscr_el1);
     if active {
         mdscr.set_mde(true); // MDE enables hardware exceptions.
@@ -174,36 +156,22 @@ fn arm64_validate_hw_watchpoints(state: &mut Arm64DebugState) -> Option<u32> {
 /// Values beyond the CPU's register count are ignored. Zircon never uses them, so they are
 /// always zero, whatever the user provided in them.
 ///
-/// On success, `active_breakpoints` and `active_watchpoints` hold the number of activated
-/// breakpoints and watchpoints in `state`.
-#[unsafe(no_mangle)]
-pub extern "C" fn arm64_validate_debug_state(
-    state: &mut Arm64DebugState,
-    active_breakpoints: &mut u32,
-    active_watchpoints: &mut u32,
-) -> bool {
-    let Some(breakpoints) = arm64_validate_hw_breakpoints(state) else {
-        return false;
-    };
-    *active_breakpoints = breakpoints;
-    let Some(watchpoints) = arm64_validate_hw_watchpoints(state) else {
-        return false;
-    };
-    *active_watchpoints = watchpoints;
-    true
+/// On success, returns the number of activated breakpoints and watchpoints in `state`.
+pub(super) fn arm64_validate_debug_state(state: &mut Arm64DebugState) -> Option<(u32, u32)> {
+    let active_breakpoints = arm64_validate_hw_breakpoints(state)?;
+    let active_watchpoints = arm64_validate_hw_watchpoints(state)?;
+    Some((active_breakpoints, active_watchpoints))
 }
 
 /// Returns the amount of HW breakpoints present in this CPU.
-#[unsafe(no_mangle)]
-pub extern "C" fn arm64_hw_breakpoint_count() -> u8 {
+pub fn arm64_hw_breakpoint_count() -> u8 {
     let count = ID_AA64DFR0_EL1.read().brps() + 1;
     debug_assert!(usize::from(count) <= ARM64_MAX_HW_BREAKPOINTS);
     count
 }
 
 /// Returns the amount of HW watchpoints present in this CPU.
-#[unsafe(no_mangle)]
-pub extern "C" fn arm64_hw_watchpoint_count() -> u8 {
+pub fn arm64_hw_watchpoint_count() -> u8 {
     let count = ID_AA64DFR0_EL1.read().wrps() + 1;
     debug_assert!(usize::from(count) <= ARM64_MAX_HW_WATCHPOINTS);
     count
@@ -241,8 +209,7 @@ fn arm64_write_hw_watchpoint_by_index(index: usize, dbgwcr: u32, dbgwvr: u64) {
 ///
 /// `debug_state` must have passed `arm64_validate_debug_state`, as a thread's saved debug state did
 /// when it was set: unvalidated values can arm breakpoints and watchpoints on kernel addresses.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arm64_write_hw_debug_regs(debug_state: &Arm64DebugState) {
+pub(super) unsafe fn arm64_write_hw_debug_regs(debug_state: &Arm64DebugState) {
     // Write the HW Breakpoints.
     let bps_count = usize::from(arm64_hw_breakpoint_count());
     for (i, hw_bp) in debug_state.hw_bps.iter().enumerate().take(bps_count) {

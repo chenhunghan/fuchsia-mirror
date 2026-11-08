@@ -5,6 +5,7 @@
 import("//build/assembly/product_bundle.gni")
 import("//build/assembly/product_bundle_test_group.gni")
 import("//build/testing/environments.gni")
+import("//bundles/buildbot/target_tests.gni")
 
 declare_args() {
   # True if we are running in postsubmit, false if we are running in presubmit.
@@ -31,6 +32,7 @@ group("fuchsia") {
   ]
   if (target_cpu == "arm64") {
     deps += [
+      ":core.arm64",
       ":minimal.arm64",
       ":minimal.arm64-hermetic_examples",
     ]
@@ -42,19 +44,28 @@ group("fuchsia") {
   }
   if (target_cpu == "x64") {
     deps += [
+      ":core.x64",
       ":minimal.x64",
       ":minimal.x64-ui_tests",
       ":workbench_eng.x64",
     ]
 
-    # Lacewing tests only run in the debug compilation mode.
     if (is_debug) {
+      # Lacewing tests only run in the debug compilation mode.
       deps += [ ":core.x64-lacewing" ]
+
+      # Terminal tests are only built by this builder for debug.
+      deps += [ ":terminal.x64" ]
     }
 
     # Lacewing tests only run with the balanced compilation mode.
     if (is_balanced) {
       deps += [ ":workbench_eng.x64-lacewing" ]
+    }
+
+    # Only run tests on minfs in release
+    if (is_release) {
+      deps += [ ":core_with_minfs.x64" ]
     }
   }
   if (target_cpu == "riscv64") {
@@ -74,40 +85,11 @@ group("additional_build_targets") {
     # product_bundle_test_group().
     tests_barrier = []
   }
-  deps = [ "//examples" ]
+  deps = core_examples_targets
 }
 
 ########
 # Tests to build or run on minimal.
-
-minimal_target_tests = [
-  "//examples:tests",
-  "//examples:hermetic_tests",
-  "//src/sys/component_manager:hermetic_tests",
-  "//src/sys/pkg:hermetic_tests",
-  "//sdk:tests",
-  "//src/connectivity/network:tests",
-  "//src/bringup:tests",
-  "//src/devices:tests",
-  "//src/diagnostics:tests",
-  "//src/fonts:tests",
-  "//src/hwinfo:tests",
-  "//src/intl:tests",
-  "//src/lib:tests",
-  "//src/media/audio/drivers/tests:admin",
-  "//src/media/audio/drivers/tests:basic",
-  "//src/performance:tests",
-  "//src/power:tests",
-  "//src/starnix:tests",
-  "//src/storage:tests",
-  "//src/sys:tests",
-  "//src/zircon:tests",
-
-  # reboot_hang is a non-hermetic e2e test. It is added to minimal because
-  # iris only has bringup and minimal builders in infra. Execution is
-  # restricted to iris_env.
-  "//src/tests/end_to_end/reboot_hang:tests",
-]
 
 if (target_cpu == "arm64") {
   product_bundle_test_group("minimal.arm64") {
@@ -119,7 +101,7 @@ if (target_cpu == "arm64") {
       build_only = true
     }
 
-    target_tests = minimal_target_tests + [ "//src/ui:tests" ]
+    target_tests = minimal_target_tests + minimal_ui_target_tests
   }
 
   # Included so that there are _some_ tests to run on
@@ -149,7 +131,7 @@ if (target_cpu == "x64") {
     # https://fxbug.dev/42083237. Since they are only run on x64 (the test spec
     # requires AEMU), disable them only for that architecture
     build_only = true
-    target_tests = [ "//src/ui:tests" ]
+    target_tests = minimal_ui_target_tests
   }
 
   if (is_debug) {
@@ -177,11 +159,105 @@ if (target_cpu == "riscv64") {
       build_only = true
     }
 
-    target_tests = minimal_target_tests + [ "//src/ui:tests" ]
+    target_tests = minimal_target_tests + minimal_ui_target_tests
   }
 }
 
-########1
+########
+# Core
+
+if (target_cpu == "arm64") {
+  product_bundle_test_group("core.arm64") {
+    product_bundle_name = "core.arm64"
+
+    if (is_postsubmit || is_release) {
+      allowed_environments = [ c4a_env ]
+    } else {
+      build_only = true
+    }
+
+    target_tests = core_target_tests + fxfs_required_target_tests
+
+    # Don't re-run tests on core that are already run on minimal in the same
+    # environment.
+    dedupe_against = [
+      ":minimal.arm64",
+      ":minimal.arm64-hermetic_examples",
+    ]
+  }
+}
+
+if (target_cpu == "x64") {
+  # All the core tests.
+  product_bundle_test_group("core.x64") {
+    product_bundle_name = "core.x64"
+
+    # Presubmit only runs tests in release mode, under the assumption
+    # that if the tests pass in release mode, they will likely
+    # pass in the others.
+    if (is_postsubmit || is_release) {
+      allowed_environments = [
+        aemu_env,
+        qemu_env,
+        nuc11_env,
+      ]
+      default_environments = [ aemu_env ]
+
+      if (is_postsubmit && is_release) {
+        # Add nuc11 to the set of hardware environments used by default
+        # for tests in post-submit in release mode.
+        default_environments += [ nuc11_env ]
+      }
+    } else {
+      build_only = true
+    }
+
+    target_tests = core_target_tests + fxfs_required_target_tests
+
+    # Don't re-run tests on core that are already run on minimal in the same
+    # environment.
+    dedupe_against = [
+      ":minimal.x64",
+      ":minimal.x64-ui_tests",
+    ]
+  }
+
+  # Only run tests on minfs in release
+  if (is_release) {
+    product_bundle_test_group("core_with_minfs.x64") {
+      product_bundle_name = "core_with_minfs.x64"
+
+      # presubmit only allows running on aemu.
+      allowed_environments = [ aemu_env ]
+
+      # The default is always just aemu, even if we add nuc11 to allowed for
+      # postsubmit.
+      default_environments = [ aemu_env ]
+
+      if (is_postsubmit) {
+        # Add nuc11 to the set of hardware environments allowed by tests
+        # in post-submit.
+        allowed_environments += [ nuc11_env ]
+      }
+
+      target_tests = core_target_tests
+    }
+  }
+}
+
+########
+#  Terminal
+if (target_cpu == "x64") {
+  if (is_debug) {
+    product_bundle_test_group("terminal.x64") {
+      product_bundle_name = "terminal.x64"
+      build_only = true
+      target_tests = terminal_target_tests
+    }
+  }
+}
+
+########
 # Workbench.
 
 if (target_cpu == "arm64") {

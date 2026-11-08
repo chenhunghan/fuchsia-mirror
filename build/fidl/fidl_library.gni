@@ -134,16 +134,22 @@ template("fidl_library") {
       # "sdk_compat_test_libs_allowlist" target, which is used to ensure
       # that the API compatibility tests actually run on these libraries.
       category_allowlist_deps = [ "//sdk/fidl:sdk_compat_test_libs_allowlist" ]
+      all_allowlist_entries_group =
+          "//sdk/fidl:compat_test_fidl_libraries_non_sdk_molecule"
     } else if (category == "host_tool") {
       # Ensures that all libraries in the "host_tool" category are in the
       # "sdk_host_tool_libs_allowlist" target, which is used to ensure
       # that the API compatibility tests actually run on these libraries.
       category_allowlist_deps = [ "//sdk/fidl:sdk_host_tool_libs_allowlist" ]
+      all_allowlist_entries_group =
+          "//sdk/fidl:host_tool_fidl_libraries_non_sdk_molecule"
     } else if (category == "prebuilt") {
       # Ensures that all libraries in the "prebuilt" category are in the
       # "sdk_prebuilt_libs_allowlist" target, which is used to ensure
       # that the API compatibility tests actually run on these libraries.
       category_allowlist_deps = [ "//sdk/fidl:sdk_prebuilt_libs_allowlist" ]
+      all_allowlist_entries_group =
+          "//sdk/fidl:prebuilt_fidl_libraries_non_sdk_molecule"
     } else if (category == "partner") {
       if (is_vendor_library) {
         # Vendor SDK libraries are `is_sdk_included_publishable` but not in the
@@ -160,6 +166,7 @@ template("fidl_library") {
           category_allowlist_deps =
               [ "//sdk/fidl:sdk_partner_unstable_libs_allowlist" ]
         }
+        all_allowlist_entries_group = "//sdk/fidl:fidl"
       }
     } else {
       assert(
@@ -425,7 +432,6 @@ template("fidl_library") {
               "//sdk/testing/fidl/protocols_tests:*",
               "//sdk/testing/fidl/types_tests:*",
               "//src/devices/tools/fidlgen_banjo/tests/fidl:*",
-              "//src/lib/fidl/c/coding_tables_tests:*",
               "//src/lib/fidl/c/walker_tests:*",
               "//src/lib/fidl/llcpp/tests/*",
               "//src/lib/fidl/rust/external_tests:*",
@@ -588,6 +594,15 @@ template("fidl_library") {
                              "applicable_licenses",
                              "visibility",
                            ])
+    if (defined(visibility)) {
+      if (defined(all_allowlist_entries_group)) {
+        # All targets in the allowlist must be visible to the target that
+        # depends on that list.
+        visibility += [ all_allowlist_entries_group ]
+      }
+    } else if (defined(all_allowlist_entries_group)) {
+      not_needed([ "all_allowlist_entries_group" ])
+    }
     testonly = testonly
 
     metadata = {

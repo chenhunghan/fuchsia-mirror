@@ -1,0 +1,48 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":bt-repl-tests"],
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)
+
+rustc_library(
+    name = "bt-repl",
+    srcs = [
+        "src/commands.rs",
+        "src/helper.rs",
+        "src/lib.rs",
+        "src/repl.rs",
+        "src/source.rs",
+    ],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    visibility = ["//src/connectivity/bluetooth:__subpackages__"],
+    deps = [
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:rustyline",
+    ],
+)
+
+rustc_test(
+    name = "bt_repl_lib_test",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate = ":bt-repl",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = ["//src/lib/fuchsia"],
+)
+
+fx_unittest_package(
+    name = "bt-repl-tests",
+    package_name = "bt-repl-tests",
+    unit_tests = [":bt_repl_lib_test"],
+)

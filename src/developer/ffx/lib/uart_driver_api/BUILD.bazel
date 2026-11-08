@@ -20,11 +20,13 @@ rustc_library(
     visibility = [
         "//src/developer/ffx/lib/discovery:__pkg__",
         "//src/developer/ffx/lib/target:__pkg__",
+        "//src/developer/ffx/tests/uart:__pkg__",
         "//src/developer/ffx/tools/uart:__pkg__",
         "//src/developer/ffx/tools/uart_driver:__subpackages__",
     ],
     deps = [
         "//src/developer/ffx/config:lib",
+        "//src/developer/ffx/lib/emulator_instance:lib",
         "//third_party/rust_crates/vendor:serde",
         "//third_party/rust_crates/vendor:serde_json",
         "//third_party/rust_crates/vendor:sha2",

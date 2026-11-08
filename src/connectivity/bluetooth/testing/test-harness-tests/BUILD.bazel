@@ -7,6 +7,12 @@ load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package
 
 package(default_applicable_licenses = ["//:license"])
 
+test_suite(
+    name = "tests",
+    tests = [":test-harness-crate-tests"],
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)
+
 rustc_test(
     name = "tests_bin",
     srcs = ["src/lib.rs"],
@@ -28,5 +34,4 @@ fx_unittest_package(
     name = "test-harness-crate-tests",
     package_name = "test-harness-crate-tests",
     unit_tests = [":tests_bin"],
-    visibility = ["//src/connectivity/bluetooth:__pkg__"],
 )

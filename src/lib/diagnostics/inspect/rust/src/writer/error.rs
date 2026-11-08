@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use crate::writer::BoundsError;
 use inspect_format::{BlockIndex, BlockType, Error as FormatError};
 
 /// Errors that Inspect API functions can return.
@@ -126,6 +127,9 @@ pub enum Error {
 
     #[error("Cannot rename root node")]
     RenameRoot,
+
+    #[error(transparent)]
+    Bounds(#[from] BoundsError),
 }
 
 impl From<FormatError> for Error {

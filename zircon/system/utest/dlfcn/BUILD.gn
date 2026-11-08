@@ -19,7 +19,10 @@ test("dlfcn") {
 
   defines = [ "LIBPREFIX=\"/boot/lib/${toolchain_variant.libprefix}\"" ]
 
-  data_deps = [ ":test-dso-no-note" ]
+  data_deps = [
+    ":test-dso-no-note",
+    ":test-dso-relocated-phdr",
+  ]
 }
 
 loadable_module("test-dso-no-note") {
@@ -28,6 +31,13 @@ loadable_module("test-dso-no-note") {
   testonly = true
   sources = [ "test-dso-no-note.cc" ]
   configs += [ ":no-build-id" ]
+}
+
+loadable_module("test-dso-relocated-phdr") {
+  visibility = [ ":*" ]
+
+  testonly = true
+  sources = [ "test-dso-no-note.cc" ]
 }
 
 config("no-build-id") {

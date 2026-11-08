@@ -12,8 +12,6 @@ readonly HOST_TRIPLE="${HOST_ARCH}-${HOST_OS}"
 
 if [[ "x${HOST_OS}" == "xlinux" ]]; then
   readonly QEMU_HOST_FLAGS="${QEMU_FLAGS} --disable-gtk --enable-sdl=internal --enable-kvm"
-elif [[ "x${HOST_OS}" == "xdarwin" ]]; then
-  readonly QEMU_HOST_FLAGS="${QEMU_FLAGS} --enable-cocoa"
 else
   echo "unsupported system: ${HOST_OS}" 1>&2
   exit 1

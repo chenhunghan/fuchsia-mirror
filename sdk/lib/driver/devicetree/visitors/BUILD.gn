@@ -120,7 +120,7 @@ sdk_source_set("common-types") {
   include_base = "//sdk"
 
   public = [ "common-types.h" ]
-  public_deps = [ "//zircon/kernel/lib/devicetree" ]
+  public_deps = [ "//sdk/lib/devicetree" ]
 }
 
 config("static_visitor_config") {

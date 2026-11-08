@@ -14,8 +14,7 @@ unsafe extern "C" {
 }
 
 /// Returns whether the calling CPU's microarchitecture needs the Spectre V2 mitigation.
-#[unsafe(no_mangle)]
-pub extern "C" fn arm64_uarch_needs_spectre_v2_mitigation() -> bool {
+pub fn arm64_uarch_needs_spectre_v2_mitigation() -> bool {
     matches!(
         read_percpu_field!(microarch),
         mp_bindings::arm64_microarch_ARM_CORTEX_A57
@@ -28,8 +27,7 @@ pub extern "C" fn arm64_uarch_needs_spectre_v2_mitigation() -> bool {
 
 /// Spectre V2 mitigation for the calling CPU: a PSCI call, which firmware on affected cores uses
 /// to invalidate the indirect branch predictors.
-#[unsafe(no_mangle)]
-pub extern "C" fn arm64_uarch_do_spectre_v2_mitigation() {
+pub fn arm64_uarch_do_spectre_v2_mitigation() {
     // Certain processors are vulnerable to branch target injection attacks (Spectre V2), where the
     // targets of indirect branches may be controlled by hostile code under speculation. The wrong
     // path speculation may leak secrets via cache side channels.

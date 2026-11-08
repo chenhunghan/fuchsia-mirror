@@ -8,12 +8,16 @@ load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
 
 package(default_applicable_licenses = ["//:license"])
 
+# TODO(https://fxbug.dev/564213227): Packaged in BUILD.gn by
+# base-resolver-as-a-component-resolver-tests*, which remain above the BAZEL2GN
+# SENTINEL while blocked on GN-only
+# //src/storage/testing:storage_driver_test_realm and
+# //src/sys/pkg/bin/pkg-cache:production-component-and-config.
 rustc_test(
     name = "integration_test_bin",
     srcs = ["integration_test.rs"],
-    # @bazel2gn:skip
     crate_name = "base_resolver_integration_test_bin",
-    crate_root = "integration_test.rs",  # @bazel2gn:raw_overwrite:"integration_test.rs" output_name = "base_resolver_integration_test_bin"
+    crate_root = "integration_test.rs",
     edition = "2024",
     deps = [
         ":test.ping_rust",
@@ -22,6 +26,64 @@ rustc_test(
         "//src/lib/fidl/rust/fidl",
         "//src/lib/fuchsia",
         "//src/lib/fuchsia-component",
+    ],
+)
+
+# //src/storage/fxfs:fxfs_component is a component, not a crate, so it can't be
+# a Bazel rustc_binary dep; GN packages it next to the binary through deps.
+# @bazel2gn:raw_attribute:deps += [ "//src/storage/fxfs:fxfs_component" ]
+rustc_binary(
+    name = "fake_dependencies_fxblob_bin",
+    testonly = True,
+    srcs = ["fake_dependencies.rs"],
+    binary_name = "base_resolver_fake_dependencies_fxblob_bin",
+    crate_features = ["use_fxblob"],
+    crate_root = "fake_dependencies.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.metrics:fuchsia.metrics_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-runtime",
+        "//src/storage/lib/vfs/rust:vfs",
+        "//src/sys/pkg/lib/fuchsia-pkg-testing",
+        "//src/sys/pkg/lib/system-image",
+        "//src/sys/pkg/testing/blobfs-ramdisk",
+        "//src/sys/pkg/testing/mock-metrics",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+rustc_binary(
+    name = "fake_dependencies_bin",
+    testonly = True,
+    srcs = ["fake_dependencies.rs"],
+    binary_name = "base_resolver_fake_dependencies_bin",
+    crate_root = "fake_dependencies.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.metrics:fuchsia.metrics_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-runtime",
+        "//src/storage/lib/vfs/rust:vfs",
+        "//src/sys/pkg/lib/fuchsia-pkg-testing",
+        "//src/sys/pkg/lib/system-image",
+        "//src/sys/pkg/testing/blobfs-ramdisk",
+        "//src/sys/pkg/testing/mock-metrics",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
     ],
 )
 

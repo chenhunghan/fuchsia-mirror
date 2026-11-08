@@ -2,15 +2,19 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <lib/async-testing/test_loop.h>
 #include <lib/zx/profile.h>
 #include <lib/zx/result.h>
 
+#include <set>
 #include <string>
+#include <tuple>
 #include <unordered_set>
 
 #include <zxtest/zxtest.h>
 
 #include "src/zircon/bin/role_manager/src/config.h"
+#include "src/zircon/bin/role_manager/src/role.h"
 
 namespace {
 
@@ -375,6 +379,56 @@ TEST(ProfileConfig, MaybeMediaRole) {
     ASSERT_TRUE(role.is_ok());
     EXPECT_EQ(fit::failed{}, role->ToMediaRole());
   }
+}
+
+TEST(ProfileConfig, LogUnclaimedProfilesAfterBoot) {
+  async::TestLoop loop;
+  fit::result result = LoadConfigs("/pkg/data");
+  ASSERT_TRUE(result.is_ok());
+
+  // Mark one Product profile ("test.product.a") as claimed so it should not be reported.
+  auto claimed = result->thread.find(*Role::Create("test.product.a"));
+  ASSERT_TRUE(claimed != result->thread.end());
+  claimed->second.request_count = 1;
+
+  auto [client_end, server_end] = fidl::Endpoints<fuchsia_sys2::BootNotifier>::Create();
+
+  using UnclaimedEntry = std::tuple<std::string, std::string, ProfileScope>;
+  std::set<UnclaimedEntry> unclaimed;
+  auto manager = RoleManager::CreateForTesting(
+      loop.dispatcher(), std::move(*result), std::move(client_end),
+      [&](std::string_view role, std::string_view type, ProfileScope scope) {
+        unclaimed.emplace(role, type, scope);
+      });
+
+  // Before OnBootComplete, advancing time by 3 minutes should not run the check.
+  loop.RunFor(zx::min(3));
+  EXPECT_TRUE(unclaimed.empty());
+
+  // Send OnBootComplete and verify RoleManager unbinds the BootNotifier channel.
+  ASSERT_OK(fidl::WireSendEvent(server_end)->OnBootComplete().status());
+  loop.RunUntilIdle();
+
+  zx_signals_t observed = 0;
+  EXPECT_OK(
+      server_end.channel().wait_one(ZX_CHANNEL_PEER_CLOSED, zx::time::infinite_past(), &observed));
+  EXPECT_TRUE(observed & ZX_CHANNEL_PEER_CLOSED);
+
+  // Just before 3 minutes, the delayed task has not fired yet.
+  loop.RunFor(zx::min(3) - zx::sec(1));
+  EXPECT_TRUE(unclaimed.empty());
+
+  // At 3 minutes after OnBootComplete, only unclaimed Board and Product profiles are reported.
+  loop.RunFor(zx::sec(1));
+  const std::set<UnclaimedEntry> expected{
+      {"test.core.a", "thread", ProfileScope::Product},
+      {"test.bringup.b", "thread", ProfileScope::Product},
+      {"test.board.a", "thread", ProfileScope::Board},
+      {"test.board.b", "thread", ProfileScope::Product},
+      {"test.board.b", "thread", ProfileScope::Board},
+      {"test.board.a", "memory", ProfileScope::Board},
+  };
+  EXPECT_EQ(unclaimed, expected);
 }
 
 }  // anonymous namespace

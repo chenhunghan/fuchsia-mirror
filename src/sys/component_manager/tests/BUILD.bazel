@@ -1,0 +1,57 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+cml_shard(
+    name = "meta/elf_runner_and_environment.shard",
+    shard = "meta/elf_runner_and_environment.shard.cml",
+    visibility = ["//src/sys/component_manager/tests:__subpackages__"],
+)
+
+cml_shard(
+    name = "meta/use_elf_runner.shard",
+    includes = [":meta/elf_runner_and_environment.shard"],
+    shard = "meta/use_elf_runner.shard.cml",
+    visibility = [
+        "//examples/components/routing/rust/echo_server:__pkg__",
+        "//src/sys/component_manager/tests:__subpackages__",
+    ],
+)
+
+rustc_binary(
+    name = "trigger_bin",
+    testonly = True,
+    srcs = ["trigger.rs"],
+    crate_name = "trigger",
+    crate_root = "trigger.rs",
+    edition = "2024",
+    visibility = [
+        "//src/sys/component_manager/tests/collections:__pkg__",
+        "//src/sys/component_manager/tests/routing:__pkg__",
+    ],
+    deps = [
+        "//examples/components/routing/fidl:echo_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/sys/component_manager/tests/fidl:components_rust",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "trigger_packaged_bin",
+    testonly = True,
+    binary = ":trigger_bin",
+    binary_name = "trigger",
+    visibility = [
+        "//src/sys/component_manager/tests/collections:__pkg__",
+        "//src/sys/component_manager/tests/routing:__pkg__",
+    ],
+)

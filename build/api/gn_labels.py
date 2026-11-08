@@ -72,7 +72,7 @@ class GnLabelQualifier(object):
         self._ninja_path_to_gn_label: T.Callable[[str], str] = lambda x: x
 
     @staticmethod
-    def create_from_build_dir(build_dir: str) -> "GnLabelQualifier":
+    def create_from_build_dir(build_dir: str) -> GnLabelQualifier:
         """Create new instance from the build directory content.
 
         A convenience method that automatically detects the host CPU

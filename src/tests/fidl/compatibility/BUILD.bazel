@@ -3,16 +3,57 @@
 # found in the LICENSE file.
 
 load("@rules_fuchsia//fuchsia:assembly.bzl", "fuchsia_prebuilt_package")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
 
-package(
-    default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
+package(default_applicable_licenses = ["//:license"])
+
+cml_shard(
+    name = "meta/impl.shard",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    shard = "meta/impl.shard.cml",
+    visibility = ["//src/tests/fidl/compatibility:__subpackages__"],
 )
 
+# Shared between the hlcpp test server and the test harness.
+fx_cc_library(
+    name = "hlcpp_client_app",
+    testonly = True,
+    srcs = ["hlcpp_client_app.cc"],
+    hdrs = ["hlcpp_client_app.h"],
+    visibility = ["//src/tests/fidl/compatibility/hlcpp:__pkg__"],
+    deps = [
+        "//sdk/lib/sys/cpp",
+        "//src/tests/fidl/compatibility/fidl:fidl_service_hlcpp",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+rustc_binary(
+    name = "test_driver_bin",
+    testonly = True,
+    srcs = ["test_driver.rs"],
+    binary_name = "test_driver",
+    crate_root = "test_driver.rs",
+    edition = "2024",
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/tests/fidl/compatibility/fidl:fidl_service_rust",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+# `fuchsia_prebuilt_package` wraps GN-built harness packages for Bazel product
+# assembly while the harness packages remain defined in `BUILD.gn`.
+# @bazel2gn:skip
 [
     fuchsia_prebuilt_package(
         name = "fidl-compatibility-{}-harness_pkg".format(test),
         archive = "@gn_targets//src/tests/fidl/compatibility:fidl-compatibility-{}-harness_pkg".format(test),
+        visibility = ["//products/terminal:__pkg__"],
     )
     for test in [
         "minimal",

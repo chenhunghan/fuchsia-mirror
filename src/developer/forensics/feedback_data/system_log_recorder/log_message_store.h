@@ -14,7 +14,6 @@
 
 #include "src/developer/forensics/feedback_data/log_source.h"
 #include "src/developer/forensics/feedback_data/system_log_recorder/encoding/encoder.h"
-#include "src/developer/forensics/feedback_data/system_log_recorder/log_stats.h"
 #include "src/developer/forensics/utils/redact/redactor.h"
 #include "src/developer/forensics/utils/storage_size.h"
 
@@ -40,12 +39,8 @@ namespace system_log_recorder {
 class LogMessageStore : public LogSink {
  public:
   struct ConsumeResult {
-    ConsumeResult(std::string log, bool end_of_block, LogStats stats)
-        : log(std::move(log)), end_of_block(end_of_block), stats(stats) {}
-
     std::string log;
     bool end_of_block;
-    LogStats stats;
   };
 
   LogMessageStore(StorageSize max_block_capacity, StorageSize max_buffer_capacity,
@@ -59,13 +54,6 @@ class LogMessageStore : public LogSink {
   // * The message is omitted if it is the same one as the previous one in the store.
   bool Add(LogSink::MessageOr message) override;
 
-  // The system log recorder takes no action on the log stream being interrupted and ceases to
-  // continue out of safety for the already persisted messages.
-  //
-  // TODO(https://fxbug.dev/42137340): Handle reconnection in the system log recorder.
-  void NotifyInterruption() override {}
-  bool SafeAfterInterruption() const override { return false; }
-
   // |str| will be the final message in the consumed buffer, after the dropped and repeated
   // messages.
   void AppendToEnd(const std::string& str);
@@ -77,9 +65,9 @@ class LogMessageStore : public LogSink {
   // after |str|.
   void InsertRawMessage(const std::string& str);
 
-  // Consumes the contents of the store and returns a ConsumeResult containing the log string, the
-  // incremental block statistics, and a signal that notifies the end of the block (after the
-  // returned string). Calling Consume will empty the store.
+  // Consumes the contents of the store and returns a ConsumeResult containing the log string and a
+  // signal that notifies the end of the block (after the returned string). Calling Consume will
+  // empty the store.
   ConsumeResult Consume();
 
   // Clears the buffer, resets block and buffer stats, resets the encoder, resets repeat tracking,
@@ -119,8 +107,6 @@ class LogMessageStore : public LogSink {
 
   ContainerStats buffer_stats_;
   ContainerStats block_stats_;
-
-  LogStats incremental_stats_;
 
   std::optional<zx::time_boot> ignore_before_timestamp_;
 

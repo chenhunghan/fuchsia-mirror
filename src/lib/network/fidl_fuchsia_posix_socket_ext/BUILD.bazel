@@ -1,0 +1,39 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# NOTE: `fidl_fuchsia_posix_socket_ext_test`,
+# `fidl-fuchsia-posix-socket-ext-test`, and
+# `fidl-fuchsia-posix-socket-ext-tests` remain in BUILD.gn above the sentinel
+# because the test depends on
+# `//src/connectivity/network/testing/netemul/rust:lib` and
+# `//src/connectivity/network/tests/integration/common:netstack_testing_common`
+# and packages `//src/connectivity/network/netstack3:component-debug` and
+# `//src/connectivity/network/testing/netemul/service:netemul-sandbox`, which
+# have no Bazel build yet.
+rustc_library(
+    name = "fidl_fuchsia_posix_socket_ext",
+    srcs = ["src/lib.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    visibility = [
+        "//src/connectivity/network/dhcpv4/client/bindings:__pkg__",
+        "//src/connectivity/network/testing/netemul/rust:__pkg__",
+        "//src/connectivity/network/testing/network-test-realm/service:__pkg__",
+        "//src/connectivity/network/tests/integration/socket:__pkg__",
+        "//src/starnix/tests/netstack:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.posix.socket:fuchsia.posix.socket_rust",
+        "//sdk/fidl/fuchsia.posix.socket.packet:fuchsia.posix.socket.packet_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fdio/rust:fdio",
+        "//src/lib/fidl/rust/fidl",
+        "//third_party/rust_crates/vendor:socket2",
+    ],
+)

@@ -1,17 +1,16 @@
 ## Setting up for running the tests
 
-The following is the command line to use if you want to run an integration
-input test on a product that is not natively graphical.  You must include
-both the test and `web_engine`.  If you do not, the tests may fail in ways
-that don't obviously point at the absence of `web_engine`.
+The Chromium variants of these tests require WebEngine to be available on the
+device. The `core` product includes WebEngine in its cache packages. If you use
+a product that does not, the tests may fail in ways that don't obviously point
+at the absence of WebEngine.
 
 The `fx set` command for running the test under the QEMU emulator
 is as follows below:
 
 ```
 fx set core.x64 \
-  --with=//src/ui/tests/integration_input_tests \
-  --with=//src/chromium:web_engine
+  --with=//src/ui/tests/integration_input_tests
 ```
 
 From here, you can compile and run the test as usual.
@@ -49,7 +48,7 @@ Note the IP address of your Fuchsia device. Let's assume that the address
 is `192.168.86.23` for the sake of this example.
 
 Ensure that the web engine is started up to support remote debugging.
-If you look at [text-input-chromium/text-input-chromium.cc], the following
+If you look at `//src/ui/testing/util/web_view_client.cc`, the following
 pieces of configuration take care of that:
 
 ```
@@ -67,13 +66,10 @@ Next, we create a frame passing debugging parameters like this:
 
 ```
 fuchsia::web::CreateFrameParams frame_params;
-frame_params.set_debug_name("text-input-chromium");
+frame_params.set_debug_name("text-input-test");
 frame_params.set_enable_remote_debugging(true);
 web_context_->CreateFrameWithParams(std::move(frame_params), web_frame_.NewRequest());
 ```
-
-(you don't need to do any of the above, `text-input-chromium.cc` is already
-configured correctly; above text is given for completeness.)
 
 Next, you must replace the following in [BUILD.gn]:
 

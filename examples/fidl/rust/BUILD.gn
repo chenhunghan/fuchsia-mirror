@@ -11,10 +11,14 @@ group("all") {
     ":echo-rust-client",
     ":echo-rust-client-sync",
     ":echo-service-rust",
-    "fidl_crates",
-    "persistence",
+    ":tests",
     "server:echo-rust-server",
   ]
+}
+
+group("tests") {
+  testonly = true
+  deps = []
 }
 
 # //docs/development/languages/fidl/tutorials/rust/basics/client.md

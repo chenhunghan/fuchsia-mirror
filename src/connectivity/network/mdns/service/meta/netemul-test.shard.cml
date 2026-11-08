@@ -31,7 +31,7 @@
         },
         {
             name: "local-netstack",
-            url: "#meta/configurable-netstack-netstack3.cm",
+            url: "configurable-netstack#meta/configurable-netstack.cm",
         },
         {
             name: "local-name-provider",
@@ -49,7 +49,7 @@
         },
         {
             name: "remote-netstack",
-            url: "#meta/configurable-netstack-netstack3.cm",
+            url: "configurable-netstack#meta/configurable-netstack.cm",
         },
         {
             name: "remote-name-provider",

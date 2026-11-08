@@ -2,26 +2,233 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Library that exports the metadata.h file  to support the transition
-# to DFv2.
-
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_library_headers.bzl", "fx_cc_library_headers")
 
 package(
     default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
 )
 
-cc_library(
+# This needs to be static_library rather than source_set, as we need
+# Unix linking rules to apply. This is so that only the object files
+# corresponding to the used functions will be linked to the final binary.
+# buildifier: leave-alone - Do not sort `deps`.
+fx_cc_library(
+    name = "ddk",
+    srcs = select({
+        "@platforms//os:fuchsia": [
+            "io-buffer.c",
+            "macros.h",
+        ],
+        "//conditions:default": [],
+    }),
+    hdrs = [
+        "include/lib/ddk/binding_driver.h",
+        "include/lib/ddk/binding_priv.h",
+        "include/lib/ddk/debug.h",
+        "include/lib/ddk/device.h",
+        "include/lib/ddk/driver.h",
+        "include/lib/ddk/hw/arch_ops.h",
+        "include/lib/ddk/hw/inout.h",
+        "include/lib/ddk/io-buffer.h",
+        "include/lib/ddk/metadata.h",
+        "include/lib/ddk/protodefs.h",
+        "include/lib/ddk/trace/event.h",
+    ],
+    # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
+    copts = ["-Wno-conversion"],
+    implementation_deps = select({
+        "@platforms//os:fuchsia": ["//zircon/system/ulib/sync"],
+        "//conditions:default": [],
+    }),
+    includes = ["include"],
+    public_configs = [":include"],
+    #  ________  _________  ________  ________
+    # |\   ____\|\___   ___\\   __  \|\   __  \
+    # \ \  \___|\|___ \  \_\ \  \|\  \ \  \|\  \
+    #  \ \_____  \   \ \  \ \ \  \\\  \ \   ____\
+    #   \|____|\  \   \ \  \ \ \  \\\  \ \  \___|
+    #     ____\_\  \   \ \__\ \ \_______\ \__\
+    #    |\_________\   \|__|  \|_______|\|__|
+    #    \|_________|
+    #
+    # New drivers should be written for DFv2. If you need to target a board stuck
+    # on DFv1, it is acceptable to add an entry to this list.
+    #
+    # To remove items from the allowlist, please send a change to one of the
+    # OWNERS of this file to remove an element from the visibility list below.
+    #
+    # Please allowlist entire directories rather than individual targets as it
+    # requires less allowlist churn over time.
+    visibility = ["//:__subpackages__"],
+    deps = [
+        # <ddk/io-buffer.h> has #include <zircon/syscalls.h>.
+        "//sdk/lib/async",
+        "//sdk/lib/driver/runtime:driver_runtime",
+        "//sdk/lib/zbi-format",
+        "//zircon/system/ulib/ddk-platform-defs",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "//zircon/system/ulib/trace",
+            "//zircon/system/ulib/trace-engine",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+fx_cc_library_headers(
+    name = "ddk-deprecated-binding-headers",
+    hdrs = ["include/lib/ddk/binding.h"],
+    visibility = [
+        "//src/devices/board/drivers/astro:__pkg__",
+        "//src/devices/board/drivers/nelson:__pkg__",
+        "//src/devices/board/drivers/qemu-arm64:__pkg__",
+        "//src/devices/board/drivers/sherlock:__pkg__",
+        "//src/devices/board/drivers/x86:__subpackages__",
+        "//src/devices/board/lib/acpi:__subpackages__",
+        "//src/devices/bus/drivers/platform:__subpackages__",
+        "//src/lib/ddk/tests:__pkg__",
+    ],
+    deps = [":ddk"],
+)
+
+fx_cc_library_headers(
+    name = "ddk-device-headers",
+    hdrs = ["include/lib/ddk/device.h"],
+    visibility = [],
+    deps = ["//sdk/lib/driver/runtime:driver_runtime"],
+)
+
+# DFv2 drivers that link the DFv1 io-buffer library must define a weak
+# __zircon_driver_rec__ for it to link. They need the zx_driver_rec declaration
+# but none of the DDK implementation, so they take this instead of ":ddk".
+fx_cc_library_headers(
+    name = "ddk-driver-headers",
+    # driver.h x-macro-includes protodefs.h to build the protocol id enum.
+    hdrs = [
+        "include/lib/ddk/driver.h",
+        "include/lib/ddk/protodefs.h",
+    ],
+    visibility = [
+        "//src/connectivity/ethernet/drivers/third_party/igc:__pkg__",
+        "//zircon/third_party/dev/ethernet/e1000:__pkg__",
+    ],
+    deps = ["//sdk/lib/async"],
+)
+
+# Adds the metadata.h file to the SDK to be used with the driver compat
+# library.
+fx_cc_library_headers(
+    name = "ddk_metadata_only",
+    hdrs = ["include/lib/ddk/metadata.h"],
+    visibility = [
+        "//src/devices/clock/drivers/clock:__pkg__",
+        "//src/devices/usb/drivers/dwc2:__pkg__",
+        "//src/graphics/display/drivers/amlogic-display:__pkg__",
+    ],
+    deps = ["//sdk/lib/zbi-format"],
+)
+
+# Exports the metadata.h file to the SDK to support the transition
+# to DFv2.
+fx_cc_library(
     name = "ddk_metadata",
     hdrs = [
         "include/lib/ddk/metadata.h",
     ],
+    implementation_deps = [":ddk_metadata_only"],
     includes = [
         "include",
     ],
-    target_compatible_with = ["@platforms//os:fuchsia"],
+    public_configs = [":include"],
+    visibility = [
+        "//sdk/lib/driver/devicetree/visitors:__subpackages__",
+        "//src/devices:__subpackages__",
+        "//src/ui:__subpackages__",
+        "//vendor/google:__subpackages__",
+    ],
     deps = [
-        "@fuchsia_sdk//pkg/zbi-format",
+        "//sdk/lib/zbi-format",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library_headers(
+    name = "ddk-metadata-headers",
+    hdrs = [
+        "include/ddk/metadata/camera.h",
+        "include/ddk/metadata/display.h",
+        "include/ddk/metadata/test.h",
+    ],
+
+    #  ________  _________  ________  ________
+    # |\   ____\|\___   ___\\   __  \|\   __  \
+    # \ \  \___|\|___ \  \_\ \  \|\  \ \  \|\  \
+    #  \ \_____  \   \ \  \ \ \  \\\  \ \   ____\
+    #   \|____|\  \   \ \  \ \ \  \\\  \ \  \___|
+    #     ____\_\  \   \ \__\ \ \_______\ \__\
+    #    |\_________\   \|__|  \|_______|\|__|
+    #    \|_________|
+    #
+    # New driver metadata should be defined in FIDL instead of C.
+    #
+    # To remove items from the allowlist, please send a change to one of the
+    # OWNERS of this file to remove an element from the visibility list below.
+    #
+    # Please allowlist entire directories rather than individual targets as it
+    # requires less allowlist churn over time.
+    visibility = [
+        "//sdk/lib/driver/devicetree/visitors:__subpackages__",
+        "//sdk/lib/driver_test_realm:__pkg__",
+        "//src/camera/drivers/bus/aml_mipicsi:__pkg__",
+        "//src/camera/drivers/sensors/imx227:__pkg__",
+        "//src/devices/board/drivers/astro:__pkg__",
+        "//src/devices/board/drivers/astro/post-init:__pkg__",
+        "//src/devices/board/drivers/integration-test:__pkg__",
+        "//src/devices/board/drivers/nelson:__pkg__",
+        "//src/devices/board/drivers/nelson/post-init:__pkg__",
+        "//src/devices/board/drivers/sherlock:__pkg__",
+        "//src/devices/board/drivers/sherlock/post-init:__pkg__",
+        "//src/devices/board/drivers/vim3:__pkg__",
+        "//src/devices/bus/drivers/platform:__pkg__",
+        "//src/devices/bus/drivers/platform/test:__pkg__",
+        "//src/devices/clock/drivers/clock:__pkg__",
+        "//src/devices/gpio/drivers/gpio:__pkg__",
+        "//src/devices/i2c/drivers/intel-i2c:__pkg__",
+        "//src/devices/power/drivers/power:__pkg__",
+        "//src/devices/serial/drivers/ftdi:__pkg__",
+        "//src/devices/serial/drivers/ftdi/test:__pkg__",
+        "//src/devices/testing/driver-integration-test-shim:__pkg__",
+        "//src/devices/usb/drivers/usb-peripheral:__pkg__",
+        "//src/devices/usb/lib/usb:__pkg__",
+        "//src/ui/input/drivers/buttons:__pkg__",
+        "//src/ui/input/drivers/goodix-gt92xx:__pkg__",
+        "//src/ui/input/drivers/hid-input-report:__pkg__",
+        "//src/ui/input/lib/hid:__pkg__",
+        "//src/ui/input/lib/hid-input-report:__pkg__",
+        "//src/ui/light/drivers/aml-light:__pkg__",
+    ],
+)
+
+# Drivers should use //sdk/lib/mmio-ptr instead.
+fx_cc_library_headers(
+    name = "ddk-deprecated-mmio-headers",
+    hdrs = ["include/lib/ddk/hw/reg.h"],
+    visibility = [
+        "//src/devices/bus/lib/virtio:__pkg__",
+        "//zircon/third_party/dev/ethernet/e1000:__pkg__",
+    ],
+)
+
+fx_cc_library_headers(
+    name = "ddk-hw-headers",
+    hdrs = [
+        "include/lib/ddk/hw/arch_ops.h",
+        "include/lib/ddk/hw/inout.h",
+    ],
+    visibility = [
+        "//src/devices/block/drivers/ufs:__pkg__",
+        "//src/graphics/display/drivers/intel-display:__pkg__",
+        "//src/graphics/magma/lib/magma/platform:__pkg__",
     ],
 )

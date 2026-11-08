@@ -26,64 +26,68 @@ use crate::task::{CurrentTask, TaskPersistentInfo};
 use crate::vfs::FsNode;
 use crate::vfs::{DirEntry, FileHandle, FileObject, FileSystem, FileSystemOps};
 use audit::{Auditable, audit_decision};
-use fuchsia_rcu::{RcuBox, RcuDroppable, RcuReadGuard};
 use indexmap::IndexSet;
 use selinux::permission_check::PermissionCheck;
 use selinux::policy::{FsUseType, XpermsKind};
 use selinux::{
-    ClassPermission, CommonFilePermission, CommonFsNodePermission, DirPermission, FdPermission,
-    FileClass, FileSystemLabel, FileSystemLabelingScheme, FileSystemMountOptions, ForClass,
-    FsNodeClass, InitialSid, KernelPermission, PolicyCap, ProcessPermission, SecurityId,
+    ClassPermission, CommonFilePermission, CommonFilePermissionSet, CommonFsNodePermission,
+    CommonFsNodePermissionSet, DirPermission, DirPermissionSet, FdPermission, FileClass,
+    FileSystemLabel, FileSystemLabelingScheme, FileSystemMountOptions, ForClass, FsNodeClass,
+    InitialSid, KernelPermission, KernelPermissionSet, PolicyCap, ProcessPermission, SecurityId,
     SecurityServer, TaskAttrs,
 };
-use smallvec;
 use starnix_logging::{BugRef, CATEGORY_STARNIX_SECURITY, bug_ref, track_stub};
 use starnix_sync::{
     LockDepMutex, SeLinuxPeerSidLock, SeLinuxPendingEntriesLock, SeLinuxPendingFileSystemsLock,
-    SeLinuxUpdateLock,
 };
 use starnix_uapi::arc_key::WeakKey;
 use starnix_uapi::errors::Errno;
 use starnix_uapi::file_mode::FileMode;
 use starnix_uapi::{errno, error};
 use std::cell::Ref;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
-/// Rust cannot infer the permission type from an empty slice, so define an explicitly-typed empty
-/// permissions slice to use.
-const NO_PERMISSIONS: &[KernelPermission] = &[];
+/// Empty permission set to pass to `has_file_permissions()`.
+const NO_PERMISSIONS: CommonFsNodePermissionSet = CommonFsNodePermissionSet::empty();
 
-/// Iterable set of permissions returned by `permissions_from_flags()`.
-type PermissionFlagsVec = smallvec::SmallVec<[KernelPermission; 3]>;
-
-/// Returns the set of `Permissions` on `class`, corresponding to the specified `flags`.
-fn permissions_from_flags(flags: PermissionFlags, class: FsNodeClass) -> PermissionFlagsVec {
-    let mut result = PermissionFlagsVec::new();
+/// Returns the `CommonFsNodePermission`s corresponding to the `READ`, `WRITE`, and `APPEND`
+/// bits in `flags`.
+fn common_fs_node_permissions_from_flags(flags: PermissionFlags) -> CommonFsNodePermissionSet {
+    debug_assert!(!flags.contains(PermissionFlags::EXEC));
+    let mut result = CommonFsNodePermissionSet::empty();
 
     if flags.contains(PermissionFlags::READ) {
-        result.push(CommonFsNodePermission::Read.for_class(class));
+        result |= CommonFsNodePermission::Read;
     }
     if flags.contains(PermissionFlags::WRITE) {
         // SELinux uses the `APPEND` bit to distinguish which of the "append" or the more general
         // "write" permission to check for.
         if flags.contains(PermissionFlags::APPEND) {
-            result.push(CommonFsNodePermission::Append.for_class(class));
+            result |= CommonFsNodePermission::Append;
         } else {
-            result.push(CommonFsNodePermission::Write.for_class(class));
+            result |= CommonFsNodePermission::Write;
         }
     }
+    result
+}
+
+/// Returns the set of `Permissions` on `class`, corresponding to the specified `flags`.
+fn permissions_from_flags(flags: PermissionFlags, class: FsNodeClass) -> KernelPermissionSet {
+    let result = common_fs_node_permissions_from_flags(flags - PermissionFlags::EXEC);
 
     if let FsNodeClass::File(class) = class {
         if flags.contains(PermissionFlags::EXEC) {
             if class == FileClass::Dir {
-                result.push(DirPermission::Search.into());
+                return (DirPermissionSet::from(result) | DirPermission::Search).into();
             } else {
-                result.push(CommonFilePermission::Execute.for_class(class));
+                return (CommonFilePermissionSet::from(result) | CommonFilePermission::Execute)
+                    .for_class(class);
             }
         }
     }
-    result
+    result.for_class(class)
 }
 
 fn is_internal_operation(current_task: &CurrentTask) -> bool {
@@ -97,7 +101,7 @@ fn has_file_permissions(
     current_task: &CurrentTask,
     subject_sid: SecurityId,
     file: &FileObject,
-    permissions: &[impl ForClass<FsNodeClass>],
+    permissions: impl Into<CommonFsNodePermissionSet>,
     audit_context: Auditable<'_>,
 ) -> Result<(), Errno> {
     if is_internal_operation(current_task) {
@@ -120,6 +124,7 @@ fn has_file_permissions(
     }
 
     // Validate that the `subject` has the desired `permissions`, if any, to the underlying node.
+    let permissions = permissions.into();
     if !permissions.is_empty()
         && let Some(fs_node) = NonPrivateFsNode::new(file.node())
     {
@@ -196,11 +201,11 @@ fn check_permission_and_xperms(
         xperms_kind,
         subject_sid,
         target_sid,
-        permission.clone(),
+        permission,
         xperm,
     );
 
-    if result.audit {
+    if let Some(audit_permissions) = result.audit_permissions(permission.class()) {
         if !result.permit() {
             current_task
                 .kernel()
@@ -215,10 +220,10 @@ fn check_permission_and_xperms(
         audit_decision(
             current_task,
             permission_check,
-            result.clone(),
+            result,
             subject_sid,
             target_sid,
-            permission.into(),
+            audit_permissions,
             audit_context.into(),
         );
     }
@@ -232,7 +237,7 @@ fn has_fs_node_permissions_dontaudit(
     _current_task: &CurrentTask,
     subject_sid: SecurityId,
     fs_node: NonPrivateFsNode<'_>,
-    permissions: &[impl ForClass<FsNodeClass>],
+    permissions: impl ForClass<FsNodeClass, Output = KernelPermissionSet>,
 ) -> Result<(), Errno> {
     fuchsia_trace::duration!(
         CATEGORY_STARNIX_SECURITY,
@@ -240,13 +245,13 @@ fn has_fs_node_permissions_dontaudit(
     );
 
     let target = fs_node_effective_sid_and_class(fs_node);
-    for permission in permissions {
-        if !permission_check
-            .has_permission(subject_sid, target.sid, permission.for_class(target.class))
-            .permit()
-        {
-            return error!(EACCES);
-        }
+    let permissions = permissions.for_class(target.class);
+    if permissions.is_empty() {
+        return Ok(());
+    }
+
+    if !permission_check.has_permissions(subject_sid, target.sid, permissions).permit() {
+        return error!(EACCES);
     }
 
     Ok(())
@@ -258,27 +263,26 @@ fn has_fs_node_permissions(
     current_task: &CurrentTask,
     subject_sid: SecurityId,
     fs_node: NonPrivateFsNode<'_>,
-    permissions: &[impl ForClass<FsNodeClass>],
+    permissions: impl ForClass<FsNodeClass, Output = KernelPermissionSet>,
     audit_context: Auditable<'_>,
 ) -> Result<(), Errno> {
     fuchsia_trace::duration!(CATEGORY_STARNIX_SECURITY, "security.selinux.has_fs_node_permissions");
 
     let target = fs_node_effective_sid_and_class(fs_node);
-
-    let fs = fs_node.fs();
-    let audit_context = [audit_context, fs_node.into(), fs.as_ref().into()];
-    for permission in permissions {
-        check_permission(
-            permission_check,
-            current_task,
-            subject_sid,
-            target.sid,
-            permission.for_class(target.class),
-            (&audit_context).into(),
-        )?;
+    let permissions = permissions.for_class(target.class);
+    if permissions.is_empty() {
+        return Ok(());
     }
 
-    Ok(())
+    let audit_context = [audit_context, fs_node.into()];
+    check_permissions(
+        permission_check,
+        current_task,
+        subject_sid,
+        target.sid,
+        permissions,
+        (&audit_context).into(),
+    )
 }
 
 fn file_class_from_file_mode(mode: FileMode) -> Result<FileClass, Errno> {
@@ -310,8 +314,8 @@ macro_rules! TODO_DENY {
 /// Returns the `SecurityId` and `FsNodeClass` that should be used for SELinux access control checks
 /// against `fs_node`.
 fn fs_node_effective_sid_and_class(fs_node: NonPrivateFsNode<'_>) -> FsNodeSidAndClass {
-    let label_class = fs_node.selinux_state().read();
-    if matches!(label_class.label, FsNodeLabel::Uninitialized) {
+    let (sid, class) = fs_node.selinux_state().sid_and_class();
+    let sid = sid.unwrap_or_else(|| {
         // We should never reach here, but for now enforce it in debug builds.
         if cfg!(any(test, debug_assertions)) {
             panic!(
@@ -323,28 +327,53 @@ fn fs_node_effective_sid_and_class(fs_node: NonPrivateFsNode<'_>) -> FsNodeSidAn
             );
         } else {
             track_stub!(TODO("https://fxbug.dev/381210515"), "SID requested for unlabeled FsNode");
+            InitialSid::Unlabeled.into()
         }
-    }
-    FsNodeSidAndClass { sid: label_class.sid(), class: label_class.class() }
+    });
+    let class = class.unwrap_or(FsNodeClass::File(FileClass::File));
+    FsNodeSidAndClass { sid, class }
 }
 
 /// Checks whether `source_sid` is allowed the specified `permission` on `target_sid`.
-fn check_permission<P: ClassPermission + Into<KernelPermission> + Clone + 'static>(
+fn check_permission(
     permission_check: &PermissionCheck<'_>,
     current_task: &CurrentTask,
     source_sid: SecurityId,
     target_sid: SecurityId,
-    permission: P,
+    permission: impl ClassPermission,
     audit_context: Auditable<'_>,
 ) -> Result<(), Errno> {
-    fuchsia_trace::duration!(CATEGORY_STARNIX_SECURITY, "security.selinux.check_permission");
+    check_permissions(
+        permission_check,
+        current_task,
+        source_sid,
+        target_sid,
+        permission,
+        audit_context,
+    )
+}
+
+/// Checks whether `source_sid` is allowed all of the specified `permissions` on `target_sid`.
+///
+/// The `permissions` are checked against a single access decision, and audited, if necessary, in a
+/// single audit log entry, listing the permissions to be audited.
+fn check_permissions(
+    permission_check: &PermissionCheck<'_>,
+    current_task: &CurrentTask,
+    source_sid: SecurityId,
+    target_sid: SecurityId,
+    permissions: impl Into<KernelPermissionSet>,
+    audit_context: Auditable<'_>,
+) -> Result<(), Errno> {
+    fuchsia_trace::duration!(CATEGORY_STARNIX_SECURITY, "security.selinux.check_permissions");
 
     if is_internal_operation(current_task) {
         return Ok(());
     }
-    let result = permission_check.has_permission(source_sid, target_sid, permission.clone());
+    let permissions = permissions.into();
+    let result = permission_check.has_permissions(source_sid, target_sid, permissions);
 
-    if result.audit {
+    if let Some(audit_permissions) = result.audit_permissions(permissions.class()) {
         if !result.permit() {
             current_task
                 .kernel()
@@ -359,23 +388,23 @@ fn check_permission<P: ClassPermission + Into<KernelPermission> + Clone + 'stati
         audit_decision(
             current_task,
             permission_check,
-            result.clone(),
+            result,
             source_sid,
             target_sid,
-            permission.into(),
+            audit_permissions,
             audit_context,
         );
-    };
+    }
 
     result.permit().then_some(()).ok_or_else(|| errno!(EACCES))
 }
 
-/// Checks that `subject_sid` has the specified process `permission` on `self`.
-fn check_self_permission<P: ClassPermission + Into<KernelPermission> + Clone + 'static>(
+/// Checks that `subject_sid` has the specified `permission` on `self`.
+fn check_self_permission(
     permission_check: &PermissionCheck<'_>,
     current_task: &CurrentTask,
     subject_sid: SecurityId,
-    permission: P,
+    permission: impl ClassPermission,
     audit_context: Auditable<'_>,
 ) -> Result<(), Errno> {
     check_permission(
@@ -393,11 +422,7 @@ async fn create_inspect_values(
 ) -> Result<fuchsia_inspect::Inspector, anyhow::Error> {
     let inspector = fuchsia_inspect::Inspector::default();
 
-    let policy_bytes = if let Some(policy_data) = security_server.get_binary_policy() {
-        policy_data.len().try_into()?
-    } else {
-        0
-    };
+    let policy_bytes: u64 = security_server.binary_policy_size().unwrap_or(0).try_into()?;
     inspector.root().record_uint("policy_bytes", policy_bytes);
 
     Ok(inspector)
@@ -533,7 +558,7 @@ impl FileSystemState {
             return false;
         };
         match label.scheme {
-            FileSystemLabelingScheme::Mountpoint { .. } => false,
+            FileSystemLabelingScheme::Mountpoint { .. } | FileSystemLabelingScheme::None => false,
             FileSystemLabelingScheme::FsUse { .. } => true,
             FileSystemLabelingScheme::GenFsCon { supports_seclabel } => supports_seclabel,
         }
@@ -546,100 +571,203 @@ impl FileSystemState {
         };
         match label.scheme {
             FileSystemLabelingScheme::Mountpoint { .. }
-            | FileSystemLabelingScheme::GenFsCon { .. } => false,
+            | FileSystemLabelingScheme::GenFsCon { .. }
+            | FileSystemLabelingScheme::None => false,
             FileSystemLabelingScheme::FsUse { fs_use_type, .. } => fs_use_type == FsUseType::Xattr,
         }
     }
 }
 
-/// Holds security state associated with a [`crate::vfs::FsNode`].
-#[derive(Debug)]
-pub(super) struct FsNodeState {
-    label: RcuBox<FsNodeLabelAndClass>,
-    update_lock: LockDepMutex<(), SeLinuxUpdateLock>,
+struct TaskBoundState {
+    // TODO(https://fxbug.dev/451613626): Consider replacing by a reference to a task-or-zombie.
+    task_state: TaskPersistentInfo,
+    class: FsNodeClass,
 }
 
-impl Default for FsNodeState {
-    fn default() -> Self {
-        Self {
-            label: RcuBox::new(FsNodeLabelAndClass {
-                label: FsNodeLabel::Uninitialized,
-                class: None,
-            }),
-            update_lock: Default::default(),
-        }
-    }
+enum DecodedState<'a> {
+    Uninitialized,
+    Inline { sid: Option<SecurityId>, class: FsNodeClass },
+    FromTask(&'a TaskBoundState),
 }
+
+/// Holds security state associated with a [`crate::vfs::FsNode`].
+///
+/// Packs the node's security label and [`FsNodeClass`] into a single tagged `AtomicUsize`.
+/// A node can be in one of 4 states:
+/// - **1. Uninitialized** (`raw == 0`):
+///   - Bit 0 is `0`, all other bits are `0`.
+///   - Decodes to `(None, None)`. `is_labeled()` is `false`.
+/// - **2. Class set, unlabeled** (`(raw & INLINE_TAG) == 1`, bits 32..64 are `0`):
+///   - Bit 0 is `1`, bits 16..32 hold `FsNodeClass` (`u16`), bits 32..64 are `0`.
+///   - Decodes to `(None, Some(class))`. `is_labeled()` is `false`.
+/// - **3. Inline SID and class** (`(raw & INLINE_TAG) == 1`, bits 32..64 are non-zero):
+///   - Bit 0 is `1`, bits 16..32 hold `FsNodeClass` (`u16`), bits 32..64 hold `SecurityId`
+///     (`NonZeroU32`).
+///   - Decodes to `(Some(sid), Some(class))`. `is_labeled()` is `true`.
+/// - **4. Task-bound pointer** (`(raw & INLINE_TAG) == 0` and `raw != 0`):
+///   - Bit 0 is `0` because `raw` is an 8-byte-aligned `Box<TaskBoundState>` pointer.
+///   - Decodes to `(Some(task_sid), Some(class))`. `is_labeled()` is `true`.
+///
+/// State transitions are monotonic:
+/// - `class` is initialized on the first transition out of `UNINITIALIZED` (either to
+///   `(None, Some(class))` via `ensure_class` or directly to `(Some(sid), Some(class))` via
+///   `set_sid_and_class`). `set_sid` and `set_from_task` preserve the existing `class`, whereas
+///   `set_sid_and_class` may refine `class` before the node is published (e.g., `new_memfd`
+///   refining `FileClass::File` to `FileClass::MemFdFile`).
+/// - A node is labeled either from a task (`set_from_task`) or with a `SecurityId` (`set_sid` /
+///   `set_sid_and_class`) and never switches between the two. Because a published
+///   `TaskBoundState` pointer is never replaced until [`Drop::drop`], readers can borrow it
+///   directly for `&self` without RCU.
+#[derive(Debug, Default)]
+pub(super) struct FsNodeState(AtomicUsize);
 
 impl FsNodeState {
-    pub(super) fn read(&self) -> RcuReadGuard<FsNodeLabelAndClass> {
-        self.label.read()
+    const _LAYOUT_ASSERTIONS: () = {
+        // Inline packing places the 32-bit `SecurityId` in bits 32..64, the 16-bit `FsNodeClass`
+        // in bits 16..32, and the inline tag in bit 0, requiring at least a 64-bit `AtomicUsize`.
+        assert!(std::mem::size_of::<AtomicUsize>() >= 8);
+        // `TaskBoundState` is boxed and its raw pointer is stored in `self.0`; an alignment of at
+        // least 2 guarantees bit 0 is `0`, distinguishing pointers from `INLINE_TAG` (`1`).
+        assert!(std::mem::align_of::<TaskBoundState>() >= 2);
+    };
+
+    const UNINITIALIZED: usize = 0;
+    const INLINE_TAG: usize = 1;
+    const CLASS_SHIFT: u32 = 16;
+    const SID_SHIFT: u32 = 32;
+
+    #[inline]
+    fn is_task_ptr(raw: usize) -> bool {
+        (raw != Self::UNINITIALIZED) && ((raw & Self::INLINE_TAG) == 0)
     }
 
-    pub(super) fn update(&self, new_label: FsNodeLabel, new_class: FsNodeClass) {
-        let _lock = self.update_lock.lock();
-        let mut new_label_class = (*self.label.read()).clone();
-        new_label_class.label = new_label;
-        new_label_class.class = Some(new_class);
-        self.label.update(new_label_class);
+    #[inline]
+    fn encode_inline(sid: Option<SecurityId>, class: FsNodeClass) -> usize {
+        let sid_bits = sid.map_or(0, |security_id| security_id.0.get() as usize) << Self::SID_SHIFT;
+        let raw_class: u16 = zerocopy::transmute!(class);
+        Self::INLINE_TAG | ((raw_class as usize) << Self::CLASS_SHIFT) | sid_bits
     }
 
-    pub(super) fn update_label(&self, new_label: FsNodeLabel) {
-        let _lock = self.update_lock.lock();
-        let mut new_label_class = (*self.label.read()).clone();
-        new_label_class.label = new_label;
-        self.label.update(new_label_class);
+    #[inline]
+    fn decode(&self, raw: usize) -> DecodedState<'_> {
+        if (raw & Self::INLINE_TAG) != 0 {
+            let sid = NonZeroU32::new((raw >> Self::SID_SHIFT) as u32).map(SecurityId);
+            // SAFETY: Any value with `INLINE_TAG` set was constructed by `encode_inline`, which
+            // wrote a valid `FsNodeClass` into bits 16..32.
+            let class = unsafe {
+                std::mem::transmute::<u16, FsNodeClass>((raw >> Self::CLASS_SHIFT) as u16)
+            };
+            DecodedState::Inline { sid, class }
+        } else if raw != Self::UNINITIALIZED {
+            // SAFETY: A non-zero value without `INLINE_TAG` is a write-once `TaskBoundState`
+            // pointer that is only freed in `Drop::drop(&mut self)`, so the pointee remains valid
+            // and immutable for the lifetime of `&self`.
+            DecodedState::FromTask(unsafe { &*(raw as *const TaskBoundState) })
+        } else {
+            DecodedState::Uninitialized
+        }
     }
 
-    pub(super) fn update_class(&self, new_class: FsNodeClass) {
-        let _lock = self.update_lock.lock();
-        let mut new_label_class = (*self.label.read()).clone();
-        new_label_class.class = Some(new_class);
-        self.label.update(new_label_class);
+    #[inline]
+    fn decode_class(&self, raw: usize) -> Option<FsNodeClass> {
+        match self.decode(raw) {
+            DecodedState::Uninitialized => None,
+            DecodedState::Inline { class, .. } => Some(class),
+            DecodedState::FromTask(state) => Some(state.class),
+        }
+    }
+
+    #[inline]
+    pub(super) fn sid_and_class(&self) -> (Option<SecurityId>, Option<FsNodeClass>) {
+        match self.decode(self.0.load(Ordering::Acquire)) {
+            DecodedState::Uninitialized => (None, None),
+            DecodedState::Inline { sid, class } => (sid, Some(class)),
+            DecodedState::FromTask(TaskBoundState { task_state, class }) => {
+                (Some(task_state.real_creds().security_state.current_sid), Some(*class))
+            }
+        }
+    }
+
+    #[inline]
+    pub(super) fn sid(&self) -> Option<SecurityId> {
+        self.sid_and_class().0
+    }
+
+    #[inline]
+    pub(super) fn class(&self) -> Option<FsNodeClass> {
+        self.decode_class(self.0.load(Ordering::Acquire))
+    }
+
+    #[inline]
+    pub(super) fn is_labeled(&self) -> bool {
+        match self.decode(self.0.load(Ordering::Acquire)) {
+            DecodedState::Uninitialized => false,
+            DecodedState::Inline { sid, .. } => sid.is_some(),
+            DecodedState::FromTask(_) => true,
+        }
+    }
+
+    #[inline]
+    pub(super) fn task_state(&self) -> Option<&TaskPersistentInfo> {
+        match self.decode(self.0.load(Ordering::Acquire)) {
+            DecodedState::FromTask(state) => Some(&state.task_state),
+            DecodedState::Uninitialized | DecodedState::Inline { .. } => None,
+        }
+    }
+
+    pub(super) fn set_sid_and_class(&self, sid: SecurityId, class: FsNodeClass) {
+        let old_raw = self.0.swap(Self::encode_inline(Some(sid), class), Ordering::AcqRel);
+        assert!(!Self::is_task_ptr(old_raw), "Cannot overwrite a FromTask node");
+    }
+
+    pub(super) fn set_sid(&self, sid: SecurityId) {
+        let class = self.class().expect("Class must be set before updating FsNode label");
+        let old_raw = self.0.swap(Self::encode_inline(Some(sid), class), Ordering::AcqRel);
+        assert!(!Self::is_task_ptr(old_raw), "Cannot overwrite a FromTask node");
+    }
+
+    pub(super) fn set_from_task(&self, task_state: &TaskPersistentInfo) {
+        let class = self.class().expect("Class must be set before updating FsNode label");
+        let ptr = Box::into_raw(Box::new(TaskBoundState { task_state: task_state.clone(), class }));
+        let old_raw = self.0.swap(ptr as usize, Ordering::AcqRel);
+        assert_eq!(
+            old_raw,
+            Self::encode_inline(None, class),
+            "FromTask transition requires an unlabeled node"
+        );
+    }
+
+    pub(super) fn ensure_class(&self, fallback_class: FsNodeClass) -> FsNodeClass {
+        let new_raw = Self::encode_inline(None, fallback_class);
+        match self.0.compare_exchange(
+            Self::UNINITIALIZED,
+            new_raw,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => fallback_class,
+            Err(observed) => {
+                self.decode_class(observed).expect("class is set when not UNINITIALIZED")
+            }
+        }
     }
 
     #[cfg(test)]
     pub(super) fn clear_label_for_test(&self) {
-        let _lock = self.update_lock.lock();
-        let class = self.label.read().class;
-        self.label.update(FsNodeLabelAndClass { label: FsNodeLabel::Uninitialized, class });
+        let class = self.class().expect("Class must be set before clearing FsNode label");
+        let old_raw = self.0.swap(Self::encode_inline(None, class), Ordering::AcqRel);
+        assert!(!Self::is_task_ptr(old_raw), "Cannot overwrite a FromTask node");
     }
 }
 
-/// Describes the security label for a [`crate::vfs::FsNode`].
-#[derive(Debug, Clone, RcuDroppable)]
-pub(super) enum FsNodeLabel {
-    Uninitialized,
-    SecurityId { sid: SecurityId },
-    // TODO(https://fxbug.dev/451613626): Consider replacing by a reference to a task-or-zombie.
-    FromTask { task_state: TaskPersistentInfo },
-}
-
-impl FsNodeLabel {
-    pub fn sid(&self) -> SecurityId {
-        match self {
-            FsNodeLabel::Uninitialized => InitialSid::Unlabeled.into(),
-            FsNodeLabel::SecurityId { sid } => *sid,
-            FsNodeLabel::FromTask { task_state } => {
-                task_state.real_creds().security_state.current_sid
-            }
+impl Drop for FsNodeState {
+    fn drop(&mut self) {
+        let raw = *self.0.get_mut();
+        if Self::is_task_ptr(raw) {
+            // SAFETY: `raw` was produced by `Box::into_raw` on a `TaskBoundState`, and
+            // `&mut self` guarantees exclusive access during drop.
+            drop(unsafe { Box::from_raw(raw as *mut TaskBoundState) });
         }
-    }
-}
-
-#[derive(Debug, Clone, RcuDroppable)]
-pub(super) struct FsNodeLabelAndClass {
-    pub label: FsNodeLabel,
-    pub class: Option<FsNodeClass>,
-}
-
-impl FsNodeLabelAndClass {
-    pub fn class(&self) -> FsNodeClass {
-        self.class.unwrap_or(FsNodeClass::File(FileClass::File))
-    }
-
-    pub fn sid(&self) -> SecurityId {
-        self.label.sid()
     }
 }
 
@@ -655,6 +783,12 @@ pub(super) struct FsNodeSidAndClass {
 #[derive(Debug, Default)]
 pub(super) struct SocketState {
     peer_sid: LockDepMutex<Option<SecurityId>, SeLinuxPeerSidLock>,
+}
+
+/// Security state for a datagram message. This holds the [`SecurityId`] of the sending socket.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct SecurityContextToken {
+    sid: SecurityId,
 }
 
 /// Security state for a bpf [`ebpf_api::maps::Map`] instance. This currently just holds the
@@ -675,52 +809,26 @@ pub(super) struct BpfProgState {
 /// cause the security id to *not* be recomputed by the SELinux LSM when determining the effective
 /// security id of this [`NonPrivateFsNode`].
 pub(super) fn set_cached_sid(fs_node: NonPrivateFsNode<'_>, sid: SecurityId) {
-    fs_node.selinux_state().update_label(FsNodeLabel::SecurityId { sid });
-}
-
-/// Sets the Task associated with `fs_node` to `task`.
-/// The effective security id of the [`NonPrivateFsNode`] will be that of the task, even if the
-/// security id of the task changes.
-fn fs_node_set_label_with_task(
-    fs_node: NonPrivateFsNode<'_>,
-    task_persistent_info: &TaskPersistentInfo,
-) {
-    fs_node
-        .selinux_state()
-        .update_label(FsNodeLabel::FromTask { task_state: task_persistent_info.clone() });
+    fs_node.selinux_state().set_sid(sid);
 }
 
 /// Ensures that the `fs_node`'s security state has an appropriate security class set.
 /// As per the NSA report description, the security class is chosen based on the `FileMode`, unless
 /// a security class more specific than "file" has already been set on the node.
 fn fs_node_ensure_class(fs_node: NonPrivateFsNode<'_>) -> Result<FsNodeClass, Errno> {
-    let label_class = fs_node.selinux_state().read();
-    if let Some(class) = label_class.class {
+    if let Some(class) = fs_node.selinux_state().class() {
         return Ok(class);
     }
 
     let file_mode = fs_node.info().mode;
-    let _lock = fs_node.selinux_state().update_lock.lock();
-    let label_class = fs_node.selinux_state().read();
-    if let Some(class) = label_class.class {
-        return Ok(class);
-    }
-    let mut new_label_class = (*label_class).clone();
     let class = file_class_from_file_mode(file_mode)?.into();
-    new_label_class.class = Some(class);
-    fs_node.selinux_state().label.update(new_label_class);
-    Ok(class)
+    Ok(fs_node.selinux_state().ensure_class(class))
 }
 
 #[cfg(test)]
 /// Returns the SID with which the node is labeled, if any, for use by `FsNode` labeling tests.
 pub(super) fn get_cached_sid(fs_node: &FsNode) -> Option<SecurityId> {
-    let label_class = fs_node.security_state.selinux_for_test().read();
-    if !matches!(label_class.label, FsNodeLabel::Uninitialized) {
-        Some(label_class.sid())
-    } else {
-        None
-    }
+    fs_node.security_state.selinux_for_test().sid()
 }
 
 /// Returned by `policycap_support()` to indicate whether a policy is always-on, always-off,
@@ -763,5 +871,110 @@ fn policycap_support(policy_cap: PolicyCap) -> PolicyCapSupport {
 /// Security state for a current task. This holds the task-local cache for permission check results.
 #[derive(Default, Debug)]
 pub struct CurrentTaskState {
-    pub local_cache: selinux::permission_check::PerThreadCache,
+    pub local_cache: selinux::PerThreadCache,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testing::spawn_kernel_and_run;
+    use selinux::SocketClass;
+    use std::sync::Arc;
+
+    #[fuchsia::test]
+    async fn fs_node_state_encoding_and_lifecycle() {
+        assert_eq!(std::mem::size_of::<FsNodeState>(), std::mem::size_of::<usize>());
+
+        spawn_kernel_and_run(async |current_task| {
+            // Default `(None, None)` (`0`).
+            let state = FsNodeState::default();
+            assert!(!state.is_labeled());
+            assert_eq!(state.sid(), None);
+            assert_eq!(state.class(), None);
+            assert_eq!(state.sid_and_class(), (None, None));
+            assert_eq!(state.task_state(), None);
+
+            // `(None, Some(class))` via `ensure_class`, followed by `set_sid` preserving `class`.
+            assert_eq!(
+                state.ensure_class(FsNodeClass::File(FileClass::Dir)),
+                FsNodeClass::File(FileClass::Dir)
+            );
+            assert_eq!(
+                state.ensure_class(FsNodeClass::File(FileClass::File)),
+                FsNodeClass::File(FileClass::Dir)
+            );
+            assert!(!state.is_labeled());
+            assert_eq!(state.sid(), None);
+            assert_eq!(state.class(), Some(FsNodeClass::File(FileClass::Dir)));
+            assert_eq!(state.sid_and_class(), (None, Some(FsNodeClass::File(FileClass::Dir))));
+
+            let sid = SecurityId(NonZeroU32::new(7).unwrap());
+            state.set_sid(sid);
+            assert!(state.is_labeled());
+            assert_eq!(state.sid(), Some(sid));
+            assert_eq!(state.class(), Some(FsNodeClass::File(FileClass::Dir)));
+            assert_eq!(state.sid_and_class(), (Some(sid), Some(FsNodeClass::File(FileClass::Dir))));
+
+            state.clear_label_for_test();
+            assert!(!state.is_labeled());
+            assert_eq!(state.sid_and_class(), (None, Some(FsNodeClass::File(FileClass::Dir))));
+
+            // Round-trip `SecurityId` boundary values and both `FileClass` and `SocketClass`
+            // variants.
+            for raw_sid in [1u32, 42, u32::MAX] {
+                let sid = SecurityId(NonZeroU32::new(raw_sid).unwrap());
+                for class in [
+                    FsNodeClass::File(FileClass::AnonFsNode),
+                    FsNodeClass::File(FileClass::Dir),
+                    FsNodeClass::File(FileClass::ChrFile),
+                    FsNodeClass::Socket(SocketClass::UnixStreamSocket),
+                    FsNodeClass::Socket(SocketClass::NetlinkRouteSocket),
+                    FsNodeClass::Socket(SocketClass::VsockSocket),
+                ] {
+                    state.set_sid_and_class(sid, class);
+                    assert!(state.is_labeled());
+                    assert_eq!(state.sid(), Some(sid));
+                    assert_eq!(state.class(), Some(class));
+                    assert_eq!(state.sid_and_class(), (Some(sid), Some(class)));
+                }
+            }
+
+            // Verify `set_from_task` pointer tagging, class preservation, zero-clone reads, and
+            // `Drop` releasing the `Arc` directly.
+            let task_info = current_task.persistent_info.clone();
+            let task_sid = task_info.real_creds().security_state.current_sid;
+            let baseline_count = Arc::strong_count(&task_info);
+            {
+                let task_state = FsNodeState::default();
+                assert_eq!(
+                    task_state.ensure_class(FsNodeClass::File(FileClass::LnkFile)),
+                    FsNodeClass::File(FileClass::LnkFile)
+                );
+                task_state.set_from_task(&task_info);
+                assert_eq!(Arc::strong_count(&task_info), baseline_count + 1);
+                assert!(task_state.is_labeled());
+
+                // Reading `task_state`, `sid`, `class`, and `sid_and_class` borrows without cloning
+                // the `Arc`.
+                assert_eq!(task_state.task_state(), Some(&task_info));
+                assert_eq!(task_state.sid(), Some(task_sid));
+                assert_eq!(task_state.class(), Some(FsNodeClass::File(FileClass::LnkFile)));
+                assert_eq!(
+                    task_state.sid_and_class(),
+                    (Some(task_sid), Some(FsNodeClass::File(FileClass::LnkFile)))
+                );
+                assert_eq!(Arc::strong_count(&task_info), baseline_count + 1);
+
+                // Subsequent `ensure_class` calls on a `FromTask` node preserve the existing
+                // class and allocation.
+                assert_eq!(
+                    task_state.ensure_class(FsNodeClass::File(FileClass::File)),
+                    FsNodeClass::File(FileClass::LnkFile)
+                );
+                assert_eq!(Arc::strong_count(&task_info), baseline_count + 1);
+            }
+            assert_eq!(Arc::strong_count(&task_info), baseline_count);
+        })
+        .await;
+    }
 }

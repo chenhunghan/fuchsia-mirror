@@ -12,6 +12,7 @@ use crate::arch_rs::x86::interrupts::{X86_INT_PLATFORM_BASE, X86_INT_PLATFORM_MA
 #[cfg(console_enabled)]
 use crate::console::{CMD_AVAIL_NORMAL, CmdArgs, static_command};
 use crate::dev_interrupt::{InterruptPolarity, InterruptTriggerMode};
+use crate::ksync_kernel::TrackedSpinlock;
 use crate::vm::arch_vm_aspace::{
     ARCH_MMU_FLAG_PERM_READ, ARCH_MMU_FLAG_PERM_WRITE, ARCH_MMU_FLAG_UNCACHED_DEVICE,
 };
@@ -24,7 +25,7 @@ use debug::ltrace::KernelConsoleWriter;
 use debug::ltracef;
 use fbl::Array;
 use kalloc::Box;
-use ksync::{KMutex, RawSpinlock, guarded, lock};
+use ksync::{KMutex, guarded, lock};
 use lazy_init::LazyInit;
 use zx_status::Status;
 use zx_types::zx_status_t;
@@ -93,7 +94,7 @@ pub struct IoApicState {
     pub isa_overrides: [IoApicIsaOverride; NUM_ISA_IRQS],
 
     #[mutex]
-    lock: KMutex<RawSpinlock>,
+    lock: KMutex<TrackedSpinlock>,
 }
 
 // SAFETY: `IoApicState` is safe to send and share across threads because the internal `io_apics`

@@ -12,14 +12,14 @@ use fidl_fuchsia_bluetooth::{self as fidl_bt, ErrorCode};
 use fidl_fuchsia_bluetooth_bredr as bredr;
 use fuchsia_async as fasync;
 use fuchsia_bluetooth::profile::{
-    ChannelParameters, ProtocolDescriptor, Psm, ServiceDefinition, l2cap_connect_parameters,
-    psm_from_protocol,
+    ChannelParameters, ProtocolDescriptor, Psm, ServiceDefinition,
+    l2cap_connect_parameters_with_security, psm_from_protocol,
 };
 use fuchsia_bluetooth::types::PeerId;
 use fuchsia_inspect_derive::Inspect;
 use futures::channel::mpsc;
 use futures::select;
-use futures::stream::{FusedStream, Stream, StreamExt};
+use futures::stream::{BoxStream, FusedStream, Stream, StreamExt};
 use log::{info, trace, warn};
 use std::collections::HashSet;
 use std::ops::RangeFrom;
@@ -27,16 +27,18 @@ use std::ops::RangeFrom;
 use crate::fidl_service::Service;
 use crate::profile::*;
 use crate::rfcomm::RfcommServer;
-use crate::types::{ServiceGroup, ServiceGroupHandle, Services};
+use crate::types::{
+    ClientReceiverEvent, ConnectionReceiverClient, ServiceGroup, ServiceGroupHandle, Services,
+};
 
 /// Unique identifier assigned to the currently active managed advertisement ID.
 type ManagedAdvertisementId = u64;
 
 /// A stream associated with a FIDL client's `bredr.Advertise` request. Produces an event any time
-/// the client's `ConnectionReceiver` stream produces an event.
+/// the client's connection receiver stream produces an event.
 /// On stream termination, returns the unique `ServiceGroupHandle` associated with this FIDL client.
 type ManagedAdvertisementEventStream = StreamWithEpitaph<
-    Tagged<ServiceGroupHandle, bredr::ConnectionReceiverEventStream>,
+    Tagged<ServiceGroupHandle, BoxStream<'static, Result<ClientReceiverEvent, fidl::Error>>>,
     ServiceGroupHandle,
 >;
 
@@ -44,14 +46,14 @@ type ManagedAdvertisementEventStream = StreamWithEpitaph<
 struct ManagedAdvertisement {
     /// Unique identifier describing this advertisement.
     id: ManagedAdvertisementId,
-    /// The control handle associated with the `ConnectionReceiver` stream for this advertisement.
+    /// The control handle associated with the `ConnectionReceiver2` stream for this advertisement.
     /// Used to send an `OnRevoke` event to cancel this advertisement.
-    connection_receiver_handle: bredr::ConnectionReceiverControlHandle,
-    /// The connection relay that processes incoming `bredr.ConnectionReceiver.Connect` requests
+    connection_receiver_handle: bredr::ConnectionReceiver2ControlHandle,
+    /// The connection relay that processes incoming `bredr.ConnectionReceiver2.Connected` requests
     /// from the upstream `Profile` server. These represent incoming L2CAP connections made by a
     /// remote peer.
     connection_relay:
-        StreamWithEpitaph<bredr::ConnectionReceiverRequestStream, ManagedAdvertisementId>,
+        StreamWithEpitaph<bredr::ConnectionReceiver2RequestStream, ManagedAdvertisementId>,
 }
 
 /// The current advertisement status of the `ProfileRegistrar`.
@@ -68,7 +70,7 @@ enum AdvertiseStatus {
 
 impl Stream for AdvertiseStatus {
     type Item = StreamItem<
-        <bredr::ConnectionReceiverRequestStream as Stream>::Item,
+        <bredr::ConnectionReceiver2RequestStream as Stream>::Item,
         ManagedAdvertisementId,
     >;
 
@@ -105,8 +107,12 @@ impl AdvertiseStatus {
 
 fn get_parameters_from_advertise_request(
     payload: bredr::ProfileAdvertiseRequest,
-) -> Result<(bredr::ConnectionReceiverProxy, ChannelParameters), Error> {
-    let receiver = payload.receiver.unwrap().into_proxy();
+) -> Result<(ConnectionReceiverClient, ChannelParameters), Error> {
+    let receiver = match (payload.connection_receiver, payload.receiver) {
+        (Some(receiver), None) => ConnectionReceiverClient::V2(receiver.into_proxy()),
+        (None, Some(receiver)) => ConnectionReceiverClient::V1(receiver.into_proxy()),
+        _ => return Err(format_err!("Expected exactly one of connection_receiver or receiver")),
+    };
     let parameters = ChannelParameters::try_from(&payload.parameters.unwrap_or_default())?;
     Ok((receiver, parameters))
 }
@@ -216,7 +222,11 @@ impl ProfileRegistrar {
             .map(|p| ProtocolDescriptor::try_from(p))
             .collect::<Result<Vec<_>, _>>()?;
         match psm_from_protocol(&local).ok_or_else(|| format_err!("No PSM provided"))? {
-            Psm::RFCOMM => self.rfcomm_server.new_l2cap_connection(peer_id, channel.try_into()?),
+            Psm::RFCOMM => self.rfcomm_server.new_l2cap_connection(
+                peer_id,
+                channel.try_into()?,
+                self.registered_services.security_requirements(),
+            ),
             psm => {
                 match self.registered_services.iter().find(|(_, client)| client.contains_psm(psm)) {
                     Some((_, client)) => client.relay_connected(peer_id, channel, protocol),
@@ -233,25 +243,25 @@ impl ProfileRegistrar {
             return Ok(());
         }
 
-        let l2cap_channel = match self
-            .profile_upstream
-            .connect(
-                &peer_id.into(),
-                &l2cap_connect_parameters(Psm::RFCOMM, fidl_bt::ChannelMode::Basic),
-            )
-            .await
-        {
-            Ok(Ok(channel)) => channel.try_into().unwrap(),
-            Ok(Err(e)) => {
-                return Err(e);
-            }
-            Err(e) => {
-                warn!(peer_id:%; "Couldn't establish L2CAP connection {e:?}");
-                return Err(ErrorCode::Failed);
-            }
-        };
+        let security_requirements = self.registered_services.security_requirements();
+        let connect_params = l2cap_connect_parameters_with_security(
+            Psm::RFCOMM,
+            fidl_bt::ChannelMode::Basic,
+            security_requirements.as_ref().map(Into::into),
+        );
+        let l2cap_channel =
+            match self.profile_upstream.connect(&peer_id.into(), &connect_params).await {
+                Ok(Ok(channel)) => channel.try_into().unwrap(),
+                Ok(Err(e)) => {
+                    return Err(e);
+                }
+                Err(e) => {
+                    warn!(peer_id:%; "Couldn't establish L2CAP connection {e:?}");
+                    return Err(ErrorCode::Failed);
+                }
+            };
         self.rfcomm_server
-            .new_l2cap_connection(peer_id, l2cap_channel)
+            .new_l2cap_connection(peer_id, l2cap_channel, security_requirements)
             .map_err(|_| ErrorCode::Failed)
     }
 
@@ -326,7 +336,7 @@ impl ProfileRegistrar {
         let id = self.get_next_id();
         trace!(id:?, params:?; "Refreshing advertisement from registered services");
         let (connect_client, connect_requests) =
-            create_request_stream::<bredr::ConnectionReceiverMarker>();
+            create_request_stream::<bredr::ConnectionReceiver2Marker>();
         // The control handle will be used to revoke the advertisement any time a refresh is
         // requested.
         let connection_receiver_handle = connect_requests.control_handle();
@@ -355,13 +365,13 @@ impl ProfileRegistrar {
     /// assigned ServerChannels. The services are registered together with any existing RFCOMM
     /// services. Assumes `services` contain valid `ServiceDefinition` records.
     ///
-    /// Returns a stream of `ConnectionReceiverEvent`s. The event stream should be actively polled
+    /// Returns a stream of `ClientReceiverEvent`s. The event stream should be actively polled
     /// in order to detect when the client terminates the advertisement.
     async fn add_managed_advertisement(
         &mut self,
         mut services: Vec<ServiceDefinition>,
         parameters: ChannelParameters,
-        receiver: bredr::ConnectionReceiverProxy,
+        receiver: ConnectionReceiverClient,
         responder: bredr::ProfileAdvertiseResponder,
     ) -> Result<ManagedAdvertisementEventStream, Error> {
         // The requested PSMs must be disjoint from the existing set of PSMs as only one group
@@ -386,7 +396,7 @@ impl ProfileRegistrar {
         for mut service in services.iter_mut().filter(|def| is_rfcomm_service_definition(def)) {
             let server_channel = self
                 .rfcomm_server
-                .allocate_server_channel(receiver.clone())
+                .allocate_server_channel(receiver.clone(), parameters.security_requirements.clone())
                 .await
                 .expect("just checked");
             update_svc_def_with_server_channel(&mut service, server_channel)?;
@@ -453,15 +463,11 @@ impl ProfileRegistrar {
         request: bredr::ProfileRequest,
     ) -> Option<ManagedAdvertisementEventStream> {
         match request {
-            bredr::ProfileRequest::Advertise {
-                payload:
-                    original_payload @ bredr::ProfileAdvertiseRequest {
-                        services: Some(_),
-                        receiver: Some(_),
-                        ..
-                    },
-                responder,
-            } => {
+            bredr::ProfileRequest::Advertise { payload: original_payload, responder }
+                if original_payload.services.is_some()
+                    && (original_payload.connection_receiver.is_some()
+                        ^ original_payload.receiver.is_some()) =>
+            {
                 let Ok(services_local) =
                     ServiceDefinition::try_from_fidl(original_payload.services.as_ref().unwrap())
                 else {
@@ -517,7 +523,7 @@ impl ProfileRegistrar {
                 };
             }
             bredr::ProfileRequest::Advertise { responder, .. } => {
-                // Otherwise, the Advertise `payload` is missing a required field.
+                // Otherwise, the Advertise payload has missing or mutually exclusive fields.
                 let _ = responder.send(Err(fidl_fuchsia_bluetooth::ErrorCode::InvalidArguments));
             }
             bredr::ProfileRequest::Connect { peer_id, connection, responder, .. } => {
@@ -550,20 +556,36 @@ impl ProfileRegistrar {
     async fn handle_connection_request(
         &mut self,
         request: StreamItem<
-            Result<bredr::ConnectionReceiverRequest, fidl::Error>,
+            Result<bredr::ConnectionReceiver2Request, fidl::Error>,
             ManagedAdvertisementId,
         >,
     ) -> Result<bool, Error> {
-        use bredr::ConnectionReceiverRequest::*;
+        use bredr::ConnectionReceiver2Request::*;
         match request {
-            StreamItem::Item(Ok(Connected { peer_id, channel, protocol, .. })) => {
-                self.handle_incoming_l2cap_connection(peer_id.into(), channel, protocol)?;
+            StreamItem::Item(Ok(Connected { payload, responder })) => {
+                let _ = responder.send();
+                let bredr::ConnectionReceiver2ConnectedRequest {
+                    peer_id: Some(peer_id),
+                    channel: Some(channel),
+                    protocol,
+                    ..
+                } = payload
+                else {
+                    return Err(format_err!(
+                        "`ConnectionReceiver2.Connected` missing required fields"
+                    ));
+                };
+                self.handle_incoming_l2cap_connection(
+                    peer_id.into(),
+                    channel,
+                    protocol.unwrap_or_default(),
+                )?;
             }
             StreamItem::Item(Ok(_UnknownMethod { .. })) => {
-                return Err(format_err!("`ConnectionReceiverRequest` unknown method"));
+                return Err(format_err!("`ConnectionReceiver2Request` unknown method"));
             }
             StreamItem::Item(Err(e)) => {
-                return Err(format_err!("Error in `ConnectionReceiver` stream: {e:?}"));
+                return Err(format_err!("Error in `ConnectionReceiver2` stream: {e:?}"));
             }
             StreamItem::Epitaph(id) => {
                 // If the `id` matches the current advertisement, then the upstream unexpectedly
@@ -621,7 +643,7 @@ impl ProfileRegistrar {
                 client_event = client_event_streams.next() => {
                     // `Profile` client has terminated their service advertisement.
                     let (service_id, log_str) = match client_event {
-                        Some(StreamItem::Item((id, Ok(bredr::ConnectionReceiverEvent::OnRevoke {})))) => (id, "revoked"),
+                        Some(StreamItem::Item((id, Ok(ClientReceiverEvent::OnRevoke)))) => (id, "revoked"),
                         Some(StreamItem::Epitaph(id)) => (id, "closed"),
                         _ => continue,
                     };
@@ -647,6 +669,7 @@ impl ProfileRegistrar {
 mod tests {
     use super::*;
 
+    use crate::rfcomm::test_util::{expect_peer_frame, send_peer_frame};
     use crate::types::tests::{
         l2cap_protocol, obex_service_definition, other_service_definition,
         rfcomm_service_definition,
@@ -657,8 +680,11 @@ mod tests {
         expect_stream_item, expect_stream_pending, expect_stream_terminated, run_while,
     };
     use async_utils::PollExt;
+    use bt_rfcomm::frame::{Frame, FrameData};
+    use bt_rfcomm::{DLCI, Role};
     use fidl::endpoints::{create_proxy, create_proxy_and_stream};
-    use fuchsia_bluetooth::profile::DataElement;
+    use fuchsia_bluetooth::profile::{DataElement, l2cap_connect_parameters};
+    use fuchsia_bluetooth::types::Channel;
     use futures::{Future, FutureExt, SinkExt};
     use std::pin::pin;
 
@@ -735,14 +761,27 @@ mod tests {
         client: &bredr::ProfileProxy,
         services: Vec<bredr::ServiceDefinition>,
     ) -> (
-        bredr::ConnectionReceiverRequestStream,
+        bredr::ConnectionReceiver2RequestStream,
+        impl Future<Output = Result<Vec<bredr::ServiceDefinition>, ErrorCode>>,
+    ) {
+        make_advertise_request_with_params(client, services, fidl_bt::ChannelParameters::default())
+    }
+
+    /// Creates a Profile::Advertise request with explicit `ChannelParameters`.
+    fn make_advertise_request_with_params(
+        client: &bredr::ProfileProxy,
+        services: Vec<bredr::ServiceDefinition>,
+        parameters: fidl_bt::ChannelParameters,
+    ) -> (
+        bredr::ConnectionReceiver2RequestStream,
         impl Future<Output = Result<Vec<bredr::ServiceDefinition>, ErrorCode>>,
     ) {
         let (connection, connection_stream) =
-            create_request_stream::<bredr::ConnectionReceiverMarker>();
+            create_request_stream::<bredr::ConnectionReceiver2Marker>();
         let request = bredr::ProfileAdvertiseRequest {
             services: Some(services),
-            receiver: Some(connection),
+            parameters: Some(parameters),
+            connection_receiver: Some(connection),
             ..Default::default()
         };
         let adv_fut = client
@@ -757,15 +796,15 @@ mod tests {
     fn expect_advertise_request(
         exec: &mut fasync::TestExecutor,
         profile_requests: &mut bredr::ProfileRequestStream,
-    ) -> bredr::ConnectionReceiverProxy {
+    ) -> bredr::ConnectionReceiver2Proxy {
         match expect_stream_item(exec, profile_requests) {
             Ok(bredr::ProfileRequest::Advertise {
-                payload: bredr::ProfileAdvertiseRequest { services, receiver, .. },
+                payload: bredr::ProfileAdvertiseRequest { services, connection_receiver, .. },
                 responder,
                 ..
             }) => {
                 let _ = responder.send(Ok(&advertise_response(services.unwrap())));
-                receiver.unwrap().into_proxy()
+                connection_receiver.unwrap().into_proxy()
             }
             x => panic!("Expected advertise request, got: {x:?}"),
         }
@@ -1041,6 +1080,66 @@ mod tests {
             run_while(&mut exec, &mut handler_fut, &mut adv_fut);
     }
 
+    /// Exercises a downstream service advertisement using the deprecated `receiver` field.
+    #[fuchsia::test]
+    fn handle_advertise_request_with_deprecated_receiver() {
+        let (mut exec, server, mut upstream_requests) = setup_server();
+
+        let (service_sender, handler_fut) = setup_handler_fut(server);
+        let mut handler_fut = pin!(handler_fut);
+        exec.run_until_stalled(&mut handler_fut).expect_pending("server active");
+
+        let client = new_client(&mut exec, service_sender.clone(), &mut handler_fut);
+        let psm = Psm::new(10);
+        let services = vec![
+            bredr::ServiceDefinition::try_from(&other_service_definition(psm)).unwrap(),
+            bredr::ServiceDefinition::try_from(&rfcomm_service_definition(None)).unwrap(),
+        ];
+        let (connection, mut connection_stream) =
+            create_request_stream::<bredr::ConnectionReceiverMarker>();
+        let request = bredr::ProfileAdvertiseRequest {
+            services: Some(services),
+            receiver: Some(connection),
+            ..Default::default()
+        };
+        let adv_fut = client
+            .advertise(request)
+            .map(|fidl_result| fidl_result.unwrap().map(|r| r.services.unwrap()));
+        let mut adv_fut = pin!(adv_fut);
+        exec.run_until_stalled(&mut adv_fut).expect_pending("waiting for advertise response");
+        exec.run_until_stalled(&mut handler_fut).expect_pending("server active");
+
+        let upstream_receiver = expect_advertise_request(&mut exec, &mut upstream_requests);
+        let (adv_result, mut handler_fut) = run_while(&mut exec, &mut handler_fut, &mut adv_fut);
+        assert_eq!(adv_result.expect("successful advertisement").len(), 2);
+        expect_stream_pending(&mut exec, &mut connection_stream);
+
+        // Incoming L2CAP connection on `psm` is relayed to the V1 `ConnectionReceiver`.
+        let peer_id = PeerId(12);
+        let _ = upstream_receiver
+            .connected(bredr::ConnectionReceiver2ConnectedRequest {
+                peer_id: Some(peer_id.into()),
+                channel: Some(bredr::Channel::default()),
+                protocol: Some(l2cap_protocol(psm)),
+                ..Default::default()
+            })
+            .check()
+            .expect("valid FIDL request");
+        exec.run_until_stalled(&mut handler_fut).expect_pending("server active");
+        let event = expect_stream_item(&mut exec, &mut connection_stream);
+        assert_matches!(
+            event,
+            Ok(bredr::ConnectionReceiverRequest::Connected { peer_id: id, .. }) if id == peer_id.into()
+        );
+
+        // Client revoking via V1 `ConnectionReceiver` unregisters upstream.
+        let mut upstream_event_stream = upstream_receiver.take_event_stream();
+        connection_stream.control_handle().send_on_revoke().expect("can send FIDL revoke event");
+        exec.run_until_stalled(&mut handler_fut).expect_pending("server active");
+        let revoke = expect_stream_item(&mut exec, &mut upstream_event_stream);
+        assert_matches!(revoke, Ok(bredr::ConnectionReceiver2Event::OnRevoke {}));
+    }
+
     /// Tests handling two advertise requests with overlapping PSMs. The first one
     /// should succeed and be relayed upstream. The second one should fail since it
     /// is requesting already-allocated PSMs - the responder should be notified of the error.
@@ -1117,13 +1216,16 @@ mod tests {
         // First advertisement request should be relayed upstream with the 2 services.
         let receiver1 = match expect_stream_item(&mut exec, &mut upstream_requests) {
             Ok(bredr::ProfileRequest::Advertise {
-                payload: bredr::ProfileAdvertiseRequest { services: Some(services), receiver, .. },
+                payload:
+                    bredr::ProfileAdvertiseRequest {
+                        services: Some(services), connection_receiver, ..
+                    },
                 responder,
                 ..
             }) => {
                 assert_eq!(services.len(), n1);
                 let _ = responder.send(Ok(&advertise_response(services)));
-                receiver.unwrap().into_proxy()
+                connection_receiver.unwrap().into_proxy()
             }
             x => panic!("Expected advertise request, got: {:?}", x),
         };
@@ -1153,7 +1255,7 @@ mod tests {
         {
             let mut event_stream1 = receiver1.take_event_stream();
             let revoke1 = expect_stream_item(&mut exec, &mut event_stream1);
-            assert_matches!(revoke1, Ok(bredr::ConnectionReceiverEvent::OnRevoke {}));
+            assert_matches!(revoke1, Ok(bredr::ConnectionReceiver2Event::OnRevoke {}));
         }
         // Simulate the upstream Profile server acknowledging it by terminating the advertisement.
         drop(receiver1);
@@ -1162,13 +1264,16 @@ mod tests {
         // We expect a new advertisement upstream with the combined set of services.
         let receiver2 = match expect_stream_item(&mut exec, &mut upstream_requests) {
             Ok(bredr::ProfileRequest::Advertise {
-                payload: bredr::ProfileAdvertiseRequest { services: Some(services), receiver, .. },
+                payload:
+                    bredr::ProfileAdvertiseRequest {
+                        services: Some(services), connection_receiver, ..
+                    },
                 responder,
                 ..
             }) => {
                 assert_eq!(services.len(), n1 + n2);
                 let _ = responder.send(Ok(&advertise_response(services)));
-                receiver.unwrap().into_proxy()
+                connection_receiver.unwrap().into_proxy()
             }
             x => panic!("Expected advertise request, got: {x:?}"),
         };
@@ -1176,27 +1281,39 @@ mod tests {
 
         // Both Client #1 and Client #2 should be advertising with their connection receivers open.
         // The response to Client #2's advertise request should only contain `services2`.
-        let (adv_result2, _handler_fut) = run_while(&mut exec, &mut handler_fut, &mut adv_fut2);
+        let (adv_result2, mut handler_fut) = run_while(&mut exec, &mut handler_fut, &mut adv_fut2);
         assert_eq!(adv_result2.expect("successful advertisement").len(), n2);
         expect_stream_pending(&mut exec, &mut connection_stream1);
         expect_stream_pending(&mut exec, &mut connection_stream2);
         // Can receive L2CAP connections on any of the registered PSMs.
-        receiver2
-            .connected(&PeerId(12).into(), bredr::Channel::default(), &l2cap_protocol(psm1))
+        let _ = receiver2
+            .connected(bredr::ConnectionReceiver2ConnectedRequest {
+                peer_id: Some(PeerId(12).into()),
+                channel: Some(bredr::Channel::default()),
+                protocol: Some(l2cap_protocol(psm1)),
+                ..Default::default()
+            })
+            .check()
             .expect("valid FIDL request");
 
         // `bt-rfcomm` should receive, parse, and pass to FIDL client #1 since it registered `psm1`.
         exec.run_until_stalled(&mut handler_fut).expect_pending("server active");
         let event = expect_stream_item(&mut exec, &mut connection_stream1);
-        assert_matches!(event, Ok(bredr::ConnectionReceiverRequest::Connected { .. }));
+        assert_matches!(event, Ok(bredr::ConnectionReceiver2Request::Connected { .. }));
 
         // Should be passed to FIDL client #2 since it registered `psm3`.
-        receiver2
-            .connected(&PeerId(12).into(), bredr::Channel::default(), &l2cap_protocol(psm3))
+        let _ = receiver2
+            .connected(bredr::ConnectionReceiver2ConnectedRequest {
+                peer_id: Some(PeerId(12).into()),
+                channel: Some(bredr::Channel::default()),
+                protocol: Some(l2cap_protocol(psm3)),
+                ..Default::default()
+            })
+            .check()
             .expect("valid FIDL request");
         exec.run_until_stalled(&mut handler_fut).expect_pending("server active");
         let event = expect_stream_item(&mut exec, &mut connection_stream2);
-        assert_matches!(event, Ok(bredr::ConnectionReceiverRequest::Connected { .. }));
+        assert_matches!(event, Ok(bredr::ConnectionReceiver2Request::Connected { .. }));
     }
 
     #[fuchsia::test]
@@ -1228,7 +1345,7 @@ mod tests {
         connection_stream.control_handle().send_on_revoke().expect("can send FIDL revoke event");
         exec.run_until_stalled(&mut handler_fut).expect_pending("server active");
         let revoke = expect_stream_item(&mut exec, &mut upstream_event_stream);
-        assert_matches!(revoke, Ok(bredr::ConnectionReceiverEvent::OnRevoke {}));
+        assert_matches!(revoke, Ok(bredr::ConnectionReceiver2Event::OnRevoke {}));
         // Simulate upstream processing the Revoke.
         drop(upstream_event_stream);
         drop(receiver);
@@ -1273,7 +1390,7 @@ mod tests {
         // advertisement by issuing the `OnRevoke` event.
         exec.run_until_stalled(&mut handler_fut).expect_pending("server active");
         let revoke = expect_stream_item(&mut exec, &mut upstream_event_stream);
-        assert_matches!(revoke, Ok(bredr::ConnectionReceiverEvent::OnRevoke {}));
+        assert_matches!(revoke, Ok(bredr::ConnectionReceiver2Event::OnRevoke {}));
         // Simulate upstream processing the Revoke.
         drop(upstream_event_stream);
         drop(receiver);
@@ -1337,7 +1454,11 @@ mod tests {
         let receiver1 = match expect_stream_item(&mut exec, &mut upstream_requests) {
             Ok(bredr::ProfileRequest::Advertise {
                 payload:
-                    bredr::ProfileAdvertiseRequest { services: Some(mut services), receiver, .. },
+                    bredr::ProfileAdvertiseRequest {
+                        services: Some(mut services),
+                        connection_receiver,
+                        ..
+                    },
                 responder,
                 ..
             }) => {
@@ -1349,7 +1470,7 @@ mod tests {
                     ..Default::default()
                 };
                 let _ = responder.send(Ok(&advertise_response(services)));
-                receiver.unwrap().into_proxy()
+                connection_receiver.unwrap().into_proxy()
             }
             x => panic!("Expected advertise request, got: {x:?}"),
         };
@@ -1386,7 +1507,7 @@ mod tests {
         {
             let mut event_stream1 = receiver1.take_event_stream();
             let revoke1 = expect_stream_item(&mut exec, &mut event_stream1);
-            assert_matches!(revoke1, Ok(bredr::ConnectionReceiverEvent::OnRevoke {}));
+            assert_matches!(revoke1, Ok(bredr::ConnectionReceiver2Event::OnRevoke {}));
         }
         // Simulate the upstream Profile server acknowledging it by terminating the advertisement.
         drop(receiver1);
@@ -1397,7 +1518,11 @@ mod tests {
         let new_receiver = match expect_stream_item(&mut exec, &mut upstream_requests) {
             Ok(bredr::ProfileRequest::Advertise {
                 payload:
-                    bredr::ProfileAdvertiseRequest { services: Some(mut services), receiver, .. },
+                    bredr::ProfileAdvertiseRequest {
+                        services: Some(mut services),
+                        connection_receiver,
+                        ..
+                    },
                 responder,
                 ..
             }) => {
@@ -1409,7 +1534,7 @@ mod tests {
                     ..Default::default()
                 };
                 let _ = responder.send(Ok(&advertise_response(services)));
-                receiver.unwrap().into_proxy()
+                connection_receiver.unwrap().into_proxy()
             }
             x => panic!("Expected advertise request, got: {x:?}"),
         };
@@ -1424,15 +1549,22 @@ mod tests {
         // service.
         let id = PeerId(123);
         let protocol: Vec<bredr::ProtocolDescriptor> = l2cap_protocol(assigned_psm1);
-        new_receiver
-            .connected(&id.into(), bredr::Channel::default(), &protocol)
+        let _ = new_receiver
+            .connected(bredr::ConnectionReceiver2ConnectedRequest {
+                peer_id: Some(id.into()),
+                channel: Some(bredr::Channel::default()),
+                protocol: Some(protocol.clone()),
+                ..Default::default()
+            })
+            .check()
             .expect("valid FIDL request");
         // bt-rfcomm should receive and route the connection to the correct upstream FIDL client.
         exec.run_until_stalled(&mut handler_fut).expect_pending("server active");
         match expect_stream_item(&mut exec, &mut connection_stream1) {
-            Ok(bredr::ConnectionReceiverRequest::Connected { peer_id, protocol, .. }) => {
-                assert_eq!(peer_id, id.into());
-                assert_eq!(protocol, protocol);
+            Ok(bredr::ConnectionReceiver2Request::Connected { payload, responder }) => {
+                responder.send().expect("can respond");
+                assert_eq!(payload.peer_id, Some(id.into()));
+                assert_eq!(payload.protocol, Some(protocol));
             }
             x => panic!("Expected incoming L2CAP request. got: {x:?}"),
         };
@@ -1440,15 +1572,22 @@ mod tests {
         // Second dynamic L2CAP PSM should be connectable as well.
         let id2 = PeerId(123);
         let protocol2 = l2cap_protocol(assigned_psm2);
-        new_receiver
-            .connected(&id2.into(), bredr::Channel::default(), &protocol2)
+        let _ = new_receiver
+            .connected(bredr::ConnectionReceiver2ConnectedRequest {
+                peer_id: Some(id2.into()),
+                channel: Some(bredr::Channel::default()),
+                protocol: Some(protocol2.clone()),
+                ..Default::default()
+            })
+            .check()
             .expect("valid FIDL request");
         // bt-rfcomm should receive and route the connection to the correct upstream FIDL client.
         exec.run_until_stalled(&mut handler_fut).expect_pending("server active");
         match expect_stream_item(&mut exec, &mut connection_stream2) {
-            Ok(bredr::ConnectionReceiverRequest::Connected { peer_id, protocol, .. }) => {
-                assert_eq!(peer_id, id.into());
-                assert_eq!(protocol, protocol2);
+            Ok(bredr::ConnectionReceiver2Request::Connected { payload, responder }) => {
+                responder.send().expect("can respond");
+                assert_eq!(payload.peer_id, Some(id.into()));
+                assert_eq!(payload.protocol, Some(protocol2));
             }
             x => panic!("Expected incoming L2CAP request. got: {x:?}"),
         };
@@ -1512,7 +1651,7 @@ mod tests {
         {
             let mut es = upstream_recv1.take_event_stream();
             let r = expect_stream_item(&mut exec, &mut es);
-            assert_matches!(r, Ok(bredr::ConnectionReceiverEvent::OnRevoke {}));
+            assert_matches!(r, Ok(bredr::ConnectionReceiver2Event::OnRevoke {}));
         }
         drop(upstream_recv1);
         exec.run_until_stalled(&mut handler_fut).expect_pending("server active");
@@ -1583,7 +1722,7 @@ mod tests {
         {
             let mut event_stream1 = receiver1.take_event_stream();
             let revoke1 = expect_stream_item(&mut exec, &mut event_stream1);
-            assert_matches!(revoke1, Ok(bredr::ConnectionReceiverEvent::OnRevoke {}));
+            assert_matches!(revoke1, Ok(bredr::ConnectionReceiver2Event::OnRevoke {}));
         }
         drop(receiver1);
         exec.run_until_stalled(&mut handler_fut).expect_pending("server active");
@@ -1632,5 +1771,229 @@ mod tests {
         let _ = exec.run_until_stalled(&mut handler_fut);
         let res = exec.run_until_stalled(&mut adv_fut);
         assert_matches!(res, Poll::Ready(Err(fidl_fuchsia_bluetooth::ErrorCode::InvalidArguments)));
+    }
+
+    #[fuchsia::test]
+    fn sabm_rejected_when_session_security_does_not_meet_channel_requirements() {
+        let (mut exec, server, mut upstream_requests) = setup_server();
+        let (service_sender, handler_fut) = setup_handler_fut(server);
+        let mut handler_fut = pin!(handler_fut);
+        exec.run_until_stalled(&mut handler_fut).expect_pending("server active");
+
+        // 1. Client 1 advertises a low-security RFCOMM service (`authentication_required: false`).
+        let client1 = new_client(&mut exec, service_sender.clone(), &mut handler_fut);
+        let services1 =
+            vec![bredr::ServiceDefinition::try_from(&rfcomm_service_definition(None)).unwrap()];
+        let low_sec_params = fidl_bt::ChannelParameters {
+            security_requirements: Some(fidl_bt::SecurityRequirements {
+                authentication_required: Some(false),
+                secure_connections_required: Some(false),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let (mut connection_stream1, adv_fut1) =
+            make_advertise_request_with_params(&client1, services1, low_sec_params);
+        let mut adv_fut1 = pin!(adv_fut1);
+        exec.run_until_stalled(&mut adv_fut1).expect_pending("waiting for advertise response");
+        exec.run_until_stalled(&mut handler_fut).expect_pending("server active");
+
+        let receiver1 = expect_advertise_request(&mut exec, &mut upstream_requests);
+        let (adv_res1, mut handler_fut) = run_while(&mut exec, &mut handler_fut, &mut adv_fut1);
+        let advertised1 =
+            ServiceDefinition::try_from_fidl(&adv_res1.expect("advertise 1 ok")).unwrap();
+        let sc1 = *server_channels_from_service_definitions(&advertised1).iter().next().unwrap();
+
+        // 2. Remote peer connects over L2CAP under the low-security advertisement and starts mux.
+        let peer_id = PeerId(42);
+        let (local_l2cap, mut remote_l2cap) = Channel::create_socket_pair();
+        let _ = receiver1
+            .connected(bredr::ConnectionReceiver2ConnectedRequest {
+                peer_id: Some(peer_id.into()),
+                channel: Some(bredr::Channel::try_from(local_l2cap).unwrap()),
+                protocol: Some(l2cap_protocol(Psm::RFCOMM)),
+                ..Default::default()
+            })
+            .check()
+            .expect("valid FIDL connected");
+        exec.run_until_stalled(&mut handler_fut).expect_pending("server active");
+
+        let mux_sabm = Frame::make_sabm_command(Role::Unassigned, DLCI::MUX_CONTROL_DLCI);
+        send_peer_frame(&mut exec, &mut remote_l2cap, mux_sabm);
+        let _ = exec.run_until_stalled(&mut handler_fut);
+        let mux_resp = expect_peer_frame(&mut exec, &mut remote_l2cap);
+        assert_eq!(mux_resp.data, FrameData::UnnumberedAcknowledgement);
+
+        // 3. Client 2 dynamically advertises a high-security RFCOMM service (`authentication_required: true`).
+        let client2 = new_client(&mut exec, service_sender.clone(), &mut handler_fut);
+        let services2 =
+            vec![bredr::ServiceDefinition::try_from(&rfcomm_service_definition(None)).unwrap()];
+        let high_sec_params = fidl_bt::ChannelParameters {
+            security_requirements: Some(fidl_bt::SecurityRequirements {
+                authentication_required: Some(true),
+                secure_connections_required: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let (mut connection_stream2, adv_fut2) =
+            make_advertise_request_with_params(&client2, services2, high_sec_params);
+        let mut adv_fut2 = pin!(adv_fut2);
+        exec.run_until_stalled(&mut adv_fut2).expect_pending("waiting for advertise response");
+        exec.run_until_stalled(&mut handler_fut).expect_pending("server active");
+
+        // Upstream receives revoke for old advertisement and registers combined advertisement.
+        {
+            let mut event_stream1 = receiver1.take_event_stream();
+            let revoke1 = expect_stream_item(&mut exec, &mut event_stream1);
+            assert_matches!(revoke1, Ok(bredr::ConnectionReceiver2Event::OnRevoke {}));
+        }
+        drop(receiver1);
+        exec.run_until_stalled(&mut handler_fut).expect_pending("server active");
+        let _receiver2 = expect_advertise_request(&mut exec, &mut upstream_requests);
+        let (adv_res2, mut handler_fut) = run_while(&mut exec, &mut handler_fut, &mut adv_fut2);
+        let advertised2 =
+            ServiceDefinition::try_from_fidl(&adv_res2.expect("advertise 2 ok")).unwrap();
+        let sc2 = *server_channels_from_service_definitions(&advertised2).iter().next().unwrap();
+        assert_ne!(sc1, sc2);
+
+        // 4. Remote peer on the pre-existing low-security L2CAP session sends SABM for high-security `sc2`.
+        let high_sec_dlci = sc2.to_dlci(Role::Responder).unwrap();
+        let high_sec_sabm = Frame::make_sabm_command(Role::Initiator, high_sec_dlci);
+        send_peer_frame(&mut exec, &mut remote_l2cap, high_sec_sabm);
+        let _ = exec.run_until_stalled(&mut handler_fut);
+
+        // `bt-rfcomm` must reject the SABM with DisconnectedMode (DM) and NOT deliver a channel to Client 2.
+        let resp_frame = expect_peer_frame(&mut exec, &mut remote_l2cap);
+        assert_eq!(resp_frame.dlci, high_sec_dlci);
+        assert_eq!(resp_frame.data, FrameData::DisconnectedMode);
+        expect_stream_pending(&mut exec, &mut connection_stream2);
+
+        // Meanwhile, low-security `sc1` remains accessible over this session.
+        let low_sec_dlci = sc1.to_dlci(Role::Responder).unwrap();
+        let low_sec_sabm = Frame::make_sabm_command(Role::Initiator, low_sec_dlci);
+        send_peer_frame(&mut exec, &mut remote_l2cap, low_sec_sabm);
+        let _ = exec.run_until_stalled(&mut handler_fut);
+        let event1 = expect_stream_item(&mut exec, &mut connection_stream1);
+        assert_matches!(event1, Ok(bredr::ConnectionReceiver2Request::Connected { .. }));
+    }
+
+    #[fuchsia::test]
+    fn outbound_rfcomm_connection_uses_combined_security_requirements() {
+        let (mut exec, server, mut upstream_requests) = setup_server();
+        let (service_sender, handler_fut) = setup_handler_fut(server);
+        let mut handler_fut = pin!(handler_fut);
+        exec.run_until_stalled(&mut handler_fut).expect_pending("server active");
+
+        // 1. Client 1 advertises a service requiring authentication.
+        let client1 = new_client(&mut exec, service_sender.clone(), &mut handler_fut);
+        let services1 =
+            vec![bredr::ServiceDefinition::try_from(&rfcomm_service_definition(None)).unwrap()];
+        let auth_only_params = fidl_bt::ChannelParameters {
+            security_requirements: Some(fidl_bt::SecurityRequirements {
+                authentication_required: Some(true),
+                secure_connections_required: None,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let (mut connection_stream1, adv_fut1) =
+            make_advertise_request_with_params(&client1, services1, auth_only_params);
+        let mut adv_fut1 = pin!(adv_fut1);
+        exec.run_until_stalled(&mut adv_fut1).expect_pending("waiting for advertise response");
+        exec.run_until_stalled(&mut handler_fut).expect_pending("server active");
+
+        let receiver1 = expect_advertise_request(&mut exec, &mut upstream_requests);
+        let (adv_res1, mut handler_fut) = run_while(&mut exec, &mut handler_fut, &mut adv_fut1);
+        let advertised1 =
+            ServiceDefinition::try_from_fidl(&adv_res1.expect("advertise 1 ok")).unwrap();
+        let sc1 = *server_channels_from_service_definitions(&advertised1).iter().next().unwrap();
+
+        // 2. Client 2 advertises a service requiring secure connections.
+        let client2 = new_client(&mut exec, service_sender.clone(), &mut handler_fut);
+        let services2 =
+            vec![bredr::ServiceDefinition::try_from(&rfcomm_service_definition(None)).unwrap()];
+        let sc_only_params = fidl_bt::ChannelParameters {
+            security_requirements: Some(fidl_bt::SecurityRequirements {
+                authentication_required: Some(false),
+                secure_connections_required: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let (_connection_stream2, adv_fut2) =
+            make_advertise_request_with_params(&client2, services2, sc_only_params);
+        let mut adv_fut2 = pin!(adv_fut2);
+        exec.run_until_stalled(&mut adv_fut2).expect_pending("waiting for advertise response");
+        exec.run_until_stalled(&mut handler_fut).expect_pending("server active");
+
+        {
+            let mut event_stream1 = receiver1.take_event_stream();
+            let revoke1 = expect_stream_item(&mut exec, &mut event_stream1);
+            assert_matches!(revoke1, Ok(bredr::ConnectionReceiver2Event::OnRevoke {}));
+        }
+        drop(receiver1);
+        exec.run_until_stalled(&mut handler_fut).expect_pending("server active");
+        let _receiver2 = expect_advertise_request(&mut exec, &mut upstream_requests);
+        let (_adv_res2, mut handler_fut) = run_while(&mut exec, &mut handler_fut, &mut adv_fut2);
+
+        // 3. Client 3 initiates an outbound RFCOMM connection to `peer_id`.
+        let client3 = new_client(&mut exec, service_sender, &mut handler_fut);
+        let peer_id = PeerId(99);
+        let connect_fut = client3.connect(
+            &peer_id.into(),
+            &bredr::ConnectParameters::Rfcomm(bredr::RfcommParameters {
+                channel: Some(1),
+                ..Default::default()
+            }),
+        );
+        let mut connect_fut = pin!(connect_fut);
+        exec.run_until_stalled(&mut connect_fut).expect_pending("waiting for connect");
+        exec.run_until_stalled(&mut handler_fut).expect_pending("server active");
+
+        // 4. The outbound L2CAP connection for Psm::RFCOMM must include the combined security
+        // requirements of both registered services.
+        let expected_combined_sec = fidl_bt::SecurityRequirements {
+            authentication_required: Some(true),
+            secure_connections_required: Some(true),
+            ..Default::default()
+        };
+        let (local_l2cap, mut remote_l2cap) = Channel::create_socket_pair();
+        match expect_stream_item(&mut exec, &mut upstream_requests) {
+            Ok(bredr::ProfileRequest::Connect {
+                peer_id: req_peer,
+                connection: bredr::ConnectParameters::L2cap(l2cap_params),
+                responder,
+            }) => {
+                assert_eq!(req_peer, peer_id.into());
+                assert_eq!(l2cap_params.psm, Some(bredr::PSM_RFCOMM));
+                let params = l2cap_params.parameters.expect("channel parameters present");
+                assert_eq!(params.security_requirements, Some(expected_combined_sec));
+                let _ = responder.send(Ok(bredr::Channel::try_from(local_l2cap).unwrap()));
+            }
+            x => panic!("Expected upstream L2CAP connect request, got: {x:?}"),
+        }
+        let _ = exec.run_until_stalled(&mut handler_fut);
+
+        // 5. Complete mux startup and verify that an inbound SABM for `sc1` succeeds on this
+        // high-security session.
+        let mux_sabm = expect_peer_frame(&mut exec, &mut remote_l2cap);
+        assert_eq!(mux_sabm.dlci, DLCI::MUX_CONTROL_DLCI);
+        assert_eq!(mux_sabm.data, FrameData::SetAsynchronousBalancedMode);
+        let mux_ua = Frame::make_ua_response(Role::Unassigned, DLCI::MUX_CONTROL_DLCI);
+        send_peer_frame(&mut exec, &mut remote_l2cap, mux_ua);
+        let _ = exec.run_until_stalled(&mut handler_fut);
+        // Drain the outbound PN command for channel 1 triggered by `client3.connect`.
+        let _outbound_pn = expect_peer_frame(&mut exec, &mut remote_l2cap);
+
+        let sc1_dlci = sc1.to_dlci(Role::Initiator).unwrap();
+        let sc1_sabm = Frame::make_sabm_command(Role::Responder, sc1_dlci);
+        send_peer_frame(&mut exec, &mut remote_l2cap, sc1_sabm);
+        let _ = exec.run_until_stalled(&mut handler_fut);
+        let sc1_resp = expect_peer_frame(&mut exec, &mut remote_l2cap);
+        assert_eq!(sc1_resp.dlci, sc1_dlci);
+        assert_eq!(sc1_resp.data, FrameData::UnnumberedAcknowledgement);
+        let event1 = expect_stream_item(&mut exec, &mut connection_stream1);
+        assert_matches!(event1, Ok(bredr::ConnectionReceiver2Request::Connected { .. }));
     }
 }

@@ -9,25 +9,6 @@ import("//build/testing/cc_test_executable.gni")
 ###############################################################################
 # EXECUTABLES
 ###############################################################################
-cc_test_executable("disk_backed_logs_metadata_unittest_exe") {
-  testonly = true
-
-  sources = [ "disk_backed_logs_metadata_unittest.cc" ]
-
-  deps = [
-    "//src/developer/forensics/feedback_data/system_log_recorder:src",
-    "//src/developer/forensics/testing:gtest_with_syslog_main",
-    "//src/developer/forensics/testing:scoped_memfs_manager",
-    "//src/developer/forensics/testing:unit_test_fixture",
-    "//src/developer/forensics/testing/stubs:cobalt",
-    "//src/developer/forensics/utils/cobalt",
-    "//src/lib/files",
-    "//src/lib/timekeeper:testing",
-    "//third_party/googletest:gmock",
-    "//third_party/googletest:gtest",
-  ]
-}
-
 cc_test_executable("log_message_store_unittest_exe") {
   testonly = true
 
@@ -150,13 +131,6 @@ cc_test_executable("writer_unittest_exe") {
 ###############################################################################
 # COMPONENTS
 ###############################################################################
-fuchsia_unittest_component("disk_backed_logs_metadata_unittest") {
-  deps = [
-    ":disk_backed_logs_metadata_unittest_exe",
-    "//src/sys/test_runners:tmp_storage",
-  ]
-}
-
 fuchsia_unittest_component("log_message_store_unittest") {
   deps = [ ":log_message_store_unittest_exe" ]
 }
@@ -195,7 +169,6 @@ fuchsia_unittest_component("writer_unittest") {
 ###############################################################################
 fuchsia_test_package("system-log-recorder-tests") {
   test_components = [
-    ":disk_backed_logs_metadata_unittest",
     ":log_message_store_unittest",
     ":lz4_encoding_unittest",
     ":reader_unittest",

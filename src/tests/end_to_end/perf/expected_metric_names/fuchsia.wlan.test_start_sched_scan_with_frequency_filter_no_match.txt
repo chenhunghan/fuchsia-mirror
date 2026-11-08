@@ -1,0 +1,3 @@
+[no-summarize-metrics]
+fuchsia.wlan.test_start_sched_scan_with_frequency_filter_no_match: Power
+fuchsia.wlan.test_start_sched_scan_with_frequency_filter_no_match: TotalEnergy

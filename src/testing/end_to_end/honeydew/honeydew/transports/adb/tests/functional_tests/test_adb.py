@@ -9,7 +9,13 @@ import pathlib
 import fuchsia_base_test
 from honeydew.device_classes import android_device
 from honeydew.transports.adb import adb as adb_transport
+from honeydew.transports.adb import errors as adb_errors
 from mobly import asserts, test_runner
+
+# Arbitrary ports for the forward/reverse tests. Nothing needs to listen on
+# them because the tests never open a connection through the binding.
+_DEVICE_PORT = 25000
+_HOST_PORT = 15000
 
 
 class AdbTest(fuchsia_base_test.FuchsiaBaseTest):
@@ -30,11 +36,10 @@ class AdbTest(fuchsia_base_test.FuchsiaBaseTest):
         for attr in ("root", "unroot", "use_adb_root"):
             self.adb.__dict__.pop(attr, None)
 
-    async def test_verify_supported_and_check_connection(self) -> None:
-        """Test case for ADB.verify_supported(), check_connection(), and wait_for_boot_complete()."""
+    def test_verify_supported_and_check_connection(self) -> None:
+        """Test case for ADB.verify_supported() and check_connection()."""
         self.adb.verify_supported()
         self.adb.check_connection()
-        self.adb.wait_for_boot_complete()
 
     async def test_adb_server_log_collected(self) -> None:
         """Verifies adb_server_N_log.txt is created in artifacts dir."""
@@ -145,6 +150,43 @@ class AdbTest(fuchsia_base_test.FuchsiaBaseTest):
         test_val = "test_val_123"
         self.adb.setprop(test_prop, test_val)
         asserts.assert_equal(self.adb.getprop(test_prop), test_val)
+
+    async def test_adb_forward(self) -> None:
+        """Test case for ADB.forward()."""
+        # `tcp:0` lets ADB pick a free host port and print it. Nothing has to
+        # listen on the device port; ADB connects to it only when a host
+        # client connects to the forwarded host port.
+        output = self.adb.forward(["tcp:0", f"tcp:{_DEVICE_PORT}"])
+        host_port = int(output.strip())
+        try:
+            asserts.assert_in(
+                f"tcp:{host_port} tcp:{_DEVICE_PORT}",
+                self.adb.forward(["--list"]),
+            )
+            # `--no-rebind` makes ADB reject rebinding the same host port.
+            with asserts.assert_raises(adb_errors.AdbCommandError):
+                self.adb.forward([f"tcp:{host_port}", f"tcp:{_DEVICE_PORT}"])
+        finally:
+            self.adb.forward(["--remove", f"tcp:{host_port}"])
+        asserts.assert_not_in(f"tcp:{host_port}", self.adb.forward(["--list"]))
+
+    async def test_adb_reverse(self) -> None:
+        """Test case for ADB.reverse()."""
+        # `tcp:0` lets adbd pick a free device port and print it. Nothing has
+        # to listen on the host port; ADB connects to it only when a device
+        # client connects to the reversed device port.
+        output = self.adb.reverse(["tcp:0", f"tcp:{_HOST_PORT}"])
+        device_port = int(output.strip())
+        try:
+            asserts.assert_in(
+                f"tcp:{device_port} tcp:{_HOST_PORT}",
+                self.adb.reverse(["--list"]),
+            )
+        finally:
+            self.adb.reverse(["--remove", f"tcp:{device_port}"])
+        asserts.assert_not_in(
+            f"tcp:{device_port}", self.adb.reverse(["--list"])
+        )
 
     async def test_adb_su_root_unroot(self) -> None:
         """Test case for ADB su_root(), su_unroot(), is_su_root, and use_su_root()."""

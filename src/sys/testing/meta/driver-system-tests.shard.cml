@@ -61,6 +61,10 @@
         },
         {
             service: [
+                "fuchsia.hardware.google.cryptobam.Service",
+                "fuchsia.hardware.google.cryptobam.TestService",
+                "fuchsia.hardware.google.gpdma.Service",
+                "fuchsia.hardware.google.gpdma.TestService",
                 "fuchsia.hardware.google.nanohub.DataChannelService",
                 "fuchsia.hardware.google.nanohub.Service",
             ],

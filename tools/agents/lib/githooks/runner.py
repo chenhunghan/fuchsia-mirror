@@ -5,8 +5,6 @@
 
 """Fuchsia Git hook CLI runner and hook dispatcher entrypoints."""
 
-from __future__ import annotations
-
 import argparse
 import os
 import sys
@@ -35,8 +33,12 @@ from agents.lib.githooks.reporters import ConsoleReporter
 
 AGENT_ENV_VARS: tuple[str, ...] = (
     "ANTIGRAVITY_AGENT",
+    "ANTIGRAVITY_CONVERSATION_ID",
     "GEMINI_CLI",
     "ANTIGRAVITY_EDITOR_APP_ROOT",
+    "CLAUDECODE",
+    "CLAUDE_CODE_SESSION_ID",
+    "FFX_AGENT_SESSION_ID",
 )
 
 _FALSY_VALUES: frozenset[str] = frozenset({"0", "false", "no", "n", "off", ""})

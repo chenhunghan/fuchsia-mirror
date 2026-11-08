@@ -763,9 +763,7 @@ class TestsFileMatcher:
             else:
                 target_label = options[0] if options else name
                 message = f"Build includes: {target_label}"
-                is_host_val = "fuchsia" not in labels and (
-                    "linux" in labels or "mac" in labels
-                )
+                is_host_val = "fuchsia" not in labels and "linux" in labels
             if max_score is not None and max_option is not None:
                 matches.append(
                     Suggestion(

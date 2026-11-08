@@ -1,0 +1,10 @@
+# Verify that atomic xchg on the stack rejects a non-scalar source operand.
+-- asm
+mov %r2, 0
+stxdw [%r10-8], %r2
+mov %r1, %r10
+lock xchg [%r10-8], %r1
+mov %r0, 0
+exit
+-- error
+cannot store a pointer or an uninitialized value to memory

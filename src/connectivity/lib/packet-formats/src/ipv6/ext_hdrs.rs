@@ -1080,7 +1080,17 @@ pub(super) fn is_valid_next_header_upper_layer(next_header: u8) -> bool {
         | Ipv6Proto::Proto(IpProto::Udp)
         | Ipv6Proto::Icmpv6
         | Ipv6Proto::NoNextHeader => true,
-        Ipv6Proto::Proto(IpProto::Reserved) | Ipv6Proto::Other(_) => false,
+        Ipv6Proto::Proto(IpProto::Ipv4Encap)
+        | Ipv6Proto::Proto(IpProto::Ipv6Encap)
+        // ESP is handled as an (unsupported) extension header by
+        // `Ipv6ExtensionHeaderImpl`, so it's never treated as an upper layer
+        // protocol.
+        //
+        // TODO(https://fxbug.dev/567135187): Stop extension header parsing at
+        // ESP once ESP is supported over IPv6.
+        | Ipv6Proto::Proto(IpProto::Esp)
+        | Ipv6Proto::Proto(IpProto::Reserved)
+        | Ipv6Proto::Other(_) => false,
     }
 }
 

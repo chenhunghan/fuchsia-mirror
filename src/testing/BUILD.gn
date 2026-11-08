@@ -2,6 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/bazel/bazel_test_suite.gni")
+
 group("testing") {
   testonly = true
   deps = [
@@ -15,15 +17,15 @@ group("tests") {
   testonly = true
 
   deps = [
+    ":bazel_tests",
     "catapult_converter:tests",
-    "end_to_end/libs/tests:tests($host_toolchain)",
     "fuzzing:tests",
     "host-target-testing:tests",
     "loadbench:tests",
-    "perfcompare:tests($host_toolchain)",
     "realm_client:tests",
     "sl4f:tests",
     "trf_codegen/bin:tests",
+    "trf_codegen/lib/macro:tests",
   ]
 }
 
@@ -39,4 +41,9 @@ group("e2e_tests") {
       "end_to_end/mobly_driver/tests/functional_tests:tests",
     ]
   }
+}
+
+bazel_test_suite("bazel_tests") {
+  host_tests = [ "//src/testing:host_tests" ]
+  target_tests = [ "//src/testing:target_tests" ]
 }

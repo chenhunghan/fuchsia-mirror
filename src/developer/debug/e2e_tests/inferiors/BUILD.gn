@@ -21,14 +21,19 @@ template("inferior") {
 
   target(_type, _target_bin) {
     output_name = _target_name
-    forward_variables_from(invoker, "*")
+    forward_variables_from(invoker, "*", [ "manifest_includes" ])
+  }
+
+  _manifest_includes = [ "syslog/client.shard.cml" ]
+  if (defined(invoker.manifest_includes)) {
+    _manifest_includes += invoker.manifest_includes
   }
 
   generated_file(_target_manifest) {
     outputs = [ "$target_gen_dir/$_target_manifest.cml" ]
     output_conversion = "json"
     contents = {
-      include = [ "syslog/client.shard.cml" ]
+      include = _manifest_includes
       program = {
         runner = "elf"
         binary = "bin/$_target_name"
@@ -43,6 +48,18 @@ template("inferior") {
       ":$_target_manifest",
     ]
   }
+}
+
+inferior("async_cpp_driver") {
+  sources = [ "async_cpp_driver.cc" ]
+  cflags = [ "-fno-inline-functions" ]
+  deps = [
+    "//sdk/lib/async:async-cpp",
+    "//sdk/lib/driver/runtime/testing/cpp",
+    "//sdk/lib/driver/testing/cpp",
+    "//src/devices/bin/driver_runtime",
+  ]
+  manifest_includes = [ "inspect/client.shard.cml" ]
 }
 
 inferior("step_plt") {
@@ -67,6 +84,14 @@ inferior("loop") {
   sources = [ "loop.cc" ]
 
   # Ensure std::ostream << doesn't get inlined.
+  cflags = [ "-fno-inline-functions" ]
+}
+
+inferior("infinite_loop") {
+  sources = [ "loop.cc" ]
+  defines = [ "INFINITE_LOOP" ]
+
+  # Ensure do_loop doesn't get inlined or optimized away.
   cflags = [ "-fno-inline-functions" ]
 }
 
@@ -185,10 +210,12 @@ fuchsia_component("starnix_proc_exception32") {
 fuchsia_package("zxdb_e2e_inferiors") {
   testonly = true
   deps = [
+    ":async_cpp_driver",
     ":async_rust",
     ":async_rust_multithreaded",
     ":bitfield",
     ":cpp_functions",
+    ":infinite_loop",
     ":inlined_crasher",
     ":loop",
     ":pretty_types",

@@ -12,8 +12,6 @@ manifest last). Missing consent fails closed, and no denial or failure
 skips evidence finalization.
 """
 
-from __future__ import annotations
-
 import asyncio
 import dataclasses
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -419,7 +417,7 @@ class DriverLab:
         recovery: RecoveryController | None = None,
         proxy_transport: ProxyTransport | None = None,
         direct_transport: DirectTransport | None = None,
-    ) -> "DriverLab":
+    ) -> DriverLab:
         """Connects to a target device or directly to a live driver moniker (Phase 2)."""
         endpoint_moniker = driver_moniker or node_id or target
         active_transport: ProxyTransport | DirectTransport

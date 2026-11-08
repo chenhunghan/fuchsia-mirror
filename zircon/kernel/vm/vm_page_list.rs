@@ -602,6 +602,9 @@ impl Drop for VmPageOrMarker {
 /// This allows for the majority of `VmPageList` iterations that are not intended to allow for
 /// clearing entries to the Empty state to allow limited mutation (such as between different content
 /// states), without being completely mutable.
+// Passed by value across `extern "C"` as the trivially-copyable single-pointer C++
+// `VmPageOrMarkerRef`.
+#[repr(transparent)]
 pub struct VmPageOrMarkerRef<'a> {
     slot: &'a mut VmPageOrMarker,
 }
@@ -1336,9 +1339,8 @@ impl<'a> BatchInserter<'a> {
             // Even if this is not our target node, we stash the result to use to optimize the
             // insertion later.
             // SAFETY: `self.list.list.get()` and `self.node.get()` are valid pointers.
-            entry = unsafe {
-                btree_lower_bound(self.list.list.get(), target_offset, self.node.get())
-            };
+            entry =
+                unsafe { btree_lower_bound(self.list.list.get(), target_offset, self.node.get()) };
             if !entry.node.is_null() && entry.offset == target_offset {
                 let node_ptr = entry.node.cast::<VmPageListNode>();
                 // SAFETY: As above.
@@ -3076,9 +3078,9 @@ impl VmPageList {
 
             // SAFETY: `lookup_or_allocate_internal` returns either null or a valid slot at
             // `new_start_offset - page_size`, which is distinct from `old_end` and `new_start`.
-            let Some(clipped_end) =
-                (unsafe { self.lookup_or_allocate_internal(new_start_offset - page_size).as_mut() })
-            else {
+            let Some(clipped_end) = (unsafe {
+                self.lookup_or_allocate_internal(new_start_offset - page_size).as_mut()
+            }) else {
                 if new_start_offset != new_end_offset {
                     self.return_empty_slot(new_start_offset);
                 }
@@ -3608,6 +3610,7 @@ impl VmPageList {
         self.for_every_page_and_gap_in_range_internal(
             start_offset,
             end_offset,
+            #[inline(always)]
             |entry| match entry {
                 PageOrGap::Page(p, off) => {
                     found_page_or_gap = true;
@@ -3793,6 +3796,7 @@ impl VmPageList {
         // inside an interval. In that case, we need to find both the start and the end of this
         // interval and evaluate compare_func on them.
         if !found_page_or_gap {
+            core::hint::cold_path();
             debug_assert!(self.is_offset_in_interval(start_offset));
             debug_assert!(self.is_offset_in_interval(end_offset - page_size));
 

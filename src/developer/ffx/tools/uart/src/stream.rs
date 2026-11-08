@@ -366,7 +366,9 @@ async fn connect_uart_stream_file(
         let file = open_and_lock_tty(p).await?;
         platform::configure_tty(file.as_fd(), baud)?;
         let owned_fd = OwnedFd::from(file);
-        let async_fd = tokio::io::unix::AsyncFd::new(owned_fd).map_err(|e| {
+        // SAFETY: `owned_fd` is an `OwnedFd` that owns a valid open file descriptor
+        // for the lifetime of the `AsyncFd`.
+        let async_fd = unsafe { tokio::io::unix::AsyncFd::register(owned_fd) }.map_err(|e| {
             ConnectionError::TtyConfigureFailed { error: format!("Failed to create AsyncFd: {e}") }
         })?;
 
@@ -455,8 +457,11 @@ mod tests {
         s1.set_nonblocking(true).unwrap();
         s2.set_nonblocking(true).unwrap();
 
-        let mut uart1 = AsyncUart(tokio::io::unix::AsyncFd::new(OwnedFd::from(s1)).unwrap());
-        let mut uart2 = AsyncUart(tokio::io::unix::AsyncFd::new(OwnedFd::from(s2)).unwrap());
+        // SAFETY: `OwnedFd` owns a valid open file descriptor for the lifetime of `AsyncFd`.
+        let mut uart1 =
+            AsyncUart(unsafe { tokio::io::unix::AsyncFd::register(OwnedFd::from(s1)) }.unwrap());
+        let mut uart2 =
+            AsyncUart(unsafe { tokio::io::unix::AsyncFd::register(OwnedFd::from(s2)) }.unwrap());
 
         uart1.write_all(b"hello uart").await.unwrap();
         let mut buf = [0u8; 10];

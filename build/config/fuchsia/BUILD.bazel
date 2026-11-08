@@ -2,9 +2,12 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("@fuchsia_build_info//:args.bzl", "scudo_default_options")
 load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
 load("@fuchsia_rules_common//build_flags:compiler_build_flags.bzl", "compiler_build_flags")
+load("@fuchsia_rules_common//build_flags:extra_linker_flags.bzl", "extra_linker_flags")
 load("//build/bazel/config/derived:compilation_modes.bzl", "is_release")
+load("//build/config/sanitizers:sanitizer_default_options.bzl", "sanitizer_default_options")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -14,7 +17,7 @@ build_flags(
     rustflags = ["-Cprefer-dynamic"],
     visibility = ["//visibility:public"],
 )
-# LINT.ThenChange(//build/config/fuchsia/BUILD.gn:dynamic_rust_standard_library)
+# LINT.ThenChange(BUILD.gn:dynamic_rust_standard_library)
 
 # LINT.IfChange(large_rust_stack)
 # Configure a larger (2MB) stack size for Rust binaries.
@@ -28,32 +31,33 @@ build_flags(
     rustflags = ["-Clink-args=-Wl,-zstack-size=0x200000"],
     visibility = ["//visibility:public"],
 )
-# LINT.ThenChange(//build/config/fuchsia/BUILD.gn:large_rust_stack)
+# LINT.ThenChange(BUILD.gn:large_rust_stack)
 
+# NOTE: In Bazel, -fPIC vs -fPIE is controlled by the C++ toolchain's `pic`
+# feature rather than response files so that a single fx_cc_library() target
+# can compile both *.pic.o (-fPIC) and *.o (-fPIE).
+# See //build/bazel/BAZEL_PIE_VS_PIC.md for full details.
 # LINT.IfChange(shared_library_config)
 build_flags(
     name = "shared_library_config",
-    cflags = ["-fPIC"],
-    ldflags = ["-fPIC"],
-    # NOTE: commented out because build_flags() does not support asmflags.
-    # asmflags = ["-fPIC"],
     visibility = ["//visibility:public"],
 )
 
 # LINT.ThenChange(BUILD.gn:shared_library_config)
 
 # LINT.IfChange(fdio_config)
-build_flags(
+extra_linker_flags(
     name = "fdio_config",
-    # This config is only a marker that is used to signal that a given executable
-    # should link with fdio. With fdio now getting built in this very build, there
-    # need to be a proper dependency.
-    # See the override of the `executable` template in
-    # //build/config/BUILDCONFIG.gni where that build edge is added.
+    executable_link_deps = select({
+        "@platforms//os:fuchsia": ["//sdk/lib/fdio"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )
-# LINT.ThenChange(//build/config/fuchsia/BUILD.gn:fdio_config)
+# LINT.ThenChange(BUILD.gn:fdio_config)
 
+# NOTE: See comment on shared_library_config above and
+# //build/bazel/BAZEL_PIE_VS_PIC.md.
 # LINT.IfChange(executable_config)
 build_flags(
     name = "executable_config",
@@ -73,7 +77,7 @@ build_flags(
     subflags = [":enable_zircon_asserts"] if not is_release else [],
     visibility = ["//visibility:public"],
 )
-# LINT.ThenChange(//build/config/fuchsia/BUILD.gn:zircon_asserts)
+# LINT.ThenChange(BUILD.gn:zircon_asserts)
 
 # LINT.IfChange(no_cpp_standard_library)
 build_flags(
@@ -81,7 +85,43 @@ build_flags(
     ldflags = ["-nostdlib++"],
     visibility = ["//visibility:public"],
 )
-# LINT.ThenChange(//build/config/fuchsia/BUILD.gn:no_cpp_standard_library)
+# LINT.ThenChange(BUILD.gn:no_cpp_standard_library)
+
+# LINT.IfChange(static_cpp_standard_library)
+# Links the C++ standard library (libc++) and the unwinder (libunwind)
+# statically.
+#
+# Like all `ldflags`, these only apply to targets that link, i.e. binaries and
+# shared libraries, such as the `cc_shared_library()` created by
+# `cc_shared_library_zx()`. They have no effect on `cc_library()` targets.
+#
+# The `static_cpp_standard_library` C++ toolchain feature provides a subset of
+# these flags. Use this target where the equivalent GN config is needed, e.g.
+# for targets converted to GN by bazel2gn.
+build_flags(
+    name = "static_cpp_standard_library",
+    ldflags = [
+        # Use libc++ as the C++ standard library.
+        "-stdlib=libc++",
+
+        # Use libunwind as the unwinder.
+        "-unwindlib=libunwind",
+
+        # Request static linking for standard C++ library. Despite the name, this
+        # option applies to both libstdc++ and libc++, whichever is used by Clang.
+        "-static-libstdc++",
+
+        # Request static linking for unwinder. Despite the name, this option
+        # applies to both libgcc and libunwind, whichever is used by Clang.
+        "-static-libgcc",
+    ],
+    # -static-libstdc++ and -static-libgcc options are handled by the C++
+    # compiler driver (that is clang), whereas these link-args get passed
+    # straight to lld by rustc and need to be expanded manually.
+    rustflags = ["-Clink-args=--push-state -Bstatic -lc++ -Bdynamic -lm --pop-state -l:libunwind.a"],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:static_cpp_standard_library)
 
 # LINT.IfChange(static-pie-config)
 # This config is also used by Linux binaries, such as
@@ -101,4 +141,20 @@ compiler_build_flags(
     linker_flags = ["-no-dynamic-linker"],
     visibility = ["//:__subpackages__"],
 )
-# LINT.ThenChange(//build/config/fuchsia/BUILD.gn:static-pie-config)
+# LINT.ThenChange(BUILD.gn:static-pie-config)
+
+# LINT.IfChange(scudo_default_options)
+sanitizer_default_options(
+    name = "scudo_default_options",
+    visibility = ["//:__subpackages__"],
+)
+
+extra_linker_flags(
+    name = "maybe_scudo_default_options",
+    executable_link_deps = select({
+        "@platforms//os:fuchsia": [":scudo_default_options"],
+        "//conditions:default": [],
+    }) if scudo_default_options and scudo_default_options != [""] else [],
+    visibility = ["//:__subpackages__"],
+)
+# LINT.ThenChange(BUILD.gn:scudo_default_options)

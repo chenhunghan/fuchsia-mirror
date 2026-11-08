@@ -116,4 +116,7 @@ fuchsia_component("soundplayer-tests-driver") {
 
 fuchsia_test_package("soundplayer-tests") {
   test_components = [ ":soundplayer-tests-driver" ]
+  test_specs = {
+    parallel = 4
+  }
 }

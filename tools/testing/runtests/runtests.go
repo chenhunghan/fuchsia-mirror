@@ -158,6 +158,11 @@ type TestResult struct {
 	// a non-zero exit code to be considered a failure.
 	FailureReason *FailureReason `json:"failure_reason,omitempty"`
 
+	// ExonerationExplanation is an optional plain-text explanation of why an
+	// exonerated test was marked EXONERATED (surfaced via ResultDB's
+	// TestExoneration.explanation_html).
+	ExonerationExplanation string `json:"exoneration_explanation,omitempty"`
+
 	// SetupSucceeded indicates whether test setup completed successfully.
 	SetupSucceeded *bool `json:"setup_succeeded,omitempty"`
 
@@ -215,7 +220,11 @@ type TestCaseResult struct {
 	Format string `json:"format"`
 	// FailureReason is structured information about why a test case failed, including repeatable errors.
 	FailureReason *FailureReason `json:"failure_reason,omitempty"`
-	OutputFiles   []string       `json:"output_files,omitempty"`
+	// ExonerationExplanation is an optional plain-text explanation of why an
+	// exonerated test case was marked EXONERATED (surfaced via ResultDB's
+	// TestExoneration.explanation_html).
+	ExonerationExplanation string   `json:"exoneration_explanation,omitempty"`
+	OutputFiles            []string `json:"output_files,omitempty"`
 	// The directory where the OutputFiles live if given as relative paths.
 	OutputDir string `json:"output_dir,omitempty"`
 	// Tags contain test case metadata.

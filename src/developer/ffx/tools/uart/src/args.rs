@@ -45,6 +45,8 @@ pub enum UartSubCommand {
     Probe(ProbeCommand),
     /// Show real-time connection status and metrics for a UART target
     Status(StatusCommand),
+    /// Diagnose and repair UART connection issues
+    Doctor(DoctorCommand),
 }
 
 /// Arguments for the `ffx uart connect` subcommand.
@@ -73,10 +75,6 @@ pub struct ConnectCommand {
     #[argh(option)]
     /// baud rate for the UART port (default: 1000000, only used for TTY targets)
     pub baud: Option<NonZeroU32>,
-
-    #[argh(option)]
-    /// custom UNIX socket path to use
-    pub socket: Option<String>,
 
     #[argh(switch)]
     /// reconnect if already connected (reclaims stale daemon)
@@ -115,6 +113,15 @@ pub struct ProbeCommand {
 #[argh(subcommand, name = "status")]
 pub struct StatusCommand {}
 
+#[derive(ArgsInfo, FromArgs, PartialEq, Clone, Debug)]
+/// Diagnose and repair UART connection issues
+#[argh(subcommand, name = "doctor")]
+pub struct DoctorCommand {
+    #[argh(switch)]
+    /// automatically fix detected issues where possible
+    pub fix: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,7 +138,6 @@ mod tests {
                 assert_eq!(connect.baud, NonZeroU32::new(115200));
                 assert!(connect.reconnect);
                 assert!(connect.no_retry);
-                assert_eq!(connect.socket, None);
             }
             other => panic!("Expected Connect subcommand, got {other:?}"),
         }
@@ -181,5 +187,12 @@ mod tests {
         let cmd =
             UartCommand::from_args(&["uart"], &["status"]).expect("Failed to parse status args");
         assert_eq!(cmd.sub_cmd, UartSubCommand::Status(StatusCommand {}));
+    }
+
+    #[test]
+    fn test_parse_doctor_command() {
+        let cmd = UartCommand::from_args(&["uart"], &["doctor", "--fix"])
+            .expect("Failed to parse doctor args");
+        assert_eq!(cmd.sub_cmd, UartSubCommand::Doctor(DoctorCommand { fix: true }));
     }
 }

@@ -14,13 +14,13 @@ use crate::fuchsia::pager::{
 };
 use crate::fuchsia::volume::{FxVolume, READ_AHEAD_SIZE};
 use anyhow::{Context, Error, anyhow, bail, ensure};
-use delivery_blob::compression::{CompressionAlgorithm, CompressionInfo};
+use delivery_blob::compression::CompressionInfo;
 use fidl_fuchsia_feedback::{Annotation, Attachment, CrashReport};
 use fidl_fuchsia_mem::Buffer as MemBuffer;
 use fuchsia_component_client::connect_to_protocol;
-use fuchsia_merkle::{Hash, MerkleVerifier, ReadSizedMerkleVerifier};
+use fuchsia_merkle::{BLOCK_SIZE, Hash, MerkleVerifier, ReadSizedMerkleVerifier};
 use futures::{StreamExt, TryStreamExt, try_join};
-use fxfs::blob_metadata::{BlobFormat, BlobMetadata, FxfsBlobMetadataExt};
+use fxfs::blob_metadata::{BlobMetadata, FxfsBlobMetadataExt};
 use fxfs::errors::FxfsError;
 use fxfs::lock_keys;
 use fxfs::log::*;
@@ -90,11 +90,7 @@ impl FxBlob {
         let stored_size =
             handle.store().get_attribute_size(handle.object_id(), AttributeId::DATA).await?;
         let metadata = BlobMetadata::read_from(&handle).await?;
-        let uncompressed_size = match &metadata.format {
-            BlobFormat::Uncompressed => stored_size,
-            BlobFormat::ChunkedZstd { uncompressed_size, .. }
-            | BlobFormat::ChunkedLz4 { uncompressed_size, .. } => *uncompressed_size,
-        };
+        let uncompressed_size = metadata.format.uncompressed_size().unwrap_or(stored_size);
 
         // Check the uncompressed size of the blob against the number of merkle leaves. This only
         // ensures that the uncompressed size lands within the same merkle block as the true
@@ -125,25 +121,7 @@ impl FxBlob {
             }));
         }
 
-        let compression_info = match &metadata.format {
-            BlobFormat::Uncompressed => None,
-            BlobFormat::ChunkedZstd { chunk_size, compressed_offsets, .. } => {
-                Some(CompressionInfo::new(
-                    *chunk_size,
-                    stored_size,
-                    compressed_offsets,
-                    CompressionAlgorithm::Zstd,
-                )?)
-            }
-            BlobFormat::ChunkedLz4 { chunk_size, compressed_offsets, .. } => {
-                Some(CompressionInfo::new(
-                    *chunk_size,
-                    stored_size,
-                    compressed_offsets,
-                    CompressionAlgorithm::Lz4,
-                )?)
-            }
-        };
+        let compression_info = metadata.format.compression_info(stored_size)?;
         let merkle_verifier = metadata.into_merkle_verifier(merkle_root)?;
 
         let min_chunk_size = min_chunk_size(&compression_info);
@@ -516,17 +494,34 @@ impl PagerBacked for FxBlob {
         self.record_page_fault_metric(&range);
 
         let pager_state = self.pager_state();
-        let mut buffer = match pager_state.compression_info {
-            Some(_) => self.allocate_trusted_buffer(range.end - range.start).await,
-            None => self.allocate_buffer(range.end - range.start).await,
+        // Uncompressed blobs, and ranges of compressed blobs that are stored entirely raw, can be
+        // read directly into the buffer.
+        enum ReadSource<'a> {
+            Raw(u64),
+            Compressed(&'a CompressionInfo),
+        }
+        let source = match &pager_state.compression_info {
+            None => ReadSource::Raw(range.start),
+            Some(info) => match info
+                .raw_offset_for_uncompressed_range(&range, self.handle.block_size().get())
+            {
+                Some(offset) => ReadSource::Raw(offset),
+                None => ReadSource::Compressed(info),
+            },
         };
         let unaligned_bytes =
             (std::cmp::min(range.end, self.uncompressed_size) - range.start) as usize;
-        match &pager_state.compression_info {
-            None => self.read_blocks(range.start, buffer.as_mut()).await?,
-            Some(compression_info) => {
-                let compressed_offsets =
-                    compression_info.compressed_range_for_uncompressed_range(&range)?;
+        let mut buffer = match source {
+            ReadSource::Raw(raw_offset) => {
+                let mut buffer = self.allocate_buffer(range.end - range.start).await;
+                self.read_blocks(raw_offset, buffer.as_mut()).await?;
+                buffer
+            }
+            ReadSource::Compressed(compression_info) => {
+                let mut buffer = self.allocate_trusted_buffer(range.end - range.start).await;
+                let compressed_offsets = compression_info.compressed_range_for_uncompressed_range(
+                    &(range.start..range.start + unaligned_bytes as u64),
+                )?;
                 let bs = self.handle.block_size();
                 let aligned = bs.align_range_outwards(&compressed_offsets).unwrap();
                 let mut compressed_buf = self.allocate_buffer(aligned.end - aligned.start).await;
@@ -583,6 +578,7 @@ impl PagerBacked for FxBlob {
                 if decompression_errors > 0 {
                     info!("Read succeeded on second attempt");
                 }
+                buffer
             }
         };
         // Zero the tail before verification.
@@ -591,9 +587,11 @@ impl PagerBacked for FxBlob {
             // TODO(https://fxbug.dev/42073035): This should be offloaded to the kernel at which
             // point we can delete this.
             fxfs_trace::duration!("blob-verify", "len" => unaligned_bytes);
+            let verify_len =
+                std::cmp::min(buffer.len(), unaligned_bytes.next_multiple_of(BLOCK_SIZE));
             pager_state.merkle_verifier.verify_aligned(
                 range.start as usize,
-                buffer.as_ptr_slice().subslice(0..buffer.len()),
+                buffer.as_ptr_slice().subslice(0..verify_len),
                 unaligned_bytes,
             )?;
         }
@@ -682,10 +680,13 @@ mod tests {
     use crate::fxblob::testing::open_blob_fixture;
     use assert_matches::assert_matches;
     use blob_writer::BlobWriter;
-    use delivery_blob::compression::{ChunkedArchiveOptions, CompressionAlgorithm};
+    use delivery_blob::compression::{
+        ChunkedArchiveError, ChunkedArchiveOptions, CompressionAlgorithm,
+    };
     use delivery_blob::{CompressionMode, Type1Blob};
     use fuchsia_async::epoch::Epoch;
     use fuchsia_component_client::connect_to_protocol_at_dir_svc;
+    use fxfs::blob_metadata::BlobFormat;
     use fxfs::object_store::{HandleOptions, ObjectStore};
     use fxfs_make_blob_image::FxBlobBuilder;
     use storage_device::DeviceHolder;
@@ -915,7 +916,9 @@ mod tests {
     #[fuchsia::test(threads = 10)]
     async fn test_lz4_blob() {
         let device = DeviceHolder::new(FakeDevice::new(16384, 512));
-        let blob_data = vec![0xAA; 68 * 1024];
+        // Only the first chunk can be compressed, so the rest are stored raw.
+        let mut blob_data = vec![0xAA; READ_AHEAD_SIZE as usize * 2 + 5000];
+        rand::fill(&mut blob_data[CHUNK_SIZE..]);
         let fxblob_builder = FxBlobBuilder::new(device).await.unwrap();
         let blob = fxblob_builder
             .generate_blob(blob_data.clone(), Some(CompressionAlgorithm::Lz4))
@@ -925,6 +928,17 @@ mod tests {
         let device = fxblob_builder.finalize().await.unwrap().0;
         device.reopen(/*read_only=*/ false);
         let fixture = open_blob_fixture(device).await;
+        if let Some(pager_state) = &fixture.get_blob(blob_hash).await.unwrap().pager_state {
+            let info = pager_state.compression_info.as_ref().unwrap();
+            assert!(info.raw_offset_for_uncompressed_range(&(0..READ_AHEAD_SIZE), 4096).is_none());
+            assert!(
+                info.raw_offset_for_uncompressed_range(
+                    &(READ_AHEAD_SIZE..READ_AHEAD_SIZE * 2),
+                    4096
+                )
+                .is_some()
+            );
+        }
 
         assert_eq!(fixture.read_blob(blob_hash).await, blob_data);
 
@@ -1012,9 +1026,18 @@ mod tests {
             COMPRESSED_BLOB_CHUNK_SIZE * 4,
         );
         check_compression_ranges(
-            &[0, 10, 20, 30, MAX_SMALL_OFFSET + 10],
-            MAX_SMALL_OFFSET + 10,
-            &[0..MAX_SMALL_OFFSET + 10, MAX_SMALL_OFFSET + 10..MAX_SMALL_OFFSET + 10],
+            &[
+                0,
+                10,
+                20,
+                30,
+                MAX_SMALL_OFFSET + 10,
+                MAX_SMALL_OFFSET + 20,
+                MAX_SMALL_OFFSET + 30,
+                MAX_SMALL_OFFSET + 40,
+            ],
+            MAX_SMALL_OFFSET + 40,
+            &[0..MAX_SMALL_OFFSET + 10, MAX_SMALL_OFFSET + 10..MAX_SMALL_OFFSET + 40],
             COMPRESSED_BLOB_CHUNK_SIZE,
             COMPRESSED_BLOB_CHUNK_SIZE * 4,
         );
@@ -1069,14 +1092,19 @@ mod tests {
                 .is_err()
         );
 
-        // Reading entirely past the last offset isn't allowed.
-        assert!(
-            compression_info
-                .compressed_range_for_uncompressed_range(
-                    &(COMPRESSED_BLOB_CHUNK_SIZE * 9..COMPRESSED_BLOB_CHUNK_SIZE * 12),
-                )
-                .is_err()
-        );
+        // Reading entirely or partially past the last offset isn't allowed.
+        assert!(matches!(
+            compression_info.compressed_range_for_uncompressed_range(
+                &(COMPRESSED_BLOB_CHUNK_SIZE * 9..COMPRESSED_BLOB_CHUNK_SIZE * 12),
+            ),
+            Err(ChunkedArchiveError::OutOfRange)
+        ));
+        assert!(matches!(
+            compression_info.compressed_range_for_uncompressed_range(
+                &(COMPRESSED_BLOB_CHUNK_SIZE * 8..COMPRESSED_BLOB_CHUNK_SIZE * 10),
+            ),
+            Err(ChunkedArchiveError::OutOfRange)
+        ));
 
         // Reading a different amount than the read-ahead size isn't allowed for middle offsets.
         assert!(

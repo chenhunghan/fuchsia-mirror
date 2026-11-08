@@ -6,9 +6,10 @@
 #define SRC_DEVICES_USB_DRIVERS_XHCI_XHCI_DEVICE_STATE_H_
 
 #include <lib/inspect/cpp/vmo/types.h>
-#include <lib/sync/completion.h>
+#include <lib/sync/cpp/completion.h>
 
 #include <optional>
+#include <utility>
 
 #include "src/devices/usb/drivers/xhci/xhci-endpoint.h"
 #include "src/devices/usb/drivers/xhci/xhci-hub.h"
@@ -30,7 +31,9 @@ constexpr uint8_t kMaxEndpoints = 32;
 class DeviceState : public fbl::RefCounted<DeviceState> {
  public:
   DeviceState(uint32_t device_id, UsbXhci* hci)
-      : device_id_(device_id), hci_(hci), tr_(hci, device_id, 0) {}
+      : device_id_(device_id), hci_(hci), tr_(hci, device_id, 0) {
+    ZX_DEBUG_ASSERT(hci_ != nullptr);
+  }
   ~DeviceState();
 
   void Disconnect() __TA_REQUIRES(transaction_lock_) { disconnecting_ = true; }
@@ -41,6 +44,7 @@ class DeviceState : public fbl::RefCounted<DeviceState> {
     port_ = port;
     hub_ = hub;
     disconnecting_ = false;
+    slot_disable_started_ = false;
   }
 
   // True if the device state has been initialized, false otherwise.
@@ -61,6 +65,11 @@ class DeviceState : public fbl::RefCounted<DeviceState> {
 
   bool IsDisconnecting() const __TA_REQUIRES(transaction_lock_) { return disconnecting_; }
 
+  // Marks that a Disable Slot command has been issued for this slot. Returns the previous value.
+  bool ExchangeSlotDisableStarted() __TA_REQUIRES(transaction_lock_) {
+    return std::exchange(slot_disable_started_, true);
+  }
+
   Endpoint& GetEndpoint() __TA_REQUIRES(transaction_lock_) { return tr_; }
 
   zx_status_t InitEndpoint(uint8_t ep_addr, EventRing* event_ring, fdf::MmioBuffer* mmio)
@@ -71,6 +80,10 @@ class DeviceState : public fbl::RefCounted<DeviceState> {
       rings_[idx].emplace(hci_, device_id_, XhciEndpointIndexInverse(idx + 1));
     }
     return *rings_[idx];
+  }
+
+  Endpoint* TryGetEndpoint(uint8_t idx) __TA_REQUIRES(transaction_lock_) {
+    return rings_[idx] ? &*rings_[idx] : nullptr;
   }
 
   std::unique_ptr<dma_buffer::PagedBuffer>& GetInputContext() __TA_REQUIRES(transaction_lock_) {
@@ -90,23 +103,26 @@ class DeviceState : public fbl::RefCounted<DeviceState> {
     return transaction_lock_;
   }
 
-  // Used by xhci to break cyclic dependency during dtor or device disconnect.
+  // Marks the device as disconnecting and tears down active endpoint transfer rings.
   void ResetHci() {
     fbl::AutoLock l(&transaction_lock_);
-    hci_ = nullptr;
-    tr_.ResetHci();
+    disconnecting_ = true;
+    slot_disable_started_ = true;
     tr_.transfer_ring().DeinitIfActive();
     for (auto& ring : rings_) {
       if (ring.has_value()) {
-        ring->ResetHci();
         ring->transfer_ring().DeinitIfActive();
       }
     }
+    hub_.reset();
   }
 
   void CreateInspectNode(inspect::Node node, uint16_t vendor_id, uint16_t product_id);
 
   uint32_t device_id() const { return device_id_; }
+
+  // Signaled when the Disable Slot command issued for this slot has completed.
+  libsync::Completion slot_disabled_;
 
  private:
   zx_status_t InitializeSlotBuffer(const UsbXhci& hci, uint8_t slot_id, uint8_t port_id,
@@ -123,13 +139,14 @@ class DeviceState : public fbl::RefCounted<DeviceState> {
       __TA_REQUIRES(transaction_lock_);
 
   uint32_t device_id_;
-  UsbXhci* hci_;
+  UsbXhci* const hci_;
   uint8_t slot_ = 0;
   uint8_t port_ = 0;
   uint16_t interrupter_target_;
   fbl::Mutex transaction_lock_;
   std::optional<HubInfo> hub_ __TA_GUARDED(transaction_lock_);
   bool disconnecting_ __TA_GUARDED(transaction_lock_) = false;
+  bool slot_disable_started_ __TA_GUARDED(transaction_lock_) = false;
   Endpoint tr_ __TA_GUARDED(transaction_lock_);
   std::optional<Endpoint> rings_[kMaxEndpoints] __TA_GUARDED(transaction_lock_);
   std::unique_ptr<dma_buffer::PagedBuffer> input_context_ __TA_GUARDED(transaction_lock_);

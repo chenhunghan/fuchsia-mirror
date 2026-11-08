@@ -419,6 +419,14 @@ void BootOptions::PrintValue(const PageTableEvictionPolicy& value, FILE* out) {
   Enum<PageTableEvictionPolicy>(EnumPrinter{value, out});
 }
 
+bool BootOptions::Parse(std::string_view value, FairPlacementAffinity BootOptions::* member) {
+  return Enum<FairPlacementAffinity>(EnumParser{value, &(this->*member)}).Check();
+}
+
+void BootOptions::PrintValue(const FairPlacementAffinity& value, FILE* out) {
+  Enum<FairPlacementAffinity>(EnumPrinter{value, out});
+}
+
 bool BootOptions::Parse(std::string_view value, SerialDebugSyscalls BootOptions::* member) {
   return Enum<SerialDebugSyscalls>(EnumParser{value, &(this->*member)}).Check();
 }

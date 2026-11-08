@@ -1,0 +1,167 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/idk:idk_cc_prebuilt_library.bzl", "idk_cc_shared_library")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_staticlib.bzl", "rustc_staticlib")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Note: Fuchsia-only target matching platform-only deps via target_compatible_with.
+rustc_staticlib(
+    name = "core",
+    srcs = [
+        "src/allocations_table.rs",
+        "src/hooks.rs",
+        "src/lib.rs",
+        "src/profiler.rs",
+        "src/recursion_guard.rs",
+        "src/resources_table.rs",
+        "src/waiter_list.rs",
+    ],
+    dynamic_libstd = False,
+    edition = "2024",
+    output_name = "heapdump_instrumentation_core",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.memory.heapdump.process:fuchsia.memory.heapdump.process_rust",
+        "//sdk/lib/c/rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-runtime",
+        "//src/performance/memory/heapdump/lib/heapdump_vmo",
+    ],
+)
+
+# `src/lib.rs` gates `mod hooks;` on `#[cfg(not(test))]`, so `//sdk/lib/c/rust`
+# (GN `non_test_deps`) is only used by `:core` and omitted from `:core_test`.
+rustc_test(
+    name = "core_test",
+    srcs = [
+        "src/allocations_table.rs",
+        "src/hooks.rs",
+        "src/lib.rs",
+        "src/profiler.rs",
+        "src/recursion_guard.rs",
+        "src/resources_table.rs",
+        "src/waiter_list.rs",
+    ],
+    crate_name = "heapdump_instrumentation_core_staticlib_test",
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.memory.heapdump.process:fuchsia.memory.heapdump.process_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-runtime",
+        "//src/performance/memory/heapdump/lib/heapdump_vmo",
+        "//third_party/rust_crates/vendor:assert_matches",
+    ],
+)
+
+fx_unittest_package(
+    name = "rust-tests",
+    package_name = "heapdump-instrumentation-rust-tests",
+    unit_tests = [":core_test"],
+    visibility = ["//src/performance/memory:__pkg__"],
+)
+
+# bazel2gn does not translate genrule; GN keeps the hand-written generated_file("exported_symbols.ld") above the sentinel.
+# @bazel2gn:skip
+genrule(
+    name = "exported_symbols_version_script",
+    srcs = ["exported_symbols.allowlist"],
+    outs = ["exported_symbols.ld"],
+    cmd = "{ echo '{ global:'; sed 's/.*/  &;/' $(location exported_symbols.allowlist); echo '  local: *; };'; } > $@",
+    # `idk_cc_shared_library` is a symbolic macro in `//build/bazel/rules/idk/private`
+    # whose `version_script` attribute is `attr.string`, so `:instrumentation_export`
+    # requires visibility to the macro definition package.
+    visibility = ["//build/bazel/rules/idk/private:__pkg__"],
+)
+
+# Processes that link to this library must call either
+# `heapdump_bind_with_channel` or `heapdump_bind_with_fdio` themselves.
+# Note: Fuchsia-only target matching platform-only deps via target_compatible_with.
+# GN links the generated linker script via `libs` and `deps` on `exported_symbols.ld`, whereas Bazel passes `version_script`.
+# @bazel2gn:raw_attribute:deps += [ ":exported_symbols.ld" ]
+# @bazel2gn:raw_attribute:libs = get_target_outputs(":exported_symbols.ld")
+idk_cc_shared_library(
+    name = "instrumentation",
+    srcs = ["bind_with_fdio.cc"],
+    hdrs = [
+        "include/heapdump/bind.h",
+        "include/heapdump/snapshot.h",
+        "include/heapdump/stats.h",
+    ],
+    api_area = "Diagnostics",
+    category = "partner",
+    idk_name = "heapdump_instrumentation",
+    implementation_deps = [
+        ":core",
+        "//sdk/fidl/fuchsia.memory.heapdump.process:fuchsia.memory.heapdump.process_cpp",
+        "//sdk/lib/fdio",
+        "//sdk/lib/fit",
+        "//src/zircon/lib/zircon",
+    ],
+    libcxx_linkage = "static",
+    # For each symbol that we want to export, tell the linker that:
+    #  - It must not be hidden (via input linker script in libs)
+    #  - It must be included in the shared library (--undefined)
+    # Keep in sync with exported_symbols.allowlist.
+    # LINT.IfChange
+    linkopts = [
+        "-Wl,--undefined=__scudo_allocate_hook",
+        "-Wl,--undefined=__scudo_deallocate_hook",
+        "-Wl,--undefined=__scudo_realloc_allocate_hook",
+        "-Wl,--undefined=__scudo_realloc_deallocate_hook",
+        "-Wl,--undefined=heapdump_bind_with_channel",
+        "-Wl,--undefined=heapdump_bind_with_fdio",
+        "-Wl,--undefined=heapdump_get_stats",
+        "-Wl,--undefined=heapdump_take_named_snapshot",
+    ],
+    # LINT.ThenChange(exported_symbols.allowlist)
+    output_name = "heapdump_instrumentation",
+    public_configs = [":include"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    version_script = ":exported_symbols.ld",
+    visibility = [
+        "//build/sdk:__pkg__",
+        "//src/memory/tools/dupefinder/tests/e2e:__pkg__",
+        "//src/performance/memory/heapdump:__subpackages__",
+    ],
+    runtime_deps = ["//sdk/lib/fdio"],
+)
+
+# Note: Fuchsia-only target matching platform-only deps via target_compatible_with.
+fx_cc_library(
+    name = "autobind",
+    srcs = ["autobind.cc"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//build/config/profile:__pkg__",
+        "//src/devices/bin/driver-host:__pkg__",
+        "//src/devices/bin/driver_manager:__pkg__",
+    ],
+    deps = [":instrumentation"],
+    alwayslink = True,
+)
+
+# Note: Fuchsia-only target matching platform-only deps via target_compatible_with.
+rustc_library(
+    name = "rust",
+    srcs = ["bindings.rs"],
+    crate_name = "heapdump",
+    crate_root = "bindings.rs",
+    edition = "2024",
+    link_deps = [":instrumentation"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/devices/bin/driver_manager_rust:__pkg__",
+        "//src/sys/component_manager:__pkg__",
+    ],
+    deps = ["//sdk/rust/zx"],
+)

@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <dirent.h>
+#include <elf.h>
 #include <fcntl.h>
 #include <grp.h>
 #include <lib/fit/defer.h>
@@ -21,11 +23,19 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <atomic>
 #include <cinttypes>
+#include <cstdlib>
+#include <cstring>
 #include <format>
+#include <map>
 #include <optional>
 #include <sstream>
+#include <string>
+#include <string_view>
 #include <thread>
+#include <vector>
 
 #include <fbl/unique_fd.h>
 #include <gtest/gtest.h>
@@ -443,6 +453,96 @@ TEST_F(ProcTaskDirTest, PidDirFdListingAndReadsFailAfterExit) {
   EXPECT_THAT(read(status_fd.get(), buf, sizeof(buf)), SyscallFailsWithErrno(ESRCH));
 }
 
+// Opens /proc/<pid>/`dir` of a child process, and returns it once the child has exited and has
+// been reaped.
+fbl::unique_fd OpenTaskSubdirOfReapedChild(const char* dir) {
+  test_helper::Rendezvous child_exit = test_helper::MakeRendezvous();
+
+  test_helper::ForkHelper helper;
+  pid_t child_pid = helper.RunInForkedProcess(
+      [holder = std::move(child_exit.holder)]() mutable { holder.hold(); });
+
+  std::string path = fxl::StringPrintf("/proc/%d/%s", child_pid, dir);
+  fbl::unique_fd dir_fd(open(path.c_str(), O_RDONLY | O_DIRECTORY));
+  EXPECT_TRUE(dir_fd.is_valid()) << path << ": " << strerror(errno);
+
+  // Allow the child to exit and reap it while keeping dir_fd open.
+  child_exit.poker.poke();
+  EXPECT_TRUE(helper.WaitForChildren());
+  return dir_fd;
+}
+
+TEST_F(ProcTaskDirTest, AttrDirLookupFailsWithEnoentAfterExit) {
+  fbl::unique_fd attr_fd = OpenTaskSubdirOfReapedChild("attr");
+  ASSERT_TRUE(attr_fd.is_valid());
+
+  // Unlike lookups relative to the dead task's /proc/<pid> directory, which fail with ESRCH,
+  // lookups relative to its attr directory fail with ENOENT.
+  EXPECT_THAT(openat(attr_fd.get(), "current", O_RDONLY), SyscallFailsWithErrno(ENOENT));
+}
+
+TEST_F(ProcTaskDirTest, AttrDirListingFailsWithEnoentAfterExit) {
+  fbl::unique_fd attr_fd = OpenTaskSubdirOfReapedChild("attr");
+  ASSERT_TRUE(attr_fd.is_valid());
+
+  // Like listing the dead task's /proc/<pid> directory, listing its attr directory fails with
+  // ENOENT.
+  char buf[4096];
+  EXPECT_THAT(syscall(SYS_getdents64, attr_fd.get(), buf, sizeof(buf)),
+              SyscallFailsWithErrno(ENOENT));
+}
+
+// Returns the d_ino and d_type of each entry of the directory open at `dir_fd`, by name,
+// without "." and "..".
+std::map<std::string, std::pair<uint64_t, unsigned char>> ListDirEntries(int dir_fd) {
+  struct linux_dirent64 {
+    uint64_t d_ino;
+    int64_t d_off;
+    unsigned short d_reclen;
+    unsigned char d_type;
+    char d_name[];
+  };
+
+  std::map<std::string, std::pair<uint64_t, unsigned char>> entries;
+  std::vector<uint8_t> buffer(4096);
+  long nread;
+  while ((nread = syscall(SYS_getdents64, dir_fd, buffer.data(), buffer.size())) > 0) {
+    for (long pos = 0; pos < nread;) {
+      auto entry = reinterpret_cast<linux_dirent64*>(buffer.data() + pos);
+      std::string name(entry->d_name);
+      if (name != "." && name != "..") {
+        entries[name] = {entry->d_ino, entry->d_type};
+      }
+      pos += entry->d_reclen;
+    }
+  }
+  EXPECT_EQ(nread, 0) << "getdents64 failed: " << std::strerror(errno);
+  return entries;
+}
+
+TEST_F(ProcTaskDirTest, AttrDirListsAttributeEntries) {
+  auto entries = test_helper::ListDirectory("/proc/self/attr");
+  ASSERT_TRUE(entries.is_ok()) << std::strerror(entries.error_value());
+  // Linux may also list directories for specific security modules, so only check that the
+  // common entries are present.
+  for (const char* name : {"current", "prev", "exec", "fscreate", "keycreate", "sockcreate"}) {
+    EXPECT_TRUE(entries->contains(name)) << name;
+  }
+}
+
+TEST_F(ProcTaskDirTest, AttrDirListingMatchesStat) {
+  fbl::unique_fd attr_fd(SAFE_SYSCALL(open("/proc/self/attr", O_RDONLY | O_DIRECTORY)));
+  auto entries = ListDirEntries(attr_fd.get());
+  ASSERT_FALSE(entries.empty());
+  for (const auto& [name, ino_and_type] : entries) {
+    struct stat st;
+    ASSERT_THAT(fstatat(attr_fd.get(), name.c_str(), &st, AT_SYMLINK_NOFOLLOW), SyscallSucceeds())
+        << name;
+    EXPECT_EQ(ino_and_type.first, st.st_ino) << name;
+    EXPECT_EQ(ino_and_type.second, IFTODT(st.st_mode)) << name;
+  }
+}
+
 TEST_F(ProcTaskDirTest, SelfAuxvIsNotEmpty) {
   std::string contents;
   ASSERT_TRUE(files::ReadFileToString("/proc/self/auxv", &contents));
@@ -739,6 +839,101 @@ TEST_F(ProcTaskDirTest, ParentFieldsValidWithCapSysPtrace) {
     // exit_code(52) will be zero.
   });
   ASSERT_TRUE(helper.WaitForChildren());
+}
+
+// Observed on Linux: the initial [stack] VMA always extends exactly 128 KiB below the page holding
+// the lowest byte of the strings (argv, envp and AT_EXECFN). The pointer area (argc, argv, envp,
+// auxv, AT_RANDOM, AT_PLATFORM) and a random amount of padding are carved out of those 128 KiB; the
+// remainder is pre-mapped but unused. The VMA size is therefore not the size of the resolved
+// argv/envp/auxv but round_up_to_page(strings + one NULL word) + 128 KiB.
+//
+// This relationship only holds until the process uses more stack than the initial slack and makes
+// the VMA grow, so it is measured on a freshly exec'd child that has executed almost nothing,
+// rather than on the long-lived test process.
+TEST_F(ProcTest, InitialStackVmaSizeIsStringsPlusFixedSlack) {
+  constexpr size_t kStackSlackBelowStrings = 128 * 1024;
+  const size_t page_size = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+
+  test_helper::ForkHelper fork_helper;
+  test_helper::ScopedPipe child_stdout;
+  test_helper::ScopedPipe child_stdin;
+  pid_t child_pid = fork_helper.RunInForkedProcess(
+      [child_stdout = &child_stdout.WriteSide(), child_stdin = &child_stdin.ReadSide()]() mutable {
+        // Use the pipes for stdin & stdout. Stderr remains unchanged, to allow error output.
+        SAFE_SYSCALL(dup2(child_stdin->get(), STDIN_FILENO));
+        child_stdin->reset();
+        SAFE_SYSCALL(dup2(child_stdout->get(), STDOUT_FILENO));
+        child_stdout->reset();
+
+        std::string binary_path = GetExecChildBinaryPath();
+        char* const argv[] = {const_cast<char*>(binary_path.c_str()),
+                              const_cast<char*>("some-argument"), nullptr};
+        char* const envp[] = {const_cast<char*>("SOME_VARIABLE=some-value"), nullptr};
+        SAFE_SYSCALL(execve(binary_path.c_str(), argv, envp));
+        _exit(EXIT_FAILURE);
+      });
+
+  // Wait for the child to indicate that it has exec'd and started.
+  test_helper::Rendezvous child_ready = test_helper::MakeRendezvous(std::move(child_stdout));
+  child_ready.holder.hold();
+  // Let the child exit once we are done, whatever the outcome.
+  test_helper::Rendezvous child_exit = test_helper::MakeRendezvous(std::move(child_stdin));
+  auto release_child = fit::defer([&] {
+    child_exit.poker.poke();
+    EXPECT_TRUE(fork_helper.WaitForChildren());
+  });
+
+  std::string child_dir = fxl::StringPrintf("%s/%d", proc_path().c_str(), child_pid);
+
+  std::string maps;
+  ASSERT_TRUE(files::ReadFileToString(child_dir + "/maps", &maps));
+  auto stack = test_helper::find_memory_mapping(
+      [](const test_helper::MemoryMapping& mapping) { return mapping.pathname == "[stack]"; },
+      maps);
+  ASSERT_TRUE(stack.has_value()) << maps;
+
+  std::string stat_contents;
+  ASSERT_TRUE(files::ReadFileToString(child_dir + "/stat", &stat_contents));
+  auto fields = ProcPidStatElements(stat_contents);
+  ASSERT_GE(fields.size(), 52u) << stat_contents;
+  // The child has the same word size as this test, so its addresses fit in our uintptr_t.
+  auto parse_address = [](const std::string& field) -> uintptr_t {
+    char* end = nullptr;
+    unsigned long long value = strtoull(field.c_str(), &end, 10);
+    EXPECT_TRUE(end != field.c_str() && *end == '\0') << "not a number: " << field;
+    return static_cast<uintptr_t>(value);
+  };
+  uintptr_t arg_start = parse_address(fields[48]);
+  uintptr_t env_start = parse_address(fields[50]);
+
+  // /proc/<pid>/auxv is an array of (type, value) pairs of the child's native word size, which is
+  // the same as ours since the child is built alongside this test.
+  std::string auxv_contents;
+  ASSERT_TRUE(files::ReadFileToString(child_dir + "/auxv", &auxv_contents));
+  ASSERT_EQ(auxv_contents.size() % (2 * sizeof(unsigned long)), 0u);
+  uintptr_t execfn = 0;
+  for (size_t offset = 0; offset + 2 * sizeof(unsigned long) <= auxv_contents.size();
+       offset += 2 * sizeof(unsigned long)) {
+    unsigned long type, value;
+    memcpy(&type, auxv_contents.data() + offset, sizeof(type));
+    memcpy(&value, auxv_contents.data() + offset + sizeof(type), sizeof(value));
+    if (type == AT_EXECFN) {
+      execfn = value;
+      break;
+    }
+  }
+  ASSERT_NE(execfn, 0u);
+
+  // The strings area consists of the argv strings, the envp strings and the AT_EXECFN string. Only
+  // its extent matters here, not the order of the three blocks, so take the lowest start.
+  uintptr_t strings_start = std::min({arg_start, env_start, execfn});
+  ASSERT_GE(strings_start, stack->start);
+  ASSERT_LT(strings_start, stack->end);
+
+  // The VMA ends on a page boundary, so this is equivalent to checking that the VMA size is the
+  // strings rounded up to a page plus the slack.
+  uintptr_t strings_page = strings_start & ~(page_size - 1);
+  EXPECT_EQ(strings_page - stack->start, kStackSlackBelowStrings);
 }
 
 TEST_F(ProcTaskDirTest, SelfStatPriorityAndNice) {
@@ -1711,6 +1906,110 @@ TEST_F(ProcfsTest, ZombieProcessStatusAccessible) {
   EXPECT_THAT(stat(child_proc_dir.c_str(), &st), SyscallFailsWithErrno(ENOENT));
 }
 
+// Forks a child that exits immediately and waits until it is an unreaped zombie. The caller must
+// reap `*child_pid` if this succeeds without fatal failure.
+void ForkZombie(pid_t* child_pid) {
+  *child_pid = fork();
+  ASSERT_GE(*child_pid, 0);
+  if (*child_pid == 0) {
+    _exit(0);
+  }
+  auto cleanup_child = fit::defer([pid = *child_pid] {
+    kill(pid, SIGKILL);
+    waitpid(pid, nullptr, 0);
+  });
+  siginfo_t info{};
+  ASSERT_THAT(waitid(P_PID, *child_pid, &info, WEXITED | WNOWAIT), SyscallSucceeds());
+  cleanup_child.cancel();
+}
+
+std::string ReadLink(const std::string& path) {
+  char buf[256];
+  ssize_t len = readlink(path.c_str(), buf, sizeof(buf));
+  return len < 0 ? std::string() : std::string(buf, len);
+}
+
+TEST_F(ProcfsTest, NsLinkLstatZombieSucceeds) {
+  pid_t child_pid;
+  ASSERT_NO_FATAL_FAILURE(ForkZombie(&child_pid));
+  auto reap_child = fit::defer([child_pid] { waitpid(child_pid, nullptr, 0); });
+
+  std::string path = fxl::StringPrintf("/proc/%d/ns/mnt", child_pid);
+  struct stat st{};
+  ASSERT_THAT(fstatat(AT_FDCWD, path.c_str(), &st, AT_SYMLINK_NOFOLLOW), SyscallSucceeds());
+  EXPECT_TRUE(S_ISLNK(st.st_mode));
+}
+
+TEST_F(ProcfsTest, NsLinkReadlinkZombieFails) {
+  pid_t child_pid;
+  ASSERT_NO_FATAL_FAILURE(ForkZombie(&child_pid));
+  auto reap_child = fit::defer([child_pid] { waitpid(child_pid, nullptr, 0); });
+
+  std::string path = fxl::StringPrintf("/proc/%d/ns/mnt", child_pid);
+  char buf[256];
+  EXPECT_THAT(readlink(path.c_str(), buf, sizeof(buf)), SyscallFailsWithErrno(ENOENT));
+}
+
+TEST_F(ProcfsTest, NsPidForChildrenLinksToPidNamespace) {
+  std::string target = ReadLink("/proc/self/ns/pid_for_children");
+  EXPECT_THAT(target, ContainsRegex("^pid:\\[[0-9]+\\]$"));
+  EXPECT_EQ(target, ReadLink("/proc/self/ns/pid"));
+}
+
+TEST_F(ProcfsTest, NsTimeForChildrenLinksToTimeNamespace) {
+  if (access("/proc/self/ns/time", F_OK) != 0) {
+    GTEST_SKIP() << "Time namespaces are not supported, skipping.";
+  }
+  std::string target = ReadLink("/proc/self/ns/time_for_children");
+  EXPECT_THAT(target, ContainsRegex("^time:\\[[0-9]+\\]$"));
+  EXPECT_EQ(target, ReadLink("/proc/self/ns/time"));
+}
+
+// Linux requires ptrace read access to read or follow another process's /proc/<pid>/ns links, but
+// not to look up the links themselves.
+class ProcNsOtherUserTest : public ProcTestBase {
+ protected:
+  void SetUp() override {
+    ProcTestBase::SetUp();
+    if (getuid() != 0) {
+      GTEST_SKIP() << "Not running as root, skipping.";
+    }
+  }
+
+  // Runs `fn` with the path of this process's ns/mnt link, in a child process that runs as a
+  // different, unprivileged user.
+  void RunAsOtherUser(fit::function<void(const std::string&)> fn) {
+    std::string path = fxl::StringPrintf("/proc/%d/ns/mnt", getpid());
+    test_helper::ForkHelper helper;
+    helper.RunInForkedProcess([&] {
+      SAFE_SYSCALL(setgid(65534));
+      SAFE_SYSCALL(setuid(65534));
+      fn(path);
+    });
+    ASSERT_TRUE(helper.WaitForChildren());
+  }
+};
+
+TEST_F(ProcNsOtherUserTest, LstatSucceeds) {
+  RunAsOtherUser([](const std::string& path) {
+    struct stat st{};
+    EXPECT_THAT(fstatat(AT_FDCWD, path.c_str(), &st, AT_SYMLINK_NOFOLLOW), SyscallSucceeds());
+  });
+}
+
+TEST_F(ProcNsOtherUserTest, ReadlinkFails) {
+  RunAsOtherUser([](const std::string& path) {
+    char buf[256];
+    EXPECT_THAT(readlink(path.c_str(), buf, sizeof(buf)), SyscallFailsWithErrno(EACCES));
+  });
+}
+
+TEST_F(ProcNsOtherUserTest, OpenFails) {
+  RunAsOtherUser([](const std::string& path) {
+    EXPECT_THAT(open(path.c_str(), O_RDONLY), SyscallFailsWithErrno(EACCES));
+  });
+}
+
 TEST_F(ProcfsTest, LeaderlessThreadGroupAccessible) {
   int raw_pipe[2];
   ASSERT_THAT(pipe(raw_pipe), SyscallSucceeds());
@@ -2270,6 +2569,180 @@ TEST(ProcKallsymsTest, KptrRestrictControlsKernelSymbolAddresses) {
     ASSERT_TRUE(newly_opened->stext.has_value());
     EXPECT_NE(*newly_opened->stext, 0u);
   }
+}
+
+// Parses a whole decimal string. Returns std::nullopt if it is not a valid number.
+std::optional<uint64_t> ParseUint64(const std::string& value) {
+  char* end = nullptr;
+  errno = 0;
+  const uint64_t result = strtoull(value.c_str(), &end, 10);
+  if (value.empty() || errno != 0 || *end != '\0') {
+    return std::nullopt;
+  }
+  return result;
+}
+
+// Returns the value of `field` in /proc/<pid>/status contents, in kB.
+std::optional<uint64_t> StatusFieldKb(const std::string& status, std::string_view field) {
+  const std::string key = std::format("\n{}:", field);
+  const size_t pos = status.find(key);
+  if (pos == std::string::npos) {
+    return std::nullopt;
+  }
+  const char* start = status.c_str() + pos + key.size();
+  char* end = nullptr;
+  errno = 0;
+  const uint64_t value = strtoull(start, &end, 10);
+  if (end == start || errno != 0) {
+    return std::nullopt;
+  }
+  return value;
+}
+
+// A process that reads the memory stats of another process must see a mapping that the other
+// process created after its previous read, even when the two reads are close together.
+TEST(ProcfsMemoryStatsTest, StatusOfOtherProcessReflectsNewMapping) {
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+  constexpr size_t kPages = 1024;
+  const uint64_t mapping_kb = kPages * page_size / 1024;
+  const std::string status_path = std::format("/proc/{}/status", getpid());
+
+  test_helper::ForkHelper helper;
+  int to_child[2];
+  int to_parent[2];
+  ASSERT_THAT(pipe2(to_child, O_CLOEXEC), SyscallSucceeds());
+  ASSERT_THAT(pipe2(to_parent, O_CLOEXEC), SyscallSucceeds());
+  fbl::unique_fd child_reads(to_child[0]);
+  fbl::unique_fd parent_writes(to_child[1]);
+  fbl::unique_fd parent_reads(to_parent[0]);
+  fbl::unique_fd child_writes(to_parent[1]);
+
+  helper.RunInForkedProcess([&] {
+    parent_writes.reset();
+    parent_reads.reset();
+
+    std::string before;
+    ASSERT_TRUE(files::ReadFileToString(status_path, &before));
+    std::optional<uint64_t> vm_size_before = StatusFieldKb(before, "VmSize");
+    ASSERT_TRUE(vm_size_before.has_value()) << before;
+
+    char token = 0;
+    ASSERT_EQ(write(child_writes.get(), &token, 1), 1);
+    ASSERT_EQ(read(child_reads.get(), &token, 1), 1);
+
+    std::string after;
+    ASSERT_TRUE(files::ReadFileToString(status_path, &after));
+    std::optional<uint64_t> vm_size_after = StatusFieldKb(after, "VmSize");
+    ASSERT_TRUE(vm_size_after.has_value()) << after;
+    EXPECT_GE(*vm_size_after, *vm_size_before + mapping_kb);
+  });
+  child_reads.reset();
+  child_writes.reset();
+
+  char token = 0;
+  ASSERT_EQ(read(parent_reads.get(), &token, 1), 1);
+  auto mapping = test_helper::ScopedMMap::MMap(nullptr, kPages * page_size, PROT_READ | PROT_WRITE,
+                                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  ASSERT_TRUE(mapping.is_ok());
+  ASSERT_EQ(write(parent_writes.get(), &token, 1), 1);
+  EXPECT_TRUE(helper.WaitForChildren());
+}
+
+// /proc/self/status, statm and stat must stay well-formed and consistent while other threads map,
+// split and unmap memory.
+TEST(ProcfsMemoryStatsTest, MemoryStatsStayConsistentWhileMappingsChange) {
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+  constexpr size_t kAnchorPages = 256;
+  constexpr size_t kChurnPages = 8;
+  constexpr int kChurnThreads = 2;
+  constexpr int kReads = 100;
+
+  // This mapping stays in place for the whole test, so every read must account for it.
+  auto anchor =
+      test_helper::ScopedMMap::MMap(nullptr, kAnchorPages * page_size, PROT_READ | PROT_WRITE,
+                                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  ASSERT_TRUE(anchor.is_ok());
+  memset(anchor.value().mapping(), 1, kAnchorPages * page_size);
+  const uint64_t anchor_kb = kAnchorPages * page_size / 1024;
+
+  std::atomic<bool> stop = false;
+  std::atomic<int> churn_failures = 0;
+  std::vector<std::thread> churn_threads;
+  churn_threads.reserve(kChurnThreads);
+  for (int i = 0; i < kChurnThreads; ++i) {
+    churn_threads.emplace_back([&stop, &churn_failures, page_size] {
+      const size_t size = kChurnPages * page_size;
+      while (!stop.load()) {
+        void* addr =
+            mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (addr == MAP_FAILED) {
+          churn_failures++;
+          continue;
+        }
+        memset(addr, 2, size);
+        // Changing the protection of one page splits the mapping.
+        if (mprotect(addr, page_size, PROT_READ) != 0) {
+          churn_failures++;
+        }
+        if (munmap(addr, size) != 0) {
+          churn_failures++;
+        }
+      }
+    });
+  }
+  auto stop_churn = fit::defer([&] {
+    stop = true;
+    for (std::thread& thread : churn_threads) {
+      thread.join();
+    }
+  });
+
+  for (int i = 0; i < kReads; ++i) {
+    std::string status;
+    ASSERT_TRUE(files::ReadFileToString("/proc/self/status", &status));
+    std::optional<uint64_t> vm_size = StatusFieldKb(status, "VmSize");
+    std::optional<uint64_t> vm_rss = StatusFieldKb(status, "VmRSS");
+    ASSERT_TRUE(vm_size.has_value() && vm_rss.has_value()) << status;
+    EXPECT_GE(*vm_size, anchor_kb);
+    EXPECT_LE(*vm_rss, *vm_size);
+    EXPECT_THAT(status, ContainsRegex("\nUid:\t[0-9]+\t[0-9]+\t[0-9]+\t[0-9]+\n"));
+    EXPECT_THAT(status, ContainsRegex("\nGid:\t[0-9]+\t[0-9]+\t[0-9]+\t[0-9]+\n"));
+    EXPECT_THAT(status, ContainsRegex("\nGroups:\t[0-9 ]*\n"));
+
+    std::string statm;
+    ASSERT_TRUE(files::ReadFileToString("/proc/self/statm", &statm));
+    char* end = nullptr;
+    const uint64_t size_pages = strtoull(statm.c_str(), &end, 10);
+    ASSERT_NE(end, statm.c_str()) << statm;
+    const char* resident_start = end;
+    const uint64_t resident_pages = strtoull(resident_start, &end, 10);
+    ASSERT_NE(end, resident_start) << statm;
+    EXPECT_GE(size_pages, kAnchorPages);
+    EXPECT_LE(resident_pages, size_pages);
+
+    std::string stat;
+    ASSERT_TRUE(files::ReadFileToString("/proc/self/stat", &stat));
+    // vsize and rss are fields 23 and 24. The fields after the command name start at field 3.
+    const size_t comm_end = stat.rfind(')');
+    ASSERT_NE(comm_end, std::string::npos) << stat;
+    std::istringstream fields(stat.substr(comm_end + 1));
+    std::string field;
+    std::optional<uint64_t> vsize;
+    std::optional<uint64_t> rss_pages;
+    for (int n = 3; n <= 24 && fields >> field; ++n) {
+      if (n == 23) {
+        vsize = ParseUint64(field);
+      } else if (n == 24) {
+        rss_pages = ParseUint64(field);
+      }
+    }
+    ASSERT_TRUE(vsize.has_value() && rss_pages.has_value()) << stat;
+    EXPECT_GE(*vsize, kAnchorPages * page_size) << stat;
+    EXPECT_LE(*rss_pages * page_size, *vsize) << stat;
+  }
+
+  stop_churn.call();
+  EXPECT_EQ(churn_failures.load(), 0);
 }
 
 }  // namespace

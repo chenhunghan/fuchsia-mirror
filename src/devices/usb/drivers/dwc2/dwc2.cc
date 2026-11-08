@@ -185,6 +185,8 @@ zx::result<> Dwc2::ResetCore() {
     return zx::error{ZX_ERR_TIMED_OUT};
   }
 
+  quarantined_reqs_.clear();
+
   return zx::ok();
 }
 
@@ -696,29 +698,6 @@ void Dwc2::FlushRxFifo() {
   zx::nanosleep(zx::deadline_after(zx::usec(1)));
 }
 
-void Dwc2::FlushTxFifoRetryIndefinite(uint32_t fifo_num) {
-  auto* mmio = get_mmio();
-
-  auto grstctl = GRSTCTL::Get().FromValue(0).set_txfflsh(1).set_txfnum(fifo_num).WriteTo(mmio);
-
-  do {
-    grstctl.ReadFrom(mmio);
-  } while (grstctl.txfflsh() == 1);
-
-  zx::nanosleep(zx::deadline_after(zx::usec(1)));
-}
-
-void Dwc2::FlushRxFifoRetryIndefinite() {
-  auto* mmio = get_mmio();
-  auto grstctl = GRSTCTL::Get().FromValue(0).set_rxfflsh(1).WriteTo(mmio);
-
-  do {
-    grstctl.ReadFrom(mmio);
-  } while (grstctl.rxfflsh() == 1);
-
-  zx::nanosleep(zx::deadline_after(zx::usec(1)));
-}
-
 void Dwc2::StartEndpoints() {
   for (uint8_t ep_num = 1; ep_num < std::size(endpoints_); ep_num++) {
     auto& ep = endpoints_[ep_num];
@@ -736,7 +715,7 @@ void Dwc2::EnableEp(uint8_t ep_num, bool enable) {
 
   std::lock_guard<std::mutex> _(lock_);
 
-  uint32_t bit = 1 << ep_num;
+  uint32_t bit = 1u << ep_num;
 
   auto mask = DAINTMSK::Get().ReadFrom(mmio).reg_value();
   if (enable) {
@@ -942,6 +921,10 @@ void Dwc2::HandleTransferComplete(uint8_t ep_num) {
   auto& ep = endpoints_[ep_num];
 
   ep->lock.lock();
+  if (!ep->enabled || !ep->current_req) {
+    ep->lock.unlock();
+    return;
+  }
 
   ep->req_offset += ReadTransferred(&*ep);
 
@@ -955,18 +938,18 @@ void Dwc2::HandleTransferComplete(uint8_t ep_num) {
   // Make a copy since this is used outside the critical section.
   auto actual = ep->req_offset;
 
-  if (ep->current_req) {
-    auto req = std::move(ep->current_req.value());
-    ep->current_req.reset();
-    // It is necessary to set current_req = nullptr in order to make this re-entrant safe and
-    // thread-safe. When we call request.Complete the callee may immediately re-queue this request.
-    // if it is already in current_req it could be completed twice (since QueueNextRequest
-    // would attempt to re-queue it, or CancelAll could take the lock on a separate thread and
-    // forcefully complete it after we've already completed it).
-    ep->lock.unlock();
-    ep->RequestComplete(ZX_OK, actual, std::move(req));
-    ep->lock.lock();
+  auto req = std::move(ep->current_req.value());
+  ep->current_req.reset();
+  // It is necessary to set current_req = nullptr in order to make this re-entrant safe and
+  // thread-safe. When we call request.Complete the callee may immediately re-queue this request.
+  // if it is already in current_req it could be completed twice (since QueueNextRequest
+  // would attempt to re-queue it, or CancelAll could take the lock on a separate thread and
+  // forcefully complete it after we've already completed it).
+  ep->lock.unlock();
+  ep->RequestComplete(ZX_OK, actual, std::move(req));
+  ep->lock.lock();
 
+  if (ep->enabled) {
     QueueNextRequest(&*ep);
   }
   ep->lock.unlock();
@@ -1090,9 +1073,52 @@ zx::result<> Dwc2::InitController() {
   return zx::ok();
 }
 
+void Dwc2::DrainEndpointLocked(Endpoint* ep, std::optional<usb::RequestVariant>* in_flight_req,
+                               std::queue<usb::RequestVariant>* complete_reqs) {
+  ZX_DEBUG_ASSERT(ep->ep_addr() != DWC_EP0_IN && ep->ep_addr() != DWC_EP0_OUT);
+  ep->pending_zlp = false;
+  if (ep->current_req.has_value()) {
+    // usb::FidlRequest has a deleted move-assignment operator, so use emplace().
+    in_flight_req->emplace(std::move(*ep->current_req));
+    ep->current_req.reset();
+  }
+  complete_reqs->swap(ep->queued_reqs);
+}
+
 void Dwc2::SetConnected(bool connected) {
   if (connected_.exchange(connected) == connected) {
     return;
+  }
+
+  if (!connected) {
+    configured_.store(false);
+
+    // Complete any pending requests before notifying upper layers of disconnect.
+    for (size_t i = 0; i < std::size(endpoints_); i++) {
+      if (i == DWC_EP0_IN || i == DWC_EP0_OUT) {
+        continue;
+      }
+      auto& ep = endpoints_[i];
+
+      std::optional<usb::RequestVariant> in_flight_req;
+      std::queue<usb::RequestVariant> complete_reqs;
+      {
+        std::lock_guard<std::mutex> _(ep->lock);
+        DrainEndpointLocked(&*ep, &in_flight_req, &complete_reqs);
+
+        ep->enabled = false;
+      }
+
+      // Requests must be completed outside of the lock in FIFO submission order (in_flight_req
+      // first, followed by queued_reqs).
+      if (in_flight_req.has_value()) {
+        ep->RequestComplete(ZX_ERR_IO_NOT_PRESENT, 0, std::move(*in_flight_req));
+      }
+      while (!complete_reqs.empty()) {
+        ep->RequestComplete(ZX_ERR_IO_NOT_PRESENT, 0, std::move(complete_reqs.front()));
+        complete_reqs.pop();
+      }
+    }
   }
 
   if (dci_intf_.is_valid()) {
@@ -1107,37 +1133,6 @@ void Dwc2::SetConnected(bool connected) {
       fdf::warn("Call to ConnectStatusChanged on usb phy failed: {}",
                 connect.error_value().FormatDescription().c_str());
       // Continue despite failure.
-    }
-  }
-
-  if (!connected) {
-    // Complete any pending requests
-    for (size_t i = 0; i < std::size(endpoints_); i++) {
-      auto& ep = endpoints_[i];
-
-      std::queue<usb::RequestVariant> complete_reqs;
-      {
-        std::lock_guard<std::mutex> _(ep->lock);
-        complete_reqs.swap(ep->queued_reqs);
-
-        if (ep->current_req) {
-          complete_reqs.emplace(std::move(*ep->current_req));
-          ep->current_req.reset();
-        }
-
-        ep->enabled = false;
-        ep->pending_zlp = false;
-      }
-
-      // Requests must be completed outside of the lock.
-      while (true) {
-        if (complete_reqs.empty()) {
-          break;
-        }
-
-        ep->RequestComplete(ZX_ERR_IO_NOT_PRESENT, 0, std::move(complete_reqs.front()));
-        complete_reqs.pop();
-      }
     }
   }
 }
@@ -1530,6 +1525,12 @@ void Dwc2::ConfigureEndpoint(ConfigureEndpointRequest& request,
       .set_usbactep(1)
       .WriteTo(mmio);
 
+  if (is_in) {
+    DIEPINT::Get(ep_num).FromValue(UINT32_MAX).WriteTo(mmio);
+  } else {
+    DOEPINT::Get(ep_num).FromValue(UINT32_MAX).WriteTo(mmio);
+  }
+
   EnableEp(ep_num, true);
 
   if (configured_) {
@@ -1539,24 +1540,169 @@ void Dwc2::ConfigureEndpoint(ConfigureEndpointRequest& request,
   completer.Reply(zx::ok());
 }
 
+bool Dwc2::StopEndpointTransferLocked(uint8_t ep_num, bool deactivate) {
+  ZX_DEBUG_ASSERT(ep_num < DWC_MAX_EPS);
+  auto* mmio = get_mmio();
+  const bool is_in = DWC_EP_IS_IN(ep_num);
+
+  // Mask the endpoint interrupt while halting so IrqThread cannot race on epdisabled/xfercompl.
+  const uint32_t ep_bit = 1u << ep_num;
+  const uint32_t daintmsk = DAINTMSK::Get().ReadFrom(mmio).reg_value();
+  const bool was_unmasked = (daintmsk & ep_bit) != 0;
+  if (deactivate || was_unmasked) {
+    DAINTMSK::Get().FromValue(daintmsk & ~ep_bit).WriteTo(mmio);
+  }
+
+  auto wait_bounded = [](auto predicate, zx::duration timeout, zx::duration step) {
+    if (predicate()) {
+      return true;
+    }
+    const zx::time deadline = zx::clock::get_monotonic() + timeout;
+    while (zx::clock::get_monotonic() < deadline) {
+      zx::nanosleep(zx::deadline_after(step));
+      if (predicate()) {
+        return true;
+      }
+    }
+    return predicate();
+  };
+
+  bool halted = true;
+  auto depctl = DEPCTL::Get(ep_num).ReadFrom(mmio);
+  if (depctl.epena()) {
+    bool set_goutnak = false;
+    if (is_in) {
+      depctl.set_cnak(0).set_snak(1).set_epdis(0).set_epena(0).WriteTo(mmio);
+      if (!wait_bounded(
+              [mmio, ep_num] {
+                return DIEPINT::Get(ep_num).ReadFrom(mmio).inepnakeff() ||
+                       !DEPCTL::Get(ep_num).ReadFrom(mmio).epena();
+              },
+              zx::usec(250), zx::usec(5))) {
+        fdf::warn("Dwc2::StopEndpointTransferLocked: timed out waiting for INEPNakEff on ep {}",
+                  ep_num);
+      }
+      DIEPINT::Get(ep_num).FromValue(0).set_inepnakeff(1).WriteTo(mmio);
+    } else {
+      set_goutnak = !DCTL::Get().ReadFrom(mmio).goutnaksts();
+      if (set_goutnak) {
+        DCTL::Get()
+            .ReadFrom(mmio)
+            .set_sgnpinnak(0)
+            .set_cgnpinnak(0)
+            .set_cgoutnak(0)
+            .set_sgoutnak(1)
+            .WriteTo(mmio);
+        if (!wait_bounded(
+                [mmio, ep_num] {
+                  return GINTSTS::Get().ReadFrom(mmio).goutnakeff() ||
+                         DCTL::Get().ReadFrom(mmio).goutnaksts() ||
+                         !DEPCTL::Get(ep_num).ReadFrom(mmio).epena();
+                },
+                zx::usec(250), zx::usec(5))) {
+          fdf::warn("Dwc2::StopEndpointTransferLocked: timed out waiting for GOUTNakEff on ep {}",
+                    ep_num);
+        }
+      }
+    }
+
+    auto cur_depctl = DEPCTL::Get(ep_num).ReadFrom(mmio);
+    if (cur_depctl.epena()) {
+      if (is_in) {
+        DIEPINT::Get(ep_num).FromValue(0).set_epdisabled(1).WriteTo(mmio);
+      } else {
+        DOEPINT::Get(ep_num).FromValue(0).set_epdisabled(1).WriteTo(mmio);
+      }
+      // Per the Synopsys DWC2 Databook, both EPDis and EPEna must be written as 1 simultaneously
+      // to disable an active endpoint (matching Linux dwc2_set_bit(..., DXEPCTL_EPDIS |
+      // DXEPCTL_SNAK)).
+      cur_depctl.set_cnak(0).set_snak(1).set_epdis(1).set_epena(1).WriteTo(mmio);
+      halted = wait_bounded([mmio, ep_num] { return !DEPCTL::Get(ep_num).ReadFrom(mmio).epena(); },
+                            zx::msec(1), zx::usec(10));
+      if (!halted) {
+        fdf::warn("Dwc2::StopEndpointTransferLocked: timed out waiting for EPEna to clear on ep {}",
+                  ep_num);
+      }
+    }
+
+    if (set_goutnak) {
+      DCTL::Get()
+          .ReadFrom(mmio)
+          .set_sgnpinnak(0)
+          .set_cgnpinnak(0)
+          .set_sgoutnak(0)
+          .set_cgoutnak(1)
+          .WriteTo(mmio);
+    }
+  }
+
+  // Ensure SNAK is asserted, R_WS_SC trigger bits (epena/epdis) are not re-armed on RMW, and
+  // usbactep is cleared when deactivating (even if epena cleared before the EPDIS write).
+  auto final_depctl =
+      DEPCTL::Get(ep_num).ReadFrom(mmio).set_cnak(0).set_snak(1).set_epdis(0).set_epena(0);
+  if (deactivate) {
+    final_depctl.set_usbactep(0);
+  }
+  final_depctl.WriteTo(mmio);
+
+  if (halted) {
+    DEPDMA::Get(ep_num).FromValue(0).WriteTo(mmio);
+    DEPTSIZ::Get(ep_num).FromValue(0).WriteTo(mmio);
+  }
+
+  if (is_in) {
+    DIEPINT::Get(ep_num).FromValue(0).set_epdisabled(1).set_inepnakeff(1).set_xfercompl(1).WriteTo(
+        mmio);
+    if (halted) {
+      FlushTxFifo(ep_num);
+    }
+  } else {
+    DOEPINT::Get(ep_num).FromValue(0).set_epdisabled(1).set_xfercompl(1).WriteTo(mmio);
+  }
+
+  if (!deactivate && halted && was_unmasked) {
+    const uint32_t cur_daintmsk = DAINTMSK::Get().ReadFrom(mmio).reg_value();
+    DAINTMSK::Get().FromValue(cur_daintmsk | ep_bit).WriteTo(mmio);
+  }
+
+  return halted;
+}
+
 void Dwc2::DisableEndpoint(DisableEndpointRequest& request,
                            DisableEndpointCompleter::Sync& completer) {
-  auto* mmio = get_mmio();
-
-  unsigned ep_num = DWC_ADDR_TO_INDEX(request.ep_address());
+  uint8_t ep_num = DWC_ADDR_TO_INDEX(request.ep_address());
   if (ep_num == DWC_EP0_IN || ep_num == DWC_EP0_OUT || ep_num >= std::size(endpoints_)) {
-    fdf::error("Dwc2::UsbDciConfigEp: bad ep address 0x{:02X}", request.ep_address());
+    fdf::error("Dwc2::DisableEndpoint: bad ep address 0x{:02X}", request.ep_address());
     completer.Reply(zx::error(ZX_ERR_INVALID_ARGS));
     return;
   }
 
   auto& ep = endpoints_[ep_num];
 
-  std::lock_guard<std::mutex> _(ep->lock);
+  std::optional<usb::RequestVariant> in_flight_req;
+  std::queue<usb::RequestVariant> complete_reqs;
+  {
+    std::lock_guard<std::mutex> ep_guard(ep->lock);
+    ep->enabled = false;
+    {
+      std::lock_guard<std::mutex> dwc2_guard(lock_);
+      const bool halted = StopEndpointTransferLocked(ep_num, /*deactivate=*/true);
+      DrainEndpointLocked(&*ep, &in_flight_req, &complete_reqs);
+      if (!halted && in_flight_req.has_value()) {
+        quarantined_reqs_.push_back(std::move(*in_flight_req));
+        in_flight_req.reset();
+      }
+    }
+  }
 
-  DEPCTL::Get(ep_num).ReadFrom(mmio).set_usbactep(0).WriteTo(mmio);
-  ep->enabled = false;
-  ep->pending_zlp = false;
+  if (in_flight_req.has_value()) {
+    ep->RequestComplete(ZX_ERR_IO_NOT_PRESENT, 0, std::move(*in_flight_req));
+  }
+  while (!complete_reqs.empty()) {
+    ep->RequestComplete(ZX_ERR_IO_NOT_PRESENT, 0, std::move(complete_reqs.front()));
+    complete_reqs.pop();
+  }
+
   completer.Reply(zx::ok());
 }
 
@@ -1572,6 +1718,11 @@ void Dwc2::EndpointClearStall(EndpointClearStallRequest& request,
 
 void Dwc2::CancelAll(CancelAllRequest& request, CancelAllCompleter::Sync& completer) {
   uint8_t ep_num = DWC_ADDR_TO_INDEX(request.ep_address());
+  if (ep_num == DWC_EP0_IN || ep_num == DWC_EP0_OUT || ep_num >= std::size(endpoints_)) {
+    fdf::error("Dwc2::CancelAll: bad ep address 0x{:02X}", request.ep_address());
+    completer.Reply(zx::error(ZX_ERR_INVALID_ARGS));
+    return;
+  }
   endpoints_[ep_num]->CancelAll();
   completer.Reply(zx::ok());
 }
@@ -1621,23 +1772,27 @@ void Dwc2::Endpoint::QueueRequest(usb::FidlRequest request) {
 }
 
 void Dwc2::Endpoint::CancelAll() {
+  std::optional<usb::RequestVariant> in_flight_req;
   std::queue<usb::RequestVariant> queue;
   {
     std::lock_guard<std::mutex> ep_guard(lock);
-    std::lock_guard<std::mutex> dwc2_guard(dwc2_->lock_);
-    pending_zlp = false;
-    if (DWC_EP_IS_OUT(ep_addr())) {
-      dwc2_->FlushRxFifoRetryIndefinite();
-    } else {
-      dwc2_->FlushTxFifoRetryIndefinite(ep_addr());
-    }
-    queue = std::move(queued_reqs);
-    if (current_req) {
-      queue.push(std::move(current_req.value()));
-      current_req.reset();
+    {
+      std::lock_guard<std::mutex> dwc2_guard(dwc2_->lock_);
+      const bool halted = dwc2_->StopEndpointTransferLocked(ep_addr(), /*deactivate=*/false);
+      Dwc2::DrainEndpointLocked(this, &in_flight_req, &queue);
+      if (!halted) {
+        enabled = false;
+        if (in_flight_req.has_value()) {
+          dwc2_->quarantined_reqs_.push_back(std::move(*in_flight_req));
+          in_flight_req.reset();
+        }
+      }
     }
   }
 
+  if (in_flight_req.has_value()) {
+    RequestComplete(ZX_ERR_IO_NOT_PRESENT, 0, std::move(*in_flight_req));
+  }
   while (!queue.empty()) {
     auto req = std::move(queue.front());
     queue.pop();

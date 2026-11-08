@@ -156,6 +156,18 @@ impl Node {
         &self.entity
     }
 
+    /// Returns a reference to the processor entity for a processor node.
+    ///
+    /// # Panics
+    ///
+    /// Panics if this node is not a [`zbi::TopologyEntity::Processor`].
+    pub fn processor(&self) -> &zbi::TopologyProcessor {
+        match &self.entity {
+            zbi::TopologyEntity::Processor(processor) => processor,
+            _ => panic!("Node is not a Processor"),
+        }
+    }
+
     /// Returns a reference to the parent node, or `None` if this node has no parent.
     pub fn parent(&self) -> Option<&Node> {
         // SAFETY: If `self.parent` is `Some(ptr)`, it points to a valid `Node` in the owning `Graph`.

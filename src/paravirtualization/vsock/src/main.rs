@@ -7,7 +7,7 @@
 use anyhow::{Context as _, Error};
 use fidl_fuchsia_hardware_vsock::DeviceMarker;
 use fidl_fuchsia_vsock::ConnectorRequestStream;
-use fuchsia_component::client::{connect_to_protocol_at_path, Service};
+use fuchsia_component::client::{Service, connect_to_protocol_at_path};
 use fuchsia_component::server::ServiceFs;
 use futures::{StreamExt, TryStreamExt};
 use vsock_service_config::Config;
@@ -24,7 +24,9 @@ async fn main() -> Result<(), Error> {
     let config = Config::take_from_startup_handle();
 
     if !config.guest_to_host_supported && !config.loopback_supported {
-        return Err(anyhow::anyhow!("Invalid config supplied. At least one of guest_to_host_supported or loopback_supported must be true"));
+        return Err(anyhow::anyhow!(
+            "Invalid config supplied. At least one of guest_to_host_supported or loopback_supported must be true"
+        ));
     }
 
     let guest_vsock_device = if config.guest_to_host_supported {
@@ -66,6 +68,9 @@ async fn main() -> Result<(), Error> {
         }
     });
 
-    let _ = futures::try_join!(fut, event_loops)?;
-    Ok(())
+    futures::pin_mut!(fut, event_loops);
+    match futures::future::select(fut, event_loops).await {
+        futures::future::Either::Left((res, _)) => res,
+        futures::future::Either::Right((res, _)) => res,
+    }
 }

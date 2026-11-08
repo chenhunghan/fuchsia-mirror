@@ -2,18 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use std::path::PathBuf;
-
 use anyhow::{Result, anyhow};
-use emulator_instance::EmulatorInstances;
 use errors::ffx_bail;
 use ffx_config::EnvironmentContext;
-use ffx_config::keys::EMU_INSTANCE_ROOT_DIR;
 use ffx_emulator_config::EngineConsoleType;
 use ffx_emulator_console_args::ConsoleCommand;
 use ffx_emulator_engines::EngineBuilder;
 use ffx_writer::{ToolIO, VerifiedMachineWriter};
-use fho::{FfxMain, FfxTool, bug};
+use fho::{FfxMain, FfxTool};
 /// Sub-sub tool for `emu console`
 #[derive(FfxTool)]
 pub struct EmuConsoleTool {
@@ -37,9 +33,7 @@ impl FfxMain for EmuConsoleTool {
         if writer.is_machine() {
             return Err(fho::user_error!("Interactive console not supported in machine mode"));
         }
-        let instance_dir: PathBuf =
-            self.context.get(EMU_INSTANCE_ROOT_DIR).map_err(|e| bug!("{e}"))?;
-        let builder = EngineBuilder::new(&self.context, EmulatorInstances::new(instance_dir));
+        let builder = EngineBuilder::from_env(&self.context)?;
 
         let console = match get_console_type(&self.cmd) {
             Ok(c) => c,

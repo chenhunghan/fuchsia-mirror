@@ -5,16 +5,15 @@
 use anyhow::{Error, Result, bail};
 use blobfs_ramdisk::BlobfsRamdisk;
 use fidl::endpoints::{self, ServerEnd};
+use fidl_fuchsia_io as fio;
 use fidl_fuchsia_pkg_test::*;
 use fidl_fuchsia_testing_harness::{OperationError, RealmProxy_RequestStream};
-use fuchsia_component::client::connect_to_protocol;
 use fuchsia_component::runtime::Dictionary;
 use fuchsia_component::server::ServiceFs;
 use fuchsia_pkg_testing::{Package, PackageBuilder, SystemImageBuilder};
 use futures::{FutureExt, StreamExt, TryFutureExt, TryStreamExt};
 use log::{error, info};
 use realm_proxy::service::serve_with_proxy;
-use {fidl_fuchsia_component_sandbox as fsandbox, fidl_fuchsia_io as fio};
 
 // When this feature is enabled, the pkgdir tests will start Fxblob.
 #[cfg(feature = "use_fxblob")]
@@ -93,8 +92,6 @@ async fn serve_factory(
     directory: fio::DirectoryProxy,
     mut stream: RealmFactoryRequestStream,
 ) -> Result<(), crate::Error> {
-    let store = connect_to_protocol::<fsandbox::CapabilityStoreMarker>().unwrap();
-    let mut dict_id = 1;
     while let Ok(Some(request)) = stream.try_next().await {
         match request {
             RealmFactoryRequest::CreateRealm { options, responder } => {
@@ -113,10 +110,9 @@ async fn serve_factory(
                     continue;
                 }
 
-                store.dictionary_create(dict_id).await?.unwrap();
+                let dictionary = Dictionary::new().await;
                 let (my_dictionary, server) = endpoints::create_endpoints();
-                store.dictionary_legacy_export(dict_id, server.into()).await.unwrap().unwrap();
-                dict_id += 1;
+                dictionary.legacy_export(server.into_channel()).await;
 
                 responder.send(Ok(my_dictionary))?;
             }

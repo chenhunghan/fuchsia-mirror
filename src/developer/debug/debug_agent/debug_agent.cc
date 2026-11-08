@@ -833,12 +833,14 @@ void DebugAgent::OnAttach(const debug_ipc::AttachRequest& request, debug_ipc::At
   reply->timestamp = GetNowTimestamp();
 
   // See if we already have a DebuggedProcess for this koid. If we do and we're not already attached
-  // (we could be attached to the parent job already), try to attach. This might fail if another
-  // process eagerly claimed the exception channel before us.
+  // (we could be attached to the parent job already), try to attach unless the request is for
+  // minimal priority (e.g., from a recursive job_only filter sync that sets never_attach). This
+  // might fail if another process eagerly claimed the exception channel before us.
   if (request.config.target == debug_ipc::TaskType::kProcess) {
     if (auto found = procs_.find(request.koid); found != procs_.end()) {
       DebuggedProcess* proc = found->second.get();
-      if (proc->IsAttached()) {
+      if (proc->IsAttached() ||
+          request.config.priority == debug_ipc::AttachConfig::Priority::kMinimal) {
         reply->status =
             debug::Status(debug::Status::kAlreadyExists,
                           "Already attached to process " + std::to_string(proc->koid()));

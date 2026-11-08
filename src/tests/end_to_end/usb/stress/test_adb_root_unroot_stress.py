@@ -11,6 +11,9 @@ from mobly import asserts, test_runner
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
+# How long to wait for adbd to come back before restoring the non-root state.
+_WAIT_FOR_DEVICE_TIMEOUT_SECS: float = 60.0
+
 
 class AdbRootUnrootStressTest(fuchsia_base_test.FuchsiaBaseTest):
     """Mobly test for loop/stress testing ADB root/unroot.
@@ -133,16 +136,16 @@ class AdbRootUnrootStressTest(fuchsia_base_test.FuchsiaBaseTest):
                 output,
                 msg=f"Expected shell user (uid=2000) after use_su_root exit but got: {output}",
             )
-        finally:
-            # Always restore non-root state
-            self.dut.adb.su_unroot()
-            self.dut.adb.unroot(timeout=30.0)
-            output = self.dut.adb.run(["shell", "id"])
-            asserts.assert_in(
-                "uid=2000(shell)",
-                output,
-                msg=f"Expected shell user (uid=2000) but got: {output}",
-            )
+        except BaseException:
+            # Restore non-root state on a best-effort basis and re-raise the
+            # original error. When root/unroot fails, adbd is often still
+            # restarting (b/580019721), so the cleanup can fail too, and its
+            # error would otherwise replace the one that failed the iteration.
+            self._restore_non_root(best_effort=True)
+            raise
+
+        # Restore non-root state. Here, a cleanup failure fails the iteration.
+        self._restore_non_root(best_effort=False)
 
         # Ensure Fuchsia side is also online and IP is resolved (in case USB reset changed it)
         await self.dut.wait_for_online()
@@ -151,6 +154,35 @@ class AdbRootUnrootStressTest(fuchsia_base_test.FuchsiaBaseTest):
             "Successfully ended the ADB Root/Unroot test iteration# %s",
             iteration,
         )
+
+    def _restore_non_root(self, *, best_effort: bool) -> None:
+        """Restores the non-root state and verifies adbd runs as the shell user.
+
+        Args:
+            best_effort: If True, log errors instead of raising them, so that
+                the error that failed the iteration is the one reported.
+        """
+        try:
+            # adbd may still be restarting after the last root/unroot.
+            self.dut.adb.run(
+                ["wait-for-device"], timeout=_WAIT_FOR_DEVICE_TIMEOUT_SECS
+            )
+            self.dut.adb.su_unroot()
+            self.dut.adb.unroot(timeout=30.0)
+            output = self.dut.adb.run(["shell", "id"])
+            asserts.assert_in(
+                "uid=2000(shell)",
+                output,
+                msg=f"Expected shell user (uid=2000) but got: {output}",
+            )
+        except Exception:
+            if not best_effort:
+                raise
+            _LOGGER.warning(
+                "Failed to restore non-root state after a failed iteration; "
+                "reporting the original error instead.",
+                exc_info=True,
+            )
 
     def _name_func(self, iteration: int) -> str:
         """Generates name for each iteration test case."""

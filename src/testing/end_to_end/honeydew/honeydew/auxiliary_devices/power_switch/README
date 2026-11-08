@@ -88,3 +88,37 @@ Verify that passwordless access is working by attempting a non-interactive conne
 $ ssh -i pdu_priv_key_path [remote_user]@[remote_host]
 
 Note : This time ssh will be successful, no need to enter password manually.
+```
+
+### 4. Mobly YAML Configuration (`PowerSwitchUsingPdu`)
+
+Configure `power_switch_hw`, `power_switch_outlet`, and `power_switch_impl` on the device entry (`FuchsiaDevice` or `AccessPoint`) in your Mobly YAML testbed file:
+
+```yaml
+          power_switch_hw:
+            pdu_host: "192.168.42.48"
+            pdu_username: "admin"
+            priv_key_path: "/home/user/.ssh/pdu_key"
+          power_switch_outlet: 2
+          power_switch_impl:
+            module: "honeydew.auxiliary_devices.power_switch.power_switch_using_pdu"
+            class: "PowerSwitchUsingPdu"
+```
+
+---
+
+## Synaccess NP-02B HTTP PDU Configuration (`PowerSwitchUsingSynaccess`)
+
+For local testbeds using a Synaccess NP-02B HTTP PDU, configure `power_switch_hw`, `power_switch_outlet`, and `power_switch_impl` on the device entry (`FuchsiaDevice` or `AccessPoint`) in your Mobly YAML testbed file:
+
+```yaml
+          power_switch_hw:
+            host: "192.168.42.33"
+            # username and password are optional (default to "admin")
+            username: "admin"
+            password: "admin"
+          power_switch_outlet: 1
+          power_switch_impl:
+            module: "honeydew.auxiliary_devices.power_switch.power_switch_using_synaccess"
+            class: "PowerSwitchUsingSynaccess"
+```

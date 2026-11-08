@@ -5,7 +5,7 @@
 #ifndef SRC_DEVELOPER_FORENSICS_FEEDBACK_DATA_DATA_PROVIDER_H_
 #define SRC_DEVELOPER_FORENSICS_FEEDBACK_DATA_DATA_PROVIDER_H_
 
-#include <fuchsia/feedback/cpp/fidl.h>
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
 #include <lib/async/cpp/executor.h>
 #include <lib/async/dispatcher.h>
 #include <lib/fpromise/promise.h>
@@ -51,13 +51,14 @@ class DataProviderInternal {
   virtual ~DataProviderInternal() = default;
 
   using GetSnapshotInternalCallback =
-      fit::callback<void(feedback::Annotations, fuchsia::feedback::Attachment)>;
+      fit::callback<void(feedback::Annotations, fuchsia_feedback::Attachment)>;
   virtual void GetSnapshotInternal(zx::duration timeout, const std::string& uuid,
                                    GetSnapshotInternalCallback callback) = 0;
 };
 
 // Provides data useful to attach in feedback reports (crash, user feedback or bug reports).
-class DataProvider : public fuchsia::feedback::DataProvider, public DataProviderInternal {
+class DataProvider : public fidl::Server<fuchsia_feedback::DataProvider>,
+                     public DataProviderInternal {
  public:
   DataProvider(async_dispatcher_t* dispatcher, std::shared_ptr<sys::ServiceDirectory> services,
                timekeeper::Clock* clock, RedactorBase* redactor, bool is_first_instance,
@@ -67,11 +68,10 @@ class DataProvider : public fuchsia::feedback::DataProvider, public DataProvider
                feedback::AttachmentManager* attachment_manager,
                InspectDataBudget* inspect_data_budget);
 
-  // |fuchsia::feedback::DataProvider|
-  void GetAnnotations(fuchsia::feedback::GetAnnotationsParameters params,
-                      GetAnnotationsCallback callback) override;
-  void GetSnapshot(fuchsia::feedback::GetSnapshotParameters params,
-                   GetSnapshotCallback callback) override;
+  // |fuchsia_feedback::DataProvider|
+  void GetAnnotations(GetAnnotationsRequest& request,
+                      GetAnnotationsCompleter::Sync& completer) override;
+  void GetSnapshot(GetSnapshotRequest& request, GetSnapshotCompleter::Sync& completer) override;
   void GetSnapshotInternal(zx::duration timeout, const std::string& uuid,
                            GetSnapshotInternalCallback callback) override;
 

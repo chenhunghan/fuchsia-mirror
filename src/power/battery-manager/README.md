@@ -42,10 +42,21 @@ effective settings to the charger driver. The vote that charges least wins:
   with exponential backoff (1s to 60s). Charger votes stay applied as long as
   the driver's `Controller` channel remains open.
 
+### Debugging
+`fuchsia.power.battery.test.GovernorDebug` (in the toolbox; see `battery_cli`) debugs each scope
+like a charger: its composed `charger.Debug` sets sticky overrides that win over the votes they
+apply to.
+
+| Scope | Protocol | `SetControl` / `ClearControl` override | `GetState` reports | Other |
+| :---- | :------- | :------------------------------------- | :----------------- | :---- |
+| All governors | `GovernorDebug` | every governor's votes | every governor, `overrides`, and the `effective` values sent to the charger driver | `OpenGovernor` |
+| One governor | `Governor`, from `OpenGovernor` | that governor's votes, which still compete with the others | its lifecycle, `votes`, and `overrides` | `Pause` (returns once its votes are withdrawn), `Resume` |
+
 ### Inspect
 - `charge_limit_arbiter/elections/<field>`: `result`, `overridden`, and
-  per-governor `votes`.
-- `governors/<child_name>`: `url`, `running`, and `restarts`.
+  per-governor `votes` (debug overrides vote as `debug_override`).
+- `governors/<child_name>`: `url`, `state` (`stopped`, `running`, or `paused`),
+  and `restarts`.
 - `governor_telemetry`: per-governor `battery_sample_interval` and
   `charger_sample_interval` votes, `wakeup`, and `sample_count`.
 

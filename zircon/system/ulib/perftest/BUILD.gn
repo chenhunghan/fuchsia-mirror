@@ -4,6 +4,7 @@
 
 import("//build/zircon/zx_library.gni")
 
+# LINT.IfChange
 zx_library("perftest") {
   sdk = "source"
   sdk_headers = [
@@ -26,6 +27,8 @@ zx_library("perftest") {
     ]
   }
 }
+
+# LINT.ThenChange(BUILD.bazel)
 
 group("tests") {
   testonly = true

@@ -10,8 +10,6 @@ Interfaces directly with Linux USB device nodes (/dev/bus/usb/BBB/DDD or
 and bidirectional loopback transfers.
 """
 
-from __future__ import annotations
-
 import collections.abc
 import contextlib
 import ctypes
@@ -172,6 +170,39 @@ USB_ENDPOINT_XFER_INT = 0x03
 USB_ENDPOINT_XFERTYPE_MASK = 0x03
 
 
+def reset_usb_device(device_path: str) -> bool:
+    """Resets a USB device's port with the USBDEVFS_RESET ioctl.
+
+    The host drives a bus reset on the device's port and then reconfigures
+    it, without dropping VBUS. The call blocks until the reset completes.
+
+    Args:
+        device_path: Path to the usbfs device node (/dev/bus/usb/BBB/DDD).
+
+    Returns:
+        True if the kernel could not reset the device in place (e.g. its
+        descriptors changed) and logically disconnected it to re-enumerate
+        it, which the ioctl reports as ENODEV. False if the device was reset
+        in place.
+
+    Raises:
+        OSError: If the device node cannot be opened or the ioctl fails.
+    """
+    fd = os.open(device_path, os.O_RDWR)
+    try:
+        if _get_libc().ioctl(fd, USBDEVFS_RESET, 0) < 0:
+            err = ctypes.get_errno()
+            if err == errno.ENODEV:
+                return True
+            raise OSError(
+                err,
+                f"USBDEVFS_RESET on {device_path} failed: {os.strerror(err)}",
+            )
+        return False
+    finally:
+        os.close(fd)
+
+
 class MalformedDescriptorError(Exception):
     """Raised when a USB configuration descriptor payload is malformed."""
 
@@ -275,6 +306,25 @@ _USB_ZERO_REQ_CTRL_LOOPBACK_OUT: int = 0x5B
 _USB_ZERO_REQ_CTRL_LOOPBACK_IN: int = 0x5C
 _CTRL_LOOPBACK_LENGTHS: tuple[int, ...] = (63, 64, 65, 512)
 
+# Standard USB Device Feature Selectors
+# [USB 2.0 Specification, Chapter 9, Section 9.4: Standard Device Requests]
+USB_DEVICE_TEST_MODE: int = 0x02
+
+
+class UsbTestModeSelector(enum.IntEnum):
+    """Standard USB 2.0 Test Mode Selectors.
+
+    Defined in Table 9-7 of
+    [USB 2.0 Specification, Chapter 9, Section 9.4.9: Set Feature].
+    """
+
+    TEST_J = 0x01
+    TEST_K = 0x02
+    TEST_SE0_NAK = 0x03
+    TEST_PACKET = 0x04
+    TEST_FORCE_ENABLE = 0x05
+
+
 _USB_DT_DEVICE_SIZE: int = 18
 _USB_DT_CONFIG_SIZE: int = 9
 _DEFAULT_CTRL_TIMEOUT_MS: int = 1000
@@ -355,6 +405,46 @@ def _make_get_configuration_transfer(
         value=0,
         index=0,
         length=1,
+        timeout_ms=timeout_ms,
+        data_ptr=data_ptr,
+    )
+
+
+def _make_set_feature_transfer(
+    feature_selector: int,
+    index: int = 0,
+    recipient: int = _USB_RECIP_DEVICE,
+    length: int = 0,
+    timeout_ms: int = _DEFAULT_CTRL_TIMEOUT_MS,
+    data_ptr: int = 0,
+) -> UsbdevfsCtrltransfer:
+    """Builds a UsbdevfsCtrltransfer for standard SET_FEATURE."""
+    return _make_ctrl_transfer(
+        request_type=USB_DIR_OUT | _USB_TYPE_STANDARD | recipient,
+        request=_USB_REQ_SET_FEATURE,
+        value=feature_selector,
+        index=index,
+        length=length,
+        timeout_ms=timeout_ms,
+        data_ptr=data_ptr,
+    )
+
+
+def _make_clear_feature_transfer(
+    feature_selector: int,
+    index: int = 0,
+    recipient: int = _USB_RECIP_DEVICE,
+    length: int = 0,
+    timeout_ms: int = _DEFAULT_CTRL_TIMEOUT_MS,
+    data_ptr: int = 0,
+) -> UsbdevfsCtrltransfer:
+    """Builds a UsbdevfsCtrltransfer for standard CLEAR_FEATURE."""
+    return _make_ctrl_transfer(
+        request_type=USB_DIR_OUT | _USB_TYPE_STANDARD | recipient,
+        request=_USB_REQ_CLEAR_FEATURE,
+        value=feature_selector,
+        index=index,
+        length=length,
         timeout_ms=timeout_ms,
         data_ptr=data_ptr,
     )
@@ -1487,6 +1577,337 @@ class USBTestIoctlBackend(USBTestBackend):
             bytes_transferred=total_bytes,
             throughput_mbps=throughput_mbps,
             throughput_mbs=throughput_mbs,
+        )
+
+    def reset_device(self) -> bool:
+        """Issues a USB port reset to the device via USBDEVFS_RESET.
+
+        Per [USB 2.0 Specification, Chapter 7, Section 7.1.20: Test Mode Support],
+        exiting a USB 2.0 test mode requires a bus reset or power cycle.
+
+        Returns:
+            True if USBDEVFS_RESET succeeded, False otherwise.
+
+        Raises:
+            RuntimeError: If the backend is not currently open.
+        """
+        if not self.is_open or self._fd is None:
+            raise RuntimeError("Backend is not open")
+
+        try:
+            res = _get_libc().ioctl(self._fd, USBDEVFS_RESET, 0)
+            if res < 0:
+                errno_val = ctypes.get_errno()
+                if errno_val == errno.ENODEV:
+                    self._maxpacket = None
+                    return True
+                _LOGGER.debug(
+                    "USBDEVFS_RESET failed with errno %d (%s)",
+                    errno_val,
+                    os.strerror(errno_val),
+                )
+                return False
+            self._maxpacket = None
+            return True
+        except OSError as err:
+            _LOGGER.debug("USBDEVFS_RESET raised OSError: %s", err)
+            return False
+
+    def run_test_mode_negative(
+        self,
+        params: TestParams | None = None,
+        test_id: int = 0,
+        test_name: str = "Test Mode: Negative Checks",
+    ) -> TestResult:
+        """Verifies EP0 stalls on invalid USB_DEVICE_TEST_MODE requests.
+
+        Issues direct USBDEVFS_CONTROL transfers testing invalid test mode
+        selectors (0x00, >= 0x06), non-zero wIndex[7:0], and
+        CLEAR_FEATURE(USB_DEVICE_TEST_MODE) per
+        [USB 2.0 Specification, Chapter 9, Section 9.4.9: Set Feature] and
+        [USB 2.0 Specification, Chapter 9, Section 9.4.1: Clear Feature],
+        verifying that each control transfer fails with errno.EPIPE (EP0
+        protocol stall) and that EP0 remains responsive afterward.
+
+        Args:
+            params: Optional TestParams controlling iteration count and timeout.
+            test_id: Integer test identifier for reporting.
+            test_name: Human-readable test name for reporting.
+
+        Returns:
+            TestResult recording status, duration, and completed iterations.
+
+        Raises:
+            RuntimeError: If the backend is not currently open.
+        """
+        if not self.is_open or self._fd is None:
+            raise RuntimeError("Backend is not open")
+
+        iterations = params.iterations if params is not None else 1
+        timeout_ms = (
+            params.timeout_ms
+            if params is not None
+            else _DEFAULT_CTRL_TIMEOUT_MS
+        )
+
+        negative_cases: tuple[tuple[str, UsbdevfsCtrltransfer], ...] = (
+            (
+                "SET_FEATURE(TEST_MODE, selector=0x00)",
+                _make_set_feature_transfer(
+                    feature_selector=USB_DEVICE_TEST_MODE,
+                    index=0x0000,
+                    timeout_ms=timeout_ms,
+                ),
+            ),
+            (
+                "SET_FEATURE(TEST_MODE, selector=0x06)",
+                _make_set_feature_transfer(
+                    feature_selector=USB_DEVICE_TEST_MODE,
+                    index=0x06 << 8,
+                    timeout_ms=timeout_ms,
+                ),
+            ),
+            (
+                "SET_FEATURE(TEST_MODE, selector=0xc0)",
+                _make_set_feature_transfer(
+                    feature_selector=USB_DEVICE_TEST_MODE,
+                    index=0xC0 << 8,
+                    timeout_ms=timeout_ms,
+                ),
+            ),
+            (
+                "SET_FEATURE(TEST_MODE, non-zero wIndex[7:0])",
+                _make_set_feature_transfer(
+                    feature_selector=USB_DEVICE_TEST_MODE,
+                    index=(int(UsbTestModeSelector.TEST_J) << 8) | 0x01,
+                    timeout_ms=timeout_ms,
+                ),
+            ),
+            (
+                "CLEAR_FEATURE(TEST_MODE, wIndex=0x0000)",
+                _make_clear_feature_transfer(
+                    feature_selector=USB_DEVICE_TEST_MODE,
+                    index=0x0000,
+                    timeout_ms=timeout_ms,
+                ),
+            ),
+            (
+                "CLEAR_FEATURE(TEST_MODE, wIndex=TEST_J<<8)",
+                _make_clear_feature_transfer(
+                    feature_selector=USB_DEVICE_TEST_MODE,
+                    index=int(UsbTestModeSelector.TEST_J) << 8,
+                    timeout_ms=timeout_ms,
+                ),
+            ),
+        )
+
+        cdll = _get_libc()
+        cfg_buf = ctypes.create_string_buffer(1)
+        ctrl_cfg = _make_get_configuration_transfer(
+            timeout_ms=timeout_ms,
+            data_ptr=ctypes.addressof(cfg_buf),
+        )
+
+        start_time = time.perf_counter()
+        iterations_done = 0
+        error_msg: str | None = None
+
+        for i in range(iterations):
+            for label, ctrl in negative_cases:
+                try:
+                    res = cdll.ioctl(
+                        self._fd, USBDEVFS_CONTROL, ctypes.byref(ctrl)
+                    )
+                except OSError as err:
+                    if err.errno == errno.EPIPE:
+                        continue
+                    error_msg = f"{label} failed at iteration {i}: {err}"
+                    break
+
+                if res >= 0:
+                    error_msg = (
+                        f"{label} unexpectedly succeeded at iteration {i} "
+                        f"(returned {res}); expected EP0 stall (EPIPE)"
+                    )
+                    break
+
+                errno_val = ctypes.get_errno()
+                if errno_val != errno.EPIPE:
+                    error_msg = (
+                        f"{label} failed at iteration {i} with errno "
+                        f"{errno_val} ({os.strerror(errno_val)}); "
+                        f"expected errno {errno.EPIPE} (EPIPE)"
+                    )
+                    break
+
+            if error_msg is not None:
+                break
+
+            # Verify EP0 recovers from the protocol stall and has not entered
+            # test mode by issuing a standard GET_CONFIGURATION request.
+            try:
+                res_cfg = cdll.ioctl(
+                    self._fd, USBDEVFS_CONTROL, ctypes.byref(ctrl_cfg)
+                )
+            except OSError as err:
+                error_msg = (
+                    "GET_CONFIGURATION recovery check failed at iteration "
+                    f"{i}: {err}"
+                )
+                break
+
+            if res_cfg < 1:
+                errno_val = ctypes.get_errno()
+                error_msg = (
+                    "EP0 unresponsive after negative test mode checks at "
+                    f"iteration {i}: GET_CONFIGURATION returned {res_cfg}, "
+                    f"errno {errno_val} ({os.strerror(errno_val)})"
+                )
+                break
+
+            iterations_done += 1
+
+        elapsed = time.perf_counter() - start_time
+        if error_msg is not None:
+            return TestResult(
+                test_id=test_id,
+                test_name=test_name,
+                status=TestStatus.FAIL,
+                duration_secs=elapsed,
+                error_message=error_msg,
+                iterations_completed=iterations_done,
+            )
+
+        return TestResult(
+            test_id=test_id,
+            test_name=test_name,
+            status=TestStatus.PASS,
+            duration_secs=elapsed,
+            iterations_completed=iterations_done,
+        )
+
+    def run_test_mode(
+        self,
+        selector: int = UsbTestModeSelector.TEST_SE0_NAK,
+        reset_after: bool = True,
+        reset_callback: collections.abc.Callable[[], None] | None = None,
+        timeout_ms: int = _DEFAULT_CTRL_TIMEOUT_MS,
+        test_id: int = 0,
+        test_name: str | None = None,
+    ) -> TestResult:
+        """Executes an opt-in positive SET_FEATURE(USB_DEVICE_TEST_MODE) check.
+
+        Sends SET_FEATURE(USB_DEVICE_TEST_MODE) with a valid test mode selector
+        in wIndex[15:8] per
+        [USB 2.0 Specification, Chapter 9, Section 9.4.9: Set Feature],
+        verifies the Status stage succeeds, and resets or power-cycles the
+        port afterward to exit test mode per
+        [USB 2.0 Specification, Chapter 7, Section 7.1.20: Test Mode Support].
+
+        Args:
+            selector: Valid USB 2.0 test mode selector in range 1..5
+                (UsbTestModeSelector.TEST_J..TEST_FORCE_ENABLE).
+            reset_after: If True and reset_callback is None, issues
+                USBDEVFS_RESET via reset_device() after entering test mode.
+            reset_callback: Optional callback to reset or power-cycle the USB
+                port after entering test mode. Takes precedence over
+                reset_after when provided.
+            timeout_ms: Control transfer timeout in milliseconds.
+            test_id: Integer test identifier for reporting.
+            test_name: Optional human-readable test name for reporting.
+
+        Returns:
+            TestResult recording status and duration.
+
+        Raises:
+            RuntimeError: If the backend is not currently open.
+            ValueError: If selector is not a valid UsbTestModeSelector (1..5).
+        """
+        if not self.is_open or self._fd is None:
+            raise RuntimeError("Backend is not open")
+
+        try:
+            mode_selector = UsbTestModeSelector(selector)
+        except ValueError as err:
+            raise ValueError(
+                f"Invalid USB 2.0 test mode selector {selector:#x}; expected "
+                "1..5 (TEST_J..TEST_FORCE_ENABLE)"
+            ) from err
+
+        if test_name is None:
+            test_name = f"Test Mode: {mode_selector.name}"
+
+        ctrl = _make_set_feature_transfer(
+            feature_selector=USB_DEVICE_TEST_MODE,
+            index=int(mode_selector) << 8,
+            timeout_ms=timeout_ms,
+        )
+
+        start_time = time.perf_counter()
+        try:
+            res = _get_libc().ioctl(
+                self._fd, USBDEVFS_CONTROL, ctypes.byref(ctrl)
+            )
+        except OSError as err:
+            elapsed = time.perf_counter() - start_time
+            return TestResult(
+                test_id=test_id,
+                test_name=test_name,
+                status=TestStatus.ERROR,
+                duration_secs=elapsed,
+                error_message=str(err),
+            )
+
+        if res < 0:
+            elapsed = time.perf_counter() - start_time
+            errno_val = ctypes.get_errno()
+            return TestResult(
+                test_id=test_id,
+                test_name=test_name,
+                status=TestStatus.FAIL,
+                duration_secs=elapsed,
+                error_message=(
+                    f"SET_FEATURE(TEST_MODE={mode_selector.name}) failed: "
+                    f"errno {errno_val} ({os.strerror(errno_val)})"
+                ),
+            )
+
+        if reset_callback is not None:
+            try:
+                reset_callback()
+            except Exception as err:  # pylint: disable=broad-except
+                elapsed = time.perf_counter() - start_time
+                return TestResult(
+                    test_id=test_id,
+                    test_name=test_name,
+                    status=TestStatus.FAIL,
+                    duration_secs=elapsed,
+                    error_message=(
+                        f"Port reset callback failed after entering "
+                        f"{mode_selector.name}: {err}"
+                    ),
+                )
+        elif reset_after:
+            if not self.reset_device():
+                elapsed = time.perf_counter() - start_time
+                return TestResult(
+                    test_id=test_id,
+                    test_name=test_name,
+                    status=TestStatus.FAIL,
+                    duration_secs=elapsed,
+                    error_message=(
+                        f"USBDEVFS_RESET failed after entering "
+                        f"{mode_selector.name}"
+                    ),
+                )
+
+        elapsed = time.perf_counter() - start_time
+        return TestResult(
+            test_id=test_id,
+            test_name=test_name,
+            status=TestStatus.PASS,
+            duration_secs=elapsed,
+            iterations_completed=1,
         )
 
     def run_test(self, test_id: int, params: TestParams) -> TestResult:

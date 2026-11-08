@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -91,14 +92,15 @@ type EmulatorConfig struct {
 // QEMU, AEMU, and crosvm.
 type Emulator struct {
 	*genericFuchsiaTarget
-	binary  string
-	c       chan error
-	config  EmulatorConfig
-	mac     [6]byte
-	opts    Options
-	process *os.Process
-	ptm     *os.File
-	serial  io.ReadWriteCloser
+	binary   string
+	c        chan error
+	config   EmulatorConfig
+	mac      [6]byte
+	netProxy *emuNetProxy
+	opts     Options
+	process  *os.Process
+	ptm      *os.File
+	serial   io.ReadWriteCloser
 }
 
 var _ FuchsiaTarget = (*Emulator)(nil)
@@ -118,6 +120,14 @@ func getBinaryName(emuType string, target Target) (string, error) {
 	default:
 		return "", fmt.Errorf("unknown emulator type found: %q", emuType)
 	}
+}
+
+// IPv4 returns nil: an emulator's IPv4 address, if any, is on QEMU's internal
+// SLiRP network (e.g. 10.0.2.15 with internet access enabled) and isn't
+// reachable from the host, which uses the IPv6 link-local address over the TAP
+// interface instead. This matches how Device and GCE return nil from IPv6().
+func (t *Emulator) IPv4() (net.IP, error) {
+	return nil, nil
 }
 
 // NewEmulator returns a new Emulator target with a given configuration.
@@ -277,13 +287,13 @@ func (t *Emulator) Start(ctx context.Context, args []string, pbPath string, isBo
 		Accel:         t.config.Emulator.Accel,
 	}
 	if t.config.Emulator.Uefi {
-		startArgs.ExtraEmuArgs = []string{
+		startArgs.ExtraEmuArgs = append(startArgs.ExtraEmuArgs,
 			"--uefi",
 			"--vbmeta-key",
 			t.config.Emulator.VbmetaKey,
 			"--vbmeta-key-metadata",
 			t.config.Emulator.VbmetaKeyMetadata,
-		}
+		)
 		// TODO(https://fxbug.dev/369416059): ffx emu --uefi calls mkfs-msdosfs which
 		// looks for the FUCHSIA_BUILD_DIR env var. Remove once this dependency is no
 		// longer needed.
@@ -291,12 +301,40 @@ func (t *Emulator) Start(ctx context.Context, args []string, pbPath string, isBo
 			return err
 		}
 	}
+	if t.config.Emulator.AllowInternet {
+		proxyCtx := ctx
+		if t.genericFuchsiaTarget != nil && t.targetCtx != nil {
+			proxyCtx = t.targetCtx
+		}
+		// No domains are allowed yet, so the proxy blocks all guest
+		// network requests.
+		netProxy, err := newEmuNetProxy(proxyCtx, nil, "")
+		if err != nil {
+			return err
+		}
+		t.netProxy = netProxy
+		startArgs.ExtraEmuArgs = append(startArgs.ExtraEmuArgs, "--internet")
+		startArgs.ExtraEmuArgs = append(startArgs.ExtraEmuArgs, netProxy.emuArgs()...)
+	}
+	// closeNetProxy may run concurrently with Stop(), so it closes the proxy
+	// started above without modifying t.netProxy, and relies on
+	// emuNetProxy.Close being safe to call more than once.
+	netProxy := t.netProxy
+	closeNetProxy := func() {
+		if netProxy != nil {
+			_ = netProxy.Close()
+		}
+	}
 
 	cmd, err := t.ffx.EmuStartConsole(ctx, cwd, DefaultEmulatorNodename, tools, startArgs)
 	if err != nil {
+		closeNetProxy()
 		return err
 	}
 	if dryRun {
+		// No emulator process is spawned for a dry run, so nothing will
+		// otherwise tear down the proxy.
+		closeNetProxy()
 		return nil
 	}
 
@@ -318,13 +356,16 @@ func (t *Emulator) Start(ctx context.Context, args []string, pbPath string, isBo
 		logfile := filepath.Join(t.opts.SerialLogDir, "serial_log.txt")
 		logfileAbsPath, err := filepath.Abs(logfile)
 		if err != nil {
+			closeNetProxy()
 			return fmt.Errorf("cannot get absolute path for %q: %w", logfile, err)
 		}
 		if err := os.MkdirAll(filepath.Dir(logfileAbsPath), os.ModePerm); err != nil {
+			closeNetProxy()
 			return fmt.Errorf("failed to make parent dirs of %q: %w", logfileAbsPath, err)
 		}
 		serialLog, err := os.Create(logfileAbsPath)
 		if err != nil {
+			closeNetProxy()
 			return fmt.Errorf("failed to create %s", logfileAbsPath)
 		}
 		if err := os.Setenv(constants.SerialLogEnvKey, logfileAbsPath); err != nil {
@@ -360,6 +401,7 @@ func (t *Emulator) Start(ctx context.Context, args []string, pbPath string, isBo
 	if err := cmd.Start(); err != nil {
 		flush()
 		closeSerialLog()
+		closeNetProxy()
 		return fmt.Errorf("failed to start: %w", err)
 	}
 	t.process = cmd.Process
@@ -368,6 +410,7 @@ func (t *Emulator) Start(ctx context.Context, args []string, pbPath string, isBo
 		err := cmd.Wait()
 		flush()
 		closeSerialLog()
+		closeNetProxy()
 		if err != nil {
 			logger.Debugf(ctx, "processes using 'qemu' interface:\n%s", strings.Join(processesUsingQEMUInterface(), "\n"))
 			err = fmt.Errorf("%s invocation error: %w", t.binary, err)
@@ -434,6 +477,9 @@ func (t *Emulator) Stop() error {
 		err = t.process.Kill()
 	}
 	t.process = nil
+	if t.netProxy != nil {
+		_ = t.netProxy.Close()
+	}
 	t.genericFuchsiaTarget.Stop()
 	return err
 }

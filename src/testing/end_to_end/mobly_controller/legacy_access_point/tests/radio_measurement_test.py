@@ -4,8 +4,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# mypy: disable-error-code="no-untyped-def"
-
 import unittest
 
 from honeydew.typing.custom_types import MacAddress
@@ -29,7 +27,7 @@ EXPECTED_BSSID_INFO = BssidInformation(
 
 
 class RadioMeasurementTest(unittest.TestCase):
-    def test_bssid_information_capabilities(self):
+    def test_bssid_information_capabilities(self) -> None:
         self.assertTrue(EXPECTED_BSSID_INFO_CAP.spectrum_management)
         self.assertTrue(EXPECTED_BSSID_INFO_CAP.qos)
         self.assertTrue(EXPECTED_BSSID_INFO_CAP.apsd)
@@ -37,7 +35,7 @@ class RadioMeasurementTest(unittest.TestCase):
         # Must also test the numeric representation.
         self.assertEqual(int(EXPECTED_BSSID_INFO_CAP), 0b111100)
 
-    def test_bssid_information(self):
+    def test_bssid_information(self) -> None:
         self.assertEqual(
             EXPECTED_BSSID_INFO.capabilities, EXPECTED_BSSID_INFO_CAP
         )
@@ -47,7 +45,7 @@ class RadioMeasurementTest(unittest.TestCase):
             int(EXPECTED_BSSID_INFO), 0b10001111000100000000000000000000
         )
 
-    def test_neighbor_report_element(self):
+    def test_neighbor_report_element(self) -> None:
         element = NeighborReportElement(
             bssid=EXPECTED_BSSID,
             bssid_information=EXPECTED_BSSID_INFO,

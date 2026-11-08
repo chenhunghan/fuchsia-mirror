@@ -1,0 +1,41 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_library_headers.bzl", "fx_cc_library_headers")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library_headers(
+    name = "headers",
+    hdrs = [
+        "include/lib/hid-parser/descriptor.h",
+        "include/lib/hid-parser/item.h",
+        "include/lib/hid-parser/parser.h",
+        "include/lib/hid-parser/report.h",
+        "include/lib/hid-parser/units.h",
+        "include/lib/hid-parser/usages.h",
+    ],
+)
+
+fx_cc_library(
+    name = "hid-parser",
+    srcs = [
+        "descriptor.cc",
+        "item.cc",
+        "parser.cc",
+        "report.cc",
+        "units.cc",
+    ],
+    implementation_deps = [
+        "//zircon/system/ulib/fbl",
+        "//zircon/third_party/ulib/safemath",
+    ],
+    visibility = [
+        "//src/bringup/bin/critical-services:__pkg__",
+        "//src/ui/input:__subpackages__",
+    ],
+    deps = [":headers"],
+    alwayslink = True,
+)

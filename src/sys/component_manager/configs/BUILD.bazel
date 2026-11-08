@@ -8,5 +8,21 @@ exports_files(
     [
         "bootfs_config.json5",
     ],
-    visibility = ["//bundles/assembly:__subpackages__"],
+    visibility = [
+        "//build/component:__pkg__",
+        "//bundles/assembly:__subpackages__",
+    ],
+)
+
+exports_files(
+    [
+        "component_id_index_for_debug.json5",
+        "debug.json5",
+        "no_debug.json5",
+        "test_config.base.json5",
+    ],
+    visibility = [
+        "//src/lib/fuchsia-component-test:__subpackages__",
+        "//src/sys/component_manager:__subpackages__",
+    ],
 )

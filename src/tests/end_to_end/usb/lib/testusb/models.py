@@ -9,8 +9,6 @@ Leaf module with no dependencies on runner, cli, or backends, ensuring a clean
 directed acyclic graph (DAG) across the testusb package.
 """
 
-from __future__ import annotations
-
 import dataclasses
 import enum
 from typing import Any
@@ -239,8 +237,8 @@ ALL_TEST_CASES: dict[int, TestCase] = {
     ),
     24: TestCase(
         24,
-        "Test 24: ISO_UNLINK",
-        "Isochronous transfer unlink and cancel",
+        "Test 24: UNLINK_QUEUED_OUT",
+        "Unlink from queued bulk OUT transfers",
     ),
     25: TestCase(
         25,

@@ -42,7 +42,7 @@ DDK_PROTOCOL_DEF(HIDBUS,                  22,   "hidbus", 0)
 DDK_PROTOCOL_DEF(HID_DEVICE,              23,   "input", 0)
 DDK_PROTOCOL_DEF(I2C,                     24,   "i2c", 0)
 DDK_PROTOCOL_DEF(I2C_IMPL ,               25,   "i2c-impl", 0)
-DDK_PROTOCOL_DEF(INPUTREPORT,             26,   "input-report", 0)
+// 26 was INPUTREPORT
 DDK_PROTOCOL_DEF(ROOT,                    27,   "root", PF_NOPUB)
 DDK_PROTOCOL_DEF(MISC,                    28,   "misc", PF_NOPUB)
 DDK_PROTOCOL_DEF(ACPI,                    30,   "acpi", 0)

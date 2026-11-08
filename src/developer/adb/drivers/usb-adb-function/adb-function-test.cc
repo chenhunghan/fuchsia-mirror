@@ -46,8 +46,12 @@ class UsbAdbTestHelper {
   static size_t BulkInEpPendingRequests(UsbAdbDevice& device) {
     return device.bulk_in_ep_.GetInFlightCount();
   }
+  static size_t BulkTxVmoSize(const UsbAdbDevice& device) { return device.bulk_tx_vmo_size_; }
   static size_t TxPendingReqsCount(const UsbAdbDevice& device) {
     return device.tx_pending_reqs_.size();
+  }
+  static size_t BackTxPendingStart(const UsbAdbDevice& device) {
+    return device.tx_pending_reqs_.empty() ? 0 : device.tx_pending_reqs_.back().start;
   }
   static size_t RxRequestsCount(const UsbAdbDevice& device) { return device.rx_requests_.size(); }
   static size_t PendingRepliesCount(const UsbAdbDevice& device) {
@@ -73,6 +77,31 @@ static constexpr uint32_t kBulkInEp = 2;
 
 class DelayedCancelEndpoint : public fake_usb_endpoint::FakeEndpoint {
  public:
+  void GetInfo(GetInfoCompleter::Sync& completer) override {
+    bool use_base = false;
+    bool supports_sg = false;
+    {
+      std::lock_guard<std::mutex> _(lock_);
+      use_base = !expected_get_info_.empty();
+      supports_sg = supports_scatter_gather_;
+    }
+    if (use_base) {
+      FakeEndpoint::GetInfo(completer);
+      return;
+    }
+    if (!supports_sg) {
+      completer.Reply(fit::as_error(ZX_ERR_NOT_SUPPORTED));
+      return;
+    }
+    completer.Reply(fit::ok(fuchsia_hardware_usb_endpoint::EndpointInfo::WithBulk(
+        fuchsia_hardware_usb_endpoint::BulkEndpointInfo().supports_scatter_gather(true))));
+  }
+
+  void set_supports_scatter_gather(bool supports_sg) {
+    std::lock_guard<std::mutex> _(lock_);
+    supports_scatter_gather_ = supports_sg;
+  }
+
   void CancelAll(CancelAllCompleter::Sync& completer) override {
     zx_status_t reply_status = ZX_OK;
     {
@@ -160,6 +189,7 @@ class DelayedCancelEndpoint : public fake_usb_endpoint::FakeEndpoint {
 
   zx_status_t cancel_status_ __TA_GUARDED(lock_) = ZX_OK;
   bool hold_cancel_ __TA_GUARDED(lock_) = false;
+  bool supports_scatter_gather_ __TA_GUARDED(lock_) = false;
   std::vector<CancelAllCompleter::Async> delayed_cancels_ __TA_GUARDED(lock_);
 };
 
@@ -401,6 +431,9 @@ class UsbAdbEnvironment : public fdf_testing::Environment {
     fake_dev_->set_alloc_resources_status(alloc_resources_status_);
     fake_dev_->set_configure_status(configure_status_);
     fake_dev_->set_omit_endpoints(omit_endpoints_);
+    if (bulk_in_scatter_gather_) {
+      fake_dev_->fake_endpoint(kBulkInEp).set_supports_scatter_gather(true);
+    }
 
     fuchsia_hardware_usb_function::UsbFunctionService::InstanceHandler handler({
         .device = usb_function_bindings_.CreateHandler(&*fake_dev_, dispatcher,
@@ -417,6 +450,7 @@ class UsbAdbEnvironment : public fdf_testing::Environment {
   void set_alloc_resources_status(zx_status_t status) { alloc_resources_status_ = status; }
   void set_configure_status(zx_status_t status) { configure_status_ = status; }
   void set_omit_endpoints(bool omit) { omit_endpoints_ = omit; }
+  void set_bulk_in_scatter_gather(bool enabled) { bulk_in_scatter_gather_ = enabled; }
 
   void CancelAllUsbRequests() {
     if (!fake_dev_.has_value()) {
@@ -435,6 +469,7 @@ class UsbAdbEnvironment : public fdf_testing::Environment {
   zx_status_t alloc_resources_status_ = ZX_OK;
   zx_status_t configure_status_ = ZX_OK;
   bool omit_endpoints_ = false;
+  bool bulk_in_scatter_gather_ = false;
 };
 
 class UsbAdbTestConfig final {
@@ -2478,6 +2513,313 @@ TEST_F(UsbAdbTest, QueueTxOutOfOrderCompletionMatchesByVmoId) {
     env.fake_dev_->fake_endpoint(kBulkInEp).RequestCompleteAtIndex(0, ZX_OK, payload1.size());
   });
   driver_test_.runtime().RunUntil([&] { return tx1_ok.load(); });
+
+  async_usb_impl = {};
+  SafeStopDriver();
+}
+
+TEST_F(UsbAdbTest, BadStateAndCanceledCompletionsDoNotRequeueOrPumpTx) {
+  auto usb_impl_sync = NormalStartAdb();
+  EventHandler handler;
+  handler.expected_statuses_.emplace(fadb::StatusFlags::kOnline);
+  ExpectHandleOneEventSafe(usb_impl_sync, handler);
+
+  auto async_usb_impl = fidl::WireClient<fadb::UsbAdbImpl>(
+      usb_impl_sync.TakeClientEnd(), fdf::Dispatcher::GetCurrent()->async_dispatcher());
+
+  // 1. Verify that a bulk OUT completion with ZX_ERR_BAD_STATE returns the request to bulk_out_ep_
+  // without re-queuing it onto the hardware endpoint.
+  std::atomic<bool> rx_completed = false;
+  async_usb_impl->Receive().ThenExactlyOnce([&](auto& response) {
+    ASSERT_TRUE(response.ok());
+    EXPECT_TRUE(response->is_error());
+    rx_completed = true;
+  });
+
+  driver_test_.runtime().RunUntil([&]() {
+    size_t count = 0;
+    driver_test_.RunInDriverContext(
+        [&](UsbAdbDevice& dev) { count = UsbAdbTestHelper::RxRequestsCount(dev); });
+    return count == 1u;
+  });
+
+  driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+    env.fake_dev_->fake_endpoint(kBulkOutEp).RequestComplete(ZX_ERR_BAD_STATE, 0);
+  });
+
+  driver_test_.runtime().RunUntil([&]() { return rx_completed.load(); });
+
+  driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+    EXPECT_EQ(env.fake_dev_->fake_endpoint(kBulkOutEp).pending_request_count(), kBulkRxCount - 1);
+  });
+
+  // 2. Queue two multi-chunk TX transfers totaling kBulkTxCount + 2 chunks (each under the 64 KiB
+  // FIDL channel limit) so that all kBulkTxCount descriptors are in flight and 2 chunks of payload2
+  // remain unqueued waiting for descriptors to return.
+  std::vector<uint8_t> payload1(kVmoDataSize * 2, 0xAA);
+  std::vector<uint8_t> payload2(kVmoDataSize * (kBulkTxCount - 1) + 2, 0xBB);
+  std::atomic<bool> tx1_completed = false;
+  std::atomic<zx_status_t> tx1_status = ZX_OK;
+  std::atomic<bool> tx2_completed = false;
+  std::atomic<zx_status_t> tx2_status = ZX_OK;
+  async_usb_impl->QueueTx(fidl::VectorView<uint8_t>::FromExternal(payload1.data(), payload1.size()))
+      .ThenExactlyOnce([&](auto& result) {
+        ASSERT_TRUE(result.ok());
+        tx1_status = result->is_error() ? result->error_value() : ZX_OK;
+        tx1_completed = true;
+      });
+  async_usb_impl->QueueTx(fidl::VectorView<uint8_t>::FromExternal(payload2.data(), payload2.size()))
+      .ThenExactlyOnce([&](auto& result) {
+        ASSERT_TRUE(result.ok());
+        tx2_status = result->is_error() ? result->error_value() : ZX_OK;
+        tx2_completed = true;
+      });
+
+  constexpr size_t kInitialPayload2Start = kVmoDataSize * (kBulkTxCount - 2);
+  driver_test_.runtime().RunUntil([&]() {
+    size_t pending = 0;
+    driver_test_.RunInEnvironmentTypeContext([&](UsbAdbEnvironment& env) {
+      pending = env.fake_dev_->fake_endpoint(kBulkInEp).pending_request_count();
+    });
+    size_t tx_reqs = 0;
+    driver_test_.RunInDriverContext(
+        [&](UsbAdbDevice& dev) { tx_reqs = UsbAdbTestHelper::TxPendingReqsCount(dev); });
+    return pending == kBulkTxCount && tx_reqs == 2u;
+  });
+
+  // Completing a bulk IN request with ZX_ERR_BAD_STATE must return the descriptor to bulk_in_ep_
+  // without calling SendQueued() to pump the next unqueued chunk onto the endpoint.
+  driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+    env.fake_dev_->fake_endpoint(kBulkInEp).RequestComplete(ZX_ERR_BAD_STATE, 0);
+  });
+  driver_test_.runtime().RunUntil([&]() {
+    bool processed = false;
+    driver_test_.RunInDriverContext([&](UsbAdbDevice& dev) {
+      processed = (UsbAdbTestHelper::BulkInEpPendingRequests(dev) == kBulkTxCount - 1) ||
+                  (UsbAdbTestHelper::BackTxPendingStart(dev) > kInitialPayload2Start);
+    });
+    return processed;
+  });
+  driver_test_.RunInDriverContext([&](UsbAdbDevice& dev) {
+    EXPECT_EQ(UsbAdbTestHelper::BulkInEpPendingRequests(dev), kBulkTxCount - 1);
+    EXPECT_EQ(UsbAdbTestHelper::BackTxPendingStart(dev), kInitialPayload2Start);
+  });
+  driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+    EXPECT_EQ(env.fake_dev_->fake_endpoint(kBulkInEp).pending_request_count(), kBulkTxCount - 1);
+  });
+  EXPECT_FALSE(tx1_completed.load());
+
+  // Completing another bulk IN request with ZX_ERR_CANCELED must also not call SendQueued().
+  // Because payload1 had 2 chunks and both have now completed, payload1 completes with its first
+  // error status (ZX_ERR_BAD_STATE), leaving only the partially queued payload2 in
+  // tx_pending_reqs_.
+  driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+    env.fake_dev_->fake_endpoint(kBulkInEp).RequestComplete(ZX_ERR_CANCELED, 0);
+  });
+  driver_test_.runtime().RunUntil([&]() { return tx1_completed.load(); });
+  EXPECT_EQ(tx1_status.load(), ZX_ERR_BAD_STATE);
+  driver_test_.RunInDriverContext([&](UsbAdbDevice& dev) {
+    EXPECT_EQ(UsbAdbTestHelper::TxPendingReqsCount(dev), 1u);
+    EXPECT_EQ(UsbAdbTestHelper::BulkInEpPendingRequests(dev), kBulkTxCount - 2);
+    EXPECT_EQ(UsbAdbTestHelper::BackTxPendingStart(dev), kInitialPayload2Start);
+  });
+  driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+    EXPECT_EQ(env.fake_dev_->fake_endpoint(kBulkInEp).pending_request_count(), kBulkTxCount - 2);
+  });
+  EXPECT_FALSE(tx2_completed.load());
+
+  // 3. Complete all remaining in-flight chunks of the partially queued payload2 with
+  // ZX_ERR_BAD_STATE. Even though 2 chunks of payload2 were never queued, payload2 must complete
+  // promptly with ZX_ERR_BAD_STATE as soon as its last in-flight VMO returns, without waiting for
+  // PurgeOfflineQueues().
+  constexpr size_t kPayload2InFlightChunks = kBulkTxCount - 2;
+  for (size_t i = 0; i < kPayload2InFlightChunks; ++i) {
+    const size_t expected_remaining = kPayload2InFlightChunks - 1 - i;
+    driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+      env.fake_dev_->fake_endpoint(kBulkInEp).RequestComplete(ZX_ERR_BAD_STATE, 0);
+    });
+    driver_test_.runtime().RunUntil([&]() {
+      size_t in_flight = 0;
+      driver_test_.RunInDriverContext(
+          [&](UsbAdbDevice& dev) { in_flight = UsbAdbTestHelper::BulkInEpPendingRequests(dev); });
+      return in_flight == expected_remaining;
+    });
+    if (expected_remaining > 0) {
+      EXPECT_FALSE(tx2_completed.load());
+    }
+  }
+  driver_test_.runtime().RunUntil([&]() { return tx2_completed.load(); });
+  EXPECT_EQ(tx2_status.load(), ZX_ERR_BAD_STATE);
+  driver_test_.RunInDriverContext(
+      [&](UsbAdbDevice& dev) { EXPECT_EQ(UsbAdbTestHelper::TxPendingReqsCount(dev), 0u); });
+
+  async_usb_impl = {};
+  SafeStopDriver();
+}
+
+TEST_F(UsbAdbTest, PartiallyQueuedTxNonTeardownErrorDrainsBeforeNextTransfer) {
+  auto usb_impl_sync = NormalStartAdb();
+  EventHandler handler;
+  handler.expected_statuses_.emplace(fadb::StatusFlags::kOnline);
+  ExpectHandleOneEventSafe(usb_impl_sync, handler);
+
+  auto async_usb_impl = fidl::WireClient<fadb::UsbAdbImpl>(
+      usb_impl_sync.TakeClientEnd(), fdf::Dispatcher::GetCurrent()->async_dispatcher());
+
+  // Queue three transfers whose total chunk count exceeds kBulkTxCount (2 + 15 + 1 = 18 > 16)
+  // while keeping each individual FIDL QueueTx payload below the 64 KiB channel message limit:
+  // - payload0 occupies 2 descriptors.
+  // - payload1 has 15 chunks (kBulkTxCount - 1): 14 descriptors are queued and 1 chunk remains
+  //   unqueued.
+  // - payload2 (1 chunk) waits behind payload1 in tx_pending_reqs_.
+  std::vector<uint8_t> payload0(kVmoDataSize * 2, 0xAA);
+  std::vector<uint8_t> payload1(kVmoDataSize * (kBulkTxCount - 2) + 1, 0xCC);
+  std::vector<uint8_t> payload2 = {0x11, 0x22, 0x33, 0x44};
+  std::atomic<bool> tx0_completed = false;
+  std::atomic<zx_status_t> tx0_status = ZX_OK;
+  std::atomic<bool> tx1_completed = false;
+  std::atomic<zx_status_t> tx1_status = ZX_OK;
+  std::atomic<bool> tx2_completed = false;
+  std::atomic<zx_status_t> tx2_status = ZX_OK;
+
+  async_usb_impl->QueueTx(fidl::VectorView<uint8_t>::FromExternal(payload0.data(), payload0.size()))
+      .ThenExactlyOnce([&](auto& result) {
+        ASSERT_TRUE(result.ok());
+        tx0_status = result->is_error() ? result->error_value() : ZX_OK;
+        tx0_completed = true;
+      });
+  async_usb_impl->QueueTx(fidl::VectorView<uint8_t>::FromExternal(payload1.data(), payload1.size()))
+      .ThenExactlyOnce([&](auto& result) {
+        ASSERT_TRUE(result.ok());
+        tx1_status = result->is_error() ? result->error_value() : ZX_OK;
+        tx1_completed = true;
+      });
+  async_usb_impl->QueueTx(fidl::VectorView<uint8_t>::FromExternal(payload2.data(), payload2.size()))
+      .ThenExactlyOnce([&](auto& result) {
+        ASSERT_TRUE(result.ok());
+        tx2_status = result->is_error() ? result->error_value() : ZX_OK;
+        tx2_completed = true;
+      });
+
+  driver_test_.runtime().RunUntil([&]() {
+    size_t pending = 0;
+    driver_test_.RunInEnvironmentTypeContext([&](UsbAdbEnvironment& env) {
+      pending = env.fake_dev_->fake_endpoint(kBulkInEp).pending_request_count();
+    });
+    size_t tx_reqs = 0;
+    driver_test_.RunInDriverContext(
+        [&](UsbAdbDevice& dev) { tx_reqs = UsbAdbTestHelper::TxPendingReqsCount(dev); });
+    return pending == kBulkTxCount && tx_reqs == 3u;
+  });
+
+  // Fail the first chunk of payload1 (index 2, after payload0's 2 chunks) with a non-teardown
+  // error (ZX_ERR_IO). SendQueued() must not queue payload1's remaining unqueued chunk or send
+  // payload2 out of order while payload1 still has chunks in flight.
+  driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+    env.fake_dev_->fake_endpoint(kBulkInEp).RequestCompleteAtIndex(2, ZX_ERR_IO, 0);
+  });
+  driver_test_.runtime().RunUntil([&]() {
+    size_t in_flight = 0;
+    driver_test_.RunInDriverContext(
+        [&](UsbAdbDevice& dev) { in_flight = UsbAdbTestHelper::BulkInEpPendingRequests(dev); });
+    return in_flight == kBulkTxCount - 1;
+  });
+  EXPECT_FALSE(tx0_completed.load());
+  EXPECT_FALSE(tx1_completed.load());
+  EXPECT_FALSE(tx2_completed.load());
+
+  // Complete payload0's 2 chunks with ZX_OK. Even though payload0 succeeds and triggers
+  // SendQueued(), payload1 is now at the front of tx_pending_reqs_ with status == ZX_ERR_IO, so
+  // SendQueued() must still hold off until payload1's remaining 13 in-flight chunks drain.
+  for (size_t i = 0; i < 2; ++i) {
+    driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+      env.fake_dev_->fake_endpoint(kBulkInEp).RequestComplete(ZX_OK, kVmoDataSize);
+    });
+  }
+  driver_test_.runtime().RunUntil([&]() { return tx0_completed.load(); });
+  EXPECT_EQ(tx0_status.load(), ZX_OK);
+  driver_test_.RunInDriverContext([&](UsbAdbDevice& dev) {
+    EXPECT_EQ(UsbAdbTestHelper::TxPendingReqsCount(dev), 2u);
+    EXPECT_EQ(UsbAdbTestHelper::BulkInEpPendingRequests(dev), kBulkTxCount - 3);
+    EXPECT_EQ(UsbAdbTestHelper::BackTxPendingStart(dev), 0u);
+  });
+  EXPECT_FALSE(tx1_completed.load());
+  EXPECT_FALSE(tx2_completed.load());
+
+  // Complete the remaining kBulkTxCount - 3 in-flight chunks of payload1. Once all in-flight
+  // chunks drain, payload1 must complete with ZX_ERR_IO and SendQueued() must then submit payload2.
+  for (size_t i = 0; i < kBulkTxCount - 3; ++i) {
+    driver_test_.RunInEnvironmentTypeContext([](UsbAdbEnvironment& env) {
+      env.fake_dev_->fake_endpoint(kBulkInEp).RequestComplete(ZX_OK, kVmoDataSize);
+    });
+  }
+  driver_test_.runtime().RunUntil([&]() { return tx1_completed.load(); });
+  EXPECT_EQ(tx1_status.load(), ZX_ERR_IO);
+
+  driver_test_.runtime().RunUntil([&]() {
+    size_t pending = 0;
+    driver_test_.RunInEnvironmentTypeContext([&](UsbAdbEnvironment& env) {
+      pending = env.fake_dev_->fake_endpoint(kBulkInEp).pending_request_count();
+    });
+    return pending == 1u;
+  });
+  EXPECT_FALSE(tx2_completed.load());
+
+  // Complete payload2's request -> payload2 succeeds.
+  driver_test_.RunInEnvironmentTypeContext([&](UsbAdbEnvironment& env) {
+    env.fake_dev_->fake_endpoint(kBulkInEp).RequestComplete(ZX_OK, payload2.size());
+  });
+  driver_test_.runtime().RunUntil([&]() { return tx2_completed.load(); });
+  EXPECT_EQ(tx2_status.load(), ZX_OK);
+
+  async_usb_impl = {};
+  SafeStopDriver();
+}
+
+class UsbAdbScatterGatherTest : public UsbAdbTest {
+ public:
+  void SetUp() override {
+    driver_test_.RunInEnvironmentTypeContext(
+        [](UsbAdbEnvironment& env) { env.set_bulk_in_scatter_gather(true); });
+    UsbAdbTest::SetUp();
+  }
+};
+
+TEST_F(UsbAdbScatterGatherTest, BulkInUses16KiBVmoWhenScatterGatherSupported) {
+  driver_test_.RunInDriverContext([](UsbAdbDevice& dev) {
+    EXPECT_EQ(UsbAdbTestHelper::BulkTxVmoSize(dev), kScatterGatherBulkTxVmoSize);
+  });
+
+  auto usb_impl = NormalStartAdb();
+  EventHandler handler;
+  handler.expected_statuses_.emplace(fadb::StatusFlags::kOnline);
+  ExpectHandleOneEventSafe(usb_impl, handler);
+
+  fidl::WireClient<fadb::UsbAdbImpl> async_usb_impl(
+      usb_impl.TakeClientEnd(), fdf::Dispatcher::GetCurrent()->async_dispatcher());
+
+  std::vector<uint8_t> payload(kScatterGatherBulkTxVmoSize, 0x5a);
+  std::atomic<bool> tx_done = false;
+  async_usb_impl->QueueTx(fidl::VectorView<uint8_t>::FromExternal(payload.data(), payload.size()))
+      .ThenExactlyOnce([&tx_done](auto& result) {
+        ASSERT_TRUE(result.ok());
+        EXPECT_TRUE(result->is_ok());
+        tx_done = true;
+      });
+
+  // A 16 KiB write fits in a single scatter-gather bulk IN VMO request.
+  driver_test_.runtime().RunUntil([&] {
+    size_t pending = 0;
+    driver_test_.RunInEnvironmentTypeContext([&](UsbAdbEnvironment& env) {
+      pending = env.fake_dev_->fake_endpoint(kBulkInEp).pending_request_count();
+    });
+    return pending == 1u;
+  });
+
+  driver_test_.RunInEnvironmentTypeContext([&](UsbAdbEnvironment& env) {
+    env.fake_dev_->fake_endpoint(kBulkInEp).RequestComplete(ZX_OK, payload.size());
+  });
+  driver_test_.runtime().RunUntil([&] { return tx_done.load(); });
 
   async_usb_impl = {};
   SafeStopDriver();

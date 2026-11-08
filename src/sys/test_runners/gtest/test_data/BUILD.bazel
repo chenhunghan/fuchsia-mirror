@@ -1,0 +1,202 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+exports_files(
+    ["sample_tests_golden_events.rsf"],
+    visibility = ["//src/sys/test_manager/tests:__pkg__"],
+)
+
+# We don't have gunit in-tree, so this main function will replace all gunit
+# flags with gtest flags and run the tests using gtest framework.
+fx_cc_library(
+    name = "gunit_main",
+    testonly = True,
+    srcs = ["gunit_main.cc"],
+    implementation_deps = [
+        "//src/lib/fxl",
+        "//src/lib/fxl/test:test_settings",
+    ],
+    visibility = ["//src/sys/test_runners/gunit/tests:__pkg__"],
+    deps = ["@com_google_googletest//:gtest"],
+    alwayslink = True,
+)
+
+fx_cc_binary(
+    name = "echo_gtest_client",
+    testonly = True,
+    srcs = ["echo_test.cc"],
+    build_flags = ["//build/config/lto:no-fat-lto-objects-linking"],
+    deps = [
+        "//examples/components/routing/fidl:echo_hlcpp",
+        "//sdk/lib/async-default",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/sys/cpp",
+        "//src/lib/fxl/test:gtest_main",
+    ],
+)
+
+# Generates two executables. One for gtest and other for gunit.
+fx_cc_binary(
+    name = "death_gtest",
+    testonly = True,
+    srcs = ["death_test.cc"],
+    build_flags = ["//build/config/lto:no-fat-lto-objects-linking"],
+    deps = [
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl/test:gtest_main",
+    ],
+)
+
+# Unrolled from executable_gtest_gunit("runner_no_tests").
+fx_cc_binary(
+    name = "gtest_runner_no_tests",
+    testonly = True,
+    srcs = ["empty_test_file.cc"],
+    build_flags = ["//build/config/lto:no-fat-lto-objects-linking"],
+    deps = [
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+    ],
+)
+
+# Unrolled from executable_gtest_gunit("runner_no_tests").
+fx_cc_binary(
+    name = "gunit_runner_no_tests",
+    testonly = True,
+    srcs = ["empty_test_file.cc"],
+    deps = [
+        ":gunit_main",
+        "//src/lib/testing/loop_fixture",
+    ],
+)
+
+fx_cc_binary(
+    name = "gtest_setup_failure",
+    testonly = True,
+    srcs = ["gtest_setup_failure.cc"],
+    build_flags = ["//build/config/lto:no-fat-lto-objects-linking"],
+    deps = ["//src/lib/fxl/test:gtest_main"],
+)
+
+# Unrolled from executable_gtest_gunit("runner_sample_tests").
+fx_cc_binary(
+    name = "gtest_runner_sample_tests",
+    testonly = True,
+    srcs = ["sample_tests.cc"],
+    build_flags = ["//build/config/lto:no-fat-lto-objects-linking"],
+    deps = [
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+    ],
+)
+
+fx_cc_binary(
+    name = "gunit_runner_sample_tests",
+    testonly = True,
+    srcs = ["sample_tests.cc"],
+    deps = [
+        ":gunit_main",
+        "//src/lib/testing/loop_fixture",
+    ],
+)
+
+fx_cc_binary(
+    name = "gtest_runner_test_with_custom_args",
+    testonly = True,
+    srcs = ["gtest_with_custom_args.cc"],
+    build_flags = ["//build/config/lto:no-fat-lto-objects-linking"],
+    deps = ["//src/lib/testing/loop_fixture"],
+)
+
+fx_cc_binary(
+    name = "gunit_runner_test_with_custom_args",
+    testonly = True,
+    srcs = ["gunit_with_custom_args.cc"],
+    build_flags = ["//build/config/lto:no-fat-lto-objects-linking"],
+    deps = ["//src/lib/testing/loop_fixture"],
+)
+
+# Unrolled from executable_gtest_gunit("runner_test_with_environ").
+fx_cc_binary(
+    name = "gtest_runner_test_with_environ",
+    testonly = True,
+    srcs = ["test_with_environ.cc"],
+    build_flags = ["//build/config/lto:no-fat-lto-objects-linking"],
+    deps = [
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+    ],
+)
+
+fx_cc_binary(
+    name = "gunit_runner_test_with_environ",
+    testonly = True,
+    srcs = ["test_with_environ.cc"],
+    deps = [
+        ":gunit_main",
+        "//src/lib/testing/loop_fixture",
+    ],
+)
+
+# Unrolled from executable_gtest_gunit("huge_runner_example").
+fx_cc_binary(
+    name = "gtest_huge_runner_example",
+    testonly = True,
+    srcs = ["huge_gtest.cc"],
+    build_flags = ["//build/config/lto:no-fat-lto-objects-linking"],
+    deps = ["//src/lib/fxl/test:gtest_main"],
+)
+
+fx_cc_binary(
+    name = "gunit_huge_runner_example",
+    testonly = True,
+    srcs = ["huge_gtest.cc"],
+    deps = [":gunit_main"],
+)
+
+fx_cc_binary(
+    name = "concurrency_test_driver_gtest",
+    testonly = True,
+    srcs = ["concurrency_test_driver.cc"],
+    build_flags = ["//build/config/lto:no-fat-lto-objects-linking"],
+    deps = [
+        "//examples/components/routing/fidl:echo_hlcpp",
+        "//sdk/lib/async-default",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/sys/cpp",
+        "//src/lib/fxl/test:gtest_main",
+    ],
+)
+
+fx_cc_test_binary(
+    name = "zxtest_success",
+    srcs = ["zxtest_success.cc"],
+    deps = ["//zircon/system/ulib/zxtest"],
+)
+
+fx_cc_test_binary(
+    name = "zxtest_failure",
+    srcs = ["zxtest_failure.cc"],
+    deps = ["//zircon/system/ulib/zxtest"],
+)
+
+fx_cc_test_binary(
+    name = "zxtest_setup_failure",
+    srcs = ["zxtest_setup_failure.cc"],
+    deps = ["//zircon/system/ulib/zxtest"],
+)
+
+fx_cc_test_binary(
+    name = "zxtest_env_setup_failure",
+    srcs = ["zxtest_env_setup_failure.cc"],
+    deps = ["//zircon/system/ulib/zxtest"],
+)

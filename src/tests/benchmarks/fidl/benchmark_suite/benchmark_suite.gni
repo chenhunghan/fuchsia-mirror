@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+# LINT.IfChange
 benchmark_suite_declarations = [
   {
     name = "bool_array"
@@ -146,7 +147,7 @@ benchmark_suite_declarations = [
     fidl = [ "table.gen.test.fidl" ]
   },
   {
-    name = "table_signle_set_gen"
+    name = "table_single_set_gen"
     gidl = [ "table_single_set.gen.gidl" ]
     fidl = [ "table.gen.test.fidl" ]
   },
@@ -200,3 +201,4 @@ foreach(decl, benchmark_suite_declarations) {
 
 benchmark_suite_fidl_target =
     "//src/tests/benchmarks/fidl/benchmark_suite:benchmark_suite_fidl"
+# LINT.ThenChange(//src/tests/benchmarks/fidl/benchmark_suite/benchmark_suite.bzl)

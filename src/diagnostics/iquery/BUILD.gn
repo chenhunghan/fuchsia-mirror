@@ -248,7 +248,6 @@ group("iquery") {
   deps = [
     ":bin",
     ":inspect_bin",
-    "//build/validate:non_production_tag",
   ]
 }
 

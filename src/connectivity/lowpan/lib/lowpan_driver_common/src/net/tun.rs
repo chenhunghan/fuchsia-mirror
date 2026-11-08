@@ -98,7 +98,7 @@ impl TunNetworkInterface {
         let (tun_port, port_req) = create_proxy::<ftun::PortMarker>();
         tun_dev
             .add_port(
-                &ftun::DevicePortConfig {
+                ftun::DevicePortConfig {
                     base: Some(ftun::BasePortConfig {
                         id: Some(TUN_PORT_ID),
                         mtu: Some(Ipv6::MINIMUM_LINK_MTU.get()),

@@ -12,6 +12,10 @@
 
 #include <ktl/type_traits.h>
 
+// TODO(https://fxbug.dev/576430218): Remove once C++ callers of `validate_user_accessible_range`
+// are removed.
+extern "C" void rust_validate_user_accessible_range(vaddr_t* vaddr, size_t* len);
+
 namespace internal {
 
 // Generates a type whose ::value is true if |T| is allowed to be copied to/from usermode.
@@ -33,7 +37,9 @@ struct is_copy_allowed
 
 // Ensure that all addresses in the range [vaddr, vaddr+len) are accessible to the user. If any
 // address in this range is not accessible to the user, `vaddr` and `len` are set to {0,0}.
-void validate_user_accessible_range(vaddr_t* vaddr, size_t* len);
+inline void validate_user_accessible_range(vaddr_t* vaddr, size_t* len) {
+  rust_validate_user_accessible_range(vaddr, len);
+}
 
 }  // namespace internal
 

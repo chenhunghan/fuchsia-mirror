@@ -1,0 +1,43 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+host_rustc_test(
+    name = "triage_config_test_runner_test",
+    srcs = ["src/main.rs"],
+    crate_root = "src/main.rs",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    visibility = ["//src/diagnostics:__pkg__"],
+    deps = [
+        "//src/diagnostics/lib/triage",
+        "//src/diagnostics/triage:triage_app_lib",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:clap",
+    ],
+)
+
+rustc_binary(
+    name = "triage_config_test_runner",
+    srcs = ["src/main.rs"],
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    visibility = [
+        "//src/diagnostics/config/triage:__pkg__",
+        "//src/diagnostics/triage/build:__pkg__",
+        "//src/diagnostics/triage/test_data:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
+    deps = [
+        "//src/diagnostics/lib/triage",
+        "//src/diagnostics/triage:triage_app_lib",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:clap",
+    ],
+)

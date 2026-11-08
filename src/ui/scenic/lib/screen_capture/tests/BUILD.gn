@@ -25,26 +25,22 @@ cc_test_executable("unittests") {
   ]
 
   deps = [
+    "//sdk/lib/async:async-cpp",
+    "//sdk/lib/async-default",
     "//sdk/lib/sys/cpp/testing:unit",
     "//sdk/lib/ui/scenic/cpp",
     "//src/graphics/display/lib/coordinator-getter:client",
+    "//src/lib/fsl",
     "//src/lib/testing/loop_fixture",
+    "//src/ui/lib/escher",
+    "//src/ui/lib/escher/test/common:gtest_escher",
     "//src/ui/scenic/lib/allocation",
     "//src/ui/scenic/lib/flatland/renderer/tests:testing_deps",
+    "//src/ui/scenic/lib/scenic/util",
     "//src/ui/scenic/lib/screen_capture",
     "//src/ui/scenic/lib/utils",
     "//src/ui/scenic/tests:promise",
     "//third_party/googletest:gmock",
-  ]
-
-  public_deps = [
-    "//sdk/lib/async:async-cpp",
-    "//sdk/lib/async-default",
-    "//src/lib/fsl",
-    "//src/ui/lib/escher",
-    "//src/ui/lib/escher/test/common:gtest_escher",
-    "//src/ui/scenic/lib/scenic/util",
-    "//src/ui/scenic/lib/utils",
     "//zircon/system/ulib/zx",
   ]
 }

@@ -21,6 +21,22 @@
             protocol: "fuchsia.component.Realm",
             from: "framework",
         },
+        {
+            config: "fuchsia.config.ToOverride",
+            key: "to_override",
+            type: "string",
+            max_size: 100,
+            availability: "optional",
+            default: "lol",
+        },
+        {
+            config: "fuchsia.config.DontOverride",
+            key: "dont_override",
+            type: "string",
+            max_size: 100,
+            availability: "optional",
+            default: "lol",
+        },
     ],
     offer: [
         {
@@ -28,15 +44,16 @@
             from: "parent",
             to: [ "#test-collection" ],
         },
+        {
+            config: [
+                "fuchsia.config.EchoBool",
+                "fuchsia.config.EchoNum",
+                "fuchsia.config.EchoString",
+                "fuchsia.config.EchoStringVector",
+            ],
+            from: "void",
+            to: [ "#test-collection" ],
+            availability: "optional",
+        },
     ],
-    config: {
-        to_override: {
-            type: "string",
-            max_size: 100,
-        },
-        dont_override: {
-            type: "string",
-            max_size: 100,
-        },
-    },
 }

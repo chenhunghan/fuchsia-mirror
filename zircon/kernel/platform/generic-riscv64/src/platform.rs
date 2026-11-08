@@ -17,6 +17,10 @@ use crate::arch_rs::riscv64::mp::{
 use crate::arch_rs::riscv64::sbi::sbi_get_cpu_state_impl;
 #[cfg(console_enabled)]
 use crate::console::panic_shell_start;
+use crate::jtrace::{
+    IS_PERSISTENT as JTRACE_IS_PERSISTENT,
+    TARGET_PERSISTENT_BUFFER_SIZE as JTRACE_TARGET_PERSISTENT_BUFFER_SIZE,
+};
 use crate::kernel::mp::{MpIpi, MpIpiTarget, SMP_MAX_CPUS};
 use crate::kernel::types::cpu_num_t;
 use crate::object::ResourceDispatcher;
@@ -25,13 +29,18 @@ use crate::pdev_power::{
     PowerCpuState, PowerRebootFlags, power_cpu_off, power_get_cpu_state, power_reboot,
     power_shutdown,
 };
+use crate::platform_rs::crashlog::PlatformCrashlog;
+use crate::platform_rs::mapped_crashlog::MappedCrashlog;
 use crate::platform_rs::power::{PlatformHaltAction, ZirconCrashReason};
+use crate::vm::pmm;
 use crate::{debuglog_rs as debuglog, persistent_debuglog_rs as persistent_debuglog, topology};
 use boot_options::BootOptions;
 use core::ffi::CStr;
+use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, Ordering};
 use debug::{dprintf, tracef};
 use kprint::kprint;
+use lazy_init::{LazyInit, NoCheck};
 #[cfg(ktest)]
 use unittest as _;
 use zx_status::Status;
@@ -69,35 +78,11 @@ zr::static_assert!(
 );
 zr::static_assert!(TARGET_PERSISTENT_DEBUGLOG_SIZE <= u32::MAX as usize);
 
-const JTRACE_TARGET_BUFFER_SIZE: usize =
-    zr::parse_usize(env!("JTRACE_TARGET_BUFFER_SIZE")).expect("JTRACE_TARGET_BUFFER_SIZE invalid");
-const JTRACE_IS_PERSISTENT: bool = cfg!(jtrace_persistent);
-const JTRACE_TARGET_PERSISTENT_BUFFER_SIZE: usize =
-    if JTRACE_IS_PERSISTENT { JTRACE_TARGET_BUFFER_SIZE } else { 0 };
-// A persistent jtrace buffer must be a multiple of the persistent RAM allocation granularity.
-zr::static_assert!(
-    !JTRACE_IS_PERSISTENT
-        || JTRACE_TARGET_BUFFER_SIZE.is_multiple_of(PERSISTENT_RAM_ALLOCATION_GRANULARITY)
-);
-
-/// `memalloc::Range` as handed off by physboot.  Only ever passed through to the
-/// PMM, never read here.
-#[repr(C)]
-struct MemallocRange {
-    _opaque: [u8; 0],
-}
-
 unsafe extern "C" {
-    fn cpp_jtrace_dump_current();
-    fn cpp_jtrace_set_location(ptr: *mut u8, len: usize);
-    fn cpp_mapped_crashlog_bind(base: *mut u8, size: usize);
     fn cpp_phys_handoff_cpu_topology(count: &mut usize) -> *const zbi::TopologyNode;
-    fn cpp_phys_handoff_memory(count: &mut usize) -> *const MemallocRange;
+    fn cpp_phys_handoff_memory(count: &mut usize) -> *const memalloc::Range;
     fn cpp_phys_handoff_nvram(size: &mut usize) -> *mut u8;
     fn cpp_phys_handoff_platform_id(out: &mut zbi::PlatformId) -> bool;
-    fn cpp_platform_crashlog_has_non_trivial_impl() -> bool;
-    fn cpp_pmm_checker_init_from_cmdline();
-    fn cpp_pmm_init(ranges: *const MemallocRange, count: usize) -> Result<(), Status>;
     fn cpp_print_current_thread_backtrace();
     fn lk_init_secondary_cpus(secondary_cpu_count: u32);
 }
@@ -110,9 +95,13 @@ fn panic_shell_start() {}
 static PANIC_STARTED: AtomicBool = AtomicBool::new(false);
 static HALTED: AtomicBool = AtomicBool::new(false);
 
+/// The platform's crashlog implementation, backed by the persistent RAM range
+/// that the Rust platform carves out for it.
+static MAPPED_CRASHLOG: LazyInit<MappedCrashlog, NoCheck> = LazyInit::uninit();
+
 /// Whether EFI services are expected on this platform.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_is_efi_expected() -> bool {
+#[unsafe(export_name = "IsEfiExpected")]
+pub extern "C" fn is_efi_expected() -> bool {
     false
 }
 
@@ -146,8 +135,7 @@ pub extern "C" fn rust_platform_panic_start(halt_others: bool) {
     if !PANIC_STARTED.swap(true, Ordering::SeqCst) {
         debuglog::dlog_bluescreen_init();
         // Attempt to dump the current debug trace buffer, if we have one.
-        // SAFETY: takes no arguments; jtrace owns the buffer it dumps.
-        unsafe { cpp_jtrace_dump_current() };
+        crate::jtrace::jtrace_dump(crate::jtrace::TraceBufferType::Current);
     }
 }
 
@@ -492,8 +480,7 @@ fn allocate_persistent_ram(range: &'static mut [u8]) {
     // 2) Persistent debug logging.
     // 3) Persistent debug tracing.
     //
-    // SAFETY: takes no arguments; reads the crashlog interface's binding state.
-    let has_non_trivial_crashlog = unsafe { cpp_platform_crashlog_has_non_trivial_impl() };
+    let has_non_trivial_crashlog = PlatformCrashlog::has_non_trivial_impl();
     let PersistentRamPartitions { crashlog_size, pdlog_size, jtrace_size } =
         partition_persistent_ram(range.len(), has_non_trivial_crashlog, &PERSISTENT_RAM_BUDGET);
 
@@ -501,10 +488,12 @@ fn allocate_persistent_ram(range: &'static mut [u8]) {
     let (crashlog, leftover) = range.split_at_mut(crashlog_size);
     if crashlog_size > 0 {
         dprintf!(INFO, "Crashlog configured with {} bytes\n", crashlog_size);
-        // SAFETY: `crashlog` is the head of the persistent RAM range, which
-        // stays mapped for the life of the kernel; the MappedCrashlog keeps
-        // using it and nothing here touches it again.
-        unsafe { cpp_mapped_crashlog_bind(crashlog.as_mut_ptr(), crashlog.len()) };
+        // SAFETY: `allocate_persistent_ram` runs at most once during single-threaded early boot
+        // before `MAPPED_CRASHLOG` is read via `PlatformCrashlog::bind`.
+        unsafe {
+            let _ = Pin::static_ref(&MAPPED_CRASHLOG).init_pin(MappedCrashlog::new(crashlog));
+            let _ = PlatformCrashlog::bind(MAPPED_CRASHLOG.get_unchecked());
+        }
     }
 
     // Configure the persistent debuglog RAM (if we have any)
@@ -523,10 +512,20 @@ fn allocate_persistent_ram(range: &'static mut [u8]) {
     // trace buffer would have been already set during (very) early init.
     if JTRACE_IS_PERSISTENT {
         let (jtrace, _) = leftover.split_at_mut(jtrace_size);
-        // SAFETY: `jtrace` is the tail of the persistent RAM range, which stays
-        // mapped for the life of the kernel; jtrace keeps using it and nothing
-        // here touches it again.
-        unsafe { cpp_jtrace_set_location(jtrace.as_mut_ptr(), jtrace.len()) };
+        let jtrace_len = jtrace.len();
+        // SAFETY: `allocate_persistent_ram` runs once during single-CPU early
+        // platform initialization (`rust_platform_early_init`), so
+        // `jtrace_set_location` is never called concurrently with itself or
+        // `jtrace_dump(TraceBufferType::Recovered)`. `jtrace` is the tail of
+        // the initialized persistent RAM range, which stays mapped and valid
+        // for the `'static` lifetime of the kernel, and nothing here touches it
+        // again.
+        unsafe {
+            crate::jtrace::jtrace_set_location(
+                jtrace.as_mut_ptr().cast::<core::ffi::c_void>(),
+                jtrace_len,
+            );
+        }
     }
 }
 
@@ -546,15 +545,19 @@ pub extern "C" fn rust_platform_early_init() {
     }
 
     // Initialize the PmmChecker now that the cmdline has been parsed.
-    // SAFETY: takes no arguments; the PMM checker owns the state it initializes.
-    unsafe { cpp_pmm_checker_init_from_cmdline() };
+    // SAFETY: This runs during single-threaded early boot, before the kernel console can access
+    // the PMM checker.
+    unsafe { pmm::pmm_checker_init_from_cmdline() };
 
     let mut range_count = 0usize;
     // SAFETY: `range_count` is a live local that the callee fills in.
     let ranges = unsafe { cpp_phys_handoff_memory(&mut range_count) };
     // SAFETY: `ranges` and `range_count` describe the memory ranges physboot
     // handed off, which stay valid until the handoff ends, after this call.
-    assert!(unsafe { cpp_pmm_init(ranges, range_count) }.is_ok());
+    let ranges = unsafe { zr::slice_from_raw_parts(ranges, range_count) };
+    // SAFETY: This runs once during single-threaded early boot with the normalized physical memory
+    // map from physboot.
+    assert!(unsafe { pmm::init(ranges) }.is_ok());
 }
 
 /// Platform initialization before the VM is up.  Nothing to do here.
@@ -638,7 +641,7 @@ pub extern "C" fn rust_platform_specific_halt(
     }
 }
 
-// Initialize Resource system after the heap is initialized.
+/// Initialize Resource system after the heap is initialized.
 fn riscv64_resource_dispatcher_init_hook(_level: init::LkInitLevel) {
     // 64 bit address space for MMIO on RISCV64
     if let Err(status) = ResourceDispatcher::initialize_allocator(ZX_RSRC_KIND_MMIO, 0, usize::MAX)
@@ -646,10 +649,7 @@ fn riscv64_resource_dispatcher_init_hook(_level: init::LkInitLevel) {
         kprint!("Resources: Failed to initialize MMIO allocator: {}\n", status.into_raw());
     }
     // Set up IRQs based on values from the PLIC
-    // SAFETY: the PLIC registered the interrupt ops during the driver handoff,
-    // before the init hooks of this level run.
-    let (base_vector, max_vector) =
-        unsafe { (*interrupt_get_base_vector(), *interrupt_get_max_vector()) };
+    let (base_vector, max_vector) = (*interrupt_get_base_vector(), *interrupt_get_max_vector());
     // Normally there would be at least one interrupt vector.
     debug_assert!(max_vector > 0);
     if let Err(status) = ResourceDispatcher::initialize_allocator(

@@ -4,8 +4,15 @@
 
 """Tests for the platform Bazel package and device test rules."""
 
+load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
+load("@fuchsia_rules_common//build_flags:compiler_build_flags.bzl", "compiler_build_flags")
+load("@fuchsia_rules_common//build_flags:extra_linker_flags.bzl", "extra_linker_flags")
 load("@fuchsia_rules_common//packages:resources.bzl", "resource")
+load("@rules_cc//cc:defs.bzl", "cc_import")
 load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_shared_library.bzl", "fx_cc_shared_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
 load(
     "//build/bazel/rules/components:cml_shard.bzl",
     "cml_shard",
@@ -16,13 +23,15 @@ load(
 )
 load(
     "//build/bazel/rules/components:fx_component.bzl",
+    "fx_compiled_manifest",
     "fx_component",
     "fx_component_manifest",
     "fx_test_component",
 )
+load("//build/bazel/rules/packages:fx_bootfs_files_package.bzl", "fx_bootfs_files_package")
 load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
 load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
-load("//build/bazel/rules/rust:defs.bzl", "rustc_dylib", "rustc_test")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_dylib", "rustc_library", "rustc_test")
 load(
     "//build/bazel/rules/testing:defs.bzl",
     "analysis_failure_test",
@@ -39,7 +48,10 @@ load(
 )
 load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 load("//build/testing/environments:device_types.bzl", "device_types")
+load(":fx_bootfs_files_package_test.bzl", "verify_bootfs_files_package")
 load(":fx_test_validation_tests.bzl", "fx_test_validation_tests")
+load(":gn_visibility_test.bzl", "gn_visibility_test")
+load(":rules.bzl", "verify_names_in_fx_package")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -71,7 +83,6 @@ fx_component_manifest(
 fx_test_component(
     name = "example_test_component",
     compiled_manifest = ":example_test_manifest",
-    component_name = "example_test",
     deps = [
         ":example_test_packaged_bin",
     ],
@@ -86,7 +97,6 @@ fx_component_manifest(
 fx_component(
     name = "example_helper_component",
     compiled_manifest = ":example_helper_manifest",
-    component_name = "example_helper",
 )
 
 fx_package(
@@ -223,6 +233,35 @@ verify_fx_test_environments(
     test = ":example_test_with_custom_environments",
 )
 
+# `allow_internet` is emitted in the emulator config.
+fx_test_environment(
+    name = "example_internet_env",
+    allow_internet = True,
+    dimensions = {"device_type": device_types.aemu},
+    emulator = {"name": "internet"},
+)
+
+fx_test(
+    name = "example_test_with_internet_environment",
+    environments = [":example_internet_env"],
+    package = ":example_test_package",
+)
+
+verify_fx_test_environments(
+    name = "verify_example_test_with_internet_environment",
+    testonly = True,
+    expected_environments = [
+        {
+            "dimensions": {"device_type": device_types.aemu},
+            "emulator": {
+                "allow_internet": True,
+                "name": "internet",
+            },
+        },
+    ],
+    test = ":example_test_with_internet_environment",
+)
+
 # Environments are labels, so they can be chosen with `select()`.
 fx_test(
     name = "example_test_with_selected_environments",
@@ -265,6 +304,7 @@ verify_fx_test_unstripped_binaries(
     testonly = True,
     expected_basenames = [
         "example_test_bin",
+        "libfdio.so",
     ],
     test = ":example_test",
 )
@@ -275,6 +315,7 @@ verify_fx_test_unstripped_binaries(
     expected_basenames = [
         "example_second_test_bin",
         "example_test_bin",
+        "libfdio.so",
     ],
     test = ":example_multi_unittest_package",
 )
@@ -290,7 +331,6 @@ fx_component(
     name = "example_subpackage_component",
     testonly = True,
     compiled_manifest = ":example_helper_manifest",
-    component_name = "example_helper",
     deps = [
         ":example_second_test_packaged_bin",
     ],
@@ -327,6 +367,7 @@ verify_fx_test_unstripped_binaries(
     expected_basenames = [
         "example_second_test_bin",
         "example_test_bin",
+        "libfdio.so",
     ],
     test = ":example_test_with_subpackage",
 )
@@ -358,7 +399,6 @@ fx_component_manifest(
 fx_test_component(
     name = "example_starnix_test_component",
     compiled_manifest = ":example_starnix_test_manifest",
-    component_name = "example_starnix_test",
     test_type = "starnix",
     deps = [
         ":example_test_packaged_bin",
@@ -403,12 +443,14 @@ filegroup(
         ":example_test",
         ":example_test_with_custom_environments",
         ":example_test_with_environments",
+        ":example_test_with_internet_environment",
         ":example_test_with_selected_environments",
         ":fx_test_validation_tests",
         ":verify_example_build_only_test",
         ":verify_example_test_default_environments",
         ":verify_example_test_with_custom_environments",
         ":verify_example_test_with_environments",
+        ":verify_example_test_with_internet_environment",
         ":verify_example_test_with_selected_environments",
     ],
     visibility = ["//build/bazel/rules/tests:__pkg__"],
@@ -419,12 +461,18 @@ filegroup(
     name = "quick_build_only_tests",
     testonly = True,
     srcs = [
+        ":example_bootfs_files_package_test_component_failure_test",
+        ":example_cc_test",
+        ":example_cc_test_unittest_package",
         ":example_check_includes_disabled_package",
         ":example_cml_shard_invalid_name_failure_test",
         ":example_cml_shard_mismatched_shard_failure_test",
+        ":example_compiled_manifest_consumer",
         ":example_component_unwrapped_cc_binary_failure_test",
         ":example_component_unwrapped_rust_binary_failure_test",
+        ":example_component_with_compiled_manifest_failure_test",
         ":example_conflicting_runners_failure_test",
+        ":example_dynamic_dictionaries_manifest",
         ":example_expect_includes_package",
         ":example_expect_includes_unittest_package",
         ":example_gtest_unittest_package",
@@ -435,7 +483,9 @@ filegroup(
         ":example_resource_from_filegroup",
         ":example_resource_packaged_binary_failure_test",
         ":example_resource_rust_binary_failure_test",
+        ":example_restricted_feature_not_allowed_failure_test",
         ":example_rust_dylib_unittest_package",
+        ":example_rust_shared_lib_dep_unittest_package",
         ":example_rust_unittest_package",
         ":example_test",
         ":example_test_with_subpackage",
@@ -444,12 +494,27 @@ filegroup(
         ":example_unittest_package",
         ":example_unittest_package_default_name",
         ":example_unittest_package_with_packaged_binary_resource",
+        ":example_unknown_restricted_feature_failure_test",
+        ":example_unsupported_restricted_feature_failure_test",
         ":example_zxtest_unittest_package",
+        ":gn_visibility_pattern_matches_test",
+        ":verify_example_bootfs_files_package_full",
+        ":verify_example_bootfs_files_package_resources_only",
+        ":verify_example_cc_test_unittest_package_unstripped_binaries",
+        ":verify_example_cc_test_unstripped_binaries",
+        ":verify_example_compiled_manifest_paths",
+        ":verify_example_custom_names_package",
+        ":verify_example_default_name_package",
+        ":verify_example_default_name_test_package",
+        ":verify_example_disabled_extra_linker_flags_unstripped_binaries",
+        ":verify_example_extra_linker_flags_shared_lib_unstripped_binaries",
+        ":verify_example_extra_linker_flags_unstripped_binaries",
         ":verify_example_gtest_runner_shard",
         ":verify_example_multi_component_test_realms",
         ":verify_example_multi_unittest_package_realms",
         ":verify_example_multi_unittest_package_unstripped_binaries",
         ":verify_example_rust_runner_shard",
+        ":verify_example_rust_shared_lib_dep_unittest_package_unstripped_binaries",
         ":verify_example_rust_unittest_package_unstripped_binaries",
         ":verify_example_test_default_realm",
         ":verify_example_test_unstripped_binaries",
@@ -541,6 +606,60 @@ fx_unittest_package(
     name = "example_rust_dylib_unittest_package",
     package_name = "fx-rust-dylib-unittest-package-example",
     unit_tests = [":example_rust_dylib_dep_test_bin"],
+)
+
+# Tests that a shared library reached only through the `link_deps` of the crate
+# under test in `rustc_test(crate = ...)` is packaged. The shared library is
+# imported with `cc_import()`, as `idk_cc_shared_library()` does, which does not
+# add it to runfiles, so `fx_packaged_binary()` must collect it from `DepInfo`.
+fx_cc_library(
+    name = "example_rust_shared_lib_dep_impl",
+    srcs = ["example_shared_lib.cc"],
+    tags = ["manual"],
+)
+
+fx_cc_shared_library(
+    name = "example_rust_shared_lib_dep",
+    tags = ["manual"],
+    deps = [":example_rust_shared_lib_dep_impl"],
+)
+
+cc_import(
+    name = "example_rust_shared_lib_dep_import",
+    shared_library = ":example_rust_shared_lib_dep",
+    tags = ["manual"],
+)
+
+rustc_library(
+    name = "example_rust_shared_lib_dep_lib",
+    srcs = ["example_test.rs"],
+    edition = "2024",
+    link_deps = [":example_rust_shared_lib_dep_import"],
+    tags = ["manual"],
+)
+
+rustc_test(
+    name = "example_rust_shared_lib_dep_test_bin",
+    crate = ":example_rust_shared_lib_dep_lib",
+    edition = "2024",
+    tags = ["manual"],
+)
+
+fx_unittest_package(
+    name = "example_rust_shared_lib_dep_unittest_package",
+    package_name = "fx-rust-shared-lib-dep-unittest-package-example",
+    unit_tests = [":example_rust_shared_lib_dep_test_bin"],
+)
+
+verify_fx_test_unstripped_binaries(
+    name = "verify_example_rust_shared_lib_dep_unittest_package_unstripped_binaries",
+    testonly = True,
+    expected_basenames = [
+        "example_rust_shared_lib_dep_test_bin",
+        "libexample_rust_shared_lib_dep.so",
+        "libfdio.so",
+    ],
+    test = ":example_rust_shared_lib_dep_unittest_package",
 )
 
 fx_cc_binary(
@@ -730,7 +849,6 @@ fx_component(
     name = "example_expect_includes_component",
     testonly = True,
     compiled_manifest = ":example_expect_includes_manifest",
-    component_name = "example_expect_includes",
     deps = [":example_expect_includes_packaged_bin"],
 )
 
@@ -765,7 +883,6 @@ fx_packaged_binary(
 fx_test_component(
     name = "example_unenforced_omitted_component",
     compiled_manifest = ":example_test_manifest",
-    component_name = "example_unenforced_omitted",
     deps = [":example_unenforced_includes_packaged_bin"],
 )
 
@@ -783,7 +900,6 @@ fx_component(
     testonly = True,
     check_includes = False,
     compiled_manifest = ":example_helper_manifest",
-    component_name = "example_check_includes_disabled",
     deps = [":example_expect_includes_packaged_bin"],
 )
 
@@ -871,7 +987,6 @@ fx_component(
     name = "example_component_unwrapped_cc_binary",
     testonly = True,
     compiled_manifest = ":example_helper_manifest",
-    component_name = "example_helper",
     tags = ["manual"],
     deps = [":example_test_bin"],
 )
@@ -885,7 +1000,6 @@ analysis_failure_test(
 fx_test_component(
     name = "example_component_unwrapped_rust_binary",
     compiled_manifest = ":example_test_manifest",
-    component_name = "example_test",
     tags = ["manual"],
     deps = [":example_rust_test_bin"],
 )
@@ -911,6 +1025,554 @@ verify_fx_test_unstripped_binaries(
     expected_basenames = [
         "example_second_test_bin",
         "example_test_bin",
+        "libfdio.so",
     ],
     test = ":example_unittest_package_with_packaged_binary_resource",
+)
+
+# Tests `fx_component_manifest(restricted_features = ...)`. `cmc compile` only
+# accepts the dynamic dictionary in this manifest with "dynamic_dictionaries",
+# which this package is allowlisted for in
+# //tools/cmc/build/restricted_features/allowlists.bzl.
+fx_component_manifest(
+    name = "example_dynamic_dictionaries_manifest",
+    manifest = "meta/example_dynamic_dictionary.cml",
+    restricted_features = ["dynamic_dictionaries"],
+)
+
+fx_component_manifest(
+    name = "example_unknown_restricted_feature_manifest",
+    manifest = "meta/example_helper.cml",
+    restricted_features = ["not_a_feature"],
+    tags = ["manual"],
+)
+
+analysis_failure_test(
+    name = "example_unknown_restricted_feature_failure_test",
+    expected_message = "Unknown restricted CML feature \"not_a_feature\"",
+    target_under_test = ":example_unknown_restricted_feature_manifest",
+)
+
+# This package is in the allowlist for "dynamic_dictionaries", but only for
+# `:example_dynamic_dictionaries_manifest`, not this target.
+fx_component_manifest(
+    name = "example_restricted_feature_not_allowed_manifest",
+    manifest = "meta/example_helper.cml",
+    restricted_features = ["dynamic_dictionaries"],
+    tags = ["manual"],
+)
+
+analysis_failure_test(
+    name = "example_restricted_feature_not_allowed_failure_test",
+    expected_message = "is not allowed to use the restricted CML feature \"dynamic_dictionaries\"",
+    target_under_test = ":example_restricted_feature_not_allowed_manifest",
+)
+
+# "allow_long_names" is known in GN but not yet supported in Bazel.
+fx_component_manifest(
+    name = "example_unsupported_restricted_feature_manifest",
+    manifest = "meta/example_helper.cml",
+    restricted_features = ["allow_long_names"],
+    tags = ["manual"],
+)
+
+analysis_failure_test(
+    name = "example_unsupported_restricted_feature_failure_test",
+    expected_message = "not yet supported in Bazel; mirror its allowlist from BUILD.gn",
+    target_under_test = ":example_unsupported_restricted_feature_manifest",
+)
+
+gn_visibility_test(
+    name = "gn_visibility_pattern_matches_test",
+)
+
+# Tests `fx_compiled_manifest()` with the default `output_name`.
+fx_compiled_manifest(
+    name = "example_compiled_manifest",
+    component_name = "example_dynamic_dictionary",
+    manifest = "meta/example_dynamic_dictionary.cml",
+    restricted_features = ["dynamic_dictionaries"],
+)
+
+# Tests `fx_compiled_manifest()` with a custom `output_name`.
+fx_compiled_manifest(
+    name = "example_compiled_manifest_custom_output_name",
+    manifest = "meta/example_helper.cml",
+    output_name = "custom/example_helper.cm",
+)
+
+genrule(
+    name = "verify_example_compiled_manifest_paths",
+    testonly = True,
+    srcs = [
+        ":example_compiled_manifest",
+        ":example_compiled_manifest_custom_output_name",
+    ],
+    outs = ["verify_example_compiled_manifest_paths.stamp"],
+    cmd = """
+case "$(execpath :example_compiled_manifest)" in
+  */build/bazel/rules/packages/tests/cml/example_compiled_manifest/example_dynamic_dictionary.cm) ;;
+  *) echo "Unexpected default output path: $(execpath :example_compiled_manifest)" >&2; exit 1 ;;
+esac
+case "$(execpath :example_compiled_manifest_custom_output_name)" in
+  */build/bazel/rules/packages/tests/custom/example_helper.cm) ;;
+  *) echo "Unexpected custom output path: $(execpath :example_compiled_manifest_custom_output_name)" >&2; exit 1 ;;
+esac
+touch $@
+""",
+)
+
+# Embeds the compiled manifests in a Rust library, like component_manager does.
+rustc_library(
+    name = "example_compiled_manifest_consumer",
+    testonly = True,
+    srcs = ["example_compiled_manifest_consumer.rs"],
+    compile_data = [
+        ":example_compiled_manifest",
+        ":example_compiled_manifest_custom_output_name",
+    ],
+    edition = "2024",
+    rustc_env = {
+        "CUSTOM_OUTPUT_NAME_CM_PATH": "$(execpath :example_compiled_manifest_custom_output_name)",
+        "EXAMPLE_CM_PATH": "$(execpath :example_compiled_manifest)",
+    },
+)
+
+# `fx_compiled_manifest()` does not provide `_FxComponentManifestSourcesInfo`,
+# which `fx_component()` requires via its `compiled_manifest` attribute.
+fx_component(
+    name = "example_component_with_compiled_manifest",
+    compiled_manifest = ":example_compiled_manifest",
+    tags = ["manual"],
+)
+
+analysis_failure_test(
+    name = "example_component_with_compiled_manifest_failure_test",
+    expected_message = "_FxComponentManifestSourcesInfo",
+    target_under_test = ":example_component_with_compiled_manifest",
+)
+
+# Tests that shared libraries injected via `extra_linker_flags` (including when
+# nested under `build_flags(subflags = [...])` and
+# `compiler_build_flags(compiler_subflags = [...])`) propagate debug symbols to
+# `FuchsiaTestInfo.unstripped_binaries`, that `executable_link_deps` is ignored
+# for `fx_cc_binary(linkshared = True)` while `link_deps` is included, and that
+# `disable_build_flags` suppresses them.
+extra_linker_flags(
+    name = "example_extra_linker_flags",
+    testonly = True,
+    executable_link_deps = ["//sdk/lib/fdio"],
+)
+
+build_flags(
+    name = "example_extra_linker_flags_subflags",
+    testonly = True,
+    subflags = [":example_extra_linker_flags"],
+)
+
+compiler_build_flags(
+    name = "example_extra_linker_flags_wrapper",
+    testonly = True,
+    compiler_subflags = [":example_extra_linker_flags_subflags"],
+)
+
+alias(
+    name = "example_extra_linker_flags_alias",
+    testonly = True,
+    actual = ":example_extra_linker_flags_wrapper",
+)
+
+fx_cc_binary(
+    name = "example_extra_linker_flags_bin",
+    testonly = True,
+    srcs = ["example_test.cc"],
+    build_flags = [":example_extra_linker_flags_alias"],
+    disable_build_flags = ["//build/config/fuchsia:fdio_config"],
+    tags = ["manual"],
+)
+
+fx_unittest_package(
+    name = "example_extra_linker_flags_unittest_package",
+    package_name = "fx-extra-linker-flags-unittest-package-example",
+    unit_tests = [":example_extra_linker_flags_bin"],
+)
+
+verify_fx_test_unstripped_binaries(
+    name = "verify_example_extra_linker_flags_unstripped_binaries",
+    testonly = True,
+    expected_basenames = [
+        "example_extra_linker_flags_bin",
+        "libfdio.so",
+    ],
+    test = ":example_extra_linker_flags_unittest_package",
+)
+
+extra_linker_flags(
+    name = "example_shared_lib_extra_linker_flags",
+    testonly = True,
+    link_deps = ["//sdk/lib/fdio"],
+)
+
+fx_cc_binary(
+    name = "libexample_shared_with_extra_linker_flags.so",
+    testonly = True,
+    srcs = ["example_test.cc"],
+    build_flags = [
+        ":example_extra_linker_flags_wrapper",
+        ":example_shared_lib_extra_linker_flags",
+    ],
+    linkshared = True,
+    tags = ["manual"],
+)
+
+fx_cc_binary(
+    name = "example_shared_lib_host_bin",
+    testonly = True,
+    srcs = ["example_test.cc"],
+    data = [":libexample_shared_with_extra_linker_flags.so"],
+    disable_build_flags = ["//build/config/fuchsia:fdio_config"],
+    tags = ["manual"],
+)
+
+fx_unittest_package(
+    name = "example_extra_linker_flags_shared_lib_unittest_package",
+    package_name = "fx-extra-linker-flags-shared-lib-unittest-package-example",
+    unit_tests = [":example_shared_lib_host_bin"],
+)
+
+verify_fx_test_unstripped_binaries(
+    name = "verify_example_extra_linker_flags_shared_lib_unstripped_binaries",
+    testonly = True,
+    expected_basenames = [
+        "example_shared_lib_host_bin",
+        "libexample_shared_with_extra_linker_flags.so",
+        "libfdio.so",
+    ],
+    test = ":example_extra_linker_flags_shared_lib_unittest_package",
+)
+
+fx_cc_binary(
+    name = "libexample_shared_with_exec_only_extra_linker_flags.so",
+    testonly = True,
+    srcs = ["example_test.cc"],
+    build_flags = [":example_extra_linker_flags_wrapper"],
+    linkshared = True,
+    tags = ["manual"],
+)
+
+fx_cc_binary(
+    name = "example_disabled_extra_linker_flags_bin",
+    testonly = True,
+    srcs = ["example_test.cc"],
+    build_flags = [":example_extra_linker_flags_wrapper"],
+    data = [":libexample_shared_with_exec_only_extra_linker_flags.so"],
+    disable_build_flags = [
+        ":example_extra_linker_flags_wrapper",
+        "//build/config/fuchsia:fdio_config",
+    ],
+    tags = ["manual"],
+)
+
+fx_unittest_package(
+    name = "example_disabled_extra_linker_flags_unittest_package",
+    package_name = "fx-disabled-extra-linker-flags-unittest-package-example",
+    unit_tests = [":example_disabled_extra_linker_flags_bin"],
+)
+
+verify_fx_test_unstripped_binaries(
+    name = "verify_example_disabled_extra_linker_flags_unstripped_binaries",
+    testonly = True,
+    expected_basenames = [
+        "example_disabled_extra_linker_flags_bin",
+        "libexample_shared_with_exec_only_extra_linker_flags.so",
+    ],
+    test = ":example_disabled_extra_linker_flags_unittest_package",
+)
+
+# Tests `fx_cc_test_binary()` (implicit `testonly = True`, `no-fat-lto-objects-linking` by default)
+# with both `fx_unittest_package()` and `fx_packaged_binary(install_root = "test/")`
+# inside an `fx_test_component()`.
+fx_cc_test_binary(
+    name = "example_cc_test_bin",
+    srcs = ["example_test.cc"],
+    tags = ["manual"],
+    deps = ["@com_google_googletest//:gtest"],
+)
+
+fx_unittest_package(
+    name = "example_cc_test_unittest_package",
+    package_name = "fx-cc-test-unittest-package-example",
+    unit_tests = [":example_cc_test_bin"],
+)
+
+verify_fx_test_unstripped_binaries(
+    name = "verify_example_cc_test_unittest_package_unstripped_binaries",
+    testonly = True,
+    expected_basenames = [
+        "example_cc_test_bin",
+        "libfdio.so",
+    ],
+    test = ":example_cc_test_unittest_package",
+)
+
+fx_packaged_binary(
+    name = "example_cc_test_packaged_bin",
+    testonly = True,
+    binary = ":example_cc_test_bin",
+    binary_name = "example_cc_test",
+    install_root = "test/",
+    tags = ["manual"],
+)
+
+genrule(
+    name = "example_cc_test_manifest_cml",
+    testonly = True,
+    outs = ["example_cc_test.cml"],
+    cmd = """cat > $@ <<'EOF'
+{
+    include: [
+        "//src/sys/test_runners/gtest/default.shard.cml",
+        "syslog/client.shard.cml",
+    ],
+    program: {
+        binary: "test/example_cc_test",
+    },
+}
+EOF
+""",
+    tags = ["manual"],
+)
+
+fx_component_manifest(
+    name = "example_cc_test_manifest",
+    testonly = True,
+    component_name = "example_cc_test",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = ":example_cc_test_manifest_cml",
+    tags = ["manual"],
+)
+
+fx_test_component(
+    name = "example_cc_test_component",
+    compiled_manifest = ":example_cc_test_manifest",
+    tags = ["manual"],
+    deps = [":example_cc_test_packaged_bin"],
+)
+
+fx_package(
+    name = "example_cc_test_package",
+    package_name = "fx-cc-test-package-example",
+    tags = ["manual"],
+    test_components = [":example_cc_test_component"],
+)
+
+fx_test(
+    name = "example_cc_test",
+    package = ":example_cc_test_package",
+)
+
+verify_fx_test_unstripped_binaries(
+    name = "verify_example_cc_test_unstripped_binaries",
+    testonly = True,
+    expected_basenames = [
+        "example_cc_test_bin",
+        "libfdio.so",
+    ],
+    test = ":example_cc_test",
+)
+
+# Tests that `fx_component()` uses `compiled_manifest`'s `component_name` and
+# `fx_package()` defaults `package_name` (and `archive_name`) to `name`.
+fx_component(
+    name = "example_default_name_component",
+    compiled_manifest = ":example_helper_manifest",
+)
+
+fx_package(
+    name = "example_default_name_package",
+    components = [":example_default_name_component"],
+)
+
+verify_names_in_fx_package(
+    name = "verify_example_default_name_package",
+    expected_component_names = ["example_helper"],
+    expected_far_name = "example_default_name_package.far",
+    expected_package_name = "example_default_name_package",
+    package = ":example_default_name_package",
+)
+
+# Tests that `fx_test_component()` uses `compiled_manifest`'s `component_name`.
+fx_test_component(
+    name = "example_default_name_test_component",
+    compiled_manifest = ":example_test_manifest",
+    deps = [":example_test_packaged_bin"],
+)
+
+fx_package(
+    name = "example_default_name_test_package",
+    test_components = [":example_default_name_test_component"],
+)
+
+verify_names_in_fx_package(
+    name = "verify_example_default_name_test_package",
+    testonly = True,
+    expected_component_names = ["example_test"],
+    expected_far_name = "example_default_name_test_package.far",
+    expected_package_name = "example_default_name_test_package",
+    package = ":example_default_name_test_package",
+)
+
+# Tests that `fx_component()` and `fx_test_component()` use `compiled_manifest`'s `component_name`,
+# and explicit `package_name` and `archive_name` on `fx_package()` override `name`.
+fx_component(
+    name = "example_custom_name_component",
+    testonly = True,
+    compiled_manifest = ":example_helper_manifest",
+)
+
+fx_test_component(
+    name = "example_custom_name_test_component",
+    compiled_manifest = ":example_test_manifest",
+    deps = [":example_test_packaged_bin"],
+)
+
+fx_package(
+    name = "example_custom_names_package",
+    package_name = "custom_package_name",
+    archive_name = "custom_archive_name",
+    components = [":example_custom_name_component"],
+    test_components = [":example_custom_name_test_component"],
+)
+
+verify_names_in_fx_package(
+    name = "verify_example_custom_names_package",
+    testonly = True,
+    expected_component_names = [
+        "example_helper",
+        "example_test",
+    ],
+    expected_far_name = "custom_archive_name.far",
+    expected_package_name = "custom_package_name",
+    package = ":example_custom_names_package",
+)
+
+# Tests `fx_bootfs_files_package()` with resources only (including rebasing
+# `meta/...` resources to `bootfs/meta/...` and not injecting runtime shared
+# libraries when no binaries are packaged).
+resource(
+    name = "example_bootfs_config_resource",
+    src = "example_test.cc",
+    dest = "config/profiles/example.profiles",
+)
+
+resource(
+    name = "example_bootfs_meta_resource",
+    src = "example_test.cc",
+    dest = "meta/example_meta.cfg",
+)
+
+fx_bootfs_files_package(
+    name = "example_bootfs_files_package_resources_only",
+    resources = [
+        ":example_bootfs_config_resource",
+        ":example_bootfs_meta_resource",
+    ],
+)
+
+verify_bootfs_files_package(
+    name = "verify_example_bootfs_files_package_resources_only",
+    testonly = True,
+    expected_blob_paths = [
+        "bootfs/meta/example_meta.cfg",
+        "config/profiles/example.profiles",
+    ],
+    expected_dests = [
+        "bootfs/meta/example_meta.cfg",
+        "config/profiles/example.profiles",
+    ],
+    expected_package_name = "example_bootfs_files_package_resources_only",
+    forbidden_dests = [
+        "lib/ld.so.1",
+        "lib/libfdio.so",
+        "meta/example_meta.cfg",
+    ],
+    package = ":example_bootfs_files_package_resources_only",
+)
+
+# Tests `fx_bootfs_files_package()` with `fx_component()` in `components` and
+# C++, renamed Rust `fx_packaged_binary()`, and `resource()` targets in `resources`,
+# verifying standalone `package_manifest.json` blobs, Rust `libstd`, transitive
+# shared libraries (including shared libraries reached through an rlib's `link_deps`),
+# and `DebugSymbolManifestInfo` destination paths.
+fx_packaged_binary(
+    name = "example_bootfs_rust_packaged_bin",
+    testonly = True,
+    binary = ":example_rust_shared_lib_dep_test_bin",
+    binary_name = "renamed_rust_tool",
+)
+
+fx_bootfs_files_package(
+    name = "example_bootfs_files_package_full",
+    package_name = "fx-bootfs-files-package-full",
+    testonly = True,
+    components = [
+        ":example_helper_component",
+    ],
+    resources = [
+        ":example_bootfs_config_resource",
+        ":example_bootfs_rust_packaged_bin",
+        ":example_test_packaged_bin",
+    ],
+)
+
+verify_bootfs_files_package(
+    name = "verify_example_bootfs_files_package_full",
+    testonly = True,
+    expected_blob_paths = [
+        "bin/example_test",
+        "bin/renamed_rust_tool",
+        "bootfs/meta/example_helper.cm",
+        "config/profiles/example.profiles",
+        "lib/ld.so.1",
+        "lib/libexample_rust_shared_lib_dep.so",
+        "lib/libfdio.so",
+    ],
+    expected_debug_dest_paths = {
+        "example_rust_shared_lib_dep_test_bin": "bin/renamed_rust_tool",
+        "example_test_bin": "bin/example_test",
+    },
+    expected_dest_prefixes = [
+        "lib/libstd-",
+    ],
+    expected_dests = [
+        "bin/example_test",
+        "bin/renamed_rust_tool",
+        "bootfs/meta/example_helper.cm",
+        "config/profiles/example.profiles",
+        "lib/ld.so.1",
+        "lib/libexample_rust_shared_lib_dep.so",
+        "lib/libfdio.so",
+    ],
+    expected_package_name = "fx-bootfs-files-package-full",
+    forbidden_dests = [
+        "meta/example_helper.cm",
+    ],
+    package = ":example_bootfs_files_package_full",
+)
+
+# Tests that `fx_bootfs_files_package()` rejects `fx_test_component()` in `components`.
+fx_bootfs_files_package(
+    name = "example_bootfs_files_package_test_component",
+    testonly = True,
+    components = [":example_test_component"],
+    tags = ["manual"],
+)
+
+analysis_failure_test(
+    name = "example_bootfs_files_package_test_component_failure_test",
+    expected_message = "Please use `test_components` for test components.",
+    target_under_test = ":example_bootfs_files_package_test_component",
 )

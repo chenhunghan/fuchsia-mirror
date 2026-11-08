@@ -8,7 +8,9 @@ use super::channel_dispatcher::ChannelDispatcher;
 use super::exceptionate::Exceptionate;
 use super::handle::KernelHandle;
 use super::job_dispatcher::JobDispatcher;
+use super::job_policy::JobPolicy;
 use super::process_dispatcher::ProcessDispatcher;
+use core::ffi::c_void;
 use core::mem::MaybeUninit;
 use zx_types::{
     zx_info_job_t, zx_koid_t, zx_policy_basic_v1_t, zx_policy_basic_v2_t, zx_policy_timer_slack_t,
@@ -16,13 +18,6 @@ use zx_types::{
 };
 
 unsafe extern "C" {
-    /// Checks if the given JobDispatcher is the root job dispatcher.
-    ///
-    /// # Safety
-    ///
-    /// `job` must point to a valid `JobDispatcher`.
-    pub(crate) fn cpp_job_dispatcher_is_root(job: *const JobDispatcher) -> bool;
-
     /// Creates a new child JobDispatcher under the given parent job.
     ///
     /// # Safety
@@ -73,20 +68,6 @@ unsafe extern "C" {
         job: *mut JobDispatcher,
         policy: *const zx_policy_timer_slack_t,
     ) -> zx_status_t;
-
-    /// Returns a reference-counted pointer to the root job dispatcher.
-    ///
-    /// # Safety
-    ///
-    /// Safe to call from any thread context after root job initialization.
-    pub(crate) fn cpp_job_dispatcher_get_root_job() -> *mut JobDispatcher;
-
-    /// Returns a pointer to the immortal singleton root job handle.
-    ///
-    /// # Safety
-    ///
-    /// Safe to call from any thread context after root job initialization.
-    pub(crate) fn cpp_job_dispatcher_get_root_job_handle() -> *const core::ffi::c_void;
 
     /// Creates and returns a reference-counted pointer to a new root job dispatcher.
     pub(crate) fn cpp_job_dispatcher_create_root_job() -> *mut JobDispatcher;
@@ -168,12 +149,75 @@ unsafe extern "C" {
         process_rights: zx_rights_t,
     ) -> zx_status_t;
 
+    /// Looks up a direct child job of `job` by `koid`, returning an exported
+    /// `RefPtr<JobDispatcher>` raw pointer (or null if not found).
+    ///
+    /// # Safety
+    ///
+    /// `job` must point to a valid `JobDispatcher`.
     pub(crate) fn cpp_job_dispatcher_lookup_job_by_id(
         job: *mut JobDispatcher,
         koid: zx_koid_t,
     ) -> *mut JobDispatcher;
+
+    /// Looks up a direct child process of `job` by `koid`, returning an exported
+    /// `RefPtr<ProcessDispatcher>` raw pointer (or null if not found).
+    ///
+    /// # Safety
+    ///
+    /// `job` must point to a valid `JobDispatcher`.
     pub(crate) fn cpp_job_dispatcher_lookup_process_by_id(
         job: *mut JobDispatcher,
         koid: zx_koid_t,
     ) -> *mut ProcessDispatcher;
+
+    /// Returns the parent job of `job` as an exported `RefPtr<JobDispatcher>` raw pointer (or null
+    /// if `job` is the root job).
+    ///
+    /// # Safety
+    ///
+    /// `job` must point to a valid `JobDispatcher`.
+    pub(crate) fn cpp_job_dispatcher_parent(job: *const JobDispatcher) -> *mut JobDispatcher;
+
+    /// Initializes `out_policy` with a copy of `job`'s policy.
+    ///
+    /// # Safety
+    ///
+    /// `job` must point to a valid `JobDispatcher` whose lock is not held by the calling thread,
+    /// and `out_policy` must point to valid, aligned, non-overlapping uninitialized memory for a
+    /// `JobPolicy`.
+    pub(crate) fn cpp_job_dispatcher_get_policy(
+        job: *const JobDispatcher,
+        out_policy: *mut MaybeUninit<JobPolicy>,
+    );
+
+    /// Recursively walks the job/process tree rooted at `job`, invoking `on_job` and `on_process`
+    /// (with `ctx`) on each node. Returns false if any callback returns false; returns true
+    /// otherwise.
+    ///
+    /// # Safety
+    ///
+    /// `job` must point to a valid `JobDispatcher`, and `ctx` must remain valid for the duration
+    /// of the call for use by `on_job` and `on_process`.
+    pub(crate) fn cpp_job_dispatcher_enumerate_children_recursive(
+        job: *mut JobDispatcher,
+        ctx: *mut c_void,
+        on_job: unsafe extern "C" fn(*mut c_void, *mut JobDispatcher) -> bool,
+        on_process: unsafe extern "C" fn(*mut c_void, *mut ProcessDispatcher) -> bool,
+    ) -> bool;
+
+    /// Walks the direct children of `job`, invoking `on_job` and `on_process` (with `ctx`) on each
+    /// direct child. Returns false if any callback returns false; returns true otherwise.
+    ///
+    /// # Safety
+    ///
+    /// `job` must point to a valid `JobDispatcher`, and `ctx` must remain valid for the duration
+    /// of the call for use by `on_job` and `on_process`.
+    #[cfg(ktest)]
+    pub(super) fn cpp_job_dispatcher_enumerate_direct_children(
+        job: *mut JobDispatcher,
+        ctx: *mut c_void,
+        on_job: unsafe extern "C" fn(*mut c_void, *mut JobDispatcher) -> bool,
+        on_process: unsafe extern "C" fn(*mut c_void, *mut ProcessDispatcher) -> bool,
+    ) -> bool;
 }

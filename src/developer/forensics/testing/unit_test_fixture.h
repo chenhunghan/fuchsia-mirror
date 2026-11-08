@@ -6,7 +6,6 @@
 #define SRC_DEVELOPER_FORENSICS_TESTING_UNIT_TEST_FIXTURE_H_
 
 #include <lib/async/dispatcher.h>
-#include <lib/fidl/cpp/interface_request.h>
 #include <lib/fidl/cpp/wire/connect_service.h>
 #include <lib/fit/function.h>
 #include <lib/inspect/cpp/hierarchy.h>
@@ -40,15 +39,6 @@ class UnitTestFixture : public gtest::TestLoopFixture {
   }
 
   template <typename Protocol>
-  void AddHandler(::fidl::InterfaceRequestHandler<Protocol> handler, const char* name = nullptr) {
-    if (name) {
-      FX_CHECK(service_directory_provider_.AddService(std::move(handler), name) == ZX_OK);
-    } else {
-      FX_CHECK(service_directory_provider_.AddService(std::move(handler)) == ZX_OK);
-    }
-  }
-
-  template <typename Protocol>
   void AddHandler(::fit::function<void(::fidl::ServerEnd<Protocol>)> handler,
                   std::string name = ::fidl::DiscoverableProtocolName<Protocol>) {
     InjectServiceProvider(
@@ -57,12 +47,6 @@ class UnitTestFixture : public gtest::TestLoopFixture {
               handler(::fidl::ServerEnd<Protocol>(std::move(channel)));
             }),
         std::move(name));
-  }
-
-  template <typename ServiceProvider>
-    requires(requires(ServiceProvider* s) { s->GetHandler(); })
-  void InjectServiceProvider(ServiceProvider* service_provider, const char* name = nullptr) {
-    AddHandler(service_provider->GetHandler(), name);
   }
 
   template <typename Protocol>

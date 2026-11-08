@@ -746,3 +746,9 @@
   available_in_git: '7c6541bda79bac210a20dd3bbeea9207d2285bd2'
   areas: ['RTC']
   path: '/src/devices/rtc/drivers/aml-rtc'
+- short_description: 'USB QMI telephony driver'
+  deletion_reason: 'Driver is unused'
+  gerrit_change_id: '1887456'
+  available_in_git: 'd8017642d9519c967bf52d41ca3d71bec1ecc0f2'
+  areas: ['Telephony']
+  path: '/src/connectivity/telephony/drivers/qmi-usb-transport'

@@ -9,6 +9,7 @@ load("//build/bazel/rules/rust:rustc_dylib.bzl", _rustc_dylib = "rustc_dylib")
 load("//build/bazel/rules/rust:rustc_embed_files.bzl", _rustc_embed_files = "rustc_embed_files")
 load("//build/bazel/rules/rust:rustc_library.bzl", _rustc_library = "rustc_library")
 load("//build/bazel/rules/rust:rustc_proc_macro.bzl", _rustc_proc_macro = "rustc_proc_macro")
+load("//build/bazel/rules/rust:rustc_staticlib.bzl", _rustc_staticlib = "rustc_staticlib")
 load("//build/bazel/rules/rust:rustc_test.bzl", _rustc_test = "rustc_test")
 
 rustc_binary = _rustc_binary
@@ -16,4 +17,5 @@ rustc_dylib = _rustc_dylib
 rustc_embed_files = _rustc_embed_files
 rustc_library = _rustc_library
 rustc_proc_macro = _rustc_proc_macro
+rustc_staticlib = _rustc_staticlib
 rustc_test = _rustc_test

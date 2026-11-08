@@ -107,7 +107,7 @@
             config: "fuchsia.diagnostics.StorageStallWatchdogEnabled",
             from: "parent",
             to: "#fxfs",
-            availability: "optional",
+            availability: "transitional",
         },
     ],
     expose: [
@@ -123,7 +123,10 @@
             from: "#fxfs",
         },
         {
-            protocol: "fuchsia.fs.startup.Volumes",
+            protocol: [
+                "fuchsia.fs.startup.Volumes",
+                "fuchsia.fxfs.ProfileManager",
+            ],
             from: "#fxfs",
         },
         {

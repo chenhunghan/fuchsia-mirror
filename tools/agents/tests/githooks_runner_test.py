@@ -3,8 +3,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-from __future__ import annotations
-
 import dataclasses
 import io
 import os
@@ -32,8 +30,12 @@ class AgentDetectionTest(unittest.TestCase):
 
         for var in (
             "ANTIGRAVITY_AGENT",
+            "ANTIGRAVITY_CONVERSATION_ID",
             "GEMINI_CLI",
             "ANTIGRAVITY_EDITOR_APP_ROOT",
+            "CLAUDECODE",
+            "CLAUDE_CODE_SESSION_ID",
+            "FFX_AGENT_SESSION_ID",
         ):
             self.assertTrue(runner.is_invoked_by_agent(env={var: "1"}))
 

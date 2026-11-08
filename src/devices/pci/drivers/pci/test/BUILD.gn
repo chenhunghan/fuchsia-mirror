@@ -8,10 +8,10 @@ import("//build/rust/rustc_test.gni")
 import("//build/test.gni")
 
 # The test suite consists of:
-# fakes: Test fakes (FakePciroot, FakeEcam) used by pci-unit-test and downstream
+# fakes: Test fakes (FakeRootServer, FakeEcam) used by pci-unit-test and downstream
 #        adapter tests.
 # pci-unit-test: C++ unit tests (in unit/) testing allocation, bus, config,
-#                device, fake pciroot, and MSI-X against mock DDK and fakes.
+#                device, and MSI-X against fakes.
 # pci-driver-test: Rust integration test (driver/driver_tests.rs) running in
 #                  DriverTestRealm to test all PCI protocol operations.
 # fake-bus-pci (target: pci_fake): A fake bus driver loaded in DriverTestRealm
@@ -25,10 +25,12 @@ source_set("fakes") {
   ]
   public = [
     "fakes/fake_ecam.h",
-    "fakes/fake_pciroot.h",
+    "fakes/fake_root_service.h",
   ]
   public_deps = [
-    "//sdk/banjo/fuchsia.hardware.pciroot:fuchsia.hardware.pciroot_banjo_cpp",
+    "//sdk/fidl/fuchsia.hardware.pci.root:fuchsia.hardware.pci.root_cpp",
+    "//sdk/fidl/fuchsia.hardware.pci.root:fuchsia.hardware.pci.root_cpp_testing",
+    "//sdk/lib/driver/mmio/cpp",
     "//sdk/lib/driver/mmio/testing/cpp",
     "//src/devices/pci/lib/cpp:headers",
     "//src/devices/testing/fake-bti",
@@ -46,7 +48,6 @@ test("pci-unit") {
     "unit/bus_tests.cc",
     "unit/config_tests.cc",
     "unit/device_tests.cc",
-    "unit/fake_pciroot_tests.cc",
     "unit/msix_tests.cc",
   ]
 
@@ -55,20 +56,18 @@ test("pci-unit") {
     "..:user_pci",
     "//sdk/lib/async-loop:async-loop-cpp",
     "//sdk/lib/async-loop:async-loop-default",
-    "//sdk/lib/async_patterns/testing/cpp",
-    "//sdk/lib/component/outgoing/cpp",
     "//sdk/lib/driver/metadata/cpp",
     "//sdk/lib/driver/mmio/testing/cpp",
+    "//sdk/lib/driver/testing/cpp",
+    "//sdk/lib/driver/testing/cpp:scoped_global_logger",
+    "//sdk/lib/fit",
     "//src/devices/testing/fake-bti",
     "//src/devices/testing/fake-msi",
-    "//src/devices/testing/mock-ddk",
+    "//src/devices/testing/fake-resource",
     "//src/lib/fxl/test:gtest_main",
-    "//src/lib/testing/loop_fixture",
     "//src/lib/testing/predicates",
-    "//third_party/googletest:gtest",
+    "//src/sys/test_runners/gtest:death_test",
   ]
-
-  public_deps = [ "//src/devices/testing/fake-resource" ]
 
   # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
   configs += [ "//build/config:Wno-conversion" ]
@@ -93,10 +92,7 @@ rustc_test("pci-driver") {
   ]
 }
 
-# These drivers are not 'test' drivers because at the moment having other
-# drivers in test/ breaks ddkltl integration tests.
 fuchsia_cc_driver("pci_fake-driver") {
-  legacy = true
   output_name = "fake-bus-pci"
   configs += [
     "//build/config:all_source",
@@ -107,14 +103,12 @@ fuchsia_cc_driver("pci_fake-driver") {
   public_deps = [
     "..:user_pci",
     "driver:fake_pci_bus_driver_bind",
-    "//src/devices/lib/driver",
+    "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_cpp",
+    "//sdk/lib/driver/component/cpp",
     "//src/devices/testing/fake-bti",
     "//src/devices/testing/fake-msi",
     "//src/devices/testing/fake-resource",
-    "//src/lib/ddk",
-    "//src/lib/ddktl",
     "//zircon/system/ulib/pretty",
-    "//zircon/system/ulib/zxtest",
   ]
 }
 
@@ -142,7 +136,6 @@ fuchsia_unittest_package("pci_driver_test") {
   deps = [
     ":pci-driver",
     ":pci_fake",
-    "..",
     "//src/devices/bus/drivers/platform",
   ]
   test_specs = {

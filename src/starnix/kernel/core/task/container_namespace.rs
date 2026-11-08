@@ -2,9 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 use fidl::endpoints::create_endpoints;
+use fidl_fuchsia_component_runner as frunner;
+use fidl_fuchsia_unknown as funknown;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use {fidl_fuchsia_component_runner as frunner, fidl_fuchsia_unknown as funknown};
 
 #[derive(Debug)]
 pub struct ContainerNamespace {
@@ -21,6 +22,25 @@ impl ContainerNamespace {
     /// channel entry corresponding to the given path.
     pub fn has_channel_entry(&self, channel_path: impl AsRef<Path>) -> bool {
         return self.namespace_entries.contains_key(channel_path.as_ref());
+    }
+
+    /// Removes and returns a channel at the given namespace path.
+    pub fn remove_namespace_channel(
+        &mut self,
+        channel_path: impl AsRef<Path>,
+    ) -> Result<zx::Channel, anyhow::Error> {
+        let path = channel_path.as_ref();
+        if !path.is_absolute() {
+            anyhow::bail!(
+                "Invalid parameter provided to remove_namespace_channel: {}",
+                path.display()
+            );
+        }
+
+        match self.namespace_entries.remove(path) {
+            Some(cloneable_proxy) => Ok(cloneable_proxy.into_channel()),
+            None => anyhow::bail!("Could not find an entry for {}", path.display()),
+        }
     }
 
     /// Attempts to find a channel at the given namespace path.
@@ -315,5 +335,32 @@ mod test {
         // Assert both original and clone retain their own references.
         assert!(cn_under_test.has_channel_entry("/pkg"));
         assert!(clone_under_test.has_channel_entry("/pkg"));
+    }
+
+    #[::fuchsia::test]
+    fn removes_namespace_channel() {
+        let _stub_exec = fuchsia_async::TestExecutor::new();
+        let mut ns = Vec::<frunner::ComponentNamespaceEntry>::new();
+        let pkg_channel: zx::Channel =
+            directory::open_in_namespace("/pkg", fio::PERM_READABLE | fio::PERM_EXECUTABLE)
+                .expect("failed to open /pkg")
+                .into_channel()
+                .expect("into_channel")
+                .into();
+        ns.push(frunner::ComponentNamespaceEntry {
+            path: Some("/tmp_lifecycle".to_string()),
+            directory: Some(ClientEnd::new(pkg_channel)),
+            ..Default::default()
+        });
+
+        let mut cn_under_test = ContainerNamespace::from(ns);
+        assert!(cn_under_test.remove_namespace_channel("tmp_lifecycle").is_err());
+        assert!(cn_under_test.has_channel_entry("/tmp_lifecycle"));
+        let removed_channel = cn_under_test
+            .remove_namespace_channel("/tmp_lifecycle")
+            .expect("remove_namespace_channel should succeed");
+        assert!(removed_channel.write(b"hello", &mut vec![]).is_ok());
+        assert!(!cn_under_test.has_channel_entry("/tmp_lifecycle"));
+        assert!(cn_under_test.remove_namespace_channel("/tmp_lifecycle").is_err());
     }
 }

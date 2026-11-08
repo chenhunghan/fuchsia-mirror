@@ -84,6 +84,7 @@ zx_status_t PciBus::Configure() {
   }
 
   // Request 1 interrupt of any mode.
+  fuchsia_hardware_pci::InterruptMode irq_mode;
   {
     const auto result = pci_->GetInterruptModes();
     if (!result.ok()) {
@@ -91,18 +92,18 @@ zx_status_t PciBus::Configure() {
       return result.status();
     }
     if (result->modes.msix_count > 0) {
-      irq_mode_ = fuchsia_hardware_pci::InterruptMode::kMsiX;
+      irq_mode = fuchsia_hardware_pci::InterruptMode::kMsiX;
     } else if (result->modes.msi_count > 0) {
-      irq_mode_ = fuchsia_hardware_pci::InterruptMode::kMsi;
+      irq_mode = fuchsia_hardware_pci::InterruptMode::kMsi;
     } else if (result->modes.has_legacy) {
-      irq_mode_ = fuchsia_hardware_pci::InterruptMode::kLegacy;
+      irq_mode = fuchsia_hardware_pci::InterruptMode::kLegacy;
     } else {
       fdf::error("No interrupt modes are supported.");
       return ZX_ERR_NOT_SUPPORTED;
     }
   }
   {
-    const auto result = pci_->SetInterruptMode(irq_mode_, 1);
+    const auto result = pci_->SetInterruptMode(irq_mode, 1);
     if (!result.ok()) {
       fdf::error("Call to SetInterruptMode failed: {}", result.status_string());
       return result.status();
@@ -169,21 +170,7 @@ zx_status_t PciBus::BtiPin(uint32_t options, const zx::unowned_vmo& vmo, uint64_
   return status;
 }
 
-zx_status_t PciBus::InterruptWait() {
-  if (irq_mode_ == fuchsia_hardware_pci::InterruptMode::kLegacy) {
-    const auto result = pci_->AckInterrupt();
-    if (!result.ok()) {
-      fdf::error("Call to AckInterrupt failed: {}", result.status_string());
-      return result.status();
-    }
-    if (result->is_error()) {
-      fdf::error("AckInterrupt failed: {}", zx_status_get_string(result->error_value()));
-      return result->error_value();
-    }
-  }
-
-  return irq_.wait(nullptr);
-}
+zx_status_t PciBus::InterruptWait() { return irq_.wait(nullptr); }
 
 void PciBus::InterruptCancel() { irq_.destroy(); }
 

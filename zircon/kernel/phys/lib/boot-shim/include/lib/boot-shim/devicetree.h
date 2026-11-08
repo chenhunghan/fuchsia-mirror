@@ -603,6 +603,12 @@ class RiscvDevicetreePlicItem
 // the actual value of the performance class is only a representative of the relative difference
 // between difference clusters.
 //
+// On DynamIQ and similar systems, a single '/cpus/cpu-map' cluster may describe a shared DSU/cache
+// domain whose cores span multiple DVFS or capacity groups. Leaf clusters whose active cores span
+// distinct 'operating-points-v2' tables (or, when 'cpu-map' defines only a single cluster,
+// distinct 'capacity-dmips-mhz' values) are split into sibling ZBI_TOPOLOGY_ENTITY_CLUSTER nodes
+// so each performance group receives its own cluster and performance class.
+//
 // See:
 // https://www.kernel.org/doc/Documentation/devicetree/bindings/arm/cpu-capacity.txt
 // https://www.kernel.org/doc/Documentation/devicetree/bindings/cpu/cpu-topology.txt
@@ -735,6 +741,11 @@ class DevicetreeCpuTopologyItem : public DevicetreeItemBase<DevicetreeCpuTopolog
   // This MUST be called AFTER |UpdateEntryCpuLinks|.
   fit::result<ItemBase::DataZbi::Error, size_t> MarkSkippedMapEntries() const;
 
+  // Splits leaf clusters in |map_entries_| whose active cores span multiple DVFS or capacity
+  // groups into sibling clusters sharing the original cluster's parent.
+  // This MUST be called AFTER |UpdateEntryCpuLinks| and |MarkSkippedMapEntries|.
+  fit::result<ItemBase::DataZbi::Error> SplitHeterogeneousClusters();
+
   // After both |entries_| and |cpus_| have been filled this routine will fill up
   // the reference from an entry to a 'cpu' node.
   fit::result<ItemBase::DataZbi::Error> UpdateEntryCpuLinks() const;
@@ -760,6 +771,7 @@ class DevicetreeCpuTopologyItem : public DevicetreeItemBase<DevicetreeCpuTopolog
   uint32_t cluster_count_ = 0;
 
   size_t topology_node_count_ = 0;
+  std::optional<DataZbi::Error> init_error_;
 
   // Allocation is environment specific, so we delegate that to a lambda.
   mutable const Allocator* allocator_ = nullptr;
@@ -1157,6 +1169,18 @@ class ArmDevicetreeTimerMmioItem
 // `domain-idle-states see
 // https://www.kernel.org/doc/Documentation/devicetree/bindings/power/domain-idle-state.yaml
 //
+// Each emitted idle state records in `cpu_mask` the logical CPUs that may enter it. A CPU may enter
+// the idle states listed in its `cpu-idle-states` property, and the `domain-idle-states` of every
+// PSCI power domain reachable from its `power-domains` property through each power domain's own
+// `power-domains` parent links. See
+// https://www.kernel.org/doc/Documentation/devicetree/bindings/arm/psci.yaml
+//
+// A domain idle state is emitted once per power domain that lists it, with `cpu_mask` set to the
+// CPUs beneath that domain. Any other idle state is emitted once, with `cpu_mask` set to every CPU
+// that may enter it. Logical CPU IDs are read from the ZBI_TYPE_CPU_TOPOLOGY item, so this item
+// must be appended after the CPU topology item. If no CPU can be mapped to an idle state, every
+// idle state is emitted once with `cpu_mask` = ~uint64_t{0}, meaning every CPU may enter it.
+//
 // Note: There is inconsistency in the use of `domain-idle-states` and `idle-states, specifically on
 // where they are located in the devicetree with respect to the spec.
 class ArmDevicetreePsciCpuSuspendItem
@@ -1178,16 +1202,56 @@ class ArmDevicetreePsciCpuSuspendItem
   devicetree::ScanState OnScan();
 
   constexpr size_t size_bytes() const {
-    return num_idle_states_ == 0
-               ? 0
-               : ItemSize(num_idle_states_ * sizeof(zbi_dcfg_arm_psci_cpu_suspend_state_t));
+    // Each idle state is emitted at most once on its own and once per power domain.
+    return num_idle_states_ == 0 ? 0
+                                 : ItemSize(num_idle_states_ * (size_t{1} + num_power_domains_) *
+                                            sizeof(zbi_dcfg_arm_psci_cpu_suspend_state_t));
   }
 
   fit::result<DataZbi::Error> AppendItems(DataZbi& zbi);
 
  private:
+  // A `cpu` node under `/cpus`.
+  struct CpuEntry {
+    uint64_t mpidr = 0;
+    // Raw `cpu-idle-states` and `power-domains` phandle lists, if present.
+    devicetree::ByteView idle_states;
+    devicetree::ByteView power_domains;
+  };
+
+  // A PSCI power domain: a node under the PSCI node with #power-domain-cells = <0> and a phandle.
+  struct PowerDomainEntry {
+    uint32_t phandle = 0;
+    // Bitmask of logical IDs of the CPUs beneath this power domain.
+    uint64_t cpus = 0;
+    // Raw `domain-idle-states` and parent `power-domains` phandle lists, if present.
+    devicetree::ByteView idle_states;
+    devicetree::ByteView parents;
+  };
+
   devicetree::ScanState OnIdleStateCount(const devicetree::PropertyDecoder& decoder);
   devicetree::ScanState OnIdleStateFill(const devicetree::PropertyDecoder& decoder);
+  devicetree::ScanState OnCpu(const devicetree::PropertyDecoder& decoder);
+  devicetree::ScanState OnPowerDomain(const devicetree::PropertyDecoder& decoder);
+
+  bool allocated() const { return states_ != nullptr; }
+
+  // Returns the index into `states_` of the idle state with `phandle`, if any.
+  std::optional<uint32_t> IdleStateIndex(uint32_t phandle) const;
+
+  // Adds `cpu` to `state_cpus_` for each idle state in `phandles`, except domain idle states
+  // listed by a power domain (`from_power_domain`), which are emitted per power domain instead.
+  void AddCpuToIdleStates(devicetree::ByteView phandles, uint64_t cpu, bool from_power_domain);
+
+  // Adds `cpu` to the power domains in `phandles` and their ancestors, and to their idle states.
+  void AddCpuToPowerDomains(devicetree::ByteView phandles, uint64_t cpu);
+
+  // Records the logical IDs of `cpus_` in `state_cpus_` and `PowerDomainEntry::cpus`, using the
+  // ZBI_TYPE_CPU_TOPOLOGY item in `zbi` to map each CPU's MPIDR to its logical ID.
+  void MapCpus(DataZbi& zbi);
+
+  // Returns whether `domain` lists the idle state at index `index` in its `domain-idle-states`.
+  bool PowerDomainListsIdleState(const PowerDomainEntry& domain, uint32_t index) const;
 
   std::span<zbi_dcfg_arm_psci_cpu_suspend_state_t> idle_states() {
     return {states_, num_idle_states_};
@@ -1198,11 +1262,24 @@ class ArmDevicetreePsciCpuSuspendItem
 
   const devicetree::Node* idle_states_ = nullptr;
   const devicetree::Node* domain_idle_states_ = nullptr;
-  uint32_t subtree_visited_count_ = 0;
+  const devicetree::Node* psci_ = nullptr;
 
   uint32_t current_idle_state_ = 0;
   uint32_t num_idle_states_ = 0;
   zbi_dcfg_arm_psci_cpu_suspend_state_t* states_ = nullptr;
+  // `phandle` of each recorded idle state, indexed like `states_`, or 0 if it had none.
+  uint32_t* state_phandles_ = nullptr;
+  // Logical IDs of the CPUs that may enter each recorded idle state on its own, indexed like
+  // `states_`.
+  uint64_t* state_cpus_ = nullptr;
+
+  uint32_t current_cpu_ = 0;
+  uint32_t num_cpus_ = 0;
+  CpuEntry* cpus_ = nullptr;
+
+  uint32_t current_power_domain_ = 0;
+  uint32_t num_power_domains_ = 0;
+  PowerDomainEntry* power_domains_ = nullptr;
 };
 
 // QCOM Rng device

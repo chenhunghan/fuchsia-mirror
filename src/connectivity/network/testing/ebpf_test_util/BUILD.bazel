@@ -1,0 +1,40 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_rules_common//packages:resources.bzl", "resource")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Kept in BUILD.gn above the sentinel because bazel2gn does not translate resource().
+# @bazel2gn:skip
+resource(
+    name = "ebpf_test_progs",
+    src = "ebpf/ebpf_test_progs.o",
+    dest = "data/ebpf_test_progs.o",
+)
+
+rustc_library(
+    name = "ebpf_test_util",
+    testonly = True,
+    srcs = ["src/lib.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    data = [":ebpf_test_progs"],
+    edition = "2024",
+    visibility = [
+        "//src/connectivity/network/netstack3:__pkg__",
+        "//src/connectivity/network/tests/fidl/filter:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.ebpf:fuchsia.ebpf_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//src/starnix/lib/ebpf",
+        "//src/starnix/lib/ebpf_api",
+        "//src/starnix/lib/ebpf_loader",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)

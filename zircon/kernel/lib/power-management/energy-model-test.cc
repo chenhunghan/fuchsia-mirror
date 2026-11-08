@@ -295,6 +295,99 @@ TEST(PowerModelTest, Create) {
   EXPECT_FALSE(energy_model->FindPowerLevel(static_cast<ControlInterface>(495), 0));
 }
 
+TEST(PowerModelTest, CreateRemapsTransitionsForAnySortOrder) {
+  // Sorting reorders these levels as WFI (originally 1), tied idle states C2a/C2b (3 and 4),
+  // low (2), high (0). The original-to-sorted index mapping contains a cycle longer than 2, which
+  // is not its own inverse, as well as two levels with identical (processing_rate, power) keys.
+  static constexpr auto kPowerLevels = std::to_array<ProcessorPowerLevel>({
+      {
+          .options = 0,
+          .processing_rate = 2,
+          .power_coefficient_nw = 20,
+          .control_interface = ControlInterface::kCpuDriver,
+          .control_argument = 0,
+          .diagnostic_name = "high",
+      },
+      {
+          .options = 0,
+          .processing_rate = 0,
+          .power_coefficient_nw = 1,
+          .control_interface = ControlInterface::kArmWfi,
+          .control_argument = 0,
+          .diagnostic_name = "wfi",
+      },
+      {
+          .options = 0,
+          .processing_rate = 1,
+          .power_coefficient_nw = 10,
+          .control_interface = ControlInterface::kCpuDriver,
+          .control_argument = 1,
+          .diagnostic_name = "low",
+      },
+      {
+          .options = 0,
+          .processing_rate = 0,
+          .power_coefficient_nw = 5,
+          .control_interface = ControlInterface::kArmPsci,
+          .control_argument = 10,
+          .diagnostic_name = "c2a",
+      },
+      {
+          .options = 0,
+          .processing_rate = 0,
+          .power_coefficient_nw = 5,
+          .control_interface = ControlInterface::kArmPsci,
+          .control_argument = 20,
+          .diagnostic_name = "c2b",
+      },
+  });
+
+  static constexpr auto kTransitions = std::to_array<ProcessorPowerLevelTransition>({
+      {.latency = 10, .energy_nj = 1, .from = 1, .to = 2},
+      {.latency = 20, .energy_nj = 2, .from = 1, .to = 0},
+      {.latency = 30, .energy_nj = 3, .from = 2, .to = 0},
+      {.latency = 40, .energy_nj = 4, .from = 3, .to = 0},
+      {.latency = 50, .energy_nj = 5, .from = 4, .to = 0},
+  });
+
+  auto model_result = EnergyModel::Create(kPowerLevels, kTransitions);
+  ASSERT_TRUE(model_result.is_ok());
+  const EnergyModel& model = model_result.value();
+
+  ASSERT_EQ(model.levels().size(), 5u);
+  EXPECT_EQ(model.levels()[0].name(), "wfi");
+  EXPECT_EQ(model.levels()[3].name(), "low");
+  EXPECT_EQ(model.levels()[4].name(), "high");
+
+  const std::optional<uint8_t> c2a_idx = model.FindPowerLevel(ControlInterface::kArmPsci, 10);
+  const std::optional<uint8_t> c2b_idx = model.FindPowerLevel(ControlInterface::kArmPsci, 20);
+  ASSERT_TRUE(c2a_idx.has_value());
+  ASSERT_TRUE(c2b_idx.has_value());
+
+  // Sorted indices: wfi = 0, {c2a, c2b} = {1, 2}, low = 3, high = 4.
+  EXPECT_EQ(model.transitions()[0][3].latency(), 10);
+  EXPECT_EQ(model.transitions()[0][4].latency(), 20);
+  EXPECT_EQ(model.transitions()[3][4].latency(), 30);
+  EXPECT_EQ(model.transitions()[*c2a_idx][4].latency(), 40);
+  EXPECT_EQ(model.transitions()[*c2b_idx][4].latency(), 50);
+  EXPECT_FALSE(model.transitions()[4][0]);
+}
+
+TEST(PowerModelTest, CreateRejectsMoreThan256Levels) {
+  std::array<ProcessorPowerLevel, 257> levels = {};
+  for (size_t i = 0; i < levels.size(); ++i) {
+    levels[i] = {
+        .options = 0,
+        .processing_rate = i + 1,
+        .power_coefficient_nw = i + 1,
+        .control_interface = ControlInterface::kCpuDriver,
+        .control_argument = i,
+        .diagnostic_name = "opp",
+    };
+  }
+  EXPECT_EQ(EnergyModel::Create(levels, {}).status_value(), ZX_ERR_INVALID_ARGS);
+}
+
 TEST(PowerModelTest, CreateWithEmptyTransitionsIsOk) {
   static constexpr auto kPowerLevels = std::to_array<ProcessorPowerLevel>({
       {

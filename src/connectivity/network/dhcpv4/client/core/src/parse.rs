@@ -45,14 +45,9 @@ pub(crate) fn parse_dhcp_message_from_ip_packet(
 
     let src_addr = ip_packet.src_ip();
 
-    match ip_packet.proto() {
-        packet_formats::ip::Ipv4Proto::Proto(packet_formats::ip::IpProto::Udp) => (),
-        packet_formats::ip::Ipv4Proto::Proto(packet_formats::ip::IpProto::Tcp)
-        | packet_formats::ip::Ipv4Proto::Icmp
-        | packet_formats::ip::Ipv4Proto::Igmp
-        | packet_formats::ip::Ipv4Proto::Proto(packet_formats::ip::IpProto::Reserved)
-        | packet_formats::ip::Ipv4Proto::Other(_) => return Err(ParseError::NotUdp),
-    };
+    if ip_packet.proto() != packet_formats::ip::Ipv4Proto::Proto(packet_formats::ip::IpProto::Udp) {
+        return Err(ParseError::NotUdp);
+    }
     let mut ip_packet_body = ip_packet.body();
 
     let udp_packet = ip_packet_body
@@ -81,7 +76,16 @@ pub(crate) fn serialize_dhcp_message_to_ip_packet(
     dst_ip: impl Into<net_types::ip::Ipv4Addr>,
     dst_port: NonZeroU16,
 ) -> impl AsRef<[u8]> {
-    let message = message.serialize();
+    serialize_dhcp_bytes_to_ip_packet(message.serialize(), src_ip, src_port, dst_ip, dst_port)
+}
+
+pub(crate) fn serialize_dhcp_bytes_to_ip_packet(
+    message: Vec<u8>,
+    src_ip: impl Into<net_types::ip::Ipv4Addr>,
+    src_port: NonZeroU16,
+    dst_ip: impl Into<net_types::ip::Ipv4Addr>,
+    dst_port: NonZeroU16,
+) -> impl AsRef<[u8]> {
     let src_ip = src_ip.into();
     let dst_ip = dst_ip.into();
 

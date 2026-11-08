@@ -49,11 +49,11 @@ class ElfImage {
   using BootfsDir = zbitl::BootfsView<ktl::span<ktl::byte>>;
   using Error = BootfsDir::Error;
 
-  using PublishDebugdataFunction = fit::inline_function<ktl::span<ktl::byte>(
-      ktl::string_view sink_name, ktl::string_view vmo_name, ktl::string_view suffix,
-      size_t stream_size)>;
-
   using PrintPatchFunction = fit::inline_function<void(ktl::initializer_list<ktl::string_view>)>;
+
+  // Called at the end of Load() once the load address is final, to emit
+  // symbolizer markup context for the newly loaded module.
+  using EmitMarkupFunction = fit::inline_function<void(const ElfImage& image)>;
 
   using MapSegmentFunction = fit::inline_function<fit::result<arch::MapError>(
       uintptr_t vaddr, size_type offset, size_type filesz, size_type memsz,
@@ -169,14 +169,15 @@ class ElfImage {
   // Load in place if possible, or else copy into a new Allocation
   // A virtual load address at which relocation is expected to occur may be
   // provided; if not, the image will be loaded within the current address
-  // space.
+  // space.  Once the load address is final, `emit_markup` is called with this
+  // image so the caller can emit symbolizer context for it.
   // The Allocation returned is null if LoadInPlace was used; otherwise, it
   // owns the memory backing the new load image and should be kept alive for
   // the lifetime of the ElfImage. In general, the returned allocation should
   // not be consulted for addresses within the load image; that is what
   // memory_image() is for.
-  Allocation Load(memalloc::Type type, ktl::optional<uint64_t> relocation_address = {},
-                  bool in_place_ok = true);
+  Allocation Load(memalloc::Type type, EmitMarkupFunction emit_markup,
+                  ktl::optional<uint64_t> relocation_address = {}, bool in_place_ok = true);
 
   size_t vaddr_size() const { return load_info_.vaddr_size(); }
 
@@ -233,14 +234,6 @@ class ElfImage {
     uintptr_t address = physical ? physical_load_address() : load_address();
     return load_info_.SymbolizerContext(writer, id, name(), build_id_->desc, address, prefix);
   }
-
-  // Publish this image's llvm-profdata (if any) as an instrumentation VMO.
-  // This is only meaningful for the running phys executable's own image, i.e.
-  // the one set up by InitSelf.  The argument is similar called like
-  // HandoffPrep::PublishExtraVmo, which see; PublishDebugdataFunction takes
-  // different arguments to name the data, so it can be used to compose either
-  // a ZBI_TYPE_DEBUGDATA payload or a named VMO.
-  void PublishDebugdata(PublishDebugdataFunction publish_debugdata) const;
 
   // Call the image's entry point as a function type F.
   template <typename F, typename... Args>

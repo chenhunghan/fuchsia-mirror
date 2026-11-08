@@ -31,25 +31,32 @@ class ResourceRecycler : public ResourceManager, public impl::CommandBufferSeque
  private:
   // Gives subclasses a chance to recycle the resource. Default implementation
   // immediately destroys resource.
-  // Note that if OnCommandBufferFinished() and OnReceiveOwnable() is called from multiple threads,
-  // RecycleResource() will also be called from multiple threads, so the implementers should
-  // guarantee thread-safety.
-  virtual void RecycleResource(std::unique_ptr<Resource> resource) {}
+  //
+  // Subclass implementations may be called from multiple threads and must
+  // guarantee thread-safety. Because destroying a composite `Resource` may
+  // synchronously re-enter `OnReceiveOwnable()` and `RecycleResource()` on the
+  // same thread, subclasses must not hold a non-recursive lock across
+  // `resource` destruction.
+  virtual void RecycleResource(std::unique_ptr<Resource> resource) FXL_LOCKS_EXCLUDED(lock_) {}
 
-  // Implement impl::CommandBufferSequenceListener::CommandBufferFinished().
-  // Checks whether it is safe to recycle any of |unused_resources_|.
-  void OnCommandBufferFinished(uint64_t sequence_number) final;
+  // Implement `impl::CommandBufferSequencerListener::OnCommandBufferFinished()`.
+  // Checks whether it is safe to recycle any of `unused_resources_`.
+  // NOLINTNEXTLINE(misc-override-with-different-visibility)
+  void OnCommandBufferFinished(uint64_t sequence_number) final FXL_LOCKS_EXCLUDED(lock_);
 
-  // Implement Owner::OnReceiveOwnable().  Call RecycleOwnable() immediately if
-  // it is safe to do so.  Otherwise, adds the resource to a set of resources
-  // to be recycled later; see CommandBufferFinished().
-  void OnReceiveOwnable(std::unique_ptr<Resource> resource) final;
+  // Implement `Owner::OnReceiveOwnable()`. Calls `RecycleResource()` immediately if it is safe to
+  // do so. Otherwise, adds the resource to `unused_resources_` to be recycled by
+  // `OnCommandBufferFinished()`.
+  void OnReceiveOwnable(std::unique_ptr<Resource> resource) final FXL_LOCKS_EXCLUDED(lock_);
 
-  uint64_t last_finished_sequence_number_ = 0;
-
-  // This mutex protects access to |unused_resources_|. These class methods
-  // may be called from multiple threads.
+  // Protects `last_finished_sequence_number_` and `unused_resources_`, which may be accessed
+  // concurrently from `OnCommandBufferFinished()` and `OnReceiveOwnable()`. Must not be held while
+  // invoking `RecycleResource()`, as destroying a composite `Resource` (for example, `Texture`)
+  // can drop references to child `Resource`s owned by this same `ResourceRecycler` and re-enter
+  // `OnReceiveOwnable()`.
   mutable std::mutex lock_;
+
+  uint64_t last_finished_sequence_number_ FXL_GUARDED_BY(lock_) = 0;
 
   // We need to use an unordered_map instead of an unordered_set because you
   // can't modify elements of an unordered_set, which prevents us from

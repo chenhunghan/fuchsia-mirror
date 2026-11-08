@@ -1,0 +1,40 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+load("//tools/fidl/measure-tape:measure_tape.bzl", "measure_tape")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_test_binary(
+    name = "hlcpp-tests",
+    srcs = ["hlcpp_test.cc"],
+    visibility = ["//tools/fidl/measure-tape:__pkg__"],
+    deps = [
+        ":measure_tape_for_toplevelunion",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+        "//tools/fidl/measure-tape/testdata:measuretape_hlcpp",
+    ],
+)
+
+measure_tape(
+    name = "measure_tape_for_toplevelunion",
+    testonly = True,
+    fidls = ["//tools/fidl/measure-tape/testdata:measuretape"],
+    target_binding = "hlcpp",
+    target_types = [
+        "test.measuretape/TopLevelUnion",
+        "test.measuretape/AnotherTopLevelThing",
+    ],
+)
+
+# //tools/fidl/measure-tape:integration-tests packages the GN cc_test_executable.
+# @bazel2gn:skip
+fx_unittest_package(
+    name = "hlcpp-tests-package",
+    unit_tests = [":hlcpp-tests"],
+    visibility = ["//tools/fidl/measure-tape:__pkg__"],
+)

@@ -5,9 +5,10 @@
 // https://opensource.org/licenses/MIT
 
 use crate::counters::define_kcounter;
+use crate::ksync_kernel::{TrackedCriticalMutex, TrackedMutex};
 use bitrs::layout;
 use fbl::{Canary, RefPtr};
-use ksync::{KMutex, RawCriticalMutex, RawMutex, guarded};
+use ksync::{KMutex, guarded};
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
 use zx_types::{
@@ -36,8 +37,6 @@ layout!({
         let write @ 1;
         /// Append mode is enabled.
         let append @ 2;
-        /// Resizing the VMO is permitted.
-        let can_resize_vmo @ 3;
     }
 });
 
@@ -80,13 +79,13 @@ pub struct StreamDispatcherState {
     options: StreamOptions,
 
     #[mutex]
-    lock: KMutex<RawCriticalMutex>,
+    lock: KMutex<TrackedCriticalMutex>,
 
     #[guarded_by(seek_lock)]
     seek: u64,
 
     #[mutex(flags = lockdep::LOCK_FLAGS_ACTIVE_LIST_DISABLED)]
-    seek_lock: KMutex<RawMutex>,
+    seek_lock: KMutex<TrackedMutex>,
 
     vmo: RefPtr<VmObjectPaged>,
 
@@ -163,11 +162,20 @@ impl StreamDispatcher {
         if options.write() {
             rights |= ZX_RIGHT_WRITE;
         }
-        // SAFETY: `vmo_dispatcher` is a valid `VmObjectDispatcher`, and
+        let ssm = vmo_dispatcher.stream_size_manager()?;
+        let vmo = crate::vm::vm_object::VmObject::downcast_paged(vmo_dispatcher.vmo().clone())
+            .expect("stream VMO must be paged");
+        // SAFETY: `vmo` and `ssm` transfer ownership of one RefPtr count to C++, and
         // `cpp_stream_dispatcher_create` initializes `handle` on success.
         let handle = unsafe {
             KernelHandle::create(|out| {
-                cpp_stream_dispatcher_create(options.bits(), vmo_dispatcher as *const _, seek, out)
+                cpp_stream_dispatcher_create(
+                    options.bits(),
+                    RefPtr::into_raw(vmo).cast_mut(),
+                    RefPtr::into_raw(ssm).cast_mut(),
+                    seek,
+                    out,
+                )
             })
         }?;
         Ok((handle, rights))
@@ -563,12 +571,6 @@ impl StreamDispatcher {
     pub fn is_in_append_mode(&self) -> bool {
         ksync::lock!(let guard = self.state().lock_lock());
         guard.fields().options.append()
-    }
-
-    /// Returns whether the stream can resize the underlying VMO.
-    pub fn can_resize_vmo(&self) -> bool {
-        ksync::lock!(let guard = self.state().lock_lock());
-        guard.fields().options.can_resize_vmo()
     }
 
     /// Returns diagnostic information about the stream.

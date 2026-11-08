@@ -5,6 +5,7 @@
 // https://opensource.org/licenses/MIT
 
 #include <stdint.h>
+#include <zircon/assert.h>
 
 #include <kernel/ffi.h>
 #include <phys/handoff/boot-constants.h>
@@ -20,10 +21,33 @@ FFI_ALWAYS_INLINE const uint8_t* cpp_boot_constants_kernel_version_ident(size_t*
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE const PhysHandoff* cpp_phys_handoff_get();
+FFI_ALWAYS_INLINE const uint8_t* cpp_boot_constants_kernel_debug_ident(size_t* size) {
+  std::string_view ident = kBootConstants.kernel_debug_ident.get();
+  *size = ident.size();
+  return reinterpret_cast<const uint8_t*>(ident.data());
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE uint32_t cpp_boot_constants_hw_reboot_reason() {
+  return static_cast<uint32_t>(kBootConstants.hw_reboot_reason);
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE const uint8_t* cpp_boot_constants_system_version_string(size_t* size) {
+  std::string_view version = kBootConstants.system_version_string.get();
+  *size = version.size();
+  return reinterpret_cast<const uint8_t*>(version.data());
+}
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE const PhysHandoff* cpp_phys_handoff_get() { return gPhysHandoff; }
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE const uint8_t* cpp_phys_handoff_crashlog(size_t* size) {
+  std::string_view crashlog = gPhysHandoff->crashlog.get();
+  *size = crashlog.size();
+  return reinterpret_cast<const uint8_t*>(crashlog.data());
+}
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE uint8_t* cpp_phys_handoff_nvram(size_t* size) {
@@ -44,6 +68,14 @@ FFI_ALWAYS_INLINE const memalloc::Range* cpp_phys_handoff_memory(size_t* count) 
   std::span<const memalloc::Range> memory = gPhysHandoff->memory.get();
   *count = memory.size();
   return memory.data();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE const uint8_t* cpp_phys_handoff_efi_memory_attributes(size_t* size) {
+  ZX_DEBUG_ASSERT(gPhysHandoff != nullptr);
+  std::span<const std::byte> efi_memory_attributes = gPhysHandoff->efi_memory_attributes.get();
+  *size = efi_memory_attributes.size();
+  return reinterpret_cast<const uint8_t*>(efi_memory_attributes.data());
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.

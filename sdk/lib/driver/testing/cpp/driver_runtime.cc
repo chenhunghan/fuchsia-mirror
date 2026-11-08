@@ -184,8 +184,15 @@ bool DriverRuntime::RunWithTimeout(zx::duration timeout) {
   // after this function returns.
   auto canceled = std::make_shared<bool>(false);
   bool timed_out = false;
+#if FUCHSIA_API_LEVEL_AT_LEAST(32)
+  ZX_ASSERT(foreground_dispatcher_.has_value());
+  async_dispatcher_t* dispatcher =
+      foreground_dispatcher_->driver_dispatcher().GetAlwaysOnDispatcher()->async_dispatcher();
+#else
+  async_dispatcher_t* dispatcher = foreground_dispatcher_->dispatcher();
+#endif
   async::PostDelayedTask(
-      foreground_dispatcher_->dispatcher(),
+      dispatcher,
       [this, canceled, &timed_out] {
         if (*canceled) {
           return;

@@ -135,10 +135,8 @@ fuchsia_test_component("lib_test-component") {
 
 fuchsia_test_package("remote-control-lib-tests") {
   test_components = [ ":lib_test-component" ]
-  deps = [
-    ":lib_test-test-driver",
-    "//src/connectivity/network/netstack3:component-for-tests",
-  ]
+  deps = [ ":lib_test-test-driver" ]
+  subpackages = [ "//src/connectivity/network/netstack3:package-for-tests" ]
   test_specs = {
     log_settings = {
       max_severity = "ERROR"
@@ -165,7 +163,6 @@ fuchsia_package("remote-control-package") {
   package_name = "remote-control"
   deps = [
     ":remote-control-component",
-    "//build/validate:non_production_tag",
     "//src/developer/remote-control/fdomain-runner:bin",
     "//src/developer/remote-control/fdomain-uart-driver:component",
     "//src/developer/remote-control/identify-host:bin",

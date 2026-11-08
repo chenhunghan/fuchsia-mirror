@@ -20,9 +20,10 @@ migration) or a finding is a false positive:
 2. File a tracking bug in the Build > Bazel component:
    <https://issues.fuchsia.dev/issues/new?component=1477645>.
 3. Add an entry referencing that bug to `<check_name>.json` in this directory.
-4. Verify that the check passes across the entire workspace:
+4. Verify that the check passes across the entire workspace with zero findings
+   (errors, warnings, or notices):
    ```sh
-   fx host-tool shac check --only <check_name> --all
+   fx host-tool shac check --only <check_name> --all --fail-level warning
    ```
 5. Commit the change, including the following footers in the commit message:
    * `Bug:` specifying the tracking bug filed above
@@ -36,13 +37,20 @@ class in [`../checks/`](../checks/README.md) rather than in an allowlist file.
 ## File Naming
 
 Each allowlist file is named `<shac_check_name>.json` (for example,
-`bazel_target_visibility.json`). If no `<shac_check_name>.json` file exists for
-a check, that check has no allowlisted exceptions.
+`bazel_target_visibility.json`). Only checks that set
+`supports_allowlist = True` on their `BazelCheck` class may have an allowlist
+file; creating a `.json` file for a check with `supports_allowlist = False`
+(such as `bazel_vendor_paths`) is rejected with an `AllowlistError`. For checks
+with `supports_allowlist = True`, the `.json` file is optional: if no
+`<shac_check_name>.json` file exists on disk, that check has no allowlisted
+exceptions.
 
 ## Format
 
 Each allowlist file is a JSON object with a single top-level `"entries"` array.
-Entries should be kept in alphabetical order by `path` or `path_prefix`.
+Entries must be kept in alphabetical order by `path` or `path_prefix`. Within
+each entry object, place `path` or `path_prefix` first, followed by `bug`, then
+optional `comment` and `targets` (with `targets` sorted alphabetically).
 
 ### Entry Fields
 
@@ -58,7 +66,10 @@ Entries should be kept in alphabetical order by `path` or `path_prefix`.
   needed.
 * `targets` (*optional*): Non-empty list of target names within `path`. Only
   supported for checks with `supports_targets_allowlist = True` and only valid
-  when `path` (not `path_prefix`) is specified.
+  when `path` (not `path_prefix`) is specified. Functions and rules without a
+  `name` parameter (such as `exports_files()`, `package()`, and
+  `expect_includes()`) are not targets and are not covered by target-specific
+  allowlists.
 
 ### Example
 

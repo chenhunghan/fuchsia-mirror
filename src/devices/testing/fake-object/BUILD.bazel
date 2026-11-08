@@ -1,0 +1,26 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules:zx_library.bzl", "cc_static_library_zx")
+
+package(default_applicable_licenses = ["//:license"])
+
+cc_static_library_zx(
+    name = "fake-object",
+    srcs = [
+        "fake-handle.cc",
+        "fake-object.cc",
+    ],
+    hdrs = [
+        "include/lib/fake-object/object.h",
+        "internal.h",
+    ],
+    includes = ["include"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//sdk/lib/fdio",
+        "//zircon/system/ulib/zx",
+    ],
+)

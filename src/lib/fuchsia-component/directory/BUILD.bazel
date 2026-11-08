@@ -2,7 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -26,4 +27,9 @@ rustc_library(
         "//src/lib/fidl/rust/fidl",
         "//third_party/rust_crates/vendor:anyhow",
     ],
+)
+
+fx_unittest_package(
+    name = "fuchsia-component-directory-unittests",
+    unit_tests = [":directory_test"],
 )

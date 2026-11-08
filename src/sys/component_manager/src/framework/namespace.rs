@@ -76,13 +76,13 @@ async fn serve_inner(
 async fn handle_request(
     namespace_scope: &ExecutionScope,
     store: &fsandbox::CapabilityStoreProxy,
-    #[allow(unused)] remote_capabilities: &Arc<RemotedRuntimeCapabilities>,
+    remote_capabilities: &Arc<RemotedRuntimeCapabilities>,
     request: fcomponent::NamespaceRequest,
     target: Arc<WeakInstanceToken>,
 ) -> Result<(), fidl::Error> {
     match request {
         fcomponent::NamespaceRequest::Create { entries, responder } => {
-            let res = create(namespace_scope, store, entries, target).await;
+            let res = create(namespace_scope, store, remote_capabilities, entries, target).await;
             responder.send(res)?;
         }
         #[cfg(fuchsia_api_level_at_least = "HEAD")]
@@ -100,6 +100,7 @@ async fn handle_request(
 async fn create(
     namespace_scope: &ExecutionScope,
     store: &fsandbox::CapabilityStoreProxy,
+    remote_capabilities: &Arc<RemotedRuntimeCapabilities>,
     entries: Vec<fcomponent::NamespaceInputEntry>,
     target: Arc<WeakInstanceToken>,
 ) -> Result<Vec<fcomponent::NamespaceEntry>, fcomponent::NamespaceError> {
@@ -108,20 +109,29 @@ async fn create(
     for entry in entries {
         const ERR: fcomponent::NamespaceError = fcomponent::NamespaceError::DictionaryRead;
 
-        // This API accepts legacy [Dictionary] channel. Round-trip through the import/export
-        // CapabilityStore API to convert the channel to a local Dictionary object that we can
-        // enumerate.
+        // This API accepts legacy [Dictionary] channel. The channel may have been associated with
+        // a dictionary by either `fuchsia.component.runtime/Capabilities.DictionaryLegacyExport`
+        // or `fuchsia.component.sandbox/CapabilityStore.DictionaryLegacyExport`. Check for the
+        // former first, because that lookup borrows the channel while the latter consumes it.
         let path = entry.path;
-        let dict_id = 1;
-        store
-            .dictionary_legacy_import(dict_id, entry.dictionary.into())
-            .await
-            .map_err(|_| ERR)?
-            .map_err(|_| ERR)?;
-        let dict = store.export(dict_id).await.map_err(|_| ERR)?.map_err(|_| ERR)?;
-        let dict = runtime_capabilities::Capability::try_from(dict).map_err(|_| ERR)?;
-        let runtime_capabilities::Capability::Dictionary(dict) = dict else {
-            return Err(ERR);
+        let dict = match remote_capabilities.get_by_ref::<Dictionary>(&entry.dictionary) {
+            Ok(dict) => dict,
+            Err(_) => {
+                // Round-trip through the import/export CapabilityStore API to convert the
+                // channel to a local Dictionary object that we can enumerate.
+                let dict_id = 1;
+                store
+                    .dictionary_legacy_import(dict_id, entry.dictionary.into())
+                    .await
+                    .map_err(|_| ERR)?
+                    .map_err(|_| ERR)?;
+                let dict = store.export(dict_id).await.map_err(|_| ERR)?.map_err(|_| ERR)?;
+                let dict = runtime_capabilities::Capability::try_from(dict).map_err(|_| ERR)?;
+                let runtime_capabilities::Capability::Dictionary(dict) = dict else {
+                    return Err(ERR);
+                };
+                dict
+            }
         };
         for (key, capability) in dict.enumerate() {
             let path = Path::new(format!("{}/{}", path, key))
@@ -369,6 +379,103 @@ mod tests {
         let echo = client::connect_to_protocol_at_dir_root::<fecho::EchoMarker>(&dir).unwrap();
         let response = echo.echo_string(None).await.unwrap();
         assert_matches!(response, Some(m) if m == "second");
+    }
+
+    /// Returns a dictionary containing a connector to an Echo server that responds with
+    /// `response`. The server runs on `tasks`.
+    fn echo_dictionary(tasks: &fasync::Scope, response: &'static str) -> Arc<Dictionary> {
+        // Initialize the host and sender/receiver pair.
+        let (receiver, sender) = Connector::new();
+
+        // Serve an Echo request handler on the Receiver.
+        tasks.spawn(async move {
+            while let Some(channel) = receiver.receive().await {
+                let stream: fecho::EchoRequestStream =
+                    ServerEnd::<fecho::EchoMarker>::from(channel).into_stream();
+                handle_echo_request_stream(response, stream).await;
+            }
+        });
+
+        // Create a dictionary and add the Sender to it.
+        let dict = Dictionary::new();
+        let prev = dict
+            .insert(fecho::EchoMarker::DEBUG_NAME.parse().unwrap(), Capability::Connector(sender));
+        assert!(prev.is_none(), "dict entry already exists");
+        dict
+    }
+
+    /// Tests that `Create` accepts a dictionary channel that was registered with
+    /// `fuchsia.component.runtime/Capabilities.DictionaryLegacyExport`.
+    #[fuchsia::test]
+    async fn namespace_create_with_runtime_legacy_export() {
+        let tasks = fasync::Scope::new();
+        let root = new_root().await;
+        let (namespace_proxy, _task) = namespace(&root).await;
+
+        // Associate the dictionary with a channel in the same way that
+        // `fuchsia.component.runtime/Capabilities.DictionaryLegacyExport` does.
+        let dict = echo_dictionary(&tasks, "hello");
+        let (client_end, server_end) = fidl::Channel::create();
+        root.context.remote_capabilities().store(server_end, dict).unwrap();
+
+        let namespace_pairs = vec![fcomponent::NamespaceInputEntry {
+            path: "/svc".into(),
+            dictionary: client_end.into(),
+        }];
+        let mut namespace_entries = namespace_proxy.create(namespace_pairs).await.unwrap().unwrap();
+
+        // Confirm that we can access the Echo protocol through the namespace entry.
+        let entry = namespace_entries.remove(0);
+        assert!(namespace_entries.is_empty());
+        assert_matches!(entry.path, Some(p) if p == "/svc");
+        let dir = entry.directory.unwrap().into_proxy();
+        let echo = client::connect_to_protocol_at_dir_root::<fecho::EchoMarker>(&dir).unwrap();
+        let response = echo.echo_string(None).await.unwrap();
+        assert_matches!(response, Some(m) if m == "hello");
+    }
+
+    /// Tests that `Create` accepts a dictionary channel that was registered with
+    /// `fuchsia.component.sandbox/CapabilityStore.DictionaryLegacyExport`.
+    #[fuchsia::test]
+    async fn namespace_create_with_capability_store_legacy_export() {
+        let tasks = fasync::Scope::new();
+        let root = new_root().await;
+        let (namespace_proxy, _task) = namespace(&root).await;
+
+        let (store, stream) =
+            endpoints::create_proxy_and_stream::<fsandbox::CapabilityStoreMarker>();
+        let root_token: Arc<WeakInstanceToken> = root.as_weak().into();
+        tasks.spawn(async move {
+            let receiver_scope = fasync::Scope::new();
+            runtime_capabilities::serve_capability_store(stream, &receiver_scope, root_token)
+                .await
+                .unwrap()
+        });
+
+        let dict = echo_dictionary(&tasks, "hello");
+        let dict_id = 1;
+        store
+            .import(dict_id, fsandbox::Capability::Dictionary(dict.to_fsandbox()))
+            .await
+            .unwrap()
+            .unwrap();
+        let (client_end, server_end) = fidl::Channel::create();
+        store.dictionary_legacy_export(dict_id, server_end).await.unwrap().unwrap();
+
+        let namespace_pairs = vec![fcomponent::NamespaceInputEntry {
+            path: "/svc".into(),
+            dictionary: client_end.into(),
+        }];
+        let mut namespace_entries = namespace_proxy.create(namespace_pairs).await.unwrap().unwrap();
+
+        // Confirm that we can access the Echo protocol through the namespace entry.
+        let entry = namespace_entries.remove(0);
+        assert!(namespace_entries.is_empty());
+        assert_matches!(entry.path, Some(p) if p == "/svc");
+        let dir = entry.directory.unwrap().into_proxy();
+        let echo = client::connect_to_protocol_at_dir_root::<fecho::EchoMarker>(&dir).unwrap();
+        let response = echo.echo_string(None).await.unwrap();
+        assert_matches!(response, Some(m) if m == "hello");
     }
 
     #[fuchsia::test]

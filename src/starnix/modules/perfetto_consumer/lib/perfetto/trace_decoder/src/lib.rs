@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use perfetto_protos::perfetto::protos::ReadBuffersResponse;
+use perfetto_protos::perfetto::protos::{EnableTracingResponse, ReadBuffersResponse};
 use perfetto_trace_protos::perfetto::protos::Trace;
 use prost::{DecodeError, Message};
 
@@ -30,4 +30,14 @@ pub fn decode_read_buffers_response(
     protobuf_blob: &[u8],
 ) -> Result<ReadBuffersResponse, DecodeError> {
     ReadBuffersResponse::decode(protobuf_blob)
+}
+
+/// Decodes a Perfetto enable tracing response from a protobuf blob.
+///
+/// This function is intentionally isolated in its own crate to contain the
+/// build-time cost of monomorphizing the `EnableTracingResponse::decode` function.
+pub fn decode_enable_tracing_response(
+    protobuf_blob: &[u8],
+) -> Result<EnableTracingResponse, DecodeError> {
+    EnableTracingResponse::decode(protobuf_blob)
 }

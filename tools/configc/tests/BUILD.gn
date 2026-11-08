@@ -26,11 +26,10 @@ host_test_data("test_configc") {
   deps = [ configc_label ]
 }
 
-package_label = "//examples/assembly/structured_config/configured_by_assembly:configured_by_assembly($default_toolchain)"
+package_label = "//src/lib/assembly/structured_config/tests/repackaging_pass:validate_structured_config_repackaging($default_toolchain)"
 package_out_dir = get_label_info(package_label, "target_out_dir")
-package_manifest =
-    "$package_out_dir/configured_by_assembly/package_manifest.json"
-meta_far = "$package_out_dir/configured_by_assembly/meta.far"
+package_manifest = "$package_out_dir/validate_structured_config_repackaging/package_manifest.json"
+meta_far = "$package_out_dir/validate_structured_config_repackaging/meta.far"
 
 host_test_data("test_data") {
   sources = [

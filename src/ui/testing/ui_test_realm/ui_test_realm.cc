@@ -329,38 +329,6 @@ void UITestRealm::ConfigureAccessibility() {
 }
 
 void UITestRealm::ConfigureScenic() {
-  // Load default config for Scenic.
-
-  // Configure scenic's configuration.
-  realm_builder_.AddChild("config", "#meta/config.cm", {});
-
-  std::vector<component_testing::Capability> config_capabilities = {
-      component_testing::Config{.name = "fuchsia.scenic.DisplayCompositionEnableHeuristics"},
-      component_testing::Config{.name = "fuchsia.scenic.FrameCounterOverlay"},
-      component_testing::Config{.name =
-                                    "fuchsia.scenic.FrameSchedulerMinPredictedFrameDurationInUs"},
-      component_testing::Config{.name = "fuchsia.scenic.FramePredictionMarginInUs"},
-      component_testing::Config{.name = "fuchsia.scenic.ICanHazDisplayId"},
-      component_testing::Config{.name = "fuchsia.scenic.ICanHazDisplayMode"},
-      component_testing::Config{.name = "fuchsia.scenic.MaxDisplayHorizontalResolutionPx"},
-      component_testing::Config{.name = "fuchsia.scenic.MaxDisplayRefreshRateMillihertz"},
-      component_testing::Config{.name = "fuchsia.scenic.MaxDisplayVerticalResolutionPx"},
-      component_testing::Config{.name = "fuchsia.scenic.MinDisplayHorizontalResolutionPx"},
-      component_testing::Config{.name = "fuchsia.scenic.MinDisplayRefreshRateMillihertz"},
-      component_testing::Config{.name = "fuchsia.scenic.MinDisplayVerticalResolutionPx"},
-      component_testing::Config{.name = "fuchsia.scenic.PointerAutoFocus"},
-      component_testing::Config{.name = "fuchsia.scenic.Renderer"},
-      component_testing::Config{.name = "fuchsia.scenic.UseSeparateInputThread"},
-      component_testing::Config{.name = "fuchsia.ui.Prefetch"},
-      component_testing::Config{.name = "fuchsia.ui.VisualDebuggingLevel"},
-  };
-
-  realm_builder_.AddRoute({
-      .capabilities = std::move(config_capabilities),
-      .source = component_testing::ChildRef{"config"},
-      .targets = {component_testing::ChildRef{kScenicName}},
-  });
-
   std::vector<component_testing::ConfigCapability> configurations;
   configurations.push_back({
       .name = "fuchsia.scenic.DisplayComposition",
@@ -385,27 +353,53 @@ void UITestRealm::ConfigureScenic() {
 }
 
 void UITestRealm::ConfigureFakeDisplayStackHost() {
-  realm_builder_.InitMutableConfigFromPackage(kFakeDisplayStackHostName);
-
   FX_CHECK((config_.display_config.active_width_px == 0) ==
            (config_.display_config.active_height_px == 0))
       << "active_width_px or active_height_px must be both zero or both non-zero.";
+
+  std::vector<component_testing::ConfigCapability> configurations;
+  std::vector<component_testing::Capability> capabilities;
+
   if (config_.display_config.active_width_px != 0) {
-    realm_builder_.SetConfigValue(kFakeDisplayStackHostName, "active_width_px",
-                                  ConfigValue::Uint32(config_.display_config.active_width_px));
+    configurations.push_back({
+        .name = "fuchsia.display.testing.ActiveWidthPx",
+        .value = ConfigValue::Uint32(config_.display_config.active_width_px),
+    });
+    capabilities.push_back(
+        component_testing::Config{.name = "fuchsia.display.testing.ActiveWidthPx"});
   }
   if (config_.display_config.active_height_px != 0) {
-    realm_builder_.SetConfigValue(kFakeDisplayStackHostName, "active_height_px",
-                                  ConfigValue::Uint32(config_.display_config.active_height_px));
+    configurations.push_back({
+        .name = "fuchsia.display.testing.ActiveHeightPx",
+        .value = ConfigValue::Uint32(config_.display_config.active_height_px),
+    });
+    capabilities.push_back(
+        component_testing::Config{.name = "fuchsia.display.testing.ActiveHeightPx"});
   }
   if (config_.display_config.refresh_rate_millihertz != 0) {
-    realm_builder_.SetConfigValue(
-        kFakeDisplayStackHostName, "refresh_rate_millihertz",
-        ConfigValue::Uint32(config_.display_config.refresh_rate_millihertz));
+    configurations.push_back({
+        .name = "fuchsia.display.testing.RefreshRateMillihertz",
+        .value = ConfigValue::Uint32(config_.display_config.refresh_rate_millihertz),
+    });
+    capabilities.push_back(
+        component_testing::Config{.name = "fuchsia.display.testing.RefreshRateMillihertz"});
   }
   if (config_.display_config.max_layer_count != 0) {
-    realm_builder_.SetConfigValue(kFakeDisplayStackHostName, "max_layer_count",
-                                  ConfigValue::Uint32(config_.display_config.max_layer_count));
+    configurations.push_back({
+        .name = "fuchsia.display.testing.MaxLayerCount",
+        .value = ConfigValue::Uint32(config_.display_config.max_layer_count),
+    });
+    capabilities.push_back(
+        component_testing::Config{.name = "fuchsia.display.testing.MaxLayerCount"});
+  }
+
+  if (!configurations.empty()) {
+    realm_builder_.AddConfiguration(std::move(configurations));
+    realm_builder_.AddRoute({
+        .capabilities = std::move(capabilities),
+        .source = component_testing::SelfRef{},
+        .targets = {component_testing::ChildRef{kFakeDisplayStackHostName}},
+    });
   }
 }
 
@@ -435,23 +429,6 @@ void UITestRealm::ConfigureSceneOwner() {
       << "DPR must result in integer logical display dimensions";
   auto display_pixel_density = kLowResolutionDisplayPixelDensity * config_.device_pixel_ratio;
 
-  // Load config for Scene Manager.
-  realm_builder_.AddRoute({
-      .capabilities =
-          {
-              component_testing::Config{.name = "fuchsia.ui.AttachA11yView"},
-              component_testing::Config{.name = "fuchsia.ui.EnableButtonBatonPassing"},
-              component_testing::Config{.name = "fuchsia.ui.EnableMouseBatonPassing"},
-              component_testing::Config{.name = "fuchsia.ui.EnableTouchBatonPassing"},
-              component_testing::Config{.name = "fuchsia.ui.EnableMergeTouchEvents"},
-              component_testing::Config{.name = "fuchsia.ui.SupportedInputDevices"},
-              component_testing::Config{.name = "fuchsia.ui.ViewingDistance"},
-              component_testing::Config{.name = "fuchsia.ui.Prefetch"},
-              component_testing::Config{.name = "fuchsia.ui.VisualDebuggingLevel"},
-          },
-      .source = component_testing::ChildRef{"scene_manager_config"},
-      .targets = {component_testing::ChildRef{kSceneManagerName}},
-  });
   std::vector<component_testing::ConfigCapability> configurations;
   configurations.push_back({
       .name = "fuchsia.ui.DisplayPixelDensity",

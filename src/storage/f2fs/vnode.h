@@ -212,7 +212,6 @@ class VnodeF2fs : public fs::PagedVnode,
   bool IsBlk() const;
   bool IsSock() const;
   bool IsFifo() const;
-  bool HasGid() const;
   bool IsMeta() const;
   bool IsNode() const;
 
@@ -233,10 +232,6 @@ class VnodeF2fs : public fs::PagedVnode,
   void AddBlocks(const block_t nblocks) __TA_EXCLUDES(mutex_) {
     std::lock_guard lock(mutex_);
     return AddBlocksUnsafe(nblocks);
-  }
-  void RemoveBlocks(const block_t nblocks) __TA_EXCLUDES(mutex_) {
-    std::lock_guard lock(mutex_);
-    return RemoveBlocksUnsafe(nblocks);
   }
   block_t GetBlockCount() const __TA_EXCLUDES(mutex_) {
     fs::SharedLock lock(mutex_);
@@ -344,7 +339,6 @@ class VnodeF2fs : public fs::PagedVnode,
   DirEntryCache& GetDirEntryCache() { return dir_entry_cache_; }
   VmoManager& GetVmoManager() { return vmo_manager(); }
   const VmoManager& GetVmoManager() const { return vmo_manager(); }
-  block_t GetReadBlockSize(block_t start_block, block_t req_size, block_t end_block);
   void CleanupCache();
   uint8_t GetDirLevel() const { return dir_level_; }
   template <typename T>

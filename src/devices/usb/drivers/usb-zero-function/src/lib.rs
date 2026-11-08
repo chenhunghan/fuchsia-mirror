@@ -9,7 +9,8 @@ use fidl_fuchsia_hardware_usb_function as fusb_function;
 use fidl_fuchsia_hardware_usb_request as fusb_request;
 use fuchsia_async as fasync;
 use futures::channel::mpsc;
-use futures::{SinkExt, StreamExt, TryStreamExt};
+use futures::future::join;
+use futures::{FutureExt, SinkExt, StreamExt, TryStreamExt};
 use log::{debug, error, info, warn};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -366,6 +367,10 @@ impl UsbZeroFunctionDevice {
     /// Resets the halt state and data toggle for all endpoints associated with this interface,
     /// per USB 2.0 Specification §9.4.10.
     async fn reset_interface_endpoints(&mut self) {
+        if !self.is_configured {
+            self.stalled_endpoints.clear();
+            return;
+        }
         for ep_addr in [self.ep_in_addr, self.ep_out_addr] {
             if let Err(e) = self.clear_endpoint_stall(ep_addr).await {
                 warn!("Failed to clear endpoint stall for {}: {:?}", ep_addr, e);
@@ -386,8 +391,55 @@ impl UsbZeroFunctionDevice {
     }
 
     async fn cleanup_endpoints(&mut self) {
-        self.endpoint_tasks = None;
+        let had_tasks = if let Some((read_task, write_task)) = self.endpoint_tasks.take() {
+            let _ = join(read_task.abort(), write_task.abort()).await;
+            true
+        } else {
+            false
+        };
+        let was_active = self.is_configured || self.vmos_registered || had_tasks;
         self.requeue_rx = None;
+        self.is_configured = false;
+        if was_active {
+            for (ep_addr, ep) in [(self.ep_in_addr, &self.ep_in), (self.ep_out_addr, &self.ep_out)]
+            {
+                // ZX_ERR_IO_NOT_PRESENT and closed channels are expected on disconnect/teardown.
+                match ep.cancel_all().await {
+                    Ok(Ok(())) | Ok(Err(zx::sys::ZX_ERR_IO_NOT_PRESENT)) => {}
+                    Err(err) if err.is_closed() => {}
+                    Ok(Err(raw)) => {
+                        warn!(
+                            "Failed to cancel requests on endpoint {:#x}: {:?}",
+                            ep_addr,
+                            Status::err_from_raw(raw)
+                        );
+                    }
+                    Err(err) => {
+                        warn!(
+                            "FIDL error canceling requests on endpoint {:#x}: {:?}",
+                            ep_addr, err
+                        );
+                    }
+                }
+            }
+        }
+        for ep_addr in [self.ep_in_addr, self.ep_out_addr] {
+            // ZX_ERR_IO_NOT_PRESENT and closed channels are expected on disconnect/teardown.
+            match self.function_client.disable_endpoint(ep_addr).await {
+                Ok(Ok(())) | Ok(Err(zx::sys::ZX_ERR_IO_NOT_PRESENT)) => {}
+                Err(err) if err.is_closed() => {}
+                Ok(Err(raw)) => {
+                    warn!(
+                        "Failed to disable endpoint {:#x}: {:?}",
+                        ep_addr,
+                        Status::err_from_raw(raw)
+                    );
+                }
+                Err(err) => {
+                    warn!("FIDL error disabling endpoint {:#x}: {:?}", ep_addr, err);
+                }
+            }
+        }
         if self.vmos_registered {
             let in_ids: Vec<u64> =
                 (USB_ZERO_IN_VMO_ID..USB_ZERO_IN_VMO_ID + QUEUE_DEPTH as u64).collect();
@@ -397,9 +449,15 @@ impl UsbZeroFunctionDevice {
             let _ = self.ep_out.unregister_vmos(&out_ids).await;
             self.vmos_registered = false;
         }
-        self.is_configured = false;
-        for ep_addr in [self.ep_in_addr, self.ep_out_addr] {
-            let _ = self.function_client.disable_endpoint(ep_addr).await;
+        if was_active {
+            for ep in [&self.ep_in, &self.ep_out] {
+                let mut events = ep.take_event_stream();
+                while let Some(Some(Ok(_))) = events.next().now_or_never() {}
+            }
+        }
+        if let Ok(mut sg) = self.sg_config.lock() {
+            sg.in_flight_out = 0;
+            sg.requeue_on_cancel = false;
         }
         self.stalled_endpoints.clear();
         self.control_loopback_buf.clear();
@@ -601,9 +659,7 @@ impl UsbZeroFunctionDevice {
                 {
                     return Err(Status::INVALID_ARGS);
                 }
-                self.endpoint_tasks = None;
                 self.cleanup_endpoints().await;
-                self.is_configured = false;
                 self.function_client
                     .deconfigure()
                     .await
@@ -885,8 +941,6 @@ impl UsbZeroFunctionDevice {
                     responder,
                 } => {
                     info!("Set configured: {}", configured);
-                    self.endpoint_tasks = None;
-
                     let status = self.handle_set_configured(configured, speed).await;
 
                     match status {
@@ -914,8 +968,7 @@ impl UsbZeroFunctionDevice {
                 }
             }
         }
-        if self.is_configured {
-            self.endpoint_tasks = None;
+        if self.is_configured || self.vmos_registered || self.endpoint_tasks.is_some() {
             self.cleanup_endpoints().await;
         }
         info!("handle_requests exiting");

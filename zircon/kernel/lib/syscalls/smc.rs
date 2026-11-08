@@ -8,10 +8,10 @@ use crate::object::HandleValue;
 use crate::user_copy::{UserInPtr, UserOutPtr};
 use syscalls_macro::syscall;
 use zx_status::Status;
-use zx_types::{zx_smc_parameters_t, zx_smc_result_t};
-
-const ARM_SMC_SERVICE_CALL_NUM_MASK: u32 = 0x3F;
-const ARM_SMC_SERVICE_CALL_NUM_SHIFT: u32 = 24;
+use zx_types::{
+    ARM_SMC_SERVICE_CALL_NUM_MASK, ARM_SMC_SERVICE_CALL_NUM_SHIFT, zx_smc_parameters_t,
+    zx_smc_result_t,
+};
 
 /// Extracts the service call number from an ARM SMC function ID.
 pub const fn arm_smc_get_service_call_num_from_func_id(func_id: u32) -> u32 {
@@ -20,6 +20,7 @@ pub const fn arm_smc_get_service_call_num_from_func_id(func_id: u32) -> u32 {
 
 // Fast Call: ARM SMCCC w0 encodes the function ID.
 // ARM SMCCC w0[31] is 1 for Fast Calls.
+#[cfg(any(target_arch = "aarch64", ktest))]
 #[inline]
 pub const fn is_smccc_fast_call(function_id: u32) -> bool {
     (function_id & (1 << 31)) != 0
@@ -36,7 +37,7 @@ mod arch {
     define_kcounter!(ARM_SMCCC_YIELDING_CALLS, "arm_smccc.yielding_calls", Sum);
     define_kcounter!(ARM_SMCCC_QCOM_INTERRUPTED, "arm_smccc.qcom.interrupted", Sum);
 
-    ksync::declare_singleton_mutex!(QcomSmcLock);
+    crate::ksync_kernel::declare_singleton_mutex!(QcomSmcLock);
 
     pub fn smc_call(params: &zx_smc_parameters_t) -> Result<zx_smc_result_t, Status> {
         let client_and_secure_os_id =

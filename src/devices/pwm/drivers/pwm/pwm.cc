@@ -131,13 +131,12 @@ zx::result<> PwmChannel::Init(std::shared_ptr<fdf::OutgoingDirectory>& outgoing,
       fdf::MakeOffer2<fuchsia_hardware_pwm::Service>(child_node_name),
   };
 
+  // The DML global ID, when present, replaces the channel number since a node can't have duplicate
+  // property keys.
   std::vector<fuchsia_driver_framework::NodeProperty2> properties = {
-      fdf::MakeProperty2(bind_fuchsia::ID, id_),
+      fdf::MakeProperty2(bind_fuchsia::ID, global_id_.value_or(id_)),
       fdf::MakeProperty2(bind_fuchsia::SERVICE, "fuchsia.hardware.pwm.Service"),
   };
-  if (global_id_.has_value()) {
-    properties.push_back(fdf::MakeProperty2(bind_fuchsia::ID, *global_id_));
-  }
   if (name_.has_value()) {
     properties.push_back(fdf::MakeProperty2(bind_fuchsia::NAME, *name_));
   }

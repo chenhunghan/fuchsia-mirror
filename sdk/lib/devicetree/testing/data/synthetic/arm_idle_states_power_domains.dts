@@ -1,0 +1,210 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+/dts-v1/;
+
+// Hierarchical PSCI idle states: CPUs reference PSCI power domains whose `domain-idle-states`
+// apply to every CPU beneath them, plus CPUs testing flat `cpu-idle-states`, combined
+// `cpu-idle-states` + `power-domains`, trailing non-PSCI `power-domains` specifiers, cyclic power
+// domains, non-affinity bits in `reg`, and CPU nodes with missing or multi-entry `reg`.
+//
+// Expected idle state entries, in order (`cpus` lists the CPUs that may enter each one; `cpu@400`
+// with multi-entry `reg` and `cpu` without `reg` are omitted):
+//   0: cpu-a-c2                    cpu@0, cpu@1, cpu@200, cpu@201
+//   1: cpu-b-c2                    cpu@100, cpu@101, cpu@201
+//   2: cluster-b-c3 (cluster-b)    cpu@100, cpu@101
+//   3: cluster-b-c3 (cycle)        cpu@300
+//   4: top-c4                      cpu@0, cpu@1, cpu@100, cpu@101, cpu@201
+
+/ {
+    #size-cells = <0x02>;
+    #address-cells = <0x02>;
+
+    OTHER_PD: other-power-controller {
+        #power-domain-cells = <0x01>;
+    };
+
+    cpus {
+        #address-cells = <0x01>;
+        #size-cells = <0x00>;
+
+        cpu@0 {
+            device_type = "cpu";
+            compatible = "arm,armv8";
+            reg = <0x0>;
+            enable-method = "psci";
+            // Trailing non-PSCI provider with a 1-cell specifier equal to PD_CLUSTER_B's explicit
+            // phandle; misreading it as a phandle would add cluster-b-c3 (0xd instead of 0x9).
+            power-domains = <&PD_CPU0 &OTHER_PD 0x100>;
+            power-domain-names = "psci", "perf";
+        };
+
+        cpu@1 {
+            device_type = "cpu";
+            compatible = "arm,armv8";
+            reg = <0x1>;
+            enable-method = "psci";
+            power-domains = <&PD_CPU1>;
+            power-domain-names = "psci";
+        };
+
+        cpu@100 {
+            device_type = "cpu";
+            compatible = "arm,armv8";
+            reg = <0x100>;
+            enable-method = "psci";
+            power-domains = <&PD_CPU2>;
+            power-domain-names = "psci";
+        };
+
+        cpu@101 {
+            device_type = "cpu";
+            compatible = "arm,armv8";
+            reg = <0x101>;
+            enable-method = "psci";
+            power-domains = <&PD_CPU3>;
+            power-domain-names = "psci";
+        };
+
+        cpu@200 {
+            device_type = "cpu";
+            compatible = "arm,armv8";
+            reg = <0x200>;
+            enable-method = "psci";
+            cpu-idle-states = <&CPU_A_C2>;
+        };
+
+        cpu@201 {
+            device_type = "cpu";
+            compatible = "arm,armv8";
+            reg = <0x201>;
+            enable-method = "psci";
+            cpu-idle-states = <&CPU_B_C2>;
+            power-domains = <&PD_CPU0>;
+        };
+
+        cpu@300 {
+            device_type = "cpu";
+            compatible = "arm,armv8";
+            // Non-affinity bit (bit 31, RES1 in MPIDR_EL1) is masked out to 0x300.
+            reg = <0x80000300>;
+            enable-method = "psci";
+            power-domains = <&PD_CYCLE>;
+        };
+
+        cpu@400 {
+            device_type = "cpu";
+            compatible = "arm,armv8";
+            // Multi-entry `reg` is invalid for a `cpu` node and must be skipped.
+            reg = <0x400 0x401>;
+            enable-method = "psci";
+            cpu-idle-states = <&CPU_A_C2>;
+        };
+
+        cpu {
+            device_type = "cpu";
+            compatible = "arm,armv8";
+            enable-method = "psci";
+            cpu-idle-states = <&CPU_A_C2>;
+        };
+
+        idle-states {
+            entry-method = "psci";
+
+            CPU_A_C2: cpu-a-c2 {
+                compatible = "arm,idle-state";
+                arm,psci-suspend-param = <0x40000003>;
+                entry-latency-us = <0x84>;
+                exit-latency-us = <0x128>;
+                min-residency-us = <0xe1a>;
+                local-timer-stop;
+            };
+
+            CPU_B_C2: cpu-b-c2 {
+                compatible = "arm,idle-state";
+                arm,psci-suspend-param = <0x40000004>;
+                entry-latency-us = <0x82>;
+                exit-latency-us = <0x112>;
+                min-residency-us = <0xaa0>;
+                local-timer-stop;
+            };
+        };
+
+        domain-idle-states {
+            CLUSTER_B_C3: cluster-b-c3 {
+                compatible = "domain-idle-state";
+                arm,psci-suspend-param = <0x40010033>;
+                entry-latency-us = <0x145>;
+                exit-latency-us = <0x229>;
+                min-residency-us = <0x2710>;
+                local-timer-stop;
+            };
+
+            DISABLED_C5: disabled-c5 {
+                compatible = "domain-idle-state";
+                status = "disabled";
+                arm,psci-suspend-param = <0x40033333>;
+                entry-latency-us = <0x1>;
+                exit-latency-us = <0x1>;
+                min-residency-us = <0x1>;
+            };
+
+            TOP_C4: top-c4 {
+                compatible = "domain-idle-state";
+                arm,psci-suspend-param = <0x40020333>;
+                entry-latency-us = <0x1fe>;
+                exit-latency-us = <0x403>;
+                min-residency-us = <0x2710>;
+                local-timer-stop;
+            };
+        };
+    };
+
+    psci {
+        compatible = "arm,psci-1.0";
+        method = "smc";
+
+        PD_CPU0: power-domain-cpu0 {
+            #power-domain-cells = <0x00>;
+            domain-idle-states = <&CPU_A_C2>;
+            power-domains = <&PD_TOP>;
+        };
+
+        PD_CPU1: power-domain-cpu1 {
+            #power-domain-cells = <0x00>;
+            domain-idle-states = <&CPU_A_C2>;
+            power-domains = <&PD_TOP>;
+        };
+
+        PD_CPU2: power-domain-cpu2 {
+            #power-domain-cells = <0x00>;
+            domain-idle-states = <&CPU_B_C2>;
+            power-domains = <&PD_CLUSTER_B>;
+        };
+
+        PD_CPU3: power-domain-cpu3 {
+            #power-domain-cells = <0x00>;
+            domain-idle-states = <&CPU_B_C2>;
+            power-domains = <&PD_CLUSTER_B>;
+        };
+
+        PD_CLUSTER_B: power-domain-cluster-b {
+            phandle = <0x100>;
+            #power-domain-cells = <0x00>;
+            domain-idle-states = <&CLUSTER_B_C3>;
+            power-domains = <&PD_TOP>;
+        };
+
+        PD_TOP: power-domain-top {
+            #power-domain-cells = <0x00>;
+            domain-idle-states = <&TOP_C4 &DISABLED_C5>;
+        };
+
+        PD_CYCLE: power-domain-cycle {
+            #power-domain-cells = <0x00>;
+            domain-idle-states = <&CLUSTER_B_C3>;
+            power-domains = <&PD_CYCLE>;
+        };
+    };
+};

@@ -29,10 +29,7 @@
             to: "#omaha-client-service",
         },
         {
-            protocol: [
-                "fuchsia.cobalt.SystemDataUpdater",
-                "fuchsia.metrics.MetricEventLoggerFactory",
-            ],
+            protocol: [ "fuchsia.metrics.MetricEventLoggerFactory" ],
             from: "parent",
             to: "#omaha-client-service",
         },

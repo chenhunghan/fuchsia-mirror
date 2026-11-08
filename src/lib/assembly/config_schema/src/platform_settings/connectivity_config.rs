@@ -36,6 +36,16 @@ pub struct PlatformConnectivityConfig {
 
     #[serde(skip_serializing_if = "crate::common::is_default")]
     pub location: LocationConfig,
+
+    /// Whether WLAN and Netstack components redact MAC addresses, BSSIDs and
+    /// SSIDs in logs and Inspect by replacing them with per-boot salted
+    /// hashes (the 3-octet vendor OUI prefix of MAC addresses is preserved).
+    ///
+    /// Defaults to `true` on `user` and `userdebug` builds and `false` on
+    /// `eng` builds, where engineers need raw identifiers to cross-reference
+    /// against packet captures. Cannot be disabled on `user` builds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redact_network_identifiers: Option<bool>,
 }
 
 /// Platform configuration options for the network area.
@@ -136,7 +146,7 @@ pub enum NetworkingConfig {
     /// out-of-tree product configurations.
     Standard,
 
-    /// Basic networking configuration (`netcfg-basic`).
+    /// Basic networking configuration (`netcfg`).
     #[default]
     Basic,
 }

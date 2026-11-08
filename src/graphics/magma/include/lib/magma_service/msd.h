@@ -135,6 +135,20 @@ class Connection {
  public:
   virtual ~Connection() = 0;
 
+  // Allocates the memory for a buffer the client requested with CreateBuffer. `flags` contains
+  // only vendor-specific flags. `object_id` is the id the client will use for the buffer. The
+  // returned VMO is imported into the connection and a duplicate handle is returned to the client.
+  // Errors are returned to the client; MAGMA_STATUS_ALREADY_EXISTS makes the client retry with a
+  // different `object_id`.
+  //
+  // The buffer is imported after this returns. If that import fails, the MSD isn't notified, so
+  // any state it associated with `object_id` here must be released at the latest when the
+  // connection is destroyed.
+  virtual magma_status_t MsdCreateBuffer(uint64_t size, uint64_t flags, uint64_t object_id,
+                                         zx::vmo* vmo_out) {
+    return MAGMA_STATUS_UNIMPLEMENTED;
+  }
+
   virtual magma_status_t MsdMapBuffer(Buffer& buffer, uint64_t gpu_va, uint64_t offset,
                                       uint64_t length, uint64_t flags) {
     return MAGMA_STATUS_UNIMPLEMENTED;

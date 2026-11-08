@@ -12,7 +12,7 @@ use starnix_core::vfs::FsNodeOps;
 use starnix_core::vfs::pseudo::simple_directory::SimpleDirectoryMutator;
 use starnix_core::vfs::pseudo::simple_file::{BytesFile, BytesFileOps};
 use starnix_logging::{log_error, log_warn};
-use starnix_sync::{LockDepMutex, Mutex, ThermalChargeLevelLock};
+use starnix_sync::{LockDepMutex, ThermalChargeLevelLock, ThermalFccProxyLock};
 use starnix_uapi::errors::{Errno, errno};
 use starnix_uapi::file_mode::mode;
 use std::borrow::Cow;
@@ -175,9 +175,8 @@ fn register_cpu_domains(
 pub fn cooling_device_init(kernel: &Kernel, devices: Vec<String>) -> Result<(), Error> {
     let mut registrar = CoolingDeviceRegistrar::new();
     for device_spec in devices.into_iter() {
-        let (device_type, device_param) = device_spec
-            .split_once('=')
-            .map_or_else(|| (device_spec.as_str(), None), |(t, p)| (t, Some(p)));
+        let (device_type, device_param) =
+            device_spec.split_once('=').map_or((device_spec.as_str(), None), |(t, p)| (t, Some(p)));
         match device_type {
             "fcc" => {
                 // TODO(b/460321934): Return errors rather than logging them.
@@ -208,7 +207,7 @@ pub fn cooling_device_init(kernel: &Kernel, devices: Vec<String>) -> Result<(), 
 const CHARGER_SYNC_TIMEOUT: zx::MonotonicDuration = zx::MonotonicDuration::from_seconds(5);
 
 struct FccCoolingOps {
-    proxy: Mutex<Option<Arc<fbattery::ChargerSynchronousProxy>>>,
+    proxy: LockDepMutex<Option<Arc<fbattery::ChargerSynchronousProxy>>, ThermalFccProxyLock>,
     proxy_ready: zx::Event,
     timeout: zx::MonotonicDuration,
     max_charge_level: u32,
@@ -229,7 +228,7 @@ impl FccCoolingOps {
         timeout: zx::MonotonicDuration,
     ) -> Self {
         Self {
-            proxy: Mutex::new(None),
+            proxy: LockDepMutex::new(None),
             proxy_ready: zx::Event::create(),
             timeout,
             max_charge_level,

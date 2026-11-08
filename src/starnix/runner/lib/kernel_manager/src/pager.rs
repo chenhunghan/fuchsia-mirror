@@ -308,6 +308,7 @@ impl Filesystem {
                             vmo: self
                                 .pager
                                 .create_pager_vmo(self.port_key_for_inode(inode_num), size)?,
+                            size,
                             extents,
                             chunks_supplied,
                         }))
@@ -398,26 +399,33 @@ impl Filesystem {
             std::slice::from_raw_parts_mut(transfer_vmo_addr as *mut u8, TRANSFER_VMO_SIZE as usize)
         };
 
+        // Only read data up to EOF; `finish` zero-fills the rest of the range.
+        let data_end = std::cmp::min(range.end, file.size);
+
         let mut current_offset = range.start;
         let mut supply_helper =
             SupplyHelper::new(transfer_vmo, buf, &file.vmo, current_offset, &*self.pager);
 
-        while ix < file.extents.len() && current_offset < range.end {
+        while ix < file.extents.len() && current_offset < data_end {
             let extent = &file.extents[ix];
 
             let logical_start = extent.logical.start as u64 * self.block_size;
 
             // Deal with holes.
             if current_offset < logical_start {
-                if let Err(e) = supply_helper.zero(logical_start - current_offset) {
+                let hole_end = std::cmp::min(logical_start, data_end);
+                if let Err(e) = supply_helper.zero(hole_end - current_offset) {
                     let supplied_end = supply_helper.supplied_end();
                     supply_helper.fail_to(range.end, e);
                     return supplied_end;
                 }
-                current_offset = logical_start;
+                current_offset = hole_end;
+                if current_offset == data_end {
+                    break;
+                }
             }
 
-            let end = std::cmp::min(extent.logical.end as u64 * self.block_size, range.end);
+            let end = std::cmp::min(extent.logical.end as u64 * self.block_size, data_end);
 
             while current_offset < end {
                 let phys_offset =
@@ -538,6 +546,9 @@ impl Filesystem {
 struct PagedFile {
     /// The main VMO.  We always hand out children of this VMO.
     vmo: zx::Vmo,
+
+    /// File size in bytes; bytes past EOF in the final block are zero-filled.
+    size: u64,
 
     /// The extents for the file, which will be sorted and not overlapping.  There can be holes i.e.
     /// zeroed ranges within the file.
@@ -729,6 +740,22 @@ mod tests {
 
             assert_eq!(&buf, b"hello");
 
+            // Bytes past EOF in the final block must read as zeros even if the image has data.
+            backing_vmo.write(&[0xAB; 1024], 2 * 1024).expect("write failed");
+            let vmo = filesystem
+                .register(
+                    "tail",
+                    6,
+                    5,
+                    Box::new([PagerExtent { logical: 0..1, physical_block: 2 }]),
+                )
+                .expect("register failed");
+            let mut page = vec![1; *PAGE_SIZE as usize];
+            vmo.read(&mut page, 0).expect("read failed");
+            assert_eq!(&page[..5], &[0xAB; 5]);
+            assert!(page[5..].iter().all(|&b| b == 0));
+            backing_vmo.write(&[0; 1024], 2 * 1024).expect("write failed");
+
             // A file with sparse ranges: 6 sparse, 1 extent, 5 more sparse, 1 extent, 4 sparse + a
             // bit.
             let file_size = (6 + 1 + 5 + 4) * 1024 + 100;
@@ -779,7 +806,7 @@ mod tests {
             let file = filesystem.files_by_inode.lock().get(&4).unwrap().clone();
             let num_pages = file_size.div_ceil(*PAGE_SIZE);
             let initial_faults = pager.page_fault_counter().read_faults(Ordering::Relaxed);
-            assert_eq!(initial_faults, 2 + 2 * num_pages);
+            assert_eq!(initial_faults, 3 + 2 * num_pages);
 
             // The kernel asks for pages it has already been given: every page supplied again
             // counts as a refault (even when the last chunk is smaller than READAHEAD_ALIGNMENT).
@@ -844,5 +871,41 @@ mod tests {
         vmo.read(&mut buf, 0).expect("read failed");
         sync_with_pager(&filesystem, 101);
         assert_eq!(pager.page_fault_counter().read_refaults(Ordering::Relaxed), refaults_before);
+    }
+
+    #[::fuchsia::test]
+    async fn test_sparse_tail() {
+        let backing_vmo = zx::Vmo::create(1024 * 1024).expect("Vmo::create failed");
+        let backing_vmo_clone =
+            backing_vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("failed handle dup");
+
+        let pager = Arc::new(Pager::new().expect("Pager::new failed"));
+        let filesystem = Arc::new(
+            Filesystem::new(pager.clone(), backing_vmo_clone, 1024)
+                .expect("Filesystem::new failed"),
+        );
+        pager.add_filesystem(filesystem.clone());
+        pager.start_threads();
+
+        // Register a two-page file whose next extent starts at page 3 (past EOF). Without clamping
+        // hole zeroing to `data_end`, supplying three zero pages to a two-page VMO fails with
+        // `ZX_ERR_OUT_OF_RANGE`.
+        let page_size = *PAGE_SIZE;
+        let extent_start_block = ((3 * page_size) / 1024) as u32;
+        let vmo = filesystem
+            .register(
+                "sparse_tail",
+                7,
+                page_size + 904,
+                Box::new([PagerExtent {
+                    logical: extent_start_block..extent_start_block + 1,
+                    physical_block: 5,
+                }]),
+            )
+            .expect("register failed");
+
+        let mut page = vec![1; page_size as usize * 2];
+        vmo.read(&mut page, 0).expect("read failed");
+        assert!(page.iter().all(|&b| b == 0));
     }
 }

@@ -1,0 +1,64 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host:defs.bzl", "go_binary_host_tool")
+load("//build/bazel/rules/host_tests:host_go_test.bzl", "host_go_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+go_library(
+    name = "proto_lib",
+    srcs = ["third_party/stardoc/stardoc_output.pb.go"],
+    importpath = "go.fuchsia.dev/fuchsia/tools/bazel-docgen/third_party/stardoc",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        "//third_party/golibs:google.golang.org/protobuf/reflect/protoreflect",
+        "//third_party/golibs:google.golang.org/protobuf/runtime/protoimpl",
+    ],
+)
+
+go_library(
+    name = "bazel_docgen_lib",
+    srcs = [
+        "doc_generator.go",
+        "file_provider.go",
+        "markdown_renderer.go",
+        "renderer.go",
+        "templates.go",
+    ],
+    importpath = "go.fuchsia.dev/fuchsia/tools/bazel-docgen",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        ":proto_lib",
+        "//third_party/golibs:golang.org/x/exp/maps",
+        "//third_party/golibs:gopkg.in/yaml.v2",
+    ],
+)
+
+host_go_test(
+    name = "bazel_docgen_lib_tests",
+    srcs = ["markdown_renderer_test.go"],
+    embed = [":bazel_docgen_lib"],
+    visibility = ["//tools:__pkg__"],
+)
+
+go_library(
+    name = "main",
+    srcs = ["cmd/main.go"],
+    importpath = "go.fuchsia.dev/fuchsia/tools/bazel-docgen/cmd",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        ":bazel_docgen_lib",
+        ":proto_lib",
+        "//third_party/golibs:google.golang.org/protobuf/encoding/prototext",
+    ],
+)
+
+go_binary_host_tool(
+    name = "bin",
+    embed = [":main"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)

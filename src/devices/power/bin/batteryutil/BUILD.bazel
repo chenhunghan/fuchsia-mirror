@@ -1,0 +1,57 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":batteryutil-tests"],
+    visibility = ["//src/devices:__pkg__"],
+)
+
+rustc_binary(
+    name = "batteryutil",
+    srcs = [
+        "src/battery.rs",
+        "src/charger.rs",
+        "src/common.rs",
+        "src/main.rs",
+        "src/spmi.rs",
+    ],
+    build_flags = ["//build/config/rust:bootfs"],
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.power.battery:fuchsia.hardware.power.battery_rust",
+        "//sdk/fidl/fuchsia.hardware.power.charger:fuchsia.hardware.power.charger_rust",
+        "//sdk/fidl/fuchsia.hardware.spmi:fuchsia.hardware.spmi_rust",
+        "//sdk/fidl/fuchsia.power.battery:fuchsia.power.battery_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+rustc_test(
+    name = "batteryutil_test",
+    build_flags = ["//build/config/rust:bootfs"],
+    crate = ":batteryutil",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = ["//src/lib/fuchsia-async"],
+)
+
+fx_unittest_package(
+    name = "batteryutil-tests",
+    unit_tests = [":batteryutil_test"],
+)

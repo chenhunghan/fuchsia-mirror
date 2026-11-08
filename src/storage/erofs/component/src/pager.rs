@@ -95,19 +95,6 @@ impl ErofsPager {
         let registration = self.registrations.lock().unwrap().remove(&key);
         drop(registration);
     }
-
-    /// Unregisters and discards all active packet receiver registrations.
-    pub fn unregister_all(&self) {
-        let registrations = std::mem::take(&mut *self.registrations.lock().unwrap());
-        for (_, registration) in registrations {
-            let prev = std::mem::replace(
-                &mut *registration.receiver().file.lock().unwrap(),
-                FileHolder::Weak(Weak::new()),
-            );
-            drop(prev);
-            drop(registration);
-        }
-    }
 }
 
 /// Receives pager packets and serves page requests from the kernel.

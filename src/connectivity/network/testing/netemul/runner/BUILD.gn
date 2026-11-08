@@ -57,6 +57,7 @@ fuchsia_component("component") {
     ":bin",
     "//src/connectivity/network/testing/netemul/service:netemul-sandbox",
   ]
+  visibility = [ ":*" ]
 }
 
 fuchsia_package("package") {

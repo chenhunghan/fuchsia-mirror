@@ -1,0 +1,32 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "developer_host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        "//src/developer/lib/credentials:lib_test",
+        "//src/developer/lib/uart_fpl:uart_fpl_host_test",
+    ],
+)
+
+test_suite(
+    name = "developer_target_tests",
+    tests = [
+        "//src/developer/hw_info:tests",
+        "//src/developer/remote-control/identify-host:tests",
+    ],
+)
+
+test_suite(
+    name = "target_tests",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    tests = [
+        "//src/developer/forensics/crasher/rust:rust_crasher_tests",
+    ],
+)

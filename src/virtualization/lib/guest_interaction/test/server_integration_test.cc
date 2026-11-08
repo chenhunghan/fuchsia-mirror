@@ -3,7 +3,9 @@
 // found in the LICENSE file.
 
 #include <fcntl.h>
-#include <fuchsia/virtualization/cpp/fidl.h>
+#include <fidl/fuchsia.io/cpp/fidl.h>
+#include <fidl/fuchsia.virtualization.guest.interaction/cpp/fidl.h>
+#include <fidl/fuchsia.virtualization/cpp/fidl.h>
 #include <lib/fdio/directory.h>
 #include <lib/fdio/fd.h>
 #include <threads.h>
@@ -21,8 +23,6 @@
 #include "src/virtualization/lib/guest_interaction/test/integration_test_lib.h"
 
 namespace {
-
-using ::fuchsia::virtualization::HostVsockEndpoint_Connect_Result;
 
 constexpr size_t kBufferSize = 100;
 
@@ -53,36 +53,28 @@ static void ConvertSocketToNonBlockingFd(zx::socket socket, fbl::unique_fd& fd) 
 
 TEST_F(GuestInteractionTest, GrpcExecScriptTest) {
   // Connect the gRPC client to the guest under test.
-  fuchsia::virtualization::HostVsockEndpointPtr ep;
-  GetHostVsockEndpoint(ep.NewRequest());
+  auto [ep_client, ep_server] =
+      fidl::Endpoints<fuchsia_virtualization::HostVsockEndpoint>::Create();
+  GetHostVsockEndpoint(std::move(ep_server));
 
-  zx::socket local_socket;
-  std::optional<zx_status_t> status;
-  auto callback = [&status, &local_socket](HostVsockEndpoint_Connect_Result result) {
-    if (result.is_response()) {
-      local_socket = std::move(result.response().socket);
-      status = ZX_OK;
-    } else {
-      status = result.err();
-    }
-  };
-  ep->Connect(GUEST_INTERACTION_PORT, std::move(callback));
-
-  RunLoopUntil([&status]() { return status.has_value(); });
-  ASSERT_OK(status.value());
+  fidl::SyncClient ep(std::move(ep_client));
+  fidl::Result<fuchsia_virtualization::HostVsockEndpoint::Connect> connect_result =
+      ep->Connect({{.guest_port = GUEST_INTERACTION_PORT}});
+  ASSERT_TRUE(connect_result.is_ok()) << connect_result.error_value().FormatDescription();
 
   fbl::unique_fd vsock_fd;
-  ASSERT_NO_FATAL_FAILURE(ConvertSocketToNonBlockingFd(std::move(local_socket), vsock_fd));
+  ASSERT_NO_FATAL_FAILURE(
+      ConvertSocketToNonBlockingFd(std::move(connect_result->socket()), vsock_fd));
 
   ClientImpl<PosixPlatform> client(vsock_fd.release());
 
   // Push the bash script to the guest.
-  fidl::InterfaceHandle<fuchsia::io::File> put_remote;
-  ASSERT_OK(fdio_open3(kTestScriptSource, static_cast<uint64_t>(fuchsia::io::PERM_READABLE),
-                       put_remote.NewRequest().TakeChannel().release()));
+  auto [put_client, put_server] = fidl::Endpoints<fuchsia_io::File>::Create();
+  ASSERT_OK(fdio_open3(kTestScriptSource, static_cast<uint64_t>(fuchsia_io::wire::kPermReadable),
+                       put_server.TakeChannel().release()));
 
-  status.reset();
-  client.Put(std::move(put_remote), kGuestScriptDestination,
+  std::optional<zx_status_t> status;
+  client.Put(std::move(put_client), kGuestScriptDestination,
              [&client, &status](zx_status_t put_result) {
                status = put_result;
                client.Stop();
@@ -119,34 +111,76 @@ TEST_F(GuestInteractionTest, GrpcExecScriptTest) {
   std::optional<zx_status_t> exec_terminated;
   int32_t ret_code = -1;
 
-  fuchsia::virtualization::guest::interaction::CommandListenerPtr listener;
-  listener.events().OnStarted = [&](zx_status_t status) {
-    exec_started = status;
-    if (status == ZX_OK) {
-      while (bytes_written < to_write.size()) {
-        size_t curr_bytes_written = write(stdin_fd.get(), &(to_write.c_str()[bytes_written]),
-                                          to_write.size() - bytes_written);
-        if (curr_bytes_written < 0) {
-          break;
+  auto listener_endpoints =
+      fidl::Endpoints<fuchsia_virtualization_guest_interaction::CommandListener>::Create();
+
+  struct ListenerHandler
+      : public fidl::AsyncEventHandler<fuchsia_virtualization_guest_interaction::CommandListener> {
+    ListenerHandler(ClientImpl<PosixPlatform>& client, fbl::unique_fd& stdin_fd,
+                    const std::string& to_write, uint32_t& bytes_written, zx::socket& stdout_reader,
+                    zx::socket& stderr_reader, std::optional<zx_status_t>& exec_started,
+                    std::optional<zx_status_t>& exec_terminated, int32_t& ret_code,
+                    std::string& std_out, std::string& std_err)
+        : client_(client),
+          stdin_fd_(stdin_fd),
+          to_write_(to_write),
+          bytes_written_(bytes_written),
+          stdout_reader_(stdout_reader),
+          stderr_reader_(stderr_reader),
+          exec_started_(exec_started),
+          exec_terminated_(exec_terminated),
+          ret_code_(ret_code),
+          std_out_(std_out),
+          std_err_(std_err) {}
+
+    void OnStarted(
+        fidl::Event<fuchsia_virtualization_guest_interaction::CommandListener::OnStarted>& event)
+        override {
+      exec_started_ = event.status();
+      if (event.status() == ZX_OK) {
+        while (bytes_written_ < to_write_.size()) {
+          ssize_t curr_bytes_written = write(stdin_fd_.get(), &(to_write_.c_str()[bytes_written_]),
+                                             to_write_.size() - bytes_written_);
+          if (curr_bytes_written < 0) {
+            break;
+          }
+          bytes_written_ += static_cast<uint32_t>(curr_bytes_written);
         }
-
-        bytes_written += curr_bytes_written;
       }
+      client_.Stop();
+      stdin_fd_.reset();
     }
-    client.Stop();
-    stdin_fd.reset();
-  };
-  listener.events().OnTerminated = [&](zx_status_t exec_result, int32_t exit_code) {
-    exec_terminated = exec_result;
-    ret_code = exit_code;
 
-    std_out = drain_socket(std::move(stdout_reader));
-    std_err = drain_socket(std::move(stderr_reader));
-    client.Stop();
-  };
+    void OnTerminated(
+        fidl::Event<fuchsia_virtualization_guest_interaction::CommandListener::OnTerminated>& event)
+        override {
+      exec_terminated_ = event.status();
+      ret_code_ = event.return_code();
+
+      std_out_ = drain_socket(std::move(stdout_reader_));
+      std_err_ = drain_socket(std::move(stderr_reader_));
+      client_.Stop();
+    }
+
+    ClientImpl<PosixPlatform>& client_;
+    fbl::unique_fd& stdin_fd_;
+    const std::string& to_write_;
+    uint32_t& bytes_written_;
+    zx::socket& stdout_reader_;
+    zx::socket& stderr_reader_;
+    std::optional<zx_status_t>& exec_started_;
+    std::optional<zx_status_t>& exec_terminated_;
+    int32_t& ret_code_;
+    std::string& std_out_;
+    std::string& std_err_;
+  } event_handler(client, stdin_fd, to_write, bytes_written, stdout_reader, stderr_reader,
+                  exec_started, exec_terminated, ret_code, std_out, std_err);
+
+  fidl::Client<fuchsia_virtualization_guest_interaction::CommandListener> listener(
+      std::move(listener_endpoints.client), dispatcher(), &event_handler);
 
   client.Exec(command, env_vars, std::move(stdin_reader), std::move(stdout_writer),
-              std::move(stderr_writer), listener.NewRequest(), dispatcher());
+              std::move(stderr_writer), std::move(listener_endpoints.server), dispatcher());
 
   // Ensure that the process started cleanly.
   {
@@ -179,15 +213,15 @@ TEST_F(GuestInteractionTest, GrpcExecScriptTest) {
 
   // The bash script will create a file with contents that were written to
   // stdin.  Pull this file back and inspect its contents.
-  fidl::InterfaceHandle<fuchsia::io::File> get_remote;
+  auto [get_client, get_server] = fidl::Endpoints<fuchsia_io::File>::Create();
   ASSERT_OK(fdio_open3(
       kHostOuputCopyLocation,
-      static_cast<uint64_t>(fuchsia::io::PERM_WRITABLE | fuchsia::io::Flags::FLAG_MAYBE_CREATE |
-                            fuchsia::io::Flags::FILE_TRUNCATE),
-      get_remote.NewRequest().TakeChannel().release()));
+      static_cast<uint64_t>(fuchsia_io::wire::kPermWritable | fuchsia_io::Flags::kFlagMaybeCreate |
+                            fuchsia_io::Flags::kFileTruncate),
+      get_server.TakeChannel().release()));
 
   status.reset();
-  client.Get(kGuestFileOutputLocation, std::move(get_remote), [&](zx_status_t get_result) {
+  client.Get(kGuestFileOutputLocation, std::move(get_client), [&](zx_status_t get_result) {
     status = get_result;
     client.Stop();
   });
@@ -217,27 +251,18 @@ TEST_F(GuestInteractionTest, GrpcExecScriptTest) {
 // guest.
 TEST_F(GuestInteractionTest, GrpcPutGetTest) {
   // Connect the gRPC client to the guest under test.
-  fuchsia::virtualization::HostVsockEndpointPtr ep;
-  GetHostVsockEndpoint(ep.NewRequest());
+  auto [ep_client, ep_server] =
+      fidl::Endpoints<fuchsia_virtualization::HostVsockEndpoint>::Create();
+  GetHostVsockEndpoint(std::move(ep_server));
 
-  zx::socket local_socket;
-  std::optional<zx_status_t> status;
-  auto callback = [&status, &local_socket](HostVsockEndpoint_Connect_Result result) {
-    if (result.is_response()) {
-      local_socket = std::move(result.response().socket);
-      status = ZX_OK;
-    } else {
-      status = result.err();
-    }
-  };
-  ep->Connect(GUEST_INTERACTION_PORT, std::move(callback));
-
-  RunLoopUntil([&status] { return status.has_value(); });
-  ASSERT_TRUE(status.has_value());
-  ASSERT_OK(status.value());
+  fidl::SyncClient ep(std::move(ep_client));
+  fidl::Result<fuchsia_virtualization::HostVsockEndpoint::Connect> connect_result =
+      ep->Connect({{.guest_port = GUEST_INTERACTION_PORT}});
+  ASSERT_TRUE(connect_result.is_ok()) << connect_result.error_value().FormatDescription();
 
   fbl::unique_fd vsock_fd;
-  ASSERT_NO_FATAL_FAILURE(ConvertSocketToNonBlockingFd(std::move(local_socket), vsock_fd));
+  ASSERT_NO_FATAL_FAILURE(
+      ConvertSocketToNonBlockingFd(std::move(connect_result->socket()), vsock_fd));
 
   ClientImpl<PosixPlatform> client(vsock_fd.release());
 
@@ -262,12 +287,12 @@ TEST_F(GuestInteractionTest, GrpcPutGetTest) {
   }
 
   // Push the test file to the guest
-  fidl::InterfaceHandle<fuchsia::io::File> put_remote;
-  ASSERT_OK(fdio_open3(test_file, static_cast<uint64_t>(fuchsia::io::PERM_READABLE),
-                       put_remote.NewRequest().TakeChannel().release()));
+  auto [put_client, put_server] = fidl::Endpoints<fuchsia_io::File>::Create();
+  ASSERT_OK(fdio_open3(test_file, static_cast<uint64_t>(fuchsia_io::wire::kPermReadable),
+                       put_server.TakeChannel().release()));
 
-  status.reset();
-  client.Put(std::move(put_remote), guest_destination, [&](zx_status_t put_result) {
+  std::optional<zx_status_t> status;
+  client.Put(std::move(put_client), guest_destination, [&](zx_status_t put_result) {
     status = put_result;
     client.Stop();
   });
@@ -276,15 +301,15 @@ TEST_F(GuestInteractionTest, GrpcPutGetTest) {
   ASSERT_OK(status.value());
 
   // Copy back the file that was sent to the guest.
-  fidl::InterfaceHandle<fuchsia::io::File> get_remote;
+  auto [get_client, get_server] = fidl::Endpoints<fuchsia_io::File>::Create();
   ASSERT_OK(fdio_open3(
       host_verification_file,
-      static_cast<uint64_t>(fuchsia::io::PERM_WRITABLE | fuchsia::io::Flags::FLAG_MAYBE_CREATE |
-                            fuchsia::io::Flags::FILE_TRUNCATE),
-      get_remote.NewRequest().TakeChannel().release()));
+      static_cast<uint64_t>(fuchsia_io::wire::kPermWritable | fuchsia_io::Flags::kFlagMaybeCreate |
+                            fuchsia_io::Flags::kFileTruncate),
+      get_server.TakeChannel().release()));
 
   status.reset();
-  client.Get(guest_destination, std::move(get_remote), [&](zx_status_t get_result) {
+  client.Get(guest_destination, std::move(get_client), [&](zx_status_t get_result) {
     status = get_result;
     client.Stop();
   });

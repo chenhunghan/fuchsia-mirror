@@ -5,8 +5,6 @@
 // https://opensource.org/licenses/MIT
 
 use core::ptr::NonNull;
-use zx_status::Status;
-use zx_types::{zx_status_t, zx_time_t};
 
 use super::interrupt_dispatcher::{
     InterruptDispatcher, InterruptDispatcherState, WakeVectorDiagnostics,
@@ -67,32 +65,4 @@ pub unsafe extern "C" fn rust_interrupt_dispatcher_get_diagnostics(
     diagnostics_out: &mut WakeVectorDiagnostics,
 ) {
     disp.get_diagnostics(diagnostics_out);
-}
-
-/// # Safety
-///
-/// `disp` and `out_timestamp` must be valid.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_interrupt_dispatcher_wait_for_interrupt(
-    disp: &InterruptDispatcher,
-    out_timestamp: *mut zx_time_t,
-) -> zx_status_t {
-    match disp.wait_for_interrupt() {
-        Ok(ts) => {
-            // SAFETY: `out_timestamp` is a valid non-null pointer provided by C++.
-            unsafe {
-                *out_timestamp = ts;
-            }
-            zx_status::sys::ZX_OK
-        }
-        Err(status) => status.into_raw(),
-    }
-}
-
-/// # Safety
-///
-/// `disp` must be a valid reference to an initialized `InterruptDispatcher`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_interrupt_dispatcher_ack(disp: &InterruptDispatcher) -> zx_status_t {
-    Status::result_into_raw(disp.ack())
 }

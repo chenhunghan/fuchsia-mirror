@@ -64,6 +64,10 @@ class PrimaryFidlServer : public fidl::WireServer<fuchsia_gpu_magma::Primary>,
                                        uint64_t client_id) = 0;
     virtual magma::Status ReleaseObject(uint64_t object_id,
                                         fuchsia_gpu_magma::wire::ObjectType object_type) = 0;
+    // Allocates a buffer and imports it as `client_id`. On success `vmo_out` is a handle to the
+    // buffer's memory for the client.
+    virtual magma::Status CreateBuffer(uint64_t size, uint64_t flags, uint64_t client_id,
+                                       zx::vmo* vmo_out) = 0;
 
     virtual magma::Status CreateContext(uint32_t context_id) = 0;
     virtual magma::Status CreateContext2(uint32_t context_id, uint64_t priority) = 0;
@@ -153,6 +157,10 @@ class PrimaryFidlServer : public fidl::WireServer<fuchsia_gpu_magma::Primary>,
   void UnmapBuffer(UnmapBufferRequestView request, UnmapBufferCompleter::Sync& _completer) override;
   void BufferRangeOp2(BufferRangeOp2RequestView request,
                       BufferRangeOp2Completer::Sync& completer) override;
+#if FUCHSIA_API_LEVEL_AT_LEAST(NEXT)
+  void CreateBuffer(CreateBufferRequestView request,
+                    CreateBufferCompleter::Sync& completer) override;
+#endif
   void EnablePerformanceCounterAccess(
       EnablePerformanceCounterAccessRequestView request,
       EnablePerformanceCounterAccessCompleter::Sync& completer) override;

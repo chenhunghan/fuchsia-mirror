@@ -5,6 +5,7 @@
 #ifndef SRC_DEVICES_PCI_DRIVERS_PCIROOT_BANJO_ADAPTER_ADAPTER_H_
 #define SRC_DEVICES_PCI_DRIVERS_PCIROOT_BANJO_ADAPTER_ADAPTER_H_
 
+#include <fidl/fuchsia.hardware.pci.root/cpp/driver/wire.h>
 #include <fidl/fuchsia.hardware.pci.root/cpp/wire.h>
 #include <fidl/fuchsia.hardware.pci/cpp/fidl.h>
 #include <fuchsia/hardware/pciroot/cpp/banjo.h>
@@ -19,7 +20,7 @@ namespace pciroot_banjo_adapter {
 // FIDL.
 class Adapter : public fdf::DriverBase2,
                 public fidl::WireServer<fuchsia_hardware_pci_root::Root>,
-                public fidl::WireServer<fuchsia_hardware_pci_root::Config> {
+                public fdf::WireServer<fuchsia_hardware_pci_root::Config> {
  public:
   Adapter() : fdf::DriverBase2("pciroot-banjo-adapter") {}
 
@@ -38,12 +39,17 @@ class Adapter : public fdf::DriverBase2,
                     GetMsiHandleCompleter::Sync& completer) override;
 
   // fuchsia_hardware_pci_root::Config implementations:
-  void Read8(Read8RequestView request, Read8Completer::Sync& completer) override;
-  void Read16(Read16RequestView request, Read16Completer::Sync& completer) override;
-  void Read32(Read32RequestView request, Read32Completer::Sync& completer) override;
-  void Write8(Write8RequestView request, Write8Completer::Sync& completer) override;
-  void Write16(Write16RequestView request, Write16Completer::Sync& completer) override;
-  void Write32(Write32RequestView request, Write32Completer::Sync& completer) override;
+  void Read8(Read8RequestView request, fdf::Arena& arena, Read8Completer::Sync& completer) override;
+  void Read16(Read16RequestView request, fdf::Arena& arena,
+              Read16Completer::Sync& completer) override;
+  void Read32(Read32RequestView request, fdf::Arena& arena,
+              Read32Completer::Sync& completer) override;
+  void Write8(Write8RequestView request, fdf::Arena& arena,
+              Write8Completer::Sync& completer) override;
+  void Write16(Write16RequestView request, fdf::Arena& arena,
+               Write16Completer::Sync& completer) override;
+  void Write32(Write32RequestView request, fdf::Arena& arena,
+               Write32Completer::Sync& completer) override;
 
  private:
   zx::result<> ServeConfigService(std::vector<fuchsia_driver_framework::Offer>& offers);
@@ -58,7 +64,7 @@ class Adapter : public fdf::DriverBase2,
   pci_platform_info_t banjo_info_{};
 
   fidl::ServerBindingGroup<fuchsia_hardware_pci_root::Root> root_bindings_;
-  fidl::ServerBindingGroup<fuchsia_hardware_pci_root::Config> config_bindings_;
+  fdf::ServerBindingGroup<fuchsia_hardware_pci_root::Config> config_bindings_;
   fdf_metadata::MetadataServer<fuchsia_hardware_pci::BoardConfiguration> metadata_server_;
   fidl::ClientEnd<fuchsia_driver_framework::NodeController> node_controller_;
 };

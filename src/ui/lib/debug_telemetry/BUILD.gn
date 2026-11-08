@@ -6,8 +6,20 @@ import("//build/components.gni")
 import("//build/rust/rustc_library.gni")
 import("//tools/cmc/build/expect_includes.gni")
 
+expect_includes("gpu_includes") {
+  includes = [ "meta/gpu.shard.cml" ]
+}
+
 expect_includes("kernel_includes") {
   includes = [ "meta/kernel.shard.cml" ]
+}
+
+expect_includes("power_includes") {
+  includes = [ "meta/power.shard.cml" ]
+}
+
+expect_includes("scenic_includes") {
+  includes = [ "meta/scenic.shard.cml" ]
 }
 
 expect_includes("all_includes") {
@@ -19,14 +31,23 @@ rustc_library("debug_telemetry") {
   with_unit_tests = true
 
   deps = [
+    "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_rust",
+    "//sdk/fidl/fuchsia.gpu.magma:fuchsia.gpu.magma_rust",
+    "//sdk/fidl/fuchsia.hardware.power.battery:fuchsia.hardware.power.battery_rust",
     "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_rust",
+    "//sdk/fidl/fuchsia.power.battery:fuchsia.power.battery_rust",
     "//sdk/rust/zx",
+    "//src/lib/diagnostics/hierarchy/rust",
+    "//src/lib/diagnostics/reader/rust",
+    "//src/lib/diagnostics/selectors",
+    "//src/lib/fidl/rust/fidl",
     "//src/lib/fuchsia-component",
+    "//src/lib/fuchsia-fs",
     "//third_party/rust_crates:futures",
   ]
 
   test_deps = [
-    "//src/lib/fidl/rust/fidl",
+    "//sdk/fidl/fuchsia.mem:fuchsia.mem_rust",
     "//src/lib/fuchsia",
     "//src/lib/fuchsia-async",
   ]
@@ -35,14 +56,32 @@ rustc_library("debug_telemetry") {
 
   sources = [
     "src/cpu.rs",
+    "src/gpu.rs",
     "src/lib.rs",
     "src/memory.rs",
+    "src/power.rs",
+    "src/scenic.rs",
   ]
+}
+
+group("gpu") {
+  public_deps = [ ":debug_telemetry" ]
+  deps = [ ":gpu_includes" ]
 }
 
 group("kernel") {
   public_deps = [ ":debug_telemetry" ]
   deps = [ ":kernel_includes" ]
+}
+
+group("power") {
+  public_deps = [ ":debug_telemetry" ]
+  deps = [ ":power_includes" ]
+}
+
+group("scenic") {
+  public_deps = [ ":debug_telemetry" ]
+  deps = [ ":scenic_includes" ]
 }
 
 group("all") {

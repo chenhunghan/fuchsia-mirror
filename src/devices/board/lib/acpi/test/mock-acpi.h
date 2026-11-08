@@ -59,6 +59,9 @@ class MockAcpi : public Acpi {
       ACPI_HANDLE object, const char* pathname,
       std::optional<std::vector<ACPI_OBJECT>> args) override;
 
+  void SetHasLegacyCmosRtc(bool val) { has_legacy_cmos_rtc_ = val; }
+  bool HasLegacyCmosRtc() override { return has_legacy_cmos_rtc_; }
+
   acpi::status<acpi::UniquePtr<ACPI_DEVICE_INFO>> GetObjectInfo(ACPI_HANDLE obj) override;
   acpi::status<ACPI_HANDLE> GetParent(ACPI_HANDLE child) override {
     return acpi::ok(ToDevice(child)->parent());
@@ -126,6 +129,7 @@ class MockAcpi : public Acpi {
                                        NamespaceCallable& cbk);
   std::unique_ptr<Device> root_;
   acpi::UniquePtr<ACPI_RESOURCE> resource_;
+  bool has_legacy_cmos_rtc_ = false;
   std::mutex global_lock_;
 
   std::vector<WakeGpe> wake_gpes_;

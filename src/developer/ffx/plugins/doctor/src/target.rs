@@ -210,40 +210,67 @@ pub async fn check_targets_locally<W: Write>(
     mut show_tool: Option<ShowToolWrapper>,
     retry_delay: Duration,
 ) -> Result<()> {
-    let query = TargetInfoQuery::try_from(target_str)?;
-    let is_specific_query = !matches!(query, TargetInfoQuery::First);
+    let query =
+        if !target_str.is_empty() { Some(TargetInfoQuery::try_from(target_str)?) } else { None };
+
     let targets = {
         let mut discovery_node = ledger.add_node("Searching for targets", LedgerMode::Automatic);
-        let find_res = find_targets_locally(env_context, query).await;
-        let found = check_target_discovery(&mut discovery_node, find_res);
-        if found.is_empty() && is_specific_query {
-            discovery_node
-                .add_node("Searching for all available targets", LedgerMode::Automatic)
-                .set_outcome(LedgerOutcome::Info);
-            if let Ok(other_targets) =
-                find_targets_locally(env_context, TargetInfoQuery::First).await
-            {
-                report_non_matching_targets(
-                    &mut discovery_node,
-                    target_str,
-                    env_context,
-                    &other_targets,
-                );
-            }
-        }
-        found
+        let find_res = find_targets_locally(env_context, TargetInfoQuery::First).await;
+        check_target_discovery(&mut discovery_node, find_res)
     };
+    check_discovered_targets(
+        ledger,
+        targets,
+        target_str,
+        query.as_ref(),
+        env_context,
+        show_tool.as_mut(),
+        retry_delay,
+    )
+    .await
+}
+
+async fn check_discovered_targets<W: Write>(
+    ledger: &mut LedgerNodeGuard<'_, W>,
+    targets: Vec<TargetHandle>,
+    target_str: &str,
+    query: Option<&TargetInfoQuery>,
+    env_context: &EnvironmentContext,
+    mut show_tool: Option<&mut ShowToolWrapper>,
+    retry_delay: Duration,
+) -> Result<()> {
     if targets.is_empty() {
         return Ok(());
     }
-    for target in targets.iter() {
+
+    let (targets_to_check, prefix) = if let Some(query) = query {
+        let matching: Vec<&TargetHandle> =
+            targets.iter().filter(|t| query.match_handle(t)).collect();
+
+        if matching.is_empty() {
+            ledger
+                .add_node(
+                    &format!("Specified target '{target_str}' was not found in discovered targets"),
+                    LedgerMode::Normal,
+                )
+                .set_outcome(LedgerOutcome::Failure);
+            report_non_matching_targets(ledger, target_str, env_context, &targets);
+            (targets.iter().collect(), "Discovered target (unmatched): ")
+        } else {
+            (matching, "Target: ")
+        }
+    } else {
+        (targets.iter().collect(), "Target: ")
+    };
+
+    for target in targets_to_check {
         let mut target_node =
-            ledger.add_node(&format!("Target: {}", target_name(target)), LedgerMode::Normal);
+            ledger.add_node(&format!("{prefix}{}", target_name(target)), LedgerMode::Normal);
         check_single_target_locally(
             &mut target_node,
             target,
             env_context,
-            show_tool.as_mut(),
+            show_tool.as_deref_mut(),
             retry_delay,
         )
         .await?;
@@ -322,7 +349,9 @@ pub async fn find_targets_locally(
 mod tests {
     use super::*;
     use crate::doctor_ledger::{DoctorLedger, LedgerViewMode};
-    use crate::ledger_view::RecordLedgerView;
+    use crate::ledger_view::{RecordLedgerView, VisualLedgerView};
+    use discovery::{FastbootConnectionState, FastbootTargetState};
+    use ffx_doctor_test_utils::MockWriter;
 
     #[test]
     fn test_make_ssh_fix_suggestion() {
@@ -457,5 +486,172 @@ mod tests {
             "Target specification 'fuchsia-3a40-6b66-017b' was not found, but other targets were discovered: fuchsia-4407-0bbf-aed4."
         ));
         assert!(output.contains("ffx target list"));
+    }
+
+    fn make_fastboot_target(name: &str, serial: &str) -> TargetHandle {
+        TargetHandle {
+            node_name: Some(name.to_string()),
+            state: TargetState::Fastboot(FastbootTargetState {
+                serial_number: serial.to_string(),
+                connection_state: FastbootConnectionState::Usb,
+            }),
+            manual: false,
+        }
+    }
+
+    #[fuchsia::test]
+    async fn test_check_discovered_targets_empty() {
+        let test_env = ffx_config::test_env().build().unwrap();
+        let mut writer = MockWriter::new();
+        let mut ledger = DoctorLedger::new(
+            &mut writer,
+            Box::new(VisualLedgerView::new()),
+            LedgerViewMode::Verbose,
+        );
+
+        check_discovered_targets(
+            &mut ledger.root_guard(),
+            vec![],
+            "some-target",
+            None,
+            &test_env.context,
+            None,
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap();
+
+        let output = writer.get_data();
+        assert_eq!(output.trim(), "");
+    }
+
+    #[fuchsia::test]
+    async fn test_check_discovered_targets_with_empty_target_str() {
+        let test_env = ffx_config::test_env().build().unwrap();
+        let mut writer = MockWriter::new();
+        let mut ledger = DoctorLedger::new(
+            &mut writer,
+            Box::new(VisualLedgerView::new()),
+            LedgerViewMode::Verbose,
+        );
+
+        let targets = vec![
+            make_fastboot_target("target-a", "serial-a"),
+            make_fastboot_target("target-b", "serial-b"),
+        ];
+
+        check_discovered_targets(
+            &mut ledger.root_guard(),
+            targets,
+            "",
+            None,
+            &test_env.context,
+            None,
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap();
+
+        let output = writer.get_data();
+        assert!(output.contains("Target: target-a"), "output: {output}");
+        assert!(output.contains("Target: target-b"), "output: {output}");
+        assert!(!output.contains("Discovered target (unmatched)"), "output: {output}");
+    }
+
+    #[fuchsia::test]
+    async fn test_check_discovered_targets_matching_specified_target() {
+        let test_env = ffx_config::test_env().build().unwrap();
+        let mut writer = MockWriter::new();
+        let mut ledger = DoctorLedger::new(
+            &mut writer,
+            Box::new(VisualLedgerView::new()),
+            LedgerViewMode::Verbose,
+        );
+
+        let targets = vec![
+            make_fastboot_target("target-a", "serial-a"),
+            make_fastboot_target("target-b", "serial-b"),
+        ];
+        let query = TargetInfoQuery::try_from("target-a").unwrap();
+
+        check_discovered_targets(
+            &mut ledger.root_guard(),
+            targets,
+            "target-a",
+            Some(&query),
+            &test_env.context,
+            None,
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap();
+
+        let output = writer.get_data();
+        assert!(output.contains("Target: target-a"), "output: {output}");
+        assert!(!output.contains("Target: target-b"), "output: {output}");
+        assert!(!output.contains("was not found in discovered targets"), "output: {output}");
+    }
+
+    #[fuchsia::test]
+    async fn test_check_discovered_targets_unmatched_specified_target() {
+        let test_env = ffx_config::test_env().build().unwrap();
+        let mut writer = MockWriter::new();
+        let mut ledger = DoctorLedger::new(
+            &mut writer,
+            Box::new(VisualLedgerView::new()),
+            LedgerViewMode::Verbose,
+        );
+
+        let targets = vec![
+            make_fastboot_target("target-a", "serial-a"),
+            make_fastboot_target("target-b", "serial-b"),
+        ];
+        let query = TargetInfoQuery::try_from("non-existent-device").unwrap();
+
+        check_discovered_targets(
+            &mut ledger.root_guard(),
+            targets,
+            "non-existent-device",
+            Some(&query),
+            &test_env.context,
+            None,
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap();
+
+        let output = writer.get_data();
+        assert!(
+            output.contains(
+                "Specified target 'non-existent-device' was not found in discovered targets"
+            ),
+            "output: {output}"
+        );
+        assert!(output.contains("Discovered target (unmatched): target-a"), "output: {output}");
+        assert!(output.contains("Discovered target (unmatched): target-b"), "output: {output}");
+    }
+
+    #[fuchsia::test]
+    async fn test_check_targets_locally_invalid_target_str_fails_fast() {
+        let test_env = ffx_config::test_env().build().unwrap();
+        let mut writer = MockWriter::new();
+        let mut ledger = DoctorLedger::new(
+            &mut writer,
+            Box::new(VisualLedgerView::new()),
+            LedgerViewMode::Verbose,
+        );
+
+        // "uart:" without endpoint is invalid syntax and should fail fast before discovery.
+        assert!(
+            Box::pin(check_targets_locally(
+                &mut ledger.root_guard(),
+                "uart:",
+                &test_env.context,
+                None,
+                Duration::from_millis(100),
+            ))
+            .await
+            .is_err()
+        );
     }
 }

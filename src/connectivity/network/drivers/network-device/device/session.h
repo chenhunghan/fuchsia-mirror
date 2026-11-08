@@ -184,6 +184,16 @@ class Session : public fidl::WireServer<netdev::Session> {
   inline void RxTaken() { in_flight_rx_++; }
   inline void StopRx() __TA_REQUIRES(parent_->rx_lock()) { rx_valid_ = false; }
   inline bool IsRxValid() const __TA_REQUIRES(parent_->rx_lock()) { return rx_valid_; }
+  // Marks that the rx queue has purged this session's rx path: the session's
+  // rx path is stopped and the rx queue holds no more available buffers from
+  // it, so no further rx buffers can be taken from this session.
+  inline void MarkRxPurged() __TA_REQUIRES(parent_->rx_lock()) {
+    rx_purged_.store(true, std::memory_order_release);
+  }
+  // Returns true once |MarkRxPurged| has been called. Until then, the rx queue
+  // may still take buffers from this session, so the in-flight rx count is not
+  // yet final.
+  inline bool IsRxPurged() const { return rx_purged_.load(std::memory_order_acquire); }
   [[nodiscard]] inline bool ShouldDestroy() {
     if (in_flight_rx_ == 0 && in_flight_tx_ == 0) {
       bool expect = false;
@@ -296,6 +306,7 @@ class Session : public fidl::WireServer<netdev::Session> {
   std::atomic<size_t> in_flight_tx_ = 0;
   std::atomic<size_t> in_flight_rx_ = 0;
   std::atomic<bool> scheduled_destruction_ = false;
+  std::atomic<bool> rx_purged_ = false;
   bool tx_installed_ __TA_GUARDED(parent_->tx_lock()) = false;
 
   fbl::Mutex rx_lease_lock_;

@@ -1,0 +1,48 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+# The GN counterpart of this library is a hand-written internal-category
+# `sdk_source_set()` in BUILD.gn, because it is published to the internal IDK
+# (`@internal_sdk//pkg/mock-registers`) and `idk_cc_source_library()` only
+# supports the "partner" category.
+# LINT.IfChange(mock-registers)
+# @bazel2gn:skip
+fx_cc_library(
+    name = "mock-registers",
+    hdrs = ["mock-registers.h"],
+    # The header uses Fuchsia-only FIDL wire bindings and async dispatchers.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.registers:fuchsia.hardware.registers_cpp",
+    ],
+    alwayslink = True,
+)
+
+# LINT.ThenChange(//src/devices/registers/testing/mock-registers/BUILD.gn:mock-registers)
+
+fx_cc_test_binary(
+    name = "mock-registers-test",
+    srcs = ["mock-registers-test.cc"],
+    tags = ["manual"],
+    deps = [
+        ":mock-registers",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//zircon/system/ulib/zx",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "mock-registers-test-package",
+    package_name = "mock-registers-test",
+    unit_tests = [":mock-registers-test"],
+    visibility = ["//src/devices:__pkg__"],
+)

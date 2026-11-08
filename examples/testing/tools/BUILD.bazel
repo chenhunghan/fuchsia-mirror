@@ -1,0 +1,20 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "stdout_test",
+    srcs = ["src/stdout_test.rs"],
+    edition = "2024",
+)
+
+fx_unittest_package(
+    name = "stdout-test",
+    unit_tests = [":stdout_test"],
+    visibility = ["//examples:__pkg__"],
+)

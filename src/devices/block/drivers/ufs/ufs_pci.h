@@ -19,11 +19,9 @@ class UfsPci : public Ufs {
   zx::result<> InitResources() override;
   zx_status_t StopResources() override;
   zx::result<> InitQuirk() override;
-  void OnIrqComplete() override;
 
  private:
   fidl::WireSyncClient<fuchsia_hardware_pci::Device> pci_;
-  fuchsia_hardware_pci::InterruptMode irq_mode_;
 };
 
 }  // namespace ufs

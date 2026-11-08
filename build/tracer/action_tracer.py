@@ -20,9 +20,8 @@ import shlex
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Collection, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence, Set
 from typing import (
-    AbstractSet,
     Any,
     TextIO,
 )
@@ -52,10 +51,10 @@ class FileAccessType(enum.Enum):
 
 @dataclasses.dataclass
 class MatchConditions(object):
-    prefixes: frozenset[str] = dataclasses.field(default_factory=set)
-    suffixes: frozenset[str] = dataclasses.field(default_factory=set)
-    components: frozenset[str] = dataclasses.field(default_factory=set)
-    component_prefixes: frozenset[str] = dataclasses.field(default_factory=set)
+    prefixes: Set[str] = dataclasses.field(default_factory=set)
+    suffixes: Set[str] = dataclasses.field(default_factory=set)
+    components: Set[str] = dataclasses.field(default_factory=set)
+    component_prefixes: Set[str] = dataclasses.field(default_factory=set)
 
     def matches(self, path: str) -> bool:
         """Returns true if path matches any of the conditions."""
@@ -122,7 +121,7 @@ class ToolCommand(object):
         # processing.
         return _find_first_index(self.tokens, lambda x: x == "--")
 
-    def unwrap(self) -> "ToolCommand":
+    def unwrap(self) -> ToolCommand:
         # Assuming that '--' separates a wrapper from a command, this unwraps
         # a command one level.  (For example, this script is such a wrapper,
         # with the original command following '--' in trailing position.)
@@ -169,7 +168,7 @@ class FSAccess(object):
         return not ignore_conditions.matches(self.path)
 
     def allowed(
-        self, allowed_reads: frozenset[str], allowed_writes: frozenset[str]
+        self, allowed_reads: Set[str], allowed_writes: Set[str]
     ) -> bool:
         """Validates a file system access against a set of allowed accesses.
 
@@ -249,7 +248,7 @@ def parse_fsatrace_output(fsatrace_lines: Iterable[str]) -> Iterable[FSAccess]:
     return ret
 
 
-def _abspaths(container: Iterable[str]) -> AbstractSet[str]:
+def _abspaths(container: Iterable[str]) -> Set[str]:
     return {os.path.abspath(f) for f in container}
 
 
@@ -257,13 +256,13 @@ def _abspaths(container: Iterable[str]) -> AbstractSet[str]:
 class AccessConstraints(object):
     """Set of file system accesses constraints."""
 
-    allowed_reads: frozenset[str] = dataclasses.field(default_factory=set)
-    allowed_writes: frozenset[str] = dataclasses.field(default_factory=set)
-    required_writes: frozenset[str] = dataclasses.field(default_factory=set)
+    allowed_reads: Set[str] = dataclasses.field(default_factory=set)
+    allowed_writes: Set[str] = dataclasses.field(default_factory=set)
+    required_writes: Set[str] = dataclasses.field(default_factory=set)
     # TODO(fangism): forbidden_deletes should probably include declared inputs
 
     @property
-    def inputs(self) -> frozenset[str]:
+    def inputs(self) -> Set[str]:
         # allowed_reads includes allowed_writes (and required_writes), so consider
         # "inputs" as their set-difference.
         return self.allowed_reads - self.allowed_writes - self.required_writes
@@ -271,10 +270,10 @@ class AccessConstraints(object):
 
 @dataclasses.dataclass
 class DepEdges(object):
-    ins: frozenset[str] = dataclasses.field(default_factory=set)
-    outs: frozenset[str] = dataclasses.field(default_factory=set)
+    ins: Set[str] = dataclasses.field(default_factory=set)
+    outs: Set[str] = dataclasses.field(default_factory=set)
 
-    def abspaths(self) -> "DepEdges":
+    def abspaths(self) -> DepEdges:
         return DepEdges(ins=_abspaths(self.ins), outs=_abspaths(self.outs))
 
 
@@ -307,12 +306,12 @@ class DepFile(object):
     deps: Collection[DepEdges] = dataclasses.field(default_factory=list)
 
     @property
-    def all_ins(self) -> AbstractSet[str]:
+    def all_ins(self) -> Set[str]:
         """Returns a set of all dependency inputs."""
         return {f for dep in self.deps for f in dep.ins}
 
     @property
-    def all_outs(self) -> AbstractSet[str]:
+    def all_outs(self) -> Set[str]:
         """Returns a set of all dependency outputs."""
         return {f for dep in self.deps for f in dep.outs}
 
@@ -383,7 +382,7 @@ def parse_depfile(depfile_lines: Iterable[str]) -> DepFile:
 
 
 def abspaths_from_depfile(
-    depfile: DepFile, allowed_abspaths: frozenset[str]
+    depfile: DepFile, allowed_abspaths: Set[str]
 ) -> Collection[str]:
     return [
         f
@@ -452,12 +451,12 @@ def _sorted_join(elements: Iterable[str], joiner: str) -> str:
 
 @dataclasses.dataclass
 class FSAccessSet(object):
-    reads: frozenset[str] = dataclasses.field(default_factory=set)
-    writes: frozenset[str] = dataclasses.field(default_factory=set)
-    deletes: frozenset[str] = dataclasses.field(default_factory=set)
+    reads: Set[str] = dataclasses.field(default_factory=set)
+    writes: Set[str] = dataclasses.field(default_factory=set)
+    deletes: Set[str] = dataclasses.field(default_factory=set)
 
     @property
-    def all_accesses(self) -> frozenset[str]:
+    def all_accesses(self) -> Set[str]:
         return self.reads | self.writes | self.deletes
 
     def __str__(self) -> str:
@@ -542,8 +541,8 @@ def check_access_permissions(
 
 
 def check_missing_writes(
-    accesses: Iterable[FSAccess], required_writes: frozenset[str]
-) -> AbstractSet[str]:
+    accesses: Iterable[FSAccess], required_writes: Set[str]
+) -> Set[str]:
     """Tracks sequence of access to verify that required files are written.
 
     Args:
@@ -553,7 +552,7 @@ def check_missing_writes(
     Returns:
       Subset of required_writes that were not fulfilled.
     """
-    missing_writes = required_writes.copy()
+    missing_writes = set(required_writes)
     for access in accesses:
         if access.op == FileAccessType.WRITE and access.path in missing_writes:
             missing_writes.remove(access.path)
@@ -566,7 +565,7 @@ def check_missing_writes(
     return missing_writes
 
 
-def actually_read_files(accesses: Iterable[FSAccess]) -> AbstractSet[str]:
+def actually_read_files(accesses: Iterable[FSAccess]) -> Set[str]:
     """Returns subset of files that were actually used/read."""
     return {
         access.path for access in accesses if access.op == FileAccessType.READ
@@ -585,15 +584,15 @@ def _verbose_path(path: str) -> str:
 class StalenessDiagnostics(object):
     """Just a structure to capture results of diagnosing outputs."""
 
-    required_writes: frozenset[str] = dataclasses.field(default_factory=set)
-    nonexistent_outputs: frozenset[str] = dataclasses.field(default_factory=set)
+    required_writes: Set[str] = dataclasses.field(default_factory=set)
+    nonexistent_outputs: Set[str] = dataclasses.field(default_factory=set)
     # If there are stale_outputs, then it must have been compared against a
     # newest_input.
     newest_input: str | None = None
-    stale_outputs: frozenset[str] = dataclasses.field(default_factory=set)
+    stale_outputs: Set[str] = dataclasses.field(default_factory=set)
 
     @property
-    def has_findings(self) -> frozenset[str]:
+    def has_findings(self) -> Set[str]:
         return self.nonexistent_outputs or self.stale_outputs
 
     def print_findings(self, stream: TextIO) -> None:
@@ -637,7 +636,7 @@ Stale outputs: (older than newest input: {self.newest_input})
             )
 
 
-def realpath_ctime(path: str) -> int:
+def realpath_ctime(path: str) -> float:
     """Follow symlinks before getting ctime.
 
     This reflects Ninja's behavior of using `stat()` instead of `lstat()`
@@ -684,11 +683,11 @@ def diagnose_stale_outputs(
     read_files = actually_read_files(accesses)
     # Ignore allowed-but-unused inputs.
     # Outputs are readable, but should not be considered as inputs.
-    used_inputs = access_constraints.inputs.intersection(read_files)
+    used_inputs = access_constraints.inputs & read_files
 
     # Compare timestamps vs. newest input to find stale outputs.
     stale_outputs = set()
-    newest_input = None
+    newest_input: str | None = None
     if used_inputs and untouched_outputs:
         # All links in inputs are followed to their destinations already in
         # previous steps, so realpath_ctime is unnecessary on them.
@@ -834,7 +833,7 @@ def is_known_wrapper(command: ToolCommand) -> bool:
     return False
 
 
-def all_parent_dirs(abspath: str) -> AbstractSet[str]:
+def all_parent_dirs(abspath: str) -> Set[str]:
     """Identifies all parent dirs of a given path.
 
     Args:
@@ -851,7 +850,7 @@ def all_parent_dirs(abspath: str) -> AbstractSet[str]:
     return dirs
 
 
-def detect_all_dirs(paths: Iterable[str]) -> AbstractSet[str]:
+def detect_all_dirs(paths: Iterable[str]) -> Set[str]:
     """Evaluates the set of directories seen from a collection of paths.
 
     Args:

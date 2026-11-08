@@ -5,11 +5,8 @@
 // https://opensource.org/licenses/MIT
 
 #include <inttypes.h>
-#include <lib/fit/defer.h>
 #include <lib/unittest/unittest.h>
 #include <lib/zircon-internal/macros.h>
-#include <platform.h>
-#include <pow2.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <zircon/errors.h>
@@ -17,7 +14,6 @@
 #include <zircon/types.h>
 
 #include <arch/interrupt.h>
-#include <fbl/algorithm.h>
 #include <kernel/cpu.h>
 #include <kernel/event.h>
 #include <kernel/mp.h>
@@ -26,7 +22,6 @@
 #include <kernel/timer.h>
 #include <ktl/atomic.h>
 #include <ktl/iterator.h>
-#include <ktl/optional.h>
 #include <ktl/unique_ptr.h>
 
 #include "tests.h"
@@ -305,86 +300,9 @@ int timer_stress(int argc, const cmd_args* argv, uint32_t) {
 struct timer_args {
   ktl::atomic<int> result;
   ktl::atomic<int> timer_fired;
-  ktl::atomic<int> remaining;
   ktl::atomic<int> wait;
   DECLARE_SPINLOCK_WITH_TYPE(timer_args, MonitoredSpinLock) lock;
 };
-
-static void timer_cb(Timer*, zx_instant_mono_t now, void* void_arg) {
-  timer_args* arg = reinterpret_cast<timer_args*>(void_arg);
-  arg->timer_fired.store(1);
-}
-
-// Set a timer and cancel it before the deadline has elapsed.
-static bool cancel_before_deadline() {
-  BEGIN_TEST;
-  timer_args arg{};
-  Timer t;
-  const Deadline deadline = Deadline::after_mono(ZX_HOUR(5));
-  t.Set(deadline, timer_cb, &arg);
-  ASSERT_TRUE(t.Cancel());
-  ASSERT_FALSE(arg.timer_fired.load());
-  END_TEST;
-}
-
-// Set a timer and cancel it after it has fired.
-static bool cancel_after_fired() {
-  BEGIN_TEST;
-  timer_args arg{};
-  Timer t;
-  const Deadline deadline = Deadline::no_slack(current_mono_time());
-  t.Set(deadline, timer_cb, &arg);
-  while (!arg.timer_fired.load()) {
-  }
-  ASSERT_FALSE(t.Cancel());
-  END_TEST;
-}
-
-static void timer_cancel_cb(Timer* t, zx_instant_mono_t now, void* void_arg) {
-  timer_args* arg = reinterpret_cast<timer_args*>(void_arg);
-  arg->result.store(t->Cancel());
-  arg->timer_fired.store(1);
-}
-
-// Set a timer and cancel it from its own callback.
-static bool cancel_from_callback() {
-  BEGIN_TEST;
-  timer_args arg{};
-  arg.result = 1;
-  Timer t;
-  const Deadline deadline = Deadline::no_slack(current_mono_time());
-  t.Set(deadline, timer_cancel_cb, &arg);
-  while (!arg.timer_fired.load()) {
-  }
-  ASSERT_FALSE(t.Cancel());
-  ASSERT_FALSE(arg.result);
-  END_TEST;
-}
-
-static void timer_set_cb(Timer* t, zx_instant_mono_t now, void* void_arg) {
-  timer_args* arg = reinterpret_cast<timer_args*>(void_arg);
-  if (arg->remaining.fetch_sub(1) >= 1) {
-    const Deadline deadline = Deadline::after_mono(ZX_USEC(10));
-    t->Set(deadline, timer_set_cb, void_arg);
-  }
-}
-
-// Set a timer that re-sets itself from its own callback.
-static bool set_from_callback() {
-  BEGIN_TEST;
-  timer_args arg{};
-  arg.remaining = 5;
-  Timer t;
-  const Deadline deadline = Deadline::no_slack(current_mono_time());
-  t.Set(deadline, timer_set_cb, &arg);
-  while (arg.remaining.load() > 0) {
-  }
-
-  // We cannot assert the return value below because we don't know if the last timer has fired.
-  t.Cancel();
-
-  END_TEST;
-}
 
 static void timer_trylock_cb(Timer* t, zx_instant_mono_t now, void* void_arg) {
   timer_args* arg = reinterpret_cast<timer_args*>(void_arg);
@@ -506,170 +424,7 @@ static bool trylock_or_cancel_get_lock() {
   END_TEST;
 }
 
-static bool print_timer_queues() {
-  BEGIN_TEST;
-
-  // Allocate a bunch of timers and a small buffer.  Set the timers then see that |PrintTimerQueues|
-  // doesn't overflow the buffer.
-  constexpr size_t kNumTimers = 1000;
-  fbl::AllocChecker ac;
-  auto timers = ktl::unique_ptr<Timer[]>(new (&ac) Timer[kNumTimers]);
-  ASSERT_TRUE(ac.check());
-  constexpr size_t kBufferSize = 4096;
-  auto buffer = ktl::unique_ptr<char[]>(new (&ac) char[kBufferSize]);
-  ASSERT_TRUE(ac.check());
-  // Fill the buffer with a pattern so we can detect overflow.
-  memset(buffer.get(), 'X', kBufferSize);
-
-  for (size_t i = 0; i < kNumTimers; ++i) {
-    timers[i].Set(Deadline::infinite(), [](Timer*, zx_instant_mono_t, void*) {}, nullptr);
-  }
-  auto cleanup = fit::defer([&]() {
-    for (size_t i = 0; i < kNumTimers; ++i) {
-      timers[i].Cancel();
-    }
-  });
-
-  // Tell |PrintTimerQueues| the buffer is one less than it really is.
-  TimerQueue::PrintTimerQueues(buffer.get(), kBufferSize - 1);
-
-  // See that our sentinel was not overwritten.
-  ASSERT_EQ('X', buffer[kBufferSize - 1]);
-
-  // See that a null terminator was written to the last available position.
-  ASSERT_EQ(0, buffer[kBufferSize - 2]);
-
-  END_TEST;
-}
-
-static bool deadline_after() {
-  BEGIN_TEST;
-
-  ktl::array<ktl::optional<TimerSlack>, 5> kSlackModes{
-      ktl::nullopt,        // nullopt is used for testing the default mode (should be "none").
-      TimerSlack::none(),  // an explicit test of "none"
-      TimerSlack(ZX_USEC(100), TIMER_SLACK_CENTER),
-      TimerSlack(ZX_USEC(200), TIMER_SLACK_EARLY),
-      TimerSlack(ZX_USEC(200), TIMER_SLACK_LATE),
-  };
-
-  // Test to make sure that a relative timeout which is an infinite amount of
-  // time from now produces an infinite deadline.
-  for (const auto& slack : kSlackModes) {
-    Deadline deadline = slack.has_value() ? Deadline::after_mono(ZX_TIME_INFINITE, slack.value())
-                                          : Deadline::after_mono(ZX_TIME_INFINITE);
-    ASSERT_EQ(ZX_TIME_INFINITE, deadline.when());
-
-    // Default slack should be "none"
-    const TimerSlack& expected = slack.has_value() ? slack.value() : TimerSlack::none();
-    ASSERT_EQ(expected.amount(), deadline.slack().amount());
-    ASSERT_EQ(expected.mode(), deadline.slack().mode());
-  }
-
-  // While we cannot control the precise deadline which will be produced from
-  // our call to Deadline::after, we _can_ bound the range it might exist in.
-  // Test for this as well.
-  for (const auto& slack : kSlackModes) {
-    constexpr zx_duration_mono_t kTimeout = ZX_MSEC(10);
-    zx_instant_mono_t before = zx_time_add_duration(current_mono_time(), kTimeout);
-    Deadline deadline = slack.has_value() ? Deadline::after_mono(kTimeout, slack.value())
-                                          : Deadline::after_mono(kTimeout);
-    zx_instant_mono_t after = zx_time_add_duration(current_mono_time(), kTimeout);
-    ASSERT_LE(before, deadline.when());
-    ASSERT_GE(after, deadline.when());
-
-    // Default slack should be "none"
-    const TimerSlack& expected = slack.has_value() ? slack.value() : TimerSlack::none();
-    ASSERT_EQ(expected.amount(), deadline.slack().amount());
-    ASSERT_EQ(expected.mode(), deadline.slack().mode());
-  }
-
-  END_TEST;
-}
-
-static bool test_timer_current_mono_and_boot_ticks() {
-  BEGIN_TEST;
-
-  // Get the current monotonic and boot ticks. This should occur prior to our observation of both
-  // below, providing us with a lower bound on those values.
-  zx_instant_boot_ticks_t boot_before = timer_current_boot_ticks();
-  zx_instant_mono_ticks_t mono_before = timer_current_mono_ticks();
-
-  // Perform a synchronized read of the monotonic and boot ticks.
-  CurrentTicksObservation obs = timer_current_mono_and_boot_ticks();
-
-  // Get the current monotonic and boot ticks. This should occur after our observation of both
-  // above, providing us with an upper bound on those values.
-  zx_instant_mono_ticks_t mono_after = timer_current_mono_ticks();
-  zx_instant_boot_ticks_t boot_after = timer_current_boot_ticks();
-
-  // Ensure that the monotonic ticks are less than or equal to the boot ticks.
-  ASSERT_LE(obs.mono_now, obs.boot_now);
-
-  // Ensure that our observations are monotonic, meaning that they are greater than or equal to our
-  // before observations and less than or equal to our after observations.
-  ASSERT_GE(obs.mono_now, mono_before);
-  ASSERT_GE(obs.boot_now, boot_before);
-  ASSERT_LE(obs.mono_now, mono_after);
-  ASSERT_LE(obs.boot_now, boot_after);
-
-  END_TEST;
-}
-
-static bool mono_to_raw_ticks_overflow() {
-  BEGIN_TEST;
-
-  // Verify that converting ZX_TIME_INFINITE and ZX_TIME_INFINTE - 1 returns ZX_TIME_INFINITE
-  // instead of overflowing.
-  ktl::optional<zx_ticks_t> raw_ticks = timer_convert_mono_to_raw_ticks(ZX_TIME_INFINITE);
-  ASSERT_TRUE(raw_ticks.has_value());
-  ASSERT_EQ(raw_ticks.value(), ZX_TIME_INFINITE);
-
-  raw_ticks = timer_convert_mono_to_raw_ticks(ZX_TIME_INFINITE - 1);
-  ASSERT_TRUE(raw_ticks.has_value());
-  ASSERT_GE(raw_ticks.value(), ZX_TIME_INFINITE - 1);
-
-  // Verify that 0 gives us a raw ticks greater than or equal to 0, as the conversion function
-  // should add an offset that is greater than or equal to 0.
-  raw_ticks = timer_convert_mono_to_raw_ticks(0);
-  ASSERT_TRUE(raw_ticks.has_value());
-  ASSERT_GE(raw_ticks.value(), 0);
-
-  // Verify that ZX_TIME_INFINITE_PAST and ZX_TIME_INFINITE_PAST + 1 return negative numbers,
-  // since the mono_ticks_modifier should be much smaller than this value.
-  raw_ticks = timer_convert_mono_to_raw_ticks(ZX_TIME_INFINITE_PAST);
-  ASSERT_TRUE(raw_ticks.has_value());
-  ASSERT_LT(raw_ticks.value(), 0);
-
-  raw_ticks = timer_convert_mono_to_raw_ticks(ZX_TIME_INFINITE_PAST + 1);
-  ASSERT_TRUE(raw_ticks.has_value());
-  ASSERT_LT(raw_ticks.value(), 0);
-
-  END_TEST;
-}
-
-// Ensure that a boot timer fires.
-static bool boot_timer() {
-  BEGIN_TEST;
-  timer_args arg{};
-  Timer t{ZX_CLOCK_BOOT};
-  const Deadline deadline = Deadline::no_slack(current_boot_time());
-  t.Set(deadline, timer_cb, &arg);
-  while (!arg.timer_fired.load()) {
-  }
-  END_TEST;
-}
-
 UNITTEST_START_TESTCASE(timer_tests)
-UNITTEST("cancel_before_deadline", cancel_before_deadline)
-UNITTEST("cancel_after_fired", cancel_after_fired)
-UNITTEST("cancel_from_callback", cancel_from_callback)
-UNITTEST("set_from_callback", set_from_callback)
 UNITTEST("trylock_or_cancel_canceled", trylock_or_cancel_canceled)
 UNITTEST("trylock_or_cancel_get_lock", trylock_or_cancel_get_lock)
-UNITTEST("print_timer_queue", print_timer_queues)
-UNITTEST("Deadline::after", deadline_after)
-UNITTEST("mono_to_raw_ticks_overflow", mono_to_raw_ticks_overflow)
-UNITTEST("boot_timer", boot_timer)
-UNITTEST("test_timer_current_mono_and_boot_ticks", test_timer_current_mono_and_boot_ticks)
 UNITTEST_END_TESTCASE(timer_tests, "timer", "timer tests")

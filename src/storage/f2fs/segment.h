@@ -209,7 +209,6 @@ class SegmentManager {
   zx_status_t SetSummaryBlock(CursegType type, SummaryCallback callback);
   zx_status_t GetSummaryBlock(CursegType type, SummaryCallback callback);
 
-  uint32_t CheckPrefreeSegments(int ofs_unit, CursegType type);
   void GetNewSegment(uint32_t *newseg, bool new_sec);
   void ResetCurseg(CursegType type, bool modified) __TA_REQUIRES(sentry_lock_);
   void NewCurseg(CursegType type, bool new_sec) __TA_REQUIRES(sentry_lock_);

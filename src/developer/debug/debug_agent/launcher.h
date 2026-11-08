@@ -28,6 +28,8 @@ class DebugAgentLauncher : public fidl::Server<fuchsia_debugger::Launcher> {
 
   static fuchsia_component_decl::Child CreateChildDecl(
       const std::string& name, const fuchsia_debugger::LaunchOptions& options);
+  static std::vector<fuchsia_component_decl::Offer> CreateDynamicOffers(
+      const fuchsia_debugger::LaunchOptions& options);
 
  private:
   FRIEND_TEST(DebugAgentLauncherTest, CreateChildDecl);

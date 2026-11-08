@@ -5,6 +5,7 @@
 #ifndef SRC_STARNIX_TESTS_SELINUX_USERSPACE_BASE_INITIAL_SIDS_H_
 #define SRC_STARNIX_TESTS_SELINUX_USERSPACE_BASE_INITIAL_SIDS_H_
 
+constexpr char kKernelInitialSid[] = "system_u:unconfined_r:unconfined_t:s0";
 constexpr char kUnlabeledInitialSid[] = "unlabeled_u:unlabeled_r:unlabeled_t:s0";
 
 #endif  // SRC_STARNIX_TESTS_SELINUX_USERSPACE_BASE_INITIAL_SIDS_H_

@@ -6,7 +6,7 @@
     children: [
         {
             name: "network-tun",
-            url: "#meta/network-tun.cm",
+            url: "network-tun#meta/network-tun.cm",
         },
     ],
     use: [

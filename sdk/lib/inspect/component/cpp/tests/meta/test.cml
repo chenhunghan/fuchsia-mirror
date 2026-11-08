@@ -14,11 +14,28 @@
     children: [
         {
             name: "inspector_publisher",
-            url: "publish_inspector_only#meta/program.cm",
+            url: "#meta/program.cm",
         },
         {
             name: "vmo_publisher",
-            url: "publish_vmo_only#meta/program.cm",
+            url: "#meta/program.cm",
+        },
+    ],
+    capabilities: [
+        // Enable Inspector publishing on #inspector_publisher while leaving
+        // PublishVmo at its default (false).
+        {
+            config: "fuchsia.inspect.test.PublishInspector",
+            type: "bool",
+            value: true,
+        },
+
+        // Enable VMO publishing on #vmo_publisher while leaving
+        // PublishInspector at its default (false).
+        {
+            config: "fuchsia.inspect.test.PublishVmo",
+            type: "bool",
+            value: true,
         },
     ],
     use: [
@@ -26,12 +43,26 @@
             protocol: "fuchsia.component.Binder",
             from: "#inspector_publisher",
             path: "/svc/InspectorPublisherBinder",
+            dependency: "weak",
         },
         {
             protocol: "fuchsia.component.Binder",
             from: "#vmo_publisher",
             path: "/svc/VmoPublisherBinder",
+            dependency: "weak",
         },
         { protocol: "fuchsia.diagnostics.ArchiveAccessor" },
+    ],
+    offer: [
+        {
+            config: "fuchsia.inspect.test.PublishInspector",
+            from: "self",
+            to: "#inspector_publisher",
+        },
+        {
+            config: "fuchsia.inspect.test.PublishVmo",
+            from: "self",
+            to: "#vmo_publisher",
+        },
     ],
 }

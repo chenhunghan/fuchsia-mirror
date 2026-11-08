@@ -4,24 +4,15 @@
 # found in the LICENSE file.
 """Functionality for building the IDK from its component parts."""
 
-# See https://stackoverflow.com/questions/33533148/how-do-i-type-hint-a-method-with-the-type-of-the-enclosing-class
-from __future__ import annotations
-
 import dataclasses
 import filecmp
 import itertools
 import json
+import os
 import pathlib
+import typing
 from collections.abc import Callable, Mapping, Sequence
-from typing import (
-    Any,
-    Literal,
-    Optional,
-    TypedDict,
-    TypeVar,
-    get_args,
-    get_type_hints,
-)
+from typing import Any, Literal, Optional, TypedDict, TypeVar
 
 from .validate_idk import *
 
@@ -94,20 +85,25 @@ class LoadableModuleMeta(TypedDict):
     stable: bool
 
 
+UnmergeableAtomType = Literal[
+    "bind_library",
+    "cc_source_library",
+    "component_manifest",
+    "config",
+    "dart_library",
+    "documentation",
+    "experimental_python_e2e_test",
+    "fidl_library",
+    "license",
+    "version_history",
+]
+
+UNMERGEABLE_ATOM_TYPES = typing.get_args(UnmergeableAtomType)
+
+
 class UnmergeableMeta(TypedDict):
     name: str
-    type: Literal[
-        "bind_library",
-        "cc_source_library",
-        "component_manifest",
-        "config",
-        "dart_library",
-        "documentation",
-        "experimental_python_e2e_test",
-        "fidl_library",
-        "license",
-        "version_history",
-    ]
+    type: UnmergeableAtomType
     stable: bool
 
 
@@ -225,6 +221,7 @@ class PartialIDK:
         """
         files_list = []
 
+        found_any = False
         # First handle common fields that can coexist with others.
         if "headers" in atom_meta:
             assert atom_type in [
@@ -234,12 +231,13 @@ class PartialIDK:
 
             # Contains a list of files.
             files_list += atom_meta["headers"]
+            found_any = True
 
-        # The following fields are mutually exclusive.
+        # The following fields can be present.
         if atom_type == "version_history":
             # Version history is special. It contains "data", so we must
             # avoid matching that case.
-            pass
+            found_any = True
         elif "sources" in atom_meta:
             assert atom_type in [
                 "dart_library",
@@ -250,6 +248,7 @@ class PartialIDK:
 
             # Contains a list of files.
             files_list += atom_meta["sources"]
+            found_any = True
         elif "files" in atom_meta:
             assert atom_type in [
                 "host_tool",
@@ -276,11 +275,13 @@ class PartialIDK:
                 files_list += []
                 for label, file in variant.items():
                     files_list.append(file)
+            found_any = True
         elif "data" in atom_meta:
             assert atom_type == "data", f"Unexpected entry for {atom_type}"
 
             # Contains a list of files.
             files_list += atom_meta["data"]
+            found_any = True
         elif "docs" in atom_meta:
             assert (
                 atom_type == "documentation"
@@ -288,43 +289,41 @@ class PartialIDK:
 
             # Contains a list of files.
             files_list += atom_meta["docs"]
-        elif "variants" in atom_meta:
-            assert (
-                len(atom_meta["variants"]) == 1
-            ), "Expected only one variant per sub-build."
+            found_any = True
 
+        if "variants" in atom_meta:
+            found_any = True
             # Contains an array of items of various possible types.
-            variant = atom_meta["variants"][0]
+            for variant in atom_meta["variants"]:
+                if atom_type == "package":
+                    # The variant contains a list of files.
+                    files_list += variant["files"]
+                elif atom_type == "sysroot":
+                    # The variant contains a dictionary of file lists
+                    for label, file_list in variant["values"].items():
+                        if label not in [
+                            "include_dir",
+                            "root",
+                            "sysroot_dir",
+                        ]:
+                            files_list += file_list
+                elif atom_type == "cc_prebuilt_library":
+                    for label, file in variant["values"].items():
+                        if label not in ["dist_lib_dest"]:
+                            files_list.append(file)
+                else:
+                    assert False, f"Unexpected entry for {atom_type}"
 
-            if atom_type == "package":
-                # The variant contains a list of files.
-                files_list += variant["files"]
-            elif atom_type == "sysroot":
-                # The variant contains a dictionary of file lists
-                files_list += []
-                for label, file_list in variant["values"].items():
-                    if label not in [
-                        "include_dir",
-                        "root",
-                        "sysroot_dir",
-                    ]:
-                        files_list += file_list
-
-                # The IFS files are listed separately outside the variant and
-                # not versioned.
-                # TODO(https://fxbug.dev/339884866): Version libzircon and get
-                # its IFS file from the variant.
-                # TODO(https://fxbug.dev/388856587): Version libc and get
-                # its IFS file from the variant.
+            # The IFS files are listed separately outside the variant and
+            # not versioned.
+            # TODO(https://fxbug.dev/339884866): Version libzircon and get
+            # its IFS file from the variant.
+            # TODO(https://fxbug.dev/388856587): Version libc and get
+            # its IFS file from the variant.
+            if atom_type == "sysroot":
                 files_list += atom_meta["ifs_files"]
-            elif atom_type == "cc_prebuilt_library":
-                files_list += []
-                for label, file in variant["values"].items():
-                    if label not in ["dist_lib_dest"]:
-                        files_list.append(file)
-            else:
-                assert False, f"Unexpected entry for {atom_type}"
-        elif "binaries" in atom_meta:
+
+        if "binaries" in atom_meta:
             # TODO(https://fxbug.dev/310006516): Remove this case when no longer
             # distributing API-level-agnostic prebuilts (arch/) in the IDK.
 
@@ -336,7 +335,6 @@ class PartialIDK:
             variant = list(atom_meta["binaries"].values())[0]
 
             if atom_type in ["cc_prebuilt_library"]:
-                files_list += []
                 for label, file in variant.items():
                     if label != "dist_path":
                         files_list.append(file)
@@ -360,31 +358,31 @@ class PartialIDK:
                 files_list += atom_meta["resources"]
             else:
                 assert False, f"Unexpected entry for {atom_type}"
-        elif "versions" in atom_meta:
+            found_any = True
+
+        if "versions" in atom_meta:
             # TODO(https://fxbug.dev/310006516): Remove this case when no longer
             # distributing API-level-agnostic prebuilts (arch/) in the IDK.
 
             assert atom_type == "sysroot", f"Unexpected entry for {atom_type}"
 
-            # Contains a dictionary of variants.
-            assert (
-                len(atom_meta["versions"]) == 1
-            ), "Expected only one variant per sub-build."
-            variant = list(atom_meta["versions"].values())[0]
-
-            # The variant contains a dictionary of file lists
-            for label, file_list in variant.items():
-                if label not in [
-                    "dist_dir",
-                    "include_dir",
-                    "root",
-                ]:
-                    files_list += file_list
+            # Contains a dictionary of versions.
+            for variant in atom_meta["versions"].values():
+                # The variant contains a dictionary of file lists
+                for label, file_list in variant.items():
+                    if label not in [
+                        "dist_dir",
+                        "include_dir",
+                        "root",
+                    ]:
+                        files_list += file_list
 
             # The IFS files are listed separately outside the variant.
-            files_list += atom_meta["ifs_files"]
-        else:
-            assert False, f"Unhandleld atom type {atom_type}"
+            if "variants" not in atom_meta:
+                files_list += atom_meta["ifs_files"]
+            found_any = True
+
+        assert found_any, f"Unhandled atom type {atom_type}"
 
         return files_list
 
@@ -479,6 +477,25 @@ class MergedIDK:
             "root": "..",
             "schema_version": "1",
         }
+
+
+def create_relative_symlink(dest_path: pathlib.Path, src: pathlib.Path) -> None:
+    """Create a relative symlink at `dest_path` pointing to the file `src`.
+
+    `src` may itself be a symlink (e.g. in exported IDK collections such as
+    sdk/exported/bazel_internal_only), and `dest_path` may live under a
+    symlinked directory. Both sides are resolved before computing the link
+    value, so that the new link points directly at the real file rather
+    than forming a chain of symlinks. A chain is problematic because its
+    first hop does not change when the real file moves, which defeats
+    content hashing of the IDK (see
+    //build/bazel/scripts/compute_content_hash.py).
+    """
+    dest_path.symlink_to(
+        os.path.relpath(
+            os.path.realpath(src), os.path.realpath(dest_path.parent)
+        )
+    )
 
 
 def _merge_atoms(
@@ -603,13 +620,13 @@ def _merge_disjoint_dicts(
 
 def _merge_atom_meta(a: AtomMeta, b: AtomMeta) -> AtomMeta:
     """Merge two atoms, according to type-specific rules."""
-    if a["type"] in get_args(get_type_hints(UnmergeableMeta)["type"]):
+    if a["type"] in UNMERGEABLE_ATOM_TYPES:
         _assert_dicts_equal(a, b, [])
         return a
 
     if a["type"] == "cc_prebuilt_library":
         # This needs to go in each case to appease the type checker.
-        assert a["type"] == b["type"]
+        assert b["type"] == "cc_prebuilt_library"
 
         # "binaries" contains the legacy API level unaware prebuilts, and
         # "variants" contains the API level-specific prebuilts. They are
@@ -628,7 +645,7 @@ def _merge_atom_meta(a: AtomMeta, b: AtomMeta) -> AtomMeta:
         return a
 
     if a["type"] == "loadable_module":
-        assert a["type"] == b["type"]
+        assert b["type"] == "loadable_module"
         _assert_dicts_equal(a, b, ["binaries"])
         a["binaries"] = _merge_disjoint_dicts(
             a.get("binaries"), b.get("binaries")
@@ -636,7 +653,7 @@ def _merge_atom_meta(a: AtomMeta, b: AtomMeta) -> AtomMeta:
         return a
 
     if a["type"] == "package":
-        assert a["type"] == b["type"]
+        assert b["type"] == "package"
         _assert_dicts_equal(a, b, ["variants"])
         a["variants"] = _merge_unique_variants(
             a.get("variants"),
@@ -646,7 +663,7 @@ def _merge_atom_meta(a: AtomMeta, b: AtomMeta) -> AtomMeta:
         return a
 
     if a["type"] == "sysroot":
-        assert a["type"] == b["type"]
+        assert b["type"] == "sysroot"
         _assert_dicts_equal(a, b, ["versions", "variants"])
         a["versions"] = _merge_disjoint_dicts(
             a.get("versions"), b.get("versions")

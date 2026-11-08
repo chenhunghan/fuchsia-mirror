@@ -74,12 +74,9 @@ if (is_fuchsia) {
     configs += [ "//build/config/rust/lints:deny_unused_results" ]
   }
 }
+
 fuchsia_unittest_package("vigil-tests") {
   package_name = "vigil-tests-gn"
   component_name = "vigil-tests"
   deps = [ ":vigil_test" ]
-  visibility = [
-    ":*",
-    "//src/connectivity/bluetooth:*",
-  ]
 }

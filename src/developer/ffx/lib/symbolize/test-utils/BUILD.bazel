@@ -1,0 +1,32 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "symbolize_test_utils",
+    srcs = [
+        "collector.rs",
+        "lib.rs",
+    ],
+    crate_root = "lib.rs",
+    edition = "2024",
+    visibility = [
+        "//src/developer/ffx/lib/profiler/tests:__pkg__",
+        "//src/developer/ffx/lib/symbolize/tests:__pkg__",
+    ],
+    deps = [
+        "//third_party/rust_crates/vendor:serde",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "//sdk/rust/zx",
+            "//src/lib/elf_parse",
+            "//third_party/rust_crates/vendor:libc",
+            "//third_party/rust_crates/vendor:zerocopy",
+        ],
+        "//conditions:default": [],
+    }),
+)

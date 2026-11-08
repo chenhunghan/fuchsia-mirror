@@ -4,9 +4,36 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT
 
+import("//zircon/kernel/kernel_rust_mod.gni")
+
 source_set("ksync") {
-  sources = [ "bindings.cc" ]
+  sources = [
+    "bindings.cc",
+    "bindings.h",
+  ]
+  public = []
   deps = [ "//zircon/kernel/lib/lockdep" ]
+}
+
+# The kernel's raw lock implementations (`RawBrwLockPi` and `RawBrwLockNoPi`,
+# plus re-exports of `TrackedMutex` and `TrackedCriticalMutex` from
+# //zircon/kernel/kernel/mutex.rs and of `TrackedSpinlock` and
+# `TrackedMonitoredSpinlock` from //zircon/kernel/kernel/spinlock.rs) for
+# `//src/lib/ksync`. This is compiled directly into the kernel crate (mounted at
+# `crate::ksync_kernel`) rather than into the `ksync` crate, so that only kernel
+# code can name them directly. Generic code must instead be parameterized over
+# its `ksync::RawLock` type.
+kernel_rust_mod("ksync-rs") {
+  sources = [
+    "mod.rs",
+    "raw_kernel_brwlock.rs",
+  ]
+  deps = [
+    ":ksync",
+    "//src/lib/ksync",
+    "//src/lib/zr",
+    "//third_party/rust_crates:pin-init",
+  ]
 }
 
 group("tests") {

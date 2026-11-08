@@ -54,9 +54,6 @@ fuchsia_test_component("netsvc-integration-test") {
 
     # netemul-sandbox-v2 is used to create hermetic test realms.
     "//src/connectivity/network/testing/netemul/service:netemul-sandbox",
-
-    # We inject a network stack to be able to communicate with netsvc.
-    "//src/connectivity/network/netstack3:component-debug",
   ]
 }
 
@@ -64,6 +61,9 @@ fuchsia_test_with_expectations_package("integration") {
   package_name = "netsvc-integration-test"
   test_components = [ ":netsvc-integration-test" ]
   expectations = "expects/netsvc-integration-test.json5"
+
+  # We inject a network stack to be able to communicate with netsvc.
+  subpackages = [ "//src/connectivity/network/netstack3:package-debug" ]
 
   if (current_cpu == "riscv64") {
     expectations = "expects/netsvc-integration-test-riscv.json5"

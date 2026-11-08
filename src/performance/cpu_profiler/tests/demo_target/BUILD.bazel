@@ -1,0 +1,52 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["main.cc"],
+    gn_output_name = "demo_target",
+    visibility = ["//src/performance/cpu_profiler/tests:__pkg__"],
+    deps = ["//zircon/system/ulib/zx"],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged_bin",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "demo_target",
+)
+
+fx_component_manifest(
+    name = "demo_target_component-manifest",
+    testonly = True,
+    component_name = "demo_target",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/demo_target.cml",
+)
+
+fx_component(
+    name = "demo_target_component",
+    testonly = True,
+    compiled_manifest = ":demo_target_component-manifest",
+    visibility = ["//src/performance/cpu_profiler/tests:__pkg__"],
+    deps = [":bin_packaged_bin"],
+)
+
+fx_package(
+    name = "demo_target",
+    testonly = True,
+    components = [":demo_target_component"],
+)

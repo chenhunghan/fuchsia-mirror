@@ -543,7 +543,7 @@ pub mod queue {
     }
 
     bitfield! {
-        pub struct RequestField(u32);
+        pub struct RequestField(pub u32);
         impl Debug;
         pub state, set_state: 2, 0;
         pub fatal, set_fatal: 30, 30;

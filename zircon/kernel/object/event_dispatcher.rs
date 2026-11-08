@@ -7,14 +7,14 @@
 use super::event_dispatcher_ffi::{
     cpp_event_dispatcher_create, cpp_memory_stall_event_dispatcher_create,
 };
-use super::memory_watchdog::get_memory_watchdog;
 use super::{DispatcherOps, KernelHandle};
 use crate::counters::define_kcounter;
+use crate::ksync_kernel::TrackedCriticalMutex;
 use crate::platform_rs::timer::DurationMono;
 use crate::stall::{EventReceiver, StallAggregator, StallObserver};
 use core::ptr::NonNull;
 use fbl::Canary;
-use ksync::{KMutex, RawCriticalMutex, guarded};
+use ksync::{KMutex, guarded};
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
 use zx_types::{
@@ -41,10 +41,11 @@ pub struct EventDispatcherState {
     canary: Canary<{ fbl::magic(b"EVTD") }>,
 
     #[mutex]
-    lock: KMutex<RawCriticalMutex>,
+    lock: KMutex<TrackedCriticalMutex>,
 }
 
 impl EventDispatcherState {
+    #[inline]
     pub fn init(
         _dispatcher: *const EventDispatcher,
     ) -> impl PinInit<Self, core::convert::Infallible> {
@@ -71,21 +72,11 @@ crate::object::dispatcher::impl_dispatcher_facade_with_state!(
 );
 
 impl EventDispatcher {
-    pub fn default_rights() -> zx_rights_t {
-        ZX_DEFAULT_EVENT_RIGHTS
-    }
-
     /// Creates a new EventDispatcher via C++ and returns its kernel handle and rights.
-    pub fn create(options: u32) -> Result<(KernelHandle<Self>, zx_rights_t), Status> {
+    pub fn create() -> Result<(KernelHandle<Self>, zx_rights_t), Status> {
         // SAFETY: `cpp_event_dispatcher_create` initializes `handle` on success.
-        let handle =
-            unsafe { KernelHandle::create(|out| cpp_event_dispatcher_create(options, out)) }?;
+        let handle = unsafe { KernelHandle::create(|out| cpp_event_dispatcher_create(out)) }?;
         Ok((handle, ZX_DEFAULT_EVENT_RIGHTS))
-    }
-
-    /// Returns the kernel-owned memory pressure event dispatcher for the given kind.
-    pub fn get_mem_pressure_event(kind: u32) -> Result<fbl::RefPtr<EventDispatcher>, Status> {
-        get_memory_watchdog().get_mem_pressure_event(kind).ok_or(Status::INVALID_ARGS)
     }
 
     /// Creates a memory stall watch event dispatcher.

@@ -1,0 +1,119 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "looper_bin",
+    testonly = True,
+    srcs = ["src/looper.rs"],
+    crate_name = "looper",
+    crate_root = "src/looper.rs",
+    edition = "2024",
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/sys/component_manager/tests/binder/fidl:fuchsia.component.tests_rust",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "looper_packaged_bin",
+    testonly = True,
+    binary = ":looper_bin",
+    binary_name = "looper",
+)
+
+fx_component_manifest(
+    name = "looper_component-manifest",
+    testonly = True,
+    component_name = "looper",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/looper.cml",
+)
+
+fx_component(
+    name = "looper_component",
+    testonly = True,
+    compiled_manifest = ":looper_component-manifest",
+    deps = [":looper_packaged_bin"],
+)
+
+rustc_test(
+    name = "binder_integration_test_bin",
+    srcs = ["src/binder_integration_test.rs"],
+    crate_name = "binder_integration_test",
+    crate_root = "src/binder_integration_test.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/sys/component_manager/tests/binder/fidl:fuchsia.component.tests_rust",
+        "//src/sys/lib/component-events",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "binder_integration_test_packaged_bin",
+    testonly = True,
+    binary = ":binder_integration_test_bin",
+    binary_name = "binder_integration_test",
+)
+
+fx_component_manifest(
+    name = "binder_integration_test_component-manifest",
+    testonly = True,
+    component_name = "binder_integration_test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/binder_integration_test.cml",
+)
+
+fx_test_component(
+    name = "binder_integration_test_component",
+    compiled_manifest = ":binder_integration_test_component-manifest",
+    deps = [":binder_integration_test_packaged_bin"],
+)
+
+fx_package(
+    name = "binder_integration_test_package",
+    package_name = "binder_integration_test",
+    components = [
+        ":looper_component",
+        # https://fxbug.dev/42052321: Dep included for affected tests presubmit
+        "//src/sys/component_manager:component-manager-realm-builder-cmp",
+    ],
+    test_components = [":binder_integration_test_component"],
+)
+
+# https://fxbug.dev/42052321: Dep included for affected tests presubmit
+fx_test(
+    name = "binder_integration_test",
+    package = ":binder_integration_test_package",
+    visibility = ["//src/sys/component_manager:__pkg__"],
+)

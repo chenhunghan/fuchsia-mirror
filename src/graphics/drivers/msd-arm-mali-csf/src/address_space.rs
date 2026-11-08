@@ -35,7 +35,7 @@ pub enum Coherency {
     NonCoherent,
 }
 bitfield! {
-    pub struct AccessFlags(u64);
+    pub struct AccessFlags(pub u64);
     impl Debug;
     pub attribute_slot, set_attribute_slot: 4, 2;
     pub access_flag_read, set_access_flag_read: 6, 6;
@@ -45,7 +45,7 @@ bitfield! {
 }
 
 bitfield! {
-    pub struct MaliPte(u64);
+    pub struct MaliPte(pub u64);
     impl Debug;
     pub entry_type, set_entry_type: 1, 0;
     pub attribute_slot, set_attribute_slot: 4, 2;

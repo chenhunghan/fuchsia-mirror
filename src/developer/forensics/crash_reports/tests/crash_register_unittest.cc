@@ -4,13 +4,16 @@
 
 #include "src/developer/forensics/crash_reports/crash_register.h"
 
-#include <fuchsia/feedback/cpp/fidl.h>
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
 #include <lib/async/cpp/executor.h>
+#include <lib/fit/function.h>
 #include <lib/fpromise/promise.h>
 #include <lib/syslog/cpp/macros.h>
 #include <lib/zx/time.h>
 
 #include <memory>
+#include <optional>
+#include <utility>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -29,7 +32,7 @@ namespace forensics {
 namespace crash_reports {
 namespace {
 
-using fuchsia::feedback::CrashReportingProduct;
+using fuchsia_feedback::CrashReportingProduct;
 using inspect::testing::ChildrenMatch;
 using inspect::testing::NameMatches;
 using inspect::testing::NodeMatches;
@@ -43,7 +46,7 @@ constexpr char kComponentUrl[] = "fuchsia-pkg://fuchsia.com/my-pkg#meta/my-compo
 // Unit-tests the server of fuchsia.feedback.CrashReportingProductRegister.
 //
 // This does not test the environment service. It directly instantiates the class, without
-// connecting through FIDL.
+// connecting through the environment.
 class CrashRegisterTest : public UnitTestFixture {
  public:
   CrashRegisterTest()
@@ -54,12 +57,29 @@ class CrashRegisterTest : public UnitTestFixture {
 
  protected:
   void Upsert(const std::string& component_url, CrashReportingProduct product) {
-    crash_register_->Upsert(component_url, std::move(product));
+    ASSERT_TRUE(crash_register_client_
+                    ->Upsert({{
+                        .component_url = component_url,
+                        .product = std::move(product),
+                    }})
+                    .is_ok());
+    RunLoopUntilIdle();
   }
 
   void Upsert(const std::string& component_url, CrashReportingProduct product,
-              CrashRegister::UpsertWithAckCallback callback) {
-    crash_register_->UpsertWithAck(component_url, std::move(product), std::move(callback));
+              fit::closure callback) {
+    crash_register_client_
+        ->UpsertWithAck({{
+            .component_url = component_url,
+            .product = std::move(product),
+        }})
+        .Then([callback = std::move(callback)](
+                  fidl::Result<fuchsia_feedback::CrashReportingProductRegister::UpsertWithAck>&
+                      result) mutable {
+          EXPECT_TRUE(result.is_ok());
+          callback();
+        });
+    RunLoopUntilIdle();
   }
 
   bool HasProduct(const std::string& program_name) const {
@@ -79,7 +99,14 @@ class CrashRegisterTest : public UnitTestFixture {
   }
 
   void MakeNewCrashRegister() {
+    if (binding_.has_value()) {
+      binding_->Unbind();
+    }
     crash_register_ = std::make_unique<CrashRegister>(info_context_, RegisterJsonPath());
+    auto [client, server] =
+        fidl::Endpoints<fuchsia_feedback::CrashReportingProductRegister>::Create();
+    crash_register_client_ = fidl::Client(std::move(client), dispatcher());
+    binding_ = fidl::BindServer(dispatcher(), std::move(server), crash_register_.get());
   }
 
  private:
@@ -87,13 +114,16 @@ class CrashRegisterTest : public UnitTestFixture {
   files::ScopedTempDir tmp_dir_;
   std::shared_ptr<InfoContext> info_context_;
   std::unique_ptr<CrashRegister> crash_register_;
+  fidl::Client<fuchsia_feedback::CrashReportingProductRegister> crash_register_client_;
+  std::optional<fidl::ServerBindingRef<fuchsia_feedback::CrashReportingProductRegister>> binding_;
 };
 
 TEST_F(CrashRegisterTest, Upsert_Basic) {
-  CrashReportingProduct product;
-  product.set_name("some name");
-  product.set_version("some version");
-  product.set_channel("some channel");
+  CrashReportingProduct product({
+      .name = "some name",
+      .version = "some version",
+      .channel = "some channel",
+  });
   Upsert(kComponentUrl, std::move(product));
 
   EXPECT_THAT(InspectTree(), ChildrenMatch(Contains(AllOf(
@@ -118,10 +148,11 @@ TEST_F(CrashRegisterTest, Upsert_Basic) {
 }
 
 TEST_F(CrashRegisterTest, UpsertWithAck_Basic) {
-  CrashReportingProduct product;
-  product.set_name("some name");
-  product.set_version("some version");
-  product.set_channel("some channel");
+  CrashReportingProduct product({
+      .name = "some name",
+      .version = "some version",
+      .channel = "some channel",
+  });
 
   bool success{false};
   Upsert(kComponentUrl, std::move(product), [&] { success = true; });
@@ -149,9 +180,10 @@ TEST_F(CrashRegisterTest, UpsertWithAck_Basic) {
 }
 
 TEST_F(CrashRegisterTest, Upsert_NoInsertOnMissingProductName) {
-  CrashReportingProduct product;
-  product.set_version("some version");
-  product.set_channel("some channel");
+  CrashReportingProduct product({
+      .version = "some version",
+      .channel = "some channel",
+  });
   Upsert(kComponentUrl, std::move(product));
 
   EXPECT_THAT(InspectTree(),
@@ -160,10 +192,11 @@ TEST_F(CrashRegisterTest, Upsert_NoInsertOnMissingProductName) {
 }
 
 TEST_F(CrashRegisterTest, UpsertNoInsertOnNullByteInComponentUrl) {
-  CrashReportingProduct product;
-  product.set_name("some name");
-  product.set_version("some version");
-  product.set_channel("some channel");
+  CrashReportingProduct product({
+      .name = "some name",
+      .version = "some version",
+      .channel = "some channel",
+  });
 
   const std::string url_with_null("some url with\0a null byte", 25);
 
@@ -175,10 +208,11 @@ TEST_F(CrashRegisterTest, UpsertNoInsertOnNullByteInComponentUrl) {
 }
 
 TEST_F(CrashRegisterTest, Upsert_UpdateIfSameComponentUrl) {
-  CrashReportingProduct product;
-  product.set_name("some name");
-  product.set_version("some version");
-  product.set_channel("some channel");
+  CrashReportingProduct product({
+      .name = "some name",
+      .version = "some version",
+      .channel = "some channel",
+  });
   Upsert(kComponentUrl, std::move(product));
 
   EXPECT_THAT(InspectTree(), ChildrenMatch(Contains(AllOf(
@@ -193,10 +227,11 @@ TEST_F(CrashRegisterTest, Upsert_UpdateIfSameComponentUrl) {
                                                                StringIs("channel", "some channel"),
                                                            })))),
                                      })))))))));
-  CrashReportingProduct another_product;
-  another_product.set_name("some other name");
-  another_product.set_version("some other version");
-  another_product.set_channel("some other channel");
+  CrashReportingProduct another_product({
+      .name = "some other name",
+      .version = "some other version",
+      .channel = "some other channel",
+  });
   Upsert(kComponentUrl, std::move(another_product));
 
   EXPECT_THAT(InspectTree(),
@@ -227,10 +262,11 @@ TEST_F(CrashRegisterTest, GetProduct_NoUpsert) {
 }
 
 TEST_F(CrashRegisterTest, GetProduct_FromUpsert) {
-  CrashReportingProduct product;
-  product.set_name("some name");
-  product.set_version("some version");
-  product.set_channel("some channel");
+  CrashReportingProduct product({
+      .name = "some name",
+      .version = "some version",
+      .channel = "some channel",
+  });
   Upsert(kComponentUrl, std::move(product));
 
   const auto expected = Product{
@@ -249,10 +285,11 @@ TEST_F(CrashRegisterTest, GetProduct_FromUpsert) {
 }
 
 TEST_F(CrashRegisterTest, GetProduct_DifferentUpsert) {
-  CrashReportingProduct product;
-  product.set_name("some name");
-  product.set_version("some version");
-  product.set_channel("some channel");
+  CrashReportingProduct product({
+      .name = "some name",
+      .version = "some version",
+      .channel = "some channel",
+  });
   Upsert(kComponentUrl, std::move(product));
 
   EXPECT_FALSE(HasProduct("some program name"));
@@ -376,21 +413,24 @@ TEST_F(CrashRegisterTest, ReinitializesFromJson) {
   constexpr char kOtherComponentUrl[] =
       "fuchsia-pkg://fuchsia.com/my-other-pkg#meta/my-other-component.cm";
 
-  CrashReportingProduct product;
-  product.set_name("some name");
-  product.set_version("some version");
-  product.set_channel("some channel");
+  CrashReportingProduct product({
+      .name = "some name",
+      .version = "some version",
+      .channel = "some channel",
+  });
   Upsert(kComponentUrl, std::move(product));
 
-  CrashReportingProduct another_product;
-  another_product.set_name("some other name");
-  another_product.set_version("some other version");
-  another_product.set_channel("some other channel");
+  CrashReportingProduct another_product({
+      .name = "some other name",
+      .version = "some other version",
+      .channel = "some other channel",
+  });
   Upsert(kComponentUrl, std::move(another_product));
 
-  CrashReportingProduct yet_another_product;
-  yet_another_product.set_name("yet another name");
-  yet_another_product.set_version("yet another version");
+  CrashReportingProduct yet_another_product({
+      .name = "yet another name",
+      .version = "yet another version",
+  });
   Upsert(kOtherComponentUrl, std::move(yet_another_product));
 
   MakeNewCrashRegister();

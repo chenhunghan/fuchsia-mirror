@@ -140,28 +140,40 @@ where
     // TODO(https://fxbug.dev/535265209): Support capturing on multiple interfaces.
     let interfaces = fnet_debug::InterfaceSpecifier::InterfaceIds(vec![interface_id]);
 
-    let bpf_program = pcap_filter
-        .map(|filter_str| {
-            let fidl_fuchsia_ebpf::VerifiedProgram {
-                code,
-                struct_access_instructions,
-                maps,
-                __source_breaking,
-            } = pcap::compile::compile_filter(&filter_str).map_err(|e| {
-                crate::user_facing_error(format!(
-                    "Failed to compile pcap filter '{filter_str}': {e:?}"
-                ))
-            })?;
-            assert!(maps.unwrap().is_empty());
-            assert!(struct_access_instructions.unwrap().is_empty());
-            Ok::<_, anyhow::Error>(febpf::VerifiedProgram {
-                code,
-                struct_access_instructions: Some(Vec::new()),
-                maps: Some(Vec::new()),
-                ..Default::default()
-            })
-        })
-        .transpose()?;
+    let provider =
+        crate::connect_with_context::<fnet_debug::PacketCaptureProviderMarker, _>(connector)
+            .await
+            .context("Failed to connect to packet capture provider")?;
+
+    let (bpf_program, linker_fut) = match pcap_filter {
+        Some(filter_str) => {
+            let instructions =
+                pcap::compile::compile_filter_bytecode(&filter_str).map_err(|e| {
+                    crate::user_facing_error(format!(
+                        "Failed to compile pcap filter '{filter_str}': {e:?}"
+                    ))
+                })?;
+            let (linker_client, mut linker_stream) =
+                provider.domain().create_request_stream::<febpf::ProgramLinkerMarker>();
+            let linker_fut = futures::future::Either::Left(async move {
+                if let Some(Ok(febpf::ProgramLinkerRequest::Link { payload: _, responder })) =
+                    linker_stream.next().await
+                {
+                    let _ = responder
+                        .send(Ok(febpf::LinkedProgram::Bytecode(febpf::Bytecode { instructions })));
+                }
+            });
+            (
+                Some(febpf::VerifiedProgram {
+                    linker: Some(linker_client),
+                    maps: Some(Vec::new()),
+                    ..Default::default()
+                }),
+                linker_fut,
+            )
+        }
+        None => (None, futures::future::Either::Right(futures::future::ready(()))),
+    };
 
     let common_params = fnet_debug::CommonPacketCaptureParams {
         interfaces: Some(interfaces),
@@ -170,15 +182,12 @@ where
         ..Default::default()
     };
 
-    let provider =
-        crate::connect_with_context::<fnet_debug::PacketCaptureProviderMarker, _>(connector)
-            .await
-            .context("Failed to connect to packet capture provider")?;
     let rolling_params =
         fnet_debug::RollingPacketCaptureParams { capture_size, ..Default::default() };
-    let rolling_client = provider
-        .start_rolling(common_params, &rolling_params)
-        .await
+    let (start_res, ()) =
+        futures::future::join(provider.start_rolling(common_params, &rolling_params), linker_fut)
+            .await;
+    let rolling_client = start_res
         .context("FIDL error calling StartRolling")?
         .map_err(|e| crate::user_facing_error(format!("StartRolling error: {e:?}")))?
         .into_proxy();

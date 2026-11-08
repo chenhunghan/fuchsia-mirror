@@ -30,19 +30,30 @@ library_headers("headers") {
   public_deps = [
     "//zircon/system/ulib/fbl:headers",
 
-    # <fbl/gparena.h> has #include <lib/fit/defer.h>
-    "//sdk/lib/fit:headers",
-
     # <fbl/arena.h> has #include <ktl/forward.h>.
     "//zircon/kernel/lib/ktl:headers",
-
-    # <fbl/gparena.h> has #include <lib/page/size.h>
-    "//zircon/kernel/lib/page:headers",
   ]
 }
 
 group("tests") {
   testonly = true
+}
+
+kernel_rust_mod("gparena") {
+  sources = [ "gparena.rs" ]
+  deps = [
+    "//sdk/rust/zx-status",
+    "//src/lib/kprint",
+    "//src/lib/ksync",
+    "//src/lib/zr",
+    "//third_party/rust_crates:pin-init",
+    "//zircon/kernel/lib/page:page-rs",
+    "//zircon/system/ulib/fbl/rust:fbl",
+  ]
+  test_deps = [
+    "//src/lib/kalloc",
+    "//zircon/kernel/lib/unittest:unittest-rs",
+  ]
 }
 
 kernel_rust_mod("name_tests_rust") {
@@ -64,11 +75,11 @@ source_set("kernel-tests") {
   ]
   sources = [
     "arena_tests.cc",
-    "gparena_tests.cc",
     "name_tests.cc",
   ]
 
   deps = [
+    ":gparena",
     ":headers",
     ":name_tests_rust",
     "//zircon/kernel/lib/page",

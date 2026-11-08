@@ -31,7 +31,6 @@
 #include <kernel/mutex.h>
 #include <kernel/thread.h>
 #include <ktl/algorithm.h>
-#include <object/process_dispatcher.h>
 #include <vm/fault.h>
 #include <vm/vm.h>
 #include <vm/vm_address_region.h>
@@ -760,14 +759,6 @@ void VmAspace::DropUserPageTables() {
     return;
   Guard<CriticalMutex> guard{&lock_};
   arch_aspace().Unmap(base(), size() / kPageSize, ArchUnmapOptions::Enlarge);
-}
-
-bool VmAspace::IntersectsVdsoCodeLocked(vaddr_t base, size_t size) const {
-  if (vdso_code_mapping_) {
-    return Intersects(vdso_code_mapping_->base(), vdso_code_mapping_->size(), base, size);
-  }
-
-  return false;
 }
 
 bool VmAspace::IsHighMemoryPriority() const {

@@ -40,5 +40,4 @@ rustc_library("insecure") {
     "//src/storage/crypt/fxfs/common:lib",
     "//src/storage/fxfs/crypto",
   ]
-  deps += [ "//build/validate:non_production_tag" ]
 }

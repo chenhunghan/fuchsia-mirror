@@ -28,8 +28,10 @@ pub type Utilization = ffl::FastFixed<i64, 31>;
 pub type Time = ffl::FastFixed<i64, 0>;
 
 pub use energy_model::{
-    CppPowerLevelController, EnergyModel, MAX_POWER_DOMAINS,
-    POWER_LEVEL_OPTIONS_DOMAIN_INDEPENDENT, PowerDomain, PowerDomainSet, PowerLevel,
+    CppPowerLevelController, EnergyModel, POWER_LEVEL_OPTIONS_DOMAIN_INDEPENDENT, PowerDomain,
+    PowerDomainConfigFfi, PowerDomainSet, PowerLevel, PowerLevelTransition, PowerLevelType,
+    ProcessorPowerLevel, ProcessorPowerLevelFfi, ProcessorPowerLevelTransition, TransitionMatrix,
+    boot_boost_enabled, register_domains, set_rate_limits,
 };
 #[cfg(not(feature = "userspace"))]
 pub use pdev_power_level_controller::PDevPowerLevelController;

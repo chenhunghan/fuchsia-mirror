@@ -298,6 +298,103 @@ TEST_F(RequestAsyncBacktraceTest, MultipleThreadsRequiresAllThreadsStopped) {
   }
 }
 
+TEST_F(RequestAsyncBacktraceTest, StoppedThreadWithCppDispatcher) {
+  InitializeDebugging();
+
+  Process* process = InjectProcessWithModule(kProcessKoid, 0x1000);
+  process->AddAsyncTaskProviderForTesting(ExprLanguage::kC,
+                                          std::make_unique<MockAsyncTaskProvider>(fake_file_path_));
+
+  Thread* thread = InjectThread(kProcessKoid, kThreadKoid);
+
+  std::vector<std::unique_ptr<Frame>> frames;
+  auto cu = fxl::MakeRefCounted<CompileUnit>(DwarfTag::kCompileUnit, fxl::WeakPtr<ModuleSymbols>(),
+                                             fxl::RefPtr<DwarfUnit>(), DwarfLang::kCpp, "driver.cc",
+                                             std::optional<uint64_t>());
+  auto func = fxl::MakeRefCounted<Function>(DwarfTag::kSubprogram);
+  func->set_assigned_name("mock_cpp_dispatcher");
+  SymbolTestParentSetter parent_setter(func, cu);
+  Location loc(0x1234, FileLine(), 0, SymbolContext::ForRelativeAddresses(), func);
+  frames.push_back(std::make_unique<MockFrame>(&session(), thread, loc, 0));
+
+  InjectExceptionWithStack(kProcessKoid, kThreadKoid, debug_ipc::ExceptionType::kSingleStep,
+                           std::move(frames), true);
+
+  dap::ZxdbAsyncBacktraceRequest req;
+  req.threadId = static_cast<dap::integer>(kThreadKoid);
+  auto response = client().send(req);
+
+  context().OnStreamReadable();
+  loop().RunUntilNoTasks();
+  RunPendingClientCalls();
+
+  auto got = response.get();
+  EXPECT_FALSE(got.error);
+  ASSERT_EQ(got.response.tasks.size(), 2u);
+
+  ASSERT_TRUE(got.response.tasks[0].id.has_value());
+  EXPECT_EQ(got.response.tasks[0].id.value(), "0x1");
+  EXPECT_EQ(got.response.tasks[0].name, "root");
+  EXPECT_TRUE(got.response.tasks[0].file.has_value());
+  EXPECT_EQ(got.response.tasks[0].file.value(), fake_file_path_);
+  EXPECT_TRUE(got.response.tasks[0].line.has_value());
+  EXPECT_EQ(got.response.tasks[0].line.value(), 42);
+
+  ASSERT_EQ(got.response.tasks[0].children.size(), 1u);
+  ASSERT_TRUE(got.response.tasks[0].children[0].id.has_value());
+  EXPECT_EQ(got.response.tasks[0].children[0].id.value(), "0x2");
+  EXPECT_EQ(got.response.tasks[0].children[0].name, "child");
+
+  ASSERT_EQ(got.response.tasks[0].children[0].children.size(), 1u);
+  ASSERT_TRUE(got.response.tasks[0].children[0].children[0].id.has_value());
+  EXPECT_EQ(got.response.tasks[0].children[0].children[0].id.value(), "0x3");
+  EXPECT_EQ(got.response.tasks[0].children[0].children[0].name, "grandchild");
+
+  EXPECT_FALSE(got.response.tasks[1].id.has_value());
+  EXPECT_EQ(got.response.tasks[1].name, "zero_id_task");
+}
+
+TEST_F(RequestAsyncBacktraceTest, StoppedCppThreadWithoutDriverFrames) {
+  InitializeDebugging();
+
+  InjectProcessWithModule(kProcessKoid, 0x1000);
+  Thread* thread = InjectThread(kProcessKoid, kThreadKoid);
+
+  std::vector<std::unique_ptr<Frame>> frames;
+  auto cu = fxl::MakeRefCounted<CompileUnit>(DwarfTag::kCompileUnit, fxl::WeakPtr<ModuleSymbols>(),
+                                             fxl::RefPtr<DwarfUnit>(), DwarfLang::kCpp, "main.cc",
+                                             std::optional<uint64_t>());
+
+  auto func_helper = fxl::MakeRefCounted<Function>(DwarfTag::kSubprogram);
+  func_helper->set_assigned_name("MyHelper");
+  SymbolTestParentSetter parent_setter_helper(func_helper, cu);
+  Location loc_helper(0x1234, FileLine("main.cc", 10), 0, SymbolContext::ForRelativeAddresses(),
+                      func_helper);
+  frames.push_back(std::make_unique<MockFrame>(&session(), thread, loc_helper, 0x2000));
+
+  auto func_main = fxl::MakeRefCounted<Function>(DwarfTag::kSubprogram);
+  func_main->set_assigned_name("main");
+  SymbolTestParentSetter parent_setter_main(func_main, cu);
+  Location loc_main(0x1000, FileLine("main.cc", 20), 0, SymbolContext::ForRelativeAddresses(),
+                    func_main);
+  frames.push_back(std::make_unique<MockFrame>(&session(), thread, loc_main, 0x2010));
+
+  InjectExceptionWithStack(kProcessKoid, kThreadKoid, debug_ipc::ExceptionType::kSingleStep,
+                           std::move(frames), true);
+
+  dap::ZxdbAsyncBacktraceRequest req;
+  req.threadId = static_cast<dap::integer>(kThreadKoid);
+  auto response = client().send(req);
+
+  context().OnStreamReadable();
+  loop().RunUntilNoTasks();
+  RunPendingClientCalls();
+
+  auto got = response.get();
+  EXPECT_FALSE(got.error);
+  EXPECT_TRUE(got.response.tasks.empty());
+}
+
 }  // namespace
 
 }  // namespace zxdb

@@ -11,9 +11,9 @@ from collections.abc import Collection
 
 from reporting import metrics
 from trace_processing import trace_metrics, trace_model, trace_time, trace_utils
-from trace_processing.metrics import cpu
 
 MEMORY_SYSTEM_CATEGORY = "memory:kernel"
+_NS_PER_MS = 1_000_000.0
 
 # The names of threads that perform memory management tasks; CPU time spent in
 # these threads gets aggregated into a "management time" cumulative metric.
@@ -31,12 +31,15 @@ _MEMORY_MANAGEMENT_THREAD_NAMES = frozenset(
     )
 )
 
+_KERNEL_EVENT_BASIC = "kmem_stats_a"
 _KERNEL_EVENT_NAMES = (
-    "kmem_stats_a",
+    _KERNEL_EVENT_BASIC,
     "kmem_stats_b",
     "kmem_stats_compression",
     "memory_stall",
+    "page_request_wait",
 )
+_KERNEL_EVENT_NAMES_SET = frozenset(_KERNEL_EVENT_NAMES)
 # Names of some of the metrics that are cumulative, monotonic counters,
 # as opposed to gauges.
 _CUMULATIVE_METRIC_NAMES = frozenset(
@@ -85,6 +88,16 @@ _STRUCTURED_METRIC_NAMES = {
         metrics.Unit.count,
         metrics.Direction.smallerIsBetter,
     ),
+    "page_request_wait_read": _StructuredMetricName(
+        "Memory/System/PageRequestTime/Read",
+        metrics.Unit.nanoseconds,
+        metrics.Direction.smallerIsBetter,
+    ),
+    "page_request_wait_dirty": _StructuredMetricName(
+        "Memory/System/PageRequestTime/Dirty",
+        metrics.Unit.nanoseconds,
+        metrics.Direction.smallerIsBetter,
+    ),
     "total_heap_bytes": _StructuredMetricName(
         "Memory/System/ZirconHeapBytes", metrics.Unit.bytes
     ),
@@ -92,6 +105,17 @@ _STRUCTURED_METRIC_NAMES = {
 
 _MANAGEMENT_STRUCTURED_METRIC_NAME = _StructuredMetricName(
     "Memory/System/ManagementTime", metrics.Unit.milliseconds
+)
+
+# Fields from `zx_info_kmem_stats` composing the total kernel private memory.
+_KERNEL_PRIVATE_MEMORY_FIELDS = (
+    "wired_bytes",
+    "total_heap_bytes",
+    "mmu_overhead_bytes",
+    "ipc_bytes",
+    "cache_bytes",
+    "slab_bytes",
+    "other_bytes",
 )
 
 
@@ -141,6 +165,52 @@ def _gauges_metrics_json(
     return {result.label: result.values[0] for result in results}
 
 
+def _compute_management_time_ms(model: trace_model.Model) -> float:
+    """Computes total unnormalized CPU time (ms) spent in memory management threads."""
+    management_tids = {
+        t.tid
+        for p in model.processes
+        for t in p.threads
+        if t.name in _MEMORY_MANAGEMENT_THREAD_NAMES
+    }
+    if not management_tids or not model.scheduling_records:
+        return 0.0
+
+    entries: list[tuple[int, float, float]] = []
+    for cpu_idx, records in model.scheduling_records.items():
+        cs_records = [
+            r for r in records if isinstance(r, trace_model.ContextSwitch)
+        ]
+        if len(cs_records) < 2:
+            continue
+        cs_records.sort(key=lambda r: r.start.to_epoch_nanoseconds())
+        total_cpu_dur = (
+            float(cs_records[-1].start.to_epoch_nanoseconds())
+            - float(cs_records[0].start.to_epoch_nanoseconds())
+        ) / _NS_PER_MS
+        tid_durations: dict[int, float] = {}
+        for i in range(len(cs_records) - 1):
+            prev_record = cs_records[i]
+            curr_record = cs_records[i + 1]
+            out_tid = curr_record.outgoing_tid
+            if (
+                prev_record.tid == out_tid
+                and out_tid in management_tids
+                and not prev_record.is_idle()
+            ):
+                dur = (
+                    float(curr_record.start.to_epoch_nanoseconds())
+                    - float(prev_record.start.to_epoch_nanoseconds())
+                ) / _NS_PER_MS
+                tid_durations[out_tid] = tid_durations.get(out_tid, 0.0) + dur
+        for dur in tid_durations.values():
+            pct = dur / total_cpu_dur * 100.0 if total_cpu_dur > 0 else 0.0
+            entries.append((cpu_idx, pct, dur))
+
+    entries.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return sum(dur for _, _, dur in entries)
+
+
 class MemoryMetricsProcessor(trace_metrics.MetricsProcessor):
     """Computes statistics for values published by zircon kernel.
 
@@ -186,7 +256,7 @@ class MemoryMetricsProcessor(trace_metrics.MetricsProcessor):
         series_by_name = collections.defaultdict(list)
         for event in trace_utils.filter_events(
             model.all_events(),
-            name=_KERNEL_EVENT_NAMES,
+            name=_KERNEL_EVENT_NAMES_SET,
             type=trace_model.CounterEvent,
         ):
             for name, value in event.args.items():
@@ -209,16 +279,65 @@ class MemoryMetricsProcessor(trace_metrics.MetricsProcessor):
         self, model: trace_model.Model
     ) -> Collection[metrics.TestCaseResult]:
         series_by_name = collections.defaultdict(list)
-        for event in trace_utils.filter_events(
-            model.all_events(),
-            name=_KERNEL_EVENT_NAMES,
-            type=trace_model.CounterEvent,
-        ):
-            for name, value in event.args.items():
-                if name in _STRUCTURED_METRIC_NAMES:
-                    series_by_name[name].append((event.start, value))
+        read_durations: list[int | float] = []
+        dirty_durations: list[int | float] = []
+        private_memory_series = []
+
+        for process in model.processes:
+            for thread in process.threads:
+                for event in thread.events:
+                    if (
+                        isinstance(event, trace_model.CounterEvent)
+                        and event.name in _KERNEL_EVENT_NAMES_SET
+                    ):
+                        for name, value in event.args.items():
+                            if name in _STRUCTURED_METRIC_NAMES:
+                                series_by_name[name].append(
+                                    (event.start, value)
+                                )
+                        if event.name == _KERNEL_EVENT_BASIC and all(
+                            field in event.args
+                            for field in _KERNEL_PRIVATE_MEMORY_FIELDS
+                        ):
+                            private_memory_series.append(
+                                (
+                                    event.start,
+                                    sum(
+                                        event.args[field]
+                                        for field in _KERNEL_PRIVATE_MEMORY_FIELDS
+                                    ),
+                                )
+                            )
+                    elif (
+                        isinstance(event, trace_model.DurationEvent)
+                        and event.name == "page_request_wait"
+                        and event.duration is not None
+                        and event.args.get("pager_name")
+                    ):
+                        req_type = event.args.get("type")
+                        if req_type == "Read":
+                            read_durations.append(
+                                event.duration.to_nanoseconds()
+                            )
+                        elif req_type == "Dirty":
+                            dirty_durations.append(
+                                event.duration.to_nanoseconds()
+                            )
 
         results = []
+        if private_memory_series:
+            results.extend(
+                trace_utils.standard_metrics_set(
+                    values=_gauges_metrics_values(private_memory_series),
+                    label_prefix="Memory/Kernel/TotalPrivate",
+                    unit=metrics.Unit.bytes,
+                    doc_prefix=(
+                        "Total bytes used by Kernel "
+                        f"({', '.join(_KERNEL_PRIVATE_MEMORY_FIELDS)})"
+                    ),
+                )
+            )
+
         for name, series in series_by_name.items():
             if name in _CUMULATIVE_METRIC_NAMES:
                 values = [_cumulative_metrics_value(series)[0]]
@@ -233,12 +352,7 @@ class MemoryMetricsProcessor(trace_metrics.MetricsProcessor):
                 )
             )
 
-        breakdown, _ = cpu.process_metrics_and_get_total_time(model)
-        total_management_time = sum(
-            metric["duration"]
-            for metric in breakdown
-            if metric["thread_name"] in _MEMORY_MANAGEMENT_THREAD_NAMES
-        )
+        total_management_time = _compute_management_time_ms(model)
         results.append(
             metrics.TestCaseResult(
                 label=_MANAGEMENT_STRUCTURED_METRIC_NAME.structured_name,
@@ -247,5 +361,20 @@ class MemoryMetricsProcessor(trace_metrics.MetricsProcessor):
                 direction=metrics.Direction.smallerIsBetter,
             )
         )
+
+        for durations, metric_key in (
+            (read_durations, "page_request_wait_read"),
+            (dirty_durations, "page_request_wait_dirty"),
+        ):
+            metric_info = _STRUCTURED_METRIC_NAMES[metric_key]
+            if durations:
+                results.append(
+                    metrics.TestCaseResult(
+                        label=metric_info.structured_name,
+                        values=durations,
+                        unit=metric_info.unit,
+                        direction=metric_info.direction,
+                    )
+                )
 
         return results

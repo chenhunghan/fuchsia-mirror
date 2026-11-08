@@ -6,11 +6,11 @@
 
 #include <lib/fit/defer.h>
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
 #include "src/developer/forensics/feedback_data/constants.h"
-#include "src/developer/forensics/feedback_data/log_source.h"
 #include "src/developer/forensics/utils/log_format.h"
 #include "src/lib/fxl/strings/string_printf.h"
 
@@ -43,7 +43,7 @@ std::optional<zx::time_boot> LogBuffer::LastTimestamp() const {
   return messages_.empty() ? std::nullopt : std::make_optional(messages_.back().timestamp);
 }
 
-bool LogBuffer::Add(LogSink::MessageOr message) {
+void LogBuffer::Add(::fpromise::result<fuchsia::logger::LogMessage, std::string> message) {
   if (message.is_ok()) {
     redactor_->Redact(message.value().msg);
     for (std::string& tag : message.value().tags) {
@@ -70,24 +70,19 @@ bool LogBuffer::Add(LogSink::MessageOr message) {
     last_tags = tags;
     last_msg_repeated_ = 0;
     is_sorted_ &= messages_.back().timestamp >= last_timestamp;
-
-    return true;
   };
 
-  const zx::time_boot action_timestamp = (message.is_ok()) ? message.value().time : last_timestamp;
-  auto on_return = ::fit::defer([this, action_timestamp] {
-    RunActions(action_timestamp);
-    EnforceCapacity();
-  });
+  auto on_return = ::fit::defer([this] { EnforceCapacity(); });
 
   if (messages_.empty()) {
-    return AddNew();
+    AddNew();
+    return;
   }
 
   // The most recent message is repeated, don't need to create new data.
   if (last_msg_ == msg && last_severity_ == severity && last_tags == tags) {
     ++last_msg_repeated_;
-    return true;
+    return;
   }
 
   // Inject a signal the most previously added message was repeated.
@@ -95,21 +90,7 @@ bool LogBuffer::Add(LogSink::MessageOr message) {
     size_ += AppendRepeated(last_msg_repeated_, messages_.back().msg);
   }
 
-  return AddNew();
-}
-
-void LogBuffer::NotifyInterruption() {
-  messages_.clear();
-  ResetLastMessage();
-  is_sorted_ = true;
-  size_ = 0u;
-
-  // Executing and deleting all remaining actions is safe because non-SystemLog controlled
-  // interruptions aren't expected to occur.
-  for (auto& [_, action] : actions_at_time_) {
-    action();
-  }
-  actions_at_time_.clear();
+  AddNew();
 }
 
 std::string LogBuffer::ToString() {
@@ -129,10 +110,6 @@ std::string LogBuffer::ToString() {
   }
 
   return out;
-}
-
-void LogBuffer::ExecuteAfter(const zx::time_boot uptime, ::fit::closure action) {
-  actions_at_time_.insert({uptime, std::move(action)});
 }
 
 void LogBuffer::Sort() {
@@ -167,13 +144,6 @@ void LogBuffer::Sort() {
   ResetLastMessage();
 }
 
-void LogBuffer::RunActions(const zx::time_boot timestamp) {
-  for (auto it = actions_at_time_.lower_bound(timestamp); it != actions_at_time_.end();) {
-    it->second();
-    actions_at_time_.erase(it++);
-  }
-}
-
 void LogBuffer::EnforceCapacity() {
   if (size_ <= capacity_) {
     return;
@@ -194,7 +164,9 @@ void LogBuffer::ResetLastMessage() {
   last_msg_repeated_ = 0u;
 }
 
-LogBuffer::Message::Message(const LogSink::MessageOr& message, zx::time_boot default_timestamp)
+LogBuffer::Message::Message(
+    const ::fpromise::result<fuchsia::logger::LogMessage, std::string>& message,
+    zx::time_boot default_timestamp)
     : timestamp(message.is_ok() ? message.value().time : default_timestamp),
       msg(message.is_ok() ? Format(message.value())
                           : fxl::StringPrintf("!!! Failed to format chunk: %s !!!\n",

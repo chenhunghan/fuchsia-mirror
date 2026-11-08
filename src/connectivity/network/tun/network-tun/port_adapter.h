@@ -5,6 +5,7 @@
 #define SRC_CONNECTIVITY_NETWORK_TUN_NETWORK_TUN_PORT_ADAPTER_H_
 
 #include <fidl/fuchsia.hardware.network.driver/cpp/driver/wire.h>
+#include <lib/zx/event.h>
 
 #include <fbl/mutex.h>
 
@@ -43,7 +44,8 @@ class PortAdapterParent : public MacAdapterParent {
 class PortAdapter : public fdf::WireServer<fuchsia_hardware_network_driver::NetworkPort> {
  public:
   PortAdapter(PortAdapterParent* parent, const BasePortConfig& config,
-              std::unique_ptr<MacAdapter> mac, fdf::UnownedUnsynchronizedDispatcher dispatcher);
+              std::unique_ptr<MacAdapter> mac, fdf::UnownedUnsynchronizedDispatcher dispatcher,
+              zx::event power_dependency_token = {});
   PortAdapter(PortAdapter&&) = delete;
 
   // NetworkPort protocol:
@@ -82,6 +84,7 @@ class PortAdapter : public fdf::WireServer<fuchsia_hardware_network_driver::Netw
   fdf::UnownedUnsynchronizedDispatcher dispatcher_;
   const std::unique_ptr<MacAdapter> mac_;
   const BasePortConfig config_;
+  const zx::event power_dependency_token_;
 
   fbl::Mutex state_lock_;
   bool has_sessions_ __TA_GUARDED(state_lock_) = false;

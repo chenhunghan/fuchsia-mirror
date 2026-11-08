@@ -6,7 +6,6 @@ group("drivers") {
   testonly = true
   deps = [
     "drivers/qmi-fake-transport:fake_qmi_driver",
-    "drivers/qmi-usb-transport:qmi_driver",
     "tests/fake-drivers",
   ]
 }

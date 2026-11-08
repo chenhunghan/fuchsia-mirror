@@ -79,6 +79,5 @@ group("tests") {
     ":goldens",
     ":goldens($host_toolchain)",
     "convert:tests",
-    "examples/calculator:tests",
   ]
 }

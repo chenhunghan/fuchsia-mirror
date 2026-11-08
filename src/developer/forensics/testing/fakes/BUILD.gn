@@ -34,11 +34,11 @@ executable("fake_data_provider_exe") {
   ]
 
   deps = [
-    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_hlcpp",
-    "//sdk/fidl/fuchsia.mem:fuchsia.mem_hlcpp",
+    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_cpp",
+    "//sdk/fidl/fuchsia.mem:fuchsia.mem_cpp",
     "//sdk/lib/async-loop:async-loop-cpp",
     "//sdk/lib/async-loop:async-loop-default",
-    "//sdk/lib/sys/cpp",
+    "//sdk/lib/component/outgoing/cpp",
     "//sdk/lib/syslog/cpp",
     "//src/developer/forensics/utils:archive",
     "//src/lib/fsl",
@@ -77,14 +77,11 @@ source_set("privacy_settings") {
   ]
 
   public_deps = [
-    "//sdk/fidl/fuchsia.settings:fuchsia.settings_hlcpp",
-    "//src/lib/fxl",
+    "//sdk/fidl/fuchsia.settings:fuchsia.settings_cpp",
+    "//src/developer/forensics/testing/stubs:fidl_server",
   ]
 
-  deps = [
-    "//sdk/lib/fit-promise",
-    "//sdk/lib/syslog/cpp",
-  ]
+  deps = [ "//sdk/lib/syslog/cpp" ]
 }
 
 ###############################################################################

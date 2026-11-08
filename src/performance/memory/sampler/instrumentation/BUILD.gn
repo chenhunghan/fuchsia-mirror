@@ -4,6 +4,14 @@
 
 import("//build/cpp/sdk_shared_library.gni")
 
+source_set("allocation_table") {
+  sources = [
+    "allocation_table.cc",
+    "allocation_table.h",
+  ]
+  public = [ "allocation_table.h" ]
+}
+
 source_set("recorder") {
   sources = [
     "recorder.cc",
@@ -11,10 +19,10 @@ source_set("recorder") {
   ]
   public = [ "recorder.h" ]
   public_deps = [
+    ":allocation_table",
     ":poisson_sampler",
     "//sdk/fidl/fuchsia.memory.sampler:fuchsia.memory.sampler_cpp",
     "//sdk/lib/component/incoming/cpp",
-    "//src/lib/elf-search",
     "//zircon/system/ulib/fbl",
     "//zircon/system/ulib/zx",
   ]
@@ -51,7 +59,6 @@ sdk_shared_library("instrumentation") {
 
   runtime_deps = [
     "//sdk/lib/fdio",
-    "//zircon/system/ulib/trace-engine",
     "//zircon/system/ulib/zx",
   ]
 }

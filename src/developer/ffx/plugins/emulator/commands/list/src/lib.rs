@@ -35,11 +35,11 @@ pub struct WithInstances<P: Instances>(PhantomData<P>);
 impl TryFromEnv for InstanceData {
     type Error = fho::Error;
     async fn try_from_env(env: &fho::FhoEnvironment) -> std::result::Result<Self, Self::Error> {
-        let instance_root: PathBuf = env
+        let dirs: Vec<PathBuf> = env
             .environment_context()
             .get(ffx_config::keys::EMU_INSTANCE_ROOT_DIR)
             .map_err(|e| bug!("{e}"))?;
-        Ok(InstanceData { emu_instances: EmulatorInstances::new(instance_root) })
+        Ok(InstanceData { emu_instances: EmulatorInstances::from(dirs) })
     }
 }
 

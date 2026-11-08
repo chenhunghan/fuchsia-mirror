@@ -22,10 +22,10 @@ source_set("pci-protocol-fake") {
     "//sdk/lib/async:async-cpp",
     "//sdk/lib/async-loop:async-loop-cpp",
     "//sdk/lib/async-loop:async-loop-default",
+    "//sdk/lib/driver/fake-bti/cpp",
+    "//sdk/lib/driver/fake-resource/cpp",
     "//src/devices/pci/lib/cpp:headers",
     "//src/devices/pci/lib/device-protocol-pci",
-    "//src/devices/testing/fake-bti",
-    "//src/devices/testing/fake-resource",
     "//zircon/system/ulib/fbl",
   ]
   deps = [ "//sdk/lib/stdcompat" ]

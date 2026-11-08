@@ -95,13 +95,12 @@ class GdcDevice : public GdcDeviceType, public ddk::GdcProtocol<GdcDevice, ddk::
 
   struct TaskInfo {
     GdcOp op;
-    GdcTask* task;
     // case: GDC_OP_SETOUTPUTRES |index| = output format index
     // case: GDC_OP_FRAME        |index| = input buffer index
-    uint32_t index;
+    uint32_t index = 0;
     uint64_t capture_timestamp = 0;
     // Index of the task in the hashmap
-    uint32_t task_index;
+    uint32_t task_index = 0;
   };
 
   zx::port port_;
@@ -117,6 +116,9 @@ class GdcDevice : public GdcDeviceType, public ddk::GdcProtocol<GdcDevice, ddk::
   void Start() const;
   void Stop() const;
 
+  // Looks up |task_index| under |interface_lock_|. The returned pointer is only guaranteed to
+  // remain valid on |processing_thread_|, which is the sole thread that erases from |task_map_|.
+  GdcTask* LookupTask(uint32_t task_index);
   void ProcessTask(TaskInfo& info);
   void ChangeOutputResolution(TaskInfo& info);
   void ProcessFrame(TaskInfo& info);

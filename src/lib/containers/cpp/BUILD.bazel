@@ -2,11 +2,27 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/host_tests:host_test.bzl", "host_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
 
-cc_library(
+test_suite(
+    name = "tests",
+    tests = [":containers_cpp_tests"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    tests = [":containers_cpp_host_unittests"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+fx_cc_library(
     name = "cpp",
     hdrs = [
         "circular_deque.h",
@@ -15,8 +31,38 @@ cc_library(
         "template_util.h",
         "vector_buffer.h",
     ],
+    # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
     copts = ["-Wno-conversion"],
-    visibility = ["//visibility:public"],
+    visibility = ["//:__subpackages__"],
     deps = ["//zircon/third_party/ulib/safemath"],
     alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "containers_cpp_unittests",
+    testonly = True,
+    srcs = [
+        "circular_deque_unittest.cc",
+        "mpsc_queue_unittest.cc",
+        "test_objects.h",
+        "vector_buffer_unittest.cc",
+    ],
+    # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
+    copts = ["-Wno-conversion"],
+    deps = [
+        ":cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "containers_cpp_tests",
+    unit_tests = [":containers_cpp_unittests"],
+)
+
+host_test(
+    name = "containers_cpp_host_unittests",
+    binary = ":containers_cpp_unittests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
 )

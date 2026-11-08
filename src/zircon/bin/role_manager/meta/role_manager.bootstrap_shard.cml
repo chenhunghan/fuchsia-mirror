@@ -18,7 +18,10 @@
             subdir: "config/profiles",
         },
         {
-            protocol: [ "fuchsia.kernel.ProfileResource" ],
+            protocol: [
+                "fuchsia.kernel.ProfileResource",
+                "fuchsia.sys2.BootNotifier",
+            ],
             from: "parent",
             to: [ "#role_manager" ],
         },

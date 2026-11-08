@@ -11,7 +11,6 @@ use anyhow::{Error, anyhow};
 use byteorder::{LittleEndian, WriteBytesExt};
 use fuchsia_inspect::{Property as _, UintProperty};
 use std::cmp::min;
-use std::io::Write;
 use storage_device::buffer::MutableBufferRef;
 use storage_units::BlockSize;
 
@@ -74,14 +73,29 @@ impl JournalWriter {
 
     /// Pads from the current offset in the buffer to the end of the block.
     pub fn pad_to_block(&mut self) -> std::io::Result<()> {
-        let align = (self.buf.len() as u64 % self.block_size) as usize;
+        let bs = self.block_size.get() as usize;
+        let align = self.buf.len() % bs;
         if align > 0 {
-            self.write_all(&vec![
-                0;
-                self.block_size.get() as usize
-                    - std::mem::size_of::<Checksum>()
-                    - align
-            ])?;
+            let block_start = self.buf.len() - align;
+            let end_of_data = block_start + bs - std::mem::size_of::<Checksum>();
+
+            // Align to 8 bytes and update `last_checksum` for the payload so far.
+            let aligned = (self.buf.len() + 7) & !7;
+            self.buf.resize(aligned, 0);
+            self.last_checksum = fletcher64(&self.buf[block_start..aligned], self.last_checksum);
+
+            // Fill the remaining 8-byte words with `self.last_checksum` so that a torn write after
+            // a journal reset has at most a 1 in 2^64 chance of matching an earlier torn write at
+            // the same block offset.
+            let fill = self.last_checksum;
+            let word_count = (end_of_data - aligned) / 8;
+            self.buf.reserve(end_of_data + std::mem::size_of::<Checksum>() - self.buf.len());
+            for _ in 0..word_count {
+                self.buf.write_u64::<LittleEndian>(fill)?;
+            }
+
+            self.last_checksum = fletcher64(&self.buf[aligned..end_of_data], self.last_checksum);
+            self.buf.write_u64::<LittleEndian>(self.last_checksum)?;
         }
         Ok(())
     }
@@ -181,7 +195,7 @@ mod tests {
     use super::JournalWriter;
     use crate::checksum::{Checksum, fletcher64};
     use crate::object_handle::{ObjectHandle, ReadObjectHandle, WriteObjectHandle};
-    use crate::object_store::journal::JournalCheckpoint;
+    use crate::object_store::journal::{BLOCK_SIZE, JournalCheckpoint, RESET_XOR};
     use crate::serialized_types::*;
     use crate::testing::fake_object::{FakeObject, FakeObjectHandle};
     use byteorder::{ByteOrder, LittleEndian};
@@ -245,5 +259,109 @@ mod tests {
         let value: u64 =
             u64::deserialize_from(&mut reader, LATEST_VERSION).expect("deserialize_from failed");
         assert_eq!(value, 17);
+    }
+
+    #[fuchsia::test]
+    async fn test_pad_to_block_prevents_torn_block_splicing() {
+        let bs = BLOCK_SIZE.get() as usize;
+        let sector_size = 512usize;
+        let block_offset = BLOCK_SIZE.get();
+        let prev_checksum = 0x1234_5678_9abc_def0;
+        let handle = FakeObjectHandle::new(Arc::new(FakeObject::new()));
+
+        // Session 1 writes a padded journal block at `block_offset`.
+        let mut writer1 = JournalWriter::new(BLOCK_SIZE, 0);
+        writer1.seek(JournalCheckpoint {
+            file_offset: block_offset,
+            checksum: prev_checksum,
+            version: LATEST_VERSION,
+        });
+        writer1.write_record(&0xdead_beef_cafe_babe_u64).unwrap();
+        writer1.write_record(&0u8).unwrap();
+        writer1.pad_to_block().expect("pad_to_block failed");
+        let mut buf1 = handle.allocate_buffer(writer1.flushable_bytes()).await;
+        writer1.take_flushable(buf1.as_mut());
+        let block1 = buf1.to_vec();
+
+        // Simulate power cut 1: leading payload sector (0) and trailing checksum sector (7) land
+        // on disk, while middle padding sectors (1..7) hold stale non-zero data.
+        let mut disk_block = vec![0xffu8; bs];
+        disk_block[..sector_size].copy_from_slice(&block1[..sector_size]);
+        disk_block[bs - sector_size..].copy_from_slice(&block1[bs - sector_size..]);
+
+        // Recovery after power cut 1 sees a checksum mismatch at `block_offset`.
+        let stored_checksum =
+            LittleEndian::read_u64(&disk_block[bs - std::mem::size_of::<Checksum>()..]);
+        assert_ne!(
+            stored_checksum,
+            fletcher64(&disk_block[..bs - std::mem::size_of::<Checksum>()], prev_checksum)
+        );
+
+        // Session 2 mounts, resets the journal at `block_offset`, writes a new padded block, and
+        // suffers power cut 2 where only its middle padding sectors (1..7) land on disk.
+        let mut writer2 = JournalWriter::new(BLOCK_SIZE, 0);
+        writer2.seek(JournalCheckpoint {
+            file_offset: block_offset,
+            checksum: prev_checksum ^ RESET_XOR,
+            version: LATEST_VERSION,
+        });
+        LATEST_VERSION.serialize_into(&mut writer2).unwrap();
+        writer2.write_record(&0x1111_2222_3333_4444_u64).unwrap();
+        writer2.write_record(&0u8).unwrap();
+        writer2.pad_to_block().expect("pad_to_block failed");
+        let mut buf2 = handle.allocate_buffer(writer2.flushable_bytes()).await;
+        writer2.take_flushable(buf2.as_mut());
+        let block2 = buf2.to_vec();
+
+        disk_block[sector_size..bs - sector_size]
+            .copy_from_slice(&block2[sector_size..bs - sector_size]);
+
+        // The spliced disk block must not validate against either Session 1's pre-reset checksum
+        // or Session 2's post-reset checksum.
+        let spliced_checksum =
+            LittleEndian::read_u64(&disk_block[bs - std::mem::size_of::<Checksum>()..]);
+        assert_ne!(
+            spliced_checksum,
+            fletcher64(&disk_block[..bs - std::mem::size_of::<Checksum>()], prev_checksum)
+        );
+        assert_ne!(
+            spliced_checksum,
+            fletcher64(
+                &disk_block[..bs - std::mem::size_of::<Checksum>()],
+                prev_checksum ^ RESET_XOR
+            )
+        );
+
+        // Two `Reset` blocks with different payloads at the same offset must also not splice to
+        // form a valid post-reset block.
+        let mut writer3 = JournalWriter::new(BLOCK_SIZE, 0);
+        writer3.seek(JournalCheckpoint {
+            file_offset: block_offset,
+            checksum: prev_checksum ^ RESET_XOR,
+            version: LATEST_VERSION,
+        });
+        LATEST_VERSION.serialize_into(&mut writer3).unwrap();
+        writer3.write_record(&0x5555_6666_7777_8888_u64).unwrap();
+        writer3.write_record(&0u8).unwrap();
+        writer3.pad_to_block().expect("pad_to_block failed");
+        let mut buf3 = handle.allocate_buffer(writer3.flushable_bytes()).await;
+        writer3.take_flushable(buf3.as_mut());
+        let block3 = buf3.to_vec();
+
+        let mut reset_disk_block = vec![0xffu8; bs];
+        reset_disk_block[..sector_size].copy_from_slice(&block2[..sector_size]);
+        reset_disk_block[bs - sector_size..].copy_from_slice(&block2[bs - sector_size..]);
+        reset_disk_block[sector_size..bs - sector_size]
+            .copy_from_slice(&block3[sector_size..bs - sector_size]);
+
+        let reset_spliced_checksum =
+            LittleEndian::read_u64(&reset_disk_block[bs - std::mem::size_of::<Checksum>()..]);
+        assert_ne!(
+            reset_spliced_checksum,
+            fletcher64(
+                &reset_disk_block[..bs - std::mem::size_of::<Checksum>()],
+                prev_checksum ^ RESET_XOR
+            )
+        );
     }
 }

@@ -7,7 +7,7 @@ use crate::client::roaming::lib::{
 };
 use crate::client::roaming::local_roam_manager::{RoamManager, serve_local_roam_manager_requests};
 use crate::client::roaming::roam_monitor::stationary_monitor;
-use crate::client::{connection_selection, scan, serve_provider_requests, types};
+use crate::client::{connection_selection, scan, serve_provider_requests, state_machine, types};
 use crate::config_management::{
     SavedNetworksManager, SavedNetworksManagerApi, compatible_policy_securities,
 };
@@ -23,7 +23,7 @@ use assert_matches::assert_matches;
 use fidl::endpoints::{create_proxy, create_proxy_and_stream, create_request_stream};
 use fidl_fuchsia_power_system as fsystem;
 use fidl_fuchsia_wlan_device_service::DeviceWatcherEvent;
-use fidl_fuchsia_wlan_internal::SignalReportIndication;
+use fidl_fuchsia_wlan_stats as fidl_stats;
 use fuchsia_async::{self as fasync, TestExecutor};
 use fuchsia_inspect::{self as inspect};
 use futures::channel::mpsc;
@@ -170,6 +170,7 @@ struct ExternalInterfaces {
 struct ExistingConnectionSmeObjects {
     iface_sme_stream: fidl_sme::ClientSmeRequestStream,
     state_machine_sme_stream: fidl_sme::ClientSmeRequestStream,
+    state_machine_telemetry_stream: fidl_sme::TelemetryRequestStream,
     connect_txn_handle: fidl_sme::ConnectTransactionControlHandle,
 }
 
@@ -712,6 +713,22 @@ fn save_and_connect(
     );
     let mut state_machine_sme_stream = sme_server.into_stream();
 
+    let next_device_monitor_req = run_while(
+        exec,
+        &mut test_values.internal_objects.internal_futures,
+        test_values.external_interfaces.monitor_service_stream.next(),
+    );
+    let telemetry_server = assert_matches!(
+        next_device_monitor_req,
+        Some(Ok(fidl_fuchsia_wlan_device_service::DeviceMonitorRequest::GetSmeTelemetry {
+            iface_id: TEST_CLIENT_IFACE_ID, telemetry_server, responder
+        })) => {
+            assert!(responder.send(Ok(())).is_ok());
+            telemetry_server
+        }
+    );
+    let state_machine_telemetry_stream = telemetry_server.into_stream();
+
     // State machine does an initial disconnect. Ack.
     let next_sme_req = run_while(
         exec,
@@ -767,7 +784,12 @@ fn save_and_connect(
     assert_eq!(network.id.unwrap(), network_id.clone());
     assert_eq!(network.state.unwrap(), types::ConnectionState::Connected);
 
-    ExistingConnectionSmeObjects { iface_sme_stream, state_machine_sme_stream, connect_txn_handle }
+    ExistingConnectionSmeObjects {
+        iface_sme_stream,
+        state_machine_sme_stream,
+        state_machine_telemetry_stream,
+        connect_txn_handle,
+    }
 }
 
 use fidl_policy::SecurityType as Saved;
@@ -1399,6 +1421,20 @@ fn test_autoconnect_to_saved_network() {
     );
     let mut state_machine_sme_stream = sme_server.into_stream();
 
+    let next_device_monitor_req = run_while(
+        &mut exec,
+        &mut test_values.internal_objects.internal_futures,
+        test_values.external_interfaces.monitor_service_stream.next(),
+    );
+    assert_matches!(
+        next_device_monitor_req,
+        Some(Ok(fidl_fuchsia_wlan_device_service::DeviceMonitorRequest::GetSmeTelemetry {
+            iface_id: TEST_CLIENT_IFACE_ID, responder, ..
+        })) => {
+            assert!(responder.send(Ok(())).is_ok());
+        }
+    );
+
     // State machine does an initial disconnect. Ack.
     let next_sme_req = run_while(
         &mut exec,
@@ -1628,6 +1664,20 @@ fn test_autoconnect_to_hidden_saved_network_and_reconnect() {
             }
         );
         let mut state_machine_sme_stream = sme_server.into_stream();
+
+        let next_device_monitor_req = run_while(
+            &mut exec,
+            &mut test_values.internal_objects.internal_futures,
+            test_values.external_interfaces.monitor_service_stream.next(),
+        );
+        assert_matches!(
+            next_device_monitor_req,
+            Some(Ok(fidl_fuchsia_wlan_device_service::DeviceMonitorRequest::GetSmeTelemetry {
+                iface_id: TEST_CLIENT_IFACE_ID, responder, ..
+            })) => {
+                assert!(responder.send(Ok(())).is_ok());
+            }
+        );
 
         // State machine does an initial disconnect. Ack.
         let next_sme_req = run_while(
@@ -2185,6 +2235,14 @@ fn reject_connect_requests(
                 )) => {
                     assert!(responder.send(Ok(())).is_ok());
                     *state_machine_sme_stream = Some(sme_server.into_stream());
+                }
+                Some(Ok(
+                    fidl_fuchsia_wlan_device_service::DeviceMonitorRequest::GetSmeTelemetry {
+                        responder,
+                        ..
+                    },
+                )) => {
+                    assert!(responder.send(Ok(())).is_ok());
                 }
                 other => panic!("Unexpected DeviceMonitor operation: {other:?}"),
             }
@@ -2889,14 +2947,14 @@ impl<F> RoamScanSolicitFunc for F where
 {
 }
 
-// Helper func for signal related roam scan solicit functions. Repeatedly sends/processes
-// SignalReportIndications, checking if a roam scan has been requested. If so, returns early with
+// Helper func for signal related roam scan solicit functions. Repeatedly polls/processes
+// SignalReports, checking if a roam scan has been requested. If so, returns early with
 // scan results responder.
 fn solicit_roam_scan_with_signal_reports(
     exec: &mut fasync::TestExecutor,
     test_values: &mut TestValues,
     existing_connection: &mut ExistingConnectionSmeObjects,
-    signal_report: SignalReportIndication,
+    signal_report: fidl_stats::ConnectionSignalReport,
 ) -> Option<fidl_sme::ClientSmeScanResponder> {
     // Get the EWMA smoothing factor from the roam profile. This guarantees enough iterations
     // to drop the EWMA signal to the provided value. This should never use a catch-all branch, to
@@ -2908,11 +2966,23 @@ fn solicit_roam_scan_with_signal_reports(
         }
     };
     for _ in 0..num_iterations {
-        // Send the signal report.
-        existing_connection
-            .connect_txn_handle
-            .send_on_signal_report(&signal_report)
-            .expect("failed to send signal report");
+        exec.set_fake_time(fasync::MonotonicInstant::after(state_machine::SIGNAL_REPORT_INTERVAL));
+        assert_matches!(
+            exec.run_until_stalled(&mut test_values.internal_objects.internal_futures),
+            Poll::Pending
+        );
+
+        assert_matches!(
+            exec.run_until_stalled(&mut existing_connection.state_machine_telemetry_stream.next()),
+            Poll::Ready(Some(Ok(fidl_sme::TelemetryRequest::GetSignalReport { responder }))) => {
+                responder
+                    .send(Ok(&fidl_stats::SignalReport {
+                        connection_signal_report: Some(signal_report.clone()),
+                        ..Default::default()
+                    }))
+                    .expect("failed to send signal report");
+            }
+        );
 
         // Run the state machine to process the signal report.
         assert_matches!(
@@ -2940,7 +3010,7 @@ fn solicit_roam_scan_weak_rssi(
         exec,
         test_values,
         existing_connection,
-        SignalReportIndication {
+        fidl_stats::ConnectionSignalReport {
             rssi_dbm: Some(-91),
             snr_db: Some(100),
             tx_rate_500kbps: Some(0),

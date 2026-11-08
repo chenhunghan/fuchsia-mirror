@@ -6,6 +6,7 @@
 
 #include <zircon/errors.h>
 
+#include <algorithm>
 #include <string>
 #include <utility>
 
@@ -27,6 +28,26 @@ zx_status_t MockSpinelHostFixture::SetChannel(fidl::Client<fspinel::DeviceSetup>
   }
   host.Bind(std::move(client_end), dispatcher());
   return ZX_OK;
+}
+
+zx_status_t MockSpinelHostFixture::RetryWhileAlreadyBound(
+    fit::function<zx_status_t()> set_channel) {
+  zx::duration backoff = kSetChannelInitialBackoff;
+  zx_status_t status = ZX_ERR_ALREADY_BOUND;
+  for (uint32_t attempt = 1; attempt <= kSetChannelMaxAttempts; ++attempt) {
+    status = set_channel();
+    if (status != ZX_ERR_ALREADY_BOUND || attempt == kSetChannelMaxAttempts) {
+      break;
+    }
+    RunLoopWithTimeout(backoff);
+    backoff = std::min(backoff * 2, kSetChannelMaxBackoff);
+  }
+  return status;
+}
+
+zx_status_t MockSpinelHostFixture::SetChannelWithRetry(fidl::Client<fspinel::DeviceSetup>& setup,
+                                                       MockSpinelHost& host) {
+  return RetryWhileAlreadyBound([&] { return SetChannel(setup, host); });
 }
 
 void MockSpinelHostFixture::OpenDevice(MockSpinelHost& host) {

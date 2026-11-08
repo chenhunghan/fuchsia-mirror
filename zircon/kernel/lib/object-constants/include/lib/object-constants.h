@@ -9,6 +9,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <zircon/syscalls/debug.h>
 
 // Size and alignment constants for Rust dispatcher states stored in C++ OpaqueStorage.
 // These values must match the exact size and alignment of their corresponding Rust structs,
@@ -40,10 +41,6 @@ constexpr size_t kChannelDispatcherStateSize = 112;
 constexpr size_t kChannelDispatcherStateAlign = 8;
 constexpr size_t kChannelDispatcherStateOffset = 48;
 
-// Size and alignment for MessageWaiter.
-constexpr size_t kMessageWaiterSize = 136;
-constexpr size_t kMessageWaiterAlign = 8;
-
 // Size, alignment, and offset for CounterDispatcherState.
 constexpr size_t kCounterDispatcherStateSize = 64;
 constexpr size_t kCounterDispatcherStateAlign = 8;
@@ -63,6 +60,10 @@ constexpr size_t kEventPairDispatcherStateOffset = 48;
 constexpr size_t kExceptionDispatcherStateSize = 160 + kLockClassIdSize;
 constexpr size_t kExceptionDispatcherStateAlign = 8;
 constexpr size_t kExceptionDispatcherStateOffset = 48;
+
+// Size and alignment for Exceptionate.
+constexpr size_t kExceptionateStorageSize = 56 + kLockClassIdSize;
+constexpr size_t kExceptionateStorageAlign = 8;
 
 // Size, alignment, and offset for FifoDispatcherState.
 constexpr size_t kFifoDispatcherStateSize = 72;
@@ -119,6 +120,7 @@ constexpr size_t kDlogReaderStorageAlign = 8;
 constexpr size_t kPagerDispatcherStateSize = 120 + (2 * kLockClassIdSize);
 constexpr size_t kPagerDispatcherStateAlign = 8;
 constexpr size_t kPagerDispatcherStateOffset = 48;
+
 constexpr uint32_t kPagerProxyTrapDirty = (1u << 0u);
 
 // Size, alignment, and offset for PinnedMemoryTokenDispatcherState.
@@ -127,7 +129,7 @@ constexpr size_t kPinnedMemoryTokenDispatcherStateAlign = 8;
 constexpr size_t kPinnedMemoryTokenDispatcherStateOffset = 48;
 
 // Size, alignment, and offset for ProfileDispatcherState.
-constexpr size_t kProfileDispatcherStateSize = 96 + kLockClassIdSize;
+constexpr size_t kProfileDispatcherStateSize = 88 + kLockClassIdSize;
 constexpr size_t kProfileDispatcherStateAlign = 8;
 constexpr size_t kProfileDispatcherStateOffset = 48;
 
@@ -172,9 +174,9 @@ constexpr size_t kWaitSignalObserverAlign = 8;
 constexpr size_t kRootJobSignalObserverSize = 48;
 constexpr size_t kRootJobSignalObserverAlign = 8;
 
-// Size and alignment for RootJobObserver (Rust state).
-constexpr size_t kRootJobObserverStorageSize = 80;
-constexpr size_t kRootJobObserverStorageAlign = 8;
+// Size and alignment for PortSignalObserver.
+constexpr size_t kPortSignalObserverSize = 40;
+constexpr size_t kPortSignalObserverAlign = 8;
 
 // Size, alignment, and offset for WaitSignalObserverState.
 constexpr size_t kWaitSignalObserverStorageSize = 32;
@@ -191,10 +193,6 @@ constexpr size_t kVmAddressRegionDispatcherStateSize = 56 + kLockClassIdSize;
 constexpr size_t kVmAddressRegionDispatcherStateAlign = 8;
 constexpr size_t kVmAddressRegionDispatcherStateOffset = 48;
 
-// Size and alignment for MemoryWatchdogState.
-constexpr size_t kMemoryWatchdogStateSize = 304;
-constexpr size_t kMemoryWatchdogStateAlign = 8;
-
 // Size, alignment, and offset for VmObjectDispatcherState.
 constexpr size_t kVmObjectDispatcherStateSize = 64 + kLockClassIdSize;
 constexpr size_t kVmObjectDispatcherStateAlign = 8;
@@ -210,11 +208,6 @@ constexpr size_t kPortDispatcherStateSize = 176 + (2 * kLockClassIdSize);
 constexpr size_t kPortDispatcherStateAlign = 8;
 constexpr size_t kPortDispatcherStateOffset = 48;
 
-// Size, alignment, and list node offset for PortObserver.
-constexpr size_t kPortObserverSize = 160;
-constexpr size_t kPortObserverAlign = 8;
-constexpr size_t kPortObserverListNodeOffset = 136;
-
 // Size, alignment, and field offsets for PortPacket. Both C++ and Rust read and write every
 // field directly, so each offset is asserted on both sides.
 constexpr size_t kPortPacketSize = 88;
@@ -225,13 +218,14 @@ constexpr size_t kPortPacketHandleOffset = 64;
 constexpr size_t kPortPacketObserverOffset = 72;
 constexpr size_t kPortPacketAllocatorOffset = 80;
 
-// Sentinel stored in PortPacket::packet.type by PortPacket::Cancel(). Shared by the C++
-// PortPacket helpers (is_canceled()) and the Rust PortDispatcher.
-constexpr uint32_t kPortPacketTypeCanceled = 0xffffffff;
-
-// Size and alignment for PortInterruptPacket.
-constexpr size_t kPortInterruptPacketSize = 32;
-constexpr size_t kPortInterruptPacketAlign = 8;
+// Size and alignment for PortPacketArena.
+#if (defined(SCHEDULER_LOCK_SPIN_TRACING_ENABLED) && SCHEDULER_LOCK_SPIN_TRACING_ENABLED) || \
+    (defined(LOCK_NAME_TRACING_ENABLED) && LOCK_NAME_TRACING_ENABLED)
+constexpr size_t kPortPacketArenaSize = 280;
+#else
+constexpr size_t kPortPacketArenaSize = 272;
+#endif
+constexpr size_t kPortPacketArenaAlign = 8;
 
 // Size and alignment for FutexContext (Rust state).
 constexpr size_t kFutexContextStorageSize = 56;
@@ -247,9 +241,9 @@ constexpr size_t kFutexContextStorageAlign = 8;
 // SeqLock inside runtime_stats, the mutex inside the embedded Exceptionate, and the
 // core_thread_lock spinlock - and each grows by one lock class id when lockdep is enabled. The
 // base value is taken from the compiler, not computed by hand.
-constexpr size_t kThreadDispatcherStateSize = 328 + (4 * kLockClassIdSize);
+constexpr size_t kThreadDispatcherStateSize = 344 + (4 * kLockClassIdSize);
 constexpr size_t kThreadDispatcherStateAlign = 8;
-constexpr size_t kThreadDispatcherStateOffset = 136;
+constexpr size_t kThreadDispatcherStateOffset = 120;
 
 // Size and alignment for ThreadRuntimeStatsStorage (ThreadRuntimeStats).
 constexpr size_t kThreadRuntimeStatsStorageSize = 56 + kLockClassIdSize;
@@ -276,9 +270,21 @@ constexpr size_t kHandleTableStorageSize = 176;
 constexpr size_t kHandleTableStorageAlign = 16;
 #endif
 
-// Size and alignment for ExceptionateStorage (Exceptionate). The Exceptionate's mutex grows by one
-// lock class id when lockdep is enabled.
-constexpr size_t kExceptionateStorageSize = 56 + kLockClassIdSize;
-constexpr size_t kExceptionateStorageAlign = 8;
+// Sizes and alignments for thread architectural register state topics.
+constexpr size_t kThreadStateGeneralRegsSize = sizeof(zx_thread_state_general_regs_t);
+constexpr size_t kThreadStateGeneralRegsAlign = alignof(zx_thread_state_general_regs_t);
+constexpr size_t kThreadStateFpRegsSize = sizeof(zx_thread_state_fp_regs_t);
+constexpr size_t kThreadStateFpRegsAlign = alignof(zx_thread_state_fp_regs_t);
+constexpr size_t kThreadStateVectorRegsSize = sizeof(zx_thread_state_vector_regs_t);
+constexpr size_t kThreadStateVectorRegsAlign = alignof(zx_thread_state_vector_regs_t);
+constexpr size_t kThreadStateDebugRegsSize = sizeof(zx_thread_state_debug_regs_t);
+constexpr size_t kThreadStateDebugRegsAlign = alignof(zx_thread_state_debug_regs_t);
+constexpr size_t kThreadStateSingleStepSize = sizeof(zx_thread_state_single_step_t);
+constexpr size_t kThreadStateSingleStepAlign = alignof(zx_thread_state_single_step_t);
+
+#ifdef __aarch64__
+constexpr size_t kThreadStateArm64SveSize = sizeof(zx_arm64_thread_state_sve_regs_t);
+constexpr size_t kThreadStateArm64SveAlign = alignof(zx_arm64_thread_state_sve_regs_t);
+#endif
 
 #endif  // ZIRCON_KERNEL_LIB_OBJECT_CONSTANTS_INCLUDE_LIB_OBJECT_CONSTANTS_H_

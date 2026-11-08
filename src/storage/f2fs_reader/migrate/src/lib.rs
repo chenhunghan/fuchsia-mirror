@@ -4,7 +4,7 @@
 
 #![recursion_limit = "256"]
 
-use anyhow::{Context, Error, bail, ensure};
+use anyhow::{Context, Error, anyhow, bail, ensure};
 use f2fs_reader::{
     AdviseFlags, BLOCK_SIZE as F2FS_BLOCK_SIZE, F2fsReader, FileType, Flags, FsVerityDescriptor,
     InlineFlags, Inode, NEW_ADDR, NULL_ADDR, XattrIndex,
@@ -625,6 +625,10 @@ pub async fn migrate(
     Ok(())
 }
 
+/// Verifies that the fxfs tree rooted at `dir` matches the f2fs tree rooted at `ino`.
+///
+/// Any mismatch between the two filesystems is reported as an error rather than a panic so that
+/// callers can decide how to handle a failed verification.
 pub async fn verify(
     f2fs: &F2fsReader,
     fxfs: &OpenFxFilesystem,
@@ -636,7 +640,7 @@ pub async fn verify(
     while let Some((ino, dir)) = stack.pop() {
         for entry in f2fs.readdir(ino).await? {
             let object_id = entry.ino as u64;
-            let inode = f2fs.read_inode(entry.ino).await.unwrap();
+            let inode = f2fs.read_inode(entry.ino).await.context("read f2fs inode")?;
             let mut fscrypt_info = dir.fscrypt_info();
 
             // If f2fs inode has a context, we have an fscrypt file. In fxfs this is marked by the
@@ -657,7 +661,69 @@ pub async fn verify(
                 (false, None) => DirType::Normal,
             };
 
-            // TODO(https://fxbug.dev/393449584): Lookup and compare fxfs filename.
+            let (lookup_object_id, lookup_descriptor, locked) = dir
+                .lookup(&entry.filename)
+                .await
+                .context("lookup fxfs filename")?
+                .ok_or_else(|| {
+                    anyhow!("Entry {} not found in fxfs dir {}", entry.filename, dir.object_id())
+                })?;
+            ensure!(
+                lookup_object_id == object_id,
+                "object_id mismatch for {}: fxfs {lookup_object_id}, f2fs {object_id}",
+                entry.filename
+            );
+            let expected_descriptor = match entry.file_type {
+                FileType::Directory => ObjectDescriptor::Directory,
+                FileType::RegularFile => ObjectDescriptor::File,
+                FileType::Symlink => ObjectDescriptor::Symlink,
+                file_type => bail!("Unsupported file type {file_type:?} for {}", entry.filename),
+            };
+            ensure!(
+                lookup_descriptor == expected_descriptor,
+                "descriptor mismatch for {}: fxfs {lookup_descriptor:?}, f2fs \
+                 {expected_descriptor:?}",
+                entry.filename
+            );
+
+            if dir.dir_type().is_casefold() && !locked {
+                let flipped_case_name: String = entry
+                    .filename
+                    .chars()
+                    .map(|c| {
+                        if c.is_ascii_lowercase() {
+                            c.to_ascii_uppercase()
+                        } else if c.is_ascii_uppercase() {
+                            c.to_ascii_lowercase()
+                        } else {
+                            c
+                        }
+                    })
+                    .collect();
+                if flipped_case_name != entry.filename {
+                    let (cf_object_id, cf_descriptor, _) = dir
+                        .lookup(&flipped_case_name)
+                        .await
+                        .context("lookup casefolded filename")?
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "Casefolded entry {} not found in fxfs dir {}",
+                                flipped_case_name,
+                                dir.object_id()
+                            )
+                        })?;
+                    ensure!(
+                        cf_object_id == object_id,
+                        "object_id mismatch for casefolded {flipped_case_name}: fxfs \
+                         {cf_object_id}, f2fs {object_id}"
+                    );
+                    ensure!(
+                        cf_descriptor == expected_descriptor,
+                        "descriptor mismatch for casefolded {flipped_case_name}: fxfs \
+                         {cf_descriptor:?}, f2fs {expected_descriptor:?}"
+                    );
+                }
+            }
 
             match entry.file_type {
                 FileType::Directory => {
@@ -670,14 +736,22 @@ pub async fn verify(
                                 name.extend_from_slice(&xattr.name);
                                 let fxfs_xattr_value =
                                     dir.get_extended_attribute(name).await.context("xattr read")?;
-                                assert_eq!(&fxfs_xattr_value, xattr.value.as_ref());
+                                ensure!(
+                                    &fxfs_xattr_value == xattr.value.as_ref(),
+                                    "xattr mismatch for {}",
+                                    entry.filename
+                                );
                             }
                             XattrIndex::Security => {
                                 let fxfs_xattr_value = dir
                                     .get_extended_attribute("security.selinux".into())
                                     .await
                                     .context("xattr read")?;
-                                assert_eq!(&fxfs_xattr_value, xattr.value.as_ref());
+                                ensure!(
+                                    &fxfs_xattr_value == xattr.value.as_ref(),
+                                    "xattr mismatch for {}",
+                                    entry.filename
+                                );
                             }
                             _ => {}
                         }
@@ -698,9 +772,10 @@ pub async fn verify(
                         dir_type,
                     };
                     let h = inode.header;
-                    assert_eq!(
-                        fxfs_properties, f2fs_properties,
-                        "entry {entry:?}, inode header: {h:?}"
+                    ensure!(
+                        fxfs_properties == f2fs_properties,
+                        "properties mismatch for entry {entry:?}, inode header: {h:?}: fxfs \
+                         {fxfs_properties:?}, f2fs {f2fs_properties:?}"
                     );
 
                     stack.push((entry.ino, dir));
@@ -726,14 +801,22 @@ pub async fn verify(
                                     .get_extended_attribute(name)
                                     .await
                                     .context("xattr read")?;
-                                assert_eq!(&fxfs_xattr_value, xattr.value.as_ref());
+                                ensure!(
+                                    &fxfs_xattr_value == xattr.value.as_ref(),
+                                    "xattr mismatch for {}",
+                                    entry.filename
+                                );
                             }
                             XattrIndex::Security => {
                                 let fxfs_xattr_value = dir
                                     .get_extended_attribute("security.selinux".into())
                                     .await
                                     .context("xattr read")?;
-                                assert_eq!(&fxfs_xattr_value, xattr.value.as_ref());
+                                ensure!(
+                                    &fxfs_xattr_value == xattr.value.as_ref(),
+                                    "xattr mismatch for {}",
+                                    entry.filename
+                                );
                             }
                             _ => {}
                         }
@@ -760,7 +843,12 @@ pub async fn verify(
                         posix_attributes: object_attributes.posix_attributes,
                         dir_type: DirType::Normal,
                     };
-                    assert_eq!(fxfs_properties, f2fs_properties, "{}", entry.filename);
+                    ensure!(
+                        fxfs_properties == f2fs_properties,
+                        "properties mismatch for {}: fxfs {fxfs_properties:?}, f2fs \
+                         {f2fs_properties:?}",
+                        entry.filename
+                    );
 
                     if check_file_contents {
                         let inline_flags = inode.header.inline_flags;
@@ -769,30 +857,30 @@ pub async fn verify(
                                 handle.allocate_buffer(FXFS_BLOCK_SIZE.get() as usize).await;
                             let len =
                                 handle.read_aligned(0, buffer.as_mut()).await.context("read")?;
-                            let f2fs_block = inode.inline_data.as_ref().unwrap();
-                            assert_eq!(
-                                &buffer.to_vec()[..len],
-                                f2fs_block.as_ref(),
-                                "Inline data mismatch."
+                            let f2fs_block =
+                                inode.inline_data.as_ref().context("Missing inline data")?;
+                            ensure!(
+                                &buffer.to_vec()[..len] == f2fs_block.as_ref(),
+                                "Inline data mismatch for ino {object_id}"
                             );
                         } else {
                             let device = fxfs.device();
                             let mut fxfs_buffer =
                                 device.allocate_buffer(FXFS_BLOCK_SIZE.get() as usize).await;
                             for i in 0..inode.header.block_size as u32 {
-                                if let Some(f2fs_block) = f2fs.read_data(&inode, i).await.unwrap() {
+                                if let Some(f2fs_block) =
+                                    f2fs.read_data(&inode, i).await.context("read f2fs data")?
+                                {
                                     let len = handle
                                         .read_aligned(
                                             i as u64 * FXFS_BLOCK_SIZE,
                                             fxfs_buffer.as_mut(),
                                         )
                                         .await
-                                        .unwrap();
-                                    assert_eq!(
-                                        &fxfs_buffer.to_vec()[..len],
-                                        &f2fs_block[..len],
-                                        "File content mismatch for ino {}",
-                                        object_id
+                                        .context("read fxfs data")?;
+                                    ensure!(
+                                        &fxfs_buffer.to_vec()[..len] == &f2fs_block[..len],
+                                        "File content mismatch for ino {object_id} block {i}"
                                     );
                                 }
                             }
@@ -803,20 +891,29 @@ pub async fn verify(
                         // contents.
                         if inode.header.advise_flags.contains(AdviseFlags::Verity) {
                             let (fxfs_descriptor, fxfs_root) =
-                                handle.get_descriptor().expect("fsverity on f2fs but not fxfs");
+                                handle.get_descriptor().with_context(|| {
+                                    format!("fsverity on f2fs but not fxfs for ino {object_id}")
+                                })?;
                             let extent = inode
                                 .data_blocks()
                                 .last()
-                                .expect("Must have a data block for verity");
+                                .context("Must have a data block for verity")?;
                             let descriptor_block = extent.logical_block_num + extent.length - 1;
-                            let descriptor_data =
-                                f2fs.read_data(&inode, descriptor_block).await.unwrap().unwrap();
+                            let descriptor_data = f2fs
+                                .read_data(&inode, descriptor_block)
+                                .await
+                                .context("read f2fs verity descriptor")?
+                                .context("Missing f2fs verity descriptor block")?;
                             let f2fs_descriptor = FsVerityDescriptor::from_bytes(&descriptor_data)
-                                .expect("Validating descriptor");
-                            assert_eq!(fxfs_root.as_slice(), f2fs_descriptor.root());
-                            assert_eq!(
-                                fxfs_descriptor.salt.unwrap_or_default().as_slice(),
-                                f2fs_descriptor.salt()
+                                .context("Validating descriptor")?;
+                            ensure!(
+                                fxfs_root.as_slice() == f2fs_descriptor.root(),
+                                "Verity root mismatch for ino {object_id}"
+                            );
+                            ensure!(
+                                fxfs_descriptor.salt.unwrap_or_default().as_slice()
+                                    == f2fs_descriptor.salt(),
+                                "Verity salt mismatch for ino {object_id}"
                             );
                         }
                     }
@@ -829,15 +926,14 @@ pub async fn verify(
                             .read_symlink(object_id)
                             .await
                             .context("failed to read fxfs symlink")?;
-                        assert_eq!(
-                            f2fs_link.as_ref(),
-                            &fxfs_link,
+                        ensure!(
+                            f2fs_link.as_ref() == fxfs_link.as_slice(),
                             "Symlink differs for inode {:?}",
                             inode.context
                         );
                     }
                 }
-                _ => unimplemented!(),
+                file_type => bail!("Unsupported file type {file_type:?} for {}", entry.filename),
             }
         }
     }
@@ -1060,12 +1156,11 @@ pub async fn migrate_device(
     let image_builder_mode =
         if offset > FXFS_BLOCK_SIZE { SuperBlockInstance::A } else { SuperBlockInstance::B };
     let mut fxfs = FxFilesystemBuilder::new()
-        .format(true)
         .trim_config(None)
         .image_builder_mode(Some(image_builder_mode))
-        .open(device)
+        .format(device)
         .await
-        .context("Failed to open Fxfs")?;
+        .context("Failed to format Fxfs")?;
 
     {
         let device = fxfs.device();

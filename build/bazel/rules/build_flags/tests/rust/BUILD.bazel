@@ -5,6 +5,8 @@
 load("@fuchsia_build_info//:args.bzl", "rust_debug_assertions")
 load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
 load("@fuchsia_rules_common//build_flags:compiler_build_flags.bzl", "compiler_build_flags")
+load("@fuchsia_rules_common//build_flags:extra_linker_flags.bzl", "extra_linker_flags")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
 load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
 load("//build/bazel/rules/host_tests:host_test.bzl", "host_test")
 load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
@@ -123,5 +125,36 @@ build_flags_rust_binary_host_test(
     name = "check_compiler_build_flags_select_rust",
     srcs = ["check_rustflags_and_rustenv.rs"],
     build_flags = [":compiler_flags_select_rust"],
+    edition = "2024",
+)
+
+# Verify that extra_linker_flags() link_deps and executable_link_deps are
+# linked into Rust executable targets.
+fx_cc_library(
+    name = "c_helper_for_test",
+    srcs = ["c_helper_for_test.c"],
+)
+
+extra_linker_flags(
+    name = "rust_flags_link_deps",
+    link_deps = [":c_helper_for_test"],
+)
+
+build_flags_rust_binary_host_test(
+    name = "check_rust_extra_linker_flags_link_deps",
+    srcs = ["check_extra_linker_flags.rs"],
+    build_flags = [":rust_flags_link_deps"],
+    edition = "2024",
+)
+
+extra_linker_flags(
+    name = "rust_flags_executable_link_deps",
+    executable_link_deps = [":c_helper_for_test"],
+)
+
+build_flags_rust_binary_host_test(
+    name = "check_rust_extra_linker_flags_executable_link_deps",
+    srcs = ["check_extra_linker_flags.rs"],
+    build_flags = [":rust_flags_executable_link_deps"],
     edition = "2024",
 )

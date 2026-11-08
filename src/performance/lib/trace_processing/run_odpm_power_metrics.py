@@ -67,6 +67,14 @@ def main() -> None:
         default="Manual",
         help="Test suite name to embed in fuchsiaperf.json (default: Manual).",
     )
+    parser.add_argument(
+        "--raw-samples",
+        action="store_true",
+        help=(
+            "Emit raw sample series (Power_<suffix>) instead of "
+            "duration-weighted PowerAverage_<suffix> metrics."
+        ),
+    )
     args = parser.parse_args()
 
     if not (args.rails or args.all_rails or args.list_rails or args.sum_rails):
@@ -106,6 +114,7 @@ def main() -> None:
         rails=args.rails or (),
         sum_rails=sum_rails,
         all_rails=args.all_rails or args.list_rails,
+        aggregates_only=not args.raw_samples,
     )
 
     if args.path_to_trace.endswith(".json"):

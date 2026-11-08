@@ -12,7 +12,6 @@ use zx_types::{
     ZX_INTERRUPT_MODE_DEFAULT, ZX_INTERRUPT_MODE_EDGE_HIGH, ZX_INTERRUPT_MODE_EDGE_LOW,
     ZX_INTERRUPT_MODE_LEVEL_HIGH, ZX_INTERRUPT_MODE_LEVEL_LOW, ZX_INTERRUPT_MODE_MASK,
     ZX_INTERRUPT_REMAP_IRQ, ZX_INTERRUPT_TIMESTAMP_MONO, ZX_INTERRUPT_WAKE_VECTOR, zx_rights_t,
-    zx_status_t,
 };
 
 use super::handle::KernelHandle;
@@ -222,7 +221,7 @@ impl InterruptEventDispatcher {
                     r#fn: Some({
                         extern "C" fn handler(cookie: *mut c_void) {
                             // SAFETY: `cookie` is a valid `*const InterruptDispatcher`.
-                            unsafe { &*(cookie as *const InterruptDispatcher) }.interrupt_handler();
+                            unsafe { &*cookie.cast::<InterruptDispatcher>() }.interrupt_handler();
                         }
                         handler
                     }),
@@ -238,34 +237,9 @@ impl InterruptEventDispatcher {
     }
 }
 
-/// # Safety
-///
-/// `handle_out` and `rights_out` must point to valid `KernelHandle<InterruptDispatcher>` and
-/// `zx_rights_t` locations.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_interrupt_event_dispatcher_create(
-    handle_out: *mut KernelHandle<InterruptDispatcher>,
-    rights_out: *mut zx_rights_t,
-    vector: u32,
-    options: u32,
-    allow_ack_without_port_for_test: bool,
-) -> zx_status_t {
-    match InterruptEventDispatcher::create(vector, options, allow_ack_without_port_for_test) {
-        Ok((handle, rights)) => {
-            // SAFETY: `handle_out` and `rights_out` are valid pointers provided by C++.
-            unsafe {
-                *rights_out = rights;
-                *handle_out = handle;
-            }
-            zx_status::sys::ZX_OK
-        }
-        Err(status) => status.into_raw(),
-    }
-}
-
 #[cfg(ktest)]
 /// InterruptEventDispatcher unit tests.
-#[unittest::suite(name = "interrupt_event_dispatcher_tests_rust")]
+#[unittest::suite(name = "interrupt_event_dispatcher_tests")]
 mod tests {
     #[cfg(target_arch = "x86_64")]
     extern "C" fn int_worker(arg: *mut c_void) -> i32 {
@@ -274,7 +248,7 @@ mod tests {
         use core::sync::atomic::{AtomicU16, Ordering};
 
         // SAFETY: `arg` points to a valid `AtomicU16` on the caller's stack until `join`.
-        let state = unsafe { &*(arg as *const AtomicU16) };
+        let state = unsafe { &*arg.cast::<AtomicU16>() };
         let vec = (state.load(Ordering::SeqCst) & 0xff) as u8;
         // Loop until anything is set in the high byte of the state.
         while (state.load(Ordering::SeqCst) & 0xff00) == 0 {
@@ -341,6 +315,117 @@ mod tests {
             let status =
                 unsafe { int_thread.join(current_mono_time() + DurationMono::from_seconds(5)) };
             expect_ok!(status.map(|_| ()));
+        }
+    }
+
+    // Tests that a pending wake event on an InterruptEventDispatcher prevents the system from
+    // entering suspend until the interrupt is acknowledged.
+    /// PendingWakeEventBlocksSuspend
+    #[test]
+    fn pending_wake_event_blocks_suspend() {
+        // Generating the interrupt events for this test is necessarily arch specific and is only
+        // implemented for x86 here.
+        #[cfg(target_arch = "x86_64")]
+        {
+            use crate::arch_rs::arch_x86::apic::ApicInterruptDeliveryMode;
+            use crate::arch_rs::arch_x86::ioapic::apic_io_fetch_irq_vector;
+            use crate::arch_rs::arch_x86::lapic::apic_send_self_ipi;
+            use crate::arch_rs::curr_cpu_num;
+            use crate::kernel::idle_power_thread::IdlePowerThread;
+            use crate::kernel::thread::ThreadPtr;
+            use crate::kernel::types::{BOOT_CPU_ID, cpu_num_to_mask};
+            use crate::platform_rs::timer::{current_boot_time, zx_sec};
+            use unittest::{
+                assert_eq, assert_ne, expect_gt, expect_lt, expect_ne, expect_ok, unwrap_ok,
+            };
+            use zx_types::ZX_INTERRUPT_WAKE_VECTOR;
+
+            let mut interrupt = None;
+            let mut gsi: u32 = 0;
+            const GSI_SEARCH_MAX: u32 = 24;
+            while gsi < GSI_SEARCH_MAX {
+                if let Ok((handle, _rights)) =
+                    InterruptEventDispatcher::create(gsi, ZX_INTERRUPT_WAKE_VECTOR, true)
+                {
+                    interrupt = Some(handle);
+                    break;
+                }
+                gsi += 1;
+            }
+            assert_ne!(gsi, GSI_SEARCH_MAX, "Failed to find free global interrupt");
+            let interrupt = interrupt.unwrap();
+
+            // Migrate to the boot CPU so that we can predict which CPU will handle the interrupt.
+            // SAFETY: Executing in a valid thread context.
+            let current = unsafe { ThreadPtr::current() };
+            // SAFETY: `current` points to the currently running `Thread`.
+            let prev_affinity = unsafe { current.set_cpu_affinity(cpu_num_to_mask(BOOT_CPU_ID)) };
+            let _restore_affinity = zr::defer(|| {
+                // SAFETY: `current` points to the currently running `Thread`.
+                let _ = unsafe { current.set_cpu_affinity(prev_affinity) };
+            });
+            assert_eq!(curr_cpu_num(), BOOT_CPU_ID);
+
+            assert_eq!(IdlePowerThread::pending_wake_events(), 0u64);
+
+            // Make sure suspend entry works before testing suspend abort due to pending wake
+            // events.
+            let resume_at = current_boot_time().0.saturating_add(zx_sec(5));
+            // SAFETY: Executing in a normal kernel unittest thread after `LK_INIT_LEVEL_PLATFORM`
+            // with no spinlocks, `TransitionLock`, or `ChainLockTransaction` held.
+            let _ = unsafe { IdlePowerThread::transition_all_active_to_suspend(resume_at) };
+
+            // Pend a wake event by issuing the IPI.
+            let vector = apic_io_fetch_irq_vector(gsi);
+            apic_send_self_ipi(vector, ApicInterruptDeliveryMode::Fixed);
+            assert_eq!(IdlePowerThread::pending_wake_events(), 1u64);
+
+            // Suspend entry should immediately bounce out with pending wake events.
+            let before = current_boot_time().0;
+            let resume_at = before.saturating_add(zx_sec(5));
+            // SAFETY: Executing in a normal kernel unittest thread after `LK_INIT_LEVEL_PLATFORM`
+            // with no spinlocks, `TransitionLock`, or `ChainLockTransaction` held.
+            let suspend_start =
+                unsafe { IdlePowerThread::transition_all_active_to_suspend(resume_at) };
+            let after = current_boot_time().0;
+            expect_ne!(suspend_start, zx_types::ZX_TIME_INFINITE);
+            expect_lt!(after - before, zx_sec(2));
+            assert_eq!(IdlePowerThread::pending_wake_events(), 1u64);
+
+            // Wait for the interrupt to advance the state machine from TRIGGERED to NEEDACK.
+            let trig_time = unwrap_ok!(interrupt.dispatcher().wait_for_interrupt());
+            expect_gt!(trig_time, 0);
+            assert_eq!(IdlePowerThread::pending_wake_events(), 1u64);
+
+            // Acknowledge the wake event to allow suspend again.
+            expect_ok!(interrupt.dispatcher().ack());
+            assert_eq!(IdlePowerThread::pending_wake_events(), 0u64);
+
+            // Suspend entry should succeed again.
+            let resume_at = current_boot_time().0.saturating_add(zx_sec(5));
+            // SAFETY: Executing in a normal kernel unittest thread after `LK_INIT_LEVEL_PLATFORM`
+            // with no spinlocks, `TransitionLock`, or `ChainLockTransaction` held.
+            let _ = unsafe { IdlePowerThread::transition_all_active_to_suspend(resume_at) };
+
+            // Check that a pending wake event is acknowledged if the interrupt event dispatcher is
+            // destroyed without an explicit acknowledgment.
+            apic_send_self_ipi(vector, ApicInterruptDeliveryMode::Fixed);
+            assert_eq!(IdlePowerThread::pending_wake_events(), 1u64);
+
+            // Suspend entry should immediately bounce out with pending wake events.
+            let resume_at = current_boot_time().0.saturating_add(zx_sec(5));
+            // SAFETY: Executing in a normal kernel unittest thread after `LK_INIT_LEVEL_PLATFORM`
+            // with no spinlocks, `TransitionLock`, or `ChainLockTransaction` held.
+            let _ = unsafe { IdlePowerThread::transition_all_active_to_suspend(resume_at) };
+
+            drop(interrupt);
+            assert_eq!(IdlePowerThread::pending_wake_events(), 0u64);
+
+            // Suspend entry should succeed.
+            let resume_at = current_boot_time().0.saturating_add(zx_sec(5));
+            // SAFETY: Executing in a normal kernel unittest thread after `LK_INIT_LEVEL_PLATFORM`
+            // with no spinlocks, `TransitionLock`, or `ChainLockTransaction` held.
+            let _ = unsafe { IdlePowerThread::transition_all_active_to_suspend(resume_at) };
         }
     }
 }

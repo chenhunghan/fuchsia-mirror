@@ -1,0 +1,151 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_component.bzl",
+    "fx_unittest_component",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":colocated-runner-unittests"],
+    visibility = ["//examples:__pkg__"],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = [
+        "src/main.rs",
+        "src/program.rs",
+    ],
+    crate_name = "colocated_runner",
+    edition = "2024",
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:async-trait",
+    ],
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//examples/components/runner/colocated/fidl:colocated_rust",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.component.runner:fuchsia.component.runner_rust",
+        "//sdk/fidl/fuchsia.memory.attribution:fuchsia.memory.attribution_rust",
+        "//sdk/fidl/fuchsia.process:fuchsia.process_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-runtime",
+        "//src/lib/fuchsia-sync",
+        "//src/performance/memory/attribution/server",
+        "//src/sys/lib/runner",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:async-lock",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:scopeguard",
+    ],
+)
+
+rustc_test(
+    name = "bin_test",
+    crate = ":bin",
+    # Sets the GN output_name in bazel2gn to avoid a generic bin_test binary collision.
+    crate_name = "colocated_runner_bin_test",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//src/lib/fuchsia-fs",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "colocated_runner",
+)
+
+fx_component_manifest(
+    name = "colocated-runner_manifest",
+    component_name = "colocated-runner",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/colocated-runner.cml",
+)
+
+fx_component(
+    name = "colocated-runner",
+    compiled_manifest = ":colocated-runner_manifest",
+    visibility = ["//:__subpackages__"],
+    deps = [":bin_packaged"],
+)
+
+fx_component_manifest(
+    name = "colocated-runner-example-realm_manifest",
+    component_name = "colocated-runner-example",
+    includes = ["//sdk/lib/syslog:offer.shard"],
+    manifest = "meta/colocated-runner-example.cml",
+)
+
+fx_component(
+    name = "colocated-runner-example-realm",
+    compiled_manifest = ":colocated-runner-example-realm_manifest",
+    visibility = ["//:__subpackages__"],
+)
+
+fx_component_manifest(
+    name = "colocated-component_manifest",
+    component_name = "colocated-component",
+    manifest = "meta/colocated-component.cml",
+)
+
+fx_component(
+    name = "colocated-component",
+    compiled_manifest = ":colocated-component_manifest",
+    visibility = ["//:__subpackages__"],
+)
+
+fx_package(
+    name = "colocated-runner-example",
+    components = [
+        ":colocated-component",
+        ":colocated-runner",
+        ":colocated-runner-example-realm",
+    ],
+)
+
+fx_unittest_component(
+    name = "colocated-runner-unittests-component",
+    binary = ":bin_test",
+    component_name = "colocated-runner-unittests",
+)
+
+fx_package(
+    name = "colocated-runner-unittests-package",
+    package_name = "colocated-runner-unittests",
+    testonly = True,
+    components = [":colocated-component"],
+    test_components = [":colocated-runner-unittests-component"],
+)
+
+fx_test(
+    name = "colocated-runner-unittests",
+    package = ":colocated-runner-unittests-package",
+)

@@ -1,0 +1,30 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_license//rules:license.bzl", "license")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = [":license"])
+
+license(
+    name = "license",
+    package_name = "gfxstream",
+    license_kinds = [
+        "@rules_license//licenses/spdx:Apache-2.0",
+    ],
+    license_text = "src/LICENSE",
+)
+
+# The public gfxstream host renderer API, for code that implements or stubs it.
+#
+# Headers in the src/ submodule are included by their full path, e.g.
+# "third_party/gfxstream/src/host/include/gfxstream/virtio-gpu-gfxstream-renderer.h".
+# The upstream BUILD.bazel files in src/ and src/host are ignored with
+# --deleted_packages (see //build/bazel/templates/template.bazelrc), so these
+# headers belong to this package.
+fx_cc_library(
+    name = "virtio_gpu_renderer_headers",
+    hdrs = ["src/host/include/gfxstream/virtio-gpu-gfxstream-renderer.h"],
+    visibility = ["//src/starnix/modules/gpu:__pkg__"],
+)

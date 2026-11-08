@@ -130,6 +130,18 @@ impl Cursor {
         debug_assert!(self.depth > 0);
         self.indices[0] -= 1;
     }
+
+    /// Compare two cursors of equal depth in left-to-right tree order (from root to leaf).
+    fn cmp_same_depth(&self, other: &Self) -> std::cmp::Ordering {
+        debug_assert_eq!(self.depth, other.depth);
+        for i in (0..self.depth as usize).rev() {
+            match self.indices[i].cmp(&other.indices[i]) {
+                std::cmp::Ordering::Equal => continue,
+                non_eq => return non_eq,
+            }
+        }
+        std::cmp::Ordering::Equal
+    }
 }
 
 impl PartialEq for Cursor {
@@ -158,16 +170,27 @@ impl PartialEq for Cursor {
 impl Eq for Cursor {}
 
 /// Where to place the cursor relative to the given key.
+#[derive(Clone, Copy)]
 enum CursorPosition {
-    /// The given key represents a left edge of a range.
+    /// The given key represents an inclusive left edge of a range.
     ///
-    /// Place the cursor to the left of a range containing the cursor.
+    /// Place the cursor at the first range containing keys `>= key`.
     Left,
 
-    /// The given key represents a right edge of a range.
+    /// The given key represents an exclusive left edge of a range.
     ///
-    /// Place the cursor to the right of a range containing the cursor.
+    /// Place the cursor at the first range containing keys `> key`.
+    LeftExclusive,
+
+    /// The given key represents an exclusive right edge of a range.
+    ///
+    /// Place the cursor past all ranges with `start < key`.
     Right,
+
+    /// The given key represents an inclusive right edge of a range.
+    ///
+    /// Place the cursor past all ranges with `start <= key`.
+    RightInclusive,
 }
 
 /// Search of the given key in the given array of ranges.
@@ -344,9 +367,27 @@ where
             CursorPosition::Left => {
                 cursor.push(index);
             }
+            CursorPosition::LeftExclusive => {
+                if let Some(range) = self.keys.get(index) {
+                    if *key >= range.start && key.measure_gap(&range.end) <= 1 {
+                        cursor.push(index + 1);
+                        return self;
+                    }
+                }
+                cursor.push(index);
+            }
             CursorPosition::Right => {
                 if let Some(range) = self.keys.get(index) {
                     if *key > range.start {
+                        cursor.push(index + 1);
+                        return self;
+                    }
+                }
+                cursor.push(index);
+            }
+            CursorPosition::RightInclusive => {
+                if let Some(range) = self.keys.get(index) {
+                    if *key >= range.start {
                         cursor.push(index + 1);
                         return self;
                     }
@@ -1754,9 +1795,9 @@ where
 
     /// Create the cursor stack and initial leaf for the start bound of the given range.
     fn find_start_bound(&self, bounds: &impl RangeBounds<K>) -> (Cursor, Option<&NodeLeaf<K, V>>) {
-        let key = match bounds.start_bound() {
-            Bound::Included(key) => key,
-            Bound::Excluded(key) => key,
+        let (key, position) = match bounds.start_bound() {
+            Bound::Included(key) => (key, CursorPosition::Left),
+            Bound::Excluded(key) => (key, CursorPosition::LeftExclusive),
             Bound::Unbounded => {
                 let leaf = match &self.node {
                     Node::Leaf(leaf) => Some(leaf.as_ref()),
@@ -1766,26 +1807,53 @@ where
             }
         };
         let mut cursor = Cursor::default();
-        let leaf = self.node.find(key, CursorPosition::Left, &mut cursor);
+        let leaf = self.node.find(key, position, &mut cursor);
         (cursor, Some(leaf))
     }
 
     /// Create the cursor stack for the end bound of the given range.
     fn find_end_bound(&self, bounds: &impl RangeBounds<K>) -> Cursor {
-        let key = match bounds.end_bound() {
-            Bound::Included(key) => key,
-            Bound::Excluded(key) => key,
+        let (key, position) = match bounds.end_bound() {
+            Bound::Included(key) => (key, CursorPosition::RightInclusive),
+            Bound::Excluded(key) => (key, CursorPosition::Right),
             Bound::Unbounded => {
                 return Cursor::with_index(self.node.len());
             }
         };
-        self.find(key, CursorPosition::Right)
+        self.find(key, position)
     }
 
     /// Iterate through the keys and values stored in the given range in the map.
     pub fn range(&self, bounds: impl RangeBounds<K>) -> Iter<'_, K, V> {
+        let is_empty_bounds = match (bounds.start_bound(), bounds.end_bound()) {
+            (Bound::Included(s), Bound::Included(e)) => s > e,
+            (Bound::Included(s), Bound::Excluded(e)) | (Bound::Excluded(s), Bound::Included(e)) => {
+                s >= e
+            }
+            (Bound::Excluded(s), Bound::Excluded(e)) => s >= e || s.measure_gap(e) <= 1,
+            _ => false,
+        };
+        if is_empty_bounds {
+            return Iter {
+                forward: Cursor::default(),
+                backward: Cursor::default(),
+                root: &self.node,
+                forward_leaf: None,
+            };
+        }
         let (forward, forward_leaf) = self.find_start_bound(&bounds);
         let backward = self.find_end_bound(&bounds);
+        if !matches!(bounds.start_bound(), Bound::Unbounded)
+            && !matches!(bounds.end_bound(), Bound::Unbounded)
+            && forward.cmp_same_depth(&backward).is_ge()
+        {
+            return Iter {
+                forward: Cursor::default(),
+                backward: Cursor::default(),
+                root: &self.node,
+                forward_leaf: None,
+            };
+        }
         Iter { forward, backward, root: &self.node, forward_leaf }
     }
 
@@ -2931,12 +2999,13 @@ mod test {
                     for end_offset in offsets {
                         let query_start = start_idx * 10 + start_offset;
                         let query_end = end_idx * 10 + end_offset;
-                        if query_end < query_start {
-                            continue;
-                        }
                         let expected: Vec<_> = inserted
                             .iter()
-                            .filter(|(r, _)| r.end > query_start && r.start < query_end)
+                            .filter(|(r, _)| {
+                                query_start < query_end
+                                    && r.end > query_start
+                                    && r.start < query_end
+                            })
                             .cloned()
                             .collect();
                         let actual: Vec<_> = map
@@ -2948,5 +3017,34 @@ mod test {
                 }
             }
         }
+
+        // Inverted and empty ranges (including Excluded bounds on adjacent integers) must yield
+        // empty iterators in both directions without panicking.
+        #[allow(clippy::reversed_empty_ranges)]
+        {
+            assert_eq!(map.range(100..50).count(), 0);
+            assert_eq!(map.range(100..50).rev().count(), 0);
+        }
+        assert_eq!(map.range(50..50).count(), 0);
+        assert_eq!(map.range((Bound::Excluded(50), Bound::Included(50))).count(), 0);
+        assert_eq!(map.range((Bound::Excluded(50), Bound::Excluded(50))).count(), 0);
+        assert_eq!(map.range((Bound::Excluded(50), Bound::Excluded(51))).count(), 0);
+        assert_eq!(map.range((Bound::Excluded(50), Bound::Excluded(51))).rev().count(), 0);
+
+        // Included end (`..=22`) includes entry `[22, 27)`, whereas `..22` excludes it.
+        let incl_end: Vec<_> = map.range(12..=22).map(|(r, v)| (r.clone(), *v)).collect();
+        assert_eq!(incl_end, vec![(12..17, 1), (22..27, 2)]);
+
+        // `Excluded(5)` includes point 6 inside `[2, 7)`, whereas `Excluded(6)` starts at 7.
+        let excl_start_5: Vec<_> = map
+            .range((Bound::Excluded(5), Bound::Excluded(22)))
+            .map(|(r, v)| (r.clone(), *v))
+            .collect();
+        assert_eq!(excl_start_5, vec![(2..7, 0), (12..17, 1)]);
+        let excl_start_6: Vec<_> = map
+            .range((Bound::Excluded(6), Bound::Excluded(22)))
+            .map(|(r, v)| (r.clone(), *v))
+            .collect();
+        assert_eq!(excl_start_6, vec![(12..17, 1)]);
     }
 }

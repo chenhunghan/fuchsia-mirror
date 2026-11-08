@@ -131,6 +131,23 @@ async fn handle_wifi_sta_iface_request<I: IfaceManager, P: PowerManager>(
                 });
             responder.send(result).context("send SetMacAddress response")?;
         }
+        fidl_wlanix::WifiStaIfaceRequest::GetFactoryMacAddress { responder } => {
+            let (iface, iface_id) = get_iface_and_log(
+                "fidl_wlanix::WifiStaIfaceRequest::GetFactoryMacAddress",
+                iface_manager,
+                IFACE_NAME,
+            )
+            .await?;
+            let result = match iface.query().await {
+                Ok(response) => Ok(response.factory_addr),
+                Err(e) => {
+                    error!("Failed to query iface {}: {}", iface_id, e);
+                    Err(zx::sys::ZX_ERR_INTERNAL)
+                }
+            };
+            let result = result.as_ref().map_err(|status| *status);
+            responder.send(result).context("send GetFactoryMacAddress response")?;
+        }
         fidl_wlanix::WifiStaIfaceRequest::GetApfPacketFilterSupport { responder } => {
             let (_iface, iface_id) = get_iface_and_log(
                 "fidl_wlanix::WifiStaIfaceRequest::GetApfPacketFilterSupport",
@@ -1151,8 +1168,6 @@ struct ConnectionContext {
     stream: fidl_sme::ConnectTransactionEventStream,
     original_bss_desc: Box<BssDescription>,
     most_recent_connect_time: fasync::BootInstant,
-    current_rssi_dbm: i8,
-    current_snr_db: i8,
     current_channel: Channel,
 }
 
@@ -1297,6 +1312,11 @@ async fn handle_client_connect_transactions<C: ClientIface + 'static, P: PowerMa
             Ok(fidl_sme::ConnectTransactionEvent::OnDisconnect { info }) => {
                 let _wake_lease = power_manager.take_wake_lease("wlanix-process-disconnect").await;
                 let connected_duration = fasync::BootInstant::now() - ctx.most_recent_connect_time;
+                let (current_rssi_dbm, current_snr_db) =
+                    iface.get_connected_network().map(|n| (n.rssi, n.snr)).unwrap_or((
+                        ctx.original_bss_desc.rssi_dbm,
+                        Some(ctx.original_bss_desc.snr_db),
+                    ));
                 telemetry_sender.send(TelemetryEvent::Disconnect {
                     info: wlan_telemetry::DisconnectInfo {
                         iface_id,
@@ -1304,8 +1324,8 @@ async fn handle_client_connect_transactions<C: ClientIface + 'static, P: PowerMa
                         is_sme_reconnecting: info.is_sme_reconnecting,
                         disconnect_source: info.disconnect_source,
                         original_bss_desc: ctx.original_bss_desc.clone(),
-                        current_rssi_dbm: ctx.current_rssi_dbm,
-                        current_snr_db: ctx.current_snr_db,
+                        current_rssi_dbm,
+                        current_snr_db,
                         current_channel: ctx.current_channel,
                     },
                 });
@@ -1328,19 +1348,11 @@ async fn handle_client_connect_transactions<C: ClientIface + 'static, P: PowerMa
                     disconnect_with_ongoing_reconnect = None;
                 }
             }
-            Ok(fidl_sme::ConnectTransactionEvent::OnSignalReport { ind }) => {
-                if let Some(rssi) = ind.rssi_dbm {
-                    ctx.current_rssi_dbm = rssi;
-                }
-                if let Some(snr) = ind.snr_db {
-                    ctx.current_snr_db = snr;
-                }
-                iface.on_signal_report(ind);
-            }
+            Ok(fidl_sme::ConnectTransactionEvent::OnSignalReport { .. }) => {}
             Ok(fidl_sme::ConnectTransactionEvent::OnRssiThresholdBreached { cur_rssi_dbm }) => {
                 let _wake_lease =
                     power_manager.take_wake_lease("wlanix-process-rssi-threshold-breached").await;
-                ctx.current_rssi_dbm = cur_rssi_dbm;
+                iface.on_rssi_threshold_breached(cur_rssi_dbm);
                 let mut wifi_state = wifi_state.lock();
                 if let Some(cmd_id) = wifi_state.rssi_monitor_cmd_id {
                     let event =
@@ -1609,8 +1621,6 @@ async fn handle_supplicant_sta_network_request<I: IfaceManager, P: PowerManager>
                                 stream: connected.transaction_stream,
                                 original_bss_desc: connected.bss.clone(),
                                 most_recent_connect_time: fasync::BootInstant::now(),
-                                current_rssi_dbm: connected.bss.rssi_dbm,
-                                current_snr_db: connected.bss.snr_db,
                                 current_channel: connected.bss.channel,
                             }),
                         )
@@ -2427,6 +2437,14 @@ async fn handle_nl80211_message<I: IfaceManager, P: PowerManager>(
             info!("Nl80211Cmd::StartSchedScan");
             match get_client_iface_and_id(&message.payload.attrs[..], &iface_manager).await {
                 Ok((client_iface, iface_id)) => {
+                    // A start replaces any scheduled scan that is already running: dropping the
+                    // old transaction makes SME stop that scan, while the new one starts. Keep the
+                    // system awake until the new scan is running. Otherwise the system can suspend
+                    // after the stop got through but before the start did, and the driver may only
+                    // see the start after the next resume, with no scheduled scan running while
+                    // the system sleeps.
+                    let _wake_lease =
+                        power_manager.take_wake_lease("wlanix-start-sched-scan").await;
                     let mut request = fidl_common::ScheduledScanRequest::default();
                     let mut default_interval = None;
 
@@ -3550,6 +3568,11 @@ async fn main() {
     )
     .expect("Failed to initialize wlanix logs");
     let config = wlanix_config::Config::take_from_startup_handle();
+    // Enable redaction of BSSIDs/MAC addresses/SSIDs in logs and Inspect before anything
+    // else can log them. `enable()` installs masking synchronously; the returned future
+    // fetches the per-boot salt and is driven alongside the other futures in `main_fut`.
+    let redactor_fut =
+        future::OptionFuture::from(config.redact_network_identifiers.then(redactor_client::enable));
     info!("Starting Wlanix (power_framework_enabled: {})", config.power_framework_enabled);
 
     // Register for suspend/resume events
@@ -3681,7 +3704,8 @@ async fn main() {
                     Arc::clone(&log_throttler),
                     Arc::clone(&scheduled_scan_controller),
                 ),
-                serve_phy_events(phy_events_proxy, wifi_state)
+                serve_phy_events(phy_events_proxy, wifi_state),
+                redactor_fut.map(Ok),
             )
             .map(|_| ())
         }
@@ -3712,7 +3736,8 @@ mod tests {
     use fidl::endpoints::{create_proxy, create_proxy_and_stream, create_request_stream};
 
     use crate::ifaces::test_utils::{
-        ClientIfaceCall, FAKE_IFACE_RESPONSE, IfaceManagerCall, TestIfaceManager,
+        ClientIfaceCall, FAKE_FACTORY_ADDR, FAKE_IFACE_RESPONSE, FAKE_STA_ADDR, IfaceManagerCall,
+        TestIfaceManager,
     };
     use anyhow::format_err;
     use assert_matches::assert_matches;
@@ -3720,11 +3745,13 @@ mod tests {
     use fidl_fuchsia_wlan_internal as fidl_internal;
     use futures::Future;
     use futures::channel::mpsc;
+    use futures::future::LocalBoxFuture;
+    use futures::stream::FuturesUnordered;
     use futures::task::Poll;
     use ieee80211::Ssid;
     use netlink_packet_utils::nla::NlasIterator;
     use netlink_packet_utils::parsers::parse_u32;
-    use scheduled_scans::ScheduledScanState;
+    use scheduled_scans::{ScheduledScanEvent, ScheduledScanState};
     use std::collections::HashSet;
     use std::pin::Pin;
     use test_case::test_case;
@@ -3732,6 +3759,308 @@ mod tests {
     use wlan_power_manager_testing::TestPowerManager;
     const CHIP_ID: u32 = 1;
     const FAKE_IFACE_NAME: &str = "fake-iface-name";
+
+    type DaemonExit = (&'static str, Result<(), Error>);
+
+    /// Composable test harness for `wlanix` unit tests. Declare `fasync::TestExecutor` before
+    /// `WlanixTestHelper::new` so channels and daemon futures drop before the executor.
+    #[allow(dead_code)]
+    struct WlanixTestHelper {
+        wlanix_proxy: fidl_wlanix::WlanixProxy,
+        wifi_state: Arc<Mutex<WifiState>>,
+        iface_manager: Arc<TestIfaceManager>,
+        power_manager: Arc<TestPowerManager>,
+        scheduled_scan_controller: Arc<ScheduledScanController>,
+        telemetry_receiver: mpsc::Receiver<TelemetryEvent>,
+        phy_events: fidl_device_service::PhyEventWatcherControlHandle,
+        _phy_events_stream: fidl_device_service::PhyEventWatcherRequestStream,
+        daemon_tasks: FuturesUnordered<LocalBoxFuture<'static, DaemonExit>>,
+    }
+
+    #[allow(dead_code)]
+    impl WlanixTestHelper {
+        /// Wires `serve_wlanix`, `handle_scheduled_scan_events`, and `serve_phy_events` without
+        /// polling or running implicit setup transitions.
+        fn new(iface_manager: TestIfaceManager) -> Self {
+            let (wlanix_proxy, wlanix_stream) =
+                create_proxy_and_stream::<fidl_wlanix::WlanixMarker>();
+            let (phy_events_proxy, phy_events_server) =
+                create_proxy::<fidl_device_service::PhyEventWatcherMarker>();
+            let (phy_events_stream, phy_events) =
+                phy_events_server.into_stream_and_control_handle();
+
+            let wifi_state = Arc::new(Mutex::new(WifiState::default()));
+            let iface_manager = Arc::new(iface_manager);
+            let power_manager = Arc::new(TestPowerManager::new());
+            let (telemetry_tx, telemetry_receiver) = mpsc::channel::<TelemetryEvent>(100);
+            let telemetry_sender = TelemetrySender::new(telemetry_tx);
+            let log_throttler = Arc::new(Mutex::new(ThrottledErrorLogger::new(
+                MIN_MINUTES_BETWEEN_FREQUENT_ERRORS,
+            )));
+            let (event_sender, event_receiver) = mpsc::unbounded::<ScheduledScanEvent>();
+            let scheduled_scan_controller = Arc::new(ScheduledScanController::new(
+                telemetry_sender.clone(),
+                event_sender,
+                Arc::clone(&power_manager) as Arc<dyn PowerManager>,
+            ));
+
+            let daemon_tasks = FuturesUnordered::new();
+            daemon_tasks.push(
+                serve_wlanix(
+                    wlanix_stream,
+                    Arc::clone(&wifi_state),
+                    Arc::clone(&iface_manager),
+                    Arc::clone(&power_manager),
+                    telemetry_sender,
+                    log_throttler,
+                    Arc::clone(&scheduled_scan_controller),
+                )
+                .map(|()| ("serve_wlanix", Ok(())))
+                .boxed_local(),
+            );
+            daemon_tasks.push(
+                handle_scheduled_scan_events(Arc::clone(&wifi_state), event_receiver)
+                    .map(|()| ("handle_scheduled_scan_events", Ok(())))
+                    .boxed_local(),
+            );
+            daemon_tasks.push(
+                serve_phy_events(phy_events_proxy, Arc::clone(&wifi_state))
+                    .map(|res| ("serve_phy_events", res))
+                    .boxed_local(),
+            );
+
+            Self {
+                wlanix_proxy,
+                wifi_state,
+                iface_manager,
+                power_manager,
+                scheduled_scan_controller,
+                telemetry_receiver,
+                phy_events,
+                _phy_events_stream: phy_events_stream,
+                daemon_tasks,
+            }
+        }
+
+        /// Drives `fut` alongside the daemon until `fut` completes, then settles the daemon.
+        #[track_caller]
+        fn run<F: Future>(&mut self, exec: &mut fasync::TestExecutor, fut: F) -> F::Output {
+            let mut fut = pin!(fut);
+            let polled = exec.run_until_stalled(&mut future::poll_fn(|cx| {
+                if let Poll::Ready(out) = fut.as_mut().poll(cx) {
+                    return Poll::Ready(Ok(out));
+                }
+                self.daemon_tasks
+                    .poll_next_unpin(cx)
+                    .map(|opt| Err(opt.expect("daemon_tasks empty")))
+            }));
+            match polled {
+                Poll::Ready(Ok(out)) => {
+                    self.run_daemon_until_stalled(exec);
+                    out
+                }
+                Poll::Ready(Err((task, res))) => {
+                    panic!("wlanix daemon task `{task}` exited: {res:?}");
+                }
+                Poll::Pending => panic!(
+                    "future `{}` stalled; use exec.run_until_stalled() for futures that stay pending",
+                    std::any::type_name::<F>()
+                ),
+            }
+        }
+
+        /// Settles all daemon tasks after one-way FIDL calls, injected events, or fake-time steps.
+        #[track_caller]
+        fn run_daemon_until_stalled(&mut self, exec: &mut fasync::TestExecutor) {
+            let polled = exec.run_until_stalled(&mut future::poll_fn(|cx| {
+                self.daemon_tasks.poll_next_unpin(cx).map(|opt| opt.expect("daemon_tasks empty"))
+            }));
+            if let Poll::Ready((task, res)) = polled {
+                panic!("wlanix daemon task `{task}` exited: {res:?}");
+            }
+        }
+
+        /// Enqueues `Wlanix::GetWifi` without polling the daemon.
+        fn get_wifi(&self) -> fidl_wlanix::WifiProxy {
+            let (proxy, server) = create_proxy::<fidl_wlanix::WifiMarker>();
+            self.wlanix_proxy
+                .get_wifi(fidl_wlanix::WlanixGetWifiRequest {
+                    wifi: Some(server),
+                    ..Default::default()
+                })
+                .expect("Wlanix::GetWifi failed");
+            proxy
+        }
+
+        /// Enqueues `Wlanix::GetSupplicant` without polling the daemon.
+        fn get_supplicant(&self) -> fidl_wlanix::SupplicantProxy {
+            let (proxy, server) = create_proxy::<fidl_wlanix::SupplicantMarker>();
+            self.wlanix_proxy
+                .get_supplicant(fidl_wlanix::WlanixGetSupplicantRequest {
+                    supplicant: Some(server),
+                    ..Default::default()
+                })
+                .expect("Wlanix::GetSupplicant failed");
+            proxy
+        }
+
+        /// Enqueues `Wlanix::GetNl80211` without polling the daemon.
+        fn get_nl80211(&self) -> fidl_wlanix::Nl80211Proxy {
+            let (proxy, server) = create_proxy::<fidl_wlanix::Nl80211Marker>();
+            self.wlanix_proxy
+                .get_nl80211(fidl_wlanix::WlanixGetNl80211Request {
+                    nl80211: Some(server),
+                    ..Default::default()
+                })
+                .expect("Wlanix::GetNl80211 failed");
+            proxy
+        }
+
+        /// Enqueues `Wlanix::GetWifiLegacyHal` without polling the daemon.
+        fn get_wifi_legacy_hal(&self) -> fidl_wlanix::WifiLegacyHalProxy {
+            let (proxy, server) = create_proxy::<fidl_wlanix::WifiLegacyHalMarker>();
+            self.wlanix_proxy
+                .get_wifi_legacy_hal(fidl_wlanix::WlanixGetWifiLegacyHalRequest {
+                    legacy_hal: Some(server),
+                    ..Default::default()
+                })
+                .expect("Wlanix::GetWifiLegacyHal failed");
+            proxy
+        }
+
+        /// Enqueues `Wifi::RegisterEventCallback` without polling the daemon.
+        fn register_wifi_event_callback(
+            &self,
+            wifi: &fidl_wlanix::WifiProxy,
+        ) -> fidl_wlanix::WifiEventCallbackRequestStream {
+            let (client_end, stream) =
+                create_request_stream::<fidl_wlanix::WifiEventCallbackMarker>();
+            wifi.register_event_callback(fidl_wlanix::WifiRegisterEventCallbackRequest {
+                callback: Some(client_end),
+                ..Default::default()
+            })
+            .expect("Wifi::RegisterEventCallback failed");
+            stream
+        }
+
+        /// Enqueues `Supplicant::AddStaInterface` without polling the daemon.
+        #[track_caller]
+        fn get_supplicant_sta_iface(
+            &self,
+            supplicant: &fidl_wlanix::SupplicantProxy,
+            iface_name: &str,
+        ) -> fidl_wlanix::SupplicantStaIfaceProxy {
+            assert!(self.iface_manager.client_iface.lock().is_some(), "requires client iface");
+            let (proxy, server) = create_proxy::<fidl_wlanix::SupplicantStaIfaceMarker>();
+            supplicant
+                .add_sta_interface(fidl_wlanix::SupplicantAddStaInterfaceRequest {
+                    iface: Some(server),
+                    iface_name: Some(iface_name.to_string()),
+                    ..Default::default()
+                })
+                .expect("Supplicant::AddStaInterface failed");
+            proxy
+        }
+
+        /// Enqueues `SupplicantStaIface::RegisterCallback` without polling the daemon.
+        #[track_caller]
+        fn register_supplicant_sta_iface_callback(
+            &self,
+            sta_iface: &fidl_wlanix::SupplicantStaIfaceProxy,
+        ) -> fidl_wlanix::SupplicantStaIfaceCallbackRequestStream {
+            assert!(self.iface_manager.client_iface.lock().is_some(), "requires client iface");
+            let (client_end, stream) =
+                create_request_stream::<fidl_wlanix::SupplicantStaIfaceCallbackMarker>();
+            sta_iface
+                .register_callback(fidl_wlanix::SupplicantStaIfaceRegisterCallbackRequest {
+                    callback: Some(client_end),
+                    ..Default::default()
+                })
+                .expect("SupplicantStaIface::RegisterCallback failed");
+            stream
+        }
+
+        /// Enqueues `SupplicantStaIface::AddNetwork` without polling the daemon.
+        #[track_caller]
+        fn add_supplicant_sta_network(
+            &self,
+            sta_iface: &fidl_wlanix::SupplicantStaIfaceProxy,
+        ) -> fidl_wlanix::SupplicantStaNetworkProxy {
+            assert!(self.iface_manager.client_iface.lock().is_some(), "requires client iface");
+            let (proxy, server) = create_proxy::<fidl_wlanix::SupplicantStaNetworkMarker>();
+            sta_iface
+                .add_network(fidl_wlanix::SupplicantStaIfaceAddNetworkRequest {
+                    network: Some(server),
+                    ..Default::default()
+                })
+                .expect("SupplicantStaIface::AddNetwork failed");
+            proxy
+        }
+
+        /// Enqueues `Nl80211::GetMulticast` without polling the daemon.
+        fn get_nl80211_multicast(
+            &self,
+            nl80211: &fidl_wlanix::Nl80211Proxy,
+            group: &str,
+        ) -> fidl_wlanix::Nl80211MulticastRequestStream {
+            let (client_end, stream) =
+                create_request_stream::<fidl_wlanix::Nl80211MulticastMarker>();
+            nl80211
+                .get_multicast(fidl_wlanix::Nl80211GetMulticastRequest {
+                    group: Some(group.to_string()),
+                    multicast: Some(client_end),
+                    ..Default::default()
+                })
+                .expect("Nl80211::GetMulticast failed");
+            stream
+        }
+
+        /// Drives `Wifi::GetChip` to completion and settles queued daemon work.
+        #[track_caller]
+        fn get_wifi_chip(
+            &mut self,
+            exec: &mut fasync::TestExecutor,
+            wifi: &fidl_wlanix::WifiProxy,
+            chip_id: u32,
+        ) -> fidl_wlanix::WifiChipProxy {
+            let (chip_proxy, chip_server) = create_proxy::<fidl_wlanix::WifiChipMarker>();
+            let res = self
+                .run(
+                    exec,
+                    wifi.get_chip(fidl_wlanix::WifiGetChipRequest {
+                        chip_id: Some(chip_id),
+                        chip: Some(chip_server),
+                        ..Default::default()
+                    }),
+                )
+                .expect("Wifi::GetChip FIDL call failed");
+            assert_eq!(res, Ok(()), "Wifi::GetChip returned error");
+            chip_proxy
+        }
+
+        /// Drives `WifiChip::GetStaIface` against an existing client iface and settles daemon work.
+        #[track_caller]
+        fn get_wifi_sta_iface(
+            &mut self,
+            exec: &mut fasync::TestExecutor,
+            chip: &fidl_wlanix::WifiChipProxy,
+            iface_name: &str,
+        ) -> fidl_wlanix::WifiStaIfaceProxy {
+            let (sta_proxy, sta_server) = create_proxy::<fidl_wlanix::WifiStaIfaceMarker>();
+            let res = self
+                .run(
+                    exec,
+                    chip.get_sta_iface(fidl_wlanix::WifiChipGetStaIfaceRequest {
+                        iface_name: Some(iface_name.to_string()),
+                        iface: Some(sta_server),
+                        ..Default::default()
+                    }),
+                )
+                .expect("WifiChip::GetStaIface FIDL call failed");
+            assert_eq!(res, Ok(()), "WifiChip::GetStaIface failed; requires client iface");
+            sta_proxy
+        }
+    }
 
     // This will only work if the message is a parseable nl80211 message. Some
     // attributes are currently write only in our NL80211 implementation. If a
@@ -5026,7 +5355,7 @@ mod tests {
         let response = assert_matches!(
             test_helper.exec.run_until_stalled(&mut get_mac_address_fut),
             Poll::Ready(Ok(Ok(response))) => response);
-        assert_eq!(response.mac_addr.unwrap(), [13u8, 37, 13, 37, 13, 37]);
+        assert_eq!(response.mac_addr.unwrap(), FAKE_STA_ADDR);
     }
 
     #[fuchsia::test]
@@ -5048,7 +5377,7 @@ mod tests {
         let response = assert_matches!(
             test_helper.exec.run_until_stalled(&mut get_mac_address_fut),
             Poll::Ready(Ok(Ok(response))) => response);
-        assert_eq!(response.mac_addr.unwrap(), [13u8, 37, 13, 37, 13, 37]);
+        assert_eq!(response.mac_addr.unwrap(), FAKE_STA_ADDR);
     }
 
     #[test_case(
@@ -5577,6 +5906,13 @@ mod tests {
             .exec
             .set_fake_time(fasync::MonotonicInstant::from_nanos(connection_length_nanos.into()));
 
+        *test_helper.iface_manager.get_client_iface().connected_network.lock() =
+            Some(ifaces::ConnectedNetwork {
+                bssid: Bssid::from([42, 42, 42, 42, 42, 42]),
+                rssi: -68,
+                snr: Some(25),
+            });
+
         let mocked_disconnect_source = fidl_sme::DisconnectSource::Ap(fidl_sme::DisconnectCause {
             mlme_event_name: fidl_sme::DisconnectMlmeEventName::DeauthenticateIndication,
             reason_code: fidl_fuchsia_wlan_ieee80211::ReasonCode::ReasonInactivity,
@@ -5638,6 +5974,8 @@ mod tests {
                 assert_eq!(info.disconnect_source, mocked_disconnect_source);
                 assert_eq!(info.original_bss_desc.ssid, Ssid::try_from("foo").unwrap());
                 assert_eq!(info.original_bss_desc.bssid, Bssid::from([42, 42, 42, 42, 42, 42]));
+                assert_eq!(info.current_rssi_dbm, -68);
+                assert_eq!(info.current_snr_db, Some(25));
             }
         );
     }
@@ -5772,38 +6110,6 @@ mod tests {
     }
 
     #[fuchsia::test]
-    fn test_supplicant_sta_signal_report() {
-        let (mut test_helper, mut test_fut) = setup_supplicant_test();
-        let mut mcast_stream = get_nl80211_mcast(&test_helper.nl80211_proxy, "mlme");
-
-        establish_open_connection(&mut test_helper, &mut test_fut, &mut mcast_stream);
-
-        let mocked_signal_report = fidl_internal::SignalReportIndication {
-            rssi_dbm: Some(-35),
-            snr_db: Some(20),
-            tx_rate_500kbps: Some(0),
-            ..Default::default()
-        };
-        {
-            let client_iface = test_helper.iface_manager.get_client_iface();
-            let transaction_handle = client_iface.transaction_handle.lock();
-            let control_handle = transaction_handle.as_ref().expect("No control handle found");
-            control_handle
-                .send_on_signal_report(&mocked_signal_report)
-                .expect("Failed to send OnDisconnect");
-        }
-
-        assert_matches!(test_helper.exec.run_until_stalled(&mut test_fut), Poll::Pending);
-
-        let iface_calls = test_helper.iface_manager.get_iface_call_history();
-        let signal_report_ind = assert_matches!(
-            iface_calls.lock().pop().expect("iface call history should not be empty"),
-            ClientIfaceCall::OnSignalReport { ind } => ind
-        );
-        assert_eq!(signal_report_ind, mocked_signal_report);
-    }
-
-    #[fuchsia::test]
     fn test_supplicant_sta_rssi_threshold_breached() {
         let (mut test_helper, mut test_fut) = setup_supplicant_test();
         let mut mcast_stream = get_nl80211_mcast(&test_helper.nl80211_proxy, "mlme");
@@ -5878,6 +6184,13 @@ mod tests {
         }
 
         assert_matches!(test_helper.exec.run_until_stalled(&mut test_fut), Poll::Pending);
+
+        let iface_calls = test_helper.iface_manager.get_iface_call_history();
+        let rssi_dbm = assert_matches!(
+            iface_calls.lock().pop().expect("iface call history should not be empty"),
+            ClientIfaceCall::OnRssiThresholdBreached { rssi_dbm } => rssi_dbm
+        );
+        assert_eq!(rssi_dbm, -85);
 
         let power_manager_calls = test_helper.power_manager.calls.lock();
         assert!(
@@ -6715,6 +7028,69 @@ mod tests {
     }
 
     #[fuchsia::test]
+    fn restart_sched_scan_holds_wake_lease_until_started() {
+        let mut exec = fasync::TestExecutor::new();
+        let iface_manager = TestIfaceManager::new_with_client();
+        let client_iface = iface_manager.client_iface.lock().clone().unwrap();
+        let mut test_values = setup_nl80211_test_with_iface_manager(&mut exec, iface_manager);
+        let power_manager = Arc::clone(&test_values.power_manager);
+        let leases_taken = || {
+            power_manager.calls.lock().iter().filter(|c| *c == "wlanix-start-sched-scan").count()
+        };
+
+        let start_sched_scan_message = build_nl80211_message(
+            Nl80211Cmd::StartSchedScan,
+            vec![
+                Nl80211Attr::IfaceIndex(ifaces::test_utils::FAKE_IFACE_RESPONSE.id.into()),
+                Nl80211Attr::ScanSsids(vec![b"TestSSID".to_vec()]),
+                Nl80211Attr::SchedScanInterval(40000),
+            ],
+        );
+
+        // Start a first scheduled scan.
+        let first_start_fut = test_values.nl80211_proxy.message_v2(&start_sched_scan_message);
+        let mut first_start_fut = pin!(first_start_fut);
+        assert_matches!(exec.run_until_stalled(&mut test_values.nl80211_fut), Poll::Pending);
+        assert_matches!(exec.run_until_stalled(&mut first_start_fut), Poll::Ready(Ok(Ok(_))));
+        assert_matches!(
+            test_values.scheduled_scan_controller.states.lock().get(&1),
+            Some(ScheduledScanState::FirmwareScansActive { .. })
+        );
+        assert_eq!(leases_taken(), 1);
+        assert!(test_values.power_manager.is_lease_dropped("wlanix-start-sched-scan"));
+
+        // Start a second one, which replaces the first, and keep its start pending.
+        let (mut yield_sender, yielding_rx) = mpsc::channel(1);
+        *client_iface.start_sched_scan_yielding_rx.lock() = Some(yielding_rx);
+        let second_start_fut = test_values.nl80211_proxy.message_v2(&start_sched_scan_message);
+        let mut second_start_fut = pin!(second_start_fut);
+        assert_matches!(exec.run_until_stalled(&mut test_values.nl80211_fut), Poll::Pending);
+        assert_matches!(exec.run_until_stalled(&mut second_start_fut), Poll::Pending);
+
+        // The first scan is already gone, and the wake lease covers the pending start.
+        assert_matches!(
+            test_values.scheduled_scan_controller.states.lock().get(&1),
+            Some(ScheduledScanState::Starting)
+        );
+        assert_eq!(leases_taken(), 2);
+        assert!(!test_values.power_manager.is_lease_dropped("wlanix-start-sched-scan"));
+
+        // Once the start completes, the wake lease is dropped.
+        yield_sender.try_send(()).expect("Failed to resume start_sched_scan");
+        assert_matches!(exec.run_until_stalled(&mut test_values.nl80211_fut), Poll::Pending);
+        let responses = deserialize(assert_matches!(
+            exec.run_until_stalled(&mut second_start_fut),
+            Poll::Ready(Ok(Ok(r))) => r));
+        assert_eq!(responses.len(), 1);
+        assert_matches!(responses[0], fidl_wlanix::Nl80211Message::Ack(_));
+        assert_matches!(
+            test_values.scheduled_scan_controller.states.lock().get(&1),
+            Some(ScheduledScanState::FirmwareScansActive { .. })
+        );
+        assert!(test_values.power_manager.is_lease_dropped("wlanix-start-sched-scan"));
+    }
+
+    #[fuchsia::test]
     fn test_start_sched_scan_fallback_to_software_scheduled_scan() {
         let mut exec = fasync::TestExecutor::new();
         let iface_manager = TestIfaceManager::new_with_client();
@@ -6746,6 +7122,12 @@ mod tests {
             test_values.scheduled_scan_controller.states.lock().get(&1),
             Some(ScheduledScanState::SoftwareScansActive { .. })
         );
+
+        // The failed firmware start still took a wake lease, and dropped it once it was done.
+        assert!(
+            test_values.power_manager.calls.lock().contains(&"wlanix-start-sched-scan".to_string())
+        );
+        assert!(test_values.power_manager.is_lease_dropped("wlanix-start-sched-scan"));
     }
 
     #[fuchsia::test]
@@ -8427,6 +8809,41 @@ mod tests {
         assert_matches!(&iface_calls.lock()[0], ClientIfaceCall::SetMacAddress(addr) => {
             assert_eq!(*addr, mac);
         });
+    }
+
+    #[fuchsia::test]
+    fn test_wifi_sta_iface_get_factory_mac_address() {
+        let (mut test_helper, mut test_fut) = setup_wifi_test();
+
+        let mut get_mac_fut = pin!(test_helper.wifi_sta_iface_proxy.get_factory_mac_address());
+        assert_matches!(test_helper.exec.run_until_stalled(&mut get_mac_fut), Poll::Pending);
+        assert_matches!(test_helper.exec.run_until_stalled(&mut test_fut), Poll::Pending);
+
+        let iface_calls = test_helper.iface_manager.get_iface_call_history();
+        assert_matches!(&iface_calls.lock()[0], ClientIfaceCall::Query);
+
+        let response = assert_matches!(
+            test_helper.exec.run_until_stalled(&mut get_mac_fut),
+            Poll::Ready(Ok(response)) => response
+        );
+        assert_eq!(response, Ok(FAKE_FACTORY_ADDR));
+    }
+
+    #[fuchsia::test]
+    fn test_wifi_sta_iface_get_factory_mac_address_error() {
+        let (mut test_helper, mut test_fut) = setup_wifi_test();
+        assert_matches!(test_helper.exec.run_until_stalled(&mut test_fut), Poll::Pending);
+        *test_helper.iface_manager.client_iface.lock().as_ref().unwrap().fail_query.lock() = true;
+
+        let mut get_mac_fut = pin!(test_helper.wifi_sta_iface_proxy.get_factory_mac_address());
+        assert_matches!(test_helper.exec.run_until_stalled(&mut get_mac_fut), Poll::Pending);
+        assert_matches!(test_helper.exec.run_until_stalled(&mut test_fut), Poll::Pending);
+
+        let response = assert_matches!(
+            test_helper.exec.run_until_stalled(&mut get_mac_fut),
+            Poll::Ready(Ok(response)) => response
+        );
+        assert_eq!(response, Err(zx::sys::ZX_ERR_INTERNAL));
     }
 
     #[fuchsia::test]

@@ -34,5 +34,6 @@ fidl("fuchsia.net.tun") {
   public_deps = [
     "//sdk/fidl/fuchsia.hardware.network",
     "//sdk/fidl/fuchsia.net",
+    "//sdk/fidl/fuchsia.power.broker",
   ]
 }

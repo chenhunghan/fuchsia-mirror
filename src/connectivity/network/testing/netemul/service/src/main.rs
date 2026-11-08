@@ -77,8 +77,8 @@ enum CreateRealmError {
     DuplicateProtocolExposed(String, String),
     #[error("is_weak provided for capability that does not support it '{0}")]
     WeakBindingUnsupported(String),
-    #[error("configuration key '{0}' is not used by component '{1}'")]
-    UnknownConfigKey(String, String),
+    #[error("invalid configuration capability '{0}' for component '{1}'")]
+    InvalidConfigCapabilityName(String, String),
 }
 
 impl From<CreateRealmError> for zx::Status {
@@ -95,7 +95,7 @@ impl From<CreateRealmError> for zx::Status {
             | CreateRealmError::InvalidDevfsSubdirectory(String { .. })
             | CreateRealmError::DuplicateProtocolExposed(String { .. }, String { .. })
             | CreateRealmError::WeakBindingUnsupported(String { .. })
-            | CreateRealmError::UnknownConfigKey(String { .. }, String { .. }) => {
+            | CreateRealmError::InvalidConfigCapabilityName(String { .. }, String { .. }) => {
                 zx::Status::INVALID_ARGS
             }
             CreateRealmError::RealmBuilderError(error) => match error {
@@ -321,37 +321,29 @@ async fn create_realm_instance(
                 offering_children.push(name.clone());
             }
         }
-        let config_values = config_values.unwrap_or_default();
-        if !config_values.is_empty() {
-            let child_decl = builder.get_component_decl(&child_ref).await?;
-            for fnetemul::ChildConfigValue { key, value } in config_values {
-                let use_config = child_decl
-                    .uses
-                    .iter()
-                    .find_map(|u| match u {
-                        cm_rust::UseDecl::Config(c) => (c.target_name == key.as_str()).then_some(c),
-                        _ => None,
-                    })
-                    .ok_or_else(|| CreateRealmError::UnknownConfigKey(key, name.clone()))?;
-                let self_cap_name = format!("{}_{}", name, use_config.source_name);
-                builder
-                    .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
-                        name: self_cap_name.parse().expect("valid capability name"),
-                        value: value.fidl_into_native(),
-                    }))
-                    .await?;
-                builder
-                    .add_route(
-                        Route::new()
-                            .capability(
-                                Capability::configuration(self_cap_name)
-                                    .as_(use_config.source_name.as_str()),
-                            )
-                            .from(Ref::self_())
-                            .to(&child_ref),
-                    )
-                    .await?;
-            }
+        for fnetemul::ChildConfigValue { capability, value } in config_values.unwrap_or_default() {
+            let self_cap_name = format!("{}_{}", name, capability);
+            builder
+                .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                    name: self_cap_name.parse().map_err(|_| {
+                        CreateRealmError::InvalidConfigCapabilityName(
+                            capability.clone(),
+                            name.clone(),
+                        )
+                    })?,
+                    value: value.fidl_into_native(),
+                }))
+                .await?;
+            builder
+                .add_route(
+                    Route::new()
+                        .capability(
+                            Capability::configuration(self_cap_name).as_(capability.as_str()),
+                        )
+                        .from(Ref::self_())
+                        .to(&child_ref),
+                )
+                .await?;
         }
         children_with_uses.push((name, uses));
     }
@@ -1568,10 +1560,12 @@ mod tests {
     const COUNTER_COMPONENT_NAME: &str = "counter";
     const COUNTER_ALTERNATIVE_COMPONENT_NAME: &str = "counter-alternative";
     const COUNTER_URL: &str = "#meta/counter.cm";
+    const COUNTER_SUBPACKAGE_URL: &str = "counter-subpackage#meta/counter.cm";
     const COUNTER_ALTERNATIVE_URL: &str = "#meta/counter-alternative.cm";
     const COUNTER_WITHOUT_PROGRAM_URL: &str = "#meta/counter-without-program.cm";
     const COUNTER_WITH_SHUTDOWN_PROGRAM_URL: &str = "#meta/counter-with-shutdown.cm";
     const COUNTER_CONFIGURATION_NAME: &str = "fuchsia.netemul.test.Config";
+    const COUNTER_STARTING_VALUE_CONFIG_NAME: &str = "fuchsia.netemul.test.StartingValue";
     const COUNTER_A_PROTOCOL_NAME: &str = "fuchsia.netemul.test.CounterA";
     const COUNTER_B_PROTOCOL_NAME: &str = "fuchsia.netemul.test.CounterB";
     const DATA_PATH: &str = "/data";
@@ -2473,14 +2467,33 @@ mod tests {
                 epitaph: zx::Status::INVALID_ARGS,
             },
             TestCase {
-                name: "unknown configuration key for child",
+                name: "invalid configuration capability name for child",
                 children: vec![fnetemul::ChildDef {
                     name: Some(COUNTER_COMPONENT_NAME.to_string()),
                     source: Some(fnetemul::ChildSource::Component(COUNTER_URL.to_string())),
                     config_values: Some(vec![fnetemul::ChildConfigValue {
-                        key: "nonexistent_config_key".to_string(),
+                        capability: "invalid/capability".to_string(),
                         value: cm_rust::ConfigValue::from(0u32).native_into_fidl(),
                     }]),
+                    ..Default::default()
+                }],
+                epitaph: zx::Status::INVALID_ARGS,
+            },
+            TestCase {
+                name: "duplicate configuration capability for child",
+                children: vec![fnetemul::ChildDef {
+                    name: Some(COUNTER_COMPONENT_NAME.to_string()),
+                    source: Some(fnetemul::ChildSource::Component(COUNTER_URL.to_string())),
+                    config_values: Some(vec![
+                        fnetemul::ChildConfigValue {
+                            capability: COUNTER_STARTING_VALUE_CONFIG_NAME.to_string(),
+                            value: cm_rust::ConfigValue::from(0u32).native_into_fidl(),
+                        },
+                        fnetemul::ChildConfigValue {
+                            capability: COUNTER_STARTING_VALUE_CONFIG_NAME.to_string(),
+                            value: cm_rust::ConfigValue::from(1u32).native_into_fidl(),
+                        },
+                    ]),
                     ..Default::default()
                 }],
                 epitaph: zx::Status::INVALID_ARGS,
@@ -3402,29 +3415,35 @@ mod tests {
         );
     }
 
-    #[fixture(with_sandbox)]
+    #[test_case(COUNTER_URL, "relative"; "relative_url")]
+    #[test_case(COUNTER_SUBPACKAGE_URL, "subpackage"; "subpackage_url")]
     #[fuchsia::test]
-    async fn override_config_values(sandbox: fnetemul::SandboxProxy) {
-        const STARTING_VALUE: u32 = 9000;
-        let realm = TestRealm::new(
-            &sandbox,
-            fnetemul::RealmOptions {
-                children: Some(vec![fnetemul::ChildDef {
-                    program_args: Some(vec!["--starting-value-from-config".to_string()]),
-                    config_values: Some(vec![fnetemul::ChildConfigValue {
-                        key: "starting_value".to_string(),
-                        value: cm_rust::ConfigValue::from(STARTING_VALUE).native_into_fidl(),
+    async fn override_config_values(url: &str, variant: &str) {
+        // TODO(https://fxbug.dev/42075656): Use #[fixture] for this once it
+        // integrates well with #[test_case].
+        with_sandbox(&format!("override_config_values_{variant}"), |sandbox| async move {
+            const STARTING_VALUE: u32 = 9000;
+            let realm = TestRealm::new(
+                &sandbox,
+                fnetemul::RealmOptions {
+                    children: Some(vec![fnetemul::ChildDef {
+                        source: Some(fnetemul::ChildSource::Component(url.to_string())),
+                        config_values: Some(vec![fnetemul::ChildConfigValue {
+                            capability: COUNTER_STARTING_VALUE_CONFIG_NAME.to_string(),
+                            value: cm_rust::ConfigValue::from(STARTING_VALUE).native_into_fidl(),
+                        }]),
+                        ..counter_component()
                     }]),
-                    ..counter_component()
-                }]),
-                ..Default::default()
-            },
-        );
-        let counter = realm.connect_to_protocol::<CounterMarker>();
-        assert_eq!(
-            counter.increment().await.expect("failed to increment counter"),
-            STARTING_VALUE + 1,
-        );
+                    ..Default::default()
+                },
+            );
+            let counter = realm.connect_to_protocol::<CounterMarker>();
+            assert_eq!(
+                counter.increment().await.expect("failed to increment counter"),
+                STARTING_VALUE + 1,
+            );
+        })
+        .await;
     }
 
     #[fixture(with_sandbox)]

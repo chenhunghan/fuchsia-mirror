@@ -9,6 +9,7 @@ Fuchsia's [Driver Framework v2 (DFv2)][dfv2].
 
 In Driver Framework v2 (DFv2), drivers are components executed by the driver runner.
 Historically, authoring a DFv2 driver required maintaining multiple disconnected configuration files:
+
 * A **Component Manifest (`.cml`)**: Declaring capabilities, used services, runner configuration, and binary locations.
 * A **Bind Rules File (`.bind`)**: Declaring driver matching rules, hardware identifiers, and composite parent specifications.
 * **Board Configurations (`.fidl`)**: Board drivers required board topology manifests, capability route mappings, and static metadata payloads.
@@ -20,6 +21,7 @@ of drift and configuration bugs.
 
 **DML (Driver Manifest Language)** solves this by providing a single, unified declarative JSON5 manifest
 (`.dml`). The DML compiler (`dmlc`) processes `.dml` files and automatically produces:
+
 1. **Component Manifests (`.cml`)**: Cleaned and validated component manifests ready for compilation with `cmc`.
 2. **Bind Rules (`.bind`)**: Bind program source code compiled with `bindc` into driver bytecode (`.bindbc`).
 3. **FIDL Board Configurations**: Board topology binaries (`BoardConfig`) for platform bus drivers.
@@ -127,6 +129,7 @@ program: {
 ### 3.3 The `use` Section
 
 The `use` section serves a dual purpose:
+
 1. **Component Capability Routing**: Passing standard CML capabilities (`service`, `protocol`, `directory`).
 2. **Composite Parent Node Specification**: Defining the parent nodes that a composite driver binds to.
 
@@ -145,6 +148,7 @@ The `use` section serves a dual purpose:
 #### Special Handling for Initialization Steps
 
 Services representing platform init steps (such as `fuchsia.gpio.Init` and `fuchsia.pwm.Init`) are automatically detected:
+
 * They generate the appropriate bind rule (e.g. `fuchsia.BIND_INIT_STEP == fuchsia.gpio.BIND_INIT_STEP.GPIO;`).
 * They are automatically filtered out of runtime CML `use` entries because init steps are transient bind milestones rather than connectable runtime FIDL services.
 
@@ -255,6 +259,7 @@ offer: [
 ##### Userspace Interrupt Controllers
 
 When a platform device consumes an interrupt managed by a userspace interrupt controller driver (rather than the kernel interrupt controller directly), two `offer` entries are required:
+
 1. Route `fuchsia.hardware.interrupt.ControllerRegistryService` from `"parent"` to the interrupt controller node (`name: "pdev"`). `dmlc` automatically allocates a unique platform bus `interrupt_controller_id` for that controller node.
 2. Reference the controller node in the consumer's `fuchsia.hardware.platform.device.Service` `interrupts` constraint via `controller: "#<controller-node>"`.
 
@@ -328,6 +333,7 @@ bind: {
 ```
 
 Generated bind rules:
+
 ```bind
 fuchsia.BIND_PLATFORM_DEV_VID == fuchsia.khadas.platform.BIND_PLATFORM_DEV_VID.KHADAS;
 fuchsia.BIND_PLATFORM_DEV_PID == fuchsia.khadas.platform.BIND_PLATFORM_DEV_PID.VIM3;
@@ -357,6 +363,7 @@ bind: {
 ```
 
 Generated bind rules:
+
 ```bind
 fuchsia.Service == "fuchsia.hardware.pci.Service";
 fuchsia.BIND_PCI_VID == fuchsia.pci.BIND_PCI_VID.INTEL;
@@ -387,6 +394,7 @@ bind: {
 ```
 
 Generated bind rules:
+
 ```bind
 fuchsia.BIND_PROTOCOL == fuchsia.usb.BIND_PROTOCOL.INTERFACE;
 fuchsia.BIND_USB_VID == fuchsia.usb.BIND_USB_VID.GOOGLE;
@@ -412,6 +420,7 @@ bind: {
 ```
 
 Generated bind rules:
+
 ```bind
 fuchsia.acpi.HID == "PNP0C0A";
 fuchsia.acpi.FIRST_CID == "PNP0C0B";
@@ -447,6 +456,7 @@ use: [
 ```
 
 Generated bind rules:
+
 ```bind
 composite sample_composite;
 
@@ -480,6 +490,7 @@ use: [
 ```
 
 Generated bind rules:
+
 ```bind
 parent "volume-up" {
   fuchsia.Service == "fuchsia.hardware.gpio.Service";
@@ -506,6 +517,7 @@ use: [
 ```
 
 Generated bind rules:
+
 ```bind
 parent "gpio-init" {
   fuchsia.BIND_INIT_STEP == fuchsia.gpio.BIND_INIT_STEP.GPIO;
@@ -531,6 +543,7 @@ bind: {
 ```
 
 Generated bind rules:
+
 ```bind
 fuchsia.BIND_PCI_VID == fuchsia.pci.BIND_PCI_VID.INTEL;
 accept fuchsia.BIND_PCI_DID {
@@ -565,6 +578,7 @@ bind: {
 ```
 
 Generated bind rules:
+
 ```bind
 if fuchsia.BIND_PCI_VID == fuchsia.pci.BIND_PCI_VID.INTEL {
     fuchsia.BIND_PCI_DID == 0x1234;
@@ -576,6 +590,7 @@ if fuchsia.BIND_PCI_VID == fuchsia.pci.BIND_PCI_VID.INTEL {
 ```
 
 Supported trigger properties in `one_of` include:
+
 * `node_name` / `fuchsia.NAME`
 * `acpi.hid` and `acpi.bus_type`
 * `compat` (`fuchsia.COMPATIBLE`)
@@ -599,6 +614,7 @@ bind: {
 ```
 
 Generated bind rule:
+
 ```bind
 fuchsia.BIND_COMPOSITE != 1;
 ```
@@ -612,6 +628,7 @@ fuchsia.BIND_COMPOSITE != 1;
 #### Before: Separate Files
 
 `meta/usb_mass_storage.cml`:
+
 ```json5
 {
   include: [
@@ -638,6 +655,7 @@ fuchsia.BIND_COMPOSITE != 1;
 ```
 
 `meta/usb_mass_storage.bind`:
+
 ```bind
 using fuchsia.usb;
 using fuchsia.usb.massstorage;
@@ -684,6 +702,7 @@ fuchsia.BIND_USB_PROTOCOL == fuchsia.usb.massstorage.BIND_USB_PROTOCOL.BULK_ONLY
 #### Before: Separate Files
 
 `meta/buttons.cml`:
+
 ```json5
 {
   include: [
@@ -712,6 +731,7 @@ fuchsia.BIND_USB_PROTOCOL == fuchsia.usb.massstorage.BIND_USB_PROTOCOL.BULK_ONLY
 ```
 
 `meta/buttons.bind`:
+
 ```bind
 composite buttons;
 
@@ -773,6 +793,7 @@ optional parent "volume-up" {
 ```
 
 Notice that:
+
 * `pdev` is explicitly the primary parent.
 * `fuchsia.gpio.Init` is converted into an init step bind rule and automatically filtered out of the generated CML.
 * `volume-up` with `match_name: true` automatically matches `fuchsia.NAME == "volume-up"`.

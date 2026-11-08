@@ -46,7 +46,6 @@ bool rust_wait_queue_base_is_empty(const WaitQueueBase* wait_queue);
 uint32_t rust_wait_queue_base_count(const WaitQueueBase* wait_queue);
 zx_status_t rust_wait_queue_base_unblock_thread(WaitQueueBase* wait_queue, Thread* t,
                                                 zx_status_t wait_queue_error);
-Thread* rust_wait_queue_base_peek_front(const WaitQueueBase* wait_queue);
 zx_status_t rust_wait_queue_base_block_etc_preamble(WaitQueueBase* wait_queue,
                                                     Thread* current_thread,
                                                     const Deadline* deadline, uint32_t signal_mask,
@@ -71,7 +70,6 @@ bool rust_wait_queue_wake_one_locked(WaitQueue* wait_queue, zx_status_t wait_que
                                      bool* out_woken);
 bool rust_wait_queue_wake_all_locked(WaitQueue* wait_queue, zx_status_t wait_queue_error,
                                      uint32_t* out_woken);
-void rust_wait_queue_dequeue_thread(WaitQueue* wait_queue, Thread* t, zx_status_t wait_queue_error);
 void rust_wait_queue_move_thread(WaitQueue* source, WaitQueue* dest, Thread* t);
 }  // extern "C"
 
@@ -173,39 +171,9 @@ class WaitQueueCollection {
   uint32_t Count() const { return static_cast<uint32_t>(threads_.size()); }
   bool IsEmpty() const { return threads_.is_empty(); }
 
-  // The current minimum inheritable relative deadline of the set of blocked threads.
-  SchedDuration MinInheritableRelativeDeadline() const {
-    return SchedDuration{rust_wait_queue_collection_min_inheritable_relative_deadline(this)};
-  }
-
   // Peek at the first Thread in the collection.
   Thread* PeekFront() { return threads_.is_empty() ? nullptr : &threads_.front(); }
   const Thread* PeekFront() const { return const_cast<WaitQueueCollection*>(this)->PeekFront(); }
-
-  SchedulerState::WaitQueueInheritedSchedulerState* FindInheritedSchedulerStateStorage() {
-    return static_cast<SchedulerState::WaitQueueInheritedSchedulerState*>(
-        rust_wait_queue_collection_find_inherited_scheduler_state_storage(this));
-  }
-
-  // Add the Thread into its sorted location in the collection.
-  void Insert(Thread* thread) TA_REQ(ChainLockable::GetLock(*thread)) {
-    rust_wait_queue_collection_insert(this, thread);
-  }
-
-  // Remove the Thread from the collection.
-  void Remove(Thread* thread) TA_REQ(ChainLockable::GetLock(*thread)) {
-    rust_wait_queue_collection_remove(this, thread);
-  }
-
-  // Either lock every thread in the collection, or failed with
-  // ChainLock::Result::Backoff, releasing any locks which were obtained in the
-  // process. ASSERTs if any cycles are detected by the ChainLock. Used by
-  // WaitQueue WakeAll.  Note that it is not possible to statically annotated
-  // this, and needs to be used with extreme care.  If LockAll returns success,
-  // it is critical that the caller (eventually) drops all of the locks.
-  ChainLock::Result LockAll() TA_REQ(chainlock_transaction_token) {
-    return static_cast<ChainLock::Result>(rust_wait_queue_collection_lock_all(this));
-  }
 
   // Accessor for the underlying thread collection.
   const auto& threads() const { return threads_; }
@@ -226,9 +194,9 @@ class WaitQueueCollection {
     static fbl::WAVLTreeNodeState<Thread*>& node_state(Thread& thread);
   };
 
-  // The C++ view of the tree of blocked threads. All mutation (Insert, Remove) happens in Rust,
-  // which maintains the node links and the subtree_min_deadline_ invariant, so no observer runs
-  // on this side; C++ only reads the tree through this type.
+  // The C++ view of the tree of blocked threads. All mutation (`insert`, `remove`) happens in
+  // Rust, which maintains the node links and the `subtree_min_deadline_` invariant, so no observer
+  // runs on this side; C++ only reads the tree through this type.
   using BlockedThreadTree =
       fbl::WAVLTree<Key, Thread*, BlockedThreadTreeTraits, fbl::DefaultObjectTag,
                     fbl::SizeOrder::Constant, BlockedThreadTreeTraits>;
@@ -263,11 +231,6 @@ class WaitQueueBase : public ChainLockable {
 
   explicit constexpr WaitQueueBase(uint32_t magic) : magic_(magic) {}
   ~WaitQueueBase();
-
-  Thread* PeekFront() TA_REQ(get_lock()) { return rust_wait_queue_base_peek_front(this); }
-  const Thread* PeekFront() const TA_REQ(get_lock()) {
-    return rust_wait_queue_base_peek_front(this);
-  }
 
   inline zx_status_t BlockEtcPreamble(Thread* current_thread, const Deadline& deadline,
                                       uint signal_mask, ResourceOwnership reason,
@@ -308,9 +271,6 @@ class WaitQueue : public WaitQueueBase {
   WaitQueue(WaitQueue&&) = delete;
   WaitQueue& operator=(WaitQueue&) = delete;
   WaitQueue& operator=(WaitQueue&&) = delete;
-
-  // Expose direct access to PeekFront.
-  using WaitQueueBase::PeekFront;
 
   // Block on a wait queue.
   // The returned status is whatever the caller of WaitQueue::Wake_*() specifies.
@@ -367,11 +327,6 @@ class WaitQueue : public WaitQueueBase {
       TA_REQ(chainlock_transaction_token, get_lock(), preempt_disabled_token);
   ktl::optional<uint32_t> WakeAllLocked(zx_status_t wait_queue_error)
       TA_REQ(chainlock_transaction_token, get_lock(), preempt_disabled_token);
-
-  // Dequeue the specified thread and set its blocked_status.  Do not actually
-  // schedule the thread to run.
-  void DequeueThread(Thread* t, zx_status_t wait_queue_error)
-      TA_REQ(get_lock(), ChainLockable::GetLock(*t));
 
  protected:
   explicit constexpr WaitQueue(uint32_t magic) : WaitQueueBase(magic) {}

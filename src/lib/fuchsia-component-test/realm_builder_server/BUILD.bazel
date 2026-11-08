@@ -1,0 +1,169 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_component_manifest(
+    name = "realm_with_child_manifest",
+    component_name = "realm_with_child",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:offer.shard",
+    ],
+    manifest = "meta/realm_with_child.cml",
+)
+
+fx_component(
+    name = "realm_with_child",
+    compiled_manifest = ":realm_with_child_manifest",
+)
+
+fx_component_manifest(
+    name = "a_manifest",
+    component_name = "a",
+    manifest = "meta/a.cml",
+)
+
+fx_component(
+    name = "a",
+    compiled_manifest = ":a_manifest",
+)
+
+rustc_binary(
+    name = "realm_builder_server_bin",
+    srcs = [
+        "src/builtin.rs",
+        "src/main.rs",
+        "src/resolver.rs",
+        "src/runner.rs",
+    ],
+    build_flags = ["//build/config/rust:bootfs"],
+    crate_name = "realm_builder_server",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.component.resolution:fuchsia.component.resolution_rust",
+        "//sdk/fidl/fuchsia.component.runner:fuchsia.component.runner_rust",
+        "//sdk/fidl/fuchsia.component.test:fuchsia.component.test_rust",
+        "//sdk/fidl/fuchsia.data:fuchsia.data_rust",
+        "//sdk/fidl/fuchsia.inspect:fuchsia.inspect_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.logger:fuchsia.logger_rust",
+        "//sdk/fidl/fuchsia.mem:fuchsia.mem_rust",
+        "//sdk/rust/zx",
+        "//sdk/rust/zx-status",
+        "//src/lib/directed_graph",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-fs",
+        "//src/lib/fuchsia-sync",
+        "//src/lib/versioning/version-history/rust",
+        "//src/storage/lib/vfs/rust:vfs",
+        "//src/sys/lib/cm_fidl_validator",
+        "//src/sys/lib/cm_rust",
+        "//src/sys/lib/cm_types",
+        "//src/sys/lib/config_encoder",
+        "//src/sys/lib/fidl-fuchsia-component-abi-ext",
+        "//src/sys/lib/mem_util",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:rand",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:url",
+    ],
+)
+
+rustc_test(
+    name = "realm_builder_server_bin_test",
+    build_flags = ["//build/config/rust:bootfs"],
+    crate = ":realm_builder_server_bin",
+    edition = "2024",
+    deps = [
+        "//src/lib/versioning/version-history/rust/data",
+        "//src/sys/lib/cm_rust/testing",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:difference",
+        "//third_party/rust_crates/vendor:maplit",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+fx_packaged_binary(
+    name = "realm_builder_server_bin_test_packaged_bin",
+    testonly = True,
+    binary = ":realm_builder_server_bin_test",
+    binary_name = "realm_builder_server_bin_test",
+)
+
+fx_component_manifest(
+    name = "realm_builder_server_unit_tests_manifest",
+    testonly = True,
+    component_name = "realm_builder_server_unit_tests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/unit-tests.cml",
+)
+
+fx_test_component(
+    name = "realm_builder_server_unit_tests_component",
+    compiled_manifest = ":realm_builder_server_unit_tests_manifest",
+    deps = [":realm_builder_server_bin_test_packaged_bin"],
+)
+
+fx_package(
+    name = "realm_builder_server_unit_tests_package",
+    package_name = "realm_builder_server_unit_tests",
+    components = [
+        ":a",
+        ":realm_with_child",
+    ],
+    test_components = [":realm_builder_server_unit_tests_component"],
+)
+
+fx_test(
+    name = "realm_builder_server_unit_tests",
+    package = ":realm_builder_server_unit_tests_package",
+    visibility = ["//src/lib/fuchsia-component-test:__pkg__"],
+)
+
+fx_packaged_binary(
+    name = "realm_builder_server_packaged_bin",
+    binary = ":realm_builder_server_bin",
+    binary_name = "realm_builder_server",
+)
+
+fx_component_manifest(
+    name = "realm_builder_server_component-manifest",
+    component_name = "realm_builder_server",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/realm_builder_server.cml",
+)
+
+fx_component(
+    name = "realm_builder_server_component",
+    compiled_manifest = ":realm_builder_server_component-manifest",
+    visibility = ["//:__subpackages__"],
+    deps = [":realm_builder_server_packaged_bin"],
+)

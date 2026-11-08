@@ -1,0 +1,78 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["calc_integration_test.cc"],
+    # GN adds the source root as an include directory, which the source relies
+    # on for its angled `<src/lib/testing/...>` includes.
+    copts = ["-I."],
+    tags = ["manual"],
+    deps = [
+        "//examples/fidl/calculator/fidl:calculator_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+        "//src/lib/testing/predicates",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged_bin",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "calc_integration_test_cpp",
+)
+
+fx_component_manifest(
+    name = "calc_integration_test-manifest",
+    testonly = True,
+    component_name = "calc_integration_test",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/calc_integration_test.cml",
+)
+
+fx_test_component(
+    name = "calc_integration_test_component_cpp",
+    compiled_manifest = ":calc_integration_test-manifest",
+    deps = [":bin_packaged_bin"],
+)
+
+fx_package(
+    name = "calculator-integration-test-cpp-package",
+    package_name = "calculator-integration-test-cpp",
+    components = ["//examples/fidl/calculator/cpp/server:component"],
+    test_components = [":calc_integration_test_component_cpp"],
+)
+
+fx_test(
+    name = "calculator-integration-test-cpp",
+    package = ":calculator-integration-test-cpp-package",
+    # Aggregated by the examples test suite in //examples/BUILD.bazel.
+    visibility = ["//examples:__pkg__"],
+)

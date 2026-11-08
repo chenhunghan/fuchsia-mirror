@@ -1,0 +1,72 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load(
+    "//src/tests/benchmarks/fidl/benchmark_suite:benchmark_suite.bzl",
+    "BENCHMARK_SUITE_FIDL_TARGET",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+# LINT.IfChange
+fx_cc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = [
+        "benchmarks.cc",
+        "data.h",
+        "main.cc",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//sdk/lib/fidl",
+        "//sdk/lib/utf-utils",
+        "//src/zircon/lib/zircon",
+        "//zircon/system/ulib/perftest",
+        BENCHMARK_SUITE_FIDL_TARGET + "_hlcpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "lib_fidl_microbenchmarks",
+    visibility = ["//visibility:private"],
+)
+
+fx_component_manifest(
+    name = "benchmark_manifest",
+    testonly = True,
+    component_name = "benchmark",
+    includes = ["//src/tests/benchmarks/fidl:meta/benchmark.shard"],
+    manifest = "meta/benchmark.cml",
+    visibility = ["//visibility:private"],
+)
+
+fx_component(
+    name = "benchmark",
+    testonly = True,
+    compiled_manifest = ":benchmark_manifest",
+    visibility = ["//visibility:private"],
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "fidl_microbenchmarks_libfidl",
+    package_name = "fidl_microbenchmarks_libfidl",
+    testonly = True,
+    components = [":benchmark"],
+    visibility = ["//src/tests/benchmarks:__subpackages__"],
+)
+# LINT.ThenChange(//src/tests/benchmarks/fidl/libfidl/BUILD.gn)

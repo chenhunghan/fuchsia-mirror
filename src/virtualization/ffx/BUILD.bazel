@@ -1,0 +1,40 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//src/developer/ffx/build:ffx_plugin.bzl", "ffx_plugin")
+load("//src/developer/ffx/build:ffx_tool.bzl", "ffx_tool")
+
+package(default_applicable_licenses = ["//:license"])
+
+ffx_plugin(
+    name = "ffx_guest",
+    args_deps = [
+        "//src/developer/ffx/core:lib",
+        "//third_party/rust_crates/vendor:argh",
+    ],
+    args_srcs = ["src/args.rs"],
+    edition = "2024",
+    plugin_deps = [
+        "//src/virtualization/ffx/attach:ffx_guest_attach",
+        "//src/virtualization/ffx/balloon:ffx_guest_balloon",
+        "//src/virtualization/ffx/launch:ffx_guest_launch",
+        "//src/virtualization/ffx/list:ffx_guest_list",
+        "//src/virtualization/ffx/mem:ffx_guest_mem",
+        "//src/virtualization/ffx/socat:ffx_guest_socat",
+        "//src/virtualization/ffx/stop:ffx_guest_stop",
+        "//src/virtualization/ffx/vsockperf:ffx_guest_vsockperf",
+    ],
+    version = "0.1.0",
+)
+
+ffx_tool(
+    name = "ffx_guest_tool",
+    srcs = ["src/main.rs"],
+    binary_name = "ffx-guest",
+    edition = "2024",
+    deps = [
+        ":ffx_guest_suite",
+        "//src/lib/fuchsia",
+    ],
+)

@@ -1825,13 +1825,18 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
     /// Writes an attribute that should not already exist and therefore does not require trimming.
     /// Breaks up the write into multiple transactions if `data.len()` is larger than
     /// `WRITE_ATTR_BATCH_SIZE`. This always writes using a key wrapped with the volume data key.
+    ///
+    /// If the write spans multiple transactions, returns a `ScopeGuard` that **must** be defused
+    /// (via `scopeguard::ScopeGuard::into_inner`) inside `Transaction::commit_with_callback` when
+    /// committing the final transaction. If dropped without being defused, the guard queues an
+    /// attribute tombstone in the graveyard to clean up the partially written attribute.
     #[trace]
     pub async fn write_new_attr(
         &self,
         transaction: &mut Transaction<'_>,
         attribute_id: AttributeId,
         data: &[u8],
-    ) -> Result<(), Error> {
+    ) -> Result<Option<scopeguard::ScopeGuard<(), impl FnOnce(()) + Send + use<S>>>, Error> {
         self.write_new_attr_impl(
             transaction,
             attribute_id,
@@ -1843,14 +1848,14 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
     }
 
     /// Writes a new attribute that has already been encrypted with `key_id`, without performing
-    /// encryption again.
+    /// encryption again. See `write_new_attr` for details on the returned `ScopeGuard`.
     pub async fn write_new_attr_pre_encrypted(
         &self,
         transaction: &mut Transaction<'_>,
         attribute_id: AttributeId,
         key_id: u64,
         data: &[u8],
-    ) -> Result<(), Error> {
+    ) -> Result<Option<scopeguard::ScopeGuard<(), impl FnOnce(()) + Send + use<S>>>, Error> {
         self.write_new_attr_impl(transaction, attribute_id, key_id, /* encrypt: */ false, data)
             .await
     }
@@ -1862,7 +1867,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         key_id: u64,
         encrypt: bool,
         data: &[u8],
-    ) -> Result<(), Error> {
+    ) -> Result<Option<scopeguard::ScopeGuard<(), impl FnOnce(()) + Send + use<S>>>, Error> {
         transaction.add(
             self.store().store_object_id,
             Mutation::replace_or_insert_object(
@@ -1886,6 +1891,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
             );
         }
         let mut start_offset = 0;
+        let mut graveyard_guard = None;
         for (i, chunk) in chunks.enumerate() {
             let rounded_len = self.block_size().align_up(chunk.len() as u64).unwrap();
             let mut buffer = self.store().device.allocate_buffer(rounded_len as usize).await;
@@ -1908,7 +1914,26 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
             start_offset += rounded_len;
             // Do not commit the last chunk.
             if i < num_chunks - 1 {
-                transaction.commit_and_continue().await?;
+                transaction
+                    .commit_and_continue(|| {
+                        if i == 0 {
+                            let owner = self.owner.clone();
+                            let object_id = self.object_id();
+                            graveyard_guard = Some(scopeguard::guard((), move |()| {
+                                let store = owner.as_ref().as_ref();
+                                store
+                                    .filesystem()
+                                    .ensure_local()
+                                    .graveyard()
+                                    .queue_tombstone_attribute(
+                                        store.store_object_id(),
+                                        object_id,
+                                        attribute_id,
+                                    );
+                            }));
+                        }
+                    })
+                    .await?;
             }
         }
         if num_chunks > 1 {
@@ -1918,7 +1943,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
                 attribute_id,
             );
         }
-        Ok(())
+        Ok(graveyard_guard)
     }
 
     /// Writes an entire attribute. Returns whether or not the attribute needs to continue being
@@ -3157,11 +3182,18 @@ mod tests {
         let (fs, object) = test_filesystem_and_empty_object().await;
         let merkle_tree = vec![1; 3 * WRITE_ATTR_BATCH_SIZE];
         let mut transaction = (*object).new_transaction(AttributeId::TEST_ID).await.unwrap();
-        object
+        let graveyard_guard = object
             .write_new_attr(&mut transaction, AttributeId::TEST_ID, &merkle_tree)
             .await
             .expect("failed to write merkle attribute");
-        transaction.commit().await.unwrap();
+        transaction
+            .commit_with_callback(|_| {
+                if let Some(guard) = graveyard_guard {
+                    scopeguard::ScopeGuard::into_inner(guard);
+                }
+            })
+            .await
+            .unwrap();
         assert_eq!(
             object.read_attr(AttributeId::TEST_ID).await.expect("read_attr failed"),
             Some(merkle_tree.into())
@@ -3407,5 +3439,157 @@ mod tests {
             .multi_write(&mut transaction, AttributeId::DATA, &[0..write_len as u64], buf.as_mut())
             .await
             .expect("multi_write");
+    }
+
+    #[fuchsia::test]
+    async fn test_write_new_attr_queues_tombstone_on_partial_commit_error() {
+        use futures::FutureExt;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let pause_after_commit = Arc::new(AtomicBool::new(false));
+        let pause_clone = pause_after_commit.clone();
+        let device = DeviceHolder::new(FakeDevice::new(16384, TEST_DEVICE_BLOCK_SIZE));
+        let fs = crate::filesystem::FxFilesystemBuilder::new()
+            .post_commit_hook(move || {
+                if pause_clone.load(Ordering::SeqCst) {
+                    std::future::pending().boxed()
+                } else {
+                    futures::future::ready(()).boxed()
+                }
+            })
+            .format(device)
+            .await
+            .expect("format failed");
+        let store = fs.root_store();
+        let file = {
+            let mut transaction = store
+                .new_transaction(
+                    lock_keys![LockKey::object(
+                        store.store_object_id(),
+                        store.root_directory_object_id()
+                    )],
+                    Options::default(),
+                )
+                .await
+                .expect("new_transaction failed");
+            let object = ObjectStore::create_object(
+                &store,
+                &mut transaction,
+                HandleOptions::default(),
+                None,
+            )
+            .await
+            .expect("create_object failed");
+            let root_directory = Directory::open(&store, store.root_directory_object_id())
+                .await
+                .expect("open failed");
+            root_directory
+                .add_child_file(&mut transaction, TEST_OBJECT_NAME, &object)
+                .await
+                .expect("add_child_file failed");
+            transaction.commit().await.expect("commit failed");
+            object
+        };
+
+        let attr_id = AttributeId(64);
+        let attr_data = vec![0xABu8; 2 * WRITE_ATTR_BATCH_SIZE];
+
+        // 1. If `write_new_attr` is cancelled (dropped) while suspended in `commit_and_continue`
+        //    before Batch 0 actually commits, it must not queue a tombstone for the uncommitted
+        //    graveyard entry.
+        {
+            let mut transaction = file.new_transaction().await.expect("new_transaction");
+            let commit_guard = fs.lock_commits().await;
+            {
+                let mut write_fut =
+                    std::pin::pin!(file.write_new_attr(&mut transaction, attr_id, &attr_data));
+                assert!(futures::poll!(write_fut.as_mut()).is_pending());
+            }
+            drop(transaction);
+            drop(commit_guard);
+            fs.graveyard().flush().await;
+            assert!(file.read_attr(attr_id).await.expect("read_attr").is_none());
+            assert_eq!(file.get_properties().await.unwrap().allocated_size, 0);
+            assert_eq!(file.store().graveyard_count(), 0);
+        }
+
+        // 2. If `write_new_attr` is cancelled (dropped) while suspended in `commit_and_continue`
+        //    after Batch 0 has committed, the graveyard guard armed in the commit callback must
+        //    queue a tombstone on drop.
+        {
+            let mut transaction = file.new_transaction().await.expect("new_transaction");
+            pause_after_commit.store(true, Ordering::SeqCst);
+            {
+                let mut write_fut =
+                    std::pin::pin!(file.write_new_attr(&mut transaction, attr_id, &attr_data));
+                assert!(futures::poll!(write_fut.as_mut()).is_pending());
+            }
+            drop(transaction);
+            pause_after_commit.store(false, Ordering::SeqCst);
+            assert_eq!(
+                file.get_properties().await.unwrap().allocated_size,
+                WRITE_ATTR_BATCH_SIZE as u64
+            );
+            fs.graveyard().flush().await;
+            assert!(
+                file.read_attr(attr_id).await.expect("read_attr").is_none(),
+                "Partially written attribute should be tombstoned by graveyard after drop"
+            );
+            assert_eq!(file.get_properties().await.unwrap().allocated_size, 0);
+            assert_eq!(file.store().graveyard_count(), 0);
+        }
+
+        // 3. If `commit_and_continue` returns an error after Batch 0 commits, the graveyard guard
+        //    must also queue a tombstone for the partially written attribute.
+        let mut transaction = file.new_transaction().await.expect("new_transaction");
+
+        // Leave WRITE_ATTR_BATCH_SIZE unreserved in the allocator: enough for Batch 0's data
+        // extent in `multi_write`, leaving 0 B when `commit_and_continue()` tries to top up
+        // `transaction`'s reservation for Batch 1.
+        let held = fs
+            .allocator()
+            .reserve_with(None, |limit| limit.saturating_sub(WRITE_ATTR_BATCH_SIZE as u64));
+
+        let is_err = file.write_new_attr(&mut transaction, attr_id, &attr_data).await;
+        assert!(
+            matches!(&is_err, Err(e) if FxfsError::NoSpace.matches(e)),
+            "Expected NoSpace, got: {:?}",
+            is_err.err()
+        );
+        drop(transaction);
+        drop(held);
+
+        // Flushing the graveyard must process the queued attribute tombstone and remove the
+        // partially written attribute and its extent.
+        fs.graveyard().flush().await;
+        assert!(
+            file.read_attr(attr_id).await.expect("read_attr").is_none(),
+            "Partially written attribute should be tombstoned by graveyard after error"
+        );
+        assert_eq!(file.get_properties().await.unwrap().allocated_size, 0);
+        assert_eq!(file.store().graveyard_count(), 0);
+
+        // 4. If `write_new_attr` succeeds for a multi-batch write, dropping the returned guard
+        //    (and transaction) without defusing it inside `commit_with_callback` must queue a
+        //    tombstone for cleanup.
+        {
+            let mut transaction = file.new_transaction().await.expect("new_transaction");
+            let graveyard_guard = file
+                .write_new_attr(&mut transaction, attr_id, &attr_data)
+                .await
+                .expect("write_new_attr should succeed");
+            assert!(graveyard_guard.is_some());
+            drop(graveyard_guard);
+            drop(transaction);
+            fs.graveyard().flush().await;
+            assert!(
+                file.read_attr(attr_id).await.expect("read_attr").is_none(),
+                "Partially written attribute should be tombstoned when commit guard is dropped"
+            );
+            assert_eq!(file.get_properties().await.unwrap().allocated_size, 0);
+            assert_eq!(file.store().graveyard_count(), 0);
+        }
+
+        fs.close().await.expect("close failed");
     }
 }

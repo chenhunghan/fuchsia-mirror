@@ -53,14 +53,15 @@ void TestFn(zx::unowned_event event) {
 }
 
 // Call f for each record read from the sampler.
-zx::result<> ForEachRecord(zx_handle_t sampler, fit::function<void(std::span<uint64_t>)> f) {
+zx::result<> ForEachRecord(zx_handle_t sampler, std::vector<uint64_t>& data,
+                           fit::function<void(std::span<uint64_t>)> f) {
   size_t max_size;
   if (zx_status_t status = zx_sampler_read(sampler, nullptr, 0, &max_size); status != ZX_OK) {
     return zx::error(status);
   }
 
   size_t actual;
-  std::vector<uint64_t> data(max_size / 8);
+  data.resize(max_size / sizeof(uint64_t));
   if (zx_status_t status =
           zx_sampler_read(sampler, data.data(), data.size() * sizeof(uint64_t), &actual);
       status != ZX_OK) {
@@ -87,10 +88,11 @@ zx::result<> ForEachRecord(zx_handle_t sampler, fit::function<void(std::span<uin
 
 zx::result<> ReadNRecords(zx_handle_t sampler, size_t N) {
   size_t record_count{0};
+  std::vector<uint64_t> data;
   zx::time deadline = zx::deadline_after(zx::sec(30));
   while (zx::clock::get_monotonic() < deadline) {
-    if (zx::result res =
-            ForEachRecord(sampler, [&record_count](std::span<uint64_t>) { record_count += 1; });
+    if (zx::result res = ForEachRecord(sampler, data,
+                                       [&record_count](std::span<uint64_t>) { record_count += 1; });
         res.is_error()) {
       return res.take_error();
     }
@@ -103,6 +105,7 @@ zx::result<> ReadNRecords(zx_handle_t sampler, size_t N) {
 
 zx::result<> ReadNRecordsContainingTid(zx_handle_t sampler, zx_koid_t desired_tid, size_t N) {
   size_t record_count{0};
+  std::vector<uint64_t> data;
   zx::time deadline = zx::deadline_after(zx::sec(30));
   auto f = [&record_count, desired_tid](std::span<uint64_t> record_data) {
     ZX_ASSERT(record_data.size() >= 4);
@@ -119,7 +122,7 @@ zx::result<> ReadNRecordsContainingTid(zx_handle_t sampler, zx_koid_t desired_ti
     }
   };
   while (zx::clock::get_monotonic() < deadline) {
-    if (zx::result res = ForEachRecord(sampler, f); res.is_error()) {
+    if (zx::result res = ForEachRecord(sampler, data, f); res.is_error()) {
       return res.take_error();
     }
     if (record_count >= N) {
@@ -306,6 +309,12 @@ TEST(ThreadSampler, NonRunningThread) {
 }
 
 TEST(ThreadSampler, HighFrequency) {
+#if defined(SKIP_HIGH_FREQUENCY_SAMPLER_TEST)
+  // TODO(https://fxbug.dev/579382913): Re-enable once high-frequency sampling
+  // with coverage-instrumented kernel spinlocks no longer stalls cuckoo tests.
+  ZXTEST_SKIP("Skipping HighFrequency under coverage (https://fxbug.dev/579382913)");
+#endif
+
   // Start the thread sampler a large number of threads at a high frequency to stress the sampler.
 
   // We use a larger buffer size than the other tests. We need enough buffer room that the buffers

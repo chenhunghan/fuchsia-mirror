@@ -16,7 +16,6 @@ use crate::thread::{
     BinderThread, BinderThreadState, Command, QueuedCommand, RegistrationState,
     generate_dead_replies,
 };
-use crossbeam::queue::SegQueue;
 use starnix_core::mm::MemoryAccessor;
 use starnix_core::mm::memory::MemoryObject;
 use starnix_core::mutable_state::Guard;
@@ -24,8 +23,8 @@ use starnix_core::task::{Kernel, Pid, Task};
 use starnix_core::vfs::FdNumber;
 use starnix_logging::{log_trace, log_warn, track_stub};
 use starnix_sync::{
-    BinderFreezeLevel, BinderProcessSharedMemoryLevel, BinderProcessStateLevel,
-    BinderThreadPoolLevel, LockDepGuard, LockDepMutex,
+    BinderAvailableThreadsLock, BinderFreezeLevel, BinderProcessSharedMemoryLevel,
+    BinderProcessStateLevel, BinderThreadPoolLevel, LockDepGuard, LockDepMutex,
 };
 use starnix_types::ownership::{
     DropGuard, OwnedRef, Releasable, ReleaseGuard, Share, TempRef, WeakRef, release_after,
@@ -41,6 +40,7 @@ use starnix_uapi::{
     binder_driver_command_protocol_BC_RELEASE, binder_frozen_state_info, binder_uintptr_t, errno,
     error,
 };
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
@@ -66,6 +66,8 @@ pub struct BinderProcessState {
     pub active_transactions: BTreeMap<UserAddress, ReleaseGuard<ActiveTransaction>>,
     /// The list of processes that should be notified if this process dies.
     pub death_subscribers: Vec<(WeakRef<BinderProcess>, binder_uintptr_t)>,
+    /// The death notifications requested by this process, keyed by their cookie.
+    pub death_notifications: BTreeMap<binder_uintptr_t, DeathNotificationState>,
     /// Whether the binder connection for this process is closed. Once closed, any blocking
     /// operation will be aborted and return an EBADF error.
     pub closed: bool,
@@ -78,6 +80,43 @@ pub struct BinderProcessState {
     /// same cookie was in-flight, waiting for BC_FREEZE_NOTIFICATION_DONE before sending
     /// BR_CLEAR_FREEZE_NOTIFICATION_DONE.
     pub pending_clear_freeze_notifications: BTreeSet<binder_uintptr_t>,
+    /// Number of threads currently being unregistered and released that had pending transactions
+    /// when removed from `thread_pool`.
+    pub releasing_threads_with_pending_transactions: usize,
+}
+
+/// The state of the death notifications that a process requested for a given cookie.
+///
+/// This mirrors the lifecycle of `binder_ref_death` in Linux. Userspace may release the object
+/// identified by the cookie as soon as it receives `BR_CLEAR_DEATH_NOTIFICATION_DONE` (libbinder
+/// drops the weak reference that it took for the notification), so that command must never be
+/// delivered while a `BR_DEAD_BINDER` for the same cookie is queued or still being processed.
+#[derive(Debug, Default)]
+pub struct DeathNotificationState {
+    /// Whether the notification is registered with the owner of the binder object, which will
+    /// queue a `BR_DEAD_BINDER` when it dies.
+    pub registered: bool,
+    /// The number of `BR_DEAD_BINDER` queued for, or delivered to, userspace that have not been
+    /// acknowledged with `BC_DEAD_BINDER_DONE` yet.
+    pub pending_dead_binders: usize,
+    /// The number of `BR_CLEAR_DEATH_NOTIFICATION_DONE` deferred until a `BC_DEAD_BINDER_DONE`,
+    /// because their `BC_CLEAR_DEATH_NOTIFICATION` arrived while a `BR_DEAD_BINDER` was pending.
+    /// This is the equivalent of `BINDER_WORK_DEAD_BINDER_AND_CLEAR` in Linux.
+    pub deferred_clears: usize,
+}
+
+impl DeathNotificationState {
+    /// Whether a death notification is currently active (not yet cleared by
+    /// `BC_CLEAR_DEATH_NOTIFICATION`). Like `ref->death != NULL` in Linux, this remains true after
+    /// `BR_DEAD_BINDER` is queued until `BC_CLEAR_DEATH_NOTIFICATION` arrives.
+    fn is_set(&self) -> bool {
+        self.registered || self.pending_dead_binders > self.deferred_clears
+    }
+
+    /// Whether the state no longer tracks anything, and can be dropped.
+    fn is_empty(&self) -> bool {
+        !self.registered && self.pending_dead_binders == 0 && self.deferred_clears == 0
+    }
 }
 
 #[derive(Debug, Default)]
@@ -86,13 +125,45 @@ pub struct BinderFreezeState {
     pub freeze_subscribers: Vec<(WeakRef<BinderProcess>, binder_uintptr_t)>,
     /// Status of the binder freeze.
     pub freeze_status: FreezeStatus,
+    /// Number of in-flight `BINDER_FREEZE(enable=1)` operations waiting for transactions to drain
+    /// in the current `thaw_generation`.
+    pub freezing_count: usize,
+    /// Monotonic counter incremented on every `thaw()` to invalidate any in-flight
+    /// `BINDER_FREEZE(enable=1)` waiters that started before the thaw.
+    pub thaw_generation: u64,
+    /// Whether a `BINDER_FREEZE(enable=1)` operation has completed without a subsequent `thaw()`.
+    pub committed_frozen: bool,
 }
 
 impl BinderFreezeState {
-    pub fn freeze(&mut self) -> Vec<(OwnedRef<BinderProcess>, Command)> {
+    pub fn begin_freeze(&mut self) -> u64 {
+        self.freezing_count += 1;
         self.freeze_status.frozen = true;
         self.freeze_status.has_async_recv = false;
         self.freeze_status.has_sync_recv = false;
+        self.thaw_generation
+    }
+
+    pub fn cancel_freeze(
+        &mut self,
+        expected_generation: u64,
+        state: &mut BinderProcessState,
+    ) -> bool {
+        if self.thaw_generation != expected_generation {
+            return false;
+        }
+        self.freezing_count = self.freezing_count.saturating_sub(1);
+        if self.freezing_count == 0 && !self.committed_frozen {
+            self.freeze_status.frozen = false;
+            return state.unfreeze_oneway_transactions();
+        }
+        false
+    }
+
+    pub fn notify_frozen(&mut self) -> Vec<(OwnedRef<BinderProcess>, Command)> {
+        self.freezing_count = self.freezing_count.saturating_sub(1);
+        self.committed_frozen = true;
+        self.freeze_status.frozen = true;
         let mut pending_notifications = Vec::new();
         self.freeze_subscribers.retain(|(proc, cookie)| {
             if let Some(p) = proc.re_own() {
@@ -112,10 +183,23 @@ impl BinderFreezeState {
         pending_notifications
     }
 
-    pub fn thaw(&mut self) -> Vec<(OwnedRef<BinderProcess>, Command)> {
+    #[cfg(test)]
+    pub fn freeze(&mut self) -> Vec<(OwnedRef<BinderProcess>, Command)> {
+        self.begin_freeze();
+        self.notify_frozen()
+    }
+
+    pub fn thaw(
+        &mut self,
+        state: &mut BinderProcessState,
+    ) -> (Vec<(OwnedRef<BinderProcess>, Command)>, bool) {
+        self.thaw_generation += 1;
+        self.freezing_count = 0;
+        self.committed_frozen = false;
         self.freeze_status.frozen = false;
         self.freeze_status.has_async_recv = false;
         self.freeze_status.has_sync_recv = false;
+        let should_wake = state.unfreeze_oneway_transactions();
         let mut pending_notifications = Vec::new();
         self.freeze_subscribers.retain(|(proc, cookie)| {
             if let Some(p) = proc.re_own() {
@@ -132,13 +216,41 @@ impl BinderFreezeState {
                 false
             }
         });
-        pending_notifications
+        (pending_notifications, should_wake)
     }
 }
 
 impl BinderProcessState {
-    pub fn has_pending_transactions(&self) -> bool {
-        !self.active_transactions.is_empty()
+    pub fn unfreeze_oneway_transactions(&mut self) -> bool {
+        let mut had_frozen_oneway = false;
+        for transaction in self.active_transactions.values_mut() {
+            if matches!(transaction.request_type, RequestType::Oneway { .. })
+                && !transaction.is_pending
+            {
+                transaction.is_pending = true;
+                had_frozen_oneway = true;
+            }
+        }
+        had_frozen_oneway && !self.command_queue.is_empty()
+    }
+
+    pub fn is_command_runnable(&self, command: &Command) -> bool {
+        if let Command::OnewayTransaction(data) = command {
+            self.active_transactions.get(&data.buffers.data.address).is_none_or(|t| t.is_pending)
+        } else {
+            true
+        }
+    }
+
+    pub fn has_runnable_commands(&self) -> bool {
+        self.command_queue.iter().any(|queued| self.is_command_runnable(&queued.command))
+    }
+
+    pub fn enqueue_command(&mut self, command: QueuedCommand) -> bool {
+        let is_runnable = self.is_command_runnable(&command.command);
+        crate::trace::on_command_enqueued(&command.command, command.trace_id);
+        self.command_queue.push_back(command);
+        is_runnable
     }
 }
 
@@ -159,6 +271,8 @@ pub struct FreezeStatus {
 pub struct ActiveTransaction {
     /// The transaction's request type.
     pub request_type: RequestType,
+    /// Whether this transaction is still pending for `BINDER_FREEZE` and `BINDER_GET_FROZEN_INFO`.
+    pub is_pending: bool,
     /// The state associated with the transaction.
     ///
     /// Invariant: `state.proc` always points to the receiving [`BinderProcess`] whose
@@ -358,6 +472,98 @@ pub enum RequestType {
     RequestResponse,
 }
 
+/// A thread-safe stack of available threads for a [`BinderProcess`].
+///
+/// Threads register themselves here when they become available to process commands. Work is handed
+/// to the most recently available thread first, as Linux does (a thread is added at the head of
+/// `proc->waiting_threads` when it starts waiting, and `binder_select_thread_ilocked` picks the
+/// head), so that a few threads with warm caches handle most of the work instead of rotating it
+/// through the whole thread pool.
+///
+/// This stack is backed by [`LockDepMutex`] with [`BinderAvailableThreadsLock`], a terminal
+/// lock level acquired after [`BinderProcessStateLevel`] and `BinderThreadStateLock`;
+/// nothing may be acquired while it is held, and it must not be taken while holding another
+/// terminal lock.
+///
+/// Using a priority-inheriting mutex with no userspace spinning avoids the `sched_yield`
+/// spinning / starvation livelock seen with `SegQueue` under deadline scheduler roles
+/// (see https://fxbug.dev/577150201).
+#[derive(Debug)]
+pub struct AvailableThreads {
+    inner: LockDepMutex<Vec<WeakRef<BinderThread>>, BinderAvailableThreadsLock>,
+}
+
+impl Default for AvailableThreads {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AvailableThreads {
+    /// Creates a new empty `AvailableThreads` stack.
+    pub fn new() -> Self {
+        Self { inner: LockDepMutex::new(Vec::new()) }
+    }
+
+    /// Pops the most recently pushed thread, releasing the lock immediately before returning.
+    ///
+    /// May briefly block while acquiring the inner lock.
+    /// Returns `None` if the stack is empty.
+    #[inline]
+    pub fn pop(&self) -> Option<WeakRef<BinderThread>> {
+        self.inner.lock().pop()
+    }
+
+    /// Pushes `thread` as the most recently available thread.
+    ///
+    /// A thread can stop waiting without being popped, e.g. when it is kicked, which leaves its
+    /// entry behind until it waits again. Any entry for `thread` is removed first, so that each
+    /// thread is queued at most once, at the top of the stack.
+    ///
+    /// May briefly block while acquiring the inner lock.
+    #[inline]
+    pub fn push(&self, thread: WeakRef<BinderThread>) {
+        let mut inner = self.inner.lock();
+        inner.retain(|queued| !WeakRef::ptr_eq(queued, &thread));
+        inner.push(thread);
+    }
+
+    /// Removes the entry of `thread`, if any.
+    ///
+    /// May briefly block while acquiring the inner lock.
+    #[inline]
+    pub fn remove(&self, thread: &WeakRef<BinderThread>) {
+        self.inner.lock().retain(|queued| !WeakRef::ptr_eq(queued, thread));
+    }
+
+    /// Returns `true` if the stack is empty.
+    ///
+    /// May briefly block while acquiring the inner lock.
+    ///
+    /// # Concurrency Notes
+    /// - In [`BinderProcess::enqueue_command`], this is called while holding
+    ///   [`BinderProcess::state`] (where popping and locking a [`BinderThread`] is not allowed) to
+    ///   check whether a thread became available after
+    ///   [`BinderProcess::try_enqueue_on_available_thread`] returned `Err`. Because
+    ///   `BinderDriver::handle_thread_read` drops `thread_state` (which calls [`push`](Self::push))
+    ///   before dropping `proc_state`, any `push` ordered before `BinderProcess::state` is
+    ///   acquired is guaranteed to be visible to this check.
+    /// - A `false` return indicates entries are present in the stack, but queued entries may be
+    ///   dead [`WeakRef`]s (if the target thread has exited) or live threads that are no longer
+    ///   available.
+    /// - Entries at the bottom of the stack are only popped after all the newer entries, so a
+    ///   thread removes its entry when its wait fails (e.g. when it is interrupted, see
+    ///   `BinderDriver::handle_thread_read`) or when it exits (see
+    ///   [`BinderProcess::unregister_thread`]). Otherwise, its stale entry could stay queued below
+    ///   the threads that keep becoming available, and make
+    ///   [`BinderProcessGuard::should_request_thread_locked`] assume that the process has an idle
+    ///   thread when all its threads are busy.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.inner.lock().is_empty()
+    }
+}
+
 #[derive(Debug)]
 pub struct BinderProcess {
     /// Weak reference to self.
@@ -377,7 +583,9 @@ pub struct BinderProcess {
     // `freeze_state`, `state`, and `thread_pool`. For ordering purposes, locks must be taken in
     // the order they are defined in this struct, even across `BinderProcess` instances.
     // Moreover, any `BinderThread` lock must be ordered after `state` and `thread_pool` from a
-    // `BinderProcess`.
+    // `BinderProcess`. `available_threads` has its own terminal lock. It may be taken while
+    // holding any of the above or a `BinderThread` lock, and no lock may be taken while holding
+    // it.
     /// The [`SharedMemory`] region mapped in both the driver and the binder process. Allows for
     /// transactions to copy data once from the sender process into the receiver process.
     pub shared_memory: LockDepMutex<Option<SharedMemory>, BinderProcessSharedMemoryLevel>,
@@ -392,9 +600,13 @@ pub struct BinderProcess {
     /// FD events when commands are available.
     pub process_waiters: starnix_core::task::WaitQueue,
 
-    /// A lock-free queue of threads that are available to handle commands.
+    /// A WaitQueue used to notify waiters waiting for pending transactions to drain during
+    /// `BINDER_FREEZE`.
+    pub freeze_waiters: starnix_core::task::WaitQueue,
+
+    /// A queue of threads that are available to handle commands.
     /// A thread adds itself to this queue when it transitions to being available.
-    pub available_threads: Arc<SegQueue<WeakRef<BinderThread>>>,
+    pub available_threads: Arc<AvailableThreads>,
 
     /// The set of threads that are interacting with the binder driver.
     /// Protected by a dedicated mutex to allow thread lookup on the ioctl hot path without
@@ -433,7 +645,8 @@ impl BinderProcess {
             freeze_state: Default::default(),
             state: Default::default(),
             process_waiters: Default::default(),
-            available_threads: Arc::new(SegQueue::new()),
+            freeze_waiters: Default::default(),
+            available_threads: Default::default(),
             thread_pool: Default::default(),
         });
         log_trace!("new BinderProcess id={}", result.identifier());
@@ -447,6 +660,17 @@ impl BinderProcess {
 
     pub fn lock<'a>(&'a self) -> BinderProcessGuard<'a> {
         BinderProcessGuard(Guard::new(self, self.state.lock()))
+    }
+
+    pub fn has_pending_transactions(&self, state: &BinderProcessState) -> bool {
+        !state.closed
+            && (state.releasing_threads_with_pending_transactions > 0
+                || state.active_transactions.values().any(|t| t.is_pending)
+                || self
+                    .thread_pool
+                    .lock()
+                    .values()
+                    .any(|t| t.state.lock().has_pending_transactions()))
     }
 
     /// Return the `BinderThread` with the given `task.tid`, creating it if it doesn't exist.
@@ -479,6 +703,15 @@ impl BinderProcess {
                         .checked_sub(1)
                         .expect("Attempt to decrement auxiliary_threads_count below 0");
                 }
+                let mut thread_state = thread.state.lock();
+                if thread_state.has_pending_transactions() {
+                    state.releasing_threads_with_pending_transactions += 1;
+                    thread_state.releasing_with_pending_transactions = true;
+                }
+                // The thread may still be queued in `available_threads` if it stopped waiting
+                // without being popped. Remove its entry, which would otherwise stay queued as a
+                // dead `WeakRef` once the thread is released (see `AvailableThreads::is_empty`).
+                self.available_threads.remove(&thread.weak_self);
             }
             removed
         };
@@ -493,10 +726,11 @@ impl BinderProcess {
         if !state.closed {
             state.closed = true;
             for thread in self.thread_pool.lock().values() {
-                thread.command_queue_waiters.notify_all();
+                thread.command_event.notify();
                 thread.command_queue_poll_waiters.notify_all();
             }
             self.process_waiters.notify_all();
+            self.freeze_waiters.notify_all();
         }
     }
 
@@ -506,7 +740,7 @@ impl BinderProcess {
         log_trace!("kicking threads for BinderProcess id={}", self.identifier());
         for thread in self.thread_pool.lock().values() {
             thread.lock().request_kick = true;
-            thread.command_queue_waiters.notify_all();
+            thread.command_event.notify();
             thread.command_queue_poll_waiters.notify_all();
         }
     }
@@ -571,12 +805,13 @@ impl BinderProcess {
         // Handle oneway transactions explicitly. They should always target the process queue to
         // avoid accidentally handling them during an ongoing transaction.
         if matches!(command.command, Command::OnewayTransaction(_)) {
-            crate::trace::on_command_enqueued(&command.command, command.trace_id);
-            self.lock().command_queue.push_back(command);
+            let should_wake = self.lock().enqueue_command(command);
 
             // Since OnewayTransactions are routed to the process queue, we must explicitly
             // wake waiters and available threads so it can grab the command, rather than letting it stall.
-            self.wake_process_and_available_thread();
+            if should_wake {
+                self.wake_process_and_available_thread();
+            }
             return None;
         }
 
@@ -615,9 +850,7 @@ impl BinderProcess {
             if let Some(thread) = weak_thread.upgrade() {
                 let thread_guard = thread.lock();
                 if thread_guard.is_available() {
-                    thread
-                        .command_queue_waiters
-                        .notify_fd_events_count(starnix_uapi::vfs::FdEvents::POLLIN, 1);
+                    thread.command_event.notify();
                     return true;
                 }
             }
@@ -632,50 +865,61 @@ impl BinderProcess {
         // Drop the state associated with the now completed transaction, releasing any temporary
         // strong handle references under the same process lock acquisition.
         let mut drop_actions = RefCountActions::default();
-        release_after!(drop_actions, (), {
-            let active_transaction = {
+        let notify_freeze_waiters = release_after!(drop_actions, (), {
+            let (active_transaction, should_wake, notify_freeze_waiters) = {
                 let mut proc_state = self.lock();
                 let mut active_transaction = proc_state.active_transactions.remove(&buffer_ptr);
+                let mut should_wake = false;
                 if let Some(active_transaction) = active_transaction.as_mut() {
                     active_transaction.state.release_handles(&mut proc_state, &mut drop_actions);
-                }
-                active_transaction
-            };
-            release_after!(active_transaction, &mut drop_actions, {
-                // Check if this was a oneway transaction and schedule the next oneway if this is the case.
-                if let Some(ActiveTransaction {
-                    request_type: RequestType::Oneway { object },
-                    ..
-                }) = active_transaction.as_ref().map(|at| at.deref())
-                {
-                    let mut object_state = object.lock();
-                    assert!(
-                        object_state.handling_oneway_transaction,
-                        "freeing a oneway buffer implies that a oneway transaction was being handled"
-                    );
-                    if let Some((transaction, trace)) = object_state.oneway_transactions.pop_front()
-                    {
-                        // Drop the lock, as we've completed all mutations and don't want to hold this
-                        // lock while acquiring any others.
-                        drop(object_state);
+                    // Check if this was a oneway transaction and schedule the next oneway if this
+                    // is the case.
+                    if let RequestType::Oneway { object } = &active_transaction.request_type {
+                        let mut object_state = object.lock();
+                        assert!(
+                            object_state.handling_oneway_transaction,
+                            "freeing a oneway buffer implies that a oneway transaction was being handled"
+                        );
+                        if let Some((transaction, trace)) =
+                            object_state.oneway_transactions.pop_front()
+                        {
+                            drop(object_state);
 
-                        // Schedule the transaction
-                        self.enqueue_command(QueuedCommand::new(
-                            Command::OnewayTransaction(transaction),
-                            trace,
-                        ));
-                    } else {
-                        // No more oneway transactions queued, mark the queue handling as done.
-                        object_state.handling_oneway_transaction = false;
+                            let queued =
+                                QueuedCommand::new(Command::OnewayTransaction(transaction), trace);
+                            should_wake = proc_state.enqueue_command(queued);
+                        } else {
+                            // No more oneway transactions queued, mark the queue handling as done.
+                            object_state.handling_oneway_transaction = false;
+                        }
                     }
                 }
+                let was_pending = active_transaction.as_ref().is_some_and(|t| t.is_pending);
+                (
+                    active_transaction,
+                    should_wake,
+                    was_pending && !self.has_pending_transactions(&proc_state),
+                )
+            };
+            release_after!(active_transaction, &mut drop_actions, {
+                if should_wake {
+                    self.wake_process_and_available_thread();
+                }
             });
+            notify_freeze_waiters
         });
 
         // Reclaim the memory.
-        let mut shared_memory_lock = self.shared_memory.lock();
-        let shared_memory = shared_memory_lock.as_mut().ok_or_else(|| errno!(ENOMEM))?;
-        shared_memory.free_buffer(buffer_ptr)
+        let res = self
+            .shared_memory
+            .lock()
+            .as_mut()
+            .ok_or_else(|| errno!(ENOMEM))
+            .and_then(|shared_memory| shared_memory.free_buffer(buffer_ptr));
+        if notify_freeze_waiters {
+            self.freeze_waiters.notify_all();
+        }
+        res
     }
 
     /// Handle a binder thread's request to increment/decrement a strong/weak reference to a remote
@@ -732,7 +976,29 @@ impl BinderProcess {
                 proxy
             }
         };
-        if let Some(owner) = proxy.owner.upgrade() {
+        // Upgrade the owner before locking `self`: holding `Some(owner)` (`TempRef`) prevents
+        // `BinderProcess::release` from running until `owner` is dropped after subscribing, while
+        // `None` records the pending `BR_DEAD_BINDER` directly without exposing `registered`.
+        let owner = proxy.owner.upgrade();
+        {
+            let mut state = self.lock();
+            let notification = state.death_notifications.entry(cookie).or_default();
+            if notification.is_set() {
+                // Like Linux, ignore a request for a death notification that is already set.
+                log_trace!(
+                    "BinderProcess id={} death notification already set for cookie {:#x}",
+                    self.identifier(),
+                    cookie
+                );
+                return Ok(());
+            }
+            if owner.is_some() {
+                notification.registered = true;
+            } else {
+                notification.pending_dead_binders += 1;
+            }
+        }
+        if let Some(owner) = owner {
             owner.lock().death_subscribers.push((self.weak_self.clone(), cookie));
         } else {
             // The object is already dead. Notify immediately. To be noted: the requesting thread
@@ -760,7 +1026,41 @@ impl BinderProcess {
                 return Ok(());
             }
             Handle::Object { index } => {
-                self.lock().handles.get_owner(index).ok_or_else(|| errno!(ENOENT))?
+                let mut state = self.lock();
+                let owner = state.handles.get_owner(index).ok_or_else(|| errno!(ENOENT))?;
+                match state.death_notifications.entry(cookie) {
+                    Entry::Occupied(mut entry) if entry.get().registered => {
+                        // No BR_DEAD_BINDER has been queued for the notification, and none will
+                        // be: acknowledge the clear right away.
+                        let notification = entry.get_mut();
+                        notification.registered = false;
+                        if notification.is_empty() {
+                            entry.remove();
+                        }
+                    }
+                    Entry::Occupied(mut entry)
+                        if entry.get().pending_dead_binders > entry.get().deferred_clears =>
+                    {
+                        // A BR_DEAD_BINDER for this cookie is queued or being processed by
+                        // userspace, e.g. this is the BC_CLEAR_DEATH_NOTIFICATION that libbinder's
+                        // `BpBinder::sendObituary()` sends before calling the death recipients.
+                        // Like Linux, defer BR_CLEAR_DEATH_NOTIFICATION_DONE until userspace
+                        // acknowledges the BR_DEAD_BINDER with BC_DEAD_BINDER_DONE.
+                        entry.get_mut().deferred_clears += 1;
+                        return Ok(());
+                    }
+                    _ => {
+                        // The death notification is not set, or each pending BR_DEAD_BINDER
+                        // already has a deferred clear. Like Linux, ignore the clear.
+                        log_trace!(
+                            "BinderProcess id={} death notification not set for cookie {:#x}",
+                            self.identifier(),
+                            cookie
+                        );
+                        return Ok(());
+                    }
+                }
+                owner
             }
         };
         if let Some(owner) = owner.upgrade() {
@@ -775,6 +1075,59 @@ impl BinderProcess {
         }
         self.enqueue_command(Command::ClearDeathNotificationDone(cookie).into());
         Ok(())
+    }
+
+    /// Acknowledge that userspace finished processing a death notification (`BR_DEAD_BINDER`).
+    pub fn handle_dead_binder_done(&self, cookie: binder_uintptr_t) {
+        let clear_done = {
+            let mut state = self.lock();
+            match state.death_notifications.entry(cookie) {
+                Entry::Occupied(mut entry) if entry.get().pending_dead_binders > 0 => {
+                    let notification = entry.get_mut();
+                    notification.pending_dead_binders -= 1;
+                    let clear_done = notification.deferred_clears > 0;
+                    if clear_done {
+                        notification.deferred_clears -= 1;
+                    }
+                    if notification.is_empty() {
+                        entry.remove();
+                    }
+                    clear_done
+                }
+                _ => {
+                    // Like Linux, ignore the acknowledgement of a death notification that was not
+                    // sent.
+                    log_trace!(
+                        "BinderProcess id={} no pending death notification for cookie {:#x}",
+                        self.identifier(),
+                        cookie
+                    );
+                    false
+                }
+            }
+        };
+        if clear_done {
+            self.enqueue_command(Command::ClearDeathNotificationDone(cookie).into());
+        }
+    }
+
+    /// Queues a `BR_DEAD_BINDER` for the death notification `cookie`, as the owner of the binder
+    /// object died, unless the notification has been cleared in the meantime.
+    pub(crate) fn notify_dead_binder(&self, cookie: binder_uintptr_t) {
+        {
+            let mut state = self.lock();
+            match state.death_notifications.get_mut(&cookie) {
+                Some(notification) if notification.registered => {
+                    notification.registered = false;
+                    notification.pending_dead_binders += 1;
+                }
+                // The notification has been cleared, and its BR_CLEAR_DEATH_NOTIFICATION_DONE may
+                // already have been delivered: userspace must not receive a BR_DEAD_BINDER after
+                // it.
+                _ => return,
+            }
+        }
+        self.enqueue_command(Command::DeadBinder(cookie).into());
     }
 
     /// Subscribe a process to the freeze of the owner of `handle`.
@@ -820,7 +1173,7 @@ impl BinderProcess {
         owner_freeze_state.freeze_subscribers.push((self.weak_self.clone(), cookie));
         let info = binder_frozen_state_info {
             cookie,
-            is_frozen: if owner_freeze_state.freeze_status.frozen { 1 } else { 0 },
+            is_frozen: if owner_freeze_state.committed_frozen { 1 } else { 0 },
             reserved: 0,
         };
         self.enqueue_command(Command::FrozenBinder(info).into());
@@ -1054,7 +1407,7 @@ impl Releasable for BinderProcess {
         // Notify any subscribers that the objects this process owned are now dead.
         for (proc, cookie) in state.death_subscribers {
             if let Some(target_proc) = proc.upgrade() {
-                target_proc.enqueue_command(Command::DeadBinder(cookie).into());
+                target_proc.notify_dead_binder(cookie);
             }
         }
 
@@ -1074,6 +1427,8 @@ impl Releasable for BinderProcess {
         for thread in self.thread_pool.into_inner().into_values() {
             thread.release(context);
         }
+
+        self.freeze_waiters.notify_all();
     }
 }
 

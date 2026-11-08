@@ -641,7 +641,7 @@ TEST_F(CapsExecTest, RegularUserExecutingSUIDRootGetsAllCapabilities) {
         test_helper::SetCapabilityEffective(CAP_SETPCAP);
 
         // Leave only CAP_SETPCAP in effective capabilities.
-        for (int cap = 0; cap < cap_last_cap_; cap++) {
+        for (int cap = 0; cap <= cap_last_cap_; cap++) {
           if (cap == CAP_SETPCAP) {
             continue;
           }
@@ -1240,6 +1240,72 @@ TEST(CapsTest, CapsetMasksReservedBits) {
     EXPECT_EQ(got_permitted & valid_mask, orig_permitted & valid_mask);
     EXPECT_EQ(got_effective & valid_mask, orig_effective & valid_mask);
     EXPECT_EQ(got_inheritable & valid_mask, orig_inheritable & valid_mask);
+  });
+  EXPECT_TRUE(helper.WaitForChildren());
+}
+
+// Verifies that capget(2) can query another task's capabilities, and that
+// adding a capability from the bounding set to the inheritable set requires
+// either having the capability in the permitted set or holding CAP_SETPCAP
+// in the effective set.
+TEST(CapsTest, CapgetOtherTaskAndCapsetInheritableRequiresCapSetpcap) {
+  if (!test_helper::HasCapability(CAP_SETPCAP) || !test_helper::HasCapability(CAP_CHOWN)) {
+    GTEST_SKIP() << "Requires CAP_SETPCAP and CAP_CHOWN";
+  }
+
+  test_helper::ForkHelper helper;
+  test_helper::Rendezvous child_ready = test_helper::MakeRendezvous();
+  test_helper::Rendezvous parent_done = test_helper::MakeRendezvous();
+
+  pid_t child_pid = helper.RunInForkedProcess([&]() {
+    test_helper::UnsetCapabilityEffective(CAP_CHOWN);
+    test_helper::UnsetCapabilityPermitted(CAP_CHOWN);
+    child_ready.poker.poke();
+    parent_done.holder.hold();
+  });
+
+  child_ready.holder.hold();
+
+  // 1. Verify capget on another task returns the target task's capability sets.
+  __user_cap_header_struct header{_LINUX_CAPABILITY_VERSION_3, child_pid};
+  __user_cap_data_struct child_caps[_LINUX_CAPABILITY_U32S_3]{};
+  ASSERT_THAT(syscall(SYS_capget, &header, child_caps), SyscallSucceeds());
+  uint64_t child_permitted = static_cast<uint64_t>(child_caps[0].permitted) |
+                             (static_cast<uint64_t>(child_caps[1].permitted) << 32);
+  EXPECT_EQ(child_permitted & (1ULL << CAP_CHOWN), 0ULL);
+
+  parent_done.poker.poke();
+  EXPECT_TRUE(helper.WaitForChildren());
+
+  // 2. Verify adding a capability to inheritable that is in the bounding set
+  // but not in permitted requires CAP_SETPCAP in effective.
+  helper.RunInForkedProcess([]() {
+    test_helper::UnsetCapabilityEffective(CAP_CHOWN);
+    test_helper::UnsetCapabilityPermitted(CAP_CHOWN);
+    ASSERT_TRUE(test_helper::HasCapabilityBounding(CAP_CHOWN));
+    ASSERT_FALSE(test_helper::HasCapabilityPermitted(CAP_CHOWN));
+    ASSERT_TRUE(test_helper::HasCapabilityEffective(CAP_SETPCAP));
+
+    // Adding CAP_CHOWN to inheritable succeeds because CAP_SETPCAP is in effective.
+    __user_cap_header_struct self_header{_LINUX_CAPABILITY_VERSION_3, 0};
+    __user_cap_data_struct caps[_LINUX_CAPABILITY_U32S_3]{};
+    ASSERT_THAT(syscall(SYS_capget, &self_header, caps), SyscallSucceeds());
+    caps[CAP_TO_INDEX(CAP_CHOWN)].inheritable |= CAP_TO_MASK(CAP_CHOWN);
+    EXPECT_THAT(syscall(SYS_capset, &self_header, caps), SyscallSucceeds());
+
+    // Drop CAP_SETPCAP from effective.
+    test_helper::UnsetCapabilityEffective(CAP_SETPCAP);
+    ASSERT_FALSE(test_helper::HasCapabilityEffective(CAP_SETPCAP));
+
+    // Adding another capability (e.g. CAP_NET_RAW) not in permitted to inheritable
+    // now fails with EPERM.
+    if (test_helper::HasCapability(CAP_NET_RAW)) {
+      test_helper::UnsetCapabilityEffective(CAP_NET_RAW);
+      test_helper::UnsetCapabilityPermitted(CAP_NET_RAW);
+      ASSERT_THAT(syscall(SYS_capget, &self_header, caps), SyscallSucceeds());
+      caps[CAP_TO_INDEX(CAP_NET_RAW)].inheritable |= CAP_TO_MASK(CAP_NET_RAW);
+      EXPECT_THAT(syscall(SYS_capset, &self_header, caps), SyscallFailsWithErrno(EPERM));
+    }
   });
   EXPECT_TRUE(helper.WaitForChildren());
 }

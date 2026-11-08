@@ -74,13 +74,13 @@ class ShellCommand:
 
     def split(
         self, separators: set[str] = _DEFAULT_SPLIT_SEPARATORS
-    ) -> list["ShellCommand"]:
+    ) -> list[ShellCommand]:
         """Splits the command by top-level && and || separators.
 
         Returns separated subcommands as ShellCommand objects. Separators are dropped.
         """
         chunks = _split_by_separators(self._str, separators)
-        result: list["ShellCommand"] = []
+        result: list[ShellCommand] = []
         for chunk in chunks:
             if chunk in separators:
                 continue
@@ -88,7 +88,7 @@ class ShellCommand:
                 result.append(ShellCommand(chunk))
         return result
 
-    def unwrap(self) -> T.Optional["ShellCommand"]:
+    def unwrap(self) -> T.Optional[ShellCommand]:
         """Unwraps the command by stripping the first wrapper script.
 
         It looks for the first occurrence of `--` (surrounded by spaces)
@@ -107,7 +107,7 @@ class ShellCommand:
 
         return ShellCommand(inner_tokens)
 
-    def parse(self) -> "ParsedShellCommand":
+    def parse(self) -> ParsedShellCommand:
         """Parses the command into env vars, tool, and args.
 
         This uses a heuristic where the first token that doesn't contain '=' is
@@ -150,8 +150,8 @@ class ShellCommand:
 
 
 def find_command_with_tool(
-    commands: list["ShellCommand"], tool: str
-) -> T.Optional["ShellCommand"]:
+    commands: list[ShellCommand], tool: str
+) -> T.Optional[ShellCommand]:
     """
     Find the first command in the list that uses the given tool.
     Matches the basename of the tool.

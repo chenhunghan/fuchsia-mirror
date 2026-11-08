@@ -178,6 +178,7 @@ class WlanWmmTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         self.wmm_transceivers = [self.staut, self.access_point_transceiver]
 
         # Create secondary station transceiver, if present
+        self.secondary_sta: wmm_transceiver.WmmTransceiver | None = None
         if "secondary_sta" in self._wmm_transceiver_configs:
             self.secondary_sta = wmm_transceiver.create(
                 self._wmm_transceiver_configs["secondary_sta"],
@@ -185,8 +186,6 @@ class WlanWmmTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
                 wlan_devices=self.fuchsia_devices,
             )
             self.wmm_transceivers.append(self.secondary_sta)
-        else:
-            self.secondary_sta = None
 
         for tc in self.wmm_transceivers:
             if tc.wlan_device:
@@ -730,7 +729,10 @@ class WlanWmmTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         uuid = await self.staut.run_synchronous_traffic_stream(
             {"receiver": self.access_point_transceiver}, subnet_str
         )
-        max_bw = self.staut.get_results(uuid).avg_send_rate
+        max_bw_result = self.staut.get_results(uuid)
+        if max_bw_result is None or max_bw_result.avg_send_rate is None:
+            raise ConnectionError("Failed to determine link maximum bandwidth.")
+        max_bw = max_bw_result.avg_send_rate
         self.log.info(f"Link maximum bandwidth: {max_bw} Mb/s")
 
         # Run parallel phases

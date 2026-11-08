@@ -28,7 +28,7 @@ class SpdxWriter:
     builder: SpdxDocumentBuilder
 
     @staticmethod
-    def create(root_package_name: str, file_access: FileAccess) -> "SpdxWriter":
+    def create(root_package_name: str, file_access: FileAccess) -> SpdxWriter:
         builder = SpdxDocumentBuilder.create(
             root_package_name=root_package_name,
             creators=[f"Tool: {os.path.basename(__file__)}"],

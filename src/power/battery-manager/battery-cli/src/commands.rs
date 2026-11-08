@@ -89,6 +89,11 @@ gen_commands! {
             "Connect the real battery and disconnect the simulator"),
         Disconnect = ("disconnect", [],
             "Disconnect the real battery and connect to the simulator"),
+        Governor = ("governor", [
+                "list | control | pause <governor> | resume <governor> | override ... | clear ...",
+                "--help"
+            ],
+            "Inspect and control charge governors and override their votes"),
         Help = ("help", [], "Help message"),
         Exit = ("exit", [], "Exit/Close REPL"),
         Quit = ("quit", [], "Quit/Close REPL"),

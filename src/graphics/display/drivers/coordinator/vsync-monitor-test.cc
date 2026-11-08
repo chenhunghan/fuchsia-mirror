@@ -260,6 +260,36 @@ TEST_F(VsyncMonitorTest, TimeSinceLastVsyncIsComputedWhenInspectIsRead) {
   EXPECT_LT(time_since_last_vsync_ns, static_cast<uint64_t>(zx::sec(10).to_nsecs()));
 }
 
+TEST_F(VsyncMonitorTest, PeriodicUpdaterContinuesAfterStallAndDetectsSubsequentStalls) {
+  ASSERT_EQ(ZX_OK, vsync_monitor_->Initialize().status_value());
+  EXPECT_FALSE(vsync_monitor_->is_vsync_stalled());
+  EXPECT_EQ(0u, vsync_monitor_->vsync_stalls_count());
+  EXPECT_EQ(zx::time_boot::infinite_past(), vsync_monitor_->current_stall_start_boot());
+
+  // Report an old Vsync timestamp exceeding the 10-second stall threshold.
+  ReportVsync(zx::clock::get_monotonic() - zx::sec(15));
+  EXPECT_TRUE(test_loop_.RunFor(zx::sec(5)));
+  EXPECT_TRUE(vsync_monitor_->is_vsync_stalled());
+  EXPECT_EQ(1u, vsync_monitor_->vsync_stalls_count());
+  EXPECT_EQ(1u, ReadUintProperty("vsync_stalls"));
+  const zx::time_boot first_stall_boot = vsync_monitor_->current_stall_start_boot();
+  EXPECT_GT(first_stall_boot, zx::time_boot(0));
+
+  // A fresh Vsync clears the stalled flag.
+  ReportVsync(zx::clock::get_monotonic());
+  EXPECT_FALSE(vsync_monitor_->is_vsync_stalled());
+
+  // Because `UpdateStatistics` continues rescheduling `updater_` even when stalled,
+  // a subsequent stall is also detected and updates `current_stall_start_boot()`.
+  zx::nanosleep(zx::deadline_after(zx::usec(50)));
+  ReportVsync(zx::clock::get_monotonic() - zx::sec(15));
+  EXPECT_TRUE(test_loop_.RunFor(zx::sec(5)));
+  EXPECT_TRUE(vsync_monitor_->is_vsync_stalled());
+  EXPECT_EQ(2u, vsync_monitor_->vsync_stalls_count());
+  EXPECT_EQ(2u, ReadUintProperty("vsync_stalls"));
+  EXPECT_GT(vsync_monitor_->current_stall_start_boot(), first_stall_boot);
+}
+
 }  // namespace
 
 }  // namespace display_coordinator

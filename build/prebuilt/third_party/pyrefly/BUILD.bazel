@@ -1,0 +1,16 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_build_config//:defs.bzl", "build_config")
+load("//build/bazel/rules:cipd_prebuilt.bzl", "cipd_prebuilt_file")
+
+package(default_applicable_licenses = ["//:license"])
+
+# The pyrefly Python type checker, used by pyrefly_aspect in
+# //build/bazel/aspects/pyrefly.bzl.
+cipd_prebuilt_file(
+    name = "pyrefly",
+    path = "//prebuilt/third_party/pyrefly/%s/bin/pyrefly" % build_config.host_tag,
+    visibility = ["//build/bazel/aspects:__pkg__"],
+)

@@ -14,9 +14,9 @@ type BlockIdentity = [u8; size_of::<u64>() + size_of::<u32>()];
 
 /// Generate the bytes representing a block's identity.
 #[inline]
-fn make_identity(length: usize, level: usize, offset: usize) -> BlockIdentity {
-    let [o0, o1, o2, o3, o4, o5, o6, o7] = (offset as u64 | level as u64).to_le_bytes();
-    let [l0, l1, l2, l3] = (length as u32).to_le_bytes();
+fn make_identity(length: u32, level: u64, offset: u64) -> BlockIdentity {
+    let [o0, o1, o2, o3, o4, o5, o6, o7] = (offset | level).to_le_bytes();
+    let [l0, l1, l2, l3] = length.to_le_bytes();
     [o0, o1, o2, o3, o4, o5, o6, o7, l0, l1, l2, l3]
 }
 
@@ -30,12 +30,12 @@ fn make_identity(length: usize, level: usize, offset: usize) -> BlockIdentity {
 /// # Panics
 ///
 /// Panics if `block.len()` exceeds [`BLOCK_SIZE`] or if `offset` is not aligned to [`BLOCK_SIZE`]
-pub fn hash_block(block: &[u8], offset: usize) -> Hash {
+pub fn hash_block(block: &[u8], offset: u64) -> Hash {
     assert!(block.len() <= BLOCK_SIZE);
-    assert!(offset.is_multiple_of(BLOCK_SIZE));
+    assert!(offset.is_multiple_of(BLOCK_SIZE as u64));
 
     let mut hasher = Sha256::new();
-    hasher.update(&make_identity(block.len(), 0, offset));
+    hasher.update(&make_identity(block.len() as u32, 0, offset));
     hasher.update(block);
     // Zero fill block up to BLOCK_SIZE. As a special case, if the first data block is completely
     // empty, it is not zero filled.
@@ -61,14 +61,14 @@ pub fn hash_block(block: &[u8], offset: usize) -> Hash {
 /// Panics if `buffer_len` is not 4096 or 8192, or if `unaligned_len == 0` or
 /// `unaligned_len > buffer_len`.
 pub fn hash_block_aligned(
-    offset: usize,
+    offset: u64,
     data: PtrByteSlice<'_>,
     buffer_len: usize,
     unaligned_len: usize,
 ) -> Hash {
     assert!(buffer_len == BLOCK_SIZE || buffer_len == 4096);
     assert!(unaligned_len > 0 && unaligned_len <= buffer_len);
-    assert!(offset.is_multiple_of(BLOCK_SIZE));
+    assert!(offset.is_multiple_of(BLOCK_SIZE as u64));
     assert!(data.len() >= buffer_len);
 
     #[cfg(all(target_arch = "aarch64", target_feature = "sha2"))]
@@ -102,7 +102,7 @@ pub fn hash_block_aligned(
         // SAFETY: SHA256_Init initializes the context. data is valid for reading buffer_len bytes.
         unsafe {
             SHA256_Init(ctx.as_mut_ptr());
-            let identity = make_identity(unaligned_len, 0, offset);
+            let identity = make_identity(unaligned_len as u32, 0, offset);
             SHA256_Update(
                 ctx.as_mut_ptr(),
                 identity.as_ptr() as *const core::ffi::c_void,
@@ -445,6 +445,11 @@ mod arm64 {
         }
 
         /// Performs SHA-256 transformation directly on vector registers.
+        ///
+        /// Pass a separate value for each of `w0`..`w3`, even if they are equal: they are tied to
+        /// fixed registers, and LLVM's fast register allocator (-O0) miscompiles a tied
+        /// fixed-register input whose value is also used elsewhere
+        /// TODO(https://fxbug.dev/578328881): Revert the zero_vec hack.
         #[inline(always)]
         fn transform_words(
             &mut self,
@@ -494,14 +499,14 @@ mod arm64 {
     /// for the computed hash to match.
     #[inline(always)]
     pub fn hash_block_arm64_neon(
-        offset: usize,
+        offset: u64,
         data: PtrByteSlice<'_>,
         buffer_len: usize,
         unaligned_len: usize,
     ) -> Hash {
         assert!(buffer_len == BLOCK_SIZE || buffer_len == 4096);
         assert!(unaligned_len > 0 && unaligned_len <= buffer_len);
-        assert!(offset.is_multiple_of(BLOCK_SIZE));
+        assert!(offset.is_multiple_of(BLOCK_SIZE as u64));
         assert!(data.len() >= buffer_len);
 
         let ktable = KTable::load();
@@ -509,7 +514,7 @@ mod arm64 {
 
         // Block 0: 12B identity header + first 52B of data loaded directly into vector registers.
         let mut w0_bytes = [0u8; 16];
-        w0_bytes[0..12].copy_from_slice(&make_identity(unaligned_len, 0, offset));
+        w0_bytes[0..12].copy_from_slice(&make_identity(unaligned_len as u32, 0, offset));
         let src = data.as_ptr();
         // SAFETY: data has at least buffer_len >= 4096 bytes (asserted above), so offsets 0..52
         // are valid for reading.
@@ -554,7 +559,7 @@ mod arm64 {
                 (w3_bytes.as_mut_ptr().add(8) as *mut u64).write_unaligned(TOTAL_BITS_8K.to_be());
                 let zero_vec = vdupq_n_u8(0);
                 let w3 = vld1q_u8(w3_bytes.as_ptr());
-                state.transform_words(ktable, w0, zero_vec, zero_vec, w3);
+                state.transform_words(ktable, w0, zero_vec, vdupq_n_u8(0), w3);
             }
         }
 
@@ -584,7 +589,7 @@ mod arm64 {
             unsafe {
                 let w0 = load_12b_padded(data.as_ptr().add(4084), 0x00);
                 let zero_vec = vdupq_n_u8(0);
-                state.transform_words(&ktable, w0, zero_vec, zero_vec, zero_vec);
+                state.transform_words(&ktable, w0, zero_vec, vdupq_n_u8(0), vdupq_n_u8(0));
             }
 
             // Remaining 63 blocks (4096 - 52 bytes) of zeros
@@ -619,10 +624,10 @@ pub(crate) fn update_with_zeros(hasher: &mut Sha256, mut count: usize) {
 
 /// Creates a new [`Sha256`] for hashing blocks of hashes. The hasher is initialized with the
 /// block's identity.
-pub fn make_hash_hasher(hashes_per_hash: usize, level: usize, offset: usize) -> Sha256 {
+pub fn make_hash_hasher(bytes_per_hash: u32, level: u64, offset: u64) -> Sha256 {
     debug_assert!(level > 0);
-    let bytes_per_hash = hashes_per_hash * HASH_SIZE;
-    debug_assert!(offset.is_multiple_of(bytes_per_hash));
+    debug_assert!(bytes_per_hash > 0);
+    debug_assert!(offset.is_multiple_of(bytes_per_hash as u64));
     let mut hasher = Sha256::new();
     hasher.update(&make_identity(bytes_per_hash, level, offset));
     hasher
@@ -657,7 +662,7 @@ mod tests {
 
     #[test]
     fn test_hash_block_aligned_matches_reference_4k() {
-        let offsets = [0, BLOCK_SIZE, 16384];
+        let offsets = [0, BLOCK_SIZE as u64, 16384];
         let unaligned_lens = [1, 12, 51, 52, 53, 100, 500, 4083, 4084, 4085, 4096];
 
         for &offset in &offsets {
@@ -680,7 +685,7 @@ mod tests {
 
     #[test]
     fn test_hash_block_aligned_matches_reference_8k() {
-        let offsets = [0, BLOCK_SIZE, 16384];
+        let offsets = [0, BLOCK_SIZE as u64, 16384];
         let unaligned_lens = [1, 12, 51, 52, 53, 4096, 8179, 8180, 8181, 8192];
 
         for &offset in &offsets {
@@ -723,7 +728,7 @@ mod tests {
     #[cfg(all(target_arch = "aarch64", target_feature = "sha2"))]
     #[test]
     fn test_arm64_neon_matches_reference() {
-        let offsets = [0, BLOCK_SIZE, 32768];
+        let offsets = [0, BLOCK_SIZE as u64, 32768];
         let buffer_lens = [4096, BLOCK_SIZE];
 
         for &buffer_len in &buffer_lens {

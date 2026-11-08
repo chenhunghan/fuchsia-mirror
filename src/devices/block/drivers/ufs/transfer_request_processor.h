@@ -10,6 +10,8 @@
 #include <lib/fit/function.h>
 #include <lib/trace/event.h>
 
+#include <span>
+
 #include "request_processor.h"
 #include "src/devices/block/drivers/ufs/registers.h"
 #include "src/devices/block/drivers/ufs/transfer_request_descriptor.h"
@@ -93,7 +95,7 @@ class TransferRequestProcessor : public RequestProcessor {
 
   template <class RequestType>
   std::tuple<uint16_t, uint32_t> PreparePrdt(RequestType &request, uint8_t lun, uint8_t slot,
-                                             const std::vector<zx_paddr_t> &buffer_phys,
+                                             std::span<const zx_paddr_t> buffer_phys,
                                              uint16_t response_offset, uint16_t response_length)
       TA_REQ(slot_lock_) {
     return {0, 0};
@@ -101,9 +103,8 @@ class TransferRequestProcessor : public RequestProcessor {
 
   template <>
   std::tuple<uint16_t, uint32_t> PreparePrdt<ScsiCommandUpiu>(
-      ScsiCommandUpiu &request, uint8_t lun, uint8_t slot,
-      const std::vector<zx_paddr_t> &buffer_phys, uint16_t response_offset,
-      uint16_t response_length) TA_REQ(slot_lock_);
+      ScsiCommandUpiu &request, uint8_t lun, uint8_t slot, std::span<const zx_paddr_t> buffer_phys,
+      uint16_t response_offset, uint16_t response_length) TA_REQ(slot_lock_);
 
   // Low-level helper that sets up descriptor and PRDT buffers for a reserved slot, pins data VMO,
   // and rings the doorbell. Invokes |completion_cb| when the hardware request completes, or
@@ -113,6 +114,13 @@ class TransferRequestProcessor : public RequestProcessor {
                             zx::unowned_vmo data_vmo, uint64_t dma_offset, uint64_t dma_length,
                             fit::callback<void(zx_status_t)> completion_cb,
                             block_server::internal::InlineCryptoOptions inline_crypto = {});
+
+  struct IoSlotState {
+    bool has_allocated_slots = false;
+    uint32_t inflight_io_count = 0;
+    zx_time_t earliest_timeout_deadline = ZX_TIME_INFINITE;
+  };
+  IoSlotState GetIoSlotState() TA_EXCL(slot_lock_);
 
   uint32_t GetInflightIoCount() const {
     std::lock_guard<std::mutex> lock(slot_lock_);
@@ -148,16 +156,13 @@ class TransferRequestProcessor : public RequestProcessor {
   }
 
   void SetDoorBellRegister(uint8_t slot_num) override {
-    // Order the UTRD, Command UPIU, and PRDT stores in uncached Normal memory before the MMIO
-    // doorbell store in Device memory (the equivalent of the leading barrier in Linux's writel()).
+    // Ensure host memory descriptors are visible before the MMIO doorbell write.
     hw_wmb();
     UtrListDoorBellReg::Get().FromValue(1u << slot_num).WriteTo(&register_);
   }
   uint32_t ReadDoorBellRegister() override {
     const uint32_t doorbell = UtrListDoorBellReg::Get().ReadFrom(&register_).door_bell();
-    // A cleared doorbell bit publishes the UTRD and RESPONSE UPIU the controller wrote to DMA
-    // memory. Order the register load before the descriptor loads that follow (the equivalent of
-    // the trailing barrier in Linux's readl()); the MMIO read itself carries no hardware barrier.
+    // Ensure the MMIO status read completes before reading subsequent host memory descriptors.
     hw_rmb();
     return doorbell;
   }
@@ -170,9 +175,9 @@ class TransferRequestProcessor : public RequestProcessor {
                              fit::callback<void(zx_status_t)> &cb, zx_status_t &status)
       TA_REQ(slot_lock_);
 
-  // TODO(b/42075643): Background Operation uses the admin slot, causing a race condition for admin
-  // commands running on the main thread. To fix this, per-slot locking is required, but I added
-  // admin_slot_lock_ as a temporary solution.
+  // TODO(https://fxbug.dev/42075643): Background Operation uses the admin slot, causing a race
+  // condition for admin commands running on the main thread. To fix this, per-slot locking is
+  // required, but I added admin_slot_lock_ as a temporary solution.
   std::mutex admin_slot_lock_;
 };
 

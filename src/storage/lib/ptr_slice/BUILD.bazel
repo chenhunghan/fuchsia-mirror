@@ -19,5 +19,8 @@ rustc_library(
         "//vendor/google:__subpackages__",
     ],
     with_host_unit_tests = True,
-    deps = ["//third_party/rust_crates/vendor:zerocopy"],
+    deps = ["//third_party/rust_crates/vendor:zerocopy"] + select({
+        "@platforms//os:fuchsia": ["//sdk/rust/zx"],
+        "//conditions:default": [],
+    }),
 )

@@ -64,7 +64,15 @@ if (is_host) {
     testonly = true
     deps = [
       ":ffx_profile_tests($host_toolchain)",
+
+      # Bazel-migrated plugins whose unit tests are no longer aggregated by
+      # :ffx_profile_tests.
+      "cpu/load:tests",
+      "gpu/usage:tests",
       "memory:tests",
+      "network/activity:tests",
+      "power/logger:tests",
+      "temperature/logger:tests",
     ]
   }
 }

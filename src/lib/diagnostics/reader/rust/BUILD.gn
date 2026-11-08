@@ -39,6 +39,7 @@ rustc_test("lib_test") {
     "//src/lib/fuchsia-async",
     "//src/lib/fuchsia-component",
     "//src/lib/fuchsia-component-test",
+    "//src/sys/lib/cm_rust",
     "//third_party/rust_crates:anyhow",
     "//third_party/rust_crates:assert_matches",
     "//third_party/rust_crates:async-stream",
@@ -99,6 +100,7 @@ group("rust") {
   public_deps = [ ":lib" ]
   visibility = [ "//*" ]
 }
+
 rustc_library("lib") {
   sources = [ "src/lib.rs" ]
   crate_name = "diagnostics_reader"

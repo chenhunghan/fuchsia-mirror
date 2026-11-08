@@ -498,18 +498,6 @@ zx_status_t blobfs_create_sparse(std::unique_ptr<Blobfs>* out, fbl::unique_fd fd
   return ZX_OK;
 }
 
-zx_status_t blobfs_fsck(fbl::unique_fd fd, const std::vector<size_t>& extent_lengths) {
-  std::unique_ptr<Blobfs> blob;
-  if (zx_status_t status = blobfs_create_sparse(&blob, std::move(fd), extent_lengths);
-      status != ZX_OK) {
-    return status;
-  }
-  if (zx_status_t status = Fsck(blob.get()); status != ZX_OK) {
-    return status;
-  }
-  return ZX_OK;
-}
-
 Blobfs::Blobfs(fbl::unique_fd fd, off_t offset, const info_block_t& info_block,
                const fbl::Array<size_t>& extent_lengths)
     : blockfd_(std::move(fd)), offset_(offset) {

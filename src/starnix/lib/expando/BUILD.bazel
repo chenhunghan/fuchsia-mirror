@@ -3,6 +3,10 @@
 # found in the LICENSE file.
 
 load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -14,4 +18,10 @@ rustc_library(
     visibility = ["//src/starnix/kernel/core:__pkg__"],
     with_unit_tests = True,
     deps = ["//src/starnix/lib/starnix_sync"],
+)
+
+fx_unittest_package(
+    name = "starnix-expando-tests",
+    unit_tests = [":expando_test"],
+    visibility = ["//src/starnix/lib:__pkg__"],
 )

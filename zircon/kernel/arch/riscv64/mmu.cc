@@ -173,7 +173,7 @@ bool Riscv64ArchVmAspace::AccessedSinceLastCheck(bool clear) {
 }
 
 void Riscv64ArchVmAspace::HandoffPageTablesFromPhysboot(VmPageDoublyLinkedList* mmu_pages) {
-  // This must drain |mmu_pages|: PmmNode::InitReservedRange() destroys the list
+  // This must drain |mmu_pages|: PmmNode::init_reserved_range() destroys the list
   // immediately afterwards and it is an error to destroy a non-empty list of
   // unmanaged pointers.
   while (vm_page_t* page = mmu_pages->pop_front()) {

@@ -1,0 +1,45 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_binary(
+    name = "passing_test",
+    testonly = True,
+    srcs = ["passing_test.cc"],
+    build_flags = ["//build/config/lto:no-fat-lto-objects-linking"],
+)
+
+fx_cc_binary(
+    name = "failing_test",
+    testonly = True,
+    srcs = ["failing_test.cc"],
+    build_flags = ["//build/config/lto:no-fat-lto-objects-linking"],
+)
+
+fx_cc_binary(
+    name = "arg_test",
+    testonly = True,
+    srcs = ["arg_test.cc"],
+    build_flags = ["//build/config/lto:no-fat-lto-objects-linking"],
+)
+
+fx_cc_binary(
+    name = "environ_test",
+    testonly = True,
+    srcs = ["environ_test.cc"],
+    build_flags = ["//build/config/lto:no-fat-lto-objects-linking"],
+)
+
+# TODO: Verify whether ambient_exec_test should use target_compatible_with (was not gated by if (is_fuchsia) in GN).
+fx_cc_binary(
+    name = "ambient_exec_test",
+    testonly = True,
+    srcs = ["ambient_exec_test.cc"],
+    build_flags = ["//build/config/lto:no-fat-lto-objects-linking"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = ["//zircon/system/ulib/zx"],
+)

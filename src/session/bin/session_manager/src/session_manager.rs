@@ -4,7 +4,7 @@
 
 use crate::{power, startup};
 use anyhow::{Context as _, Error, anyhow};
-use fidl::endpoints::{ClientEnd, ServerEnd, create_proxy};
+use fidl::endpoints::{ServerEnd, create_proxy};
 use fidl_fuchsia_component as fcomponent;
 use fidl_fuchsia_component_decl as fdecl;
 use fidl_fuchsia_io as fio;
@@ -92,11 +92,11 @@ impl Session {
 }
 
 struct PowerState {
-    /// The power element corresponding to the session.
+    /// The power lease held on behalf of the session.
     ///
     /// The async mutex exists to serialize concurrent power lease operations, where
     /// we need to take a lock over async FIDL calls.
-    power_element: futures::lock::Mutex<Option<power::PowerElement>>,
+    power_lease: futures::lock::Mutex<Option<power::PowerLease>>,
 
     /// Whether the system supports suspending.
     suspend_enabled: bool,
@@ -104,7 +104,7 @@ struct PowerState {
 
 impl PowerState {
     pub fn new(suspend_enabled: bool) -> Self {
-        Self { power_element: futures::lock::Mutex::default(), suspend_enabled }
+        Self { power_lease: futures::lock::Mutex::default(), suspend_enabled }
     }
 
     /// Attempt to ensures that `session_manager` has a lease on the application activity element.
@@ -114,24 +114,22 @@ impl PowerState {
         if !self.suspend_enabled {
             return;
         }
-        let power_element = &mut *self.power_element.lock().await;
-        if let Some(power_element) = power_element
-            && power_element.has_lease()
+        let power_lease = &mut *self.power_lease.lock().await;
+        if let Some(power_lease) = power_lease
+            && power_lease.has_lease()
         {
             return;
         }
-        *power_element = match power::PowerElement::new().await {
-            Ok(element) => Some(element),
+        *power_lease = match power::PowerLease::new().await {
+            Ok(lease) => Some(lease),
             Err(err) => {
-                warn!("Failed to create power element: {err}");
+                warn!("Failed to acquire power lease: {err:#}");
                 None
             }
         };
     }
 
-    pub async fn take_power_lease(
-        &self,
-    ) -> Result<ClientEnd<fbroker::LeaseControlMarker>, fpower::HandoffError> {
+    pub async fn take_power_lease(&self) -> Result<fbroker::LeaseToken, fpower::HandoffError> {
         if !self.suspend_enabled {
             log::warn!(
                 "Session component wants to take our power lease, but the platform is \
@@ -140,8 +138,8 @@ impl PowerState {
             return Err(fpower::HandoffError::Unavailable);
         }
         log::info!("Session component is taking our power lease");
-        let lease = match &mut *self.power_element.lock().await {
-            Some(power_element) => power_element.take_lease(),
+        let lease = match &mut *self.power_lease.lock().await {
+            Some(power_lease) => power_lease.take_lease(),
             None => return Err(fpower::HandoffError::Unavailable),
         }
         .ok_or(fpower::HandoffError::AlreadyTaken)?;
@@ -264,9 +262,7 @@ impl SessionManagerState {
         Ok(())
     }
 
-    async fn take_power_lease(
-        &self,
-    ) -> Result<ClientEnd<fbroker::LeaseControlMarker>, fpower::HandoffError> {
+    async fn take_power_lease(&self) -> Result<fbroker::LeaseToken, fpower::HandoffError> {
         let lease = self.power.take_power_lease().await?;
         Ok(lease)
     }
@@ -493,7 +489,7 @@ impl SessionManager {
             match request {
                 fpower::HandoffRequest::Take { responder } => {
                     let result = self.handle_handoff_take_request().await;
-                    let _ = responder.send(result.map(|lease| lease.into_channel().into_handle()));
+                    let _ = responder.send(result.map(zx::NullableHandle::from));
                 }
                 fpower::HandoffRequest::_UnknownMethod { ordinal, .. } => {
                     warn!(ordinal:%; "Lifecycle received an unknown method")
@@ -550,7 +546,7 @@ impl SessionManager {
     /// Handles a `Handoff.Take()` request.
     async fn handle_handoff_take_request(
         &mut self,
-    ) -> Result<ClientEnd<fbroker::LeaseControlMarker>, fpower::HandoffError> {
+    ) -> Result<fbroker::LeaseToken, fpower::HandoffError> {
         self.state.take_power_lease().await
     }
 }

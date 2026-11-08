@@ -16,6 +16,10 @@ pub mod evictor;
 pub mod fault;
 #[path = "../lib/heap/heap.rs"]
 pub mod heap;
+pub mod kstack;
+pub mod lz4_compressor;
+#[cfg(console_enabled)]
+mod mem_command;
 pub mod memory_stats;
 pub mod name;
 pub mod page;
@@ -31,6 +35,8 @@ pub mod pmm;
 pub mod pmm_arena;
 pub mod pmm_checker;
 pub mod pmm_node;
+#[cfg(console_enabled)]
+mod ppb_command;
 pub mod scanner;
 pub mod slot_page_storage;
 pub mod stream_size_manager;

@@ -15,13 +15,13 @@
 #include <unordered_set>
 
 #include <fbl/auto_lock.h>
-#include <fbl/canary.h>
 #include <fbl/condition_variable.h>
 #include <fbl/intrusive_double_list.h>
 #include <fbl/ref_counted.h>
 #include <fbl/string_buffer.h>
 
 #include "callback_request.h"
+#include "canary.h"
 #include "dispatcher_state.h"
 
 namespace driver_runtime {
@@ -66,7 +66,7 @@ class Dispatcher : public DispatcherInterface,
   struct Veneer {
     DispatcherInterface async_dispatcher;
     Dispatcher* dispatcher;
-    fbl::Canary<fbl::magic("FDFV")> canary_;
+    Canary<magic("FDFV")> canary_;
   };
 
   enum class SuspendState : uint8_t {
@@ -488,7 +488,7 @@ class Dispatcher : public DispatcherInterface,
 
   Veneer veneer_;
 
-  fbl::Canary<fbl::magic("FDFD")> canary_;
+  Canary<magic("FDFD")> canary_;
 };
 
 extern const async_ops_t g_veneer_ops;

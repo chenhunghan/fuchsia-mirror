@@ -45,24 +45,28 @@ _common_test_package_deps = [
   # netemul-sandbox is used to create hermetic test realms.
   "//src/connectivity/network/testing/netemul/service:netemul-sandbox",
 
-  # some tests run the DHCP client along with the hermetic netstack.
-  "//src/connectivity/network/dhcpv4/client/bindings:component",
-
   # the expectation-comparer is used to support pass/fail/skip expectations.
   "//src/lib/testing/expectation:expectation_comparer",
 ]
 
-_non_log_less_package_deps = [
-  # netstack3 is under test.
-  "//src/connectivity/network/netstack3:component-debug",
+_common_test_subpackages = [
+  # some tests run the DHCP client along with the hermetic netstack.
+  "//src/connectivity/network/dhcpv4/client/bindings:package",
 ]
 
-_log_less_package_deps = [
-  # :component-debug-less-logs is used instead of :component-debug to avoid
-  # forcing DEBUG logs to be included, which are too verbose and cause some
-  # longer suites to time out.
-  "//src/connectivity/network/netstack3:component-debug-less-logs",
-]
+_non_log_less_subpackages =
+    _common_test_subpackages + [
+      # Netstack3 is under test.
+      "//src/connectivity/network/netstack3:package-debug",
+    ]
+
+_log_less_subpackages =
+    _common_test_subpackages + [
+      # `:package-debug-less-logs` is used instead of `:package-debug` to avoid
+      # forcing DEBUG logs to be included, which are too verbose and cause some
+      # longer suites to time out.
+      "//src/connectivity/network/netstack3:package-debug-less-logs",
+    ]
 
 all_non_sharded_test_packages = []
 
@@ -76,12 +80,11 @@ foreach(test, non_sharded_tests) {
   _component_label = "${_name}"
   _expect = "expectations/${_label}.json5"
 
-  _package_deps = []
-  _package_deps += _common_test_package_deps
+  _subpackages = []
   if (defined(test.log_less) && test.log_less) {
-    _package_deps += _log_less_package_deps
+    _subpackages += _log_less_subpackages
   } else {
-    _package_deps += _non_log_less_package_deps
+    _subpackages += _non_log_less_subpackages
   }
 
   if (!_err_logs) {
@@ -97,7 +100,8 @@ foreach(test, non_sharded_tests) {
     fuchsia_test_package(_package_label) {
       package_name = _name
       test_components = [ ":${_component_label}" ]
-      deps = _package_deps
+      deps = _common_test_package_deps
+      subpackages = _subpackages
     }
 
     all_non_sharded_test_packages += [ ":${_package_label}" ]
@@ -114,7 +118,8 @@ foreach(test, non_sharded_tests) {
       test_components = [ ":${_component_label}" ]
       expectations = _expect
       treatment_of_cases_with_error_logs = "SKIP_CASES_WITH_ERROR_LOGS"
-      deps = _package_deps
+      deps = _common_test_package_deps
+      subpackages = _subpackages
     }
     _with_err_logs_package_name = "${_name}-with-err-logs"
 
@@ -122,7 +127,8 @@ foreach(test, non_sharded_tests) {
       test_components = [ ":${_component_label}" ]
       expectations = _expect
       treatment_of_cases_with_error_logs = "RUN_ONLY_CASES_WITH_ERROR_LOGS"
-      deps = _package_deps
+      deps = _common_test_package_deps
+      subpackages = _subpackages
       test_specs = {
         log_settings = {
           max_severity = "ERROR"
@@ -141,7 +147,7 @@ fuchsia_sharded_test_package("netstack-filter-fidl-tests") {
     {
       name = "netstack-filter-fidl-test"
       manifest = "meta/netstack-filter-fidl-test.cml"
-      deps = _common_test_package_deps + _log_less_package_deps + [ "filter" ]
+      deps = _common_test_package_deps + [ "filter" ]
       expectations = "expectations/filter.json5"
       num_shards = 15
 
@@ -153,6 +159,7 @@ fuchsia_sharded_test_package("netstack-filter-fidl-tests") {
       shard_part_regex = "([^::]+(?:::[^::]+)?).*"
     },
   ]
+  subpackages = _log_less_subpackages
 }
 
 fuchsia_sharded_test_package("netstack-neighbor-fidl-tests") {
@@ -160,8 +167,7 @@ fuchsia_sharded_test_package("netstack-neighbor-fidl-tests") {
     {
       name = "netstack-neighbor-fidl-test"
       manifest = "meta/netstack-neighbor-fidl-test.cml"
-      deps = _common_test_package_deps + _non_log_less_package_deps +
-             [ "neighbor" ]
+      deps = _common_test_package_deps + [ "neighbor" ]
       expectations = "expectations/neighbor.json5"
       num_shards = 4
 
@@ -170,6 +176,7 @@ fuchsia_sharded_test_package("netstack-neighbor-fidl-tests") {
       shard_part_regex = "([^:]+)"
     },
   ]
+  subpackages = _non_log_less_subpackages
 }
 
 group("tests") {

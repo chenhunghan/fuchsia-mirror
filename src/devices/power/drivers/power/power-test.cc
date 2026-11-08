@@ -10,6 +10,8 @@
 
 #include <memory>
 
+#include <bind/fuchsia/cpp/bind.h>
+#include <bind/fuchsia/power/cpp/bind.h>
 #include <zxtest/zxtest.h>
 
 #include "src/devices/testing/mock-ddk/mock-device.h"
@@ -372,6 +374,41 @@ TEST_F(GenericPowerTest, FixedVoltageDomain) {
   EXPECT_EQ(dut_fixed->GetDependentCount(), 0);
   EXPECT_EQ(parent_power_.SyncCall(&FakePower::power_domain_unregistered_count), 1);
   EXPECT_EQ(power_impl_->power_domain_disabled_count(), 1);
+}
+
+TEST_F(GenericPowerTest, CreatePublishesDomainId) {
+  const fuchsia_hardware_power::Domain domain{{.id = 1}};
+  ASSERT_OK(PowerDomain::Create(nullptr, fake_parent_.get(), power_impl_->GetClient(), domain));
+
+  MockDevice* child = fake_parent_->GetLatestChild();
+  ASSERT_NOT_NULL(child);
+  cpp20::span<const zx_device_str_prop_t> props = child->GetStringProperties();
+  ASSERT_EQ(props.size(), 3u);
+  EXPECT_STREQ(props[0].key, bind_fuchsia_power::POWER_DOMAIN);
+  EXPECT_EQ(props[0].property_value.data.int_val, 1u);
+  EXPECT_STREQ(props[1].key, bind_fuchsia::SERVICE);
+  EXPECT_STREQ(props[2].key, bind_fuchsia::ID);
+  EXPECT_EQ(props[2].property_value.data.int_val, 1u);
+}
+
+// The DML global ID replaces the domain ID as the child's `fuchsia.ID`.
+TEST_F(GenericPowerTest, CreatePublishesGlobalId) {
+  // The child's properties point into `domain`, so it must outlive them.
+  const fuchsia_hardware_power::Domain domain{
+      {.id = 1, .name = "power-01", .global_id = 0x12345678}};
+  ASSERT_OK(PowerDomain::Create(nullptr, fake_parent_.get(), power_impl_->GetClient(), domain));
+
+  MockDevice* child = fake_parent_->GetLatestChild();
+  ASSERT_NOT_NULL(child);
+  cpp20::span<const zx_device_str_prop_t> props = child->GetStringProperties();
+  ASSERT_EQ(props.size(), 4u);
+  EXPECT_STREQ(props[0].key, bind_fuchsia_power::POWER_DOMAIN);
+  EXPECT_EQ(props[0].property_value.data.int_val, 1u);
+  EXPECT_STREQ(props[1].key, bind_fuchsia::SERVICE);
+  EXPECT_STREQ(props[2].key, bind_fuchsia::ID);
+  EXPECT_EQ(props[2].property_value.data.int_val, 0x12345678u);
+  EXPECT_STREQ(props[3].key, bind_fuchsia::NAME);
+  EXPECT_STREQ(props[3].property_value.data.str_val, "power-01");
 }
 
 }  // namespace power

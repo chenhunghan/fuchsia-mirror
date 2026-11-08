@@ -49,7 +49,7 @@ class BlobEntry:
     source_path: FilePath | None = None
 
     def compare_with(
-        self, other: "BlobEntry", allow_source_path_differences: bool = False
+        self, other: BlobEntry, allow_source_path_differences: bool = False
     ) -> list[str]:
         """Compare this BlobEntry with the other, reporting any differences.
 
@@ -111,7 +111,7 @@ class PackageManifest:
 
     def compare_with(
         self,
-        other: "PackageManifest",
+        other: PackageManifest,
         allow_source_path_differences: bool = False,
     ) -> list[str]:
         """Compare this package manifest with the other, reporting any

@@ -5,128 +5,38 @@
 #include <fidl/fuchsia.hardware.pci/cpp/wire.h>
 #include <lib/async/default.h>
 #include <lib/driver/testing/cpp/driver_test.h>
-#include <lib/fake-bti/bti.h>
 
 #include <gtest/gtest.h>
 
+#include "src/devices/pci/testing/pci_protocol_fake.h"
 #include "third_party/iwlwifi/platform/pcie-iwlwifi-driver.h"
 
 namespace {
 
-constexpr int kTestDeviceId = 0x095a;
-constexpr int kTestSubsysDeviceId = 0x9e10;
-
-// Implement all the WireServer handlers of fuchsia_hardware_pci::Device as protocol as required by
-// FIDL.
-class FakePciParent : public fidl::WireServer<fuchsia_hardware_pci::Device> {
- public:
-  fuchsia_hardware_pci::Service::InstanceHandler GetInstanceHandler(async_dispatcher_t* dispatcher) {
-    return fuchsia_hardware_pci::Service::InstanceHandler({
-        .device = binding_group_.CreateHandler(
-            this, dispatcher,
-            fidl::kIgnoreBindingClosure),
-    });
-  }
-
-  void GetDeviceInfo(GetDeviceInfoCompleter::Sync& completer) override {
-    fuchsia_hardware_pci::wire::DeviceInfo info;
-    info.device_id = kTestDeviceId;
-    completer.Reply(info);
-  }
-  void GetBar(GetBarRequestView request, GetBarCompleter::Sync& completer) override {
-    fuchsia_hardware_pci::wire::Bar bar;
-    completer.ReplySuccess(std::move(bar));
-  }
-
-  void SetBusMastering(SetBusMasteringRequestView request,
-                       SetBusMasteringCompleter::Sync& completer) override {
-    completer.ReplySuccess();
-  }
-
-  void ResetDevice(ResetDeviceCompleter::Sync& completer) override { completer.ReplySuccess(); }
-
-  void AckInterrupt(AckInterruptCompleter::Sync& completer) override { completer.ReplySuccess(); }
-
-  void MapInterrupt(MapInterruptRequestView request,
-                    MapInterruptCompleter::Sync& completer) override {
-    zx::interrupt interrupt;
-    completer.ReplySuccess(std::move(interrupt));
-  }
-
-  void GetInterruptModes(GetInterruptModesCompleter::Sync& completer) override {
-    fuchsia_hardware_pci::wire::InterruptModes modes;
-    completer.Reply(modes);
-  }
-
-  void SetInterruptMode(SetInterruptModeRequestView request,
-                        SetInterruptModeCompleter::Sync& completer) override {
-    completer.ReplySuccess();
-  }
-
-  void ReadConfig8(ReadConfig8RequestView request, ReadConfig8Completer::Sync& completer) override {
-    completer.ReplySuccess(0);
-  }
-
-  void ReadConfig16(ReadConfig16RequestView request,
-                    ReadConfig16Completer::Sync& completer) override {
-    // Always return the fake sub-system device id to pass the initialization.
-    completer.ReplySuccess(kTestSubsysDeviceId);
-  }
-
-  void ReadConfig32(ReadConfig32RequestView request,
-                    ReadConfig32Completer::Sync& completer) override {
-    completer.ReplySuccess(0);
-  }
-
-  void WriteConfig8(WriteConfig8RequestView request,
-                    WriteConfig8Completer::Sync& completer) override {
-    completer.ReplySuccess();
-  }
-
-  void WriteConfig16(WriteConfig16RequestView request,
-                     WriteConfig16Completer::Sync& completer) override {
-    completer.ReplySuccess();
-  }
-
-  void WriteConfig32(WriteConfig32RequestView request,
-                     WriteConfig32Completer::Sync& completer) override {
-    completer.ReplySuccess();
-  }
-
-  void GetCapabilities(GetCapabilitiesRequestView request,
-                       GetCapabilitiesCompleter::Sync& completer) override {
-    std::vector<uint8_t> empty_vec;
-    auto empty_vec_view = fidl::VectorView<uint8_t>::FromExternal(empty_vec);
-    completer.Reply(empty_vec_view);
-  }
-
-  void GetExtendedCapabilities(GetExtendedCapabilitiesRequestView request,
-                               GetExtendedCapabilitiesCompleter::Sync& completer) override {
-    std::vector<uint16_t> empty_vec;
-    auto empty_vec_view = fidl::VectorView<uint16_t>::FromExternal(empty_vec);
-    completer.Reply(empty_vec_view);
-  }
-
-  void GetBti(GetBtiRequestView request, GetBtiCompleter::Sync& completer) override {
-    zx_handle_t fake_handle;
-    fake_bti_create(&fake_handle);
-    zx::bti bti(fake_handle);
-    completer.ReplySuccess(std::move(bti));
-  }
-
-  fidl::ServerBindingGroup<fuchsia_hardware_pci::Device> binding_group_;
-};
+constexpr uint16_t kTestDeviceId = 0x095a;
+constexpr uint16_t kTestSubsysDeviceId = 0x9e10;
 
 class IwlwifiTestEnvironment : public fdf_testing::Environment {
  public:
   zx::result<> Serve(fdf::OutgoingDirectory& to_driver_vfs) override {
+    fake_pci_.SetDeviceInfo({.device_id = kTestDeviceId});
+    const uint16_t subsys_id = kTestSubsysDeviceId;
+    zx_status_t status = fake_pci_.GetConfigVmo()->write(
+        &subsys_id, fidl::ToUnderlying(fuchsia_hardware_pci::Config::kSubsystemId),
+        sizeof(subsys_id));
+    if (status != ZX_OK) {
+      return zx::error(status);
+    }
+
     async_dispatcher_t* dispatcher = fdf::Dispatcher::GetCurrent()->async_dispatcher();
-    auto handler = fake_pci_parent_.GetInstanceHandler(dispatcher);
-    return to_driver_vfs.AddService<fuchsia_hardware_pci::Service>(std::move(handler));
+    return to_driver_vfs.AddService<fuchsia_hardware_pci::Service>(
+        fuchsia_hardware_pci::Service::InstanceHandler({
+            .device = fake_pci_.bind_handler(dispatcher),
+        }));
   }
 
  private:
-  FakePciParent fake_pci_parent_;
+  pci::FakePciProtocol fake_pci_;
 };
 
 class TestConfig final {

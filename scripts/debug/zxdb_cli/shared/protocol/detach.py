@@ -19,7 +19,7 @@ class DetachRequest(BaseRequest[dict[str, Any]]):
     response_type: ClassVar[Any] = dict[str, Any]
 
     @model_validator(mode="after")
-    def validate(self) -> "DetachRequest":
+    def validate(self) -> DetachRequest:
         if self.all and self.pid is not None:
             raise ValueError("Cannot specify both PID and all")
         if not self.all and self.pid is None:

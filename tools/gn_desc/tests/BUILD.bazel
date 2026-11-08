@@ -1,0 +1,82 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_test.bzl", "host_test")
+load(
+    "//build/bazel/rules/host_tests:host_test_data.bzl",
+    "host_test_data_files",
+    "host_test_data_map",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":gn_json_integration_test"],
+    visibility = ["//tools/gn_desc:__pkg__"],
+)
+
+rustc_binary(
+    name = "gn_json_integration_test_executable",
+    testonly = True,
+    srcs = ["src/main.rs"],
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:camino",
+        "//third_party/rust_crates/vendor:itertools",
+        "//third_party/rust_crates/vendor:pretty_assertions",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//tools/gn_desc/gn_json",
+    ],
+)
+
+# we need to copy the GN binary from the builder into the test output
+# directory so we can run it on a different bot than does the builds.
+host_test_data_files(
+    name = "gn_tool",
+    testonly = True,
+    srcs = ["//build/prebuilt/cipd:gn"],
+    dest_dir = "gn_dir",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+host_test_data_map(
+    name = "test_project",
+    testonly = True,
+    files_map = {
+        f: f
+        for f in [
+            "gn_project/.gn",
+            "gn_project/BUILD.gn",
+            "gn_project/build/BUILD.gn",
+            "gn_project/build/BUILDCONFIG.gn",
+            "gn_project/build/toolchain/BUILD.gn",
+            "gn_project/foo/BUILD.gn",
+            "gn_project/foo/bar/BUILD.gn",
+        ]
+    },
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+host_test(
+    name = "gn_json_integration_test",
+    binary = ":gn_json_integration_test_executable",
+    data = [
+        ":gn_tool",
+        ":test_project",
+    ],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    test_args = [
+        "--gn-tool-dir",
+        "gn_dir",
+        "--project-dir",
+        "gn_project",
+    ],
+)

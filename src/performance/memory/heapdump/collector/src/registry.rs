@@ -6,16 +6,15 @@ use anyhow::Context;
 use fidl_fuchsia_memory_heapdump_client::{
     self as fheapdump_client, CollectorError, ProcessSelector, SnapshotReceiverProxy,
 };
-use fuchsia_inspect::ArrayProperty;
+use fidl_fuchsia_memory_heapdump_process as fheapdump_process;
+use fuchsia_async as fasync;
 use fuchsia_sync::Mutex as SyncMutex;
 use futures::StreamExt;
 use futures::lock::Mutex as AsyncMutex;
+use itertools::Itertools;
 use log::{info, warn};
 use std::collections::hash_map::{Entry, HashMap};
 use std::sync::Arc;
-
-use fidl_fuchsia_memory_heapdump_process as fheapdump_process;
-use fuchsia_async as fasync;
 use zx::Koid;
 
 use crate::process::Process;
@@ -46,14 +45,11 @@ impl Registry {
             let processes = this.list_processes();
             let inspector = fuchsia_inspect::Inspector::default();
             let root = inspector.root();
-            let names = root.create_string_array("names", processes.len());
-            let koids = root.create_uint_array("koids", processes.len());
-            for (i, (koid, name)) in processes.iter().enumerate() {
-                names.set(i, name);
-                koids.set(i, koid.raw_koid());
+            for (koid, name) in processes.iter() {
+                root.record_child(koid.raw_koid().to_string(), |node| {
+                    node.record_string("name", name);
+                });
             }
-            root.record(names);
-            root.record(koids);
             Box::pin(async move { Ok(inspector) })
         });
     }
@@ -286,6 +282,7 @@ impl Registry {
             .lock()
             .iter()
             .map(|(koid, process)| (*koid, process.get_name().to_string()))
+            .sorted_by_key(|(koid, _)| *koid)
             .collect()
     }
 
@@ -321,10 +318,33 @@ async fn take_and_send_live_snapshots(
         assert!(processes.len() == 1);
     }
 
-    let snapshots: Result<Vec<_>, _> =
-        processes.iter().map(|p| p.take_live_snapshot(with_contents)).collect();
+    // Ignore failures from individual processes (e.g. processes that exited
+    // between the moment we matched them and the moment we take the snapshot).
+    let mut snapshots = Vec::with_capacity(processes.len());
+    let mut first_error = None;
+    for process in &processes {
+        match process.take_live_snapshot(with_contents) {
+            Ok(snapshot) => snapshots.push((snapshot, process)),
+            Err(error) => {
+                warn!(
+                    koid = process.get_koid().raw_koid(),
+                    name = process.get_name(),
+                    error:?;
+                    "Failed to take live snapshot"
+                );
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
 
-    for (snapshot, process) in snapshots?.into_iter().zip(processes.iter()) {
+    // If all of them failed, return the error.
+    if snapshots.is_empty() {
+        return Err(first_error.expect("processes cannot be empty"));
+    }
+
+    for (snapshot, process) in snapshots {
         #[cfg(fuchsia_api_level_at_least = "HEAD")]
         if multi_process {
             receiver
@@ -358,11 +378,13 @@ mod tests {
     use super::*;
     use assert_matches::assert_matches;
     use async_trait::async_trait;
+    use diagnostics_assertions::assert_data_tree;
     use fidl::endpoints::{create_proxy, create_proxy_and_stream, create_request_stream};
+    use fuchsia_inspect::Inspector;
     use futures::channel::oneshot;
     use futures::pin_mut;
     use heapdump_snapshot::ThreadInfo;
-    use itertools::{Itertools, assert_equal};
+    use itertools::assert_equal;
     use std::rc::Rc;
     use test_case::test_case;
     use zx::sys::ZX_CHANNEL_MAX_MSG_BYTES;
@@ -514,14 +536,10 @@ mod tests {
     }
 
     impl FakeSnapshot {
-        /// Receives a Snapshot from a SnapshotReceiver channel and asserts that it matches the
-        /// output of `write_to`.
-        async fn receive_and_assert_match(
-            src: fheapdump_client::SnapshotReceiverRequestStream,
+        fn assert_matches(
+            mut received_snapshot: heapdump_snapshot::Snapshot,
             expect_contents: bool,
         ) {
-            let mut received_snapshot =
-                heapdump_snapshot::Snapshot::receive_single_from(src).await.unwrap();
             let allocation = received_snapshot.allocations.swap_remove(
                 received_snapshot
                     .allocations
@@ -548,6 +566,38 @@ mod tests {
                 assert_matches!(allocation.contents, None);
             }
             assert!(received_snapshot.allocations.is_empty(), "all the entries have been removed");
+        }
+
+        /// Receives a Snapshot from a SnapshotReceiver channel and asserts that it matches the
+        /// output of `write_to`.
+        async fn receive_and_assert_match(
+            src: fheapdump_client::SnapshotReceiverRequestStream,
+            expect_contents: bool,
+        ) {
+            let received_snapshot =
+                heapdump_snapshot::Snapshot::receive_single_from(src).await.unwrap();
+            Self::assert_matches(received_snapshot, expect_contents);
+        }
+
+        /// Receives a multi-process Snapshot stream from a SnapshotReceiver channel and asserts
+        /// that it matches the expected process `(name, koid)` list and `write_to` output.
+        async fn receive_multi_and_assert_match(
+            src: fheapdump_client::SnapshotReceiverRequestStream,
+            expect_contents: bool,
+            expect_processes: &[(&str, u64)],
+        ) {
+            let received_snapshots =
+                heapdump_snapshot::Snapshot::receive_multi_from(src).await.unwrap();
+            assert_eq!(received_snapshots.len(), expect_processes.len());
+            for (entry, (expect_name, expect_koid)) in received_snapshots
+                .into_iter()
+                .sorted_by_key(|e| e.process_koid)
+                .zip(expect_processes.iter().sorted_by_key(|(_, koid)| *koid))
+            {
+                assert_eq!(entry.process_name, *expect_name);
+                assert_eq!(entry.process_koid, *expect_koid);
+                Self::assert_matches(entry.snapshot, expect_contents);
+            }
         }
     }
 
@@ -670,6 +720,44 @@ mod tests {
             let expect_contents = with_contents == Some(true);
             FakeSnapshot::receive_and_assert_match(receiver_stream, expect_contents).await;
         }
+    }
+
+    #[fuchsia::test]
+    async fn test_take_live_snapshot_multi_process() {
+        let (process1, _signal1) = FakeProcess::new("foo", Koid::from_raw(1), false);
+        let (process2, _signal2) = FakeProcess::new("bar", Koid::from_raw(2), false);
+        let (process3, _signal3) = FakeProcess::new("bar", Koid::from_raw(3), true);
+        let (process4, _signal4) = FakeProcess::new("baz", Koid::from_raw(4), true);
+
+        // Create a Registry and a client connected to it.
+        let (_registry, proxy) =
+            create_registry_and_proxy([process1, process2, process3, process4]);
+
+        // Take a multi-process snapshot of all processes: two fail and two succeed.
+        let (receiver_client, receiver_stream) = create_request_stream();
+        let request = fheapdump_client::CollectorTakeLiveSnapshotRequest {
+            multi_process: Some(true),
+            receiver: Some(receiver_client),
+            ..Default::default()
+        };
+        proxy.take_live_snapshot(request).expect("FIDL channel error");
+        FakeSnapshot::receive_multi_and_assert_match(
+            receiver_stream,
+            false,
+            &[("bar", 3), ("baz", 4)],
+        )
+        .await;
+
+        // Take a multi-process snapshot where all matching processes fail.
+        let (receiver_client, receiver_stream) = create_request_stream();
+        let request = fheapdump_client::CollectorTakeLiveSnapshotRequest {
+            process_selector: Some(fheapdump_client::ProcessSelector::ByName("foo".to_string())),
+            multi_process: Some(true),
+            receiver: Some(receiver_client),
+            ..Default::default()
+        };
+        proxy.take_live_snapshot(request).expect("FIDL channel error");
+        receive_and_assert_error(receiver_stream, CollectorError::LiveSnapshotFailed).await;
     }
 
     async fn receive_list_of_snapshots(
@@ -821,5 +909,31 @@ mod tests {
         };
         proxy.download_stored_snapshot(request).expect("FIDL channel error");
         receive_and_assert_error(receiver_stream, CollectorError::StoredSnapshotNotFound).await;
+    }
+
+    #[fuchsia::test]
+    async fn test_inspect() {
+        let name1 = "fake-1";
+        let koid1 = Koid::from_raw(1234);
+        let (process1, _signal1) = FakeProcess::new(name1, koid1, false);
+
+        let name2 = "fake-2";
+        let koid2 = Koid::from_raw(5678);
+        let (process2, _signal2) = FakeProcess::new(name2, koid2, false);
+
+        let (registry, _proxy) = create_registry_and_proxy([process1, process2]);
+        let inspector = Inspector::default();
+        registry.register_inspect(inspector.root());
+
+        assert_data_tree!(inspector, root: {
+            processes: {
+                "1234": {
+                    name: "fake-1",
+                },
+                "5678": {
+                    name: "fake-2",
+                },
+            }
+        });
     }
 }

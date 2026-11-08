@@ -210,7 +210,7 @@ impl TargetStream {
 }
 
 pub struct DiscoveryBuilder {
-    emulator_instance_root: Option<PathBuf>,
+    emulator_instance_root: Option<Vec<PathBuf>>,
     fastboot_devices_file_path: Option<PathBuf>,
     usb_vsock_driver_socket_path: Option<PathBuf>,
     gce_instance_root: Option<PathBuf>,
@@ -234,7 +234,10 @@ impl DiscoveryBuilder {
         self
     }
 
-    pub fn with_emulator_instance_root(mut self, emulator_instance_root: Option<PathBuf>) -> Self {
+    pub fn with_emulator_instance_root(
+        mut self,
+        emulator_instance_root: Option<Vec<PathBuf>>,
+    ) -> Self {
         if emulator_instance_root.is_some() {
             self.emulator_instance_root = emulator_instance_root;
             self.sources.insert(DiscoverySources::EMULATOR);
@@ -396,7 +399,7 @@ impl TargetStateFilter {
 }
 
 pub struct Discovery {
-    emulator_instance_root: Option<PathBuf>,
+    emulator_instance_root: Option<Vec<PathBuf>>,
     fastboot_devices_file_path: Option<PathBuf>,
     usb_vsock_driver_socket_path: Option<PathBuf>,
     gce_instance_root: Option<PathBuf>,
@@ -543,7 +546,7 @@ impl Default for DiscoverySources {
 
 fn wait_for_devices(
     context: &EnvironmentContext,
-    emulator_instance_root: Option<PathBuf>,
+    emulator_instance_root: Option<Vec<PathBuf>>,
     fastboot_devices_file_path: Option<PathBuf>,
     usb_vsock_driver_socket_path: Option<PathBuf>,
     gce_instance_root: Option<PathBuf>,
@@ -691,15 +694,15 @@ pub mod test {
         let env = ffx_config::test_env().build().expect("Test Env Init");
         let discovery = DiscoveryBuilder::default()
             .set_source(DiscoverySources::MANUAL)
-            .with_emulator_instance_root(Some(
+            .with_emulator_instance_root(Some(vec![
                 PathBuf::from_str("/tmp").expect("tmp is a valid path"),
-            ))
+            ]))
             .build(&env.context);
 
         assert_eq!(discovery.sources, DiscoverySources::MANUAL | DiscoverySources::EMULATOR);
         assert_eq!(
             discovery.emulator_instance_root,
-            Some(PathBuf::from_str("/tmp").expect("tmp is a valid path"))
+            Some(vec![PathBuf::from_str("/tmp").expect("tmp is a valid path")])
         );
     }
 
@@ -1023,7 +1026,7 @@ pub mod test {
         // Start watching the directory
         let mut stream = wait_for_devices(
             &env.context,
-            Some(instance_dir.clone()),
+            Some(vec![instance_dir.clone()]),
             None,
             None,
             None,

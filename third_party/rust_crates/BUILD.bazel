@@ -21,7 +21,6 @@ exports_files([
 # //third_party/rust_crates/vendor to these package_groups, so each name must
 # match the group_visibility variable name in Cargo.toml.
 
-# LINT.IfChange
 package_group(
     name = "md5_visibility",
     packages = [
@@ -40,6 +39,10 @@ package_group(
     name = "once_cell_visibility",
     packages = [
         "//src/lib/async-utils",
+        "//src/starnix/kernel/core",
+        "//src/starnix/modules/ashmem",
+        "//src/starnix/modules/ext4",
+        "//src/starnix/modules/overlayfs",
         "//src/storage/ext4",
 
         # Not enforced, matching visibility.gni.
@@ -70,6 +73,7 @@ package_group(
     packages = [
         "//src/storage/ext4/lib/metadata",
         "//src/storage/fxfs",
+        "//src/storage/fxfs/transaction_fifo",
         "//src/storage/lib/mapping",
         "//src/storage/lib/sparse/rust",
     ],
@@ -78,23 +82,46 @@ package_group(
 package_group(
     name = "regex_visibility",
     packages = [
+        "//examples/fidl/new/key_value_store/add_read_item/rust/server",
         "//src/connectivity/wlan/lib/ieee80211-testutils",
         "//src/connectivity/wlan/lib/sme",
+        "//src/connectivity/wlan/wlancfg",
         "//src/developer/ffx/command",
         "//src/developer/ffx/config",
         "//src/developer/ffx/lib/netext",
         "//src/developer/ffx/lib/target_errors",
         "//src/developer/ffx/lib/trace",
+        "//src/developer/ffx/playground",
+        "//src/developer/ffx/plugins/forward",
+        "//src/developer/ffx/plugins/fuzz",
+        "//src/developer/ffx/plugins/platform/preflight",
+        "//src/developer/ffx/plugins/profile/cpu/load",
+        "//src/developer/ffx/plugins/profile/gpu/usage",
+        "//src/developer/ffx/plugins/profile/memory",
+        "//src/developer/ffx/plugins/profile/network/activity",
+        "//src/developer/ffx/plugins/profile/temperature/logger",
         "//src/developer/ffx/plugins/sdk",
+        "//src/developer/ffx/plugins/setui/keyboard",
         "//src/developer/ffx/tools/bluetooth/common",
+        "//src/developer/ffx/tools/bluetooth/src/peer",
+        "//src/devices/lib/fidl-ir",
         "//src/lib/analytics/rust",
+        "//src/lib/assembly/assembled_system",
         "//src/lib/assembly/util",
         "//src/lib/diagnostics/log/rust",
         "//src/lib/diagnostics/testing/diagnostics-assertions/rust",
+        "//src/lib/intl/strings",
+        "//src/lib/intl/unicode_utils/unicode_blocks",
+        "//src/lib/testing/sharding",
+        "//src/storage/benchmarks",
+        "//src/storage/benchmarks/host",
         "//src/storage/fxfs/unicode",
+        "//src/sys/fuzzing/fuzzctl",
         "//src/sys/lib/cm_fidl_validator",
         "//src/sys/pkg/lib/fuchsia-pkg",
+        "//tools/doc_checker",
         "//tools/fidl/fidldoc",
+        "//tools/gn_desc/bin",
         "//tools/gtest_test_parser",
         "//tools/pretty_serial",
         "//tools/zedmon/client",
@@ -104,4 +131,3 @@ package_group(
         "//vendor/...",
     ],
 )
-# LINT.ThenChange(//third_party/rust_crates/visibility.gni)

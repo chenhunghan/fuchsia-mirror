@@ -112,40 +112,50 @@ func loadMetadata(path string) (int, error) {
 }
 
 func loadOwners(ownersFile string, checkoutDir string) ([]string, error) {
+	queue := []string{ownersFile}
+	visitedFiles := make(map[string]bool)
+	seenOwners := make(map[string]bool)
 	owners := make([]string, 0)
-	b, err := os.ReadFile(ownersFile)
-	if err != nil {
-		// Ignore missing/invalid OWNERS files
-		if errors.Is(err, fs.ErrNotExist) {
-			return owners, nil
+
+	for len(queue) > 0 {
+		currFile := queue[0]
+		queue = queue[1:]
+		cleanPath := filepath.Clean(currFile)
+		if visitedFiles[cleanPath] {
+			continue
 		}
-		return owners, err
-	}
-	lines := strings.Split(string(b), "\n")
-	for _, line := range lines {
-		includeMatches := includeRegex.FindStringSubmatch(line)
-		ownerMatch := ownerRegex.FindString(line)
-		if includeMatches != nil {
-			includedFileParts := strings.Split(strings.TrimLeft(includeMatches[1], "/"), "/")
-			var path string
-			var err error
-			// Included paths can be relative
-			if strings.HasPrefix(includedFileParts[0], ".") {
-				path, err = filepath.Abs(filepath.Join(filepath.Dir(ownersFile), filepath.Join(includedFileParts...)))
-				if err != nil {
-					return nil, fmt.Errorf("Error reading included lines in OWNERS file: %w", err)
+		visitedFiles[cleanPath] = true
+
+		b, err := os.ReadFile(currFile)
+		if err != nil {
+			// Ignore missing/invalid OWNERS files
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return owners, err
+		}
+		for _, line := range strings.Split(string(b), "\n") {
+			includeMatches := includeRegex.FindStringSubmatch(line)
+			ownerMatch := ownerRegex.FindString(line)
+			if includeMatches != nil {
+				includedFileParts := strings.Split(strings.TrimLeft(includeMatches[1], "/"), "/")
+				var path string
+				var err error
+				// Included paths can be relative
+				if strings.HasPrefix(includedFileParts[0], ".") {
+					path, err = filepath.Abs(filepath.Join(filepath.Dir(currFile), filepath.Join(includedFileParts...)))
+					if err != nil {
+						return nil, fmt.Errorf("Error reading included lines in OWNERS file: %w", err)
+					}
+				} else {
+					path = filepath.Join(checkoutDir, filepath.Join(includedFileParts...))
 				}
-			} else {
-				path = filepath.Join(checkoutDir, filepath.Join(includedFileParts...))
+				queue = append(queue, path)
 			}
-			ownersToAppend, err := loadOwners(path, checkoutDir)
-			if err != nil {
-				return nil, err
+			if ownerMatch != "" && !seenOwners[line] {
+				seenOwners[line] = true
+				owners = append(owners, line)
 			}
-			owners = append(owners, ownersToAppend...)
-		}
-		if ownerMatch != "" {
-			owners = append(owners, line)
 		}
 	}
 	return owners, nil

@@ -5,47 +5,43 @@
 use crate::node::Node;
 use driver_manager_devfs::{Connector, ConnectorMsg, TopologicalDevnode};
 use fidl::endpoints::{ClientEnd, ServerEnd};
+use fidl_fuchsia_device as fdevice;
+use fidl_fuchsia_device_fs as fdevfs;
+use fuchsia_async as fasync;
 use futures::channel::mpsc;
 use futures::{StreamExt, TryStreamExt};
 use log::{error, warn};
 use phf::{Map, Set, phf_map, phf_set};
 use std::rc::{Rc, Weak};
-use {fidl_fuchsia_device as fdevice, fidl_fuchsia_device_fs as fdevfs, fuchsia_async as fasync};
 
 const ALLOW_ALL_USES: &str = "Allow_all_uses";
 
 // LINT.IfChange
 static CONTROLLER_ALLOWLISTS: Map<&'static str, Set<&'static str>> = phf_map! {
     "ConnectToController" => phf_set! {
-        "block",
         "No_class_name_but_driver_url_is_fuchsia-boot:///dtr#meta/sample_driver.cm",
         "driver_runner_test",
     },
     "ConnectToDeviceFidl" => phf_set! {
-        "block",
         "driver_runner_test",
-        "nand",
         "skip-block",
         "No_class_name_but_driver_url_is_fuchsia-boot:///dtr#meta/fvm.cm",
         "No_class_name_but_driver_url_is_fuchsia-boot:///gpt#meta/gpt.cm",
         "No_class_name_but_driver_url_is_fuchsia-boot:///dtr#meta/gpt.cm",
         "No_class_name_but_driver_url_is_fuchsia-boot:///dtr#meta/nand-broker.cm",
         "No_class_name_but_driver_url_is_fuchsia-boot:///dtr#meta/sample_driver.cm",
+        "No_class_name_but_driver_url_is_owned by parent",
     },
     "Bind" => phf_set! {
-        "block",
         "No_class_name_but_driver_url_is_fuchsia-boot:///dtr#meta/test.cm",
         "driver_runner_test",
     },
     "Rebind" => phf_set! {
-        "block",
         "driver_runner_test",
         "No_class_name_but_driver_url_is_owned by parent",
-        "nand",
         "No_class_name_but_driver_url_is_fuchsia-boot:///dtr#meta/ddk-lifecycle-test.cm",
     },
     "UnbindChildren" => phf_set! {
-        "block",
         "driver_runner_test",
     },
     "ScheduleUnbind" => phf_set! {

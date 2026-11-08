@@ -1,0 +1,121 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Area test suites export this package-level suite instead of individual tests.
+test_suite(
+    name = "tests",
+    tests = [],
+    visibility = ["//examples:__pkg__"],
+)
+
+rustc_test(
+    name = "temp_user_bin",
+    srcs = ["temp_user.rs"],
+    crate_name = "temp_user_bin_test",
+    crate_root = "temp_user.rs",
+    edition = "2024",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = ["//third_party/rust_crates/vendor:anyhow"],
+)
+
+rustc_test(
+    name = "custom_artifact_test",
+    srcs = ["custom_artifact_test.rs"],
+    crate_root = "custom_artifact_test.rs",
+    edition = "2024",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = ["//third_party/rust_crates/vendor:anyhow"],
+)
+
+fx_packaged_binary(
+    name = "temp_user_bin_packaged",
+    testonly = True,
+    binary = ":temp_user_bin",
+    binary_name = "temp_user_bin_test",
+)
+
+fx_component_manifest(
+    name = "temp_user_cmp_manifest",
+    testonly = True,
+    component_name = "temp_user_cmp",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners:tmp_storage.shard.cml",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/temp_user.cml",
+)
+
+fx_test_component(
+    name = "temp_user_cmp",
+    compiled_manifest = ":temp_user_cmp_manifest",
+    deps = [":temp_user_bin_packaged"],
+)
+
+fx_packaged_binary(
+    name = "custom_artifact_test_packaged_bin",
+    testonly = True,
+    binary = ":custom_artifact_test",
+    binary_name = "custom_artifact_test",
+)
+
+fx_component_manifest(
+    name = "custom_artifact_user_cmp_manifest",
+    testonly = True,
+    component_name = "custom_artifact_user",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/custom_artifact_test.cml",
+)
+
+fx_test_component(
+    name = "custom_artifact_user_cmp",
+    compiled_manifest = ":custom_artifact_user_cmp_manifest",
+    visibility = [
+        "//src/sys/run_test_suite/tests:__pkg__",
+        "//src/sys/test_manager/tests:__subpackages__",
+    ],
+    deps = [":custom_artifact_test_packaged_bin"],
+)
+
+fx_package(
+    name = "custom_artifact_user",
+    package_name = "custom_artifact_user",
+    test_components = [":custom_artifact_user_cmp"],
+)
+
+fx_test(
+    name = "custom_artifact_user_test",
+    package = ":custom_artifact_user",
+)
+
+fx_package(
+    name = "temp-user",
+    package_name = "temp-user",
+    test_components = [":temp_user_cmp"],
+)
+
+fx_test(
+    name = "temp-user_test",
+    package = ":temp-user",
+)

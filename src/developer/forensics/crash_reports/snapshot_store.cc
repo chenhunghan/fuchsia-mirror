@@ -146,14 +146,14 @@ void SnapshotStore::DeleteAll() {
   persistence_.DeleteAll();
 }
 
-void SnapshotStore::AddSnapshot(const std::string& uuid, fuchsia::feedback::Attachment archive) {
+void SnapshotStore::AddSnapshot(const std::string& uuid, fuchsia_feedback::Attachment archive) {
   FX_CHECK(!SnapshotExists(uuid)) << "Duplicate snapshot uuid '" << uuid << "' added to store";
 
   SnapshotData& data = data_[uuid];
 
-  if (!archive.key.empty() && archive.value.vmo.is_valid()) {
-    data.archive_size += StorageSize::Bytes(archive.key.size());
-    data.archive_size += StorageSize::Bytes(archive.value.size);
+  if (!archive.key().empty() && archive.value().vmo().is_valid()) {
+    data.archive_size += StorageSize::Bytes(archive.key().size());
+    data.archive_size += StorageSize::Bytes(archive.value().size());
 
     if (data.archive_size > max_archives_size_) {
       // Attempting to add to the store would needlessly garbage collect all snapshots despite

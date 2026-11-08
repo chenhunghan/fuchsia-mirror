@@ -74,7 +74,7 @@ use netstack3_ip::{
     TransportIpContext,
 };
 use netstack3_trace::{TraceResourceId, trace_duration};
-use packet_formats::ip::{IpProto, Ipv4Proto, Ipv6Proto};
+use packet_formats::ip::{DscpAndEcn, IpProto, Ipv4Proto, Ipv6Proto};
 use smallvec::{SmallVec, smallvec};
 use thiserror::Error;
 
@@ -96,8 +96,8 @@ use crate::internal::socket::diagnostics::{
 use crate::internal::socket::generators::{IsnGenerator, TimestampOffsetGenerator};
 use crate::internal::state::info::TcpSocketInfo;
 use crate::internal::state::{
-    CloseError, CloseReason, Closed, Initial, NewlyClosed, ShouldRetransmit, State,
-    StateMachineDebugId, Takeable, TakeableRef,
+    CloseError, CloseReason, Closed, Gso, Initial, NewlyClosed, ShouldRetransmit, State,
+    StateMachineDebugId, Takeable, TakeableRef, TxSegment,
 };
 
 /// A marker trait for dual-stack socket features.
@@ -4048,6 +4048,44 @@ where
         self.with_socket_options(id, |options| *options.ip_options.marks.get(domain))
     }
 
+    /// Sets the traffic class for outgoing segments, or resets it to the
+    /// default when `None`.
+    ///
+    /// TCP controls ECN, so caller-supplied ECN bits are ignored.
+    pub fn set_dscp_and_ecn(
+        &mut self,
+        id: &TcpApiSocketId<I, C>,
+        value: Option<DscpAndEcn>,
+        ip_version: IpVersion,
+    ) -> Result<(), NotDualStackCapableError> {
+        let value = value.map(|value| DscpAndEcn::new(value.dscp(), 0));
+        self.with_socket_options_mut(id, |options| match (I::VERSION, ip_version) {
+            (IpVersion::V4, IpVersion::V6) => Err(NotDualStackCapableError),
+            (_, IpVersion::V4) => {
+                options.ip_options.ipv4_dscp_and_ecn = value;
+                Ok(())
+            }
+            (IpVersion::V6, IpVersion::V6) => {
+                options.ip_options.ipv6_dscp_and_ecn = value;
+                Ok(())
+            }
+        })
+    }
+
+    /// Gets the traffic class for outgoing segments.
+    pub fn dscp_and_ecn(
+        &mut self,
+        id: &TcpApiSocketId<I, C>,
+        ip_version: IpVersion,
+    ) -> Result<DscpAndEcn, NotDualStackCapableError> {
+        self.with_socket_options(id, |options| match (I::VERSION, ip_version) {
+            (IpVersion::V4, IpVersion::V6) => Err(NotDualStackCapableError),
+            (_, IpVersion::V4) | (IpVersion::V6, IpVersion::V6) => {
+                Ok(options.ip_options.dscp_and_ecn_for_version(ip_version))
+            }
+        })
+    }
+
     /// Sets the `dual_stack_enabled` option value.
     pub fn set_dual_stack_enabled(
         &mut self,
@@ -4524,10 +4562,10 @@ where
                     }
                     TcpSocketStateInner::Bound(BoundState { addr, .. }) => {
                         let BoundInfo { addr, port, device } = I::get_bound_info(addr);
-                        let local = addr.map_or_else(
-                            || ZonedAddr::Unzoned(I::UNSPECIFIED_ADDRESS),
-                            |addr| maybe_zoned(addr.addr(), &device).into(),
-                        );
+                        let local = addr
+                            .map_or(ZonedAddr::Unzoned(I::UNSPECIFIED_ADDRESS), |addr| {
+                                maybe_zoned(addr.addr(), &device).into()
+                            });
                         node.record_local_socket_addr::<N, _, _, _>(Some((local, port)));
                         node.record_remote_socket_addr::<N, I::Addr, _, NonZeroU16>(None);
                     }
@@ -4535,10 +4573,10 @@ where
                         addr, accept_queue, backlog, ..
                     }) => {
                         let BoundInfo { addr, port, device } = I::get_bound_info(addr);
-                        let local = addr.map_or_else(
-                            || ZonedAddr::Unzoned(I::UNSPECIFIED_ADDRESS),
-                            |addr| maybe_zoned(addr.addr(), &device).into(),
-                        );
+                        let local = addr
+                            .map_or(ZonedAddr::Unzoned(I::UNSPECIFIED_ADDRESS), |addr| {
+                                maybe_zoned(addr.addr(), &device).into()
+                            });
                         node.record_local_socket_addr::<N, _, _, _>(Some((local, port)));
                         node.record_remote_socket_addr::<N, I::Addr, _, NonZeroU16>(None);
                         node.record_child("AcceptQueue", |node| {
@@ -4997,15 +5035,20 @@ where
             &TcpCountersRefs::from_ctx(core_ctx, conn_id),
             bindings_ctx.now(),
             socket_options,
+            // TODO(https://fxbug.dev/565891068): Enable GSO when configured.
+            Gso::Disabled,
         ) {
-            Ok(seg) => {
+            Ok(TxSegment { segment, gso_size }) => {
+                // TODO(https://fxbug.dev/565891068): Remove this assertion once
+                // GSO is wired up in the socket layer.
+                assert_eq!(gso_size, None);
                 send_tcp_segment(
                     core_ctx,
                     bindings_ctx,
                     Some(conn_id),
                     Some(&conn.ip_sock),
                     addr.ip.clone(),
-                    seg,
+                    segment,
                     &socket_options.ip_options,
                 );
                 match limit {
@@ -5749,8 +5792,10 @@ fn send_tcp_segment<'a, WireI, SockI, CC, BC, D>(
     let result = match ip_sock {
         Some(ip_sock) => {
             let body = tcp_serialize_segment(&header, data, conn_addr);
+            // TODO(https://fxbug.dev/565891068): Support TCP GSO by providing
+            // GSO metadata when segment offloading is enabled for the socket.
             core_ctx
-                .send_ip_packet(bindings_ctx, ip_sock, body, ip_sock_options, tx_metadata)
+                .send_ip_packet(bindings_ctx, ip_sock, body, None, ip_sock_options, tx_metadata)
                 .map_err(|err| IpSockCreateAndSendError::Send(err))
         }
         None => {
@@ -5851,7 +5896,9 @@ mod tests {
     use netstack3_ip::nud::LinkResolutionContext;
     use netstack3_ip::nud::testutil::FakeLinkResolutionNotifier;
     use netstack3_ip::socket::testutil::{FakeDeviceConfig, FakeDualStackIpSocketCtx};
-    use netstack3_ip::socket::{IpSockSendError, MmsError, RouteResolutionOptions, SendOptions};
+    use netstack3_ip::socket::{
+        IpSockSendError, MmsError, RouteResolutionOptions, SendOptions, TransportGsoInfo,
+    };
     use netstack3_ip::testutil::DualStackSendIpPacketMeta;
     use netstack3_ip::{
         BaseTransportIpContext, HopLimits, IpTransportContext, LocalDeliveryPacketInfo,
@@ -6325,6 +6372,7 @@ mod tests {
             bindings_ctx: &mut BC,
             socket: &IpSock<I, Self::WeakDeviceId>,
             body: S,
+            gso_info: Option<TransportGsoInfo>,
             options: &O,
             tx_meta: BC::TxMetadata,
         ) -> Result<(), IpSockSendError>
@@ -6333,7 +6381,14 @@ mod tests {
             S::Buffer: BufferMut,
             O: SendOptions<I> + RouteResolutionOptions<I>,
         {
-            self.ip_socket_ctx.send_ip_packet(bindings_ctx, socket, body, options, tx_meta)
+            self.ip_socket_ctx.send_ip_packet(
+                bindings_ctx,
+                socket,
+                body,
+                gso_info,
+                options,
+                tx_meta,
+            )
         }
 
         fn confirm_reachable<O>(
@@ -9781,6 +9836,266 @@ mod tests {
             for (domain, expected) in expected_marks {
                 assert_eq!(ctx.tcp_api::<I>().get_mark(&accepted, domain), Mark(Some(expected)));
             }
+        });
+    }
+
+    #[ip_test(I)]
+    fn tcp_dscp_and_ecn_get_set<I: TcpTestIpExt>()
+    where
+        TcpCoreCtx<FakeDeviceId, TcpBindingsCtx<FakeDeviceId>>:
+            TcpContext<I, TcpBindingsCtx<FakeDeviceId>>,
+    {
+        let mut ctx = TcpCtx::with_core_ctx(TcpCoreCtx::new::<I>(
+            I::TEST_ADDRS.local_ip,
+            I::TEST_ADDRS.remote_ip,
+        ));
+        let mut api = ctx.tcp_api::<I>();
+        let socket = api.create(Default::default());
+
+        assert_eq!(api.dscp_and_ecn(&socket, IpVersion::V4), Ok(DscpAndEcn::default()));
+
+        assert_eq!(
+            api.set_dscp_and_ecn(&socket, Some(DscpAndEcn::new(46, 3)), IpVersion::V4),
+            Ok(())
+        );
+        assert_eq!(api.dscp_and_ecn(&socket, IpVersion::V4), Ok(DscpAndEcn::new(46, 0)));
+
+        match I::VERSION {
+            IpVersion::V4 => {
+                assert_eq!(
+                    api.set_dscp_and_ecn(&socket, Some(DscpAndEcn::new(10, 0)), IpVersion::V6),
+                    Err(NotDualStackCapableError)
+                );
+                assert_eq!(api.dscp_and_ecn(&socket, IpVersion::V6), Err(NotDualStackCapableError));
+            }
+            IpVersion::V6 => {
+                assert_eq!(api.dscp_and_ecn(&socket, IpVersion::V6), Ok(DscpAndEcn::default()));
+                assert_eq!(
+                    api.set_dscp_and_ecn(&socket, Some(DscpAndEcn::new(10, 1)), IpVersion::V6),
+                    Ok(())
+                );
+                assert_eq!(api.dscp_and_ecn(&socket, IpVersion::V6), Ok(DscpAndEcn::new(10, 0)));
+                assert_eq!(api.dscp_and_ecn(&socket, IpVersion::V4), Ok(DscpAndEcn::new(46, 0)));
+
+                assert_eq!(api.set_dscp_and_ecn(&socket, None, IpVersion::V6), Ok(()));
+                assert_eq!(api.dscp_and_ecn(&socket, IpVersion::V6), Ok(DscpAndEcn::default()));
+                assert_eq!(api.dscp_and_ecn(&socket, IpVersion::V4), Ok(DscpAndEcn::new(46, 0)));
+            }
+        }
+
+        assert_eq!(api.set_dscp_and_ecn(&socket, None, IpVersion::V4), Ok(()));
+        assert_eq!(api.dscp_and_ecn(&socket, IpVersion::V4), Ok(DscpAndEcn::default()));
+    }
+
+    #[ip_test(I)]
+    fn tcp_dscp_and_ecn_in_sent_segments<I: TcpTestIpExt>()
+    where
+        TcpCoreCtx<FakeDeviceId, TcpBindingsCtx<FakeDeviceId>>: TcpContext<
+                I,
+                TcpBindingsCtx<FakeDeviceId>,
+                SingleStackConverter = I::SingleStackConverter,
+                DualStackConverter = I::DualStackConverter,
+            >,
+    {
+        let client_dscp = DscpAndEcn::new(46, 0);
+        let server_dscp = DscpAndEcn::new(10, 0);
+        let mut net = new_test_net::<I>();
+        let backlog = NonZeroUsize::new(1).unwrap();
+        let server_port = NonZeroU16::new(1234).unwrap();
+
+        let server = net.with_context(REMOTE, |ctx| {
+            let mut api = ctx.tcp_api::<I>();
+            let server = api.create(Default::default());
+            api.set_dscp_and_ecn(&server, Some(server_dscp), I::VERSION).expect("set dscp");
+            api.bind(&server, None, Some(server_port)).expect("failed to bind the server socket");
+            api.listen(&server, backlog).expect("can listen");
+            server
+        });
+
+        let client_ends = WriteBackClientBuffers::default();
+        let client = net.with_context(LOCAL, |ctx| {
+            let mut api = ctx.tcp_api::<I>();
+            let socket = api.create(ProvidedBuffers::Buffers(client_ends.clone()));
+            api.set_dscp_and_ecn(&socket, Some(client_dscp), I::VERSION).expect("set dscp");
+            api.connect(&socket, Some(ZonedAddr::Unzoned(I::TEST_ADDRS.remote_ip)), server_port)
+                .expect("failed to connect");
+            socket
+        });
+
+        let segments = run_until_idle_checking_dscp(&mut net, |dst_context, _meta| {
+            if dst_context == REMOTE { client_dscp } else { server_dscp }
+        });
+        assert!(segments >= 3, "expected at least 3 segments, got {segments}");
+
+        net.with_context(REMOTE, |ctx| {
+            let (accepted, _addr, _accepted_ends) =
+                ctx.tcp_api::<I>().accept(&server).expect("failed to accept");
+            assert_eq!(ctx.tcp_api::<I>().dscp_and_ecn(&accepted, I::VERSION), Ok(server_dscp));
+        });
+
+        let new_client_dscp = DscpAndEcn::new(8, 0);
+        let ClientBuffers { send: client_snd_end, receive: _ } =
+            client_ends.0.as_ref().lock().take().unwrap();
+        client_snd_end.lock().extend_from_slice(b"Hello");
+        net.with_context(LOCAL, |ctx| {
+            let mut api = ctx.tcp_api::<I>();
+            api.set_dscp_and_ecn(&client, Some(new_client_dscp), I::VERSION).expect("set dscp");
+            api.do_send(&client);
+        });
+        let segments = run_until_idle_checking_dscp(&mut net, |dst_context, _meta| {
+            if dst_context == REMOTE { new_client_dscp } else { server_dscp }
+        });
+        assert!(segments >= 2, "expected at least 2 segments (data and ack), got {segments}");
+    }
+
+    #[test]
+    fn tcp_dscp_and_ecn_dual_stack() {
+        set_logger_for_test();
+        let client_v4_dscp = DscpAndEcn::new(46, 0);
+        let server_v4_dscp = DscpAndEcn::new(12, 0);
+        let v6_dscp = DscpAndEcn::new(10, 0);
+        let mut net = new_test_net::<Ipv4>();
+        let backlog = NonZeroUsize::new(1).unwrap();
+
+        let _server = net.with_context(REMOTE, |ctx| {
+            let mut api = ctx.tcp_api::<Ipv6>();
+            let server = api.create(Default::default());
+            api.set_dscp_and_ecn(&server, Some(server_v4_dscp), IpVersion::V4)
+                .expect("set IPv4 dscp");
+            api.set_dscp_and_ecn(&server, Some(v6_dscp), IpVersion::V6).expect("set IPv6 dscp");
+            api.bind(&server, None, Some(PORT_1)).expect("failed to bind the server socket");
+            api.listen(&server, backlog).expect("can listen");
+            server
+        });
+
+        let client_ends = WriteBackClientBuffers::default();
+        let _client = net.with_context(LOCAL, |ctx| {
+            let mut api = ctx.tcp_api::<Ipv6>();
+            let socket = api.create(ProvidedBuffers::Buffers(client_ends.clone()));
+            api.set_dscp_and_ecn(&socket, Some(client_v4_dscp), IpVersion::V4)
+                .expect("set IPv4 dscp");
+            api.set_dscp_and_ecn(&socket, Some(v6_dscp), IpVersion::V6).expect("set IPv6 dscp");
+            api.connect(
+                &socket,
+                Some(ZonedAddr::Unzoned((*Ipv4::TEST_ADDRS.remote_ip).to_ipv6_mapped())),
+                PORT_1,
+            )
+            .expect("failed to connect");
+            socket
+        });
+
+        let segments = run_until_idle_checking_dscp(&mut net, |dst_context, meta| {
+            assert_matches!(meta, DualStackSendIpPacketMeta::V4(_));
+            if dst_context == REMOTE { client_v4_dscp } else { server_v4_dscp }
+        });
+        assert!(segments >= 3, "expected at least 3 segments, got {segments}");
+    }
+
+    fn run_until_idle_checking_dscp(
+        net: &mut TcpTestNetwork,
+        expected: impl Fn(&str, &DualStackSendIpPacketMeta<FakeDeviceId>) -> DscpAndEcn,
+    ) -> usize {
+        let mut segments = 0;
+        loop {
+            net.collect_frames();
+            for InstantAndData(_instant, PendingFrameData { dst_context, meta, frame: _ }) in
+                net.iter_pending_frames()
+            {
+                let dscp_and_ecn = match meta {
+                    DualStackSendIpPacketMeta::V4(meta) => meta.dscp_and_ecn,
+                    DualStackSendIpPacketMeta::V6(meta) => meta.dscp_and_ecn,
+                };
+                assert_eq!(dscp_and_ecn, expected(dst_context, meta));
+                segments += 1;
+            }
+            if net.step().is_idle() {
+                break;
+            }
+        }
+        segments
+    }
+
+    #[ip_test(I)]
+    #[test_case(Some(1000), None, 1000; "client_user_mss")]
+    #[test_case(None, Some(800), 800; "server_user_mss")]
+    #[test_case(Some(1000), Some(800), 800; "both_user_mss")]
+    #[test_case(
+        Some(2000),
+        Some(2000),
+        Mss::from_mms(Mms::from_mtu::<I>(LINK_MTU, 0).unwrap()).unwrap().get();
+        "clamped_to_device_mss"
+    )]
+    fn tcp_user_mss<I: TcpTestIpExt>(
+        client_user_mss: Option<u16>,
+        server_user_mss: Option<u16>,
+        expected_mss: u16,
+    ) where
+        TcpCoreCtx<FakeDeviceId, TcpBindingsCtx<FakeDeviceId>>: TcpContext<
+                I,
+                TcpBindingsCtx<FakeDeviceId>,
+                SingleStackConverter = I::SingleStackConverter,
+                DualStackConverter = I::DualStackConverter,
+            >,
+    {
+        set_logger_for_test();
+        let mut net = new_test_net::<I>();
+        let backlog = NonZeroUsize::new(1).unwrap();
+        let server_port = NonZeroU16::new(1234).unwrap();
+
+        let server = net.with_context(REMOTE, |ctx| {
+            let mut api = ctx.tcp_api::<I>();
+            let server = api.create(Default::default());
+            if let Some(user_mss) = server_user_mss {
+                api.with_socket_options_mut(&server, |so| {
+                    so.user_mss = Some(Mss::new(user_mss).unwrap());
+                });
+            }
+            api.bind(&server, None, Some(server_port)).expect("failed to bind server");
+            api.listen(&server, backlog).expect("can listen");
+            server
+        });
+
+        let client = net.with_context(LOCAL, |ctx| {
+            let mut api = ctx.tcp_api::<I>();
+            let client = api.create(Default::default());
+            if let Some(user_mss) = client_user_mss {
+                api.with_socket_options_mut(&client, |so| {
+                    so.user_mss = Some(Mss::new(user_mss).unwrap());
+                });
+            }
+            api.connect(&client, Some(ZonedAddr::Unzoned(I::TEST_ADDRS.remote_ip)), server_port)
+                .expect("failed to connect");
+            client
+        });
+
+        net.run_until_idle();
+
+        let accepted = net.with_context(REMOTE, |ctx| {
+            let (accepted, _addr, _accepted_ends) =
+                ctx.tcp_api::<I>().accept(&server).expect("failed to accept");
+            accepted
+        });
+
+        // Timestamps are enabled by default and reduce the negotiated MSS.
+        const TIMESTAMP_OPTION_LEN: u32 =
+            packet_formats::tcp::options::ALIGNED_TIMESTAMP_OPTION_LENGTH as u32;
+        let expected_snd_mss = u32::from(expected_mss) - TIMESTAMP_OPTION_LEN;
+
+        net.with_context(LOCAL, |ctx| {
+            let client_info = ctx.tcp_api::<I>().get_tcp_info(&client);
+            assert_eq!(client_info.snd_mss, Some(expected_snd_mss));
+            ctx.tcp_api::<I>().with_socket_options_mut(&client, |so| so.user_mss = Some(Mss::MIN));
+            let client_info = ctx.tcp_api::<I>().get_tcp_info(&client);
+            assert_eq!(client_info.snd_mss, Some(expected_snd_mss));
+        });
+
+        net.with_context(REMOTE, |ctx| {
+            let accepted_info = ctx.tcp_api::<I>().get_tcp_info(&accepted);
+            assert_eq!(accepted_info.snd_mss, Some(expected_snd_mss));
+            ctx.tcp_api::<I>()
+                .with_socket_options_mut(&accepted, |so| so.user_mss = Some(Mss::MIN));
+            let accepted_info = ctx.tcp_api::<I>().get_tcp_info(&accepted);
+            assert_eq!(accepted_info.snd_mss, Some(expected_snd_mss));
         });
     }
 

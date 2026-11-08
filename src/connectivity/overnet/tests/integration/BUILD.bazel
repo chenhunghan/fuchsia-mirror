@@ -1,0 +1,83 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":overnet-integration-tests"],
+    visibility = ["//src/connectivity:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    tests = [":integration_host_test"],
+    visibility = ["//src/connectivity:__pkg__"],
+)
+
+rustc_test(
+    name = "integration",
+    srcs = [
+        "src/drop.rs",
+        "src/echo.rs",
+        "src/lib.rs",
+        "src/triangle.rs",
+    ] + select({
+        "//build/bazel/platforms:is_host_os": ["src/error_propagation.rs"],
+        "//conditions:default": [],
+    }),
+    crate_name = "overnet_integration_tests",
+    edition = "2024",
+    env = select({
+        "//build/bazel/platforms:is_host_os": {"RUST_LIB_BACKTRACE": "0"},
+        "//conditions:default": {},
+    }),
+    deps = [
+        ":echo_rust",
+        ":triangle_rust",
+        "//sdk/rust/zx-status",
+        "//src/connectivity/overnet/lib/circuit",
+        "//src/connectivity/overnet/lib/core",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-sync",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+wrap_host_rust_test(
+    name = "integration_host_test",
+    binary_name = "integration",
+    test_args = ["env RUST_LIB_BACKTRACE=0"],
+)
+
+fidl_library(
+    name = "echo",
+    testonly = True,
+    srcs = ["src/echo.test.fidl"],
+    library_name = "test.echo",
+)
+
+fidl_library(
+    name = "triangle",
+    testonly = True,
+    srcs = ["src/triangle.test.fidl"],
+    # TODO(https://fxbug.dev/381096879): Fix lint warnings and remove.
+    excluded_checks = ["string-bounds-not-specified"],
+    library_name = "test.triangle",
+    deps = [":echo"],
+)
+
+fx_unittest_package(
+    name = "overnet-integration-tests",
+    unit_tests = [":integration"],
+)

@@ -4,6 +4,7 @@
 
 #include "src/developer/forensics/utils/vmo.h"
 
+#include <fidl/fuchsia.mem/cpp/fidl.h>
 #include <lib/zx/vmo.h>
 
 #include <string>
@@ -99,6 +100,24 @@ TEST(VmoTest, RoundTrip) {
   const zx::result<std::string> output = StringFromVmo(*vmo);
   ASSERT_TRUE(output.is_ok());
   EXPECT_EQ(*output, input);
+}
+
+TEST(VmoTest, BufferFromStringSuccess) {
+  const std::string input = "Hello, world!";
+  zx::result<fuchsia_mem::Buffer> buffer = BufferFromString(input);
+  ASSERT_TRUE(buffer.is_ok());
+  EXPECT_EQ(buffer->size(), input.size());
+
+  const zx::result<std::string> output = StringFromVmo(buffer->vmo());
+  ASSERT_TRUE(output.is_ok());
+  EXPECT_EQ(*output, input);
+}
+
+TEST(VmoTest, BufferFromStringEmpty) {
+  zx::result<fuchsia_mem::Buffer> buffer = BufferFromString("");
+  ASSERT_TRUE(buffer.is_ok());
+  ASSERT_TRUE(buffer->vmo().is_valid());
+  EXPECT_EQ(buffer->size(), 0u);
 }
 
 }  // namespace

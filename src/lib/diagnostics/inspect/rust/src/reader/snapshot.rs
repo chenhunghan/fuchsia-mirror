@@ -93,7 +93,7 @@ impl Snapshot {
 
         // Read the buffer
         let mut vmo_size = if let Some(vmo_size) = header_block.vmo_size()? {
-            vmo_size as usize
+            cmp::min(vmo_size as usize, source.len())
         } else {
             source.len()
         };
@@ -933,6 +933,25 @@ mod tests {
     }
 
     #[fuchsia::test]
+    fn snapshot_vmo_with_header_size_larger_than_vmo_size() -> Result<(), Error> {
+        let size = constants::PAGE_SIZE_BYTES;
+        let (mut container, storage) = Container::read_and_write(size).unwrap();
+        let _ = Block::free(
+            &mut container,
+            BlockIndex::HEADER,
+            constants::HEADER_ORDER,
+            BlockIndex::EMPTY,
+        )?
+        .become_reserved()
+        .become_inspect_header(constants::MAX_VMO_SIZE)?;
+
+        let snapshot = get_snapshot!(container, storage, || {})?;
+        assert_eq!(snapshot.buffer.len(), size);
+
+        Ok(())
+    }
+
+    #[fuchsia::test]
     fn snapshot_vmo_with_very_large_vmo() -> Result<(), Error> {
         let size = 2 * constants::MAX_VMO_SIZE;
         let (mut container, storage) = Container::read_and_write(size).unwrap();
@@ -946,6 +965,43 @@ mod tests {
         .become_inspect_header(size)?;
 
         let snapshot = get_snapshot!(container, storage, || {})?;
+        assert_eq!(snapshot.buffer.len(), constants::MAX_VMO_SIZE);
+
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    fn snapshot_frozen_vmo_with_very_large_vmo() -> Result<(), Error> {
+        let size = 2 * constants::MAX_VMO_SIZE;
+        let (mut container, parent_storage) = Container::read_and_write(size).unwrap();
+        let _ = Block::free(
+            &mut container,
+            BlockIndex::HEADER,
+            constants::HEADER_ORDER,
+            BlockIndex::EMPTY,
+        )?
+        .become_reserved()
+        .become_inspect_header(size)?;
+        container.copy_from_slice_at(8, &[0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+
+        let snapshot;
+        #[cfg(target_os = "fuchsia")]
+        {
+            let storage = parent_storage.create_child(
+                zx::VmoChildOptions::SNAPSHOT | zx::VmoChildOptions::NO_WRITE,
+                0,
+                size as u64,
+            )?;
+            snapshot = get_snapshot!(container, storage, || {})?;
+        };
+        #[cfg(not(target_os = "fuchsia"))]
+        {
+            // Silence unused variable warning, which happens to be set to a unit value.
+            #[allow(clippy::let_unit_value)]
+            let _ = parent_storage;
+            snapshot = get_snapshot!(container, (), || {})?;
+        };
+        assert!(matches!(snapshot.buffer, BackingBuffer::Container(_)));
         assert_eq!(snapshot.buffer.len(), constants::MAX_VMO_SIZE);
 
         Ok(())

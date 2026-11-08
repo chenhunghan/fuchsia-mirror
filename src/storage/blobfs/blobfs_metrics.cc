@@ -6,8 +6,6 @@
 
 #include "src/storage/blobfs/blobfs_metrics.h"
 
-#include <lib/fpromise/promise.h>
-#include <lib/fpromise/result.h>
 #include <lib/inspect/cpp/inspector.h>
 #include <zircon/assert.h>
 
@@ -28,18 +26,7 @@ namespace blobfs {
 BlobfsMetrics::BlobfsMetrics(bool should_record_page_in, inspect::Inspector inspector)
     : inspector_{std::move(inspector)}, should_record_page_in_(should_record_page_in) {
   // Add a node that allows querying the size of the Inspect VMO at runtime.
-  // TODO(https://fxbug.dev/42160612): Replace the following lazy node with the one now part of the
-  // Inspector class itself (i.e. call `inspector_.CreateStatsNode()` instead).
-  root_.CreateLazyNode(
-      "inspect_vmo_stats",
-      [this] {
-        inspect::InspectStats stats = inspector_.GetStats();
-        inspect::Inspector insp;
-        insp.GetRoot().CreateUint("current_size", stats.size, &insp);
-        insp.GetRoot().CreateUint("maximum_size", stats.maximum_size, &insp);
-        return fpromise::make_result_promise(fpromise::ok(std::move(insp)));
-      },
-      &inspector_);
+  inspector_.CreateStatsNode();
 }
 
 void BlobfsMetrics::UpdateAllocation(uint64_t size_data, const fs::Duration& duration) {

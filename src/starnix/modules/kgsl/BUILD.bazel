@@ -1,0 +1,109 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "@fuchsia_build_info//:args.bzl",
+    "starnix_kgsl_debug",
+    "starnix_kgsl_enable",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_component.bzl",
+    "fx_unittest_component",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":kgsl-tests"],
+    visibility = ["//src/starnix:__pkg__"],
+)
+
+# TODO(https://fxbug.dev/42085293): Placeholder filegroup for
+# //src/starnix/modules/kgsl/uapi_manual, which is a GN-only golden-file check
+# group with no Bazel target yet; remove once migrated to Bazel.
+# @bazel2gn:skip
+filegroup(
+    name = "uapi_manual",
+)
+
+rustc_library(
+    name = "kgsl",
+    srcs = [
+        "file.rs",
+        "init.rs",
+        "lib.rs",
+        "util.rs",
+    ],
+    aspect_hints = [
+        # TODO(https://fxbug.dev/42085293): Preserve GN dependency on the
+        # GN-only //src/starnix/modules/kgsl/uapi_manual golden check group;
+        # remove placeholder filegroup once migrated to Bazel.
+        ":uapi_manual",  # @bazel2gn:path_overwrite://src/starnix/modules/kgsl/uapi_manual
+    ],
+    # This flag affects the return value of a signal ioctl used by certain
+    # container binaries to direct them to use kgsl-based or magma-based drivers.
+    # It does not affect the availability of the kgsl device within the container.
+    crate_features = (["starnix-kgsl-enable"] if starnix_kgsl_enable else []) + (
+        ["starnix-kgsl-debug"] if starnix_kgsl_debug else []
+    ),
+    crate_name = "starnix_modules_kgsl",
+    crate_root = "lib.rs",
+    edition = "2024",
+    lint_config = "//src/starnix/build:kernel_library_config",
+    visibility = ["//src/starnix/modules:__subpackages__"],
+    deps = [
+        "//sdk/rust/zx",
+        "//src/lib/fdio/rust:fdio",
+        "//src/starnix/kernel/core",
+        "//src/starnix/lib/magma",
+        "//src/starnix/lib/starnix_logging",
+        "//src/starnix/lib/starnix_sync",
+        "//src/starnix/lib/starnix_syscalls",
+        "//src/starnix/lib/starnix_uapi",
+        "//src/starnix/modules/kgsl/libmagma",
+        "//src/starnix/modules/kgsl/magma_params",
+        "//src/starnix/modules/kgsl/strings:kgsl_strings",
+        "//third_party/rust_crates/vendor:bitfield",
+        "//third_party/rust_crates/vendor:range-alloc",
+    ],
+)
+
+rustc_test(
+    name = "kgsl_test",
+    aspect_hints = [
+        # TODO(https://fxbug.dev/42085293): Preserve GN dependency on the
+        # GN-only //src/starnix/modules/kgsl/uapi_manual golden check group;
+        # remove placeholder filegroup once migrated to Bazel.
+        ":uapi_manual",  # @bazel2gn:path_overwrite://src/starnix/modules/kgsl/uapi_manual
+    ],
+    crate = ":kgsl",
+    crate_features = (["starnix-kgsl-enable"] if starnix_kgsl_enable else []) + (
+        ["starnix-kgsl-debug"] if starnix_kgsl_debug else []
+    ),
+    lint_config = "//src/starnix/config:starnix_clippy_lints_test",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_unittest_component(
+    name = "kgsl-tests-component",
+    binary = ":kgsl_test",
+    component_name = "kgsl-tests",
+    test_type = "starnix",
+)
+
+fx_package(
+    name = "kgsl-tests-package",
+    package_name = "kgsl-tests",
+    test_components = [":kgsl-tests-component"],
+)
+
+fx_test(
+    name = "kgsl-tests",
+    package = ":kgsl-tests-package",
+)

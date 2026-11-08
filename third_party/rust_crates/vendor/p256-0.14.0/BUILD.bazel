@@ -100,6 +100,6 @@ rust_library(
         "//third_party/rust_crates/vendor/primefield-0.14.0:primefield",
         "//third_party/rust_crates/vendor/primeorder-0.14.0:primeorder",
         "//third_party/rust_crates/vendor/serdect-0.4.3:serdect",
-        "//third_party/rust_crates/vendor/sha2-0.11.0:sha2",
+        "//third_party/rust_crates/vendor/sha2-0.11.1:sha2",
     ],
 )

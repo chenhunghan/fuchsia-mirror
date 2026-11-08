@@ -261,14 +261,10 @@ func ConstructBaseCommand(shard *Shard, checkoutRoot, buildDir string, tools bui
 		cmd = append(cmd, "-experiment", exp)
 	}
 
-	// test-pilot and resummarize are required for target tests that are run using
-	// test-pilot. The build must place these binaries in the same directory with
-	// the ffx binary (host_x64 or host_arm64).
+	// test-pilot is required for target tests that are run using test-pilot.
+	// The build must place this binary in the same directory with the ffx
+	// binary (host_x64 or host_arm64).
 	_, err = registerTool(shard, tools, "test-pilot")
-	if err != nil {
-		return err
-	}
-	_, err = registerTool(shard, tools, "resummarize")
 	if err != nil {
 		return err
 	}

@@ -2,17 +2,15 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/bazel/bazel_test_suite.gni")
 import("//build/components.gni")
 import("//build/rust/rustc_test.gni")
 import("//src/tests/fidl/conformance_suite/gidl-conformance-suite.gni")
 import("//tools/fidl/gidl/gidl.gni")
 
-conformance_test_source = "$target_gen_dir/src/conformance_test.rs"
+# LINT.IfChange
 
-group("tests") {
-  testonly = true
-  deps = [ ":fidl_rust_next_conformance_tests" ]
-}
+conformance_test_source = "$target_gen_dir/src/conformance_test.rs"
 
 gidl("generate_conformance_test") {
   type = "conformance"
@@ -25,7 +23,7 @@ gidl("generate_conformance_test") {
 # The `encode_large_array` allocates a large array onto the stack, so we need
 # to ensure we have a large enough stack or we'll stack overflow.
 #
-# TODO(http://fxbug.dev/468026274): We should come back and investigate why
+# TODO(https://fxbug.dev/468026274): We should come back and investigate why
 # we're hitting the stack overflow now. As rust bindings start getting broader
 # adoption, we'd like to make sure we're not going to be inadvertently hitting
 # this in production.
@@ -53,5 +51,22 @@ rustc_test("fidl_rust_next_conformance_tests_bin") {
 }
 
 fuchsia_unittest_package("fidl_rust_next_conformance_tests") {
+  package_name = "fidl_rust_next_conformance_tests-gn"
   deps = [ ":fidl_rust_next_conformance_tests_bin" ]
+}
+
+# LINT.ThenChange(//src/lib/fidl/rust_next/conformance/BUILD.bazel)
+
+bazel_test_suite("bazel_tests") {
+  target_tests = [
+    "//src/lib/fidl/rust_next/conformance:fidl_rust_next_conformance_tests",
+  ]
+}
+
+group("tests") {
+  testonly = true
+  deps = [
+    ":bazel_tests",
+    ":fidl_rust_next_conformance_tests",
+  ]
 }

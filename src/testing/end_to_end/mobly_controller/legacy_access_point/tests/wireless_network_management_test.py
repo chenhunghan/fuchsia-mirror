@@ -4,8 +4,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# mypy: disable-error-code="no-untyped-def"
-
 import unittest
 
 from honeydew.typing.custom_types import MacAddress
@@ -38,7 +36,7 @@ EXPECTED_CANDIDATE_LIST = BssTransitionCandidateList(EXPECTED_NEIGHBORS)
 
 
 class WirelessNetworkManagementTest(unittest.TestCase):
-    def test_bss_transition_management_request(self):
+    def test_bss_transition_management_request(self) -> None:
         request = BssTransitionManagementRequest(
             disassociation_imminent=True,
             abridged=True,

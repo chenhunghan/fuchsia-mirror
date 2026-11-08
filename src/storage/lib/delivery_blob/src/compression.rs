@@ -20,6 +20,14 @@ pub use compression_algorithm::{
 mod compression_info;
 pub use compression_info::{CompressionInfo, DataBuffer, StreamingDecompressor};
 
+/// Alignment of LZ4 chunks that are stored raw (uncompressed) because they don't compress.
+///
+/// Once the delivery header and seek table are stripped on write, 4 KiB places raw chunks on
+/// standard 4 KiB Fxfs block boundaries so reads can bypass decompression and intermediate bounce
+/// buffers, while keeping alignment padding minimal (~0.02% of total blob image size) compared to
+/// larger alignments.
+pub const RAW_CHUNK_ALIGNMENT: usize = 4096;
+
 /// Validated chunk information from an archive. Compressed ranges are relative to the start of
 /// compressed data (i.e. they start after the header and seek table).
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -158,7 +166,7 @@ impl ChunkedArchiveOptions {
 
     const V3_VERSION: u16 = 3;
     const V3_MAX_CHUNKS: usize = u32::MAX as usize;
-    const V3_CHUNK_SIZE: usize = 32 * 1024;
+    pub const V3_CHUNK_SIZE: usize = 32 * 1024;
     const V3_ZSTD_COMPRESSION_LEVEL: i32 = 22;
 
     /// Which version of chunked-compression archive should be constructed.
@@ -201,24 +209,12 @@ impl ChunkedArchiveOptions {
     /// Constructs a compressor to compress chunks based on the specified options.
     pub fn compressor(&self) -> Compressor {
         match self {
-            Self::V2 { compression_level, .. } => {
-                let mut cctx = zstd::zstd_safe::CCtx::create();
-                cctx.set_parameter(zstd::zstd_safe::CParameter::CompressionLevel(
-                    *compression_level,
-                ))
-                .expect("setting the compression level should never fail");
-                Compressor::Zstd(cctx)
-            }
+            Self::V2 { compression_level, .. } => Compressor::new_zstd(*compression_level),
             Self::V3 { compression_algorithm: CompressionAlgorithm::Zstd } => {
-                let mut cctx = zstd::zstd_safe::CCtx::create();
-                cctx.set_parameter(zstd::zstd_safe::CParameter::CompressionLevel(
-                    Self::V3_ZSTD_COMPRESSION_LEVEL,
-                ))
-                .expect("setting the compression level should never fail");
-                Compressor::Zstd(cctx)
+                Compressor::new_zstd(Self::V3_ZSTD_COMPRESSION_LEVEL)
             }
             Self::V3 { compression_algorithm: CompressionAlgorithm::Lz4 } => {
-                Compressor::Lz4 { compression_level: lz4::HcCompressionLevel::custom(12) }
+                Compressor::new_lz4(lz4::HcCompressionLevel::custom(12))
             }
         }
     }
@@ -298,11 +294,20 @@ impl ChunkInfo {
 /// Validated information from decoding an archive.
 #[derive(Debug)]
 pub struct DecodedArchive {
+    version: u16,
     compression_algorithm: CompressionAlgorithm,
     seek_table: Vec<ChunkInfo>,
 }
 
 impl DecodedArchive {
+    pub fn version(&self) -> u16 {
+        self.version
+    }
+
+    pub fn compression_algorithm(&self) -> CompressionAlgorithm {
+        self.compression_algorithm
+    }
+
     /// The total size of decompressing all of the chunks in the archive.
     pub fn decompressed_size(&self) -> usize {
         self.seek_table.last().map_or(0, |entry| entry.decompressed_range.end)
@@ -424,6 +429,9 @@ impl ChunkedArchiveHeader {
             return Err(ChunkedArchiveError::IntegrityError);
         }
         let compression_algorithm = CompressionAlgorithm::try_from(self.compression_algorithm)?;
+        if version == 2 && compression_algorithm != CompressionAlgorithm::Zstd {
+            return Err(ChunkedArchiveError::IntegrityError);
+        }
 
         // Validate seek table using invariants I0 through I5.
 
@@ -440,7 +448,7 @@ impl ChunkedArchiveHeader {
 
         // I2: Each entry's decompressed offset must be equal to the end of the previous frame
         //     (i.e. to the previous frame's decompressed offset + length).
-        for (prev, curr) in entries.iter().tuple_windows() {
+        for [prev, curr] in entries.iter().array_windows() {
             if (prev.decompressed_offset.get() + prev.decompressed_size.get())
                 != curr.decompressed_offset.get()
             {
@@ -450,7 +458,7 @@ impl ChunkedArchiveHeader {
 
         // I3: Each entry's compressed offset must be greater than or equal to the end of the
         //     previous frame (i.e. to the previous frame's compressed offset + length).
-        for (prev, curr) in entries.iter().tuple_windows() {
+        for [prev, curr] in entries.iter().array_windows() {
             if (prev.compressed_offset.get() + prev.compressed_size.get())
                 > curr.compressed_offset.get()
             {
@@ -477,13 +485,13 @@ impl ChunkedArchiveHeader {
             .iter()
             .map(|entry| ChunkInfo::from_entry(entry, header_length))
             .try_collect()?;
-        Ok(Some((DecodedArchive { seek_table, compression_algorithm }, chunk_data)))
+        Ok(Some((DecodedArchive { version, seek_table, compression_algorithm }, chunk_data)))
     }
 }
 
 /// In-memory representation of a compressed chunk.
 pub struct CompressedChunk {
-    /// Compressed data for this chunk.
+    /// Compressed data for this chunk (or uncompressed data if stored raw).
     pub compressed_data: Vec<u8>,
     /// Size of this chunk when decompressed.
     pub decompressed_size: usize,
@@ -491,8 +499,7 @@ pub struct CompressedChunk {
 
 /// In-memory representation of a compressed chunked archive.
 pub struct ChunkedArchive {
-    /// Chunks this archive contains, in order. Right now we only allow creating archives with
-    /// contiguous compressed and decompressed space.
+    /// Chunks this archive contains, in order.
     chunks: Vec<CompressedChunk>,
     /// Size used to chunk input when creating this archive. Last chunk may be smaller than this
     /// amount.
@@ -509,10 +516,16 @@ impl ChunkedArchive {
         let chunk_size = options.chunk_size_for(data.len());
         let mut chunks: Vec<Result<CompressedChunk, ChunkedArchiveError>> = vec![];
         let compressor = options.thread_local_compressor();
+        let is_lz4 = options.compression_algorithm() == CompressionAlgorithm::Lz4;
         data.par_chunks(chunk_size)
             .enumerate()
             .map(|(index, chunk)| {
-                let compressed_data = compressor.compress(chunk, index)?;
+                let mut compressed_data = compressor.compress(chunk, index)?;
+                if is_lz4 && compressed_data.len() >= chunk.len() {
+                    // Store LZ4 chunks that don't compress raw.
+                    compressed_data.clear();
+                    compressed_data.extend_from_slice(chunk);
+                }
                 Ok(CompressedChunk { compressed_data, decompressed_size: chunk.len() })
             })
             .collect_into_vec(&mut chunks);
@@ -520,7 +533,7 @@ impl ChunkedArchive {
         Ok(ChunkedArchive { chunks, chunk_size, options })
     }
 
-    /// Accessor for compressed chunk data.
+    /// Accessor for compressed chunk data (excluding any alignment padding).
     pub fn chunks(&self) -> &Vec<CompressedChunk> {
         &self.chunks
     }
@@ -532,9 +545,43 @@ impl ChunkedArchive {
         self.chunk_size
     }
 
-    /// Sum of sizes of all compressed chunks.
+    /// Iterates over the chunks in storage order, along with the zero padding that must be written
+    /// before each chunk. LZ4 chunks that are stored uncompressed are aligned to
+    /// [`RAW_CHUNK_ALIGNMENT`]; all other chunks have no padding.
+    pub fn chunks_with_padding(
+        &self,
+    ) -> impl Iterator<Item = (/*padding*/ &'static [u8], &CompressedChunk)> + '_ {
+        static ZEROES: [u8; RAW_CHUNK_ALIGNMENT] = [0; RAW_CHUNK_ALIGNMENT];
+        let is_lz4 = self.options.compression_algorithm() == CompressionAlgorithm::Lz4;
+        let mut offset: usize = 0;
+        self.chunks.iter().map(move |chunk| {
+            let padding = if is_lz4 && chunk.compressed_data.len() == chunk.decompressed_size {
+                offset.next_multiple_of(RAW_CHUNK_ALIGNMENT) - offset
+            } else {
+                0
+            };
+            offset += padding + chunk.compressed_data.len();
+            (&ZEROES[..padding], chunk)
+        })
+    }
+
+    /// Returns the offset of the end of each preceding chunk (0 for the first chunk, before any
+    /// alignment padding).
+    pub fn compressed_offsets(&self) -> Vec<u64> {
+        let mut offsets = Vec::with_capacity(self.chunks.len());
+        let mut offset: u64 = 0;
+        for (padding, chunk) in self.chunks_with_padding() {
+            offsets.push(offset);
+            offset += (padding.len() + chunk.compressed_data.len()) as u64;
+        }
+        offsets
+    }
+
+    /// Total size of the compressed chunk data section, including any alignment padding.
     pub fn compressed_data_size(&self) -> usize {
-        self.chunks.iter().map(|chunk| chunk.compressed_data.len()).sum()
+        self.chunks_with_padding()
+            .map(|(padding, chunk)| padding.len() + chunk.compressed_data.len())
+            .sum()
     }
 
     /// Total size of the archive in bytes.
@@ -548,7 +595,8 @@ impl ChunkedArchive {
         let header = ChunkedArchiveHeader::new(&seek_table, self.options).unwrap();
         writer.write_all(header.as_bytes())?;
         writer.write_all(seek_table.as_slice().as_bytes())?;
-        for chunk in self.chunks {
+        for (padding, chunk) in self.chunks_with_padding() {
+            writer.write_all(padding)?;
             writer.write_all(&chunk.compressed_data)?;
         }
         Ok(())
@@ -561,7 +609,8 @@ impl ChunkedArchive {
         seek_table.reserve(self.chunks.len());
         let mut compressed_size: usize = 0;
         let mut decompressed_offset: usize = 0;
-        for chunk in &self.chunks {
+        for (padding, chunk) in self.chunks_with_padding() {
+            compressed_size += padding.len();
             seek_table.push(SeekTableEntry {
                 decompressed_offset: (decompressed_offset as u64).into(),
                 decompressed_size: (chunk.decompressed_size as u64).into(),
@@ -590,6 +639,7 @@ impl ChunkedArchive {
 /// assert_eq!(data.as_slice(), decompressed.as_slice());
 /// ```
 pub struct ChunkedDecompressor {
+    version: u16,
     seek_table: Vec<ChunkInfo>,
     buffer: Vec<u8>,
     data_written: usize,
@@ -605,12 +655,13 @@ type ErrorHandler = Box<dyn Fn(usize, ChunkInfo, &[u8]) -> () + Send + 'static>;
 impl ChunkedDecompressor {
     /// Create a new decompressor to decode an archive from a validated seek table.
     pub fn new(decoded_archive: DecodedArchive) -> Result<Self, ChunkedArchiveError> {
-        let DecodedArchive { compression_algorithm, seek_table } = decoded_archive;
+        let DecodedArchive { version, compression_algorithm, seek_table } = decoded_archive;
         let total_compressed_size =
             seek_table.last().map_or(0, |last_chunk| last_chunk.compressed_range.end);
         let decompressed_buffer =
             vec![0u8; seek_table.first().map_or(0, |c| c.decompressed_range.len())];
         Ok(Self {
+            version,
             seek_table,
             buffer: vec![],
             data_written: 0,
@@ -631,16 +682,32 @@ impl ChunkedDecompressor {
         Ok(Self { error_handler: Some(error_handler), ..Self::new(decoded_archive)? })
     }
 
+    /// Returns the chunked archive format version used by this decompressor.
+    pub fn version(&self) -> u16 {
+        self.version
+    }
+
     /// Returns the compression algorithm used by this decompressor.
     pub fn algorithm(&self) -> CompressionAlgorithm {
-        match &self.decompressor {
-            Decompressor::Zstd => CompressionAlgorithm::Zstd,
-            Decompressor::Lz4 => CompressionAlgorithm::Lz4,
-        }
+        self.decompressor.algorithm()
     }
 
     pub fn seek_table(&self) -> &Vec<ChunkInfo> {
         &self.seek_table
+    }
+
+    /// Returns the number of compressed bytes (including any padding) needed to finish
+    /// decompressing the current chunk, or `None` if all chunks have been decompressed.
+    pub fn bytes_needed_for_next_chunk(&self) -> Option<usize> {
+        self.seek_table
+            .get(self.curr_chunk)
+            .map(|chunk| chunk.compressed_range.end - self.data_written)
+    }
+
+    /// Returns true if all chunks in the archive have been decompressed and no buffered data
+    /// remains.
+    pub fn is_complete(&self) -> bool {
+        self.curr_chunk == self.seek_table.len() && self.buffer.is_empty()
     }
 
     fn finish_chunk(
@@ -650,6 +717,17 @@ impl ChunkedDecompressor {
     ) -> Result<(), ChunkedArchiveError> {
         debug_assert_eq!(data.len(), self.seek_table[self.curr_chunk].compressed_range.len());
         let chunk = &self.seek_table[self.curr_chunk];
+        if self.decompressor.algorithm() == CompressionAlgorithm::Lz4
+            && data.len() == chunk.decompressed_range.len()
+        {
+            if data.len() > self.decompressed_buffer.len() {
+                return Err(ChunkedArchiveError::IntegrityError);
+            }
+            // LZ4 chunks that don't compress are stored raw.
+            chunk_callback(data);
+            self.curr_chunk += 1;
+            return Ok(());
+        }
         let decompressed_size = self
             .decompressor
             .decompress_into(data, self.decompressed_buffer.as_mut_slice(), self.curr_chunk)
@@ -676,7 +754,6 @@ impl ChunkedDecompressor {
         if self.data_written + data.len() > self.total_compressed_size {
             return Err(ChunkedArchiveError::OutOfRange);
         }
-        self.data_written += data.len();
 
         // If we had leftover data from a previous read, append until we've filled a chunk.
         if !self.buffer.is_empty() {
@@ -689,6 +766,8 @@ impl ChunkedDecompressor {
                     .unwrap(),
             );
             self.buffer.extend_from_slice(&data[..to_read]);
+            data = &data[to_read..];
+            self.data_written += to_read;
             if self.buffer.len() == self.seek_table[self.curr_chunk].compressed_range.len() {
                 // Take self.buffer temporarily (so we don't have to split borrows).
                 // That way we don't have to re-commit the pages we've already used in the buffer
@@ -699,24 +778,35 @@ impl ChunkedDecompressor {
                 // Draining the buffer will set the length to 0 but keep the capacity the same.
                 self.buffer.clear();
             }
-            data = &data[to_read..];
         }
 
-        // Decode as many full chunks as we can.
-        while !data.is_empty()
-            && self.curr_chunk < self.seek_table.len()
-            && self.seek_table[self.curr_chunk].compressed_range.len() <= data.len()
-        {
-            let len = self.seek_table[self.curr_chunk].compressed_range.len();
+        // Decode as many full chunks as we can, skipping any alignment padding before each chunk.
+        while !data.is_empty() && self.curr_chunk < self.seek_table.len() {
+            let chunk_range = &self.seek_table[self.curr_chunk].compressed_range;
+            let to_skip =
+                std::cmp::min(data.len(), chunk_range.start.saturating_sub(self.data_written));
+            data = &data[to_skip..];
+            self.data_written += to_skip;
+            let len = chunk_range.len();
+            if data.len() < len {
+                break;
+            }
             self.finish_chunk(&data[..len], chunk_callback)?;
             data = &data[len..];
+            self.data_written += len;
         }
 
         // Buffer the rest for the next call.
         if !data.is_empty() {
-            debug_assert!(self.curr_chunk < self.seek_table.len());
-            debug_assert!(self.data_written < self.total_compressed_size);
+            if self.curr_chunk >= self.seek_table.len() {
+                return Err(ChunkedArchiveError::OutOfRange);
+            }
+            debug_assert_eq!(
+                self.data_written,
+                self.seek_table[self.curr_chunk].compressed_range.start
+            );
             self.buffer.extend_from_slice(data);
+            self.data_written += data.len();
         }
 
         debug_assert!(
@@ -1150,6 +1240,57 @@ mod tests {
         let mut chunk_callback = |chunk: &[u8]| decompressed.extend_from_slice(chunk);
         decompressor.update(chunk_data, &mut chunk_callback).unwrap();
 
+        assert_eq!(decompressed, data);
+    }
+
+    #[test]
+    fn test_v3_lz4_mixed_compressible_and_uncompressible_block_aligned() {
+        let chunk_size = ChunkedArchiveOptions::V3_CHUNK_SIZE;
+        // Chunks 0 and 2 are compressible; chunks 1 and 3 (partial) are stored raw and aligned.
+        let mut data = vec![0xAAu8; chunk_size * 3 + 5000];
+        rand::fill(&mut data[chunk_size..chunk_size * 2]);
+        rand::fill(&mut data[chunk_size * 3..]);
+
+        let options =
+            ChunkedArchiveOptions::V3 { compression_algorithm: CompressionAlgorithm::Lz4 };
+        let archive = ChunkedArchive::new(&data, options).expect("compress");
+        assert!(archive.chunks()[0].compressed_data.len() < chunk_size);
+        assert_eq!(archive.chunks()[1].compressed_data.len(), chunk_size);
+        assert!(archive.chunks()[2].compressed_data.len() < chunk_size);
+        assert_eq!(archive.chunks()[3].compressed_data.len(), 5000);
+
+        let expected_serialized_size = archive.serialized_size();
+        let mut compressed = vec![];
+        archive.write(&mut compressed).expect("write");
+        assert_eq!(compressed.len(), expected_serialized_size);
+
+        let (decoded_archive, chunk_data) =
+            decode_archive(&compressed, compressed.len()).unwrap().unwrap();
+        let seek_table = decoded_archive.seek_table();
+        assert_eq!(seek_table.len(), 4);
+        assert_eq!(seek_table[0].compressed_range.start, 0);
+        // Uncompressed chunks 1 and 3 must be aligned to RAW_CHUNK_ALIGNMENT (4096)
+        // relative to the start of `chunk_data`.
+        assert_eq!(
+            seek_table[1].compressed_range.start,
+            seek_table[0].compressed_range.end.next_multiple_of(RAW_CHUNK_ALIGNMENT)
+        );
+        assert_eq!(seek_table[1].compressed_range.len(), chunk_size);
+        // Compressed chunk 2 immediately follows chunk 1 (which is already 4096-aligned).
+        assert_eq!(seek_table[2].compressed_range.start, seek_table[1].compressed_range.end);
+        assert_eq!(
+            seek_table[3].compressed_range.start,
+            seek_table[2].compressed_range.end.next_multiple_of(RAW_CHUNK_ALIGNMENT)
+        );
+        assert_eq!(seek_table[3].compressed_range.len(), 5000);
+
+        // Stream in small 7-byte slices to exercise padding skipping across chunk boundaries.
+        let mut decompressor = ChunkedDecompressor::new(decoded_archive).unwrap();
+        let mut decompressed = Vec::new();
+        for slice in chunk_data.chunks(7) {
+            decompressor.update(slice, &mut |chunk| decompressed.extend_from_slice(chunk)).unwrap();
+        }
+        assert!(decompressor.is_complete());
         assert_eq!(decompressed, data);
     }
 }

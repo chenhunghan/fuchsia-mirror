@@ -11,6 +11,7 @@ fidl_library(
     srcs = [
         "root.fidl",
     ],
+    contains_drivers = True,
     visibility = ["//visibility:public"],
     deps = [
         "//sdk/fidl/fuchsia.hardware.pci",

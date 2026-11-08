@@ -33,21 +33,21 @@ class PressureTestFixture : public testing::TestWithParam<const char*> {
 TEST_P(PressureTestFixture, PressureFileRespondToPollIn) {
   struct pollfd fds{
       .fd = fd.get(),
-      .events = POLL_IN,
+      .events = POLLIN,
       .revents = 0,
   };
   ASSERT_EQ(SAFE_SYSCALL(poll(&fds, 1, 100)), 1);
-  ASSERT_EQ(fds.revents & POLL_IN, POLL_IN);
+  ASSERT_EQ(fds.revents & POLLIN, POLLIN);
 }
 
 TEST_P(PressureTestFixture, PressureFileRespondToPollOut) {
   struct pollfd fds{
       .fd = fd.get(),
-      .events = POLL_OUT,
+      .events = POLLOUT,
       .revents = 0,
   };
   ASSERT_EQ(SAFE_SYSCALL(poll(&fds, 1, 100)), 1);
-  ASSERT_EQ(fds.revents & POLL_OUT, POLL_OUT);
+  ASSERT_EQ(fds.revents & POLLOUT, POLLOUT);
 }
 
 INSTANTIATE_TEST_SUITE_P(PressureTest, PressureTestFixture,

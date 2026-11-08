@@ -50,7 +50,6 @@
 #include <ktl/span.h>
 #include <ktl/variant.h>
 #include <lk/init.h>
-#include <object/resource_dispatcher.h>
 #include <platform/crashlog.h>
 #include <platform/debug.h>
 #include <vm/handoff-end.h>
@@ -70,12 +69,11 @@
 #include <lib/zx/result.h>
 #include <zircon/errors.h>
 #include <zircon/rights.h>
-#include <zircon/syscalls/smc.h>
 #include <zircon/types.h>
 
-#include <platform/mapped_crashlog.h>
-
 #define LOCAL_TRACE 0
+
+extern "C" void rust_mapped_crashlog_bind(void* base, size_t size);
 
 static ktl::atomic<int> panic_started;
 static ktl::atomic<int> halted;
@@ -87,9 +85,6 @@ static bool cpu_suspend_supported = false;
 static bool system_suspend_supported = false;
 
 namespace {
-
-lazy_init::LazyInit<MappedCrashlog, lazy_init::CheckType::None, lazy_init::Destructor::Disabled>
-    mapped_crashlog;
 
 // Used for |platform_suspend_cpu| coordination.
 ControlRegion gControlRegion;
@@ -457,7 +452,7 @@ static void allocate_persistent_ram(ktl::span<ktl::byte> range) {
     // If we have not already configured a non-trivial crashlog implementation
     // for the platform, make sure that crashlog gets its minimum allocation, or
     // all of the RAM if it cannot meet even its minimum allocation.
-    size_t crashlog_chunks = !PlatformCrashlog::HasNonTrivialImpl()
+    size_t crashlog_chunks = !rust_platform_crashlog_has_non_trivial_impl()
                                  ? ktl::min(persistent_chunks_available,
                                             kMinCrashlogSize / kPersistentRamAllocationGranularity)
                                  : 0;
@@ -486,8 +481,7 @@ static void allocate_persistent_ram(ktl::span<ktl::byte> range) {
   // Configure up the crashlog RAM
   if (crashlog_size > 0) {
     dprintf(INFO, "Crashlog configured with %" PRIu64 " bytes\n", crashlog_size);
-    mapped_crashlog.Initialize(ktl::span{range.data(), crashlog_size});
-    PlatformCrashlog::Bind(mapped_crashlog.Get());
+    rust_mapped_crashlog_bind(range.data(), crashlog_size);
   }
 
   ktl::byte* leftover_base = range.data() + crashlog_size;
@@ -514,7 +508,7 @@ void platform_early_init(void) {
   }
 
   // Initialize the PmmChecker now that the cmdline has been parsed.
-  pmm_checker_init_from_cmdline();
+  rust_pmm_checker_init_from_cmdline();
 
   ASSERT(pmm_init(gPhysHandoff->memory.get()) == ZX_OK);
 
@@ -604,33 +598,6 @@ void platform_specific_halt(platform_halt_action suggested_action, zircon_crash_
   }
 }
 
-// Initialize Resource system after the heap is initialized.
-static void arm_resource_dispatcher_init_hook(unsigned int rl) {
-  // 64 bit address space for MMIO on ARM64
-  zx_status_t status = ResourceDispatcher::InitializeAllocator(ZX_RSRC_KIND_MMIO, 0, UINT64_MAX);
-  if (status != ZX_OK) {
-    printf("Resources: Failed to initialize MMIO allocator: %d\n", status);
-  }
-  // Set up IRQs based on values from the GIC
-  status = ResourceDispatcher::InitializeAllocator(ZX_RSRC_KIND_IRQ, interrupt_get_base_vector(),
-                                                   interrupt_get_max_vector());
-  if (status != ZX_OK) {
-    printf("Resources: Failed to initialize IRQ allocator: %d\n", status);
-  }
-  // Set up SMC valid service call range
-  status = ResourceDispatcher::InitializeAllocator(ZX_RSRC_KIND_SMC, 0,
-                                                   ARM_SMC_SERVICE_CALL_NUM_MAX + 1);
-  if (status != ZX_OK) {
-    printf("Resources: Failed to initialize SMC allocator: %d\n", status);
-  }
-  // Set up range of valid system resources.
-  status = ResourceDispatcher::InitializeAllocator(ZX_RSRC_KIND_SYSTEM, 0, ZX_RSRC_SYSTEM_COUNT);
-  if (status != ZX_OK) {
-    printf("Resources: Failed to initialize system allocator: %d\n", status);
-  }
-}
-LK_INIT_HOOK(arm_resource_init, arm_resource_dispatcher_init_hook, LK_INIT_LEVEL_INTC)
-
 void topology_init() {
   // Check MPIDR_EL1.MT to determine how to interpret AFF0 (i.e. cpu_id). For
   // now, assume that MT is set consistently across all PEs in the system. When
@@ -640,6 +607,11 @@ void topology_init() {
   // all PEs are initialized.
   const bool cpu_id_is_thread_id = __arm_rsr64("mpidr_el1") & (1 << 24);
   printf("topology_init: MPIDR_EL1.MT=%d\n", cpu_id_is_thread_id);
+
+  // TODO(eieio): Determine automatically or provide a way to specify in the
+  // ZBI. The current value matches the depth of the first significant cache
+  // above.
+  constexpr CpuDistanceMap::Distance kDistanceThreshold = 2u;
 
   // This platform initializes the topology earlier than this standard hook.
   // Setup the CPU distance map with the already initialized topology.
@@ -670,24 +642,43 @@ void topology_init() {
         from_node->entity.processor.architecture_info.arm64;
     const zbi_topology_arm64_info_t& to_info = to_node->entity.processor.architecture_info.arm64;
 
-    // Return the maximum cache depth not shared when multithreaded.
-    if (cpu_id_is_thread_id) {
-      return ktl::max({1 * int{from_info.cluster_1_id != to_info.cluster_1_id},
-                       2 * int{from_info.cluster_2_id != to_info.cluster_2_id},
-                       3 * int{from_info.cluster_3_id != to_info.cluster_3_id}});
-    }
+    // Distance according to the MPIDR affinity levels: the maximum cache depth
+    // not shared when multithreaded or single threaded, respectively.
+    const int affinity_distance =
+        cpu_id_is_thread_id ? ktl::max({1 * int{from_info.cluster_1_id != to_info.cluster_1_id},
+                                        2 * int{from_info.cluster_2_id != to_info.cluster_2_id},
+                                        3 * int{from_info.cluster_3_id != to_info.cluster_3_id}})
+                            : ktl::max({1 * int{from_info.cpu_id != to_info.cpu_id},
+                                        2 * int{from_info.cluster_1_id != to_info.cluster_1_id},
+                                        3 * int{from_info.cluster_2_id != to_info.cluster_2_id},
+                                        4 * int{from_info.cluster_3_id != to_info.cluster_3_id}});
 
-    // Return the maximum cache depth not shared when single threaded.
-    return ktl::max({1 * int{from_info.cpu_id != to_info.cpu_id},
-                     2 * int{from_info.cluster_1_id != to_info.cluster_1_id},
-                     3 * int{from_info.cluster_2_id != to_info.cluster_2_id},
-                     4 * int{from_info.cluster_3_id != to_info.cluster_3_id}});
+    // The affinity levels do not necessarily reflect the clusters the firmware
+    // describes. On DynamIQ parts every core of a DSU reports the same AFF2
+    // with MT set and a distinct AFF1, which puts an entire heterogeneous SoC
+    // at affinity distance 1 and therefore into a single logical cluster, even
+    // though the devicetree cpu-map (and the ZBI topology built from it)
+    // groups the cores by cluster. Processors whose nearest cluster nodes in
+    // the topology differ are at least the first significant distance apart,
+    // so that the described clusters are never merged by auto-clustering.
+    const auto cluster_of = [](const Node* node) -> const Node* {
+      for (const Node* ancestor = node->parent; ancestor != nullptr; ancestor = ancestor->parent) {
+        if (ancestor->entity.discriminant == ZBI_TOPOLOGY_ENTITY_CLUSTER) {
+          return ancestor;
+        }
+      }
+      return nullptr;
+    };
+    const Node* from_cluster = cluster_of(from_node);
+    const Node* to_cluster = cluster_of(to_node);
+    const int cluster_distance =
+        (from_cluster != nullptr && to_cluster != nullptr && from_cluster != to_cluster)
+            ? static_cast<int>(kDistanceThreshold)
+            : 0;
+
+    return ktl::max(affinity_distance, cluster_distance);
   });
 
-  // TODO(eieio): Determine automatically or provide a way to specify in the
-  // ZBI. The current value matches the depth of the first significant cache
-  // above.
-  const CpuDistanceMap::Distance kDistanceThreshold = 2u;
   CpuDistanceMap::Get().set_distance_threshold(kDistanceThreshold);
 
   CpuDistanceMap::Get().Dump();

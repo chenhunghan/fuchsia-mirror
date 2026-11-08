@@ -4,9 +4,9 @@
 
 use async_trait::async_trait;
 use fuchsia_async::{self as fasync, TimeoutExt};
-
 use futures::Future;
 use futures::future::FutureExt;
+use hickory_net::runtime::{Spawn as HickorySpawn, Time as HickoryTime};
 use std::io;
 use std::time::Duration;
 use trust_dns_proto::{Executor, Time};
@@ -45,11 +45,42 @@ impl Executor for FuchsiaExec {
     }
 }
 
-/// A Fuchsia Time with time-related capabilities which implements the `trust_dns_proto::Time` trait.
+impl HickorySpawn for FuchsiaExec {
+    fn spawn_bg(&mut self, future: impl Future<Output = ()> + Send + 'static) {
+        fasync::Task::spawn(future).detach();
+    }
+}
+
+/// A Fuchsia Time with time-related capabilities which implements the `hickory_net::runtime::Time`
+/// trait.
 pub struct FuchsiaTime;
 
 #[async_trait]
 impl Time for FuchsiaTime {
+    async fn timeout<F: 'static + Future + Send>(
+        duration: Duration,
+        future: F,
+    ) -> Result<F::Output, io::Error> {
+        let nanos = i64::try_from(duration.as_nanos()).expect("failed to cast the input into i64 ");
+        let zx_duration = zx::MonotonicDuration::from_nanos(nanos);
+
+        future
+            .map(|output| Ok(output))
+            .on_timeout(fasync::MonotonicInstant::after(zx_duration), || {
+                Err(io::Error::new(io::ErrorKind::TimedOut, "future timed out"))
+            })
+            .await
+    }
+
+    async fn delay_for(duration: Duration) -> () {
+        let nanos = i64::try_from(duration.as_nanos()).expect("failed to cast the input into i64");
+        let zx_duration = zx::MonotonicDuration::from_nanos(nanos);
+        fasync::Timer::new(fasync::MonotonicInstant::after(zx_duration)).await
+    }
+}
+
+#[async_trait]
+impl HickoryTime for FuchsiaTime {
     async fn timeout<F: 'static + Future + Send>(
         duration: Duration,
         future: F,

@@ -55,6 +55,10 @@
                     "description": "An IPv4 or IPv6 network address with an associated SSH port.",
                     "type": "object",
                     "properties": {
+                        "type": {
+                            "type": "string",
+                            "const": "Ip"
+                        },
                         "ip": {
                             "type": "string"
                         },
@@ -63,10 +67,6 @@
                             "format": "uint16",
                             "minimum": 0,
                             "maximum": 65535
-                        },
-                        "type": {
-                            "type": "string",
-                            "const": "Ip"
                         }
                     },
                     "required": [
@@ -79,14 +79,14 @@
                     "description": "A virtual socket (VSock) context ID.",
                     "type": "object",
                     "properties": {
+                        "type": {
+                            "type": "string",
+                            "const": "VSock"
+                        },
                         "cid": {
                             "type": "integer",
                             "format": "uint32",
                             "minimum": 0
-                        },
-                        "type": {
-                            "type": "string",
-                            "const": "VSock"
                         }
                     },
                     "required": [
@@ -98,14 +98,14 @@
                     "description": "A USB device context ID.",
                     "type": "object",
                     "properties": {
+                        "type": {
+                            "type": "string",
+                            "const": "Usb"
+                        },
                         "cid": {
                             "type": "integer",
                             "format": "uint32",
                             "minimum": 0
-                        },
-                        "type": {
-                            "type": "string",
-                            "const": "Usb"
                         }
                     },
                     "required": [
@@ -117,12 +117,12 @@
                     "description": "A physical or virtual UART serial device endpoint.",
                     "type": "object",
                     "properties": {
-                        "endpoint": {
-                            "type": "string"
-                        },
                         "type": {
                             "type": "string",
                             "const": "Uart"
+                        },
+                        "endpoint": {
+                            "type": "string"
                         }
                     },
                     "required": [

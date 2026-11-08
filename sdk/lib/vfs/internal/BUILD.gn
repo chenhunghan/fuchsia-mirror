@@ -58,8 +58,6 @@ sdk_shared_library("vfs_internal") {
   # visibility list.
   visibility = [
     ":*",
-    "//build/sdk:partner_idk_versioned_shared_libraries",
-    "//sdk:core_cc_prebuilt_libraries",
     "//sdk/lib/vfs/cpp:*",
 
     # Drivers load this shared library through the driver manager for ABI

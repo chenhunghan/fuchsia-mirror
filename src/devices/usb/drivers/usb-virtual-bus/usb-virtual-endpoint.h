@@ -42,13 +42,20 @@ class UsbEpServer : public fidl::Server<fuchsia_hardware_usb_endpoint::Endpoint>
   void RequestComplete(zx_status_t status, size_t actual, RequestVariant& request);
   zx::result<void*> GetBuffer(RequestVariant& req) __TA_REQUIRES(lock_);
 
-  zx::result<std::optional<usb::MappedVmo>> GetMapped(
-      const fuchsia_hardware_usb_request::Buffer& buffer) __TA_REQUIRES(lock_) {
-    if (buffer.Which() == fuchsia_hardware_usb_request::Buffer::Tag::kData) {
-      return zx::ok(std::nullopt);
+  struct RegisteredVmo {
+    RegisteredVmo(zx_vaddr_t addr, size_t size) : addr(addr), size(size) {}
+    ~RegisteredVmo() {
+      if (addr != 0 && size != 0) {
+        zx_status_t status = zx::vmar::root_self()->unmap(addr, size);
+        ZX_DEBUG_ASSERT(status == ZX_OK);
+      }
     }
-    return zx::ok(registered_vmos_.at(buffer.vmo_id().value()));
-  }
+    RegisteredVmo(const RegisteredVmo&) = delete;
+    RegisteredVmo& operator=(const RegisteredVmo&) = delete;
+
+    zx_vaddr_t addr = 0;
+    size_t size = 0;
+  };
 
   struct CurrentRequest {
     RequestVariant req;
@@ -85,8 +92,8 @@ class UsbEpServer : public fidl::Server<fuchsia_hardware_usb_endpoint::Endpoint>
   std::vector<fuchsia_hardware_usb_endpoint::Completion> completions_ __TA_GUARDED(lock_);
 
   // registered_vmos_: All pre-registered VMOs registered through RegisterVmos(). Mapping from
-  // vmo_id to usb::MappedVmo.
-  std::map<uint64_t, usb::MappedVmo> registered_vmos_ __TA_GUARDED(lock_);
+  // vmo_id to RegisteredVmo.
+  std::map<uint64_t, std::shared_ptr<RegisteredVmo>> registered_vmos_ __TA_GUARDED(lock_);
 
   fbl::Mutex lock_;
 };

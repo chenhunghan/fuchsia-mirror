@@ -142,6 +142,7 @@
                 "fuchsia.fshost.StartupProfilingSeconds",
                 "fuchsia.pkgcache.BlobDownloadResumptionAttemptsLimit",
                 "fuchsia.pkgcache.BlobFetchConcurrencyLimit",
+                "fuchsia.pkgcache.PostCommitGcEarliestBootSeconds",
                 "fuchsia.pkgcache.UseDriverBlobPaging",
             ],
             from: "void",

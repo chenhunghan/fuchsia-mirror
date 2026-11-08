@@ -87,7 +87,9 @@ _codec_impl_internal_public_deps = [
 ]
 
 _codec_impl_internal_deps = [
+  "//sdk/fidl/fuchsia.images2:fuchsia.images2_cpp_hlcpp_conversion",
   "//sdk/fidl/fuchsia.media:fuchsia.media_hlcpp",
+  "//sdk/fidl/fuchsia.sysmem:fuchsia.sysmem_cpp_hlcpp_conversion",
   "//sdk/lib/memory_barriers",
   "//sdk/lib/sys/cpp",
   "//sdk/lib/syslog/cpp",

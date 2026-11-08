@@ -6,6 +6,7 @@
 #define LIB_DRIVER_TESTING_CPP_DRIVER_TEST_H_
 
 #include <lib/async_patterns/testing/cpp/dispatcher_bound.h>
+#include <lib/driver/testing/cpp/health_test_utils.h>
 #include <lib/driver/testing/cpp/internal/internals.h>
 
 // This library provides RAII-style classes for writing driver unit tests. It contains two classes,
@@ -224,6 +225,11 @@ class DriverTestCommon {
                   "Ensure |StopDriver| is only called once after a |StartDriver| call.");
 
     if (StartedSuccessfully()) {
+#if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
+      if (power_state_ == PowerState::kSuspended) {
+        std::ignore = ResumeDriver();
+      }
+#endif
       prepare_stop_result_ = StopDriverInner();
     } else {
       // Drivers that failed to stop don't receive a PrepareStop call. Set the result as ok so
@@ -233,6 +239,33 @@ class DriverTestCommon {
 
     return *prepare_stop_result_;
   }
+
+#if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
+  // Suspends the driver's dispatchers and calls the driver's SystemSuspend hook, waiting for it
+  // to complete.
+  zx::result<> SuspendDriver() {
+    ZX_ASSERT_MSG(StartedSuccessfully(), "Cannot suspend without having started successfully.");
+    ZX_ASSERT_MSG(!prepare_stop_result_.has_value(), "Cannot suspend after |StopDriver|.");
+    ZX_ASSERT_MSG(power_state_ == PowerState::kResumed,
+                  "Cannot call |SuspendDriver| when the driver is not in the resumed state.");
+    zx::result<> result = SuspendDriverInner();
+    power_state_ = result.is_ok() ? PowerState::kSuspended : PowerState::kTransitionFailed;
+    return result;
+  }
+
+  // Calls the driver's SystemResume hook, waits for it to complete, and then resumes the driver's
+  // dispatchers.
+  zx::result<> ResumeDriver(
+      std::optional<fuchsia_power_broker::LeaseToken> power_element_lease = std::nullopt) {
+    ZX_ASSERT_MSG(StartedSuccessfully(), "Cannot resume without having started successfully.");
+    ZX_ASSERT_MSG(!prepare_stop_result_.has_value(), "Cannot resume after |StopDriver|.");
+    ZX_ASSERT_MSG(power_state_ == PowerState::kSuspended,
+                  "Cannot call |ResumeDriver| when the driver is not suspended.");
+    zx::result<> result = ResumeDriverInner(std::move(power_element_lease));
+    power_state_ = result.is_ok() ? PowerState::kResumed : PowerState::kTransitionFailed;
+    return result;
+  }
+#endif
 
   // Shuts down the driver dispatchers fully, and then calls the driver's destroy hook.
   // Can be called multiple times, but it will only do the required work the first time.
@@ -254,6 +287,9 @@ class DriverTestCommon {
       // Reset the start_result_ and prepare_stop_result_ to allow another iteration of the driver.
       start_result_.reset();
       prepare_stop_result_.reset();
+#if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
+      power_state_ = PowerState::kResumed;
+#endif
     }
   }
 
@@ -274,11 +310,58 @@ class DriverTestCommon {
   // take affect on the next start of the driver and cannot modify an already started driver.
   void SetServiceValidator(bool enable) { enable_service_connect_validation_ = enable; }
 
+  // Sends a `HealthCheck` request over the `Driver` channel to the driver under test and waits for
+  // its reply. Must be called after `StartDriver` succeeds and before `StopDriver`.
+  zx::result<fit::result<fuchsia_driver_framework::HealthCheckError,
+                         fuchsia_driver_framework::HealthCheckResponse>>
+  CheckHealth(fuchsia_driver_framework::HealthCheckRequest request =
+                  fuchsia_driver_framework::HealthCheckRequest::kPing) {
+    ZX_ASSERT_MSG(StartedSuccessfully(),
+                  "Cannot call |CheckHealth| before |StartDriver| succeeds.");
+    ZX_ASSERT_MSG(!prepare_stop_result_.has_value(),
+                  "Cannot call |CheckHealth| after |StopDriver|.");
+    return CheckHealthInner(request);
+  }
+
+  // Drains and returns all `OnHealthAlert` events emitted by the driver under test in FIFO order.
+  // Pending dispatcher work is pumped first so alerts already queued on the driver dispatcher have
+  // arrived at the test client before draining.
+  std::vector<fuchsia_driver_framework::HealthAlert> TakeHealthAlerts() {
+    ZX_ASSERT_MSG(DriverExists(),
+                  "Cannot call |TakeHealthAlerts| after |ShutdownAndDestroyDriver|.");
+    return TakeHealthAlertsInner();
+  }
+
+  // Returns the number of `OnHealthAlert` events currently queued without draining them.
+  size_t PendingHealthAlertCount() {
+    ZX_ASSERT_MSG(DriverExists(),
+                  "Cannot call |PendingHealthAlertCount| after |ShutdownAndDestroyDriver|.");
+    return PendingHealthAlertCountInner();
+  }
+
  private:
+#if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
+  enum class PowerState {
+    kResumed,
+    kSuspended,
+    kTransitionFailed,
+  };
+#endif
+
   virtual zx::result<> StartDriverInner(fuchsia_driver_framework::DriverStartArgs start_args) = 0;
   virtual zx::result<> StopDriverInner() = 0;
+#if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
+  virtual zx::result<> SuspendDriverInner() = 0;
+  virtual zx::result<> ResumeDriverInner(
+      std::optional<fuchsia_power_broker::LeaseToken> power_element_lease) = 0;
+#endif
   virtual bool DriverExists() = 0;
   virtual void ShutdownAndDestroyDriverInner() = 0;
+  virtual zx::result<fit::result<fuchsia_driver_framework::HealthCheckError,
+                                 fuchsia_driver_framework::HealthCheckResponse>>
+  CheckHealthInner(fuchsia_driver_framework::HealthCheckRequest request) = 0;
+  virtual std::vector<fuchsia_driver_framework::HealthAlert> TakeHealthAlertsInner() = 0;
+  virtual size_t PendingHealthAlertCountInner() = 0;
 
   bool StartedSuccessfully() const { return start_result_.has_value() && start_result_->is_ok(); }
 
@@ -306,6 +389,9 @@ class DriverTestCommon {
   fidl::ClientEnd<fuchsia_io::Directory> outgoing_directory_client_;
   std::optional<zx::result<>> start_result_;
   std::optional<zx::result<>> prepare_stop_result_;
+#if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
+  PowerState power_state_ = PowerState::kResumed;
+#endif
 
   bool enable_service_connect_validation_ = false;
 };
@@ -365,7 +451,13 @@ class BackgroundDriverTest final : public internal::DriverTestCommon<Configurati
     }
 
     dut_dispatcher_ = this->runtime().StartBackgroundDispatcher();
-    dut_.emplace(dut_dispatcher_->async_dispatcher(), std::in_place, symbol);
+#if FUCHSIA_API_LEVEL_AT_LEAST(32)
+    async_dispatcher_t* dut_async_dispatcher =
+        dut_dispatcher_->GetAlwaysOnDispatcher()->async_dispatcher();
+#else
+    async_dispatcher_t* dut_async_dispatcher = dut_dispatcher_->async_dispatcher();
+#endif
+    dut_.emplace(dut_async_dispatcher, std::in_place, symbol);
 
     return this->runtime().RunToCompletion(dut_->SyncCall(
         &fdf_testing::internal::DriverUnderTest<DriverType>::Start, std::move(start_args)));
@@ -376,11 +468,68 @@ class BackgroundDriverTest final : public internal::DriverTestCommon<Configurati
         dut_->SyncCall(&fdf_testing::internal::DriverUnderTest<DriverType>::PrepareStop));
   }
 
+#if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
+  zx::result<> SuspendDriverInner() override {
+    return this->runtime().RunToCompletion(
+        dut_->SyncCall(&fdf_testing::internal::DriverUnderTest<DriverType>::Suspend));
+  }
+
+  zx::result<> ResumeDriverInner(
+      std::optional<fuchsia_power_broker::LeaseToken> power_element_lease) override {
+    return this->runtime().RunToCompletion(
+        dut_->SyncCall(&fdf_testing::internal::DriverUnderTest<DriverType>::Resume,
+                       std::move(power_element_lease)));
+  }
+#endif
+
   bool DriverExists() override { return dut_.has_value(); }
 
   void ShutdownAndDestroyDriverInner() override {
     this->runtime().ShutdownBackgroundDispatcher(dut_dispatcher_->get(),
                                                  [this]() { dut_.reset(); });
+  }
+
+  zx::result<fit::result<fuchsia_driver_framework::HealthCheckError,
+                         fuchsia_driver_framework::HealthCheckResponse>>
+  CheckHealthInner(fuchsia_driver_framework::HealthCheckRequest request) override {
+    return this->runtime().RunToCompletion(
+        dut_->SyncCall(&fdf_testing::internal::DriverUnderTest<DriverType>::CheckHealth, request));
+  }
+
+  std::vector<fuchsia_driver_framework::HealthAlert> TakeHealthAlertsInner() override {
+    DrainPendingHealthAlerts();
+    return dut_->SyncCall(&fdf_testing::internal::DriverUnderTest<DriverType>::TakeHealthAlerts);
+  }
+
+  size_t PendingHealthAlertCountInner() override {
+    DrainPendingHealthAlerts();
+    return dut_->SyncCall(
+        &fdf_testing::internal::DriverUnderTest<DriverType>::PendingHealthAlertCount);
+  }
+
+  // Pumps dut_dispatcher_ until no more `OnHealthAlert` events arrive. Each SyncCall barriers
+  // behind the work already queued on dut_dispatcher_ (tasks that call ReportHealthAlert, and the
+  // channel read that delivers the resulting FIDL event). The driver transport reads one message
+  // per channel-read callback and only then re-arms the wait, so when several alerts are in flight
+  // a single barrier would observe only the first one; iterate until the count stops changing.
+  void DrainPendingHealthAlerts() {
+    // A driver that emits alerts continuously would never let the count settle; bound the pump so
+    // such a test fails loudly instead of hanging.
+    constexpr size_t kMaxDrainIterations = 1000;
+    size_t prev = dut_->SyncCall(
+        &fdf_testing::internal::DriverUnderTest<DriverType>::PendingHealthAlertCount);
+    for (size_t i = 0; i < kMaxDrainIterations; ++i) {
+      size_t curr = dut_->SyncCall(
+          &fdf_testing::internal::DriverUnderTest<DriverType>::PendingHealthAlertCount);
+      if (curr == prev) {
+        return;
+      }
+      prev = curr;
+    }
+    ZX_PANIC(
+        "Health alerts kept arriving for %zu dispatcher rounds; is the driver emitting them "
+        "continuously?",
+        kMaxDrainIterations);
   }
 
   fdf::UnownedSynchronizedDispatcher dut_dispatcher_;
@@ -483,9 +632,36 @@ class ForegroundDriverTest final : public internal::DriverTestCommon<Configurati
     return this->runtime().RunToCompletion(dut_->PrepareStop());
   }
 
+#if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
+  zx::result<> SuspendDriverInner() override {
+    return this->runtime().RunToCompletion(dut_->Suspend());
+  }
+
+  zx::result<> ResumeDriverInner(
+      std::optional<fuchsia_power_broker::LeaseToken> power_element_lease) override {
+    return this->runtime().RunToCompletion(dut_->Resume(std::move(power_element_lease)));
+  }
+#endif
+
   bool DriverExists() override { return dut_.has_value(); }
   void ShutdownAndDestroyDriverInner() override {
     this->runtime().ResetForegroundDispatcher([this]() { dut_.reset(); });
+  }
+
+  zx::result<fit::result<fuchsia_driver_framework::HealthCheckError,
+                         fuchsia_driver_framework::HealthCheckResponse>>
+  CheckHealthInner(fuchsia_driver_framework::HealthCheckRequest request) override {
+    return this->runtime().RunToCompletion(dut_->CheckHealth(request));
+  }
+
+  std::vector<fuchsia_driver_framework::HealthAlert> TakeHealthAlertsInner() override {
+    this->runtime().RunUntilIdle();
+    return dut_->TakeHealthAlerts();
+  }
+
+  size_t PendingHealthAlertCountInner() override {
+    this->runtime().RunUntilIdle();
+    return dut_->PendingHealthAlertCount();
   }
 
   std::optional<fdf::UnownedSynchronizedDispatcher> bg_task_dispatcher_;

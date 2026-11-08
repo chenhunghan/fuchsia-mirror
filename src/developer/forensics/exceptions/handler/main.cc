@@ -4,10 +4,10 @@
 
 #include "src/developer/forensics/exceptions/handler/main.h"
 
+#include <fidl/fuchsia.exception.internal/cpp/fidl.h>
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async-loop/default.h>
 #include <lib/component/incoming/cpp/protocol.h>
-#include <lib/fidl/cpp/binding.h>
 #include <lib/sys/cpp/service_directory.h>
 #include <lib/syslog/cpp/log_settings.h>
 #include <lib/syslog/cpp/macros.h>
@@ -55,8 +55,6 @@ std::unique_ptr<WakeLease> CreateWakeLease(async_dispatcher_t* dispatcher,
 int main(const std::string& process_name, const std::string& suspend_enabled_flag) {
   async::Loop loop(&kAsyncLoopConfigAttachToCurrentThread);
   using forensics::exceptions::kComponentLookupTimeout;
-  using Binding = fidl::Binding<forensics::exceptions::handler::CrashReporter,
-                                std::unique_ptr<fuchsia::exception::internal::CrashReporter>>;
 
   const std::string handler_index = ExtractHandlerIndex(process_name);
 
@@ -87,18 +85,19 @@ int main(const std::string& process_name, const std::string& suspend_enabled_fla
                                               ? CreateWakeLease(loop.dispatcher(), handler_index)
                                               : nullptr;
 
-  auto crash_reporter = std::make_unique<forensics::exceptions::handler::CrashReporter>(
-      loop.dispatcher(), sys::ServiceDirectory::CreateFromNamespace(), kComponentLookupTimeout,
-      std::move(wake_lease), std::move(driver_crash_introspect_client_end));
+  CrashReporter crash_reporter(loop.dispatcher(), sys::ServiceDirectory::CreateFromNamespace(),
+                               kComponentLookupTimeout, std::move(wake_lease),
+                               std::move(driver_crash_introspect_client_end));
 
-  Binding crash_reporter_binding(std::move(crash_reporter), std::move(channel), loop.dispatcher());
-  crash_reporter_binding.set_error_handler([&loop](const zx_status_t status) {
-    FX_PLOGS(WARNING, status) << "Lost connection to client";
-    loop.Shutdown();
-  });
+  fidl::ServerBinding<fuchsia_exception_internal::CrashReporter> crash_reporter_binding(
+      loop.dispatcher(),
+      fidl::ServerEnd<fuchsia_exception_internal::CrashReporter>(std::move(channel)),
+      &crash_reporter, [&loop](fidl::UnbindInfo info) {
+        FX_LOGS(WARNING) << "Lost connection to client: " << info;
+        loop.Shutdown();
+      });
 
   loop.Run();
-  crash_reporter_binding.Close(ZX_OK);
 
   return EXIT_SUCCESS;
 }

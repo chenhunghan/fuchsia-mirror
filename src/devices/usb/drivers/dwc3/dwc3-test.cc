@@ -922,10 +922,11 @@ TEST_F(ManagedTestFixture, ConfigureEndpoint_RxFifoSufficient) {
       << "ConfigureEndpoint failed: " << zx_status_get_string(result.value().error_value());
 }
 
-TEST_F(ManagedTestFixture, GetHardwareInfo) {
+TEST_F(UnmanagedTestFixture, GetHardwareInfo) {
   namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
-  // Dynamic cable connection triggers automatic core wake-up and soft reset.
+  // Mock GHWPARAMS0 and GTXFIFOSIZ before starting the driver so InitHardwareInfo()
+  // caches the mocked endpoint limits during Init().
   dut_.RunInEnvironmentTypeContext([&](Environment& env) {
     // Mock GHWPARAMS0 to return MDWIDTH = 2 (128-bit = 16 bytes)
     auto& ghwparams0 = env.reg_region()[GHWPARAMS0::Get().addr()];
@@ -941,13 +942,15 @@ TEST_F(ManagedTestFixture, GetHardwareInfo) {
     gtxfifosiz2.SetReadCallback(
         []() -> uint32_t { return GTXFIFOSIZ::Get(2).FromValue(0).set_TXFDEP(128).reg_value(); });
   });
-  TriggerConnectionPlugIn(fdescriptor::UsbSpeed::kSuper);
+
+  ASSERT_OK(StartDriverWithoutPlatformExtension());
 
   auto dci_service = dut_.Connect<fuchsia_hardware_usb_dci::UsbDciService::Device>();
   ASSERT_TRUE(dci_service.is_ok())
       << "Failed to connect to UsbDciService: " << dci_service.status_string();
   fidl::SyncClient<fuchsia_hardware_usb_dci::UsbDci> dci{std::move(*dci_service)};
 
+  // Hardware info is cached at Init() time and must succeed even when unpowered / disconnected.
   auto result = dci->GetHardwareInfo();
   ASSERT_TRUE(result.is_ok()) << "GetHardwareInfo failed: "
                               << result.error_value().FormatDescription();
@@ -1000,6 +1003,17 @@ TEST_F(ManagedTestFixture, GetHardwareInfo) {
   EXPECT_TRUE(found_ep1_in);
   EXPECT_TRUE(found_ep2_in);
   EXPECT_EQ(info.supports_dynamic_ep_sizing().value_or(true), false);
+
+  // Dynamic cable connection triggers automatic core wake-up and soft reset.
+  TriggerConnectionPlugIn(fdescriptor::UsbSpeed::kSuper);
+
+  // Query again when connected: cached hardware info remains valid and consistent.
+  auto result_connected = dci->GetHardwareInfo();
+  ASSERT_TRUE(result_connected.is_ok())
+      << "GetHardwareInfo connected failed: " << result_connected.error_value().FormatDescription();
+  EXPECT_EQ(result_connected.value().info().endpoints()->size(), expected_eps.size());
+
+  EXPECT_OK(dut_.StopDriver().status_value());
 }
 
 typedef struct {
@@ -1934,6 +1948,139 @@ TEST_F(UnmanagedTestFixture, FailedConnectPowersDownNotifiesPhyAndRearmsWatcher)
 
   stuck_reset_test_.store(false);
   EXPECT_OK(dut_.StopDriver().status_value());
+}
+
+TEST_F(UnmanagedTestFixture, StopEventsEndsOnlyStaleStartsWhilePoweredOn) {
+  std::atomic<uint32_t> dalepena_val{0};
+  std::vector<uint32_t> ep0_out_ended_rsrc_ids;
+  std::vector<uint32_t> ep2_ended_rsrc_ids;
+  std::vector<uint32_t> pending_event_batches;
+  uint32_t dalepena_during_ep0_end = 0;
+  uint32_t dalepena_during_ep2_end = 0;
+
+  SetUpAndPowerOnDriver();
+
+  auto cleanup_depcmd0 = DeferClearDepcmdCallbacks(0);
+  auto cleanup_depcmd2 = DeferClearDepcmdCallbacks(2);
+  auto cleanup_regs = fit::defer([this]() {
+    dut_.RunInEnvironmentTypeContext([](Environment& env) {
+      env.reg_region()[DALEPENA::Get().addr()].SetReadCallback([]() -> uint64_t { return 0; });
+      env.reg_region()[DALEPENA::Get().addr()].SetWriteCallback([](uint64_t) {});
+      env.reg_region()[GEVNTCOUNT::Get(0).addr()].SetReadCallback([]() -> uint64_t { return 0; });
+      env.reg_region()[GEVNTCOUNT::Get(0).addr()].SetWriteCallback([](uint64_t) {});
+    });
+  });
+
+  dut_.RunInEnvironmentTypeContext([&](Environment& env) {
+    env.reg_region()[DALEPENA::Get().addr()].SetReadCallback(
+        [&]() -> uint64_t { return dalepena_val.load(); });
+    env.reg_region()[DALEPENA::Get().addr()].SetWriteCallback(
+        [&](uint64_t val) { dalepena_val.store(static_cast<uint32_t>(val)); });
+
+    env.reg_region()[DEPCMD::Get(0).addr()].SetWriteCallback([&](uint64_t val) {
+      auto cmd = DEPCMD::Get(0).FromValue(static_cast<uint32_t>(val));
+      if (cmd.CMDTYP() == DEPCMD::DEPENDXFER) {
+        dalepena_during_ep0_end = dalepena_val.load();
+        ep0_out_ended_rsrc_ids.push_back(cmd.COMMANDPARAM());
+      }
+    });
+    env.reg_region()[DEPCMD::Get(0).addr()].SetReadCallback([]() -> uint64_t { return 0; });
+
+    env.reg_region()[DEPCMD::Get(2).addr()].SetWriteCallback([&](uint64_t val) {
+      auto cmd = DEPCMD::Get(2).FromValue(static_cast<uint32_t>(val));
+      if (cmd.CMDTYP() == DEPCMD::DEPENDXFER) {
+        dalepena_during_ep2_end = dalepena_val.load();
+        ep2_ended_rsrc_ids.push_back(cmd.COMMANDPARAM());
+      }
+    });
+    env.reg_region()[DEPCMD::Get(2).addr()].SetReadCallback([]() -> uint64_t { return 0; });
+
+    env.reg_region()[GEVNTCOUNT::Get(0).addr()].SetReadCallback([&]() -> uint64_t {
+      return pending_event_batches.empty() ? 0 : pending_event_batches.front();
+    });
+    env.reg_region()[GEVNTCOUNT::Get(0).addr()].SetWriteCallback([&](uint64_t val) {
+      if (pending_event_batches.empty()) {
+        return;
+      }
+      const uint32_t cleared = GEVNTCOUNT::Get(0).FromValue(static_cast<uint32_t>(val)).EVNTCOUNT();
+      if (cleared >= pending_event_batches.front()) {
+        pending_event_batches.erase(pending_event_batches.begin());
+      } else {
+        pending_event_batches.front() -= cleared;
+      }
+    });
+  });
+
+  const auto make_depstrtxfer_cmplt = [](uint8_t ep_num, uint32_t rsrc_id) -> uint32_t {
+    return ((ep_num & 0x1fu) << 1u) | (DEPEVT_CMD_CMPLT << 6u) | ((rsrc_id & 0x7fu) << 16u) |
+           ((DEPCMD::DEPSTRTXFER & 0xfu) << 24u);
+  };
+
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    // Case 1: Physical disconnect / stop teardown where StopActiveTransfers() records in-flight
+    // DEPSTRTXFER starts (kStartingSingle -> stale_starts_to_end == 1) on EP0 OUT and user
+    // endpoint 2, followed by StopEvents() while both link_connected_ and is_active() are false
+    // and power_on_ is true. Position event_fifo_ two slots before wraparound and split the unread
+    // events across two GEVNTCOUNT batches so older retired DEPSTRTXFER completions (10, 20) sit
+    // before wraparound in batch 1 and newer in-flight completions (11, 21) sit after wraparound
+    // in batch 2.
+    Dwc3TestHelper::SetControllerStarted(drv, true);
+    Dwc3TestHelper::EnableEp0(drv);
+    Dwc3TestHelper::Ep0QueueSetup(drv);
+
+    auto* uep2 = Dwc3TestHelper::GetUserEndpoint(drv, 2);
+    ASSERT_NE(uep2, nullptr);
+    ASSERT_OK(Dwc3TestHelper::InitFifo(drv, 2, false));
+    Dwc3TestHelper::EpEnable(drv, uep2->ep, true);
+    uep2->ep.transfer_state = Dwc3TestHelper::TransferState::kStartingSingle;
+
+    Dwc3TestHelper::StopActiveTransfers(drv);
+    EXPECT_NE(dalepena_val.load() & ((1u << 0) | (1u << 2)), 0u);
+
+    Dwc3TestHelper::SetControllerStarted(drv, false);
+    ASSERT_FALSE(Dwc3TestHelper::IsActive(drv));
+    ASSERT_TRUE(Dwc3TestHelper::GetPowerOn(drv));
+
+    const size_t total_slots = Dwc3TestHelper::EventFifoTotalSlots(drv);
+    ASSERT_GT(total_slots, 2u);
+    Dwc3TestHelper::AdvanceEventFifo(drv, total_slots - 2);
+    Dwc3TestHelper::PushEventToEventFifo(drv, make_depstrtxfer_cmplt(0, 10));
+    Dwc3TestHelper::PushEventToEventFifo(drv, make_depstrtxfer_cmplt(2, 20));
+    Dwc3TestHelper::PushEventToEventFifo(drv, make_depstrtxfer_cmplt(0, 11));
+    Dwc3TestHelper::PushEventToEventFifo(drv, make_depstrtxfer_cmplt(2, 21));
+    pending_event_batches = {2 * sizeof(uint32_t), 2 * sizeof(uint32_t)};
+
+    Dwc3TestHelper::StopEvents(drv);
+
+    ASSERT_EQ(ep0_out_ended_rsrc_ids.size(), 1u);
+    EXPECT_EQ(ep0_out_ended_rsrc_ids[0], 11u);
+    ASSERT_EQ(ep2_ended_rsrc_ids.size(), 1u);
+    EXPECT_EQ(ep2_ended_rsrc_ids[0], 21u);
+    EXPECT_NE(dalepena_during_ep0_end & (1u << 0), 0u);
+    EXPECT_NE(dalepena_during_ep2_end & (1u << 2), 0u);
+    EXPECT_EQ(dalepena_val.load() & ((1u << 0) | (1u << 2)), 0u);
+    EXPECT_EQ(Dwc3TestHelper::GetEpRsrcId(drv, 0), Endpoint::kInvalidResourceId);
+    EXPECT_EQ(Dwc3TestHelper::GetEpRsrcId(drv, 2), Endpoint::kInvalidResourceId);
+    EXPECT_EQ(Dwc3TestHelper::GetEpQueuedTrbs(drv, 0), 0u);
+    EXPECT_TRUE(Dwc3TestHelper::IsSharedFifoEmpty(drv));
+    EXPECT_TRUE(pending_event_batches.empty());
+
+    // Case 2: When stale_starts_to_end == 0, StopEvents() drains GEVNTCOUNT without issuing
+    // spurious DEPENDXFER commands for already-retired DEPSTRTXFER completion events.
+    ep0_out_ended_rsrc_ids.clear();
+    ep2_ended_rsrc_ids.clear();
+    Dwc3TestHelper::PushEventToEventFifo(drv, make_depstrtxfer_cmplt(0, 30));
+    Dwc3TestHelper::PushEventToEventFifo(drv, make_depstrtxfer_cmplt(2, 40));
+    pending_event_batches = {2 * sizeof(uint32_t)};
+
+    Dwc3TestHelper::StopEvents(drv);
+
+    EXPECT_TRUE(ep0_out_ended_rsrc_ids.empty());
+    EXPECT_TRUE(ep2_ended_rsrc_ids.empty());
+    EXPECT_TRUE(pending_event_batches.empty());
+  });
+
+  TearDownAndPowerOffDriver();
 }
 
 }  // namespace dwc3

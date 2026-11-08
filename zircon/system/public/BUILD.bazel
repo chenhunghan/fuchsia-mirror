@@ -4,7 +4,7 @@
 
 # The logic in BUILD.gn is too complex for bazel2gn, manually keep these
 # files synchronized.
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -26,11 +26,13 @@ cc_library(
         "zircon/processargs.h",
         "zircon/rights.h",
         "zircon/syscalls.h",
+        "zircon/syscalls/clock.h",
         "zircon/syscalls/debug.h",
         "zircon/syscalls/exception.h",
         "zircon/syscalls/iob.h",
         "zircon/syscalls/object.h",
         "zircon/syscalls/port.h",
+        "zircon/syscalls/resource.h",
         "zircon/time.h",
         "zircon/types.h",
     ],

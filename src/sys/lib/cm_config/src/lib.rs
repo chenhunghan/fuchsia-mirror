@@ -7,8 +7,8 @@ use camino::Utf8PathBuf;
 use cm_rust::{CapabilityTypeName, FidlIntoNative};
 use cm_types::{Name, ParseError, Url, symmetrical_enums};
 use fidl::unpersist;
-use fidl_fuchsia_component_decl as fdecl;
-use fidl_fuchsia_component_internal::{
+use fidl_fuchsia_component_decl_common as fdecl;
+use fidl_fuchsia_component_internal_common::{
     self as component_internal, BuiltinBootResolver, CapabilityPolicyAllowlists,
     DebugRegistrationPolicyAllowlists, LogDestination, RealmBuilderResolverAndRunner,
 };
@@ -1050,7 +1050,7 @@ impl Into<component_internal::InjectedCapabilities> for InjectedCapabilities {
 mod tests {
     use super::*;
     use assert_matches::assert_matches;
-    use fidl_fuchsia_io as fio;
+    use fidl_fuchsia_io_common as fio;
     use version_history::{ApiLevel, Version, VersionVec};
 
     const FOO_PKG_URL: &str = "fuchsia-pkg://fuchsia.com/foo#meta/foo.cm";

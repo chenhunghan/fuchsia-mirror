@@ -1,0 +1,36 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Bazel device tests for libraries under //zircon/system/ulib, exported to GN
+# by `bazel_test_suite("bazel_tests")` in BUILD.gn.
+test_suite(
+    name = "target_tests",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    tests = [
+        "//zircon/system/ulib/affine/test:tests",
+        "//zircon/system/ulib/ffl/test:ffl-test-pkg",
+        "//zircon/system/ulib/mock-function/test:mock-function-test-pkg",
+        "//zircon/system/ulib/perftest/test:tests",
+        "//zircon/system/ulib/pretty/test:tests",
+        "//zircon/system/ulib/refcount/test:tests",
+        "//zircon/system/ulib/sysmem-version/test:sysmem-version-test-pkg",
+        "//zircon/system/ulib/test-exceptions/test:tests",
+        "//zircon/system/ulib/tftp/test:tests",
+        "//zircon/system/ulib/zircon-internal/rust:tests",
+        "//zircon/system/ulib/zx/test:tests",
+    ],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        "//zircon/system/ulib/perftest/test:host_tests",
+        "//zircon/system/ulib/zxtest/test/integration:host_tests",
+    ],
+)

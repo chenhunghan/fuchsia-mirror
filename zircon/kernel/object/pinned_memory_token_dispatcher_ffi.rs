@@ -20,7 +20,6 @@ unsafe extern "C" {
     pub(crate) fn cpp_pmt_get_ref_counted(pmt: *mut super::pmt::Pmt) -> *mut ();
     pub(crate) fn cpp_pmt_release_pinned_memory(pmt: *mut super::pmt::Pmt);
     pub(crate) fn cpp_pmt_on_dispatcher_zero_handles(pmt: *mut super::pmt::Pmt);
-    pub(crate) fn cpp_pmt_size(pmt: *const super::pmt::Pmt) -> u64;
     pub(crate) fn cpp_pmt_query_address(
         pmt: *mut super::pmt::Pmt,
         query_offset: u64,
@@ -28,6 +27,13 @@ unsafe extern "C" {
         out_result: *mut MaybeUninit<QueryAddressResult>,
     ) -> zx_status_t;
 
+    /// Allocates and initializes a `PinnedMemoryTokenDispatcher`.
+    ///
+    /// # Safety
+    ///
+    /// `bti` must be a valid owning raw pointer from `RefPtr::into_raw`; ownership of that
+    /// reference is consumed whether or not allocation succeeds. `handle_out` must point to
+    /// writable, uninitialized memory for `KernelHandle<PinnedMemoryTokenDispatcher>`.
     pub(crate) fn cpp_pinned_memory_token_dispatcher_create(
         bti: *mut BusTransactionInitiatorDispatcher,
         handle_out: *mut MaybeUninit<KernelHandle<PinnedMemoryTokenDispatcher>>,

@@ -16,31 +16,19 @@ source_set("vm") {
 
   sources = [
     "anonymous_page_request.cc",
-    "anonymous_page_request_ffi.cc",
     "arch_vm_aspace_ffi.cc",
     "compression.cc",
-    "compression_ffi.cc",
     "compressor.cc",
     "evictor.cc",
-    "kstack.cc",
-    "lz4_compressor.cc",
-    "mem_command.cc",
     "page_queues.cc",
     "page_source.cc",
     "page_source_ffi.cc",
-    "physical_page_borrowing_config.cc",
     "physical_page_provider.cc",
     "physmap_ffi.cc",
     "pinned_vm_object.cc",
     "pmm.cc",
-    "pmm_arena.cc",
-    "pmm_checker.cc",
-    "pmm_ffi.cc",
     "pmm_node.cc",
-    "ppb_command.cc",
     "scanner.cc",
-    "slot_page_storage.cc",
-    "stream_size_manager.cc",
     "vm.cc",
     "vm_address_region.cc",
     "vm_address_region_ffi.cc",
@@ -56,6 +44,7 @@ source_set("vm") {
     "vm_object_paged.cc",
     "vm_object_paged_ffi.cc",
     "vm_object_physical.cc",
+    "vm_object_physical_ffi.cc",
     "vm_page_list.cc",
     "vm_page_list_ffi.cc",
     "vmm.cc",
@@ -63,7 +52,6 @@ source_set("vm") {
   deps = [
     "//src/lib/lazy_init",
     "//src/lib/zbitl",
-    "//third_party/lz4",
     "//zircon/kernel/lib/arch",
     "//zircon/kernel/lib/boot-options",
     "//zircon/kernel/lib/btree",
@@ -77,7 +65,6 @@ source_set("vm") {
     "//zircon/kernel/lib/ktrace",
     "//zircon/kernel/lib/page",
     "//zircon/kernel/lib/page_cache",
-    "//zircon/kernel/lib/thread-stack",
     "//zircon/kernel/lib/user_copy",
     "//zircon/kernel/lib/userabi",
     "//zircon/kernel/phys/handoff",
@@ -85,11 +72,6 @@ source_set("vm") {
     "//zircon/system/ulib/affine",
     "//zircon/system/ulib/ffl",
     "//zircon/system/ulib/pretty",
-  ]
-
-  defines = [
-    "LZ4_STATIC_LINKING_ONLY",
-    "LZ4_STATIC_LINKING_ONLY_DISABLE_MEMORY_ALLOCATION",
   ]
 }
 
@@ -106,29 +88,20 @@ kernel_bindgen_crate("evictor-bindings") {
   type_allowlist = [
     "Evictor",
     "Evictor_EvictionLevel",
-    "Evictor_Output",
-    "Evictor_TriggerReason",
     "Evictor_EvictionTarget",
     "Evictor_EvictedPageCounts",
-    "Evictor_EvictionResult",
     "ktl::atomic",
     "std::atomic",
   ]
   type_blocklist = [
     "AutounsignalEvent",
-    "Evictor_TestFreePagesFunction",
-    "Evictor_TestReclaimFunction",
     "Thread",
   ]
   opaque_types = [
     "ktl::atomic",
     "std::atomic",
   ]
-  rustified_enum = [
-    "Evictor_EvictionLevel",
-    "Evictor_Output",
-    "Evictor_TriggerReason",
-  ]
+  rustified_enum = [ "Evictor_EvictionLevel" ]
   function_blocklist = [ "Evictor_.*" ]
   additional_bindgen_flags = [ "--no-recursive-allowlist" ]
   deps = [ "//zircon/kernel/kernel:event-bindings" ]
@@ -199,6 +172,7 @@ kernel_bindgen_crate("vm-constants-rs") {
     "kRefCountedAdoptionValidator",
     "kVmAddressRegionState.*",
     "kVmMappingState.*",
+    "kVmMappingPageFaultMaxOptimisticPages",
     "kVmCowPagesState.*",
     "kPhysicalPageProviderState.*",
     "kVmPageList.*",
@@ -237,57 +211,6 @@ kernel_bindgen_crate("physmap-bindings") {
     "#![no_std]",
     "pub use zx_types::{zx_paddr_t, zx_vaddr_t};",
   ]
-}
-
-kernel_bindgen_crate("pmm-bindings") {
-  visibility = [ ":*" ]
-  headers = [ "include/vm/pmm_ffi.h" ]
-  non_rust_deps = [ ":vm" ]
-  output_name = "pmm_bindings.rs"
-  cpp = true
-
-  notice_year = 2026
-  function_allowlist = [
-    "cpp_pmm_alloc_page",
-    "cpp_pmm_alloc_pages",
-    "cpp_pmm_alloc_contiguous",
-    "cpp_pmm_free_page",
-    "cpp_pmm_free_list",
-    "cpp_pmm_num_arenas",
-    "cpp_pmm_get_arena_info",
-    "cpp_paddr_to_vm_page",
-  ]
-  type_allowlist = []
-  type_blocklist = [
-    "PmmOptDelayReuse",
-    "PmmNode",
-    "VmPageDoublyLinkedList",
-    "pmm_arena_info",
-    "pmm_arena_info_t",
-    "uint",
-    "vm_page_t",
-    "zx_paddr_t",
-    "zx_status_t",
-  ]
-  additional_bindgen_flags = [ "--no-recursive-allowlist" ]
-  deps = [
-    ":page-bindings",
-    ":pmm-arena-bindings",
-    ":pmm-node-bindings",
-    "//sdk/rust/zx-types",
-  ]
-  var_allowlist = [ "PMM_ALLOC_FLAG_.*" ]
-  edition = "2024"
-  raw_lines = [
-    "#![no_std]",
-    "use page_bindings::vm_page_t;",
-    "pub use pmm_arena_bindings::{pmm_arena_info, pmm_arena_info_t};",
-    "pub use zx_types::{zx_paddr_t, zx_status_t};",
-    "pub use pmm_node_bindings::PmmOptDelayReuse;",
-    "pub type PmmNode = pmm_node_bindings::PmmNode;",
-    "pub type VmPageDoublyLinkedList = core::ffi::c_void;",
-  ]
-  expect_lints = []
 }
 
 kernel_bindgen_crate("pmm-checker-bindings") {
@@ -329,81 +252,37 @@ kernel_bindgen_crate("pmm-node-bindings") {
   visibility = [ ":*" ]
   headers = [ "include/vm/pmm_node_ffi.h" ]
   non_rust_deps = [ ":vm" ]
-  output_name = "pmm_node_bindings.rs"
   cpp = true
 
   notice_year = 2026
   type_allowlist = [
     "PmmOptDelayReuse",
+
+    # Only needed for `PmmNode::kIndexZeroBits`, which Rust asserts matches its
+    # own constant.
     "PmmNode",
-    "PmmNode_.*",
-    "ktl::atomic",
-    "std::atomic",
     "FreeLoanedPagesHolder",
     "FreeLoanedPagesHolder::Waiter",
   ]
   type_blocklist = [
-    "vm_page_t",
-    "zx_paddr_t",
-    "zx_status_t",
-    "zx_instant_mono_t",
-    "zx_duration_mono_t",
-    "uint",
-    "PmmArena",
-    "PageQueues",
-    "Evictor",
-    "PmmChecker",
-    "AutounsignalEvent",
     "Event",
-    "VmCompression",
-    "VmCowPages",
     "VmPageDoublyLinkedList",
   ]
-  opaque_types = [
-    "fbl::RefPtr",
-    "ktl::atomic",
-    "std::atomic",
-    "FreeLoanedPagesHolder::Waiter",
-  ]
+  opaque_types = [ "FreeLoanedPagesHolder::Waiter" ]
   function_blocklist = [
     "PmmNode_.*",
     "FreeLoanedPagesHolder_.*",
   ]
   additional_bindgen_flags = [ "--no-recursive-allowlist" ]
-  rustified_enum = [
-    "PmmOptDelayReuse",
-    "PmmNode_ShouldWaitState",
-    "PmmNode_AllocFailure_Type",
-  ]
-  deps = [
-    ":compression-bindings",
-    ":evictor-bindings",
-    ":page-bindings",
-    ":page-queues-bindings",
-    ":pmm-arena-bindings",
-    ":pmm-checker-bindings",
-    "//sdk/rust/zx-types",
-    "//zircon/kernel/kernel:event-bindings",
-  ]
+  rustified_enum = [ "PmmOptDelayReuse" ]
+  deps = [ "//zircon/kernel/kernel:event-bindings" ]
   var_allowlist = [ "PMM_ALLOC_FLAG_.*" ]
-  edition = "2024"
   raw_lines = [
     "#![no_std]",
-    "pub use compression_bindings::VmCompression;",
-    "pub use event_bindings::{AutounsignalEvent, Event};",
-    "pub use evictor_bindings::Evictor;",
-    "pub use page_bindings::vm_page_t;",
-    "pub use page_queues_bindings::PageQueues;",
-    "pub use pmm_arena_bindings::PmmArena;",
-    "pub use pmm_checker_bindings::PmmChecker;",
-    "pub use zx_types::{zx_duration_mono_t, zx_instant_mono_t, zx_paddr_t, zx_status_t};",
-    "pub type VmCowPages = *const core::ffi::c_void;",
+    "pub use event_bindings::Event;",
     "pub type VmPageDoublyLinkedList = usize;",
   ]
-  expect_lints = [
-    "non_camel_case_types",
-    "non_upper_case_globals",
-  ]
+  expect_lints = [ "non_upper_case_globals" ]
 }
 
 kernel_bindgen_crate("pmm-arena-bindings") {
@@ -454,9 +333,7 @@ kernel_bindgen_crate("page-queues-bindings") {
   type_allowlist = [
     "Counts",
     "PageQueues",
-    "PageQueues_ActiveInactiveCounts",
     "PageQueues_Counts",
-    "PageQueuesVmoBacklink",
   ]
   type_blocklist = [
     "VmPageDoublyLinkedList",
@@ -466,7 +343,6 @@ kernel_bindgen_crate("page-queues-bindings") {
     "zx_instant_mono_t",
     "zx_paddr_t",
     "zx_status_t",
-    "PageQueues_VmoBacklink",
   ]
   var_allowlist = [ "PageQueues_k.*" ]
   opaque_types = [
@@ -478,13 +354,9 @@ kernel_bindgen_crate("page-queues-bindings") {
   ]
   function_blocklist = [ "PageQueues_.*" ]
   additional_bindgen_flags = [ "--no-recursive-allowlist" ]
-  deps = [
-    ":page-bindings",
-    "//sdk/rust/zx-types",
-  ]
+  deps = [ "//sdk/rust/zx-types" ]
   raw_lines = [
     "#![no_std]",
-    "use page_bindings::vm_page_t;",
     "pub use zx_types::{zx_duration_mono_t, zx_instant_mono_t};",
     "pub use zx_types::zx_paddr_t;",
     "pub type VmCowPages = *const core::ffi::c_void;",
@@ -555,8 +427,11 @@ kernel_bindgen_crate("arch-vm-aspace-bindings") {
   function_allowlist = [
     "cpp_arch_vm_aspace_accessed_since_last_check",
     "cpp_arch_vm_aspace_arch_table_phys",
+    "cpp_arch_vm_aspace_construct",
     "cpp_arch_vm_aspace_destroy",
+    "cpp_arch_vm_aspace_destruct",
     "cpp_arch_vm_aspace_disable_updates",
+    "cpp_arch_vm_aspace_handoff_page_tables_from_physboot",
     "cpp_arch_vm_aspace_harvest_accessed",
     "cpp_arch_vm_aspace_init",
     "cpp_arch_vm_aspace_init_restricted",
@@ -565,6 +440,7 @@ kernel_bindgen_crate("arch-vm-aspace-bindings") {
     "cpp_arch_vm_aspace_map",
     "cpp_arch_vm_aspace_map_contiguous",
     "cpp_arch_vm_aspace_mark_accessed",
+    "cpp_arch_vm_aspace_next_user_page_table_offset",
     "cpp_arch_vm_aspace_pick_spot",
     "cpp_arch_vm_aspace_protect",
     "cpp_arch_vm_aspace_query",
@@ -574,6 +450,7 @@ kernel_bindgen_crate("arch-vm-aspace-bindings") {
   var_allowlist = [
     "ARCH_ASPACE_FLAG_.*",
     "ARCH_MMU_FLAG_.*",
+    "kArchVmAspace.*",
   ]
   type_allowlist = [
     "ArchVmAspace",
@@ -581,14 +458,18 @@ kernel_bindgen_crate("arch-vm-aspace-bindings") {
     "ArchVmAspaceInterface_ExistingEntryAction",
     "ArchVmAspaceInterface_NonTerminalAction",
     "ArchVmAspaceInterface_TerminalAction",
+    "ArchVmAspaceInterface_page_alloc_fn_t",
     "arch_mmu_flags_t",
+    "uint",
   ]
   opaque_types = [ "ArchVmAspace" ]
   function_blocklist = [ "ArchVmAspace_.*" ]
   type_blocklist = [
     "ArchVmAspace_.*",
+    "VmPageDoublyLinkedList",
     "paddr_t",
     "vaddr_t",
+    "vm_page",
     "zx_paddr_t",
     "zx_status_t",
     "zx_vaddr_t",
@@ -599,11 +480,16 @@ kernel_bindgen_crate("arch-vm-aspace-bindings") {
     "--newtype-enum=ArchVmAspaceInterface_NonTerminalAction",
     "--newtype-enum=ArchVmAspaceInterface_TerminalAction",
   ]
-  deps = [ "//sdk/rust/zx-types" ]
+  deps = [
+    ":page-bindings",
+    "//sdk/rust/zx-types",
+  ]
   edition = "2024"
   raw_lines = [
     "#![no_std]",
+    "pub use page_bindings::vm_page_t as vm_page;",
     "pub use zx_types::{zx_paddr_t as paddr_t, zx_status_t, zx_vaddr_t as vaddr_t};",
+    "pub type VmPageDoublyLinkedList = core::ffi::c_void;",
   ]
   expect_lints = [
     "non_camel_case_types",
@@ -657,6 +543,7 @@ kernel_bindgen_crate("vm-aspace-bindings") {
     "cpp_vm_aspace_arch_aspace",
     "cpp_vm_aspace_attach_to_thread",
     "cpp_vm_aspace_base",
+    "cpp_vm_aspace_can_enlarge_arch_unmap",
     "cpp_vm_aspace_change_high_priority_count_locked",
     "cpp_vm_aspace_clear_last_fault_locked",
     "cpp_vm_aspace_create",
@@ -675,6 +562,7 @@ kernel_bindgen_crate("vm-aspace-bindings") {
     "cpp_vm_aspace_is_aslr_enabled",
     "cpp_vm_aspace_is_destroyed",
     "cpp_vm_aspace_enlarge_arch_unmap",
+    "cpp_vm_aspace_is_guest_physical",
     "cpp_vm_aspace_is_high_memory_priority",
     "cpp_vm_aspace_is_user",
     "cpp_vm_aspace_kernel_aspace",
@@ -755,6 +643,26 @@ kernel_bindgen_crate("vmm-bindings") {
   ]
 }
 
+kernel_bindgen_crate("vm-bindings") {
+  visibility = [ ":*" ]
+  headers = [ "include/vm/vm.h" ]
+  non_rust_deps = [ ":vm" ]
+  output_name = "vm_bindings.rs"
+  cpp = true
+
+  notice_year = 2026
+  var_allowlist = [ "zero_page_paddr" ]
+  type_blocklist = [ "paddr_t" ]
+  additional_bindgen_flags = [ "--no-recursive-allowlist" ]
+  deps = [ "//sdk/rust/zx-types" ]
+
+  edition = "2024"
+  raw_lines = [
+    "#![no_std]",
+    "use zx_types::zx_paddr_t as paddr_t;",
+  ]
+}
+
 kernel_bindgen_crate("vm-address-region-bindings") {
   visibility = [ ":*" ]
   headers = [ "include/vm/vm_address_region_ffi.h" ]
@@ -768,7 +676,6 @@ kernel_bindgen_crate("vm-address-region-bindings") {
     "VMAR_CAN_RWX_FLAGS",
   ]
   function_allowlist = [
-    "cpp_vm_address_region_commit_high_memory_priority",
     "cpp_vm_address_region_construct_child",
     "cpp_vm_address_region_construct_kernel_root",
     "cpp_vm_address_region_construct_root",
@@ -785,55 +692,58 @@ kernel_bindgen_crate("vm-address-region-bindings") {
     "cpp_vm_address_region_or_mapping_region_lock_is_held",
     "cpp_vm_address_region_or_mapping_as_vm_address_region",
     "cpp_vm_address_region_or_mapping_as_vm_mapping",
-    "cpp_vm_address_region_protect",
-    "cpp_vm_address_region_range_op",
     "cpp_vm_address_region_reserve_space",
-    "cpp_vm_address_region_set_memory_priority",
-    "cpp_vm_address_region_set_memory_priority_locked",
     "cpp_vm_address_region_state",
+    "cpp_vm_address_region_subregions_cursor_get",
+    "cpp_vm_address_region_subregions_cursor_is_valid",
+    "cpp_vm_address_region_subregions_cursor_next",
     "cpp_vm_address_region_subregions_find_region",
     "cpp_vm_address_region_subregions_for_each",
     "cpp_vm_address_region_subregions_front",
     "cpp_vm_address_region_subregions_include_or_higher",
     "cpp_vm_address_region_subregions_insert_region",
     "cpp_vm_address_region_subregions_is_empty",
+    "cpp_vm_address_region_subregions_left_of",
     "cpp_vm_address_region_subregions_remove_region",
+    "cpp_vm_address_region_subregions_replace_region",
+    "cpp_vm_address_region_subregions_right_of",
     "cpp_vm_address_region_subregions_size_slow",
-    "cpp_vm_address_region_unmap",
     "cpp_vm_mapping_construct",
     "cpp_vm_mapping_construct_with_ranges",
-    "cpp_vm_mapping_debug_protect",
-    "cpp_vm_mapping_debug_unmap",
     "cpp_vm_mapping_destruct",
-    "cpp_vm_mapping_force_writable",
-    "cpp_vm_mapping_map_range",
-    "cpp_vm_mapping_mark_mergeable",
-    "cpp_vm_mapping_page_fault_locked",
+    "cpp_vm_mapping_protection_ranges_begin",
     "cpp_vm_mapping_protection_ranges_clear",
+    "cpp_vm_mapping_protection_ranges_construct",
     "cpp_vm_mapping_protection_ranges_cursor_get",
     "cpp_vm_mapping_protection_ranges_cursor_is_valid",
     "cpp_vm_mapping_protection_ranges_cursor_next",
     "cpp_vm_mapping_protection_ranges_cursor_prev",
+    "cpp_vm_mapping_protection_ranges_destroy",
+    "cpp_vm_mapping_protection_ranges_end",
+    "cpp_vm_mapping_protection_ranges_erase",
+    "cpp_vm_mapping_protection_ranges_find",
+    "cpp_vm_mapping_protection_ranges_insert",
+    "cpp_vm_mapping_protection_ranges_insert_hint",
     "cpp_vm_mapping_protection_ranges_is_empty",
+    "cpp_vm_mapping_protection_ranges_lower_bound",
+    "cpp_vm_mapping_protection_ranges_move_assign",
+    "cpp_vm_mapping_protection_ranges_update",
     "cpp_vm_mapping_protection_ranges_upper_bound",
     "cpp_vm_mapping_rest_protection_ranges",
     "cpp_vm_mapping_rest_protection_ranges_const",
     "cpp_vm_mapping_state",
   ]
   type_allowlist = [
-    "ActivateInsertRegions",
     "CppVmAddressRegionEnumerator",
-    "DestroyRemoveFromParent",
-    "DestroyUnmap",
     "LifeCycleState",
     "MemoryPriority",
     "Mergeable",
-    "RangeOpType",
     "UnmapOptions",
     "VmAddressRegion",
     "VmAddressRegionEnumeratorType",
     "VmAddressRegionOpChildren",
     "VmAddressRegionOrMapping",
+    "VmAddressRegionSubregionsCursor",
     "VmMapping",
     "VmMappingProtectionRanges",
     "VmMappingProtectionRangesCursor",
@@ -842,12 +752,10 @@ kernel_bindgen_crate("vm-address-region-bindings") {
   ]
   type_blocklist = [
     "CppVmAddressRegionEnumerator_.*",
-    "MultiPageRequest",
     "VmAspace",
     "VmAddressRegion_AttributionCounts",
     "VmAddressRegion_MapResult",
     "VmMapping_AttributionCounts",
-    "VmMapping_CurrentlyFaulting",
     "VmObject",
     "fbl_RefPtr",
     "vaddr_t",
@@ -857,6 +765,7 @@ kernel_bindgen_crate("vm-address-region-bindings") {
     "CppVmAddressRegionEnumerator",
     "VmAddressRegion",
     "VmAddressRegionOrMapping",
+    "VmAddressRegionSubregionsCursor",
     "VmMapping",
     "VmMappingProtectionRanges",
     "VmMappingProtectionRangesCursor",
@@ -866,10 +775,6 @@ kernel_bindgen_crate("vm-address-region-bindings") {
     "VmAddressRegionOpChildren",
     "VmAddressRegionOrMapping_LifeCycleState",
     "VmAddressRegionOrMapping_MemoryPriority",
-    "VmAddressRegion_RangeOpType",
-    "VmMapping_ActivateInsertRegions",
-    "VmMapping_DestroyRemoveFromParent",
-    "VmMapping_DestroyUnmap",
     "VmMapping_Mergeable",
     "VmMapping_UnmapOptions",
   ]
@@ -893,7 +798,6 @@ kernel_bindgen_crate("vm-address-region-bindings") {
     "pub use zx_types::{zx_status_t, zx_vaddr_t as vaddr_t};",
     "pub type fbl_RefPtr = core::ffi::c_void;",
     "pub type VmAspace = core::ffi::c_void;",
-    "pub type MultiPageRequest = core::ffi::c_void;",
   ]
   expect_lints = [ "non_camel_case_types" ]
 }
@@ -927,23 +831,25 @@ kernel_bindgen_crate("attribution-bindings") {
 
 kernel_bindgen_crate("anonymous-page-request-bindings") {
   visibility = [ ":*" ]
-  headers = [ "include/vm/anonymous_page_request_ffi.h" ]
+  headers = [ "include/vm/anonymous_page_request.h" ]
   non_rust_deps = [ ":vm" ]
-  output_name = "anonymous_page_request_bindings.rs"
   cpp = true
 
-  edition = "2024"
   notice_year = 2026
-  function_allowlist = [
-    "cpp_anonymous_page_request_construct",
-    "cpp_anonymous_page_request_destroy",
-    "cpp_anonymous_page_request_cancel",
-  ]
   type_allowlist = [ "AnonymousPageRequest" ]
-  opaque_types = [ "AnonymousPageRequest" ]
+  type_blocklist = [ "vm_page_t" ]
   function_blocklist = [ "AnonymousPageRequest_.*" ]
   additional_bindgen_flags = [ "--no-recursive-allowlist" ]
-  raw_lines = [ "#![no_std]" ]
+  deps = [ ":page-bindings" ]
+
+  # anonymous_page_request.rs asserts that its AnonymousPageRequest matches the
+  # layout of this binding, so check the binding against the C++ layout.
+  layout_tests = true
+
+  raw_lines = [
+    "#![no_std]",
+    "use page_bindings::vm_page_t;",
+  ]
 }
 
 kernel_bindgen_crate("page-source-bindings") {
@@ -960,6 +866,12 @@ kernel_bindgen_crate("page-source-bindings") {
     "cpp_multi_page_request_destroy",
     "cpp_multi_page_request_cancel_requests",
     "cpp_multi_page_request_wait",
+    "cpp_multi_page_request_get_anonymous",
+    "cpp_multi_page_request_get_read_request",
+    "cpp_multi_page_request_get_lazy_dirty_request",
+    "cpp_multi_page_request_made_dirty_request",
+    "cpp_lazy_page_request_get",
+    "cpp_lazy_page_request_is_initialized",
     "cpp_page_request_get_type",
     "cpp_page_request_get_offset",
     "cpp_page_request_get_len",
@@ -970,31 +882,52 @@ kernel_bindgen_crate("page-source-bindings") {
     "cpp_page_source_is_valid_external_failure_code",
     "cpp_page_source_is_valid_internal_failure_code",
     "cpp_page_source_paged_vmo_lock_is_held",
+    "cpp_page_source_dump",
+    "cpp_page_source_properties",
+    "cpp_page_source_should_trap_dirty_transitions",
+    "cpp_page_source_get_pages",
+    "cpp_page_source_request_dirty_transition",
+    "cpp_page_source_on_pages_supplied",
+    "cpp_page_source_on_pages_dirtied",
+    "cpp_page_source_free_pages",
   ]
   type_allowlist = [
+    "LazyPageRequest",
     "MultiPageRequest",
     "PageRequest",
     "PageSource",
     "PageSourceProperties",
+    "VmoDebugInfo",
     "page_request_type",
   ]
-  type_blocklist = [ "zx_status_t" ]
+  type_blocklist = [
+    "AnonymousPageRequest",
+    "VmPageDoublyLinkedList",
+    "zx_status_t",
+  ]
   opaque_types = [
+    "LazyPageRequest",
     "MultiPageRequest",
     "PageRequest",
     "PageSource",
   ]
   rustified_enum = [ "page_request_type" ]
   function_blocklist = [
+    "LazyPageRequest_.*",
     "MultiPageRequest_.*",
     "PageRequest_.*",
     "PageSource_.*",
   ]
   additional_bindgen_flags = [ "--no-recursive-allowlist" ]
-  deps = [ "//sdk/rust/zx-types" ]
+  deps = [
+    ":anonymous-page-request-bindings",
+    "//sdk/rust/zx-types",
+  ]
   raw_lines = [
     "#![no_std]",
+    "pub use anonymous_page_request_bindings::AnonymousPageRequest;",
     "pub use zx_types::zx_status_t;",
+    "pub type VmPageDoublyLinkedList = core::ffi::c_void;",
   ]
   expect_lints = [
     "non_camel_case_types",
@@ -1063,6 +996,7 @@ kernel_bindgen_crate("vm-object-bindings") {
   notice_year = 2026
   function_allowlist = [
     "cpp_vm_object_add_mapping_locked",
+    "cpp_vm_object_get_name_locked",
     "cpp_vm_object_commit_high_priority_pages",
     "cpp_vm_object_commit_range",
     "cpp_vm_object_decommit_range",
@@ -1072,6 +1006,8 @@ kernel_bindgen_crate("vm-object-bindings") {
     "cpp_vm_object_get_ref_counted",
     "cpp_vm_object_is_contiguous",
     "cpp_vm_object_is_stream_compatible",
+    "cpp_vm_object_is_dirty_tracked",
+    "cpp_vm_object_debug_is_range_pinned",
     "cpp_vm_object_lock",
     "cpp_vm_object_is_paged",
     "cpp_vm_object_is_resizable",
@@ -1097,6 +1033,7 @@ kernel_bindgen_crate("vm-object-bindings") {
     "cpp_vm_object_num_children",
     "cpp_vm_object_lookup",
     "cpp_vm_object_lookup_contiguous",
+    "cpp_vm_object_lookup_fn_invoke",
     "cpp_vm_object_get_page",
     "cpp_vm_object_get_attributed_memory",
     "cpp_vm_object_get_attributed_memory_in_reference_owner",
@@ -1139,6 +1076,8 @@ kernel_bindgen_crate("vm-object-bindings") {
     "VmObject",
     "VmObject_CacheOpType",
     "VmObject_ChildType",
+    "VmObject_LookupFunction",
+    "VmObject_RangeChangeOp",
     "VmObjectChildObserver",
     "VmObjectReadWriteOptions",
     "arch_mmu_flags_t",
@@ -1160,15 +1099,14 @@ kernel_bindgen_crate("vm-object-bindings") {
     "VmObject_ChildObserverLock",
     "VmObject_DirtyRangeEnumerateFunction",
     "VmObject_GlobalList",
-    "VmObject_LookupFunction",
     "VmObject_MappingKey",
     "VmObject_MappingTree",
     "VmObject_OnWriteBytesTransferredCallback",
-    "VmObject_RangeChangeOp",
   ]
   opaque_types = [
     "StreamSizeManager",
     "VmObject",
+    "VmObject_LookupFunction",
     "VmObjectChildObserver",
   ]
   rustified_enum = [
@@ -1178,6 +1116,7 @@ kernel_bindgen_crate("vm-object-bindings") {
     "VmObject_CacheOpType",
     "VmObject_ChildType",
     "VmObject_EvictionHint",
+    "VmObject_RangeChangeOp",
   ]
   function_blocklist = [ "VmObject_.*" ]
   additional_bindgen_flags = [ "--no-recursive-allowlist" ]
@@ -1220,8 +1159,11 @@ kernel_bindgen_crate("vm-object-paged-bindings") {
   notice_year = 2026
   function_allowlist = [
     "cpp_vm_object_as_vm_object_paged",
+    "cpp_vm_object_paged_range_change_update_locked",
+    "cpp_vm_object_paged_can_dedup_zero_pages_locked",
     "cpp_vm_object_paged_as_vm_object",
     "cpp_vm_object_paged_cow_pages",
+    "cpp_vm_object_paged_lock_order",
     "cpp_vm_object_paged_create",
     "cpp_vm_object_paged_set_user_stream_size",
     "cpp_vm_object_paged_zero_range",
@@ -1236,6 +1178,8 @@ kernel_bindgen_crate("vm-object-paged-bindings") {
     "cpp_vm_object_paged_create_from_wired_pages",
     "cpp_vm_object_paged_debug_get_cow_pages",
     "cpp_vm_object_paged_debug_get_page",
+    "cpp_vm_object_paged_get_lookup_cursor_locked",
+    "cpp_vm_object_paged_mark_modified_locked",
     "cpp_vm_object_paged_reset_pager_vmo_stats",
   ]
   type_allowlist = [
@@ -1246,6 +1190,7 @@ kernel_bindgen_crate("vm-object-paged-bindings") {
     "PageSource",
     "VmCowPages",
     "VmObject",
+    "VmObject_RangeChangeOp",
     "vm_page_t",
     "zx_status_t",
   ]
@@ -1281,7 +1226,51 @@ kernel_bindgen_crate("vm-object-paged-bindings") {
     "use page_bindings::vm_page_t;",
     "use page_source_bindings::PageSource;",
     "use vm_cow_pages_bindings::VmCowPages;",
+    "use vm_object_bindings::{VmObject, VmObject_RangeChangeOp};",
+    "use zx_types::zx_status_t;",
+  ]
+}
+
+kernel_bindgen_crate("vm-object-physical-bindings") {
+  visibility = [ ":*" ]
+  headers = [ "include/vm/vm_object_physical_ffi.h" ]
+  non_rust_deps = [ ":vm" ]
+  output_name = "vm_object_physical_bindings.rs"
+  cpp = true
+
+  edition = "2024"
+  notice_year = 2026
+  function_allowlist = [
+    "cpp_vm_object_as_vm_object_physical",
+    "cpp_vm_object_physical_as_vm_object",
+    "cpp_vm_object_physical_child_list_lock_acquire",
+    "cpp_vm_object_physical_child_list_lock_release",
+    "cpp_vm_object_physical_create",
+    "cpp_vm_object_physical_get_mapping_cache_policy_locked",
+    "cpp_vm_object_physical_has_children_locked",
+    "cpp_vm_object_physical_num_mappings_locked",
+    "cpp_vm_object_physical_set_cache_policy_locked",
+  ]
+  type_allowlist = [ "VmObjectPhysical" ]
+  type_blocklist = [
+    "VmObject",
+    "arch_mmu_flags_t",
+    "paddr_t",
+    "zx_status_t",
+  ]
+  opaque_types = [ "VmObjectPhysical" ]
+  function_blocklist = [ "VmObjectPhysical_.*" ]
+  additional_bindgen_flags = [ "--no-recursive-allowlist" ]
+  deps = [
+    ":vm-object-bindings",
+    "//sdk/rust/zx-types",
+  ]
+
+  raw_lines = [
+    "#![no_std]",
     "use vm_object_bindings::VmObject;",
+    "use vm_object_bindings::arch_mmu_flags_t;",
+    "use zx_types::zx_paddr_t as paddr_t;",
     "use zx_types::zx_status_t;",
   ]
 }
@@ -1296,68 +1285,32 @@ kernel_bindgen_crate("compression-bindings") {
   edition = "2024"
   notice_year = 2026
 
-  function_allowlist = [
-    "cpp_vm_compressed_storage_free_instance",
-    "cpp_vm_compressed_storage_get_ref_counted",
-    "cpp_vm_slot_page_storage_create",
-    "cpp_vm_compressed_storage_store",
-    "cpp_vm_compressed_storage_free",
-    "cpp_vm_compressed_storage_compressed_data",
-    "cpp_vm_compressed_storage_get_metadata",
-    "cpp_vm_compressed_storage_set_metadata",
-    "cpp_vm_compressed_storage_dump",
-    "cpp_vm_compressed_storage_get_memory_usage",
-    "cpp_vm_compression_strategy_free_instance",
-    "cpp_vm_compression_strategy_get_ref_counted",
-    "cpp_vm_lz4_compressor_create",
-    "cpp_vm_compression_strategy_compress",
-    "cpp_vm_compression_strategy_decompress",
-    "cpp_vm_compression_strategy_dump",
-  ]
   type_allowlist = [
-    "VmCompressedStorage",
-    "VmCompressedStorage_MemoryUsage",
-    "VmCompressionStrategy",
     "VmCompression",
     "VmCompression_CompressorGuard",
   ]
   opaque_types = [
-    "VmCompressedStorage",
-    "VmCompressionStrategy",
     "VmCompression",
     "VmCompression_CompressorGuard",
   ]
-  function_blocklist = [
-    "VmCompressedStorage_.*",
-    "VmCompressionStrategy_.*",
-    "VmCompression_.*",
-  ]
+  function_blocklist = [ "VmCompression_.*" ]
 
   # These are listed individually rather than as "VmCompression_.*" because a
   # wildcard would also block VmCompression_CompressorGuard, which is
   # allowlisted above.
   type_blocklist = [
-    "VmCompressedStorage_CompressedRef",
-    "VmCompressionStrategy_CompressResult",
-    "VmCompressionStrategy_FailTag",
-    "VmCompressionStrategy_ZeroTag",
     "VmCompression_CompressedRef",
     "VmCompression_PageAndMetadata",
     "VmCompressor",
     "VmCompressor_PageAndMetadata",
-    "vm_page_t",
     "zx_status_t",
   ]
   additional_bindgen_flags = [ "--no-recursive-allowlist" ]
 
-  deps = [
-    ":compressor-bindings",
-    ":page-bindings",
-  ]
+  deps = [ ":compressor-bindings" ]
 
   raw_lines = [
     "#![no_std]",
-    "use page_bindings::vm_page_t;",
     "pub use compressor_bindings::VmCompressor;",
   ]
 }
@@ -1408,35 +1361,40 @@ kernel_bindgen_crate("vm-cow-pages-bindings") {
     "cpp_vm_cow_pages_state",
     "cpp_vm_cow_pages_free",
     "cpp_vm_cow_pages_get_ref_counted",
-    "cpp_vm_cow_pages_initialize_page_cache",
     "cpp_vm_cow_pages_replace_page",
     "cpp_vm_cow_pages_replace_page_with_loaned",
-    "cpp_vm_cow_pages_should_delay_reuse_on_free",
     "cpp_vm_cow_pages_debug_get_parent",
     "cpp_vm_cow_pages_dedup_zero_page",
     "cpp_vm_cow_pages_evict_loaned_page",
-    "cpp_vm_cow_pages_debug_get_page",
-    "cpp_vm_cow_pages_debug_is_empty",
-    "cpp_vm_cow_pages_debug_is_page",
-    "cpp_vm_cow_pages_debug_is_high_memory_priority",
     "cpp_vm_cow_pages_lock_is_held",
-    "cpp_vm_cow_pages_debug_get_discardable_tracker",
+    "cpp_vm_cow_pages_discardable_tracker",
     "cpp_vm_cow_pages_reclaim_page",
     "cpp_vm_cow_pages_debug_lookup_readable",
     "cpp_vm_cow_pages_get_lock",
-    "cpp_vm_cow_pages_deferred_ops_construct",
-    "cpp_vm_cow_pages_deferred_ops_destroy",
+    "cpp_vm_cow_pages_call_lookup_fn",
+    "cpp_vm_cow_pages_call_dirty_range_fn",
+    "cpp_vm_cow_pages_deferred_ops_init_page_source_lock",
+    "cpp_vm_cow_pages_deferred_ops_destroy_page_source_lock",
+    "cpp_vm_cow_pages_range_change_update_cow_children",
+    "cpp_vm_cow_pages_lookup_cursor_destroy",
+    "cpp_vm_cow_pages_lookup_cursor_result_value",
+    "cpp_vm_cow_pages_lookup_cursor_lock_is_held",
+    "cpp_vm_cow_pages_lookup_cursor_disable_mark_accessed",
+    "cpp_vm_cow_pages_lookup_cursor_require_owned_page",
+    "cpp_vm_cow_pages_lookup_cursor_require_page",
+    "cpp_vm_cow_pages_lookup_cursor_maybe_page",
+    "cpp_vm_cow_pages_lookup_cursor_skip_missing_pages",
+    "cpp_vm_cow_pages_lookup_cursor_if_exist_pages",
     "cpp_vm_cow_pages_add_new_pages_locked",
     "cpp_vm_cow_pages_zero_pages_locked",
     "cpp_vm_cow_pages_supply_pages_locked",
-    "cpp_vm_cow_pages_debug_get_populated_slots_count",
-    "cpp_vm_cow_pages_debug_is_parent_content",
     "cpp_vm_cow_pages_can_borrow",
     "cpp_vm_cow_pages_can_evict",
-    "cpp_vm_cow_pages_is_discardable",
     "cpp_vm_cow_pages_upgrade_from_raw",
-    "cpp_vm_cow_pages_debug_get_discardable_page_counts",
     "cpp_vm_cow_pages_debug_dump_reclaim_counters",
+    "cpp_vm_cow_pages_page_source_type",
+    "cpp_vm_cow_pages_page_source",
+    "cpp_vm_cow_pages_get_paged_backlink_locked",
     "cpp_priority_changer_construct",
     "cpp_priority_changer_destroy",
     "cpp_priority_changer_prepare_may_not_already_be_high_priority",
@@ -1445,13 +1403,18 @@ kernel_bindgen_crate("vm-cow-pages-bindings") {
     "cpp_priority_changer_lock",
   ]
   type_allowlist = [
+    "DeferredPageSourceLock",
     "DirtyState",
     "EvictionAction",
     "PageSourceType",
     "PriorityChanger",
+    "ScopedPageFreedList",
     "VmCowPages",
     "VmCowPages_CanOverwriteSlot",
     "VmCowPages_DeferredOps",
+    "VmCowPages_LifeCycle",
+    "VmCowPages_LookupCursor",
+    "VmCowPagesLookupCursorResult",
     "VmCowPagesOptions",
     "VmCowRange",
     "VmCowReclaimFailure",
@@ -1464,31 +1427,40 @@ kernel_bindgen_crate("vm-cow-pages-bindings") {
   type_blocklist = [
     "AnonymousPageRequest",
     "MultiPageRequest",
-    "PmmOptDelayReuse",
+    "PageSource",
+    "ScopedPageFreedList_.*",
     "SupplyOptions",
     "VmCompressor",
     "VmCompressor_.*",
+    "VmObjectPaged",
     "VmPageDoublyLinkedList",
     "VmPageSpliceList",
+    "paddr_t",
     "vm_page_t",
     "zx_status_t",
     "VmCowPages_AddPageTransaction",
     "VmCowPages_AttributionCounts",
     "VmCowPages_DirtyRangeEnumerateFunction",
-    "VmCowPages_DeferredOps_DeferredRangeOp",
+    "VmCowPages_DeferredOps_.*",
     "VmCowPages_LockedPtr",
     "VmCowPages_LockedRefPtr",
+    "VmCowPages_LookupCursor_RequireResult",
     "VmCowPages_LookupReadableFunction",
     "VmCowPages_PageLookup",
     "VmCowPages_ParentAndRange",
     "VmCowPages_RangeChangeOp",
+    "VmObject_RangeChangeOp",
   ]
   var_allowlist = [ "VmCowPagesOptions_.*" ]
   opaque_types = [
+    "DeferredPageSourceLock",
     "DiscardableVmoTracker",
     "PriorityChanger",
+    "ScopedPageFreedList",
     "VmCowPages",
     "VmCowPages_DeferredOps",
+    "VmCowPages_LookupCursor",
+    "VmCowPagesLookupCursorResult",
   ]
   rustified_enum = [
     "PageSourceType",
@@ -1499,7 +1471,9 @@ kernel_bindgen_crate("vm-cow-pages-bindings") {
     "VmCowReclaimSuccess_Type",
   ]
   function_blocklist = [
+    "DeferredPageSourceLock_.*",
     "PriorityChanger_.*",
+    "ScopedPageFreedList_.*",
     "VmCompressor_.*",
     "VmCowPages_.*",
     "VmCowRange_.*",
@@ -1517,7 +1491,6 @@ kernel_bindgen_crate("vm-cow-pages-bindings") {
     ":compressor-bindings",
     ":page-bindings",
     ":page-source-bindings",
-    ":pmm-bindings",
     ":vm-object-bindings",
     ":vm-page-list-bindings",
     "//sdk/rust/zx-types",
@@ -1528,11 +1501,13 @@ kernel_bindgen_crate("vm-cow-pages-bindings") {
     "use anonymous_page_request_bindings::AnonymousPageRequest;",
     "pub use compressor_bindings::VmCompressor;",
     "use page_bindings::vm_page_t;",
-    "use page_source_bindings::MultiPageRequest;",
-    "pub use pmm_bindings::{PmmOptDelayReuse, VmPageDoublyLinkedList};",
-    "pub use vm_object_bindings::SupplyOptions;",
+    "use page_source_bindings::{MultiPageRequest, PageSource};",
+    "pub use vm_object_bindings::{SupplyOptions, VmObject_RangeChangeOp};",
     "use vm_page_list_bindings::VmPageSpliceList;",
+    "use zx_types::zx_paddr_t as paddr_t;",
     "use zx_types::zx_status_t;",
+    "pub type VmPageDoublyLinkedList = core::ffi::c_void;",
+    "pub type VmObjectPaged = core::ffi::c_void;",
   ]
 }
 
@@ -1550,6 +1525,9 @@ kernel_rust_mod("vm-rs") {
     "discardable_vmo_tracker.rs",
     "evictor.rs",
     "fault.rs",
+    "kstack.rs",
+    "lz4_compressor.rs",
+    "mem_command.rs",
     "memory_stats.rs",
     "mod.rs",
     "name.rs",
@@ -1566,6 +1544,7 @@ kernel_rust_mod("vm-rs") {
     "pmm_arena.rs",
     "pmm_checker.rs",
     "pmm_node.rs",
+    "ppb_command.rs",
     "scanner.rs",
     "slot_page_storage.rs",
     "stream_size_manager.rs",
@@ -1594,16 +1573,17 @@ kernel_rust_mod("vm-rs") {
     ":page-source-bindings",
     ":physmap-bindings",
     ":pmm-arena-bindings",
-    ":pmm-bindings",
     ":pmm-checker-bindings",
     ":pmm-node-bindings",
     ":vm-address-region-bindings",
     ":vm-aspace-bindings",
+    ":vm-bindings",
     ":vm-constants-rs",
     ":vm-cow-pages-bindings",
     ":vm-fault-bindings",
     ":vm-object-bindings",
     ":vm-object-paged-bindings",
+    ":vm-object-physical-bindings",
     ":vm-page-list-bindings",
     ":vmm-bindings",
     "//sdk/rust/zx-status",
@@ -1614,11 +1594,13 @@ kernel_rust_mod("vm-rs") {
     "//src/lib/lazy_init:lazy_init_rs",
     "//src/lib/lockdep/rust:lockdep",
     "//src/lib/zr",
+    "//third_party/lz4/rust/sys:lz4-sys",
     "//third_party/rust_crates:bitflags",
     "//third_party/rust_crates:pin-init",
     "//third_party/rust_crates:rand",
     "//zircon/kernel/lib/backtrace:backtrace-rs",
     "//zircon/kernel/lib/boot-options:boot-options-rs",
+    "//zircon/kernel/lib/counters:counters-rs",
     "//zircon/kernel/lib/debug",
     "//zircon/kernel/lib/dump:dump-rs",
     "//zircon/kernel/lib/heap:heap-rs",
@@ -1627,6 +1609,10 @@ kernel_rust_mod("vm-rs") {
     "//zircon/kernel/lib/object-constants:object-constants-rs",
     "//zircon/kernel/lib/page:page-rs",
     "//zircon/kernel/lib/range_check:range_check_rs",
+    "//zircon/kernel/lib/thread-stack:thread-stack-rs",
+    "//zircon/kernel/phys/handoff:handoff-rs",
+    "//zircon/kernel/phys/lib/memalloc:memalloc-rs",
+    "//zircon/kernel/vm/phys:arena",
     "//zircon/system/ulib/fbl/rust:fbl",
     "//zircon/system/ulib/pretty/rust:pretty",
   ]
@@ -1696,6 +1682,7 @@ kernel_rust_mod("vm-rs-unittests") {
     ":test-helper-bindings",
     "//sdk/rust/zx-status",
     "//sdk/rust/zx-types",
+    "//src/lib/kalloc",
     "//src/lib/kprint",
     "//src/lib/ksync",
     "//third_party/rust_crates:pin-init",
@@ -1714,20 +1701,11 @@ source_set("tests") {
   testonly = true
   sources = [
     "unittests/aspace_unittest.cc",
-    "unittests/compression_unittest.cc",
-    "unittests/continuous_attribution_unittest.cc",
-    "unittests/evictor_unittest.cc",
-    "unittests/page_queues_unittest.cc",
-    "unittests/pmm_unittest.cc",
-    "unittests/slab_unittest.cc",
     "unittests/test_helper.cc",
     "unittests/test_helper_ffi.cc",
-    "unittests/vmo_unittest.cc",
-    "unittests/vmpl_unittest.cc",
   ]
   deps = [
     ":vm-rs-unittests",
-    "//third_party/lz4",
     "//zircon/kernel/lib/page",
     "//zircon/kernel/lib/unittest",
   ]

@@ -23,6 +23,7 @@
                 "starnix",
                 "starnix:binder",
                 "starnix:pager",
+                "starnix:syscalls",
                 "storage",
                 "system_metrics",
                 "view",

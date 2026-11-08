@@ -1,0 +1,51 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "heapdump_vmo",
+    srcs = [
+        "src/allocations_table_v1.rs",
+        "src/lib.rs",
+        "src/resources_table_v1.rs",
+        "src/stack_trace_compression.rs",
+    ],
+    edition = "2024",
+    visibility = [
+        "//src/performance/memory/heapdump/collector:__pkg__",
+        "//src/performance/memory/heapdump/instrumentation:__pkg__",
+    ],
+    deps = [
+        "//sdk/rust/zx",
+        "//src/performance/memory/memory_mapped_vmo",
+        "//third_party/rust_crates/vendor:crc",
+        "//third_party/rust_crates/vendor:static_assertions",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)
+
+rustc_test(
+    name = "heapdump_vmo_test",
+    crate = ":heapdump_vmo",
+    deps = [
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+fx_unittest_package(
+    name = "tests",
+    package_name = "heapdump-vmo-tests",
+    unit_tests = [":heapdump_vmo_test"],
+    visibility = ["//src/performance/memory:__subpackages__"],
+)

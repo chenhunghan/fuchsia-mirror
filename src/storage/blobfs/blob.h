@@ -171,12 +171,6 @@ class Blob final : public CacheNode, fbl::Recyclable<Blob> {
   BlobCache& GetCache() final;
   bool ShouldCache() const final __TA_EXCLUDES(mutex_);
 
-  // Returns a clone of the blobfs VMO.
-  //
-  // Monitors the current VMO, keeping a reference to the Vnode alive while the |out| VMO (and any
-  // clones it may have) are open.
-  zx_status_t CloneDataVmo(zx_rights_t rights, zx::vmo* out_vmo) __TA_REQUIRES(mutex_);
-
   // Invokes |Purge()| if the vnode is purgeable.
   zx_status_t TryPurge() __TA_REQUIRES(mutex_);
 

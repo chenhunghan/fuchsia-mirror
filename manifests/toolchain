@@ -50,8 +50,8 @@
     <!-- Go
          TODO(phosek): repo/bot link about provenance
     -->
-    <package name="fuchsia/go/${platform}"
-             version="git_revision:0e8f75048563897aeb1e06b9c791cd55e41a0469"
+    <package name="infra/3pp/tools/go/${platform}"
+             version="version:3@1.27.3"
              platforms="linux-amd64,linux-arm64"
              path="prebuilt/third_party/go/{{.OS}}-{{.Arch}}"/>
 
@@ -69,7 +69,7 @@
          https://chrome-infra-packages.appspot.com/p/infra/rbe/client/
     -->
     <package name="infra/rbe/client/${platform}"
-             version="re_client_version:0.186.0.305f6525-gomaip"
+             version="re_client_version:0.187.0.ad10b508-gomaip"
              platforms="linux-amd64"
              path="prebuilt/third_party/reclient/{{.OS}}-{{.Arch}}"/>
 
@@ -78,7 +78,7 @@
     -->
     <!-- mac platforms added to support CIPD tagging -->
     <package name="fuchsia/third_party/rust/host/${platform}"
-             version="git_revisions:42cfc04deaa723bc21611f3f9d7c8651be6300df,61aea712077a33fc4aa2be6594f5957686be2547"
+             version="git_revisions:7189d39d9ce936881b8132c6addeaf3e295cd455,61aea712077a33fc4aa2be6594f5957686be2547"
              platforms="linux-amd64,linux-arm64,mac-amd64,mac-arm64,windows-amd64"
              path="prebuilt/third_party/rust/{{.OS}}-{{.Arch}}"/>
 
@@ -87,21 +87,21 @@
     -->
     <!-- mac platforms added to support CIPD tagging -->
     <package name="fuchsia/third_party/rust/target/fuchsia"
-             version="git_revisions:42cfc04deaa723bc21611f3f9d7c8651be6300df,61aea712077a33fc4aa2be6594f5957686be2547"
+             version="git_revisions:7189d39d9ce936881b8132c6addeaf3e295cd455,61aea712077a33fc4aa2be6594f5957686be2547"
              platforms="linux-amd64,linux-arm64,mac-amd64,mac-arm64"
              path="prebuilt/third_party/rust/{{.OS}}-{{.Arch}}"/>
     <!-- mac platforms added to support CIPD tagging -->
     <package name="fuchsia/third_party/rust/target/aarch64-apple-darwin"
-             version="git_revisions:42cfc04deaa723bc21611f3f9d7c8651be6300df,61aea712077a33fc4aa2be6594f5957686be2547"
+             version="git_revisions:7189d39d9ce936881b8132c6addeaf3e295cd455,61aea712077a33fc4aa2be6594f5957686be2547"
              platforms="linux-amd64,linux-arm64,mac-amd64,mac-arm64"
              path="prebuilt/third_party/rust/{{.OS}}-{{.Arch}}"/>
     <!-- mac platforms added to support CIPD tagging -->
     <package name="fuchsia/third_party/rust/target/aarch64-unknown-linux-gnu"
-             version="git_revisions:42cfc04deaa723bc21611f3f9d7c8651be6300df,61aea712077a33fc4aa2be6594f5957686be2547"
+             version="git_revisions:7189d39d9ce936881b8132c6addeaf3e295cd455,61aea712077a33fc4aa2be6594f5957686be2547"
              platforms="linux-amd64,linux-arm64,mac-amd64,mac-arm64"
              path="prebuilt/third_party/rust/{{.OS}}-{{.Arch}}"/>
     <package name="fuchsia/third_party/rust/target/riscv64gc-unknown-linux-gnu"
-             version="git_revisions:42cfc04deaa723bc21611f3f9d7c8651be6300df,61aea712077a33fc4aa2be6594f5957686be2547"
+             version="git_revisions:7189d39d9ce936881b8132c6addeaf3e295cd455,61aea712077a33fc4aa2be6594f5957686be2547"
              platforms="linux-amd64,linux-arm64"
              path="prebuilt/third_party/rust/{{.OS}}-{{.Arch}}"/>
     <!-- mac platforms added to support CIPD tagging -->
@@ -111,12 +111,12 @@
              path="prebuilt/third_party/rust/{{.OS}}-{{.Arch}}"/>
     <!-- mac platforms added to support CIPD tagging -->
     <package name="fuchsia/third_party/rust/target/x86_64-apple-darwin"
-             version="git_revisions:42cfc04deaa723bc21611f3f9d7c8651be6300df,61aea712077a33fc4aa2be6594f5957686be2547"
+             version="git_revisions:7189d39d9ce936881b8132c6addeaf3e295cd455,61aea712077a33fc4aa2be6594f5957686be2547"
              platforms="linux-amd64,linux-arm64,mac-amd64,mac-arm64"
              path="prebuilt/third_party/rust/{{.OS}}-{{.Arch}}"/>
     <!-- mac platforms added to support CIPD tagging -->
     <package name="fuchsia/third_party/rust/target/x86_64-unknown-linux-gnu"
-             version="git_revisions:42cfc04deaa723bc21611f3f9d7c8651be6300df,61aea712077a33fc4aa2be6594f5957686be2547"
+             version="git_revisions:7189d39d9ce936881b8132c6addeaf3e295cd455,61aea712077a33fc4aa2be6594f5957686be2547"
              platforms="linux-amd64,linux-arm64,mac-amd64,mac-arm64"
              path="prebuilt/third_party/rust/{{.OS}}-{{.Arch}}"/>
 
@@ -129,7 +129,7 @@
      <!-- rust-analyzer, used for rust editor support -->
      <!-- mac platforms added to support CIPD tagging -->
      <package name="fuchsia/third_party/rust-analyzer/${platform}"
-              version="git_revision:0c4d74686b21f2b3bd8872b6d3cf36ad2e740d49"
+              version="git_revision:55effabb762bbd0a21c5af530ea447bd6772881d"
               platforms="linux-amd64,mac-amd64"
               path="prebuilt/third_party/rust-analyzer"/>
 
@@ -147,14 +147,14 @@
 
     <!-- GN from https://gn.googlesource.com/gn/ -->
     <package name="gn/gn/${platform}"
-             version="git_revision:150a9d6ba0aa7f407aa4feeabc5f03ce9aa7e04b"
+             version="git_revision:4df39f484f1f49f5c7f6264adc88d27811cb7b00"
              platforms="linux-amd64,linux-arm64"
              path="prebuilt/third_party/gn/{{.OS}}-{{.Arch}}"/>
 
     <!-- Ninja from https://ninja-build.org/ -->
     <!-- TODO(phosek): link to bot/recipe/autoroller(?) -->
     <package name="fuchsia/third_party/ninja/${platform}"
-      version="git_revision:0fde9fdcbbd2c8ec826344fdedbe2bd615f162bf"
+      version="git_revision:0304bd8b8a780d29a065122cc6a2c7d900d0a4b9"
              platforms="linux-amd64,linux-arm64,windows-amd64"
              path="prebuilt/third_party/ninja/{{.OS}}-{{.Arch}}"/>
 
@@ -162,7 +162,7 @@
          TODO(phosek): repo/bot link about provenance
     -->
     <package name="fuchsia/tools/breakpad/${platform}"
-             version="git_revision:e35d1d09ae73eb18e28d11881ec724c279964991"
+             version="git_revision:94c818ea27482d8a8d32b0c8de50cbca0270db9a"
              platforms="linux-amd64"
              path="prebuilt/third_party/breakpad/{{.OS}}-{{.Arch}}"/>
 
@@ -202,7 +202,7 @@
          https://fuchsia.googlesource.com/fuchsia/+/{{.git_revision}}/tools/debug/buildidtool
     -->
     <package name="fuchsia/tools/buildidtool/${platform}"
-             version="git_revision:7ca22c44fa2bd62630ebe2734db14628436d6560"
+             version="git_revision:5e51d3e387006a1380b37c1392fc5ee0350ebc65"
              path="prebuilt/tools/buildidtool/{{.OS}}-{{.Arch}}"
              platforms="linux-amd64"/>
 

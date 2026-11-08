@@ -167,6 +167,7 @@ impl<T: TimeFetcher> TimelineEstimator<T> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_types)]
 mod tests {
     use std::sync::Arc;
 

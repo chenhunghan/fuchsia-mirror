@@ -20,11 +20,14 @@ _MY_DIR = pathlib.Path(__file__).parent
 _FUCHSIA_ROOT_DIR = _MY_DIR.parents[4]
 _MKBOOTIMG_PATH = (
     _FUCHSIA_ROOT_DIR
-    / "zircon"
     / "third_party"
-    / "tools"
     / "android"
+    / "platform"
+    / "system"
+    / "tools"
     / "mkbootimg"
+    / "src"
+    / "mkbootimg.py"
 )
 
 

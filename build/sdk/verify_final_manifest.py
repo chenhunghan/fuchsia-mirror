@@ -39,11 +39,11 @@ INCLUDE_RE = re.compile(r'#include\s*"//([^"]+)"\s*')
 @dataclasses.dataclass
 class GoldenFile:
     path: pathlib.Path
-    includes: list["GoldenFile"]
+    includes: list[GoldenFile]
     atom_ids: set[str]
 
     @staticmethod
-    def parse(path: pathlib.Path, source_root: pathlib.Path) -> "GoldenFile":
+    def parse(path: pathlib.Path, source_root: pathlib.Path) -> GoldenFile:
         includes = []
         atom_ids: set[str] = set()
 

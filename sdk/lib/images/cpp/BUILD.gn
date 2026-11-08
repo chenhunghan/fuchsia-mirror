@@ -38,7 +38,6 @@ sdk_source_set("cpp") {
   stable = true
   visibility = [
     ":*",
-    "//build/sdk:*",
     "//sdk/lib/ui/scenic/cpp:*",
   ]
   public_deps = [ "//sdk/fidl/fuchsia.images:fuchsia.images_hlcpp" ]

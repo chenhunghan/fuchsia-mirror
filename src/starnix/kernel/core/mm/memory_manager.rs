@@ -8,9 +8,9 @@ use crate::mm::memory::MemoryObject;
 use crate::mm::private_anonymous_memory_manager::PrivateAnonymousMemoryManager;
 use crate::mm::{
     FaultRegisterMode, InflightVmsplicedPayloads, MapInfoCache, Mapping, MappingAccess,
-    MappingBacking, MappingFlags, MappingMode, MappingName, MappingNameRef, MlockPinFlavor,
-    PrefetchMessage, ProtectionFlags, UserFault, VMEX_RESOURCE, VmsplicePayload,
-    VmsplicePayloadSegment,
+    MappingBacking, MappingFlags, MappingMode, MappingName, MappingNameRef, MemoryAccessor,
+    MlockPinFlavor, PrefetchMessage, ProtectionFlags, TaskMemoryAccessor, UserFault, VMEX_RESOURCE,
+    VmsplicePayload, VmsplicePayloadSegment,
 };
 use crate::security;
 use crate::signals::{SignalDetail, SignalInfo};
@@ -33,6 +33,7 @@ use flyweights::FlyByteStr;
 use linux_uapi::BUS_ADRERR;
 use memory_pinning::PinnedMapping;
 use range_map::RangeMap;
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use starnix_lifecycle::DropNotifier;
 use starnix_logging::{CATEGORY_STARNIX_MM, impossible_error, log_error, log_warn, track_stub};
@@ -199,17 +200,40 @@ struct ProgramBreak {
 }
 
 /// The policy about whether the address space can be dumped.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
 pub enum DumpPolicy {
     /// The address space cannot be dumped.
     ///
     /// Corresponds to SUID_DUMP_DISABLE.
-    Disable,
+    #[default]
+    Disable = 0,
 
     /// The address space can be dumped.
     ///
     /// Corresponds to SUID_DUMP_USER.
-    User,
+    User = 1,
+}
+
+impl From<DumpPolicy> for i32 {
+    fn from(policy: DumpPolicy) -> i32 {
+        policy as i32
+    }
+}
+
+impl TryFrom<i32> for DumpPolicy {
+    type Error = Errno;
+
+    fn try_from(value: i32) -> Result<Self, Errno> {
+        match value {
+            0 => Ok(Self::Disable),
+            1 => Ok(Self::User),
+            2 => {
+                track_stub!(TODO("https://fxbug.dev/322873960"), "SUID_DUMP_ROOT");
+                error!(EINVAL)
+            }
+            _ => error!(EINVAL),
+        }
+    }
 }
 
 static_assertions::const_assert!(AtomicCell::<DumpPolicy>::is_lock_free());
@@ -239,6 +263,9 @@ struct Mappings {
 
     /// The cached sum of the lengths of all mapped ranges.
     total_usage: usize,
+
+    /// The cached sum of the lengths of all `MappingFlags::GROWSDOWN` ranges.
+    stack_usage: usize,
 }
 
 impl Deref for Mappings {
@@ -253,31 +280,34 @@ impl Mappings {
     pub fn insert(&mut self, range: std::ops::Range<UserAddress>, value: Mapping) -> Vec<Mapping> {
         self.generation = self.generation.wrapping_add(1);
         let range_len = range.end - range.start;
-        let removed_len: usize = self
-            .map
-            .range(range.clone())
-            .map(|(r, _)| {
+        let is_growsdown = value.flags().contains(MappingFlags::GROWSDOWN);
+        let (removed_len, removed_stack_len) =
+            self.map.range(range.clone()).fold((0usize, 0usize), |(total, stack), (r, m)| {
                 let intersection = r.intersect(&range);
-                intersection.end - intersection.start
-            })
-            .sum();
+                let len = intersection.end - intersection.start;
+                let stack_len = if m.flags().contains(MappingFlags::GROWSDOWN) { len } else { 0 };
+                (total + len, stack + stack_len)
+            });
         let removed = self.map.insert(range, value);
         self.total_usage = self.total_usage.saturating_add(range_len).saturating_sub(removed_len);
+        let added_stack_len = if is_growsdown { range_len } else { 0 };
+        self.stack_usage =
+            self.stack_usage.saturating_add(added_stack_len).saturating_sub(removed_stack_len);
         removed
     }
 
     pub fn remove(&mut self, range: std::ops::Range<UserAddress>) -> Vec<Mapping> {
         self.generation = self.generation.wrapping_add(1);
-        let removed_len: usize = self
-            .map
-            .range(range.clone())
-            .map(|(r, _)| {
+        let (removed_len, removed_stack_len) =
+            self.map.range(range.clone()).fold((0usize, 0usize), |(total, stack), (r, m)| {
                 let intersection = r.intersect(&range);
-                intersection.end - intersection.start
-            })
-            .sum();
+                let len = intersection.end - intersection.start;
+                let stack_len = if m.flags().contains(MappingFlags::GROWSDOWN) { len } else { 0 };
+                (total + len, stack + stack_len)
+            });
         let removed = self.map.remove(range);
         self.total_usage = self.total_usage.saturating_sub(removed_len);
+        self.stack_usage = self.stack_usage.saturating_sub(removed_stack_len);
         removed
     }
 
@@ -288,8 +318,12 @@ impl Mappings {
     ) -> bool {
         self.generation = self.generation.wrapping_add(1);
         let range_len = range.end - range.start;
+        let is_growsdown = value.flags().contains(MappingFlags::GROWSDOWN);
         if self.map.append_non_overlapping(range, value) {
             self.total_usage = self.total_usage.saturating_add(range_len);
+            if is_growsdown {
+                self.stack_usage = self.stack_usage.saturating_add(range_len);
+            }
             true
         } else {
             false
@@ -418,7 +452,7 @@ fn map_in_vmar(
     flags: MappingFlags,
     populate: bool,
 ) -> Result<(), Errno> {
-    let vmar_offset = addr.addr().checked_sub(vmar_info.base).ok_or_else(|| errno!(ENOMEM))?;
+    let vmar_offset = addr.addr().checked_sub(vmar_info.base).ok_or_else(|| errno!(EINVAL))?;
     let vmar_extra_flags = match addr {
         SelectedAddress::Fixed(_) => zx::VmarFlags::SPECIFIC,
         SelectedAddress::FixedOverwrite(_) => ZX_VM_SPECIFIC_OVERWRITE,
@@ -956,6 +990,9 @@ impl MemoryManagerState {
                 if end > UserAddress::from_ptr(RESTRICTED_ASPACE_HIGHEST_ADDRESS as usize) {
                     return error!(ENOMEM);
                 }
+                if a < UserAddress::from_ptr(RESTRICTED_ASPACE_BASE) {
+                    return error!(EINVAL);
+                }
                 if self.check_has_unauthorized_splits(a, length) {
                     return error!(ENOMEM);
                 }
@@ -994,12 +1031,8 @@ impl MemoryManagerState {
         if cow_modified {
             backing.set_cow_modified();
         }
-        let mapping = Mapping::with_name(
-            MappingBacking::Memory(Box::new(backing)),
-            flags,
-            name,
-            mapping_mode,
-        );
+        let mapping =
+            Mapping::with_name(MappingBacking::Memory(backing), flags, name, mapping_mode);
         if mapping_mode == MappingMode::Eager {
             // For unmodified writable private file mappings, `mapping.vmar_flags()` omits `WRITE`,
             // which also causes `populate` (`MAP_POPULATE`) to prefetch pages read-only rather
@@ -1791,6 +1824,21 @@ impl MemoryManagerState {
         Ok(())
     }
 
+    fn flush_private_anonymous_unmap_range(mm: &MemoryManager, range: Range<UserAddress>) {
+        if let Err(e) = mm
+            .inflight_vmspliced_payloads
+            .handle_unmapping(&mm.mapping_context.private_anonymous.backing, &range)
+        {
+            log_error!("Failed to handle vmsplice unmapping: {:?}", e);
+        }
+
+        if let Err(e) =
+            mm.mapping_context.private_anonymous.zero(range.start, range.end - range.start)
+        {
+            log_error!("Failed to zero private anonymous memory: {:?}", e);
+        }
+    }
+
     // Updates `self.mappings` after the specified range was unmaped.
     //
     // The range to unmap can span multiple mappings, and can split mappings if
@@ -1815,26 +1863,29 @@ impl MemoryManagerState {
         // Remove any shadow mappings for mlock()'d pages that are now unmapped.
         released_mappings.extend_pins(self.shadow_mappings_for_mlock.remove(unmap_range.clone()));
 
+        let mut pending_anon_range: Option<Range<UserAddress>> = None;
         for (range, mapping) in self.mappings.range(unmap_range.clone()) {
-            // Deallocate any pages in the private, anonymous backing that are now unreachable.
+            // Deallocate any pages in the private, anonymous backing that are now unreachable,
+            // coalescing contiguous private-anonymous sub-ranges (such as regions split by
+            // `mprotect` or `PR_SET_VMA`) into a single VMO zero operation.
             if let MappingBacking::PrivateAnonymous = self.get_mapping_backing(mapping) {
-                let unmapped_range = &unmap_range.intersect(range);
-
-                if let Err(e) = mm
-                    .inflight_vmspliced_payloads
-                    .handle_unmapping(&mm.mapping_context.private_anonymous.backing, unmapped_range)
-                {
-                    log_error!("Failed to handle vmsplice unmapping: {:?}", e);
-                }
-
-                if let Err(e) = mm
-                    .mapping_context
-                    .private_anonymous
-                    .zero(unmapped_range.start, unmapped_range.end - unmapped_range.start)
-                {
-                    log_error!("Failed to zero private anonymous memory: {:?}", e);
+                let unmapped_range = unmap_range.intersect(range);
+                match &mut pending_anon_range {
+                    Some(prev) if prev.end == unmapped_range.start => {
+                        prev.end = unmapped_range.end;
+                    }
+                    Some(prev) => {
+                        let flushed = std::mem::replace(prev, unmapped_range);
+                        Self::flush_private_anonymous_unmap_range(mm, flushed);
+                    }
+                    None => {
+                        pending_anon_range = Some(unmapped_range);
+                    }
                 }
             }
+        }
+        if let Some(flushed) = pending_anon_range {
+            Self::flush_private_anonymous_unmap_range(mm, flushed);
         }
         released_mappings.extend(self.mappings.remove(unmap_range));
     }
@@ -2053,8 +2104,10 @@ impl MemoryManagerState {
             let cow_modified = run_mapping.has_cow_modifications();
             let memory_offset = run_mapping.address_to_offset(run_range.start);
             let flags = run_mapping.flags().difference(MappingFlags::LAZY_PRIVATE_FILE);
-            run_mapping.set_backing_internal(MappingBacking::Memory(Box::new(
-                MappingBackingMemory::new(run_range.start, child_memory.clone(), memory_offset),
+            run_mapping.set_backing_internal(MappingBacking::Memory(MappingBackingMemory::new(
+                run_range.start,
+                child_memory.clone(),
+                memory_offset,
             )));
             if cow_modified {
                 run_mapping.set_cow_modified();
@@ -2468,24 +2521,7 @@ impl MemoryManagerState {
 
         self.ensure_range_mapped_in_user_vmar(start_addr, Some(end_addr - start_addr), context)?;
 
-        if !on_fault && !current_task.kernel().features.mlock_always_onfault {
-            context
-                .user_vmar
-                .op_range(zx::VmarOp::PREFETCH, start_addr.ptr(), end_addr - start_addr)
-                .map_err(Self::mlock_op_range_status_to_errno)?;
-        }
-
-        match current_task.kernel().features.mlock_pin_flavor {
-            MlockPinFlavor::VmarAlwaysNeed => {
-                context
-                    .user_vmar
-                    .op_range(zx::VmarOp::ALWAYS_NEED, start_addr.ptr(), end_addr - start_addr)
-                    .map_err(Self::mlock_op_range_status_to_errno)?;
-            }
-            // The shadow process doesn't use any vmar-level operations to pin memory.
-            MlockPinFlavor::Noop | MlockPinFlavor::ShadowProcess => (),
-        }
-
+        // Lock the mappings before populating so a populate failure leaves the range locked.
         for (range, mut mapping, shadow_mapping) in updates {
             if let Some(shadow_mapping) = shadow_mapping {
                 released_mappings.extend_pins(
@@ -2498,12 +2534,91 @@ impl MemoryManagerState {
             released_mappings.extend(self.mappings.insert(range, mapping));
         }
 
+        // Apply the hint before populating, so that a populate failure does not skip it.
+        match current_task.kernel().features.mlock_pin_flavor {
+            MlockPinFlavor::VmarAlwaysNeed => {
+                context
+                    .user_vmar
+                    .op_range(zx::VmarOp::ALWAYS_NEED, start_addr.ptr(), end_addr - start_addr)
+                    .map_err(Self::mlock_op_range_status_to_errno)?;
+            }
+            // The shadow process doesn't use any vmar-level operations to pin memory.
+            MlockPinFlavor::Noop | MlockPinFlavor::ShadowProcess => (),
+        }
+
+        if !on_fault && !current_task.kernel().features.mlock_always_onfault {
+            // Populate the range, as required by mlock(2). Private mappings that are writable in
+            // the VMAR are committed. Unmodified private file mappings are prefetched instead, as
+            // COMMIT would break copy-on-write without `set_cow_modified()`, and so are
+            // userfaultfd ranges, as COMMIT would fill missing pages behind its back. Other
+            // accessible mappings are prefetched. Populating stops at the first PROT_NONE mapping.
+            // Batch the same operation on the nearby ranges together.
+            let mut current_op: Option<(zx::VmarOp, UserAddress, usize)> = None;
+
+            for (range, mapping) in self.mappings.range(start_addr..end_addr) {
+                let sub_start = std::cmp::max(range.start, start_addr);
+                let sub_end = std::cmp::min(range.end, end_addr);
+                debug_assert!(sub_start < sub_end, "mappings.range() yields intersecting ranges");
+                let sub_len = sub_end - sub_start;
+
+                // TODO(https://fxbug.dev/579404355): PREFETCH does not allocate non-pager-backed
+                // shared memory (shared anonymous, memfd, tmpfs). Consider also using COMMIT in
+                // those cases.
+                let new_op = if mapping.vmar_flags().contains(MappingFlags::WRITE)
+                    && !mapping.flags().intersects(MappingFlags::SHARED | MappingFlags::UFFD)
+                {
+                    zx::VmarOp::COMMIT
+                } else if mapping
+                    .flags()
+                    .intersects(MappingFlags::READ | MappingFlags::WRITE | MappingFlags::EXEC)
+                {
+                    zx::VmarOp::PREFETCH
+                } else {
+                    break;
+                };
+
+                match current_op {
+                    Some((cur_op, cur_start, cur_len))
+                        if cur_op == new_op
+                            && cur_start.checked_add(cur_len) == Some(sub_start) =>
+                    {
+                        current_op = Some((cur_op, cur_start, cur_len + sub_len));
+                    }
+                    Some((cur_op, cur_start, cur_len)) => {
+                        context
+                            .user_vmar
+                            .op_range(cur_op, cur_start.ptr(), cur_len)
+                            .map_err(Self::mlock_op_range_status_to_errno)?;
+                        current_op = Some((new_op, sub_start, sub_len));
+                    }
+                    None => {
+                        current_op = Some((new_op, sub_start, sub_len));
+                    }
+                }
+            }
+
+            if let Some((cur_op, cur_start, cur_len)) = current_op {
+                context
+                    .user_vmar
+                    .op_range(cur_op, cur_start.ptr(), cur_len)
+                    .map_err(Self::mlock_op_range_status_to_errno)?;
+            }
+        }
+
         if failed_to_lock { error!(ENOMEM) } else { Ok(()) }
     }
 
     fn mlock_op_range_status_to_errno(e: zx::Status) -> Errno {
         match e {
-            zx::Status::BAD_STATE | zx::Status::NOT_SUPPORTED => errno!(ENOMEM),
+            // mlock(2): EAGAIN if some or all of the range could not be locked.
+            zx::Status::NO_MEMORY => errno!(EAGAIN),
+            // Includes errors a pager can return while paging in file contents.
+            zx::Status::BAD_STATE
+            | zx::Status::NOT_SUPPORTED
+            | zx::Status::IO
+            | zx::Status::IO_DATA_INTEGRITY
+            | zx::Status::NO_SPACE
+            | zx::Status::BUFFER_TOO_SMALL => errno!(ENOMEM),
             zx::Status::INVALID_ARGS | zx::Status::OUT_OF_RANGE => errno!(EINVAL),
             zx::Status::ACCESS_DENIED => {
                 unreachable!("user vmar should always have needed rights")
@@ -2525,11 +2640,7 @@ impl MemoryManagerState {
         range: &Range<UserAddress>,
         mapping: &Mapping,
     ) -> Result<Arc<PinnedMapping>, Errno> {
-        let shadow_process = kernel.expando.get_or_try_init(|| {
-            memory_pinning::ShadowProcess::new(zx::Name::new_lossy("starnix_mlock_pins"))
-                .map(MlockShadowProcess)
-                .map_err(|_| errno!(EPERM))
-        })?;
+        let shadow_process = MlockShadowProcess::get_or_try_init(kernel)?;
 
         let (vmo, offset) = match self.get_mapping_backing(mapping) {
             MappingBacking::Memory(m) => (
@@ -2541,7 +2652,7 @@ impl MemoryManagerState {
                 range.start.ptr() as u64,
             ),
         };
-        shadow_process.0.pin_pages(vmo, offset, range.end - range.start)
+        shadow_process.pin_pages(vmo, offset, range.end - range.start)
     }
 
     /// Re-establishes the mlock pin for the locked `mapping` covering `range` after its backing
@@ -3583,41 +3694,30 @@ impl MemoryManagerState {
     fn set_mapping_name(
         &mut self,
         addr: UserAddress,
-        length: usize,
-        name: Option<FsString>,
+        end: UserAddress,
+        new_name: MappingName,
+        memories_to_name: &mut SmallVec<[Arc<MemoryObject>; 1]>,
         released_mappings: &mut ReleasedMappings,
     ) -> Result<(), Errno> {
-        if addr.ptr() % *PAGE_SIZE as usize != 0 {
-            return error!(EINVAL);
-        }
-        let end = match addr.checked_add(length) {
-            Some(addr) => addr.round_up(*PAGE_SIZE).map_err(|_| errno!(ENOMEM))?,
-            None => return error!(EINVAL),
-        };
-
-        let mappings_in_range =
-            self.mappings.range(addr..end).map(|(r, m)| (r.clone(), m.clone())).collect::<Vec<_>>();
+        let mappings_in_range: SmallVec<[(Range<UserAddress>, Mapping); 2]> =
+            self.mappings.range(addr..end).map(|(r, m)| (r.clone(), m.clone())).collect();
 
         if mappings_in_range.is_empty() {
             return error!(EINVAL);
         }
-        if !mappings_in_range.first().unwrap().0.contains(&addr) {
+        if !mappings_in_range[0].0.contains(&addr) {
             return error!(ENOMEM);
         }
 
         let mut last_range_end = None;
-        // There's no get_mut on RangeMap, because it would be hard to implement correctly in
-        // combination with merging of adjacent mappings. Instead, make a copy, change the copy,
-        // and insert the copy.
-        for (mut range, mut mapping) in mappings_in_range {
+        // Update whole-mapping renames in-place via `update_exact`, and fall back to cloning and
+        // inserting when splitting a range or after a neighbor merge.
+        for (orig_range, mut mapping) in mappings_in_range {
             if mapping.name().is_file() {
                 // It's invalid to assign a name to a file-backed mapping.
                 return error!(EBADF);
             }
-            // Handle mappings that start before the region to be named.
-            range.start = std::cmp::max(range.start, addr);
-            // Handle mappings that extend past the region to be named.
-            range.end = std::cmp::min(range.end, end);
+            let range = std::cmp::max(orig_range.start, addr)..std::cmp::min(orig_range.end, end);
 
             if let Some(last_range_end) = last_range_end {
                 if last_range_end != range.start {
@@ -3629,20 +3729,26 @@ impl MemoryManagerState {
             // TODO(b/310255065): We have no place to store names in a way visible to programs outside of Starnix
             // such as memory analysis tools.
             if let MappingBacking::Memory(backing) = self.get_mapping_backing(&mapping) {
-                match &name {
-                    Some(memory_name) => {
-                        backing.memory().set_zx_name(memory_name);
-                    }
-                    None => {
-                        backing.memory().set_zx_name(b"");
-                    }
+                let memory = backing.memory();
+                if !memories_to_name.iter().any(|existing| Arc::ptr_eq(existing, memory)) {
+                    memories_to_name.push(Arc::clone(memory));
                 }
             }
-            mapping.set_name(match &name {
-                Some(name) => MappingName::Vma(FlyByteStr::new(name.as_bytes())),
-                None => MappingName::None,
-            });
-            released_mappings.extend(self.mappings.insert(range, mapping));
+            if orig_range == range && mapping.name() == new_name {
+                continue;
+            }
+            let updated_in_place = if orig_range == range {
+                self.mappings.update_exact::<_, Errno>(&range, |m| {
+                    m.set_name(new_name.clone());
+                    Ok(())
+                })?
+            } else {
+                false
+            };
+            if !updated_in_place {
+                mapping.set_name(new_name.clone());
+                released_mappings.extend(self.mappings.insert(range, mapping));
+            }
         }
         if let Some(last_range_end) = last_range_end {
             if last_range_end < end {
@@ -3654,11 +3760,52 @@ impl MemoryManagerState {
     }
 }
 
-/// The memory pinning shadow process used for mlock().
+/// The memory pinning shadow process used for `mlock()` and `tmpfs -o noswap`.
 ///
 /// Uses its own distinct shadow process so that it doesn't interfere with other uses of memory
 /// pinning.
 pub struct MlockShadowProcess(memory_pinning::ShadowProcess);
+
+impl MlockShadowProcess {
+    /// Returns the kernel's shared memory-pinning shadow process, initializing it on first use.
+    pub fn get_or_try_init(kernel: &Kernel) -> Result<Arc<Self>, Errno> {
+        kernel.expando.get_or_try_init(|| {
+            memory_pinning::ShadowProcess::new(zx::Name::new_lossy("starnix_mlock_pins"))
+                .map(MlockShadowProcess)
+                .map_err(|e| from_status_like_fdio!(e))
+        })
+    }
+
+    /// Pins `[offset..offset + length]` of `vmo` in the shadow process VMAR.
+    pub fn pin_pages(
+        &self,
+        vmo: &zx::Vmo,
+        offset: u64,
+        length: usize,
+    ) -> Result<Arc<PinnedMapping>, Errno> {
+        self.0.pin_pages(vmo, offset, length)
+    }
+
+    /// Returns the koids of the VMOs currently mapped into the mlock shadow process, or an empty
+    /// `Vec` if the shadow process has not been initialized.
+    #[cfg(test)]
+    pub fn pinned_vmo_koids(kernel: &Kernel) -> Vec<zx::Koid> {
+        let Some(shadow_process) = kernel.expando.peek::<Self>() else {
+            return Vec::new();
+        };
+        shadow_process
+            .0
+            .vmar()
+            .maps_vec()
+            .expect("maps_vec")
+            .iter()
+            .filter_map(|map| match map.details() {
+                zx::MapDetails::Mapping(details) => Some(details.vmo_koid),
+                _ => None,
+            })
+            .collect()
+    }
+}
 
 impl MemoryManager {
     /// Ensures that the mapping at `addr` (if `length` is `None`) or all mappings intersecting
@@ -4300,7 +4447,7 @@ impl MappingContext {
         if mapping.has_cow_modifications() {
             backing.set_cow_modified();
         }
-        mapping.set_backing_internal(MappingBacking::Memory(Box::new(backing)));
+        mapping.set_backing_internal(MappingBacking::Memory(backing));
         Ok(())
     }
 
@@ -4341,12 +4488,10 @@ pub struct MemoryManager {
     /// The architecture width of the process.
     pub arch_width: ArchWidth,
 
-    /// Cached `(timestamp, mappings_generation, stats)` to avoid expensive Zircon VMAR walks on
-    /// sequential reads while invalidating when mappings change.
-    pub cached_stats: LockDepMutex<
-        Option<(zx::MonotonicInstant, u64, MemoryStats)>,
-        MemoryManagerCachedStatsLock,
-    >,
+    /// Cached `(timestamp, stats)` to avoid expensive Zircon VMAR walks on repeated procfs reads;
+    /// see [`Self::get_stats`] for the caching contract.
+    pub cached_stats:
+        LockDepMutex<Option<(zx::MonotonicInstant, MemoryStats)>, MemoryManagerCachedStatsLock>,
 }
 
 impl ArchSpecific for MemoryManager {
@@ -4379,12 +4524,17 @@ impl MemoryManager {
         current_task: &CurrentTask,
         op: impl FnOnce(&[zx::MapInfo]) -> R,
     ) -> R {
-        MapInfoCache::get_or_init(current_task)
-            .expect("must be able to retrieve map info cache")
-            .with_map_infos(&self.mapping_context.user_vmar, |infos| match infos {
+        if let Ok(Some(cache)) = MapInfoCache::get_or_init(current_task) {
+            cache.with_map_infos(&self.mapping_context.user_vmar, |infos| match infos {
                 Ok(infos) => op(infos),
                 Err(_) => op(&[]),
             })
+        } else {
+            match self.mapping_context.user_vmar.maps_vec() {
+                Ok(infos) => op(&infos),
+                Err(_) => op(&[]),
+            }
+        }
     }
 
     pub fn total_locked_bytes(&self) -> u64 {
@@ -4475,8 +4625,6 @@ impl MemoryManager {
                 },
             }
             .into(),
-            // TODO(security): Reset to DISABLE, or the value in the fs.suid_dumpable sysctl, under
-            // certain conditions as specified in the prctl(2) man page.
             dumpable: AtomicCell::new(DumpPolicy::User),
             maximum_valid_user_address: UserAddress::from_ptr(
                 user_vmar_info.base + user_vmar_info.len,
@@ -4727,7 +4875,7 @@ impl MemoryManager {
                             target_backing.set_cow_modified();
                         }
                         let mapping = Mapping::with_name(
-                            MappingBacking::Memory(Box::new(target_backing)),
+                            MappingBacking::Memory(target_backing),
                             target_mapping_flags,
                             mapping.name().to_owned(),
                             MappingMode::Lazy,
@@ -4904,6 +5052,11 @@ impl MemoryManager {
         // Drop the state before the unmapped mappings, since dropping a mapping may acquire a lock
         // in `DirEntry`'s `drop`.
         released_mappings.finalize(state);
+        // `MAP_POPULATE` only commits or faults in pages when the mapping is accessible
+        // (`!prot_flags.is_empty()`); `PROT_NONE` mappings leave resident stats unchanged.
+        if options.contains(MappingOptions::POPULATE) && !prot_flags.is_empty() && result.is_ok() {
+            *self.cached_stats.lock() = None;
+        }
 
         result
     }
@@ -4931,6 +5084,11 @@ impl MemoryManager {
         );
 
         released_mappings.finalize(state);
+        // `MAP_POPULATE` only commits or faults in pages when the mapping is accessible
+        // (`!prot_flags.is_empty()`); `PROT_NONE` mappings leave resident stats unchanged.
+        if options.contains(MappingOptions::POPULATE) && !prot_flags.is_empty() && result.is_ok() {
+            *self.cached_stats.lock() = None;
+        }
 
         result
     }
@@ -5438,10 +5596,36 @@ impl MemoryManager {
         length: usize,
         name: Option<FsString>,
     ) -> Result<(), Errno> {
-        let mut state = self.state.write();
+        if addr.ptr() % *PAGE_SIZE as usize != 0 {
+            return error!(EINVAL);
+        }
+        let end = match addr.checked_add(length) {
+            Some(addr) => addr.round_up(*PAGE_SIZE).map_err(|_| errno!(ENOMEM))?,
+            None => return error!(EINVAL),
+        };
+        let new_name = match &name {
+            Some(name) => MappingName::Vma(FlyByteStr::new(name.as_bytes())),
+            None => MappingName::None,
+        };
+
+        let mut memories_to_name: SmallVec<[Arc<MemoryObject>; 1]> = SmallVec::new();
         let mut released_mappings = ReleasedMappings::default();
-        let result = state.set_mapping_name(addr, length, name, &mut released_mappings);
-        released_mappings.finalize(state);
+        let result = {
+            let mut state = self.state.write();
+            let res = state.set_mapping_name(
+                addr,
+                end,
+                new_name,
+                &mut memories_to_name,
+                &mut released_mappings,
+            );
+            released_mappings.finalize(state);
+            res
+        };
+        let zx_name: &[u8] = name.as_deref().map_or(b"", |n| n.as_slice());
+        for memory in memories_to_name {
+            memory.set_zx_name(zx_name);
+        }
         result
     }
 
@@ -5594,15 +5778,28 @@ impl MemoryManager {
         self.state.read().mappings.total_usage
     }
 
+    /// Returns memory statistics for this address space.
+    ///
+    /// Computing resident stats requires an expensive Zircon `ZX_INFO_VMAR_MAPS` walk, so results
+    /// are cached in `self.cached_stats` for `CACHE_TTL` (2s). When returning cached stats (any
+    /// non-self read, or a self-read with `SelfStatsCacheMode::AllowCached`):
+    /// - `vm_size` and `vm_stack` are always exact (`O(1)` from `Mappings::{total_usage,
+    ///   stack_usage}`).
+    /// - `MAP_POPULATE` (when `!prot_flags.is_empty()`, since `PROT_NONE` does not populate
+    ///   pages), `mlock`, `munlock`, and `process_mrelease` explicitly invalidate the cache, so
+    ///   bulk page population/reclaim and `vm_lck` changes are reflected immediately.
+    /// - Other `Mappings` mutations (lazy VMA fault materialization, `mprotect`, `PR_SET_VMA`,
+    ///   `madvise`, non-`POPULATE` `mmap`, `PROT_NONE` `MAP_POPULATE`, `munmap`) and in-place page
+    ///   faults do not invalidate the cache, so `vm_rss`, `rss_*`, `vm_swap`, `vm_data`, and
+    ///   `vm_exe` may be up to `CACHE_TTL` stale, except that cached entries with `vm_rss >
+    ///   vm_size` (after a large `munmap`) are bypassed so `vm_rss <= vm_size` always holds.
+    ///   Callers requiring immediate resident page accuracy on self-reads (such as
+    ///   `/proc/self/statm`) pass `SelfStatsCacheMode::BypassCache`.
     pub fn get_stats(
         &self,
         current_task: &CurrentTask,
         self_cache_mode: SelfStatsCacheMode,
     ) -> MemoryStats {
-        // Acquiring stats is an intensive operation, so when diagnostic processes request
-        // stats of a process in fast succession, we return a short-lived cached value.
-        // Callers such as /proc/self/stat and /proc/self/statm that need immediate reflection
-        // of userspace page faults on self-reads pass `SelfStatsCacheMode::BypassCache`.
         let is_self_read =
             current_task.mm().map_or(false, |mm| std::ptr::eq(Arc::as_ptr(&mm), self));
 
@@ -5610,25 +5807,40 @@ impl MemoryManager {
         // Other Starnix threads should not make any changes to the Zircon mappings while we hold
         // a read lock to the memory manager state.
         let state = self.state.read();
-        let generation = state.mappings.generation;
+        let total_usage = state.mappings.total_usage;
+        let stack_usage = state.mappings.stack_usage;
         let now = zx::MonotonicInstant::get();
         if !(self_cache_mode == SelfStatsCacheMode::BypassCache && is_self_read) {
             const CACHE_TTL: zx::MonotonicDuration = zx::MonotonicDuration::from_millis(2000);
             let cached = self.cached_stats.lock();
-            if let Some((timestamp, cached_gen, stats)) = *cached {
-                if cached_gen == generation && now - timestamp < CACHE_TTL {
+            if let Some((timestamp, mut stats)) = *cached {
+                // `munmap` does not invalidate `cached_stats`, so unmapping a large populated
+                // region can drop `total_usage` (`vm_size`) below the cached `vm_rss`. Bypass the
+                // cache when `stats.vm_rss > total_usage` so `vm_rss <= vm_size` always holds.
+                if now - timestamp < CACHE_TTL && stats.vm_rss <= total_usage {
+                    stats.vm_size = total_usage;
+                    stats.vm_stack = stack_usage;
                     return stats;
                 }
             }
         }
 
         let mut stats = MemoryStats::default();
-        stats.vm_stack = state
-            .mappings
-            .iter()
-            .filter(|(_, m)| m.flags().contains(MappingFlags::GROWSDOWN))
-            .map(|(range, _)| range.end - range.start)
-            .sum();
+        debug_assert_eq!(
+            total_usage,
+            state.mappings.iter().map(|(range, _)| range.end - range.start).sum::<usize>(),
+        );
+        debug_assert_eq!(
+            stack_usage,
+            state
+                .mappings
+                .iter()
+                .filter(|(_, m)| m.flags().contains(MappingFlags::GROWSDOWN))
+                .map(|(range, _)| range.end - range.start)
+                .sum::<usize>(),
+        );
+        stats.vm_size = total_usage;
+        stats.vm_stack = stack_usage;
 
         self.with_zx_mappings(current_task, |zx_mappings| {
             let mut mappings_iter = state.mappings.iter().peekable();
@@ -5659,8 +5871,6 @@ impl MemoryManager {
                     zx_details.vmo_koid,
                     "MemoryManager and Zircon must agree on which VMO is mapped in this range",
                 );
-
-                stats.vm_size += zx_mapping.size;
 
                 stats.vm_rss += zx_details.committed_bytes;
                 stats.vm_swap += zx_details.populated_bytes - zx_details.committed_bytes;
@@ -5694,7 +5904,7 @@ impl MemoryManager {
         // TODO(https://fxbug.dev/396221597): Placeholder for now. We need kernel support to track
         // the committed bytes high water mark.
         stats.vm_rss_hwm = STUB_VM_RSS_HWM;
-        *self.cached_stats.lock() = Some((now, generation, stats));
+        *self.cached_stats.lock() = Some((now, stats));
         stats
     }
 
@@ -5773,6 +5983,65 @@ impl MemoryManager {
     }
 }
 
+impl MemoryAccessor for MemoryManager {
+    fn read_memory<'a>(
+        &self,
+        addr: UserAddress,
+        bytes: &'a mut [MaybeUninit<u8>],
+    ) -> Result<&'a mut [u8], Errno> {
+        // Using a `MemoryManager` directly generally indicates that the memory is being read from a
+        // task different than the `CurrentTask`, so its address space may not be mapped and access
+        // must go through the backing VMO.
+        self.syscall_read_memory(addr, bytes)
+    }
+
+    fn read_memory_partial_until_null_byte<'a>(
+        &self,
+        addr: UserAddress,
+        bytes: &'a mut [MaybeUninit<u8>],
+    ) -> Result<&'a mut [u8], Errno> {
+        self.syscall_read_memory_partial_until_null_byte(addr, bytes)
+    }
+
+    fn read_memory_partial<'a>(
+        &self,
+        addr: UserAddress,
+        bytes: &'a mut [MaybeUninit<u8>],
+    ) -> Result<&'a mut [u8], Errno> {
+        self.syscall_read_memory_partial(addr, bytes)
+    }
+
+    fn write_memory(&self, addr: UserAddress, bytes: &[u8]) -> Result<usize, Errno> {
+        self.syscall_write_memory(addr, bytes)
+    }
+
+    fn write_memory_partial(&self, addr: UserAddress, bytes: &[u8]) -> Result<usize, Errno> {
+        self.syscall_write_memory_partial(addr, bytes)
+    }
+
+    fn zero(&self, addr: UserAddress, length: usize) -> Result<usize, Errno> {
+        self.syscall_zero(addr, length)
+    }
+}
+
+impl TaskMemoryAccessor for MemoryManager {
+    fn maximum_valid_address(&self) -> Option<UserAddress> {
+        Some(self.maximum_valid_user_address)
+    }
+
+    fn ensure_buffers_mapped_in_user_vmar(
+        &self,
+        _buffers: &[UserBuffer],
+        _access: MappingAccess,
+    ) -> Result<(), Errno> {
+        // Using `MemoryManager` rather than `CurrentTask` indicates that the target address space
+        // is not mapped in the current thread, so buffers cannot be mapped for direct user-VMAR
+        // access. Returning `ENOTSUP` lets callers of `peek_each_segment` (like
+        // `with_iovec_segments`) fall back to `InputBuffer` / `OutputBuffer` read/write methods.
+        error!(ENOTSUP)
+    }
+}
+
 /// The result of an atomic compare/exchange operation on user memory.
 #[derive(Debug, Clone)]
 pub enum CompareExchangeResult<T> {
@@ -5835,6 +6104,48 @@ impl SelectedAddress {
     }
 }
 
+/// Caches the most recently resolved file path while formatting `/proc/[pid]/maps` or `smaps`.
+///
+/// Mapped files (such as shared libraries) are typically split into several adjacent mappings
+/// (`r--p`, `r-xp`, `r--p`, `rw-p`) backed by separate `FileMapping` instances that reference the
+/// same `NamespaceNode`. Caching the last resolved path avoids repeating the `DirEntry` parent
+/// walk and `FsString` allocation for each segment.
+///
+/// Entries are keyed by the `Arc` pointers of `NamespaceNode::mount` and `NamespaceNode::entry`.
+/// Comparing raw pointer addresses is sound because the caller holds the `MemoryManagerState`
+/// read lock for the lifetime of the cache, keeping all mappings and their `NamespaceNode` `Arc`s
+/// alive so their addresses cannot be freed or reused.
+#[derive(Default)]
+struct FilePathCache {
+    last: Option<((Option<usize>, usize), FsString)>,
+}
+
+impl FilePathCache {
+    fn key(file: &crate::vfs::FileMapping) -> (Option<usize>, usize) {
+        let name = file.name();
+        (name.mount.as_ref().map(|m| Arc::as_ptr(m) as usize), Arc::as_ptr(&name.entry) as usize)
+    }
+
+    fn get_or_resolve(
+        &mut self,
+        file: &crate::vfs::FileMapping,
+        task: &Task,
+        fs_context: Option<&FsContext>,
+    ) -> Result<&[u8], Errno> {
+        let key = Self::key(file);
+        if self.last.as_ref().is_none_or(|(cached_key, _)| *cached_key != key) {
+            let name = file.name();
+            let path = if let Some(fs_context) = fs_context {
+                name.path(fs_context)
+            } else {
+                name.path(&*task.fs()?)
+            };
+            self.last = Some((key, path));
+        }
+        Ok(self.last.as_ref().unwrap().1.as_slice())
+    }
+}
+
 /// Write one line of the memory map intended for adding to `/proc/self/maps`.
 fn write_map(
     task: &Task,
@@ -5843,6 +6154,7 @@ fn write_map(
     state: &MemoryManagerState,
     range: &Range<UserAddress>,
     map: &Mapping,
+    file_path_cache: &mut FilePathCache,
 ) -> Result<(), Errno> {
     let line_length = write!(
         sink,
@@ -5861,8 +6173,9 @@ fn write_map(
     )?;
     let fill_to_name = |sink: &mut DynamicFileBuf| {
         // The filename goes at >= the 74th column (73rd when zero indexed)
-        for _ in line_length..73 {
-            sink.write(b" ");
+        const SPACES: [u8; 73] = [b' '; 73];
+        if line_length < SPACES.len() {
+            sink.write(&SPACES[line_length..]);
         }
     };
     match &map.name() {
@@ -5896,13 +6209,9 @@ fn write_map(
             // File names can have newlines that need to be escaped before printing.
             // According to https://man7.org/linux/man-pages/man5/proc.5.html the only
             // escaping applied to paths is replacing newlines with an octal sequence.
-            let path = if let Some(fs_context) = fs_context {
-                file.name().path(fs_context)
-            } else {
-                file.name().path(&*task.fs()?)
-            };
+            let path = file_path_cache.get_or_resolve(file, task, fs_context)?;
             if !path.contains(&b'\n') {
-                sink.write(&path);
+                sink.write(path);
             } else {
                 sink.write_iter(
                     path.iter()
@@ -5935,12 +6244,11 @@ fn write_map(
 /// own `/proc/self/*` memory statistics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SelfStatsCacheMode {
-    /// Allow returning recent `cached_stats` on self-reads when the mapping generation matches
-    /// (used for high-frequency self-polling files like `/proc/self/status` and
-    /// `/proc/self/smaps_rollup`).
+    /// Allow returning recent `cached_stats` on self-reads (used for high-frequency self-polling
+    /// files like `/proc/self/stat`, `/proc/self/status`, and `/proc/self/smaps_rollup`).
     AllowCached,
     /// Bypass `cached_stats` on self-reads to immediately reflect in-place committed page changes
-    /// from userspace page faults (used for `/proc/self/stat` and `/proc/self/statm`).
+    /// from userspace page faults (used for `/proc/self/statm`).
     BypassCache,
 }
 
@@ -5990,7 +6298,15 @@ impl SequenceFileSource for ProcMapsFile {
         let fs_context = task.fs().ok();
         let state = mm.state.read();
         if let Some((range, map)) = state.mappings.find_at_or_after(cursor) {
-            write_map(&task, fs_context.as_deref(), sink, &state, range, map)?;
+            write_map(
+                &task,
+                fs_context.as_deref(),
+                sink,
+                &state,
+                range,
+                map,
+                &mut FilePathCache::default(),
+            )?;
             return Ok(Some(range.end));
         }
         Ok(None)
@@ -6018,7 +6334,7 @@ impl ProcSmapsFile {
         state: &MemoryManagerState,
         zx_mappings: &[zx::MapInfo],
     ) -> Vec<u64> {
-        let mut committed_bytes_vec = Vec::new();
+        let mut committed_bytes_vec = Vec::with_capacity(zx_mappings.len());
         let mut zx_idx = 0;
         for (mm_range, mm_mapping) in state.mappings.iter() {
             let mm_start = mm_range.start.ptr();
@@ -6113,21 +6429,46 @@ impl DynamicFileSource for ProcSmapsFile {
             Self::compute_committed_bytes(&mm, &state, zx_mappings)
         });
 
-        let mut share_count_cache: HashMap<zx::Koid, u64> = HashMap::default();
+        let mut share_count_cache: FxHashMap<zx::Koid, u64> = FxHashMap::default();
+        let mut file_path_cache = FilePathCache::default();
 
         for ((mm_range, mm_mapping), committed_bytes) in
             state.mappings.iter().zip(committed_bytes_vec.into_iter())
         {
-            write_map(&task, fs_context_ref, sink, &state, mm_range, mm_mapping)?;
+            write_map(
+                &task,
+                fs_context_ref,
+                sink,
+                &state,
+                mm_range,
+                mm_mapping,
+                &mut file_path_cache,
+            )?;
 
             let size_kb = (mm_range.end.ptr() - mm_range.start.ptr()) / 1024;
             let rss_kb = committed_bytes / 1024;
 
-            let share_count = if rss_kb == 0 {
-                // If there is no memory, share_count has no effect (all below is 0)
-                1
+            if rss_kb == 0 {
+                // Keep the zeroed fields in the format string literal so `write!` copies them as
+                // static slices instead of formatting and padding 8 separate zero integers at
+                // runtime.
+                write!(
+                    sink,
+                    "Size:           {size_kb:>8} kB\n\
+                     Rss:                   0 kB\n\
+                     Pss:                   0 kB\n\
+                     Shared_Clean:          0 kB\n\
+                     Shared_Dirty:          0 kB\n\
+                     Private_Clean:         0 kB\n\
+                     Private_Dirty:         0 kB\n\
+                     Anonymous:             0 kB\n\
+                     KernelPageSize: {page_size_kb:>8} kB\n\
+                     MMUPageSize:    {page_size_kb:>8} kB\n\
+                     Locked:                0 kB\n\
+                     VmFlags: "
+                )?;
             } else {
-                match state.get_mapping_backing(mm_mapping) {
+                let share_count = match state.get_mapping_backing(mm_mapping) {
                     MappingBacking::Memory(backing) => {
                         let memory = backing.memory();
                         let koid = memory.get_koid();
@@ -6148,37 +6489,39 @@ impl DynamicFileSource for ProcSmapsFile {
                     MappingBacking::PrivateAnonymous => {
                         1 // Private mapping
                     }
-                }
-            };
+                };
 
-            let is_shared = share_count > 1;
+                let is_shared = share_count > 1;
 
-            let pss_kb = if is_shared { rss_kb / share_count } else { rss_kb };
+                let pss_kb = if is_shared { rss_kb / share_count } else { rss_kb };
 
-            track_stub!(TODO("https://fxbug.dev/322874967"), "smaps dirty pages");
-            let (shared_dirty_kb, private_dirty_kb) = (0, 0);
-            let shared_clean_kb = if is_shared { rss_kb } else { 0 };
-            let private_clean_kb = if is_shared { 0 } else { rss_kb };
+                track_stub!(TODO("https://fxbug.dev/322874967"), "smaps dirty pages");
+                let (shared_dirty_kb, private_dirty_kb) = (0, 0);
+                let shared_clean_kb = if is_shared { rss_kb } else { 0 };
+                let private_clean_kb = if is_shared { 0 } else { rss_kb };
 
-            let anonymous_kb = if mm_mapping.private_anonymous() { rss_kb } else { 0 };
-            let locked_kb =
-                if mm_mapping.flags().contains(MappingFlags::LOCKED) { rss_kb } else { 0 };
-            writeln!(
-                sink,
-                "Size:           {size_kb:>8} kB\n\
-                 Rss:            {rss_kb:>8} kB\n\
-                 Pss:            {pss_kb:>8} kB\n\
-                 Shared_Clean:   {shared_clean_kb:>8} kB\n\
-                 Shared_Dirty:   {shared_dirty_kb:>8} kB\n\
-                 Private_Clean:  {private_clean_kb:>8} kB\n\
-                 Private_Dirty:  {private_dirty_kb:>8} kB\n\
-                 Anonymous:      {anonymous_kb:>8} kB\n\
-                 KernelPageSize: {page_size_kb:>8} kB\n\
-                 MMUPageSize:    {page_size_kb:>8} kB\n\
-                 Locked:         {locked_kb:>8} kB\n\
-                 VmFlags: {}",
-                mm_mapping.vm_flags()
-            )?;
+                let anonymous_kb = if mm_mapping.private_anonymous() { rss_kb } else { 0 };
+                let locked_kb =
+                    if mm_mapping.flags().contains(MappingFlags::LOCKED) { rss_kb } else { 0 };
+                write!(
+                    sink,
+                    "Size:           {size_kb:>8} kB\n\
+                     Rss:            {rss_kb:>8} kB\n\
+                     Pss:            {pss_kb:>8} kB\n\
+                     Shared_Clean:   {shared_clean_kb:>8} kB\n\
+                     Shared_Dirty:   {shared_dirty_kb:>8} kB\n\
+                     Private_Clean:  {private_clean_kb:>8} kB\n\
+                     Private_Dirty:  {private_dirty_kb:>8} kB\n\
+                     Anonymous:      {anonymous_kb:>8} kB\n\
+                     KernelPageSize: {page_size_kb:>8} kB\n\
+                     MMUPageSize:    {page_size_kb:>8} kB\n\
+                     Locked:         {locked_kb:>8} kB\n\
+                     VmFlags: "
+                )?;
+            }
+
+            mm_mapping.write_vm_flags(sink);
+            sink.write(b"\n");
 
             track_stub!(TODO("https://fxbug.dev/297444691"), "optional smaps fields");
         }
@@ -6598,9 +6941,11 @@ mod tests {
     use crate::task::KernelFeatures;
     use crate::task::syscalls::sys_prctl;
     use crate::testing::*;
-    use crate::vfs::{FdFlags, FdNumber, fileops_impl_memory, new_memfd};
+    use crate::vfs::{FdFlags, FdNumber, FileMapping, fileops_impl_memory, new_memfd};
     use assert_matches::assert_matches;
     use itertools::assert_equal;
+    use starnix_uapi::device_id::DeviceId;
+    use starnix_uapi::file_mode::FileMode;
     use starnix_uapi::open_flags::OpenFlags;
     use starnix_uapi::seal_flags::SealFlags;
     use starnix_uapi::user_address::{UserCString, UserRef};
@@ -6624,6 +6969,313 @@ mod tests {
         let adusted_mapping_flags = mapping_flags.with_access_flags(new_access_flags);
         assert_eq!(adusted_mapping_flags.access_flags(), new_access_flags);
         assert_eq!(adusted_mapping_flags.options(), options);
+    }
+
+    #[::fuchsia::test]
+    fn test_write_vm_flags() {
+        let options = MappingOptions::ANONYMOUS;
+        let access_flags = ProtectionFlags::READ | ProtectionFlags::WRITE;
+        let mapping_flags = MappingFlags::from_access_flags_and_options(access_flags, options);
+        let mapping = Mapping::with_name(
+            MappingBacking::PrivateAnonymous,
+            mapping_flags,
+            MappingName::None,
+            MappingMode::Eager,
+        );
+        let mut sink = DynamicFileBuf::default();
+        mapping.write_vm_flags(&mut sink);
+        let bytes: Vec<u8> = sink.into();
+        let str_flags = std::str::from_utf8(&bytes).unwrap();
+        assert!(str_flags.contains("rd "));
+        assert!(str_flags.contains("wr "));
+        assert!(str_flags.contains("mr "));
+        assert!(str_flags.contains("mw "));
+        assert!(str_flags.contains("ac "));
+
+        // Exhaustive test covering all 15 VM flags:
+        // rd, wr, ex, sh, mr, mw, me, ms, gd, lo, wf, dc, de, ac, and um.
+        let all_access = ProtectionFlags::READ | ProtectionFlags::WRITE | ProtectionFlags::EXEC;
+        let all_options = MappingOptions::SHARED
+            | MappingOptions::GROWSDOWN
+            | MappingOptions::DONTFORK
+            | MappingOptions::WIPEONFORK
+            | MappingOptions::DONT_EXPAND;
+        let mut exhaustive_flags =
+            MappingFlags::from_access_flags_and_options(all_access, all_options);
+        exhaustive_flags |= MappingFlags::LOCKED | MappingFlags::UFFD_MISSING;
+
+        let mapping_all = Mapping::with_name(
+            MappingBacking::PrivateAnonymous,
+            exhaustive_flags,
+            MappingName::None,
+            MappingMode::Eager,
+        );
+        let mut sink_all = DynamicFileBuf::default();
+        mapping_all.write_vm_flags(&mut sink_all);
+        let bytes_all: Vec<u8> = sink_all.into();
+        let str_all = std::str::from_utf8(&bytes_all).unwrap();
+
+        // Verify the exact full sequence
+        assert_eq!(str_all, "rd wr ex sh mr mw me ms gd lo dc de ac wf um ");
+    }
+
+    #[::fuchsia::test]
+    async fn test_pad_to_column_boundaries() {
+        spawn_kernel_and_run(async |current_task| {
+            let mm = current_task.mm().unwrap();
+            let state = mm.state.read();
+            let fs_context = current_task.fs();
+            let mapping_flags = MappingFlags::from_access_flags_and_options(
+                ProtectionFlags::READ,
+                MappingOptions::ANONYMOUS,
+            );
+            let range = UserAddress::from(0x10000)..UserAddress::from(0x20000);
+
+            // Named mapping: verify name starts at column 74 (0-indexed byte 73).
+            let mapping_vdso = Mapping::with_name(
+                MappingBacking::PrivateAnonymous,
+                mapping_flags,
+                MappingName::Vdso,
+                MappingMode::Eager,
+            );
+            let mut sink_named = DynamicFileBuf::default();
+            write_map(
+                &current_task.task,
+                Some(&fs_context),
+                &mut sink_named,
+                &state,
+                &range,
+                &mapping_vdso,
+                &mut FilePathCache::default(),
+            )
+            .expect("write_map");
+            let bytes_named: Vec<u8> = sink_named.into();
+            assert_eq!(&bytes_named[..40], b"00010000-00020000 r--p 00000000 00:00 0 ");
+            assert_eq!(&bytes_named[40..73], &[b' '; 33]);
+            assert_eq!(&bytes_named[73..], b"[vdso]\n");
+
+            // Anonymous unnamed mapping: verify trailing spaces omitted.
+            let mapping_anon = Mapping::with_name(
+                MappingBacking::PrivateAnonymous,
+                mapping_flags,
+                MappingName::None,
+                MappingMode::Eager,
+            );
+            let mut sink = DynamicFileBuf::default();
+            write_map(
+                &current_task.task,
+                Some(&fs_context),
+                &mut sink,
+                &state,
+                &range,
+                &mapping_anon,
+                &mut FilePathCache::default(),
+            )
+            .expect("write_map");
+            let bytes: Vec<u8> = sink.into();
+            let line = std::str::from_utf8(&bytes).unwrap();
+            assert_eq!(line, "00010000-00020000 r--p 00000000 00:00 0 \n");
+            let trimmed = &line[..line.len() - 1];
+            assert!(trimmed.len() < 73, "Anonymous mapping line should not be padded to column 73");
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_proc_smaps_file_path_caching() {
+        spawn_kernel_and_run(async |current_task| {
+            let root = current_task.fs().root();
+            let _ = root
+                .create_node(
+                    &current_task,
+                    "file_a".into(),
+                    FileMode::from_bits(0o777 | FileMode::IFREG.bits()),
+                    DeviceId::NONE,
+                )
+                .expect("create file_a");
+            let file_a =
+                current_task.open_file("file_a".into(), OpenFlags::RDWR).expect("open file_a");
+            let file_mapping_a = FileMapping::new(file_a.clone(), None).expect("file_mapping_a");
+            let file_mapping_a2 = FileMapping::new(file_a, None).expect("file_mapping_a2");
+            assert!(!Arc::ptr_eq(&file_mapping_a, &file_mapping_a2));
+
+            let _ = root
+                .create_node(
+                    &current_task,
+                    "file_b".into(),
+                    FileMode::from_bits(0o777 | FileMode::IFREG.bits()),
+                    DeviceId::NONE,
+                )
+                .expect("create file_b");
+            let file_b =
+                current_task.open_file("file_b".into(), OpenFlags::RDWR).expect("open file_b");
+            let file_mapping_b = FileMapping::new(file_b, None).expect("file_mapping_b");
+
+            let mm = current_task.mm().unwrap();
+            let state = mm.state.read();
+            let fs_context = current_task.fs();
+            let fs_context_ref = Some(&*fs_context);
+
+            let mapping_flags = MappingFlags::from_access_flags_and_options(
+                ProtectionFlags::READ,
+                MappingOptions::empty(),
+            );
+
+            let mapping_a1 = Mapping::with_name(
+                MappingBacking::PrivateAnonymous,
+                mapping_flags,
+                MappingName::File(file_mapping_a.clone()),
+                MappingMode::Eager,
+            );
+            let mapping_a2 = Mapping::with_name(
+                MappingBacking::PrivateAnonymous,
+                mapping_flags,
+                MappingName::File(file_mapping_a2.clone()),
+                MappingMode::Eager,
+            );
+            let mapping_anon = Mapping::with_name(
+                MappingBacking::PrivateAnonymous,
+                mapping_flags,
+                MappingName::None,
+                MappingMode::Eager,
+            );
+            let mapping_b = Mapping::with_name(
+                MappingBacking::PrivateAnonymous,
+                mapping_flags,
+                MappingName::File(file_mapping_b.clone()),
+                MappingMode::Eager,
+            );
+
+            let mut file_path_cache = FilePathCache::default();
+
+            // 1. Initial mapping with file_A: caches resolved path
+            let range1 = UserAddress::from(0x10000)..UserAddress::from(0x20000);
+            let mut sink1 = DynamicFileBuf::default();
+            write_map(
+                &current_task.task,
+                fs_context_ref,
+                &mut sink1,
+                &state,
+                &range1,
+                &mapping_a1,
+                &mut file_path_cache,
+            )
+            .expect("write_map");
+            let bytes1: Vec<u8> = sink1.into();
+            let line1 = std::str::from_utf8(&bytes1).unwrap();
+            assert!(line1.ends_with("/file_a\n"), "line1: {line1}");
+            let expected_key_a = FilePathCache::key(&file_mapping_a);
+            let (cached_key, cached_path) = file_path_cache.last.as_ref().expect("cached");
+            assert_eq!(*cached_key, expected_key_a);
+            assert_eq!(cached_path.as_slice(), b"/file_a");
+
+            // 2. Adjacent mapping of a distinct FileMapping for the same file: verify cache hit
+            let range2 = UserAddress::from(0x20000)..UserAddress::from(0x30000);
+            let mut sink2 = DynamicFileBuf::default();
+            write_map(
+                &current_task.task,
+                fs_context_ref,
+                &mut sink2,
+                &state,
+                &range2,
+                &mapping_a2,
+                &mut file_path_cache,
+            )
+            .expect("write_map");
+            let bytes2: Vec<u8> = sink2.into();
+            let line2 = std::str::from_utf8(&bytes2).unwrap();
+            assert!(line2.ends_with("/file_a\n"), "line2: {line2}");
+            assert_eq!(file_path_cache.last.as_ref().unwrap().0, expected_key_a);
+
+            // 3. Interleaved mappings (file_A -> anonymous -> file_A):
+            // Anonymous mapping does not touch or invalidate file_path_cache
+            let range_anon = UserAddress::from(0x30000)..UserAddress::from(0x40000);
+            let mut sink_anon = DynamicFileBuf::default();
+            write_map(
+                &current_task.task,
+                fs_context_ref,
+                &mut sink_anon,
+                &state,
+                &range_anon,
+                &mapping_anon,
+                &mut file_path_cache,
+            )
+            .expect("write_map");
+            let bytes_anon: Vec<u8> = sink_anon.into();
+            let line_anon = std::str::from_utf8(&bytes_anon).unwrap();
+            assert!(!line_anon.contains("file_a"), "anonymous line: {line_anon}");
+            // Verify cache properly matches when returning to file_A
+            assert_eq!(file_path_cache.last.as_ref().unwrap().0, expected_key_a);
+
+            let range3 = UserAddress::from(0x40000)..UserAddress::from(0x50000);
+            let mut sink3 = DynamicFileBuf::default();
+            write_map(
+                &current_task.task,
+                fs_context_ref,
+                &mut sink3,
+                &state,
+                &range3,
+                &mapping_a1,
+                &mut file_path_cache,
+            )
+            .expect("write_map");
+            let bytes3: Vec<u8> = sink3.into();
+            let line3 = std::str::from_utf8(&bytes3).unwrap();
+            assert!(line3.ends_with("/file_a\n"), "line3: {line3}");
+            assert_eq!(file_path_cache.last.as_ref().unwrap().0, expected_key_a);
+
+            // 4. Distinct files (file_A -> file_B): verify file_B is resolved and printed correctly without bleeding file_A's path
+            let range_b = UserAddress::from(0x50000)..UserAddress::from(0x60000);
+            let mut sink_b = DynamicFileBuf::default();
+            write_map(
+                &current_task.task,
+                fs_context_ref,
+                &mut sink_b,
+                &state,
+                &range_b,
+                &mapping_b,
+                &mut file_path_cache,
+            )
+            .expect("write_map");
+            let bytes_b: Vec<u8> = sink_b.into();
+            let line_b = std::str::from_utf8(&bytes_b).unwrap();
+            assert!(line_b.ends_with("/file_b\n"), "line_b: {line_b}");
+            assert!(!line_b.contains("file_a"), "line_b should not bleed file_a's path");
+            let expected_key_b = FilePathCache::key(&file_mapping_b);
+            assert_eq!(file_path_cache.last.as_ref().unwrap().0, expected_key_b);
+            assert_eq!(file_path_cache.last.as_ref().unwrap().1.as_slice(), b"/file_b");
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_proc_smaps_generation() {
+        spawn_kernel_with_features_and_run(
+            async |current_task| {
+                let _uncommitted = map_memory(&current_task, UserAddress::default(), *PAGE_SIZE);
+                let gap = map_memory(&current_task, UserAddress::default(), *PAGE_SIZE);
+                let committed = map_memory(&current_task, UserAddress::default(), *PAGE_SIZE);
+                current_task.mm().unwrap().unmap(gap, *PAGE_SIZE as usize).expect("unmap gap");
+                current_task.write_memory(committed, &[0x42; 16]).expect("write committed page");
+                let mm = current_task.mm().unwrap();
+                assert_eq!(mm.get_mapping_count(), 2);
+                let smaps = ProcSmapsFile {
+                    mm: Arc::downgrade(&mm),
+                    target: TaskContainer::from_task(&current_task.task),
+                };
+                let mut sink = DynamicFileBuf::default();
+                smaps.generate(current_task, &mut sink).expect("generate");
+                let bytes: Vec<u8> = sink.into();
+                let content = std::str::from_utf8(&bytes).unwrap();
+                let page_kb = *PAGE_SIZE / 1024;
+                assert!(content.contains("Size:"));
+                assert!(content.contains("Rss:                   0 kB"));
+                assert!(content.contains(&format!("Rss:            {page_kb:>8} kB")));
+                assert!(content.contains("VmFlags:"));
+            },
+            KernelFeatures { cached_zx_map_info_bytes: 4096, ..Default::default() },
+        )
+        .await;
     }
 
     #[::fuchsia::test]
@@ -6656,7 +7308,7 @@ mod tests {
             );
 
             let mapping = Mapping::with_name(
-                MappingBacking::Memory(Box::new(MappingBackingMemory::new(addr, memory, 0))),
+                MappingBacking::Memory(MappingBackingMemory::new(addr, memory, 0)),
                 flags,
                 MappingName::None,
                 MappingMode::Lazy,
@@ -7797,10 +8449,8 @@ mod tests {
                 let mm = current_task.mm().unwrap();
                 let page_size = *PAGE_SIZE as usize;
 
-                assert_eq!(
-                    mm.get_stats(&current_task, SelfStatsCacheMode::AllowCached).vm_stack,
-                    0
-                );
+                let base_stats = mm.get_stats(&current_task, SelfStatsCacheMode::AllowCached);
+                assert_eq!(base_stats.vm_stack, 0);
 
                 // Regular anonymous mapping does not count toward vm_stack, even when adjacent to a
                 // MAP_GROWSDOWN mapping.
@@ -7826,11 +8476,80 @@ mod tests {
                     mm.get_stats(&current_task, SelfStatsCacheMode::AllowCached).vm_stack,
                     3 * page_size
                 );
+                assert_eq!(
+                    mm.get_stats(&current_task, SelfStatsCacheMode::BypassCache).vm_stack,
+                    3 * page_size
+                );
 
-                // Unmap the entire 3-page MAP_GROWSDOWN region.
-                mm.unmap(extended_low, 3 * page_size).unwrap();
+                // Forking preserves stack_usage via `Mappings::append_non_overlapping` and
+                // unmapping in the child decrements it back to 0.
+                let child = current_task.clone_task_for_test(0, None);
+                let child_mm = child.mm().unwrap();
+                assert_eq!(
+                    child_mm.get_stats(&child, SelfStatsCacheMode::AllowCached).vm_stack,
+                    3 * page_size
+                );
+                child_mm.unmap(extended_low, 3 * page_size).unwrap();
+                assert_eq!(child_mm.get_stats(&child, SelfStatsCacheMode::AllowCached).vm_stack, 0);
+                assert_eq!(child_mm.get_stats(&child, SelfStatsCacheMode::BypassCache).vm_stack, 0);
+
+                // Partial unmap: unmap the lowest page of the 3-page MAP_GROWSDOWN region.
+                mm.unmap(extended_low, page_size).unwrap();
                 assert_eq!(
                     mm.get_stats(&current_task, SelfStatsCacheMode::AllowCached).vm_stack,
+                    2 * page_size
+                );
+                assert_eq!(
+                    mm.get_stats(&current_task, SelfStatsCacheMode::BypassCache).vm_stack,
+                    2 * page_size
+                );
+
+                // Partial overwrite: replace the middle page with a non-GROWSDOWN mapping via
+                // MAP_FIXED (`Mappings::insert` subtracting `removed_stack_len`), then restore it
+                // as a GROWSDOWN mapping.
+                let middle_page = (extended_low + page_size).unwrap();
+                let vm_size_before_overwrite =
+                    mm.get_stats(&current_task, SelfStatsCacheMode::AllowCached).vm_size;
+                assert_eq!(
+                    map_memory_with_flags(
+                        &current_task,
+                        middle_page,
+                        *PAGE_SIZE,
+                        MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED,
+                    ),
+                    middle_page
+                );
+                let after_non_stack_overwrite =
+                    mm.get_stats(&current_task, SelfStatsCacheMode::AllowCached);
+                assert_eq!(after_non_stack_overwrite.vm_size, vm_size_before_overwrite);
+                assert_eq!(after_non_stack_overwrite.vm_stack, page_size);
+                assert_eq!(
+                    mm.get_stats(&current_task, SelfStatsCacheMode::BypassCache).vm_stack,
+                    page_size
+                );
+
+                assert_eq!(
+                    map_memory_with_flags(
+                        &current_task,
+                        middle_page,
+                        *PAGE_SIZE,
+                        MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED | MAP_GROWSDOWN,
+                    ),
+                    middle_page
+                );
+                assert_eq!(
+                    mm.get_stats(&current_task, SelfStatsCacheMode::AllowCached).vm_stack,
+                    2 * page_size
+                );
+
+                // Unmap the remaining 2-page MAP_GROWSDOWN region.
+                mm.unmap(middle_page, 2 * page_size).unwrap();
+                assert_eq!(
+                    mm.get_stats(&current_task, SelfStatsCacheMode::AllowCached).vm_stack,
+                    0
+                );
+                assert_eq!(
+                    mm.get_stats(&current_task, SelfStatsCacheMode::BypassCache).vm_stack,
                     0
                 );
             },
@@ -8356,6 +9075,75 @@ mod tests {
     }
 
     #[::fuchsia::test]
+    async fn test_set_vma_name_splits_and_merges() {
+        spawn_kernel_and_run(async |current_task| {
+            let page_size = *PAGE_SIZE as usize;
+            let mm = current_task.mm().unwrap();
+            let base = map_memory(&current_task, UserAddress::default(), 3 * *PAGE_SIZE);
+
+            // Split into named segments, then rename one of them to the name it already has.
+            mm.set_mapping_name(base, page_size, Some("seg-a".into())).unwrap();
+            mm.set_mapping_name((base + page_size).unwrap(), page_size, Some("seg-b".into()))
+                .unwrap();
+            mm.set_mapping_name((base + 2 * page_size).unwrap(), page_size, Some("seg-b".into()))
+                .unwrap();
+            mm.set_mapping_name((base + page_size).unwrap(), page_size, Some("seg-b".into()))
+                .unwrap();
+            {
+                let state = mm.state.read();
+                let (range, mapping) = state.mappings.get((base + page_size).unwrap()).unwrap();
+                assert_eq!(range.start, (base + page_size).unwrap());
+                assert_eq!(mapping.name(), MappingName::Vma("seg-b".into()));
+            }
+
+            // Renaming all 3 pages to the same name coalesces the split RangeMap entries back into
+            // a single 3-page mapping.
+            mm.set_mapping_name(base, 3 * page_size, Some("merged".into())).unwrap();
+            {
+                let state = mm.state.read();
+                let (range, mapping) = state.mappings.get(base).unwrap();
+                assert_eq!(range.start, base);
+                assert_eq!(range.end, (base + 3 * page_size).unwrap());
+                assert_eq!(mapping.name(), MappingName::Vma("merged".into()));
+            }
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_unmap_coalesces_split_private_anonymous_ranges() {
+        spawn_kernel_and_run(async |current_task| {
+            let page_size = *PAGE_SIZE as usize;
+            let mm = current_task.mm().unwrap();
+            let base = map_memory(&current_task, UserAddress::default(), 5 * *PAGE_SIZE);
+
+            for idx in 0..5 {
+                let page_addr = (base + idx * page_size).unwrap();
+                current_task.write_memory(page_addr, &[0xaau8; 8]).unwrap();
+                mm.set_mapping_name(page_addr, page_size, Some(format!("split-{idx}").into()))
+                    .unwrap();
+            }
+
+            // Create a gap at page 1 so pages [0] and [2, 3] form two separate runs when unmapping
+            // the first 4 pages, while page 4 remains mapped and intact.
+            mm.unmap((base + page_size).unwrap(), page_size).unwrap();
+            mm.unmap(base, 4 * page_size).unwrap();
+
+            for idx in 0..4 {
+                let page_addr = (base + idx * page_size).unwrap();
+                let mut raw = [MaybeUninit::uninit(); 8];
+                let bytes =
+                    mm.mapping_context.private_anonymous.read_memory(page_addr, &mut raw).unwrap();
+                assert_eq!(bytes, &[0u8; 8], "page {idx} should be zeroed in backing VMO");
+            }
+
+            let kept_addr = (base + 4 * page_size).unwrap();
+            assert_eq!(current_task.read_memory_to_array::<8>(kept_addr).unwrap(), [0xaau8; 8]);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
     fn test_fill_contiguous_entries_vectorized() {
         let mut slice = [0u64; 512];
         let flags = 0x8000_0000_0000_0000;
@@ -8401,23 +9189,6 @@ mod tests {
         backing.memory().get_koid()
     }
 
-    /// Returns the koids of the VMOs pinned by the mlock shadow process.
-    fn mlock_shadow_process_pinned_koids(kernel: &Kernel) -> Vec<zx::Koid> {
-        let shadow_process =
-            kernel.expando.peek::<MlockShadowProcess>().expect("shadow process should exist");
-        shadow_process
-            .0
-            .vmar()
-            .maps_vec()
-            .unwrap()
-            .iter()
-            .filter_map(|map| match map.details() {
-                zx::MapDetails::Mapping(details) => Some(details.vmo_koid),
-                _ => None,
-            })
-            .collect()
-    }
-
     fn mlock_features(flavor: MlockPinFlavor) -> KernelFeatures {
         let mut features = KernelFeatures::default();
         features.mlock_pin_flavor = flavor;
@@ -8453,7 +9224,7 @@ mod tests {
                 mm.mlock(current_task, addr, page_size, false).expect("mlock failed");
                 let original_koid = mapping_memory_koid(&mm, addr);
                 assert_eq!(
-                    mlock_shadow_process_pinned_koids(current_task.kernel()),
+                    MlockShadowProcess::pinned_vmo_koids(current_task.kernel()),
                     [original_koid]
                 );
 
@@ -8465,7 +9236,10 @@ mod tests {
 
                 let child_koid = mapping_memory_koid(&mm, addr);
                 assert_ne!(child_koid, original_koid);
-                assert_eq!(mlock_shadow_process_pinned_koids(current_task.kernel()), [child_koid]);
+                assert_eq!(
+                    MlockShadowProcess::pinned_vmo_koids(current_task.kernel()),
+                    [child_koid]
+                );
             },
             mlock_features(MlockPinFlavor::ShadowProcess),
         )
@@ -8777,7 +9551,10 @@ mod tests {
 
                 mm.mlock(current_task, addr, page_size, false).expect("mlock failed");
                 let file_koid = mapping_memory_koid(&mm, addr);
-                assert_eq!(mlock_shadow_process_pinned_koids(current_task.kernel()), [file_koid]);
+                assert_eq!(
+                    MlockShadowProcess::pinned_vmo_koids(current_task.kernel()),
+                    [file_koid]
+                );
 
                 mm.protect(
                     current_task,
@@ -8800,7 +9577,10 @@ mod tests {
                         .flags()
                         .contains(MappingFlags::LOCKED)
                 );
-                assert_eq!(mlock_shadow_process_pinned_koids(current_task.kernel()), [child_koid]);
+                assert_eq!(
+                    MlockShadowProcess::pinned_vmo_koids(current_task.kernel()),
+                    [child_koid]
+                );
             },
             mlock_features(MlockPinFlavor::ShadowProcess),
         )
@@ -8832,6 +9612,116 @@ mod tests {
                 assert!(!mapping.flags().contains(MappingFlags::LAZY_PRIVATE_FILE));
             },
             mlock_features(MlockPinFlavor::VmarAlwaysNeed),
+        )
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_mlock_always_onfault_feature_does_not_prefault() {
+        let mut features = KernelFeatures::default();
+        features.cached_zx_map_info_bytes = *PAGE_SIZE as u32;
+        features.mlock_always_onfault = true;
+        spawn_kernel_with_features_and_run(
+            async |current_task| {
+                let page_size = *PAGE_SIZE as usize;
+                let addr = do_mmap(
+                    current_task,
+                    UserAddress::default(),
+                    page_size * 2,
+                    PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS,
+                    FdNumber::from_raw(-1),
+                    0,
+                )
+                .expect("mmap failed");
+                let mm = current_task.mm().unwrap();
+
+                // Even with on_fault: false, the kernel feature forces on-fault behavior.
+                mm.mlock(current_task, addr, page_size, false).expect("mlock failed");
+
+                let stats = mm.get_stats(current_task, SelfStatsCacheMode::AllowCached);
+                assert_eq!(stats.vm_rss, 0);
+                assert_eq!(stats.vm_lck, 0);
+            },
+            features,
+        )
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_mlock_prot_none() {
+        spawn_kernel_with_features_and_run(
+            async |current_task| {
+                let page_size = *PAGE_SIZE as usize;
+                let addr = do_mmap(
+                    current_task,
+                    UserAddress::default(),
+                    page_size * 3,
+                    PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS,
+                    FdNumber::from_raw(-1),
+                    0,
+                )
+                .expect("mmap failed");
+                let mm = current_task.mm().unwrap();
+                mm.protect(
+                    current_task,
+                    (addr + page_size).unwrap(),
+                    page_size,
+                    ProtectionFlags::empty(),
+                )
+                .expect("mprotect failed");
+
+                // mlock on a standalone PROT_NONE mapping returns ENOMEM without panicking.
+                assert_eq!(
+                    mm.mlock(current_task, (addr + page_size).unwrap(), page_size, false),
+                    error!(ENOMEM)
+                );
+
+                // [RW, PROT_NONE, RW] returns ENOMEM and only commits the first RW page.
+                assert_eq!(mm.mlock(current_task, addr, page_size * 3, false), error!(ENOMEM));
+                let stats = mm.get_stats(current_task, SelfStatsCacheMode::AllowCached);
+                assert_eq!(stats.vm_rss, page_size);
+                assert_eq!(stats.vm_lck, page_size);
+            },
+            KernelFeatures { cached_zx_map_info_bytes: *PAGE_SIZE as u32, ..Default::default() },
+        )
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_mlock_unmodified_private_file() {
+        spawn_kernel_with_features_and_run(
+            async |current_task| {
+                let file = new_memfd(
+                    current_task,
+                    b"test_memfd".into(),
+                    SealFlags::empty(),
+                    OpenFlags::RDWR,
+                )
+                .unwrap();
+                file.node().truncate(current_task, &file.name.mount, *PAGE_SIZE * 2).unwrap();
+                let fd = current_task.add_file(file, FdFlags::empty()).unwrap();
+                let page_size = *PAGE_SIZE as usize;
+                let addr = do_mmap(
+                    current_task,
+                    UserAddress::default(),
+                    page_size * 2,
+                    PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE,
+                    fd,
+                    0,
+                )
+                .expect("mmap failed");
+                let mm = current_task.mm().unwrap();
+                // Must be prefetched, not committed, so that it stays unmodified.
+                mm.mlock(current_task, addr, page_size, false).expect("mlock failed");
+                let state = mm.state.read();
+                let (_, mapping) = state.mappings.get(addr).expect("mapping");
+                assert!(mapping.flags().contains(MappingFlags::LOCKED));
+                assert!(mapping.is_unmodified_private_file());
+            },
+            KernelFeatures { cached_zx_map_info_bytes: *PAGE_SIZE as u32, ..Default::default() },
         )
         .await;
     }
@@ -8941,11 +9831,11 @@ mod tests {
                         MappingOptions::ANONYMOUS,
                     );
                     let lazy_mapping = Mapping::with_name(
-                        MappingBacking::Memory(Box::new(MappingBackingMemory::new(
+                        MappingBacking::Memory(MappingBackingMemory::new(
                             lazy_addr,
                             lazy_memory,
                             0,
-                        ))),
+                        )),
                         lazy_flags,
                         MappingName::None,
                         MappingMode::Lazy,
@@ -9001,7 +9891,8 @@ mod tests {
                 insert_lazy_mapping((mm.base_addr + 24 * page_size).unwrap());
 
                 let stats_after = mm.get_stats(&current_task, SelfStatsCacheMode::BypassCache);
-                assert_eq!(stats_after.vm_size - stats_before.vm_size, 7 * page_size);
+                // 7 pages of active mappings (3 + 2 + 2) plus 3 single-page lazy mappings.
+                assert_eq!(stats_after.vm_size - stats_before.vm_size, 10 * page_size);
                 assert_eq!(stats_after.vm_rss - stats_before.vm_rss, 3 * page_size);
                 assert_eq!(stats_after.rss_anonymous - stats_before.rss_anonymous, 3 * page_size);
             },
@@ -9031,6 +9922,11 @@ mod tests {
                 assert!(initial_stats.vm_size >= 2 * page_size);
                 assert!(initial_stats.vm_rss >= page_size);
 
+                // Pin the cached timestamp far in the future for cache-hit assertions so the test
+                // cannot flake if the thread is preempted for >= CACHE_TTL on a heavily loaded bot.
+                let far_future = zx::MonotonicInstant::get() + zx::MonotonicDuration::from_hours(1);
+                mm.cached_stats.lock().as_mut().unwrap().0 = far_future;
+
                 // Commit the second page of addr1 in-place (without changing mappings.generation)
                 // and verify a subsequent read within CACHE_TTL hits the cache.
                 current_task.write_memory((addr1 + page_size).unwrap(), &[1u8; 8]).unwrap();
@@ -9041,34 +9937,106 @@ mod tests {
                     (initial_stats.vm_size, initial_stats.vm_rss)
                 );
 
-                // 2. Cache expiration once now - timestamp >= CACHE_TTL (2000ms), and cache
-                // invalidation when mappings.generation changes.
-                let gen1 = mm.state.read().mappings.generation;
+                // 2. Cache expiration once now - timestamp >= CACHE_TTL (2000ms), O(1) vm_size
+                // and vm_stack updates across non-POPULATE VMA churn within CACHE_TTL, and
+                // immediate invalidation on MAP_POPULATE.
                 *mm.cached_stats.lock() = Some((
                     zx::MonotonicInstant::get() - zx::MonotonicDuration::from_millis(2001),
-                    gen1,
                     initial_stats,
                 ));
                 let expired_stats = mm.get_stats(&reader, SelfStatsCacheMode::AllowCached);
                 assert_eq!(expired_stats.vm_size, initial_stats.vm_size);
                 assert_eq!(expired_stats.vm_rss - initial_stats.vm_rss, page_size);
+                mm.cached_stats.lock().as_mut().unwrap().0 = far_future;
 
                 let addr2 = map_memory(&current_task, UserAddress::default(), 2 * *PAGE_SIZE);
                 current_task.write_memory(addr2, &[1u8; 8]).unwrap();
                 current_task.write_memory((addr2 + page_size).unwrap(), &[2u8; 8]).unwrap();
+                let stack_addr = map_memory_growsdown(&current_task, *PAGE_SIZE);
+
+                // Within CACHE_TTL, non-POPULATE VMA churn updates vm_size and vm_stack in O(1)
+                // without walking Zircon mappings (so vm_rss remains the cached value).
+                let churn_cached_stats = mm.get_stats(&reader, SelfStatsCacheMode::AllowCached);
+                assert_eq!(churn_cached_stats.vm_size - initial_stats.vm_size, 3 * page_size);
+                assert_eq!(churn_cached_stats.vm_stack - initial_stats.vm_stack, page_size);
+                assert_eq!(churn_cached_stats.vm_rss, expired_stats.vm_rss);
+
+                mm.unmap(stack_addr, page_size).unwrap();
+                let unmapped_stack_stats = mm.get_stats(&reader, SelfStatsCacheMode::AllowCached);
+                assert_eq!(unmapped_stack_stats.vm_size - initial_stats.vm_size, 2 * page_size);
+                assert_eq!(unmapped_stack_stats.vm_stack, initial_stats.vm_stack);
+                assert_eq!(unmapped_stack_stats.vm_rss, expired_stats.vm_rss);
+
+                // MappingOptions::POPULATE with PROT_NONE does not commit pages or invalidate
+                // cached_stats.
+                let prot_none_populated = mm
+                    .map_anonymous(
+                        DesiredAddress::Any,
+                        page_size,
+                        ProtectionFlags::empty(),
+                        MappingOptions::ANONYMOUS | MappingOptions::POPULATE,
+                        MappingName::None,
+                    )
+                    .unwrap();
+                assert!(mm.cached_stats.lock().is_some());
+                mm.unmap(prot_none_populated, page_size).unwrap();
+
+                // Accessible MappingOptions::POPULATE invalidates cached_stats so an immediate
+                // AllowCached read reflects all newly committed pages; unmapping a large populated
+                // region that reduces total_usage below the cached vm_rss bypasses the stale cache.
+                let bulk_populated_len = initial_stats.vm_size + 8 * page_size;
+                let bulk_populated_addr = mm
+                    .map_anonymous(
+                        DesiredAddress::Any,
+                        bulk_populated_len,
+                        ProtectionFlags::READ | ProtectionFlags::WRITE,
+                        MappingOptions::ANONYMOUS | MappingOptions::POPULATE,
+                        MappingName::None,
+                    )
+                    .unwrap();
+                assert!(mm.cached_stats.lock().is_none());
+                let bulk_populated_stats =
+                    mm.get_stats(&current_task, SelfStatsCacheMode::AllowCached);
+                assert_eq!(
+                    bulk_populated_stats.vm_rss - initial_stats.vm_rss,
+                    3 * page_size + bulk_populated_len
+                );
+                mm.cached_stats.lock().as_mut().unwrap().0 = far_future;
+                mm.unmap(bulk_populated_addr, bulk_populated_len).unwrap();
+                let after_bulk_unmap_stats =
+                    mm.get_stats(&current_task, SelfStatsCacheMode::AllowCached);
+                assert_eq!(after_bulk_unmap_stats.vm_rss - initial_stats.vm_rss, 3 * page_size);
+
+                let _populated_addr = mm
+                    .map_anonymous(
+                        DesiredAddress::Any,
+                        page_size,
+                        ProtectionFlags::READ | ProtectionFlags::WRITE,
+                        MappingOptions::ANONYMOUS | MappingOptions::POPULATE,
+                        MappingName::None,
+                    )
+                    .unwrap();
+                assert!(mm.cached_stats.lock().is_none());
 
                 let refreshed_stats = mm.get_stats(&reader, SelfStatsCacheMode::AllowCached);
-                assert_eq!(refreshed_stats.vm_size - initial_stats.vm_size, 2 * page_size);
-                assert_eq!(refreshed_stats.vm_rss - initial_stats.vm_rss, 3 * page_size);
+                assert_eq!(refreshed_stats.vm_size - initial_stats.vm_size, 3 * page_size);
+                assert_eq!(refreshed_stats.vm_rss - initial_stats.vm_rss, 4 * page_size);
 
                 // 3. Kernel thread (mm() == Err, is_self_read == false) uses cached_stats, whereas a
                 // CLONE_VM sibling thread (is_self_read == true) bypasses stale cached_stats when
                 // SelfStatsCacheMode::BypassCache is requested.
-                let gen2 = mm.state.read().mappings.generation;
+                let sibling = current_task.clone_task_for_test(
+                    (starnix_uapi::CLONE_THREAD
+                        | starnix_uapi::CLONE_VM
+                        | starnix_uapi::CLONE_SIGHAND) as u64,
+                    None,
+                );
+                assert!(Arc::ptr_eq(&sibling.mm().unwrap(), &mm));
+
+                let synthetic_cached_rss = refreshed_stats.vm_size;
                 *mm.cached_stats.lock() = Some((
-                    zx::MonotonicInstant::get(),
-                    gen2,
-                    MemoryStats { vm_size: 123_456, vm_rss: 654_321, ..Default::default() },
+                    far_future,
+                    MemoryStats { vm_rss: synthetic_cached_rss, ..Default::default() },
                 ));
 
                 let (kthread_result_fn, req) =
@@ -9083,17 +10051,16 @@ mod tests {
                         .build_with_sync_result();
                 current_task.kernel().kthreads.spawner().spawn_from_request(req);
                 let kthread_stats = kthread_result_fn().expect("kthread get_stats");
-                assert_eq!((kthread_stats.vm_size, kthread_stats.vm_rss), (123_456, 654_321));
-
-                let sibling = current_task.clone_task_for_test(
-                    (starnix_uapi::CLONE_THREAD
-                        | starnix_uapi::CLONE_VM
-                        | starnix_uapi::CLONE_SIGHAND) as u64,
-                    None,
+                assert_eq!(
+                    (kthread_stats.vm_size, kthread_stats.vm_rss),
+                    (refreshed_stats.vm_size, synthetic_cached_rss)
                 );
-                assert!(Arc::ptr_eq(&sibling.mm().unwrap(), &mm));
+
                 let sibling_cached = mm.get_stats(&sibling, SelfStatsCacheMode::AllowCached);
-                assert_eq!((sibling_cached.vm_size, sibling_cached.vm_rss), (123_456, 654_321));
+                assert_eq!(
+                    (sibling_cached.vm_size, sibling_cached.vm_rss),
+                    (refreshed_stats.vm_size, synthetic_cached_rss)
+                );
                 let sibling_stats = mm.get_stats(&sibling, SelfStatsCacheMode::BypassCache);
                 assert_eq!(
                     (sibling_stats.vm_size, sibling_stats.vm_rss),
@@ -9106,9 +10073,37 @@ mod tests {
                 assert!(mm.cached_stats.lock().is_none());
                 let post_release_stats = mm.get_stats(&reader, SelfStatsCacheMode::AllowCached);
                 assert_eq!(post_release_stats.vm_size, refreshed_stats.vm_size);
-                assert!(post_release_stats.vm_rss + 4 * page_size <= refreshed_stats.vm_rss);
+                assert!(post_release_stats.vm_rss + 5 * page_size <= refreshed_stats.vm_rss);
             },
             KernelFeatures { cached_zx_map_info_bytes: 4096, ..Default::default() },
+        )
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_get_stats_without_map_info_cache() {
+        use crate::task::KernelFeatures;
+        use crate::testing::spawn_kernel_with_features_and_run;
+
+        spawn_kernel_with_features_and_run(
+            async |current_task| {
+                let mm = current_task.mm().unwrap();
+                let page_size = *PAGE_SIZE as usize;
+                let _addr = mm
+                    .map_anonymous(
+                        DesiredAddress::Any,
+                        page_size,
+                        ProtectionFlags::READ | ProtectionFlags::WRITE,
+                        MappingOptions::ANONYMOUS | MappingOptions::POPULATE,
+                        MappingName::None,
+                    )
+                    .unwrap();
+
+                let stats = mm.get_stats(&current_task, SelfStatsCacheMode::BypassCache);
+                assert!(stats.vm_size >= page_size);
+                assert!(stats.vm_rss >= page_size);
+            },
+            KernelFeatures { cached_zx_map_info_bytes: 0, ..Default::default() },
         )
         .await;
     }

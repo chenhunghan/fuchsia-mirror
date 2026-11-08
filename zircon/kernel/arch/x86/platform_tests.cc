@@ -13,7 +13,9 @@
 #include <lib/console.h>
 #include <lib/page/size.h>
 #include <lib/unittest/unittest.h>
+#include <platform.h>
 #include <zircon/syscalls/system.h>
+#include <zircon/time.h>
 
 #include <arch/arch_ops.h>
 #include <arch/mp.h>
@@ -21,20 +23,16 @@
 #include <arch/x86/apic.h>
 #include <arch/x86/cpuid.h>
 #include <arch/x86/cpuid_test_data.h>
-#include <arch/x86/fake_msr_access.h>
 #include <arch/x86/feature.h>
 #include <arch/x86/hwp.h>
 #include <arch/x86/interrupts.h>
-#include <arch/x86/platform_access.h>
 #include <hwreg/x86msr.h>
 #include <kernel/cpu.h>
 #include <kernel/deadline.h>
 #include <kernel/scheduler.h>
 #include <ktl/array.h>
 #include <ktl/unique_ptr.h>
-
-#include "../../lib/syscalls/system_priv.h"
-#include "amd.h"
+#include <platform/pc/timer.h>
 
 #include <ktl/enforce.h>
 
@@ -131,8 +129,7 @@ static bool test_x64_hwp_k_commands() {
   }
 
   // If we don't support HWP, expect every command to just return "not supported".
-  cpu_id::CpuId cpuid;
-  if (!x86::IntelHwpSupported(&cpuid)) {
+  if (!x86::IntelHwpSupported()) {
     EXPECT_EQ(ZX_ERR_NOT_SUPPORTED, console_run_script_locked("hwp"));
     return all_ok;
   }
@@ -158,9 +155,10 @@ static bool test_x64_hwp_k_commands() {
   EXPECT_EQ(ZX_OK, console_run_script_locked("hwp set-freq 100"));
   EXPECT_EQ(ZX_OK, console_run_script_locked("hwp set-freq 255"));
 
-  // Restore the policy to default.
-  MsrAccess msr;
-  x86::IntelHwpInit(&cpuid, &msr, BootOptions::Get()->x86_hwp_policy);
+  // Restore the policy to default across all CPUs.
+  mp_sync_exec(
+      mp_ipi_target::ALL, 0, [](void*) { x86::IntelHwpInit(BootOptions::Get()->x86_hwp_policy); },
+      nullptr);
 
   END_TEST;
 }
@@ -186,124 +184,6 @@ static bool test_x64_cpu_uarch_config_selection() {
   // AMD Ryzen Threadripper 2970WX is Zen
   EXPECT_EQ(get_microarch_config(&cpu_id::kCpuIdThreadRipper2970wx)->x86_microarch,
             X86_MICROARCH_AMD_ZEN);
-
-  END_TEST;
-}
-
-static uint32_t intel_make_microcode_checksum(uint32_t* patch, size_t bytes) {
-  size_t dwords = bytes / sizeof(uint32_t);
-  uint32_t sum = 0;
-  for (size_t i = 0; i < dwords; i++) {
-    sum += patch[i];
-  }
-  return -sum;
-}
-
-static bool test_x64_intel_ucode_loader() {
-  BEGIN_TEST;
-
-  // x86_intel_check_microcode_patch checks if a microcode patch is suitable for a particular
-  // CPU. Test that its match logic works for various CPUs and conditions we commonly use.
-
-  {
-    uint32_t fake_patch[512] = {};
-    // Intel(R) Celeron(R) CPU J3455 (Goldmont), NUC6CAYH
-    cpu_id::TestDataSet data = {};
-    data.leaf0 = {.reg = {0x15, 0x756e6547, 0x6c65746e, 0x49656e69}};
-    data.leaf1 = {.reg = {0x506c9, 0x2200800, 0x4ff8ebbf, 0xbfebfbff}};
-    data.leaf4 = {.reg = {0x3c000121, 0x140003f, 0x3f, 0x1}};
-    data.leaf7 = {.reg = {0x0, 0x2294e283, 0x0, 0x2c000000}};
-    cpu_id::FakeCpuId cpu(data);
-    FakeMsrAccess fake_msrs = {};
-    fake_msrs.msrs_[0] = {X86_MSR_IA32_PLATFORM_ID, 0x1ull << 50};  // Apollo Lake
-
-    // Reject an all-zero patch.
-    EXPECT_FALSE(
-        x86_intel_check_microcode_patch(&cpu, &fake_msrs, {fake_patch, sizeof(fake_patch)}));
-
-    // Reject patch with non-matching processor signature.
-    fake_patch[0] = 0x1;
-    fake_patch[4] = intel_make_microcode_checksum(fake_patch, sizeof(fake_patch));
-    EXPECT_FALSE(
-        x86_intel_check_microcode_patch(&cpu, &fake_msrs, {fake_patch, sizeof(fake_patch)}));
-
-    // Expect matching patch to pass
-    fake_patch[0] = 0x1;
-    fake_patch[3] = data.leaf1.reg[0];  // Signature match
-    fake_patch[6] = 0x3;                // Processor flags match PLATFORM_ID
-    fake_patch[4] = 0;
-    fake_patch[4] = intel_make_microcode_checksum(fake_patch, sizeof(fake_patch));
-    EXPECT_TRUE(
-        x86_intel_check_microcode_patch(&cpu, &fake_msrs, {fake_patch, sizeof(fake_patch)}));
-    // Real header from 2019-01-15, rev 38
-    fake_patch[0] = 0x1;
-    fake_patch[1] = 0x38;
-    fake_patch[2] = 0x01152019;
-    fake_patch[3] = 0x506c9;
-    fake_patch[6] = 0x3;  // Processor flags match PLATFORM_ID
-    fake_patch[4] = 0;
-    fake_patch[4] = intel_make_microcode_checksum(fake_patch, sizeof(fake_patch));
-    EXPECT_TRUE(
-        x86_intel_check_microcode_patch(&cpu, &fake_msrs, {fake_patch, sizeof(fake_patch)}));
-  }
-
-  END_TEST;
-}
-
-class FakeWriteMsr : public MsrAccess {
- public:
-  void write_msr(uint32_t msr_index, uint64_t value) override {
-    DEBUG_ASSERT(written_ == false);
-    written_ = true;
-    msr_index_ = msr_index;
-  }
-
-  bool written_ = false;
-  uint32_t msr_index_;
-};
-
-static bool test_x64_intel_ucode_patch_loader() {
-  BEGIN_TEST;
-
-  cpu_id::TestDataSet data = {};
-  cpu_id::FakeCpuId cpu(data);
-  FakeWriteMsr msrs;
-  uint32_t fake_patch[512] = {};
-
-  // This test can only run on physical Intel x86-64 hosts; x86_intel_get_patch_level
-  // does not use an interface to access patch_level registers and those registers are
-  // only present/writable on h/w.
-  if (x86_vendor == X86_VENDOR_INTEL && !x86_feature_test(X86_FEATURE_HYPERVISOR)) {
-    // Expect that a patch == current patch is not loaded.
-    uint32_t current_patch_level = x86_intel_get_patch_level();
-    fake_patch[1] = current_patch_level;
-    x86_intel_load_microcode_patch(&cpu, &msrs, {fake_patch, sizeof(fake_patch)});
-    EXPECT_FALSE(msrs.written_);
-
-    // Expect that a newer patch is loaded.
-    fake_patch[1] = current_patch_level + 1;
-    x86_intel_load_microcode_patch(&cpu, &msrs, {fake_patch, sizeof(fake_patch)});
-    EXPECT_TRUE(msrs.written_);
-    EXPECT_EQ(msrs.msr_index_, X86_MSR_IA32_BIOS_UPDT_TRIG);
-  }
-
-  END_TEST;
-}
-
-static bool test_amd_platform_init() {
-  BEGIN_TEST;
-  FakeMsrAccess fake_msrs = {};
-
-  // Test that set_lfence_serializing sets the LFENCE bit when its not already set.
-  fake_msrs.msrs_[0] = {X86_MSR_AMD_F10_DE_CFG, 0};
-  x86_amd_set_lfence_serializing(&cpu_id::kCpuIdThreadRipper2970wx, &fake_msrs);
-  EXPECT_EQ(fake_msrs.msrs_[0].value, 0x2ull, "");
-
-  // Test that set_lfence_serializing doesn't change the LFENCE bit when its set.
-  fake_msrs.msrs_[0] = {X86_MSR_AMD_F10_DE_CFG, 0x2ull};
-  fake_msrs.no_writes_ = true;
-  x86_amd_set_lfence_serializing(&cpu_id::kCpuIdThreadRipper2970wx, &fake_msrs);
-  EXPECT_EQ(fake_msrs.msrs_[0].value, 0x2ull, "");
 
   END_TEST;
 }
@@ -429,6 +309,36 @@ static bool test_x64_tss_io_bitmap() {
   END_TEST;
 }
 
+static bool test_convert_raw_tsc_timestamp_to_clock_monotonic() {
+  BEGIN_TEST;
+
+  const zx_instant_mono_t before_mono = current_mono_time();
+  const int64_t raw_tsc = static_cast<int64_t>(_rdtsc());
+  const zx_instant_mono_t converted_mono = convert_raw_tsc_timestamp_to_clock_monotonic(raw_tsc);
+  const zx_instant_mono_t after_mono = current_mono_time();
+
+  // Allow a small tolerance for non-TSC wallclocks (such as HPET or PIT) where
+  // `now_tsc` inside `convert_raw_tsc_timestamp_to_clock_monotonic` is sampled
+  // slightly after `raw_tsc`.
+  EXPECT_GE(converted_mono, zx_time_sub_duration(before_mono, ZX_MSEC(10)));
+  EXPECT_LE(converted_mono, zx_time_add_duration(after_mono, ZX_MSEC(10)));
+
+  constexpr int64_t kFutureTscDelta = 1'000'000'000;
+  const zx_duration_t future_duration = convert_raw_tsc_duration_to_nanoseconds(kFutureTscDelta);
+  if (future_duration > 0) {
+    const zx_instant_mono_t future_before = current_mono_time();
+    const int64_t future_tsc = static_cast<int64_t>(_rdtsc()) + kFutureTscDelta;
+    const zx_instant_mono_t future_converted =
+        convert_raw_tsc_timestamp_to_clock_monotonic(future_tsc);
+    const zx_instant_mono_t future_after = current_mono_time();
+
+    EXPECT_GE(future_converted, zx_time_add_duration(future_before, future_duration - ZX_MSEC(10)));
+    EXPECT_LE(future_converted, zx_time_add_duration(future_after, future_duration + ZX_MSEC(10)));
+  }
+
+  END_TEST;
+}
+
 }  // anonymous namespace
 
 UNITTEST_START_TESTCASE(x64_platform_tests)
@@ -436,12 +346,11 @@ UNITTEST("basic test of read/write MSR variants", test_x64_msrs)
 UNITTEST("test k cpu rdmsr commands", test_x64_msrs_k_commands)
 UNITTEST("test k hwp commands", test_x64_hwp_k_commands)
 UNITTEST("test uarch_config is correctly selected", test_x64_cpu_uarch_config_selection)
-UNITTEST("test Intel x86 microcode patch loader match and load logic", test_x64_intel_ucode_loader)
-UNITTEST("test Intel x86 microcode patch loader mechanism", test_x64_intel_ucode_patch_loader)
-UNITTEST("test amd_platform_init", test_amd_platform_init)
 UNITTEST("test spectre v2 mitigation building blocks", test_spectre_v2_mitigations)
 UNITTEST("test mds mitigation building blocks", test_mds_taa_mitigation)
 UNITTEST("test gdt is mapped", test_gdt_mapping)
 UNITTEST("test nmi spam", test_nmi_spam)
 UNITTEST("test tss io bitmap", test_x64_tss_io_bitmap)
+UNITTEST("test convert_raw_tsc_timestamp_to_clock_monotonic",
+         test_convert_raw_tsc_timestamp_to_clock_monotonic)
 UNITTEST_END_TESTCASE(x64_platform_tests, "x64_platform_tests", "")

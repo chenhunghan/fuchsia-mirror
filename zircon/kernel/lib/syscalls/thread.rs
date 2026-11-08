@@ -7,6 +7,7 @@
 use crate::arch_rs::UserEntryState;
 #[cfg(target_arch = "x86_64")]
 use crate::arch_rs::x86::vm::is_vaddr_canonical;
+use crate::counters::define_kcounter;
 use crate::object::{HandleValue, ProcessDispatcher, ThreadDispatcher, VmObjectDispatcher};
 use crate::user_copy::{UserInPtr, UserOutPtr};
 use boot_options::BootOptions;
@@ -17,24 +18,9 @@ use zx_status::Status;
 use zx_types::{
     ZX_HANDLE_INVALID, ZX_MAX_NAME_LEN, ZX_RIGHT_DUPLICATE, ZX_RIGHT_MANAGE_THREAD, ZX_RIGHT_READ,
     ZX_RIGHT_WRITE, ZX_THREAD_STATE_DEBUG_REGS, zx_exception_context_t, zx_excp_type_t, zx_rseq_t,
-    zx_status_t,
 };
 
-unsafe extern "C" {
-    /// Resets the restartable sequence (rseq) registration for the calling thread.
-    ///
-    /// # Safety
-    ///
-    /// Must only be called in a valid thread context.
-    fn cpp_thread_reset_rseq();
-
-    /// Registers a restartable sequence (rseq) for the calling thread backed by `vmo_dispatcher`.
-    ///
-    /// # Safety
-    ///
-    /// `vmo_dispatcher` must be a valid reference to an initialized `VmObjectDispatcher`.
-    fn cpp_thread_set_rseq(vmo_dispatcher: &VmObjectDispatcher, offset: u64) -> zx_status_t;
-}
+define_kcounter!(THREAD_LEGACY_YIELD, "thread.legacy_yield", Sum);
 
 const LOCAL_TRACE: u32 = 0;
 
@@ -138,7 +124,7 @@ pub fn sys_thread_read_state(
     let thread = ProcessDispatcher::with_current(|up| {
         up.handle_table().get_dispatcher_with_rights::<ThreadDispatcher>(up, handle, ZX_RIGHT_READ)
     })?;
-    thread.read_state(kind, buffer.reinterpret::<core::ffi::c_void>().as_ptr(), buffer_size)?;
+    thread.read_state(kind, buffer, buffer_size)?;
     Ok(())
 }
 
@@ -159,7 +145,7 @@ pub fn sys_thread_write_state(
     let thread = ProcessDispatcher::with_current(|up| {
         up.handle_table().get_dispatcher_with_rights::<ThreadDispatcher>(up, handle, ZX_RIGHT_WRITE)
     })?;
-    thread.write_state(kind, buffer.reinterpret::<core::ffi::c_void>().as_ptr(), buffer_size)?;
+    thread.write_state(kind, buffer, buffer_size)?;
     Ok(())
 }
 
@@ -192,8 +178,7 @@ pub fn sys_thread_set_rseq(vmo_handle: HandleValue, offset: u64, size: u64) -> R
             return Err(Status::INVALID_ARGS);
         }
 
-        // SAFETY: Resets the restartable sequence configuration on the current thread context.
-        unsafe { cpp_thread_reset_rseq() };
+        crate::kernel::thread::current_reset_rseq();
         return Ok(());
     }
 
@@ -216,16 +201,24 @@ pub fn sys_thread_set_rseq(vmo_handle: HandleValue, offset: u64, size: u64) -> R
         )
     })?;
 
-    // SAFETY: `vmo_dispatcher` is a valid `VmObjectDispatcher` reference.
-    let status = unsafe { cpp_thread_set_rseq(&vmo_dispatcher, offset) };
-    Status::ok(status)?;
-    Ok(())
+    let vmo = vmo_dispatcher.vmo();
+    if vmo.is_user_pager_backed() {
+        return Err(Status::INVALID_ARGS);
+    }
+    let vmo_paged =
+        crate::vm::vm_object::VmObject::downcast_paged(vmo.clone()).ok_or(Status::INVALID_ARGS)?;
+
+    crate::kernel::thread::current_set_rseq(vmo_paged, offset)
 }
 
 #[syscall]
 pub fn sys_thread_legacy_yield(options: u32) -> Result<(), Status> {
     ltracef!("options {:#x}\n", options);
 
-    ThreadDispatcher::legacy_yield(options)?;
+    if options != 0 {
+        return Err(Status::INVALID_ARGS);
+    }
+    THREAD_LEGACY_YIELD.add(1);
+    crate::kernel::thread::r#yield();
     Ok(())
 }

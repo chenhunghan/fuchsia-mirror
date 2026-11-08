@@ -222,6 +222,12 @@ void brcmf_fweh_handle_if_event(struct brcmf_pub* drvr, struct brcmf_event_msg* 
   ifp = drvr->iflist[ifevent->bsscfgidx];
 
   if (ifevent->action == BRCMF_E_IF_ADD) {
+    if (ifp != nullptr || drvr->if2bss[ifevent->ifidx] != BRCMF_BSSIDX_INVALID ||
+        !brcmf_cfg80211_vif_event_pending_add(drvr->config)) {
+      BRCMF_WARN("ignoring unexpected IF_ADD event (bsscfgidx: %u, ifidx: %u)",
+                 ifevent->bsscfgidx, ifevent->ifidx);
+      return;
+    }
     BRCMF_DBG(EVENT, "adding ifname '%s' with mac " FMT_MAC, emsg->ifname,
               FMT_MAC_ARGS(emsg->addr));
     // The event handler has already locked the correct mutex, proceed to use the locked version of
@@ -261,6 +267,9 @@ void brcmf_fweh_handle_if_event(struct brcmf_pub* drvr, struct brcmf_event_msg* 
   if (err != ZX_OK) {
     BRCMF_WARN("Event handler failed with err: %s event_code: %d", zx_status_get_string(err),
                emsg->event_code);
+    if (ifevent->action == BRCMF_E_IF_ADD) {
+      brcmf_remove_interface_locked(drvr, ifp, false);
+    }
     return;
   }
 }

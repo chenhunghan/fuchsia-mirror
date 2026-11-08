@@ -8,7 +8,6 @@ use crate::{
     RLIMIT_LOCKS, RLIMIT_MEMLOCK, RLIMIT_MSGQUEUE, RLIMIT_NICE, RLIMIT_NOFILE, RLIMIT_NPROC,
     RLIMIT_RSS, RLIMIT_RTPRIO, RLIMIT_RTTIME, RLIMIT_SIGPENDING, RLIMIT_STACK, rlimit, uapi,
 };
-use std::collections::HashMap;
 
 /// A description of a resource.
 pub struct ResourceDesc {
@@ -26,24 +25,25 @@ impl ResourceDesc {
 }
 
 #[allow(clippy::upper_case_acronyms)]
+#[repr(usize)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Resource {
-    CPU,
-    FSIZE,
-    DATA,
-    STACK,
-    CORE,
-    RSS,
-    NPROC,
-    NOFILE,
-    MEMLOCK,
-    AS,
-    LOCKS,
-    SIGPENDING,
-    MSGQUEUE,
-    NICE,
-    RTPRIO,
-    RTTIME,
+    CPU = 0,
+    FSIZE = 1,
+    DATA = 2,
+    STACK = 3,
+    CORE = 4,
+    RSS = 5,
+    NPROC = 6,
+    NOFILE = 7,
+    MEMLOCK = 8,
+    AS = 9,
+    LOCKS = 10,
+    SIGPENDING = 11,
+    MSGQUEUE = 12,
+    NICE = 13,
+    RTPRIO = 14,
+    RTTIME = 15,
 }
 
 impl Resource {
@@ -138,7 +138,7 @@ impl std::str::FromStr for Resource {
 
 #[derive(Debug, Clone)]
 pub struct ResourceLimits {
-    values: HashMap<Resource, rlimit>,
+    values: [rlimit; Resource::ALL.len()],
 }
 
 const INFINITE_LIMIT: rlimit =
@@ -190,7 +190,7 @@ impl ResourceLimits {
     /// Initializes default resource limits, scaling [`RLIMIT_NPROC`] and [`RLIMIT_SIGPENDING`]
     /// to half of [`default_threads_max`] for `total_ram_bytes`.
     pub fn from_total_ram(total_ram_bytes: u64) -> Self {
-        let mut limits = Self { values: Default::default() };
+        let mut limits = Self { values: [INFINITE_LIMIT; Resource::ALL.len()] };
         for (resource, value) in DEFAULT_LIMITS {
             limits.set(resource, value);
         }
@@ -200,12 +200,14 @@ impl ResourceLimits {
         limits
     }
 
+    #[inline]
     pub fn get(&self, resource: Resource) -> rlimit {
-        *self.values.get(&resource).unwrap_or(&INFINITE_LIMIT)
+        self.values[resource as usize]
     }
 
+    #[inline]
     pub fn set(&mut self, resource: Resource, value: rlimit) {
-        self.values.insert(resource, value);
+        self.values[resource as usize] = value;
     }
 }
 

@@ -1,0 +1,95 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Export tests to the ancestor test_suite.
+test_suite(
+    name = "tests",
+    tests = [],  # Include all tests in the package.
+    visibility = ["//src/media:__pkg__"],
+)
+
+fx_cc_library(
+    name = "constants",
+    hdrs = ["constants.h"],
+    visibility = ["//src/media/audio/audio_core/mixer:__pkg__"],
+    deps = [
+        "//src/media/audio/lib/format2:fixed",
+        "//zircon/system/ulib/ffl",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "format",
+    srcs = [
+        "driver_format.cc",
+        "format.cc",
+    ],
+    hdrs = [
+        "audio_buffer.h",
+        "driver_format.h",
+        "format.h",
+        "traits.h",
+    ],
+    implementation_deps = [
+        "//src/media/audio/drivers/lib/audio-proto-utils",
+    ],
+    visibility = [
+        "//src/media/audio:__subpackages__",
+        "//src/virtualization/tests:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
+    deps = [
+        ":constants",
+        "//sdk/fidl/fuchsia.hardware.audio:fuchsia.hardware.audio_hlcpp",
+        "//sdk/fidl/fuchsia.media:fuchsia.media_hlcpp",
+        "//sdk/lib/stdcompat",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl",
+        "//src/media/audio/lib/format2",
+        "//src/media/audio/lib/timeline",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/trace",
+    ],
+    alwayslink = True,
+)
+
+# TODO(https://fxbug.dev/570694755): bazel2gn maps @com_google_googletest//:gtest to //third_party/googletest:gtest, while GN requires //third_party/googletest:gmock.
+# @bazel2gn:skip
+alias(
+    name = "gmock",
+    actual = "@com_google_googletest//:gtest",
+)
+
+fx_cc_test_binary(
+    name = "unittest-bin",
+    srcs = [
+        "audio_buffer_unittest.cc",
+        "format_unittest.cc",
+        "traits_unittest.cc",
+    ],
+    gn_output_name = "audio_lib_format_unittests",
+    tags = ["manual"],
+    deps = [
+        ":format",
+        # Bazel's gtest target bundles gmock, whereas GN defines gmock separately.
+        ":gmock",  # @bazel2gn:path_overwrite://third_party/googletest:gmock
+        "//src/lib/fxl/test:gtest_main",
+        "//src/zircon/lib/zircon",
+    ],
+)
+
+fx_unittest_package(
+    name = "audio_lib_format_unittests",
+    # TODO(https://fxbug.dev/570694755): Map fx_unittest_package parallel to GN test_specs in bazel2gn.
+    # @bazel2gn:skip
+    parallel = 4,
+    unit_tests = [":unittest-bin"],
+)

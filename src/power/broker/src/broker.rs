@@ -18,7 +18,7 @@ use itertools::Itertools;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::Cow;
 use std::cmp::max;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::{self, Debug};
 use std::hash::Hash;
 
@@ -190,74 +190,79 @@ impl Broker {
             })
     }
 
-    // Deactivate claims that are now broken due to a disorderly level transition.
-    // TODO(b/356400605): Consider simplifying this function with reverse dependency traversal
-    // (Topology::dependencies_for_required_element), so that we do not have to scan all leases.
-    // Note that narrowing the scan to leases claiming the disorderly element is not sufficient on
-    // its own: a lease that is powering down may have already dropped that claim while still
-    // enforcing claims that this function must break.
-    fn deactivate_broken_claims(&mut self, element_id: ElementID, prev_level: IndexedPowerLevel) {
-        let element_level = ElementLevel { element_id: element_id, level: prev_level.clone() };
-        // For each lease, find the dependencies that are parents of the broken element.
-        let mut affected_elements = HashSet::new();
-        let mut affected_leases = HashSet::new();
-        let dependencies_safe: HashSet<Dependency> = self
-            .catalog
-            .topology
-            .all_direct_and_indirect_dependencies(&element_level)
-            .into_iter()
-            .collect();
-        let leases: Vec<(LeaseID, Vec<ElementLevel>)> = self
-            .catalog
-            .leases
-            .iter()
-            .map(|(lease_id, lease)| (*lease_id, lease.targets.clone()))
-            .collect();
-        for (lease_id, targets) in leases {
-            log::debug!("deactivate_broken_claims({lease_id}, {element_id}@{prev_level})");
-            let mut dependencies_lease = HashSet::new();
-            for target in &targets {
-                dependencies_lease.insert(Dependency::new_root(target.clone()));
-                dependencies_lease
-                    .extend(self.catalog.topology.all_direct_and_indirect_dependencies(target));
+    /// Deactivates the claims that a disorderly drop of `element_id` to `new_level` broke.
+    ///
+    /// A claim is broken if it requires `element_id` at a level that `new_level` does not satisfy,
+    /// or if its dependent element level relies, directly or transitively, on a broken claim.
+    /// Claims on branches that don't depend on `element_id` are left alone.
+    ///
+    /// Broken dependencies are found by walking upward from `element_id` through the topology and
+    /// lease root dependencies. Walking the topology rather than the claims matters: a lease that
+    /// is powering down may already have dropped its claim on `element_id` while still enforcing
+    /// claims above it, and those claims must be broken too.
+    ///
+    /// Broken claims on `element_id` itself stay enforced. Other broken claims are moved back to
+    /// pending, or dropped if their lease is powering down.
+    fn deactivate_broken_claims(&mut self, element_id: ElementID, new_level: IndexedPowerLevel) {
+        log::debug!("deactivate_broken_claims({element_id}@{new_level})");
+
+        // Each entry in `unsupported_levels` is an element level that lost support. A level also
+        // needs the dependencies of every lower level, so all higher levels of that element lost
+        // support too. `lowest_unsupported` records the lowest such level found for each element.
+        let mut broken_deps: BTreeSet<Dependency> = BTreeSet::new();
+        let mut unsupported_levels: Vec<ElementLevel> = Vec::new();
+        for dep in self.catalog.all_dependencies_for_required_element(element_id) {
+            if !new_level.satisfies(dep.requires.level) && broken_deps.insert(dep.clone()) {
+                unsupported_levels.extend(dep.dependent.clone());
             }
-            if !dependencies_lease.iter().any(|d| {
-                d.requires.element_id == element_id && d.requires.level.satisfies(prev_level)
-            }) {
-                log::debug!(
-                    "There was no dependency in this lease that required this element to be at that level."
-                );
+        }
+        let mut lowest_unsupported: HashMap<ElementID, IndexedPowerLevel> = HashMap::new();
+        while let Some(unsupported) = unsupported_levels.pop() {
+            if lowest_unsupported
+                .get(&unsupported.element_id)
+                .is_some_and(|lowest| *lowest <= unsupported.level)
+            {
                 continue;
             }
-            // Find the set difference between the dependencies of this lease and
-            // the dependencies of the disorderly element. The element's dependencies
-            // are 'safe' as none of their dependencies are broken. The difference
-            // constitutes the dependencies of this lease that broke.
-            let broken_dependencies = dependencies_lease
-                .difference(&dependencies_safe)
-                .cloned()
-                .collect::<HashSet<Dependency>>();
-
-            for dependency in broken_dependencies {
-                if self.catalog.is_claim_enforced(&dependency, lease_id) {
-                    affected_elements.insert(dependency.requires.element_id);
-                    affected_leases.insert(lease_id);
-                    if dependency.requires.element_id != element_id {
-                        if self.catalog.is_lease_dropped(lease_id) {
-                            self.catalog.drop_claim(&dependency, lease_id);
-                        } else {
-                            self.catalog.deactivate_claim(&dependency, lease_id);
-                        }
-                    }
+            lowest_unsupported.insert(unsupported.element_id, unsupported.level);
+            for dep in self.catalog.all_dependencies_for_required_element(unsupported.element_id) {
+                if dep.requires.level.satisfies(unsupported.level)
+                    && broken_deps.insert(dep.clone())
+                {
+                    unsupported_levels.extend(dep.dependent.clone());
                 }
             }
         }
-        affected_elements.remove(&element_id);
-        let should_update_this_element = affected_elements.len() > 1;
-        self.update_required_levels(affected_elements.into_iter(), &mut EagerInspectWriter);
-        if should_update_this_element {
-            self.update_required_level(element_id, prev_level.clone(), &mut EagerInspectWriter);
+
+        let mut affected_elements = HashSet::new();
+        let mut affected_leases = BTreeSet::new();
+        for dependency in &broken_deps {
+            let Some(claims) = self.catalog.claims.get(dependency) else {
+                continue;
+            };
+            let enforced_leases: Vec<LeaseID> =
+                claims.active.iter().chain(claims.deactivating.iter()).copied().sorted().collect();
+            for lease_id in enforced_leases {
+                affected_leases.insert(lease_id);
+                // Claims on the disorderly element stay enforced, so its required level doesn't
+                // change here.
+                if dependency.requires.element_id == element_id {
+                    continue;
+                }
+                affected_elements.insert(dependency.requires.element_id);
+                if self.catalog.is_lease_dropped(lease_id)
+                    || self.catalog.is_claim_deactivating(dependency, lease_id)
+                {
+                    self.catalog.drop_claim(dependency, lease_id);
+                } else {
+                    self.catalog.deactivate_claim(dependency, lease_id);
+                }
+            }
         }
+        self.update_required_levels(
+            affected_elements.into_iter().sorted(),
+            &mut EagerInspectWriter,
+        );
         for lease in affected_leases {
             self.update_lease_status(lease);
             self.vacate_lease_if_all_claims_dropped(lease);
@@ -354,7 +359,7 @@ impl Broker {
             // enforced claims that are no longer valid and immediately
             // deactivate them.
             if is_disorderly_update {
-                self.deactivate_broken_claims(element_id, prev_level.unwrap().clone());
+                self.deactivate_broken_claims(element_id, level);
             }
         }
     }
@@ -475,14 +480,17 @@ impl Broker {
         }
     }
 
+    /// Acquires a lease on `element_id` at `level`, keyed by `lease_control` and recorded in
+    /// Inspect under `lease_name`.
     pub fn acquire_lease(
         &mut self,
         element_id: ElementID,
         level: IndexedPowerLevel,
         lease_control: zx::Koid,
+        lease_name: &str,
     ) -> Result<Lease, fpb::LeaseError> {
         fuchsia_trace::duration!("power-broker", "Broker::acquire_lease");
-        log::debug!("acquire_lease({element_id}@{level})");
+        log::debug!("acquire_lease({lease_name}: {element_id}@{level})");
         let counter = self.adjust_lease_counter(element_id, level.level, 1) as i64;
         fuchsia_trace::counter!(
             c"power-broker", c"LeaseCounter", level.level.into(),
@@ -491,7 +499,7 @@ impl Broker {
 
         let targets = vec![ElementLevel { element_id, level }];
         let (lease, deps_claimed) =
-            self.catalog.create_lease_and_claim_dependencies(None, targets, lease_control);
+            self.catalog.create_lease_and_claim_dependencies(lease_name, targets, lease_control);
         // Activate all pending claims that have all of their
         // dependencies satisfied.
         self.activate_claims_if_dependencies_satisfied(
@@ -545,7 +553,7 @@ impl Broker {
         }
 
         let (lease, deps_claimed) = self.catalog.create_lease_and_claim_dependencies(
-            Some(&lease_name),
+            &lease_name,
             required_levels,
             lease_control,
         );
@@ -652,6 +660,12 @@ impl Broker {
     fn calculate_lease_status(&self, lease_id: LeaseID) -> LeaseStatus {
         if let Some(deps) = self.catalog.lease_dependencies.get(&lease_id) {
             for dep in deps {
+                // This is only called for open leases. A deactivating claim of an open lease was
+                // deactivated by `remove_dependency`. The lease no longer needs it, it is only kept
+                // so that the required element is not lowered before the dependent element is.
+                if self.catalog.is_claim_deactivating(dep, lease_id) {
+                    continue;
+                }
                 if !self.catalog.is_claim_enforced(dep, lease_id)
                     || !self.current_level_satisfies(&dep.requires)
                 {
@@ -767,8 +781,7 @@ impl Broker {
 
     /// Examines a slice of deactivating claims and returns any that can be dropped immediately
     /// (either because another open lease has an active claim satisfying the required level, or
-    /// because the dependent element is no longer satisfied and no other enforced claim within the
-    /// same lease requires it).
+    /// because the dependent element is no longer satisfied).
     fn find_deactivating_claims_to_drop(
         &self,
         claims: &[(Dependency, LeaseID)],
@@ -790,12 +803,18 @@ impl Broker {
                 );
                 continue;
             }
-            // If the dependent element is transiting, we cannot drop this claim as
-            // we cannot guarantee that it hasn't yet dropped to its destination level.
+            // If the dependent element is transiting, only keep this claim if either
+            // its current level or its transition target level satisfies the dependent level.
             if let Some(dependent) = &dep.dependent {
-                if self.in_transition.contains_key(&dependent.element_id) {
-                    log::debug!("keeping {lease_id}:{dep}, dependent is transiting");
-                    continue;
+                if let Some(transit_level) = self.in_transition.get(&dependent.element_id) {
+                    let current_satisfies = self
+                        .get_current_level(&dependent.element_id)
+                        .is_some_and(|current| current.satisfies(dependent.level));
+                    let transit_satisfies = transit_level.satisfies(dependent.level);
+                    if current_satisfies || transit_satisfies {
+                        log::debug!("keeping {lease_id}:{dep}, dependent is transiting");
+                        continue;
+                    }
                 }
             }
             // If another open lease has an active claim whose required level satisfies its
@@ -834,47 +853,46 @@ impl Broker {
                     continue;
                 }
             }
-            let mut has_dependents = false;
-            if let Some(dep_dependent) = &dep.dependent {
-                // Only claims belonging to the same lease can be a dependent.
-                for related_dep in self.catalog.enforced_for_lease(*lease_id) {
-                    if dep_dependent.element_id == related_dep.requires.element_id
-                        && dep_dependent.level >= related_dep.requires.level
-                        && self.current_level_satisfies(&related_dep.requires)
-                    {
-                        log::debug!("won't drop {lease_id}:{dep}, has dependent {related_dep}");
-                        has_dependents = true;
-                        break;
-                    }
-                }
-            }
-            if has_dependents {
-                continue;
-            }
             log::debug!("will drop {lease_id}:{dep}");
             claims_to_drop.push((dep.clone(), *lease_id));
         }
         claims_to_drop
     }
 
-    /// Drops a slice of deactivating claims, updates required levels of affected elements, and
-    /// vacates any leases whose remaining claims have all been dropped.
+    /// Drops a slice of deactivating claims, downgrading any dropped claims that have superseded
+    /// lower-level dependencies in the topology, looping to a fixed point. Updates required levels
+    /// of affected elements, and vacates any leases whose remaining claims have all been dropped.
     fn drop_deactivating_claims(&mut self, claims: &[(Dependency, LeaseID)]) {
+        let mut elements_to_update = HashSet::new();
         let mut leases_to_check = HashSet::new();
-        for (dep, lease_id) in claims {
-            log::debug!("drop deactivating claim: {lease_id}:{dep}");
-            // Claims only enter `deactivating` when `drop_and_mark_powering_down` transitions
-            // their lease to `PoweringDown`, so every deactivating claim must belong to a dropped
-            // lease.
-            debug_assert!(
-                self.catalog.is_lease_dropped(*lease_id),
-                "deactivating claim {lease_id}:{dep} must belong to a dropped lease"
-            );
-            self.catalog.drop_claim(dep, *lease_id);
-            leases_to_check.insert(*lease_id);
+        let mut batch: Vec<(Dependency, LeaseID)> = claims.to_vec();
+        while !batch.is_empty() {
+            let mut downgraded = Vec::new();
+            for (dep, lease_id) in &batch {
+                log::debug!("drop deactivating claim: {lease_id}:{dep}");
+                // Claims only enter deactivating state when their lease is dropped in
+                // drop_and_mark_powering_down() or when they're deactivated by remove_dependency().
+                debug_assert!(
+                    self.catalog.is_claim_deactivating(dep, *lease_id),
+                    "claim {lease_id}:{dep} passed to drop_deactivating_claims is not deactivating"
+                );
+                self.catalog.drop_claim(dep, *lease_id);
+                if let Some(fallback_dep) =
+                    self.catalog.claim_superseded_lower_dependency_on_drop(dep, *lease_id)
+                {
+                    downgraded.push((fallback_dep, *lease_id));
+                }
+                leases_to_check.insert(*lease_id);
+                elements_to_update.insert(dep.requires.element_id);
+            }
+            batch = if downgraded.is_empty() {
+                Vec::new()
+            } else {
+                self.find_deactivating_claims_to_drop(&downgraded)
+            };
         }
         self.update_required_levels(
-            claims.iter().map(|(dep, _)| dep.requires.element_id).unique(),
+            elements_to_update.into_iter().sorted(),
             &mut EagerInspectWriter,
         );
         for lease_id in leases_to_check {
@@ -1005,21 +1023,7 @@ impl Broker {
 
     fn remove_dependency_and_update_leases(&mut self, dep: &Dependency) {
         if let Ok(()) = self.catalog.topology.remove_dependency(dep) {
-            let mut affected_leases = HashSet::new();
-            if let Some(claims) = self.catalog.claims.get(dep) {
-                affected_leases.extend(claims.all_leases());
-            }
-            for lease_id in &affected_leases {
-                self.catalog.drop_claim(dep, *lease_id);
-            }
-            self.update_required_levels(
-                [dep.requires.element_id].into_iter(),
-                &mut EagerInspectWriter,
-            );
-            for lease_id in affected_leases {
-                self.update_lease_status(lease_id);
-                self.vacate_lease_if_all_claims_dropped(lease_id);
-            }
+            self.update_leases_for_removed_dependency(dep);
         }
     }
 
@@ -1036,26 +1040,71 @@ impl Broker {
         &self,
         dependency: &fpb::LevelDependency,
     ) -> Result<(ElementID, IndexedPowerLevel), ModifyDependencyError> {
-        let requires_token =
-            dependency.requires_token.as_ref().ok_or(ModifyDependencyError::Invalid)?;
+        let requires_token = dependency.requires_token.as_ref().ok_or_else(|| {
+            log::debug!("lookup_dependency_requires: requires_token is missing");
+            ModifyDependencyError::Invalid
+        })?;
         let Some(requires_cred) = self.lookup_credentials(&Token::from(requires_token)) else {
+            log::debug!(
+                "lookup_dependency_requires: requires_token is not a registered dependency token"
+            );
             return Err(ModifyDependencyError::NotAuthorized);
         };
         if !requires_cred.contains(Permissions::MODIFY_DEPENDENT) {
+            log::debug!(
+                "lookup_dependency_requires: credential for element {} lacks MODIFY_DEPENDENT",
+                requires_cred.get_element(),
+            );
             return Err(ModifyDependencyError::NotAuthorized);
         }
         let requires_element_id = requires_cred.get_element();
 
-        let requires_level = dependency
-            .requires_level_by_preference
-            .as_ref()
-            .ok_or(ModifyDependencyError::Invalid)?
+        let requires_levels =
+            dependency.requires_level_by_preference.as_ref().ok_or_else(|| {
+                log::debug!("lookup_dependency_requires: requires_level_by_preference is missing");
+                ModifyDependencyError::Invalid
+            })?;
+        let requires_level = requires_levels
             .iter()
             .find_map(|l| self.catalog.topology.get_level_index(requires_element_id.clone(), l))
-            .ok_or(ModifyDependencyError::Invalid)?
+            .ok_or_else(|| {
+                log::debug!(
+                    "lookup_dependency_requires: no valid level in {requires_levels:?} for \
+                     element {requires_element_id}"
+                );
+                ModifyDependencyError::Invalid
+            })?
             .clone();
 
         Ok((requires_element_id, requires_level))
+    }
+
+    /// Checks authorization and resolves a LevelDependency of `element_id` into the Dependency
+    /// that it describes.
+    fn resolve_dependency(
+        &self,
+        element_id: ElementID,
+        dependency: &fpb::LevelDependency,
+    ) -> Result<Dependency, ModifyDependencyError> {
+        let (requires_element_id, requires_level) = self.lookup_dependency_requires(dependency)?;
+        let dependent_level_val = dependency.dependent_level.as_ref().ok_or_else(|| {
+            log::debug!("resolve_dependency: dependent_level is missing");
+            ModifyDependencyError::Invalid
+        })?;
+        let dependent_level =
+            self.catalog.topology.get_level_index(element_id, dependent_level_val).ok_or_else(
+                || {
+                    log::debug!(
+                        "resolve_dependency: no valid level {dependent_level_val} for \
+                     element {element_id}"
+                    );
+                    ModifyDependencyError::Invalid
+                },
+            )?;
+        Ok(Dependency {
+            dependent: Some(ElementLevel { element_id, level: *dependent_level }),
+            requires: ElementLevel { element_id: requires_element_id, level: requires_level },
+        })
     }
 
     /// Prepares to add a dependency by acquiring a provisional lease if needed.
@@ -1077,10 +1126,17 @@ impl Broker {
 
         let provisional_lease = if need_provisional_lease {
             let lease_token = zx::Event::create();
-            let lease_koid = lease_token.koid().unwrap();
+            let lease_koid = lease_token.koid().expect("koid failed");
+            let provisional_lease_name =
+                format!("{}_provisional_lease", self.lookup_name(element_id));
             let lease = self
-                .acquire_lease(requires_element_id.clone(), requires_level, lease_koid)
-                .unwrap();
+                .acquire_lease(
+                    requires_element_id.clone(),
+                    requires_level,
+                    lease_koid,
+                    &provisional_lease_name,
+                )
+                .expect("acquire_lease failed");
             Some(lease)
         } else {
             None
@@ -1099,29 +1155,35 @@ impl Broker {
     where
         I: InspectAddDependency,
     {
-        let (requires_element_id, requires_level) = self.lookup_dependency_requires(&dependency)?;
-        let dependent_level_val =
-            dependency.dependent_level.as_ref().ok_or(ModifyDependencyError::Invalid)?;
-        let dependent_level = self
-            .catalog
-            .topology
-            .get_level_index(element_id, dependent_level_val)
-            .ok_or(ModifyDependencyError::Invalid)?;
-        let dep = Dependency {
-            dependent: Some(ElementLevel { element_id: element_id, level: *dependent_level }),
-            requires: ElementLevel {
-                element_id: requires_element_id.clone(),
-                level: requires_level,
-            },
-        };
+        let dep = self.resolve_dependency(element_id, &dependency)?;
         let on_required_element_removal =
             OnRequiredElementRemoval::from_level_dependency(dependency);
         self.catalog.topology.add_dependency(&dep, on_required_element_removal, inspect_writer)?;
-        self.update_leases_for_dependency(dep);
+        self.update_leases_for_added_dependency(dep);
         Ok(())
     }
 
-    fn update_leases_for_dependency(&mut self, dependency: Dependency) {
+    /// Verify the authorization for the dependency's requires_token and if it's valid, remove the
+    /// matching dependency from the Power Topology. Once the dependency is removed, update the
+    /// leases in the topology.
+    ///
+    /// Open leases stop claiming this dependency immediately, so the required element may be
+    /// lowered right away if nothing else requires it to remain at its current level. Claims on
+    /// the now removed dependency are dropped or deactivated in an orderly fashion so that an element is never
+    /// lowered before the elements that still depend on it.
+    pub fn remove_dependency(
+        &mut self,
+        element_id: ElementID,
+        dependency: &fpb::LevelDependency,
+    ) -> Result<(), ModifyDependencyError> {
+        fuchsia_trace::duration!("power-broker", "Broker::remove_dependency");
+        let dep = self.resolve_dependency(element_id, dependency)?;
+        self.catalog.topology.remove_dependency(&dep)?;
+        self.update_leases_for_removed_dependency(&dep);
+        Ok(())
+    }
+
+    fn update_leases_for_added_dependency(&mut self, dependency: Dependency) {
         let Some(dependent) = &dependency.dependent else {
             return;
         };
@@ -1156,24 +1218,39 @@ impl Broker {
         // Claim dependencies in a deterministic order, so that required levels are updated in a
         // consistent order as well.
         let leases_to_update: Vec<LeaseID> = leases_to_update.into_iter().sorted().collect();
-        let mut all_new_claims = Vec::new();
-        for lease_id in &leases_to_update {
-            let deps_to_claim: Vec<Dependency> = new_dependencies
-                .iter()
-                .filter(|dep| {
-                    !self
-                        .catalog
-                        .lease_dependencies
-                        .get(lease_id)
-                        .is_some_and(|deps| deps.contains(*dep))
-                })
-                .cloned()
-                .collect();
 
-            let deps_claimed = self.catalog.filter_out_redundant_dependencies(deps_to_claim);
+        let mut all_new_claims = Vec::new();
+
+        for lease_id in &leases_to_update {
+            // Include existing active and pending claims so that filter_out_redundant_dependencies
+            // detects if any dependency in new_dependencies is superseded by an existing claim.
+            let mut candidates: HashSet<Dependency> = HashSet::from_iter(new_dependencies.clone());
+            if let Some(lease_deps) = self.catalog.lease_dependencies.get(lease_id) {
+                for existing in lease_deps {
+                    if !self.catalog.is_claim_deactivating(existing, *lease_id) {
+                        candidates.insert(existing.clone());
+                    }
+                }
+            }
+
+            let deps_claimed = self
+                .catalog
+                .filter_out_redundant_dependencies(candidates.into_iter().sorted().collect());
+
             for dep in deps_claimed {
-                self.catalog.add_pending_claim(dep.clone(), *lease_id);
-                all_new_claims.push((dep, *lease_id));
+                if self.catalog.is_claim_deactivating(&dep, *lease_id) {
+                    // If a deactivating claim is in deps_claimed (not redundant), transition it
+                    // directly from deactivating back to active.
+                    self.catalog.reactivate_claim(&dep, *lease_id);
+                } else if !self
+                    .catalog
+                    .lease_dependencies
+                    .get(lease_id)
+                    .is_some_and(|deps| deps.contains(&dep))
+                {
+                    self.catalog.add_pending_claim(dep.clone(), *lease_id);
+                    all_new_claims.push((dep, *lease_id));
+                }
             }
         }
 
@@ -1181,6 +1258,37 @@ impl Broker {
 
         for lease_id in leases_to_update {
             self.update_lease_status(lease_id);
+        }
+    }
+
+    /// Updates the claims, required levels and statuses of the leases affected by the removal of
+    /// `removed` from the topology.
+    fn update_leases_for_removed_dependency(&mut self, removed: &Dependency) {
+        let affected_leases = self.catalog.find_leases_affected_by_dependency_removal(removed);
+        let pending_claims = self
+            .catalog
+            .drop_or_deactivate_claims_for_removed_dependency(removed, &affected_leases);
+
+        // Activate the claims that are no longer blocked by the removed dependency, and those
+        // that take its place. This is done before updating the required level of the formerly
+        // required element, so that the level is lowered at most once, instead of to the minimum
+        // and then up again.
+        self.activate_claims_if_dependencies_satisfied(pending_claims);
+        self.update_required_levels([removed.requires.element_id], &mut EagerInspectWriter);
+
+        for lease_id in affected_leases {
+            // Drop deactivating claims for this lease that can be safely dropped immediately
+            // (e.g. if the dependent element is not powered or satisfied by another lease).
+            let deactivating_claims = self.catalog.deactivating_for_lease(lease_id);
+            if !deactivating_claims.is_empty() {
+                let claims_to_drop = self.find_deactivating_claims_to_drop(&deactivating_claims);
+                self.drop_deactivating_claims(&claims_to_drop);
+            }
+
+            // Update the status of the lease, and vacate it if it was powering down and has
+            // no remaining claims.
+            self.update_lease_status(lease_id);
+            self.vacate_lease_if_all_claims_dropped(lease_id);
         }
     }
 }
@@ -1280,6 +1388,8 @@ impl Catalog {
         )
     }
 
+    /// Returns the leases with a claim on a dependency that involves the `removed_element_id` that will
+    /// be affected by the removal.
     fn find_leases_affected_by_removal(&self, removed_element_id: ElementID) -> HashSet<LeaseID> {
         let mut affected_leases = HashSet::new();
 
@@ -1306,6 +1416,38 @@ impl Catalog {
             }
         }
         affected_leases
+    }
+
+    /// Returns the leases affected by the removal of the `removed` dependency, in order.
+    /// This includes leases with a direct claim on `removed`, as well as open leases whose
+    /// targets can reach `removed.dependent` (for which `removed` may have been filtered out
+    /// as redundant, but whose removal unblocks pending claims or deactivates transitive claims).
+    fn find_leases_affected_by_dependency_removal(&self, removed: &Dependency) -> Vec<LeaseID> {
+        let mut affected = HashSet::new();
+        if let Some(claims) = self.claims.get(removed) {
+            affected.extend(claims.all_leases().copied());
+        }
+        if let Some(dependent) = &removed.dependent {
+            for (lease_id, lease) in &self.leases {
+                if self.is_lease_dropped(*lease_id) {
+                    continue;
+                }
+                let reaches_dependent = lease.targets.iter().any(|target| {
+                    (target.element_id == dependent.element_id
+                        && target.level.satisfies(dependent.level))
+                        || self.topology.all_direct_and_indirect_dependencies(target).iter().any(
+                            |dep| {
+                                dep.requires.element_id == dependent.element_id
+                                    && dep.requires.level.satisfies(dependent.level)
+                            },
+                        )
+                });
+                if reaches_dependent {
+                    affected.insert(*lease_id);
+                }
+            }
+        }
+        affected.into_iter().sorted().collect()
     }
 
     /// Called after an element is removed, to remove any claims that are no longer valid from the
@@ -1337,6 +1479,12 @@ impl Catalog {
             };
             for dep in lease_deps {
                 if !valid_deps.contains(&dep) {
+                    if !self.is_lease_dropped(lease_id)
+                        && self.is_claim_deactivating(&dep, lease_id)
+                        && self.topology.contains_dependency(&dep)
+                    {
+                        continue;
+                    }
                     if self.is_claim_enforced(&dep, lease_id) {
                         elements_to_update.insert(dep.requires.element_id);
                     }
@@ -1346,6 +1494,103 @@ impl Catalog {
             }
         }
         (elements_to_update, affected_leases)
+    }
+
+    /// Drops or deactivates claims for the given removed dependency.
+    ///
+    /// Claims on the removed dependency are dropped. The lease does not need the other claims
+    /// that it can no longer reach, namely those on dependencies of the formerly required element
+    /// that were only needed because of the removed dependency, but their dependent elements may
+    /// still be powered. For an open lease these claims are deactivated, so that they stay enforced
+    /// until their dependent element has been lowered, as for the claims of a dropped lease. A
+    /// powering down lease has already deactivated them.
+    ///
+    /// Conversely, a lease does not claim a dependency that is redundant with another one between
+    /// the same pair of elements at a higher level. If the lease can no longer reach that one,
+    /// such as the removed dependency itself, but still reaches the redundant one, an open lease
+    /// claims it now, so that the element it requires is not lowered further than it needs to be.
+    /// If the lease is powering down, dropping the removed claim downgrades it to any superseded
+    /// lower dependency in the topology.
+    ///
+    /// Returns the pending claims of the open leases, some of which may now be ready to be
+    /// activated, as they could have been waiting for the removed dependency to be satisfied, or
+    /// have just been claimed.
+    fn drop_or_deactivate_claims_for_removed_dependency(
+        &mut self,
+        removed: &Dependency,
+        lease_ids: &[LeaseID],
+    ) -> Vec<(Dependency, LeaseID)> {
+        let mut removed_subgraph =
+            self.topology.all_direct_and_indirect_dependencies(&removed.requires);
+        removed_subgraph.push(removed.clone());
+        removed_subgraph.sort();
+
+        let mut pending_claims = Vec::new();
+        for lease_id in lease_ids {
+            let Some(lease) = self.leases.get(lease_id).cloned() else {
+                continue;
+            };
+            let is_lease_open = !self.is_lease_dropped(*lease_id);
+
+            // A powering down lease already deactivated all its claims when dropped. When the
+            // removed dependency is dropped, claim any superseded lower dependency in deactivating.
+            if !is_lease_open {
+                self.drop_claim(removed, *lease_id);
+                self.claim_superseded_lower_dependency_on_drop(removed, *lease_id);
+                continue;
+            }
+
+            // Store all the dependencies that the targets of the lease depend on, directly or indirectly.
+            let mut reachable: HashSet<Dependency> = HashSet::new();
+            for target in &lease.targets {
+                if self.topology.get_element(&target.element_id).is_some() {
+                    reachable.insert(Dependency::new_root(target.clone()));
+                    reachable.extend(self.topology.all_direct_and_indirect_dependencies(target));
+                }
+            }
+
+            let needed: HashSet<Dependency> = self
+                .filter_out_redundant_dependencies(reachable.into_iter().sorted().collect())
+                .into_iter()
+                .collect();
+
+            for dep in &removed_subgraph {
+                if self.lease_dependencies.get(lease_id).is_some_and(|deps| deps.contains(dep))
+                    && !needed.contains(dep)
+                {
+                    // If the now unneeded dependency is the one we just removed, drop the claim.
+                    // Otherwise, drop or deactivate the claim to move it into the deactivating state.
+                    if dep == removed {
+                        self.drop_claim(dep, *lease_id);
+                    } else {
+                        self.drop_or_deactivate_claim(dep, *lease_id);
+                    }
+                }
+            }
+
+            // If the lease is open, it may need to claim additional dependencies that it can now reach,
+            // or reactivate deactivating claims that are no longer redundant.
+            let new_claims: Vec<Dependency> = needed
+                .iter()
+                .filter(|dep| {
+                    !self.lease_dependencies.get(lease_id).is_some_and(|deps| deps.contains(dep))
+                        || self.is_claim_deactivating(dep, *lease_id)
+                })
+                .cloned()
+                .sorted()
+                .collect();
+            for dep in new_claims {
+                if self.is_claim_deactivating(&dep, *lease_id) {
+                    self.reactivate_claim(&dep, *lease_id);
+                } else {
+                    self.add_pending_claim(dep, *lease_id);
+                }
+            }
+
+            pending_claims
+                .extend(self.pending_for_lease(*lease_id).into_iter().map(|dep| (dep, *lease_id)));
+        }
+        pending_claims
     }
 
     fn minimum_level(&self, element_id: ElementID) -> IndexedPowerLevel {
@@ -1398,7 +1643,8 @@ impl Catalog {
             (
                 dep.dependent.as_ref().map(|d| d.element_id),
                 dep.requires.element_id,
-                usize::MAX - dep.requires.level.index,
+                std::cmp::Reverse(dep.requires.level),
+                std::cmp::Reverse(dep.dependent.as_ref().map(|d| d.level)),
             )
         });
         for dep in dependencies {
@@ -1411,12 +1657,12 @@ impl Catalog {
         essential_deps
     }
 
-    /// Creates a new lease for the given targets along with all
+    /// Creates a new lease named `lease_name` for the given targets along with all
     /// claims necessary to satisfy this lease and adds them as pending claims.
     /// Returns the new lease and the Vec of dependencies claimed.
     fn create_lease_and_claim_dependencies(
         &mut self,
-        lease_name: Option<&str>,
+        lease_name: &str,
         targets: Vec<ElementLevel>,
         lease_control: zx::Koid,
     ) -> (Lease, Vec<Dependency>) {
@@ -1491,8 +1737,9 @@ impl Catalog {
 /// Claims on a [`Dependency`] are partitioned into three mutually exclusive states:
 /// - `pending`: Waiting for prerequisite dependencies to be satisfied; not enforced.
 /// - `active`: Lease is open and claim is enforced, affecting the required level.
-/// - `deactivating`: Lease was dropped, but the claim is still enforced until dependent
-///   elements finish powering down.
+/// - `deactivating`: The lease was dropped, or the lease is open but can no longer reach the
+///   dependency because another dependency was removed. The claim is still enforced until
+///   dependent elements finish powering down.
 ///
 /// An **enforced** claim (`active or deactivating`) requires an element to be at least the
 /// required level.
@@ -1567,15 +1814,14 @@ impl Catalog {
     /// Transitions a claim from `pending` to `active`.
     fn activate_claim(&mut self, dep: &Dependency, lease_id: LeaseID) {
         log::debug!("activate_claim: {lease_id}:{dep}");
-        let Some(entry) = self.claims.get_mut(dep) else {
-            return;
-        };
-        if entry.pending.remove(&lease_id) {
-            self.pending_claims_count -= 1;
-            if entry.active.insert(lease_id) {
-                self.enforced_claims_count += 1;
+        if let Some(entry) = self.claims.get_mut(dep) {
+            if entry.pending.remove(&lease_id) {
+                self.pending_claims_count -= 1;
+                if entry.active.insert(lease_id) {
+                    self.enforced_claims_count += 1;
+                }
+                self.update_claim_trace_counters();
             }
-            self.update_claim_trace_counters();
         }
     }
 
@@ -1591,6 +1837,17 @@ impl Catalog {
                 self.pending_claims_count += 1;
             }
             self.update_claim_trace_counters();
+        }
+    }
+
+    /// Transitions an open lease's claim from `deactivating` back to `active`.
+    fn reactivate_claim(&mut self, dep: &Dependency, lease_id: LeaseID) {
+        log::debug!("reactivate_claim: {lease_id}:{dep}");
+        let Some(entry) = self.claims.get_mut(dep) else {
+            return;
+        };
+        if entry.deactivating.remove(&lease_id) {
+            entry.active.insert(lease_id);
         }
     }
 
@@ -1639,6 +1896,77 @@ impl Catalog {
         }
     }
 
+    /// When an enforced claim `dep` (`B@k ==> C@m`) is dropped for `lease_id`, checks if
+    /// `lease_id` still holds an enforced claim requiring `B` at some level `B@j` that has a
+    /// lower-level dependency `B@i ==> C@n` (`i <= j`) in the topology (which was previously
+    /// filtered out as redundant with `dep`). If so, claims `B@i ==> C@n` in `deactivating`.
+    fn claim_superseded_lower_dependency_on_drop(
+        &mut self,
+        dropped_dep: &Dependency,
+        lease_id: LeaseID,
+    ) -> Option<Dependency> {
+        let dependent = dropped_dep.dependent.as_ref()?;
+        let lease_deps = self.lease_dependencies.get(&lease_id)?;
+
+        // Highest level of `dependent.element_id` still required by an enforced claim on this lease.
+        let max_enforced_dependent_level = lease_deps
+            .iter()
+            .filter(|d| {
+                *d != dropped_dep
+                    && d.requires.element_id == dependent.element_id
+                    && self.is_claim_enforced(d, lease_id)
+            })
+            .map(|d| d.requires.level)
+            .max()?;
+
+        // Highest direct dependency from `dependent.element_id` (at <= max_enforced_dependent_level)
+        // to `dropped_dep.requires.element_id` still present in the topology.
+        let fallback_dep = self
+            .topology
+            .dependencies_for_dependent_element(dependent.element_id)
+            .filter(|d| {
+                d.requires.element_id == dropped_dep.requires.element_id
+                    && *d != dropped_dep
+                    && (d.requires.level < dropped_dep.requires.level
+                        || d.dependent.as_ref().map(|dep| dep.level)
+                            < dropped_dep.dependent.as_ref().map(|dep| dep.level))
+                    && d.dependent
+                        .as_ref()
+                        .is_some_and(|dep| max_enforced_dependent_level.satisfies(dep.level))
+            })
+            .max_by_key(|d| (d.requires.level, d.dependent.as_ref().map(|dep| dep.level)))
+            .cloned()?;
+
+        // Check whether this lease already has an enforced claim from `dependent.element_id`
+        // (at <= max_enforced_dependent_level) to `dropped_dep.requires.element_id` satisfying `fallback_dep`.
+        let already_covered = lease_deps.iter().any(|other| {
+            other != dropped_dep
+                && other.dependent.as_ref().is_some_and(|d| {
+                    d.element_id == dependent.element_id
+                        && max_enforced_dependent_level.satisfies(d.level)
+                })
+                && other.requires.element_id == fallback_dep.requires.element_id
+                && other.requires.level.satisfies(fallback_dep.requires.level)
+                && self.is_claim_enforced(other, lease_id)
+        });
+        if already_covered {
+            return None;
+        }
+
+        // Insert `fallback_dep` into `deactivating` (or transition it from `pending` to `deactivating`).
+        if self.is_claim_pending(&fallback_dep, lease_id) {
+            self.drop_claim(&fallback_dep, lease_id);
+        }
+        if !self.is_claim_enforced(&fallback_dep, lease_id) {
+            self.claims.entry(fallback_dep.clone()).or_default().deactivating.insert(lease_id);
+            self.lease_dependencies.entry(lease_id).or_default().insert(fallback_dep.clone());
+            self.enforced_claims_count += 1;
+            self.update_claim_trace_counters();
+            return Some(fallback_dep);
+        }
+        None
+    }
+
     /// Removes all `pending` claims associated with `lease_id`.
     fn drop_all_pending_for_lease(&mut self, lease_id: LeaseID) {
         let Some(deps) = self.lease_dependencies.get(&lease_id).cloned() else {
@@ -1672,6 +2000,32 @@ impl Catalog {
         marked
     }
 
+    /// Drops or deactivates a claim that its open lease no longer needs.
+    ///
+    /// The following is performed according to the claim's state:
+    /// - Pending: Claim is immediately dropped.
+    /// - Active: Claim is marked to deactivate so that it is enforced until its dependent
+    ///   element has been lowered.
+    /// - Deactivating: Claim is left as is.
+    ///
+    /// The enforced claim count is unchanged, as claims in both active and deactivating states
+    /// are enforced. This matches the behavior for claims of a dropped lease.
+    fn drop_or_deactivate_claim(&mut self, dep: &Dependency, lease_id: LeaseID) {
+        log::debug!("drop_or_deactivate_claim: {lease_id}:{dep}");
+        let Some(entry) = self.claims.get_mut(dep) else {
+            return;
+        };
+        if entry.active.remove(&lease_id) {
+            entry.deactivating.insert(lease_id);
+        } else if entry.pending.contains(&lease_id) {
+            self.drop_claim(dep, lease_id);
+        }
+    }
+
+    fn is_claim_pending(&self, dep: &Dependency, lease_id: LeaseID) -> bool {
+        self.claims.get(dep).is_some_and(|entry| entry.pending.contains(&lease_id))
+    }
+
     fn is_claim_deactivating(&self, dep: &Dependency, lease_id: LeaseID) -> bool {
         self.claims.get(dep).is_some_and(|entry| entry.deactivating.contains(&lease_id))
     }
@@ -1692,6 +2046,7 @@ impl Catalog {
     /// `claims` and `lease_dependencies` agree with each other, empty entries are cleaned up, and
     /// the claim counts match the tracked claims.
     #[cfg(test)]
+    #[track_caller]
     fn assert_claims_consistent(&self) {
         let mut pending_count = 0;
         let mut enforced_count = 0;
@@ -1744,7 +2099,7 @@ impl Catalog {
         );
     }
 
-    #[cfg(test)]
+    /// Returns the pending claims for `lease_id`, in a deterministic order.
     fn pending_for_lease(&self, lease_id: LeaseID) -> Vec<Dependency> {
         let mut deps_res = Vec::new();
         if let Some(deps) = self.lease_dependencies.get(&lease_id) {
@@ -1754,9 +2109,11 @@ impl Catalog {
                 }
             }
         }
+        deps_res.sort_unstable();
         deps_res
     }
 
+    #[cfg(test)]
     fn enforced_for_lease(&self, lease_id: LeaseID) -> impl Iterator<Item = &Dependency> {
         self.lease_dependencies
             .get(&lease_id)
@@ -1914,16 +2271,250 @@ mod tests {
     use fuchsia_inspect::hierarchy::DiagnosticsHierarchy;
 
     use power_broker_client::BINARY_POWER_LEVELS;
+    use std::ops::{Deref, DerefMut};
 
     // Convenience aliases.
     const OFF: IndexedPowerLevel =
-        IndexedPowerLevel { level: BinaryPowerLevel::Off.into_primitive(), index: 0 };
+        IndexedPowerLevel::from_same_level_and_index(BinaryPowerLevel::Off.into_primitive());
     const ON: IndexedPowerLevel =
-        IndexedPowerLevel { level: BinaryPowerLevel::On.into_primitive(), index: 1 };
+        IndexedPowerLevel::from_same_level_and_index(BinaryPowerLevel::On.into_primitive());
 
     const ZERO: IndexedPowerLevel = IndexedPowerLevel::from_same_level_and_index(0);
     const ONE: IndexedPowerLevel = IndexedPowerLevel::from_same_level_and_index(1);
     const TWO: IndexedPowerLevel = IndexedPowerLevel::from_same_level_and_index(2);
+
+    type InnerBroker = super::Broker;
+
+    /// Wraps [`super::Broker`] in unit tests so every borrow and scope exit checks resting-state
+    /// invariants at a single point without touching production code.
+    ///
+    /// Intentionally departs from Rust's `C-DEREF` smart-pointer guideline within this private
+    /// test module so existing and future tests cannot bypass checks by omitting an explicit
+    /// accessor or macro. Checks run before each borrow, so a panic points at the first call
+    /// after the operation that broke an invariant (or at `Drop` if it was the last operation).
+    /// Tests that deliberately build or inspect a non-resting state access `.0` directly (and
+    /// `std::mem::forget` the wrapper when `Drop` must be skipped).
+    struct Broker(InnerBroker);
+
+    impl Broker {
+        fn new(inspect: INode) -> Self {
+            Self(InnerBroker::new(inspect))
+        }
+    }
+
+    impl Deref for Broker {
+        type Target = InnerBroker;
+
+        #[track_caller]
+        fn deref(&self) -> &Self::Target {
+            assert_broker_invariants(&self.0);
+            &self.0
+        }
+    }
+
+    impl DerefMut for Broker {
+        #[track_caller]
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            assert_broker_invariants(&self.0);
+            &mut self.0
+        }
+    }
+
+    impl Drop for Broker {
+        fn drop(&mut self) {
+            if !std::thread::panicking() {
+                assert_broker_invariants(&self.0);
+            }
+        }
+    }
+
+    fn is_dependency_needed_by_open_lease(
+        broker: &InnerBroker,
+        lease_id: LeaseID,
+        dep: &Dependency,
+    ) -> bool {
+        let Some(lease) = broker.catalog.leases.get(&lease_id) else {
+            return false;
+        };
+        if dep.dependent.is_none() {
+            return lease.targets.contains(&dep.requires);
+        }
+        let mut reachable = Vec::new();
+        for target in &lease.targets {
+            if broker.catalog.topology.get_element(&target.element_id).is_some() {
+                reachable
+                    .extend(broker.catalog.topology.all_direct_and_indirect_dependencies(target));
+            }
+        }
+        let needed = broker.catalog.filter_out_redundant_dependencies(reachable);
+        needed.contains(dep)
+    }
+
+    #[track_caller]
+    fn assert_broker_invariants(broker: &InnerBroker) {
+        broker.catalog.assert_claims_consistent();
+
+        for &element_id in broker.current.keys() {
+            if broker.catalog.topology.element_exists(element_id)
+                && !broker.in_transition.contains_key(&element_id)
+            {
+                assert_eq!(
+                    broker.get_required_level(&element_id),
+                    Some(broker.catalog.calculate_required_level(element_id)),
+                    "settled element {element_id} required level does not match calculated level"
+                );
+            }
+        }
+
+        let mut all_deactivating = Vec::new();
+        for (dep, entry) in &broker.catalog.claims {
+            for &lease_id in entry.pending.iter().chain(entry.active.iter()) {
+                assert!(
+                    !broker.catalog.is_lease_dropped(lease_id),
+                    "claim {lease_id}:{dep} in pending/active belongs to a dropped lease"
+                );
+            }
+            for &lease_id in &entry.deactivating {
+                let lease_exists = broker.catalog.leases.contains_key(&lease_id);
+                let is_powering_down = broker.catalog.is_lease_powering_down(lease_id);
+                let is_needed =
+                    !is_powering_down && is_dependency_needed_by_open_lease(broker, lease_id, dep);
+                assert!(
+                    lease_exists && (is_powering_down || !is_needed),
+                    "deactivating claim {lease_id}:{dep} must belong to a PoweringDown lease or an open lease that no longer needs it"
+                );
+                all_deactivating.push((dep.clone(), lease_id));
+            }
+        }
+        // Overlapping re-acquisition across multi-hop chains still strands a droppable downstream
+        // deactivating claim (https://fxbug.dev/578645847), so a unit test reproducing that
+        // scenario will trip this assertion until the bug is fixed.
+        // Note: `find_deactivating_claims_to_drop` logs at DEBUG during read-only evaluation;
+        // skip the empty common case to avoid per-borrow noise.
+        if !all_deactivating.is_empty() {
+            all_deactivating.sort_unstable();
+            let droppable = broker.find_deactivating_claims_to_drop(&all_deactivating);
+            assert!(
+                droppable.is_empty(),
+                "droppable deactivating claims remained after operation: {droppable:?}"
+            );
+        }
+
+        let mut prereq_cache: FxHashMap<ElementLevel, Vec<Dependency>> = FxHashMap::default();
+        for (dep, entry) in &broker.catalog.claims {
+            if !entry.pending.is_empty() {
+                assert!(
+                    !broker.all_dependencies_satisfied(&dep.requires),
+                    "pending claim on {dep} should be active because its prerequisites are satisfied"
+                );
+            }
+
+            if entry.active.is_empty() && entry.deactivating.is_empty() {
+                continue;
+            }
+
+            let prereqs = prereq_cache.entry(dep.requires.clone()).or_insert_with(|| {
+                broker.catalog.topology.all_direct_and_indirect_dependencies(&dep.requires)
+            });
+            // Pre-existing shortcuts (`activate_claims_if_dependencies_satisfied` on self-raised
+            // intermediates and `prepare_add_dependency` reading `required` while in transition)
+            // can enforce a claim before its prerequisite settles; a future test hitting either
+            // path will surface that ordering gap here.
+            for prereq in prereqs.iter() {
+                assert!(
+                    broker
+                        .get_current_level(&prereq.requires.element_id)
+                        .satisfies(prereq.requires.level),
+                    "enforced claim on {dep} has unsatisfied prerequisite {prereq} (current: {:?})",
+                    broker.get_current_level(&prereq.requires.element_id)
+                );
+            }
+
+            let claimed = &dep.requires;
+            let active_satisfied = !entry.active.is_empty();
+            let element_may_satisfy = broker
+                .get_current_level(&claimed.element_id)
+                .satisfies(claimed.level)
+                || broker.in_transition.get(&claimed.element_id).copied().satisfies(claimed.level);
+            // `update_leases_for_added_dependency` intentionally skips `PoweringDown` leases when a new
+            // dependency is added dynamically: a provisional root lease holds the new parent only
+            // until `add_dependency` returns and is then dropped while `deactivating` claims are
+            // still winding down (see `test_add_dependency_while_lease_powering_down`). Requiring
+            // `all_dependencies_satisfied(claimed)` for `deactivating_satisfied` and gating
+            // `has_enforced_edge` on `active_satisfied` accommodates that state transition.
+            let deactivating_satisfied = !entry.deactivating.is_empty()
+                && element_may_satisfy
+                && broker.all_dependencies_satisfied(claimed);
+            if !active_satisfied && !deactivating_satisfied {
+                continue;
+            }
+
+            for parent_dep in
+                broker.catalog.topology.dependencies_for_dependent_element(claimed.element_id)
+            {
+                let dep_level =
+                    parent_dep.dependent.as_ref().expect("topology dep must have dependent");
+                if !claimed.satisfies(dep_level) {
+                    continue;
+                }
+                let parent_required =
+                    broker.catalog.calculate_required_level(parent_dep.requires.element_id);
+                assert!(
+                    parent_required.satisfies(parent_dep.requires.level),
+                    "satisfied dependent {claimed} requires {parent_dep}, \
+                     but calculated required level of {} is {parent_required}",
+                    parent_dep.requires.element_id
+                );
+                if active_satisfied {
+                    let has_enforced_edge = broker
+                        .catalog
+                        .topology
+                        .dependencies_for_required_element(parent_dep.requires.element_id)
+                        .any(|enforced_dep| {
+                            enforced_dep
+                                .dependent
+                                .as_ref()
+                                .is_some_and(|d| d.element_id == claimed.element_id)
+                                && enforced_dep.requires.satisfies(&parent_dep.requires)
+                                && broker.catalog.is_dependency_enforced(enforced_dep)
+                        });
+                    assert!(
+                        has_enforced_edge,
+                        "active-claimed dependent {claimed} has no enforced claim covering \
+                         parent dependency {parent_dep}"
+                    );
+                }
+            }
+        }
+
+        for (lease_id, status_entry) in &broker.catalog.lease_status.values {
+            if status_entry.value.is_some() {
+                assert!(
+                    broker.catalog.leases.contains_key(lease_id),
+                    "lease_status entry for {lease_id} outlived catalog.leases"
+                );
+            }
+        }
+
+        for &lease_id in broker.catalog.leases.keys() {
+            if broker.catalog.is_lease_powering_down(lease_id) {
+                assert!(
+                    !broker.catalog.has_no_remaining_claims(lease_id),
+                    "PoweringDown lease {lease_id} has no remaining claims and should be vacated"
+                );
+            } else {
+                assert!(
+                    !broker.catalog.is_lease_dropped(lease_id),
+                    "vacated lease {lease_id} remained in catalog.leases"
+                );
+                assert_eq!(
+                    broker.get_lease_status(lease_id),
+                    Some(broker.calculate_lease_status(lease_id)),
+                    "open lease {lease_id} status does not match calculated status"
+                );
+            }
+        }
+    }
 
     #[track_caller]
     fn assert_element_cleaned_up(broker: &Broker, element_id: ElementID) {
@@ -2156,6 +2747,61 @@ mod tests {
         }
     }
 
+    /// Adds an element with the given levels and dependencies (dependent level, required element's
+    /// token, required level), registers a dependency token for it, and returns both.
+    fn add_test_element_with_token(
+        broker: &mut Broker,
+        name: &str,
+        levels: &[fpb::PowerLevel],
+        deps: &[(fpb::PowerLevel, &DependencyToken, fpb::PowerLevel)],
+    ) -> (ElementID, DependencyToken) {
+        let level_deps = deps
+            .iter()
+            .map(|(dependent_level, token, requires_level)| fpb::LevelDependency {
+                dependent_level: Some(*dependent_level),
+                requires_token: Some(
+                    token.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed"),
+                ),
+                requires_level_by_preference: Some(vec![*requires_level]),
+                ..Default::default()
+            })
+            .collect();
+        let id = broker
+            .add_element(name, levels[0], levels.to_vec(), level_deps)
+            .expect("add_element failed");
+        let token = DependencyToken::create();
+        broker
+            .register_dependency_token(
+                id,
+                token.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed").into(),
+            )
+            .expect("register_dependency_token failed");
+        (id, token)
+    }
+
+    /// Makes each element in `elements` report its required level until nothing changes, as
+    /// well-behaved elements would.
+    #[track_caller]
+    fn settle_levels(broker: &mut Broker, elements: &[ElementID]) {
+        // Only a safety bound, so that a test that never settles fails instead of hanging.
+        const MAX_SETTLE_ROUNDS: usize = 32;
+        for _ in 0..MAX_SETTLE_ROUNDS {
+            let mut changed = false;
+            for id in elements {
+                let required =
+                    broker.get_required_level(id).expect("element has no required level");
+                if broker.get_current_level(id) != Some(required) {
+                    broker.update_current_level(*id, required);
+                    changed = true;
+                }
+            }
+            if !changed {
+                return;
+            }
+        }
+        panic!("levels did not settle");
+    }
+
     // When claims are added, activated, marked to deactivate, and dropped, the Catalog's counts
     // and indexes should track each transition, and dropping the last claim on a dependency
     // should leave no entry behind.
@@ -2301,52 +2947,24 @@ mod tests {
     // process pending claims again: nothing would drop it, the new element would stay required,
     // and the lease would never vacate.
     #[fuchsia::test]
-    fn test_add_dependency_while_lease_powering_down() {
+    async fn test_add_dependency_while_lease_powering_down() {
         let inspect = fuchsia_inspect::Inspector::default();
         let mut broker = Broker::new(inspect.root().create_child("test"));
-        let token_b = DependencyToken::create();
-        let token_c = DependencyToken::create();
-
-        let element_c = broker
-            .add_element("C", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![])
-            .expect("add_element failed");
-        broker
-            .register_dependency_token(
-                element_c,
-                token_c.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed").into(),
-            )
-            .expect("register_dependency_token failed");
-
-        let element_b = broker
-            .add_element("B", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![])
-            .expect("add_element failed");
-        broker
-            .register_dependency_token(
-                element_b,
-                token_b.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed").into(),
-            )
-            .expect("register_dependency_token failed");
-
-        let element_a = broker
-            .add_element(
-                "A",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(ON.level),
-                    requires_token: Some(
-                        token_b.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed"),
-                    ),
-                    requires_level_by_preference: Some(vec![ON.level]),
-                    ..Default::default()
-                }],
-            )
-            .expect("add_element failed");
+        let (element_c, token_c) =
+            add_test_element_with_token(&mut broker, "C", &BINARY_POWER_LEVELS, &[]);
+        let (element_b, token_b) =
+            add_test_element_with_token(&mut broker, "B", &BINARY_POWER_LEVELS, &[]);
+        let (element_a, _) = add_test_element_with_token(
+            &mut broker,
+            "A",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &token_b, ON.level)],
+        );
 
         // Acquire lease on A(ON); B and A turn ON.
-        let lease_a = broker.acquire_lease(element_a, ON, zx::Koid::from_raw(1)).unwrap();
-        broker.update_current_level(element_b, ON);
-        broker.update_current_level(element_a, ON);
+        let lease_a =
+            broker.acquire_lease(element_a, ON, zx::Koid::from_raw(1), "A_lease").unwrap();
+        settle_levels(&mut broker, &[element_a, element_b]);
         assert_eq!(broker.get_lease_status(lease_a.id), Some(LeaseStatus::Satisfied));
 
         // Drop lease_a while A has not yet completed transitioning to OFF.
@@ -2371,6 +2989,27 @@ mod tests {
             .unwrap()
             .unwrap();
         broker.update_current_level(element_c, ON);
+        assert_data_tree!(inspect, root: contains {
+            test: contains {
+                topology: contains {
+                    "fuchsia.inspect.Graph": contains {
+                        topology: contains {
+                            element_c.to_string() => contains {
+                                meta: contains {
+                                    leases: {
+                                        provisional_lease.id.to_string() => {
+                                            name: "B_provisional_lease",
+                                            level: ON.level as u64,
+                                            status: LeaseStatus::Satisfied.into_primitive() as u64,
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        });
         broker
             .add_dependency(
                 element_b,
@@ -2401,8 +3040,7 @@ mod tests {
         broker.drop_lease(provisional_lease.id).unwrap();
 
         // Complete power-down of A and B to OFF.
-        broker.update_current_level(element_a, OFF);
-        broker.update_current_level(element_b, OFF);
+        settle_levels(&mut broker, &[element_a, element_b]);
 
         // C is left at OFF because the only claim on it belonged to the provisional lease, and
         // lease_a vacates cleanly once its own claims drop.
@@ -2417,60 +3055,21 @@ mod tests {
     fn test_disorderly_drop_while_lease_powering_down() {
         let inspect = fuchsia_inspect::Inspector::default();
         let mut broker = Broker::new(inspect.root().create_child("test"));
-        let token_a = DependencyToken::create();
-        let token_b = DependencyToken::create();
-
-        let element_a = broker
-            .add_element("A", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![])
-            .expect("add_element failed");
-        broker
-            .register_dependency_token(
-                element_a,
-                token_a.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed").into(),
-            )
-            .expect("register_dependency_token failed");
-
-        let element_b = broker
-            .add_element("B", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![])
-            .expect("add_element failed");
-        broker
-            .register_dependency_token(
-                element_b,
-                token_b.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed").into(),
-            )
-            .expect("register_dependency_token failed");
-
-        let element_x = broker
-            .add_element(
-                "X",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![
-                    fpb::LevelDependency {
-                        dependent_level: Some(ON.level),
-                        requires_token: Some(
-                            token_a.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed"),
-                        ),
-                        requires_level_by_preference: Some(vec![ON.level]),
-                        ..Default::default()
-                    },
-                    fpb::LevelDependency {
-                        dependent_level: Some(ON.level),
-                        requires_token: Some(
-                            token_b.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed"),
-                        ),
-                        requires_level_by_preference: Some(vec![ON.level]),
-                        ..Default::default()
-                    },
-                ],
-            )
-            .expect("add_element failed");
+        let (element_a, token_a) =
+            add_test_element_with_token(&mut broker, "A", &BINARY_POWER_LEVELS, &[]);
+        let (element_b, token_b) =
+            add_test_element_with_token(&mut broker, "B", &BINARY_POWER_LEVELS, &[]);
+        let (element_x, _) = add_test_element_with_token(
+            &mut broker,
+            "X",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &token_a, ON.level), (ON.level, &token_b, ON.level)],
+        );
 
         // Acquire lease_x1 on X(ON); A, B, and X turn ON.
-        let lease_x1 = broker.acquire_lease(element_x, ON, zx::Koid::from_raw(1)).unwrap();
-        broker.update_current_level(element_a, ON);
-        broker.update_current_level(element_b, ON);
-        broker.update_current_level(element_x, ON);
+        let lease_x1 =
+            broker.acquire_lease(element_x, ON, zx::Koid::from_raw(1), "X_lease").unwrap();
+        settle_levels(&mut broker, &[element_a, element_b, element_x]);
         assert_eq!(broker.get_lease_status(lease_x1.id), Some(LeaseStatus::Satisfied));
 
         // Drop lease_x1 while X stays in transition to OFF (so X->A and X->B are in powering_down).
@@ -2486,7 +3085,8 @@ mod tests {
         assert_lease_cleaned_up(&broker.catalog, lease_x1.id);
 
         // Acquire and drop a new lease on A(ON); A must cleanly return to required level OFF.
-        let lease_a = broker.acquire_lease(element_a, ON, zx::Koid::from_raw(2)).unwrap();
+        let lease_a =
+            broker.acquire_lease(element_a, ON, zx::Koid::from_raw(2), "A_lease").unwrap();
         broker.update_current_level(element_a, ON);
         assert_eq!(broker.get_lease_status(lease_a.id), Some(LeaseStatus::Satisfied));
         broker.drop_lease(lease_a.id).unwrap();
@@ -2555,14 +3155,8 @@ mod tests {
             )
             .expect("add_element failed");
         assert_eq!(broker.lookup_name(latinum), "Latinum".to_string());
-        assert_eq!(
-            broker.get_current_level(&latinum),
-            Some(IndexedPowerLevel { level: 7, index: 2 })
-        );
-        assert_eq!(
-            broker.get_required_level(&latinum),
-            Some(IndexedPowerLevel { level: 5, index: 0 })
-        );
+        assert_eq!(broker.get_current_level(&latinum), Some(IndexedPowerLevel::new(7, 2)));
+        assert_eq!(broker.get_required_level(&latinum), Some(IndexedPowerLevel::new(5, 0)));
 
         assert_data_tree!(inspect, root: {
             test: {
@@ -2716,17 +3310,9 @@ mod tests {
     async fn test_add_element_dependency_never_and_unregistered() {
         let inspect = fuchsia_inspect::Inspector::default();
         let mut broker = Broker::new(inspect.root().create_child("test"));
-        let token_mithril = DependencyToken::create();
         let never_registered_token = DependencyToken::create();
-        let mithril = broker
-            .add_element("Mithril", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![])
-            .expect("add_element failed");
-        broker
-            .register_dependency_token(
-                mithril,
-                token_mithril.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed").into(),
-            )
-            .expect("register_dependency_token failed");
+        let (mithril, token_mithril) =
+            add_test_element_with_token(&mut broker, "Mithril", &BINARY_POWER_LEVELS, &[]);
         let v01: Vec<u64> = BINARY_POWER_LEVELS.iter().map(|&v| v as u64).collect();
         assert_data_tree!(inspect, root: {
             test: {
@@ -2801,23 +3387,12 @@ mod tests {
         assert!(matches!(add_element_not_authorized_res, Err(AddElementError::NotAuthorized)));
 
         // Add element with a valid token should succeed.
-        let silver = broker
-            .add_element(
-                "Silver",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(ON.level),
-                    requires_token: Some(
-                        token_mithril
-                            .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                            .expect("dup failed"),
-                    ),
-                    requires_level_by_preference: Some(vec![ON.level]),
-                    ..Default::default()
-                }],
-            )
-            .expect("add_element failed");
+        let (silver, _) = add_test_element_with_token(
+            &mut broker,
+            "Silver",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &token_mithril, ON.level)],
+        );
         assert_data_tree!(inspect, root: {
         test: {
             leases: {},
@@ -2929,9 +3504,8 @@ mod tests {
         let inspect = fuchsia_inspect::Inspector::default();
         let inspect_node = inspect.root().create_child("test");
         let mut broker = Broker::new(inspect_node);
-        let unobtanium = broker
-            .add_element("Unobtainium", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![])
-            .expect("add_element failed");
+        let (unobtanium, _) =
+            add_test_element_with_token(&mut broker, "Unobtainium", &BINARY_POWER_LEVELS, &[]);
         assert_eq!(broker.element_exists(unobtanium), true);
         let v01: Vec<u64> = BINARY_POWER_LEVELS.iter().map(|&v| v as u64).collect();
         assert_data_tree!(inspect, root: {
@@ -3116,13 +3690,8 @@ mod tests {
         let inspect = fuchsia_inspect::Inspector::default();
         let mut broker = Broker::new(inspect.root().create_child("test"));
 
-        let a = broker
-            .add_element("a", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![])
-            .expect("add_element failed");
-
-        let b = broker
-            .add_element("b", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![])
-            .expect("add_element failed");
+        let (a, _) = add_test_element_with_token(&mut broker, "a", &BINARY_POWER_LEVELS, &[]);
+        let (b, _) = add_test_element_with_token(&mut broker, "b", &BINARY_POWER_LEVELS, &[]);
 
         assert_eq!(broker.adjust_lease_counter(a, 5, 1), 1);
         // a:5: 1
@@ -3151,55 +3720,16 @@ mod tests {
         // P1 <= C => P2
         let inspect = fuchsia_inspect::Inspector::default();
         let mut broker = Broker::new(inspect.root().create_child("test"));
-        let parent1_token = DependencyToken::create();
-        let parent1: ElementID = broker
-            .add_element("P1", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![])
-            .expect("add_element failed");
-        broker
-            .register_dependency_token(
-                parent1,
-                parent1_token.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed").into(),
-            )
-            .expect("register_dependency_token failed");
-        let parent2_token = DependencyToken::create();
-        let parent2: ElementID = broker
-            .add_element("P2", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![])
-            .expect("add_element failed");
-        broker
-            .register_dependency_token(
-                parent2,
-                parent2_token.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed").into(),
-            )
-            .expect("register_dependency_token failed");
-        let child = broker
-            .add_element(
-                "C",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![
-                    fpb::LevelDependency {
-                        dependent_level: Some(ON.level),
-                        requires_token: Some(
-                            parent1_token
-                                .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                                .expect("dup failed"),
-                        ),
-                        requires_level_by_preference: Some(vec![ON.level]),
-                        ..Default::default()
-                    },
-                    fpb::LevelDependency {
-                        dependent_level: Some(ON.level),
-                        requires_token: Some(
-                            parent2_token
-                                .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                                .expect("dup failed"),
-                        ),
-                        requires_level_by_preference: Some(vec![ON.level]),
-                        ..Default::default()
-                    },
-                ],
-            )
-            .expect("add_element failed");
+        let (parent1, parent1_token) =
+            add_test_element_with_token(&mut broker, "P1", &BINARY_POWER_LEVELS, &[]);
+        let (parent2, parent2_token) =
+            add_test_element_with_token(&mut broker, "P2", &BINARY_POWER_LEVELS, &[]);
+        let (child, _) = add_test_element_with_token(
+            &mut broker,
+            "C",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &parent1_token, ON.level), (ON.level, &parent2_token, ON.level)],
+        );
 
         let mut broker_status = BrokerStatusMatcher::new();
 
@@ -3283,7 +3813,9 @@ mod tests {
         // P1's required level should become ON.
         // P2's required level should become ON.
         // The lease should be pending, as C isn't ON yet.
-        let lease = broker.acquire_lease(child, ON, zx::Koid::from_raw(1)).expect("acquire failed");
+        let lease = broker
+            .acquire_lease(child, ON, zx::Koid::from_raw(1), "C_lease")
+            .expect("acquire failed");
         broker_status.required_level.update(parent1, ON);
         broker_status.required_level.update(parent2, ON);
         broker_status.lease.update(lease.id, LeaseStatus::Pending);
@@ -3356,6 +3888,7 @@ mod tests {
                                     required_level: ON.level as u64,
                                     leases: {
                                         format!("{}", lease.id) => {
+                                            name: "C_lease",
                                             level: 1u64,
                                             status: 2u64,
                                         }
@@ -3509,6 +4042,7 @@ mod tests {
                     rm_lease: {
                         element_id: *child,
                         lease_id: *lease.id,
+                        name: "C_lease",
                         level: 1u64,
                     },
                 },
@@ -3530,44 +4064,16 @@ mod tests {
         // C => P => GP
         let inspect = fuchsia_inspect::Inspector::default();
         let mut broker = Broker::new(inspect.root().create_child("test"));
-        let grandparent_token = DependencyToken::create();
-        let grandparent: ElementID = broker
-            .add_element("GP", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![])
-            .expect("add_element failed");
-        broker
-            .register_dependency_token(
-                grandparent,
-                grandparent_token
-                    .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                    .expect("dup failed")
-                    .into(),
-            )
-            .expect("register_dependency_token failed");
-        let parent_token = DependencyToken::create();
-        let parent: ElementID = broker
-            .add_element("P", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![])
-            .expect("add_element failed");
-        broker
-            .register_dependency_token(
-                parent,
-                parent_token.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed").into(),
-            )
-            .expect("register_dependency_token failed");
-        let child = broker
-            .add_element(
-                "C",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(ON.level),
-                    requires_token: Some(
-                        parent_token.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed"),
-                    ),
-                    requires_level_by_preference: Some(vec![ON.level]),
-                    ..Default::default()
-                }],
-            )
-            .expect("add_element failed");
+        let (grandparent, grandparent_token) =
+            add_test_element_with_token(&mut broker, "GP", &BINARY_POWER_LEVELS, &[]);
+        let (parent, parent_token) =
+            add_test_element_with_token(&mut broker, "P", &BINARY_POWER_LEVELS, &[]);
+        let (child, _) = add_test_element_with_token(
+            &mut broker,
+            "C",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &parent_token, ON.level)],
+        );
         let dep = fpb::LevelDependency {
             dependent_level: Some(ON.level),
             requires_token: Some(
@@ -3589,7 +4095,9 @@ mod tests {
         // dependency and GP as the transitive dependency.
         // P's required level should remain OFF, it depends on GP.
         // GP's required level should become ON.
-        let lease = broker.acquire_lease(child, ON, zx::Koid::from_raw(1)).expect("acquire failed");
+        let lease = broker
+            .acquire_lease(child, ON, zx::Koid::from_raw(1), "C_lease")
+            .expect("acquire failed");
         broker_status.required_level.update(grandparent, ON);
         broker_status.lease.update(lease.id, LeaseStatus::Pending);
         broker_status.assert_matches(&broker);
@@ -3644,88 +4152,26 @@ mod tests {
         let inspect = fuchsia_inspect::Inspector::default();
         let mut broker = Broker::new(inspect.root().create_child("test"));
 
-        let greatgrandparent_token = DependencyToken::create();
-        let greatgrandparent: ElementID = broker
-            .add_element("GGP", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![])
-            .expect("add_element failed");
-        broker
-            .register_dependency_token(
-                greatgrandparent,
-                greatgrandparent_token
-                    .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                    .expect("dup failed")
-                    .into(),
-            )
-            .expect("register_dependency_token failed");
-
-        let grandparent_token = DependencyToken::create();
-        let grandparent: ElementID = broker
-            .add_element("GP", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![])
-            .expect("add_element failed");
-        broker
-            .register_dependency_token(
-                grandparent,
-                grandparent_token
-                    .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                    .expect("dup failed")
-                    .into(),
-            )
-            .expect("register_dependency_token failed");
-
-        let parent_token = DependencyToken::create();
-        let parent: ElementID = broker
-            .add_element("P", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![])
-            .expect("add_element failed");
-        broker
-            .register_dependency_token(
-                parent,
-                parent_token.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed").into(),
-            )
-            .expect("register_dependency_token failed");
-
-        let child = broker
-            .add_element(
-                "C",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(ON.level),
-                    requires_token: Some(
-                        parent_token.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed"),
-                    ),
-                    requires_level_by_preference: Some(vec![ON.level]),
-                    ..Default::default()
-                }],
-            )
-            .expect("add_element failed");
-
-        // P depends on GP
-        let dep_p_gp = fpb::LevelDependency {
-            dependent_level: Some(ON.level),
-            requires_token: Some(
-                grandparent_token.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed"),
-            ),
-            requires_level_by_preference: Some(vec![ON.level]),
-            ..Default::default()
-        };
-        broker
-            .add_dependency(parent, dep_p_gp, &mut EagerInspectWriter)
-            .expect("add_dependency failed");
-
-        // GP depends on GGP
-        let dep_gp_ggp = fpb::LevelDependency {
-            dependent_level: Some(ON.level),
-            requires_token: Some(
-                greatgrandparent_token
-                    .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                    .expect("dup failed"),
-            ),
-            requires_level_by_preference: Some(vec![ON.level]),
-            ..Default::default()
-        };
-        broker
-            .add_dependency(grandparent, dep_gp_ggp, &mut EagerInspectWriter)
-            .expect("add_dependency failed");
+        let (greatgrandparent, greatgrandparent_token) =
+            add_test_element_with_token(&mut broker, "GGP", &BINARY_POWER_LEVELS, &[]);
+        let (grandparent, grandparent_token) = add_test_element_with_token(
+            &mut broker,
+            "GP",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &greatgrandparent_token, ON.level)],
+        );
+        let (parent, parent_token) = add_test_element_with_token(
+            &mut broker,
+            "P",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &grandparent_token, ON.level)],
+        );
+        let (child, _) = add_test_element_with_token(
+            &mut broker,
+            "C",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &parent_token, ON.level)],
+        );
 
         let mut broker_status = BrokerStatusMatcher::new();
 
@@ -3737,7 +4183,9 @@ mod tests {
         broker_status.assert_matches(&broker);
 
         // Lease C, which will result in GGP's required level becoming ON.
-        let lease = broker.acquire_lease(child, ON, zx::Koid::from_raw(1)).expect("acquire failed");
+        let lease = broker
+            .acquire_lease(child, ON, zx::Koid::from_raw(1), "C_lease")
+            .expect("acquire failed");
         broker_status.required_level.update(greatgrandparent, ON);
         broker_status.lease.update(lease.id, LeaseStatus::Pending);
         broker_status.assert_matches(&broker);
@@ -3808,91 +4256,25 @@ mod tests {
         // All other elements have a minimum of 0.
         let inspect = fuchsia_inspect::Inspector::default();
         let mut broker = Broker::new(inspect.root().create_child("test"));
-        let grandparent_token = DependencyToken::create();
-        let grandparent: ElementID =
-            broker.add_element("GP", 10, vec![10, 90, 200], vec![]).expect("add_element failed");
-        broker
-            .register_dependency_token(
-                grandparent,
-                grandparent_token
-                    .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                    .expect("dup failed")
-                    .into(),
-            )
-            .expect("register_dependency_token failed");
-        let parent_token = DependencyToken::create();
-        let parent: ElementID = broker
-            .add_element(
-                "P",
-                0,
-                vec![0, 30, 50],
-                vec![
-                    fpb::LevelDependency {
-                        dependent_level: Some(50),
-                        requires_token: Some(
-                            grandparent_token
-                                .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                                .expect("dup failed"),
-                        ),
-                        requires_level_by_preference: Some(vec![200]),
-                        ..Default::default()
-                    },
-                    fpb::LevelDependency {
-                        dependent_level: Some(30),
-                        requires_token: Some(
-                            grandparent_token
-                                .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                                .expect("dup failed"),
-                        ),
-                        requires_level_by_preference: Some(vec![90]),
-                        ..Default::default()
-                    },
-                ],
-            )
-            .expect("add_element failed");
-        broker
-            .register_dependency_token(
-                parent,
-                parent_token.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed").into(),
-            )
-            .expect("register_dependency_token failed");
-        let child1 = broker
-            .add_element(
-                "C1",
-                0,
-                vec![0, 5],
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(5),
-                    requires_token: Some(
-                        parent_token.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed"),
-                    ),
-                    requires_level_by_preference: Some(vec![50]),
-                    ..Default::default()
-                }],
-            )
-            .expect("add_element failed");
-        let child2 = broker
-            .add_element(
-                "C2",
-                0,
-                vec![0, 3],
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(3),
-                    requires_token: Some(
-                        parent_token.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed"),
-                    ),
-                    requires_level_by_preference: Some(vec![30]),
-                    ..Default::default()
-                }],
-            )
-            .expect("add_element failed");
+        let (grandparent, grandparent_token) =
+            add_test_element_with_token(&mut broker, "GP", &[10, 90, 200], &[]);
+        let (parent, parent_token) = add_test_element_with_token(
+            &mut broker,
+            "P",
+            &[0, 30, 50],
+            &[(50, &grandparent_token, 200), (30, &grandparent_token, 90)],
+        );
+        let (child1, _) =
+            add_test_element_with_token(&mut broker, "C1", &[0, 5], &[(5, &parent_token, 50)]);
+        let (child2, _) =
+            add_test_element_with_token(&mut broker, "C2", &[0, 3], &[(3, &parent_token, 30)]);
 
         // Initially, all elements should be at their default required levels.
         // Grandparent should have a default required level of 10
         // and all others should have a default required level of 0.
         let mut broker_status = BrokerStatusMatcher::new();
         broker_status.required_level.update(parent, ZERO);
-        broker_status.required_level.update(grandparent, IndexedPowerLevel { level: 10, index: 0 });
+        broker_status.required_level.update(grandparent, IndexedPowerLevel::new(10, 0));
         broker_status.required_level.update(child1, ZERO);
         broker_status.required_level.update(child2, ZERO);
         broker_status.assert_matches(&broker);
@@ -3903,30 +4285,28 @@ mod tests {
         // dependency on Grandparent. Grandparent has no dependencies so its
         // level should be raised first.
         let lease1 = broker
-            .acquire_lease(child1, IndexedPowerLevel { level: 5, index: 1 }, zx::Koid::from_raw(1))
+            .acquire_lease(child1, IndexedPowerLevel::new(5, 1), zx::Koid::from_raw(1), "C1_lease")
             .expect("acquire failed");
-        broker_status
-            .required_level
-            .update(grandparent, IndexedPowerLevel { level: 200, index: 2 });
+        broker_status.required_level.update(grandparent, IndexedPowerLevel::new(200, 2));
         broker_status.lease.update(lease1.id, LeaseStatus::Pending);
         broker_status.assert_matches(&broker);
 
         // Raise Grandparent's current level to 200. Now Parent claim should
         // be enforced, because its dependency on Grandparent is unblocked
         // raising its required level to 50.
-        broker.update_current_level(grandparent, IndexedPowerLevel { level: 200, index: 2 });
-        broker_status.required_level.update(parent, IndexedPowerLevel { level: 50, index: 2 });
+        broker.update_current_level(grandparent, IndexedPowerLevel::new(200, 2));
+        broker_status.required_level.update(parent, IndexedPowerLevel::new(50, 2));
         broker_status.assert_matches(&broker);
 
         // Update Parent's current level to 50.
         // Parent and Grandparent should have required levels of 50 and 200.
-        broker.update_current_level(parent, IndexedPowerLevel { level: 50, index: 2 });
-        broker_status.required_level.update(child1, IndexedPowerLevel { level: 5, index: 1 });
+        broker.update_current_level(parent, IndexedPowerLevel::new(50, 2));
+        broker_status.required_level.update(child1, IndexedPowerLevel::new(5, 1));
         broker_status.assert_matches(&broker);
 
         // Update Child 1's current level to 5.
         // Lease Child 1's is now satisfied.
-        broker.update_current_level(child1, IndexedPowerLevel { level: 5, index: 1 });
+        broker.update_current_level(child1, IndexedPowerLevel::new(5, 1));
         broker_status.lease.update(lease1.id, LeaseStatus::Satisfied);
         broker_status.assert_matches(&broker);
 
@@ -3934,15 +4314,15 @@ mod tests {
         // requirements of Parent at 30 and Grandparent at 100, they are
         // superseded by Child 1's requirements of 50 and 200.
         let lease2 = broker
-            .acquire_lease(child2, IndexedPowerLevel { level: 3, index: 1 }, zx::Koid::from_raw(2))
+            .acquire_lease(child2, IndexedPowerLevel::new(3, 1), zx::Koid::from_raw(2), "C2_lease")
             .expect("acquire failed");
-        broker_status.required_level.update(child2, IndexedPowerLevel { level: 3, index: 1 });
+        broker_status.required_level.update(child2, IndexedPowerLevel::new(3, 1));
         broker_status.lease.update(lease2.id, LeaseStatus::Pending);
         broker_status.assert_matches(&broker);
 
         // Update Child 2's current level to 3.
         // Lease Child 2's is now satisfied.
-        broker.update_current_level(child2, IndexedPowerLevel { level: 3, index: 1 });
+        broker.update_current_level(child2, IndexedPowerLevel::new(3, 1));
         broker_status.lease.update(lease2.id, LeaseStatus::Satisfied);
         broker_status.assert_matches(&broker);
 
@@ -3957,14 +4337,14 @@ mod tests {
         // Parent's required level should immediately drop to 30.
         // Grandparent's required level will remain at 200 for now.
         broker.update_current_level(child1, ZERO);
-        broker_status.required_level.update(parent, IndexedPowerLevel { level: 30, index: 1 });
+        broker_status.required_level.update(parent, IndexedPowerLevel::new(30, 1));
         broker_status.lease.remove(lease1.id);
         broker_status.assert_matches(&broker);
 
         // Lower Parent's current level to 30. Now Grandparent's required level
         // should drop to 90.
-        broker.update_current_level(parent, IndexedPowerLevel { level: 30, index: 1 });
-        broker_status.required_level.update(grandparent, IndexedPowerLevel { level: 90, index: 1 });
+        broker.update_current_level(parent, IndexedPowerLevel::new(30, 1));
+        broker_status.required_level.update(grandparent, IndexedPowerLevel::new(90, 1));
         broker_status.assert_matches(&broker);
 
         // All claims for Lease 1 should now be cleaned up,
@@ -3986,13 +4366,13 @@ mod tests {
         broker_status.assert_matches(&broker);
 
         // Lower GrandParent's current level to 90.
-        broker.update_current_level(grandparent, IndexedPowerLevel { level: 90, index: 1 });
+        broker.update_current_level(grandparent, IndexedPowerLevel::new(90, 1));
         broker_status.assert_matches(&broker);
 
         // Lower Parent's current level to 0. Grandparent claim should now be
         // dropped and have its default required level of 10.
         broker.update_current_level(parent, ZERO);
-        broker_status.required_level.update(grandparent, IndexedPowerLevel { level: 10, index: 0 });
+        broker_status.required_level.update(grandparent, IndexedPowerLevel::new(10, 0));
         broker_status.assert_matches(&broker);
         assert_lease_cleaned_up(&broker.catalog, lease2.id);
     }
@@ -4012,73 +4392,26 @@ mod tests {
         // C2 =>  P => GP
         let inspect = fuchsia_inspect::Inspector::default();
         let mut broker = Broker::new(inspect.root().create_child("test"));
-        let grandparent_token = DependencyToken::create();
-        let grandparent: ElementID = broker
-            .add_element("GP", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![])
-            .expect("add_element failed");
-        broker
-            .register_dependency_token(
-                grandparent,
-                grandparent_token
-                    .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                    .expect("dup failed")
-                    .into(),
-            )
-            .expect("register_dependency_token failed");
-        let parent_token = DependencyToken::create();
-        let parent: ElementID = broker
-            .add_element(
-                "P",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(ON.level),
-                    requires_token: Some(
-                        grandparent_token
-                            .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                            .expect("dup failed"),
-                    ),
-                    requires_level_by_preference: Some(vec![ON.level]),
-                    ..Default::default()
-                }],
-            )
-            .expect("add_element failed");
-        broker
-            .register_dependency_token(
-                parent,
-                parent_token.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed").into(),
-            )
-            .expect("register_dependency_token failed");
-        let child1 = broker
-            .add_element(
-                "C1",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(ON.level),
-                    requires_token: Some(
-                        parent_token.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed"),
-                    ),
-                    requires_level_by_preference: Some(vec![ON.level]),
-                    ..Default::default()
-                }],
-            )
-            .expect("add_element failed");
-        let child2 = broker
-            .add_element(
-                "C2",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(ON.level),
-                    requires_token: Some(
-                        parent_token.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed"),
-                    ),
-                    requires_level_by_preference: Some(vec![ON.level]),
-                    ..Default::default()
-                }],
-            )
-            .expect("add_element failed");
+        let (grandparent, grandparent_token) =
+            add_test_element_with_token(&mut broker, "GP", &BINARY_POWER_LEVELS, &[]);
+        let (parent, parent_token) = add_test_element_with_token(
+            &mut broker,
+            "P",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &grandparent_token, ON.level)],
+        );
+        let (child1, _) = add_test_element_with_token(
+            &mut broker,
+            "C1",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &parent_token, ON.level)],
+        );
+        let (child2, _) = add_test_element_with_token(
+            &mut broker,
+            "C2",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &parent_token, ON.level)],
+        );
 
         // Initially, all elements should be OFF.
         let mut broker_status = BrokerStatusMatcher::new();
@@ -4092,8 +4425,9 @@ mod tests {
         // should have required level ON because Child 1 has a dependency
         // on Parent and Parent has a dependency on Grandparent. Grandparent
         // has no dependencies so its level should be raised first.
-        let lease1 =
-            broker.acquire_lease(child1, ON, zx::Koid::from_raw(1)).expect("acquire failed");
+        let lease1 = broker
+            .acquire_lease(child1, ON, zx::Koid::from_raw(1), "C1_lease")
+            .expect("acquire failed");
         broker_status.required_level.update(grandparent, ON);
         broker_status.lease.update(lease1.id, LeaseStatus::Pending);
         broker_status.assert_matches(&broker);
@@ -4119,8 +4453,9 @@ mod tests {
 
         // Acquire a lease for Child 2. Child 2 requires Parent and
         // Grandparent ON, which is already met by Child 1's requirements.
-        let lease2 =
-            broker.acquire_lease(child2, ON, zx::Koid::from_raw(2)).expect("acquire failed");
+        let lease2 = broker
+            .acquire_lease(child2, ON, zx::Koid::from_raw(2), "C2_lease")
+            .expect("acquire failed");
         broker_status.required_level.update(child2, ON);
         broker_status.lease.update(lease2.id, LeaseStatus::Pending);
         broker_status.assert_matches(&broker);
@@ -4183,107 +4518,32 @@ mod tests {
         // D ON requires C ON.
         let inspect = fuchsia_inspect::Inspector::default();
         let mut broker = Broker::new(inspect.root().create_child("test"));
-        let element_c_token = DependencyToken::create();
-        let element_c: ElementID = broker
-            .add_element("C", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![])
-            .expect("add_element failed");
-        broker
-            .register_dependency_token(
-                element_c,
-                element_c_token
-                    .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                    .expect("dup failed")
-                    .into(),
-            )
-            .expect("register_dependency_token failed");
-        let element_b_token = DependencyToken::create();
-        let element_b: ElementID = broker
-            .add_element(
-                "B",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(ON.level),
-                    requires_token: Some(
-                        element_c_token
-                            .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                            .expect("dup failed"),
-                    ),
-                    requires_level_by_preference: Some(vec![ON.level]),
-                    ..Default::default()
-                }],
-            )
-            .expect("add_element failed");
-        broker
-            .register_dependency_token(
-                element_b,
-                element_b_token
-                    .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                    .expect("dup failed")
-                    .into(),
-            )
-            .expect("register_dependency_token failed");
-        let element_a = broker
-            .add_element(
-                "A",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(ON.level),
-                    requires_token: Some(
-                        element_b_token
-                            .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                            .expect("dup failed"),
-                    ),
-                    requires_level_by_preference: Some(vec![ON.level]),
-                    ..Default::default()
-                }],
-            )
-            .expect("add_element failed");
-        let element_d = broker
-            .add_element(
-                "D",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(ON.level),
-                    requires_token: Some(
-                        element_c_token
-                            .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                            .expect("dup failed"),
-                    ),
-                    requires_level_by_preference: Some(vec![ON.level]),
-                    ..Default::default()
-                }],
-            )
-            .expect("add_element failed");
-        let element_d_token = DependencyToken::create();
-        broker
-            .register_dependency_token(
-                element_d,
-                element_d_token
-                    .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                    .expect("dup failed")
-                    .into(),
-            )
-            .expect("register_dependency_token failed");
-        let element_e = broker
-            .add_element(
-                "E",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(ON.level),
-                    requires_token: Some(
-                        element_d_token
-                            .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                            .expect("dup failed"),
-                    ),
-                    requires_level_by_preference: Some(vec![ON.level]),
-                    ..Default::default()
-                }],
-            )
-            .expect("add_element failed");
+        let (element_c, element_c_token) =
+            add_test_element_with_token(&mut broker, "C", &BINARY_POWER_LEVELS, &[]);
+        let (element_b, element_b_token) = add_test_element_with_token(
+            &mut broker,
+            "B",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &element_c_token, ON.level)],
+        );
+        let (element_a, _) = add_test_element_with_token(
+            &mut broker,
+            "A",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &element_b_token, ON.level)],
+        );
+        let (element_d, element_d_token) = add_test_element_with_token(
+            &mut broker,
+            "D",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &element_c_token, ON.level)],
+        );
+        let (element_e, _) = add_test_element_with_token(
+            &mut broker,
+            "E",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &element_d_token, ON.level)],
+        );
 
         log::warn!("a: {element_a}\nb: {element_b}\nc:{element_c}\nd:{element_d}\ne:{element_e}");
 
@@ -4297,8 +4557,9 @@ mod tests {
         broker_status.assert_matches(&broker);
 
         // Acquire lease for E. C's required level should become on as a result.
-        let lease1 =
-            broker.acquire_lease(element_e, ON, zx::Koid::from_raw(1)).expect("acquire failed");
+        let lease1 = broker
+            .acquire_lease(element_e, ON, zx::Koid::from_raw(1), "E_lease")
+            .expect("acquire failed");
         broker_status.required_level.update(element_c, ON);
         broker_status.lease.update(lease1.id, LeaseStatus::Pending);
         broker_status.assert_matches(&broker);
@@ -4320,8 +4581,9 @@ mod tests {
 
         // Acquire a lease for A. A requires B, which is currently OFF and
         // C, which is already ON.
-        let lease2 =
-            broker.acquire_lease(element_a, ON, zx::Koid::from_raw(2)).expect("acquire failed");
+        let lease2 = broker
+            .acquire_lease(element_a, ON, zx::Koid::from_raw(2), "A_lease")
+            .expect("acquire failed");
         broker_status.required_level.update(element_b, ON);
         broker_status.lease.update(lease2.id, LeaseStatus::Pending);
         broker_status.assert_matches(&broker);
@@ -4399,96 +4661,26 @@ mod tests {
         // Parent 2 ON requires Grandparent ON.
         let inspect = fuchsia_inspect::Inspector::default();
         let mut broker = Broker::new(inspect.root().create_child("test"));
-        let grandparent_token = DependencyToken::create();
-        let grandparent: ElementID = broker
-            .add_element("GP", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![])
-            .expect("add_element failed");
-        broker
-            .register_dependency_token(
-                grandparent,
-                grandparent_token
-                    .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                    .expect("dup failed")
-                    .into(),
-            )
-            .expect("register_dependency_token failed");
-        let parent1_token = DependencyToken::create();
-        let parent1: ElementID = broker
-            .add_element(
-                "P",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(ON.level),
-                    requires_token: Some(
-                        grandparent_token
-                            .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                            .expect("dup failed"),
-                    ),
-                    requires_level_by_preference: Some(vec![ON.level]),
-                    ..Default::default()
-                }],
-            )
-            .expect("add_element failed");
-        broker
-            .register_dependency_token(
-                parent1,
-                parent1_token.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed").into(),
-            )
-            .expect("register_dependency_token failed");
-        let parent2_token = DependencyToken::create();
-        let parent2: ElementID = broker
-            .add_element(
-                "P",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(ON.level),
-                    requires_token: Some(
-                        grandparent_token
-                            .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                            .expect("dup failed"),
-                    ),
-                    requires_level_by_preference: Some(vec![ON.level]),
-                    ..Default::default()
-                }],
-            )
-            .expect("add_element failed");
-        broker
-            .register_dependency_token(
-                parent2,
-                parent2_token.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed").into(),
-            )
-            .expect("register_dependency_token failed");
-        let child = broker
-            .add_element(
-                "C",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![
-                    fpb::LevelDependency {
-                        dependent_level: Some(ON.level),
-                        requires_token: Some(
-                            parent1_token
-                                .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                                .expect("dup failed"),
-                        ),
-                        requires_level_by_preference: Some(vec![ON.level]),
-                        ..Default::default()
-                    },
-                    fpb::LevelDependency {
-                        dependent_level: Some(ON.level),
-                        requires_token: Some(
-                            parent2_token
-                                .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                                .expect("dup failed"),
-                        ),
-                        requires_level_by_preference: Some(vec![ON.level]),
-                        ..Default::default()
-                    },
-                ],
-            )
-            .expect("add_element failed");
+        let (grandparent, grandparent_token) =
+            add_test_element_with_token(&mut broker, "GP", &BINARY_POWER_LEVELS, &[]);
+        let (parent1, parent1_token) = add_test_element_with_token(
+            &mut broker,
+            "P",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &grandparent_token, ON.level)],
+        );
+        let (parent2, parent2_token) = add_test_element_with_token(
+            &mut broker,
+            "P",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &grandparent_token, ON.level)],
+        );
+        let (child, _) = add_test_element_with_token(
+            &mut broker,
+            "C",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &parent1_token, ON.level), (ON.level, &parent2_token, ON.level)],
+        );
 
         // Initially, all elements should be OFF.
         let mut broker_status = BrokerStatusMatcher::new();
@@ -4499,8 +4691,9 @@ mod tests {
         broker_status.assert_matches(&broker);
 
         // Acquire lease for Child.
-        let lease1 =
-            broker.acquire_lease(child, ON, zx::Koid::from_raw(1)).expect("acquire failed");
+        let lease1 = broker
+            .acquire_lease(child, ON, zx::Koid::from_raw(1), "C_lease")
+            .expect("acquire failed");
         broker_status.required_level.update(grandparent, ON);
         broker_status.lease.update(lease1.id, LeaseStatus::Pending);
         broker_status.assert_matches(&broker);
@@ -4576,64 +4769,18 @@ mod tests {
         let mut broker = Broker::new(inspect.root().create_child("test"));
 
         let v012_u8: Vec<u8> = vec![0, 1, 2];
-
-        let token_b = DependencyToken::create();
-        let token_c = DependencyToken::create();
-        let element_b =
-            broker.add_element("B", 0, v012_u8.clone(), vec![]).expect("add_element failed");
-        broker
-            .register_dependency_token(
-                element_b,
-                token_b.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed").into(),
-            )
-            .expect("register_dependency_token failed");
-        let element_c =
-            broker.add_element("C", 0, v012_u8.clone(), vec![]).expect("add_element failed");
-        broker
-            .register_dependency_token(
-                element_c,
-                token_c.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed").into(),
-            )
-            .expect("register_dependency_token failed");
-        let element_a = broker
-            .add_element(
-                "A",
-                0,
-                v012_u8.clone(),
-                vec![
-                    fpb::LevelDependency {
-                        dependent_level: Some(1),
-                        requires_token: Some(
-                            token_b
-                                .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                                .expect("dup failed")
-                                .into(),
-                        ),
-                        requires_level_by_preference: Some(vec![1]),
-                        ..Default::default()
-                    },
-                    fpb::LevelDependency {
-                        dependent_level: Some(2),
-                        requires_token: Some(
-                            token_c
-                                .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                                .expect("dup failed")
-                                .into(),
-                        ),
-                        requires_level_by_preference: Some(vec![1]),
-                        ..Default::default()
-                    },
-                ],
-            )
-            .expect("add_element failed");
+        let (element_b, token_b) = add_test_element_with_token(&mut broker, "B", &v012_u8, &[]);
+        let (element_c, token_c) = add_test_element_with_token(&mut broker, "C", &v012_u8, &[]);
+        let (element_a, _) = add_test_element_with_token(
+            &mut broker,
+            "A",
+            &v012_u8,
+            &[(1, &token_b, 1), (2, &token_c, 1)],
+        );
 
         let mut broker_status = BrokerStatusMatcher::new();
 
-        // Initial required levels for all elements should be 0.
-        // Set all current levels to 0.
-        broker.update_current_level(element_a, ZERO);
-        broker.update_current_level(element_b, ZERO);
-        broker.update_current_level(element_c, ZERO);
+        // All elements start with current and required level 0.
         broker_status.required_level.update(element_a, ZERO);
         broker_status.required_level.update(element_b, ZERO);
         broker_status.required_level.update(element_c, ZERO);
@@ -4647,8 +4794,9 @@ mod tests {
         // B and C's required level should be 1.
         //
         // A's lease is pending.
-        let lease_a =
-            broker.acquire_lease(element_a, TWO, zx::Koid::from_raw(1)).expect("acquire failed");
+        let lease_a = broker
+            .acquire_lease(element_a, TWO, zx::Koid::from_raw(1), "A_lease")
+            .expect("acquire failed");
         let lease_a_id = lease_a.id;
         broker_status.required_level.update(element_b, ONE);
         broker_status.required_level.update(element_c, ONE);
@@ -4661,8 +4809,7 @@ mod tests {
         // B and C's current level should not change.
         //
         // A's lease should be satisfied.
-        broker.update_current_level(element_b, ONE);
-        broker.update_current_level(element_c, ONE);
+        settle_levels(&mut broker, &[element_b, element_c]);
         broker_status.required_level.update(element_a, TWO);
         broker_status.assert_matches(&broker);
 
@@ -4711,60 +4858,24 @@ mod tests {
         // ON <======= ON
         let inspect = fuchsia_inspect::Inspector::default();
         let mut broker = Broker::new(inspect.root().create_child("test"));
-        let token_a = DependencyToken::create();
-        let element_a = broker
-            .add_element("A", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![])
-            .expect("add_element failed");
-        broker
-            .register_dependency_token(
-                element_a,
-                token_a.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed").into(),
-            )
-            .expect("register_dependency_token failed");
-        let element_b = broker
-            .add_element(
-                "B",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(ON.level),
-                    requires_token: Some(
-                        token_a
-                            .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                            .expect("dup failed")
-                            .into(),
-                    ),
-                    requires_level_by_preference: Some(vec![ON.level]),
-                    ..Default::default()
-                }],
-            )
-            .expect("add_element failed");
-        let element_c = broker
-            .add_element(
-                "C",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(ON.level),
-                    requires_token: Some(
-                        token_a
-                            .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                            .expect("dup failed")
-                            .into(),
-                    ),
-                    requires_level_by_preference: Some(vec![ON.level]),
-                    ..Default::default()
-                }],
-            )
-            .expect("add_element failed");
+        let (element_a, token_a) =
+            add_test_element_with_token(&mut broker, "A", &BINARY_POWER_LEVELS, &[]);
+        let (element_b, _) = add_test_element_with_token(
+            &mut broker,
+            "B",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &token_a, ON.level)],
+        );
+        let (element_c, _) = add_test_element_with_token(
+            &mut broker,
+            "C",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &token_a, ON.level)],
+        );
 
         let mut broker_status = BrokerStatusMatcher::new();
 
-        // Initial required levels for all elements should be 0.
-        // Set all current levels to 0.
-        broker.update_current_level(element_a, ZERO);
-        broker.update_current_level(element_b, ZERO);
-        broker.update_current_level(element_c, ZERO);
+        // All elements start with current and required level 0.
         broker_status.required_level.update(element_a, ZERO);
         broker_status.required_level.update(element_b, ZERO);
         broker_status.required_level.update(element_c, ZERO);
@@ -4780,10 +4891,12 @@ mod tests {
         // B & C's required level should remain OFF.
         // Both leases should be pending, as they should
         // have a new dependency on the topology unsatisfiable element.
-        let lease_b =
-            broker.acquire_lease(element_b, ON, zx::Koid::from_raw(1)).expect("acquire failed");
-        let lease_c =
-            broker.acquire_lease(element_c, ON, zx::Koid::from_raw(2)).expect("acquire failed");
+        let lease_b = broker
+            .acquire_lease(element_b, ON, zx::Koid::from_raw(1), "B_lease")
+            .expect("acquire failed");
+        let lease_c = broker
+            .acquire_lease(element_c, ON, zx::Koid::from_raw(2), "C_lease")
+            .expect("acquire failed");
         broker.update_current_level(element_a, ON);
         broker_status.lease.update(lease_b.id, LeaseStatus::Pending);
         broker_status.lease.update(lease_c.id, LeaseStatus::Pending);
@@ -4805,8 +4918,7 @@ mod tests {
         // Create a topology of one element.
         let inspect = fuchsia_inspect::Inspector::default();
         let mut broker = Broker::new(inspect.root().create_child("test"));
-        let element =
-            broker.add_element("E", 0, vec![0, 1, 2], vec![]).expect("add_element failed");
+        let (element, _) = add_test_element_with_token(&mut broker, "E", &[0, 1, 2], &[]);
         let mut broker_status = BrokerStatusMatcher::new();
 
         // Initial required level should be 0.
@@ -4814,8 +4926,9 @@ mod tests {
         broker_status.assert_matches(&broker);
 
         // Acquire lease for level 1.
-        let lease =
-            broker.acquire_lease(element, ONE, zx::Koid::from_raw(1)).expect("acquire failed");
+        let lease = broker
+            .acquire_lease(element, ONE, zx::Koid::from_raw(1), "E_lease_1")
+            .expect("acquire failed");
         // Required level should become 1.
         broker_status.required_level.update(element, ONE);
         broker_status.assert_matches(&broker);
@@ -4832,8 +4945,9 @@ mod tests {
         broker_status.assert_matches(&broker);
 
         // Acquire and drop a level 2 lease.
-        let lease =
-            broker.acquire_lease(element, TWO, zx::Koid::from_raw(2)).expect("acquire failed");
+        let lease = broker
+            .acquire_lease(element, TWO, zx::Koid::from_raw(2), "E_lease_2")
+            .expect("acquire failed");
         broker.drop_lease(lease.id).expect("drop failed");
         // Required level should stay 0, to preserve orderly transition.
         broker_status.assert_matches(&broker);
@@ -4844,8 +4958,9 @@ mod tests {
         broker_status.assert_matches(&broker);
 
         // Acquire lease for level 1 and check required level.
-        let lease =
-            broker.acquire_lease(element, ONE, zx::Koid::from_raw(3)).expect("acquire failed");
+        let lease = broker
+            .acquire_lease(element, ONE, zx::Koid::from_raw(3), "E_lease_3")
+            .expect("acquire failed");
         broker_status.required_level.update(element, ONE);
         broker_status.assert_matches(&broker);
 
@@ -4865,16 +4980,8 @@ mod tests {
     async fn test_add_element_dependency_list_of_levels() {
         let inspect = fuchsia_inspect::Inspector::default();
         let mut broker = Broker::new(inspect.root().create_child("test"));
-        let token_mithril = DependencyToken::create();
-        let mithril = broker
-            .add_element("Mithril", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![])
-            .expect("add_element failed");
-        broker
-            .register_dependency_token(
-                mithril,
-                token_mithril.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed").into(),
-            )
-            .expect("register_dependency_token failed");
+        let (mithril, token_mithril) =
+            add_test_element_with_token(&mut broker, "Mithril", &BINARY_POWER_LEVELS, &[]);
         let v01: Vec<u64> = BINARY_POWER_LEVELS.iter().map(|&v| v as u64).collect();
 
         // Add an element with a dependency with a list of requires_level_by_preference.
@@ -5003,210 +5110,83 @@ mod tests {
         let inspect = fuchsia_inspect::Inspector::default();
         let mut broker = Broker::new(inspect.root().create_child("test"));
 
-        let token_gp1 = DependencyToken::create();
-        let token_gp2 = DependencyToken::create();
-        let token_x = DependencyToken::create();
-        let token_p1: fidl::Event = DependencyToken::create();
-        let token_p2 = DependencyToken::create();
-
-        let element_gp1 = broker
-            .add_element("GP1", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![])
-            .expect("add_element failed");
-        broker
-            .register_dependency_token(
-                element_gp1,
-                token_gp1.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed").into(),
-            )
-            .expect("register_dependency_token failed");
-        let element_gp2 = broker
-            .add_element("GP2", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![])
-            .expect("add_element failed");
-        broker
-            .register_dependency_token(
-                element_gp2,
-                token_gp2.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed").into(),
-            )
-            .expect("register_dependency_token failed");
-        let element_x = broker
-            .add_element(
-                "X",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![
-                    fpb::LevelDependency {
-                        dependent_level: Some(ON.level),
-                        requires_token: Some(
-                            token_gp1
-                                .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                                .expect("dup failed")
-                                .into(),
-                        ),
-                        requires_level_by_preference: Some(vec![ON.level]),
-                        ..Default::default()
-                    },
-                    fpb::LevelDependency {
-                        dependent_level: Some(ON.level),
-                        requires_token: Some(
-                            token_gp2
-                                .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                                .expect("dup failed")
-                                .into(),
-                        ),
-                        requires_level_by_preference: Some(vec![ON.level]),
-                        ..Default::default()
-                    },
-                ],
-            )
-            .expect("add_element failed");
-        broker
-            .register_dependency_token(
-                element_x,
-                token_x.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed").into(),
-            )
-            .expect("register_dependency_token failed");
-        let element_p1 = broker
-            .add_element(
-                "P1",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(ON.level),
-                    requires_token: Some(
-                        token_x
-                            .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                            .expect("dup failed")
-                            .into(),
-                    ),
-                    requires_level_by_preference: Some(vec![ON.level]),
-                    ..Default::default()
-                }],
-            )
-            .expect("add_element failed");
-        broker
-            .register_dependency_token(
-                element_p1,
-                token_p1.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed").into(),
-            )
-            .expect("register_dependency_token failed");
-        let element_p2 = broker
-            .add_element(
-                "P2",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(ON.level),
-                    requires_token: Some(
-                        token_x
-                            .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                            .expect("dup failed")
-                            .into(),
-                    ),
-                    requires_level_by_preference: Some(vec![ON.level]),
-                    ..Default::default()
-                }],
-            )
-            .expect("add_element failed");
-        broker
-            .register_dependency_token(
-                element_p2,
-                token_p2.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed").into(),
-            )
-            .expect("register_dependency_token failed");
-        let element_c1 = broker
-            .add_element(
-                "C1",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(ON.level),
-                    requires_token: Some(
-                        token_p1
-                            .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                            .expect("dup failed")
-                            .into(),
-                    ),
-                    requires_level_by_preference: Some(vec![ON.level]),
-                    ..Default::default()
-                }],
-            )
-            .expect("add_element failed");
-        let element_c2 = broker
-            .add_element(
-                "C2",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(ON.level),
-                    requires_token: Some(
-                        token_p1
-                            .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                            .expect("dup failed")
-                            .into(),
-                    ),
-                    requires_level_by_preference: Some(vec![ON.level]),
-                    ..Default::default()
-                }],
-            )
-            .expect("add_element failed");
-        let element_c3 = broker
-            .add_element(
-                "C3",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(ON.level),
-                    requires_token: Some(
-                        token_p2
-                            .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                            .expect("dup failed")
-                            .into(),
-                    ),
-                    requires_level_by_preference: Some(vec![ON.level]),
-                    ..Default::default()
-                }],
-            )
-            .expect("add_element failed");
-        let element_c4 = broker
-            .add_element(
-                "C4",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(ON.level),
-                    requires_token: Some(
-                        token_p2
-                            .duplicate_handle(zx::Rights::SAME_RIGHTS)
-                            .expect("dup failed")
-                            .into(),
-                    ),
-                    requires_level_by_preference: Some(vec![ON.level]),
-                    ..Default::default()
-                }],
-            )
-            .expect("add_element failed");
+        let (element_gp1, token_gp1) =
+            add_test_element_with_token(&mut broker, "GP1", &BINARY_POWER_LEVELS, &[]);
+        let (element_gp2, token_gp2) =
+            add_test_element_with_token(&mut broker, "GP2", &BINARY_POWER_LEVELS, &[]);
+        let (element_x, token_x) = add_test_element_with_token(
+            &mut broker,
+            "X",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &token_gp1, ON.level), (ON.level, &token_gp2, ON.level)],
+        );
+        let (element_p1, token_p1) = add_test_element_with_token(
+            &mut broker,
+            "P1",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &token_x, ON.level)],
+        );
+        let (element_p2, token_p2) = add_test_element_with_token(
+            &mut broker,
+            "P2",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &token_x, ON.level)],
+        );
+        let (element_c1, _) = add_test_element_with_token(
+            &mut broker,
+            "C1",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &token_p1, ON.level)],
+        );
+        let (element_c2, _) = add_test_element_with_token(
+            &mut broker,
+            "C2",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &token_p1, ON.level)],
+        );
+        let (element_c3, _) = add_test_element_with_token(
+            &mut broker,
+            "C3",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &token_p2, ON.level)],
+        );
+        let (element_c4, _) = add_test_element_with_token(
+            &mut broker,
+            "C4",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &token_p2, ON.level)],
+        );
+        let all = [
+            element_gp1,
+            element_gp2,
+            element_x,
+            element_p1,
+            element_p2,
+            element_c1,
+            element_c2,
+            element_c3,
+            element_c4,
+        ];
 
         let mut broker_status = BrokerStatusMatcher::new();
 
         // Grab all required leases and power on all elements.
-        let lease_gp2 =
-            broker.acquire_lease(element_gp2, ON, zx::Koid::from_raw(1)).expect("acquire failed");
-        let lease_c1 =
-            broker.acquire_lease(element_c1, ON, zx::Koid::from_raw(2)).expect("acquire failed");
-        let lease_c2 =
-            broker.acquire_lease(element_c2, ON, zx::Koid::from_raw(3)).expect("acquire failed");
-        let lease_c3 =
-            broker.acquire_lease(element_c3, ON, zx::Koid::from_raw(4)).expect("acquire failed");
-        let lease_c4 =
-            broker.acquire_lease(element_c4, ON, zx::Koid::from_raw(5)).expect("acquire failed");
-        broker.update_current_level(element_gp1, ON);
-        broker.update_current_level(element_gp2, ON);
-        broker.update_current_level(element_x, ON);
-        broker.update_current_level(element_p1, ON);
-        broker.update_current_level(element_p2, ON);
-        broker.update_current_level(element_c1, ON);
-        broker.update_current_level(element_c2, ON);
-        broker.update_current_level(element_c3, ON);
-        broker.update_current_level(element_c4, ON);
+        let lease_gp2 = broker
+            .acquire_lease(element_gp2, ON, zx::Koid::from_raw(1), "GP2_lease")
+            .expect("acquire failed");
+        let lease_c1 = broker
+            .acquire_lease(element_c1, ON, zx::Koid::from_raw(2), "C1_lease")
+            .expect("acquire failed");
+        let lease_c2 = broker
+            .acquire_lease(element_c2, ON, zx::Koid::from_raw(3), "C2_lease")
+            .expect("acquire failed");
+        let lease_c3 = broker
+            .acquire_lease(element_c3, ON, zx::Koid::from_raw(4), "C3_lease")
+            .expect("acquire failed");
+        let lease_c4 = broker
+            .acquire_lease(element_c4, ON, zx::Koid::from_raw(5), "C4_lease")
+            .expect("acquire failed");
+        settle_levels(&mut broker, &all);
 
         // At this point, all elements should have required level ON.
         broker_status.required_level.update(element_gp1, ON);
@@ -5243,12 +5223,10 @@ mod tests {
         broker_status.assert_matches(&broker);
 
         // Turn off all parent/child elements to preserve ordering.
-        broker.update_current_level(element_p1, OFF);
-        broker.update_current_level(element_p2, OFF);
-        broker.update_current_level(element_c1, OFF);
-        broker.update_current_level(element_c2, OFF);
-        broker.update_current_level(element_c3, OFF);
-        broker.update_current_level(element_c4, OFF);
+        settle_levels(
+            &mut broker,
+            &[element_p1, element_p2, element_c1, element_c2, element_c3, element_c4],
+        );
         broker_status.assert_matches(&broker);
 
         // Update X to ON.
@@ -5259,8 +5237,7 @@ mod tests {
         broker_status.assert_matches(&broker);
 
         // Update P1 and P2 to ON.
-        broker.update_current_level(element_p1, ON);
-        broker.update_current_level(element_p2, ON);
+        settle_levels(&mut broker, &[element_p1, element_p2]);
         broker_status.required_level.update(element_c1, ON);
         broker_status.required_level.update(element_c2, ON);
         broker_status.required_level.update(element_c3, ON);
@@ -5269,10 +5246,7 @@ mod tests {
 
         // Update C1, C2, C3, and C4 to ON.
         // All leases should now be satisfied.
-        broker.update_current_level(element_c1, ON);
-        broker.update_current_level(element_c2, ON);
-        broker.update_current_level(element_c3, ON);
-        broker.update_current_level(element_c4, ON);
+        settle_levels(&mut broker, &[element_c1, element_c2, element_c3, element_c4]);
         broker_status.lease.update(lease_c1.id, LeaseStatus::Satisfied);
         broker_status.lease.update(lease_c2.id, LeaseStatus::Satisfied);
         broker_status.lease.update(lease_c3.id, LeaseStatus::Satisfied);
@@ -5297,16 +5271,12 @@ mod tests {
         broker_status.assert_matches(&broker);
 
         // Power down all elements to remove activated claims.
-        broker.update_current_level(element_c1, OFF);
-        broker.update_current_level(element_c2, OFF);
-        broker.update_current_level(element_c3, OFF);
-        broker.update_current_level(element_c4, OFF);
+        settle_levels(&mut broker, &[element_c1, element_c2, element_c3, element_c4]);
         broker_status.required_level.update(element_p1, OFF);
         broker_status.required_level.update(element_p2, OFF);
         broker_status.assert_matches(&broker);
 
-        broker.update_current_level(element_p1, OFF);
-        broker.update_current_level(element_p2, OFF);
+        settle_levels(&mut broker, &[element_p1, element_p2]);
         broker_status.required_level.update(element_x, OFF);
         broker_status.assert_matches(&broker);
 
@@ -5332,67 +5302,22 @@ mod tests {
         // C has a dependency on D.
         // We will directly lease both B and C.
         // A <= B <= L => C => D
-        let element_a =
-            broker.add_element("A", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![]).unwrap();
-        let token_a = DependencyToken::create();
-        broker
-            .register_dependency_token(
-                element_a,
-                token_a.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap().into(),
-            )
-            .unwrap();
-
-        let element_b = broker
-            .add_element(
-                "B",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(ON.level),
-                    requires_token: Some(token_a.into()),
-                    requires_level_by_preference: Some(vec![ON.level]),
-                    ..Default::default()
-                }],
-            )
-            .unwrap();
-        let token_b = DependencyToken::create();
-        broker
-            .register_dependency_token(
-                element_b,
-                token_b.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap().into(),
-            )
-            .unwrap();
-
-        let element_d =
-            broker.add_element("D", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![]).unwrap();
-        let token_d = DependencyToken::create();
-        broker
-            .register_dependency_token(
-                element_d,
-                token_d.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap().into(),
-            )
-            .unwrap();
-
-        let element_c = broker
-            .add_element(
-                "C",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(ON.level),
-                    requires_token: Some(token_d.into()),
-                    requires_level_by_preference: Some(vec![ON.level]),
-                    ..Default::default()
-                }],
-            )
-            .unwrap();
-        let token_c = DependencyToken::create();
-        broker
-            .register_dependency_token(
-                element_c,
-                token_c.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap().into(),
-            )
-            .unwrap();
+        let (element_a, token_a) =
+            add_test_element_with_token(&mut broker, "A", &BINARY_POWER_LEVELS, &[]);
+        let (element_b, token_b) = add_test_element_with_token(
+            &mut broker,
+            "B",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &token_a, ON.level)],
+        );
+        let (element_d, token_d) =
+            add_test_element_with_token(&mut broker, "D", &BINARY_POWER_LEVELS, &[]);
+        let (element_c, token_c) = add_test_element_with_token(
+            &mut broker,
+            "C",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &token_d, ON.level)],
+        );
 
         // Direct Lease L depends on B and C.
         let dependencies = vec![
@@ -5423,8 +5348,7 @@ mod tests {
         assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Pending));
 
         // Now satisfy A and D.
-        broker.update_current_level(element_a, ON);
-        broker.update_current_level(element_d, ON);
+        settle_levels(&mut broker, &[element_a, element_d]);
 
         // Now B and C should have their required levels updated to ON.
         assert_eq!(broker.get_required_level(&element_b), Some(ON));
@@ -5432,8 +5356,7 @@ mod tests {
         assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Pending));
 
         // Now satisfy B and C.
-        broker.update_current_level(element_b, ON);
-        broker.update_current_level(element_c, ON);
+        settle_levels(&mut broker, &[element_b, element_c]);
         // Now all dependencies are satisfied.
         assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
 
@@ -5447,8 +5370,7 @@ mod tests {
         assert_eq!(broker.get_required_level(&element_d), Some(ON));
 
         // Power down B and C.
-        broker.update_current_level(element_b, OFF);
-        broker.update_current_level(element_c, OFF);
+        settle_levels(&mut broker, &[element_b, element_c]);
 
         // Now A and D's required levels levels should drop to OFF.
         assert_eq!(broker.get_required_level(&element_a), Some(OFF));
@@ -5485,95 +5407,29 @@ mod tests {
         //
         //   A <= M <= B <= L
         //        M <= C <= L
-        let levels = vec![0, 1, 2];
-        let element_a = broker
-            .add_element("A", ZERO.level, levels.clone(), vec![])
-            .expect("add_element failed");
-        let token_a = DependencyToken::create();
-        broker
-            .register_dependency_token(
-                element_a,
-                token_a.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap().into(),
-            )
-            .unwrap();
-
+        let levels = [0, 1, 2];
+        let (element_a, token_a) = add_test_element_with_token(&mut broker, "A", &levels, &[]);
         // M at 1 requires A at 1, and M at 2 requires A at 2.
-        let element_m = broker
-            .add_element(
-                "M",
-                ZERO.level,
-                levels.clone(),
-                vec![
-                    fpb::LevelDependency {
-                        dependent_level: Some(ONE.level),
-                        requires_token: Some(
-                            token_a.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap().into(),
-                        ),
-                        requires_level_by_preference: Some(vec![ONE.level]),
-                        ..Default::default()
-                    },
-                    fpb::LevelDependency {
-                        dependent_level: Some(TWO.level),
-                        requires_token: Some(token_a.into()),
-                        requires_level_by_preference: Some(vec![TWO.level]),
-                        ..Default::default()
-                    },
-                ],
-            )
-            .expect("add_element failed");
-        let token_m = DependencyToken::create();
-        broker
-            .register_dependency_token(
-                element_m,
-                token_m.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap().into(),
-            )
-            .unwrap();
-
+        let (element_m, token_m) = add_test_element_with_token(
+            &mut broker,
+            "M",
+            &levels,
+            &[(ONE.level, &token_a, ONE.level), (TWO.level, &token_a, TWO.level)],
+        );
         // B at ON requires M at 1.
-        let element_b = broker
-            .add_element(
-                "B",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(ON.level),
-                    requires_token: Some(
-                        token_m.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap().into(),
-                    ),
-                    requires_level_by_preference: Some(vec![ONE.level]),
-                    ..Default::default()
-                }],
-            )
-            .expect("add_element failed");
-        let token_b = DependencyToken::create();
-        broker
-            .register_dependency_token(
-                element_b,
-                token_b.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap().into(),
-            )
-            .unwrap();
-
+        let (element_b, token_b) = add_test_element_with_token(
+            &mut broker,
+            "B",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &token_m, ONE.level)],
+        );
         // C at ON requires M at 2.
-        let element_c = broker
-            .add_element(
-                "C",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(ON.level),
-                    requires_token: Some(token_m.into()),
-                    requires_level_by_preference: Some(vec![TWO.level]),
-                    ..Default::default()
-                }],
-            )
-            .expect("add_element failed");
-        let token_c = DependencyToken::create();
-        broker
-            .register_dependency_token(
-                element_c,
-                token_c.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap().into(),
-            )
-            .unwrap();
+        let (element_c, token_c) = add_test_element_with_token(
+            &mut broker,
+            "C",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &token_m, TWO.level)],
+        );
 
         let dependencies = vec![
             fpb::LeaseDependency {
@@ -5620,8 +5476,7 @@ mod tests {
         assert_eq!(broker.get_required_level(&element_b), Some(ON));
         assert_eq!(broker.get_required_level(&element_c), Some(ON));
 
-        broker.update_current_level(element_b, ON);
-        broker.update_current_level(element_c, ON);
+        settle_levels(&mut broker, &[element_b, element_c]);
         assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
 
         // The lease is recorded under each of its target elements, and only
@@ -5672,8 +5527,7 @@ mod tests {
         assert_eq!(broker.get_required_level(&element_c), Some(OFF));
         assert_eq!(broker.get_required_level(&element_m), Some(TWO));
 
-        broker.update_current_level(element_b, OFF);
-        broker.update_current_level(element_c, OFF);
+        settle_levels(&mut broker, &[element_b, element_c]);
         assert_eq!(broker.get_required_level(&element_m), Some(ZERO));
 
         broker.update_current_level(element_m, ZERO);
@@ -5732,15 +5586,7 @@ mod tests {
         let inspect = fuchsia_inspect::Inspector::default();
         let mut broker = Broker::new(inspect.root().create_child("test"));
 
-        let element_a =
-            broker.add_element("A", ZERO.level, vec![0, 1, 2], vec![]).expect("add_element failed");
-        let token_a = DependencyToken::create();
-        broker
-            .register_dependency_token(
-                element_a,
-                token_a.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap().into(),
-            )
-            .unwrap();
+        let (element_a, token_a) = add_test_element_with_token(&mut broker, "A", &[0, 1, 2], &[]);
 
         // The same element at the same level twice.
         let dependencies = vec![
@@ -5850,36 +5696,14 @@ mod tests {
 
         // A <= B <= L. B is the lease target, so the lease holds a root claim
         // on B. Removing B must drop the lease along with its claims on B and A.
-        let element_a =
-            broker.add_element("A", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![]).unwrap();
-        let token_a = DependencyToken::create();
-        broker
-            .register_dependency_token(
-                element_a,
-                token_a.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap().into(),
-            )
-            .unwrap();
-
-        let element_b = broker
-            .add_element(
-                "B",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(ON.level),
-                    requires_token: Some(token_a.into()),
-                    requires_level_by_preference: Some(vec![ON.level]),
-                    ..Default::default()
-                }],
-            )
-            .unwrap();
-        let token_b = DependencyToken::create();
-        broker
-            .register_dependency_token(
-                element_b,
-                token_b.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap().into(),
-            )
-            .unwrap();
+        let (element_a, token_a) =
+            add_test_element_with_token(&mut broker, "A", &BINARY_POWER_LEVELS, &[]);
+        let (element_b, token_b) = add_test_element_with_token(
+            &mut broker,
+            "B",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &token_a, ON.level)],
+        );
 
         let dependencies = vec![fpb::LeaseDependency {
             requires_token: Some(token_b.into()),
@@ -5901,7 +5725,6 @@ mod tests {
         // The lease and all of its claims are dropped immediately, leaving A no longer required.
         assert_eq!(broker.get_required_level(&element_a), Some(OFF));
         assert_lease_cleaned_up(&broker.catalog, lease.id);
-        broker.catalog.assert_claims_consistent();
         assert!(broker.drop_lease(lease.id).is_err());
 
         assert_data_tree!(inspect, root: contains {
@@ -5970,42 +5793,26 @@ mod tests {
         let inspect = fuchsia_inspect::Inspector::default();
         let mut broker = Broker::new(inspect.root().create_child("test"));
 
-        let element_a =
-            broker.add_element("A", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![]).unwrap();
-        let token_a = DependencyToken::create();
-        broker
-            .register_dependency_token(
-                element_a,
-                token_a.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap().into(),
-            )
-            .unwrap();
+        let (element_a, token_a) =
+            add_test_element_with_token(&mut broker, "A", &BINARY_POWER_LEVELS, &[]);
+        let (element_b, _) = add_test_element_with_token(
+            &mut broker,
+            "B",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &token_a, ON.level)],
+        );
 
-        let element_b = broker
-            .add_element(
-                "B",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(ON.level),
-                    requires_token: Some(token_a.into()),
-                    requires_level_by_preference: Some(vec![ON.level]),
-                    ..Default::default()
-                }],
-            )
-            .unwrap();
+        let lease = broker
+            .acquire_lease(element_b, ON, zx::Koid::from_raw(456), "B_lease")
+            .expect("acquire failed");
 
-        let lease =
-            broker.acquire_lease(element_b, ON, zx::Koid::from_raw(456)).expect("acquire failed");
-
-        broker.update_current_level(element_a, ON);
-        broker.update_current_level(element_b, ON);
+        settle_levels(&mut broker, &[element_a, element_b]);
         assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
 
         broker.remove_element(&element_b);
         assert!(!broker.element_exists(element_b));
         assert_eq!(broker.get_required_level(&element_a), Some(OFF));
         assert_lease_cleaned_up(&broker.catalog, lease.id);
-        broker.catalog.assert_claims_consistent();
         assert!(broker.drop_lease(lease.id).is_err());
 
         assert_data_tree!(inspect, root: contains {
@@ -6057,6 +5864,7 @@ mod tests {
                     rm_lease: {
                         element_id: *element_b,
                         lease_id: *lease.id,
+                        name: "B_lease",
                         level: ON.level as u64,
                         status: LeaseStatus::Vacated.into_primitive() as u64,
                     },
@@ -6082,76 +5890,32 @@ mod tests {
         let mut broker = Broker::new(inspect.root().create_child("test"));
 
         // D(ON) -> C(ON) -> B(ON) -> A(ON).
-        let element_a =
-            broker.add_element("A", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![]).unwrap();
-        let token_a = DependencyToken::create();
-        broker
-            .register_dependency_token(
-                element_a,
-                token_a.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap().into(),
-            )
-            .unwrap();
-
-        let element_b = broker
-            .add_element(
-                "B",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(ON.level),
-                    requires_token: Some(token_a.into()),
-                    requires_level_by_preference: Some(vec![ON.level]),
-                    ..Default::default()
-                }],
-            )
-            .unwrap();
-        let token_b = DependencyToken::create();
-        broker
-            .register_dependency_token(
-                element_b,
-                token_b.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap().into(),
-            )
-            .unwrap();
-
-        let element_c = broker
-            .add_element(
-                "C",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(ON.level),
-                    requires_token: Some(token_b.into()),
-                    requires_level_by_preference: Some(vec![ON.level]),
-                    ..Default::default()
-                }],
-            )
-            .unwrap();
-        let token_c = DependencyToken::create();
-        broker
-            .register_dependency_token(
-                element_c,
-                token_c.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap().into(),
-            )
-            .unwrap();
-
-        let element_d = broker
-            .add_element(
-                "D",
-                OFF.level,
-                BINARY_POWER_LEVELS.to_vec(),
-                vec![fpb::LevelDependency {
-                    dependent_level: Some(ON.level),
-                    requires_token: Some(token_c.into()),
-                    requires_level_by_preference: Some(vec![ON.level]),
-                    ..Default::default()
-                }],
-            )
-            .unwrap();
+        let (element_a, token_a) =
+            add_test_element_with_token(&mut broker, "A", &BINARY_POWER_LEVELS, &[]);
+        let (element_b, token_b) = add_test_element_with_token(
+            &mut broker,
+            "B",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &token_a, ON.level)],
+        );
+        let (element_c, token_c) = add_test_element_with_token(
+            &mut broker,
+            "C",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &token_b, ON.level)],
+        );
+        let (element_d, _) = add_test_element_with_token(
+            &mut broker,
+            "D",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &token_c, ON.level)],
+        );
 
         // Acquire a lease on D(ON). Initially `[B(ON) -> A(ON)]` is activated (requiring A(ON)),
         // while `[C(ON) -> B(ON)]`, `[D(ON) -> C(ON)]`, and `[None -> D(ON)]` are pending.
-        let lease =
-            broker.acquire_lease(element_d, ON, zx::Koid::from_raw(789)).expect("acquire failed");
+        let lease = broker
+            .acquire_lease(element_d, ON, zx::Koid::from_raw(789), "D_lease")
+            .expect("acquire failed");
         assert_eq!(broker.get_required_level(&element_a), Some(ON));
         assert_eq!(broker.get_required_level(&element_b), Some(OFF));
         assert_eq!(broker.get_required_level(&element_c), Some(OFF));
@@ -6173,7 +5937,6 @@ mod tests {
         assert!(!broker.element_exists(element_d));
         assert_eq!(broker.get_required_level(&element_a), Some(OFF));
         assert_lease_cleaned_up(&broker.catalog, lease.id);
-        broker.catalog.assert_claims_consistent();
 
         // Complete B's in-flight transition to ON; now that `[C(ON) -> B(ON)]` has been dropped,
         // B's required level drops back to OFF.
@@ -6182,20 +5945,19 @@ mod tests {
     }
 
     #[fuchsia::test]
-    fn test_update_leases_for_dependency_active() {
+    fn test_update_leases_for_added_dependency_active() {
         let inspect = fuchsia_inspect::Inspector::default();
         let mut broker = Broker::new(inspect.root().create_child("test"));
 
-        let element_a = broker
-            .add_element("A", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![])
-            .expect("add_element failed");
-        let element_b = broker
-            .add_element("B", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![])
-            .expect("add_element failed");
+        let (element_a, _) =
+            add_test_element_with_token(&mut broker, "A", &BINARY_POWER_LEVELS, &[]);
+        let (element_b, _) =
+            add_test_element_with_token(&mut broker, "B", &BINARY_POWER_LEVELS, &[]);
 
         // Create a lease for A at ON and verify that A's required level is now ON.
-        let lease =
-            broker.acquire_lease(element_a, ON, zx::Koid::from_raw(1)).expect("acquire failed");
+        let lease = broker
+            .acquire_lease(element_a, ON, zx::Koid::from_raw(1), "A_lease")
+            .expect("acquire failed");
         assert_eq!(broker.get_required_level(&element_a), Some(ON));
 
         // Update current level to ON and verify the lease is satisfied.
@@ -6215,7 +5977,7 @@ mod tests {
             dependent: Some(ElementLevel { element_id: element_a, level: ON }),
             requires: ElementLevel { element_id: element_b, level: ON },
         };
-        broker.update_leases_for_dependency(dependency.clone());
+        broker.update_leases_for_added_dependency(dependency.clone());
 
         // Verify that a claim for B at ON is added to the lease (and no other claims were added).
         let pending_claims = broker.catalog.pending_for_lease(lease.id);
@@ -6234,25 +5996,20 @@ mod tests {
     }
 
     #[fuchsia::test]
-    fn test_update_leases_for_dependency_unaffected() {
+    fn test_update_leases_for_added_dependency_unaffected() {
         let inspect = fuchsia_inspect::Inspector::default();
         let mut broker = Broker::new(inspect.root().create_child("test"));
 
-        let levels = vec![0, 1, 2];
-        let level_0 = IndexedPowerLevel { level: 0, index: 0 };
-        let level_1 = IndexedPowerLevel { level: 1, index: 1 };
-        let level_2 = IndexedPowerLevel { level: 2, index: 2 };
+        let levels = [0, 1, 2];
+        let level_1 = IndexedPowerLevel::from_same_level_and_index(1);
+        let level_2 = IndexedPowerLevel::from_same_level_and_index(2);
 
-        let element_a = broker
-            .add_element("A", level_0.level, levels.clone(), vec![])
-            .expect("add_element failed");
-        let element_b = broker
-            .add_element("B", level_0.level, levels.clone(), vec![])
-            .expect("add_element failed");
+        let (element_a, _) = add_test_element_with_token(&mut broker, "A", &levels, &[]);
+        let (element_b, _) = add_test_element_with_token(&mut broker, "B", &levels, &[]);
 
         // Create a lease for A at 1.
         let lease = broker
-            .acquire_lease(element_a, level_1, zx::Koid::from_raw(1))
+            .acquire_lease(element_a, level_1, zx::Koid::from_raw(1), "A_lease")
             .expect("acquire failed");
 
         // There should be only one claim for A at 1.
@@ -6271,7 +6028,7 @@ mod tests {
             dependent: Some(ElementLevel { element_id: element_a, level: level_2 }),
             requires: ElementLevel { element_id: element_b, level: level_1 },
         };
-        broker.update_leases_for_dependency(dependency);
+        broker.update_leases_for_added_dependency(dependency);
 
         // Verify that NO new claim is added.
         let pending_claims = broker.catalog.pending_for_lease(lease.id);
@@ -6289,14 +6046,7 @@ mod tests {
         let inspect = fuchsia_inspect::Inspector::default();
         let mut broker = Broker::new(inspect.root().create_child("test"));
 
-        let token_a = DependencyToken::create();
-        let element_a = broker.add_element("A", 0, vec![0, 1], vec![]).expect("add_element failed");
-        broker
-            .register_dependency_token(
-                element_a,
-                token_a.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed").into(),
-            )
-            .expect("register failed");
+        let (element_a, token_a) = add_test_element_with_token(&mut broker, "A", &[0, 1], &[]);
 
         let dep = fpb::LevelDependency {
             dependent_level: Some(1),
@@ -6314,8 +6064,9 @@ mod tests {
         let lease = broker
             .acquire_lease(
                 element_b,
-                IndexedPowerLevel { level: 1, index: 1 },
+                IndexedPowerLevel::from_same_level_and_index(1),
                 zx::Koid::from_raw(1),
+                "B_lease",
             )
             .expect("acquire failed");
 
@@ -6325,13 +6076,13 @@ mod tests {
         assert_eq!(broker.get_required_level(&element_a).unwrap().level, 1);
 
         // Transition A to 1.
-        broker.update_current_level(element_a, IndexedPowerLevel { level: 1, index: 1 });
+        broker.update_current_level(element_a, IndexedPowerLevel::from_same_level_and_index(1));
 
         // Now B's dependency is satisfied, so B's required level is 1.
         assert_eq!(broker.get_required_level(&element_b).unwrap().level, 1);
 
         // Transition B to 1 to satisfy the lease.
-        broker.update_current_level(element_b, IndexedPowerLevel { level: 1, index: 1 });
+        broker.update_current_level(element_b, IndexedPowerLevel::from_same_level_and_index(1));
         assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
 
         broker.remove_element(&element_a);
@@ -6347,42 +6098,23 @@ mod tests {
         let inspect = fuchsia_inspect::Inspector::default();
         let mut broker = Broker::new(inspect.root().create_child("test"));
 
-        let element_a = broker
-            .add_element("A", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![])
-            .expect("add_element failed");
-        let element_b = broker
-            .add_element("B", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![])
-            .expect("add_element failed");
-
-        let token_b = DependencyToken::create();
-        broker
-            .register_dependency_token(
-                element_b,
-                token_b.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed").into(),
-            )
-            .expect("register_dependency_token failed");
-
+        let (element_b, token_b) =
+            add_test_element_with_token(&mut broker, "B", &BINARY_POWER_LEVELS, &[]);
         // A at ON requires B at ON.
-        broker
-            .add_dependency(
-                element_a,
-                fpb::LevelDependency {
-                    dependent_level: Some(ON.level),
-                    requires_token: Some(token_b),
-                    requires_level_by_preference: Some(vec![ON.level]),
-                    ..Default::default()
-                },
-                &mut EagerInspectWriter,
-            )
-            .expect("add_dependency failed");
+        let (element_a, _) = add_test_element_with_token(
+            &mut broker,
+            "A",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &token_b, ON.level)],
+        );
 
         // Acquire lease on A at ON.
-        let lease =
-            broker.acquire_lease(element_a, ON, zx::Koid::from_raw(1)).expect("acquire failed");
+        let lease = broker
+            .acquire_lease(element_a, ON, zx::Koid::from_raw(1), "A_lease")
+            .expect("acquire failed");
 
         // Satisfy dependencies.
-        broker.update_current_level(element_b, ON);
-        broker.update_current_level(element_a, ON);
+        settle_levels(&mut broker, &[element_b, element_a]);
 
         // Verify lease is Satisfied.
         assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
@@ -6409,64 +6141,32 @@ mod tests {
         let inspect = fuchsia_inspect::Inspector::default();
         let mut broker = Broker::new(inspect.root().create_child("test"));
 
-        let element_a = broker
-            .add_element("A", OFF.level, vec![0, 10, 20], vec![])
-            .expect("add_element failed");
-        let element_b = broker
-            .add_element("B", OFF.level, vec![0, 10, 20], vec![])
-            .expect("add_element failed");
-
-        let token_b = DependencyToken::create();
-        broker
-            .register_dependency_token(
-                element_b,
-                token_b.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed").into(),
-            )
-            .expect("register_dependency_token failed");
-
+        let levels = [0, 10, 20];
+        let (element_b, token_b) = add_test_element_with_token(&mut broker, "B", &levels, &[]);
         // A     B
         // 20 -> 20
         // 10 -> 10
-        broker
-            .add_dependency(
-                element_a,
-                fpb::LevelDependency {
-                    dependent_level: Some(10),
-                    requires_token: Some(
-                        token_b.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed"),
-                    ),
-                    requires_level_by_preference: Some(vec![10]),
-                    ..Default::default()
-                },
-                &mut EagerInspectWriter,
-            )
-            .expect("add_dependency failed");
-        broker
-            .add_dependency(
-                element_a,
-                fpb::LevelDependency {
-                    dependent_level: Some(20),
-                    requires_token: Some(token_b),
-                    requires_level_by_preference: Some(vec![20]),
-                    ..Default::default()
-                },
-                &mut EagerInspectWriter,
-            )
-            .expect("add_dependency failed");
+        let (element_a, _) = add_test_element_with_token(
+            &mut broker,
+            "A",
+            &levels,
+            &[(10, &token_b, 10), (20, &token_b, 20)],
+        );
 
-        let level_10 = IndexedPowerLevel { level: 10, index: 1 };
-        let level_20 = IndexedPowerLevel { level: 20, index: 2 };
+        let level_10 = IndexedPowerLevel::new(10, 1);
+        let level_20 = IndexedPowerLevel::new(20, 2);
 
         // Acquire Lease 1 on A at level 10.
-        let lease1 =
-            broker.acquire_lease(element_a, level_10.clone(), zx::Koid::from_raw(1)).unwrap();
-        broker.update_current_level(element_b, level_10.clone());
-        broker.update_current_level(element_a, level_10.clone());
+        let lease1 = broker
+            .acquire_lease(element_a, level_10.clone(), zx::Koid::from_raw(1), "A_lease_1")
+            .unwrap();
+        settle_levels(&mut broker, &[element_b, element_a]);
         assert_eq!(broker.get_lease_status(lease1.id), Some(LeaseStatus::Satisfied));
 
         // Acquire Lease 2 on A at level 10.
-        let lease2 =
-            broker.acquire_lease(element_a, level_10.clone(), zx::Koid::from_raw(2)).unwrap();
+        let lease2 = broker
+            .acquire_lease(element_a, level_10.clone(), zx::Koid::from_raw(2), "A_lease_2")
+            .unwrap();
         assert_eq!(broker.get_lease_status(lease2.id), Some(LeaseStatus::Satisfied));
 
         // Bring B to level 20 first so that Lease 3's top claim can be
@@ -6475,8 +6175,9 @@ mod tests {
 
         // Acquire Lease 3 on A at level 20. This puts element A into
         // in_transition while transiting to 20.
-        let lease3 =
-            broker.acquire_lease(element_a, level_20.clone(), zx::Koid::from_raw(3)).unwrap();
+        let lease3 = broker
+            .acquire_lease(element_a, level_20.clone(), zx::Koid::from_raw(3), "A_lease_3")
+            .unwrap();
 
         // While A is in transition, drop Lease 2.
         // Because A is in transition, Lease 2's bottom claim (A@10 -> B@10)
@@ -6506,14 +6207,15 @@ mod tests {
         let inspect = fuchsia_inspect::Inspector::default();
         let mut broker = Broker::new(inspect.root().create_child("test"));
 
-        let element_a = broker
-            .add_element("A", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![])
-            .expect("add_element failed");
+        let (element_a, _) =
+            add_test_element_with_token(&mut broker, "A", &BINARY_POWER_LEVELS, &[]);
 
-        let lease1 =
-            broker.acquire_lease(element_a, ON, zx::Koid::from_raw(1)).expect("acquire failed");
-        let lease2 =
-            broker.acquire_lease(element_a, ON, zx::Koid::from_raw(2)).expect("acquire failed");
+        let lease1 = broker
+            .acquire_lease(element_a, ON, zx::Koid::from_raw(1), "A_lease_1")
+            .expect("acquire failed");
+        let lease2 = broker
+            .acquire_lease(element_a, ON, zx::Koid::from_raw(2), "A_lease_2")
+            .expect("acquire failed");
 
         broker.update_current_level(element_a, ON);
         assert_eq!(broker.get_lease_status(lease1.id), Some(LeaseStatus::Satisfied));
@@ -6526,5 +6228,1983 @@ mod tests {
         assert!(!broker.catalog.leases.contains_key(&lease1.id));
 
         assert_eq!(broker.get_lease_status(lease2.id), Some(LeaseStatus::Satisfied));
+    }
+
+    #[fuchsia::test]
+    fn test_disorderly_drop_spares_unrelated_branch() {
+        // A disorderly drop of E must not break the lease's claims on F and G, which don't depend
+        // on E, and the lease must recover once E comes back.
+        //
+        // A -> E
+        //   -> F -> G
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+        let levels = BINARY_POWER_LEVELS.to_vec();
+        let (e, e_token) = add_test_element_with_token(&mut broker, "E", &levels, &[]);
+        let (g, g_token) = add_test_element_with_token(&mut broker, "G", &levels, &[]);
+        let (f, f_token) = add_test_element_with_token(
+            &mut broker,
+            "F",
+            &levels,
+            &[(ON.level, &g_token, ON.level)],
+        );
+        let (a, _) = add_test_element_with_token(
+            &mut broker,
+            "A",
+            &levels,
+            &[(ON.level, &e_token, ON.level), (ON.level, &f_token, ON.level)],
+        );
+        let all = [a, e, f, g];
+
+        let lease = broker.acquire_lease(a, ON, zx::Koid::from_raw(1), "A_lease").unwrap();
+        settle_levels(&mut broker, &all);
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+
+        // E drops without being asked to. Only A, which depends on E, loses its required level.
+        broker.update_current_level(e, OFF);
+        assert_eq!(broker.get_required_level(&a), Some(OFF));
+        assert_eq!(broker.get_required_level(&e), Some(ON));
+        assert_eq!(broker.get_required_level(&f), Some(ON));
+        assert_eq!(broker.get_required_level(&g), Some(ON));
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Pending));
+
+        settle_levels(&mut broker, &[a, f, g]);
+        assert_eq!(broker.get_current_level(&f), Some(ON));
+        assert_eq!(broker.get_current_level(&g), Some(ON));
+
+        // E comes back, and the lease recovers.
+        broker.update_current_level(e, ON);
+        settle_levels(&mut broker, &all);
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+        assert_eq!(broker.get_current_level(&a), Some(ON));
+    }
+
+    #[fuchsia::test]
+    fn test_disorderly_drop_keeps_lower_level_claims_in_same_lease() {
+        // M@2 needs E, but M@1 doesn't. When E drops without being asked to, only claims that need
+        // M@2 break. P's claim on M@1, held by the same lease, stays enforced.
+        //
+        // Q@1 -> M@2 -> E@ON
+        // Q@1 -> P@1 -> M@1
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+        let binary = BINARY_POWER_LEVELS.to_vec();
+        let three = vec![0, 1, 2];
+        let (e, e_token) = add_test_element_with_token(&mut broker, "E", &binary, &[]);
+        let (m, m_token) =
+            add_test_element_with_token(&mut broker, "M", &three, &[(2, &e_token, ON.level)]);
+        let (p, p_token) =
+            add_test_element_with_token(&mut broker, "P", &binary, &[(1, &m_token, 1)]);
+        let (q, _) = add_test_element_with_token(
+            &mut broker,
+            "Q",
+            &binary,
+            &[(1, &m_token, 2), (1, &p_token, 1)],
+        );
+        let all = [e, m, p, q];
+
+        let lease = broker.acquire_lease(q, ON, zx::Koid::from_raw(1), "Q_lease").unwrap();
+        settle_levels(&mut broker, &all);
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+        assert_eq!(broker.get_current_level(&m), Some(TWO));
+
+        broker.update_current_level(e, OFF);
+        assert_eq!(broker.get_required_level(&e), Some(ON));
+        assert_eq!(broker.get_required_level(&m), Some(ONE));
+        assert_eq!(broker.get_required_level(&p), Some(ON));
+        assert_eq!(broker.get_required_level(&q), Some(OFF));
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Pending));
+
+        settle_levels(&mut broker, &[m, p, q]);
+        broker.update_current_level(e, ON);
+        settle_levels(&mut broker, &all);
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+    }
+
+    #[fuchsia::test]
+    fn test_disorderly_drop_breaks_claims_between_new_and_previous_level() {
+        // E drops from 3 to 1 without being asked to. Y needs E@2, which is between E's new and
+        // previous levels, so Y loses its required level.
+        //
+        // Y@ON -> E@2
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+        let three_step = vec![0, 1, 2, 3];
+        let (e, e_token) = add_test_element_with_token(&mut broker, "E", &three_step, &[]);
+        let (y, _) = add_test_element_with_token(
+            &mut broker,
+            "Y",
+            &BINARY_POWER_LEVELS.to_vec(),
+            &[(ON.level, &e_token, 2)],
+        );
+        let all = [e, y];
+        let level_3 = IndexedPowerLevel::from_same_level_and_index(3);
+
+        let lease_e = broker.acquire_lease(e, level_3, zx::Koid::from_raw(1), "E_lease").unwrap();
+        let lease_y = broker.acquire_lease(y, ON, zx::Koid::from_raw(2), "Y_lease").unwrap();
+        settle_levels(&mut broker, &all);
+        assert_eq!(broker.get_lease_status(lease_e.id), Some(LeaseStatus::Satisfied));
+        assert_eq!(broker.get_lease_status(lease_y.id), Some(LeaseStatus::Satisfied));
+
+        broker.update_current_level(e, ONE);
+        assert_eq!(broker.get_required_level(&e), Some(level_3));
+        assert_eq!(broker.get_required_level(&y), Some(OFF));
+        assert_eq!(broker.get_lease_status(lease_e.id), Some(LeaseStatus::Pending));
+        assert_eq!(broker.get_lease_status(lease_y.id), Some(LeaseStatus::Pending));
+    }
+
+    #[fuchsia::test]
+    fn test_disorderly_drop_drops_powering_down_lease_claims_above_element() {
+        // L1 on R is powering down and has already dropped its own claim on A -> E, because L2
+        // holds the same claim. When E drops without being asked to, L1's remaining claim on
+        // R -> A must still be found and dropped, so that A can follow E down and L1 vacates.
+        //
+        // R -> A -> E
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+        let levels = BINARY_POWER_LEVELS.to_vec();
+        let (e, e_token) = add_test_element_with_token(&mut broker, "E", &levels, &[]);
+        let (a, a_token) = add_test_element_with_token(
+            &mut broker,
+            "A",
+            &levels,
+            &[(ON.level, &e_token, ON.level)],
+        );
+        let (r, _) = add_test_element_with_token(
+            &mut broker,
+            "R",
+            &levels,
+            &[(ON.level, &a_token, ON.level)],
+        );
+        let all = [e, a, r];
+
+        let lease2 = broker.acquire_lease(a, ON, zx::Koid::from_raw(2), "A_lease").unwrap();
+        let lease1 = broker.acquire_lease(r, ON, zx::Koid::from_raw(1), "R_lease").unwrap();
+        settle_levels(&mut broker, &all);
+        assert_eq!(broker.get_lease_status(lease1.id), Some(LeaseStatus::Satisfied));
+
+        // R stays ON, so L1 keeps its claim on R -> A while powering down.
+        broker.drop_lease(lease1.id).unwrap();
+        assert_eq!(broker.get_lease_status(lease1.id), Some(LeaseStatus::PoweringDown));
+        assert!(
+            !broker
+                .catalog
+                .is_claim_enforced(&create_test_dependency(a, ON.level, e, ON.level), lease1.id)
+        );
+        assert!(
+            broker
+                .catalog
+                .is_claim_enforced(&create_test_dependency(r, ON.level, a, ON.level), lease1.id)
+        );
+
+        broker.update_current_level(e, OFF);
+        assert_lease_cleaned_up(&broker.catalog, lease1.id);
+        assert_eq!(broker.get_required_level(&a), Some(OFF));
+        assert_eq!(broker.get_lease_status(lease2.id), Some(LeaseStatus::Pending));
+    }
+
+    #[fuchsia::test]
+    fn test_disorderly_drop_leaves_element_required_level_alone() {
+        // E drops from 2 to 1 and then to 0 without being asked to. A's claim on E@2 stays
+        // enforced throughout, so E must still be required at 2.
+        //
+        // A@ON -> E@2
+        // X@ON -> Y@ON -> E@1
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+        let binary = BINARY_POWER_LEVELS.to_vec();
+        let (e, e_token) = add_test_element_with_token(&mut broker, "E", &[0, 1, 2], &[]);
+        let (a, _) =
+            add_test_element_with_token(&mut broker, "A", &binary, &[(ON.level, &e_token, 2)]);
+        let (y, y_token) =
+            add_test_element_with_token(&mut broker, "Y", &binary, &[(ON.level, &e_token, 1)]);
+        let (x, _) = add_test_element_with_token(
+            &mut broker,
+            "X",
+            &binary,
+            &[(ON.level, &y_token, ON.level)],
+        );
+        let all = [e, a, x, y];
+
+        let _lease_a = broker.acquire_lease(a, ON, zx::Koid::from_raw(1), "A_lease").unwrap();
+        let _lease_x = broker.acquire_lease(x, ON, zx::Koid::from_raw(2), "X_lease").unwrap();
+        settle_levels(&mut broker, &all);
+        assert_eq!(broker.get_current_level(&e), Some(TWO));
+
+        broker.update_current_level(e, ONE);
+        assert_eq!(broker.get_required_level(&e), Some(TWO));
+        assert_eq!(broker.get_required_level(&a), Some(OFF));
+        assert_eq!(broker.get_required_level(&y), Some(ON));
+
+        broker.update_current_level(e, ZERO);
+        assert_eq!(broker.get_required_level(&e), Some(TWO));
+        assert_eq!(broker.get_required_level(&x), Some(OFF));
+        assert_eq!(broker.get_required_level(&y), Some(OFF));
+    }
+
+    /// Settled baseline topology for invariant tests: `C(ON) -> A(ON) -> B(ON)` and
+    /// `D(ON) -> B(ON)`, with `lease_a` satisfied on `A@ON`, `lease_d` satisfied on `D@ON` (so
+    /// both leases require `B@ON`), and `C` idle at `OFF`.
+    struct InvariantFixture {
+        _inspect: fuchsia_inspect::Inspector,
+        broker: Broker,
+        a: ElementID,
+        b: ElementID,
+        c: ElementID,
+        d: ElementID,
+        lease_a: LeaseID,
+        lease_d: LeaseID,
+    }
+
+    fn setup_invariant_fixture() -> InvariantFixture {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+        let (b, b_token) = add_test_element_with_token(&mut broker, "B", &BINARY_POWER_LEVELS, &[]);
+        let (a, a_token) = add_test_element_with_token(
+            &mut broker,
+            "A",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &b_token, ON.level)],
+        );
+        let (c, _) = add_test_element_with_token(
+            &mut broker,
+            "C",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &a_token, ON.level)],
+        );
+        let (d, _) = add_test_element_with_token(
+            &mut broker,
+            "D",
+            &BINARY_POWER_LEVELS,
+            &[(ON.level, &b_token, ON.level)],
+        );
+        let lease_a = broker.acquire_lease(a, ON, zx::Koid::from_raw(1), "A_lease").unwrap().id;
+        let lease_d = broker.acquire_lease(d, ON, zx::Koid::from_raw(2), "D_lease").unwrap().id;
+        settle_levels(&mut broker, &[a, b, c, d]);
+        InvariantFixture { _inspect: inspect, broker, a, b, c, d, lease_a, lease_d }
+    }
+
+    #[fuchsia::test]
+    #[should_panic(expected = "required level does not match calculated level")]
+    fn test_wrapper_deref_checks_invariants() {
+        let mut f = setup_invariant_fixture();
+        f.broker.0.required.update(&f.b, OFF);
+        let _ = f.broker.get_required_level(&f.b);
+        // Skip `Drop` so only `Deref` can satisfy `should_panic`.
+        std::mem::forget(f.broker);
+    }
+
+    #[fuchsia::test]
+    #[should_panic(expected = "required level does not match calculated level")]
+    fn test_wrapper_deref_mut_checks_invariants() {
+        let mut f = setup_invariant_fixture();
+        f.broker.0.required.update(&f.b, OFF);
+        f.broker.update_current_level(f.b, ON);
+        std::mem::forget(f.broker);
+    }
+
+    #[fuchsia::test]
+    #[should_panic(expected = "required level does not match calculated level")]
+    fn test_wrapper_drop_checks_invariants() {
+        let mut f = setup_invariant_fixture();
+        f.broker.0.required.update(&f.b, OFF);
+        drop(f.broker);
+    }
+
+    macro_rules! invariant_violation_tests {
+        ($( $name:ident => ($expected:literal, |$f:ident| $corrupt:block) ),+ $(,)?) => {
+            $(
+                #[fuchsia::test]
+                #[should_panic(expected = $expected)]
+                fn $name() {
+                    let mut $f = setup_invariant_fixture();
+                    $corrupt;
+                    assert_broker_invariants(&$f.broker.0);
+                    std::mem::forget($f.broker);
+                }
+            )+
+        };
+    }
+
+    invariant_violation_tests! {
+        test_invariants_catch_catalog_claims_bookkeeping => (
+            "pending claim count is stale",
+            |f| {
+                f.broker.0.catalog.pending_claims_count += 1;
+            }
+        ),
+        test_invariants_catch_settled_element_required_level_mismatch => (
+            "required level does not match calculated level",
+            |f| {
+                f.broker.0.required.update(&f.b, OFF);
+            }
+        ),
+        test_invariants_catch_active_claim_on_dropped_lease => (
+            "in pending/active belongs to a dropped lease",
+            |f| {
+                f.broker.0.catalog.lease_status.update(&f.lease_a, LeaseStatus::PoweringDown);
+            }
+        ),
+        test_invariants_catch_deactivating_claim_on_open_lease => (
+            "must belong to a PoweringDown lease",
+            |f| {
+                let _ = f.broker.0.catalog.mark_to_deactivate(f.lease_a);
+            }
+        ),
+        test_invariants_catch_stranded_droppable_deactivating_claim => (
+            "droppable deactivating claims remained",
+            |f| {
+                let duplicate_lease =
+                    f.broker.0.acquire_lease(f.a, ON, zx::Koid::from_raw(3), "A_lease_2").unwrap();
+                let _ =
+                    f.broker.0.catalog.drop_and_mark_powering_down(duplicate_lease.id).unwrap();
+            }
+        ),
+        test_invariants_catch_pending_claim_with_satisfied_prerequisites => (
+            "should be active because its prerequisites are satisfied",
+            |f| {
+                let root_a = Dependency::new_root(ElementLevel { element_id: f.a, level: ON });
+                f.broker.0.catalog.deactivate_claim(&root_a, f.lease_a);
+                f.broker.0.update_required_levels([f.a], &mut EagerInspectWriter);
+            }
+        ),
+        test_invariants_catch_enforced_claim_with_unsatisfied_prerequisite => (
+            "has unsatisfied prerequisite",
+            |f| {
+                f.broker.0.update_current_level_internal(f.b, OFF, &mut EagerInspectWriter);
+            }
+        ),
+        test_invariants_catch_satisfied_dependent_missing_parent_required_level => (
+            "but calculated required level of",
+            |f| {
+                f.broker.drop_lease(f.lease_d).unwrap();
+                settle_levels(&mut f.broker, &[f.d]);
+                f.broker.0.catalog.drop_claim(
+                    &create_test_dependency(f.a, ON.level, f.b, ON.level),
+                    f.lease_a,
+                );
+                f.broker.0.update_required_levels([f.b], &mut EagerInspectWriter);
+            }
+        ),
+        test_invariants_catch_active_dependent_missing_enforced_parent_edge => (
+            "has no enforced claim covering",
+            |f| {
+                // `lease_d` keeps `B` required at `ON`, isolating the `has_enforced_edge` check on
+                // `A -> B`.
+                f.broker.0.catalog.drop_claim(
+                    &create_test_dependency(f.a, ON.level, f.b, ON.level),
+                    f.lease_a,
+                );
+            }
+        ),
+        test_invariants_catch_deactivating_dependent_missing_parent_required_level => (
+            "but calculated required level of",
+            |f| {
+                let lease_c =
+                    f.broker.acquire_lease(f.c, ON, zx::Koid::from_raw(3), "C_lease").unwrap().id;
+                settle_levels(&mut f.broker, &[f.c]);
+                f.broker.drop_lease(f.lease_a).unwrap();
+                f.broker.drop_lease(f.lease_d).unwrap();
+                settle_levels(&mut f.broker, &[f.d]);
+                f.broker.drop_lease(lease_c).unwrap();
+                // `C` is transitioning toward `OFF`, so `C@ON -> A@ON` is only in `deactivating`
+                // (`active` is empty). Marking `B` in transition to `ON` after dropping
+                // `A@ON -> B@ON` skips the settled-element check on `B` while keeping
+                // `deactivating_satisfied` true for `A@ON`.
+                f.broker.0.catalog.drop_claim(
+                    &create_test_dependency(f.a, ON.level, f.b, ON.level),
+                    lease_c,
+                );
+                f.broker.0.in_transition.insert(f.b, ON);
+            }
+        ),
+        test_invariants_catch_orphaned_lease_status => (
+            "outlived catalog.leases",
+            |f| {
+                f.broker.drop_lease(f.lease_d).unwrap();
+                settle_levels(&mut f.broker, &[f.d]);
+                f.broker.0.catalog.lease_status.update(&f.lease_d, LeaseStatus::PoweringDown);
+            }
+        ),
+        test_invariants_catch_powering_down_lease_without_remaining_claims => (
+            "has no remaining claims and should be vacated",
+            |f| {
+                let _ = f.broker.0.catalog.drop_and_mark_powering_down(f.lease_d).unwrap();
+                f.broker.0.catalog.drop_claim(
+                    &Dependency::new_root(ElementLevel { element_id: f.d, level: ON }),
+                    f.lease_d,
+                );
+                f.broker.0.catalog.drop_claim(
+                    &create_test_dependency(f.d, ON.level, f.b, ON.level),
+                    f.lease_d,
+                );
+                f.broker.0.update_required_levels([f.d], &mut EagerInspectWriter);
+            }
+        ),
+        test_invariants_catch_vacated_lease_retained_in_catalog => (
+            "vacated lease",
+            |f| {
+                let _ = f.broker.0.catalog.drop_and_mark_powering_down(f.lease_d).unwrap();
+                f.broker.0.catalog.drop_claim(
+                    &Dependency::new_root(ElementLevel { element_id: f.d, level: ON }),
+                    f.lease_d,
+                );
+                f.broker.0.catalog.drop_claim(
+                    &create_test_dependency(f.d, ON.level, f.b, ON.level),
+                    f.lease_d,
+                );
+                f.broker.0.update_required_levels([f.d], &mut EagerInspectWriter);
+                f.broker.0.catalog.lease_status.update(&f.lease_d, LeaseStatus::Vacated);
+            }
+        ),
+        test_invariants_catch_open_lease_stale_status => (
+            "status does not match calculated status",
+            |f| {
+                f.broker.0.catalog.lease_status.update(&f.lease_a, LeaseStatus::Pending);
+            }
+        ),
+    }
+
+    /// Registers a dependency token for `element_id`, and returns it.
+    fn register_token(broker: &mut Broker, element_id: ElementID) -> DependencyToken {
+        let token = DependencyToken::create();
+        broker
+            .register_dependency_token(
+                element_id,
+                token.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed").into(),
+            )
+            .expect("register_dependency_token failed");
+        token
+    }
+
+    /// Adds a binary element that is OFF, and registers a dependency token for it.
+    fn add_binary_element(broker: &mut Broker, name: &str) -> (ElementID, DependencyToken) {
+        let element_id = broker
+            .add_element(name, OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![])
+            .expect("add_element failed");
+        let token = register_token(broker, element_id);
+        (element_id, token)
+    }
+
+    /// Returns the dependency of an element at `dependent_level` on the element that
+    /// `requires_token` was registered for, at `requires_level`.
+    fn level_dependency(
+        dependent_level: fpb::PowerLevel,
+        requires_token: &DependencyToken,
+        requires_level: fpb::PowerLevel,
+    ) -> fpb::LevelDependency {
+        fpb::LevelDependency {
+            dependent_level: Some(dependent_level),
+            requires_token: Some(
+                requires_token.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup failed"),
+            ),
+            requires_level_by_preference: Some(vec![requires_level]),
+            ..Default::default()
+        }
+    }
+
+    /// Makes `dependent` at `dependent_level` require the element that `requires_token` was
+    /// registered for to be at `requires_level`.
+    fn add_level_dependency(
+        broker: &mut Broker,
+        dependent: ElementID,
+        dependent_level: fpb::PowerLevel,
+        requires_token: &DependencyToken,
+        requires_level: fpb::PowerLevel,
+    ) {
+        broker
+            .add_dependency(
+                dependent,
+                level_dependency(dependent_level, requires_token, requires_level),
+                &mut EagerInspectWriter,
+            )
+            .expect("add_dependency failed");
+    }
+
+    /// Removes the dependency that `add_level_dependency` adds.
+    fn remove_level_dependency(
+        broker: &mut Broker,
+        dependent: ElementID,
+        dependent_level: fpb::PowerLevel,
+        requires_token: &DependencyToken,
+        requires_level: fpb::PowerLevel,
+    ) -> Result<(), ModifyDependencyError> {
+        broker.remove_dependency(
+            dependent,
+            &level_dependency(dependent_level, requires_token, requires_level),
+        )
+    }
+
+    /// Makes `dependent` require the element that `requires_token` was registered for to be ON
+    /// while it is ON.
+    fn add_on_dependency(
+        broker: &mut Broker,
+        dependent: ElementID,
+        requires_token: &DependencyToken,
+    ) {
+        add_level_dependency(broker, dependent, ON.level, requires_token, ON.level);
+    }
+
+    /// Removes the dependency that `add_on_dependency` adds.
+    fn remove_on_dependency(
+        broker: &mut Broker,
+        dependent: ElementID,
+        requires_token: &DependencyToken,
+    ) -> Result<(), ModifyDependencyError> {
+        remove_level_dependency(broker, dependent, ON.level, requires_token, ON.level)
+    }
+
+    /// Binary elements A, B and C, where A requires B and B requires C while ON.
+    struct Chain {
+        a: ElementID,
+        b: ElementID,
+        c: ElementID,
+        /// The dependency token of B, which A requires.
+        token_b: DependencyToken,
+    }
+
+    impl Chain {
+        fn new(broker: &mut Broker) -> Self {
+            let (c, token_c) = add_binary_element(broker, "C");
+            let (b, token_b) = add_binary_element(broker, "B");
+            add_on_dependency(broker, b, &token_c);
+            let (a, _token_a) = add_binary_element(broker, "A");
+            add_on_dependency(broker, a, &token_b);
+            Chain { a, b, c, token_b }
+        }
+
+        /// The dependency of A on B.
+        fn a_requires_b(&self) -> fpb::LevelDependency {
+            level_dependency(ON.level, &self.token_b, ON.level)
+        }
+
+        /// Removes the dependency of A on B.
+        fn remove_a_requires_b(&self, broker: &mut Broker) {
+            remove_on_dependency(broker, self.a, &self.token_b).expect("remove_dependency failed");
+        }
+
+        /// Leases A, and powers up C, B and A in the order that the broker requires. Returns the
+        /// lease, which is satisfied.
+        fn lease_and_power_up(&self, broker: &mut Broker) -> Lease {
+            let lease = broker
+                .acquire_lease(self.a, ON, zx::Koid::from_raw(1), "A_lease")
+                .expect("acquire failed");
+            broker.update_current_level(self.c, ON);
+            broker.update_current_level(self.b, ON);
+            broker.update_current_level(self.a, ON);
+            assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+            lease
+        }
+    }
+
+    // Removing a dependency stops the leases from requiring the element that it requires, without
+    // otherwise affecting them. Leases that are acquired afterwards do not require it either.
+    #[fuchsia::test]
+    fn test_remove_dependency() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+        let (element_b, token_b) = add_binary_element(&mut broker, "B");
+        let (element_a, _token_a) = add_binary_element(&mut broker, "A");
+        add_on_dependency(&mut broker, element_a, &token_b);
+
+        let lease1 = broker
+            .acquire_lease(element_a, ON, zx::Koid::from_raw(1), "A_lease")
+            .expect("acquire failed");
+        broker.update_current_level(element_b, ON);
+        broker.update_current_level(element_a, ON);
+        let lease2 = broker
+            .acquire_lease(element_a, ON, zx::Koid::from_raw(2), "A_lease_2")
+            .expect("acquire failed");
+        assert_eq!(broker.get_lease_status(lease1.id), Some(LeaseStatus::Satisfied));
+        assert_eq!(broker.get_lease_status(lease2.id), Some(LeaseStatus::Satisfied));
+        assert_eq!(broker.get_required_level(&element_b), Some(ON));
+
+        remove_on_dependency(&mut broker, element_a, &token_b).expect("remove_dependency failed");
+        broker.catalog.assert_claims_consistent();
+
+        // B is no longer required, but A still is, and the leases on it are still satisfied.
+        assert_eq!(
+            broker.catalog.topology.dependencies_for_dependent_element(element_a).count(),
+            0
+        );
+        assert_eq!(broker.get_required_level(&element_b), Some(OFF));
+        assert_eq!(broker.get_required_level(&element_a), Some(ON));
+        assert_eq!(broker.get_lease_status(lease1.id), Some(LeaseStatus::Satisfied));
+        assert_eq!(broker.get_lease_status(lease2.id), Some(LeaseStatus::Satisfied));
+        assert_eq!(broker.catalog.enforced_for_lease(lease1.id).count(), 1);
+        assert_eq!(broker.catalog.enforced_for_lease(lease2.id).count(), 1);
+
+        // B powers down while A stays on.
+        broker.update_current_level(element_b, OFF);
+        assert_eq!(broker.get_lease_status(lease1.id), Some(LeaseStatus::Satisfied));
+        assert_eq!(broker.get_lease_status(lease2.id), Some(LeaseStatus::Satisfied));
+        assert_eq!(broker.get_required_level(&element_a), Some(ON));
+
+        // A lease acquired afterwards does not require B.
+        let lease3 = broker
+            .acquire_lease(element_a, ON, zx::Koid::from_raw(3), "A_lease_3")
+            .expect("acquire failed");
+        assert_eq!(broker.get_lease_status(lease3.id), Some(LeaseStatus::Satisfied));
+        assert_eq!(broker.get_required_level(&element_b), Some(OFF));
+        broker.catalog.assert_claims_consistent();
+
+        for lease in [&lease1, &lease2, &lease3] {
+            broker.drop_lease(lease.id).expect("drop failed");
+        }
+        assert_eq!(broker.get_required_level(&element_a), Some(OFF));
+        for lease in [&lease1, &lease2, &lease3] {
+            assert_lease_cleaned_up(&broker.catalog, lease.id);
+        }
+        broker.catalog.assert_claims_consistent();
+    }
+
+    // Removing a dependency fails if the dependency is not valid, if the token is not registered, or
+    // if the element does not have the dependency, without changing anything.
+    #[fuchsia::test]
+    fn test_remove_dependency_errors() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+        let (element_b, token_b) = add_binary_element(&mut broker, "B");
+        let (element_c, token_c) = add_binary_element(&mut broker, "C");
+        let (element_a, _token_a) = add_binary_element(&mut broker, "A");
+        add_on_dependency(&mut broker, element_a, &token_b);
+        let lease = broker
+            .acquire_lease(element_a, ON, zx::Koid::from_raw(1), "A_lease")
+            .expect("acquire failed");
+
+        // A field is missing, or a level is not a level of its element.
+        let invalidations: [fn(&mut fpb::LevelDependency); 5] = [
+            |dependency| dependency.dependent_level = None,
+            |dependency| dependency.requires_token = None,
+            |dependency| dependency.requires_level_by_preference = None,
+            |dependency| dependency.dependent_level = Some(10),
+            |dependency| dependency.requires_level_by_preference = Some(vec![10]),
+        ];
+        for invalidate in invalidations {
+            let mut dependency = level_dependency(ON.level, &token_b, ON.level);
+            invalidate(&mut dependency);
+            let res = broker.remove_dependency(element_a, &dependency);
+            assert!(matches!(res, Err(ModifyDependencyError::Invalid)), "{res:?}");
+        }
+
+        // The token is not registered.
+        let res = remove_on_dependency(&mut broker, element_a, &DependencyToken::create());
+        assert!(matches!(res, Err(ModifyDependencyError::NotAuthorized)), "{res:?}");
+
+        // A does not have a dependency upon C, and C does not have one upon B.
+        let res = remove_on_dependency(&mut broker, element_a, &token_c);
+        assert!(matches!(res, Err(ModifyDependencyError::NotFound(_))), "{res:?}");
+        let res = remove_on_dependency(&mut broker, element_c, &token_b);
+        assert!(matches!(res, Err(ModifyDependencyError::NotFound(_))), "{res:?}");
+
+        // A has a dependency upon B, but not at these levels.
+        let res = remove_level_dependency(&mut broker, element_a, OFF.level, &token_b, ON.level);
+        assert!(matches!(res, Err(ModifyDependencyError::NotFound(_))), "{res:?}");
+        let res = remove_level_dependency(&mut broker, element_a, ON.level, &token_b, OFF.level);
+        assert!(matches!(res, Err(ModifyDependencyError::NotFound(_))), "{res:?}");
+
+        // None of the failures changed anything.
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(
+            broker.catalog.topology.dependencies_for_dependent_element(element_a).count(),
+            1
+        );
+        assert_eq!(broker.catalog.enforced_for_lease(lease.id).count(), 1);
+        assert_eq!(broker.get_required_level(&element_b), Some(ON));
+
+        // The dependency can be removed once.
+        remove_on_dependency(&mut broker, element_a, &token_b).expect("remove_dependency failed");
+        let res = remove_on_dependency(&mut broker, element_a, &token_b);
+        assert!(matches!(res, Err(ModifyDependencyError::NotFound(_))), "{res:?}");
+    }
+
+    // The dependency to remove is resolved as the one to add is: its required level is the first
+    // valid level in `requires_level_by_preference`, and `remove_with_required_element` is ignored.
+    #[fuchsia::test]
+    fn test_remove_dependency_resolves_level_by_preference() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+        let (_element_b, token_b) = add_binary_element(&mut broker, "B");
+        let (element_a, _token_a) = add_binary_element(&mut broker, "A");
+        // 10 is not a level of B, so this is a dependency on ON.
+        let mut dependency = level_dependency(ON.level, &token_b, ON.level);
+        dependency.requires_level_by_preference = Some(vec![10, ON.level, OFF.level]);
+        broker
+            .add_dependency(element_a, dependency, &mut EagerInspectWriter)
+            .expect("add_dependency failed");
+
+        // Requiring another level is another dependency.
+        let res = remove_level_dependency(&mut broker, element_a, ON.level, &token_b, OFF.level);
+        assert!(matches!(res, Err(ModifyDependencyError::NotFound(_))), "{res:?}");
+
+        // Requiring the same level is the same dependency, however the preference is expressed.
+        let mut dependency = level_dependency(ON.level, &token_b, ON.level);
+        dependency.requires_level_by_preference = Some(vec![11, 12, ON.level]);
+        dependency.remove_with_required_element = Some(true);
+        broker.remove_dependency(element_a, &dependency).expect("remove_dependency failed");
+        assert_eq!(
+            broker.catalog.topology.dependencies_for_dependent_element(element_a).count(),
+            0
+        );
+    }
+
+    // A dependency that was declared when its element was added can be removed too. Removing the
+    // required element afterwards does not make the dependent element unsatisfiable, as it would
+    // if the dependency still existed.
+    #[fuchsia::test]
+    fn test_remove_dependency_declared_with_element() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+        let (element_b, token_b) = add_binary_element(&mut broker, "B");
+        let element_a = broker
+            .add_element(
+                "A",
+                OFF.level,
+                BINARY_POWER_LEVELS.to_vec(),
+                vec![level_dependency(ON.level, &token_b, ON.level)],
+            )
+            .expect("add_element failed");
+        // A2's dependency is removed together with B, rather than made unsatisfiable.
+        let mut removable = level_dependency(ON.level, &token_b, ON.level);
+        removable.remove_with_required_element = Some(true);
+        let element_a2 = broker
+            .add_element("A2", OFF.level, BINARY_POWER_LEVELS.to_vec(), vec![removable])
+            .expect("add_element failed");
+        let topology = &broker.catalog.topology;
+        assert_eq!(topology.get_removable_dependencies_for_required_element(element_b).len(), 1);
+
+        for (index, element) in [element_a, element_a2].into_iter().enumerate() {
+            remove_on_dependency(&mut broker, element, &token_b).expect("remove_dependency failed");
+            assert_eq!(
+                broker.catalog.topology.dependencies_for_dependent_element(element).count(),
+                0
+            );
+            // The dependency of the other element is not affected.
+            let topology = &broker.catalog.topology;
+            assert_eq!(topology.dependencies_for_required_element(element_b).count(), 1 - index);
+        }
+        let topology = &broker.catalog.topology;
+        assert!(topology.get_removable_dependencies_for_required_element(element_b).is_empty());
+
+        broker.remove_element(&element_b);
+        for (element, koid) in [(element_a, 1), (element_a2, 2)] {
+            assert_eq!(
+                broker.catalog.topology.dependencies_for_dependent_element(element).count(),
+                0
+            );
+            let lease = broker
+                .acquire_lease(element, ON, zx::Koid::from_raw(koid), "A_lease")
+                .expect("acquire failed");
+            broker.update_current_level(element, ON);
+            assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+            broker.drop_lease(lease.id).expect("drop failed");
+        }
+        broker.catalog.assert_claims_consistent();
+    }
+
+    // The elements that were only required through the removed dependency are lowered in order,
+    // as for a dropped lease: B is lowered right away, but C is held until B has been lowered.
+    #[fuchsia::test]
+    fn test_remove_dependency_lowers_transitive_dependencies_in_order() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+        let chain = Chain::new(&mut broker);
+        let lease = chain.lease_and_power_up(&mut broker);
+
+        chain.remove_a_requires_b(&mut broker);
+        broker.catalog.assert_claims_consistent();
+
+        // B is lowered, and C is still required by B's deactivated claim on it.
+        assert_eq!(broker.get_required_level(&chain.a), Some(ON));
+        assert_eq!(broker.get_required_level(&chain.b), Some(OFF));
+        assert_eq!(broker.get_required_level(&chain.c), Some(ON));
+        assert_eq!(broker.catalog.deactivating_for_lease(lease.id).len(), 1);
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+
+        // C is lowered once B has been.
+        broker.update_current_level(chain.b, OFF);
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.get_required_level(&chain.c), Some(OFF));
+        assert!(broker.catalog.deactivating_for_lease(lease.id).is_empty());
+        assert_eq!(broker.catalog.enforced_for_lease(lease.id).count(), 1);
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+        broker.update_current_level(chain.c, OFF);
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+
+        broker.drop_lease(lease.id).expect("drop failed");
+        assert_eq!(broker.get_required_level(&chain.a), Some(OFF));
+        assert_lease_cleaned_up(&broker.catalog, lease.id);
+        broker.catalog.assert_claims_consistent();
+    }
+
+    // When B is still powering up while the dependency on it is removed, it is lowered once it
+    // has reported its level, as for any other change of the level that it requires.
+    #[fuchsia::test]
+    fn test_remove_dependency_while_required_element_is_transitioning() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+        let chain = Chain::new(&mut broker);
+        let lease = broker
+            .acquire_lease(chain.a, ON, zx::Koid::from_raw(1), "A_lease")
+            .expect("acquire failed");
+        // C is on, and B is powering up. The lease waits for B.
+        broker.update_current_level(chain.c, ON);
+        assert_eq!(broker.get_required_level(&chain.b), Some(ON));
+        assert_eq!(broker.get_required_level(&chain.a), Some(OFF));
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Pending));
+
+        chain.remove_a_requires_b(&mut broker);
+        broker.catalog.assert_claims_consistent();
+
+        // The lease no longer waits for B, so A is required. B stays required until it reports.
+        assert_eq!(broker.get_required_level(&chain.a), Some(ON));
+        assert_eq!(broker.get_required_level(&chain.b), Some(ON));
+        assert_eq!(broker.get_required_level(&chain.c), Some(ON));
+        assert_eq!(broker.catalog.deactivating_for_lease(lease.id).len(), 1);
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Pending));
+
+        // B is lowered when it reports being on, and C when B has been lowered.
+        broker.update_current_level(chain.b, ON);
+        assert_eq!(broker.get_required_level(&chain.b), Some(OFF));
+        assert_eq!(broker.get_required_level(&chain.c), Some(ON));
+        broker.update_current_level(chain.b, OFF);
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.get_required_level(&chain.c), Some(OFF));
+        assert!(broker.catalog.deactivating_for_lease(lease.id).is_empty());
+
+        broker.update_current_level(chain.a, ON);
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+        assert_eq!(broker.catalog.enforced_for_lease(lease.id).count(), 1);
+    }
+
+    // A lease that is pending because of the removed dependency is no longer blocked by it, and
+    // claims on elements that are not powered, which were only needed because of the removed
+    // dependency, are dropped, rather than kept until their elements have been lowered.
+    #[fuchsia::test]
+    fn test_remove_dependency_unblocks_pending_lease() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+        // A requires B, which requires C, which requires D.
+        let (element_d, token_d) = add_binary_element(&mut broker, "D");
+        let (element_c, token_c) = add_binary_element(&mut broker, "C");
+        add_on_dependency(&mut broker, element_c, &token_d);
+        let (element_b, token_b) = add_binary_element(&mut broker, "B");
+        add_on_dependency(&mut broker, element_b, &token_c);
+        let (element_a, _token_a) = add_binary_element(&mut broker, "A");
+        add_on_dependency(&mut broker, element_a, &token_b);
+
+        // Nothing is powered. Only D is required, as the claims on the others are pending.
+        let lease = broker
+            .acquire_lease(element_a, ON, zx::Koid::from_raw(1), "A_lease")
+            .expect("acquire failed");
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Pending));
+        assert_eq!(broker.catalog.pending_for_lease(lease.id).len(), 3);
+        assert_eq!(broker.get_required_level(&element_a), Some(OFF));
+        assert_eq!(broker.get_required_level(&element_b), Some(OFF));
+        assert_eq!(broker.get_required_level(&element_c), Some(OFF));
+        assert_eq!(broker.get_required_level(&element_d), Some(ON));
+
+        remove_on_dependency(&mut broker, element_a, &token_b).expect("remove_dependency failed");
+        broker.catalog.assert_claims_consistent();
+
+        // A no longer waits for B, and is required. The claims on B and C were dropped.
+        assert_eq!(broker.get_required_level(&element_a), Some(ON));
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Pending));
+        assert!(broker.catalog.pending_for_lease(lease.id).is_empty());
+        assert!(broker.catalog.deactivating_for_lease(lease.id).is_empty());
+        assert_eq!(broker.catalog.enforced_for_lease(lease.id).count(), 1);
+
+        // D was already powering up, and is lowered once it has reported its level.
+        assert_eq!(broker.get_required_level(&element_d), Some(ON));
+        broker.update_current_level(element_d, ON);
+        assert_eq!(broker.get_required_level(&element_d), Some(OFF));
+        broker.update_current_level(element_d, OFF);
+
+        broker.update_current_level(element_a, ON);
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+        broker.catalog.assert_claims_consistent();
+    }
+
+    // A dependency can be removed while the claim on it is being deactivated. It takes effect right
+    // away, as it does for any claim, without waiting for the element that depends on it.
+    #[fuchsia::test]
+    fn test_remove_dependency_with_deactivated_claim() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+        // A requires B, which requires C, which requires D.
+        let (element_d, token_d) = add_binary_element(&mut broker, "D");
+        let (element_c, token_c) = add_binary_element(&mut broker, "C");
+        add_on_dependency(&mut broker, element_c, &token_d);
+        let (element_b, token_b) = add_binary_element(&mut broker, "B");
+        add_on_dependency(&mut broker, element_b, &token_c);
+        let (element_a, _token_a) = add_binary_element(&mut broker, "A");
+        add_on_dependency(&mut broker, element_a, &token_b);
+        let lease = broker
+            .acquire_lease(element_a, ON, zx::Koid::from_raw(1), "A_lease")
+            .expect("acquire failed");
+        for element in [element_d, element_c, element_b, element_a] {
+            broker.update_current_level(element, ON);
+        }
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+
+        // The claims of B on C and of C on D are deactivated. C and D are held until the elements
+        // above them are lowered.
+        remove_on_dependency(&mut broker, element_a, &token_b).expect("remove_dependency failed");
+        assert_eq!(broker.catalog.deactivating_for_lease(lease.id).len(), 2);
+        assert_eq!(broker.get_required_level(&element_b), Some(OFF));
+        assert_eq!(broker.get_required_level(&element_c), Some(ON));
+        assert_eq!(broker.get_required_level(&element_d), Some(ON));
+
+        // C no longer requires D, so D is lowered even though C is still on.
+        remove_on_dependency(&mut broker, element_c, &token_d).expect("remove_dependency failed");
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.catalog.deactivating_for_lease(lease.id).len(), 1);
+        assert_eq!(broker.get_required_level(&element_c), Some(ON));
+        assert_eq!(broker.get_required_level(&element_d), Some(OFF));
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+
+        // C is lowered once B has been.
+        broker.update_current_level(element_b, OFF);
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.get_required_level(&element_c), Some(OFF));
+        assert!(broker.catalog.deactivating_for_lease(lease.id).is_empty());
+        assert_eq!(broker.catalog.enforced_for_lease(lease.id).count(), 1);
+    }
+
+    // A claim that the lease can still reach through another dependency is not deactivated.
+    #[fuchsia::test]
+    fn test_remove_dependency_keeps_claims_that_are_still_reachable() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+        // A requires B and C, which both require D.
+        let (element_d, token_d) = add_binary_element(&mut broker, "D");
+        let (element_b, token_b) = add_binary_element(&mut broker, "B");
+        add_on_dependency(&mut broker, element_b, &token_d);
+        let (element_c, token_c) = add_binary_element(&mut broker, "C");
+        add_on_dependency(&mut broker, element_c, &token_d);
+        let (element_a, _token_a) = add_binary_element(&mut broker, "A");
+        add_on_dependency(&mut broker, element_a, &token_b);
+        add_on_dependency(&mut broker, element_a, &token_c);
+        let lease = broker
+            .acquire_lease(element_a, ON, zx::Koid::from_raw(1), "A_lease")
+            .expect("acquire failed");
+        for element in [element_d, element_b, element_c, element_a] {
+            broker.update_current_level(element, ON);
+        }
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+        assert_eq!(broker.catalog.enforced_for_lease(lease.id).count(), 5);
+
+        remove_on_dependency(&mut broker, element_a, &token_b).expect("remove_dependency failed");
+        broker.catalog.assert_claims_consistent();
+
+        // B is lowered. Its claim on D is deactivated, but D is still required through C.
+        assert_eq!(broker.get_required_level(&element_b), Some(OFF));
+        assert_eq!(broker.get_required_level(&element_c), Some(ON));
+        assert_eq!(broker.get_required_level(&element_d), Some(ON));
+        assert_eq!(broker.catalog.deactivating_for_lease(lease.id).len(), 1);
+        assert_eq!(broker.catalog.enforced_for_lease(lease.id).count(), 4);
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+
+        broker.update_current_level(element_b, OFF);
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.get_required_level(&element_d), Some(ON));
+        assert!(broker.catalog.deactivating_for_lease(lease.id).is_empty());
+        assert_eq!(broker.catalog.enforced_for_lease(lease.id).count(), 3);
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+    }
+
+    // Only the dependency that is removed is: the dependencies of the same element upon the same
+    // element at other levels remain. They apply to the leases that are acquired afterwards, and
+    // can be removed separately.
+    #[fuchsia::test]
+    fn test_remove_dependency_keeps_dependencies_at_other_levels() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+        let element_b =
+            broker.add_element("B", 0, vec![0, 1, 2], vec![]).expect("add_element failed");
+        let token_b = register_token(&mut broker, element_b);
+        let element_a =
+            broker.add_element("A", 0, vec![0, 1, 2], vec![]).expect("add_element failed");
+        add_level_dependency(&mut broker, element_a, 1, &token_b, 1);
+        add_level_dependency(&mut broker, element_a, 2, &token_b, 2);
+
+        remove_level_dependency(&mut broker, element_a, 2, &token_b, 2)
+            .expect("remove_dependency failed");
+        assert_eq!(
+            broker.catalog.topology.dependencies_for_dependent_element(element_a).count(),
+            1
+        );
+
+        // A at level 2 now only requires B at level 1, as it does at level 1.
+        let lease = broker
+            .acquire_lease(element_a, TWO, zx::Koid::from_raw(1), "A_lease")
+            .expect("acquire failed");
+        assert_eq!(broker.get_required_level(&element_b), Some(ONE));
+        broker.update_current_level(element_b, ONE);
+        broker.update_current_level(element_a, TWO);
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+        broker.catalog.assert_claims_consistent();
+
+        // The dependency at level 2 is gone, but the one at level 1 can still be removed.
+        let res = remove_level_dependency(&mut broker, element_a, 2, &token_b, 2);
+        assert!(matches!(res, Err(ModifyDependencyError::NotFound(_))), "{res:?}");
+        remove_level_dependency(&mut broker, element_a, 1, &token_b, 1)
+            .expect("remove_dependency failed");
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(
+            broker.catalog.topology.dependencies_for_dependent_element(element_a).count(),
+            0
+        );
+        assert_eq!(broker.get_required_level(&element_b), Some(ZERO));
+        assert_eq!(broker.get_required_level(&element_a), Some(TWO));
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+    }
+
+    // A lease does not claim a dependency that is redundant with another one between the same pair
+    // of elements at a higher level. When the dependency that made it redundant is removed, the
+    // lease claims it, so that the required element is lowered as far as the remaining dependencies
+    // allow, instead of to its minimum level.
+    #[fuchsia::test]
+    fn test_remove_dependency_claims_redundant_dependencies() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+        let element_b =
+            broker.add_element("B", 0, vec![0, 1, 2, 3], vec![]).expect("add_element failed");
+        let token_b = register_token(&mut broker, element_b);
+        let (element_c, token_c) = add_binary_element(&mut broker, "C");
+        let element_a =
+            broker.add_element("A", 0, vec![0, 1, 2, 3], vec![]).expect("add_element failed");
+        // A     B
+        // 3 ==> 3
+        // 2 ==> 2 (redundant with A@3 => B@3)
+        // 1 ==> 1 (redundant with A@3 => B@3 and A@2 => B@2)
+        for level in 1..=3 {
+            add_level_dependency(&mut broker, element_a, level, &token_b, level);
+        }
+        // A     C
+        // 3 ==> ON
+        add_level_dependency(&mut broker, element_a, 3, &token_c, ON.level);
+        let three = IndexedPowerLevel::from_same_level_and_index(3);
+        let lease = broker
+            .acquire_lease(element_a, three, zx::Koid::from_raw(1), "A_lease")
+            .expect("acquire failed");
+        broker.update_current_level(element_b, three);
+        broker.update_current_level(element_c, ON);
+        broker.update_current_level(element_a, three);
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+        // The lease only claims A@3 => B@3 and A@3 => C@ON, in addition to its own claim on A.
+        assert_eq!(broker.catalog.enforced_for_lease(lease.id).count(), 3);
+        assert_eq!(
+            broker.catalog.topology.dependencies_for_dependent_element(element_a).count(),
+            4
+        );
+
+        // Removing the dependencies upon B from the highest level down lowers B one level at a
+        // time, as the lease claims the dependency that took the removed one's place. The
+        // dependencies at the lower levels are not removed, and C is still required.
+        for (level, lowered_to, claims) in [(3, TWO, 3), (2, ONE, 3), (1, ZERO, 2)] {
+            remove_level_dependency(&mut broker, element_a, level, &token_b, level)
+                .expect("remove_dependency failed");
+            broker.catalog.assert_claims_consistent();
+            assert_eq!(
+                broker.catalog.topology.dependencies_for_dependent_element(element_a).count(),
+                usize::from(level)
+            );
+            assert_eq!(broker.get_required_level(&element_b), Some(lowered_to));
+            assert_eq!(broker.get_required_level(&element_c), Some(ON));
+            assert_eq!(broker.catalog.enforced_for_lease(lease.id).count(), claims);
+            assert!(broker.catalog.deactivating_for_lease(lease.id).is_empty());
+            assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+            // B has to report its level before it can be lowered again.
+            broker.update_current_level(element_b, lowered_to);
+        }
+
+        // There are none left to remove.
+        let res = remove_level_dependency(&mut broker, element_a, 1, &token_b, 1);
+        assert!(matches!(res, Err(ModifyDependencyError::NotFound(_))), "{res:?}");
+
+        // The dependency upon C can be removed separately.
+        remove_level_dependency(&mut broker, element_a, 3, &token_c, ON.level)
+            .expect("remove_dependency failed");
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(
+            broker.catalog.topology.dependencies_for_dependent_element(element_a).count(),
+            0
+        );
+        assert_eq!(broker.get_required_level(&element_c), Some(OFF));
+        assert_eq!(broker.catalog.enforced_for_lease(lease.id).count(), 1);
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+
+        broker.drop_lease(lease.id).expect("drop failed");
+        assert_eq!(broker.get_required_level(&element_a), Some(ZERO));
+        broker.update_current_level(element_a, ZERO);
+        assert_lease_cleaned_up(&broker.catalog, lease.id);
+        broker.catalog.assert_claims_consistent();
+    }
+
+    // The dependency that made another one redundant for a lease does not have to be the removed
+    // one, it can be one that the lease only reaches through the removed one. D is required at
+    // level 2 by C@2 => D@2, which makes C@1 => D@1 redundant, but the lease only reaches
+    // C@2 => D@2 through B. Without B, it must claim C@1 => D@1, which it reaches through E, or D
+    // is lowered further than E needs.
+    #[fuchsia::test]
+    fn test_remove_dependency_claims_redundant_dependencies_of_other_paths() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+        let element_d =
+            broker.add_element("D", 0, vec![0, 1, 2], vec![]).expect("add_element failed");
+        let token_d = register_token(&mut broker, element_d);
+        let element_c =
+            broker.add_element("C", 0, vec![0, 1, 2], vec![]).expect("add_element failed");
+        let token_c = register_token(&mut broker, element_c);
+        // C     D
+        // 2 ==> 2
+        // 1 ==> 1
+        add_level_dependency(&mut broker, element_c, 1, &token_d, 1);
+        add_level_dependency(&mut broker, element_c, 2, &token_d, 2);
+        // B, E and A are binary. A requires B and E while it is ON, which require C at level 2
+        // and 1 respectively:
+        //   A ==> B ==> C@2 ==> D@2
+        //   A ==> E ==> C@1 ==> D@1
+        let (element_b, token_b) = add_binary_element(&mut broker, "B");
+        add_level_dependency(&mut broker, element_b, ON.level, &token_c, 2);
+        let (element_e, token_e) = add_binary_element(&mut broker, "E");
+        add_level_dependency(&mut broker, element_e, ON.level, &token_c, 1);
+        let (element_a, _token_a) = add_binary_element(&mut broker, "A");
+        add_on_dependency(&mut broker, element_a, &token_b);
+        add_on_dependency(&mut broker, element_a, &token_e);
+
+        // Nothing is powered. The lease only claims C@2 => D@2 of the dependencies on D, and
+        // that is the only claim that is enforced, as the others wait for the elements below.
+        let lease = broker
+            .acquire_lease(element_a, ON, zx::Koid::from_raw(1), "A_lease")
+            .expect("acquire failed");
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Pending));
+        assert_eq!(broker.catalog.pending_for_lease(lease.id).len(), 5);
+        assert_eq!(broker.catalog.enforced_for_lease(lease.id).count(), 1);
+        assert_eq!(broker.get_required_level(&element_d), Some(TWO));
+
+        // The lease no longer needs B or C@2 => D@2, but it needs C@1 => D@1 now.
+        remove_on_dependency(&mut broker, element_a, &token_b).expect("remove_dependency failed");
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Pending));
+        assert_eq!(broker.catalog.pending_for_lease(lease.id).len(), 3);
+        assert_eq!(
+            broker.catalog.enforced_for_lease(lease.id).map(|dep| dep.requires.level).collect_vec(),
+            vec![ONE]
+        );
+        assert!(broker.catalog.deactivating_for_lease(lease.id).is_empty());
+
+        // D is still powering up to level 2, and is lowered to level 1 once it has reported its
+        // level, rather than to its minimum level. C is required at level 1 now that D is.
+        assert_eq!(broker.get_required_level(&element_d), Some(TWO));
+        broker.update_current_level(element_d, TWO);
+        assert_eq!(broker.get_required_level(&element_d), Some(ONE));
+        assert_eq!(broker.get_required_level(&element_c), Some(ONE));
+        broker.update_current_level(element_d, ONE);
+        broker.update_current_level(element_c, ONE);
+        broker.update_current_level(element_e, ON);
+        broker.update_current_level(element_a, ON);
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+        assert_eq!(broker.catalog.enforced_for_lease(lease.id).count(), 4);
+        assert_eq!(broker.get_required_level(&element_b), Some(OFF));
+        assert_eq!(broker.get_required_level(&element_d), Some(ONE));
+
+        // The elements are lowered in order when the lease is dropped.
+        broker.drop_lease(lease.id).expect("drop failed");
+        assert_eq!(broker.get_required_level(&element_a), Some(OFF));
+        assert_eq!(broker.get_required_level(&element_e), Some(ON));
+        broker.update_current_level(element_a, OFF);
+        assert_eq!(broker.get_required_level(&element_e), Some(OFF));
+        assert_eq!(broker.get_required_level(&element_c), Some(ONE));
+        broker.update_current_level(element_e, OFF);
+        assert_eq!(broker.get_required_level(&element_c), Some(ZERO));
+        assert_eq!(broker.get_required_level(&element_d), Some(ONE));
+        broker.update_current_level(element_c, ZERO);
+        assert_eq!(broker.get_required_level(&element_d), Some(ZERO));
+        assert_lease_cleaned_up(&broker.catalog, lease.id);
+        broker.catalog.assert_claims_consistent();
+    }
+
+    // When a higher dependency branch is removed while a lease is Satisfied, verify that
+    // any redundant lower dependencies that were previously filtered out are claimed and
+    // become active to maintain the lease's requirements.
+    #[fuchsia::test]
+    fn test_remove_dependency_claims_redundant_dependencies_when_lease_satisfied() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+        let element_d =
+            broker.add_element("D", 0, vec![0, 1, 2], vec![]).expect("add_element failed");
+        let token_d = register_token(&mut broker, element_d);
+        let element_c =
+            broker.add_element("C", 0, vec![0, 1, 2], vec![]).expect("add_element failed");
+        let token_c = register_token(&mut broker, element_c);
+        // C     D
+        // 2 ==> 2
+        // 1 ==> 1
+        add_level_dependency(&mut broker, element_c, 1, &token_d, 1);
+        add_level_dependency(&mut broker, element_c, 2, &token_d, 2);
+        // B, E and A are binary. A requires B and E while it is ON, which require C at level 2
+        // and 1 respectively:
+        //   A ==> B ==> C@2 ==> D@2
+        //   A ==> E ==> C@1 ==> D@1
+        let (element_b, token_b) = add_binary_element(&mut broker, "B");
+        add_level_dependency(&mut broker, element_b, ON.level, &token_c, 2);
+        let (element_e, token_e) = add_binary_element(&mut broker, "E");
+        add_level_dependency(&mut broker, element_e, ON.level, &token_c, 1);
+        let (element_a, _token_a) = add_binary_element(&mut broker, "A");
+        add_on_dependency(&mut broker, element_a, &token_b);
+        add_on_dependency(&mut broker, element_a, &token_e);
+
+        // Power up the lease so that it is Satisfied. The lease claims C@2 => D@2 of the
+        // dependencies on D, which makes C@1 => D@1 redundant.
+        let lease = broker
+            .acquire_lease(element_a, ON, zx::Koid::from_raw(1), "A_lease")
+            .expect("acquire failed");
+        assert_eq!(broker.get_required_level(&element_d), Some(TWO));
+        broker.update_current_level(element_d, TWO);
+        assert_eq!(broker.get_required_level(&element_c), Some(TWO));
+        broker.update_current_level(element_c, TWO);
+        assert_eq!(broker.get_required_level(&element_b), Some(ON));
+        assert_eq!(broker.get_required_level(&element_e), Some(ON));
+        broker.update_current_level(element_b, ON);
+        broker.update_current_level(element_e, ON);
+        assert_eq!(broker.get_required_level(&element_a), Some(ON));
+        broker.update_current_level(element_a, ON);
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+        assert_eq!(broker.catalog.enforced_for_lease(lease.id).count(), 6);
+
+        // The lease no longer needs B or C@2 => D@2, but it needs C@1 => D@1 now.
+        remove_on_dependency(&mut broker, element_a, &token_b).expect("remove_dependency failed");
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.get_required_level(&element_b), Some(OFF));
+        assert_eq!(broker.get_required_level(&element_c), Some(TWO));
+        assert_eq!(broker.get_required_level(&element_d), Some(TWO));
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+
+        // Lower B to OFF. B@ON ==> C@2 drops, and C's required level lowers to ONE.
+        broker.update_current_level(element_b, OFF);
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.get_required_level(&element_c), Some(ONE));
+        assert_eq!(broker.get_required_level(&element_d), Some(TWO));
+
+        // Lower C to ONE. C@2 ==> D@2 drops from deactivating, D's required level lowers to ONE,
+        // and deactivating_for_lease becomes empty.
+        broker.update_current_level(element_c, ONE);
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.get_required_level(&element_d), Some(ONE));
+        assert!(broker.catalog.deactivating_for_lease(lease.id).is_empty());
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+
+        // Lower D to ONE to match its required level.
+        broker.update_current_level(element_d, ONE);
+        broker.catalog.assert_claims_consistent();
+
+        // The elements are lowered in order when the lease is dropped.
+        broker.drop_lease(lease.id).expect("drop failed");
+        assert_eq!(broker.get_required_level(&element_a), Some(OFF));
+        assert_eq!(broker.get_required_level(&element_e), Some(ON));
+        broker.update_current_level(element_a, OFF);
+        assert_eq!(broker.get_required_level(&element_e), Some(OFF));
+        assert_eq!(broker.get_required_level(&element_c), Some(ONE));
+        broker.update_current_level(element_e, OFF);
+        assert_eq!(broker.get_required_level(&element_c), Some(ZERO));
+        assert_eq!(broker.get_required_level(&element_d), Some(ONE));
+        broker.update_current_level(element_c, ZERO);
+        assert_eq!(broker.get_required_level(&element_d), Some(ZERO));
+        assert_lease_cleaned_up(&broker.catalog, lease.id);
+        broker.catalog.assert_claims_consistent();
+    }
+
+    // The required element stays on as long as another lease requires it.
+    #[fuchsia::test]
+    fn test_remove_dependency_while_other_lease_requires_element() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+        let (element_b, token_b) = add_binary_element(&mut broker, "B");
+        let (element_a, _token_a) = add_binary_element(&mut broker, "A");
+        add_on_dependency(&mut broker, element_a, &token_b);
+        let lease_a = broker
+            .acquire_lease(element_a, ON, zx::Koid::from_raw(1), "A_lease")
+            .expect("acquire failed");
+        broker.update_current_level(element_b, ON);
+        broker.update_current_level(element_a, ON);
+        let lease_b = broker
+            .acquire_lease(element_b, ON, zx::Koid::from_raw(2), "B_lease")
+            .expect("acquire failed");
+        assert_eq!(broker.get_lease_status(lease_a.id), Some(LeaseStatus::Satisfied));
+        assert_eq!(broker.get_lease_status(lease_b.id), Some(LeaseStatus::Satisfied));
+
+        remove_on_dependency(&mut broker, element_a, &token_b).expect("remove_dependency failed");
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.get_required_level(&element_b), Some(ON));
+        assert_eq!(broker.get_lease_status(lease_a.id), Some(LeaseStatus::Satisfied));
+        assert_eq!(broker.get_lease_status(lease_b.id), Some(LeaseStatus::Satisfied));
+
+        broker.drop_lease(lease_b.id).expect("drop failed");
+        assert_eq!(broker.get_required_level(&element_b), Some(OFF));
+        assert_eq!(broker.get_lease_status(lease_a.id), Some(LeaseStatus::Satisfied));
+        assert_lease_cleaned_up(&broker.catalog, lease_b.id);
+    }
+
+    // A lease that is powering down does not wait for the element that the removed dependency
+    // required to be lowered either, and is vacated once it has no more claims.
+    #[fuchsia::test]
+    fn test_remove_dependency_while_lease_powering_down() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+        let chain = Chain::new(&mut broker);
+        let lease = chain.lease_and_power_up(&mut broker);
+
+        // A is required to power down, but B and C are held until it has.
+        broker.drop_lease(lease.id).expect("drop failed");
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::PoweringDown));
+        assert_eq!(broker.get_required_level(&chain.a), Some(OFF));
+        assert_eq!(broker.get_required_level(&chain.b), Some(ON));
+        assert_eq!(broker.get_required_level(&chain.c), Some(ON));
+
+        chain.remove_a_requires_b(&mut broker);
+        broker.catalog.assert_claims_consistent();
+
+        // B can be lowered without waiting for A, but C is still held until B has been lowered.
+        assert_eq!(broker.get_required_level(&chain.b), Some(OFF));
+        assert_eq!(broker.get_required_level(&chain.c), Some(ON));
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::PoweringDown));
+
+        broker.update_current_level(chain.b, OFF);
+        assert_eq!(broker.get_required_level(&chain.c), Some(OFF));
+        assert_lease_cleaned_up(&broker.catalog, lease.id);
+        broker.catalog.assert_claims_consistent();
+    }
+
+    // When the dependency is added again before the elements that were only required through it
+    // have been lowered, they are required again. The claim that was deactivated must not be dropped
+    // while the lease needs it, which would let B power up without C.
+    #[fuchsia::test]
+    fn test_remove_and_add_dependency_again() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+        let chain = Chain::new(&mut broker);
+        let lease = chain.lease_and_power_up(&mut broker);
+
+        chain.remove_a_requires_b(&mut broker);
+        assert_eq!(broker.catalog.deactivating_for_lease(lease.id).len(), 1);
+        assert_eq!(broker.get_required_level(&chain.b), Some(OFF));
+        assert_eq!(broker.get_required_level(&chain.c), Some(ON));
+
+        broker
+            .add_dependency(chain.a, chain.a_requires_b(), &mut EagerInspectWriter)
+            .expect("add_dependency failed");
+        broker.catalog.assert_claims_consistent();
+
+        // The lease claims everything again. B, which was being lowered, is raised again once it
+        // has reported being off.
+        assert!(broker.catalog.deactivating_for_lease(lease.id).is_empty());
+        assert_eq!(broker.catalog.enforced_for_lease(lease.id).count(), 3);
+        assert_eq!(broker.get_required_level(&chain.c), Some(ON));
+        broker.0.update_current_level(chain.b, OFF);
+        assert_eq!(broker.0.get_required_level(&chain.b), Some(ON));
+        assert_eq!(broker.0.get_required_level(&chain.c), Some(ON));
+        broker.0.update_current_level(chain.b, ON);
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.get_required_level(&chain.c), Some(ON));
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+
+        // The elements are lowered in order when the lease is dropped.
+        broker.drop_lease(lease.id).expect("drop failed");
+        assert_eq!(broker.get_required_level(&chain.a), Some(OFF));
+        assert_eq!(broker.get_required_level(&chain.b), Some(ON));
+        broker.update_current_level(chain.a, OFF);
+        assert_eq!(broker.get_required_level(&chain.b), Some(OFF));
+        assert_eq!(broker.get_required_level(&chain.c), Some(ON));
+        broker.update_current_level(chain.b, OFF);
+        assert_eq!(broker.get_required_level(&chain.c), Some(OFF));
+        assert_lease_cleaned_up(&broker.catalog, lease.id);
+        broker.catalog.assert_claims_consistent();
+    }
+
+    // When A ==> B is removed while B and C are powered, B ==> C@1 enters deactivating state.
+    // If B also has B ==> C@2 ==> D@ON (with D at OFF), and A ==> B is re-added before B lowers,
+    // the higher requirement B ==> C@2 is claimed but remains pending waiting on D.
+    // B ==> C@1 must stay in deactivating so that C's required level remains at 1 rather than
+    // dropping to 0 while B is still powered.
+    #[fuchsia::test]
+    fn test_remove_and_add_dependency_with_superseded_claim() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+
+        let (element_d, token_d) = add_binary_element(&mut broker, "D");
+        let element_c =
+            broker.add_element("C", 0, vec![0, 1, 2], vec![]).expect("add_element failed");
+        let token_c = register_token(&mut broker, element_c);
+        let element_b =
+            broker.add_element("B", 0, vec![0, 1, 2], vec![]).expect("add_element failed");
+        let token_b = register_token(&mut broker, element_b);
+        let (element_a, _token_a) = add_binary_element(&mut broker, "A");
+
+        // C@2 ==> D@ON
+        add_level_dependency(&mut broker, element_c, 2, &token_d, ON.level);
+        // B@1 ==> C@1
+        add_level_dependency(&mut broker, element_b, 1, &token_c, 1);
+        // B@2 ==> C@2
+        add_level_dependency(&mut broker, element_b, 2, &token_c, 2);
+        // A@ON ==> B@1
+        add_level_dependency(&mut broker, element_a, ON.level, &token_b, 1);
+
+        // Power up A, B and C@1.
+        let lease = broker
+            .acquire_lease(element_a, ON, zx::Koid::from_raw(1), "A_lease")
+            .expect("acquire failed");
+        broker.update_current_level(element_c, ONE);
+        broker.update_current_level(element_b, ONE);
+        broker.update_current_level(element_a, ON);
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+
+        // Remove A ==> B@1 while B and C@1 are powered.
+        // B ==> C@1 was active, so it becomes deactivating. B's required level becomes 0,
+        // but C's required level stays at 1 while B is still at 1.
+        remove_level_dependency(&mut broker, element_a, ON.level, &token_b, 1)
+            .expect("remove_dependency failed");
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.get_required_level(&element_b), Some(ZERO));
+        assert_eq!(broker.get_required_level(&element_c), Some(ONE));
+        assert_eq!(broker.catalog.deactivating_for_lease(lease.id).len(), 1);
+
+        // Re-add as A ==> B@2 before B lowers.
+        // B ==> C@2 supersedes B ==> C@1 in deps_claimed, but stays pending because D is OFF.
+        // B ==> C@1 must remain deactivating, and C's required level must stay at 1.
+        broker
+            .0
+            .add_dependency(
+                element_a,
+                level_dependency(ON.level, &token_b, 2),
+                &mut EagerInspectWriter,
+            )
+            .expect("add_dependency failed");
+        broker.0.catalog.assert_claims_consistent();
+
+        assert_eq!(broker.0.get_required_level(&element_c), Some(ONE));
+        assert_eq!(broker.0.catalog.deactivating_for_lease(lease.id).len(), 1);
+
+        // When D powers up to ON, B ==> C@2 activates. B ==> C@1 remains deactivating
+        // while B is at 1, so C's required level is 2 and deactivating_for_lease has 1 claim.
+        broker.0.update_current_level(element_d, ON);
+        broker.0.catalog.assert_claims_consistent();
+        assert_eq!(broker.0.get_required_level(&element_c), Some(TWO));
+        assert_eq!(broker.0.catalog.deactivating_for_lease(lease.id).len(), 1);
+        // Once B lowers to 0, B ==> C@1 is dropped and deactivating_for_lease becomes empty.
+        broker.0.update_current_level(element_b, ZERO);
+        broker.0.catalog.assert_claims_consistent();
+        assert!(broker.0.catalog.deactivating_for_lease(lease.id).is_empty());
+
+        // Bring C and B up to 2 to satisfy the re-added dependency.
+        broker.0.update_current_level(element_c, TWO);
+        broker.0.update_current_level(element_b, TWO);
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+
+        // Clean up lease and complete power down.
+        broker.drop_lease(lease.id).expect("drop_lease failed");
+        broker.update_current_level(element_a, OFF);
+        broker.update_current_level(element_b, ZERO);
+        broker.update_current_level(element_c, ZERO);
+        broker.update_current_level(element_d, OFF);
+        assert_lease_cleaned_up(&broker.catalog, lease.id);
+    }
+
+    // When an unrelated element is removed via remove_element, an open lease's deactivating
+    // claims must be kept if their dependencies still exist in the topology, so that their
+    // dependent elements can power down in an orderly fashion.
+    #[fuchsia::test]
+    fn test_remove_dependency_keeps_deactivating_claims_when_unrelated_element_removed() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+        let chain = Chain::new(&mut broker);
+        let (element_x, token_x) = add_binary_element(&mut broker, "X");
+        let mut dep_x = level_dependency(ON.level, &token_x, ON.level);
+        dep_x.remove_with_required_element = Some(true);
+        broker
+            .add_dependency(chain.a, dep_x, &mut EagerInspectWriter)
+            .expect("add_dependency failed");
+
+        let lease = broker
+            .acquire_lease(chain.a, ON, zx::Koid::from_raw(1), "A_lease")
+            .expect("acquire failed");
+        broker.update_current_level(chain.c, ON);
+        broker.update_current_level(chain.b, ON);
+        broker.update_current_level(element_x, ON);
+        broker.update_current_level(chain.a, ON);
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+
+        // Remove A ==> B. B ==> C becomes deactivating while B is still ON.
+        chain.remove_a_requires_b(&mut broker);
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.catalog.deactivating_for_lease(lease.id).len(), 1);
+        assert_eq!(broker.get_required_level(&chain.b), Some(OFF));
+        assert_eq!(broker.get_required_level(&chain.c), Some(ON));
+
+        // Removing unrelated element X must not drop the deactivating claim for B ==> C.
+        broker.remove_element(&element_x);
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.catalog.deactivating_for_lease(lease.id).len(), 1);
+        assert_eq!(broker.get_required_level(&chain.c), Some(ON));
+
+        // C's required level lowers to OFF once B lowers to OFF.
+        broker.update_current_level(chain.b, OFF);
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.get_required_level(&chain.c), Some(OFF));
+        assert!(broker.catalog.deactivating_for_lease(lease.id).is_empty());
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+    }
+
+    // When an element is removed via remove_element, removable dependencies that require it are
+    // removed and their leases updated via update_leases_for_removed_dependency. This unblocks
+    // pending leases and drops/deactivates transitive claims.
+    #[fuchsia::test]
+    fn test_remove_element_with_removable_dependency_unblocks_pending_lease() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+        // A requires B (remove_with_required_element: true), and B requires C.
+        let (element_c, token_c) = add_binary_element(&mut broker, "C");
+        let (element_b, token_b) = add_binary_element(&mut broker, "B");
+        add_on_dependency(&mut broker, element_b, &token_c);
+        let (element_a, _token_a) = add_binary_element(&mut broker, "A");
+        let mut dep_b = level_dependency(ON.level, &token_b, ON.level);
+        dep_b.remove_with_required_element = Some(true);
+        broker
+            .add_dependency(element_a, dep_b, &mut EagerInspectWriter)
+            .expect("add_dependency failed");
+
+        // Nothing is powered. Only C is required initially since claims on A and B are pending.
+        let lease = broker
+            .acquire_lease(element_a, ON, zx::Koid::from_raw(1), "A_lease")
+            .expect("acquire failed");
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Pending));
+        assert_eq!(broker.catalog.pending_for_lease(lease.id).len(), 2);
+        assert_eq!(broker.get_required_level(&element_a), Some(OFF));
+        assert_eq!(broker.get_required_level(&element_b), Some(OFF));
+        assert_eq!(broker.get_required_level(&element_c), Some(ON));
+
+        // Removing B removes A ==> B, deactivates/drops transitive claim on B ==> C,
+        // and activates the claim on A so that A is no longer blocked.
+        broker.remove_element(&element_b);
+        broker.catalog.assert_claims_consistent();
+
+        assert_eq!(broker.get_required_level(&element_a), Some(ON));
+        assert!(broker.catalog.pending_for_lease(lease.id).is_empty());
+        assert!(broker.catalog.deactivating_for_lease(lease.id).is_empty());
+
+        // C was already powering up, and is lowered once it has reported its level.
+        assert_eq!(broker.get_required_level(&element_c), Some(ON));
+        broker.update_current_level(element_c, ON);
+        assert_eq!(broker.get_required_level(&element_c), Some(OFF));
+        broker.update_current_level(element_c, OFF);
+
+        // Powering up A satisfies the lease.
+        broker.update_current_level(element_a, ON);
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+    }
+
+    // With A@ON ==> C@1 ==> B@ON ==> C@2 ==> D@ON and all elements at 0/OFF,
+    // acquire a lease on A@ON (so D is required at ON and C is at 0).
+    // When C@1 ==> B@ON is removed, A@ON ==> C@1 unblocks and C transitions to 1.
+    // The deactivating claim C@2 ==> D@ON should be dropped immediately because
+    // C's current level (0) and target level (1) are both below C@2, rather than being
+    // kept alive by C being in_transition.
+    #[fuchsia::test]
+    fn test_remove_dependency_drops_deactivating_claim_when_dependent_transition_below_level() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+
+        let (element_a, _token_a) = add_binary_element(&mut broker, "A");
+        let (element_b, token_b) = add_binary_element(&mut broker, "B");
+        let element_c =
+            broker.add_element("C", 0, vec![0, 1, 2], vec![]).expect("add_element failed");
+        let token_c = register_token(&mut broker, element_c);
+        let (element_d, token_d) = add_binary_element(&mut broker, "D");
+
+        // A@ON ==> C@1
+        add_level_dependency(&mut broker, element_a, ON.level, &token_c, 1);
+        // C@1 ==> B@ON
+        add_level_dependency(&mut broker, element_c, 1, &token_b, ON.level);
+        // B@ON ==> C@2
+        add_level_dependency(&mut broker, element_b, ON.level, &token_c, 2);
+        // C@2 ==> D@ON
+        add_level_dependency(&mut broker, element_c, 2, &token_d, ON.level);
+
+        // Acquire lease on A@ON. All elements at 0/OFF.
+        // C@2 ==> D@ON activates, so D is required at ON and C is at 0.
+        let lease = broker
+            .acquire_lease(element_a, ON, zx::Koid::from_raw(1), "A_lease")
+            .expect("acquire failed");
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.get_required_level(&element_d), Some(ON));
+        assert_eq!(broker.get_required_level(&element_c), Some(ZERO));
+
+        // Power up D to ON so D is satisfied and no longer in transition.
+        broker.update_current_level(element_d, ON);
+
+        // Remove C@1 ==> B@ON.
+        // A@ON ==> C@1 unblocks and activates, transitioning C from 0 to 1.
+        // C@2 ==> D@ON becomes deactivating. Because C is only transitioning to 1 (< 2),
+        // C@2 ==> D@ON must be dropped immediately, D drops to OFF, and deactivating is empty.
+        remove_level_dependency(&mut broker, element_c, 1, &token_b, ON.level)
+            .expect("remove_dependency failed");
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.get_required_level(&element_c), Some(ONE));
+        assert!(broker.catalog.deactivating_for_lease(lease.id).is_empty());
+        assert_eq!(broker.get_required_level(&element_d), Some(OFF));
+    }
+
+    // In update_leases_for_added_dependency, ensure filter_out_redundant_dependencies evaluates
+    // all reachable dependencies so that a deactivating claim (B@1 ==> C@1) that is superseded
+    // by an existing claim (B@2 ==> C@2) is not reactivated.
+    #[fuchsia::test]
+    fn test_add_dependency_does_not_reactivate_superseded_deactivating_claim() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+
+        let (element_a, _token_a) = add_binary_element(&mut broker, "A");
+        let element_b =
+            broker.add_element("B", 0, vec![0, 1, 2], vec![]).expect("add_element failed");
+        let token_b = register_token(&mut broker, element_b);
+        let element_c =
+            broker.add_element("C", 0, vec![0, 1, 2], vec![]).expect("add_element failed");
+        let token_c = register_token(&mut broker, element_c);
+        let (_element_d, token_d) = add_binary_element(&mut broker, "D");
+        let (element_e, token_e) = add_binary_element(&mut broker, "E");
+        let (_element_f, token_f) = add_binary_element(&mut broker, "F");
+
+        // C@2 ==> D@ON (D at OFF)
+        add_level_dependency(&mut broker, element_c, 2, &token_d, ON.level);
+        // B@1 ==> C@1
+        add_level_dependency(&mut broker, element_b, 1, &token_c, 1);
+        // B@2 ==> C@2
+        add_level_dependency(&mut broker, element_b, 2, &token_c, 2);
+        // E@ON ==> F@ON (F at OFF)
+        add_level_dependency(&mut broker, element_e, ON.level, &token_f, ON.level);
+        // E@ON ==> B@1
+        add_level_dependency(&mut broker, element_e, ON.level, &token_b, 1);
+        // A@ON ==> B@1
+        add_level_dependency(&mut broker, element_a, ON.level, &token_b, 1);
+
+        // Power up A=ON, B=1, C=1.
+        let lease = broker
+            .acquire_lease(element_a, ON, zx::Koid::from_raw(1), "A_lease")
+            .expect("acquire failed");
+        broker.update_current_level(element_c, ONE);
+        broker.update_current_level(element_b, ONE);
+        broker.update_current_level(element_a, ON);
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+
+        // Remove A@ON ==> B@1 (so B@1 ==> C@1 is deactivating).
+        remove_level_dependency(&mut broker, element_a, ON.level, &token_b, 1)
+            .expect("remove_dependency failed");
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.catalog.deactivating_for_lease(lease.id).len(), 1);
+
+        // Add A@ON ==> B@2 (so B@2 ==> C@2 is pending, blocked on D).
+        broker
+            .0
+            .add_dependency(
+                element_a,
+                level_dependency(ON.level, &token_b, 2),
+                &mut EagerInspectWriter,
+            )
+            .expect("add_dependency failed");
+        broker.0.catalog.assert_claims_consistent();
+
+        // Add A@ON ==> E@ON.
+        broker
+            .0
+            .add_dependency(
+                element_a,
+                level_dependency(ON.level, &token_e, ON.level),
+                &mut EagerInspectWriter,
+            )
+            .expect("add_dependency failed");
+        broker.0.catalog.assert_claims_consistent();
+
+        // B@1 ==> C@1 must NOT be reactivated, because it is superseded by the existing
+        // claim on B@2 ==> C@2. It remains in the deactivating state.
+        let b1_c1 = Dependency {
+            dependent: Some(ElementLevel { element_id: element_b, level: ONE }),
+            requires: ElementLevel { element_id: element_c, level: ONE },
+        };
+        assert!(broker.0.catalog.is_claim_deactivating(&b1_c1, lease.id));
+        assert!(!broker.0.catalog.claims.get(&b1_c1).is_some_and(|c| c.active.contains(&lease.id)));
+        assert_eq!(broker.0.catalog.deactivating_for_lease(lease.id).len(), 1);
+
+        // Clean up lease and complete power down.
+        broker.0.drop_lease(lease.id).expect("drop_lease failed");
+        broker.update_current_level(element_a, OFF);
+        broker.update_current_level(element_b, ZERO);
+        broker.update_current_level(element_c, ZERO);
+        assert_lease_cleaned_up(&broker.catalog, lease.id);
+    }
+
+    // 1. Unblocking pending claims on the lower level:
+    // D@ON requires A@ON ==> B@1 ==> C@1 and B@2 ==> C@2 with all elements at 0.
+    // Removing B@1 ==> C@1 leaves B@1 with no dependencies, so A@ON ==> B@1
+    // should activate and raise B's required level to ONE.
+    #[fuchsia::test]
+    fn test_remove_dependency_unblocks_pending_claim_filtered_on_lower_level() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+
+        let (element_d, _token_d) = add_binary_element(&mut broker, "D");
+        let (element_a, token_a) = add_binary_element(&mut broker, "A");
+        let element_b =
+            broker.add_element("B", 0, vec![0, 1, 2], vec![]).expect("add_element failed");
+        let token_b = register_token(&mut broker, element_b);
+        let element_c =
+            broker.add_element("C", 0, vec![0, 1, 2], vec![]).expect("add_element failed");
+        let token_c = register_token(&mut broker, element_c);
+
+        // D@ON ==> A@ON
+        add_level_dependency(&mut broker, element_d, ON.level, &token_a, ON.level);
+        // A@ON ==> B@1
+        add_level_dependency(&mut broker, element_a, ON.level, &token_b, 1);
+        // B@1 ==> C@1
+        add_level_dependency(&mut broker, element_b, 1, &token_c, 1);
+        // D@ON ==> B@2
+        add_level_dependency(&mut broker, element_d, ON.level, &token_b, 2);
+        // B@2 ==> C@2
+        add_level_dependency(&mut broker, element_b, 2, &token_c, 2);
+
+        // Acquire lease on D@ON with all elements at 0/OFF.
+        let _lease = broker
+            .acquire_lease(element_d, ON, zx::Koid::from_raw(1), "D_lease")
+            .expect("acquire failed");
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.get_required_level(&element_b), Some(ZERO));
+
+        // Remove B@1 ==> C@1.
+        remove_level_dependency(&mut broker, element_b, 1, &token_c, 1)
+            .expect("remove_dependency failed");
+        broker.catalog.assert_claims_consistent();
+
+        // B's required level should now be ONE because A@ON ==> B@1 activated.
+        assert_eq!(broker.get_required_level(&element_b), Some(ONE));
+    }
+
+    // 2. Deactivating claims reachable only through the lower dependency:
+    // A@ON requires B@1 ==> C@1 ==> D@ON and E@ON ==> B@2 ==> C@2
+    // with all elements powered up (Satisfied). Removing B@1 ==> C@1 leaves C@1 ==> D@ON
+    // active because C@2 cumulatively inherits C@1's dependencies.
+    // Once B@2 ==> C@2 is also removed, C@1 ==> D@ON is disconnected from A@ON and deactivates.
+    #[fuchsia::test]
+    fn test_remove_dependency_deactivates_claims_reachable_only_through_lower_dependency() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+
+        let (element_a, _token_a) = add_binary_element(&mut broker, "A");
+        let (element_e, token_e) = add_binary_element(&mut broker, "E");
+        let element_b =
+            broker.add_element("B", 0, vec![0, 1, 2], vec![]).expect("add_element failed");
+        let token_b = register_token(&mut broker, element_b);
+        let element_c =
+            broker.add_element("C", 0, vec![0, 1, 2], vec![]).expect("add_element failed");
+        let token_c = register_token(&mut broker, element_c);
+        let (element_d, token_d) = add_binary_element(&mut broker, "D");
+
+        // A@ON ==> B@1
+        add_level_dependency(&mut broker, element_a, ON.level, &token_b, 1);
+        // B@1 ==> C@1
+        add_level_dependency(&mut broker, element_b, 1, &token_c, 1);
+        // C@1 ==> D@ON
+        add_level_dependency(&mut broker, element_c, 1, &token_d, ON.level);
+
+        // A@ON ==> E@ON
+        add_level_dependency(&mut broker, element_a, ON.level, &token_e, ON.level);
+        // E@ON ==> B@2
+        add_level_dependency(&mut broker, element_e, ON.level, &token_b, 2);
+        // B@2 ==> C@2
+        add_level_dependency(&mut broker, element_b, 2, &token_c, 2);
+
+        // Acquire lease on A@ON and power all up to Satisfied.
+        let lease = broker
+            .acquire_lease(element_a, ON, zx::Koid::from_raw(1), "A_lease")
+            .expect("acquire failed");
+        broker.update_current_level(element_d, ON);
+        broker.update_current_level(element_c, TWO);
+        broker.update_current_level(element_b, TWO);
+        broker.update_current_level(element_e, ON);
+        broker.update_current_level(element_a, ON);
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+        assert!(broker.catalog.deactivating_for_lease(lease.id).is_empty());
+
+        // Remove B@1 ==> C@1.
+        remove_level_dependency(&mut broker, element_b, 1, &token_c, 1)
+            .expect("remove_dependency failed");
+        broker.catalog.assert_claims_consistent();
+
+        // Higher levels cumulatively inherit dependencies of lower levels in Power Broker
+        // (via decrement_element_level_index in Topology::all_direct_and_indirect_dependencies).
+        // Therefore, C@2 still requires C@1 ==> D@ON, so C@1 ==> D@ON remains active.
+        assert!(broker.catalog.deactivating_for_lease(lease.id).is_empty());
+
+        // Once B@2 ==> C@2 is also removed, C@1 ==> D@ON is no longer reachable from A@ON
+        // and transitions to deactivating.
+        remove_level_dependency(&mut broker, element_b, 2, &token_c, 2)
+            .expect("remove_dependency failed");
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.catalog.deactivating_for_lease(lease.id).len(), 1);
+    }
+
+    // Claim downgrading on remove_dependency:
+    // With B@1 ==> C@1, B@2 ==> C@2, B@2 ==> E@ON (E at OFF), and A@ON ==> X@ON ==> B@1,
+    // power up A=ON, X=ON, B=1, C=1.
+    // Remove A@ON ==> X@ON while X stays ON (so X@ON ==> B@1 and B@1 ==> C@1 are deactivating and B stays at 1).
+    // Add A@ON ==> B@2 and power up C to 2 (B@2 ==> C@2 activates while A@ON ==> B@2 stays pending on E).
+    // Then remove A@ON ==> B@2: assert broker.get_required_level(&element_c) is downgraded to Some(ONE) while B is at ONE.
+    #[fuchsia::test]
+    fn test_activate_claim_and_remove_dependency_keeps_lower_claim() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+
+        let (element_a, _token_a) = add_binary_element(&mut broker, "A");
+        let (element_x, token_x) = add_binary_element(&mut broker, "X");
+        let element_b =
+            broker.add_element("B", 0, vec![0, 1, 2], vec![]).expect("add_element failed");
+        let token_b = register_token(&mut broker, element_b);
+        let element_c =
+            broker.add_element("C", 0, vec![0, 1, 2], vec![]).expect("add_element failed");
+        let token_c = register_token(&mut broker, element_c);
+        let (_element_e, token_e) = add_binary_element(&mut broker, "E");
+
+        // B@1 ==> C@1
+        add_level_dependency(&mut broker, element_b, 1, &token_c, 1);
+        // B@2 ==> C@2
+        add_level_dependency(&mut broker, element_b, 2, &token_c, 2);
+        // B@2 ==> E@ON (E at OFF)
+        add_level_dependency(&mut broker, element_b, 2, &token_e, ON.level);
+        // A@ON ==> X@ON
+        add_level_dependency(&mut broker, element_a, ON.level, &token_x, ON.level);
+        // X@ON ==> B@1
+        add_level_dependency(&mut broker, element_x, ON.level, &token_b, 1);
+
+        // Power up A=ON, X=ON, B=1, C=1.
+        let lease = broker
+            .acquire_lease(element_a, ON, zx::Koid::from_raw(1), "A_lease")
+            .expect("acquire failed");
+        broker.update_current_level(element_c, ONE);
+        broker.update_current_level(element_b, ONE);
+        broker.update_current_level(element_x, ON);
+        broker.update_current_level(element_a, ON);
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+
+        // Remove A@ON ==> X@ON while X stays ON (so X@ON ==> B@1 and B@1 ==> C@1 are deactivating, B stays at 1).
+        remove_level_dependency(&mut broker, element_a, ON.level, &token_x, ON.level)
+            .expect("remove_dependency failed");
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.get_required_level(&element_c), Some(ONE));
+
+        // Add A@ON ==> B@2 and power up C to 2 (B@2 ==> C@2 activates while A@ON ==> B@2 stays pending on E).
+        broker
+            .0
+            .add_dependency(
+                element_a,
+                level_dependency(ON.level, &token_b, 2),
+                &mut EagerInspectWriter,
+            )
+            .expect("add_dependency failed");
+        broker.0.update_current_level(element_c, TWO);
+        broker.0.catalog.assert_claims_consistent();
+
+        // Then remove A@ON ==> B@2: B@2 ==> C@2 is dropped, but C's required level was downgraded to ONE while B is at 1.
+        broker
+            .0
+            .remove_dependency(element_a, &level_dependency(ON.level, &token_b, 2))
+            .expect("remove_dependency failed");
+        broker.0.catalog.assert_claims_consistent();
+        assert_eq!(broker.0.get_required_level(&element_c), Some(ONE));
+
+        // When X lowers to OFF, X@ON ==> B@1 drops, so B is required to be ZERO.
+        // However, B is still at ONE, so B@1 ==> C@1 holds C's required level at ONE.
+        broker.update_current_level(element_x, OFF);
+        assert_eq!(broker.get_required_level(&element_b), Some(ZERO));
+        assert_eq!(broker.get_required_level(&element_c), Some(ONE));
+
+        // Once B lowers to ZERO, B@1 ==> C@1 drops, lowering C's required level to ZERO.
+        broker.update_current_level(element_c, ONE);
+        broker.update_current_level(element_b, ZERO);
+        assert_eq!(broker.get_required_level(&element_c), Some(ZERO));
+        broker.update_current_level(element_c, ZERO);
+
+        // Power down A and clean up lease.
+        broker.drop_lease(lease.id).expect("drop_lease failed");
+        broker.update_current_level(element_a, OFF);
+        assert_lease_cleaned_up(&broker.catalog, lease.id);
+    }
+
+    // Path 2: filter_out_redundant_dependencies + drop_lease
+    // With B@1 ==> C@1, B@2 ==> C@2, B@2 ==> D@ON (D at OFF), Y@ON ==> A@ON ==> B@1, and Y@ON ==> X@ON ==> B@2,
+    // lease Y@ON, power up C=2, B=1, A=ON (while D and X stay OFF), and call drop_lease.
+    // Because A is ON, A@ON ==> B@1 stays deactivating (holding B at 1).
+    // Assert that broker.get_required_level(&element_c) is downgraded to Some(ONE) while B is at ONE.
+    #[fuchsia::test]
+    fn test_filter_out_redundant_dependencies_and_drop_lease_keeps_lower_claim() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+
+        let (element_y, _token_y) = add_binary_element(&mut broker, "Y");
+        let (element_a, token_a) = add_binary_element(&mut broker, "A");
+        let (element_x, token_x) = add_binary_element(&mut broker, "X");
+        let element_b =
+            broker.add_element("B", 0, vec![0, 1, 2], vec![]).expect("add_element failed");
+        let token_b = register_token(&mut broker, element_b);
+        let element_c =
+            broker.add_element("C", 0, vec![0, 1, 2], vec![]).expect("add_element failed");
+        let token_c = register_token(&mut broker, element_c);
+        let (_element_d, token_d) = add_binary_element(&mut broker, "D");
+
+        // B@1 ==> C@1
+        add_level_dependency(&mut broker, element_b, 1, &token_c, 1);
+        // B@2 ==> C@2
+        add_level_dependency(&mut broker, element_b, 2, &token_c, 2);
+        // B@2 ==> D@ON (D at OFF)
+        add_level_dependency(&mut broker, element_b, 2, &token_d, ON.level);
+        // Y@ON ==> A@ON
+        add_level_dependency(&mut broker, element_y, ON.level, &token_a, ON.level);
+        // A@ON ==> B@1
+        add_level_dependency(&mut broker, element_a, ON.level, &token_b, 1);
+        // Y@ON ==> X@ON
+        add_level_dependency(&mut broker, element_y, ON.level, &token_x, ON.level);
+        // X@ON ==> B@2
+        add_level_dependency(&mut broker, element_x, ON.level, &token_b, 2);
+
+        // Lease Y@ON (B@1 ==> C@1 is filtered out in favor of B@2 ==> C@2).
+        let lease = broker
+            .acquire_lease(element_y, ON, zx::Koid::from_raw(1), "Y_lease")
+            .expect("acquire failed");
+        // Power up C=2, B=1, A=ON (while D and X stay OFF).
+        broker.update_current_level(element_c, TWO);
+        broker.update_current_level(element_b, ONE);
+        broker.update_current_level(element_a, ON);
+
+        // Call drop_lease.
+        broker.drop_lease(lease.id).expect("drop_lease failed");
+        broker.catalog.assert_claims_consistent();
+
+        // Because A is ON, A@ON ==> B@1 stays deactivating (holding B at 1).
+        // C's required level was downgraded to ONE while B is at ONE.
+        assert_eq!(broker.get_required_level(&element_c), Some(ONE));
+        broker.update_current_level(element_c, ONE);
+
+        // When A lowers to OFF, A@ON ==> B@1 drops, so B is required to be ZERO.
+        // However, B is still at ONE, so B@1 ==> C@1 holds C's required level at ONE.
+        broker.update_current_level(element_a, OFF);
+        assert_eq!(broker.get_required_level(&element_b), Some(ZERO));
+        assert_eq!(broker.get_required_level(&element_c), Some(ONE));
+
+        // Once B lowers to ZERO, B@1 ==> C@1 drops, lowering C's required level to ZERO.
+        broker.update_current_level(element_b, ZERO);
+        assert_eq!(broker.get_required_level(&element_c), Some(ZERO));
+        broker.update_current_level(element_c, ZERO);
+        assert_lease_cleaned_up(&broker.catalog, lease.id);
     }
 }

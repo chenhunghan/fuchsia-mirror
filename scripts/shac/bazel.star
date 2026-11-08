@@ -451,6 +451,13 @@ def _bazel_no_recursive_glob(ctx):
         description = "recursive glob patterns",
     )
 
+# Reports an error when a .bzl file does not declare top-level load
+# visibility().
+_bazel_bzl_require_load_visibility = _make_bazel_lint_check(
+    "bazel_bzl_require_load_visibility",
+    applies_to_globs = _BZL_FILES,
+)
+
 # Reports an error if a disallowed workspace root package label is used.
 # Workspace root package labels (e.g. `//:...`) should only refer to targets
 # or files defined directly in the root BUILD.bazel file.
@@ -459,31 +466,64 @@ _bazel_disallowed_workspace_root_package_labels = _make_bazel_lint_check(
     applies_to_globs = _ALL_BAZEL_FILES,
 )
 
+# Reports an error when upstream C/C++ or Rust rules are loaded or called
+# instead of their Fuchsia-specific wrapper macros.
+# TODO(https://fxbug.dev/570203009): Switch to "all" once rolled out.
+_bazel_fuchsia_wrappers = _make_bazel_lint_check(
+    "bazel_fuchsia_wrappers",
+    applies_to_globs = _BUILD_AND_BZL_FILES,
+    enforcement = "unchanged_lines_warning_only",
+)
+
+# Reports an error when `HOST_CONSTRAINTS` is loaded from
+# `@platforms//host:constraints.bzl` or used in `target_compatible_with`.
+_bazel_host_constraints = _make_bazel_lint_check(
+    "bazel_host_constraints",
+    applies_to_globs = _ALL_BAZEL_FILES,
+)
+
 # Reports an error when visibility("public") is used and a warning when
 # visibility("//...") is used in .bzl files.
-# TODO(https://fxbug.dev/570203009): Switch to "all" once rolled out.
 _bazel_load_visibility = _make_bazel_lint_check(
     "bazel_load_visibility",
     applies_to_globs = _BZL_FILES,
-    enforcement = "unchanged_lines_warning_only",
 )
 
 # Reports an error when default_visibility in package() uses broad visibility
 # and a warning when it uses narrower visibility.
-# TODO(https://fxbug.dev/570203009): Switch to "all" once rolled out.
 _bazel_package_default_visibility = _make_bazel_lint_check(
     "bazel_package_default_visibility",
     applies_to_globs = _BUILD_FILES,
+)
+
+# Reports an error when Fuchsia Bazel SDK repository paths or `bazel_sdk`
+# label paths are used in platform code.
+# TODO(https://fxbug.dev/570203009): Switch to "all" once rolled out.
+_bazel_repository_paths = _make_bazel_lint_check(
+    "bazel_repository_paths",
+    applies_to_globs = _BUILD_AND_BZL_FILES,
     enforcement = "unchanged_lines_warning_only",
 )
 
 # Reports an error when "//visibility:public" is used on targets outside
 # exempted directories.
-# TODO(https://fxbug.dev/570203009): Switch to "all" once rolled out.
 _bazel_target_visibility = _make_bazel_lint_check(
     "bazel_target_visibility",
     applies_to_globs = _BUILD_AND_BZL_FILES,
-    enforcement = "unchanged_lines_warning_only",
+)
+
+# Reports an error when public Fuchsia Bazel files reference private
+# //vendor/... subpaths.
+_bazel_vendor_paths = _make_bazel_lint_check(
+    "bazel_vendor_paths",
+    applies_to_globs = _ALL_BAZEL_FILES,
+)
+
+# Reports an error when `config_setting()` or `exports_files()` does not
+# explicitly specify `visibility`.
+_bazel_visibility_for_public_by_default_types = _make_bazel_lint_check(
+    "bazel_visibility_for_public_by_default_types",
+    applies_to_globs = _BUILD_AND_BZL_FILES,
 )
 
 def register_bazel_checks():
@@ -496,8 +536,14 @@ def register_bazel_checks():
     # Ensure tests are added and the filegroups used by tests are updated along
     # with checks.
     # LINT.IfChange(register_all_checks)
+    shac.register_check(_bazel_bzl_require_load_visibility)
     shac.register_check(_bazel_disallowed_workspace_root_package_labels)
+    shac.register_check(_bazel_fuchsia_wrappers)
+    shac.register_check(_bazel_host_constraints)
     shac.register_check(_bazel_load_visibility)
     shac.register_check(_bazel_package_default_visibility)
+    shac.register_check(_bazel_repository_paths)
     shac.register_check(_bazel_target_visibility)
+    shac.register_check(_bazel_vendor_paths)
+    shac.register_check(_bazel_visibility_for_public_by_default_types)
     # LINT.ThenChange(//scripts/shac/bazel_lint/checks/__init__.py:all_checks)

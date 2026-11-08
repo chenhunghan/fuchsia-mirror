@@ -2,9 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::mm::{
-    MappingAccess, MemoryAccessor, MemoryAccessorExt, MemoryManager, TaskMemoryAccessor,
-};
+use crate::mm::{MemoryAccessor, MemoryAccessorExt, MemoryManager};
 use crate::mutable_state::{state_accessor, state_implementation};
 use crate::ptrace::{AtomicStopState, PtraceEventData, PtraceState, PtraceStatus, StopState};
 use crate::signals::{KernelSignal, SignalDetail, SignalInfo, SignalState};
@@ -13,24 +11,23 @@ use crate::task::run_state::RunState;
 use crate::task::tracing::ZirconIdentity;
 use crate::task::{
     AbstractUnixSocketNamespace, AbstractVsockSocketNamespace, CurrentCreds, CurrentTask,
-    EventHandler, ExitStatus, Kernel, NormalPriority, Pid, RealtimePriority, SchedulerState,
-    SchedulingPolicy, SeccompFilterContainer, SeccompState, SeccompStateValue, TaskRunningState,
-    ThreadGroup, ThreadState, UtsNamespaceHandle, WaitCanceler, Waiter, ZombieProcess, ZombieState,
+    EventHandler, ExitStatus, Kernel, NormalPriority, Pid, SchedulerState, SeccompFilterContainer,
+    SeccompState, SeccompStateValue, TaskRunningState, ThreadGroup, ThreadState,
+    UtsNamespaceHandle, WaitCanceler, Waiter, ZombieProcess, ZombieState,
 };
 use crate::vfs::{FdTable, FsContext, FsString, SharedFdTable, SharedFsContext};
 use atomic_bitflags::atomic_bitflags;
 use fuchsia_rcu::{RcuArc, RcuDroppable, RcuDroppableArc, RcuReadGuard, RcuReadScope};
 use macro_rules_attribute::apply;
-use starnix_logging::{log_warn, set_zx_name};
+use starnix_logging::{log_debug, log_warn, set_zx_name};
 use starnix_registers::HeapRegs;
 use starnix_sync::{
-    LockDepGuard, LockDepMutex, LockDepReadGuard, LockDepRwLock, LockDepWriteGuard,
+    LockDepGuard, LockDepMutex, LockDepReadGuard, LockDepRwLock, LockDepWriteGuard, LockGuarded,
     TaskCommandLevel, TaskCredsLock,
 };
 use starnix_task_command::TaskCommand;
 use starnix_types::arch::ArchWidth;
 use starnix_types::stats::TaskTimeStats;
-use starnix_types::user_buffer::UserBuffer;
 use starnix_uapi::auth::{CAP_SYS_PTRACE, Credentials, FsCred};
 use starnix_uapi::errors::Errno;
 use starnix_uapi::signals::{SIGCHLD, SIGKILL, SigSet, Signal, sigaltstack_contains_pointer};
@@ -55,9 +52,6 @@ atomic_bitflags! {
         const EXITED                   = 1 << 0;
         const SIGNALS_AVAILABLE        = 1 << 1;
         const TEMPORARY_SIGNAL_MASK    = 1 << 2;
-        /// Whether the executor should dump the stack of this task when it exits.
-        /// Currently used to implement ExitStatus::CoreDump.
-        const DUMP_ON_EXIT             = 1 << 3;
         const KERNEL_SIGNALS_AVAILABLE = 1 << 4;
         /// Whether the executor has successfully spawned a thread for this task.
         const SPAWNED                  = 1 << 5;
@@ -75,6 +69,15 @@ atomic_bitflags! {
         /// - A handler that leaves via `siglongjmp` keeps it set.
         /// - It isn't set for crashes that started before shutdown.
         const IN_CORE_DUMP_SIGNAL_HANDLER = 1 << 7;
+    }
+}
+
+impl starnix_sync::AtomicRead for AtomicTaskFlags {
+    type Value = TaskFlags;
+
+    #[inline(always)]
+    fn load(&self, order: Ordering) -> Self::Value {
+        Self::load(self, order)
     }
 }
 
@@ -169,8 +172,12 @@ pub struct TaskMutableState {
     /// This design is not about observable consequence, but about convenient implementation.
     kernel_signals: VecDeque<KernelSignal>,
 
-    /// The exit status that this task exited with.
-    exit_status: Option<ExitStatus>,
+    /// The signal that caused this task to dump core, if any.
+    ///
+    /// If set when the task exits with [`ExitStatus::CoreDump`], the executor dumps the stack of
+    /// this task and files a crash report. Stored separately from the lifecycle state to allow
+    /// ExitStatus to be RcuDroppable.
+    pub core_dump_signal: Option<SignalInfo>,
 
     /// The UTS namespace assigned to this thread.
     ///
@@ -415,6 +422,88 @@ impl TaskMutableState {
 
 #[apply(state_implementation!)]
 impl TaskMutableState<Base = Task> {
+    pub fn state_code(&self) -> TaskStateCode {
+        if !self.base.is_running() {
+            return TaskStateCode::Zombie;
+        }
+        self.run_state.state_code()
+    }
+
+    /// Transitions the task to [`TaskLifecycleState::Exiting`], initiating the exit process.
+    pub fn set_exiting(&mut self, exit_status: ExitStatus) {
+        match &*self.base.lifecycle_state() {
+            TaskLifecycleState::Running => {
+                // `flags` and `lifecycle_state` are read lock-free. Publish `Exiting` before
+                // `EXITED` (which `update_flags()` stores with `Release` ordering) so that a
+                // reader that observes `EXITED` also observes `Exiting`, and therefore
+                // `Task::exit_status()` is never `None` for a task marked `EXITED`. Otherwise, a
+                // task that observes `EXITED` while another thread is marking it as exiting skips
+                // its syscall, fails to resolve an exit status, and returns to userspace with a
+                // stale return register.
+                self.base
+                    .lifecycle_state
+                    .write(self)
+                    .update(Some(Arc::new(TaskLifecycleState::Exiting(exit_status))));
+                self.set_flags(TaskFlags::EXITED, true);
+            }
+            TaskLifecycleState::Exiting(_) => {
+                // Preserve the original exit status.
+            }
+            _ => panic!("Invalid transition"),
+        }
+    }
+
+    /// Transitions the task to [`TaskLifecycleState::Exited`], marking the task as exited.
+    ///
+    /// Must only be called from [`CurrentTask::exit`] after the task's `files`, `mm`, and `fs`
+    /// have been released.
+    pub(super) fn set_exited(&mut self) {
+        debug_assert!(
+            self.base.running_state.upgrade().is_none_or(|state| state.is_released()),
+            "files, mm and fs must be released before set_exited()",
+        );
+        let exit_status = {
+            // Use nested RCU read locks for reading both the thread group and task lifecycle
+            // states.
+            let _scope = RcuReadScope::new();
+            match &*self.base.lifecycle_state() {
+                TaskLifecycleState::Running => {
+                    self.base.thread_group().exit_status().unwrap_or_default()
+                }
+                TaskLifecycleState::Exiting(exit_status) => {
+                    self.base.thread_group().exit_status().unwrap_or_else(|| exit_status.clone())
+                }
+                _ => panic!("Invalid transition"),
+            }
+        };
+        // `time_stats()` reads the thread from `running_state`, so capture it before clearing that.
+        let time_stats = self.base.time_stats();
+        let state = ZombieState { exit_status, time_stats };
+        // `flags`, `running_state`, and `lifecycle_state` are read lock-free. Publish `Exited`
+        // after clearing `running_state` so a reader that observes it also observes the cleared
+        // `running_state`. As in `set_exiting()`, publish `EXITED` last (if not already set) so a
+        // reader that observes it also observes a lifecycle state with an exit status.
+        self.base.running_state.write(self).update(None);
+        self.base
+            .lifecycle_state
+            .write(self)
+            .update(Some(Arc::new(TaskLifecycleState::Exited(state))));
+        self.set_flags(TaskFlags::EXITED, true);
+    }
+
+    /// Transitions the task to [`TaskLifecycleState::Reaped`], marking the task as reaped.
+    pub fn set_reaped(&mut self) {
+        debug_assert!(self.base.is_exitted());
+        let state = match &*self.base.lifecycle_state() {
+            TaskLifecycleState::Exited(state) => state.clone(),
+            _ => panic!("Invalid transition"),
+        };
+        self.base
+            .lifecycle_state
+            .write(self)
+            .update(Some(Arc::new(TaskLifecycleState::Reaped(state))));
+    }
+
     pub fn set_stopped(
         &mut self,
         stopped: StopState,
@@ -556,21 +645,22 @@ impl TaskMutableState<Base = Task> {
     }
 
     fn store_stopped(&mut self, state: StopState) {
-        // We don't actually use the guard but we require it to enforce that the
-        // caller holds the thread group's mutable state lock (identified by
-        // mutable access to the thread group's mutable state).
-
-        self.base.stop_state.store(state, Ordering::Relaxed)
+        self.base.stop_state.write(self).store(state, Ordering::Relaxed)
     }
 
     pub fn update_flags(&mut self, clear: TaskFlags, set: TaskFlags) {
-        // We don't actually use the guard but we require it to enforce that the
-        // caller holds the task's mutable state lock (identified by mutable
-        // access to the task's mutable state).
-
         debug_assert_eq!(clear ^ set, clear | set);
+        debug_assert!(!clear.contains(TaskFlags::EXITED), "EXITED must never be cleared");
+        debug_assert!(
+            !set.contains(TaskFlags::EXITED)
+                || !matches!(&*self.base.lifecycle_state(), TaskLifecycleState::Running),
+            "EXITED must only be set after the lifecycle state has left Running",
+        );
         let observed = self.base.flags();
-        let swapped = self.base.flags.swap((observed | set) & !clear, Ordering::Relaxed);
+        // `Release` pairs with the `Acquire` load in `Task::exit_status()` so that a reader that
+        // observes `EXITED` also observes the lifecycle state published before it.
+        let swapped =
+            self.base.flags.write(self).swap((observed | set) & !clear, Ordering::Release);
         debug_assert_eq!(swapped, observed);
     }
 
@@ -582,16 +672,6 @@ impl TaskMutableState<Base = Task> {
 
     pub fn set_spawned(&mut self) {
         self.set_flags(TaskFlags::SPAWNED, true);
-    }
-
-    pub fn set_exit_status(&mut self, status: ExitStatus) {
-        self.set_flags(TaskFlags::EXITED, true);
-        self.exit_status = Some(status);
-    }
-
-    pub fn set_exit_status_if_not_already(&mut self, status: ExitStatus) {
-        self.set_flags(TaskFlags::EXITED, true);
-        self.exit_status.get_or_insert(status);
     }
 
     /// Transitions the task out of any stop state, notifies signal waiters, and thaws it so it can
@@ -707,6 +787,20 @@ impl TaskMutableState<Base = Task> {
     }
 }
 
+/// Container for lifecycle-dependent [`Task`] state.
+///
+/// The following state transitions are valid:
+/// - `Running` -> `Exiting`
+/// - `Running` | `Exiting` -> `Exited`
+/// - `Exited` -> `Reaped`
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TaskLifecycleState {
+    Running,
+    Exiting(ExitStatus),
+    Exited(ZombieState),
+    Reaped(ZombieState),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskStateCode {
     // Task is being executed.
@@ -742,6 +836,9 @@ impl TaskStateCode {
     }
 }
 
+#[derive(Debug, RcuDroppable, Default)]
+struct TaskCredsLockState;
+
 /// The information of the task that needs to be available to the `ThreadGroup` while computing
 /// which process a wait can target. It is necessary to shared this data with the `ThreadGroup` so
 /// that it is available while the task is being dropped and so is not accessible from a weak
@@ -757,16 +854,16 @@ pub struct TaskPersistentInfoState {
 
     /// The security credentials for this task. These are only set when the task is the CurrentTask,
     /// or on task creation.
-    creds: RcuDroppableArc<Credentials>,
+    creds: LockGuarded<RcuDroppableArc<Credentials>, TaskCredsLockState>,
 
     // A lock for the security credentials. Writers must take the lock, readers that need to ensure
     // that the task state does not change may take the lock.
-    creds_lock: LockDepRwLock<(), TaskCredsLock>,
+    creds_lock: LockDepRwLock<TaskCredsLockState, TaskCredsLock>,
 }
 
 /// Guard for reading locked credentials.
 pub struct CredentialsReadGuard<'a> {
-    _lock: LockDepReadGuard<'a, ()>,
+    _lock: LockDepReadGuard<'a, TaskCredsLockState>,
     creds: RcuReadGuard<Credentials>,
 }
 
@@ -775,19 +872,6 @@ impl<'a> Deref for CredentialsReadGuard<'a> {
 
     fn deref(&self) -> &Self::Target {
         self.creds.deref()
-    }
-}
-
-/// Guard for writing credentials. No `CredentialsReadGuard` to the same task can concurrently
-///  exist.
-pub struct CredentialsWriteGuard<'a> {
-    _lock: LockDepWriteGuard<'a, ()>,
-    creds: &'a RcuDroppableArc<Credentials>,
-}
-
-impl<'a> CredentialsWriteGuard<'a> {
-    pub fn update(&mut self, creds: Arc<Credentials>) {
-        self.creds.update(creds);
     }
 }
 
@@ -802,7 +886,7 @@ impl TaskPersistentInfoState {
             tid,
             pid,
             command: command.into(),
-            creds: RcuDroppableArc::new(creds),
+            creds: LockGuarded::new(RcuDroppableArc::new(creds)),
             creds_lock: Default::default(),
         })
     }
@@ -838,11 +922,12 @@ impl TaskPersistentInfoState {
         // SAFETY: `creds_lock` remains live via the `persistent_info` reference to `Self`.
         let lock = unsafe {
             let raw_lock = self.creds_lock.write();
-            std::mem::transmute::<LockDepWriteGuard<'_, ()>, LockDepWriteGuard<'static, ()>>(
-                raw_lock,
-            )
+            std::mem::transmute::<
+                LockDepWriteGuard<'_, TaskCredsLockState>,
+                LockDepWriteGuard<'static, TaskCredsLockState>,
+            >(raw_lock)
         };
-        CurrentTaskCredentialsWriteGuard { _lock: lock, persistent_info }
+        CurrentTaskCredentialsWriteGuard { lock, persistent_info }
     }
 }
 
@@ -883,14 +968,14 @@ pub type TaskPersistentInfo = Arc<TaskPersistentInfoState>;
 pub struct CurrentTaskCredentialsWriteGuard {
     // Drop order is critical: the lock must be dropped BEFORE the persistent_info Arc.
     // Rust drops fields in declaration order (top-to-bottom).
-    // So _lock is dropped first, then persistent_info.
-    _lock: LockDepWriteGuard<'static, ()>,
-    pub persistent_info: TaskPersistentInfo,
+    // So lock is dropped first, then persistent_info.
+    lock: LockDepWriteGuard<'static, TaskCredsLockState>,
+    persistent_info: TaskPersistentInfo,
 }
 
 impl CurrentTaskCredentialsWriteGuard {
     pub fn update(self, current_task: &CurrentTask, creds: Arc<Credentials>) {
-        self.persistent_info.creds.update(creds.clone());
+        self.persistent_info.creds.write(&self.lock).update(creds.clone());
         *current_task.current_creds.borrow_mut() = CurrentCreds::Cached(creds);
 
         // The /proc/pid directory's ownership is updated when the task's euid
@@ -957,17 +1042,16 @@ pub struct Task {
     /// The running state of the task.
     ///
     /// This is `None` for exited tasks.
-    pub running_state: RcuArc<TaskRunningState>,
+    pub(super) running_state: LockGuarded<RcuArc<TaskRunningState>, TaskMutableState>,
+
+    /// The lifecycle state of the task, which determines whether the task is running or exited.
+    lifecycle_state: LockGuarded<RcuArc<TaskLifecycleState>, TaskMutableState>,
 
     /// The stop state of the task, distinct from the stop state of the thread group.
-    ///
-    /// Must only be set when the `mutable_state` write lock is held.
-    stop_state: AtomicStopState,
+    stop_state: LockGuarded<AtomicStopState, TaskMutableState>,
 
     /// The flags for the task.
-    ///
-    /// Must only be set the then `mutable_state` write lock is held.
-    flags: AtomicTaskFlags,
+    flags: LockGuarded<AtomicTaskFlags, TaskMutableState>,
 
     /// The mutable state of the Task.
     mutable_state:
@@ -1049,16 +1133,13 @@ impl Task {
             if let Some(tracer_tg) = tracer_tg {
                 drop(state);
                 let mut tracer_state = tracer_tg.write();
-                if tracer_state.is_exited() {
+                if tracer_tg.is_exited() {
                     // An exited tracer has already detached its ptracees and cannot accept new
                     // zombies.
                     return;
                 }
 
-                let exit_status = self.exit_status().unwrap_or_else(|| {
-                    starnix_logging::log_error!("Exiting without an exit code.");
-                    ExitStatus::Exit(u8::MAX)
-                });
+                let exit_status = self.exit_status().unwrap_or_default();
                 let zombie = ZombieProcess {
                     task: self
                         .weak_self
@@ -1093,8 +1174,30 @@ impl Task {
         }
     }
 
+    /// Returns the canonical exit status of the task.
+    ///
+    /// Returns `None` until the task is marked [`TaskFlags::EXITED`]. While the task is exiting,
+    /// this is the thread group's exit status, if it has one. Otherwise, it is the individual exit
+    /// status assigned to this task by [`TaskMutableState::set_exiting()`]. Once the task reaches
+    /// [`TaskLifecycleState::Exited`], its exit status is finalized.
     pub fn exit_status(&self) -> Option<ExitStatus> {
-        self.is_exitted().then(|| self.read().exit_status.clone()).flatten()
+        // `Acquire` pairs with the `Release` store of `EXITED` in
+        // `TaskMutableState::update_flags()`, which is published after the lifecycle state leaves
+        // `Running`.
+        if !self.flags.load(Ordering::Acquire).contains(TaskFlags::EXITED) {
+            return None;
+        }
+        // Use nested RCU read locks for reading both the thread group and task lifecycle states.
+        let _scope = RcuReadScope::new();
+        match &*self.lifecycle_state() {
+            TaskLifecycleState::Running => None,
+            TaskLifecycleState::Exiting(exit_status) => {
+                self.thread_group().exit_status().or_else(|| Some(exit_status.clone()))
+            }
+            TaskLifecycleState::Exited(state) | TaskLifecycleState::Reaped(state) => {
+                Some(state.exit_status.clone())
+            }
+        }
     }
 
     pub fn is_exitted(&self) -> bool {
@@ -1148,7 +1251,7 @@ impl Task {
                 pid: pid.clone(),
                 kernel: Arc::clone(&thread_group.kernel),
                 thread_group,
-                running_state: RcuArc::new(Some(Arc::new(TaskRunningState {
+                running_state: LockGuarded::new(RcuArc::new(Some(Arc::new(TaskRunningState {
                     thread: Default::default(),
                     files: Some(files).into(),
                     mm: RcuArc::new(mm),
@@ -1156,16 +1259,19 @@ impl Task {
                     abstract_socket_namespace,
                     abstract_vsock_namespace,
                     proc_pid_directory_cache: Default::default(),
-                }))),
+                })))),
+                lifecycle_state: LockGuarded::new(RcuArc::new(Some(Arc::new(
+                    TaskLifecycleState::Running,
+                )))),
                 vfork_event,
-                stop_state: AtomicStopState::new(StopState::Awake),
-                flags: AtomicTaskFlags::new(TaskFlags::empty()),
+                stop_state: LockGuarded::new(AtomicStopState::new(StopState::Awake)),
+                flags: LockGuarded::new(AtomicTaskFlags::new(TaskFlags::empty())),
                 mutable_state: TaskMutableState {
                     clear_child_tid: UserRef::default(),
                     signals: SignalState::with_mask(signal_mask),
                     run_state: RunState::default(),
                     kernel_signals,
-                    exit_status: None,
+                    core_dump_signal: None,
                     uts_ns,
                     no_new_privs,
                     oom_score_adj: Default::default(),
@@ -1219,11 +1325,18 @@ impl Task {
         self.read().ptrace.as_ref().and_then(|p| p.core_state.task.upgrade())
     }
 
+    /// Returns a snapshot of the task's current [`TaskLifecycleState`].
+    pub fn lifecycle_state(&self) -> Arc<TaskLifecycleState> {
+        self.lifecycle_state.upgrade().expect("lifecycle_state is always set")
+    }
+
     /// Determine whether the task is running.
     ///
     /// # Thread Safety
     ///
-    /// The task may exit immediately after `is_running()` returns `true`.
+    /// The task may exit immediately after [`is_running()`] returns `true`. To both check the
+    /// running state and access a snapshot of its [`TaskRunningState`], use
+    /// [`Task::running_state()`].
     pub fn is_running(&self) -> bool {
         self.running_state.is_some()
     }
@@ -1232,11 +1345,21 @@ impl Task {
     ///
     /// # Errors
     ///
-    /// Returns [`Err(ESRCH)`] if the task has already transitioned to a zombie state and its running
-    /// resources have been dropped.
+    /// Returns [`Err(ESRCH)`] if the task has already exited.
     #[track_caller]
     pub fn running_state(&self) -> Result<Arc<TaskRunningState>, Errno> {
         self.running_state.upgrade().ok_or_else(|| errno!(ESRCH))
+    }
+
+    /// Returns the zombie state of the task, if the task has exited.
+    #[track_caller]
+    pub fn zombie_state(&self) -> Option<ZombieState> {
+        match &*self.lifecycle_state() {
+            TaskLifecycleState::Exited(state) | TaskLifecycleState::Reaped(state) => {
+                Some(state.clone())
+            }
+            _ => None,
+        }
     }
 
     /// Returns the file descriptor table of the task, if it exists.
@@ -1279,32 +1402,11 @@ impl Task {
         self.running_state()?.mm.upgrade().ok_or_else(|| errno!(EINVAL))
     }
 
-    /// Modify the given elements of the scheduler state with new values and update the
-    /// task's thread's role.
-    pub(crate) fn set_scheduler_policy_priority_and_reset_on_fork(
-        &self,
-        policy: SchedulingPolicy,
-        priority: RealtimePriority,
-        reset_on_fork: bool,
-    ) -> Result<(), Errno> {
-        self.update_scheduler_state_then_role(|scheduler_state| {
-            scheduler_state.policy = policy;
-            scheduler_state.realtime_priority = priority;
-            scheduler_state.reset_on_fork = reset_on_fork;
-        })
-    }
-
-    /// Modify the scheduler state's priority and update the task's thread's role.
-    pub(crate) fn set_scheduler_priority(&self, priority: RealtimePriority) -> Result<(), Errno> {
-        self.update_scheduler_state_then_role(|scheduler_state| {
-            scheduler_state.realtime_priority = priority;
-        })
-    }
-
     /// Modify the scheduler state's nice and update the task's thread's role.
     pub(crate) fn set_scheduler_nice(&self, nice: NormalPriority) -> Result<(), Errno> {
         self.update_scheduler_state_then_role(|scheduler_state| {
             scheduler_state.normal_priority = nice;
+            Ok(())
         })
     }
 
@@ -1313,12 +1415,15 @@ impl Task {
     ///
     /// This should be called on tasks that have newly created threads, e.g. after cloning.
     pub fn sync_scheduler_state_to_role(&self) -> Result<(), Errno> {
-        self.update_scheduler_state_then_role(|_| {})
+        self.update_scheduler_state_then_role(|_| Ok(()))
     }
 
-    fn update_scheduler_state_then_role(
+    /// Locks the task's `scheduler_state`, runs `updater` to validate and mutate it in place, and
+    /// commits the updated thread role while holding the lock. Restores the previous fields if
+    /// `updater`, priority validation, or role commitment returns an error.
+    pub(crate) fn update_scheduler_state_then_role(
         &self,
-        updater: impl FnOnce(&mut SchedulerState),
+        updater: impl FnOnce(&mut SchedulerState) -> Result<(), Errno>,
     ) -> Result<(), Errno> {
         let mut scheduler_state = self.scheduler_state.lock();
         let prev = (
@@ -1326,20 +1431,24 @@ impl Task {
             scheduler_state.normal_priority,
             scheduler_state.realtime_priority,
             scheduler_state.reset_on_fork,
+            scheduler_state.uclamp_min,
+            scheduler_state.uclamp_max,
         );
-        updater(&mut scheduler_state);
-        let result = if !scheduler_state.policy.is_valid_priority(scheduler_state.realtime_priority)
-        {
-            error!(EINVAL)
-        } else {
-            self.thread_group().kernel.scheduler.commit_thread_role(self, &mut scheduler_state)
-        };
+        let result = updater(&mut scheduler_state).and_then(|()| {
+            if !scheduler_state.policy.is_valid_priority(scheduler_state.realtime_priority) {
+                error!(EINVAL)
+            } else {
+                self.thread_group().kernel.scheduler.commit_thread_role(self, &mut scheduler_state)
+            }
+        });
         result.inspect_err(|_| {
             (
                 scheduler_state.policy,
                 scheduler_state.normal_priority,
                 scheduler_state.realtime_priority,
                 scheduler_state.reset_on_fork,
+                scheduler_state.uclamp_min,
+                scheduler_state.uclamp_max,
             ) = prev;
         })
     }
@@ -1464,7 +1573,11 @@ impl Task {
     /// The signal_state of the task must not be locked.
     pub fn interrupt(&self) {
         let Ok(running_state) = self.running_state() else {
-            log_warn!("Cannot interrupt dead task {}", self.get_tid());
+            // Task::interrupt() is invoked without holding the ThreadGroup or Task locks (for
+            // example after releasing locks in terminate_tasks or send_signal_prio), so a concurrently
+            // exiting task may finish dropping its running_state before we reach here, just as the
+            // underlying Zircon thread may already be DYING or DEAD for zx_restricted_kick below.
+            log_debug!("Skipping interrupt of dead task {}", self.get_tid());
             return;
         };
 
@@ -1488,29 +1601,30 @@ impl Task {
         self.persistent_info.command.lock().clone()
     }
 
-    pub fn set_command_name(&self, mut new_name: TaskCommand) {
+    /// Constructs a [`TaskCommand`] from a Linux UAPI `comm` byte slice (`PR_SET_NAME` or
+    /// `/proc/<pid>/comm`). For the thread-group leader, extends the name from `argv[0]` in user
+    /// memory when `comm` is a substring of `argv[0]`'s basename.
+    pub fn command_from_comm(&self, comm: &[u8]) -> TaskCommand {
+        let name = TaskCommand::new(comm);
+        if self.is_leader()
+            && let Ok(argv0) = self.read_argv0()
+        {
+            name.with_argv0(&argv0)
+        } else {
+            name
+        }
+    }
+
+    /// Sets the task's command name. Returns `false` for a dead task.
+    pub fn set_command_name(&self, new_name: TaskCommand) -> bool {
         let Ok(running_state) = self.running_state() else {
             log_warn!("Cannot set command name for dead task {}", self.get_tid());
-            return;
+            return false;
         };
 
         let is_leader = self.is_leader();
 
-        // If we're going to update the process name, see if we can get a longer one than normally
-        // provided in the Linux uapi. Only choose the argv0-based name if it's a superset of the
-        // uapi-provided name to avoid clobbering the name provided by the user.
-        if is_leader {
-            if let Ok(argv0) = self.read_argv0() {
-                let argv0 = TaskCommand::from_path_bytes(&argv0);
-                if let Some(embedded_name) = argv0.try_embed(&new_name) {
-                    new_name = embedded_name;
-                }
-            }
-        }
-
         // Acquire this before modifying Zircon state to ensure consistency under concurrent access.
-        // Ideally this would also guard the logic above to read argv[0] but we can't due to lock
-        // cycles with SELinux checks.
         let mut command_guard = self.persistent_info.command_guard();
 
         // Set the name on the Linux thread. If the thread has already exited concurrently in
@@ -1529,12 +1643,22 @@ impl Task {
             );
         }
 
+        // Compute `name_changed` after updating the Zircon thread and process names, because newly
+        // spawned threads start with the placeholder Zircon name `"user-thread"` while inheriting
+        // the parent's `TaskCommand`.
+        let name_changed = *command_guard != new_name;
+        if name_changed {
+            *command_guard = new_name;
+        }
         // Avoid a lock cycle by dropping the guard before notifying memory attribution of the
         // change.
-        *command_guard = new_name;
         drop(command_guard);
 
-        if is_leader {
+        if !name_changed && self.scheduler_state.lock().has_committed_role() {
+            return true;
+        }
+
+        if name_changed && is_leader {
             let tasks = {
                 let thread_group = self.thread_group().read();
                 if let Some(notifier) = &thread_group.notifier {
@@ -1551,6 +1675,7 @@ impl Task {
         } else if let Err(err) = self.sync_scheduler_state_to_role() {
             log_warn!(err:?; "Failed to update scheduler role after thread name change.");
         }
+        true
     }
 
     pub fn set_seccomp_state(&self, state: SeccompStateValue) -> Result<(), Errno> {
@@ -1558,12 +1683,11 @@ impl Task {
     }
 
     pub fn state_code(&self) -> TaskStateCode {
-        let status = self.read();
-        if status.exit_status.is_some() {
-            TaskStateCode::Zombie
-        } else {
-            status.run_state.state_code()
+        if !self.is_running() {
+            return TaskStateCode::Zombie;
         }
+
+        self.read().state_code()
     }
 
     pub fn time_stats(&self) -> TaskTimeStats {
@@ -1603,7 +1727,7 @@ impl Task {
     /// backing process (a Starnix kernel thread) is intentionally excluded.
     pub fn get_zircon_identity(&self) -> Option<ZirconIdentity> {
         let process = self.thread_group().get_process_koid().ok()?;
-        let thread = self.running_state().ok()?.thread.get()?.koid;
+        let thread = self.running_state().ok()?.thread.get()?.koid();
         Some(ZirconIdentity { process, thread })
     }
 
@@ -1686,24 +1810,6 @@ impl MemoryAccessor for Task {
     }
 }
 
-impl TaskMemoryAccessor for Task {
-    fn maximum_valid_address(&self) -> Option<UserAddress> {
-        self.mm().map(|mm| mm.maximum_valid_user_address).ok()
-    }
-
-    fn ensure_buffers_mapped_in_user_vmar(
-        &self,
-        _buffers: &[UserBuffer],
-        _access: MappingAccess,
-    ) -> Result<(), Errno> {
-        // Using `Task` rather than `CurrentTask` indicates that the target address space is not
-        // mapped in the current thread, so buffers cannot be mapped for direct user-VMAR access.
-        // Returning `ENOTSUP` lets callers of `peek_each_segment` (like `with_iovec_segments`)
-        // fall back to `InputBuffer` / `OutputBuffer` read/write methods.
-        error!(ENOTSUP)
-    }
-}
-
 impl fmt::Debug for Task {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}:{}[{}]", self.pid, self.tid, *self.persistent_info.command.lock())
@@ -1725,11 +1831,13 @@ mod test {
     use super::*;
     use crate::mm::PAGE_SIZE;
     use crate::security;
+    use crate::task::{RoleOverrides, SchedulerManager, SchedulingPolicy};
     use crate::testing::*;
+    use fidl_fuchsia_scheduler::RoleManagerMarker;
     use starnix_uapi::auth::{CAP_SYS_ADMIN, Capabilities};
     use starnix_uapi::resource_limits::Resource;
     use starnix_uapi::signals::{SIGCHLD, SIGUSR1};
-    use starnix_uapi::{CLONE_SIGHAND, CLONE_THREAD, CLONE_VM, rlimit};
+    use starnix_uapi::{CLONE_FILES, CLONE_FS, CLONE_SIGHAND, CLONE_THREAD, CLONE_VM, rlimit};
 
     #[::fuchsia::test]
     async fn test_tid_allocation() {
@@ -1801,6 +1909,111 @@ mod test {
             // spawning threads for test tasks but want them to behave as normal tasks.
             let test_child = current_task.clone_task_for_test(0, Some(SIGCHLD));
             assert!(test_child.is_spawned());
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_task_lifecycle_transitions() {
+        spawn_kernel_and_run(async |current_task| {
+            let child = current_task.clone_task_for_test(0, Some(SIGCHLD));
+            let child_task = child.task.clone();
+
+            // Initially Running.
+            assert!(matches!(&*child_task.lifecycle_state(), TaskLifecycleState::Running));
+            assert!(child_task.running_state().is_ok());
+            assert!(!child_task.is_exitted());
+            assert_eq!(child_task.exit_status(), None);
+            assert!(child_task.zombie_state().is_none());
+
+            // Transition to Exiting.
+            child_task.write().set_exiting(ExitStatus::Exit(42));
+            assert!(matches!(
+                &*child_task.lifecycle_state(),
+                TaskLifecycleState::Exiting(ExitStatus::Exit(42))
+            ));
+            assert!(child_task.running_state().is_ok());
+            assert!(child_task.is_exitted());
+            assert_eq!(child_task.exit_status(), Some(ExitStatus::Exit(42)));
+            assert!(child_task.zombie_state().is_none());
+
+            // Calling set_exiting() again preserves original exit status.
+            child_task.write().set_exiting(ExitStatus::Exit(99));
+            assert_eq!(child_task.exit_status(), Some(ExitStatus::Exit(42)));
+
+            // Transition to Exited via drop.
+            drop(child);
+            assert!(matches!(&*child_task.lifecycle_state(), TaskLifecycleState::Exited(_)));
+            assert!(child_task.running_state().is_err());
+            assert!(child_task.is_exitted());
+            assert_eq!(child_task.exit_status(), Some(ExitStatus::Exit(42)));
+            assert!(child_task.zombie_state().is_some());
+
+            // Transition to Reaped.
+            child_task.write().set_reaped();
+            assert!(matches!(&*child_task.lifecycle_state(), TaskLifecycleState::Reaped(_)));
+            assert!(child_task.running_state().is_err());
+            assert!(child_task.is_exitted());
+            assert_eq!(child_task.exit_status(), Some(ExitStatus::Exit(42)));
+            assert!(child_task.zombie_state().is_some());
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_task_lifecycle_running_to_exited() {
+        spawn_kernel_and_run(async |current_task| {
+            let child = current_task.clone_task_for_test(0, Some(SIGCHLD));
+            let child_task = child.task.clone();
+            drop(child);
+            assert!(matches!(&*child_task.lifecycle_state(), TaskLifecycleState::Exited(_)));
+            assert!(child_task.is_exitted());
+            assert_eq!(child_task.exit_status(), Some(ExitStatus::Exit(0)));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_exit_status_observable_once_exitted() {
+        spawn_kernel_and_run(async |current_task| {
+            // A task that observes itself as `EXITED` skips its syscall and relies on
+            // `exit_status()` to stop returning to userspace, so `exit_status()` must never be
+            // `None` once another thread has marked it `EXITED`.
+            let (task_sender, task_receiver) = std::sync::mpsc::channel::<Arc<Task>>();
+            let (status_sender, status_receiver) = std::sync::mpsc::channel();
+            let observing = Arc::new(AtomicBool::new(false));
+            let observer = std::thread::spawn({
+                let observing = observing.clone();
+                move || {
+                    for task in task_receiver {
+                        observing.store(true, Ordering::Release);
+                        while !task.is_exitted() {
+                            std::hint::spin_loop();
+                        }
+                        status_sender.send(task.exit_status()).expect("send exit status");
+                    }
+                }
+            });
+            for _ in 0..1000 {
+                // Use threads rather than processes to avoid accumulating zombie children.
+                let child = current_task.clone_task_for_test(
+                    (CLONE_THREAD | CLONE_SIGHAND | CLONE_VM | CLONE_FILES | CLONE_FS) as u64,
+                    None,
+                );
+                let child_task = child.task.clone();
+                task_sender.send(child_task.clone()).expect("send task to observer");
+                // Mark the task as exiting only once the observer is spinning on `EXITED`.
+                while !observing.swap(false, Ordering::Acquire) {
+                    std::hint::spin_loop();
+                }
+                child_task.write().set_exiting(ExitStatus::Exit(42));
+                assert_eq!(
+                    status_receiver.recv().expect("receive exit status"),
+                    Some(ExitStatus::Exit(42))
+                );
+            }
+            std::mem::drop(task_sender);
+            observer.join().expect("join observer");
         })
         .await;
     }
@@ -1953,7 +2166,7 @@ mod test {
     }
 
     #[::fuchsia::test]
-    async fn test_set_command_name_only_embeds_argv0_on_leader() {
+    async fn test_command_from_comm_only_embeds_argv0_on_leader() {
         spawn_kernel_and_run(async |current_task| {
             let argv0_bytes = b"/bin/my_long_command_name\0";
             let addr = map_memory(current_task, UserAddress::default(), *PAGE_SIZE);
@@ -1967,7 +2180,7 @@ mod test {
 
             // Updating the leader task's command name embeds argv[0] when the truncated name is a
             // substring of argv[0].
-            current_task.set_command_name(TaskCommand::new(b"my_long_command"));
+            current_task.set_command_name(current_task.command_from_comm(b"my_long_command"));
             let cmd = current_task.command();
             assert_eq!(cmd.as_bytes(), b"my_long_command_name");
             assert_eq!(cmd.comm_name(), b"my_long_command");
@@ -1978,7 +2191,7 @@ mod test {
                 Some(SIGCHLD),
             );
             assert!(!thread.is_leader());
-            thread.set_command_name(TaskCommand::new(b"my_long_command"));
+            thread.set_command_name(thread.command_from_comm(b"my_long_command"));
             let cmd = thread.command();
             assert_eq!(cmd.as_bytes(), b"my_long_command");
             assert_eq!(cmd.comm_name(), b"my_long_command");
@@ -2003,35 +2216,54 @@ mod test {
 
             // Passing a non-zero real-time priority while `SchedulingPolicy::Normal` returns
             // `EINVAL` without mutating `realtime_priority`.
-            assert_eq!(current_task.set_scheduler_priority(realtime_10), error!(EINVAL));
+            assert_eq!(
+                current_task.update_scheduler_state_then_role(|scheduler_state| {
+                    scheduler_state.realtime_priority = realtime_10;
+                    Ok(())
+                }),
+                error!(EINVAL)
+            );
             assert_eq!(current_task.scheduler_state.lock().realtime_priority, non_realtime);
 
             current_task
-                .set_scheduler_policy_priority_and_reset_on_fork(
-                    SchedulingPolicy::Fifo,
-                    realtime_10,
-                    false,
-                )
-                .expect("set_scheduler_policy_priority_and_reset_on_fork");
+                .update_scheduler_state_then_role(|scheduler_state| {
+                    scheduler_state.policy = SchedulingPolicy::Fifo;
+                    scheduler_state.realtime_priority = realtime_10;
+                    scheduler_state.reset_on_fork = false;
+                    Ok(())
+                })
+                .expect("update policy and priority");
             assert_eq!(current_task.scheduler_state.lock().policy, SchedulingPolicy::Fifo);
             assert_eq!(current_task.scheduler_state.lock().realtime_priority, realtime_10);
 
-            current_task.set_scheduler_priority(realtime_20).expect("set_scheduler_priority");
+            current_task
+                .update_scheduler_state_then_role(|scheduler_state| {
+                    scheduler_state.realtime_priority = realtime_20;
+                    Ok(())
+                })
+                .expect("update priority");
             assert_eq!(current_task.scheduler_state.lock().realtime_priority, realtime_20);
 
             // Passing `NON_REAL_TIME` while `SchedulingPolicy::Fifo` returns `EINVAL` without
             // mutating `realtime_priority`.
-            assert_eq!(current_task.set_scheduler_priority(non_realtime), error!(EINVAL));
+            assert_eq!(
+                current_task.update_scheduler_state_then_role(|scheduler_state| {
+                    scheduler_state.realtime_priority = non_realtime;
+                    Ok(())
+                }),
+                error!(EINVAL)
+            );
             assert_eq!(current_task.scheduler_state.lock().realtime_priority, realtime_20);
 
             // Setting policy and priority together also validates their combination and rolls back
             // on mismatch.
             assert_eq!(
-                current_task.set_scheduler_policy_priority_and_reset_on_fork(
-                    SchedulingPolicy::Normal,
-                    realtime_10,
-                    true,
-                ),
+                current_task.update_scheduler_state_then_role(|scheduler_state| {
+                    scheduler_state.policy = SchedulingPolicy::Normal;
+                    scheduler_state.realtime_priority = realtime_10;
+                    scheduler_state.reset_on_fork = true;
+                    Ok(())
+                }),
                 error!(EINVAL)
             );
             assert_eq!(current_task.scheduler_state.lock().policy, SchedulingPolicy::Fifo);
@@ -2043,9 +2275,6 @@ mod test {
 
     #[::fuchsia::test]
     async fn test_update_scheduler_state_rolls_back_on_commit_error() {
-        use crate::task::{RoleOverrides, SchedulerManager};
-        use fidl_fuchsia_scheduler::RoleManagerMarker;
-
         let (role_manager, server_end) = fidl::endpoints::create_sync_proxy::<RoleManagerMarker>();
         // Drop the server endpoint so RoleManager FIDL calls fail and `commit_thread_role`
         // returns `Err(EINVAL)`.
@@ -2057,19 +2286,38 @@ mod test {
         spawn_kernel_with_scheduler_and_run_sync(scheduler_manager, |current_task| {
             let initial_state = current_task.scheduler_state.lock().clone();
             let realtime_10 = SchedulingPolicy::Fifo.realtime_priority_from(10).unwrap();
+            let nicer = NormalPriority::from_setpriority_syscall(-5);
 
             assert_eq!(
-                current_task.set_scheduler_policy_priority_and_reset_on_fork(
-                    SchedulingPolicy::Fifo,
-                    realtime_10,
-                    true,
-                ),
+                current_task.update_scheduler_state_then_role(|scheduler_state| {
+                    scheduler_state.policy = SchedulingPolicy::Fifo;
+                    scheduler_state.realtime_priority = realtime_10;
+                    scheduler_state.reset_on_fork = true;
+                    scheduler_state.uclamp_min = 256;
+                    scheduler_state.uclamp_max = 768;
+                    Ok(())
+                }),
                 error!(EINVAL)
             );
             assert_eq!(*current_task.scheduler_state.lock(), initial_state);
 
-            let nicer = NormalPriority::from_setpriority_syscall(-5);
             assert_eq!(current_task.set_scheduler_nice(nicer), error!(EINVAL));
+            assert_eq!(*current_task.scheduler_state.lock(), initial_state);
+
+            // Also verify rollback when the updater closure itself returns an error after mutating
+            // fields.
+            assert_eq!(
+                current_task.update_scheduler_state_then_role(|scheduler_state| {
+                    scheduler_state.policy = SchedulingPolicy::Fifo;
+                    scheduler_state.realtime_priority = realtime_10;
+                    scheduler_state.normal_priority = nicer;
+                    scheduler_state.reset_on_fork = true;
+                    scheduler_state.uclamp_min = 128;
+                    scheduler_state.uclamp_max = 512;
+                    error!(EPERM)
+                }),
+                error!(EPERM)
+            );
             assert_eq!(*current_task.scheduler_state.lock(), initial_state);
         })
         .await;

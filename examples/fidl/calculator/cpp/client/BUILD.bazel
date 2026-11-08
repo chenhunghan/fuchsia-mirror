@@ -1,0 +1,94 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_binary(
+    name = "bin",
+    srcs = ["main.cc"],
+    gn_output_name = "calculator_client_cpp",
+    tags = ["manual"],
+    deps = [
+        # The parser library.
+        ":parser-lib",
+
+        # This is the FIDL Calculator protocol we're connecting to
+        "//examples/fidl/calculator/fidl:calculator_cpp",
+
+        # This library provides an asynchronous event loop implementation.
+        "//sdk/lib/async-loop:async-loop-cpp",
+
+        # This library is used to consume capabilities, e.g. protocols,
+        # from the component's incoming directory.
+        "//sdk/lib/component/incoming/cpp",
+
+        # This library is used to log messages.
+        "//sdk/lib/syslog/cpp",
+    ],
+)
+
+# The parser library for input to the calculator client
+fx_cc_library(
+    name = "parser-lib",
+    srcs = ["calc_parser.cc"],
+    hdrs = ["calc_parser.h"],
+    alwayslink = True,
+)
+
+fx_packaged_binary(
+    name = "bin_packaged_bin",
+    binary = ":bin",
+    binary_name = "calculator_client_cpp",
+)
+
+fx_component_manifest(
+    name = "component-manifest",
+    component_name = "client",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/client.cml",
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":component-manifest",
+    visibility = ["//examples/fidl/calculator:__pkg__"],
+    deps = [":bin_packaged_bin"],
+)
+
+fx_cc_binary(
+    name = "parser_unittests_bin",
+    testonly = True,
+    srcs = ["parser_unittest.cc"],
+    tags = ["manual"],
+    deps = [
+        ":parser-lib",
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "calculator-client-cpp-parser-unittests",
+    unit_tests = [":parser_unittests_bin"],
+    visibility = [
+        "//examples:__pkg__",
+        "//examples/fidl/calculator/cpp:__pkg__",
+    ],
+)

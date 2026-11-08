@@ -5,8 +5,8 @@
 #ifndef SRC_DEVICES_USB_DRIVERS_XHCI_XHCI_ENDPOINT_H_
 #define SRC_DEVICES_USB_DRIVERS_XHCI_XHCI_ENDPOINT_H_
 
+#include <fidl/fuchsia.hardware.usb.descriptor/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.usb.endpoint/cpp/fidl.h>
-#include <fuchsia/hardware/usb/request/c/banjo.h>
 #include <lib/sync/cpp/completion.h>
 
 #include <vector>
@@ -21,10 +21,12 @@
 namespace usb_xhci {
 
 inline uint8_t XhciEndpointIndex(uint8_t ep_address) {
-  if (ep_address == 0)
+  uint8_t ep_num = ep_address & fuchsia_hardware_usb_descriptor::kEndpointNumberMask;
+  if (ep_num == 0) {
     return 0;
-  uint8_t index = static_cast<uint8_t>(
-      2 * (ep_address & ~fuchsia_hardware_usb_descriptor::kEndpointDirectionMask));
+  }
+
+  uint8_t index = static_cast<uint8_t>(2 * ep_num);
   if ((ep_address & fuchsia_hardware_usb_descriptor::kEndpointDirectionMask) ==
       fidl::ToUnderlying(fuchsia_hardware_usb_descriptor::EndpointDirection::kOut))
     index--;
@@ -54,8 +56,6 @@ class Endpoint : public usb::EndpointServer {
   void Connect(async_dispatcher_t* dispatcher,
                fidl::ServerEnd<fuchsia_hardware_usb_endpoint::Endpoint> server_end,
                fbl::RefPtr<DeviceState> state = nullptr);
-
-  void ResetHci() { hci_ = nullptr; }
 
   // fuchsia_hardware_usb_new.Endpoint protocol implementation. RegisterVmos/UnregisterVmos are
   // defined by usb::EndpointServer.
@@ -152,22 +152,22 @@ class Endpoint : public usb::EndpointServer {
     TRB* last_trb;
   };
 
-  // Helper functions for ControlRequestQueue
-  void ControlRequestQueue(usb::RequestVariant request);
+  struct LockedQueue;
+
+  // Helper functions for ControlRequestQueueLocked
   zx_status_t ControlRequestAllocationPhase(UsbRequestState* state);
   zx_status_t ControlRequestStatusPhase(UsbRequestState* state);
   zx_status_t ControlRequestDataPhase(UsbRequestState* state);
   void ControlRequestSetupPhase(UsbRequestState* state);
   void ControlRequestCommit(UsbRequestState* state);
 
-  // Helper functions for NormalRequestQueue
-  void NormalRequestQueue(usb::RequestVariant request);
+  // Helper functions for NormalRequestQueueLocked
   zx_status_t WaitForIsochronousReady(uint64_t target_frame);
   zx_status_t StartNormalTransaction(UsbRequestState* state, uint8_t interrupter_target);
   zx_status_t ContinueNormalTransaction(UsbRequestState* state);
   void CommitNormalTransaction(UsbRequestState* state);
 
-  UsbXhci* hci_;
+  UsbXhci* const hci_;
   uint32_t device_id_;
   TransferRing transfer_ring_;
   std::optional<fuchsia_hardware_usb_descriptor::EndpointType> ep_type_;

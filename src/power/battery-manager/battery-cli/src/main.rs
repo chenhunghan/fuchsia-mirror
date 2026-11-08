@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 mod commands;
+mod governor;
 use crate::commands::{CmdHelper, Command, ReplControl};
 use anyhow::{Error, format_err};
 use fidl_fuchsia_power_battery as fpower;
@@ -241,14 +242,14 @@ async fn set_all_information(args: String, service: &BatterySimulatorProxy) -> R
 async fn handle_command(
     service: &BatterySimulatorProxy,
     cmd: Command,
-    args: Vec<String>,
+    args: &[String],
 ) -> Result<ReplControl, Error> {
-    let args = args.join(" ");
     match cmd {
         Command::Get => print_battery_info(service).await,
-        Command::Set => set_all_information(args, service).await,
+        Command::Set => set_all_information(args.join(" "), service).await,
         Command::Reconnect => service.reconnect_real_battery().map_err(|e| format_err!("{}", e)),
         Command::Disconnect => service.disconnect_real_battery().map_err(|e| format_err!("{}", e)),
+        Command::Governor => governor::run(args).await,
         Command::Help => Ok(println!("{}", Command::help_msg())),
         Command::Exit | Command::Quit => return Ok(ReplControl::Break),
     }?;
@@ -277,7 +278,7 @@ async fn parse_and_handle_cmd(
     line: String,
 ) -> Result<ReplControl, Error> {
     match parse_command(line) {
-        ParseResult::Valid((cmd, args)) => handle_command(service, cmd, args).await,
+        ParseResult::Valid((cmd, args)) => handle_command(service, cmd, &args).await,
         ParseResult::Empty => Ok(ReplControl::Continue),
         ParseResult::Error(err) => {
             println!("{}", err);
@@ -354,6 +355,18 @@ async fn run_repl(service: BatterySimulatorProxy) -> Result<(), Error> {
 
 #[fuchsia::main(logging_tags = ["battery_simulator"])]
 async fn main() -> Result<(), Error> {
+    // With arguments, run them as a single command instead of starting the REPL.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some((raw_cmd, rest)) = args.split_first() {
+        let cmd: Command =
+            raw_cmd.parse().map_err(|_| format_err!("\"{raw_cmd}\" is not a valid command"))?;
+        if cmd == Command::Governor {
+            return governor::run(rest).await;
+        }
+        let battery_simulator = connect_to_protocol::<spower::BatterySimulatorMarker>()?;
+        return handle_command(&battery_simulator, cmd, rest).await.map(|_| ());
+    }
+
     println!("Welcome to the Battery Simulator. Type help and <Enter> to see all the options!");
     let battery_simulator = connect_to_protocol::<spower::BatterySimulatorMarker>()?;
     let repl = pin!(

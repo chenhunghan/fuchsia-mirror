@@ -7,6 +7,7 @@ use std::num::NonZeroU16;
 use selinux_policy_derive::{HasName, HasPolicyId, Parse, Serialize};
 
 use super::Policy;
+use super::access_vector::AccessVector;
 use super::error::{ParseError, SerializeError, ValidateError};
 use super::id_type::IdType;
 use super::indexed::IdAndNameIndexed;
@@ -22,7 +23,7 @@ pub struct CommonSymbolTag;
 pub type CommonSymbolId = IdType<NonZeroU16, CommonSymbolTag>;
 
 /// Parsed SELinux common symbol table entry (e.g. `common file { ... }`).
-#[derive(Debug, HasName, HasPolicyId)]
+#[derive(Clone, Debug, HasName, HasPolicyId)]
 pub struct CommonSymbol {
     id: CommonSymbolId,
     name: Box<[u8]>,
@@ -53,11 +54,10 @@ impl Parse for CommonSymbol {
 
         let name = Box::from(cursor.read_bytes(header.name_len as usize)?);
 
-        let mut permissions_vec = Vec::with_capacity(header.permissions_count as usize);
-        for _ in 0..header.permissions_count {
-            permissions_vec.push(Permission::parse(cursor)?);
-        }
-        let permissions = IdAndNameIndexed::new(permissions_vec.into_boxed_slice())?;
+        let permissions = IdAndNameIndexed::new(
+            cursor.parse_elements(header.permissions_count as usize)?,
+            AccessVector::MAX_PERMISSIONS,
+        )?;
 
         let id = CommonSymbolId::from_u32(header.id)
             .ok_or(ParseError::InvalidId { value: header.id })?;
@@ -98,7 +98,7 @@ impl Validate for CommonSymbol {
 impl Validate for CommonSymbolId {
     fn validate(&self, policy: &Policy) -> Result<(), ValidateError> {
         policy
-            .common_symbols()
+            .common_symbols
             .get_by_id(*self)
             .map(|_| ())
             .ok_or_else(|| ValidateError::UnknownId { kind: "common_symbol", id: self.as_u32() })

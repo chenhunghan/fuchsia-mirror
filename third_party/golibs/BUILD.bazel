@@ -8,10 +8,7 @@ package(default_visibility = ["//visibility:public"])
 
 go_library(
     name = "golibs",
-    srcs = [
-        "imports.go",
-        "petal_imports.go",
-    ],
+    srcs = ["imports.go"],
     importpath = "go.fuchsia.dev/fuchsia/third_party/golibs",
     visibility = ["//visibility:public"],
     deps = [
@@ -27,8 +24,6 @@ go_library(
         "//third_party/golibs/vendor/github.com/kr/fs",
         "//third_party/golibs/vendor/github.com/kr/pretty",
         "//third_party/golibs/vendor/github.com/pkg/sftp",
-        "//third_party/golibs/vendor/github.com/spdx/tools-golang/spdx/common",
-        "//third_party/golibs/vendor/github.com/spdx/tools-golang/spdx/v2_2",
         "//third_party/golibs/vendor/github.com/spf13/pflag",
         "//third_party/golibs/vendor/github.com/theupdateframework/go-tuf",
         "//third_party/golibs/vendor/github.com/theupdateframework/go-tuf/data",
@@ -38,6 +33,7 @@ go_library(
         "//third_party/golibs/vendor/golang.org/x/crypto/ssh",
         "//third_party/golibs/vendor/golang.org/x/exp/maps",
         "//third_party/golibs/vendor/golang.org/x/exp/slices",
+        "//third_party/golibs/vendor/golang.org/x/net/dns/dnsmessage",
         "//third_party/golibs/vendor/golang.org/x/net/ipv4",
         "//third_party/golibs/vendor/golang.org/x/net/ipv6",
         "//third_party/golibs/vendor/golang.org/x/sync/errgroup",
@@ -126,16 +122,6 @@ alias(
 )
 
 alias(
-    name = "github.com/spdx/tools-golang/spdx/common",
-    actual = "//third_party/golibs/vendor/github.com/spdx/tools-golang/spdx/common",
-)
-
-alias(
-    name = "github.com/spdx/tools-golang/spdx/v2_2",
-    actual = "//third_party/golibs/vendor/github.com/spdx/tools-golang/spdx/v2_2",
-)
-
-alias(
     name = "github.com/spf13/pflag",
     actual = "//third_party/golibs/vendor/github.com/spf13/pflag",
 )
@@ -178,6 +164,11 @@ alias(
 alias(
     name = "golang.org/x/exp/slices",
     actual = "//third_party/golibs/vendor/golang.org/x/exp/slices",
+)
+
+alias(
+    name = "golang.org/x/net/dns/dnsmessage",
+    actual = "//third_party/golibs/vendor/golang.org/x/net/dns/dnsmessage",
 )
 
 alias(

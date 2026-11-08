@@ -200,10 +200,14 @@ fn shutdown_and_block(
 }
 
 fn parse_shutdown_reason(reboot_args: &[&[u8]], arg_bytes: &FsString) -> fpower::ShutdownReason {
+    const CRITICAL_PROCESS_FAILURE_SUFFIXES: &[&[u8]] = &[b"-failed", b"-fatal"];
+
     // TODO(https://fxbug.dev/391585107): Loop through all the arguments and
     // generate a list of shutdown reasons.
-    if let Some(arg) = reboot_args.iter().find(|arg| arg.ends_with(b"-failed")) {
-        let process_name = String::from_utf8_lossy(arg.strip_suffix(b"-failed").unwrap());
+    if let Some(process_name) = reboot_args.iter().find_map(|arg| {
+        CRITICAL_PROCESS_FAILURE_SUFFIXES.iter().find_map(|suffix| arg.strip_suffix(*suffix))
+    }) {
+        let process_name = String::from_utf8_lossy(process_name);
         // This log message is load-bearing server-side as it's used to
         // extract the critical process responsible for the reboot.
         // Please notify //src/developer/forensics/OWNERS upon changing.
@@ -273,6 +277,18 @@ mod tests {
         check_parse_shutdown_reason(
             "shutdown,thermal,battery",
             fpower::ShutdownReason::HighTemperature,
+        );
+    }
+
+    #[test]
+    fn parse_shutdown_reason_critical_process() {
+        check_parse_shutdown_reason(
+            "reboot,vold-failed",
+            fpower::ShutdownReason::AndroidCriticalProcessFailure,
+        );
+        check_parse_shutdown_reason(
+            "reboot,zygote-fatal",
+            fpower::ShutdownReason::AndroidCriticalProcessFailure,
         );
     }
 }

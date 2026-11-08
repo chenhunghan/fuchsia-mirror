@@ -25,9 +25,9 @@ Bug: 372314445
 The above line resulted in [this
 comment](https://issues.fuchsia.dev/issues/372314445#comment11).
 
-### Fixed
+### Fixed / Fixes
 
-`Fixed: #` adds a comment, **and marks as "Fixed"**, the given
+`Fixed: #` (or `Fixes: #`) adds a comment, **and marks as "Fixed"**, the given
 [Buganizer][buganizer] issue when a change is submitted.
 
 For example:

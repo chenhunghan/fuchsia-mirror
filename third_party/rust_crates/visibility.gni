@@ -187,6 +187,7 @@ bincode_visibility = [
   # (cd $FUCHSIA_DIR && git grep  --files-with-matches '//third_party/rust_crates:bincode' -- '*BUILD.gn' | sed 's|\(.*\)/BUILD.gn|"//\1:*",|')
   "//src/storage/ext4/lib/metadata:*",
   "//src/storage/fxfs:*",
+  "//src/storage/fxfs/transaction_fifo:*",
   "//src/storage/lib/mapping:*",
   "//src/storage/lib/sparse/rust:*",
 ]
@@ -237,8 +238,6 @@ regex_visibility = [
   "//src/developer/ffx/playground:*",
   "//src/developer/ffx/plugins/doctor:*",
   "//src/developer/ffx/plugins/emulator/commands/start:*",
-  "//src/developer/ffx/plugins/forward:*",
-  "//src/developer/ffx/plugins/fuzz:*",
   "//src/developer/ffx/plugins/platform/preflight:*",
   "//src/developer/ffx/plugins/profile/cpu/load:*",
   "//src/developer/ffx/plugins/profile/gpu/usage:*",
@@ -279,10 +278,8 @@ regex_visibility = [
   "//src/sys/test_runners/rust:*",
   "//src/ui/lib/input_pipeline:*",
   "//third_party/tcpdump/tests:*",
-  "//tools/doc_checker:*",
   "//tools/fidl/example-tester:*",
   "//tools/fidl/fidldoc:*",
-  "//tools/gn_desc/bin:*",
   "//tools/pretty_serial:*",
   "//tools/shush:*",
 

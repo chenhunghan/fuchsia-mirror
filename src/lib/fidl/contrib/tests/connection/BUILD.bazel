@@ -1,0 +1,132 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [],  # Include all tests in the package.
+    visibility = ["//src/lib:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "service_hub_connector_tests_bin",
+    srcs = ["service_hub_connector_test.cc"],
+    # The test includes <sdk/lib/component/outgoing/cpp/outgoing_directory.h>
+    # relative to the source root, which GN puts on the include path by
+    # default and Bazel does not.
+    copts = ["-I."],
+    tags = ["manual"],
+    deps = [
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/component/outgoing/cpp",
+        "//sdk/testing/fidl/protocols_tests:test.protocol.connector_cpp",
+        "//src/lib/fidl/contrib/connection:service_hub_connector",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+    ],
+)
+
+fx_cc_test_binary(
+    name = "service_reconnector_tests_bin",
+    srcs = ["service_reconnector_test.cc"],
+    tags = ["manual"],
+    deps = [
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/component/outgoing/cpp",
+        "//sdk/testing/fidl/protocols_tests:test.protocol.connector_cpp",
+        "//src/lib/fidl/contrib/connection:service_reconnector",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+    ],
+)
+
+fx_packaged_binary(
+    name = "service_hub_connector_tests_packaged_bin",
+    testonly = True,
+    binary = ":service_hub_connector_tests_bin",
+    binary_name = "service_hub_connector_tests_bin",
+    install_root = "test/",
+)
+
+fx_component_manifest(
+    name = "service_hub_connector_tests_manifest",
+    testonly = True,
+    component_name = "service_hub_connector_tests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:death_test.shard.cml",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    # Required for death tests
+    manifest = "meta/service_hub_connector_tests.cml",
+)
+
+fx_test_component(
+    name = "service_hub_connector_tests_component",
+    compiled_manifest = ":service_hub_connector_tests_manifest",
+    deps = [":service_hub_connector_tests_packaged_bin"],
+)
+
+fx_package(
+    name = "service_hub_connector_tests",
+    testonly = True,
+    test_components = [":service_hub_connector_tests_component"],
+)
+
+fx_test(
+    name = "service_hub_connector_tests_test",
+    package = ":service_hub_connector_tests",
+)
+
+fx_packaged_binary(
+    name = "service_reconnector_tests_packaged_bin",
+    testonly = True,
+    binary = ":service_reconnector_tests_bin",
+    binary_name = "service_reconnector_tests_bin",
+    install_root = "test/",
+)
+
+fx_component_manifest(
+    name = "service_reconnector_tests_manifest",
+    testonly = True,
+    component_name = "service_reconnector_tests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:death_test.shard.cml",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    # Required for death tests
+    manifest = "meta/service_reconnector_tests.cml",
+)
+
+fx_test_component(
+    name = "service_reconnector_tests_component",
+    compiled_manifest = ":service_reconnector_tests_manifest",
+    deps = [":service_reconnector_tests_packaged_bin"],
+)
+
+fx_package(
+    name = "service_reconnector_tests",
+    testonly = True,
+    test_components = [":service_reconnector_tests_component"],
+)
+
+fx_test(
+    name = "service_reconnector_tests_test",
+    package = ":service_reconnector_tests",
+)

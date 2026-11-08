@@ -1080,7 +1080,6 @@ FFI_ALWAYS_INLINE zx_status_t cpp_ktrace_read_user(user_out_ptr<void> ptr, uint3
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE zx_status_t cpp_ktrace_control(uint32_t action, uint32_t options);
 
-void* cpp_ktrace_get_active_instance();
 #ifdef UNITTESTS_ENABLED
 void* cpp_ktrace_get_thread_local_override();
 void cpp_ktrace_set_thread_local_override(void* ktrace_ptr);

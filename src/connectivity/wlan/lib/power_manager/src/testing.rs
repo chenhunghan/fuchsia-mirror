@@ -85,11 +85,26 @@ impl PowerManager for TestPowerManager {
 pub struct FakeSyncPowerManager {
     pub calls: Arc<Mutex<Vec<String>>>,
     pub active_leases: Arc<Mutex<Vec<(String, fsystem::LeaseToken)>>>,
+    pub held_leases_at_take: Arc<Mutex<Vec<(String, Vec<String>)>>>,
 }
 
 impl FakeSyncPowerManager {
     pub fn new() -> Self {
-        Self { calls: Arc::new(Mutex::new(vec![])), active_leases: Arc::new(Mutex::new(vec![])) }
+        Self {
+            calls: Arc::new(Mutex::new(vec![])),
+            active_leases: Arc::new(Mutex::new(vec![])),
+            held_leases_at_take: Arc::new(Mutex::new(vec![])),
+        }
+    }
+
+    pub fn was_lease_held_at_take(&self, held_lease: &str, acquired_lease: &str) -> bool {
+        self.held_leases_at_take
+            .lock()
+            .iter()
+            .rev()
+            .find(|(n, _)| n == acquired_lease)
+            .map(|(_, held)| held.iter().any(|h| h == held_lease))
+            .unwrap_or(false)
     }
 
     pub fn is_lease_dropped(&self, name: &str) -> bool {
@@ -110,6 +125,22 @@ impl FakeSyncPowerManager {
 
 impl SyncPowerManager for FakeSyncPowerManager {
     fn take_wake_lease(&self, name: &str) -> Option<WakeLease> {
+        let held = self
+            .active_leases
+            .lock()
+            .iter()
+            .filter_map(|(held_name, token)| {
+                matches!(
+                    token.wait_one(
+                        zx::Signals::EVENTPAIR_PEER_CLOSED,
+                        zx::MonotonicInstant::INFINITE_PAST,
+                    ),
+                    zx::WaitResult::TimedOut(_)
+                )
+                .then(|| held_name.clone())
+            })
+            .collect();
+        self.held_leases_at_take.lock().push((name.to_string(), held));
         self.calls.lock().push(name.to_string());
         let (local_token, token) = fsystem::LeaseToken::create();
         self.active_leases.lock().push((name.to_string(), local_token));

@@ -459,7 +459,7 @@ class PackageManifestBuilder:
             self._name_counter += 1
         return format_merkle(idx)
 
-    def manifest_path(self, path: FilePath) -> "PackageManifestBuilder":
+    def manifest_path(self, path: FilePath) -> PackageManifestBuilder:
         """Set the path that the manifest should be written to."""
         self._manifest_path = path
         return self
@@ -470,7 +470,7 @@ class PackageManifestBuilder:
         merkle: str | None = None,
         size: int | None = None,
         source: FilePath | None = None,
-    ) -> "PackageManifestBuilder":
+    ) -> PackageManifestBuilder:
         """Add a blob to the package, creating fake data for any fields that
         aren't given.
         """
@@ -488,7 +488,7 @@ class PackageManifestBuilder:
         )
         return self
 
-    def fake_blob(self, id: int) -> "PackageManifestBuilder":
+    def fake_blob(self, id: int) -> PackageManifestBuilder:
         """Add a completely faked blob to the package, using a numeric id to
         provide a way of tracking which package it belongs to.
         """
@@ -704,7 +704,9 @@ class AIBCreatorTest(unittest.TestCase):
             # in-AIB version of the manifests.
             expected_deps = [entry.source for entry in expected_files]
             expected_deps.extend(source_package_manifests)
-            self.assertEqual(sorted(deps), sorted(expected_deps))
+            self.assertEqual(
+                sorted(deps, key=str), sorted(expected_deps, key=str)
+            )
 
             # Verify that the fini manifest created (used to create archives of
             # the AIB is correct).
@@ -720,7 +722,8 @@ class AIBCreatorTest(unittest.TestCase):
                 [p.package for p in expected_package_manifests]
             )
             self.assertEqual(
-                sorted(bundle.all_file_paths()), sorted(expected_paths)
+                sorted(bundle.all_file_paths(), key=str),
+                sorted(expected_paths, key=str),
             )
 
             # Created the expected entries from the expected_paths by pre-

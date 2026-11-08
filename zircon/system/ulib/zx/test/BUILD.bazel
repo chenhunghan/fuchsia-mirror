@@ -1,0 +1,86 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":zx-test-package"],
+    visibility = ["//zircon/system/ulib:__pkg__"],
+)
+
+# GN's bootfs_test() expects the binary at test/zx-test via distribution_entries metadata, which cc_test_executable() omits.
+# @bazel2gn:raw_attribute:metadata = { distribution_entries = [ { source = rebase_path("$root_out_dir/zx-test", root_build_dir) destination = "test/zx-test" label = get_label_info(":zx-test", "label_with_toolchain") } ] }
+fx_cc_test_binary(
+    name = "zx-test",
+    srcs = [
+        "object-test.cc",
+        "traits.cc",
+        "util.cc",
+        "util.h",
+        "zx-test.cc",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.boot:fuchsia.boot_cpp",
+        "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/fdio",
+        "//src/lib/captive-thread",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/fzl",
+        "//zircon/system/ulib/zx",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "zx-test-packaged",
+    testonly = True,
+    binary = ":zx-test",
+    binary_name = "zx-test",
+    install_root = "test/",
+)
+
+fx_component_manifest(
+    name = "zx-test-manifest",
+    testonly = True,
+    component_name = "zx-test-package",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/elf:create_raw_processes.shard.cml",
+    ],
+    manifest = "meta/zx-test.cml",
+)
+
+fx_test_component(
+    name = "zx-test-component",
+    compiled_manifest = ":zx-test-manifest",
+    test_type = "system",
+    deps = [":zx-test-packaged"],
+)
+
+fx_package(
+    name = "zx-test-package-pkg",
+    package_name = "zx-test-package",
+    testonly = True,
+    test_components = [":zx-test-component"],
+)
+
+fx_test(
+    name = "zx-test-package",
+    package = ":zx-test-package-pkg",
+)

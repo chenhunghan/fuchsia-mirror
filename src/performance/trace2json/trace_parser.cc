@@ -11,9 +11,8 @@
 #include <memory>
 #include <utility>
 
-#include <re2/re2.h>
-
 #include "lib/trace-engine/types.h"
+#include "re2/re2.h"
 #include "src/performance/lib/trace_converters/chromium_exporter.h"
 
 namespace tracing {

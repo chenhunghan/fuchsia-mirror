@@ -16,16 +16,23 @@ use fuchsia_fs::directory;
 use fuchsia_inspect as inspect;
 use fuchsia_sync::RwLock;
 use futures::StreamExt;
-use log::debug;
+use log::{debug, warn};
 use moniker::ExtendedMoniker;
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
 
 const ALL_PIPELINE_NAME: &str = "all";
+/// Pipeline that allows reading only logs (`fuchsia.diagnostics.ArchiveAccessor.logs`).
+/// Because this pipeline exposes unredacted logs prior to redaction by Feedback,
+/// routing this capability to any component other than `/core/feedback` on `user`
+/// builds requires a Fuchsia Privacy review.
+const LOGS_PIPELINE_NAME: &str = "logs";
 
 struct PipelineParameters {
     has_config: bool,
+    logs_enabled: bool,
+    inspect_enabled: bool,
     name: Cow<'static, str>,
     empty_behavior: configs::EmptyBehavior,
 }
@@ -46,6 +53,12 @@ pub struct Pipeline {
 
     /// The statically declared allowlist for data exfiltration on this pipeline.
     static_allowlist: RwLock<StaticHierarchyAllowlist>,
+
+    /// Whether this pipeline supports reading logs.
+    logs_enabled: bool,
+
+    /// Whether this pipeline supports reading inspect.
+    inspect_enabled: bool,
 }
 
 impl Pipeline {
@@ -57,7 +70,7 @@ impl Pipeline {
     ) -> Self {
         let mut _pipeline_node = None;
         let path = format!("{}/{}", pipelines_path.display(), parameters.name);
-        let mut static_selectors = None;
+        let mut static_selectors = if parameters.inspect_enabled { None } else { Some(vec![]) };
         if parameters.has_config {
             let node = parent_node.create_child(parameters.name.as_ref());
             let mut config =
@@ -74,10 +87,20 @@ impl Pipeline {
             stats,
             name: parameters.name,
             static_allowlist: RwLock::new(StaticHierarchyAllowlist::new(static_selectors)),
+            logs_enabled: parameters.logs_enabled,
+            inspect_enabled: parameters.inspect_enabled,
         }
     }
 
-    fn protocol_name(&self) -> Cow<'_, str> {
+    pub fn logs_enabled(&self) -> bool {
+        self.logs_enabled
+    }
+
+    pub fn inspect_enabled(&self) -> bool {
+        self.inspect_enabled
+    }
+
+    pub fn protocol_name(&self) -> Cow<'_, str> {
         self.protocol_name_inner::<fdiagnostics::ArchiveAccessorMarker>()
     }
 
@@ -117,17 +140,32 @@ impl Pipeline {
 #[cfg(test)]
 impl Pipeline {
     pub fn for_test(static_selectors: Option<Vec<fdiagnostics::Selector>>) -> Self {
+        let has_config = static_selectors.is_some();
         Pipeline {
             _pipeline_node: None,
             name: Cow::Borrowed("test"),
             stats: AccessorStats::new(Default::default()),
             static_allowlist: RwLock::new(StaticHierarchyAllowlist::new(static_selectors)),
+            logs_enabled: !has_config,
+            inspect_enabled: true,
+        }
+    }
+
+    pub fn logs_only_for_test() -> Self {
+        Pipeline {
+            _pipeline_node: None,
+            name: Cow::Borrowed(LOGS_PIPELINE_NAME),
+            stats: AccessorStats::new(Default::default()),
+            static_allowlist: RwLock::new(StaticHierarchyAllowlist::new(Some(vec![]))),
+            logs_enabled: true,
+            inspect_enabled: false,
         }
     }
 }
 
 pub struct PipelineManager {
     pipelines: Vec<Arc<Pipeline>>,
+    logs_pipeline: Arc<Pipeline>,
     _pipelines_node: inspect::Node,
     _accessor_stats_node: inspect::Node,
     scope: Option<fasync::Scope>,
@@ -148,6 +186,10 @@ impl PipelineManager {
                 if !matches!(entry.kind, directory::DirentKind::Directory) {
                     continue;
                 }
+                if entry.name == ALL_PIPELINE_NAME || entry.name == LOGS_PIPELINE_NAME {
+                    warn!("Ignoring reserved pipeline configuration directory: {}", entry.name);
+                    continue;
+                }
                 let empty_behavior = if entry.name == "feedback" || entry.name == "previous_boot" {
                     configs::EmptyBehavior::DoNotFilter
                 } else {
@@ -155,6 +197,8 @@ impl PipelineManager {
                 };
                 let parameters = PipelineParameters {
                     has_config: true,
+                    logs_enabled: false,
+                    inspect_enabled: true,
                     name: Cow::Owned(entry.name),
                     empty_behavior,
                 };
@@ -166,9 +210,23 @@ impl PipelineManager {
                 )));
             }
         }
+        let logs_pipeline = Arc::new(Pipeline::new(
+            PipelineParameters {
+                has_config: false,
+                logs_enabled: true,
+                inspect_enabled: false,
+                name: Cow::Borrowed(LOGS_PIPELINE_NAME),
+                empty_behavior: configs::EmptyBehavior::Disable,
+            },
+            &pipelines_path,
+            &pipelines_node,
+            &accessor_stats_node,
+        ));
         pipelines.push(Arc::new(Pipeline::new(
             PipelineParameters {
                 has_config: false,
+                logs_enabled: true,
+                inspect_enabled: true,
                 name: Cow::Borrowed(ALL_PIPELINE_NAME),
                 empty_behavior: configs::EmptyBehavior::Disable,
             },
@@ -178,14 +236,23 @@ impl PipelineManager {
         )));
         Self {
             pipelines,
+            logs_pipeline,
             _pipelines_node: pipelines_node,
             _accessor_stats_node: accessor_stats_node,
             scope: Some(scope),
         }
     }
 
+    pub fn logs_pipeline(&self) -> Arc<Pipeline> {
+        Arc::clone(&self.logs_pipeline)
+    }
+
     pub fn weak_pipelines(&self) -> Vec<Weak<Pipeline>> {
-        self.pipelines.iter().map(Arc::downgrade).collect::<Vec<_>>()
+        self.pipelines
+            .iter()
+            .filter(|p| p.inspect_enabled())
+            .map(Arc::downgrade)
+            .collect::<Vec<_>>()
     }
 
     pub async fn cancel(&mut self) {
@@ -247,5 +314,45 @@ async fn handle_receiver_requests<P>(
         let server_end = ServerEnd::<P>::new(channel);
         accessor_server
             .spawn_server::<P::RequestStream>(Arc::clone(&pipeline), server_end.into_stream());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[fuchsia::test]
+    async fn pipeline_manager_ignores_reserved_pipeline_names() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join(ALL_PIPELINE_NAME)).unwrap();
+        fs::create_dir(dir.path().join(LOGS_PIPELINE_NAME)).unwrap();
+        fs::create_dir(dir.path().join("feedback")).unwrap();
+
+        let inspector = inspect::Inspector::default();
+        let manager = PipelineManager::new(
+            dir.path().to_path_buf(),
+            inspector.root().create_child("pipelines"),
+            inspector.root().create_child("stats"),
+            fasync::Scope::new_with_name("test"),
+        )
+        .await;
+
+        assert_eq!(manager.pipelines.len(), 2);
+        let feedback = manager.pipelines.iter().find(|p| p.name == "feedback").unwrap();
+        assert!(!feedback.logs_enabled());
+        assert!(feedback.inspect_enabled());
+
+        assert!(manager.pipelines.iter().all(|p| p.name != LOGS_PIPELINE_NAME));
+        let logs_pipeline = manager.logs_pipeline();
+        assert_eq!(logs_pipeline.protocol_name(), "fuchsia.diagnostics.ArchiveAccessor.logs");
+        assert!(logs_pipeline.logs_enabled());
+        assert!(!logs_pipeline.inspect_enabled());
+
+        let all_pipelines: Vec<_> =
+            manager.pipelines.iter().filter(|p| p.name == ALL_PIPELINE_NAME).collect();
+        assert_eq!(all_pipelines.len(), 1);
+        assert!(all_pipelines[0].logs_enabled());
+        assert!(all_pipelines[0].inspect_enabled());
     }
 }

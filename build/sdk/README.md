@@ -88,9 +88,11 @@ follows the standard IDK layout for all its elements, under
 There is an `sdk_collection` for each combination of supported target CPU
 architecture and API level.
 It is possible to see an SDK collection as a "partial IDK" since it
-only contains a subset of atoms that go into the final IDK, but only
-provides prebuilts for the current build configuration's `target_cpu`,
-and for the current SDK API level / build variant.
+only contains a subset of atoms that go into the final IDK, providing
+prebuilts for a specific target CPU and API level. To avoid redundant
+work across sub-builds, sub-builds reuse host tools (`//sdk:idk_build_tools`)
+and the target sysroot (`//zircon/public/sysroot_sdk:sysroot_sdk_export`)
+built directly by the top-level build.
 
 //build/sdk/generate_idk generates the final IDK in
 `$BUILD_DIR/sdk/exported/<name>` by merging the collections for

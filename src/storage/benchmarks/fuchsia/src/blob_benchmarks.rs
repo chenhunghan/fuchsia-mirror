@@ -488,54 +488,60 @@ impl ColdPageFaultBenchmark {
     }
 
     pub fn new_uncompressed(size: usize) -> Self {
+        assert!(size > 0, "uncompressed blob size must be non-zero");
         Self {
-            name: format!("ColdPageFault/Uncompressed/{}", size),
+            name: format!("ColdPageFault/Uncompressed/{size}"),
             data_source: BlobDataSource::Uncompressed { size },
         }
     }
 }
+
+// Byte offset used for the timed cold page fault in `ColdPageFaultBenchmark`. Must be a multiple
+// of the 128 KiB readahead window and sufficiently distant from offset 0 so the untimed warmup
+// fault at offset 0 (which completes lazy `get_vmo` metadata setup) never prefetches this range.
+const COLD_FAULT_OFFSET: usize = 512 * 1024;
+const COLD_FAULT_SAMPLES: usize = 20;
 
 #[async_trait]
 impl Benchmark<FxblobInstance> for ColdPageFaultBenchmark {
     async fn run(&self, fs: &mut FxblobInstance) -> Vec<OperationDuration> {
         storage_trace::duration!("benchmark", "ColdPageFault", "name" => self.name.as_str());
 
+        // Prepend `COLD_FAULT_OFFSET` (512 KiB) of warmup prefix data so that the timed fault at
+        // `COLD_FAULT_OFFSET` still has a full chunk/page behind it unaffected by the untimed
+        // warmup fault at offset 0.
         let delivery_blob = match &self.data_source {
             BlobDataSource::Compressed { resource_path, algo } => {
-                let raw_data = std::fs::read(resource_path).unwrap_or_else(|e| {
-                    panic!("failed to read resource {}: {:?}", resource_path, e)
-                });
+                let raw_data = std::fs::read(resource_path)
+                    .unwrap_or_else(|e| panic!("failed to read resource {resource_path}: {e:?}"));
+                assert!(!raw_data.is_empty(), "resource {resource_path} must not be empty");
+                let repeat_count = (COLD_FAULT_OFFSET / raw_data.len()) + 1;
+                let repeated_data = raw_data.repeat(repeat_count);
                 match algo {
                     CompressionAlgorithm::Zstd => {
-                        DeliveryBlob::new(raw_data, delivery_blob::CompressionMode::Always)
+                        DeliveryBlob::new(repeated_data, delivery_blob::CompressionMode::Always)
                     }
                     CompressionAlgorithm::Lz4 => DeliveryBlob::new_with_type(
                         delivery_blob::DeliveryBlobType::Type3,
-                        raw_data,
+                        repeated_data,
                         delivery_blob::CompressionMode::Always,
                     ),
                 }
             }
             BlobDataSource::Uncompressed { size } => {
                 let mut rng = XorShiftRng::seed_from_u64(RNG_SEED);
-                create_incompressible_data(*size, &mut rng)
+                create_incompressible_data(COLD_FAULT_OFFSET + *size, &mut rng)
             }
         };
         let blob_hash = delivery_blob.name;
 
         fs.write_blob(&delivery_blob).await;
-
-        // Warm up the decompression threads (to avoid measuring startup latency).
-        {
-            let vmo = fs.get_vmo(&blob_hash).await;
-            let mut warm_buf = [0u8; 1];
-            vmo.read(&mut warm_buf, 0).expect("warm up read failed");
-        }
+        drop(delivery_blob);
 
         let debug_proxy = fs.connect_to_debug();
 
-        let mut durations = Vec::new();
-        for _ in 0..20 {
+        let mut durations = Vec::with_capacity(COLD_FAULT_SAMPLES);
+        for _ in 0..COLD_FAULT_SAMPLES {
             // Call ClearCaches to purge Fxfs's internal caches.
             debug_proxy
                 .clear_caches()
@@ -546,13 +552,28 @@ impl Benchmark<FxblobInstance> for ColdPageFaultBenchmark {
 
             let vmo = fs.get_vmo(&blob_hash).await;
             let mapped = MappedBlob::new(&vmo);
+            let data = mapped.data();
+            assert!(data.len() > COLD_FAULT_OFFSET);
+            let ptr = data.as_ptr();
+
+            // Perform one untimed fault at offset 0 first to warm `get_vmo` (ensuring any lazy
+            // blob metadata read and verifier registration finishes before timing).
+            {
+                storage_trace::duration!("benchmark", "warmup_page_in", "offset" => 0usize);
+                // SAFETY: `data.len() > COLD_FAULT_OFFSET > 0`, so `ptr` is valid for a 1-byte
+                // read.
+                let warm_val = unsafe { std::ptr::read_volatile(ptr) };
+                std::hint::black_box(warm_val);
+            }
 
             let duration = {
-                storage_trace::duration!("benchmark", "page_in", "offset" => 0usize);
+                storage_trace::duration!("benchmark", "page_in", "offset" => COLD_FAULT_OFFSET);
                 let timer = OperationTimer::start();
-                // Read the first byte of mapped VMO to trigger page fault
-                let ptr = mapped.data().as_ptr();
-                let val = unsafe { std::ptr::read_volatile(ptr) };
+                // Read at `COLD_FAULT_OFFSET` (well beyond the 128 KiB readahead window of offset
+                // 0) to trigger and measure purely the cold data page fault.
+                // SAFETY: `COLD_FAULT_OFFSET < data.len()`, so `ptr.add(COLD_FAULT_OFFSET)` is
+                // in-bounds of the mapped VMO.
+                let val = unsafe { std::ptr::read_volatile(ptr.add(COLD_FAULT_OFFSET)) };
                 std::hint::black_box(val);
                 timer.stop()
             };
@@ -654,6 +675,30 @@ mod tests {
     #[fuchsia::test]
     async fn write_realistic_blobs_fxblob_test() {
         check_benchmark(WriteRealisticBlobs::new(), Fxblob::new(), 1).await;
+    }
+
+    #[fuchsia::test]
+    async fn cold_page_fault_fxblob_test() {
+        check_benchmark(ColdPageFaultBenchmark::new_lz4_55(), Fxblob::new(), COLD_FAULT_SAMPLES)
+            .await;
+        check_benchmark(
+            ColdPageFaultBenchmark::new_uncompressed(page_size()),
+            Fxblob::new(),
+            COLD_FAULT_SAMPLES,
+        )
+        .await;
+        check_benchmark(
+            ColdPageFaultBenchmark::new_zstd_55(),
+            Fxblob::with_driver_paging(),
+            COLD_FAULT_SAMPLES,
+        )
+        .await;
+        check_benchmark(
+            ColdPageFaultBenchmark::new_uncompressed(1024),
+            Fxblob::with_driver_paging(),
+            COLD_FAULT_SAMPLES,
+        )
+        .await;
     }
 
     #[fuchsia::test]

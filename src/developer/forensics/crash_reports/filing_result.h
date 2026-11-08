@@ -5,7 +5,7 @@
 #ifndef SRC_DEVELOPER_FORENSICS_CRASH_REPORTS_FILING_RESULT_H_
 #define SRC_DEVELOPER_FORENSICS_CRASH_REPORTS_FILING_RESULT_H_
 
-#include <fuchsia/feedback/cpp/fidl.h>
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
 #include <lib/fit/function.h>
 #include <lib/fpromise/promise.h>
 
@@ -26,8 +26,8 @@ enum class FilingResult {
 
 using FilingResultFn = fit::callback<void(FilingResult, std::string)>;
 
-fpromise::result<fuchsia::feedback::FilingSuccess, fuchsia::feedback::FilingError>
-ToFidlFilingResult(FilingResult result);
+fpromise::result<fuchsia_feedback::FilingSuccess, fuchsia_feedback::FilingError> ToFidlFilingResult(
+    FilingResult result);
 
 }  // namespace forensics::crash_reports
 

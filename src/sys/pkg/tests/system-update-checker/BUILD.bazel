@@ -1,0 +1,57 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# `system-update-checker-integration-test` and
+# `system-update-checker-integration-tests` stay in BUILD.gn above the
+# bazel2gn sentinel because `:driver` depends on
+# `//src/lib/fuchsia-component-test`, which bundles the GN-only
+# `//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component`
+# needed at runtime by `sys/component/realm_builder.shard.cml`.
+rustc_test(
+    name = "driver",
+    srcs = ["src/lib.rs"],
+    crate_name = "system_update_checker_integration_test",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.logger:fuchsia.logger_rust",
+        "//sdk/fidl/fuchsia.paver:fuchsia.paver_rust",
+        "//sdk/fidl/fuchsia.pkg:fuchsia.pkg_rust",
+        "//sdk/fidl/fuchsia.pkg.garbagecollector:fuchsia.pkg.garbagecollector_rust",
+        "//sdk/fidl/fuchsia.pkg.rewrite:fuchsia.pkg.rewrite_rust",
+        "//sdk/fidl/fuchsia.update.channel:fuchsia.update.channel_rust",
+        "//sdk/fidl/fuchsia.update.channelcontrol:fuchsia.update.channelcontrol_rust",
+        "//sdk/fidl/fuchsia.update:fuchsia.update_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        # GN depends on the `//src/lib/fuchsia-component-test` group; Bazel
+        # depends on the library directly.
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-fs",
+        "//src/lib/fuchsia-sync",
+        "//src/sys/lib/cm_rust",
+        "//src/sys/pkg/fidl/fuchsia.update.installer:fuchsia.update.installer_rust",
+        "//src/sys/pkg/fidl/fuchsia.update.verify:fuchsia.update.verify_rust",
+        "//src/sys/pkg/lib/fidl-fuchsia-update-installer-ext",
+        "//src/sys/pkg/lib/fuchsia-pkg-testing",
+        "//src/sys/pkg/testing/mock-health-verification",
+        "//src/sys/pkg/testing/mock-installer",
+        "//src/sys/pkg/testing/mock-paver",
+        "//src/sys/pkg/testing/mock-resolver",
+        "//src/sys/pkg/testing/mock-space",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:pretty_assertions",
+        "//third_party/rust_crates/vendor:tempfile",
+    ],
+)

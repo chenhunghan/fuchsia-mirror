@@ -248,9 +248,10 @@ constexpr bool ModuleContainsVaddr(const auto& module, decltype(module.vaddr_sta
 constexpr std::input_iterator auto FindModuleByVaddr(
     std::ranges::input_range auto&& modules,
     decltype(std::ranges::begin(modules)->vaddr_start()) vaddr) {
-  return std::ranges::find_if(
-      std::forward<decltype(modules)>(modules),
-      [vaddr](const auto& module) { return ModuleContainsVaddr(module, vaddr); });
+  auto contains_vaddr = [vaddr](const auto& module) -> bool {
+    return ModuleContainsVaddr(module, vaddr);
+  };
+  return std::ranges::find_if(std::forward<decltype(modules)>(modules), contains_vaddr);
 }
 
 // Given a module, call the callback as `bool(std::span<std::byte>)` to cover

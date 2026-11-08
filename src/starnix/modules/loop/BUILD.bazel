@@ -1,0 +1,125 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "@fuchsia_rules_common//packages:resources.bzl",
+    "fuchsia_package_resource_group",
+)
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# LTO OOMs out on RBE default workers, so use bigger workers.
+# @bazel2gn:raw_attribute:if (is_lto_variant || optimize == "size_lto" || optimize == "size_thinlto") { _concurrent_jobs = concurrent_jobs.link_highmem configs += _concurrent_jobs.configs forward_variables_from(_concurrent_jobs.vars, "*") }
+rustc_library(
+    name = "loop",
+    srcs = ["lib.rs"],
+    crate_name = "starnix_modules_loop",
+    crate_root = "lib.rs",
+    edition = "2024",
+    lint_config = "//src/starnix/build:kernel_library_config",
+    visibility = ["//src/starnix/modules:__subpackages__"],
+    deps = [
+        "//sdk/rust/zx",
+        "//src/starnix/kernel/core",
+        "//src/starnix/lib/starnix_ext",
+        "//src/starnix/lib/starnix_logging",
+        "//src/starnix/lib/starnix_sync",
+        "//src/starnix/lib/starnix_syscalls",
+        "//src/starnix/lib/starnix_types",
+        "//src/starnix/lib/starnix_uapi",
+        "//third_party/rust_crates/vendor:bitflags",
+    ],
+)
+
+# TODO(https://fxbug.dev/42059075): Re-enable starnix in these environments.
+rustc_test(
+    name = "starnix_modules_loop_lib_test",
+    crate = ":loop",
+    lint_config = "//src/starnix/config:starnix_clippy_lints_test",
+    tags = [
+        "exclude_toolchain_tags=asan",
+        "exclude_toolchain_tags=hwasan",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-fs",
+    ],
+)
+
+# LINT.IfChange
+# Hand-maintained in BUILD.gn above the sentinel while GN consumers remain.
+# @bazel2gn:skip
+fuchsia_package_resource_group(
+    name = "test_files",
+    testonly = True,
+    srcs = [
+        "test_data/testfile.txt",
+        "test_data/testfile2.txt",
+    ],
+    basename_only = True,
+    dest = "data",
+)
+# LINT.ThenChange(BUILD.gn)
+
+fx_packaged_binary(
+    name = "loop_test_packaged_bin",
+    testonly = True,
+    binary = ":starnix_modules_loop_lib_test",
+    binary_name = "starnix_modules_loop_lib_test",
+)
+
+fx_component_manifest(
+    name = "starnix-loop-tests-manifest",
+    testonly = True,
+    component_name = "starnix-loop-tests",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/starnix:unit_test.shard.cml",
+    ],
+    manifest = "meta/starnix_loop_tests.cml",
+)
+
+fx_test_component(
+    name = "starnix-loop-tests-component",
+    compiled_manifest = ":starnix-loop-tests-manifest",
+    test_type = "starnix",
+    deps = [
+        ":loop_test_packaged_bin",
+        ":test_files",
+        # In GN, //src/starnix/kernel/vdso is a resource() propagated through
+        # //src/starnix/kernel/core's deps.
+        "//src/starnix/kernel/vdso",
+    ],
+)
+
+# The GN copy of this test package is written by hand in BUILD.gn because
+# bazel2gn does not support `create_no_exception_channel` on `fx_test`.
+# @bazel2gn:skip
+fx_package(
+    name = "starnix-loop-tests-package",
+    package_name = "starnix-loop-tests",
+    test_components = [":starnix-loop-tests-component"],
+)
+
+fx_test(
+    name = "starnix-loop-tests",
+    create_no_exception_channel = True,
+    package = ":starnix-loop-tests-package",
+)

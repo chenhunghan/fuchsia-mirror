@@ -42,13 +42,14 @@ rustc_library("ieee80211") {
   ]
   deps = [
     "//sdk/fidl/fuchsia.wlan.ieee80211:fuchsia.wlan.ieee80211_rust",
+    "//src/diagnostics/lib/redactor",
     "//third_party/rust_crates:anyhow",
     "//third_party/rust_crates:arbitrary",
-    "//third_party/rust_crates:hex",
     "//third_party/rust_crates:thiserror",
     "//third_party/rust_crates:zerocopy",
   ]
 }
+
 rustc_test("ieee80211_test") {
   sources = [
     "src/bssid.rs",
@@ -59,18 +60,45 @@ rustc_test("ieee80211_test") {
   edition = "2024"
   deps = [
     "//sdk/fidl/fuchsia.wlan.ieee80211:fuchsia.wlan.ieee80211_rust",
+    "//src/diagnostics/lib/redactor",
     "//third_party/rust_crates:anyhow",
     "//third_party/rust_crates:arbitrary",
-    "//third_party/rust_crates:hex",
     "//third_party/rust_crates:thiserror",
     "//third_party/rust_crates:zerocopy",
   ]
   visibility = [ ":*" ]
 }
-fuchsia_unittest_package("ieee80211-tests") {
-  package_name = "ieee80211-tests-gn"
-  component_name = "ieee80211-tests"
+
+rustc_test("ieee80211-redaction_test") {
+  sources = [ "tests/redaction.rs" ]
+  source_root = "tests/redaction.rs"
+  edition = "2024"
+  visibility = [ ":*" ]
+  deps = [
+    ":ieee80211",
+    "//src/diagnostics/lib/redactor",
+  ]
+}
+
+fuchsia_unittest_component("ieee80211-tests.ieee80211_test.component") {
+  component_name = "ieee80211_test"
+  visibility = [ ":*" ]
   deps = [ ":ieee80211_test" ]
+}
+
+fuchsia_unittest_component(
+    "ieee80211-tests.ieee80211-redaction_test.component") {
+  component_name = "ieee80211-redaction_test"
+  visibility = [ ":*" ]
+  deps = [ ":ieee80211-redaction_test" ]
+}
+
+fuchsia_test_package("ieee80211-tests") {
+  package_name = "ieee80211-tests-gn"
+  test_components = [
+    ":ieee80211-tests.ieee80211_test.component",
+    ":ieee80211-tests.ieee80211-redaction_test.component",
+  ]
   visibility = [
     ":*",
     "//src/connectivity/wlan:*",

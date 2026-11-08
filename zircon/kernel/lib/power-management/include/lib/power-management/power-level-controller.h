@@ -91,4 +91,16 @@ class PowerLevelController : public fbl::RefCounted<PowerLevelController> {
 
 }  // namespace power_management
 
+extern "C" {
+
+bool cpp_power_level_controller_is_serving(
+    const power_management::PowerLevelController* controller);
+power_management::ControlInterface cpp_power_level_controller_control_interface(
+    const power_management::PowerLevelController* controller);
+zx_status_t cpp_power_level_controller_get_current_power_level(
+    const power_management::PowerLevelController* controller, uint32_t domain_id,
+    uint64_t* out_level);
+
+}  // extern "C"
+
 #endif  // ZIRCON_KERNEL_LIB_POWER_MANAGEMENT_INCLUDE_LIB_POWER_MANAGEMENT_POWER_LEVEL_CONTROLLER_H_

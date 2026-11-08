@@ -25,19 +25,27 @@ zip
 zstd
 
 # Code formatting & generation (mutates workspace source files)
+clang-format
 fx create
 fx dtsfmt
 fx format-code
 fx gen-cargo
 fx setup-go
 fx setup-jj
+rustfmt
+shac fix
+shac fmt
 
 # Workspace build configuration & target management (mutates args.gn / .fx-build-dir)
 fx add-host-test
 fx add-test
 fx args
+fx host-tool
 fx set
 fx use
+
+# Worktree management
+fx worktree
 
 # Agent configuration & lifecycle
 fx agents
@@ -70,6 +78,8 @@ git worktree
 
 # Local Jujutsu operations (mutates working copy & local jj history)
 jj abandon
+jj absorb
+jj b
 jj bookmark
 jj bookmark create
 jj bookmark delete
@@ -77,17 +87,39 @@ jj bookmark move
 jj bookmark rename
 jj bookmark set
 jj branch
+jj ci
 jj commit
+jj desc
 jj describe
+jj duplicate
 jj edit
+jj file chmod
+jj file track
+jj file untrack
+jj fix
+jj git export
+jj git import
+jj metaedit
 jj new
+jj next
+jj parallelize
+jj prev
 jj rebase
+jj redo
+jj resolve
 jj restore
+jj revert
+jj simplify-parents
+jj sparse
 jj split
 jj squash
 jj undo
+jj workspace
 
 # Jiri local synchronization & manifest editing
 jiri edit
+jiri fetch-packages
+jiri run-hooks
 jiri runp
 jiri update
+jiri worktree

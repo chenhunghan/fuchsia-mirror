@@ -225,6 +225,9 @@ class UsbCdcFunction : public fdf::DriverBase2,
   void CheckSetInterfaceDone();
 
   std::atomic_bool unbound_ = false;  // set to true when device is going away.
+  bool intr_endpoint_dead_ = false;
+  bool rx_endpoint_dead_ = false;
+  bool tx_endpoint_dead_ = false;
   bool deconfigure_called_ = false;
   bool deconfigure_completed_ = false;
   bool intr_cancelled_ = false;
@@ -248,7 +251,8 @@ class UsbCdcFunction : public fdf::DriverBase2,
   std::queue<fnetdev::wire::RxSpaceBuffer> rx_space_buffers_;
   std::optional<fdf::StopCompleter> stop_completer_;
 
-  struct {
+  struct __attribute__((packed)) {
+    usb_interface_assoc_descriptor_t iad;
     usb_interface_descriptor_t comm_intf;
     usb_cs_header_interface_descriptor_t cdc_header;
     usb_cs_union_interface_descriptor_1_t cdc_union;
@@ -259,6 +263,18 @@ class UsbCdcFunction : public fdf::DriverBase2,
     usb_endpoint_descriptor_t bulk_out_ep;
     usb_endpoint_descriptor_t bulk_in_ep;
   } descriptors_ = {
+      .iad =
+          {
+              .b_length = sizeof(usb_interface_assoc_descriptor_t),
+              .b_descriptor_type =
+                  fidl::ToUnderlying(fdescriptor::DescriptorType::kInterfaceAssociation),
+              .b_first_interface = 0,  // set later
+              .b_interface_count = 2,
+              .b_function_class = fidl::ToUnderlying(fdescriptor::UsbClass::kComm),
+              .b_function_sub_class = fidl::ToUnderlying(fdescriptor::CdcSubclass::kEthernet),
+              .b_function_protocol = 0,
+              .i_function = 0,
+          },
       .comm_intf =
           {
               .b_length = sizeof(usb_interface_descriptor_t),
@@ -350,6 +366,13 @@ class UsbCdcFunction : public fdf::DriverBase2,
               .b_interval = 0,
           },
   };
+  static_assert(sizeof(descriptors_) == sizeof(usb_interface_assoc_descriptor_t) +
+                                            3 * sizeof(usb_interface_descriptor_t) +
+                                            sizeof(usb_cs_header_interface_descriptor_t) +
+                                            sizeof(usb_cs_union_interface_descriptor_1_t) +
+                                            sizeof(usb_cs_ethernet_interface_descriptor_t) +
+                                            3 * sizeof(usb_endpoint_descriptor_t),
+                "Descriptors struct must be packed without compiler padding");
 
   std::optional<inspect::ComponentInspector> inspector_;
   inspect::Node inspect_node_;

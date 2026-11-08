@@ -3,20 +3,10 @@
 # found in the LICENSE file.
 
 import("//build/python/python_binary.gni")
-import("//build/python/python_host_test.gni")
 import("//build/python/python_library.gni")
-
-if (is_host) {
-  python_host_test("generate_version_history_unittest") {
-    main_source = "generate_version_history_unittest.py"
-    libraries = [ ":generate_version_history" ]
-    visibility = [ ":*" ]
-  }
-}
 
 group("tests") {
   testonly = true
-  deps = [ ":generate_version_history_unittest($host_toolchain)" ]
 }
 
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
@@ -49,6 +39,7 @@ if (is_host) {
     sources = [ "__init__.py" ]
     visibility = [
       ":*",
+      "//build:*",
       "//build/sdk/generate_version_history/*",
     ]
   }
@@ -57,6 +48,11 @@ if (is_host) {
   python_binary("generate_version_history_bin") {
     sources = [ "cmd.py" ]
     main_source = "cmd.py"
+    visibility = [
+      ":*",
+      "//build/sdk/*",
+      "//sdk:*",
+    ]
     deps = [ ":generate_version_history" ]
   }
 }

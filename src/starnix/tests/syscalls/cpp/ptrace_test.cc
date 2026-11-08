@@ -604,6 +604,7 @@ TEST_F(PtracePokePreservesRestartTest, PokeAtSyscallExit) {
 TEST(PtraceTest, PokePreservedAcrossBackToBackStop) {
   test_helper::ForkHelper helper;
   helper.OnlyWaitForForkedChildren();
+  helper.KillChildrenOnDestroy();
 
   int notify_pipe[2];
   SAFE_SYSCALL(pipe(notify_pipe));
@@ -612,7 +613,7 @@ TEST(PtraceTest, PokePreservedAcrossBackToBackStop) {
 
   pid_t child_pid =
       helper.RunInForkedProcess([read_fd = std::move(read_fd), write_pipe_fd = write_fd.get()] {
-        close(write_pipe_fd);
+        SAFE_SYSCALL(close(write_pipe_fd));
         char c = 0;
         ASSERT_THAT(read(read_fd.get(), &c, 1), SyscallSucceedsWithValue(1));
         ASSERT_EQ('x', c);
@@ -623,6 +624,10 @@ TEST(PtraceTest, PokePreservedAcrossBackToBackStop) {
   // PTRACE_SEIZE attaches without delivering a SIGSTOP, allowing us to use PTRACE_INTERRUPT
   // to cleanly stop the tracee while it is blocked in a syscall.
   ASSERT_THAT(ptrace(PTRACE_SEIZE, child_pid, 0, 0), SyscallSucceeds());
+
+  // Wait for the child to block in read() before interrupting it so that we do not stop it in
+  // user space where the scratch register may hold a live caller-saved value.
+  ASSERT_TRUE(test_helper::WaitUntilBlocked(child_pid, true));
 
   // Interrupt and stop the tracee while it is blocked in read().
   ASSERT_THAT(ptrace(PTRACE_INTERRUPT, child_pid, 0, 0), SyscallSucceeds());
@@ -3117,6 +3122,62 @@ TEST(PtraceTest, ReplaceForcedSignalWithIgnoredSignal) {
   EXPECT_TRUE(helper.WaitForChildren());
 }
 
+// Verifies that a synchronous forced hardware exception signal (SIGTRAP from a software
+// breakpoint) while blocked unmasks the signal and resets its handler to SIG_DFL (preserving other
+// sigaction fields) before entering ptrace signal-delivery-stop.
+TEST(PtraceTest, BlockedForcedSignalUnmasksAndResetsHandlerAtSendTime) {
+  test_helper::ForkHelper helper;
+  helper.OnlyWaitForForkedChildren();
+  helper.KillChildrenOnDestroy();
+
+  pid_t child_pid = helper.RunInForkedProcess([] {
+    struct sigaction sa = {};
+    sa.sa_handler = [](int) { _exit(1); };
+    sa.sa_flags = SA_RESTART;
+    SAFE_SYSCALL(sigaction(SIGTRAP, &sa, nullptr));
+
+    sigset_t mask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGTRAP);
+    SAFE_SYSCALL(sigprocmask(SIG_BLOCK, &mask, nullptr));
+
+    SAFE_SYSCALL(ptrace(PTRACE_TRACEME, 0, nullptr, nullptr));
+    SAFE_SYSCALL(raise(SIGSTOP));
+
+    FunctionToBreak();
+
+    sigset_t current_mask = {};
+    SAFE_SYSCALL(sigprocmask(SIG_SETMASK, nullptr, &current_mask));
+    EXPECT_EQ(sigismember(&current_mask, SIGTRAP), 0);
+
+    struct sigaction current_sa = {};
+    SAFE_SYSCALL(sigaction(SIGTRAP, nullptr, &current_sa));
+    EXPECT_EQ(current_sa.sa_handler, SIG_DFL);
+    EXPECT_EQ(current_sa.sa_flags & SA_RESTART, SA_RESTART);
+  });
+
+  int status = 0;
+  ASSERT_EQ(SAFE_SYSCALL(waitpid(child_pid, &status, 0)), child_pid);
+  ASSERT_TRUE(WIFSTOPPED(status) && WSTOPSIG(status) == SIGSTOP);
+
+  const void *breakpoint_addr = reinterpret_cast<const void *>(&FunctionToBreak);
+  long original_data = PokeBreakpoint(child_pid, breakpoint_addr);
+  ASSERT_FALSE(::testing::Test::HasFailure());
+  ASSERT_THAT(ptrace(PTRACE_CONT, child_pid, nullptr, 0), SyscallSucceeds());
+
+  // Wait for the forced SIGTRAP from the breakpoint exception.
+  ASSERT_EQ(SAFE_SYSCALL(waitpid(child_pid, &status, 0)), child_pid);
+  ASSERT_TRUE(WIFSTOPPED(status) && WSTOPSIG(status) == SIGTRAP);
+
+  // Restore original instruction and suppress SIGTRAP so the child can inspect its post-exception
+  // signal mask and disposition.
+  ASSERT_THAT(ptrace(PTRACE_POKEDATA, child_pid, breakpoint_addr, original_data),
+              SyscallSucceeds());
+  ASSERT_THAT(ptrace(PTRACE_CONT, child_pid, nullptr, 0), SyscallSucceeds());
+
+  EXPECT_TRUE(helper.WaitForChildren());
+}
+
 extern "C" void GetConstantFromCodeInsn();
 
 #if defined(__arm__)
@@ -3385,6 +3446,50 @@ TEST(PtraceTest, SigkillAtSyscallEnterAbortsSyscall) {
 
   char buf = 0;
   EXPECT_EQ(read(read_fd.get(), &buf, 1), 0);
+}
+
+TEST(PtraceTest, SeizeOptionsValidation) {
+  int notify_pipe[2];
+  ASSERT_THAT(pipe(notify_pipe), SyscallSucceeds());
+  fbl::unique_fd read_fd(notify_pipe[0]);
+  fbl::unique_fd write_fd(notify_pipe[1]);
+
+  test_helper::ForkHelper helper;
+  helper.OnlyWaitForForkedChildren();
+  helper.KillChildrenOnDestroy();
+  pid_t child_pid = helper.RunInForkedProcess([&] {
+    write_fd.reset();
+    char c = 0;
+    ASSERT_THAT(read(read_fd.get(), &c, 1), SyscallSucceedsWithValue(1));
+    _exit(0);
+  });
+  read_fd.reset();
+
+  // Option validation precedes the same-thread-group EPERM check.
+  EXPECT_THAT(ptrace(PTRACE_SEIZE, getpid(), 0, ~0UL), SyscallFailsWithErrno(EIO));
+
+  // Unknown option bits must be rejected with EIO before attaching to the tracee.
+  EXPECT_THAT(ptrace(PTRACE_SEIZE, child_pid, 0, 0x80000000UL), SyscallFailsWithErrno(EIO));
+  EXPECT_THAT(ptrace(PTRACE_SEIZE, child_pid, 0, ~0UL), SyscallFailsWithErrno(EIO));
+  EXPECT_THAT(ptrace(PTRACE_DETACH, child_pid, 0, 0), SyscallFailsWithErrno(ESRCH));
+
+#if defined(__LP64__)
+  // Non-zero high bits must be rejected with EIO rather than truncated away.
+  EXPECT_THAT(ptrace(PTRACE_SEIZE, child_pid, 0, 1UL << 32), SyscallFailsWithErrno(EIO));
+  EXPECT_THAT(ptrace(PTRACE_DETACH, child_pid, 0, 0), SyscallFailsWithErrno(ESRCH));
+#endif
+
+  // A subsequent PTRACE_SEIZE with valid options must attach and apply the options.
+  ASSERT_THAT(ptrace(PTRACE_SEIZE, child_pid, 0, PTRACE_O_TRACEEXIT), SyscallSucceeds());
+  ASSERT_THAT(write(write_fd.get(), "x", 1), SyscallSucceedsWithValue(1));
+
+  int status = 0;
+  ASSERT_THAT(waitpid(child_pid, &status, 0), SyscallSucceedsWithValue(child_pid));
+  ASSERT_TRUE(WIFSTOPPED(status));
+  EXPECT_EQ(status >> 8, (SIGTRAP | (PTRACE_EVENT_EXIT << 8)));
+
+  ASSERT_THAT(ptrace(PTRACE_CONT, child_pid, 0, 0), SyscallSucceeds());
+  EXPECT_TRUE(helper.WaitForChildren());
 }
 
 }  // namespace

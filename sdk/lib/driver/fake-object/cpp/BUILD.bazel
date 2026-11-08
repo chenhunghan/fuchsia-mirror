@@ -1,0 +1,51 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/idk:idk_cc_source_library.bzl", "idk_cc_source_library")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+idk_cc_source_library(
+    name = "cpp",
+    srcs = [
+        "fake-handle.cc",
+        "fake-object.cc",
+        "internal.h",
+    ],
+    hdrs = ["fake-object.h"],
+    api_area = "Driver SDK",
+    category = "partner",
+    idk_name = "driver_fake_object_cpp",
+    include_base = "//sdk",
+    public_configs = ["//sdk/config"],
+    stable = True,
+    visibility = [
+        "//sdk/lib/driver/fake-bti/cpp:__pkg__",
+        "//sdk/lib/driver/fake-resource/cpp:__pkg__",
+    ],
+    deps = [
+        "//sdk/lib/fdio",
+        "//zircon/system/ulib/zx",
+    ],
+)
+
+fx_cc_test_binary(
+    name = "fake_object_test",
+    srcs = [
+        "fake-object-test.cc",
+        "internal.h",
+    ],
+    deps = [
+        ":cpp",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "fake_object_test_package",
+    unit_tests = [":fake_object_test"],
+    visibility = ["//sdk/lib:__pkg__"],
+)

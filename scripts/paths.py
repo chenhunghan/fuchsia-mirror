@@ -12,7 +12,6 @@ FUCHSIA_BUILD_DIR = os.environ["FUCHSIA_BUILD_DIR"]
 
 PREBUILT_PLATFORM = {
     "Linux": "linux-x64",
-    "Darwin": "mac-x64",
     "Windows": "win-x64",
 }[platform.system()]
 

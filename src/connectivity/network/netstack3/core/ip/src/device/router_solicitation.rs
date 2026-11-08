@@ -12,16 +12,18 @@ use core::time::Duration;
 use assert_matches::assert_matches;
 use derivative::Derivative;
 use net_types::UnicastAddr;
-use net_types::ip::Ipv6Addr;
+use net_types::ip::{Ipv6, Ipv6Addr};
 use netstack3_base::{
     AnyDevice, CoreTimerContext, DeviceIdContext, HandleableTimer, NetworkPartialSerializer,
     NetworkSerializer, RngContext, StrongDeviceIdentifier as _, TimerBindingsTypes, TimerContext,
     TimerHandler, WeakDeviceIdentifier,
 };
 use packet::{EitherSerializer, EmptyBuf, InnerPacketBuilder as _};
+use packet_formats::icmp::IcmpPacket;
 use packet_formats::icmp::ndp::options::NdpOptionBuilder;
-use packet_formats::icmp::ndp::{OptionSequenceBuilder, RouterSolicitation};
+use packet_formats::icmp::ndp::{OptionSequenceBuilder, RouterAdvertisement, RouterSolicitation};
 use rand::RngExt as _;
+use zerocopy::SplitByteSlice;
 
 use crate::internal::base::IpSendFrameError;
 use crate::internal::device::Ipv6LinkLayerAddr;
@@ -68,9 +70,10 @@ impl<D: WeakDeviceIdentifier> RsTimerId<D> {
 
 /// A device's router solicitation state.
 #[derive(Derivative)]
-#[derivative(Default(bound = ""))]
+#[derivative(Default(bound = ""), Debug(bound = ""))]
 pub struct RsState<BT: RsBindingsTypes> {
     solicitations_sent: u8,
+    received_valid_ra: bool,
     timer: Option<BT::Timer>,
 }
 
@@ -136,15 +139,24 @@ pub trait RsHandler<BC: RsBindingsTypes>:
 
     /// Stops router solicitation.
     ///
-    /// Does nothing if router solicitaiton is not being performed
+    /// Does nothing if router solicitation is not being performed.
     fn stop_router_solicitation(&mut self, bindings_ctx: &mut BC, device_id: &Self::DeviceId);
+
+    /// Handles receipt of a valid Router Advertisement.
+    fn handle_router_advertisement<B: SplitByteSlice>(
+        &mut self,
+        bindings_ctx: &mut BC,
+        device_id: &Self::DeviceId,
+        packet: &IcmpPacket<Ipv6, B, RouterAdvertisement>,
+    );
 }
 
 impl<BC: RsBindingsContext, CC: RsContext<BC>> RsHandler<BC> for CC {
     fn start_router_solicitation(&mut self, bindings_ctx: &mut BC, device_id: &Self::DeviceId) {
         self.with_rs_state_mut_and_max(device_id, |state, max| {
-            let RsState { solicitations_sent, timer } = state;
+            let RsState { solicitations_sent, received_valid_ra, timer } = state;
             *solicitations_sent = 0;
+            *received_valid_ra = false;
 
             // The caller *must call* `stop_router_solicitation` before starting
             // a new one.
@@ -178,6 +190,37 @@ impl<BC: RsBindingsContext, CC: RsContext<BC>> RsHandler<BC> for CC {
             }
         });
     }
+
+    fn handle_router_advertisement<B: SplitByteSlice>(
+        &mut self,
+        bindings_ctx: &mut BC,
+        device_id: &Self::DeviceId,
+        packet: &IcmpPacket<Ipv6, B, RouterAdvertisement>,
+    ) {
+        // As per RFC 4861 section 6.3.7:
+        //   Once the host sends a Router Solicitation, and receives a valid
+        //   Router Advertisement with a non-zero Router Lifetime, the host
+        //   MUST desist from sending additional solicitations on that
+        //   interface.
+        if packet.message().router_lifetime().is_none() {
+            return;
+        }
+
+        self.with_rs_state_mut(
+            device_id,
+            |RsState { solicitations_sent, received_valid_ra, timer }| {
+                *received_valid_ra = true;
+                // Moreover, a host SHOULD send at least one solicitation in the
+                // case where an advertisement is received prior to having sent
+                // a solicitation.
+                if *solicitations_sent > 0
+                    && let Some(mut timer) = timer.take()
+                {
+                    let _: Option<BC::Instant> = bindings_ctx.cancel_timer(&mut timer);
+                }
+            },
+        );
+    }
 }
 
 impl<BC: RsBindingsContext, CC: RsContext<BC>> HandleableTimer<CC, BC>
@@ -200,12 +243,12 @@ fn do_router_solicitation<BC: RsBindingsContext, CC: RsContext<BC>>(
 ) {
     let send_rs = core_ctx.with_rs_state_mut_and_max(
         device_id,
-        |RsState { solicitations_sent, timer }, max| {
-            let Some(timer) = timer.as_mut() else {
+        |RsState { solicitations_sent, received_valid_ra, timer }, max| {
+            let Some(current_timer) = timer.as_mut() else {
                 // If we don't have a timer then RS has been stopped.
                 return false;
             };
-            if bindings_ctx.unique_timer_id(timer) != timer_id {
+            if bindings_ctx.unique_timer_id(current_timer) != timer_id {
                 // This is an errant request from a previous round of RS enablement,
                 // just ignore it and don't send a solicitation.
                 return false;
@@ -213,14 +256,21 @@ fn do_router_solicitation<BC: RsBindingsContext, CC: RsContext<BC>>(
 
             let max_solicitations = max.map_or(0, NonZeroU8::get);
             if *solicitations_sent >= max_solicitations {
+                *timer = None;
                 return false;
             }
 
             *solicitations_sent = solicitations_sent.saturating_add(1);
 
-            // Schedule the next timer if more solicitations are needed.
-            if *solicitations_sent < max_solicitations {
-                assert_eq!(bindings_ctx.schedule_timer(RTR_SOLICITATION_INTERVAL, timer), None);
+            // Schedule the next timer if more solicitations are needed and we
+            // have not yet received a valid RA with a non-zero router lifetime.
+            if !*received_valid_ra && *solicitations_sent < max_solicitations {
+                assert_eq!(
+                    bindings_ctx.schedule_timer(RTR_SOLICITATION_INTERVAL, current_timer),
+                    None
+                );
+            } else {
+                *timer = None;
             }
 
             true
@@ -267,12 +317,17 @@ mod tests {
     use alloc::vec::Vec;
 
     use net_declare::net_ip_v6;
+    use net_types::Witness as _;
     use netstack3_base::testutil::{
         FakeBindingsCtx, FakeCoreCtx, FakeDeviceId, FakeTimerCtxExt as _, FakeWeakDeviceId,
     };
-    use netstack3_base::{CtxPair, InstantContext as _, SendFrameContext as _};
+    use netstack3_base::{
+        CtxPair, InstantContext as _, NetworkSerializationContext, SendFrameContext as _,
+    };
+    use packet::{NestableSerializer as _, ParsablePacket as _, Serializer as _};
     use packet_formats::icmp::ndp::Options;
     use packet_formats::icmp::ndp::options::NdpOption;
+    use packet_formats::icmp::{IcmpPacketBuilder, IcmpParseArgs, IcmpZeroCode};
     use test_case::test_case;
 
     use super::*;
@@ -352,6 +407,29 @@ mod tests {
     const RS_TIMER_ID: RsTimerId<FakeWeakDeviceId<FakeDeviceId>> =
         RsTimerId { device_id: FakeWeakDeviceId(FakeDeviceId) };
 
+    fn create_ra_buffer(router_lifetime: u16) -> Vec<u8> {
+        let src_ip = Ipv6::ALL_NODES_LINK_LOCAL_MULTICAST_ADDRESS.get();
+        let dst_ip = Ipv6::ALL_NODES_LINK_LOCAL_MULTICAST_ADDRESS.get();
+        EmptyBuf
+            .wrap_in(IcmpPacketBuilder::<Ipv6, _>::new(
+                src_ip,
+                dst_ip,
+                IcmpZeroCode,
+                RouterAdvertisement::new(0, false, false, router_lifetime, 0, 0),
+            ))
+            .serialize_vec_outer(&mut NetworkSerializationContext::default())
+            .unwrap()
+            .unwrap_b()
+            .into_inner()
+    }
+
+    fn parse_ra(buf: &[u8]) -> IcmpPacket<Ipv6, &'_ [u8], RouterAdvertisement> {
+        let src_ip = Ipv6::ALL_NODES_LINK_LOCAL_MULTICAST_ADDRESS.get();
+        let dst_ip = Ipv6::ALL_NODES_LINK_LOCAL_MULTICAST_ADDRESS.get();
+        let mut slice = buf;
+        IcmpPacket::parse(&mut slice, IcmpParseArgs::new(src_ip, dst_ip)).unwrap()
+    }
+
     #[test]
     fn stop_router_solicitation() {
         let CtxPair { mut core_ctx, mut bindings_ctx } =
@@ -374,11 +452,175 @@ mod tests {
         assert_eq!(core_ctx.frames(), &[][..]);
     }
 
+    #[test]
+    fn handle_router_advertisement_when_inactive() {
+        let CtxPair { mut core_ctx, mut bindings_ctx } =
+            CtxPair::with_core_ctx(FakeCoreCtxImpl::with_state(FakeRsContext {
+                max_router_solicitations: NonZeroU8::new(3),
+                rs_state: Default::default(),
+                source_address: None,
+                link_layer_bytes: None,
+            }));
+
+        assert_matches!(
+            core_ctx.state.rs_state,
+            RsState { solicitations_sent: 0, received_valid_ra: false, timer: None }
+        );
+        let buf = create_ra_buffer(0);
+        let ra = parse_ra(&buf);
+        RsHandler::handle_router_advertisement(
+            &mut core_ctx,
+            &mut bindings_ctx,
+            &FakeDeviceId,
+            &ra,
+        );
+        // An RA with zero router lifetime must not stop router solicitation or be
+        // considered a valid RA for desisting solicitations.
+        assert_matches!(
+            core_ctx.state.rs_state,
+            RsState { solicitations_sent: 0, received_valid_ra: false, timer: None }
+        );
+
+        let buf = create_ra_buffer(1000);
+        let ra = parse_ra(&buf);
+        RsHandler::handle_router_advertisement(
+            &mut core_ctx,
+            &mut bindings_ctx,
+            &FakeDeviceId,
+            &ra,
+        );
+        assert_matches!(
+            core_ctx.state.rs_state,
+            RsState { solicitations_sent: 0, received_valid_ra: true, timer: None }
+        );
+        bindings_ctx.timers.assert_no_timers_installed();
+        assert_eq!(core_ctx.frames(), &[][..]);
+    }
+
+    #[test]
+    fn handle_router_advertisement_during_initial_delay() {
+        let CtxPair { mut core_ctx, mut bindings_ctx } =
+            CtxPair::with_core_ctx(FakeCoreCtxImpl::with_state(FakeRsContext {
+                max_router_solicitations: NonZeroU8::new(3),
+                rs_state: Default::default(),
+                source_address: None,
+                link_layer_bytes: None,
+            }));
+
+        RsHandler::start_router_solicitation(&mut core_ctx, &mut bindings_ctx, &FakeDeviceId);
+        assert_matches!(
+            core_ctx.state.rs_state,
+            RsState { solicitations_sent: 0, received_valid_ra: false, timer: Some(_) }
+        );
+        let now = bindings_ctx.now();
+        bindings_ctx
+            .timers
+            .assert_timers_installed_range([(RS_TIMER_ID, now..=now + MAX_RTR_SOLICITATION_DELAY)]);
+
+        // Unsolicited RA before the first RS is sent: per RFC 4861 section
+        // 6.3.7, at least one RS should still be sent, and no further ones.
+        let buf = create_ra_buffer(1000);
+        let ra = parse_ra(&buf);
+        RsHandler::handle_router_advertisement(
+            &mut core_ctx,
+            &mut bindings_ctx,
+            &FakeDeviceId,
+            &ra,
+        );
+        assert_matches!(
+            core_ctx.state.rs_state,
+            RsState { solicitations_sent: 0, received_valid_ra: true, timer: Some(_) }
+        );
+        bindings_ctx
+            .timers
+            .assert_timers_installed_range([(RS_TIMER_ID, now..=now + MAX_RTR_SOLICITATION_DELAY)]);
+
+        assert_eq!(bindings_ctx.trigger_next_timer(&mut core_ctx), Some(RS_TIMER_ID));
+        assert_eq!(
+            core_ctx.frames(),
+            &[(RsMessageMeta { message: RouterSolicitation::default() }, Vec::new())][..]
+        );
+        assert_matches!(
+            core_ctx.state.rs_state,
+            RsState { solicitations_sent: 1, received_valid_ra: true, timer: None }
+        );
+        bindings_ctx.timers.assert_no_timers_installed();
+    }
+
+    #[test]
+    fn handle_router_advertisement_while_soliciting() {
+        let CtxPair { mut core_ctx, mut bindings_ctx } =
+            CtxPair::with_core_ctx(FakeCoreCtxImpl::with_state(FakeRsContext {
+                max_router_solicitations: NonZeroU8::new(3),
+                rs_state: Default::default(),
+                source_address: None,
+                link_layer_bytes: None,
+            }));
+
+        RsHandler::start_router_solicitation(&mut core_ctx, &mut bindings_ctx, &FakeDeviceId);
+        let now = bindings_ctx.now();
+        bindings_ctx
+            .timers
+            .assert_timers_installed_range([(RS_TIMER_ID, now..=now + MAX_RTR_SOLICITATION_DELAY)]);
+
+        // Send the first RS, then receive a solicited RA: the pending
+        // retransmission timer must be cancelled immediately.
+        assert_eq!(bindings_ctx.trigger_next_timer(&mut core_ctx), Some(RS_TIMER_ID));
+        assert_eq!(
+            core_ctx.frames(),
+            &[(RsMessageMeta { message: RouterSolicitation::default() }, Vec::new())][..]
+        );
+        assert_matches!(
+            core_ctx.state.rs_state,
+            RsState { solicitations_sent: 1, received_valid_ra: false, timer: Some(_) }
+        );
+        let now = bindings_ctx.now();
+        bindings_ctx
+            .timers
+            .assert_timers_installed([(RS_TIMER_ID, now + RTR_SOLICITATION_INTERVAL)]);
+
+        // RA with zero lifetime does not cancel the timer.
+        let buf = create_ra_buffer(0);
+        let ra = parse_ra(&buf);
+        RsHandler::handle_router_advertisement(
+            &mut core_ctx,
+            &mut bindings_ctx,
+            &FakeDeviceId,
+            &ra,
+        );
+        assert_matches!(
+            core_ctx.state.rs_state,
+            RsState { solicitations_sent: 1, received_valid_ra: false, timer: Some(_) }
+        );
+        bindings_ctx
+            .timers
+            .assert_timers_installed([(RS_TIMER_ID, now + RTR_SOLICITATION_INTERVAL)]);
+
+        let buf = create_ra_buffer(1000);
+        let ra = parse_ra(&buf);
+        RsHandler::handle_router_advertisement(
+            &mut core_ctx,
+            &mut bindings_ctx,
+            &FakeDeviceId,
+            &ra,
+        );
+        assert_matches!(
+            core_ctx.state.rs_state,
+            RsState { solicitations_sent: 1, received_valid_ra: true, timer: None }
+        );
+        bindings_ctx.timers.assert_no_timers_installed();
+        assert_eq!(
+            core_ctx.frames(),
+            &[(RsMessageMeta { message: RouterSolicitation::default() }, Vec::new())][..]
+        );
+    }
+
     const SOURCE_ADDRESS: UnicastAddr<Ipv6Addr> =
         unsafe { UnicastAddr::new_unchecked(net_ip_v6!("fe80::1")) };
 
     #[test_case(0, None, None, None; "disabled")]
     #[test_case(1, None, None, None; "once_without_source_address_or_link_layer_option")]
+    #[test_case(3, None, None, None; "three_without_source_address_or_link_layer_option")]
     #[test_case(
         1,
         Some(SOURCE_ADDRESS),
@@ -450,6 +692,7 @@ mod tests {
 
         bindings_ctx.timers.assert_no_timers_installed();
         assert_eq!(core_ctx.state.rs_state.solicitations_sent, max_router_solicitations);
+        assert_matches!(core_ctx.state.rs_state.timer, None);
         let frames = core_ctx.frames();
         assert_eq!(frames.len(), usize::from(max_router_solicitations), "frames = {:?}", frames);
     }

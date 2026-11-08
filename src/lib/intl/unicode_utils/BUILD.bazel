@@ -1,0 +1,17 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules:stamp_group.bzl", "stamp_group")
+
+package(default_applicable_licenses = ["//:license"])
+
+stamp_group(
+    name = "unicode_utils",
+    stamp = "unicode_utils.stamp",
+    visibility = ["//src/lib/intl:__pkg__"],
+    deps = [
+        "//src/lib/intl/unicode_utils/char_collection",
+        "//src/lib/intl/unicode_utils/unicode_blocks",
+    ],
+)

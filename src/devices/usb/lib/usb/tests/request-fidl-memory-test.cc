@@ -56,8 +56,17 @@ class FidlRequestMemoryTest : public testing::TestWithParam<BufferTag> {
       mocked_vmos_[vmo_id] = std::vector<uint8_t>(alloc_size, 0);
       req.add_vmo_id(vmo_id, region_size.value_or(alloc_size), region_offset);
     } else {
-      req.add_data(std::vector<uint8_t>(alloc_size, 0), region_size.value_or(alloc_size),
-                   region_offset);
+      const size_t effective_size = region_size.value_or(alloc_size);
+      if (effective_size == 0) {
+        // add_data() enforces actual_size > 0. To test CopyTo/CopyFrom against a BufferRegion
+        // whose size was mutated to 0, initialize with alloc_size and then set size(0) on the
+        // underlying FIDL BufferRegion.
+        req.add_data(std::vector<uint8_t>(alloc_size, 0), alloc_size, region_offset);
+        req->data()->back().size(0);
+        req->data()->back().buffer()->data()->resize(alloc_size);
+      } else {
+        req.add_data(std::vector<uint8_t>(alloc_size, 0), effective_size, region_offset);
+      }
     }
   }
 
@@ -146,9 +155,7 @@ TEST_P(FidlRequestMemoryTest, BoundariesAndSlicing) {
 
 // Verifies multi-region scatter-gather copies across adjacent request buffers while preserving
 // pre-allocated buffer capacity.
-// Disabled: On origin/main, CopyTo() resizes partial-write kData vectors to written size (5u),
-// truncating the vector from 10 to 5 bytes while leaving the logical size at 10. Activated in CL 2.
-TEST_P(FidlRequestMemoryTest, DISABLED_ScatterGather) {
+TEST_P(FidlRequestMemoryTest, ScatterGather) {
   usb::FidlRequest req;
   AddBuffer(req, 10, 10, 0);
   AddBuffer(req, 10, 10, 0);
@@ -191,8 +198,7 @@ TEST_P(FidlRequestMemoryTest, DISABLED_ScatterGather) {
 }
 
 // Verifies copy behavior on zero-length regions and out-of-bounds offsets.
-// Disabled: CopyTo and CopyFrom require bounds validation updates for zero-length regions.
-TEST_P(FidlRequestMemoryTest, DISABLED_ZeroLengthAndOutOfBounds) {
+TEST_P(FidlRequestMemoryTest, ZeroLengthAndOutOfBounds) {
   usb::FidlRequest req;
   AddBuffer(req, 5, 0, 5);  // Zero size region
 
@@ -251,8 +257,7 @@ TEST_P(FidlRequestMemoryTest, IntermediateBufferSkipping) {
 }
 
 // Verifies that CopyTo dynamically resizes kData vector buffers to account for region offsets.
-// Disabled: CopyTo requires dynamic vector capacity expansion for region offset + payload size.
-TEST_P(FidlRequestMemoryTest, DISABLED_DataResizeBehavior) {
+TEST_P(FidlRequestMemoryTest, DataResizeBehavior) {
   if (GetParam() == BufferTag::kVmoId) {
     GTEST_SKIP() << "DataResizeBehavior is only applicable to kData dynamic vectors";
   }
@@ -320,9 +325,7 @@ TEST_F(FidlRequestMemorySimpleTest, GetMappedErrorPropagation) {
 
 // Verifies that empty requests report length 0 and return empty copy results without crashing on
 // clear_buffers() or reset_buffers().
-// Disabled: length(), clear_buffers(), and reset_buffers() require optional check for empty request
-// data vectors.
-TEST_F(FidlRequestMemorySimpleTest, DISABLED_EmptyRequestHandling) {
+TEST_F(FidlRequestMemorySimpleTest, EmptyRequestHandling) {
   usb::FidlRequest req;
   EXPECT_EQ(req.length(), 0u);
 
@@ -341,8 +344,7 @@ TEST_F(FidlRequestMemorySimpleTest, DISABLED_EmptyRequestHandling) {
 
 // Verifies that clear_buffers() clears size while preserving vector capacity, and reset_buffers()
 // restores payload limits.
-// Disabled: reset_buffers() requires payload limit retention instead of default size restoration.
-TEST_F(FidlRequestMemorySimpleTest, DISABLED_DataCapacityRetention) {
+TEST_F(FidlRequestMemorySimpleTest, DataCapacityRetention) {
   usb::FidlRequest req;
   req.add_data(std::vector<uint8_t>(10, 0), 10, 0);
 
@@ -363,11 +365,11 @@ TEST_F(FidlRequestMemorySimpleTest, DISABLED_DataCapacityRetention) {
 }
 
 // Verifies CopyTo after clear_buffers() when an explicit region offset is assigned.
-// Disabled: CopyTo requires dynamic vector resizing for offset + written payload size after buffer
-// clearing.
-TEST_F(FidlRequestMemorySimpleTest, DISABLED_ClearedBufferWithOffsetCopyTo) {
+TEST_F(FidlRequestMemorySimpleTest, ClearedBufferWithOffsetCopyTo) {
   usb::FidlRequest req;
-  req.add_data(std::vector<uint8_t>(20, 0), 0, 0);
+  // Allocate a non-empty 20-byte kData region, then call clear_buffers() to simulate recycling
+  // the request before reassigning offset and size.
+  req.add_data(std::vector<uint8_t>(20, 0), 20, 0);
 
   req.clear_buffers();
   ASSERT_TRUE(req->data()->at(0).buffer()->data()->empty());
@@ -420,10 +422,11 @@ TEST_F(FidlRequestMemorySimpleTest, CachedCopyFromWithLargeVmoTest) {
 
 // Verifies that add_data handles near-overflow region offsets without causing out-of-memory dynamic
 // vector allocations.
-// Disabled: add_data() requires arithmetic overflow validation before vector allocation.
-TEST_F(FidlRequestMemorySimpleTest, DISABLED_AddDataNearOverflowOffsetNoSize) {
+TEST_F(FidlRequestMemorySimpleTest, AddDataNearOverflowOffsetNoSize) {
   usb::FidlRequest req;
-  req.add_data(std::vector<uint8_t>(10, 0), 0, std::numeric_limits<size_t>::max() - 100);
+  // Pass an explicit non-zero size (200) with a near-max offset so offset + actual_size overflows
+  // size_t and exercises add_data()'s overflow guard without triggering the inferred-size assert.
+  req.add_data(std::vector<uint8_t>(10, 0), 200, std::numeric_limits<size_t>::max() - 100);
 
   std::vector<uint8_t> src(10, 0xAA);
   auto copied = req.CopyTo(0, src.data(), 10, GetMappedCallback());
@@ -432,8 +435,7 @@ TEST_F(FidlRequestMemorySimpleTest, DISABLED_AddDataNearOverflowOffsetNoSize) {
 }
 
 // Verifies length calculation when a kVmoId buffer has an omitted size field.
-// Disabled: length() requires optional region size validation for kVmoId buffers.
-TEST_F(FidlRequestMemorySimpleTest, DISABLED_LengthWithUnresolvedVmoSizeTest) {
+TEST_F(FidlRequestMemorySimpleTest, LengthWithUnresolvedVmoSizeTest) {
   fuchsia_hardware_usb_request::Request request;
   request.data()
       .emplace()

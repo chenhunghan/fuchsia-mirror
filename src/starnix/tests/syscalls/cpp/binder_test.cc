@@ -39,6 +39,26 @@
 
 namespace {
 
+#ifndef BINDER_FREEZE
+struct binder_freeze_info {
+  __u32 pid;
+  __u32 enable;
+  __u32 timeout_ms;
+};
+
+struct binder_frozen_status_info {
+  __u32 pid;
+  __u32 sync_recv;
+  __u32 async_recv;
+};
+
+#define BINDER_FREEZE _IOW('b', 14, struct binder_freeze_info)
+#define BINDER_GET_FROZEN_INFO _IOWR('b', 15, struct binder_frozen_status_info)
+constexpr auto BR_FROZEN_REPLY = static_cast<binder_driver_return_protocol>(_IO('r', 18));
+constexpr auto BR_TRANSACTION_PENDING_FROZEN =
+    static_cast<binder_driver_return_protocol>(_IO('r', 20));
+#endif
+
 bool skip_binder_tests = false;
 
 class BinderTest : public ::testing::Test {
@@ -692,11 +712,11 @@ binder_transaction_data TransactionDataWithObject(uint32_t handle, uint32_t flag
 }
 
 // Forks a process that becomes the context manager of the binder device in `binder_dir`, and then
-// runs `serve` with its binder fd. Returns once the context manager has been set.
-void ForkContextManager(test_helper::ForkHelper& fork_helper, const std::string& binder_dir,
-                        fit::function<void(const fbl::unique_fd&)> serve) {
+// runs `serve` with its binder fd. Returns the child PID once the context manager has been set.
+pid_t ForkContextManager(test_helper::ForkHelper& fork_helper, const std::string& binder_dir,
+                         fit::function<void(const fbl::unique_fd&)> serve) {
   auto ready = test_helper::MakeRendezvous();
-  fork_helper.RunInForkedProcess([&] {
+  pid_t pid = fork_helper.RunInForkedProcess([&] {
     auto fd_and_mapping = starnix_binder::OpenBinderAndMap(binder_dir);
     ASSERT_TRUE(fd_and_mapping.fd_);
     ASSERT_THAT(fd_and_mapping.mapping_, SyscallResultIsOk());
@@ -709,6 +729,7 @@ void ForkContextManager(test_helper::ForkHelper& fork_helper, const std::string&
   // without poking.
   ready.poker = test_helper::Poker();
   ready.holder.hold();
+  return pid;
 }
 
 // Waits until `fd` is readable, for at most 10 seconds.
@@ -898,6 +919,378 @@ TEST_F(BinderTest, ReplyToExitedSenderIsCompleted) {
 
   // Let the context manager reply.
   ASSERT_THAT(write(sender_exited.WriteSide().get(), "", 1), SyscallSucceedsWithValue(1));
+  EXPECT_TRUE(fork_helper.WaitForChildren());
+}
+
+TEST_F(BinderTest, FreezeWaitsForPendingTransactions) {
+  using namespace starnix_binder;
+  test_helper::ForkHelper fork_helper;
+  fork_helper.OnlyWaitForForkedChildren();
+  test_helper::ScopedPipe oneway_received;
+  test_helper::ScopedPipe allow_oneway_free;
+  test_helper::ScopedPipe txn1_buffer_freed;
+  test_helper::ScopedPipe allow_reply_1;
+  test_helper::ScopedPipe txn2_buffer_freed;
+  test_helper::ScopedPipe allow_reply_2;
+  test_helper::ScopedPipe done;
+
+  struct __attribute__((packed)) FreeBufferCmd {
+    binder_driver_command_protocol free_cmd = BC_FREE_BUFFER;
+    binder_uintptr_t buffer;
+  };
+
+  pid_t manager_pid =
+      ForkContextManager(fork_helper, TestPath("binderfs"), [&](const fbl::unique_fd& binder) {
+        // Phase 1: Receive the first of two oneway transactions and hold its buffer before
+        // BC_FREE_BUFFER so the second oneway transaction remains queued and unread.
+        BinderReadResult oneway1 = ReadUntil(binder, BR_TRANSACTION);
+        ASSERT_EQ(oneway1.transactions.size(), 1u);
+        ASSERT_THAT(write(oneway_received.WriteSide().get(), "", 1), SyscallSucceedsWithValue(1));
+
+        WaitUntilReadable(allow_oneway_free.ReadSide());
+        FreeBufferCmd free_oneway1 = {.buffer = oneway1.transactions[0].data.ptr.buffer};
+        Write(binder, &free_oneway1, sizeof(free_oneway1));
+
+        BinderReadResult oneway2 = ReadUntil(binder, BR_TRANSACTION);
+        ASSERT_EQ(oneway2.transactions.size(), 1u);
+        FreeBufferCmd free_oneway2 = {.buffer = oneway2.transactions[0].data.ptr.buffer};
+        Write(binder, &free_oneway2, sizeof(free_oneway2));
+
+        // Phase 2: Receive a two-way transaction, free its buffer first via a standalone
+        // BC_FREE_BUFFER while keeping the transaction on the thread stack, then wait before
+        // sending BC_REPLY in a separate WriteRead call.
+        BinderReadResult txn1 = ReadUntil(binder, BR_TRANSACTION);
+        ASSERT_EQ(txn1.transactions.size(), 1u);
+        FreeBufferCmd free_txn1 = {.buffer = txn1.transactions[0].data.ptr.buffer};
+        Write(binder, &free_txn1, sizeof(free_txn1));
+        ASSERT_THAT(write(txn1_buffer_freed.WriteSide().get(), "", 1), SyscallSucceedsWithValue(1));
+
+        WaitUntilReadable(allow_reply_1.ReadSide());
+        EXPECT_THAT(SendEmptyReply(binder).commands, testing::ElementsAre(BR_TRANSACTION_COMPLETE));
+
+        // Phase 3: Receive a second two-way transaction (verifying EINTR rolled back the freeze),
+        // free its buffer first, and reply when signaled.
+        BinderReadResult txn2 = ReadUntil(binder, BR_TRANSACTION);
+        ASSERT_EQ(txn2.transactions.size(), 1u);
+        FreeBufferCmd free_txn2 = {.buffer = txn2.transactions[0].data.ptr.buffer};
+        Write(binder, &free_txn2, sizeof(free_txn2));
+        ASSERT_THAT(write(txn2_buffer_freed.WriteSide().get(), "", 1), SyscallSucceedsWithValue(1));
+
+        WaitUntilReadable(allow_reply_2.ReadSide());
+        EXPECT_THAT(SendEmptyReply(binder).commands, testing::ElementsAre(BR_TRANSACTION_COMPLETE));
+
+        WaitUntilReadable(done.ReadSide());
+        BinderReadResult oneway3 = ReadUntil(binder, BR_TRANSACTION);
+        ASSERT_EQ(oneway3.transactions.size(), 1u);
+        FreeBufferCmd free_oneway3 = {.buffer = oneway3.transactions[0].data.ptr.buffer};
+        Write(binder, &free_oneway3, sizeof(free_oneway3));
+      });
+
+  auto binder_and_map = OpenBinderAndMap(TestPath("binderfs"));
+  ASSERT_TRUE(binder_and_map.fd_);
+  ASSERT_THAT(binder_and_map.mapping_, SyscallResultIsOk());
+  const auto& binder = binder_and_map.fd_;
+
+  // Phase 1: Send two oneway transactions so an unread buffer remains pending in
+  // active_transactions while the context manager's thread transaction stack is empty.
+  const TransactionWriteBuffer oneway_txn = {
+      .command = BC_TRANSACTION,
+      .data =
+          {
+              .target = {.handle = kServiceManagerHandle},
+              .flags = TF_ONE_WAY,
+          },
+  };
+  EXPECT_THAT(WriteRead(binder, &oneway_txn, sizeof(oneway_txn)).commands,
+              testing::ElementsAre(BR_TRANSACTION_COMPLETE));
+  EXPECT_THAT(WriteRead(binder, &oneway_txn, sizeof(oneway_txn)).commands,
+              testing::ElementsAre(BR_TRANSACTION_COMPLETE));
+
+  WaitUntilReadable(oneway_received.ReadSide());
+
+  binder_frozen_status_info status = {.pid = static_cast<uint32_t>(manager_pid)};
+  ASSERT_THAT(ioctl(binder.get(), BINDER_GET_FROZEN_INFO, &status), SyscallSucceeds());
+  EXPECT_EQ(status.sync_recv, 2u);
+  EXPECT_EQ(status.async_recv, 0u);
+
+  std::thread delayed_oneway_free([&] {
+    usleep(50'000);
+    EXPECT_THAT(write(allow_oneway_free.WriteSide().get(), "", 1), SyscallSucceedsWithValue(1));
+  });
+
+  binder_freeze_info freeze_info = {
+      .pid = static_cast<uint32_t>(manager_pid),
+      .enable = 1,
+      .timeout_ms = 2000,
+  };
+  ASSERT_THAT(ioctl(binder.get(), BINDER_FREEZE, &freeze_info), SyscallSucceeds());
+  delayed_oneway_free.join();
+
+  freeze_info.enable = 0;
+  freeze_info.timeout_ms = 0;
+  ASSERT_THAT(ioctl(binder.get(), BINDER_FREEZE, &freeze_info), SyscallSucceeds());
+
+  // Phase 2: Start an in-flight two-way transaction where the receiver frees the buffer via
+  // BC_FREE_BUFFER before sending BC_REPLY.
+  std::thread client_thread_1([&] {
+    BinderReadResult res =
+        ReadUntil(binder, SendTwoWayTransaction(binder, kServiceManagerHandle), BR_REPLY);
+    EXPECT_TRUE(res.Contains(BR_REPLY));
+  });
+
+  WaitUntilReadable(txn1_buffer_freed.ReadSide());
+
+  // Even after BC_FREE_BUFFER, while the two-way transaction is still on the receiver's thread
+  // stack, BINDER_GET_FROZEN_INFO reports bit 1 of sync_recv set on both receiver and sender.
+  status = {.pid = static_cast<uint32_t>(manager_pid)};
+  ASSERT_THAT(ioctl(binder.get(), BINDER_GET_FROZEN_INFO, &status), SyscallSucceeds());
+  EXPECT_EQ(status.sync_recv, 2u);
+  EXPECT_EQ(status.async_recv, 0u);
+
+  binder_frozen_status_info client_status = {.pid = static_cast<uint32_t>(getpid())};
+  ASSERT_THAT(ioctl(binder.get(), BINDER_GET_FROZEN_INFO, &client_status), SyscallSucceeds());
+  EXPECT_EQ(client_status.sync_recv, 2u);
+  EXPECT_EQ(client_status.async_recv, 0u);
+
+  // Earlier validation checks (invalid enable value and non-existent binder PID) take precedence
+  // over EAGAIN even while a transaction is pending.
+  uint32_t nonexistent_pid = 0x7fffffff;
+  {
+    fbl::unique_fd pid_max_fd(open("/proc/sys/kernel/pid_max", O_RDONLY));
+    char buf[32] = {};
+    if (pid_max_fd.is_valid() && read(pid_max_fd.get(), buf, sizeof(buf) - 1) > 0) {
+      unsigned long pid_max = strtoul(buf, nullptr, 10);
+      if (pid_max > 0) {
+        nonexistent_pid = static_cast<uint32_t>(pid_max + 1);
+      }
+    }
+  }
+  binder_frozen_status_info bad_status = {.pid = nonexistent_pid};
+  EXPECT_THAT(ioctl(binder.get(), BINDER_GET_FROZEN_INFO, &bad_status),
+              SyscallFailsWithErrno(EINVAL));
+
+  binder_freeze_info bad_freeze = {
+      .pid = static_cast<uint32_t>(manager_pid),
+      .enable = 2,
+      .timeout_ms = 0,
+  };
+  EXPECT_THAT(ioctl(binder.get(), BINDER_FREEZE, &bad_freeze), SyscallFailsWithErrno(EINVAL));
+
+  bad_freeze.pid = nonexistent_pid;
+  bad_freeze.enable = 1;
+  EXPECT_THAT(ioctl(binder.get(), BINDER_FREEZE, &bad_freeze), SyscallFailsWithErrno(EINVAL));
+
+  // Non-blocking freeze (timeout_ms == 0) and short-timeout freeze (timeout_ms == 20) still fail
+  // with EAGAIN after BC_FREE_BUFFER because BC_REPLY has not been sent yet.
+  freeze_info = {
+      .pid = static_cast<uint32_t>(manager_pid),
+      .enable = 1,
+      .timeout_ms = 0,
+  };
+  EXPECT_THAT(ioctl(binder.get(), BINDER_FREEZE, &freeze_info), SyscallFailsWithErrno(EAGAIN));
+
+  freeze_info.timeout_ms = 20;
+  EXPECT_THAT(ioctl(binder.get(), BINDER_FREEZE, &freeze_info), SyscallFailsWithErrno(EAGAIN));
+
+  // Interrupting a blocking BINDER_FREEZE with a signal fails with EINTR and rolls back the
+  // freeze state.
+  struct sigaction sa = {};
+  struct sigaction old_sa = {};
+  sa.sa_handler = +[](int) {};
+  ASSERT_THAT(sigaction(SIGUSR1, &sa, &old_sa), SyscallSucceeds());
+  auto restore_sigaction = fit::defer([&] { sigaction(SIGUSR1, &old_sa, nullptr); });
+
+  std::atomic<bool> freeze_returned{false};
+  pthread_t main_thread = pthread_self();
+  std::thread interrupt_thread([main_thread, &freeze_returned] {
+    while (!freeze_returned.load(std::memory_order_acquire)) {
+      usleep(10'000);
+      if (freeze_returned.load(std::memory_order_acquire)) {
+        break;
+      }
+      EXPECT_EQ(0, pthread_kill(main_thread, SIGUSR1));
+    }
+  });
+
+  freeze_info.timeout_ms = 5000;
+  EXPECT_THAT(ioctl(binder.get(), BINDER_FREEZE, &freeze_info), SyscallFailsWithErrno(EINTR));
+  freeze_returned.store(true, std::memory_order_release);
+  interrupt_thread.join();
+
+  ASSERT_THAT(write(allow_reply_1.WriteSide().get(), "", 1), SyscallSucceedsWithValue(1));
+  client_thread_1.join();
+
+  // Phase 3: Without calling BINDER_FREEZE(enable = 0), start another two-way transaction. Because
+  // the interrupted BINDER_FREEZE rolled back the freeze state, this transaction is delivered
+  // rather than rejected with BR_FROZEN_REPLY.
+  std::thread client_thread_2([&] {
+    BinderReadResult res =
+        ReadUntil(binder, SendTwoWayTransaction(binder, kServiceManagerHandle), BR_REPLY);
+    EXPECT_TRUE(res.Contains(BR_REPLY));
+  });
+
+  WaitUntilReadable(txn2_buffer_freed.ReadSide());
+
+  // Unblock the context manager's BC_REPLY slightly after starting a blocking BINDER_FREEZE.
+  std::thread delayed_reply([&] {
+    usleep(50'000);
+    EXPECT_THAT(write(allow_reply_2.WriteSide().get(), "", 1), SyscallSucceedsWithValue(1));
+  });
+
+  freeze_info.timeout_ms = 2000;
+  ASSERT_THAT(ioctl(binder.get(), BINDER_FREEZE, &freeze_info), SyscallSucceeds());
+
+  delayed_reply.join();
+  client_thread_2.join();
+
+  // Once frozen with no pending transactions, BINDER_GET_FROZEN_INFO reports sync_recv == 0 on
+  // both the receiver and the sender (even before the sender frees its BR_REPLY buffer).
+  status = {.pid = static_cast<uint32_t>(manager_pid)};
+  ASSERT_THAT(ioctl(binder.get(), BINDER_GET_FROZEN_INFO, &status), SyscallSucceeds());
+  EXPECT_EQ(status.sync_recv, 0u);
+  EXPECT_EQ(status.async_recv, 0u);
+
+  client_status = {.pid = static_cast<uint32_t>(getpid())};
+  ASSERT_THAT(ioctl(binder.get(), BINDER_GET_FROZEN_INFO, &client_status), SyscallSucceeds());
+  EXPECT_EQ(client_status.sync_recv, 0u);
+  EXPECT_EQ(client_status.async_recv, 0u);
+
+  // A synchronous transaction to the frozen process fails with BR_FROZEN_REPLY and sets bit 0 of
+  // sync_recv.
+  EXPECT_TRUE(
+      ReadUntil(binder, SendTwoWayTransaction(binder, kServiceManagerHandle), BR_FROZEN_REPLY)
+          .Contains(BR_FROZEN_REPLY));
+
+  status = {.pid = static_cast<uint32_t>(manager_pid)};
+  ASSERT_THAT(ioctl(binder.get(), BINDER_GET_FROZEN_INFO, &status), SyscallSucceeds());
+  EXPECT_EQ(status.sync_recv, 1u);
+  EXPECT_EQ(status.async_recv, 0u);
+
+  // A oneway transaction to the frozen process returns BR_TRANSACTION_PENDING_FROZEN and sets
+  // async_recv. Once the process is thawed, the buffered oneway transaction is treated as pending
+  // until the receiver reads and frees its buffer.
+  EXPECT_THAT(WriteRead(binder, &oneway_txn, sizeof(oneway_txn)).commands,
+              testing::ElementsAre(BR_TRANSACTION_PENDING_FROZEN));
+
+  status = {.pid = static_cast<uint32_t>(manager_pid)};
+  ASSERT_THAT(ioctl(binder.get(), BINDER_GET_FROZEN_INFO, &status), SyscallSucceeds());
+  EXPECT_EQ(status.async_recv, 1u);
+
+  // Unfreeze the process.
+  freeze_info.enable = 0;
+  freeze_info.timeout_ms = 0;
+  ASSERT_THAT(ioctl(binder.get(), BINDER_FREEZE, &freeze_info), SyscallSucceeds());
+
+  status = {.pid = static_cast<uint32_t>(manager_pid)};
+  ASSERT_THAT(ioctl(binder.get(), BINDER_GET_FROZEN_INFO, &status), SyscallSucceeds());
+  EXPECT_EQ(status.sync_recv, 2u);
+  EXPECT_EQ(status.async_recv, 0u);
+
+  freeze_info.enable = 1;
+  freeze_info.timeout_ms = 0;
+  EXPECT_THAT(ioctl(binder.get(), BINDER_FREEZE, &freeze_info), SyscallFailsWithErrno(EAGAIN));
+
+  ASSERT_THAT(write(done.WriteSide().get(), "", 1), SyscallSucceedsWithValue(1));
+  EXPECT_TRUE(fork_helper.WaitForChildren());
+}
+
+TEST_F(BinderTest, ScatterGatherOverlappingAndUnalignedOffsetsRejected) {
+  using namespace starnix_binder;
+  test_helper::ForkHelper fork_helper;
+  fork_helper.OnlyWaitForForkedChildren();
+  test_helper::ScopedPipe done_pipe;
+
+  ForkContextManager(fork_helper, TestPath("binderfs"), [&](const fbl::unique_fd& binder) {
+    WaitUntilReadable(done_pipe.ReadSide());
+  });
+
+  auto binder_and_map = OpenBinderAndMap(TestPath("binderfs"));
+  ASSERT_TRUE(binder_and_map.fd_);
+  ASSERT_THAT(binder_and_map.mapping_, SyscallResultIsOk());
+  const auto& binder = binder_and_map.fd_;
+
+  struct __attribute__((packed)) SgTransactionWriteBuffer {
+    binder_driver_command_protocol command = BC_TRANSACTION_SG;
+    binder_transaction_data_sg sg_data;
+  };
+
+  auto expect_tx_rejected = [&](const SgTransactionWriteBuffer& tx) {
+    BinderReadResult result = WriteRead(binder, &tx, sizeof(tx));
+    while (!result.Contains(BR_FAILED_REPLY) && !result.Contains(BR_ERROR) &&
+           !result.Contains(BR_DEAD_REPLY) && !testing::Test::HasFailure()) {
+      BinderReadResult next = WriteRead(binder, nullptr, 0);
+      result.commands.insert(result.commands.end(), next.commands.begin(), next.commands.end());
+    }
+    EXPECT_TRUE(result.Contains(BR_FAILED_REPLY) || result.Contains(BR_ERROR));
+  };
+
+  uint8_t child_buf[64] = {};
+
+  // 1. Non-monotonic / overlapping object offsets: offsets[1] < offsets[0] + sizeof(object).
+  {
+    binder_buffer_object objects[2] = {};
+    objects[0].hdr.type = BINDER_TYPE_PTR;
+    objects[0].buffer = reinterpret_cast<binder_uintptr_t>(child_buf);
+    objects[0].length = 16;
+    objects[1].hdr.type = BINDER_TYPE_PTR;
+    objects[1].buffer = reinterpret_cast<binder_uintptr_t>(child_buf);
+    objects[1].length = 16;
+
+    binder_size_t offsets[2] = {sizeof(binder_buffer_object), 0};
+
+    SgTransactionWriteBuffer tx = {};
+    tx.sg_data.transaction_data.target.handle = kServiceManagerHandle;
+    tx.sg_data.transaction_data.data_size = sizeof(objects);
+    tx.sg_data.transaction_data.offsets_size = sizeof(offsets);
+    tx.sg_data.transaction_data.data.ptr.buffer = reinterpret_cast<binder_uintptr_t>(objects);
+    tx.sg_data.transaction_data.data.ptr.offsets = reinterpret_cast<binder_uintptr_t>(offsets);
+    tx.sg_data.buffers_size = 64;
+
+    expect_tx_rejected(tx);
+  }
+
+  // 2. Unaligned object offset in offsets buffer.
+  {
+    alignas(8) uint8_t raw_data[sizeof(binder_buffer_object) + 8] = {};
+    binder_buffer_object obj = {};
+    obj.hdr.type = BINDER_TYPE_PTR;
+    obj.buffer = reinterpret_cast<binder_uintptr_t>(child_buf);
+    obj.length = 16;
+    memcpy(raw_data + 1, &obj, sizeof(obj));
+
+    binder_size_t offset = 1;
+
+    SgTransactionWriteBuffer tx = {};
+    tx.sg_data.transaction_data.target.handle = kServiceManagerHandle;
+    tx.sg_data.transaction_data.data_size = sizeof(raw_data);
+    tx.sg_data.transaction_data.offsets_size = sizeof(offset);
+    tx.sg_data.transaction_data.data.ptr.buffer = reinterpret_cast<binder_uintptr_t>(raw_data);
+    tx.sg_data.transaction_data.data.ptr.offsets = reinterpret_cast<binder_uintptr_t>(&offset);
+    tx.sg_data.buffers_size = 64;
+
+    expect_tx_rejected(tx);
+  }
+
+  // 3. Scatter-gather buffer length exceeding declared buffers_size.
+  {
+    binder_buffer_object obj = {};
+    obj.hdr.type = BINDER_TYPE_PTR;
+    obj.buffer = reinterpret_cast<binder_uintptr_t>(child_buf);
+    obj.length = sizeof(child_buf);
+    binder_size_t offset = 0;
+
+    SgTransactionWriteBuffer tx = {};
+    tx.sg_data.transaction_data.target.handle = kServiceManagerHandle;
+    tx.sg_data.transaction_data.data_size = sizeof(obj);
+    tx.sg_data.transaction_data.offsets_size = sizeof(offset);
+    tx.sg_data.transaction_data.data.ptr.buffer = reinterpret_cast<binder_uintptr_t>(&obj);
+    tx.sg_data.transaction_data.data.ptr.offsets = reinterpret_cast<binder_uintptr_t>(&offset);
+    tx.sg_data.buffers_size = 8;
+
+    expect_tx_rejected(tx);
+  }
+
+  ASSERT_THAT(write(done_pipe.WriteSide().get(), "", 1), SyscallSucceedsWithValue(1));
   EXPECT_TRUE(fork_helper.WaitForChildren());
 }
 

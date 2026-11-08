@@ -25,7 +25,7 @@ cc_test_executable("amlogic_decoder_integration_tests_bin") {
 
   sources = [ "test_runner.cc" ]
 
-  public_deps = [
+  deps = [
     "//sdk/fidl/fuchsia.driver.development:fuchsia.driver.development_cpp",
     "//sdk/lib/component/incoming/cpp",
     "//sdk/lib/fdio",

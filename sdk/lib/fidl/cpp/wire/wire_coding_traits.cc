@@ -7,6 +7,34 @@
 
 namespace fidl::internal {
 
+template <typename IntType>
+void WireEncodeNonZero(WireEncoder* encoder, const IntType* value, WirePosition position) {
+  if (unlikely(*value == 0)) {
+    encoder->SetError(kCodingErrorInvalidNonZero);
+    return;
+  }
+  *position.As<IntType>() = *value;
+}
+
+template <typename IntType>
+void WireDecodeNonZero(WireDecoder* decoder, WirePosition position) {
+  IntType val = *position.As<IntType>();
+  if (unlikely(val == 0)) {
+    decoder->SetError(kCodingErrorInvalidNonZero);
+    return;
+  }
+}
+
+template void WireEncodeNonZero<uint8_t>(WireEncoder*, const uint8_t*, WirePosition);
+template void WireEncodeNonZero<uint16_t>(WireEncoder*, const uint16_t*, WirePosition);
+template void WireEncodeNonZero<uint32_t>(WireEncoder*, const uint32_t*, WirePosition);
+template void WireEncodeNonZero<uint64_t>(WireEncoder*, const uint64_t*, WirePosition);
+
+template void WireDecodeNonZero<uint8_t>(WireDecoder*, WirePosition);
+template void WireDecodeNonZero<uint16_t>(WireDecoder*, WirePosition);
+template void WireDecodeNonZero<uint32_t>(WireDecoder*, WirePosition);
+template void WireDecodeNonZero<uint64_t>(WireDecoder*, WirePosition);
+
 const CodingConfig kNullCodingConfig = {
     .handle_metadata_stride = 0,
     .encode_process_handle = nullptr,

@@ -308,14 +308,12 @@ pub extern "C" fn get_interrupt_config(
 /// On x64 these methods return the base and max Global System Interrupts as
 /// defined by ACPI and described by MADT tables.
 /// ACPI Spec 6.1, section 5.2.12 & section 5.2.13.
-#[unsafe(no_mangle)]
-pub extern "C" fn interrupt_get_base_vector() -> u32 {
+pub fn interrupt_get_base_vector() -> u32 {
     GSI_RANGE.start
 }
 
 /// Returns the maximum global IRQ vector.
-#[unsafe(no_mangle)]
-pub extern "C" fn interrupt_get_max_vector() -> u32 {
+pub fn interrupt_get_max_vector() -> u32 {
     GSI_RANGE.end
 }
 

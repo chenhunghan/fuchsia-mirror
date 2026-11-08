@@ -18,13 +18,13 @@ lib_srcs = [
 lib_deps = [
   "//src/lib/fuchsia-sync",
   "//src/storage/lib/block_protocol",
+  "//src/storage/lib/buddy_allocator",
   "//src/storage/lib/ptr_slice",
   "//third_party/rust_crates:anyhow",
   "//third_party/rust_crates:async-trait",
   "//third_party/rust_crates:event-listener",
   "//third_party/rust_crates:futures",
   "//third_party/rust_crates:log",
-  "//third_party/rust_crates:num-traits",
   "//third_party/rust_crates:rand",
 ]
 
@@ -51,10 +51,12 @@ rustc_test("storage_device_test") {
   deps += [
     "//src/lib/fuchsia",
     "//src/lib/fuchsia-async",
-    "//src/storage/lib/block_client/rust:fake-block-client",
   ]
   if (is_fuchsia) {
-    deps += [ "//sdk/lib/driver/fake-bti/rust" ]
+    deps += [
+      "//sdk/lib/driver/fake-bti/rust",
+      "//src/storage/lib/block_client/rust:fake-block-client",
+    ]
   }
   sources = lib_srcs
 }
@@ -71,7 +73,10 @@ fuchsia_test_package("storage-device-tests") {
 
 group("tests") {
   testonly = true
-  deps = [ ":storage-device-tests" ]
+  deps = [
+    ":storage-device-tests",
+    ":storage_device_test($host_toolchain)",
+  ]
 }
 
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
@@ -121,6 +126,7 @@ rustc_library("storage_device") {
   visibility = [
     ":*",
     "//src/devices/block/drivers/cqhci:*",
+    "//src/firmware/paver/*",
     "//src/starnix/kernel/core:*",
     "//src/starnix/modules/overlayfs:*",
     "//src/storage/crypt/starnix:*",
@@ -134,12 +140,12 @@ rustc_library("storage_device") {
   deps += [
     "//src/lib/fuchsia-sync",
     "//src/storage/lib/block_protocol",
+    "//src/storage/lib/buddy_allocator",
     "//src/storage/lib/ptr_slice",
     "//third_party/rust_crates:anyhow",
     "//third_party/rust_crates:event-listener",
     "//third_party/rust_crates:futures",
     "//third_party/rust_crates:log",
-    "//third_party/rust_crates:num-traits",
     "//third_party/rust_crates:rand",
   ]
   if (is_fuchsia) {

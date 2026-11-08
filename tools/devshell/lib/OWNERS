@@ -5,3 +5,5 @@ include /build/OWNERS
 # SSH configuration and utilities are managed by the tools
 per-file generate-ssh-config.sh = file: /src/developer/ffx/OWNERS
 per-file verify-default-keys.sh = file: /src/developer/ffx/OWNERS
+
+per-file shac_runner.py,shac_runner_test.py = jcecil@google.com

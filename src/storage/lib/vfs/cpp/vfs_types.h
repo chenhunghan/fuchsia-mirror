@@ -80,10 +80,6 @@ struct DeprecatedOptions {
   // certain operations were unprivileged so they may be implicitly added to the resulting `rights`.
   static zx::result<DeprecatedOptions> FromOpen1Flags(fuchsia_io::OpenFlags flags);
 
-  // Converts from fuchsia.io/Directory.Clone flags to |DeprecatedOptions|.
-  static zx::result<DeprecatedOptions> FromCloneFlags(fuchsia_io::OpenFlags flags,
-                                                      VnodeProtocol protocol);
-
   // Converts from |DeprecatedOptions| to fuchsia.io flags.
   fuchsia_io::OpenFlags ToIoV1Flags() const;
 };
@@ -123,9 +119,6 @@ struct VnodeAttributes {
            access_time == other.access_time && change_time == other.change_time &&
            mode == other.mode && uid == other.uid && gid == other.gid && rdev == other.rdev;
   }
-
-  // Converts from |VnodeAttributes| to fuchsia.io v1 |NodeAttributes|.
-  fuchsia_io::wire::NodeAttributes ToIoV1NodeAttributes(const fs::Vnode& vnode) const;
 };
 
 // A request to update pieces of the |VnodeAttributes| via |Vnode::SetAttributes|. Filesystems may
@@ -133,7 +126,7 @@ struct VnodeAttributes {
 //
 // Note that only attributes for which existing filesystems support are currently implemented.
 // Additional attributes can be supported by adding them to this struct, and updating the
-// |FromIo1()| and |FromIo2()| functions accordingly.
+// |FromIo2()| function accordingly.
 struct VnodeAttributesUpdate {
   std::optional<uint64_t> creation_time;
   std::optional<uint64_t> modification_time;
@@ -170,18 +163,6 @@ struct VnodeAttributesUpdate {
       query |= VnodeAttributesQuery::kAccessTime;
     }
     return query;
-  }
-
-  static constexpr VnodeAttributesUpdate FromIo1(const fuchsia_io::wire::NodeAttributes& attrs,
-                                                 fuchsia_io::NodeAttributeFlags flags) {
-    VnodeAttributesUpdate attr_update;
-    if (flags & fuchsia_io::NodeAttributeFlags::kCreationTime) {
-      attr_update.creation_time = attrs.creation_time;
-    }
-    if (flags & fuchsia_io::NodeAttributeFlags::kModificationTime) {
-      attr_update.modification_time = attrs.modification_time;
-    }
-    return attr_update;
   }
 
   static constexpr VnodeAttributesUpdate FromIo2(
@@ -261,10 +242,6 @@ zx::result<VnodeProtocol> NegotiateProtocol(fuchsia_io::Flags flags,
 
 // Synthesizes a set of POSIX mode bits using a node's supported protocols and abilities.
 // This implementation mirrors that of |get_posix_mode| in fdio.
-//
-// Unlike the ZXIO implementation, this function is *only* used for synthesizing the mode bits
-// reported by the io1 GetAttrs method. Callers should use the io2 GetAttributes method to get
-// an accurate representation of the mode bits.
 uint32_t GetPosixMode(fuchsia_io::NodeProtocolKinds protocols, fuchsia_io::Abilities abilities);
 
 constexpr fuchsia_io::NodeProtocolKinds GetProtocols(fuchsia_io::Flags flags) {

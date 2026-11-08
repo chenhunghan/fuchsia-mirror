@@ -22,7 +22,7 @@ func init() {
 				Config: config.Config{
 					"depth": 8,
 				},
-				Allowlist: []config.Binding{config.LLCPP, config.HLCPP, config.CPP, config.Rust, config.Go, config.Reference, config.Dart},
+				Allowlist: []config.Binding{config.LLCPP, config.HLCPP, config.CPP, config.Rust, config.Reference, config.Dart},
 			},
 		},
 	})

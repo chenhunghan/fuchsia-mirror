@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules:stamp_group.bzl", "stamp_group")
 load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
 
 package(default_applicable_licenses = ["//:license"])
@@ -45,5 +46,14 @@ fidl_library(
 
 # TODO(https://fxbug.dev/427976639): Migrate the
 # `zither_golden_files("zbi.c.checked-in")` target when template is available.
+stamp_group(
+    name = "zbi.c.checked-in",
+    stamp = "zbi.c.checked-in.stamp",
+    visibility = [
+        "//build/bazel/bazel_idk/tests:__pkg__",
+        "//sdk/lib/zbi-format:__pkg__",
+    ],
+    deps = ["@gn_targets//sdk/fidl/zbi:zbi.c.checked-in"],
+)
 
 # LINT.ThenChange(BUILD.gn)

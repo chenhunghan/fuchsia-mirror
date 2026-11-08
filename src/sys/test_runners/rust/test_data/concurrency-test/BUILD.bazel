@@ -1,0 +1,71 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "concurrency_test_driver_bin",
+    srcs = ["src/main.rs"],
+    crate_name = "concurrency_test_driver_rust",
+    crate_root = "src/main.rs",
+    edition = "2024",
+    deps = [
+        "//examples/components/routing/fidl:echo_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+    ],
+)
+
+fx_packaged_binary(
+    name = "concurrency_test_driver_packaged_bin",
+    testonly = True,
+    binary = ":concurrency_test_driver_bin",
+    binary_name = "concurrency_test_driver_rust",
+)
+
+fx_component_manifest(
+    name = "concurrency_test_driver_component-manifest",
+    testonly = True,
+    component_name = "concurrency-test-driver",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/concurrency-test-driver.cml",
+)
+
+fx_component(
+    name = "concurrency_test_driver_component",
+    testonly = True,
+    compiled_manifest = ":concurrency_test_driver_component-manifest",
+    deps = [":concurrency_test_driver_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "concurrency_test_component-manifest",
+    testonly = True,
+    component_name = "concurrency-test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:offer.shard",
+    ],
+    manifest = "meta/concurrency-test.cml",
+)
+
+fx_component(
+    name = "concurrency_test_component",
+    testonly = True,
+    compiled_manifest = ":concurrency_test_component-manifest",
+)

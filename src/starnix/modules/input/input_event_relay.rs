@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use crate::direct_input::DirectInputManager;
 use crate::{
     InputDevice, InputDeviceInfo, InputDeviceInfoHandle, InputDeviceStatus, InputFile, uinput,
 };
@@ -10,10 +11,10 @@ use crate::{
 // to any vendor in the USB spec.
 //
 // May not be zero, see below.
-const FUCHSIA_VENDOR_ID: u16 = 0xfc1a;
-const FUCHSIA_KEYBOARD_PRODUCT_ID: u16 = 0x1;
-const FUCHSIA_TOUCH_PRODUCT_ID: u16 = 0x2;
-const FUCHSIA_MOUSE_PRODUCT_ID: u16 = 0x3;
+pub(crate) const FUCHSIA_VENDOR_ID: u16 = 0xfc1a;
+pub(crate) const FUCHSIA_KEYBOARD_PRODUCT_ID: u16 = 0x1;
+pub(crate) const FUCHSIA_TOUCH_PRODUCT_ID: u16 = 0x2;
+pub(crate) const FUCHSIA_MOUSE_PRODUCT_ID: u16 = 0x3;
 
 // Touch, keyboard, and mouse input IDs should be distinct.
 // Per https://www.linuxjournal.com/article/6429, the bus type should be populated with a
@@ -49,9 +50,13 @@ pub const MOUSE_INPUT_ID: uapi::input_id = uapi::input_id {
     product: FUCHSIA_MOUSE_PRODUCT_ID,
     version: 1,
 };
+#[cfg(test)]
+use crate::direct_input::{
+    DISPLAY_PLATFORM_OWNED_SIGNAL, INPUT_CLIENT_OWNED_SIGNAL, INPUT_PLATFORM_OWNED_SIGNAL,
+    spawn_fake_input_ownership, wait_for_ownership,
+};
 use fidl::endpoints::{ClientEnd, RequestStream, ServerEnd};
-use fidl_fuchsia_ui_input as fuiinput;
-use fidl_fuchsia_ui_input::TouchDeviceInfo;
+use fidl_fuchsia_ui_input::{self as fuiinput, TouchButton, TouchDeviceInfo};
 use fidl_fuchsia_ui_input3::{
     KeyEventStatus, KeyboardListenerMarker, KeyboardListenerRequest, KeyboardListenerRequestStream,
     KeyboardSynchronousProxy,
@@ -87,9 +92,10 @@ use starnix_sync::{
     InputEventRelayOpenedFilesLock, InputRelayDeviceInfosLock, InputRelayDisplaySizeLock,
     LockDepMutex,
 };
+use starnix_types::time::{duration_from_timeval, timeval_from_time};
 use starnix_uapi::errors::Errno;
 use starnix_uapi::{error, uapi};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
@@ -118,6 +124,22 @@ pub struct StartRelaysArgs {
     pub display_height: i32,
 }
 
+const MAX_PRE_OPEN_BUFFERED_EVENTS: usize = 1024;
+
+/// Computes the event timestamp in nanoseconds from the last event in a slice, using
+/// `duration_from_timeval` and falling back to saturating arithmetic.
+pub fn event_time_ns_from_events(events: &[uapi::input_event]) -> i64 {
+    events.last().map_or(0, |last| {
+        duration_from_timeval::<zx::MonotonicTimeline>(last.time)
+            .map(|d| d.into_nanos())
+            .unwrap_or_else(|_| {
+                (last.time.tv_sec as i64)
+                    .saturating_mul(1_000_000_000)
+                    .saturating_add((last.time.tv_usec as i64).saturating_mul(1_000))
+            })
+    })
+}
+
 #[derive(Default)]
 pub struct OpenedFilesState {
     files: Vec<Weak<InputFile>>,
@@ -130,10 +152,49 @@ impl OpenedFilesState {
         if !self.has_been_opened {
             self.has_been_opened = true;
             if !self.buffered_events.is_empty() {
-                file.add_events(std::mem::take(&mut self.buffered_events));
+                let events = std::mem::take(&mut self.buffered_events);
+                if let Some(inspect) = &file.inspect_status {
+                    let event_time_ns = event_time_ns_from_events(&events);
+                    inspect.count_generated_events(events.len() as u64, event_time_ns);
+                }
+                file.add_events(events);
             }
         }
         self.files.push(Arc::downgrade(file));
+    }
+
+    pub fn dispatch_events(&mut self, events: &[uapi::input_event]) -> bool {
+        if events.is_empty() {
+            return false;
+        }
+        if !self.has_been_opened {
+            let available_space =
+                MAX_PRE_OPEN_BUFFERED_EVENTS.saturating_sub(self.buffered_events.len());
+            if events.len() <= available_space {
+                self.buffered_events.extend_from_slice(events);
+                return true;
+            } else {
+                log_warn!(
+                    "Dropping {} pre-open input events: buffer capacity exceeded (buffered: {}, limit: {})",
+                    events.len(),
+                    self.buffered_events.len(),
+                    MAX_PRE_OPEN_BUFFERED_EVENTS
+                );
+                return false;
+            }
+        }
+        let event_time_ns = event_time_ns_from_events(events);
+        self.files.retain(|f| {
+            let Some(file) = f.upgrade() else {
+                return false;
+            };
+            if let Some(inspect) = &file.inspect_status {
+                inspect.count_generated_events(events.len() as u64, event_time_ns);
+            }
+            file.add_events(events.to_vec());
+            true
+        });
+        true
     }
 }
 
@@ -178,7 +239,7 @@ impl DeviceRegistration {
     /// Creates a `Pending` registration for `device`, which will be registered with `kernel`
     /// under `device_id` on the first call to `ensure_registered`.
     ///
-    /// `device` must not already be registered: `DeviceRegistry::register_device` silently
+    /// `device` must not already be registered: `DeviceRegistry::add_device_with_dir` silently
     /// overwrites an existing minor device entry, so a double registration would otherwise only
     /// surface as a warning log.
     fn pending(kernel: Arc<Kernel>, device: crate::InputDevice, device_id: DeviceId) -> Self {
@@ -223,6 +284,9 @@ struct DeviceState {
     registration: DeviceRegistration,
     starnix_device: Option<Device>,
     minor: u32,
+    active_touch_slots: HashSet<i32>,
+    active_mouse_buttons: HashSet<u16>,
+    active_keyboard_keys: HashSet<u16>,
 }
 
 impl DeviceState {
@@ -241,6 +305,9 @@ impl DeviceState {
             registration: DeviceRegistration::Registered,
             starnix_device: None,
             minor: device_id,
+            active_touch_slots: HashSet::new(),
+            active_mouse_buttons: HashSet::new(),
+            active_keyboard_keys: HashSet::new(),
         }
     }
 
@@ -257,6 +324,9 @@ impl DeviceState {
             registration: DeviceRegistration::Registered,
             starnix_device: None,
             minor: device_id,
+            active_touch_slots: HashSet::new(),
+            active_mouse_buttons: HashSet::new(),
+            active_keyboard_keys: HashSet::new(),
         }
     }
 
@@ -274,6 +344,9 @@ impl DeviceState {
             registration: DeviceRegistration::Registered,
             starnix_device: None,
             minor: device_id,
+            active_touch_slots: HashSet::new(),
+            active_mouse_buttons: HashSet::new(),
+            active_keyboard_keys: HashSet::new(),
         }
     }
 
@@ -291,6 +364,9 @@ impl DeviceState {
             registration: DeviceRegistration::pending(kernel, device, device_id),
             starnix_device: None,
             minor: device_id,
+            active_touch_slots: HashSet::new(),
+            active_mouse_buttons: HashSet::new(),
+            active_keyboard_keys: HashSet::new(),
         }
     }
 }
@@ -352,6 +428,7 @@ pub fn new_input_relay() -> (InputEventsRelay, Arc<InputEventsRelayHandle>) {
             _inspect_node: None,
             device_infos: device_infos.clone(),
             display_size: display_size.clone(),
+            direct_input_manager: None,
         },
         Arc::new(InputEventsRelayHandle {
             #[cfg(test)]
@@ -447,9 +524,222 @@ pub struct InputEventsRelay {
     device_infos:
         Arc<LockDepMutex<SortedVecMap<DeviceId, InputDeviceInfoHandle>, InputRelayDeviceInfosLock>>,
     display_size: Arc<LockDepMutex<Option<(i32, i32)>, InputRelayDisplaySizeLock>>,
+    direct_input_manager: Option<Arc<DirectInputManager>>,
 }
 
 impl InputEventsRelay {
+    /// Builder pattern setting `DirectInputManager`.
+    pub fn with_direct_input_manager(mut self, manager: Arc<DirectInputManager>) -> Self {
+        self.direct_input_manager = Some(manager);
+        self
+    }
+
+    /// Flushes release events for any currently active touches, mouse buttons, or pressed media/touch
+    /// buttons across all devices when ownership transitions to direct driver input.
+    fn flush_all_releases(
+        &mut self,
+        power_was_pressed: &mut bool,
+        function_was_pressed: &mut bool,
+        volume_up_was_pressed: &mut bool,
+        volume_down_was_pressed: &mut bool,
+        touch_buttons_were_pressed: &mut bit_vec::BitVec,
+    ) {
+        let time = timeval_from_time(zx::MonotonicInstant::get());
+        let sync_event = uapi::input_event {
+            time,
+            type_: uapi::EV_SYN as u16,
+            code: uapi::SYN_REPORT as u16,
+            value: 0,
+        };
+
+        // 1. Flush releases for touch and mouse devices
+        for dev in self.devices.values_mut() {
+            match dev.device_type {
+                InputDeviceType::Touch(_) => {
+                    let mut events = Vec::new();
+                    if !dev.active_touch_slots.is_empty() {
+                        for slot in dev.active_touch_slots.drain() {
+                            events.push(uapi::input_event {
+                                time,
+                                type_: uapi::EV_ABS as u16,
+                                code: uapi::ABS_MT_SLOT as u16,
+                                value: slot,
+                            });
+                            events.push(uapi::input_event {
+                                time,
+                                type_: uapi::EV_ABS as u16,
+                                code: uapi::ABS_MT_TRACKING_ID as u16,
+                                value: -1,
+                            });
+                        }
+                        events.push(uapi::input_event {
+                            time,
+                            type_: uapi::EV_KEY as u16,
+                            code: uapi::BTN_TOUCH as u16,
+                            value: 0,
+                        });
+                        events.push(sync_event);
+                    }
+                    // Reset touch converter state so subsequent touches start fresh.
+                    dev.device_type = InputDeviceType::Touch(
+                        FuchsiaTouchEventToLinuxTouchEventConverter::create(),
+                    );
+                    if !events.is_empty() {
+                        dev.open_files.lock().retain(|f| {
+                            if let Some(file) = f.upgrade() {
+                                file.add_events(events.clone());
+                                true
+                            } else {
+                                false
+                            }
+                        });
+                    }
+                }
+                InputDeviceType::Mouse(_) => {
+                    let mut events = Vec::new();
+                    if !dev.active_mouse_buttons.is_empty() {
+                        for code in dev.active_mouse_buttons.drain() {
+                            events.push(uapi::input_event {
+                                time,
+                                type_: uapi::EV_KEY as u16,
+                                code,
+                                value: 0,
+                            });
+                        }
+                        events.push(sync_event);
+                    }
+                    // Reset mouse converter state so subsequent clicks start fresh.
+                    dev.device_type = InputDeviceType::Mouse(
+                        FuchsiaMouseEventToLinuxMouseEventConverter::create(),
+                    );
+                    if !events.is_empty() {
+                        dev.open_files.lock().retain(|f| {
+                            if let Some(file) = f.upgrade() {
+                                file.add_events(events.clone());
+                                true
+                            } else {
+                                false
+                            }
+                        });
+                    }
+                }
+                InputDeviceType::Keyboard => {
+                    let mut events = Vec::new();
+                    if !dev.active_keyboard_keys.is_empty() {
+                        for code in dev.active_keyboard_keys.drain() {
+                            events.push(uapi::input_event {
+                                time,
+                                type_: uapi::EV_KEY as u16,
+                                code,
+                                value: 0,
+                            });
+                        }
+                        events.push(sync_event);
+                    }
+                    if !events.is_empty() {
+                        dev.open_files.lock().retain(|f| {
+                            if let Some(file) = f.upgrade() {
+                                file.add_events(events.clone());
+                                true
+                            } else {
+                                false
+                            }
+                        });
+                    }
+                }
+            }
+        }
+
+        // 2. Flush media buttons if pressed
+        let mut key_events = Vec::new();
+        if *power_was_pressed {
+            key_events.push(uapi::input_event {
+                time,
+                type_: uapi::EV_KEY as u16,
+                code: uapi::KEY_POWER as u16,
+                value: 0,
+            });
+            *power_was_pressed = false;
+        }
+        if *function_was_pressed {
+            key_events.push(uapi::input_event {
+                time,
+                type_: uapi::EV_KEY as u16,
+                code: uapi::KEY_VOLUMEDOWN as u16,
+                value: 0,
+            });
+            *function_was_pressed = false;
+        }
+        if *volume_up_was_pressed {
+            key_events.push(uapi::input_event {
+                time,
+                type_: uapi::EV_KEY as u16,
+                code: uapi::KEY_VOLUMEUP as u16,
+                value: 0,
+            });
+            *volume_up_was_pressed = false;
+        }
+        if *volume_down_was_pressed {
+            key_events.push(uapi::input_event {
+                time,
+                type_: uapi::EV_KEY as u16,
+                code: uapi::KEY_VOLUMEDOWN as u16,
+                value: 0,
+            });
+            *volume_down_was_pressed = false;
+        }
+        if !key_events.is_empty() {
+            key_events.push(sync_event);
+            if let Some(dev) = self.get_device_mut(None, DEFAULT_KEYBOARD_DEVICE_ID, |t| {
+                matches!(t, InputDeviceType::Keyboard)
+            }) {
+                dev.open_files.lock().retain(|f| {
+                    if let Some(file) = f.upgrade() {
+                        file.add_events(key_events.clone());
+                        true
+                    } else {
+                        false
+                    }
+                });
+            }
+        }
+
+        // 3. Flush touch buttons if pressed
+        let mut touch_btn_events = Vec::new();
+        for (index, key_code) in [
+            (TouchButton::Palm.into_primitive() as usize, uapi::KEY_SLEEP),
+            (TouchButton::SwipeUp.into_primitive() as usize, uapi::KEY_UP),
+            (TouchButton::SwipeLeft.into_primitive() as usize, uapi::KEY_LEFT),
+            (TouchButton::SwipeRight.into_primitive() as usize, uapi::KEY_RIGHT),
+            (TouchButton::SwipeDown.into_primitive() as usize, uapi::KEY_DOWN),
+        ] {
+            if touch_buttons_were_pressed.get(index).unwrap_or(false) {
+                touch_btn_events.push(uapi::input_event {
+                    time,
+                    type_: uapi::EV_KEY as u16,
+                    code: key_code as u16,
+                    value: 0,
+                });
+            }
+        }
+        if !touch_btn_events.is_empty() {
+            touch_btn_events.push(sync_event);
+            if let Some(dev) = self.get_device_mut(None, DEFAULT_TOUCH_DEVICE_ID, |t| {
+                matches!(t, InputDeviceType::Touch(_))
+            }) {
+                dev.open_files.lock().retain(|f| {
+                    if let Some(file) = f.upgrade() {
+                        file.add_events(touch_btn_events.clone());
+                        true
+                    } else {
+                        false
+                    }
+                });
+            }
+        }
+        *touch_buttons_were_pressed = new_touch_buttons_bitvec();
+    }
+
     /// Updates the inspect-visible device count. Must be called after every mutation of
     /// `self.devices` once the relay has started.
     fn update_num_devices(&self) {
@@ -554,6 +844,7 @@ impl InputEventsRelay {
         let display_width = args.display_width;
         let display_height = args.display_height;
         let event_proxy_mode = args.event_proxy_mode;
+        let direct_input_manager = self.direct_input_manager.take();
         #[cfg(test)]
         let mut receiver = self.receiver.take().expect("start_relays called once");
         *self.display_size.lock() = if display_width > 0 && display_height > 0 {
@@ -679,6 +970,14 @@ impl InputEventsRelay {
             let mut volume_up_was_pressed = false;
             let mut volume_down_was_pressed = false;
             let mut touch_buttons_were_pressed = new_touch_buttons_bitvec();
+            let mut prev_direct_active = false;
+            let is_direct_active = |m: &Option<Arc<DirectInputManager>>| -> bool {
+                m.as_ref().is_some_and(|m| m.is_ownership_active())
+            };
+            let get_resume_gen = |m: &Option<Arc<DirectInputManager>>| -> u64 {
+                m.as_ref().map_or(0, |m| m.resume_generation())
+            };
+            let mut prev_resume_gen = get_resume_gen(&direct_input_manager);
 
             loop {
                 futures::select! {
@@ -688,9 +987,35 @@ impl InputEventsRelay {
                                 events,
                                 last_event_stamp,
                             })) => {
-                                self.process_touch_event(
-                                    events,
-                                );
+                                let direct_active = is_direct_active(&direct_input_manager);
+                                let current_resume_gen = get_resume_gen(&direct_input_manager);
+                                if current_resume_gen != prev_resume_gen {
+                                    self.flush_all_releases(
+                                        &mut power_was_pressed,
+                                        &mut function_was_pressed,
+                                        &mut volume_up_was_pressed,
+                                        &mut volume_down_was_pressed,
+                                        &mut touch_buttons_were_pressed,
+                                    );
+                                }
+                                if !prev_direct_active && direct_active {
+                                    // TODO(https://fxbug.dev/533426336): Inject cancel/release events when transitioning
+                                    // ownership between relay and direct input to prevent stuck pointers or stale media-button state mid-gesture.
+                                    self.flush_all_releases(
+                                        &mut power_was_pressed,
+                                        &mut function_was_pressed,
+                                        &mut volume_up_was_pressed,
+                                        &mut volume_down_was_pressed,
+                                        &mut touch_buttons_were_pressed,
+                                    );
+                                }
+                                prev_direct_active = direct_active;
+                                prev_resume_gen = current_resume_gen;
+                                if !direct_active {
+                                    self.process_touch_event(
+                                        events,
+                                    );
+                                }
                                 if let Err(e) = touch_source_proxy.acknowledge_events(last_event_stamp) {
                                     log_warn!("error acknowledging touch events: {:?}", e);
                                 }
@@ -720,7 +1045,24 @@ impl InputEventsRelay {
                                 events,
                                 last_event_stamp,
                             })) => {
-                                self.process_mouse_event(events);
+                                let direct_active = is_direct_active(&direct_input_manager);
+                                let current_resume_gen = get_resume_gen(&direct_input_manager);
+                                if (!prev_direct_active && direct_active)
+                                    || current_resume_gen != prev_resume_gen
+                                {
+                                    self.flush_all_releases(
+                                        &mut power_was_pressed,
+                                        &mut function_was_pressed,
+                                        &mut volume_up_was_pressed,
+                                        &mut volume_down_was_pressed,
+                                        &mut touch_buttons_were_pressed,
+                                    );
+                                }
+                                prev_direct_active = direct_active;
+                                prev_resume_gen = current_resume_gen;
+                                if !direct_active {
+                                    self.process_mouse_event(events);
+                                }
                                 if let Err(e) = mouse_source_proxy.acknowledge_events(last_event_stamp) {
                                     log_warn!("error acknowledging mouse events: {:?}", e);
                                 }
@@ -747,18 +1089,45 @@ impl InputEventsRelay {
                     media_buttons_res = media_buttons_future => {
                         match media_buttons_res {
                             Some(Ok(event)) => {
-                                (
-                                    power_was_pressed,
-                                    function_was_pressed,
-                                    volume_up_was_pressed,
-                                    volume_down_was_pressed,
-                                ) = self.process_media_button_event(
-                                    event,
-                                    power_was_pressed,
-                                    function_was_pressed,
-                                    volume_up_was_pressed,
-                                    volume_down_was_pressed,
-                                );
+                                let direct_active = is_direct_active(&direct_input_manager);
+                                let current_resume_gen = get_resume_gen(&direct_input_manager);
+                                if (!prev_direct_active && direct_active)
+                                    || current_resume_gen != prev_resume_gen
+                                {
+                                    self.flush_all_releases(
+                                        &mut power_was_pressed,
+                                        &mut function_was_pressed,
+                                        &mut volume_up_was_pressed,
+                                        &mut volume_down_was_pressed,
+                                        &mut touch_buttons_were_pressed,
+                                    );
+                                }
+                                prev_direct_active = direct_active;
+                                prev_resume_gen = current_resume_gen;
+                                if direct_active {
+                                    match event {
+                                        fuipolicy::MediaButtonsListenerRequest::OnEvent {
+                                            responder,
+                                            ..
+                                        } => {
+                                            let _ = responder.send();
+                                        }
+                                        _ => {}
+                                    }
+                                } else {
+                                    (
+                                        power_was_pressed,
+                                        function_was_pressed,
+                                        volume_up_was_pressed,
+                                        volume_down_was_pressed,
+                                    ) = self.process_media_button_event(
+                                        event,
+                                        power_was_pressed,
+                                        function_was_pressed,
+                                        volume_up_was_pressed,
+                                        volume_down_was_pressed,
+                                    );
+                                }
                                 drop(media_buttons_future);
                                 media_buttons_future = media_buttons_waking_stream.next().fuse();
                             }
@@ -770,10 +1139,37 @@ impl InputEventsRelay {
                     touch_buttons_res = touch_buttons_future => {
                         match touch_buttons_res {
                             Some(Ok(event)) => {
-                                touch_buttons_were_pressed = self.process_touch_button_event(
-                                    event,
-                                    &touch_buttons_were_pressed,
-                                );
+                                let direct_active = is_direct_active(&direct_input_manager);
+                                let current_resume_gen = get_resume_gen(&direct_input_manager);
+                                if (!prev_direct_active && direct_active)
+                                    || current_resume_gen != prev_resume_gen
+                                {
+                                    self.flush_all_releases(
+                                        &mut power_was_pressed,
+                                        &mut function_was_pressed,
+                                        &mut volume_up_was_pressed,
+                                        &mut volume_down_was_pressed,
+                                        &mut touch_buttons_were_pressed,
+                                    );
+                                }
+                                prev_direct_active = direct_active;
+                                prev_resume_gen = current_resume_gen;
+                                if direct_active {
+                                    match event {
+                                        fuipolicy::TouchButtonsListenerRequest::OnEvent {
+                                            responder,
+                                            ..
+                                        } => {
+                                            let _ = responder.send();
+                                        }
+                                        _ => {}
+                                    }
+                                } else {
+                                    touch_buttons_were_pressed = self.process_touch_button_event(
+                                        event,
+                                        &touch_buttons_were_pressed,
+                                    );
+                                }
                                 drop(touch_buttons_future);
                                 touch_buttons_future = touch_buttons_waking_stream.next().fuse();
                             }
@@ -820,7 +1216,30 @@ impl InputEventsRelay {
                     keyboard_res = keyboard_future => {
                         match keyboard_res {
                             Some(Ok(request)) => {
-                                self.process_keyboard(request);
+                                let direct_active = is_direct_active(&direct_input_manager);
+                                let current_resume_gen = get_resume_gen(&direct_input_manager);
+                                if (!prev_direct_active && direct_active)
+                                    || current_resume_gen != prev_resume_gen
+                                {
+                                    self.flush_all_releases(
+                                        &mut power_was_pressed,
+                                        &mut function_was_pressed,
+                                        &mut volume_up_was_pressed,
+                                        &mut volume_down_was_pressed,
+                                        &mut touch_buttons_were_pressed,
+                                    );
+                                }
+                                prev_direct_active = direct_active;
+                                prev_resume_gen = current_resume_gen;
+                                if direct_active {
+                                    match request {
+                                        KeyboardListenerRequest::OnKeyEvent { responder, .. } => {
+                                            let _ = responder.send(KeyEventStatus::NotHandled);
+                                        }
+                                    }
+                                } else {
+                                    self.process_keyboard(request);
+                                }
                                 drop(keyboard_future);
                                 keyboard_future = keyboard_event_stream.next().fuse();
                             }
@@ -939,6 +1358,21 @@ impl InputEventsRelay {
             num_unexpected_events += batch.count_unexpected_fidl_events;
             let last_event_time_ns = batch.last_event_time_ns;
 
+            let mut current_slot = 0i32;
+            for ev in &new_events {
+                if ev.type_ == uapi::EV_ABS as u16 && ev.code == uapi::ABS_MT_SLOT as u16 {
+                    current_slot = ev.value;
+                } else if ev.type_ == uapi::EV_ABS as u16
+                    && ev.code == uapi::ABS_MT_TRACKING_ID as u16
+                {
+                    if ev.value < 0 {
+                        dev.active_touch_slots.remove(&current_slot);
+                    } else {
+                        dev.active_touch_slots.insert(current_slot);
+                    }
+                }
+            }
+
             if let Some(dev_inspect_status) = &dev.inspect_status {
                 dev_inspect_status.count_total_received_events(num_received_events);
                 dev_inspect_status.count_total_ignored_events(num_ignored_events);
@@ -1040,6 +1474,16 @@ impl InputEventsRelay {
                     }
                 } else {
                     log_warn!("unable to record inspect for keyboard device");
+                }
+
+                for ev in &new_events {
+                    if ev.type_ == uapi::EV_KEY as u16 {
+                        if ev.value == 0 {
+                            dev.active_keyboard_keys.remove(&ev.code);
+                        } else if ev.value == 1 {
+                            dev.active_keyboard_keys.insert(ev.code);
+                        }
+                    }
                 }
 
                 dev.open_files.lock().retain(|f| {
@@ -1425,6 +1869,16 @@ impl InputEventsRelay {
             num_unexpected_events += batch.count_unexpected_events;
             let last_event_time_ns = batch.last_event_time_ns;
 
+            for ev in &new_events {
+                if ev.type_ == uapi::EV_KEY as u16 {
+                    if ev.value == 0 {
+                        dev.active_mouse_buttons.remove(&ev.code);
+                    } else if ev.value == 1 {
+                        dev.active_mouse_buttons.insert(ev.code);
+                    }
+                }
+            }
+
             if !new_events.is_empty() {
                 dev.registration.ensure_registered();
             }
@@ -1740,10 +2194,11 @@ fn register_and_add_device(
         }
     }
 
-    // Allocate the lowest available minor number for this device.
+    // Allocate the lowest available minor number for this device within the relay range.
     // Note: `DeviceRegistry` does not provide dynamic minor allocation or recycling for
     // `INPUT_MAJOR`, so minors are tracked and recycled locally here.
-    let minor = (0u32..)
+    let minor = crate::RELAY_MINOR_RANGE
+        .clone()
         .find(|&m| !devices_relay.devices.values().any(|s| s.minor == m))
         .expect("failed to allocate minor number");
 
@@ -1755,6 +2210,9 @@ fn register_and_add_device(
         registration: DeviceRegistration::Registered,
         starnix_device: Some(starnix_device),
         minor,
+        active_touch_slots: HashSet::new(),
+        active_mouse_buttons: HashSet::new(),
+        active_keyboard_keys: HashSet::new(),
     };
     devices_relay.devices.insert(device_id, device_state);
     devices_relay.update_num_devices();
@@ -3111,6 +3569,861 @@ mod test {
                     device_listener_registered: false,
                 }
             });
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    fn test_opened_files_state_bounding_and_buffering() {
+        let mut state = OpenedFilesState::default();
+        let dummy_event = uapi::input_event {
+            time: uapi::timeval { tv_sec: 0, tv_usec: 0 },
+            type_: uapi::EV_KEY as u16,
+            code: 1,
+            value: 1,
+        };
+        // Dispatch batch that fits within MAX_PRE_OPEN_BUFFERED_EVENTS (1024)
+        let batch = vec![dummy_event; 1000];
+        assert!(state.dispatch_events(&batch));
+        assert_eq!(state.buffered_events.len(), 1000);
+
+        // Dispatch a batch that exceeds remaining space (24); entire batch should be dropped
+        let overflow_batch = vec![dummy_event; 50];
+        assert!(!state.dispatch_events(&overflow_batch));
+        assert_eq!(state.buffered_events.len(), 1000);
+
+        // Flushing buffered pre-open events into the first opened InputFile via on_file_opened
+        let inspector = fuchsia_inspect::Inspector::default();
+        let file1 = Arc::new(InputFile::new_keyboard(
+            InputDeviceInfo::new(
+                uapi::input_id { bustype: 0, vendor: 0, product: 0, version: 0 },
+                "keyboard_1".to_string(),
+            ),
+            inspector.root(),
+        ));
+        file1.init_inspect_status();
+        state.on_file_opened(&file1);
+
+        assert_eq!(file1.read_events(2000).len(), 1000);
+        assert_eq!(
+            file1
+                .inspect_status
+                .as_ref()
+                .unwrap()
+                .uapi_events_generated_count
+                .load(Ordering::Relaxed),
+            1000
+        );
+
+        // A second opened file should not receive the flushed pre-open events
+        let file2 = Arc::new(InputFile::new_keyboard(
+            InputDeviceInfo::new(
+                uapi::input_id { bustype: 0, vendor: 0, product: 0, version: 0 },
+                "keyboard_2".to_string(),
+            ),
+            inspector.root(),
+        ));
+        file2.init_inspect_status();
+        state.on_file_opened(&file2);
+
+        assert!(file2.read_events(2000).is_empty());
+        assert_eq!(
+            file2
+                .inspect_status
+                .as_ref()
+                .unwrap()
+                .uapi_events_generated_count
+                .load(Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[::fuchsia::test]
+    fn test_input_device_dispatch_events_and_inspect_counters() {
+        let inspector = fuchsia_inspect::Inspector::default();
+        let input_device = InputDevice::new_keyboard(
+            InputDeviceInfo::new(
+                uapi::input_id { bustype: 0, vendor: 0, product: 0, version: 0 },
+                "test_keyboard".to_string(),
+            ),
+            "test_keyboard",
+            inspector.root(),
+        );
+
+        // 1. Dispatch events prior to any files being opened (buffered and counted)
+        let pre_open_event = uapi::input_event {
+            time: uapi::timeval { tv_sec: 1, tv_usec: 0 },
+            type_: uapi::EV_KEY as u16,
+            code: 10,
+            value: 1,
+        };
+        input_device.dispatch_events(&[pre_open_event]);
+        assert_eq!(
+            input_device.inspect_status.total_uapi_events_generated_count.load(Ordering::Relaxed),
+            1
+        );
+
+        // 2. Open first file; receives buffered pre-open event and updates its inspect counter
+        let _file_ops1 = input_device.open_internal();
+        let file1 = input_device.open_files.lock()[0].upgrade().expect("file1 upgraded");
+        assert_eq!(file1.read_events(10).len(), 1);
+        assert_eq!(
+            file1
+                .inspect_status
+                .as_ref()
+                .unwrap()
+                .uapi_events_generated_count
+                .load(Ordering::Relaxed),
+            1
+        );
+
+        // 3. Open second file; does NOT receive flushed pre-open event
+        let _file_ops2 = input_device.open_internal();
+        let file2 = input_device.open_files.lock()[1].upgrade().expect("file2 upgraded");
+        assert!(file2.read_events(10).is_empty());
+        assert_eq!(
+            file2
+                .inspect_status
+                .as_ref()
+                .unwrap()
+                .uapi_events_generated_count
+                .load(Ordering::Relaxed),
+            0
+        );
+
+        // 4. Dispatch events while files are open; delivers to both files and updates counters
+        let live_event = uapi::input_event {
+            time: uapi::timeval { tv_sec: 2, tv_usec: 0 },
+            type_: uapi::EV_KEY as u16,
+            code: 20,
+            value: 1,
+        };
+        input_device.dispatch_events(&[live_event]);
+
+        assert_eq!(file1.read_events(10).len(), 1);
+        assert_eq!(file2.read_events(10).len(), 1);
+
+        let total_device_events =
+            input_device.inspect_status.total_uapi_events_generated_count.load(Ordering::Relaxed);
+        let file1_events = file1
+            .inspect_status
+            .as_ref()
+            .unwrap()
+            .uapi_events_generated_count
+            .load(Ordering::Relaxed);
+        let file2_events = file2
+            .inspect_status
+            .as_ref()
+            .unwrap()
+            .uapi_events_generated_count
+            .load(Ordering::Relaxed);
+
+        assert_eq!(total_device_events, 2);
+        assert_eq!(file1_events, 2);
+        assert_eq!(file2_events, 1);
+    }
+
+    #[::fuchsia::test]
+    async fn test_direct_input_coordination_suppresses_scenic_events() {
+        spawn_kernel_and_run(async move |current_task| {
+            let kernel = current_task.kernel().clone();
+            let inspector = fuchsia_inspect::Inspector::default();
+
+            let touch_device = crate::InputDevice::new_touch(
+                700,
+                1200,
+                crate::InputDeviceInfo::new(TOUCH_INPUT_ID, "starnix_touch".to_string()),
+                "touch_device",
+                inspector.root(),
+            );
+            let touch_file =
+                touch_device.open_test(&current_task).expect("Failed to create input file");
+
+            let keyboard_device = crate::InputDevice::new_keyboard(
+                crate::InputDeviceInfo::new(KEYBOARD_INPUT_ID, "starnix_keyboard".to_string()),
+                "keyboard_device",
+                inspector.root(),
+            );
+            let keyboard_file =
+                keyboard_device.open_test(&current_task).expect("Failed to create input file");
+
+            let mouse_device = crate::InputDevice::new_mouse(
+                crate::InputDeviceInfo::new(MOUSE_INPUT_ID, "starnix_mouse".to_string()),
+                "mouse_device",
+                inspector.root(),
+            );
+            let mouse_file =
+                mouse_device.open_test(&current_task).expect("Failed to create input file");
+
+            let (touch_source_client_end, mut touch_source_stream) =
+                fidl::endpoints::create_request_stream::<fuipointer::TouchSourceV2Marker>();
+            let (mouse_source_client_end, mut mouse_source_stream) =
+                fidl::endpoints::create_request_stream::<fuipointer::MouseSourceV2Marker>();
+            let (keyboard_proxy, mut keyboard_stream) =
+                fidl::endpoints::create_sync_proxy_and_stream::<
+                    fidl_fuchsia_ui_input3::KeyboardMarker,
+                >();
+            let view_ref_pair =
+                fuchsia_scenic::ViewRefPair::new().expect("Failed to create ViewRefPair");
+            let (device_registry_proxy, mut device_listener_stream) =
+                fidl::endpoints::create_sync_proxy_and_stream::<
+                    fuipolicy::DeviceListenerRegistryMarker,
+                >();
+
+            let (mut relay, _relay_handle) = new_input_relay();
+            relay.add_touch_device(
+                DEFAULT_TOUCH_DEVICE_ID,
+                touch_device.open_files.clone(),
+                Some(touch_device.inspect_status.clone()),
+            );
+            relay.add_keyboard_device(
+                DEFAULT_KEYBOARD_DEVICE_ID,
+                keyboard_device.open_files.clone(),
+                Some(keyboard_device.inspect_status.clone()),
+            );
+            relay.add_mouse_device(
+                DEFAULT_MOUSE_DEVICE_ID,
+                mouse_device.open_files.clone(),
+                Some(mouse_device.inspect_status.clone()),
+            );
+
+            let direct_input = DirectInputManager::new(Arc::downgrade(&kernel), None, None);
+            direct_input.set_ownership_active(true);
+            assert!(direct_input.is_ownership_active());
+            let relay = relay.with_direct_input_manager(direct_input.clone());
+
+            relay.start_relays(
+                &current_task.kernel(),
+                StartRelaysArgs {
+                    event_proxy_mode: EventProxyMode::None,
+                    touch_source_client_end,
+                    keyboard_proxy,
+                    mouse_source_client_end,
+                    view_ref: view_ref_pair.view_ref,
+                    registry_proxy: device_registry_proxy,
+                    device_listener_registry: None,
+                    display_width: 700,
+                    display_height: 1200,
+                },
+            );
+
+            let keyboard_listener = match keyboard_stream.next().await {
+                Some(Ok(fuiinput::KeyboardRequest::AddListener {
+                    listener, responder, ..
+                })) => {
+                    let _ = responder.send();
+                    listener.into_proxy()
+                }
+                _ => panic!("Failed to get keyboard listener"),
+            };
+
+            if let Some(Ok(fuipolicy::DeviceListenerRegistryRequest::RegisterListener {
+                responder,
+                ..
+            })) = device_listener_stream.next().await
+            {
+                let _ = responder.send();
+            }
+            if let Some(Ok(
+                fuipolicy::DeviceListenerRegistryRequest::RegisterTouchButtonsListener {
+                    responder,
+                    ..
+                },
+            )) = device_listener_stream.next().await
+            {
+                let _ = responder.send();
+            }
+
+            const DEVICE_ID: u32 = DEFAULT_TOUCH_DEVICE_ID;
+            let event1 = make_touch_event_with_phase_device_id(EventPhase::Add, 1, DEVICE_ID);
+
+            // While direct_input ownership is active, Scenic touch, mouse, and keyboard events must be suppressed
+            answer_next_touch_watch_request(&mut touch_source_stream, vec![event1]).await;
+            answer_next_touch_watch_request(
+                &mut touch_source_stream,
+                vec![make_empty_touch_event(DEVICE_ID)],
+            )
+            .await;
+            let touch_received = read_uapi_events(&touch_file, &current_task);
+            assert!(
+                touch_received.is_empty(),
+                "Touch events must be suppressed while direct input ownership is active"
+            );
+
+            answer_next_mouse_watch_request(
+                &mut mouse_source_stream,
+                vec![make_mouse_wheel_event(1, DEFAULT_MOUSE_DEVICE_ID)],
+            )
+            .await;
+            answer_next_mouse_watch_request(
+                &mut mouse_source_stream,
+                vec![make_mouse_wheel_event(0, DEFAULT_MOUSE_DEVICE_ID)],
+            )
+            .await;
+            let mouse_received = read_uapi_events(&mouse_file, &current_task);
+            assert!(
+                mouse_received.is_empty(),
+                "Mouse events must be suppressed while direct input ownership is active"
+            );
+
+            let key_event1 = fuiinput::KeyEvent {
+                timestamp: Some(10),
+                type_: Some(fuiinput::KeyEventType::Pressed),
+                key: Some(fidl_fuchsia_input::Key::A),
+                device_id: Some(DEFAULT_KEYBOARD_DEVICE_ID),
+                ..Default::default()
+            };
+            let status = keyboard_listener.on_key_event(&key_event1).await.unwrap();
+            assert_eq!(status, KeyEventStatus::NotHandled);
+            let key_received = read_uapi_events(&keyboard_file, &current_task);
+            assert!(
+                key_received.is_empty(),
+                "Keyboard events must be suppressed while direct input ownership is active"
+            );
+
+            // Pause direct input ownership (e.g. lost ownership to Scenic)
+            direct_input.pause();
+            assert!(!direct_input.is_ownership_active());
+
+            // Now send Scenic touch, mouse, and keyboard events; they should NOT be suppressed
+            let event2 = make_touch_event_with_phase_device_id(EventPhase::Add, 2, DEVICE_ID);
+            answer_next_touch_watch_request(&mut touch_source_stream, vec![event2]).await;
+            answer_next_touch_watch_request(
+                &mut touch_source_stream,
+                vec![make_empty_touch_event(DEVICE_ID)],
+            )
+            .await;
+            let touch_received_after = read_uapi_events(&touch_file, &current_task);
+            assert!(
+                !touch_received_after.is_empty(),
+                "Touch events must be processed after direct input ownership is paused"
+            );
+
+            answer_next_mouse_watch_request(
+                &mut mouse_source_stream,
+                vec![make_mouse_wheel_event(1, DEFAULT_MOUSE_DEVICE_ID)],
+            )
+            .await;
+            answer_next_mouse_watch_request(
+                &mut mouse_source_stream,
+                vec![make_mouse_wheel_event(0, DEFAULT_MOUSE_DEVICE_ID)],
+            )
+            .await;
+            let mouse_received_after = read_uapi_events(&mouse_file, &current_task);
+            assert!(
+                !mouse_received_after.is_empty(),
+                "Mouse events must be processed after direct input ownership is paused"
+            );
+
+            let key_event2 = fuiinput::KeyEvent {
+                timestamp: Some(20),
+                type_: Some(fuiinput::KeyEventType::Pressed),
+                key: Some(fidl_fuchsia_input::Key::B),
+                device_id: Some(DEFAULT_KEYBOARD_DEVICE_ID),
+                ..Default::default()
+            };
+            let status2 = keyboard_listener.on_key_event(&key_event2).await.unwrap();
+            assert_eq!(status2, KeyEventStatus::Handled);
+            let key_received_after = read_uapi_events(&keyboard_file, &current_task);
+            assert!(
+                !key_received_after.is_empty(),
+                "Keyboard events must be processed after direct input ownership is paused"
+            );
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_relay_handoff_flushes_releases() {
+        spawn_kernel_and_run(async move |current_task| {
+            let kernel = current_task.kernel().clone();
+            let inspector = fuchsia_inspect::Inspector::default();
+
+            let touch_device = crate::InputDevice::new_touch(
+                700,
+                1200,
+                crate::InputDeviceInfo::new(TOUCH_INPUT_ID, "starnix_touch".to_string()),
+                "touch_device",
+                inspector.root(),
+            );
+            let touch_file =
+                touch_device.open_test(&current_task).expect("Failed to create input file");
+
+            let keyboard_device = crate::InputDevice::new_keyboard(
+                crate::InputDeviceInfo::new(KEYBOARD_INPUT_ID, "starnix_keyboard".to_string()),
+                "keyboard_device",
+                inspector.root(),
+            );
+            let keyboard_file =
+                keyboard_device.open_test(&current_task).expect("Failed to create input file");
+
+            let (touch_source_client_end, mut touch_source_stream) =
+                fidl::endpoints::create_request_stream::<fuipointer::TouchSourceV2Marker>();
+            let (mouse_source_client_end, _mouse_source_stream) =
+                fidl::endpoints::create_request_stream::<fuipointer::MouseSourceV2Marker>();
+            let (keyboard_proxy, mut keyboard_stream) =
+                fidl::endpoints::create_sync_proxy_and_stream::<
+                    fidl_fuchsia_ui_input3::KeyboardMarker,
+                >();
+            let view_ref_pair =
+                fuchsia_scenic::ViewRefPair::new().expect("Failed to create ViewRefPair");
+            let (device_registry_proxy, mut device_listener_stream) =
+                fidl::endpoints::create_sync_proxy_and_stream::<
+                    fuipolicy::DeviceListenerRegistryMarker,
+                >();
+
+            let (mut relay, _relay_handle) = new_input_relay();
+            relay.add_touch_device(
+                DEFAULT_TOUCH_DEVICE_ID,
+                touch_device.open_files.clone(),
+                Some(touch_device.inspect_status.clone()),
+            );
+            relay.add_keyboard_device(
+                DEFAULT_KEYBOARD_DEVICE_ID,
+                keyboard_device.open_files.clone(),
+                Some(keyboard_device.inspect_status.clone()),
+            );
+
+            let direct_input = DirectInputManager::new(Arc::downgrade(&kernel), None, None);
+            // Initially direct input ownership is inactive
+            assert!(!direct_input.is_ownership_active());
+            let relay = relay.with_direct_input_manager(direct_input.clone());
+
+            relay.start_relays(
+                &current_task.kernel(),
+                StartRelaysArgs {
+                    event_proxy_mode: EventProxyMode::None,
+                    touch_source_client_end,
+                    keyboard_proxy,
+                    mouse_source_client_end,
+                    view_ref: view_ref_pair.view_ref,
+                    registry_proxy: device_registry_proxy,
+                    device_listener_registry: None,
+                    display_width: 700,
+                    display_height: 1200,
+                },
+            );
+
+            let keyboard_listener = match keyboard_stream.next().await {
+                Some(Ok(fuiinput::KeyboardRequest::AddListener {
+                    listener, responder, ..
+                })) => {
+                    let _ = responder.send();
+                    listener.into_proxy()
+                }
+                _ => panic!("Failed to get keyboard listener"),
+            };
+
+            let media_buttons_proxy = match device_listener_stream.next().await {
+                Some(Ok(fuipolicy::DeviceListenerRegistryRequest::RegisterListener {
+                    listener,
+                    responder,
+                    ..
+                })) => {
+                    let _ = responder.send();
+                    listener.into_proxy()
+                }
+                _ => panic!("Failed to get media buttons listener"),
+            };
+            let touch_buttons_proxy = match device_listener_stream.next().await {
+                Some(Ok(
+                    fuipolicy::DeviceListenerRegistryRequest::RegisterTouchButtonsListener {
+                        listener,
+                        responder,
+                        ..
+                    },
+                )) => {
+                    let _ = responder.send();
+                    listener.into_proxy()
+                }
+                _ => panic!("Failed to get touch buttons listener"),
+            };
+
+            const DEVICE_ID: u32 = DEFAULT_TOUCH_DEVICE_ID;
+            // Send touch Add event while Scenic owns input
+            let event1 = make_touch_event_with_phase_device_id(EventPhase::Add, 1, DEVICE_ID);
+            answer_next_touch_watch_request(&mut touch_source_stream, vec![event1]).await;
+            answer_next_touch_watch_request(
+                &mut touch_source_stream,
+                vec![make_empty_touch_event(DEVICE_ID)],
+            )
+            .await;
+
+            let touch_received = read_uapi_events(&touch_file, &current_task);
+            assert!(
+                !touch_received.is_empty(),
+                "Touch events should be received when direct input is inactive"
+            );
+            // Verify slot is active (BTN_TOUCH down)
+            assert!(touch_received.iter().any(|e| e.type_ == uapi::EV_KEY as u16
+                && e.code == uapi::BTN_TOUCH as u16
+                && e.value == 1));
+
+            // Press a keyboard key while Scenic owns input
+            let key_event1 = fuiinput::KeyEvent {
+                timestamp: Some(10),
+                type_: Some(fuiinput::KeyEventType::Pressed),
+                key: Some(fidl_fuchsia_input::Key::A),
+                device_id: Some(DEFAULT_KEYBOARD_DEVICE_ID),
+                ..Default::default()
+            };
+            let status = keyboard_listener.on_key_event(&key_event1).await.unwrap();
+            assert_eq!(status, KeyEventStatus::Handled);
+            let key_received = read_uapi_events(&keyboard_file, &current_task);
+            assert!(
+                !key_received.is_empty(),
+                "Keyboard events should be received when direct input is inactive"
+            );
+            assert!(key_received.iter().any(|e| e.type_ == uapi::EV_KEY as u16
+                && e.code == uapi::KEY_A as u16
+                && e.value == 1));
+
+            // Now activate direct input ownership (Scenic -> Direct handoff)
+            direct_input.set_ownership_active(true);
+            assert!(direct_input.is_ownership_active());
+
+            // Next touch event arrives; handoff transition flushes releases for active touches and keys
+            let event2 = make_touch_event_with_phase_device_id(EventPhase::Change, 1, DEVICE_ID);
+            answer_next_touch_watch_request(&mut touch_source_stream, vec![event2]).await;
+            answer_next_touch_watch_request(
+                &mut touch_source_stream,
+                vec![make_empty_touch_event(DEVICE_ID)],
+            )
+            .await;
+
+            let touch_received_handoff = read_uapi_events(&touch_file, &current_task);
+            assert!(
+                !touch_received_handoff.is_empty(),
+                "Synthetic release events must be flushed on handoff"
+            );
+            // Verify lifted tracking ID (-1) and BTN_TOUCH up (0) were flushed
+            assert!(
+                touch_received_handoff.iter().any(|e| e.type_ == uapi::EV_ABS as u16
+                    && e.code == uapi::ABS_MT_TRACKING_ID as u16
+                    && e.value == -1),
+                "Expected ABS_MT_TRACKING_ID -1 on handoff"
+            );
+            assert!(
+                touch_received_handoff.iter().any(|e| e.type_ == uapi::EV_KEY as u16
+                    && e.code == uapi::BTN_TOUCH as u16
+                    && e.value == 0),
+                "Expected BTN_TOUCH 0 on handoff"
+            );
+
+            // Verify pressed keyboard key was flushed on handoff
+            let key_received_handoff = read_uapi_events(&keyboard_file, &current_task);
+            assert!(
+                !key_received_handoff.is_empty(),
+                "Synthetic keyboard release events must be flushed on handoff"
+            );
+            assert!(
+                key_received_handoff.iter().any(|e| e.type_ == uapi::EV_KEY as u16
+                    && e.code == uapi::KEY_A as u16
+                    && e.value == 0),
+                "Expected KEY_A release (0) on handoff"
+            );
+
+            // Verify button listener events during direct ownership receive responses without closing stream
+            let media_res = media_buttons_proxy
+                .on_event(MediaButtonsEvent { volume: Some(1), ..Default::default() })
+                .await;
+            assert!(
+                media_res.is_ok(),
+                "MediaButtons OnEvent must succeed when direct input is active"
+            );
+
+            let touch_btn_res = touch_buttons_proxy
+                .on_event(TouchButtonsEvent { pressed_buttons: Some(vec![]), ..Default::default() })
+                .await;
+            assert!(
+                touch_btn_res.is_ok(),
+                "TouchButtons OnEvent must succeed when direct input is active"
+            );
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_relay_switches_between_direct_input_and_app_protocol_via_input_ownership() {
+        spawn_kernel_and_run(async move |current_task| {
+            let kernel = current_task.kernel().clone();
+            let inspector = fuchsia_inspect::Inspector::default();
+            let touch_device = crate::InputDevice::new_touch(
+                700,
+                1200,
+                crate::InputDeviceInfo::new(TOUCH_INPUT_ID, "starnix_touch".to_string()),
+                "touch_device",
+                inspector.root(),
+            );
+            let keyboard_device = crate::InputDevice::new_keyboard(
+                crate::InputDeviceInfo::new(KEYBOARD_INPUT_ID, "starnix_keyboard".to_string()),
+                "keyboard_device",
+                inspector.root(),
+            );
+            let mouse_device = crate::InputDevice::new_mouse(
+                crate::InputDeviceInfo::new(MOUSE_INPUT_ID, "starnix_mouse".to_string()),
+                "mouse_device",
+                inspector.root(),
+            );
+
+            let touch_file =
+                touch_device.open_test(&current_task).expect("Failed to create input file");
+            let keyboard_file =
+                keyboard_device.open_test(&current_task).expect("Failed to create input file");
+            let mouse_file =
+                mouse_device.open_test(&current_task).expect("Failed to create input file");
+
+            let (touch_source_client_end, mut touch_source_stream) =
+                fidl::endpoints::create_request_stream::<fuipointer::TouchSourceV2Marker>();
+            let (mouse_source_client_end, mut mouse_source_stream) =
+                fidl::endpoints::create_request_stream::<fuipointer::MouseSourceV2Marker>();
+            let (keyboard_proxy, mut keyboard_stream) =
+                fidl::endpoints::create_sync_proxy_and_stream::<
+                    fidl_fuchsia_ui_input3::KeyboardMarker,
+                >();
+            let view_ref_pair =
+                fuchsia_scenic::ViewRefPair::new().expect("Failed to create ViewRefPair");
+            let (device_registry_proxy, mut device_listener_stream) =
+                fidl::endpoints::create_sync_proxy_and_stream::<
+                    fuipolicy::DeviceListenerRegistryMarker,
+                >();
+
+            let (mut relay, _relay_handle) = new_input_relay();
+            relay.add_touch_device(
+                DEFAULT_TOUCH_DEVICE_ID,
+                touch_device.open_files.clone(),
+                Some(touch_device.inspect_status.clone()),
+            );
+            relay.add_keyboard_device(
+                DEFAULT_KEYBOARD_DEVICE_ID,
+                keyboard_device.open_files.clone(),
+                Some(keyboard_device.inspect_status.clone()),
+            );
+            relay.add_mouse_device(
+                DEFAULT_MOUSE_DEVICE_ID,
+                mouse_device.open_files.clone(),
+                Some(mouse_device.inspect_status.clone()),
+            );
+
+            let event = zx::Event::create();
+            // Initially, platform owns input
+            event
+                .signal(
+                    zx::Signals::NONE,
+                    DISPLAY_PLATFORM_OWNED_SIGNAL | INPUT_PLATFORM_OWNED_SIGNAL,
+                )
+                .unwrap();
+
+            let (ownership_proxy, get_event_rx, _server_task) = spawn_fake_input_ownership(&event);
+
+            let direct_input = DirectInputManager::new_with_ownership_proxy(
+                Arc::downgrade(&kernel),
+                None,
+                Some(ownership_proxy),
+            );
+            let relay = relay.with_direct_input_manager(direct_input.clone());
+
+            relay.start_relays(
+                &current_task.kernel(),
+                StartRelaysArgs {
+                    event_proxy_mode: EventProxyMode::None,
+                    touch_source_client_end,
+                    keyboard_proxy,
+                    mouse_source_client_end,
+                    view_ref: view_ref_pair.view_ref,
+                    registry_proxy: device_registry_proxy,
+                    device_listener_registry: None,
+                    display_width: 700,
+                    display_height: 1200,
+                },
+            );
+
+            let keyboard_listener = match keyboard_stream.next().await {
+                Some(Ok(fuiinput::KeyboardRequest::AddListener {
+                    listener, responder, ..
+                })) => {
+                    let _ = responder.send();
+                    listener.into_proxy()
+                }
+                _ => panic!("Failed to get keyboard listener"),
+            };
+
+            if let Some(Ok(fuipolicy::DeviceListenerRegistryRequest::RegisterListener {
+                responder,
+                ..
+            })) = device_listener_stream.next().await
+            {
+                let _ = responder.send();
+            }
+            if let Some(Ok(
+                fuipolicy::DeviceListenerRegistryRequest::RegisterTouchButtonsListener {
+                    responder,
+                    ..
+                },
+            )) = device_listener_stream.next().await
+            {
+                let _ = responder.send();
+            }
+
+            // Wait for fake server to handle GetEvent
+            get_event_rx.await.expect("GetEvent handled by fake server");
+
+            // Initially, ownership is inactive (Platform owned)
+            assert!(!direct_input.is_ownership_active());
+
+            // Transition 1: Scenic grants direct input ownership to Starnix
+            event.signal(INPUT_PLATFORM_OWNED_SIGNAL, INPUT_CLIENT_OWNED_SIGNAL).unwrap();
+
+            wait_for_ownership(&direct_input, true).await;
+            assert!(direct_input.is_ownership_active());
+
+            const DEVICE_ID: u32 = DEFAULT_TOUCH_DEVICE_ID;
+            let event1 = make_touch_event_with_phase_device_id(EventPhase::Add, 1, DEVICE_ID);
+
+            // While direct_input ownership is active, Scenic touch, mouse, and keyboard events must be suppressed
+            answer_next_touch_watch_request(&mut touch_source_stream, vec![event1]).await;
+            answer_next_touch_watch_request(
+                &mut touch_source_stream,
+                vec![make_empty_touch_event(DEVICE_ID)],
+            )
+            .await;
+            let touch_received = read_uapi_events(&touch_file, &current_task);
+            assert!(
+                touch_received.is_empty(),
+                "Touch events must be suppressed while direct input ownership is active"
+            );
+
+            answer_next_mouse_watch_request(
+                &mut mouse_source_stream,
+                vec![make_mouse_wheel_event(1, DEFAULT_MOUSE_DEVICE_ID)],
+            )
+            .await;
+            answer_next_mouse_watch_request(
+                &mut mouse_source_stream,
+                vec![make_mouse_wheel_event(0, DEFAULT_MOUSE_DEVICE_ID)],
+            )
+            .await;
+            let mouse_received = read_uapi_events(&mouse_file, &current_task);
+            assert!(
+                mouse_received.is_empty(),
+                "Mouse events must be suppressed while direct input ownership is active"
+            );
+
+            let key_event1 = fuiinput::KeyEvent {
+                timestamp: Some(10),
+                type_: Some(fuiinput::KeyEventType::Pressed),
+                key: Some(fidl_fuchsia_input::Key::A),
+                device_id: Some(DEFAULT_KEYBOARD_DEVICE_ID),
+                ..Default::default()
+            };
+            let status = keyboard_listener.on_key_event(&key_event1).await.unwrap();
+            assert_eq!(status, KeyEventStatus::NotHandled);
+            let key_received = read_uapi_events(&keyboard_file, &current_task);
+            assert!(
+                key_received.is_empty(),
+                "Keyboard events must be suppressed while direct input ownership is active"
+            );
+
+            // Transition 2: Scenic revokes direct input ownership back to platform
+            event.signal(INPUT_CLIENT_OWNED_SIGNAL, INPUT_PLATFORM_OWNED_SIGNAL).unwrap();
+
+            wait_for_ownership(&direct_input, false).await;
+            assert!(!direct_input.is_ownership_active());
+
+            // Now send Scenic touch, mouse, and keyboard events; they should NOT be suppressed
+            let event2 = make_touch_event_with_phase_device_id(EventPhase::Add, 2, DEVICE_ID);
+            answer_next_touch_watch_request(&mut touch_source_stream, vec![event2]).await;
+            answer_next_touch_watch_request(
+                &mut touch_source_stream,
+                vec![make_empty_touch_event(DEVICE_ID)],
+            )
+            .await;
+            let touch_received_after = read_uapi_events(&touch_file, &current_task);
+            assert!(
+                !touch_received_after.is_empty(),
+                "Touch events must be processed after direct input ownership is revoked"
+            );
+
+            answer_next_mouse_watch_request(
+                &mut mouse_source_stream,
+                vec![make_mouse_wheel_event(1, DEFAULT_MOUSE_DEVICE_ID)],
+            )
+            .await;
+            answer_next_mouse_watch_request(
+                &mut mouse_source_stream,
+                vec![make_mouse_wheel_event(0, DEFAULT_MOUSE_DEVICE_ID)],
+            )
+            .await;
+            let mouse_received_after = read_uapi_events(&mouse_file, &current_task);
+            assert!(
+                !mouse_received_after.is_empty(),
+                "Mouse events must be processed after direct input ownership is revoked"
+            );
+
+            let key_event2 = fuiinput::KeyEvent {
+                timestamp: Some(20),
+                type_: Some(fuiinput::KeyEventType::Pressed),
+                key: Some(fidl_fuchsia_input::Key::B),
+                device_id: Some(DEFAULT_KEYBOARD_DEVICE_ID),
+                ..Default::default()
+            };
+            let status2 = keyboard_listener.on_key_event(&key_event2).await.unwrap();
+            assert_eq!(status2, KeyEventStatus::Handled);
+            let key_received_after = read_uapi_events(&keyboard_file, &current_task);
+            assert!(
+                !key_received_after.is_empty(),
+                "Keyboard events must be processed after direct input ownership is revoked"
+            );
+
+            // Bounce direct input ownership to active and immediately back to inactive
+            // with no Scenic events in between.
+            event.signal(INPUT_PLATFORM_OWNED_SIGNAL, INPUT_CLIENT_OWNED_SIGNAL).unwrap();
+            wait_for_ownership(&direct_input, true).await;
+
+            event.signal(INPUT_CLIENT_OWNED_SIGNAL, INPUT_PLATFORM_OWNED_SIGNAL).unwrap();
+            wait_for_ownership(&direct_input, false).await;
+
+            // Follow-up Scenic event triggers resume generation change check,
+            // which flushes synthetic releases for held contacts and keys.
+            answer_next_touch_watch_request(
+                &mut touch_source_stream,
+                vec![make_empty_touch_event(DEVICE_ID)],
+            )
+            .await;
+
+            let touch_releases = read_uapi_events(&touch_file, &current_task);
+            assert!(
+                !touch_releases.is_empty(),
+                "Synthetic touch releases must be flushed after ownership bounce"
+            );
+            assert!(
+                touch_releases.iter().any(|e| {
+                    e.type_ == uapi::EV_ABS as u16
+                        && e.code == uapi::ABS_MT_TRACKING_ID as u16
+                        && e.value == -1
+                }),
+                "Expected ABS_MT_TRACKING_ID -1"
+            );
+            assert!(
+                touch_releases.iter().any(|e| {
+                    e.type_ == uapi::EV_KEY as u16
+                        && e.code == uapi::BTN_TOUCH as u16
+                        && e.value == 0
+                }),
+                "Expected BTN_TOUCH 0"
+            );
+
+            let key_releases = read_uapi_events(&keyboard_file, &current_task);
+            assert!(
+                !key_releases.is_empty(),
+                "Synthetic keyboard releases must be flushed after ownership bounce"
+            );
+            assert!(
+                key_releases.iter().any(|e| {
+                    e.type_ == uapi::EV_KEY as u16 && e.code == uapi::KEY_B as u16 && e.value == 0
+                }),
+                "Expected KEY_B 0"
+            );
         })
         .await;
     }

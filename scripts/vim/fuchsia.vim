@@ -38,9 +38,7 @@ if jiri_manifest != ""
 
   " The "filetype plugin" line must come AFTER the changes to runtimepath
   " above (so the proper directories are searched), but must come BEFORE the
-  " FuchsiaBuffer function below (to work around a bug on MacOS where
-  " Ctrl-] does not work because filetype is undefined instead of being
-  " equal to "cpp".)
+  " FuchsiaBuffer function below.
   filetype plugin indent on
 
   function! FuchsiaBuffer()

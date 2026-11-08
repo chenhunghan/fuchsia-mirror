@@ -2,10 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use fuchsia_runtime;
 use starnix_uapi::errno;
 use starnix_uapi::errors::Errno;
 use std::sync::Arc;
-use {fuchsia_runtime, zx};
+use zx;
 
 // Allocate VMARs in 1GiB blocks. Even for the reduced size of the shared asapce 1GiB is not too
 // wasteful and should still sufficiently minimize the number of allocations done.
@@ -92,6 +93,18 @@ pub struct GrowableVmars {
 }
 
 impl GrowableVmars {
+    /// Returns a handle to the current active VMAR without probing free space, allocating an
+    /// initial VMAR if the list is empty.
+    ///
+    /// Call `probe()` if an allocation in the returned VMAR fails due to insufficient space.
+    pub fn current(&mut self) -> Result<Arc<zx::Vmar>, Errno> {
+        if self.vmars.is_empty() {
+            let vmar = CompactVmar::new().ok_or_else(|| errno!(ENOMEM))?;
+            self.vmars.push_front(vmar);
+        }
+        Ok(self.vmars.front().expect("populated above").vmar.clone())
+    }
+
     /// Returns a handle to a VMAR that has at least `PROBE_SIZE` bytes of free space.
     ///
     /// The returned handle is suitable for passing to `thrd_set_zx_create_handles` via the
@@ -220,5 +233,23 @@ mod tests {
         assert_eq!(vmars.vmars[0].vmar.raw_handle(), h1_raw);
         assert_eq!(vmars.vmars[1].vmar.raw_handle(), h3_raw);
         assert_eq!(vmars.vmars[2].vmar.raw_handle(), h2_raw);
+    }
+
+    #[fuchsia::test]
+    fn test_current_reuses_front_until_probed() {
+        let mut vmars = GrowableVmars::new();
+
+        let h1 = vmars.current().expect("failed to get initial current VMAR");
+        let h1_raw = h1.raw_handle();
+        assert_eq!(vmars.current().expect("current").raw_handle(), h1_raw);
+
+        // Exhaust the front VMAR; current() still returns the front VMAR without probing, whereas
+        // probe() rotates/allocates a new VMAR with free space.
+        let _allocs1 = fill_vmar(h1_raw);
+        assert_eq!(vmars.current().expect("current when full").raw_handle(), h1_raw);
+
+        let h2 = vmars.probe().expect("probe after full");
+        assert_ne!(h2.raw_handle(), h1_raw);
+        assert_eq!(vmars.current().expect("current after probe").raw_handle(), h2.raw_handle());
     }
 }

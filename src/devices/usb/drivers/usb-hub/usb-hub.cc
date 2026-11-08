@@ -131,8 +131,7 @@ void UsbHubDevice::DdkInit(ddk::InitTxn txn) {
   auto raw_desc = descriptor;
 
   // Config bus
-  status = bus_.SetHubInterface(reinterpret_cast<uint64_t>(zxdev()), this,
-                                &usb_hub_interface_protocol_ops_);
+  status = bus_.SetHubInterface(this, &usb_hub_interface_protocol_ops_);
   if (status != ZX_OK) {
     zxlogf(ERROR, "Could not set hub interface");
     txn_->Reply(status);
@@ -140,7 +139,7 @@ void UsbHubDevice::DdkInit(ddk::InitTxn txn) {
   }
   // TODO(https://fxbug.dev/42133694): Support multi-TT hubs properly. Currently, we
   // operate in single-TT mode even if the hub supports multiple TTs.
-  status = bus_.ConfigureHub(reinterpret_cast<uint64_t>(zxdev()), speed_, &raw_desc, false);
+  status = bus_.ConfigureHub(speed_, &raw_desc, false);
   if (status != ZX_OK) {
     zxlogf(ERROR, "Could not configure hub");
     txn_->Reply(status);
@@ -373,14 +372,14 @@ void UsbHubDevice::HandleDeviceDisconnected(PortNumber port) {
   bool link_status = status.link_active;
   status.Reset();
   if (link_status) {
-    bus_.DeviceRemoved(reinterpret_cast<uint64_t>(zxdev()), port.value());
+    bus_.DeviceRemoved(port.value());
   }
 }
 
 void UsbHubDevice::HandleResetComplete(PortNumber port) {
   port_status_[PortNumberToIndex(port).value()].reset_pending = false;
   auto speed = port_status_[PortNumberToIndex(port).value()].GetSpeed(speed_);
-  zx_status_t status = bus_.DeviceAdded(reinterpret_cast<uint64_t>(zxdev()), port.value(), speed);
+  zx_status_t status = bus_.DeviceAdded(port.value(), speed);
 
   port_status_[PortNumberToIndex(port).value()].enumeration_pending = false;
   port_status_[PortNumberToIndex(port).value()].link_active = (status == ZX_OK);

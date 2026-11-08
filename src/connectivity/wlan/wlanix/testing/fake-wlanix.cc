@@ -277,6 +277,15 @@ void FakeWlanix::SetMacAddress(fuchsia_wlan_wlanix::wire::WifiStaIfaceSetMacAddr
   completer.Reply(fit::ok());
 }
 
+void FakeWlanix::GetFactoryMacAddress(
+    fidl::WireServer<fuchsia_wlan_wlanix::WifiStaIface>::GetFactoryMacAddressCompleter::Sync&
+        completer) {
+  AppendCommand(Command{.tag = CommandTag::kWifiStaIfaceGetFactoryMacAddress});
+  fuchsia_wlan_wlanix::wire::WifiStaIfaceGetFactoryMacAddressResponse response;
+  response.mac_addr = kFakeFactoryAddr;
+  completer.Reply(fit::ok(&response));
+}
+
 void FakeWlanix::GetApfPacketFilterSupport(GetApfPacketFilterSupportCompleter::Sync& completer) {
   AppendCommand(Command{.tag = CommandTag::kWifiStaIfaceGetApfPacketFilterSupport});
   fidl::Arena arena;
@@ -393,16 +402,17 @@ void FakeWlanix::GetMacAddress(GetMacAddressCompleter::Sync& completer) {
   AppendCommand(Command{.tag = CommandTag::kSupplicantStaIfaceGetMacAddress});
   fidl::Arena arena;
   auto builder = fuchsia_wlan_wlanix::wire::SupplicantStaIfaceGetMacAddressResponse::Builder(arena);
-  fidl::Array<uint8_t, 6> mac_addr = {13, 37, 13, 37, 13, 37};
-  builder.mac_addr(mac_addr);
+  builder.mac_addr(kFakeStaAddr);
   auto response = builder.Build();
   completer.Reply(fit::ok(&response));
 }
 
-void FakeWlanix::GetFactoryMacAddress(GetFactoryMacAddressCompleter::Sync& completer) {
+void FakeWlanix::GetFactoryMacAddress(
+    fidl::WireServer<fuchsia_wlan_wlanix::SupplicantStaIface>::GetFactoryMacAddressCompleter::Sync&
+        completer) {
   AppendCommand(Command{.tag = CommandTag::kSupplicantStaIfaceGetFactoryMacAddress});
   fuchsia_wlan_wlanix::wire::SupplicantStaIfaceGetFactoryMacAddressResponse response;
-  response.mac_addr = {12, 34, 56, 78, 90, 12};
+  response.mac_addr = kFakeFactoryAddr;
   completer.Reply(fit::ok(&response));
 }
 

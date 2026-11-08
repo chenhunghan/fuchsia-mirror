@@ -4,6 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+use crate::arch_rs::enable_ints;
 pub use crate::backtrace::Backtrace;
 use crate::platform_rs::timer::{DurationMono, InstantMono};
 use core::cell::UnsafeCell;
@@ -12,7 +13,7 @@ use core::marker::{PhantomData, PhantomPinned};
 use core::mem::{align_of, offset_of, size_of};
 use core::pin::Pin;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 use fbl::{
     DoublyLinkedList, DoublyLinkedListContainable, DoublyLinkedListNode,
     SinglyLinkedListContainable, SinglyLinkedListNode,
@@ -21,23 +22,28 @@ use ksync::KCell;
 use pin_init::{PinInit, pin_data, pinned_drop};
 use thread_layout_bindings as layout;
 use thread_lock_guard_bindings as lock_guard_bindings;
-use zr::{Opaque, static_assert};
+use zr::{Opaque, OpaqueBytes, static_assert};
 use zx_status::Status;
 use zx_types::{ZX_MAX_NAME_LEN, zx_instant_mono_t, zx_koid_t, zx_status_t};
 
 use crate::kconcurrent::ChainLock;
+use crate::kernel::deadline::Deadline;
 use crate::kernel::owned_wait_queue::OwnedWaitQueue;
 use crate::kernel::relaxed_atomic::{RelaxedAtomicI64, RelaxedAtomicU32, RelaxedAtomicU64};
 use crate::kernel::restricted_state::RestrictedState;
 use crate::kernel::scheduler;
 use crate::kernel::scheduler_state::{SchedulerState, SchedulerStateBaseProfile, ThreadStateKind};
 use crate::kernel::types::{cpu_mask_t, cpu_num_t};
-use crate::kernel::wait_queue::{ThreadState, WaitQueue};
+use crate::kernel::wait_queue::{ResourceOwnership, ThreadState, WaitQueue, WaitQueueBase};
 use crate::ktrace_rs::InternedString;
+use crate::vm::kstack::KernelStack;
 use crate::vm::vm_aspace::VmAspace;
 
 pub use crate::kconcurrent::CallsiteInfo as CltTag;
-use crate::kconcurrent::{ChainLockProof, ChainLocked, ClassedChainLock};
+use crate::kconcurrent::{
+    ChainLockProof, ChainLockTransaction, ChainLockTransactionToken, ChainLocked, ClassedChainLock,
+    OwnerGuard,
+};
 
 /// Lock class for data guarded by a [`Thread`]'s chain lock.
 ///
@@ -65,8 +71,18 @@ unsafe extern "C" {
         arg: *mut c_void,
         profile: *const SchedulerStateBaseProfile,
     ) -> *mut Thread;
+    fn cpp_thread_create_etc(
+        t: *mut Thread,
+        name_ptr: *const c_char,
+        name_len: usize,
+        entry: Option<extern "C" fn(*mut c_void) -> i32>,
+        arg: *mut c_void,
+        profile: *const SchedulerStateBaseProfile,
+        alt_trampoline: Option<unsafe extern "C" fn() -> !>,
+    ) -> *mut Thread;
     fn cpp_thread_set_base_profile(thread: *mut Thread, profile: *const SchedulerStateBaseProfile);
     fn cpp_thread_resume(thread: *mut Thread);
+    fn cpp_thread_detach(thread: *mut Thread) -> zx_status_t;
     fn cpp_thread_detach_and_resume(thread: *mut Thread) -> zx_status_t;
     fn cpp_thread_join(
         thread: *mut Thread,
@@ -91,17 +107,12 @@ unsafe extern "C" {
     fn cpp_thread_lock_guard_destroy(guard: *mut lock_guard_bindings::ThreadLockGuard);
     fn cpp_thread_current_get() -> *mut Thread;
     fn cpp_thread_current_active_aspace() -> *mut VmAspace;
-    fn cpp_thread_fxt_ref(thread: *mut Thread) -> FxtRef;
-    fn cpp_thread_preempt_set_timeslice_extension(duration: DurationMono) -> bool;
-    fn cpp_thread_preempt_clear_timeslice_extension();
-    fn cpp_thread_preempt_disable();
-    fn cpp_thread_preempt_reenable();
-    fn cpp_thread_eager_resched_disable();
-    fn cpp_thread_eager_resched_reenable();
-    fn cpp_thread_preempt_disable_count() -> u32;
-    fn cpp_thread_eager_resched_disable_count() -> u32;
-    fn cpp_thread_preempt_set_pending();
-    fn cpp_thread_preempt_is_enabled() -> bool;
+    fn cpp_thread_current_switch_aspace(aspace: *mut VmAspace) -> *mut VmAspace;
+    pub fn cpp_thread_signal_sample_stack(
+        timer: *mut super::timer::Timer,
+        now: zx_instant_mono_t,
+        session_id: *mut c_void,
+    );
     fn cpp_thread_preempt();
     fn cpp_thread_current_sleep_etc(
         deadline: *const crate::kernel::deadline::Deadline,
@@ -113,22 +124,15 @@ unsafe extern "C" {
     fn cpp_thread_current_sleep_interruptible(deadline: InstantMono) -> zx_status_t;
     fn cpp_thread_current_soft_fault(va: usize, flags: u32) -> zx_status_t;
     fn cpp_thread_get_arch(thread: *mut Thread) -> *mut c_void;
-    fn cpp_thread_get_stack_top(thread: *mut Thread) -> usize;
-    fn cpp_thread_get_shadow_call_base(thread: *mut Thread) -> usize;
-    fn cpp_thread_dump_current_stack();
+    fn cpp_thread_secondary_cpu_init_early(thread: *mut Thread);
     fn cpp_thread_is_running(thread: *const Thread) -> bool;
-    fn cpp_thread_name(thread: *const Thread) -> *const c_char;
     fn cpp_thread_process_pending_signals(frame: *mut c_void);
     fn cpp_thread_in_restricted(thread: *mut Thread) -> bool;
     fn cpp_thread_is_user_thread(thread: *const Thread) -> bool;
     fn cpp_thread_active_aspace(thread: *mut Thread) -> *mut VmAspace;
     fn cpp_thread_current_restricted_state() -> *mut RestrictedState;
     fn cpp_thread_current_set_restricted_state(raw_rs: *mut RestrictedState);
-    fn cpp_thread_current_is_signaled() -> bool;
     fn cpp_thread_current_check_for_restricted_kick() -> bool;
-    fn cpp_thread_current_memory_allocation_state_enable();
-    fn cpp_thread_current_memory_allocation_state_disable();
-    fn cpp_thread_current_memory_allocation_state_is_enabled() -> bool;
     fn cpp_thread_current_signal_policy_exception(
         policy_exception_code: u32,
         policy_exception_data: u32,
@@ -142,19 +146,318 @@ unsafe extern "C" {
     fn cpp_thread_last_cpu(thread: *const Thread) -> cpu_num_t;
     fn cpp_thread_current_migrate_to_cpu(target_cpu: cpu_num_t);
     fn cpp_thread_user_thread(thread: *mut Thread) -> *mut crate::object::ThreadDispatcher;
-    fn cpp_thread_tid(thread: *const Thread) -> zx_types::zx_koid_t;
     fn cpp_thread_lock_flow_id(thread: *const Thread) -> u64;
     fn cpp_thread_take_next_lock_flow_id(thread: *mut Thread) -> u64;
-    fn cpp_thread_get_list_lock() -> *mut ksync::KSpinlock<ThreadListLockClass>;
-    fn cpp_thread_id_to_thread_slow(tid: zx_types::zx_koid_t) -> *mut Thread;
+    fn cpp_thread_get_list_lock() -> *mut crate::ksync_kernel::KSpinlock<ThreadListLockClass>;
+    fn cpp_thread_id_to_thread_slow(tid: zx_koid_t) -> *mut Thread;
     fn cpp_thread_get_backtrace(thread: *mut Thread, out_bt: *mut Backtrace);
+    fn cpp_thread_current_get_backtrace(out_bt: *mut Backtrace);
+    fn cpp_thread_current_get_backtrace_with_fp(fp: usize, out_bt: *mut Backtrace);
     fn cpp_thread_dump(thread: *const Thread, full: bool);
     fn cpp_thread_runtime(thread: *const Thread) -> DurationMono;
-    fn cpp_thread_dump_tid(tid: zx_types::zx_koid_t, full: bool);
-    fn cpp_thread_dump_tid_during_panic(tid: zx_types::zx_koid_t, full: bool);
+    fn cpp_thread_dump_tid(tid: zx_koid_t, full: bool);
+    fn cpp_thread_dump_tid_during_panic(tid: zx_koid_t, full: bool);
     fn cpp_thread_dump_all(match_owner: *const c_char, full: bool);
     fn cpp_thread_dump_all_during_panic(match_owner: *const c_char, full: bool);
     fn cpp_thread_current_reschedule();
+    fn cpp_thread_set_migrate_fn(thread: *mut Thread, ctx: *mut c_void);
+    fn cpp_thread_clear_migrate_fn(thread: *mut Thread);
+    fn cpp_thread_set_context_switch_fn(thread: *mut Thread, ctx: *mut c_void);
+    fn cpp_thread_clear_context_switch_fn(thread: *mut Thread);
+    fn cpp_thread_runtime_stats_init(storage: *mut c_void);
+    fn cpp_thread_runtime_stats_update_irq_save(storage: *mut c_void, new_state: ThreadStateKind);
+    fn cpp_thread_runtime_stats_add_page_fault_ticks(storage: *mut c_void, ticks: i64);
+    fn cpp_thread_runtime_stats_add_lock_contention_ticks(storage: *mut c_void, ticks: i64);
+    fn cpp_thread_runtime_stats_read(
+        storage: *const c_void,
+        out_result: *mut core::mem::MaybeUninit<ReadResult>,
+    );
+    fn cpp_thread_runtime_stats_get_compensated_ticks(
+        storage: *const c_void,
+        out_stats: *mut core::mem::MaybeUninit<TaskRuntimeStats>,
+    );
+    fn cpp_scoped_memory_stall_init(storage: *mut core::mem::MaybeUninit<CppScopedMemoryStall>);
+    fn cpp_scoped_memory_stall_destroy(stall: *mut CppScopedMemoryStall);
+    fn cpp_scoped_thread_exception_context_init(
+        storage: *mut core::mem::MaybeUninit<CppScopedThreadExceptionContext>,
+        context: *const crate::arch_rs::ArchExceptionContext,
+    );
+    fn cpp_scoped_thread_exception_context_destroy(context: *mut CppScopedThreadExceptionContext);
+    fn cpp_thread_create_empty() -> *mut Thread;
+    fn cpp_thread_delete(thread: *mut Thread);
+    // TODO: Remove these test-only shims once `Thread` construction and destruction are ported to
+    // Rust.
+    #[cfg(ktest)]
+    fn cpp_thread_create_for_test() -> *mut Thread;
+    #[cfg(ktest)]
+    fn cpp_thread_destroy_for_test(thread: *mut Thread);
+    fn cpp_thread_current_reset_rseq();
+    fn cpp_thread_current_set_rseq(
+        vmo_paged_raw: *mut crate::vm::vm_object_paged::VmObjectPaged,
+        offset: u64,
+    ) -> zx_status_t;
+}
+
+/// Stage at which a migration function may be executed (`Thread::MigrateStage`).
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MigrateStage {
+    /// Before the thread has migrated between CPUs. Called from the old CPU.
+    Save = 0,
+    /// After the thread has migrated between CPUs. Called from the new CPU.
+    Restore = 1,
+    /// The thread is exiting. May be called from any CPU.
+    Exiting = 2,
+}
+
+type MigrateTrampoline =
+    unsafe extern "C" fn(ctx: *mut c_void, thread: *mut Thread, stage: MigrateStage);
+
+/// Inline/stack-allocated migration callback storage passed to [`ThreadPtr::set_migrate_fn`].
+#[repr(C)]
+pub struct MigrateFn<F> {
+    invoke: MigrateTrampoline,
+    f: F,
+}
+
+impl<F: FnMut(&Thread, MigrateStage) + Send> MigrateFn<F> {
+    /// Wraps `f` in a [`MigrateFn`] suitable for passing to [`ThreadPtr::set_migrate_fn`].
+    pub const fn new(f: F) -> Self {
+        /// # Safety
+        ///
+        /// `ctx` must point to a valid, exclusively accessed `MigrateFn<F>`, and `thread` must
+        /// point to a valid `Thread`.
+        unsafe extern "C" fn trampoline<F: FnMut(&Thread, MigrateStage)>(
+            ctx: *mut c_void,
+            thread: *mut Thread,
+            stage: MigrateStage,
+        ) {
+            // SAFETY: `ctx` points to a valid `MigrateFn<F>` with exclusive access under the
+            // thread lock, and `thread` points to a valid `Thread`.
+            unsafe {
+                let wrapper = &mut *ctx.cast::<MigrateFn<F>>();
+                (wrapper.f)(&*thread, stage);
+            }
+        }
+
+        Self { invoke: trampoline::<F>, f }
+    }
+}
+
+/// Invokes a type-erased [`MigrateFn`] from C++ `Thread::MigrateFn`.
+///
+/// # Safety
+///
+/// `ctx` must point to a valid [`MigrateFn`] whose first field is a `MigrateTrampoline`, and
+/// `thread` must point to a valid [`Thread`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_thread_invoke_migrate_fn(
+    ctx: *mut c_void,
+    thread: *mut Thread,
+    stage: MigrateStage,
+) {
+    // SAFETY: `MigrateFn<F>` is `#[repr(C)]` with `invoke: MigrateTrampoline` at offset 0, and
+    // the caller guarantees `ctx` and `thread` are valid.
+    unsafe {
+        let invoke = *ctx.cast::<MigrateTrampoline>();
+        invoke(ctx, thread, stage);
+    }
+}
+
+/// Trait for migration callbacks accepted by [`ThreadPtr::set_migrate_fn`].
+pub trait IntoMigrateFn {
+    /// Converts `self` into an optional raw context pointer for `cpp_thread_set_migrate_fn`.
+    fn into_migrate_ctx(self) -> Option<*mut c_void>;
+}
+
+impl<F: FnMut(&Thread, MigrateStage) + Send> IntoMigrateFn for &mut MigrateFn<F> {
+    #[inline]
+    fn into_migrate_ctx(self) -> Option<*mut c_void> {
+        Some(core::ptr::from_mut(self).cast())
+    }
+}
+
+impl<F: FnMut(&Thread, MigrateStage) + Send> IntoMigrateFn for Option<&mut MigrateFn<F>> {
+    #[inline]
+    fn into_migrate_ctx(self) -> Option<*mut c_void> {
+        self.map(|m| core::ptr::from_mut(m).cast())
+    }
+}
+
+type ContextSwitchTrampoline = unsafe extern "C" fn(ctx: *mut c_void);
+
+/// Inline/stack-allocated context-switch callback storage passed to
+/// [`ThreadPtr::set_context_switch_fn`].
+#[repr(C)]
+pub struct ContextSwitchFn<F> {
+    invoke: ContextSwitchTrampoline,
+    f: F,
+}
+
+impl<F: FnMut() + Send> ContextSwitchFn<F> {
+    /// Wraps `f` in a [`ContextSwitchFn`] suitable for passing to
+    /// [`ThreadPtr::set_context_switch_fn`].
+    pub const fn new(f: F) -> Self {
+        /// # Safety
+        ///
+        /// `ctx` must point to a valid, exclusively accessed `ContextSwitchFn<F>`.
+        unsafe extern "C" fn trampoline<F: FnMut()>(ctx: *mut c_void) {
+            // SAFETY: `ctx` points to a valid `ContextSwitchFn<F>` with exclusive access under
+            // the thread lock.
+            unsafe {
+                let wrapper = &mut *ctx.cast::<ContextSwitchFn<F>>();
+                (wrapper.f)();
+            }
+        }
+
+        Self { invoke: trampoline::<F>, f }
+    }
+}
+
+/// Invokes a type-erased [`ContextSwitchFn`] from C++ `Thread::ContextSwitchFn`.
+///
+/// # Safety
+///
+/// `ctx` must point to a valid [`ContextSwitchFn`] whose first field is a
+/// `ContextSwitchTrampoline`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_thread_invoke_context_switch_fn(ctx: *mut c_void) {
+    // SAFETY: `ContextSwitchFn<F>` is `#[repr(C)]` with `invoke: ContextSwitchTrampoline` at
+    // offset 0, and the caller guarantees `ctx` is valid.
+    unsafe {
+        let invoke = *ctx.cast::<ContextSwitchTrampoline>();
+        invoke(ctx);
+    }
+}
+
+/// Trait for context-switch callbacks accepted by [`ThreadPtr::set_context_switch_fn`].
+pub trait IntoContextSwitchFn {
+    /// Converts `self` into an optional raw context pointer for
+    /// `cpp_thread_set_context_switch_fn`.
+    fn into_context_switch_ctx(self) -> Option<*mut c_void>;
+}
+
+impl<F: FnMut() + Send> IntoContextSwitchFn for &mut ContextSwitchFn<F> {
+    #[inline]
+    fn into_context_switch_ctx(self) -> Option<*mut c_void> {
+        Some(core::ptr::from_mut(self).cast())
+    }
+}
+
+impl<F: FnMut() + Send> IntoContextSwitchFn for Option<&mut ContextSwitchFn<F>> {
+    #[inline]
+    fn into_context_switch_ctx(self) -> Option<*mut c_void> {
+        self.map(|c| core::ptr::from_mut(c).cast())
+    }
+}
+
+/// Aggregate runtime statistics (in ticks) for a task (`TaskRuntimeStats`).
+///
+/// Not safe for concurrent use by multiple threads.
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TaskRuntimeStats {
+    /// The total duration (in ticks) spent running on a CPU.
+    pub cpu_ticks: i64,
+    /// The total duration (in ticks) spent ready to run (queued).
+    pub queue_ticks: i64,
+    /// The total duration (in ticks) spent handling page faults.
+    pub page_fault_ticks: i64,
+    /// The total duration (in ticks) spent contended on kernel locks.
+    pub lock_contention_ticks: i64,
+}
+
+zr::static_assert_size_and_align!(TaskRuntimeStats, 32, 8);
+
+/// Sequence-locked per-thread scheduling state snapshot (`ThreadRuntimeStats::ThreadStats`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThreadStats {
+    /// Accumulated ticks spent in `ThreadStateKind::Running`.
+    pub total_running_ticks: i64,
+    /// Accumulated ticks spent in `ThreadStateKind::Ready`.
+    pub total_ready_ticks: i64,
+    /// Timestamp (in ticks) when the thread entered `current_state`.
+    pub state_change_ticks: i64,
+    /// Current scheduling state of the thread.
+    pub current_state: ThreadStateKind,
+}
+
+zr::static_assert_size_and_align!(ThreadStats, 32, 8);
+
+/// Coherent snapshot returned by [`ThreadRuntimeStats::read`] (`ThreadRuntimeStats::ReadResult`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadResult {
+    /// Snapshot of the thread's runtime state.
+    pub stats: ThreadStats,
+    /// Synchronized monotonic ticks sampled inside the seqlock read transaction.
+    pub now: i64,
+}
+
+zr::static_assert_size_and_align!(ReadResult, 40, 8);
+
+zr::define_opaque_storage_ffi! {
+    /// Per-thread runtime stats wrapper (`ThreadRuntimeStats`).
+    pub struct ThreadRuntimeStats(
+        object_constants_rs::kThreadRuntimeStatsStorageSize,
+        object_constants_rs::kThreadRuntimeStatsStorageAlign,
+        8,
+        cpp_thread_runtime_stats_init,
+    );
+}
+
+impl ThreadRuntimeStats {
+    /// Returns an in-place pin-initializer for a default `ThreadRuntimeStats`.
+    pub fn new() -> impl pin_init::PinInit<Self> {
+        // SAFETY: `PinInit` guarantees the destination slot is valid and properly aligned for
+        // `ThreadRuntimeStats`.
+        unsafe { Self::init() }
+    }
+
+    /// Updates the thread state with `IrqSave` seqlock synchronization.
+    pub fn update_irq_save(&self, new_state: ThreadStateKind) {
+        // SAFETY: `self` is an initialized `ThreadRuntimeStats`.
+        unsafe { cpp_thread_runtime_stats_update_irq_save(self.as_void_ptr(), new_state) };
+    }
+
+    /// Adds `delta` page fault ticks.
+    pub fn add_page_fault_ticks(&self, delta: i64) {
+        // SAFETY: `self` is an initialized `ThreadRuntimeStats`.
+        unsafe { cpp_thread_runtime_stats_add_page_fault_ticks(self.as_void_ptr(), delta) };
+    }
+
+    /// Adds `delta` lock contention ticks.
+    pub fn add_lock_contention_ticks(&self, delta: i64) {
+        // SAFETY: `self` is an initialized `ThreadRuntimeStats`.
+        unsafe { cpp_thread_runtime_stats_add_lock_contention_ticks(self.as_void_ptr(), delta) };
+    }
+
+    /// Returns a coherent snapshot of the `ThreadStats` state.
+    pub fn read(&self) -> ReadResult {
+        let mut out = core::mem::MaybeUninit::<ReadResult>::uninit();
+        // SAFETY: `self` is an initialized `ThreadRuntimeStats` and `out` is valid uninitialized
+        // storage initialized by `cpp_thread_runtime_stats_read`.
+        unsafe {
+            cpp_thread_runtime_stats_read(self.as_void_ptr().cast_const(), &raw mut out);
+            out.assume_init()
+        }
+    }
+
+    /// Returns the instantaneous runtime stats for the thread, including the time spent in its
+    /// current state (if `Ready` or `Running`).
+    pub fn get_compensated_task_runtime_stats(&self) -> TaskRuntimeStats {
+        let mut out = core::mem::MaybeUninit::<TaskRuntimeStats>::uninit();
+        // SAFETY: `self` is an initialized `ThreadRuntimeStats` and `out` is valid uninitialized
+        // storage initialized by `cpp_thread_runtime_stats_get_compensated_ticks`.
+        unsafe {
+            cpp_thread_runtime_stats_get_compensated_ticks(
+                self.as_void_ptr().cast_const(),
+                &raw mut out,
+            );
+            out.assume_init()
+        }
+    }
 }
 
 /// Stall accounting state of a thread.
@@ -169,6 +472,11 @@ unsafe extern "C" {
 /// If a user thread signals that a stall is ongoing, it will contribute to the current CPU's
 /// accumulator as `Stalling`. If preempted, the contribution will persist on the last CPU's
 /// accumulator. Normal operation is resumed when the thread signals that the stall is over.
+///
+/// Safety invariant: a thread only enters `Stalling` while it is the running thread on its CPU
+/// (C++ `ScopedMemoryStall` on `Thread::Current`), so a `Stalling` thread's `last_cpu` is a
+/// valid CPU number (`< PerCpu::processor_count()`); `last_cpu` is only written at context
+/// switch and idle init and never reset.
 // LINT.IfChange(ThreadStallState)
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -207,6 +515,9 @@ pub unsafe fn memory_stall_state(thread: *const Thread) -> ThreadStallState {
 /// call, with exclusive access to its `memory_stall_state_`. The state is guarded by
 /// `preempt_disabled_token`, so the caller must have preemption (or interrupts, as during a
 /// scheduler context switch) disabled on the current CPU.
+///
+/// If `value == ThreadStallState::Stalling`, `thread`'s `SchedulerState::last_cpu()` must be
+/// `< PerCpu::processor_count()`, to uphold the safety invariant on [`ThreadStallState`].
 #[inline]
 pub unsafe fn set_memory_stall_state(thread: *mut Thread, value: ThreadStallState) {
     // SAFETY: The caller guarantees `thread` is a valid, live `Thread` and that preemption or
@@ -228,12 +539,36 @@ pub unsafe fn scheduler_state<'a>(thread: *const Thread) -> &'a SchedulerState {
     unsafe { (*thread).scheduler_state_unchecked() }
 }
 
+// LINT.IfChange(thread_flags_and_signals)
+/// Thread is detached and will not be joined.
+pub const THREAD_FLAG_DETACHED: u32 = 1 << 0;
+/// `Thread` struct is heap-allocated and should be freed on exit.
+pub const THREAD_FLAG_FREE_STRUCT: u32 = 1 << 1;
+/// Thread is a per-CPU idle/power thread.
+pub const THREAD_FLAG_IDLE: u32 = 1 << 2;
+/// Thread runs a guest VCPU.
+pub const THREAD_FLAG_VCPU: u32 = 1 << 3;
+/// A restricted-mode kick is pending on this thread.
+pub const THREAD_FLAG_RESTRICTED_KICK_PENDING: u32 = 1 << 4;
+
+/// Thread has been signaled to terminate.
 pub const THREAD_SIGNAL_KILL: u32 = 1 << 0;
+/// Thread has been signaled to suspend.
 pub const THREAD_SIGNAL_SUSPEND: u32 = 1 << 1;
+/// Thread has a pending job policy exception to deliver on syscall exit.
 pub const THREAD_SIGNAL_POLICY_EXCEPTION: u32 = 1 << 2;
+/// Thread has been kicked out of restricted mode.
 pub const THREAD_SIGNAL_RESTRICTED_KICK: u32 = 1 << 3;
+/// Thread has been signaled to sample its user stack.
 pub const THREAD_SIGNAL_SAMPLE_STACK: u32 = 1 << 4;
+/// Thread has been signaled to check its restartable sequence before returning to usermode.
 pub const THREAD_SIGNAL_CHECK_RSEQ: u32 = 1 << 5;
+/// Thread is being killed due to a fatal job policy violation.
+pub const THREAD_SIGNAL_POLICY_KILL: u32 = 1 << 6;
+// LINT.ThenChange(
+//   //zircon/kernel/include/kernel/thread.h:thread_flags_and_signals,
+//   //zircon/kernel/kernel/thread_ffi.cc:thread_flags_and_signals,
+// )
 
 /// `ZX_ERR_INTERNAL_INTR_KILLED`; `zx_status::Status` has no named constant for it.
 const ZX_ERR_INTERNAL_INTR_KILLED: Status =
@@ -241,15 +576,45 @@ const ZX_ERR_INTERNAL_INTR_KILLED: Status =
 /// `ZX_ERR_INTERNAL_INTR_RETRY`, an alias of `ZX_ERR_INTERRUPTED_RETRY`.
 const ZX_ERR_INTERNAL_INTR_RETRY: Status = Status::INTERRUPTED_RETRY;
 
-// LINT.IfChange(FxtRef)
-/// Rust representation of the C++ `FxtRef` struct.
+/// Process and thread koids for a tracing thread reference.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FxtRef {
     pub pid: u64,
     pub tid: u64,
 }
-// LINT.ThenChange(//zircon/kernel/kernel/thread_ffi.cc:FxtRef)
+
+/// Snapshot of a thread's name buffer.
+pub struct ThreadName {
+    buf: [u8; ZX_MAX_NAME_LEN],
+    len: usize,
+}
+
+impl ThreadName {
+    /// Returns an empty [`ThreadName`].
+    #[inline]
+    pub const fn empty() -> Self {
+        Self { buf: [0u8; ZX_MAX_NAME_LEN], len: 0 }
+    }
+
+    /// Returns the name bytes before the first NUL byte.
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+
+    /// Returns the name as a UTF-8 string slice, or `""` if it contains invalid UTF-8.
+    #[inline]
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(self.as_bytes()).unwrap_or("")
+    }
+}
+
+impl core::fmt::Display for ThreadName {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Display::fmt(&zr::from_utf8_lossy(self.as_bytes()), f)
+    }
+}
 
 /// Tag type for a [`Thread`]'s membership in the global migrate list (`migrate_list_node`).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -286,7 +651,7 @@ static_assert!(align_of::<OwnedWaitQueueList>() == align_of::<*mut c_void>());
 /// Per-thread preemption state.
 #[repr(C)]
 pub struct PreemptionState {
-    /// state_ contains three fields:
+    /// `state` contains three fields:
     ///
     ///  * a 15-bit preempt disable counter (bits 0-14)
     ///  * a 15-bit eager resched disable counter (bits 15-29)
@@ -295,73 +660,743 @@ pub struct PreemptionState {
     /// This is a single field so that both counters and the flags can be compared
     /// against zero with a single memory access and comparison.
     ///
-    /// state_'s counts are modified by interrupt handlers, but the counts are
+    /// `state`'s counts are modified by interrupt handlers, but the counts are
     /// always restored to their original value before the interrupt handler
     /// returns, so modifications are not visible to the interrupted thread.
     state: RelaxedAtomicU32,
 
-    /// preempts_pending_ tracks pending reschedules to both local and remote CPUs
+    /// `preempts_pending` tracks pending reschedules to both local and remote CPUs
     /// due to activity in the context of the current thread.
     ///
     /// This value can be changed asynchronously by an interrupt handler.
     ///
-    /// preempts_pending_ should only be non-zero:
-    ///  * if PreemptDisableCount() or EagerReschedDisable() are non-zero, or
-    ///  * after PreemptDisableCount() or EagerReschedDisable() have been
-    ///    decremented, while preempts_pending_ is being checked.
+    /// `preempts_pending` should only be non-zero:
+    ///  * if `preempt_disable_count()` or `eager_resched_disable_count()` are non-zero, or
+    ///  * after `preempt_disable_count()` or `eager_resched_disable_count()` have been
+    ///    decremented, while `preempts_pending` is being checked.
     preempts_pending: RelaxedAtomicU32,
 
     /// The maximum duration of the thread's timeslice extension.
     ///
-    /// This field is only valid when |state_|'s
-    /// |kTimeSliceExtensionFlags::Present| flag is set.
+    /// This field is only valid when `state`'s
+    /// `TIMESLICE_EXTENSION_PRESENT` flag is set.
     ///
     /// This field may only be accessed by its owning thread or in an interrupt
-    /// context of the owning thread.  When reading this field, be sure to issue an
-    /// atomic_signal_fence (compiler barrier) with acquire semantics after
-    /// observing the Present flag.  Likewise, when writing this field, use an
-    /// atomic_signal_fence with release semantics prior to setting the Present
+    /// context of the owning thread.  When reading this field, be sure to issue a
+    /// `compiler_fence` (Rust's `atomic_signal_fence`; a compiler barrier) with acquire semantics
+    /// after observing the Present flag.  Likewise, when writing this field, use a
+    /// `compiler_fence` with release semantics prior to setting the Present
     /// flag.  By using these fences, we ensure the flag and field value remain in
     /// sync.
     timeslice_extension: RelaxedAtomicI64,
 
     /// The deadline at which the thread timeslice extension expires.
     ///
-    /// This field is only valid when |kTimeSliceExtensionFlags::Active| flag is
+    /// This field is only valid when `TIMESLICE_EXTENSION_ACTIVE` flag is
     /// set.
     ///
     /// This field may only be accessed by its owning thread or in an interrupt
-    /// context of the owning thread.  When reading this field, be sure to issue an
-    /// atomic_signal_fence (compiler barrier) with acquire semantics after
-    /// observing the Active flag.  Likewise, when writing this field, use an
-    /// atomic_signal_fence with release semantics prior to setting the Active
+    /// context of the owning thread.  When reading this field, be sure to issue a
+    /// `compiler_fence` (Rust's `atomic_signal_fence`; a compiler barrier) with acquire semantics
+    /// after observing the Active flag.  Likewise, when writing this field, use a
+    /// `compiler_fence` with release semantics prior to setting the Active
     /// flag.  By using these fences, we ensure the flag and field value remain in
     /// sync.
     timeslice_extension_deadline: RelaxedAtomicI64,
 }
 
-impl PreemptionState {
-    /// Counters contained in state_ are limited to 15 bits.
-    pub const MAX_COUNT_VALUE: u32 = 0x7fff;
-    /// The preempt disable count is in the lowest 15 bits.
-    pub const PREEMPT_DISABLE_MASK: u32 = Self::MAX_COUNT_VALUE;
-    /// The eager resched disable count is in the next highest 15 bits.
-    pub const EAGER_RESCHED_DISABLE_SHIFT: u32 = 15;
-    /// Mask selecting the eager resched disable count.
-    pub const EAGER_RESCHED_DISABLE_MASK: u32 =
-        Self::MAX_COUNT_VALUE << Self::EAGER_RESCHED_DISABLE_SHIFT;
-    /// Finally, the timeslice extension flags are the highest 2 bits.
-    pub const TIMESLICE_EXTENSION_FLAGS_SHIFT: u32 = 30;
-    /// Mask selecting the timeslice extension flags.
-    pub const TIMESLICE_EXTENSION_FLAGS_MASK: u32 =
-        !(Self::PREEMPT_DISABLE_MASK | Self::EAGER_RESCHED_DISABLE_MASK);
-    /// Thread has a timeslice extension that may or may not be Active.
-    pub const TIMESLICE_EXTENSION_PRESENT: u32 = 0b01 << Self::TIMESLICE_EXTENSION_FLAGS_SHIFT;
-    /// Thread has an Active (in use) timeslice extension.
-    pub const TIMESLICE_EXTENSION_ACTIVE: u32 = 0b10 << Self::TIMESLICE_EXTENSION_FLAGS_SHIFT;
+bitflags::bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct Flush: u32 {
+        const LOCAL = 0x1;
+        const REMOTE = 0x2;
+        const ALL = Self::LOCAL.bits() | Self::REMOTE.bits();
+    }
 }
 
-// Compile-time layout assertions against <kernel/thread_layout.h>.
+// counts the number of times a thread's timeslice extension was activated (see
+// `PreemptionState::set_timeslice_extension`).
+crate::counters::define_kcounter!(THREAD_TIMESLICE_EXTENDED, "thread.timeslice_extended", Sum);
+
+impl PreemptionState {
+    /// Counters contained in state_ are limited to 15 bits.
+    const MAX_COUNT_VALUE: u32 = 0x7fff;
+    /// The preempt disable count is in the lowest 15 bits.
+    const PREEMPT_DISABLE_MASK: u32 = Self::MAX_COUNT_VALUE;
+    /// The eager resched disable count is in the next highest 15 bits.
+    const EAGER_RESCHED_DISABLE_SHIFT: u32 = 15;
+    /// Mask selecting the eager resched disable count.
+    const EAGER_RESCHED_DISABLE_MASK: u32 =
+        Self::MAX_COUNT_VALUE << Self::EAGER_RESCHED_DISABLE_SHIFT;
+    /// Finally, the timeslice extension flags are the highest 2 bits.
+    const TIMESLICE_EXTENSION_FLAGS_SHIFT: u32 = 30;
+    /// Mask selecting the timeslice extension flags.
+    const TIMESLICE_EXTENSION_FLAGS_MASK: u32 =
+        !(Self::PREEMPT_DISABLE_MASK | Self::EAGER_RESCHED_DISABLE_MASK);
+    /// Thread has a timeslice extension that may or may not be Active.
+    const TIMESLICE_EXTENSION_PRESENT: u32 = 0b01 << Self::TIMESLICE_EXTENSION_FLAGS_SHIFT;
+    /// Thread has an Active (in use) timeslice extension.
+    const TIMESLICE_EXTENSION_ACTIVE: u32 = 0b10 << Self::TIMESLICE_EXTENSION_FLAGS_SHIFT;
+
+    /// Returns true if preemption is enabled for this thread: both counts are zero and there is
+    /// no runtime extension.
+    #[inline]
+    pub fn preempt_is_enabled(&self) -> bool {
+        let state = self.state.load();
+        state == 0
+    }
+
+    /// Returns the thread's preempt disable count.
+    #[inline]
+    pub fn preempt_disable_count(&self) -> u32 {
+        Self::preempt_disable_count_of(self.state.load())
+    }
+
+    /// Returns the thread's eager resched disable count.
+    #[inline]
+    pub fn eager_resched_disable_count(&self) -> u32 {
+        Self::eager_resched_disable_count_of(self.state.load())
+    }
+
+    /// Returns the thread's pending preemptions mask.
+    #[inline]
+    pub fn preempts_pending(&self) -> cpu_mask_t {
+        self.preempts_pending.load()
+    }
+
+    /// Clears the thread's pending preemptions mask.
+    #[inline]
+    pub fn preempts_pending_clear(&self) {
+        self.preempts_pending.store(0);
+    }
+
+    /// Adds `mask` to the thread's pending preemptions mask.
+    #[inline]
+    pub fn preempts_pending_add(&self, mask: cpu_mask_t) {
+        self.preempts_pending.fetch_or(mask);
+    }
+
+    // `<kernel/thread.h>` duplicates these inline fast paths for C++ callers; keep them in sync.
+    // LINT.IfChange(PreemptionStateFastPaths)
+    /// PreemptDisable() increments the preempt disable counter for the current
+    /// thread. While preempt disable is non-zero, preemption of the thread is
+    /// disabled, including preemption from interrupt handlers. During this time,
+    /// any call to Reschedule() will only record that a reschedule is pending, and
+    /// won't do a context switch.
+    ///
+    /// Note that this does not disallow blocking operations (e.g.
+    /// mutex.Acquire()). Disabling preemption does not prevent switching away from
+    /// the current thread if it blocks.
+    ///
+    /// A call to `preempt_disable()` must be matched by a later call to
+    /// `preempt_reenable()` to decrement the preempt disable counter.
+    #[inline]
+    pub fn preempt_disable(&self) {
+        let old_state = self.state.fetch_add(1);
+        if Self::preempt_disable_count_of(old_state) >= Self::MAX_COUNT_VALUE {
+            Self::count_overflow("preempt disable", old_state);
+        }
+    }
+
+    /// Panics for a saturated disable counter. Kept out of line and cold so that the message
+    /// formatting does not bloat the hot `*_disable` entry points (which are inlined).
+    #[cold]
+    #[inline(never)]
+    #[track_caller]
+    fn count_overflow(what: &str, old_state: u32) -> ! {
+        panic!("{what} count overflow: old_state: {old_state:#x}");
+    }
+
+    /// Panics for a disable counter that was decremented from zero. Kept out of line and cold
+    /// so that the message formatting does not bloat the `*_reenable_slow` paths (formatting
+    /// `old_state` in place would force a SafeStack frame and defeat the tail call into
+    /// [`Self::flush_pending_continued`]).
+    #[cold]
+    #[inline(never)]
+    #[track_caller]
+    fn count_underflow(what: &str, old_state: u32) -> ! {
+        panic!("{what} count underflow: unmasked preemption state: {old_state:#x}");
+    }
+
+    /// PreemptReenable() decrements the preempt disable counter and flushes any
+    /// pending local preemption operation.  Callers must ensure that they are
+    /// calling from a context where blocking is allowed, as the call may result in
+    /// the immediate preemption of the calling thread.
+    ///
+    /// Blocking must be allowed (`debug_assert!`ed on the flush path, as in C++).
+    ///
+    /// # Safety
+    ///
+    /// - `self` must be the *current* thread's preemption state: the flush may reschedule the
+    ///   current thread, and `&self` survives that only because the current thread outlives its
+    ///   own run.
+    /// - The call must pair with a prior, still unmatched [`Self::preempt_disable`] on the
+    ///   current thread, and it must not drop preemption back to enabled while any
+    ///   [`PreemptDisabledToken`] is live.
+    #[inline]
+    pub unsafe fn preempt_reenable(&self) {
+        let old_state = self.state.fetch_sub(1);
+        // Fast path: count drops to zero, no eager resched count, no extension, nothing pending.
+        if old_state == 1 {
+            // Order the state RMW before the preempts_pending load for same-CPU interrupts.
+            core::sync::atomic::compiler_fence(Ordering::SeqCst);
+            if self.preempts_pending.load() != 0 {
+                // SAFETY: The `self`, pairing, and token obligations are forwarded from the
+                // caller, and `old_state == 1` satisfies the slow-path counter preconditions.
+                unsafe { self.preempt_reenable_slow(old_state) };
+            }
+            return;
+        }
+        // Are either of the counters non-zero?  Only take the early return when the preempt
+        // disable count was at least one: the underflow case (count already zero) must fall
+        // through to the slow path, which asserts on it.
+        if Self::preempt_disable_count_of(old_state) != 0
+            && (old_state & (Self::PREEMPT_DISABLE_MASK | Self::EAGER_RESCHED_DISABLE_MASK)) > 1
+        {
+            // We've got a non-zero count in one of the counters.
+            return;
+        }
+        // SAFETY: The `self`, pairing, and token obligations are forwarded from the caller, and
+        // `old_state` was produced by the `fetch_sub(1)` above with the non-zero counter cases
+        // already returned early.
+        unsafe { self.preempt_reenable_slow(old_state) }
+    }
+
+    /// The uncommon remainder of [`Self::preempt_reenable`], after the inline fast-path checks;
+    /// `old_state` is the `state` value before the decrement. Kept out of line so that the hot
+    /// entry point stays small enough to inline.
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::preempt_reenable`], and the caller has already decremented the preempt disable
+    /// count once, observing `old_state` with
+    /// `Self::eager_resched_disable_count_of(old_state) == 0 &&
+    /// Self::preempt_disable_count_of(old_state) == 1` (or an underflow with
+    /// `Self::preempt_disable_count_of(old_state) == 0`, which panics).
+    #[cold]
+    #[inline(never)]
+    unsafe fn preempt_reenable_slow(&self, old_state: u32) {
+        if Self::preempt_disable_count_of(old_state) == 0 {
+            Self::count_underflow("preempt disable", old_state);
+        }
+
+        // First, check for the expected situation of dropping the preempt count to zero
+        // with a zero eager resched disable count and no timeslice extension.  The inline
+        // wrapper only gets here in that case when a preemption is pending, so flush directly.
+        if old_state == 1 {
+            // SAFETY: Forwarded from the caller.
+            unsafe { self.flush_pending_continued(Flush::LOCAL) };
+            return;
+        }
+
+        // Things must be more complicated.  The inline wrapper already returned when either
+        // counter was still non-zero, so the counters are both zero.  At this point, we must
+        // have a timeslice extension installed.  This extension may be inactive, active and
+        // not-yet-expired, or active and expired.
+
+        // Is there an active extension?
+        if Self::has_active_timeslice_extension(old_state) {
+            // Has it expired?
+            if self.clear_active_timeslice_extension_if_expired() {
+                // It has.  We can flush.
+                debug_assert!(self.preempt_is_enabled());
+                // SAFETY: Forwarded from the caller.
+                unsafe { self.flush_pending(Flush::LOCAL) };
+            }
+        }
+
+        // We have an extension that's either inactive or active+unexpired.
+    }
+
+    /// PreemptReenableDelayFlush() decrements the preempt disable counter, but
+    /// deliberately does _not_ flush any pending local preemption operation.
+    /// Instead, if local preemption has become enabled again after the count
+    /// drops, and the local pending bit is set, the method will clear the bit and
+    /// return true.  Otherwise, it will return false.
+    ///
+    /// This method may only be called when interrupts are disabled and blocking is
+    /// not allowed.
+    ///
+    /// Callers of this method are "taking" ownership of the responsibility to
+    /// ensure that preemption on the local CPU takes place in the near future
+    /// after the call if the method returns true.
+    ///
+    /// Use of this method is strongly discouraged outside of top-level interrupt
+    /// glue and early threading setup.
+    ///
+    /// TODO(johngro): Consider replacing the bool return type with a move-only
+    /// RAII type which wraps the bool, and ensures that preemption event _must_
+    /// happen, either by having the user call a method on the object to manually
+    /// force the preemption event, or when the object destructs.
+    ///
+    /// # Safety
+    ///
+    /// - `self` must be the *current* thread's preemption state, with interrupts disabled and
+    ///   blocking disallowed.
+    /// - The call must pair with a prior, still unmatched [`Self::preempt_disable`] on the current
+    ///   thread, and it must not drop preemption back to enabled while any [`PreemptDisabledToken`]
+    ///   is live.
+    #[must_use]
+    #[inline]
+    pub unsafe fn preempt_reenable_delay_flush(&self) -> bool {
+        debug_assert!(crate::arch_rs::ints_disabled());
+        debug_assert!(crate::arch_rs::blocking_disallowed());
+
+        let old_state = self.state.fetch_sub(1);
+
+        // First, check for the expected situation of dropping the preempt count to zero
+        // with a zero eager resched disable count and no timeslice extension.
+        if old_state == 1 {
+            let local_mask = crate::kernel::types::cpu_num_to_mask(crate::arch_rs::curr_cpu_num());
+            let prev_mask = self.preempts_pending.fetch_and(!local_mask);
+            return (local_mask & prev_mask) != 0;
+        }
+        // Are either of the counters non-zero?  Only take the early return when the preempt
+        // disable count was at least one: the underflow case (count already zero) must fall
+        // through to the slow path, which asserts on it.
+        if Self::preempt_disable_count_of(old_state) != 0
+            && (old_state & (Self::PREEMPT_DISABLE_MASK | Self::EAGER_RESCHED_DISABLE_MASK)) > 1
+        {
+            // We've got a non-zero count in one of the counters.
+            return false;
+        }
+        self.preempt_reenable_delay_flush_slow(old_state)
+    }
+
+    /// The uncommon remainder of [`Self::preempt_reenable_delay_flush`], after the inline
+    /// fast-path checks; `old_state` is the `state` value before the decrement. Kept out of line
+    /// so that the hot entry point stays small enough to inline. Only reached when
+    /// `Self::eager_resched_disable_count_of(old_state) == 0 &&
+    /// Self::preempt_disable_count_of(old_state) == 1` and `old_state != 1` (or on underflow with
+    /// `Self::preempt_disable_count_of(old_state) == 0`, which panics).
+    #[must_use]
+    #[cold]
+    #[inline(never)]
+    fn preempt_reenable_delay_flush_slow(&self, old_state: u32) -> bool {
+        if Self::preempt_disable_count_of(old_state) == 0 {
+            Self::count_underflow("preempt disable", old_state);
+        }
+        debug_assert!(Self::has_timeslice_extension(old_state));
+
+        // The inline wrapper already returned when either counter was still non-zero, so the
+        // counters are both zero.  At this point, we must have a timeslice
+        // extension installed.  This extension may be inactive, active and
+        // not-yet-expired, or active and expired.
+
+        // Is there an active extension?
+        if Self::has_active_timeslice_extension(old_state) {
+            // Has it expired?
+            if self.clear_active_timeslice_extension_if_expired() {
+                // It has.
+                debug_assert!(self.preempt_is_enabled());
+                let local_mask =
+                    crate::kernel::types::cpu_num_to_mask(crate::arch_rs::curr_cpu_num());
+                let prev_mask = self.preempts_pending.fetch_and(!local_mask);
+                return (local_mask & prev_mask) != 0;
+            }
+        }
+
+        // We have an extension that's either inactive or active+unexpired.
+        false
+    }
+
+    /// EagerReschedDisable() increments the eager resched disable counter for the
+    /// current thread. When early resched disable is non-zero, issuing local and
+    /// remote preemptions is disabled, including from interrupt handlers. During
+    /// this time, any call to Reschedule() or other scheduler entry points that
+    /// imply a reschedule will only record the pending reschedule for the affected
+    /// CPU, but will not perform reschedule IPIs or a local context switch.
+    ///
+    /// As with PreemptDisable, blocking operations are still allowed while
+    /// eager resched disable is non-zero.
+    ///
+    /// A call to `eager_resched_disable()` must be matched by a later call to
+    /// `eager_resched_reenable()` to decrement the eager resched disable counter.
+    #[inline]
+    pub fn eager_resched_disable(&self) {
+        let old_state = self.state.fetch_add(1 << Self::EAGER_RESCHED_DISABLE_SHIFT);
+        if Self::eager_resched_disable_count_of(old_state) >= Self::MAX_COUNT_VALUE {
+            Self::count_overflow("eager resched disable", old_state);
+        }
+    }
+
+    /// EagerReschedReenable() decrements the eager resched disable counter and
+    /// flushes pending local and/or remote preemptions if enabled, respectively.
+    ///
+    /// Blocking must be allowed (`debug_assert!`ed on the local flush path, as in C++).
+    ///
+    /// # Safety
+    ///
+    /// - `self` must be the *current* thread's preemption state (see [`Self::preempt_reenable`]).
+    /// - The call must pair with a prior, still unmatched [`Self::eager_resched_disable`] on the
+    ///   current thread, and it must not drop preemption back to enabled while any
+    ///   [`PreemptDisabledToken`] is live.
+    #[inline]
+    pub unsafe fn eager_resched_reenable(&self) {
+        let old_state = self.state.fetch_sub(1 << Self::EAGER_RESCHED_DISABLE_SHIFT);
+        // Fast path: count drops to zero, no preempt disable count, no extension, nothing pending.
+        if old_state == 1 << Self::EAGER_RESCHED_DISABLE_SHIFT {
+            // Order the state RMW before the preempts_pending load for same-CPU interrupts.
+            core::sync::atomic::compiler_fence(Ordering::SeqCst);
+            if self.preempts_pending.load() != 0 {
+                // SAFETY: The `self`, pairing, and token obligations are forwarded from the
+                // caller, and `old_state` has eager resched disable count 1.
+                unsafe { self.eager_resched_reenable_slow(old_state) };
+            }
+            return;
+        }
+        if Self::eager_resched_disable_count_of(old_state) > 1 {
+            // Nothing to do since eager resched disable implies preempt disable.
+            return;
+        }
+        // SAFETY: The `self`, pairing, and token obligations are forwarded from the caller, and
+        // `old_state` was produced by the `fetch_sub` above with the
+        // `eager_resched_disable_count_of(old_state) > 1` case already returned early.
+        unsafe { self.eager_resched_reenable_slow(old_state) }
+    }
+
+    /// The uncommon remainder of [`Self::eager_resched_reenable`], after the inline fast-path
+    /// checks; `old_state` is the `state` value before the decrement. Kept out of line so that
+    /// the hot entry point stays small enough to inline.
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::eager_resched_reenable`], and the caller has already decremented the eager
+    /// resched disable count once, observing `old_state` with
+    /// `Self::eager_resched_disable_count_of(old_state) == 1` (or an underflow with
+    /// `Self::eager_resched_disable_count_of(old_state) == 0`, which panics).
+    #[cold]
+    #[inline(never)]
+    unsafe fn eager_resched_reenable_slow(&self, old_state: u32) {
+        if Self::eager_resched_disable_count_of(old_state) == 0 {
+            Self::count_underflow("eager resched disable", old_state);
+        }
+
+        // First check the expected case.
+        if old_state == 1 << Self::EAGER_RESCHED_DISABLE_SHIFT {
+            // Counts are both zero and there's no timeslice extension.  The inline wrapper only
+            // gets here in that case when a preemption is pending, so flush directly.
+            //
+            // Flushing all might reschedule this CPU, make sure it's OK to block.
+            // SAFETY: Forwarded from the caller.
+            unsafe { self.flush_pending_continued(Flush::ALL) };
+            return;
+        }
+
+        // The inline wrapper already returned when the eager resched disable count was still
+        // non-zero (nothing to do since eager resched disable implies preempt disable).
+
+        // We know we can at least flush remote.  Can we also flush local?
+        if Self::preempt_disable_count_of(old_state) > 0 {
+            // Nope, we've got a non-zero preempt disable count.
+            // SAFETY: Forwarded from the caller.
+            unsafe { self.flush_pending(Flush::REMOTE) };
+            return;
+        }
+
+        // Is there an active extension?
+        if Self::has_active_timeslice_extension(old_state) {
+            // Has it expired?
+            if self.clear_active_timeslice_extension_if_expired() {
+                // Yes, preempt disable count is zero and the active extension has
+                // expired.  We can flush all.
+                debug_assert!(self.preempt_is_enabled());
+                // SAFETY: Forwarded from the caller.
+                unsafe { self.flush_pending(Flush::ALL) };
+                return;
+            }
+            // Extension is active, can't flush local.
+        }
+
+        // We have an inactive extension or an unexpired active extension.  Either
+        // way, we can flush remote, but not local.
+        // SAFETY: Forwarded from the caller.
+        unsafe { self.flush_pending(Flush::REMOTE) };
+    }
+    // LINT.ThenChange(//zircon/kernel/include/kernel/thread.h:PreemptionStateFastPaths)
+
+    /// Sets a timeslice extension if one is not already set.
+    ///
+    /// This method should only be called in normal thread context.
+    ///
+    /// Returns false if a timeslice extension was already present or if the
+    /// supplied duration is <= 0.
+    ///
+    /// Note: It OK to call this from a context where preemption is (hard)
+    /// disabled.  If preemption is requested while the preempt disable count is
+    /// non-zero and a timeslice extension is in place, the extension will be
+    /// activated, but preemption will not occur until the count has dropped to
+    /// zero and the extension has expired or has been clear.
+    pub fn set_timeslice_extension(
+        &self,
+        extension_duration: zx_types::zx_duration_mono_t,
+    ) -> bool {
+        if extension_duration <= 0 {
+            return false;
+        }
+
+        let state = self.state.load();
+        if Self::has_timeslice_extension(state) {
+            return false;
+        }
+        self.timeslice_extension.store(extension_duration);
+        // Make sure that the timeslice extension value becomes visible to an
+        // interrupt handler in this thread prior to the state flag becoming
+        // visible.  See comment at |timeslice_extension|.
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Release);
+        self.state.fetch_or(Self::TIMESLICE_EXTENSION_PRESENT);
+        true
+    }
+
+    /// Unconditionally clears any timeslice extension.
+    ///
+    /// This method must be called in normal thread context because it may trigger
+    /// local preemption.
+    ///
+    /// Blocking must be allowed (`debug_assert!`ed on the flush path, as in C++).
+    ///
+    /// # Safety
+    ///
+    /// `self` must be the *current* thread's preemption state (see [`Self::preempt_reenable`]).
+    pub unsafe fn clear_timeslice_extension(&self) {
+        // Clear any present timeslice extension.
+        let old_state = self.state.fetch_and(!Self::TIMESLICE_EXTENSION_FLAGS_MASK);
+        // Are the counters both zero?
+        if (old_state & !Self::TIMESLICE_EXTENSION_FLAGS_MASK) == 0 {
+            // SAFETY: Forwarded from the caller.
+            unsafe { self.flush_pending(Flush::LOCAL) };
+        }
+    }
+
+    /// PreemptSetPending() marks a pending preemption for the given CPUs.
+    ///
+    /// This is similar to Reschedule(), except that it may only be used inside an
+    /// interrupt handler while interrupts and preemption are disabled, between
+    /// PreemptDisable() and PreemptReenable(). It is similar to Reschedule(),
+    /// except that it does not need to be called with thread's lock held.
+    pub fn preempt_set_pending(&self, reschedule_mask: cpu_mask_t) {
+        debug_assert!(crate::arch_rs::ints_disabled());
+        debug_assert!(crate::arch_rs::blocking_disallowed());
+        debug_assert!(!self.preempt_is_enabled());
+
+        // Latch the local CPU's mask before the atomic RMW below (interrupts are disabled, so the
+        // CPU cannot change) so that the compiler can share it with the caller's copy.
+        let local_cpu_mask = crate::kernel::types::cpu_num_to_mask(crate::arch_rs::curr_cpu_num());
+
+        self.preempts_pending.fetch_or(reschedule_mask);
+
+        // Are we pending for the local CPU?
+        let local_cpu_in_resched_mask = (reschedule_mask & local_cpu_mask) != 0;
+        if !local_cpu_in_resched_mask {
+            // Nope.
+            return;
+        }
+
+        self.evaluate_timeslice_extension();
+    }
+
+    /// Evaluate the thread's timeslice extension (if present), activating or
+    /// expiring it as necessary.
+    ///
+    /// Returns whether preemption is enabled.
+    #[inline]
+    pub fn evaluate_timeslice_extension(&self) -> bool {
+        let old_state = self.state.load();
+        if old_state == 0 {
+            // No counts, no extension.  The common case.
+            return true;
+        }
+        self.evaluate_timeslice_extension_slow(old_state)
+    }
+
+    /// The uncommon remainder of [`Self::evaluate_timeslice_extension`], after the inline
+    /// fast-path check; `old_state` is the `state` value just loaded. Kept out of line so that the
+    /// hot entry point stays small enough to inline.
+    #[cold]
+    #[inline(never)]
+    fn evaluate_timeslice_extension_slow(&self, old_state: u32) -> bool {
+        if !Self::has_timeslice_extension(old_state) {
+            // No extension, but we have a non-zero count.
+            return false;
+        }
+
+        if Self::has_active_timeslice_extension(old_state) {
+            if !self.clear_active_timeslice_extension_if_expired() {
+                return false;
+            }
+            // The active extension has expired.  If the counts are both zero, then
+            // we're ready for preemption.
+            return (old_state & !Self::TIMESLICE_EXTENSION_FLAGS_MASK) == 0;
+        }
+
+        // We have a not-yet-active extension.  Time to activate it.
+        //
+        // See comment at |timeslice_extension| for why the signal fence is needed.
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Acquire);
+        let extension_duration = self.timeslice_extension.load();
+        if extension_duration <= 0 {
+            // Already expired.
+            self.state.fetch_and(!Self::TIMESLICE_EXTENSION_FLAGS_MASK);
+            return (old_state & !Self::TIMESLICE_EXTENSION_FLAGS_MASK) == 0;
+        }
+        let deadline = (crate::platform_rs::timer::current_mono_time()
+            + crate::platform_rs::timer::DurationMono(extension_duration))
+        .0;
+        self.timeslice_extension_deadline.store(deadline);
+        // See comment at |timeslice_extension_deadline| for why the signal fence
+        // is needed.
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Release);
+        self.state.fetch_or(Self::TIMESLICE_EXTENSION_ACTIVE);
+        Self::set_preemption_timer_for_extension(deadline);
+        false
+    }
+
+    /// Resets the preemption state. This should only be called when reviving an
+    /// idle/power thread that halted while taking a CPU offline.
+    ///
+    /// # Safety
+    ///
+    /// The owning thread must be halted (not running on any CPU) and no [`PreemptDisabledToken`]
+    /// for it may be live; `Reset` exists only for `ReviveIdlePowerThread`.
+    pub unsafe fn reset(&self) {
+        self.state.store(0);
+        self.preempts_pending.store(0);
+        self.timeslice_extension.store(0);
+        self.timeslice_extension_deadline.store(0);
+    }
+
+    const fn eager_resched_disable_count_of(state: u32) -> u32 {
+        (state & Self::EAGER_RESCHED_DISABLE_MASK) >> Self::EAGER_RESCHED_DISABLE_SHIFT
+    }
+
+    const fn preempt_disable_count_of(state: u32) -> u32 {
+        state & Self::PREEMPT_DISABLE_MASK
+    }
+
+    const fn has_timeslice_extension(state: u32) -> bool {
+        (state & Self::TIMESLICE_EXTENSION_PRESENT) != 0
+    }
+
+    const fn has_active_timeslice_extension(state: u32) -> bool {
+        (state & Self::TIMESLICE_EXTENSION_ACTIVE) != 0
+    }
+
+    /// Sets the preemption timer when a timeslice has been extended.
+    fn set_preemption_timer_for_extension(deadline: zx_instant_mono_t) {
+        // Interrupts must be disabled when calling PreemptReset.
+        let _interrupt_disable = crate::arch_rs::InterruptDisableGuard::new();
+        // SAFETY: Interrupts are disabled for the call, as `TimerQueue::PreemptReset` requires,
+        // and `PerCpu::get_current()` returns the current CPU's `PerCpu`.
+        unsafe {
+            crate::kernel::percpu::PerCpu::get_current()
+                .timer_queue
+                .preempt_reset(InstantMono(deadline))
+        };
+        THREAD_TIMESLICE_EXTENDED.add(1);
+    }
+
+    /// Checks whether the active timeslice extension has expired and if so, clears
+    /// it and returns true.
+    ///
+    /// Should only be called when there is an active timeslice extension.
+    fn clear_active_timeslice_extension_if_expired(&self) -> bool {
+        // Has the extension expired?
+        //
+        // See comment at |timeslice_extension_deadline| for why the signal fence is needed.
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Acquire);
+        if crate::platform_rs::timer::current_mono_time()
+            >= crate::platform_rs::timer::InstantMono(self.timeslice_extension_deadline.load())
+        {
+            self.state.fetch_and(!Self::TIMESLICE_EXTENSION_FLAGS_MASK);
+            return true;
+        }
+        false
+    }
+
+    /// Flushes local, remote, or all pending preemptions.
+    ///
+    /// This method is kept split from [`Self::flush_pending_continued`] so that the early-out
+    /// case of no pending preemptions stays small and inlinable.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be the *current* thread's preemption state: flushing a local preemption
+    /// reschedules the current thread, and `&self` stays valid across that only because the
+    /// current thread outlives its own run.
+    #[inline]
+    unsafe fn flush_pending(&self, flush: Flush) {
+        // Early out to avoid unnecessarily taking the thread lock. This check races
+        // any potential flush due to context switch, however, the context switch can
+        // only clear bits that would have been flushed below, no new pending
+        // preemptions are possible in the mask bits indicated by |flush|.
+        if self.preempts_pending.load() == 0 {
+            return;
+        }
+        core::hint::cold_path();
+        // SAFETY: Forwarded from the caller.
+        unsafe { self.flush_pending_continued(flush) }
+    }
+
+    /// The out-of-line part of [`Self::flush_pending`], entered only when a preemption is
+    /// pending.
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::flush_pending`].
+    #[cold]
+    #[inline(never)]
+    unsafe fn flush_pending_continued(&self, flush: Flush) {
+        // If we're flushing the local CPU, make sure OK to block since flushing
+        // local may trigger a reschedule.
+        debug_assert!(!flush.contains(Flush::LOCAL) || !crate::arch_rs::blocking_disallowed());
+
+        let _interrupt_disable = crate::arch_rs::InterruptDisableGuard::new();
+        // Recheck, pending preemptions could have been flushed by a context switch
+        // before interrupts were disabled.
+        let pending_mask = self.preempts_pending.load();
+
+        // If there is a pending local preemption the scheduler will take care of
+        // flushing all pending reschedules.
+        let current_cpu_mask =
+            crate::kernel::types::cpu_num_to_mask(crate::arch_rs::curr_cpu_num());
+        if (pending_mask & current_cpu_mask) != 0 && flush.contains(Flush::LOCAL) {
+            // Clear the local preempt pending flag before calling preempt.  Failure
+            // to do this can cause recursion during Scheduler::Preempt if any code
+            // (such as debug tracing code) attempts to disable and re-enable
+            // preemption during the scheduling operation.
+            self.preempts_pending.fetch_and(!current_cpu_mask);
+
+            // TODO(johngro): We cannot be holding the current thread's lock while we do
+            // this.  Is there a good way to enforce this requirement via either static
+            // annotation or dynamic checks?
+            //
+            // `scheduler::preempt` requires that no `ChainLockTransaction` is active on this CPU
+            // (`TA_EXCL(chainlock_transaction_token)` in C++).  Like the C++ `DEBUG_ASSERT` via
+            // `ChainLockTransaction::AssertNoTransactionActive()`, this is a debug-only check:
+            // `scheduler::preempt` enters `single_chain_lock_guard!`, whose
+            // `ChainLockTransaction::register` asserts the same condition in release builds.
+            crate::kconcurrent::debug_assert_no_transaction_active();
+            // SAFETY: No `ChainLockTransaction` is active on the current CPU (debug-asserted
+            // above, and asserted unconditionally by `ChainLockTransaction::register` inside
+            // `scheduler::preempt`'s `single_chain_lock_guard!`), which is `scheduler::preempt`'s
+            // only precondition. `self` is the *current* thread's preemption state (the caller's
+            // contract), and the current thread outlives its own run, so `&self` stays valid
+            // across the resulting context switch; `PreemptionState` is all relaxed atomics, so
+            // the scheduler's and interrupt handlers' writes through it meanwhile are sound.
+            unsafe {
+                crate::kernel::scheduler::preempt(
+                    crate::kernel::scheduler::PreemptType::FlushPending,
+                );
+            }
+        } else if flush.contains(Flush::REMOTE) {
+            // The current cpu is ignored by mp_reschedule if present in the mask.
+            crate::kernel::mp::reschedule(pending_mask, 0);
+            self.preempts_pending.fetch_and(current_cpu_mask);
+        }
+    }
+}
+
+// Compile-time layout and constant assertions against <kernel/thread_layout.h>.
 static_assert!(size_of::<PreemptionState>() == size_of::<layout::PreemptionStateStorage>());
 static_assert!(align_of::<PreemptionState>() == align_of::<layout::PreemptionStateStorage>());
 static_assert!(offset_of!(PreemptionState, state) == layout::PreemptionStateLayout_kStateOffset);
@@ -377,6 +1412,34 @@ static_assert!(
     offset_of!(PreemptionState, timeslice_extension_deadline)
         == layout::PreemptionStateLayout_kTimesliceExtensionDeadlineOffset
 );
+static_assert!(PreemptionState::MAX_COUNT_VALUE == layout::PreemptionStateLayout_kMaxCountValue);
+static_assert!(
+    PreemptionState::PREEMPT_DISABLE_MASK == layout::PreemptionStateLayout_kPreemptDisableMask
+);
+static_assert!(
+    PreemptionState::EAGER_RESCHED_DISABLE_SHIFT
+        == layout::PreemptionStateLayout_kEagerReschedDisableShift
+);
+static_assert!(
+    PreemptionState::EAGER_RESCHED_DISABLE_MASK
+        == layout::PreemptionStateLayout_kEagerReschedDisableMask
+);
+static_assert!(
+    PreemptionState::TIMESLICE_EXTENSION_FLAGS_SHIFT
+        == layout::PreemptionStateLayout_kTimesliceExtensionFlagsShift
+);
+static_assert!(
+    PreemptionState::TIMESLICE_EXTENSION_FLAGS_MASK
+        == layout::PreemptionStateLayout_kTimesliceExtensionFlagsMask
+);
+static_assert!(
+    PreemptionState::TIMESLICE_EXTENSION_PRESENT
+        == layout::PreemptionStateLayout_kTimesliceExtensionPresent
+);
+static_assert!(
+    PreemptionState::TIMESLICE_EXTENSION_ACTIVE
+        == layout::PreemptionStateLayout_kTimesliceExtensionActive
+);
 
 /// TaskState is responsible for running the task defined by
 /// |entry(arg)|, and reporting its value to any joining threads.
@@ -384,10 +1447,15 @@ static_assert!(
 /// TODO: the detached state in Thread::flags_ probably belongs here.
 #[repr(C)]
 pub struct TaskState {
+    // Safety invariant: written once by `rust_task_state_init` before the owning `Thread` is
+    // published; never mutated afterwards.
     /// The Thread's entry point, and its argument.
     entry: Option<extern "C" fn(*mut c_void) -> i32>,
     arg: *mut c_void,
 
+    // Safety invariant: written by the exiting thread under its own lock (`Thread::Current::Exit`)
+    // and read by a joiner under the same lock after observing `THREAD_DEATH` (`Thread::Join`), so
+    // the thread's lock orders the two; see `retcode`.
     /// Storage for the return code.
     ///
     /// TODO: This is logically protected by our thread's lock.  What is a
@@ -396,6 +1464,171 @@ pub struct TaskState {
 
     /// Other threads waiting to join this Thread.
     retcode_wait_queue: WaitQueue,
+}
+
+impl TaskState {
+    /// The thread's entry point; `None` for threads driven by an alternate trampoline, which
+    /// `CreateEtc` allows to be created without one.
+    #[inline]
+    pub(crate) fn entry(&self) -> Option<extern "C" fn(*mut c_void) -> i32> {
+        self.entry
+    }
+
+    /// The argument passed to the entry point.
+    #[inline]
+    pub(crate) fn arg(&self) -> *mut c_void {
+        self.arg
+    }
+
+    /// The thread's return code.
+    ///
+    /// # Safety
+    ///
+    /// The caller must exclude a concurrent write by the exiting thread (`Thread::Current::Exit`):
+    /// either it holds the owning thread's lock (the return code is written under that lock, and
+    /// `Thread::Join` reads it under the same lock after observing `THREAD_DEATH`), or the thread
+    /// has not started running yet.
+    #[inline]
+    pub unsafe fn retcode(&self) -> i32 {
+        // SAFETY: The caller excludes concurrent writers; no reference is formed.
+        unsafe { self.retcode.get().read() }
+    }
+
+    /// Records the thread's entry point and argument (`TaskState::Init`).
+    ///
+    /// Called from `CreateEtc` on a fully constructed but not yet published `Thread`, so the
+    /// fields are written through the raw pointer and no `&TaskState` is formed.
+    ///
+    /// # Safety
+    ///
+    /// `this` points to a valid `TaskState` not yet visible to any other thread, with no live Rust
+    /// reference to it.
+    #[inline]
+    pub(crate) unsafe fn init(
+        this: *mut Self,
+        entry: Option<extern "C" fn(*mut c_void) -> i32>,
+        arg: *mut c_void,
+    ) {
+        // SAFETY: The caller guarantees the pointer is valid for writes with no live Rust
+        // reference; projecting the fields through the raw pointer forms none.
+        unsafe {
+            (&raw mut (*this).entry).write(entry);
+            (&raw mut (*this).arg).write(arg);
+        }
+    }
+
+    /// Blocks `current_thread` in this thread's `retcode_wait_queue` until that thread exits or
+    /// `deadline` passes.
+    ///
+    /// The queue's lock is released by this call because the C++ is `TA_REL(get_lock())`;
+    /// `current_thread`'s lock stays held on return (`TA_REQ`).
+    ///
+    /// There is deliberately no `&self`: the target thread (and so its `TaskState`) may be torn
+    /// down while the joiner is blocked (`Detach` wakes joiners with `BAD_STATE` and a detached
+    /// target then exits and frees itself, possibly before the woken joiner runs), so no reference
+    /// into it may be live across `scheduler::block`. The `&WaitQueue` and its [`OwnerGuard`] are
+    /// scoped to [`WaitQueue::block_etc_preamble`], which releases the queue lock before the
+    /// thread blocks, and [`WaitQueueBase::block_etc_postamble`] dereferences the returned
+    /// `base_ptr` only once, before `scheduler::block`.
+    ///
+    /// # Safety
+    ///
+    /// - `this` points to a valid `TaskState` at the time of the call, and its
+    ///   `retcode_wait_queue` remains valid while `current_thread` remains blocked in it (and at
+    ///   least until both the queue lock and `current_thread`'s lock are released during the block
+    ///   operation).
+    /// - `current_thread.owner()` is the currently executing thread in `THREAD_RUNNING`, not queued
+    ///   in any wait queue, in a context where blocking is permitted (no spinlocks held, blocking
+    ///   not disallowed).
+    /// - The active transaction is finalized with `(*this).retcode_wait_queue`'s lock and
+    ///   `current_thread`'s lock as the only held chain locks, with no other guard or proof for
+    ///   the queue lock live; this call takes over releasing the queue lock.
+    pub unsafe fn join(
+        this: *const Self,
+        current_thread: &mut ChainLockProof<'_, Thread>,
+        deadline: InstantMono,
+        clt_token: &ChainLockTransactionToken,
+    ) -> Result<(), Status> {
+        let deadline = Deadline::no_slack(deadline.into());
+        // The `&WaitQueue` and its guard live only inside this block: `block_etc_preamble`
+        // releases the queue lock before the thread blocks, and only the raw `base_ptr` is passed
+        // to `block_etc_postamble`.
+        let base_ptr = {
+            // SAFETY: `this` is valid at the time of the call per the caller; projecting the field
+            // forms no reference to the `TaskState` itself, and the `&WaitQueue` does not outlive
+            // this block.
+            let queue = unsafe { &(*this).retcode_wait_queue };
+            // SAFETY: The queue's lock is held by the active transaction with no other guard or
+            // proof (precondition), and this guard takes over releasing it.
+            let guard = unsafe { OwnerGuard::adopt_unchecked(queue, clt_token) };
+            // SAFETY: `current_thread` is the running thread, not queued, in a context where
+            // blocking is permitted; `deadline` is monotonic; the active transaction is finalized
+            // with `guard`'s and `current_thread`'s locks as the only held chain locks; and the
+            // queue remains valid while `current_thread` is blocked in it.
+            unsafe {
+                WaitQueue::block_etc_preamble(
+                    guard,
+                    current_thread,
+                    &deadline,
+                    0,
+                    ResourceOwnership::Normal,
+                    Interruptible::No,
+                    clt_token,
+                )?
+            }
+        };
+        // SAFETY: `block_etc_preamble` returned `Ok(base_ptr)` with `current_thread` inserted in
+        // `base_ptr` and the queue lock released; `base_ptr` remains valid while `current_thread`
+        // is blocked in it; and `current_thread`'s lock is the only held chain lock in the
+        // finalized transaction.
+        unsafe {
+            WaitQueueBase::block_etc_postamble(
+                base_ptr,
+                current_thread.reborrow(),
+                &deadline,
+                clt_token,
+            )
+        }
+    }
+
+    /// Attempt to wake all of our joiners.  This operation might fail because of a
+    /// conflict while attempting to obtain the required locks, in which case the
+    /// caller needs to back off (drop all currently held chain locks) and try
+    /// again.
+    ///
+    /// `Thread::Current::Exit` restarts its finalized transaction before calling this in a loop
+    /// with its own lock held. On `true`, `wake_all_locked` finalizes the transaction and
+    /// `guard.release()` drops the queue lock (`ChainLock::release` does not require an
+    /// unfinalized transaction); on `false`, either `acquire_or_backoff` or `wake_all_locked`
+    /// backed off without finalizing.
+    ///
+    /// # Panics
+    ///
+    /// Debug-asserts (via `acquire_or_backoff` and `wake_all_locked`) that the active
+    /// transaction is not already finalized on entry.
+    pub fn try_wake_joiners(
+        &self,
+        status: impl Into<Result<(), Status>>,
+        clt_token: &ChainLockTransactionToken,
+        preempt_disabled_token: &PreemptDisabledToken,
+    ) -> bool {
+        // Attempt to lock the queue first.
+        let Some(mut guard) = OwnerGuard::acquire_or_backoff(&self.retcode_wait_queue, clt_token)
+        else {
+            core::hint::cold_path();
+            return false;
+        };
+
+        // Now, try to lock and wake all of our waiting threads.
+        let result = guard.proof().wake_all_locked(status, clt_token, preempt_disabled_token);
+
+        // No matter what just happened, we need to drop the queue's lock.
+        guard.release();
+
+        // If we got a result, then we succeeded in waking the threads we wanted to
+        // wake.
+        result.is_some()
+    }
 }
 
 // Compile-time layout assertions against <kernel/thread_layout.h>.
@@ -440,6 +1673,54 @@ static_assert!(
         == layout::MemoryAllocationStateLayout_kDisableCountOffset
 );
 
+impl MemoryAllocationState {
+    /// Increments the memory-allocation disable count for this thread.
+    ///
+    /// # Safety
+    ///
+    /// Must only be called on the current thread's [`MemoryAllocationState`] and must be balanced
+    /// with a corresponding call to [`Self::enable`] on the same thread.
+    #[inline]
+    pub unsafe fn disable(&self) {
+        core::sync::atomic::compiler_fence(Ordering::SeqCst);
+        // SAFETY: `self.disable_count` is only accessed by the owning thread or interrupt handlers
+        // running in its context, using volatile loads/stores surrounded by `SeqCst` compiler
+        // fences without forming references to the `u32`.
+        unsafe {
+            let count = core::ptr::read_volatile(self.disable_count.get());
+            core::ptr::write_volatile(self.disable_count.get(), count + 1);
+        }
+        core::sync::atomic::compiler_fence(Ordering::SeqCst);
+    }
+
+    /// Decrements the memory-allocation disable count for this thread.
+    ///
+    /// # Safety
+    ///
+    /// Must only be called on the current thread's [`MemoryAllocationState`] to balance a prior
+    /// call to [`Self::disable`] on the same thread.
+    #[inline]
+    pub unsafe fn enable(&self) {
+        core::sync::atomic::compiler_fence(Ordering::SeqCst);
+        // SAFETY: As in `disable`.
+        unsafe {
+            let count = core::ptr::read_volatile(self.disable_count.get());
+            debug_assert!(count > 0);
+            core::ptr::write_volatile(self.disable_count.get(), count - 1);
+        }
+        core::sync::atomic::compiler_fence(Ordering::SeqCst);
+    }
+
+    /// Returns true if memory allocation is allowed.
+    #[inline]
+    pub fn is_enabled(&self) -> bool {
+        core::sync::atomic::compiler_fence(Ordering::SeqCst);
+        // SAFETY: As in `disable`.
+        let count = unsafe { core::ptr::read_volatile(self.disable_count.get()) };
+        count == 0
+    }
+}
+
 /// A Zircon kernel thread.
 ///
 /// Its layout is shared with `<kernel/thread.h>` and checked against `<kernel/thread_layout.h>`.
@@ -470,9 +1751,12 @@ pub struct Thread {
     //
     // `scheduler_variable_lock_` (a zero-sized `fbl::NullLock`) has no storage and is omitted.
     //
-    // Mutated by the owning thread (restricted-kick) and under the thread's lock by other threads.
-    flags: UnsafeCell<u32>,
-    signals: AtomicU32,
+    // Relaxed atomic. Each flag is an independent bit: the owning thread mutates
+    // `THREAD_FLAG_RESTRICTED_KICK_PENDING` lock-free, `THREAD_FLAG_IDLE`/`THREAD_FLAG_VCPU` are
+    // set during setup, and `THREAD_FLAG_DETACHED`/`THREAD_FLAG_FREE_STRUCT` are set at creation
+    // or under `get_lock()`.
+    flags: RelaxedAtomicU32,
+    signals: RelaxedAtomicU32,
     // Guard: split (see `scheduler::SchedulerState`). `state`, `base_profile`,
     // `inherited_profile_values` and the `effective_profile` dirty flags are written under
     // `get_lock()`; the queue-related members (`start_time`, `finish_time`, time slices,
@@ -524,13 +1808,17 @@ pub struct Thread {
 
     /// When user_thread_ is set, these values are copied from ThreadDispatcher and
     /// its parent ProcessDispatcher. Kernel threads maintain an independent tid.
-    // Set once during user-thread setup and read lock-free afterwards.
-    tid: UnsafeCell<zx_koid_t>,
-    pid: UnsafeCell<zx_koid_t>,
+    // Written during thread setup (or `SetUserThread` before the thread runs) and read lock-free
+    // with relaxed ordering.
+    tid: RelaxedAtomicU64,
+    pid: RelaxedAtomicU64,
 
     /// Architecture-specific stuff.
     arch: Opaque<layout::ThreadArchStorage>,
 
+    /// `KernelStack` storage. C++ constructs, `Init`s, tears down and destroys it; Rust also
+    /// initializes it via `stack_init` and reads it through `stack`, whose callers exclude
+    /// those mutations.
     stack: Opaque<layout::ThreadStackStorage>,
 
     /// This is used by dispatcher.cc:SafeDeleter.
@@ -538,8 +1826,11 @@ pub struct Thread {
     recursive_object_deletion_list: UnsafeCell<*mut c_void>,
 
     /// This always includes the trailing NUL.
-    // NUL-terminated name buffer; written by `set_name` and read lock-free.
-    name: UnsafeCell<[c_char; ZX_MAX_NAME_LEN]>,
+    // NUL-terminated name buffer, byte-wise relaxed atomics: `set_name` (and C++
+    // `Thread::Current::SetName`, which forwards to it) writes it without a lock and readers
+    // (`name_bytes`, `name_bytes_ptr`, C++ `name()`) copy or read it lock-free, tolerating a torn
+    // name. Same layout as `char[ZX_MAX_NAME_LEN]`.
+    name: [AtomicU8; ZX_MAX_NAME_LEN],
 
     /// Buffering for Debuglog output.
     linebuffer: Opaque<layout::ThreadLinebufferStorage>,
@@ -672,11 +1963,17 @@ static_assert!(offset_of!(Thread, tid) == layout::ThreadLayout_kTidOffset);
 static_assert!(offset_of!(Thread, pid) == layout::ThreadLayout_kPidOffset);
 static_assert!(offset_of!(Thread, arch) == layout::ThreadLayout_kArchOffset);
 static_assert!(offset_of!(Thread, stack) == layout::ThreadLayout_kStackOffset);
+static_assert!(size_of::<KernelStack>() == size_of::<layout::ThreadStackStorage>());
+static_assert!(align_of::<KernelStack>() == align_of::<layout::ThreadStackStorage>());
 static_assert!(
     offset_of!(Thread, recursive_object_deletion_list)
         == layout::ThreadLayout_kRecursiveObjectDeletionListOffset
 );
 static_assert!(offset_of!(Thread, name) == layout::ThreadLayout_kNameOffset);
+static_assert!(size_of::<[AtomicU8; ZX_MAX_NAME_LEN]>() == size_of::<[c_char; ZX_MAX_NAME_LEN]>());
+static_assert!(
+    align_of::<[AtomicU8; ZX_MAX_NAME_LEN]>() == align_of::<[c_char; ZX_MAX_NAME_LEN]>()
+);
 static_assert!(offset_of!(Thread, linebuffer) == layout::ThreadLayout_kLinebufferOffset);
 static_assert!(offset_of!(Thread, lock_flow_id) == layout::ThreadLayout_kLockFlowIdOffset);
 static_assert!(offset_of!(Thread, user_state_saved) == layout::ThreadLayout_kUserStateSavedOffset);
@@ -726,12 +2023,65 @@ unsafe impl ChainLocked for Thread {
 pub enum ThreadListLockClass {}
 
 impl ksync::LockClass for ThreadListLockClass {
-    const ID: *mut core::ffi::c_void = core::ptr::null_mut();
+    const ID: *mut c_void = core::ptr::null_mut();
+    const FLAGS: ksync::LockFlags = crate::ksync_kernel::TrackedSpinlock::LOCK_FLAGS;
 }
 
 impl Thread {
     /// The sampling session value of a thread not associated with any session.
     pub const INVALID_SAMPLING_SESSION: u64 = u64::MAX;
+
+    /// Returns a reference to the thread's `TaskState`.
+    #[inline]
+    pub(crate) fn task_state(&self) -> &TaskState {
+        &self.task_state
+    }
+
+    /// Returns a reference to the thread's `PreemptionState`.
+    #[inline]
+    pub(crate) fn preemption_state(&self) -> &PreemptionState {
+        &self.preemption_state
+    }
+
+    /// Allocates and constructs an empty `Thread("")` instance on the kernel heap without
+    /// initializing its kernel stack or placing it in the global thread list.
+    #[inline]
+    pub fn create_empty() -> Option<NonNull<Self>> {
+        // SAFETY: `cpp_thread_create_empty` allocates a `Thread("")` using `fbl::AllocChecker`
+        // and returns null on allocation failure.
+        NonNull::new(unsafe { cpp_thread_create_empty() })
+    }
+
+    /// Initializes the kernel stack of `thread`.
+    ///
+    /// # Safety
+    ///
+    /// `thread` must point to a valid, live `Thread` instance whose stack has not yet been
+    /// initialized, and nothing may concurrently access its `KernelStack` during this call.
+    #[inline]
+    pub unsafe fn stack_init(thread: *mut Self) -> Result<(), Status> {
+        debug_assert!(!thread.is_null());
+        // SAFETY: `thread` points to a valid `Thread` per the caller, and `&raw const` projects the
+        // `stack` field place without forming a reference to the whole `Thread`.
+        let stack = unsafe { &raw const (*thread).stack };
+        // SAFETY: `stack` holds the thread's `KernelStack`, constructed in place by C++, and its
+        // size and alignment are asserted above. The caller guarantees exclusive access to the
+        // uninitialized `KernelStack`.
+        unsafe { (*(*stack).get().cast::<KernelStack>()).init() }
+    }
+
+    /// Deletes a `Thread` instance previously allocated with [`Self::create_empty`].
+    ///
+    /// # Safety
+    ///
+    /// `thread` must be either null or a pointer returned by [`Self::create_empty`] that has not
+    /// been started or deleted yet.
+    #[inline]
+    pub unsafe fn delete(thread: *mut Self) {
+        // SAFETY: The caller guarantees `thread` is null or a valid unstarted `Thread` allocated
+        // by `create_empty`.
+        unsafe { cpp_thread_delete(thread) }
+    }
 
     /// Domain-specific conversion: returns raw pointer for [`Thread`].
     #[inline]
@@ -771,29 +2121,288 @@ impl Thread {
         unsafe { (*canary).assert() };
     }
 
-    /// Returns the current pending signals bitmask on this thread.
+    /// Like [`Self::is_idle`], for a raw pointer, without forming a `&Thread`.
     ///
-    /// Uses `Relaxed` ordering, matching C++ `Thread::signals()` (`ktl::memory_order_relaxed`).
-    /// Signal bitmask reads are polled opportunistically or re-checked under the thread's lock,
-    /// and do not synchronize other memory accesses.
+    /// # Safety
+    ///
+    /// `this` must point to a valid, live [`Thread`].
     #[inline]
-    pub fn signals(&self) -> u32 {
-        self.signals.load(Ordering::Relaxed)
+    pub(super) unsafe fn is_idle_ptr(this: *const Self) -> bool {
+        // SAFETY: `this` points to a valid `Thread` per the caller, and `&raw const` projects the
+        // `flags` field place without forming a reference to the whole `Thread`.
+        let flags = unsafe { &raw const (*this).flags };
+        // SAFETY: `flags` is the live `Thread`'s flags field (see above).
+        unsafe { (*flags).load() & THREAD_FLAG_IDLE != 0 }
     }
 
-    /// Checks whether the kill or suspend signal has been raised. If kill has been raised, returns
-    /// `Err(ZX_ERR_INTERNAL_INTR_KILLED)`. If suspend has been raised, returns
-    /// `Err(ZX_ERR_INTERNAL_INTR_RETRY)`. Otherwise, returns `Ok(())`.
+    /// Like [`Self::preemption_state`], for a raw pointer, without forming a `&Thread`.
+    ///
+    /// # Safety
+    ///
+    /// `this` must point to a valid, live [`Thread`].
     #[inline]
-    pub fn check_kill_or_suspend_signal(&self) -> Result<(), Status> {
-        let current_signals = self.signals();
+    pub(super) unsafe fn preemption_state_ptr(this: *const Self) -> *const PreemptionState {
+        // SAFETY: `this` points to a valid `Thread` per the caller, and `&raw const` projects the
+        // `preemption_state` field place without forming a reference to the whole `Thread`.
+        unsafe { &raw const (*this).preemption_state }
+    }
+
+    /// Returns the koid of the associated `ThreadDispatcher` for user threads or an independent
+    /// koid for kernel threads.
+    #[inline]
+    pub fn tid(&self) -> zx_koid_t {
+        self.tid.load()
+    }
+
+    /// Like [`Self::tid`], for a raw pointer, without forming a `&Thread`.
+    ///
+    /// # Safety
+    ///
+    /// `this` must point to a valid, live [`Thread`].
+    #[inline]
+    pub(crate) unsafe fn tid_ptr(this: *const Self) -> zx_koid_t {
+        // SAFETY: `this` points to a valid `Thread` per the caller, and `&raw const` projects the
+        // `tid` field place without forming a reference to the whole `Thread`.
+        let tid = unsafe { &raw const (*this).tid };
+        // SAFETY: `tid` is the live `Thread`'s `tid` field (see above).
+        unsafe { (*tid).load() }
+    }
+
+    /// Returns the koid of the associated `ProcessDispatcher` for user threads or
+    /// `ZX_KOID_INVALID` for kernel threads.
+    #[inline]
+    pub fn pid(&self) -> zx_koid_t {
+        self.pid.load()
+    }
+
+    /// Like [`Self::pid`], for a raw pointer, without forming a `&Thread`.
+    ///
+    /// # Safety
+    ///
+    /// `this` must point to a valid, live [`Thread`].
+    #[inline]
+    pub(crate) unsafe fn pid_ptr(this: *const Self) -> zx_koid_t {
+        // SAFETY: `this` points to a valid `Thread` per the caller, and `&raw const` projects the
+        // `pid` field place without forming a reference to the whole `Thread`.
+        let pid = unsafe { &raw const (*this).pid };
+        // SAFETY: `pid` is the live `Thread`'s `pid` field (see above).
+        unsafe { (*pid).load() }
+    }
+
+    /// Checks whether the kill or suspend signal (excluding signals in `signal_mask`) has been
+    /// raised. If kill has been raised, returns `Err(ZX_ERR_INTERNAL_INTR_KILLED)`. If suspend has
+    /// been raised, returns `Err(ZX_ERR_INTERNAL_INTR_RETRY)`. Otherwise, returns `Ok(())`.
+    #[inline]
+    pub fn check_kill_or_suspend_signal_mask(&self, signal_mask: u32) -> Result<(), Status> {
+        let current_signals = self.signals() & !signal_mask;
         if current_signals & THREAD_SIGNAL_KILL != 0 {
+            core::hint::cold_path();
             return Err(ZX_ERR_INTERNAL_INTR_KILLED);
         }
         if current_signals & THREAD_SIGNAL_SUSPEND != 0 {
+            core::hint::cold_path();
             return Err(ZX_ERR_INTERNAL_INTR_RETRY);
         }
         Ok(())
+    }
+
+    /// Checks whether the kill or suspend signal has been raised.
+    ///
+    /// Returns `Err(ZX_ERR_INTERNAL_INTR_KILLED)` if kill has been raised,
+    /// `Err(ZX_ERR_INTERNAL_INTR_RETRY)` if suspend has been raised, and `Ok(())` otherwise.
+    #[inline]
+    pub fn check_kill_or_suspend_signal(&self) -> Result<(), Status> {
+        self.check_kill_or_suspend_signal_mask(0)
+    }
+
+    // Accessors for specific flags bits.
+    /// Whether the thread is detached.
+    #[inline]
+    pub fn detached(&self) -> bool {
+        (self.flags.load() & THREAD_FLAG_DETACHED) != 0
+    }
+    /// Sets or clears the detached flag.
+    ///
+    /// # Safety
+    ///
+    /// Callers must preserve the detached-vs-joinable lifecycle invariant: a joined or being-joined
+    /// thread must not be marked detached, and a detached thread's exit path assumes it will not be
+    /// joined.
+    #[inline]
+    pub(crate) unsafe fn set_detached(&self, value: bool) {
+        if value {
+            self.flags.fetch_or(THREAD_FLAG_DETACHED);
+        } else {
+            self.flags.fetch_and(!THREAD_FLAG_DETACHED);
+        }
+    }
+    /// Whether the `Thread` struct is freed when the thread exits.
+    #[inline]
+    pub fn free_struct(&self) -> bool {
+        (self.flags.load() & THREAD_FLAG_FREE_STRUCT) != 0
+    }
+    /// Sets or clears the free-struct flag.
+    ///
+    /// # Safety
+    ///
+    /// Callers must ensure this matches how the `Thread` storage was allocated (`new` vs
+    /// caller-owned storage) and is only changed before the thread's exit path inspects it.
+    #[inline]
+    pub(crate) unsafe fn set_free_struct(&self, value: bool) {
+        if value {
+            self.flags.fetch_or(THREAD_FLAG_FREE_STRUCT);
+        } else {
+            self.flags.fetch_and(!THREAD_FLAG_FREE_STRUCT);
+        }
+    }
+    /// Whether this is an idle thread; read lock-free by the scheduler.
+    #[inline]
+    pub fn is_idle(&self) -> bool {
+        (self.flags.load() & THREAD_FLAG_IDLE) != 0
+    }
+    /// Sets or clears the idle flag.
+    ///
+    /// # Safety
+    ///
+    /// Callers must only set this on a CPU's dedicated per-CPU idle thread during initialization,
+    /// as the scheduler relies on `is_idle()` to identify the idle thread.
+    #[inline]
+    pub(crate) unsafe fn set_idle(&self, value: bool) {
+        if value {
+            self.flags.fetch_or(THREAD_FLAG_IDLE);
+        } else {
+            self.flags.fetch_and(!THREAD_FLAG_IDLE);
+        }
+    }
+    /// Whether this thread runs a VCPU.
+    #[inline]
+    pub fn vcpu(&self) -> bool {
+        (self.flags.load() & THREAD_FLAG_VCPU) != 0
+    }
+    /// Sets or clears the VCPU flag.
+    #[inline]
+    pub(crate) fn set_vcpu(&self, value: bool) {
+        if value {
+            self.flags.fetch_or(THREAD_FLAG_VCPU);
+        } else {
+            self.flags.fetch_and(!THREAD_FLAG_VCPU);
+        }
+    }
+
+    /// Access to the entire flags value, for diagnostics.
+    #[inline]
+    pub fn flags(&self) -> u32 {
+        self.flags.load()
+    }
+
+    // TODO(https://fxbug.dev/42077109): Write down memory order requirements for accessing
+    // signals.
+    /// Returns the thread's pending signals.
+    ///
+    /// Uses `Relaxed` ordering: signal bitmask reads are polled opportunistically or re-checked
+    /// under the thread's lock, and do not synchronize other memory accesses.
+    #[inline]
+    pub fn signals(&self) -> u32 {
+        self.signals.load()
+    }
+    /// Raises `bits` in the thread's pending signals.
+    #[inline]
+    pub(crate) fn set_signals(&self, bits: u32) {
+        self.signals.fetch_or(bits);
+    }
+    /// Clears `bits` from the thread's pending signals.
+    #[inline]
+    pub(crate) fn clear_signals(&self, bits: u32) {
+        self.signals.fetch_and(!bits);
+    }
+
+    /// Copies the name buffer (always NUL-terminated) into `out`.
+    #[inline]
+    pub fn name_bytes(&self, out: &mut [u8; ZX_MAX_NAME_LEN]) {
+        // Like the C++ lock-free readers (ktrace, `DumpLocked`), the copy may observe a
+        // concurrent `set_name` of another thread renaming itself; byte-wise relaxed loads make
+        // that a torn name rather than a data race.
+        for i in 0..ZX_MAX_NAME_LEN {
+            out[i] = self.name[i].load(Ordering::Relaxed);
+        }
+    }
+
+    /// Like [`Self::name_bytes`], for a raw pointer, without forming a `&Thread`.
+    ///
+    /// # Safety
+    ///
+    /// `this` must point to a valid, live [`Thread`].
+    #[inline]
+    pub(super) unsafe fn name_bytes_ptr(this: *const Self, out: &mut [u8; ZX_MAX_NAME_LEN]) {
+        // SAFETY: `this` points to a valid `Thread` per the caller, and `&raw const` projects the
+        // `name` field place without forming a reference to the whole `Thread`.
+        let name = unsafe { &raw const (*this).name };
+        for (i, byte) in out.iter_mut().enumerate() {
+            // SAFETY: `name` is the live `Thread`'s `[AtomicU8; ZX_MAX_NAME_LEN]` field (see
+            // above).
+            *byte = unsafe { (*name)[i].load(Ordering::Relaxed) };
+        }
+    }
+
+    /// Returns a snapshot of the thread's name.
+    #[inline]
+    pub fn name(&self) -> ThreadName {
+        // SAFETY: `self` is a valid, live `Thread`.
+        unsafe { Self::name_copy_ptr(core::ptr::from_ref(self)) }
+    }
+
+    /// Like [`Self::name`], for a raw pointer, without forming a `&Thread`.
+    ///
+    /// # Safety
+    ///
+    /// `this` must point to a valid, live [`Thread`].
+    #[inline]
+    pub unsafe fn name_copy_ptr(this: *const Self) -> ThreadName {
+        let mut res = ThreadName::empty();
+        // SAFETY: `this` points to a valid, live `Thread` per the caller.
+        unsafe { Self::name_bytes_ptr(this, &mut res.buf) };
+        let mut len = 0;
+        while len < ZX_MAX_NAME_LEN && res.buf[len] != 0 {
+            len += 1;
+        }
+        res.len = len;
+        res
+    }
+
+    /// Writes `name` into `dst`, truncated so that it (including a trailing NUL byte) fits in
+    /// `ZX_MAX_NAME_LEN` bytes, and NUL-fills the remainder.
+    fn write_name_bytes(dst: &[AtomicU8; ZX_MAX_NAME_LEN], name: &[u8]) {
+        let len = core::cmp::min(name.len(), ZX_MAX_NAME_LEN - 1);
+        for i in 0..ZX_MAX_NAME_LEN {
+            let byte = if i < len { name[i] } else { 0 };
+            dst[i].store(byte, Ordering::Relaxed);
+        }
+    }
+
+    /// Sets the thread's name to `name`.
+    ///
+    /// This may truncate `name`, so that it (including a trailing NUL byte) fits in
+    /// `ZX_MAX_NAME_LEN` bytes. Writes to `name` are unsynchronized: concurrent `set_name` calls
+    /// may interleave, and readers (`name_bytes`, C++ `name()`) tolerate a torn name.
+    pub fn set_name(&self, name: &[u8]) {
+        Self::write_name_bytes(&self.name, name);
+    }
+
+    /// Sets the thread's name without creating a `&Thread` reference, so that it can be used on
+    /// a `Thread` that is still under construction.
+    ///
+    /// # Safety
+    ///
+    /// `thread` must point to allocated, suitably aligned `Thread` storage whose `name` bytes are
+    /// initialized (it need not be a fully constructed `Thread`), with no concurrent non-atomic
+    /// access to `name`.
+    unsafe fn set_name_in_place(thread: *mut Self, name: &[u8]) {
+        // SAFETY: `&raw const` projects the `name` place without forming a reference to the
+        // surrounding (possibly uninitialized) `Thread`; the caller guarantees `name` is
+        // initialized and only accessed atomically.
+        let dst = unsafe { &raw const (*thread).name };
+        // SAFETY: `dst` points to the initialized `[AtomicU8; ZX_MAX_NAME_LEN]` field (see above).
+        Self::write_name_bytes(unsafe { &*dst }, name);
     }
 
     /// Raw read of the thread's scheduling state without its lock.
@@ -827,17 +2436,71 @@ impl Thread {
         unsafe { &*self.scheduler_state.get().cast::<SchedulerState>() }
     }
 
+    /// Returns the [`KernelStack`] in `this`'s `stack` member, without forming a `&Thread`.
+    ///
+    /// # Safety
+    ///
+    /// `this` must point to a valid, live [`Thread`], and nothing may mutate its `KernelStack`
+    /// while the returned reference is live.
+    #[inline(always)]
+    unsafe fn stack<'a>(this: *const Self) -> &'a KernelStack {
+        // SAFETY: `this` points to a valid `Thread` per the caller, and `&raw const` projects the
+        // `stack` field place without forming a reference to the whole `Thread`.
+        let stack = unsafe { &raw const (*this).stack };
+        // SAFETY: `stack` holds the thread's `KernelStack`. C++ constructed it in place, and its
+        // size and alignment are asserted after the struct definition. The caller ensures it is
+        // not mutated while the reference is live.
+        unsafe { &*(*stack).get().cast::<KernelStack>() }
+    }
+
+    /// Allocates a default-constructed, unscheduled test-only [`Thread`] on the heap, returning
+    /// null on allocation failure.
+    #[cfg(ktest)]
+    pub(super) fn create_for_test() -> *mut Self {
+        // SAFETY: The C++ shim uses `fbl::AllocChecker` to allocate and default-construct a
+        // standalone `Thread` without unwinding across FFI.
+        unsafe { cpp_thread_create_for_test() }
+    }
+
+    /// Destroys a test-only [`Thread`] previously returned by [`Self::create_for_test`] (or does
+    /// nothing if `ptr` is null).
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `ptr` is either null or was returned by
+    /// [`Self::create_for_test`], has not already been destroyed, is not queued or scheduled
+    /// anywhere, and has no live references to `*ptr` or any of its fields.
+    #[cfg(ktest)]
+    pub(super) unsafe fn destroy_for_test(ptr: *mut Self) {
+        // SAFETY: The caller upholds the pointer validity, exclusivity, and single-free contract.
+        unsafe { cpp_thread_destroy_for_test(ptr) };
+    }
+
+    /// Raw pointer to the [`scheduler::SchedulerState`] storage of this thread for unit tests.
+    ///
+    /// Never dereference this pointer into a whole-struct `&scheduler::SchedulerState` or
+    /// `&mut scheduler::SchedulerState` on a live/scheduled thread: `SchedulerState` has split
+    /// lock guardianship (`Thread::lock` vs. `Scheduler::queue_lock_` vs. lock-free `curr_cpu` and
+    /// `last_cpu` reads). Forming a whole-struct reference or mutating fields directly is only
+    /// sound on an unscheduled, unqueued test-only `Thread` when no other references to its
+    /// `SchedulerState` or any of its fields exist.
+    #[cfg(ktest)]
+    #[inline]
+    pub(super) fn scheduler_state_ptr(&self) -> *mut scheduler::SchedulerState {
+        self.scheduler_state.get().cast::<scheduler::SchedulerState>()
+    }
+
     /// Returns a reference to the global thread list spinlock (`Thread::get_list_lock()`).
     #[inline]
-    pub fn get_list_lock() -> &'static ksync::KSpinlock<ThreadListLockClass> {
+    pub fn get_list_lock() -> &'static crate::ksync_kernel::KSpinlock<ThreadListLockClass> {
         // SAFETY: `cpp_thread_get_list_lock` returns the static `Thread::list_lock_` instance,
-        // which is layout-compatible with `ksync::KSpinlock`.
+        // which is layout-compatible with `crate::ksync_kernel::KSpinlock`.
         unsafe { &*cpp_thread_get_list_lock() }
     }
 
     /// Finds a thread whose `tid()` matches `tid` and dumps it (`Thread::DumpTid`).
     #[inline]
-    pub fn dump_tid(tid: zx_types::zx_koid_t, full: bool) {
+    pub fn dump_tid(tid: zx_koid_t, full: bool) {
         // SAFETY: Safe FFI call into `Thread::DumpTid`.
         unsafe { cpp_thread_dump_tid(tid, full) };
     }
@@ -850,7 +2513,7 @@ impl Thread {
     /// Because this method bypasses `Thread::list_lock_` and per-thread locks, it must only be
     /// called during a kernel panic when normal locking is unsafe or unavailable.
     #[inline]
-    pub unsafe fn dump_tid_during_panic(tid: zx_types::zx_koid_t, full: bool) {
+    pub unsafe fn dump_tid_during_panic(tid: zx_koid_t, full: bool) {
         // SAFETY: Caller guarantees the system is in a panic context.
         unsafe { cpp_thread_dump_tid_during_panic(tid, full) };
     }
@@ -877,6 +2540,40 @@ impl Thread {
         // panic context.
         unsafe { cpp_thread_dump_all_during_panic(ptr, full) };
     }
+
+    /// Changes the base profile of the thread to `profile`, propagating any priority inheritance
+    /// side effects (`Thread::SetBaseProfile`).
+    #[inline]
+    pub fn set_base_profile(&self, profile: &scheduler::BaseProfile) {
+        self.assert_canary();
+        OwnedWaitQueue::set_thread_base_profile_and_propagate(self, profile);
+    }
+
+    /// Acquires the thread's lock and returns a snapshot of its base profile
+    /// (`Thread::SnapshotBaseProfile`).
+    #[inline]
+    pub fn snapshot_base_profile(&self) -> scheduler::BaseProfile {
+        crate::kconcurrent::single_chain_lock_guard_owned!(
+            guard,
+            self,
+            crate::kconcurrent::IRQ_SAVE_OPTION,
+            crate::kconcurrent::clt_tag!("Thread::SnapshotBaseProfile")
+        );
+        *guard.proof().base_profile()
+    }
+
+    /// Acquires the thread's lock and returns a snapshot of its effective profile
+    /// (`Thread::SnapshotEffectiveProfile`).
+    #[inline]
+    pub fn snapshot_effective_profile(&self) -> scheduler::EffectiveProfile {
+        crate::kconcurrent::single_chain_lock_guard_owned!(
+            guard,
+            self,
+            crate::kconcurrent::IRQ_SAVE_OPTION,
+            crate::kconcurrent::clt_tag!("Thread::SnapshotEffectiveeProfile")
+        );
+        *guard.proof().effective_profile()
+    }
 }
 
 /// Finds a thread based on the thread ID (`thread_id_to_thread_slow`).
@@ -886,7 +2583,7 @@ impl Thread {
 /// The caller must hold [`Thread::get_list_lock`], and the returned pointer is only guaranteed to
 /// remain valid while that lock is held.
 #[inline]
-pub unsafe fn thread_id_to_thread_slow(tid: zx_types::zx_koid_t) -> Option<ThreadPtr> {
+pub unsafe fn thread_id_to_thread_slow(tid: zx_koid_t) -> Option<ThreadPtr> {
     // SAFETY: Caller holds `Thread::get_list_lock()`, and `ThreadPtr::from_raw` wraps the raw
     // pointer without dereferencing it.
     unsafe { ThreadPtr::from_raw(cpp_thread_id_to_thread_slow(tid)) }
@@ -1006,6 +2703,15 @@ impl<'p> ChainLockProof<'p, Thread> {
         unsafe { &mut (*p).inherited_profile_values }
     }
 
+    /// Returns this thread's effective profile.
+    #[inline]
+    pub(crate) fn effective_profile(&self) -> &scheduler::EffectiveProfile {
+        let p = self.scheduler_state_ptr();
+        // SAFETY: `self` proves `self.owner().lock()` is held, which guards `effective_profile`,
+        // and `&(*p).effective_profile` projects only that field.
+        unsafe { &(*p).effective_profile }
+    }
+
     /// Returns this thread's effective profile mutably (for example, to mark it dirty).
     #[inline]
     pub(crate) fn effective_profile_mut(&mut self) -> &mut scheduler::EffectiveProfile {
@@ -1056,6 +2762,32 @@ impl<'p> ChainLockProof<'p, Thread> {
         unsafe {
             ((*ss).start_time, (*ss).finish_time, (*ss).time_slice_ns, (*ss).time_slice_used_ns)
         }
+    }
+
+    /// Returns this thread's remaining time slice (`remaining_time_slice_ns()`).
+    #[inline]
+    pub(crate) fn remaining_time_slice_ns(&self) -> scheduler::SchedDuration {
+        let (_, _, time_slice_ns, time_slice_used_ns) = self.dynamic_parameters();
+        scheduler::SchedDuration::from(time_slice_ns - time_slice_used_ns)
+    }
+
+    /// Returns this thread's activation count (`activation_count()`).
+    #[inline]
+    pub(crate) fn activation_count(&self) -> u64 {
+        let ss = self.scheduler_state_ptr();
+        // SAFETY: `ss` points to `self.owner()`'s live `SchedulerState`, and `activation_count` is
+        // read by value through the raw pointer without forming a reference to the whole struct.
+        unsafe { (*ss).activation_count }
+    }
+
+    /// Returns the time at which this thread last started running (`last_started_running()`).
+    #[inline]
+    pub(crate) fn last_started_running(&self) -> scheduler::SchedTime {
+        let ss = self.scheduler_state_ptr();
+        // SAFETY: `ss` points to `self.owner()`'s live `SchedulerState`, and
+        // `last_started_running` is read by value through the raw pointer without forming a
+        // reference to the whole struct.
+        unsafe { (*ss).last_started_running }
     }
 
     /// Returns a reference to this thread's [`ThreadState`].
@@ -1231,6 +2963,28 @@ impl ThreadPtr {
         unsafe { cpp_thread_resume(self.as_raw()) }
     }
 
+    /// Marks a thread as detached, in this state its memory will be released once
+    /// execution is done (`Thread::Detach`).
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that:
+    ///
+    /// * The thread has not been joined, detached, or destroyed.
+    /// * `self` is not used after `detach()` returns unless the thread is still in its initial
+    ///   state (i.e. it has not been resumed yet). If the thread has already exited, `detach()`
+    ///   synchronously joins it (`Join(nullptr, 0)`) and frees the [`Thread`] before returning;
+    ///   once a detached thread has been resumed, it may exit and be freed at any time.
+    /// * The caller does not hold `self`'s lock or `Thread::get_list_lock()`, and does not have an
+    ///   active `ChainLockTransaction`, since `Thread::Detach` creates its own transaction and
+    ///   may call `Thread::Join`.
+    #[inline]
+    pub unsafe fn detach(self) -> Result<(), Status> {
+        // SAFETY: Caller guarantees `self.as_raw()` points to a valid thread that has not been
+        // joined, detached, or destroyed.
+        Status::ok(unsafe { cpp_thread_detach(self.as_raw()) })
+    }
+
     /// Detaches and resumes a newly created thread (`Thread::DetachAndResume`).
     ///
     /// # Safety
@@ -1326,6 +3080,32 @@ impl ThreadPtr {
         unsafe { cpp_thread_is_blocked(self.as_raw()) }
     }
 
+    /// Returns a snapshot of the thread's name (`Thread::name`), which is at most
+    /// `ZX_MAX_NAME_LEN - 1` bytes long.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `self` points to a valid, live [`Thread`].
+    #[inline]
+    pub unsafe fn name(self) -> ThreadName {
+        // SAFETY: The caller guarantees `self` points to a valid, live `Thread`.
+        unsafe { Thread::name_copy_ptr(self.as_ptr()) }
+    }
+
+    /// Sets the thread's name (`Thread::set_name`).
+    ///
+    /// This may truncate `name`, so that it (including a trailing NUL byte) fits in
+    /// `ZX_MAX_NAME_LEN` bytes.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `self` points to a valid, live [`Thread`].
+    #[inline]
+    pub unsafe fn set_name(self, name: &[u8]) {
+        // SAFETY: The caller guarantees `self` points to a valid, live `Thread`.
+        unsafe { Thread::set_name_in_place(self.as_raw(), name) }
+    }
+
     /// Returns a `ThreadPtr` representing the currently executing thread.
     ///
     /// # Safety
@@ -1342,8 +3122,10 @@ impl ThreadPtr {
     ///
     /// The caller must ensure that the thread pointer is still valid and the
     /// underlying thread has not been destroyed.
+    #[inline]
     pub unsafe fn fxt_ref(self) -> FxtRef {
-        unsafe { cpp_thread_fxt_ref(self.as_raw()) }
+        // SAFETY: Caller guarantees `self` points to a valid, live `Thread`.
+        unsafe { FxtRef { pid: self.pid(), tid: self.tid() } }
     }
 
     /// Sets the base profile of the thread (`Thread::SetBaseProfile`).
@@ -1445,8 +3227,7 @@ impl ThreadPtr {
         unsafe { self.as_ref().lock().as_chain_lock() }
     }
 
-    /// Returns the associated `ThreadDispatcher` (`user_thread()`), or null if this is a
-    /// kernel-only thread.
+    /// Returns the associated `ThreadDispatcher`, or null if this is a kernel-only thread.
     ///
     /// # Safety
     ///
@@ -1458,19 +3239,30 @@ impl ThreadPtr {
     }
 
     /// Returns the koid of the associated `ThreadDispatcher` for user threads or an independent
-    /// koid for kernel threads (`tid()`).
+    /// koid for kernel threads.
     ///
     /// # Safety
     ///
     /// The caller must ensure that `self` points to a valid `Thread`.
     #[inline]
-    pub unsafe fn tid(self) -> zx_types::zx_koid_t {
+    pub unsafe fn tid(self) -> zx_koid_t {
         // SAFETY: `self` points to a valid `Thread`.
-        unsafe { cpp_thread_tid(self.as_ptr()) }
+        unsafe { Thread::tid_ptr(self.as_ptr()) }
     }
 
-    /// Returns the last flow id allocated by [`ThreadPtr::take_next_lock_flow_id`] for this thread
-    /// (`lock_flow_id()`).
+    /// Returns the koid of the associated `ProcessDispatcher` for user threads or
+    /// `ZX_KOID_INVALID` for kernel threads.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `self` points to a valid `Thread`.
+    #[inline]
+    pub unsafe fn pid(self) -> zx_koid_t {
+        // SAFETY: `self` points to a valid `Thread`.
+        unsafe { Thread::pid_ptr(self.as_ptr()) }
+    }
+
+    /// Returns the last flow id allocated by [`ThreadPtr::take_next_lock_flow_id`] for this thread.
     ///
     /// # Safety
     ///
@@ -1524,6 +3316,57 @@ impl ThreadPtr {
         // SAFETY: `self` points to a valid `Thread` and the caller upholds the locking
         // preconditions.
         unsafe { cpp_thread_dump(self.as_ptr(), full) }
+    }
+
+    /// Sets or clears the migrate callback invoked when this thread is migrated between CPUs or
+    /// exits.
+    ///
+    /// The callback is invoked by the scheduler with interrupts disabled, an active
+    /// `ChainLockTransaction`, and `self`'s thread lock held, so it must not block or re-acquire
+    /// `self`'s thread lock.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `self` points to a valid `Thread`, that the caller does not
+    /// hold `self`'s thread lock or an active chain lock transaction, and that the [`MigrateFn`]
+    /// storage (and any data it borrows) outlives the thread's use of the callback (until the
+    /// callback is cleared or the thread is joined) and is not concurrently accessed while
+    /// installed.
+    #[inline]
+    pub unsafe fn set_migrate_fn(self, migrate_fn: impl IntoMigrateFn) {
+        match migrate_fn.into_migrate_ctx() {
+            // SAFETY: `self` points to a valid `Thread`, `ctx` points to valid `MigrateFn`
+            // storage, and the caller upholds the locking and callback lifetime preconditions.
+            Some(ctx) => unsafe { cpp_thread_set_migrate_fn(self.as_raw(), ctx) },
+            // SAFETY: `self` points to a valid `Thread` and the caller upholds the locking
+            // preconditions.
+            None => unsafe { cpp_thread_clear_migrate_fn(self.as_raw()) },
+        }
+    }
+
+    /// Sets or clears the context switch callback invoked when this thread switches context.
+    ///
+    /// The callback is invoked by the scheduler during context switch with interrupts disabled, an
+    /// active `ChainLockTransaction`, and `self`'s thread lock held, so it must not block or
+    /// re-acquire `self`'s thread lock.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `self` points to a valid `Thread`, that the caller does not
+    /// hold `self`'s thread lock or an active chain lock transaction, and that the
+    /// [`ContextSwitchFn`] storage (and any data it borrows) outlives the thread's use of the
+    /// callback (until the callback is cleared or the thread is joined) and is not concurrently
+    /// accessed while installed.
+    #[inline]
+    pub unsafe fn set_context_switch_fn(self, context_switch_fn: impl IntoContextSwitchFn) {
+        match context_switch_fn.into_context_switch_ctx() {
+            // SAFETY: `self` points to a valid `Thread`, `ctx` points to valid `ContextSwitchFn`
+            // storage, and the caller upholds the locking and callback lifetime preconditions.
+            Some(ctx) => unsafe { cpp_thread_set_context_switch_fn(self.as_raw(), ctx) },
+            // SAFETY: `self` points to a valid `Thread` and the caller upholds the locking
+            // preconditions.
+            None => unsafe { cpp_thread_clear_context_switch_fn(self.as_raw()) },
+        }
     }
 }
 
@@ -1712,6 +3555,38 @@ pub unsafe fn create_with_profile(
     unsafe { ThreadPtr::from_raw(thread) }.ok_or(Status::NO_MEMORY)
 }
 
+/// Internal thread creation routine (`Thread::CreateEtc`) allowing a custom `alt_trampoline`.
+///
+/// # Safety
+///
+/// The caller must ensure that:
+/// - `thread` is either null or points to uninitialized storage valid for a `Thread`.
+/// - `entry`, `arg`, and `alt_trampoline` are valid to execute on the new thread, and if
+///   `alt_trampoline` is provided it upholds `Scheduler::TrampolineLockHandoff` and never returns.
+pub unsafe fn create_etc(
+    thread: *mut Thread,
+    name: &str,
+    entry: Option<extern "C" fn(*mut c_void) -> i32>,
+    arg: *mut c_void,
+    profile: &SchedulerStateBaseProfile,
+    alt_trampoline: Option<unsafe extern "C" fn() -> !>,
+) -> Result<ThreadPtr, Status> {
+    // SAFETY: Forwarded from caller preconditions.
+    let thread = unsafe {
+        cpp_thread_create_etc(
+            thread,
+            name.as_ptr() as *const c_char,
+            name.len(),
+            entry,
+            arg,
+            profile,
+            alt_trampoline,
+        )
+    };
+    // SAFETY: `cpp_thread_create_etc` returns either null or a valid `Thread*`.
+    unsafe { ThreadPtr::from_raw(thread) }.ok_or(Status::NO_MEMORY)
+}
+
 /// Spawns a new kernel thread with default priority and resumes it.
 ///
 /// # Safety
@@ -1756,33 +3631,75 @@ pub fn current_kill() {
     unsafe { cpp_thread_current_kill() }
 }
 
+/// Clears the restartable sequence (rseq) registration for the current thread.
+pub fn current_reset_rseq() {
+    // SAFETY: `Thread::Current::Get()` is valid on the calling thread.
+    unsafe { cpp_thread_current_reset_rseq() }
+}
+
+/// Registers a restartable sequence (rseq) for the current thread at `offset` within `vmo_paged`.
+pub fn current_set_rseq(
+    vmo_paged: fbl::RefPtr<crate::vm::vm_object_paged::VmObjectPaged>,
+    offset: u64,
+) -> Result<(), Status> {
+    // SAFETY: `RefPtr::into_raw` transfers the owned reference to `cpp_thread_current_set_rseq`,
+    // which adopts it via `fbl::ImportFromRawPtr`.
+    Status::ok(unsafe {
+        cpp_thread_current_set_rseq(fbl::RefPtr::into_raw(vmo_paged).cast_mut(), offset)
+    })
+}
+
+/// The current thread's [`PreemptionState`] (`Thread::Current::preemption_state()`), as a pointer
+/// to the field alone so that no `&Thread` is formed.
+///
+/// The returned pointer remains valid for dereferencing as long as the calling thread continues
+/// executing (for example, while preemption is disabled on the calling CPU).
+///
+/// # Safety
+///
+/// The calling CPU's current `Thread` pointer must have been initialized (i.e., after
+/// `ConstructFirstThread` on the calling CPU).
+pub unsafe fn current_preemption_state() -> *const PreemptionState {
+    let current = current_get();
+    // SAFETY: Caller guarantees `current` is the valid, live current thread; projecting the field
+    // through the raw pointer forms no reference.
+    unsafe { &raw const (*current).preemption_state }
+}
+
 /// Increments the preempt disable counter for the current thread.
 ///
 /// While preempt disable is non-zero, preemption of the thread is disabled, including preemption
 /// from interrupt handlers. During this time, any call to `Reschedule()` will only record that a
 /// reschedule is pending, and won't do a context switch.
 ///
-/// Note that this does not disallow blocking operations (e.g. `mutex.Acquire()`). Disabling
-/// preemption does not prevent switching away from the current thread if it blocks.
+/// Note: [`preempt_disable`] does not preclude a thread from blocking (e.g., waiting on a lock).
+/// Disabling preemption does not prevent switching away from the current thread if it blocks.
 ///
 /// A call to [`preempt_disable`] must be matched by a later call to [`preempt_reenable`] to
 /// decrement the preempt disable counter.
 #[inline]
 pub fn preempt_disable() {
-    // SAFETY: Calling this FFI function safely increments the preemption disable count for the
-    // current thread.
-    unsafe { cpp_thread_preempt_disable() }
+    // SAFETY: The current thread is alive for as long as code runs on it, and `PreemptionState`
+    // is all relaxed atomics, so a shared reference to the field is sound while C++ and interrupt
+    // handlers mutate it.
+    unsafe { (*current_preemption_state()).preempt_disable() }
 }
 
 /// Decrements the preempt disable counter and flushes any pending local preemption operation.
 ///
 /// Callers must ensure that they are calling from a context where blocking is allowed, as the call
 /// may result in the immediate preemption of the calling thread.
+///
+/// # Safety
+///
+/// The call must pair with a prior, still unmatched [`preempt_disable`] on the current thread,
+/// and it must not drop preemption back to enabled while any [`PreemptDisabledToken`] is live.
 #[inline]
-pub fn preempt_reenable() {
-    // SAFETY: Calling this FFI function safely decrements the preemption disable count for the
-    // current thread.
-    unsafe { cpp_thread_preempt_reenable() }
+pub unsafe fn preempt_reenable() {
+    // SAFETY: As in `preempt_disable`, `current_preemption_state()` is by construction the
+    // current thread's preemption state, and the pairing and token obligations are forwarded
+    // from the caller.
+    unsafe { (*current_preemption_state()).preempt_reenable() }
 }
 
 /// Increments the eager resched disable counter for the current thread.
@@ -1799,33 +3716,38 @@ pub fn preempt_reenable() {
 /// [`eager_resched_reenable`] to decrement the eager resched disable counter.
 #[inline]
 pub fn eager_resched_disable() {
-    // SAFETY: Calling this FFI function safely increments the eager resched disable count for the
-    // current thread.
-    unsafe { cpp_thread_eager_resched_disable() }
+    // SAFETY: As in `preempt_disable`.
+    unsafe { (*current_preemption_state()).eager_resched_disable() }
 }
 
 /// Decrements the eager resched disable counter and flushes pending local and/or remote
 /// preemptions if enabled, respectively.
+///
+/// # Safety
+///
+/// The call must pair with a prior, still unmatched [`eager_resched_disable`] on the current
+/// thread, and it must not drop preemption back to enabled while any [`PreemptDisabledToken`] is
+/// live.
 #[inline]
-pub fn eager_resched_reenable() {
-    // SAFETY: Calling this FFI function safely decrements the eager resched disable count for the
-    // current thread.
-    unsafe { cpp_thread_eager_resched_reenable() }
+pub unsafe fn eager_resched_reenable() {
+    // SAFETY: As in `preempt_disable`, `current_preemption_state()` is by construction the
+    // current thread's preemption state, and the pairing and token obligations are forwarded
+    // from the caller.
+    unsafe { (*current_preemption_state()).eager_resched_reenable() }
 }
 
 /// Returns the current thread's preemption disable count.
 #[inline]
 pub fn preempt_disable_count() -> u32 {
-    // SAFETY: Calling this FFI function safely reads the current thread's preemption disable count.
-    unsafe { cpp_thread_preempt_disable_count() }
+    // SAFETY: As in `preempt_disable`.
+    unsafe { (*current_preemption_state()).preempt_disable_count() }
 }
 
 /// Returns the current thread's eager resched disable count.
 #[inline]
 pub fn eager_resched_disable_count() -> u32 {
-    // SAFETY: Calling this FFI function safely reads the current thread's eager resched disable
-    // count.
-    unsafe { cpp_thread_eager_resched_disable_count() }
+    // SAFETY: As in `preempt_disable`.
+    unsafe { (*current_preemption_state()).eager_resched_disable_count() }
 }
 
 /// Marks a pending preemption for the current CPU on the current thread's preemption state.
@@ -1834,18 +3756,30 @@ pub fn eager_resched_disable_count() -> u32 {
 /// while interrupts and preemption are disabled, between [`preempt_disable`] and
 /// [`preempt_reenable`]. Unlike `Reschedule()`, it does not need to be called with the thread's
 /// lock held.
+///
+/// Supplies the C++ default argument `cpu_num_to_mask(arch_curr_cpu_num())`.
 #[inline]
 pub fn preempt_set_pending() {
-    // SAFETY: Calling this FFI function safely marks a pending preemption on the current thread's
-    // preemption state.
-    unsafe { cpp_thread_preempt_set_pending() }
+    // SAFETY: As in `preempt_disable`.
+    unsafe {
+        (*current_preemption_state()).preempt_set_pending(crate::kernel::types::cpu_num_to_mask(
+            crate::arch_rs::curr_cpu_num(),
+        ))
+    }
 }
 
-/// Returns `true` if preemption is currently enabled on the current thread.
+/// Marks a pending preemption for `reschedule_mask` on the current thread's preemption state.
+#[inline]
+pub fn preempt_set_pending_mask(reschedule_mask: cpu_mask_t) {
+    // SAFETY: As in `preempt_disable`.
+    unsafe { (*current_preemption_state()).preempt_set_pending(reschedule_mask) }
+}
+
+/// Returns `true` if preemption is enabled for the current thread.
 #[inline]
 pub fn preempt_is_enabled() -> bool {
-    // SAFETY: Calling this FFI function safely queries the current thread's preemption state.
-    unsafe { cpp_thread_preempt_is_enabled() }
+    // SAFETY: As in `preempt_disable`.
+    unsafe { (*current_preemption_state()).preempt_is_enabled() }
 }
 
 /// Zero-sized capability token proving that preemption is disabled on the current thread.
@@ -1893,18 +3827,17 @@ impl PreemptDisabledToken {
 /// the extension will be activated, but preemption will not occur until the count has dropped to
 /// zero and the extension has expired or has been cleared.
 pub fn preempt_set_timeslice_extension(duration: DurationMono) -> bool {
-    // SAFETY: Calling this FFI function safely sets the timeslice extension on the current thread's
-    // preemption state.
-    unsafe { cpp_thread_preempt_set_timeslice_extension(duration) }
+    // SAFETY: As in `preempt_disable`.
+    unsafe { (*current_preemption_state()).set_timeslice_extension(duration.0) }
 }
 
 /// Unconditionally clears any timeslice extension.
 ///
 /// This function must be called in normal thread context because it may trigger local preemption.
 pub fn preempt_clear_timeslice_extension() {
-    // SAFETY: Calling this FFI function safely clears the timeslice extension on the current
-    // thread's preemption state.
-    unsafe { cpp_thread_preempt_clear_timeslice_extension() }
+    // SAFETY: As in `preempt_disable`, and `current_preemption_state()` is by construction the
+    // current thread's preemption state.
+    unsafe { (*current_preemption_state()).clear_timeslice_extension() }
 }
 
 pub use super::auto_preempt_disabler::{
@@ -1915,21 +3848,136 @@ pub use super::auto_preempt_disabler::{
 /// RAII helper to enforce that a block of code does not allocate memory.
 ///
 /// See `Thread::Current::memory_allocation_state()`.
-pub struct ScopedMemoryAllocationDisabled;
+pub struct ScopedMemoryAllocationDisabled {
+    _not_send_sync: PhantomData<*mut ()>,
+}
 
 impl ScopedMemoryAllocationDisabled {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
-        // SAFETY: Disables memory allocations on the current thread.
-        unsafe { cpp_thread_current_memory_allocation_state_disable() };
-        Self
+        // SAFETY: `ScopedMemoryAllocationDisabled` is only constructed on an initialized thread
+        // and is `!Send`, so `drop` balances this `disable()` on the same thread.
+        unsafe { (*current_memory_allocation_state()).disable() };
+        Self { _not_send_sync: PhantomData }
     }
 }
 
 impl Drop for ScopedMemoryAllocationDisabled {
     fn drop(&mut self) {
-        // SAFETY: Re-enables memory allocations on the current thread when the guard drops.
-        unsafe { cpp_thread_current_memory_allocation_state_enable() };
+        // SAFETY: Balances the `disable()` call in `ScopedMemoryAllocationDisabled::new` on the
+        // same thread.
+        unsafe { (*current_memory_allocation_state()).enable() };
     }
+}
+
+/// Opaque inline backing storage matching C++ `ScopedMemoryStall`.
+#[repr(C)]
+struct CppScopedMemoryStall(OpaqueBytes<1>);
+
+/// RAII class to mark sections of code as memory stalls.
+///
+/// Nesting is not allowed. It is a programming error to instantiate this class
+/// if there exists another instance on the call stack.
+#[repr(C)]
+pub struct ScopedMemoryStall {
+    storage: core::mem::MaybeUninit<CppScopedMemoryStall>,
+    _not_send_sync: PhantomData<*mut ()>,
+}
+
+zr::static_assert!(core::mem::size_of::<ScopedMemoryStall>() == 1);
+zr::static_assert!(core::mem::align_of::<ScopedMemoryStall>() == 1);
+
+impl ScopedMemoryStall {
+    /// Marks the current thread as experiencing a memory stall until the guard is dropped.
+    #[inline]
+    pub fn new() -> Self {
+        let mut stall =
+            Self { storage: core::mem::MaybeUninit::uninit(), _not_send_sync: PhantomData };
+        // SAFETY: `stall.storage` has the verified size and alignment of C++
+        // `ScopedMemoryStall`, which is not self-referential.
+        unsafe {
+            cpp_scoped_memory_stall_init(&raw mut stall.storage);
+        }
+        stall
+    }
+}
+
+impl Drop for ScopedMemoryStall {
+    #[inline]
+    fn drop(&mut self) {
+        // SAFETY: `self.storage` was initialized by `cpp_scoped_memory_stall_init` in `new()`
+        // and has not yet been destroyed.
+        unsafe {
+            cpp_scoped_memory_stall_destroy(self.storage.as_mut_ptr());
+        }
+    }
+}
+
+/// Opaque inline backing storage matching C++ `ScopedThreadExceptionContext`.
+#[repr(C, align(8))]
+struct CppScopedThreadExceptionContext(OpaqueBytes<24>);
+
+/// Private RAII wrapper around C++ `ScopedThreadExceptionContext`.
+///
+/// Kept private behind [`with_exception_context`] so safe code cannot call `core::mem::forget` on
+/// the guard and leave `Thread::arch().suspended_general_regs` dangling into popped stack memory.
+#[repr(C)]
+struct ScopedThreadExceptionContext {
+    storage: core::mem::MaybeUninit<CppScopedThreadExceptionContext>,
+    _not_send_sync: PhantomData<*mut ()>,
+}
+
+zr::static_assert!(
+    core::mem::size_of::<ScopedThreadExceptionContext>() == 3 * core::mem::size_of::<usize>()
+);
+zr::static_assert!(
+    core::mem::align_of::<ScopedThreadExceptionContext>() == core::mem::align_of::<usize>()
+);
+
+impl Drop for ScopedThreadExceptionContext {
+    #[inline]
+    fn drop(&mut self) {
+        // SAFETY: `self.storage` was initialized by `cpp_scoped_thread_exception_context_init` in
+        // `with_exception_context` and has not yet been destroyed, and the caller of
+        // `with_exception_context` guarantees neither the current thread's lock nor an active
+        // `ChainLockTransaction` is held when the scope exits.
+        unsafe {
+            cpp_scoped_thread_exception_context_destroy(self.storage.as_mut_ptr());
+        }
+    }
+}
+
+/// Installs `context` on the current user thread for the duration of `f`, making its user register
+/// state available to debuggers and exception handlers while the thread is in an exception.
+///
+/// # Safety
+///
+/// * `context` must point to a valid, initialized `arch_exception_context_t` for the current
+///   thread that outlives this call.
+/// * If `(*context).frame` is non-null, it must point to a valid, initialized, writable `iframe_t`
+///   that outlives this call with no conflicting Rust references while installed.
+/// * The current thread must be a user thread (`user_thread_ != nullptr`).
+/// * Neither the current thread's lock nor an active `ChainLockTransaction` may be held on the
+///   current CPU when entering `with_exception_context` or when `f` returns (or unwinds).
+#[inline]
+pub unsafe fn with_exception_context<R>(
+    context: *const crate::arch_rs::ArchExceptionContext,
+    f: impl FnOnce() -> R,
+) -> R {
+    let mut guard = ScopedThreadExceptionContext {
+        storage: core::mem::MaybeUninit::uninit(),
+        _not_send_sync: PhantomData,
+    };
+    // SAFETY: `guard.storage` has the verified size and alignment of C++
+    // `ScopedThreadExceptionContext` (which is non-self-referential), and the caller guarantees
+    // `context` (and any non-null `(*context).frame`) is valid for the current user thread and
+    // outlives this call with neither the thread lock nor an active `ChainLockTransaction` held.
+    unsafe {
+        cpp_scoped_thread_exception_context_init(&raw mut guard.storage, context);
+    }
+    let result = f();
+    drop(guard);
+    result
 }
 
 pub use crate::kernel::wait_queue::Interruptible;
@@ -2005,6 +4053,17 @@ pub unsafe fn current_runtime() -> DurationMono {
     unsafe { cpp_thread_runtime(cpp_thread_current_get()) }
 }
 
+/// Initializes early CPU state for a secondary CPU.
+///
+/// # Safety
+///
+/// `thread` must be a valid, live bootstrap `Thread` for the calling AP.
+pub unsafe fn secondary_cpu_init_early(thread: *mut Thread) {
+    debug_assert!(!thread.is_null());
+    // SAFETY: The caller ensures that `thread` points to the calling AP's live bootstrap Thread.
+    unsafe { cpp_thread_secondary_cpu_init_early(thread) }
+}
+
 /// Preempts the current thread from an interrupt.
 ///
 /// This function places the current thread at the head of the run queue and then yields the CPU to
@@ -2016,8 +4075,16 @@ pub fn preempt() {
 /// Logs the relevant stack memory addresses of the current thread at the `CRITICAL` debug level.
 ///
 /// This is useful during a thread dump.
-pub fn dump_current_stack() {
-    unsafe { cpp_thread_dump_current_stack() }
+///
+/// # Safety
+///
+/// This CPU must have a constructed current [`Thread`] (`ConstructFirstThread` has completed on
+/// this CPU), and its stack must not be concurrently initialized or torn down (see
+/// [`Thread::stack`]).
+pub unsafe fn dump_current_stack() {
+    // SAFETY: The caller guarantees `current_get()` returns a valid, constructed `Thread` that
+    // meets the requirements of `Thread::stack`.
+    unsafe { Thread::stack(current_get()) }.dump_info(debug::dprintf::CRITICAL);
 }
 
 /// Processes any pending thread signals on the current thread using the given `frame`.
@@ -2054,19 +4121,50 @@ pub unsafe fn get_arch(thread: *mut Thread) -> *mut c_void {
 /// Returns the top of the stack for `thread`.
 ///
 /// # Safety
-/// Caller must ensure `thread` points to a valid C++ `Thread` instance.
+///
+/// `thread` must point to a valid, constructed `Thread` that meets the requirements of
+/// `Thread::stack`, so that its stack is not concurrently initialized or torn down.
 pub unsafe fn get_stack_top(thread: *mut Thread) -> usize {
-    // SAFETY: Forwarded to C++ Thread::stack().top() with caller-verified pointer.
-    unsafe { cpp_thread_get_stack_top(thread) }
+    // SAFETY: The caller guarantees `thread` is valid and that the requirements of
+    // `Thread::stack` hold.
+    unsafe { Thread::stack(thread) }.top()
 }
 
-/// Returns the shadow call stack base for `thread`.
+/// Returns the shadow call stack base for `thread`, or 0 if shadow call stacks are disabled.
 ///
 /// # Safety
-/// Caller must ensure `thread` points to a valid C++ `Thread` instance.
+///
+/// As for [`get_stack_top`].
 pub unsafe fn get_shadow_call_base(thread: *mut Thread) -> usize {
-    // SAFETY: Forwarded to C++ Thread::stack().shadow_call_base() with caller-verified pointer.
-    unsafe { cpp_thread_get_shadow_call_base(thread) }
+    #[cfg(sanitize = "shadow-call-stack")]
+    {
+        // SAFETY: As for `get_stack_top`.
+        unsafe { Thread::stack(thread) }.shadow_call_base()
+    }
+    #[cfg(not(sanitize = "shadow-call-stack"))]
+    {
+        let _ = thread;
+        0
+    }
+}
+
+/// Returns the unsafe stack top for `thread`, or 0 if safe-stack is disabled.
+///
+/// # Safety
+///
+/// As for [`get_stack_top`].
+#[inline(always)]
+pub unsafe fn get_unsafe_stack_top(thread: *mut Thread) -> usize {
+    #[cfg(sanitize = "safestack")]
+    {
+        // SAFETY: As for `get_stack_top`.
+        unsafe { Thread::stack(thread) }.unsafe_top()
+    }
+    #[cfg(not(sanitize = "safestack"))]
+    {
+        let _ = thread;
+        0
+    }
 }
 
 /// Returns `true` if `thread`'s user state has been saved.
@@ -2087,15 +4185,6 @@ pub unsafe fn is_user_state_saved_locked(thread: *const Thread) -> bool {
 pub unsafe fn is_running(thread: *const Thread) -> bool {
     // SAFETY: Forwarded to C++ Thread::state() with caller-verified pointer.
     unsafe { cpp_thread_is_running(thread) }
-}
-
-/// Returns the name of `thread`.
-///
-/// # Safety
-/// Caller must ensure `thread` points to a valid C++ `Thread` instance.
-pub unsafe fn name(thread: *const Thread) -> *const c_char {
-    // SAFETY: Forwarded to C++ Thread::name() with caller-verified pointer.
-    unsafe { cpp_thread_name(thread) }
 }
 
 /// Checks whether `thread` is executing in restricted mode.
@@ -2176,6 +4265,33 @@ pub unsafe fn current_active_aspace<'a>() -> Option<&'a VmAspace> {
     unsafe { cpp_thread_current_active_aspace().as_ref() }
 }
 
+/// Switches the current thread's address space pointer without performing a hardware context
+/// switch.
+///
+/// # Safety
+///
+/// The caller must ensure `aspace` remains valid while attached to the current thread.
+pub unsafe fn current_switch_aspace(aspace: &VmAspace) -> *mut VmAspace {
+    let ptr = core::ptr::from_ref(aspace).cast_mut();
+    // SAFETY: Caller guarantees `aspace` remains valid while attached to the current thread.
+    unsafe { cpp_thread_current_switch_aspace(ptr) }
+}
+
+/// Clears the current thread's address space pointer without performing a hardware context
+/// switch.
+///
+/// Note: This helper is only used by test and kernel debugging code (such as `k vmm` console
+/// commands) to detach a test address space from a kernel thread.
+///
+/// # Safety
+///
+/// The caller must ensure the current thread can safely run without an attached user address
+/// space.
+pub unsafe fn current_clear_aspace() -> *mut VmAspace {
+    // SAFETY: Caller guarantees clearing the current thread's address space pointer is valid.
+    unsafe { cpp_thread_current_switch_aspace(core::ptr::null_mut()) }
+}
+
 /// Sets the current thread's restricted mode state pointer.
 ///
 /// # Safety
@@ -2186,9 +4302,13 @@ pub unsafe fn current_set_restricted_state(raw_rs: *mut RestrictedState) {
 }
 
 /// Returns `true` if the current thread has been signaled.
+#[inline]
 pub fn current_is_signaled() -> bool {
-    // SAFETY: Foreign function wrapper for Thread::Current::Get()->IsSignaled().
-    unsafe { cpp_thread_current_is_signaled() }
+    // SAFETY: `current_get()` returns the current `Thread`, and `&raw const` projects the `signals`
+    // field place without forming a reference to the whole `Thread`.
+    let signals = unsafe { &raw const (*current_get()).signals };
+    // SAFETY: `signals` is the live current `Thread`'s `signals` field (see above).
+    unsafe { (*signals).load() != 0 }
 }
 
 /// If a restricted kick is pending on the current thread, clears it and returns `true`.
@@ -2200,10 +4320,30 @@ pub fn current_check_for_restricted_kick() -> bool {
     unsafe { cpp_thread_current_check_for_restricted_kick() }
 }
 
+/// The current thread's [`MemoryAllocationState`] (`Thread::Current::memory_allocation_state()`),
+/// as a pointer to the field alone so that no `&Thread` is formed.
+///
+/// The returned pointer remains valid for dereferencing as long as the calling thread continues
+/// executing.
+///
+/// # Safety
+///
+/// The calling CPU's current `Thread` pointer must have been initialized (i.e., after
+/// `ConstructFirstThread` on the calling CPU).
+#[inline]
+pub unsafe fn current_memory_allocation_state() -> *const MemoryAllocationState {
+    let current = current_get();
+    // SAFETY: Caller guarantees `current` is the valid, live current thread; projecting the field
+    // through the raw pointer forms no reference.
+    unsafe { &raw const (*current).memory_allocation_state }
+}
+
 /// Returns `true` if memory allocation is allowed on the current thread.
+#[inline]
 pub fn current_memory_allocation_state_is_enabled() -> bool {
-    // SAFETY: Foreign function wrapper for Thread::Current::memory_allocation_state().IsEnabled().
-    unsafe { cpp_thread_current_memory_allocation_state_is_enabled() }
+    // SAFETY: Only called on an initialized thread; the temporary reference does not escape this
+    // call.
+    unsafe { (*current_memory_allocation_state()).is_enabled() }
 }
 
 /// Signals an exception on the current thread, to be handled when the current syscall exits.
@@ -2234,48 +4374,451 @@ pub unsafe fn migrate_to_cpu(target_cpu: cpu_num_t) {
     unsafe { cpp_thread_current_migrate_to_cpu(target_cpu) }
 }
 
-/// Unit tests for Thread Rust bindings.
+/// Generate a backtrace for the calling thread.
+///
+/// `out_bt` will be `reset()` prior to be filled in and if a backtrace cannot
+/// be obtained, it will be left empty.
+#[inline]
+pub fn current_get_backtrace(out_bt: &mut Backtrace) {
+    // SAFETY: `out_bt` is a valid, writable `Backtrace` on the current stack.
+    unsafe { cpp_thread_current_get_backtrace(out_bt) };
+}
+
+/// Generate a backtrace for the calling thread starting from frame pointer `fp`.
+///
+/// `out_bt` will be `reset()` prior to be filled in and if a backtrace cannot
+/// be obtained, it will be left empty.
+///
+/// # Safety
+///
+/// `fp` must either lie outside the calling thread's stack bounds (such as `0`) or be a valid,
+/// aligned, initialized frame pointer on the calling thread's stack (e.g., returned by
+/// [`crate::get_frame!`]).
+#[inline]
+pub unsafe fn current_get_backtrace_with_fp(fp: usize, out_bt: &mut Backtrace) {
+    // SAFETY: `out_bt` is a valid, writable `Backtrace` on the current stack, and the caller
+    // guarantees `fp` is either out of stack bounds or a valid initialized frame pointer.
+    unsafe { cpp_thread_current_get_backtrace_with_fp(fp, out_bt) };
+}
+
+/// Forwards C++ `Thread::set_signals`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_thread_set_signals(thread: &Thread, bits: u32) {
+    thread.set_signals(bits);
+}
+
+/// Forwards C++ `Thread::clear_signals`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_thread_clear_signals(thread: &Thread, bits: u32) {
+    thread.clear_signals(bits);
+}
+
+/// Forwards C++ `Thread::flags`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_thread_flags(thread: &Thread) -> u32 {
+    thread.flags()
+}
+
+/// Forwards C++ `Thread::detached`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_thread_detached(thread: &Thread) -> bool {
+    thread.detached()
+}
+
+/// Forwards C++ `Thread::set_detached`.
+///
+/// # Safety
+///
+/// Callers must uphold the [`Thread::set_detached`] lifecycle invariants.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_thread_set_detached(thread: &Thread, value: bool) {
+    // SAFETY: Forwarded from C++ `Thread::set_detached` caller.
+    unsafe { thread.set_detached(value) };
+}
+
+/// Forwards C++ `Thread::free_struct`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_thread_free_struct(thread: &Thread) -> bool {
+    thread.free_struct()
+}
+
+/// Forwards C++ `Thread::set_free_struct`.
+///
+/// # Safety
+///
+/// Callers must uphold the [`Thread::set_free_struct`] storage-ownership invariants.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_thread_set_free_struct(thread: &Thread, value: bool) {
+    // SAFETY: Forwarded from C++ `Thread::set_free_struct` caller.
+    unsafe { thread.set_free_struct(value) };
+}
+
+/// Forwards C++ `Thread::idle`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_thread_idle(thread: &Thread) -> bool {
+    thread.is_idle()
+}
+
+/// Forwards C++ `Thread::set_idle`.
+///
+/// # Safety
+///
+/// Callers must uphold the [`Thread::set_idle`] idle-thread invariants.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_thread_set_idle(thread: &Thread, value: bool) {
+    // SAFETY: Forwarded from C++ `Thread::set_idle` caller.
+    unsafe { thread.set_idle(value) };
+}
+
+/// Forwards C++ `Thread::vcpu`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_thread_vcpu(thread: &Thread) -> bool {
+    thread.vcpu()
+}
+
+/// Forwards C++ `Thread::set_vcpu`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_thread_set_vcpu(thread: &Thread, value: bool) {
+    thread.set_vcpu(value);
+}
+
+/// Forwards C++ `Thread::name`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_thread_name(thread: &Thread) -> *const c_char {
+    thread.name.as_ptr().cast::<c_char>()
+}
+
+/// Forwards C++ `Thread::set_name`. Takes `*mut Thread` rather than `&Thread` because C++ calls
+/// this from the `Thread::Thread` constructor before the `Thread` is fully constructed.
+///
+/// # Safety
+///
+/// - `thread` must point to allocated, suitably aligned `Thread` storage whose `name` bytes are
+///   initialized, with no concurrent non-atomic access to `name`.
+/// - When `len > 0`, `name` must be valid for reads of `len` initialized bytes (the
+///   [`zr::slice_from_raw_parts`] preconditions), and `[name, name + len)` must not overlap
+///   `thread`'s `name` buffer or be concurrently mutated for the duration of this call. When
+///   `len == 0`, `name` is not dereferenced and may be null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_thread_set_name(
+    thread: *mut Thread,
+    name: *const c_char,
+    len: usize,
+) {
+    // SAFETY: Caller guarantees `name` is valid for `len` non-overlapping, unmutated bytes when
+    // `len > 0`, and `zr::slice_from_raw_parts` handles `len == 0` without dereferencing `name`.
+    let bytes = unsafe { zr::slice_from_raw_parts(name.cast::<u8>(), len) };
+    // SAFETY: Caller guarantees `thread` has valid storage for `name`.
+    unsafe { Thread::set_name_in_place(thread, bytes) };
+}
+
+/// Forwards C++ `Thread::CheckKillOrSuspendSignal`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_thread_check_kill_or_suspend_signal(thread: &Thread) -> zx_status_t {
+    Status::result_into_raw(thread.check_kill_or_suspend_signal())
+}
+
+/// Forwards C++ `TaskState::Init`.
+///
+/// # Safety
+///
+/// `task_state` is a valid `TaskState` not yet visible to any other thread, with no live Rust
+/// reference to it (see [`TaskState::init`]).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_task_state_init(
+    task_state: *mut TaskState,
+    entry: Option<extern "C" fn(*mut c_void) -> i32>,
+    arg: *mut c_void,
+) {
+    // SAFETY: Forwarded from the C++ `TaskState::Init` caller, which upholds `init`'s contract.
+    unsafe { TaskState::init(task_state, entry, arg) };
+}
+
+/// Forwards C++ `TaskState::Join`.
+///
+/// # Safety
+///
+/// - A `ChainLockTransaction` must be active and finalized on this CPU (`assert_active` is
+///   debug-only; calling with no active transaction is UB in release).
+/// - `current_thread` must be the valid, currently executing `Thread` in `THREAD_RUNNING`, not
+///   queued in any wait queue, in a context where blocking is permitted (no spinlocks held,
+///   blocking not disallowed), with no Rust guard or proof for it live.
+/// - `*task_state` must be valid at the time of the call with no Rust guard or proof for its
+///   `retcode_wait_queue` live, and the queue must remain valid while `current_thread` remains
+///   blocked in it (and at least until both the queue lock and `current_thread`'s lock are
+///   released during the block operation); see [`TaskState::join`].
+/// - `task_state`'s queue lock and `current_thread`'s lock must be held by the active
+///   transaction's *current* token as the only held chain locks (both are debug-asserted).
+/// - The queue lock is released by this call (`TA_REL(get_lock())`) and must not be released
+///   again by the caller; `current_thread`'s lock is still held on return (`TA_REQ`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_task_state_join(
+    task_state: *mut TaskState,
+    current_thread: *mut Thread,
+    deadline: zx_instant_mono_t,
+) -> zx_status_t {
+    debug_assert!(!task_state.is_null());
+    debug_assert!(!current_thread.is_null());
+    // SAFETY: A transaction is active and finalized by precondition.
+    let token = unsafe { ChainLockTransaction::assert_active() };
+    // SAFETY:
+    // - `current_thread` is the valid current thread per caller contract, and it outlives the
+    //   call, so a `&Thread` may live across the block. Its lock is held by the active transaction
+    //   (`assert_held`, debug-only) with no other proof live, and a proof never releases the lock,
+    //   so the caller keeps that responsibility.
+    // - `task_state` is passed as a raw pointer: `TaskState::join` scopes the `&WaitQueue` and its
+    //   adopted guard to the preamble so that nothing into the (possibly freed) target is live
+    //   across `WaitQueueBase::block_etc_postamble`. All other blocking preconditions of
+    //   `TaskState::join` are upheld by the caller.
+    let res = unsafe {
+        let thread: &Thread = &*current_thread;
+        thread.lock().assert_held(&token);
+        let mut thread_proof = ChainLockProof::assume_held_unchecked(thread);
+        TaskState::join(task_state, &mut thread_proof, InstantMono(deadline), &token)
+    };
+    Status::result_into_raw(res)
+}
+
+/// Forwards C++ `TaskState::TryWakeJoiners`.
+///
+/// # Safety
+///
+/// - A `ChainLockTransaction` must be active and not finalized on this CPU (`assert_active` is
+///   debug-only; calling with no active transaction is UB in release).
+/// - Preemption must be disabled (`TA_REQ(preempt_disabled_token)`).
+/// - `task_state`'s queue lock must not already be held by this transaction.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_task_state_try_wake_joiners(
+    task_state: &TaskState,
+    status: zx_status_t,
+) -> bool {
+    // SAFETY: A transaction is active by precondition.
+    let token = unsafe { ChainLockTransaction::assert_active() };
+    // SAFETY: Preemption is disabled by precondition (`TA_REQ(preempt_disabled_token)`).
+    let preempt_disabled_token = unsafe { PreemptDisabledToken::new() };
+    task_state.try_wake_joiners(Status::ok(status), &token, &preempt_disabled_token)
+}
+
+/// The default trampoline used when running the Thread. This can be
+/// replaced by the `alt_trampoline` parameter to `CreateEtc()`.
+///
+/// `Thread::CreateEtc` and `Thread::ReviveIdlePowerThread` install this symbol directly as the
+/// thread's initial PC (`arch_thread_initialize`), so there is no intermediate frame.
+///
+/// Thread trampolines are always called with:
+///
+/// 1. The thread's lock held
+/// 2. interrupts disabled.
+///
+/// Implementers of trampolines must always remember to unconditionally release
+/// the current thread's lock, and *then* enable interrupts, before jumping to
+/// the thread's entry point.
+///
+/// Sadly, there does not seem to be a good way to statically annotate this.
+///
+/// # Safety
+///
+/// Must only be entered as the initial PC of a newly context-switched thread, with interrupts
+/// disabled and the `ChainLockTransaction` registered by `Scheduler::reschedule_common` still
+/// active and holding both the previous thread's lock and the current thread's lock under its
+/// reserved scheduler token.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_thread_trampoline() -> ! {
+    // Handle the special case of starting a new thread for the first time,
+    // releasing the previous thread's lock as well as the current thread's lock
+    // in the process, before restoring interrupts and dropping into the thread's
+    // entry point.
+    //
+    // SAFETY: The caller guarantees this is the initial trampoline entry with interrupts disabled
+    // and the `reschedule_common` transaction active holding both locks with the reserved scheduler
+    // token.
+    unsafe { scheduler::trampoline_lock_handoff() };
+    enable_ints();
+
+    // Call into the thread's entry point, and call exit when finished.
+    let current = current_get();
+    // SAFETY: `current` is the valid, live current thread; projecting the field forms no
+    // reference, so no `&Thread` is live across the indirect call, and `entry`/`arg` were written
+    // once by `TaskState::init` before this thread was published.
+    let (entry, arg) = unsafe {
+        let task_state = &raw const (*current).task_state;
+        ((*task_state).entry, (*task_state).arg)
+    };
+    // `CreateEtc` installs this default trampoline only when no `alt_trampoline` is given, and
+    // every `CreateEtc` caller that passes a null `entry` supplies an `alt_trampoline`, so `entry`
+    // is non-null here; a null `entry` is a caller bug, so panic.
+    let entry =
+        entry.expect("the default trampoline is only installed for threads created with an entry");
+    // TODO(https://fxbug.dev/528405969): The C++ `thread_start_routine` typedef in
+    // `kernel/thread.h` is `[[clang::cfi_unchecked_callee]]`. Rust has no equivalent opt-out;
+    // revisit this indirect call if kernel Rust ever enables KCFI.
+    let ret = entry(arg);
+    current_exit(ret)
+}
+
+/// Slow path for C++ `PreemptionState::PreemptReenable`.
+///
+/// # Safety
+/// `preemption_state` is the current thread's `PreemptionState` on a running thread
+/// (`ThreadState::Running`) in a context where blocking is allowed (`!blocking_disallowed()`), the
+/// call pairs with a prior unmatched `PreemptDisable` on the current thread, the caller has
+/// already decremented the preempt disable count once (observing `old_state` with
+/// `PreemptionState::eager_resched_disable_count_of(old_state) == 0 &&
+/// PreemptionState::preempt_disable_count_of(old_state) == 1`, or an underflow with
+/// `PreemptionState::preempt_disable_count_of(old_state) == 0`), and the call does not drop
+/// preemption back to enabled while any `PreemptDisabledToken` is live.
+#[cold]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_preemption_state_preempt_reenable_slow(
+    preemption_state: &PreemptionState,
+    old_state: u32,
+) {
+    // SAFETY: The caller guarantees this is the current thread's state and the slow-path
+    // preconditions of `preempt_reenable_slow`.
+    unsafe { preemption_state.preempt_reenable_slow(old_state) };
+}
+
+/// Slow path for C++ `PreemptionState::PreemptReenableDelayFlush`.
+///
+/// # Safety
+/// `preemption_state` is the current thread's `PreemptionState`, interrupts are disabled and
+/// blocking is disallowed, the call pairs with a prior unmatched `PreemptDisable` on the current
+/// thread, the caller has already decremented the preempt disable count once (observing
+/// `old_state` with `PreemptionState::eager_resched_disable_count_of(old_state) == 0 &&
+/// PreemptionState::preempt_disable_count_of(old_state) == 1` and `old_state != 1`, or an
+/// underflow with `PreemptionState::preempt_disable_count_of(old_state) == 0`), and the call does
+/// not drop preemption back to enabled while any `PreemptDisabledToken` is live.
+#[cold]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_preemption_state_preempt_reenable_delay_flush_slow(
+    preemption_state: &PreemptionState,
+    old_state: u32,
+) -> bool {
+    preemption_state.preempt_reenable_delay_flush_slow(old_state)
+}
+
+/// Slow path for C++ `PreemptionState::EagerReschedReenable`.
+///
+/// # Safety
+/// `preemption_state` is the current thread's `PreemptionState`, when
+/// `PreemptionState::preempt_disable_count_of(old_state) == 0` the current thread is in
+/// `ThreadState::Running` in a context where blocking is allowed (`!blocking_disallowed()`), the
+/// call pairs with a prior unmatched `EagerReschedDisable` on the current thread, the caller has
+/// already decremented the eager resched disable count once (observing `old_state` with
+/// `PreemptionState::eager_resched_disable_count_of(old_state) == 1`, or an underflow with
+/// `PreemptionState::eager_resched_disable_count_of(old_state) == 0`), and the call does not drop
+/// preemption back to enabled while any `PreemptDisabledToken` is live.
+#[cold]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_preemption_state_eager_resched_reenable_slow(
+    preemption_state: &PreemptionState,
+    old_state: u32,
+) {
+    // SAFETY: The caller guarantees this is the current thread's state and the slow-path
+    // preconditions of `eager_resched_reenable_slow`.
+    unsafe { preemption_state.eager_resched_reenable_slow(old_state) };
+}
+
+/// Forwards C++ `PreemptionState::SetTimesliceExtension`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_preemption_state_set_timeslice_extension(
+    preemption_state: &PreemptionState,
+    extension_duration: zx_types::zx_duration_mono_t,
+) -> bool {
+    preemption_state.set_timeslice_extension(extension_duration)
+}
+
+/// Forwards C++ `PreemptionState::ClearTimesliceExtension`.
+///
+/// # Safety
+/// `preemption_state` is the current thread's `PreemptionState`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_preemption_state_clear_timeslice_extension(
+    preemption_state: &PreemptionState,
+) {
+    // SAFETY: The caller guarantees this is the current thread's state.
+    unsafe { preemption_state.clear_timeslice_extension() };
+}
+
+/// Forwards C++ `PreemptionState::PreemptSetPending`.
+///
+/// Interrupts and preemption must be disabled and blocking disallowed (interrupt-handler
+/// context), as `debug_assert!`ed by [`PreemptionState::preempt_set_pending`].
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_preemption_state_preempt_set_pending(
+    preemption_state: &PreemptionState,
+    reschedule_mask: crate::kernel::types::cpu_mask_t,
+) {
+    preemption_state.preempt_set_pending(reschedule_mask);
+}
+
+/// Forwards C++ `PreemptionState::EvaluateTimesliceExtension`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_preemption_state_evaluate_timeslice_extension(
+    preemption_state: &PreemptionState,
+) -> bool {
+    preemption_state.evaluate_timeslice_extension()
+}
+
+/// Forwards C++ `PreemptionState::Reset`.
+///
+/// # Safety
+/// `preemption_state`'s owning thread is halted (not running on any CPU) and no
+/// `PreemptDisabledToken` for it is live. This exists only for reviving an idle/power thread that
+/// halted while taking a CPU offline.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_preemption_state_reset(preemption_state: &PreemptionState) {
+    // SAFETY: The caller guarantees the owning thread is halted with no live token.
+    unsafe { preemption_state.reset() };
+}
+
+/// Unit tests for Thread and TaskRuntimeStats.
 #[cfg(ktest)]
-#[unittest::suite(name = "thread_rust")]
+#[unittest::suite(name = "thread")]
 mod tests {
     use super::{
-        AnnotatedAutoEagerReschedDisabler, ChainLocked, DEFAULT_PRIORITY, Interruptible,
-        LOW_PRIORITY, ScopedMemoryAllocationDisabled, Thread, ThreadLockGuard, ThreadPtr,
-        ThreadStateKind, cpp_thread_current_memory_allocation_state_disable,
-        cpp_thread_current_memory_allocation_state_enable, create_with_priority, current_get,
-        current_memory_allocation_state_is_enabled, eager_resched_disable_count, layout,
-        sleep_relative,
+        AnnotatedAutoEagerReschedDisabler, AnnotatedAutoPreemptDisabler, AutoPreemptDisabler,
+        ChainLocked, ContextSwitchFn, DEFAULT_PRIORITY, Interruptible, LOW_PRIORITY, MigrateFn,
+        MigrateStage, SchedulerStateBaseProfile, ScopedMemoryAllocationDisabled, ScopedMemoryStall,
+        TaskRuntimeStats, Thread, ThreadLockGuard, ThreadPtr, ThreadRuntimeStats, ThreadStallState,
+        ThreadStateKind, create_etc, create_with_priority, current_exit, current_get,
+        current_get_backtrace, current_get_backtrace_with_fp, current_memory_allocation_state,
+        eager_resched_disable_count, layout, sleep_relative, r#yield,
     };
-    use crate::arch_rs::curr_cpu_num;
+    use crate::arch_rs::{curr_cpu_num, enable_ints};
+    use crate::backtrace::Backtrace;
     use crate::kconcurrent::{
-        ChainLockTransaction, DONE, IRQ_SAVE_OPTION, OwnerGuard, SingleChainLockGuard, clt_tag,
-        single_chain_lock_guard_owned,
+        ChainLockProof, ChainLockTransaction, DONE, IRQ_SAVE_OPTION, OwnerGuard,
+        SingleChainLockGuard, clt_tag, single_chain_lock_guard_owned,
     };
-    use crate::kernel::mp::{INVALID_CPU, cpu_num_to_mask, get_online_mask};
-    use crate::kernel::types::{cpu_mask_t, cpu_num_t, highest_cpu_set};
+    use crate::kernel::deadline::{Deadline, TimerSlack};
+    use crate::kernel::event::Event;
+    use crate::kernel::mp::{CPU_MASK_ALL, INVALID_CPU, cpu_num_to_mask, get_online_mask};
+    use crate::kernel::scheduler::{Scheduler, peek_active_mask, trampoline_lock_handoff};
+    use crate::kernel::types::{cpu_mask_t, cpu_num_t, highest_cpu_set, lowest_cpu_set};
     use crate::kernel::wait_queue::{
         BlockedThreadTreeTag, MinRelativeDeadlineTraits, PRIMARY_KEY_ZERO,
     };
-    use crate::platform_rs::timer::{DurationMono, InstantMono};
-    use core::ffi::c_void;
-    use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+    use crate::platform_rs::timer::{
+        DurationMono, InstantMono, current_mono_time, timer_current_mono_ticks,
+    };
+    use core::cell::Cell;
+    use core::ffi::{CStr, c_int, c_void};
+    use core::marker::{PhantomData, PhantomPinned};
+    use core::pin::Pin;
+    use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
     use fbl::{WavlTreeAugmentedInvariantObserverTraits, WavlTreeContainable, WavlTreeKeyable};
     use kprint::kprintln;
+    use pin_init::{PinInit, pin_data, pinned_drop};
     use unittest::{
-        assert_eq, assert_ne, assert_true, expect_eq, expect_false, expect_true, unwrap_ok,
+        assert_eq, assert_gt, assert_ne, assert_true, expect_eq, expect_err, expect_false,
+        expect_ge, expect_le, expect_ne, expect_ok, expect_true, unwrap_ok,
     };
     use zx_status::Status;
-
-    // Wait for condition |cond| to become true, polling with slow exponential backoff
-    // to avoid pegging the CPU.
-    fn wait_for_cond(mut cond: impl FnMut() -> bool) {
-        let mut wait_duration = DurationMono::from_micros(1);
-        while !cond() {
-            let _ = sleep_relative(wait_duration);
-            // Increase wait_duration time by ~10%.
-            wait_duration = DurationMono(wait_duration.0 + (wait_duration.0 / 10 + 1));
-        }
-    }
+    use zx_types::{
+        ZX_ERR_BAD_STATE, ZX_ERR_TIMED_OUT, ZX_KOID_INVALID, ZX_MAX_NAME_LEN, ZX_OK,
+        zx_duration_mono_ticks_t, zx_instant_mono_ticks_t,
+    };
 
     /// Verifies AnnotatedAutoEagerReschedDisabler and ThreadPtr accessors on the current thread.
     #[test]
@@ -2382,6 +4925,723 @@ mod tests {
         expect_true!(held);
         expect_true!(owner_matches);
         expect_true!(current.lock().is_unlocked());
+    }
+
+    /// Verifies the `ChainLockProof<'_, Thread>` accessors on the (unblocked) running thread.
+    #[test]
+    fn thread_proof_guarded_fields() {
+        let current_ptr = current_get();
+        // SAFETY: `current_get()` returns a valid pointer to the running thread, which stays alive
+        // for the duration of this test.
+        let current: &Thread = unsafe { &*current_ptr };
+        // The lock is the `ChainLockable` base subobject, so it lives at the thread's address.
+        expect_eq!(core::ptr::from_ref(current.lock()).addr(), current_ptr.addr());
+        expect_true!(current.canary.valid());
+        current.assert_canary();
+        expect_true!(current.check_kill_or_suspend_signal().is_ok());
+        expect_true!(current.check_kill_or_suspend_signal_mask(0).is_ok());
+        expect_true!(current.check_kill_or_suspend_signal_mask(u32::MAX).is_ok());
+
+        let mut running = false;
+        let mut state_transitions_match = false;
+        let mut not_blocked = false;
+        let mut interruptible = Interruptible::Yes;
+        let mut no_owned_wait_queues = false;
+        let mut can_own_wait_queues = false;
+        let mut user_state_saved = true;
+        let mut migrate_pending = true;
+        let mut policy_exception = (u32::MAX, u32::MAX);
+        let mut scheduler_state_matches = false;
+        let mut wait_queue_state_matches = false;
+        ChainLockTransaction::until_done(
+            IRQ_SAVE_OPTION,
+            clt_tag!("thread_proof_guarded_fields"),
+            |token| {
+                let mut guard = OwnerGuard::new(current, token);
+                ChainLockTransaction::finalize(token);
+                let mut proof = guard.proof();
+
+                let orig_state = proof.state();
+                running = orig_state == ThreadStateKind::Running;
+                proof.set_blocked();
+                let blocked_ok = proof.state() == ThreadStateKind::Blocked;
+                proof.set_blocked_read_lock();
+                let blocked_read_ok = proof.state() == ThreadStateKind::BlockedReadLock;
+                proof.set_state(orig_state);
+                state_transitions_match =
+                    blocked_ok && blocked_read_ok && proof.state() == orig_state;
+
+                // `ThreadState` members (wait_queue.rs accessors).
+                let wq_state = proof.wait_queue_state();
+                not_blocked = !wq_state.in_wait_queue(proof.token())
+                    && wq_state.blocking_wait_queue(proof.token()).is_none();
+                // `blocked_status` keeps the last wake status until the next block, so only check
+                // that it reads back.
+                let _ = wq_state.blocked_status(proof.token());
+                interruptible = wq_state.interruptible(proof.token());
+
+                // `Thread` members.
+                no_owned_wait_queues = proof.owned_wait_queues().is_empty()
+                    && proof.owned_wait_queues_mut().is_empty();
+                can_own_wait_queues = proof.can_own_wait_queues();
+                user_state_saved = proof.user_state_saved();
+                migrate_pending = proof.migrate_pending();
+                policy_exception =
+                    (proof.extra_policy_exception_code(), proof.extra_policy_exception_data());
+
+                // Writing the current values back through the `_mut` accessors leaves the thread
+                // unchanged.
+                *proof.extra_policy_exception_code_mut() = policy_exception.0;
+                *proof.extra_policy_exception_data_mut() = policy_exception.1;
+                *proof.can_own_wait_queues_mut() = can_own_wait_queues;
+                *proof.user_state_saved_mut() = user_state_saved;
+                *proof.migrate_pending_mut() = migrate_pending;
+
+                // The proof's `SchedulerState` facade and `ThreadState` sit over the members at
+                // the offsets `<kernel/thread_layout.h>` declares.
+                scheduler_state_matches = core::ptr::from_ref(proof.scheduler_state()).addr()
+                    == current_ptr.addr() + layout::ThreadLayout_kSchedulerStateOffset;
+                wait_queue_state_matches = core::ptr::from_ref(proof.wait_queue_state()).addr()
+                    == current_ptr.addr() + layout::ThreadLayout_kWaitQueueStateOffset;
+                guard.release();
+                DONE
+            },
+        );
+        expect_true!(running);
+        expect_true!(state_transitions_match);
+        expect_true!(not_blocked);
+        expect_eq!(interruptible, Interruptible::No);
+        expect_true!(no_owned_wait_queues);
+        expect_true!(can_own_wait_queues);
+        expect_false!(user_state_saved);
+        expect_false!(migrate_pending);
+        expect_eq!(policy_exception.0, 0);
+        expect_eq!(policy_exception.1, 0);
+        expect_true!(scheduler_state_matches);
+        expect_true!(wait_queue_state_matches);
+        expect_true!(current.lock().is_unlocked());
+    }
+
+    /// Verifies WAVL tree traits and `MinRelativeDeadlineTraits` on an unqueued `Thread`.
+    #[test]
+    fn wavl_tree_traits_on_thread() {
+        let current_ptr = current_get();
+        // SAFETY: `current_get()` returns a valid pointer to the running thread, which stays alive
+        // for the duration of this test.
+        let current: &Thread = unsafe { &*current_ptr };
+
+        // The running test thread is not in any wait queue.
+        let node = <Thread as WavlTreeContainable<Thread, BlockedThreadTreeTag>>::get_node(current);
+        expect_false!(node.in_container());
+
+        let mut key: (InstantMono, usize) = (InstantMono::INFINITE, 0);
+        let mut node_deadline = DurationMono::ZERO;
+        let mut subtree_deadline = DurationMono::ZERO;
+        ChainLockTransaction::until_done(
+            IRQ_SAVE_OPTION,
+            clt_tag!("wavl_tree_traits_on_thread"),
+            |token| {
+                let mut guard = OwnerGuard::new(current, token);
+                ChainLockTransaction::finalize(token);
+                let _proof = guard.proof();
+                // SAFETY: The current thread is not in any wait queue and we hold its lock, which
+                // satisfies the synchronization preconditions of the WAVL tree trait hooks.
+                unsafe {
+                    key = <Thread as WavlTreeKeyable<(InstantMono, usize)>>::get_key(current);
+                    node_deadline = MinRelativeDeadlineTraits::get_node_value(current);
+                    subtree_deadline = MinRelativeDeadlineTraits::get_subtree_value(current);
+                }
+                guard.release();
+                DONE
+            },
+        );
+        // `WaitQueueCollection::Remove` only resets the sort key in debug builds, so a thread
+        // that has blocked before may carry a stale key in release builds.
+        if cfg!(debug_assertions) {
+            expect_eq!(key.0.0, PRIMARY_KEY_ZERO.0);
+        }
+        expect_eq!(key.1, current_ptr.addr());
+        // The running test thread has a fair profile, so its relative deadline is `INFINITE`.
+        expect_eq!(node_deadline.0, DurationMono::INFINITE.0);
+        expect_eq!(subtree_deadline.0, DurationMono::INFINITE.0);
+        expect_eq!(
+            MinRelativeDeadlineTraits::combine_values(
+                DurationMono::from_millis(10),
+                DurationMono::INFINITE
+            )
+            .0,
+            DurationMono::from_millis(10).0
+        );
+    }
+
+    /// Shared with a helper thread that waits on `event` until `deadline` (monotonic) and exits
+    /// with `retcode`, or with the raw status `wait` returned on failure.
+    struct WaitCtx {
+        event: *const Event,
+        deadline: InstantMono,
+        retcode: i32,
+    }
+
+    impl WaitCtx {
+        /// A generous but finite deadline, so a failed test self-terminates via the wait queue's
+        /// timeout instead of wedging the join.
+        fn ten_seconds(event: &Event) -> Self {
+            Self {
+                event: core::ptr::from_ref(event),
+                deadline: InstantMono(current_mono_time().0 + 10 * 1_000_000_000),
+                retcode: zx_types::ZX_OK,
+            }
+        }
+    }
+
+    extern "C" fn wait_entry(arg: *mut c_void) -> i32 {
+        // SAFETY: `arg` is the `WaitCtx` the spawning test keeps alive until it joins us.
+        let ctx = unsafe { &*arg.cast::<WaitCtx>() };
+        // SAFETY: As above for the event the context points at.
+        let event = unsafe { &*ctx.event };
+        match event.wait_deadline(ctx.deadline, super::Interruptible::No) {
+            Ok(()) => ctx.retcode,
+            Err(status) => status.into_raw(),
+        }
+    }
+
+    /// Waits for `waiter` to enter `THREAD_BLOCKED` in a wait queue.
+    fn wait_until_blocked(waiter: super::ThreadPtr) -> bool {
+        for _ in 0..5000 {
+            // SAFETY: Callers have not joined `waiter` yet.
+            if unsafe { waiter.is_blocked() } {
+                return true;
+            }
+            let _ = super::sleep_relative(DurationMono(1_000_000)); // 1ms
+        }
+        false
+    }
+
+    /// A helper thread parked in `ctx`'s event queue. Its `Thread` can be inspected and poked
+    /// through [`ParkedWaiter::thread`] while it sits there; it is signaled and joined exactly
+    /// once, either by [`ParkedWaiter::join`] or on drop, so an early test return never leaves
+    /// it live.
+    struct ParkedWaiter<'a> {
+        ctx: &'a WaitCtx,
+        thread: Option<super::ThreadPtr>,
+    }
+
+    impl<'a> ParkedWaiter<'a> {
+        /// Spawns the waiter and waits for it to block; `None` if either step fails.
+        fn spawn(ctx: &'a WaitCtx) -> Option<Self> {
+            // SAFETY: `ctx` outlives the thread, which `join`/`Drop` joins.
+            let thread = unsafe {
+                super::spawn(
+                    c"thread_rust_waiter".as_ptr(),
+                    wait_entry,
+                    core::ptr::from_ref(ctx).cast_mut().cast(),
+                )
+            }
+            .ok()?;
+            let waiter = Self { ctx, thread: Some(thread) };
+            wait_until_blocked(thread).then_some(waiter)
+        }
+
+        fn thread(&self) -> &super::Thread {
+            // SAFETY: The waiter has not been joined (it is still in `self.thread`), so its
+            // `Thread` is alive for as long as `self` is borrowed.
+            unsafe { &*self.ptr().as_ptr() }
+        }
+
+        fn ptr(&self) -> super::ThreadPtr {
+            self.thread.expect("only `join`/`joined_elsewhere` take the thread, consuming self")
+        }
+
+        /// Gives up the waiter without joining it, because some other thread already did.
+        fn joined_elsewhere(mut self) {
+            self.thread = None;
+        }
+
+        /// Opens the event and joins the waiter, returning its exit status.
+        fn join(mut self) -> Result<i32, zx_status::Status> {
+            let thread = self.thread.take().expect("only `join` takes the thread");
+            // SAFETY: `self.event` outlives `self`.
+            unsafe { &*self.ctx.event }.signal();
+            // SAFETY: The thread was taken out of `self.thread`, so it is joined exactly once.
+            unsafe { thread.join(InstantMono::INFINITE) }
+        }
+    }
+
+    impl Drop for ParkedWaiter<'_> {
+        fn drop(&mut self) {
+            if let Some(thread) = self.thread.take() {
+                // SAFETY: `self.event` outlives `self`.
+                unsafe { &*self.ctx.event }.signal();
+                // SAFETY: The thread was taken out of `self.thread`, so it is joined exactly once.
+                let _ = unsafe { thread.join(InstantMono::INFINITE) };
+            }
+        }
+    }
+
+    /// Verifies the flag getters and setters on a parked helper thread, restoring its flags.
+    // A helper is used rather than the running thread because a blocked thread's flags are not
+    // concurrently modified by other systems, while the running thread's might be. Toggling
+    // `FREE_STRUCT`, `IDLE`, and `DETACHED` here is safe because `waiter` is parked on `event` and
+    // neither exits nor is scheduled until `waiter.join()`, after every flag is restored.
+    #[test]
+    fn test_thread_flags() {
+        pin_init::stack_pin_init!(let event = Event::init_unsignaled());
+        let ctx = WaitCtx { deadline: InstantMono::INFINITE, ..WaitCtx::ten_seconds(&event) };
+        let waiter = ParkedWaiter::spawn(&ctx);
+        assert_true!(waiter.is_some(), "failed to spawn and park the waiter");
+        let waiter = waiter.expect("checked above");
+        let thread = waiter.thread();
+        let saved = thread.flags();
+        // Put every bit back however the test exits.
+        let _restore = zr::defer(|| {
+            // SAFETY: Restores the parked waiter's original flags before `waiter` is dropped.
+            unsafe {
+                thread.set_free_struct(saved & super::THREAD_FLAG_FREE_STRUCT != 0);
+                thread.set_idle(saved & super::THREAD_FLAG_IDLE != 0);
+                thread.set_detached(saved & super::THREAD_FLAG_DETACHED != 0);
+            }
+            thread.set_vcpu(saved & super::THREAD_FLAG_VCPU != 0);
+        });
+
+        expect_false!(thread.is_idle());
+        // SAFETY: `thread` is a valid `Thread`.
+        expect_false!(unsafe { Thread::is_idle_ptr(core::ptr::from_ref(thread)) });
+
+        // SAFETY: `waiter` is parked in `event` and all flags are restored before it wakes/exits.
+        unsafe { thread.set_free_struct(true) };
+        expect_true!(thread.free_struct());
+        expect_true!(thread.flags() & super::THREAD_FLAG_FREE_STRUCT != 0);
+        // SAFETY: As above.
+        unsafe { thread.set_free_struct(false) };
+        expect_false!(thread.free_struct());
+        // SAFETY: As above.
+        unsafe { thread.set_free_struct(saved & super::THREAD_FLAG_FREE_STRUCT != 0) };
+        expect_eq!(thread.free_struct(), saved & super::THREAD_FLAG_FREE_STRUCT != 0);
+
+        // SAFETY: As above.
+        unsafe { thread.set_idle(true) };
+        expect_true!(thread.is_idle());
+        // SAFETY: `thread` is a valid `Thread`.
+        expect_true!(unsafe { Thread::is_idle_ptr(core::ptr::from_ref(thread)) });
+        expect_true!(thread.flags() & super::THREAD_FLAG_IDLE != 0);
+        // SAFETY: As above.
+        unsafe { thread.set_idle(false) };
+        expect_false!(thread.is_idle());
+        // SAFETY: `thread` is a valid `Thread`.
+        expect_false!(unsafe { Thread::is_idle_ptr(core::ptr::from_ref(thread)) });
+        // SAFETY: As above.
+        unsafe { thread.set_idle(saved & super::THREAD_FLAG_IDLE != 0) };
+        expect_eq!(thread.is_idle(), saved & super::THREAD_FLAG_IDLE != 0);
+
+        thread.set_vcpu(true);
+        expect_true!(thread.vcpu());
+        expect_true!(thread.flags() & super::THREAD_FLAG_VCPU != 0);
+        thread.set_vcpu(false);
+        expect_false!(thread.vcpu());
+        thread.set_vcpu(saved & super::THREAD_FLAG_VCPU != 0);
+        expect_eq!(thread.vcpu(), saved & super::THREAD_FLAG_VCPU != 0);
+
+        // SAFETY: As above.
+        unsafe { thread.set_detached(true) };
+        expect_true!(thread.detached());
+        expect_true!(thread.flags() & super::THREAD_FLAG_DETACHED != 0);
+        // SAFETY: As above.
+        unsafe { thread.set_detached(false) };
+        expect_false!(thread.detached());
+        // SAFETY: As above.
+        unsafe { thread.set_detached(saved & super::THREAD_FLAG_DETACHED != 0) };
+        expect_eq!(thread.detached(), saved & super::THREAD_FLAG_DETACHED != 0);
+
+        expect_eq!(thread.flags(), saved);
+        drop(_restore);
+        expect_eq!(waiter.join().unwrap_or(ZX_ERR_BAD_STATE), ZX_OK);
+    }
+
+    /// Verifies the signal accessors and `check_kill_or_suspend_signal` on a parked helper thread.
+    #[test]
+    fn test_thread_signals() {
+        pin_init::stack_pin_init!(let event = Event::init_unsignaled());
+        let ctx = WaitCtx::ten_seconds(&event);
+        let waiter = ParkedWaiter::spawn(&ctx);
+        assert_true!(waiter.is_some(), "failed to spawn and park the waiter");
+        let waiter = waiter.expect("checked above");
+        let thread = waiter.thread();
+        let initial = thread.signals();
+        expect_ok!(thread.check_kill_or_suspend_signal());
+
+        thread.set_signals(super::THREAD_SIGNAL_KILL);
+        expect_true!(thread.signals() & super::THREAD_SIGNAL_KILL != 0);
+        expect_err!(thread.check_kill_or_suspend_signal(), super::ZX_ERR_INTERNAL_INTR_KILLED);
+        thread.clear_signals(super::THREAD_SIGNAL_KILL);
+        expect_true!(thread.signals() & super::THREAD_SIGNAL_KILL == 0);
+
+        thread.set_signals(super::THREAD_SIGNAL_SUSPEND);
+        expect_err!(thread.check_kill_or_suspend_signal(), super::ZX_ERR_INTERNAL_INTR_RETRY);
+        expect_err!(thread.check_kill_or_suspend_signal_mask(0), super::ZX_ERR_INTERNAL_INTR_RETRY);
+        expect_ok!(thread.check_kill_or_suspend_signal_mask(super::THREAD_SIGNAL_SUSPEND));
+
+        // When both KILL and SUSPEND are raised, KILL takes precedence unless masked.
+        thread.set_signals(super::THREAD_SIGNAL_KILL);
+        expect_err!(thread.check_kill_or_suspend_signal(), super::ZX_ERR_INTERNAL_INTR_KILLED);
+        expect_err!(
+            thread.check_kill_or_suspend_signal_mask(super::THREAD_SIGNAL_SUSPEND),
+            super::ZX_ERR_INTERNAL_INTR_KILLED
+        );
+        expect_err!(
+            thread.check_kill_or_suspend_signal_mask(super::THREAD_SIGNAL_KILL),
+            super::ZX_ERR_INTERNAL_INTR_RETRY
+        );
+        expect_ok!(thread.check_kill_or_suspend_signal_mask(
+            super::THREAD_SIGNAL_KILL | super::THREAD_SIGNAL_SUSPEND
+        ));
+        thread.clear_signals(super::THREAD_SIGNAL_KILL | super::THREAD_SIGNAL_SUSPEND);
+        expect_ok!(thread.check_kill_or_suspend_signal());
+        expect_eq!(thread.signals(), initial);
+
+        expect_eq!(waiter.join().unwrap_or(ZX_ERR_BAD_STATE), ZX_OK);
+    }
+
+    /// Verifies `set_name` truncation and zero-fill on the current thread, restoring its name.
+    #[test]
+    fn test_thread_name() {
+        let current_ptr = super::current_get();
+        // SAFETY: `current_get()` returns a valid pointer to the running thread, which stays alive
+        // for the duration of this test.
+        let current: &super::Thread = unsafe { &*current_ptr };
+        let saved = current.name();
+        let _restore = zr::defer(|| {
+            current.set_name(saved.as_bytes());
+        });
+
+        current.set_name(b"short");
+        let mut expected = [0u8; ZX_MAX_NAME_LEN];
+        expected[..5].copy_from_slice(b"short");
+        let mut buf = [0u8; ZX_MAX_NAME_LEN];
+        current.name_bytes(&mut buf);
+        expect_true!(buf == expected);
+        let mut ptr_buf = [0u8; ZX_MAX_NAME_LEN];
+        // SAFETY: `current_ptr` points to the live current thread.
+        unsafe { Thread::name_bytes_ptr(current_ptr, &mut ptr_buf) };
+        expect_true!(ptr_buf == expected);
+        // SAFETY: `current_ptr` points to the live current thread.
+        expect_true!(unsafe { Thread::name_copy_ptr(current_ptr) }.as_bytes() == b"short");
+        expect_eq!(super::rust_thread_name(current).addr(), current.name.as_ptr().addr());
+        // SAFETY: The buffer is NUL-terminated and nothing else writes the test thread's name.
+        let cstr = unsafe { CStr::from_ptr(super::rust_thread_name(current).cast()) };
+        expect_true!(cstr.to_bytes() == b"short");
+
+        let exact = [b'a'; ZX_MAX_NAME_LEN - 1];
+        current.set_name(&exact);
+        let mut expected = [b'a'; ZX_MAX_NAME_LEN];
+        expected[ZX_MAX_NAME_LEN - 1] = 0;
+        current.name_bytes(&mut buf);
+        expect_true!(buf == expected);
+        expect_eq!(current.name().as_bytes().len(), ZX_MAX_NAME_LEN - 1);
+
+        let long = [b'b'; ZX_MAX_NAME_LEN + 8];
+        current.set_name(&long);
+        let mut expected = [b'b'; ZX_MAX_NAME_LEN];
+        expected[ZX_MAX_NAME_LEN - 1] = 0;
+        current.name_bytes(&mut buf);
+        expect_true!(buf == expected);
+        // SAFETY: As above.
+        let cstr = unsafe { CStr::from_ptr(super::rust_thread_name(current).cast()) };
+        expect_eq!(cstr.to_bytes().len(), ZX_MAX_NAME_LEN - 1);
+
+        // Embedded NUL bytes and non-UTF-8 bytes are copied verbatim into the buffer.
+        current.set_name(b"ab\0cd");
+        let mut expected = [0u8; ZX_MAX_NAME_LEN];
+        expected[..5].copy_from_slice(b"ab\0cd");
+        current.name_bytes(&mut buf);
+        expect_true!(buf == expected);
+        expect_true!(current.name().as_bytes() == b"ab");
+        // SAFETY: As above.
+        let cstr = unsafe { CStr::from_ptr(super::rust_thread_name(current).cast()) };
+        expect_true!(cstr.to_bytes() == b"ab");
+
+        current.set_name(b"a\xffb");
+        let mut expected = [0u8; ZX_MAX_NAME_LEN];
+        expected[..3].copy_from_slice(b"a\xffb");
+        current.name_bytes(&mut buf);
+        expect_true!(buf == expected);
+        expect_true!(current.name().as_bytes() == b"a\xffb");
+
+        current.set_name(b"");
+        current.name_bytes(&mut buf);
+        expect_true!(buf == [0u8; ZX_MAX_NAME_LEN]);
+        expect_true!(current.name().as_bytes().is_empty());
+        // SAFETY: As above.
+        let cstr = unsafe { CStr::from_ptr(super::rust_thread_name(current).cast()) };
+        expect_true!(cstr.to_bytes().is_empty());
+
+        // `rust_thread_set_name` accepts a null pointer when `len == 0`.
+        current.set_name(b"nonempty");
+        // SAFETY: `current_ptr` has valid `name` storage and `len == 0` does not dereference the
+        // name pointer.
+        unsafe { super::rust_thread_set_name(current_ptr, core::ptr::null(), 0) };
+        current.name_bytes(&mut buf);
+        expect_true!(buf == [0u8; ZX_MAX_NAME_LEN]);
+
+        // `ThreadPtr::{set_name, name}` delegates to the underlying `Thread` buffer.
+        // SAFETY: Threading is initialized during ktests and `thread_ptr` is the live current
+        // thread.
+        unsafe {
+            let thread_ptr = super::ThreadPtr::current();
+            thread_ptr.set_name(b"via-ptr");
+            expect_true!(thread_ptr.name().as_bytes() == b"via-ptr");
+        }
+    }
+
+    /// Verifies that a kernel thread has a nonzero tid and no pid.
+    #[test]
+    fn test_thread_tid_pid() {
+        let current_ptr = super::current_get();
+        // SAFETY: `current_get()` returns a valid pointer to the running thread, which stays alive
+        // for the duration of this test.
+        let current: &super::Thread = unsafe { &*current_ptr };
+        expect_true!(current.tid() != 0);
+        // SAFETY: `current_ptr` points to the valid current thread.
+        expect_eq!(current.tid(), unsafe { super::ThreadPtr::current().tid() });
+        expect_eq!(current.pid(), ZX_KOID_INVALID);
+        // SAFETY: `current_ptr` points to the valid current thread.
+        expect_eq!(current.pid(), unsafe { super::ThreadPtr::current().pid() });
+    }
+
+    /// Shared with a helper thread that joins `target` with `deadline` (monotonic) and exits with
+    /// the target's retcode, or with the raw status `join` returned on failure; `joined` records
+    /// whether the helper's join succeeded (and so consumed `target`).
+    struct JoinCtx {
+        target: super::ThreadPtr,
+        deadline: InstantMono,
+        joined: AtomicBool,
+    }
+
+    extern "C" fn join_entry(arg: *mut c_void) -> i32 {
+        // SAFETY: `arg` is the `JoinCtx` the spawning test keeps alive until it joins us.
+        let ctx = unsafe { &*arg.cast::<JoinCtx>() };
+        // SAFETY: The spawning test joins `target` itself only if `joined` stays false.
+        match unsafe { ctx.target.join(ctx.deadline) } {
+            Ok(retcode) => {
+                ctx.joined.store(true, Ordering::Release);
+                retcode
+            }
+            Err(status) => status.into_raw(),
+        }
+    }
+
+    extern "C" fn double_entry(arg: *mut c_void) -> i32 {
+        2 * (arg.addr() as i32)
+    }
+
+    /// Verifies a created thread's `TaskState` before it runs and its retcode after the trampoline.
+    #[test]
+    fn test_thread_spawn_and_join() {
+        // SAFETY: `double_entry` only uses the value of `arg`.
+        let thread = unsafe {
+            super::create(
+                c"thread_rust_double".as_ptr(),
+                double_entry,
+                core::ptr::without_provenance_mut(21),
+            )
+        };
+        assert_true!(thread.is_ok(), "failed to create the thread");
+        let thread = thread.expect("checked above");
+        {
+            // SAFETY: The thread is created but not resumed or joined, so its `Thread` is alive
+            // and nothing else touches its task state.
+            let task_state = unsafe { (*thread.as_ptr()).task_state() };
+            expect_true!(task_state.entry().is_some());
+            expect_eq!(task_state.arg().addr(), 21);
+            // SAFETY: The thread has not started running, so nothing writes the retcode.
+            expect_eq!(unsafe { task_state.retcode() }, 0);
+        }
+        // SAFETY: The thread has not been joined or destroyed.
+        unsafe { thread.resume() };
+        // SAFETY: The thread is joined exactly once.
+        let retcode = unsafe { thread.join(InstantMono::INFINITE) };
+        expect_eq!(retcode.unwrap_or(ZX_ERR_BAD_STATE), 42);
+    }
+
+    /// Verifies that a joiner blocked in `TaskState::join` is woken with the target's retcode.
+    #[test]
+    fn test_thread_join_wakes_joiner() {
+        pin_init::stack_pin_init!(let event = Event::init_unsignaled());
+        let ctx = WaitCtx { retcode: 7, ..WaitCtx::ten_seconds(&event) };
+        let target = ParkedWaiter::spawn(&ctx);
+        assert_true!(target.is_some(), "failed to spawn and park the target");
+        let target = target.expect("checked above");
+
+        let join_ctx = JoinCtx {
+            target: target.ptr(),
+            deadline: ctx.deadline,
+            joined: AtomicBool::new(false),
+        };
+        // SAFETY: `join_ctx` outlives the joiner, which is joined below before returning.
+        let joiner = unsafe {
+            super::spawn(
+                c"thread_rust_joiner".as_ptr(),
+                join_entry,
+                core::ptr::from_ref(&join_ctx).cast_mut().cast(),
+            )
+        };
+        assert_true!(joiner.is_ok(), "failed to spawn the joiner");
+        let joiner = joiner.expect("checked above");
+        // No early returns from here until the joiner is joined.
+        let joiner_blocked = wait_until_blocked(joiner);
+        // Let the target exit; its `Thread::Current::Exit` wakes the joiner with its retcode.
+        event.signal();
+        // SAFETY: The joiner is joined exactly once.
+        let joiner_retcode = unsafe { joiner.join(InstantMono::INFINITE) };
+        let target_joined = join_ctx.joined.load(Ordering::Acquire);
+        if target_joined {
+            target.joined_elsewhere();
+        }
+        expect_true!(joiner_blocked);
+        expect_eq!(joiner_retcode.unwrap_or(ZX_ERR_BAD_STATE), 7);
+        expect_true!(target_joined);
+    }
+
+    /// Verifies that `TaskState::join` with an already-past deadline fails with `ZX_ERR_TIMED_OUT`.
+    #[test]
+    fn test_thread_join_timeout() {
+        pin_init::stack_pin_init!(let event = Event::init_unsignaled());
+        let ctx = WaitCtx { retcode: 7, ..WaitCtx::ten_seconds(&event) };
+        let target = ParkedWaiter::spawn(&ctx);
+        assert_true!(target.is_some(), "failed to spawn and park the target");
+        let target = target.expect("checked above");
+
+        let join_ctx = JoinCtx {
+            target: target.ptr(),
+            deadline: InstantMono(current_mono_time().0 - 1),
+            joined: AtomicBool::new(false),
+        };
+        // SAFETY: `join_ctx` outlives the joiner, which is joined below before returning.
+        let joiner = unsafe {
+            super::spawn(
+                c"thread_rust_joiner".as_ptr(),
+                join_entry,
+                core::ptr::from_ref(&join_ctx).cast_mut().cast(),
+            )
+        };
+        assert_true!(joiner.is_ok(), "failed to spawn the joiner");
+        let joiner = joiner.expect("checked above");
+        // SAFETY: The joiner is joined exactly once.
+        let joiner_retcode = unsafe { joiner.join(InstantMono::INFINITE) };
+        let target_joined = join_ctx.joined.load(Ordering::Acquire);
+        // The target is normally still parked; release it and collect its retcode ourselves.
+        let target_retcode = if target_joined {
+            target.joined_elsewhere();
+            None
+        } else {
+            Some(target.join().unwrap_or(ZX_ERR_BAD_STATE))
+        };
+        expect_eq!(joiner_retcode.unwrap_or(ZX_ERR_BAD_STATE), ZX_ERR_TIMED_OUT);
+        expect_false!(target_joined);
+        expect_eq!(target_retcode.unwrap_or(ZX_ERR_BAD_STATE), 7);
+    }
+
+    unsafe extern "C" {
+        fn rand() -> c_int;
+    }
+
+    /// Wait for condition `cond` to become true, polling with slow exponential backoff
+    /// to avoid pegging the CPU.
+    fn wait_for_cond(mut cond: impl FnMut() -> bool) {
+        let mut wait_duration = DurationMono::from_micros(1);
+        while !cond() {
+            let _ = sleep_relative(wait_duration);
+            // Increase wait_duration time by ~10%.
+            wait_duration = DurationMono(wait_duration.0 + (wait_duration.0 / 10 + 1));
+        }
+    }
+
+    /// Create and manage a spinning thread.
+    #[pin_data(PinnedDrop)]
+    struct WorkerThread {
+        name: Cell<&'static CStr>,
+        worker_iterations: AtomicI32,
+        worker_should_stop: AtomicI32,
+        thread: Cell<Option<ThreadPtr>>,
+        #[pin]
+        _pin: PhantomData<PhantomPinned>,
+    }
+
+    impl WorkerThread {
+        fn new(name: &'static CStr) -> impl PinInit<Self> {
+            pin_init::pin_init!(Self {
+                name: Cell::new(name),
+                worker_iterations: AtomicI32::new(0),
+                worker_should_stop: AtomicI32::new(0),
+                thread: Cell::new(None),
+                _pin: PhantomData,
+            })
+        }
+
+        fn start(&self) {
+            let thread = self.thread();
+            // SAFETY: `thread` is valid and has not yet been resumed or joined.
+            unsafe { thread.resume() };
+        }
+
+        fn join(&self) {
+            if let Some(thread) = self.thread.take() {
+                self.worker_should_stop.store(1, Ordering::SeqCst);
+                // SAFETY: `thread` was taken from `self.thread`, so it is joined at most once.
+                let result = unsafe { thread.join(InstantMono::INFINITE) };
+                assert!(result.is_ok());
+            }
+        }
+
+        fn wait_for_worker_progress(&self) {
+            let start_iterations = self.worker_iterations();
+            wait_for_cond(|| start_iterations != self.worker_iterations());
+        }
+
+        fn thread(&self) -> ThreadPtr {
+            if let Some(thread) = self.thread.get() {
+                return thread;
+            }
+            // SAFETY: `self` is pinned in place and all fields of `WorkerThread` are wrapped in
+            // `UnsafeCell` (`Cell` / `AtomicI32`) or ZST (`PhantomData`), so
+            // `(&raw const *self).cast_mut()` has shared-read-write provenance and remains valid
+            // until `PinnedDrop::drop` joins the worker thread.
+            let thread = unsafe {
+                create_with_priority(
+                    self.name.get().as_ptr(),
+                    Self::worker_body,
+                    (&raw const *self).cast_mut().cast(),
+                    LOW_PRIORITY,
+                )
+            }
+            .expect("Thread::Create failed");
+            self.thread.set(Some(thread));
+            thread
+        }
+
+        fn worker_iterations(&self) -> i32 {
+            self.worker_iterations.load(Ordering::SeqCst)
+        }
+
+        extern "C" fn worker_body(arg: *mut c_void) -> i32 {
+            let this = arg.cast::<WorkerThread>();
+            // SAFETY: `this` points to a pinned `WorkerThread` that outlives this thread (joined
+            // before `WorkerThread` is dropped). Projecting directly to the atomic fields avoids
+            // forming a shared reference to the whole `WorkerThread` while the owner thread may
+            // mutate `this.thread`.
+            let (should_stop, iterations) =
+                unsafe { (&(*this).worker_should_stop, &(*this).worker_iterations) };
+            while should_stop.load(Ordering::SeqCst) == 0 {
+                iterations.fetch_add(1, Ordering::SeqCst);
+            }
+            0
+        }
+    }
+
+    #[pinned_drop]
+    impl PinnedDrop for WorkerThread {
+        fn drop(self: Pin<&mut Self>) {
+            self.join();
+        }
     }
 
     /// Tests setting CPU affinity on the current thread across online CPUs.
@@ -2507,786 +5767,1878 @@ mod tests {
             unwrap_ok!(unsafe { worker.join(InstantMono::INFINITE) }, "Failed to join thread.");
     }
 
+    /// Tests that `last_cpu` returns `INVALID_CPU` on a newly created, unstarted thread.
+    #[test]
+    fn thread_last_cpu_new_thread() {
+        // Create a worker, but don't start it.
+        pin_init::stack_pin_init!(let worker = WorkerThread::new(c"last_cpu_new_thread"));
+
+        // Ensure we get INVALID_CPU as last cpu.
+        assert_eq!(
+            // SAFETY: `worker` has not been joined yet.
+            unsafe { worker.thread().last_cpu() },
+            INVALID_CPU,
+            "Last CPU on unstarted thread invalid."
+        );
+
+        // Clean up the thread.
+        worker.start();
+        worker.join();
+    }
+
+    /// Tests that `last_cpu` reports the expected CPU as a running thread migrates across cores.
+    #[test]
+    fn thread_last_cpu_running_thread() {
+        pin_init::stack_pin_init!(let worker = WorkerThread::new(c"last_cpu_running_thread"));
+        worker.start();
+
+        // Migrate the worker task across different CPUs.
+        let online_cpus: cpu_mask_t = get_online_mask();
+        assert_ne!(online_cpus, 0u32, "Expected at least one CPU to be online.");
+        for c in 0..=highest_cpu_set(online_cpus) {
+            // Skip offline CPUs.
+            if (cpu_num_to_mask(c) & online_cpus) == 0 {
+                continue;
+            }
+
+            // Set affinity to the given core.
+            // SAFETY: Calling thread does not hold `worker`'s lock or an active chain lock
+            // transaction.
+            let _ = unsafe { worker.thread().set_cpu_affinity(cpu_num_to_mask(c)) };
+
+            // Ensure it is reported at the correct CPU.
+            // SAFETY: `worker` has not been joined yet.
+            wait_for_cond(|| unsafe { worker.thread().last_cpu() } == c);
+        }
+    }
+
+    /// Tests that setting an empty soft CPU affinity mask still allows the thread to make progress.
+    #[test]
+    fn thread_empty_soft_affinity_mask() {
+        pin_init::stack_pin_init!(let worker = WorkerThread::new(c"empty_soft_affinity_mask"));
+        worker.start();
+
+        // Wait for the thread to start running.
+        worker.wait_for_worker_progress();
+
+        // Set affinity to an invalid (empty) mask.
+        // SAFETY: Calling thread does not hold `worker`'s lock or an active chain lock transaction.
+        let _ = unsafe { worker.thread().set_soft_cpu_affinity(0) };
+
+        // Ensure that the thread is still running.
+        worker.wait_for_worker_progress();
+    }
+
+    /// Tests interaction between conflicting soft and hard CPU affinity masks.
+    #[test]
+    fn thread_conflicting_soft_and_hard_affinity() {
+        // Find two different CPUs to run our tests on.
+        let online: cpu_mask_t = get_online_mask();
+        assert_true!(online != 0, "No CPUs online.");
+        let a: cpu_num_t = highest_cpu_set(online);
+        let b: cpu_num_t = lowest_cpu_set(online);
+        if a == b {
+            // Skip test on single CPU machines.
+            kprintln!("Only 1 CPU active in this machine. Skipping test.");
+            return true;
+        }
+
+        pin_init::stack_pin_init!(
+            let worker = WorkerThread::new(c"conflicting_soft_and_hard_affinity")
+        );
+        worker.start();
+
+        // Set soft affinity to CPU A, wait for the thread to start running there.
+        // SAFETY: Calling thread does not hold `worker`'s lock or an active chain lock transaction.
+        let _ = unsafe { worker.thread().set_soft_cpu_affinity(cpu_num_to_mask(a)) };
+        // SAFETY: `worker` has not been joined yet.
+        wait_for_cond(|| unsafe { worker.thread().last_cpu() } == a);
+
+        // Set hard affinity to CPU B, ensure the thread migrates there.
+        // SAFETY: Calling thread does not hold `worker`'s lock or an active chain lock transaction.
+        let _ = unsafe { worker.thread().set_cpu_affinity(cpu_num_to_mask(b)) };
+        // SAFETY: `worker` has not been joined yet.
+        wait_for_cond(|| unsafe { worker.thread().last_cpu() } == b);
+
+        // Remove the hard affinity. Make sure the thread migrates back to CPU A.
+        // SAFETY: Calling thread does not hold `worker`'s lock or an active chain lock transaction.
+        let _ = unsafe { worker.thread().set_cpu_affinity(CPU_MASK_ALL) };
+        // SAFETY: `worker` has not been joined yet.
+        wait_for_cond(|| unsafe { worker.thread().last_cpu() } == a);
+    }
+
+    /// Tests that `set_migrate_fn` invokes the migration callback across Save, Restore, and Exit.
+    #[test]
+    fn set_migrate_fn_test() {
+        let active_cpus: cpu_mask_t = peek_active_mask();
+        if active_cpus == 0 || active_cpus.is_power_of_two() {
+            kprintln!("Expected multiple CPUs to be active.");
+            return true;
+        }
+
+        // The worker thread will attempt to migrate to another CPU.
+        extern "C" fn worker_body(_arg: *mut c_void) -> i32 {
+            let current_cpu: cpu_num_t = curr_cpu_num();
+            // SAFETY: Called in a running kernel worker thread context.
+            let this = unsafe { ThreadPtr::current() };
+            // SAFETY: `this` points to the valid current thread.
+            let _ =
+                unsafe { this.set_cpu_affinity(peek_active_mask() ^ cpu_num_to_mask(current_cpu)) };
+
+            let target_cpu: cpu_num_t = curr_cpu_num();
+            if current_cpu == target_cpu {
+                kprintln!(
+                    "Expected to be running on CPU {}, but actually running on {}.",
+                    target_cpu,
+                    current_cpu
+                );
+                return Status::INTERNAL.into_raw();
+            }
+
+            Status::result_into_raw(Ok(()))
+        }
+        // SAFETY: `worker_body` is a valid thread entry point that ignores its argument.
+        let worker = unwrap_ok!(
+            unsafe {
+                create_with_priority(
+                    c"set_migrate_fn_test_worker".as_ptr(),
+                    worker_body,
+                    core::ptr::null_mut(),
+                    DEFAULT_PRIORITY,
+                )
+            },
+            "thread_create failed."
+        );
+
+        // Set the migrate function, and begin execution.
+        struct MigrateState {
+            count: i32,
+            last_cpu: cpu_num_t,
+            next_stage: MigrateStage,
+            success: bool,
+        }
+        let mut migrate_state = MigrateState {
+            count: 0,
+            last_cpu: INVALID_CPU,
+            next_stage: MigrateStage::Save,
+            success: true,
+        };
+
+        let mut migrate_fn = MigrateFn::new(|thread: &Thread, stage: MigrateStage| {
+            // SAFETY: `set_migrate_fn` callbacks are always invoked by the scheduler with an
+            // active `ChainLockTransaction` and `thread`'s lock held.
+            let token = unsafe { ChainLockTransaction::assert_active() };
+            thread.lock().assert_held(&token);
+            migrate_state.count += 1;
+
+            let current_cpu: cpu_num_t = curr_cpu_num();
+            if (stage == MigrateStage::Restore) && (migrate_state.last_cpu == current_cpu) {
+                kprintln!("Expected to have migrated CPU.");
+                migrate_state.success = false;
+            }
+            migrate_state.last_cpu = current_cpu;
+
+            if migrate_state.next_stage != stage {
+                kprintln!(
+                    "Expected migrate stage {}, but received migrate stage {}.",
+                    migrate_state.next_stage as i32,
+                    stage as i32
+                );
+                migrate_state.success = false;
+            }
+
+            match migrate_state.next_stage {
+                MigrateStage::Save => {
+                    migrate_state.next_stage = MigrateStage::Restore;
+                }
+                MigrateStage::Restore => {
+                    migrate_state.next_stage = MigrateStage::Exiting;
+                    // SAFETY: `thread.lock().assert_held(&token)` above verified that
+                    // `thread`'s lock is held under `token`.
+                    let proof = unsafe { ChainLockProof::assume_held(thread, &token) };
+                    if proof.scheduler_state().last_cpu() != current_cpu {
+                        kprintln!("Expected last CPU to be current CPU after migrate.");
+                        migrate_state.success = false;
+                    }
+                }
+                MigrateStage::Exiting => {}
+            }
+        });
+        // SAFETY: `worker` is valid and has not yet been resumed, and `migrate_fn` (and
+        // `migrate_state`) outlives `worker` (joined below before `migrate_state` is read or
+        // dropped).
+        unsafe {
+            worker.set_migrate_fn(&mut migrate_fn);
+            worker.resume();
+        }
+
+        // Wait for the worker thread to test itself.
+        // SAFETY: `worker` is valid and has not been joined yet.
+        let worker_retcode =
+            unwrap_ok!(unsafe { worker.join(InstantMono::INFINITE) }, "Failed to join thread.");
+        expect_eq!(worker_retcode, Status::result_into_raw(Ok(())), "Worker thread failed.");
+        expect_eq!(migrate_state.count, 3, "Migrate function was not called 3 times.");
+        expect_true!(
+            migrate_state.success,
+            "Migrate function was not called with the expected state."
+        );
+    }
+
+    /// Tests migrating `THREAD_READY` threads queued behind the running thread on the same CPU.
+    #[test]
+    fn set_migrate_ready_threads_test() {
+        let active_cpus: cpu_mask_t = peek_active_mask();
+        if active_cpus == 0 || active_cpus.is_power_of_two() {
+            kprintln!("Expected multiple CPUs to be active.");
+            return true;
+        }
+
+        const STARTING_CPU: cpu_num_t = 0;
+        const TARGET_CPU: cpu_num_t = 1;
+
+        // The worker thread will validate that it is running on the target CPU.
+        extern "C" fn worker_body(_arg: *mut c_void) -> i32 {
+            let current_cpu: cpu_num_t = curr_cpu_num();
+            if current_cpu != TARGET_CPU {
+                kprintln!(
+                    "Expected to be running on CPU {}, but actually running on {}.",
+                    TARGET_CPU,
+                    current_cpu
+                );
+                return Status::INTERNAL.into_raw();
+            }
+            Status::result_into_raw(Ok(()))
+        }
+
+        let mut workers: [Option<ThreadPtr>; 4] = [None, None, None, None];
+
+        for worker_slot in &mut workers {
+            // SAFETY: `worker_body` is a valid thread entry point that ignores its argument.
+            let worker = unwrap_ok!(
+                unsafe {
+                    create_with_priority(
+                        c"set_migrate_ready_threads_test_worker".as_ptr(),
+                        worker_body,
+                        core::ptr::null_mut(),
+                        DEFAULT_PRIORITY,
+                    )
+                },
+                "thread_create failed."
+            );
+            // SAFETY: `worker` was just created and is not locked.
+            let _ = unsafe { worker.set_cpu_affinity(cpu_num_to_mask(STARTING_CPU)) };
+            *worker_slot = Some(worker);
+        }
+        let workers: [ThreadPtr; 4] = workers.map(|w| w.expect("initialized above"));
+
+        // Move the test thread to the same CPU that the workers will start on.
+        // SAFETY: Called in a running kernel test thread context with no locks held.
+        let current_thread = unsafe { ThreadPtr::current() };
+        // SAFETY: `current_thread` is the valid running thread.
+        let original_affinity: cpu_mask_t = unsafe { current_thread.get_cpu_affinity() };
+        // SAFETY: Current thread is not locked and no chain lock transaction is active.
+        let _ = unsafe { current_thread.set_cpu_affinity(cpu_num_to_mask(STARTING_CPU)) };
+        assert_eq!(curr_cpu_num(), STARTING_CPU, "Failed to move test thread to the starting CPU.");
+
+        let _cleanup = zr::defer(|| {
+            // Restore original CPU affinity of the test thread.
+            // SAFETY: Current thread is not locked and no chain lock transaction is active.
+            let _ = unsafe { current_thread.set_cpu_affinity(original_affinity) };
+        });
+
+        {
+            let _preempt_disabled_guard = AutoPreemptDisabler::new();
+            // SAFETY: Preemption is disabled by `_preempt_disabled_guard`, so the current CPU's
+            // `PerCpu` stats remain valid for this read.
+            let context_switches_before = unsafe {
+                crate::kernel::stats::CpuStats::read_atomic_fields_relaxed(
+                    crate::kernel::percpu::PerCpu::get_current().stats.get(),
+                )
+            }
+            .context_switches;
+
+            // Resume the workers with preemption disabled. The workers should stack up
+            // behind the current thread in the run queue. BE CAREFUL not to do anything
+            // that would block until the workers are validated.
+            for worker in workers {
+                // SAFETY: `worker` has not yet been resumed or joined.
+                unsafe { worker.resume() };
+
+                // Validate the thread state.
+                // SAFETY: `worker` is valid and alive until joined below.
+                let worker_ref = unsafe { &*worker.as_ptr() };
+                let (state, curr_cpu) = {
+                    single_chain_lock_guard_owned!(
+                        guard,
+                        worker_ref,
+                        IRQ_SAVE_OPTION,
+                        clt_tag!("set_migrate_ready_threads_test")
+                    );
+                    let proof = guard.proof();
+                    (proof.state(), proof.scheduler_state().curr_cpu())
+                };
+                assert_eq!(state, ThreadStateKind::Ready, "The worker was in the wrong state.");
+                assert_eq!(curr_cpu, STARTING_CPU, "The worker was assigned to the wrong CPU.");
+            }
+
+            // Migrate the ready threads to a different CPU. BE CAREFUL not to do
+            // anything that would block until the workers are migrated.
+            for worker in workers {
+                // SAFETY: `worker` is valid and alive until joined below.
+                let _ = unsafe { worker.set_cpu_affinity(cpu_num_to_mask(TARGET_CPU)) };
+            }
+
+            // SAFETY: Preemption is disabled by `_preempt_disabled_guard`, so the current CPU's
+            // `PerCpu` stats remain valid for this read.
+            let context_switches_after = unsafe {
+                crate::kernel::stats::CpuStats::read_atomic_fields_relaxed(
+                    crate::kernel::percpu::PerCpu::get_current().stats.get(),
+                )
+            }
+            .context_switches;
+            assert_eq!(
+                context_switches_before, context_switches_after,
+                "The test thread context switched during the critical section."
+            );
+        }
+
+        // Wait for the worker thread results.
+        for worker in workers {
+            // SAFETY: `worker` is valid and joined exactly once here.
+            let worker_retcode =
+                unwrap_ok!(unsafe { worker.join(InstantMono::INFINITE) }, "Failed to join thread.");
+            expect_eq!(worker_retcode, Status::result_into_raw(Ok(())), "Worker thread failed.");
+        }
+    }
+
+    /// Tests `Scheduler::migrate_unpinned_threads_curr_cpu` via a custom trampoline thread.
+    #[test]
+    fn migrate_unpinned_threads_test() {
+        let active_cpus: cpu_mask_t = peek_active_mask();
+        if active_cpus == 0 || active_cpus.is_power_of_two() {
+            kprintln!("Expected multiple CPUs to be active.");
+            return true;
+        }
+
+        const STARTING_CPU: cpu_num_t = 1;
+        #[repr(u8)]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum TestState {
+            WaitingForWorkerStart = 0,
+            WaitingForMigration = 1,
+            MigrationDone = 2,
+        }
+        let test_state = AtomicU8::new(TestState::WaitingForWorkerStart as u8);
+
+        // Setup the thread that will be migrated.
+        extern "C" fn worker_body(arg: *mut c_void) -> i32 {
+            // SAFETY: `arg` points to `test_state` on the caller's stack, which outlives this
+            // worker thread (joined below).
+            let test_state = unsafe { &*(arg as *const AtomicU8) };
+
+            debug_assert!(
+                test_state.load(Ordering::SeqCst) == TestState::WaitingForWorkerStart as u8
+            );
+            test_state.store(TestState::WaitingForMigration as u8, Ordering::SeqCst);
+            while test_state.load(Ordering::SeqCst) != TestState::MigrationDone as u8 {
+                let _ = sleep_relative(DurationMono::from_micros(100));
+            }
+            0
+        }
+
+        let mut fn_ = MigrateFn::new(|_: &Thread, _: MigrateStage| {
+            test_state.store(TestState::MigrationDone as u8, Ordering::SeqCst);
+        });
+        // SAFETY: `worker_body` is a valid thread entry point and `test_state` outlives `worker`.
+        let worker = unwrap_ok!(unsafe {
+            create_with_priority(
+                c"worker".as_ptr(),
+                worker_body,
+                (&raw const test_state).cast_mut().cast(),
+                DEFAULT_PRIORITY,
+            )
+        });
+        // SAFETY: `worker` has not yet been resumed, and `fn_` (and `test_state`) outlives
+        // `worker` (joined below).
+        unsafe {
+            let _ = worker.set_soft_cpu_affinity(cpu_num_to_mask(STARTING_CPU));
+            worker.set_migrate_fn(&mut fn_);
+            worker.resume();
+        }
+
+        while test_state.load(Ordering::SeqCst) != TestState::WaitingForMigration as u8 {
+            let _ = sleep_relative(DurationMono::from_micros(100));
+        }
+
+        // Setup the thread that will perform the migration.  Note that this is a
+        // trampoline function implementation.  It must call
+        // Scheduler::TrampolineLockHandoff to deal with dropping locks held across
+        // context switches while maintaining ChainLockTransaction invariants.
+        //
+        /// # Safety
+        ///
+        /// Must only be invoked as a thread initial entry trampoline immediately following a
+        /// scheduler context switch with interrupts disabled and the scheduler lock handoff
+        /// pending.
+        unsafe extern "C" fn migrate_body() -> ! {
+            // SAFETY: This is an alternate thread trampoline invoked right after context switch,
+            // so `trampoline_lock_handoff`, `migrate_unpinned_threads_curr_cpu`,
+            // `set_curr_cpu_active`, and `enable_ints` satisfy the scheduler trampoline contract.
+            unsafe {
+                trampoline_lock_handoff();
+                Scheduler::migrate_unpinned_threads_curr_cpu();
+                Scheduler::set_curr_cpu_active(true);
+                enable_ints();
+            }
+            current_exit(0);
+        }
+        let profile = SchedulerStateBaseProfile::fair(DEFAULT_PRIORITY, true);
+        // SAFETY: `migrate_body` is a valid alternate trampoline that performs lock handoff and
+        // calls `current_exit(0)`.
+        let migrate = unwrap_ok!(unsafe {
+            create_etc(
+                core::ptr::null_mut(),
+                "migrate",
+                None,
+                core::ptr::null_mut(),
+                &profile,
+                Some(migrate_body),
+            )
+        });
+        // SAFETY: `migrate` was just created and has not been resumed or joined yet.
+        unsafe {
+            let _ = migrate.set_cpu_affinity(cpu_num_to_mask(STARTING_CPU));
+            migrate.resume();
+        }
+
+        // SAFETY: `migrate` and `worker` are valid and joined exactly once here.
+        let retcode = unwrap_ok!(
+            unsafe { migrate.join(InstantMono::INFINITE) },
+            "Failed to join migrate thread."
+        );
+        expect_eq!(retcode, ZX_OK, "Migrate thread failed.");
+        // SAFETY: `worker` is valid and joined exactly once here.
+        let retcode = unwrap_ok!(
+            unsafe { worker.join(InstantMono::INFINITE) },
+            "Failed to join worker thread."
+        );
+        expect_eq!(retcode, ZX_OK, "Worker thread failed.");
+    }
+
+    /// Stress-tests migrating spinning worker threads across active CPUs.
+    #[test]
+    #[allow(unreachable_code)]
+    fn migrate_stress_test() {
+        if true {
+            // TODO(https://fxbug.dev/78695): Disabled until root cause of hangs on some hardware
+            // can be determined.
+            kprintln!("Test disabled due to https://fxbug.dev/42158849");
+            return true;
+        }
+
+        // Get number of CPUs in the system.
+        let active_cpus: usize = peek_active_mask().count_ones() as usize;
+        kprintln!("Found {} active CPU(s)", active_cpus);
+        if active_cpus <= 1 {
+            kprintln!("Test can only proceed with multiple active CPUs.");
+            return true;
+        }
+
+        // The worker thread body.
+        //
+        // Each thread spins ensuring that it is only running on a single, particular
+        // CPU. The migration function below updates which CPU the thread is allowed
+        // to run on.
+        #[ksync::guarded]
+        struct ThreadState {
+            should_stop: AtomicBool,
+            started: AtomicBool,
+
+            // Prevent reporting lock violations inside the migration function to avoid reentering
+            // the scheduler and interfering with the migration function state.
+            // TODO(https://fxbug.dev/42157332): Figure out how to support violation reporting in
+            // sensitive code paths.
+            #[mutex(flags = lockdep::LOCK_FLAGS_REPORTING_DISABLED)]
+            lock: ksync::KMutex<crate::ksync_kernel::TrackedSpinlock>,
+
+            #[guarded_by(lock)]
+            allowed_cpu: cpu_num_t,
+            #[guarded_by(lock)]
+            is_migrating: bool,
+        }
+
+        extern "C" fn worker_body(arg: *mut c_void) -> i32 {
+            // SAFETY: `arg` points to this worker's `ThreadState` element in `threads`, which
+            // remains pinned in heap storage until all worker threads are joined.
+            let state = unsafe { &*(arg as *const ThreadState) };
+            state.started.store(true, Ordering::SeqCst);
+
+            // Justification: Relaxed ordering is sufficient because this is a best-effort stop
+            // flag polled in a loop.
+            while !state.should_stop.load(Ordering::Relaxed) {
+                {
+                    ksync::lock!(let guard = state.lock_lock());
+                    let locked = guard.fields();
+                    assert!(
+                        !*locked.is_migrating,
+                        "Worker thread scheduled between MigrationStage::Before and \
+                         MigrationStage::After being called."
+                    );
+                    assert!(
+                        curr_cpu_num() == *locked.allowed_cpu,
+                        "Worker thread running on unexpected CPU: expected = {}, running on = {}",
+                        *locked.allowed_cpu,
+                        curr_cpu_num()
+                    );
+                }
+                r#yield();
+            }
+            0
+        }
+
+        // CPU that all threads start running on. Can be any valid CPU.
+        let starting_cpu: cpu_num_t = curr_cpu_num();
+
+        // Create threads.
+        let num_threads: usize = active_cpus;
+        let threads = fbl::Array::<ThreadState>::try_new_pin_init(num_threads, || {
+            pin_init::pin_init!(ThreadState {
+                should_stop: AtomicBool::new(false),
+                started: AtomicBool::new(false),
+                lock <- ksync::KMutex::init(),
+                allowed_cpu: starting_cpu.into(),
+                is_migrating: false.into(),
+            })
+        })
+        .expect("ThreadState slice allocation failed");
+        let mut worker_threads = fbl::Array::<Option<ThreadPtr>>::try_new(num_threads)
+            .expect("worker_threads allocation failed");
+        let mut migrate_fns =
+            kalloc::Box::try_new_uninit_slice(num_threads).expect("MigrateFn allocation failed");
+
+        for ((state_ref, thread_slot), migrate_fn_slot) in
+            threads.iter().zip(worker_threads.iter_mut()).zip(migrate_fns.iter_mut())
+        {
+            let state_ptr: *mut c_void = (&raw const *state_ref).cast_mut().cast();
+            // Create the thread.
+            // SAFETY: `worker_body` is a valid entry point and `state_ptr` remains valid and
+            // pinned in `threads` until the thread is joined below.
+            let thread = unwrap_ok!(
+                unsafe {
+                    create_with_priority(
+                        c"migrate_stress_test worker".as_ptr(),
+                        worker_body,
+                        state_ptr,
+                        DEFAULT_PRIORITY,
+                    )
+                },
+                "Thread::Create failed."
+            );
+            *thread_slot = Some(thread);
+            {
+                ksync::lock!(let mut guard = state_ref.lock_lock());
+                *guard.as_mut().fields_mut().allowed_cpu = starting_cpu;
+            }
+
+            // SAFETY: `state_ptr` remains valid and pinned in `threads` until all workers are
+            // joined below.
+            let state_for_migrate: &ThreadState = unsafe { &*(state_ptr as *const ThreadState) };
+            let migrate_fn = migrate_fn_slot.write(MigrateFn::new(
+                move |_thread: &Thread, stage: MigrateStage| {
+                    ksync::lock!(let mut guard = state_for_migrate.lock_lock());
+                    let locked = guard.as_mut().fields_mut();
+                    match stage {
+                        MigrateStage::Save => {
+                            assert!(!*locked.is_migrating, "Thread is already migrating");
+                            assert!(
+                                *locked.allowed_cpu == curr_cpu_num(),
+                                "Migrate function called on incorrect CPU."
+                            );
+                            *locked.allowed_cpu = INVALID_CPU;
+                            *locked.is_migrating = true;
+                        }
+                        MigrateStage::Restore => {
+                            assert!(*locked.is_migrating);
+                            *locked.is_migrating = false;
+                            *locked.allowed_cpu = curr_cpu_num();
+                        }
+                        MigrateStage::Exiting => {}
+                    }
+                },
+            ));
+
+            // Set the migration function to ensure that `allowed_cpu` keeps up to date.
+            // SAFETY: `thread` has not been resumed yet, and `migrate_fn` (and `state_ref`)
+            // outlives `thread` (joined below).
+            unsafe {
+                thread.set_migrate_fn(migrate_fn);
+
+                // Start running on `starting_cpu`.
+                let _ = thread.set_soft_cpu_affinity(1 << starting_cpu);
+                thread.resume();
+            }
+        }
+
+        // Wait for the worker threads to execute at least once to ensure the migrate function gets
+        // called. Threads that have never executed are moved without calling the migrate function,
+        // which could cause this test to incorrectly assert in the worker loop.
+        for thread_state in threads.iter() {
+            while !thread_state.started.load(Ordering::SeqCst) {
+                let _ = sleep_relative(DurationMono::from_micros(100));
+            }
+        }
+
+        // Mutate threads as they run.
+        for i in 0..10_000usize {
+            for (j, thread_opt) in worker_threads.iter().enumerate() {
+                let affinity: cpu_mask_t = ((i + j) as cpu_mask_t) & peek_active_mask();
+                if affinity != 0 {
+                    let thread = thread_opt.expect("initialized above");
+                    // SAFETY: `thread` is valid and alive until joined below.
+                    let _ = unsafe { thread.set_soft_cpu_affinity(affinity) };
+                }
+            }
+            let _ = sleep_relative(DurationMono::from_micros(100));
+        }
+
+        // Join threads.
+        for (thread_state, thread_opt) in threads.iter().zip(worker_threads.iter()) {
+            // Inform the thread to stop.
+            thread_state.should_stop.store(true, Ordering::SeqCst);
+
+            // Wait for it to finish.
+            let thread = thread_opt.expect("initialized above");
+            let deadline = Deadline::after_mono(DurationMono::from_seconds(5), TimerSlack::none());
+            // SAFETY: `thread` is valid and joined here.
+            let result = unsafe { thread.join(InstantMono(deadline.when().0)) };
+            if let Err(status) = result {
+                // If the thread has not completed in 5 seconds, it is likely that the
+                // thread has hung for an unknown reason.
+                //
+                // TODO(https://fxbug.dev/42158849): We are currently seeing some flakes in CI/CQ
+                // that cannot be reproduced locally. Once resolved, this additional
+                // logging can be removed.
+                // SAFETY: `thread` is valid and has not exited yet.
+                unsafe { thread.dump(true) };
+                let mut bt = Backtrace::new();
+                // SAFETY: `thread` is valid and `bt` is a valid `Backtrace`.
+                unsafe { thread.get_backtrace(&mut bt) };
+                bt.print();
+
+                panic!("Failed to join worker thread: {}", status.into_raw());
+            }
+        }
+    }
+
+    /// Stress-tests concurrently setting and clearing `set_migrate_fn` on a running thread.
+    #[test]
+    fn set_migrate_fn_stress_test() {
+        // Get number of CPUs in the system.
+        let active_cpus: usize = peek_active_mask().count_ones() as usize;
+        kprintln!("Found {} active CPU(s)", active_cpus);
+        if active_cpus <= 1 {
+            kprintln!("Test can only proceed with multiple active CPUs.");
+            return true;
+        }
+
+        struct Worker {
+            thread: Cell<Option<ThreadPtr>>,
+            should_stop: AtomicBool,
+        }
+
+        impl Worker {
+            fn migrate(_thread: &Thread, _stage: MigrateStage) {}
+
+            extern "C" fn body(arg: *mut c_void) -> i32 {
+                // SAFETY: `arg` points to a valid `Worker` element in `threads`, which outlives
+                // all worker threads (joined below).
+                let state = unsafe { &*(arg as *const Worker) };
+
+                // Justification: Relaxed ordering is sufficient because this is a best-effort stop
+                // flag polled in a loop.
+                while !state.should_stop.load(Ordering::Relaxed) {
+                    // Spin or sleep for 100us.
+                    let delay = DurationMono::from_micros(100);
+                    // SAFETY: `rand` is a thread-safe C library PRNG function in the kernel.
+                    if (unsafe { rand() } & 1) != 0 {
+                        let spin_end = InstantMono(current_mono_time().0.saturating_add(delay.0));
+                        while current_mono_time() < spin_end {
+                            libarch::r#yield();
+                        }
+                    } else {
+                        let _ = sleep_relative(delay);
+                    }
+                }
+
+                0
+            }
+        }
+
+        // Create threads.
+        let num_threads: usize = active_cpus * 2;
+        let mut uninit_threads = kalloc::Box::<[Worker]>::try_new_uninit_slice(num_threads)
+            .expect("Worker slice allocation failed");
+        for slot in uninit_threads.iter_mut() {
+            slot.write(Worker { thread: Cell::new(None), should_stop: AtomicBool::new(false) });
+        }
+        // SAFETY: Every element of `uninit_threads` was initialized above.
+        let threads = unsafe { uninit_threads.assume_init() };
+
+        for worker_ref in threads.iter() {
+            let worker_ptr: *mut c_void = (&raw const *worker_ref).cast_mut().cast();
+            // SAFETY: `Worker::body` is a valid entry point and `worker_ptr` outlives the thread.
+            let thread = unwrap_ok!(
+                unsafe {
+                    create_with_priority(
+                        c"set_migrate_fn_stress_test worker".as_ptr(),
+                        Worker::body,
+                        worker_ptr,
+                        DEFAULT_PRIORITY,
+                    )
+                },
+                "Thread::Create failed."
+            );
+            worker_ref.thread.set(Some(thread));
+            // SAFETY: `thread` was just created and has not been resumed yet.
+            unsafe { thread.resume() };
+        }
+
+        // Periodically set/unset the migrate fn of the first thread.
+        let first_thread = threads[0].thread.get().expect("initialized above");
+        let mut migrate_fn =
+            MigrateFn::new(|thread: &Thread, stage: MigrateStage| Worker::migrate(thread, stage));
+        for i in 0..10000 {
+            let _ = sleep_relative(DurationMono::from_micros(100));
+            let callback = if (i & 1) != 0 { None } else { Some(&mut migrate_fn) };
+            // SAFETY: `first_thread` is valid and `migrate_fn` outlives `first_thread` (joined
+            // below).
+            unsafe { first_thread.set_migrate_fn(callback) };
+        }
+
+        // Join threads.
+        for worker in threads.iter() {
+            // Inform the thread to stop.
+            worker.should_stop.store(true, Ordering::SeqCst);
+
+            let thread = worker.thread.get().expect("initialized above");
+            // Wait for it to finish.
+            loop {
+                let deadline =
+                    Deadline::after_mono(DurationMono::from_seconds(5), TimerSlack::none());
+                // SAFETY: `thread` is valid and joined until it succeeds.
+                if unsafe { thread.join(InstantMono(deadline.when().0)) }.is_ok() {
+                    break;
+                }
+
+                // If the thread has not completed in 5 seconds, either the thread has
+                // hung for an unknown reason or there may have been lost time due to
+                // virtualization. Keep trying until the overall test times out to
+                // differentiate between an indefinite hang and virtualization time
+                // loss.
+                //
+                // TODO(https://fxbug.dev/42158849): We are currently seeing some flakes
+                // in CI/CQ that cannot be reproduced locally. Once resolved, this
+                // additional logging can be removed.
+                // SAFETY: `thread` is still alive because `join` timed out.
+                unsafe { thread.dump(true) };
+                let mut bt = Backtrace::new();
+                // SAFETY: `thread` is still alive and `bt` is a valid `Backtrace`.
+                unsafe { thread.get_backtrace(&mut bt) };
+                bt.print();
+            }
+        }
+    }
+
+    /// Tests that `set_context_switch_fn` invokes the context switch callback as expected.
+    #[test]
+    fn set_context_switch_fn_test() {
+        // The worker thread will attempt to context switch.
+        extern "C" fn worker_body(_arg: *mut c_void) -> i32 {
+            Status::result_into_raw(sleep_relative(DurationMono::from_millis(1)))
+        }
+        // SAFETY: `worker_body` is a valid thread entry point that ignores its argument.
+        let worker = unwrap_ok!(
+            unsafe {
+                create_with_priority(
+                    c"set_context_switch_fn_test_worker".as_ptr(),
+                    worker_body,
+                    core::ptr::null_mut(),
+                    DEFAULT_PRIORITY,
+                )
+            },
+            "thread_create failed."
+        );
+
+        // Set the context switch function, and begin execution.
+        let mut context_switches: i32 = 0;
+        let mut context_switch_fn = ContextSwitchFn::new(|| {
+            context_switches += 1;
+        });
+        // SAFETY: `worker` has not been resumed yet, and `context_switch_fn` (and
+        // `context_switches`) outlives `worker` (joined below before `context_switches` is read or
+        // dropped).
+        unsafe {
+            worker.set_context_switch_fn(&mut context_switch_fn);
+            worker.resume();
+        }
+
+        // Wait for the worker thread to test itself.
+        // SAFETY: `worker` is valid and joined exactly once here.
+        let worker_retcode =
+            unwrap_ok!(unsafe { worker.join(InstantMono::INFINITE) }, "Failed to join thread.");
+        expect_eq!(worker_retcode, ZX_OK, "Worker thread failed.");
+        // There are at least 4 context switches that occur as part of this test:
+        // 1. When the thread is initially scheduled.
+        // 2. When the thread is blocked for sleep.
+        // 3. When the thread is rescheduled.
+        // 4. When the thread exits.
+        //
+        // Additionally context switches may occur to additional scheduling events
+        // during regular system operation.
+        expect_ge!(context_switches, 4, "Context switch function was not called at least 4 times.");
+    }
+
     /// Tests enabling and disabling thread memory allocation state and nested guards.
     #[test]
     fn scoped_allocation_disabled_test() {
-        expect_true!(current_memory_allocation_state_is_enabled());
+        // SAFETY: Called in a running kernel test thread context.
+        let state = unsafe { &*current_memory_allocation_state() };
+        expect_true!(state.is_enabled());
 
-        // SAFETY: Disables memory allocation on the current thread and re-enables it immediately
-        // below.
-        unsafe { cpp_thread_current_memory_allocation_state_disable() };
-        expect_false!(current_memory_allocation_state_is_enabled());
-        // SAFETY: Balances the preceding `cpp_thread_current_memory_allocation_state_disable` call.
-        unsafe { cpp_thread_current_memory_allocation_state_enable() };
-        expect_true!(current_memory_allocation_state_is_enabled());
+        // SAFETY: Balanced with `state.enable()` on the same thread immediately below.
+        unsafe { state.disable() };
+        expect_false!(state.is_enabled());
+        // SAFETY: Balances `state.disable()` above on the same thread.
+        unsafe { state.enable() };
+        expect_true!(state.is_enabled());
 
         {
-            expect_true!(current_memory_allocation_state_is_enabled());
+            expect_true!(state.is_enabled());
             {
                 let _smad = ScopedMemoryAllocationDisabled::new();
-                expect_false!(current_memory_allocation_state_is_enabled());
+                expect_false!(state.is_enabled());
                 {
                     let _nested_smad = ScopedMemoryAllocationDisabled::new();
-                    expect_false!(current_memory_allocation_state_is_enabled());
+                    expect_false!(state.is_enabled());
                 }
-                expect_false!(current_memory_allocation_state_is_enabled());
+                expect_false!(state.is_enabled());
             }
-            expect_true!(current_memory_allocation_state_is_enabled());
+            expect_true!(state.is_enabled());
         }
     }
 
-    /// Verifies the `ChainLockProof<'_, Thread>` accessors on the (unblocked) running thread.
+    /// Tests capturing backtraces on the current thread via `current_get_backtrace`.
     #[test]
-    fn thread_proof_guarded_fields() {
-        let current_ptr = current_get();
-        // SAFETY: `current_get()` returns a valid pointer to the running thread, which stays alive
-        // for the duration of this test.
-        let current: &Thread = unsafe { &*current_ptr };
-        // The lock is the `ChainLockable` base subobject, so it lives at the thread's address.
-        expect_eq!(core::ptr::from_ref(current.lock()).addr(), current_ptr.addr());
-        expect_true!(current.canary.valid());
-        current.assert_canary();
-        expect_true!(current.check_kill_or_suspend_signal().is_ok());
+    fn backtrace_static_method_test() {
+        let mut bt = Backtrace::new();
+        current_get_backtrace(&mut bt);
 
-        let mut running = false;
-        let mut state_transitions_match = false;
-        let mut not_blocked = false;
-        let mut interruptible = Interruptible::Yes;
-        let mut no_owned_wait_queues = false;
-        let mut can_own_wait_queues = false;
-        let mut user_state_saved = true;
-        let mut migrate_pending = true;
-        let mut policy_exception = (u32::MAX, u32::MAX);
-        let mut scheduler_state_matches = false;
-        let mut wait_queue_state_matches = false;
-        ChainLockTransaction::until_done(
-            IRQ_SAVE_OPTION,
-            clt_tag!("thread_proof_guarded_fields"),
-            |token| {
-                let mut guard = OwnerGuard::new(current, token);
-                ChainLockTransaction::finalize(token);
-                let mut proof = guard.proof();
+        // Make sure we have at least one frames worth.
+        assert_gt!(bt.size(), 1usize);
 
-                let orig_state = proof.state();
-                running = orig_state == ThreadStateKind::Running;
-                proof.set_blocked();
-                let blocked_ok = proof.state() == ThreadStateKind::Blocked;
-                proof.set_blocked_read_lock();
-                let blocked_read_ok = proof.state() == ThreadStateKind::BlockedReadLock;
-                proof.set_state(orig_state);
-                state_transitions_match =
-                    blocked_ok && blocked_read_ok && proof.state() == orig_state;
+        bt.reset();
+        // SAFETY: `crate::get_frame!()` returns the current stack frame pointer.
+        unsafe { current_get_backtrace_with_fp(crate::get_frame!() as usize, &mut bt) };
+        assert_gt!(bt.size(), 1usize);
 
-                // `ThreadState` members (wait_queue.rs accessors).
-                let wq_state = proof.wait_queue_state();
-                not_blocked = !wq_state.in_wait_queue(proof.token())
-                    && wq_state.blocking_wait_queue(proof.token()).is_none();
-                // `blocked_status` keeps the last wake status until the next block, so only check
-                // that it reads back.
-                let _ = wq_state.blocked_status(proof.token());
-                interruptible = wq_state.interruptible(proof.token());
-
-                // `Thread` members.
-                no_owned_wait_queues = proof.owned_wait_queues().is_empty()
-                    && proof.owned_wait_queues_mut().is_empty();
-                can_own_wait_queues = proof.can_own_wait_queues();
-                user_state_saved = proof.user_state_saved();
-                migrate_pending = proof.migrate_pending();
-                policy_exception =
-                    (proof.extra_policy_exception_code(), proof.extra_policy_exception_data());
-
-                // Writing the current values back through the `_mut` accessors leaves the thread
-                // unchanged.
-                *proof.extra_policy_exception_code_mut() = policy_exception.0;
-                *proof.extra_policy_exception_data_mut() = policy_exception.1;
-                *proof.can_own_wait_queues_mut() = can_own_wait_queues;
-                *proof.user_state_saved_mut() = user_state_saved;
-                *proof.migrate_pending_mut() = migrate_pending;
-
-                // The proof's `SchedulerState` facade and `ThreadState` sit over the members at
-                // the offsets `<kernel/thread_layout.h>` declares.
-                scheduler_state_matches = core::ptr::from_ref(proof.scheduler_state()).addr()
-                    == current_ptr.addr() + layout::ThreadLayout_kSchedulerStateOffset;
-                wait_queue_state_matches = core::ptr::from_ref(proof.wait_queue_state()).addr()
-                    == current_ptr.addr() + layout::ThreadLayout_kWaitQueueStateOffset;
-                guard.release();
-                DONE
-            },
-        );
-        expect_true!(running);
-        expect_true!(state_transitions_match);
-        expect_true!(not_blocked);
-        expect_eq!(interruptible, Interruptible::No);
-        expect_true!(no_owned_wait_queues);
-        expect_true!(can_own_wait_queues);
-        expect_false!(user_state_saved);
-        expect_false!(migrate_pending);
-        expect_eq!(policy_exception.0, 0);
-        expect_eq!(policy_exception.1, 0);
-        expect_true!(scheduler_state_matches);
-        expect_true!(wait_queue_state_matches);
-        expect_true!(current.lock().is_unlocked());
+        // See that we don't crash.
+        bt.reset();
+        // SAFETY: `0` is outside the current thread's stack bounds.
+        unsafe { current_get_backtrace_with_fp(0, &mut bt) };
+        assert_eq!(bt.size(), 0usize);
     }
 
-    /// Verifies WAVL tree traits and `MinRelativeDeadlineTraits` on an unqueued `Thread`.
+    /// Tests capturing a backtrace on a running vs. blocked thread instance.
     #[test]
-    fn wavl_tree_traits_on_thread() {
-        let current_ptr = current_get();
-        // SAFETY: `current_get()` returns a valid pointer to the running thread, which stays alive
-        // for the duration of this test.
-        let current: &Thread = unsafe { &*current_ptr };
-
-        // The running test thread is not in any wait queue.
-        let node = <Thread as WavlTreeContainable<Thread, BlockedThreadTreeTag>>::get_node(current);
-        expect_false!(node.in_container());
-
-        let mut key: (InstantMono, usize) = (InstantMono::INFINITE, 0);
-        let mut node_deadline = DurationMono::ZERO;
-        let mut subtree_deadline = DurationMono::ZERO;
-        ChainLockTransaction::until_done(
-            IRQ_SAVE_OPTION,
-            clt_tag!("wavl_tree_traits_on_thread"),
-            |token| {
-                let mut guard = OwnerGuard::new(current, token);
-                ChainLockTransaction::finalize(token);
-                let _proof = guard.proof();
-                // The current thread is not in any wait queue and we hold its lock, which
-                // satisfies the synchronization preconditions of the WAVL tree trait hooks.
-                key = <Thread as WavlTreeKeyable<(InstantMono, usize)>>::get_key(current);
-                node_deadline = MinRelativeDeadlineTraits::get_node_value(current);
-                subtree_deadline = MinRelativeDeadlineTraits::get_subtree_value(current);
-                guard.release();
-                DONE
-            },
-        );
-        // `WaitQueueCollection::Remove` only resets the sort key in debug builds, so a thread
-        // that has blocked before may carry a stale key in release builds.
-        if cfg!(debug_assertions) {
-            expect_eq!(key.0.0, PRIMARY_KEY_ZERO.0);
+    fn backtrace_instance_method_test() {
+        #[pin_data]
+        struct Args {
+            running: AtomicBool,
+            #[pin]
+            event: Event,
         }
-        expect_eq!(key.1, current_ptr.addr());
-        // The running test thread has a fair profile, so its relative deadline is `INFINITE`.
-        expect_eq!(node_deadline.0, DurationMono::INFINITE.0);
-        expect_eq!(subtree_deadline.0, DurationMono::INFINITE.0);
-        expect_eq!(
-            MinRelativeDeadlineTraits::combine_values(
-                DurationMono::from_millis(10),
-                DurationMono::INFINITE
-            )
-            .0,
-            DurationMono::from_millis(10).0
-        );
-    }
-}
-
-/// Intensive scheduler and thread synchronization unit tests.
-#[cfg(ktest)]
-#[unittest::suite(name = "intensive_thread_rust")]
-mod intensive_thread_tests {
-    // These tests take much longer than, and are more intensive on the scheduler than,
-    // the //zircon/kernel/kernel/thread.cc tests.
-    use super::{
-        DEFAULT_PRIORITY, Interruptible, LOW_PRIORITY, ThreadPtr, create_with_priority,
-        current_get, sleep_interruptible, sleep_relative, r#yield,
-    };
-    use crate::kernel::event::{AutounsignalEvent, Event};
-    use crate::platform_rs::timer::{DurationMono, InstantMono};
-    use core::ffi::{c_int, c_void};
-    use core::ptr;
-    use core::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
-    use kprint::kprintln;
-    use pin_init::{pin_init, stack_pin_init};
-    use unittest::unwrap_ok;
-    use zx_status::Status;
-    use zx_types::ZX_ERR_INTERNAL_INTR_KILLED;
-
-    const INTERNAL_INTR_KILLED: Status = Status::err_from_raw(ZX_ERR_INTERNAL_INTR_KILLED);
-
-    unsafe extern "C" {
-        fn rand() -> c_int;
-    }
-
-    #[ksync::guarded]
-    struct IntensiveMutexHolder {
-        #[mutex]
-        m: ksync::KMutex<ksync::RawMutex>,
-    }
-
-    extern "C" fn mutex_thread(arg: *mut c_void) -> i32 {
-        const ITERATIONS: i32 = 100000;
-        static SHARED: AtomicUsize = AtomicUsize::new(0);
-
-        // SAFETY: `arg` points to `m` on `mutex_test`'s stack, which outlives all worker threads.
-        let holder = unsafe { &*(arg as *const IntensiveMutexHolder) };
-
-        for _i in 0..ITERATIONS {
-            {
-                ksync::lock!(let _guard = holder.lock_m());
-
-                if SHARED.load(Ordering::Relaxed) != 0 {
-                    panic!("someone else has messed with the shared data\n");
-                }
-
-                SHARED.store(current_get() as usize, Ordering::Relaxed);
-                // SAFETY: `rand` is a thread-safe C library PRNG function in the kernel.
-                if (unsafe { rand() } % 5) == 0 {
-                    r#yield();
-                }
-
-                SHARED.store(0, Ordering::Relaxed);
-            }
-            // SAFETY: `rand` is a thread-safe C library PRNG function in the kernel.
-            if (unsafe { rand() } % 5) == 0 {
-                r#yield();
-            }
-        }
-
-        0
-    }
-
-    /// Stress-tests mutex acquisition and release across 5 concurrent threads.
-    #[test]
-    fn mutex_test() {
-        stack_pin_init!(let m = pin_init!(IntensiveMutexHolder {
-            m <- ksync::KMutex::init(),
+        pin_init::stack_pin_init!(let args = pin_init::pin_init!(Args {
+            running: AtomicBool::new(false),
+            event <- Event::init_unsignaled(),
         }));
-        let m_ptr: *mut c_void = ptr::from_ref(&*m).cast_mut().cast();
 
-        let threads: [ThreadPtr; 5] = core::array::from_fn(|_| {
-            // SAFETY: `mutex_thread` is a valid thread entry point and `m` outlives all threads
-            // joined below.
-            let thread = unsafe {
-                create_with_priority(
-                    c"mutex tester".as_ptr(),
-                    mutex_thread,
-                    m_ptr,
-                    DEFAULT_PRIORITY,
-                )
+        extern "C" fn helper(raw_args: *mut c_void) -> i32 {
+            // SAFETY: `raw_args` points to `args` pinned on the caller's stack, which outlives
+            // this helper thread (joined before `args` is dropped).
+            let args = unsafe { &*(raw_args as *const Args) };
+            args.running.store(true, Ordering::SeqCst);
+
+            // Busy wait.
+            while args.running.load(Ordering::SeqCst) {
+                libarch::r#yield();
             }
-            .unwrap();
-            // SAFETY: `thread` was just created and has not been resumed or joined yet.
-            unsafe { thread.resume() };
-            thread
+
+            // Block.
+            let _ = args.event.wait_infinite();
+
+            0
+        }
+
+        let args_ptr: *mut c_void = (&raw const *args).cast_mut().cast();
+        // SAFETY: `helper` is a valid thread entry point and `args` outlives `t` (joined by
+        // `cleanup` or explicitly below).
+        let t = unwrap_ok!(unsafe {
+            create_with_priority(c"backtrace helper".as_ptr(), helper, args_ptr, DEFAULT_PRIORITY)
+        });
+        let mut cleanup = zr::defer(|| {
+            // SAFETY: `t` is valid and has not been joined if `cleanup` runs.
+            let _ = unsafe { t.join(InstantMono::INFINITE) };
         });
 
-        for thread in threads {
-            // SAFETY: `thread` is valid and has not been joined yet.
-            let _ = unsafe { thread.join(InstantMono::INFINITE) };
+        // SAFETY: `t` was just created and has not been resumed yet.
+        unsafe { t.resume() };
+
+        // Wait for the thread to run.
+        while !args.running.load(Ordering::SeqCst) {
+            libarch::r#yield();
         }
 
-        let _ = sleep_relative(DurationMono::from_millis(100));
-    }
+        // Can't take the backtrace of a running thread.
+        let mut bt = Backtrace::new();
+        // SAFETY: `t` points to a valid `Thread` and `bt` is a valid `Backtrace`; `GetBacktrace`
+        // checks `t`'s state under its lock and returns an empty backtrace for a running thread.
+        unsafe { t.get_backtrace(&mut bt) };
+        assert_eq!(0usize, bt.size());
 
-    extern "C" fn event_signaler(arg: *mut c_void) -> i32 {
-        // SAFETY: `arg` points to a valid `Event` on `event_test`'s stack, which outlives this
-        // thread.
-        let event = unsafe { &*(arg as *const Event) };
+        // Tell the thread to go block.
+        args.running.store(false, Ordering::SeqCst);
 
-        // event signaler pausing
-        let _ = sleep_relative(DurationMono::from_seconds(1));
-
-        event.signal();
-        r#yield();
-
-        0
-    }
-
-    #[derive(Clone, Copy)]
-    struct WaiterArgs {
-        event: *const Event,
-        count: usize,
-    }
-
-    #[allow(clippy::if_same_then_else)]
-    extern "C" fn event_waiter(arg: *mut c_void) -> i32 {
-        // Copy our arguments here so we can mutate the count.
-        // SAFETY: `arg` points to a valid `WaiterArgs` on `event_test`'s stack, which outlives
-        // this thread.
-        let mut args: WaiterArgs = unsafe { *(arg as *const WaiterArgs) };
-
-        while args.count > 0 {
-            // SAFETY: `args.event` points to a valid `Event` on `event_test`'s stack, which
-            // outlives this thread.
-            let status =
-                unsafe { (*args.event).wait_deadline(InstantMono::INFINITE, Interruptible::Yes) };
-            if status == Err(INTERNAL_INTR_KILLED) {
-                return -1;
-            } else if status.is_err() {
-                return -1;
-            }
-            r#yield();
-            args.count -= 1;
+        // Wait for it to block.
+        let mut state = ThreadStateKind::Running;
+        while state != ThreadStateKind::Blocked {
+            let _ = sleep_relative(DurationMono::from_micros(200));
+            // SAFETY: `t` is valid and alive until joined below.
+            let t_ref = unsafe { &*t.as_ptr() };
+            single_chain_lock_guard_owned!(
+                guard,
+                t_ref,
+                IRQ_SAVE_OPTION,
+                clt_tag!("backtrace_instance_method_test")
+            );
+            state = guard.proof().state();
         }
 
-        0
+        // See that we can backtrace a blocked thread.
+        bt.reset();
+        // SAFETY: `t` is blocked in `args.event.wait_infinite()` and `bt` is a valid `Backtrace`.
+        unsafe { t.get_backtrace(&mut bt) };
+        assert_gt!(bt.size(), 0usize);
+
+        args.event.signal();
+
+        cleanup.cancel();
+        // SAFETY: `cleanup` was cancelled, so `t` is joined exactly once here.
+        let result = unwrap_ok!(unsafe { t.join(InstantMono::INFINITE) });
+        assert_eq!(ZX_OK, result);
     }
 
-    /// Tests `Event` (broadcast wakeup) and `AutounsignalEvent` (single-waiter wakeup).
+    /// ScopedMemoryStall is currently meant to be a no-op when executed in a kernel-only thread.
     #[test]
-    fn event_test() {
+    fn scoped_memory_stall_test() {
+        // This test verifies that it, indeed, does not modify the thread's state.
+        let current_thread: *const Thread = current_get();
+
+        // Verify previous state.
         {
-            // make sure signaling the event wakes up all the threads and stays signaled
-            stack_pin_init!(let event = Event::init_unsignaled());
-            let event_ptr: *const Event = &*event;
-            let mut args = WaiterArgs { event: event_ptr, count: 2 };
-            let args_ptr: *mut c_void = (&raw mut args).cast();
-
-            // SAFETY: `event_signaler` and `event_waiter` are valid entry points, and `event` and
-            // `args` outlive all 5 threads (joined before the end of this block).
-            let threads = unsafe {
-                [
-                    unwrap_ok!(create_with_priority(
-                        c"event signaler".as_ptr(),
-                        event_signaler,
-                        event_ptr.cast_mut().cast(),
-                        DEFAULT_PRIORITY,
-                    )),
-                    unwrap_ok!(create_with_priority(
-                        c"event waiter 0".as_ptr(),
-                        event_waiter,
-                        args_ptr,
-                        DEFAULT_PRIORITY,
-                    )),
-                    unwrap_ok!(create_with_priority(
-                        c"event waiter 1".as_ptr(),
-                        event_waiter,
-                        args_ptr,
-                        DEFAULT_PRIORITY,
-                    )),
-                    unwrap_ok!(create_with_priority(
-                        c"event waiter 2".as_ptr(),
-                        event_waiter,
-                        args_ptr,
-                        DEFAULT_PRIORITY,
-                    )),
-                    unwrap_ok!(create_with_priority(
-                        c"event waiter 3".as_ptr(),
-                        event_waiter,
-                        args_ptr,
-                        DEFAULT_PRIORITY,
-                    )),
-                ]
-            };
-
-            for thread in threads {
-                // SAFETY: `thread` was just created and has not been resumed or joined yet.
-                unsafe { thread.resume() };
-            }
-
-            for thread in threads {
-                // SAFETY: `thread` is valid and has not been joined yet.
-                let _ = unsafe { thread.join(InstantMono::INFINITE) };
-            }
-
-            let _ = sleep_relative(DurationMono::from_seconds(2));
-            // destroying event by going out of scope
+            let _preempt_disable = AnnotatedAutoPreemptDisabler::new();
+            // SAFETY: `_preempt_disable` holds preemption disabled on the current thread and no
+            // concurrent writes to `memory_stall_state` occur.
+            let state = unsafe { super::memory_stall_state(current_thread) };
+            assert_eq!(ThreadStallState::IgnoredKernelOnly, state);
         }
 
+        // Enter a memory stall and verify that the state has not changed.
         {
-            stack_pin_init!(let event = AutounsignalEvent::init_unsignaled());
-            let event_ptr: *const Event = event.as_event();
-            let mut args = WaiterArgs { event: event_ptr, count: 99 };
-            let args_ptr: *mut c_void = (&raw mut args).cast();
-            // make sure signaling the event wakes up precisely one thread
-            // SAFETY: `event_signaler` and `event_waiter` are valid entry points, and `event` and
-            // `args` outlive all 5 threads (joined before the end of this block).
-            let threads = unsafe {
-                [
-                    unwrap_ok!(create_with_priority(
-                        c"event signaler".as_ptr(),
-                        event_signaler,
-                        event_ptr.cast_mut().cast(),
-                        DEFAULT_PRIORITY,
-                    )),
-                    unwrap_ok!(create_with_priority(
-                        c"event waiter 0".as_ptr(),
-                        event_waiter,
-                        args_ptr,
-                        DEFAULT_PRIORITY,
-                    )),
-                    unwrap_ok!(create_with_priority(
-                        c"event waiter 1".as_ptr(),
-                        event_waiter,
-                        args_ptr,
-                        DEFAULT_PRIORITY,
-                    )),
-                    unwrap_ok!(create_with_priority(
-                        c"event waiter 2".as_ptr(),
-                        event_waiter,
-                        args_ptr,
-                        DEFAULT_PRIORITY,
-                    )),
-                    unwrap_ok!(create_with_priority(
-                        c"event waiter 3".as_ptr(),
-                        event_waiter,
-                        args_ptr,
-                        DEFAULT_PRIORITY,
-                    )),
-                ]
-            };
+            let _scoped_memory_stall = ScopedMemoryStall::new();
+            let _preempt_disable = AnnotatedAutoPreemptDisabler::new();
+            // SAFETY: `_preempt_disable` holds preemption disabled on the current thread and no
+            // concurrent writes to `memory_stall_state` occur.
+            let state = unsafe { super::memory_stall_state(current_thread) };
+            assert_eq!(ThreadStallState::IgnoredKernelOnly, state);
+        }
 
-            for thread in threads {
-                // SAFETY: `thread` was just created and has not been resumed or joined yet.
-                unsafe { thread.resume() };
-            }
+        // After exiting the memory stall, verify that the state has not changed.
+        {
+            let _preempt_disable = AnnotatedAutoPreemptDisabler::new();
+            // SAFETY: `_preempt_disable` holds preemption disabled on the current thread and no
+            // concurrent writes to `memory_stall_state` occur.
+            let state = unsafe { super::memory_stall_state(current_thread) };
+            assert_eq!(ThreadStallState::IgnoredKernelOnly, state);
+        }
+    }
 
-            let _ = sleep_relative(DurationMono::from_seconds(2));
+    /// Tests `ThreadRuntimeStats` state transitions and compensated runtime calculations.
+    #[test]
+    fn thread_runtime_test() {
+        const CPU_TICKS: zx_duration_mono_ticks_t = 10;
+        const QUEUE_TICKS: zx_duration_mono_ticks_t = 20;
+        pin_init::stack_pin_init!(let stats = ThreadRuntimeStats::new());
+        let mut read_res = stats.read();
+        let sched_stats = &read_res.stats;
 
-            for thread in threads {
-                // SAFETY: `thread` is valid and has not been joined yet.
-                unsafe {
-                    thread.kill();
-                    let _ = thread.join(InstantMono::INFINITE);
+        expect_eq!(ThreadStateKind::Initial, sched_stats.current_state);
+        expect_eq!(0, sched_stats.state_change_ticks);
+        expect_eq!(0, sched_stats.total_running_ticks);
+        expect_eq!(0, sched_stats.total_ready_ticks);
+
+        let mut trs: TaskRuntimeStats = stats.get_compensated_task_runtime_stats();
+        expect_eq!(0, trs.cpu_ticks);
+        expect_eq!(0, trs.queue_ticks);
+        expect_eq!(0, trs.page_fault_ticks);
+        expect_eq!(0, trs.lock_contention_ticks);
+
+        let delay_ticks = |ticks: zx_duration_mono_ticks_t| {
+            let deadline: zx_instant_mono_ticks_t = timer_current_mono_ticks().0 + ticks;
+            loop {
+                libarch::r#yield();
+                if timer_current_mono_ticks().0 >= deadline {
+                    break;
                 }
             }
-        }
-    }
-
-    static ATOMIC_VAR: AtomicI32 = AtomicI32::new(0);
-    static ATOMIC_COUNT: AtomicI32 = AtomicI32::new(0);
-
-    extern "C" fn atomic_tester(arg: *mut c_void) -> i32 {
-        let add = arg as isize as i32;
-        const ITER: i32 = 10000000;
-
-        for _i in 0..ITER {
-            let _ = ATOMIC_VAR.fetch_add(add, Ordering::SeqCst);
-        }
-
-        let _ = ATOMIC_COUNT.fetch_sub(1, Ordering::SeqCst);
-
-        0
-    }
-
-    /// Stress-tests concurrent atomic `fetch_add` and `fetch_sub` across 8 threads.
-    #[test]
-    fn atomic_test() {
-        ATOMIC_VAR.store(0, Ordering::SeqCst);
-        ATOMIC_COUNT.store(8, Ordering::SeqCst);
-
-        #[allow(clippy::manual_dangling_ptr)]
-        let plus_one = 1usize as *mut c_void;
-        let minus_one = (-1isize as usize) as *mut c_void;
-        // SAFETY: `atomic_tester` is a valid thread entry point and interprets its `arg` as an
-        // integer delta without dereferencing it.
-        let threads = unsafe {
-            [
-                unwrap_ok!(create_with_priority(
-                    c"atomic tester 1".as_ptr(),
-                    atomic_tester,
-                    plus_one,
-                    LOW_PRIORITY,
-                )),
-                unwrap_ok!(create_with_priority(
-                    c"atomic tester 1".as_ptr(),
-                    atomic_tester,
-                    plus_one,
-                    LOW_PRIORITY,
-                )),
-                unwrap_ok!(create_with_priority(
-                    c"atomic tester 1".as_ptr(),
-                    atomic_tester,
-                    plus_one,
-                    LOW_PRIORITY,
-                )),
-                unwrap_ok!(create_with_priority(
-                    c"atomic tester 1".as_ptr(),
-                    atomic_tester,
-                    plus_one,
-                    LOW_PRIORITY,
-                )),
-                unwrap_ok!(create_with_priority(
-                    c"atomic tester 2".as_ptr(),
-                    atomic_tester,
-                    minus_one,
-                    LOW_PRIORITY,
-                )),
-                unwrap_ok!(create_with_priority(
-                    c"atomic tester 2".as_ptr(),
-                    atomic_tester,
-                    minus_one,
-                    LOW_PRIORITY,
-                )),
-                unwrap_ok!(create_with_priority(
-                    c"atomic tester 2".as_ptr(),
-                    atomic_tester,
-                    minus_one,
-                    LOW_PRIORITY,
-                )),
-                unwrap_ok!(create_with_priority(
-                    c"atomic tester 2".as_ptr(),
-                    atomic_tester,
-                    minus_one,
-                    LOW_PRIORITY,
-                )),
-            ]
         };
 
-        // start all the threads
-        for thread in threads {
-            // SAFETY: `thread` was just created and has not been resumed or joined yet.
-            unsafe { thread.resume() };
-        }
+        // Test that runtime is calculated as a function of the stats and the current time spent
+        // queued.
+        // When the state is set to THREAD_READY, TotalRuntime calculates queue_ticks as:
+        //   runtime.queue_ticks + (current_mono_ticks() - state_change_ticks)
+        //
+        stats.update_irq_save(ThreadStateKind::Ready);
 
-        // wait for them to all stop
-        for thread in threads {
-            // SAFETY: `thread` is valid and has not been joined yet.
-            let _ = unsafe { thread.join(InstantMono::INFINITE) };
-        }
-    }
+        // Spin for at least QUEUE_TICKS, so we know that the projected amount of
+        // time has to be >= QUEUE_TICKS.
+        delay_ticks(QUEUE_TICKS);
 
-    extern "C" fn sleeper_kill_thread_infinite_wait(_arg: *mut c_void) -> i32 {
-        let _ = sleep_relative(DurationMono::from_millis(100));
+        read_res = stats.read();
+        let sched_stats = &read_res.stats;
+        expect_eq!(ThreadStateKind::Ready, sched_stats.current_state);
+        expect_ne!(0, sched_stats.state_change_ticks);
+        expect_eq!(0, sched_stats.total_running_ticks);
+        expect_eq!(0, sched_stats.total_ready_ticks); // Nothing accumulates into queue ticks until
+        // we leave the READY state.
 
-        kprintln!("sleeper_kill_thread_infinite_wait: waiting until killed");
-        let err = sleep_interruptible(InstantMono::INFINITE);
-        assert_eq!(err, Err(INTERNAL_INTR_KILLED));
+        trs = stats.get_compensated_task_runtime_stats();
+        expect_le!(QUEUE_TICKS, trs.queue_ticks);
+        expect_eq!(0, trs.cpu_ticks);
+        expect_eq!(0, trs.page_fault_ticks);
+        expect_eq!(0, trs.lock_contention_ticks);
 
-        0
-    }
+        // Test that runtime is calculated as a function of the stats and the
+        // current time spent running. When the state is set to THREAD_RUNNING,
+        // TotalRuntime calculates cpu_ticks as:
+        //
+        // runtime.cpu_ticks + (current_mono_ticks() - state_change_ticks)
+        //
+        // Start by changing state to running.
+        stats.update_irq_save(ThreadStateKind::Running);
 
-    extern "C" fn waiter_kill_thread_infinite_wait(arg: *mut c_void) -> i32 {
-        // SAFETY: `arg` points to a valid `Event` on `kill_test`'s stack, which outlives this
-        // thread.
-        let e = unsafe { &*(arg as *const Event) };
+        // When we read the non-compensated stats, the total accumulated queue time
+        // has to be at least the compensated queue time before we switched to
+        // running.  The accumulated CPU time should still be zero, since we have
+        // never been in the running state, then switched out.
+        let queue_ticks_lower_bound: zx_duration_mono_ticks_t = trs.queue_ticks;
 
-        let _ = sleep_relative(DurationMono::from_millis(100));
+        read_res = stats.read();
+        let sched_stats = &read_res.stats;
+        expect_eq!(ThreadStateKind::Running, sched_stats.current_state);
+        expect_ne!(0, sched_stats.state_change_ticks);
+        expect_eq!(0, sched_stats.total_running_ticks);
+        expect_le!(queue_ticks_lower_bound, sched_stats.total_ready_ticks);
 
-        kprintln!("waiter_kill_thread_infinite_wait: waiting until killed");
-        let err = e.wait_deadline(InstantMono::INFINITE, Interruptible::Yes);
-        assert_eq!(err, Err(INTERNAL_INTR_KILLED));
+        // Spend some time in this state and make sure that only the compensated
+        // stat for the state we are in is advancing.
+        delay_ticks(CPU_TICKS);
+        trs = stats.get_compensated_task_runtime_stats();
+        expect_le!(CPU_TICKS, trs.cpu_ticks);
+        expect_eq!(sched_stats.total_ready_ticks, trs.queue_ticks);
+        expect_eq!(0, trs.page_fault_ticks);
+        expect_eq!(0, trs.lock_contention_ticks);
 
-        0
-    }
+        // Add other times.
+        const PAGE_FAULT_TICKS: zx_duration_mono_ticks_t = 30;
+        const LOCK_CONTENTION_TICKS: zx_duration_mono_ticks_t = 40;
+        let prev_trs: TaskRuntimeStats = trs;
 
-    /// Tests killing threads blocked in interruptible sleep or event wait across lifecycle stages.
-    #[test]
-    fn kill_test() {
-        // Starting sleeper thread, then killing it while it sleeps.
-        // SAFETY: `sleeper_kill_thread_infinite_wait` is a valid thread entry point that ignores
-        // its argument.
-        let t = unwrap_ok!(unsafe {
-            create_with_priority(
-                c"sleeper".as_ptr(),
-                sleeper_kill_thread_infinite_wait,
-                ptr::null_mut(),
-                LOW_PRIORITY,
-            )
-        });
-        // SAFETY: `t` was just created and is joined before the end of this section.
-        unsafe {
-            t.resume();
-            let _ = sleep_relative(DurationMono::from_millis(200));
-            t.kill();
-            let _ = t.join(InstantMono::INFINITE);
-        }
+        stats.add_page_fault_ticks(PAGE_FAULT_TICKS);
+        trs = stats.get_compensated_task_runtime_stats();
+        expect_le!(prev_trs.cpu_ticks, trs.cpu_ticks);
+        expect_eq!(prev_trs.queue_ticks, trs.queue_ticks);
+        expect_eq!(PAGE_FAULT_TICKS, trs.page_fault_ticks);
+        expect_eq!(0, trs.lock_contention_ticks);
 
-        // Starting sleeper thread, then killing it before it wakes up.
-        // SAFETY: `sleeper_kill_thread_infinite_wait` is a valid thread entry point that ignores
-        // its argument.
-        let t = unwrap_ok!(unsafe {
-            create_with_priority(
-                c"sleeper".as_ptr(),
-                sleeper_kill_thread_infinite_wait,
-                ptr::null_mut(),
-                LOW_PRIORITY,
-            )
-        });
-        // SAFETY: `t` was just created and is joined before the end of this section.
-        unsafe {
-            t.resume();
-            t.kill();
-            let _ = t.join(InstantMono::INFINITE);
-        }
-
-        // Starting sleeper thread, then killing it before it is unsuspended.
-        // SAFETY: `sleeper_kill_thread_infinite_wait` is a valid thread entry point that ignores
-        // its argument.
-        let t = unwrap_ok!(unsafe {
-            create_with_priority(
-                c"sleeper".as_ptr(),
-                sleeper_kill_thread_infinite_wait,
-                ptr::null_mut(),
-                LOW_PRIORITY,
-            )
-        });
-        // SAFETY: `t` was just created and is joined before the end of this section.
-        unsafe {
-            t.kill(); // kill it before it is resumed
-            t.resume();
-            let _ = t.join(InstantMono::INFINITE);
-        }
-
-        {
-            // Starting waiter thread that waits forever, then killing it while it blocks.
-            stack_pin_init!(let e = Event::init_unsignaled());
-            let e_ptr: *mut c_void = ptr::from_ref(&*e).cast_mut().cast();
-            // SAFETY: `waiter_kill_thread_infinite_wait` is a valid entry point and `e` outlives
-            // `t` (joined below).
-            let t = unwrap_ok!(unsafe {
-                create_with_priority(
-                    c"waiter".as_ptr(),
-                    waiter_kill_thread_infinite_wait,
-                    e_ptr,
-                    LOW_PRIORITY,
-                )
-            });
-            // SAFETY: `t` was just created and is joined before `e` goes out of scope.
-            unsafe {
-                t.resume();
-                let _ = sleep_relative(DurationMono::from_millis(200));
-                t.kill();
-                let _ = t.join(InstantMono::INFINITE);
-            }
-        }
-
-        {
-            // Starting waiter thread that waits forever, then killing it before it wakes up.
-            stack_pin_init!(let e = Event::init_unsignaled());
-            let e_ptr: *mut c_void = ptr::from_ref(&*e).cast_mut().cast();
-            // SAFETY: `waiter_kill_thread_infinite_wait` is a valid entry point and `e` outlives
-            // `t` (joined below).
-            let t = unwrap_ok!(unsafe {
-                create_with_priority(
-                    c"waiter".as_ptr(),
-                    waiter_kill_thread_infinite_wait,
-                    e_ptr,
-                    LOW_PRIORITY,
-                )
-            });
-            // SAFETY: `t` was just created and is joined before `e` goes out of scope.
-            unsafe {
-                t.resume();
-                t.kill();
-                let _ = t.join(InstantMono::INFINITE);
-            }
-        }
+        stats.add_lock_contention_ticks(LOCK_CONTENTION_TICKS);
+        trs = stats.get_compensated_task_runtime_stats();
+        expect_le!(prev_trs.cpu_ticks, trs.cpu_ticks);
+        expect_eq!(prev_trs.queue_ticks, trs.queue_ticks);
+        expect_eq!(PAGE_FAULT_TICKS, trs.page_fault_ticks);
+        expect_eq!(LOCK_CONTENTION_TICKS, trs.lock_contention_ticks);
     }
 }
 
-/// Preemption disable and timeslice extension RAII guard unit tests.
+/// Preemption disable and timeslice extension unit tests.
 #[cfg(ktest)]
 #[unittest::suite(name = "preempt_disable_tests_rust")]
 mod preempt_disable_tests {
     use super::{
-        AutoExpiringPreemptDisabler, AutoPreemptDisabler, preempt_disable_count, preempt_is_enabled,
+        AnnotatedAutoEagerReschedDisabler, AutoEagerReschedDisabler, AutoExpiringPreemptDisabler,
+        AutoPreemptDisabler, DEFAULT_PRIORITY, PreemptionState, ThreadLockGuard, ThreadPtr,
+        create_with_priority, current_get, current_preemption_state, preempt, reschedule,
+        sleep_relative, r#yield,
     };
-    use crate::platform_rs::timer::DurationMono;
-    use unittest::{assert_eq, assert_false, assert_true};
+    use crate::arch_rs::{InterruptDisableGuard, curr_cpu_num};
+    use crate::kconcurrent::clt_tag;
+    use crate::kernel::deadline::{Deadline, TimerSlack};
+    use crate::kernel::event::Event;
+    use crate::kernel::interrupt::{IntHandlerSavedState, int_handler_finish, int_handler_start};
+    use crate::kernel::mp::CPU_MASK_ALL;
+    use crate::kernel::scheduler;
+    use crate::kernel::timer::{Timer, ZX_CLOCK_MONOTONIC};
+    use crate::kernel::types::{BOOT_CPU_ID, cpu_mask_t, cpu_num_to_mask};
+    use crate::platform_rs::timer::{DurationMono, InstantMono, zx_usec};
+    use core::ffi::c_void;
+    use core::sync::atomic::{AtomicBool, Ordering};
+    use pin_init::{pin_init, stack_pin_init};
+    use unittest::{
+        assert_eq, assert_ne, assert_true, expect_eq, expect_false, expect_ne, expect_true,
+        subtest, unwrap_ok,
+    };
+    use zx_types::zx_instant_mono_t;
 
-    /// Tests `AutoPreemptDisabler` deferred and immediate modes, nesting, and toggling.
-    #[test]
-    fn test_auto_preempt_disabler() {
-        // Make sure that nothing funny is going on with our preempt disable count as
-        // it stands now.
-        assert_eq!(0u32, preempt_disable_count());
-
-        {
-            // Create a disabler inside of a scope, but do not have it immediately
-            // request that preemption be disabled.  Our count should still be zero.
-            let mut ap_disabler = AutoPreemptDisabler::new_deferred();
-            assert_eq!(0u32, preempt_disable_count());
-
-            // Now explicitly disable.  Our count should go to 1.
-            ap_disabler.disable();
-            assert_eq!(1u32, preempt_disable_count());
-
-            // Do it again, our count should remain at 1.
-            ap_disabler.disable();
-            assert_eq!(1u32, preempt_disable_count());
-
-            {
-                // Make another inside of a new scope.  Our count should remain at 1 until
-                // we explicitly use the new instance to disable preemption.
-                let mut ap_disabler2 = AutoPreemptDisabler::new_deferred();
-                assert_eq!(1u32, preempt_disable_count());
-
-                ap_disabler2.disable();
-                assert_eq!(2u32, preempt_disable_count());
-            } // Let it go out of scope, we should drop down to a count of 1.
-
-            assert_eq!(1u32, preempt_disable_count());
-        } // Allow the original to go out of scope.  This should get us back down to a count of 0.
-
-        assert_eq!(0u32, preempt_disable_count());
-
-        // Next, do a similar test, but this time with the version which automatically
-        // begins life with preemption disabled.
-        {
-            let mut ap_disabler = AutoPreemptDisabler::new();
-            assert_eq!(1u32, preempt_disable_count());
-
-            // Attempting to call disable should do nothing.
-            ap_disabler.disable();
-            assert_eq!(1u32, preempt_disable_count());
-
-            {
-                // Add a second.  Watch the count go up as it comes into scope, and back
-                // down again when it goes out.
-                let _ap_disabler2 = AutoPreemptDisabler::new();
-                assert_eq!(2u32, preempt_disable_count());
-            }
-
-            assert_eq!(1u32, preempt_disable_count());
-        } // Allow the original to go out of scope.  This should get us back down to a count of 0.
-
-        // Test an explicit Enable
-        {
-            let mut ap_disabler = AutoPreemptDisabler::new();
-            assert_eq!(1u32, preempt_disable_count());
-
-            {
-                // Create a defered disabler, and test that Enabling it before its disabled does
-                // nothing.
-                let mut ap_disabler2 = AutoPreemptDisabler::new_deferred();
-                assert_eq!(1u32, preempt_disable_count());
-
-                ap_disabler2.enable();
-                assert_eq!(1u32, preempt_disable_count());
-            }
-            assert_eq!(1u32, preempt_disable_count());
-
-            // Should be able to toggle enable and disable
-            ap_disabler.enable();
-            assert_eq!(0u32, preempt_disable_count());
-            ap_disabler.disable();
-            assert_eq!(1u32, preempt_disable_count());
-            // Ending on Enable should result in no change after the disabler goes out of scope.
-            ap_disabler.enable();
-            assert_eq!(0u32, preempt_disable_count());
-        }
-
-        assert_eq!(0u32, preempt_disable_count());
+    /// Mirror of C++ `PreemptDisableTestAccess::State`.
+    struct State {
+        preempts_pending: cpu_mask_t,
     }
 
-    /// Tests basic and nested `AutoExpiringPreemptDisabler` timeslice extensions.
-    #[test]
-    fn test_auto_timeslice_extension() {
-        // Basic.
+    /// Mirror of C++ `PreemptDisableTestAccess::SaveState`.
+    fn save_state(preemption_state: &PreemptionState) -> State {
+        State { preempts_pending: preemption_state.preempts_pending() }
+    }
+
+    /// Mirror of C++ `PreemptDisableTestAccess::RestoreState`.
+    fn restore_state(preemption_state: &PreemptionState, state: State) {
+        preemption_state.preempts_pending.store(state.preempts_pending);
+    }
+
+    /// Mirror of C++ `PreemptDisableTestAccess::ClearPending`.
+    fn clear_pending(preemption_state: &PreemptionState) {
+        preemption_state.preempts_pending.store(0);
+    }
+
+    /// Test that PreemptDisable is set for timer callbacks and that, in this
+    /// context, preempts_pending will get set by some functions.
+    ///
+    /// # Safety
+    ///
+    /// `arg` must point to the `Event` that `test_in_timer_callback` keeps alive until the timer
+    /// has been cancelled, and this must run as a `Timer` callback (interrupt context).
+    unsafe extern "C" fn timer_callback_func(
+        _timer: *mut Timer,
+        _now: zx_instant_mono_t,
+        arg: *mut c_void,
+    ) {
+        // SAFETY: `arg` is the pinned `Event` that `test_in_timer_callback` keeps alive until the
+        // timer has been cancelled.
+        let event = unsafe { &*arg.cast::<Event>() };
+
+        // The timer should run in interrupt context.  (`assert!` panics like the C++ `ASSERT`;
+        // the unittest `expect_*` macros are only usable from the test body itself.)
+        assert!(crate::arch_rs::ints_disabled());
+        assert!(crate::arch_rs::blocking_disallowed());
+
+        // Entry into interrupt context should disable preemption and eager
+        // reschedules.
+        // SAFETY: The interrupted thread is the current thread and stays alive for the callback;
+        // `PreemptionState` is all relaxed atomics.
+        let preemption_state = unsafe { &*current_preemption_state() };
+        assert!(preemption_state.preempt_disable_count() > 0);
+        assert!(preemption_state.eager_resched_disable_count() > 0);
+        let state = save_state(preemption_state);
+
+        // Test that Scheduler::Reschedule() sets the preempt_pending flag when
+        // PreemptDisable is set.
+        clear_pending(preemption_state);
+        assert!(preemption_state.preempts_pending() == 0);
         {
-            assert_true!(preempt_is_enabled());
-            {
-                let _guard = AutoExpiringPreemptDisabler::new(DurationMono::INFINITE);
-                assert_false!(preempt_is_enabled());
+            let current_thread = current_get();
+            // SAFETY: `current_thread` is the live current thread, no chain lock transaction is
+            // active in this timer callback, and the guard is stack-pinned and dropped in this
+            // scope without blocking.
+            ksync::lock!(
+                let _guard = unsafe {
+                    ThreadLockGuard::lock(
+                        current_thread,
+                        clt_tag!("PreemptDisableTests timer_callback"),
+                    )
+                }
+            );
+            // SAFETY: `current_thread` is the current CPU's active thread, `_guard` holds its lock
+            // as the sole lock of a finalized transaction with interrupts disabled, and no
+            // `queue_lock_` is held in a timer callback.
+            unsafe { scheduler::reschedule(current_thread) };
+        }
+        assert!(preemption_state.preempts_pending() != 0);
+
+        // Test that preemption_state.PreemptSetPending() sets preempts_pending.
+        clear_pending(preemption_state);
+        assert!(preemption_state.preempts_pending() == 0);
+
+        preemption_state.preempt_set_pending(cpu_num_to_mask(curr_cpu_num()));
+        assert!(preemption_state.preempts_pending() != 0);
+
+        restore_state(preemption_state, state);
+        event.signal();
+    }
+
+    /// Schedule a timer callback and wait for it to complete.
+    //
+    // Most of the testing is done in the timer callback.
+    #[test]
+    fn test_in_timer_callback() {
+        stack_pin_init!(let event = Event::init_unsignaled());
+        stack_pin_init!(let timer = Timer::init(ZX_CLOCK_MONOTONIC));
+
+        // SAFETY: `timer` and `event` are stack-pinned and outlive the timer, which `_cancel`
+        // cancels before either goes out of scope (also on an early return from a failed
+        // assertion); `timer_callback_func` is a valid timer callback.
+        unsafe {
+            timer.as_ref().set_oneshot(
+                0,
+                timer_callback_func,
+                core::ptr::from_ref(&*event).cast_mut().cast(),
+            );
+        }
+        // Make sure the timer has fully completed prior to letting it go out of scope.
+        let _cancel = zr::defer(|| {
+            timer.cancel();
+        });
+        assert_true!(event.wait_infinite().is_ok());
+    }
+
+    /// Test incrementing and decrementing the PreemptDisable and EagerReschedDisable counts.
+    #[test]
+    fn test_inc_dec_disable_counts() {
+        // SAFETY: The current thread stays alive for the duration of this test, and
+        // `PreemptionState` is all relaxed atomics; no `&Thread` is formed.
+        let preemption_state = unsafe { &*current_preemption_state() };
+
+        // Test initial conditions.
+        expect_eq!(preemption_state.preempt_disable_count(), 0);
+        expect_eq!(preemption_state.eager_resched_disable_count(), 0);
+        expect_true!(preemption_state.preempt_is_enabled());
+        // While preemption is allowed, a preemption should not be pending.
+        expect_eq!(preemption_state.preempts_pending(), 0);
+
+        // Test incrementing and decrementing of PreemptDisable.
+        preemption_state.preempt_disable();
+        expect_eq!(preemption_state.preempt_disable_count(), 1);
+        expect_false!(preemption_state.preempt_is_enabled());
+        // SAFETY: `preemption_state` is the current thread's, tests may block, this pairs with
+        // the `preempt_disable()` above, and no `PreemptDisabledToken` exists in this test.
+        unsafe { preemption_state.preempt_reenable() };
+        expect_eq!(preemption_state.preempt_disable_count(), 0);
+        expect_true!(preemption_state.preempt_is_enabled());
+
+        // Test incrementing and decrementing of EagerReschedDisable.
+        preemption_state.eager_resched_disable();
+        expect_eq!(preemption_state.eager_resched_disable_count(), 1);
+        expect_false!(preemption_state.preempt_is_enabled());
+        // SAFETY: `preemption_state` is the current thread's, tests may block, this pairs with
+        // the `eager_resched_disable()` above, and no `PreemptDisabledToken` exists in this test.
+        unsafe { preemption_state.eager_resched_reenable() };
+        expect_eq!(preemption_state.eager_resched_disable_count(), 0);
+        expect_true!(preemption_state.preempt_is_enabled());
+
+        // Test nesting: multiple increments and decrements.
+        preemption_state.preempt_disable();
+        preemption_state.preempt_disable();
+        expect_eq!(preemption_state.preempt_disable_count(), 2);
+        expect_false!(preemption_state.preempt_is_enabled());
+        // SAFETY: As above; each call pairs with one of the two `preempt_disable()`s above.
+        unsafe { preemption_state.preempt_reenable() };
+        expect_eq!(preemption_state.preempt_disable_count(), 1);
+        expect_false!(preemption_state.preempt_is_enabled());
+        // SAFETY: As above.
+        unsafe { preemption_state.preempt_reenable() };
+        expect_eq!(preemption_state.preempt_disable_count(), 0);
+        expect_true!(preemption_state.preempt_is_enabled());
+
+        // Test nesting: multiple increments and decrements.
+        preemption_state.eager_resched_disable();
+        preemption_state.eager_resched_disable();
+        expect_eq!(preemption_state.eager_resched_disable_count(), 2);
+        expect_false!(preemption_state.preempt_is_enabled());
+        // SAFETY: As above; each call pairs with one of the two `eager_resched_disable()`s above.
+        unsafe { preemption_state.eager_resched_reenable() };
+        expect_eq!(preemption_state.eager_resched_disable_count(), 1);
+        expect_false!(preemption_state.preempt_is_enabled());
+        // SAFETY: As above.
+        unsafe { preemption_state.eager_resched_reenable() };
+        expect_eq!(preemption_state.eager_resched_disable_count(), 0);
+        expect_true!(preemption_state.preempt_is_enabled());
+
+        // Every disable above is paired with its reenable and `expect_*` never returns early, so
+        // the counts are back to zero however the checks went.
+        expect_eq!(preemption_state.preempt_disable_count(), 0);
+        expect_eq!(preemption_state.eager_resched_disable_count(), 0);
+        expect_eq!(preemption_state.preempts_pending(), 0);
+    }
+
+    /// Mirror of C++ `test_decrement_clears_preempt_pending`: reenabling flushes pending bits.
+    #[test]
+    fn test_decrement_clears_preempt_pending() {
+        // SAFETY: The current thread stays alive for the duration of this test, and
+        // `PreemptionState` is all relaxed atomics; no `&Thread` is formed.
+        let preemption_state = unsafe { &*current_preemption_state() };
+        assert_true!(preemption_state.preempt_is_enabled());
+        assert_eq!(preemption_state.preempts_pending(), 0);
+
+        // Test that preemption_state.preempt_reenable() clears preempt_pending.
+        preemption_state.preempt_disable();
+        reschedule();
+        expect_ne!(preemption_state.preempts_pending(), 0);
+        // SAFETY: `preemption_state` is the current thread's, this pairs with the
+        // `preempt_disable()` above, and no `PreemptDisabledToken` exists in this test.
+        unsafe { preemption_state.preempt_reenable() };
+        expect_eq!(preemption_state.preempts_pending(), 0);
+
+        // Test that preemption_state.eager_resched_reenable() clears preempt_pending.
+        preemption_state.eager_resched_disable();
+        reschedule();
+        expect_ne!(preemption_state.preempts_pending(), 0);
+        // SAFETY: `preemption_state` is the current thread's, this pairs with the
+        // `eager_resched_disable()` above, and no `PreemptDisabledToken` exists in this test.
+        unsafe { preemption_state.eager_resched_reenable() };
+        expect_eq!(preemption_state.preempts_pending(), 0);
+    }
+
+    /// Mirror of C++ `test_blocking_clears_preempt_pending`: blocking clears pending bits.
+    #[test]
+    fn test_blocking_clears_preempt_pending() {
+        // SAFETY: The current thread stays alive for the duration of this test, and
+        // `PreemptionState` is all relaxed atomics; no `&Thread` is formed.
+        let preemption_state = unsafe { &*current_preemption_state() };
+
+        // It is OK to block while preemption is disabled. In this case, blocking
+        // should clear a pending local preemption.
+        preemption_state.preempt_disable();
+        reschedule();
+        expect_ne!(preemption_state.preempts_pending(), 0);
+        {
+            let _int_state = InterruptDisableGuard::new();
+            let _ = sleep_relative(DurationMono::from_millis(10));
+            // Read preempts_pending with interrupts disabled because otherwise an
+            // interrupt handler could set it.
+            expect_eq!(preemption_state.preempts_pending(), 0);
+        }
+        // SAFETY: `preemption_state` is the current thread's, this pairs with the
+        // `preempt_disable()` above, and no `PreemptDisabledToken` exists in this test.
+        unsafe { preemption_state.preempt_reenable() };
+
+        // It is OK to block while eager rescheduling is disabled. In this case,
+        // blocking should clear all pending preemptions.
+        preemption_state.eager_resched_disable();
+        reschedule();
+        {
+            let _int_state = InterruptDisableGuard::new();
+            let _ = sleep_relative(DurationMono::from_millis(10));
+            // Read preempts_pending with interrupts disabled because otherwise an
+            // interrupt handler could set it.
+            expect_eq!(preemption_state.preempts_pending(), 0);
+        }
+        // SAFETY: `preemption_state` is the current thread's, this pairs with the
+        // `eager_resched_disable()` above, and no `PreemptDisabledToken` exists in this test.
+        unsafe { preemption_state.eager_resched_reenable() };
+    }
+
+    /// Mirror of C++ `test_interrupt_preserves_preempt_pending`.
+    //
+    // Test that preempts_pending is preserved across an interrupt handler when
+    // EagerReschedDisable is set and when the interrupt handler does not cause a
+    // preemption. This tests the int_handler_start()/finish() routines rather than
+    // the full interrupt handler.
+    #[test]
+    fn test_interrupt_preserves_preempt_pending() {
+        // SAFETY: The current thread stays alive for the duration of this test, and
+        // `PreemptionState` is all relaxed atomics; no `&Thread` is formed.
+        let preemption_state = unsafe { &*current_preemption_state() };
+
+        preemption_state.eager_resched_disable();
+        {
+            // Do this with interrupts disabled so that a real interrupt does not
+            // clear preempts_pending.
+            let _int_state = InterruptDisableGuard::new();
+            reschedule();
+
+            // Simulate an interrupt handler invocation.
+            let mut state = IntHandlerSavedState::default();
+            int_handler_start(&mut state);
+            expect_eq!(preemption_state.preempt_disable_count(), 1);
+            let do_preempt = int_handler_finish(&mut state);
+
+            expect_false!(do_preempt);
+            expect_ne!(preemption_state.preempts_pending(), 0);
+        }
+        // SAFETY: `preemption_state` is the current thread's, this pairs with the
+        // `eager_resched_disable()` above, and no `PreemptDisabledToken` exists in this test.
+        unsafe { preemption_state.eager_resched_reenable() };
+        expect_eq!(preemption_state.preempts_pending(), 0);
+    }
+
+    /// Timer callback used for testing.
+    ///
+    /// # Safety
+    ///
+    /// `arg` must point to the `AtomicBool` that `test_interrupt_with_preempt_disable` keeps alive
+    /// until the timer has been cancelled, and this must run as a `Timer` callback.
+    unsafe extern "C" fn timer_set_preempt_pending(
+        _timer: *mut Timer,
+        _now: zx_instant_mono_t,
+        arg: *mut c_void,
+    ) {
+        // SAFETY: `arg` is the `AtomicBool` that `test_interrupt_with_preempt_disable` keeps
+        // alive until the timer has been cancelled.
+        let timer_ran = unsafe { &*arg.cast::<AtomicBool>() };
+
+        // SAFETY: The interrupted thread is the current thread and stays alive for the callback;
+        // `PreemptionState` is all relaxed atomics.
+        unsafe {
+            (*current_preemption_state()).preempt_set_pending(cpu_num_to_mask(curr_cpu_num()))
+        };
+        timer_ran.store(true, Ordering::SeqCst);
+    }
+
+    /// Mirror of C++ `test_interrupt_with_preempt_disable`.
+    #[test]
+    fn test_interrupt_with_preempt_disable() {
+        // SAFETY: The current thread stays alive for the duration of this test, and
+        // `PreemptionState` is all relaxed atomics; no `&Thread` is formed.
+        let preemption_state = unsafe { &*current_preemption_state() };
+
+        // Test that interrupt handlers honor PreemptDisable.
+        //
+        // We test that by setting a timer callback that will set
+        // preempt_pending from inside an interrupt handler.  preempt_pending
+        // should remain set after the interrupt handler returns.
+        //
+        // This assumes that timer_set() will run the callback on the same CPU
+        // that we invoked it from.  This also assumes that we don't
+        // accidentally call any blocking operations that cause our thread to
+        // be rescheduled to another CPU.
+        preemption_state.preempt_disable();
+        let timer_ran = AtomicBool::new(false);
+        stack_pin_init!(let timer = Timer::init(ZX_CLOCK_MONOTONIC));
+        let deadline = Deadline::after_mono(DurationMono(zx_usec(100)), TimerSlack::none());
+        // SAFETY: `timer` is stack-pinned and `timer_ran` outlives it: `_cancel` cancels the timer
+        // before either goes out of scope (also on an early return from a failed assertion);
+        // `timer_set_preempt_pending` is a valid timer callback.
+        unsafe {
+            timer.as_ref().set_deadline(
+                &deadline,
+                timer_set_preempt_pending,
+                core::ptr::from_ref(&timer_ran).cast_mut().cast(),
+            );
+        }
+        // Make sure the timer has fully completed prior to letting it go out of scope.
+        let _cancel = zr::defer(|| {
+            timer.cancel();
+        });
+        // Spin until timer_ran is set by the interrupt handler.
+        while !timer_ran.load(Ordering::SeqCst) {
+            libarch::r#yield();
+        }
+        expect_eq!(preemption_state.preempts_pending(), cpu_num_to_mask(curr_cpu_num()));
+        // SAFETY: `preemption_state` is the current thread's, this pairs with the
+        // `preempt_disable()` above, and no `PreemptDisabledToken` exists in this test.
+        unsafe { preemption_state.preempt_reenable() };
+    }
+
+    /// Shared with the `waiter` thread of `test_local_preempt_pending`.
+    struct Args {
+        event: *const Event,
+        started: AtomicBool,
+    }
+
+    extern "C" fn waiter(void_args: *mut c_void) -> i32 {
+        // SAFETY: `void_args` is the `Args` that `setup_and_run_with` keeps alive (along with the
+        // `Event` it points at) until it has joined this thread.
+        let (args, event) = unsafe {
+            let args = &*void_args.cast::<Args>();
+            (args, &*args.event)
+        };
+        // Let the other thread know that we're up and running and then wait to be signaled.
+        args.started.store(true, Ordering::SeqCst);
+        let _ = event.wait_infinite();
+        0
+    }
+
+    /// The common code used in all cases of `test_local_preempt_pending`.
+    ///
+    /// `setup_and_run_with` is used to setup test conditions and run the `func` test case.
+    ///
+    /// `func` receives an Event that it should signal to unblock the `waiter` thread (see above).
+    fn setup_and_run_with(func: &dyn Fn(&Event) -> bool) -> bool {
+        (subtest!(|func: &dyn Fn(&Event) -> bool| {
+            // Make sure we restore this thread's affinity.
+            // SAFETY: Threading is initialized by the time unit tests run.
+            let current = unsafe { ThreadPtr::current() };
+            // SAFETY: The current thread is alive for the duration of this test.
+            let affinity = unsafe { current.get_cpu_affinity() };
+            let _cleanup = zr::defer(move || {
+                // SAFETY: The current thread is alive for the duration of this test.
+                unsafe { current.set_cpu_affinity(affinity) };
+            });
+
+            stack_pin_init!(let event = Event::init_unsignaled());
+            let args =
+                Args { event: core::ptr::from_ref(&*event), started: AtomicBool::new(false) };
+
+            let target_cpu = BOOT_CPU_ID;
+
+            // Migrate the current thread to the target CPU and bind a |waiter| thread to the same
+            // CPU.
+            let mask = cpu_num_to_mask(target_cpu);
+            // SAFETY: The current thread is alive for the duration of this test.
+            unsafe { current.set_cpu_affinity(mask) };
+            // SAFETY: `waiter` is a valid thread entry point, and `args` and `event` outlive the
+            // thread, which `_cleanup_waiter` joins below.
+            let t = unwrap_ok!(unsafe {
+                create_with_priority(
+                    c"test_local_preempt_pending".as_ptr(),
+                    waiter,
+                    core::ptr::from_ref(&args).cast_mut().cast(),
+                    DEFAULT_PRIORITY,
+                )
+            });
+            let _cleanup_waiter = zr::defer(|| {
+                event.signal();
+                // SAFETY: `t` is joined exactly once, here.
+                let _ = unsafe { t.join(InstantMono::INFINITE) };
+            });
+            // SAFETY: `t` has not been joined yet.
+            unsafe { t.set_cpu_affinity(mask) };
+
+            // Start the |waiter| and spin until we know that it has started running and then
+            // blocked.
+            // SAFETY: `t` was just created and has not been resumed or joined yet.
+            unsafe { t.resume() };
+            loop {
+                r#yield();
+                // SAFETY: `t` has not been joined yet.  (`is_blocked` checks the scheduler state
+                // under `t`'s lock, as the C++ `SingleChainLockGuard` scope does.)
+                if args.started.load(Ordering::SeqCst) && unsafe { t.is_blocked() } {
+                    break;
+                }
             }
-            assert_true!(preempt_is_enabled());
+
+            // At this point we know the |waiter| is blocked on the event.
+            expect_true!(func(&event));
+        }))(func)
+    }
+
+    /// Unblocking a thread pinned to the current CPU marks the CPU for preemption.
+    //
+    // Verify that in certain contexts where preemption cannot immediately occur, unblocking a
+    // thread pinned to the current CPU will mark the CPU for preemption.
+    //
+    // This test covers four cases:
+    //
+    // 1. preemption is disabled
+    // 2. eager resched is disabled
+    // 3. timeslice extension
+    // 4. a spinlock is held
+    //
+    // See https://fxbug.dev/42051271 for motivation.
+    #[test]
+    fn test_local_preempt_pending() {
+        // Now test each case using the common code above.
+
+        // 1. Preemption disabled should cause a preemption event to become pending.
+        expect_true!(setup_and_run_with(&subtest!(|event: &Event| {
+            let _apd = AutoPreemptDisabler::new();
+            // Unblock the |waiter|.  Because we've got preemption disabled, a preemption event
+            // for the local CPU should become pending.
+            event.signal();
+            // SAFETY: The current thread stays alive for the duration of this test, and
+            // `PreemptionState` is all relaxed atomics; no `&Thread` is formed.
+            let pending = unsafe { (*current_preemption_state()).preempts_pending() };
+            expect_ne!(0, pending);
+            expect_true!((pending | cpu_num_to_mask(curr_cpu_num())) != 0);
+        })));
+
+        // 2. Eager resched disabled should cause a preemption event to become pending.
+        expect_true!(setup_and_run_with(&subtest!(|event: &Event| {
+            let _aerd = AutoEagerReschedDisabler::new();
+            // Unblock the |waiter|.  Because we've got eager resched disabled (which implies
+            // preempt disable), a preemption event for the local CPU should become pending.
+            event.signal();
+            // SAFETY: As in case 1.
+            let pending = unsafe { (*current_preemption_state()).preempts_pending() };
+            expect_ne!(0, pending);
+            expect_true!((pending | cpu_num_to_mask(curr_cpu_num())) != 0);
+        })));
+
+        // 3. A timeslice extension should cause a preemption event to become pending.
+        expect_true!(setup_and_run_with(&subtest!(|event: &Event| {
+            let _guard = AutoExpiringPreemptDisabler::new(DurationMono::INFINITE);
+            // Unblock the |waiter|.  Because we've got eager resched disabled (which implies
+            // preempt disable), a preemption event for the local CPU should become pending.
+            event.signal();
+            // SAFETY: As in case 1.
+            let pending = unsafe { (*current_preemption_state()).preempts_pending() };
+            expect_ne!(0, pending);
+            expect_true!((pending | cpu_num_to_mask(curr_cpu_num())) != 0);
+        })));
+
+        // 4. Holding a spinlock should cause a preemption event to become pending.
+        expect_true!(setup_and_run_with(&subtest!(|event: &Event| {
+            crate::ksync_kernel::declare_singleton_monitored_spinlock!(LocalLock);
+            ksync::lock!(let _guard = LocalLock::get().lock_with(ksync::source_tag!()));
+            // Unblock the |waiter|.  Because we're holding a spinlock, a preemption event for the
+            // local CPU should become pending.
+            event.signal();
+            // SAFETY: As in case 1.
+            let pending = unsafe { (*current_preemption_state()).preempts_pending() };
+            expect_ne!(0, pending);
+            expect_true!((pending | cpu_num_to_mask(curr_cpu_num())) != 0);
+        })));
+    }
+
+    /// Mirror of C++ `test_evaluate_timeslice_extension`: extension activation and expiry.
+    #[test]
+    fn test_evaluate_timeslice_extension() {
+        // Nothing preventing preemption.
+        // SAFETY: The current thread stays alive for the duration of this test, and
+        // `PreemptionState` is all relaxed atomics; no `&Thread` is formed.
+        let preemption_state = unsafe { &*current_preemption_state() };
+        expect_true!(preemption_state.preempt_is_enabled());
+        expect_true!(preemption_state.evaluate_timeslice_extension());
+        expect_true!(preemption_state.preempt_is_enabled());
+
+        // Disabled (by count).
+        {
+            let _apd = AutoPreemptDisabler::new();
+            expect_false!(preemption_state.preempt_is_enabled());
+            expect_false!(preemption_state.evaluate_timeslice_extension());
+            expect_false!(preemption_state.preempt_is_enabled());
+        }
+        expect_true!(preemption_state.preempt_is_enabled());
+
+        // Disabled (by eager resched count).
+        {
+            let _aerd = AnnotatedAutoEagerReschedDisabler::new();
+            expect_false!(preemption_state.preempt_is_enabled());
+            expect_false!(preemption_state.evaluate_timeslice_extension());
+            expect_false!(preemption_state.preempt_is_enabled());
+        }
+        expect_true!(preemption_state.preempt_is_enabled());
+
+        // Disabled (by infinite timeslice extension).
+        {
+            let _guard = AutoExpiringPreemptDisabler::new(DurationMono::INFINITE);
+            expect_false!(preemption_state.preempt_is_enabled());
+            expect_false!(preemption_state.evaluate_timeslice_extension());
+            expect_false!(preemption_state.preempt_is_enabled());
+        }
+        expect_true!(preemption_state.preempt_is_enabled());
+
+        // In the tests below, the current thread will defer preemption for
+        // EPSILON_DURATION and sleep for EPSILON_DURATION.  The only requirement for
+        // correctness is that this value is greater than zero.  We use the value 1 to
+        // minimize test runtime.
+        const EPSILON_DURATION: DurationMono = DurationMono(1);
+
+        // See that the timeslice extension expires.
+        {
+            let _guard = AutoExpiringPreemptDisabler::new(EPSILON_DURATION);
+            // Note, we cannot reliably assert that preemption is disabled at this point
+            // because a preemption request may have already occurred and
+            // EPSILON_DURATION may have already elapsed.
+            reschedule();
+            let _ = sleep_relative(EPSILON_DURATION);
+            expect_true!(preemption_state.evaluate_timeslice_extension());
+            expect_true!(preemption_state.preempt_is_enabled());
+        }
+        expect_true!(preemption_state.preempt_is_enabled());
+
+        // AutoPreemptDisabler inside an expired AutoExpiringPreemptDisabler.
+        {
+            let _guard1 = AutoExpiringPreemptDisabler::new(EPSILON_DURATION);
+            let _guard2 = AutoPreemptDisabler::new();
+            expect_false!(preemption_state.preempt_is_enabled());
+            reschedule();
+            let _ = sleep_relative(EPSILON_DURATION);
+            expect_false!(preemption_state.evaluate_timeslice_extension());
+            // Still false because of the APD.
+            expect_false!(preemption_state.preempt_is_enabled());
+        }
+        expect_true!(preemption_state.preempt_is_enabled());
+
+        // AutoEagerReschedDisabler inside an expired AutoExpiringPreemptDisabler.
+        {
+            let _guard1 = AutoExpiringPreemptDisabler::new(EPSILON_DURATION);
+            let _guard2 = AnnotatedAutoEagerReschedDisabler::new();
+            expect_false!(preemption_state.preempt_is_enabled());
+            reschedule();
+            let _ = sleep_relative(EPSILON_DURATION);
+            expect_false!(preemption_state.evaluate_timeslice_extension());
+            // Still false because of the AERD.
+            expect_false!(preemption_state.preempt_is_enabled());
+        }
+        expect_true!(preemption_state.preempt_is_enabled());
+        expect_eq!(preemption_state.preempts_pending(), 0);
+    }
+
+    /// Holder for the `CriticalMutex` of `test_apd_in_critical_mutex`.
+    #[ksync::guarded]
+    struct CriticalMutexHolder {
+        #[mutex]
+        mutex: ksync::KMutex<crate::ksync_kernel::TrackedCriticalMutex>,
+    }
+
+    /// An AutoPreemptDisabler inside a CriticalMutex does not clear the mutex's extension.
+    //
+    // Verify that an AutoPreemptDisabler inside a CriticalMutex with a non-expired
+    // timeslice extension does not clear the CriticalMutex's extension.
+    #[test]
+    fn test_apd_in_critical_mutex() {
+        // SAFETY: The current thread stays alive for the duration of this test, and
+        // `PreemptionState` is all relaxed atomics; no `&Thread` is formed.
+        let preemption_state = unsafe { &*current_preemption_state() };
+
+        stack_pin_init!(let holder = pin_init!(CriticalMutexHolder {
+            mutex <- ksync::KMutex::init(),
+        }));
+
+        {
+            // `KMutex<TrackedCriticalMutex>`'s guard is the `Acquire`/`Release(should_clear)` pair.
+            ksync::lock!(let _guard = holder.lock_mutex());
+
+            expect_false!(preemption_state.preempt_is_enabled());
+            expect_false!(preemption_state.evaluate_timeslice_extension());
+            expect_false!(preemption_state.preempt_is_enabled());
+
+            {
+                let _apd = AutoPreemptDisabler::new();
+                expect_false!(preemption_state.preempt_is_enabled());
+                expect_false!(preemption_state.evaluate_timeslice_extension());
+                expect_false!(preemption_state.preempt_is_enabled());
+            }
+        }
+    }
+
+    /// Releasing a `CriticalMutex` clears the timeslice extension set by acquiring it.
+    #[test]
+    fn test_critical_mutex_release_clears_timeslice_extension() {
+        // SAFETY: The current thread stays alive for the duration of this test, and
+        // `PreemptionState` is all relaxed atomics; no `&Thread` is formed.
+        let preemption_state = unsafe { &*current_preemption_state() };
+
+        stack_pin_init!(let holder = pin_init!(CriticalMutexHolder {
+            mutex <- ksync::KMutex::init(),
+        }));
+
+        expect_true!(preemption_state.preempt_is_enabled());
+        // Acquire twice, to check that the first release left no extension behind that would
+        // prevent the second acquisition from setting its own.
+        for _ in 0..2 {
+            {
+                ksync::lock!(let _guard = holder.lock_mutex());
+                expect_false!(preemption_state.preempt_is_enabled());
+            }
+            expect_true!(preemption_state.preempt_is_enabled());
+        }
+    }
+
+    /// Mirror of C++ `test_flush_race`: reenabling with an inactive timeslice extension in place.
+    #[test]
+    fn test_flush_race() {
+        // This test simulates a race condition where a preemption is requested (via IPI
+        // or timer) concurrent with reenabling preemption / eager rescheduling while an
+        // inactive timeslice extension is in place.
+        // SAFETY: The current thread stays alive for the duration of this test, and
+        // `PreemptionState` is all relaxed atomics; no `&Thread` is formed.
+        let preemption_state = unsafe { &*current_preemption_state() };
+        expect_true!(preemption_state.preempt_is_enabled());
+
+        // In each block below, dropping `_guard` clears the extension with the counts at zero and
+        // so flushes the pending local bit the block left behind, as in C++.
+
+        // Test PreemptReenable.
+        {
+            let _guard = AutoExpiringPreemptDisabler::new(DurationMono::INFINITE);
+            let curr_mask = cpu_num_to_mask(curr_cpu_num());
+            {
+                let _apd = AutoPreemptDisabler::new();
+                expect_false!(preemption_state.preempt_is_enabled());
+
+                // We'll simulate a race by marking the current CPU as pending for
+                // preemption without going through the normal PreemptSetPending path
+                // because we want to test the behavior when the extension is
+                // inactive, and PreemptSetPending will activate it.
+                preemption_state.preempts_pending_add(curr_mask);
+                // When we leave this scope and reenable preemption, we'd better not flush.
+            }
+            expect_false!(preemption_state.preempt_is_enabled());
+            // See that we did not flush.
+            expect_eq!(curr_mask, preemption_state.preempts_pending());
         }
 
-        // Nested.  Only the outermost guard matters.
+        // Test PreemptReenableDelayFlush.
         {
-            assert_true!(preempt_is_enabled());
+            let _guard = AutoExpiringPreemptDisabler::new(DurationMono::INFINITE);
+            let curr_mask = cpu_num_to_mask(curr_cpu_num());
+            let should_preempt = {
+                let _irqd = InterruptDisableGuard::new();
+                crate::arch_rs::set_blocking_disallowed(true);
+                let _cleanup = zr::defer(|| crate::arch_rs::set_blocking_disallowed(false));
+                preemption_state.preempt_disable();
+                preemption_state.preempts_pending_add(curr_mask);
+                // SAFETY: `preemption_state` is the current thread's state, interrupts are
+                // disabled and blocking is disallowed, this pairs with the `preempt_disable()`
+                // just above, and no `PreemptDisabledToken` exists in this test.
+                unsafe { preemption_state.preempt_reenable_delay_flush() }
+            };
+            expect_false!(preemption_state.preempt_is_enabled());
+            expect_false!(should_preempt);
+        }
+
+        // Test EagerReschedReenable.
+        {
+            let _guard = AutoExpiringPreemptDisabler::new(DurationMono::INFINITE);
+            let curr_mask = cpu_num_to_mask(curr_cpu_num());
             {
-                let _guard1 = AutoExpiringPreemptDisabler::new(DurationMono::INFINITE);
-                assert_false!(preempt_is_enabled());
-                {
-                    let _guard2 = AutoExpiringPreemptDisabler::new(DurationMono::ZERO);
-                    // Even though _guard2's duration is 0, preemption should still be disabled
-                    // because of _guard1's extension.
-                    assert_false!(preempt_is_enabled());
-                }
-                assert_false!(preempt_is_enabled());
+                let _aerd = AnnotatedAutoEagerReschedDisabler::new();
+                expect_false!(preemption_state.preempt_is_enabled());
+                preemption_state.preempts_pending_add(CPU_MASK_ALL);
             }
-            assert_true!(preempt_is_enabled());
+            expect_false!(preemption_state.preempt_is_enabled());
+            // See that we flushed the remote CPUs, but not the local.
+            expect_eq!(curr_mask, preemption_state.preempts_pending());
+        }
+
+        expect_true!(preemption_state.preempt_is_enabled());
+        expect_eq!(preemption_state.preempts_pending(), 0);
+        expect_false!(crate::arch_rs::blocking_disallowed());
+    }
+
+    /// Verify that it's legal to call preempt while holding a spinlock.
+    //
+    // This is a regression test for https://fxbug.dev/473600952.
+    #[test]
+    fn test_preempt_with_spinlock() {
+        crate::ksync_kernel::declare_singleton_monitored_spinlock!(SpinlockForTest);
+
+        {
+            ksync::lock!(let _guard = SpinlockForTest::get().lock_with(ksync::source_tag!()));
+            preempt();
+            // SAFETY: The current thread stays alive for the duration of this test, and
+            // `PreemptionState` is all relaxed atomics; no `&Thread` is formed.
+            let pending = unsafe { (*current_preemption_state()).preempts_pending() };
+            assert_ne!(0, pending & cpu_num_to_mask(curr_cpu_num()));
         }
     }
 }

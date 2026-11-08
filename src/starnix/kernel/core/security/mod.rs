@@ -11,9 +11,6 @@
 //! should treat the types as opaque; hook implementations necessarily have access
 //! to kernel structures, but not the other way around.
 
-use selinux::{SecurityId, SecurityServer};
-use std::sync::Arc;
-
 /// SELinux implementations called by the LSM hooks.
 mod selinux_hooks;
 pub use selinux_hooks::audit::Auditable;
@@ -89,4 +86,11 @@ pub struct PerfEventState {
 #[derive(Default, Debug)]
 pub struct CurrentTaskState {
     pub state: selinux_hooks::CurrentTaskState,
+}
+
+/// Opaque token representing a security context captured at message send time, which can be
+/// resolved to a serialized security context string if `SO_PASSSEC` is enabled when receiving.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SecurityContextToken {
+    state: selinux_hooks::SecurityContextToken,
 }

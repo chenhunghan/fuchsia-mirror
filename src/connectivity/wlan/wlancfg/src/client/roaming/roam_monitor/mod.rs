@@ -10,7 +10,7 @@ use crate::telemetry::{TelemetryEvent, TelemetrySender};
 use anyhow::{Error, format_err};
 use async_trait::async_trait;
 use fidl_fuchsia_wlan_common as fidl_common;
-use fidl_fuchsia_wlan_internal as fidl_internal;
+use fidl_fuchsia_wlan_stats as fidl_stats;
 use futures::channel::mpsc;
 use futures::future::LocalBoxFuture;
 use futures::lock::Mutex;
@@ -31,11 +31,11 @@ impl RoamDataSender {
     pub fn new(trigger_data_sender: mpsc::Sender<RoamTriggerData>) -> Self {
         Self { sender: trigger_data_sender }
     }
-    pub fn send_signal_report_ind(
+    pub fn send_signal_report(
         &mut self,
-        ind: fidl_internal::SignalReportIndication,
+        report: fidl_stats::ConnectionSignalReport,
     ) -> Result<(), anyhow::Error> {
-        Ok(self.sender.try_send(RoamTriggerData::SignalReportInd(ind))?)
+        Ok(self.sender.try_send(RoamTriggerData::ConnectionSignalReport(report))?)
     }
 }
 /// Trait for creating different roam monitors based on roaming profiles.
@@ -168,7 +168,6 @@ mod test {
     };
     use assert_matches::assert_matches;
     use fidl_fuchsia_wlan_common as fidl_common;
-    use fidl_fuchsia_wlan_internal as fidl_internal;
     use fuchsia_async::{self as fasync, TestExecutor};
     use futures::task::Poll;
     use futures::{Future, pin_mut};
@@ -211,22 +210,22 @@ mod test {
     }
 
     #[fuchsia::test]
-    fn test_roam_data_sender_send_signal_report_ind() {
+    fn test_roam_data_sender_send_signal_report() {
         let _exec = TestExecutor::new();
         let (sender, mut receiver) = mpsc::channel(100);
         let mut roam_data_sender = RoamDataSender::new(sender);
-        let ind = fidl_internal::SignalReportIndication {
+        let report = fidl_stats::ConnectionSignalReport {
             rssi_dbm: Some(-60),
             snr_db: Some(30),
             tx_rate_500kbps: Some(0),
             ..Default::default()
         };
 
-        roam_data_sender.send_signal_report_ind(ind.clone()).expect("error sending signal report");
+        roam_data_sender.send_signal_report(report.clone()).expect("error sending signal report");
 
         // Verify that roam sender packages trigger data and sends to roam monitor receiver.
-        assert_matches!(receiver.try_recv(), Ok(RoamTriggerData::SignalReportInd(data)) => {
-            assert_eq!(ind, data);
+        assert_matches!(receiver.try_recv(), Ok(RoamTriggerData::ConnectionSignalReport(data)) => {
+            assert_eq!(report, data);
         });
     }
 
@@ -264,7 +263,7 @@ mod test {
         // irrelevant.
         test_values
             .trigger_data_sender
-            .try_send(RoamTriggerData::SignalReportInd(fidl_internal::SignalReportIndication {
+            .try_send(RoamTriggerData::ConnectionSignalReport(fidl_stats::ConnectionSignalReport {
                 rssi_dbm: Some(-40),
                 snr_db: Some(40),
                 tx_rate_500kbps: Some(0),
@@ -341,7 +340,7 @@ mod test {
         // irrelevant.
         test_values
             .trigger_data_sender
-            .try_send(RoamTriggerData::SignalReportInd(fidl_internal::SignalReportIndication {
+            .try_send(RoamTriggerData::ConnectionSignalReport(fidl_stats::ConnectionSignalReport {
                 rssi_dbm: Some(-40),
                 snr_db: Some(40),
                 tx_rate_500kbps: Some(0),
@@ -464,7 +463,7 @@ mod test {
         // Send some trigger data to kick off the handling sequence. The actual values here are
         // irrelevant.
         trigger_data_sender
-            .try_send(RoamTriggerData::SignalReportInd(fidl_internal::SignalReportIndication {
+            .try_send(RoamTriggerData::ConnectionSignalReport(fidl_stats::ConnectionSignalReport {
                 rssi_dbm: Some(-40),
                 snr_db: Some(40),
                 tx_rate_500kbps: Some(0),

@@ -184,6 +184,19 @@ FFI_ALWAYS_INLINE void* cpp_lockdep_state_connected_set(void* state) {
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_lockdep_thread_lock_state_init(
+    ffi::Uninitialized<lockdep::ThreadLockState>* out) {
+  DEBUG_ASSERT(out != nullptr);
+  out->Initialize();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_lockdep_system_init_thread_lock_state(lockdep::ThreadLockState* state) {
+  DEBUG_ASSERT(state != nullptr);
+  lockdep::SystemInitThreadLockState(state);
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE void cpp_lockdep_trigger_loop_detection() {
   lockdep::SystemTriggerLoopDetection();
 }

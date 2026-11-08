@@ -2,155 +2,11 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-import("//build/rust/rustc_binary.gni")
-import("//build/rust/rustc_library.gni")
-import("//tools/cmc/build/expect_includes.gni")
-
-rustc_library("lib") {
-  name = "test_runners_lib"
-  with_unit_tests = true
-  edition = "2024"
-
-  # Only for internal use.
-  visibility = [ "./*" ]
-
-  deps = [
-    "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
-    "//sdk/fidl/fuchsia.component.runner:fuchsia.component.runner_rust",
-    "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
-    "//sdk/fidl/fuchsia.ldsvc:fuchsia.ldsvc_rust",
-    "//sdk/fidl/fuchsia.process:fuchsia.process_rust",
-    "//sdk/fidl/fuchsia.test:fuchsia.test_rust",
-    "//sdk/fidl/fuchsia.test:rust_measure_tape_for_case",
-    "//sdk/rust/zx",
-    "//src/lib/fidl/rust/fidl",
-    "//src/lib/fuchsia-async",
-    "//src/lib/fuchsia-component",
-    "//src/lib/fuchsia-runtime",
-    "//src/lib/trace/rust:trace",
-    "//src/storage/lib/vfs/rust:vfs",
-    "//src/sys/lib/cm_types",
-    "//src/sys/lib/library_loader",
-    "//src/sys/lib/namespace",
-    "//src/sys/lib/runner",
-    "//src/sys/test_runners/fidl/fuchsia.test.runner:fuchsia.test.runner_rust",
-    "//third_party/rust_crates:anyhow",
-    "//third_party/rust_crates:async-trait",
-    "//third_party/rust_crates:futures",
-    "//third_party/rust_crates:log",
-    "//third_party/rust_crates:serde_json",
-    "//third_party/rust_crates:thiserror",
-  ]
-
-  test_deps = [
-    "//src/lib/fuchsia",
-    "//src/lib/fuchsia-fs",
-    "//third_party/rust_crates:assert_matches",
-    "//third_party/rust_crates:rand",
-    "//third_party/rust_crates:test-case",
-  ]
-
-  sources = [
-    "src/cases.rs",
-    "src/elf/elf_component.rs",
-    "src/elf/mod.rs",
-    "src/elf/server.rs",
-    "src/errors.rs",
-    "src/launch.rs",
-    "src/lib.rs",
-    "src/logs.rs",
-  ]
-}
-
-rustc_library("test_lib") {
-  testonly = true
-  name = "test_runners_test_lib"
-  with_unit_tests = true
-  edition = "2024"
-  source_root = "src/test_lib.rs"
-
-  # Only for use by test runners.
-  visibility = [
-    "./*",
-    "//src/connectivity/network/testing/netemul/runner/*",
-    "//src/lib/testing/sharding/tests/*",
-  ]
-
-  deps = [
-    ":lib",
-    "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
-    "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
-    "//sdk/fidl/fuchsia.component.runner:fuchsia.component.runner_rust",
-    "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
-    "//sdk/fidl/fuchsia.test:fuchsia.test_rust",
-    "//sdk/fidl/fuchsia.test.manager:fuchsia.test.manager_rust",
-    "//sdk/rust/zx",
-    "//src/lib/fidl/rust/fidl",
-    "//src/lib/fuchsia",
-    "//src/lib/fuchsia-async",
-    "//src/lib/fuchsia-component",
-    "//src/lib/fuchsia-fs",
-    "//src/lib/fuchsia-runtime",
-    "//src/sys/lib/namespace",
-    "//src/sys/test_manager:test_lib",
-    "//third_party/rust_crates:anyhow",
-    "//third_party/rust_crates:futures",
-  ]
-
-  test_deps = [ "//third_party/rust_crates:maplit" ]
-
-  sources = [ "src/test_lib.rs" ]
-}
-
-rustc_binary("echo_server_for_concurrency_test_bin") {
-  name = "echo_server_for_concurrency_test"
-  edition = "2024"
-  source_root = "src/echo_server_for_concurrency_test.rs"
-  deps = [
-    "//examples/components/routing/fidl:echo_rust",
-    "//src/lib/fuchsia",
-    "//src/lib/fuchsia-async",
-    "//src/lib/fuchsia-component",
-    "//third_party/rust_crates:futures",
-  ]
-
-  sources = [ "src/echo_server_for_concurrency_test.rs" ]
-}
-
-fuchsia_component("echo_server_for_concurrency_test") {
-  testonly = true
-  manifest = "meta/echo-server-for-concurrency-test.cml"
-  component_name = "echo-server-for-concurrency-test"
-  deps = [ ":echo_server_for_concurrency_test_bin" ]
-}
-
-fuchsia_unittest_component("test-component") {
-  deps = [
-    ":lib_test",
-    "//src/sys/test_runners:test-with-process-launcher",
-  ]
-}
-
-fuchsia_test_package("test-runner-unit-tests") {
-  test_components = [ ":test-component" ]
-  deps =
-      [ "//src/sys/test_runners/lib_loader_cache:lib_loader_runner_cache_cmp" ]
-}
-
-fuchsia_unittest_package("test-runner-test-lib-unit-tests") {
-  deps = [ ":test_lib_test" ]
-}
-
-expect_includes("tmp_storage") {
-  includes = [ "tmp_storage.shard.cml" ]
-}
-
 group("tests") {
   testonly = true
   deps = [
     ":test-runner-test-lib-unit-tests",
-    ":test-runner-unit-tests",
+    ":test-runner-unit-tests_package",
     "elf:tests",
     "fuzz:tests",
     "gtest:tests",
@@ -190,4 +46,254 @@ group("test-with-process-launcher") {
       },
     ]
   }
+}
+
+## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
+#
+#  ________  _________  ________  ________
+# |\   ____\|\___   ___\\   __  \|\   __  \
+# \ \  \___|\|___ \  \_\ \  \|\  \ \  \|\  \
+#  \ \_____  \   \ \  \ \ \  \\\  \ \   ____\
+#   \|____|\  \   \ \  \ \ \  \\\  \ \  \___|
+#     ____\_\  \   \ \__\ \ \_______\ \__\
+#    |\_________\   \|__|  \|_______|\|__|
+#    \|_________|
+#
+#
+# AUTO-GENERATED - DO NOT EDIT
+#
+# The targets below are auto-generated based on the targets defined in the
+# BUILD.bazel file from the same directory. If you made changes to targets in
+# Bazel, instead of editing this file manually, run:
+#
+#   > fx bazel2gn
+#
+# Please do NOT edit this file directly. Instead, edit the BUILD.bazel file and
+# rerun bazel2gn.
+
+import("//build/tools/bazel2gn/bazel_migration.gni")
+
+expect_includes("tmp_storage") {
+  includes = [ "tmp_storage.shard.cml" ]
+  visibility = [ "//*" ]
+}
+
+rustc_library("lib") {
+  sources = [
+    "src/cases.rs",
+    "src/elf/elf_component.rs",
+    "src/elf/mod.rs",
+    "src/elf/server.rs",
+    "src/errors.rs",
+    "src/launch.rs",
+    "src/lib.rs",
+    "src/logs.rs",
+  ]
+  crate_name = "test_runners_lib"
+  edition = "2024"
+  proc_macro_deps = [ "//third_party/rust_crates:async-trait" ]
+  visibility = [
+    ":*",
+    "//src/sys/test_runners/*",
+  ]
+  deps = [
+    "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+    "//sdk/fidl/fuchsia.component.runner:fuchsia.component.runner_rust",
+    "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+    "//sdk/fidl/fuchsia.ldsvc:fuchsia.ldsvc_rust",
+    "//sdk/fidl/fuchsia.process:fuchsia.process_rust",
+    "//sdk/fidl/fuchsia.test:fuchsia.test_rust",
+    "//sdk/fidl/fuchsia.test:rust_measure_tape_for_case",
+    "//sdk/rust/zx",
+    "//src/lib/fidl/rust/fidl",
+    "//src/lib/fuchsia-async",
+    "//src/lib/fuchsia-component",
+    "//src/lib/fuchsia-runtime",
+    "//src/lib/trace/rust:trace",
+    "//src/storage/lib/vfs/rust:vfs",
+    "//src/sys/lib/cm_types",
+    "//src/sys/lib/library_loader",
+    "//src/sys/lib/namespace",
+    "//src/sys/lib/runner",
+    "//src/sys/test_runners/fidl/fuchsia.test.runner:fuchsia.test.runner_rust",
+    "//third_party/rust_crates:anyhow",
+    "//third_party/rust_crates:futures",
+    "//third_party/rust_crates:log",
+    "//third_party/rust_crates:serde_json",
+    "//third_party/rust_crates:thiserror",
+  ]
+}
+if (is_fuchsia) {
+  rustc_test("lib_test") {
+    sources = [
+      "src/cases.rs",
+      "src/elf/elf_component.rs",
+      "src/elf/mod.rs",
+      "src/elf/server.rs",
+      "src/errors.rs",
+      "src/launch.rs",
+      "src/lib.rs",
+      "src/logs.rs",
+    ]
+    edition = "2024"
+    proc_macro_deps = [ "//third_party/rust_crates:async-trait" ]
+    deps = [
+             "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+             "//sdk/fidl/fuchsia.component.runner:fuchsia.component.runner_rust",
+             "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+             "//sdk/fidl/fuchsia.ldsvc:fuchsia.ldsvc_rust",
+             "//sdk/fidl/fuchsia.process:fuchsia.process_rust",
+             "//sdk/fidl/fuchsia.test:fuchsia.test_rust",
+             "//sdk/fidl/fuchsia.test:rust_measure_tape_for_case",
+             "//sdk/rust/zx",
+             "//src/lib/fidl/rust/fidl",
+             "//src/lib/fuchsia-async",
+             "//src/lib/fuchsia-component",
+             "//src/lib/fuchsia-runtime",
+             "//src/lib/trace/rust:trace",
+             "//src/storage/lib/vfs/rust:vfs",
+             "//src/sys/lib/cm_types",
+             "//src/sys/lib/library_loader",
+             "//src/sys/lib/namespace",
+             "//src/sys/lib/runner",
+             "//src/sys/test_runners/fidl/fuchsia.test.runner:fuchsia.test.runner_rust",
+             "//third_party/rust_crates:anyhow",
+             "//third_party/rust_crates:futures",
+             "//third_party/rust_crates:log",
+             "//third_party/rust_crates:serde_json",
+             "//third_party/rust_crates:thiserror",
+           ] +
+           [
+             "//src/lib/fuchsia",
+             "//src/lib/fuchsia-fs",
+             "//third_party/rust_crates:assert_matches",
+             "//third_party/rust_crates:rand",
+             "//third_party/rust_crates:test-case",
+           ]
+    output_name = "test_runners_lib_lib_test"
+  }
+}
+
+rustc_library("test_lib") {
+  testonly = true
+  sources = [ "src/test_lib.rs" ]
+  crate_name = "test_runners_test_lib"
+  source_root = "src/test_lib.rs"
+  edition = "2024"
+  visibility = [
+    ":*",
+    "//src/connectivity/network/testing/netemul/runner/*",
+    "//src/lib/testing/sharding/tests/*",
+    "//src/sys/test_runners/*",
+  ]
+  deps = [
+    ":lib",
+    "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+    "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+    "//sdk/fidl/fuchsia.component.runner:fuchsia.component.runner_rust",
+    "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+    "//sdk/fidl/fuchsia.test:fuchsia.test_rust",
+    "//sdk/fidl/fuchsia.test.manager:fuchsia.test.manager_rust",
+    "//sdk/rust/zx",
+    "//src/lib/fidl/rust/fidl",
+    "//src/lib/fuchsia",
+    "//src/lib/fuchsia-async",
+    "//src/lib/fuchsia-component",
+    "//src/lib/fuchsia-fs",
+    "//src/lib/fuchsia-runtime",
+    "//src/sys/lib/namespace",
+    "//src/sys/test_manager:test_lib",
+    "//third_party/rust_crates:anyhow",
+    "//third_party/rust_crates:futures",
+  ]
+}
+if (is_fuchsia) {
+  rustc_test("test_lib_test") {
+    sources = [ "src/test_lib.rs" ]
+    source_root = "src/test_lib.rs"
+    edition = "2024"
+    deps =
+        [
+          ":lib",
+          "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+          "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+          "//sdk/fidl/fuchsia.component.runner:fuchsia.component.runner_rust",
+          "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+          "//sdk/fidl/fuchsia.test:fuchsia.test_rust",
+          "//sdk/fidl/fuchsia.test.manager:fuchsia.test.manager_rust",
+          "//sdk/rust/zx",
+          "//src/lib/fidl/rust/fidl",
+          "//src/lib/fuchsia",
+          "//src/lib/fuchsia-async",
+          "//src/lib/fuchsia-component",
+          "//src/lib/fuchsia-fs",
+          "//src/lib/fuchsia-runtime",
+          "//src/sys/lib/namespace",
+          "//src/sys/test_manager:test_lib",
+          "//third_party/rust_crates:anyhow",
+          "//third_party/rust_crates:futures",
+        ] + [ "//third_party/rust_crates:maplit" ]
+    output_name = "test_runners_test_lib_lib_test"
+  }
+}
+
+rustc_binary("echo_server_for_concurrency_test_bin") {
+  sources = [ "src/echo_server_for_concurrency_test.rs" ]
+  output_name = "echo_server_for_concurrency_test"
+  source_root = "src/echo_server_for_concurrency_test.rs"
+  edition = "2024"
+  deps = [
+    "//examples/components/routing/fidl:echo_rust",
+    "//src/lib/fuchsia",
+    "//src/lib/fuchsia-async",
+    "//src/lib/fuchsia-component",
+    "//third_party/rust_crates:futures",
+  ]
+}
+
+fuchsia_component_manifest("echo_server_for_concurrency_test_manifest") {
+  testonly = true
+  component_name = "echo-server-for-concurrency-test"
+  manifest = "meta/echo-server-for-concurrency-test.cml"
+}
+
+fuchsia_component("echo_server_for_concurrency_test") {
+  testonly = true
+  cm_label = ":echo_server_for_concurrency_test_manifest"
+  visibility = [
+    ":*",
+    "//src/sys/test_runners/*",
+  ]
+  deps = [ ":echo_server_for_concurrency_test_bin" ]
+}
+
+fuchsia_component_manifest("test-component_manifest") {
+  testonly = true
+  component_name = "test-component"
+  manifest = "meta/test_component.cml"
+}
+
+fuchsia_test_component("test-component") {
+  cm_label = ":test-component_manifest"
+  deps = [
+    ":lib_test",
+    ":test-with-process-launcher",
+  ]
+}
+
+fuchsia_test_package("test-runner-unit-tests_package") {
+  package_name = "test-runner-unit-tests-gn"
+  test_components = [ ":test-component" ]
+  deps =
+      [ "//src/sys/test_runners/lib_loader_cache:lib_loader_runner_cache_cmp" ]
+}
+
+fuchsia_unittest_package("test-runner-test-lib-unit-tests") {
+  package_name = "test-runner-test-lib-unit-tests-gn"
+  component_name = "test-runner-test-lib-unit-tests"
+  deps = [ ":test_lib_test" ]
+  visibility = [
+    ":*",
+    "//src/sys:*",
+  ]
 }

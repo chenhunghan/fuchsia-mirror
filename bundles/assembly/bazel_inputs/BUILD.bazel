@@ -40,6 +40,16 @@ prebuilt_package(
 )
 
 prebuilt_package(
+    name = "component_tool.bootfs_files_package",
+    archive = "@gn_targets//bundles/assembly/bazel_inputs:component_tool.bootfs_files_package",
+)
+
+prebuilt_package(
+    name = "psutils.bootfs_files_package",
+    archive = "@gn_targets//bundles/assembly/bazel_inputs:psutils.bootfs_files_package",
+)
+
+prebuilt_package(
     name = "bootstrap_userdebug.bootfs_files_package",
     archive = "@gn_targets//bundles/assembly/bazel_inputs:bootstrap_userdebug.bootfs_files_package",
 )
@@ -50,6 +60,11 @@ prebuilt_package(
 )
 
 prebuilt_package(
+    name = "package_tool.bootfs_files_package",
+    archive = "@gn_targets//bundles/assembly/bazel_inputs:package_tool.bootfs_files_package",
+)
+
+prebuilt_package(
     name = "lspci.bootfs_files_package",
     archive = "@gn_targets//bundles/assembly/bazel_inputs:lspci.bootfs_files_package",
 )
@@ -57,6 +72,16 @@ prebuilt_package(
 prebuilt_package(
     name = "ufsutil.bootfs_files_package",
     archive = "@gn_targets//bundles/assembly/bazel_inputs:ufsutil.bootfs_files_package",
+)
+
+prebuilt_package(
+    name = "spmi-ctl.bootfs_files_package",
+    archive = "@gn_targets//bundles/assembly/bazel_inputs:spmi-ctl.bootfs_files_package",
+)
+
+prebuilt_package(
+    name = "batteryutil.bootfs_files_package",
+    archive = "@gn_targets//bundles/assembly/bazel_inputs:batteryutil.bootfs_files_package",
 )
 
 prebuilt_package(
@@ -72,11 +97,6 @@ prebuilt_package(
 prebuilt_package(
     name = "intel_hda.bootfs_files_package",
     archive = "@gn_targets//bundles/assembly/bazel_inputs:intel_hda.bootfs_files_package",
-)
-
-prebuilt_package(
-    name = "common_standard.bootfs_files_package",
-    archive = "@gn_targets//bundles/assembly/bazel_inputs:common_standard.bootfs_files_package",
 )
 
 prebuilt_package(

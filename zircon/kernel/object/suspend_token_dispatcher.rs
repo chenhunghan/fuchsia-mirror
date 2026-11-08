@@ -5,8 +5,9 @@
 // https://opensource.org/licenses/MIT
 
 use crate::counters::define_kcounter;
+use crate::ksync_kernel::TrackedCriticalMutex;
 use fbl::Canary;
-use ksync::{KMutex, RawCriticalMutex, guarded};
+use ksync::{KMutex, guarded};
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
 use zx_types::{ZX_DEFAULT_SUSPEND_TOKEN_RIGHTS, ZX_OBJ_TYPE_SUSPEND_TOKEN, zx_rights_t};
@@ -86,7 +87,7 @@ pub struct SuspendTokenDispatcherState {
 
     /// Mutex guarding state operations.
     #[mutex]
-    lock: KMutex<RawCriticalMutex>,
+    lock: KMutex<TrackedCriticalMutex>,
 }
 
 impl SuspendTokenDispatcherState {

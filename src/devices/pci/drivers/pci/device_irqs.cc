@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <lib/driver/logging/cpp/logger.h>
 #include <lib/driver/mmio/cpp/mmio.h>
 #include <lib/pci/constants.h>
 #include <lib/pci/hw.h>
@@ -20,12 +21,13 @@
 namespace pci {
 
 namespace fpci = fuchsia_hardware_pci;
+namespace fpci_root = fuchsia_hardware_pci_root;
 
 zx::result<uint32_t> Device::QueryIrqMode(fpci::InterruptMode mode) {
   const fbl::AutoLock dev_lock(&dev_lock_);
   switch (mode) {
     case fpci::InterruptMode::kLegacy:
-      if (cfg_->Read(Config::kInterruptLine) != 0) {
+      if (config::InterruptLine.ReadFrom(cfg_.get()).reg_value() != 0) {
         return zx::ok(kLegacyInterruptCount);
       }
       break;
@@ -46,11 +48,11 @@ zx::result<uint32_t> Device::QueryIrqMode(fpci::InterruptMode mode) {
   return zx::error(ZX_ERR_NOT_SUPPORTED);
 }
 
-pci_interrupt_modes_t Device::GetInterruptModes() {
+fuchsia_hardware_pci::wire::InterruptModes Device::GetInterruptModes() {
   const fbl::AutoLock dev_lock(&dev_lock_);
-  pci_interrupt_modes_t modes{};
+  fuchsia_hardware_pci::wire::InterruptModes modes{};
 
-  if (cfg_->Read(Config::kInterruptLine) != 0) {
+  if (config::InterruptLine.ReadFrom(cfg_.get()).reg_value() != 0) {
     modes.has_legacy = true;
   }
   if (caps_.msi) {
@@ -121,7 +123,7 @@ zx_status_t Device::DisableInterrupts() {
   }
 
   if (st == ZX_OK) {
-    zxlogf(DEBUG, "[%s] disabled IRQ mode %u", cfg_->addr(), fidl::ToUnderlying(irqs_.mode));
+    fdf::debug("[{}] disabled IRQ mode {}", cfg_->addr(), fidl::ToUnderlying(irqs_.mode));
     irqs_.mode = fpci::InterruptMode::kDisabled;
   }
   return st;
@@ -170,9 +172,7 @@ zx::result<zx::interrupt> Device::MapInterrupt(uint32_t which_irq) {
                                   *msix->table_vmo(), msix->table_offset(), &interrupt);
       // Disable the function level masking now that at least one interrupt exists for the device.
       if (status == ZX_OK) {
-        MsixControlReg ctrl = {.value = cfg_->Read(caps_.msix->ctrl())};
-        ctrl.set_function_mask(0);
-        cfg_->Write(caps_.msix->ctrl(), ctrl.value);
+        caps_.msix->ctrl().ReadFrom(cfg_.get()).set_function_mask(0).WriteTo(cfg_.get());
       }
       break;
     }
@@ -191,43 +191,33 @@ zx_status_t Device::SignalLegacyIrq(zx_instant_boot_t timestamp) {
   return irqs_.legacy.trigger(/*options=*/0, zx::time_boot(timestamp));
 }
 
-zx_status_t Device::AckLegacyIrq() {
-  if (irqs_.mode != fpci::InterruptMode::kLegacy) {
-    return ZX_ERR_BAD_STATE;
-  }
-
-  // TODO(544749672): AckLegacyIrq is a no-op until fully removed.
-  // Unmasking is handled automatically by the Bus monitoring
-  // ZX_VIRTUAL_INTERRUPT_UNTRIGGERED.
-  return ZX_OK;
-}
-
 void Device::EnableLegacyIrq() {
-  ModifyCmdLocked(/*clr_bits=*/pci::kCommandIntDisable, /*set_bits=*/0);
+  config::Command.ReadFrom(cfg_.get()).set_interrupt_disable(false).WriteTo(cfg_.get());
   irqs_.legacy_disabled = false;
 }
 
 void Device::DisableLegacyIrq() {
-  ModifyCmdLocked(/*clr_bits=*/0, /*set_bits=*/pci::kCommandIntDisable);
+  config::Command.ReadFrom(cfg_.get()).set_interrupt_disable(true).WriteTo(cfg_.get());
   irqs_.legacy_disabled = true;
 }
 
-zx::result<std::pair<zx::msi, msi_allocation_info_t>> Device::AllocateMsi(uint32_t irq_cnt) {
+zx::result<std::pair<zx::msi, fpci_root::wire::MsiAllocationInfo>> Device::AllocateMsi(
+    uint32_t irq_cnt) {
   zx::msi msi;
-  msi_allocation_info_t info{};
+  fpci_root::wire::MsiAllocationInfo info{};
   zx_status_t st = bdi_->AllocateMsi(irq_cnt, &msi, &info);
   if (st != ZX_OK) {
     return zx::error(st);
   }
   ZX_DEBUG_ASSERT(info.irq_count == irq_cnt);
-  zxlogf(DEBUG, "[%s] allocated MSI range [%#x, %#x)", cfg_->addr(), info.target_data,
-         info.target_data + info.irq_count);
+  fdf::debug("[{}] allocated MSI range [{:#x}, {:#x})", cfg_->addr(), info.target_data,
+             info.target_data + info.irq_count);
 
   return zx::ok(std::make_pair(std::move(msi), info));
 }
 
 zx_status_t Device::EnableLegacy() {
-  irqs_.legacy_vector = cfg_->Read(Config::kInterruptLine);
+  irqs_.legacy_vector = config::InterruptLine.ReadFrom(cfg_.get()).reg_value();
   if (irqs_.legacy_vector == 0) {
     return ZX_ERR_NOT_SUPPORTED;
   }
@@ -235,15 +225,14 @@ zx_status_t Device::EnableLegacy() {
   const zx_status_t status =
       bdi_->AddToSharedIrqList(this, irqs_.legacy_vector, irqs_.legacy.borrow());
   if (status != ZX_OK) {
-    zxlogf(ERROR, "[%s] failed to add legacy irq to shared handler list %#x: %s", cfg_->addr(),
-           irqs_.legacy_vector, zx_status_get_string(status));
+    fdf::error("[{}] failed to add legacy irq to shared handler list {:#x}: {}", cfg_->addr(),
+               irqs_.legacy_vector, zx_status_get_string(status));
     return status;
   }
 
-  ModifyCmdLocked(/*clr_bits=*/pci::kCommandIntDisable, /*set_bits=*/0);
-  irqs_.legacy_disabled = false;
+  EnableLegacyIrq();
   irqs_.mode = fpci::InterruptMode::kLegacy;
-  irqs_.legacy_pin = cfg_->Read(Config::kInterruptPin);
+  irqs_.legacy_pin = config::InterruptPin.ReadFrom(cfg_.get()).reg_value();
   return ZX_OK;
 }
 
@@ -253,29 +242,46 @@ zx_status_t Device::EnableMsi(uint32_t irq_cnt) {
   ZX_DEBUG_ASSERT(caps_.msi);
 
   if (!cpp20::has_single_bit(irq_cnt) || irq_cnt > caps_.msi->vectors_avail()) {
-    zxlogf(DEBUG, "[%s] EnableMsi: bad irq count = %u, available = %u\n", cfg_->addr(), irq_cnt,
-           caps_.msi->vectors_avail());
+    fdf::debug("[{}] EnableMsi: bad irq count = {}, available = {}", cfg_->addr(), irq_cnt,
+               caps_.msi->vectors_avail());
     return ZX_ERR_INVALID_ARGS;
   }
 
+  bool was_bus_mastering = config::Command.ReadFrom(cfg_.get()).bus_master();
   // Bus mastering must be enabled to generate MSI messages.
   const zx_status_t status = SetBusMastering(true);
   if (status != ZX_OK) {
-    zxlogf(ERROR, "[%s] Failed to enable bus mastering for MSI mode (%d)", cfg_->addr(), status);
+    fdf::error("[{}] Failed to enable bus mastering for MSI mode ({})", cfg_->addr(),
+               zx_status_get_string(status));
     return status;
   }
 
   auto result = AllocateMsi(irq_cnt);
   if (result.is_ok()) {
     auto [alloc, info] = std::move(result.value());
-    MsiControlReg ctrl = {.value = cfg_->Read(caps_.msi->ctrl())};
-    cfg_->Write(caps_.msi->tgt_addr(), info.target_addr);
-    cfg_->Write(caps_.msi->tgt_data(), info.target_data);
+    if (!caps_.msi->is_64bit() && (info.target_addr >> 32u) != 0) {
+      fdf::error("[{}] 32-bit MSI device cannot use target address {:#x}", cfg_->addr(),
+                 info.target_addr);
+      if (!was_bus_mastering) {
+        if (zx_status_t st = SetBusMastering(false); st != ZX_OK) {
+          fdf::warn("[{}] Failed to restore bus mastering state: {}", cfg_->addr(),
+                    zx_status_get_string(st));
+        }
+      }
+      return ZX_ERR_NOT_SUPPORTED;
+    }
+    auto ctrl = caps_.msi->ctrl().ReadFrom(cfg_.get());
+    caps_.msi->tgt_addr().FromValue(static_cast<uint32_t>(info.target_addr)).WriteTo(cfg_.get());
+    if (caps_.msi->is_64bit()) {
+      caps_.msi->tgt_addr_upper()
+          .FromValue(static_cast<uint32_t>(info.target_addr >> 32u))
+          .WriteTo(cfg_.get());
+    }
+    caps_.msi->tgt_data().FromValue(static_cast<uint16_t>(info.target_data)).WriteTo(cfg_.get());
     if (ctrl.mm_capable()) {
       ctrl.set_mm_enable(MsiCapability::CountToMmc(irq_cnt));
     }
-    ctrl.set_enable(1);
-    cfg_->Write(caps_.msi->ctrl(), ctrl.value);
+    ctrl.set_enable(1).WriteTo(cfg_.get());
 
     irqs_.msi_allocation = std::move(alloc);
     irqs_.mode = fpci::InterruptMode::kMsi;
@@ -291,7 +297,8 @@ zx_status_t Device::EnableMsix(uint32_t irq_cnt) {
   // Bus mastering must be enabled to generate MSI-X messages.
   const zx_status_t status = SetBusMastering(true);
   if (status != ZX_OK) {
-    zxlogf(ERROR, "[%s] Failed to enable bus mastering for MSI-X mode (%d)", cfg_->addr(), status);
+    fdf::error("[{}] Failed to enable bus mastering for MSI-X mode ({})", cfg_->addr(),
+               zx_status_get_string(status));
     return status;
   }
 
@@ -302,10 +309,7 @@ zx_status_t Device::EnableMsix(uint32_t irq_cnt) {
   if (result.is_ok()) {
     auto [alloc, info] = std::move(result.value());
     // Enable MSI-X, but mask off all functions until an interrupt is mapped.
-    MsixControlReg ctrl = {.value = cfg_->Read(caps_.msix->ctrl())};
-    ctrl.set_function_mask(1);
-    ctrl.set_enable(1);
-    cfg_->Write(caps_.msix->ctrl(), ctrl.value);
+    caps_.msix->ctrl().ReadFrom(cfg_.get()).set_function_mask(1).set_enable(1).WriteTo(cfg_.get());
 
     irqs_.msi_allocation = std::move(alloc);
     irqs_.mode = fpci::InterruptMode::kMsiX;
@@ -314,13 +318,12 @@ zx_status_t Device::EnableMsix(uint32_t irq_cnt) {
 }
 
 zx_status_t Device::DisableLegacy() {
-  ModifyCmdLocked(/*clr_bits=*/0, /*set_bits=*/pci::kCommandIntDisable);
-  irqs_.legacy_disabled = true;
+  DisableLegacyIrq();
 
   const zx_status_t status = bdi_->RemoveFromSharedIrqList(this, irqs_.legacy_vector);
   if (status != ZX_OK) {
-    zxlogf(ERROR, "[%s] failed to remove legacy irq to shared handler list %#x: %s", cfg_->addr(),
-           irqs_.legacy_vector, zx_status_get_string(status));
+    fdf::error("[{}] failed to remove legacy irq to shared handler list {:#x}: {}", cfg_->addr(),
+               irqs_.legacy_vector, zx_status_get_string(status));
     return status;
   }
 
@@ -366,9 +369,7 @@ zx_status_t Device::DisableMsi() {
     return st;
   }
 
-  MsiControlReg ctrl = {.value = cfg_->Read(caps_.msi->ctrl())};
-  ctrl.set_enable(0);
-  cfg_->Write(caps_.msi->ctrl(), ctrl.value);
+  caps_.msi->ctrl().ReadFrom(cfg_.get()).set_enable(0).WriteTo(cfg_.get());
 
   DisableMsiCommon();
   return ZX_OK;
@@ -380,10 +381,7 @@ zx_status_t Device::DisableMsix() {
     return st;
   }
 
-  MsixControlReg ctrl = {.value = cfg_->Read(caps_.msix->ctrl())};
-  ctrl.set_function_mask(1);
-  ctrl.set_enable(0);
-  cfg_->Write(caps_.msix->ctrl(), ctrl.value);
+  caps_.msix->ctrl().ReadFrom(cfg_.get()).set_function_mask(1).set_enable(0).WriteTo(cfg_.get());
 
   irqs_.msi_allocation.reset();
   return ZX_OK;

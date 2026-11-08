@@ -182,6 +182,10 @@ mod sys {
             vector: u32,
             handler: InterruptHandler,
         ) -> zx_types::zx_status_t;
+        pub fn register_permanent_int_handler(
+            vector: u32,
+            handler: InterruptHandler,
+        ) -> zx_types::zx_status_t;
         pub fn remap_interrupt(vector: u32) -> u32;
         pub fn is_valid_interrupt(vector: u32, flags: u32) -> bool;
         pub fn msi_is_supported() -> bool;
@@ -195,6 +199,7 @@ mod sys {
         pub fn msi_supports_masking() -> bool;
         pub fn msi_mask_unmask(block: *const MsiBlock, msi_id: u32, mask: bool);
         pub fn msi_register_handler(block: *const MsiBlock, msi_id: u32, handler: InterruptHandler);
+        pub fn shutdown_interrupts_curr_cpu();
     }
 }
 
@@ -259,6 +264,21 @@ pub unsafe fn register_int_handler(
     zx_status::Status::ok(unsafe { sys::register_int_handler(vector, handler) })
 }
 
+/// Registers a permanent interrupt `handler` for `vector`.
+///
+/// # Safety
+///
+/// If `handler` is present, its callback and `cookie` must remain valid for the remaining lifetime
+/// of the system.
+#[inline]
+pub unsafe fn register_permanent_int_handler(
+    vector: u32,
+    handler: InterruptHandler,
+) -> Result<(), zx_status::Status> {
+    // SAFETY: Guaranteed by the caller.
+    zx_status::Status::ok(unsafe { sys::register_permanent_int_handler(vector, handler) })
+}
+
 /// Remaps an interrupt `vector` number to the platform's internal IRQ number.
 #[inline]
 pub fn remap_interrupt(vector: u32) -> u32 {
@@ -313,4 +333,15 @@ pub fn msi_supports_masking() -> bool {
 pub fn msi_mask_unmask(block: &MsiBlock, msi_id: u32, mask: bool) {
     // SAFETY: `block` is a valid reference to an `MsiBlock`.
     unsafe { sys::msi_mask_unmask(block, msi_id, mask) }
+}
+
+/// Shuts down the interrupt controller for the calling CPU.
+///
+/// # Safety
+///
+/// Must only be called on a CPU that is being shut down, with interrupts disabled.
+#[inline]
+pub unsafe fn shutdown_interrupts_curr_cpu() {
+    // SAFETY: Guaranteed by the caller.
+    unsafe { sys::shutdown_interrupts_curr_cpu() }
 }

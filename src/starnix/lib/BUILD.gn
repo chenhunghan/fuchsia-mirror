@@ -71,6 +71,7 @@ group("tests") {
 }
 
 bazel_test_suite("bazel_tests") {
+  host_tests = [ "//src/starnix/lib:host_tests" ]
   target_tests = [ "//src/starnix/lib:target_tests" ]
 }
 

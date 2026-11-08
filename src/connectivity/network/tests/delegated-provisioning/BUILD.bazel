@@ -1,0 +1,68 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "delegated-provisioning-constants",
+    srcs = ["src/constants.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate_root = "src/constants.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
+        "//src/connectivity/lib/net-declare",
+    ],
+)
+
+fx_component_manifest(
+    name = "bootstrap-dhcpd-component_manifest",
+    component_name = "bootstrap-dhcpd",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/bootstrap-dhcpd.cml",
+)
+
+fx_component(
+    name = "bootstrap-dhcpd-component",
+    compiled_manifest = ":bootstrap-dhcpd-component_manifest",
+    visibility = ["//vendor/google:__subpackages__"],
+    deps = [":bootstrap-dhcpd-bin.packaged"],
+)
+
+rustc_binary(
+    name = "bootstrap-dhcpd-bin",
+    srcs = ["src/bootstrap_dhcpd.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    # Preserves GN output_name = "bootstrap_dhcpd_bin" through bazel2gn.
+    crate_name = "bootstrap_dhcpd_bin",
+    crate_root = "src/bootstrap_dhcpd.rs",
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        ":delegated-provisioning-constants",
+        "//sdk/fidl/fuchsia.net.dhcp:fuchsia.net.dhcp_rust",
+        "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bootstrap-dhcpd-bin.packaged",
+    binary = ":bootstrap-dhcpd-bin",
+    binary_name = "bootstrap_dhcpd_bin",
+)

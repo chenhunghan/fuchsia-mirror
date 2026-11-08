@@ -12,7 +12,7 @@ class Thread:
     id: int
     name: str = field(default="", compare=False)
     is_stopped: bool = field(default=False, compare=False)
-    process: "Process | None" = field(default=None, repr=False, compare=False)
+    process: Process | None = field(default=None, repr=False, compare=False)
 
     def resume(self) -> None:
         """Marks this thread as not stopped."""
@@ -25,6 +25,7 @@ class Process:
 
     id: int
     name: str = field(default="", compare=False)
+    target_id: int = field(default=1, compare=False)
     threads: dict[int, Thread] = field(
         default_factory=dict, repr=False, compare=False
     )

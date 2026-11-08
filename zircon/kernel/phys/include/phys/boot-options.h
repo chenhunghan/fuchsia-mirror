@@ -11,8 +11,7 @@
 #include <ktl/optional.h>
 #include <ktl/span.h>
 #include <ktl/string_view.h>
-
-#include "early-boot.h"
+#include <phys/runtime/early-boot.h>
 
 struct BootOptions;
 

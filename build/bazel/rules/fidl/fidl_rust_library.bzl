@@ -104,11 +104,16 @@ def _fidl_rust_library_flavor(flavor, name, fidl_library_name, fidl_ir_json, dep
     if flavor == "fdomain":
         library_deps.append("//src/lib/fdomain/client")
 
+    has_zx_dep = False
     for dep in deps:
         if Label(dep) == Label("//zircon/vdso/zx"):
+            has_zx_dep = True
             continue
 
         library_deps.append(_fidl_rust_flavor_label(dep, flavor))
+
+    if has_zx_dep:
+        library_deps.append("//sdk/rust/zx-types")
 
     if flavor != "common":
         library_deps.append(":" + _fidl_rust_flavor_label_name(name, "common"))

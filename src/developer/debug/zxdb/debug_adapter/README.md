@@ -1,4 +1,4 @@
-<!--* freshness: { reviewed: '2026-10-12' } *-->
+<!--* freshness: { reviewed: '2026-10-22' } *-->
 
 # Debug Adapter (`zxdb/debug_adapter`)
 
@@ -53,6 +53,10 @@ Public headers and subdirectories expose these DAP server and context types:
 - `zxdb::VariablesType`, `zxdb::VariablesRecord`: Scope categories (`kLocal`,
   `kArguments`, `kRegister`, `kChildVariable`) and variable reference table
   entries (`context.h`).
+- `zxdb::DataId`: Hardware breakpoint and watchpoint data ID encoder and parser
+  (`data_id.h`).
+- `zxdb::ToDapFrameCapture`: DAP tracepoint capture converter
+  (`type_conversions.h`).
 - `zxdb::AsyncBacktraceSubscription`, `zxdb::FormatAsyncTaskTree`,
   `dap::AsyncTaskNode`, `dap::AsyncBacktraceUpdate`: Subscription manager and
   DAP types for streaming async task trees (`async_backtrace_subscription.h`).
@@ -81,8 +85,12 @@ Callers and implementations must preserve these invariants:
   and their associated variable IDs.
 - `AsyncBacktraceSubscription` syncs and emits non-empty async task trees only
   when all threads in the process stop and the thread has stack frames.
-- `DebugAdapterContext` tracks and deletes only the breakpoints and filters that
-  it created, preserving user console breakpoints and startup filters.
+- A `zxdb.SetTracepoints` watch with a `dataId` applies only to the process
+  that the `dataId` names. A watch with only a raw `address` has no process, so
+  it applies to that address in every attached process.
+- `DebugAdapterContext` tracks and deletes only the breakpoints, tracepoints,
+  and filters that it created, preserving user console breakpoints, tracepoints,
+  and startup filters.
 
 ## Side Effects
 
@@ -95,11 +103,11 @@ Callers and implementations must preserve these invariants:
   which quits the `zxdb` `Console` (`console()->Quit()`).
 - `DebugAdapterContext` registers itself and `AsyncBacktraceSubscription` as
   observers on `Session`, `Thread`, `Process`, `Breakpoint`, and `System`. On
-  destruction, it deletes all DAP-created breakpoints and filters.
+  destruction, it deletes all DAP-created breakpoints, tracepoints, and filters.
 - Emits standard and custom DAP events (`InitializedEvent`, `ThreadEventZxdb`,
   `StoppedEvent`, `ProcessEvent`, `ExitedEvent`, `TerminatedEvent`,
-  `BreakpointEvent`, `InvalidatedEvent`, `AsyncBacktraceUpdate`) over the client
-  stream.
+  `BreakpointEvent`, `InvalidatedEvent`, `AsyncBacktraceUpdate`,
+  `ZxdbTracepointEvent`) over the client stream.
 - `GetElidedFrames` sets a `Process` kind to `Process::Kind::kTest` when
   `TestFailureStackMatcher` matches frames on the stack.
 - Reports `ConsoleType::Type::kDebugAdapter` to `zxdb` session analytics on

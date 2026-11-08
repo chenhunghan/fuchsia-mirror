@@ -142,7 +142,13 @@ class DriverRuntime final {
   template <typename Result>
   Result RunToCompletion(AsyncTask<Result> async_task) {
     AssertCurrentThreadIsInitialThread();
-    return RunPromise(std::move(async_task.promise_)).take_value();
+#if FUCHSIA_API_LEVEL_AT_LEAST(32)
+    async_dispatcher_t* dispatcher =
+        foreground_dispatcher_->driver_dispatcher().GetAlwaysOnDispatcher()->async_dispatcher();
+#else
+    async_dispatcher_t* dispatcher = foreground_dispatcher_->dispatcher();
+#endif
+    return RunPromiseOnDispatcher(std::move(async_task.promise_), dispatcher).take_value();
   }
 
   // Runs the foreground dispatcher until the given |fpromise::promise| completes, and returns the
@@ -215,6 +221,10 @@ class DriverRuntime final {
   // Returns |ZX_ERR_CANCELED| if it quit.
   zx_status_t RunInternal(zx::time deadline = zx::time::infinite(), bool once = false);
 
+  template <typename PromiseType>
+  PromiseType::result_type RunPromiseOnDispatcher(PromiseType promise,
+                                                  async_dispatcher_t* executor_dispatcher);
+
   template <typename Result, typename Callable>
   Result PerformBlockingWorkImpl(Callable&& work);
 
@@ -243,7 +253,13 @@ class DriverRuntime final {
 
 template <typename PromiseType>
 typename PromiseType::result_type DriverRuntime::RunPromise(PromiseType promise) {
-  async::Executor e(foreground_dispatcher_->dispatcher());
+  return RunPromiseOnDispatcher(std::move(promise), foreground_dispatcher_->dispatcher());
+}
+
+template <typename PromiseType>
+PromiseType::result_type DriverRuntime::RunPromiseOnDispatcher(
+    PromiseType promise, async_dispatcher_t* executor_dispatcher) {
+  async::Executor e(executor_dispatcher);
   std::optional<typename PromiseType::result_type> res;
   e.schedule_task(
       promise.then([&res](typename PromiseType::result_type& v) { res = std::move(v); }));
@@ -261,7 +277,13 @@ Result DriverRuntime::PerformBlockingWorkImpl(Callable&& work) {
   std::thread t([completer = std::move(bridge.completer),
                  work = std::forward<Callable>(work)]() mutable { completer.complete_ok(work()); });
   auto defer = fit::defer([&] { t.join(); });
-  return RunPromise(bridge.consumer.promise()).take_value();
+#if FUCHSIA_API_LEVEL_AT_LEAST(32)
+  async_dispatcher_t* dispatcher =
+      foreground_dispatcher_->driver_dispatcher().GetAlwaysOnDispatcher()->async_dispatcher();
+#else
+  async_dispatcher_t* dispatcher = foreground_dispatcher_->dispatcher();
+#endif
+  return RunPromiseOnDispatcher(bridge.consumer.promise(), dispatcher).take_value();
 }
 
 }  // namespace fdf_testing

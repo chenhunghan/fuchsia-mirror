@@ -65,14 +65,70 @@ LINT_PATTERNS = [
 
 findings = []
 
+
+def _emit(findings, category, severity, file, line, message, remediation=""):
+    findings.append({"source": "lint_config_parity", "category": category, "severity": severity, "file": file, "line": line, "message": message, "remediation": remediation})
+
+
+# Resolve effective change base when HEAD is already the task's migration commit (fallback for
+# runs outside planter, which exports PLANTER_RESOLVED_CHANGE_BASE).
+def resolve_change_base(raw_base):
+    base = (raw_base or "").strip() or "HEAD"
+    head_subj = git(["log", "-1", "--format=%s", "HEAD"]).strip()
+    if head_subj.startswith("[bazel_migration]"):
+        head_sha = git(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]).strip()
+        parent_sha = git(["rev-parse", "--verify", "--quiet", "HEAD~1^{commit}"]).strip()
+        base_sha = git(["rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"]).strip()
+        if parent_sha and (base == "HEAD" or base_sha == head_sha):
+            return "HEAD~1"
+    return base
+
+
 # Collect the unified diff of the task's change since PLANTER_CHANGE_BASE ("HEAD~1" when HEAD is
 # the task's own commit, "HEAD" when HEAD is unrelated upstream history).
-change_base = os.environ.get("PLANTER_CHANGE_BASE", "").strip() or "HEAD"
-diff_texts = [
-    git(["diff", "--unified=0", change_base]),
-]
+change_base = (
+    os.environ.get("PLANTER_RESOLVED_CHANGE_BASE", "").strip()
+    or resolve_change_base(os.environ.get("PLANTER_CHANGE_BASE", ""))
+)
+env_changed = os.environ.get("PLANTER_CHANGED_FILES", "").strip()
+if env_changed:
+    non_build = [p.strip() for p in env_changed.splitlines() if p.strip() and not is_build_file(p.strip())]
+    diff_texts = [git(["diff", "--unified=0", change_base, "--"] + non_build)] if non_build else []
+else:
+    diff_texts = [git(["diff", "--unified=0", change_base])]
+
+# Check whether a Rust source file belongs to a migrated package whose BUILD.bazel
+# applies `//build/config/rust/lints:clippy_warn_all` to a test target (in Bazel,
+# `clippy_warn_all` bakes `_CLIPPY_WARN_PRODUCTION` in, whereas GN `rustc_test`
+# omits `clippy_warn_production`).
+def has_clippy_warn_all_on_rust_test(rs_path):
+    if not rs_path.endswith(".rs"):
+        return False
+    pkg = os.path.dirname(rs_path).strip("/")
+    while pkg:
+        bzl_path = os.path.join(workdir, pkg, "BUILD.bazel")
+        if os.path.isfile(bzl_path):
+            try:
+                text = open(bzl_path, encoding="utf-8").read()
+            except OSError:
+                return False
+            has_warn_all = "//build/config/rust/lints:clippy_warn_all" in text
+            has_test = any(
+                tok in text
+                for tok in (
+                    "rustc_test(",
+                    "host_rustc_test(",
+                    "with_unit_tests",
+                    "with_host_unit_tests",
+                )
+            )
+            return has_warn_all and has_test
+        pkg = os.path.dirname(pkg).strip("/")
+    return False
+
 
 seen = set()
+seen_allowed_test_files = set()
 for text in diff_texts:
     cur_file = None
     new_line = 0
@@ -98,27 +154,38 @@ for text in diff_texts:
             continue
         for pkind, rx, why in LINT_PATTERNS:
             if pkind == kind and rx.search(body):
+                if has_clippy_warn_all_on_rust_test(cur_file):
+                    if cur_file not in seen_allowed_test_files:
+                        seen_allowed_test_files.add(cur_file)
+                        _emit(
+                            findings,
+                            "allowed_test_clippy_warn_all_edit",
+                            "INFO",
+                            cur_file,
+                            line,
+                            (
+                                f"Allowed clippy_warn_all test lint fix ({why}) in '{cur_file}' "
+                                "to preserve clippy coverage without disable_clippy = True."
+                            ),
+                        )
+                    continue
                 key = (cur_file, line, why)
                 if key in seen:
                     continue
                 seen.add(key)
-                findings.append({
-                    "source": "lint_config_parity",
-                    "category": "lint_driven_source_edit",
-                    "severity": "error",
-                    "file": cur_file,
-                    "line": line,
-                    "message": (
-                        f"Migration {why} in non-build file '{cur_file}': `{body.strip()[:120]}`. "
-                        "GN-to-Bazel migrations must not edit sources to silence lints/warnings."
-                    ),
-                    "remediation": (
-                        "Revert the source edit (git checkout $PLANTER_CHANGE_BASE -- <file>). "
-                        "Pre-existing lint findings are out of scope. If the Bazel build newly reports this "
-                        "lint, restore lint parity in BUILD.bazel (lint_config, rustc_flags, testonly, "
-                        "features) instead; if impossible, stop and report the blocker."
-                    ),
-                })
+                _emit(
+                    findings,
+                    "lint_driven_source_edit",
+                    "error",
+                    cur_file,
+                    line,
+                    f"Migration {why} in non-build file '{cur_file}': `{body.strip()[:120]}`. "
+                    "GN-to-Bazel migrations must not edit sources to silence lints/warnings.",
+                    "Revert the source edit (git checkout $PLANTER_CHANGE_BASE -- <file>). "
+                    "Pre-existing lint findings are out of scope. If the Bazel build newly reports this "
+                    "lint, restore lint parity in BUILD.bazel (lint_config, rustc_flags, testonly, "
+                    "features) instead; if impossible, stop and report the blocker.",
+                )
 
 # lint_config semantics check for BUILD.bazel files in the target package tree:
 # resolve custom lint_config labels (including through alias() chains and loaded .bzl
@@ -369,17 +436,74 @@ if target_dir:
         tree = parse_rel(rel)
         if tree is None:
             continue
+        raw_bzl = read_rel(rel) or ""
+        for idx, bzl_line in enumerate(raw_bzl.splitlines(), start=1):
+            if re.search(
+                r"#\s*@bazel2gn:raw_attribute:.*\bexclude_toolchain_tags\s*\+?=",
+                bzl_line,
+            ):
+                _emit(
+                    findings,
+                    "raw_attribute_for_supported_bazel2gn_tag",
+                    "error",
+                    rel,
+                    idx,
+                    (
+                        f"Line {idx} in {rel} uses `# @bazel2gn:raw_attribute:` to emit "
+                        "`exclude_toolchain_tags`, which `bazel2gn` supports natively."
+                    ),
+                    (
+                        'Use `tags = ["exclude_toolchain_tags=<tag>", ...]` (plus '
+                        "`target_compatible_with = HOST_OS_CONSTRAINTS` when host-only, "
+                        "or `disable_instrumentation = True` on `fx_cc_*` for "
+                        '`"instrumented"`) instead of `# @bazel2gn:raw_attribute:`. '
+                        "If the binary is wrapped by `bazel_host_tool` in BUILD.gn "
+                        "and marked `# @bazel2gn:skip`, remove the `raw_attribute`."
+                    ),
+                )
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
             rule_name = node.func.id if isinstance(node.func, ast.Name) else ""
             is_testonly = False
             lint_kw = None
+            disable_clippy_kw = None
+            target_name = "<target>"
             for kw in node.keywords:
-                if kw.arg == "testonly" and isinstance(kw.value, ast.Constant) and kw.value.value is True:
+                if kw.arg == "name" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                    target_name = kw.value.value
+                elif kw.arg == "testonly" and isinstance(kw.value, ast.Constant) and kw.value.value is True:
                     is_testonly = True
                 elif kw.arg == "lint_config":
                     lint_kw = kw
+                elif (
+                    kw.arg == "disable_clippy"
+                    and isinstance(kw.value, ast.Constant)
+                    and kw.value.value is True
+                ):
+                    disable_clippy_kw = kw
+            if disable_clippy_kw is not None:
+                base_gn = git(["show", f"{change_base}:{cur_pkg}/BUILD.gn"])
+                if not re.search(r"\bdisable_clippy\s*=\s*true\b", base_gn):
+                    _emit(
+                        findings,
+                        "unrequested_disable_clippy",
+                        "error",
+                        rel,
+                        getattr(disable_clippy_kw, "lineno", getattr(node, "lineno", 1)),
+                        (
+                            f"Target '{target_name}' in {rel} sets `disable_clippy = True`, "
+                            f"but `{cur_pkg}/BUILD.gn` did not set `disable_clippy = true` at "
+                            "the change base. Disabling clippy loses lint coverage during migration."
+                        ),
+                        (
+                            "Remove `disable_clippy = True` from BUILD.bazel. If `clippy_warn_all` "
+                            "on a Rust test target in Bazel surfaces a `_CLIPPY_WARN_PRODUCTION` "
+                            "lint (such as `clippy::redundant_clone`, which GN `rustc_test` "
+                            "omitted), fix the lint or add a narrow `#[allow(clippy::<lint>)]` "
+                            "in the test source file instead of disabling clippy on the target."
+                        ),
+                    )
             if lint_kw is None:
                 continue
             is_test_target = is_testonly or rule_name in ("rustc_test", "rust_test")
@@ -395,21 +519,17 @@ if target_dir:
                     continue
                 target_res = resolve_lint_config_target(lpkg, lname)
                 if not target_res or target_res[2]["rule"] != "rust_lint_config":
-                    findings.append({
-                        "source": "lint_config_parity",
-                        "category": "lint_config_semantics",
-                        "severity": "warning",
-                        "file": rel,
-                        "line": lineno,
-                        "message": (
-                            f"lint_config = \"{label}\" does not resolve to a `rust_lint_config` target. "
-                            "Bazel lint_config REPLACES the macro default lint set while GN appends to it."
-                        ),
-                        "remediation": (
-                            "Point `lint_config` at a valid `rust_lint_config` target (or pre-existing alias) "
-                            "that includes the default clippy and rustc lint sets from //build/config/rust/lints."
-                        ),
-                    })
+                    _emit(
+                        findings,
+                        "lint_config_semantics",
+                        "warning",
+                        rel,
+                        lineno,
+                        f'lint_config = "{label}" does not resolve to a `rust_lint_config` target. '
+                        "Bazel lint_config REPLACES the macro default lint set while GN appends to it.",
+                        "Point `lint_config` at a valid `rust_lint_config` target (or pre-existing alias) "
+                        "that includes the default clippy and rustc lint sets from //build/config/rust/lints.",
+                    )
                     continue
                 def_pkg, def_name, tinfo = target_res
                 clippy_branches = tinfo.get("clippy") or []
@@ -428,23 +548,19 @@ if target_dir:
                         missing_desc.append(f"clippy lints ({', '.join(missing_clippy[:5])})")
                     if missing_rustc:
                         missing_desc.append(f"rustc lints ({', '.join(missing_rustc[:5])})")
-                    findings.append({
-                        "source": "lint_config_parity",
-                        "category": "lint_config_semantics",
-                        "severity": "warning",
-                        "file": rel,
-                        "line": lineno,
-                        "message": (
-                            f"lint_config = \"{label}\" (resolving to //{def_pkg}:{def_name}) omits default "
-                            f"{' and '.join(missing_desc)} from //build/config/rust/lints. "
-                            "Bazel lint_config REPLACES the macro default lint set while GN appends to it, "
-                            "so omitting the defaults changes the effective lint set."
-                        ),
-                        "remediation": (
-                            f"Compose `//{def_pkg}:{def_name}` with the default clippy/rustc lint constants from "
-                            "//build/config/rust/lints so the Bazel lint set matches GN's append semantics."
-                        ),
-                    })
+                    _emit(
+                        findings,
+                        "lint_config_semantics",
+                        "warning",
+                        rel,
+                        lineno,
+                        f'lint_config = "{label}" (resolving to //{def_pkg}:{def_name}) omits default '
+                        f"{' and '.join(missing_desc)} from //build/config/rust/lints. "
+                        "Bazel lint_config REPLACES the macro default lint set while GN appends to it, "
+                        "so omitting the defaults changes the effective lint set.",
+                        f"Compose `//{def_pkg}:{def_name}` with the default clippy/rustc lint constants from "
+                        "//build/config/rust/lints so the Bazel lint set matches GN's append semantics.",
+                    )
 
 print(json.dumps(findings, indent=2))
 PYEOF

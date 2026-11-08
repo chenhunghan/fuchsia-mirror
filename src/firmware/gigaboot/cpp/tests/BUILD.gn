@@ -18,15 +18,12 @@ test("gigaboot_unittests") {
     "mock_boot_service.cc",
     "mock_boot_service.h",
     "mock_efi_variables.h",
-
-    # TODO(https://fxbug.dev/42081851) Re-enable this test once clang front end
-    # bug is fixed.
-    # "network_test.cc",
-
+    "network_test.cc",
+    "protocol_test.cc",
     "tss2_uefi_tests.cc",
     "utils_test.cc",
   ]
-  public_deps = [
+  deps = [
     "..:lib",
     "//sdk/lib/fit",
     "//src/firmware/gigaboot/lib:shared",

@@ -5,7 +5,7 @@
 use fho::{FhoEnvironment, TryFromEnv};
 use std::net::SocketAddr;
 use std::ops::Deref;
-use target_behavior::{ConnectionBehavior, target_interface};
+use target_behavior::target_interface;
 
 /// Holder struct for the target's SshAddr.
 #[derive(Debug, Clone)]
@@ -15,9 +15,8 @@ impl TryFromEnv for SshAddrHolder {
     type Error = ffx_command_error::Error;
     async fn try_from_env(env: &FhoEnvironment) -> std::result::Result<Self, Self::Error> {
         let target_env = target_interface(env);
-        let behavior = target_env.init_connection_behavior(env.environment_context()).await?;
-        let ConnectionBehavior::Direct(ref dc) = *behavior;
-        let addr = dc
+        let connector = target_env.init_connection_behavior(env.environment_context()).await?;
+        let addr = connector
             .resolution()
             .await
             .map_err(|e| e.into_command_error())?

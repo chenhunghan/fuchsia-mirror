@@ -9,11 +9,17 @@ import("//build/rust/config.gni")
 import("//build/toolchain/toolchain_environment.gni")
 import("//build/zircon/c_utils.gni")
 import("//zircon/kernel/kernel_rust_mod.gni")
-import("//zircon/kernel/params.gni")
 import("//zircon/kernel/phys/kernel_elf_binary.gni")
 
 _kernel_executable_deps = [
+  # main.rs always mounts the kernel's ksync raw lock implementations.
+  "//zircon/kernel/lib/ksync:ksync-rs",
   "//zircon/kernel/lib/syscalls:syscalls-rs",
+
+  # main.rs always compiles lib/userabi, and its public_configs
+  # (VDSO_CODE_PATH, VDSO_MAX_PAGE_SIZE) must reach the kernel crate, which
+  # needs a public_deps path from here.
+  "//zircon/kernel/lib/userabi:userabi-rs",
   "//zircon/kernel/top",
 ]
 
@@ -104,6 +110,7 @@ template("kernel_executable") {
     crate_root = sources[0]
     rustflags = [
       "--edition=2024",
+      "--cfg=is_kernel",
 
       # Disambiguate rustc's intermediate object filenames across kernel
       # executables that share crate name and source root.
@@ -141,6 +148,9 @@ template("kernel_executable") {
       "--crate-type=$crate_type",
       "--crate-name=$crate_name",
       "-Cmetadata=clippy",
+
+      # See the comment on -Znext-solver in //build/rust/rust_auxiliary.gni.
+      "-Znext-solver=coherence",
     ]
 
     script = "//build/rust/clippy_wrapper.py"
@@ -184,7 +194,7 @@ template("kernel_executable") {
 
   kernel_elf_binary(main_target) {
     forward_variables_from(_crate_vars, "*")
-    deps += [ "//zircon/kernel/phys:physboot.kernel" ]
+    deps += [ "//zircon/kernel/phys/physboot:physboot.kernel" ]
 
     install_name = "vmzircon"
 

@@ -25,6 +25,7 @@
 #include "src/cobalt/bin/app/current_channel_provider.h"
 #include "src/cobalt/bin/app/diagnostics_impl.h"
 #include "src/cobalt/bin/app/key_fetcher.h"
+#include "src/cobalt/bin/app/network_reachability_watcher.h"
 #include "src/cobalt/bin/app/process_lifecycle_impl.h"
 #include "src/cobalt/bin/app/user_consent_watcher.h"
 #include "src/cobalt/bin/utils/clock.h"
@@ -112,12 +113,13 @@ class CobaltApp {
       const std::string& product_name, const std::string& board_name, const std::string& version,
       std::unique_ptr<DiagnosticsImpl> diagnostics);
 
-  // The DynamicEncryptedMessageMakers installed on |target_pipeline| (whose ownership
-  // is transferred to CobaltService) must outlive the returned KeyFetcher.
+  // |diagnostics| must be non-null and, along with the DynamicEncryptedMessageMakers
+  // installed on |target_pipeline| (whose ownership is transferred to CobaltService),
+  // must outlive the returned KeyFetcher.
   static std::unique_ptr<KeyFetcher> ConfigureKeyRotation(
       async_dispatcher_t* dispatcher, TargetPipelineInterface* target_pipeline,
       std::unique_ptr<lib::HTTPClient> http_client, util::SystemClockInterface* encryption_clock,
-      std::string key_cache_dir, std::string public_keys_url);
+      DiagnosticsImpl* diagnostics, std::string key_cache_dir, std::string public_keys_url);
 
   CobaltApp(std::unique_ptr<sys::ComponentContext> context, async_dispatcher_t* dispatcher,
             fidl::InterfaceRequest<fuchsia::process::lifecycle::Lifecycle> lifecycle_handle,
@@ -143,11 +145,16 @@ class CobaltApp {
   // C++ destroys member variables in reverse declaration order:
   // - validated_clock_ and encryption_clock_ must be declared before cobalt_service_
   //   so they outlive cobalt_service_ and its DynamicEncryptedMessageMaker instances.
-  // - cobalt_service_ owns the DynamicEncryptedMessageMakers referenced by key_fetcher_.
+  // - cobalt_service_ owns the DiagnosticsImpl and the DynamicEncryptedMessageMakers
+  //   referenced by key_fetcher_ and its status observer.
   // - key_fetcher_ must be declared after cobalt_service_ so key_fetcher_ is destroyed
   //   first, canceling scheduled key updates before cobalt_service_ is torn down.
+  // - network_reachability_watcher_ must be declared after key_fetcher_ so
+  //   network_reachability_watcher_ is destroyed first, stopping reachability watch
+  //   callbacks before key_fetcher_ is torn down.
   std::unique_ptr<CobaltServiceInterface> cobalt_service_;
   std::unique_ptr<KeyFetcher> key_fetcher_;
+  std::unique_ptr<NetworkReachabilityWatcher> network_reachability_watcher_;
 
   std::unique_ptr<CobaltControllerImpl> controller_impl_;
   fidl::BindingSet<fuchsia::cobalt::Controller> controller_bindings_;

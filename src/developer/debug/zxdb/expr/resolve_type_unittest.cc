@@ -53,6 +53,12 @@ TEST(ResolveType, GetConcreteType) {
   EXPECT_EQ(def.get(), result_type.get());
   result_type = GetConcreteType(find_name_context, const_forward_decl.get());
   EXPECT_EQ(def.get(), result_type.get());
+
+  // String-based lookup should also resolve to the concrete definition and return null for unknown
+  // or unparsable names.
+  EXPECT_EQ(def.get(), FindTypeDefinition(find_name_context, kMyStructName).get());
+  EXPECT_EQ(nullptr, FindTypeDefinition(find_name_context, "NonExistentStruct").get());
+  EXPECT_EQ(nullptr, FindTypeDefinition(find_name_context, "").get());
 }
 
 // Given this code:

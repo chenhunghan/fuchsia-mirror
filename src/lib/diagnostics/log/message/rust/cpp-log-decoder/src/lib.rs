@@ -4,48 +4,14 @@
 use bumpalo::Bump;
 use diagnostics_log_encoding;
 use diagnostics_log_encoding::parse::ParseError;
+use diagnostics_message as message;
 use diagnostics_message::error::MessageError;
 use diagnostics_message::ffi::{CPPMessageFormatter, CppArray, LogMessage};
-use diagnostics_message::{self as message, MonikerWithUrl};
 use std::ffi::CString;
 use std::ops::{Deref, DerefMut};
 use std::os::raw::c_char;
 use std::ptr::NonNull;
 use thiserror::Error;
-
-/// # Safety
-///
-/// Same as for `std::slice::from_raw_parts`. Summarizing in terms of this API:
-///
-/// - `msg` must be valid for reads for `size`, and it must be properly aligned.
-/// - `msg` must point to `size` consecutive u8 values.
-/// - The `size` of the slice must be no larger than `isize::MAX`, and adding
-///   that size to data must not "wrap around" the address space. See the safety
-///   documentation of pointer::offset.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn fuchsia_decode_log_message_to_json(
-    msg: *const u8,
-    size: usize,
-) -> *mut c_char {
-    if msg.is_null() || size == 0 {
-        return std::ptr::null_mut();
-    }
-    // SAFETY: caller guarantees msg is valid for reads of size bytes.
-    let managed_ptr = unsafe { std::slice::from_raw_parts(msg, size) };
-    let Ok(data) = message::from_structured(
-        MonikerWithUrl { moniker: "test_moniker".try_into().unwrap(), url: "".into() },
-        managed_ptr,
-    ) else {
-        return std::ptr::null_mut();
-    };
-    let Ok(item) = serde_json::to_string(&data) else {
-        return std::ptr::null_mut();
-    };
-    let Ok(c_string) = CString::new(format!("[{}]", item)) else {
-        return std::ptr::null_mut();
-    };
-    c_string.into_raw()
-}
 
 /// LogMessages struct containing log messages
 /// It is created by calling fuchsia_decode_log_messages_to_struct,
@@ -205,16 +171,6 @@ fn fuchsia_decode_log_messages_to_struct_internal_legacy<'a>(
     }
 
     Ok(messages)
-}
-
-/// # Safety
-///
-/// This should only be called with a pointer obtained through
-/// `fuchsia_decode_log_message_to_json`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn fuchsia_free_decoded_log_message(msg: *mut c_char) {
-    let str_to_free = unsafe { CString::from_raw(msg) };
-    let _freer = str_to_free;
 }
 
 /// # Safety

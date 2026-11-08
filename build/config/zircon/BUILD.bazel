@@ -279,6 +279,7 @@ compiler_build_flags(
     visibility = ["//visibility:public"],
 )
 
+# NOTE: This assumes is_gcc=false in Bazel.
 compiler_build_flags(
     name = "no-synthetic-sections",
     # These may be necessary to override earlier explicit switches passed by
@@ -287,6 +288,7 @@ compiler_build_flags(
         "--build-id=none",  # Don't generate .note.gnu.build-id section.
         "--no-eh-frame-hdr",  # Don't generate .eh_frame_hdr section.
         "--no-dynamic-linker",  # Don't generate .interp section.
+        "--no-debug-names",  # Don't generate .debug_names section when using -r.
     ],
     visibility = ["//visibility:public"],
 )

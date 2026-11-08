@@ -403,11 +403,8 @@ if (current_toolchain == default_toolchain) {
       ":invoke_helpdoc",
       "//build/bazel/bazel_sdk/docs",
       "//bundles/drivers:create_all_drivers_doc",
-      "//tools/doc_checker:doc_checker_host_tool($host_toolchain)",
+      "//tools/doc_checker:doc_checker_bin($host_toolchain)",
     ]
-    _doc_checker_dir = get_label_info(
-            "//tools/doc_checker::doc_checker_host_tool($host_toolchain)",
-            "target_out_dir")
     _manifests = get_target_outputs(":generated_docs")
     inputs = _manifests
     inputs += [

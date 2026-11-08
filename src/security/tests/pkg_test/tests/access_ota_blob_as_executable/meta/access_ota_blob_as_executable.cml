@@ -58,7 +58,7 @@
         // Production non-package delivery components.
         {
             name: "netstack",
-            url: "#meta/netstack3.cm",
+            url: "netstack#meta/netstack3.cm",
         },
         {
             name: "http-client",
@@ -116,7 +116,7 @@
         // Control storage capabilities of this realm. See
         // `offer: [{from: "self"}]` for routing details.
         {
-            protocol: "fuchsia.sys2.StorageAdmin",
+            protocol: "fuchsia.component.StorageAdmin",
             from: "#data",
         },
 
@@ -165,6 +165,7 @@
                 "fuchsia.pkgcache.BlobFetchConcurrencyLimit",
                 "fuchsia.pkgcache.BlobNetworkBodyTimeoutSeconds",
                 "fuchsia.pkgcache.BlobNetworkHeaderTimeoutSeconds",
+                "fuchsia.pkgcache.PostCommitGcEarliestBootSeconds",
                 "fuchsia.pkgcache.UseDriverBlobPaging",
             ],
             from: "void",

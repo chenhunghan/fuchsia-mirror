@@ -15,7 +15,7 @@
     children: [
         {
             name: "netstack",
-            url: "#meta/netstack3.cm",
+            url: "netstack#meta/netstack3.cm",
         },
     ],
 }

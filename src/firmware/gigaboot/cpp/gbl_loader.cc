@@ -7,7 +7,6 @@
 #include <zircon/assert.h>
 
 #include <gbl/gbl_efi_protocols.h>
-#include <phys/efi/main.h>
 
 #include "backends.h"
 #include "boot_zbi_items.h"

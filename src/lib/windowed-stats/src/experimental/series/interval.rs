@@ -414,8 +414,6 @@ impl Default for SamplingProfile {
 
 impl Display for SamplingProfile {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        use itertools::Position::{First, Last, Middle, Only};
-
         // Avoid `join` and other sources of intermediate allocations.
         write!(
             formatter,
@@ -424,10 +422,11 @@ impl Display for SamplingProfile {
             self.duration().into_quanta().into_nearest_unit_display(),
         )?;
         for (pos, interval) in self.0.iter().with_position() {
-            match pos {
-                First | Middle => write!(formatter, "{} + ", interval),
-                Only | Last => write!(formatter, "{}", interval),
-            }?;
+            if pos.is_last() {
+                write!(formatter, "{}", interval)?;
+            } else {
+                write!(formatter, "{} + ", interval)?;
+            }
         }
         Ok(())
     }

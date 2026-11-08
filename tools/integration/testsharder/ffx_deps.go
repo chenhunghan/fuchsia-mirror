@@ -16,7 +16,9 @@ func AddFFXDeps(s *Shard, buildDir string, tools build.Tools) error {
 	if len(s.Tests) == 0 {
 		return fmt.Errorf("shard %s has no tests", s.Name)
 	}
-	subtools := []string{"package", "product", "test", "log", "assembly", "monitor", "usb-driver", "forward"}
+	// botanist runs `ffx repository server` to serve packages to the target,
+	// so ffx-repository is needed when it is built as a separate subtool.
+	subtools := []string{"package", "product", "test", "log", "assembly", "monitor", "usb-driver", "forward", "repository"}
 	if s.Env.TargetsEmulator() {
 		subtools = append(subtools, "emu")
 	}

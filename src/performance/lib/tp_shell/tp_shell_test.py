@@ -4,16 +4,208 @@
 
 import importlib.resources
 import os
+import tempfile
 import time
 import unittest
 import unittest.mock
+from typing import Any
 
-from tp_shell import FuchsiaPlatformDelegate, PerfettoTraceProcessor
+from perfetto.trace_processor.api import TraceProcessor as PerfettoTP
+from tp_shell import (
+    FuchsiaPlatformDelegate,
+    PerfettoTraceProcessor,
+    TraceProcessorStartupError,
+    tp_server,
+)
+from tp_shell.tp_server import TraceProcessorServer
+
+
+def _write_fake_shell(directory: str, script_body: str) -> str:
+    """Writes an executable shell script standing in for trace_processor_shell."""
+    path = os.path.join(directory, "fake_tp_shell.sh")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("#!/bin/sh\n" + script_body)
+    os.chmod(path, 0o755)
+    return path
+
+
+class TraceProcessorServerTest(unittest.TestCase):
+    def test_serves_trace_and_cleans_up(self) -> None:
+        """Tests that the server accepts queries and close() kills it and removes the socket."""
+        trace = importlib.resources.files("test_data").joinpath(
+            "perfetto_golden.fxt"
+        )
+        shell = importlib.resources.files("tp_shell.bin").joinpath(
+            "trace_processor_shell"
+        )
+        with (
+            importlib.resources.as_file(trace) as trace_path,
+            importlib.resources.as_file(shell) as tp_shell_path,
+            unittest.mock.patch(
+                "perfetto.trace_processor.api.PLATFORM_DELEGATE",
+                lambda: FuchsiaPlatformDelegate(str(tp_shell_path)),
+            ),
+        ):
+            os.chmod(tp_shell_path, 0o755)
+            with TraceProcessorServer(
+                str(tp_shell_path), str(trace_path)
+            ) as server:
+                self.assertTrue(server.running)
+                self.assertTrue(os.path.exists(server.socket_path))
+                client = PerfettoTP(remote=server.socket_path)
+                try:
+                    rows = list(
+                        client.query("SELECT count(*) AS cnt FROM slice")
+                    )
+                    self.assertGreater(rows[0].cnt, 0)
+                finally:
+                    client.close()
+
+            self.assertFalse(server.running)
+            self.assertFalse(
+                os.path.exists(os.path.dirname(server.socket_path))
+            )
+            # close() is idempotent.
+            server.close()
+
+    def test_accepts_relative_paths(self) -> None:
+        """Tests that relative shell and trace paths resolve against the caller's directory."""
+        trace = importlib.resources.files("test_data").joinpath(
+            "perfetto_golden.fxt"
+        )
+        shell = importlib.resources.files("tp_shell.bin").joinpath(
+            "trace_processor_shell"
+        )
+        with (
+            importlib.resources.as_file(trace) as trace_path,
+            importlib.resources.as_file(shell) as tp_shell_path,
+            unittest.mock.patch(
+                "perfetto.trace_processor.api.PLATFORM_DELEGATE",
+                lambda: FuchsiaPlatformDelegate(str(tp_shell_path)),
+            ),
+        ):
+            os.chmod(tp_shell_path, 0o755)
+            with TraceProcessorServer(
+                os.path.relpath(tp_shell_path), os.path.relpath(trace_path)
+            ) as server:
+                client = PerfettoTP(remote=server.socket_path)
+                try:
+                    rows = list(
+                        client.query("SELECT count(*) AS cnt FROM slice")
+                    )
+                    self.assertGreater(rows[0].cnt, 0)
+                finally:
+                    client.close()
+
+    def test_startup_failure_raises_and_cleans_up(self) -> None:
+        """Tests that a shell that exits early raises and leaves nothing behind."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            fake_shell = _write_fake_shell(
+                tmp_dir, "echo 'simulated fatal error' >&2\nexit 2\n"
+            )
+            socket_dirs: list[str] = []
+            real_temporary_directory = tempfile.TemporaryDirectory
+
+            def tracking_temporary_directory(
+                *args: Any, **kwargs: Any
+            ) -> tempfile.TemporaryDirectory[str]:
+                d = real_temporary_directory(*args, **kwargs)
+                socket_dirs.append(d.name)
+                return d
+
+            with unittest.mock.patch(
+                "tp_shell.tp_server.tempfile.TemporaryDirectory",
+                side_effect=tracking_temporary_directory,
+            ):
+                with self.assertRaises(TraceProcessorStartupError) as ctx:
+                    TraceProcessorServer(fake_shell, "unused.fxt")
+            self.assertEqual(ctx.exception.exit_code, 2)
+            self.assertTrue(socket_dirs)
+            for socket_dir in socket_dirs:
+                self.assertFalse(os.path.exists(socket_dir))
+
+    def test_socket_dir_prefers_xdg_runtime_dir(self) -> None:
+        """Tests that the socket goes under $XDG_RUNTIME_DIR when it is usable."""
+        if not os.access("/tmp", os.W_OK):
+            self.skipTest("needs a short writable directory under /tmp")
+        with tempfile.TemporaryDirectory(dir="/tmp") as runtime_dir:
+            with unittest.mock.patch.dict(
+                os.environ, {"XDG_RUNTIME_DIR": runtime_dir}
+            ):
+                socket_dir = tp_server._make_socket_dir()
+            with socket_dir:
+                self.assertEqual(os.path.dirname(socket_dir.name), runtime_dir)
+
+    def test_socket_dir_skips_missing_and_too_long_dirs(self) -> None:
+        """Tests that unwritable dirs and dirs that make the socket path too long are skipped."""
+        if not os.access("/tmp", os.W_OK):
+            self.skipTest("needs a writable /tmp as the fallback")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            missing_dir = os.path.join(tmp_dir, "missing")
+            long_dir = os.path.join(tmp_dir, *(["d" * 40] * 3))
+            os.makedirs(long_dir)
+            with (
+                unittest.mock.patch.dict(
+                    os.environ, {"XDG_RUNTIME_DIR": missing_dir}
+                ),
+                unittest.mock.patch(
+                    "tp_shell.tp_server.tempfile.gettempdir",
+                    return_value=long_dir,
+                ),
+            ):
+                socket_dir = tp_server._make_socket_dir()
+            with socket_dir:
+                self.assertEqual(os.path.dirname(socket_dir.name), "/tmp")
+            # The rejected too-long directory must not be left behind.
+            self.assertEqual(os.listdir(long_dir), [])
+
+    def test_socket_dir_raises_when_no_dir_is_usable(self) -> None:
+        """Tests that an error naming every candidate is raised if none is usable."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            candidates = [
+                os.path.join(tmp_dir, name)
+                for name in ("xdg", "tmp", "slash_tmp")
+            ]
+            with (
+                unittest.mock.patch.dict(
+                    os.environ, {"XDG_RUNTIME_DIR": candidates[0]}
+                ),
+                unittest.mock.patch(
+                    "tp_shell.tp_server.tempfile.gettempdir",
+                    return_value=candidates[1],
+                ),
+                unittest.mock.patch(
+                    "tp_shell.tp_server._FALLBACK_SOCKET_PARENT_DIR",
+                    candidates[2],
+                ),
+            ):
+                with self.assertRaises(OSError) as ctx:
+                    tp_server._make_socket_dir()
+            for candidate in candidates:
+                self.assertIn(candidate, str(ctx.exception))
+
+    def test_startup_timeout_kills_shell(self) -> None:
+        """Tests that a shell that never becomes ready is killed after the timeout."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            pid_file = os.path.join(tmp_dir, "pid")
+            # Records its pid, then blocks forever without printing the
+            # readiness line.
+            fake_shell = _write_fake_shell(
+                tmp_dir, f"echo $$ > {pid_file}\nexec tail -f /dev/null\n"
+            )
+            with self.assertRaises(TimeoutError):
+                TraceProcessorServer(
+                    fake_shell, "unused.fxt", startup_timeout_s=0.5
+                )
+            with open(pid_file, encoding="utf-8") as f:
+                pid = int(f.read())
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
 
 
 class TpShellTest(unittest.TestCase):
     def test_single_query_and_cleanup(self) -> None:
-        """Tests that a single query works and the background process is cleaned up."""
+        """Tests that a single query works and the processor is unusable after close."""
         source = importlib.resources.files("test_data").joinpath(
             "perfetto_golden.fxt"
         )
@@ -27,13 +219,27 @@ class TpShellTest(unittest.TestCase):
                 tables = tp.get_tables()
                 self.assertIn("slice", tables)
 
-                # Check that process is alive inside the context.
                 self.assertTrue(tp._finalizer.alive)
 
-            # Check that process is cleaned up after exiting context.
             self.assertFalse(tp._finalizer.alive)
             with self.assertRaises(RuntimeError):
                 tp.run_query("SELECT count(*) as cnt FROM slice")
+
+    def test_startup_failure_raises(self) -> None:
+        """Tests that a shell that fails to load the trace raises a startup error."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            fake_shell = _write_fake_shell(
+                tmp_dir, "echo 'simulated fatal error' >&2\nexit 2\n"
+            )
+            # PerfettoTraceProcessor requires the trace file to exist; the
+            # fake shell never reads it.
+            trace_file = os.path.join(tmp_dir, "unused.fxt")
+            with open(trace_file, "wb"):
+                pass
+
+            with self.assertRaises(TraceProcessorStartupError) as ctx:
+                PerfettoTraceProcessor(trace_file, tp_shell_path=fake_shell)
+            self.assertEqual(ctx.exception.exit_code, 2)
 
     def test_multiple_queries_are_fast(self) -> None:
         """Tests that running multiple queries is fast, proving a persistent connection."""
@@ -76,6 +282,28 @@ class TpShellTest(unittest.TestCase):
                 event_names = [r["name"] for r in results]
                 expected_names = ["example_duration"] * 20
                 self.assertEqual(event_names, expected_names)
+
+    def test_query_rows_types_and_columns(self) -> None:
+        """Tests that query_rows returns typed tuples and column names lazily."""
+        source = importlib.resources.files("test_data").joinpath(
+            "perfetto_golden.fxt"
+        )
+        with importlib.resources.as_file(source) as trace_path:
+            with PerfettoTraceProcessor(str(trace_path)) as tp:
+                cols, rows = tp.query_rows(
+                    "SELECT 42 AS int_col, 3.14 AS float_col, 'hello' AS str_col, NULL AS null_col"
+                )
+                self.assertEqual(
+                    cols, ("int_col", "float_col", "str_col", "null_col")
+                )
+                row_list = list(rows)
+                self.assertEqual(len(row_list), 1)
+                first_row = row_list[0]
+                self.assertEqual(first_row, (42, 3.14, "hello", None))
+                self.assertIsInstance(first_row[0], int)
+                self.assertIsInstance(first_row[1], float)
+                self.assertIsInstance(first_row[2], str)
+                self.assertIsNone(first_row[3])
 
     @unittest.mock.patch("urllib.request.urlopen")
     def test_http_uri_resolver_timeout(

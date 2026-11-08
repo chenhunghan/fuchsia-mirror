@@ -45,6 +45,7 @@ if (is_linux) {
     # not useful to run it on Fuchsia because Fuchsia's getpid()
     # function does not return a real process ID.
     "getpid.cc",
+    "prctl.cc",
     "process_spawn_posix.cc",
     "unshare.cc",
   ]
@@ -166,7 +167,6 @@ executable("no_op_executable") {
   testonly = true
   sources = [ "no_op_executable.cc" ]
   deps = []
-  public_deps = []
   emit_tool_path = false
 }
 
@@ -342,8 +342,11 @@ if (host_os == "linux" && !is_asan) {
     "malloc.cc",
     "memcpy.cc",
     "null.cc",
+    "prctl.cc",
+    "pthreads.cc",
     "random_memcpy.cc",
     "starnix_filesystem.cc",
+    "starnix_mm.cc",
     "starnix_tracefs.cc",
     "stdcompat.cc",
     "unshare.cc",
@@ -459,16 +462,17 @@ group("tests") {
 
   if (host_os == "linux") {
     deps += [ ":fuchsia_microbenchmarks_host($host_toolchain)" ]
+  }
+}
 
-    # NOTE: Minfs does not support the POSIX attributes required to run Starnix.
-    # TODO(https://fxbug.dev/359323478): Figure out a better way to disable these tests on Minfs
-    # without relying on a global GN argument.
-    if (!is_asan && data_filesystem_format != "minfs") {
-      deps += [
-        ":starnix_microbenchmarks_perftestmode",
-        ":starnix_microbenchmarks_unittestmode",
-      ]
-    }
+group("starnix_tests") {
+  testonly = true
+  deps = []
+  if (host_os == "linux" && !is_asan) {
+    deps += [
+      ":starnix_microbenchmarks_perftestmode",
+      ":starnix_microbenchmarks_unittestmode",
+    ]
   }
 }
 

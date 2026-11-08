@@ -12,8 +12,20 @@ async fn run_reverser(
     let builder = RealmBuilder::new().await?;
     let reverser = builder.add_child("reverser", "#meta/reverser.cm", ChildOptions::new()).await?;
 
-    builder.init_mutable_config_from_package(&reverser).await?;
-    builder.set_config_value(&reverser, "switch_case", switch_case.into()).await?;
+    builder
+        .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+            name: "fuchsia.examples.reverser.SwitchCase".parse().unwrap(),
+            value: switch_case.into(),
+        }))
+        .await?;
+    builder
+        .add_route(
+            Route::new()
+                .capability(Capability::configuration("fuchsia.examples.reverser.SwitchCase"))
+                .from(Ref::self_())
+                .to(&reverser),
+        )
+        .await?;
 
     builder
         .add_route(

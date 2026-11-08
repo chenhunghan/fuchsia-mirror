@@ -26,7 +26,10 @@ package(default_applicable_licenses = ["//:license"])
 cml_shard(
     name = "hyper.shard",
     shard = "hyper.shard.cml",
-    visibility = ["//src/connectivity/policy/http-client:__pkg__"],
+    visibility = [
+        "//src/connectivity/policy/http-client:__pkg__",
+        "//src/sys/time/httpsdate_time_source:__pkg__",
+    ],
 )
 
 rustc_library(
@@ -96,9 +99,8 @@ rustc_library(
     }),
 )
 
-# @bazel2gn:raw_attribute:output_name = "fuchsia_hyper_lib_test"
 rustc_test(
-    name = "fuchsia-hyper_test",
+    name = "fuchsia_hyper_lib_test",
     crate = ":fuchsia-hyper",
     edition = "2024",
     deps = [
@@ -116,13 +118,13 @@ rustc_test(
 
 wrap_host_rust_test(
     name = "fuchsia-hyper_host_test",
-    binary_name = "fuchsia-hyper_test",
+    binary_name = "fuchsia_hyper_lib_test",
 )
 
 fx_packaged_binary(
     name = "fuchsia-hyper_test_packaged_bin",
     testonly = True,
-    binary = ":fuchsia-hyper_test",
+    binary = ":fuchsia_hyper_lib_test",
     binary_name = "fuchsia_hyper_lib_test",
 )
 
@@ -141,11 +143,12 @@ fx_component_manifest(
 fx_test_component(
     name = "fuchsia-hyper-lib-test",
     compiled_manifest = ":fuchsia-hyper-lib-test-manifest",
-    component_name = "fuchsia-hyper-lib-test",
     test_type = "system",
     deps = [":fuchsia-hyper_test_packaged_bin"],
 )
 
+# GN copy is hand-written in BUILD.gn because it depends on `//src/connectivity/network/netstack3:component-for-tests`, which has no Bazel build yet.
+# @bazel2gn:skip
 fx_package(
     name = "fuchsia-hyper-tests-pkg",
     package_name = "fuchsia-hyper-tests",

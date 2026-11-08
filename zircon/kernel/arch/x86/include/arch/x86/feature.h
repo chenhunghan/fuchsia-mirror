@@ -12,13 +12,12 @@
 #include <zircon/compiler.h>
 
 #include <arch/x86.h>
+#include <arch/x86/feature_ffi.h>
 #include <arch/x86/idle_states.h>
 
 namespace cpu_id {
 class CpuId;
 }  // namespace cpu_id
-
-class MsrAccess;
 
 #define MAX_SUPPORTED_CPUID (0x17)
 #define MAX_SUPPORTED_CPUID_HYP (0x40000001)
@@ -66,6 +65,7 @@ static_assert(sizeof(x86_cpuid_bit) == 8);
 #define X86_CPUID_BIT(leaf, word, bit) \
   (struct x86_cpuid_bit) { (enum x86_cpuid_leaf_num)(leaf), (word), (bit) }
 
+extern "C" {
 /* Invoked on each CPU prior to lk_main being called. */
 void x86_feature_early_init_percpu();
 
@@ -76,7 +76,6 @@ void x86_cpu_feature_init();
 /* Invoked on each CPU late in init sequence. */
 void x86_cpu_feature_late_init_percpu();
 
-extern "C" {
 extern struct cpuid_leaf _cpuid[MAX_SUPPORTED_CPUID + 1];
 extern struct cpuid_leaf _cpuid_hyp[MAX_SUPPORTED_CPUID_HYP - X86_CPUID_HYP_BASE + 1];
 extern struct cpuid_leaf _cpuid_ext[MAX_SUPPORTED_CPUID_EXT - X86_CPUID_EXT_BASE + 1];
@@ -131,7 +130,7 @@ static inline bool x86_feature_test(struct x86_cpuid_bit bit) {
   }
 }
 
-void x86_feature_debug();
+extern "C" void x86_feature_debug();
 
 /* add feature bits to test here */
 /* format: X86_CPUID_BIT(cpuid leaf, register (eax-edx:0-3), bit) */
@@ -244,7 +243,7 @@ struct x86_model_info {
   uint32_t patch_level;
 };
 
-const struct x86_model_info* x86_get_model();
+extern "C" const struct x86_model_info* x86_get_model();
 
 enum x86_microarch_list {
   X86_MICROARCH_UNKNOWN,
@@ -365,19 +364,21 @@ static inline bool x86_cpu_has_enhanced_ibrs() { return g_has_enhanced_ibrs; }
 
 static inline bool x86_cpu_has_meltdown() { return g_has_meltdown; }
 
-// Vendor-specific per-cpu init functions, in amd.cpp/intel.cpp
-void x86_amd_init_percpu();
-void x86_intel_init_percpu();
-bool x86_intel_cpu_has_rsb_fallback(const cpu_id::CpuId* cpuid, MsrAccess* msr);
-uint32_t x86_amd_get_patch_level();
-uint32_t x86_intel_get_patch_level();
-bool x86_amd_has_retbleed();
-void x86_amd_zen2_retbleed_mitigation(const x86_model_info&);
+// Vendor-specific per-cpu init functions, in src/amd.rs and src/intel.rs
+inline void x86_amd_init_percpu() { rust_x86_amd_init_percpu(); }
+inline void x86_intel_init_percpu() { rust_x86_intel_init_percpu(); }
+inline bool x86_intel_cpu_has_rsb_fallback() { return rust_x86_intel_cpu_has_rsb_fallback(); }
+inline uint32_t x86_amd_get_patch_level() { return rust_x86_amd_get_patch_level(); }
+inline uint32_t x86_intel_get_patch_level() { return rust_x86_intel_get_patch_level(); }
+inline bool x86_amd_has_retbleed() { return rust_x86_amd_has_retbleed(); }
+inline void x86_amd_zen2_retbleed_mitigation(const x86_model_info& model) {
+  rust_x86_amd_zen2_retbleed_mitigation(&model);
+}
 
 const x86_microarch_config_t* get_microarch_config(const cpu_id::CpuId* cpuid);
-bool x86_intel_idle_state_may_empty_rsb(X86IdleState*);
-bool x86_intel_check_microcode_patch(cpu_id::CpuId* cpuid, MsrAccess* msr, zx_iovec_t patch);
-void x86_intel_load_microcode_patch(cpu_id::CpuId* cpuid, MsrAccess* msr, zx_iovec_t patch);
+inline bool x86_intel_idle_state_may_empty_rsb(const X86IdleState* state) {
+  return rust_x86_intel_idle_state_may_empty_rsb(state);
+}
 
 // Called from assembly.
 extern "C" void x86_cpu_maybe_l1d_flush(zx_status_t syscall_return);

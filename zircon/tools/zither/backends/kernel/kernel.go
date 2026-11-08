@@ -13,6 +13,7 @@ import (
 
 	"go.fuchsia.dev/fuchsia/tools/fidl/lib/fidlgen"
 	"go.fuchsia.dev/fuchsia/zircon/tools/zither"
+	"go.fuchsia.dev/fuchsia/zircon/tools/zither/backends/rust"
 )
 
 //go:embed templates/*
@@ -23,39 +24,47 @@ var templates embed.FS
 var includePaths = []string{
 	filepath.Join("lib", "syscalls", "category.inc"),
 	filepath.Join("lib", "syscalls", "kernel.inc"),
-	filepath.Join("lib", "syscalls", "kernel-wrappers.inc"),
+	filepath.Join("lib", "syscalls", "kernel_wrappers.rs"),
+	filepath.Join("lib", "syscalls", "syscall_numbers.rs"),
 	filepath.Join("lib", "syscalls", "syscall_sigs.rs"),
 	filepath.Join("lib", "syscalls", "syscalls.inc"),
 	filepath.Join("lib", "syscalls", "zx-syscall-numbers.h"),
 }
 
+// Generator is the kernel backend generator. It emits both C++ (.inc and .h)
+// and Rust (.rs) sources, each through its own formatter.
 type Generator struct {
-	fidlgen.Generator
+	// Generates the C++ sources.
+	cpp *fidlgen.Generator
+
+	// Generates the Rust sources.
+	rust *fidlgen.Generator
 }
 
-func NewGenerator(formatter fidlgen.Formatter) *Generator {
-	gen := fidlgen.NewGenerator("ZirconKernelTemplates", templates, formatter, template.FuncMap{
+// NewGenerator creates a kernel backend generator. `cppFormatter` formats the
+// C++ outputs (.inc and .h files) and `rustFormatter` formats the Rust
+// outputs. (`cppFormatter` is spelled `formatter` by the zither GN and Bazel
+// backend specifications, where it is the only formatter of other backends.)
+func NewGenerator(cppFormatter, rustFormatter fidlgen.Formatter) *Generator {
+	funcs := template.FuncMap{
 		"LowerCaseWithUnderscores": zither.LowerCaseWithUnderscores,
+		"UpperCaseWithUnderscores": zither.UpperCaseWithUnderscores,
 		"Increment":                func(n int) int { return n + 1 },
 		"IsUserOutHandle":          isUserOutHandle,
 		"KernelIncDecl": func(syscall zither.Syscall) string {
 			return SyscallCDecl(syscall, PointerViewKernel, cDeclMacro)
 		},
-		"LastParameterIndex": func(syscall zither.Syscall) int {
-			return len(syscall.Parameters) - 1
-		},
-		"ParameterType": func(param zither.SyscallParameter) string {
-			return cDeclParameterType(param, PointerViewUserspace, false)
-		},
-		"PassedAsPointer":         passedAsPointer,
 		"RustKernelParameterType": rustKernelParameterType,
 		"RustKernelReturnType":    rustKernelReturnType,
+		"RustName":                rust.LowerCaseWithUnderscores,
 		"SyscallIncDecl": func(syscall zither.Syscall) string {
 			return SyscallCDecl(syscall, PointerViewUserspace, cDeclMacro)
 		},
 		"UserOutHandles": userOutHandles,
-	})
-	return &Generator{*gen}
+	}
+	cppGen := fidlgen.NewGenerator("ZirconKernelCppTemplates", templates, cppFormatter, funcs)
+	rustGen := fidlgen.NewGenerator("ZirconKernelRustTemplates", templates, rustFormatter, funcs)
+	return &Generator{cpp: cppGen, rust: rustGen}
 }
 
 func (gen Generator) DeclOrder() zither.DeclOrder { return zither.SourceDeclOrder }
@@ -82,7 +91,11 @@ func (gen *Generator) Generate(summary zither.LibrarySummary, outputDir string) 
 	for _, file := range includePaths {
 		output := filepath.Join(outputDir, file)
 		templateName := "Generate-" + filepath.Base(file)
-		if err := gen.GenerateFile(output, templateName, syscalls); err != nil {
+		g := gen.cpp
+		if filepath.Ext(file) == ".rs" {
+			g = gen.rust
+		}
+		if err := g.GenerateFile(output, templateName, syscalls); err != nil {
 			return nil, err
 		}
 		outputs = append(outputs, output)

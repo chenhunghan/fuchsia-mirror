@@ -5,10 +5,8 @@
 #ifndef SRC_DEVELOPER_FORENSICS_FEEDBACK_FEEDBACK_DATA_H_
 #define SRC_DEVELOPER_FORENSICS_FEEDBACK_FEEDBACK_DATA_H_
 
-#include <fuchsia/feedback/cpp/fidl.h>
 #include <fuchsia/process/lifecycle/cpp/fidl.h>
 #include <lib/async/dispatcher.h>
-#include <lib/fidl/cpp/interface_request.h>
 #include <lib/fit/defer.h>
 #include <lib/fit/function.h>
 #include <lib/sys/cpp/service_directory.h>

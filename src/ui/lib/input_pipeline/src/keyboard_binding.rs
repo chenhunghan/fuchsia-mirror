@@ -283,6 +283,8 @@ impl KeyboardBinding {
         device_node: fuchsia_inspect::Node,
         feature_flags: input_device::InputPipelineFeatureFlags,
         metrics_logger: metrics::MetricsLogger,
+        display_ownership: Option<std::rc::Rc<crate::display_ownership::DisplayOwnership>>,
+        is_injected: bool,
     ) -> Result<(Self, crate::dispatcher::TaskHandle<()>), Error> {
         let (device_descriptor, mut inspect_status) =
             Self::bind_device(&device_proxy, device_id, device_node, metrics_logger.clone())
@@ -295,6 +297,8 @@ impl KeyboardBinding {
             inspect_status,
             metrics_logger.clone(),
             feature_flags,
+            display_ownership,
+            is_injected,
             Self::process_reports,
         );
 

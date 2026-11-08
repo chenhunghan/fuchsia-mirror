@@ -119,7 +119,7 @@ template("cmc_check_includes") {
   }
 
   cmc_label = "//tools/cmc:cmc($host_toolchain)"
-  cmc_out_path = "${root_build_dir}/host-tools/cmc"
+  cmc_out_path = get_label_info(cmc_label, "root_out_dir") + "/cmc"
 
   _expected_includes_label = ":" + _expected_includes_label
 

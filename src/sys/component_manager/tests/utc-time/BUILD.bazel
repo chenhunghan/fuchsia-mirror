@@ -1,0 +1,78 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+fidl_library(
+    name = "componentmanager.test",
+    testonly = True,
+    srcs = ["componentmanager.test.fidl"],
+    # TODO(https://fxbug.dev/381096879): Fix lint warnings and remove.
+    excluded_checks = ["wrong-prefix-for-platform-source-library"],
+    deps = ["//zircon/vdso/zx"],
+)
+
+rustc_binary(
+    name = "maintainer_bin",
+    testonly = True,
+    srcs = ["maintainer.rs"],
+    crate_name = "utc_time_maintainer_bin",
+    crate_root = "maintainer.rs",
+    edition = "2024",
+    deps = [
+        ":componentmanager.test_rust",
+        "//sdk/fidl/fuchsia.time:fuchsia.time_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/test_util",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+rustc_binary(
+    name = "time_client_bin",
+    testonly = True,
+    srcs = ["time_client.rs"],
+    crate_name = "utc_time_client_bin",
+    crate_root = "time_client.rs",
+    edition = "2024",
+    deps = [
+        ":componentmanager.test_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-runtime",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+rustc_test(
+    name = "integration_test_bin",
+    srcs = ["integration_test.rs"],
+    crate_name = "utc_time_integration_test",
+    crate_root = "integration_test.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        # In GN, `//src/lib/fuchsia-component-test` is a group that forwards
+        # `:fuchsia-component-test-lib` and also pulls in `:includes` and the
+        # GN-only `realm_builder_server_component` into `utc-time-tests`.
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/storage/lib/vfs/rust:vfs",
+        "//src/sys/lib/component-events",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)

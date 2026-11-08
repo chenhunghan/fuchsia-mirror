@@ -25,21 +25,23 @@ func TestTestSummarySerialization(t *testing.T) {
 				StartTime:      time.Unix(1700000000, 0).UTC(),
 				DurationMillis: 1234,
 				TestResult: TestResult{
-					OutputDir:         "my-test",
-					OutputFiles:       []string{"stdout-and-stderr.txt"},
-					FailureReason:     FailureReasonFromMessage("Assertion failed in main.cc:42"),
-					SetupSucceeded:    &setupOk,
-					TeardownSucceeded: &teardownOk,
-					ExitCode:          &exitCode,
+					OutputDir:              "my-test",
+					OutputFiles:            []string{"stdout-and-stderr.txt"},
+					FailureReason:          FailureReasonFromMessage("Assertion failed in main.cc:42"),
+					ExonerationExplanation: "Exonerated by LUCI Analysis stability check (met flake_rate criteria).",
+					SetupSucceeded:         &setupOk,
+					TeardownSucceeded:      &teardownOk,
+					ExitCode:               &exitCode,
 					Cases: []TestCaseResult{
 						{
-							DisplayName:   "TestFoo",
-							SuiteName:     "MySuite",
-							CaseName:      "TestFoo",
-							Status:        TestFailure,
-							Duration:      500 * time.Millisecond,
-							Format:        "gtest",
-							FailureReason: FailureReasonFromMessage("Expected true, got false"),
+							DisplayName:            "TestFoo",
+							SuiteName:              "MySuite",
+							CaseName:               "TestFoo",
+							Status:                 TestFailure,
+							Duration:               500 * time.Millisecond,
+							Format:                 "gtest",
+							FailureReason:          FailureReasonFromMessage("Expected true, got false"),
+							ExonerationExplanation: "Exonerated case explanation",
 						},
 					},
 				},
@@ -80,11 +82,17 @@ func TestTestSummarySerialization(t *testing.T) {
 	if test.FailureReason == nil || len(test.FailureReason.Errors) != 1 || test.FailureReason.Errors[0].Message != "Assertion failed in main.cc:42" {
 		t.Errorf("test.FailureReason mismatch: got %+v", test.FailureReason)
 	}
+	if test.ExonerationExplanation != summary.Tests[0].ExonerationExplanation {
+		t.Errorf("test.ExonerationExplanation mismatch: got %q, want %q", test.ExonerationExplanation, summary.Tests[0].ExonerationExplanation)
+	}
 	if len(test.Cases) != 1 {
 		t.Fatalf("expected 1 case, got %d", len(test.Cases))
 	}
 	if test.Cases[0].FailureReason == nil || len(test.Cases[0].FailureReason.Errors) != 1 || test.Cases[0].FailureReason.Errors[0].Message != "Expected true, got false" {
 		t.Errorf("case.FailureReason mismatch: got %+v", test.Cases[0].FailureReason)
+	}
+	if test.Cases[0].ExonerationExplanation != summary.Tests[0].Cases[0].ExonerationExplanation {
+		t.Errorf("case.ExonerationExplanation mismatch: got %q, want %q", test.Cases[0].ExonerationExplanation, summary.Tests[0].Cases[0].ExonerationExplanation)
 	}
 }
 
@@ -100,7 +108,7 @@ func TestTestResultOmitEmpty(t *testing.T) {
 	}
 
 	jsonStr := string(data)
-	for _, field := range []string{"setup_succeeded", "teardown_succeeded", "exit_code", "failure_reason"} {
+	for _, field := range []string{"setup_succeeded", "teardown_succeeded", "exit_code", "failure_reason", "exoneration_explanation"} {
 		if jsonContainsField(jsonStr, field) {
 			t.Errorf("expected field %q to be omitted when unset, got json: %s", field, jsonStr)
 		}

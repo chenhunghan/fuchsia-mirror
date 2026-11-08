@@ -51,4 +51,13 @@ zx::result<zx::vmo> VmoFromString(std::string_view string) {
   return zx::ok(std::move(vmo));
 }
 
+zx::result<fuchsia_mem::Buffer> BufferFromString(std::string_view string) {
+  zx::result<zx::vmo> vmo = VmoFromString(string);
+  if (vmo.is_error()) {
+    return vmo.take_error();
+  }
+
+  return zx::ok(fuchsia_mem::Buffer(std::move(*vmo), string.size()));
+}
+
 }  // namespace forensics

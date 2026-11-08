@@ -206,11 +206,11 @@ zx_status_t x86_allocate_ap_structures(uint32_t* apic_ids, uint8_t cpu_count) {
   return ZX_OK;
 }
 
-static struct x86_percpu* x86_percpu_for(cpu_num_t cpu_num) {
+extern "C" __NO_SAFESTACK struct x86_percpu* x86_percpu_for(cpu_num_t cpu_num) {
   return (cpu_num == 0) ? &bp_percpu : &ap_percpus[cpu_num - 1];
 }
 
-void x86_init_percpu(cpu_num_t cpu_num) {
+extern "C" void x86_init_percpu(cpu_num_t cpu_num) {
   struct x86_percpu* const percpu = x86_percpu_for(cpu_num);
   DEBUG_ASSERT(percpu->cpu_num == cpu_num);
   DEBUG_ASSERT(percpu->direct == percpu);
@@ -335,7 +335,7 @@ FFI_ALWAYS_INLINE uint32_t cpp_x86_curr_percpu_get_apic_id() { return x86_get_pe
 
 }  // extern "C"
 
-int x86_apic_id_to_cpu_num(uint32_t apic_id) {
+__NO_SAFESTACK int x86_apic_id_to_cpu_num(uint32_t apic_id) {
   if (bp_percpu.apic_id == apic_id) {
     return (int)bp_percpu.cpu_num;
   }
@@ -349,6 +349,11 @@ int x86_apic_id_to_cpu_num(uint32_t apic_id) {
 }
 
 void arch_mp_reschedule(cpu_mask_t mask) {
+  DEBUG_ASSERT(x86_num_cpus <= sizeof(cpu_mask_t) * CHAR_BIT);
+  const cpu_mask_t valid_mask = x86_num_cpus < sizeof(cpu_mask_t) * CHAR_BIT
+                                    ? static_cast<cpu_mask_t>((1ULL << x86_num_cpus) - 1)
+                                    : CPU_MASK_ALL;
+  mask &= valid_mask;
   cpu_mask_t needs_ipi = 0;
   if (use_monitor) {
     while (mask) {
@@ -647,46 +652,6 @@ FFI_ALWAYS_INLINE X86IdleStates* cpp_x86_mp_bp_idle_states() { return bp_percpu.
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE X86IdleStates* cpp_x86_mp_ap_idle_states(size_t idx) {
   return ap_percpus[idx].idle_states;
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE const char* cpp_x86_idle_state_name(const X86IdleState* state) {
-  return state->Name();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE uint32_t cpp_x86_idle_state_mwait_hint(const X86IdleState* state) {
-  return state->MwaitHint();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE uint64_t cpp_x86_idle_state_times_entered(const X86IdleState* state) {
-  return state->TimesEntered();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE zx_duration_t cpp_x86_idle_state_cumulative_duration(const X86IdleState* state) {
-  return state->CumulativeDuration();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_x86_idle_state_reset_counters(X86IdleState* state) {
-  state->ResetCounters();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE X86IdleState* cpp_x86_idle_states_states(X86IdleStates* states) {
-  return states->States();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE size_t cpp_x86_idle_states_num_states(const X86IdleStates* states) {
-  return states->NumStates();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_x86_idle_states_set_state_mask(X86IdleStates* states, uint32_t mask) {
-  states->SetStateMask(mask);
 }
 
 }  // extern "C"

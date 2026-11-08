@@ -4,10 +4,8 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-use ksync::{KCell, KMutex, guarded, lock};
+use ksync::{ExclusiveLockPolicy, KCell, KMutex, RawLock, guarded, lock};
 use pin_init::{PinInit, pin_init};
-
-pub type NameLock = ksync::RawSpinlock;
 
 /// A fixed-size, thread-safe name buffer with automatic truncation and null-termination.
 ///
@@ -16,16 +14,23 @@ pub type NameLock = ksync::RawSpinlock;
 /// the string is always null-terminated.
 ///
 /// Corresponds to `fbl::Name<Size>` in C++.
+///
+/// `L` is the raw lock type protecting the name. The C++ `fbl::Name` uses a `SpinLock`, so the
+/// kernel supplies its `TrackedSpinlock` (which is not visible to this crate).
 #[guarded]
 #[repr(C)]
-pub struct Name<const SIZE: usize> {
+pub struct Name<const SIZE: usize, L: RawLock> {
     #[mutex]
-    lock: KMutex<NameLock>,
+    lock: KMutex<L>,
     #[guarded_by(lock)]
     name: [u8; SIZE],
 }
 
-impl<const SIZE: usize> Name<SIZE> {
+impl<const SIZE: usize, L: RawLock> Name<SIZE, L>
+where
+    // `L` must be a lock which takes no acquisition arguments.
+    L::DefaultPolicy: ExclusiveLockPolicy<L, AcquireArgs = ()>,
+{
     /// Asserts that `SIZE >= 1` at compile time.
     const CHECK_SIZE: () = assert!(SIZE >= 1, "Names must have SIZE >= 1");
 
@@ -111,7 +116,10 @@ impl<const SIZE: usize> Name<SIZE> {
     }
 }
 
-impl<const SIZE: usize> core::fmt::Debug for Name<SIZE> {
+impl<const SIZE: usize, L: RawLock> core::fmt::Debug for Name<SIZE, L>
+where
+    L::DefaultPolicy: ExclusiveLockPolicy<L, AcquireArgs = ()>,
+{
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let mut buf = [0u8; SIZE];
         self.get(&mut buf);

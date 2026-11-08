@@ -6,24 +6,26 @@
 
 Provides an asynchronous wrapper around the StreamProcessor API to encode/decode audio packets.
 
-The main object to use is the StreamProcessor with either the `create_encoder` or `create_decoder` methods which are passed the input audio parameters and the
-encoder settings to provide to the StreamProcessor for the encoder case. The `input_domain`
-can be found as `fidl_fuchsia_media::DomainFormat` and it must be one of the Audio formats. The
-`encoder_settings` is found as `fidl_fuchsia_media::EncoderSettings`.
+The main object to use is the StreamProcessor with either the `create_encoder` or `create_decoder`
+methods which are passed the input audio parameters and the encoder settings to provide to the
+StreamProcessor for the encoder case. The `input_pcm_format` can be found as
+`fidl_fuchsia_media::PcmFormat2`. The `encoder_settings` is found as
+`fidl_fuchsia_media::EncoderSettings`.
 
-After creating the encoder/decoder, audio input data can be provided either by using the StreamProcessor as an
-`AsyncWrite` provider.  The resulting audio is provided via the output stream which can
-be acquired via the `StreamProcessor::take_output_stream` call.
+After creating the encoder/decoder, audio input data can be provided either by using the
+StreamProcessor as an `AsyncWrite` provider.  The resulting audio is provided via the output stream
+which can be acquired via the `StreamProcessor::take_output_stream` call.
 
 # Example
 
 ```rust
 
-let pcm_format = PcmFormat {
-    pcm_mode: AudioPcmMode::Linear,
-    bits_per_sample: 16,
-    frames_per_second: 44100,
-    channel_map: vec![AudioChannelId::Cf],
+let pcm_format = PcmFormat2 {
+    pcm_mode: Some(AudioPcmMode2::Linear),
+    bits_per_sample: Some(16),
+    frames_per_second: Some(44100),
+    channel_map: Some(vec![AudioChannelId2::Fc]),
+    ..Default::default()
 };
 
 // Some sample SBC encoder settings.
@@ -40,7 +42,7 @@ let sbc_encoder_settings = EncoderSettings::Sbc(SbcEncoderSettings {
 let mut raw_audio = Vec::new();
 File::open("sample.wav")?.read_to_end(&mut raw_audio)?;
 
-let encoder = StreamProcessor::create_encoder(pcm_format, sbc_encoder_settings);
+let mut encoder = StreamProcessor::create_encoder(pcm_format, sbc_encoder_settings)?;
 
 // 44 bytes offset skips the RIFF header in the wav file.
 // Delivering 16 audio frames at once that are 2 bytes each
@@ -50,15 +52,13 @@ for audio_frames in raw_audio[44..].chunks(2 * 16) {
 
 encoder.close()?;
 
-let mut encoded_stream = encoder.take_encoded_stream();
+let mut encoded_stream = encoder.take_output_stream()?;
 
 let mut output_file = File::create("sample.sbc")?;
 
 while let Some(data) = encoded_stream.try_next().await? {
     output_file.write(&data)?;
 }
-
-output_file.close()?;
 
 ```
 

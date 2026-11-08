@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -67,27 +68,18 @@ fuchsia::media::FormatDetails MakeValidMsbcDecoderFormatDetails() {
 }
 
 fuchsia::media::FormatDetails MakeValidMsbcEncoderFormatDetails() {
-  fuchsia::media::PcmFormat pcm;
-  pcm.pcm_mode = fuchsia::media::AudioPcmMode::LINEAR;
-  pcm.bits_per_sample = 16;
-  pcm.frames_per_second = 16000;
-  pcm.channel_map = {fuchsia::media::AudioChannelId::LF};
-
-  fuchsia::media::AudioUncompressedFormat uncompressed;
-  uncompressed.set_pcm(std::move(pcm));
-
-  fuchsia::media::AudioFormat audio;
-  audio.set_uncompressed(std::move(uncompressed));
-
-  fuchsia::media::DomainFormat domain;
-  domain.set_audio(std::move(audio));
+  fuchsia::media::PcmFormat2 pcm;
+  pcm.set_pcm_mode(fuchsia::media::AudioPcmMode2::LINEAR);
+  pcm.set_bits_per_sample(16);
+  pcm.set_frames_per_second(16000);
+  pcm.set_channel_map({fuchsia::media::AudioChannelId2::FL});
 
   fuchsia::media::EncoderSettings encoder_settings;
   encoder_settings.set_msbc(fuchsia::media::MSbcEncoderSettings{});
 
   fuchsia::media::FormatDetails format_details;
   format_details.set_format_details_version_ordinal(0);
-  format_details.set_domain(std::move(domain));
+  format_details.set_pcm_format(std::move(pcm));
   format_details.set_encoder_settings(std::move(encoder_settings));
   return format_details;
 }
@@ -137,20 +129,11 @@ std::vector<uint8_t> EncodeSingleMsbcFrame() {
 }
 
 fuchsia::media::FormatDetails MakeValidSbcEncoderFormatDetails() {
-  fuchsia::media::PcmFormat pcm;
-  pcm.pcm_mode = fuchsia::media::AudioPcmMode::LINEAR;
-  pcm.bits_per_sample = 16;
-  pcm.frames_per_second = 44100;
-  pcm.channel_map = {fuchsia::media::AudioChannelId::LF, fuchsia::media::AudioChannelId::RF};
-
-  fuchsia::media::AudioUncompressedFormat uncompressed;
-  uncompressed.set_pcm(std::move(pcm));
-
-  fuchsia::media::AudioFormat audio;
-  audio.set_uncompressed(std::move(uncompressed));
-
-  fuchsia::media::DomainFormat domain;
-  domain.set_audio(std::move(audio));
+  fuchsia::media::PcmFormat2 pcm;
+  pcm.set_pcm_mode(fuchsia::media::AudioPcmMode2::LINEAR);
+  pcm.set_bits_per_sample(16);
+  pcm.set_frames_per_second(44100);
+  pcm.set_channel_map({fuchsia::media::AudioChannelId2::FL, fuchsia::media::AudioChannelId2::FR});
 
   fuchsia::media::SbcEncoderSettings sbc_settings;
   sbc_settings.sub_bands = static_cast<fuchsia::media::SbcSubBands>(SUB_BANDS_8);
@@ -164,7 +147,7 @@ fuchsia::media::FormatDetails MakeValidSbcEncoderFormatDetails() {
 
   fuchsia::media::FormatDetails format_details;
   format_details.set_format_details_version_ordinal(0);
-  format_details.set_domain(std::move(domain));
+  format_details.set_pcm_format(std::move(pcm));
   format_details.set_encoder_settings(std::move(encoder_settings));
   return format_details;
 }
@@ -380,6 +363,66 @@ TEST(CodecAdapterSbcDecoderTest, MsbcDecodeKeepsBytesLeftInSyncAcrossPaddedAndUn
   decoder.CoreCodecStopStream();
 }
 
+template <uint8_t SamplingFrequency>
+std::vector<uint8_t> MakeSbcOobBytesWithSamplingFrequency() {
+  static_assert(SamplingFrequency <= 0b1111);
+  SbcCodecInfo codec_info = {
+      .sampling_frequency = SamplingFrequency,
+      .channel_mode = kSbcChannelModeJointStereo,
+      .block_length = 0b0001,     // 16 blocks
+      .subbands = 0b01,           // 8 subbands
+      .allocation_method = 0b01,  // Loudness
+      .min_bitpool_value = 2,
+      .max_bitpool_value = 53,
+  };
+  std::vector<uint8_t> oob_bytes(sizeof(SbcCodecInfo));
+  std::memcpy(oob_bytes.data(), &codec_info, sizeof(SbcCodecInfo));
+  return oob_bytes;
+}
+
+TEST(CodecAdapterSbcDecoderTest, InvalidSamplingFrequencyInOobBytesFailsCodecCleanly) {
+  struct TestCase {
+    const char* mime_type;
+    std::vector<uint8_t> oob_bytes;
+  };
+  const std::vector<TestCase> kInvalidCases = {
+      {.mime_type = "audio/sbc", .oob_bytes = {0, 0, 0, 0}},
+      {.mime_type = "audio/sbc", .oob_bytes = MakeSbcOobBytesWithSamplingFrequency<0b0000>()},
+      {.mime_type = "audio/sbc", .oob_bytes = MakeSbcOobBytesWithSamplingFrequency<0b0011>()},
+      {.mime_type = "audio/sbc", .oob_bytes = MakeSbcOobBytesWithSamplingFrequency<0b1111>()},
+      {.mime_type = "audio/msbc", .oob_bytes = MakeSbcOobBytesWithSamplingFrequency<0b1001>()},
+  };
+
+  for (const auto& test_case : kInvalidCases) {
+    ASSERT_EQ(test_case.oob_bytes.size(), sizeof(SbcCodecInfo));
+
+    fuchsia::media::FormatDetails format_details;
+    format_details.set_format_details_version_ordinal(0);
+    format_details.set_mime_type(test_case.mime_type);
+    format_details.set_oob_bytes(test_case.oob_bytes);
+
+    std::mutex lock;
+    FakeCodecAdapterEvents events;
+    CodecAdapterSbcDecoder decoder(lock, &events);
+
+    decoder.CoreCodecInit(format_details);
+    ASSERT_EQ(events.fail_codec_count(), 0u);
+
+    decoder.CoreCodecStartStream();
+    decoder.CoreCodecQueueInputFormatDetails(format_details);
+    // WaitForOutputConstraintsChangeCount unblocks as soon as fail_codec_count() > 0.
+    events.WaitForOutputConstraintsChangeCount(1);
+
+    EXPECT_EQ(events.fail_codec_count(), 1u);
+    EXPECT_EQ(events.last_fail_message(),
+              "SBC Decoder received invalid sampling_frequency in oob_bytes.");
+    EXPECT_EQ(events.output_eos_count(), 0u);
+    EXPECT_EQ(events.output_packet_count(), 0u);
+
+    decoder.CoreCodecStopStream();
+  }
+}
+
 TEST(CodecAdapterSbcEncoderTest, EmptyStreamEndOfStreamAndPostStopOutputConstraints) {
   std::mutex lock;
   FakeCodecAdapterEvents events;
@@ -435,6 +478,45 @@ TEST(CodecAdapterSbcEncoderTest, EmptyStreamEndOfStreamAndPostStopOutputConstrai
   EXPECT_EQ(events.output_eos_count(), 2u);
   EXPECT_EQ(events.output_packet_count(), 0u);
   encoder.CoreCodecStopStream();
+}
+
+TEST(CodecAdapterSbcEncoderTest, BytesPerSampleValidation) {
+  {
+    // Padded 4-byte container for 16-bit PCM is rejected.
+    std::mutex lock;
+    FakeCodecAdapterEvents events;
+    CodecAdapterSbcEncoder encoder(lock, &events);
+
+    auto format_details = MakeValidSbcEncoderFormatDetails();
+    format_details.mutable_pcm_format()->set_bytes_per_sample(4);
+    encoder.CoreCodecInit(format_details);
+    ASSERT_EQ(events.fail_codec_count(), 0u);
+
+    encoder.CoreCodecStartStream();
+    encoder.CoreCodecQueueInputFormatDetails(format_details);
+    events.WaitForOutputConstraintsChangeCount(1);
+    EXPECT_EQ(events.fail_codec_count(), 1u);
+    encoder.CoreCodecStopStream();
+  }
+
+  {
+    // Explicit 2-byte container for 16-bit PCM succeeds.
+    std::mutex lock;
+    FakeCodecAdapterEvents events;
+    CodecAdapterSbcEncoder encoder(lock, &events);
+
+    auto format_details = MakeValidSbcEncoderFormatDetails();
+    format_details.mutable_pcm_format()->set_bytes_per_sample(2);
+    encoder.CoreCodecInit(format_details);
+    ASSERT_EQ(events.fail_codec_count(), 0u);
+
+    encoder.CoreCodecStartStream();
+    encoder.CoreCodecQueueInputFormatDetails(format_details);
+    events.WaitForOutputConstraintsChangeCount(1);
+    encoder.CoreCodecMidStreamOutputBufferReConfigFinish();
+    EXPECT_EQ(events.fail_codec_count(), 0u);
+    encoder.CoreCodecStopStream();
+  }
 }
 
 }  // namespace

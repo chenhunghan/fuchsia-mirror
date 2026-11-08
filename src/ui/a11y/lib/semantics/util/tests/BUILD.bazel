@@ -1,0 +1,28 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_test_binary(
+    name = "semantics_util_tests",
+    srcs = ["semantic_transform_unittest.cc"],
+    # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
+    copts = ["-Wno-conversion"],
+    tags = ["manual"],
+    deps = [
+        "//src/lib/fxl/test:gtest_main",
+        "//src/ui/a11y/lib/semantics/util",
+    ],
+)
+
+# //src/ui/a11y/lib:a11y-lib-tests packages the GN cc_test_executable.
+# @bazel2gn:skip
+fx_unittest_package(
+    name = "semantics-util-tests-package",
+    unit_tests = [":semantics_util_tests"],
+    visibility = ["//src/ui/a11y/lib:__pkg__"],
+)

@@ -178,7 +178,7 @@ impl TunWorker {
         let tun_device = tun_device.into_proxy();
         tun_device
             .add_port(
-                &fnet_tun::DevicePortConfig {
+                fnet_tun::DevicePortConfig {
                     base: Some(fnet_tun::BasePortConfig {
                         id: Some(ARBITRARY_PORT_ID),
                         // Even though this field is named `mtu`, it's actually

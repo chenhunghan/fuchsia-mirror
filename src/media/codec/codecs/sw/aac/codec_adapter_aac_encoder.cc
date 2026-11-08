@@ -212,16 +212,9 @@ fuchsia::media::StreamOutputFormat CodecAdapterAacEncoder::CoreCodecGetOutputFor
     uint64_t stream_lifetime_ordinal, uint64_t new_output_format_details_version_ordinal) {
   ZX_DEBUG_ASSERT(output_sink_);
 
-  auto audio_compressed_format = fuchsia::media::AudioCompressedFormat();
-  audio_compressed_format.set_aac(fuchsia::media::AudioCompressedFormatAac());
-
-  auto audio_format = fuchsia::media::AudioFormat();
-  audio_format.set_compressed(std::move(audio_compressed_format));
-
   auto format_details = fuchsia::media::FormatDetails();
   format_details.set_format_details_version_ordinal(new_output_format_details_version_ordinal);
   format_details.set_mime_type(kAacMimeType);
-  format_details.mutable_domain()->set_audio(std::move(audio_format));
 
   {
     std::lock_guard<std::mutex> lock(lock_);
@@ -371,11 +364,11 @@ CodecAdapterAacEncoder::BuildStreamFromFormatDetails(
   }
   auto& encoder_settings = format_details.encoder_settings().aac();
 
-  auto pcm_format_result = ValidateInputFormat(format_details);
-  if (pcm_format_result.is_error()) {
-    return fpromise::error(pcm_format_result.error());
+  auto validate_result = ValidateInputFormat(format_details);
+  if (validate_result.is_error()) {
+    return fpromise::error(validate_result.error());
   }
-  auto pcm_format = pcm_format_result.take_value();
+  const auto& pcm_format = format_details.pcm_format();
 
   auto create_encoder_result = CreateEncoder(pcm_format, encoder_settings);
   if (create_encoder_result.is_error()) {
@@ -392,7 +385,7 @@ CodecAdapterAacEncoder::BuildStreamFromFormatDetails(
   // FDK can output in one frame at most 6144 bits per channel (from
   // documentation; tediously, the constant is not exported).
   constexpr size_t kFdkMaxOutBytesPerChannel = 6144 / 8;
-  const size_t max_output_size = kFdkMaxOutBytesPerChannel * pcm_format.channel_map.size();
+  const size_t max_output_size = kFdkMaxOutBytesPerChannel * enc_info.inputChannels;
 
   std::vector<uint8_t> oob_bytes(enc_info.confSize, 0);
   memcpy(&oob_bytes[0], enc_info.confBuf, enc_info.confSize);
@@ -408,7 +401,7 @@ CodecAdapterAacEncoder::BuildStreamFromFormatDetails(
       [this](ChunkInputStream::InputBlock input_block) { return ProcessInputBlock(input_block); };
 
   const size_t pcm_frame_size = enc_info.inputChannels * sizeof(int16_t);
-  const size_t bytes_per_second = pcm_format.frames_per_second * pcm_frame_size;
+  const size_t bytes_per_second = pcm_format.frames_per_second() * pcm_frame_size;
   auto extrapolator = format_details.has_timebase()
                           ? TimestampExtrapolator(format_details.timebase(), bytes_per_second)
                           : TimestampExtrapolator();
@@ -421,34 +414,33 @@ CodecAdapterAacEncoder::BuildStreamFromFormatDetails(
   return fpromise::ok();
 }
 
-fpromise::result<fuchsia::media::PcmFormat, CodecAdapterAacEncoder::InputError>
+fpromise::result<void, CodecAdapterAacEncoder::InputError>
 CodecAdapterAacEncoder::ValidateInputFormat(const fuchsia::media::FormatDetails& format_details) {
-  if (!format_details.domain().is_audio()) {
-    return fpromise::error(kNotAudio);
-  }
-
-  if (!format_details.domain().audio().is_uncompressed()) {
-    return fpromise::error(kCompressed);
-  }
-
-  if (!format_details.domain().audio().uncompressed().is_pcm()) {
+  if (!format_details.has_pcm_format()) {
     return fpromise::error(kNotPcm);
   }
-  auto& pcm_format = format_details.domain().audio().uncompressed().pcm();
+  const auto& pcm_format = format_details.pcm_format();
 
-  if (!(pcm_format.pcm_mode == fuchsia::media::AudioPcmMode::LINEAR)) {
+  if (!pcm_format.has_pcm_mode() ||
+      pcm_format.pcm_mode() != fuchsia::media::AudioPcmMode2::LINEAR) {
     return fpromise::error(kNotLinear);
   }
 
-  if (!(pcm_format.bits_per_sample == 16u)) {
+  if (!pcm_format.has_bits_per_sample() || pcm_format.bits_per_sample() != 16u ||
+      (pcm_format.has_bytes_per_sample() && pcm_format.bytes_per_sample() != sizeof(int16_t))) {
     return fpromise::error(kNot16Bit);
   }
 
-  return fpromise::ok(fidl::Clone(pcm_format));
+  if (!pcm_format.has_frames_per_second() || !pcm_format.has_channel_map() ||
+      pcm_format.channel_map().empty()) {
+    return fpromise::error(kNotPcm);
+  }
+
+  return fpromise::ok();
 }
 
 fpromise::result<CodecAdapterAacEncoder::Encoder, CodecAdapterAacEncoder::Error>
-CodecAdapterAacEncoder::CreateEncoder(const fuchsia::media::PcmFormat& pcm_format,
+CodecAdapterAacEncoder::CreateEncoder(const fuchsia::media::PcmFormat2& pcm_format,
                                       const fuchsia::media::AacEncoderSettings& encoder_settings) {
   HANDLE_AACENCODER encoder = nullptr;
   AACENC_ERROR status = aacEncOpen(&encoder, 0, 0);
@@ -491,7 +483,7 @@ CodecAdapterAacEncoder::CreateEncoder(const fuchsia::media::PcmFormat& pcm_forma
     return fpromise::error(status);
   }
 
-  if ((status = aacEncoder_SetParam(encoder, AACENC_SAMPLERATE, pcm_format.frames_per_second)) !=
+  if ((status = aacEncoder_SetParam(encoder, AACENC_SAMPLERATE, pcm_format.frames_per_second())) !=
       AACENC_OK) {
     return fpromise::error(status);
   }
@@ -699,9 +691,6 @@ void CodecAdapterAacEncoder::ReportError(Error error) {
 
         if constexpr (std::is_same_v<T, InputError>) {
           switch (error) {
-            case kNotAudio:
-              events_->onCoreCodecFailCodec("Input to aac encoder must be audio.");
-              break;
             case kNotPcm:
               events_->onCoreCodecFailCodec("Input to aac encoder must be pcm.");
               break;
@@ -710,9 +699,6 @@ void CodecAdapterAacEncoder::ReportError(Error error) {
               break;
             case kNotLinear:
               events_->onCoreCodecFailCodec("Input to aac encoder must be linear samples.");
-              break;
-            case kCompressed:
-              events_->onCoreCodecFailCodec("Input to aac encoder must be uncompressed.");
               break;
           }
         } else if constexpr (std::is_same_v<T, SettingsError>) {

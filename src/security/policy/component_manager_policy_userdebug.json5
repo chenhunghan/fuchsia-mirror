@@ -340,6 +340,28 @@
             {
                 source_moniker: "/core/lowpanservice",
                 source: "component",
+                source_name: "fuchsia.lowpan.device.CountersConnector",
+                capability: "protocol",
+                target_monikers: [
+                    // TODO(https://fxbug.dev/42080863): Remove once the shell tools that use this
+                    // capability no longer run in the sshd realm.
+                    "/toolbox",
+                ],
+            },
+            {
+                source_moniker: "/core/lowpanservice",
+                source: "component",
+                source_name: "fuchsia.lowpan.device.DeviceConnector",
+                capability: "protocol",
+                target_monikers: [
+                    // TODO(https://fxbug.dev/42080863): Remove once the shell tools that use this
+                    // capability no longer run in the sshd realm.
+                    "/toolbox",
+                ],
+            },
+            {
+                source_moniker: "/core/lowpanservice",
+                source: "component",
                 source_name: "fuchsia.lowpan.device.DeviceExtraConnector",
                 capability: "protocol",
                 target_monikers: [
@@ -351,7 +373,95 @@
             {
                 source_moniker: "/core/lowpanservice",
                 source: "component",
-                source_name: "fuchsia.lowpan.device.DeviceRouterExtraConnector",
+                source_name: "fuchsia.lowpan.device.EnergyScanConnector",
+                capability: "protocol",
+                target_monikers: [
+                    // TODO(https://fxbug.dev/42080863): Remove once the shell tools that use this
+                    // capability no longer run in the sshd realm.
+                    "/toolbox",
+                ],
+            },
+            {
+                source_moniker: "/core/lowpanservice",
+                source: "component",
+                source_name: "fuchsia.lowpan.experimental.DeviceConnector",
+                capability: "protocol",
+                target_monikers: [
+                    // TODO(https://fxbug.dev/42080863): Remove once the shell tools that use this
+                    // capability no longer run in the sshd realm.
+                    "/toolbox",
+                ],
+            },
+            {
+                source_moniker: "/core/lowpanservice",
+                source: "component",
+                source_name: "fuchsia.lowpan.experimental.DeviceExtraConnector",
+                capability: "protocol",
+                target_monikers: [
+                    // TODO(https://fxbug.dev/42080863): Remove once the shell tools that use this
+                    // capability no longer run in the sshd realm.
+                    "/toolbox",
+                ],
+            },
+            {
+                source_moniker: "/core/lowpanservice",
+                source: "component",
+                source_name: "fuchsia.lowpan.experimental.DeviceRouteConnector",
+                capability: "protocol",
+                target_monikers: [
+                    // TODO(https://fxbug.dev/42080863): Remove once the shell tools that use this
+                    // capability no longer run in the sshd realm.
+                    "/toolbox",
+                ],
+            },
+            {
+                source_moniker: "/core/lowpanservice",
+                source: "component",
+                source_name: "fuchsia.lowpan.experimental.DeviceRouteExtraConnector",
+                capability: "protocol",
+                target_monikers: [
+                    // TODO(https://fxbug.dev/42080863): Remove once the shell tools that use this
+                    // capability no longer run in the sshd realm.
+                    "/toolbox",
+                ],
+            },
+            {
+                source_moniker: "/core/lowpanservice",
+                source: "component",
+                source_name: "fuchsia.lowpan.experimental.LegacyJoiningConnector",
+                capability: "protocol",
+                target_monikers: [
+                    // TODO(https://fxbug.dev/42080863): Remove once the shell tools that use this
+                    // capability no longer run in the sshd realm.
+                    "/toolbox",
+                ],
+            },
+            {
+                source_moniker: "/core/lowpanservice",
+                source: "component",
+                source_name: "fuchsia.lowpan.thread.DatasetConnector",
+                capability: "protocol",
+                target_monikers: [
+                    // TODO(https://fxbug.dev/42080863): Remove once the shell tools that use this
+                    // capability no longer run in the sshd realm.
+                    "/toolbox",
+                ],
+            },
+            {
+                source_moniker: "/core/lowpanservice",
+                source: "component",
+                source_name: "fuchsia.lowpan.thread.FeatureConnector",
+                capability: "protocol",
+                target_monikers: [
+                    // TODO(https://fxbug.dev/42080863): Remove once the shell tools that use this
+                    // capability no longer run in the sshd realm.
+                    "/toolbox",
+                ],
+            },
+            {
+                source_moniker: "/core/lowpanservice",
+                source: "component",
+                source_name: "fuchsia.lowpan.thread.MeshcopConnector",
                 capability: "protocol",
                 target_monikers: [
                     // TODO(https://fxbug.dev/42080863): Remove once the shell tools that use this

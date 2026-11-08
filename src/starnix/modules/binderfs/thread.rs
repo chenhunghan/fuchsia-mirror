@@ -3,22 +3,19 @@
 // found in the LICENSE file.
 
 use crate::objects::{LocalBinderObject, TransactionData};
-use crate::process::{BinderProcess, BinderProcessGuard};
+use crate::process::{AvailableThreads, BinderProcess, BinderProcessGuard};
 
 use starnix_core::mm::{MemoryAccessor, MemoryAccessorExt};
 
-use starnix_core::task::{
-    EventHandler, Kernel, Pid, SimpleWaiter, Task, WaitCanceler, WaitQueue, Waiter,
-};
+use starnix_core::task::{EventHandler, Kernel, Pid, Task, WaitCanceler, WaitQueue, Waiter};
 
 use starnix_logging::{log_trace, log_warn};
 use starnix_sync::{
-    BinderThreadRequeueEventLock, BinderThreadStateLock, InterruptibleEvent, LockDepGuard,
-    LockDepMutex, ordered_lock,
+    BinderThreadStateLock, EventWaitGuard, InterruptibleEvent, LockDepGuard, LockDepMutex,
+    ordered_lock,
 };
 use starnix_uapi::vfs::FdEvents;
 
-use crossbeam::queue::SegQueue;
 use starnix_types::ownership::{OwnedRef, Releasable, TempRef, WeakRef};
 use starnix_types::user_buffer::UserBuffer;
 use starnix_uapi::errors::{EACCES, EPERM, ESRCH, Errno};
@@ -65,25 +62,32 @@ impl From<Command> for QueuedCommand {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct CommandQueueWithWaitQueue {
     pub commands: VecDeque<QueuedCommand>,
-    /// The owning thread, while it is blocked in `handle_thread_read` waiting for work.
+    /// Event notified when the owning thread is blocked in `handle_thread_read` waiting for work.
     ///
-    /// Only these waiters make the thread available for work (see
-    /// `BinderThreadState::is_available`), and they are woken one at a time.
-    pub waiters: WaitQueue,
+    /// Only an active wait on `command_event` makes the thread available for work (see
+    /// `BinderThreadState::is_available`).
+    pub command_event: Arc<InterruptibleEvent>,
     /// FD event waiters (poll, select, epoll) on the binder file for the owning thread.
     ///
-    /// These are kept separate from `waiters` because a thread that polls the binder file is not
-    /// blocked waiting for work: it must not be considered available, and it must not consume a
-    /// wake-up meant for a thread blocked in `handle_thread_read`. A poll registration can also
-    /// stay in the queue after its handler has fired, e.g. when the registration's
-    /// process-level waiter fired first. All these waiters are notified on every new command.
+    /// These are kept separate from `command_event` because a thread that polls the binder file is
+    /// not blocked waiting for work: it must not be considered available, and it must not consume
+    /// a wake-up meant for a thread blocked in `handle_thread_read`. A poll registration can also
+    /// stay in the queue after its handler has fired, e.g. when the registration's process-level
+    /// waiter fired first. All these waiters are notified on every new command.
     pub poll_waiters: WaitQueue,
 }
 
 impl CommandQueueWithWaitQueue {
+    /// Creates a command queue backed by `command_event`, which must be a clone of the owning
+    /// [`BinderThread::command_event`] so that process-level notifications (e.g. `close`,
+    /// `kick_all_threads`, and `wake_process_and_available_thread`) reach the blocked thread.
+    pub fn new(command_event: Arc<InterruptibleEvent>) -> Self {
+        Self { commands: VecDeque::new(), command_event, poll_waiters: WaitQueue::default() }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.commands.is_empty()
     }
@@ -106,7 +110,7 @@ impl CommandQueueWithWaitQueue {
     pub fn push_back(&mut self, command: QueuedCommand) {
         crate::trace::on_command_enqueued(&command.command, command.trace_id);
         self.commands.push_back(command);
-        self.waiters.notify_fd_events_count(FdEvents::POLLIN, 1);
+        self.command_event.notify();
         self.poll_waiters.notify_fd_events(FdEvents::POLLIN);
     }
 
@@ -134,12 +138,7 @@ impl CommandQueueWithWaitQueue {
 
     /// Whether the owning thread is blocked waiting for work. FD event waiters are not counted.
     pub fn has_waiters(&self) -> bool {
-        !self.waiters.is_empty()
-    }
-
-    /// Registers the owning thread, blocking in `handle_thread_read`, as waiting for work.
-    pub fn wait_async_simple(&self, waiter: &mut SimpleWaiter) {
-        self.waiters.wait_async_simple(waiter);
+        self.command_event.is_waiting()
     }
 
     /// Registers an FD event waiter (poll, select, epoll) for new commands.
@@ -217,6 +216,9 @@ pub struct BinderThread {
     /// Weak reference to self.
     pub weak_self: WeakRef<BinderThread>,
 
+    /// Weak reference to the owning `BinderProcess`.
+    pub binder_proc: WeakRef<BinderProcess>,
+
     pub tid: Pid,
 
     // The underlying Zircon thread which backs this binder thread.
@@ -229,47 +231,62 @@ pub struct BinderThread {
     /// state protected by the lock.
     pub registration: AtomicU8,
 
-    /// A reference to the wait queue for the command queue. This allows other threads to notify
-    /// this thread without acquiring the lock.
-    pub command_queue_waiters: WaitQueue,
+    /// Event notified when this thread is blocked in `handle_thread_read` waiting for commands.
+    /// Allows other threads to wake or assign PI ownership to this thread without acquiring
+    /// `state`.
+    pub command_event: Arc<InterruptibleEvent>,
 
     /// A reference to the FD event wait queue for the command queue. This allows other threads to
     /// notify pollers of this thread without acquiring the lock.
     pub command_queue_poll_waiters: WaitQueue,
 
-    /// A shared queue of available threads for the `BinderProcess`.
-    pub available_threads: Arc<SegQueue<WeakRef<BinderThread>>>,
+    /// Waiters waiting for all pending transactions in the owning `BinderProcess` to complete.
+    pub freeze_waiters: WaitQueue,
 
-    /// The event that this thread is currently blocked on when waiting for an unscheduled
-    /// transaction, if any. This allows dequeuing worker threads to inspect and requeue the
-    /// event to inherit priority without acquiring `state`.
-    pub requeue_event: LockDepMutex<Option<Arc<InterruptibleEvent>>, BinderThreadRequeueEventLock>,
+    /// A shared queue of available threads for the `BinderProcess`.
+    pub available_threads: Arc<AvailableThreads>,
 }
 
 impl BinderThread {
     pub fn new(binder_proc: &BinderProcess, tid: Pid, thread: Arc<zx::Thread>) -> OwnedRef<Self> {
-        let inner_state = BinderThreadState::new(tid.clone(), binder_proc.identifier());
-        let command_queue_waiters = inner_state.command_queue.waiters.clone();
+        let command_event = InterruptibleEvent::new();
+        let inner_state = BinderThreadState::new(
+            tid.clone(),
+            binder_proc.identifier(),
+            Arc::clone(&command_event),
+        );
         let command_queue_poll_waiters = inner_state.command_queue.poll_waiters.clone();
+        let freeze_waiters = binder_proc.freeze_waiters.clone();
         let available_threads = binder_proc.available_threads.clone();
+        let weak_binder_proc = binder_proc.weak_self.clone();
         let state = inner_state.into();
 
         OwnedRef::new_cyclic(|weak_self| Self {
             weak_self,
+            binder_proc: weak_binder_proc,
             tid,
             thread,
             state,
             registration: AtomicU8::new(RegistrationState::Unregistered.to_u8()),
-            command_queue_waiters,
+            command_event,
             command_queue_poll_waiters,
+            freeze_waiters,
             available_threads,
-            requeue_event: LockDepMutex::new(None),
         })
+    }
+
+    /// Assigns `worker_thread` as the PI owner of `command_event` if this thread is currently
+    /// waiting in [`BinderThreadGuard::begin_wait_requeueable`] on an unscheduled process-queue
+    /// transaction.
+    pub fn try_assign_owner(&self, worker_thread: &Arc<zx::Thread>) {
+        let _ = self.command_event.assign_new_owner(worker_thread);
     }
 
     /// Acquire the lock to the binder thread's mutable state.
     pub fn lock(&self) -> BinderThreadGuard<'_> {
-        BinderThreadGuard { guard: self.state.lock(), thread: self }
+        let guard = self.state.lock();
+        let had_pending_transactions = guard.has_pending_transactions();
+        BinderThreadGuard { guard, thread: self, had_pending_transactions }
     }
 
     pub fn ordered_lock<'a>(
@@ -277,7 +294,12 @@ impl BinderThread {
         t2: &'a Self,
     ) -> (BinderThreadGuard<'a>, BinderThreadGuard<'a>) {
         let (g1, g2) = ordered_lock(&t1.state, &t2.state);
-        (BinderThreadGuard { guard: g1, thread: t1 }, BinderThreadGuard { guard: g2, thread: t2 })
+        let had_pending_1 = g1.has_pending_transactions();
+        let had_pending_2 = g2.has_pending_transactions();
+        (
+            BinderThreadGuard { guard: g1, thread: t1, had_pending_transactions: had_pending_1 },
+            BinderThreadGuard { guard: g2, thread: t2, had_pending_transactions: had_pending_2 },
+        )
     }
 
     /// Returns the task associated with this thread, if it is running and has an intact file
@@ -287,30 +309,44 @@ impl BinderThread {
     }
 }
 
-/// An RAII registration that associates an `InterruptibleEvent` with a `BinderThread` while waiting.
-///
-/// Note: This does NOT hold a lock while alive. It only sets the event upon creation and
-/// clears it back to `None` on drop.
-pub struct RequeueEventRegistration<'a>(&'a BinderThread);
-
-impl<'a> RequeueEventRegistration<'a> {
-    pub fn new(thread: &'a BinderThread, event: Arc<InterruptibleEvent>) -> Self {
-        *thread.requeue_event.lock() = Some(event);
-        Self(thread)
-    }
-}
-
-impl Drop for RequeueEventRegistration<'_> {
-    fn drop(&mut self) {
-        *self.0.requeue_event.lock() = None;
-    }
-}
-
 impl Releasable for BinderThread {
     type Context<'a> = &'a Kernel;
 
     fn release<'a>(self, context: Self::Context<'a>) {
-        self.state.into_inner().release(context);
+        let state = self.state.into_inner();
+        let releasing_with_pending = state.releasing_with_pending_transactions;
+        let mut had_pending_transactions =
+            releasing_with_pending || state.has_pending_transactions();
+        let command_addresses = state
+            .command_queue
+            .commands
+            .iter()
+            .filter_map(|queued| match &queued.command {
+                Command::Transaction { data, .. } => Some(data.buffers.data.address),
+                _ => None,
+            })
+            .collect::<smallvec::SmallVec<[_; 4]>>();
+        state.release(context);
+        let notify_freeze_waiters = if let Some(proc) = self.binder_proc.upgrade() {
+            let mut proc_state = proc.lock();
+            if releasing_with_pending {
+                proc_state.releasing_threads_with_pending_transactions =
+                    proc_state.releasing_threads_with_pending_transactions.checked_sub(1).expect(
+                        "Attempt to decrement releasing_threads_with_pending_transactions below 0",
+                    );
+            }
+            for address in command_addresses {
+                if let Some(active) = proc_state.active_transactions.get_mut(&address) {
+                    had_pending_transactions |= std::mem::replace(&mut active.is_pending, false);
+                }
+            }
+            had_pending_transactions && !proc.has_pending_transactions(&proc_state)
+        } else {
+            had_pending_transactions
+        };
+        if notify_freeze_waiters {
+            self.freeze_waiters.notify_all();
+        }
     }
 }
 
@@ -337,11 +373,165 @@ pub struct BinderThreadState {
     /// The extended error recorded for the calling thread since it last started a transaction or
     /// reply, or `None` if no error has been recorded. Reported by `BINDER_GET_EXTENDED_ERROR`.
     pub extended_error: Option<binder_extended_error>,
+    /// Whether `unregister_thread` incremented
+    /// `BinderProcessState::releasing_threads_with_pending_transactions` for this thread.
+    pub releasing_with_pending_transactions: bool,
+    /// Whether this thread is currently in the middle of initiating a synchronous transaction
+    /// before pushing `TransactionRole::Sender` onto `transactions`.
+    transaction_in_flight: bool,
+    /// Whether this thread is currently in the middle of sending a reply after popping the
+    /// `TransactionRole::Receiver` from `transactions` and before completing the reply.
+    reply_in_flight: bool,
+}
+
+/// Guard returned by [`BinderThreadGuard::begin_transaction`] that keeps the thread marked as
+/// having an outgoing synchronous transaction in flight until it is consumed by
+/// [`BinderThreadGuard::complete_begin_transaction`] or dropped on error.
+#[must_use]
+pub struct InFlightTransactionGuard<'a> {
+    thread: &'a BinderThread,
+}
+
+impl InFlightTransactionGuard<'_> {
+    fn deactivate(self) {
+        // Do not call the destructor.
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for InFlightTransactionGuard<'_> {
+    fn drop(&mut self) {
+        self.thread.lock().transaction_in_flight = false;
+    }
+}
+
+/// Token returned by [`BinderThreadGuard::pop_transaction_caller`] that keeps the thread marked as
+/// having a reply in flight until [`BinderThreadGuard::complete_reply`] is called (or the guard is
+/// dropped).
+#[must_use]
+pub struct InFlightReplyGuard<'a> {
+    thread: &'a BinderThread,
+}
+
+impl InFlightReplyGuard<'_> {
+    fn deactivate(self) {
+        // Do not call the destructor.
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for InFlightReplyGuard<'_> {
+    fn drop(&mut self) {
+        self.thread.lock().reply_in_flight = false;
+    }
 }
 
 pub struct BinderThreadGuard<'a> {
     guard: LockDepGuard<'a, BinderThreadState>,
     thread: &'a BinderThread,
+    had_pending_transactions: bool,
+}
+
+impl<'a> BinderThreadGuard<'a> {
+    /// Marks this thread as initiating an outgoing synchronous transaction while its lock is
+    /// released to copy transaction buffers.
+    pub fn begin_transaction(mut self) -> InFlightTransactionGuard<'a> {
+        debug_assert!(!self.guard.transaction_in_flight);
+        self.guard.transaction_in_flight = true;
+        InFlightTransactionGuard { thread: self.thread }
+    }
+
+    /// Enqueues `Command::TwoWayTransactionComplete` and pushes `sender` onto `transactions`,
+    /// consuming the [`InFlightTransactionGuard`] token.
+    pub fn complete_begin_transaction(
+        &mut self,
+        in_flight: InFlightTransactionGuard<'_>,
+        sender: TransactionSender,
+    ) {
+        debug_assert!(std::ptr::eq(self.thread, in_flight.thread));
+        debug_assert!(self.guard.transaction_in_flight);
+        in_flight.deactivate();
+        self.guard.transaction_in_flight = false;
+        self.guard.enqueue_command(Command::TwoWayTransactionComplete.into());
+        self.guard.transactions.push(TransactionRole::Sender(sender));
+    }
+
+    /// Pops the transaction this thread is replying to, and returns the peer that sent it (which
+    /// may be dead) along with an [`InFlightReplyGuard`] token that keeps the reply marked as in
+    /// flight until [`BinderThreadGuard::complete_reply`] is called. Fails if this thread is not
+    /// handling a transaction.
+    pub fn pop_transaction_caller(
+        mut self,
+    ) -> Result<(WeakBinderPeer, fuchsia_trace::Id, InFlightReplyGuard<'a>), TransactionError> {
+        match self.guard.transactions.pop() {
+            Some(TransactionRole::Receiver { peer, trace_id }) => {
+                log_trace!(
+                    "binder transaction popped from thread {} for peer {:?}",
+                    self.guard.tid,
+                    peer
+                );
+                debug_assert!(!self.guard.reply_in_flight);
+                self.guard.reply_in_flight = true;
+                Ok((peer, trace_id, InFlightReplyGuard { thread: self.thread }))
+            }
+            Some(transaction @ TransactionRole::Sender(_)) => {
+                // The thread is waiting for the reply to its own transaction, which must stay on
+                // its transaction stack.
+                self.guard.transactions.push(transaction);
+                log_warn!("caller got confused, nothing to reply to!");
+                error!(EINVAL)?
+            }
+            None => error!(EINVAL)?,
+        }
+    }
+
+    /// Completes an in-flight reply by clearing `reply_in_flight` and enqueuing
+    /// `Command::TransactionComplete`, consuming the [`InFlightReplyGuard`] token.
+    pub fn complete_reply(&mut self, in_flight: InFlightReplyGuard<'_>) {
+        debug_assert!(std::ptr::eq(self.thread, in_flight.thread));
+        debug_assert!(self.guard.reply_in_flight);
+        in_flight.deactivate();
+        self.guard.reply_in_flight = false;
+        self.guard.enqueue_command(Command::TransactionComplete.into());
+    }
+
+    /// Initiates a non-requeueable wait on this thread's `command_event` while holding
+    /// `BinderThreadGuard`, so dropping the guard immediately afterward observes the waiting state
+    /// and registers the thread in `available_threads` if eligible.
+    ///
+    /// `available` is cleared first, so that dropping the guard queues the thread at the top of
+    /// `available_threads` even if `available` is still set, e.g. if its previous wait ended
+    /// without its state being locked since.
+    ///
+    /// Calls to [`BinderThread::try_assign_owner`] during this wait are rejected, preserving any
+    /// known PI owner passed to `block_until`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a previous [`EventWaitGuard`] for this `BinderThread`'s `command_event` has not
+    /// yet been dropped. In production, at most one wait is active per `BinderThread` because
+    /// `BinderThread` instances are keyed by the calling task's `tid` and only that task calls
+    /// `handle_thread_read`.
+    pub fn begin_wait(&mut self) -> EventWaitGuard<'a> {
+        self.guard.available = false;
+        self.thread.command_event.begin_wait()
+    }
+
+    /// Initiates a requeueable wait on this thread's `command_event` while holding
+    /// `BinderThreadGuard`, allowing a worker thread that dequeues this thread's unscheduled
+    /// process-queue transaction to dynamically assign itself as PI owner via
+    /// [`BinderThread::try_assign_owner`].
+    ///
+    /// Requeue eligibility is part of `command_event`'s futex state and is cleared automatically
+    /// when the returned [`EventWaitGuard`] is dropped.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a previous [`EventWaitGuard`] for this `BinderThread`'s `command_event` has not
+    /// yet been dropped (see [`Self::begin_wait`]).
+    pub fn begin_wait_requeueable(&self) -> EventWaitGuard<'a> {
+        self.thread.command_event.begin_wait_requeueable()
+    }
 }
 
 impl Deref for BinderThreadGuard<'_> {
@@ -366,21 +556,27 @@ impl Drop for BinderThreadGuard<'_> {
         if is_available && !was_available {
             self.thread.available_threads.push(self.thread.weak_self.clone());
         }
+        if self.had_pending_transactions && !self.guard.has_pending_transactions() {
+            self.thread.freeze_waiters.notify_all();
+        }
         self.thread.registration.store(self.guard.registration.to_u8(), Ordering::Release);
     }
 }
 
 impl BinderThreadState {
-    pub fn new(tid: Pid, process_identifier: u64) -> Self {
+    pub fn new(tid: Pid, process_identifier: u64, command_event: Arc<InterruptibleEvent>) -> Self {
         Self {
             tid,
             process_identifier,
             registration: RegistrationState::default(),
             transactions: Default::default(),
-            command_queue: Default::default(),
+            command_queue: CommandQueueWithWaitQueue::new(command_event),
             request_kick: false,
             available: false,
             extended_error: None,
+            releasing_with_pending_transactions: false,
+            transaction_in_flight: false,
+            reply_in_flight: false,
         }
     }
 
@@ -409,7 +605,7 @@ impl BinderThreadState {
             log_trace!("thread {:?} is not waiting", self.tid);
             return false;
         }
-        if !self.transactions.is_empty() {
+        if !self.transactions.is_empty() || self.transaction_in_flight || self.reply_in_flight {
             log_trace!("thread {:?} is in a transaction {:?}", self.tid, self.transactions);
             return false;
         }
@@ -444,31 +640,6 @@ impl BinderThreadState {
         self.command_queue.push_back(command);
     }
 
-    /// Pops the transaction this thread is replying to, and returns the peer that sent it, which
-    /// may be dead. Fails if this thread is not handling a transaction.
-    pub fn pop_transaction_caller(
-        &mut self,
-    ) -> Result<(WeakBinderPeer, fuchsia_trace::Id), TransactionError> {
-        match self.transactions.pop() {
-            Some(TransactionRole::Receiver { peer, trace_id }) => {
-                log_trace!(
-                    "binder transaction popped from thread {} for peer {:?}",
-                    self.tid,
-                    peer
-                );
-                Ok((peer, trace_id))
-            }
-            Some(transaction @ TransactionRole::Sender(_)) => {
-                // The thread is waiting for the reply to its own transaction, which must stay on
-                // its transaction stack.
-                self.transactions.push(transaction);
-                log_warn!("caller got confused, nothing to reply to!");
-                error!(EINVAL)?
-            }
-            None => error!(EINVAL)?,
-        }
-    }
-
     /// Notifies this thread that the reply to the transaction it sent to `target_proc` could not
     /// be delivered because of `error`, and pops that transaction from its transaction stack.
     ///
@@ -500,6 +671,13 @@ impl BinderThreadState {
 
     pub fn has_pending_transactions(&self) -> bool {
         !self.transactions.is_empty()
+            || self.transaction_in_flight
+            || self.reply_in_flight
+            || self
+                .command_queue
+                .commands
+                .iter()
+                .any(|queued| matches!(queued.command, Command::Transaction { .. }))
     }
 }
 

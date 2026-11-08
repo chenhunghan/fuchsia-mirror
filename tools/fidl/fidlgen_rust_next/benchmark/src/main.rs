@@ -89,7 +89,7 @@ where
         &input,
     )
     .unwrap();
-    let mut handle_infos = fidl::convert_handle_dispositions_to_infos(decode_handle_buf).unwrap();
+    assert!(decode_handle_buf.is_empty());
 
     c.bench_function(&format!("rust/{name}/encode/{input_size}x"), move |b| {
         let mut buf = Vec::new();
@@ -119,7 +119,7 @@ where
                         wire_format_version: fidl::encoding::WireFormatVersion::V2,
                     },
                     black_box(&decode_buf),
-                    &mut handle_infos,
+                    &mut [],
                     &mut out,
                 )).unwrap();
             });

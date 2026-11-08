@@ -39,7 +39,7 @@ import("//build/tools/bazel2gn/bazel_migration.gni")
 
 library_headers("headers") {
   public = [ "include/elf-search.h" ]
-  deps = [
+  public_deps = [
     "//zircon/system/ulib/fbl",
     "//zircon/system/ulib/zx",
   ]

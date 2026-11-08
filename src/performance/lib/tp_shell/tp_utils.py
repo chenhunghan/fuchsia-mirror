@@ -4,6 +4,7 @@
 
 """Trace Processor wrapper utilities for Perfetto trace analysis."""
 
+import contextlib
 import hashlib
 import importlib.resources
 import json
@@ -24,12 +25,12 @@ from typing import Any, Self
 import perfetto.trace_processor.api
 from perfetto.tools.download_trace import resolve_trace_url
 from perfetto.trace_processor.api import TraceProcessor as PerfettoTP
-from perfetto.trace_processor.api import TraceProcessorConfig
 from perfetto.trace_processor.platform import PlatformDelegate
 from perfetto.trace_uri_resolver import util as resolver_util
 from perfetto.trace_uri_resolver.path import PathUriResolver
 from perfetto.trace_uri_resolver.registry import ResolverRegistry
 from perfetto.trace_uri_resolver.resolver import TraceUriResolver
+from tp_shell.tp_server import TraceProcessorServer
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -562,6 +563,15 @@ class FuchsiaPlatformDelegate(PlatformDelegate):
         )
 
 
+def _release(resources: contextlib.ExitStack) -> None:
+    """Releases a PerfettoTraceProcessor's resources, logging any failure."""
+    _LOGGER.info("Tearing down Perfetto TraceProcessor shell process...")
+    try:
+        resources.close()
+    except Exception as e:
+        _LOGGER.error(f"Error tearing down trace processor: {e}")
+
+
 class PerfettoTraceProcessor:
     """A wrapper around Perfetto's official Python TraceProcessor API.
 
@@ -581,7 +591,6 @@ class PerfettoTraceProcessor:
     debug: bool
     _tp: PerfettoTP
     _finalizer: weakref.finalize[Any, Any]
-    _tp_shell_context: Any
 
     def __init__(
         self,
@@ -599,104 +608,91 @@ class PerfettoTraceProcessor:
             cache: If True and trace_path is a URL, reuses local cached trace if valid;
                 if False, forces a fresh download overwriting the cache entry (default: True).
         """
-        self._tp_shell_context = None
+        self.debug = debug
+        # Everything this object owns, released in reverse order by close():
+        # the client connection, then the shell process, then the extracted
+        # shell binary.
+        resources = contextlib.ExitStack()
+        try:
+            self.tp_shell_path = self._find_tp_shell(tp_shell_path, resources)
+            delegate = FuchsiaPlatformDelegate(self.tp_shell_path)
+            self.trace_path = self._resolve_trace_path(
+                trace_path, delegate, cache
+            )
 
+            # The Perfetto client loads its protos and URI resolvers through
+            # the platform delegate.
+            perfetto.trace_processor.api.PLATFORM_DELEGATE = lambda: delegate
+
+            _LOGGER.info(
+                f"Initializing Perfetto TraceProcessor for trace: {self.trace_path}"
+            )
+            server = resources.enter_context(
+                TraceProcessorServer(self.tp_shell_path, self.trace_path)
+            )
+            self._tp = resources.enter_context(
+                contextlib.closing(PerfettoTP(remote=server.socket_path))
+            )
+        except BaseException:
+            resources.close()
+            raise
+
+        # Releases the resources even if close() is never called.
+        self._finalizer = weakref.finalize(self, _release, resources)
+
+    @staticmethod
+    def _find_tp_shell(
+        tp_shell_path: str | None, resources: contextlib.ExitStack
+    ) -> str:
+        """Returns the absolute path to the trace_processor_shell binary.
+
+        Without an explicit path, extracts the binary packaged with this
+        library, registering its cleanup with `resources`.
+        """
         if tp_shell_path is None:
+            resource = importlib.resources.files("tp_shell.bin").joinpath(
+                "trace_processor_shell"
+            )
             try:
-                # The logic here involving _tp_shell_context and its __enter__/__exit__
-                # methods is necessary to correctly manage the lifecycle of the extracted
-                # trace_processor_shell binary when loaded from package resources.
-                # importlib.resources.as_file returns a context manager that extracts
-                # the resource to a temporary location. We must call __enter__() to get
-                # the path and ensure __exit__() is called for cleanup.
-                resource = importlib.resources.files("tp_shell.bin").joinpath(
-                    "trace_processor_shell"
+                # Inside a .pyz archive this extracts the binary to a
+                # temporary file that is deleted when `resources` is closed.
+                tp_shell_path = str(
+                    resources.enter_context(
+                        importlib.resources.as_file(resource)
+                    )
                 )
-                self._tp_shell_context = importlib.resources.as_file(resource)
-                # Enter the extraction context to obtain a real filesystem path
-                extracted_path = self._tp_shell_context.__enter__()
-                tp_shell_path = str(extracted_path)
-                # Ensure the extracted file is executable (necessary in ZIP contexts)
-                os.chmod(tp_shell_path, 0o755)
             except Exception as e:
-                if self._tp_shell_context is not None:
-                    try:
-                        self._tp_shell_context.__exit__(None, None, None)
-                    except Exception:
-                        pass
                 raise FileNotFoundError(
                     "trace_processor_shell was not found in the packaged resources. "
                     "The binary must either be explicitly specified or packaged as a data source dependency."
                 ) from e
+            # Extraction from a ZIP archive does not preserve the executable bit.
+            os.chmod(tp_shell_path, 0o755)
 
-        self.tp_shell_path = os.path.abspath(tp_shell_path)
-        if not os.path.exists(self.tp_shell_path):
+        tp_shell_path = os.path.abspath(tp_shell_path)
+        if not os.path.exists(tp_shell_path):
             raise FileNotFoundError(
-                f"Trace processor shell not found: {self.tp_shell_path}"
+                f"Trace processor shell not found: {tp_shell_path}"
             )
-        self.debug = debug
+        return tp_shell_path
 
-        delegate = FuchsiaPlatformDelegate(self.tp_shell_path)
-
-        if (
-            trace_path.startswith("http://")
-            or trace_path.startswith("https://")
-            or trace_path.startswith("gs://")
-        ):
-            registry = delegate.default_resolver_registry()
-            self.trace_path = os.path.abspath(
-                self._resolve_and_cache_url(
-                    trace_path, registry, force_refresh=not cache
+    @classmethod
+    def _resolve_trace_path(
+        cls, trace_path: str, delegate: PlatformDelegate, cache: bool
+    ) -> str:
+        """Returns an absolute local path for `trace_path`, downloading URLs."""
+        if trace_path.startswith(("http://", "https://", "gs://")):
+            return os.path.abspath(
+                cls._resolve_and_cache_url(
+                    trace_path,
+                    delegate.default_resolver_registry(),
+                    force_refresh=not cache,
                 )
             )
-        else:
-            self.trace_path = os.path.abspath(trace_path)
-            if not os.path.exists(self.trace_path):
-                raise FileNotFoundError(
-                    f"Trace file not found: {self.trace_path}"
-                )
-
-        # Override Perfetto's PlatformDelegate to point directly to our prebuilt shell binary
-        perfetto.trace_processor.api.PLATFORM_DELEGATE = lambda: delegate
-
-        # Configure TraceProcessor to use a unique port to avoid conflicts
-        config = TraceProcessorConfig(unique_port=True)
-
-        _LOGGER.info(
-            f"Initializing Perfetto TraceProcessor for trace: {self.trace_path}"
-        )
-        try:
-            self._tp = PerfettoTP(trace=self.trace_path, config=config)
-        except Exception:
-            if self._tp_shell_context is not None:
-                try:
-                    self._tp_shell_context.__exit__(None, None, None)
-                except Exception:
-                    pass
-            raise
-
-        # Register a finalizer to ensure the subprocess is cleaned up even if close() isn't called.
-        self._finalizer = weakref.finalize(
-            self, self._cleanup, self._tp, self._tp_shell_context
-        )
-
-    @staticmethod
-    def _cleanup(tp: PerfettoTP, context: Any = None) -> None:
-        """Safely tears down the Perfetto TraceProcessor shell process and deletes temporary extraction files."""
-        _LOGGER.info("Tearing down Perfetto TraceProcessor shell process...")
-        try:
-            tp.close()
-        except Exception as e:
-            _LOGGER.error(f"Error closing trace processor: {e}")
-
-        if context is not None:
-            _LOGGER.info(
-                "Cleaning up temporary trace_processor_shell extraction..."
-            )
-            try:
-                context.__exit__(None, None, None)
-            except Exception as e:
-                _LOGGER.error(f"Error cleaning up extraction context: {e}")
+        trace_path = os.path.abspath(trace_path)
+        if not os.path.exists(trace_path):
+            raise FileNotFoundError(f"Trace file not found: {trace_path}")
+        return trace_path
 
     def run_query(self, query: str) -> list[dict[str, Any]]:
         """Runs a SQL query against the trace and returns the result as a list of dicts."""
@@ -712,6 +708,35 @@ class PerfettoTraceProcessor:
             result_iterator = self._tp.query(query)
             # Row.__dict__ on instance contains exactly the dynamic attributes (columns)
             return [row.__dict__ for row in result_iterator]
+        except Exception as e:
+            _LOGGER.error(f"Error running query: {e}")
+            raise
+
+    def query_rows(
+        self, query: str
+    ) -> tuple[tuple[str, ...], Iterator[tuple[Any, ...]]]:
+        """Runs a SQL query against the trace and returns (column_names, row_iterator).
+
+        Yields rows lazily as tuples of typed values (int, float, str, bytes, None)
+        without allocating full materialized result lists or intermediate dicts.
+        """
+        if not hasattr(self, "_finalizer") or not self._finalizer.alive:
+            raise RuntimeError("Trace processor is closed.")
+
+        if self.debug:
+            _LOGGER.debug(
+                f"--- DEBUG SQL QUERY ---\n{query.strip()}\n-----------------------"
+            )
+
+        try:
+            result_iterator = self._tp.query(query)
+            columns = tuple(result_iterator.column_names)
+
+            def row_gen() -> Iterator[tuple[Any, ...]]:
+                for row in result_iterator:
+                    yield tuple(getattr(row, col) for col in columns)
+
+            return columns, row_gen()
         except Exception as e:
             _LOGGER.error(f"Error running query: {e}")
             raise

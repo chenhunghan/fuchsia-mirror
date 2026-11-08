@@ -27,6 +27,8 @@ kernel_rust_mod("lockdep-rs") {
   deps = [
     "//src/lib/kprint",
     "//src/lib/zr",
+    "//third_party/rust_crates:pin-init",
+    "//zircon/kernel/kernel:percpu-bindings",
     "//zircon/kernel/lib/console:console_rs",
   ]
 }

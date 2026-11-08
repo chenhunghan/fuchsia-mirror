@@ -21,14 +21,13 @@ fn cvsd_test_suite() -> Result<()> {
         let output_format = FormatDetails {
             format_details_version_ordinal: Some(1),
             mime_type: Some("audio/pcm".to_string()),
-            domain: Some(DomainFormat::Audio(AudioFormat::Uncompressed(
-                AudioUncompressedFormat::Pcm(PcmFormat {
-                    pcm_mode: AudioPcmMode::Linear,
-                    bits_per_sample: 16,
-                    frames_per_second: 64000,
-                    channel_map: vec![AudioChannelId::Lf],
-                }),
-            ))),
+            pcm_format: Some(PcmFormat2 {
+                pcm_mode: Some(AudioPcmMode2::Linear),
+                bits_per_sample: Some(16),
+                frames_per_second: Some(64000),
+                channel_map: Some(vec![AudioChannelId2::Fl]),
+                ..Default::default()
+            }),
             ..Default::default()
         };
 

@@ -7,7 +7,11 @@
 from . import backend, cli, ioctl, models, runner
 from .backend import USBTestBackend
 from .cli import create_parser, main, parse_test_selection
-from .ioctl import USBTestIoctlBackend
+from .ioctl import (
+    USB_DEVICE_TEST_MODE,
+    USBTestIoctlBackend,
+    UsbTestModeSelector,
+)
 from .models import (
     ALL_TEST_CASES,
     EP0_GENERIC_TESTS,
@@ -37,9 +41,11 @@ __all__ = [
     "TestRunner",
     "TestStatus",
     "TextReporter",
+    "USB_DEVICE_TEST_MODE",
     "USBTestBackend",
     "USBTestIoctlBackend",
     "UsbDescriptorType",
+    "UsbTestModeSelector",
     "backend",
     "cli",
     "create_parser",

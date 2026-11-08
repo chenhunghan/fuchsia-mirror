@@ -1,0 +1,62 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/idk:idk_cc_source_library.bzl", "idk_cc_source_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Internal headers for in-tree use only.
+fx_cc_library(
+    name = "internal",
+    hdrs = [
+        "include/lib/zbi-format/internal/bootfs.h",
+        "include/lib/zbi-format/internal/debugdata.h",
+        "include/lib/zbi-format/internal/deprecated-cpu.h",
+        "include/lib/zbi-format/internal/storage.h",
+    ],
+    # Since this doesn't actually compile any code, don't let it contribute any
+    # implicit link inputs from default configs.
+    configs = [],  # @bazel2gn:clear
+    includes = ["include"],
+    public_configs = [":include"],
+    visibility = [
+        "//src/bringup/bin/userboot:__pkg__",
+        "//src/firmware/lib/zircon_boot:__pkg__",
+        "//src/lib/zbitl:__subpackages__",
+        "//src/sys/early_boot_instrumentation:__subpackages__",
+        "//zircon/kernel:__subpackages__",
+        "//zircon/tools/zbi:__pkg__",
+    ],
+    deps = [":zbi-format"],
+    alwayslink = True,
+)
+
+idk_cc_source_library(
+    name = "zbi-format",
+    hdrs = [
+        "include/lib/zbi-format/board.h",
+        "include/lib/zbi-format/cpu.h",
+        "include/lib/zbi-format/driver-config.h",
+        "include/lib/zbi-format/graphics.h",
+        "include/lib/zbi-format/kernel.h",
+        "include/lib/zbi-format/memory.h",
+        "include/lib/zbi-format/partition.h",
+        "include/lib/zbi-format/reboot.h",
+        "include/lib/zbi-format/secure-entropy.h",
+        "include/lib/zbi-format/zbi.h",
+    ],
+    api_area = "Kernel",
+    category = "partner",
+    # Since this doesn't actually compile any code, don't let it contribute any
+    # implicit link inputs from default configs.
+    configs = [],  # @bazel2gn:clear
+    idk_name = "zbi-format",
+    # Verifies that the checked-in headers match those generated from the FIDL
+    # library.
+    non_idk_implementation_deps = ["//sdk/fidl/zbi:zbi.c.checked-in"],
+    public_configs = [":include"],
+    stable = True,
+    visibility = ["//:__subpackages__"],
+)

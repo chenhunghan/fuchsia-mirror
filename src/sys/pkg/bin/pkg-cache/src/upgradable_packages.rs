@@ -25,6 +25,10 @@ impl UpgradablePackages {
         }
     }
 
+    pub async fn wait_until_initialized(&self) {
+        let () = self.init_event.wait().await;
+    }
+
     pub async fn get_hash(&self, url: &UnpinnedAbsolutePackageUrl) -> Option<fuchsia_url::Hash> {
         let () = self.init_event.wait().await;
         self.packages
@@ -34,6 +38,8 @@ impl UpgradablePackages {
             .copied()
     }
 
+    /// Called by `PackageIndex::set_upgradable_urls`, which holds the package index lock for
+    /// writing so the upgradable package set does not change during a garbage collection pass.
     pub fn set_upgradable_urls(
         &self,
         pinned_urls: Vec<fpkg::PackageUrl>,
@@ -68,8 +74,13 @@ impl UpgradablePackages {
         Ok(())
     }
 
+    /// Returns the upgradable packages and their required blobs.
+    ///
+    /// Must only be called after `Self::wait_until_initialized` returns. `PackageIndex` calls this
+    /// for garbage collection passes, which wait for initialization before locking the package
+    /// index.
     pub async fn list_blobs(&self, blobfs: &blobfs::Client) -> HashSet<fuchsia_hash::Hash> {
-        let () = self.init_event.wait().await;
+        debug_assert!(self.init_event.signaled());
 
         let mut all_blobs = HashSet::new();
         let package_hashes: Vec<_> = self.packages.lock().values().copied().collect();
@@ -79,7 +90,6 @@ impl UpgradablePackages {
                 blobfs,
                 &package_hash,
                 &memoized_packages,
-                crate::required_blobs::ErrorStrategy::PropagateFailure,
             )
             .await
             {

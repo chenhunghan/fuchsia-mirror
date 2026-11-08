@@ -85,12 +85,9 @@ if (is_fuchsia) {
     visibility = [ ":*" ]
   }
 }
+
 fuchsia_unittest_package("battery-client-tests") {
   package_name = "battery-client-tests-gn"
   component_name = "battery-client-tests"
   deps = [ ":battery-client_test" ]
-  visibility = [
-    ":*",
-    "//src/connectivity/bluetooth:*",
-  ]
 }

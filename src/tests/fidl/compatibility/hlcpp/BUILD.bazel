@@ -3,13 +3,65 @@
 # found in the LICENSE file.
 
 load("@rules_fuchsia//fuchsia:assembly.bzl", "fuchsia_prebuilt_package")
-
-package(
-    default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
 )
 
+package(default_applicable_licenses = ["//:license"])
+
+# GN puts the binary in `target_out_dir` rather than `root_out_dir`.
+# @bazel2gn:raw_attribute:output_dir = target_out_dir
+fx_cc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["main.cc"],
+    gn_output_name = "hlcpp-impl",
+    deps = [
+        "//sdk/lib/async-default",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl",
+        "//src/tests/fidl/compatibility:hlcpp_client_app",
+        "//src/tests/fidl/compatibility/fidl:fidl_service_hlcpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "hlcpp-impl",
+)
+
+fx_component_manifest(
+    name = "impl_manifest",
+    testonly = True,
+    component_name = "impl",
+    includes = ["//src/tests/fidl/compatibility:meta/impl.shard"],
+    manifest = "meta/impl.cml",
+)
+
+fx_component(
+    name = "impl",
+    testonly = True,
+    compiled_manifest = ":impl_manifest",
+    deps = [":bin_packaged"],
+)
+
+# `fuchsia_prebuilt_package` wraps the GN-built package for Bazel product
+# assembly while `fuchsia_package("hlcpp")` remains in `BUILD.gn`.
+# @bazel2gn:skip
 fuchsia_prebuilt_package(
     name = "hlcpp",
     archive = "@gn_targets//src/tests/fidl/compatibility/hlcpp",
+    visibility = ["//products/terminal:__pkg__"],
 )

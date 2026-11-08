@@ -3,14 +3,13 @@
 // found in the LICENSE file.
 
 #![cfg(test)]
-use crate::security::selinux_hooks::selinuxfs::selinuxfs_policy_loaded;
+use crate::security::selinux_hooks::selinuxfs::selinuxfs_load_policy;
 
-use crate::security::SecurityServer;
 use crate::task::CurrentTask;
 use crate::task::loader::ResolvedProgram;
 use crate::testing::spawn_kernel_with_selinux_and_run;
 use crate::vfs::{FileMapping, FileWriteGuardMode, FsStr, NamespaceNode, OpenAccessCheck};
-use selinux::TaskAttrs;
+use selinux::{SecurityServer, TaskAttrs};
 use starnix_uapi::auth::Credentials;
 use starnix_uapi::device_id::DeviceId;
 use starnix_uapi::file_mode::FileMode;
@@ -50,7 +49,7 @@ pub(in crate::security) fn create_directory_with_parents(
 
 /// `hooks_tests_policy.pp` is a compiled policy module.
 /// The path is relative to this rust source file.
-const HOOKS_TESTS_BINARY_POLICY: &[u8] =
+pub(in crate::security) const HOOKS_TESTS_BINARY_POLICY: &[u8] =
     include_bytes!("../../../../lib/selinux/testdata/micro_policies/hooks_tests_policy");
 
 /// Instantiates a kernel with SELinux enabled, switches from permissive to enforcing mode, and
@@ -66,8 +65,7 @@ where
     spawn_kernel_with_selinux_and_run(async |current_task, security_server| {
         let policy_bytes = HOOKS_TESTS_BINARY_POLICY.to_vec();
         security_server.set_enforcing(true);
-        security_server.load_policy(policy_bytes).expect("policy load failed");
-        selinuxfs_policy_loaded(current_task);
+        selinuxfs_load_policy(current_task, policy_bytes).expect("load policy");
         callback(current_task, security_server)
     })
 }

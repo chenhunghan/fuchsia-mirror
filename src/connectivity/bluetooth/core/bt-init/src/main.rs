@@ -13,6 +13,7 @@ use fidl_fuchsia_component::{CreateChildArgs, RealmMarker, RealmProxy};
 use fidl_fuchsia_component_decl::{
     Child, CollectionRef, ConfigOverride, ConfigSingleValue, ConfigValue, StartupMode,
 };
+use fidl_fuchsia_component_runtime as fruntime;
 use fidl_fuchsia_io as fio;
 use fuchsia_async as fasync;
 use fuchsia_bluetooth::constants::{BT_HOST, BT_HOST_COLLECTION, BT_HOST_URL, BT_SERVICE_DIR};
@@ -76,7 +77,11 @@ async fn open_childs_service_directory<C: ComponentClientAdapter>(
 }
 
 // Use the fuchsia.component.Realm protocol to create a dynamic child instance in the collection.
-async fn create_bt_host(realm: &RealmProxy, instance_name: &str) -> Result<(), Error> {
+async fn create_bt_host(
+    realm: &RealmProxy,
+    capabilities: &fruntime::CapabilitiesProxy,
+    instance_name: &str,
+) -> Result<(), Error> {
     let component_name = format!("{BT_HOST}_{instance_name}");
     let collection_ref = CollectionRef { name: BT_HOST_COLLECTION.to_owned() };
 
@@ -84,21 +89,41 @@ async fn create_bt_host(realm: &RealmProxy, instance_name: &str) -> Result<(), E
 
     info!("Creating component: {component_name:?} with service path: {service_path:?}");
 
-    // TODO(b/308664865): Structured config launches dynamic child component with InstanceCannotResolve error. See bug description for temporary hack.
+    let config_value = ConfigValue::Single(ConfigSingleValue::String(service_path));
+    let (data_handle, data_other_end) = zx::EventPair::create();
+    capabilities
+        .data_create(data_other_end, &fruntime::Data::Bytes(fidl::persist(&config_value)?))
+        .await?
+        .map_err(|e| format_err!("{e:?}"))?;
+    let (dictionary, dictionary_other_end) = zx::EventPair::create();
+    capabilities
+        .dictionary_create(dictionary_other_end)
+        .await?
+        .map_err(|e| format_err!("{e:?}"))?;
+    let dictionary_dup = dictionary.duplicate_handle(zx::Rights::SAME_RIGHTS)?;
+    capabilities
+        .dictionary_insert(dictionary_dup, "fuchsia.bluetooth.DevicePath", data_handle)
+        .await?
+        .map_err(|e| format_err!("{e:?}"))?;
+
+    // Retain config_overrides alongside additional_inputs for compatibility with prebuilt bt-host
+    // until third_party/pigweed rolls its bt-host.cml configuration capability migration.
     let child_decl = Child {
         name: Some(component_name),
         url: Some(BT_HOST_URL.to_owned()),
         startup: Some(StartupMode::Lazy),
         config_overrides: Some(vec![ConfigOverride {
             key: Some("device_path".to_string()),
-            value: Some(ConfigValue::Single(ConfigSingleValue::String(service_path))),
+            value: Some(config_value),
             ..ConfigOverride::default()
         }]),
         ..Default::default()
     };
 
+    let child_args = CreateChildArgs { additional_inputs: Some(dictionary), ..Default::default() };
+
     realm
-        .create_child(&collection_ref, &child_decl, CreateChildArgs::default())
+        .create_child(&collection_ref, &child_decl, child_args)
         .await?
         .map_err(|e| format_err!("{e:?}"))?;
     Ok(())
@@ -108,6 +133,8 @@ async fn create_bt_host(realm: &RealmProxy, instance_name: &str) -> Result<(), E
 async fn run_device_watcher() -> Result<(), Error> {
     let realm = client::connect_to_protocol::<RealmMarker>()
         .expect("failed to connect to fuchsia.component.Realm");
+    let capabilities = client::connect_to_protocol::<fruntime::CapabilitiesMarker>()
+        .expect("failed to connect to fuchsia.component.runtime.Capabilities");
 
     let service =
         fuchsia_component::client::Service::open(fidl_fuchsia_hardware_bluetooth::ServiceMarker)
@@ -120,7 +147,7 @@ async fn run_device_watcher() -> Result<(), Error> {
             Ok(instance) => {
                 let name = instance.instance_name().to_string();
                 info!("Discovered bluetooth service instance: {name}");
-                if let Err(e) = create_bt_host(&realm, &name).await {
+                if let Err(e) = create_bt_host(&realm, &capabilities, &name).await {
                     warn!("Failed to create bt-host for service instance {name}: {e:?}");
                 }
             }
@@ -327,14 +354,82 @@ mod tests {
         assert!(mock_client.bt_fastpair_provider_channel.is_none());
     }
 
+    /// Handles the expected `DataCreate`, `DictionaryCreate`, and `DictionaryInsert` requests for
+    /// `create_bt_host`, verifying the persisted `ConfigValue` and `EventPair` peer koids across
+    /// requests, and returns the server end of the created dictionary `EventPair`.
+    async fn handle_expected_capabilities_requests(
+        capabilities_stream: &mut fruntime::CapabilitiesRequestStream,
+        expected_device_path: &str,
+    ) -> zx::EventPair {
+        let Some(Ok(fruntime::CapabilitiesRequest::DataCreate { data_handle, data, responder })) =
+            capabilities_stream.next().await
+        else {
+            panic!("Expected DataCreate request");
+        };
+        let data_create_info = data_handle.basic_info().unwrap();
+        assert_ne!(data_create_info.koid, data_create_info.related_koid);
+        let fruntime::Data::Bytes(bytes) = data else {
+            panic!("Expected Data::Bytes");
+        };
+        let decoded: ConfigValue = fidl::unpersist(&bytes).expect("valid persisted ConfigValue");
+        assert_eq!(
+            decoded,
+            ConfigValue::Single(ConfigSingleValue::String(expected_device_path.to_string()))
+        );
+        responder.send(Ok(())).unwrap();
+
+        let Some(Ok(fruntime::CapabilitiesRequest::DictionaryCreate {
+            dictionary: dict_server,
+            responder,
+        })) = capabilities_stream.next().await
+        else {
+            panic!("Expected DictionaryCreate request");
+        };
+        let dict_create_info = dict_server.basic_info().unwrap();
+        assert_ne!(dict_create_info.koid, dict_create_info.related_koid);
+        responder.send(Ok(())).unwrap();
+
+        let Some(Ok(fruntime::CapabilitiesRequest::DictionaryInsert {
+            dictionary: insert_dict,
+            key,
+            value,
+            responder,
+        })) = capabilities_stream.next().await
+        else {
+            panic!("Expected DictionaryInsert request");
+        };
+        assert_eq!(key, "fuchsia.bluetooth.DevicePath");
+
+        // `insert_dict` is a duplicate of the client dictionary handle paired with `dict_server`.
+        let insert_dict_info = insert_dict.basic_info().unwrap();
+        assert_eq!(insert_dict_info.koid, dict_create_info.related_koid);
+        assert_eq!(insert_dict_info.related_koid, dict_create_info.koid);
+
+        // `value` is the client data handle paired with `DataCreate`'s `data_handle`.
+        let value_info = value.basic_info().unwrap();
+        assert_eq!(value_info.koid, data_create_info.related_koid);
+        assert_eq!(value_info.related_koid, data_create_info.koid);
+
+        responder.send(Ok(())).unwrap();
+        dict_server
+    }
+
     #[fuchsia::test]
     async fn test_create_bt_host_success() {
         let (realm_proxy, mut realm_stream) =
             fidl::endpoints::create_proxy_and_stream::<RealmMarker>();
+        let (capabilities_proxy, mut capabilities_stream) =
+            fidl::endpoints::create_proxy_and_stream::<fruntime::CapabilitiesMarker>();
 
-        let create_fut = create_bt_host(&realm_proxy, "instance-1");
+        let create_fut = create_bt_host(&realm_proxy, &capabilities_proxy, "instance-1");
 
         let mock_fut = async move {
+            let expected_path = format!("{BT_SERVICE_DIR}/instance-1/vendor");
+            let dict_server =
+                handle_expected_capabilities_requests(&mut capabilities_stream, &expected_path)
+                    .await;
+            let dict_server_info = dict_server.basic_info().unwrap();
+
             let Some(Ok(fidl_fuchsia_component::RealmRequest::CreateChild {
                 collection,
                 decl,
@@ -354,11 +449,12 @@ mod tests {
             assert_eq!(overrides[0].key.as_deref(), Some("device_path"));
             assert_eq!(
                 overrides[0].value,
-                Some(ConfigValue::Single(ConfigSingleValue::String(format!(
-                    "{BT_SERVICE_DIR}/instance-1/vendor"
-                ))))
+                Some(ConfigValue::Single(ConfigSingleValue::String(expected_path)))
             );
-            assert_eq!(args, CreateChildArgs::default());
+            let additional_inputs = args.additional_inputs.expect("additional_inputs present");
+            let additional_inputs_info = additional_inputs.basic_info().unwrap();
+            assert_eq!(additional_inputs_info.koid, dict_server_info.related_koid);
+            assert_eq!(additional_inputs_info.related_koid, dict_server_info.koid);
 
             responder.send(Ok(())).unwrap();
         };
@@ -371,10 +467,17 @@ mod tests {
     async fn test_create_bt_host_component_error() {
         let (realm_proxy, mut realm_stream) =
             fidl::endpoints::create_proxy_and_stream::<RealmMarker>();
+        let (capabilities_proxy, mut capabilities_stream) =
+            fidl::endpoints::create_proxy_and_stream::<fruntime::CapabilitiesMarker>();
 
-        let create_fut = create_bt_host(&realm_proxy, "instance-1");
+        let create_fut = create_bt_host(&realm_proxy, &capabilities_proxy, "instance-1");
 
         let mock_fut = async move {
+            let expected_path = format!("{BT_SERVICE_DIR}/instance-1/vendor");
+            let _dict_server =
+                handle_expected_capabilities_requests(&mut capabilities_stream, &expected_path)
+                    .await;
+
             let Some(Ok(fidl_fuchsia_component::RealmRequest::CreateChild { responder, .. })) =
                 realm_stream.next().await
             else {
@@ -392,10 +495,17 @@ mod tests {
     async fn test_create_bt_host_fidl_error() {
         let (realm_proxy, mut realm_stream) =
             fidl::endpoints::create_proxy_and_stream::<RealmMarker>();
+        let (capabilities_proxy, mut capabilities_stream) =
+            fidl::endpoints::create_proxy_and_stream::<fruntime::CapabilitiesMarker>();
 
-        let create_fut = create_bt_host(&realm_proxy, "instance-1");
+        let create_fut = create_bt_host(&realm_proxy, &capabilities_proxy, "instance-1");
 
         let mock_fut = async move {
+            let expected_path = format!("{BT_SERVICE_DIR}/instance-1/vendor");
+            let _dict_server =
+                handle_expected_capabilities_requests(&mut capabilities_stream, &expected_path)
+                    .await;
+
             let Some(Ok(fidl_fuchsia_component::RealmRequest::CreateChild { responder, .. })) =
                 realm_stream.next().await
             else {
@@ -407,5 +517,45 @@ mod tests {
 
         let (result, ()) = futures::future::join(create_fut, mock_fut).await;
         assert!(result.is_err());
+    }
+
+    #[fuchsia::test]
+    async fn test_create_bt_host_capabilities_error() {
+        let (realm_proxy, mut realm_stream) =
+            fidl::endpoints::create_proxy_and_stream::<RealmMarker>();
+        let (capabilities_proxy, mut capabilities_stream) =
+            fidl::endpoints::create_proxy_and_stream::<fruntime::CapabilitiesMarker>();
+
+        let result = {
+            let create_fut = create_bt_host(&realm_proxy, &capabilities_proxy, "instance-1");
+            let mock_fut = async move {
+                let Some(Ok(fruntime::CapabilitiesRequest::DataCreate { responder, .. })) =
+                    capabilities_stream.next().await
+                else {
+                    panic!("Expected DataCreate request");
+                };
+                responder.send(Err(fruntime::CapabilitiesError::InvalidData)).unwrap();
+            };
+            let (result, ()) = futures::future::join(create_fut, mock_fut).await;
+            result
+        };
+
+        assert!(result.is_err());
+        drop(realm_proxy);
+        assert!(realm_stream.next().await.is_none());
+    }
+
+    #[fuchsia::test]
+    async fn test_create_bt_host_capabilities_fidl_error() {
+        let (realm_proxy, mut realm_stream) =
+            fidl::endpoints::create_proxy_and_stream::<RealmMarker>();
+        let (capabilities_proxy, capabilities_stream) =
+            fidl::endpoints::create_proxy_and_stream::<fruntime::CapabilitiesMarker>();
+        drop(capabilities_stream);
+
+        let result = create_bt_host(&realm_proxy, &capabilities_proxy, "instance-1").await;
+        assert!(result.is_err());
+        drop(realm_proxy);
+        assert!(realm_stream.next().await.is_none());
     }
 }

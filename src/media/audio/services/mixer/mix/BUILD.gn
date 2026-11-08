@@ -137,4 +137,7 @@ cc_test_executable("mix_unittests") {
 
 fuchsia_unittest_package("audio_services_mixer_mix_unittests") {
   deps = [ ":mix_unittests" ]
+  test_specs = {
+    parallel = 4
+  }
 }

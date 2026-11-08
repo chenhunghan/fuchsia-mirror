@@ -27,7 +27,7 @@ executable("cpp_bin") {
   output_name = "config_integration_test_cpp"
   sources = [ "cpp/test.cc" ]
 
-  public_deps = [
+  deps = [
     "//examples/diagnostics/inspect/codelab/cpp/testing:inspect-cpp-codelab-testing",
     "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_hlcpp",
     "//sdk/lib/diagnostics/reader/cpp:archive_reader",

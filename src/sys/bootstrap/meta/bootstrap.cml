@@ -36,6 +36,7 @@
         },
         {
             protocol: [
+                "fuchsia.diagnostics.SaltProvider",
                 "fuchsia.inspect.InspectSink",
                 "fuchsia.logger.LogSink",
             ],
@@ -210,6 +211,7 @@
         },
         {
             protocol: [
+                "fuchsia.diagnostics.ArchiveAccessor.logs",
                 "fuchsia.diagnostics.LogSettings",
                 "fuchsia.diagnostics.LogStream",
                 "fuchsia.diagnostics.system.SerialLogControl",

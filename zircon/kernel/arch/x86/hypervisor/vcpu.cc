@@ -1012,7 +1012,7 @@ zx::result<> Vcpu::Enter(zx_port_packet_t& packet) {
     }
 
     // Updates guest system time if the guest subscribed to updates.
-    pv_clock_update_system_time(&pv_clock_state_, &guest_.PhysicalAspace());
+    pv_clock_update_system_time(&pv_clock_state_);
 
     if (!extended_registers_loaded) {
       entered_.store(true);

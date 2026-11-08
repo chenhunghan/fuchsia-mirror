@@ -2,7 +2,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules/rust:defs.bzl", "rustc_library", "rustc_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -83,4 +85,11 @@ alias(
     actual = ":fuchsia-inspect-contrib",
     # Used widely across the repository (sdk/lib, connectivity, devices, diagnostics, performance, power, session, starnix, sys, vendor).
     visibility = ["//visibility:public"],
+)
+
+fx_unittest_package(
+    name = "fuchsia-inspect-contrib-tests",
+    max_log_severity = "ERROR",
+    unit_tests = [":fuchsia-inspect-contrib_test"],
+    visibility = ["//src/lib/diagnostics:__pkg__"],
 )

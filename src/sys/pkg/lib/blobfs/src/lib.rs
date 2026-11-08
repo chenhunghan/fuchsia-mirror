@@ -82,6 +82,9 @@ pub enum CreateError {
     #[error("the blob already exists or is being concurrently written")]
     AlreadyExists,
 
+    #[error("there is insufficient storage space available to create the blob")]
+    OutOfSpace,
+
     #[error("while creating the blob")]
     Io(#[source] fuchsia_fs::node::OpenError),
 
@@ -114,6 +117,7 @@ impl From<ffxfs::CreateBlobError> for CreateError {
     fn from(e: ffxfs::CreateBlobError) -> Self {
         match e {
             ffxfs::CreateBlobError::AlreadyExists => CreateError::AlreadyExists,
+            ffxfs::CreateBlobError::OutOfSpace => CreateError::OutOfSpace,
             e @ ffxfs::CreateBlobError::Internal => CreateError::BlobCreator(e),
         }
     }

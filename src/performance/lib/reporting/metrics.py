@@ -66,6 +66,8 @@ class Unit(enum.Enum):
     count = "count"
     # Power-based units.
     watts = "W"
+    # Energy-based units.
+    joules = "J"
 
 
 class MetricDescription(TypedDict):

@@ -5,6 +5,7 @@
 #ifndef SRC_DEVELOPER_FORENSICS_EXCEPTIONS_EXCEPTION_BROKER_H_
 #define SRC_DEVELOPER_FORENSICS_EXCEPTIONS_EXCEPTION_BROKER_H_
 
+#include <fidl/fuchsia.exception/cpp/fidl.h>
 #include <lib/async/dispatcher.h>
 #include <lib/inspect/cpp/vmo/types.h>
 #include <lib/zx/time.h>
@@ -20,7 +21,7 @@ namespace exceptions {
 // crash reporting will occur, but the broker can be used to make other systems handle exceptions,
 // such as debuggers.
 
-class ExceptionBroker : public fuchsia::exception::Handler {
+class ExceptionBroker : public fidl::Server<fuchsia_exception::Handler> {
  public:
   // If |override_filepath| is defined, it will attempt to locate that file instead of the default
   // config one. See exception_broker.cc for the prod filepath.
@@ -32,10 +33,9 @@ class ExceptionBroker : public fuchsia::exception::Handler {
 
   // fuchsia.exception.Handler implementation.
 
-  void OnException(zx::exception exception, fuchsia::exception::ExceptionInfo info,
-                   OnExceptionCallback) override;
+  void OnException(OnExceptionRequest& request, OnExceptionCompleter::Sync& completer) override;
 
-  void IsActive(IsActiveCallback) override;
+  void IsActive(IsActiveCompleter::Sync& completer) override;
 
   ProcessLimboManager& limbo_manager() { return limbo_manager_; }
   const ProcessLimboManager& limbo_manager() const { return limbo_manager_; }
@@ -43,7 +43,7 @@ class ExceptionBroker : public fuchsia::exception::Handler {
  private:
   ExceptionBroker(async_dispatcher_t* dispatcher, inspect::Node* inspect_root,
                   size_t max_num_handlers, zx::duration exception_ttl, bool suspend_enabled);
-  void AddToLimbo(zx::exception exception, fuchsia::exception::ExceptionInfo info);
+  void AddToLimbo(zx::exception exception, fuchsia_exception::ExceptionInfo info);
 
   HandlerManager handler_manager_;
   ProcessLimboManager limbo_manager_;

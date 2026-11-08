@@ -1,0 +1,74 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_rules_common//packages:resources.bzl", "resource")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "super_parser",
+    srcs = [
+        "src/format.rs",
+        "src/lib.rs",
+        "src/metadata.rs",
+    ],
+    edition = "2024",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:async-trait"],
+    visibility = ["//vendor/google:__subpackages__"],
+    deps = [
+        "//src/storage/lib/storage_device",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:bitflags",
+        "//third_party/rust_crates/vendor:sha2",
+        "//third_party/rust_crates/vendor:static_assertions",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)
+
+rustc_test(
+    name = "super_parser_test",
+    crate = ":super_parser",
+    data = [":test_images"],
+    link_deps = ["//third_party/zstd"],
+    deps = [
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:rand",
+        "//third_party/rust_crates/vendor:zstd",
+    ],
+)
+
+rustc_binary(
+    name = "super_parser_tool",
+    srcs = ["src/main.rs"],
+    edition = "2024",
+    deps = [
+        ":super_parser",
+        "//src/storage/lib/storage_device",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+# Kept in BUILD.gn above the sentinel because bazel2gn does not translate
+# resource() targets.
+# @bazel2gn:skip
+resource(
+    name = "test_images",
+    src = "testdata/simple_super.img.zstd",
+    dest = "data/simple_super.img.zstd",
+)
+
+fx_unittest_package(
+    name = "super_parser_tests",
+    unit_tests = [":super_parser_test"],
+    visibility = ["//src/storage:__pkg__"],
+)

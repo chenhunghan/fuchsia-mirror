@@ -22,7 +22,7 @@
 //  - Contributing to an accumulator as a stalling thread.
 class StallAccumulator {
  public:
-  StallAccumulator();
+  StallAccumulator() = delete;
   StallAccumulator(const StallAccumulator &) = delete;
   StallAccumulator(StallAccumulator &&) = delete;
   StallAccumulator &operator=(const StallAccumulator &) = delete;
@@ -45,7 +45,8 @@ class StallAccumulator {
   //
   // //zircon/kernel/kernel/percpu.rs asserts that the two layouts agree.
   struct Storage {
-    // A Rust `ksync::KMutex<ksync::RawSpinlock>`, which mirrors `Lock<SpinLock>`.
+    // A Rust `ksync::KMutex<TrackedSpinlock>` (`crate::ksync_kernel::TrackedSpinlock`), which
+    // mirrors `Lock<SpinLock>`.
     alignas(Lock<SpinLock>) uint8_t lock[sizeof(Lock<SpinLock>)];
 
     // Number of progressing threads currently tracked by this structure.
@@ -72,8 +73,6 @@ extern "C" {
 
 // Moves the stall contributions of the outgoing and incoming threads across a context switch.
 void rust_stall_apply_context_switch(Thread *current_thread, Thread *next_thread);
-
-void rust_stall_accumulator_init(StallAccumulator *accumulator);
 
 void rust_stall_accumulator_update(StallAccumulator *accumulator, int op_contributors_progressing,
                                    int op_contributors_stalling);

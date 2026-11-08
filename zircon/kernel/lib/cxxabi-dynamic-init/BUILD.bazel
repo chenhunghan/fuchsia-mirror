@@ -1,0 +1,25 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_library_headers.bzl", "fx_cc_library_headers")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "cxxabi-dynamic-init",
+    srcs = ["cxxabi-dynamic-init.cc"],
+    visibility = ["//zircon/kernel/kernel:__pkg__"],
+    deps = [":headers"],
+    alwayslink = True,
+)
+
+fx_cc_library_headers(
+    name = "headers",
+    hdrs = ["include/lib/cxxabi-dynamic-init/cxxabi-dynamic-init.h"],
+    visibility = [
+        "//zircon/kernel/lib/cxxabi-dynamic-init/tests:__pkg__",
+        "//zircon/kernel/top:__pkg__",
+    ],
+)

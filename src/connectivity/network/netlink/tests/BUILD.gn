@@ -66,9 +66,10 @@ fuchsia_sharded_test_package("netlink-integration-tests") {
   deps = [
     # netemul-sandbox is used to create hermetic test realms.
     "//src/connectivity/network/testing/netemul/service:netemul-sandbox",
-
-    # netstack3 is under test.
-    "//src/connectivity/network/netstack3:component-debug",
+  ]
+  subpackages = [
+    # Netstack3 is under test.
+    "//src/connectivity/network/netstack3:package-debug",
   ]
 }
 

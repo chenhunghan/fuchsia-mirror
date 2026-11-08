@@ -4,8 +4,6 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-mod virtual_alloc_ffi;
-
 use crate::kernel::align::{is_rounded, roundup};
 use crate::kernel::types::PAddr;
 use crate::vm::arch_vm_aspace::{
@@ -807,6 +805,7 @@ impl VirtualAlloc {
     /// Frees any allocated pages as if `free_pages` had been called on every outstanding
     /// allocation. This is exposed for testing for circumstances where externally tracking every
     /// allocation is burdensome and not the goal of the test.
+    #[cfg(ktest)]
     pub fn debug_free_all_allocations(&mut self) {
         self.canary.assert();
         debug_assert!(self.alloc_base != 0);
@@ -823,6 +822,7 @@ impl VirtualAlloc {
     /// Force allocates the given range, overriding any padding or alignment requirements. This is
     /// used for testing to more precisely control available allocation regions. Panics if range is
     /// invalid or already allocated.
+    #[cfg(ktest)]
     pub fn debug_allocate_vaddr_range(&mut self, vaddr: usize, num_pages: usize) {
         self.canary.assert();
         assert!(page::is_page_rounded(vaddr));

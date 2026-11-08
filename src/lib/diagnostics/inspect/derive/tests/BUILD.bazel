@@ -73,7 +73,6 @@ fx_component_manifest(
 fx_test_component(
     name = "fuchsia-inspect-derive-test-component",
     compiled_manifest = ":fuchsia-inspect-derive-test-manifest",
-    component_name = "fuchsia-inspect-derive-test",
     deps = [":fuchsia_inspect_derive_tests_packaged_bin"],
 )
 
@@ -91,7 +90,6 @@ fx_component_manifest(
 fx_test_component(
     name = "fuchsia-inspect-derive-import-test-component",
     compiled_manifest = ":fuchsia-inspect-derive-import-test-manifest",
-    component_name = "fuchsia-inspect-derive-import-test",
     deps = [":fuchsia_inspect_derive_import_tests_packaged_bin"],
 )
 

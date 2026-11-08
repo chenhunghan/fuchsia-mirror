@@ -94,7 +94,6 @@ tracing::TransferStatus SharedBuffer::WriteChunk(
     uint64_t end, uint64_t buffer_size) const {
   ZX_DEBUG_ASSERT(last <= buffer_size);
   ZX_DEBUG_ASSERT(end <= buffer_size);
-  ZX_DEBUG_ASSERT(end == 0 || last <= end);
   offset += last;
   if (buffering_mode_ == fuchsia_tracing::BufferingMode::kOneshot ||
       // If end is zero then the header wasn't updated when tracing stopped.
@@ -103,8 +102,43 @@ tracing::TransferStatus SharedBuffer::WriteChunk(
     return output->WriteChunkBy(tracing::BufferForwarder::ForwardStrategy::Records, vmo_, offset,
                                 size);
   }
+  if (end < last) {
+    FX_LOGS(ERROR) << std::format("{}: buffer data end {} is before already transferred offset {}",
+                                  provider_name_, end, last);
+    return tracing::TransferStatus::kProviderError;
+  }
   uint64_t size = end - last;
   return output->WriteChunkBy(tracing::BufferForwarder::ForwardStrategy::Size, vmo_, offset, size);
+}
+
+std::optional<SharedBuffer::RollingBufferFingerprint> SharedBuffer::ReadRollingBufferFingerprint(
+    uint64_t buffer_offset, uint64_t buffer_size) const {
+  RollingBufferFingerprint fingerprint;
+  if (buffer_size < fingerprint.size()) {
+    return std::nullopt;
+  }
+  if (zx_status_t status = vmo_.read(fingerprint.data(), buffer_offset, fingerprint.size());
+      status != ZX_OK) {
+    FX_PLOGS(WARNING, status) << std::format("{}: Failed to read start of rolling buffer at {}",
+                                             provider_name_, buffer_offset);
+    return std::nullopt;
+  }
+  return fingerprint;
+}
+
+bool SharedBuffer::IsRollingBufferUnchangedSinceSaved(int32_t buffer_number, uint64_t buffer_offset,
+                                                      uint64_t buffer_size) const {
+  if (buffering_mode_ != fuchsia_tracing::BufferingMode::kStreaming) {
+    return false;
+  }
+  const std::optional<RollingBufferFingerprint>& saved =
+      saved_rolling_buffer_fingerprints_[static_cast<size_t>(buffer_number)];
+  if (!saved) {
+    return false;
+  }
+  std::optional<RollingBufferFingerprint> current =
+      ReadRollingBufferFingerprint(buffer_offset, buffer_size);
+  return current == saved;
 }
 
 std::pair<tracing::TransferStatus, TransferStats> SharedBuffer::TransferAll(
@@ -178,8 +212,23 @@ std::pair<tracing::TransferStatus, TransferStats> SharedBuffer::TransferAll(
     uint64_t end = header->rolling_data_end(buffer_number);
     uint64_t buffer_size = header->rolling_buffer_size();
     auto name = buffer_number == 0 ? "rolling buffer 0" : "rolling buffer 1";
+    // A rolling buffer is only ever written from its start, so if its start still matches what
+    // was previously forwarded, the provider hasn't written to it since. This happens when a Flush
+    // switches to a buffer (or a new run starts with CLEAR_ENTIRE) and tracing stops before any new
+    // records are written. Scanning it would forward stale records that were already sent.
+    if (end == 0 && IsRollingBufferUnchangedSinceSaved(buffer_number, offset, buffer_size)) {
+      FX_LOGS(DEBUG) << std::format("{}: {} is unchanged since it was saved, skipping",
+                                    provider_name_, name);
+      return tracing::TransferStatus::kComplete;
+    }
     FX_LOGS(DEBUG) << "Writing chunks for " << name;
-    return WriteChunk(output, offset, last, end, buffer_size);
+    auto transfer_status = WriteChunk(output, offset, last, end, buffer_size);
+    if (transfer_status == tracing::TransferStatus::kComplete &&
+        buffering_mode_ == fuchsia_tracing::BufferingMode::kStreaming && end > 0) {
+      saved_rolling_buffer_fingerprints_[static_cast<size_t>(buffer_number)] =
+          ReadRollingBufferFingerprint(offset, buffer_size);
+    }
+    return transfer_status;
   };
 
   if (header->wrapped_count() > 0) {
@@ -229,6 +278,20 @@ tracing::TransferStatus SharedBuffer::WriteProviderIdRecord(
   auto status = output->WriteProviderInfoRecord(provider_id_, provider_name_);
   provider_info_record_written_ = true;
   return status;
+}
+
+void SharedBuffer::OnStart(fuchsia_tracing::BufferDisposition disposition) {
+  switch (disposition) {
+    case fuchsia_tracing::BufferDisposition::kClearEntire:
+      last_wrapped_count_ = 0u;
+      last_durable_data_end_ = 0;
+      break;
+    case fuchsia_tracing::BufferDisposition::kClearNondurable:
+      last_wrapped_count_ = 0u;
+      break;
+    case fuchsia_tracing::BufferDisposition::kRetain:
+      break;
+  }
 }
 
 bool SharedBuffer::StreamingTransfer(const std::shared_ptr<const tracing::BufferForwarder>& output,
@@ -307,6 +370,13 @@ bool SharedBuffer::StreamingTransfer(const std::shared_ptr<const tracing::Buffer
       tracing::BufferForwarder::ForwardStrategy::Size, vmo_, buffer_offset, rolling_data_end);
   if (transfer_status != tracing::TransferStatus::kComplete) {
     return false;
+  }
+
+  // The provider won't write to this buffer again until we tell it the buffer is saved, so its
+  // start is stable here. TransferAll() uses this to recognize a buffer that is still unchanged.
+  if (rolling_data_end > 0) {
+    saved_rolling_buffer_fingerprints_[static_cast<size_t>(buffer_number)] =
+        ReadRollingBufferFingerprint(buffer_offset, header->rolling_buffer_size());
   }
 
   last_wrapped_count_ = wrapped_count;

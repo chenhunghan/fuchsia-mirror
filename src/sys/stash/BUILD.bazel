@@ -2,13 +2,23 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
 load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 load("//tools/fidl/measure-tape:measure_tape.bzl", "measure_tape")
 
 package(default_applicable_licenses = ["//:license"])
 
-# NOTE: `bin_test`, `stash-tests`, and the `stash_v2`/`stash2_v2`/`stash_secure_v2`
-# component and `pkg` package targets remain in BUILD.gn above the sentinel.
+# NOTE: the `stash2_v2` component and the `pkg` package targets remain in
+# BUILD.gn above the sentinel.
 rustc_binary(
     name = "bin",
     srcs = [
@@ -50,4 +60,101 @@ measure_tape(
         "fuchsia.stash/ListItem",
         "fuchsia.stash/KeyValue",
     ],
+)
+
+fx_packaged_binary(
+    name = "stash_packaged_bin",
+    binary = ":bin",
+    binary_name = "stash",
+)
+
+fx_component_manifest(
+    name = "stash_secure_v2-manifest",
+    component_name = "stash_secure",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/stash_secure.cml",
+)
+
+fx_component(
+    name = "stash_secure_v2",
+    compiled_manifest = ":stash_secure_v2-manifest",
+    visibility = [
+        "//src/chromium:__subpackages__",
+        "//src/connectivity:__subpackages__",
+        "//src/sys:__subpackages__",
+        "//third_party/boringssl:__pkg__",
+    ],
+    deps = [":stash_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "stash_v2-manifest",
+    component_name = "stash",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/stash.cml",
+)
+
+fx_component(
+    name = "stash_v2",
+    compiled_manifest = ":stash_v2-manifest",
+    visibility = [
+        "//sdk/ctf/tests/fidl/fuchsia.intl/testing/realm-factory:__pkg__",
+        "//sdk/ctf/tests/fidl/fuchsia.settings/testing/realm-factory:__pkg__",
+        "//src/connectivity/wlan/lib/storage:__pkg__",
+        "//src/sys/stash/tests:__subpackages__",
+    ],
+    deps = [":stash_packaged_bin"],
+)
+
+rustc_test(
+    name = "bin_test",
+    crate = ":bin",
+    # Matches `program.binary` in meta/stash_bin_test.cml.
+    crate_name = "stash_bin_test",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = ["//third_party/rust_crates/vendor:tempfile"],
+)
+
+fx_packaged_binary(
+    name = "stash_bin_test_packaged_bin",
+    testonly = True,
+    binary = ":bin_test",
+    binary_name = "stash_bin_test",
+)
+
+fx_component_manifest(
+    name = "stash-tests-manifest",
+    testonly = True,
+    component_name = "stash-tests",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/stash_bin_test.cml",
+)
+
+fx_test_component(
+    name = "stash-tests-component",
+    compiled_manifest = ":stash-tests-manifest",
+    deps = [":stash_bin_test_packaged_bin"],
+)
+
+fx_package(
+    name = "stash-tests-package",
+    package_name = "stash-tests",
+    test_components = [":stash-tests-component"],
+)
+
+fx_test(
+    name = "stash-tests",
+    package = ":stash-tests-package",
+    visibility = ["//src/sys:__pkg__"],
 )

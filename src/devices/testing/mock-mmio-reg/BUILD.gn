@@ -24,6 +24,7 @@ source_set("mock-mmio-reg-zxtest") {
     "//sdk/lib/driver/mmio/testing/cpp",
     "//zircon/system/ulib/mmio-ptr",
   ]
+  public_deps = [ "//zircon/system/ulib/fbl" ]
   public_configs = [
     ":headers.config",
     ":zxtest-backend",

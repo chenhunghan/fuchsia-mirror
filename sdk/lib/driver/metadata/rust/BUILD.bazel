@@ -1,0 +1,66 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":fdf_metadata_test"],
+    visibility = ["//sdk/lib:__pkg__"],
+)
+
+rustc_library(
+    name = "rust",
+    srcs = [
+        "src/lib.rs",
+        "src/serde.rs",
+    ],
+    crate_name = "fdf_metadata",
+    edition = "2024",
+    visibility = [
+        "//sdk/lib/driver/platform-device/rust:__pkg__",
+        "//src/devices/adc/drivers/aml-saradc:__pkg__",
+        "//src/devices/spi/drivers/dw-spi:__pkg__",
+        "//src/devices/tests/v2/devicetree-config:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust",
+        "//sdk/fidl/fuchsia.driver.metadata:fuchsia.driver.metadata_rust",
+        "//sdk/fidl/fuchsia.driver.metadata:fuchsia.driver.metadata_rust_next",
+        "//sdk/fidl/fuchsia.hardware.platform.device:fuchsia.hardware.platform.device_rust",
+        "//sdk/fidl/fuchsia.hardware.platform.device:fuchsia.hardware.platform.device_rust_next",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/lib/async/rust",
+        "//sdk/lib/async/rust/fidl",
+        "//sdk/lib/driver/component/rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fidl/rust_next/fidl_next",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+rustc_test(
+    name = "fdf_metadata_lib_test",
+    crate = ":rust",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/lib/async/rust/scope_dispatcher",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_unittest_package(
+    name = "fdf_metadata_test",
+    unit_tests = [":fdf_metadata_lib_test"],
+)

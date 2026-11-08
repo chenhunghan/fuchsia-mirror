@@ -131,7 +131,7 @@ class JsonGet:
     # If match succeeds, returns a JsonMatch with fields corresponding to the filled-in pattern.
     def _match_dict(
         self, pattern: dict[str, Any], tree: dict[str, Any]
-    ) -> Any:  # -> JsonMatch | None:
+    ) -> JsonMatch | None:
         if not isinstance(tree, dict):
             return None
         o = JsonMatch()
@@ -139,6 +139,7 @@ class JsonGet:
             if v is None:
                 if k in tree:
                     return None
+                continue
             elif v is Maybe:
                 if k in tree:
                     matched = tree[k]

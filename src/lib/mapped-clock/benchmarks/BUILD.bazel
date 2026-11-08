@@ -1,0 +1,27 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["src/main.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate_name = "mapped_clock_benchmarks",
+    edition = "2024",
+    # TODO(https://fxbug.dev/570694755): rustc_binary.bzl defaults lint_config
+    # to clippy_warn_production even when testonly = True, whereas GN
+    # rustc_artifact.gni skips clippy_warn_production on testonly targets.
+    # @bazel2gn:skip
+    lint_config = "//build/config/rust/lints:clippy_warn_default",
+    deps = [
+        "//sdk/rust/zx",
+        "//src/developer/fuchsia-criterion",
+        "//src/lib/fuchsia-runtime",
+        "//src/lib/mapped-clock:lib",
+    ],
+)

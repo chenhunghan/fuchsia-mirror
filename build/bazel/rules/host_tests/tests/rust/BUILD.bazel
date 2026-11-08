@@ -99,11 +99,13 @@ rustc_binary(
     name = "panic_trigger",
     srcs = ["panic_trigger.rs"],
     edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
 )
 
 host_test_data_files(
     name = "panic_trigger_as_test_data",
     srcs = [":panic_trigger"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
 )
 
 # A host test that runs panic_trigger. Used to verify that RUST_BACKTRACE=1 is

@@ -1,0 +1,37 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# The test component and package (`:component` and `:package`) stay in BUILD.gn
+# because they use RealmBuilder (`sys/component/realm_builder.shard.cml`) and
+# `//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component`
+# is not in Bazel.
+rustc_test(
+    name = "bin",
+    srcs = ["src/lib.rs"],
+    # Matches `program.binary` in
+    # meta/null-update-checker-integration-tests.cml.
+    crate_name = "null_update_checker_integration_test",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    deps = [
+        "//sdk/fidl/fuchsia.logger:fuchsia.logger_rust",
+        "//sdk/fidl/fuchsia.update.channel:fuchsia.update.channel_rust",
+        "//sdk/fidl/fuchsia.update:fuchsia.update_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        # GN depends on the `//src/lib/fuchsia-component-test` group, which bundles
+        # `:fuchsia-component-test-lib` with `realm_builder_server_component`; Bazel
+        # depends on `:fuchsia-component-test-lib` directly.
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/sys/lib/cm_rust",
+        "//src/sys/lib/component-events",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)

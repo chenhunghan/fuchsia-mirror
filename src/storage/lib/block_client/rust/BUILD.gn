@@ -3,40 +3,10 @@
 # found in the LICENSE file.
 
 import("//build/components.gni")
-import("//build/rust/rustc_test.gni")
 import("//src/storage/testing/driver_test_realm.gni")
 
 group("rust") {
   public_deps = [ ":block-client" ]
-}
-
-# The libraries are defined in BUILD.bazel. The block-client unit tests stay
-# in GN because //src/storage/lib/block_server and
-# //src/storage/lib/ramdevice_client have no Bazel build yet.
-rustc_test("block-client_test") {
-  edition = "2024"
-  output_name = "block_client_lib_test"
-  deps = [
-    "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_rust",
-    "//sdk/rust/zx",
-    "//src/lib/fidl/rust/fidl",
-    "//src/lib/fuchsia",
-    "//src/lib/fuchsia-async",
-    "//src/lib/fuchsia-sync",
-    "//src/storage/lib/block_protocol",
-    "//src/storage/lib/block_server",
-    "//src/storage/lib/ramdevice_client",
-    "//src/storage/lib/trace",
-    "//third_party/rust_crates:anyhow",
-    "//third_party/rust_crates:futures",
-    "//third_party/rust_crates:linked-hash-map",
-    "//third_party/rust_crates:log",
-  ]
-
-  sources = [
-    "src/cache.rs",
-    "src/lib.rs",
-  ]
 }
 
 # Uses GN-only storage_driver_test_realm_component template and wraps
@@ -98,11 +68,17 @@ if (is_fuchsia) {
     edition = "2024"
     visibility = [
       ":*",
+      "//src/firmware/paver/rust/*",
+      "//src/starnix/kernel/core:*",
       "//src/storage/benchmarks/fuchsia:*",
+      "//src/storage/block_adapter:*",
       "//src/storage/ext4:*",
+      "//src/storage/fxfs/platform:*",
       "//src/storage/gpt/component:*",
       "//src/storage/lib/fs_management/rust:*",
       "//src/storage/lib/storage_device:*",
+      "//src/storage/tools/logs/run-with-logs:*",
+      "//src/virtualization/tests/virtio_block_test_util:*",
       "//vendor/google/*",
     ]
     deps = [
@@ -127,6 +103,7 @@ if (is_fuchsia) {
     edition = "2024"
     visibility = [
       ":*",
+      "//src/firmware/paver/rust/*",
       "//src/storage/fvm:*",
       "//src/storage/lib/storage_device:*",
       "//vendor/google/*",
@@ -137,5 +114,33 @@ if (is_fuchsia) {
       "//sdk/rust/zx",
       "//src/lib/fuchsia-sync",
     ]
+  }
+}
+if (is_fuchsia) {
+  rustc_test("block-client_test") {
+    sources = [
+      "src/cache.rs",
+      "src/lib.rs",
+    ]
+    edition = "2024"
+    deps = [
+             "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_rust",
+             "//sdk/rust/zx",
+             "//src/lib/fidl/rust/fidl",
+             "//src/lib/fuchsia-async",
+             "//src/lib/fuchsia-sync",
+             "//src/storage/lib/block_protocol",
+             "//src/storage/lib/trace",
+             "//third_party/rust_crates:anyhow",
+             "//third_party/rust_crates:futures",
+             "//third_party/rust_crates:linked-hash-map",
+             "//third_party/rust_crates:log",
+           ] +
+           [
+             "//src/lib/fuchsia",
+             "//src/storage/lib/block_server",
+             "//src/storage/lib/ramdevice_client",
+           ]
+    output_name = "block_client_lib_test"
   }
 }

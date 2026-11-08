@@ -1,0 +1,37 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "consent_sync",
+    srcs = ["src/lib.rs"],
+    crate_name = "starnix_consent_sync",
+    edition = "2024",
+    visibility = ["//src/starnix/modules:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.settings:fuchsia.settings_rust",
+        "//sdk/rust/zx",
+        "//src/starnix/kernel/core",
+        "//src/starnix/lib/starnix_logging",
+        "//src/starnix/lib/starnix_uapi",
+    ],
+)
+
+rustc_test(
+    name = "consent_sync_test",
+    crate = ":consent_sync",
+)
+
+fx_unittest_package(
+    name = "starnix-consent-sync-tests",
+    unit_tests = [":consent_sync_test"],
+)

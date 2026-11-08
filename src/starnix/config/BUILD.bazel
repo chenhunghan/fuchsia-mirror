@@ -53,6 +53,7 @@ _STARNIX_CLIPPY_TEST = {
 # Lints applied to non-test Starnix code: additionally clippy_warn_production.
 _STARNIX_CLIPPY_COMMON = _STARNIX_CLIPPY_TEST | {
     "collection_is_never_read": "warn",
+    "disallowed_types": "warn",
     "needless_collect": "warn",
     "perf": "warn",
     "redundant_clone": "warn",

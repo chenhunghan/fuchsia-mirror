@@ -23,9 +23,9 @@ group("all") {
   ]
 
   # Certain test cases (e.g. position accuracy) are disabled by default (enabled
-  # by cmdline flag). They have hard realtime constraints; debug builds are too
-  # slow.
-  if (!is_debug) {
+  # by cmdline flag). They have hard realtime constraints; debug and asan builds
+  # are too slow.
+  if (!is_debug && !is_asan) {
     deps += [ ":realtime" ]
   }
 }
@@ -40,10 +40,15 @@ fuchsia_unittest_package("basic") {
     "//src/media/audio/drivers/virtual-audio-legacy:virtual-audio-legacy-driver-component",
   ]
 
-  # This test can run on any board and product build: release, debug, asan, etc.
-  # -- regardless of whether an audio service is already running.
+  # This test runs on real hardware or x64 emulators (which include a virtio
+  # audio device). It tests real drivers, virtual_audio instances and a
+  # virtualized Bluetooth audio driver. This test suite can run on any product,
+  # regardless of whether an audio service is already running.
   test_specs = {
-    environments = hardware_envs + basic_envs
+    environments = hardware_envs
+    if (target_cpu == "x64") {
+      environments += [ emu_env ]
+    }
   }
 
   # This non-hermetic suite tests all audio drivers detected on this device, as
@@ -61,11 +66,15 @@ fuchsia_unittest_package("admin") {
     "//src/media/audio/drivers/virtual-audio-legacy:virtual-audio-legacy-driver-component",
   ]
 
-  # This test runs on real hardware (debug) or emulators, WITHOUT
-  # audio_core/audio_device_registry. It tests real drivers, virtual_audio
-  # instances and a virtualized Bluetooth audio driver.
+  # This test runs on real hardware or x64 emulators (which include a virtio
+  # audio device). It tests real drivers, virtual_audio instances and a
+  # virtualized Bluetooth audio driver. This test suite can only run on
+  # products which do not include audio_device_registry or audio_core.
   test_specs = {
-    environments = hardware_envs + basic_envs
+    environments = hardware_envs
+    if (target_cpu == "x64") {
+      environments += [ emu_env ]
+    }
   }
 
   # This non-hermetic suite tests all audio drivers detected on this device, as
@@ -83,9 +92,11 @@ fuchsia_unittest_package("realtime") {
     "//src/media/audio/drivers/virtual-audio-legacy:virtual-audio-legacy-driver-component",
   ]
 
-  # This test runs on real hardware, release-only, WITHOUT audio_core or
-  # audio_device_registry. It tests real drivers, virtual_audio instances and a
-  # virtualized Bluetooth audio driver.
+  # This test requires real-time response and thus runs only on real hardware.
+  # It tests real drivers, virtual_audio instances and a virtualized Bluetooth
+  # audio driver. Like audio_driver_admin_tests, this test suite can run only
+  # on products which do not include audio_device_registry or audio_core (or on
+  # custom builds that explicitly disable those services).
   test_specs = {
     environments = hardware_envs
   }

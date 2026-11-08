@@ -1,0 +1,160 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/testing:defs.bzl",
+    "analysis_failure_test",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//src/lib/testing/expectation/rules:fx_generated_expectations.bzl",
+    "fx_generated_expectations",
+)
+load(
+    "//src/lib/testing/expectation/rules:fx_test_component_with_expectations.bzl",
+    "fx_component_manifest_with_expectations",
+    "fx_test_component_with_expectations",
+)
+load(":rules_test.bzl", "expectation_rules_test_suite")
+
+package(default_applicable_licenses = ["//:license"])
+
+expectation_rules_test_suite(
+    name = "tests",
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
+)
+
+fx_generated_expectations(
+    name = "generated_expectations_example",
+    includes = [
+        "//src/lib/testing/expectation:example_expectations_part1.json5",
+        "//src/lib/testing/expectation:example_expectations_part2.json5",
+    ],
+)
+
+fx_component_manifest_with_expectations(
+    name = "expectation_example_component_with_expectations_manifest",
+    includes = ["//src/lib/testing/expectation:meta/client.shard"],
+    manifest = "//src/lib/testing/expectation:meta/test_root.cml",
+)
+
+fx_component_manifest_with_expectations(
+    name = "expectation_example_component_with_generated_expectations_manifest",
+    includes = ["//src/lib/testing/expectation:meta/client.shard"],
+    manifest = "//src/lib/testing/expectation:meta/test_root.cml",
+)
+
+# Tests `fx_test_component_with_expectations()` with an `fx_expectations()`
+# target (that itself includes another `.json5` file in the sandbox) and with an
+# `fx_generated_expectations()` target.
+fx_test_component_with_expectations(
+    name = "expectation-example-component-with-expectations",
+    compiled_manifest = ":expectation_example_component_with_expectations_manifest",
+    expectations = "//src/lib/testing/expectation:example_expectations",
+    treatment_of_cases_with_error_logs = "SKIP_CASES_WITH_ERROR_LOGS",
+    deps = ["//src/lib/testing/expectation:example_tests_packaged"],
+)
+
+fx_test_component_with_expectations(
+    name = "expectation-example-component-with-generated-expectations",
+    compiled_manifest = ":expectation_example_component_with_generated_expectations_manifest",
+    expectations = ":generated_expectations_example",
+    treatment_of_cases_with_error_logs = "SKIP_CASES_WITH_ERROR_LOGS",
+    deps = ["//src/lib/testing/expectation:example_tests_packaged"],
+)
+
+fx_package(
+    name = "expectation-example-component-package.package",
+    package_name = "expectation-example-component-package",
+    tags = ["manual"],
+    test_components = [
+        ":expectation-example-component-with-expectations",
+        ":expectation-example-component-with-generated-expectations",
+    ],
+)
+
+fx_test(
+    name = "expectation-example-component-package",
+    package = ":expectation-example-component-package.package",
+    visibility = ["//src/lib/testing/expectation:__pkg__"],
+)
+
+# Exercises direct `.json5` `expectations` as well as `select()` on both
+# `expectations` and `deps`.
+fx_component_manifest_with_expectations(
+    name = "expectation_example_component_with_direct_expectations_manifest",
+    includes = ["//src/lib/testing/expectation:meta/client.shard"],
+    manifest = "//src/lib/testing/expectation:meta/test_root.cml",
+    tags = ["manual"],
+)
+
+fx_test_component_with_expectations(
+    name = "expectation-example-component-with-direct-expectations",
+    compiled_manifest = ":expectation_example_component_with_direct_expectations_manifest",
+    expectations = select({
+        "//conditions:default": "//src/lib/testing/expectation:included_expectations.json5",
+    }),
+    tags = ["manual"],
+    deps = select({
+        "//conditions:default": ["//src/lib/testing/expectation:example_tests_packaged"],
+    }),
+)
+
+fx_package(
+    name = "expectation-example-direct-component-package.package",
+    package_name = "expectation-example-direct-component-package",
+    tags = ["manual"],
+    test_components = [":expectation-example-component-with-direct-expectations"],
+)
+
+fx_test(
+    name = "expectation-example-direct-component-package",
+    package = ":expectation-example-direct-component-package.package",
+)
+
+# `fx_component_manifest()` does not use
+# `fx_component_manifest_with_expectations()`, so passing it to
+# `fx_test_component_with_expectations()` fails analysis.
+fx_component_manifest(
+    name = "plain_component_manifest",
+    testonly = True,
+    includes = ["//src/lib/testing/expectation:meta/client.shard"],
+    manifest = "//src/lib/testing/expectation:meta/test_root.cml",
+    tags = ["manual"],
+)
+
+fx_test_component_with_expectations(
+    name = "expectation-example-component-with-plain-manifest",
+    compiled_manifest = ":plain_component_manifest",
+    expectations = "//src/lib/testing/expectation:example_expectations",
+    tags = ["manual"],
+    deps = ["//src/lib/testing/expectation:example_tests_packaged"],
+)
+
+analysis_failure_test(
+    name = "expectation_component_with_plain_manifest_failure_test",
+    expected_message = "was not created by `fx_component_manifest_with_expectations()`",
+    target_under_test = ":expectation-example-component-with-plain-manifest",
+)
+
+test_suite(
+    name = "quick_build_only_tests",
+    tests = [
+        ":expectation-example-component-package",
+        ":expectation-example-direct-component-package",
+        ":expectation_component_with_plain_manifest_failure_test",
+        ":tests",
+        "//src/lib/testing/expectation:expectation-example-package",
+        "//src/lib/testing/expectation:expectation-example-package-generated",
+        "//src/lib/testing/expectation:expectation-example-package-just-err-logs-cases",
+        "//src/lib/testing/expectation:expectation-example-package-no-err-logs-cases",
+        "//src/lib/testing/expectation:expectation-unittests",
+    ],
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
+)

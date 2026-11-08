@@ -9,6 +9,7 @@
 #include <fuchsia/mem/cpp/fidl.h>
 #include <lib/fpromise/result.h>
 #include <lib/syslog/cpp/macros.h>
+#include <lib/zx/time.h>
 
 #include <ostream>
 #include <string_view>
@@ -263,6 +264,10 @@ namespace zx {
 
 inline void PrintTo(const zx::duration& duration, std::ostream* os) {
   *os << duration.to_nsecs() << "ns";
+}
+
+inline void PrintTo(const zx::time_boot& timestamp, std::ostream* os) {
+  *os << timestamp.get() << "ns";
 }
 
 }  // namespace zx

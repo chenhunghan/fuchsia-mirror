@@ -39,9 +39,12 @@ constexpr uint64_t kBufferLifetimeOrdinal = 1;
 constexpr uint64_t kStreamLifetimeOrdinal = 1;
 constexpr uint32_t kInputPacketSize = 8 * 1024;
 
-auto CreateDecryptorParams(bool is_secure) {
+auto CreateDecryptorParams(bool is_secure, std::optional<std::string> mime_type = std::nullopt) {
   fuchsia::media::drm::DecryptorParams params;
   params.mutable_input_details()->set_format_details_version_ordinal(0);
+  if (mime_type.has_value()) {
+    params.mutable_input_details()->set_mime_type(std::move(*mime_type));
+  }
   if (is_secure) {
     params.set_require_secure_mode(is_secure);
   }
@@ -54,8 +57,7 @@ auto CreateStreamBufferPartialSettings(
   fuchsia::media::StreamBufferPartialSettings settings;
   settings.set_buffer_lifetime_ordinal(kBufferLifetimeOrdinal)
       .set_buffer_constraints_version_ordinal(kBufferConstraintsVersionOrdinal)
-      .set_sysmem_token(
-          fidl::InterfaceHandle<fuchsia::sysmem::BufferCollectionToken>(token.TakeChannel()));
+      .set_sysmem2_token(std::move(token));
   return settings;
 }
 
@@ -78,12 +80,8 @@ auto CreateInputFormatDetails(const std::string& scheme, const std::vector<uint8
 
   fuchsia::media::FormatDetails details;
   details.set_format_details_version_ordinal(kFormatDetailsVersionOrdinal);
-  details.mutable_domain()
-      ->crypto()
-      .encrypted()
-      .set_scheme(scheme)
-      .set_key_id(key_id)
-      .set_init_vector(init_vector);
+  details.mutable_encrypted_format()->set_scheme(scheme).set_key_id(key_id).set_init_vector(
+      init_vector);
 
   return details;
 }
@@ -100,6 +98,19 @@ class FakeDecryptorAdapter : public DecryptorAdapter {
   void set_use_mapped_output(bool use_mapped_output) { use_mapped_output_ = use_mapped_output; }
   bool use_mapped_output() const { return use_mapped_output_; }
 
+  void set_output_mime_type(std::string mime_type) { output_mime_type_ = std::move(mime_type); }
+
+  fuchsia::media::StreamOutputFormat CoreCodecGetOutputFormat(
+      uint64_t stream_lifetime_ordinal,
+      uint64_t new_output_format_details_version_ordinal) override {
+    auto format = DecryptorAdapter::CoreCodecGetOutputFormat(
+        stream_lifetime_ordinal, new_output_format_details_version_ordinal);
+    if (output_mime_type_.has_value()) {
+      format.mutable_format_details()->set_mime_type(*output_mime_type_);
+    }
+    return format;
+  }
+
   bool IsCoreCodecMappedBufferUseful(CodecPort port) override {
     if (!use_mapped_output_ && port == kOutputPort) {
       return false;
@@ -111,6 +122,7 @@ class FakeDecryptorAdapter : public DecryptorAdapter {
  private:
   bool has_keys_ = false;
   bool use_mapped_output_ = true;
+  std::optional<std::string> output_mime_type_;
 };
 
 class ClearTextDecryptorAdapter : public FakeDecryptorAdapter {
@@ -206,13 +218,13 @@ class DecryptorAdapterTest : public gtest::RealLoopFixture {
     }
   }
 
-  void ConnectDecryptor(bool is_secure) {
+  void ConnectDecryptor(bool is_secure, std::optional<std::string> mime_type = std::nullopt) {
     auto allocator_result = component::Connect<fuchsia_sysmem2::Allocator>();
     ZX_ASSERT(allocator_result.is_ok());
     auto allocator = std::move(allocator_result.value());
-    codec_impl_ =
-        std::make_unique<CodecImpl>(std::move(allocator), nullptr, dispatcher(), thrd_current(),
-                                    CreateDecryptorParams(is_secure), decryptor_.NewRequest());
+    codec_impl_ = std::make_unique<CodecImpl>(
+        std::move(allocator), nullptr, dispatcher(),
+        CreateDecryptorParams(is_secure, std::move(mime_type)), decryptor_.NewRequest());
     auto adapter = std::make_unique<DecryptorAdapterT>(
         codec_impl_->lock(), codec_impl_.get(), inspector_.GetRoot().CreateChild("decryptor"));
     // Grab a non-owning reference to the adapter for test manipulation.
@@ -509,7 +521,12 @@ TEST_F(ClearDecryptorAdapterTest, ClearTextDecrypt) {
 
   EXPECT_TRUE(input_constraints_);
   EXPECT_TRUE(output_constraints_);
-  EXPECT_TRUE(output_format_);
+  ASSERT_TRUE(output_format_);
+  ASSERT_TRUE(output_format_->has_format_details());
+  EXPECT_FALSE(output_format_->format_details().has_encrypted_format());
+  ASSERT_TRUE(output_format_->format_details().has_domain());
+  ASSERT_TRUE(output_format_->format_details().domain().is_crypto());
+  EXPECT_TRUE(output_format_->format_details().domain().crypto().is_decrypted());
 
   ASSERT_TRUE(end_of_stream_reached_);
   // ClearText decryptor just copies data across
@@ -517,6 +534,33 @@ TEST_F(ClearDecryptorAdapterTest, ClearTextDecrypt) {
 
   // Check that all input packets were returned
   EXPECT_EQ(free_packets_.size(), input_buffer_info_->buffers().size());
+}
+
+TEST_F(ClearDecryptorAdapterTest, ClearTextDecryptWithMimeTypePreservesDecryptedDomain) {
+  ConnectDecryptor(false, "video/h264");
+  decryptor_adapter_->set_has_keys(true);
+  decryptor_adapter_->set_output_mime_type("video/h264");
+
+  RunLoopUntil([this]() { return input_buffer_info_.has_value(); });
+  AssertNoChannelErrors();
+  ASSERT_TRUE(input_buffer_info_);
+
+  ConfigureInputPackets();
+  decryptor_->QueueInputFormatDetails(kStreamLifetimeOrdinal,
+                                      CreateInputFormatDetails("clear", {}, {}));
+  PumpInput();
+
+  RunLoopUntil([this]() {
+    return end_of_stream_reached_ && free_packets_.size() == input_buffer_info_->buffers().size();
+  });
+  AssertNoChannelErrors();
+
+  ASSERT_TRUE(output_format_);
+  ASSERT_TRUE(output_format_->has_format_details());
+  EXPECT_FALSE(output_format_->format_details().has_encrypted_format());
+  ASSERT_TRUE(output_format_->format_details().has_domain());
+  ASSERT_TRUE(output_format_->format_details().domain().is_crypto());
+  EXPECT_TRUE(output_format_->format_details().domain().crypto().is_decrypted());
 }
 
 TEST_F(ClearDecryptorAdapterTest, NoKeys) {

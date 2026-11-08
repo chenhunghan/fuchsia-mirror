@@ -1,0 +1,24 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host:defs.bzl", "fx_script_host_tool")
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_script_host_tool(
+    name = "get-src-dir",
+    script = "get_src_dir.sh",
+    visibility = ["//tools/devshell:__subpackages__"],
+)
+
+host_py_test(
+    name = "get_src_dir_test",
+    srcs = ["get_src_dir_test.py"],
+    data = [":get-src-dir"],
+    imports = ["."],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//tools:__subpackages__"],
+)

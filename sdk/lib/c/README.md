@@ -113,7 +113,10 @@ marks the change "abandoned" (but another attempt may reopen it later instead
 of starting a freshing one that's identical).
 
 [Maintainers](OWNERS) get [Gerrit] notifications about the roll attempts.
-[File bugs] and/or consult them with any issues observed.
+[File bugs] and/or consult them with any issues observed.  The [`libc-rollers`
+agent skill] can be used interactively or as a scheduled background automation
+to monitor pending commits, triage roll failures, and assist with the common
+breakage scenarios below.
 
 ### Roll flake
 
@@ -134,6 +137,11 @@ cited by build gardeners, etc.  Most often, another attempt after unrelated
 fires of the day have been put out, or things go eerily quiet in the night,
 will succeed without intervention.
 
+When using an AI coding agent, the [`libc-rollers` agent skill] can check the
+failing tryjobs on a roll change, distinguish unrelated Fuchsia or
+infrastructure flakes from real C library failures, and immediately retrigger
+the roller in [LUCI] without waiting hours for the periodic schedule.
+
 ### Coordinated upstream changes
 
 The LLVM [monorepo] makes it possible to simultaneously change [llvm-libc],
@@ -143,7 +151,10 @@ Since each one is pinned separately and has its own auto-roller that updates
 only one pin at a time, things don't work automatically for the Fuchsia build
 that do work automatically when tracking the full LLVM repository as a unit.
 
-In these, cases [_manual rolls_](#manual-rolls) are the solution.
+In these, cases [_manual rolls_](#manual-rolls) are the solution.  An agent
+using the [`libc-rollers` agent skill] can detect when multiple rollers have
+coordinated upstream commits pending and prepare a combined manual roll in an
+isolated `jiri worktree`.
 
 ### Upstream regressions
 
@@ -177,14 +188,18 @@ will become able to succeed with the same LLVM revision that failed before.
 That is often the (second) easiest way to get back to smooth operation.
 
 In more complicated situations, or just for quicker results for an impatient
-maintainer, [_manual rolls_](#manual-rolls) may be required.
+maintainer, [_manual rolls_](#manual-rolls) may be required.  An agent can use
+the [`libc-rollers` agent skill] to inspect the failing builder logs, identify
+the culprit upstream commit, and test [`BUILD.gn`](BUILD.gn) adjustments or
+compatibility fixes alongside a manual roll in an isolated `jiri worktree`.
 
 ### Header updates
 
 Some header files come in various ways from [llvm-libc] and the auto-roller
 implications of this are explained in [their own entire directory](include).
 At the end of all those complications specific to header files, really it's
-just that [_manual rolls_](#manual-rolls) are the solution.
+just that [_manual rolls_](#manual-rolls) are the solution, which an agent can
+prepare for human API review using the [`libc-rollers` agent skill].
 
 ### Manual rolls
 
@@ -232,7 +247,10 @@ those in the maintainer ACLs to manually trigger a job without waiting for the
 periodic schedule or a mirror repository change.  Whenever there's a previous
 failed [Gerrit] change, a comment posted by the auto-roller includes the
 specific URL that makes it easy to find the right part of the UI to see the
-job history and schedule; or to trigger a new job.
+job history and schedule; or to trigger a new job.  The [`libc-rollers` agent
+skill] can automate both preparing a manual roll with
+[`manual-roll.sh`](manual-roll.sh) in a dedicated `jiri worktree` and
+retriggering the affected auto-rollers in [LUCI] once the change lands.
 
 ## Dynamic Linking
 
@@ -247,6 +265,7 @@ instead contains code that works with the dynamic linking regimes provided by
 [Gerrit]: https://fuchsia-review.googlesource.com/
 [LUCI]: https://luci-milo.appspot.com/ui/p/turquoise/g/global_roller/builders
 [Scudo]: https://llvm.org/docs/ScudoHardenedAllocator.html
+[`libc-rollers` agent skill]: skills/libc-rollers/SKILL.md
 [fuchsia.git]: https://fuchsia.googlesource.com/fuchsia/+/HEAD
 [gwp_asan-github]: https://github.com/llvm/llvm-project/tree/main/compiler-rt/lib/gwp_asan
 [libc/src]: https://github.com/llvm/llvm-project/tree/main/libc/src

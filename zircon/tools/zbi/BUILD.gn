@@ -306,7 +306,7 @@ input_test("make-single-item-zbi-input-test") {
   expected = [
     {
       type = "KERNEL_DRIVER"
-      size = 24
+      size = 32
     },
   ]
 }

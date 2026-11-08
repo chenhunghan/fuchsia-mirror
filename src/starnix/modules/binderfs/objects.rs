@@ -914,6 +914,20 @@ impl SerializedBinderObject {
         }
     }
 
+    /// Returns the byte length of this object's serialized representation in transaction data.
+    pub fn serialized_size(&self) -> usize {
+        match self {
+            SerializedBinderObject::Handle { .. } | SerializedBinderObject::Object { .. } => {
+                std::mem::size_of::<flat_binder_object>()
+            }
+            SerializedBinderObject::File { .. } => std::mem::size_of::<binder_fd_object>(),
+            SerializedBinderObject::Buffer { .. } => std::mem::size_of::<binder_buffer_object>(),
+            SerializedBinderObject::FileArray { .. } => {
+                std::mem::size_of::<binder_fd_array_object>()
+            }
+        }
+    }
+
     /// Writes the serialized object back to `data`. `data` must be large enough to fit the
     /// serialized object, or else this method fails.
     pub fn write_to(self, data: &mut [u8]) -> Result<(), Errno> {

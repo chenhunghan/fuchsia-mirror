@@ -17,19 +17,16 @@ use assembly_constants::{
     BootfsCompiledPackageDestination, CompiledPackageDestination, FileEntry, PackageDestination,
     PackageSetDestination,
 };
-use assembly_images_config::VolumeConfig;
 use camino::Utf8PathBuf;
 
 pub(crate) struct RecoverySubsystem;
 
-impl DefineSubsystemConfiguration<(&RecoveryConfig, &VolumeConfig)> for RecoverySubsystem {
+impl DefineSubsystemConfiguration<RecoveryConfig> for RecoverySubsystem {
     fn define_configuration(
         context: &ConfigurationContext<'_>,
-        configs: &(&RecoveryConfig, &VolumeConfig),
+        config: &RecoveryConfig,
         builder: &mut dyn ConfigurationBuilder,
     ) -> anyhow::Result<()> {
-        let (config, volume_config) = *configs;
-
         let gendir = context.get_gendir().context("getting gen dir for recovery subsystem")?;
 
         if let Some(mapping) = &config.factory_reset_trigger_config {
@@ -66,21 +63,6 @@ impl DefineSubsystemConfiguration<(&RecoveryConfig, &VolumeConfig)> for Recovery
             builder.platform_bundle("factory_reset")?;
         }
 
-        // factory_reset needs to know which mutable filesystem to use, in order to properly
-        // reset it.  The value is always provided in case factory_reset has been added directly
-        // by a product, and not through assembly.
-        builder.set_config_capability(
-            "fuchsia.recovery.UseFxBlob",
-            Config::new(
-                ConfigValueType::Bool,
-                match volume_config {
-                    VolumeConfig::Fxfs => true,
-                    VolumeConfig::Fvm(_) => false,
-                }
-                .into(),
-            ),
-        )?;
-
         if let Some(system_recovery) = &config.system_recovery {
             match system_recovery {
                 SystemRecovery::Fdr => {
@@ -89,7 +71,7 @@ impl DefineSubsystemConfiguration<(&RecoveryConfig, &VolumeConfig)> for Recovery
                     builder.platform_bundle("recovery_fdr")?;
                     configure_platform_system_recovery(context, config, builder)?;
                 }
-                SystemRecovery::Android => {
+                SystemRecovery::Android(android_recovery_config) => {
                     context.ensure_feature_set_level(
                         &[FeatureSetLevel::Utility],
                         "Android System Recovery",
@@ -99,6 +81,20 @@ impl DefineSubsystemConfiguration<(&RecoveryConfig, &VolumeConfig)> for Recovery
                     builder.set_config_capability(
                         "fuchsia.adb.IsRecovery",
                         Config::new(ConfigValueType::Bool, true.into()),
+                    )?;
+                    builder.set_config_capability(
+                        "fuchsia.recovery.android.TouchScreenEnabled",
+                        Config::new(
+                            ConfigValueType::Bool,
+                            android_recovery_config.touch_screen_enabled.into(),
+                        ),
+                    )?;
+                    builder.set_config_capability(
+                        "fuchsia.recovery.android.TopMargin",
+                        Config::new(
+                            ConfigValueType::Uint16,
+                            android_recovery_config.top_margin.into(),
+                        ),
                     )?;
                 }
                 SystemRecovery::Bootfs(bootfs_recovery_config) => {

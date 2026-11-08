@@ -21,14 +21,17 @@ use carnelian::{
 };
 use euclid::size2;
 use fidl::endpoints::{DiscoverableProtocolMarker as _, ServerEnd};
+use fidl_fuchsia_hardware_adb as fadb;
 use fidl_fuchsia_hardware_power_statecontrol::ShutdownAction;
 use fidl_fuchsia_input::ConsumerControlButton;
 use fidl_fuchsia_io as fio;
 use fidl_fuchsia_recovery_android::{UpdaterMarker, UpdaterRequest, UpdaterRequestStream};
-use fuchsia_async as fasync;
-use futures::channel::mpsc;
-use futures::lock::Mutex;
-use futures::{SinkExt as _, StreamExt as _, TryFutureExt as _, TryStreamExt as _};
+use fuchsia_async::{self as fasync, TimeoutExt as _};
+use fuchsia_sync::Mutex;
+use futures::channel::oneshot;
+use futures::{TryFutureExt as _, TryStreamExt as _};
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 mod bootloader;
@@ -49,10 +52,20 @@ const MESSAGE_COLOR: Color = Color { r: 247, g: 0, b: 6, a: 255 };
 const MENU_COLOR: Color = Color { r: 0, g: 106, b: 157, a: 255 };
 const MENU_ACTIVE_BG_COLOR: Color = Color { r: 0, g: 156, b: 100, a: 255 };
 const MENU_SELECTED_COLOR: Color = Color::white();
+const SIDELOAD_TIMEOUT: zx::MonotonicDuration = zx::MonotonicDuration::from_minutes(5);
+const CONSECUTIVE_POWER_KEYS_FOR_REBOOT: u8 = 7;
+
+#[derive(Clone, Copy)]
+enum PowerKeyRebootState {
+    Enabled { consecutive_power_keys: u8 },
+    Disabled,
+}
 
 struct RecoveryAppAssistant {
     display_rotation: DisplayRotation,
-    sideload_request_receiver: Arc<Mutex<mpsc::Receiver<UpdaterRequest>>>,
+    touch_screen_enabled: bool,
+    top_margin: u16,
+    sideload_request_sender: Arc<Mutex<Option<oneshot::Sender<UpdaterRequest>>>>,
     exposed_dir: Arc<vfs::directory::simple::Simple>,
     svc_dir: Arc<vfs::directory::simple::Simple>,
     bootloader_message: BootloaderMessage,
@@ -61,14 +74,18 @@ struct RecoveryAppAssistant {
 impl RecoveryAppAssistant {
     fn new(
         display_rotation: DisplayRotation,
-        sideload_request_receiver: mpsc::Receiver<UpdaterRequest>,
+        touch_screen_enabled: bool,
+        top_margin: u16,
+        sideload_request_sender: Arc<Mutex<Option<oneshot::Sender<UpdaterRequest>>>>,
         exposed_dir: Arc<vfs::directory::simple::Simple>,
         svc_dir: Arc<vfs::directory::simple::Simple>,
         bootloader_message: BootloaderMessage,
     ) -> Self {
         Self {
             display_rotation,
-            sideload_request_receiver: Arc::new(Mutex::new(sideload_request_receiver)),
+            touch_screen_enabled,
+            top_margin,
+            sideload_request_sender,
             exposed_dir,
             svc_dir,
             bootloader_message,
@@ -88,7 +105,9 @@ impl AppAssistant for RecoveryAppAssistant {
         Ok(Box::new(RecoveryViewAssistant::new(
             params.view_key,
             params.app_sender,
-            Arc::clone(&self.sideload_request_receiver),
+            self.touch_screen_enabled,
+            self.top_margin,
+            Arc::clone(&self.sideload_request_sender),
             Arc::clone(&self.exposed_dir),
             Arc::clone(&self.svc_dir),
             self.bootloader_message.clone(),
@@ -114,19 +133,25 @@ struct RecoveryViewAssistant {
     waiting_for_confirmation: bool,
     // tuple of touch contact id, start location, current location
     active_contact: Option<(input::touch::ContactId, IntPoint, IntPoint)>,
-    sideload_request_receiver: Arc<Mutex<mpsc::Receiver<UpdaterRequest>>>,
+    touch_screen_enabled: bool,
+    top_margin: u16,
+    sideload_request_sender: Arc<Mutex<Option<oneshot::Sender<UpdaterRequest>>>>,
     exposed_dir: Arc<vfs::directory::simple::Simple>,
     svc_dir: Arc<vfs::directory::simple::Simple>,
     main_menu_items: &'static [menu::MenuItem],
     main_menu_message: Option<String>,
     show_text: bool,
+    power_key_reboot_state: Rc<Cell<PowerKeyRebootState>>,
+    sideload_task: Option<fasync::Task<()>>,
 }
 
 impl RecoveryViewAssistant {
     fn new(
         view_key: ViewKey,
         app_sender: AppSender,
-        sideload_request_receiver: Arc<Mutex<mpsc::Receiver<UpdaterRequest>>>,
+        touch_screen_enabled: bool,
+        top_margin: u16,
+        sideload_request_sender: Arc<Mutex<Option<oneshot::Sender<UpdaterRequest>>>>,
         exposed_dir: Arc<vfs::directory::simple::Simple>,
         svc_dir: Arc<vfs::directory::simple::Simple>,
         bootloader_message: BootloaderMessage,
@@ -160,12 +185,18 @@ impl RecoveryViewAssistant {
             message: None,
             waiting_for_confirmation: false,
             active_contact: None,
-            sideload_request_receiver,
+            touch_screen_enabled,
+            top_margin,
+            sideload_request_sender,
             exposed_dir,
             svc_dir,
             main_menu_items: menu::MAIN_MENU,
             main_menu_message: None,
             show_text: true,
+            power_key_reboot_state: Rc::new(Cell::new(PowerKeyRebootState::Enabled {
+                consecutive_power_keys: 0,
+            })),
+            sideload_task: None,
         };
 
         // *NOTE*: Handling recovery actions may trigger immediate action without user intervention
@@ -190,19 +221,33 @@ impl RecoveryViewAssistant {
         self.view_sender.request_render();
     }
 
+    fn disable_power_key_reboot(&self) {
+        self.power_key_reboot_state.set(PowerKeyRebootState::Disabled);
+    }
+
+    fn reset_power_key_count(&self) {
+        if matches!(self.power_key_reboot_state.get(), PowerKeyRebootState::Enabled { .. }) {
+            self.power_key_reboot_state
+                .set(PowerKeyRebootState::Enabled { consecutive_power_keys: 0 });
+        }
+    }
+
     fn on_menu_select(&mut self) {
         match self.menu.current_item() {
             menu::MenuItem::Reboot => {
+                self.disable_power_key_reboot();
                 self.log("Rebooting...");
                 let action = ShutdownAction::Reboot;
                 self.view_sender.queue_message(RecoveryMessages::Shutdown { action });
             }
             menu::MenuItem::RebootBootloader => {
+                self.disable_power_key_reboot();
                 self.log("Rebooting to bootloader...");
                 let action = ShutdownAction::RebootToBootloader;
                 self.view_sender.queue_message(RecoveryMessages::Shutdown { action });
             }
             menu::MenuItem::PowerOff => {
+                self.disable_power_key_reboot();
                 self.log("Powering off...");
                 let action = ShutdownAction::Poweroff;
                 self.view_sender.queue_message(RecoveryMessages::Shutdown { action });
@@ -283,6 +328,9 @@ impl ViewAssistant for RecoveryViewAssistant {
 
             builder.group().column().max_size().main_align(MainAxisAlignment::Start).contents(
                 |builder| {
+                    if self.top_margin > 0 {
+                        builder.space(size2(size.width, self.top_margin as f32));
+                    }
                     if let Some(logo_file) = &self.logo_file {
                         // Centre the logo
                         builder.start_group(
@@ -458,6 +506,9 @@ impl ViewAssistant for RecoveryViewAssistant {
         _event: &input::Event,
         mouse_event: &input::mouse::Event,
     ) -> Result<(), Error> {
+        if matches!(mouse_event.phase, input::mouse::Phase::Wheel(_)) {
+            self.reset_power_key_count();
+        }
         if self.logs.is_some() || !self.show_text {
             return Ok(());
         }
@@ -483,6 +534,12 @@ impl ViewAssistant for RecoveryViewAssistant {
         _event: &input::Event,
         touch_event: &input::touch::Event,
     ) -> Result<(), Error> {
+        if !self.touch_screen_enabled {
+            return Ok(());
+        }
+        if !touch_event.contacts.is_empty() {
+            self.reset_power_key_count();
+        }
         if self.logs.is_some() || !self.show_text {
             return Ok(());
         }
@@ -547,6 +604,32 @@ impl ViewAssistant for RecoveryViewAssistant {
         _event: &input::Event,
         consumer_control_event: &input::consumer_control::Event,
     ) -> Result<(), Error> {
+        if consumer_control_event.phase == input::consumer_control::Phase::Up {
+            if consumer_control_event.button == ConsumerControlButton::Power {
+                if let PowerKeyRebootState::Enabled { consecutive_power_keys } =
+                    self.power_key_reboot_state.get()
+                {
+                    let consecutive_power_keys = consecutive_power_keys + 1;
+                    if consecutive_power_keys >= CONSECUTIVE_POWER_KEYS_FOR_REBOOT {
+                        self.disable_power_key_reboot();
+                        self.waiting_for_confirmation = false;
+                        self.sideload_task = None;
+                        self.log("Rebooting...");
+                        self.view_sender.queue_message(RecoveryMessages::Shutdown {
+                            action: ShutdownAction::Reboot,
+                        });
+                        return Ok(());
+                    }
+                    self.power_key_reboot_state
+                        .set(PowerKeyRebootState::Enabled { consecutive_power_keys });
+                }
+            } else {
+                self.reset_power_key_count();
+            }
+        } else if consumer_control_event.button != ConsumerControlButton::Power {
+            self.reset_power_key_count();
+        }
+
         if !self.show_text {
             return Ok(());
         }
@@ -610,89 +693,53 @@ impl ViewAssistant for RecoveryViewAssistant {
             }
             RecoveryMessages::TaskDone => {
                 self.waiting_for_confirmation = true;
+                self.power_key_reboot_state
+                    .set(PowerKeyRebootState::Enabled { consecutive_power_keys: 0 });
             }
             RecoveryMessages::Sideload { auto_reboot } => {
                 let view_sender = self.view_sender.clone();
-                let sideload_request_receiver = Arc::clone(&self.sideload_request_receiver);
+                let sideload_request_sender = Arc::clone(&self.sideload_request_sender);
                 let exposed_dir = Arc::clone(&self.exposed_dir);
                 let svc_dir = Arc::clone(&self.svc_dir);
-                fasync::Task::local(async move {
-                    let state_controller = match fuchsia_component::client::connect_to_protocol::<
-                        fidl_fuchsia_hardware_adb::StateControllerMarker,
-                    >() {
-                        Ok(state_controller) => {
-                            if let Err(e) = state_controller
-                                .set_system_type(fidl_fuchsia_hardware_adb::SystemType::Sideload)
-                                .await
-                            {
-                                log::error!(
-                                    "Failed to set sideload system type to StateController: {e:?}"
-                                );
-                            }
-                            Some(state_controller)
-                        }
-                        Err(e) => {
-                            log::error!("Failed to connect to StateController for adb: {e:?}");
-                            None
-                        }
-                    };
-
-                    let mut receiver = sideload_request_receiver.lock().await;
-                    let Some(request) = receiver.next().await else {
-                        log::error!("Sideload request sender dropped");
-                        return;
-                    };
-                    let UpdaterRequest::Update { manifest_url, responder } = request;
-
-                    view_sender.queue_message(RecoveryMessages::Log(
-                        match update::apply_update(
-                            &manifest_url,
-                            &view_sender,
-                            exposed_dir,
-                            svc_dir,
-                        )
-                        .await
-                        {
-                            Ok(()) => "Successfully applied update!".into(),
-                            Err(e) => format!("Failed to apply update: {e:#}"),
-                        },
-                    ));
-                    if let Err(e) = responder.send() {
-                        log::error!("Error sending response for Update: {e:?}");
+                let power_key_reboot_state = Rc::clone(&self.power_key_reboot_state);
+                self.sideload_task = Some(fasync::Task::local(async move {
+                    if let Err(e) = run_sideload(
+                        auto_reboot,
+                        &view_sender,
+                        &sideload_request_sender,
+                        exposed_dir,
+                        svc_dir,
+                        &power_key_reboot_state,
+                    )
+                    .await
+                    {
+                        log::error!("{e:#}");
+                        view_sender.queue_message(RecoveryMessages::Log(format!("{e:#}")));
                     }
                     view_sender.queue_message(if auto_reboot {
                         RecoveryMessages::Shutdown { action: ShutdownAction::Reboot }
                     } else {
-                        if let Some(state_controller) = state_controller {
-                            // Give adb sideload sometime to shutdown the server and send the
-                            // "sideload done" message before we set the system type which will
-                            // reset adb.
-                            fasync::Timer::new(std::time::Duration::from_millis(100)).await;
-                            if let Err(e) = state_controller
-                                .set_system_type(fidl_fuchsia_hardware_adb::SystemType::Recovery)
-                                .await
-                            {
-                                log::error!("Failed to reset system type to recovery: {e:?}");
-                            }
-                        }
                         RecoveryMessages::TaskDone
                     });
-                })
-                .detach();
+                }));
             }
             RecoveryMessages::Shutdown { action } => {
+                self.disable_power_key_reboot();
+                self.waiting_for_confirmation = false;
+                self.sideload_task = None;
                 let view_sender = self.view_sender.clone();
                 fasync::Task::local(async move {
                     if let Err(e) = power::shutdown(action).await {
                         view_sender.queue_message(RecoveryMessages::Log(format!(
                             "Failed to send shutdown message: {e:#}"
                         )));
+                        view_sender.queue_message(RecoveryMessages::TaskDone);
                     }
-                    view_sender.queue_message(RecoveryMessages::TaskDone);
                 })
                 .detach();
             }
             RecoveryMessages::WipeData => {
+                self.waiting_for_confirmation = false;
                 self.log("Wiping data...");
                 let view_sender = self.view_sender.clone();
                 fasync::Task::local(async move {
@@ -700,8 +747,8 @@ impl ViewAssistant for RecoveryViewAssistant {
                         view_sender.queue_message(RecoveryMessages::Log(format!(
                             "Failed to factory data reset: {e:#}"
                         )));
+                        view_sender.queue_message(RecoveryMessages::TaskDone);
                     }
-                    view_sender.queue_message(RecoveryMessages::TaskDone);
                 })
                 .detach();
             }
@@ -758,14 +805,86 @@ enum RecoveryMessages {
     WipeData,
 }
 
-async fn run_updater_service(
-    mut stream: UpdaterRequestStream,
-    mut sender: mpsc::Sender<UpdaterRequest>,
+async fn run_sideload(
+    auto_reboot: bool,
+    view_sender: &ViewSender,
+    sideload_request_sender: &Mutex<Option<oneshot::Sender<UpdaterRequest>>>,
+    exposed_dir: Arc<vfs::directory::simple::Simple>,
+    svc_dir: Arc<vfs::directory::simple::Simple>,
+    power_key_reboot_state: &Cell<PowerKeyRebootState>,
 ) -> Result<(), Error> {
-    while let Some(request) = stream.try_next().await.context("updater request stream")? {
-        sender.send(request).await.context("send request to UI task")?;
+    let (sender, receiver) = oneshot::channel();
+    *sideload_request_sender.lock() = Some(sender);
+
+    let state_controller =
+        fuchsia_component::client::connect_to_protocol::<fadb::StateControllerMarker>()
+            .context("Failed to connect to adb StateController")?;
+    set_adb_system_type(&state_controller, fadb::SystemType::Sideload).await?;
+
+    let update_result: Result<(), Error> = async {
+        let UpdaterRequest::Update { manifest_url, responder } = receiver
+            .err_into()
+            .on_timeout(SIDELOAD_TIMEOUT, || {
+                anyhow::bail!("Timed out waiting for sideload package.")
+            })
+            .await?;
+        power_key_reboot_state.set(PowerKeyRebootState::Disabled);
+
+        let result = update::apply_update(&manifest_url, view_sender, exposed_dir, svc_dir)
+            .await
+            .context("Failed to apply update");
+        if let Err(e) = responder.send() {
+            log::error!("Error sending response for Update: {e:?}");
+        }
+        result
+    }
+    .await;
+
+    match update_result {
+        Ok(()) => {
+            view_sender.queue_message(RecoveryMessages::Log("Successfully applied update!".into()));
+        }
+        Err(e) => {
+            log::error!("{e:#}");
+            view_sender.queue_message(RecoveryMessages::Log(format!("{e:#}")));
+        }
+    }
+
+    if !auto_reboot {
+        // Give adb sideload sometime to shutdown the server and send the
+        // "sideload done" message before we set the system type which will
+        // reset adb.
+        fasync::Timer::new(std::time::Duration::from_millis(100)).await;
+        set_adb_system_type(&state_controller, fadb::SystemType::Recovery).await?;
     }
     Ok(())
+}
+
+async fn run_updater_service(
+    mut stream: UpdaterRequestStream,
+    sideload_request_sender: Arc<Mutex<Option<oneshot::Sender<UpdaterRequest>>>>,
+) -> Result<(), Error> {
+    while let Some(request) = stream.try_next().await.context("updater request stream")? {
+        if sideload_request_sender.lock().take().is_none_or(|sender| sender.send(request).is_err())
+        {
+            log::warn!("Rejecting Updater.Update request while not waiting for sideload");
+        }
+    }
+    Ok(())
+}
+
+async fn set_adb_system_type(
+    state_controller: &fadb::StateControllerProxy,
+    system_type: fadb::SystemType,
+) -> Result<(), Error> {
+    state_controller
+        .set_system_type(system_type)
+        .await
+        .with_context(|| {
+            format!("FIDL error calling adb StateController.SetSystemType({system_type:?})")
+        })?
+        .map_err(zx::Status::err_from_raw)
+        .with_context(|| format!("adb failed to switch to {system_type:?}"))
 }
 
 /// Reads and clears the BCB in the /misc partition. Returns the bootloader message.
@@ -789,7 +908,7 @@ async fn process_bootloader_message() -> Result<BootloaderMessage, Error> {
 fn main() -> Result<(), Error> {
     log::info!("recovery-android started.");
 
-    let config = recovery_ui_config::Config::take_from_startup_handle();
+    let config = recovery_android_config::Config::take_from_startup_handle();
     let display_rotation = match config.display_rotation {
         0 => DisplayRotation::Deg0,
         180 => DisplayRotation::Deg180,
@@ -812,15 +931,18 @@ fn main() -> Result<(), Error> {
                 }
             };
 
-            let (sideload_request_sender, sideload_request_receiver) = mpsc::channel(1);
+            let sideload_request_sender = Arc::new(Mutex::new(None));
 
             let scope = vfs::execution_scope::ExecutionScope::new();
             let svc_dir = vfs::pseudo_directory! {
-                UpdaterMarker::PROTOCOL_NAME => vfs::service::host(move |stream| {
-                    let sender = sideload_request_sender.clone();
-                    run_updater_service(stream, sender).unwrap_or_else(|e| {
-                        log::error!("Updater service failed: {e:#}");
-                    })
+                UpdaterMarker::PROTOCOL_NAME => vfs::service::host({
+                    let sideload_request_sender = Arc::clone(&sideload_request_sender);
+                    move |stream| {
+                        let sender = Arc::clone(&sideload_request_sender);
+                        run_updater_service(stream, sender).unwrap_or_else(|e| {
+                            log::error!("Updater service failed: {e:#}");
+                        })
+                    }
                 })
             };
             let exposed_dir = vfs::pseudo_directory! {
@@ -840,7 +962,9 @@ fn main() -> Result<(), Error> {
 
             let assistant = Box::new(RecoveryAppAssistant::new(
                 display_rotation,
-                sideload_request_receiver,
+                config.touch_screen_enabled,
+                config.top_margin,
+                sideload_request_sender,
                 exposed_dir,
                 svc_dir,
                 bootloader_message,

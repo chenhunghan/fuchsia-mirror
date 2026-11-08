@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 use fdomain_fuchsia_io as fio;
-use futures::future::BoxFuture;
+use ffx_futures::BoxFuture;
 use std::any::Any;
 use std::future::ready;
 use std::io::{Read, Seek, Write};
@@ -208,14 +208,6 @@ impl Node for HostFile {
         ))
     }
 
-    async fn link_into(
-        self: Arc<Self>,
-        _destination_dir: Arc<dyn MutableDirectory>,
-        _name: vfs::name::Name,
-    ) -> Result<(), Status> {
-        Err(Status::NOT_SUPPORTED)
-    }
-
     /// Returns information about the filesystem.
     fn query_filesystem(&self) -> Result<fio::FilesystemInfo, Status> {
         Err(Status::NOT_SUPPORTED)
@@ -284,14 +276,6 @@ impl Node for HostDirectory {
                 | fio::Operations::TRAVERSE
                 | fio::Operations::MODIFY_DIRECTORY,
         ))
-    }
-
-    async fn link_into(
-        self: Arc<Self>,
-        _destination_dir: Arc<dyn MutableDirectory>,
-        _name: vfs::name::Name,
-    ) -> Result<(), Status> {
-        Err(Status::NOT_SUPPORTED)
     }
 
     /// Returns information about the filesystem.

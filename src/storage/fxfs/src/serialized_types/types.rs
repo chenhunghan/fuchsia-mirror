@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::blob_metadata::{BlobMetadata, BlobMetadataV53};
+use crate::blob_metadata::{BlobMetadata, BlobMetadataV53, BlobMetadataV64};
 use crate::lsm_tree::{
     PersistentLayerHeader, PersistentLayerHeaderV39, PersistentLayerInfo, PersistentLayerInfoV39,
 };
@@ -12,23 +12,23 @@ use crate::object_store::allocator::{
 };
 use crate::object_store::journal::super_block::{
     SuperBlockHeader, SuperBlockHeaderV32, SuperBlockHeaderV61, SuperBlockRecord,
-    SuperBlockRecordV56, SuperBlockRecordV59, SuperBlockRecordV62,
+    SuperBlockRecordV56, SuperBlockRecordV59, SuperBlockRecordV62, SuperBlockRecordV63,
 };
 use crate::object_store::journal::{
     JournalRecord, JournalRecordV56, JournalRecordV57, JournalRecordV59, JournalRecordV60,
-    JournalRecordV61, JournalRecordV62,
+    JournalRecordV61, JournalRecordV62, JournalRecordV63,
 };
 use crate::object_store::object_record::{
-    FsverityMetadata, FsverityMetadataV50, ObjectKey, ObjectKeyV54, ObjectValue, ObjectValueV56,
-    ObjectValueV59, ObjectValueV62,
+    FsverityMetadata, FsverityMetadataV50, ObjectKey, ObjectKeyV54, ObjectKeyV63, ObjectValue,
+    ObjectValueV56, ObjectValueV59, ObjectValueV62,
 };
 use crate::object_store::transaction::{
-    Mutation, MutationV56, MutationV57, MutationV59, MutationV61, MutationV62,
+    Mutation, MutationV56, MutationV57, MutationV59, MutationV61, MutationV62, MutationV63,
 };
 use crate::object_store::{
     EncryptedMutations, EncryptedMutationsV49, EncryptedTransaction, EncryptedTransactionV57,
-    EncryptedTransactionV59, EncryptedTransactionV61, EncryptedTransactionV62, StoreInfo,
-    StoreInfoV52,
+    EncryptedTransactionV59, EncryptedTransactionV61, EncryptedTransactionV62,
+    EncryptedTransactionV63, StoreInfo, StoreInfoV52,
 };
 use crate::serialized_types::{Version, Versioned, VersionedLatest, versioned_type};
 use std::collections::BTreeMap;
@@ -42,7 +42,7 @@ use std::collections::BTreeMap;
 ///
 /// IMPORTANT: When changing this (major or minor), update the list of possible versions at
 /// https://cs.opensource.google/fuchsia/fuchsia/+/main:third_party/cobalt_config/fuchsia/local_storage/versions.txt.
-pub const LATEST_VERSION: Version = Version { major: 62, minor: 0 };
+pub const LATEST_VERSION: Version = Version { major: 64, minor: 0 };
 
 /// The last version of the filesystem where keys in layer files used the old serialization format
 /// (prior to SerializeKey and delta encoding).
@@ -131,6 +131,7 @@ versioned_types! {
         49.. => EncryptedMutationsV49,
     }
     EncryptedTransaction {
+        63.. => EncryptedTransactionV63,
         62.. => EncryptedTransactionV62,
         61.. => EncryptedTransactionV61,
         59.. => EncryptedTransactionV59,
@@ -140,6 +141,7 @@ versioned_types! {
         50.. => FsverityMetadataV50,
     }
     JournalRecord {
+        63.. => JournalRecordV63,
         62.. => JournalRecordV62,
         61.. => JournalRecordV61,
         60.. => JournalRecordV60,
@@ -148,6 +150,7 @@ versioned_types! {
         56.. => JournalRecordV56,
     }
     Mutation {
+        63.. => MutationV63,
         62.. => MutationV62,
         61.. => MutationV61,
         59.. => MutationV59,
@@ -155,6 +158,7 @@ versioned_types! {
         56.. => MutationV56,
     }
     ObjectKey {
+        63.. => ObjectKeyV63,
         54.. => ObjectKeyV54,
     }
     ObjectValue {
@@ -176,11 +180,15 @@ versioned_types! {
         32.. => SuperBlockHeaderV32,
     }
     SuperBlockRecord {
+        63.. => SuperBlockRecordV63,
         62.. => SuperBlockRecordV62,
         59.. => SuperBlockRecordV59,
         56.. => SuperBlockRecordV56,
     }
+    // Blobs are immutable and their metadata attribute is never rewritten during compaction, so
+    // older BlobMetadata versions must not be removed when EARLIEST_SUPPORTED_VERSION is bumped.
     BlobMetadata {
+        64.. => BlobMetadataV64,
         53.. => BlobMetadataV53,
     }
 }

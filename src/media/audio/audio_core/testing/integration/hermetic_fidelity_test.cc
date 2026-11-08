@@ -17,6 +17,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <utility>
 
@@ -218,9 +219,8 @@ template <fuchsia::media::AudioSampleFormat InputFormat,
           fuchsia::media::AudioSampleFormat OutputFormat>
 std::vector<HermeticFidelityTest::Frequency> HermeticFidelityTest::GetTestFrequencies(
     const HermeticFidelityTest::TestCase<InputFormat, OutputFormat>& tc) {
-  if (tc.single_frequency_to_test.has_value()) {
-    auto freq_display_val = tc.single_frequency_to_test.value();
-    // If `single_frequency_to_test` is specified, it should be in kReferenceFrequencies.
+  auto freq_to_struct = [&tc](int32_t freq_display_val) -> HermeticFidelityTest::Frequency {
+    // Specified frequencies should be in kReferenceFrequencies.
     // If not, round down to a lower frequency that is, and use those results.
     size_t freq_idx;
     for (freq_idx = 0u; freq_idx < kNumReferenceFreqs - 1; ++freq_idx) {
@@ -234,14 +234,22 @@ std::vector<HermeticFidelityTest::Frequency> HermeticFidelityTest::GetTestFreque
                        << kReferenceFrequencies[freq_idx] << " Hz instead";
       freq_display_val = kReferenceFrequencies[freq_idx];
     }
-    return {{
+    return {
         .display_val = freq_display_val,
         .periods = FrequencyToPeriods(tc.output_format.frames_per_second(), freq_display_val),
         .idx = freq_idx,
-    }};
-  }
+    };
+  };
 
   std::vector<HermeticFidelityTest::Frequency> frequencies;
+  if (!tc.frequencies_to_test.empty()) {
+    frequencies.reserve(tc.frequencies_to_test.size());
+    for (auto freq_val : tc.frequencies_to_test) {
+      frequencies.push_back(freq_to_struct(freq_val));
+    }
+    return frequencies;
+  }
+
   for (auto freq_idx = 0u; freq_idx < kNumReferenceFreqs; ++freq_idx) {
     frequencies.push_back({
         .display_val = kReferenceFrequencies[freq_idx],
@@ -648,22 +656,6 @@ void HermeticFidelityTest::Run(
   ASSERT_LE(tc.low_cut_frequency, low_pass_frequency)
       << "low_cut_frequency (" << tc.low_cut_frequency << ") cannot exceed low_pass_frequency ("
       << low_pass_frequency << ")";
-
-  if (tc.single_frequency_to_test.has_value()) {
-    ASSERT_LE(tc.single_frequency_to_test.value(), nyquist_limit)
-        << "Specified frequency (" << tc.single_frequency_to_test.value() << ") exceeds "
-        << nyquist_limit << ", the Nyquist limit for this input/output pair ("
-        << tc.input_format.frames_per_second() << ", " << tc.output_format.frames_per_second()
-        << ")";
-    if (tc.low_pass_frequency.has_value()) {
-      ASSERT_LE(tc.single_frequency_to_test.value(), tc.low_pass_frequency.value())
-          << "Specified frequency (" << tc.single_frequency_to_test.value() << ") exceeds "
-          << tc.low_pass_frequency.value() << ", the specified low-pass limit";
-    }
-    ASSERT_GE(tc.single_frequency_to_test.value(), tc.low_cut_frequency)
-        << "Specified frequency (" << tc.single_frequency_to_test.value() << ") is less than "
-        << tc.low_cut_frequency << ", the specified low-cut limit";
-  }
 
   // This is the factor mentioned earlier (where we set input_signal_frames_to_measure_double). We
   // apply this adjustment to freq, to perfectly fit an integral number of wavelengths into the

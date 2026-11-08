@@ -116,16 +116,6 @@ experimental status and exits early if it's not enabled. When writing a new
 subcommand, it should have this declaration on it to discourage people from relying
 on it before it's ready for wider use.
 
-##### Direct Connections
-Target connections are direct by default. The `#[target(direct)]` declaration may be added for explicit subtool declaration:
-```rust
-#[derive(FfxTool)]
-#[target(direct)]
-pub struct MyTool {
-    ...
-}
-```
-
 ##### No Target Connection
 If a subtool does not require a target connection, it may declare this with
 `#[target(None)]`:

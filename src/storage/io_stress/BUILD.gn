@@ -6,7 +6,6 @@ import("//build/components.gni")
 import("//build/rust/rustc_binary.gni")
 import("//build/rust/rustc_library.gni")
 import("//build/testing/perf/test.gni")
-import("//src/storage/fshost/generated_fshost_config.gni")
 
 rustc_library("lib") {
   name = "io_stress"
@@ -100,9 +99,9 @@ fuchsia_test_component("io-stress-suite-component") {
   test_type = "system"
 }
 
-if (target_cpu == "riscv64" || data_filesystem_format == "minfs") {
+if (target_cpu == "riscv64") {
   # These empty groups act as stubs for unsupported configurations (e.g.,
-  # riscv64 or minfs) to prevent build failures when referenced by higher-level
+  # riscv64) to prevent build failures when referenced by higher-level
   # test groups like //src/storage:tests and
   # //src/tests/end_to_end/perf:benchmarks
   group("io-stress-test") {

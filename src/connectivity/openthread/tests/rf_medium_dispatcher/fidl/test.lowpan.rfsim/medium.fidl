@@ -1,0 +1,86 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+/// Simulated IEEE 802.15.4 medium for hermetic OpenThread tests.
+library test.lowpan.rfsim;
+
+using zx;
+
+/// Maximum size of an IEEE 802.15.4 PSDU (aMaxPhyPacketSize).
+const MAX_PSDU_SIZE uint32 = 127;
+
+/// Upper bound on nodes attached at once.
+const MAX_NODES uint32 = 64;
+
+/// Identifies a node on the medium. Chosen by the node when it attaches and
+/// unique among attached nodes.
+alias NodeId = uint32;
+
+/// An IEEE 802.15.4 channel number. The medium models the 2.4 GHz O-QPSK
+/// band, channels 11 to 26.
+alias Channel = uint8;
+
+/// A PSDU together with the PHY parameters a node transmits it with.
+type Frame = struct {
+    /// Channel to transmit on.
+    channel Channel;
+    /// The PSDU, FCS included.
+    psdu vector<uint8>:MAX_PSDU_SIZE;
+    /// Transmit power, in dBm.
+    tx_power_dbm int8;
+};
+
+/// A frame the medium delivers to a node, with what that node observes of it.
+type ReceivedFrame = struct {
+    /// The frame as transmitted. The receiving radio uses `channel` and `psdu`;
+    /// `tx_power_dbm` is the transmitter's setting, which a real radio could
+    /// not observe, and is carried for completeness only.
+    frame Frame;
+    /// Received signal strength this node observes, in dBm.
+    rssi_dbm int8;
+    /// Link quality indicator this node observes, 0 to 255.
+    lqi uint8;
+};
+
+/// The medium that nodes are attached to. Each node is identified by a `node_id`
+/// that is unique on the medium. Attached nodes transmit and receive through
+/// their own `Radio` connection.
+@discoverable
+closed protocol Medium {
+    /// Attaches the node `node_id` to the medium. The medium serves `radio`
+    /// for the lifetime of the attachment; closing it detaches the node.
+    ///
+    /// Errors:
+    ///  * `ZX_ERR_ALREADY_EXISTS`: `node_id` is already attached.
+    ///  * `ZX_ERR_NO_RESOURCES`: `MAX_NODES` nodes are already attached.
+    ///  * `ZX_ERR_NOT_FOUND`: the medium's topology has no such node and the
+    ///    medium does not accept unknown nodes.
+    strict Attach(resource struct {
+        /// Identifies the node on the medium and in `Monitor` records.
+        node_id NodeId;
+        /// The node's radio, served until the node detaches.
+        radio server_end:Radio;
+    }) -> () error zx.Status;
+};
+
+/// One attached node's view of the medium.
+closed protocol Radio {
+    /// Transmits `frame`. Replies once the medium has taken it. A radio
+    /// transmits one frame at a time, so a node waits for the reply before
+    /// transmitting again; closes the connection with `ZX_ERR_BAD_STATE` if
+    /// called while a previous call is still outstanding.
+    strict Transmit(Frame) -> ();
+
+    /// Hanging get for the next frame the medium decided this node hears,
+    /// oldest first. Blocks until a frame is available.
+    ///
+    /// While no call is pending the medium queues a bounded number of frames
+    /// for the node and drops the oldest beyond that, like a radio whose
+    /// receive FIFO overflows. A node that is not receiving (radio disabled
+    /// or asleep) does not call this.
+    ///
+    /// Closes the connection with `ZX_ERR_BAD_STATE` if called while a
+    /// previous call is still outstanding.
+    strict Receive() -> (ReceivedFrame);
+};

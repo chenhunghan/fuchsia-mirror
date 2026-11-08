@@ -138,6 +138,7 @@ zstdcat
 zstdgrep
 
 # Static analysis & shell linter
+shac check
 shellcheck
 
 # Git queries (inspection only)
@@ -209,8 +210,16 @@ jj branch list
 jj config get
 jj config list
 jj diff
+jj evolog
+jj evolution-log
+jj file annotate
+jj file list
+jj file search
+jj file show
 jj files
+jj git remote list
 jj help
+jj interdiff
 jj log
 jj op log
 jj op show
@@ -218,9 +227,12 @@ jj operation log
 jj operation show
 jj root
 jj show
+jj st
 jj status
+jj tag list
 jj version
 jj workspace list
+jj workspace root
 
 # Jiri inspection & search
 jiri branch
@@ -237,6 +249,7 @@ jiri snapshot
 jiri status
 jiri version
 jiri which-pins
+jiri worktree list
 
 # Fuchsia inspection & queries
 fx cmc
@@ -259,6 +272,9 @@ fx serial
 fx status
 fx symbolizer
 fx version
+fx worktree list
+fx worktree locate
+fx worktree pool list
 
 # Target & device inspection
 ffx component capability
@@ -295,6 +311,7 @@ fx debug
 fx debug cli
 
 # Build, test, and verification (writes to out/ or runs in sandbox, leaves source untouched)
+fuchsia-vendored-python scripts/shac/commit_msg_checker.py
 fx build
 fx check-deps
 fx check-goldens

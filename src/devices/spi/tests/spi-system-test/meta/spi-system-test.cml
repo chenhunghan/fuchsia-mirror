@@ -13,24 +13,4 @@
         { protocol: "fuchsia.driver.token.NodeBusTopology" },
         { service: "fuchsia.hardware.spi.TestService" },
     ],
-    config: {
-        bus_addresses: {
-            type: "vector",
-            element: {
-                type: "string",
-                max_size: 64,
-            },
-            max_count: 8,
-        },
-        min_expected_throughput_bytes_per_second: {
-            type: "vector",
-            element: { type: "uint64" },
-            max_count: 8,
-        },
-        max_expected_latency_nanoseconds: {
-            type: "vector",
-            element: { type: "uint64" },
-            max_count: 8,
-        },
-    },
 }

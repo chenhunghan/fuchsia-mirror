@@ -102,6 +102,9 @@ template("idk_subbuilds") {
       api_level = "PLATFORM"
       subbuild_dir_name = _subbuild_dir_name
 
+      prebuilt_target_sysroot_dir =
+          "$root_build_dir/sysroot_idk_export/arch/${target_cpu}/sysroot"
+
       # Each subbuild depends on the `sdk_collection` in the main build, so
       # that when a change happens that would cause the `sdk_collection` to be
       # rebuilt, that also triggers the subbuilds to be rerun.
@@ -140,6 +143,9 @@ template("idk_subbuilds") {
         target_cpu = target_cpu
         api_level = "$api_level"
         subbuild_dir_name = _subbuild_dir_name
+
+        prebuilt_target_sysroot_dir =
+            "$root_build_dir/sysroot_idk_export/arch/${target_cpu}/sysroot"
 
         # Each subbuild depends on the `sdk_collection` in the main build, so
         # that when a change happens that would cause the `sdk_collection` to be

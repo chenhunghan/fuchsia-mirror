@@ -6,6 +6,12 @@ load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
 
 package(default_applicable_licenses = ["//:license"])
 
+alias(
+    name = "rust",
+    actual = ":fuchsia-inspect",
+    visibility = ["//:__subpackages__"],
+)
+
 rustc_library(
     name = "fuchsia-inspect",
     srcs = [
@@ -17,12 +23,15 @@ rustc_library(
         "src/reader/snapshot.rs",
         "src/reader/tree_reader.rs",
         "src/stats.rs",
+        "src/writer/blob_buffer.rs",
         "src/writer/error.rs",
         "src/writer/heap.rs",
         "src/writer/mod.rs",
         "src/writer/state.rs",
         "src/writer/testing_utils.rs",
         "src/writer/types/base.rs",
+        "src/writer/types/blob_property.rs",
+        "src/writer/types/blob_reader_writer.rs",
         "src/writer/types/bool_property.rs",
         "src/writer/types/bytes_property.rs",
         "src/writer/types/double_array.rs",

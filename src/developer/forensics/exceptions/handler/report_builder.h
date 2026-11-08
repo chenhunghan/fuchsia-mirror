@@ -5,7 +5,7 @@
 #ifndef SRC_DEVELOPER_FORENSICS_EXCEPTIONS_HANDLER_REPORT_BUILDER_H_
 #define SRC_DEVELOPER_FORENSICS_EXCEPTIONS_HANDLER_REPORT_BUILDER_H_
 
-#include <fuchsia/feedback/cpp/fidl.h>
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
 #include <lib/zx/process.h>
 #include <lib/zx/thread.h>
 #include <lib/zx/vmo.h>
@@ -29,11 +29,13 @@ class CrashReportBuilder {
   CrashReportBuilder& SetComponentInfo(const ComponentInfo& component_info);
   CrashReportBuilder& SetExceptionExpired();
   CrashReportBuilder& SetProcessTerminated();
+  // No minidump on purpose, e.g. because reading the process's memory would block on its pager.
+  CrashReportBuilder& SetMinidumpSkipped();
   CrashReportBuilder& SetGwpAsanExceptionType(std::string exception_type);
 
   const std::optional<std::string>& ProcessName() const;
 
-  fuchsia::feedback::CrashReport Consume();
+  fuchsia_feedback::CrashReport Consume();
 
  private:
   std::optional<std::string> process_name_;
@@ -48,6 +50,7 @@ class CrashReportBuilder {
   std::optional<std::string> gwp_asan_exception_type_;
   bool exception_expired_{false};
   bool process_already_terminated_{false};
+  bool minidump_skipped_{false};
 
   bool is_valid_{true};
 };

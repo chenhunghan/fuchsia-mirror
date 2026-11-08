@@ -30,7 +30,7 @@ pub struct PolicyCursor<'a> {
 impl<'a> PolicyCursor<'a> {
     /// Creates a new [`PolicyCursor`] wrapping the supplied `data`.
     pub fn new(data: &'a [u8]) -> Self {
-        Self { data, offset: 0, policy_version: PolicyVersion::V30, types_count: 0 }
+        Self { data, offset: 0, policy_version: PolicyVersion::MIN, types_count: 0 }
     }
 
     /// Sets the SELinux policy database version on this cursor.
@@ -58,13 +58,28 @@ impl<'a> PolicyCursor<'a> {
         self.offset
     }
 
+    /// Returns the number of unconsumed bytes remaining in the cursor.
+    pub fn remaining(&self) -> usize {
+        self.data.len() - self.offset
+    }
+
     /// Parses a type `T` that implements [`Parse`] from the cursor.
     pub fn parse<T: Parse>(&mut self) -> Result<T, ParseError> {
         T::parse(self)
     }
 
     /// Parses `count` contiguous elements of type `T` from the cursor.
-    fn parse_elements<T: Parse>(&mut self, count: usize) -> Result<Box<[T]>, ParseError> {
+    pub(super) fn parse_elements<T: Parse>(
+        &mut self,
+        count: usize,
+    ) -> Result<Box<[T]>, ParseError> {
+        if count > self.remaining() {
+            return Err(ParseError::MissingData {
+                type_name: std::any::type_name::<T>(),
+                type_size: count,
+                num_bytes: self.remaining(),
+            });
+        }
         let mut elements = Vec::with_capacity(count);
         for _ in 0..count {
             elements.push(self.parse()?);
@@ -89,11 +104,11 @@ impl<'a> PolicyCursor<'a> {
 
     /// Reads a byte slice of `count` bytes from the cursor.
     pub fn read_bytes(&mut self, count: usize) -> Result<&'a [u8], ParseError> {
-        if self.offset + count > self.data.len() {
+        if count > self.remaining() {
             return Err(ParseError::MissingData {
                 type_name: "bytes",
                 type_size: count,
-                num_bytes: self.data.len() - self.offset,
+                num_bytes: self.remaining(),
             });
         }
         let bytes = &self.data[self.offset..self.offset + count];
@@ -187,7 +202,7 @@ impl Validate for u32 {
     }
 }
 
-/// Container representing a `u32` count followed by that many raw bytes.
+/// Sequence of raw bytes prefixed by a `u32` byte count in the binary policy format.
 #[derive(Debug, Clone, PartialEq, Eq, Validate)]
 pub struct ByteArray {
     data: Box<[u8]>,
@@ -210,7 +225,7 @@ impl Parse for ByteArray {
     fn parse(cursor: &mut PolicyCursor<'_>) -> Result<Self, ParseError> {
         let count = u32::parse(cursor)? as usize;
         let bytes = cursor.read_bytes(count)?;
-        Ok(Self { data: bytes.to_vec().into_boxed_slice() })
+        Ok(Self { data: Box::from(bytes) })
     }
 }
 
@@ -347,6 +362,12 @@ impl<T> AsRef<[T]> for Array<T> {
     }
 }
 
+impl<T> AsMut<[T]> for Array<T> {
+    fn as_mut(&mut self) -> &mut [T] {
+        &mut self.elements
+    }
+}
+
 impl<T: Parse> Parse for Array<T> {
     fn parse(cursor: &mut PolicyCursor<'_>) -> Result<Self, ParseError> {
         let count = u32::parse(cursor)? as usize;
@@ -368,7 +389,7 @@ impl<T: Serialize> Serialize for Array<T> {
 /// In the SELinux binary policy database, each symbol table is prefixed by a header
 /// containing a `primary_names_count` field, followed by the array of items (which itself
 /// is prefixed by an `items_count` field).
-#[derive(Debug, Parse, Serialize)]
+#[derive(Clone, Debug, Parse, Serialize)]
 pub struct SymbolArray<T> {
     /// Number of primary names in this array (excluding aliases).
     /// Included in the policy to allow allocation of index structures to be optimized.
@@ -376,17 +397,26 @@ pub struct SymbolArray<T> {
     items: Array<T>,
 }
 
-impl<T> Deref for SymbolArray<T> {
-    type Target = [T];
-    fn deref(&self) -> &Self::Target {
+impl<T> AsRef<[T]> for SymbolArray<T> {
+    fn as_ref(&self) -> &[T] {
         &self.items
     }
 }
 
-#[cfg(test)]
-impl<T> std::ops::DerefMut for SymbolArray<T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
+impl<T> SymbolArray<T> {
+    pub(super) fn primary_names_count(&self) -> u32 {
+        self.primary_names_count
+    }
+
+    #[cfg(test)]
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
         &mut self.items
+    }
+}
+
+impl<T> AsMut<[T]> for SymbolArray<T> {
+    fn as_mut(&mut self) -> &mut [T] {
+        self.items.as_mut()
     }
 }
 

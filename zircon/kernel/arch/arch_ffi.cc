@@ -11,9 +11,11 @@
 
 #include <arch/arch_ops.h>
 #include <arch/debugger.h>
+#include <arch/exception.h>
 #include <arch/interrupt.h>
 #include <arch/ops.h>
 #include <kernel/ffi.h>
+#include <kernel/percpu.h>
 #include <kernel/thread.h>
 #if defined(__x86_64__)
 #include <arch/user_copy.h>
@@ -40,6 +42,21 @@ FFI_ALWAYS_INLINE zx_status_t capture_faults_result(UserCopyCaptureFaultsResult 
 }  // namespace
 #endif
 
+// The Rust `arch_rs::InterruptSavedState`, passed across FFI by `cpp_arch_interrupt_save` and
+// `cpp_arch_interrupt_restore`, must match `interrupt_saved_state_t`.
+#ifdef __x86_64__
+constexpr size_t kExpectedInterruptSavedStateSize = 8;
+constexpr size_t kExpectedInterruptSavedStateAlign = 8;
+#else
+constexpr size_t kExpectedInterruptSavedStateSize = 1;
+constexpr size_t kExpectedInterruptSavedStateAlign = 1;
+#endif
+
+static_assert(sizeof(interrupt_saved_state_t) == kExpectedInterruptSavedStateSize,
+              "Rust InterruptSavedState size mismatch with C++");
+static_assert(alignof(interrupt_saved_state_t) == kExpectedInterruptSavedStateAlign,
+              "Rust InterruptSavedState alignment mismatch with C++");
+
 extern "C" {
 
 void cpp_arch_yield();
@@ -64,13 +81,19 @@ zx_status_t cpp_arch_copy_to_user_capture_faults(void* dst, const void* src, siz
 void* cpp_arch_get_current_thread();
 void cpp_arch_set_current_thread(void* thread);
 void cpp_arch_set_restricted_flag(bool in_restricted);
-void cpp_dump_common_exception_context(const arch_exception_context_t* context);
 bool cpp_with_frame_pointers();
 void cpp_arch_set_blocking_disallowed(bool value);
-void* cpp_arch_get_curr_percpu();
+__attribute__((returns_nonnull, assume_aligned(alignof(percpu)))) void* cpp_arch_get_curr_percpu();
 uint32_t cpp_arch_vm_features();
 uint32_t cpp_arch_num_spinlocks_held();
+uint32_t cpp_arch_cpu_features();
+uint32_t cpp_arch_cpu_sve_features();
 uint32_t cpp_arch_dcache_line_size();
+uint32_t cpp_arch_icache_line_size();
+#ifndef __riscv
+uint32_t cpp_arch_exception_context_user_synth_code(const arch_exception_context_t* context);
+uint32_t cpp_arch_exception_context_user_synth_data(const arch_exception_context_t* context);
+#endif
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE void cpp_arch_yield() { arch::Yield(); }
@@ -116,16 +139,30 @@ FFI_ALWAYS_INLINE void cpp_arch_set_current_thread(void* thread) {
 FFI_ALWAYS_INLINE void cpp_arch_set_restricted_flag(bool in_restricted) {
   arch_set_restricted_flag(in_restricted);
 }
-FFI_ALWAYS_INLINE void cpp_dump_common_exception_context(const arch_exception_context_t* context) {
-  dump_common_exception_context(context);
-}
 FFI_ALWAYS_INLINE bool cpp_with_frame_pointers() { return WITH_FRAME_POINTERS != 0; }
 FFI_ALWAYS_INLINE void cpp_arch_set_blocking_disallowed(bool value) {
   arch_set_blocking_disallowed(value);
 }
-FFI_ALWAYS_INLINE void* cpp_arch_get_curr_percpu() { return arch_get_curr_percpu(); }
+FFI_ALWAYS_INLINE __attribute__((returns_nonnull, assume_aligned(alignof(percpu)))) void*
+cpp_arch_get_curr_percpu() {
+  return arch_get_curr_percpu();
+}
 FFI_ALWAYS_INLINE uint32_t cpp_arch_vm_features() { return arch_vm_features(); }
 FFI_ALWAYS_INLINE uint32_t cpp_arch_num_spinlocks_held() { return arch_num_spinlocks_held(); }
+FFI_ALWAYS_INLINE uint32_t cpp_arch_cpu_features() { return arch_cpu_features(); }
+FFI_ALWAYS_INLINE uint32_t cpp_arch_cpu_sve_features() { return arch_cpu_sve_features(); }
 FFI_ALWAYS_INLINE uint32_t cpp_arch_dcache_line_size() { return arch_dcache_line_size(); }
+FFI_ALWAYS_INLINE uint32_t cpp_arch_icache_line_size() { return arch_icache_line_size(); }
+#ifndef __riscv
+FFI_ALWAYS_INLINE uint32_t
+cpp_arch_exception_context_user_synth_code(const arch_exception_context_t* context) {
+  return context->user_synth_code;
+}
+FFI_ALWAYS_INLINE uint32_t
+cpp_arch_exception_context_user_synth_data(const arch_exception_context_t* context) {
+  return context->user_synth_data;
+}
+#endif
+FFI_ALWAYS_INLINE void cpp_arch_enter_idle_state() { ArchIdlePowerThread::EnterIdleState(); }
 
 }  // extern "C"

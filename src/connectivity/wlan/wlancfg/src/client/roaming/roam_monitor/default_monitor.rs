@@ -47,7 +47,7 @@ mod test {
     use super::*;
     use crate::util::testing::generate_random_scanned_candidate;
     use assert_matches::assert_matches;
-    use fidl_fuchsia_wlan_internal as fidl_internal;
+    use fidl_fuchsia_wlan_stats as fidl_stats;
 
     #[fuchsia::test]
     async fn test_handle_roam_trigger_data_always_returns_noop() {
@@ -56,8 +56,8 @@ mod test {
         // Send each type of trigger data and verify the default monitor always returns noop.
         assert_matches!(
             monitor
-                .handle_roam_trigger_data(RoamTriggerData::SignalReportInd(
-                    fidl_internal::SignalReportIndication {
+                .handle_roam_trigger_data(RoamTriggerData::ConnectionSignalReport(
+                    fidl_stats::ConnectionSignalReport {
                         rssi_dbm: Some(-100),
                         snr_db: Some(0),
                         tx_rate_500kbps: Some(0),

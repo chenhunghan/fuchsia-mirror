@@ -1,0 +1,33 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rbe:rbe.bzl", "RBE_USE_LARGE_WORKER")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "shared-multi-call-tool-binary",
+    srcs = ["src/main.rs"],
+    # This binary is a part of the bootfs image, so attempt to minimize its size
+    # impact.
+    build_flags = ["//build/config/rust:bootfs"],
+    edition = "2024",
+    # As this is a large binary that uses many resources to compile (and takes
+    # minutes when LTO is enabled, shift it to the large RBE worker pool)
+    exec_properties = RBE_USE_LARGE_WORKER,
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    tags = ["manual"],
+    visibility = [
+        "//src/sys/tools/component:__pkg__",
+        "//src/sys/tools/package:__pkg__",
+    ],
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/sys/tools/component",
+        "//src/sys/tools/package",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)

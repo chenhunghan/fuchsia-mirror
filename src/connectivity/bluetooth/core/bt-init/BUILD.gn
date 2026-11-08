@@ -18,8 +18,10 @@ rustc_binary("bin") {
     "//sdk/fidl/fuchsia.bluetooth.sys:fuchsia.bluetooth.sys_rust",
     "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
     "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+    "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_rust",
     "//sdk/fidl/fuchsia.hardware.bluetooth:fuchsia.hardware.bluetooth_rust",
     "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+    "//sdk/rust/zx",
     "//src/connectivity/bluetooth/lib/fuchsia-bluetooth",
     "//src/lib/fdio/rust:fdio",
     "//src/lib/fidl/rust/fidl",
@@ -32,10 +34,7 @@ rustc_binary("bin") {
     "//third_party/rust_crates:log",
   ]
 
-  test_deps = [
-    "//sdk/rust/zx",
-    "//src/lib/fuchsia",
-  ]
+  test_deps = [ "//src/lib/fuchsia" ]
 
   sources = [ "src/main.rs" ]
 

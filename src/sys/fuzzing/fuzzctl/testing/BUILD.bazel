@@ -1,0 +1,74 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Convert shared source file paths for GN targets.
+# @bazel2gn:transformer=file_paths
+_TESTING_SRCS = [
+    "src/controller.rs",
+    "src/diagnostics.rs",
+    "src/input.rs",
+    "src/lib.rs",
+    "src/manager.rs",
+    "src/options.rs",
+    "src/test.rs",
+    "src/util.rs",
+    "src/writer.rs",
+]
+
+rustc_library(
+    name = "testing",
+    testonly = True,
+    srcs = _TESTING_SRCS,
+    crate_name = "fuchsia_fuzzctl_test",
+    edition = "2024",
+    # Matches GN's testonly = true lint defaults.
+    # @bazel2gn:skip
+    lint_config = "//build/config/rust/lints:clippy_warn_default",
+    visibility = ["//src/sys/fuzzing/fuzzctl:__pkg__"],
+    deps = [
+        "//sdk/rust/zx-status",
+        "//src/lib/diagnostics/data",
+        "//src/lib/fdomain/client:flex_fidl",
+        "//src/lib/fuchsia-async",
+        "//src/sys/fuzzing/fidl:fuchsia.fuzzer_rust_flex",
+        "//src/sys/fuzzing/fuzzctl:lib",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:tempfile",
+    ],
+)
+
+rustc_library(
+    name = "testing_fdomain",
+    testonly = True,
+    srcs = _TESTING_SRCS,
+    crate_features = ["fdomain"],
+    crate_name = "fuchsia_fuzzctl_test_fdomain",
+    edition = "2024",
+    # Matches GN's testonly = true lint defaults.
+    # @bazel2gn:skip
+    lint_config = "//build/config/rust/lints:clippy_warn_default",
+    visibility = [
+        "//src/developer/ffx/plugins/fuzz:__pkg__",
+        "//src/sys/fuzzing/fuzzctl:__pkg__",
+    ],
+    deps = [
+        "//sdk/rust/zx-status",
+        "//src/lib/diagnostics/data",
+        "//src/lib/fdomain/client:flex_fdomain",
+        "//src/lib/fdomain/local",
+        "//src/lib/fuchsia-async",
+        "//src/sys/fuzzing/fidl:fuchsia.fuzzer_rust_fdomain_flex",
+        "//src/sys/fuzzing/fuzzctl:lib_fdomain",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:tempfile",
+    ],
+)

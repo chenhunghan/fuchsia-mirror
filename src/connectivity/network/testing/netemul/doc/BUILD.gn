@@ -13,7 +13,6 @@ fuchsia_test_component("example-sandbox-test") {
   manifest = "sandbox-test/meta/sandbox-test.cml"
   deps = [
     "sandbox-test",
-    "//src/connectivity/network/netstack3:component-debug",
     "//src/connectivity/network/testing/netemul/service:netemul-sandbox",
   ]
 }
@@ -35,8 +34,6 @@ fuchsia_test_component("example-runner-test") {
   deps = [
     ":client-component",
     ":server-component",
-    "//src/connectivity/network/testing/netemul/configurable-netstack:netstack3",
-    "//src/connectivity/network/testing/netemul/sync-manager",
   ]
 }
 
@@ -44,5 +41,10 @@ fuchsia_test_package("netemul-example-tests") {
   test_components = [
     ":example-sandbox-test",
     ":example-runner-test",
+  ]
+  subpackages = [
+    "//src/connectivity/network/netstack3:package-debug",
+    "//src/connectivity/network/testing/netemul/configurable-netstack",
+    "//src/connectivity/network/testing/netemul/sync-manager",
   ]
 }

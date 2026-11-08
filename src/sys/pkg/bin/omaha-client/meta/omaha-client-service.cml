@@ -24,7 +24,6 @@
     use: [
         {
             protocol: [
-                "fuchsia.cobalt.SystemDataUpdater",
                 "fuchsia.feedback.ComponentDataRegister",
                 "fuchsia.feedback.CrashReporter",
                 "fuchsia.metrics.MetricEventLoggerFactory",

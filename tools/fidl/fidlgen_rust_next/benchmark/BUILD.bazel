@@ -1,0 +1,40 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+fidl_library(
+    name = "fidl",
+    srcs = ["benchmark.test.fidl"],
+    excluded_checks = [
+        "string-bounds-not-specified",
+        "vector-bounds-not-specified",
+    ],
+    library_name = "test.benchmark",
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = [
+        "src/_macros.rs",
+        "src/log.rs",
+        "src/main.rs",
+        "src/mesh.rs",
+        "src/minecraft.rs",
+    ],
+    crate_name = "rust_next_benchmark",
+    edition = "2024",
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
+    deps = [
+        ":fidl_rust",
+        ":fidl_rust_next",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fidl/rust_next/fidl_next",
+        "//third_party/rust_crates/vendor:criterion",
+        "//third_party/rust_crates/vendor:rand",
+    ],
+)

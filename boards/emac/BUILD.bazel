@@ -96,6 +96,7 @@ fuchsia_board_configuration(
         "fuchsia::paver",
         "fuchsia::power",
         "fuchsia::pwm",
+        "fuchsia::sdmmc",
         "fuchsia::shared_registers",
         "fuchsia::input",
         "fuchsia::usb_host",

@@ -14,17 +14,8 @@ load(
 
 package(default_applicable_licenses = ["//:license"])
 
-# NOTE: `shutdown_shim_integration_test_bin`,
-# `shutdown_shim_integration_test_component`, and
-# `shutdown-shim-integration-tests` remain in BUILD.gn because
-# `shutdown_shim_integration_test_bin` depends on
-# `//src/lib/fuchsia-component-test`, which bundles the unmigrated GN-only
-# `//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component`.
-# `shutdown_shim_component` is duplicated in BUILD.gn for
-# `:shutdown-shim-integration-tests` and GN-only test packages in
-# `//src/sys/component_manager/tests/reboot_on_terminate`,
-# `//src/sys/pkg/bin/omaha-client`, and
-# `//src/sys/pkg/lib/omaha-client-fuchsia`.
+# Skipped by bazel2gn because these targets are hand-written in BUILD.gn for
+# callers in //src/sys/pkg/bin/omaha-client and //src/sys/pkg/lib/omaha-client-fuchsia.
 # LINT.IfChange
 # @bazel2gn:skip
 fx_packaged_binary(
@@ -55,7 +46,12 @@ fx_component(
     name = "shutdown_shim_component",
     testonly = True,
     compiled_manifest = ":shutdown_shim_manifest",
-    component_name = "shutdown-shim",
-    deps = [":shutdown_shim_packaged_bin"],
+    visibility = [
+        "//src/sys/component_manager/tests/reboot_on_terminate:__pkg__",
+    ],
+    deps = [
+        # GN fuchsia_component depends on ..:bin directly; Bazel fx_component wraps it in fx_packaged_binary.
+        ":shutdown_shim_packaged_bin",  # @bazel2gn:path_overwrite:..:bin
+    ],
 )
 # LINT.ThenChange(BUILD.gn)

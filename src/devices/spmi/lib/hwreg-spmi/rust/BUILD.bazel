@@ -1,0 +1,77 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "spmi-hwreg",
+    srcs = [
+        "src/common.rs",
+        "src/lib.rs",
+    ],
+    edition = "2024",
+    visibility = [
+        "//vendor/google:__subpackages__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.spmi:fuchsia.hardware.spmi_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)
+
+rustc_test(
+    name = "spmi-hwreg_test",
+    crate = ":spmi-hwreg",
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+rustc_library(
+    name = "spmi-hwreg-next",
+    srcs = [
+        "src/common.rs",
+        "src/lib_next.rs",
+    ],
+    crate_root = "src/lib_next.rs",
+    edition = "2024",
+    visibility = [
+        "//vendor/google:__subpackages__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.spmi:fuchsia.hardware.spmi_rust_next",
+        "//src/lib/fidl/rust_next/fidl_next",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)
+
+rustc_test(
+    name = "spmi-hwreg-next_test",
+    crate = ":spmi-hwreg-next",
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+    ],
+)
+
+fx_unittest_package(
+    name = "spmi-hwreg-rust-test",
+    unit_tests = [":spmi-hwreg_test"],
+    visibility = ["//src/devices:__pkg__"],
+)
+
+fx_unittest_package(
+    name = "spmi-hwreg-next-rust-test",
+    unit_tests = [":spmi-hwreg-next_test"],
+    visibility = ["//src/devices:__pkg__"],
+)

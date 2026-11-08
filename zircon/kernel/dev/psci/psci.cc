@@ -173,8 +173,10 @@ void parse_cpu_suspend_power_states(ktl::span<const zbi_dcfg_arm_psci_cpu_suspen
     dprintf(INFO, "  id=0x%x, power_state=0x%x, flags=0x%x, powerdown=%d%s\n", elem.id,
             elem.power_state, elem.flags, psci_is_powerdown_power_state(elem.power_state),
             skip ? " SKIPPED" : "");
-    dprintf(INFO, "    entry_latency_us=%u, exit_latency_us=%u, min_residency_us=%u\n",
-            elem.entry_latency_us, elem.exit_latency_us, elem.min_residency_us);
+    dprintf(INFO,
+            "    entry_latency_us=%u, exit_latency_us=%u, min_residency_us=%u, cpu_mask=0x%" PRIx64
+            "\n",
+            elem.entry_latency_us, elem.exit_latency_us, elem.min_residency_us, elem.cpu_mask);
 
     if (skip) {
       continue;

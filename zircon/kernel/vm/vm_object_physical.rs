@@ -5,18 +5,22 @@
 // https://opensource.org/licenses/MIT
 
 use crate::kernel::types::PAddr;
+use crate::ksync_kernel::TrackedCriticalMutex;
+use core::mem::ManuallyDrop;
 use core::ops::Deref;
 use core::ptr::NonNull;
-use fbl::{IsOpaqueRefCounted, OpaqueRefCountedFacade, RefPtr};
-use ksync::{KMutex, RawCriticalMutex, guarded};
-use zr::ToMutPtr;
+use fbl::{IsOpaqueRefCounted, RefPtr};
+use ksync::{KMutex, LockToken, guarded};
+use pin_init::pin_data;
+use zr::{Opaque, ToMutPtr};
 use zx_status::Status;
-use zx_types::ZX_CACHE_POLICY_MASK;
+use zx_types::{ZX_CACHE_POLICY_MASK, ZX_ERR_NEXT, ZX_ERR_STOP, zx_status_t};
 
 use super::arch_vm_aspace::ArchMmuFlags;
-use super::vm_object::VmObject;
+use super::vm_object::{VmObject, VmObjectLockClass};
 use vm_constants_rs as constants;
-use vm_object_bindings as bindings;
+use vm_object_bindings as vmo_bindings;
+use vm_object_physical_bindings as phys_bindings;
 
 use ::page as kernel_page;
 
@@ -30,9 +34,10 @@ use ::page as kernel_page;
 #[guarded]
 #[repr(C)]
 pub struct VmObjectPhysicalState {
-    #[mutex]
-    lock: KMutex<RawCriticalMutex>,
+    #[mutex(flags = ksync::LOCK_FLAGS_NESTABLE)]
+    lock: KMutex<TrackedCriticalMutex>,
 
+    // size and base are immutable after initialization.
     size: u64,
     base: PAddr,
     is_slice: bool,
@@ -58,38 +63,39 @@ impl VmObjectPhysicalState {
             parent: None,
         })
     }
+
+    /// # Safety
+    ///
+    /// The caller must ensure `ptr` is non-null, properly aligned, and valid for reads of an
+    /// initialized `VmObjectPhysicalState` for the duration of the call.
+    #[inline]
+    unsafe fn lookup_contiguous_locked(
+        ptr: *const Self,
+        offset: u64,
+        len: u64,
+    ) -> Result<PAddr, Status> {
+        if len == 0 || !kernel_page::is_aligned(offset as usize) {
+            core::hint::cold_path();
+            return Err(Status::INVALID_ARGS);
+        }
+        // SAFETY: `ptr` points to an initialized `VmObjectPhysicalState`, and `size` is immutable
+        // after initialization.
+        let size = unsafe { (*ptr).size };
+        if !in_range(offset, len, size) {
+            core::hint::cold_path();
+            return Err(Status::OUT_OF_RANGE);
+        }
+        // SAFETY: `ptr` points to an initialized `VmObjectPhysicalState`, and `base` is immutable
+        // after initialization.
+        let base = unsafe { (*ptr).base };
+        Ok(PAddr(base.0 + (offset as usize)))
+    }
 }
 
 const PAGE_SIZE: u64 = kernel_page::SIZE as u64;
 
 const fn in_range(offset: u64, len: u64, size: u64) -> bool {
     if let Some(end) = offset.checked_add(len) { end <= size } else { false }
-}
-
-unsafe extern "C" {
-    fn cpp_vm_object_lookup_fn_invoke(
-        lookup_fn: *const VmObjectLookupFunction,
-        offset: u64,
-        pa: PAddr,
-    ) -> Status;
-
-    fn cpp_vm_object_physical_get_mapping_cache_policy_locked(
-        vmo: *const VmObjectPhysical,
-    ) -> ArchMmuFlags;
-    fn cpp_vm_object_num_mappings_locked(vmo: *const VmObjectPhysical) -> usize;
-    fn cpp_child_list_lock_acquire() -> bool;
-    fn cpp_child_list_lock_release(should_clear: bool);
-    fn cpp_vm_object_has_children_locked(vmo: *const VmObjectPhysical) -> bool;
-    fn cpp_vm_object_set_cache_policy_locked(
-        vmo: *mut VmObjectPhysical,
-        cache_policy: ArchMmuFlags,
-    );
-}
-
-#[repr(C)]
-/// Opaque type representing the C++ `VmObject::LookupFunction` callback.
-pub struct VmObjectLookupFunction {
-    _private: [u8; 0],
 }
 
 #[repr(C)]
@@ -110,119 +116,188 @@ pub struct ValidateChildSliceResult {
     pub base: PAddr,
 }
 
+enum ChildListLockClass {}
+
 /// RAII guard that manages the acquisition and release of the child list lock.
-pub struct ChildListLockGuard {
+struct ChildListLockGuard {
     should_clear: bool,
+    token: LockToken<'static, ChildListLockClass>,
 }
 
 impl ChildListLockGuard {
     #[inline(always)]
-    pub fn new() -> Self {
+    fn new() -> Self {
         // TODO(https://fxbug.dev/539633525): Figure out lockdep validation for
         // ChildListLock instead of bypassing it via C++ FFI wrappers.
-        // SAFETY: Calling the stateless helper `cpp_child_list_lock_acquire` has no
-        // preconditions and cannot cause undefined behavior or invalid memory access.
-        let should_clear = unsafe { cpp_child_list_lock_acquire() };
-        Self { should_clear }
+        // SAFETY: `cpp_vm_object_physical_child_list_lock_acquire` has no preconditions.
+        let should_clear: bool =
+            unsafe { phys_bindings::cpp_vm_object_physical_child_list_lock_acquire() };
+        // SAFETY: The child list lock is held by the current thread until the guard drops, and
+        // the token is only lent out for borrows of the guard.
+        let token: LockToken<'static, ChildListLockClass> = unsafe { LockToken::new() };
+        Self { should_clear, token }
+    }
+
+    #[inline(always)]
+    fn token(&self) -> &LockToken<'_, ChildListLockClass> {
+        &self.token
     }
 }
 
 impl Drop for ChildListLockGuard {
     #[inline(always)]
     fn drop(&mut self) {
-        // SAFETY: Calling the stateless helper `cpp_child_list_lock_release` has no
-        // preconditions and cannot cause undefined behavior or invalid memory access.
+        // SAFETY: The child list lock is held by the current thread, and `self.should_clear` is
+        // the value its acquisition returned.
         unsafe {
-            cpp_child_list_lock_release(self.should_clear);
+            phys_bindings::cpp_vm_object_physical_child_list_lock_release(self.should_clear);
         }
     }
 }
 
+/// VMO representing a physical range of memory.
+#[pin_data]
 #[repr(C)]
-/// VMO representing a physical range of memory
 pub struct VmObjectPhysical {
-    _facade: OpaqueRefCountedFacade<VmObject>,
+    #[pin]
+    raw: Opaque<phys_bindings::VmObjectPhysical>,
 }
 
+// SAFETY: `VmObjectPhysical` inherits from `VmObject` at byte offset 0 and derefs to `VmObject`.
 unsafe impl IsOpaqueRefCounted for VmObjectPhysical {
     type TargetBase = VmObject;
 }
 
 impl Deref for VmObjectPhysical {
     type Target = VmObject;
+    #[inline]
     fn deref(&self) -> &Self::Target {
-        // SAFETY: `raw` is derived from the valid reference `self`. The FFI helper performs
-        // a safe `static_cast` to the base `VmObject`, returning a valid pointer that is safe
-        // to dereference for the lifetime of `self`.
-        unsafe {
-            let raw = self as *const Self as *mut Self;
-            &*cpp_vm_object_physical_as_vm_object(raw)
-        }
+        // SAFETY: `self.as_raw()` points to a live `VmObjectPhysical`.
+        let raw: *mut vmo_bindings::VmObject =
+            unsafe { phys_bindings::cpp_vm_object_physical_as_vm_object(self.as_raw()) };
+        let ptr: *mut VmObject = VmObject::ptr_from_raw(raw);
+        // SAFETY: `ptr` points to a live `VmObject` for the lifetime of `self`.
+        unsafe { ptr.as_ref_unchecked() }
     }
 }
 
-unsafe extern "C" {
-    fn cpp_vm_object_physical_create(
-        base: PAddr,
-        size: usize,
-        out_status: *mut Result<(), Status>,
-    ) -> *mut VmObjectPhysical;
-    fn cpp_vm_object_physical_as_vm_object(vmo: *mut VmObjectPhysical) -> *mut VmObject;
-}
-
 impl VmObjectPhysical {
+    fn cast_raw(ptr: *mut VmObjectPhysical) -> *mut phys_bindings::VmObjectPhysical {
+        ptr.cast()
+    }
+
+    fn as_raw(&self) -> *mut phys_bindings::VmObjectPhysical {
+        self.raw.get()
+    }
+
+    #[inline]
+    fn state_ptr(&self) -> *const VmObjectPhysicalState {
+        // SAFETY: `self.as_raw()` points to a live `VmObjectPhysical`, whose
+        // `VmObjectPhysicalState` lives at `kVmObjectPhysicalStateOffset`.
+        unsafe { self.as_raw().byte_add(constants::kVmObjectPhysicalStateOffset).cast() }
+    }
+
+    /// # Safety
+    ///
+    /// `raw` is null or points to a live `VmObjectPhysical` and carries one reference, which
+    /// passes to the returned `RefPtr`.
+    unsafe fn from_raw(raw: *mut phys_bindings::VmObjectPhysical) -> Option<RefPtr<Self>> {
+        // SAFETY: `raw` is null or points to a live `VmObjectPhysical` and carries one reference.
+        unsafe { RefPtr::try_from_raw(raw.cast::<Self>()) }
+    }
+
     /// Create a new physical VMO for the given physical region.
     pub fn create(base: PAddr, size: usize) -> Result<RefPtr<VmObjectPhysical>, Status> {
-        let mut status = Ok(());
+        let mut status: zx_status_t = 0;
         // SAFETY: The pointer derived from `&mut status` is valid.
-        let raw = unsafe { cpp_vm_object_physical_create(base, size, &mut status) };
-        status?;
-        // SAFETY: The raw pointer returned by C++ is refcounted and ownership is transferred
-        // to Rust via RefPtr.
-        unsafe { RefPtr::try_from_raw(raw).ok_or(Status::NO_MEMORY) }
+        let raw: *mut phys_bindings::VmObjectPhysical =
+            unsafe { phys_bindings::cpp_vm_object_physical_create(base.0, size, &mut status) };
+        Status::ok(status)?;
+        // SAFETY: `raw` is null or points to a live `VmObjectPhysical` and carries one reference.
+        unsafe { Self::from_raw(raw).ok_or(Status::NO_MEMORY) }
     }
 
     /// Converts a `RefPtr<VmObjectPhysical>` into a base `RefPtr<VmObject>`.
     pub fn into_vm_object(this: RefPtr<Self>) -> RefPtr<VmObject> {
-        let this: *const VmObjectPhysical = RefPtr::into_raw(this);
-        let this: *mut VmObjectPhysical = this.cast_mut();
-        // Since `this` is non-null, `cpp_vm_object_physical_as_vm_object` guarantees its output is
-        // non-null.
-        // SAFETY: `this` points to a live `VmObjectPhysical` with an active refcount.
-        let this: *mut VmObject = unsafe { cpp_vm_object_physical_as_vm_object(this) };
-        let this: *mut bindings::VmObject = this.cast();
-        // SAFETY: `this` points to a live `VmObject` with an active refcount.
-        let this = unsafe { VmObject::from_raw(this) };
-        this.expect("RefPtr guarantees this is non-null")
+        let this = ManuallyDrop::new(this);
+        // SAFETY: `this.as_raw()` points to a live `VmObjectPhysical` with an active refcount.
+        let raw_base = unsafe { phys_bindings::cpp_vm_object_physical_as_vm_object(this.as_raw()) };
+        // SAFETY: `raw_base` points to a live `VmObject` whose reference count was owned by `this`.
+        unsafe { VmObject::from_raw(raw_base) }.expect("RefPtr guarantees this is non-null")
     }
 
     /// Cast a pointer to a VmObjectPhysical to its base VmObject.
-    pub fn cast(vmo: NonNull<VmObjectPhysical>) -> NonNull<VmObject> {
-        // SAFETY: Calls C++ helper to cast VmObjectPhysical pointer to base class VmObject.
-        // The return value is guaranteed to be non-null and valid.
-        unsafe { NonNull::new_unchecked(cpp_vm_object_physical_as_vm_object(vmo.as_ptr())) }
+    ///
+    /// # Safety
+    ///
+    /// `vmo` points to a live `VmObjectPhysical`.
+    #[inline]
+    pub unsafe fn cast(vmo: NonNull<VmObjectPhysical>) -> NonNull<VmObject> {
+        let raw_this: *mut phys_bindings::VmObjectPhysical = Self::cast_raw(vmo.as_ptr());
+        // SAFETY: `raw_this` points to a live `VmObjectPhysical`.
+        let raw: *mut vmo_bindings::VmObject =
+            unsafe { phys_bindings::cpp_vm_object_physical_as_vm_object(raw_this) };
+        let ptr: *mut VmObject = VmObject::ptr_from_raw(raw);
+        // SAFETY: `vmo` is non-null, and C++ `static_cast<VmObject*>` on a non-null
+        // `VmObjectPhysical` pointer produces a non-null base pointer.
+        unsafe { NonNull::new_unchecked(ptr) }
     }
 
-    pub fn get_mapping_cache_policy_locked(&self) -> ArchMmuFlags {
-        // SAFETY: Safe to call FFI wrapper with valid reference to self.
-        unsafe { cpp_vm_object_physical_get_mapping_cache_policy_locked(self) }
-    }
-
-    pub fn num_mappings_locked(&self) -> usize {
-        // SAFETY: Safe to call FFI wrapper with valid reference to self.
-        unsafe { cpp_vm_object_num_mappings_locked(self) }
-    }
-
-    pub fn has_children_locked(&self) -> bool {
-        // SAFETY: Safe to call FFI wrapper with valid reference to self.
-        unsafe { cpp_vm_object_has_children_locked(self) }
-    }
-
-    pub fn set_cache_policy_locked(&self, cache_policy: ArchMmuFlags) {
-        // SAFETY: Safe to call FFI wrapper with valid reference to self.
+    #[inline]
+    fn get_mapping_cache_policy_locked(
+        &self,
+        _token: &LockToken<'_, VmObjectPhysicalStateLockClass>,
+    ) -> ArchMmuFlags {
+        // SAFETY: `self.as_raw()` points to a live `VmObjectPhysical` and the object lock is held.
         unsafe {
-            cpp_vm_object_set_cache_policy_locked(
-                core::ptr::from_ref(self).cast_mut(),
+            phys_bindings::cpp_vm_object_physical_get_mapping_cache_policy_locked(self.as_raw())
+        }
+    }
+
+    #[inline]
+    pub fn size_locked(&self, _token: &LockToken<'_, VmObjectLockClass>) -> u64 {
+        // SAFETY: `self.state_ptr()` is valid for reads.
+        unsafe { (*self.state_ptr()).size }
+    }
+
+    /// Attempts to lookup the given range in the VMO. If it exists and is physically contiguous,
+    /// returns the physical address of the start of the range. The offset must be page aligned.
+    /// Ranges of length zero are considered invalid and will return `Status::INVALID_ARGS`.
+    #[inline]
+    pub fn lookup_contiguous_locked(
+        &self,
+        _token: &LockToken<'_, VmObjectLockClass>,
+        offset: u64,
+        len: u64,
+    ) -> Result<PAddr, Status> {
+        // SAFETY: `self.state_ptr()` is non-null, properly aligned, and valid for reads of this
+        // VMO's initialized `VmObjectPhysicalState` for the duration of the call.
+        unsafe { VmObjectPhysicalState::lookup_contiguous_locked(self.state_ptr(), offset, len) }
+    }
+
+    #[inline]
+    fn num_mappings_locked(&self, _token: &LockToken<'_, VmObjectPhysicalStateLockClass>) -> u32 {
+        // SAFETY: `self.as_raw()` points to a live `VmObjectPhysical` and the object lock is held.
+        unsafe { phys_bindings::cpp_vm_object_physical_num_mappings_locked(self.as_raw()) }
+    }
+
+    #[inline]
+    fn has_children_locked(&self, _token: &LockToken<'_, ChildListLockClass>) -> bool {
+        // SAFETY: `self.as_raw()` points to a live `VmObjectPhysical` and the child list lock is
+        // held.
+        unsafe { phys_bindings::cpp_vm_object_physical_has_children_locked(self.as_raw()) }
+    }
+
+    #[inline]
+    fn set_cache_policy_locked(
+        &self,
+        _token: &mut LockToken<'_, VmObjectPhysicalStateLockClass>,
+        cache_policy: ArchMmuFlags,
+    ) {
+        // SAFETY: `self.as_raw()` points to a live `VmObjectPhysical` and the object lock is held.
+        unsafe {
+            phys_bindings::cpp_vm_object_physical_set_cache_policy_locked(
+                self.as_raw(),
                 cache_policy,
             )
         }
@@ -270,7 +345,7 @@ pub unsafe extern "C" fn rust_vm_object_physical_state_destroy(ptr: *mut VmObjec
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rust_vm_object_physical_state_get_lock(
     ptr: *const VmObjectPhysicalState,
-) -> *mut KMutex<VmObjectPhysicalStateLockClass, RawCriticalMutex> {
+) -> *mut KMutex<VmObjectPhysicalStateLockClass, TrackedCriticalMutex> {
     // SAFETY: The caller guarantees `ptr` points to an initialized `VmObjectPhysicalState`.
     unsafe {
         let lock_ref = &(*ptr).lock;
@@ -348,22 +423,20 @@ pub unsafe extern "C" fn rust_vm_object_physical_state_set_parent_locked(
 
 /// # Safety
 ///
-/// The caller must ensure `ptr` points to an initialized `VmObjectPhysicalState`.
+/// The caller must ensure `ptr` is non-null, properly aligned, and valid for reads of an
+/// initialized `VmObjectPhysicalState` for the duration of the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rust_vm_object_physical_state_lookup_contiguous_locked(
     ptr: *const VmObjectPhysicalState,
     offset: u64,
     len: u64,
 ) -> LookupContiguousResult {
-    // SAFETY: The caller guarantees `ptr` points to an initialized `VmObjectPhysicalState`.
-    let state = unsafe { &*ptr };
-    if len == 0 || !kernel_page::is_aligned(offset as usize) {
-        return LookupContiguousResult { status: Err(Status::INVALID_ARGS), paddr: PAddr(0) };
+    // SAFETY: The caller guarantees `ptr` is non-null, properly aligned, and valid for reads of an
+    // initialized `VmObjectPhysicalState` for the duration of the call.
+    match unsafe { VmObjectPhysicalState::lookup_contiguous_locked(ptr, offset, len) } {
+        Ok(paddr) => LookupContiguousResult { status: Ok(()), paddr },
+        Err(err) => LookupContiguousResult { status: Err(err), paddr: PAddr(0) },
     }
-    if !in_range(offset, len, state.size) {
-        return LookupContiguousResult { status: Err(Status::OUT_OF_RANGE), paddr: PAddr(0) };
-    }
-    LookupContiguousResult { status: Ok(()), paddr: PAddr(state.base.0 + (offset as usize)) }
 }
 
 /// # Safety
@@ -407,13 +480,14 @@ pub unsafe extern "C" fn rust_vm_object_physical_state_prefetch_range(
 
 /// # Safety
 ///
-/// The caller must ensure `ptr` points to an initialized `VmObjectPhysicalState`.
+/// The caller must ensure `ptr` points to an initialized `VmObjectPhysicalState`, and `lookup_fn`
+/// points to a valid `VmObject::LookupFunction`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rust_vm_object_physical_state_lookup(
     ptr: *const VmObjectPhysicalState,
     offset: u64,
     len: u64,
-    lookup_fn: *const VmObjectLookupFunction,
+    lookup_fn: *const vmo_bindings::VmObject_LookupFunction,
 ) -> Result<(), Status> {
     // SAFETY: The caller guarantees `ptr` points to an initialized `VmObjectPhysicalState`.
     let state = unsafe { &*ptr };
@@ -430,13 +504,14 @@ pub unsafe extern "C" fn rust_vm_object_physical_state_lookup(
     let base_addr = state.base;
     while cur_offset < end_page_offset {
         let pa = PAddr(base_addr.0 + (cur_offset as usize));
-        // SAFETY: The caller guarantees `lookup_fn` is a valid pointer to VmObjectLookupFunction.
-        let status = unsafe { cpp_vm_object_lookup_fn_invoke(lookup_fn, cur_offset, pa) };
-        if status != Status::NEXT {
-            if status == Status::STOP {
+        // SAFETY: `lookup_fn` points to a valid `VmObject::LookupFunction`.
+        let status: zx_status_t =
+            unsafe { vmo_bindings::cpp_vm_object_lookup_fn_invoke(lookup_fn, cur_offset, pa.0) };
+        if status != ZX_ERR_NEXT {
+            if status == ZX_ERR_STOP {
                 return Ok(());
             }
-            return Err(status);
+            return Status::ok(status);
         }
         cur_offset += PAGE_SIZE;
     }
@@ -447,6 +522,7 @@ pub unsafe extern "C" fn rust_vm_object_physical_state_lookup(
 ///
 /// The caller must ensure `state_ptr` points to an initialized `VmObjectPhysicalState`.
 /// The caller must ensure `vmo` points to a valid `VmObjectPhysical`.
+/// The caller must ensure `state_ptr` is `vmo`'s state.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rust_vm_object_physical_set_mapping_cache_policy(
     vmo: *mut VmObjectPhysical,
@@ -459,7 +535,7 @@ pub unsafe extern "C" fn rust_vm_object_physical_set_mapping_cache_policy(
         return Err(Status::INVALID_ARGS);
     }
 
-    ksync::lock!(let _guard = state.lock_lock());
+    ksync::lock!(let mut guard = state.lock_lock());
 
     // SAFETY: The caller guarantees `vmo` points to a valid VmObjectPhysical.
     let vmo = unsafe { &*vmo };
@@ -468,18 +544,21 @@ pub unsafe extern "C" fn rust_vm_object_physical_set_mapping_cache_policy(
     // the requested policy then this is a no-op. This is a common practice
     // in the serialio and magma drivers, but may change.
     // TODO: revisit this when we shake out more of the future DDK protocol.
-    if cache_policy == vmo.get_mapping_cache_policy_locked() {
+    if cache_policy == vmo.get_mapping_cache_policy_locked(guard.token()) {
         return Ok(());
     }
 
-    let _guard = ChildListLockGuard::new();
+    let child_list_guard = ChildListLockGuard::new();
 
     // If this VMO is mapped already it is not safe to allow its caching policy to change.
-    if vmo.num_mappings_locked() != 0 || vmo.has_children_locked() || state.parent.is_some() {
+    if vmo.num_mappings_locked(guard.token()) != 0
+        || vmo.has_children_locked(child_list_guard.token())
+        || state.parent.is_some()
+    {
         return Err(Status::BAD_STATE);
     }
 
-    vmo.set_cache_policy_locked(cache_policy);
+    vmo.set_cache_policy_locked(guard.as_mut().token_mut(), cache_policy);
     Ok(())
 }
 

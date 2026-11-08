@@ -2,14 +2,14 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
 
 package(default_applicable_licenses = ["//:license"])
 
-# The unit tests (`:blobfs_test` and `:blobfs-lib-tests`) stay in BUILD.gn
-# because `blobfs-lib-tests` packages `//src/storage/fxfs:fxfs_component` and
-# `//src/storage/testing:storage_driver_test_realm`, and `:blobfs_test` depends
-# on `//src/sys/pkg/testing/blobfs-ramdisk` (which depends back on `:blobfs`).
+# The test package (`:blobfs-lib-tests`) stays in BUILD.gn because it packages
+# `//src/storage/fxfs:fxfs_component` and
+# `//src/storage/testing:storage_driver_test_realm`, which are GN-only.
 rustc_library(
     name = "blobfs",
     srcs = [
@@ -37,5 +37,23 @@ rustc_library(
         "//third_party/rust_crates/vendor:futures",
         "//third_party/rust_crates/vendor:log",
         "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+rustc_test(
+    name = "blobfs_test",
+    crate = ":blobfs",
+    # Synced to GN `output_name` to match `program.binary` in
+    # `meta/blobfs-lib-test.cml`.
+    crate_name = "blobfs_lib_test",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/storage/lib/delivery_blob",
+        "//src/sys/pkg/lib/fuchsia-merkle",
+        "//src/sys/pkg/testing/blobfs-ramdisk",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:test-case",
     ],
 )

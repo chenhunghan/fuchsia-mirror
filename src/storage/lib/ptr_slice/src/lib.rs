@@ -102,6 +102,19 @@ impl<'a> PtrByteSlice<'a> {
         }
     }
 
+    /// Copies the contents of this slice into `dest` starting at byte offset `vmo_offset` within
+    /// `dest`.
+    #[cfg(target_os = "fuchsia")]
+    pub fn copy_to_vmo(&self, dest: &zx::Vmo, vmo_offset: u64) -> Result<(), zx::Status> {
+        // SAFETY: `self.slice` is valid for reads of `self.len()` bytes (guaranteed by `Self::new`
+        // safety contract), and `zx_vmo_write` copies directly from the raw pointer in the kernel
+        // without creating a Rust slice reference.
+        let status = unsafe {
+            zx::sys::zx_vmo_write(dest.raw_handle(), self.as_ptr(), vmo_offset, self.len())
+        };
+        zx::ok(status)
+    }
+
     /// Returns a subslice of this pointer slice.
     ///
     /// # Panics
@@ -323,6 +336,25 @@ impl<'a> MutPtrByteSlice<'a> {
         unsafe {
             std::ptr::copy_nonoverlapping(src.as_ptr(), self.slice as *mut u8, self.len());
         }
+    }
+
+    /// Copies the contents of this slice into `dest` starting at byte offset `vmo_offset` within
+    /// `dest`.
+    #[cfg(target_os = "fuchsia")]
+    pub fn copy_to_vmo(&self, dest: &zx::Vmo, vmo_offset: u64) -> Result<(), zx::Status> {
+        self.as_ptr_slice().copy_to_vmo(dest, vmo_offset)
+    }
+
+    /// Copies `self.len()` bytes from `src` starting at byte offset `vmo_offset` within `src` into
+    /// this mutable slice.
+    #[cfg(target_os = "fuchsia")]
+    pub fn copy_from_vmo(&mut self, src: &zx::Vmo, vmo_offset: u64) -> Result<(), zx::Status> {
+        // SAFETY:
+        // - `self.slice` is valid for writes of `self.len()` bytes (guaranteed by `Self::new`
+        //   safety contract).
+        // - `&mut self` guarantees exclusive access to the memory pointed to by `self.as_mut_ptr()`
+        //   for the duration of the call.
+        unsafe { src.read_raw(self.as_mut_ptr(), self.len(), vmo_offset) }
     }
 
     /// Fills the slice with the given byte value.
@@ -975,5 +1007,19 @@ mod tests {
         let written = writer.into_written();
         assert_eq!(written.len(), 4);
         assert_eq!(&bytes[..], &[1, 2, 3, 4]);
+    }
+
+    #[cfg(target_os = "fuchsia")]
+    #[test]
+    fn test_copy_to_and_from_vmo() {
+        let vmo = zx::Vmo::create(64).unwrap();
+        let src_bytes = [10u8, 20, 30, 40, 50, 60];
+        let ptr_slice = PtrByteSlice::from(&src_bytes[..]);
+        ptr_slice.copy_to_vmo(&vmo, 8).unwrap();
+
+        let mut dst_bytes = [0u8; 6];
+        let mut mut_ptr_slice = MutPtrByteSlice::from(&mut dst_bytes[..]);
+        mut_ptr_slice.copy_from_vmo(&vmo, 8).unwrap();
+        assert_eq!(dst_bytes, src_bytes);
     }
 }

@@ -73,6 +73,8 @@ bool ZirconPlatformBuffer::MapCpuWithFlags(uint64_t offset, uint64_t length, uin
     map_flags |= ZX_VM_PERM_READ;
   if (flags & kMapWrite)
     map_flags |= ZX_VM_PERM_WRITE;
+  if (flags & kMapPopulate)
+    map_flags |= ZX_VM_MAP_RANGE;
   uintptr_t ptr;
   zx_status_t status = parent_vmar_->get()->map(map_flags, 0, vmo_, offset, length, &ptr);
   if (status != ZX_OK) {

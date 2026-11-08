@@ -6,16 +6,18 @@
 
 //! Hypervisor guest trap map and blocking port packet allocator.
 
+use crate::ksync_kernel::{KSpinlock, TrackedSpinlock};
 use core::convert::Infallible;
 use core::ffi::{CStr, c_void};
-use core::mem::{align_of, offset_of, size_of};
-use core::pin::Pin;
+use core::mem::{MaybeUninit, align_of, offset_of, size_of};
 use core::ptr::NonNull;
 use fbl::{
-    Recyclable, RefPtr, UniquePtr, WavlTree, WavlTreeContainable, WavlTreeKeyable, WavlTreeNode,
+    Recyclable, RefPtr, UninitRecyclable, UniquePtr, WavlTree, WavlTreeContainable,
+    WavlTreeKeyable, WavlTreeNode,
 };
-use ksync::{KCell, KSpinlock, LockClass, RawSpinlock};
-use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
+use ksync::{KCell, LockClass};
+use object_constants_rs as object_constants;
+use pin_init::{PinInit, pin_data, pin_init};
 use range_check::intersects_offset_len;
 use zr::static_assert;
 use zx_status::Status;
@@ -25,14 +27,13 @@ use zx_types::{ZX_GUEST_TRAP_BELL, ZX_GUEST_TRAP_MEM, zx_gpaddr_t, zx_port_packe
 
 use crate::kernel::deadline::Deadline;
 use crate::kernel::semaphore::Semaphore;
-use crate::kernel::spin_tracing::MUTEX_NAME_TRACING_ENABLED;
-use crate::object::{PortDispatcher, PortPacket};
+use crate::object::{PortAllocator, PortDispatcher, PortPacket};
 
 use super::ktrace::{VcpuBlockOp, VcpuMeta, ktrace_vcpu};
 use super::state_invalidator::StateInvalidator;
 use super::trap_map_ffi::{
-    cpp_port_packet_arena_delete, cpp_port_packet_arena_destroy, cpp_port_packet_arena_init,
-    cpp_port_packet_arena_init_pool, cpp_port_packet_arena_new, cpp_rust_port_allocator_init,
+    cpp_port_packet_arena_alloc, cpp_port_packet_arena_destroy, cpp_port_packet_arena_free,
+    cpp_port_packet_arena_init, cpp_port_packet_arena_init_pool,
 };
 
 const MAX_PACKETS_PER_RANGE: usize = 256;
@@ -53,32 +54,20 @@ fn valid_range(kind: u32, addr: zx_gpaddr_t, len: usize) -> bool {
     true
 }
 
-/// C++ `RustPortAllocator` base subobject holding the `PortAllocator` vtable pointer.
-#[repr(C, align(8))]
-pub(super) struct RustPortAllocator {
-    _vptr: usize,
-}
-
-static_assert!(size_of::<RustPortAllocator>() == 8);
-static_assert!(align_of::<RustPortAllocator>() == 8);
-
-impl RustPortAllocator {
-    fn new() -> impl PinInit<Self, Infallible> {
-        zr::pin_init_ffi!(cpp_rust_port_allocator_init)
-    }
-}
-
-const PORT_PACKET_ARENA_SIZE: usize = if MUTEX_NAME_TRACING_ENABLED { 280 } else { 272 };
-
-/// Facade for C++ `fbl::TypedArena<PortPacket, Mutex>`.
+/// Facade for C++ `hypervisor::PortPacketArena`.
 #[pin_data(PinnedDrop)]
 #[repr(C, align(8))]
 pub(super) struct PortPacketArena {
-    _storage: zr::OpaqueBytes<PORT_PACKET_ARENA_SIZE>,
+    _storage: zr::OpaqueBytes<{ object_constants::kPortPacketArenaSize }>,
+    #[pin]
+    _pin: core::marker::PhantomData<core::marker::PhantomPinned>,
 }
 
-static_assert!(size_of::<PortPacketArena>() == PORT_PACKET_ARENA_SIZE);
-static_assert!(align_of::<PortPacketArena>() == 8);
+zr::static_assert_size_and_align!(
+    PortPacketArena,
+    object_constants::kPortPacketArenaSize,
+    object_constants::kPortPacketArenaAlign,
+);
 
 zr::unsafe_pinned_drop_ffi!(PortPacketArena, cpp_port_packet_arena_destroy);
 
@@ -93,6 +82,7 @@ impl PortPacketArena {
             cpp_port_packet_arena_init_pool(
                 core::ptr::from_ref(self).cast_mut(),
                 name.as_ptr(),
+                size_of::<PortPacket>(),
                 max_count,
             )
         };
@@ -105,23 +95,25 @@ impl PortPacketArena {
     ///
     /// `handle` and `allocator` must remain valid for the lifetime of the allocated `PortPacket`
     /// while it is queued on any `PortDispatcher`, and `allocator` must point to the
-    /// `RustPortAllocator` base subobject of a live `BlockingPortAllocator` with provenance over
+    /// `PortAllocator` subobject at offset 0 of a live `BlockingPortAllocator` with provenance over
     /// the full `BlockingPortAllocator`.
     unsafe fn new_packet(
         &self,
         handle: NonNull<c_void>,
-        allocator: NonNull<RustPortAllocator>,
+        allocator: NonNull<PortAllocator>,
     ) -> Option<NonNull<PortPacket>> {
         // SAFETY: `self` is a valid initialized `PortPacketArena` (synchronized internally by its
-        // embedded `Mutex`), and the caller guarantees `handle` and `allocator` are valid.
-        let pkt = unsafe {
-            cpp_port_packet_arena_new(
-                core::ptr::from_ref(self).cast_mut(),
-                handle.as_ptr(),
-                allocator.as_ptr(),
-            )
+        // embedded `Mutex`).
+        let raw = unsafe {
+            cpp_port_packet_arena_alloc(core::ptr::from_ref(self).cast_mut()).cast::<PortPacket>()
         };
-        NonNull::new(pkt)
+        let pkt = NonNull::new(raw)?;
+        // SAFETY: `pkt` points to a freshly allocated, uninitialized `PortPacket` slot from the
+        // arena, and the caller guarantees `handle` and `allocator` are valid.
+        unsafe {
+            pkt.write(PortPacket::new(handle.as_ptr(), allocator.as_ptr()));
+        }
+        Some(pkt)
     }
 
     /// Destroys and frees `port_packet` back to this arena.
@@ -130,12 +122,13 @@ impl PortPacketArena {
     ///
     /// `port_packet` must have been allocated from this `PortPacketArena` and not yet freed.
     unsafe fn delete(&self, port_packet: NonNull<PortPacket>) {
-        // SAFETY: Guaranteed by caller; `PortPacketArena::Delete` is synchronized internally by
+        // SAFETY: Guaranteed by caller; `PortPacketArena::Free` is synchronized internally by
         // its embedded `Mutex`.
         unsafe {
-            cpp_port_packet_arena_delete(
+            core::ptr::drop_in_place(port_packet.as_ptr());
+            cpp_port_packet_arena_free(
                 core::ptr::from_ref(self).cast_mut(),
-                port_packet.as_ptr(),
+                port_packet.as_ptr().cast(),
             );
         }
     }
@@ -145,24 +138,41 @@ impl PortPacketArena {
 #[pin_data]
 #[repr(C)]
 pub struct BlockingPortAllocator {
-    #[pin]
-    vtable: RustPortAllocator,
+    allocator: PortAllocator,
     #[pin]
     semaphore: Semaphore,
     #[pin]
     arena: PortPacketArena,
 }
 
-static_assert!(offset_of!(BlockingPortAllocator, vtable) == 0);
+static_assert!(offset_of!(BlockingPortAllocator, allocator) == 0);
 
 impl BlockingPortAllocator {
     /// Creates an in-place pinned initializer for `BlockingPortAllocator`.
     pub fn new() -> impl PinInit<Self, Infallible> {
         pin_init!(Self {
-            vtable <- RustPortAllocator::new(),
+            allocator: PortAllocator::new(Self::free_packet),
             semaphore <- Semaphore::new(MAX_PACKETS_PER_RANGE as i64),
             arena <- PortPacketArena::new(),
         })
+    }
+
+    /// Callback invoked by [`PortPacket::free`] when a packet allocated by this
+    /// `BlockingPortAllocator` is released.
+    ///
+    /// # Safety
+    ///
+    /// `allocator` must point to the `allocator` field at offset 0 of a live
+    /// `BlockingPortAllocator` with provenance over the entire `BlockingPortAllocator`, and
+    /// `port_packet` must have been allocated by that `BlockingPortAllocator` and not yet freed.
+    unsafe extern "C" fn free_packet(
+        allocator: *const PortAllocator,
+        port_packet: NonNull<PortPacket>,
+    ) {
+        // SAFETY: Guaranteed by caller.
+        unsafe {
+            (*allocator.cast::<Self>()).free(port_packet);
+        }
     }
 
     /// Initializes the underlying packet arena.
@@ -184,10 +194,10 @@ impl BlockingPortAllocator {
     pub(super) fn alloc(&self) -> Option<NonNull<PortPacket>> {
         let this = NonNull::from(self);
         // SAFETY: `this` is a valid `BlockingPortAllocator` that cancels all queued packets in
-        // `Trap::drop` before being destroyed. Deriving the `RustPortAllocator` pointer from
-        // `NonNull::from(self)` (with `vtable` at offset 0) preserves provenance over the entire
-        // `BlockingPortAllocator` when `RustPortAllocator::Free` casts `this` back to
-        // `BlockingPortAllocator*`.
+        // `Trap::drop` before being destroyed. Deriving the `PortAllocator` pointer from
+        // `NonNull::from(self)` (with `allocator` at offset 0) preserves provenance over the
+        // entire `BlockingPortAllocator` when `BlockingPortAllocator::free_packet` casts
+        // `allocator` back to `BlockingPortAllocator*`.
         unsafe { self.arena.new_packet(this.cast(), this.cast()) }
     }
 
@@ -201,7 +211,7 @@ impl BlockingPortAllocator {
         unsafe {
             self.arena.delete(port_packet);
         }
-        self.semaphore.post();
+        self.semaphore.post(None);
     }
 
     fn as_handle_ptr(&self) -> NonNull<c_void> {
@@ -210,8 +220,8 @@ impl BlockingPortAllocator {
 }
 
 /// Describes a single trap within a guest.
-#[derive(Recyclable, WavlTreeContainable)]
-#[pin_data(PinnedDrop)]
+#[derive(WavlTreeContainable)]
+#[pin_data]
 pub struct Trap {
     #[wavl_node]
     wavl_node: WavlTreeNode<Trap>,
@@ -234,20 +244,50 @@ unsafe impl Sync for Trap {}
 impl WavlTreeKeyable<zx_gpaddr_t> for Trap {
     type Key<'a> = zx_gpaddr_t;
 
-    fn get_key(&self) -> zx_gpaddr_t {
+    unsafe fn get_key(&self) -> zx_gpaddr_t {
         self.addr
     }
 }
 
-#[pinned_drop]
-impl PinnedDrop for Trap {
-    fn drop(self: Pin<&mut Self>) {
-        let Some(port) = self.port.as_ref() else {
-            return;
-        };
-        // `self.port_allocator.as_handle_ptr()` is the allocator token used for ephemeral packets
-        // queued by this `Trap`; the port only compares it, never dereferences it.
-        let _ = port.cancel_queued_handle(self.port_allocator.as_handle_ptr(), self.key);
+unsafe impl Recyclable for Trap {
+    unsafe fn recycle(ptr: NonNull<Self>) {
+        // Cancel any queued packets via a shared reference before `Box::from_non_null` creates an
+        // exclusive `&mut Trap` (which under Stacked/Tree Borrows would invalidate the shared-ref
+        // tag stored in `(*packet).allocator` during `cancel_queued_handle` -> `PortPacket::free`
+        // -> `BlockingPortAllocator::free_packet`).
+        // SAFETY: `ptr` points to a valid, exclusively owned `Trap` about to be destroyed.
+        unsafe {
+            let trap = ptr.as_ref();
+            if let Some(port) = trap.port.as_ref() {
+                // `trap.port_allocator.as_handle_ptr()` is the allocator token used for ephemeral
+                // packets queued by this `Trap`; the port only compares it, never dereferences it.
+                let _ = port.cancel_queued_handle(trap.port_allocator.as_handle_ptr(), trap.key);
+            }
+            let _ = kalloc::Box::from_non_null(ptr);
+        }
+    }
+
+    fn allocate(value: Self) -> Result<NonNull<Self>, kalloc::AllocError> {
+        let boxed = kalloc::Box::try_new(value)?;
+        let raw = kalloc::Box::into_raw(boxed);
+        // SAFETY: `Box::into_raw` returns a valid, non-null pointer.
+        unsafe { Ok(NonNull::new_unchecked(raw)) }
+    }
+}
+
+unsafe impl UninitRecyclable for Trap {
+    unsafe fn recycle_uninit(ptr: NonNull<MaybeUninit<Self>>) {
+        // SAFETY: `ptr` was allocated by `allocate_uninit` (`kalloc::Box`).
+        unsafe {
+            let _ = kalloc::Box::from_non_null(ptr);
+        }
+    }
+
+    fn allocate_uninit() -> Result<NonNull<MaybeUninit<Self>>, kalloc::AllocError> {
+        let boxed = kalloc::Box::try_new_uninit()?;
+        let raw = kalloc::Box::into_raw(boxed);
+        // SAFETY: `Box::into_raw` returns a valid, non-null pointer.
+        unsafe { Ok(NonNull::new_unchecked(raw)) }
     }
 }
 
@@ -287,15 +327,17 @@ impl Trap {
             invalidator.invalidate();
         }
         let Some(port) = self.port.as_ref() else {
+            core::hint::cold_path();
             return Err(Status::NOT_FOUND);
         };
         let mut port_packet = self.port_allocator.alloc_blocking().ok_or(Status::NO_MEMORY)?;
         // SAFETY: `port_packet` is uniquely owned by this caller prior to `port.queue`.
         unsafe { port_packet.as_mut() }.set_packet(packet);
         // SAFETY: `port_packet` was allocated from `self.port_allocator`, which cancels all queued
-        // packets in `Trap::drop` before `port_allocator` is destroyed.
+        // packets in `Trap::recycle` before `port_allocator` is destroyed.
         let mut status = unsafe { port.queue(port_packet) };
         if let Err(ref mut err) = status {
+            core::hint::cold_path();
             // SAFETY: `port.queue` failed, so ownership of `port_packet` remains with the caller.
             unsafe {
                 self.port_allocator.free(port_packet);
@@ -358,11 +400,12 @@ ksync::declare_interned_string!(TRAP_MAP_LOCK_STRING_REG, "TrapMap::lock");
 static TRAP_MAP_LOCK_REGISTRATION: ksync::LockClassRegistration =
     ksync::LockClassRegistration::with_flags(
         TRAP_MAP_LOCK_STRING_REG,
-        <RawSpinlock as ksync::RawLock>::LOCK_FLAGS,
+        <TrapMapLockClass as LockClass>::FLAGS,
     );
 
 impl LockClass for TrapMapLockClass {
     const ID: *mut c_void = TRAP_MAP_LOCK_REGISTRATION.get();
+    const FLAGS: ksync::LockFlags = TrackedSpinlock::LOCK_FLAGS;
 }
 
 /// Contains all the traps within a guest.
@@ -379,13 +422,13 @@ pub struct TrapMap {
 }
 
 static_assert!(offset_of!(TrapMap, lock) == 0);
-static_assert!(offset_of!(TrapMap, mem_traps) == size_of::<RawSpinlock>());
+static_assert!(offset_of!(TrapMap, mem_traps) == size_of::<TrackedSpinlock>());
 #[cfg(target_arch = "x86_64")]
-static_assert!(offset_of!(TrapMap, io_traps) == size_of::<RawSpinlock>() + 24);
+static_assert!(offset_of!(TrapMap, io_traps) == size_of::<TrackedSpinlock>() + 24);
 #[cfg(target_arch = "x86_64")]
-static_assert!(size_of::<TrapMap>() == size_of::<RawSpinlock>() + 48);
+static_assert!(size_of::<TrapMap>() == size_of::<TrackedSpinlock>() + 48);
 #[cfg(not(target_arch = "x86_64"))]
-static_assert!(size_of::<TrapMap>() == size_of::<RawSpinlock>() + 24);
+static_assert!(size_of::<TrapMap>() == size_of::<TrackedSpinlock>() + 24);
 static_assert!(align_of::<TrapMap>() == 8);
 
 impl TrapMap {
@@ -458,6 +501,7 @@ impl TrapMap {
             let mut iter = traps.upper_bound(&addr);
             iter.move_prev();
             let Some(trap) = iter.get() else {
+                core::hint::cold_path();
                 return Err(Status::NOT_FOUND);
             };
             // SAFETY: Traps are never removed from `TrapMap` until `TrapMap` itself is dropped,
@@ -466,6 +510,7 @@ impl TrapMap {
             unsafe { &*core::ptr::from_ref(trap) }
         };
         if !found.contains(addr) {
+            core::hint::cold_path();
             return Err(Status::NOT_FOUND);
         }
         Ok(found)

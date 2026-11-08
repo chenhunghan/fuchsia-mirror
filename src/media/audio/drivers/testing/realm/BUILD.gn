@@ -105,7 +105,6 @@ fuchsia_cc_driver("dai-test-driver") {
   sources = [ "test-dai.cc" ]
   deps = [
     ":dai_test-bind",
-    "//sdk/banjo/fuchsia.hardware.audio:fuchsia.hardware.audio_banjo_cpp",
     "//sdk/fidl/fuchsia.hardware.audio:fuchsia.hardware.audio_cpp",
     "//sdk/lib/async-loop:async-loop-cpp",
     "//src/devices/bind/fuchsia:fuchsia_cpp",

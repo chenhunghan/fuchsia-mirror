@@ -23,7 +23,6 @@
     use: [
         {
             protocol: [
-                "fuchsia.cobalt.SystemDataUpdater",
                 "fuchsia.paver.Paver",
                 "fuchsia.pkg.garbagecollector.Manager",
                 "fuchsia.pkg.PackageResolver",

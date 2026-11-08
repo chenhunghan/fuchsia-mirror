@@ -1,0 +1,110 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "context-bin",
+    testonly = True,
+    srcs = ["src/context.rs"],
+    crate_name = "context",
+    crate_root = "src/context.rs",
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/sys/lib/elf_runner/tests/environ/fidl:fuchsia.elf.test_rust",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "context-bin_packaged_bin",
+    testonly = True,
+    binary = ":context-bin",
+    binary_name = "context",
+)
+
+fx_component_manifest(
+    name = "context-component-manifest",
+    testonly = True,
+    component_name = "context",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/context.cml",
+)
+
+fx_component(
+    name = "context-component",
+    testonly = True,
+    compiled_manifest = ":context-component-manifest",
+    deps = [":context-bin_packaged_bin"],
+)
+
+rustc_test(
+    name = "test",
+    srcs = ["src/lib.rs"],
+    crate_name = "environ",
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/sys/lib/elf_runner/tests/environ/fidl:fuchsia.elf.test_rust",
+    ],
+)
+
+fx_packaged_binary(
+    name = "test_packaged_bin",
+    testonly = True,
+    binary = ":test",
+    binary_name = "environ",
+)
+
+fx_component_manifest(
+    name = "environ_integration_test-manifest",
+    testonly = True,
+    component_name = "environ_integration_test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/environ.cml",
+)
+
+fx_test_component(
+    name = "environ_integration_test",
+    compiled_manifest = ":environ_integration_test-manifest",
+    deps = [":test_packaged_bin"],
+)
+
+fx_package(
+    name = "elf_runner_environ_test-package",
+    package_name = "elf_runner_environ_test",
+    components = [":context-component"],
+    test_components = [":environ_integration_test"],
+)
+
+fx_test(
+    name = "elf_runner_environ_test",
+    package = ":elf_runner_environ_test-package",
+    visibility = ["//src/sys:__pkg__"],
+)

@@ -21,6 +21,13 @@
                 "fuchsia.stash.SecureStore",
             ],
         },
+        {
+            config: "fuchsia.net.dhcp.Persistent",
+            key: "persistent",
+            type: "bool",
+            availability: "transitional",
+            default: false,
+        },
     ],
     expose: [
         {

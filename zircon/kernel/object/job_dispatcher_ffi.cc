@@ -12,11 +12,6 @@
 extern "C" {
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE bool cpp_job_dispatcher_is_root(const JobDispatcher* job) {
-  return job == GetRootJobDispatcher().get();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE zx_status_t cpp_job_dispatcher_create(
     uint32_t flags, JobDispatcher* parent, ffi::Uninitialized<KernelHandle<JobDispatcher>>* handle,
     ffi::Uninitialized<zx_rights_t>* rights) {
@@ -47,17 +42,6 @@ FFI_ALWAYS_INLINE zx_status_t cpp_job_dispatcher_set_basic_policy_v2(
 FFI_ALWAYS_INLINE zx_status_t cpp_job_dispatcher_set_timer_slack_policy(
     JobDispatcher* job, const zx_policy_timer_slack_t* policy) {
   return job->SetTimerSlackPolicy(*policy);
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE JobDispatcher* cpp_job_dispatcher_get_root_job() {
-  auto root = GetRootJobDispatcher();
-  return fbl::ExportToRawPtr(&root);
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE const Handle* cpp_job_dispatcher_get_root_job_handle() {
-  return &GetRootJobHandle();
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
@@ -192,4 +176,51 @@ FFI_ALWAYS_INLINE ProcessDispatcher* cpp_job_dispatcher_lookup_process_by_id(Job
   return fbl::ExportToRawPtr(&proc);
 }
 
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE JobDispatcher* cpp_job_dispatcher_parent(const JobDispatcher* job) {
+  fbl::RefPtr<JobDispatcher> parent = job->parent();
+  return fbl::ExportToRawPtr(&parent);
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_job_dispatcher_get_policy(const JobDispatcher* job,
+                                                     ffi::Uninitialized<JobPolicy>* out_policy) {
+  out_policy->Initialize(job->GetPolicy());
+}
+
 }  // extern "C"
+
+namespace {
+
+// Forwards JobEnumerator visits to the Rust callbacks passed to
+// cpp_job_dispatcher_enumerate_children_recursive.
+class CallbackJobEnumerator final : public JobEnumerator {
+ public:
+  CallbackJobEnumerator(void* ctx, cpp_job_enumerator_on_job_fn on_job,
+                        cpp_job_enumerator_on_process_fn on_process)
+      : ctx_(ctx), on_job_(on_job), on_process_(on_process) {}
+
+ private:
+  bool OnJob(JobDispatcher* job) final { return on_job_(ctx_, job); }
+  bool OnProcess(ProcessDispatcher* proc) final { return on_process_(ctx_, proc); }
+
+  void* const ctx_;
+  const cpp_job_enumerator_on_job_fn on_job_;
+  const cpp_job_enumerator_on_process_fn on_process_;
+};
+
+}  // namespace
+
+extern "C" bool cpp_job_dispatcher_enumerate_children_recursive(
+    JobDispatcher* job, void* ctx, cpp_job_enumerator_on_job_fn on_job,
+    cpp_job_enumerator_on_process_fn on_process) {
+  CallbackJobEnumerator je(ctx, on_job, on_process);
+  return job->EnumerateChildrenRecursive(&je);
+}
+
+extern "C" bool cpp_job_dispatcher_enumerate_direct_children(
+    JobDispatcher* job, void* ctx, cpp_job_enumerator_on_job_fn on_job,
+    cpp_job_enumerator_on_process_fn on_process) {
+  CallbackJobEnumerator je(ctx, on_job, on_process);
+  return job->EnumerateChildren(&je);
+}

@@ -11,37 +11,104 @@ load(
     "package_resources_providers",
 )
 
-visibility(["//src/starnix/containers/..."])
+visibility(["//src/starnix/..."])
+
+# The CPUs that have a //build/bazel/platforms:linux_starnix_${cpu} platform
+# for a Fuchsia target CPU, using Fuchsia CPU names.
+_LINUX_CPUS = ("x64", "arm64", "riscv64")
+
+_FEATURES = "//command_line_option:features"
+
+# The C++ toolchain features that build a target with instrumentation, such as
+# sanitizers. As in GN, which never builds Starnix Linux binaries in variant
+# toolchains, linux_resource builds its sources with these disabled: nothing
+# provides an instrumentation runtime for these binaries. They can't be
+# removed from @fuchsia_rules_common//build_flags:enabled_features instead,
+# because the linux_starnix platforms set it (from the host build
+# configuration) after the transition.
+#
+# LINT.IfChange(instrumentation_features)
+_INSTRUMENTATION_FEATURES = [
+    "asan",
+    "coverage",
+    "hwasan",
+    "lsan",
+    "msan",
+    "tsan",
+    "ubsan",
+]
+# LINT.ThenChange(//build/bazel/rules/cc/fx_cc_binary.bzl:instrumentation_features)
+
+def _linux_settings(cpu, settings):
+    disabled = ["-" + f for f in _INSTRUMENTATION_FEATURES]
+    return {
+        "//command_line_option:platforms": ["@//build/bazel/platforms:linux_starnix_" + cpu],
+        _FEATURES: [
+            f
+            for f in settings[_FEATURES]
+            if f not in _INSTRUMENTATION_FEATURES and f not in disabled
+        ] + disabled,
+    }
 
 def _target_linux_transition_impl(settings, _attr):
     current_platforms = settings["//command_line_option:platforms"]
     if len(current_platforms) == 1:
         platform = str(current_platforms[0])
-        if platform.endswith("_x64"):
-            return {"//command_line_option:platforms": ["@//build/bazel/platforms:linux_x64"]}
-        if platform.endswith("_arm64"):
-            return {"//command_line_option:platforms": ["@//build/bazel/platforms:linux_arm64"]}
-    if target_cpu in ("x64", "arm64"):
-        return {"//command_line_option:platforms": ["@//build/bazel/platforms:linux_" + target_cpu]}
-    return {"//command_line_option:platforms": current_platforms}
+        for cpu in _LINUX_CPUS:
+            if platform.endswith("_" + cpu):
+                return _linux_settings(cpu, settings)
+    if target_cpu in _LINUX_CPUS:
+        return _linux_settings(target_cpu, settings)
+    return {
+        "//command_line_option:platforms": current_platforms,
+        _FEATURES: settings[_FEATURES],
+    }
 
 _target_linux_transition = transition(
     implementation = _target_linux_transition_impl,
-    inputs = ["//command_line_option:platforms"],
-    outputs = ["//command_line_option:platforms"],
+    inputs = ["//command_line_option:platforms", _FEATURES],
+    outputs = ["//command_line_option:platforms", _FEATURES],
+)
+
+def _arch32_linux_transition_impl(settings, _attr):
+    return _linux_settings("arm", settings)
+
+_arch32_linux_transition = transition(
+    implementation = _arch32_linux_transition_impl,
+    inputs = [_FEATURES],
+    outputs = ["//command_line_option:platforms", _FEATURES],
 )
 
 def _linux_resource_impl(ctx):
     if len(ctx.attr.dest) == 0:
         fail("dest must not be an empty string")
 
-    return package_resources_providers(ctx, [make_resource_struct(
+    resources = [make_resource_struct(
         src = ctx.files.src[0],
         dest = ctx.attr.dest,
-    )])
+    )]
+
+    if ctx.attr.arch32_src:
+        if not ctx.target_platform_has_constraint(ctx.attr._arm64[platform_common.ConstraintValueInfo]):
+            fail("arch32_src is only supported when building for arm64")
+        if len(ctx.attr.arch32_dest) == 0:
+            fail("arch32_dest must be set when arch32_src is set")
+        resources.append(make_resource_struct(
+            src = ctx.files.arch32_src[0],
+            dest = ctx.attr.arch32_dest,
+        ))
+
+    return package_resources_providers(ctx, resources)
 
 linux_resource = rule(
-    doc = "Declares a Linux binary resource to be included in a Fuchsia package.",
+    doc = """Declares a Linux binary resource to be included in a Fuchsia package.
+
+    `src` is built for the Starnix Linux platform with the same CPU as the
+    current Fuchsia target (//build/bazel/platforms:linux_starnix_${cpu}).
+
+    On arm64, `arch32_src` can additionally be built for the 32-bit arm
+    Starnix Linux platform (//build/bazel/platforms:linux_starnix_arm), for
+    Starnix's arch32 support.""",
     implementation = _linux_resource_impl,
     attrs = {
         "src": attr.label(
@@ -53,6 +120,20 @@ linux_resource = rule(
         "dest": attr.string(
             doc = "The path where this will be installed in the package.",
             mandatory = True,
+        ),
+        "arch32_src": attr.label(
+            doc = """Optional Linux target to build for 32-bit arm and include in
+            the package. Only supported for arm64, so use a select() to
+            set it.""",
+            allow_single_file = True,
+            cfg = _arch32_linux_transition,
+        ),
+        "arch32_dest": attr.string(
+            doc = "The path where arch32_src will be installed in the package.",
+        ),
+        "_arm64": attr.label(
+            default = "@platforms//cpu:arm64",
+            providers = [platform_common.ConstraintValueInfo],
         ),
     },
 )

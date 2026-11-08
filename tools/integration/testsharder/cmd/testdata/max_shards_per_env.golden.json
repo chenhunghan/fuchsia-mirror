@@ -67,7 +67,6 @@
             "host_x64/ffx",
             "host_x64/fvm",
             "host_x64/llvm-profdata",
-            "host_x64/resummarize",
             "host_x64/ssh",
             "host_x64/test-pilot",
             "host_x64/zbi",
@@ -76,14 +75,14 @@
         ],
         "timeout_secs": 1564,
         "summary": {
-            "tests": null
+            "tests": []
         },
         "summary_if_skipped": {
             "tests": [
                 {
-                    "output_files": null,
+                    "output_files": [],
                     "output_dir": "",
-                    "cases": null,
+                    "cases": [],
                     "name": "fuchsia-pkg://fuchsia.com/nonhermetic2#meta/nonhermetic2.cm",
                     "gn_label": "//src/something:nonhermetic2(//build/toolchain/fuchsia:x64)",
                     "source_label": "//src/something:nonhermetic2",
@@ -105,9 +104,9 @@
                     "metadata": {}
                 },
                 {
-                    "output_files": null,
+                    "output_files": [],
                     "output_dir": "",
-                    "cases": null,
+                    "cases": [],
                     "name": "fuchsia-pkg://fuchsia.com/nonhermetic1#meta/nonhermetic1.cm",
                     "gn_label": "//src/something:nonhermetic1(//build/toolchain/fuchsia:x64)",
                     "source_label": "//src/something:nonhermetic1",
@@ -254,7 +253,6 @@
             "host_x64/ffx",
             "host_x64/fvm",
             "host_x64/llvm-profdata",
-            "host_x64/resummarize",
             "host_x64/ssh",
             "host_x64/test-pilot",
             "host_x64/zbi",
@@ -263,14 +261,14 @@
         ],
         "timeout_secs": 1564,
         "summary": {
-            "tests": null
+            "tests": []
         },
         "summary_if_skipped": {
             "tests": [
                 {
-                    "output_files": null,
+                    "output_files": [],
                     "output_dir": "",
-                    "cases": null,
+                    "cases": [],
                     "name": "fuchsia-pkg://fuchsia.com/affected3#meta/affected3.cm",
                     "gn_label": "//src/something:affected3(//build/toolchain/fuchsia:x64)",
                     "source_label": "//src/something:affected3",
@@ -292,9 +290,9 @@
                     "metadata": {}
                 },
                 {
-                    "output_files": null,
+                    "output_files": [],
                     "output_dir": "",
-                    "cases": null,
+                    "cases": [],
                     "name": "fuchsia-pkg://fuchsia.com/affected1#meta/affected1.cm",
                     "gn_label": "//src/something:affected1(//build/toolchain/fuchsia:x64)",
                     "source_label": "//src/something:affected1",
@@ -441,7 +439,6 @@
             "host_x64/ffx",
             "host_x64/fvm",
             "host_x64/llvm-profdata",
-            "host_x64/resummarize",
             "host_x64/ssh",
             "host_x64/test-pilot",
             "host_x64/zbi",
@@ -450,14 +447,14 @@
         ],
         "timeout_secs": 1564,
         "summary": {
-            "tests": null
+            "tests": []
         },
         "summary_if_skipped": {
             "tests": [
                 {
-                    "output_files": null,
+                    "output_files": [],
                     "output_dir": "",
-                    "cases": null,
+                    "cases": [],
                     "name": "fuchsia-pkg://fuchsia.com/affected4#meta/affected4.cm",
                     "gn_label": "//src/something:affected4(//build/toolchain/fuchsia:x64)",
                     "source_label": "//src/something:affected4",
@@ -479,9 +476,9 @@
                     "metadata": {}
                 },
                 {
-                    "output_files": null,
+                    "output_files": [],
                     "output_dir": "",
-                    "cases": null,
+                    "cases": [],
                     "name": "fuchsia-pkg://fuchsia.com/affected2#meta/affected2.cm",
                     "gn_label": "//src/something:affected2(//build/toolchain/fuchsia:x64)",
                     "source_label": "//src/something:affected2",
@@ -623,9 +620,9 @@
         "summary": {
             "tests": [
                 {
-                    "output_files": null,
+                    "output_files": [],
                     "output_dir": "",
-                    "cases": null,
+                    "cases": [],
                     "name": "fuchsia-pkg://fuchsia.com/unaffected1#meta/unaffected1.cm",
                     "gn_label": "//src/something:unaffected1(//build/toolchain/fuchsia:x64)",
                     "source_label": "//src/something:unaffected1",
@@ -647,9 +644,9 @@
                     "metadata": {}
                 },
                 {
-                    "output_files": null,
+                    "output_files": [],
                     "output_dir": "",
-                    "cases": null,
+                    "cases": [],
                     "name": "fuchsia-pkg://fuchsia.com/unaffected2#meta/unaffected2.cm",
                     "gn_label": "//src/something:unaffected2(//build/toolchain/fuchsia:x64)",
                     "source_label": "//src/something:unaffected2",
@@ -675,9 +672,9 @@
         "summary_if_skipped": {
             "tests": [
                 {
-                    "output_files": null,
+                    "output_files": [],
                     "output_dir": "",
-                    "cases": null,
+                    "cases": [],
                     "name": "fuchsia-pkg://fuchsia.com/unaffected1#meta/unaffected1.cm",
                     "gn_label": "//src/something:unaffected1(//build/toolchain/fuchsia:x64)",
                     "source_label": "//src/something:unaffected1",
@@ -699,9 +696,9 @@
                     "metadata": {}
                 },
                 {
-                    "output_files": null,
+                    "output_files": [],
                     "output_dir": "",
-                    "cases": null,
+                    "cases": [],
                     "name": "fuchsia-pkg://fuchsia.com/unaffected2#meta/unaffected2.cm",
                     "gn_label": "//src/something:unaffected2(//build/toolchain/fuchsia:x64)",
                     "source_label": "//src/something:unaffected2",
@@ -725,7 +722,7 @@
             ]
         },
         "expects_ssh": true,
-        "bot_dimensions": null,
+        "bot_dimensions": {},
         "build_metadata": {}
     }
 ]

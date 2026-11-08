@@ -138,6 +138,11 @@ struct CreateArgs {
     #[argh(option)]
     override_copyright_year: Option<u32>,
 
+    /// export every generated file from generated BUILD.bazel files, so that
+    /// golden tests can refer to them. For testing.
+    #[argh(switch)]
+    export_all_files: bool,
+
     /// when set, do not emit anything to stdout.
     #[argh(switch)]
     silent: bool,
@@ -353,6 +358,10 @@ struct TemplateArgs {
 
     /// The project-type, as specified on the command line. E.g. 'component-default'.
     project_type: String,
+
+    /// Whether generated BUILD.bazel files should export every generated file.
+    /// Reference from a template with `{{#if EXPORT_ALL_FILES}}`.
+    export_all_files: bool,
 }
 
 impl TemplateArgs {
@@ -388,6 +397,7 @@ impl TemplateArgs {
                 .ok_or_else(|| anyhow!("invalid path {:?}", project_path))?
                 .to_string(),
             project_type: create_args.project_template()?,
+            export_all_files: create_args.export_all_files,
         })
     }
 }
@@ -671,6 +681,7 @@ mod tests {
             project_name: "foo".to_string(),
             project_path: "bar/foo".to_string(),
             project_type: "component".to_string(),
+            export_all_files: false,
         };
 
         let rendered =
@@ -706,6 +717,42 @@ mod tests {
             self.get(path.as_ref()).map(|c| c.to_string()).ok_or_else(|| {
                 anyhow::Error::from(io::Error::new(io::ErrorKind::NotFound, "file not found"))
             })
+        }
+    }
+
+    #[test]
+    fn driver_bazel_templates_only_export_files_when_requested() {
+        let templates = [
+            include_str!("../templates/driver-default/BUILD.bazel.tmpl-cpp"),
+            include_str!("../templates/driver-default/BUILD.bazel.tmpl-rust"),
+        ];
+        for template in templates {
+            for export_all_files in [false, true] {
+                let mut handlebars = Handlebars::new();
+                handlebars.set_strict_mode(true);
+                template_helpers::register_helpers(&mut handlebars);
+                handlebars
+                    .register_partial("copyright", include_str!("../templates/_copyright.tmpl"))
+                    .expect("failed to register partial");
+                handlebars
+                    .register_partial("generated", include_str!("../templates/_generated.tmpl"))
+                    .expect("failed to register partial");
+                let args = TemplateArgs {
+                    copyright_year: "2020".to_string(),
+                    project_name: "foo".to_string(),
+                    project_path: "bar/foo".to_string(),
+                    project_type: "driver".to_string(),
+                    export_all_files,
+                };
+                let rendered = handlebars
+                    .render_template(
+                        template,
+                        &TemplateArgsWithTemplatePath { args: &args, template_path: "template" },
+                    )
+                    .expect("failed to render template");
+                assert_eq!(rendered.contains("exports_files("), export_all_files);
+                assert!(!rendered.contains("\n\n\n"), "unexpected blank lines:\n{rendered}");
+            }
         }
     }
 

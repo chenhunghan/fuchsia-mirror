@@ -96,6 +96,8 @@ tables_generator_tests_*.txt
 !/third_party/BUILD.gn
 !/third_party/abseil-cpp
 /third_party/abseil-cpp/src
+!/third_party/acpica
+/third_party/acpica/src
 !/third_party/alacritty-migrating
 /third_party/alacritty-migrating/src
 !/third_party/android/platform/system/libufdt
@@ -108,6 +110,8 @@ tables_generator_tests_*.txt
 /third_party/colorama/colorama
 !/third_party/curl/
 /third_party/curl/src
+!/third_party/double-conversion/
+/third_party/double-conversion/src
 !/third_party/libpng/
 /third_party/libpng/src
 !/third_party/llvm-libc/
@@ -259,7 +263,6 @@ tables_generator_tests_*.txt
 /bazel-out
 /bazel-repos
 /bazel-workspace
-/third_party/bazel_vendor/bazel-external
 
 # The Bazel registries directory
 !/third_party/bazel_registries
@@ -268,11 +271,9 @@ tables_generator_tests_*.txt
 
 # The Bazel vendor directory
 !/third_party/bazel_vendor
-!/third_party/bazel_vendor/*~
-!/tools/check-licenses/assets/readmes/third_party/bazel_vendor/*~
-
-# The Bazel vendor directory
-!/third_party/bazel_vendor
+!/third_party/bazel_vendor/**/*~
+!/tools/check-licenses/assets/readmes/third_party/bazel_vendor/**/*~
+/third_party/bazel_vendor/**/bazel-external
 
 # Symlinks created by `fx setup-go`.
 /go.mod

@@ -63,7 +63,7 @@
              path="prebuilt/third_party/android/aemu/release/{{.OS}}-arm64"/>
 
      <package name="fuchsia/third_party/android/aemu/release-gfxstream/${platform}"
-             version="bid:16716839"
+             version="bid:16862624"
              platforms="linux-amd64,linux-arm64"
              path="prebuilt/third_party/android/aemu/release-gfxstream/{{.OS}}-{{.Arch}}"/>
 
@@ -200,21 +200,21 @@
              path="prebuilt/tools/cgpt/{{.OS}}-{{.Arch}}"
              platforms="linux-amd64"/>
     <package name="fuchsia/tools/futility/${platform}"
-             version="git_revision:a5c45a9ab66005b5ef27ada823daef5a9fd104bc"
+             version="git_revision:555652f1c857fbf9959c0ea61c837bda987ce074"
              path="prebuilt/tools/futility/{{.OS}}-{{.Arch}}"
              platforms="linux-amd64"/>
     <package name="fuchsia/tools/buildstats/${platform}"
-             version="git_revision:fc76ac2674b7a93d2297afa6c129a8a9d3b3a309"
+             version="git_revision:05bbc38fc8fcdec5ec01cbbef31a50ae41865aa9"
              path="prebuilt/tools/buildstats/{{.OS}}-{{.Arch}}"
              platforms="linux-amd64"/>
     <package name="fuchsia/tools/ninjatrace/${platform}"
-             version="git_revision:fc76ac2674b7a93d2297afa6c129a8a9d3b3a309"
+             version="git_revision:05bbc38fc8fcdec5ec01cbbef31a50ae41865aa9"
              path="prebuilt/tools/ninjatrace/{{.OS}}-{{.Arch}}"
              platforms="linux-amd64"/>
 
     <!-- Perfetto trace processor -->
     <package name="perfetto/trace_processor_shell/${platform}"
-             version="git_tag:v58.3"
+             version="git_tag:v59.1"
              platforms="linux-amd64"
              path="prebuilt/third_party/perfetto/trace_processor_shell/{{.OS}}-{{.Arch}}"/>
 
@@ -237,10 +237,11 @@
              platforms="linux-amd64,linux-arm64"
              path="prebuilt/test_data/media/third_party/chromium_media_test_data_downstream"/>
     <!--   ADB -->
-    <package name="fuchsia/third_party/3pp/platform_tools/adb/${platform}"
-             version="version:2@37.0.0"
+    <!--     Version 37.0.2-16797903 (from git_main-throttled) -->
+    <package name="fuchsia/third_party/android/adb/${platform}"
+             version="bid:2@16797903"
              path="prebuilt/third_party/adb"
-             platforms="linux-amd64,linux-arm64"/>
+             platforms="linux-amd64"/>
 
     <!--   Fastboot -->
     <package name="fuchsia/third_party/fastboot/${platform}"
@@ -267,12 +268,12 @@
              path="prebuilt/third_party/fonts"/>
     <!--   ICU time zone resource files -->
     <package name="fuchsia/third_party/tzres"
-             version="version:2026e"
+             version="version:2026f"
              platforms="linux-amd64,linux-arm64"
              path="prebuilt/third_party/tzres"/>
     <!--   IANA Time Zone DB -->
     <package name="fuchsia/third_party/zoneinfo"
-             version="version:2026e"
+             version="version:2026f"
              platforms="linux-amd64,linux-arm64"
              path="prebuilt/third_party/zoneinfo"/>
     <!--   Unicode UCD datafiles -->
@@ -440,13 +441,13 @@
 
     <!--   Debian guest kernel images for x64 -->
     <package name="fuchsia_internal/linux/debian_guest-x64"
-             version="2qjeHxCn6ow_0j_jze3fkZCMaxS4Is1yLC6K2FwOu8IC"
+             version="uJYTt6qYcftg5Lk3_qVrEL6KrTAlNrhMdA_XQz7YzasC"
              path="prebuilt/virtualization/packages/debian_guest/images/x64"
              platforms="linux-amd64,linux-arm64"
              internal="true"/>
     <!--   Debian guest kernel images for arm64 -->
     <package name="fuchsia_internal/linux/debian_guest-arm64"
-             version="pmZC6KbKSEE2zbRFrm7D_kBbNokkl5B9TQ-rLKOCUHwC"
+             version="6R2bycxsCE_rrRtisgRjgWYiAyW0e-dIyWRD_8rC_mgC"
              path="prebuilt/virtualization/packages/debian_guest/images/arm64"
              platforms="linux-amd64,linux-arm64"
              internal="true"/>
@@ -498,7 +499,7 @@
     <!-- SHAC static analysis tooling -->
     <package name="fuchsia/shac/${platform}"
              path="prebuilt/tools/shac"
-             version="git_revision:42590a6764221422c854b8f65f84d98d0815ed8f"
+             version="git_revision:73bd11013a90a2a03639cdc4d5392b7c0d76fb14"
              platforms="linux-amd64,linux-arm64"/>
 
     <!-- keep-sorted tool -->
@@ -513,33 +514,27 @@
              version="version:2@0.16.0.1"
              platforms="linux-amd64,linux-arm64"/>
 
-    <!-- mcp-language-server tool -->
-    <package name="fuchsia/third_party/3pp/mcp-language-server/${platform}"
-             path="prebuilt/third_party/mcp-language-server/{{.OS}}-{{.Arch}}"
-             version="version:2@0.1.1.cr0"
-             platforms="linux-amd64"/>
-
     <!-- Packages in /infra/tools/ -->
     <package name="infra/tools/bb/${platform}"
              path="prebuilt/tools/buildbucket"
-             version="git_revision:5698508b873fe67ac5a8d6afe391368ad083597b"
+             version="git_revision:8b0ab0e7039020ae9fa2399f950a86dc8208bd9a"
              platforms="linux-amd64,linux-arm64"/>
     <package name="infra/tools/luci/gsutil/${platform}"
              path="prebuilt/tools/gsutil"
              platforms="linux-amd64,linux-arm64"
-             version="git_revision:5698508b873fe67ac5a8d6afe391368ad083597b"/>
+             version="git_revision:8b0ab0e7039020ae9fa2399f950a86dc8208bd9a"/>
     <package name="infra/tools/luci/logdog/logdog/${platform}"
              path="prebuilt/tools/logdog"
              platforms="linux-amd64,linux-arm64"
-             version="git_revision:5698508b873fe67ac5a8d6afe391368ad083597b"/>
+             version="git_revision:8b0ab0e7039020ae9fa2399f950a86dc8208bd9a"/>
     <package name="infra/tools/luci/cas/${platform}"
              path="prebuilt/tools/cas"
              platforms="linux-amd64,linux-arm64"
-             version="git_revision:5698508b873fe67ac5a8d6afe391368ad083597b"/>
+             version="git_revision:8b0ab0e7039020ae9fa2399f950a86dc8208bd9a"/>
     <package name="infra/tools/luci-auth/${platform}"
              path="prebuilt/tools/luci-auth"
              platforms="linux-amd64,linux-arm64"
-             version="git_revision:5698508b873fe67ac5a8d6afe391368ad083597b"/>
+             version="git_revision:8b0ab0e7039020ae9fa2399f950a86dc8208bd9a"/>
     <package name="infra/tools/rdb/${platform}"
              path="prebuilt/tools/resultdb"
              platforms="linux-amd64,linux-arm64"
@@ -548,17 +543,17 @@
     <!-- Packages in /fuchsia/infra -->
     <package name="fuchsia/infra/artifacts/${platform}"
              path="prebuilt/tools/artifacts"
-             version="git_revision:102c76cd760e9ec3c7cbdf98d9d20ab394107ea2"
+             version="git_revision:7dbf35e4d7e26871c152c466bdb36fb0f57a7308"
              platforms="linux-amd64,linux-arm64"/>
     <package name="fuchsia/infra/lkg/${platform}"
              path="prebuilt/tools/lkg"
-             version="git_revision:102c76cd760e9ec3c7cbdf98d9d20ab394107ea2"
+             version="git_revision:7dbf35e4d7e26871c152c466bdb36fb0f57a7308"
              platforms="linux-amd64,linux-arm64"/>
 
     <!-- rsclient tools -->
     <package name="fuchsia/tools/rsclient/${platform}"
              path="prebuilt/rsclient/{{.OS}}-{{.Arch}}"
-             version="git_revision:8041874e494c2811b138971e542c74d1883beb6a"
+             version="git_revision:071b37d5a4f69f505472f2e6db057c735eb2fb42"
              platforms="linux-amd64"/>
 
     <!-- Zedmon -->
@@ -607,66 +602,48 @@
              version="git_revision:18082c71069910e4517d82cbae3e61faea01cd8b"
              internal="true"/>
 
-    <!-- Bazel SDK sample packages built OOT -->
-    <package name="fuchsia/sdk-samples/fortune-teller/x64"
-             path="prebuilt/sdk-samples/fortune-teller"
-             version="git_revision:3e2ac06090d4bc2393a1e36894e572aa98ae0183"/>
-    <package name="fuchsia/sdk-samples/fortune-teller/debug-symbols-x64"
-             path="prebuilt/.build-id"
-             version="git_revision:3e2ac06090d4bc2393a1e36894e572aa98ae0183"
-             attributes="debug-symbols,debug-symbols-x64"/>
-
-    <!-- Drivers built OOT -->
-    <package name="fuchsia/drivers/backlight/x64"
-             path="prebuilt/drivers/backlight"
-             version="git_revision:25091161bc0a5750540ff2c4b73862e746d8c225"/>
-    <package name="fuchsia/drivers/backlight/debug-symbols-x64"
-             path="prebuilt/.build-id"
-             version="git_revision:25091161bc0a5750540ff2c4b73862e746d8c225"
-             attributes="debug-symbols,debug-symbols-x64"/>
-
      <!-- Components built OOT -->
     <package name="fuchsia/prebuilt/bt-host/arm64"
              path="prebuilt/connectivity/bluetooth/bt-host/arm64"
-             version="git_revision:2b85dbf691e12653ac7dcdfd2019b47380412cb7"/>
+             version="git_revision:3f2ee3788d1d4b306907b63332b33c26c9133cdd"/>
     <package name="fuchsia/prebuilt/bt-host/debug-symbols-arm64"
              path="prebuilt/.build-id"
-             version="git_revision:2b85dbf691e12653ac7dcdfd2019b47380412cb7"
+             version="git_revision:3f2ee3788d1d4b306907b63332b33c26c9133cdd"
              attributes="debug-symbols,debug-symbols-arm64"/>
     <package name="fuchsia/prebuilt/bt-host/x86_64"
              path="prebuilt/connectivity/bluetooth/bt-host/x64"
-             version="git_revision:2b85dbf691e12653ac7dcdfd2019b47380412cb7"/>
+             version="git_revision:3f2ee3788d1d4b306907b63332b33c26c9133cdd"/>
     <package name="fuchsia/prebuilt/bt-host/debug-symbols-x86_64"
              path="prebuilt/.build-id"
-             version="git_revision:2b85dbf691e12653ac7dcdfd2019b47380412cb7"
+             version="git_revision:3f2ee3788d1d4b306907b63332b33c26c9133cdd"
              attributes="debug-symbols,debug-symbols-x64"/>
     <package name="fuchsia/prebuilt/bt-host/riscv64"
              path="prebuilt/connectivity/bluetooth/bt-host/riscv64"
-             version="git_revision:2b85dbf691e12653ac7dcdfd2019b47380412cb7"/>
+             version="git_revision:3f2ee3788d1d4b306907b63332b33c26c9133cdd"/>
     <package name="fuchsia/prebuilt/bt-host/debug-symbols-riscv64"
              path="prebuilt/.build-id"
-             version="git_revision:2b85dbf691e12653ac7dcdfd2019b47380412cb7"
+             version="git_revision:3f2ee3788d1d4b306907b63332b33c26c9133cdd"
              attributes="debug-symbols,debug-symbols-riscv64"/>
     <package name="fuchsia/prebuilt/bt-hci-virtual/arm64"
              path="prebuilt/connectivity/bluetooth/bt-hci-virtual/arm64"
-             version="git_revision:2b85dbf691e12653ac7dcdfd2019b47380412cb7"/>
+             version="git_revision:3f2ee3788d1d4b306907b63332b33c26c9133cdd"/>
     <package name="fuchsia/prebuilt/bt-hci-virtual/debug-symbols-arm64"
              path="prebuilt/.build-id"
-             version="git_revision:2b85dbf691e12653ac7dcdfd2019b47380412cb7"
+             version="git_revision:3f2ee3788d1d4b306907b63332b33c26c9133cdd"
              attributes="debug-symbols,debug-symbols-arm64"/>
     <package name="fuchsia/prebuilt/bt-hci-virtual/x86_64"
              path="prebuilt/connectivity/bluetooth/bt-hci-virtual/x64"
-             version="git_revision:2b85dbf691e12653ac7dcdfd2019b47380412cb7"/>
+             version="git_revision:3f2ee3788d1d4b306907b63332b33c26c9133cdd"/>
     <package name="fuchsia/prebuilt/bt-hci-virtual/debug-symbols-x86_64"
              path="prebuilt/.build-id"
-             version="git_revision:2b85dbf691e12653ac7dcdfd2019b47380412cb7"
+             version="git_revision:3f2ee3788d1d4b306907b63332b33c26c9133cdd"
              attributes="debug-symbols,debug-symbols-x64"/>
     <package name="fuchsia/prebuilt/bt-hci-virtual/riscv64"
              path="prebuilt/connectivity/bluetooth/bt-hci-virtual/riscv64"
-             version="git_revision:2b85dbf691e12653ac7dcdfd2019b47380412cb7"/>
+             version="git_revision:3f2ee3788d1d4b306907b63332b33c26c9133cdd"/>
     <package name="fuchsia/prebuilt/bt-hci-virtual/debug-symbols-riscv64"
              path="prebuilt/.build-id"
-             version="git_revision:2b85dbf691e12653ac7dcdfd2019b47380412cb7"
+             version="git_revision:3f2ee3788d1d4b306907b63332b33c26c9133cdd"
              attributes="debug-symbols,debug-symbols-riscv64"/>
 
      <!-- Linux iptables binary used for Starnix tests.

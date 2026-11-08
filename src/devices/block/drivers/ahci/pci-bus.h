@@ -33,7 +33,6 @@ class PciBus : public Bus {
 
  private:
   fidl::WireSyncClient<fuchsia_hardware_pci::Device> pci_;
-  fuchsia_hardware_pci::InterruptMode irq_mode_;
   std::optional<fdf::MmioBuffer> mmio_;
   zx::bti bti_;
   zx::interrupt irq_;

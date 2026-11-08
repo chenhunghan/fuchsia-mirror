@@ -1511,6 +1511,104 @@ fn test_host_send_router_solicitations() {
 }
 
 #[test]
+fn test_router_advertisement_cancels_router_solicitation_timer() {
+    let fake_config = Ipv6::TEST_ADDRS;
+    let mut ctx = FakeCtx::default();
+    let eth_device_id =
+        ctx.core_api().device::<EthernetLinkDevice>().add_device_with_default_state(
+            EthernetCreationProperties {
+                tx_offload_spec: Default::default(),
+                mac: fake_config.local_mac,
+                max_frame_size: IPV6_MIN_IMPLIED_MAX_FRAME_SIZE,
+            },
+            DEFAULT_INTERFACE_METRIC,
+        );
+    let device_id = eth_device_id.into();
+    let _: Ipv6DeviceConfigurationUpdate = ctx
+        .core_api()
+        .device_ip::<Ipv6>()
+        .update_configuration(
+            &device_id,
+            Ipv6DeviceConfigurationUpdate {
+                max_router_solicitations: Some(NonZeroU8::new(3)),
+                ip_config: IpDeviceConfigurationUpdate {
+                    ip_enabled: Some(true),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_matches!(ctx.bindings_ctx.take_ethernet_frames()[..], []);
+
+    let expect_single_rs_frame = |ctx: &mut FakeCtx| {
+        let frames = ctx.bindings_ctx.take_ethernet_frames();
+        let (_dev, frame) = assert_matches!(&frames[..], [frame] => frame);
+        let (src_mac, _, src_ip, dst_ip, ttl, message, code) =
+            parse_icmp_packet_in_ip_packet_in_ethernet_frame::<Ipv6, _, RouterSolicitation, _>(
+                frame,
+                EthernetFrameLengthCheck::NoCheck,
+                |p| assert_eq!(p.body().iter().count(), 0),
+            )
+            .unwrap();
+        assert_eq!(src_mac, fake_config.local_mac.get());
+        assert_eq!(src_ip, Ipv6::UNSPECIFIED_ADDRESS);
+        assert_eq!(dst_ip, Ipv6::ALL_ROUTERS_LINK_LOCAL_MULTICAST_ADDRESS.get());
+        assert_eq!(ttl, REQUIRED_NDP_IP_PACKET_HOP_LIMIT);
+        assert_eq!(message, RouterSolicitation::default());
+        assert_eq!(code, IcmpZeroCode);
+    };
+
+    // Advance past the initial solicitation delay; the first RS should be sent.
+    let _: Vec<_> = ctx.trigger_timers_for(MAX_RTR_SOLICITATION_DELAY);
+    expect_single_rs_frame(&mut ctx);
+
+    let router_ip: Ipv6Addr = fake_config.remote_mac.to_ipv6_link_local().addr().get();
+    let build_ra = |router_lifetime: u16| {
+        EmptyBuf
+            .wrap_in(IcmpPacketBuilder::<Ipv6, _>::new(
+                router_ip,
+                Ipv6::ALL_NODES_LINK_LOCAL_MULTICAST_ADDRESS.get(),
+                IcmpZeroCode,
+                RouterAdvertisement::new(0, false, false, router_lifetime, 0, 0),
+            ))
+            .wrap_in(Ipv6PacketBuilder::new(
+                router_ip,
+                Ipv6::ALL_NODES_LINK_LOCAL_MULTICAST_ADDRESS.get(),
+                REQUIRED_NDP_IP_PACKET_HOP_LIMIT,
+                Ipv6Proto::Icmpv6,
+            ))
+            .serialize_vec_outer(&mut NetworkSerializationContext::default())
+            .unwrap()
+            .unwrap_b()
+    };
+
+    assert_eq!(ctx.core_ctx.ipv6().icmp.ndp_counters.rx.router_advertisement.get(), 0);
+
+    // Receiving an RA with zero router lifetime does NOT stop router solicitation,
+    // so the second RS is still sent after `RTR_SOLICITATION_INTERVAL`.
+    ctx.test_api().receive_ip_packet::<Ipv6, _>(
+        &device_id,
+        Some(FrameDestination::Multicast),
+        build_ra(0),
+    );
+    assert_eq!(ctx.core_ctx.ipv6().icmp.ndp_counters.rx.router_advertisement.get(), 1);
+    let _: Vec<_> = ctx.trigger_timers_for(RTR_SOLICITATION_INTERVAL);
+    expect_single_rs_frame(&mut ctx);
+
+    // Receiving a valid RA with non-zero router lifetime stops router
+    // solicitation (RFC 4861 section 6.3.7), so the third RS is not sent.
+    ctx.test_api().receive_ip_packet::<Ipv6, _>(
+        &device_id,
+        Some(FrameDestination::Multicast),
+        build_ra(1800),
+    );
+    assert_eq!(ctx.core_ctx.ipv6().icmp.ndp_counters.rx.router_advertisement.get(), 2);
+    let _: Vec<_> = ctx.trigger_timers_for(RTR_SOLICITATION_INTERVAL * 10);
+    assert_matches!(ctx.bindings_ctx.take_ethernet_frames()[..], []);
+}
+
+#[test]
 fn test_set_ndp_config_dup_addr_detect_transmits() {
     // Test that updating the DupAddrDetectTransmits parameter on an
     // interface updates the number of DAD messages (NDP Neighbor

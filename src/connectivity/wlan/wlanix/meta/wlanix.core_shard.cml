@@ -17,6 +17,12 @@
             to: "#wlanix",
         },
         {
+            config: "fuchsia.connectivity.RedactNetworkIdentifiers",
+            from: "parent",
+            to: "#wlanix",
+            availability: "same_as_target",
+        },
+        {
             protocol: [ "fuchsia.wlan.device.service.DeviceMonitor" ],
             from: "#wlandevicemonitor",
             to: "#wlanix",

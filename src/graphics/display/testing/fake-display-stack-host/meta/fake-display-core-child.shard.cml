@@ -19,5 +19,14 @@
             from: "parent",
             to: [ "#fake-display-stack-host" ],
         },
+        {
+            config: [
+                "fuchsia.display.testing.ActiveHeightPx",
+                "fuchsia.display.testing.ActiveWidthPx",
+            ],
+            from: "parent",
+            to: [ "#fake-display-stack-host" ],
+            availability: "optional",
+        },
     ],
 }

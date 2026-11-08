@@ -7,7 +7,7 @@ use camino::Utf8PathBuf;
 use clap::Parser;
 use component_id_index::Index;
 use fidl::persist;
-use fidl_fuchsia_component_internal as fcomponent_internal;
+use fidl_fuchsia_component_internal_common as fcomponent_internal;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;

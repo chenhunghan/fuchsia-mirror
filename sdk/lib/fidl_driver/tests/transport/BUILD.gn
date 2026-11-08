@@ -25,16 +25,11 @@ fidl("test.transport") {
 source_set("fidl_driver_transport_testing_lib") {
   public = [
     "assert_peer_closed_helper.h",
-    "scoped_fake_driver.h",
     "server_on_unbound_helper.h",
   ]
   sources = [ "assert_peer_closed_helper.cc" ]
-  public_deps = [ "//sdk/lib/driver/runtime:driver_runtime_env" ]
-  deps = [
-    "//sdk/lib/driver/runtime:driver_runtime_testing",
+  public_deps = [
     "//sdk/lib/fidl_driver",
-    "//sdk/lib/fit",
-    "//zircon/system/ulib/sync:sync-cpp",
     "//zircon/system/ulib/zxtest",
   ]
 }
@@ -67,15 +62,11 @@ foreach(test_name, test_names) {
       ":fidl_driver_transport_testing_lib",
       ":test.transport_cpp",
       "//sdk/lib/async:async-cpp",
-      "//sdk/lib/async-loop:async-loop-cpp",
-      "//sdk/lib/async-loop:async-loop-default",
-      "//sdk/lib/driver/runtime:driver_runtime_testing",
       "//sdk/lib/driver/runtime/testing/cpp",
+      "//sdk/lib/driver/testing/cpp",
       "//sdk/lib/fidl_driver",
       "//sdk/lib/fidl_driver:fidl_driver_natural",
       "//sdk/testing/fidl/protocols_tests:test.unknown.interactions_cpp",
-      "//src/devices/bin/driver_runtime",
-      "//src/devices/testing/driver-runtime-main:zxtest",
       "//zircon/system/ulib/sync:sync-cpp",
       "//zircon/system/ulib/zxtest",
     ]
@@ -95,17 +86,14 @@ test("fidl_driver_api_test_bin") {
     "server_binding_test.cc",
   ]
   deps = [
-    ":fidl_driver_transport_testing_lib",
     ":test.transport_cpp",
     "//sdk/lib/async:async-cpp",
     "//sdk/lib/async_patterns/testing/cpp",
-    "//sdk/lib/driver/runtime:driver_runtime_testing",
     "//sdk/lib/driver/runtime/testing/cpp",
+    "//sdk/lib/driver/testing/cpp",
     "//sdk/lib/fidl_driver",
     "//sdk/lib/fidl_driver:fidl_driver_natural",
-    "//sdk/testing/fidl/protocols_tests:test.unknown.interactions_cpp",
-    "//src/devices/bin/driver_runtime:driver_runtime_impl",
-    "//src/devices/testing/driver-runtime-main:gtest",
+    "//src/lib/fxl/test:gtest_main",
     "//src/lib/testing/predicates",
     "//third_party/googletest:gtest",
     "//zircon/system/ulib/sync:sync-cpp",

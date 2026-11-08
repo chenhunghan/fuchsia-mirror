@@ -5,7 +5,6 @@
 use strum_macros::EnumString;
 use thiserror::Error;
 
-use std::fmt::Display;
 use std::str::FromStr;
 
 /// Features are a way to enable or disable specific starnix behaviors.
@@ -15,37 +14,10 @@ use std::str::FromStr;
 #[derive(Debug, Clone, Copy, PartialEq, EnumString, strum_macros::Display)]
 #[strum(serialize_all = "snake_case")]
 pub enum Feature {
-    // Legacy module feature flags retained for backwards compatibility with `ExtraFeatures`,
-    // Product Assembly, and prebuilt container manifests. Prefer configuring modules via
-    // `program.modules` in container manifests.
-    AndroidUsb,
-    AspectRatio,
-    Ashmem,
-    BootNotifier,
-    BootNotifierCpuBoost,
-    Cooling,
-    DataCollectionConsentSync,
-    Fastrpc,
+    // Legacy module feature flags retained for backwards compatibility with `ExtraFeatures` and
+    // Product Assembly. Prefer configuring modules via `program.modules` in container manifests.
     Framebuffer,
-    Gfxstream,
-    // Note: GoogleOdpm statically registers `iio:device0`.
-    // Conflicts with `HvdcpOpti`, which also statically registers `iio:device0`.
-    // Until dynamic IIO numbering is supported, they must not be used at the same time.
-    GoogleOdpm,
-    Gralloc,
-    // Note: HvdcpOpti statically registers IIO devices (`iio:device0`, `iio:device3`).
-    // Conflicts with `GoogleOdpm`, which also statically registers `iio:device0`.
-    // Until dynamic IIO numbering is supported, they must not be used at the same time.
-    HvdcpOpti,
-    Kgsl,
-    Magma,
-    MagmaSupportedVendors,
-    MmcblkStub,
-    Nanohub,
     NetworkManager,
-    Perfetto,
-    Thermal,
-    Usbfs,
     WakeupTest,
 
     // Container and kernel behavior features.
@@ -72,6 +44,13 @@ pub enum Feature {
     Wifi,
 }
 
+/// Parsed [`Feature`] together with its optional raw argument string (`"<feature>:<raw_args>"`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FeatureAndArgs {
+    pub feature: Feature,
+    pub raw_args: Option<String>,
+}
+
 /// Error returned when a feature is not recognized.
 #[derive(Debug, Error)]
 #[error("unsupported feature: {0}")]
@@ -84,33 +63,21 @@ impl Feature {
     }
 }
 
-/// Feature together with any arguments that go along with it, if specified.
-#[derive(Debug, Clone, PartialEq)]
-pub struct FeatureAndArgs {
-    /// The feature.
-    pub feature: Feature,
-    /// If specified, the (unparsed) arguments for the feature.
-    pub raw_args: Option<String>,
-}
-
 impl FeatureAndArgs {
-    /// Parses a feature and args from a string that separates them with `:`, e.g. "bpf:v2".
-    ///
-    /// If there is no `:` then the whole string is interpreted as the feature name.
-    pub fn try_parse(s: &str) -> Result<FeatureAndArgs, UnsupportedFeatureError> {
+    /// Parses a feature and optional `:`-delimited argument from a string.
+    pub fn try_parse(s: &str) -> Result<Self, UnsupportedFeatureError> {
         let (raw_flag, raw_args) =
             s.split_once(':').map(|(f, a)| (f, Some(a.to_string()))).unwrap_or((s, None));
         let feature = Feature::try_parse(raw_flag)?;
-        Ok(FeatureAndArgs { feature, raw_args })
+        Ok(Self { feature, raw_args })
     }
 }
 
-impl Display for FeatureAndArgs {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        let FeatureAndArgs { feature, raw_args } = self;
-        match raw_args {
-            None => feature.fmt(f),
-            Some(raw_args) => format_args!("{feature}:{raw_args}").fmt(f),
+impl std::fmt::Display for FeatureAndArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.raw_args {
+            Some(args) => write!(f, "{}:{}", self.feature, args),
+            None => write!(f, "{}", self.feature),
         }
     }
 }
@@ -124,42 +91,23 @@ mod test {
         for (feature, expected_str) in [
             (Feature::AndroidSerialno, "android_serialno"),
             (Feature::AndroidBootreason, "android_bootreason"),
-            (Feature::AspectRatio, "aspect_ratio"),
             (Feature::Container, "container"),
             (Feature::CustomArtifacts, "custom_artifacts"),
             (Feature::Devtmpfs, "devtmpfs"),
-            (Feature::Ashmem, "ashmem"),
-            (Feature::BootNotifier, "boot_notifier"),
-            (Feature::BootNotifierCpuBoost, "boot_notifier_cpu_boost"),
             (Feature::Framebuffer, "framebuffer"),
-            (Feature::Gralloc, "gralloc"),
-            (Feature::Kgsl, "kgsl"),
-            (Feature::Magma, "magma"),
-            (Feature::MagmaSupportedVendors, "magma_supported_vendors"),
-            (Feature::Nanohub, "nanohub"),
             (Feature::NetworkManager, "network_manager"),
-            (Feature::Gfxstream, "gfxstream"),
             (Feature::Bpf, "bpf"),
             (Feature::EnableSuid, "enable_suid"),
             (Feature::IoUring, "io_uring"),
             (Feature::ErrorOnFailedReboot, "error_on_failed_reboot"),
-            (Feature::Perfetto, "perfetto"),
             (Feature::PingGroupRange, "ping_group_range"),
             (Feature::RootfsRw, "rootfs_rw"),
             (Feature::Selinux, "selinux"),
             (Feature::SelinuxTestSuite, "selinux_test_suite"),
             (Feature::TestData, "test_data"),
-            (Feature::Thermal, "thermal"),
-            (Feature::Cooling, "cooling"),
-            (Feature::DataCollectionConsentSync, "data_collection_consent_sync"),
-            (Feature::HvdcpOpti, "hvdcp_opti"),
             (Feature::Wifi, "wifi"),
             (Feature::AdditionalMounts, "additional_mounts"),
             (Feature::WakeupTest, "wakeup_test"),
-            (Feature::MmcblkStub, "mmcblk_stub"),
-            (Feature::AndroidUsb, "android_usb"),
-            (Feature::GoogleOdpm, "google_odpm"),
-            (Feature::Usbfs, "usbfs"),
             // TODO(https://fxbug.dev/485370648) remove when unnecessary
             (Feature::FakeIon, "fake_ion"),
             (Feature::UnifiedTracing, "unified_tracing"),

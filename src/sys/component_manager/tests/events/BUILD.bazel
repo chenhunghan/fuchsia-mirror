@@ -1,0 +1,389 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "events_integration_test_bin",
+    srcs = ["integration_test.rs"],
+    crate_name = "events_integration_test",
+    crate_root = "integration_test.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/sys/lib/cm_rust",
+        "//src/sys/lib/cm_types",
+        "//src/sys/lib/component-events",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "events_integration_test_packaged_bin",
+    testonly = True,
+    binary = ":events_integration_test_bin",
+    binary_name = "events_integration_test",
+)
+
+fx_packaged_binary(
+    name = "async_reporter_packaged_bin",
+    testonly = True,
+    binary = "//src/sys/component_manager/tests/events/components:async_reporter_bin",
+    binary_name = "async_reporter",
+)
+
+fx_packaged_binary(
+    name = "capability_requested_child_packaged_bin",
+    testonly = True,
+    binary = "//src/sys/component_manager/tests/events/components:capability_requested_child_bin",
+    binary_name = "capability_requested_child",
+)
+
+fx_packaged_binary(
+    name = "capability_requested_root_packaged_bin",
+    testonly = True,
+    binary = "//src/sys/component_manager/tests/events/components:capability_requested_root_bin",
+    binary_name = "capability_requested_root",
+)
+
+fx_packaged_binary(
+    name = "echo_server_for_events_packaged_bin",
+    testonly = True,
+    binary = "//src/sys/component_manager/tests/events/components:echo_server_for_events_bin",
+    binary_name = "scoped_echo_server",
+)
+
+fx_packaged_binary(
+    name = "echo_reporter_packaged_bin",
+    testonly = True,
+    binary = "//src/sys/component_manager/tests/events/components:echo_reporter_bin",
+    binary_name = "scoped_echo_reporter",
+)
+
+fx_packaged_binary(
+    name = "nested_reporter_packaged_bin",
+    testonly = True,
+    binary = "//src/sys/component_manager/tests/events/components:nested_reporter_bin",
+    binary_name = "nested_reporter",
+)
+
+fx_packaged_binary(
+    name = "stub_component_packaged_bin",
+    testonly = True,
+    binary = "//src/sys/component_manager/tests/events/components:stub_component_bin",
+    binary_name = "stub_component",
+)
+
+fx_packaged_binary(
+    name = "realm_offered_packaged_bin",
+    testonly = True,
+    binary = "//src/sys/component_manager/tests/events/components:realm_offered_bin",
+    binary_name = "realm_offered_reporter",
+)
+
+fx_packaged_binary(
+    name = "realm_offered_nested_packaged_bin",
+    testonly = True,
+    binary = "//src/sys/component_manager/tests/events/components:realm_offered_nested",
+    binary_name = "realm_offered_nested",
+)
+
+fx_component_manifest(
+    name = "async_reporter-manifest",
+    testonly = True,
+    component_name = "async_reporter",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder_no_diagnostics.shard",
+        "//src/sys/component_manager:meta/passthrough_diagnostics.shard.cml",
+        "//src/sys/component_manager/tests:meta/use_elf_runner.shard",
+    ],
+    manifest = "//src/sys/component_manager/tests/events/components:async/meta/reporter.cml",
+)
+
+# We want `diagnostics` from self rather than parent, so we can't use
+# syslog/client.shard.cml.
+fx_component(
+    name = "async_reporter",
+    testonly = True,
+    check_includes = False,
+    compiled_manifest = ":async_reporter-manifest",
+    deps = [
+        ":async_reporter_packaged_bin",  # @bazel2gn:path_overwrite:components:async_reporter_bin
+    ],
+)
+
+fx_component_manifest(
+    name = "capability_requested_child-manifest",
+    testonly = True,
+    component_name = "capability_requested_child",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "//src/sys/component_manager/tests/events/components:capability_requested/meta/child.cml",
+)
+
+fx_component(
+    name = "capability_requested_child",
+    testonly = True,
+    compiled_manifest = ":capability_requested_child-manifest",
+    deps = [
+        ":capability_requested_child_packaged_bin",  # @bazel2gn:path_overwrite:components:capability_requested_child_bin
+    ],
+)
+
+fx_component_manifest(
+    name = "capability_requested_root-manifest",
+    testonly = True,
+    component_name = "capability_requested_root",
+    includes = [
+        "//src/sys/component_manager:meta/passthrough_diagnostics.shard.cml",
+        "//src/sys/component_manager/tests:meta/use_elf_runner.shard",
+    ],
+    manifest = "//src/sys/component_manager/tests/events/components:capability_requested/meta/root.cml",
+)
+
+# We want `diagnostics` from self rather than parent, so we can't use
+# syslog/client.shard.cml.
+fx_component(
+    name = "capability_requested_root",
+    testonly = True,
+    check_includes = False,
+    compiled_manifest = ":capability_requested_root-manifest",
+    deps = [
+        ":capability_requested_root_packaged_bin",  # @bazel2gn:path_overwrite:components:capability_requested_root_bin
+    ],
+)
+
+fx_component_manifest(
+    name = "echo_realm-manifest",
+    testonly = True,
+    component_name = "echo_realm",
+    includes = [
+        "//src/sys/component_manager:meta/passthrough_diagnostics.shard.cml",
+        "//src/sys/component_manager/tests:meta/elf_runner_and_environment.shard",
+    ],
+    manifest = "//src/sys/component_manager/tests/events/components:scoped/meta/echo_realm.cml",
+)
+
+fx_component(
+    name = "echo_realm",
+    testonly = True,
+    compiled_manifest = ":echo_realm-manifest",
+)
+
+fx_component_manifest(
+    name = "echo_server-manifest",
+    testonly = True,
+    component_name = "echo_server",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "//src/sys/component_manager/tests/events/components:scoped/meta/echo_server.cml",
+)
+
+fx_component(
+    name = "echo_server",
+    testonly = True,
+    compiled_manifest = ":echo_server-manifest",
+    deps = [
+        ":echo_server_for_events_packaged_bin",  # @bazel2gn:path_overwrite:components:echo_server_for_events_bin
+    ],
+)
+
+fx_component_manifest(
+    name = "echo_reporter-manifest",
+    testonly = True,
+    component_name = "echo_reporter",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "//src/sys/component_manager/tests/events/components:scoped/meta/echo_reporter.cml",
+)
+
+fx_component(
+    name = "echo_reporter",
+    testonly = True,
+    compiled_manifest = ":echo_reporter-manifest",
+    deps = [
+        ":echo_reporter_packaged_bin",  # @bazel2gn:path_overwrite:components:echo_reporter_bin
+    ],
+)
+
+fx_component_manifest(
+    name = "nested_reporter-manifest",
+    testonly = True,
+    component_name = "nested_reporter",
+    includes = [
+        "//src/sys/component_manager:meta/passthrough_diagnostics.shard.cml",
+        "//src/sys/component_manager/tests:meta/use_elf_runner.shard",
+    ],
+    manifest = "//src/sys/component_manager/tests/events/components:nested/meta/reporter.cml",
+)
+
+# We want `diagnostics` from self rather than parent, so we can't use
+# syslog/client.shard.cml.
+fx_component(
+    name = "nested_reporter",
+    testonly = True,
+    check_includes = False,
+    compiled_manifest = ":nested_reporter-manifest",
+    deps = [
+        ":nested_reporter_packaged_bin",  # @bazel2gn:path_overwrite:components:nested_reporter_bin
+    ],
+)
+
+fx_component_manifest(
+    name = "event_dispatch_order_root-manifest",
+    testonly = True,
+    component_name = "event_dispatch_order_root",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/component_manager/tests:meta/use_elf_runner.shard",
+    ],
+    manifest = "//src/sys/component_manager/tests/events/components:event_dispatch_order/meta/root.cml",
+)
+
+fx_component(
+    name = "event_dispatch_order_root",
+    testonly = True,
+    compiled_manifest = ":event_dispatch_order_root-manifest",
+    deps = [
+        ":stub_component_packaged_bin",  # @bazel2gn:path_overwrite:components:stub_component_bin
+    ],
+)
+
+fx_component_manifest(
+    name = "stub_component-manifest",
+    testonly = True,
+    component_name = "stub_component",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "//src/sys/component_manager/tests/events/components:stub/meta/component.cml",
+)
+
+fx_component(
+    name = "stub_component",
+    testonly = True,
+    compiled_manifest = ":stub_component-manifest",
+    deps = [
+        ":stub_component_packaged_bin",  # @bazel2gn:path_overwrite:components:stub_component_bin
+    ],
+)
+
+fx_component_manifest(
+    name = "realm_offered_reporter-manifest",
+    testonly = True,
+    component_name = "realm_offered_reporter",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "//src/sys/component_manager/tests/events/components:realm_offered/meta/reporter.cml",
+)
+
+fx_component(
+    name = "realm_offered_reporter",
+    testonly = True,
+    compiled_manifest = ":realm_offered_reporter-manifest",
+    deps = [
+        ":realm_offered_packaged_bin",  # @bazel2gn:path_overwrite:components:realm_offered_bin
+    ],
+)
+
+fx_component_manifest(
+    name = "realm_offered_nested-manifest",
+    testonly = True,
+    component_name = "realm_offered_nested",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "//src/sys/component_manager/tests/events/components:realm_offered/meta/nested.cml",
+)
+
+fx_component(
+    name = "realm_offered_nested",
+    testonly = True,
+    compiled_manifest = ":realm_offered_nested-manifest",
+    deps = [
+        ":realm_offered_nested_packaged_bin",  # @bazel2gn:path_overwrite:components:realm_offered_nested
+    ],
+)
+
+fx_component_manifest(
+    name = "realm_offered_root-manifest",
+    testonly = True,
+    component_name = "realm_offered_root",
+    includes = [
+        "//src/sys/component_manager:meta/passthrough_diagnostics.shard.cml",
+        "//src/sys/component_manager/tests:meta/elf_runner_and_environment.shard",
+    ],
+    manifest = "//src/sys/component_manager/tests/events/components:realm_offered/meta/root.cml",
+)
+
+fx_component(
+    name = "realm_offered_root",
+    testonly = True,
+    compiled_manifest = ":realm_offered_root-manifest",
+)
+
+fx_component_manifest(
+    name = "events_integration_test-manifest",
+    testonly = True,
+    component_name = "events_integration_test",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/lib/fuchsia-component-test:meta/nested_component_manager.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/events_integration_test.cml",
+)
+
+fx_test_component(
+    name = "events_integration_test_component",
+    compiled_manifest = ":events_integration_test-manifest",
+    deps = [":events_integration_test_packaged_bin"],
+)
+
+fx_package(
+    name = "events_integration_test_package",
+    package_name = "events_integration_test",
+    components = [
+        ":async_reporter",
+        ":capability_requested_child",
+        ":capability_requested_root",
+        ":echo_realm",
+        ":echo_reporter",
+        ":echo_server",
+        ":event_dispatch_order_root",
+        ":nested_reporter",
+        ":realm_offered_nested",
+        ":realm_offered_reporter",
+        ":realm_offered_root",
+        ":stub_component",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+        "//src/sys/component_manager:component-manager-realm-builder-debug-cmp",
+    ],
+    test_components = [":events_integration_test_component"],
+)
+
+fx_test(
+    name = "events_integration_test",
+    package = ":events_integration_test_package",
+    visibility = ["//src/sys/component_manager:__pkg__"],
+)

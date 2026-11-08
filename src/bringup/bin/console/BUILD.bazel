@@ -2,7 +2,29 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":console-test-pkg"],
+    visibility = ["//src/bringup:__pkg__"],
+)
 
 exports_files(
     [
@@ -10,4 +32,66 @@ exports_files(
         "meta/console_eng.shard.cml",
     ],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "console",
+    manifest = "meta/console.cml",
+)
+
+rustc_binary(
+    name = "console_bin",
+    srcs = [
+        "src/fifo.rs",
+        "src/main.rs",
+    ],
+    binary_name = "console",
+    build_flags = ["//build/config/rust:bootfs"],
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.pty:fuchsia.hardware.pty_rust",
+        "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-sync",
+        "//src/sys/lib/stdout-to-debuglog/rust",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+rustc_test(
+    name = "console_bin_test",
+    build_flags = ["//build/config/rust:bootfs"],
+    crate = ":console_bin",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = ["//third_party/rust_crates/vendor:assert_matches"],
+)
+
+fx_unittest_package(
+    name = "console-test-pkg",
+    package_name = "console-test",
+    unit_tests = [":console_bin_test"],
+)
+
+fx_packaged_binary(
+    name = "console_bin_packaged",
+    binary = ":console_bin",
+    binary_name = "console",
+)
+
+fx_component(
+    name = "component",
+    # console uses the boot log.
+    # The includes checker wants the syslog shard because console gets the
+    # injected dep on the legacy syslog backend.
+    check_includes = False,
+    compiled_manifest = ":manifest",
+    deps = [":console_bin_packaged"],
 )

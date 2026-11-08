@@ -1,0 +1,66 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":display-tool-test"],
+    visibility = ["//src/graphics/display:__pkg__"],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = [
+        "src/commands.rs",
+        "src/commands/bouncing_squares.rs",
+        "src/commands/cadence.rs",
+        "src/commands/display_color_layer.rs",
+        "src/commands/frame_rate_test.rs",
+        "src/commands/multilayer_squares.rs",
+        "src/commands/static_config_vsync_loop.rs",
+        "src/draw.rs",
+        "src/fps.rs",
+        "src/main.rs",
+        "src/mode_selection.rs",
+        "src/rgb.rs",
+        "src/runner.rs",
+        "src/runner_multilayer.rs",
+    ],
+    binary_name = "display-tool",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.display.types:fuchsia.hardware.display.types_rust",
+        "//sdk/fidl/fuchsia.images2:fuchsia.images2_rust",
+        "//sdk/fidl/fuchsia.math:fuchsia.math_rust",
+        "//sdk/rust/zx",
+        "//src/graphics/display/lib/rust/display-utils",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-image-format",
+        "//src/lib/mapped-vmo",
+        "//src/lib/trace/rust:trace",
+        "//src/lib/trace/rust:trace-provider",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:euclid",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+rustc_test(
+    name = "display_tool_bin_test",
+    crate = ":bin",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = ["//third_party/rust_crates/vendor:googletest"],
+)
+
+fx_unittest_package(
+    name = "display-tool-test",
+    unit_tests = [":display_tool_bin_test"],
+)

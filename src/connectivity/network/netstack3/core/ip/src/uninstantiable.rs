@@ -14,7 +14,7 @@ use crate::internal::base::{BaseTransportIpContext, HopLimits, IpLayerIpExt};
 use crate::internal::device::Ipv6LinkLayerAddr;
 use crate::internal::socket::{
     DeviceIpSocketHandler, IpSock, IpSockCreationError, IpSockSendError, IpSocketArgs,
-    IpSocketHandler, MmsError, RouteResolutionOptions,
+    IpSocketHandler, MmsError, RouteResolutionOptions, TransportGsoInfo,
 };
 
 impl<I: IpExt, C, P: DeviceIdContext<AnyDevice>> BaseTransportIpContext<I, C>
@@ -52,6 +52,7 @@ impl<I: IpExt + FilterIpExt, BC: TxMetadataBindingsTypes, P: DeviceIdContext<Any
         _ctx: &mut BC,
         _socket: &IpSock<I, Self::WeakDeviceId>,
         _body: S,
+        _gso_info: Option<TransportGsoInfo>,
         _options: &O,
         _tx_metadata: BC::TxMetadata,
     ) -> Result<(), IpSockSendError> {

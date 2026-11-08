@@ -1,0 +1,29 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "exit_with_code_util",
+    srcs = ["exit_with_code_util.rs"],
+    crate_root = "exit_with_code_util.rs",
+    edition = "2024",
+    visibility = [
+        "//sdk/rust/zx:__pkg__",
+        "//src/lib/pty:__pkg__",
+        "//src/ui/bin/terminal:__pkg__",
+    ],
+    deps = ["//sdk/rust/zx"],
+)
+
+rustc_binary(
+    name = "sleep_forever_util",
+    srcs = ["sleep_forever_util.rs"],
+    crate_root = "sleep_forever_util.rs",
+    edition = "2024",
+    visibility = ["//sdk/rust/zx:__pkg__"],
+    deps = ["//sdk/rust/zx"],
+)

@@ -1,0 +1,87 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [],  # Include all tests in the package.
+    visibility = ["//src/sys:__pkg__"],
+)
+
+fx_packaged_binary(
+    name = "engine_packaged_bin",
+    testonly = True,
+    binary = "//src/sys/fuzzing/realmfuzzer/coverage/tests/engine",
+    binary_name = "realmfuzzer_coverage_test_engine",
+)
+
+fx_component_manifest(
+    name = "environment-test-manifest",
+    testonly = True,
+    component_name = "environment-test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/sys/testing:elf_test_runner.shard.cml",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/fuzzing/realmfuzzer/coverage:fuzzed-env.shard",
+    ],
+    manifest = "meta/environment-test.cml",
+)
+
+fx_test_component(
+    name = "environment-test-component",
+    compiled_manifest = ":environment-test-manifest",
+    deps = [":engine_packaged_bin"],
+)
+
+fx_packaged_binary(
+    name = "adapter_packaged_bin",
+    testonly = True,
+    binary = "//src/sys/fuzzing/realmfuzzer/coverage/tests/adapter",
+    binary_name = "realmfuzzer_coverage_test_adapter",
+)
+
+fx_component_manifest(
+    name = "adapter-manifest",
+    testonly = True,
+    component_name = "adapter",
+    includes = ["//src/sys/fuzzing/realmfuzzer/adapters:llvm.shard"],
+    manifest = "meta/adapter.cml",
+)
+
+fx_component(
+    name = "adapter-component",
+    testonly = True,
+    compiled_manifest = ":adapter-manifest",
+    deps = [":adapter_packaged_bin"],
+)
+
+fx_package(
+    name = "integration-tests-pkg",
+    package_name = "realmfuzzer-coverage-integration-tests",
+    components = [
+        ":adapter-component",
+        "//src/sys/fuzzing/realmfuzzer/coverage",
+    ],
+    test_components = [":environment-test-component"],
+)
+
+fx_test(
+    name = "realmfuzzer-coverage-integration-tests",
+    package = ":integration-tests-pkg",
+)

@@ -182,7 +182,7 @@ class Directive(object):
         self.name = keyword  # function name
         # Some Directive arguments contain other directives,
         # e.g. AS_NEEDED inside INPUT or GROUPS.
-        self.args: list[str | "Directive"] = list(args) if args else []
+        self.args: list[str | Directive] = list(args) if args else []
 
     def __str__(self) -> str:
         args_str = " ".join(str(arg) for arg in self.args)

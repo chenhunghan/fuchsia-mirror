@@ -32,8 +32,11 @@ idk_cc_source_library(
     # In both, it is used outside the FIDL bindings in a small number of places.
     visibility = [
         "//build/bazel/rules/fidl:__subpackages__",
+        "//examples/fidl/cpp/client_thread_safety:__pkg__",
+        "//examples/fidl/cpp/services/server:__pkg__",
         "//sdk/lib:__subpackages__",
         "//src:__subpackages__",
+        "//zircon:__subpackages__",
     ],  # @bazel2gn:raw_overwrite:[ "//*" ]
     deps = [
         "//sdk/lib/fidl_base",

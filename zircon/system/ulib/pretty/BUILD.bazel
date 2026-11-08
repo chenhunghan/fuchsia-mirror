@@ -1,0 +1,46 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules:zx_library.bzl", "cc_static_library_zx")
+
+package(default_applicable_licenses = ["//:license"])
+
+# TODO(https://fxbug.dev/456186319): The kernel build is not yet supported in
+# Bazel, so the kernel-only `//zircon/kernel/lib/libc` dependency is emitted in
+# GN via raw_attribute.
+# @bazel2gn:raw_attribute:if (is_kernel && toolchain_environment != "kernel") { deps = [ "//zircon/kernel/lib/libc" ] }
+cc_static_library_zx(
+    name = "pretty",
+    srcs = [
+        "hexdump.cc",
+        "sizes.cc",
+    ],
+    hdrs = [
+        "include/pretty/cpp/sizes.h",
+        "include/pretty/hexdump.h",
+        "include/pretty/sizes.h",
+    ],
+    # `zx_library()` in GN always adds `"include"` to `include_dirs`, and its
+    # `zircon_toolchain != false` branch rejects `includes` as unused.
+    # TODO(https://fxbug.dev/456186319): Remove once `zx_library.gni` handles
+    # `includes` in `zircon_toolchain != false`.
+    # @bazel2gn:skip
+    includes = ["include"],
+    visibility = [
+        "//src/bringup:__subpackages__",
+        "//src/connectivity:__subpackages__",
+        "//src/devices:__subpackages__",
+        "//src/firmware:__subpackages__",
+        "//src/graphics:__subpackages__",
+        "//src/lib/utf_conversion:__pkg__",
+        "//src/media:__subpackages__",
+        "//src/storage:__subpackages__",
+        "//src/sys:__subpackages__",
+        "//src/ui:__subpackages__",
+        "//src/zircon:__subpackages__",
+        "//zircon/kernel:__subpackages__",
+        "//zircon/system:__subpackages__",
+    ],
+    deps = ["//zircon/system/ulib/zircon-internal:headers"],
+)

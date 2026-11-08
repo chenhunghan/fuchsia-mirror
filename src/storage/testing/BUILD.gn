@@ -38,7 +38,6 @@ source_set("storage_driver_test_support") {
     "//sdk/lib/fdio-caller",
     "//sdk/lib/sys/cpp",
     "//sdk/lib/syslog/cpp",
-    "//src/storage/lib/utils:topological_path",
     "//zircon/system/ulib/sync",
   ]
   public_deps = [

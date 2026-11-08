@@ -179,8 +179,7 @@ mod tests {
     use std::fs::*;
     use tempfile::TempDir;
 
-    const LIST_RESULT_MAIN_PATH: &'static str =
-        "../../src/developer/ffx/lib/symbol-index/test_data/main.json";
+    const LIST_RESULT_MAIN_PATH: &'static str = "test_data/main.json";
 
     #[fuchsia::test]
     async fn test_list_no_aggregate() {

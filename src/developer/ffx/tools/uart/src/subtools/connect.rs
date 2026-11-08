@@ -16,7 +16,7 @@ use crate::metadata::{ConnectionMetadata, get_socket_path};
 use crate::sys::{get_peer_pid, is_driver_running};
 use ffx_config::EnvironmentContext;
 use ffx_writer::{SimpleWriter, ToolIO};
-use fho::{FfxMain, FfxTool, Result, bug, user_error};
+use fho::{FfxMain, FfxTool, Result, user_error};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
@@ -60,7 +60,7 @@ impl ConnectTool {
         meta: Option<&ConnectionMetadata>,
     ) -> Result<LaunchParameters> {
         let (baud, log_level) = self.resolve_args(args, meta, args.protocol.as_deref())?;
-        let socket_path = self.resolve_socket_path(target, args.socket.as_deref())?;
+        let socket_path = self.resolve_socket_path(target)?;
         let log_dir = get_or_create_log_dir(&self.context)?;
         let log_path = get_driver_log_path(&log_dir, &socket_path);
         Ok(LaunchParameters { baud, log_level, socket_path, log_dir, log_path })
@@ -196,38 +196,10 @@ impl ConnectTool {
         Ok((baud, log_level))
     }
 
-    pub(crate) fn resolve_socket_path(
-        &self,
-        target: &str,
-        custom_socket: Option<&str>,
-    ) -> Result<PathBuf> {
-        let (raw_socket_path, is_custom) = match custom_socket {
-            Some(s) => (PathBuf::from(s), true),
-            None => (get_socket_path(&self.context, target)?, false),
-        };
-
-        let absolute_socket_path = if raw_socket_path.is_relative() {
-            std::env::current_dir().map_err(|e| bug!("{e:?}"))?.join(&raw_socket_path)
-        } else {
-            raw_socket_path
-        };
-
-        let resolved_socket_path = canonicalize_or_parent(&absolute_socket_path);
-
-        if is_custom {
-            if let Some(parent) = resolved_socket_path.parent() {
-                if !parent.exists() {
-                    return Err(user_error!(
-                        "Parent directory for custom socket path '{}' does not exist: {}",
-                        resolved_socket_path.display(),
-                        parent.display()
-                    ));
-                }
-            }
-        }
-
-        validate_socket_path_len(&resolved_socket_path)?;
-        Ok(resolved_socket_path)
+    pub(crate) fn resolve_socket_path(&self, target: &str) -> Result<PathBuf> {
+        let socket_path = canonicalize_or_parent(&get_socket_path(&self.context, target)?);
+        validate_socket_path_len(&socket_path)?;
+        Ok(socket_path)
     }
 }
 
@@ -253,13 +225,7 @@ mod tests {
             .build()
             .expect("test env");
         ConnectTool {
-            cmd: ConnectCommand {
-                baud: None,
-                reconnect: false,
-                no_retry: false,
-                socket: None,
-                protocol: None,
-            },
+            cmd: ConnectCommand { baud: None, reconnect: false, no_retry: false, protocol: None },
             context: env.context,
         }
     }
@@ -276,13 +242,7 @@ mod tests {
     fn test_resolve_args_defaults() {
         let temp = tempdir().unwrap();
         let tool = create_test_tool(temp.path());
-        let cmd = ConnectCommand {
-            baud: None,
-            reconnect: false,
-            no_retry: false,
-            socket: None,
-            protocol: None,
-        };
+        let cmd = ConnectCommand { baud: None, reconnect: false, no_retry: false, protocol: None };
         let (baud, log_level) = tool.resolve_args(&cmd, None, None).unwrap();
         assert_eq!(baud, DEFAULT_BAUD_RATE);
         assert!(log_level.is_none());
@@ -296,7 +256,6 @@ mod tests {
             baud: NonZeroU32::new(115200),
             reconnect: false,
             no_retry: false,
-            socket: None,
             protocol: None,
         };
         let (baud_custom, _) = tool.resolve_args(&cmd, None, None).unwrap();
@@ -318,13 +277,8 @@ mod tests {
             nodename: None,
             serial: None,
         };
-        let cmd_reconnect = ConnectCommand {
-            baud: None,
-            reconnect: true,
-            no_retry: false,
-            socket: None,
-            protocol: None,
-        };
+        let cmd_reconnect =
+            ConnectCommand { baud: None, reconnect: true, no_retry: false, protocol: None };
         let (baud_reconnect, log_level_reconnect) =
             tool.resolve_args(&cmd_reconnect, Some(&existing), None).unwrap();
         assert_eq!(baud_reconnect, NonZeroU32::new(57600).unwrap());
@@ -336,14 +290,8 @@ mod tests {
         let temp = tempdir().unwrap();
         let tool = create_test_tool(temp.path());
 
-        // Default socket path for target
-        let path = tool.resolve_socket_path("/dev/ttyUSB0", None).unwrap();
+        let path = tool.resolve_socket_path("/dev/ttyUSB0").unwrap();
         assert!(path.to_string_lossy().contains("ffx_uart"));
-
-        // Custom socket path in existing dir
-        let custom = temp.path().join("my_custom.sock");
-        let path_custom = tool.resolve_socket_path("/dev/ttyUSB0", custom.to_str()).unwrap();
-        assert_eq!(path_custom, custom);
     }
 
     #[fuchsia::test]

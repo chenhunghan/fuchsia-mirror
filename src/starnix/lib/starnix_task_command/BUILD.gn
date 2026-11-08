@@ -2,12 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-
-fuchsia_unittest_package("starnix_task_command_tests") {
-  deps = [ ":starnix_task_command_test" ]
-}
-
 group("tests") {
   testonly = true
   deps = [ ":starnix_task_command_tests" ]
@@ -52,5 +46,15 @@ rustc_library("starnix_task_command") {
     "//third_party/rust_crates:bstr",
     "//third_party/rust_crates:flyweights",
     "//third_party/rust_crates:memchr",
+  ]
+}
+
+fuchsia_unittest_package("starnix_task_command_tests") {
+  package_name = "starnix_task_command_tests-gn"
+  component_name = "starnix_task_command_tests"
+  deps = [ ":starnix_task_command_test" ]
+  visibility = [
+    ":*",
+    "//src/starnix/lib:*",
   ]
 }

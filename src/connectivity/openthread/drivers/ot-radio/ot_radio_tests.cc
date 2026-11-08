@@ -74,6 +74,7 @@ TEST(OtRadioTestCase, InitTest) {
   // Wait for interrupt to fire and for SPI transaction to complete
   ASSERT_OK(sync_completion_wait(&dev->spi_rx_complete_, ZX_SEC(30)));
   // Verify that a valid byte was sent by the radio
+  fbl::AutoLock lock(&dev->spi_rx_lock_);
   ASSERT_NE(dev->spi_rx_buffer_[0], 0);
   // Teardown
   ASSERT_OK(dev->ShutDown());
@@ -111,6 +112,7 @@ TEST(OtRadioTestCase, SpinelFramerTest) {
     dev->SetMaxInboundAllowance();
 
     // Break if we find matching TID, so we have received a response
+    fbl::AutoLock lock(&dev->spi_rx_lock_);
     if ((dev->spi_rx_buffer_[0] & 0xf) == ot::kGetNcpVersionTID) {
       break;
     }

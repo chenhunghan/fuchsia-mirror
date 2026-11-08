@@ -7,6 +7,8 @@
 #ifndef ZIRCON_KERNEL_HYPERVISOR_INCLUDE_HYPERVISOR_TRAP_MAP_H_
 #define ZIRCON_KERNEL_HYPERVISOR_INCLUDE_HYPERVISOR_TRAP_MAP_H_
 
+#include <zircon/syscalls/port.h>
+
 #include <fbl/arena.h>
 #include <fbl/ref_ptr.h>
 #include <hypervisor/state_invalidator.h>
@@ -17,8 +19,30 @@
 
 namespace hypervisor {
 
-using PortPacketArena = fbl::TypedArena<PortPacket, Mutex>;
-class RustPortAllocator;
+class PortPacketArena {
+ public:
+  zx_status_t Init(const char* name, size_t ob_size,
+                   size_t max_count) TA_NO_THREAD_SAFETY_ANALYSIS {
+    return arena_.Init(name, ob_size, max_count);
+  }
+
+  void* Alloc() {
+    mutex_.Acquire();
+    void* addr = arena_.Alloc();
+    mutex_.Release();
+    return addr;
+  }
+
+  void Free(void* mem) {
+    mutex_.Acquire();
+    arena_.Free(mem);
+    mutex_.Release();
+  }
+
+ private:
+  Mutex mutex_;
+  fbl::Arena arena_ TA_GUARDED(mutex_);
+};
 
 // Describes a single trap within a guest.
 class Trap {
@@ -28,7 +52,7 @@ class Trap {
   Trap(const Trap&) = delete;
   Trap& operator=(const Trap&) = delete;
 
-  zx::result<> Queue(const zx_port_packet_t& packet, StateInvalidator* invalidator = nullptr);
+  zx::result<> Queue(const zx_port_packet_t& packet, StateInvalidator* invalidator = nullptr) const;
   bool HasPort() const;
   uint32_t kind() const;
   uint64_t key() const;
@@ -44,7 +68,7 @@ class TrapMap {
 
   zx::result<> InsertTrap(uint32_t kind, zx_gpaddr_t addr, size_t len,
                           fbl::RefPtr<PortDispatcher> port, uint64_t key);
-  zx::result<Trap*> FindTrap(uint32_t kind, zx_gpaddr_t addr);
+  zx::result<Trap*> FindTrap(uint32_t kind, zx_gpaddr_t addr) const;
 
  private:
   using LockType = DECLARE_SPINLOCK(TrapMap);
@@ -63,14 +87,12 @@ static_assert(alignof(TrapMap) == 8);
 }  // namespace hypervisor
 
 extern "C" {
-void cpp_rust_port_allocator_init(ffi::Uninitialized<hypervisor::RustPortAllocator>* allocator);
 void cpp_port_packet_arena_init(ffi::Uninitialized<hypervisor::PortPacketArena>* arena);
 void cpp_port_packet_arena_destroy(hypervisor::PortPacketArena* arena);
 zx_status_t cpp_port_packet_arena_init_pool(hypervisor::PortPacketArena* arena, const char* name,
-                                            size_t max_count);
-PortPacket* cpp_port_packet_arena_new(hypervisor::PortPacketArena* arena, const void* handle,
-                                      PortAllocator* allocator);
-void cpp_port_packet_arena_delete(hypervisor::PortPacketArena* arena, PortPacket* port_packet);
+                                            size_t ob_size, size_t max_count);
+void* cpp_port_packet_arena_alloc(hypervisor::PortPacketArena* arena);
+void cpp_port_packet_arena_free(hypervisor::PortPacketArena* arena, void* port_packet);
 }
 
 #endif  // ZIRCON_KERNEL_HYPERVISOR_INCLUDE_HYPERVISOR_TRAP_MAP_H_

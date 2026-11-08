@@ -62,6 +62,7 @@ rust_library(
         "net",
         "netlink",
         "no_std",
+        "prctl",
         "xdp",
     ],
     crate_root = "src/lib.rs",

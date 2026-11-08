@@ -1,0 +1,202 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_rules_common//packages:resources.bzl", "resource")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load("//build/component:config.bzl", "component_config")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "trigger_bin",
+    testonly = True,
+    srcs = ["trigger.rs"],
+    crate_name = "namespace_capabilities_trigger",
+    crate_root = "trigger.rs",
+    edition = "2024",
+    deps = [
+        "//examples/components/routing/fidl:echo_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-fs",
+        "//src/sys/component_manager/tests/fidl:components_rust",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "trigger_bin_packaged_bin",
+    testonly = True,
+    binary = ":trigger_bin",
+    binary_name = "namespace_capabilities_trigger",
+)
+
+fx_component_manifest(
+    name = "trigger-manifest",
+    testonly = True,
+    component_name = "trigger",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/trigger.cml",
+)
+
+fx_component(
+    name = "trigger",
+    testonly = True,
+    compiled_manifest = ":trigger-manifest",
+    deps = [":trigger_bin_packaged_bin"],
+)
+
+rustc_test(
+    name = "integration_test_bin",
+    srcs = ["integration_test.rs"],
+    crate_name = "namespace_capabilities_integration_test",
+    crate_root = "integration_test.rs",
+    edition = "2024",
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/sys/lib/component-events",
+    ],
+)
+
+fx_packaged_binary(
+    name = "integration_test_packaged_bin",
+    testonly = True,
+    binary = ":integration_test_bin",
+    binary_name = "namespace_capabilities_integration_test",
+)
+
+rustc_binary(
+    name = "integration_test_root_bin",
+    testonly = True,
+    srcs = ["integration_test_root.rs"],
+    crate_name = "namespace_capabilities_integration_test_root",
+    crate_root = "integration_test_root.rs",
+    edition = "2024",
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/sys/component_manager/tests/fidl:components_rust",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "integration_test_root_packaged_bin",
+    testonly = True,
+    binary = ":integration_test_root_bin",
+    binary_name = "namespace_capabilities_integration_test_root",
+)
+
+component_config(
+    name = "component_manager_config",
+    testonly = True,
+    srcs = [
+        "namespace_config.json5",
+        "//src/sys/component_manager/configs:test_config.base.json5",
+    ],
+)
+
+resource(
+    name = "testdata",
+    src = "testdata.txt",
+    dest = "data/testdata",
+)
+
+fx_component_manifest(
+    name = "component-manager-manifest",
+    testonly = True,
+    component_name = "component-manager",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "//src/sys/component_manager:meta/component_manager.cml",
+)
+
+fx_component(
+    name = "component-manager",
+    testonly = True,
+    compiled_manifest = ":component-manager-manifest",
+    deps = [
+        ":component_manager_config",
+        "//src/sys/component_manager:bin_with_tracing_packaged",  # @bazel2gn:path_overwrite://src/sys/component_manager:bin_with_tracing
+    ],
+)
+
+fx_component_manifest(
+    name = "integration-test-root-manifest",
+    testonly = True,
+    component_name = "integration-test-root",
+    includes = [
+        "//src/sys/component_manager:meta/passthrough_diagnostics.shard.cml",
+        "//src/sys/component_manager/tests:meta/use_elf_runner.shard",
+    ],
+    manifest = "meta/integration_test_root.cml",
+)
+
+# We want `diagnostics` from self rather than parent, so we can't use
+# syslog/client.shard.cml.
+fx_component(
+    name = "integration-test-root",
+    testonly = True,
+    check_includes = False,
+    compiled_manifest = ":integration-test-root-manifest",
+    deps = [":integration_test_root_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "integration-test-manifest",
+    testonly = True,
+    component_name = "integration-test",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/lib/fuchsia-component-test:meta/nested_component_manager.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/integration_test.cml",
+)
+
+fx_test_component(
+    name = "integration-test",
+    compiled_manifest = ":integration-test-manifest",
+    deps = [":integration_test_packaged_bin"],
+)
+
+fx_package(
+    name = "package",
+    package_name = "namespace-capabilities-integration-test",
+    components = [
+        ":component-manager",
+        ":integration-test-root",
+        ":trigger",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+        "//src/sys/component_manager/testing/echo_server",
+    ],
+    resources = [":testdata"],
+    test_components = [":integration-test"],
+)
+
+fx_test(
+    name = "namespace-capabilities-integration-test",
+    package = ":package",
+    visibility = ["//src/sys/component_manager:__pkg__"],
+)

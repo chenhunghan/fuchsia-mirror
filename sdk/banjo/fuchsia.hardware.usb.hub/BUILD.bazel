@@ -1,0 +1,27 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fidl_library(
+    name = "fuchsia.hardware.usb.hub",
+    srcs = ["usb-hub.fidl"],
+    enable_banjo = True,
+    # TODO(https://fxbug.dev/428285014): Pure Banjo transport protocols produce empty
+    # Rust crates and are unsupported by fidlgen_rust_next; GN only builds the _banjo_*
+    # subtargets on demand whereas Bazel :all builds all enabled bindings.
+    # @bazel2gn:skip
+    enable_rust = False,
+    # TODO(https://fxbug.dev/428285014): Disable rust_next bindings for Banjo-only FIDL.
+    # @bazel2gn:skip
+    enable_rust_next = False,
+    visibility = [
+        "//sdk/banjo/fuchsia.hardware.usb.bus:__pkg__",
+        "//src/devices/usb/drivers/usb-bus:__pkg__",
+        "//src/devices/usb/drivers/usb-hub:__pkg__",
+    ],
+    deps = ["//zircon/vdso/zx"],
+)

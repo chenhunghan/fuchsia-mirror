@@ -3,13 +3,14 @@
 // found in the LICENSE file.
 
 //! This module tests shared properties of the package resolution capabilities that use an external
-//! package authority and fetch remote blobs (capabilities that use the queued_tuf_resolver, i.e.
-//! the -full and -ota resolvers).
+//! package authority and fetch remote blobs (capabilities that use the PackageFetcher, i.e. the
+//! -full and -ota resolvers).
 //!
-//! Uses the -ota resolver capability because it just uses the queued_tuf_resolver with retained
-//! GC protection, unlike the -full resolver which has additional logic for base package short
+//! Uses the -ota resolver capability because it just uses the PackageFetcher with retained GC
+//! protection, unlike the -full resolver which has additional logic for base package short
 //! circuiting and cache fallback, etc.
 
+use diagnostics_assertions::assert_data_tree;
 use fidl_fuchsia_pkg as fpkg;
 use fuchsia_async as fasync;
 use futures::future::FutureExt as _;
@@ -730,4 +731,77 @@ async fn does_not_fetch_up_to_date_blobs(blobfs_impl: blobfs_ramdisk::Implementa
     let (dir, _context) = env.resolve_ota("fuchsia-pkg://example.org/superpackage").await.unwrap();
     assert_eq!(served_repository.history().lock().len(), 2);
     let () = superpackage.verify_contents(&dir).await.unwrap();
+}
+
+#[fuchsia::test]
+async fn resolve_marks_retained_package_complete() {
+    let subpackage = fuchsia_pkg_testing::PackageBuilder::new("subpackage")
+        .add_resource_at("subpackage-blob", "subpackage-blob-contents".as_bytes())
+        .build()
+        .await
+        .unwrap();
+    let superpackage = fuchsia_pkg_testing::PackageBuilder::new("superpackage")
+        .add_subpackage("my-subpackage", &subpackage)
+        .add_resource_at("superpackage-blob", "superpackage-blob-contents".as_bytes())
+        .build()
+        .await
+        .unwrap();
+    let repo = Arc::new(
+        fuchsia_pkg_testing::RepositoryBuilder::from_template_dir(crate::EMPTY_REPO_PATH)
+            .add_package(&superpackage)
+            .build()
+            .await
+            .unwrap(),
+    );
+    let served_repository = Arc::clone(&repo).server().start().unwrap();
+    let repo_config =
+        served_repository.make_repo_config("fuchsia-pkg://example.org".parse().unwrap());
+    let env = crate::TestEnv::builder()
+        .pkg_authority(crate::MockPkgAuthority::from_repo_config_and_packages(
+            &repo_config,
+            &[&superpackage],
+        ))
+        .build()
+        .await;
+
+    crate::replace_retained_packages(
+        &env.proxies.retained_packages,
+        &[(*superpackage.hash()).into()],
+    )
+    .await;
+    assert_data_tree!(
+        env.inspect_hierarchy().await,
+        "root": contains {
+            "index": contains {
+                "retained": {
+                    "entries": {
+                        superpackage.hash().to_string() => {
+                            "state": "partial-blob-set",
+                            "blobs-count": 0u64,
+                        },
+                    },
+                },
+            },
+        }
+    );
+
+    let (pkg_dir, _context) =
+        env.resolve_full("fuchsia-pkg://example.org/superpackage").await.unwrap();
+    let () = superpackage.verify_contents(&pkg_dir).await.unwrap();
+
+    assert_data_tree!(
+        env.inspect_hierarchy().await,
+        "root": contains {
+            "index": contains {
+                "retained": {
+                    "entries": {
+                        superpackage.hash().to_string() => {
+                            "state": "complete-blob-set",
+                            "blobs-count": 3u64,
+                        },
+                    },
+                },
+            },
+        }
+    );
 }

@@ -3,15 +3,10 @@
 # found in the LICENSE file.
 
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
 
 package(default_applicable_licenses = ["//:license"])
 
-# The unit tests (`:system-image_test`, `:system-image-test-component`, and
-# `:system-image-tests`) stay in BUILD.gn because `system-image-test-component`
-# packages `//src/storage/testing:storage_driver_test_realm`, and
-# `:system-image_test` depends on `//src/sys/pkg/lib/fuchsia-pkg-testing` and
-# `//src/sys/pkg/testing/blobfs-ramdisk` (which are GN-only and depend back on
-# `:system-image`).
 rustc_library(
     name = "system-image",
     srcs = [
@@ -42,5 +37,26 @@ rustc_library(
         "//third_party/rust_crates/vendor:serde",
         "//third_party/rust_crates/vendor:serde_json",
         "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+# `:system-image-test-component` and `:system-image-tests` stay in BUILD.gn
+# because they depend on `//src/storage/testing:storage_driver_test_realm` and
+# `//src/storage/testing/driver_test_realm/meta/client.shard.cml`, which remain
+# in GN.
+rustc_test(
+    name = "system-image_test",
+    crate = ":system-image",
+    # Sets GN `output_name` via bazel2gn to match `bin/system_image_lib_test`
+    # in `meta/system-image-lib-test.cml`.
+    crate_name = "system_image_lib_test",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    deps = [
+        "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+        "//src/lib/fuchsia",
+        "//src/sys/pkg/lib/fuchsia-pkg-testing",
+        "//src/sys/pkg/testing/blobfs-ramdisk",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:proptest",
     ],
 )

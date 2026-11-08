@@ -67,7 +67,10 @@ cc_test_executable("clang_coverage_test_bin") {
     "-profile-correlate=binary",
   ]
   deps = [ "//zircon/system/ulib/zx" ]
-  ldflags = cflags
+  ldflags = [
+    "-fprofile-instr-generate",
+    "-fcoverage-mapping",
+  ]
   configs += [ ":disable_hwasan_globals" ]
 
   # Coverage and profiling instrumentation are incompatible within the same TU,
@@ -300,6 +303,7 @@ if (is_host) {
       rebase_path("$host_tools_dir/ffx", root_build_dir),
     ]
   }
+
   go_test("clang_coverage_tests_on_target") {
     embed = [ ":lib" ]
     non_go_deps = [

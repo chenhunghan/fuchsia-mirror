@@ -1,0 +1,28 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = ["//:license"])
+
+go_library(
+    name = "check",
+    testonly = True,
+    srcs = ["check.go"],
+    importpath = "go.fuchsia.dev/fuchsia/src/sys/pkg/tests/system-tests/check",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//src/sys/pkg/tests/system-tests/reboot_test:__pkg__",
+        "//src/sys/pkg/tests/system-tests/recovery_test:__pkg__",
+        "//src/sys/pkg/tests/system-tests/upgrade_test:__pkg__",
+    ],
+    deps = [
+        "//src/testing/host-target-testing/device",
+        "//src/testing/host-target-testing/ffx",
+        "//src/testing/host-target-testing/packages",
+        "//src/testing/host-target-testing/sl4f",
+        "//tools/lib/logger",
+    ],
+)

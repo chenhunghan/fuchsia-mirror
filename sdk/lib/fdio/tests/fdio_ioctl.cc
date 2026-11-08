@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <fcntl.h>
 #include <lib/fdio/fdio.h>
 #include <lib/zxio/null.h>
 #include <lib/zxio/ops.h>
@@ -41,6 +42,22 @@ TEST(IoctlTest, IoctlOpsTest) {
   // TIOCGWINSZ is handled by fdio directly.
   ASSERT_EQ(ioctl(test_fd.get(), TIOCGWINSZ, nullptr), -1);
   ASSERT_EQ(errno, ENOTTY);
+
+  // FIONBIO is handled by fdio directly and toggles O_NONBLOCK.
+  ASSERT_EQ(ioctl(test_fd.get(), FIONBIO, nullptr), -1);
+  ASSERT_EQ(errno, EFAULT);
+
+  int nonblocking = 1;
+  ASSERT_EQ(ioctl(test_fd.get(), FIONBIO, &nonblocking), 0);
+  int flags = fcntl(test_fd.get(), F_GETFL);
+  ASSERT_GE(flags, 0);
+  EXPECT_NE(flags & O_NONBLOCK, 0);
+
+  nonblocking = 0;
+  ASSERT_EQ(ioctl(test_fd.get(), FIONBIO, &nonblocking), 0);
+  flags = fcntl(test_fd.get(), F_GETFL);
+  ASSERT_GE(flags, 0);
+  EXPECT_EQ(flags & O_NONBLOCK, 0);
 
   // Non standard ioctl are delegated to the ioctl op.
   ASSERT_EQ(ioctl(test_fd.get(), 42), -1);

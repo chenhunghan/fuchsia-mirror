@@ -29,7 +29,7 @@ kernel_image("eng.lk_debug_level_0") {
   deps = [
     ":zircon",
     "//zircon/kernel/image/eng:cmdline",
-    "//zircon/kernel/phys:physboot",
+    "//zircon/kernel/phys/physboot",
   ]
 }
 

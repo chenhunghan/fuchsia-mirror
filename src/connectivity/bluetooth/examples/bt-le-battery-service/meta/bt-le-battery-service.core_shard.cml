@@ -26,5 +26,11 @@
             from: "parent",
             to: [ "#bt-le-battery-service" ],
         },
+        {
+            config: "fuchsia.bluetooth.le.battery.Security",
+            from: "void",
+            to: [ "#bt-le-battery-service" ],
+            availability: "optional",
+        },
     ],
 }

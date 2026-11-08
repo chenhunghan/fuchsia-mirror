@@ -46,12 +46,6 @@ wlancfg_tests_for_postsubmit = [
   "//src/connectivity/wlan/tests/wlancfg:wlan_misc_scenario_test",
   "//src/connectivity/wlan/tests/wlancfg:wlan_target_security_test",
   "//src/connectivity/wlan/tests/wlancfg:wlan_wireless_network_management_test",
-
-  # TODO(https://fxbug.dev/555756211): Remove once CI runs
-  # //src/connectivity/policy E2E tests directly.
-  "//src/connectivity/policy/tests/e2e:dhcpv4_duplicate_address_test",
-  "//src/connectivity/policy/tests/e2e:dhcpv4_interop_basic_test",
-  "//src/connectivity/policy/tests/e2e:dhcpv4_interop_combinatorial_options_test",
 ]
 
 # If you're writing a new test, add it to FYI first until it has a sufficient

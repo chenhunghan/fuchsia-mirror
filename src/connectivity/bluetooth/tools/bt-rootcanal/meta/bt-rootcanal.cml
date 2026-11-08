@@ -13,11 +13,7 @@
         },
     ],
     use: [
-        {
-            directory: "dev-topological",
-            rights: [ "r*" ],
-            path: "/dev",
-        },
+        { service: "fuchsia.hardware.bluetooth.VirtualControllerService" },
         { protocol: "fuchsia.posix.socket.Provider" },
     ],
     expose: [

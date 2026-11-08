@@ -28,119 +28,82 @@ group("tests") {
   ]
 }
 
-timekeeper_deps = [
-  # The generated structured config data schema.
-  ":timekeeper-config",
-  "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
-  "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
-  "//sdk/fidl/fuchsia.hardware.hrtimer:fuchsia.hardware.hrtimer_rust",
-  "//sdk/fidl/fuchsia.hardware.rtc:fuchsia.hardware.rtc_rust",
-  "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
-  "//sdk/fidl/fuchsia.metrics:fuchsia.metrics_rust",
-  "//sdk/fidl/fuchsia.net.reachability:fuchsia.net.reachability_rust",
-  "//sdk/fidl/fuchsia.power.system:fuchsia.power.system_rust",
-  "//sdk/fidl/fuchsia.time:fuchsia.time_rust",
-  "//sdk/fidl/fuchsia.time.alarms:fuchsia.time.alarms_rust",
-  "//sdk/fidl/fuchsia.time.external:fuchsia.time.external_rust",
-  "//sdk/fidl/fuchsia.time.test:fuchsia.time.test_rust",
-  "//sdk/rust/zx",
-  "//src/lib/async-utils",
-  "//src/lib/cobalt/rust/builders",
-  "//src/lib/diagnostics/inspect/runtime/rust",
-  "//src/lib/diagnostics/inspect/rust",
-  "//src/lib/fdio/rust:fdio",
-  "//src/lib/fidl/rust/fidl",
-  "//src/lib/fidl/rust/fidl-contrib",
-  "//src/lib/fuchsia",
-  "//src/lib/fuchsia-async",
-  "//src/lib/fuchsia-component",
-  "//src/lib/fuchsia-runtime",
-  "//src/lib/fuchsia-sync",
-  "//src/lib/trace/rust:trace",
-  "//src/lib/trace/rust:trace-provider",
-  "//src/sys/time/lib/inspect-writable",
-  "//src/sys/time/lib/time-util",
-  "//src/sys/time/lib/time_metrics_registry",
-  "//src/sys/time/timekeeper/adjust:time_adjust",
-  "//src/sys/time/timekeeper/alarms",
-  "//src/sys/time/timekeeper/persistence:lib",
-  "//src/sys/time/timekeeper/pretty:time_pretty",
-  "//third_party/cobalt/src/lib/client/rust:cobalt-client",
-  "//third_party/rust_crates:anyhow",
-  "//third_party/rust_crates:async-trait",
-  "//third_party/rust_crates:chrono",
-  "//third_party/rust_crates:futures",
-  "//third_party/rust_crates:log",
-  "//third_party/rust_crates:serde",
-  "//third_party/rust_crates:serde_json",
-  "//third_party/rust_crates:thiserror",
-]
-
-timekeeper_sources = [
-  "src/clock_manager.rs",
-  "src/diagnostics/cobalt.rs",
-  "src/diagnostics/composite.rs",
-  "src/diagnostics/fake.rs",
-  "src/diagnostics/inspect.rs",
-  "src/diagnostics/mod.rs",
-  "src/enums.rs",
-  "src/estimator/frequency.rs",
-  "src/estimator/kalman_filter.rs",
-  "src/estimator/mod.rs",
-  "src/main.rs",
-  "src/power_topology_integration.rs",
-  "src/reachability.rs",
-  "src/rtc.rs",
-  "src/rtc_testing.rs",
-  "src/time_source.rs",
-  "src/time_source_manager.rs",
-]
-
-rustc_binary("bin") {
-  name = "timekeeper"
-  edition = "2024"
-  with_unit_tests = true
-
-  deps = timekeeper_deps
-
-  sources = timekeeper_sources
-
-  test_deps = [
-    "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
-    "//src/lib/fuchsia",
-    "//src/lib/test_util",
-    "//src/storage/lib/vfs/rust:vfs",
-    "//third_party/rust_crates:assert_matches",
-    "//third_party/rust_crates:tempfile",
-    "//third_party/rust_crates:test-case",
-  ]
-}
-
+# Kept in GN because it links shared_library `//src/lib/fake-clock/lib`.
 rustc_binary("bin_with_fake_time") {
   name = "timekeeper_fake_time"
   edition = "2024"
   with_unit_tests = false
   testonly = true
 
-  deps = timekeeper_deps
+  deps = [
+    # The generated structured config data schema.
+    ":timekeeper-config",
+    "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+    "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+    "//sdk/fidl/fuchsia.hardware.hrtimer:fuchsia.hardware.hrtimer_rust",
+    "//sdk/fidl/fuchsia.hardware.rtc:fuchsia.hardware.rtc_rust",
+    "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+    "//sdk/fidl/fuchsia.metrics:fuchsia.metrics_rust",
+    "//sdk/fidl/fuchsia.net.reachability:fuchsia.net.reachability_rust",
+    "//sdk/fidl/fuchsia.power.system:fuchsia.power.system_rust",
+    "//sdk/fidl/fuchsia.time:fuchsia.time_rust",
+    "//sdk/fidl/fuchsia.time.alarms:fuchsia.time.alarms_rust",
+    "//sdk/fidl/fuchsia.time.external:fuchsia.time.external_rust",
+    "//sdk/fidl/fuchsia.time.test:fuchsia.time.test_rust",
+    "//sdk/rust/zx",
+    "//src/lib/async-utils",
+    "//src/lib/cobalt/rust/builders",
+    "//src/lib/diagnostics/inspect/runtime/rust",
+    "//src/lib/diagnostics/inspect/rust",
+    "//src/lib/fdio/rust:fdio",
+    "//src/lib/fidl/rust/fidl",
+    "//src/lib/fidl/rust/fidl-contrib",
+    "//src/lib/fuchsia",
+    "//src/lib/fuchsia-async",
+    "//src/lib/fuchsia-component",
+    "//src/lib/fuchsia-runtime",
+    "//src/lib/fuchsia-sync",
+    "//src/lib/trace/rust:trace",
+    "//src/lib/trace/rust:trace-provider",
+    "//src/sys/time/lib/inspect-writable",
+    "//src/sys/time/lib/time-util",
+    "//src/sys/time/lib/time_metrics_registry",
+    "//src/sys/time/timekeeper/adjust:time_adjust",
+    "//src/sys/time/timekeeper/alarms",
+    "//src/sys/time/timekeeper/persistence:lib",
+    "//src/sys/time/timekeeper/pretty:time_pretty",
+    "//third_party/cobalt/src/lib/client/rust:cobalt-client",
+    "//third_party/rust_crates:anyhow",
+    "//third_party/rust_crates:async-trait",
+    "//third_party/rust_crates:chrono",
+    "//third_party/rust_crates:futures",
+    "//third_party/rust_crates:log",
+    "//third_party/rust_crates:serde",
+    "//third_party/rust_crates:serde_json",
+    "//third_party/rust_crates:thiserror",
+  ]
 
-  sources = timekeeper_sources
+  sources = [
+    "src/clock_manager.rs",
+    "src/diagnostics/cobalt.rs",
+    "src/diagnostics/composite.rs",
+    "src/diagnostics/fake.rs",
+    "src/diagnostics/inspect.rs",
+    "src/diagnostics/mod.rs",
+    "src/enums.rs",
+    "src/estimator/frequency.rs",
+    "src/estimator/kalman_filter.rs",
+    "src/estimator/mod.rs",
+    "src/main.rs",
+    "src/power_topology_integration.rs",
+    "src/reachability.rs",
+    "src/rtc.rs",
+    "src/rtc_testing.rs",
+    "src/time_source.rs",
+    "src/time_source_manager.rs",
+  ]
 
   non_rust_deps = [ "//src/lib/fake-clock/lib" ]
-}
-
-fuchsia_component_manifest("manifest") {
-  component_name = "timekeeper"
-  manifest = "meta/service.cml"
-}
-
-fuchsia_structured_config_rust_lib("timekeeper-config") {
-  cm_label = ":manifest"
-}
-
-fuchsia_component("service") {
-  cm_label = ":manifest"
-  deps = [ ":bin" ]
 }
 
 fuchsia_package("timekeeper-without-config") {
@@ -164,14 +127,17 @@ resource("testdata") {
   outputs = [ "data/{{source_file_part}}" ]
 }
 
+# Kept in GN because it uses GN-only targets
+# `//src/connectivity/network/dns:component` and
+# `//src/connectivity/network/netstack3:package-for-tests`.
 fuchsia_unittest_package("timekeeper-tests") {
   manifest = "meta/unittests.cml"
   deps = [
     ":bin_test",
     ":testdata",
     "//src/connectivity/network/dns:component",
-    "//src/connectivity/network/netstack3:component-for-tests",
   ]
+  subpackages = [ "//src/connectivity/network/netstack3:package-for-tests" ]
   test_specs = {
     environments = [
       nuc7_env,
@@ -181,4 +147,203 @@ fuchsia_unittest_package("timekeeper-tests") {
       max_severity = "ERROR"
     }
   }
+}
+
+## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
+#
+#  ________  _________  ________  ________
+# |\   ____\|\___   ___\\   __  \|\   __  \
+# \ \  \___|\|___ \  \_\ \  \|\  \ \  \|\  \
+#  \ \_____  \   \ \  \ \ \  \\\  \ \   ____\
+#   \|____|\  \   \ \  \ \ \  \\\  \ \  \___|
+#     ____\_\  \   \ \__\ \ \_______\ \__\
+#    |\_________\   \|__|  \|_______|\|__|
+#    \|_________|
+#
+#
+# AUTO-GENERATED - DO NOT EDIT
+#
+# The targets below are auto-generated based on the targets defined in the
+# BUILD.bazel file from the same directory. If you made changes to targets in
+# Bazel, instead of editing this file manually, run:
+#
+#   > fx bazel2gn
+#
+# Please do NOT edit this file directly. Instead, edit the BUILD.bazel file and
+# rerun bazel2gn.
+
+import("//build/tools/bazel2gn/bazel_migration.gni")
+
+rustc_binary("bin") {
+  sources = [
+    "src/clock_manager.rs",
+    "src/diagnostics/cobalt.rs",
+    "src/diagnostics/composite.rs",
+    "src/diagnostics/fake.rs",
+    "src/diagnostics/inspect.rs",
+    "src/diagnostics/mod.rs",
+    "src/enums.rs",
+    "src/estimator/frequency.rs",
+    "src/estimator/kalman_filter.rs",
+    "src/estimator/mod.rs",
+    "src/main.rs",
+    "src/power_topology_integration.rs",
+    "src/reachability.rs",
+    "src/rtc.rs",
+    "src/rtc_testing.rs",
+    "src/time_source.rs",
+    "src/time_source_manager.rs",
+  ]
+  output_name = "timekeeper"
+  edition = "2024"
+  proc_macro_deps = [ "//third_party/rust_crates:async-trait" ]
+  visibility = [
+    ":*",
+    "//src/sys/time/testing:*",
+  ]
+  deps = [
+    ":timekeeper-config",
+    "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+    "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+    "//sdk/fidl/fuchsia.hardware.hrtimer:fuchsia.hardware.hrtimer_rust",
+    "//sdk/fidl/fuchsia.hardware.rtc:fuchsia.hardware.rtc_rust",
+    "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+    "//sdk/fidl/fuchsia.metrics:fuchsia.metrics_rust",
+    "//sdk/fidl/fuchsia.net.reachability:fuchsia.net.reachability_rust",
+    "//sdk/fidl/fuchsia.power.system:fuchsia.power.system_rust",
+    "//sdk/fidl/fuchsia.time:fuchsia.time_rust",
+    "//sdk/fidl/fuchsia.time.alarms:fuchsia.time.alarms_rust",
+    "//sdk/fidl/fuchsia.time.external:fuchsia.time.external_rust",
+    "//sdk/fidl/fuchsia.time.test:fuchsia.time.test_rust",
+    "//sdk/rust/zx",
+    "//src/lib/async-utils",
+    "//src/lib/cobalt/rust/builders",
+    "//src/lib/diagnostics/inspect/runtime/rust",
+    "//src/lib/diagnostics/inspect/rust",
+    "//src/lib/fdio/rust:fdio",
+    "//src/lib/fidl/rust/fidl",
+    "//src/lib/fidl/rust/fidl-contrib",
+    "//src/lib/fuchsia",
+    "//src/lib/fuchsia-async",
+    "//src/lib/fuchsia-component",
+    "//src/lib/fuchsia-runtime",
+    "//src/lib/fuchsia-sync",
+    "//src/lib/trace/rust:trace",
+    "//src/lib/trace/rust:trace-provider",
+    "//src/sys/time/lib/inspect-writable",
+    "//src/sys/time/lib/time-util",
+    "//src/sys/time/lib/time_metrics_registry",
+    "//src/sys/time/timekeeper/adjust:time_adjust",
+    "//src/sys/time/timekeeper/alarms",
+    "//src/sys/time/timekeeper/persistence:lib",
+    "//src/sys/time/timekeeper/pretty:time_pretty",
+    "//third_party/cobalt/src/lib/client/rust:cobalt-client",
+    "//third_party/rust_crates:anyhow",
+    "//third_party/rust_crates:chrono",
+    "//third_party/rust_crates:futures",
+    "//third_party/rust_crates:log",
+    "//third_party/rust_crates:serde",
+    "//third_party/rust_crates:serde_json",
+    "//third_party/rust_crates:thiserror",
+  ]
+}
+
+rustc_test("bin_test") {
+  sources = [
+    "src/clock_manager.rs",
+    "src/diagnostics/cobalt.rs",
+    "src/diagnostics/composite.rs",
+    "src/diagnostics/fake.rs",
+    "src/diagnostics/inspect.rs",
+    "src/diagnostics/mod.rs",
+    "src/enums.rs",
+    "src/estimator/frequency.rs",
+    "src/estimator/kalman_filter.rs",
+    "src/estimator/mod.rs",
+    "src/main.rs",
+    "src/power_topology_integration.rs",
+    "src/reachability.rs",
+    "src/rtc.rs",
+    "src/rtc_testing.rs",
+    "src/time_source.rs",
+    "src/time_source_manager.rs",
+  ]
+  edition = "2024"
+  proc_macro_deps = [ "//third_party/rust_crates:async-trait" ]
+  deps = [
+           ":timekeeper-config",
+           "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+           "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+           "//sdk/fidl/fuchsia.hardware.hrtimer:fuchsia.hardware.hrtimer_rust",
+           "//sdk/fidl/fuchsia.hardware.rtc:fuchsia.hardware.rtc_rust",
+           "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+           "//sdk/fidl/fuchsia.metrics:fuchsia.metrics_rust",
+           "//sdk/fidl/fuchsia.net.reachability:fuchsia.net.reachability_rust",
+           "//sdk/fidl/fuchsia.power.system:fuchsia.power.system_rust",
+           "//sdk/fidl/fuchsia.time:fuchsia.time_rust",
+           "//sdk/fidl/fuchsia.time.alarms:fuchsia.time.alarms_rust",
+           "//sdk/fidl/fuchsia.time.external:fuchsia.time.external_rust",
+           "//sdk/fidl/fuchsia.time.test:fuchsia.time.test_rust",
+           "//sdk/rust/zx",
+           "//src/lib/async-utils",
+           "//src/lib/cobalt/rust/builders",
+           "//src/lib/diagnostics/inspect/runtime/rust",
+           "//src/lib/diagnostics/inspect/rust",
+           "//src/lib/fdio/rust:fdio",
+           "//src/lib/fidl/rust/fidl",
+           "//src/lib/fidl/rust/fidl-contrib",
+           "//src/lib/fuchsia",
+           "//src/lib/fuchsia-async",
+           "//src/lib/fuchsia-component",
+           "//src/lib/fuchsia-runtime",
+           "//src/lib/fuchsia-sync",
+           "//src/lib/trace/rust:trace",
+           "//src/lib/trace/rust:trace-provider",
+           "//src/sys/time/lib/inspect-writable",
+           "//src/sys/time/lib/time-util",
+           "//src/sys/time/lib/time_metrics_registry",
+           "//src/sys/time/timekeeper/adjust:time_adjust",
+           "//src/sys/time/timekeeper/alarms",
+           "//src/sys/time/timekeeper/persistence:lib",
+           "//src/sys/time/timekeeper/pretty:time_pretty",
+           "//third_party/cobalt/src/lib/client/rust:cobalt-client",
+           "//third_party/rust_crates:anyhow",
+           "//third_party/rust_crates:chrono",
+           "//third_party/rust_crates:futures",
+           "//third_party/rust_crates:log",
+           "//third_party/rust_crates:serde",
+           "//third_party/rust_crates:serde_json",
+           "//third_party/rust_crates:thiserror",
+         ] + [
+           "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+           "//src/lib/test_util",
+           "//src/storage/lib/vfs/rust:vfs",
+           "//third_party/rust_crates:assert_matches",
+           "//third_party/rust_crates:tempfile",
+           "//third_party/rust_crates:test-case",
+         ]
+  source_root = "src/main.rs"
+  output_name = "timekeeper_bin_test"
+}
+
+fuchsia_component_manifest("manifest") {
+  component_name = "timekeeper"
+  manifest = "meta/service.cml"
+}
+
+fuchsia_structured_config_rust_lib("timekeeper-config") {
+  cm_label = ":manifest"
+  visibility = [
+    ":*",
+    "//src/sys/time:*",
+  ]
+}
+
+fuchsia_component("service") {
+  cm_label = ":manifest"
+  visibility = [
+    ":*",
+    "//src/sys/time:*",
+  ]
+  deps = [ ":bin" ]
 }

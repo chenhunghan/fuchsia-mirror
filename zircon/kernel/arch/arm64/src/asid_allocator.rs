@@ -9,6 +9,7 @@
 use super::aspace_bindings::{
     MMU_ARM64_FIRST_USER_ASID, MMU_ARM64_MAX_USER_ASID_8, MMU_ARM64_MAX_USER_ASID_16,
 };
+use crate::ksync_kernel::TrackedMutex;
 use arm64_feature_bindings::arm64_asid_width;
 use core::pin::Pin;
 use debug::ltracef;
@@ -24,7 +25,7 @@ const MAX_ASIDS: usize = (MMU_ARM64_MAX_USER_ASID_16 as usize) + 1;
 const BITMAP_WORDS: usize = MAX_ASIDS / (usize::BITS as usize);
 
 type BackingAsidAllocator =
-    IdAllocator<u16, MAX_ASIDS, { MMU_ARM64_FIRST_USER_ASID as usize }, BITMAP_WORDS>;
+    IdAllocator<u16, TrackedMutex, MAX_ASIDS, { MMU_ARM64_FIRST_USER_ASID as usize }, BITMAP_WORDS>;
 
 /// Class to automate allocating ASIDs from the range of usable ASIDs outside the kernel.
 ///

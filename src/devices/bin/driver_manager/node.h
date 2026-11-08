@@ -16,6 +16,7 @@
 #include <zircon/assert.h>
 #include <zircon/types.h>
 
+#include <deque>
 #include <list>
 #include <memory>
 #include <unordered_map>
@@ -104,6 +105,7 @@ class NodeManager {
   }
 
   virtual void OnNodeBound(std::shared_ptr<const Node> node) {}
+  virtual void OnNodeUnbinding(std::shared_ptr<const Node> node) {}
 
   virtual DriverHost* GetDriverHost(std::string_view driver_name_name_for_colocation) = 0;
 
@@ -576,6 +578,18 @@ class Node : public fidl::WireServer<fuchsia_driver_framework::NodeController>,
     return std::holds_alternative<DriverComponent>(state_);
   }
 
+  bool IsStoppingOrStopped() const {
+    return node_shutdown_coordinator_ &&
+           node_shutdown_coordinator_->node_state() != NodeState::kRunning &&
+           node_shutdown_coordinator_->node_state() != NodeState::kPrestop;
+  }
+
+  void NotifyNodeUnbinding() {
+    if (is_bound() && node_manager_.has_value()) {
+      node_manager_.value()->OnNodeUnbinding(shared_from_this());
+    }
+  }
+
   bool is_running() const {
     if (node_shutdown_coordinator_ && node_shutdown_coordinator_->IsShuttingDown()) {
       return false;
@@ -606,11 +620,12 @@ class Node : public fidl::WireServer<fuchsia_driver_framework::NodeController>,
   //      COMMUNICATION_ERROR, INVALID_STATE, NOT_FOUND) never replaces a record that does carry
   //      some (a status, or a synthetic TIMEOUT / host-closed / transport-failure condition). It is
   //      only cached while there is no informative record yet.
-  //  (b) An OK PING result does not hide a non-OK record from a FAST or DEEP check or a
+  //  (b) A lower-severity PING result (e.g. OK, or DEGRADED when the retained non-PING status is
+  //      UNHEALTHY) does not hide a higher-severity record from a FAST or DEEP check or a
   //      self_fault alert: a liveness ping says nothing about the hardware. The most recent
-  //      informative non-PING record is retained separately for this purpose, so a PING failure
-  //      (TIMEOUT, crashed host) in between does not launder the hardware fault away: once the
-  //      PING succeeds again the retained non-PING record is published again.
+  //      informative non-PING record with a status is retained separately for this purpose, so a
+  //      PING failure (TIMEOUT, crashed host) in between does not launder the hardware fault away:
+  //      once the PING succeeds again the retained non-PING record is published again.
   //  All other results replace the existing record.
   struct HealthCheckRecord {
     // Builds a record from a response returned by (or synthesized for) the driver. |level| is the
@@ -629,8 +644,17 @@ class Node : public fidl::WireServer<fuchsia_driver_framework::NodeController>,
     static fuchsia_driver_framework::HealthCondition SyntheticCondition(std::string reason_code,
                                                                         std::string message);
 
-    // Returns the reason code of the first condition, or "-" if there is none. Used for logs.
+    // Returns the first condition whose effective status matches |status| (falling back to
+    // &conditions.front() if |status| is unset or none match), or nullptr if |conditions| is empty.
+    const fuchsia_driver_framework::HealthCondition* primary_condition() const;
+
+    // Returns the reason code of the primary condition, or "-" if there is none or it is empty.
+    // Used for logs and transition history.
     std::string_view first_reason_code() const;
+
+    // Returns the message of the primary condition, or "" if there is none. Used for logs and
+    // transition history.
+    std::string_view first_message() const;
 
     // True if the record says something about the driver's health: it has a status, or a
     // synthetic condition for a failure driver_manager detected. False for the bare errors listed
@@ -655,6 +679,31 @@ class Node : public fidl::WireServer<fuchsia_driver_framework::NodeController>,
     // driver_manager.
     std::vector<fuchsia_driver_framework::HealthCondition> conditions;
   };
+
+  // A bounded ring entry capturing an informative health transition on this node.
+  struct HealthTransitionEntry {
+    zx::time timestamp;
+    std::optional<fuchsia_driver_framework::HealthStatus> status;
+    std::optional<fuchsia_driver_framework::HealthCheckError> error;
+    std::optional<fuchsia_driver_framework::HealthCheckRequest> level;
+    std::string reason_code;
+    std::string message;
+  };
+
+  // Maximum number of health transition entries retained per node.
+  static constexpr size_t kMaxHealthHistoryEntries = 16;
+  // reason_code of the synthetic history entry appended when the driver (re)starts. Such an entry
+  // has no status, error, or level.
+  static constexpr std::string_view kDriverStartedReasonCode = "DRIVER_STARTED";
+
+  // Returns the Inspect / log string for the check level ("PING", "FAST", "DEEP", or "ALERT" for
+  // a record produced by an OnHealthAlert rather than a check),
+  // error, or health status.
+  static const char* HealthCheckLevelString(
+      std::optional<fuchsia_driver_framework::HealthCheckRequest> level);
+  static const char* HealthCheckErrorString(fuchsia_driver_framework::HealthCheckError error);
+  static const char* HealthStatusString(
+      std::optional<fuchsia_driver_framework::HealthStatus> status);
 
   // Minimum interval between health probes that driver_manager sends to a node in response to
   // health alerts. Enforced per probe target, not per reporter.
@@ -700,6 +749,36 @@ class Node : public fidl::WireServer<fuchsia_driver_framework::NodeController>,
   void OnHealthAlert(fuchsia_driver_framework::HealthAlert alert);
 
   const std::optional<HealthCheckRecord>& last_health_check() const { return last_health_check_; }
+  uint64_t unhealthy_count() const { return unhealthy_count_; }
+  uint64_t recovered_count() const { return recovered_count_; }
+  const std::deque<HealthTransitionEntry>& health_history() const { return health_history_; }
+
+  // Clears the cached records and alert probe timestamps and appends a DRIVER_STARTED entry to a
+  // non-empty transition history. Counters, the history, and whether the node was unhealthy
+  // survive the restart so a recovery after a restart still counts. Any pending [DHC] log
+  // suppression summary is flushed first. Called when a new driver is started.
+  void ResetHealthCheckState();
+
+  // [DHC] transition log throttling: at most kMaxDhcLogsPerWindow lines per node per kDhcLogWindow,
+  // followed by one trailing summary of the lines suppressed in that window.
+  static constexpr size_t kMaxDhcLogsPerWindow = 4;
+  static constexpr zx::duration kDhcLogWindow = zx::sec(60);
+  // Across all nodes, at most kMaxGlobalDhcWarns fault transitions per kGlobalDhcWarnWindow are
+  // logged at WARN; the rest are demoted to DEBUG so a fleet-wide fault storm cannot flood syslog.
+  static constexpr size_t kMaxGlobalDhcWarns = 32;
+  static constexpr zx::duration kGlobalDhcWarnWindow = zx::sec(60);
+  // Total [DHC] lines this node suppressed since it was created (including ones already
+  // summarized), and the ones suppressed in the current window that no summary has reported yet.
+  uint64_t dhc_logs_suppressed() const { return dhc_logs_suppressed_total_; }
+  uint64_t dhc_logs_suppressed_pending() const { return dhc_logs_suppressed_pending_; }
+  // Empties the process-wide WARN token bucket. Tests only.
+  static void ResetGlobalDhcWarnBucketForTesting();
+
+  // Replace control and non-ASCII bytes in a reason code with '_', and quotes/control bytes in a
+  // (UTF-8 truncated) message with ' ' / '\'', so a driver-supplied string cannot forge or break a
+  // [DHC] log line.
+  static std::string SanitizeDhcReason(std::string_view raw);
+  static std::string SanitizeDhcMessage(std::string_view raw);
 
  private:
   // Which side of this node's topology a neighbor sweep walks.
@@ -709,8 +788,18 @@ class Node : public fidl::WireServer<fuchsia_driver_framework::NodeController>,
   // policy documented on HealthCheckRecord. Every cache write goes through here.
   void MaybeStoreHealthCheckRecord(HealthCheckRecord record);
 
-  // Clears the cached records and alert probe timestamps. Called when a new driver is started.
-  void ResetHealthCheckState();
+  // Records a health transition (updating unhealthy/recovered counters and the bounded history,
+  // and emitting a throttled [DHC] log line) unless |next| has the same effective outcome as the
+  // previous informative record (|same_outcome|) or is an initial OK on a node with no history.
+  // |republished| marks a retained non-PING record being published again after a PING, which is
+  // logged at INFO rather than as a new fault. |transition_time| overrides |next.timestamp| in
+  // that case.
+  void MaybeRecordHealthTransition(bool had_informative_prev, bool same_outcome,
+                                   const HealthCheckRecord& next, bool republished = false,
+                                   std::optional<zx::time> transition_time = std::nullopt);
+
+  // Logs one INFO line summarizing the [DHC] lines suppressed in the window that just ended.
+  void EmitTrailingDhcSummary();
 
   // Returns the nearest nodes on |side| that have a running driver, routing through up to three
   // intermediate composite parent or owned-by-parent nodes.
@@ -977,7 +1066,9 @@ class Node : public fidl::WireServer<fuchsia_driver_framework::NodeController>,
   bool should_destroy_ = false;
   fidl::WireClient<fuchsia_component::Controller> component_controller_;
 
+  // The node is either unbinding or unbound.
   struct Unbound {};
+
   struct Starting {
     std::string driver_url;
   };
@@ -1034,9 +1125,20 @@ class Node : public fidl::WireServer<fuchsia_driver_framework::NodeController>,
   std::optional<bool> is_bound_override_;
   std::optional<bool> has_power_element_override_;
   std::optional<HealthCheckRecord> last_health_check_;
-  // The most recent informative record that did not come from a PING (FAST, DEEP or a self_fault
-  // alert). See replacement policy (b) on HealthCheckRecord.
+  // The most recent informative record with a status that did not come from a PING (FAST, DEEP or a
+  // self_fault alert). See replacement policy (b) on HealthCheckRecord.
   std::optional<HealthCheckRecord> last_non_ping_health_check_;
+  uint64_t unhealthy_count_ = 0;
+  uint64_t recovered_count_ = 0;
+  // Severity rank (0 OK, 1 DEGRADED, 2 UNHEALTHY/error) of the latest recorded transition. Unlike
+  // last_health_check_, this survives ResetHealthCheckState() so that a node that recovers after
+  // a driver restart still increments recovered_count_.
+  int last_transition_rank_ = 0;
+  std::deque<HealthTransitionEntry> health_history_;
+  zx::time dhc_log_window_start_ = zx::time::infinite_past();
+  size_t dhc_logs_in_window_ = 0;
+  uint64_t dhc_logs_suppressed_pending_ = 0;
+  uint64_t dhc_logs_suppressed_total_ = 0;
   // When and at what level this node was last probed in response to a health alert.
   std::optional<zx::time> last_alert_probe_time_;
   std::optional<fuchsia_driver_framework::HealthCheckRequest> last_alert_probe_level_;

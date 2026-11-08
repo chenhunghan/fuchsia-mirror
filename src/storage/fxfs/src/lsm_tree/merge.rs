@@ -1894,14 +1894,27 @@ mod tests {
         {
             // Key that doesn't exist at all: both layers must either reject (true negative) or
             // falsely match (false positive).
+            let layer_0_fp = layers[0].maybe_contains_key(&400) != MaybeContainsKey::False;
+            let layer_1_fp = layers[1].maybe_contains_key(&400) != MaybeContainsKey::False;
             let neg_before = counters.bloom_filter_negatives.load(Ordering::Relaxed);
             let fp_before = counters.bloom_filter_false_positives.load(Ordering::Relaxed);
             let iter = merger.query(Query::Point(&400)).await.expect("seek failed");
-            assert!(iter.get().is_none());
             let delta_neg = counters.bloom_filter_negatives.load(Ordering::Relaxed) - neg_before;
             let delta_fp =
                 counters.bloom_filter_false_positives.load(Ordering::Relaxed) - fp_before;
             assert_eq!(delta_neg + delta_fp, 2);
+            assert_eq!(delta_fp, usize::from(layer_0_fp) + usize::from(layer_1_fp));
+            // `Merger::query` seeks every layer whose Bloom filter (falsely) matched to the lower
+            // bound >= 400, which is 1000 in layer 0 and 2000 in layer 1, and the merger yields
+            // the smallest of those.
+            let expected = if layer_0_fp {
+                Some(1000)
+            } else if layer_1_fp {
+                Some(2000)
+            } else {
+                None
+            };
+            assert_eq!(iter.get().map(|item| *item.key), expected);
         }
     }
 

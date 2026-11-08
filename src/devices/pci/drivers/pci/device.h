@@ -5,11 +5,10 @@
 #define SRC_DEVICES_PCI_DRIVERS_PCI_DEVICE_H_
 
 #include <assert.h>
+#include <fidl/fuchsia.driver.framework/cpp/fidl.h>
+#include <fidl/fuchsia.hardware.pci.root/cpp/wire.h>
 #include <fidl/fuchsia.hardware.pci/cpp/wire.h>
 #include <fidl/fuchsia.hardware.pci/cpp/wire_types.h>
-#include <lib/component/outgoing/cpp/outgoing_directory.h>
-#include <lib/device-protocol/pci.h>
-#include <lib/fdf/cpp/dispatcher.h>
 #include <lib/pci/constants.h>
 #include <lib/zx/channel.h>
 #include <lib/zx/result.h>
@@ -20,8 +19,6 @@
 #include <limits>
 #include <tuple>
 
-#include <ddktl/device.h>
-#include <ddktl/unbind-txn.h>
 #include <fbl/macros.h>
 #include <fbl/mutex.h>
 #include <fbl/ref_ptr.h>
@@ -30,12 +27,12 @@
 #include "src/devices/pci/drivers/pci/allocation.h"
 #include "src/devices/pci/drivers/pci/bar_info.h"
 #include "src/devices/pci/drivers/pci/bus_device_interface.h"
-#include "src/devices/pci/drivers/pci/capabilities.h"
 #include "src/devices/pci/drivers/pci/capabilities/msi.h"
 #include "src/devices/pci/drivers/pci/capabilities/msix.h"
-#include "src/devices/pci/drivers/pci/capabilities/pci_express.h"
-#include "src/devices/pci/drivers/pci/capabilities/power_management.h"
 #include "src/devices/pci/drivers/pci/ref_counted.h"
+#include "src/devices/pci/lib/cpp/capabilities.h"
+#include "src/devices/pci/lib/cpp/capabilities/pci_express.h"
+#include "src/devices/pci/lib/cpp/capabilities/power_management.h"
 #include "src/devices/pci/lib/cpp/config.h"
 
 namespace pci {
@@ -52,8 +49,7 @@ class BusDeviceInterface;
 // is fulfill the PCI protocol for the driver downstream operating the PCI
 // device this corresponds to.
 class Device;
-using DeviceType = ddk::Device<pci::Device, ddk::Unbindable>;
-class Device : public DeviceType, public fidl::WireServer<fuchsia_hardware_pci::Device> {
+class Device : public fidl::WireServer<fuchsia_hardware_pci::Device> {
  public:
   // This structure contains all bookkeeping and state for a device's
   // configured IRQ mode. It is initialized to fpci::InterruptMode::kDisabled.
@@ -89,16 +85,16 @@ class Device : public DeviceType, public fidl::WireServer<fuchsia_hardware_pci::
   // Templated helpers to assist with differently sized protocol reads and writes.
   // TODO(91513): Move these back to a .cc after we no longer have both Banjo and FIDL callers for
   // them.
-  template <typename V, typename R>
+  template <typename V>
   zx::result<V> ReadConfig(uint16_t offset) {
     if (offset + sizeof(V) > pci::kExtendedConfigSize) {
       return zx::error(ZX_ERR_OUT_OF_RANGE);
     }
 
-    return zx::ok(cfg_->Read(R(offset)));
+    return zx::ok(cfg_->Read<V>(offset));
   }
 
-  template <typename V, typename R>
+  template <typename V>
   zx_status_t WriteConfig(uint16_t offset, V value) {
     // Don't permit writes inside the config header.
     if (offset < pci::kConfigHeaderSize) {
@@ -109,15 +105,14 @@ class Device : public DeviceType, public fidl::WireServer<fuchsia_hardware_pci::
       return ZX_ERR_OUT_OF_RANGE;
     }
 
-    cfg_->Write(R(offset), value);
+    cfg_->Write<V>(value, offset);
     return ZX_OK;
   }
 
   // Create, but do not initialize, a device.
-  static zx_status_t Create(zx_device_t* parent, std::unique_ptr<Config>&& config,
-                            UpstreamNode* upstream, BusDeviceInterface* bdi, bool has_acpi,
-                            bool has_devicetree);
-  virtual ~Device();
+  static zx_status_t Create(std::unique_ptr<Config>&& config, UpstreamNode* upstream,
+                            BusDeviceInterface* bdi, bool has_acpi, bool has_devicetree);
+  ~Device() override;
 
   // Bridge or DeviceImpl will need to implement refcounting
   PCI_REQUIRE_REFCOUNTED;
@@ -131,35 +126,12 @@ class Device : public DeviceType, public fidl::WireServer<fuchsia_hardware_pci::
   // The methods here are locking versions that are used primarily by the PCI
   // protocol implementation in device_protocol.cc.
 
-  // Modify bits in the device's command register (in the device config space),
-  // clearing the bits specified by clr_bits and setting the bits specified by set
-  // bits.  Specifically, the operation will be applied as...
-  //
-  // WR(cmd, (RD(cmd) & ~clr) | set)
-  //
-  // @param clr_bits The mask of bits to be cleared.
-  // @param clr_bits The mask of bits to be set.
-  // @return A zx_status_t indicating success or failure of the operation.
-  zx_status_t ModifyCmd(uint16_t clr_bits, uint16_t set_bits) __TA_EXCLUDES(dev_lock_);
-
   // Enable or disable bus mastering in a device's configuration.
   //
   // @param enable If true, allow the device to access main system memory as a bus
   // master.
   // @return A zx_status_t indicating success or failure of the operation.
   zx_status_t SetBusMastering(bool enabled) __TA_REQUIRES(dev_lock_);
-
-  // Enable or disable PIO access in a device's configuration.
-  //
-  // @param enable If true, allow the device to access its PIO mapped registers.
-  // @return A zx_status_t indicating success or failure of the operation.
-  zx_status_t EnablePio(bool enabled) __TA_EXCLUDES(dev_lock_);
-
-  // Enable or disable MMIO access in a device's configuration.
-  //
-  // @param enable If true, allow the device to access its MMIO mapped registers.
-  // @return A zx_status_t indicating success or failure of the operation.
-  zx_status_t EnableMmio(bool enabled) __TA_EXCLUDES(dev_lock_);
 
   // Requests a device unplug itself from its UpstreamNode and the Bus list.
   virtual void Unplug() __TA_EXCLUDES(dev_lock_);
@@ -185,6 +157,7 @@ class Device : public DeviceType, public fidl::WireServer<fuchsia_hardware_pci::
   uint8_t bus_id() const { return cfg_->bdf().bus_id; }
   uint8_t dev_id() const { return cfg_->bdf().device_id; }
   uint8_t func_id() const { return cfg_->bdf().function_id; }
+  const char* node_name() const { return node_name_; }
   uint16_t segment_group() const { return segment_group_; }
   uint32_t bar_count() const { return bar_count_; }
   const Capabilities& capabilities() const { return caps_; }
@@ -206,7 +179,7 @@ class Device : public DeviceType, public fidl::WireServer<fuchsia_hardware_pci::
   // initialization as well.
   zx::result<uint32_t> QueryIrqMode(fuchsia_hardware_pci::InterruptMode mode)
       __TA_EXCLUDES(dev_lock_);
-  pci_interrupt_modes_t GetInterruptModes() __TA_EXCLUDES(dev_lock_);
+  fuchsia_hardware_pci::wire::InterruptModes GetInterruptModes() __TA_EXCLUDES(dev_lock_);
   zx_status_t SetIrqMode(fuchsia_hardware_pci::InterruptMode mode, uint32_t irq_cnt)
       __TA_EXCLUDES(dev_lock_);
   zx::result<zx::interrupt> MapInterrupt(uint32_t which_irq) __TA_EXCLUDES(dev_lock_);
@@ -221,19 +194,10 @@ class Device : public DeviceType, public fidl::WireServer<fuchsia_hardware_pci::
   // Signals the device's zx::interrupt, effectively triggering an interrupt for the device
   // driver.
   zx_status_t SignalLegacyIrq(zx_instant_boot_t timestamp) __TA_REQUIRES(dev_lock_);
-  // Legacy IRQs are automatically re-armed via ZX_VIRTUAL_INTERRUPT_UNTRIGGERED;
-  // AckLegacyIrq is a no-op.
-  zx_status_t AckLegacyIrq() __TA_REQUIRES(dev_lock_);
   void EnableLegacyIrq() __TA_REQUIRES(dev_lock_);
   void DisableLegacyIrq() __TA_REQUIRES(dev_lock_);
 
   zx::result<PowerManagementCapability::PowerState> GetPowerState() __TA_EXCLUDES(dev_lock_);
-
-  // DDK device lifecycle methods
-  void DdkRelease();
-  void DdkUnbind(ddk::UnbindTxn txn);
-
-  void Bind(fidl::ServerEnd<fuchsia_hardware_pci::Device> request);
 
   // fidl::WireServer<fuchsia_hardware_pci::Device> implementations
   void GetDeviceInfo(GetDeviceInfoCompleter::Sync& completer) override;
@@ -241,7 +205,6 @@ class Device : public DeviceType, public fidl::WireServer<fuchsia_hardware_pci::
   void SetBusMastering(SetBusMasteringRequestView request,
                        SetBusMasteringCompleter::Sync& completer) override;
   void ResetDevice(ResetDeviceCompleter::Sync& completer) override;
-  void AckInterrupt(AckInterruptCompleter::Sync& completer) override;
   void MapInterrupt(MapInterruptRequestView request,
                     MapInterruptCompleter::Sync& completer) override;
   void SetInterruptMode(SetInterruptModeRequestView request,
@@ -277,26 +240,12 @@ class Device : public DeviceType, public fidl::WireServer<fuchsia_hardware_pci::
   // as in a list for roots/bridges to track their downstream children. These
   // traits facilitate that for us.
  protected:
-  Device(zx_device_t* parent, std::unique_ptr<Config>&& config, UpstreamNode* upstream,
-         BusDeviceInterface* bdi, bool is_bridge, bool has_acpi, bool has_devicetree);
+  Device(std::unique_ptr<Config>&& config, UpstreamNode* upstream, BusDeviceInterface* bdi,
+         bool is_bridge, bool has_acpi, bool has_devicetree);
 
   zx_status_t Init() __TA_EXCLUDES(dev_lock_);
   zx_status_t InitLocked() __TA_REQUIRES(dev_lock_);
   zx_status_t InitInterrupts() __TA_REQUIRES(dev_lock_);
-
-  // Read the value of the Command register, requires the dev_lock.
-  uint16_t ReadCmdLocked() __TA_REQUIRES(dev_lock_) __TA_EXCLUDES(cmd_reg_lock_) {
-    fbl::AutoLock cmd_lock(&cmd_reg_lock_);
-    return cfg_->Read(Config::kCommand);
-  }
-  void ModifyCmdLocked(uint16_t clr_bits, uint16_t set_bits) __TA_REQUIRES(dev_lock_)
-      __TA_EXCLUDES(cmd_reg_lock_);
-  void AssignCmdLocked(uint16_t value) __TA_REQUIRES(dev_lock_) __TA_EXCLUDES(cmd_reg_lock_) {
-    ModifyCmdLocked(UINT16_MAX, value);
-  }
-
-  bool IoEnabled() __TA_REQUIRES(dev_lock_) { return ReadCmdLocked() & pci::kCommandIoEn; }
-  bool MmioEnabled() __TA_REQUIRES(dev_lock_) { return ReadCmdLocked() & pci::kCommandMemEn; }
 
   zx_status_t ProbeCapabilities() __TA_REQUIRES(dev_lock_);
   zx_status_t ParseCapabilities() __TA_REQUIRES(dev_lock_);
@@ -316,8 +265,7 @@ class Device : public DeviceType, public fidl::WireServer<fuchsia_hardware_pci::
   zx::result<std::unique_ptr<PciAllocation>> AllocateFromUpstream(const Bar& bar,
                                                                   std::optional<zx_paddr_t> base)
       __TA_REQUIRES(dev_lock_);
-  void WriteBar(uint8_t bar_id, uint32_t low, std::optional<uint32_t> high = std::nullopt)
-      __TA_REQUIRES(dev_lock_);
+  void WriteBar(const Bar& bar, uint64_t address) __TA_REQUIRES(dev_lock_);
   zx_status_t WriteBarInformation(const Bar& bar) __TA_REQUIRES(dev_lock_);
   // Allocates address space for a BAR if it does not already exist.
   zx::result<> AllocateBar(uint8_t bar_id) __TA_REQUIRES(dev_lock_);
@@ -330,8 +278,8 @@ class Device : public DeviceType, public fidl::WireServer<fuchsia_hardware_pci::
   // configuring downstream BARs..
   virtual zx::result<> AllocateBars() __TA_EXCLUDES(dev_lock_);
   zx::result<> ConfigureCapabilities() __TA_EXCLUDES(dev_lock_);
-  zx::result<std::pair<zx::msi, msi_allocation_info_t>> AllocateMsi(uint32_t irq_cnt)
-      __TA_REQUIRES(dev_lock_);
+  zx::result<std::pair<zx::msi, fuchsia_hardware_pci_root::wire::MsiAllocationInfo>> AllocateMsi(
+      uint32_t irq_cnt) __TA_REQUIRES(dev_lock_);
   zx_status_t VerifyAllMsisFreed() __TA_REQUIRES(dev_lock_);
 
   // Disable a device, and anything downstream of it.  The device will
@@ -342,7 +290,6 @@ class Device : public DeviceType, public fidl::WireServer<fuchsia_hardware_pci::
   void DisableLocked() __TA_REQUIRES(dev_lock_);
 
   mutable fbl::Mutex dev_lock_;
-  mutable fbl::Mutex cmd_reg_lock_;    // Protection for access to the command register.
   const std::unique_ptr<Config> cfg_;  // Pointer to the device's config interface.
   UpstreamNode* upstream_;             // The upstream node in the device graph.
   BusDeviceInterface* bdi_ __TA_GUARDED(dev_lock_);
@@ -362,6 +309,7 @@ class Device : public DeviceType, public fidl::WireServer<fuchsia_hardware_pci::
   uint8_t subclass_;        // The device's subclass, as read from config.
   uint8_t prog_if_;         // The device's programming interface (from cfg).
   uint8_t rev_id_;          // The device's revision ID (from cfg).
+  char node_name_[8];
 
   // State related to lifetime management.
   bool plugged_in_ __TA_GUARDED(dev_lock_) = false;
@@ -372,7 +320,7 @@ class Device : public DeviceType, public fidl::WireServer<fuchsia_hardware_pci::
   Capabilities caps_ __TA_GUARDED(dev_lock_){};
   Irqs irqs_ __TA_GUARDED(dev_lock_){.mode = fuchsia_hardware_pci::InterruptMode::kDisabled};
 
-  std::optional<component::OutgoingDirectory> outgoing_dir_;
+  fidl::ClientEnd<fuchsia_driver_framework::NodeController> node_controller_;
   fidl::ServerBindingGroup<fuchsia_hardware_pci::Device> bindings_;
 };
 

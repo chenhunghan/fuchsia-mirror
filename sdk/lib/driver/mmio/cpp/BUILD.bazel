@@ -1,0 +1,66 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/idk:idk_cc_source_library.bzl", "idk_cc_source_library")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+# @bazel2gn:skip
+test_suite(
+    name = "tests",
+    tests = [":mmio-unittest-package"],
+    visibility = ["//sdk/lib:__pkg__"],
+)
+
+idk_cc_source_library(
+    name = "cpp",
+    hdrs = [
+        "mmio.h",
+        "mmio-buffer.h",
+        "mmio-ops.h",
+        "mmio-pinned-buffer.h",
+        "mmio-view.h",
+    ],
+    api_area = "Driver SDK",
+    category = "partner",
+    hdrs_for_internal_use = ["mmio-internal.h"],
+    idk_name = "driver_mmio_cpp",
+    include_base = "//sdk",
+    public_configs = ["//sdk/config"],
+    stable = True,
+    visibility = ["//:__subpackages__"],
+    deps = [
+        # <lib/mmio/mmio.h> has #include <lib/mmio-ptr/mmio-ptr.h>.
+        "//zircon/system/ulib/mmio-ptr",
+
+        # <lib/driver/mmio/cpp/mmio-buffer.h> has #include <lib/zx/result.h>.
+        "//zircon/system/ulib/zx",
+    ],
+)
+
+fx_cc_test_binary(
+    name = "mmio-unittest",
+    srcs = ["mmio-buffer-test.cc"],
+    aspect_hints = ["//src/sys/test_runners/gtest:death_test"],
+    # Includes <src/lib/testing/predicates/status.h> relative to workspace root.
+    # @bazel2gn:skip
+    copts = ["-I."],
+    tags = ["manual"],
+    deps = [
+        ":cpp",
+        "//sdk/lib/driver/mmio/testing/cpp",
+        "//src/devices/testing/fake-bti",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/predicates",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "mmio-unittest-package",
+    package_name = "mmio-unittest",
+    unit_tests = [":mmio-unittest"],
+)

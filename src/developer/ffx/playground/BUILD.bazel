@@ -1,0 +1,50 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# `playground_test` and `test_fidl` remain in `BUILD.gn` until
+# `//src/lib/fidl_codec` (`:fidl` and `:fidl_rust_fdomain`) is migrated to
+# Bazel.
+rustc_library(
+    name = "playground",
+    srcs = [
+        "src/builtins.rs",
+        "src/compiler.rs",
+        "src/error.rs",
+        "src/frame.rs",
+        "src/interpreter.rs",
+        "src/lib.rs",
+        "src/parser.rs",
+        "src/test.rs",
+        "src/value.rs",
+        "src/value/in_use_handle.rs",
+        "src/value/iterator.rs",
+    ],
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/developer/ffx/tools/playground:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust_fdomain",
+        "//sdk/rust/zx-status",
+        "//src/developer/ffx/lib/futures:lib",
+        "//src/lib/fdomain/client",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fidl_codec/rust:fidl_codec_fdomain",
+        "//src/lib/fuchsia-fs:fuchsia-fs_fdomain",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:async-lock",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:nom",
+        "//third_party/rust_crates/vendor:nom_locate",
+        "//third_party/rust_crates/vendor:num-bigint",
+        "//third_party/rust_crates/vendor:num-rational",
+        "//third_party/rust_crates/vendor:num-traits",
+        "//third_party/rust_crates/vendor:regex",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)

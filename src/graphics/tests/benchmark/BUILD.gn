@@ -28,11 +28,8 @@ executable("vkcopy_bin") {
   deps = [
     "//src/graphics/tests/common",
     "//src/graphics/tests/common:config_query",
-    "//src/lib/vulkan",
-  ]
-
-  public_deps = [
     "//src/lib/fxl/test:test_settings",
+    "//src/lib/vulkan",
     "//third_party/googletest:gtest_no_testonly",
   ]
 }

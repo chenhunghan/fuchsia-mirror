@@ -177,6 +177,9 @@ pub(crate) mod for_tests {
                             "fuchsia.pkgcache.BlobDownloadResumptionAttemptsLimit",
                         ))
                         .capability(Capability::configuration(
+                            "fuchsia.pkgcache.PostCommitGcEarliestBootSeconds",
+                        ))
+                        .capability(Capability::configuration(
                             "fuchsia.pkgcache.UseDriverBlobPaging",
                         ))
                         .capability(Capability::configuration(

@@ -9,9 +9,8 @@
 #include <lib/async_patterns/testing/cpp/dispatcher_bound.h>
 #include <lib/component/outgoing/cpp/outgoing_directory.h>
 #include <lib/ddk/debug.h>
-#include <lib/device-protocol/pci.h>
+#include <lib/driver/fake-bti/cpp/fake-bti.h>
 #include <lib/driver/mmio/cpp/mmio.h>
-#include <lib/fake-bti/bti.h>
 #include <lib/pci/constants.h>
 #include <lib/sync/completion.h>
 #include <lib/virtio/backends/pci.h>
@@ -340,8 +339,9 @@ class TestVirtioDevice : public virtio::Device, public DeviceType {
 };
 
 void VirtioTests::RunAssertZeroInitializedRing(std::unique_ptr<virtio::Backend> backend) {
-  zx::bti bti{};
-  ASSERT_OK(fake_bti_create(bti.reset_and_get_address()));
+  zx::result bti_result = fake_bti::CreateFakeBti();
+  ASSERT_OK(bti_result);
+  zx::bti bti = std::move(*bti_result);
   ASSERT_OK(backend->Bind());
   auto device =
       std::make_unique<TestVirtioDevice>(fake_parent_.get(), std::move(bti), std::move(backend));
@@ -365,8 +365,9 @@ void VirtioTests::RunAssertZeroInitializedRing(std::unique_ptr<virtio::Backend> 
 }
 
 void VirtioTests::RunGoldenAvailAllocationPattern(std::unique_ptr<virtio::Backend> backend) {
-  zx::bti bti{};
-  ASSERT_OK(fake_bti_create(bti.reset_and_get_address()));
+  zx::result bti_result = fake_bti::CreateFakeBti();
+  ASSERT_OK(bti_result);
+  zx::bti bti = std::move(*bti_result);
   ASSERT_OK(backend->Bind());
   auto device =
       std::make_unique<TestVirtioDevice>(fake_parent_.get(), std::move(bti), std::move(backend));
@@ -407,8 +408,9 @@ void VirtioTests::RunGoldenAvailAllocationPattern(std::unique_ptr<virtio::Backen
 }
 
 void VirtioTests::RunAvailUsedInterleavedOperations(std::unique_ptr<virtio::Backend> backend) {
-  zx::bti bti{};
-  ASSERT_OK(fake_bti_create(bti.reset_and_get_address()));
+  zx::result bti_result = fake_bti::CreateFakeBti();
+  ASSERT_OK(bti_result);
+  zx::bti bti = std::move(*bti_result);
   ASSERT_OK(backend->Bind());
   auto device =
       std::make_unique<TestVirtioDevice>(fake_parent_.get(), std::move(bti), std::move(backend));
@@ -609,8 +611,9 @@ TEST_F(VirtioTests, LegacyIoBackendSuccess) {
   ASSERT_TRUE(pci.is_ok());
   auto info = fidl::Call(*pci)->GetDeviceInfo();
   ASSERT_TRUE(info.is_ok());
-  zx::bti bti{};
-  ASSERT_OK(fake_bti_create(bti.reset_and_get_address()));
+  zx::result bti_result = fake_bti::CreateFakeBti();
+  ASSERT_OK(bti_result);
+  zx::bti bti = std::move(*bti_result);
 
   // Feed the same vmo backing AsyncState's BAR 0 into the interface so the view
   // from PCI, Virtio, and the test all align.
@@ -640,8 +643,9 @@ TEST_F(VirtioTests, LegacyMmioBackendSuccess) {
   ASSERT_TRUE(pci.is_ok());
   auto info = fidl::Call(*pci)->GetDeviceInfo();
   ASSERT_TRUE(info.is_ok());
-  zx::bti bti{};
-  ASSERT_OK(fake_bti_create(bti.reset_and_get_address()));
+  zx::result bti_result = fake_bti::CreateFakeBti();
+  ASSERT_OK(bti_result);
+  zx::bti bti = std::move(*bti_result);
 
   auto backend = std::make_unique<virtio::PciLegacyBackend>(std::move(*pci), info->info());
   ASSERT_OK(backend->Bind());
@@ -782,8 +786,9 @@ TEST_F(VirtioTests, LegacyMsiX) {
   ASSERT_TRUE(pci.is_ok());
   auto info = fidl::Call(*pci)->GetDeviceInfo();
   ASSERT_TRUE(info.is_ok());
-  zx::bti bti{};
-  ASSERT_OK(fake_bti_create(bti.reset_and_get_address()));
+  zx::result bti_result = fake_bti::CreateFakeBti();
+  ASSERT_OK(bti_result);
+  zx::bti bti = std::move(*bti_result);
 
   TestLegacyIoInterface interface(bars()[kLegacyBar]->View(0));
   auto backend =

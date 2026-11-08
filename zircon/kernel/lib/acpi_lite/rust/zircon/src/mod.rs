@@ -36,7 +36,7 @@ impl Mapping {
 #[guarded]
 pub struct ZirconPhysmemReader {
     #[mutex]
-    mutex: KMutex,
+    mutex: KMutex<crate::ksync_kernel::TrackedMutex>,
 
     #[guarded_by(mutex)]
     mappings: SinglyLinkedList<UniquePtr<Mapping>>,

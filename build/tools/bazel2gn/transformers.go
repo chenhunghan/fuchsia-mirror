@@ -179,6 +179,24 @@ func overwrittenValue(entry *syntax.DictEntry) (string, bool) {
 	return "", false
 }
 
+// bazelExpectationsToGN converts a Bazel `expectations` attribute value to GN,
+// treating `.json5` labels as file paths and other labels as target
+// dependencies.
+func bazelExpectationsToGN(expr syntax.Expr) (syntax.Expr, error) {
+	lit, ok := expr.(*syntax.Literal)
+	if !ok {
+		return expr, nil
+	}
+	label, ok := lit.Value.(string)
+	if !ok {
+		return nil, fmt.Errorf("expected string literal for expectations, got %s", lit.Raw)
+	}
+	if strings.HasSuffix(label, ".json5") {
+		return bazelFilePathsToGN(expr)
+	}
+	return bazelDepToGN(expr)
+}
+
 // bazelFilePathsToGN converts Bazel file paths to GN file paths, handling
 // overwritten paths.
 func bazelFilePathsToGN(expr syntax.Expr) (syntax.Expr, error) {
@@ -204,11 +222,27 @@ func bazelFilePathsToGN(expr syntax.Expr) (syntax.Expr, error) {
 
 // bazelCmlIncludesToGN converts Bazel CML shard labels and file paths (in
 // `expect_includes`) to GN `.cml` file paths.
-//
-// By convention (enforced on `cml_shard` for `bazel2gn` compatibility for now),
-// a `cml_shard` target's name ends in `.shard` and wraps `<name>.cml`, so
-// labels ending in `.shard` are converted to file paths with `.cml` appended.
 func bazelCmlIncludesToGN(expr syntax.Expr) (syntax.Expr, error) {
+	return bazelManifestPathToGN(expr, "expect_includes `includes`", false)
+}
+
+// bazelCmcMergeSrcsToGN converts Bazel `cmc_merge()` `srcs` entries to GN
+// `.cml` or `.json` file paths.
+func bazelCmcMergeSrcsToGN(expr syntax.Expr) (syntax.Expr, error) {
+	return bazelManifestPathToGN(expr, "cmc_merge `srcs`", true)
+}
+
+// bazelManifestToGN converts the `manifest` attribute of
+// `fx_component_manifest()` or `fx_compiled_manifest()` to a GN `.cml` path.
+func bazelManifestToGN(bazelRule string) transformer {
+	return func(expr syntax.Expr) (syntax.Expr, error) {
+		return bazelManifestPathToGN(expr, bazelRule+" `manifest`", false)
+	}
+}
+
+// bazelManifestPathToGN converts a Bazel `.cml` (or `.json` when `allowJSON` is
+// true) file label or `.shard` `cml_shard` target label to a GN file path.
+func bazelManifestPathToGN(expr syntax.Expr, context string, allowJSON bool) (syntax.Expr, error) {
 	lit, ok := expr.(*syntax.Literal)
 	if !ok {
 		return expr, nil
@@ -219,7 +253,7 @@ func bazelCmlIncludesToGN(expr syntax.Expr) (syntax.Expr, error) {
 	}
 	label, ok := lit.Value.(string)
 	if !ok {
-		return nil, fmt.Errorf("expected string literal in includes list, got %s", lit.Raw)
+		return nil, fmt.Errorf("expected string literal in %s, got %s", context, lit.Raw)
 	}
 	gnPath, err := bazelFileLabelToGNPath(label)
 	if err != nil {
@@ -227,8 +261,11 @@ func bazelCmlIncludesToGN(expr syntax.Expr) (syntax.Expr, error) {
 	}
 	if strings.HasSuffix(gnPath, ".shard") {
 		gnPath += ".cml"
-	} else if !strings.HasSuffix(gnPath, ".cml") {
-		return nil, fmt.Errorf("expected label in expect_includes `includes` to end in \".shard\" or \".cml\", got %q", label)
+	} else if !strings.HasSuffix(gnPath, ".cml") && !(allowJSON && strings.HasSuffix(gnPath, ".json")) {
+		if allowJSON {
+			return nil, fmt.Errorf("expected %s entry to end in \".cml\", \".json\", or \".shard\", got %q", context, label)
+		}
+		return nil, fmt.Errorf("expected %s to end in \".cml\" or \".shard\", got %q", context, label)
 	}
 	lit.Raw = gnQuote(gnPath)
 	return lit, nil

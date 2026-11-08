@@ -2339,8 +2339,8 @@ zx::result<uint8_t*> brcmf_map_vmo(brcmf_sdio* bus, uint8_t vmo_id, zx_handle_t 
   return zx::success(reinterpret_cast<uint8_t*>(addr));
 }
 
-static zx_status_t brcmf_sdio_prepare_vmo(brcmf_bus* bus_if, uint8_t vmo_id, zx_handle_t vmo,
-                                          uint8_t* mapped_addr, size_t mapped_size) {
+zx_status_t brcmf_sdio_prepare_vmo(brcmf_bus* bus_if, uint8_t vmo_id, zx_handle_t vmo,
+                                   uint8_t* mapped_addr, size_t mapped_size) {
   struct brcmf_sdio_dev* sdiodev = bus_if->bus_priv.sdio;
   struct brcmf_sdio* bus = sdiodev->bus;
 
@@ -2390,7 +2390,7 @@ static zx_status_t brcmf_sdio_prepare_vmo(brcmf_bus* bus_if, uint8_t vmo_id, zx_
   return ZX_OK;
 }
 
-static zx_status_t brcmf_sdio_release_vmo(brcmf_bus* bus_if, uint8_t vmo_id) {
+zx_status_t brcmf_sdio_release_vmo(brcmf_bus* bus_if, uint8_t vmo_id) {
   struct brcmf_sdio_dev* sdiodev = bus_if->bus_priv.sdio;
   struct brcmf_sdio* bus = sdiodev->bus;
 
@@ -2425,12 +2425,13 @@ static zx_status_t brcmf_sdio_release_vmo(brcmf_bus* bus_if, uint8_t vmo_id) {
   brcmf_proto_bcdc_txcomplete(sdiodev->drvr, frames, ZX_ERR_CANCELED);
 
   // Unregister VMO for both f1 and f2
-  zx_handle_t vmo = ZX_HANDLE_INVALID;
-  zx_status_t err = sdio_unregister_vmo(&sdiodev->sdio_proto_fn1, vmo_id, &vmo);
+  zx::vmo vmo;
+  zx_status_t err =
+      sdio_unregister_vmo(&sdiodev->sdio_proto_fn1, vmo_id, vmo.reset_and_get_address());
   if (err != ZX_OK) {
     BRCMF_ERR("Failed to release VMO %u for func1: %s", vmo_id, zx_status_get_string(err));
   }
-  err = sdio_unregister_vmo(&sdiodev->sdio_proto_fn2, vmo_id, &vmo);
+  err = sdio_unregister_vmo(&sdiodev->sdio_proto_fn2, vmo_id, vmo.reset_and_get_address());
   if (err != ZX_OK) {
     BRCMF_ERR("Failed to release VMO %u for func2: %s", vmo_id, zx_status_get_string(err));
   }
@@ -2445,6 +2446,7 @@ static zx_status_t brcmf_sdio_queue_rx_space(
   std::lock_guard lock(bus->rx_tx_data.rx_space);
   bus->rx_tx_data.rx_space.Store(buffers, vmo_addrs);
   bus->rx_tx_data.rx_space_valid = true;
+  bus->rx_tx_data.rx_space_requested = false;
   return ZX_OK;
 }
 
@@ -4417,18 +4419,52 @@ static wlan::drivers::components::FrameStorage& get_rx_space_storage(struct brcm
                                         : bus->rx_tx_data.rx_space_internal;
 }
 
+// Must be called with the storage returned by get_rx_space_storage locked. Returns true if the
+// caller should request more RX space from netdev, i.e. the RX space provided by netdev either ran
+// out or couldn't satisfy an acquisition, and no request is already outstanding.
+static bool should_request_rx_space(const struct brcmf_sdio* bus,
+                                    const wlan::drivers::components::FrameStorage& storage,
+                                    bool acquired) __TA_REQUIRES(storage) {
+  return &storage == &bus->rx_tx_data.rx_space && (!acquired || storage.empty()) &&
+         !bus->rx_tx_data.rx_space_requested;
+}
+
 wlan::drivers::components::FrameContainer brcmf_sdio_acquire_rx_space(struct brcmf_sdio* bus,
                                                                       size_t num) {
   auto& storage = get_rx_space_storage(bus);
-  std::lock_guard lock(storage);
-  return storage.Acquire(num);
+  wlan::drivers::components::FrameContainer frames;
+  bool request_rx_space = false;
+  {
+    std::lock_guard lock(storage);
+    frames = storage.Acquire(num);
+    request_rx_space = should_request_rx_space(bus, storage, frames.size() == num);
+    if (request_rx_space) [[unlikely]] {
+      bus->rx_tx_data.rx_space_requested = true;
+    }
+  }
+  if (request_rx_space) [[unlikely]] {
+    brcmf_request_rx_space(bus->sdiodev->drvr, RXDEPTH);
+  }
+  return frames;
 }
 
 std::optional<wlan::drivers::components::Frame> brcmf_sdio_acquire_single_rx_space(
     struct brcmf_sdio* bus) {
   auto& storage = get_rx_space_storage(bus);
-  std::lock_guard lock(storage);
-  return storage.Acquire();
+  std::optional<wlan::drivers::components::Frame> frame;
+  bool request_rx_space = false;
+  {
+    std::lock_guard lock(storage);
+    frame = storage.Acquire();
+    request_rx_space = should_request_rx_space(bus, storage, frame.has_value());
+    if (request_rx_space) [[unlikely]] {
+      bus->rx_tx_data.rx_space_requested = true;
+    }
+  }
+  if (request_rx_space) [[unlikely]] {
+    brcmf_request_rx_space(bus->sdiodev->drvr, RXDEPTH);
+  }
+  return frame;
 }
 
 wlan::drivers::components::FrameContainer brcmf_sdio_acquire_internal_rx_space(

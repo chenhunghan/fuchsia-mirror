@@ -23,7 +23,7 @@ cc_test_executable("unittests") {
     "stack_utils_test.cc",
   ]
 
-  public_deps = [
+  deps = [
     "//sdk/lib/async-loop:async-loop-cpp",
     "//sdk/lib/async-loop:async-loop-default",
     "//sdk/lib/sys/cpp/testing:unit",
@@ -65,9 +65,9 @@ fuchsia_test_component("weavestack-unittests") {
 fuchsia_test_package("package-test") {
   package_name = "weavestack-unittests"
   test_components = [ ":weavestack-unittests" ]
-  deps = [
-    "//src/connectivity/network/netstack3:component-debug",
-    "//src/connectivity/network/tun/network-tun:component",
+  subpackages = [
+    "//src/connectivity/network/netstack3:package-debug",
+    "//src/connectivity/network/tun/network-tun",
   ]
   test_specs = {
     log_settings = {

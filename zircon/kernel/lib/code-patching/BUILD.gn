@@ -14,7 +14,7 @@ source_set("code-patching") {
 
   if (toolchain_environment == "kernel.phys") {
     sources = [ "code-patching.cc" ]
-    deps = [ "//zircon/kernel/phys:main" ]
+    deps = [ "//zircon/kernel/phys/runtime:headers" ]
   }
 }
 

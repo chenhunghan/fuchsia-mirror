@@ -47,14 +47,15 @@ ignore_policy = struct(
             "@rules_fuchsia",  # TODO(https://fxbug.dev/42081016): sdk rules should provide licenses.
         ]
     ]) | bool_dict([
-        # These repositories are created by the root module (via
-        # `use_repo_rule()`), whose repo mapping `rules_fuchsia` (this module)
-        # can't see, so they can't be resolved via `Label()` here. They are
-        # matched by apparent name instead, which doesn't depend on their
-        # declaration order in the root `MODULE.bazel`.
+        # These repositories are created or declared by the root module, whose
+        # repo mapping `rules_fuchsia` (this module) can't see, so they can't
+        # be resolved via `Label()` here. They are matched by apparent/module
+        # name instead, which doesn't depend on their declaration order in the
+        # root `MODULE.bazel`.
         "internal_sdk",  # TODO(https://fxbug.dev/42081016): sdk atoms should provide licenses.
         "fuchsia_prebuilt_rust",  # TODO(https://fxbug.dev/564889889): rust prebuilts should provide licenses.
         "assembly_developer_overrides",  # Local development overrides don't provide licenses.
+        "rules_rust",  # Build rules, settings, and empty shims, not shipping code.
     ]),
 
     # Anything within these packages will be ignored:
@@ -82,6 +83,13 @@ def is_3p_target(target):
     # can trigger false-positives when they export packages from
     # the third_party folders.
     if label.package.startswith("bundles/assembly/bazel_inputs"):
+        return False
+
+    # //third_party/rust_crates/empty contains Fuchsia-authored empty stub
+    # crates ("null forks") used to satisfy unused transitive Cargo
+    # dependencies (matching cargo-gnaw's //build/licenses:fuchsia_license
+    # handling in GN).
+    if label.package.startswith("third_party/rust_crates/empty/"):
         return False
 
     if label.workspace_name:

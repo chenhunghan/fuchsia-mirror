@@ -61,7 +61,6 @@
                 "AshmemTest.SetNameOverflow",
 
                 // TODO(https://fxbug.dev/527579086): Starnix VFS casefold dentry cache coherence & flag inheritance.
-                "FsCasefold/FsCasefoldTest.DirectoryChildInheritsCasefoldFlag/fxfs",
                 "FsCasefold/FsCasefoldTest.RenameExchangeSwapsEntriesAcrossCaseVariants/fxfs",
 
                 // TODO(https://fxbug.dev/544902575): Non-UTF-8 and Unicode normalization support.
@@ -104,9 +103,6 @@
                 // TODO(https://fxbug.dev/297440106)
                 "ZombieTest.Setpgid",
 
-                // TODO(https://fxbug.dev/439058791)
-                "DumpableTest.DumpableDropsOnUserChange",
-
                 // TODO(https://fxbug.dev/495916611)
                 "ProcfsTest.ProcSysNetInvalidWriteReturnsEinval",
 
@@ -124,15 +120,6 @@
                 // TODO(https://fxbug.dev/555727179): Implement PTRACE_SINGLESTEP.
                 "SingleStepTest.InstructionPointerAdvances",
                 "SingleStepTest.ConsecutiveSteps",
-
-                // TODO(https://fxbug.dev/491941184)
-                "SeccompTest.BpfJaWithSourceXRejected",
-                "SeccompTest.BpfLastInstNotRetRejected",
-                "SeccompTest.BpfMiscWithSourceXRejected",
-                "SeccompTest.BpfModRejected",
-                "SeccompTest.BpfNegWithSourceXRejected",
-                "SeccompTest.BpfStWithSourceXRejected",
-                "SeccompTest.BpfUnknownCodeUpperBitsRejected",
 
                 // TODO(https://fxbug.dev/498681252)
                 "PipeTest.PolloutFragmentation",

@@ -17,7 +17,7 @@ use fidl_fuchsia_posix as fposix;
 use fidl_fuchsia_posix_socket as fposix_socket;
 use fuchsia_async as fasync;
 use futures::channel::{mpsc, oneshot};
-use log::{debug, error, warn};
+use log::{debug, error};
 use net_types::ip::{GenericOverIp, Ip, IpAddress, IpVersion, Ipv4, Ipv6};
 use net_types::{NonMappedAddr, SpecifiedAddr, ZonedAddr};
 use netstack3_core::IpExt;
@@ -25,10 +25,11 @@ use netstack3_core::device::{DeviceId, WeakDeviceId};
 use netstack3_core::socket::ShutdownType;
 use netstack3_core::tcp::{
     self, AcceptError, AcceptQueueChange, BindError, BoundInfo, BufferSizes, ConnectError,
-    ConnectionError, ConnectionInfo, IntoBuffers, ListenError, ListenerNotifier, NoConnection,
+    ConnectionError, ConnectionInfo, IntoBuffers, ListenError, ListenerNotifier, Mss, NoConnection,
     OriginalDestinationError, SetReuseAddrError, SocketAddr, SocketInfo, SocketOptions,
     TcpBindingsTypes, UnboundInfo,
 };
+use packet_formats::ip::DscpAndEcn;
 use packet_formats::utils::NonZeroDuration;
 use zx::{self as zx, Peered as _};
 
@@ -778,6 +779,36 @@ impl<I: IpSockAddrExt + IpExt> RequestHandler<'_, I> {
         ctx.api().tcp().reuseaddr(id)
     }
 
+    fn set_dscp_and_ecn(self, ip_version: IpVersion, value: Option<u8>) -> Result<(), ErrnoError> {
+        let Self {
+            data: BindingData { id, peer: _, task_data: _, task_control: _, data_notifier: _ },
+            ctx,
+        } = self;
+        ctx.api()
+            .tcp()
+            .set_dscp_and_ecn(id, value.map(DscpAndEcn::from), ip_version)
+            .map_err(IntoErrno::into_errno_error)
+    }
+
+    fn dscp_and_ecn(self, ip_version: IpVersion) -> Result<u8, ErrnoError> {
+        let Self {
+            data: BindingData { id, peer: _, task_data: _, task_control: _, data_notifier: _ },
+            ctx,
+        } = self;
+        ctx.api()
+            .tcp()
+            .dscp_and_ecn(id, ip_version)
+            .map(DscpAndEcn::raw)
+            .map_err(IntoErrno::into_errno_error)
+            .map_err(|e| {
+                e.map_errno(|e| match e {
+                    // getsockopt fails with EOPNOTSUPP instead of ENOPROTOOPT.
+                    fposix::Errno::Enoprotoopt => fposix::Errno::Eopnotsupp,
+                    e => e,
+                })
+            })
+    }
+
     fn get_original_destination(
         self,
         ip_version: IpVersion,
@@ -1078,13 +1109,16 @@ impl<I: IpSockAddrExt + IpExt> RequestHandler<'_, I> {
                     .send(self.shutdown(mode).await.log_errno_error("stream::Shutdown"))
                     .unwrap_or_log("failed to respond");
             }
-            fposix_socket::StreamSocketRequest::SetIpTypeOfService { value: _, responder } => {
-                warn!("stream::SetIpTypeOfService is not supported, returning Ok(())");
-                responder.send(Ok(())).unwrap_or_log("failed to respond");
+            fposix_socket::StreamSocketRequest::SetIpTypeOfService { value, responder } => {
+                let result = self
+                    .set_dscp_and_ecn(IpVersion::V4, Some(value))
+                    .log_errno_error("stream::SetIpTypeOfService");
+                responder.send(result).unwrap_or_log("failed to respond");
             }
             fposix_socket::StreamSocketRequest::GetIpTypeOfService { responder } => {
-                warn!("stream::GetIpTypeOfService is not supported, returning Ok(0)");
-                responder.send(Ok(0)).unwrap_or_log("failed to respond");
+                let result =
+                    self.dscp_and_ecn(IpVersion::V4).log_errno_error("stream::GetIpTypeOfService");
+                responder.send(result).unwrap_or_log("failed to respond");
             }
             fposix_socket::StreamSocketRequest::SetIpTtl { value: _, responder } => {
                 respond_not_supported!("stream::SetIpTtl", responder);
@@ -1235,24 +1269,16 @@ impl<I: IpSockAddrExt + IpExt> RequestHandler<'_, I> {
             fposix_socket::StreamSocketRequest::GetIpv6ReceiveTrafficClass { responder } => {
                 respond_not_supported!("stream::GetIpv6ReceiveTrafficClass", responder);
             }
-            fposix_socket::StreamSocketRequest::SetIpv6TrafficClass { value: _, responder } => {
-                let result = match I::VERSION {
-                    IpVersion::V4 => Err(fposix::Errno::Eopnotsupp),
-                    IpVersion::V6 => {
-                        warn!("stream::SetIpv6TrafficClass is not supported, returning Ok(())");
-                        Ok(())
-                    }
-                };
+            fposix_socket::StreamSocketRequest::SetIpv6TrafficClass { value, responder } => {
+                let value: Option<u8> = value.into_core();
+                let result = self
+                    .set_dscp_and_ecn(IpVersion::V6, value)
+                    .log_errno_error("stream::SetIpv6TrafficClass");
                 responder.send(result).unwrap_or_log("failed to respond");
             }
             fposix_socket::StreamSocketRequest::GetIpv6TrafficClass { responder } => {
-                let result = match I::VERSION {
-                    IpVersion::V4 => Err(fposix::Errno::Eopnotsupp),
-                    IpVersion::V6 => {
-                        warn!("stream::GetIpv6TrafficClass is not supported, returning Ok(0)");
-                        Ok(0)
-                    }
-                };
+                let result =
+                    self.dscp_and_ecn(IpVersion::V6).log_errno_error("stream::GetIpv6TrafficClass");
                 responder.send(result).unwrap_or_log("failed to respond");
             }
             fposix_socket::StreamSocketRequest::SetIpv6ReceivePacketInfo {
@@ -1287,12 +1313,34 @@ impl<I: IpSockAddrExt + IpExt> RequestHandler<'_, I> {
                 let nagle_enabled = self.with_socket_options(|so| so.nagle_enabled);
                 responder.send(Ok(!nagle_enabled)).unwrap_or_log("failed to respond");
             }
-            fposix_socket::StreamSocketRequest::SetTcpMaxSegment { value_bytes: _, responder } => {
-                warn!("stream::SetTcpMaxSegment is not supported, returning Ok(())");
-                responder.send(Ok(())).unwrap_or_log("failed to respond");
+            fposix_socket::StreamSocketRequest::SetTcpMaxSegment { value_bytes, responder } => {
+                let result = match u16::try_from(value_bytes).ok_checked::<TryFromIntError>() {
+                    // Linux treats 0 as resetting the user MSS to the default.
+                    Some(0) => Ok(None),
+                    Some(v) => Mss::new(v).map(Some).ok_or(fposix::Errno::Einval),
+                    None => Err(fposix::Errno::Einval),
+                }
+                .map(|user_mss| {
+                    self.with_socket_options_mut(|so| {
+                        so.user_mss = user_mss;
+                    });
+                });
+                responder.send(result).unwrap_or_log("failed to respond");
             }
             fposix_socket::StreamSocketRequest::GetTcpMaxSegment { responder } => {
-                respond_not_supported!("stream::GetTcpMaxSegment", responder);
+                let Self { data: BindingData { id, .. }, ctx } = self;
+                let mss = ctx.api().tcp().get_tcp_info(id).snd_mss.unwrap_or_else(|| {
+                    u32::from(
+                        ctx.api()
+                            .tcp()
+                            .with_socket_options(id, |so| so.user_mss)
+                            // Linux returns the IPv4 default MSS on unconnected sockets
+                            // regardless of the socket's domain.
+                            .unwrap_or(Mss::DEFAULT_IPV4)
+                            .get(),
+                    )
+                });
+                responder.send(Ok(mss)).unwrap_or_log("failed to respond");
             }
             fposix_socket::StreamSocketRequest::SetTcpCork { value: _, responder } => {
                 respond_not_supported!("stream::SetTcpCork", responder);

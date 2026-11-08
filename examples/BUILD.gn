@@ -10,7 +10,6 @@ group("examples") {
     ":tests",
     "components",
     "cowsay",
-    "cpp",
     "diagnostics",
     "drivers",
     "fidl",
@@ -31,6 +30,7 @@ group("tests") {
 
     # All other tests.
     "drivers/driver_test_realm:non_hermetic_tests",
+    "fidl:tests",
     "intl:tests",
   ]
 }
@@ -41,7 +41,6 @@ if (is_fuchsia) {
     deps = [
       ":bazel_tests",
       "components:hermetic_tests",
-      "cpp:hermetic_tests",
       "diagnostics:hermetic_tests",
       "drivers:hermetic_tests",
       "fidl:hermetic_tests",
@@ -56,12 +55,13 @@ if (is_fuchsia) {
 }
 
 bazel_test_suite("bazel_tests") {
+  host_tests = [ "//examples:host_tests" ]
   target_tests = [ "//examples:target_tests" ]
 }
 
 if (is_host) {
   group("host_tests") {
     testonly = true
-    deps = []
+    deps = [ ":bazel_tests" ]
   }
 }

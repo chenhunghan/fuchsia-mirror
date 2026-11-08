@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include <fcntl.h>
+#include <lib/fit/defer.h>
 #include <string.h>
 #include <sys/auxv.h>
 #include <sys/mman.h>
@@ -140,10 +141,7 @@ TEST_F(VdsoProcTest, VdsoMappingCannotBeSplit) {
 TEST_F(VdsoProcTest, VdsoCanBeUnmapped) {
   test_helper::ForkHelper helper;
 
-  helper.RunInForkedProcess([&] {
-    EXPECT_EQ(munmap(vdso_base_, vdso_size_), 0);
-    _exit(0);
-  });
+  helper.RunInForkedProcess([&] { EXPECT_EQ(munmap(vdso_base_, vdso_size_), 0); });
 
   EXPECT_TRUE(helper.WaitForChildren());
 }
@@ -154,7 +152,6 @@ TEST_F(VdsoProcTest, VdsoCanBeMprotected) {
   helper.RunInForkedProcess([&] {
     EXPECT_EQ(mprotect(vdso_base_, vdso_size_, PROT_READ | PROT_WRITE | PROT_EXEC), 0);
     EXPECT_EQ(mprotect(vdso_base_, vdso_size_, PROT_NONE), 0);
-    _exit(0);
   });
 
   EXPECT_TRUE(helper.WaitForChildren());
@@ -167,7 +164,6 @@ TEST_F(VdsoProcTest, VdsoCanBeMappedInto) {
     EXPECT_NE(
         mmap(vdso_base_, vdso_size_, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0),
         MAP_FAILED);
-    _exit(0);
   });
 
   EXPECT_TRUE(helper.WaitForChildren());
@@ -181,7 +177,6 @@ TEST_F(VdsoProcTest, VdsoCanBeRemapped) {
     ASSERT_NE(new_addr, MAP_FAILED);
     EXPECT_NE(mremap(vdso_base_, vdso_size_, vdso_size_, MREMAP_FIXED | MREMAP_MAYMOVE, new_addr),
               MAP_FAILED);
-    _exit(0);
   });
 
   EXPECT_TRUE(helper.WaitForChildren());
@@ -195,7 +190,6 @@ TEST_F(VdsoProcTest, VdsoCanBeRemappedInto) {
     ASSERT_NE(new_addr, MAP_FAILED);
     EXPECT_NE(mremap(new_addr, vdso_size_, vdso_size_, MREMAP_FIXED | MREMAP_MAYMOVE, vdso_base_),
               MAP_FAILED);
-    _exit(0);
   });
 
   EXPECT_TRUE(helper.WaitForChildren());
@@ -208,7 +202,6 @@ TEST_F(VdsoProcTest, VdsoModificationsDontAffectParent) {
   helper.RunInForkedProcess([&] {
     ASSERT_EQ(mprotect(vdso_base_, vdso_size_, PROT_READ | PROT_WRITE | PROT_EXEC), 0);
     SetEIPadFirstByte(vdso_base_, 0x3F);
-    _exit(0);
   });
 
   EXPECT_TRUE(helper.WaitForChildren());
@@ -237,7 +230,6 @@ TEST_F(VdsoProcTest, VdsoModificationsShowUpInFork) {
     EXPECT_EQ(waited, child_pid);
     EXPECT_TRUE(WIFEXITED(status));
     EXPECT_EQ(WEXITSTATUS(status), 0);
-    _exit(0);
   });
 
   EXPECT_TRUE(helper.WaitForChildren());
@@ -334,27 +326,29 @@ TEST_F(VdsoProcTest, VdsoModificationsBeforeForkingDontAffectOtherPrograms) {
   ASSERT_EQ(mprotect(vdso_base_, vdso_size_, PROT_READ | PROT_WRITE | PROT_EXEC), 0);
   ASSERT_TRUE(IsEIPadFirstByteZero(vdso_base_));
 
-  // Don't print anything on the child.
-  ASSERT_EQ(fcntl(fileno(stdout), F_SETFD, FD_CLOEXEC), 0);
-  ASSERT_EQ(fcntl(fileno(stderr), F_SETFD, FD_CLOEXEC), 0);
-  ASSERT_EQ(fcntl(fileno(stdin), F_SETFD, FD_CLOEXEC), 0);
-
   // We are going to modify the vdso. Try not to use complex code.
   SetEIPadFirstByte(vdso_base_, 0x3F);
+  auto restore_vdso = fit::defer([this] {
+    SetEIPadFirstByte(vdso_base_, 0x00);
+    EXPECT_EQ(mprotect(vdso_base_, vdso_size_, PROT_READ | PROT_EXEC), 0);
+  });
 
   // From this point on, we can't use any vdso call.
   pid_t child_pid = fork();
 
   if (child_pid == 0) {
+    // Don't print anything on the child.
+    fcntl(fileno(stdout), F_SETFD, FD_CLOEXEC);
+    fcntl(fileno(stderr), F_SETFD, FD_CLOEXEC);
+    fcntl(fileno(stdin), F_SETFD, FD_CLOEXEC);
     execve(argv[0], const_cast<char**>(&argv[0]), nullptr);
     _exit(1);
   } else {
     int status;
     pid_t waited = waitpid(child_pid, &status, 0);
 
-    // restore the vdso.
-    SetEIPadFirstByte(vdso_base_, 0x00);
-    ASSERT_EQ(mprotect(vdso_base_, vdso_size_, PROT_READ | PROT_EXEC), 0);
+    // Restore the vdso explicitly before checking assertions.
+    restore_vdso.call();
 
     EXPECT_EQ(waited, child_pid);
     EXPECT_TRUE(WIFEXITED(status));
@@ -398,19 +392,13 @@ TEST_F(VdsoProcTest, VvarCannotBeMadeWritableAfterFork) {
 
 TEST_F(VdsoProcTest, VvarCanBeUnmapped) {
   test_helper::ForkHelper helper;
-  helper.RunInForkedProcess([&] {
-    EXPECT_EQ(munmap(vvar_base_, vvar_size_), 0);
-    _exit(0);
-  });
+  helper.RunInForkedProcess([&] { EXPECT_EQ(munmap(vvar_base_, vvar_size_), 0); });
   EXPECT_TRUE(helper.WaitForChildren());
 }
 
 TEST_F(VdsoProcTest, VvarCanBeMadeNonReadable) {
   test_helper::ForkHelper helper;
-  helper.RunInForkedProcess([&] {
-    EXPECT_EQ(mprotect(vvar_base_, vvar_size_, PROT_NONE), 0);
-    _exit(0);
-  });
+  helper.RunInForkedProcess([&] { EXPECT_EQ(mprotect(vvar_base_, vvar_size_, PROT_NONE), 0); });
   EXPECT_TRUE(helper.WaitForChildren());
 }
 

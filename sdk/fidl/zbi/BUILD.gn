@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be found
 # in the LICENSE file.
 
+import("//build/bazel/bazel_inputs.gni")
 import("//build/fidl/fidl.gni")
 import("//zircon/tools/zither/zither_golden_files.gni")
 
@@ -52,6 +53,13 @@ zither_golden_files("zbi.c.checked-in") {
   foreach(source, zbi_sources - [ "overview.fidl" ]) {
     name = get_path_info(source, "name")
     sources += [ "//sdk/lib/zbi-format/include/lib/zbi-format/${name}.h" ]
+  }
+}
+
+if (current_toolchain == default_toolchain) {
+  # TODO(https://fxbug.dev/427976639): Remove once `:zbi.c.checked-in` is migrated to Bazel.
+  bazel_input_file("zbi.c.checked-in.bazel_input") {
+    generator = ":zbi.c.checked-in"
   }
 }
 # LINT.ThenChange(BUILD.bazel)

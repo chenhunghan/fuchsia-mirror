@@ -19,10 +19,6 @@
     ],
     use: [
         {
-            protocol: "fuchsia.component.sandbox.CapabilityStore",
-            from: "framework",
-        },
-        {
             protocol: "fuchsia.component.runtime.Capabilities",
             from: "framework",
         },

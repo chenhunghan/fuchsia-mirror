@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 use anyhow::{Error, Result};
-use fidl_fuchsia_component_sandbox as fsandbox;
 use fidl_fuchsia_inspect::InspectSinkMarker;
 use fidl_fuchsia_intl::PropertyProviderMarker;
 use fidl_fuchsia_intl_test::*;
@@ -11,7 +10,6 @@ use fidl_fuchsia_io as fio;
 use fidl_fuchsia_settings::IntlMarker;
 use fidl_fuchsia_stash::StoreMarker;
 use fuchsia_async as fasync;
-use fuchsia_component::client;
 use fuchsia_component::runtime::Dictionary;
 use fuchsia_component::server::ServiceFs;
 use fuchsia_component_test::{
@@ -39,9 +37,7 @@ async fn serve_realm_factory(stream: RealmFactoryRequestStream) {
 
 async fn handle_request_stream(mut stream: RealmFactoryRequestStream) -> Result<()> {
     let mut realms = vec![];
-    let id_gen = sandbox::CapabilityIdGenerator::new();
     let scope = fasync::Scope::new();
-    let store = client::connect_to_protocol::<fsandbox::CapabilityStoreMarker>().unwrap();
     while let Ok(Some(request)) = stream.try_next().await {
         match request {
             RealmFactoryRequest::CreateRealm3 { options, dictionary, responder } => {
@@ -54,18 +50,9 @@ async fn handle_request_stream(mut stream: RealmFactoryRequestStream) -> Result<
             }
             RealmFactoryRequest::CreateRealm2 { options, dictionary, responder } => {
                 let realm = create_realm(options).await?;
-                let dict_ref = realm.root.controller().get_exposed_dictionary().await?.unwrap();
-                let dict_id = id_gen.next();
-                store
-                    .import(dict_id, fsandbox::Capability::Dictionary(dict_ref))
-                    .await
-                    .unwrap()
-                    .unwrap();
-                store
-                    .dictionary_legacy_export(dict_id, dictionary.into_channel())
-                    .await
-                    .unwrap()
-                    .unwrap();
+                let handle = realm.root.controller().get_output_dictionary().await?.unwrap();
+                let output_dictionary = Dictionary::from(handle);
+                output_dictionary.legacy_export(dictionary.into_channel()).await;
                 realms.push(realm);
                 responder.send(Ok(()))?;
             }

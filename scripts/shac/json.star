@@ -49,6 +49,7 @@ def _json_format(ctx):
         "!/third_party/**",
         "!*.golden.json",
         "!*_pb2.json",
+        "!*.sh.config",
     ])
     if not json_files:
         return

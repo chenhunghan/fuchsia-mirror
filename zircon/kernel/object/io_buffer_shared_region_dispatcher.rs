@@ -11,6 +11,7 @@ use super::handle::KernelHandle;
 use crate::arch_rs::{CopyContext, UserCopyCaptureFaultsError, arch_copy_from_user_capture_faults};
 use crate::kernel::thread::soft_fault;
 use crate::kernel::types::VAddr;
+use crate::ksync_kernel::TrackedCriticalMutex;
 use crate::user_copy::{UserInIovec, UserInPtr, UserInVector};
 use crate::vm::arch_vm_aspace::{ARCH_MMU_FLAG_PERM_READ, ARCH_MMU_FLAG_PERM_WRITE};
 use crate::vm::pmm::{ALLOC_FLAG_ANY, ALLOC_FLAG_CAN_WAIT};
@@ -24,7 +25,7 @@ use core::pin::Pin;
 use core::sync::atomic::{AtomicU64, Ordering};
 use core::{cmp, ptr};
 use fbl::{Canary, RefPtr};
-use ksync::{KMutex, RawCriticalMutex, guarded};
+use ksync::{KMutex, guarded};
 use object_constants_rs::{
     kIoBufferSharedRegionDispatcherStateAlign, kIoBufferSharedRegionDispatcherStateOffset,
     kIoBufferSharedRegionDispatcherStateSize,
@@ -63,7 +64,7 @@ pub struct IoBufferSharedRegionDispatcherState {
     base: VAddr,
 
     #[mutex]
-    lock: KMutex<RawCriticalMutex>,
+    lock: KMutex<TrackedCriticalMutex>,
 }
 
 impl IoBufferSharedRegionDispatcherState {
@@ -116,11 +117,6 @@ unsafe extern "C" {
 }
 
 impl IoBufferSharedRegionDispatcher {
-    /// Returns default rights for `IoBufferSharedRegionDispatcher`.
-    pub fn default_rights() -> zx_rights_t {
-        ZX_DEFAULT_IOB_SHARED_REGION_RIGHTS
-    }
-
     /// Creates a new `IoBufferSharedRegionDispatcher`.
     pub fn create(size: u64) -> Result<(KernelHandle<Self>, zx_rights_t), Status> {
         let vmo = VmObjectPaged::create(

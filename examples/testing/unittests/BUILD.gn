@@ -4,8 +4,5 @@
 
 group("hermetic_tests") {
   testonly = true
-  deps = [
-    "cpp:hermetic_tests",
-    "rust:hermetic_tests",
-  ]
+  deps = [ "rust:hermetic_tests" ]
 }

@@ -14,6 +14,9 @@ build_flags(
         "@platforms//os:fuchsia": ["-Copt-level=3"],
         "//conditions:default": [],
     }) if is_release else [],
-    visibility = ["//src/connectivity/network:__subpackages__"],
+    visibility = [
+        "//src/connectivity/lib/packet-formats/benchmarks:__pkg__",
+        "//src/connectivity/network:__subpackages__",
+    ],
 )
-# LINT.ThenChange(//src/connectivity/network/netstack3/BUILD.gn:netstack3_configs)
+# LINT.ThenChange(BUILD.gn:netstack3_configs)

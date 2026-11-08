@@ -152,8 +152,10 @@ void cpp_dlog_serial_write(const char* ptr, size_t len);
 zx_status_t cpp_dlog_serial_write_interruptible(const char* ptr, size_t len);
 void cpp_dlog_sync();
 void cpp_dlog_panic_start();
+bool cpp_dlog_panic_started();
 void cpp_dlog_bluescreen_init();
 size_t cpp_dlog_render_to_crashlog(char* ptr, size_t len);
+bool cpp_dlog_bypass();
 }
 
 #endif  // ZIRCON_KERNEL_LIB_DEBUGLOG_INCLUDE_LIB_DEBUGLOG_H_

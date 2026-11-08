@@ -4,6 +4,9 @@
 
 #include "src/developer/forensics/feedback_data/data_provider.h"
 
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
+#include <fidl/fuchsia.feedback/cpp/hlcpp_conversion.h>
+#include <fidl/fuchsia.mem/cpp/fidl.h>
 #include <fuchsia/feedback/cpp/fidl.h>
 #include <lib/fpromise/promise.h>
 #include <lib/fpromise/result.h>
@@ -34,7 +37,7 @@ namespace forensics {
 namespace feedback_data {
 namespace {
 
-using fuchsia::feedback::Snapshot;
+using fuchsia_feedback::Snapshot;
 
 // Timeout for a single asynchronous piece of data, e.g., syslog collection, if the client didn't
 // specify one.
@@ -61,6 +64,16 @@ std::map<std::string, std::string> IntoSnapshotFiles(
   }
 
   return snapshot_files;
+}
+
+fuchsia_feedback::Attachment ToSnapshotAttachment(fsl::SizedVmo archive) {
+  return fuchsia_feedback::Attachment{{
+      .key = kSnapshotFilename,
+      .value = fuchsia_mem::Buffer{{
+          .vmo = std::move(archive.vmo()),
+          .size = archive.size(),
+      }},
+  }};
 }
 
 }  // namespace
@@ -104,55 +117,57 @@ DataProvider::DataProvider(async_dispatcher_t* dispatcher,
       });
 }
 
-void DataProvider::GetAnnotations(fuchsia::feedback::GetAnnotationsParameters params,
-                                  GetAnnotationsCallback callback) {
-  const zx::duration timeout = params.has_collection_timeout_per_annotation()
-                                   ? zx::duration(params.collection_timeout_per_annotation())
-                                   : kDefaultDataTimeout;
+void DataProvider::GetAnnotations(GetAnnotationsRequest& request,
+                                  GetAnnotationsCompleter::Sync& completer) {
+  const zx::duration timeout =
+      request.params().collection_timeout_per_annotation().has_value()
+          ? zx::duration(*request.params().collection_timeout_per_annotation())
+          : kDefaultDataTimeout;
 
   // TODO(https://fxbug.dev/42153749): Track how long GetAnnotations took via Cobalt.
   executor_.schedule_task(GetAnnotations(timeout).and_then(
-      [callback = std::move(callback)](feedback::Annotations& annotations) {
-        callback(feedback::Encode<fuchsia::feedback::Annotations>(annotations));
+      [completer = completer.ToAsync()](feedback::Annotations& annotations) mutable {
+        completer.Reply(
+            fidl::HLCPPToNatural(feedback::Encode<fuchsia::feedback::Annotations>(annotations)));
       }));
 }
 
-void DataProvider::GetSnapshot(fuchsia::feedback::GetSnapshotParameters params,
-                               GetSnapshotCallback callback) {
-  const zx::duration timeout = (params.has_collection_timeout_per_data())
-                                   ? zx::duration(params.collection_timeout_per_data())
+void DataProvider::GetSnapshot(GetSnapshotRequest& request, GetSnapshotCompleter::Sync& completer) {
+  const zx::duration timeout = request.params().collection_timeout_per_data().has_value()
+                                   ? zx::duration(*request.params().collection_timeout_per_data())
                                    : kDefaultDataTimeout;
 
   fidl::ServerEnd<fuchsia_io::File> file_server;
-  if (params.has_response_channel()) {
-    file_server = fidl::ServerEnd<fuchsia_io::File>(std::move(*params.mutable_response_channel()));
+  if (request.params().response_channel().has_value()) {
+    file_server =
+        fidl::ServerEnd<fuchsia_io::File>(std::move(*request.params().response_channel()));
   }
 
   FX_LOGS(INFO) << "Generating snapshot";
-  GetSnapshotInternal(
-      timeout, uuid::Generate(),
-      [this, callback = std::move(callback), file_server = std::move(file_server)](
-          const feedback::Annotations& annotations, fsl::SizedVmo archive) mutable {
-        FX_LOGS(INFO) << "Generated snapshot";
-        Snapshot snapshot;
+  GetSnapshotInternal(timeout, uuid::Generate(),
+                      [this, completer = completer.ToAsync(), file_server = std::move(file_server)](
+                          const feedback::Annotations& annotations, fsl::SizedVmo archive) mutable {
+                        FX_LOGS(INFO) << "Generated snapshot";
+                        Snapshot snapshot;
 
-        // Add the annotations to the FIDL object and as file in the snapshot itself.
-        if (auto fidl = feedback::Encode<fuchsia::feedback::Annotations>(annotations);
-            fidl.has_annotations2()) {
-          snapshot.set_annotations2(fidl.annotations2());
-        }
+                        // Add the annotations to the FIDL object and as file in the snapshot
+                        // itself.
+                        if (fuchsia_feedback::Annotations fidl = fidl::HLCPPToNatural(
+                                feedback::Encode<fuchsia::feedback::Annotations>(annotations));
+                            fidl.annotations2().has_value()) {
+                          snapshot.annotations2(std::move(*fidl.annotations2()));
+                        }
 
-        if (archive.vmo().is_valid()) {
-          if (file_server.is_valid()) {
-            ServeArchive(std::move(archive), std::move(file_server));
-          } else {
-            snapshot.set_archive(
-                {.key = kSnapshotFilename, .value = std::move(archive).ToTransport()});
-          }
-        }
+                        if (archive.vmo().is_valid()) {
+                          if (file_server.is_valid()) {
+                            ServeArchive(std::move(archive), std::move(file_server));
+                          } else {
+                            snapshot.archive(ToSnapshotAttachment(std::move(archive)));
+                          }
+                        }
 
-        callback(std::move(snapshot));
-      });
+                        completer.Reply(std::move(snapshot));
+                      });
 }
 
 void DataProvider::GetSnapshotInternal(zx::duration timeout, const std::string& uuid,
@@ -160,8 +175,7 @@ void DataProvider::GetSnapshotInternal(zx::duration timeout, const std::string& 
   GetSnapshotInternal(timeout, uuid,
                       [callback = std::move(callback)](const feedback::Annotations& annotations,
                                                        fsl::SizedVmo archive) mutable {
-                        callback(annotations, {.key = kSnapshotFilename,
-                                               .value = std::move(archive).ToTransport()});
+                        callback(annotations, ToSnapshotAttachment(std::move(archive)));
                       });
 }
 

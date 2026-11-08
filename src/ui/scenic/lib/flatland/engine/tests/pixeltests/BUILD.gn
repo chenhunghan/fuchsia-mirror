@@ -32,7 +32,7 @@ cc_test_executable("pixeltests_with_real_display") {
   testonly = true
   deps = [ ":pixeltest_lib" ]
   sources = [ "display_compositor_pixeltest.cc" ]
-  public_configs = [ ":engine_pixeltest_config" ]
+  configs += [ ":engine_pixeltest_config" ]
 }
 
 config("engine_pixeltest_with_fake_display_config") {
@@ -44,7 +44,7 @@ cc_test_executable("pixeltests_with_fake_display") {
   testonly = true
   deps = [ ":pixeltest_lib" ]
   sources = [ "display_compositor_pixeltest.cc" ]
-  public_configs = [ ":engine_pixeltest_with_fake_display_config" ]
+  configs += [ ":engine_pixeltest_with_fake_display_config" ]
 }
 
 source_set("pixeltest_lib") {

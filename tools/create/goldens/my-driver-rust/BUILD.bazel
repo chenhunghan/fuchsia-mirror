@@ -9,6 +9,19 @@ package(
     default_visibility = ["//visibility:public"],
 )
 
+exports_files(
+    [
+        "BUILD.bazel",
+        "BUILD.gn",
+        "README.md",
+        "meta/my_driver_rust.bind",
+        "meta/my_driver_rust.cml",
+        "meta/my_driver_rust_info.json",
+        "src/lib.rs",
+    ],
+    visibility = ["//tools/create/goldens:__pkg__"],
+)
+
 fuchsia_prebuilt_package(
     name = "my_driver_rust",
     archive = "@gn_targets//tools/create/goldens/my-driver-rust:pkg",

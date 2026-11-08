@@ -3,10 +3,14 @@
 
 #include "src/developer/forensics/exceptions/handler/crash_reporter.h"
 
+#include <fidl/fuchsia.component/cpp/fidl.h>
 #include <fidl/fuchsia.driver.crash/cpp/fidl.h>
-#include <fuchsia/feedback/cpp/fidl.h>
-#include <fuchsia/sys2/cpp/fidl.h>
-#include <lib/fidl/cpp/binding_set.h>
+#include <fidl/fuchsia.exception.internal/cpp/fidl.h>
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
+#include <fidl/fuchsia.feedback/cpp/test_base.h>
+#include <fidl/fuchsia.sys2/cpp/fidl.h>
+#include <fidl/fuchsia.sys2/cpp/test_base.h>
+#include <lib/fit/function.h>
 #include <lib/syslog/cpp/macros.h>
 #include <lib/zx/process.h>
 #include <lib/zx/thread.h>
@@ -15,7 +19,9 @@
 #include <zircon/types.h>
 
 #include <memory>
+#include <optional>
 #include <queue>
+#include <string>
 #include <utility>
 
 #include <gtest/gtest.h>
@@ -24,19 +30,14 @@
 #include "src/developer/forensics/exceptions/tests/crasher_wrapper.h"
 #include "src/developer/forensics/testing/gmatchers.h"
 #include "src/developer/forensics/testing/gpretty_printers.h"  // IWYU pragma: keep
+#include "src/developer/forensics/testing/stubs/fidl_server.h"
 #include "src/developer/forensics/testing/stubs/wake_lease.h"
 #include "src/developer/forensics/testing/unit_test_fixture.h"
-#include "src/lib/fostr/fidl/fuchsia/exception/formatting.h"
 #include "src/lib/fsl/handles/object_info.h"
 
 namespace forensics {
 namespace exceptions {
 namespace handler {
-
-inline void ToString(const fuchsia::exception::ExceptionType& value, std::ostream* os) {
-  *os << value;
-}
-
 namespace {
 
 using ::testing::UnorderedElementsAreArray;
@@ -46,82 +47,55 @@ constexpr zx::duration kDefaultTimeout{zx::duration::infinite()};
 constexpr std::string kDriverUrl = "test-driver-url";
 constexpr std::string kDriverMoniker = "test-driver-moniker";
 
-class StubCrashReporter : public fuchsia::feedback::CrashReporter {
+class StubCrashReporter : public stubs::SingleBindingFidlServer<fuchsia_feedback::CrashReporter> {
  public:
-  void FileReport(fuchsia::feedback::CrashReport report, FileReportCallback callback) override {
-    reports_.push_back(std::move(report));
-
-    fuchsia::feedback::CrashReporter_FileReport_Result result;
-    result.set_response({});
-    callback(std::move(result));
+  void FileReport(FileReportRequest& request, FileReportCompleter::Sync& completer) override {
+    reports_.push_back(std::move(request.report()));
+    completer.Reply(fit::ok(fuchsia_feedback::FileReportResults{}));
   }
 
-  fidl::InterfaceRequestHandler<fuchsia::feedback::CrashReporter> GetHandler() {
-    return [this](fidl::InterfaceRequest<fuchsia::feedback::CrashReporter> request) {
-      bindings_.AddBinding(this, std::move(request));
-    };
-  }
-
-  const std::vector<fuchsia::feedback::CrashReport>& reports() const { return reports_; }
+  const std::vector<fuchsia_feedback::CrashReport>& reports() const { return reports_; }
 
  private:
-  std::vector<fuchsia::feedback::CrashReport> reports_;
-
-  fidl::BindingSet<fuchsia::feedback::CrashReporter> bindings_;
+  std::vector<fuchsia_feedback::CrashReport> reports_;
 };
 
-class StubCrashReporterDelaysResponse : public fuchsia::feedback::CrashReporter {
+class StubCrashReporterDelaysResponse
+    : public stubs::SingleBindingFidlServer<fuchsia_feedback::CrashReporter> {
  public:
-  void FileReport(fuchsia::feedback::CrashReport report, FileReportCallback callback) override {
-    pending_callbacks_.push(std::move(callback));
+  void FileReport(FileReportRequest& request, FileReportCompleter::Sync& completer) override {
+    pending_callbacks_.push(completer.ToAsync());
   }
 
   void PopResponse() {
     FX_CHECK(!pending_callbacks_.empty());
 
-    fuchsia::feedback::CrashReporter_FileReport_Result result;
-    result.set_response({});
-    pending_callbacks_.front()(std::move(result));
+    pending_callbacks_.front().Reply(fit::ok(fuchsia_feedback::FileReportResults{}));
     pending_callbacks_.pop();
   }
 
-  fidl::InterfaceRequestHandler<fuchsia::feedback::CrashReporter> GetHandler() {
-    return [this](fidl::InterfaceRequest<fuchsia::feedback::CrashReporter> request) {
-      bindings_.AddBinding(this, std::move(request));
-    };
-  }
-
  private:
-  std::queue<FileReportCallback> pending_callbacks_;
-  fidl::BindingSet<fuchsia::feedback::CrashReporter> bindings_;
+  std::queue<FileReportCompleter::Async> pending_callbacks_;
 };
 
-class StubCrashIntrospect : public fuchsia::sys2::CrashIntrospect {
+class StubCrashIntrospect : public stubs::SingleBindingFidlServer<fuchsia_sys2::CrashIntrospect> {
  public:
   struct ComponentInfo {
     std::string url;
     std::string moniker;
   };
-  void FindComponentByThreadKoid(uint64_t thread_koid, FindComponentByThreadKoidCallback callback) {
-    using namespace fuchsia::sys2;
-    if (!tids_to_component_infos_.contains(thread_koid)) {
-      fuchsia::component::Error err{fuchsia::component::Error::RESOURCE_NOT_FOUND};
-      callback(CrashIntrospect_FindComponentByThreadKoid_Result::WithErr(std::move(err)));
+  void FindComponentByThreadKoid(FindComponentByThreadKoidRequest& request,
+                                 FindComponentByThreadKoidCompleter::Sync& completer) override {
+    if (!tids_to_component_infos_.contains(request.thread_koid())) {
+      completer.Reply(fit::error(fuchsia_component::Error::kResourceNotFound));
     } else {
-      const ComponentInfo& info = tids_to_component_infos_[thread_koid];
+      const ComponentInfo& info = tids_to_component_infos_[request.thread_koid()];
 
-      ComponentCrashInfo crash_info;
-      crash_info.set_url(info.url).set_moniker(info.moniker);
+      fuchsia_sys2::ComponentCrashInfo crash_info;
+      crash_info.url(info.url).moniker(info.moniker);
 
-      callback(CrashIntrospect_FindComponentByThreadKoid_Result::WithResponse(
-          CrashIntrospect_FindComponentByThreadKoid_Response(std::move(crash_info))));
+      completer.Reply(fit::ok(std::move(crash_info)));
     }
-  }
-
-  fidl::InterfaceRequestHandler<fuchsia::sys2::CrashIntrospect> GetHandler() {
-    return [this](fidl::InterfaceRequest<fuchsia::sys2::CrashIntrospect> request) {
-      bindings_.AddBinding(this, std::move(request));
-    };
   }
 
   void AddThreadKoidToComponentInfo(uint64_t thread_koid, ComponentInfo component_info) {
@@ -130,8 +104,6 @@ class StubCrashIntrospect : public fuchsia::sys2::CrashIntrospect {
 
  private:
   std::map<uint64_t, ComponentInfo> tids_to_component_infos_;
-
-  fidl::BindingSet<fuchsia::sys2::CrashIntrospect> bindings_;
 };
 
 class DriverCrashIntrospect final : public fidl::Server<fuchsia_driver_crash::CrashIntrospect> {
@@ -165,39 +137,28 @@ class DriverCrashIntrospect final : public fidl::Server<fuchsia_driver_crash::Cr
 
 class HandlerTest : public UnitTestFixture {
  public:
+  using SendCallback = fit::function<void(const std::optional<std::string>&)>;
+
   void HandleException(
       zx::exception exception, zx::duration component_lookup_timeout,
-      CrashReporter::SendCallback callback = [](const ::fidl::StringPtr& moniker) {},
+      SendCallback callback = [](const std::optional<std::string>& moniker) {},
       bool driver_introspect = true) {
-    handler_ = std::make_unique<CrashReporter>(
-        dispatcher(), services(), component_lookup_timeout,
-        /*wake_lease=*/nullptr,
-        driver_introspect ? driver_introspect_.GetClient(dispatcher())
-                          : fidl::ClientEnd<fuchsia_driver_crash::CrashIntrospect>{});
-
     zx::process process;
     exception.get_process(&process);
 
     zx::thread thread;
     exception.get_thread(&thread);
 
-    handler_->Send(std::move(exception), std::move(process), std::move(thread),
-                   std::move(callback));
-    RunLoopUntilIdle();
+    SendToHandler(std::move(exception), std::move(process), std::move(thread),
+                  component_lookup_timeout, std::move(callback), driver_introspect);
   }
 
   void HandleException(
       zx::process process, zx::thread thread, zx::duration component_lookup_timeout,
-      CrashReporter::SendCallback callback = [](const ::fidl::StringPtr& moniker) {},
+      SendCallback callback = [](const std::optional<std::string>& moniker) {},
       bool driver_introspect = true) {
-    handler_ = std::make_unique<CrashReporter>(
-        dispatcher(), services(), component_lookup_timeout,
-        /*wake_lease=*/nullptr,
-        driver_introspect ? driver_introspect_.GetClient(dispatcher())
-                          : fidl::ClientEnd<fuchsia_driver_crash::CrashIntrospect>{});
-
-    handler_->Send(zx::exception{}, std::move(process), std::move(thread), std::move(callback));
-    RunLoopUntilIdle();
+    SendToHandler(/*exception=*/zx::exception{}, std::move(process), std::move(thread),
+                  component_lookup_timeout, std::move(callback), driver_introspect);
   }
 
   void SetUpCrashReporter() { InjectServiceProvider(&crash_reporter_); }
@@ -211,7 +172,38 @@ class HandlerTest : public UnitTestFixture {
   const StubCrashIntrospect& introspect() const { return introspect_; }
 
  private:
+  void SendToHandler(zx::exception exception, zx::process process, zx::thread thread,
+                     zx::duration component_lookup_timeout, SendCallback callback,
+                     bool driver_introspect) {
+    handler_ = std::make_unique<CrashReporter>(
+        dispatcher(), services(), component_lookup_timeout,
+        /*wake_lease=*/nullptr,
+        driver_introspect ? driver_introspect_.GetClient(dispatcher())
+                          : fidl::ClientEnd<fuchsia_driver_crash::CrashIntrospect>{});
+
+    auto [client_end, server_end] =
+        fidl::Endpoints<fuchsia_exception_internal::CrashReporter>::Create();
+    handler_binding_.emplace(dispatcher(), std::move(server_end), handler_.get(),
+                             fidl::kIgnoreBindingClosure);
+    handler_client_.Bind(std::move(client_end), dispatcher());
+
+    handler_client_
+        ->Send({{
+            .exception = std::move(exception),
+            .crashed_process = std::move(process),
+            .crashed_thread = std::move(thread),
+        }})
+        .Then([callback = std::move(callback)](
+                  fidl::Result<fuchsia_exception_internal::CrashReporter::Send>& result) {
+          ASSERT_TRUE(result.is_ok()) << result.error_value();
+          callback(result->moniker());
+        });
+    RunLoopUntilIdle();
+  }
+
   std::unique_ptr<CrashReporter> handler_{nullptr};
+  std::optional<fidl::ServerBinding<fuchsia_exception_internal::CrashReporter>> handler_binding_;
+  fidl::Client<fuchsia_exception_internal::CrashReporter> handler_client_;
 
   StubCrashReporter crash_reporter_;
   StubCrashIntrospect introspect_;
@@ -232,41 +224,38 @@ bool RetrieveExceptionContext(ExceptionContext* pe, const std::string& process_n
 
 // Utilities ---------------------------------------------------------------------------------------
 
-inline void ValidateCrashSignature(const fuchsia::feedback::CrashReport& report,
+inline void ValidateCrashSignature(const fuchsia_feedback::CrashReport& report,
                                    const std::string& crash_signature) {
-  ASSERT_TRUE(report.has_crash_signature());
-  EXPECT_EQ(report.crash_signature(), crash_signature);
+  ASSERT_TRUE(report.crash_signature().has_value());
+  EXPECT_EQ(*report.crash_signature(), crash_signature);
 }
 
-inline void ValidateCrashReport(const fuchsia::feedback::CrashReport& report,
+inline void ValidateCrashReport(const fuchsia_feedback::CrashReport& report,
                                 const std::string& expected_program_name,
                                 const std::string& expected_process_name,
                                 const zx_koid_t expected_process_koid,
                                 const std::string& expected_thread_name,
                                 const zx_koid_t expected_thread_koid,
                                 const std::map<std::string, std::string>& expected_annotations) {
-  ASSERT_TRUE(report.has_program_name());
-  EXPECT_EQ(report.program_name(), expected_program_name);
+  ASSERT_TRUE(report.program_name().has_value());
+  EXPECT_EQ(*report.program_name(), expected_program_name);
 
-  ASSERT_TRUE(report.has_specific_report());
-  ASSERT_TRUE(report.specific_report().is_native());
-  EXPECT_EQ(report.specific_report().native().process_name(), expected_process_name);
-  EXPECT_EQ(report.specific_report().native().process_koid(), expected_process_koid);
-  EXPECT_EQ(report.specific_report().native().thread_name(), expected_thread_name);
-  EXPECT_EQ(report.specific_report().native().thread_koid(), expected_thread_koid);
+  ASSERT_TRUE(report.specific_report().has_value());
+  ASSERT_TRUE(report.specific_report()->native().has_value());
+  EXPECT_EQ(report.specific_report()->native()->process_name(), expected_process_name);
+  EXPECT_EQ(report.specific_report()->native()->process_koid(), expected_process_koid);
+  EXPECT_EQ(report.specific_report()->native()->thread_name(), expected_thread_name);
+  EXPECT_EQ(report.specific_report()->native()->thread_koid(), expected_thread_koid);
 
   if (!expected_annotations.empty()) {
-    ASSERT_TRUE(report.has_annotations());
+    ASSERT_TRUE(report.annotations().has_value());
 
-    // Infer the type of |matchers|.
-    auto matchers = std::vector({MatchesAnnotation("", "")});
-    matchers.clear();
-
+    std::vector<fuchsia_feedback::Annotation> annotations;
     for (const auto& [k, v] : expected_annotations) {
-      matchers.push_back(MatchesAnnotation(k.c_str(), v.c_str()));
+      annotations.push_back(fuchsia_feedback::Annotation{{.key = k, .value = v}});
     }
 
-    EXPECT_THAT(report.annotations(), UnorderedElementsAreArray(matchers));
+    EXPECT_THAT(*report.annotations(), UnorderedElementsAreArray(annotations));
   }
 }
 
@@ -280,7 +269,7 @@ TEST_F(HandlerTest, NoIntrospectConnection) {
   bool called = false;
   std::optional<std::string> out_moniker{std::nullopt};
   HandleException(std::move(exception.exception), kDefaultTimeout,
-                  [&called, &out_moniker](const ::fidl::StringPtr& moniker) {
+                  [&called, &out_moniker](const std::optional<std::string>& moniker) {
                     called = true;
                     if (moniker.has_value()) {
                       out_moniker = moniker.value();
@@ -318,7 +307,7 @@ TEST_F(HandlerTest, NoCrashReporterConnection) {
   bool called = false;
   std::optional<std::string> out_moniker{std::nullopt};
   HandleException(std::move(exception.exception), kDefaultTimeout,
-                  [&called, &out_moniker](const ::fidl::StringPtr& moniker) {
+                  [&called, &out_moniker](const std::optional<std::string>& moniker) {
                     called = true;
                     if (moniker.has_value()) {
                       out_moniker = moniker.value();
@@ -367,7 +356,7 @@ TEST_F(HandlerTest, NoException) {
   bool called = false;
   std::optional<std::string> out_moniker{std::nullopt};
   HandleException(std::move(process), std::move(thread), zx::duration::infinite(),
-                  [&called, &out_moniker](const ::fidl::StringPtr& moniker) {
+                  [&called, &out_moniker](const std::optional<std::string>& moniker) {
                     called = true;
                     if (moniker.has_value()) {
                       out_moniker = moniker.value();
@@ -379,7 +368,7 @@ TEST_F(HandlerTest, NoException) {
   EXPECT_EQ(out_moniker.value(), "realm/path/component_name");
 
   ASSERT_EQ(crash_reporter().reports().size(), 1u);
-  const ::fuchsia::feedback::CrashReport& report = crash_reporter().reports().front();
+  const fuchsia_feedback::CrashReport& report = crash_reporter().reports().front();
 
   ValidateCrashReport(report, kComponentUrl, process_name, process_koid, thread_name, thread_koid,
                       {{kCrashProcessStateKey, "in exception"}});
@@ -422,12 +411,12 @@ TEST_F(HandlerTest, ProcessTerminated) {
 
   bool called = false;
   HandleException(std::move(exception.exception), zx::duration::infinite(),
-                  [&called](const ::fidl::StringPtr& moniker) { called = true; });
+                  [&called](const std::optional<std::string>& moniker) { called = true; });
 
   ASSERT_TRUE(called);
 
   ASSERT_EQ(crash_reporter().reports().size(), 1u);
-  const ::fuchsia::feedback::CrashReport& report = crash_reporter().reports().front();
+  const fuchsia_feedback::CrashReport& report = crash_reporter().reports().front();
 
   ValidateCrashReport(report, kComponentUrl, process_name, process_koid, "", thread_koid,
                       {
@@ -464,14 +453,14 @@ TEST_F(HandlerTest, DelayForFeedbackCrash) {
 
   bool called = false;
   HandleException(std::move(exception.exception), zx::duration::infinite(),
-                  [&called](const ::fidl::StringPtr& moniker) { called = true; });
+                  [&called](const std::optional<std::string>& moniker) { called = true; });
 
   ASSERT_FALSE(called);
   RunLoopFor(zx::sec(5));
   ASSERT_TRUE(called);
 
   ASSERT_EQ(crash_reporter().reports().size(), 1u);
-  const ::fuchsia::feedback::CrashReport& report = crash_reporter().reports().front();
+  const fuchsia_feedback::CrashReport& report = crash_reporter().reports().front();
 
   ValidateCrashReport(report, kComponentUrl, process_name, process_koid, thread_name, thread_koid,
                       {
@@ -511,7 +500,7 @@ TEST_F(HandlerTest, DriverHostCrash) {
 
   bool called = false;
   HandleException(std::move(exception.exception), zx::duration::infinite(),
-                  [&called](const ::fidl::StringPtr& moniker) {
+                  [&called](const std::optional<std::string>& moniker) {
                     EXPECT_EQ(kDriverMoniker, moniker.value());
                     called = true;
                   });
@@ -519,7 +508,7 @@ TEST_F(HandlerTest, DriverHostCrash) {
   ASSERT_TRUE(called);
 
   ASSERT_EQ(crash_reporter().reports().size(), 1u);
-  const ::fuchsia::feedback::CrashReport& report = crash_reporter().reports().front();
+  const fuchsia_feedback::CrashReport& report = crash_reporter().reports().front();
 
   ValidateCrashReport(report, kDriverUrl, process_name, process_koid, thread_name, thread_koid,
                       {
@@ -562,7 +551,7 @@ TEST_F(HandlerTest, DriverHostCrashFallback) {
 
   bool called = false;
   HandleException(std::move(exception.exception), zx::duration::infinite(),
-                  [&called, kComponentMoniker](const ::fidl::StringPtr& moniker) {
+                  [&called, kComponentMoniker](const std::optional<std::string>& moniker) {
                     EXPECT_EQ(kComponentMoniker.substr(1), moniker.value());
                     called = true;
                   });
@@ -570,7 +559,7 @@ TEST_F(HandlerTest, DriverHostCrashFallback) {
   ASSERT_TRUE(called);
 
   ASSERT_EQ(crash_reporter().reports().size(), 1u);
-  const ::fuchsia::feedback::CrashReport& report = crash_reporter().reports().front();
+  const fuchsia_feedback::CrashReport& report = crash_reporter().reports().front();
 
   ValidateCrashReport(report, kComponentUrl, process_name, process_koid, thread_name, thread_koid,
                       {
@@ -612,7 +601,7 @@ TEST_F(HandlerTest, DriverHostCrashNoDriverIntrospect) {
   // Setup without a valid driver introspect channel will cause fallback to component attribution.
   HandleException(
       std::move(exception.exception), zx::duration::infinite(),
-      [&called, kComponentMoniker](const ::fidl::StringPtr& moniker) {
+      [&called, kComponentMoniker](const std::optional<std::string>& moniker) {
         EXPECT_EQ(kComponentMoniker.substr(1), moniker.value());
         called = true;
       },
@@ -621,7 +610,7 @@ TEST_F(HandlerTest, DriverHostCrashNoDriverIntrospect) {
   ASSERT_TRUE(called);
 
   ASSERT_EQ(crash_reporter().reports().size(), 1u);
-  const ::fuchsia::feedback::CrashReport& report = crash_reporter().reports().front();
+  const fuchsia_feedback::CrashReport& report = crash_reporter().reports().front();
 
   ValidateCrashReport(report, kComponentUrl, process_name, process_koid, thread_name, thread_koid,
                       {
@@ -670,9 +659,24 @@ TEST_F(HandlerTestWithPF, HoldsWakeLeaseUntilFeedbackResponse) {
   zx::thread thread;
   exception_context.exception.get_thread(&thread);
 
+  auto [client_end, server_end] =
+      fidl::Endpoints<fuchsia_exception_internal::CrashReporter>::Create();
+  fidl::ServerBinding<fuchsia_exception_internal::CrashReporter> binding(
+      dispatcher(), std::move(server_end), &handler, fidl::kIgnoreBindingClosure);
+  fidl::Client<fuchsia_exception_internal::CrashReporter> client(std::move(client_end),
+                                                                 dispatcher());
+
   bool called = false;
-  handler.Send(std::move(exception_context.exception), std::move(process), std::move(thread),
-               [&called](const ::fidl::StringPtr& moniker) { called = true; });
+  client
+      ->Send({{
+          .exception = std::move(exception_context.exception),
+          .crashed_process = std::move(process),
+          .crashed_thread = std::move(thread),
+      }})
+      .Then([&called](fidl::Result<fuchsia_exception_internal::CrashReporter::Send>& result) {
+        ASSERT_TRUE(result.is_ok()) << result.error_value();
+        called = true;
+      });
   RunLoopUntilIdle();
 
   EXPECT_FALSE(called);

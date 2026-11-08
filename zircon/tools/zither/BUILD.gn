@@ -6,6 +6,7 @@ import("//build/fidl/fidl.gni")
 import("//build/go/go_binary.gni")
 import("//build/go/go_library.gni")
 import("//build/rust/rustc_binary.gni")
+import("//build/rust/rustc_library.gni")
 import("//build/toolchain/ifs_shared_library.gni")
 import("//tools/fidl/lib/fidlgentest/fidlgentest_go_test.gni")
 import("zither_golden_files.gni")
@@ -29,6 +30,8 @@ group("tests") {
     ":resources",
     ":structs",
     ":zx.test",
+    ":zx_test_kernel_rust_goldens",
+    ":zx_test_kernel_rust_goldens_test($host_toolchain)",
   ]
 }
 
@@ -203,6 +206,7 @@ template("zither_golden_test") {
         suffix = "cc"
       }
       source = "$case_output_dir/compile-check.$suffix"
+
       action(create_source_target) {
         visibility = [ ":*" ]
         testonly = true
@@ -297,6 +301,7 @@ template("zither_golden_test") {
             ifs = output
           }
         }
+
         ifs_shared_library(compilation_check_target) {
           abi = ifs
           deps = [ backend_label ]
@@ -624,7 +629,9 @@ zither_golden_test("zx.test") {
       files = [
         "category.inc",
         "kernel.inc",
-        "kernel-wrappers.inc",
+        "kernel_wrappers.rs",
+        "syscall_numbers.rs",
+        "syscall_sigs.rs",
         "syscalls.inc",
         "zx-syscall-numbers.h",
       ]
@@ -646,6 +653,27 @@ zither_golden_test("zx.test") {
       files = "*"
     },
   ]
+}
+
+# Compiles the Rust goldens of the kernel backend against a stubbed kernel
+# environment; its unit tests exercise the generated syscall wrappers.
+rustc_library("zx_test_kernel_rust_goldens") {
+  visibility = [ ":*" ]
+  testonly = true
+  edition = "2024"
+  source_root = "testdata/zx.test/kernel_rust_goldens.rs"
+  sources = [
+    "testdata/zx.test/goldens/kernel/kernel_wrappers.rs",
+    "testdata/zx.test/goldens/kernel/syscall_numbers.rs",
+    "testdata/zx.test/goldens/kernel/syscall_sigs.rs",
+    "testdata/zx.test/kernel_rust_goldens.rs",
+  ]
+  deps = [
+    ":_zither_golden_test.zx.test-kernel.zither_golden_files",
+    "//sdk/rust/zx-status",
+    "//sdk/rust/zx-types",
+  ]
+  with_unit_tests = "host"
 }
 
 # TODO(https://fxbug.dev/42061412): These tests reference some experimental built-in

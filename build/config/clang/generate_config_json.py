@@ -219,7 +219,7 @@ def get_shared_static_exts(clang_target: str) -> tuple[str, str]:
         return ".so", ".a"
 
 
-Tree = dict[str, T.Union[str, "Tree"]]
+type Tree = dict[str, T.Union[str, Tree]]
 
 
 def store_into_dict(d: Tree, path: str, value: str) -> None:
@@ -279,14 +279,14 @@ class CommandResult(object):
     def __init__(self) -> None:
         pass
 
-    def process(self, proc: "subprocess.Popen[str]") -> str:
+    def process(self, proc: subprocess.Popen[str]) -> str:
         if proc.returncode != 0:
             return self.process_error(proc)
         else:
             assert proc.stdout is not None
             return self.process_stdout(proc.stdout.read().strip())
 
-    def process_error(self, proc: "subprocess.Popen[str]") -> str:
+    def process_error(self, proc: subprocess.Popen[str]) -> str:
         """This method can be overridden by sub-classes"""
         return ""
 
@@ -381,26 +381,9 @@ class CommandPool(object):
         """
         running: dict[str, subprocess.Popen[str]] = {}
 
-        def poll_run_queue() -> T.Iterator[tuple[str, str]]:
-            completed = []
-            for dest, proc in running.items():
-                returncode = proc.poll()
-                if returncode is not None:
-                    completed.append((dest, info.cmd_result.process(proc)))
-
-            # Release file descriptors as early as possible.
-            del proc  # Python does not have lexical scopes. 🤦
-            for dest, _ in completed:
-                del running[dest]
-
-            yield from completed
-
-            if not completed:
-                time.sleep(0.01)  # 10ms
-
         for dest, info in self._commands.items():
             while len(running) == self._depth:
-                yield from poll_run_queue()
+                yield from self._poll(running)
 
             running[dest] = subprocess.Popen(
                 info.cmd_args,
@@ -410,7 +393,39 @@ class CommandPool(object):
             )
 
         while running:
-            yield from poll_run_queue()
+            yield from self._poll(running)
+
+    def _poll(
+        self, running: dict[str, "subprocess.Popen[str]"]
+    ) -> list[tuple[str, str]]:
+        """Process and remove the finished commands in |running|.
+
+        This is a method rather than a closure in run() so that it cannot
+        refer to run()'s loop variables by mistake: each finished command
+        must be processed with its own CommandResult, found by its |dest|.
+
+        Args:
+            running: The commands still running, keyed by their |dest|.
+               Finished commands are removed from it, which releases
+               their file descriptors.
+
+        Returns:
+            (dest, value) pairs for the commands that finished. When none
+            have, sleeps briefly and returns an empty list.
+        """
+        completed = []
+        for dest, proc in running.items():
+            if proc.poll() is not None:
+                result = self._commands[dest].cmd_result
+                completed.append((dest, result.process(proc)))
+
+        for dest, _ in completed:
+            del running[dest]
+
+        if not completed:
+            time.sleep(0.01)  # 10ms
+
+        return completed
 
 
 def main() -> int:

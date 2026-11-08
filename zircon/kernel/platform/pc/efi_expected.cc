@@ -4,8 +4,11 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+#include <ktl/string_view.h>
 #include <platform/efi.h>
 #include <platform/pc.h>
+
+#include <ktl/enforce.h>
 
 namespace {
 

@@ -11,8 +11,7 @@
 #include <string>
 #include <vector>
 
-#include <re2/re2.h>
-
+#include "re2/re2.h"
 #include "src/lib/fxl/macros.h"
 
 enum StackLevel { kNoStack = 0, kPartialStack = 1, kFullStack = 2 };

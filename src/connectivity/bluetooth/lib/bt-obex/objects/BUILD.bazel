@@ -12,6 +12,12 @@ load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package
 
 package(default_applicable_licenses = ["//:license"])
 
+test_suite(
+    name = "tests",
+    tests = [":bt-obex-objects-tests"],
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)
+
 exports_files(
     ["test/bad_sample.xml"],
     visibility = ["//src/connectivity/bluetooth/lib/bt-map:__pkg__"],
@@ -78,5 +84,4 @@ fx_unittest_package(
     name = "bt-obex-objects-tests",
     resources = [":objects-test-files"],
     unit_tests = [":objects_test"],
-    visibility = ["//src/connectivity/bluetooth:__pkg__"],
 )

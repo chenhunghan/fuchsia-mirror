@@ -1,0 +1,57 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//src/developer/ffx/lib/e2e_emu/ffx_e2e_test.gni")
+
+if (is_host) {
+  _common_sources = [
+    "src/harness.rs",
+    "src/tests.rs",
+  ]
+
+  _common_deps = [
+    "//src/developer/ffx/config:lib",
+    "//src/developer/ffx/lib/executor:lib",
+    "//src/developer/ffx/lib/isolate:lib",
+    "//src/developer/ffx/lib/uart_driver_api:lib",
+    "//src/developer/lib/uart_fpl",
+    "//src/lib/fuchsia",
+    "//third_party/rust_crates:serde_json",
+    "//third_party/rust_crates:tempfile",
+  ]
+
+  _common_data_deps =
+      [ "//src/developer/ffx/tools/uart:ffx_uart($host_toolchain)" ]
+
+  ffx_e2e_test("ffx_uart_e2e_test") {
+    edition = "2024"
+    source_root = "src/tests.rs"
+    sources = _common_sources
+    args = [ "--test-threads=1" ]
+    deps = _common_deps
+    data_deps = _common_data_deps
+  }
+
+  ffx_e2e_test("ffx_uart_smoke_test") {
+    edition = "2024"
+    source_root = "src/tests.rs"
+    sources = _common_sources
+    args = [
+      "--test-threads=1",
+      "test_smoke",
+    ]
+    deps = _common_deps
+    data_deps = _common_data_deps
+  }
+}
+
+group("e2e_tests") {
+  testonly = true
+  deps = [ ":ffx_uart_e2e_test($host_toolchain)" ]
+}
+
+group("smoke_tests") {
+  testonly = true
+  deps = [ ":ffx_uart_smoke_test($host_toolchain)" ]
+}

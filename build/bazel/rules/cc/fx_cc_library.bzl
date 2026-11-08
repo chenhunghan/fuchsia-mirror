@@ -7,6 +7,7 @@ load(
     "BUILD_FLAGS_CC_MACRO_ATTRS",
     "wrap_cc_macro_args_with_build_flags",
 )
+load("@rules_cc//cc:cc_rules_extension_support.bzl", _cc_library_for_inherit_attrs = "cc_library")
 load("@rules_cc//cc:defs.bzl", "cc_library")
 
 def _fx_cc_library_impl(
@@ -39,9 +40,7 @@ fx_cc_library = macro(
     disable_build_flags. These will not affect dependencies.
     """,
     implementation = _fx_cc_library_impl,
-    # TODO(https://fxbug.dev/446694542): Remove `native.` once the
-    # `cc_library()` wrapper is a symbolic macro.
-    inherit_attrs = native.cc_library,
+    inherit_attrs = _cc_library_for_inherit_attrs,
     attrs = {
         "configs": attr.string_list(
             doc = "Unused in Bazel, for GN conversion only.",

@@ -379,6 +379,66 @@ TEST_F(TaskTest, RemoveTaskTest) {
   EXPECT_EQ(frame_status_error_, TASK_REMOVE_STATUS_OK);
 }
 
+TEST_F(TaskTest, UseAfterFreeRegressionTest) {
+  mock_mmio::Region fake_regs(sizeof(uint32_t), kNumberOfMmios);
+  auto task_id = SetupForFrameProcessing(fake_regs);
+
+  struct SyncState {
+    std::mutex lock;
+    std::condition_variable cv;
+    bool removed = false;
+    task_remove_status_t status = TASK_REMOVE_STATUS_ERROR_INVALID;
+  } sync;
+  const hw_accel_remove_task_callback_t sync_remove_callback = {
+      .task_removed =
+          [](void* ctx, task_remove_status_t status) {
+            auto* state = static_cast<SyncState*>(ctx);
+            std::lock_guard lock(state->lock);
+            state->removed = true;
+            state->status = status;
+            state->cv.notify_one();
+          },
+      .ctx = &sync,
+  };
+  struct StopOnExit {
+    GdcDevice* device;
+    ~StopOnExit() { device->StopThread(); }
+  } stop_on_exit{gdc_device_.get()};
+
+  uint32_t sync_task_id = 0;
+  ASSERT_OK(gdc_device_->GdcInitTask(&input_buffer_collection_, &output_buffer_collection_,
+                                     &input_image_format_, output_image_format_table_, 1, 0,
+                                     &config_info_, 1, &frame_callback_, &res_callback_,
+                                     &sync_remove_callback, &sync_task_id));
+
+  // Gate the processing thread in WaitForInterrupt on an initial frame so task_id remains in
+  // task_map_ while RemoveTask and subsequent operations for task_id are queued behind it.
+  ASSERT_OK(gdc_device_->GdcProcessFrame(task_id, 0, 0));
+
+  gdc_device_->GdcRemoveTask(task_id);
+  EXPECT_OK(gdc_device_->GdcSetOutputResolution(task_id, 1));
+  EXPECT_OK(gdc_device_->GdcProcessFrame(task_id, 1, 0));
+  gdc_device_->GdcRemoveTask(task_id);
+  gdc_device_->GdcRemoveTask(sync_task_id);
+
+  // Unblock the initial frame (plus an extra packet so unfixed code would not block on the second
+  // frame) and wait for the trailing sync_task_id removal to prove the queue drained past task_id.
+  zx_port_packet packet = {kPortKeyDebugFakeInterrupt, ZX_PKT_TYPE_USER, ZX_OK, {}};
+  ASSERT_OK(port_.queue(&packet));
+  ASSERT_OK(port_.queue(&packet));
+
+  {
+    std::unique_lock lock(sync.lock);
+    sync.cv.wait(lock, [&sync] { return sync.removed; });
+    EXPECT_EQ(TASK_REMOVE_STATUS_OK, sync.status);
+  }
+
+  WaitForRemoveTaskAndReset();
+  EXPECT_EQ(frame_status_error_, TASK_REMOVE_STATUS_OK);
+  EXPECT_EQ(1u, GetCallbackSize());
+  ASSERT_OK(gdc_device_->StopThread());
+}
+
 TEST_F(TaskTest, ProcessInvalidFrameTest) {
   mock_mmio::Region fake_regs(sizeof(uint32_t), kNumberOfMmios);
 

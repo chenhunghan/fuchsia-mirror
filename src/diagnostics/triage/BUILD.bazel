@@ -1,0 +1,182 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host:defs.bzl", "rustc_binary_host_tool")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/host_tests:host_test_data.bzl", "host_test_data_map")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+exports_files(
+    [
+        "test_data/config/annotation_tests.triage",
+        "test_data/config/error_rate.triage",
+        "test_data/config/log_tests.triage",
+        "test_data/config/map_fold.triage",
+        "test_data/config/other.triage",
+        "test_data/config/sample.triage",
+        "test_data/config/sample_bundle.json",
+        "test_data/config/sample_bundle_file_type_error.json",
+        "test_data/config/sample_bundle_files_error.json",
+        "test_data/config/sample_tags.triage",
+        "test_data/snapshot/annotations.json",
+        "test_data/snapshot/inspect.json",
+    ],
+    visibility = ["//src/developer/ffx/tools/triage:__pkg__"],
+)
+
+# Needed for testing on host
+# Any data that is needed for a test should be included in this list.
+# @bazel2gn:skip
+_TEST_CONFIG_FILES = [
+    "test_data/config/annotation_tests.triage",
+    "test_data/config/bad_repeat.triage",
+    "test_data/config/count_test.triage",
+    "test_data/config/error_rate.triage",
+    "test_data/config/log_tests.triage",
+    "test_data/config/map_fold.triage",
+    "test_data/config/missing_file_bug.triage",
+    "test_data/config/other.triage",
+    "test_data/config/sample.triage",
+    "test_data/config/sample_bundle.json",
+    "test_data/config/sample_bundle_file_type_error.json",
+    "test_data/config/sample_bundle_files_error.json",
+    "test_data/config/sample_checked_ratio.json",
+    "test_data/config/sample_tags.triage",
+]
+
+# @bazel2gn:skip
+_TEST_SNAPSHOT_FILES = [
+    "test_data/snapshot/annotations.json",
+    "test_data/snapshot/inspect.json",
+]
+
+# If this path changes then the integration.rs file needs to be updated
+# to look in the correct place.
+# @bazel2gn:skip
+_TEST_DATA_OUTS = [
+    "triage",
+] + [
+    "test_data/triage/config/" + f.removeprefix("test_data/config/")
+    for f in _TEST_CONFIG_FILES
+] + [
+    "test_data/triage/snapshot/" + f.removeprefix("test_data/snapshot/")
+    for f in _TEST_SNAPSHOT_FILES
+]
+
+# Copy test data and the `triage` binary into the package output directory so
+# local test runs (where current_exe() resolves the runtime_dir symlink) find
+# them alongside the test binary.
+# @bazel2gn:skip
+genrule(
+    name = "test_data_files",
+    testonly = True,
+    srcs = _TEST_CONFIG_FILES + _TEST_SNAPSHOT_FILES + [":triage_bin"],
+    outs = _TEST_DATA_OUTS,
+    cmd = " && ".join([
+        "mkdir -p $(RULEDIR)/test_data/triage/config $(RULEDIR)/test_data/triage/snapshot",
+        "cp -f $(location :triage_bin) $(RULEDIR)/triage",
+        "chmod +x $(RULEDIR)/triage",
+    ] + [
+        "cp -f $(location " + f + ") $(RULEDIR)/test_data/triage/config/"
+        for f in _TEST_CONFIG_FILES
+    ] + [
+        "cp -f $(location " + f + ") $(RULEDIR)/test_data/triage/snapshot/"
+        for f in _TEST_SNAPSHOT_FILES
+    ]),
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+# Needed to generate the runtime deps file which is used in CQ for sandboxing
+# Need to indicate our dependencies for host side integration testing
+# @bazel2gn:skip
+host_test_data_map(
+    name = "test_data",
+    testonly = True,
+    files_map = {
+        out: ":" + out
+        for out in _TEST_DATA_OUTS
+    },
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+rustc_library(
+    name = "triage_app_lib",
+    srcs = [
+        "src/app.rs",
+        "src/config.rs",
+        "src/file_io.rs",
+        "src/lib.rs",
+    ],
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    visibility = [
+        "//src/developer/ffx/tools/triage:__pkg__",
+        "//src/diagnostics/triage/build/triage_config_test_runner:__pkg__",
+    ],
+    deps = [
+        "//src/diagnostics/lib/triage",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:clap",
+        "//third_party/rust_crates/vendor:serde_json",
+    ],
+)
+
+# we need to take a dependency on our bin because our integration tests invoke
+# it
+# Uses runtime test_data, which bazel2gn cannot translate; exported via
+# //src/diagnostics:host_tests while BUILD.gn retains the GN copy for dual-build
+# coverage.
+# @bazel2gn:skip
+host_rustc_test(
+    name = "triage_lib_test",
+    srcs = [
+        "src/app.rs",
+        "src/config.rs",
+        "src/file_io.rs",
+        "src/lib.rs",
+        "src/test.rs",
+        "src/test/integration.rs",
+    ],
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    test_data = [
+        ":test_data",
+        ":triage_bin",
+    ],
+    visibility = ["//src/diagnostics:__pkg__"],
+    deps = [
+        "//src/diagnostics/lib/triage",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:clap",
+        "//third_party/rust_crates/vendor:serde_json",
+    ],
+)
+
+# Brought into GN via bazel_host_tool("triage_bin") in BUILD.gn.
+# Triage host tool performs poorly when built with asan or profile.
+# @bazel2gn:skip
+rustc_binary_host_tool(
+    name = "triage_bin",
+    srcs = ["src/main.rs"],
+    crate_name = "triage",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    tags = [
+        "exclude_toolchain_tags=asan",
+        "exclude_toolchain_tags=profile",
+    ],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        ":triage_app_lib",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:clap",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)

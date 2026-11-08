@@ -15,6 +15,7 @@ rustc_test("runner_bin") {
     "//src/lib/fidl/rust/fidl",
     "//src/lib/fuchsia",
     "//src/lib/fuchsia-component-test",
+    "//src/sys/lib/cm_rust",
     "//third_party/rust_crates:anyhow",
     "//tools/fidl/example-tester:example_tester",
   ]

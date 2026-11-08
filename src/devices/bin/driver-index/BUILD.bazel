@@ -1,0 +1,132 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rbe:rbe.bzl", "RBE_USE_LARGE_WORKER")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/components:structured_config.bzl",
+    "fuchsia_structured_config_rust_lib",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "driver-index",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/driver-index.cml",
+)
+
+fuchsia_structured_config_rust_lib(
+    name = "driver_index_config",
+    cm_label = ":manifest",
+)
+
+# As this is a large binary that uses many resources to compile (and takes
+# minutes when LTO is enabled, shift it to the large RBE worker pool)
+# Generates a GN target for unit-tests with the label `bin_test`, and
+# a binary named `driver_index_bin_test`.
+# @bazel2gn:raw_attribute:_concurrent_jobs = concurrent_jobs.link_highmem
+# @bazel2gn:raw_attribute:configs += _concurrent_jobs.configs
+# @bazel2gn:raw_attribute:forward_variables_from(_concurrent_jobs.vars, "*")
+rustc_binary(
+    name = "bin",
+    srcs = [
+        "src/composite_helper.rs",
+        "src/composite_node_spec_manager.rs",
+        "src/driver_loading_fuzzer.rs",
+        "src/escrow_support.rs",
+        "src/indexer.rs",
+        "src/load_driver.rs",
+        "src/main.rs",
+        "src/match_common.rs",
+        "src/resolved_driver.rs",
+        "src/rkyv_ext.rs",
+        "src/test_common.rs",
+    ],
+    binary_name = "driver_index",
+    build_flags = ["//build/config/rust:bootfs"],
+    edition = "2024",
+    # `concurrent_jobs.link_highmem` is synced to GN via `@bazel2gn:raw_attribute` above.
+    # @bazel2gn:skip
+    exec_properties = RBE_USE_LARGE_WORKER,
+    tags = ["manual"],
+    deps = [
+        ":driver_index_config",
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component.resolution:fuchsia.component.resolution_rust",
+        "//sdk/fidl/fuchsia.data:fuchsia.data_rust",
+        "//sdk/fidl/fuchsia.driver.development:fuchsia.driver.development_rust",
+        "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust",
+        "//sdk/fidl/fuchsia.driver.index:fuchsia.driver.index_rust",
+        "//sdk/fidl/fuchsia.driver.registrar:fuchsia.driver.registrar_rust",
+        "//sdk/fidl/fuchsia.driver.test:fuchsia.driver.test_rust",
+        "//sdk/rust/zx",
+        "//src/devices/lib/bind:lib",
+        "//src/lib/detect-stall",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-runtime",
+        "//src/lib/fuchsia-sync",
+        "//src/sys/lib/cm_types",
+        "//src/sys/lib/fidl-fuchsia-pkg-ext",
+        "//src/sys/lib/mem_util",
+        "//src/sys/pkg/lib/fuchsia-hash",
+        "//src/sys/pkg/lib/fuchsia-pkg",
+        "//third_party/lz4/rust:lz4",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:rand",
+        "//third_party/rust_crates/vendor:rkyv",
+        "//third_party/rust_crates/vendor:serde",
+    ],
+)
+
+# @bazel2gn:raw_attribute:_concurrent_jobs = concurrent_jobs.link_highmem
+# @bazel2gn:raw_attribute:configs += _concurrent_jobs.configs
+# @bazel2gn:raw_attribute:forward_variables_from(_concurrent_jobs.vars, "*")
+rustc_test(
+    name = "bin_test",
+    build_flags = ["//build/config/rust:bootfs"],
+    crate = ":bin",
+    # Keep the `driver_index_bin_test` binary name expected by
+    # `meta/driver-index-unittests.cml`.
+    crate_name = "driver_index_bin_test",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.mem:fuchsia.mem_rust",
+        "//src/lib/fuchsia-fs",
+        "//third_party/rust_crates/vendor:url",
+    ],
+)
+
+fx_packaged_binary(
+    name = "driver_index_packaged_bin",
+    binary = ":bin",
+    binary_name = "driver_index",
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":manifest",
+    visibility = [
+        "//sdk/lib/driver_test_realm:__pkg__",
+        "//src/devices/tests/ddk-firmware-test:__pkg__",
+    ],
+    deps = [":driver_index_packaged_bin"],
+)

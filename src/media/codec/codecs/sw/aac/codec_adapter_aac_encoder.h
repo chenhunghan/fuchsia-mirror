@@ -64,11 +64,9 @@ class CodecAdapterAacEncoder : public CodecAdapter {
   using Encoder = std::unique_ptr<AACENCODER, fit::function<void(AACENCODER*)>>;
 
   enum InputError {
-    kNotAudio,
     kNotPcm,
     kNot16Bit,
     kNotLinear,
-    kCompressed,
   };
 
   enum SettingsError {
@@ -112,11 +110,11 @@ class CodecAdapterAacEncoder : public CodecAdapter {
   fpromise::result<void, CodecAdapterAacEncoder::Error> BuildStreamFromFormatDetails(
       const fuchsia::media::FormatDetails& format_details);
 
-  fpromise::result<fuchsia::media::PcmFormat, InputError> ValidateInputFormat(
+  fpromise::result<void, InputError> ValidateInputFormat(
       const fuchsia::media::FormatDetails& format_details);
 
   fpromise::result<Encoder, Error> CreateEncoder(
-      const fuchsia::media::PcmFormat& pcm_format,
+      const fuchsia::media::PcmFormat2& pcm_format,
       const fuchsia::media::AacEncoderSettings& encoder_settings);
 
   ChunkInputStream::ControlFlow ProcessInputBlock(ChunkInputStream::InputBlock input_block);

@@ -32,20 +32,25 @@ pub struct AccessVector(u32);
 impl AccessVector {
     pub const NONE: Self = Self(0);
     pub const ALL: Self = Self(u32::MAX);
+    /// Maximum number of permissions in an object class (and bit width of an [`AccessVector`]).
+    pub const MAX_PERMISSIONS: usize = u32::BITS as usize;
 
     /// Returns the raw access vector value.
+    #[inline]
     pub fn value(&self) -> u32 {
         self.0
     }
 }
 
 impl From<u32> for AccessVector {
+    #[inline]
     fn from(value: u32) -> Self {
         Self(value)
     }
 }
 
 impl From<AccessVector> for u32 {
+    #[inline]
     fn from(value: AccessVector) -> Self {
         value.0
     }
@@ -75,6 +80,7 @@ impl FromStr for AccessVector {
 impl BitAnd for AccessVector {
     type Output = Self;
 
+    #[inline]
     fn bitand(self, rhs: Self) -> Self::Output {
         Self(self.0 & rhs.0)
     }
@@ -83,24 +89,28 @@ impl BitAnd for AccessVector {
 impl BitOr for AccessVector {
     type Output = Self;
 
+    #[inline]
     fn bitor(self, rhs: Self) -> Self::Output {
         Self(self.0 | rhs.0)
     }
 }
 
 impl BitAndAssign for AccessVector {
+    #[inline]
     fn bitand_assign(&mut self, rhs: Self) {
         self.0 &= rhs.0
     }
 }
 
 impl BitOrAssign for AccessVector {
+    #[inline]
     fn bitor_assign(&mut self, rhs: Self) {
         self.0 |= rhs.0
     }
 }
 
 impl SubAssign for AccessVector {
+    #[inline]
     fn sub_assign(&mut self, rhs: Self) {
         self.0 = self.0 ^ (self.0 & rhs.0);
     }
@@ -109,6 +119,7 @@ impl SubAssign for AccessVector {
 impl Sub for AccessVector {
     type Output = Self;
 
+    #[inline]
     fn sub(self, rhs: Self) -> Self::Output {
         Self(self.0 ^ (self.0 & rhs.0))
     }
@@ -117,6 +128,7 @@ impl Sub for AccessVector {
 impl Not for AccessVector {
     type Output = Self;
 
+    #[inline]
     fn not(self) -> Self {
         Self(!self.0)
     }

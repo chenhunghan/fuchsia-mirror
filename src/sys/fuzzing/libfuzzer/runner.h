@@ -16,8 +16,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include <re2/re2.h>
-
+#include "re2/re2.h"
 #include "src/sys/fuzzing/common/async-types.h"
 #include "src/sys/fuzzing/common/child-process.h"
 #include "src/sys/fuzzing/common/input.h"

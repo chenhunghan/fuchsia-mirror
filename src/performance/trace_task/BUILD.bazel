@@ -1,0 +1,84 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+# This library is intended to be runnable both on the host and device.
+
+package(default_applicable_licenses = ["//:license"])
+
+# Both trace_task and trace_task_fdomain compile the exact same Rust source
+# files. Unit tests are enabled on the fdomain trace_task target
+# (:trace_task_fdomain) and disabled on the legacy trace_task (with_unit_tests =
+# false) to avoid compiling and running duplicate unit test binaries across both
+# FIDL backend variants.
+rustc_library(
+    name = "trace_task",
+    srcs = [
+        "src/lib.rs",
+        "src/trace_task.rs",
+        "src/triggers.rs",
+    ],
+    edition = "2024",
+    link_deps = ["//third_party/zstd"],
+    visibility = ["//src/performance/trace_session_manager:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.tracing.controller:fuchsia.tracing.controller_rust_flex",
+        "//src/lib/fdomain/client:flex_fidl",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:async-channel",
+        "//third_party/rust_crates/vendor:async-lock",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:zstd",
+    ],
+)
+
+rustc_library(
+    name = "trace_task_fdomain",
+    srcs = [
+        "src/lib.rs",
+        "src/trace_task.rs",
+        "src/triggers.rs",
+    ],
+    edition = "2024",
+    link_deps = ["//third_party/zstd"],
+    visibility = ["//src/developer/ffx/plugins/trace:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.tracing.controller:fuchsia.tracing.controller_rust_fdomain_flex",
+        "//src/lib/fdomain/client:flex_fdomain",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:async-channel",
+        "//third_party/rust_crates/vendor:async-lock",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:zstd",
+    ],
+)
+
+rustc_test(
+    name = "trace_task_fdomain_test",
+    crate = ":trace_task_fdomain",
+    deps = [
+        "//src/lib/fdomain/local",
+        "//src/lib/fuchsia",
+    ] + select({
+        "@platforms//os:fuchsia": [],
+        "//conditions:default": [
+            "//third_party/rust_crates/vendor:async-fs",
+            "//third_party/rust_crates/vendor:tempfile",
+        ],
+    }),
+)
+
+wrap_host_rust_test(
+    name = "trace_task_fdomain_host_test",
+    binary_name = "trace_task_fdomain_test",
+)

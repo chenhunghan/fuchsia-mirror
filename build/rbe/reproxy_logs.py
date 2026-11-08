@@ -151,7 +151,7 @@ class ReproxyLog(object):
 
     def diff_by_outputs(
         self,
-        other: "ReproxyLog",
+        other: ReproxyLog,
         eq_comparator: Callable[[log_pb2.LogRecord, log_pb2.LogRecord], bool],
     ) -> Iterable[tuple[Path, log_pb2.LogRecord, log_pb2.LogRecord]]:
         """Compare actions output-by-output.

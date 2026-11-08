@@ -83,18 +83,23 @@ class ScenicMetricsProcessor(trace_metrics.MetricsProcessor):
     ) -> MutableSequence[metrics.TestCaseResult]:
         # This method looks for a possible race between trace event start in Scenic and magma.
         # We can safely skip these events. See https://fxbug.dev/322849857 for more details.
-        model = trace_utils.adjust_to_common_process_start(
+        common_start_time = trace_utils.get_common_process_start_time(
             model,
             _SCENIC_START_EVENT_NAME,
             category=_EVENT_CATEGORY,
             type=trace_model.DurationEvent,
         )
 
-        scenic_start_events = self._get_scenic_start_events(model)
+        scenic_start_events = self._get_scenic_start_events(
+            model, min_start=common_start_time
+        )
         tracing_events: list[_ScenicTracingEvent] = []
         for e in scenic_start_events:
             render_event = trace_utils.get_nearest_following_flow_event(
-                e, _EVENT_CATEGORY, _SCENIC_RENDER_EVENT_NAME
+                e,
+                _EVENT_CATEGORY,
+                _SCENIC_RENDER_EVENT_NAME,
+                min_start=common_start_time,
             )
             if render_event is None:
                 continue
@@ -102,7 +107,10 @@ class ScenicMetricsProcessor(trace_metrics.MetricsProcessor):
             if not render_event.duration:
                 continue
             vsync_ready_event = trace_utils.get_nearest_following_flow_event(
-                render_event, _EVENT_CATEGORY, _DISPLAY_VSYNC_READY_EVENT_NAME
+                render_event,
+                _EVENT_CATEGORY,
+                _DISPLAY_VSYNC_READY_EVENT_NAME,
+                min_start=common_start_time,
             )
             if vsync_ready_event is None:
                 continue
@@ -134,7 +142,7 @@ class ScenicMetricsProcessor(trace_metrics.MetricsProcessor):
         # We know `render_event` and `start_event` run on the same thread.
         tid = tracing_events[0].render_event.tid
         running_durations = _get_thread_running_durations(
-            model, tid, frame_windows
+            model, tid, frame_windows, min_start=common_start_time
         )
         cpu_render_times = [d.to_milliseconds_f() for d in running_durations]
 
@@ -179,7 +187,9 @@ class ScenicMetricsProcessor(trace_metrics.MetricsProcessor):
         return test_case_results
 
     def _get_scenic_start_events(
-        self, model: trace_model.Model
+        self,
+        model: trace_model.Model,
+        min_start: trace_time.TimePoint | None = None,
     ) -> list[trace_model.DurationEvent]:
         # Filter out squashed frames by checking for the latest `frame_number` instances.
         # If Scenic's frame scheduler applies updates and then decides that no frame needs to be
@@ -194,6 +204,8 @@ class ScenicMetricsProcessor(trace_metrics.MetricsProcessor):
             name=_SCENIC_START_EVENT_NAME,
             type=trace_model.DurationEvent,
         ):
+            if min_start is not None and event.start < min_start:
+                continue
             frame_number = event.args.get(_FRAME_NUMBER_ARG_NAME)
             if frame_number is None:
                 raise ValueError(
@@ -207,7 +219,7 @@ class ScenicMetricsProcessor(trace_metrics.MetricsProcessor):
                 rendered_scenic_start_events[frame_number] = event
 
         scenic_start_events = list(rendered_scenic_start_events.values())
-        scenic_start_events.sort(key=lambda e: e.start)
+        scenic_start_events.sort(key=lambda e: e.start.to_epoch_nanoseconds())
         return scenic_start_events
 
 
@@ -215,6 +227,7 @@ def _get_thread_running_durations(
     model: trace_model.Model,
     tid: int,
     windows: list[tuple[trace_time.TimePoint, trace_time.TimePoint]],
+    min_start: trace_time.TimePoint | None = None,
 ) -> list[trace_time.TimeDelta]:
     """Calculates the active running time of a thread for a list of time windows
     using an optimized two-pointer sweep over the thread's running segments and
@@ -224,6 +237,7 @@ def _get_thread_running_durations(
       model: Trace model.
       tid: Thread id.
       windows: Sorted list of time windows, each containing a start and end time.
+      min_start: Optional minimum start timestamp for scheduling records.
 
     Returns:
       List of time deltas representing the active running time of the thread
@@ -251,8 +265,9 @@ def _get_thread_running_durations(
             for r in records
             if isinstance(r, trace_model.ContextSwitch)
             and (r.tid == tid or r.outgoing_tid == tid)
+            and (min_start is None or r.start >= min_start)
         ]
-        thread_switches.sort(key=lambda r: r.start)
+        thread_switches.sort(key=lambda r: r.start.to_epoch_nanoseconds())
 
         # Construct segments from the sorted thread switches
         i = 0

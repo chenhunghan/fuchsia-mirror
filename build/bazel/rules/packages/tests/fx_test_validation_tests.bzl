@@ -33,6 +33,11 @@ _ENVIRONMENT_CASES = [
         "Unknown `emulator` field 'uefi'",
     ),
     (
+        "allow_internet_without_emulator",
+        {"dimensions": _AEMU_DIMENSIONS, "allow_internet": True},
+        "`allow_internet` requires `emulator`.",
+    ),
+    (
         "emulator_without_name",
         {"dimensions": _AEMU_DIMENSIONS, "emulator": {"device": "x64-emu-min"}},
         "`emulator` requires a unique 'name'.",

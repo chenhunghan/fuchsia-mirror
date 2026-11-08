@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 #include <fidl/fuchsia.hardware.pci/cpp/wire.h>
+#include <lib/driver/logging/cpp/logger.h>
 #include <lib/driver/mmio/cpp/mmio-buffer.h>
 #include <lib/fidl/cpp/wire/string_view.h>
 #include <lib/fidl/cpp/wire/traits.h>
@@ -37,8 +38,8 @@ void Bus::GetDevices(GetDevicesCompleter::Sync& completer) {
     fbl::AutoLock device_lock(device->dev_lock());
     auto& cfg = device->config();
     if (dev_idx >= PciFidl::wire::kMaxDevices) {
-      zxlogf(DEBUG, "device %s exceeds fuchsia.hardware.pci Device limit of %u Devices.",
-             cfg->addr(), PciFidl::wire::kMaxDevices);
+      fdf::debug("device {} exceeds fuchsia.hardware.pci Device limit of {} Devices.", cfg->addr(),
+                 PciFidl::wire::kMaxDevices);
       break;
     }
     devices[dev_idx].bus_id = cfg->bdf().bus_id;
@@ -47,7 +48,7 @@ void Bus::GetDevices(GetDevicesCompleter::Sync& completer) {
 
     fidl::VectorView<uint8_t> config(allocator, pci::kBaseConfigSize);
     for (uint16_t cfg_idx = 0; cfg_idx < pci::kBaseConfigSize; cfg_idx++) {
-      config[cfg_idx] = cfg->Read(PciReg8(static_cast<uint8_t>(cfg_idx)));
+      config[cfg_idx] = cfg->Read<uint8_t>(cfg_idx);
     }
 
     size_t bar_cnt = device->bar_count();
@@ -60,10 +61,13 @@ void Bus::GetDevices(GetDevicesCompleter::Sync& completer) {
         bars[i].is_64bit = bar->is_64bit;
         bars[i].size = bar->size;
         // Read the currently configured address in the bar.
-        bars[i].address =
-            cfg->Read(Config::kBar(i)) & (bar->is_mmio ? kBarMmioAddrMask : kBarPioAddrMask);
+        auto reg = config::BaseAddress(static_cast<uint32_t>(i)).ReadFrom(cfg.get());
+        bars[i].address = bar->is_mmio ? reg.mmio().base_address() : reg.io().base_address();
         if (bar->is_64bit) {
-          bars[i].address |= static_cast<uint64_t>(cfg->Read(Config::kBar(i + 1))) << 32;
+          bars[i].address |=
+              static_cast<uint64_t>(
+                  config::BaseAddress(static_cast<uint32_t>(i + 1)).ReadFrom(cfg.get()).reg_value())
+              << 32u;
         }
         bars[i].id = bar->bar_id;
       }
@@ -74,8 +78,8 @@ void Bus::GetDevices(GetDevicesCompleter::Sync& completer) {
     size_t cap_idx = 0;
     for (const auto& cap : device->capabilities().list) {
       if (cap_idx >= PciFidl::wire::kMaxCapabilities) {
-        zxlogf(DEBUG, "device %s exceeds fuchsia.hardware.pci Capability limit of %u Capabilities.",
-               cfg->addr(), PciFidl::wire::kMaxCapabilities);
+        fdf::debug("device {} exceeds fuchsia.hardware.pci Capability limit of {} Capabilities.",
+                   cfg->addr(), PciFidl::wire::kMaxCapabilities);
         break;
       }
       capabilities[cap_idx].id = cap->id();
@@ -88,10 +92,10 @@ void Bus::GetDevices(GetDevicesCompleter::Sync& completer) {
     size_t ext_cap_idx = 0;
     for (const auto& cap : device->capabilities().ext_list) {
       if (ext_cap_idx >= PciFidl::wire::kMaxExtCapabilities) {
-        zxlogf(DEBUG,
-               "device %s exceeds fuchsia.hardware.pci Extended Capability limit of %u Extended "
-               "Capabilities.",
-               cfg->addr(), PciFidl::wire::kMaxExtCapabilities);
+        fdf::debug(
+            "device {} exceeds fuchsia.hardware.pci Extended Capability limit of {} Extended "
+            "Capabilities.",
+            cfg->addr(), PciFidl::wire::kMaxExtCapabilities);
         break;
       }
       ext_capabilities[ext_cap_idx].id = cap->id();
@@ -110,10 +114,10 @@ void Bus::GetDevices(GetDevicesCompleter::Sync& completer) {
 
 void Bus::GetHostBridgeInfo(GetHostBridgeInfoCompleter::Sync& completer) {
   PciFidl::wire::HostBridgeInfo info = {
-      .name = fidl::StringView::FromExternal(info_.name),
-      .start_bus_number = info_.start_bus_num,
-      .end_bus_number = info_.end_bus_num,
-      .segment_group = info_.segment_group,
+      .name = fidl::StringView::FromExternal(info_.name()),
+      .start_bus_number = info_.start_bus_num(),
+      .end_bus_number = info_.end_bus_num(),
+      .segment_group = info_.segment_group(),
   };
   completer.Reply(info);
 }
@@ -129,15 +133,15 @@ void Bus::ReadBar(ReadBarRequestView request, ReadBarCompleter::Sync& completer)
   fbl::AutoLock devices_lock(&devices_lock_);
   auto it = devices_.find(bdf);
   if (it == devices_.end()) {
-    zxlogf(DEBUG, "could not find device %02x:%02x.%1x", bdf.bus_id, bdf.device_id,
-           bdf.function_id);
+    fdf::debug("could not find device {:02x}:{:02x}.{:1x}", bdf.bus_id, bdf.device_id,
+               bdf.function_id);
     completer.ReplyError(ZX_ERR_NOT_FOUND);
     return;
   }
   auto& device = it->second;
 
   if (device->bar_count() <= bar_id) {
-    zxlogf(DEBUG, "invalid BAR id %d", bar_id);
+    fdf::debug("invalid BAR id {}", bar_id);
     completer.ReplyError(ZX_ERR_INVALID_ARGS);
     return;
   }
@@ -145,7 +149,7 @@ void Bus::ReadBar(ReadBarRequestView request, ReadBarCompleter::Sync& completer)
   fbl::AutoLock dev_lock(device->dev_lock());
   auto& bar = device->bars()[bar_id];
   if (!bar.has_value()) {
-    zxlogf(DEBUG, "no BAR %d found for device", bar_id);
+    fdf::debug("no BAR {} found for device", bar_id);
     completer.ReplyError(ZX_ERR_NOT_FOUND);
     return;
   }
@@ -162,7 +166,7 @@ void Bus::ReadBar(ReadBarRequestView request, ReadBarCompleter::Sync& completer)
 
   auto result = bar->allocation->CreateVmo();
   if (result.is_error()) {
-    zxlogf(DEBUG, "failed to create VMO: %s", result.status_string());
+    fdf::debug("failed to create VMO: {}", result);
     completer.ReplyError(result.error_value());
     return;
   }
@@ -172,7 +176,7 @@ void Bus::ReadBar(ReadBarRequestView request, ReadBarCompleter::Sync& completer)
   zx::result<fdf::MmioBuffer> mmio = fdf::MmioBuffer::Create(
       0, bar->size, std::move(result.value()), ZX_CACHE_POLICY_UNCACHED_DEVICE);
   if (mmio.is_error()) {
-    zxlogf(DEBUG, "failed to create MmioBuffer: %s", mmio.status_string());
+    fdf::debug("failed to create MmioBuffer: {}", mmio);
     completer.ReplyError(result.status_value());
     return;
   }

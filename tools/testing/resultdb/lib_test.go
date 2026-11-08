@@ -272,10 +272,13 @@ func TestSetTestCaseToResultSink(t *testing.T) {
 			tags[tag.Key] = tag.Value
 		}
 		expectedTags := map[string]string{
+			"affected":     "false",
 			"format":       detail.Cases[i].Format,
+			"gn_label":     detail.GNLabel,
 			"is_test_case": "true",
 			"key1":         "value1",
 			"owners":       "testgoogler1@google.com,testgoogler2@google.com,testgoogler3@google.com,testgoogler4@google.com,testgoogler5@google.com",
+			"source_label": detail.SourceLabel,
 		}
 		if diff := cmp.Diff(tags, expectedTags); diff != "" {
 			t.Errorf("tags differ (-got +want):\n%s", diff)
@@ -579,8 +582,16 @@ func TestTestDetailProperties(t *testing.T) {
 
 func TestTestCaseProperties(t *testing.T) {
 	detail := &runtests.TestDetails{
-		Name:     "foo",
-		Metadata: metadata.TestMetadata{Owners: []string{"testgoogler1@google.com"}},
+		Name:        "foo",
+		GNLabel:     "//src/foo:foo_test(//build/toolchain:x64)",
+		SourceLabel: "//src/foo:foo_test",
+		Affected:    true,
+		Metadata:    metadata.TestMetadata{Owners: []string{"testgoogler1@google.com"}},
+		Tags: []build.TestTag{
+			{Key: "cpu", Value: "x64"},
+			{Key: "scope", Value: "hermetic"},
+			{Key: "key1", Value: "suite_value"},
+		},
 	}
 	testCase := runtests.TestCaseResult{
 		DisplayName: "foo/bar_0",
@@ -591,16 +602,42 @@ func TestTestCaseProperties(t *testing.T) {
 	}
 	buildTags := []*resultpb.StringPair{{Key: "builder", Value: "core.x64-release"}}
 
-	got, _ := testCaseProperties(testCase, detail, buildTags)
+	got, gotTags := testCaseProperties(testCase.Format, testCase.Tags, detail, buildTags)
 
 	want := mustParseProperties(t, `{
+		"gn_label": "//src/foo:foo_test(//build/toolchain:x64)",
+		"source_label": "//src/foo:foo_test",
+		"affected": true,
 		"format": "Rust",
 		"owners": ["testgoogler1@google.com"],
-		"tags": {"key1": "value1"},
+		"tags": {"cpu": "x64", "scope": "hermetic", "key1": "value1"},
 		"build": {"builder": "core.x64-release"}
 	}`)
 	if diff := cmp.Diff(want, got, protocmp.Transform()); diff != "" {
 		t.Errorf("Properties differ (-want +got):\n%s", diff)
+	}
+
+	wantTags := []*resultpb.StringPair{
+		{Key: "is_test_case", Value: "true"},
+		{Key: "gn_label", Value: "//src/foo:foo_test(//build/toolchain:x64)"},
+		{Key: "source_label", Value: "//src/foo:foo_test"},
+		{Key: "affected", Value: "true"},
+		{Key: "format", Value: "Rust"},
+		{Key: "owners", Value: "testgoogler1@google.com"},
+		{Key: "builder", Value: "core.x64-release"},
+		{Key: "cpu", Value: "x64"},
+		{Key: "scope", Value: "hermetic"},
+		{Key: "key1", Value: "suite_value"},
+		{Key: "key1", Value: "value1"},
+	}
+	sortTags := cmpopts.SortSlices(func(a, b *resultpb.StringPair) bool {
+		if a.Key != b.Key {
+			return a.Key < b.Key
+		}
+		return a.Value < b.Value
+	})
+	if diff := cmp.Diff(wantTags, gotTags, protocmp.Transform(), sortTags); diff != "" {
+		t.Errorf("Tags differ (-want +got):\n%s", diff)
 	}
 }
 
@@ -1041,11 +1078,36 @@ func TestExoneratedTestCase(t *testing.T) {
 	if exoneration.TestId != "foo/foo:bar_exonerated" {
 		t.Errorf("Exoneration maps to incorrect TestId: got %s, want foo/foo:bar_exonerated", exoneration.TestId)
 	}
-	if exoneration.Reason != resultpb.ExonerationReason_NOT_CRITICAL {
-		t.Errorf("Unexpected Exoneration reason: got %v, want NOT_CRITICAL", exoneration.Reason)
+	if exoneration.Reason != resultpb.ExonerationReason_OCCURS_ON_OTHER_CLS {
+		t.Errorf("Unexpected Exoneration reason: got %v, want OCCURS_ON_OTHER_CLS", exoneration.Reason)
 	}
 	if !strings.Contains(exoneration.ExplanationHtml, "bar_exonerated") {
 		t.Errorf("ExplanationHtml does not name the testcase: got %q", exoneration.ExplanationHtml)
+	}
+
+	// Custom ExonerationExplanation overrides the default and is HTML-escaped.
+	detail.Cases[0].ExonerationExplanation = "Exonerated by LUCI Analysis <flake_rate & failure_rate>."
+	_, customExonerations, _ := testCaseToResultSink(detail.Cases, []*resultpb.StringPair{}, detail, outputRoot)
+	if len(customExonerations) != 1 {
+		t.Fatalf("Got %d custom exonerations, want 1", len(customExonerations))
+	}
+	wantHTML := "Exonerated by LUCI Analysis &lt;flake_rate &amp; failure_rate&gt;."
+	if customExonerations[0].ExplanationHtml != wantHTML {
+		t.Errorf("custom ExplanationHtml = %q, want %q", customExonerations[0].ExplanationHtml, wantHTML)
+	}
+
+	// Oversized ExonerationExplanation is truncated to MaxExplanationHTMLLength without splitting HTML entities.
+	detail.Cases[0].ExonerationExplanation = strings.Repeat("a", MaxExplanationHTMLLength-5) + "<<<<"
+	_, truncatedExonerations, _ := testCaseToResultSink(detail.Cases, []*resultpb.StringPair{}, detail, outputRoot)
+	if len(truncatedExonerations) != 1 {
+		t.Fatalf("Got %d truncated exonerations, want 1", len(truncatedExonerations))
+	}
+	gotTruncated := truncatedExonerations[0].ExplanationHtml
+	if len(gotTruncated) > MaxExplanationHTMLLength {
+		t.Errorf("truncated ExplanationHtml length = %d, want <= %d", len(gotTruncated), MaxExplanationHTMLLength)
+	}
+	if !strings.HasSuffix(gotTruncated, "a...") {
+		t.Errorf("truncated ExplanationHtml = %q, want suffix %q (no split &lt; entity)", gotTruncated[len(gotTruncated)-10:], "a...")
 	}
 }
 
@@ -1084,11 +1146,22 @@ func TestExoneratedTestDetail(t *testing.T) {
 	if exoneration.TestId != "foo_exonerated_target" {
 		t.Errorf("Exoneration maps to incorrect TestId: got %s", exoneration.TestId)
 	}
-	if exoneration.Reason != resultpb.ExonerationReason_NOT_CRITICAL {
+	if exoneration.Reason != resultpb.ExonerationReason_OCCURS_ON_OTHER_CLS {
 		t.Errorf("Unexpected Exoneration reason: got %v", exoneration.Reason)
 	}
 	if !strings.Contains(exoneration.ExplanationHtml, "foo_exonerated_target") {
 		t.Errorf("ExplanationHtml does not name the test target: got %q", exoneration.ExplanationHtml)
+	}
+
+	// Custom ExonerationExplanation overrides the default and is HTML-escaped.
+	detail.ExonerationExplanation = "Exonerated by LUCI Analysis (met failure_rate <threshold>)."
+	_, customExoneration, _, err := testDetailsToResultSink([]*resultpb.StringPair{}, detail, outputRoot)
+	if err != nil {
+		t.Fatalf("Unexpected error mapping details with custom explanation: %v", err)
+	}
+	wantTargetHTML := "Exonerated by LUCI Analysis (met failure_rate &lt;threshold&gt;)."
+	if customExoneration.ExplanationHtml != wantTargetHTML {
+		t.Errorf("custom target ExplanationHtml = %q, want %q", customExoneration.ExplanationHtml, wantTargetHTML)
 	}
 }
 
@@ -2464,5 +2537,64 @@ func TestTestToUploadRequests(t *testing.T) {
 		t.Errorf("parent/infra_and_test_std_and_klog.txt not found in request: %+v", parentInvArtifactsReq.Artifacts)
 	} else if artifact.GetFilePath() != parentLogFile {
 		t.Errorf("parent artifact FilePath = %q, want %q", artifact.GetFilePath(), parentLogFile)
+	}
+}
+
+func TestCasePropertyCacheWithTags(t *testing.T) {
+	detail := &runtests.TestDetails{
+		Name:        "fuchsia-pkg://fuchsia.com/my-pkg#meta/my_test.cm",
+		GNLabel:     "//src/foo:my_test(//build/toolchain:x64)",
+		SourceLabel: "//src/foo:my_test",
+		Status:      runtests.TestSuccess,
+		StartTime:   time.Now(),
+		Metadata:    metadata.TestMetadata{Owners: []string{"alice@example.com"}},
+	}
+	// Exercise repeated (Format, Tags) hits, distinct formats, and cache-cap overflow.
+	for i := 0; i < 20; i++ {
+		format := "Rust"
+		if i == 3 {
+			format = "FTF"
+		}
+		detail.Cases = append(detail.Cases, runtests.TestCaseResult{
+			DisplayName: fmt.Sprintf("suite/case_%d", i),
+			SuiteName:   "suite",
+			CaseName:    fmt.Sprintf("case_%d", i),
+			Status:      runtests.TestSuccess,
+			Format:      format,
+			Tags: []build.TestTag{
+				{Key: "test_outcome", Value: "PASSED"},
+				{Key: "idx", Value: fmt.Sprintf("val_%d", i%10)},
+			},
+		})
+	}
+	buildTags := []*resultpb.StringPair{{Key: "builder", Value: "core.x64-release"}}
+
+	results, _, _ := testCaseToResultSink(detail.Cases, buildTags, detail, t.TempDir())
+	if len(results) != len(detail.Cases) {
+		t.Fatalf("got %d results, want %d", len(results), len(detail.Cases))
+	}
+	sortTags := cmpopts.SortSlices(func(a, b *resultpb.StringPair) bool {
+		if a.Key != b.Key {
+			return a.Key < b.Key
+		}
+		return a.Value < b.Value
+	})
+	for i, tc := range detail.Cases {
+		wantProps, wantTags := testCaseProperties(tc.Format, tc.Tags, detail, buildTags)
+		if diff := cmp.Diff(wantProps, results[i].Properties, protocmp.Transform()); diff != "" {
+			t.Errorf("case %d properties differ (-want +got):\n%s", i, diff)
+		}
+		if diff := cmp.Diff(wantTags, results[i].Tags, protocmp.Transform(), sortTags); diff != "" {
+			t.Errorf("case %d tags differ (-want +got):\n%s", i, diff)
+		}
+	}
+	if results[10].Properties != results[0].Properties {
+		t.Errorf("case 10 should reuse cached Properties pointer from case 0")
+	}
+	if results[13].Properties == results[3].Properties {
+		t.Errorf("case 13 (Rust) must not reuse cached Properties from case 3 (FTF)")
+	}
+	if results[18].Properties == results[8].Properties {
+		t.Errorf("case 18 should not hit cache after maxCachedPropsEntries overflow at case 8")
 	}
 }

@@ -22,9 +22,10 @@ test("virtio-backend-test") {
     "//sdk/lib/async-loop:async-loop-default",
     "//sdk/lib/async_patterns/testing/cpp",
     "//sdk/lib/component/outgoing/cpp",
+    "//sdk/lib/driver/fake-bti/cpp",
     "//src/devices/pci/testing:pci-protocol-fake",
-    "//src/devices/testing/fake-bti",
     "//src/devices/testing/mock-ddk",
+    "//src/lib/ddktl",
     "//zircon/system/ulib/zxtest",
   ]
 }
@@ -94,7 +95,7 @@ source_set("virtio-dfv1") {
   ]
 
   # To trim this list:
-  # $ scripts/gn/trim_visibility.py --target="//src/devices/bus/lib/virtio:virtio-dfv1"
+  # $ build/bazel/scripts/trim_visibility.py --target="//src/devices/bus/lib/virtio:virtio-dfv1"
   visibility = [
     "//src/connectivity/ethernet/drivers/virtio:*",
     "//src/devices/bus/lib/virtio:*",

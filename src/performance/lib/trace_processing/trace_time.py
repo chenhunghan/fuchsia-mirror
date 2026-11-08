@@ -16,6 +16,10 @@ class TimeDelta:
     nanosecond ticks.
     """
 
+    # Slotted to keep per-instance memory low; see "Memory layout of the model
+    # classes" at the top of trace_model.py.
+    __slots__ = ("_delta",)
+
     def __init__(self, nanoseconds: int = 0) -> None:
         self._delta: int = nanoseconds
 
@@ -120,6 +124,10 @@ class TimePoint:
     """Represents a point in time as an integer number of nanoseconds elapsed
     since an arbitrary point in the past."""
 
+    # Slotted to keep per-instance memory low; see "Memory layout of the model
+    # classes" at the top of trace_model.py.
+    __slots__ = ("_ticks",)
+
     def __init__(self, nanoseconds: int = 0) -> None:
         self._ticks = nanoseconds
 
@@ -130,6 +138,13 @@ class TimePoint:
     @classmethod
     def from_epoch_delta(cls, time_delta: TimeDelta) -> Self:
         return cls(time_delta.to_nanoseconds())
+
+    @classmethod
+    def from_microseconds(cls, microseconds: float) -> Self:
+        return cls(int(microseconds * 1000))
+
+    def to_epoch_nanoseconds(self) -> int:
+        return self._ticks
 
     def to_epoch_delta(self) -> TimeDelta:
         return TimeDelta.from_nanoseconds(self._ticks)

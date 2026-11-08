@@ -1,0 +1,45 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [],  # Include all tests in the package.
+    visibility = ["//src/storage:__pkg__"],
+)
+
+rustc_library(
+    name = "serializer",
+    testonly = True,
+    srcs = ["src/lib.rs"],
+    crate_name = "erofs_serializer",
+    edition = "2024",
+    visibility = [
+        "//:__subpackages__",
+    ],
+    deps = [
+        "//src/storage/erofs",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)
+
+rustc_test(
+    name = "serializer_test",
+    crate = ":serializer",
+    # Used by bazel2gn to preserve GN output_name.
+    crate_name = "erofs_serializer_lib_test",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = ["//src/lib/fuchsia"],
+)
+
+fx_unittest_package(
+    name = "erofs-serializer-tests",
+    unit_tests = [":serializer_test"],
+)

@@ -11,6 +11,7 @@
 #include <string>
 #include <utility>
 
+#include "src/developer/forensics/feedback_data/system_log_recorder/reader.h"
 #include "src/developer/forensics/utils/purge_memory.h"
 #include "src/lib/files/directory.h"
 
@@ -36,14 +37,16 @@ constexpr zx::duration kPurgeMemoryDuration = zx::sec(150);
 // duplicating logs that were already written to disk before the restart, `store_` ignores messages
 // with timestamps at or before the last persisted timestamp.
 std::optional<zx::time_boot> LastPersistedTimestamp(const bool is_restart,
-                                                    const std::string& metadata_path) {
+                                                    const std::string& logs_dir,
+                                                    const StorageSize total_log_size,
+                                                    Decoder* decoder) {
   if (!is_restart) {
     return std::nullopt;
   }
 
-  const std::optional<DiskBackedLogsMetadata> metadata =
-      DiskBackedLogsMetadata::FromFile(metadata_path, SystemLogWriter::kFirstFileNumber);
-  return metadata.has_value() ? metadata->LastTimestamp() : std::nullopt;
+  const fit::result<ReaderError, ConcatenateResult> result =
+      Concatenate(logs_dir, total_log_size, decoder);
+  return result.is_ok() ? result->last_timestamp : std::nullopt;
 }
 
 }  // namespace
@@ -63,11 +66,11 @@ SystemLogRecorder::SystemLogRecorder(async_dispatcher_t* archive_dispatcher,
       is_restart_(files::IsDirectory(write_parameters.logs_dir)),
       store_(write_parameters.total_log_size / write_parameters.max_num_files,
              write_parameters.max_write_size, redactor_.get(), std::move(encoder),
-             LastPersistedTimestamp(is_restart_, write_parameters.metadata_path)),
+             LastPersistedTimestamp(is_restart_, write_parameters.logs_dir,
+                                    write_parameters.total_log_size, decoder.get())),
       log_source_(archive_dispatcher, std::move(services), &store_),
       writer_(write_dispatcher, std::in_place, write_parameters.logs_dir,
-              write_parameters.max_num_files, write_parameters.total_log_size, std::move(decoder),
-              write_parameters.enable_periodic_metadata_writes, write_parameters.metadata_path),
+              write_parameters.max_num_files, write_parameters.total_log_size, std::move(decoder)),
       receiver_(this, archive_dispatcher),
       next_collection_id_(0) {}
 

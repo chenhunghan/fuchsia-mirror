@@ -69,7 +69,10 @@ impl
                 builder.platform_bundle("full_drivers")?;
                 true
             }
-            (_, _) => false,
+            (_, _) => {
+                builder.platform_bundle("no_full_drivers")?;
+                false
+            }
         };
 
         let delay_fallback = matches!(
@@ -229,5 +232,69 @@ impl
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::subsystems::ConfigurationBuilderImpl;
+
+    #[test]
+    fn test_full_drivers_bundle_selection() {
+        let cases = [
+            (BuildType::Eng, FeatureSetLevel::Standard, "full_drivers", "no_full_drivers", true),
+            (
+                BuildType::UserDebug,
+                FeatureSetLevel::Standard,
+                "no_full_drivers",
+                "full_drivers",
+                false,
+            ),
+            (BuildType::User, FeatureSetLevel::Standard, "no_full_drivers", "full_drivers", false),
+            (BuildType::Eng, FeatureSetLevel::Utility, "no_full_drivers", "full_drivers", false),
+            (BuildType::Eng, FeatureSetLevel::Bootstrap, "no_full_drivers", "full_drivers", false),
+            (BuildType::Eng, FeatureSetLevel::Embeddable, "no_full_drivers", "full_drivers", false),
+        ];
+
+        for (build_type, feature_set_level, expected_bundle, excluded_bundle, expected_ephemeral) in
+            cases
+        {
+            let context = ConfigurationContext {
+                feature_set_level: &feature_set_level,
+                build_type: &build_type,
+                board_config: &Default::default(),
+                gendir: Default::default(),
+                resource_dir: Default::default(),
+                developer_only_options: Default::default(),
+            };
+            let mut builder: ConfigurationBuilderImpl = Default::default();
+            DriverFrameworkSubsystemConfig::define_configuration(
+                &context,
+                &(
+                    &DriverFrameworkConfig::default(),
+                    &StorageConfig::default(),
+                    &DevelopmentSupportConfig::default(),
+                ),
+                &mut builder,
+            )
+            .unwrap();
+
+            let completed_config = builder.build();
+            assert!(
+                completed_config.bundles.contains(expected_bundle),
+                "expected {expected_bundle} for ({build_type:?}, {feature_set_level:?})"
+            );
+            assert!(
+                !completed_config.bundles.contains(excluded_bundle),
+                "unexpected {excluded_bundle} for ({build_type:?}, {feature_set_level:?})"
+            );
+            assert_eq!(
+                completed_config
+                    .configuration_capabilities
+                    .get("fuchsia.driver.EnableEphemeralDrivers"),
+                Some(&Config::new(ConfigValueType::Bool, expected_ephemeral.into())),
+            );
+        }
     }
 }

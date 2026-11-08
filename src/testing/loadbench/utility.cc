@@ -18,10 +18,9 @@
 #include <optional>
 #include <tuple>
 
-#include <re2/re2.h>
-
 #include "fuchsia/kernel/cpp/fidl.h"
 #include "lib/fdio/directory.h"
+#include "re2/re2.h"
 
 // Represents ordering of CPU affinity masks.
 enum class MaskRelation {

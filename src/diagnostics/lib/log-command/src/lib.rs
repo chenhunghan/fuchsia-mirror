@@ -18,6 +18,7 @@ pub use log_socket_stream::OneOrMany;
 use moniker::Moniker;
 use selectors::{SelectorExt, sanitize_moniker_for_selectors};
 use std::borrow::Cow;
+use std::future::Future;
 use std::io::Write;
 use std::ops::Deref;
 use std::str::FromStr;
@@ -30,8 +31,8 @@ mod log_formatter;
 mod log_socket_stream;
 pub use filter::{FuzzyMatchWarning, LogFilterCriteria, disambiguate_queried_monikers};
 pub use log_formatter::{
-    BootTimeAccessor, DefaultLogFormatter, FormatterError, LogData, LogEntry, Symbolize,
-    TIMESTAMP_FORMAT, Timestamp, WriterContainer, dump_logs_from_socket,
+    BootTimeAccessor, DefaultLogFormatter, FormatterError, LogData, LogEntry, NoOpSymbolizer,
+    Symbolize, TIMESTAMP_FORMAT, Timestamp, WriterContainer, dump_logs_from_socket,
 };
 pub use log_socket_stream::{JsonDeserializeError, LogsDataStream};
 
@@ -597,7 +598,7 @@ define_log_filter_args! {
     pub force_set_severity: bool,
 
     /// EXPERIMENTAL/SUBJECT TO REMOVAL: select the encoding used to retrieve logs from the
-    /// archivist. Options are "json" or "fxt". Default is "json".
+    /// archivist. Options are "json" or "fxt". Default is "fxt".
     #[cfg(target_os = "fuchsia")]
     #[argh(option)]
     pub encoding: Option<LogEncoding>,
@@ -775,13 +776,14 @@ impl LogError {
 }
 
 /// Trait used to get available instances given a moniker query.
-#[async_trait::async_trait(?Send)]
 pub trait InstanceGetter {
-    async fn get_monikers_from_query(&self, query: &str) -> Result<Vec<Moniker>, LogError>;
+    fn get_monikers_from_query(
+        &self,
+        query: &str,
+    ) -> impl Future<Output = Result<Vec<Moniker>, LogError>>;
 }
 
 #[cfg(not(feature = "ctf"))]
-#[async_trait::async_trait(?Send)]
 impl InstanceGetter for RealmQueryProxy {
     async fn get_monikers_from_query(&self, query: &str) -> Result<Vec<Moniker>, LogError> {
         Ok(get_instances_from_query(query, self)
@@ -793,7 +795,6 @@ impl InstanceGetter for RealmQueryProxy {
 }
 
 #[cfg(feature = "ctf")]
-#[async_trait::async_trait(?Send)]
 impl InstanceGetter for RealmQueryProxy {
     async fn get_monikers_from_query(&self, _query: &str) -> Result<Vec<Moniker>, LogError> {
         unreachable!("get_monikers_from_query is not supported in CTF tests.");
@@ -824,7 +825,7 @@ impl LogCommand {
     #[cfg(target_os = "fuchsia")]
     #[must_use]
     pub fn encoding(&self) -> LogEncoding {
-        self.filters.encoding.clone().unwrap_or(LogEncoding::Json)
+        self.filters.encoding.clone().unwrap_or(LogEncoding::Fxt)
     }
 
     /// Returns the log text filter patterns.
@@ -1163,7 +1164,6 @@ fn log_interest_selector(s: &str) -> Result<OneOrMany<LogInterestSelector>, Stri
 mod test {
     use super::*;
     use assert_matches::assert_matches;
-    use async_trait::async_trait;
     use fidl::endpoints::create_proxy;
     use flex_fuchsia_diagnostics::{LogSettingsMarker, LogSettingsRequest};
     use futures_util::StreamExt;
@@ -1177,7 +1177,6 @@ mod test {
         expected_selector: Option<String>,
     }
 
-    #[async_trait(?Send)]
     impl InstanceGetter for FakeInstanceGetter {
         async fn get_monikers_from_query(&self, query: &str) -> Result<Vec<Moniker>, LogError> {
             if let Some(expected) = &self.expected_selector {
@@ -1692,11 +1691,11 @@ ffx log --force-set-severity.
     #[fuchsia::test]
     async fn test_encoding_accessor() {
         let cmd_default = LogCommand::from_args(&["ffx", "log"], &["dump"]).unwrap();
-        assert_eq!(cmd_default.encoding(), LogEncoding::Json);
+        assert_eq!(cmd_default.encoding(), LogEncoding::Fxt);
 
         let cmd_custom =
-            LogCommand::from_args(&["ffx", "log"], &["dump", "--encoding", "fxt"]).unwrap();
-        assert_eq!(cmd_custom.encoding(), LogEncoding::Fxt);
+            LogCommand::from_args(&["ffx", "log"], &["dump", "--encoding", "json"]).unwrap();
+        assert_eq!(cmd_custom.encoding(), LogEncoding::Json);
     }
 
     #[fuchsia::test]
@@ -1960,7 +1959,7 @@ ffx log --force-set-severity.
         #[cfg(target_os = "fuchsia")]
         let cmd = LogCommand::from_args(
             &["log"],
-            &["--severity", "warn", "--clock", "local", "--encoding", "fxt", "dump"],
+            &["--severity", "warn", "--clock", "local", "--encoding", "json", "dump"],
         )
         .unwrap();
 
@@ -1969,7 +1968,7 @@ ffx log --force-set-severity.
         #[cfg(not(target_os = "fuchsia"))]
         assert_eq!(cmd.symbolize(), SymbolizeMode::Off);
         #[cfg(target_os = "fuchsia")]
-        assert_eq!(cmd.encoding(), LogEncoding::Fxt);
+        assert_eq!(cmd.encoding(), LogEncoding::Json);
 
         // Subcommand non-default enum overrides top-level non-default enum
         #[cfg(not(target_os = "fuchsia"))]
@@ -2007,7 +2006,7 @@ ffx log --force-set-severity.
                 "--clock",
                 "utc",
                 "--encoding",
-                "fxt",
+                "json",
             ],
         )
         .unwrap();
@@ -2017,7 +2016,7 @@ ffx log --force-set-severity.
         #[cfg(not(target_os = "fuchsia"))]
         assert_eq!(cmd_override.symbolize(), SymbolizeMode::Classic);
         #[cfg(target_os = "fuchsia")]
-        assert_eq!(cmd_override.encoding(), LogEncoding::Fxt);
+        assert_eq!(cmd_override.encoding(), LogEncoding::Json);
     }
 
     #[test]

@@ -12,8 +12,13 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::new_without_default)]
+#![allow(internal_features)]
 #![feature(atomic_volatile)]
 #![feature(cfg_sanitize)]
+// TODO(https://fxbug.dev/581987928): Remove once compiler options can control atomic coverage
+// counter updates.
+#![feature(coverage_attribute)]
+#![feature(link_llvm_intrinsics)]
 #![feature(sanitize)]
 
 #[allow(unused_imports)]
@@ -28,8 +33,14 @@ pub mod arch_rs;
 #[path = "dev/hw_rng/hw_rng.rs"]
 pub mod hw_rng;
 
+#[path = "dev/init.rs"]
+pub mod dev_init;
+
 #[path = "dev/interrupt/interrupt.rs"]
 pub mod dev_interrupt;
+
+#[path = "dev/iommu/mod.rs"]
+pub mod iommu;
 
 #[path = "dev/pdev/hw_watchdog/watchdog.rs"]
 pub mod pdev_watchdog;
@@ -62,11 +73,14 @@ pub mod control_region;
 #[path = "lib/counters/src/lib.rs"]
 pub mod counters;
 
-#[path = "lib/crashlog/crashlog.rs"]
+#[path = "lib/crashlog/src/crashlog.rs"]
 pub mod crashlog;
 
 #[path = "lib/debuglog/debuglog.rs"]
 pub mod debuglog_rs;
+
+#[path = "lib/fbl/gparena.rs"]
+pub mod gparena;
 
 #[path = "lib/instrumentation/mod.rs"]
 pub mod instrumentation;
@@ -79,6 +93,9 @@ pub mod kconcurrent;
 
 #[path = "lib/ktrace/src/mod.rs"]
 pub mod ktrace_rs;
+
+#[path = "lib/ksync/mod.rs"]
+pub mod ksync_kernel;
 
 #[cfg(with_lock_dep)]
 #[path = "lib/lockdep/lock_dep.rs"]
@@ -99,6 +116,9 @@ pub mod page_cache;
 #[path = "lib/percpu_writer/allocator.rs"]
 pub mod percpu_writer;
 
+#[path = "lib/perfmon/src/mod.rs"]
+pub mod perfmon;
+
 #[path = "lib/persistent-debuglog/persistent_debuglog.rs"]
 pub mod persistent_debuglog_rs;
 
@@ -116,6 +136,12 @@ pub mod suspend_wakeup_timer;
 
 #[path = "lib/syscalls/mod.rs"]
 pub mod syscalls_rs;
+
+#[path = "lib/thread-stack/src/mod.rs"]
+pub mod thread_stack;
+
+#[path = "lib/thread_sampler/thread_sampler.rs"]
+pub mod thread_sampler;
 
 #[path = "lib/topology/src/mod.rs"]
 pub mod topology;
@@ -152,6 +178,10 @@ pub mod vm;
 #[cfg(target_arch = "x86_64")]
 #[path = "platform/pc/mod.rs"]
 pub mod platform_pc;
+
+#[cfg(target_arch = "aarch64")]
+#[path = "platform/generic-arm/platform.rs"]
+pub mod generic_arm;
 
 #[cfg(target_arch = "riscv64")]
 #[path = "platform/generic-riscv64/src/mod.rs"]
@@ -192,6 +222,10 @@ pub mod arm_gicv2;
 #[cfg(target_arch = "aarch64")]
 #[path = "dev/interrupt/gic/v3/arm_gicv3.rs"]
 pub mod arm_gicv3;
+
+#[cfg(target_arch = "aarch64")]
+#[path = "dev/iommu/arm_smmu/mod.rs"]
+pub mod arm_smmu;
 
 #[cfg(target_arch = "aarch64")]
 #[path = "dev/power/iris/iris.rs"]
@@ -271,17 +305,10 @@ pub mod test_mod;
 #[path = "tests/tests.rs"]
 pub mod kernel_tests;
 
-#[cfg(ktest)]
-#[path = "tests/unused_rust.rs"]
-pub mod unused_rust;
-
 // Force linking of extern crates that provide C entry points:
 // Only arch/arm64 depends on coresight today.
 #[cfg(target_arch = "aarch64")]
 use coresight as _;
-// Only platform/pc depends on fixed_point today.
-#[cfg(target_arch = "x86_64")]
-use fixed_point as _;
 use flow_id as _;
 use init as _;
 use relaxed_atomic as _;

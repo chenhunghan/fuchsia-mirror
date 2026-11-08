@@ -52,7 +52,6 @@ fx_component_manifest(
 fx_component(
     name = "component",
     compiled_manifest = ":component-manifest",
-    component_name = "time_test_client",
     deps = [
         ":time_test_client_packaged_bin",
     ],

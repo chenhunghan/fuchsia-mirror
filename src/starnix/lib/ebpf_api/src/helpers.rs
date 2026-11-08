@@ -52,7 +52,7 @@ where
     }
 }
 
-fn bpf_map_lookup_elem<'a, C: MapsProgramContext>(
+extern "C" fn bpf_map_lookup_elem<'a, C: MapsProgramContext>(
     context: &mut C::RunContext<'a>,
     map: BpfValue,
     key: BpfValue,
@@ -84,7 +84,7 @@ fn bpf_map_lookup_elem<'a, C: MapsProgramContext>(
     result
 }
 
-fn bpf_map_update_elem<C: MapsProgramContext>(
+extern "C" fn bpf_map_update_elem<C: MapsProgramContext>(
     context: &mut C::RunContext<'_>,
     map: BpfValue,
     key: BpfValue,
@@ -115,7 +115,7 @@ fn bpf_map_update_elem<C: MapsProgramContext>(
     map.update(&key, value, flags).map(|_| 0).unwrap_or(u64::MAX).into()
 }
 
-fn bpf_map_delete_elem<C: MapsProgramContext>(
+extern "C" fn bpf_map_delete_elem<C: MapsProgramContext>(
     context: &mut C::RunContext<'_>,
     map: BpfValue,
     key: BpfValue,
@@ -142,7 +142,7 @@ fn bpf_map_delete_elem<C: MapsProgramContext>(
     map.delete(&key).map(|_| 0).unwrap_or(u64::MAX).into()
 }
 
-fn bpf_trace_printk<C: EbpfProgramContext>(
+extern "C" fn bpf_trace_printk<C: EbpfProgramContext>(
     _context: &mut C::RunContext<'_>,
     _fmt: BpfValue,
     _fmt_size: BpfValue,
@@ -154,7 +154,7 @@ fn bpf_trace_printk<C: EbpfProgramContext>(
     0.into()
 }
 
-fn bpf_ktime_get_ns<C: EbpfProgramContext>(
+extern "C" fn bpf_ktime_get_ns<C: EbpfProgramContext>(
     _context: &mut C::RunContext<'_>,
     _: BpfValue,
     _: BpfValue,
@@ -165,7 +165,7 @@ fn bpf_ktime_get_ns<C: EbpfProgramContext>(
     zx::MonotonicInstant::get().into_nanos().into()
 }
 
-fn bpf_ringbuf_reserve<C: EbpfProgramContext>(
+extern "C" fn bpf_ringbuf_reserve<C: EbpfProgramContext>(
     _context: &mut C::RunContext<'_>,
     map: BpfValue,
     size: BpfValue,
@@ -187,7 +187,7 @@ fn bpf_ringbuf_reserve<C: EbpfProgramContext>(
     map.ringbuf_reserve(size, flags).map(BpfValue::from).unwrap_or_else(|_| BpfValue::default())
 }
 
-fn bpf_ringbuf_submit<C: EbpfProgramContext>(
+extern "C" fn bpf_ringbuf_submit<C: EbpfProgramContext>(
     _context: &mut C::RunContext<'_>,
     data: BpfValue,
     flags: BpfValue,
@@ -205,7 +205,7 @@ fn bpf_ringbuf_submit<C: EbpfProgramContext>(
     0.into()
 }
 
-fn bpf_ringbuf_discard<C: EbpfProgramContext>(
+extern "C" fn bpf_ringbuf_discard<C: EbpfProgramContext>(
     _context: &mut C::RunContext<'_>,
     data: BpfValue,
     flags: BpfValue,
@@ -223,7 +223,7 @@ fn bpf_ringbuf_discard<C: EbpfProgramContext>(
     0.into()
 }
 
-fn bpf_ktime_get_boot_ns<C: EbpfProgramContext>(
+extern "C" fn bpf_ktime_get_boot_ns<C: EbpfProgramContext>(
     _context: &mut C::RunContext<'_>,
     _: BpfValue,
     _: BpfValue,
@@ -235,7 +235,7 @@ fn bpf_ktime_get_boot_ns<C: EbpfProgramContext>(
     0.into()
 }
 
-fn bpf_probe_read_user<C: EbpfProgramContext>(
+extern "C" fn bpf_probe_read_user<C: EbpfProgramContext>(
     _context: &mut C::RunContext<'_>,
     dst: BpfValue,
     size: BpfValue,
@@ -257,7 +257,7 @@ fn bpf_probe_read_user<C: EbpfProgramContext>(
     0.into()
 }
 
-fn bpf_probe_read_user_str<C: EbpfProgramContext>(
+extern "C" fn bpf_probe_read_user_str<C: EbpfProgramContext>(
     _context: &mut C::RunContext<'_>,
     dst: BpfValue,
     size: BpfValue,
@@ -279,7 +279,7 @@ fn bpf_probe_read_user_str<C: EbpfProgramContext>(
     0.into()
 }
 
-fn bpf_ktime_get_coarse_ns<C: EbpfProgramContext>(
+extern "C" fn bpf_ktime_get_coarse_ns<C: EbpfProgramContext>(
     _context: &mut C::RunContext<'_>,
     _: BpfValue,
     _: BpfValue,
@@ -291,7 +291,7 @@ fn bpf_ktime_get_coarse_ns<C: EbpfProgramContext>(
     0.into()
 }
 
-fn bpf_probe_read_str<C: EbpfProgramContext>(
+extern "C" fn bpf_probe_read_str<C: EbpfProgramContext>(
     _context: &mut C::RunContext<'_>,
     _: BpfValue,
     _: BpfValue,
@@ -303,7 +303,7 @@ fn bpf_probe_read_str<C: EbpfProgramContext>(
     0.into()
 }
 
-fn bpf_get_smp_processor_id<C: EbpfProgramContext>(
+extern "C" fn bpf_get_smp_processor_id<C: EbpfProgramContext>(
     _context: &mut C::RunContext<'_>,
     _: BpfValue,
     _: BpfValue,
@@ -337,7 +337,7 @@ where
     }
 }
 
-fn bpf_get_current_uid_gid<C: CurrentTaskProgramContext>(
+extern "C" fn bpf_get_current_uid_gid<C: CurrentTaskProgramContext>(
     context: &mut C::RunContext<'_>,
     _: BpfValue,
     _: BpfValue,
@@ -349,7 +349,7 @@ fn bpf_get_current_uid_gid<C: CurrentTaskProgramContext>(
     (uid as u64 | (gid as u64) << 32).into()
 }
 
-fn bpf_get_current_pid_tgid<C: CurrentTaskProgramContext>(
+extern "C" fn bpf_get_current_pid_tgid<C: CurrentTaskProgramContext>(
     context: &mut C::RunContext<'_>,
     _: BpfValue,
     _: BpfValue,
@@ -379,7 +379,7 @@ where
 pub trait SocketCookieProgramContext: Arg1IsSocketProgramContext {}
 impl<C> SocketCookieProgramContext for C where C: Arg1IsSocketProgramContext {}
 
-fn bpf_get_socket_cookie<'a, C: SocketCookieProgramContext>(
+extern "C" fn bpf_get_socket_cookie<'a, C: SocketCookieProgramContext>(
     context: &mut C::RunContext<'a>,
     arg1: BpfValue,
     _: BpfValue,
@@ -425,7 +425,7 @@ pub enum LoadBytesBase {
 pub trait SocketUidProgramContext: Arg1IsSocketProgramContext {}
 impl<C> SocketUidProgramContext for C where C: Arg1IsSocketProgramContext {}
 
-fn bpf_get_socket_uid<'a, C: SocketUidProgramContext>(
+extern "C" fn bpf_get_socket_uid<'a, C: SocketUidProgramContext>(
     context: &mut C::RunContext<'a>,
     sk_buf: BpfValue,
     _: BpfValue,
@@ -479,7 +479,7 @@ where
     }
 }
 
-fn bpf_skb_load_bytes<'a, C: SkbLoadBytesProgramContext>(
+extern "C" fn bpf_skb_load_bytes<'a, C: SkbLoadBytesProgramContext>(
     context: &mut C::RunContext<'a>,
     sk_buf: BpfValue,
     offset: BpfValue,
@@ -500,7 +500,7 @@ fn bpf_skb_load_bytes<'a, C: SkbLoadBytesProgramContext>(
     C::skb_load_bytes_relative(context, sk_buf, base, offset, buf).into()
 }
 
-fn bpf_skb_load_bytes_relative<'a, C: SkbLoadBytesProgramContext>(
+extern "C" fn bpf_skb_load_bytes_relative<'a, C: SkbLoadBytesProgramContext>(
     context: &mut C::RunContext<'a>,
     sk_buf: BpfValue,
     offset: BpfValue,
@@ -525,7 +525,7 @@ fn bpf_skb_load_bytes_relative<'a, C: SkbLoadBytesProgramContext>(
     C::skb_load_bytes_relative(context, sk_buf, base, offset, buf).into()
 }
 
-fn bpf_sk_storage_get<'a, C: SkStorageProgramContext + MapsProgramContext>(
+extern "C" fn bpf_sk_storage_get<'a, C: SkStorageProgramContext + MapsProgramContext>(
     context: &mut C::RunContext<'a>,
     map: BpfValue,
     sk: BpfValue,
@@ -586,7 +586,7 @@ fn bpf_sk_storage_get<'a, C: SkStorageProgramContext + MapsProgramContext>(
     BpfValue::default()
 }
 
-fn bpf_sk_fullsock<C: EbpfProgramContext>(
+extern "C" fn bpf_sk_fullsock<C: EbpfProgramContext>(
     _context: &mut C::RunContext<'_>,
     sk: BpfValue,
     _: BpfValue,
@@ -619,7 +619,7 @@ where
     }
 }
 
-fn bpf_set_retval<C: ReturnValueProgramContext>(
+extern "C" fn bpf_set_retval<C: ReturnValueProgramContext>(
     context: &mut C::RunContext<'_>,
     value: BpfValue,
     _: BpfValue,
@@ -630,7 +630,7 @@ fn bpf_set_retval<C: ReturnValueProgramContext>(
     C::set_retval(context, value.as_i32()).into()
 }
 
-fn bpf_get_retval<C: ReturnValueProgramContext>(
+extern "C" fn bpf_get_retval<C: ReturnValueProgramContext>(
     context: &mut C::RunContext<'_>,
     _: BpfValue,
     _: BpfValue,
@@ -641,7 +641,7 @@ fn bpf_get_retval<C: ReturnValueProgramContext>(
     C::get_retval(context).into()
 }
 
-fn bpf_sk_lookup_tcp<C: EbpfProgramContext>(
+extern "C" fn bpf_sk_lookup_tcp<C: EbpfProgramContext>(
     _context: &mut C::RunContext<'_>,
     _: BpfValue,
     _: BpfValue,
@@ -653,7 +653,7 @@ fn bpf_sk_lookup_tcp<C: EbpfProgramContext>(
     0.into()
 }
 
-fn bpf_sk_lookup_udp<C: EbpfProgramContext>(
+extern "C" fn bpf_sk_lookup_udp<C: EbpfProgramContext>(
     _context: &mut C::RunContext<'_>,
     _: BpfValue,
     _: BpfValue,
@@ -665,7 +665,7 @@ fn bpf_sk_lookup_udp<C: EbpfProgramContext>(
     0.into()
 }
 
-fn bpf_sk_release<C: EbpfProgramContext>(
+extern "C" fn bpf_sk_release<C: EbpfProgramContext>(
     _context: &mut C::RunContext<'_>,
     _: BpfValue,
     _: BpfValue,
@@ -677,7 +677,7 @@ fn bpf_sk_release<C: EbpfProgramContext>(
     0.into()
 }
 
-fn bpf_get_netns_cookie<C: EbpfProgramContext>(
+extern "C" fn bpf_get_netns_cookie<C: EbpfProgramContext>(
     _context: &mut C::RunContext<'_>,
     _: BpfValue,
     _: BpfValue,

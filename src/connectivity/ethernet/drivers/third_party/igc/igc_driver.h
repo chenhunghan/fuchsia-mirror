@@ -153,7 +153,6 @@ class IgcDriver final : public fdf::DriverBase2,
     std::mutex rx_lock;
     // Protect the tx data path between the two operations: QueueTx and ReapTxBuffers.
     std::mutex tx_lock;
-    fuchsia_hardware_pci::InterruptMode irq_mode;
 
     // Indicate a size for the arena so that we avoid re-allocation as much as possible. Don't use
     // this arena for anything other than these RX buffers.

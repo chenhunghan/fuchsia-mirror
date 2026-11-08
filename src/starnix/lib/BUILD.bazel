@@ -2,6 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
 package(default_applicable_licenses = ["//:license"])
 
 # Starnix library device tests defined in Bazel. These are exported to `fx test`
@@ -12,11 +14,27 @@ test_suite(
     target_compatible_with = ["@platforms//os:fuchsia"],
     tests = [
         "//src/starnix/lib/crash_throttling:crash-throttling-tests",
+        "//src/starnix/lib/ebpf:starnix-ebpf-tests",
+        "//src/starnix/lib/expando:starnix-expando-tests",
         "//src/starnix/lib/page_buf:page_buf_tests",
         "//src/starnix/lib/paged_ring_buffer:starnix-paged-ring-buffer-tests",
+        "//src/starnix/lib/range_map:range_map_unittests",
         "//src/starnix/lib/selinux:starnix-selinux-unit-tests",
         "//src/starnix/lib/seq_lock:seq_lock_tests",
+        "//src/starnix/lib/split_enum_storage:split_enum_storage_unittests",
         "//src/starnix/lib/starnix_registers:starnix_registers_tests",
+        "//src/starnix/lib/starnix_stack:starnix_stack-unittests",
+        "//src/starnix/lib/starnix_task_command:starnix_task_command_tests",
+    ],
+    visibility = ["//src/starnix:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        "//src/starnix/lib/range_map:range_map_host_test",
+        "//src/starnix/lib/split_enum_storage:split_enum_storage_host_test",
     ],
     visibility = ["//src/starnix:__pkg__"],
 )

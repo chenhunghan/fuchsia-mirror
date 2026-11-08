@@ -99,9 +99,18 @@ def _buildifier_lint(ctx):
         for warning in file_result.get("warnings", []):
             level = "warning"
 
-            # docstring-related warnings are not that important, so treat them as notices.
+            # docstring-related warnings are not that important, so treat them as notices,
+            # except for module-docstring in build/bazel_sdk/ which is exported and rolled
+            # to external repositories that enforce buildifier's module-docstring lint.
             if "docstring" in warning["category"]:
-                level = "notice"
+                if (
+                    warning["category"] == "module-docstring" and
+                    file_result["filename"].startswith("build/bazel_sdk/") and
+                    file_result["filename"].endswith(".bzl")
+                ):
+                    level = "error"
+                else:
+                    level = "notice"
 
             if warning["category"] == "load":
                 # Unused imports are completely unnecessary, so treat them as

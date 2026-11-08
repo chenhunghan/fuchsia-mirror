@@ -52,6 +52,12 @@ pub enum AccessorError {
     #[error("only selectors of type `component:root` are supported for logs at the moment")]
     InvalidLogSelector,
 
+    #[error("inspect is not supported on this pipeline accessor")]
+    InspectNotSupported,
+
+    #[error("logs are not supported on pipeline accessors")]
+    LogsNotSupported,
+
     #[error("format must be set")]
     MissingFormat,
 
@@ -108,6 +114,8 @@ impl AccessorError {
             | AccessorError::MissingSelectors
             | AccessorError::InvalidSelectors(_)
             | AccessorError::InvalidLogSelector
+            | AccessorError::InspectNotSupported
+            | AccessorError::LogsNotSupported
             | AccessorError::ParseSelectors(_) => ZxStatus::INVALID_ARGS,
             AccessorError::VmoCreate(status)
             | AccessorError::VmoWrite(status)
@@ -143,6 +151,8 @@ mod tests {
             (ZxStatus::INVALID_ARGS, AccessorError::MissingSelectors),
             (ZxStatus::INVALID_ARGS, AccessorError::InvalidSelectors("test")),
             (ZxStatus::INVALID_ARGS, AccessorError::InvalidLogSelector),
+            (ZxStatus::INVALID_ARGS, AccessorError::InspectNotSupported),
+            (ZxStatus::INVALID_ARGS, AccessorError::LogsNotSupported),
             (
                 ZxStatus::INVALID_ARGS,
                 AccessorError::ParseSelectors(selectors::Error::NonFlatDirectory),

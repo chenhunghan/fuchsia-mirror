@@ -1,0 +1,98 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":controller_integration_test"],
+    visibility = ["//src/sys/component_manager:__pkg__"],
+)
+
+rustc_test(
+    name = "controller_integration_test_bin",
+    srcs = ["src/lib.rs"],
+    edition = "2024",
+    tags = ["manual"],
+    # Device-packaged integration test depending on Fuchsia-only components and crates.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//examples/components/routing/fidl:echo_rust",
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.process:fuchsia.process_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",
+        "//src/lib/fuchsia-fs",
+        "//src/lib/fuchsia-runtime",
+        "//src/lib/fuchsia-sync",
+        "//src/storage/lib/vfs/rust:vfs",
+        "//src/sys/lib/cm_rust",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+fx_packaged_binary(
+    name = "controller_integration_test_packaged_bin",
+    testonly = True,
+    binary = ":controller_integration_test_bin",
+    binary_name = "controller_integration_test_bin",
+)
+
+fx_component_manifest(
+    name = "controller_integration_test_manifest",
+    testonly = True,
+    component_name = "controller_integration_test",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/controller_integration_test.cml",
+)
+
+fx_test_component(
+    name = "controller_integration_test_component",
+    compiled_manifest = ":controller_integration_test_manifest",
+    deps = [":controller_integration_test_packaged_bin"],
+)
+
+fx_package(
+    name = "controller_integration_test_package",
+    package_name = "controller_integration_test",
+    testonly = True,
+    components = [
+        "//examples/components/routing/rust/echo_server:echo_server_cmp_for_nested_cm",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+        "//src/sys/component_manager:component-manager-realm-builder-cmp",
+    ],
+    test_components = [":controller_integration_test_component"],
+)
+
+fx_test(
+    name = "controller_integration_test",
+    package = ":controller_integration_test_package",
+)
+# End of file

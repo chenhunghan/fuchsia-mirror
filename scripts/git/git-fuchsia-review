@@ -23,8 +23,4 @@ ID=`git show $1 | grep -E 'Change-Id' | awk '{print $(NF);}'`
 URL="https://fuchsia-review.googlesource.com/q/$ID"
 
 echo Opening Change-Id $ID
-if [[ "$OSTYPE" == "darwin"* ]]; then
-  open $URL
-else
-  xdg-open $URL
-fi
+xdg-open $URL

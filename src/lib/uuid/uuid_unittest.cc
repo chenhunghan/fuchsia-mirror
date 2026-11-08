@@ -6,13 +6,15 @@
 
 #include <stdint.h>
 
+#include <algorithm>
 #include <sstream>
 #include <string>
 #include <unordered_set>
 #include <vector>
 
 #include <gtest/gtest.h>
-#include <re2/re2.h>
+
+#include "re2/re2.h"
 
 namespace uuid {
 namespace {
@@ -189,6 +191,48 @@ TEST(Uuid, GeneratedIsValid) {
     EXPECT_TRUE(uuid::IsValid(uuid));
     EXPECT_TRUE(uuid::IsValidOutputString(uuid));
   }
+}
+
+TEST(Uuid, IsValidRejectsWrongLength) {
+  EXPECT_FALSE(uuid::IsValid(""));
+  EXPECT_FALSE(uuid::IsValid("c12a7328-f81f-11d2-ba4b-00a0c93ec93"));
+  EXPECT_FALSE(uuid::IsValidOutputString("c12a7328-f81f-11d2-ba4b-00a0c93ec93b0"));
+}
+
+TEST(Uuid, IsValidRejectsMissingDash) {
+  // Right length, but a hex digit where the second dash should be.
+  EXPECT_FALSE(uuid::IsValid("c12a7328-f81f011d2-ba4b-00a0c93ec93b"));
+  EXPECT_FALSE(uuid::IsValidOutputString("c12a7328-f81f011d2-ba4b-00a0c93ec93b"));
+}
+
+TEST(Uuid, IsValidRejectsNonHexDigit) {
+  EXPECT_FALSE(uuid::IsValid("g12a7328-f81f-11d2-ba4b-00a0c93ec93b"));
+  EXPECT_FALSE(uuid::IsValidOutputString("c12a7328-f81f-11d2-ba4b-00a0c93ec93z"));
+}
+
+// IsValid() accepts upper-case hex digits; IsValidOutputString() only accepts
+// the lower-case form produced by ToString().
+TEST(Uuid, IsValidOutputStringRejectsUpperCase) {
+  const char kUpper[] = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B";
+  EXPECT_TRUE(uuid::IsValid(kUpper));
+  EXPECT_FALSE(uuid::IsValidOutputString(kUpper));
+}
+
+TEST(Uuid, ConstIteratorsSpanAllBytes) {
+  const Uuid uuid = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                     0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
+  ASSERT_EQ(static_cast<size_t>(uuid.cend() - uuid.cbegin()), kUuidSize);
+  std::vector<uint8_t> bytes(uuid.cbegin(), uuid.cend());
+  std::vector<uint8_t> expected = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                                   0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
+  EXPECT_EQ(bytes, expected);
+}
+
+TEST(Uuid, MutableIteratorsModifyBytes) {
+  Uuid uuid;
+  ASSERT_EQ(static_cast<size_t>(uuid.end() - uuid.begin()), kUuidSize);
+  std::fill(uuid.begin(), uuid.end(), 0xff);
+  EXPECT_EQ(uuid.ToString(), "ffffffff-ffff-ffff-ffff-ffffffffffff");
 }
 
 }  // namespace

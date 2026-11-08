@@ -4,8 +4,8 @@
 
 #include <fcntl.h>
 #include <lib/stdcompat/string_view.h>
-#include <mntent.h>
 #include <sys/mount.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -13,6 +13,7 @@
 #include <map>
 #include <string>
 
+#include <fbl/unique_fd.h>
 #include <gtest/gtest.h>
 
 #include "src/starnix/tests/selinux/userspace/util.h"
@@ -24,19 +25,6 @@ namespace {
 std::map<std::string, fit::result<int>> g_pre_policy_mount_results;
 
 const char* kSelinuxMountOptions[] = {"context", "fscontext", "defcontext", "rootcontext"};
-
-std::string MountOptionsFor(std::string_view mount_path) {
-  FILE* mounts = setmntent("/proc/mounts", "r");
-  std::string result;
-  for (struct mntent* entry = 0; (entry = getmntent(mounts));) {
-    if (mount_path == entry->mnt_dir) {
-      result = entry->mnt_opts;
-      break;
-    }
-  }
-  endmntent(mounts);
-  return result;
-}
 
 class MountOptionValidationTest : public ::testing::TestWithParam<const char*> {};
 
@@ -295,6 +283,28 @@ TEST(MountTest, BindRemountWithContext) {
 
     // 5. Verify the context is still ctx1 (it was not changed by the remount)
     EXPECT_TRUE(cpp23::contains(MountOptionsFor(target_dir.path()), "test_mount_fscontext_t"));
+  }));
+}
+
+// Verify that mounting on a socket node, reached via "/proc/self/fd/", fails.
+TEST(MountTest, MountSocketDenied) {
+  if (!test_helper::HasSysAdmin()) {
+    GTEST_SKIP() << "Not running with sysadmin capabilities, skipping suite.";
+  }
+
+  auto enforce = ScopedEnforcement::SetEnforcing();
+
+  EXPECT_TRUE(RunSubprocessAs("test_u:test_r:test_mount_relabel_self_allowed_t:s0", [&] {
+    fbl::unique_fd sock(socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0));
+    ASSERT_TRUE(sock.is_valid()) << "errno: " << errno;
+    std::string sock_path = "/proc/self/fd/" + std::to_string(sock.get());
+
+    // On Linux, SELinux checks an unrelated permission of the socket class ("setopt") and denies
+    // the mount with EACCES. On Starnix, `sb_mount` allows the operation because "mounton" is only
+    // defined for file-like classes, and the VFS subsequently rejects the mount with ENOENT.
+    int expected_errno = test_helper::IsStarnix() ? ENOENT : EACCES;
+    EXPECT_THAT(mount("tmpfs", sock_path.c_str(), "tmpfs", 0, nullptr),
+                SyscallFailsWithErrno(expected_errno));
   }));
 }
 

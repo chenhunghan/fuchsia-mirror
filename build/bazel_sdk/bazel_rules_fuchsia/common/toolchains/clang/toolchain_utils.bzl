@@ -101,6 +101,61 @@ def compute_clang_features(
         enabled = is_linux or is_fuchsia,
     )
 
+    # A hard-coded Bazel feature which indicates, when enabled, that binaries
+    # and their static library dependencies should be compiled with PIC ("pic"
+    # build variable set) even in -c opt compilation mode.
+    prefer_pic_for_opt_binaries_feature = feature(
+        name = "prefer_pic_for_opt_binaries",
+    )
+
+    # @rules_cc sets the "pic" build variable for compile actions that produce
+    # PIC objects (*.pic.o) and leaves it unset for non-PIC objects (*.o).
+    # Emit -fPIC when "pic" is available and -fPIE when "pic" is not available.
+    # For link actions, emit -fPIC for dynamic libraries and -fPIE (plus -pie
+    # on Linux) for executables.
+    # See //build/bazel/BAZEL_PIE_VS_PIC.md for details.
+    pic_feature = feature(
+        name = "pic",
+        enabled = is_linux or is_fuchsia,
+        flag_sets = [
+            flag_set(
+                actions = action_names.all_compile_actions,
+                flag_groups = [
+                    flag_group(
+                        flags = ["-fPIC"],
+                        expand_if_available = "pic",
+                    ),
+                    flag_group(
+                        flags = ["-fPIE"],
+                        expand_if_not_available = "pic",
+                    ),
+                ],
+            ),
+            flag_set(
+                actions = [
+                    ACTION_NAMES.cpp_link_dynamic_library,
+                    ACTION_NAMES.cpp_link_nodeps_dynamic_library,
+                ],
+                flag_groups = [
+                    flag_group(flags = ["-fPIC"]),
+                ],
+            ),
+            flag_set(
+                actions = [ACTION_NAMES.cpp_link_executable],
+                flag_groups = [
+                    flag_group(
+                        # On Fuchsia, the Clang driver passes `-pie` to `ld.lld`
+                        # unconditionally by default for executables (and GN's
+                        # //build/config/fuchsia:executable_config omits it).
+                        # On Linux, `-pie` is passed explicitly to match GN's
+                        # //build/config/linux:default-pie.
+                        flags = ["-fPIE"] + (["-pie"] if is_linux else []),
+                    ),
+                ],
+            ),
+        ],
+    )
+
     # Redefine the dependency_files feature in order to use -MMD instead of -MD
     # which ensures that system headers files are not listed in the dependency file.
     # Doing this allows remote builds to work with our prebuilt toolchain. Otherwise
@@ -244,11 +299,24 @@ def compute_clang_features(
                             flags = [
                                 # The statically-linked profiling runtime depends on libzircon.
                                 "-lzircon",
-                                # Note: Unlike GN, which installs coverage shared libraries and a
-                                # copy of ld.so.1 under /pkg/lib/coverage/, Bazel's fx_packaged_binary
-                                # installs ld.so.1 and instrumented shared libraries in /pkg/lib/.
                             ],
                         ),
+                    ],
+                ),
+            ] if is_fuchsia else []
+        ) + (
+            [
+                flag_set(
+                    actions = action_names.all_link_actions,
+                    flag_groups = [
+                        flag_group(
+                            flags = [
+                                "-Wl,-dynamic-linker=coverage/ld.so.1",
+                            ],
+                        ),
+                    ],
+                    with_features = [
+                        with_feature_set(not_features = ["asan", "hwasan", "ubsan", "sancov"]),
                     ],
                 ),
             ] if is_fuchsia else []
@@ -257,6 +325,148 @@ def compute_clang_features(
     # LINT.ThenChange(
     #   //build/config/BUILD.gn:optimize_coverage,
     #   //build/config/profile/BUILD.gn:coverage,
+    # )
+
+    # LINT.IfChange(coverage_rust)
+    coverage_rust_feature = feature(
+        name = "coverage-rust",
+        enabled = "coverage-rust" in enabled_features,
+        flag_sets = [
+            flag_set(
+                actions = action_names.all_compile_actions + action_names.all_link_actions,
+                flag_groups = [
+                    flag_group(
+                        flags = [
+                            "-O1",
+                        ],
+                    ),
+                ],
+                with_features = [
+                    with_feature_set(not_features = ["asan", "hwasan", "ubsan", "sancov", "coverage"]),
+                ],
+            ),
+        ] + (
+            [
+                flag_set(
+                    actions = action_names.all_link_actions,
+                    flag_groups = [
+                        flag_group(
+                            flags = [
+                                "-Wl,-dynamic-linker=coverage-rust/ld.so.1",
+                            ],
+                        ),
+                    ],
+                    with_features = [
+                        with_feature_set(not_features = ["asan", "hwasan", "ubsan", "sancov", "coverage"]),
+                    ],
+                ),
+            ] if is_fuchsia else []
+        ),
+    )
+    # LINT.ThenChange(
+    #   //build/config/BUILD.gn:optimize_coverage,
+    #   //build/config/profile/BUILD.gn:rust_coverage,
+    # )
+
+    # LINT.IfChange(profile)
+    profile_feature = feature(
+        name = "profile",
+        enabled = "profile" in enabled_features,
+        flag_sets = [
+            flag_set(
+                actions = action_names.all_compile_actions + action_names.all_link_actions,
+                flag_groups = [
+                    flag_group(
+                        flags = [
+                            "-fprofile-generate",
+                            "-O1",
+                        ],
+                    ),
+                ],
+            ),
+        ] + (
+            [
+                flag_set(
+                    actions = action_names.all_compile_actions,
+                    flag_groups = [
+                        flag_group(
+                            flags = [
+                                "-mllvm",
+                                "-disable-vp",
+                            ],
+                        ),
+                    ],
+                ),
+                flag_set(
+                    actions = action_names.all_link_actions,
+                    flag_groups = [
+                        flag_group(
+                            flags = [
+                                "-lzircon",
+                            ],
+                        ),
+                    ],
+                ),
+                flag_set(
+                    actions = action_names.all_link_actions,
+                    flag_groups = [
+                        flag_group(
+                            flags = [
+                                "-Wl,-dynamic-linker=profile/ld.so.1",
+                            ],
+                        ),
+                    ],
+                    with_features = [
+                        with_feature_set(not_features = ["asan", "hwasan", "ubsan", "sancov"]),
+                    ],
+                ),
+            ] if is_fuchsia else []
+        ),
+    )
+    # LINT.ThenChange(
+    #   //build/config/BUILD.gn:optimize_profile,
+    #   //build/config/profile/BUILD.gn:profile,
+    # )
+
+    # LINT.IfChange(profile_rust)
+    profile_rust_feature = feature(
+        name = "profile-rust",
+        enabled = "profile-rust" in enabled_features,
+        flag_sets = [
+            flag_set(
+                actions = action_names.all_compile_actions + action_names.all_link_actions,
+                flag_groups = [
+                    flag_group(
+                        flags = [
+                            "-O1",
+                        ],
+                    ),
+                ],
+                with_features = [
+                    with_feature_set(not_features = ["asan", "hwasan", "ubsan", "sancov", "profile"]),
+                ],
+            ),
+        ] + (
+            [
+                flag_set(
+                    actions = action_names.all_link_actions,
+                    flag_groups = [
+                        flag_group(
+                            flags = [
+                                "-Wl,-dynamic-linker=profile-rust/ld.so.1",
+                            ],
+                        ),
+                    ],
+                    with_features = [
+                        with_feature_set(not_features = ["asan", "hwasan", "ubsan", "sancov", "profile"]),
+                    ],
+                ),
+            ] if is_fuchsia else []
+        ),
+    )
+    # LINT.ThenChange(
+    #   //build/config/BUILD.gn:optimize_profile,
+    #   //build/config/profile/BUILD.gn:rust_profile,
     # )
 
     generate_linkmap_feature = feature(
@@ -328,7 +538,12 @@ def compute_clang_features(
         default_compile_flags_feature,
         target_system_name_feature,
         supports_pic_feature,
+        prefer_pic_for_opt_binaries_feature,
+        pic_feature,
         coverage_feature,
+        coverage_rust_feature,
+        profile_feature,
+        profile_rust_feature,
         dbg_feature,
         dependency_file_feature,
         generate_linkmap_feature,
@@ -526,7 +741,8 @@ def _prebuilt_clang_cc_toolchain_config_impl(ctx):
     if ctx.attr.sysroot_label:
         if ctx.attr.sysroot_path:
             fail("Only one of sysroot_label or sysroot_path can be set")
-        sysroot_path = ctx.file.sysroot_label.dirname
+        sysroot_file = ctx.file.sysroot_label
+        sysroot_path = sysroot_file.path if sysroot_file.is_directory else sysroot_file.dirname
     else:
         sysroot_path = ctx.attr.sysroot_path
 
@@ -672,7 +888,8 @@ def generate_clang_cc_toolchain(
            Mutually exclusive with sysroot_label. One of them must be set if
            sysroot_header_files or sysroot_library_files are used.
 
-       sysroot_label: (optional) The label to a file at the root of the sysroot.
+       sysroot_label: (optional) The label to a file at the root of the sysroot,
+           or to a directory (tree artifact) that is the sysroot itself.
            Use this instead of sysroot_path if the path is not relative to the
            workspace root. Mutually exclusive with sysroot_path. One of them
            must be set if sysroot_header_files or sysroot_library_files are used.

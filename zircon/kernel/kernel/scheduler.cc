@@ -112,12 +112,6 @@ zx::result<cpu_mask_t> Scheduler::UpdatePowerLevel(uint32_t domain_id, uint64_t 
 FFI_ALWAYS_INLINE Scheduler* cpp_scheduler_get(cpu_num_t cpu) { return Scheduler::Get(cpu); }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_scheduler_block(Thread* current_thread) TA_NO_THREAD_SAFETY_ANALYSIS {
-  DEBUG_ASSERT(current_thread != nullptr);
-  Scheduler::Block(current_thread);
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE cpu_stats* cpp_get_cpu_stats(cpu_num_t cpu_num) TA_NO_THREAD_SAFETY_ANALYSIS {
   return &percpu::Get(cpu_num).stats;
 }
@@ -159,19 +153,6 @@ FFI_ALWAYS_INLINE void cpp_scheduler_unlock_queue_irq_restore(Scheduler* sched, 
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE bool cpp_scheduler_has_pending_power_work(const Scheduler* sched) {
-  if (IdlePowerThread::PendingPowerWorkPredicate pending_work =
-          percpu::Get(sched->this_cpu()).idle_power_thread.pending_power_work()) {
-    // If the idle power thread is in the (offline, offline) state, CPU hot
-    // plugging attempted to block before restoring the idle power thread.
-    DEBUG_ASSERT(pending_work.current() != IdlePowerThread::State::Offline ||
-                 pending_work.target() != IdlePowerThread::State::Offline);
-    return true;
-  }
-  return false;
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE void cpp_thread_update_runtime_stats(Thread* thread, int32_t state) {
   thread->UpdateRuntimeStats(static_cast<thread_state>(state));
 }
@@ -180,12 +161,6 @@ FFI_ALWAYS_INLINE void cpp_thread_update_runtime_stats(Thread* thread, int32_t s
 FFI_ALWAYS_INLINE int32_t cpp_thread_get_disposition(const Thread* thread)
     TA_NO_THREAD_SAFETY_ANALYSIS {
   return static_cast<int32_t>(thread->disposition());
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE Thread* cpp_scheduler_get_idle_thread(const Scheduler* sched)
-    TA_NO_THREAD_SAFETY_ANALYSIS {
-  return &percpu::Get(sched->this_cpu()).idle_power_thread.thread();
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
@@ -309,16 +284,6 @@ FFI_ALWAYS_INLINE zx_status_t cpp_scheduler_power_state_update_active_power_leve
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_timer_queue_preempt_reset(cpu_num_t cpu, zx_instant_mono_t deadline) {
-  percpu::Get(cpu).timer_queue.PreemptReset(deadline);
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE bool cpp_timer_queue_preempt_armed(cpu_num_t cpu) {
-  return percpu::Get(cpu).timer_queue.PreemptArmed();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE void cpp_thread_call_context_switch_fn_locked(Thread* thread)
     TA_NO_THREAD_SAFETY_ANALYSIS {
   thread->CallContextSwitchFnLocked();
@@ -351,9 +316,6 @@ FFI_ALWAYS_INLINE SchedulerQueueState* cpp_thread_get_queue_state(Thread* thread
     TA_NO_THREAD_SAFETY_ANALYSIS {
   return &thread->scheduler_queue_state();
 }
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE zx_koid_t cpp_thread_get_tid(const Thread* thread) { return thread->tid(); }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE const CpuSearchSet::Entry* cpp_get_cpu_search_set_entries(cpu_num_t cpu) {

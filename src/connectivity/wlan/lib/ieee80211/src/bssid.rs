@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::mac_addr::{MacAddr, MacAddrByteArray, MacAddrBytes, MacFmt, OuiFmt};
+use crate::mac_addr::{MacAddr, MacAddrByteArray, MacAddrBytes, OuiFmt, fmt_mac_octets};
 use std::fmt;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
@@ -34,7 +34,6 @@ impl MacAddrBytes for Bssid {
     }
 }
 
-impl MacFmt for Bssid {}
 impl OuiFmt for Bssid {}
 
 impl From<MacAddrByteArray> for Bssid {
@@ -49,11 +48,24 @@ impl From<MacAddr> for Bssid {
     }
 }
 
-impl fmt::Display for Bssid {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_mac_string())
+impl redactor::Redactable for Bssid {
+    fn fmt_unredacted(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_mac_octets(self.0, f)
+    }
+
+    fn fmt_redacted(
+        &self,
+        redactor: &dyn redactor::Redactor,
+        f: &mut fmt::Formatter<'_>,
+    ) -> fmt::Result {
+        fmt_mac_octets(redactor.redact_mac(self.0), f)?;
+        f.write_str(redactor::REDACTED_MARKER)
     }
 }
+
+// `Display` goes through the global redactor (if one has been installed), to
+// prevent leaking the raw BSSID in sensitive contexts. `Debug` wraps it.
+redactor::impl_display_via_redactable!(Bssid);
 
 impl fmt::Debug for Bssid {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

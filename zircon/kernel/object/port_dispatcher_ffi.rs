@@ -4,12 +4,11 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-use super::dispatcher::Dispatcher;
 use super::handle::{Handle, HandleRef, KernelHandle};
 use super::port_dispatcher::{
-    PortAllocator, PortDispatcher, PortDispatcherState, PortObserver, PortPacket, RawPortPacket,
+    PortDispatcher, PortDispatcherState, PortObserver, PortPacket, PortSignalObserver,
 };
-use crate::kernel::deadline::Deadline;
+use crate::kernel::owned_wait_queue::OwnedWaitQueue;
 use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 use zx_types::{zx_signals_t, zx_status_t};
@@ -28,35 +27,11 @@ unsafe extern "C" {
         rights_out: *mut MaybeUninit<zx_types::zx_rights_t>,
     ) -> zx_status_t;
 
-    pub fn cpp_port_packet_alloc() -> *mut PortPacket;
-    pub fn cpp_port_packet_free(packet: *mut PortPacket);
-    pub fn cpp_port_default_allocator() -> *mut PortAllocator;
-    pub fn cpp_port_allocator_free(allocator: *mut PortAllocator, packet: *mut PortPacket);
-    pub fn cpp_port_ephemeral_packet_freed_count() -> i64;
-    pub fn cpp_port_observer_freed_count() -> i64;
-
-    pub fn cpp_port_observer_alloc(
+    pub(super) fn cpp_port_signal_observer_init(
+        observer: *mut MaybeUninit<PortSignalObserver>,
         options: u32,
-        handle: *const Handle,
-        port: *mut PortDispatcher,
-        key: u64,
-        signals: zx_signals_t,
-    ) -> *mut PortObserver;
-    pub fn cpp_port_observer_free(observer: *mut PortObserver);
-    pub fn cpp_port_observer_cancel(observer: *mut PortObserver);
-    pub fn cpp_port_observer_add_dispatcher_ref_locked(observer: *mut PortObserver);
-    pub fn cpp_port_observer_unlink_dispatcher_locked(
-        observer: *mut PortObserver,
-    ) -> *mut Dispatcher;
-    pub fn cpp_port_observer_matches_key(
-        observer: *mut PortObserver,
-        port: *const PortDispatcher,
-        key: u64,
-    ) -> bool;
-    pub fn cpp_port_observer_remove_from_dispatcher(
-        observer: *mut PortObserver,
-        dispatcher: *mut Dispatcher,
-    ) -> bool;
+    );
+    pub(super) fn cpp_port_signal_observer_destroy(observer: *mut PortSignalObserver);
 }
 
 /// Handles zero handles condition for the port dispatcher.
@@ -69,104 +44,69 @@ pub unsafe extern "C" fn rust_port_dispatcher_on_zero_handles(disp: &PortDispatc
     disp.on_zero_handles();
 }
 
-/// Queues a port packet to the port.
+/// Invoked by C++ `PortSignalObserver::OnMatch` when watched signals match.
 ///
 /// # Safety
 ///
-/// `disp` must be a valid, initialized `PortDispatcher`.
-/// `port_packet` must be null or point to a valid, initialized `PortPacket` that is not in any
-/// container; a null `port_packet` is rejected with `ZX_ERR_INVALID_ARGS` (the C++ declaration
-/// takes a raw `PortPacket*`, so a non-null type must not be assumed at the ABI boundary).
+/// `observer` must point to the `signal_observer` field at offset 0 of a valid, live
+/// `PortObserver` with provenance over the entire `PortObserver`, and the watched `Dispatcher`'s
+/// lock must be held. `queue_to_own` must be either null or a valid pointer to an
+/// `OwnedWaitQueue` that remains live for the duration of the call. This call may destroy
+/// `observer`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_port_dispatcher_queue(
-    disp: &PortDispatcher,
-    port_packet: *mut PortPacket,
-) -> zx_status_t {
-    let Some(port_packet) = NonNull::new(port_packet) else {
-        return zx_status::Status::INVALID_ARGS.into_raw();
-    };
-    // SAFETY: `disp` is valid and `port_packet` is non-null and valid per the caller's contract.
-    zx_status::Status::result_into_raw(unsafe { disp.queue(port_packet) })
-}
-
-/// Queues a packet and removes the observer from the port.
-///
-/// # Safety
-///
-/// `disp` must be a valid, initialized `PortDispatcher`.
-/// `port_packet` must point to a valid `PortPacket` that is not in any container.
-/// `observer` must be null or point to a valid `PortObserver` created on `disp`; when non-null,
-/// `port_packet` must be the packet embedded in `observer`.
-/// `queue_to_own` may be null or point to a valid `OwnedWaitQueue` (passed as `void*` because
-/// the Rust `OwnedWaitQueue` is `!Unpin` and therefore not FFI-safe in `extern` signatures).
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_port_dispatcher_queue_and_remove_observer(
-    disp: &PortDispatcher,
-    port_packet: *mut PortPacket,
-    observed: zx_signals_t,
-    observer: *mut PortObserver,
-    queue_to_own: *mut core::ffi::c_void,
-) -> zx_status_t {
-    // SAFETY: caller guarantees validity of pointers.
-    zx_status::Status::result_into_raw(unsafe {
-        disp.queue_and_remove_observer(port_packet, observed, observer, queue_to_own.cast())
-    })
-}
-
-/// Queues a user packet to the port dispatcher.
-///
-/// `packet` is the caller's `zx_port_packet_t` viewed as a `RawPortPacket` (identical
-/// layout) because its `type` is user-controlled and need not be a valid `zx_packet_type_t`.
-///
-/// # Safety
-///
-/// `disp` must be a valid, initialized `PortDispatcher`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_port_dispatcher_queue_user(
-    disp: &PortDispatcher,
-    packet: &RawPortPacket,
-) -> zx_status_t {
-    zx_status::Status::result_into_raw(disp.queue_user(packet))
-}
-
-/// Dequeues a packet from the port dispatcher.
-///
-/// `packet` is the caller's `zx_port_packet_t` out-parameter viewed as a `RawPortPacket`
-/// (identical layout); it is only written on success.
-///
-/// # Safety
-///
-/// `disp` must be a valid, initialized `PortDispatcher`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_port_dispatcher_dequeue(
-    disp: &PortDispatcher,
-    deadline: &Deadline,
-    packet: &mut MaybeUninit<RawPortPacket>,
-) -> zx_status_t {
-    zx_status::Status::result_into_raw(disp.dequeue(deadline, packet))
-}
-
-/// Reaps an observer from the port dispatcher.
-///
-/// # Safety
-///
-/// `disp` must be a valid, initialized `PortDispatcher`.
-/// `observer` must point to a valid `PortObserver` created on `disp`.
-/// `port_packet` must point to a valid `PortPacket` and be the packet embedded in `observer`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_port_dispatcher_maybe_reap(
-    disp: &PortDispatcher,
-    observer: *mut PortObserver,
-    port_packet: *mut PortPacket,
+pub unsafe extern "C" fn rust_port_observer_on_match(
+    observer: *mut PortSignalObserver,
+    options: u32,
+    signals: zx_signals_t,
+    queue_to_own: *mut OwnedWaitQueue,
 ) {
-    // SAFETY: caller guarantees pointer validity.
+    // SAFETY: Caller guarantees `queue_to_own` is null or valid for the duration of the call.
+    let queue_to_own = unsafe { queue_to_own.as_ref() };
+    // SAFETY: `signal_observer` is at offset 0 of `PortObserver` and caller upholds the
+    // `PortObserver::on_match` contract.
     unsafe {
-        disp.maybe_reap(observer, port_packet);
+        PortObserver::on_match(observer.cast::<PortObserver>(), options, signals, queue_to_own);
     }
 }
 
-/// Creates and initializes a `PortObserver` registered with `disp`, returning it through
-/// `out_observer`. The C++ caller performs the `PortObserver` -> `SignalObserver` upcast.
+/// Invoked by C++ `PortSignalObserver::OnCancel` when the watched handle is closed.
+///
+/// # Safety
+///
+/// `observer` must point to the `signal_observer` field at offset 0 of a valid, live
+/// `PortObserver` with provenance over the entire `PortObserver`, and the watched `Dispatcher`'s
+/// lock must be held. This call may destroy `observer`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_port_observer_on_cancel(
+    observer: *mut PortSignalObserver,
+    signals: zx_signals_t,
+) {
+    // SAFETY: `signal_observer` is at offset 0 of `PortObserver` and caller upholds the
+    // `PortObserver::on_cancel` contract.
+    unsafe {
+        PortObserver::on_cancel(observer.cast::<PortObserver>(), signals);
+    }
+}
+
+/// Invoked by C++ `PortSignalObserver::MatchesKey` to check whether `observer` matches
+/// `(port, key)`.
+///
+/// # Safety
+///
+/// `observer` must point to the `signal_observer` field at offset 0 of a valid, live
+/// `PortObserver`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_port_observer_matches_key(
+    observer: *const PortSignalObserver,
+    port: *const core::ffi::c_void,
+    key: u64,
+) -> bool {
+    // SAFETY: `signal_observer` is at offset 0 of `PortObserver` and `observer` is live.
+    unsafe { (*observer.cast::<PortObserver>()).matches_key(port, key) }
+}
+
+/// Creates and initializes a `PortObserver` registered with `disp`, returning its
+/// `PortSignalObserver` base pointer through `out_observer`.
 ///
 /// # Safety
 ///
@@ -180,67 +120,48 @@ pub unsafe extern "C" fn rust_port_dispatcher_make_observer(
     handle: &Handle,
     key: u64,
     signals: zx_signals_t,
-    out_observer: &mut *mut PortObserver,
+    out_observer: &mut *mut PortSignalObserver,
 ) -> zx_status_t {
     // SAFETY: `handle` is a live `Handle` and the caller guarantees the handle table lock is held
     // for the duration of this call, which bounds the borrow.
     let handle = unsafe { HandleRef::from_raw(NonNull::from(handle)) };
     zx_status::Status::result_into_raw(disp.make_observer(options, handle, key, signals).map(
         |observer| {
-            *out_observer = observer.as_ptr();
+            *out_observer = observer.as_ptr().cast::<PortSignalObserver>();
         },
     ))
 }
 
-/// Cancels a queued packet matching handle and key.
+/// Queues a port packet to the port.
 ///
 /// # Safety
 ///
-/// `disp` must be a valid, initialized `PortDispatcher`.
+/// `disp` must be a valid, initialized `PortDispatcher`, and `port_packet` must be null or point
+/// to a valid, initialized `PortPacket` that is not in any container.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_port_dispatcher_cancel_queued_handle_key(
+pub unsafe extern "C" fn rust_port_dispatcher_queue(
     disp: &PortDispatcher,
-    handle: *const core::ffi::c_void,
-    key: u64,
-) -> bool {
-    disp.cancel_queued_handle_key(handle, key)
+    port_packet: *mut PortPacket,
+) -> zx_status_t {
+    let Some(port_packet) = NonNull::new(port_packet) else {
+        return zx_status::Status::INVALID_ARGS.into_raw();
+    };
+    // SAFETY: `disp` is valid and `port_packet` is non-null and valid per the caller contract.
+    zx_status::Status::result_into_raw(unsafe { disp.queue(port_packet) })
 }
 
 /// Cancels a specific queued port packet.
 ///
 /// # Safety
 ///
-/// `disp` must be a valid, initialized `PortDispatcher`.
-/// `port_packet` must point to a valid `PortPacket` that is either not in any container or
-/// queued on `disp` (never on another port).
+/// `disp` must be a valid, initialized `PortDispatcher`, and `port_packet` must point to a valid
+/// `PortPacket` that is either not in any container or queued on `disp`, and whose `allocator`
+/// (if non-null) points to a live `PortAllocator`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rust_port_dispatcher_cancel_queued_packet(
     disp: &PortDispatcher,
     port_packet: *mut PortPacket,
 ) -> bool {
-    // SAFETY: caller guarantees `port_packet` validity.
+    // SAFETY: Caller guarantees `port_packet` validity.
     unsafe { disp.cancel_queued_packet(port_packet) }
-}
-
-/// Cancels all packets and observers matching key.
-///
-/// # Safety
-///
-/// `disp` must be a valid, initialized `PortDispatcher`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_port_dispatcher_cancel_key(
-    disp: &PortDispatcher,
-    key: u64,
-) -> zx_status_t {
-    zx_status::Status::result_into_raw(disp.cancel_key(key))
-}
-
-/// Checks whether the port can bind to an interrupt.
-///
-/// # Safety
-///
-/// `disp` must be a valid, initialized `PortDispatcher`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_port_dispatcher_can_bind_to_interrupt(disp: &PortDispatcher) -> bool {
-    disp.can_bind_to_interrupt()
 }

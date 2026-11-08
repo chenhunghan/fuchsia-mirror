@@ -84,10 +84,6 @@ zx_status_t SparseReader::Create(std::unique_ptr<ReaderInterface> reader,
                                  std::unique_ptr<SparseReader>* out) {
   return SparseReader::CreateHelper(std::move(reader), true /* verbose */, out);
 }
-zx_status_t SparseReader::CreateSilent(fbl::unique_fd fd, std::unique_ptr<SparseReader>* out) {
-  return SparseReader::CreateHelper(std::make_unique<FileReader>(std::move(fd)),
-                                    false /* verbose */, out);
-}
 
 zx_status_t SparseReader::CreateHelper(std::unique_ptr<ReaderInterface> reader_intf, bool verbose,
                                        std::unique_ptr<SparseReader>* out) {
@@ -341,42 +337,6 @@ zx_status_t SparseReader::ReadRaw(uint8_t* data, size_t length, size_t* actual) 
   raw_bytes_read_ += total_size;
   *actual = total_size;
   return ZX_OK;
-}
-
-zx_status_t SparseReader::WriteDecompressed(fbl::unique_fd outfd) {
-  if (!compressed_) {
-    fprintf(stderr, "BlockReader: File is not compressed\n");
-    return ZX_ERR_INVALID_ARGS;
-  }
-
-  // Update metadata and write to new file.
-  fvm::SparseImage* image = Image();
-  image->flags &= ~fvm::kSparseFlagLz4;
-
-  if (write(outfd.get(), metadata_.get(), image->header_length) !=
-      static_cast<ssize_t>(image->header_length)) {
-    fprintf(stderr, "BlockReader: could not write header to out file\n");
-    return -1;
-  }
-
-  // Read/write decompressed data in LZ4_MAX_BLOCK_SIZE chunks.
-  while (true) {
-    zx_status_t status;
-    uint8_t data[LZ4_MAX_BLOCK_SIZE];
-    size_t length;
-    if ((status = ReadData(data, LZ4_MAX_BLOCK_SIZE, &length)) != ZX_OK) {
-      if (status == ZX_ERR_OUT_OF_RANGE) {
-        return ZX_OK;
-      }
-
-      return status;
-    }
-
-    if (write(outfd.get(), data, length) != static_cast<ssize_t>(length)) {
-      fprintf(stderr, "BlockReader: failed to write to output\n");
-      return ZX_ERR_IO;
-    }
-  }
 }
 
 void SparseReader::PrintStats() const {

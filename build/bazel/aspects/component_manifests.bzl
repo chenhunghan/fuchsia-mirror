@@ -16,6 +16,7 @@ load(
 )
 
 _DEP_ATTRS = [
+    "actual",
     "binary",
     "crate",
     "deps",

@@ -220,6 +220,9 @@ impl DownloadBlobError {
                     _ => fpkg_http::ClientDownloadBlobError::Network,
                 }
             }
+            CreateBlobWriter(blob_writer::CreateError::GetVmo(s)) if *s == zx::Status::NO_SPACE => {
+                fpkg_http::ClientDownloadBlobError::NoSpace
+            }
             CreateBlobWriter(_) => fpkg_http::ClientDownloadBlobError::Other,
             BodyStreamTerminatedEarly => fpkg_http::ClientDownloadBlobError::Other,
             BodyStreamTooManyBytes => fpkg_http::ClientDownloadBlobError::Other,

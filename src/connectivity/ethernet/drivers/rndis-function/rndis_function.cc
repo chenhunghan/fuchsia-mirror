@@ -214,14 +214,27 @@ zx_status_t RndisFunction::SetOid(uint32_t oid, const uint8_t* buffer, size_t le
         indicate_status = true;
       }
 
-      std::vector<frequest::Request> requests;
-      while (std::optional req = bulk_out_ep_.GetRequest()) {
+      fdf::Arena arena(kArenaTag);
+      std::array<frequest::wire::Request, kRequestPoolSize> requests;
+      auto reqs_iter = requests.begin();
+      while (reqs_iter != requests.end()) {
+        std::optional req = bulk_out_ep_.GetRequest();
+        if (!req.has_value()) {
+          break;
+        }
         req.value().reset_buffers(bulk_out_ep_.GetMapped());
-        requests.emplace_back(req.value().take_request());
+        *reqs_iter++ = fidl::ToWire(arena, req.value().take_request());
       }
-      fit::result<fidl::OneWayError> status = bulk_out_ep_->QueueRequests({std::move(requests)});
-      if (!status.is_ok()) {
-        fdf::error("Failed to queue requests: {}", status.error_value().FormatDescription());
+      if (reqs_iter != requests.begin()) {
+        fidl::OneWayStatus status = bulk_out_ep_.client().wire()->QueueRequests(
+            fidl::VectorView<frequest::wire::Request>::FromExternal(
+                requests.data(), std::distance(requests.begin(), reqs_iter)));
+        if (!status.ok()) {
+          fdf::error("Failed to queue requests: {}", status.FormatDescription());
+          for (auto it = requests.begin(); it != reqs_iter; it++) {
+            bulk_out_ep_.PutRequest(usb::FidlRequest(fidl::ToNatural(std::move(*it))));
+          }
+        }
       }
 
       if (indicate_status) {
@@ -387,9 +400,9 @@ zx_status_t RndisFunction::HandleCommand(const void* buffer, size_t size) {
         fdf::warn("Invalid RNDIS minor version. Expected {}, got {}.", RNDIS_MINOR_VERSION,
                   init->minor_version);
         response.emplace(InitResponse(init->request_id, RNDIS_STATUS_NOT_SUPPORTED));
+      } else {
+        response.emplace(InitResponse(init->request_id, RNDIS_STATUS_SUCCESS));
       }
-
-      response.emplace(InitResponse(init->request_id, RNDIS_STATUS_SUCCESS));
       break;
     }
     case RNDIS_QUERY_MSG: {
@@ -511,20 +524,29 @@ zx::result<std::vector<uint8_t>> RndisFunction::HandleResponse(size_t size) {
 zx_status_t RndisFunction::Halt() {
   Reset();
 
+  zx_status_t status = ZX_OK;
   for (auto ep_info : GetEndpoints()) {
     fidl::Result result = function_->DisableEndpoint({ep_info.address});
     if (result.is_error()) {
       fdf::error("Failed to disable {} endpoint: {}", ep_info.name,
                  result.error_value().FormatDescription());
-      return result.error_value().is_framework_error()
-                 ? result.error_value().framework_error().status()
-                 : ZX_ERR_INTERNAL;
+      if (status == ZX_OK) {
+        status = result.error_value().is_framework_error()
+                     ? result.error_value().framework_error().status()
+                     : result.error_value().domain_error();
+      }
     }
   }
-  return ZX_OK;
+  return status;
 }
 
 void RndisFunction::Reset() {
+  for (auto& c : rx_completion_queue_) {
+    if (c.request().has_value()) {
+      bulk_out_ep_.PutRequest(usb::FidlRequest(std::move(c.request().value())));
+    }
+  }
+  rx_completion_queue_.clear();
   CancelAllRequests();
   while (!control_responses_.empty()) {
     control_responses_.pop();
@@ -585,7 +607,7 @@ void RndisFunction::SetConfigured(SetConfiguredRequest& request,
       fdf::error("Failed to configure endpoint: {}", result.error_value().FormatDescription());
       return result.error_value().is_framework_error()
                  ? result.error_value().framework_error().status()
-                 : ZX_ERR_INTERNAL;
+                 : result.error_value().domain_error();
     }
     return ZX_OK;
   };
@@ -710,29 +732,36 @@ void RndisFunction::GetInfo(
 
 void RndisFunction::QueueTx(QueueTxRequestView request, fdf::Arena& arena,
                             QueueTxCompleter::Sync& completer) {
-  std::array<fnetdev::wire::TxResult, kRequestPoolSize> results;
-  auto results_iter = results.begin();
-  std::array<frequest::wire::Request, kRequestPoolSize> reqs;
-  auto reqs_iter = reqs.begin();
+  const size_t count = request->buffers.size();
+  fidl::VectorView<fnetdev::wire::TxResult> results(arena, count);
+  size_t results_count = 0;
+  fidl::VectorView<frequest::wire::Request> reqs(arena, count);
+  size_t reqs_count = 0;
+  fidl::VectorView<uint32_t> queued_ids(arena, count);
 
   bool offline = shutting_down_ || !Online();
 
   for (const auto& buffer : request->buffers) {
     if (offline) {
-      *results_iter++ = {.id = buffer.id, .status = ZX_ERR_BAD_STATE};
+      results[results_count++] = {.id = buffer.id, .status = ZX_ERR_BAD_STATE};
       transmit_errors_++;
       continue;
     }
     if (buffer.data.size() != 1) {
-      *results_iter++ = {.id = buffer.id, .status = ZX_ERR_INVALID_ARGS};
+      results[results_count++] = {.id = buffer.id, .status = ZX_ERR_INVALID_ARGS};
       transmit_errors_++;
       continue;
     }
     const auto& region = buffer.data[0];
+    if (region.length > kMtu) {
+      results[results_count++] = {.id = buffer.id, .status = ZX_ERR_INVALID_ARGS};
+      transmit_errors_++;
+      continue;
+    }
 
     std::optional<usb::FidlRequest> tx_req = bulk_in_ep_.GetRequest();
     if (!tx_req.has_value()) {
-      *results_iter++ = {.id = buffer.id, .status = ZX_ERR_NO_RESOURCES};
+      results[results_count++] = {.id = buffer.id, .status = ZX_ERR_NO_RESOURCES};
       transmit_no_buffer_++;
       continue;
     }
@@ -740,13 +769,13 @@ void RndisFunction::QueueTx(QueueTxRequestView request, fdf::Arena& arena,
 
     auto* stored_vmo = vmo_store_.GetVmo(region.vmo);
     if (!stored_vmo) {
-      *results_iter++ = {.id = buffer.id, .status = ZX_ERR_INVALID_ARGS};
+      results[results_count++] = {.id = buffer.id, .status = ZX_ERR_INVALID_ARGS};
       transmit_errors_++;
       continue;
     }
     std::span<uint8_t> data = stored_vmo->data();
     if (region.length > data.size() || region.offset > data.size() - region.length) {
-      *results_iter++ = {.id = buffer.id, .status = ZX_ERR_INVALID_ARGS};
+      results[results_count++] = {.id = buffer.id, .status = ZX_ERR_INVALID_ARGS};
       transmit_errors_++;
       continue;
     }
@@ -757,64 +786,93 @@ void RndisFunction::QueueTx(QueueTxRequestView request, fdf::Arena& arena,
     header.data_offset = sizeof(header) - offsetof(rndis_packet_header, data_offset);
     header.data_length = static_cast<uint32_t>(region.length);
 
-    tx_req->clear_buffers();
-    size_t offset = 0;
+    tx_req->reset_buffers(bulk_in_ep_.GetMapped());
     std::vector<size_t> copied =
         tx_req->CopyTo(0, &header, sizeof(header), bulk_in_ep_.GetMapped());
-    for (size_t i = 0; i < copied.size(); i++) {
-      tx_req.value()->data()->at(i).size(copied[i]);
-      offset += copied[i];
+    const size_t header_copied = std::accumulate(copied.begin(), copied.end(), size_t{0});
+    std::vector<size_t> copied_payload = tx_req->CopyTo(header_copied, data.data() + region.offset,
+                                                        region.length, bulk_in_ep_.GetMapped());
+    const size_t payload_copied =
+        std::accumulate(copied_payload.begin(), copied_payload.end(), size_t{0});
+    if (header_copied != sizeof(header) || payload_copied != region.length) {
+      fdf::warn("failed to copy full tx packet (header {}/{}, payload {}/{})", header_copied,
+                sizeof(header), payload_copied, region.length);
+      results[results_count++] = {.id = buffer.id, .status = ZX_ERR_INTERNAL};
+      transmit_errors_++;
+      continue;
     }
-    std::vector<size_t> copied_payload =
-        tx_req->CopyTo(offset, data.data() + region.offset, region.length, bulk_in_ep_.GetMapped());
-    for (size_t i = 0; i < copied_payload.size(); i++) {
-      auto& data_buf = tx_req.value()->data()->at(i);
-      data_buf.size(data_buf.size().value() + copied_payload[i]);
+    if ((*tx_req)->data().has_value()) {
+      auto& req_data = *(*tx_req)->data();
+      for (size_t i = 0; i < req_data.size(); ++i) {
+        const size_t header_bytes = i < copied.size() ? copied[i] : 0;
+        const size_t payload_bytes = i < copied_payload.size() ? copied_payload[i] : 0;
+        req_data[i].size(header_bytes + payload_bytes);
+      }
     }
     if (zx_status_t status = tx_req->CacheFlush(bulk_in_ep_.GetMapped()); status != ZX_OK) {
       fdf::warn("failed to copy data and flush cache: {}", zx_status_get_string(status));
-      *results_iter++ = {.id = buffer.id, .status = status};
+      results[results_count++] = {.id = buffer.id, .status = status};
       transmit_errors_++;
       continue;
     }
 
     return_request.cancel();
-    tx_completion_queue_.push(buffer.id);
-    *reqs_iter++ = fidl::ToWire(arena, tx_req->take_request());
-    transmit_ok_++;
+    queued_ids[reqs_count] = buffer.id;
+    reqs[reqs_count++] = fidl::ToWire(arena, tx_req->take_request());
   }
 
-  if (results_iter != results.begin()) {
-    fidl::OneWayStatus status = netdevice_ifc_.buffer(arena)->CompleteTx(
-        fidl::VectorView<fnetdev::wire::TxResult>::FromExternal(
-            results.data(), std::distance(results.begin(), results_iter)));
-    if (!status.ok()) {
-      fdf::error("failed to complete tx: {}", status.FormatDescription());
-    }
-  }
-
-  if (reqs_iter != reqs.begin()) {
+  if (reqs_count > 0) {
     fidl::OneWayStatus queue_status = bulk_in_ep_.client().wire()->QueueRequests(
-        fidl::VectorView<frequest::wire::Request>::FromExternal(
-            reqs.data(), std::distance(reqs.begin(), reqs_iter)));
+        fidl::VectorView<frequest::wire::Request>::FromExternal(reqs.data(), reqs_count));
 
-    if (!queue_status.ok()) {
+    if (queue_status.ok()) {
+      for (size_t i = 0; i < reqs_count; ++i) {
+        tx_completion_queue_.push_back(queued_ids[i]);
+      }
+      transmit_ok_ += static_cast<uint32_t>(reqs_count);
+    } else {
       fdf::error("failed to queue tx requests: {}", queue_status.FormatDescription());
-      for (auto it = reqs.begin(); it != reqs_iter; it++) {
-        bulk_in_ep_.PutRequest(usb::FidlRequest(fidl::ToNatural(*it)));
+      for (size_t i = 0; i < reqs_count; ++i) {
+        bulk_in_ep_.PutRequest(usb::FidlRequest(fidl::ToNatural(std::move(reqs[i]))));
+        results[results_count++] = {.id = queued_ids[i], .status = queue_status.status()};
+        transmit_errors_++;
       }
     }
   }
+
+  CompleteTxBatch(arena, std::span(results.data(), results_count));
   bulk_in_inspect_.UpdateTxQueue(bulk_in_ep_.GetInFlightCount());
 }
 
 void RndisFunction::QueueRxSpace(QueueRxSpaceRequestView request, fdf::Arena& arena,
                                  QueueRxSpaceCompleter::Sync& completer) {
+  if (shutting_down_) {
+    const size_t count = request->buffers.size();
+    fidl::VectorView<fnetdev::wire::RxBuffer> rx_buffers(arena, count);
+    fidl::VectorView<fnetdev::wire::RxBufferPart> rx_buffers_parts(arena, count);
+    for (size_t i = 0; i < count; ++i) {
+      rx_buffers_parts[i] = {
+          .id = request->buffers[i].id,
+          .offset = 0,
+          .length = 0,
+      };
+      rx_buffers[i] = {
+          .meta =
+              {
+                  .port = kPortId,
+                  .frame_type = fuchsia_hardware_network::FrameType::kEthernet,
+              },
+          .data =
+              fidl::VectorView<fnetdev::wire::RxBufferPart>::FromExternal(&rx_buffers_parts[i], 1),
+      };
+    }
+    CompleteRxBatch(arena, std::span(rx_buffers.data(), count));
+    return;
+  }
+
   for (const auto& buffer : request->buffers) {
     rx_space_buffers_.push(buffer);
   }
-  FDF_ASSERT_MSG(rx_space_buffers_.size() <= kRequestPoolSize, "rx space buffers too large",
-                 rx_space_buffers_.size());
 
   if (rx_completion_queue_.empty()) {
     return;
@@ -841,45 +899,53 @@ void RndisFunction::ReleaseVmo(ReleaseVmoRequestView request, fdf::Arena& arena,
 
 void RndisFunction::NotifyComplete(std::vector<fendpoint::Completion> completions) {
   for (auto& completion : completions) {
-    notification_ep_.PutRequest(usb::FidlRequest{std::move(completion.request().value())});
+    if (completion.request().has_value()) {
+      notification_ep_.PutRequest(usb::FidlRequest{std::move(completion.request().value())});
+    }
   }
   notification_inspect_.UpdateTxQueue(notification_ep_.GetInFlightCount());
   ContinueStop();
 }
 
 void RndisFunction::TxComplete(std::vector<fendpoint::Completion> completions) {
-  std::array<fnetdev::wire::TxResult, kRequestPoolSize> results;
-  auto results_iter = results.begin();
+  if (completions.empty()) {
+    return;
+  }
+  fdf::Arena arena(kArenaTag);
+  fidl::VectorView<fnetdev::wire::TxResult> results(arena, completions.size());
+  size_t results_count = 0;
 
   for (auto& completion : completions) {
-    zx_status_t status = *completion.status();
-    usb::FidlRequest req(std::move(completion.request().value()));
-    size_t size = req.length();
-    if (status == ZX_OK) {
-      bulk_in_inspect_.AddTxBytes(completion.transfer_size().value_or(0));
+    const bool has_request = completion.request().has_value();
+    const zx_status_t status = completion.status().value_or(ZX_ERR_INTERNAL);
+    if (has_request) {
+      usb::FidlRequest req(std::move(completion.request().value()));
+      size_t size = req.length();
+      if (status == ZX_OK) {
+        bulk_in_inspect_.AddTxBytes(completion.transfer_size().value_or(0));
+      } else {
+        bulk_in_inspect_.AddFailedTxBytes(size);
+      }
+      bulk_in_ep_.PutRequest(std::move(req));
     } else {
-      bulk_in_inspect_.AddFailedTxBytes(size);
+      fdf::error("tx completion missing request");
     }
-    bulk_in_ep_.PutRequest(std::move(req));
     if (tx_completion_queue_.empty()) {
       fdf::error("received tx completion without pending tx");
       continue;
     }
-    uint32_t id = tx_completion_queue_.front();
-    tx_completion_queue_.pop();
-
-    *results_iter++ = {.id = id, .status = *completion.status()};
-  }
-
-  if (results_iter != results.begin()) {
-    fdf::Arena arena(kArenaTag);
-    fidl::OneWayStatus status = netdevice_ifc_.buffer(arena)->CompleteTx(
-        fidl::VectorView<fnetdev::wire::TxResult>::FromExternal(
-            results.data(), std::distance(results.begin(), results_iter)));
-    if (!status.ok()) {
-      fdf::error("failed to complete tx: {}", status.FormatDescription());
+    std::optional<uint32_t> id = tx_completion_queue_.front();
+    tx_completion_queue_.pop_front();
+    if (!id.has_value()) {
+      continue;
     }
+
+    const zx_status_t tx_status =
+        has_request ? status : (status == ZX_OK ? ZX_ERR_INTERNAL : status);
+    results[results_count++] = {.id = *id, .status = tx_status};
   }
+
+  CompleteTxBatch(arena, std::span(results.data(), results_count));
   bulk_in_inspect_.UpdateTxQueue(bulk_in_ep_.GetInFlightCount());
   ContinueStop();
 }
@@ -887,7 +953,9 @@ void RndisFunction::TxComplete(std::vector<fendpoint::Completion> completions) {
 void RndisFunction::RxComplete(std::vector<fendpoint::Completion> completions) {
   if (shutting_down_) {
     for (auto& completion : completions) {
-      bulk_out_ep_.PutRequest(usb::FidlRequest{std::move(completion.request().value())});
+      if (completion.request().has_value()) {
+        bulk_out_ep_.PutRequest(usb::FidlRequest{std::move(completion.request().value())});
+      }
     }
     ContinueStop();
     return;
@@ -897,25 +965,52 @@ void RndisFunction::RxComplete(std::vector<fendpoint::Completion> completions) {
 }
 
 void RndisFunction::ProcessRxCompletions(std::vector<fendpoint::Completion> completions) {
+  if (completions.empty()) {
+    return;
+  }
   fdf::Arena arena(kArenaTag);
+  const size_t count = completions.size();
+  const size_t max_rx_buffers = rx_space_buffers_.size();
 
-  std::array<frequest::wire::Request, kRequestPoolSize> reqs;
-  auto reqs_iter = reqs.begin();
+  fidl::VectorView<frequest::wire::Request> reqs(arena, count);
+  size_t reqs_count = 0;
 
-  std::array<fnetdev::wire::RxBuffer, kRequestPoolSize> rx_buffers;
-  auto rx_buffers_iter = rx_buffers.begin();
-
-  std::array<fnetdev::wire::RxBufferPart, kRequestPoolSize> rx_buffers_parts;
-  auto rx_buffers_parts_iter = rx_buffers_parts.begin();
+  fidl::VectorView<fnetdev::wire::RxBuffer> rx_buffers(arena, max_rx_buffers);
+  fidl::VectorView<fnetdev::wire::RxBufferPart> rx_buffers_parts(arena, max_rx_buffers);
+  size_t rx_buffers_count = 0;
+  uint32_t fulfilled_rx_count = 0;
 
   auto reset_and_enqueue = [&](usb::FidlRequest req) {
     req.reset_buffers(bulk_out_ep_.GetMapped());
-    *reqs_iter++ = fidl::ToWire(arena, req.take_request());
+    reqs[reqs_count++] = fidl::ToWire(arena, req.take_request());
+  };
+
+  auto append_rx_buffer = [&](uint32_t space_id, uint32_t length) {
+    rx_buffers_parts[rx_buffers_count] = fnetdev::wire::RxBufferPart{
+        .id = space_id,
+        .offset = 0,
+        .length = length,
+    };
+    rx_buffers[rx_buffers_count] = {
+        .meta =
+            {
+                .port = kPortId,
+                .frame_type = fuchsia_hardware_network::FrameType::kEthernet,
+            },
+        .data = fidl::VectorView<fnetdev::wire::RxBufferPart>::FromExternal(
+            &rx_buffers_parts[rx_buffers_count], 1),
+    };
+    rx_buffers_count++;
   };
 
   for (auto& completion : completions) {
-    zx_status_t status = *completion.status();
-    if (status == ZX_ERR_IO_NOT_PRESENT) {
+    if (!completion.request().has_value()) {
+      fdf::error("rx completion missing request");
+      continue;
+    }
+    const zx_status_t status = completion.status().value_or(ZX_ERR_INTERNAL);
+    if (status == ZX_ERR_CANCELED || status == ZX_ERR_BAD_STATE ||
+        status == ZX_ERR_IO_NOT_PRESENT || !rndis_ready_) {
       bulk_out_ep_.PutRequest(usb::FidlRequest{std::move(completion.request().value())});
       continue;
     }
@@ -924,6 +1019,7 @@ void RndisFunction::ProcessRxCompletions(std::vector<fendpoint::Completion> comp
       fdf::error("rx_completion: {}", zx_status_get_string(status));
       usb::FidlRequest req(std::move(completion.request().value()));
       bulk_out_inspect_.AddFailedRxBytes(req.length());
+      receive_errors_++;
       reset_and_enqueue(std::move(req));
       continue;
     }
@@ -933,89 +1029,121 @@ void RndisFunction::ProcessRxCompletions(std::vector<fendpoint::Completion> comp
       continue;
     }
 
-    bulk_out_inspect_.AddRxBytes(completion.transfer_size().value_or(0));
+    const size_t transfer_size = completion.transfer_size().value_or(0);
+    bulk_out_inspect_.AddRxBytes(transfer_size);
 
     usb::FidlRequest req(std::move(completion.request().value()));
-
-    rndis_packet_header header;
-    zx::result<std::vector<size_t>> copied =
-        req.CachedCopyFrom(0, &header, sizeof(header), bulk_out_ep_.GetMapped());
-    if (copied.is_error()) {
+    if (transfer_size < sizeof(rndis_packet_header)) {
       reset_and_enqueue(std::move(req));
-      fdf::error("failed to invalidate cache or retrieve header from request: {}",
-                 copied.status_string());
+      fdf::error("rx transfer too short for header: {} bytes, want {}", transfer_size,
+                 sizeof(rndis_packet_header));
+      receive_errors_++;
       continue;
     }
-    size_t header_copied = std::accumulate(copied->begin(), copied->end(), 0);
+    if (zx_status_t cache_status =
+            req.CacheFlushInvalidate(bulk_out_ep_.GetMapped(), 0, transfer_size);
+        cache_status != ZX_OK) {
+      reset_and_enqueue(std::move(req));
+      fdf::error("failed to invalidate rx cache: {}", zx_status_get_string(cache_status));
+      receive_errors_++;
+      continue;
+    }
+
+    rndis_packet_header header;
+    std::vector<size_t> copied = req.CopyFrom(0, &header, sizeof(header), bulk_out_ep_.GetMapped());
+    size_t header_copied = std::accumulate(copied.begin(), copied.end(), size_t{0});
     if (header_copied < sizeof(header)) {
       reset_and_enqueue(std::move(req));
       fdf::error("failed to retrieve header from request: {} bytes copied, want {}", header_copied,
                  sizeof(header));
+      receive_errors_++;
       continue;
     }
 
     if (header.msg_type != RNDIS_PACKET_MSG) {
       reset_and_enqueue(std::move(req));
       fdf::warn("unrecognized message type: {}", header.msg_type);
+      receive_errors_++;
       continue;
     }
 
-    fnetdev::wire::RxSpaceBuffer space = rx_space_buffers_.front();
-    auto* stored_vmo = vmo_store_.GetVmo(space.region.vmo);
-    if (!stored_vmo) {
+    const size_t data_offset =
+        static_cast<size_t>(header.data_offset) + offsetof(rndis_packet_header, data_offset);
+    const size_t data_length = header.data_length;
+    if (data_offset > transfer_size || data_length > transfer_size - data_offset) {
       reset_and_enqueue(std::move(req));
+      receive_errors_++;
       continue;
     }
 
-    uint32_t data_offset = header.data_offset + offsetof(rndis_packet_header, data_offset);
-    uint32_t data_length = header.data_length;
+    std::optional<fnetdev::wire::RxSpaceBuffer> valid_space;
+    std::span<uint8_t> vmo_data;
+    while (!rx_space_buffers_.empty()) {
+      const fnetdev::wire::RxSpaceBuffer candidate = rx_space_buffers_.front();
+      auto* stored_vmo = vmo_store_.GetVmo(candidate.region.vmo);
+      if (!stored_vmo) {
+        fdf::error("Unrecognized VMO ID {} in rx completion", candidate.region.vmo);
+        rx_space_buffers_.pop();
+        append_rx_buffer(candidate.id, 0);
+        continue;
+      }
+      std::span<uint8_t> candidate_data = stored_vmo->data();
+      if (candidate.region.length > candidate_data.size() ||
+          candidate.region.offset > candidate_data.size() - candidate.region.length) {
+        fdf::error("rx buffer region out of bounds: offset {} length {} vmo size {}",
+                   candidate.region.offset, candidate.region.length, candidate_data.size());
+        rx_space_buffers_.pop();
+        append_rx_buffer(candidate.id, 0);
+        continue;
+      }
+      valid_space = candidate;
+      vmo_data = candidate_data;
+      break;
+    }
 
-    if (data_length > space.region.length) {
+    if (!valid_space.has_value()) {
       reset_and_enqueue(std::move(req));
+      receive_errors_++;
       continue;
     }
 
-    req.CopyFrom(data_offset,
-                 reinterpret_cast<void*>(stored_vmo->data().data() + space.region.offset),
-                 data_length, bulk_out_ep_.GetMapped());
+    if (data_length > valid_space->region.length) {
+      reset_and_enqueue(std::move(req));
+      receive_errors_++;
+      continue;
+    }
 
-    *rx_buffers_parts_iter = fnetdev::wire::RxBufferPart{
-        .id = space.id,
-        .offset = 0,
-        .length = header.data_length,
-    };
-    *rx_buffers_iter++ = {
-        .meta =
-            {
-                .port = kPortId,
-                .frame_type = fuchsia_hardware_network::FrameType::kEthernet,
-            },
-        .data =
-            fidl::VectorView<fnetdev::wire::RxBufferPart>::FromExternal(&*rx_buffers_parts_iter, 1),
-    };
+    std::vector<size_t> payload_copied_vec =
+        req.CopyFrom(data_offset, vmo_data.data() + valid_space->region.offset, data_length,
+                     bulk_out_ep_.GetMapped());
+    size_t payload_copied =
+        std::accumulate(payload_copied_vec.begin(), payload_copied_vec.end(), size_t{0});
+    if (payload_copied < data_length) {
+      reset_and_enqueue(std::move(req));
+      receive_errors_++;
+      continue;
+    }
 
-    rx_buffers_parts_iter++;
     rx_space_buffers_.pop();
+    append_rx_buffer(valid_space->id, header.data_length);
+    fulfilled_rx_count++;
 
     reset_and_enqueue(std::move(req));
   }
 
-  if (rx_buffers_iter != rx_buffers.begin()) {
-    fidl::OneWayStatus status = netdevice_ifc_.buffer(arena)->CompleteRx(
-        fidl::VectorView<fnetdev::wire::RxBuffer>::FromExternal(
-            rx_buffers.data(), std::distance(rx_buffers.begin(), rx_buffers_iter)));
-    if (!status.ok()) {
-      fdf::error("failed to complete rx: {}", status.FormatDescription());
-    }
-    receive_ok_ += static_cast<uint32_t>(std::distance(rx_buffers.begin(), rx_buffers_iter));
+  if (rx_buffers_count > 0) {
+    CompleteRxBatch(arena, std::span(rx_buffers.data(), rx_buffers_count));
+    receive_ok_ += fulfilled_rx_count;
   }
 
-  if (reqs_iter != reqs.begin()) {
+  if (reqs_count > 0) {
     fidl::OneWayStatus queue_status = bulk_out_ep_.client().wire()->QueueRequests(
-        fidl::VectorView<frequest::wire::Request>::FromExternal(
-            reqs.data(), std::distance(reqs.begin(), reqs_iter)));
+        fidl::VectorView<frequest::wire::Request>::FromExternal(reqs.data(), reqs_count));
     if (!queue_status.ok()) {
       fdf::error("failed to queue rx requests: {}", queue_status.FormatDescription());
+      for (size_t i = 0; i < reqs_count; ++i) {
+        bulk_out_ep_.PutRequest(usb::FidlRequest(fidl::ToNatural(std::move(reqs[i]))));
+      }
     }
   }
   bulk_out_inspect_.UpdateRxQueue(bulk_out_ep_.GetInFlightCount());
@@ -1052,7 +1180,7 @@ void RndisFunction::Notify() {
 
   if (!queue_status.ok()) {
     fdf::error("failed to queue notify requests: {}", queue_status.FormatDescription());
-    notification_ep_.PutRequest(usb::FidlRequest(fidl::ToNatural(req_wire)));
+    notification_ep_.PutRequest(usb::FidlRequest(fidl::ToNatural(std::move(req_wire))));
   }
   notification_inspect_.UpdateTxQueue(notification_ep_.GetInFlightCount());
 }
@@ -1479,7 +1607,9 @@ void RndisFunction::Stop(fdf::StopCompleter completer) {
   stop_completer_.emplace(std::move(completer));
 
   for (auto& c : rx_completion_queue_) {
-    bulk_out_ep_.PutRequest(usb::FidlRequest(std::move(c.request().value())));
+    if (c.request().has_value()) {
+      bulk_out_ep_.PutRequest(usb::FidlRequest(std::move(c.request().value())));
+    }
   }
   rx_completion_queue_.clear();
 
@@ -1507,62 +1637,79 @@ void RndisFunction::CancelAllRequests() {
 }
 
 void RndisFunction::DiscardPendingTxBuffers(zx_status_t status) {
-  std::array<fnetdev::wire::TxResult, kRequestPoolSize> results;
-  auto results_iter = results.begin();
-  while (!tx_completion_queue_.empty()) {
-    uint32_t id = tx_completion_queue_.front();
-    *results_iter++ = {.id = id, .status = status};
-    tx_completion_queue_.pop();
-  }
-  if (results_iter == results.begin() || !netdevice_ifc_.is_valid()) {
+  if (tx_completion_queue_.empty()) {
     return;
   }
   fdf::Arena arena(kArenaTag);
-  fidl::OneWayStatus fidl_status = netdevice_ifc_.buffer(arena)->CompleteTx(
-      fidl::VectorView<fnetdev::wire::TxResult>::FromExternal(
-          results.data(), std::distance(results.begin(), results_iter)));
-  if (!fidl_status.ok()) {
-    fdf::error("Failed to complete tx: {}", fidl_status.FormatDescription());
+  fidl::VectorView<fnetdev::wire::TxResult> results(arena, tx_completion_queue_.size());
+  size_t results_count = 0;
+  for (std::optional<uint32_t>& id : tx_completion_queue_) {
+    if (id.has_value()) {
+      results[results_count++] = {.id = *id, .status = status};
+      id.reset();
+    }
   }
+  CompleteTxBatch(arena, std::span(results.data(), results_count));
 }
 
 void RndisFunction::ReturnPendingRxSpace() {
+  if (rx_space_buffers_.empty()) {
+    return;
+  }
   fdf::Arena arena(kArenaTag);
-
-  std::array<fnetdev::wire::RxBuffer, kRequestPoolSize> rx_buffers;
-  auto rx_buffers_iter = rx_buffers.begin();
-
-  std::array<fnetdev::wire::RxBufferPart, kRequestPoolSize> rx_buffers_parts;
-  auto rx_buffers_parts_iter = rx_buffers_parts.begin();
+  const size_t count = rx_space_buffers_.size();
+  fidl::VectorView<fnetdev::wire::RxBuffer> rx_buffers(arena, count);
+  fidl::VectorView<fnetdev::wire::RxBufferPart> rx_buffers_parts(arena, count);
+  size_t idx = 0;
 
   while (!rx_space_buffers_.empty()) {
-    *rx_buffers_parts_iter = {
+    rx_buffers_parts[idx] = {
         .id = rx_space_buffers_.front().id,
         .offset = 0,
         .length = 0,
     };
     rx_space_buffers_.pop();
-    *rx_buffers_iter++ = {
+    rx_buffers[idx] = {
         .meta =
             {
                 .port = kPortId,
                 .frame_type = fuchsia_hardware_network::FrameType::kEthernet,
             },
         .data =
-            fidl::VectorView<fnetdev::wire::RxBufferPart>::FromExternal(&*rx_buffers_parts_iter, 1),
+            fidl::VectorView<fnetdev::wire::RxBufferPart>::FromExternal(&rx_buffers_parts[idx], 1),
     };
-    rx_buffers_parts_iter++;
+    idx++;
   }
 
-  if (rx_buffers_iter == rx_buffers.begin() || !netdevice_ifc_.is_valid()) {
+  CompleteRxBatch(arena, std::span(rx_buffers.data(), idx));
+}
+
+void RndisFunction::CompleteTxBatch(fdf::Arena& arena, std::span<fnetdev::wire::TxResult> results) {
+  if (results.empty() || !netdevice_ifc_.is_valid()) {
     return;
   }
+  for (size_t offset = 0; offset < results.size(); offset += kRequestPoolSize) {
+    const size_t batch = std::min(kRequestPoolSize, results.size() - offset);
+    fidl::OneWayStatus status = netdevice_ifc_.buffer(arena)->CompleteTx(
+        fidl::VectorView<fnetdev::wire::TxResult>::FromExternal(results.data() + offset, batch));
+    if (!status.ok()) {
+      fdf::error("failed to complete tx: {}", status.FormatDescription());
+    }
+  }
+}
 
-  fidl::OneWayStatus fidl_status = netdevice_ifc_.buffer(arena)->CompleteRx(
-      fidl::VectorView<fnetdev::wire::RxBuffer>::FromExternal(
-          rx_buffers.data(), std::distance(rx_buffers.begin(), rx_buffers_iter)));
-  if (!fidl_status.ok()) {
-    fdf::error("Failed to complete rx: {}", fidl_status.error());
+void RndisFunction::CompleteRxBatch(fdf::Arena& arena,
+                                    std::span<fnetdev::wire::RxBuffer> rx_buffers) {
+  if (rx_buffers.empty() || !netdevice_ifc_.is_valid()) {
+    return;
+  }
+  for (size_t offset = 0; offset < rx_buffers.size(); offset += kRequestPoolSize) {
+    const size_t batch = std::min(kRequestPoolSize, rx_buffers.size() - offset);
+    fidl::OneWayStatus status = netdevice_ifc_.buffer(arena)->CompleteRx(
+        fidl::VectorView<fnetdev::wire::RxBuffer>::FromExternal(rx_buffers.data() + offset, batch));
+    if (!status.ok()) {
+      fdf::error("failed to complete rx: {}", status.FormatDescription());
+    }
   }
 }
 

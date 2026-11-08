@@ -202,11 +202,6 @@ zx_status_t FuchsiaVfs::VnodeToToken(fbl::RefPtr<Vnode> vn, zx::event* ios_token
   return ZX_OK;
 }
 
-bool FuchsiaVfs::IsTokenAssociatedWithVnode(zx::event token) {
-  std::lock_guard lock(vfs_lock_);
-  return TokenToVnode(std::move(token), nullptr) == ZX_OK;
-}
-
 zx_status_t FuchsiaVfs::TokenToVnode(zx::event token, fbl::RefPtr<Vnode>* out) {
   zx::result koid = GetObjectKoid(token);
   if (koid.is_error()) {

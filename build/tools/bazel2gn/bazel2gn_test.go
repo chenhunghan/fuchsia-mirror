@@ -121,18 +121,15 @@ go_test("bazel2gn_tests") {
 			name: "Test suite",
 			bazel: `test_suite(
 	name = "tests",
+	tags = ["manual"],
+	target_compatible_with = ["@platforms//os:fuchsia"],
 	tests = [
 		"//tools/check-licenses/directory:directory_test",
 		"//tools/check-licenses/file:file_test",
 	],
+	visibility = ["//tools:__pkg__"],
 )`,
-			wantGN: `group("tests") {
-	deps = [
-		"//tools/check-licenses/directory:directory_test",
-		"//tools/check-licenses/file:file_test",
-	]
-	testonly = true
-}`,
+			wantGN: "",
 		},
 		{
 			name: "Stamp group",
@@ -271,20 +268,39 @@ fx_packaged_binary(
 fx_test_component(
 	name = "foo-test-component",
 	compiled_manifest = ":foo-manifest",
-	component_name = "foo-test",
 	deps = [":foo_packaged_bin"],
+)
+
+# Not referenced by an fx_package with test_components.
+fx_test_component(
+	name = "unpackaged-test-component",
+	compiled_manifest = ":foo-manifest",
 )
 
 fx_package(
 	name = "foo-package",
 	package_name = "foo",
 	components = [":foo-component"],
+)
+
+fx_package(
+	name = "foo-test-package",
+	package_name = "foo-test",
+	test_components = [
+		# @bazel2gn:skip
+		":foo-test-component",
+	],
+)
+
+# @bazel2gn:skip
+fx_package(
+	name = "skipped-test-package",
 	test_components = [":foo-test-component"],
 )
 
 fx_test(
 	name = "foo-test",
-	package = ":foo-package",
+	package = ":foo-test-package",
 )`,
 			wantGN: "",
 		},
@@ -304,7 +320,6 @@ fx_component(
 	name = "component",
 	check_includes = False,
 	compiled_manifest = ":manifest",
-	component_name = "my-component",
 	visibility = ["//bundles/assembly:__subpackages__"],
 	deps = ["//src/starnix/containers:default_init"],
 )`,
@@ -315,7 +330,6 @@ fx_component(
 fuchsia_component("component") {
 	check_includes = false
 	cm_label = ":manifest"
-	component_name = "my-component"
 	visibility = [
 		":*",
 		"//bundles/assembly/*",
@@ -341,6 +355,7 @@ fuchsia_component("component") {
 	package_name = "foo-tests",
 	unit_tests = [":foo_bin"],
 	max_log_severity = "ERROR",
+	min_log_severity = "TRACE",
 	tags = ["manual"],
 	visibility = ["//src/foo:__pkg__"],
 )`,
@@ -353,6 +368,7 @@ fuchsia_component("component") {
 	test_specs = {
 		log_settings = {
 			max_severity = "ERROR"
+			min_severity = "TRACE"
 		}
 	}
 	visibility = [
@@ -792,6 +808,27 @@ go_binary(
 	}
 }`,
 		},
+		{
+			name: "starnix linux flavor and cpu constraints",
+			bazel: `
+fx_cc_binary(
+	name = "starnix_arm_bin",
+	srcs = [
+		"main.cc",
+	],
+	target_compatible_with = [
+		"//build/bazel/platforms:linux_flavor_starnix",
+		"@platforms//cpu:arm",
+	],
+)`,
+			wantGN: `if (is_linux && !is_host && current_cpu == "arm") {
+	executable("starnix_arm_bin") {
+		sources = [
+			"main.cc",
+		]
+	}
+}`,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := toSyntaxFile(t, tc.bazel)
@@ -1011,6 +1048,231 @@ rustc_dylib(
 	}
 }`,
 		}, {
+			name: "rustc_cdylib",
+			bazel: `
+rustc_cdylib(
+	name = "foo_cdylib",
+	srcs = ["src/lib.rs"],
+	hdrs = ["include/foo.h"],
+	build_flags = ["//build/config/rust:bootfs"],
+	crate_features = ["bar"],
+	crate_name = "foo",
+	disable_clippy = True,
+	edition = "2024",
+	link_deps = [":c_helper"],
+	output_name = "foo_rust",
+	proc_macro_deps = [":my_macro"],
+	public_deps = [":c_api"],
+	tags = ["assert_no_deps=//sdk/lib/fdio"],
+	target_compatible_with = ["@platforms//os:fuchsia"],
+	validations = [":validate"],
+	deps = ["//third_party/rust_crates/vendor:anyhow"],
+)`,
+			wantGN: `if (is_fuchsia) {
+	rustc_cdylib("foo_cdylib") {
+		sources = [
+			"src/lib.rs",
+		]
+		public = [
+			"include/foo.h",
+		]
+		configs += [
+			"//build/config/rust:bootfs",
+		]
+		features = [
+			"bar",
+		]
+		crate_name = "foo"
+		disable_clippy = true
+		edition = "2024"
+		link_deps = [
+			":c_helper",
+		]
+		output_name = "foo_rust"
+		proc_macro_deps = [
+			":my_macro",
+		]
+		public_deps = [
+			":c_api",
+		]
+		assert_no_deps = [
+			"//sdk/lib/fdio",
+		]
+		validations = [
+			":validate",
+		]
+		deps = [
+			"//third_party/rust_crates:anyhow",
+		]
+	}
+}`,
+		}, {
+			name: "fuchsia_cc_dso and fuchsia_rust_dso",
+			bazel: `
+fuchsia_cc_dso(
+	name = "async_cc_dso",
+	is_async = True,
+	srcs = ["main.cc"],
+	aspect_hints = [":expect_syslog"],
+	build_flags = ["//build/config:all_source"],
+	disable_build_flags = ["//build/config:no_rtti"],
+	disable_instrumentation = True,
+	linkopts = ["-Wl,-z,defs"],
+	output_name = "custom_async_dso",
+	deps = ["//zircon/system/ulib/zx"],
+)
+
+fuchsia_cc_dso(
+	name = "sync_cc_dso",
+	is_async = False,
+	srcs = ["sync_main.cc"],
+)
+
+fuchsia_rust_dso(
+	name = "my_rust_dso",
+	srcs = ["src/lib.rs"],
+	edition = "2024",
+	output_name = "custom_rust_dso",
+	deps = ["//sdk/rust/zx"],
+)`,
+			wantGN: `fuchsia_cc_dso("async_cc_dso") {
+	async = true
+	sources = [
+		"main.cc",
+	]
+	configs += [
+		"//build/config:all_source",
+	]
+	configs -= [
+		"//build/config:no_rtti",
+	]
+	exclude_toolchain_tags = [ "instrumented" ]
+	ldflags = [
+		"-Wl,-z,defs",
+	]
+	output_name = "custom_async_dso"
+	deps = [
+		"//zircon/system/ulib/zx",
+	]
+	deps += [
+		":expect_syslog",
+	]
+}
+fuchsia_cc_dso("sync_cc_dso") {
+	async = false
+	sources = [
+		"sync_main.cc",
+	]
+}
+fuchsia_rust_dso("my_rust_dso") {
+	sources = [
+		"src/lib.rs",
+	]
+	edition = "2024"
+	output_name = "custom_rust_dso"
+	deps = [
+		"//sdk/rust/zx",
+	]
+}`,
+		}, {
+			name: "rustc_staticlib",
+			bazel: `
+rustc_staticlib(
+	name = "core",
+	srcs = [
+		"src/hooks.rs",
+		"src/lib.rs",
+	],
+	build_flags = ["//build/config/rust:bootfs"],
+	compile_data = ["data/config.json"],
+	crate_features = ["c_api"],
+	crate_name = "heapdump_core",
+	crate_root = "src/lib.rs",
+	data = [":extra_data"],
+	dynamic_libstd = False,
+	edition = "2024",
+	gn_disable_rustdoc = True,
+	gn_quiet_clippy = True,
+	link_deps = ["//sdk/lib/fdio"],
+	output_name = "heapdump_instrumentation_core",
+	proc_macro_deps = ["//third_party/rust_crates/vendor:async-trait"],
+	rustc_env = {"FOO_ENV": "1"},
+	rustc_flags = ["-Cpanic=abort"],
+	target_compatible_with = ["@platforms//os:fuchsia"],
+	testonly = True,
+	validations = [":bindings_golden"],
+	version = "0.1.0",
+	visibility = ["//src/performance/memory:__subpackages__"],
+	deps = [
+		"//sdk/rust/zx",
+		"//third_party/rust_crates/vendor:anyhow",
+	],
+)
+
+rust_static_library(
+	name = "raw_staticlib",
+	srcs = ["src/lib.rs"],
+	edition = "2024",
+)`,
+			wantGN: `if (is_fuchsia) {
+	rustc_staticlib("core") {
+		sources = [
+			"src/hooks.rs",
+			"src/lib.rs",
+		]
+		configs += [
+			"//build/config/rust:bootfs",
+		]
+		inputs = [
+			"data/config.json",
+		]
+		features = [
+			"c_api",
+		]
+		crate_name = "heapdump_core"
+		source_root = "src/lib.rs"
+		non_rust_deps = [
+			":extra_data",
+		]
+		dynamic_libstd = false
+		edition = "2024"
+		disable_rustdoc = true
+		quiet_clippy = true
+		link_deps = [
+			"//sdk/lib/fdio",
+		]
+		output_name = "heapdump_instrumentation_core"
+		proc_macro_deps = [
+			"//third_party/rust_crates:async-trait",
+		]
+		rustenv = [
+			"FOO_ENV=1",
+		]
+		rustflags = [
+			"-Cpanic=abort",
+		]
+		testonly = true
+		validations = [
+			":bindings_golden",
+		]
+		version = "0.1.0"
+		visibility = [
+			":*",
+			"//src/performance/memory/*",
+		]
+		deps = [
+			"//sdk/rust/zx",
+			"//third_party/rust_crates:anyhow",
+		]
+	}
+}
+rustc_staticlib("raw_staticlib") {
+	sources = [
+		"src/lib.rs",
+	]
+	edition = "2024"
+}`,
+		}, {
 			name: "rustc_disable_clippy",
 			bazel: `
 rustc_library(
@@ -1027,6 +1289,12 @@ rustc_binary(
 
 rustc_dylib(
 	name = "foo_dylib",
+	srcs = ["src/lib.rs"],
+	disable_clippy = True,
+)
+
+rustc_staticlib(
+	name = "foo_staticlib",
 	srcs = ["src/lib.rs"],
 	disable_clippy = True,
 )
@@ -1056,6 +1324,12 @@ rustc_binary("foo_bin") {
 	disable_clippy = true
 }
 rustc_dylib("foo_dylib") {
+	sources = [
+		"src/lib.rs",
+	]
+	disable_clippy = true
+}
+rustc_staticlib("foo_staticlib") {
 	sources = [
 		"src/lib.rs",
 	]
@@ -1104,10 +1378,15 @@ ffx_tool(
 	binary_name = "ffx-foo",
 	disable_instrumentation = True,
 	edition = "2024",
-	sdk_area = "Developer",
-	sdk_category = "partner",
-	sdk_deps = ["//sdk/lib/fdio"],
-	sdk_target_name = "sdk",
+	deps = [":ffx_foo"],
+)
+
+idk_ffx_tool(
+	name = "ffx_foo_partner_tool",
+	srcs = ["src/main.rs"],
+	category = "partner",
+	edition = "2024",
+	idk_name = "ffx-foo-partner",
 	deps = [":ffx_foo"],
 )`,
 			wantGN: `ffx_plugin("ffx_foo") {
@@ -1149,23 +1428,6 @@ ffx_tool(
 	version = "0.1.0"
 	deps = [
 		"//third_party/rust_crates:anyhow",
-	]
-}
-ffx_tool("ffx_foo_tool") {
-	sources = [
-		"src/main.rs",
-	]
-	output_name = "ffx-foo"
-	exclude_toolchain_tags = [ "instrumented" ]
-	edition = "2024"
-	sdk_area = "Developer"
-	sdk_category = "partner"
-	sdk_deps = [
-		"//sdk/lib/fdio",
-	]
-	sdk_target_name = "sdk"
-	deps = [
-		":ffx_foo",
 	]
 }`,
 		}, {
@@ -1347,6 +1609,23 @@ idk_cc_source_library_zx(
 			"//zircon/system/ulib/zx_impl",
 		]
 	}
+}`,
+		},
+		{
+			name: "non_idk_implementation_deps",
+			bazel: `idk_cc_source_library(
+	name = "foo",
+	public_deps = ["//sdk/lib/stdcompat"],
+	non_idk_implementation_deps = ["//sdk/fidl/zbi:zbi.c.checked-in"],
+)
+`,
+			wantGN: `sdk_source_set("foo") {
+	public_deps = [
+		"//sdk/lib/stdcompat",
+	]
+	non_sdk_deps = [
+		"//sdk/fidl/zbi:zbi.c.checked-in",
+	]
 }`,
 		},
 		{
@@ -1653,6 +1932,27 @@ func TestCCConversion(t *testing.T) {
 }`,
 		},
 		{
+			name: "fx_cc_library_headers deps and implementation_deps",
+			bazel: `fx_cc_library_headers(
+	name = "headers",
+	hdrs = ["include/lib/foo/foo.h"],
+	deps = ["//zircon/system/ulib/zx"],
+	implementation_deps = ["//path/to:generated_headers"],
+)
+`,
+			wantGN: `library_headers("headers") {
+	public = [
+		"include/lib/foo/foo.h",
+	]
+	public_deps = [
+		"//zircon/system/ulib/zx",
+	]
+	deps = [
+		"//path/to:generated_headers",
+	]
+}`,
+		},
+		{
 			name: "fx_cc_library alwayslink = True converts to source_set",
 			bazel: `fx_cc_library(
 	name = "foo",
@@ -1726,6 +2026,151 @@ func TestCCConversion(t *testing.T) {
 	]
 }`,
 		},
+		{
+			name: "cc_binary linkopts and linkshared",
+			bazel: `cc_binary(
+	name = "libfoo.so",
+	srcs = ["foo.cc"],
+	linkopts = ["-nostdlib"],
+	linkshared = True,
+)
+
+fx_cc_binary(
+	name = "bar",
+	srcs = ["bar.cc"],
+	linkopts = ["-static"],
+	linkshared = False,
+)
+`,
+			wantGN: `loadable_module("libfoo.so") {
+	output_name = "libfoo"
+	sources = [
+		"foo.cc",
+	]
+	ldflags = [
+		"-nostdlib",
+	]
+}
+executable("bar") {
+	sources = [
+		"bar.cc",
+	]
+	ldflags = [
+		"-static",
+	]
+}`,
+		},
+		{
+			name: "fx_cc_binary and fx_cc_test_binary with gn_output_name",
+			bazel: `fx_cc_binary(
+	name = "bin",
+	srcs = ["main.cc"],
+	gn_output_name = "foo_bin",
+)
+
+fx_cc_binary(
+	name = "libfoo.so",
+	srcs = ["foo.cc"],
+	linkshared = True,
+	gn_output_name = "foo_module",
+)
+
+fx_cc_test_binary(
+	name = "foo_test_bin",
+	srcs = ["foo_test.cc"],
+	gn_output_name = "foo_test",
+)`,
+			wantGN: `executable("bin") {
+	sources = [
+		"main.cc",
+	]
+	output_name = "foo_bin"
+}
+loadable_module("libfoo.so") {
+	sources = [
+		"foo.cc",
+	]
+	output_name = "foo_module"
+}
+cc_test_executable("foo_test_bin") {
+	sources = [
+		"foo_test.cc",
+	]
+	output_name = "foo_test"
+	testonly = true
+	emit_tool_path = false
+}`,
+		},
+		{
+			name: "fx_cc_test_binary conversion with implicit and explicit testonly",
+			bazel: `fx_cc_test_binary(
+	name = "foo_test",
+	srcs = ["foo_test.cc"],
+	build_flags = [":config"],
+	copts = ["-Wno-conversion"],
+	disable_build_flags = ["//build/config/linux:implicit-host-libs"],
+	disable_instrumentation = True,
+	disable_syslog_backend = True,
+	linkopts = ["-static"],
+	public_configs = [":pub_config"],
+	deps = ["//third_party/googletest:gtest_main"],
+)
+
+fx_cc_test_binary(
+	name = "bar_lto_test",
+	testonly = True,
+	srcs = ["bar_test.cc"],
+	disable_lto = False,
+)
+
+fx_unittest_package(
+	name = "foo-test-pkg",
+	unit_tests = [":foo_test"],
+)
+`,
+			wantGN: `cc_test_executable("foo_test") {
+	sources = [
+		"foo_test.cc",
+	]
+	configs += [
+		":config",
+	]
+	configs += [
+		"//build/config:Wno-conversion",
+	]
+	configs -= [
+		"//build/config/linux:implicit-host-libs",
+	]
+	exclude_toolchain_tags = [ "instrumented" ]
+	disable_syslog_backend = true
+	ldflags = [
+		"-static",
+	]
+	public_configs = [
+		":pub_config",
+	]
+	deps = [
+		"//third_party/googletest:gtest_main",
+	]
+	testonly = true
+	emit_tool_path = false
+}
+cc_test_executable("bar_lto_test") {
+	sources = [
+		"bar_test.cc",
+	]
+	disable_lto = false
+	testonly = true
+	emit_tool_path = false
+}
+fuchsia_unittest_package("foo-test-pkg") {
+	package_name = "foo-test-pkg-gn"
+	component_name = "foo-test-pkg"
+	deps = [
+		":foo_test",
+	]
+}`,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := toSyntaxFile(t, tc.bazel)
@@ -1778,6 +2223,34 @@ cc_source_library_zx(
 		"*",
 	]
 	sdk = "source"
+}`,
+		},
+		{
+			name: "zx library build_flags",
+			bazel: `load("//build/bazel/rules:zx_library.bzl", "cc_shared_library_zx")
+
+cc_shared_library_zx(
+    name = "foo",
+    srcs = ["foo.cc"],
+    build_flags = ["//build/config/fuchsia:static_cpp_standard_library"],
+    disable_build_flags = ["//build/config:default_frame_pointers"],
+    includes = ["include"],
+)
+`,
+			wantGN: `zx_library("foo") {
+	sources = [
+		"foo.cc",
+	]
+	configs += [
+		"//build/config/fuchsia:static_cpp_standard_library",
+	]
+	configs -= [
+		"//build/config:default_frame_pointers",
+	]
+	includes = [
+		"include",
+	]
+	sdk = "shared"
 }`,
 		},
 	} {
@@ -3130,12 +3603,61 @@ package(default_applicable_licenses = ["//:license"])`,
 exports_files(["foo.txt"])`,
 		},
 		{
+			name: "raw_attribute on test_suite",
+			bazel: `# @bazel2gn:raw_attribute:data_deps = []
+test_suite(
+	name = "tests",
+	tests = [":foo_test"],
+)`,
+		},
+		{
 			name: "empty line between raw_attribute and target",
 			bazel: `# @bazel2gn:raw_attribute:output_name = "far"
 
 cc_binary(
 	name = "bin",
 	srcs = ["main.cc"],
+)`,
+		},
+		{
+			name: "fx_cc_test_binary with testonly = False",
+			bazel: `fx_cc_test_binary(
+	name = "foo_test",
+	testonly = False,
+	srcs = ["foo_test.cc"],
+)`,
+		},
+		{
+			name: "fx_cc_test_binary with raw_attribute emit_tool_path",
+			bazel: `# @bazel2gn:raw_attribute:emit_tool_path = true
+fx_cc_test_binary(
+	name = "foo_test",
+	srcs = ["foo_test.cc"],
+)`,
+		},
+		{
+			name: "fx_cc_test_binary with non-boolean testonly",
+			bazel: `fx_cc_test_binary(
+	name = "foo_test",
+	testonly = "true",
+	srcs = ["foo_test.cc"],
+)`,
+		},
+		{
+			name: "fx_cc_binary with both gn_output_name and raw_attribute output_name",
+			bazel: `# @bazel2gn:raw_attribute:output_name = "bar"
+fx_cc_binary(
+	name = "foo",
+	srcs = ["main.cc"],
+	gn_output_name = "baz",
+)`,
+		},
+		{
+			name: "fx_cc_test_binary with non-literal gn_output_name",
+			bazel: `fx_cc_test_binary(
+	name = "foo_test",
+	srcs = ["foo_test.cc"],
+	gn_output_name = "foo" + "_test",
 )`,
 		},
 	} {

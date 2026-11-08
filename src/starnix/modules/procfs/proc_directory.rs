@@ -120,9 +120,9 @@ impl ProcDirectory {
             "modules".into() => bytes_file(fs, b"ferris 8192 0 - Live 0x0000000000000000\n".to_vec()),
             "mounts".into() => symlink_file(fs, MountsSymlink::new_node()),
             "net".into() => net_directory(fs),
-            "pagetypeinfo".into() => stub_file(fs, bug_ref!("https://fxbug.dev/322894315")),
+            "pagetypeinfo".into() => root_read_only_stub_file(fs, bug_ref!("https://fxbug.dev/322894315")),
             "self".into() => symlink_file(fs, SelfSymlink::new_node()),
-            "slabinfo".into() => stub_file(fs, bug_ref!("https://fxbug.dev/322894195")),
+            "slabinfo".into() => root_read_only_stub_file(fs, bug_ref!("https://fxbug.dev/322894195")),
             "stat".into() => read_only_file(fs, StatFile::new_node(&kernel.stats)),
             "swaps".into() => read_only_file(fs, SwapsFile::new_node()),
             "sys".into() => sysctl_directory(fs),
@@ -140,13 +140,13 @@ impl ProcDirectory {
                 let version_string = format!("Linux version {} ({}) ({}) {}\n", release, user, toolchain, version);
                 bytes_file(fs, version_string.into())
             },
-            "vmallocinfo".into() => stub_file(fs, bug_ref!("https://fxbug.dev/322894183")),
+            "vmallocinfo".into() => root_read_only_stub_file(fs, bug_ref!("https://fxbug.dev/322894183")),
             "vmstat".into() => read_only_file(fs, VmStatFile::new_node(&kernel.stats)),
             "zoneinfo".into() => read_only_file(
                 fs,
                 ZoneInfoFile::new_node(&kernel.stats, kernel.features.oom_watermarks_mb),
             ),
-            "allocinfo".into() => stub_file(fs, bug_ref!("https://fxbug.dev/452096300")),
+            "allocinfo".into() => root_read_only_stub_file(fs, bug_ref!("https://fxbug.dev/452096300")),
             "buddyinfo".into() => stub_file(fs, bug_ref!("https://fxbug.dev/452096300")),
             "locks".into() => stub_file(fs, bug_ref!("https://fxbug.dev/452096300")),
         };
@@ -181,6 +181,12 @@ fn stub_file(fs: &FileSystemHandle, bug: BugRef) -> FsNodeHandle {
     read_only_file(fs, StubEmptyFile::new_node(bug))
 }
 
+/// Creates a stub file that is only readable by root and logs a message with the associated bug
+/// when it is accessed.
+fn root_read_only_stub_file(fs: &FileSystemHandle, bug: BugRef) -> FsNodeHandle {
+    root_read_only_file(fs, StubEmptyFile::new_node(bug))
+}
+
 /// Returns a new `BytesFile` containing the provided `bytes`.
 fn bytes_file(fs: &FileSystemHandle, bytes: Vec<u8>) -> FsNodeHandle {
     read_only_file(fs, BytesFile::new_node(bytes))
@@ -189,6 +195,11 @@ fn bytes_file(fs: &FileSystemHandle, bytes: Vec<u8>) -> FsNodeHandle {
 /// Creates a standard read-only file suitable for use in `ProcDirectory`.
 fn read_only_file(fs: &FileSystemHandle, ops: impl Into<Box<dyn FsNodeOps>>) -> FsNodeHandle {
     fs.create_node_and_allocate_node_id(ops, FsNodeInfo::new(mode!(IFREG, 0o444), FsCred::root()))
+}
+
+/// Creates a file that is only readable by root.
+fn root_read_only_file(fs: &FileSystemHandle, ops: impl Into<Box<dyn FsNodeOps>>) -> FsNodeHandle {
+    fs.create_node_and_allocate_node_id(ops, FsNodeInfo::new(mode!(IFREG, 0o400), FsCred::root()))
 }
 
 /// Creates a file that is only writable by root.

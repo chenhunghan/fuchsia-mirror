@@ -9,7 +9,7 @@
 #include <stdio.h>
 #include <zircon/assert.h>
 
-#include <phys/main.h>
+#include <phys/runtime/main.h>
 
 // This (via <lib/ubsan-custom/handlers.h>) defines the custom ubsan runtime
 // for phys environments.  The ubsan:: functions below handle the details

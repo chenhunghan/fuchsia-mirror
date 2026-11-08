@@ -1,0 +1,80 @@
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+name: Continuous integration
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_COLOR: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: crate-ci/typos@master
+      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          components: rustfmt, clippy
+      - name: Cargo version
+        run: cargo --version
+      - name: Check format
+        run: cargo fmt --all -- --check
+      - name: Check clippy
+        run: cargo clippy --all-targets --all-features -- --deny warnings
+
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - rust: 1.85.0 # MSRV
+            features: "\"\""
+          - rust: 1.85.0 # MSRV
+            features: "\"std\""
+          - rust: stable
+            features: "\"\""
+          - rust: stable
+            features: "\"std\""
+          - rust: nightly
+            features: "\"\""
+          - rust: nightly
+            features: "\"std\""
+          - rust: nightly
+            features: "\"std, coerce\""
+          - rust: nightly
+            features: "\"coerce\""
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest,cargo-nextest
+      - name: Tests
+        run: |
+          cargo nextest run --verbose --no-default-features --features ${{ matrix.features }}
+
+  miri:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          components: miri
+      - name: Test with Miri
+        run: |
+          cargo miri test
+          cargo miri test --features nightly

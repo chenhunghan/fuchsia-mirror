@@ -12,6 +12,7 @@ import os
 
 import zero_function
 from mobly import asserts, test_runner
+from testusb import TestParams, USBTestIoctlBackend, UsbTestModeSelector
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -244,13 +245,21 @@ class ZeroFunctionTest(zero_function.ZeroFunctionBaseTest):
         )
 
     def test_transfer_unlink_cancellation(self) -> None:
-        """Verifies transfer unlink/cancellation on bulk OUT and bulk IN."""
-        # Bulk unlink is verified in test_bulk_unlink_transfers (Tests 11 & 12).
-        # Tests 24 & 25 correspond to isochronous and interrupt endpoints, which
-        # are not exposed by the USB zero function.
-        asserts.skip(
-            "Tests 24 & 25 (ISO/INT unlink) skipped; zero function only "
-            "provides bulk endpoints. Bulk unlink is tested via Tests 11 & 12."
+        """Verifies queued bulk OUT transfer unlink/cancellation (Test 24)."""
+        dev_node = self.require_dev_node()
+        _LOGGER.info(
+            "Executing Queued Bulk OUT Unlink (Test 24) on %s...",
+            dev_node,
+        )
+
+        results = self.execute_testusb(
+            dev_node=dev_node,
+            test_ids=[24],
+            mode="sourcesink",
+            iterations=5,
+        )
+        self.assert_testusb_success(
+            results, "Queued Bulk OUT Unlink (Test 24) failed"
         )
 
     def test_high_throughput_streaming(self) -> None:
@@ -376,6 +385,71 @@ class ZeroFunctionTest(zero_function.ZeroFunctionBaseTest):
         _LOGGER.info(
             "Successfully verified all test cases in Source/Sink mode."
         )
+
+    def test_ep0_test_mode_negative(self) -> None:
+        """Verifies EP0 stalls on invalid USB 2.0 test mode requests."""
+        dev_node = self.require_dev_node()
+        _LOGGER.info(
+            "Executing EP0 Test Mode Negative Checks on %s...",
+            dev_node,
+        )
+        with USBTestIoctlBackend(device_path=dev_node) as backend:
+            result = backend.run_test_mode_negative(
+                params=TestParams(iterations=5)
+            )
+        self.assert_testusb_success(
+            [result], "EP0 Test Mode negative checks failed"
+        )
+
+    def test_ep0_test_mode(self) -> None:
+        """Verifies opt-in USB 2.0 SET_FEATURE(TEST_MODE) and port power-cycle."""
+        if not self.user_params.get("enable_usb_test_mode", False):
+            asserts.skip(
+                "Positive USB_DEVICE_TEST_MODE check is opt-in; set "
+                "enable_usb_test_mode=true in user_params to run."
+            )
+            return
+
+        power_hub = self.dut.usb_power_hub
+        if power_hub is None:
+            asserts.skip(
+                "Positive USB_DEVICE_TEST_MODE check requires a configured "
+                "usb_power_hub to power-cycle the USB port after entering "
+                "test mode."
+            )
+            return
+
+        dev_node = self.require_dev_node()
+        selector = int(
+            self.user_params.get(
+                "usb_test_mode_selector", UsbTestModeSelector.TEST_SE0_NAK
+            )
+        )
+        power_port = self.dut.usb_power_hub_port
+
+        def _power_cycle_port() -> None:
+            power_hub.power_off(port=power_port)
+            power_hub.power_on(port=power_port)
+
+        _LOGGER.info(
+            "Executing EP0 Test Mode (selector=%#x) on %s...",
+            selector,
+            dev_node,
+        )
+        try:
+            with USBTestIoctlBackend(device_path=dev_node) as backend:
+                result = backend.run_test_mode(
+                    selector=selector,
+                    reset_after=False,
+                    reset_callback=_power_cycle_port,
+                )
+            self.assert_testusb_success(
+                [result], f"EP0 Test Mode (selector={selector:#x}) failed"
+            )
+        finally:
+            self.dev_node = zero_function.wait_for_zero_function(
+                dut=self.dut, target_serial=self.target_serial
+            )
 
 
 if __name__ == "__main__":

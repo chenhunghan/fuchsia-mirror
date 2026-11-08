@@ -46,6 +46,7 @@ using UsbDeviceType = ddk::Device<UsbDevice, ddk::GetProtocolable,
 
 class UsbDevice : public UsbDeviceType,
                   public ddk::UsbProtocol<UsbDevice, ddk::base_protocol>,
+                  public ddk::UsbBusProtocol<UsbDevice>,
                   public fbl::RefCounted<UsbDevice> {
  public:
   class UsbProtocolServer : public fidl::Server<fuchsia_hardware_usb::Usb> {
@@ -95,7 +96,6 @@ class UsbDevice : public UsbDeviceType,
         hub_id_(hub_id),
         speed_(speed),
         hci_(hci),
-        bus_(parent),
         waiter_(waiter),
         usb_server_(this),
         outgoing_(dispatcher) {
@@ -142,6 +142,17 @@ class UsbDevice : public UsbDeviceType,
   zx_status_t UsbCancelAll(uint8_t ep_address);
   uint64_t UsbGetCurrentFrame();
   size_t UsbGetRequestSize();
+
+  // USB Bus protocol implementation. These operate on this device (as a hub).
+  zx_status_t UsbBusConfigureHub(usb_speed_t speed, const usb_hub_descriptor_t* desc,
+                                 bool multi_tt);
+  zx_status_t UsbBusDeviceAdded(uint32_t port, usb_speed_t speed);
+  zx_status_t UsbBusDeviceRemoved(uint32_t port);
+  zx_status_t UsbBusSetHubInterface(const usb_hub_interface_protocol_t* hub);
+  void UsbBusRequestQueue(usb_request_t* usb_request,
+                          const usb_request_complete_callback_t* complete_cb) {
+    usb_request_complete(usb_request, ZX_ERR_NOT_SUPPORTED, 0, complete_cb);
+  }
 
   // FIDL messages (fuchsia.hardware.usb.device.Device).
   void GetDeviceSpeed(GetDeviceSpeedCompleter::Sync& completer) override;
@@ -262,9 +273,6 @@ class UsbDevice : public UsbDeviceType,
   // Parent's HCI protocol.
   ddk::UsbHciProtocolClient hci_;
   fidl::WireSyncClient<fuchsia_hardware_usb_hci::UsbHci> hci_new_;
-
-  // Protocol of parent (USB BUS).
-  ddk::UsbBusProtocolClient bus_;
 
   // Hub interface, for devices that are hubs.
   ddk::UsbHubInterfaceProtocolClient hub_intf_;

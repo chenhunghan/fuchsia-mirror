@@ -1,0 +1,40 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+exports_files(
+    [
+        "meta/cm_for_test.cml",
+        "meta/test.shard.cml",
+    ],
+    visibility = ["//src/sys/component_manager/tests/security_policy:__subpackages__"],
+)
+
+fx_component_manifest(
+    name = "cm_for_test-manifest",
+    testonly = True,
+    component_name = "cm_for_test",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/cm_for_test.cml",
+)
+
+fx_component(
+    name = "cm_for_test",
+    testonly = True,
+    compiled_manifest = ":cm_for_test-manifest",
+    visibility = ["//src/sys/component_manager/tests/security_policy:__subpackages__"],
+    deps = [
+        "//src/sys/component_manager:bin_with_tracing_packaged",  # @bazel2gn:path_overwrite://src/sys/component_manager:bin_with_tracing
+    ],
+)

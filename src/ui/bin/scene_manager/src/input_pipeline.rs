@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use crate::lib::display_ownership::DisplayOwnership;
 use crate::lib::factory_reset_handler::FactoryResetHandler;
 use crate::lib::ime_handler::ImeHandler;
 use crate::lib::input_device::InputPipelineFeatureFlags;
@@ -210,6 +211,7 @@ pub async fn handle_input(
         input_pipeline.feature_flags.clone(),
         metrics_logger.clone(),
         input_pipeline.device_listener_registry().clone(),
+        input_pipeline.display_ownership().cloned(),
     );
     tasks.push(InputTask::Fasync(fasync::Task::local(input_device_registry_fut)));
 
@@ -727,6 +729,7 @@ pub async fn handle_input_device_registry_request_streams(
     feature_flags: crate::lib::input_device::InputPipelineFeatureFlags,
     metrics_logger: metrics::MetricsLogger,
     device_listener_registry: crate::lib::device_listener_registry::DeviceListenerRegistry,
+    display_ownership: Option<Rc<DisplayOwnership>>,
 ) {
     let mut registry_tasks = FuturesUnordered::new();
     let mut watch_tasks = FuturesUnordered::new();
@@ -743,6 +746,7 @@ pub async fn handle_input_device_registry_request_streams(
                     let node_clone = injected_devices_node.clone_weak();
                     let device_listener_registry_clone = device_listener_registry.clone();
                     let task_sender_clone = task_sender.clone();
+                    let display_ownership_clone = display_ownership.clone();
                     registry_tasks.push(Dispatcher::spawn_local(async move {
                         match InputPipeline::handle_input_device_registry_request_stream(
                             stream,
@@ -754,6 +758,7 @@ pub async fn handle_input_device_registry_request_streams(
                             metrics_logger_clone,
                             device_listener_registry_clone,
                             task_sender_clone,
+                            display_ownership_clone,
                         )
                         .await
                         {

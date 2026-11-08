@@ -1,0 +1,50 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules:compiled_action.bzl", "compiled_action")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "unicode_blocks",
+    srcs = [
+        # GN outputs the generated source file to $target_gen_dir, whereas Bazel
+        # outputs :unicode_blocks.rs in the package directory.
+        ":unicode_blocks.rs",  # @bazel2gn:path_overwrite:${target_gen_dir}/unicode_blocks.rs
+    ],
+    # GN sets source_root via rebase_path on $target_gen_dir/unicode_blocks.rs,
+    # whereas Bazel uses the package-local :unicode_blocks.rs label.
+    crate_root = ":unicode_blocks.rs",  # @bazel2gn:raw_overwrite:rebase_path("$target_gen_dir/unicode_blocks.rs")
+    data = [":generate_unicode_blocks_source"],
+    edition = "2024",
+    visibility = ["//src/lib/intl/unicode_utils:__subpackages__"],
+    deps = [
+        "//third_party/rust_crates/vendor:unic-char-range",
+        "//third_party/rust_crates/vendor:unic-ucd-block",
+    ],
+)
+
+compiled_action(
+    name = "generate_unicode_blocks_source",
+    outs = ["unicode_blocks.rs"],
+    args = ["$(location :unicode_blocks.rs)"],
+    tool = ":unicode_block_generator",
+)
+
+# Restrict unicode_block_generator to host as it is only invoked as a compiled_action tool.
+rustc_binary(
+    name = "unicode_block_generator",
+    srcs = ["src/unicode_block_generator.rs"],
+    crate_root = "src/unicode_block_generator.rs",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:regex",
+        "//third_party/rust_crates/vendor:unic-ucd-block",
+    ],
+)

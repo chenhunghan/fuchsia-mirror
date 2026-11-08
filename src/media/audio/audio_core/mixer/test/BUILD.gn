@@ -9,7 +9,7 @@ group("test") {
   testonly = true
 
   # Only run on release builds to properly test fidelity and avoid flakes.
-  if (!is_debug) {
+  if (!is_debug && !is_asan) {
     deps = [ ":audio_fidelity_tests" ]
   }
 }

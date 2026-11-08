@@ -33,6 +33,16 @@ pub const F2FS_MAGIC: [u8; 4] = [0x10, 0x20, 0xf5, 0xf2];
 
 pub const FXFS_MAGIC: [u8; 8] = [b'F', b'x', b'f', b's', b'S', b'u', b'p', b'r'];
 
+// -- Superblock/header offsets and sizes --
+pub const FVM_BLOCK_SIZE: u64 = 8192;
+pub const FVM_PARTITION_TABLE_SIZE: u64 = 65536;
+pub const MINFS_NON_FVM_BACKUP_SUPERBLOCK_OFFSET: u64 = 7 * 8192;
+pub const MINFS_FVM_BACKUP_SUPERBLOCK_OFFSET: u64 = 0x40000 * 8192;
+pub const BLOBFS_FVM_BACKUP_SUPERBLOCK_OFFSET: u64 = 8192;
+pub const F2FS_MAGIC_OFFSET: u64 = 1024;
+pub const F2FS_BACKUP_MAGIC_OFFSET: u64 = 4096 + 1024;
+pub const FXFS_BACKUP_SUPERBLOCK_OFFSET: u64 = 524288;
+
 // -- Partition labels --
 pub const BLOBFS_PARTITION_LABEL: &str = "blobfs";
 

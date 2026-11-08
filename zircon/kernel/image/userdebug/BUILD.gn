@@ -34,7 +34,7 @@ kernel_image("userdebug") {
   deps = [
     ":cmdline",
     ":zircon",
-    "//zircon/kernel/phys:physboot",
+    "//zircon/kernel/phys/physboot",
   ]
 }
 

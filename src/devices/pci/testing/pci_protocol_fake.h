@@ -53,6 +53,9 @@ class FakePciProtocol : public FakePciProtocolInternal,
     return SetDeviceInfoInternal(info);
   }
 
+  // Sets the BTI handle returned by |PciGetBti|.
+  void SetBti(zx::bti bti) { SetBtiInternal(std::move(bti)); }
+
   // Adds a vendor capability of size |size| to the device at |position| in PCI Configuration Space.
   void AddVendorCapability(uint8_t position, uint8_t size) {
     ZX_ASSERT_MSG(
@@ -86,7 +89,7 @@ class FakePciProtocol : public FakePciProtocolInternal,
   // a reference to the VMO backing its mapped region. |is_mmio| determines whether the bar
   // is MMIO or IO backed. The caller is responsible for mocking/faking the IO access in their
   // driver.
-  zx::vmo& CreateBar(uint32_t bar_id, size_t size, bool is_mmio) {
+  zx::vmo& CreateBar(uint32_t bar_id, size_t size, bool is_mmio, uint64_t address = 0) {
     ZX_ASSERT_MSG(bar_id < PCI_DEVICE_BAR_COUNT,
                   "FakePciProtocol Error: valid BAR ids are [0, 5] (bar_id = %u)", bar_id);
     zx::vmo vmo;
@@ -100,8 +103,9 @@ class FakePciProtocol : public FakePciProtocolInternal,
         status == ZX_OK,
         "FakePciProtocol Error: failed to set cache policy for BAR (bar_id = %u, status = %s)",
         status, zx_status_get_string(status));
-    bars()[bar_id].type = (is_mmio) ? PCI_BAR_TYPE_MMIO : PCI_BAR_TYPE_IO;
+    bars()[bar_id].is_mmio = is_mmio;
     bars()[bar_id].size = size;
+    bars()[bar_id].address = address;
     bars()[bar_id].vmo = std::move(vmo);
     return GetBar(bar_id);
   }
@@ -158,14 +162,13 @@ class FakePciProtocol : public FakePciProtocolInternal,
   void SetBusMastering(SetBusMasteringRequestView request,
                        SetBusMasteringCompleter::Sync& completer) override;
   void ResetDevice(ResetDeviceCompleter::Sync& completer) override;
-  void AckInterrupt(AckInterruptCompleter::Sync& completer) override;
 
   void NotImplemented_(const std::string& name, fidl::CompleterBase& completer) final {
     completer.Close(ZX_ERR_NOT_SUPPORTED);
   }
 
   // Convenience method to set up a FIDL server in tests.
-  ddk::Pci SetUpFidlServer(async::Loop& loop);
+  fdf::Pci SetUpFidlServer(async::Loop& loop);
 };
 
 // Any test code which calls a helper method on FakePciProtocol must be executed

@@ -21,6 +21,8 @@ int main(int argc, char** argv) {
       .Macro("SETUP_HEADER_VERSION", offsetof(linuxboot::setup_header, version))
       .Macro("SETUP_HEADER_LOADFLAGS", offsetof(linuxboot::setup_header, loadflags))
       .Macro("LOADFLAGS_LOADED_HIGH", linuxboot::setup_header::LoadFlags::kLoadedHigh)
+      .Macro("SETUP_HEADER_CODE32_START", offsetof(linuxboot::setup_header, code32_start))
+      .Macro("LINUXBOOT_LOADED_HIGH_ADDRESS", linuxboot::kLoadedHighAddress)
       .Macro("SETUP_HEADER_INITRD_ADDR_MAX", offsetof(linuxboot::setup_header, initrd_addr_max))
       .Macro("SETUP_HEADER_KERNEL_ALIGNMENT", offsetof(linuxboot::setup_header, kernel_alignment))
       .Macro("SETUP_HEADER_RELOCATABLE_KERNEL",
@@ -33,6 +35,7 @@ int main(int argc, char** argv) {
       .Macro("SETUP_HEADER_INIT_SIZE", offsetof(linuxboot::setup_header, init_size))
       .Macro("SIZEOF_SETUP_HEADER", sizeof(linuxboot::setup_header))
       .Macro("BOOT_PARAMS_HDR", offsetof(linuxboot::boot_params, hdr))
+      .Macro("BOOT_PARAMS_SCRATCH", offsetof(linuxboot::boot_params, scratch))
       .Macro("BOOT_PARAMS_E820_ENTRIES", offsetof(linuxboot::boot_params, e820_entries))
       .Macro("BOOT_PARAMS_E820_TABLE", offsetof(linuxboot::boot_params, e820_table))
       .Macro("SIZEOF_BOOT_PARAMS", sizeof(linuxboot::boot_params))

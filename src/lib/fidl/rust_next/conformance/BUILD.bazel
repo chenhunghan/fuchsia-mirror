@@ -1,0 +1,60 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+load(
+    "//src/tests/fidl/conformance_suite:gidl_conformance_suite.bzl",
+    "CONFORMANCE_SUITE_FIDL_TARGET",
+    "CONFORMANCE_SUITE_GIDL_FILES",
+)
+load("//tools/fidl/gidl:gidl.bzl", "gidl")
+
+package(default_applicable_licenses = ["//:license"])
+
+# LINT.IfChange
+
+_CONFORMANCE_TEST_SOURCE = "src/conformance_test.rs"
+
+gidl(
+    name = "generate_conformance_test",
+    fidl = CONFORMANCE_SUITE_FIDL_TARGET,
+    inputs = CONFORMANCE_SUITE_GIDL_FILES,
+    language = "rust_next",
+    output = _CONFORMANCE_TEST_SOURCE,
+    type = "conformance",
+)
+
+rustc_test(
+    name = "fidl_rust_next_conformance_tests_bin",
+    srcs = [":generate_conformance_test"],
+    crate_name = "fidl_rust_next_conformance_tests",
+    crate_root = _CONFORMANCE_TEST_SOURCE,
+    edition = "2024",
+    # The `encode_large_array` allocates a large array onto the stack, so we need
+    # to ensure we have a large enough stack or we'll stack overflow.
+    #
+    # TODO(https://fxbug.dev/468026274): We should come back and investigate why
+    # we're hitting the stack overflow now. As rust bindings start getting broader
+    # adoption, we'd like to make sure we're not going to be inadvertently hitting
+    # this in production.
+    rustc_flags = ["-Clink-args=-Wl,-zstack-size=0x400000"],
+    deps = [
+        "//sdk/rust/zx-status",
+        "//sdk/rust/zx-types",
+        "//src/lib/fidl/rust/gidl_util",
+        "//src/lib/fidl/rust_next/fidl_next",
+        "//src/tests/fidl/conformance_suite:conformance_fidl_rust_next",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)
+
+fx_unittest_package(
+    name = "fidl_rust_next_conformance_tests",
+    unit_tests = [":fidl_rust_next_conformance_tests_bin"],
+    visibility = ["//src/lib/fidl/rust_next:__subpackages__"],
+)
+
+# LINT.ThenChange(//src/lib/fidl/rust_next/conformance/BUILD.gn)

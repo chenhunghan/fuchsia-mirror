@@ -31,9 +31,10 @@ fuchsia_test_package("expectation-example") {
 }
 ```
 
-Test components using this template must specify a path to a manifest file, cm_label is not
-supported.  Test components may be placed in a regular `fuchsia_test_package` or a
-`fuchsia_test_with_expectations` package (see below).
+Test components using this template must specify either a path to a manifest
+file (`manifest`) or a `fuchsia_component_manifest_with_expectations` target
+(`cm_label`). Test components may be placed in a regular `fuchsia_test_package`
+or a `fuchsia_test_with_expectations_package` (see below).
 
 Each component specified using `fuchsia_test_component_with_expectations` must have its manifest
 `include` the expectation client shard (./meta/client.shard.cml).

@@ -800,6 +800,18 @@ void DisplayCompositor::SetDisplayLayers(const display::DisplayId display_id,
   display_coordinator_.SetDisplayLayers(display_id, layers);
 }
 
+void DisplayCompositor::SetEmptySceneDisplayLayers(const display::DisplayId display_id,
+                                                   DisplayEngineData& data) {
+  // The color config is set every time the layer is shown, not only once when the display is
+  // added: if the config that shows it fails, the proxy discards the layer's draft config.  Setting
+  // an unchanged config sends no FIDL call.
+  display_coordinator_.SetLayerColorConfig(
+      data.empty_scene_layer,
+      {.format = fuchsia_images2::PixelFormat::kB8G8R8A8, .bytes = {0, 0, 0, 255, 0, 0, 0, 0}},
+      data.empty_scene_destination);
+  SetDisplayLayers(display_id, std::span(&data.empty_scene_layer, 1));
+}
+
 bool DisplayCompositor::SetRenderDataOnDisplay(const RenderData& data) {
   TRACE_DURATION("gfx", "flatland::DisplayCompositor::SetRenderDataOnDisplay", "display_id",
                  data.display_id.value(), "rectangle_count", data.layers.size());
@@ -830,7 +842,7 @@ bool DisplayCompositor::SetRenderDataOnDisplay(const RenderData& data) {
   }
 
   if (num_layers == 0) {
-    SetDisplayLayers(data.display_id, std::span(&display_engine_data.empty_scene_layer, 1));
+    SetEmptySceneDisplayLayers(data.display_id, display_engine_data);
     return true;
   }
 
@@ -893,13 +905,21 @@ void DisplayCompositor::ApplyLayerColor(const display::LayerId& layer_id, const 
   FX_DCHECK(main_dispatcher_ == async_get_default_dispatcher());
   FX_DCHECK(display_coordinator_.is_valid());
 
-  // We have to convert the `image_metadata`'s multiply color, which is an array of normalized
-  // floating point values, to an unnormalized array of `uint8_t`s in the range 0-255.
+  // We have to convert `color`, the solid color already multiplied by the layer's multiply color,
+  // from an array of normalized floating point values to an unnormalized array of `uint8_t`s in
+  // the range 0-255.
+  //
+  // A `kReplace` fill writes its premultiplied RGB without blending, so nothing below it shows
+  // through, and the alpha it leaves in the output is not displayed. Sending alpha 0xff therefore
+  // gives the same pixels on the display path as on the GPU path, even for a translucent color.
+  //
+  // `color` is RGBA, as Flatland stores solid colors. `kB8G8R8A8` stores blue in byte 0.
+  const bool is_replace = blend_mode == types::BlendMode::kReplace();
   const fidl::Array<uint8_t, 8> color_bytes = {
-      static_cast<uint8_t>(255 * color[0]),
-      static_cast<uint8_t>(255 * color[1]),
       static_cast<uint8_t>(255 * color[2]),
-      static_cast<uint8_t>(255 * color[3]),
+      static_cast<uint8_t>(255 * color[1]),
+      static_cast<uint8_t>(255 * color[0]),
+      is_replace ? uint8_t{0xff} : static_cast<uint8_t>(255 * color[3]),
       0,
       0,
       0,
@@ -980,7 +1000,6 @@ zx::result<> DisplayCompositor::ApplyConfig(uint64_t frame_number, uint64_t trac
   TRACE_DURATION("gfx", "flatland::DisplayCompositor::ApplyConfig");
   fidl::Arena arena;
 
-  TRACE_FLOW_BEGIN("gfx", "Display::CommitConfig", config_stamp.value);
   auto result = display_coordinator_.ApplyConfig(config_stamp);
   if (result.is_error()) {
     return result;
@@ -1217,6 +1236,8 @@ DisplayCompositor::RenderFrameResult DisplayCompositor::RenderFrame(
     TRACE_COUNTER("gfx", "Scenic GPU images", display_id, "count", TA_INT32(0));
   }
 
+  TRACE_FLOW_END("gfx", "render_frame_to_vsync", trace_flow_id);
+  TRACE_FLOW_END("gfx", "scenic_frame", frame_number);
   return RenderFrameResult::kFailure;
 }
 
@@ -1371,16 +1392,14 @@ fpromise::promise<> DisplayCompositor::AddDisplay(
   {
     std::scoped_lock lock(lock_);
 
-    // Prepare the black layer to render an empty scene to the display.
+    // Prepare the black layer to render an empty scene to the display.  Its color config is set
+    // each time it is shown, by `SetEmptySceneDisplayLayers()`.
     display_engine_data.empty_scene_layer = display_coordinator_.CreateLayer();
-    const display::Rectangle display_destination({.x = 0,
-                                                  .y = 0,
-                                                  .width = static_cast<int32_t>(size.width()),
-                                                  .height = static_cast<int32_t>(size.height())});
-    display_coordinator_.SetLayerColorConfig(
-        display_engine_data.empty_scene_layer,
-        {.format = fuchsia_images2::PixelFormat::kB8G8R8A8, .bytes = {0, 0, 0, 255, 0, 0, 0, 0}},
-        display_destination);
+    display_engine_data.empty_scene_destination =
+        display::Rectangle({.x = 0,
+                            .y = 0,
+                            .width = static_cast<int32_t>(size.width()),
+                            .height = static_cast<int32_t>(size.height())});
 
     // When we add in a new display, we create a couple of layers for that display upfront to be
     // used when we directly composite render data in hardware via the display coordinator.
@@ -1531,7 +1550,7 @@ zx_status_t DisplayCompositor::SetDisplayPowerMode(
     }
     pending_apply_configs_.clear();
 
-    SetDisplayLayers(display_id, std::span(&data.empty_scene_layer, 1));
+    SetEmptySceneDisplayLayers(display_id, data);
     const bool applied_display_mode = MaybeSetPendingDisplayMode(display_id);
 
     const uint64_t trace_flow_id = TRACE_NONCE();

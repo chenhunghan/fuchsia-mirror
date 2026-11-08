@@ -16,7 +16,7 @@
 #include <ktl/string_view.h>
 #include <phys/address-space.h>
 #include <phys/elf-image.h>
-#include <phys/kernel-package.h>
+#include <phys/kernel-package/kernel-package.h>
 #include <phys/symbolize.h>
 
 #include "../test-main.h"
@@ -42,10 +42,13 @@ constexpr ktl::string_view kNamespace = "virtual-address-loading-test-data";
 // (i.e., as we would in production).
 constexpr uint64_t kLoadAddress = 0xffff'ffff'0000'0000;
 
+// Symbolizer module ID for kGetInt (module 0 is this test).
+constexpr unsigned int kGetIntModuleId = 1;
+
 }  // namespace
 
 int TestMain(void* zbi_ptr, ktl::optional<EarlyBootZbi> early_zbi, arch::EarlyTicks) {
-  MainSymbolize symbolize(kTestName);
+  Symbolize symbolize(kTestName);
 
 #ifdef __aarch64__
   // There is no upper address space in EL2+ by default, so drop down to EL1
@@ -70,9 +73,6 @@ int TestMain(void* zbi_ptr, ktl::optional<EarlyBootZbi> early_zbi, arch::EarlyTi
     bootfs = ktl::move(result).value();
   }
 
-  ktl::array<const ElfImage*, 2> modules;
-  symbolize.EnableModuleLoading(Symbolize::ModuleList(ktl::span(modules)));
-
   printf("Loading %.*s...\n", static_cast<int>(kGetInt.size()), kGetInt.data());
   ElfImage elf;
   if (auto result = elf.Init(bootfs, kGetInt, true); result.is_error()) {
@@ -86,7 +86,10 @@ int TestMain(void* zbi_ptr, ktl::optional<EarlyBootZbi> early_zbi, arch::EarlyTi
   printf("Verifying PT_INTERP matches test build ID...\n");
   elf.AssertInterpMatchesBuildId(kGetInt, symbolize.build_id());
 
-  Allocation loaded = elf.Load(memalloc::Type::kPhysElf, kLoadAddress);
+  auto emit_markup = [&symbolize](const ElfImage& image) {
+    symbolize.ModuleContext(image, kGetIntModuleId);
+  };
+  Allocation loaded = elf.Load(memalloc::Type::kPhysElf, emit_markup, kLoadAddress);
   elf.Relocate();
 
   // TODO(https://fxbug.dev/42172722): Set up C++ ABI support and map and jump into a

@@ -330,6 +330,7 @@ class atransport : public std::enable_shared_from_this<atransport> {
   bool has_feature(const std::string& feature) const;
 
   bool SupportsDelayedAck() const { return delayed_ack_; }
+  void SetDelayedAck(bool enable) { delayed_ack_ = enable; }
 
   // Loads the transport's feature set from the given string.
   void SetFeatures(const std::string& features_string);

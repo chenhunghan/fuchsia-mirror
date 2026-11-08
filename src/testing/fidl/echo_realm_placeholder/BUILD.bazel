@@ -1,0 +1,77 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+# Realm component used to launch echo client/server
+fx_component_manifest(
+    name = "echo_realm_manifest",
+    component_name = "echo_realm",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:offer.shard",
+    ],
+    manifest = "meta/echo_realm.cml",
+)
+
+fx_component(
+    name = "echo_realm",
+    compiled_manifest = ":echo_realm_manifest",
+)
+
+fx_packaged_binary(
+    name = "echo_server_packaged_bin",
+    binary = "//src/testing/fidl/echo_realm_placeholder/echo_server:bin",
+    binary_name = "echo_server_placeholder",
+)
+
+fx_component_manifest(
+    name = "echo_server_manifest",
+    component_name = "echo_server",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "//src/testing/fidl/echo_realm_placeholder/echo_server:meta/echo_server.cml",
+)
+
+fx_component(
+    name = "echo_server",
+    compiled_manifest = ":echo_server_manifest",
+    deps = [
+        # TODO(https://fxbug.dev/570694755): bazel2gn requires a packaged binary from the same package, so point
+        # GN at the binary target directly.
+        ":echo_server_packaged_bin",  # @bazel2gn:path_overwrite://src/testing/fidl/echo_realm_placeholder/echo_server:bin
+    ],
+)
+
+fx_packaged_binary(
+    name = "echo_client_packaged_bin",
+    binary = "//src/testing/fidl/echo_realm_placeholder/echo_client:bin",
+    binary_name = "echo_client_placeholder",
+)
+
+fx_component_manifest(
+    name = "echo_client_manifest",
+    component_name = "echo_client",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "//src/testing/fidl/echo_realm_placeholder/echo_client:meta/echo_client.cml",
+)
+
+fx_component(
+    name = "echo_client",
+    compiled_manifest = ":echo_client_manifest",
+    deps = [
+        # TODO(https://fxbug.dev/570694755): bazel2gn requires a packaged binary from the same package, so point
+        # GN at the binary target directly.
+        ":echo_client_packaged_bin",  # @bazel2gn:path_overwrite://src/testing/fidl/echo_realm_placeholder/echo_client:bin
+    ],
+)

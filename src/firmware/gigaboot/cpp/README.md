@@ -1,9 +1,9 @@
 # Gigaboot in C++
 
-This folder contains source code for Fuchsia Gigaboot written in C++. It is built
-using the physboot toolchain defined in `zircon/kernel/phys/efi/BUILD.gn`. The code
-is currently under construction. It'll eventually replace the C gigaboot
-implementation in the parent folder (b/235489025).
+This folder contains source code for Fuchsia Gigaboot written in C++. It is
+built using the EFI toolchain defined in `src/firmware/gigaboot/cpp/BUILD.gn`.
+The code is currently under construction. It'll eventually replace the C
+gigaboot implementation in the parent folder (b/235489025).
 
 A gn target `src/firmware/gigaboot/cpp:esp` is added for producing a bootable
 UEFI image that can be flashed to the device. To build the target, follow steps:

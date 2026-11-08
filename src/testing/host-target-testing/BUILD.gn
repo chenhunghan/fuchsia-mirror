@@ -2,9 +2,11 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/go/go_library.gni")
-import("//build/go/go_test.gni")
-import("//build/testing/host_test_data.gni")
+import("//build/bazel/bazel_test_suite.gni")
+
+bazel_test_suite("bazel_tests") {
+  host_tests = [ "//src/testing/host-target-testing:host_tests" ]
+}
 
 test_packages = [
   "artifacts",
@@ -23,7 +25,7 @@ test_packages = [
 group("tests") {
   testonly = true
 
-  public_deps = []
+  public_deps = [ ":bazel_tests" ]
   foreach(testpkg, test_packages) {
     public_deps +=
         [ "${testpkg}:host-target-testing-${testpkg}-test($host_toolchain)" ]

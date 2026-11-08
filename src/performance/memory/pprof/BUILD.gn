@@ -8,6 +8,7 @@ import("//tools/protobuf/rust_proto_library.gni")
 
 # TODO(https://fxbug.dev/42075035): Create our own copy of the protobuf file and avoid depending on perfetto.
 rust_proto_library("pprof_proto") {
+  visibility = [ ":*" ]
   sources = [ "//third_party/perfetto/protos/third_party/pprof/profile.proto" ]
   packages = [ "perfetto.third_party.perftools.profiles" ]
   include_dirs = [ "//third_party/protobuf/src/src" ]

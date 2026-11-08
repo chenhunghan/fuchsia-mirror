@@ -11,6 +11,9 @@
 #include <lib/driver/symbols/symbols.h>
 #include <lib/driver/testing/cpp/driver_runtime.h>
 
+#include <mutex>
+#include <vector>
+
 // This is the exported driver registration symbol that the driver framework looks for.
 // NOLINTNEXTLINE(bugprone-reserved-identifier)
 extern "C" const DriverRegistration __fuchsia_driver_registration__;
@@ -23,9 +26,16 @@ using OpaqueDriverPtr = void*;
 // base class so the implementation does not have to live in the header.
 class DriverUnderTestBase : public fdf::WireAsyncEventHandler<fuchsia_driver_framework::Driver> {
  public:
+  using HealthCheckResult = fit::result<fuchsia_driver_framework::HealthCheckError,
+                                        fuchsia_driver_framework::HealthCheckResponse>;
+
   explicit DriverUnderTestBase(DriverRegistration driver_registration_symbol);
 
   virtual ~DriverUnderTestBase();
+
+  // fdf::WireAsyncEventHandler<fuchsia_driver_framework::Driver>
+  void OnHealthAlert(
+      fidl::WireEvent<fuchsia_driver_framework::Driver::OnHealthAlert>* event) override;
 
   // fdf::WireAsyncEventHandler<fuchsia_driver_framework::Driver>
   void on_fidl_error(fidl::UnbindInfo error) override;
@@ -49,6 +59,32 @@ class DriverUnderTestBase : public fdf::WireAsyncEventHandler<fuchsia_driver_fra
   // Returns the result of the stop operation.
   zx::result<> Stop();
 
+  // Sends a `HealthCheck` request over the `Driver` channel to the driver under test.
+  // Use `DriverRuntime::RunToCompletion` to await completion of the async task.
+  DriverRuntime::AsyncTask<zx::result<HealthCheckResult>> CheckHealth(
+      fuchsia_driver_framework::HealthCheckRequest request =
+          fuchsia_driver_framework::HealthCheckRequest::kPing);
+
+  // Drains and returns all `OnHealthAlert` events received from the driver under test in FIFO
+  // order.
+  std::vector<fuchsia_driver_framework::HealthAlert> TakeHealthAlerts();
+
+  // Returns the number of `OnHealthAlert` events currently queued without draining them.
+  size_t PendingHealthAlertCount() const;
+
+#if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
+  // Suspend the driver. This is an asynchronous operation.
+  // Use |DriverRuntime::RunToCompletion| to await the completion of the async task.
+  // The resulting zx::result is the result of the suspend operation.
+  DriverRuntime::AsyncTask<zx::result<>> Suspend();
+
+  // Resume the driver. This is an asynchronous operation.
+  // Use |DriverRuntime::RunToCompletion| to await the completion of the async task.
+  // The resulting zx::result is the result of the resume operation.
+  DriverRuntime::AsyncTask<zx::result<>> Resume(
+      std::optional<fuchsia_power_broker::LeaseToken> power_element_lease = std::nullopt);
+#endif
+
  protected:
   template <typename Driver>
 #if __cplusplus >= 202002l
@@ -66,11 +102,15 @@ class DriverUnderTestBase : public fdf::WireAsyncEventHandler<fuchsia_driver_fra
 
  private:
   fdf_dispatcher_t* driver_dispatcher_;
+  const void* driver_owner_;
   async::synchronization_checker checker_;
   DriverRegistration driver_registration_symbol_;
   std::optional<void*> token_;
   fdf::WireClient<fuchsia_driver_framework::Driver> driver_client_ __TA_GUARDED(checker_);
   std::optional<fpromise::completer<zx::result<>>> stop_completer_ __TA_GUARDED(checker_);
+  mutable std::mutex health_alerts_mutex_;
+  std::vector<fuchsia_driver_framework::HealthAlert> health_alerts_
+      __TA_GUARDED(health_alerts_mutex_);
 };
 
 // This is a RAII wrapper over a driver under test. On construction it initializes the driver server

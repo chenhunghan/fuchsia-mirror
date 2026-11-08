@@ -77,6 +77,15 @@ statemachine!(
 );
 
 #[derive(Debug)]
+pub struct LinkStateFailure {
+    pub reason: EstablishRsnaFailureReason,
+
+    // Wake lease held by the link state pre-failure. This should be held until failure
+    // handling is complete or another wake lease is taken.
+    pub wake_lease: Option<wlan_power_manager::WakeLease>,
+}
+
+#[derive(Debug)]
 enum LinkUpReconfigureProgressed {
     Complete(LinkUp),
     InProgress(LinkUpReconfiguring),
@@ -156,21 +165,27 @@ impl EstablishingRsna {
     }
 
     #[allow(clippy::result_large_err)] // TODO(https://fxbug.dev/401255153)
-    fn handle_rsna_response_timeout(mut self) -> Result<Self, EstablishRsnaFailureReason> {
+    fn handle_rsna_response_timeout(mut self) -> Result<Self, LinkStateFailure> {
         warn!("RSNA response timeout expired: {}ms", event::RSNA_RESPONSE_TIMEOUT_MILLIS);
         self.rsna_retransmission_timeout = None;
         self.rsna_response_timeout = None;
         self.rsna_completion_timeout = None;
-        Err(self.rsna.supplicant.on_rsna_response_timeout())
+        Err(LinkStateFailure {
+            reason: self.rsna.supplicant.on_rsna_response_timeout(),
+            wake_lease: self._wake_lease,
+        })
     }
 
     #[allow(clippy::result_large_err)] // TODO(https://fxbug.dev/401255153)
-    fn handle_rsna_completion_timeout(mut self) -> Result<Self, EstablishRsnaFailureReason> {
+    fn handle_rsna_completion_timeout(mut self) -> Result<Self, LinkStateFailure> {
         warn!("RSNA completion timeout expired: {}ms", event::RSNA_COMPLETION_TIMEOUT_MILLIS);
         self.rsna_retransmission_timeout = None;
         self.rsna_response_timeout = None;
         self.rsna_completion_timeout = None;
-        Err(self.rsna.supplicant.on_rsna_completion_timeout())
+        Err(LinkStateFailure {
+            reason: self.rsna.supplicant.on_rsna_completion_timeout(),
+            wake_lease: self._wake_lease,
+        })
     }
 }
 
@@ -186,7 +201,7 @@ impl LinkState {
         protection: Protection,
         wake_lease: Option<wlan_power_manager::WakeLease>,
         context: &mut Context,
-    ) -> Result<Self, EstablishRsnaFailureReason> {
+    ) -> Result<Self, LinkStateFailure> {
         let mut rsna = match protection {
             Protection::Open | Protection::Wep(_) => {
                 let now = now();
@@ -197,10 +212,13 @@ impl LinkState {
             Protection::Rsna(rsna) | Protection::LegacyWpa(rsna) => rsna,
         };
         let mut update_sink = rsna::UpdateSink::default();
-        rsna.supplicant.start(&mut update_sink).map_err(|e| {
+        if let Err(e) = rsna.supplicant.start(&mut update_sink) {
             error!("could not start Supplicant: {}", e);
-            EstablishRsnaFailureReason::StartSupplicantFailed
-        })?;
+            return Err(LinkStateFailure {
+                reason: EstablishRsnaFailureReason::StartSupplicantFailed,
+                wake_lease,
+            });
+        }
         let rsna_status = process_rsna_updates(context, None, update_sink, None);
         let state = State::new(Init).transition_to(EstablishingRsna {
             rsna,
@@ -228,29 +246,37 @@ impl LinkState {
                 let state = state.on_rsna_progressed(None, None, false, sent_keys);
                 Ok(transition.to(state).into())
             }
-            RsnaStatus::Failed(reason) => Err(reason),
+            RsnaStatus::Failed(reason) => {
+                Err(LinkStateFailure { reason, wake_lease: state._wake_lease })
+            }
             rsna_status => {
                 error!("Unexpected RsnaStatus upon Supplicant::start(): {:?}", rsna_status);
-                Err(EstablishRsnaFailureReason::StartSupplicantFailed)
+                Err(LinkStateFailure {
+                    reason: EstablishRsnaFailureReason::StartSupplicantFailed,
+                    wake_lease: state._wake_lease,
+                })
             }
         }
     }
 
-    pub fn disconnect(self) -> (Protection, Option<zx::MonotonicDuration>) {
+    pub fn disconnect(
+        self,
+    ) -> (Protection, Option<zx::MonotonicDuration>, Option<wlan_power_manager::WakeLease>) {
         match self {
             Self::EstablishingRsna(state) => {
-                let (_, state) = state.release_data();
-                (state.into_protection(), None)
+                let (_, mut state) = state.release_data();
+                let wake_lease = state._wake_lease.take();
+                (state.into_protection(), None, wake_lease)
             }
             Self::LinkUp(state) => {
                 let (_, state) = state.release_data();
                 let connected_duration = now() - state.since;
-                (state.protection, Some(connected_duration))
+                (state.protection, Some(connected_duration), None)
             }
             Self::LinkUpReconfiguring(state) => {
                 let (_, state) = state.release_data();
                 let connected_duration = now() - state.link_up.since;
-                (state.link_up.protection, Some(connected_duration))
+                (state.link_up.protection, Some(connected_duration), state._wake_lease)
             }
             // We always transition to EstablishingRsna or LinkUp on initialization
             // and never transition back
@@ -267,7 +293,7 @@ impl LinkState {
         bss: &BssDescription,
         state_change_msg: &mut Option<StateChangeContext>,
         context: &mut Context,
-    ) -> Result<Self, EstablishRsnaFailureReason>
+    ) -> Result<Self, LinkStateFailure>
     where
         H: Fn(&mut Context, &mut Rsna, &T) -> RsnaStatus,
     {
@@ -277,7 +303,10 @@ impl LinkState {
                 match process_eapol_event(context, &mut state.rsna, &eapol_event) {
                     RsnaStatus::Failed(failure_reason) => {
                         state_change_msg.set_msg(format!("{failure_reason:?}"));
-                        Err(failure_reason)
+                        Err(LinkStateFailure {
+                            reason: failure_reason,
+                            wake_lease: state._wake_lease,
+                        })
                     }
                     RsnaStatus::Progressed {
                         ap_responsive,
@@ -393,7 +422,7 @@ impl LinkState {
         bss: &BssDescription,
         state_change_msg: &mut Option<StateChangeContext>,
         context: &mut Context,
-    ) -> Result<Self, EstablishRsnaFailureReason> {
+    ) -> Result<Self, LinkStateFailure> {
         self.on_eapol_event(eapol_ind, process_eapol_ind, bss, state_change_msg, context)
     }
 
@@ -404,7 +433,7 @@ impl LinkState {
         bss: &BssDescription,
         state_change_msg: &mut Option<StateChangeContext>,
         context: &mut Context,
-    ) -> Result<Self, EstablishRsnaFailureReason> {
+    ) -> Result<Self, LinkStateFailure> {
         if let Self::LinkUpReconfiguring(state) = &mut self {
             state.eapol_conf_pending = false;
         }
@@ -418,11 +447,19 @@ impl LinkState {
         bss: &BssDescription,
         state_change_msg: &mut Option<StateChangeContext>,
         context: &mut Context,
-    ) -> Result<Self, EstablishRsnaFailureReason> {
+    ) -> Result<Self, LinkStateFailure> {
         for key_result in &set_keys_conf.results {
             if zx::Status::ok(key_result.status).is_err() {
                 state_change_msg.set_msg("Failed to set key in driver".to_string());
-                return Err(EstablishRsnaFailureReason::InternalError);
+                let wake_lease = match self {
+                    Self::EstablishingRsna(state) => state.release_data().1._wake_lease,
+                    Self::LinkUpReconfiguring(state) => state.release_data().1._wake_lease,
+                    Self::Init(_) | Self::LinkUp(_) => None,
+                };
+                return Err(LinkStateFailure {
+                    reason: EstablishRsnaFailureReason::InternalError,
+                    wake_lease,
+                });
             }
         }
 
@@ -466,7 +503,7 @@ impl LinkState {
         event: Event,
         state_change_msg: &mut Option<StateChangeContext>,
         context: &mut Context,
-    ) -> Result<Self, EstablishRsnaFailureReason> {
+    ) -> Result<Self, LinkStateFailure> {
         match self {
             Self::EstablishingRsna(state) => match event {
                 Event::RsnaResponseTimeout(RsnaResponseTimeout {}) => {
@@ -496,7 +533,10 @@ impl LinkState {
                 Event::RsnaRetransmissionTimeout(timeout) => {
                     let (transition, mut state) = state.release_data();
                     match process_rsna_retransmission_timeout(context, timeout, &mut state.rsna) {
-                        RsnaStatus::Failed(failure_reason) => Err(failure_reason),
+                        RsnaStatus::Failed(failure_reason) => Err(LinkStateFailure {
+                            reason: failure_reason,
+                            wake_lease: state._wake_lease,
+                        }),
                         RsnaStatus::Unchanged => Ok(transition.to(state).into()),
                         RsnaStatus::Progressed {
                             ap_responsive,

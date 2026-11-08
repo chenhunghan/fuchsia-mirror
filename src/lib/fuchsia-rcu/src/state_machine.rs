@@ -185,6 +185,26 @@ pub(crate) fn unregister_thread() {
     }
 }
 
+/// Returns the current CPU ID if the thread is currently registered with RCU's RSEQ backend.
+///
+/// The returned CPU ID is a point-in-time observation; the thread may be migrated to another CPU
+/// at any time.
+#[inline]
+pub fn try_current_cpu() -> Option<u32> {
+    #[cfg(feature = "rseq_backend")]
+    {
+        RCU_THREAD_BLOCK.with(|block| {
+            // SAFETY: `register_thread()` initialized `rseq` for the current thread and
+            // `unregister_thread()` clears it before unregistering from RSEQ.
+            block.rseq.get().map(|rseq| unsafe { rseq.current_cpu() })
+        })
+    }
+    #[cfg(not(feature = "rseq_backend"))]
+    {
+        None
+    }
+}
+
 /// Exposes the thread-local counters for RCU stall detection.
 pub fn with_thread_block_counters<F>(f: F)
 where
@@ -671,5 +691,19 @@ mod tests {
         rcu_advancer_wake();
         handle.join().unwrap();
         RCU_CONTROL_BLOCK.advancer_thread_state.store(ADVANCER_THREAD_SLEEPING, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn test_try_current_cpu() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        assert_eq!(try_current_cpu(), None);
+        {
+            let _registration = register_thread();
+            #[cfg(feature = "rseq_backend")]
+            assert_ne!(try_current_cpu(), None);
+            #[cfg(not(feature = "rseq_backend"))]
+            assert_eq!(try_current_cpu(), None);
+        }
+        assert_eq!(try_current_cpu(), None);
     }
 }

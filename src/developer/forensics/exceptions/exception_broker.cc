@@ -3,7 +3,7 @@
 
 #include "src/developer/forensics/exceptions/exception_broker.h"
 
-#include <fuchsia/exception/cpp/fidl.h>
+#include <fidl/fuchsia.exception/cpp/fidl.h>
 #include <lib/syslog/cpp/macros.h>
 #include <zircon/status.h>
 #include <zircon/types.h>
@@ -18,8 +18,8 @@ namespace exceptions {
 
 namespace {
 
-using fuchsia::exception::ExceptionInfo;
-using fuchsia::exception::ProcessException;
+using fuchsia_exception::ExceptionInfo;
+using fuchsia_exception::ProcessException;
 
 constexpr char kEnableJitdConfigPath[] = "/config/data/exceptions/enable_jitd_on_startup.json";
 
@@ -57,40 +57,40 @@ ExceptionBroker::ExceptionBroker(async_dispatcher_t* dispatcher, inspect::Node* 
 
 // OnException -------------------------------------------------------------------------------------
 
-void ExceptionBroker::OnException(zx::exception exception, ExceptionInfo info,
-                                  OnExceptionCallback cb) {
-  FX_LOGS(INFO) << "Received exception -- pid: " << info.process_koid
-                << " tid: " << info.thread_koid;
+void ExceptionBroker::OnException(OnExceptionRequest& request,
+                                  OnExceptionCompleter::Sync& completer) {
+  FX_LOGS(INFO) << "Received exception -- pid: " << request.info().process_koid()
+                << " tid: " << request.info().thread_koid();
   if (!limbo_manager_.active()) {
-    handler_manager_.Handle(std::move(exception));
+    handler_manager_.Handle(std::move(request.exception()));
   } else {
-    AddToLimbo(std::move(exception), std::move(info));
+    AddToLimbo(std::move(request.exception()), std::move(request.info()));
   }
-  cb();
+  completer.Reply();
 }
 
-void ExceptionBroker::IsActive(IsActiveCallback cb) { cb(); }
+void ExceptionBroker::IsActive(IsActiveCompleter::Sync& completer) { completer.Reply(); }
 
 void ExceptionBroker::AddToLimbo(zx::exception exception, ExceptionInfo info) {
-  ProcessException process_exception = {};
-  process_exception.set_exception(std::move(exception));
-  process_exception.set_info(std::move(info));
+  ProcessException process_exception;
+  process_exception.exception(std::move(exception));
+  process_exception.info(std::move(info));
 
   zx_status_t status;
   zx::process process;
-  status = process_exception.exception().get_process(&process);
+  status = process_exception.exception()->get_process(&process);
   if (status != ZX_OK) {
     FX_PLOGS(WARNING, status) << "Could not obtain process handle for exception.";
   } else {
-    process_exception.set_process(std::move(process));
+    process_exception.process(std::move(process));
   }
 
   zx::thread thread;
-  status = process_exception.exception().get_thread(&thread);
+  status = process_exception.exception()->get_thread(&thread);
   if (status != ZX_OK) {
     FX_PLOGS(WARNING, status) << "Could not obtain thread handle for exception.";
   } else {
-    process_exception.set_thread(std::move(thread));
+    process_exception.thread(std::move(thread));
   }
   limbo_manager_.AddToLimbo(std::move(process_exception));
 }

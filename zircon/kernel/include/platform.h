@@ -159,7 +159,8 @@ bool platform_supports_suspend_system();
 zx_status_t platform_suspend_system();
 
 // Returns true if this system has a debug serial port that is enabled
-bool platform_serial_enabled();
+extern "C" bool rust_platform_serial_enabled();
+inline bool platform_serial_enabled() { return rust_platform_serial_enabled(); }
 
 // Suspend all kernel access to the debug UART hardware, on behalf of
 // `zx_debug_suspend`.
@@ -199,7 +200,8 @@ bool platform_serial_enabled();
 //    `platform_serial_discard_writes_while_suspended`).
 //  - ZX_ERR_INTERNAL_INTR_KILLED or ZX_ERR_INTERNAL_INTR_RETRY if the calling
 //    thread was killed or suspended while waiting.  The UART is not suspended.
-zx_status_t platform_serial_suspend();
+extern "C" zx_status_t rust_platform_serial_suspend();
+inline zx_status_t platform_serial_suspend() { return rust_platform_serial_suspend(); }
 
 // Resume kernel access to the debug UART hardware after a previous successful
 // call to `platform_serial_suspend`.  The caller is responsible for ensuring the
@@ -213,7 +215,8 @@ zx_status_t platform_serial_suspend();
 //    being bypassed.
 //  - ZX_ERR_BAD_STATE if the UART is not suspended (including while a suspend
 //    operation is still in progress).
-zx_status_t platform_serial_resume();
+extern "C" zx_status_t rust_platform_serial_resume();
+inline zx_status_t platform_serial_resume() { return rust_platform_serial_resume(); }
 
 // Defined in <kernel/wait.h>.
 enum class Interruptible : bool;
@@ -229,7 +232,10 @@ enum class Interruptible : bool;
 // suspended (returning ZX_ERR_INTERNAL_INTR_RETRY).  Otherwise, returns ZX_OK.
 //
 // Must be called from thread context.
-zx_status_t platform_serial_wait_for_resume(Interruptible interruptible);
+extern "C" zx_status_t rust_platform_serial_wait_for_resume(Interruptible interruptible);
+inline zx_status_t platform_serial_wait_for_resume(Interruptible interruptible) {
+  return rust_platform_serial_wait_for_resume(interruptible);
+}
 
 // Cause blocking writes which cannot proceed because the debug UART is
 // suspended to be discarded instead of blocking, and release any writers which
@@ -241,22 +247,27 @@ zx_status_t platform_serial_wait_for_resume(Interruptible interruptible);
 //
 // Must be called from thread context.  Does not block for long.  Safe to call
 // concurrently with `platform_serial_suspend` and `platform_serial_resume`.
-void platform_serial_discard_writes_while_suspended();
+extern "C" void rust_platform_serial_discard_writes_while_suspended();
+inline void platform_serial_discard_writes_while_suspended() {
+  rust_platform_serial_discard_writes_while_suspended();
+}
 
 // Returns true if kernel access to the debug UART has been suspended (or a
 // suspend operation is in progress) via `platform_serial_suspend`.
 //
 // Safe to call from any context, including during a panic.
-bool platform_serial_is_suspended();
-extern "C" bool cpp_platform_serial_is_suspended();
+extern "C" bool rust_platform_serial_is_suspended();
+inline bool platform_serial_is_suspended() { return rust_platform_serial_is_suspended(); }
 
 // Returns the boot time at which the debug UART was most recently suspended via
 // `platform_serial_suspend`.  The value is only meaningful when
 // `platform_serial_is_suspended` returns true.
 //
 // Safe to call from any context, including during a panic.
-zx_instant_boot_t platform_serial_suspended_at();
-extern "C" zx_instant_boot_t cpp_platform_serial_suspended_at();
+extern "C" zx_instant_boot_t rust_platform_serial_suspended_at();
+inline zx_instant_boot_t platform_serial_suspended_at() {
+  return rust_platform_serial_suspended_at();
+}
 
 // platform_panic_start informs the system that a panic message is about
 // to be printed and that platform_halt will be called shortly.  The
@@ -264,7 +275,7 @@ extern "C" zx_instant_boot_t cpp_platform_serial_suspended_at();
 // to safely ensure that the panic message will be visible to the user.
 enum class PanicStartHaltOtherCpus { No = 0, Yes };
 void platform_panic_start(PanicStartHaltOtherCpus option = PanicStartHaltOtherCpus::Yes);
-extern "C" void cpp_platform_panic_start();
+extern "C" void cpp_platform_panic_start(bool halt_other_cpus);
 
 // Start the given cpu in a way the platform finds appropriate.
 // 'context' contains an opaque value passed through to the new cpu for the
@@ -275,5 +286,19 @@ extern "C" zx_status_t platform_start_cpu(cpu_num_t cpu_id, uint64_t mpid, uint6
 
 // Get the state of a CPU.
 zx::result<power_cpu_state> platform_get_cpu_state(cpu_num_t cpu_id);
+
+#ifdef __aarch64__
+extern "C" {
+struct PlatformCpuStateResult {
+  zx_status_t status;
+  uint32_t state;
+};
+bool cpp_platform_supports_suspend_cpu();
+zx_status_t cpp_platform_suspend_cpu(bool allow_domain);
+bool cpp_platform_supports_suspend_system();
+zx_status_t cpp_platform_suspend_system();
+PlatformCpuStateResult cpp_platform_get_cpu_state(cpu_num_t cpu_id);
+}  // extern "C"
+#endif  // __aarch64__
 
 #endif  // ZIRCON_KERNEL_INCLUDE_PLATFORM_H_

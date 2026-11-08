@@ -136,6 +136,10 @@ fxl::RefPtr<Type> AddCVQualifiersToMatch(const Type* reference, fxl::RefPtr<Type
 
 bool NameHasTemplate(std::string_view name) { return !name.empty() && name.back() == '>'; }
 
+std::string_view StripTemplate(std::string_view type_name) {
+  return type_name.substr(0, type_name.find('<'));
+}
+
 void AddTemplateParameterToName(std::string& original, const char* type_name) {
   if (!type_name)
     return;

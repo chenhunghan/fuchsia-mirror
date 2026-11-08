@@ -259,7 +259,12 @@ impl VolumeKeys {
             })?;
 
         tmp_file
-            .link_into(token, key_path, zx::MonotonicInstant::INFINITE)
+            .link_into(
+                token,
+                key_path,
+                &fio::LinkIntoOptions::default(),
+                zx::MonotonicInstant::INFINITE,
+            )
             .map_err(|e| {
                 log_error!("FIDL transport error on File.LinkInto {:?}", e);
                 errno!(EIO)

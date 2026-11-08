@@ -203,7 +203,6 @@ def _fx_unittest_component_impl(
     fx_test_component(
         name = name,
         compiled_manifest = ":" + manifest_name,
-        component_name = component_name,
         testonly = True,
         visibility = visibility,
         deps = [":" + packaged_binary_name],

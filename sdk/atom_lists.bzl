@@ -15,13 +15,27 @@ STABLE_CC_SOURCE_LIBRARY_ATOMS = [
     "//sdk/lib/async-loop-testing/cpp:cpp_idk",
     "//sdk/lib/async-testing:async-testing_idk",
     "//sdk/lib/async_patterns/cpp:cpp_idk",
+    "//sdk/lib/async_patterns/testing/cpp:cpp_idk",
     "//sdk/lib/component/incoming/cpp:cpp_idk",
     "//sdk/lib/component/outgoing/cpp:cpp_idk",
+    "//sdk/lib/driver/component/cpp:cpp_idk",
+    "//sdk/lib/driver/component/cpp:node_idk",
+    "//sdk/lib/driver/devfs/cpp:cpp_idk",
+    "//sdk/lib/driver/fake-bti/cpp:cpp_idk",
+    "//sdk/lib/driver/fake-mmio-reg/cpp:cpp_idk",
+    "//sdk/lib/driver/fake-object/cpp:cpp_idk",
+    "//sdk/lib/driver/incoming/cpp:cpp_idk",
+    "//sdk/lib/driver/logging/cpp:cpp_idk",
+    "//sdk/lib/driver/mmio/cpp:cpp_idk",
+    "//sdk/lib/driver/node/cpp:cpp_idk",
+    "//sdk/lib/driver/outgoing/cpp:cpp_idk",
     "//sdk/lib/driver/runtime:driver_runtime_cpp_idk",
     "//sdk/lib/driver/runtime:driver_runtime_env_cpp_idk",
     "//sdk/lib/driver/runtime:driver_runtime_env_idk",
     "//sdk/lib/driver/runtime:driver_runtime_idk",
     "//sdk/lib/driver/runtime:driver_runtime_testing_idk",
+    "//sdk/lib/driver/runtime/testing/cpp:cpp_idk",
+    "//sdk/lib/driver/symbols:symbols_idk",
     "//sdk/lib/fidl:fidl_idk",
     "//sdk/lib/fidl/cpp:cpp_base_idk",
     "//sdk/lib/fidl/cpp:cpp_idk",
@@ -38,22 +52,31 @@ STABLE_CC_SOURCE_LIBRARY_ATOMS = [
     "//sdk/lib/fit:fit_idk",
     "//sdk/lib/fit-promise:fit-promise_idk",
     "//sdk/lib/images/cpp:cpp_idk",
+    "//sdk/lib/inspect/component/cpp:cpp_idk",
     "//sdk/lib/magma_common:magma_common_idk",
     "//sdk/lib/media/cpp:no_converters_idk",
     "//sdk/lib/stdcompat:stdcompat_idk",
+    "//sdk/lib/sys/component/cpp/testing:cpp_library_idk",
     "//sdk/lib/sys/cpp:cpp_idk",
+    "//sdk/lib/sys/cpp/testing:cpp_idk",
     "//sdk/lib/sys/service/cpp:cpp_idk",
     "//sdk/lib/syslog/cpp:cpp_idk",
     "//sdk/lib/syslog/structured_backend:structured_backend_idk",
     "//sdk/lib/utf-utils:utf-utils_idk",
     "//sdk/lib/vfs/cpp:cpp_idk",
+    "//sdk/lib/virtgralloc:virtgralloc_headers_idk",
+    "//sdk/lib/zbi-format:zbi-format_idk",
+    "//zircon/system/ulib/hwreg:hwreg_public_idk",
     "//zircon/system/ulib/inspect:inspect_idk",
+    "//zircon/system/ulib/mmio-ptr:mmio-ptr_idk",
     "//zircon/system/ulib/sync:sync-cpp_idk",
+    "//zircon/system/ulib/trace-engine:trace-engine-headersonly_idk",
     "//zircon/system/ulib/zx:zx_idk",
 ]
 
 UNSTABLE_CC_SOURCE_LIBRARY_ATOMS = [
     # buildifier: keep sorted
+    "//sdk/lib/driver/fake-resource/cpp:cpp_idk",
     "//sdk/lib/memory_barriers:memory_barriers_idk",
 ]
 
@@ -66,6 +89,8 @@ CC_PREBUILT_SHARED_LIBRARY_ATOMS = [
     "//sdk/lib/svc:svc_idk",
     "//sdk/lib/syslog/cpp:backend_fuchsia_globals_idk",
     "//sdk/lib/vfs/internal:vfs_internal_idk",
+    "//src/performance/memory/heapdump/instrumentation:instrumentation_idk",
+    "//zircon/system/ulib/trace-engine:trace-engine_idk",
 ]
 
 CC_PREBUILT_STATIC_LIBRARY_ATOMS = [
@@ -99,6 +124,7 @@ _NON_BUILD_HOST_TOOLS_ATOMS_REQUIRED_BY_BAZEL_SDK = [
 
 NON_BUILD_HOST_TOOLS_ATOMS = _NON_BUILD_HOST_TOOLS_ATOMS_REQUIRED_BY_BAZEL_SDK + [
     # buildifier: keep sorted
+    "//src/sys/pkg/bin/far:host_idk",
     "//src/sys/pkg/testing/fake-omaha-client:fake-omaha-client_idk",
     "//tools/net/device-finder:device-finder_idk",
 ]
@@ -107,6 +133,8 @@ ALL_HOST_TOOL_ATOMS = BUILD_HOST_TOOLS_ATOMS + NON_BUILD_HOST_TOOLS_ATOMS
 
 BUILD_FFX_TOOLS_ATOMS = [
     # buildifier: keep sorted
+    "//src/developer/ffx/plugins/assembly:ffx_assembly_tool_idk",
+    "//src/developer/ffx/plugins/package:ffx_package_tool_idk",
 ]
 
 _NON_BUILD_FFX_TOOLS_ATOMS_REQUIRED_BY_BAZEL_SDK = [
@@ -115,6 +143,10 @@ _NON_BUILD_FFX_TOOLS_ATOMS_REQUIRED_BY_BAZEL_SDK = [
 
 NON_BUILD_FFX_TOOLS_ATOMS = _NON_BUILD_FFX_TOOLS_ATOMS_REQUIRED_BY_BAZEL_SDK + [
     # buildifier: keep sorted
+    "//src/developer/ffx/plugins/coverage:ffx_coverage_tool_idk",
+    "//src/developer/ffx/plugins/fuzz:ffx_fuzz_tool_idk",
+    "//src/developer/ffx/plugins/session:ffx_session_tool_idk",
+    "//src/developer/ffx/plugins/wlan:ffx_wlan_tool_idk",
 ]
 
 ALL_FFX_TOOL_ATOMS = BUILD_FFX_TOOLS_ATOMS + NON_BUILD_FFX_TOOLS_ATOMS

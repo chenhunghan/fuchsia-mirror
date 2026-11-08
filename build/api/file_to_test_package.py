@@ -5,16 +5,11 @@
 import json
 import os
 import shlex
-import sys
 import typing as T
 from pathlib import Path
 
-_SCRIPT_DIR = os.path.dirname(__file__)
-sys.path.insert(0, os.path.join(_SCRIPT_DIR, "../bazel/scripts"))
-import build_utils
-
-if T.TYPE_CHECKING:
-    from gn_ninja_outputs import NinjaOutputsBase
+from build.api import gn_ninja_outputs
+from build.bazel.scripts import build_utils
 
 
 class FileToTestPackageFinder:
@@ -37,7 +32,7 @@ class FileToTestPackageFinder:
         self,
         build_dir: Path,
         fuchsia_dir: Path,
-        outputs_database: "NinjaOutputsBase",
+        outputs_database: gn_ninja_outputs.NinjaOutputsBase,
         log_func: T.Callable[[str], None],
         host_tag: str = "linux-x64",
         command_runner: build_utils.CommandRunner | None = None,

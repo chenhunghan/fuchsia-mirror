@@ -16,9 +16,6 @@ rustc_library(
     ],
     crate_name = "manual_targets",
     edition = "2024",
-    proc_macro_deps = [
-        "//third_party/rust_crates/vendor:async-trait",
-    ],
     target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = [
         "//src/developer/ffx/lib/diagnostics/checks:__pkg__",
@@ -47,6 +44,7 @@ rustc_library(
 host_rustc_test(
     name = "lib_test",
     crate = ":lib",
+    crate_name = "manual_targets_lib_test",
     edition = "2024",
     visibility = ["//src/developer/ffx:__pkg__"],
     deps = [

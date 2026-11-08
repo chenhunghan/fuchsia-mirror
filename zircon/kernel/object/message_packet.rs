@@ -271,7 +271,7 @@ impl MessagePacket {
     /// - If `packet.owns_handles` is true, every non-null entry in `packet.handles` must be a
     ///   valid, owned `Handle*`.
     #[inline]
-    pub unsafe fn recycle(packet: *mut MessagePacket) {
+    unsafe fn recycle(packet: *mut MessagePacket) {
         // SAFETY:
         // - `packet` is a valid, uniquely owned, aligned pointer to an allocated `MessagePacket`
         //   that is not linked in any container.
@@ -454,7 +454,7 @@ impl MessagePacketPtr {
     ///
     /// `raw` must be a valid, uniquely owned `MessagePacket*`.
     #[inline]
-    pub unsafe fn from_raw(raw: *mut MessagePacket) -> Self {
+    unsafe fn from_raw(raw: *mut MessagePacket) -> Self {
         debug_assert!(!raw.is_null());
         // SAFETY: `raw` is non-null.
         Self { ptr: unsafe { NonNull::new_unchecked(raw) } }
@@ -462,7 +462,7 @@ impl MessagePacketPtr {
 
     /// Consumes the pointer and returns the raw pointer without running destructor.
     #[inline]
-    pub fn into_raw(self) -> *mut MessagePacket {
+    fn into_raw(self) -> *mut MessagePacket {
         let ptr = self.ptr.as_ptr();
         mem::forget(self);
         ptr
@@ -522,66 +522,6 @@ impl Drop for MessagePacketPtr {
             MessagePacket::recycle(self.ptr.as_ptr());
         }
     }
-}
-
-/// Creates a `MessagePacket` with kernel payload data and space for `num_handles` handles.
-///
-/// # Safety
-///
-/// - If `data` is non-null and `data_size > 0`, `data` must point to `data_size` valid bytes.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_message_packet_create_kernel(
-    data: *const u8,
-    data_size: usize,
-    num_handles: usize,
-    out: &mut *mut MessagePacket,
-) -> zx_types::zx_status_t {
-    let payload = if data.is_null() || data_size == 0 {
-        &[]
-    } else {
-        // SAFETY: Caller guarantees `data` points to `data_size` valid bytes in kernel memory.
-        unsafe { slice::from_raw_parts(data, data_size) }
-    };
-    match MessagePacket::create_from_kernel(payload, num_handles) {
-        Ok(packet) => {
-            *out = packet.into_raw();
-            zx_types::ZX_OK
-        }
-        Err(status) => status.into_raw(),
-    }
-}
-
-/// Destroys and frees a `MessagePacket`.
-///
-/// # Safety
-///
-/// `packet` must be null or a valid, uniquely owned pointer returned by
-/// `rust_message_packet_create_kernel`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_message_packet_delete(packet: *mut MessagePacket) {
-    if !packet.is_null() {
-        // SAFETY: Caller guarantees `packet` is a valid, uniquely owned MessagePacket pointer.
-        unsafe {
-            drop(MessagePacketPtr::from_raw(packet));
-        }
-    }
-}
-
-/// Returns a mutable pointer to the attached handle pointers.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_message_packet_get_mutable_handles(
-    packet: &mut MessagePacket,
-) -> *mut *mut c_void {
-    packet.handles_mut()
-}
-
-/// Sets whether this packet owns its attached handles.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_message_packet_set_owns_handles(
-    packet: &mut MessagePacket,
-    owns_handles: bool,
-) {
-    packet.set_owns_handles(owns_handles);
 }
 
 /// In-tree kernel unit tests for `MessagePacket`.

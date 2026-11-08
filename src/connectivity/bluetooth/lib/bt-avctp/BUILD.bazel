@@ -8,6 +8,12 @@ load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package
 
 package(default_applicable_licenses = ["//:license"])
 
+test_suite(
+    name = "tests",
+    tests = [":bt-avctp-tests"],
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)
+
 rustc_library(
     name = "bt-avctp",
     srcs = [
@@ -58,5 +64,4 @@ fx_unittest_package(
     package_name = "bt-avctp-tests",
     max_log_severity = "ERROR",
     unit_tests = [":bt-avctp_test"],
-    visibility = ["//src/connectivity/bluetooth:__pkg__"],
 )

@@ -14,6 +14,12 @@
 extern "C" {
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_scheduler_init(ffi::Uninitialized<Scheduler>* out) {
+  DEBUG_ASSERT(out != nullptr);
+  out->Initialize();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE zx_status_t cpp_scheduler_update_power_level(
     uint32_t domain_id, uint64_t controller_id, power_management::ControlInterface interface,
     uint64_t arg, cpu_mask_t* out_mask) {

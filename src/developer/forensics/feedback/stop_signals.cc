@@ -4,11 +4,9 @@
 
 #include "src/developer/forensics/feedback/stop_signals.h"
 
-#include <fuchsia/hardware/power/statecontrol/cpp/fidl.h>
-#include <fuchsia/process/lifecycle/cpp/fidl.h>
-#include <lib/fidl/cpp/binding.h>
-#include <lib/fidl/cpp/interface_handle.h>
-#include <lib/fidl/cpp/interface_request.h>
+#include <fidl/fuchsia.hardware.power.statecontrol/cpp/fidl.h>
+#include <fidl/fuchsia.hardware.power.statecontrol/cpp/hlcpp_conversion.h>
+#include <fidl/fuchsia.process.lifecycle/cpp/fidl.h>
 #include <lib/fit/defer.h>
 #include <lib/fit/function.h>
 #include <lib/fpromise/bridge.h>
@@ -25,40 +23,38 @@ namespace {
 
 // Handles receiving the signal the component should stop and converting into a
 // `LifecycleStopSignal`.
-class LifecycleServer : public fuchsia::process::lifecycle::Lifecycle {
+class LifecycleServer : public fidl::Server<fuchsia_process_lifecycle::Lifecycle> {
  public:
   LifecycleServer(async_dispatcher_t* dispatcher,
-                  fidl::InterfaceRequest<fuchsia::process::lifecycle::Lifecycle> request,
+                  fidl::ServerEnd<fuchsia_process_lifecycle::Lifecycle> server_end,
                   fpromise::completer<LifecycleStopSignal, Error> completer);
 
-  void Stop() override;
+  void Stop(StopCompleter::Sync& completer) override;
 
  private:
-  std::unique_ptr<fidl::Binding<fuchsia::process::lifecycle::Lifecycle>> binding_;
+  std::unique_ptr<fidl::ServerBinding<fuchsia_process_lifecycle::Lifecycle>> binding_;
   fpromise::completer<LifecycleStopSignal, Error> completer_;
 };
 
-LifecycleServer::LifecycleServer(
-    async_dispatcher_t* dispatcher,
-    fidl::InterfaceRequest<fuchsia::process::lifecycle::Lifecycle> request,
-    fpromise::completer<LifecycleStopSignal, Error> completer)
-    : binding_(std::make_unique<fidl::Binding<fuchsia::process::lifecycle::Lifecycle>>(
-          this, std::move(request), dispatcher)),
-      completer_(std::move(completer)) {
-  binding_->set_error_handler([this](const zx_status_t status) {
-    if (!completer_) {
-      return;
-    }
+LifecycleServer::LifecycleServer(async_dispatcher_t* dispatcher,
+                                 fidl::ServerEnd<fuchsia_process_lifecycle::Lifecycle> server_end,
+                                 fpromise::completer<LifecycleStopSignal, Error> completer)
+    : binding_(std::make_unique<fidl::ServerBinding<fuchsia_process_lifecycle::Lifecycle>>(
+          dispatcher, std::move(server_end), this,
+          [this](const fidl::UnbindInfo info) {
+            if (!completer_) {
+              return;
+            }
 
-    FX_PLOGS(WARNING, status) << "Lost connection to lifecycle client";
-    completer_.complete_error(Error::kConnectionError);
-  });
-}
+            FX_PLOGS(WARNING, info.status()) << "Lost connection to lifecycle client";
+            completer_.complete_error(Error::kConnectionError);
+          })),
+      completer_(std::move(completer)) {}
 
-void LifecycleServer::Stop() {
+void LifecycleServer::Stop(StopCompleter::Sync& completer) {
   if (completer_) {
     // Move `binding_` to avoid breaking references to internal member variables.
-    auto cb = fit::defer([b = std::move(binding_)]() mutable { b->Unbind(); });
+    auto cb = fit::defer([b = std::move(binding_)]() mutable { b.reset(); });
     completer_.complete_ok(LifecycleStopSignal([cb = std::move(cb)]() mutable { cb.call(); }));
   }
 }
@@ -72,14 +68,14 @@ LifecycleStopSignal::LifecycleStopSignal(fit::callback<void(void)> callback)
 
 fpromise::promise<LifecycleStopSignal, Error> WaitForLifecycleStop(
     async_dispatcher_t* dispatcher,
-    fidl::InterfaceRequest<fuchsia::process::lifecycle::Lifecycle> request) {
-  if (!request.is_valid()) {
+    fidl::ServerEnd<fuchsia_process_lifecycle::Lifecycle> server_end) {
+  if (!server_end.is_valid()) {
     return fpromise::make_result_promise<LifecycleStopSignal, Error>(
         fpromise::error(Error::kBadValue));
   }
 
   fpromise::bridge<LifecycleStopSignal, Error> bridge;
-  auto lifecycle = std::make_unique<LifecycleServer>(dispatcher, std::move(request),
+  auto lifecycle = std::make_unique<LifecycleServer>(dispatcher, std::move(server_end),
                                                      std::move(bridge.completer));
   return bridge.consumer.promise_or(fpromise::error(Error::kLogicError))
       .then([l = std::move(lifecycle)](fpromise::result<LifecycleStopSignal, Error>& result) {
@@ -91,63 +87,68 @@ namespace {
 
 // Handles receiving the reason a shutdown is expected to occur and converting into a
 // `GracefulShutdownInfoSignal`.
-class ShutdownWatcherServer : public fuchsia::hardware::power::statecontrol::ShutdownWatcher {
+class ShutdownWatcherServer
+    : public fidl::Server<fuchsia_hardware_power_statecontrol::ShutdownWatcher> {
  public:
   ShutdownWatcherServer(
       async_dispatcher_t* dispatcher,
-      fidl::InterfaceRequest<fuchsia::hardware::power::statecontrol::ShutdownWatcher> request,
+      fidl::ServerEnd<fuchsia_hardware_power_statecontrol::ShutdownWatcher> server_end,
       fpromise::completer<GracefulShutdownInfoSignal, Error> completer);
 
-  void OnShutdown(fuchsia::hardware::power::statecontrol::ShutdownOptions options,
-                  OnShutdownCallback callback) override;
+  void OnShutdown(OnShutdownRequest& request, OnShutdownCompleter::Sync& completer) override;
 
-  void handle_unknown_method(uint64_t ordinal, bool method_has_response) override {
-    FX_LOGS(WARNING) << "Received an unknown method with ordinal: " << ordinal;
+  void handle_unknown_method(
+      fidl::UnknownMethodMetadata<fuchsia_hardware_power_statecontrol::ShutdownWatcher> metadata,
+      fidl::UnknownMethodCompleter::Sync& completer) override {
+    FX_LOGS(WARNING) << "Received an unknown method with ordinal: " << metadata.method_ordinal;
   }
 
  private:
-  std::unique_ptr<fidl::Binding<fuchsia::hardware::power::statecontrol::ShutdownWatcher>> binding_;
+  std::unique_ptr<fidl::ServerBinding<fuchsia_hardware_power_statecontrol::ShutdownWatcher>>
+      binding_;
   fpromise::completer<GracefulShutdownInfoSignal, Error> completer_;
 };
 
 ShutdownWatcherServer::ShutdownWatcherServer(
     async_dispatcher_t* dispatcher,
-    fidl::InterfaceRequest<fuchsia::hardware::power::statecontrol::ShutdownWatcher> request,
+    fidl::ServerEnd<fuchsia_hardware_power_statecontrol::ShutdownWatcher> server_end,
     fpromise::completer<GracefulShutdownInfoSignal, Error> completer)
-    : binding_(
-          std::make_unique<fidl::Binding<fuchsia::hardware::power::statecontrol::ShutdownWatcher>>(
-              this, std::move(request), dispatcher)),
-      completer_(std::move(completer)) {
-  binding_->set_error_handler([this](const zx_status_t status) {
-    if (!completer_) {
-      return;
-    }
+    : binding_(std::make_unique<
+               fidl::ServerBinding<fuchsia_hardware_power_statecontrol::ShutdownWatcher>>(
+          dispatcher, std::move(server_end), this,
+          [this](const fidl::UnbindInfo info) {
+            if (!completer_) {
+              return;
+            }
 
-    FX_PLOGS(WARNING, status) << "Lost connection to shutdown watcher client, won't reconnect";
-    completer_.complete_error(Error::kConnectionError);
-  });
-}
+            FX_PLOGS(WARNING, info.status())
+                << "Lost connection to shutdown watcher client, won't reconnect";
+            completer_.complete_error(Error::kConnectionError);
+          })),
+      completer_(std::move(completer)) {}
 
-void ShutdownWatcherServer::OnShutdown(
-    fuchsia::hardware::power::statecontrol::ShutdownOptions options, OnShutdownCallback callback) {
+void ShutdownWatcherServer::OnShutdown(OnShutdownRequest& request,
+                                       OnShutdownCompleter::Sync& completer) {
   if (!completer_) {
-    callback(fpromise::ok());
+    completer.Reply();
     return;
   }
 
-  if (!options.has_action()) {
+  if (!request.options().action().has_value()) {
     FX_LOGS(WARNING) << "Received shutdown signal without an action";
-    callback(fpromise::ok());
+    completer.Reply();
     return;
   }
 
   // Move `binding_` to avoid breaking references to internal member variables.
-  auto cb = fit::defer([cb = std::move(callback), b = std::move(binding_)]() mutable {
-    cb(fpromise::ok());
-    b->Unbind();
+  auto cb = fit::defer([completer = completer.ToAsync(), b = std::move(binding_)]() mutable {
+    completer.Reply();
+    b.reset();
   });
-  completer_.complete_ok(GracefulShutdownInfoSignal(ToGracefulShutdownAction(options),
-                                                    ToGracefulShutdownReasons(options),
+  const fuchsia::hardware::power::statecontrol::ShutdownOptions hlcpp_options =
+      fidl::NaturalToHLCPP(request.options());
+  completer_.complete_ok(GracefulShutdownInfoSignal(ToGracefulShutdownAction(hlcpp_options),
+                                                    ToGracefulShutdownReasons(hlcpp_options),
                                                     [cb = std::move(cb)]() mutable { cb.call(); }));
 }
 
@@ -162,14 +163,14 @@ GracefulShutdownInfoSignal::GracefulShutdownInfoSignal(GracefulShutdownAction ac
 
 fpromise::promise<GracefulShutdownInfoSignal, Error> WaitForShutdownInfo(
     async_dispatcher_t* dispatcher,
-    fidl::InterfaceRequest<fuchsia::hardware::power::statecontrol::ShutdownWatcher> request) {
-  if (!request.is_valid()) {
+    fidl::ServerEnd<fuchsia_hardware_power_statecontrol::ShutdownWatcher> server_end) {
+  if (!server_end.is_valid()) {
     return fpromise::make_result_promise<GracefulShutdownInfoSignal, Error>(
         fpromise::error(Error::kBadValue));
   }
 
   fpromise::bridge<GracefulShutdownInfoSignal, Error> bridge;
-  auto watcher = std::make_unique<ShutdownWatcherServer>(dispatcher, std::move(request),
+  auto watcher = std::make_unique<ShutdownWatcherServer>(dispatcher, std::move(server_end),
                                                          std::move(bridge.completer));
   return bridge.consumer.promise_or(fpromise::error(Error::kLogicError))
       .then([w = std::move(watcher)](fpromise::result<GracefulShutdownInfoSignal, Error>& result) {

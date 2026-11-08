@@ -3,6 +3,7 @@
 # found in the LICENSE file.
 
 load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -12,10 +13,19 @@ rustc_library(
     crate_name = "starnix_stack",
     edition = "2024",
     test_deps = ["//src/lib/fuchsia"],
-    visibility = ["//src/starnix/lib/starnix_sync:__pkg__"],
+    visibility = [
+        "//src/starnix/lib:__pkg__",
+        "//src/starnix/lib/starnix_sync:__pkg__",
+    ],
     with_unit_tests = True,
     deps = [
         "//sdk/rust/zx",
         "//src/lib/fuchsia-runtime",
     ],
+)
+
+fx_unittest_package(
+    name = "starnix_stack-unittests",
+    unit_tests = [":starnix_stack_test"],
+    visibility = ["//src/starnix/lib:__pkg__"],
 )

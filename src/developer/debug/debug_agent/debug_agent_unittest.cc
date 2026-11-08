@@ -764,6 +764,16 @@ TEST_F(DebugAgentTests, JobOnlyFilter) {
   // We should have a DebuggedProcess object, but should not be attached to its exception channel.
   ASSERT_TRUE(harness.debug_agent()->GetDebuggedProcess(kProcessKoid));
   EXPECT_FALSE(harness.debug_agent()->GetDebuggedProcess(kProcessKoid)->IsAttached());
+
+  // A subsequent minimal-priority process attach (e.g., from a recursive never_attach filter sync)
+  // must not claim the process's debugger exception channel either.
+  debug_ipc::AttachRequest minimal_attach_request;
+  minimal_attach_request.koid = kProcessKoid;
+  minimal_attach_request.config.target = debug_ipc::TaskType::kProcess;
+  minimal_attach_request.config.priority = debug_ipc::AttachConfig::Priority::kMinimal;
+  debug_ipc::AttachReply minimal_attach_reply;
+  remote_api->OnAttach(minimal_attach_request, &minimal_attach_reply);
+  EXPECT_FALSE(harness.debug_agent()->GetDebuggedProcess(kProcessKoid)->IsAttached());
 }
 
 TEST_F(DebugAgentTests, JobOnlyFilterDoesNotAttachToChildJobs) {

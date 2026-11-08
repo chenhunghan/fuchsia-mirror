@@ -52,6 +52,9 @@ fn validate_ipv4_checksum<B: SplitByteSlice>(packet: &Ipv4Packet<B>) -> Result<(
         | Ipv4Proto::Igmp
         | Ipv4Proto::Proto(IpProto::Udp)
         | Ipv4Proto::Proto(IpProto::Tcp)
+        | Ipv4Proto::Proto(IpProto::Ipv4Encap)
+        | Ipv4Proto::Proto(IpProto::Ipv6Encap)
+        | Ipv4Proto::Proto(IpProto::Esp)
         | Ipv4Proto::Proto(IpProto::Reserved)
         | Ipv4Proto::Other(_) => Err(ChecksumError::ProtocolNotSupported),
     }
@@ -74,6 +77,9 @@ fn validate_ipv6_checksum<B: SplitByteSlice>(packet: &Ipv6Packet<B>) -> Result<(
         Ipv6Proto::NoNextHeader
         | Ipv6Proto::Proto(IpProto::Udp)
         | Ipv6Proto::Proto(IpProto::Tcp)
+        | Ipv6Proto::Proto(IpProto::Ipv4Encap)
+        | Ipv6Proto::Proto(IpProto::Ipv6Encap)
+        | Ipv6Proto::Proto(IpProto::Esp)
         | Ipv6Proto::Proto(IpProto::Reserved)
         | Ipv6Proto::Other(_) => Err(ChecksumError::ProtocolNotSupported),
     }
@@ -121,6 +127,9 @@ fn populate_ipv4_checksum<'a, B: BufferViewMut<&'a mut [u8]>>(
         | Ipv4Proto::Igmp
         | Ipv4Proto::Proto(IpProto::Udp)
         | Ipv4Proto::Proto(IpProto::Tcp)
+        | Ipv4Proto::Proto(IpProto::Ipv4Encap)
+        | Ipv4Proto::Proto(IpProto::Ipv6Encap)
+        | Ipv4Proto::Proto(IpProto::Esp)
         | Ipv4Proto::Proto(IpProto::Reserved)
         | Ipv4Proto::Other(_) => Err(ChecksumError::ProtocolNotSupported),
     }
@@ -154,6 +163,9 @@ fn populate_ipv6_checksum<'a, B: BufferViewMut<&'a mut [u8]>>(
         Ipv6Proto::NoNextHeader
         | Ipv6Proto::Proto(IpProto::Udp)
         | Ipv6Proto::Proto(IpProto::Tcp)
+        | Ipv6Proto::Proto(IpProto::Ipv4Encap)
+        | Ipv6Proto::Proto(IpProto::Ipv6Encap)
+        | Ipv6Proto::Proto(IpProto::Esp)
         | Ipv6Proto::Proto(IpProto::Reserved)
         | Ipv6Proto::Other(_) => Err(ChecksumError::ProtocolNotSupported),
     }

@@ -154,6 +154,12 @@
             availability: "same_as_target",
         },
         {
+            config: "fuchsia.connectivity.RedactNetworkIdentifiers",
+            from: "parent",
+            to: "#network",
+            availability: "same_as_target",
+        },
+        {
             dictionary: "netstack3-config",
             from: "parent",
             to: "#network",
@@ -177,10 +183,7 @@
             target_availability: "unknown",
         },
         {
-            protocol: [
-                "fuchsia.cobalt.SystemDataUpdater",
-                "fuchsia.metrics.MetricEventLoggerFactory",
-            ],
+            protocol: [ "fuchsia.metrics.MetricEventLoggerFactory" ],
             from: "#cobalt",
             to: "self/toolbox",
             target_availability: "unknown",
@@ -235,13 +238,16 @@
             target_availability: "unknown",
         },
         {
-            // Uses connectivity monitoring to know whether to issue outbound
-            // HTTPS requests for talking to external time sources.
-            // Requires assembly config setting:
-            // `platform.timekeeper.use_connectivity = true`.
+            // `#timekeeper` uses connectivity monitoring to know whether to
+            // issue outbound HTTPS requests for talking to external time
+            // sources (requires assembly config setting:
+            // `platform.timekeeper.use_connectivity = true`).
             protocol: [ "fuchsia.net.reachability.Monitor" ],
             from: "#network",
-            to: [ "#timekeeper" ],
+            to: [
+                "#cobalt",
+                "#timekeeper",
+            ],
             availability: "optional",
         },
         {
@@ -354,6 +360,15 @@
             from: "parent",
             to: "#network",
             availability: "same_as_target",
+        },
+        {
+            protocol: "fuchsia.time.alarms.WakeAlarms",
+            from: "#timekeeper",
+            to: "#network",
+
+            // Weak offer to break the dependency cycle with #network -> #timekeeper.
+            dependency: "weak",
+            availability: "optional",
         },
         {
             config: "fuchsia.power.SuspendEnabled",

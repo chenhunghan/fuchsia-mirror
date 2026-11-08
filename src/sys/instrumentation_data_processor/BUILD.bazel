@@ -2,12 +2,123 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-package(
-    default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
 )
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
 
 exports_files(
     ["meta/instrumentation_data_processor.bootstrap_shard.cml"],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+fx_cc_binary(
+    name = "instrumentation_data_processor_bin",
+    srcs = [
+        "instrumentation_data_processor.cc",
+        "instrumentation_data_publisher.cc",
+        "instrumentation_data_publisher.h",
+    ],
+    # Packaged into :instrumentation_data_processor_component via
+    # :instrumentation_data_processor_packaged_bin.
+    tags = ["manual"],
+    deps = [
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/component/outgoing/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//zircon/system/ulib/debugdata",
+    ],
+)
+
+fx_packaged_binary(
+    name = "instrumentation_data_processor_packaged_bin",
+    binary = ":instrumentation_data_processor_bin",
+    binary_name = "instrumentation_data_processor_bin",
+)
+
+fx_component_manifest(
+    name = "instrumentation_data_processor_manifest",
+    component_name = "instrumentation_data_processor",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/instrumentation_data_processor.cml",
+)
+
+# TODO: https://fxbug.dev/42068707 - This component is under construction.
+fx_component(
+    name = "instrumentation_data_processor_component",
+    compiled_manifest = ":instrumentation_data_processor_manifest",
+    deps = [":instrumentation_data_processor_packaged_bin"],
+)
+
+fx_package(
+    name = "instrumentation_data_processor_pkg",
+    package_name = "instrumentation_data_processor",
+    components = [
+        ":instrumentation_data_processor_component",
+        "//src/storage/memfs:memfs_component",
+    ],
+    visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+# test-parity-allow-manual: the bare binary only runs inside its custom-manifest
+# component; the test runs through the :instrumentation_data_processor_tests fx_test.
+fx_cc_test_binary(
+    name = "instrumentation_data_processor_test",
+    srcs = ["instrumentation_data_processor_test.cc"],
+    # Only runs inside its packaged component (:instrumentation_data_processor_tests).
+    tags = ["manual"],
+    deps = [
+        "//src/lib/fxl/test:gtest_main",
+        "//zircon/system/ulib/debugdata",
+        "//zircon/system/ulib/fbl",
+    ],
+)
+
+fx_packaged_binary(
+    name = "instrumentation_data_processor_test_packaged_bin",
+    testonly = True,
+    binary = ":instrumentation_data_processor_test",
+    binary_name = "instrumentation_data_processor_test",
+    install_root = "test/",
+)
+
+fx_component_manifest(
+    name = "instrumentation_data_processor_test_manifest",
+    component_name = "instrumentation_data_processor_tests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default",
+    ],
+    manifest = "meta/instrumentation_data_processor_test.cml",
+)
+
+fx_test_component(
+    name = "instrumentation_data_processor_test_component",
+    compiled_manifest = ":instrumentation_data_processor_test_manifest",
+    deps = [":instrumentation_data_processor_test_packaged_bin"],
+)
+
+fx_package(
+    name = "instrumentation_data_processor_tests_package",
+    package_name = "instrumentation_data_processor_tests",
+    components = [":instrumentation_data_processor_component"],
+    test_components = [":instrumentation_data_processor_test_component"],
+)
+
+fx_test(
+    name = "instrumentation_data_processor_tests",
+    package = ":instrumentation_data_processor_tests_package",
+    visibility = ["//src/sys:__pkg__"],
 )

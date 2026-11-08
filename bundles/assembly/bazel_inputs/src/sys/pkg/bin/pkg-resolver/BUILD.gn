@@ -4,10 +4,6 @@
 
 import("//build/bazel/export_fuchsia_package_to_bazel.gni")
 
-export_fuchsia_package_to_bazel("pkg-resolver-eng") {
-  package = "//src/sys/pkg/bin/pkg-resolver:pkg-resolver-eng"
-}
-
 export_fuchsia_package_to_bazel("pkg-resolver") {
   package = "//src/sys/pkg/bin/pkg-resolver"
 }

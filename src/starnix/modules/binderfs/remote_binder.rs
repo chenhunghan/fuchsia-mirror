@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 use crate::binder::{BinderDevice, BinderDriver, RemoteBinderConnection};
+use crate::binder_thread_channel::{self, ReadResult, ThreadChannelMessage};
 use crate::trace::{
     CATEGORY_STARNIX_BINDER, NAME_REMOTE_BINDER_IOCTL, NAME_REMOTE_BINDER_IOCTL_FIDL_REPLY,
     NAME_REMOTE_BINDER_IOCTL_SEND_WORK, NAME_REMOTE_BINDER_IOCTL_WORKER_PROCESS,
@@ -33,7 +34,8 @@ use starnix_core::vfs::{
 use starnix_lifecycle::DropWaiter;
 use starnix_logging::{log_error, log_warn};
 use starnix_sync::{
-    LockDepGuard, LockDepMutex, RemoteBinderHandleLevel, RemoteBinderResponderLock,
+    LockDepGuard, LockDepMutex, ObjectWaitError, ObjectWaiter, RemoteBinderHandleLevel,
+    RemoteBinderResponderLock,
 };
 use starnix_syscalls::{SUCCESS, SyscallArg, SyscallResult};
 use starnix_uapi::device_id::DeviceId;
@@ -44,6 +46,7 @@ use starnix_uapi::vfs::FdEvents;
 use starnix_uapi::{errno, errno_from_code, error, uapi};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use zx::{self, Peered};
 
@@ -55,16 +58,37 @@ const WAKE_LOCK_ACQUIRED_SIGNAL: zx::Signals = zx::Signals::USER_0;
 /// Linux TIDs are strictly positive (`>= 1`), so `0` uniquely identifies the leader thread.
 const MAIN_THREAD_WAIT_KEY: u64 = 0;
 
-/// Notification signal that resolves when either the `open_binder` connection closes or the
-/// enclosing `RemoteBinderHandle` exits.
-type ExitSignal = futures::future::Select<
-    futures::future::Shared<oneshot::Receiver<()>>,
-    futures::future::Shared<oneshot::Receiver<()>>,
->;
+/// Tells the worker tasks serving `BinderThread` channels that they must stop, when an
+/// `open_binder` connection closes or the `RemoteBinderHandle` exits.
+#[derive(Debug)]
+struct ExitEvent {
+    /// Whether the event was signaled. Checked before reading each request, without a syscall.
+    signaled: AtomicBool,
+    /// Signaled with `ExitEvent::SIGNAL` once `signaled` is set, to wake up the waiting workers.
+    event: zx::Event,
+}
 
-/// The requests received on a `BinderThread` channel, until its `ExitSignal` resolves.
-type ThreadChannelStream =
-    futures::stream::TakeUntil<fbinder::BinderThreadRequestStream, ExitSignal>;
+impl ExitEvent {
+    const SIGNAL: zx::Signals = zx::Signals::EVENT_SIGNALED;
+
+    fn new() -> Arc<Self> {
+        Arc::new(Self { signaled: AtomicBool::new(false), event: zx::Event::create() })
+    }
+
+    fn signal(&self) {
+        self.signaled.store(true, Ordering::Release);
+        // The event is owned by this object, so signaling it cannot fail.
+        let _ = self.event.signal(zx::Signals::NONE, Self::SIGNAL);
+    }
+
+    fn is_signaled(&self) -> bool {
+        self.signaled.load(Ordering::Acquire)
+    }
+
+    fn wait_item(&self) -> zx::WaitItem<'_> {
+        self.event.wait_item(Self::SIGNAL)
+    }
+}
 
 trait RemoteControllerConnector: Send + Sync + 'static {
     fn connect_to_remote_controller(
@@ -230,8 +254,9 @@ enum TaskRequest {
     ThreadChannel {
         #[derivative(Debug = "ignore")]
         remote_binder_connection: Arc<RemoteBinderConnection>,
-        server_end: ServerEnd<fbinder::BinderThreadMarker>,
-        exit_signal: ExitSignal,
+        channel: zx::Channel,
+        /// Signaled when the `open_binder` connection of `remote_binder_connection` closes.
+        connection_exit: Arc<ExitEvent>,
     },
     /// Open the binder device driver situated at `path` in the Task filesystem namespace.
     Open {
@@ -255,9 +280,10 @@ struct BoundTaskRequest {
 
 /// Why a worker task stops serving a `BinderThread` channel.
 enum ThreadChannelStop {
-    /// The channel must be closed: the client closed it, a response could not be sent, or the
-    /// `ExitSignal` resolved. `interruption` is the error (`EINTR` or `EAGAIN`) that the task must
-    /// still return from the syscall, if it was interrupted at the same time.
+    /// The channel must be closed: the client closed it, a message could not be read, decoded or
+    /// sent, or the connection or the handle exited. `interruption` is the error (`EINTR` or
+    /// `EAGAIN`) that the task must still return from the syscall, if it was interrupted at the
+    /// same time.
     Closed { interruption: Option<Errno> },
     /// The task was interrupted while the channel is still open.
     Interrupted(Errno),
@@ -367,6 +393,9 @@ struct RemoteBinderHandleState {
 
     /// Channels that must receive an element at the time the handle exits.
     exit_notifiers: Vec<oneshot::Sender<()>>,
+
+    /// Signaled when the handle exits, for the worker tasks serving `BinderThread` channels.
+    exit_event: Arc<ExitEvent>,
 }
 
 impl<F: RemoteControllerConnector> RemoteBinderHandle<F> {
@@ -390,6 +419,7 @@ impl RemoteBinderHandleState {
         for notifier in std::mem::take(&mut self.exit_notifiers) {
             let _ = notifier.send(());
         }
+        self.exit_event.signal();
         NotificationType::All
     }
 
@@ -472,6 +502,7 @@ impl<F: RemoteControllerConnector> RemoteBinderHandle<F> {
                 taskless_requests: Default::default(),
                 exit: Default::default(),
                 exit_notifiers: Default::default(),
+                exit_event: ExitEvent::new(),
             }
             .into(),
             waiters: Default::default(),
@@ -565,8 +596,14 @@ impl<F: RemoteControllerConnector> RemoteBinderHandle<F> {
 
     /// Serves a dedicated per-thread `BinderThread` channel on `current_task`.
     ///
-    /// Returns `Ok(())` when the channel closes or `exit_signal` resolves, after unregistering
-    /// `current_task` from `BinderProcess` and returning the worker task to the unassigned pool.
+    /// The task reads the requests on `channel` directly, and waits for them with an
+    /// `ObjectWaiter` rather than with an async executor, so that a request wakes it up without a
+    /// port. `binder_thread_channel` decodes the requests and encodes the replies, without the FIDL
+    /// bindings, which need an executor.
+    ///
+    /// Returns `Ok(())` when the channel closes, or the connection or the handle exits, after
+    /// unregistering `current_task` from `BinderProcess` and returning the worker task to the
+    /// unassigned pool.
     ///
     /// Returns `Err(errno)` (`EINTR` or `EAGAIN`) if waiting or an ioctl was interrupted, so that
     /// the task returns from the syscall. If the channel is still open, it is saved back into
@@ -577,37 +614,31 @@ impl<F: RemoteControllerConnector> RemoteBinderHandle<F> {
         &self,
         current_task: &CurrentTask,
         remote_binder_connection: Arc<RemoteBinderConnection>,
-        server_end: ServerEnd<fbinder::BinderThreadMarker>,
-        exit_signal: ExitSignal,
+        channel: zx::Channel,
+        connection_exit: Arc<ExitEvent>,
     ) -> Result<(), Errno> {
-        let mut executor = fasync::LocalExecutor::default();
-        // `take_until` checks `exit_signal` before reading the next request, so that a worker woken
-        // up because the connection is closing stops serving the channel.
-        let mut stream = server_end.into_stream().take_until(exit_signal);
+        let handle_exit = self.lock().exit_event.clone();
+        let object_waiter = ObjectWaiter::new();
         let stop = loop {
-            let (abort_handle, abort_registration) = futures::stream::AbortHandle::new_pair();
-            let abort_handle = Arc::new(abort_handle);
-            // Wait for the next request in an interruptible state, so that signals, exit and
-            // freezing reach this task.
-            let next_request = current_task.run_in_state(
-                RunState::Waiter(WaiterRef::from_abort_handle(&abort_handle)),
-                || {
-                    executor
-                        .run_singlethreaded(futures::stream::Abortable::new(
-                            stream.next(),
-                            abort_registration,
-                        ))
-                        .map_err(|futures::stream::Aborted| errno!(EINTR))
-                },
-            );
-            let request = match next_request {
-                Ok(Some(Ok(request))) => request,
-                Ok(None | Some(Err(_))) => break ThreadChannelStop::Closed { interruption: None },
+            let message = match Self::read_thread_channel(
+                current_task,
+                &channel,
+                &connection_exit,
+                &handle_exit,
+                &object_waiter,
+            ) {
+                Ok(Some(message)) => message,
+                Ok(None) => break ThreadChannelStop::Closed { interruption: None },
                 Err(errno) => break ThreadChannelStop::Interrupted(errno),
             };
-            if let Some(stop) = Self::handle_thread_channel_request(
+            let ThreadChannelMessage::Ioctl { tx_id, request } = message else {
+                continue;
+            };
+            if let Some(stop) = Self::handle_thread_channel_ioctl(
                 current_task,
                 &remote_binder_connection,
+                &channel,
+                tx_id,
                 request,
             ) {
                 break stop;
@@ -616,18 +647,22 @@ impl<F: RemoteControllerConnector> RemoteBinderHandle<F> {
 
         let interruption = match stop {
             ThreadChannelStop::Interrupted(errno) => {
-                if self.park_thread_channel(current_task, &remote_binder_connection, stream) {
+                if self.park_thread_channel(
+                    current_task,
+                    &remote_binder_connection,
+                    channel,
+                    &connection_exit,
+                ) {
                     return Err(errno);
                 }
                 Some(errno)
             }
             ThreadChannelStop::Closed { interruption } => {
                 // Close the channel before unregistering the thread.
-                std::mem::drop(stream);
+                std::mem::drop(channel);
                 interruption
             }
         };
-        std::mem::drop(executor);
         remote_binder_connection.unregister_current_thread(current_task);
         std::mem::drop(remote_binder_connection);
         // Unregistering the thread can release transactions and the files they hold. Release them
@@ -647,68 +682,114 @@ impl<F: RemoteControllerConnector> RemoteBinderHandle<F> {
         Ok(())
     }
 
-    /// Handles a `request` received on a `BinderThread` channel. Returns why the task must stop
-    /// serving the channel, if it must.
-    fn handle_thread_channel_request(
+    /// Reads the next message on `channel`, and waits for it if there is none yet.
+    ///
+    /// Returns `Ok(None)` if the channel must be closed: the client closed it, a message could not
+    /// be read or decoded, or the connection or the handle exited. Returns `Err(errno)` if the task
+    /// was interrupted, so that it returns from the syscall to handle the interruption.
+    fn read_thread_channel(
+        current_task: &CurrentTask,
+        channel: &zx::Channel,
+        connection_exit: &ExitEvent,
+        handle_exit: &ExitEvent,
+        object_waiter: &Arc<ObjectWaiter>,
+    ) -> Result<Option<ThreadChannelMessage>, Errno> {
+        loop {
+            // Check the exit events before reading the next request, so that a worker woken up
+            // because the connection is closing stops serving the channel.
+            if connection_exit.is_signaled() || handle_exit.is_signaled() {
+                return Ok(None);
+            }
+            // A request that is already queued is read without entering a run state, so check for
+            // the interruptions that `run_in_state` reports first. Otherwise, a client that keeps
+            // the channel busy would delay signals, stops and exit.
+            if current_task.is_exitted() || current_task.is_interrupt_pending() {
+                return error!(EINTR);
+            }
+            match binder_thread_channel::read(channel) {
+                ReadResult::Message(message) => return Ok(Some(message)),
+                ReadResult::Closed => return Ok(None),
+                ReadResult::ShouldWait => (),
+            }
+
+            // Wait for the next message in an interruptible state, so that signals, exit and
+            // freezing reach this task. Begin the wait before entering the run state, so that the
+            // wait does not miss the interruptions that arrive in between.
+            let guard = object_waiter.begin_wait();
+            let waited = current_task.run_in_state(
+                RunState::Waiter(WaiterRef::from_object_waiter(&guard)),
+                || {
+                    Ok(guard.wait_many(
+                        [
+                            channel.wait_item(
+                                zx::Signals::CHANNEL_READABLE | zx::Signals::CHANNEL_PEER_CLOSED,
+                            ),
+                            connection_exit.wait_item(),
+                            handle_exit.wait_item(),
+                        ],
+                        zx::MonotonicInstant::INFINITE,
+                    ))
+                },
+            )?;
+            match waited {
+                Ok(_) => (),
+                Err(ObjectWaitError::Interrupted) => return error!(EINTR),
+                Err(e) => {
+                    // The handles are owned by this task, and the wait has no deadline, so waiting
+                    // is not expected to fail.
+                    log_error!(
+                        "Failed to wait for the BinderThread channel of task {}: {e:?}",
+                        current_task.tid
+                    );
+                    return Ok(None);
+                }
+            }
+        }
+    }
+
+    /// Handles an ioctl `request` received on `channel`, and replies to it with the transaction ID
+    /// `tx_id`. Returns why the task must stop serving the channel, if it must.
+    fn handle_thread_channel_ioctl(
         current_task: &CurrentTask,
         remote_binder_connection: &RemoteBinderConnection,
-        request: fbinder::BinderThreadRequest,
+        channel: &zx::Channel,
+        tx_id: u32,
+        request: fbinder::BinderThreadIoctlRequest,
     ) -> Option<ThreadChannelStop> {
-        let (interruption, send_result) = match request {
-            fbinder::BinderThreadRequest::Ioctl {
+        let fbinder::BinderThreadIoctlRequest { request, arg, vmo, ioctl_reads, files } = request;
+        let result = {
+            fuchsia_trace::duration!(
+                CATEGORY_STARNIX_BINDER,
+                NAME_REMOTE_BINDER_IOCTL_WORKER_PROCESS,
+                "request" => request
+            );
+            remote_binder_connection.ioctl(
+                current_task,
                 request,
-                arg,
-                vmo,
+                arg.into(),
                 ioctl_reads,
                 files,
-                responder,
-            } => {
-                let result = {
-                    fuchsia_trace::duration!(
-                        CATEGORY_STARNIX_BINDER,
-                        NAME_REMOTE_BINDER_IOCTL_WORKER_PROCESS,
-                        "request" => request
-                    );
-                    remote_binder_connection.ioctl(
-                        current_task,
-                        request,
-                        arg.into(),
-                        ioctl_reads,
-                        files,
-                        vmo,
-                    )
-                };
-                let interruption = must_interrupt(&result);
-                // This syscall serves the channel for as long as it is open, so release the files
-                // dropped by the ioctl now rather than at syscall exit, before the client sees the
-                // result (as Linux does when returning to userspace).
-                current_task.trigger_delayed_releaser();
-                let send_result = {
-                    fuchsia_trace::duration!(
-                        CATEGORY_STARNIX_BINDER,
-                        NAME_REMOTE_BINDER_IOCTL_FIDL_REPLY
-                    );
-                    match result {
-                        Ok(writes) => responder.send(Ok(writes.as_slice())),
-                        Err(e) => responder
-                            .send(Err(fposix::Errno::from_primitive(e.code.error_code() as i32)
-                                .unwrap_or(fposix::Errno::Einval))),
-                    }
-                };
-                (interruption, send_result)
-            }
-            fbinder::BinderThreadRequest::_UnknownMethod { ordinal, .. } => {
-                // As for unknown `Binder` methods, keep serving the channel. The bindings already
-                // replied to an unknown two-way method with an `UnknownMethod` framework error.
-                log_warn!("Unknown BinderThread ordinal: {}", ordinal);
-                return None;
-            }
+                vmo,
+            )
         };
-        if send_result.is_err() {
-            // The response could not be written to the channel. Sending to a channel whose client
-            // is gone does not fail, so `park_thread_channel` checks for that case. If the task was
-            // also interrupted, it must still return from the syscall to handle the signal or the
-            // freeze.
+        let interruption = must_interrupt(&result);
+        // This syscall serves the channel for as long as it is open, so release the files dropped by
+        // the ioctl now rather than at syscall exit, before the client sees the result (as Linux
+        // does when returning to userspace).
+        current_task.trigger_delayed_releaser();
+        let sent = {
+            fuchsia_trace::duration!(CATEGORY_STARNIX_BINDER, NAME_REMOTE_BINDER_IOCTL_FIDL_REPLY);
+            let result = match &result {
+                Ok(writes) => Ok(writes.as_slice()),
+                Err(e) => Err(fposix::Errno::from_primitive(e.code.error_code() as i32)
+                    .unwrap_or(fposix::Errno::Einval)),
+            };
+            binder_thread_channel::send_ioctl_reply(channel, tx_id, result)
+        };
+        if sent.is_err() {
+            // The reply could not be written to the channel, e.g. because the client closed it. If
+            // the task was also interrupted, it must still return from the syscall to handle the
+            // signal or the freeze.
             return Some(ThreadChannelStop::Closed { interruption });
         }
         interruption.map(ThreadChannelStop::Interrupted)
@@ -722,23 +803,9 @@ impl<F: RemoteControllerConnector> RemoteBinderHandle<F> {
         &self,
         current_task: &CurrentTask,
         remote_binder_connection: &Arc<RemoteBinderConnection>,
-        mut stream: ThreadChannelStream,
+        channel: zx::Channel,
+        connection_exit: &Arc<ExitEvent>,
     ) -> bool {
-        // The exit signal is only returned if the stream did not see it resolve. It can still have
-        // resolved while the task handled an ioctl, which is checked below.
-        let Some(mut exit_signal) = stream.take_future() else {
-            return false;
-        };
-        let (inner, _) = stream.into_inner().into_inner();
-        let Some(inner) = Arc::into_inner(inner) else {
-            // Not expected: something else still references the channel, so it cannot be parked.
-            log_error!(
-                "Cannot park the BinderThread channel of task {}, dropping it",
-                current_task.tid
-            );
-            return false;
-        };
-        let channel = inner.into_channel().into_zx_channel();
         // Do not park a channel whose client is gone, e.g. if the client thread exited while the
         // task was handling one of its ioctls. Otherwise, the channel would only be closed when the
         // task resumes serving it.
@@ -749,13 +816,12 @@ impl<F: RemoteControllerConnector> RemoteBinderHandle<F> {
         {
             return false;
         }
-        let server_end = ServerEnd::<fbinder::BinderThreadMarker>::new(channel);
         let mut state = self.lock();
-        // Check the exit signal while holding the lock. `open_binder` signals `connection_exit`
-        // before `remove_thread_channels` removes the parked channels of the connection while
-        // holding the lock. So either the signal already resolved, or `remove_thread_channels`
-        // removes the channel parked here.
-        if state.exit.is_some() || (&mut exit_signal).now_or_never().is_some() {
+        // Check the exit of the connection while holding the lock. `open_binder` signals it before
+        // `remove_thread_channels` removes the parked channels of the connection while holding the
+        // lock. So either it is already signaled, or `remove_thread_channels` removes the channel
+        // parked here.
+        if state.exit.is_some() || connection_exit.is_signaled() {
             return false;
         }
         state.pending_requests.insert(
@@ -764,8 +830,8 @@ impl<F: RemoteControllerConnector> RemoteBinderHandle<F> {
                 koid: None,
                 request: TaskRequest::ThreadChannel {
                     remote_binder_connection: remote_binder_connection.clone(),
-                    server_end,
-                    exit_signal,
+                    channel,
+                    connection_exit: connection_exit.clone(),
                 },
             }),
         );
@@ -829,7 +895,7 @@ impl<F: RemoteControllerConnector> RemoteBinderHandle<F> {
     async fn serve_binder_request(
         self: &Arc<Self>,
         remote_binder_connection: Arc<RemoteBinderConnection>,
-        exit_signal: ExitSignal,
+        connection_exit: &Arc<ExitEvent>,
         request: fbinder::BinderRequest,
     ) -> Result<(), Error> {
         match request {
@@ -940,8 +1006,8 @@ impl<F: RemoteControllerConnector> RemoteBinderHandle<F> {
                         koid: None,
                         request: TaskRequest::ThreadChannel {
                             remote_binder_connection,
-                            server_end,
-                            exit_signal,
+                            channel: server_end.into_channel(),
+                            connection_exit: connection_exit.clone(),
                         },
                     })
                 };
@@ -1051,14 +1117,15 @@ impl<F: RemoteControllerConnector> RemoteBinderHandle<F> {
         });
         let remote_binder_connection: Arc<RemoteBinderConnection> = receiver.await??;
         let remote_binder_connection_for_close = remote_binder_connection.clone();
-        let (connection_exit_sender, connection_exit_receiver) = oneshot::channel::<()>();
+        let connection_exit = ExitEvent::new();
+        let connection_exit_for_close = connection_exit.clone();
 
         scopeguard::defer! {
             // When leaving the current scope, close the connection, even if some operation are in
             // progress. This should kick the tasks back with an error. Signal `connection_exit`
             // first, so that the workers serving `BinderThread` channels that are kicked back stop
             // serving their channel, and close the channels that no worker is serving.
-            let _ = connection_exit_sender.send(());
+            connection_exit_for_close.signal();
             self.remove_thread_channels(&remote_binder_connection_for_close);
             remote_binder_connection_for_close.close(&self.kernel);
         }
@@ -1072,23 +1139,17 @@ impl<F: RemoteControllerConnector> RemoteBinderHandle<F> {
             }
             state.exit_notifiers.push(sender);
         }
-        let handle_exit = receiver.shared();
-        let connection_exit = connection_exit_receiver.shared();
 
-        // The stream for the Binder protocol, that will cancel once handle_exit returns a value.
+        // The stream for the Binder protocol, that will cancel once the handle exits.
         let stream = fbinder::BinderRequestStream::from_channel(fasync::Channel::from_channel(
             binder.into_channel(),
         ))
-        .take_until(handle_exit.clone());
+        .take_until(receiver);
 
         stream
             .map(|result| result.context("failed request"))
             .try_for_each_concurrent(usize::MAX, |event| {
-                self.serve_binder_request(
-                    remote_binder_connection.clone(),
-                    futures::future::select(handle_exit.clone(), connection_exit.clone()),
-                    event,
-                )
+                self.serve_binder_request(remote_binder_connection.clone(), &connection_exit, event)
             })
             .await
     }
@@ -1422,14 +1483,14 @@ impl<F: RemoteControllerConnector> RemoteBinderHandle<F> {
                 }
                 TaskRequest::ThreadChannel {
                     remote_binder_connection,
-                    server_end,
-                    exit_signal,
+                    channel,
+                    connection_exit,
                 } => self
                     .serve_thread_channel(
                         current_task,
                         remote_binder_connection,
-                        server_end,
-                        exit_signal,
+                        channel,
+                        connection_exit,
                     )
                     .err(),
                 TaskRequest::Return { spawn_thread } => {
@@ -1470,6 +1531,7 @@ mod tests {
     use super::*;
     use crate::BinderFs;
     use crate::tests::tests::run_process_accessor;
+    use fidl::encoding::DynamicFlags;
     use fidl::endpoints::{Proxy, create_endpoints, create_proxy};
     use rand::distr::{Alphanumeric, SampleString};
     use starnix_core::execution::{TaskInfo, create_task};
@@ -2288,6 +2350,155 @@ mod tests {
                 wait_for_blocked_worker(&thread_group, Some(&read_run_state)).await;
             assert_eq!(idle_worker.get_tid(), worker.get_tid());
             closed_binder()
+        })
+        .await;
+    }
+
+    /// Registers a new `BinderThread` channel with `binder`, and returns its client end.
+    async fn register_raw_thread_channel(binder: &fbinder::BinderProxy) -> zx::Channel {
+        let (client, server) = zx::Channel::create();
+        binder
+            .register_thread_channel(ServerEnd::new(server))
+            .await
+            .expect("register_thread_channel")
+            .expect("register_thread_channel");
+        client
+    }
+
+    /// Returns a FIDL message that only has a transaction header.
+    fn header_only_message(tx_id: u32, dynamic_flags: DynamicFlags, ordinal: u64) -> Vec<u8> {
+        // The transaction ID, the at-rest flags of the wire format V2, the dynamic flags, the magic
+        // number, and the ordinal.
+        [&tx_id.to_le_bytes()[..], &[2, 0, dynamic_flags.bits(), 1], &ordinal.to_le_bytes()]
+            .concat()
+    }
+
+    #[::fuchsia::test]
+    async fn thread_channel_unknown_methods() {
+        run_remote_binder_test(|binder| async move {
+            let mapped_vmo = MappedTestVmo::new();
+            map_vmo(&binder, &mapped_vmo).await;
+            let channel = register_raw_thread_channel(&binder).await;
+
+            // An unknown flexible one-way method is ignored, and its handles are closed.
+            let (event, peer) = zx::EventPair::create();
+            let message = header_only_message(0, DynamicFlags::FLEXIBLE, 0x1234);
+            channel.write(&message, &mut [peer.into_handle()]).expect("write");
+            fasync::OnSignals::new(&event, zx::Signals::EVENTPAIR_PEER_CLOSED)
+                .await
+                .expect("peer closed");
+
+            // An unknown flexible two-way method, such as `Binder.MapVmo`, gets an `UnknownMethod`
+            // error, and its handles are closed.
+            let other_binder = fbinder::BinderProxy::new(fasync::Channel::from_channel(channel));
+            let vmo = zx::Vmo::create(*PAGE_SIZE).expect("Vmo::create");
+            let vmo_client = vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("duplicate");
+            assert_matches::assert_matches!(
+                other_binder.map_vmo(vmo, 0).await,
+                Err(fidl::Error::UnsupportedMethod { .. })
+            );
+            assert_eq!(vmo_client.count_info().expect("count_info").handle_count, 1);
+
+            // The channel is still served.
+            let thread =
+                fbinder::BinderThreadProxy::new(other_binder.into_channel().expect("into_channel"));
+            assert_eq!(
+                binder_version(&thread).await,
+                Ok(uapi::BINDER_CURRENT_PROTOCOL_VERSION as i32)
+            );
+            binder
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn thread_channel_closed_on_invalid_message() {
+        run_remote_binder_test(|binder| async move {
+            let mapped_vmo = MappedTestVmo::new();
+            map_vmo(&binder, &mapped_vmo).await;
+
+            // A message that is not a FIDL message, an unknown strict method, and an `Ioctl`
+            // without a transaction ID or without a body each close their channel.
+            for message in [
+                vec![0u8; 4],
+                header_only_message(1, DynamicFlags::empty(), 0x1234),
+                header_only_message(
+                    0,
+                    DynamicFlags::FLEXIBLE,
+                    fbinder::binder_thread_ordinals::IOCTL,
+                ),
+                header_only_message(
+                    1,
+                    DynamicFlags::FLEXIBLE,
+                    fbinder::binder_thread_ordinals::IOCTL,
+                ),
+            ] {
+                let channel = register_raw_thread_channel(&binder).await;
+                channel.write(&message, &mut []).expect("write");
+                fasync::OnSignals::new(&channel, zx::Signals::CHANNEL_PEER_CLOSED)
+                    .await
+                    .expect("peer closed");
+            }
+
+            // A new channel is still served.
+            let thread = register_thread_channel(&binder).await;
+            assert_eq!(
+                binder_version(&thread).await,
+                Ok(uapi::BINDER_CURRENT_PROTOCOL_VERSION as i32)
+            );
+            binder
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn read_thread_channel_stops_for_exit_and_interruptions() {
+        spawn_kernel_and_run(async move |current_task| {
+            let (client, server) = zx::Channel::create();
+            let connection_exit = ExitEvent::new();
+            let handle_exit = ExitEvent::new();
+            let read = |handle_exit: &ExitEvent| {
+                RemoteBinderHandle::<TestRemoteControllerConnector>::read_thread_channel(
+                    current_task,
+                    &server,
+                    &connection_exit,
+                    handle_exit,
+                    &ObjectWaiter::new(),
+                )
+                .map(|message| message.is_some())
+            };
+            // A message of an unknown flexible one-way method, which is ignored.
+            let message = header_only_message(0, DynamicFlags::FLEXIBLE, 0x1234);
+            client.write(&message, &mut []).expect("write");
+            assert_eq!(read(&handle_exit), Ok(true));
+
+            // The exit of the handle wakes up the task waiting for the next message.
+            let task = current_task.task.clone();
+            let signaler = std::thread::spawn({
+                let handle_exit = handle_exit.clone();
+                move || {
+                    while !task.read().run_state().is_blocked() {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                    handle_exit.signal();
+                }
+            });
+            assert_eq!(read(&handle_exit), Ok(false));
+            signaler.join().expect("join");
+
+            // A pending interruption is reported before the next message is read, even if it is
+            // queued already, so that a client that keeps the channel busy cannot delay it.
+            client.write(&message, &mut []).expect("write");
+            current_task.write().set_stopped(
+                starnix_core::ptrace::StopState::GroupStopping,
+                None,
+                Some(current_task),
+                None,
+            );
+            assert_eq!(read(&ExitEvent::new()), error!(EINTR));
+            let pending =
+                server.wait_one(zx::Signals::CHANNEL_READABLE, zx::MonotonicInstant::INFINITE_PAST);
+            assert!(pending.to_result().is_ok());
         })
         .await;
     }

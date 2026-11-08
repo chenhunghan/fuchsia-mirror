@@ -231,6 +231,27 @@ impl finlineencryption::DriverDeviceServerHandler for MockInlineEncryptionServer
     ) {
         responder.respond(&[1u8, 2, 3, 4][..]).await.ok();
     }
+
+    async fn evict_key_slot(
+        &mut self,
+        _request: fidl_next::Request<finlineencryption::driver_device::EvictKeySlot, DriverChannel>,
+        responder: fidl_next::Responder<
+            finlineencryption::driver_device::EvictKeySlot,
+            DriverChannel,
+        >,
+    ) {
+        responder.respond_err(zx::Status::NOT_SUPPORTED).await.ok();
+    }
+
+    async fn restore_keys(
+        &mut self,
+        responder: fidl_next::Responder<
+            finlineencryption::driver_device::RestoreKeys,
+            DriverChannel,
+        >,
+    ) {
+        responder.respond_err(zx::Status::NOT_SUPPORTED).await.ok();
+    }
 }
 
 pub struct FakeCqhciHost {

@@ -1,0 +1,98 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/idk:idk_cc_source_library.bzl", "idk_cc_source_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# This library is available on Fuchsia API level 15 and above.
+idk_cc_source_library(
+    name = "cpp",
+    srcs = [
+        "completer.cc",
+        "driver_base2.cc",
+        "health_alert_latch.cc",
+        "node_add_args.cc",
+    ],
+    hdrs = [
+        "driver_base.h",
+        "driver_base2.h",
+        "driver_export.h",
+        "driver_export2.h",
+        "health_alert_latch.h",
+        "node_add_args.h",
+        "node_offers.h",
+        "prepare_stop_completer.h",
+        "resume_completer.h",
+        "start_completer.h",
+        "stop_completer.h",
+        "suspend_completer.h",
+    ],
+    api_area = "Driver SDK",
+    category = "partner",
+    hdrs_for_internal_use = [
+        "internal/concepts.h",
+        "internal/driver_server2.h",
+        "internal/start_args.h",
+        "internal/symbols.h",
+    ],
+    idk_name = "driver_component_cpp",
+    include_base = "//sdk",
+    public_configs = ["//sdk/config"],
+    stable = True,
+    visibility = ["//:__subpackages__"],
+    deps = [
+        ":node",
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_cpp",
+        "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_cpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/driver/incoming/cpp",
+        "//sdk/lib/driver/logging/cpp",
+        "//sdk/lib/driver/node/cpp",
+        "//sdk/lib/driver/outgoing/cpp",
+        "//sdk/lib/driver/runtime:driver_runtime_cpp",
+        "//sdk/lib/driver/symbols",
+        "//sdk/lib/fidl",
+        "//sdk/lib/fidl_driver",
+        "//sdk/lib/inspect/component/cpp",
+        "//sdk/lib/stdcompat",
+    ],
+)
+
+idk_cc_source_library(
+    name = "node",
+    hdrs = [
+        "composite_node_spec.h",
+        "node_properties.h",
+        "node_wire_properties.h",
+    ],
+    api_area = "Driver SDK",
+    category = "partner",
+    idk_name = "driver_component_node",
+    include_base = "//sdk",
+    public_configs = ["//sdk/config"],
+    stable = True,
+    visibility = [
+        "//sdk/lib/driver/devicetree:__subpackages__",
+        "//vendor/google:__subpackages__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_cpp",
+        "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_cpp",
+    ],
+)
+
+fx_cc_library(
+    name = "test_base",
+    srcs = ["tests/test_base.cc"],
+    hdrs = ["tests/test_base.h"],
+    visibility = ["//sdk/lib/driver/devfs/cpp:__pkg__"],
+    deps = [
+        ":cpp",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_hlcpp",
+        "//sdk/lib/fit-promise",
+    ],
+    alwayslink = True,
+)

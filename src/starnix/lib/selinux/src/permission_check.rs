@@ -2,26 +2,30 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::kernel::{AccessVectorCache, KernelAccessDecision, Query};
+use crate::kernel::{
+    AccessVectorCache, KernelAccessDecision, KernelXpermsAccessDecision, PerThreadCache, Query,
+};
 use crate::policy::{AccessVector, SELINUX_AVD_FLAGS_PERMISSIVE, XpermsKind};
 use crate::security_server::{PolicySeqNo, SecurityServer};
-use crate::{ClassPermission, FdPermission, KernelClass, KernelPermission, SecurityId};
+use crate::{
+    ClassPermission, FdPermission, KernelClass, KernelPermission, KernelPermissionSet, SecurityId,
+};
 
 use std::num::NonZeroU32;
 
-pub use crate::kernel::PerThreadCache;
-
 /// Result of a permission lookup between two Security Contexts.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PermissionCheckResult {
-    /// True if the specified permissions are granted by policy.
+    /// True if all of the specified permissions are granted by policy.
     pub granted: bool,
 
-    /// True if details of the check should be audit logged. Audit logs are by default only output
-    /// when the policy defines that the permissions should be denied (whether or not the check is
-    /// "permissive"), but may be suppressed for some denials ("dontaudit"), or for some allowed
-    /// permissions ("auditallow").
-    pub audit: bool,
+    /// Subset of the requested permissions to be audit logged, as kernel permission-Id bits of the
+    /// permissions' class (see [`KernelPermissionSet`]), or `AccessVector::NONE` if the check
+    /// should not be audited.
+    ///
+    /// If any requested permissions are denied, this holds the denied permissions except those
+    /// marked `dontaudit`. Otherwise, this holds the requested permissions marked `auditallow`.
+    pub audit: AccessVector,
 
     /// True if the access should be granted because either the security server is running in
     /// permissive mode, or the subject domain is marked as permissive.
@@ -35,12 +39,20 @@ pub struct PermissionCheckResult {
 
 impl PermissionCheckResult {
     /// Returns true if the request was granted, or was made in permissive mode.
+    #[inline]
     pub fn permit(&self) -> bool {
         self.granted || self.permissive
     }
+
+    /// Returns the permissions that should be audit logged, as a set of `class` permissions, or
+    /// `None` if nothing should be audit logged.
+    #[inline]
+    pub fn audit_permissions(&self, class: KernelClass) -> Option<KernelPermissionSet> {
+        (self.audit != AccessVector::NONE).then(|| KernelPermissionSet::new(class, self.audit))
+    }
 }
 
-/// Implements the [`PermissionCheck::has_permission`] API, based on supplied [`SecurityServer`] and
+/// Implements the [`PermissionCheck::has_permissions`] API, based on supplied [`SecurityServer`] and
 /// [`AccessVectorCache`] implementations.
 // TODO: https://fxbug.dev/362699811 - Revise the traits to avoid direct dependencies on `SecurityServer`.
 pub struct PermissionCheck<'a> {
@@ -61,20 +73,38 @@ impl<'a> PermissionCheck<'a> {
     /// Returns whether the `source_sid` has the specified `permission` on `target_sid`.
     /// The result indicates both whether `permission` is `permit`ted, and whether the caller
     /// should `audit` log the query.
-    pub fn has_permission<P: ClassPermission + Into<KernelPermission> + Clone + 'static>(
+    #[inline]
+    pub fn has_permission<P: ClassPermission + Into<KernelPermission> + 'static>(
         &self,
         source_sid: SecurityId,
         target_sid: SecurityId,
         permission: P,
     ) -> PermissionCheckResult {
+        self.has_permissions(source_sid, target_sid, permission)
+    }
+
+    /// Returns whether the `source_sid` has all of the specified `permissions` on `target_sid`.
+    /// The result indicates both whether the `permissions` are `permit`ted, and which of them the
+    /// caller should `audit` log.
+    ///
+    /// `permissions` may be a single permission, a typed [`PermissionSet`](crate::PermissionSet),
+    /// or a [`KernelPermissionSet`] of permissions of the same class, which are checked against a
+    /// single access decision.
+    #[inline]
+    pub fn has_permissions(
+        &self,
+        source_sid: SecurityId,
+        target_sid: SecurityId,
+        permissions: impl Into<KernelPermissionSet>,
+    ) -> PermissionCheckResult {
         let policy_seqno = self.security_server.policy_seqno();
-        let result = has_permission(
+        let result = has_permissions(
             self.local_cache,
-            self.access_vector_cache,
+            self,
             policy_seqno,
             source_sid,
             target_sid,
-            permission.into(),
+            permissions.into(),
         );
         self.apply_enforcement(result)
     }
@@ -92,9 +122,7 @@ impl<'a> PermissionCheck<'a> {
     ///
     /// A denied request is audited if the base permission is `dontaudit` or the extended
     /// permission is `dontauditxperm`.
-    pub fn has_extended_permission<
-        P: ClassPermission + Into<KernelPermission> + Clone + 'static,
-    >(
+    pub fn has_extended_permission<P: ClassPermission + Into<KernelPermission> + 'static>(
         &self,
         xperms_kind: XpermsKind,
         source_sid: SecurityId,
@@ -113,7 +141,7 @@ impl<'a> PermissionCheck<'a> {
             xperm,
             move || {
                 has_extended_permission(
-                    self.access_vector_cache,
+                    self,
                     xperms_kind,
                     source_sid,
                     target_sid,
@@ -125,16 +153,17 @@ impl<'a> PermissionCheck<'a> {
         self.apply_enforcement(result)
     }
 
+    #[inline]
     fn apply_enforcement(&self, mut result: PermissionCheckResult) -> PermissionCheckResult {
-        if !result.granted {
-            if !self.security_server.is_enforcing() {
-                result.permissive = true;
-                result.todo_bug = None;
-            } else if result.todo_bug.is_some() {
-                result.granted = true;
-            }
-        } else {
+        if result.granted {
             result.todo_bug = None;
+            return result;
+        }
+        if !self.security_server.is_enforcing() {
+            result.permissive = true;
+            result.todo_bug = None;
+        } else if result.todo_bug.is_some() {
+            result.granted = true;
         }
         result
     }
@@ -148,7 +177,10 @@ impl<'a> PermissionCheck<'a> {
     /// Returns the SID with which to label a new `target_class` instance created by `source_sid`
     /// in a container labeled `target_sid`, taking into account role, type, and optional filename
     /// transition rules.
-    /// Callers pass an empty slice (`&[]`) for `name` to express nameless transitions.
+    /// For named objects (e.g. directory entries or named `anon_inode` files), a non-empty
+    /// `name` is passed so filename-dependent transition rules are evaluated; for unnamed
+    /// objects (e.g. processes, sockets, `memfd`s, or filesystem root/anonymous nodes), `name`
+    /// is empty.
     pub fn compute_create_sid(
         &self,
         source_sid: SecurityId,
@@ -156,7 +188,7 @@ impl<'a> PermissionCheck<'a> {
         target_class: KernelClass,
         name: &[u8],
     ) -> Result<SecurityId, anyhow::Error> {
-        self.access_vector_cache.compute_create_sid(source_sid, target_sid, target_class, name)
+        Query::compute_create_sid(self, source_sid, target_sid, target_class, name)
     }
 
     /// Returns the raw [`KernelAccessDecision`] for a specified source, target and class.
@@ -171,33 +203,79 @@ impl<'a> PermissionCheck<'a> {
             source_sid,
             target_sid,
             target_class,
-            move || {
-                self.access_vector_cache.compute_access_decision(
-                    source_sid,
-                    target_sid,
-                    target_class,
-                )
-            },
+            move || Query::compute_access_decision(self, source_sid, target_sid, target_class),
         )
     }
 }
 
-/// Internal implementation of the [`PermissionCheck::has_permission`] API, in terms of the [`Query`] trait.
-fn has_permission(
+impl Query for PermissionCheck<'_> {
+    fn compute_access_decision(
+        &self,
+        source_sid: SecurityId,
+        target_sid: SecurityId,
+        target_class: KernelClass,
+    ) -> KernelAccessDecision {
+        self.access_vector_cache.compute_access_decision(
+            self.security_server,
+            source_sid,
+            target_sid,
+            target_class,
+        )
+    }
+
+    fn compute_create_sid(
+        &self,
+        source_sid: SecurityId,
+        target_sid: SecurityId,
+        target_class: KernelClass,
+        name: &[u8],
+    ) -> Result<SecurityId, anyhow::Error> {
+        self.access_vector_cache.compute_create_sid(
+            self.security_server,
+            source_sid,
+            target_sid,
+            target_class,
+            name,
+        )
+    }
+
+    fn compute_xperms_access_decision(
+        &self,
+        xperms_kind: XpermsKind,
+        source_sid: SecurityId,
+        target_sid: SecurityId,
+        permission: KernelPermission,
+        xperms_prefix: u8,
+    ) -> KernelXpermsAccessDecision {
+        self.access_vector_cache.compute_xperms_access_decision(
+            self.security_server,
+            xperms_kind,
+            source_sid,
+            target_sid,
+            permission,
+            xperms_prefix,
+        )
+    }
+}
+
+/// Internal implementation of the [`PermissionCheck::has_permissions`] API, in terms of the [`Query`] trait.
+#[inline]
+fn has_permissions(
     local_cache: &PerThreadCache,
     query: &impl Query,
     policy_seqno: PolicySeqNo,
     source_sid: SecurityId,
     target_sid: SecurityId,
-    permission: KernelPermission,
+    permissions: KernelPermissionSet,
 ) -> PermissionCheckResult {
-    let permission_access_vector = permission.as_access_vector();
+    let class = permissions.class();
+    let requested = permissions.access_vector();
 
-    if permission == KernelPermission::Fd(FdPermission::Use) {
+    if permissions == KernelPermissionSet::from(FdPermission::Use) {
         // fd use checks are cached separately.
         return local_cache.lookup_fd_use(policy_seqno, source_sid, target_sid, move || {
             let decision = query.compute_access_decision(source_sid, target_sid, KernelClass::Fd);
-            access_decision_to_permission_check_result(permission_access_vector, decision)
+            access_decision_to_permission_check_result(requested, decision)
         });
     }
 
@@ -205,19 +283,26 @@ fn has_permission(
         policy_seqno,
         source_sid,
         target_sid,
-        permission.class(),
-        move || query.compute_access_decision(source_sid, target_sid, permission.class()),
+        class,
+        move || query.compute_access_decision(source_sid, target_sid, class),
     );
-    access_decision_to_permission_check_result(permission_access_vector, decision)
+    access_decision_to_permission_check_result(requested, decision)
 }
 
+#[inline]
 fn access_decision_to_permission_check_result(
-    permission_access_vector: AccessVector,
+    requested: AccessVector,
     decision: KernelAccessDecision,
 ) -> PermissionCheckResult {
     let permissive = decision.flags & SELINUX_AVD_FLAGS_PERMISSIVE != 0;
-    let granted = permission_access_vector & decision.allow == permission_access_vector;
-    let audit = permission_access_vector & decision.audit != AccessVector::NONE;
+    let denied = requested - decision.allow;
+    let granted = denied == AccessVector::NONE;
+
+    // If any `requested` permissions are denied then the denied permissions are audited, unless
+    // they are "dontaudit". Otherwise the permissions are audited only if they are "auditallow".
+    let audited = if granted { requested } else { denied };
+    let audit = audited & decision.audit;
+
     PermissionCheckResult { granted, audit, permissive, todo_bug: decision.todo_bug }
 }
 
@@ -240,7 +325,11 @@ fn has_extended_permission(
     );
 
     let granted = xperms_decision.allow.contains(xperms_postfix);
-    let audit = xperms_decision.audit.contains(xperms_postfix);
+    let audit = if xperms_decision.audit.contains(xperms_postfix) {
+        permission.as_access_vector()
+    } else {
+        AccessVector::NONE
+    };
     let permissive = xperms_decision.permissive;
     let mut result = PermissionCheckResult { granted, audit, permissive, todo_bug: None };
 
@@ -259,8 +348,12 @@ fn has_extended_permission(
 mod tests {
     use super::*;
     use crate::kernel::KernelXpermsAccessDecision;
-    use crate::policy::{AccessVector, XpermsBitmap};
-    use crate::{CommonFsNodePermission, FileClass, ForClass, KernelClass, ProcessPermission};
+    use crate::policy::AccessVector;
+    use crate::security_server::tests::security_server_with_tests_policy;
+    use crate::{
+        CommonFsNodePermission, FdPermissionSet, FileClass, ForClass, KernelClass,
+        ProcessPermission,
+    };
 
     use std::num::NonZeroU32;
     use std::sync::LazyLock;
@@ -286,12 +379,7 @@ mod tests {
             _target_sid: SecurityId,
             _target_class: KernelClass,
         ) -> KernelAccessDecision {
-            KernelAccessDecision {
-                allow: AccessVector::NONE,
-                audit: AccessVector::ALL,
-                flags: 0,
-                todo_bug: None,
-            }
+            KernelAccessDecision::DENY_ALL
         }
 
         fn compute_create_sid(
@@ -312,12 +400,7 @@ mod tests {
             _permission: KernelPermission,
             _xperms_prefix: u8,
         ) -> KernelXpermsAccessDecision {
-            KernelXpermsAccessDecision {
-                allow: XpermsBitmap::NONE,
-                audit: XpermsBitmap::ALL,
-                permissive: false,
-                has_todo: false,
-            }
+            KernelXpermsAccessDecision::DENY_ALL
         }
     }
 
@@ -332,12 +415,7 @@ mod tests {
             _target_sid: SecurityId,
             _target_class: KernelClass,
         ) -> KernelAccessDecision {
-            KernelAccessDecision {
-                allow: AccessVector::ALL,
-                audit: AccessVector::NONE,
-                flags: 0,
-                todo_bug: None,
-            }
+            KernelAccessDecision::ALLOW_ALL
         }
 
         fn compute_create_sid(
@@ -358,17 +436,48 @@ mod tests {
             _permission: KernelPermission,
             _xperms_prefix: u8,
         ) -> KernelXpermsAccessDecision {
-            KernelXpermsAccessDecision {
-                allow: XpermsBitmap::ALL,
-                audit: XpermsBitmap::NONE,
-                permissive: false,
-                has_todo: false,
-            }
+            KernelXpermsAccessDecision::ALLOW_ALL
+        }
+    }
+
+    /// [`Query`] that returns the same [`KernelAccessDecision`] for all source, target and class
+    /// combinations.
+    struct FixedAccessDecision(KernelAccessDecision);
+
+    impl Query for FixedAccessDecision {
+        fn compute_access_decision(
+            &self,
+            _source_sid: SecurityId,
+            _target_sid: SecurityId,
+            _target_class: KernelClass,
+        ) -> KernelAccessDecision {
+            self.0
+        }
+
+        fn compute_create_sid(
+            &self,
+            _source_sid: SecurityId,
+            _target_sid: SecurityId,
+            _target_class: KernelClass,
+            _name: &[u8],
+        ) -> Result<SecurityId, anyhow::Error> {
+            unreachable!();
+        }
+
+        fn compute_xperms_access_decision(
+            &self,
+            _xperms_kind: XpermsKind,
+            _source_sid: SecurityId,
+            _target_sid: SecurityId,
+            _permission: KernelPermission,
+            _xperms_prefix: u8,
+        ) -> KernelXpermsAccessDecision {
+            unreachable!();
         }
     }
 
     #[test]
-    fn has_permission_both() {
+    fn has_permissions_both() {
         let deny_all = DenyAllPermissions::default();
         let allow_all = AllowAllPermissions::default();
 
@@ -378,7 +487,7 @@ mod tests {
         for permission in permissions {
             let local_cache1 = PerThreadCache::default();
             // DenyAllPermissions denies.
-            let result = has_permission(
+            let result = has_permissions(
                 &local_cache1,
                 &deny_all,
                 PolicySeqNo::INITIAL,
@@ -390,7 +499,7 @@ mod tests {
                 result,
                 PermissionCheckResult {
                     granted: false,
-                    audit: true,
+                    audit: permission.as_access_vector(),
                     permissive: false,
                     todo_bug: None
                 }
@@ -399,7 +508,7 @@ mod tests {
 
             let local_cache2 = PerThreadCache::default();
             // AllowAllPermissions allows.
-            let result = has_permission(
+            let result = has_permissions(
                 &local_cache2,
                 &allow_all,
                 PolicySeqNo::INITIAL,
@@ -411,13 +520,165 @@ mod tests {
                 result,
                 PermissionCheckResult {
                     granted: true,
-                    audit: false,
+                    audit: AccessVector::NONE,
                     permissive: false,
                     todo_bug: None
                 }
             );
             assert!(result.permit());
         }
+    }
+
+    #[test]
+    fn has_permissions_audits_only_denied_permissions() {
+        // Allow only `fork`, and audit all permissions, whether allowed or denied.
+        let query = FixedAccessDecision(KernelAccessDecision {
+            allow: ProcessPermission::Fork.as_access_vector(),
+            audit: AccessVector::ALL,
+            flags: 0,
+            todo_bug: None,
+        });
+        let local_cache = PerThreadCache::default();
+
+        // Only the denied permissions are audited, although the allowed one is "auditallow".
+        let requested =
+            ProcessPermission::Fork | ProcessPermission::GetSched | ProcessPermission::SetSched;
+        let expected_audit = ProcessPermission::GetSched | ProcessPermission::SetSched;
+        let result = has_permissions(
+            &local_cache,
+            &query,
+            PolicySeqNo::INITIAL,
+            *A_TEST_SID,
+            *A_TEST_SID,
+            requested.into(),
+        );
+        assert_eq!(
+            result,
+            PermissionCheckResult {
+                granted: false,
+                audit: expected_audit.access_vector(),
+                permissive: false,
+                todo_bug: None
+            }
+        );
+        assert_eq!(result.audit_permissions(KernelClass::Process), Some(expected_audit.into()));
+        assert!(!result.permit());
+    }
+
+    #[test]
+    fn has_permissions_permissive_domain_audits_only_denied_permissions() {
+        // Allow only `fork`, audit all permissions, and mark the source domain as permissive.
+        let query = FixedAccessDecision(KernelAccessDecision {
+            allow: ProcessPermission::Fork.as_access_vector(),
+            audit: AccessVector::ALL,
+            flags: SELINUX_AVD_FLAGS_PERMISSIVE,
+            todo_bug: None,
+        });
+        let local_cache = PerThreadCache::default();
+
+        // Only the denied permissions are audited, and the check is permitted nonetheless.
+        let requested =
+            ProcessPermission::Fork | ProcessPermission::GetSched | ProcessPermission::SetSched;
+        let expected_audit = ProcessPermission::GetSched | ProcessPermission::SetSched;
+        let result = has_permissions(
+            &local_cache,
+            &query,
+            PolicySeqNo::INITIAL,
+            *A_TEST_SID,
+            *A_TEST_SID,
+            requested.into(),
+        );
+        assert_eq!(
+            result,
+            PermissionCheckResult {
+                granted: false,
+                audit: expected_audit.access_vector(),
+                permissive: true,
+                todo_bug: None
+            }
+        );
+        assert_eq!(result.audit_permissions(KernelClass::Process), Some(expected_audit.into()));
+        assert!(result.permit());
+    }
+
+    #[test]
+    fn has_permissions_audits_auditallow_permissions_if_granted() {
+        // Allow all permissions, and audit `fork` and `getsched`.
+        let expected_audit = ProcessPermission::Fork | ProcessPermission::GetSched;
+        let query = FixedAccessDecision(KernelAccessDecision {
+            allow: AccessVector::ALL,
+            audit: expected_audit.access_vector(),
+            flags: 0,
+            todo_bug: None,
+        });
+        let local_cache = PerThreadCache::default();
+
+        // Only the requested "auditallow" permissions are audited.
+        let requested =
+            ProcessPermission::Fork | ProcessPermission::GetSched | ProcessPermission::SetSched;
+        let result = has_permissions(
+            &local_cache,
+            &query,
+            PolicySeqNo::INITIAL,
+            *A_TEST_SID,
+            *A_TEST_SID,
+            requested.into(),
+        );
+        assert_eq!(
+            result,
+            PermissionCheckResult {
+                granted: true,
+                audit: expected_audit.access_vector(),
+                permissive: false,
+                todo_bug: None
+            }
+        );
+        assert_eq!(result.audit_permissions(KernelClass::Process), Some(expected_audit.into()));
+        assert!(result.permit());
+    }
+
+    #[test]
+    fn has_permissions_empty_fd_set_does_not_affect_fd_use_cache() {
+        let deny_all = DenyAllPermissions::default();
+        let local_cache = PerThreadCache::default();
+
+        // An empty set of permissions is trivially granted.
+        let result = has_permissions(
+            &local_cache,
+            &deny_all,
+            PolicySeqNo::INITIAL,
+            *A_TEST_SID,
+            *A_TEST_SID,
+            FdPermissionSet::empty().into(),
+        );
+        assert_eq!(
+            result,
+            PermissionCheckResult {
+                granted: true,
+                audit: AccessVector::NONE,
+                permissive: false,
+                todo_bug: None
+            }
+        );
+
+        // `fd { use }` is still denied, since the granted empty set was not cached as an fd use.
+        let result = has_permissions(
+            &local_cache,
+            &deny_all,
+            PolicySeqNo::INITIAL,
+            *A_TEST_SID,
+            *A_TEST_SID,
+            FdPermission::Use.into(),
+        );
+        assert_eq!(
+            result,
+            PermissionCheckResult {
+                granted: false,
+                audit: FdPermission::Use.as_access_vector(),
+                permissive: false,
+                todo_bug: None
+            }
+        );
     }
 
     #[test]
@@ -439,7 +700,7 @@ mod tests {
             result,
             PermissionCheckResult {
                 granted: false,
-                audit: true,
+                audit: permission.as_access_vector(),
                 permissive: false,
                 todo_bug: None
             }
@@ -459,20 +720,12 @@ mod tests {
             result,
             PermissionCheckResult {
                 granted: true,
-                audit: false,
+                audit: AccessVector::NONE,
                 permissive: false,
                 todo_bug: None
             }
         );
         assert!(result.permit());
-    }
-
-    fn security_server_with_tests_policy() -> std::sync::Arc<SecurityServer> {
-        const POLICY: &[u8] =
-            include_bytes!("../testdata/micro_policies/security_server_tests_policy");
-        let security_server = SecurityServer::new_default();
-        assert!(security_server.load_policy(POLICY.into()).is_ok());
-        security_server
     }
 
     #[test]
@@ -503,7 +756,7 @@ mod tests {
                 result,
                 PermissionCheckResult {
                     granted: false,
-                    audit: true,
+                    audit: permission.as_access_vector(),
                     permissive: !enforcing,
                     todo_bug: None
                 }

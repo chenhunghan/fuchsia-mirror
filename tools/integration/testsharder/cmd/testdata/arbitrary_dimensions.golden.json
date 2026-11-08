@@ -42,7 +42,6 @@
             "host_x64/foo.sh",
             "host_x64/fvm",
             "host_x64/llvm-profdata",
-            "host_x64/resummarize",
             "host_x64/ssh",
             "host_x64/test-pilot",
             "host_x64/zbi",
@@ -51,14 +50,14 @@
         ],
         "timeout_secs": 0,
         "summary": {
-            "tests": null
+            "tests": []
         },
         "summary_if_skipped": {
             "tests": [
                 {
-                    "output_files": null,
+                    "output_files": [],
                     "output_dir": "",
-                    "cases": null,
+                    "cases": [],
                     "name": "host_x64/foo.sh",
                     "gn_label": "//tools/other:foo(//build/toolchain/host_x64)",
                     "source_label": "//tools/other:foo",
@@ -173,7 +172,6 @@
             "host_x64/ffx",
             "host_x64/fvm",
             "host_x64/llvm-profdata",
-            "host_x64/resummarize",
             "host_x64/ssh",
             "host_x64/test-pilot",
             "host_x64/zbi",
@@ -182,14 +180,14 @@
         ],
         "timeout_secs": 0,
         "summary": {
-            "tests": null
+            "tests": []
         },
         "summary_if_skipped": {
             "tests": [
                 {
-                    "output_files": null,
+                    "output_files": [],
                     "output_dir": "",
-                    "cases": null,
+                    "cases": [],
                     "name": "host_x64/bar.sh",
                     "gn_label": "//tools/other:bar(//build/toolchain/host_x64)",
                     "source_label": "//tools/other:bar",
@@ -304,14 +302,14 @@
         ],
         "timeout_secs": 0,
         "summary": {
-            "tests": null
+            "tests": []
         },
         "summary_if_skipped": {
             "tests": [
                 {
-                    "output_files": null,
+                    "output_files": [],
                     "output_dir": "",
-                    "cases": null,
+                    "cases": [],
                     "name": "host_x64/bar.sh",
                     "gn_label": "//tools/other:bar(//build/toolchain/host_x64)",
                     "source_label": "//tools/other:bar",
@@ -397,14 +395,14 @@
         ],
         "timeout_secs": 0,
         "summary": {
-            "tests": null
+            "tests": []
         },
         "summary_if_skipped": {
             "tests": [
                 {
-                    "output_files": null,
+                    "output_files": [],
                     "output_dir": "",
-                    "cases": null,
+                    "cases": [],
                     "name": "host_x64/foo.sh",
                     "gn_label": "//tools/other:foo(//build/toolchain/host_x64)",
                     "source_label": "//tools/other:foo",

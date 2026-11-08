@@ -29,6 +29,7 @@ import("//build/tools/bazel2gn/bazel_migration.gni")
 
 fidl("fuchsia.hardware.pci.root") {
   sources = [ "root.fidl" ]
+  contains_drivers = true
   visibility = [ "*" ]
   public_deps = [
     "//sdk/fidl/fuchsia.hardware.pci",

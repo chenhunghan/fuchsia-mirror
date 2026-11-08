@@ -7,7 +7,6 @@
 
 use super::get_host_tool;
 use crate::qemu_based::QemuBasedEngine;
-use async_trait::async_trait;
 use emulator_instance::{
     AccelerationMode, ConsoleType, EmulatorConfiguration, EmulatorInstanceData,
     EmulatorInstanceInfo, EmulatorInstances, EngineState, EngineType, NetworkingMode,
@@ -16,8 +15,9 @@ use emulator_instance::{
 use ffx_config::EnvironmentContext;
 use ffx_emulator_common::config::CROSVM_TOOL;
 use ffx_emulator_common::{find_unused_vsock_cid, process};
-use ffx_emulator_config::{EmulatorEngine, EngineConsoleType, ShowDetail};
+use ffx_emulator_config::{BoxFuture, EmulatorEngine, EngineConsoleType, ShowDetail};
 use fho::{Result, bug, return_bug};
+use nix::sys::signal::Signal;
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -61,34 +61,18 @@ impl CrosvmEngine {
     fn validate_staging(&self) -> Result<()> {
         self.check_required_files(&self.emu_config().guest)
     }
-}
 
-#[async_trait(?Send)]
-impl EmulatorEngine for CrosvmEngine {
-    fn get_instance_data(&self) -> &EmulatorInstanceData {
-        &self.data
-    }
-
-    async fn stage(&mut self) -> Result<()> {
-        let ctx_clone = self.context.clone();
-        if let Err(e) = <Self as QemuBasedEngine>::stage(&mut self, &ctx_clone)
-            .await
-            .and_then(|()| self.validate_staging())
-        {
-            self.data.set_engine_state(EngineState::Error);
-            return self.save_to_disk().await.and(Err(e));
-        }
-
-        if let Some(vsock) = &mut self.emu_config_mut().device.vsock {
-            if vsock.enabled {
-                vsock.cid = find_unused_vsock_cid()?;
-            }
-        }
-
+    fn build_args(&self) -> Result<Vec<String>> {
         let emu_config = self.emu_config();
-        // Fall back to 4 core is cpu_count isn't specified.
+        // Fall back to 4 cores if cpu_count isn't specified.
         let cpu_count = emu_config.device.cpu.count;
         let cpu_count = if cpu_count > 0 { cpu_count } else { 4 };
+        let control_socket = emu_config
+            .runtime
+            .get_control_socket_path()
+            .to_str()
+            .ok_or_else(|| bug!("Control socket path is not valid UTF-8"))?
+            .to_string();
         // TODO(https://fxbug.dev/371614411): Move these into a template.
         let mut args = vec![
             "--extended-status".to_string(),
@@ -96,7 +80,7 @@ impl EmulatorEngine for CrosvmEngine {
             "run".to_string(),
             "--disable-sandbox".to_string(),
             "-s".to_string(),
-            format!("{}/control.sock", emu_config.runtime.instance_directory.to_str().unwrap()),
+            control_socket,
             "--mem".to_string(),
             emu_config.device.memory.quantity.to_string(),
             "--cpus".to_string(),
@@ -122,53 +106,91 @@ impl EmulatorEngine for CrosvmEngine {
                 format!("tap-name=qemu,mac={}", emu_config.runtime.mac_address),
             ]);
         }
-        self.emu_config_mut().flags.args = args;
-        // We don't care about several of these fields filled out via the qemu specific
-        // template.
-        self.emu_config_mut().flags.envs = HashMap::new();
-        self.emu_config_mut().flags.features = vec![];
-        self.emu_config_mut().flags.options = vec![];
-        self.data.set_engine_state(EngineState::Staged);
-        self.save_to_disk().await
+        Ok(args)
     }
 
-    async fn start(&mut self, context: &EnvironmentContext, emulator_cmd: Command) -> Result<i32> {
-        self.run(context, emulator_cmd).await
+    fn build_stop_cmd(&self) -> Command {
+        let mut cmd = Command::new(&self.data.get_emulator_binary());
+        cmd.arg("stop").arg(self.emu_config().runtime.get_control_socket_path());
+        cmd
+    }
+}
+
+impl EmulatorEngine for CrosvmEngine {
+    fn get_instance_data(&self) -> &EmulatorInstanceData {
+        &self.data
+    }
+
+    fn stage(&mut self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            let ctx_clone = self.context.clone();
+            if let Err(e) = <Self as QemuBasedEngine>::stage(self, &ctx_clone)
+                .await
+                .and_then(|()| self.validate_staging())
+            {
+                self.data.set_engine_state(EngineState::Error);
+                return self.save_to_disk().await.and(Err(e));
+            }
+
+            if let Some(vsock) = &mut self.emu_config_mut().device.vsock {
+                if vsock.enabled {
+                    vsock.cid = find_unused_vsock_cid()?;
+                }
+            }
+
+            let args = self.build_args()?;
+            self.emu_config_mut().flags.args = args;
+            // We don't care about several of these fields filled out via the qemu specific
+            // template.
+            self.emu_config_mut().flags.envs = HashMap::new();
+            self.emu_config_mut().flags.features = vec![];
+            self.emu_config_mut().flags.options = vec![];
+            self.data.set_engine_state(EngineState::Staged);
+            self.save_to_disk().await
+        })
+    }
+
+    fn start<'a>(
+        &'a mut self,
+        context: &'a EnvironmentContext,
+        emulator_cmd: Command,
+    ) -> BoxFuture<'a, Result<i32>> {
+        Box::pin(async move { self.run(context, emulator_cmd).await })
     }
 
     fn show(&self, details: Vec<ShowDetail>) -> Vec<ShowDetail> {
         <Self as QemuBasedEngine>::show(self, details)
     }
 
-    async fn stop(&mut self) -> Result<()> {
-        if self.is_running().await {
-            log::info!("Terminating running instance {:?}", self.get_pid());
+    fn stop(&mut self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            if self.is_running().await {
+                log::info!("Terminating running instance {:?}", self.get_pid());
 
-            let result = Command::new(&self.data.get_emulator_binary())
-                .arg("stop")
-                .arg(format!(
-                    "{}/control.sock",
-                    self.emu_config().runtime.instance_directory.to_str().unwrap()
-                ))
-                .output()
-                .map_err(|e| bug!("Failed to spawn crosvm stop command: {e}"))
-                .and_then(|Output { status, stdout: _, stderr }| {
-                    if status.success() {
-                        Ok(())
-                    } else {
-                        Err(bug!("status: {status} stderr:\n{stderr:?}"))
+                let result = self
+                    .build_stop_cmd()
+                    .output()
+                    .map_err(|e| bug!("Failed to spawn crosvm stop command: {e}"))
+                    .and_then(|Output { status, stdout: _, stderr }| {
+                        if status.success() {
+                            Ok(())
+                        } else {
+                            Err(bug!("status: {status} stderr:\n{stderr:?}"))
+                        }
+                    });
+                if result.is_err() {
+                    log::warn!(
+                        "crosvm stop command failed, falling back to killing PID: {result:?}"
+                    );
+                    if let Err(e) = process::signal(self.get_pid(), Signal::SIGKILL) {
+                        log::warn!("Error encountered terminating process: {e:?}");
                     }
-                });
-            if result.is_err() {
-                log::warn!("crosvm stop command failed, falling back to killing PID: {result:?}");
-                if let Some(terminate_error) = process::terminate(self.get_pid()).err() {
-                    log::warn!("Error encountered terminating process: {:?}", terminate_error);
                 }
             }
-        }
 
-        self.set_engine_state(EngineState::Staged);
-        self.save_to_disk().await
+            self.set_engine_state(EngineState::Staged);
+            self.save_to_disk().await
+        })
     }
 
     fn configure(&mut self) -> Result<()> {
@@ -196,15 +218,17 @@ impl EmulatorEngine for CrosvmEngine {
         self.data.get_engine_type()
     }
 
-    async fn is_running(&mut self) -> bool {
-        let running = self.data.is_running();
-        if self.engine_state() == EngineState::Running && running == false {
-            self.set_engine_state(EngineState::Staged);
-            if self.save_to_disk().await.is_err() {
-                log::warn!("Problem saving serialized emulator to disk during state update.");
+    fn is_running(&mut self) -> BoxFuture<'_, bool> {
+        Box::pin(async move {
+            let running = self.data.is_running();
+            if self.engine_state() == EngineState::Running && running == false {
+                self.set_engine_state(EngineState::Staged);
+                if self.save_to_disk().await.is_err() {
+                    log::warn!("Problem saving serialized emulator to disk during state update.");
+                }
             }
-        }
-        running
+            running
+        })
     }
 
     fn attach(&self, _console: EngineConsoleType) -> Result<()> {
@@ -260,19 +284,21 @@ impl EmulatorEngine for CrosvmEngine {
         self.data.get_emulator_configuration_mut()
     }
 
-    async fn screenshot(&mut self, _path: &Path) -> Result<()> {
-        Err(fho::user_error!("Screenshot not implemented for crosvm yet."))
+    fn screenshot<'a>(&'a mut self, _path: &'a Path) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { Err(fho::user_error!("Screenshot not implemented for crosvm yet.")) })
     }
 
-    async fn save_to_disk(&self) -> Result<()> {
-        write_to_disk(
-            &self.data,
-            &self
-                .emu_instances
-                .get_instance_dir(self.data.get_name(), true)
-                .unwrap_or_else(|_| panic!("instance directory for {}", self.data.get_name())),
-        )
-        .map_err(|e| bug!("Error saving instance to disk: {e}"))
+    fn save_to_disk(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            write_to_disk(
+                &self.data,
+                &self
+                    .emu_instances
+                    .get_instance_dir(self.data.get_name(), true)
+                    .unwrap_or_else(|_| panic!("instance directory for {}", self.data.get_name())),
+            )
+            .map_err(|e| bug!("Error saving instance to disk: {e}"))
+        })
     }
 }
 
@@ -303,6 +329,20 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use tempfile::tempdir;
+
+    #[fuchsia::test]
+    async fn test_send_input_unsupported() {
+        let env = ffx_config::test_env().build().expect("test env");
+        let data = EmulatorInstanceData::new(
+            EmulatorConfiguration::default(),
+            EngineType::Crosvm,
+            EngineState::Running,
+        );
+        let mut engine =
+            CrosvmEngine::new(&env.context, data, EmulatorInstances::new(PathBuf::new()));
+        let err = engine.send_input(&[]).await.unwrap_err().to_string();
+        assert_eq!(err, "Input injection is not supported by this emulator engine.");
+    }
 
     #[fuchsia::test]
     fn test_build_emulator_cmd() {
@@ -390,5 +430,53 @@ mod tests {
         ];
 
         assert_eq!(actual, expected)
+    }
+
+    #[fuchsia::test]
+    async fn test_control_socket_short_path() {
+        let builder = ffx_config::test_env();
+        let builder = make_fake_sdk(builder).await;
+        let env = builder.build().unwrap();
+        let temp = tempdir().expect("cannot get tempdir");
+        // Nest deeply so `{instance_directory}/control.sock` would exceed sun_path (108 bytes).
+        let deep_root = temp.path().join("a".repeat(50)).join("b".repeat(50));
+        let emu_instances = EmulatorInstances::new(deep_root);
+
+        let mut cfg = EmulatorConfiguration::default();
+        cfg.runtime.name = "fuchsia-5254-1234-1234".to_string();
+        cfg.runtime.config_override = true;
+        cfg.guest.kernel_image = Some(temp.path().join("kernel"));
+        let built = EngineBuilder::new(&env.context, emu_instances.clone())
+            .config(cfg)
+            .engine_type(EngineType::Crosvm)
+            .build()
+            .await
+            .expect("engine built");
+
+        let engine =
+            CrosvmEngine::new(&env.context, built.get_instance_data().clone(), emu_instances);
+        let control_socket = &engine.emu_config().runtime.control_socket;
+        assert!(control_socket.as_os_str().len() < 108, "socket path too long: {control_socket:?}");
+
+        let args = engine.build_args().expect("build args");
+        let s_pos = args.iter().position(|a| a == "-s").expect("-s arg present");
+        assert_eq!(Path::new(&args[s_pos + 1]), control_socket.as_path());
+
+        let stop_cmd = engine.build_stop_cmd();
+        let stop_args: Vec<_> = stop_cmd.get_args().collect();
+        assert_eq!(stop_args, vec![std::ffi::OsStr::new("stop"), control_socket.as_os_str()]);
+    }
+
+    #[fuchsia::test]
+    fn test_stop_cmd_legacy_fallback() {
+        let env = ffx_config::test_env().build().expect("test env");
+        let mut cfg = EmulatorConfiguration::default();
+        cfg.runtime.instance_directory = PathBuf::from("/some/instance/dir");
+        let data = EmulatorInstanceData::new(cfg, EngineType::Crosvm, EngineState::Running);
+        let engine = CrosvmEngine::new(&env.context, data, EmulatorInstances::new(PathBuf::new()));
+
+        let stop_cmd = engine.build_stop_cmd();
+        let stop_args: Vec<_> = stop_cmd.get_args().collect();
+        assert_eq!(stop_args, vec!["stop", "/some/instance/dir/control.sock"]);
     }
 }

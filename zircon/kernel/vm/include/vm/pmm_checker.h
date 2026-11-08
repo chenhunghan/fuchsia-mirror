@@ -10,11 +10,6 @@
 #include <lib/boot-options/boot-options.h>
 #include <lib/page/size.h>
 #include <stdint.h>
-#include <stdio.h>
-
-#include <ktl/atomic.h>
-#include <ktl/optional.h>
-#include <vm/page.h>
 
 // |PmmChecker| is used to detect memory corruption.  It is logically part of |PmmNode|.
 //
@@ -43,54 +38,10 @@ class PmmChecker {
   // kDefaultAction as an integer, which bindgen can turn into a Rust constant.
   static constexpr uint8_t kDefaultActionRaw = static_cast<uint8_t>(kDefaultAction);
 
-  // Returns true if |fill_size| is a valid value.  Valid values are mutliples of 8 between 8 and
-  // kPageSize, inclusive.
-  static bool IsValidFillSize(size_t fill_size);
-
-  // Sets the size of the pattern to be written / validated.
-  //
-  // It is an error to call this method with an invalid fill size (see |IsValidFillSize|.
-  //
-  // It is an error to call this method if the checker |IsArmed|.  After changing the fill size, be
-  // sure to re-fill any free pages to ensure that a future call to |ValidatePattern| or
-  // |AssertPattern| won't supriously report corruption.
-  void SetFillSize(size_t fill_size);
-
-  // Returns the fill size.
-  size_t GetFillSize() const { return fill_size_; }
-
-  void SetAction(CheckFailAction action) { action_ = action; }
-  CheckFailAction GetAction() const { return action_; }
-
-  // Returns true if armed.
-  bool IsArmed() const;
-
-  void Arm();
-
-  void PrintStatus(FILE* f) const;
-
-  // Fills |page| with a pattern.
-  void FillPattern(vm_page_t* page) const;
-
-  // Returns true if |page| contains the expected fill pattern or |IsArmed| is false.
-  //
-  // Otherwise, returns false.
-  __WARN_UNUSED_RESULT bool ValidatePattern(vm_page_t* page) const;
-
-  // Panics the kernel if |page| does not contain the expected fill pattern and |IsArmed| is true.
-  //
-  // Otherwise, does nothing.
-  void AssertPattern(vm_page_t* page) const;
-
-  static int64_t get_validation_failed_count();
-
  private:
-  // The number of bytes to fill/validate.
-  size_t fill_size_ = kPageSize;
-
-  CheckFailAction action_ = kDefaultAction;
-
   // Only accessed by Rust after construction.
+  [[maybe_unused]] size_t fill_size_ = kPageSize;
+  [[maybe_unused]] CheckFailAction action_ = kDefaultAction;
   [[maybe_unused]] bool armed_ = false;
 };
 

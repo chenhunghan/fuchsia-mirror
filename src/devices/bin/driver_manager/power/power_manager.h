@@ -33,11 +33,13 @@ class PowerManager : public fidl::WireServer<fuchsia_power_broker::ElementRunner
   using CallbackSet = std::vector<fit::callback<void()>>;
   using PowerDependencyToken = fuchsia_power_broker::DependencyToken;
 
+  // |root_node| is the root of the node topology; it is used to discover leaf drivers when the
+  // AllDrivers power element completes its startup transition.
   PowerManager(
       async_dispatcher_t* dispatcher,
       fidl::ClientEnd<fuchsia_power_broker::Topology> power_topology,
       std::optional<fidl::ClientEnd<fuchsia_power_system::CpuElementManager>> cpu_element_mgr,
-      bool wait_for_storage_token);
+      bool wait_for_storage_token, std::shared_ptr<Node> root_node);
 
   // Starts the CPU token fetch process if CPU element manager is available.
   // Must be called after initialization.
@@ -79,8 +81,12 @@ class PowerManager : public fidl::WireServer<fuchsia_power_broker::ElementRunner
   // Get a copy of the Storage token (panics if not available).
   fuchsia_power_broker::DependencyToken GetStorageTokenOrAssert();
 
-  void OnBootupComplete(std::shared_ptr<Node> root_node);
+  // Called once BootupTracker reports that initial driver binding has settled. Creates the
+  // AllDrivers power element if it has not been created yet, and lets it complete its startup
+  // transition.
+  void OnBootupComplete();
   void OnNodeBound(std::shared_ptr<const Node> node);
+  void OnNodeUnbinding(std::shared_ptr<const Node> node);
   void CreateAllDriversPowerElement(std::shared_ptr<Node> root_node);
   void LeaseAllDrivers(const std::shared_ptr<Node>& root_node, fit::callback<void()> callback);
   void CreatePowerElement(
@@ -112,6 +118,10 @@ class PowerManager : public fidl::WireServer<fuchsia_power_broker::ElementRunner
       fidl::UnknownMethodCompleter::Sync& completer) override;
 
  private:
+  // Called when the CPU or storage token arrives, and from OnBootupComplete().
+  // Does not create the element if suspend is disabled, it was already created, required tokens
+  // (CPU, and storage if expected) are not yet available, or |root_node_| is null/expired.
+  void MaybeCreateAllDriversPowerElement();
   void AcquireRebootLease(const std::shared_ptr<Node>& node, std::string topo_path,
                           std::shared_ptr<fit::deferred_callback> deferred);
 
@@ -129,6 +139,14 @@ class PowerManager : public fidl::WireServer<fuchsia_power_broker::ElementRunner
   fidl::ClientEnd<fuchsia_power_broker::Lessor> storage_lessor_;
 
   bool wait_for_storage_token_from_driver_;
+  // Set once CreateStoragePowerElement() has been called. AllDrivers creation then waits for the
+  // storage token so that AllDrivers always depends on DF-Storage.
+  bool storage_element_requested_ = false;
+  // Set once by OnBootupComplete().
+  bool bootup_complete_ = false;
+  // The root of the node topology, used to create the AllDrivers element. DriverRunner owns the
+  // root node and outlives this object.
+  std::weak_ptr<Node> root_node_;
 
   std::optional<fuchsia_power_broker::DependencyToken> all_drivers_token_;
   std::shared_ptr<AllDriversElement> all_drivers_;

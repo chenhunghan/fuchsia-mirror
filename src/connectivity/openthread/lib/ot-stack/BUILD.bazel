@@ -1,0 +1,14 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library_headers.bzl", "fx_cc_library_headers")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library_headers(
+    name = "ot-stack-callback",
+    hdrs = ["include/lib/ot-stack/ot-stack-callback.h"],
+    visibility = ["//src/connectivity/openthread/third_party/openthread/platform:__pkg__"],
+    deps = ["//sdk/fidl/fuchsia.lowpan.spinel:fuchsia.lowpan.spinel_cpp"],
+)

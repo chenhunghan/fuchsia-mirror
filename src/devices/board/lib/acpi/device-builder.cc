@@ -189,6 +189,7 @@ zx::result<zx_device_t*> DeviceBuilder::Build(acpi::Manager* manager,
     return zx::error(ZX_ERR_BAD_STATE);
   }
   DeviceArgs device_args(parent_->zx_device_, manager, device_dispatcher, handle_);
+  device_args.SetStaEnabled((state_ & ACPI_STA_DEVICE_ENABLED) != 0);
   if (HasBusId() && bus_type_ != BusType::kPci) {
     zx::result metadata = GetMetadata();
     if (metadata.is_error()) {

@@ -2,8 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-from __future__ import annotations
-
 import asyncio
 import logging
 from collections.abc import Sequence
@@ -146,9 +144,10 @@ class ClientIface:
         ssid: str,
         password: str | None = None,
         security: f_wlan_internal.Protocol = f_wlan_internal.Protocol.OPEN,
+        channels: Sequence[int] | None = None,
     ) -> None:
         try:
-            scan_results = await self.passive_scan()
+            scan_results = await self.passive_scan(channels=channels)
             target_bss_desc_list = scan_results[ssid]
             assert (
                 len(target_bss_desc_list) > 0

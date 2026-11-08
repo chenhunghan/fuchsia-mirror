@@ -1,0 +1,40 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# NOTE: `vsock_test` (and `vsock_test_bin`) remains in BUILD.gn until its
+# subpackage `//src/paravirtualization/testing:vsock-for-test` is migrated to
+# Bazel.
+
+fx_cc_library(
+    name = "vsock",
+    srcs = [
+        "socket.cc",
+        "zxio_connected_socket.cc",
+        "zxio_connected_socket.h",
+    ],
+    hdrs = [
+        "socket.h",
+        "vm_sockets.h",
+    ],
+    implementation_deps = [
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/fdio",
+        "//sdk/lib/syslog/cpp",
+        "//sdk/lib/zxio",
+    ],
+    visibility = [
+        "//src/paravirtualization/lib/vsock/vsock_sys:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.vsock:fuchsia.vsock_cpp",
+        "//zircon/system/ulib/fbl",
+    ],
+    alwayslink = True,
+)

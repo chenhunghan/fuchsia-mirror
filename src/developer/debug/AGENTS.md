@@ -96,6 +96,24 @@ Apply these C++ and subsystem idioms across all files in
   (the build disables compiler RTTI). Use `fit::function`, `fit::callback`, or
   `fit::deferred_callback`, and call `symbol->As<T>()` to downcast `Symbol`
   objects.
+- **`UncachedLazySymbol::Get()` Lifetime & Empty Symbols**:
+  `UncachedLazySymbol::Get()` constructs a new `fxl::RefPtr<Symbol>` on each
+  call and returns an empty `Symbol` (`DwarfTag::kNone`) instead of `nullptr`
+  when invalid. Before you call `symbol->As<T>()`, store the
+  `fxl::RefPtr<Symbol>` in a local variable so the pointer does not dangle. When
+  you walk `Symbol::parent()` chains, verify `is_valid()` on the
+  `UncachedLazySymbol` or verify `tag() != DwarfTag::kNone` so the loop
+  terminates.
+- **DWARF-Driven Target Inspection**: When you inspect target runtime data
+  structures (for example, in `AsyncTaskProvider` subclasses or `PrettyType`
+  formatters), resolve types and members through DWARF symbols and expression
+  evaluation. Do not hardcode struct byte offsets. Do not compute raw pointer
+  arithmetic against target memory.
+- **Shared Utilities & Existing Patterns**: Before you write a file-local helper
+  in an anonymous `namespace`, search sibling files and lower `zxdb` or `fxl`
+  layers (`common`, `symbols`, `expr`). Follow the patterns in the existing
+  code. Reuse lower-layer utilities instead of duplicating them. If a new helper
+  is general-purpose, place it in the appropriate lower layer. Add unit tests.
 - **Internal Linkage & TODOs**: Place file-local `.cc` helpers in an anonymous
   `namespace`. Format bug links as `https://fxbug.dev/<id>`, and state the
   condition required to delete each `TODO`.
@@ -103,10 +121,33 @@ Apply these C++ and subsystem idioms across all files in
   Unix socket paths in `skills/` documentation. Direct agents through supported
   CLI commands instead.
 
+## Code Comment Style
+
+Optimize code comments for the reader. Follow these guidelines:
+
+- **Tone and Casing**: Keep comments neutral and factual. Use natural
+  contractions (`can't`, `isn't`, `doesn't`). Write non-acronym subsystem or
+  protocol names in lowercase (`zircon`, `starnix`, `fidl`, `banjo`).
+- **Backticks and Formatting**: Match the formatting style of the surrounding
+  file. Do not overuse backticks or parentheses in code comments. Refer to
+  qualified function, method, and type names in plain text.
+- **Structure and Altitude**: Make the acting component or caller the subject of
+  each sentence. State the motivation and intent of a logic block before the
+  mechanics. Omit incidental bitmask math, hardcoded struct offsets, exact file
+  paths, and change history.
+- **Single-Idea Sentences**: Put one main idea in each sentence. Avoid
+  multi-clause chains and contrast warmups (such as "It is not X, it is Y").
+- **Helper Functions Over Numbered Steps**: Never use numbered lists (`// 1.`,
+  `// Step 1:`) in source code comments. If an algorithmic flow has multiple
+  phases, split it into named helper functions. Let symbol names show the
+  execution order.
+- **Architectural Overviews**: Use an explanatory block comment at the top of a
+  file or complex sequence. Avoid scattered line comments.
+
 ## Downstream Couplings, Documentation, & Reviewer Gates
 
-Follow these build, documentation, comment, and testing gates before completing
-any work:
+Before you complete any work, follow these build, documentation, and testing
+gates:
 
 - **Dual Bazel/GN Build Files (`# BAZEL2GN SENTINEL`)**: Never hand-edit
   `BUILD.gn` files below a `# BAZEL2GN SENTINEL` marker. Edit the matching
@@ -121,12 +162,6 @@ any work:
     comments explain non-obvious implementation mechanics.
   - Write all non-coding prose in Simplified Technical English (`asd-ste100`)
     and follow Google Technical Writing guidelines (`technical-writing`).
-- **Code Comment Style**:
-  - Never use numbered lists (`// 1.`, `// Step 1:`) in source code comments.
-    Decompose multi-phase logic into named helper functions and let symbol names
-    show execution order.
-  - Prefer longer explanatory block comments with references for complex
-    sequences over short comments scattered through the sequence.
 - **Co-locate Unit Tests in Patch Stacks**: Include unit tests in the same CL
   that introduces a new class, data structure, or handler. Never defer unit
   tests to a later commit in a patch stack.

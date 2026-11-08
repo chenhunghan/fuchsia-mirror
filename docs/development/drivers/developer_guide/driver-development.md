@@ -1,83 +1,70 @@
-# Fuchsia driver development (DFv1)
+# Fuchsia driver development
 
-Caution: This page may contain information that is specific to the legacy
-version of the driver framework (DFv1). Also the workflows documented on
-this page may only be specific to the Fuchsia source checkout
-(`fuchsia.git`) environment.
+Note: The workflows documented on this page are specific to the Fuchsia source
+checkout (`fuchsia.git`) environment and assume the GN build system. For
+SDK-based driver development, see
+[SDK driver development](/docs/development/sdk/index.md). For a step-by-step
+guide to writing your first driver, see
+[Write a minimal DFv2 driver][write-a-minimal-dfv2-driver].
 
-Fuchsia drivers are shared libraries that are dynamically loaded in driver host
-processes in user space. The process of loading a driver is controlled by the
-driver manager. See
-[Device Model](/docs/development/drivers/concepts/device_driver_model/device-model.md)
-for more information on driver hosts, driver manager and the driver and device
-lifecycles.
+Fuchsia drivers are components dynamically loaded into [driver host][driver-host]
+processes in user space. The process of loading and coordinating drivers is
+managed by the [driver manager][driver-manager]. See the
+[Driver framework][driver-framework] and [Drivers and nodes][drivers-and-nodes]
+documentation for more information on driver hosts, driver manager, and the
+device topology.
 
 ## Directory structure
 
-Drivers may be found throughout the source tree under `driver` subdirectories of
-areas as specified in the
-[source code layout](/docs/development/source_code/layout.md) document. Most
-Fuchsia drivers are found under [//src/devices/](/src/devices). They are grouped
-based on the protocols they implement. The driver protocols are defined in
-[ddk/include/lib/ddk/protodefs.h](/src/lib/ddk/include/lib/ddk/protodefs.h). For
-example, a USB ethernet driver goes in
+Drivers may be found throughout the source tree under `drivers` subdirectories of
+areas as specified in the [source code layout](/docs/development/source_code/layout.md)
+document. Most Fuchsia drivers are located under [//src/devices/](/src/devices).
+They are grouped based on the hardware FIDL protocols they implement, defined under
+[//sdk/fidl/](/sdk/fidl/). For example, a USB ethernet driver goes in
 [//src/connectivity/ethernet/drivers/](/src/connectivity/ethernet/drivers/)
-rather than [//src/devices/usb/drivers/](/src/devices/usb/drivers) because it
-implements an ethernet protocol. However, drivers that implement the USB stack
-are in [//src/devices/usb/drivers/](/src/devices/usb/drivers) because they
-implement USB protocols.
+because it implements an ethernet protocol, while drivers that implement the
+USB controller stack are located in [//src/devices/usb/drivers/](/src/devices/usb/drivers/).
 
-In the driver's `BUILD.gn`, there should be a `fuchsia_driver_component` target.
-In order to get a driver to show up under `/boot/driver`, it should be included
-as under the `board_bootfs_labels` list in the relevant board file(s) under
-//boards. In order to get it to show up inside of `/system/driver` it should be
-added to the system package with a `driver_package` build target, which should
-then be referenced by relevant boardfile(s) under `//boards`. The driver manager
-looks first in `/boot/driver`, then `/system/driver/` for loadable drivers.
+In the driver's `BUILD.gn`, four target types are typically defined:
+
+1. `driver_bind_rules`: Compiles the `.bind` file into driver bind bytecode.
+2. `fuchsia_cc_driver` (or `fuchsia_rust_driver`): Compiles the driver shared library.
+3. `fuchsia_driver_component`: Wraps the driver shared library and bind rules into a
+   driver component with its component manifest (`.cml`).
+4. `fuchsia_driver_package`: Packages the driver component for inclusion in the system.
+
+For detailed instructions and examples on configuring these GN targets, refer to
+[Building drivers](/docs/development/drivers/best_practices/build.md).
 
 ## Creating a new driver
 
-Creating a new driver can be done automatically by using the
-[Create Tool](/tools/create/README.md). Simply run the following command:
+Creating a new driver can be done using the [Create Tool](/tools/create/README.md):
 
-```
+```posix-terminal
 fx create driver --path <PATH> --lang cpp
 ```
 
-This will create the directory `<PATH>` containing an empty driver where the
-last segment of `<PATH>` is the driver name and GN target name. After this
-command is run, the following steps need to be followed:
+This command creates the directory `<PATH>` containing template driver sources,
+where the last segment of `<PATH>` becomes the driver name and GN target name.
+After running this command, follow these steps:
 
-1.  Include the `fuchsia_driver_component` or `driver_package` build target in
-    the correct place to get your driver included into the system.
-2.  For packaged drivers the `driver_package` build target should be added to
-    the relevant board file in `//boards` or `//vendor/<foo>/boards` to a
-    `xx_package_labels` GN argument.
-3.  For boot drivers the `fuchsia_driver_component` build target should be added
-    to the relevant board file in `//boards` or `//vendor/<foo>/boards` to the
-    `board_bootfs_labels` GN argument.
-4.  Include the `tests` build target in the `<PATH>:tests` build target to get
-    your tests included in CQ.
-5.  Add proper bind rules in `meta/<NAME>.bind`.
-6.  Add driver information in `meta/<NAME>-info.json`. The file must include a
-    `short_description` and `areas` matching at least one of the areas listed at
-    `//build/drivers/areas.txt`.
-7.  Write the functionality for the driver.
+1. Define bind rules in `meta/<NAME>.bind`.
+2. Configure the component manifest in `meta/<NAME>.cml`.
+3. Add driver metadata in `meta/<NAME>-info.json`, including a `short_description`
+   and `areas` matching an entry in `//build/drivers/areas.txt`.
+4. Implement the driver class in C++ (inheriting from `fdf::DriverBase2`) or Rust.
+5. Include the `tests` target in the `<PATH>:tests` build target to ensure CQ coverage.
 
-## Declaring a driver
+## Declaring a driver and bind rules
 
-At a minimum, a driver should contain the driver declaration and implement the
-`bind()` driver op.
+Drivers are matched to devices (nodes) using declarative bind rules placed in a
+`.bind` file alongside the driver. The bind compiler compiles these rules into
+bytecode that the driver index evaluates without needing to load the driver into
+memory.
 
-Drivers are loaded and bound to a device when the driver manager successfully
-finds a matching driver for a device. A driver declares the devices it is
-compatible with through bind rules, which should be placed in a `.bind` file
-alongside the driver. The bind compiler compiles those rules and creates a
-driver declaration macro containing those rules in a C header file. The
-following bind rules declares the
-[AHCI driver](/src/devices/block/drivers/ahci/):
+The following example illustrates bind rules for an AHCI PCI device:
 
-```
+```none
 using fuchsia.pci;
 using fuchsia.pci.massstorage;
 
@@ -88,311 +75,216 @@ fuchsia.BIND_PCI_INTERFACE == 0x01;
 fuchsia.BIND_COMPOSITE == 1;
 ```
 
-These bind rules state that the driver binds to devices with a `BIND_PROTOCOL`
-property that matches `DEVICE` from the `pci` namespace and the given PCI
-class/subclass/interface. The `pci` namespace is imported from the `fucnsia.pci`
-library on the first line. For more details, refer to the [binding
-documentation](/docs/development/drivers/concepts/device_driver_model/driver-binding.md).
+In `BUILD.gn`, declare the bind target:
 
-To generate a driver declaration macro including these bind rules, there should
-be a corresponding `bind_rules` build target. This should declare dependencies
-corresponding to the "using" statements in the bind file.
-
-```
+```gn
 driver_bind_rules("bind") {
-    rules = "meta/ahci.bind"
-    bind_output = "ahci.bindbc"
-    deps = [
-        "//src/devices/bind/fuchsia.pci",
-        "//src/devices/bind/fuchsia.pci.massstorage",
-    ]
+  rules = "meta/ahci.bind"
+  bind_output = "ahci.bindbc"
+  deps = [
+    "//src/devices/bind/fuchsia.pci",
+    "//src/devices/bind/fuchsia.pci.massstorage",
+  ]
 }
 ```
 
-The driver can now include the generated header and declare itself with the
-following macro. `"zircon"` is the vendor id and `"0.1"` is the driver version.
+For more details on authoring bind rules, see [Driver binding][driver-binding] and
+the [Bind rules tutorial][bind-rules-tutorial].
 
-```c
-#include <lib/ddk/binding_driver.h>
-...
-ZIRCON_DRIVER(ahci, ahci_driver_ops, "zircon", "0.1");
-```
+In C++, the driver class inherits from `fdf::DriverBase2` and exports itself using
+the `FUCHSIA_DRIVER_EXPORT2` macro:
 
-The [PCI driver](/src/devices/pci/drivers/pci/) publishes the matching
-device with the following properties:
+```cpp
+#include <lib/driver/component/cpp/driver_base2.h>
+#include <lib/driver/component/cpp/driver_export2.h>
 
-```c
-zx_device_str_prop_t pci_device_props[] = {
-    ddk::MakeStrProperty(bind_fuchsia::PCI_VID,
-        static_cast<uint32_t>(device.info.vendor_id)),
-    ddk::MakeStrProperty(bind_fuchsia::PCI_DID,
-        static_cast<uint32_t>(device.info.device_id)),
-    ddk::MakeStrProperty(bind_fuchsia::PCI_CLASS,
-        static_cast<uint32_t>(device.info.base_class)),
-    ddk::MakeStrProperty(bind_fuchsia::PCI_SUBCLASS,
-        static_cast<uint32_t>(device.info.sub_class)),
-    ddk::MakeStrProperty(bind_fuchsia::PCI_INTERFACE,
-        static_cast<uint32_t>(device.info.program_interface)),
-    ddk::MakeStrProperty(bind_fuchsia::PCI_REVISION,
-        static_cast<uint32_t>(device.info.revision_id)),
-    ddk::MakeStrProperty(bind_fuchsia::PCI_TOPO, pci_bind_topo),
+class AhciDriver : public fdf::DriverBase2 {
+ public:
+  AhciDriver() = default;
+
+  zx::result<> Start(fdf::DriverContext context) override;
 };
+
+FUCHSIA_DRIVER_EXPORT2(AhciDriver);
 ```
 
-For now, binding variables and macros are defined in
-[lib/ddk/binding.h](/src/lib/ddk/include/lib/ddk/binding.h). In the near future,
-all node properties will be defined by bind libraries like the `fuchsia.pci`
-library imported above. If you are introducing a new device class, you may need
-to introduce new node properties to the binding header as well as the
-[bind libraries](/src/devices/bind/).
+When publishing child nodes that downstream drivers can bind to, specify node
+properties using `fuchsia_driver_framework::NodeProperty2` and `fdf::MakeProperty2`:
 
-Node properties are 32-bit values. If your variable value requires greater than
-a 32-bit value, split them into multiple 32-bit variables. An example is ACPI
-HID values, which are 8 characters (64-bits) long. It is split into
-`BIND_ACPI_HID_0_3` and `BIND_ACPI_HID_4_7`. Once the migration to bind
-libraries is complete you will be able to use other data types such as strings,
-larger numbers, and booleans.
+```cpp
+std::vector<fuchsia_driver_framework::NodeProperty2> properties = {
+    fdf::MakeProperty2(bind_fuchsia::PCI_VID, device_info.vendor_id),
+    fdf::MakeProperty2(bind_fuchsia::PCI_DID, device_info.device_id),
+};
 
-You may specify `disable_autobind = true` in the `bind_rules` build rule to
-disable the automatic binding behaviour. In that case, a driver can be bound to
-a device using `fuchsia.device.Controller/Bind` FIDL call.
+zx::result child = AddChild("sata-child", properties, offers);
+```
 
-## Driver binding
+## Driver lifecycle
 
-A driver's `bind()` function is called when it is matched to a device. Generally
-a driver will initialize any data structures needed for the device and
-initialize hardware in this function. It should not perform any time-consuming
-tasks or block in this function, because it is invoked from the driver host's
-RPC thread and it will not be able to service other requests in the meantime.
-Instead, it should spawn a new thread to perform lengthy tasks.
+### Start
 
-The driver should make no assumptions about the state of the hardware in
-`bind()`. It may need to reset the hardware or otherwise ensure it is in a known
-state. Because the system recovers from a driver crash by re-spawning the driver
-host, the hardware may be in an unknown state when `bind()` is invoked.
+The driver framework initializes a driver instance by calling its `Start()` hook.
+Drivers receive an `fdf::DriverContext` providing access to their incoming namespace,
+outgoing directory, node control, and dispatcher.
 
-There are generally four outcomes from `bind()`:
+```cpp
+zx::result<> AhciDriver::Start(fdf::DriverContext context) {
+  // Access incoming services and initialize hardware.
+  return zx::ok();
+}
+```
 
-1.  The driver determines the device is supported and does not need to do any
-    heavy lifting, so publishes a new device with `device_add()` in C or
-    `ddk::Device::DdkAdd()` in the
-    [DDKTL](/docs/development/drivers/concepts/driver_development/using-ddktl.md)
-    C++ wrapper library and returns `ZX_OK.
+Drivers should make no assumptions about the state of hardware when `Start()` is
+invoked; the device may not be in a clean reset state if a previous driver host
+crashed or restarted.
 
-2.  The driver determines that even though the bind rules matched, the device
-    cannot be supported (maybe due to checking hw version bits or whatnot) and
-    returns an error.
+Drivers should avoid blocking the driver dispatcher with long-running operations
+during `Start()`. If a driver needs to perform asynchronous initialization (such
+as loading firmware or waiting on hardware calibration), implement the asynchronous
+`Start()` overload that takes an `fdf::StartCompleter`:
 
-3.  The driver needs to do further initialization before the device is ready or
-    it's sure it can support it, so it publishes a invisible device that
-    implements the [`init()`](/src/lib/ddk/include/lib/ddk/device.h) hook and
-    kicks off a thread to keep working, while returning `ZX_OK` to `bind()`.
-    That thread will eventually call
-    [`device_init_reply()`](/src/lib/ddk/include/lib/ddk/driver.h) in C or
-    `ddk::InitTxn::Reply()` in the
-    [DDKTL](/docs/development/drivers/concepts/driver_development/using-ddktl.md)
-    C++ wrapper library. The device is guaranteed not to be removed until the
-    reply is received. The status indicates `ZX_OK` if it was able to
-    successfully initialize the device and it should be made visible, or an
-    error to indicate that the device should be removed.
+```cpp
+void AhciDriver::Start(fdf::DriverContext context, fdf::StartCompleter completer) {
+  // Perform asynchronous initialization on the dispatcher.
+  // When complete:
+  completer(zx::ok());
+}
+```
 
-4.  The driver represents a bus or controller with 0..n children that may
-    dynamically appear or disappear. In this case it should publish a device
-    immediately representing the bus or controller, and then dynamically publish
-    children (that downstream drivers will bind to) representing hardware on
-    that bus. Examples: AHCI/SATA, USB, etc.
+### PrepareStop and Stop
 
-After a device is added and made visible by the system, it is made available to
-client processes and for binding by compatible drivers.
+When a driver is being shut down or unbound, the framework invokes the teardown
+hooks:
 
-## Banjo protocols
+1. `PrepareStop(fdf::PrepareStopCompleter completer)`: The driver should stop
+   servicing new client requests, cancel pending hardware transactions, and complete
+   outstanding asynchronous tasks. Once finished, invoke `completer(zx::ok())`.
+2. `Stop()`: Final cleanup before the driver instance is destroyed.
 
-A driver provides a set of device ops and optional protocol ops to a device.
-Device ops implement the device lifecycle methods and the external interface to
-the device that are called by other user space applications and services.
-Protocol ops implement the in-process protocols of the device that are called by
-other drivers loaded into the same driver host.
+## Driver communication
 
-You can pass one set of protocol ops for the device in `device_add_args_t`. If a
-device supports multiple protocols, implement the `get_protocol()` device op. A
-device can only have one protocol id. The protocol id corresponds to the class
-the device is published under if devfs is still enabled for that class.
+All communication in Fuchsia occurs over capabilities routed through the component
+framework, primarily [FIDL service capabilities][service-capabilities].
 
-## Driver operation
+### Connecting to parent services
 
-A driver generally operates by servicing client requests from children drivers
-or other processes. It fulfills those requests either by communicating directly
-with hardware (for example, through MMIO) or by communicating with its parent
-device (for example, queueing a USB transaction).
+Drivers connect to FIDL protocols exposed by parent nodes or the platform using
+their incoming namespace:
 
-External client requests from processes outside the driver host are fulfilled by
-children drivers, generally in the same process, are fulfilled by banjo
-protocols corresponding to the device class. Driver-to-driver requests should
-use banjo protocols instead of device ops.
+```cpp
+zx::result pci = context.incoming().Connect<fuchsia_hardware_pci::Service::Device>();
+if (pci.is_error()) {
+  return pci.take_error();
+}
+```
 
-A device can get a protocol supported by its parent by calling
-`device_get_protocol()` on its parent device.
+### Advertising services to children and components
+
+A driver can advertise FIDL services to child drivers or non-driver components by
+adding service handlers to its outgoing directory and offering them when adding a child:
+
+```cpp
+// 1. Add service to outgoing directory
+zx::result result = context.outgoing()->AddService<fuchsia_example::EchoService>(
+    std::move(handler));
+
+// 2. Offer service to child node
+std::array offers = {
+    fdf::MakeOffer2<fuchsia_example::EchoService>(),
+};
+zx::result child = AddChild("echo-child", properties, offers);
+```
+
+For a comprehensive guide, see [Driver communication][driver-communication] and
+the [FIDL tutorial][fidl-tutorial].
+
+### Colocation and transport
+
+Drivers that require high-throughput, low-latency communication with parent or child
+drivers can be co-located within the same driver host process by setting
+`colocate: "true"` in their component manifest. Co-located drivers can use the
+[Driver runtime][driver-runtime] transport (`fdf::Channel`) for in-process,
+zero-copy communication without kernel context switches. Drivers in separate processes
+communicate across Zircon channels.
 
 ## Device interrupts
 
-Device interrupts are implemented by interrupt objects, which are a type of
-kernel objects. A driver requests a handle to the device interrupt from its
-parent device in a device protocol method. The handle returned will be bound to
-the appropriate interrupt for the device, as defined by a parent driver. For
-example, the PCI protocol implements `map_interrupt()` for PCI children. A
-driver should spawn a thread to wait on the interrupt handle.
+Hardware interrupts are represented by Zircon [`zx::interrupt`][zx-interrupt]
+kernel objects. Drivers request an interrupt capability from their parent bus driver
+(such as the platform bus or PCI driver).
 
-The kernel will automatically handle masking and unmasking the interrupt as
-appropriate, depending on whether the interrupt is edge-triggered or
-level-triggered. For level-triggered hardware interrupts,
-[`zx_interrupt_wait()`](/reference/syscalls/interrupt_wait.md) will mask
-the interrupt before returning and unmask the interrupt when it is called again
-the next time. For edge-triggered interrupts, the interrupt remains unmasked.
+Drivers should listen to interrupts asynchronously on their synchronized driver
+dispatcher using [`async::IrqMethod`][async-irq-method]:
 
-The interrupt thread should not perform any long-running tasks. For drivers that
-perform lengthy tasks, use a worker thread.
+```cpp
+#include <lib/async/cpp/irq.h>
 
-You can signal an interrupt handle with
-[`zx_interrupt_trigger()`](/reference/syscalls/interrupt_trigger.md) on
-slot `ZX_INTERRUPT_SLOT_USER` to return from `zx_interrupt_wait()`. This is
-necessary to shut down the interrupt thread during driver clean up.
+class MyDriver : public fdf::DriverBase2 {
+ public:
+  zx::result<> Start(fdf::DriverContext context) override {
+    irq_method_.set_handler(
+        [this](async_dispatcher_t* dispatcher, async::IrqMethod* irq,
+               zx_status_t status, const zx_packet_interrupt_t* packet) {
+          OnInterrupt(status);
+        });
+    return zx::make_result(irq_method_.Post(dispatcher(), interrupt_.get()));
+  }
 
-## FIDL messages
+ private:
+  void OnInterrupt(zx_status_t status) {
+    // Acknowledge interrupt and process hardware events.
+    interrupt_.ack();
+  }
 
-## Non-driver processes
+  zx::interrupt interrupt_;
+  async::IrqMethod irq_method_{this};
+};
+```
 
-Messages for each device class are defined in the
-[FIDL](/docs/development/languages/fidl/README.md) language. Each device
-implements zero or more FIDL protocols, multiplexed over a single channel per
-client. The driver is given the opportunity to interpret FIDL messages through
-the `message()` hook.
+For more details and Rust examples, see
+[Handle interrupts in a driver][handle-interrupts].
 
-## Drivers in other processes
+## Driver rights and hardware resources
 
-If a driver needs to communicate with a driver in a separate process, rather
-than define protocol ops, it must instead host an outgoing directory, similar to
-components, which should host all FIDL protocols the child driver would access
-on bind.
+Drivers run in restricted user space processes with sandboxed namespaces. Drivers do
+not have arbitrary access to the filesystem, raw memory, or root resources.
 
-## Protocol ops vs. FIDL messages
+Privileged hardware resources (such as MMIO ranges, interrupts, and Bus Transaction
+Initiators for DMA) are managed and partitioned by bus drivers such as the
+[Platform Bus][platform-bus] or [PCI][pci-driver] driver. Drivers request access to
+their assigned resources via FIDL protocols provided by their parent node.
 
-Protocol ops define the in-process API for a device. FIDL messages define the
-API for communicating out of process. Define a protocol op if the function is
-meant to be called by other drivers in the same process. A driver should call a
-protocol op on its parent to make use of those functions.
+## Power management
 
-## Isolate devices
+Drivers integrate with the Fuchsia Power Framework through Driver Framework power
+elements. By enabling runtime-managed dispatchers (`power_managed_dispatchers_enabled: "true"`
+in the driver manifest), the driver runtime coordinates power transitions:
 
-Devices that are added with `DEVICE_ADD_MUST_ISOLATE` spawn a new driver host.
-The device must have an accompanying outgoing directory which hosts FIDL
-protocols. A driver which is bound to the device will be loaded into the new
-driver host and provided the ability to connect FIDL protocols exported in the
-outgoing directory provided by the parent driver.
+- **Suspending**: When entering a low-power state, power-managed dispatchers are paused,
+  and the driver's `SystemSuspend` hook is called on the always-on dispatcher to save
+  hardware state.
+- **Resuming**: When waking up, the driver's `SystemResume` hook restores hardware
+  state before dispatchers resume processing requests.
 
-## Driver rights
+For detailed guidelines, see [Device power management][device-power-management].
 
-Although drivers run in user space processes, they have a more restricted set of
-rights than normal processes. Drivers are not allowed to access the filesystem,
-including devfs. That means a driver cannot interact with arbitrary devices. If
-your driver needs to do this, consider writing a service component instead. For
-example, the virtual console is implemented by the
-[virtcon](/src/bringup/bin/virtcon) component.
+<!-- Reference links -->
 
-Privileged operations such as `zx_vmo_create_contiguous()` and
-[`zx_interrupt_create`](/reference/syscalls/interrupt_create.md) require a
-root resource handle. This handle is not available to drivers other than the
-system driver ([ACPI](/src/devices/board/drivers/x86) on x86 systems and
-[platform](/src/devices/bus/drivers/platform) on ARM systems). A device should
-request its parent to perform such operations for it. Contact the author of the
-parent driver if its protocol does not address this use case.
-
-Similarly, a driver is not allowed to request arbitrary MMIO ranges, interrupts
-or GPIOs. Bus drivers such as PCI and platform only return the resources
-associated to the child device.
-
-## Advanced Topics and Tips
-
-### Taking a long time to initialize
-
-What if your device takes a long time to initialize? When we discussed the
-`null_bind()` function above, we indicated that a successful return told the
-driver manager that the driver is now associated with the device. We can't spend
-a lot of time in the bind function; we're basically expected to initialize our
-device, publish it, and be done.
-
-But your device might need to perform a lengthy initialization operation, such
-as:
-
-*   enumerate hardware points
-*   load firmware
-*   negotiate a protocol
-
-and so on, which might take a long time to do.
-
-You can publish your device as "invisible" by implementing the device `init()`
-hook. The `init()` hook is run after the device is added through `device_add()`,
-and may be used to safely access the device state and to spawn a worker thread.
-The device will remain invisible and is guaranteed not to be removed until
-`device_init_reply()` is called, which may be done from any thread. This meets
-the requirements for the binding function, but nobody is able to use your device
-(because nobody knows about it yet, because it's not visible). Now your device
-can perform the long operations with a background thread.
-
-When your device is ready to service client requests, call `device_init_reply()`
-which will cause it to appear in the pathname space.
-
-#### Power savings
-
-Two callouts, `suspend()` and `resume()`, are available for your device in order
-to support power or other resource saving features.
-
-Both take a device context pointer and a flags argument, but the flags argument
-is used only in the suspend case.
-
-Flag                                    | Meaning
---------------------------------------- | -------
-`DEVICE_SUSPEND_FLAG_REBOOT`            | The driver should shut itself down in preparation for a reboot or shutdown of the machine
-`DEVICE_SUSPEND_FLAG_REBOOT_BOOTLOADER` | ?
-`DEVICE_SUSPEND_FLAG_REBOOT_RECOVERY`   | ?
-`DEVICE_SUSPEND_FLAG_POWEROFF`          | The driver should shut itself down in preparation for power off
-
-<!---
-Yeah, I'm just guessing on the flags; they're used so little...
-
-For documentation purposes, what should I write? That they are just hints, or
-that you *must* do something because of a given flag, or ... ?
--->
-
-## Reference: Support functions
-
-This section lists support functions that are provided for your driver to use.
-
-### Accessor functions
-
-The context block that's passed as the first argument to your driver's protocol
-functions is an opaque data structure. This means that in order to access the
-data elements, you need to call an accessor function:
-
-Function            | Purpose
-------------------- | --------------------------------
-`device_get_name()` | Retrieves the name of the device
-
-### Administrative functions
-
-The following functions are used to administer the device:
-
-Function                | Purpose
------------------------ | ------------------------------------------------------
-`device_add()`          | Adds a device to a parent
-`device_async_remove()` | Schedules the removal of a device and all its children
-
-<!---
-@@@ Notes only @@@
-
-This section is great for things like talking about buffer management,
-threading, best practices, advanced options for device_add(), and so on.
-I think it can be somewhere between the man page ("printf is used to print a string
-and takes the following parameters") and an application note &mdash; I want to see
-examples of how to use the functions, what the arguments mean, what the impact of
-various design decisions is, that kind of thing.
--->
+[driver-framework]: /docs/concepts/drivers/driver_framework.md
+[driver-manager]: /docs/concepts/drivers/driver_framework.md#driver_manager
+[driver-host]: /docs/concepts/drivers/driver_framework.md#driver_host
+[driver-runtime]: /docs/concepts/drivers/driver_framework.md#driver_runtime
+[drivers-and-nodes]: /docs/concepts/drivers/drivers_and_nodes.md
+[driver-binding]: /docs/concepts/drivers/driver_binding.md
+[driver-communication]: /docs/concepts/drivers/driver_communication.md
+[service-capabilities]: /docs/concepts/components/v2/capabilities/service.md
+[write-a-minimal-dfv2-driver]: /docs/development/drivers/developer_guide/write-a-minimal-dfv2-driver.md
+[bind-rules-tutorial]: /docs/development/drivers/tutorials/bind-rules-tutorial.md
+[fidl-tutorial]: /docs/development/drivers/tutorials/fidl-tutorial.md
+[handle-interrupts]: /docs/development/drivers/developer_guide/handle-interrupts-in-a-driver.md
+[platform-bus]: /docs/development/drivers/concepts/device_driver_model/platform-bus.md
+[device-power-management]: /docs/development/drivers/concepts/device_driver_model/device-power.md
+[pci-driver]: /src/devices/pci/
+[zx-interrupt]: /reference/kernel_objects/interrupts.md
+[async-irq-method]: /sdk/lib/async/include/lib/async/cpp/irq.h

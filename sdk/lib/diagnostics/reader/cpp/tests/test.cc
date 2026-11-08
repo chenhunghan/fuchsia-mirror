@@ -13,11 +13,11 @@
 #include <memory>
 
 #include <rapidjson/pointer.h>
-#include <re2/re2.h>
 
 #include "lib/fpromise/promise.h"
 #include "lib/sys/cpp/service_directory.h"
 #include "rapidjson/document.h"
+#include "re2/re2.h"
 #include "src/lib/testing/loop_fixture/real_loop_fixture.h"
 
 namespace component {

@@ -1,0 +1,148 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+// Configuration capabilities with transitional default values used by hermetic
+// Scenic test components. Production builds use `config.shard.cml` instead so
+// missing routes fail validation rather than falling back to test defaults.
+{
+    use: [
+        // LINT.IfChange
+        {
+            config: "fuchsia.scenic.Renderer",
+            key: "renderer",
+            type: "string",
+            max_size: 16,
+            availability: "transitional",
+            default: "vulkan",
+        },
+        {
+            config: "fuchsia.scenic.FrameSchedulerMinPredictedFrameDurationInUs",
+            key: "frame_scheduler_min_predicted_frame_duration_in_us",
+            type: "uint64",
+            availability: "transitional",
+            default: 0,
+        },
+        {
+            config: "fuchsia.scenic.FramePredictionMarginInUs",
+            key: "frame_prediction_margin_in_us",
+            type: "uint64",
+            availability: "transitional",
+            default: 3000,
+        },
+        {
+            config: "fuchsia.scenic.PointerAutoFocus",
+            key: "pointer_auto_focus",
+            type: "bool",
+            availability: "transitional",
+            default: true,
+        },
+        {
+            config: "fuchsia.scenic.DisplayComposition",
+            key: "display_composition",
+            type: "bool",
+            availability: "transitional",
+            default: true,
+        },
+        {
+            config: "fuchsia.scenic.DisplayCompositionEnableHeuristics",
+            key: "display_composition_enable_heuristics",
+            type: "bool",
+            availability: "transitional",
+            default: false,
+        },
+        {
+            config: "fuchsia.scenic.ICanHazDisplayId",
+            key: "i_can_haz_display_id",
+            type: "int64",
+            availability: "transitional",
+            default: -1,
+        },
+        {
+            config: "fuchsia.scenic.ICanHazDisplayMode",
+            key: "i_can_haz_display_mode",
+            type: "int64",
+            availability: "transitional",
+            default: -1,
+        },
+        {
+            config: "fuchsia.scenic.DisplayRotation",
+            key: "display_rotation",
+            type: "uint64",
+            availability: "transitional",
+            default: 270,
+        },
+        {
+            config: "fuchsia.scenic.MinDisplayHorizontalResolutionPx",
+            key: "min_display_horizontal_resolution_px",
+            type: "int32",
+            availability: "transitional",
+            default: -1,
+        },
+        {
+            config: "fuchsia.scenic.MaxDisplayHorizontalResolutionPx",
+            key: "max_display_horizontal_resolution_px",
+            type: "int32",
+            availability: "transitional",
+            default: -1,
+        },
+        {
+            config: "fuchsia.scenic.MinDisplayVerticalResolutionPx",
+            key: "min_display_vertical_resolution_px",
+            type: "int32",
+            availability: "transitional",
+            default: -1,
+        },
+        {
+            config: "fuchsia.scenic.MaxDisplayVerticalResolutionPx",
+            key: "max_display_vertical_resolution_px",
+            type: "int32",
+            availability: "transitional",
+            default: -1,
+        },
+        {
+            config: "fuchsia.scenic.MinDisplayRefreshRateMillihertz",
+            key: "min_display_refresh_rate_millihertz",
+            type: "int32",
+            availability: "transitional",
+            default: -1,
+        },
+        {
+            config: "fuchsia.scenic.MaxDisplayRefreshRateMillihertz",
+            key: "max_display_refresh_rate_millihertz",
+            type: "int32",
+            availability: "transitional",
+            default: -1,
+        },
+        {
+            config: "fuchsia.scenic.FrameCounterOverlay",
+            key: "enable_frame_counter_overlay",
+            type: "bool",
+            availability: "transitional",
+            default: false,
+        },
+        {
+            config: "fuchsia.scenic.UseSeparateInputThread",
+            key: "use_separate_input_thread",
+            type: "bool",
+            availability: "transitional",
+            default: true,
+        },
+        {
+            config: "fuchsia.ui.VisualDebuggingLevel",
+            key: "visual_debugging_level",
+            type: "uint8",
+            availability: "transitional",
+            default: 0,
+        },
+        {
+            config: "fuchsia.ui.Prefetch",
+            key: "prefetch",
+            type: "bool",
+            availability: "transitional",
+            default: false,
+        },
+
+        // LINT.ThenChange(//src/ui/scenic/bin/meta/config.shard.cml)
+    ],
+}

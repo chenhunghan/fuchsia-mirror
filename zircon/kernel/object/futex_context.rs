@@ -26,6 +26,7 @@ use crate::kernel::thread::{
     AnnotatedAutoEagerReschedDisabler, PreemptDisabledToken, Thread, ThreadPtr, soft_fault,
 };
 use crate::kernel::wait_queue::{ForceInheritance, Interruptible, ResourceOwnership};
+use crate::ksync_kernel::{NoIrqSavePolicy, TrackedSpinlock};
 use crate::ktrace_rs::{ArgValue, begin_scope_cond};
 use crate::user_copy::{UserInPtr, UserOutPtr};
 use core::mem::{MaybeUninit, size_of};
@@ -37,7 +38,7 @@ use fbl::{
     DefaultHashable, DoublyLinkedList, DoublyLinkedListContainable, DoublyLinkedListNode,
     HashTable, HashTableKeyable, UniquePtr,
 };
-use ksync::{KCell, KMutex, LockToken, NoIrqSavePolicy, RawSpinlock, guarded, kcell_init};
+use ksync::{KCell, KMutex, LockToken, guarded, kcell_init};
 use object_constants_rs::{kFutexContextStorageAlign, kFutexContextStorageSize};
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
@@ -248,6 +249,7 @@ impl ThreadDispatcher {
 struct WakeHook;
 
 impl IWakeRequeueHook for WakeHook {
+    #[inline]
     fn on_wake_or_requeue(&mut self, t: &mut ChainLockProof<'_, Thread>) {
         let t = ThreadPtr::from(t.owner());
         // Why is this safe?  Because there are two places that a blocking
@@ -289,6 +291,7 @@ struct RequeueHook<'a, 'b> {
 }
 
 impl IWakeRequeueHook for RequeueHook<'_, '_> {
+    #[inline]
     fn on_wake_or_requeue(&mut self, t: &mut ChainLockProof<'_, Thread>) {
         let t = ThreadPtr::from(t.owner());
         // SAFETY: `t` is a valid `ThreadPtr` whose ChainLock is held by the caller.
@@ -365,7 +368,7 @@ struct FutexState {
 
     #[pin]
     #[mutex(flags = lockdep::LOCK_FLAGS_MULTI_ACQUIRE)]
-    lock: KMutex<RawSpinlock>,
+    lock: KMutex<TrackedSpinlock>,
 }
 
 // SAFETY: `FutexState` node links and atomic fields are only mutated while holding the owning
@@ -683,7 +686,7 @@ pub struct FutexContext {
     // while holding the thread lock.
     #[pin]
     #[mutex(flags = lockdep::LOCK_FLAGS_TRACKING_DISABLED)]
-    pool_lock: KMutex<RawSpinlock>,
+    pool_lock: KMutex<TrackedSpinlock>,
 
     // Map containing FutexStates currently in use (eg; futexes with waiters).
     #[guarded_by(pool_lock)]
@@ -1021,11 +1024,13 @@ impl FutexContext {
                     let owner_token = futex_owner_guard
                         .token()
                         .expect("futex_owner_guard must hold the futex owner's dispatcher lock");
-                    if !owner_thread.is_dying_or_dead_locked(&owner_token) {
-                        // SAFETY: `owner_token` was obtained from `futex_owner_guard`, which was
-                        // created over `futex_owner_thread` (i.e. `owner_thread`) and holds that
-                        // same thread's dispatcher lock. We also hold the futex state lock and
-                        // are following the `FutexContext` protocol.
+                    // SAFETY: `owner_token` was obtained from `futex_owner_guard`, which was
+                    // created over `futex_owner_thread` (i.e. `owner_thread`) and holds that
+                    // same thread's dispatcher lock. We also hold the futex state lock and
+                    // are following the `FutexContext` protocol.
+                    if !unsafe { owner_thread.is_dying_or_dead_locked(&owner_token) } {
+                        // SAFETY: As above, `owner_token` holds `owner_thread`'s own dispatcher
+                        // lock.
                         new_owner_observation =
                             unsafe { owner_thread.observe_core_thread_locked(&owner_token) };
                     }
@@ -1477,8 +1482,12 @@ impl FutexContext {
                 // Checking the lifecycle first also guarantees `core_thread_` is still set: it is
                 // only cleared in the same critical section that moves the thread to
                 // `Lifecycle::Dead`.
-                if !owner_thread.is_dying_or_dead_locked(&owner_token) {
-                    new_requeue_owner = Some(owner_thread.core_thread_locked(&owner_token));
+                //
+                // SAFETY: `owner_token` holds `owner_thread`'s own dispatcher lock (see above).
+                if !unsafe { owner_thread.is_dying_or_dead_locked(&owner_token) } {
+                    // SAFETY: As above, `owner_token` holds `owner_thread`'s own dispatcher lock.
+                    new_requeue_owner =
+                        Some(unsafe { owner_thread.core_thread_locked(&owner_token) });
                 }
             }
 

@@ -5,6 +5,7 @@
 #ifndef SRC_DEVELOPER_FORENSICS_UTILS_VMO_H_
 #define SRC_DEVELOPER_FORENSICS_UTILS_VMO_H_
 
+#include <fidl/fuchsia.mem/cpp/fidl.h>
 #include <lib/zx/result.h>
 #include <lib/zx/vmo.h>
 
@@ -26,6 +27,12 @@ zx::result<std::string> StringFromVmo(const zx::vmo& vmo);
 // The stream size of the returned VMO is set to |string.size()|.
 // Returns the VMO on success, or a zx_status_t error if creating or writing to the VMO fails.
 zx::result<zx::vmo> VmoFromString(std::string_view string);
+
+// Creates a new fuchsia.mem/Buffer containing |string|.
+//
+// The size of the returned buffer is |string.size()|.
+// Returns the buffer on success, or a zx_status_t error if creating or writing to the VMO fails.
+zx::result<fuchsia_mem::Buffer> BufferFromString(std::string_view string);
 
 }  // namespace forensics
 

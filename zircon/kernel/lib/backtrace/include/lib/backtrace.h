@@ -11,6 +11,8 @@
 #include <sys/types.h>
 #include <zircon/types.h>
 
+#include <cstddef>
+
 // Contains an array of return address values representing a thread's backtrace.
 //
 // This class is not thread-safe.
@@ -53,5 +55,13 @@ class Backtrace {
   size_t size_{};
   FrameType first_frame_type_{ReturnAddress};
 };
+
+extern "C" {
+void cpp_backtrace_print(const Backtrace* bt);
+void cpp_backtrace_print_without_version(const Backtrace* bt, FILE* file);
+const vaddr_t* cpp_backtrace_data(const Backtrace* bt);
+size_t cpp_backtrace_size(const Backtrace* bt);
+void cpp_backtrace_reset(Backtrace* bt);
+}
 
 #endif  // ZIRCON_KERNEL_LIB_BACKTRACE_INCLUDE_LIB_BACKTRACE_H_

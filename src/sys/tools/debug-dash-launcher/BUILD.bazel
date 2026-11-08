@@ -2,6 +2,22 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/components:structured_config.bzl",
+    "fuchsia_structured_config_rust_lib",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
 package(default_applicable_licenses = ["//:license"])
 
 exports_files(
@@ -11,4 +27,97 @@ exports_files(
         "meta/debug_dash_launcher.root_shard.cml",
     ],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "debug-dash-launcher",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/debug_dash_launcher.cml",
+)
+
+fuchsia_structured_config_rust_lib(
+    name = "debug_dash_launcher_config",
+    cm_label = ":manifest",
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = [
+        "src/launch.rs",
+        "src/launch/component.rs",
+        "src/launch/package.rs",
+        "src/layout.rs",
+        "src/main.rs",
+        "src/package_resolver.rs",
+        "src/socket.rs",
+        "src/trampoline.rs",
+    ],
+    binary_name = "debug-dash-launcher",
+    build_flags = ["//build/config/rust:bootfs"],
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        ":debug_dash_launcher_config",
+        "//sdk/fidl/fuchsia.component.runner:fuchsia.component.runner_rust",
+        "//sdk/fidl/fuchsia.dash:fuchsia.dash_rust",
+        "//sdk/fidl/fuchsia.device:fuchsia.device_rust",
+        "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_rust",
+        "//sdk/fidl/fuchsia.diagnostics.host:fuchsia.diagnostics.host_rust",
+        "//sdk/fidl/fuchsia.hardware.pty:fuchsia.hardware.pty_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_rust",
+        "//sdk/fidl/fuchsia.pkg:fuchsia.pkg_rust",
+        "//sdk/fidl/fuchsia.process:fuchsia.process_rust",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust",
+        "//sdk/rust/zx",
+        "//src/lib/diagnostics/inspect/runtime/rust",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-fs",
+        "//src/lib/fuchsia-runtime",
+        "//src/lib/fuchsia-url",
+        "//src/storage/lib/vfs/rust:vfs",
+        "//src/sys/lib/moniker",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:indexmap",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:url",
+    ],
+)
+
+# `debug-dash-launcher-unittests` remains in BUILD.gn above the bazel2gn
+# sentinel because it packages `//src/bringup/bin/ptysvc:component` (which is
+# GN-only). `meta/debug_dash_launcher_unittests.cml` expects
+# `bin/debug_dash_launcher_bin_test`.
+rustc_test(
+    name = "bin_test",
+    build_flags = ["//build/config/rust:bootfs"],
+    crate = ":bin",
+    crate_name = "debug_dash_launcher_bin_test",
+    deps = [
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:tempfile",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged_bin",
+    binary = ":bin",
+    binary_name = "debug-dash-launcher",
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":manifest",
+    visibility = ["//src/sys/tools/debug-dash-launcher/integration_test:__pkg__"],
+    deps = [":bin_packaged_bin"],
 )

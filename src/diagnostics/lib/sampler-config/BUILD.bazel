@@ -1,0 +1,109 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "sampler-config",
+    srcs = [
+        "src/assembly/mod.rs",
+        "src/common.rs",
+        "src/input/mod.rs",
+        "src/lib.rs",
+        "src/runtime/mod.rs",
+        "src/utils.rs",
+    ],
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    visibility = [
+        "//src/connectivity/network/tests/integration/inspect:__subpackages__",
+        "//src/diagnostics/lib/sampler-config:__subpackages__",
+        "//src/diagnostics/sampler:__subpackages__",
+        "//src/diagnostics/tools/generate_sampler_configs:__pkg__",
+        "//src/lib/assembly/platform_configuration:__subpackages__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_rust_common",
+        "//src/lib/diagnostics/selectors",
+        "//src/sys/lib/component_id_index",
+        "//src/sys/lib/moniker",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+# test-parity-allow-manual: wrapped by :sampler-config-tests (Fuchsia) and :sampler-config_host_test (host).
+rustc_test(
+    name = "sampler-config_test",
+    crate = ":sampler-config",
+    # Only bazel2gn uses this, as the GN `output_name`, matching the
+    # `bin/sampler_config_lib_test` binary in meta/test.cml.
+    crate_name = "sampler_config_lib_test",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    tags = ["manual"],
+    deps = [
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:serde_json5",
+    ],
+)
+
+wrap_host_rust_test(
+    name = "sampler-config_host_test",
+    binary_name = "sampler-config_test",
+    visibility = ["//src/diagnostics:__pkg__"],
+)
+
+fx_packaged_binary(
+    name = "sampler-config_test_packaged_bin",
+    testonly = True,
+    binary = ":sampler-config_test",
+    binary_name = "sampler_config_lib_test",
+)
+
+fx_component_manifest(
+    name = "sampler-config-tests-manifest",
+    testonly = True,
+    component_name = "sampler-config-tests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners:tmp_storage.shard.cml",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/test.cml",
+)
+
+fx_test_component(
+    name = "sampler-config-tests-component",
+    compiled_manifest = ":sampler-config-tests-manifest",
+    deps = [":sampler-config_test_packaged_bin"],
+)
+
+fx_package(
+    name = "sampler-config-tests-package",
+    package_name = "sampler-config-tests",
+    test_components = [":sampler-config-tests-component"],
+)
+
+fx_test(
+    name = "sampler-config-tests",
+    package = ":sampler-config-tests-package",
+    visibility = ["//src/diagnostics:__pkg__"],
+)

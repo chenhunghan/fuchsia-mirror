@@ -4,9 +4,9 @@
 
 use crate::time::utc;
 use fuchsia_runtime::{UtcDuration, UtcInstant};
-use starnix_types::time::{itimerspec_from_deadline_interval, time_from_timespec};
+use starnix_types::time::time_from_timespec;
 use starnix_uapi::errors::Errno;
-use starnix_uapi::{itimerspec, timespec};
+use starnix_uapi::timespec;
 use std::ops;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -94,14 +94,6 @@ impl TargetTime {
             TargetTime::Monotonic(t) => t.into_nanos(),
             TargetTime::RealTime(t) => t.into_nanos(),
             TargetTime::BootInstant(t) => t.into_nanos(),
-        }
-    }
-
-    pub fn itimerspec(&self, interval: zx::MonotonicDuration) -> itimerspec {
-        match self {
-            TargetTime::Monotonic(t) => itimerspec_from_deadline_interval(*t, interval),
-            TargetTime::BootInstant(t) => itimerspec_from_deadline_interval(*t, interval),
-            TargetTime::RealTime(t) => itimerspec_from_deadline_interval(*t, interval),
         }
     }
 

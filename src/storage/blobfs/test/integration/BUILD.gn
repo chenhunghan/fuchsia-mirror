@@ -98,7 +98,6 @@ test("blobfs_integration") {
     "//src/storage/lib/block_client/cpp",
     "//src/storage/lib/block_client/cpp:fake_device",
     "//src/storage/lib/fs_management",
-    "//src/storage/lib/utils:topological_path",
     "//zircon/system/ulib/zx",
     "//zircon/third_party/ulib/safemath",
   ]

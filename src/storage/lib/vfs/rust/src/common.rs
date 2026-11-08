@@ -4,7 +4,6 @@
 
 //! Common utilities used by both directory and file traits.
 
-use crate::node::Node;
 use flex_client::fidl::ServerEnd;
 
 use flex_fuchsia_io as fio;
@@ -226,130 +225,6 @@ pub enum CreationMode {
     UnnamedTemporary,
     // Create the object as an unnamed, temporary, and unlinkable object.
     UnlinkableUnnamedTemporary,
-}
-
-/// Used to translate fuchsia.io/Node.SetAttr calls (io1) to fuchsia.io/Node.UpdateAttributes (io2).
-pub(crate) fn io1_to_io2_attrs(
-    flags: fio::NodeAttributeFlags,
-    attrs: fio::NodeAttributes,
-) -> fio::MutableNodeAttributes {
-    fio::MutableNodeAttributes {
-        creation_time: flags
-            .contains(fio::NodeAttributeFlags::CREATION_TIME)
-            .then_some(attrs.creation_time),
-        modification_time: flags
-            .contains(fio::NodeAttributeFlags::MODIFICATION_TIME)
-            .then_some(attrs.modification_time),
-        ..Default::default()
-    }
-}
-
-/// The set of attributes that must be queried to fulfill an io1 GetAttrs request.
-const ALL_IO1_ATTRIBUTES: fio::NodeAttributesQuery = fio::NodeAttributesQuery::PROTOCOLS
-    .union(fio::NodeAttributesQuery::ABILITIES)
-    .union(fio::NodeAttributesQuery::ID)
-    .union(fio::NodeAttributesQuery::CONTENT_SIZE)
-    .union(fio::NodeAttributesQuery::STORAGE_SIZE)
-    .union(fio::NodeAttributesQuery::LINK_COUNT)
-    .union(fio::NodeAttributesQuery::CREATION_TIME)
-    .union(fio::NodeAttributesQuery::MODIFICATION_TIME);
-
-/// Default set of attributes to send to an io1 GetAttr request upon failure.
-const DEFAULT_IO1_ATTRIBUTES: fio::NodeAttributes = fio::NodeAttributes {
-    mode: 0,
-    id: fio::INO_UNKNOWN,
-    content_size: 0,
-    storage_size: 0,
-    link_count: 0,
-    creation_time: 0,
-    modification_time: 0,
-};
-
-const DEFAULT_LINK_COUNT: u64 = 1;
-
-/// Approximate a set of POSIX mode bits based on a node's protocols and abilities. This follows the
-/// C++ VFS implementation, and is only used for io1 GetAttrs calls where the filesystem doesn't
-/// support POSIX mode bits. Returns 0 if the mode bits could not be approximated.
-const fn approximate_posix_mode(
-    protocols: Option<fio::NodeProtocolKinds>,
-    abilities: fio::Abilities,
-) -> u32 {
-    let Some(protocols) = protocols else {
-        return 0;
-    };
-    match protocols {
-        fio::NodeProtocolKinds::DIRECTORY => {
-            let mut mode = libc::S_IFDIR;
-            if abilities.contains(fio::Abilities::ENUMERATE) {
-                mode |= libc::S_IRUSR;
-            }
-            if abilities.contains(fio::Abilities::MODIFY_DIRECTORY) {
-                mode |= libc::S_IWUSR;
-            }
-            if abilities.contains(fio::Abilities::TRAVERSE) {
-                mode |= libc::S_IXUSR;
-            }
-            mode
-        }
-        fio::NodeProtocolKinds::FILE => {
-            let mut mode = libc::S_IFREG;
-            if abilities.contains(fio::Abilities::READ_BYTES) {
-                mode |= libc::S_IRUSR;
-            }
-            if abilities.contains(fio::Abilities::WRITE_BYTES) {
-                mode |= libc::S_IWUSR;
-            }
-            if abilities.contains(fio::Abilities::EXECUTE) {
-                mode |= libc::S_IXUSR;
-            }
-            mode
-        }
-        fio::NodeProtocolKinds::CONNECTOR => 0,
-        #[cfg(fuchsia_api_level_at_least = "HEAD")]
-        fio::NodeProtocolKinds::SYMLINK => libc::S_IFLNK | libc::S_IRUSR,
-        _ => 0,
-    }
-}
-
-/// Used to translate fuchsia.io/Node.GetAttributes calls (io2) to fuchsia.io/Node.GetAttrs (io1).
-/// We don't return a Result since the fuchsia.io/Node.GetAttrs method doesn't use FIDL errors, and
-/// thus requires we return a status code and set of default attributes for the failure case.
-pub async fn io2_to_io1_attrs<T: Node>(
-    node: &T,
-    rights: fio::Rights,
-) -> (zx_status::sys::zx_status_t, fio::NodeAttributes) {
-    if !rights.contains(fio::Rights::GET_ATTRIBUTES) {
-        return (Status::BAD_HANDLE.into_raw(), DEFAULT_IO1_ATTRIBUTES);
-    }
-
-    let attributes = node.get_attributes(ALL_IO1_ATTRIBUTES).await;
-    let Ok(fio::NodeAttributes2 {
-        mutable_attributes: mut_attrs,
-        immutable_attributes: immut_attrs,
-    }) = attributes
-    else {
-        return (attributes.unwrap_err().into_raw(), DEFAULT_IO1_ATTRIBUTES);
-    };
-
-    (
-        zx_status::sys::ZX_OK,
-        fio::NodeAttributes {
-            // If the node has POSIX mode bits, use those directly, otherwise synthesize a set based
-            // on the node's protocols/abilities if available.
-            mode: mut_attrs.mode.unwrap_or_else(|| {
-                approximate_posix_mode(
-                    immut_attrs.protocols,
-                    immut_attrs.abilities.unwrap_or_default(),
-                )
-            }),
-            id: immut_attrs.id.unwrap_or(fio::INO_UNKNOWN),
-            content_size: immut_attrs.content_size.unwrap_or_default(),
-            storage_size: immut_attrs.storage_size.unwrap_or_default(),
-            link_count: immut_attrs.link_count.unwrap_or(DEFAULT_LINK_COUNT),
-            creation_time: mut_attrs.creation_time.unwrap_or_default(),
-            modification_time: mut_attrs.modification_time.unwrap_or_default(),
-        },
-    )
 }
 
 pub fn mutable_node_attributes_to_query(

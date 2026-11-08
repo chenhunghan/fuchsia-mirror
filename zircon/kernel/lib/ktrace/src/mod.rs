@@ -70,13 +70,22 @@ impl KTraceState {
 #[unsafe(no_mangle)]
 pub static GLOBAL_KTRACE_STATE: KTraceState = KTraceState::new();
 
-declare_interned_category!(META_CAT, "kernel:meta", extern);
-declare_interned_string!(DROP_STATS_REF, "drop_stats", extern);
-declare_interned_string!(NUM_RECORDS_REF, "num_records", extern);
-declare_interned_string!(NUM_BYTES_REF, "num_bytes", extern);
+/// The `KTrace` instance owned by the global C++ `KTrace` singleton, or null if it has not been
+/// initialized.
+///
+/// Published by `rust_ktrace_set_active`, which C++ calls only for the global singleton, from
+/// `KTrace::Init` once `rust_ktrace_init` has fully constructed the instance. The singleton is
+/// never destroyed (`KTrace::~KTrace` asserts this), so a published instance is never freed. Test
+/// instances created by `rust_ktrace_init` are never published here.
+///
+/// The store is `Release` and the load in `KTrace::with_instance` is `Acquire`, matching the C++
+/// `KTrace::rust_ktrace_` accesses. That is enough: the non-atomic fields of `KTrace` are written
+/// only by `rust_ktrace_init`, before publication, and the release/acquire pair makes those writes
+/// visible to any reader that sees the pointer. Everything changed after publication (the shared
+/// state and the per-CPU buffer pointers) is atomic and carries its own ordering.
+static ACTIVE_KTRACE: AtomicPtr<KTrace> = AtomicPtr::new(ptr::null_mut());
 
 unsafe extern "C" {
-    fn cpp_ktrace_get_active_instance() -> *mut ffi::c_void;
     #[cfg(ktest)]
     fn cpp_ktrace_get_thread_local_override() -> *mut ffi::c_void;
 }
@@ -221,6 +230,18 @@ impl<'a> StringRef<'a> {
         }
     }
 }
+/// Runs `f` out of line.
+///
+/// The trace macros build their `Argument` arrays inside a closure passed here, so the arrays
+/// occupy this helper's frame instead of the instrumented function's frame. The compiler reserves
+/// stack for those arrays whether or not the category is enabled, which matters for functions on
+/// paths that run on arbitrary thread stacks, such as interrupt handling and preemption.
+#[inline(never)]
+#[cold]
+pub fn outlined<F: FnOnce()>(f: F) {
+    f()
+}
+
 #[derive(Clone, Copy)]
 pub struct Argument<'a> {
     name: &'static InternedString,
@@ -415,63 +436,95 @@ impl<'a, const N: usize> ErasedScope for KTraceScope<'a, N> {
     }
 }
 
-// LINT.IfChange(DroppedRecordDurationEvent)
-#[repr(C)]
-struct DroppedRecordDurationEvent {
-    header: u64,
-    start: InstantBootTicks,
-    process_id: u64,
-    thread_id: u64,
-    num_dropped_arg: u64,
-    bytes_dropped_arg: u64,
-    end: InstantBootTicks,
+/// Zero-sized scope placeholder returned by `begin_scope_cond!` when its compile-time condition is
+/// `false`, avoiding `Option<KTraceScope<'a, N>>` stack slots and out-of-line drop calls.
+#[must_use]
+#[derive(Debug)]
+pub struct DisabledKTraceScope<'a, const N: usize = 0>(core::marker::PhantomData<&'a ()>);
+
+// Empty `Drop` allows callers to pass disabled and enabled scope guards uniformly to `drop(...)`
+// without triggering `clippy::drop_non_drop`, while matching `Option<KTraceScope<'a, N>>` drop
+// borrow checking.
+impl<'a, const N: usize> Drop for DisabledKTraceScope<'a, N> {
+    #[inline(always)]
+    fn drop(&mut self) {}
 }
-const _: () = assert!(size_of::<DroppedRecordDurationEvent>() == 56);
-// LINT.ThenChange(//zircon/kernel/lib/percpu_writer/include/lib/percpu_writer/buffer.h:DroppedRecordDurationEvent)
 
-// LINT.IfChange(DroppedRecordStats)
-/// This struct keeps track of the duration, number, and size of trace records dropped when the
-/// buffer is full. These statistics are emitted to the trace buffer as a duration as soon as
-/// space is available to do so, at which point the values are reset to 0, or false in the case
-/// of has_dropped.
-#[repr(C)]
-#[derive(Default, Debug, Clone)]
-pub struct DroppedRecordStats {
-    pub first_dropped: InstantBootTicks,
-    pub last_dropped: InstantBootTicks,
-
-    /// By storing num_dropped and bytes_dropped in 32-bit values, we ensure that they can each
-    /// be stored in a single 64-bit word in the FXT record we emit when space is available.
-    pub num_dropped: u32,
-    pub bytes_dropped: u32,
-    pub has_dropped: bool,
-}
-const _: () = assert!(size_of::<DroppedRecordStats>() == 32);
-// LINT.ThenChange(//zircon/kernel/lib/percpu_writer/include/lib/percpu_writer/buffer.h:DroppedRecordStats)
-
-impl DroppedRecordStats {
-    pub fn reset(&mut self) {
-        self.first_dropped = InstantBootTicks(0);
-        self.last_dropped = InstantBootTicks(0);
-        self.num_dropped = 0;
-        self.bytes_dropped = 0;
-        self.has_dropped = false;
+impl<'a, const N: usize> DisabledKTraceScope<'a, N> {
+    #[inline(always)]
+    pub const fn is_some(&self) -> bool {
+        false
     }
 
-    pub fn track(&mut self, now: InstantBootTicks, size: u32) {
-        if !self.has_dropped {
-            self.first_dropped = now;
-            self.has_dropped = true;
+    #[inline(always)]
+    pub const fn is_none(&self) -> bool {
+        true
+    }
+
+    #[inline(always)]
+    pub fn as_mut(&mut self) -> Option<&mut KTraceScope<'a, N>> {
+        None
+    }
+
+    #[inline(always)]
+    pub fn take(&mut self) -> Option<KTraceScope<'a, N>> {
+        None
+    }
+}
+
+/// Type-level selector mapping a compile-time `bool` trace condition to its scope guard storage.
+#[doc(hidden)]
+pub struct TraceCond<const ENABLED: bool>;
+
+#[doc(hidden)]
+pub trait CondScopeStorage<'a, const N: usize> {
+    type Scope;
+    #[must_use]
+    fn make_scope(f: impl FnOnce() -> Option<KTraceScope<'a, N>>) -> Self::Scope;
+}
+
+impl<'a, const N: usize> CondScopeStorage<'a, N> for TraceCond<false> {
+    type Scope = DisabledKTraceScope<'a, N>;
+
+    #[inline(always)]
+    fn make_scope(_f: impl FnOnce() -> Option<KTraceScope<'a, N>>) -> Self::Scope {
+        DisabledKTraceScope(core::marker::PhantomData)
+    }
+}
+
+impl<'a, const N: usize> CondScopeStorage<'a, N> for TraceCond<true> {
+    type Scope = Option<KTraceScope<'a, N>>;
+
+    #[inline(always)]
+    fn make_scope(f: impl FnOnce() -> Option<KTraceScope<'a, N>>) -> Self::Scope {
+        f()
+    }
+}
+
+#[doc(hidden)]
+pub trait OptionalKTraceScope<'a, const N: usize> {
+    fn end_with(self, f: impl FnOnce(&mut KTraceScope<'a, N>));
+}
+
+impl<'a, const N: usize> OptionalKTraceScope<'a, N> for DisabledKTraceScope<'a, N> {
+    #[inline(always)]
+    fn end_with(self, _f: impl FnOnce(&mut KTraceScope<'a, N>)) {}
+}
+
+impl<'a, const N: usize> OptionalKTraceScope<'a, N> for Option<KTraceScope<'a, N>> {
+    #[inline(always)]
+    fn end_with(self, f: impl FnOnce(&mut KTraceScope<'a, N>)) {
+        if let Some(mut scope) = self {
+            core::hint::cold_path();
+            f(&mut scope);
+            core::mem::forget(scope);
         }
-        self.last_dropped = now;
-        self.num_dropped = self.num_dropped.wrapping_add(1);
-        self.bytes_dropped = self.bytes_dropped.wrapping_add(size);
-    }
-
-    pub fn has_dropped(&self) -> bool {
-        self.has_dropped
     }
 }
+
+// KTraceBuffer wraps per-CPU buffers allocated by the C++ ktrace subsystem, which tracks
+// dropped records using percpu_writer's DroppedRecordStats across the FFI boundary.
+use crate::percpu_writer::{DroppedRecordDurationEvent, DroppedRecordStats, serialize_drop_stats};
 
 /// A Rust implementation of `percpu_writer::Buffer` that wraps an existing
 /// `spsc_buffer::Buffer` and tracks dropped trace records.
@@ -570,7 +623,7 @@ impl KTraceBuffer {
         match self.buffer_mut().reserve(total_size) {
             Err(status) => {
                 let now = KTrace::timestamp();
-                self.drop_stats_mut().track(now, size);
+                self.drop_stats_mut().track(now.0, size);
                 Err(status)
             }
             Ok(mut res) => {
@@ -617,34 +670,12 @@ impl KTraceBuffer {
     }
 
     fn serialize_drop_stats(&self) -> DroppedRecordDurationEvent {
-        let record_size_words = (size_of::<DroppedRecordDurationEvent>() / 8) as u16;
-        let mut header = EventRecordHeader::default();
-        header
-            .set_record_size(record_size_words)
-            .set_event_type(EventType::DurationComplete)
-            .set_arg_count(2)
-            .set_thread_ref(self.cpu_ref_header_entry as u8)
-            .set_category_ref(META_CAT.label().id())
-            .set_name_ref(DROP_STATS_REF.id());
-
-        let drop_stats = self.drop_stats();
-        let mut num_dropped_arg =
-            ArgumentHeader::for_argument(NUM_RECORDS_REF.id(), 1, ArgumentType::Uint32);
-        num_dropped_arg.set_value_bits(drop_stats.num_dropped);
-
-        let mut bytes_dropped_arg =
-            ArgumentHeader::for_argument(NUM_BYTES_REF.id(), 1, ArgumentType::Uint32);
-        bytes_dropped_arg.set_value_bits(drop_stats.bytes_dropped);
-
-        DroppedRecordDurationEvent {
-            header: header.bits(),
-            start: drop_stats.first_dropped,
-            process_id: self.process_koid,
-            thread_id: self.thread_koid,
-            num_dropped_arg: num_dropped_arg.bits(),
-            bytes_dropped_arg: bytes_dropped_arg.bits(),
-            end: drop_stats.last_dropped,
-        }
+        serialize_drop_stats(
+            self.drop_stats(),
+            self.cpu_ref_header_entry as u8,
+            self.process_koid,
+            self.thread_koid,
+        )
     }
 }
 
@@ -722,31 +753,41 @@ impl KTrace {
     /// is guaranteed to remain alive.
     #[inline]
     pub fn with_instance<R>(f: impl FnOnce(&Self) -> R) -> Option<R> {
-        // SAFETY: FFI call returns the active KTrace instance pointer (either the global
-        // singleton or a thread-local test override).
-        let ptr = unsafe { cpp_ktrace_get_active_instance() };
-        if ptr.is_null() {
-            None
-        } else {
-            // SAFETY: The pointer returned by `cpp_ktrace_get_active_instance` points to a
-            // valid `KTrace` instance that remains alive for the duration of this call.
-            Some(f(unsafe { &*ptr.cast::<Self>() }))
+        // A thread-local test override takes precedence over the global instance.
+        #[cfg(ktest)]
+        if let Some(ptr) = Self::thread_local_override() {
+            // SAFETY: The pointer set via `cpp_ktrace_set_thread_local_override` points to a
+            // valid `KTrace` instance that remains alive for the duration of this call on the
+            // current thread.
+            return Some(f(unsafe { ptr.as_ref() }));
         }
+        let ptr = NonNull::new(ACTIVE_KTRACE.load(Ordering::Acquire))?;
+        // SAFETY: A non-null `ACTIVE_KTRACE` was published by `rust_ktrace_set_active` with
+        // `Release` after `rust_ktrace_init` finished constructing it, and this `Acquire` load
+        // makes that construction visible. Only the global C++ singleton's instance is published,
+        // and the singleton is never destroyed (the kernel's `__cxa_atexit` discards static
+        // destructors), so the instance outlives this call. `f` only gets a shared reference,
+        // and every field mutated after construction is atomic.
+        Some(f(unsafe { ptr.as_ref() }))
+    }
+
+    /// Returns the current thread's test override instance, if one is set.
+    #[cfg(ktest)]
+    #[inline]
+    fn thread_local_override() -> Option<NonNull<Self>> {
+        // SAFETY: `cpp_ktrace_get_thread_local_override` has no preconditions; it returns null if
+        // there is no current thread or no override.
+        NonNull::new(unsafe { cpp_ktrace_get_thread_local_override() }.cast::<Self>())
     }
 
     #[cfg(ktest)]
     #[inline]
     fn with_override<R>(f: impl FnOnce(&Self) -> R) -> Option<R> {
-        // SAFETY: FFI call returns the current thread's test override KTrace pointer, or null.
-        let ptr = unsafe { cpp_ktrace_get_thread_local_override() };
-        if ptr.is_null() {
-            None
-        } else {
-            // SAFETY: The pointer set via `cpp_ktrace_set_thread_local_override` points to a
-            // valid `KTrace` instance that remains alive for the duration of this call on the
-            // current thread.
-            Some(f(unsafe { &*ptr.cast::<Self>() }))
-        }
+        let ptr = Self::thread_local_override()?;
+        // SAFETY: The pointer set via `cpp_ktrace_set_thread_local_override` points to a
+        // valid `KTrace` instance that remains alive for the duration of this call on the
+        // current thread.
+        Some(f(unsafe { ptr.as_ref() }))
     }
 
     /// Returns true if the given category is enabled in the active KTrace state.
@@ -1217,6 +1258,19 @@ pub unsafe extern "C" fn rust_ktrace_free(ktrace_ptr: *mut ffi::c_void) {
     }
 }
 
+/// Publishes `ktrace_ptr` as the instance returned by `KTrace::with_instance`.
+///
+/// # Safety
+///
+/// `ktrace_ptr` must be a pointer returned by `rust_ktrace_init` for the global C++ `KTrace`
+/// singleton, and that instance must never be freed: `KTrace::with_instance` may observe it at
+/// any time after this call, and there is no way to unpublish it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_ktrace_set_active(ktrace_ptr: *mut ffi::c_void) {
+    // `Release` pairs with the `Acquire` load in `KTrace::with_instance`; see `ACTIVE_KTRACE`.
+    ACTIVE_KTRACE.store(ktrace_ptr.cast::<KTrace>(), Ordering::Release);
+}
+
 /// KTrace tests
 #[cfg(all(not(gcc), ktest))]
 #[unittest::suite(name = "ktrace_rust")]
@@ -1227,6 +1281,7 @@ mod tests {
 
     use crate::arch_rs::{InterruptDisableGuard, curr_cpu_num, max_num_cpus};
     use crate::kernel::thread::{FxtRef, ThreadPtr};
+    use crate::percpu_writer::buffer::{DROP_STATS_REF, META_CAT, NUM_BYTES_REF, NUM_RECORDS_REF};
     use core::sync::atomic::Ordering;
     use core::{ffi, ptr};
     use spsc_buffer::Buffer;
@@ -1980,6 +2035,109 @@ mod tests {
         }
 
         // Dropping `scope` here emits the complete event from the arguments it owns.
+    }
+
+    /// Verifies disabled and enabled compile-time conditional trace scopes.
+    #[test]
+    fn disabled_cond_scope_is_zero_sized() {
+        const DISABLED: bool = false;
+        const ENABLED: bool = true;
+
+        struct OverrideGuard(*mut ffi::c_void);
+        impl Drop for OverrideGuard {
+            fn drop(&mut self) {
+                // SAFETY: Clearing the thread-local override to null ensures no subsequent trace
+                // call on this thread can dereference `self.0`.
+                unsafe { cpp_ktrace_set_thread_local_override(ptr::null_mut()) };
+                // SAFETY: `self.0` was allocated by `rust_ktrace_init` and is no longer referenced
+                // after clearing the thread-local override with interrupts disabled.
+                unsafe { rust_ktrace_free(self.0) };
+            }
+        }
+        let _guard = InterruptDisableGuard::new();
+        META_CAT.set_index(0, kstring::interned_category::InternedCategory::INVALID_INDEX);
+
+        let local_state = KTraceState::new();
+        let local_state_ptr = ptr::from_ref(&local_state).cast::<ffi::c_void>();
+        let mut ktrace_ptr = ptr::null_mut();
+        // SAFETY: `local_state_ptr` points to `local_state`, which outlives `_override_guard`
+        // (and thus `ktrace_ptr`), and `&mut ktrace_ptr` is a valid writable out-pointer.
+        let status = unsafe { rust_ktrace_init(max_num_cpus(), local_state_ptr, &mut ktrace_ptr) };
+        assert_eq!(status, 0);
+        // SAFETY: `ktrace_ptr` was initialized by `rust_ktrace_init` and `_override_guard` clears
+        // the thread-local override before freeing `ktrace_ptr`.
+        unsafe { cpp_ktrace_set_thread_local_override(ktrace_ptr) };
+        let _override_guard = OverrideGuard(ktrace_ptr);
+
+        // Enable `META_CAT` at runtime first so the `DISABLED` checks below verify that a `false`
+        // compile-time condition suppresses scope creation and argument evaluation even when the
+        // runtime category is active.
+        local_state.categories_bitmask.store(1 << META_CAT.index(), Ordering::Release);
+        expect_true!(KTrace::category_enabled(META_CAT));
+
+        let mut begin_evaluated = false;
+        let mut end_evaluated = false;
+        let local_bytes = *b"borrowed";
+
+        let mut scope = begin_scope_cond!(
+            DISABLED,
+            META_CAT,
+            "disabled_scope",
+            "begin_arg" => {
+                begin_evaluated = true;
+                1u64
+            },
+            "borrowed" => &local_bytes[..],
+        );
+        expect_eq!(core::mem::size_of_val(&scope), 0);
+        expect_false!(begin_evaluated);
+        expect_false!(scope.is_some());
+        expect_true!(scope.is_none());
+        expect_true!(scope.as_mut().is_none());
+        expect_true!(scope.take().is_none());
+        end_scope!(
+            scope,
+            "end_arg" => {
+                end_evaluated = true;
+                2u64
+            },
+        );
+        expect_false!(end_evaluated);
+
+        struct AssocConstCaller;
+        impl AssocConstCaller {
+            const DISABLED: bool = false;
+            fn check() -> usize {
+                let s = begin_scope_cond!(Self::DISABLED, META_CAT, "assoc_disabled");
+                core::mem::size_of_val(&s)
+            }
+        }
+        expect_eq!(AssocConstCaller::check(), 0);
+
+        let cpu_scope = cpu_begin_scope_cond!(DISABLED, META_CAT, "disabled_cpu_scope");
+        expect_eq!(core::mem::size_of_val(&cpu_scope), 0);
+        drop(cpu_scope);
+
+        let enabled_scope = begin_scope_cond!(
+            ENABLED,
+            META_CAT,
+            "enabled_scope",
+            "begin_arg" => {
+                begin_evaluated = true;
+                1u64
+            },
+        );
+        expect_true!(core::mem::size_of_val(&enabled_scope) > 0);
+        expect_true!(begin_evaluated);
+        expect_true!(enabled_scope.is_some());
+        end_scope!(
+            enabled_scope,
+            "end_arg" => {
+                end_evaluated = true;
+                2u64
+            },
+        );
+        expect_true!(end_evaluated);
     }
 
     /// Verifies bitfield layout construction and encoding.

@@ -1,0 +1,41 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":zircon-internal-rust-test-pkg"],
+    visibility = ["//zircon/system/ulib:__pkg__"],
+)
+
+rustc_library(
+    name = "zircon-internal",
+    srcs = [
+        "src/align.rs",
+        "src/e820.rs",
+        "src/fnv1hash.rs",
+        "src/ktrace.rs",
+        "src/lib.rs",
+        "src/macros.rs",
+        "src/xorshiftrand.rs",
+    ],
+    edition = "2024",
+    visibility = ["//:__subpackages__"],
+)
+
+rustc_test(
+    name = "zircon_internal_lib_test",
+    crate = ":zircon-internal",
+)
+
+fx_unittest_package(
+    name = "zircon-internal-rust-test-pkg",
+    package_name = "zircon-internal-rust-test",
+    unit_tests = [":zircon_internal_lib_test"],
+)

@@ -137,6 +137,7 @@ template("hermetic_source_set") {
   source_set(export_target) {
     forward_variables_from(invoker,
                            [
+                             "check_includes",
                              "metadata",
                              "public",
                              "public_configs",
@@ -144,6 +145,9 @@ template("hermetic_source_set") {
                              "testonly",
                              "visibility",
                            ])
+    if (defined(invoker.check_includes_strict)) {
+      check_includes_strict = invoker.check_includes_strict
+    }
 
     sources = [ hermetic_output_file ]
     deps = [

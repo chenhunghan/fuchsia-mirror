@@ -4,6 +4,7 @@
 
 import("//build/bazel/bazel_inputs.gni")
 import("//build/bazel/config/logging.gni")
+import("//build/bazel/package_tool.gni")
 import("//build/bazel/remote_services.gni")
 import("//build/licenses/generated_licenses_spdx.gni")
 import("//build/rust/config.gni")
@@ -114,6 +115,25 @@ declare_args() {
 #     for actions whose Bazel targets don't have such outputs, e.g. ones listed
 #     in `extra_bazel_targets_file`.
 #
+#   export_test_packages: (optional)
+#     A boolean (default=false). Set it to true to export the Bazel test
+#     packages listed in `$root_build_dir/bazel_test_packages.list` (written
+#     at `gn gen` time by //build/bazel/scripts/bazel_tests_utils.py) to the
+#     Ninja build directory right after the Bazel invocation that includes
+#     this action. See //build/bazel/scripts/bazel_test_packages.py.
+#
+#     Consumers like the amber-files publish then read files owned by the
+#     Ninja build, which a later Bazel invocation can't delete. Reading the
+#     Bazel output base directly isn't safe: every invocation replants the
+#     `execroot/_main/external/` symlinks with only the repositories it
+#     needs, and with `--remote_download_outputs=toplevel` Bazel only
+#     guarantees that an output is on disk at the end of an invocation that
+#     requested it.
+#
+#     At most one bazel_action() may set this (//build/bazel/target_tests),
+#     because all exports share one directory, from which each export deletes
+#     the files of packages that aren't in the list.
+#
 #   copy_outputs: (optional)
 #     A list of scopes, where each item describes a Bazel output and a
 #     corresponding Ninja output location (where the Bazel build artifact
@@ -176,7 +196,20 @@ declare_args() {
 #             target. This target must be reachable from the bazel_target argument.
 #
 #          archive: (required)
-#             output path for the package's archive, relative to `ninja_base_dir`.
+#             output path for the package's archive, relative to
+#             `ninja_base_dir` (i.e. `target_out_dir` by default).
+#
+#          package_out_dir: (required)
+#             The directory, relative to `ninja_base_dir` (i.e.
+#             `target_out_dir` by default), into which the
+#             package archive is extracted using
+#             `package-tool package archive extract --repository fuchsia.com`.
+#             This produces the same layout as
+#             `package_tool_package_archive_extract()`, i.e.
+#             `package_manifest.json`, `blobs.json`, `blobs/` and
+#             `manifests/`. The first two files are declared as outputs of
+#             this action. Other GN templates expect this to resolve to
+#             `$target_out_dir/<package GN target name>`.
 #
 #          copy_debug_symbols: (optional)
 #             A boolean flag, set it to true to copy all debug symbols from
@@ -324,6 +357,9 @@ template("bazel_action") {
 
     _copy_debug_symbols =
         defined(invoker.copy_debug_symbols) && invoker.copy_debug_symbols
+
+    _export_test_packages =
+        defined(invoker.export_test_packages) && invoker.export_test_packages
 
     _copy_outputs = []
     if (defined(invoker.copy_outputs)) {
@@ -481,16 +517,17 @@ template("bazel_action") {
              "`package_outputs` items must be scopes, string found: \"$entry\"")
       assert(defined(entry.package_label),
              "`package_outputs` scope requires package_label key: $entry")
-      _archive = ""
-      if (defined(entry.archive)) {
-        _archive = "${_ninja_base_dir}/${entry.archive}"
-      }
+      assert(defined(entry.archive),
+             "`package_outputs` scope requires archive key: $entry")
+      assert(defined(entry.package_out_dir),
+             "`package_outputs` scope requires package_out_dir key: $entry")
       _all_outputs += [
         {
           type = "package"
           bazel_target =
               get_label_info(entry.package_label, "label_no_toolchain")
-          ninja_archive = _archive
+          ninja_archive = "${_ninja_base_dir}/${entry.archive}"
+          ninja_package_out_dir = "${_ninja_base_dir}/${entry.package_out_dir}"
           copy_debug_symbols =
               defined(entry.copy_debug_symbols) && entry.copy_debug_symbols
         },
@@ -674,38 +711,31 @@ template("bazel_action") {
         # Starlark query files
         "//build/bazel/starlark/FuchsiaPackageInfo_archive.cquery",
 
-        # Imported by bazel_action_utils.py
-        "//build/bazel/scripts/bazel_build_events.py",
-
-        # Imported by bazel_ninja_delayed_actions.py
-        # LINT.IfChange(delayed_action_imports)
-        "//build/bazel/scripts/bazel_action_impl.py",
-        "//build/bazel/scripts/bazel_action_file_copy_utils.py",
-        "//build/bazel/scripts/bazel_action_utils.py",
-        "//build/bazel/scripts/bazel_compdb_utils.py",
-        "//build/bazel/scripts/bazel_rust_analyzer_utils.py",
-        "//build/bazel/scripts/build_utils.py",
-        "//build/bazel/scripts/workspace_utils.py",
-
-        # LINT.ThenChange(
-        #   //build/bazel/scripts/bazel_ninja_delayed_actions.py:imports,
-        #   //build/bazel/scripts/BUILD.gn:delayed_action_imports)
-
-        # Imported by bazel_action_impl.py
-        # LINT.IfChange(bazel_action_impl_imports)
+        # Implementation Python scripts imported by
+        # bazel_ninja_delayed_actions.py and bazel_action_impl.py.
+        # LINT.IfChange(bazel_action_python_script_inputs)
         "//build/api/debug_symbols.py",
         "//build/bazel/scripts/bazel_action_file_copy_utils.py",
+        "//build/bazel/scripts/bazel_action_impl.py",
         "//build/bazel/scripts/bazel_action_utils.py",
+        "//build/bazel/scripts/bazel_build_events.py",
+        "//build/bazel/scripts/bazel_compdb_utils.py",
         "//build/bazel/scripts/bazel_label_mapper.py",
         "//build/bazel/scripts/bazel_rust_analyzer_utils.py",
         "//build/bazel/scripts/bazel_source_path_mapper.py",
+        "//build/bazel/scripts/bazel_test_packages.py",
         "//build/bazel/scripts/build_utils.py",
         "//build/bazel/scripts/stdio_redirection.py",
         "//build/bazel/scripts/thread_pool_helpers.py",
+        "//build/bazel/scripts/workspace_utils.py",
+        "//build/python/modules/depfile/depfile.py",
 
         # LINT.ThenChange(
         #   //build/bazel/scripts/bazel_action_impl.py:imports,
-        #   //build/bazel/scripts/BUILD.gn:bazel_action_impl_imports)
+        #   //build/bazel/scripts/bazel_ninja_delayed_actions.py:imports,
+        #   //build/bazel/scripts/BUILD.gn:bazel_action_impl_imports,
+        #   //build/bazel/scripts/BUILD.gn:delayed_action_imports,
+        # )
 
         # The shell script used to execute Bazel itself.
         "//build/bazel/wrapper.bazel.sh",
@@ -713,6 +743,13 @@ template("bazel_action") {
 
       if (defined(invoker.inputs)) {
         inputs += invoker.inputs
+      }
+
+      if (_package_outputs != []) {
+        # Used by bazel_action_impl.py to extract package archives. The path
+        # itself is passed to the script via global_args.json.
+        inputs += [ bazel_action_package_tool_path ]
+        deps += bazel_action_package_tool_deps
       }
 
       depfile = "${target_gen_dir}/${target_name}.d"
@@ -759,7 +796,13 @@ template("bazel_action") {
             outputs += [ "${output.ninja_dir}/${tracked_file}" ]
           }
         } else if (output.type == "package") {
-          outputs += [ output.ninja_archive ]
+          # LINT.IfChange(extracted_package_outputs)
+          outputs += [
+            output.ninja_archive,
+            "${output.ninja_package_out_dir}/package_manifest.json",
+            "${output.ninja_package_out_dir}/blobs.json",
+          ]
+          # LINT.ThenChange(//build/bazel/scripts/bazel_action_utils.py:extracted_package_outputs)
         } else if (output.type == "final_symlink") {
           outputs += [ output.ninja_file ]
         }
@@ -789,6 +832,7 @@ template("bazel_action") {
                                        "ninja_file",
                                        "ninja_archive",
                                        "ninja_dir",
+                                       "ninja_package_out_dir",
                                      ])
 
               # To differentiate different bazel invocations' outputs.
@@ -807,6 +851,10 @@ template("bazel_action") {
               }
               if (defined(entry.ninja_dir)) {
                 ninja_dir = rebase_path(entry.ninja_dir, root_build_dir)
+              }
+              if (defined(entry.ninja_package_out_dir)) {
+                ninja_package_out_dir =
+                    rebase_path(entry.ninja_package_out_dir, root_build_dir)
               }
 
               # The depfile that ninja will read for this action.
@@ -833,6 +881,10 @@ template("bazel_action") {
                     rebase_path(invoker.extra_bazel_targets_file,
                                 root_build_dir)
               }
+
+              # Whether to export the Bazel test packages to the Ninja build
+              # directory after building.
+              export_test_packages = _export_test_packages
 
               if (invoker.command == "build") {
                 debug_symbols_manifest = _rebased_debug_symbols_manifest

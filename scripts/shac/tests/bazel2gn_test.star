@@ -12,8 +12,7 @@ _VARS = {"fuchsia_dir": ".", "fuchsia_build_dir": "out"}
 
 _TOOL_PATHS = testing.file(
     content = json.encode([
-        {"name": "bazel2gn", "os": os, "cpu": cpu, "path": "bazel2gn", "label": "//build/tools/bazel2gn"}
-        for os in ["linux", "mac"]
+        {"name": "bazel2gn", "os": "linux", "cpu": cpu, "path": "bazel2gn", "label": "//build/tools/bazel2gn"}
         for cpu in ["x64", "arm64"]
     ]),
     affected = False,

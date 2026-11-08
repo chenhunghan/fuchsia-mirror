@@ -344,6 +344,16 @@ typedef struct {
   // Minimum time in microseconds, including `entry_latency`, to stay in this low power state.
   // Spending less time would be inefficient energy-wise.
   uint32_t min_residency_us;
+
+  // Bit `i` is set iff the CPU with logical ID `i`, as given by the `logical_ids` of the
+  // ZBI_TYPE_CPU_TOPOLOGY processor nodes, may enter this state. CPUs with logical IDs of 64 or
+  // greater cannot be described.
+  //
+  // If `flags` includes TARGETS_POWER_DOMAIN, these are the CPUs of the power domain that the
+  // state powers down, and all of them must be idle before it can be entered. A devicetree
+  // domain idle state shared by several power domains is described by one entry per domain.
+  // Otherwise, each of these CPUs may enter the state on its own.
+  uint64_t cpu_mask;
 } zbi_dcfg_arm_psci_cpu_suspend_state_t;
 
 typedef uint32_t zbi_qcom_rng_flags_t;

@@ -28,18 +28,21 @@ rustc_library(
         "//src/lib/fuchsia-sync",
         "//src/lib/network/fidl_fuchsia_net_ext",
         "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:hickory-net",
+        "//third_party/rust_crates/vendor:hickory-resolver",
         "//third_party/rust_crates/vendor:trust-dns-proto",
         "//third_party/rust_crates/vendor:trust-dns-resolver",
     ],
 )
 
-# @bazel2gn:raw_attribute:output_name = "dns_lib_test"
 rustc_test(
     name = "lib_test",
     build_flags = ["//build/config/rust/lints:deny_unused_results"],
     crate = ":lib",
+    crate_name = "dns_lib_test",
     deps = [
         "//src/connectivity/lib/net-declare",
         "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:hickory-proto",
     ],
 )

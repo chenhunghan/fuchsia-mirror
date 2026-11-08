@@ -26,12 +26,15 @@
 #include "sdk/lib/driver/logging/cpp/logger.h"  // nogncheck
 #endif
 
+#include <lib/fit/defer.h>
 #include <lib/zx/bti.h>
 #include <lib/zx/result.h>
 #include <lib/zx/vmar.h>
 #include <zircon/status.h>
 
+#include <cstring>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -123,6 +126,7 @@ class FidlRequest {
   }
 
   FidlRequest& add_vmo_id(uint64_t vmo_id, size_t size = 0, size_t offset = 0) {
+    _length.reset();
     if (!request_.data().has_value()) {
       request_.data().emplace();
     }
@@ -134,45 +138,112 @@ class FidlRequest {
         .size(size);
     return *this;
   }
-  FidlRequest& add_data(std::vector<uint8_t> data = {}, size_t size = 0, size_t offset = 0) {
+  // Appends an inline kData BufferRegion to the request. If `size` is omitted, infers the region
+  // size as `data.size() - offset` (requiring `offset < data.size()`). Enforces a non-zero region
+  // size (`actual_size > 0`).
+  FidlRequest& add_data(std::vector<uint8_t> data, std::optional<size_t> size = std::nullopt,
+                        size_t offset = 0) {
+    _length.reset();
     if (!request_.data().has_value()) {
       request_.data().emplace();
+    }
+
+    size_t actual_size;
+    if (size.has_value()) {
+      actual_size = *size;
+    } else {
+      ZX_ASSERT(offset < data.size());
+      actual_size = data.size() - offset;
+    }
+    ZX_ASSERT(actual_size > 0);
+
+    size_t required_size;
+    if (!__builtin_add_overflow(offset, actual_size, &required_size) &&
+        required_size <= fuchsia_hardware_usb_request::kMaxTransferSize) {
+      if (data.size() < required_size) {
+        data.resize(required_size);
+      }
     }
 
     request_.data()
         ->emplace_back()
         .buffer(fuchsia_hardware_usb_request::Buffer::WithData(std::move(data)))
         .offset(offset)
-        .size(size);
+        .size(actual_size);
     return *this;
   }
   FidlRequest& clear_buffers() {
+    _length.reset();
+    if (!request_.data().has_value()) {
+      return *this;
+    }
     for (auto& d : *request_.data()) {
       d.offset(0);
       d.size(0);
-      if (d.buffer()->Which() == fuchsia_hardware_usb_request::Buffer::Tag::kData) {
+      if (d.buffer().has_value() &&
+          d.buffer()->Which() == fuchsia_hardware_usb_request::Buffer::Tag::kData &&
+          d.buffer()->data().has_value()) {
         d.buffer()->data()->clear();
       }
     }
     return *this;
   }
   FidlRequest& reset_buffers(const get_mapped_func_t& get_mapped) {
+    _length.reset();
+    if (!request_.data().has_value()) {
+      return *this;
+    }
     for (auto& d : *request_.data()) {
       d.offset(0);
+      if (!d.buffer().has_value()) {
+        d.size(0);
+        continue;
+      }
       switch (d.buffer()->Which()) {
         case fuchsia_hardware_usb_request::Buffer::Tag::kVmoId: {
           auto mapped = get_mapped(*d.buffer());
-          ZX_ASSERT(mapped.is_ok());
-          d.size(mapped->size);
+          if (mapped.is_ok() && mapped.value().has_value()) {
+            d.size(mapped.value()->size);
+          } else {
+            d.size(0);
+          }
         } break;
-        case fuchsia_hardware_usb_request::Buffer::Tag::kData:
-          d.size(fuchsia_hardware_usb_request::kMaxTransferSize);
-          break;
+        case fuchsia_hardware_usb_request::Buffer::Tag::kData: {
+          const size_t kMaxTransfer =
+              static_cast<size_t>(fuchsia_hardware_usb_request::kMaxTransferSize);
+          size_t cap = kMaxTransfer;
+          if (d.buffer()->data().has_value() && d.buffer()->data()->capacity() > 0) {
+            cap = std::min(d.buffer()->data()->capacity(), kMaxTransfer);
+          }
+          d.size(cap);
+        } break;
         default:
+          d.size(0);
           break;
       }
     }
     return *this;
+  }
+
+  // RegionCapacity returns the writable capacity of a BufferRegion from its region offset.
+  // When `d.size() > 0`, `d.size()` bounds the region capacity to the configured transfer size.
+  // When `d.size() == 0` (such as after `clear_buffers()`), capacity resolves to the backing VMO
+  // or `kMaxTransferSize` limit. `CopyTo` expands unpopulated (`d.size() == 0`) regions to this
+  // capacity only when writing at local offset 0, and skips them as 0-length at positive offsets.
+  size_t RegionCapacity(const fuchsia_hardware_usb_request::BufferRegion& d,
+                        const get_mapped_func_t& get_mapped) const {
+    if (!d.buffer().has_value()) {
+      return 0;
+    }
+    std::optional<MappedVmo> mapped_vmo;
+    if (d.buffer()->Which() == fuchsia_hardware_usb_request::Buffer::Tag::kVmoId) {
+      auto mapped = get_mapped(*d.buffer());
+      if (mapped.is_error()) {
+        return 0;
+      }
+      mapped_vmo = mapped.value();
+    }
+    return RegionCapacity(d, mapped_vmo);
   }
 
   // CopyTo: tries to copy `size` bytes from `buffer` to contiguous `request` buffers from
@@ -182,69 +253,86 @@ class FidlRequest {
   // version of this method that performs cache management on the user's behalf.
   std::vector<size_t> CopyTo(size_t offset, const void* buffer, size_t size,
                              const get_mapped_func_t& get_mapped) {
+    if (!request_.data().has_value()) {
+      return {};
+    }
     std::vector<size_t> cp_sizes(request_.data()->size(), 0);
-    if (size == 0) {
+    if (size == 0 || buffer == nullptr) {
       return cp_sizes;
     }
+    size_t end_offset;
+    if (__builtin_add_overflow(offset, size, &end_offset)) {
+      return cp_sizes;
+    }
+
     const uint8_t* start = static_cast<const uint8_t*>(buffer);
     size_t todo = size;
     size_t cur_offset = offset;
-    int32_t i = -1;
-    for (auto& d : *request_.data()) {
-      // Accumulator accounting done at head of loop due to multiple exit logic paths.
-      i++;
-      auto mapped = get_mapped(*d.buffer());
-      if (mapped.is_error()) {
-        return cp_sizes;
+    for (size_t i = 0; i < request_.data()->size(); ++i) {
+      auto& d = (*request_.data())[i];
+      if (!d.buffer().has_value()) {
+        continue;
       }
-
-      uint8_t* addr;
-      size_t buffer_size;
-      if (!mapped.value()) {
-        // Buffer is fuchsia_hardware_usb_request::Buffer::Tag::kData
-        if (*d.size() > 0) {
-          buffer_size = *d.size();
-        } else {
-          buffer_size = static_cast<size_t>(fuchsia_hardware_usb_request::kMaxTransferSize);
-          if (buffer_size > *d.offset()) {
-            buffer_size -= *d.offset();
-          } else {
-            buffer_size = 0;
-          }
-        }
-        d.buffer()->data()->resize(std::min(cur_offset + todo, buffer_size));
-        addr = d.buffer()->data()->data();
-      } else {
-        if (*d.size() > 0) {
-          buffer_size = *d.size();
-        } else {
-          buffer_size = mapped->size;
-          if (buffer_size > *d.offset()) {
-            buffer_size -= *d.offset();
-          } else {
-            buffer_size = 0;
-          }
-        }
-        addr = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(mapped->addr)) + *d.offset();
-      }
-
-      if (cur_offset >= buffer_size) {
-        cur_offset -= buffer_size;
+      if (d.size().value_or(0) == 0 && cur_offset > 0) {
         continue;
       }
 
-      size_t cp_size = std::min(todo, buffer_size - cur_offset);
-      memcpy(addr + cur_offset, start, cp_size);
-      if (*d.size() < cur_offset + cp_size) {
-        d.size(cur_offset + cp_size);
+      std::optional<MappedVmo> mapped;
+      if (d.buffer()->Which() == fuchsia_hardware_usb_request::Buffer::Tag::kVmoId) {
+        auto mapped_res = get_mapped(*d.buffer());
+        if (mapped_res.is_error()) {
+          return cp_sizes;
+        }
+        mapped = mapped_res.value();
       }
-      cur_offset = 0;
+
+      const size_t reg_offset = d.offset().value_or(0);
+      const size_t reg_cap = RegionCapacity(d, mapped);
+      if (cur_offset >= reg_cap) {
+        cur_offset -= reg_cap;
+        continue;
+      }
+
+      const size_t cp_size = std::min(todo, reg_cap - cur_offset);
+      uint8_t* dst_ptr = nullptr;
+      switch (d.buffer()->Which()) {
+        case fuchsia_hardware_usb_request::Buffer::Tag::kVmoId: {
+          if (mapped.has_value()) {
+            dst_ptr = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(mapped->addr)) +
+                      reg_offset + cur_offset;
+          }
+          break;
+        }
+        case fuchsia_hardware_usb_request::Buffer::Tag::kData: {
+          if (d.buffer()->data().has_value()) {
+            const size_t needed = reg_offset + cur_offset + cp_size;
+            if (d.buffer()->data()->size() < needed) {
+              d.buffer()->data()->resize(needed);
+            }
+            dst_ptr = d.buffer()->data()->data() + reg_offset + cur_offset;
+          }
+          break;
+        }
+        default:
+          break;
+      }
+
+      if (dst_ptr == nullptr) {
+        break;
+      }
+
+      std::memcpy(dst_ptr, start, cp_size);
+      const size_t written_end = cur_offset + cp_size;
+      if (d.size().value_or(0) < written_end) {
+        d.size(written_end);
+        _length.reset();
+      }
+      cp_sizes[i] = cp_size;
       start += cp_size;
       todo -= cp_size;
-      cp_sizes[i] = cp_size;
 
+      cur_offset = 0;
       if (todo == 0) {
-        // Break out early.
         break;
       }
     }
@@ -264,19 +352,29 @@ class FidlRequest {
   // version of this method that performs cache management on the user's behalf.
   std::vector<size_t> CopyFrom(size_t offset, void* buffer, size_t size,
                                const get_mapped_func_t& get_mapped) {
+    if (!request_.data().has_value()) {
+      return {};
+    }
     std::vector<size_t> cp_sizes(request_.data()->size(), 0);
-    if (size == 0) {
+    if (size == 0 || buffer == nullptr) {
       return cp_sizes;
     }
+    size_t end_offset;
+    if (__builtin_add_overflow(offset, size, &end_offset)) {
+      return cp_sizes;
+    }
+
     uint8_t* start = static_cast<uint8_t*>(buffer);
     size_t todo = size;
     size_t cur_offset = offset;
-    int32_t i = -1;
-    for (const auto& d : *request_.data()) {
-      // Accumulator accounting done at head of loop due to multiple exit logic paths.
-      i++;
-      if (cur_offset >= *d.size()) {
-        cur_offset -= *d.size();
+    for (size_t i = 0; i < request_.data()->size(); ++i) {
+      const auto& d = (*request_.data())[i];
+      if (!d.buffer().has_value()) {
+        continue;
+      }
+      const size_t reg_size = d.size().value_or(0);
+      if (cur_offset >= reg_size) {
+        cur_offset -= reg_size;
         continue;
       }
 
@@ -285,23 +383,50 @@ class FidlRequest {
         return cp_sizes;
       }
 
-      zx_vaddr_t addr;
-      if (!mapped.value()) {
-        // Buffer is fuchsia_hardware_usb_request::Buffer::Tag::kData.
-        addr = reinterpret_cast<zx_vaddr_t>(d.buffer()->data()->data());
-      } else {
-        addr = mapped->addr + *d.offset();
+      const size_t reg_offset = d.offset().value_or(0);
+      size_t avail_cap = 0;
+      const uint8_t* src_ptr = nullptr;
+      switch (d.buffer()->Which()) {
+        case fuchsia_hardware_usb_request::Buffer::Tag::kVmoId: {
+          if (mapped.value().has_value() && reg_offset < mapped.value()->size) {
+            avail_cap = mapped.value()->size - reg_offset;
+            src_ptr =
+                reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(mapped.value()->addr)) +
+                reg_offset;
+          }
+          break;
+        }
+        case fuchsia_hardware_usb_request::Buffer::Tag::kData: {
+          if (d.buffer()->data().has_value()) {
+            const auto& vec = d.buffer()->data().value();
+            if (reg_offset < vec.size()) {
+              avail_cap = vec.size() - reg_offset;
+              src_ptr = vec.data() + reg_offset;
+            }
+          }
+          break;
+        }
+        default:
+          break;
       }
 
-      size_t cp_size = std::min(todo, *d.size() - cur_offset);
-      memcpy(start, reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(addr)) + cur_offset, cp_size);
-      cur_offset = 0;
+      if (src_ptr == nullptr || avail_cap == 0) {
+        break;
+      }
+
+      const size_t buffer_size = std::min(reg_size, avail_cap);
+      if (cur_offset >= buffer_size) {
+        break;
+      }
+
+      const size_t cp_size = std::min(todo, buffer_size - cur_offset);
+      std::memcpy(start, src_ptr + cur_offset, cp_size);
+      cp_sizes[i] = cp_size;
       start += cp_size;
       todo -= cp_size;
-      cp_sizes[i] = cp_size;
 
+      cur_offset = 0;
       if (todo == 0) {
-        // Break out early.
         break;
       }
     }
@@ -340,14 +465,16 @@ class FidlRequest {
   }
 
   // Similar to `CopyTo`, copies `size` bytes from `buffer` to contiguous request buffers starting
-  // at `offset`. To ensure cache coherency, this method flushes the cache after copying.
-  //
-  // Only the range `[offset, offset + size)` is flushed.
+  // at `offset`, and flushes the cache for `[offset, offset + size)` after copying.
   //
   // For multi-part writes into a request buffer (such as copying a header followed by payload
-  // data), use `CopyTo` for intermediate writes and only call `CachedCopyTo` on the last
-  // write (or use an explicit `CacheFlush` at the end) to avoid flushing cache lines multiple
-  // times.
+  // data), call `CopyTo` for intermediate writes and call `CachedCopyTo` on the final write (or
+  // call `CacheFlush` at the end) to avoid flushing cache lines multiple times.
+  //
+  // For multi-region scatter-gather requests, `CopyTo` expands unpopulated (`d.size() == 0`)
+  // regions to capacity only when writing into them at local offset 0. Both `CopyTo` and
+  // `CacheFlush` treat unpopulated regions as 0-length when skipping past them at a positive
+  // `offset`.
   //
   // Parameters:
   //  * offset: Byte offset into the request buffers to start writing.
@@ -359,11 +486,11 @@ class FidlRequest {
   // (`ZX_ERR_OUT_OF_RANGE`).
   zx::result<std::vector<size_t>> CachedCopyTo(size_t offset, const void* buffer, size_t size,
                                                const get_mapped_func_t& get_mapped) {
+    if (!request_.data().has_value()) {
+      return zx::ok(std::vector<size_t>{});
+    }
     if (size == 0) {
       return zx::ok(std::vector<size_t>(request_.data()->size(), 0));
-    }
-    if (offset >= capacity(get_mapped)) {
-      return zx::error(ZX_ERR_OUT_OF_RANGE);
     }
     auto cp_sizes = CopyTo(offset, buffer, size, get_mapped);
     if (zx_status_t status = CacheFlush(get_mapped, offset, size); status != ZX_OK) {
@@ -395,6 +522,9 @@ class FidlRequest {
   // (`ZX_ERR_OUT_OF_RANGE`).
   zx::result<std::vector<size_t>> CachedCopyFrom(size_t offset, void* buffer, size_t size,
                                                  const get_mapped_func_t& get_mapped) {
+    if (!request_.data().has_value()) {
+      return zx::ok(std::vector<size_t>{});
+    }
     if (size == 0) {
       return zx::ok(std::vector<size_t>(request_.data()->size(), 0));
     }
@@ -422,59 +552,68 @@ class FidlRequest {
   zx_status_t CacheHelper(const fuchsia_hardware_usb_request::BufferRegion& buffer,
                           size_t offset_in_region, size_t flush_size, uint32_t options,
                           const get_mapped_func_t& get_mapped) {
-    if (flush_size == 0 || *buffer.size() == 0) {
+    if (flush_size == 0 || buffer.size().value_or(0) == 0 || !buffer.buffer().has_value()) {
       return ZX_OK;
     }
     auto mapped = get_mapped(*buffer.buffer());
     if (mapped.is_error()) {
       return mapped.error_value();
     }
-    if (!mapped.value()) {
+    if (!mapped.value().has_value()) {
       return ZX_OK;
     }
 
-    zx_status_t status =
-        zx_cache_flush(reinterpret_cast<void*>(static_cast<uintptr_t>(mapped->addr) +
-                                               *buffer.offset() + offset_in_region),
-                       flush_size, options);
+    const size_t reg_offset = buffer.offset().value_or(0);
+    size_t flush_offset;
+    size_t flush_end;
+    if (__builtin_add_overflow(reg_offset, offset_in_region, &flush_offset) ||
+        __builtin_add_overflow(flush_offset, flush_size, &flush_end) ||
+        flush_end > mapped.value()->size) {
+      return ZX_ERR_OUT_OF_RANGE;
+    }
+
+    zx_status_t status = zx_cache_flush(
+        reinterpret_cast<void*>(static_cast<uintptr_t>(mapped.value()->addr) + flush_offset),
+        flush_size, options);
     if (status != ZX_OK) {
       return status;
     }
     return ZX_OK;
   }
 
-  // CacheRangeHelper iterates across scatter-gather `BufferRegion` segments in the request and
-  // performs cache maintenance (flushing or invalidation) strictly on the byte slice
-  // `[offset, offset + size)`.
-  //
-  // The method tracks `cur_offset` across multiple contiguous buffer regions:
-  //  - If `cur_offset >= *d.size()`, the target slice starts in a subsequent region, so we subtract
-  //    the region's size from `cur_offset` and continue.
-  //  - Once inside the target range, we compute `flush_size` as the minimum of remaining `todo`
-  //    bytes
-  //    and remaining bytes in the current region (`*d.size() - cur_offset`).
-  //  - After flushing the slice in the current region via `CacheHelper`, `cur_offset` is reset to 0
-  //    for any subsequent regions until all `todo` bytes are processed.
+  // CacheRangeHelper iterates across populated `BufferRegion` segments (`d.size() > 0`) in the
+  // request and performs cache maintenance (flushing or invalidation) on the byte slice
+  // `[offset, offset + size)`. Ranges starting within `length()` that extend past the end of the
+  // populated regions are clamped to the available bytes.
   zx_status_t CacheRangeHelper(size_t offset, size_t size, uint32_t options,
                                const get_mapped_func_t& get_mapped) {
-    if (!request_.data().has_value() || size == 0) {
+    if (!request_.data().has_value()) {
       return ZX_OK;
     }
-    if (offset >= capacity(get_mapped)) {
+    for (const auto& d : *request_.data()) {
+      if (d.buffer().has_value() && (!d.size().has_value() || !d.offset().has_value())) {
+        return ZX_ERR_INVALID_ARGS;
+      }
+    }
+    if (size == 0) {
+      return ZX_OK;
+    }
+    if (offset >= length()) {
       return ZX_ERR_OUT_OF_RANGE;
     }
     zx_status_t ret_status = ZX_OK;
     size_t todo = size;
     size_t cur_offset = offset;
     for (const auto& d : *request_.data()) {
-      if (*d.size() == 0) {
+      const size_t reg_size = d.size().value_or(0);
+      if (reg_size == 0) {
         continue;
       }
-      if (cur_offset >= *d.size()) {
-        cur_offset -= *d.size();
+      if (cur_offset >= reg_size) {
+        cur_offset -= reg_size;
         continue;
       }
-      size_t flush_size = std::min(todo, *d.size() - cur_offset);
+      size_t flush_size = std::min(todo, reg_size - cur_offset);
       zx_status_t status = CacheHelper(d, cur_offset, flush_size, options, get_mapped);
       if (status != ZX_OK) {
         ret_status = status;
@@ -494,63 +633,97 @@ class FidlRequest {
   //  - fuchsia_hardware_usb_request::Buffer::Tag::kData  -- Creates, maps, pins, VMO. Copies data
   //                                                         to VMO. (Unmapped and unpinned on
   //                                                         Unpin()).
+  // Returns ZX_ERR_BAD_STATE if kData regions are already pinned without a prior Unpin() call.
   zx_status_t PhysMap(const zx::bti& bti) {
+    if (!pinned_vmos_.empty()) {
+      return ZX_ERR_BAD_STATE;
+    }
+    if (!request_.data().has_value()) {
+      return ZX_OK;
+    }
+    auto cleanup = fit::defer([this]() { Unpin(); });
+
     int64_t idx = -1;
     for (auto& d : *request_.data()) {
       idx++;
-      zx_handle_t vmo_handle = ZX_HANDLE_INVALID;
+      if (!d.buffer().has_value()) {
+        continue;
+      }
+      if (!d.size().has_value() || !d.offset().has_value()) {
+        return ZX_ERR_INVALID_ARGS;
+      }
+      zx::vmo vmo;
       zx_vaddr_t mapped_addr = 0;
+      const size_t req_size = d.size().value();
+      const size_t reg_offset = d.offset().value();
+      size_t end_offset;
+      if (__builtin_add_overflow(reg_offset, req_size, &end_offset)) {
+        return ZX_ERR_INVALID_ARGS;
+      }
       switch (d.buffer()->Which()) {
         case fuchsia_hardware_usb_request::Buffer::Tag::kVmoId:
           // Pre-registered and already pinned. Does not need to be pinned again.
           continue;
         case fuchsia_hardware_usb_request::Buffer::Tag::kData: {
-          // The price to pay for using fuchsia_hardware_usb_request::Buffer::Tag::kData instead
-          // of VMOs is that a VMO needs to be created, mapped, pinned, data needs to be copied
-          // to/from data buffer in both directions regardless of endpoint direction, cache needs
-          // to be flushed, vmo then unpinned, and then unmapped.
-          zx::vmo vmo;
-          zx_status_t status = zx::vmo::create(*d.size(), 0, &vmo);
+          if (req_size == 0) {
+            continue;
+          }
+          if (end_offset > fuchsia_hardware_usb_request::kMaxTransferSize) {
+            return ZX_ERR_INVALID_ARGS;
+          }
+          if (d.buffer()->data().has_value() && d.buffer()->data()->size() < end_offset) {
+            d.buffer()->data()->resize(end_offset);
+          }
+          zx_status_t status = zx::vmo::create(end_offset, 0, &vmo);
           if (status != ZX_OK) {
             return status;
           }
 
           uintptr_t mapped = 0;
-          status = zx::vmar::root_self()->map(ZX_VM_PERM_READ | ZX_VM_PERM_WRITE, 0, vmo,
-                                              *d.offset(), *d.size(), &mapped);
+          status = zx::vmar::root_self()->map(ZX_VM_PERM_READ | ZX_VM_PERM_WRITE, 0, vmo, 0,
+                                              end_offset, &mapped);
           if (status != ZX_OK) {
             return status;
           }
 
-          const uint8_t* src_buffer = d.buffer()->data()->data();
-          memcpy(reinterpret_cast<void*>(mapped), src_buffer, *d.size());
-          zx_cache_flush(reinterpret_cast<void*>(mapped), *d.size(),
+          if (d.buffer()->data().has_value() && !d.buffer()->data()->empty()) {
+            const size_t available = d.buffer()->data()->size() > reg_offset
+                                         ? d.buffer()->data()->size() - reg_offset
+                                         : 0;
+            const size_t copy_bytes = std::min(req_size, available);
+            if (copy_bytes > 0) {
+              std::memcpy(reinterpret_cast<void*>(mapped + reg_offset),
+                          d.buffer()->data()->data() + reg_offset, copy_bytes);
+            }
+          }
+          zx_cache_flush(reinterpret_cast<void*>(mapped + reg_offset), req_size,
                          ZX_CACHE_FLUSH_DATA | ZX_CACHE_FLUSH_INVALIDATE);
           mapped_addr = mapped;
-          vmo_handle = vmo.release();
         } break;
         default:
           return ZX_ERR_NOT_SUPPORTED;
       }
 
-      // zx_bti_pin returns whole pages, so take into account unaligned vmo
-      // offset and length when calculating the amount of pages returned
-      uint64_t page_offset = USB_ROUNDDOWN(*d.offset(), kPageSize);
-      // The buffer size is the vmo size from offset 0.
-      uint64_t page_length = *d.size() - page_offset;
+      // Record the VMAR mapping before zx_bti_pin so cleanup can unmap it if pinning fails.
+      pinned_vmos_[idx] = {
+          ZX_HANDLE_INVALID,
+          nullptr,
+          0,
+          {mapped_addr, end_offset},
+      };
+
+      uint64_t page_offset = USB_ROUNDDOWN(reg_offset, kPageSize);
+      uint64_t page_length = (reg_offset + req_size) - page_offset;
       uint64_t pages = USB_ROUNDUP(page_length, kPageSize) / kPageSize;
 
       std::unique_ptr<zx_paddr_t[]> paddrs{new zx_paddr_t[pages]};
-      const size_t sub_offset = page_offset & (kPageSize - 1);
-      const size_t pin_offset = page_offset - sub_offset;
-      const size_t pin_length = USB_ROUNDUP(page_length + sub_offset, kPageSize);
+      const size_t sub_offset = reg_offset & (kPageSize - 1);
+      const size_t pin_offset = page_offset;
+      const size_t pin_length = pages * kPageSize;
 
-      if (pin_length / kPageSize != pages) {
-        return ZX_ERR_INVALID_ARGS;
-      }
-      zx_handle_t pmt;
+      zx_handle_t pmt = ZX_HANDLE_INVALID;
       uint32_t options = ZX_BTI_PERM_READ | ZX_BTI_PERM_WRITE;
-      zx_status_t status = zx_bti_pin(bti.get(), options, vmo_handle, pin_offset, pin_length,
+      zx_status_t status = zx_bti_pin(bti.get(), options, vmo.get(), pin_offset, pin_length,
                                       paddrs.get(), pages, &pmt);
       if (status != ZX_OK) {
         FDF_LOG(ERROR, "zx_bti_pin(): %s", zx_status_get_string(status));
@@ -560,14 +733,12 @@ class FidlRequest {
       // Account for the initial misalignment if any
       paddrs.get()[0] += sub_offset;
 
-      pinned_vmos_[idx] = {
-          pmt,
-          paddrs.release(),
-          pages,
-          {mapped_addr, *d.size()},
-      };
+      pinned_vmos_[idx].pmt = pmt;
+      pinned_vmos_[idx].phys_list = paddrs.release();
+      pinned_vmos_[idx].phys_count = pages;
     }
 
+    cleanup.cancel();
     return ZX_OK;
   }
 
@@ -575,47 +746,79 @@ class FidlRequest {
   zx_status_t Unpin() {
     auto pinned_vmos = std::move(pinned_vmos_);
     for (const auto& [idx, pinned] : pinned_vmos) {
-      if (request_.data()->at(idx).buffer()->Which() ==
-          fuchsia_hardware_usb_request::Buffer::Tag::kData) {
-        memcpy((*request_.data())[idx].buffer()->data()->data(),
-               reinterpret_cast<void*>(static_cast<uintptr_t>(pinned.mapped.addr)),
-               std::min((*request_.data())[idx].size().value(), pinned.mapped.size));
-
+      if (request_.data().has_value() && idx < request_.data()->size()) {
+        auto& d = (*request_.data())[idx];
+        if (d.buffer().has_value() &&
+            d.buffer()->Which() == fuchsia_hardware_usb_request::Buffer::Tag::kData) {
+          if (d.buffer()->data().has_value()) {
+            const size_t reg_offset = d.offset().value_or(0);
+            const size_t vec_avail = (d.buffer()->data()->size() > reg_offset)
+                                         ? d.buffer()->data()->size() - reg_offset
+                                         : 0;
+            const size_t mapped_avail =
+                (pinned.mapped.size > reg_offset) ? pinned.mapped.size - reg_offset : 0;
+            const size_t copy_size = std::min({d.size().value_or(0), mapped_avail, vec_avail});
+            if (copy_size > 0) {
+              const void* mapped_src = reinterpret_cast<const void*>(
+                  static_cast<uintptr_t>(pinned.mapped.addr) + reg_offset);
+              zx_cache_flush(mapped_src, copy_size,
+                             ZX_CACHE_FLUSH_DATA | ZX_CACHE_FLUSH_INVALIDATE);
+              std::memcpy(d.buffer()->data()->data() + reg_offset, mapped_src, copy_size);
+            }
+          }
+        }
+      }
+      if (pinned.mapped.addr != 0) {
         zx_status_t status = zx::vmar::root_self()->unmap(
             reinterpret_cast<uintptr_t>(pinned.mapped.addr), pinned.mapped.size);
         ZX_DEBUG_ASSERT(status == ZX_OK);
       }
 
-      zx_status_t status = zx_pmt_unpin(pinned.pmt);
-      ZX_DEBUG_ASSERT(status == ZX_OK);
+      if (pinned.pmt != ZX_HANDLE_INVALID) {
+        zx_status_t status = zx_pmt_unpin(pinned.pmt);
+        ZX_DEBUG_ASSERT(status == ZX_OK);
+      }
       delete[] pinned.phys_list;
     }
+    shared_contexts_.clear();
     return ZX_OK;
   }
+
+  void add_shared_context(std::shared_ptr<void> ctx) { shared_contexts_.push_back(std::move(ctx)); }
 
   // Gets a PhysIterType for the buffer at request.data()->at(idx). PhysIterTypes return a
   // std::pair<zx_paddr_t, size_t> on iteration. For template specialization, see the public
   // headers outside the internal namespace.
   PhysIterType phys_iter(size_t idx, size_t max_length) const;
 
-  fuchsia_hardware_usb_request::Request* operator->() { return &request_; }
+  fuchsia_hardware_usb_request::Request* operator->() {
+    _length.reset();
+    return &request_;
+  }
   const fuchsia_hardware_usb_request::Request* operator->() const { return &request_; }
   const fuchsia_hardware_usb_request::Request& request() const { return request_; }
   // Ensures any removal of `request` is intentional and `Unpin` is called.
   fuchsia_hardware_usb_request::Request take_request() {
     zx_status_t status = Unpin();
     ZX_DEBUG_ASSERT(status == ZX_OK);
+    _length.reset();
     return std::move(request_);
   }
   // Returns the total length of all data in the request. Saves to a variable for future use.
-  size_t length() {
-    if (!_length) {
+  size_t length() const {
+    if (!_length.has_value()) {
       size_t len = 0;
-      for (const auto& d : *request_.data()) {
-        ZX_ASSERT(d.size());
-        len += *d.size();
+      if (request_.data().has_value()) {
+        for (const auto& d : *request_.data()) {
+          size_t next_len;
+          if (__builtin_add_overflow(len, d.size().value_or(0), &next_len)) {
+            len = std::numeric_limits<size_t>::max();
+            break;
+          }
+          len = next_len;
+        }
       }
-      *_length = len;
+      _length = len;
     }
     return *_length;
   }
@@ -627,28 +830,60 @@ class FidlRequest {
       return 0;
     }
     for (const auto& d : *request_.data()) {
-      if (*d.size() > 0) {
-        cap += *d.size();
-        continue;
+      size_t next_cap;
+      if (__builtin_add_overflow(cap, RegionCapacity(d, get_mapped), &next_cap)) {
+        return std::numeric_limits<size_t>::max();
       }
-      auto mapped = get_mapped(*d.buffer());
-      if (mapped.is_ok()) {
-        if (!mapped.value()) {
-          if (*d.offset() < static_cast<size_t>(fuchsia_hardware_usb_request::kMaxTransferSize)) {
-            cap +=
-                static_cast<size_t>(fuchsia_hardware_usb_request::kMaxTransferSize) - *d.offset();
-          }
-        } else {
-          if (*d.offset() < mapped->size) {
-            cap += mapped->size - *d.offset();
-          }
-        }
-      }
+      cap = next_cap;
     }
     return cap;
   }
 
  private:
+  size_t RegionCapacity(const fuchsia_hardware_usb_request::BufferRegion& d,
+                        const std::optional<MappedVmo>& mapped) const {
+    if (!d.buffer().has_value()) {
+      return 0;
+    }
+    const size_t reg_offset = d.offset().value_or(0);
+    switch (d.buffer()->Which()) {
+      case fuchsia_hardware_usb_request::Buffer::Tag::kVmoId: {
+        if (!mapped.has_value()) {
+          return 0;
+        }
+        const size_t mapped_size = mapped->size;
+        if (reg_offset >= mapped_size) {
+          return 0;
+        }
+        const size_t vmo_avail = mapped_size - reg_offset;
+        if (d.size().has_value() && d.size().value() > 0) {
+          return std::min(d.size().value(), vmo_avail);
+        }
+        return vmo_avail;
+      }
+      case fuchsia_hardware_usb_request::Buffer::Tag::kData: {
+        const size_t kMaxTransfer =
+            static_cast<size_t>(fuchsia_hardware_usb_request::kMaxTransferSize);
+        if (reg_offset >= kMaxTransfer) {
+          return 0;
+        }
+        const size_t max_avail = kMaxTransfer - reg_offset;
+        if (d.size().has_value() && d.size().value() > 0) {
+          return std::min(d.size().value(), max_avail);
+        }
+        if (d.buffer()->data().has_value() && !d.buffer()->data()->empty()) {
+          if (d.buffer()->data()->size() > reg_offset) {
+            return std::min(d.buffer()->data()->size() - reg_offset, max_avail);
+          }
+          return 0;
+        }
+        return max_avail;
+      }
+      default:
+        return 0;
+    }
+  }
+
   const size_t kPageSize = zx_system_get_page_size();
 
   // request_: FIDL request object.
@@ -668,7 +903,11 @@ class FidlRequest {
   std::map<size_t, pinned_vmo_t> pinned_vmos_ = {};
 
   // _length: Total length saved so calculation doesn't have to be done multiple times.
-  std::optional<size_t> _length = std::nullopt;
+  mutable std::optional<size_t> _length = std::nullopt;
+
+  // shared_contexts_: Reference-counted external objects (such as registered VMOs) whose lifetime
+  // must extend until this request is unpinned or destroyed.
+  std::vector<std::shared_ptr<void>> shared_contexts_;
 };
 
 // FidlRequestPool: pool of FidlRequests.

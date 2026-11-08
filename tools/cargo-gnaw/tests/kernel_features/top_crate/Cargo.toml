@@ -1,0 +1,18 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+[package]
+name = "top_crate"
+version = "1.0.0"
+edition = "2024"
+
+[dependencies]
+transitive_dep = { version = "1.0.0", path = "../transitive_dep", default-features = false }
+userspace_only_dep = { version = "1.0.0", path = "../userspace_only_dep", optional = true }
+
+[features]
+default = ["std", "dep:userspace_only_dep"]
+std = ["transitive_dep/std"]
+serde = []
+small_rng = ["transitive_dep/small_rng"]

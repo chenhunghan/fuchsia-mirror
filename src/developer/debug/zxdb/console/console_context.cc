@@ -23,6 +23,8 @@
 #include "src/developer/debug/zxdb/client/symbol_server.h"
 #include "src/developer/debug/zxdb/client/target.h"
 #include "src/developer/debug/zxdb/client/thread.h"
+#include "src/developer/debug/zxdb/client/tracepoint.h"
+#include "src/developer/debug/zxdb/client/tracepoint_capture.h"
 #include "src/developer/debug/zxdb/console/command.h"
 #include "src/developer/debug/zxdb/console/command_utils.h"
 #include "src/developer/debug/zxdb/console/console.h"
@@ -31,6 +33,7 @@
 #include "src/developer/debug/zxdb/console/format_location.h"
 #include "src/developer/debug/zxdb/console/format_target.h"
 #include "src/developer/debug/zxdb/console/format_thread.h"
+#include "src/developer/debug/zxdb/console/format_tracepoint.h"
 #include "src/developer/debug/zxdb/format/format.h"
 #include "src/developer/debug/zxdb/format/output_buffer.h"
 #include "src/developer/debug/zxdb/symbols/function.h"
@@ -68,6 +71,9 @@ ConsoleContext::ConsoleContext(Session* session) : session_(session) {
 
   for (SymbolServer* symbol_server : session->system().GetSymbolServers())
     DidCreateSymbolServer(symbol_server);
+
+  for (Tracepoint* tracepoint : session->system().GetTracepoints())
+    DidCreateTracepoint(tracepoint);
 
   test_failure_stack_matcher_ = fxl::MakeRefCounted<TestFailureStackMatcher>();
   pretty_stack_manager_ = fxl::MakeRefCounted<PrettyStackManager>();
@@ -152,6 +158,14 @@ int ConsoleContext::IdForFilter(const Filter* filter) const {
   auto found = filter_to_id_.find(filter);
   if (found == filter_to_id_.end()) {
     FX_NOTREACHED();
+    return 0;
+  }
+  return found->second;
+}
+
+int ConsoleContext::IdForTracepoint(const Tracepoint* tracepoint) const {
+  auto found = tracepoint_to_id_.find(tracepoint);
+  if (found == tracepoint_to_id_.end()) {
     return 0;
   }
   return found->second;
@@ -298,6 +312,26 @@ Filter* ConsoleContext::GetActiveFilter() const {
   return found->second;
 }
 
+void ConsoleContext::SetActiveTracepoint(const Tracepoint* tracepoint) {
+  if (!tracepoint) {
+    active_tracepoint_id_ = 0;
+    return;
+  }
+  int id = IdForTracepoint(tracepoint);
+  if (id != 0)
+    active_tracepoint_id_ = id;
+}
+
+Tracepoint* ConsoleContext::GetActiveTracepoint() const {
+  if (active_tracepoint_id_ == 0)
+    return nullptr;
+  auto found = id_to_tracepoint_.find(active_tracepoint_id_);
+  if (found == id_to_tracepoint_.end()) {
+    return nullptr;
+  }
+  return found->second;
+}
+
 SourceAffinity ConsoleContext::GetSourceAffinityForThread(const Thread* thread) const {
   const ThreadRecord* record = GetThreadRecord(thread);
   if (!record)
@@ -366,6 +400,11 @@ Err ConsoleContext::FillOutCommand(Command* cmd) const {
 
   // Filter.
   result = FillOutFilter(cmd);
+  if (result.has_error())
+    return result;
+
+  // Tracepoint.
+  result = FillOutTracepoint(cmd);
   if (result.has_error())
     return result;
 
@@ -541,6 +580,34 @@ void ConsoleContext::WillDestroyFilter(Filter* filter) {
 
   id_to_filter_.erase(found->second);
   filter_to_id_.erase(found);
+}
+
+void ConsoleContext::DidCreateTracepoint(Tracepoint* tracepoint) {
+  int id = next_tracepoint_id_++;
+
+  id_to_tracepoint_[id] = tracepoint;
+  tracepoint_to_id_[tracepoint] = id;
+}
+
+void ConsoleContext::WillDestroyTracepoint(Tracepoint* tracepoint) {
+  auto found = tracepoint_to_id_.find(tracepoint);
+  if (found == tracepoint_to_id_.end()) {
+    FX_NOTREACHED();
+    return;
+  }
+
+  if (active_tracepoint_id_ == found->second)
+    active_tracepoint_id_ = 0;
+
+  id_to_tracepoint_.erase(found->second);
+  tracepoint_to_id_.erase(found);
+}
+
+void ConsoleContext::OnTracepointHit(Tracepoint* tracepoint, const TracepointHitRecord& hit) {
+  Console* c = Console::get();
+  if (!c)
+    return;
+  c->Output(FormatTracepointHit(this, tracepoint, hit));
 }
 
 void ConsoleContext::DidCreateSymbolServer(SymbolServer* symbol_server) {
@@ -1247,6 +1314,29 @@ Err ConsoleContext::FillOutFilter(Command* cmd) const {
     return Err(ErrType::kInput, fxl::StringPrintf("There is no filter %d.", filter_id));
   }
   cmd->add_filter(found_filter->second);
+  return Err();
+}
+
+Err ConsoleContext::FillOutTracepoint(Command* cmd) const {
+  int tracepoint_id = cmd->GetNounIndex(Noun::kTracepoint);
+  if (tracepoint_id == Command::kNoIndex) {
+    // No index: use the active one (which may not exist).
+    cmd->add_tracepoint(GetActiveTracepoint());
+    return Err();
+  }
+  if (tracepoint_id == Command::kWildcard) {
+    for (auto tp : session_->system().GetTracepoints()) {
+      cmd->add_tracepoint(tp);
+    }
+    return Err();
+  }
+
+  // Explicit index given, look it up.
+  auto found_tracepoint = id_to_tracepoint_.find(tracepoint_id);
+  if (found_tracepoint == id_to_tracepoint_.end()) {
+    return Err(ErrType::kInput, fxl::StringPrintf("There is no tracepoint %d.", tracepoint_id));
+  }
+  cmd->add_tracepoint(found_tracepoint->second);
   return Err();
 }
 

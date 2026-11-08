@@ -1,0 +1,15 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+package(default_applicable_licenses = ["//:license"])
+
+exports_files(
+    [
+        # DO NOT export any files from this directory. Files in this directory are
+        # intended strictly for manual developer use and must not be referenced from
+        # anywhere else in the build.
+    ],
+    # `exports_files` is public by default.
+    visibility = ["//visibility:private"],
+)

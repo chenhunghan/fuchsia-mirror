@@ -118,6 +118,7 @@ class Device : public DeviceType,
         bus_type_{args.bus_type_},
         bus_id_{args.bus_id_},
         pci_bdfs_{std::move(args.bdfs_)},
+        sta_enabled_{args.sta_enabled_},
         outgoing_{component::OutgoingDirectory(dispatcher_)} {}
 
   // DDK mix-in impls.
@@ -234,6 +235,9 @@ class Device : public DeviceType,
 
   // TODO(https://fxbug.dev/42108122): remove once kernel PCI is no longer used.
   std::vector<pci_bdf_t> pci_bdfs_;
+
+  // True when discovery already determined the device is enabled.
+  const bool sta_enabled_ = false;
 
   // ACPI events.
   std::optional<fidl::WireSharedClient<fuchsia_hardware_acpi::NotifyHandler>> notify_handler_;

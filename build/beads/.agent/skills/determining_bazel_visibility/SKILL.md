@@ -74,12 +74,12 @@ it already specifies an explicit `visibility` declaration:
 
 1.  **Target has an explicit, restricted `visibility` list (other than `"*"`):**
     Translate GN patterns directly into Bazel syntax:
-   - `"//path/to/dir/*"` in GN -> `"//path/to/dir:__subpackages__"` in Bazel.
-   - `"//path/to/dir:*"` in GN -> `"//path/to/dir:__pkg__"` in Bazel.
-   - `"//path/to/dir:some_target"` in GN -> `"//path/to/dir:__pkg__"` in Bazel.
-   - `"//path/to/dir:some_group"` in GN -> `"//path/to/dir:some_group"` in Bazel
-     (if referring to a `package_group`). *Skip Step 2 and proceed directly to
-     **Step 3** to review and verify.*
+    - `"//path/to/dir/*"` in GN -> `"//path/to/dir:__subpackages__"` in Bazel.
+    - `"//path/to/dir:*"` in GN -> `"//path/to/dir:__pkg__"` in Bazel.
+    - `"//path/to/dir:some_target"` in GN -> `"//path/to/dir:__pkg__"` in Bazel.
+    - `"//path/to/dir:some_group"` in GN -> `"//path/to/dir:some_group"` in
+      Bazel (if referring to a `package_group`). *Skip Step 2 and proceed
+      directly to **Step 3** to review and verify.*
 
 2.  **Target has NO `visibility` declaration, or declares `visibility = [ "*"
     ]`:** In GN, omitting visibility defaults to public (`"*"`). Treat this as
@@ -152,11 +152,13 @@ Instead of listing every individual consumer directory, distill the consumer set
 into concise, idiomatic Bazel visibility expressions using these heuristics:
 
 #### Case A: No External Consumers (Intra-Package Only)
+
 - **Condition:** All dependers are within the same directory, or only internal
   binary/test targets in the same package use it.
 - **Rule:** Omit the `visibility` attribute entirely (defaulting to
   package-private), or set `visibility = ["//visibility:private"]`.
 - **Example:**
+
   ```starlark
   # Private by default; no visibility needed
   rustc_library(
@@ -166,16 +168,19 @@ into concise, idiomatic Bazel visibility expressions using these heuristics:
   ```
 
 #### Case B: Target and Subpackages / Tests
+
 - **Condition:** The target is consumed only by its own package and child
   subpackages (e.g., `tests/`, `test/`, `testing/`, `bin/`, `cmd/`).
 - **Rule:** Use `[":__subpackages__"]` (or
   `["//<current_package>:__subpackages__"]`).
 - **Example:**
+
   ```starlark
   visibility = [":__subpackages__"]
   ```
 
 #### Case C: Same Subsystem / Cohesive Module (Lowest Common Ancestor)
+
 - **Condition:** All external consumers reside within the same functional
   subsystem or module tree (e.g., all under `//src/developer/debug/...`,
   `//src/storage/fxfs/...`, or `//tools/check-licenses/...`).
@@ -189,42 +194,61 @@ into concise, idiomatic Bazel visibility expressions using these heuristics:
     use Cluster Grouping (Case F).
 - **Example:** Target in `//src/storage/lib/vfs/cpp` consumed across
   `//src/storage/fxfs`, `//src/storage/minfs`, `//src/storage/fshost`:
+
   ```starlark
   visibility = ["//src/storage:__subpackages__"]
   ```
 
 #### Case D: Assembly Input Bundles (AIBs)
+
 - **Condition:** The target is packaged or referenced by Fuchsia Assembly
   (`//bundles/assembly/...` or `//bundles/assembly/bazel_inputs/...`).
 - **Rule:** Grant visibility to `//bundles/assembly:__subpackages__`:
+
   ```starlark
   visibility = ["//bundles/assembly:__subpackages__"]
   ```
 
 #### Case E: Test Targets and Test Suites
-- **Condition:** Migrated test targets (both host tests and device tests)
-  integrated into a parent package test suite (e.g., `//tools:host_tests` or a
-  subsystem test suite).
-- **Rule:** Set `visibility = ["//<parent_package>:__pkg__"]` (e.g.,
-  `["//tools:__pkg__"]` or `["//build/tools:__pkg__"]`).
+
+- **Condition:** Migrated test targets (both host tests and device tests) and
+  package `test_suite()` targets (`"tests"` or `"host_tests"`) integrated into
+  an area's aggregation `test_suite()` (e.g., `//tools:host_tests` or a
+  subsystem `test_suite()`).
+- **Rule:**
+  - Individual `*_test` targets (`fx_test`, `fx_unittest_package`,
+    `fx_test_component`, `host_rustc_test`, `host_go_test`, `rustc_test`,
+    `cc_test`, etc.) and any local sub-suites (`*_tests` included in `"tests"`
+    or `"host_tests"`) must NOT be referenced outside their package and always
+    remain package-private (omit `visibility`).
+  - Package `test_suite()` targets (`name = "tests"` or `name = "host_tests"`)
+    set `visibility = ["//<aggregation_package>:__pkg__"]` (e.g.,
+    `["//tools:__pkg__"]` or `["//src/sys:__pkg__"]`, never `:__subpackages__`
+    or `//visibility:public`). When a package defines both `"tests"` and
+    `"host_tests"`, reference both in the same `<aggregation_package>`
+    (`BUILD.bazel` file).
 
 #### Case F: Multi-Subsystem Cluster Grouping
+
 - **Condition:** Consumers span 2 or 3 distinct subsystems (e.g. consumers in
   `//src/diagnostics/...` and `//src/sys/...`, or related driver libraries
   across `//sdk/lib/driver_component/...`, `//sdk/lib/driver/...`, and
   `//src/devices/...`).
 - **Rule:** Group by the respective subsystem roots using `__subpackages__`
   rather than listing separate package paths:
+
   ```starlark
   visibility = [
       "//src/diagnostics:__subpackages__",
       "//src/sys:__subpackages__",
   ]
   ```
+
 - **Shared Variables & Package Groups:**
   - If multiple targets in the same `BUILD.bazel` file share the same visibility
     list, define a local Starlark list variable at the top of the file to keep
     the definitions readable and DRY:
+
     ```starlark
     _SHARED_DRIVER_VISIBILITY = [
         "//sdk/lib/driver:__subpackages__",
@@ -232,12 +256,14 @@ into concise, idiomatic Bazel visibility expressions using these heuristics:
         "//src/devices:__subpackages__",
     ]
     ```
+
   - If several packages would repeat the same long visibility list, define a
     `package_group` once and reference it from each target instead. See [Use
     package groups for common non-trivial visibility
     definitions](../../../../../docs/development/languages/bazel/style/common.md#use-package-groups-for-common-non-trivial-visibility-definitions).
 
 #### Case G: Widely Consumed Platform Libraries / Disparate Top-Level Trees
+
 - **Condition:** Consumers span 3 or 4 disparate top-level trees (e.g., `//src`,
   `//tools`, `//vendor`, `//examples`), or the target is an IDK library used
   across multiple subsystems.
@@ -247,6 +273,7 @@ into concise, idiomatic Bazel visibility expressions using these heuristics:
     package groups if available) to protect boundary encapsulation (e.g.,
     keeping internal platform libraries from being directly depended on by
     `//boards`, `//bundles`, or external consumers):
+
     ```starlark
     visibility = [
         "//src:__subpackages__",
@@ -254,6 +281,7 @@ into concise, idiomatic Bazel visibility expressions using these heuristics:
         "//vendor:__subpackages__",
     ]
     ```
+
   - For foundational libraries that nearly every part of the tree may use (for
     example, base libraries like `//zircon/system/ulib/fbl`), use
     `["//:__subpackages__"]`. This is especially useful when the GN target is
@@ -271,7 +299,8 @@ into concise, idiomatic Bazel visibility expressions using these heuristics:
 | Current package + tests / sub-tools | `[":__subpackages__"]` |
 | All within same subsystem (`//src/foo/...`) | `["//src/foo:__subpackages__"]` |
 | Assembly Input Bundles | `["//bundles/assembly:__subpackages__"]` |
-| Test targets for parent `test_suite` | `["//tools:__pkg__"]` (or parent package) |
+| Individual `*_test` targets (and local `*_tests` sub-suites) | Omit `visibility` (always package-private) |
+| Package `test_suite()` (`tests` / `host_tests`) for aggregation `test_suite()` | `["//tools:__pkg__"]` (or aggregation package `:__pkg__`, never `:__subpackages__`) |
 | 2-3 distinct subsystems | `["//src/subsys1:__subpackages__", "//src/subsys2:__subpackages__"]` |
 | 1-2 specific sibling packages | `["//src/foo/pkg_a:__pkg__", "//src/foo/pkg_b:__pkg__"]` |
 | Foundational library used tree-wide | `["//:__subpackages__"]` |
@@ -286,14 +315,16 @@ After applying visibility to your migrated target in `BUILD.bazel`:
 
 1.  **Format Code First:** Run buildifier / code format to ensure formatting is
     clean:
-   ```bash
-   fx format-code
-   ```
+
+    ```bash
+    fx format-code
+    ```
 
 2.  **Verify Target and All Dependents in One Build Command:** Build the
     migrated target and all known dependent targets together in a single `fx
     build` command to ensure visibility is accepted across all consumers while
     minimizing build time:
-   ```bash
-   fx build @//path/to/package:target_name @//path/to/consumer1:target1 @//path/to/consumer2:target2
-   ```
+
+    ```bash
+    fx build @//path/to/package:target_name @//path/to/consumer1:target1 @//path/to/consumer2:target2
+    ```

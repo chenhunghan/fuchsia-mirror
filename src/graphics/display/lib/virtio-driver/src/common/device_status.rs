@@ -18,7 +18,7 @@ bitfield! {
     // @cite(virtio): sec="3" title="General Initialization And Device Operation"
     #[derive(Default, Copy, Clone, PartialEq, Eq)]
     #[repr(transparent)]
-    pub struct DeviceStatus(u8);
+    pub struct DeviceStatus(pub u8);
     impl Debug;
 
     /// True iff the driver recognized the hardware as a virtio device.

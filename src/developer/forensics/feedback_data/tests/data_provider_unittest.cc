@@ -4,7 +4,9 @@
 
 #include "src/developer/forensics/feedback_data/data_provider.h"
 
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
 #include <fuchsia/feedback/cpp/fidl.h>
+#include <lib/async/cpp/task.h>
 #include <lib/fpromise/result.h>
 #include <lib/inspect/cpp/vmo/types.h>
 #include <lib/stdcompat/string_view.h>
@@ -41,20 +43,12 @@
 #include "third_party/rapidjson/include/rapidjson/document.h"
 #include "third_party/rapidjson/include/rapidjson/schema.h"
 
-namespace fuchsia::feedback {
-
-bool operator==(const Annotation& lhs, const Annotation& rhs) {
-  return lhs.key == rhs.key && lhs.value == rhs.value;
-}
-
-}  // namespace fuchsia::feedback
-
 namespace forensics {
 namespace feedback_data {
 namespace {
 
-using fuchsia::feedback::Annotation;
-using fuchsia::feedback::Snapshot;
+using fuchsia_feedback::Annotation;
+using fuchsia_feedback::Snapshot;
 using testing::UnorderedElementsAreArray;
 
 const std::set<std::string> kDefaultAnnotations = {
@@ -70,9 +64,6 @@ constexpr zx::duration kDefaultSnapshotFlowDuration = zx::usec(5);
 constexpr zx::duration kDefaultDataTimeout = zx::sec(30);
 
 // Unit-tests the implementation of the fuchsia.feedback.DataProvider FIDL interface.
-//
-// This does not test the environment service. It directly instantiates the class, without
-// connecting through FIDL.
 class DataProviderTest : public UnitTestFixture {
  public:
   void SetUp() override {
@@ -108,31 +99,44 @@ class DataProviderTest : public UnitTestFixture {
                        zx::duration snapshot_flow_duration = kDefaultSnapshotFlowDuration) {
     FX_CHECK(data_provider_);
 
+    zx::result endpoints = fidl::CreateEndpoints<fuchsia_feedback::DataProvider>();
+    FX_CHECK(endpoints.is_ok());
+
+    fidl::ServerBinding<fuchsia_feedback::DataProvider> binding(
+        dispatcher(), std::move(endpoints->server), data_provider_.get(),
+        fidl::kIgnoreBindingClosure);
+    fidl::Client client(std::move(endpoints->client), dispatcher());
+
     Snapshot snapshot;
 
     // We can set |clock_|'s start and end times because the call to start the timer happens
-    // independently of the loop while the call to end it happens in a task that is posted on the
-    // loop. So, as long the end time is set before the loop is run, a non-zero duration will be
-    // recorded.
+    // before the posted task that advances |clock_|, while the call to end it happens in a task
+    // that is posted on the loop after that.
     clock_.SetMonotonic(zx::time_monotonic(0));
-    fuchsia::feedback::GetSnapshotParameters params;
+    fuchsia_feedback::GetSnapshotParameters params;
     if (channel) {
-      params.set_response_channel(*std::move(channel));
+      params.response_channel(*std::move(channel));
     }
-    data_provider_->GetSnapshot(std::move(params),
-                                [&snapshot](Snapshot res) { snapshot = std::move(res); });
-    clock_.SetMonotonic(zx::time_monotonic(0) + snapshot_flow_duration);
+    client->GetSnapshot(std::move(params))
+        .Then([&snapshot](fidl::Result<fuchsia_feedback::DataProvider::GetSnapshot>& result) {
+          if (result.is_ok()) {
+            snapshot = std::move(result->snapshot());
+          }
+        });
+    async::PostTask(dispatcher(), [this, snapshot_flow_duration]() {
+      clock_.SetMonotonic(zx::time_monotonic(0) + snapshot_flow_duration);
+    });
     RunLoopUntilIdle();
     return snapshot;
   }
 
-  std::pair<feedback::Annotations, fuchsia::feedback::Attachment> GetSnapshotInternal(
+  std::pair<feedback::Annotations, fuchsia_feedback::Attachment> GetSnapshotInternal(
       const std::string& uuid = uuid::Generate(),
       zx::duration snapshot_flow_duration = kDefaultSnapshotFlowDuration) {
     FX_CHECK(data_provider_);
 
     feedback::Annotations annotations;
-    fuchsia::feedback::Attachment archive;
+    fuchsia_feedback::Attachment archive;
 
     // We can set |clock_|'s start and end times because the call to start the timer happens
     // independently of the loop while the call to end it happens in a task that is posted on the
@@ -142,7 +146,7 @@ class DataProviderTest : public UnitTestFixture {
     data_provider_->GetSnapshotInternal(
         kDefaultDataTimeout, uuid,
         [&annotations, &archive](feedback::Annotations resultAnnotations,
-                                 fuchsia::feedback::Attachment resultArchive) {
+                                 fuchsia_feedback::Attachment resultArchive) {
           annotations = std::move(resultAnnotations);
           archive = std::move(resultArchive);
         });
@@ -154,10 +158,17 @@ class DataProviderTest : public UnitTestFixture {
   size_t NumCurrentServedArchives() { return data_provider_->NumCurrentServedArchives(); }
 
   std::map<std::string, std::string> UnpackSnapshot(const Snapshot& snapshot) {
-    FX_CHECK(snapshot.has_archive());
-    FX_CHECK(snapshot.archive().key == kSnapshotFilename);
+    FX_CHECK(snapshot.archive().has_value());
+    FX_CHECK(snapshot.archive()->key() == kSnapshotFilename);
+    return UnpackArchive(*snapshot.archive());
+  }
+
+  std::map<std::string, std::string> UnpackArchive(const fuchsia_feedback::Attachment& archive) {
     std::map<std::string, std::string> unpacked_attachments;
-    FX_CHECK(Unpack(snapshot.archive().value, &unpacked_attachments));
+    fuchsia::mem::Buffer buffer;
+    FX_CHECK(archive.value().vmo().duplicate(ZX_RIGHT_SAME_RIGHTS, &buffer.vmo) == ZX_OK);
+    buffer.size = archive.value().size();
+    FX_CHECK(Unpack(buffer, &unpacked_attachments));
     return unpacked_attachments;
   }
 
@@ -183,9 +194,9 @@ TEST_F(DataProviderTest, GetSnapshot_SmokeTest) {
 
   // There will always be a "manifest.json" so there will always be an archive.
 
-  ASSERT_TRUE(snapshot.has_archive());
+  ASSERT_TRUE(snapshot.archive().has_value());
 
-  const uint64_t archive_size = snapshot.archive().value.size;
+  const uint64_t archive_size = snapshot.archive()->value().size();
   ASSERT_TRUE(archive_size > 0);
 
   EXPECT_THAT(ReceivedCobaltEvents(),
@@ -222,7 +233,7 @@ TEST_F(DataProviderTest, GetSnapshotViaChannel) {
 
   {
     // Archive sent through channel, so no archive here in snapshot.
-    ASSERT_FALSE(snapshot.has_archive());
+    ASSERT_FALSE(snapshot.archive().has_value());
 
     fuchsia::io::FilePtr archive;
     archive.Bind(std::move(client_end));
@@ -378,11 +389,11 @@ TEST_F(DataProviderTest, GetSnapshotAnnotationsInFidl) {
 
   Snapshot snapshot = GetSnapshot();
 
-  const std::vector<fuchsia::feedback::Annotation> expected_annotations = {
-      {"annotation1", "value1"}};
+  const std::vector<Annotation> expected_annotations = {
+      Annotation{{.key = "annotation1", .value = "value1"}}};
 
-  ASSERT_TRUE(snapshot.has_annotations2());
-  EXPECT_EQ(snapshot.annotations2(), expected_annotations);
+  ASSERT_TRUE(snapshot.annotations2().has_value());
+  EXPECT_EQ(*snapshot.annotations2(), expected_annotations);
 }
 
 TEST_F(DataProviderTest, GetSnapshotUnfilteredAnnotations_DoesNotFilterMissingAnnotations) {
@@ -398,7 +409,7 @@ TEST_F(DataProviderTest, GetSnapshotUnfilteredAnnotations_ReturnsFilledArchive) 
   SetUpDataProvider(kDefaultAnnotations, /*attachment_allowlist=*/{});
 
   auto [annotations, archive] = GetSnapshotInternal();
-  EXPECT_TRUE(archive.value.size > 0u);
+  EXPECT_TRUE(archive.value().size() > 0u);
 }
 
 TEST_F(DataProviderTest, GetSnapshot_Timeout) {
@@ -423,12 +434,12 @@ TEST_F(DataProviderTest, GetSnapshot_Timeout) {
                     });
 
   feedback::Annotations annotations;
-  fuchsia::feedback::Attachment archive;
+  fuchsia_feedback::Attachment archive;
 
   data_provider_->GetSnapshotInternal(
       zx::sec(1), uuid::Generate(),
       [&annotations, &archive](feedback::Annotations result_annotations,
-                               fuchsia::feedback::Attachment result_archive) {
+                               fuchsia_feedback::Attachment result_archive) {
         annotations = std::move(result_annotations);
         archive = std::move(result_archive);
       });
@@ -436,10 +447,9 @@ TEST_F(DataProviderTest, GetSnapshot_Timeout) {
   provider_successful.CompleteSuccessfully(kSuccessValue);
   RunLoopFor(zx::sec(5));
 
-  ASSERT_TRUE(archive.value.size > 0u);
+  ASSERT_TRUE(archive.value().size() > 0u);
 
-  std::map<std::string, std::string> unpacked_attachments;
-  FX_CHECK(Unpack(archive.value, &unpacked_attachments));
+  std::map<std::string, std::string> unpacked_attachments = UnpackArchive(archive);
 
   // There should be |kAttachmentMetadata|, |kSuccessFile| and |kTimeoutFile| attachments present in
   // the snapshot.
@@ -455,10 +465,9 @@ TEST_F(DataProviderTest, GetSnapshotInternalUsesUuid) {
   SetUpDataProvider(kDefaultAnnotations, /*attachment_allowlist=*/{});
   const auto [annotations, archive] = GetSnapshotInternal("test-uuid");
 
-  ASSERT_TRUE(archive.value.size > 0u);
+  ASSERT_TRUE(archive.value().size() > 0u);
 
-  std::map<std::string, std::string> unpacked_attachments;
-  FX_CHECK(Unpack(archive.value, &unpacked_attachments));
+  std::map<std::string, std::string> unpacked_attachments = UnpackArchive(archive);
 
   EXPECT_NE(unpacked_attachments.find(kAttachmentMetadata), unpacked_attachments.end());
   EXPECT_TRUE(cpp23::contains(unpacked_attachments[kAttachmentMetadata],

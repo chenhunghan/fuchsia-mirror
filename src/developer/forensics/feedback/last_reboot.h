@@ -5,11 +5,12 @@
 #ifndef SRC_DEVELOPER_FORENSICS_FEEDBACK_LAST_REBOOT_H_
 #define SRC_DEVELOPER_FORENSICS_FEEDBACK_LAST_REBOOT_H_
 
-#include <fuchsia/feedback/cpp/fidl.h>
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
 #include <lib/async/dispatcher.h>
 #include <lib/fit/function.h>
 #include <lib/zx/time.h>
 
+#include "src/developer/forensics/crash_reports/crash_reporter_internal.h"
 #include "src/developer/forensics/feedback/config.h"
 #include "src/developer/forensics/feedback/reboot_log/reboot_log.h"
 #include "src/developer/forensics/last_reboot/last_reboot_info_provider.h"
@@ -30,9 +31,9 @@ class LastReboot {
   };
 
   LastReboot(async_dispatcher_t* dispatcher, cobalt::Logger* cobalt, RedactorBase* redactor,
-             fuchsia::feedback::CrashReporter* crash_reporter, Options options);
+             crash_reports::CrashReporterInternal* crash_reporter, Options options);
 
-  fuchsia::feedback::LastRebootInfoProvider* LastRebootInfoProvider();
+  fidl::Server<fuchsia_feedback::LastRebootInfoProvider>* LastRebootInfoProvider();
 
  private:
   last_reboot::Reporter reporter_;

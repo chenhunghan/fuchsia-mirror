@@ -140,11 +140,6 @@ static inline zx_status_t unregister_int_handler(interrupt_vector_t vector) {
 // serialization of handlers.
 zx_status_t register_permanent_int_handler(interrupt_vector_t vector, interrupt_handler_t handler);
 
-// These return the [base, max] range of vectors that can be used with zx_interrupt syscalls
-// This api will need to evolve if valid vector ranges later are not contiguous
-uint32_t interrupt_get_base_vector();
-uint32_t interrupt_get_max_vector();
-
 bool is_valid_interrupt(interrupt_vector_t vector, uint32_t flags);
 
 interrupt_vector_t remap_interrupt(interrupt_vector_t vector);

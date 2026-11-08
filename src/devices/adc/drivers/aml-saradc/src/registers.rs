@@ -8,6 +8,8 @@ register! {
     #[register(offset = 0x00 << 2, mode = RW)]
     pub struct Reg0(u32) {
         pub val, set_val: 31, 0;
+        pub busy, _: 30, 28;
+        pub bool, fifo_empty, _: 26;
         pub bool, sampling_stop, set_sampling_stop: 14;
         pub fifo_cnt_irq, set_fifo_cnt_irq: 8, 4;
         pub bool, fifo_irq_en, set_fifo_irq_en: 3;
@@ -31,7 +33,10 @@ register! {
     pub struct Delay(u32);
 
     #[register(offset = 0x06 << 2, mode = RO)]
-    pub struct FifoRd(u32);
+    pub struct FifoRd(u32) {
+        pub u8, chan_id, _: 14, 12;
+        pub sample, _: 11, 0;
+    }
 
     #[register(offset = 0x07 << 2, mode = RW)]
     pub struct AuxSw(u32);

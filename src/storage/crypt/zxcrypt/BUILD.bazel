@@ -1,0 +1,73 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_component.bzl",
+    "fx_unittest_component",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [],
+    visibility = ["//src/storage:__pkg__"],
+)
+
+rustc_library(
+    name = "lib",
+    srcs = ["src/lib.rs"],
+    crate_name = "zxcrypt_crypt",
+    edition = "2024",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/storage/crypt/policy",
+        "//src/storage/fxfs/fidl/fuchsia.fxfs:fuchsia.fxfs_rust",
+        "//third_party/rust_crates/vendor:aes-gcm-siv",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:hkdf",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:sha2",
+        "//third_party/rust_crates/vendor:uuid",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)
+
+rustc_test(
+    name = "zxcrypt_crypt_lib_test",
+    crate = ":lib",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = ["//src/lib/fuchsia"],
+)
+
+fx_unittest_component(
+    name = "zxcrypt-crypt-test",
+    binary = ":zxcrypt_crypt_lib_test",
+)
+
+fx_package(
+    name = "zxcrypt-crypt-tests-package",
+    package_name = "zxcrypt-crypt-tests",
+    testonly = True,
+    test_components = [":zxcrypt-crypt-test"],
+)
+
+fx_test(
+    name = "zxcrypt-crypt-tests",
+    package = ":zxcrypt-crypt-tests-package",
+)
+
+alias(
+    name = "zxcrypt",
+    actual = ":lib",
+    visibility = ["//:__subpackages__"],
+)

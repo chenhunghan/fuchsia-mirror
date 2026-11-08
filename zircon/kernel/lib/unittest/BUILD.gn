@@ -39,10 +39,7 @@ source_set("unittest") {
   sources = [ "unittest.cc" ]
   deps = [ "//zircon/system/ulib/pretty" ]
   if (toolchain_environment == "kernel") {
-    sources += [
-      "user_memory.cc",
-      "user_memory_tests.cc",
-    ]
+    sources += [ "user_memory.cc" ]
     deps += [
       ":unittest_console",
       ":user-memory-rs",

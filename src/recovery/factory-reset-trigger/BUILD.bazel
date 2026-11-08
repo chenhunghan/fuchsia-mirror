@@ -55,7 +55,6 @@ fx_component_manifest(
 fx_component(
     name = "factory-reset-trigger-component",
     compiled_manifest = ":factory-reset-trigger-manifest",
-    component_name = "factory-reset-trigger",
     visibility = [
         "//build/bazel/rules/tests:__subpackages__",
     ],

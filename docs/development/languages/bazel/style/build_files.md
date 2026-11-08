@@ -9,6 +9,9 @@ The Fuchsia project follows the official Bazel
 exceptions. The guidance on this page is in addition to the
 [common Bazel style guide and best practices][common-guide].
 
+For guidance on defining tests and `test_suite()` targets in `BUILD.bazel`
+files, see [Tests and test suites][tests-guide].
+
 This page is part of the
 [Bazel style guide and best practices][style-guide-landing-page].
 
@@ -111,15 +114,16 @@ Note: This exception does not apply to legacy macros where
 `visibility = ["//visibility:private"]`
 [must be specified][specify-visibility-legacy-macros].
 
-### Visibility for non-obvious target types
+### Always specify visibility for types that are public by default {:#always-specify-visibility-for-types-that-are-public-by-default}
 
 `config_setting()` and `exports_files()` support visibility like any other
-target except that they are public by default. Always specify `visibility` for
-these even though Bazel does not require it.
+target except that they are public by default. Always specify `visibility`
+_\[<span style="color:red">SHAC error</span>\]_ for these even though Bazel does
+not require it.
 
 ## target_compatible_with {:#target-compatible-with}
 
-### Host targets
+### Host targets {:#target-compatible-with-host-targets}
 
 Host targets (such as host tools, host tests, and host-only libraries) should
 specify `target_compatible_with = HOST_OS_CONSTRAINTS` (loaded from
@@ -129,7 +133,8 @@ developers to cross-compile tools and is necessary for host tools in the IDK
 and their dependencies.
 
 `HOST_CONSTRAINTS` from `@platforms//host:constraints.bzl` should not be used
-except by the Build team in very rare cases.
+_\[<span style="color:red">SHAC error</span>\]_ except by the Build team in very
+rare cases.
 
 <!-- Reference links -->
 
@@ -140,3 +145,4 @@ except by the Build team in very rare cases.
 [do-not-use-public-visibility]: common.md#do-not-use-public-visibility
 [specify-visibility-legacy-macros]: rules_macros.md#specify-visibility-for-all-targets-defined-by-legacy-macros
 [style-guide-landing-page]: README.md
+[tests-guide]: tests.md

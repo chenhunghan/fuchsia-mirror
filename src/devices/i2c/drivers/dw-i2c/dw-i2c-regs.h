@@ -18,6 +18,7 @@ namespace dw_i2c {
 // Vendor name: IC_CON
 class ControlReg : public hwreg::RegisterBase<ControlReg, uint32_t> {
  public:
+  DEF_BIT(11, bus_clear_feature_ctrl);
   DEF_BIT(7, tx_empty_ctrl);
   DEF_BIT(6, slave_disable);
   DEF_BIT(5, restart_en);
@@ -408,6 +409,7 @@ class ClearRestartDetReg : public hwreg::RegisterBase<ClearRestartDetReg, uint32
 /* I2C SCL Stuck at Low Timeout */
 class SclStuckAtLowTimeoutReg : public hwreg::RegisterBase<SclStuckAtLowTimeoutReg, uint32_t> {
  public:
+  DEF_FIELD(31, 0, scl_stuck_low_timeout);
   static auto Get() { return hwreg::RegisterAddr<SclStuckAtLowTimeoutReg>(0xac); }
 };
 

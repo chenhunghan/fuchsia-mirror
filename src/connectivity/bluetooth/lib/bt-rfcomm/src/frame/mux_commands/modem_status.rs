@@ -5,8 +5,8 @@
 use bitfield::bitfield;
 use packet_encoding::{Decodable, Encodable};
 
-use crate::frame::FrameParseError;
 use crate::DLCI;
+use crate::frame::FrameParseError;
 
 /// Length (in bytes) of a Modem Status Command with no break value.
 const MODEM_STATUS_COMMAND_WITHOUT_BREAK_LENGTH: usize = 2;
@@ -32,7 +32,7 @@ impl ModemStatusAddressField {
 
 bitfield! {
     /// The Modem Status Signals defined in GSM 7.10 Section 5.4.6.3.7 Figure 10.
-    pub struct ModemStatusSignals(u8);
+    pub struct ModemStatusSignals(pub u8);
     impl Debug;
     bool;
     pub ea_bit, set_ea_bit: 0;

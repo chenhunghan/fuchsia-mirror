@@ -178,6 +178,38 @@
       "hidden": false
     },
     {
+      "kind": "Switch",
+      "optionality": "optional",
+      "long": "--internet",
+      "short": null,
+      "description": "enable external internet access (via SLiRP IPv4) when using tap networking mode.",
+      "hidden": false
+    },
+    {
+      "kind": {
+        "Option": {
+          "arg_name": "guestfwd"
+        }
+      },
+      "optionality": "repeating",
+      "long": "--guestfwd",
+      "short": null,
+      "description": "specify a SLiRP guestfwd rule when --internet is enabled. May be repeated for multiple rules.",
+      "hidden": false
+    },
+    {
+      "kind": {
+        "Option": {
+          "arg_name": "netdev-socket"
+        }
+      },
+      "optionality": "optional",
+      "long": "--netdev-socket",
+      "short": null,
+      "description": "specify a host TCP address (host:port) for a socket netdev attached to hubid=0 when --internet is enabled.",
+      "hidden": false
+    },
+    {
       "kind": {
         "Option": {
           "arg_name": "kernel-args"

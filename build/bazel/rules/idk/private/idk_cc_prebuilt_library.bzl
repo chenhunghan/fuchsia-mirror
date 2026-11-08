@@ -6,8 +6,11 @@
 
 load("@bazel_skylib//lib:paths.bzl", "paths")
 load("@rules_cc//cc:cc_static_library.bzl", "cc_static_library")
-load("@rules_cc//cc:defs.bzl", "cc_import", "cc_library", "cc_shared_library")
+load("@rules_cc//cc:defs.bzl", "cc_import", "cc_shared_library")
+load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
+load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
 load("//build/bazel/rules:zx_library.bzl", "apply_common_zx_library_modifications")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
 load(
     "//build/bazel/rules/cc:shared_library.bzl",
     "generate_companion_files_for_shared_library",
@@ -53,6 +56,58 @@ def get_shared_library_output_name(name, output_name):
 
 def get_ifs_golden_file_name(output_name):
     return "lib" + output_name + ".ifs"
+
+def _shared_library_filtered_public_deps_impl(ctx):
+    # The merged `CcInfo` of the public `deps` contains:
+    # * `compilation_context`: The headers, include directories, and `defines`
+    #   of the `deps` and their transitive public dependencies. This is exactly
+    #   what a `cc_library()` would propagate to its dependents, so it is
+    #   forwarded as is. (`copts` are not part of `CcInfo`, and `local_defines`
+    #   are not propagated to dependents.)
+    # * `linking_context`: The libraries and link flags needed to link the
+    #   `deps`. Only the shared libraries are forwarded (see below).
+    cc_info = cc_common.merge_cc_infos(cc_infos = [dep[CcInfo] for dep in ctx.attr.deps])
+
+    # Static libraries in `deps` are already linked into the shared library, so
+    # forwarding them would link second copies into dependents. Shared
+    # libraries (e.g., the `cc_import()` of another `idk_cc_shared_library()`)
+    # must be forwarded so that dependents link against them and have them
+    # available at runtime, as they would for a `cc_library()`.
+    # `user_link_flags` (e.g., `linkopts`) and `additional_inputs` are
+    # intentionally dropped. They apply to the link of the shared library
+    # itself, which has already happened.
+    linker_inputs = []
+    for linker_input in cc_info.linking_context.linker_inputs.to_list():
+        shared_libraries = [
+            library
+            for library in linker_input.libraries
+            if not (library.static_library or library.pic_static_library)
+        ]
+        if shared_libraries:
+            linker_inputs.append(cc_common.create_linker_input(
+                owner = linker_input.owner,
+                libraries = depset(shared_libraries),
+            ))
+
+    return [CcInfo(
+        compilation_context = cc_info.compilation_context,
+        linking_context = cc_common.create_linking_context(linker_inputs = depset(linker_inputs)),
+    )]
+
+_shared_library_filtered_public_deps = rule(
+    implementation = _shared_library_filtered_public_deps_impl,
+    doc = """Forwards a filtered `CcInfo` of the public `deps` of a shared library to its in-tree `cc_import()`.
+
+The shared library already contains any static libraries in its `deps`, so only
+their compilation information (e.g., headers) and any shared libraries are
+forwarded. Such shared libraries are other `idk_cc_shared_library()` targets,
+which are needed to link and run dependents. Forwarding the full `CcInfo` would
+link second copies of the static libraries into dependents.""",
+    attrs = {
+        "deps": attr.label_list(providers = [CcInfo]),
+    },
+    provides = [CcInfo],
+)
 
 def _idk_cc_prebuilt_library_impl(
         name,
@@ -163,6 +218,7 @@ def _idk_cc_prebuilt_library_impl(
     hdrs_for_idk = hdrs + hdrs_for_internal_use
     hdrs_for_bazel_library = hdrs
     srcs_for_bazel_library = srcs + hdrs_for_internal_use
+    deps_for_bazel_library = deps + select_for_fuchsia(fuchsia_deps)
 
     # Prebuilt shared libraries are eligible for inclusion in the SDK. We do not
     # want to dynamically link against libc++.so because we let clients bring
@@ -187,21 +243,23 @@ def _idk_cc_prebuilt_library_impl(
         fail("`libcxx_linkage` ('%s') must be 'none' or 'static'." % libcxx_linkage)
 
     if prebuilt_library_type == "shared":
-        # In-tree code should depend on the imported `cc_shared_library` rather
-        # than the `cc_library()`, which will not be a shared library.
-        # Give the `cc_library()` a different name to make the base name
+        # In-tree code should depend on the `cc_import` target, which exposes
+        # the exported `cc_shared_library`, rather than the `fx_cc_library()`,
+        # which will not be a shared library.
+        # Give the `fx_cc_library()` a different name to make the base name
         # available for the imported library.
-        cc_library_name = "%s_impl" % name
+        fx_cc_library_name = "%s_impl" % name
 
-        # The `cc_library()` is not a shared object. Prevent use.
-        cc_library_visibility = ["//build/bazel/bazel_idk/tests:__subpackages__"]
+        # The `fx_cc_library()` is not a shared object. Prevent use.
+        fx_cc_library_visibility = ["//build/bazel/bazel_idk/tests:__subpackages__"]
     elif prebuilt_library_type == "static":
-        # In-tree code should depend on the `cc_library` rather than importing
-        # the `cc_static_library`, which is meant to be self-contained.
-        cc_library_name = name
+        # In-tree code should depend on the `fx_cc_library` rather than
+        # importing the `cc_static_library`, which is meant to be
+        # self-contained.
+        fx_cc_library_name = name
 
-        # In-tree code should depend on the `cc_library()`.
-        cc_library_visibility = visibility
+        # In-tree code should depend on the `fx_cc_library()`.
+        fx_cc_library_visibility = visibility
     else:
         fail("Unrecognized `prebuilt_library_type` '%s'." % prebuilt_library_type)
 
@@ -214,15 +272,15 @@ def _idk_cc_prebuilt_library_impl(
     # shared library toolchain (without variants for the "shared" case). For
     # the "static" case, this will allow the static library shipped in the IDK
     # to be linked into shared libraries See https://fxbug.dev/404169865.
-    cc_library(
-        name = cc_library_name,
+    fx_cc_library(
+        name = fx_cc_library_name,
         srcs = srcs_for_bazel_library,
         hdrs = hdrs_for_bazel_library,
-        deps = deps + select_for_fuchsia(fuchsia_deps),
+        deps = deps_for_bazel_library,
         implementation_deps = implementation_deps,
         includes = [include_base],
         testonly = testonly,
-        visibility = cc_library_visibility,
+        visibility = fx_cc_library_visibility,
         **kwargs
     )
 
@@ -241,10 +299,12 @@ def _idk_cc_prebuilt_library_impl(
             user_link_flags.append("-Wl,--version-script=$(location %s)" % version_script)
             additional_linker_inputs.append(version_script)
 
+        # TODO(https://fxbug.dev/421888626): Determine whether to use
+        # `fx_cc_shared_library()` here.
         cc_shared_library(
             name = exported_target_name,
             shared_lib_name = "lib%s.so" % output_name,
-            deps = [":%s" % cc_library_name],
+            deps = [":%s" % fx_cc_library_name],
             user_link_flags = user_link_flags,
             additional_linker_inputs = additional_linker_inputs,
             testonly = testonly,
@@ -264,11 +324,24 @@ def _idk_cc_prebuilt_library_impl(
         # TODO(https://fxbug.dev/478896548): Make this `include_base` when updating to Bazel 9.
         import_include_path = native.package_name() + "/" + include_base
 
+        # Make the headers and shared libraries of the library's public `deps`
+        # available to in-tree dependents of the `cc_import()`, as they are for
+        # the `cc_library()`. The `deps` must be filtered to avoid leaking the
+        # static libraries that are already linked into the shared library.
+        filtered_public_deps_target_name = name + "_filtered_public_deps"
+        _shared_library_filtered_public_deps(
+            name = filtered_public_deps_target_name,
+            deps = deps_for_bazel_library,
+            testonly = testonly,
+            visibility = ["//visibility:private"],
+        )
+
         cc_import(
             name = name,
             hdrs = hdrs_for_bazel_library,
             includes = [import_include_path],
             shared_library = ":%s" % exported_target_name,
+            deps = [":%s" % filtered_public_deps_target_name],
             aspect_hints = kwargs.get("aspect_hints"),
             testonly = testonly,
             # In-tree code should depend on the imported shared library.
@@ -288,9 +361,11 @@ def _idk_cc_prebuilt_library_impl(
         # that will be included in the IDK.
         exported_target_name = name + ".export/" + name
 
+        # TODO(https://fxbug.dev/421888626): Determine whether we need an
+        # `fx_cc_static_library()`.
         cc_static_library(
             name = exported_target_name,
-            deps = [":%s" % cc_library_name],
+            deps = [":%s" % fx_cc_library_name],
             testonly = testonly,
             # Only the IDK atom target should depend on this target.
             visibility = ["//build/bazel/bazel_idk/tests:__subpackages__"],
@@ -446,9 +521,7 @@ The values of all deps args must be iterable. That means they cannot contain
 that only apply to Fuchsia.
 """,
     implementation = _idk_cc_prebuilt_library_impl,
-    # TODO(https://fxbug.dev/446694542): Remove `native.` once the
-    # `cc_library()` wrapper is a symbolic macro.
-    inherit_attrs = native.cc_library,
+    inherit_attrs = fx_cc_library,
     attrs = {
         "prebuilt_library_type": attr.string(
             doc = """The type of the library - either "shared" or "static".""",
@@ -569,9 +642,10 @@ Not allowed when `no_headers` is True.
 When using the wrapper macro:
   * If not specified, the path will be "<idk_name>.api".
   * Only specify when the default needs to be overridden.
-When the path is not in the current directory, the file will likely need to be
-made visibile to this target using `exports_files()` in the BUILD.bazel file
-for the directory containing the .api file.
+When the path is not in the current directory, the file (and, for shared
+libraries, the "PLATFORM" `.ifs` golden file in the same directory) will likely
+need to be made visible to this target using `exports_files()` in the
+BUILD.bazel file for that directory.
 GN equivalent: `api`""",
             allow_single_file = True,
             configurable = False,
@@ -633,7 +707,8 @@ not have a stable ABI. Can be either "none" or "static".""",
 
         # Require use of `runtime_deps` for atoms that are runtime dependencies. Do not inherit.
         "data": None,
-        # Do not inherit as this attribute is specified to `cc_library()` in the implementation.
+        # Do not inherit as this attribute is specified to `fx_cc_library()` in
+        # the implementation.
         "includes": None,
     },
 )

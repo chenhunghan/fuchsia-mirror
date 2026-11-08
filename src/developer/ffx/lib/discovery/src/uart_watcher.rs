@@ -11,8 +11,9 @@
 use crate::TargetEvent;
 use crate::error::Error;
 use crate::events::{TargetHandle, TargetState};
-use crate::instance_watcher::{InstanceSource, InstanceWatcher, is_pid_running};
+use crate::instance_watcher::{InstanceSource, InstanceWatcher};
 use addr::TargetAddr;
+use ffx_process::is_pid_running;
 use futures::channel::mpsc::UnboundedSender;
 use std::path::{Path, PathBuf};
 use uart_driver_api::{ConnectionMetadata, ConnectionStatus, METADATA_FILE_EXTENSION};

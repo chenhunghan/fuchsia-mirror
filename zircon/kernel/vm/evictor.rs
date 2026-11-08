@@ -7,6 +7,7 @@
 use crate::counters::define_kcounter;
 use crate::kernel::event::AutounsignalEvent;
 use crate::kernel::thread::{Thread, ThreadPtr};
+use crate::ksync_kernel::{TrackedMonitoredSpinlock, TrackedMutex};
 use crate::platform_rs::timer::InstantMono;
 use crate::vm::compression::VmCompression;
 use crate::vm::page::VmPagePtr;
@@ -16,12 +17,11 @@ use crate::vm::vm_cow_pages::{
 use crate::vm::{page_queues, pmm};
 use core::fmt::Write;
 use core::marker::PhantomPinned;
-use core::mem::MaybeUninit;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use evictor_bindings as bindings;
 use fbl::StringBuffer;
-use ksync::{KMutex, RawMonitoredSpinlock, RawMutex, guarded, source_tag};
+use ksync::{KMutex, guarded, source_tag};
 use pin_init::{PinInit, pin_data, pin_init, stack_pin_init};
 use zr::SendSyncInlineFn;
 
@@ -77,27 +77,12 @@ pub enum Output {
     Print = 1,
 }
 
-// Compile-time layout assertions against C++ Output
-zr::static_assert!(
-    core::mem::size_of::<Output>() == core::mem::size_of::<bindings::Evictor_Output>()
-);
-zr::static_assert!(Output::Print as u8 == bindings::Evictor_Output::Print as u8);
-zr::static_assert!(Output::NoPrint as u8 == bindings::Evictor_Output::NoPrint as u8);
-
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub enum TriggerReason {
     Other = 0,
     OOM = 1,
 }
-
-// Compile-time layout assertions against C++ TriggerReason
-zr::static_assert!(
-    core::mem::size_of::<TriggerReason>()
-        == core::mem::size_of::<bindings::Evictor_TriggerReason>()
-);
-zr::static_assert!(TriggerReason::OOM as u8 == bindings::Evictor_TriggerReason::OOM as u8);
-zr::static_assert!(TriggerReason::Other as u8 == bindings::Evictor_TriggerReason::Other as u8);
 
 /// Eviction target state is grouped together behind a lock to allow different threads to safely
 /// trigger and perform the eviction.
@@ -239,30 +224,11 @@ zr::static_assert!(
 /// Result returned from eviction methods indicating what they performed and why they returned.
 /// Provides by the count of how many different items were evicted, which could be more or less
 /// than requested, as well as whether any free memory target was achieved.
-#[repr(C)]
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct EvictionResult {
     pub counts: EvictedPageCounts,
     pub free_target_reached: bool,
 }
-
-// Compile-time layout assertions against C++ EvictionResult
-zr::static_assert!(
-    core::mem::size_of::<EvictionResult>()
-        == core::mem::size_of::<bindings::Evictor_EvictionResult>()
-);
-zr::static_assert!(
-    core::mem::align_of::<EvictionResult>()
-        == core::mem::align_of::<bindings::Evictor_EvictionResult>()
-);
-zr::static_assert!(
-    core::mem::offset_of!(EvictionResult, counts)
-        == core::mem::offset_of!(bindings::Evictor_EvictionResult, counts)
-);
-zr::static_assert!(
-    core::mem::offset_of!(EvictionResult, free_target_reached)
-        == core::mem::offset_of!(bindings::Evictor_EvictionResult, free_target_reached)
-);
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct EvictorStats {
@@ -300,7 +266,7 @@ pub struct Evictor {
     /// from overshooting the free memory targets required by various simultaneous eviction
     /// requests.
     #[mutex]
-    eviction_lock: KMutex<RawMutex>,
+    eviction_lock: KMutex<TrackedMutex>,
 
     /// Tracks the total amount of evictions performed by `evict_until_targets_met`. This allows
     /// parallel evictions to combine their eviction progress instead of acting serially.
@@ -310,7 +276,7 @@ pub struct Evictor {
     /// Use MonitoredSpinLock to provide lockup detector diagnostics for the critical sections
     /// protected by this lock.
     #[mutex]
-    lock: KMutex<RawMonitoredSpinlock>,
+    lock: KMutex<TrackedMonitoredSpinlock>,
 
     /// The eviction thread used to process asynchronous requests.
     /// Created only if eviction is enabled, i.e., `eviction_enabled` is set to true.
@@ -415,17 +381,6 @@ impl PinnedDrop for Evictor {
         }
     }
 }
-
-pub type EvictorTestReclaimFn = unsafe extern "C" fn(
-    ctx: *mut core::ffi::c_void,
-    compression: *mut VmCompression,
-    eviction_level: EvictionLevel,
-    out_is_ok: *mut bool,
-    out_success: *mut VmCowReclaimSuccess,
-    out_failure: *mut VmCowReclaimFailure,
-) -> bool;
-
-pub type EvictorTestFreePagesFn = unsafe extern "C" fn(ctx: *mut core::ffi::c_void) -> u64;
 
 fn reclaim_from_global_page_queues(
     compression: Option<&VmCompression>,
@@ -675,7 +630,8 @@ impl Evictor {
     }
 
     /// Private constructor for test code to specify custom methods to fake the reclamation.
-    pub fn init_for_test(
+    #[cfg(ktest)]
+    fn init_for_test(
         reclaim_fn: ReclaimFunction,
         free_pages_fn: FreePagesFunction,
     ) -> impl PinInit<Self, core::convert::Infallible> {
@@ -1196,24 +1152,6 @@ impl Evictor {
     }
 }
 
-#[derive(Copy, Clone)]
-struct TestCallbackCtx(*mut core::ffi::c_void);
-
-// SAFETY: `TestCallbackCtx` is only constructed in `rust_evictor_init_with_test_functions`, whose
-// caller guarantees that `ctx` may be passed to `reclaim_fn` and `free_pages_fn` from any thread
-// for the lifetime of the `Evictor`.
-unsafe impl Send for TestCallbackCtx {}
-// SAFETY: `TestCallbackCtx` is only constructed in `rust_evictor_init_with_test_functions`, whose
-// caller guarantees that `ctx` may be passed to `reclaim_fn` and `free_pages_fn` concurrently
-// from any thread for the lifetime of the `Evictor`.
-unsafe impl Sync for TestCallbackCtx {}
-
-impl TestCallbackCtx {
-    fn as_ptr(self) -> *mut core::ffi::c_void {
-        self.0
-    }
-}
-
 // C FFI exports for C++ `Evictor` methods
 
 /// Initializes an `Evictor` in place at `evictor`.
@@ -1229,65 +1167,6 @@ pub unsafe extern "C" fn rust_evictor_init(evictor: *mut Evictor) {
     // SAFETY: The caller guarantees `evictor` points to valid, aligned, uninitialized storage
     // that will remain pinned.
     let _ = unsafe { Evictor::init().__pinned_init(evictor) };
-}
-
-/// Initializes an `Evictor` in place at `evictor` with custom test functions.
-///
-/// # Safety
-///
-/// The caller must ensure that:
-/// - `evictor` is a valid, aligned, non-null pointer to uninitialized storage suitable for
-///   `Evictor` that will remain pinned until destroyed by `rust_evictor_destroy`.
-/// - `ctx`, `reclaim_fn`, and `free_pages_fn` remain valid and thread-safe for concurrent calls
-///   across threads for the lifetime of `evictor`, and do not unwind across the FFI boundary.
-/// - Whenever `reclaim_fn` returns `true`, it initializes `*out_is_ok` and either `*out_success`
-///   (when `*out_is_ok` is `true`) or `*out_failure` (when `*out_is_ok` is `false`).
-// SAFETY: Symbol name is prefixed with `rust_evictor_` and matches `evictor.cc`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_evictor_init_with_test_functions(
-    evictor: *mut Evictor,
-    ctx: *mut core::ffi::c_void,
-    reclaim_fn: EvictorTestReclaimFn,
-    free_pages_fn: EvictorTestFreePagesFn,
-) {
-    let ctx = TestCallbackCtx(ctx);
-    let reclaim =
-        ReclaimFunction::new(move |compression: Option<&'static VmCompression>, eviction_level| {
-            let compression_ptr = compression.map_or(core::ptr::null_mut(), |c| c.as_raw().cast());
-            let mut is_ok = false;
-            let mut success = MaybeUninit::<VmCowReclaimSuccess>::uninit();
-            let mut failure = MaybeUninit::<VmCowReclaimFailure>::uninit();
-            // SAFETY: The caller of `rust_evictor_init_with_test_functions` guarantees that `ctx`
-            // and `reclaim_fn` are valid for the lifetime of `evictor`, and the out-pointers point
-            // to local stack variables.
-            let has_val = unsafe {
-                reclaim_fn(
-                    ctx.as_ptr(),
-                    compression_ptr,
-                    eviction_level,
-                    &mut is_ok,
-                    success.as_mut_ptr(),
-                    failure.as_mut_ptr(),
-                )
-            };
-            if has_val {
-                // SAFETY: The caller of `rust_evictor_init_with_test_functions` guarantees that
-                // when `reclaim_fn` returns `true`, `is_ok` and the corresponding `success` or
-                // `failure` out-parameter have been initialized.
-                let res = unsafe {
-                    if is_ok { Ok(success.assume_init()) } else { Err(failure.assume_init()) }
-                };
-                Some(res)
-            } else {
-                None
-            }
-        });
-    // SAFETY: The caller of `rust_evictor_init_with_test_functions` guarantees that `ctx` and
-    // `free_pages_fn` are valid and thread-safe for the lifetime of `evictor`.
-    let free_pages = FreePagesFunction::new(move || unsafe { free_pages_fn(ctx.as_ptr()) });
-    // SAFETY: The caller guarantees `evictor` points to valid, aligned, uninitialized storage
-    // that will remain pinned.
-    let _ = unsafe { Evictor::init_for_test(reclaim, free_pages).__pinned_init(evictor) };
 }
 
 /// Destroys the `Evictor` at `evictor` in place.
@@ -1313,129 +1192,6 @@ pub unsafe extern "C" fn rust_evictor_destroy(evictor: *mut Evictor) {
     // valid for dropping in place and will not be used again.
     unsafe {
         core::ptr::drop_in_place(evictor);
-    }
-}
-
-/// Enables eviction on `evictor`.
-///
-/// # Safety
-///
-/// The caller must ensure that:
-/// - `evictor` is a valid reference to an initialized `Evictor` that remains pinned and valid
-///   until `Evictor::disable_eviction` or `rust_evictor_destroy` completes.
-/// - This function is not called concurrently with `enable_eviction`, `disable_eviction`, or
-///   `debug_get_evictor_thread` on `evictor`.
-/// - The current thread does not hold `evictor.lock`.
-// SAFETY: Symbol name is prefixed with `rust_evictor_` and matches `evictor.cc`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_evictor_enable_eviction(evictor: &Evictor, use_compression: bool) {
-    // SAFETY: The caller satisfies all preconditions of `Evictor::enable_eviction`.
-    unsafe {
-        evictor.enable_eviction(use_compression);
-    }
-}
-
-/// Evicts from an external `target` on `evictor`, writing the result to `out_result`.
-///
-/// # Safety
-///
-/// The caller must ensure that `evictor` is a valid reference to an initialized `Evictor`,
-/// `target` is a valid, aligned, non-null pointer readable for the duration of the call, and
-/// `out_result` is a valid, aligned, non-null pointer writable for the duration of the call.
-// SAFETY: Symbol name is prefixed with `rust_evictor_` and matches `evictor.cc`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_evictor_evict_from_external_target(
-    evictor: &Evictor,
-    target: *const EvictionTarget,
-    out_result: *mut EvictionResult,
-) {
-    // SAFETY: The caller guarantees `target` is valid for reading and `out_result` is valid for
-    // writing.
-    unsafe {
-        *out_result = evictor.evict_from_external_target(*target);
-    }
-}
-
-/// Performs synchronous eviction on `evictor`, writing the result to `out_result`.
-///
-/// # Safety
-///
-/// The caller must ensure that `evictor` is a valid reference to an initialized `Evictor` and
-/// `out_result` is a valid, aligned, non-null pointer writable for the duration of the call.
-// SAFETY: Symbol name is prefixed with `rust_evictor_` and matches `evictor.cc`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_evictor_evict_synchronous(
-    evictor: &Evictor,
-    min_mem_to_free: u64,
-    free_mem_target: u64,
-    eviction_level: EvictionLevel,
-    output: Output,
-    reason: TriggerReason,
-    out_result: *mut EvictionResult,
-) {
-    // SAFETY: The caller guarantees `out_result` is valid for writing.
-    unsafe {
-        *out_result = evictor.evict_synchronous(
-            min_mem_to_free,
-            free_mem_target,
-            eviction_level,
-            output,
-            reason,
-        );
-    }
-}
-
-/// Writes the current `EvictionTarget` of `evictor` to `out_target`.
-///
-/// # Safety
-///
-/// The caller must ensure that `evictor` is a valid reference to an initialized `Evictor` and
-/// `out_target` is a valid, aligned, non-null pointer writable for the duration of the call.
-// SAFETY: Symbol name is prefixed with `rust_evictor_` and matches `evictor.cc`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_evictor_debug_get_eviction_target(
-    evictor: &Evictor,
-    out_target: *mut EvictionTarget,
-) {
-    // SAFETY: The caller guarantees `out_target` is valid for writing.
-    unsafe {
-        *out_target = evictor.debug_get_eviction_target();
-    }
-}
-
-/// Combines `target` into `evictor`'s eviction target.
-///
-/// # Safety
-///
-/// The caller must ensure that `evictor` is a valid reference to an initialized `Evictor` and
-/// `target` is a valid, aligned, non-null pointer readable for the duration of the call.
-// SAFETY: Symbol name is prefixed with `rust_evictor_` and matches `evictor.cc`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_evictor_combine_eviction_target(
-    evictor: &Evictor,
-    target: *const EvictionTarget,
-) {
-    // SAFETY: The caller guarantees `target` is valid for reading.
-    unsafe {
-        evictor.combine_eviction_target(*target);
-    }
-}
-
-/// Evicts from the preloaded target on `evictor`, writing the counts to `out_counts`.
-///
-/// # Safety
-///
-/// The caller must ensure that `evictor` is a valid reference to an initialized `Evictor` and
-/// `out_counts` is a valid, aligned, non-null pointer writable for the duration of the call.
-// SAFETY: Symbol name is prefixed with `rust_evictor_` and matches `evictor.cc`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_evictor_evict_from_preloaded_target(
-    evictor: &Evictor,
-    out_counts: *mut EvictedPageCounts,
-) {
-    // SAFETY: The caller guarantees `out_counts` is valid for writing.
-    unsafe {
-        *out_counts = evictor.evict_from_preloaded_target();
     }
 }
 

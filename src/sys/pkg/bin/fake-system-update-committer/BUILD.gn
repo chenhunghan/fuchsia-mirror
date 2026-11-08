@@ -2,45 +2,18 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-import("//build/rust/rustc_test.gni")
+import("//build/bazel/bazel_test_suite.gni")
 
-fuchsia_component("fake-system-update-committer") {
-  component_name = "fake-system-update-committer"
-  manifest = "meta/fake-system-update-committer.cml"
-  deps = [ ":fake-system-update-committer-bin" ]
-}
-
-# Kept in GN because `fake-system-update-committer-bin_test` transitively
-# depends on `//src/storage/lib/vfs/rust:vfs` (`rustc_dylib("vfs_dylib")`),
-# which places two copies of `libvfs-<hash>.so` in Bazel `default_runfiles` and
-# causes `fx_packaged_binary` + `fx_package` to fail with duplicate
-# `lib/libvfs-*.so`.
-rustc_test("fake-system-update-committer-bin_test") {
-  edition = "2024"
-  output_name = "fake-system-update-committer_bin_test"
-  source_root = "src/main.rs"
-  sources = [ "src/main.rs" ]
-  deps = [
-    "//sdk/fidl/fuchsia.update:fuchsia.update_rust",
-    "//sdk/rust/zx",
-    "//src/lib/fidl/rust/fidl",
-    "//src/lib/fuchsia",
-    "//src/lib/fuchsia-async",
-    "//src/lib/fuchsia-component",
-    "//third_party/rust_crates:anyhow",
-    "//third_party/rust_crates:futures",
-  ]
-  configs += [ "//build/config/rust/lints:clippy_warn_all" ]
-}
-
-fuchsia_unittest_package("fake-system-update-committer-tests") {
-  deps = [ ":fake-system-update-committer-bin_test" ]
+bazel_test_suite("bazel_tests") {
+  target_tests = [ "//src/sys/pkg/bin/fake-system-update-committer:fake-system-update-committer-tests" ]
 }
 
 group("hermetic_tests") {
   testonly = true
-  deps = [ ":fake-system-update-committer-tests" ]
+  deps = [
+    ":bazel_tests",
+    ":fake-system-update-committer-tests",
+  ]
 }
 
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
@@ -82,4 +55,44 @@ rustc_binary("fake-system-update-committer-bin") {
     "//third_party/rust_crates:anyhow",
     "//third_party/rust_crates:futures",
   ]
+}
+
+fuchsia_component_manifest("manifest") {
+  component_name = "fake-system-update-committer"
+  manifest = "meta/fake-system-update-committer.cml"
+}
+
+fuchsia_component("fake-system-update-committer") {
+  cm_label = ":manifest"
+  visibility = [
+    ":*",
+    "//src/sys/pkg/lib/isolated-swd:*",
+    "//src/sys/pkg/tests/isolated-ota:*",
+  ]
+  deps = [ ":fake-system-update-committer-bin" ]
+}
+
+rustc_test("fake-system-update-committer-bin_test") {
+  sources = [ "src/main.rs" ]
+  edition = "2024"
+  deps = [
+           "//sdk/fidl/fuchsia.update:fuchsia.update_rust",
+           "//sdk/rust/zx",
+           "//src/lib/fuchsia",
+           "//src/lib/fuchsia-component",
+           "//third_party/rust_crates:anyhow",
+           "//third_party/rust_crates:futures",
+         ] +
+         [
+           "//src/lib/fidl/rust/fidl",
+           "//src/lib/fuchsia-async",
+         ]
+  source_root = "src/main.rs"
+  lint_config = "//build/config/rust/lints:clippy_warn_all"
+}
+
+fuchsia_unittest_package("fake-system-update-committer-tests") {
+  package_name = "fake-system-update-committer-tests-gn"
+  component_name = "fake-system-update-committer-tests"
+  deps = [ ":fake-system-update-committer-bin_test" ]
 }

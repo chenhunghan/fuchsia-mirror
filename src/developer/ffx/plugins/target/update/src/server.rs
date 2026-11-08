@@ -383,7 +383,7 @@ async fn remove_aliases(repo_url: &str, rewrite_proxy: EngineProxy) -> Result<()
 fn connect_to_capability<T: DiscoverableProtocolMarker>(
     rcs_proxy_connector: Connector<RemoteControlProxyHolder>,
     time_to_wait: Duration,
-) -> futures::future::LocalBoxFuture<'static, Result<T::Proxy>> {
+) -> ffx_futures::LocalBoxFuture<'static, Result<T::Proxy>> {
     Box::pin(async move {
         let rcs_proxy = try_rcs_proxy_connection(rcs_proxy_connector, time_to_wait).await?;
         // Try to connect via fuchsia.developer.remotecontrol/RemoteControl.ConnectCapability.
@@ -450,7 +450,7 @@ pub(crate) mod tests {
     use futures::{SinkExt as _, StreamExt as _, TryStreamExt as _};
     use std::assert_matches;
     use std::sync::{Arc, Mutex};
-    use target_behavior::ConnectionBehavior;
+    use target_behavior::DirectConnector;
     use target_holders::{HostAddrHolder, RemoteControlProxyHolder};
 
     fn setup_fake_client() -> Arc<fdomain_client::Client> {
@@ -496,9 +496,8 @@ pub(crate) mod tests {
             let fdomain_client = setup_fake_client();
             let fho_env = FhoEnvironment::new_with_args(&test_env.context, &["some", "test"]);
             let target_env = target_behavior::target_interface(&fho_env);
-            let behavior =
-                ConnectionBehavior::fake_with_fdomain_client(fdomain_client.clone()).await;
-            target_env.set_behavior_for_test(behavior);
+            let connector = DirectConnector::fake_with_fdomain_client(fdomain_client.clone()).await;
+            target_env.set_behavior_for_test(connector);
 
             let rcs_proxy_connector =
                 Connector::try_from_env(&fho_env).await.expect("Could not make RCS test connector");

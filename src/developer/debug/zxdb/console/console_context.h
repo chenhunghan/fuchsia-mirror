@@ -35,6 +35,8 @@ class Filter;
 class Frame;
 class OutputBuffer;
 class Session;
+class Tracepoint;
+struct TracepointHitRecord;
 
 // The context for console commands. In a model-view-controller UI, this would
 // represent the state associated with the view and controller (depending on
@@ -103,6 +105,12 @@ class ConsoleContext : public ProcessObserver,
   int GetActiveFilterId() const;
   Filter* GetActiveFilter() const;
 
+  // Sets the active tracepoint. Can be null/0 if there is no active tracepoint.
+  void SetActiveTracepoint(const Tracepoint* tracepoint);
+  int GetActiveTracepointId() const { return active_tracepoint_id_; }
+  Tracepoint* GetActiveTracepoint() const;
+  int IdForTracepoint(const Tracepoint* tracepoint) const;
+
   // Each thread maintains a source affinity which was the last command that
   // implies either source code or disassembly viewing. This is used to control
   // what gets displayed by default for the next stop of that thread. Defaults
@@ -156,6 +164,9 @@ class ConsoleContext : public ProcessObserver,
   void WillDestroyBreakpoint(Breakpoint* breakpoint) override;
   void DidCreateFilter(Filter* filter) override;
   void WillDestroyFilter(Filter* filter) override;
+  void DidCreateTracepoint(Tracepoint* tracepoint) override;
+  void WillDestroyTracepoint(Tracepoint* tracepoint) override;
+  void OnTracepointHit(Tracepoint* tracepoint, const TracepointHitRecord& hit) override;
   void DidCreateSymbolServer(SymbolServer* symbol_server) override;
 
   // TargetObserver implementation:
@@ -243,6 +254,7 @@ class ConsoleContext : public ProcessObserver,
   Err FillOutFrame(Command* cmd, const ThreadRecord* thread_record) const;
   Err FillOutBreakpoint(Command* cmd) const;
   Err FillOutFilter(Command* cmd) const;
+  Err FillOutTracepoint(Command* cmd) const;
   Err FillOutSymbolServer(Command* cmd) const;
 
   // When a thread stops on a breakpoint, sets that breakpoint to be the default.
@@ -263,6 +275,10 @@ class ConsoleContext : public ProcessObserver,
   std::map<const Filter*, int> filter_to_id_;
   int next_filter_id_ = 1;
 
+  std::map<int, Tracepoint*> id_to_tracepoint_;
+  std::map<const Tracepoint*, int> tracepoint_to_id_;
+  int next_tracepoint_id_ = 1;
+
   std::map<int, SymbolServer*> id_to_symbol_server_;
   std::map<const SymbolServer*, int> symbol_server_to_id_;
   int next_symbol_server_id_ = 1;
@@ -270,6 +286,7 @@ class ConsoleContext : public ProcessObserver,
   int active_target_id_ = 0;
   int active_breakpoint_id_ = 0;
   int active_filter_id_ = 0;
+  int active_tracepoint_id_ = 0;
   int active_symbol_server_id_ = 0;
 
   // A separate thread that handles the console UI while symbols are being loaded and indexed. A new

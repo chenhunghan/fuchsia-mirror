@@ -57,7 +57,8 @@ rustc_library("lib") {
     "//third_party/rust_crates:futures",
   ]
 }
-rustc_test("lib_test") {
+
+rustc_test("mock_boot_arguments_lib_test") {
   sources = [ "src/lib.rs" ]
   edition = "2024"
   deps = [
@@ -73,10 +74,10 @@ rustc_test("lib_test") {
          ]
   lint_config = "//build/config/rust/lints:clippy_warn_all"
   visibility = [ ":*" ]
-  output_name = "mock_boot_arguments_lib_test"
 }
+
 fuchsia_unittest_package("mock-boot-arguments-tests") {
   package_name = "mock-boot-arguments-tests-gn"
   component_name = "mock-boot-arguments-tests"
-  deps = [ ":lib_test" ]
+  deps = [ ":mock_boot_arguments_lib_test" ]
 }

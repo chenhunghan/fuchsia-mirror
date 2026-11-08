@@ -358,11 +358,6 @@ fuchsia::media::StreamOutputFormat DecryptorAdapter::CoreCodecGetOutputFormat(
   result.set_stream_lifetime_ordinal(stream_lifetime_ordinal);
   result.mutable_format_details()->set_format_details_version_ordinal(
       new_output_format_details_version_ordinal);
-
-  // This sets each of format_details, domain, crypto, decrypted.  So far there aren't any fields in
-  // DecryptedFormat.
-  result.mutable_format_details()->mutable_domain()->crypto().decrypted();
-
   return result;
 }
 
@@ -431,13 +426,12 @@ void DecryptorAdapter::ProcessInput() {
     }
 
     if (item.is_format_details()) {
-      if (!item.format_details().has_domain() || !item.format_details().domain().is_crypto() ||
-          !item.format_details().domain().crypto().is_encrypted()) {
+      if (!item.format_details().has_encrypted_format()) {
         events_->onCoreCodecFailCodec("InputFormatDetails does not include EncryptedFormat");
         return;
       }
 
-      if (!UpdateEncryptionParams(item.format_details().domain().crypto().encrypted())) {
+      if (!UpdateEncryptionParams(item.mutable_format_details().mutable_encrypted_format())) {
         events_->onCoreCodecFailCodec("Invalid EncryptedFormat");
       }
       continue;
@@ -547,28 +541,32 @@ void DecryptorAdapter::ProcessInput() {
   }
 }
 
-bool DecryptorAdapter::UpdateEncryptionParams(
-    const fuchsia::media::EncryptedFormat& encrypted_format) {
-  if (encrypted_format.has_scheme()) {
-    encryption_params_.scheme = encrypted_format.scheme();
-    if (inspect_properties_) {
-      inspect_properties_->scheme.Set(encryption_params_.scheme);
+bool DecryptorAdapter::UpdateEncryptionParams(fuchsia::media::EncryptedFormat* encrypted_format) {
+  ZX_DEBUG_ASSERT(encrypted_format);
+  if (encrypted_format->has_scheme()) {
+    if (encryption_params_.scheme != encrypted_format->scheme()) {
+      encryption_params_.scheme = std::move(*encrypted_format->mutable_scheme());
+      if (inspect_properties_) {
+        inspect_properties_->scheme.Set(encryption_params_.scheme);
+      }
     }
   }
-  if (encrypted_format.has_key_id()) {
-    encryption_params_.key_id = encrypted_format.key_id();
-    if (inspect_properties_) {
-      inspect_properties_->key_id.Set(encryption_params_.key_id);
+  if (encrypted_format->has_key_id()) {
+    if (encryption_params_.key_id != encrypted_format->key_id()) {
+      encryption_params_.key_id = std::move(*encrypted_format->mutable_key_id());
+      if (inspect_properties_) {
+        inspect_properties_->key_id.Set(encryption_params_.key_id);
+      }
     }
   }
-  if (encrypted_format.has_init_vector()) {
-    encryption_params_.init_vector = encrypted_format.init_vector();
+  if (encrypted_format->has_init_vector()) {
+    encryption_params_.init_vector = std::move(*encrypted_format->mutable_init_vector());
   }
-  if (encrypted_format.has_pattern()) {
-    encryption_params_.pattern = encrypted_format.pattern();
+  if (encrypted_format->has_pattern()) {
+    encryption_params_.pattern = encrypted_format->pattern();
   }
-  if (encrypted_format.has_subsamples()) {
-    encryption_params_.subsamples = encrypted_format.subsamples();
+  if (encrypted_format->has_subsamples()) {
+    encryption_params_.subsamples = std::move(*encrypted_format->mutable_subsamples());
   }
 
   return true;

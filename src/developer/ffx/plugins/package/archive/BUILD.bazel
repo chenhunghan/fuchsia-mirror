@@ -1,0 +1,64 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//src/developer/ffx/build:ffx_plugin.bzl", "ffx_plugin")
+
+package(default_applicable_licenses = ["//:license"])
+
+ffx_plugin(
+    name = "ffx_package_archive",
+    args_deps = [
+        "//src/developer/ffx/core:lib",
+        "//third_party/rust_crates/vendor:argh",
+    ],
+    args_srcs = ["src/args.rs"],
+    edition = "2024",
+    plugin_deps = [
+        "//src/developer/ffx/plugins/package/archive/add:ffx_package_archive_add",
+        "//src/developer/ffx/plugins/package/archive/cat:ffx_package_archive_cat",
+        "//src/developer/ffx/plugins/package/archive/create:ffx_package_archive_create",
+        "//src/developer/ffx/plugins/package/archive/edit:ffx_package_archive_edit",
+        "//src/developer/ffx/plugins/package/archive/extract:ffx_package_archive_extract",
+        "//src/developer/ffx/plugins/package/archive/list:ffx_package_archive_list",
+        "//src/developer/ffx/plugins/package/archive/remove:ffx_package_archive_remove",
+    ],
+    sdk_category = "not-yet-specified",
+    version = "0.1.0",
+    visibility = ["//src/developer/ffx/plugins/package:__pkg__"],
+)
+
+rustc_library(
+    name = "lib",
+    srcs = ["src/lib.rs"],
+    crate_name = "ffx_package_archive_utils",
+    edition = "2024",
+    visibility = [
+        "//src/developer/ffx/plugins/package/archive/cat:__pkg__",
+        "//src/developer/ffx/plugins/package/archive/list:__pkg__",
+        "//src/developer/ffx/plugins/package/far/cat:__pkg__",
+        "//src/developer/ffx/plugins/repository/packages:__pkg__",
+    ],
+    deps = [
+        "//src/sys/pkg/lib/far/rust:fuchsia-archive",
+        "//src/sys/pkg/lib/fuchsia-hash",
+        "//src/sys/pkg/lib/fuchsia-pkg",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:base64",
+        "//third_party/rust_crates/vendor:mockall",
+        "//third_party/rust_crates/vendor:schemars",
+        "//third_party/rust_crates/vendor:serde",
+    ],
+)
+
+host_rustc_test(
+    name = "lib_test",
+    crate = ":lib",
+    # Sets GN `output_name` via bazel2gn to preserve `ffx_package_archive_utils_lib_test`
+    # and avoid a generic `lib_test` binary collision.
+    crate_name = "ffx_package_archive_utils_lib_test",
+    edition = "2024",
+    visibility = ["//src/developer/ffx:__pkg__"],
+)

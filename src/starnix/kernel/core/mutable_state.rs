@@ -275,6 +275,21 @@ impl<'a, B, S, G: DerefMut<Target = S>> DerefMut for Guard<'a, B, G> {
     }
 }
 
+impl<'a, B, S, G: DerefMut<Target = S>> starnix_sync::WriteProof<S> for Guard<'a, B, G> {
+    #[inline(always)]
+    #[track_caller]
+    fn assert_owns(&self, field_ptr: *const ()) {
+        let base_start = self.base as *const B as usize;
+        let base_end = base_start + std::mem::size_of::<B>();
+        let field_addr = field_ptr as usize;
+        debug_assert!(
+            (base_start..base_end).contains(&field_addr),
+            "Write guard for {} does not belong to the instance being updated",
+            std::any::type_name::<B>(),
+        );
+    }
+}
+
 // Public re-export of macros allows them to be used like regular rust items.
 pub(crate) use state_accessor;
 pub(crate) use state_implementation;
@@ -282,7 +297,8 @@ pub(crate) use state_implementation;
 #[cfg(test)]
 mod test {
     use macro_rules_attribute::apply;
-    use starnix_sync::{LockDepRwLock, lock_ordering};
+    use starnix_sync::{LockDepRwLock, LockGuarded, lock_ordering};
+    use std::sync::atomic::{AtomicI32, Ordering};
     lock_ordering! {
         Terminal(FooLock),
     }
@@ -293,12 +309,17 @@ mod test {
 
     pub struct Foo {
         x: i32,
+        z: LockGuarded<AtomicI32, FooMutableState>,
         mutable_state: LockDepRwLock<FooMutableState, FooLock>,
     }
 
     impl Foo {
         fn new() -> Self {
-            Self { x: 2, mutable_state: FooMutableState { y: 3 }.into() }
+            Self {
+                x: 2,
+                z: LockGuarded::new(AtomicI32::new(10)),
+                mutable_state: FooMutableState { y: 3 }.into(),
+            }
         }
 
         state_accessor!(Foo, mutable_state);
@@ -320,6 +341,9 @@ mod test {
         }
         pub fn pub_set_y(&mut self, other_y: i32) {
             self.set_y(other_y)
+        }
+        pub fn set_z(&mut self, other_z: i32) {
+            self.base.z.write(self).store(other_z, Ordering::Relaxed);
         }
         fn do_something_mutable(&mut self) {
             self.do_something();
@@ -370,5 +394,19 @@ mod test {
         foo.read().do_something();
         foo.write().do_something();
         foo.write().do_something_mutable();
+
+        assert_eq!(foo.z.load(Ordering::Relaxed), 10);
+        foo.write().set_z(99);
+        assert_eq!(foo.z.load(Ordering::Relaxed), 99);
+    }
+
+    #[cfg(debug_assertions)]
+    #[::fuchsia::test]
+    #[should_panic(expected = "does not belong to the instance being updated")]
+    fn test_lock_guarded_mismatched_instance_panics() {
+        let foo1 = Foo::new();
+        let foo2 = Foo::new();
+        let guard1 = foo1.write();
+        foo2.z.write(&guard1).store(42, Ordering::Relaxed);
     }
 }

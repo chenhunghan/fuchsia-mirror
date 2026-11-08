@@ -396,7 +396,7 @@ impl NetlinkSocketInner {
                     let requested_capacity: socklen_t = optval.read(current_task)?;
                     // SO_SNDBUF doubles the requested capacity to leave space for bookkeeping.
                     // See https://man7.org/linux/man-pages/man7/socket.7.html
-                    let capacity = usize::try_from(requested_capacity * 2).unwrap_or(usize::MAX);
+                    let capacity = (requested_capacity as usize).saturating_mul(2);
                     // TODO(https://fxbug.dev/322907334): Clamp to `wmem_max`.
                     let capacity = capacity.clamp(SOCKET_MIN_SIZE, SOCKET_MAX_SIZE);
                     self.send_buf_size = capacity;
@@ -404,16 +404,19 @@ impl NetlinkSocketInner {
                 SO_SNDBUFFORCE => {
                     security::check_task_capable(current_task, CAP_NET_ADMIN)?;
                     let requested_capacity: socklen_t = optval.read(current_task)?;
-                    // SO_SNDBUFFORE doubles the requested capacity to leave space for bookkeeping.
+                    // SO_SNDBUFFORCE doubles the requested capacity to leave space for bookkeeping,
+                    // capped to fit in a signed 32-bit int as in Linux's __sock_set_sndbuf.
                     // See https://man7.org/linux/man-pages/man7/socket.7.html
-                    let capacity = usize::try_from(requested_capacity * 2).unwrap_or(usize::MAX);
+                    let capacity = (requested_capacity as usize)
+                        .saturating_mul(2)
+                        .clamp(SOCKET_MIN_SIZE, i32::MAX as usize);
                     self.send_buf_size = capacity;
                 }
                 SO_RCVBUF => {
                     let requested_capacity: socklen_t = optval.read(current_task)?;
                     // SO_RCVBUF doubles the requested capacity to leave space for bookkeeping.
                     // See https://man7.org/linux/man-pages/man7/socket.7.html
-                    let capacity = usize::try_from(requested_capacity * 2).unwrap_or(usize::MAX);
+                    let capacity = (requested_capacity as usize).saturating_mul(2);
                     // TODO(https://fxbug.dev/322906968): Clamp to `rmem_max`.
                     let capacity = capacity.clamp(SOCKET_MIN_SIZE, SOCKET_MAX_SIZE);
                     self.receive_buffer.set_capacity(capacity)?;
@@ -421,9 +424,12 @@ impl NetlinkSocketInner {
                 SO_RCVBUFFORCE => {
                     security::check_task_capable(current_task, CAP_NET_ADMIN)?;
                     let requested_capacity: socklen_t = optval.read(current_task)?;
-                    // SO_RCVBUFFORE doubles the requested capacity to leave space for bookkeeping.
+                    // SO_RCVBUFFORCE doubles the requested capacity to leave space for bookkeeping,
+                    // capped to fit in a signed 32-bit int as in Linux's __sock_set_rcvbuf.
                     // See https://man7.org/linux/man-pages/man7/socket.7.html
-                    let capacity = usize::try_from(requested_capacity * 2).unwrap_or(usize::MAX);
+                    let capacity = (requested_capacity as usize)
+                        .saturating_mul(2)
+                        .clamp(SOCKET_MIN_SIZE, i32::MAX as usize);
                     self.receive_buffer.set_capacity(capacity)?;
                 }
                 SO_PASSCRED => {
@@ -714,6 +720,7 @@ impl SocketOps for StubbedNetlinkSocket {
                     message_length: msg_bytes.len(),
                     address: Some(SocketAddress::Netlink(NetlinkAddress::default())),
                     credentials: None,
+                    security_state: None,
                     ancillary_data: vec![],
                 };
                 Ok(info)
@@ -1786,6 +1793,7 @@ impl SocketOps for AuditNetlinkSocket {
             message_length: size,
             address: Some(SocketAddress::Netlink(NetlinkAddress::default())),
             credentials: None,
+            security_state: None,
             ancillary_data: vec![],
         })
     }
@@ -1941,7 +1949,7 @@ mod tests {
 
         let mut sender = NetlinkToClientSender::<RouteNetlinkMessage>::new(socket_inner.clone());
         sender.send(message.clone(), Some(ModernGroup(MODERN_GROUP)));
-        let Message { data, address, credentials: _, ancillary_data: _ } =
+        let Message { data, address, credentials: _, security_state: _, ancillary_data: _ } =
             socket_inner.lock().read_message().expect("should read message");
 
         assert_eq!(

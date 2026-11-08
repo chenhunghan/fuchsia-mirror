@@ -26,20 +26,6 @@ void DiagnosticsArchiveSequentialIterators::StreamDiagnostics(
                                                     dispatcher_);
 }
 
-void DiagnosticsArchiveClosesFirstIteratorConnection::StreamDiagnostics(
-    StreamDiagnosticsRequest& request, StreamDiagnosticsCompleter::Sync& completer) {
-  if (is_first_) {
-    request.result_stream().Close(ZX_ERR_PEER_CLOSED);
-    is_first_ = false;
-    return;
-  }
-
-  if (request.stream_parameters().format().has_value()) {
-    BatchIterator()->SetFormat(request.stream_parameters().format().value());
-  }
-  BatchIterator()->Bind(std::move(request.result_stream()), dispatcher());
-}
-
 void DiagnosticsArchiveClosesIteratorConnection::StreamDiagnostics(
     StreamDiagnosticsRequest& request, StreamDiagnosticsCompleter::Sync& completer) {
   request.result_stream().Close(ZX_ERR_PEER_CLOSED);

@@ -4,20 +4,19 @@
 
 #include "src/developer/forensics/feedback_data/log_buffer.h"
 
-#include <gmock/gmock.h>
+#include <lib/syslog/cpp/log_level.h>
+
 #include <gtest/gtest.h>
 
 namespace forensics::feedback {
 namespace {
 
-using ::testing::IsEmpty;
-
 constexpr fuchsia_logging::LogSeverity kLogInfo = fuchsia_logging::LogSeverity::Info;
 constexpr fuchsia_logging::LogSeverity kLogWarning = fuchsia_logging::LogSeverity::Warn;
 
-feedback_data::LogSink::MessageOr ToMessage(const std::string& msg,
-                                            fuchsia_logging::LogSeverity severity = kLogInfo,
-                                            std::vector<std::string> tags = {"tag1", "tag2"}) {
+::fpromise::result<fuchsia::logger::LogMessage, std::string> ToMessage(
+    const std::string& msg, fuchsia_logging::LogSeverity severity = kLogInfo,
+    std::vector<std::string> tags = {"tag1", "tag2"}) {
   return ::fpromise::ok(fuchsia::logger::LogMessage{
       .pid = 100,
       .tid = 101,
@@ -29,7 +28,8 @@ feedback_data::LogSink::MessageOr ToMessage(const std::string& msg,
   });
 }
 
-feedback_data::LogSink::MessageOr ToMessage(const std::string& msg, const zx::duration time) {
+::fpromise::result<fuchsia::logger::LogMessage, std::string> ToMessage(const std::string& msg,
+                                                                       const zx::duration time) {
   return ::fpromise::ok(fuchsia::logger::LogMessage{
       .pid = 100,
       .tid = 101,
@@ -41,7 +41,7 @@ feedback_data::LogSink::MessageOr ToMessage(const std::string& msg, const zx::du
   });
 }
 
-feedback_data::LogSink::MessageOr ToError(const std::string& error) {
+::fpromise::result<fuchsia::logger::LogMessage, std::string> ToError(const std::string& error) {
   return ::fpromise::error(error);
 }
 
@@ -62,28 +62,22 @@ class SimpleRedactor : public RedactorBase {
   std::string RedactedCanary() const override { return ""; }
 };
 
-TEST(LogBufferTest, SafeAfterInterruption) {
-  IdentityRedactor redactor(inspect::BoolProperty{});
-  LogBuffer buffer(StorageSize::Gigabytes(100), &redactor);
-  ASSERT_TRUE(buffer.SafeAfterInterruption());
-}
-
 TEST(LogBufferTest, OrderingOnAdd) {
   IdentityRedactor redactor(inspect::BoolProperty{});
 
   LogBuffer buffer(StorageSize::Gigabytes(100), &redactor);
 
-  EXPECT_TRUE(buffer.Add(ToError("ERRORS ERR 0")));
-  EXPECT_TRUE(buffer.Add(ToMessage("log 1", zx::sec(20))));
+  buffer.Add(ToError("ERRORS ERR 0"));
+  buffer.Add(ToMessage("log 1", zx::sec(20)));
 
   EXPECT_EQ(buffer.ToString(), R"(!!! Failed to format chunk: ERRORS ERR 0 !!!
 [00020.000][00100][00101][tag1, tag2] INFO: log 1
 )");
 
   // Should be deduplicated and before "log 1".
-  EXPECT_TRUE(buffer.Add(ToMessage("log 2", zx::sec(18))));
-  EXPECT_TRUE(buffer.Add(ToMessage("log 2", zx::sec(18))));
-  EXPECT_TRUE(buffer.Add(ToMessage("log 2", zx::sec(19))));
+  buffer.Add(ToMessage("log 2", zx::sec(18)));
+  buffer.Add(ToMessage("log 2", zx::sec(18)));
+  buffer.Add(ToMessage("log 2", zx::sec(19)));
 
   EXPECT_EQ(buffer.ToString(), R"(!!! Failed to format chunk: ERRORS ERR 0 !!!
 [00018.000][00100][00101][tag1, tag2] INFO: log 2
@@ -92,8 +86,8 @@ TEST(LogBufferTest, OrderingOnAdd) {
 )");
 
   // Should be deduplicated and after "log 1".
-  EXPECT_TRUE(buffer.Add(ToMessage("log 3", zx::sec(21))));
-  EXPECT_TRUE(buffer.Add(ToMessage("log 3", zx::sec(21))));
+  buffer.Add(ToMessage("log 3", zx::sec(21)));
+  buffer.Add(ToMessage("log 3", zx::sec(21)));
 
   EXPECT_EQ(buffer.ToString(), R"(!!! Failed to format chunk: ERRORS ERR 0 !!!
 [00018.000][00100][00101][tag1, tag2] INFO: log 2
@@ -104,7 +98,7 @@ TEST(LogBufferTest, OrderingOnAdd) {
 )");
 
   // Should be after "log 3".
-  EXPECT_TRUE(buffer.Add(ToError("ERRORS ERR 1")));
+  buffer.Add(ToError("ERRORS ERR 1"));
 
   EXPECT_EQ(buffer.ToString(), R"(!!! Failed to format chunk: ERRORS ERR 0 !!!
 [00018.000][00100][00101][tag1, tag2] INFO: log 2
@@ -125,8 +119,8 @@ TEST(LogBufferTest, OrderingOnAdd) {
 )");
 
   // Should be before "log 3".
-  EXPECT_TRUE(buffer.Add(ToMessage("log 4", zx::sec(20))));
-  EXPECT_TRUE(buffer.Add(ToMessage("log 4", zx::sec(20))));
+  buffer.Add(ToMessage("log 4", zx::sec(20)));
+  buffer.Add(ToMessage("log 4", zx::sec(20)));
 
   EXPECT_EQ(buffer.ToString(), R"(!!! Failed to format chunk: ERRORS ERR 0 !!!
 [00018.000][00100][00101][tag1, tag2] INFO: log 2
@@ -140,7 +134,7 @@ TEST(LogBufferTest, OrderingOnAdd) {
 )");
 
   // Should be before "log 3", but not aggregated with other "log 4".
-  EXPECT_TRUE(buffer.Add(ToMessage("log 4", zx::sec(20))));
+  buffer.Add(ToMessage("log 4", zx::sec(20)));
 
   EXPECT_EQ(buffer.ToString(), R"(!!! Failed to format chunk: ERRORS ERR 0 !!!
 [00018.000][00100][00101][tag1, tag2] INFO: log 2
@@ -155,8 +149,8 @@ TEST(LogBufferTest, OrderingOnAdd) {
 )");
 
   // Should be before "log 3".
-  EXPECT_TRUE(buffer.Add(ToError("ERRORS ERR 2")));
-  EXPECT_TRUE(buffer.Add(ToMessage("log 4", zx::sec(22))));
+  buffer.Add(ToError("ERRORS ERR 2"));
+  buffer.Add(ToMessage("log 4", zx::sec(22)));
 
   EXPECT_EQ(buffer.ToString(), R"(!!! Failed to format chunk: ERRORS ERR 0 !!!
 [00018.000][00100][00101][tag1, tag2] INFO: log 2
@@ -179,23 +173,23 @@ TEST(LogBufferTest, OrderingOnEnforce) {
   // 190 bytes is approximately enough to store 3 log messages.
   LogBuffer buffer(StorageSize::Bytes(190), &redactor);
 
-  EXPECT_TRUE(buffer.Add(ToMessage("log 1", zx::sec(20))));
-  EXPECT_TRUE(buffer.Add(ToMessage("log 1", zx::sec(20))));
+  buffer.Add(ToMessage("log 1", zx::sec(20)));
+  buffer.Add(ToMessage("log 1", zx::sec(20)));
 
   EXPECT_EQ(buffer.ToString(), R"([00020.000][00100][00101][tag1, tag2] INFO: log 1
 !!! MESSAGE REPEATED 1 MORE TIME !!!
 )");
 
   // Should be before "log 1".
-  EXPECT_TRUE(buffer.Add(ToMessage("log 2", zx::sec(18))));
+  buffer.Add(ToMessage("log 2", zx::sec(18)));
   EXPECT_EQ(buffer.ToString(), R"([00018.000][00100][00101][tag1, tag2] INFO: log 2
 [00020.000][00100][00101][tag1, tag2] INFO: log 1
 !!! MESSAGE REPEATED 1 MORE TIME !!!
 )");
 
   // Should be before "log 1" and not deduplicated against the earlier "log 2"
-  EXPECT_TRUE(buffer.Add(ToMessage("log 2", zx::sec(18))));
-  EXPECT_TRUE(buffer.Add(ToMessage("log 2", zx::sec(19))));
+  buffer.Add(ToMessage("log 2", zx::sec(18)));
+  buffer.Add(ToMessage("log 2", zx::sec(19)));
 
   EXPECT_EQ(buffer.ToString(), R"([00018.000][00100][00101][tag1, tag2] INFO: log 2
 [00018.000][00100][00101][tag1, tag2] INFO: log 2
@@ -205,8 +199,8 @@ TEST(LogBufferTest, OrderingOnEnforce) {
 )");
 
   // Should be deduplicated and after "log 1".
-  EXPECT_TRUE(buffer.Add(ToMessage("log 3", zx::sec(21))));
-  EXPECT_TRUE(buffer.Add(ToMessage("log 3", zx::sec(21))));
+  buffer.Add(ToMessage("log 3", zx::sec(21)));
+  buffer.Add(ToMessage("log 3", zx::sec(21)));
 
   EXPECT_EQ(buffer.ToString(), R"([00020.000][00100][00101][tag1, tag2] INFO: log 1
 !!! MESSAGE REPEATED 1 MORE TIME !!!
@@ -215,7 +209,7 @@ TEST(LogBufferTest, OrderingOnEnforce) {
 )");
 
   // Should be after "log 3".
-  EXPECT_TRUE(buffer.Add(ToError("ERRORS ERR 1")));
+  buffer.Add(ToError("ERRORS ERR 1"));
 
   EXPECT_EQ(buffer.ToString(), R"([00021.000][00100][00101][tag1, tag2] INFO: log 3
 !!! MESSAGE REPEATED 1 MORE TIME !!!
@@ -223,8 +217,8 @@ TEST(LogBufferTest, OrderingOnEnforce) {
 )");
 
   // Should be before "log 3".
-  EXPECT_TRUE(buffer.Add(ToMessage("log 4", zx::sec(20))));
-  EXPECT_TRUE(buffer.Add(ToMessage("log 4", zx::sec(20))));
+  buffer.Add(ToMessage("log 4", zx::sec(20)));
+  buffer.Add(ToMessage("log 4", zx::sec(20)));
 
   EXPECT_EQ(buffer.ToString(), R"([00020.000][00100][00101][tag1, tag2] INFO: log 4
 !!! MESSAGE REPEATED 1 MORE TIME !!!
@@ -239,8 +233,8 @@ TEST(LogBufferTest, RepeatedMessage) {
 
   LogBuffer buffer(StorageSize::Megabytes(100), &redactor);
 
-  EXPECT_TRUE(buffer.Add(ToMessage("log 1")));
-  EXPECT_TRUE(buffer.Add(ToMessage("log 1")));
+  buffer.Add(ToMessage("log 1"));
+  buffer.Add(ToMessage("log 1"));
 
   // Exact same message, severity and tags: should be deduplicated
   EXPECT_EQ(buffer.ToString(), R"([00001.010][00100][00101][tag1, tag2] INFO: log 1
@@ -253,8 +247,8 @@ TEST(LogBufferTest, DoNotDeduplicateIfDifferentMessage) {
 
   LogBuffer buffer(StorageSize::Megabytes(100), &redactor);
 
-  EXPECT_TRUE(buffer.Add(ToMessage("log 1")));
-  EXPECT_TRUE(buffer.Add(ToMessage("log 2")));
+  buffer.Add(ToMessage("log 1"));
+  buffer.Add(ToMessage("log 2"));
 
   EXPECT_EQ(buffer.ToString(), R"([00001.010][00100][00101][tag1, tag2] INFO: log 1
 [00001.010][00100][00101][tag1, tag2] INFO: log 2
@@ -266,8 +260,8 @@ TEST(LogBufferTest, DoNotDeduplicateIfDifferentSeverity) {
 
   LogBuffer buffer(StorageSize::Megabytes(100), &redactor);
 
-  EXPECT_TRUE(buffer.Add(ToMessage("log 1", kLogInfo)));
-  EXPECT_TRUE(buffer.Add(ToMessage("log 1", kLogWarning)));
+  buffer.Add(ToMessage("log 1", kLogInfo));
+  buffer.Add(ToMessage("log 1", kLogWarning));
 
   EXPECT_EQ(buffer.ToString(), R"([00001.010][00100][00101][tag1, tag2] INFO: log 1
 [00001.010][00100][00101][tag1, tag2] WARN: log 1
@@ -279,8 +273,8 @@ TEST(LogBufferTest, DoNotDeduplicateIfDifferentTags) {
 
   LogBuffer buffer(StorageSize::Megabytes(100), &redactor);
 
-  EXPECT_TRUE(buffer.Add(ToMessage("log 1", kLogInfo, {"tag1", "tag2"})));
-  EXPECT_TRUE(buffer.Add(ToMessage("log 1", kLogInfo, {"tag1"})));
+  buffer.Add(ToMessage("log 1", kLogInfo, {"tag1", "tag2"}));
+  buffer.Add(ToMessage("log 1", kLogInfo, {"tag1"}));
 
   EXPECT_EQ(buffer.ToString(), R"([00001.010][00100][00101][tag1, tag2] INFO: log 1
 [00001.010][00100][00101][tag1] INFO: log 1
@@ -292,7 +286,7 @@ TEST(LogBufferTest, TimestampZeroOnFirstError) {
 
   LogBuffer buffer(StorageSize::Megabytes(100), &redactor);
 
-  EXPECT_TRUE(buffer.Add(ToError("ERRORS ERR 1")));
+  buffer.Add(ToError("ERRORS ERR 1"));
 
   EXPECT_EQ(buffer.ToString(), R"(!!! Failed to format chunk: ERRORS ERR 1 !!!
 )");
@@ -303,8 +297,8 @@ TEST(LogBufferTest, RepeatedError) {
 
   LogBuffer buffer(StorageSize::Megabytes(100), &redactor);
 
-  EXPECT_TRUE(buffer.Add(ToError("ERRORS ERR 1")));
-  EXPECT_TRUE(buffer.Add(ToError("ERRORS ERR 1")));
+  buffer.Add(ToError("ERRORS ERR 1"));
+  buffer.Add(ToError("ERRORS ERR 1"));
 
   EXPECT_EQ(buffer.ToString(), R"(!!! Failed to format chunk: ERRORS ERR 1 !!!
 !!! MESSAGE REPEATED 1 MORE TIME !!!
@@ -316,8 +310,8 @@ TEST(LogBufferTest, DoNotDeduplicateIfDifferentError) {
 
   LogBuffer buffer(StorageSize::Megabytes(100), &redactor);
 
-  EXPECT_TRUE(buffer.Add(ToError("ERRORS ERR 1")));
-  EXPECT_TRUE(buffer.Add(ToError("ERRORS ERR 2")));
+  buffer.Add(ToError("ERRORS ERR 1"));
+  buffer.Add(ToError("ERRORS ERR 2"));
 
   EXPECT_EQ(buffer.ToString(), R"(!!! Failed to format chunk: ERRORS ERR 1 !!!
 !!! Failed to format chunk: ERRORS ERR 2 !!!
@@ -329,25 +323,25 @@ TEST(LogBufferTest, RedactsLogs) {
 
   LogBuffer buffer(StorageSize::Megabytes(100), &redactor);
 
-  EXPECT_TRUE(buffer.Add(ToMessage("log 1")));
+  buffer.Add(ToMessage("log 1"));
 
-  EXPECT_TRUE(buffer.Add(ToMessage("log 2")));
-  EXPECT_TRUE(buffer.Add(ToMessage("log 2")));
-  EXPECT_TRUE(buffer.Add(ToMessage("log 2")));
+  buffer.Add(ToMessage("log 2"));
+  buffer.Add(ToMessage("log 2"));
+  buffer.Add(ToMessage("log 2"));
 
-  EXPECT_TRUE(buffer.Add(ToMessage("log 3")));
-  EXPECT_TRUE(buffer.Add(ToMessage("log 3")));
+  buffer.Add(ToMessage("log 3"));
+  buffer.Add(ToMessage("log 3"));
 
-  EXPECT_TRUE(buffer.Add(ToError("ERRORS ERR 1")));
+  buffer.Add(ToError("ERRORS ERR 1"));
 
-  EXPECT_TRUE(buffer.Add(ToError("ERRORS ERR 2")));
-  EXPECT_TRUE(buffer.Add(ToError("ERRORS ERR 2")));
+  buffer.Add(ToError("ERRORS ERR 2"));
+  buffer.Add(ToError("ERRORS ERR 2"));
 
-  EXPECT_TRUE(buffer.Add(ToMessage("log 4")));
+  buffer.Add(ToMessage("log 4"));
 
-  EXPECT_TRUE(buffer.Add(ToError("ERRORS ERR 3")));
+  buffer.Add(ToError("ERRORS ERR 3"));
 
-  EXPECT_TRUE(buffer.Add(ToMessage("log 4")));
+  buffer.Add(ToMessage("log 4"));
 
   EXPECT_EQ(buffer.ToString(), R"([00001.010][00100][00101][REDACTED, REDACTED] INFO: REDACTED
 !!! MESSAGE REPEATED 5 MORE TIMES !!!
@@ -358,83 +352,6 @@ TEST(LogBufferTest, RedactsLogs) {
 !!! Failed to format chunk: ERRORS ERR 3 !!!
 [00001.010][00100][00101][REDACTED, REDACTED] INFO: REDACTED
 )");
-}
-
-TEST(LogBufferTest, NotifyInterruption) {
-  IdentityRedactor redactor(inspect::BoolProperty{});
-
-  LogBuffer buffer(StorageSize::Gigabytes(100), &redactor);
-
-  EXPECT_TRUE(buffer.Add(ToError("ERRORS ERR 0")));
-  EXPECT_TRUE(buffer.Add(ToMessage("log 1", zx::sec(20))));
-
-  EXPECT_EQ(buffer.ToString(), R"(!!! Failed to format chunk: ERRORS ERR 0 !!!
-[00020.000][00100][00101][tag1, tag2] INFO: log 1
-)");
-
-  // Should be clear the buffer.
-  buffer.NotifyInterruption();
-
-  EXPECT_THAT(buffer.ToString(), IsEmpty());
-
-  EXPECT_TRUE(buffer.Add(ToMessage("log 2", zx::sec(18))));
-  EXPECT_TRUE(buffer.Add(ToMessage("log 2", zx::sec(18))));
-  EXPECT_TRUE(buffer.Add(ToMessage("log 2", zx::sec(19))));
-
-  EXPECT_EQ(buffer.ToString(), R"([00018.000][00100][00101][tag1, tag2] INFO: log 2
-!!! MESSAGE REPEATED 2 MORE TIMES !!!
-)");
-}
-
-TEST(LogBufferTest, RunsActions) {
-  IdentityRedactor redactor(inspect::BoolProperty{});
-
-  LogBuffer buffer(StorageSize::Gigabytes(100), &redactor);
-
-  bool run1{false};
-  buffer.ExecuteAfter(zx::time_boot(0), [&run1] { run1 = true; });
-
-  bool run2{false};
-  buffer.ExecuteAfter(zx::time_boot(0), [&run2] { run2 = true; });
-
-  bool run3{false};
-  buffer.ExecuteAfter(zx::time_boot(zx::sec(5).to_nsecs()), [&run3] { run3 = true; });
-
-  bool run4{false};
-  buffer.ExecuteAfter(zx::time_boot(zx::sec(5).to_nsecs()), [&run4] { run4 = true; });
-
-  bool run5{false};
-  buffer.ExecuteAfter(zx::time_boot(zx::sec(7).to_nsecs()), [&run5] { run5 = true; });
-
-  bool run6{false};
-  buffer.ExecuteAfter(zx::time_boot(zx::sec(30).to_nsecs()), [&run6] { run6 = true; });
-
-  buffer.Add(ToMessage("unused", zx::sec(0)));
-
-  EXPECT_TRUE(run1);
-  EXPECT_TRUE(run2);
-  EXPECT_FALSE(run3);
-  EXPECT_FALSE(run4);
-  EXPECT_FALSE(run5);
-  EXPECT_FALSE(run6);
-
-  buffer.Add(ToMessage("unused", zx::sec(10)));
-
-  EXPECT_TRUE(run1);
-  EXPECT_TRUE(run2);
-  EXPECT_TRUE(run3);
-  EXPECT_TRUE(run4);
-  EXPECT_TRUE(run5);
-  EXPECT_FALSE(run6);
-
-  buffer.NotifyInterruption();
-
-  EXPECT_TRUE(run1);
-  EXPECT_TRUE(run2);
-  EXPECT_TRUE(run3);
-  EXPECT_TRUE(run4);
-  EXPECT_TRUE(run5);
-  EXPECT_TRUE(run6);
 }
 
 }  // namespace

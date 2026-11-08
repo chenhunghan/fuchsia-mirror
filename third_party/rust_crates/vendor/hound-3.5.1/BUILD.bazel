@@ -12,7 +12,7 @@ load("@rules_rust//rust:defs.bzl", "rust_library")
 
 package(
     default_package_metadata = [
-        ":license",
+        ":license_metadata",
         ":package_info",
     ],
     default_visibility = ["//visibility:public"],
@@ -26,7 +26,7 @@ package_info(
 )
 
 license(
-    name = "license",
+    name = "license_metadata",
     license_kinds = ["@rules_license//licenses/spdx:Apache-2.0"],
     license_text = "license",
 )

@@ -12,8 +12,6 @@ cc_link_stub_from_ifs_file(
     ifs_file = "//src/devices/bin/driver_runtime:libdriver_runtime.ifs",
     system_provided = True,
     target_compatible_with = ["@platforms//os:fuchsia"],
-    visibility = [
-        "//sdk/lib/driver/runtime/rust:__subpackages__",
-    ],
+    visibility = ["//:__subpackages__"],
 )
 # LINT.ThenChange(BUILD.gn)

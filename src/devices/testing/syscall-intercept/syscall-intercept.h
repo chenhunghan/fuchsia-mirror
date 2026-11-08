@@ -8,13 +8,12 @@
 #define SRC_DEVICES_TESTING_SYSCALL_INTERCEPT_SYSCALL_INTERCEPT_H_
 
 #include <lib/async/dispatcher.h>
+#include <lib/driver/outgoing/cpp/outgoing_directory.h>
 #include <lib/fdf/cpp/dispatcher.h>
 #include <zircon/errors.h>
 #include <zircon/syscalls.h>
 
 #include <memory>
-
-#include <sdk/lib/driver/outgoing/cpp/outgoing_directory.h>
 
 namespace syscall_intercept {
 

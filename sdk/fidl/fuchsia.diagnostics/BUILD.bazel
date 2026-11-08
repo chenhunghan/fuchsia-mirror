@@ -4,10 +4,7 @@
 
 load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
 
-package(
-    default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
-)
+package(default_applicable_licenses = ["//:license"])
 
 fidl_library(
     name = "fuchsia.diagnostics",
@@ -18,6 +15,7 @@ fidl_library(
         "log_settings.fidl",
         "overview.fidl",
         "reader.fidl",
+        "salt.fidl",
         "sample.fidl",
         "selector.fidl",
         "severity.fidl",

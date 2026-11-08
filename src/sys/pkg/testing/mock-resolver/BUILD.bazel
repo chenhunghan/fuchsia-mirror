@@ -77,7 +77,6 @@ fx_component_manifest(
 fx_test_component(
     name = "mock-resolver-tests-component",
     compiled_manifest = ":mock-resolver-tests-manifest",
-    component_name = "mock-resolver-tests",
     deps = [":mock-resolver_test_packaged_bin"],
 )
 

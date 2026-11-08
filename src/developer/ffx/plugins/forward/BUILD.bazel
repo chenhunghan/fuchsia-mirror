@@ -1,0 +1,82 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//src/developer/ffx/build:ffx_plugin.bzl", "ffx_plugin")
+load("//src/developer/ffx/build:ffx_tool.bzl", "ffx_tool")
+
+package(default_applicable_licenses = ["//:license"])
+
+ffx_plugin(
+    name = "ffx_forward",
+    srcs = ["src/lib.rs"],
+    args_deps = [
+        "//src/developer/ffx/core:lib",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:regex",
+        "//third_party/rust_crates/vendor:schemars",
+        "//third_party/rust_crates/vendor:serde",
+    ],
+    args_srcs = ["src/args.rs"],
+    edition = "2024",
+    version = "0.1.0",
+    deps = [
+        "//src/developer/ffx/lib/errors:lib",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/developer/ffx/lib/futures:lib",
+        "//src/developer/ffx/lib/target/connector:lib",
+        "//src/developer/ffx/lib/target/holders:lib",
+        "//src/developer/ffx/lib/target_net:lib",
+        "//src/developer/ffx/lib/writer:lib",
+        "//src/developer/ffx/tools/speedtest/common:speedtest_fdomain",
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:schemars",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:termion",
+        "//third_party/rust_crates/vendor:tokio",
+    ],
+)
+
+ffx_tool(
+    name = "ffx_forward_tool",
+    srcs = ["src/main.rs"],
+    binary_name = "ffx-forward",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        ":ffx_forward",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/lib/fuchsia-async",
+    ],
+)
+
+host_rustc_test(
+    name = "ffx_forward_args_test",
+    crate = ":ffx_forward_args",
+    visibility = ["//src/developer/ffx:__pkg__"],
+    deps = [
+        "//src/connectivity/lib/net-declare",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+host_rustc_test(
+    name = "ffx_forward_test",
+    crate = ":ffx_forward",
+    visibility = ["//src/developer/ffx:__pkg__"],
+    deps = [
+        "//src/connectivity/lib/net-declare",
+        "//src/developer/ffx/lib/target_net:testutil",
+        "//src/lib/fdomain/local",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:itertools",
+        "//third_party/rust_crates/vendor:pretty_assertions",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:vte",
+    ],
+)

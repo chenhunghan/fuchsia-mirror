@@ -246,17 +246,24 @@ TEST(ImageFormat, IntelYTiledFormat_V2BytesPerRowDivisor) {
 TEST(ImageFormat, IntelPlaneByteOffsetOverflowIsInvalid) {
   fuchsia_images2::ImageFormat image_format;
   image_format.pixel_format() = fuchsia_images2::PixelFormat::kNv12;
-  image_format.pixel_format_modifier() = fuchsia_images2::PixelFormatModifier::kIntelI915YTiledCcs;
+  image_format.pixel_format_modifier() = fuchsia_images2::PixelFormatModifier::kIntelI915YTiled;
   image_format.size() = {0xFFFFFFFFu, 0xFFFFFFFFu};
   image_format.bytes_per_row() = 0xFFFFFFFFu;
 
   EXPECT_FALSE(ImageFormatImageSizeChecked(image_format).IsValid());
   EXPECT_TRUE(ImageFormatPlaneByteOffsetChecked(image_format, 0).IsValid());
-  // The Y plane's size overflows, so the UV plane and CCS plane offsets are invalid.
+  // The Y plane's size overflows, so the UV plane offset is invalid.
   EXPECT_FALSE(ImageFormatPlaneByteOffsetChecked(image_format, 1).IsValid());
-  EXPECT_FALSE(ImageFormatPlaneByteOffsetChecked(image_format, 3).IsValid());
   uint64_t offset;
   EXPECT_FALSE(ImageFormatPlaneByteOffset(image_format, 1, &offset));
+
+  // Plane 0's size overflows, so the CCS plane offset is invalid.
+  image_format.pixel_format() = fuchsia_images2::PixelFormat::kB8G8R8A8;
+  image_format.pixel_format_modifier() = fuchsia_images2::PixelFormatModifier::kIntelI915YTiledCcs;
+  EXPECT_FALSE(ImageFormatImageSizeChecked(image_format).IsValid());
+  EXPECT_TRUE(ImageFormatPlaneByteOffsetChecked(image_format, 0).IsValid());
+  EXPECT_FALSE(ImageFormatPlaneByteOffsetChecked(image_format, 3).IsValid());
+  EXPECT_FALSE(ImageFormatPlaneByteOffset(image_format, 3, &offset));
 }
 #endif  // FUCHSIA_API_LEVEL_AT_LEAST(32)
 
@@ -310,5 +317,29 @@ TEST(ImageFormat, IntelCcsPlaneOnlyWithCcsModifier) {
     image_format.pixel_format_modifier() = modifier;
     EXPECT_TRUE(ImageFormatPlaneByteOffset(image_format, kCcsPlane, &offset));
     EXPECT_TRUE(ImageFormatPlaneRowBytes(image_format, kCcsPlane, &row_bytes));
+  }
+}
+
+TEST(ImageFormat, IntelCcsIsOnlyFor8888Rgb) {
+  for (const auto modifier : {fuchsia_images2::PixelFormatModifier::kIntelI915YTiledCcs,
+                              fuchsia_images2::PixelFormatModifier::kIntelI915YfTiledCcs}) {
+    for (const auto format :
+         {fuchsia_images2::PixelFormat::kR8G8B8A8, fuchsia_images2::PixelFormat::kR8G8B8X8,
+          fuchsia_images2::PixelFormat::kB8G8R8A8, fuchsia_images2::PixelFormat::kB8G8R8X8}) {
+      EXPECT_TRUE(ImageFormatIsSupported(PixelFormatAndModifier(format, modifier)));
+    }
+    for (const auto format :
+         {fuchsia_images2::PixelFormat::kNv12, fuchsia_images2::PixelFormat::kP010,
+          fuchsia_images2::PixelFormat::kI420, fuchsia_images2::PixelFormat::kA2B10G10R10,
+          fuchsia_images2::PixelFormat::kR5G6B5, fuchsia_images2::PixelFormat::kR8}) {
+      EXPECT_FALSE(ImageFormatIsSupported(PixelFormatAndModifier(format, modifier)));
+    }
+  }
+  // NV12 is still supported without CCS.
+  for (const auto modifier : {fuchsia_images2::PixelFormatModifier::kIntelI915XTiled,
+                              fuchsia_images2::PixelFormatModifier::kIntelI915YTiled,
+                              fuchsia_images2::PixelFormatModifier::kIntelI915YfTiled}) {
+    EXPECT_TRUE(ImageFormatIsSupported(
+        PixelFormatAndModifier(fuchsia_images2::PixelFormat::kNv12, modifier)));
   }
 }

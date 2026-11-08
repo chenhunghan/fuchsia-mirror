@@ -1,0 +1,40 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+# `fx_cc_binary` has no `output_name` attribute, whereas GN `executable` sets
+# `output_name = "tones"`.
+# @bazel2gn:raw_attribute:output_name = "tones"
+fx_cc_binary(
+    name = "bin",
+    srcs = [
+        "main.cc",
+        "midi.h",
+        "midi_keyboard.cc",
+        "midi_keyboard.h",
+        "tone_generator.cc",
+        "tone_generator.h",
+        "tones.cc",
+        "tones.h",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.midi:fuchsia.hardware.midi_cpp",
+        "//sdk/fidl/fuchsia.media:fuchsia.media_hlcpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/fit",
+        # Bazel defines the library as :no_converters, whereas GN defines it as :cpp.
+        # TODO(https://fxbug.dev/543568916): Update once sdk/lib/media/cpp is fully migrated.
+        "//sdk/lib/media/cpp:no_converters",  # @bazel2gn:path_overwrite://sdk/lib/media/cpp
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fsl",
+        "//src/lib/fxl:fxl_cli",
+        "//zircon/system/ulib/fzl",
+    ],
+)

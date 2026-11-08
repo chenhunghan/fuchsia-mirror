@@ -108,8 +108,8 @@ impl FileExtent {
 #[derive(Debug)]
 pub enum DataObjectState {
     Standard(AllocatedRanges),
-    VerityStarted,
-    VerityPending(FsverityStateInner),
+    VerityStarted(AllocatedRanges),
+    VerityPending(AllocatedRanges, FsverityStateInner),
     Verity(FsverityStateInner),
 }
 
@@ -226,7 +226,9 @@ impl<S: HandleOwner> DataObjectHandle<S> {
     ) -> R {
         let mut state = self.state.lock();
         match &mut *state {
-            DataObjectState::Standard(ranges) => f(Some(ranges)),
+            DataObjectState::Standard(ranges) | DataObjectState::VerityStarted(ranges) => {
+                f(Some(ranges))
+            }
             _ => f(None),
         }
     }
@@ -237,24 +239,28 @@ impl<S: HandleOwner> DataObjectHandle<S> {
 
     /// Sets `self.state` to DataObjectState::VerityStarted. Called at the top of `enable_verity`.
     /// If another caller has already started but not completed `enable_verity`, returns
-    /// FxfsError::AlreadyBound. If another caller has already completed `enable_verity`, returns
+    /// FxfsError::Unavailable. If another caller has already completed `enable_verity`, returns
     /// FxfsError::AlreadyExists.
     ///
     /// Note: This is called before `enable_verity` acquires its object transaction lock. Any
     /// ongoing transaction holding the object lock (such as `allocate`) will proceed to commit
     /// its mutations to disk while `enable_verity` waits for the lock, and `will_apply_mutation`
-    /// will gracefully discard in-memory range updates for the discarded `AllocatedRanges`.
+    /// will continue to update the preserved `AllocatedRanges` in case `enable_verity` fails.
     pub fn set_fsverity_state_started(&self) -> Result<(), Error> {
         let mut state = self.state.lock();
-        match *state {
-            DataObjectState::Standard(_) => {
-                *state = DataObjectState::VerityStarted;
+        match std::mem::replace(&mut *state, DataObjectState::Standard(AllocatedRanges::empty())) {
+            DataObjectState::Standard(ranges) => {
+                *state = DataObjectState::VerityStarted(ranges);
                 Ok(())
             }
-            DataObjectState::VerityStarted | DataObjectState::VerityPending(_) => {
+            other @ (DataObjectState::VerityStarted(_) | DataObjectState::VerityPending(..)) => {
+                *state = other;
                 Err(anyhow!(FxfsError::Unavailable))
             }
-            DataObjectState::Verity(_) => Err(anyhow!(FxfsError::AlreadyExists)),
+            other @ DataObjectState::Verity(_) => {
+                *state = other;
+                Err(anyhow!(FxfsError::AlreadyExists))
+            }
         }
     }
 
@@ -262,25 +268,45 @@ impl<S: HandleOwner> DataObjectHandle<S> {
     ///
     /// # Panics
     ///
-    /// Panics if the prior state was not `DataObjectState::VerityStarted`.
+    /// Panics if the prior state was not `DataObjectState::VerityStarted(_)`.
     pub fn set_fsverity_state_pending(&self, descriptor: FsverityStateInner) {
         let mut state = self.state.lock();
-        assert!(matches!(*state, DataObjectState::VerityStarted));
-        *state = DataObjectState::VerityPending(descriptor);
+        let old_state =
+            std::mem::replace(&mut *state, DataObjectState::Standard(AllocatedRanges::empty()));
+        match old_state {
+            DataObjectState::VerityStarted(ranges) => {
+                *state = DataObjectState::VerityPending(ranges, descriptor);
+            }
+            _ => panic!("Cannot set verity pending state from {old_state:?}"),
+        }
     }
 
     /// Sets `self.state` to Verity.
     ///
     /// # Panics
     ///
-    /// Panics if the prior state was not `DataObjectState::VerityPending(_)`.
+    /// Panics if the prior state was not `DataObjectState::VerityPending(..)`.
     pub fn finalize_fsverity_state(&self) {
         let mut state = self.state.lock();
         let old_state =
             std::mem::replace(&mut *state, DataObjectState::Standard(AllocatedRanges::empty()));
         match old_state {
-            DataObjectState::VerityPending(inner) => *state = DataObjectState::Verity(inner),
+            DataObjectState::VerityPending(_, inner) => *state = DataObjectState::Verity(inner),
             _ => panic!("Cannot finalize verity state from {old_state:?}"),
+        }
+    }
+
+    /// Reverts `self.state` from `VerityStarted` or `VerityPending` back to `Standard` if
+    /// `enable_verity` fails or is cancelled before committing.
+    fn reset_fsverity_state(&self) {
+        let mut state = self.state.lock();
+        let old_state =
+            std::mem::replace(&mut *state, DataObjectState::Standard(AllocatedRanges::empty()));
+        match old_state {
+            DataObjectState::VerityStarted(ranges) | DataObjectState::VerityPending(ranges, _) => {
+                *state = DataObjectState::Standard(ranges);
+            }
+            other => *state = other,
         }
     }
 
@@ -370,7 +396,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
             DataObjectState::Standard(_) => {
                 Err(anyhow!("Tried to verify read on a non verity-enabled file"))
             }
-            DataObjectState::VerityStarted | DataObjectState::VerityPending(_) => {
+            DataObjectState::VerityStarted(_) | DataObjectState::VerityPending(..) => {
                 Err(anyhow!("Enable verity has not yet completed, state: {state:?}"))
             }
             DataObjectState::Verity(metadata) => {
@@ -631,6 +657,9 @@ impl<S: HandleOwner> DataObjectHandle<S> {
     #[trace]
     pub async fn enable_verity(&self, options: fio::VerificationOptions) -> Result<(), Error> {
         self.set_fsverity_state_started()?;
+        let state_guard = scopeguard::guard((), |()| {
+            self.reset_fsverity_state();
+        });
         // If the merkle attribute was tombstoned in the last attempt of `enable_verity`, flushing
         // the graveyard should process the tombstone before we start rewriting the attribute.
         if self
@@ -679,7 +708,8 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         // TODO(b/314194485): Eventually want streaming writes.
         // The merkle tree attribute should not require trimming because it should not
         // exist.
-        self.handle
+        let graveyard_guard = self
+            .handle
             .write_new_attr(&mut transaction, AttributeId::FSVERITY_MERKLE, &merkle_tree)
             .await?;
         let descriptor_decoded =
@@ -701,12 +731,35 @@ impl<S: HandleOwner> DataObjectHandle<S> {
             ),
             AssocObj::Borrowed(self),
         );
-        transaction.commit().await?;
+        transaction
+            .commit_with_callback(|_| {
+                if let Some(guard) = graveyard_guard {
+                    scopeguard::ScopeGuard::into_inner(guard);
+                }
+            })
+            .await?;
+        scopeguard::ScopeGuard::into_inner(state_guard);
         Ok(())
     }
 
     /// Pre-allocate disk space for the given logical file range. If any part of the allocation
     /// range is beyond the end of the file, the file size is updated.
+    ///
+    /// # Multi-batch partial commits
+    ///
+    /// Large allocations or mode switches exceeding `TRANSACTION_MUTATION_THRESHOLD` are split
+    /// across multiple transactions via `Transaction::commit_and_continue`. If a later batch fails
+    /// (for example with `FxfsError::NoSpace`) or the future is dropped after earlier batches have
+    /// committed, those earlier batches are **not** rolled back:
+    /// - Extents switched to `ExtentMode::Overwrite` or newly allocated as
+    ///   `ExtentMode::OverwritePartial` in committed batches remain allocated (and accounted in
+    ///   `allocated_size` and in-memory `overwrite_ranges`).
+    /// - The file size may have been advanced partway toward `range.end` (up to the end of the
+    ///   last committed extent, clamped to `range.end`) so that committed overwrite extents never
+    ///   exceed the file size on disk.
+    ///
+    /// This matches POSIX `posix_fallocate` semantics, which do not guarantee atomicity or
+    /// rollback on `ENOSPC`.
     pub async fn allocate(&self, range: Range<u64>) -> Result<(), Error> {
         debug_assert!(range.start < range.end);
 
@@ -723,8 +776,8 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         // calls `set_fsverity_state_started` before creating its own transaction, which could
         // transition `self.state` to `VerityStarted` concurrently while this transaction is held.
         // If that happens, `enable_verity`'s subsequent `new_transaction` call will block until
-        // this allocation transaction finishes, and `will_apply_mutation` will gracefully discard
-        // updates to the in-memory allocated ranges.
+        // this allocation transaction finishes, and `will_apply_mutation` will continue to update
+        // the preserved in-memory allocated ranges in case `enable_verity` fails.
         {
             let state = self.state.lock();
             match &*state {
@@ -821,37 +874,40 @@ impl<S: HandleOwner> DataObjectHandle<S> {
             to_allocate.push(new_range.clone());
         }
 
-        // We can update the size in the first transaction because even if subsequent transactions
-        // don't get replayed, the data between the current and new end of the file will be zero
-        // (either sparse zero or allocated zero). On the other hand, if we don't update the size
-        // in the first transaction, overwrite extents may be written past the end of the file
-        // which is an fsck error.
+        // We update the size as we go so that overwrite extents are never written past the end of
+        // the file (which is an fsck error), while avoiding expanding the file to the full
+        // requested size if an earlier batch fails with NoSpace.
         //
         // The potential new size needs to be the non-block-aligned range end - we round up to the
         // nearest block size for the actual allocation, but shouldn't do that for the file size.
-        let new_size = std::cmp::max(range.end, self.get_size());
-        // Make sure the mutation that flips the has_overwrite_extents advisory flag is in the
-        // first transaction, in case we split transactions. This makes it okay to only replay the
-        // first transaction if power loss occurs - the file will be in an unusual state, but not
-        // an invalid one, if only part of the allocate goes through.
-        transaction.add_with_object(
-            self.store().store_object_id(),
-            Mutation::replace_or_insert_object(
-                ObjectKey::attribute(
-                    self.object_id(),
-                    self.attribute_id(),
-                    AttributeKey::Attribute,
-                ),
-                ObjectValue::Attribute { size: new_size, has_overwrite_extents: true },
-            ),
-            AssocObj::Borrowed(self),
-        );
+        let mut current_max_size = self.get_size();
 
-        // The maximum number of mutations we are going to allow per transaction in allocate. This
-        // is probably quite a bit lower than the actual limit, but it should be large enough to
-        // handle most non-edge-case versions of allocate without splitting the transaction.
-        const MAX_TRANSACTION_SIZE: usize = 256;
         for (switch_range, device_offset) in to_switch {
+            // We flush before we reach the transaction mutation threshold. We need space for this
+            // extent (1 mutation) and a trailing attribute size update (1 mutation). Note that the
+            // exact threshold does not need to be precise, as `TRANSACTION_MUTATION_THRESHOLD` is
+            // a significant under-estimate for maximum size.
+            if transaction.mutations().len() + 2 >= TRANSACTION_MUTATION_THRESHOLD {
+                transaction.add_with_object(
+                    self.store().store_object_id(),
+                    Mutation::replace_or_insert_object(
+                        ObjectKey::attribute(
+                            self.object_id(),
+                            self.attribute_id(),
+                            AttributeKey::Attribute,
+                        ),
+                        ObjectValue::Attribute {
+                            size: current_max_size,
+                            has_overwrite_extents: true,
+                        },
+                    ),
+                    AssocObj::Borrowed(self),
+                );
+                transaction.commit_and_continue(|| {}).await?;
+            }
+
+            current_max_size =
+                std::cmp::max(current_max_size, std::cmp::min(range.end, switch_range.end));
             transaction.add_with_object(
                 self.store().store_object_id(),
                 Mutation::merge_object(
@@ -863,15 +919,38 @@ impl<S: HandleOwner> DataObjectHandle<S> {
                 ),
                 AssocObj::Borrowed(self),
             );
-            if transaction.mutations().len() >= MAX_TRANSACTION_SIZE {
-                transaction.commit_and_continue().await?;
-            }
         }
 
         let mut allocated = 0;
         let allocator = self.store().allocator();
         for mut allocate_range in to_allocate {
             while allocate_range.start < allocate_range.end {
+                // We flush before we reach the transaction mutation threshold. We need space for
+                // this extent (2 mutations, including the allocation) and trailing attribute and
+                // allocated_size updates (2 mutations). Note that the exact threshold does not
+                // need to be precise, as `TRANSACTION_MUTATION_THRESHOLD` is a significant
+                // under-estimate for maximum size.
+                if transaction.mutations().len() + 4 >= TRANSACTION_MUTATION_THRESHOLD {
+                    transaction.add_with_object(
+                        self.store().store_object_id(),
+                        Mutation::replace_or_insert_object(
+                            ObjectKey::attribute(
+                                self.object_id(),
+                                self.attribute_id(),
+                                AttributeKey::Attribute,
+                            ),
+                            ObjectValue::Attribute {
+                                size: current_max_size,
+                                has_overwrite_extents: true,
+                            },
+                        ),
+                        AssocObj::Borrowed(self),
+                    );
+                    self.update_allocated_size(&mut transaction, allocated, 0).await?;
+                    transaction.commit_and_continue(|| {}).await?;
+                    allocated = 0;
+                }
+
                 let device_range = allocator
                     .allocate(
                         &mut transaction,
@@ -901,15 +980,24 @@ impl<S: HandleOwner> DataObjectHandle<S> {
 
                 allocate_range.start += device_range_len;
                 allocated += device_range_len;
-
-                if transaction.mutations().len() >= MAX_TRANSACTION_SIZE {
-                    self.update_allocated_size(&mut transaction, allocated, 0).await?;
-                    transaction.commit_and_continue().await?;
-                    allocated = 0;
-                }
+                current_max_size =
+                    std::cmp::max(current_max_size, std::cmp::min(range.end, allocate_range.start));
             }
         }
 
+        current_max_size = std::cmp::max(current_max_size, range.end);
+        transaction.add_with_object(
+            self.store().store_object_id(),
+            Mutation::replace_or_insert_object(
+                ObjectKey::attribute(
+                    self.object_id(),
+                    self.attribute_id(),
+                    AttributeKey::Attribute,
+                ),
+                ObjectValue::Attribute { size: current_max_size, has_overwrite_extents: true },
+            ),
+            AssocObj::Borrowed(self),
+        );
         self.update_allocated_size(&mut transaction, allocated, 0).await?;
         transaction.commit().await?;
 
@@ -1395,7 +1483,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
                 .await?,
             TrimResult::Incomplete
         ) {
-            transaction.commit_and_continue().await?;
+            transaction.commit_and_continue(|| {}).await?;
         }
         // We might need to zero out the tail of the old last block.
         let block_size = self.block_size();
@@ -1643,7 +1731,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         let store = self.store();
         let mut transaction = self.new_transaction().await?;
         if self.handle.write_attr(&mut transaction, attribute_id, data).await?.0 {
-            transaction.commit_and_continue().await?;
+            transaction.commit_and_continue(|| {}).await?;
             while matches!(
                 store
                     .trim_some(
@@ -1655,7 +1743,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
                     .await?,
                 TrimResult::Incomplete
             ) {
-                transaction.commit_and_continue().await?;
+                transaction.commit_and_continue(|| {}).await?;
             }
         }
         transaction.commit().await?;
@@ -1712,7 +1800,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
             let update_has_overwrite_ranges = self.truncate_overwrite_ranges(size)?;
             if self.shrink(&mut transaction, size, update_has_overwrite_ranges).await?.0 {
                 // The file needs to be trimmed.
-                transaction.commit_and_continue().await?;
+                transaction.commit_and_continue(|| {}).await?;
                 let store = self.store();
                 while matches!(
                     store
@@ -1725,7 +1813,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
                         .await?,
                     TrimResult::Incomplete
                 ) {
-                    if let Err(error) = transaction.commit_and_continue().await {
+                    if let Err(error) = transaction.commit_and_continue(|| {}).await {
                         warn!(error:?; "Failed to trim after truncate");
                         return Ok(());
                     }
@@ -1960,9 +2048,8 @@ impl<S: HandleOwner> AssociatedObject for DataObjectHandle<S> {
             }) if self.object_id() == *object_id && self.attribute_id() == *attr_id => match mode {
                 ExtentMode::Overwrite | ExtentMode::OverwritePartial(_) => {
                     // If `enable_verity` transitioned state to `VerityStarted` concurrently while a
-                    // transaction was in progress, `with_overwrite_ranges_mut` will return `None`
-                    // and safely discard in-memory range updates, since verity files do not track
-                    // overwrite ranges.
+                    // transaction was in progress, `with_overwrite_ranges_mut` will still update
+                    // the preserved ranges in case `enable_verity` fails and reverts to `Standard`.
                     self.with_overwrite_ranges_mut(|ranges| {
                         if let Some(ranges) = ranges {
                             ranges.apply_range(extent.clone().into());
@@ -2125,7 +2212,7 @@ mod tests {
         FsckOptions, fsck, fsck_volume, fsck_volume_with_options, fsck_with_options,
     };
     use crate::lsm_tree::Query;
-    use crate::lsm_tree::types::{ItemRef, LayerIterator};
+    use crate::lsm_tree::types::{ItemRef, LayerIterator, MaybeContainsKey};
     use crate::object_handle::{
         ObjectHandle, ObjectProperties, ReadObjectHandle, WriteObjectHandle,
     };
@@ -3229,6 +3316,65 @@ mod tests {
     }
 
     #[fuchsia::test]
+    async fn test_enable_verity_failure_does_not_wedge_file() {
+        let fs: OpenFxFilesystem = test_filesystem().await;
+        let store = fs.root_store();
+        let mut transaction = store
+            .new_transaction(lock_keys![], Options::default())
+            .await
+            .expect("new_transaction failed");
+        let object = Arc::new(
+            ObjectStore::create_object(&store, &mut transaction, HandleOptions::default(), None)
+                .await
+                .expect("create_object failed"),
+        );
+        transaction.commit().await.expect("commit failed");
+
+        object.allocate(0..4096).await.expect("allocate failed");
+
+        // Failing enable_verity (e.g. missing hash algorithm or salt > 32 bytes) should not leave
+        // the file wedged.
+        object
+            .enable_verity(fio::VerificationOptions {
+                hash_algorithm: None,
+                salt: Some(vec![]),
+                ..Default::default()
+            })
+            .await
+            .expect_err("enable_verity with missing hash_algorithm should fail");
+
+        object
+            .enable_verity(fio::VerificationOptions {
+                hash_algorithm: Some(fio::HashAlgorithm::Sha256),
+                salt: Some(vec![0xaa; 64]),
+                ..Default::default()
+            })
+            .await
+            .expect_err("enable_verity with oversized salt should fail");
+
+        assert!(!object.is_verified_file());
+        assert!(!object.overwrite_ranges_is_empty());
+
+        // The file should still support normal mutations (allocate, truncate, write) and a
+        // subsequent valid enable_verity call.
+        object.allocate(4096..8192).await.expect("allocate after failed enable_verity failed");
+        object.truncate(4096).await.expect("truncate after failed enable_verity failed");
+
+        object
+            .enable_verity(fio::VerificationOptions {
+                hash_algorithm: Some(fio::HashAlgorithm::Sha256),
+                salt: Some(vec![]),
+                ..Default::default()
+            })
+            .await
+            .expect("enable_verity after prior failure should succeed");
+
+        assert!(object.is_verified_file());
+
+        fs.close().await.expect("Close failed");
+    }
+
+    #[fuchsia::test]
     async fn test_enable_verity_large_file() {
         // Need to make a large FakeDevice to create space for a 67 MB file.
         let device = DeviceHolder::new(FakeDevice::new(262144, TEST_DEVICE_BLOCK_SIZE));
@@ -3258,6 +3404,27 @@ mod tests {
             handle.write_or_append(Some(offset), buf.as_ref()).await.expect("write failed");
             offset += WRITE_ATTR_BATCH_SIZE as u64;
         }
+
+        // Reserve all remaining allocator space except `WRITE_ATTR_BATCH_SIZE` so the first batch
+        // of `write_new_attr` succeeds and the second batch fails with `NoSpace`.
+        let reservation = fs
+            .allocator()
+            .reserve_with(None, |limit| limit.saturating_sub(WRITE_ATTR_BATCH_SIZE as u64));
+
+        handle
+            .enable_verity(fio::VerificationOptions {
+                hash_algorithm: Some(fio::HashAlgorithm::Sha256),
+                salt: Some(vec![]),
+                ..Default::default()
+            })
+            .await
+            .expect_err("enable_verity should fail when second merkle batch runs out of space");
+
+        assert!(!handle.is_verified_file());
+
+        // Release the reservation and verify that retrying `enable_verity` without a reboot reaps
+        // the partial merkle attribute and succeeds cleanly.
+        drop(reservation);
 
         handle
             .enable_verity(fio::VerificationOptions {
@@ -3320,14 +3487,17 @@ mod tests {
 
             // This write should span three transactions. This test mimics the behavior when the
             // last transaction gets interrupted by a filesystem.close().
-            handle
+            if let Some(guard) = handle
                 .write_new_attr(
                     &mut transaction,
                     AttributeId::FSVERITY_MERKLE,
                     &vec![0; 2 * WRITE_ATTR_BATCH_SIZE],
                 )
                 .await
-                .expect("failed to write merkle attribute");
+                .expect("failed to write merkle attribute")
+            {
+                scopeguard::ScopeGuard::into_inner(guard);
+            }
 
             handle.object_id()
             // Drop the transaction to simulate interrupting the merkle tree creation as well as to
@@ -5142,7 +5312,22 @@ mod tests {
         }
         store.flush().await.expect("flush failed");
 
-        let object = create_object_with_key(fs.clone(), Some(&new_insecure_crypt()), true).await;
+        // Find an object whose first extent bucket does not trigger a Bloom filter false positive
+        // in the flushed base layer.
+        let object = loop {
+            let candidate =
+                create_object_with_key(fs.clone(), Some(&new_insecure_crypt()), true).await;
+            let key =
+                ObjectKey::extent(candidate.object_id(), AttributeId::DATA, 0..block_size * 2);
+            let layer_set = store.tree().layer_set();
+            if layer_set
+                .layers
+                .iter()
+                .any(|l| l.maybe_contains_key(&key) == MaybeContainsKey::False)
+            {
+                break candidate;
+            }
+        };
         let mut buf = object.allocate_buffer(block_size as usize).await;
         buf.fill(0xab);
 
@@ -5306,6 +5491,62 @@ mod tests {
         let free_after_truncate =
             fs.allocator().get_disk_bytes() - fs.allocator().get_used_bytes().0;
         assert!(free_after_truncate >= free_when_full + 1_048_576);
+
+        fs.close().await.expect("close failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_allocate_partial_commit_does_not_expand_size() {
+        use crate::object_store::transaction::TRANSACTION_METADATA_MAX_AMOUNT;
+
+        let device = DeviceHolder::new(FakeDevice::new(32768, TEST_DEVICE_BLOCK_SIZE));
+        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
+        let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
+        let store = root_volume
+            .new_volume("test", NewChildStoreOptions::default())
+            .await
+            .expect("new_volume failed");
+        let root_dir =
+            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
+
+        let mut buf = store.device().allocate_buffer(4096).await;
+        buf.as_mut_ptr_slice().fill(0xCC);
+
+        let file = {
+            let mut transaction = store
+                .new_transaction(
+                    lock_keys![LockKey::object(store.store_object_id(), root_dir.object_id())],
+                    Options::default(),
+                )
+                .await
+                .expect("new_txn");
+            let file = root_dir.create_child_file(&mut transaction, "alloc_c").await.expect("file");
+            transaction.commit().await.expect("commit");
+            file
+        };
+        for i in 0..260u64 {
+            file.write_or_append(Some(i * 8192), buf.as_ref()).await.expect("write extent");
+        }
+
+        // `DataObjectHandle::allocate` updates file size incrementally per batch rather than
+        // committing `new_size` in Batch 0 before later batches allocate beyond `old_size`.
+        let old_size = file.get_size();
+        let new_size = old_size + 4096;
+        let held = fs
+            .allocator()
+            .reserve_with(None, |limit| limit.saturating_sub(TRANSACTION_METADATA_MAX_AMOUNT));
+        let err = file
+            .allocate(0..new_size)
+            .await
+            .expect_err("file.allocate should fail with NoSpace on Batch 1");
+        assert!(FxfsError::NoSpace.matches(&err), "Expected NoSpace, got: {err:?}");
+        assert_eq!(
+            file.get_size(),
+            old_size,
+            "file.allocate should not commit new_size before the batch that \
+             allocates past old_size"
+        );
+        drop(held);
 
         fs.close().await.expect("close failed");
     }

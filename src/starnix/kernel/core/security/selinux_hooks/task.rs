@@ -4,19 +4,18 @@
 
 use crate::security::selinux_hooks::{
     CommonFsNodePermission, FileClass, KernelPermission, NonPrivateFsNode, PermissionCheck,
-    PermissionFlagsVec, ProcessPermission, build_permission_check, check_permission,
-    check_self_permission, current_task_state, fs_node_effective_sid_and_class,
-    fs_node_ensure_class, fs_node_set_label_with_task, has_file_permissions, is_internal_operation,
-    permissions_from_flags, task_consistent_attrs,
+    ProcessPermission, build_permission_check, check_permission, check_self_permission,
+    common_fs_node_permissions_from_flags, current_task_state, fs_node_effective_sid_and_class,
+    fs_node_ensure_class, has_file_permissions, is_internal_operation, task_consistent_attrs,
 };
-use crate::security::{Arc, Auditable, ProcAttr, SecurityId, SecurityServer};
+use crate::security::{Auditable, ProcAttr};
 use crate::task::loader::ResolvedProgram;
 use crate::task::{CurrentTask, Task};
 use crate::vfs::{FsStr, NamespaceNode};
 use selinux::{
     Cap2Class, CapClass, CommonCap2Permission, CommonCapPermission, FilePermission, ForClass,
     InitialSid, KernelClass, KeyPermission, NullessByteStr, PolicyCap, Process2Permission,
-    SystemPermission, TaskAttrs,
+    SecurityId, SecurityServer, SystemPermission, TaskAttrs,
 };
 use starnix_uapi::auth::{
     Credentials, PTRACE_MODE_ATTACH, PTRACE_MODE_NOAUDIT, PTRACE_MODE_READ, PtraceAccessMode,
@@ -29,11 +28,13 @@ use starnix_uapi::syslog::SyslogAction;
 use starnix_uapi::{
     ITIMER_PROF, ITIMER_REAL, ITIMER_VIRTUAL, errno, error, itimerval, rlimit, timeval,
 };
+use std::sync::Arc;
 
 /// If the task SID is changing during `exec`, enforces permissions that relate to inheritance of
 /// the calling task's file descriptor access and resource limits by the callee:
 /// 1. Revoke access to any file descriptors that `current_task` is not permitted to access.
-/// 2. Reset resource limits if `current_task` is not permitted to inherit rlimits.
+/// 2. Reset the parent death signal.
+/// 3. Reset resource limits if `current_task` is not permitted to inherit rlimits.
 ///
 /// Corresponds to the `bprm_committing_creds()` LSM hook.
 pub(in crate::security) fn bprm_committing_creds(
@@ -48,6 +49,7 @@ pub(in crate::security) fn bprm_committing_creds(
         return;
     }
     close_inaccessible_file_descriptors(security_server, current_task, new_sid);
+    current_task.thread_group().write().set_parent_death_signal(None);
     maybe_reset_rlimits(security_server, current_task, previous_sid, new_sid);
 }
 
@@ -85,7 +87,7 @@ fn close_inaccessible_file_descriptors(
         .expect("kernel has security state because SELinux is enabled");
 
     let null_file_handle =
-        kernel_state.selinuxfs_null.get().expect("selinuxfs_init_null() has been called").clone();
+        kernel_state.selinuxfs_null.get().expect("selinuxfs_init_null() has been called");
 
     let audit_context = current_task.into();
     let source_sid = new_sid;
@@ -94,20 +96,13 @@ fn close_inaccessible_file_descriptors(
     // `[child-process] [fd-from-child-fd-table]:fd { use }`,
     // or for any of the file permissions associated with the file mode and flags.
     current_task.files().remap(current_task, |file| {
-        let permissions = if let Some(fs_node) = NonPrivateFsNode::new(file.node()) {
-            permissions_from_flags(
-                file.flags().into(),
-                fs_node_effective_sid_and_class(fs_node).class,
-            )
-        } else {
-            PermissionFlagsVec::new()
-        };
+        let permissions = common_fs_node_permissions_from_flags(file.flags().into());
         let permission_result = has_file_permissions(
             &permission_check,
             current_task,
             source_sid,
             file,
-            &permissions,
+            permissions,
             audit_context,
         );
         permission_result.map_or_else(|_| Some(null_file_handle.clone()), |_| None)
@@ -375,6 +370,20 @@ pub(in crate::security) fn bprm_creds_for_exec(
             (&executable_audit_context).into(),
         )?;
 
+        // If the process shares filesystem context with other processes (via `CLONE_FS`) then check
+        // for the share permission to the new domain.
+        if current_task.has_shared_fs() {
+            check_permission(
+                &permission_check,
+                current_task,
+                current_sid,
+                new_sid,
+                ProcessPermission::Share,
+                task_audit_context,
+            )
+            .map_err(|_| errno!(EPERM))?;
+        }
+
         // Check that ptrace permission is allowed if the process is traced.
         if let Some(ptracer) = current_task.ptracer_task() {
             let tracer_sid = ptracer.real_creds().security_state.current_sid;
@@ -387,19 +396,6 @@ pub(in crate::security) fn bprm_creds_for_exec(
                 task_audit_context,
             )
             .map_err(|_| errno!(EPERM))?;
-        }
-
-        // If the process shares filesystem context with other processes (via `CLONE_FS`) then check
-        // for the share permission to the new domain.
-        if current_task.has_shared_fs() {
-            check_permission(
-                &permission_check,
-                current_task,
-                current_sid,
-                new_sid,
-                ProcessPermission::Share,
-                task_audit_context,
-            )?;
         }
     }
 
@@ -602,7 +598,8 @@ pub(in crate::security) fn check_syslog_access(
 }
 
 /// Checks if the `current_task` is allowed to query the Linux capabilities of the `target` task.
-pub(in crate::security) fn check_getcap_access(
+/// Corresponds to the `capget()` LSM hook.
+pub(in crate::security) fn capget(
     permission_check: &PermissionCheck<'_>,
     current_task: &CurrentTask,
     target: &Task,
@@ -620,20 +617,18 @@ pub(in crate::security) fn check_getcap_access(
     )
 }
 
-/// Checks if the `current_task` is allowed to set the Linux capabilities of the `target` task.
-pub(in crate::security) fn check_setcap_access(
+/// Checks if the `current_task` is allowed to set its Linux capabilities.
+/// Corresponds to the `capset()` LSM hook.
+pub(in crate::security) fn capset(
     permission_check: &PermissionCheck<'_>,
     current_task: &CurrentTask,
-    target: &Task,
 ) -> Result<(), Errno> {
     let audit_context = current_task.into();
-    let source_sid = current_task_state(current_task).current_sid;
-    let target_sid = target.real_creds().security_state.current_sid;
-    check_permission(
+    let sid = current_task_state(current_task).current_sid;
+    check_self_permission(
         permission_check,
         current_task,
-        source_sid,
-        target_sid,
+        sid,
         ProcessPermission::SetCap,
         audit_context,
     )
@@ -1049,7 +1044,7 @@ pub(in crate::security) fn set_procattr(
 /// Sets the sid of `fs_node` to be that of `task`.
 pub(in crate::security) fn fs_node_init_with_task(task: &Task, fs_node: NonPrivateFsNode<'_>) {
     fs_node_ensure_class(fs_node).unwrap();
-    fs_node_set_label_with_task(fs_node, &task.persistent_info);
+    fs_node.selinux_state().set_from_task(&task.persistent_info);
 }
 
 #[cfg(test)]
@@ -1913,7 +1908,8 @@ mod tests {
         const UNBOUNDED_CONTEXT: &[u8] = b"test_u:test_r:unbounded_t:s0";
 
         spawn_kernel_with_selinux_hooks_test_policy_and_run(|current_task, security_server| {
-            security_server.load_policy(BINARY_POLICY.to_vec()).expect("policy load failed");
+            crate::security::selinuxfs_load_policy(current_task, BINARY_POLICY.to_vec())
+                .expect("load policy");
 
             mutate_attrs_for_test(&current_task, |attrs| {
                 attrs.current_sid =

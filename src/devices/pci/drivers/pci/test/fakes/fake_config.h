@@ -27,8 +27,7 @@ class FakeMmioConfig final : public MmioConfig {
   FakeMmioConfig(fuchsia_hardware_pci::wire::Bdf bdf, fdf::MmioView&& view)
       : MmioConfig(bdf, view) {}
   void MockBarProbeSideEffects(uint32_t bar_id) const {
-    uint32_t bar_val = MmioConfig::Read(Config::kBar(bar_id));
-    auto reg = config::BaseAddress::Get().FromValue(bar_val);
+    auto reg = config::BaseAddress(bar_id).ReadFrom(this);
 
     // When probing a BAR, the hardware writes a 0 in every valid bit used
     // for an address. The least significant address bit set represents the
@@ -39,41 +38,53 @@ class FakeMmioConfig final : public MmioConfig {
     //  ~(0x000FFFFF) = 0xFFF00000
 
     uint32_t size = kTestDeviceBars[bar_id].size;
-    ZX_ASSERT(size == 0 || cpp20::has_single_bit(size));
+    if (config::VendorId.ReadFrom(this).reg_value() == 0x1af4) {
+      // Virtio-input config has BAR 1 and BAR 4 implemented (each 4KB), other BARs unimplemented.
+      size = (bar_id == 1 || bar_id == 4) ? 4096 : 0;
+    }
+    if (size == 0) {
+      MmioConfig::Write32(0, static_cast<uint16_t>(config::BaseAddress(bar_id).addr()));
+      return;
+    }
+    ZX_ASSERT(cpp20::has_single_bit(size));
     size = ~(size - 1);
 
     if (reg.is_io_space()) {
-      reg.io()->set_base_address(size);
+      reg.set_reg_value(reg.io().set_base_address(size).reg_value());
     } else {
-      reg.mmio()->set_base_address(size);
+      reg.set_reg_value(reg.mmio().set_base_address(size).reg_value());
     }
-    MmioConfig::Write(Config::kBar(bar_id), reg.reg_value());
+    MmioConfig::Write32(reg.reg_value(), static_cast<uint16_t>(config::BaseAddress(bar_id).addr()));
   }
 
-  void Write(const PciReg32 addr, uint32_t val) const final {
-    switch (addr.offset()) {
-      case Config::kBar(0).offset():
-      case Config::kBar(1).offset():
-      case Config::kBar(2).offset():
-      case Config::kBar(3).offset():
-      case Config::kBar(4).offset():
-      case Config::kBar(5).offset(): {
+  const char* type() const final { return "mmio"; }
+
+ protected:
+  void Write32(uint32_t val, uint16_t offset) const final {
+    switch (offset) {
+      case pci::kConfigBaseAddresses + (0 * sizeof(uint32_t)):
+      case pci::kConfigBaseAddresses + (1 * sizeof(uint32_t)):
+      case pci::kConfigBaseAddresses + (2 * sizeof(uint32_t)):
+      case pci::kConfigBaseAddresses + (3 * sizeof(uint32_t)):
+      case pci::kConfigBaseAddresses + (4 * sizeof(uint32_t)):
+      case pci::kConfigBaseAddresses + (5 * sizeof(uint32_t)): {
         // A 32-bit write of all 1s in these addresses is reserved for
         // querying the BAR size as long as it's not the upper half of
         // a 64 bit register.
-        uint32_t bar_id = static_cast<uint32_t>((addr.offset() - Config::kBar(0).offset()) / 4);
-        if (val == UINT32_MAX && !kTestDeviceBars[bar_id].is_upper_half) {
+        uint32_t bar_id = (offset - pci::kConfigBaseAddresses) / 4;
+        bool is_upper_half = (config::VendorId.ReadFrom(this).reg_value() == 0x1af4)
+                                 ? (bar_id == 5)
+                                 : kTestDeviceBars[bar_id].is_upper_half;
+        if (val == UINT32_MAX && !is_upper_half) {
           MockBarProbeSideEffects(bar_id);
           break;
         }
         __FALLTHROUGH;
       }
       default:
-        return MmioConfig::Write(addr, val);
+        MmioConfig::Write32(val, offset);
     }
   }
-
-  const char* type(void) const final { return "mmio"; }
 };
 
 }  // namespace pci

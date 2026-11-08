@@ -5,13 +5,12 @@
 use super::SimpleFile;
 use crate::execution_scope::ExecutionScope;
 use crate::{
-    assert_close, assert_get_attr, assert_read, assert_read_at, assert_seek, assert_truncate_err,
-    assert_write_err, file,
+    assert_close, assert_get_attributes, assert_read, assert_read_at, assert_seek,
+    assert_truncate_err, assert_write_err, file,
 };
 use assert_matches::assert_matches;
 use flex_fuchsia_io as fio;
 use futures::StreamExt;
-use libc::{S_IFREG, S_IRUSR};
 use zx_status::Status;
 
 fn test_scope() -> ExecutionScope {
@@ -218,17 +217,18 @@ async fn get_attr_read_only() {
     let scope = test_scope();
     let file = SimpleFile::read_only(b"Content");
     let proxy = file::serve_proxy_with_scope(file, fio::PERM_READABLE, &scope);
-    assert_get_attr!(
+    assert_get_attributes!(
         proxy,
-        fio::NodeAttributes {
-            mode: S_IFREG | S_IRUSR,
-            id: fio::INO_UNKNOWN,
-            content_size: 7,
-            storage_size: 7,
-            link_count: 1,
-            creation_time: 0,
-            modification_time: 0,
-        }
+        fio::NodeAttributesQuery::all(),
+        immutable_attributes!(
+            fio::NodeAttributesQuery::all(),
+            Immutable {
+                protocols: fio::NodeProtocolKinds::FILE,
+                abilities: fio::Operations::GET_ATTRIBUTES | fio::Operations::READ_BYTES,
+                content_size: 7,
+                storage_size: 7,
+            }
+        )
     );
     assert_close!(proxy);
 }

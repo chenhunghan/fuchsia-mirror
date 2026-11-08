@@ -279,7 +279,10 @@ pub(in crate::security) fn sb_mount(
         let FsNodeSidAndClass { sid: target_sid, class: target_class } =
             fs_node_effective_sid_and_class(fs_node);
         let FsNodeClass::File(target_class) = target_class else {
-            panic!("sb_mount on non-file-like class")
+            // The "mounton" permission is only defined for file-like classes, and the VFS will
+            // subsequently reject mounting on non-file-like nodes (such as a socket reached via
+            // "/proc/<pid>/fd/<n>") with ENOENT.
+            return Ok(());
         };
         let audit_context = [current_task.into(), fs_node.into()];
         check_permission(

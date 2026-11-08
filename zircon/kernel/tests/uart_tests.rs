@@ -27,7 +27,7 @@ unsafe extern "C" {
 struct UartTestBuffer {
     /// Mutex serializing access to `buf`.
     #[mutex]
-    lock: ksync::KMutex,
+    lock: ksync::KMutex<crate::ksync_kernel::TrackedMutex>,
     /// Scratch line buffer.
     #[guarded_by(lock)]
     buf: [u8; 1048],
@@ -36,7 +36,7 @@ struct UartTestBuffer {
 /// Static UART test line buffer, guarded by `UartTestBuffer::lock` to keep the 1,048-byte buffer
 /// off the kernel stack while preventing concurrent `static mut` aliasing.
 static BUF: UartTestBuffer = UartTestBuffer {
-    lock: ksync::KMutex::new(ksync::RawMutex::const_init(
+    lock: ksync::KMutex::new(crate::ksync_kernel::TrackedMutex::const_init(
         <UartTestBufferLockClass as ksync::LockClass>::ID,
     )),
     buf: ksync::KCell::new([0u8; 1048]),

@@ -1,0 +1,70 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "bin",
+    srcs = ["src/lib.rs"],
+    crate_name = "log_return_value_test",
+    edition = "2024",
+    deps = [
+        "//src/lib/diagnostics/data/rust",
+        "//src/lib/diagnostics/reader/rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:futures-util",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged_bin",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "log_return_value_test",
+)
+
+fx_component_manifest(
+    name = "log_return_value_test-manifest",
+    testonly = True,
+    component_name = "log_return_value_test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/sys/testing:elf_test_runner.shard.cml",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/log_return_value_test.cml",
+)
+
+fx_test_component(
+    name = "log_return_value_test",
+    compiled_manifest = ":log_return_value_test-manifest",
+    deps = [":bin_packaged_bin"],
+)
+
+fx_package(
+    name = "log_return_value_test_package",
+    components = ["//src/lib/fuchsia/tests/log_return_value/exit-with-error:component"],
+    test_components = [":log_return_value_test"],
+)
+
+fx_test(
+    name = "log_return_value_tests",
+    max_log_severity = "ERROR",
+    package = ":log_return_value_test_package",
+    visibility = ["//src/lib:__pkg__"],
+)

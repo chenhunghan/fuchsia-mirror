@@ -1,0 +1,144 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# The binary for the test resolver.
+rustc_binary(
+    name = "resolver_bin",
+    testonly = True,
+    srcs = ["src/resolver.rs"],
+    crate_name = "component_manager_test_resolvers_resolver",
+    crate_root = "src/resolver.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component.resolution:fuchsia.component.resolution_rust",
+        "//sdk/fidl/fuchsia.data:fuchsia.data_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.mem:fuchsia.mem_rust",
+        "//src/lib/fdio/rust:fdio",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/lib/versioning/version-history/rust/data",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "resolver_packaged_bin",
+    testonly = True,
+    binary = ":resolver_bin",
+    binary_name = "component_manager_test_resolvers_resolver",
+)
+
+# The integration test binary.
+rustc_test(
+    name = "integration_test_bin",
+    srcs = ["src/integration_test.rs"],
+    crate_name = "component_manager_test_resolvers_integration_test",
+    crate_root = "src/integration_test.rs",
+    edition = "2024",
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/sys/component_manager/tests/fidl:components_rust",
+    ],
+)
+
+fx_packaged_binary(
+    name = "integration_test_packaged_bin",
+    testonly = True,
+    binary = ":integration_test_bin",
+    binary_name = "component_manager_test_resolvers_integration_test",
+)
+
+fx_component_manifest(
+    name = "resolver-manifest",
+    testonly = True,
+    component_name = "resolver",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/resolver.cml",
+)
+
+fx_component(
+    name = "resolver",
+    testonly = True,
+    compiled_manifest = ":resolver-manifest",
+    deps = [":resolver_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "integration_test-manifest",
+    testonly = True,
+    component_name = "integration_test",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/integration_test.cml",
+)
+
+fx_component(
+    name = "integration_test",
+    testonly = True,
+    compiled_manifest = ":integration_test-manifest",
+    deps = [":integration_test_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "root-manifest",
+    testonly = True,
+    component_name = "root",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/root.cml",
+)
+
+fx_test_component(
+    name = "root",
+    compiled_manifest = ":root-manifest",
+    deps = [":integration_test_packaged_bin"],
+)
+
+fx_package(
+    name = "package",
+    package_name = "component-manager-test-resolver",
+    components = [
+        ":integration_test",
+        ":resolver",
+        # https://fxbug.dev/42052321: Dep included for affected tests presubmit
+        "//src/sys/component_manager:component-manager-realm-builder-cmp",
+    ],
+    resources = [
+        "//src/sys/component_manager/tests/resolvers:trigger-bin_packaged_bin",  # @bazel2gn:path_overwrite://src/sys/component_manager/tests/resolvers:trigger-bin
+    ],
+    test_components = [":root"],
+)
+
+fx_test(
+    name = "component-manager-test-resolver",
+    package = ":package",
+    visibility = ["//src/sys/component_manager:__pkg__"],
+)

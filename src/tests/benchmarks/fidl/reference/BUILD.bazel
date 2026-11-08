@@ -1,0 +1,96 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load(
+    "//src/tests/benchmarks/fidl/benchmark_suite:benchmark_suite.bzl",
+    "BENCHMARK_SUITE_FIDL_TARGET",
+)
+load("//tools/fidl/gidl:gidl.bzl", "gidl_reference_benchmarks")
+
+package(default_applicable_licenses = ["//:license"])
+
+# LINT.IfChange
+gidl_reference_benchmarks(
+    name = "benchmark_suite_reference",
+    testonly = True,
+    fidl = BENCHMARK_SUITE_FIDL_TARGET,
+    inputs = [
+        "//src/tests/benchmarks/fidl/benchmark_suite:byte_vector.gen.gidl",
+        "//src/tests/benchmarks/fidl/benchmark_suite:padded_struct_tree.gen.gidl",
+        "//src/tests/benchmarks/fidl/benchmark_suite:struct_tree.gen.gidl",
+        "//src/tests/benchmarks/fidl/benchmark_suite:table_all_set.gen.gidl",
+        "//src/tests/benchmarks/fidl/benchmark_suite:table_all_unset.gen.gidl",
+        "//src/tests/benchmarks/fidl/benchmark_suite:table_single_set.gen.gidl",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//visibility:private"],
+    deps = ["//sdk/lib/fidl"],
+)
+
+fx_cc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = [
+        "builder.h",
+        "byte_vector.cc",
+        "decode_benchmark_util.h",
+        "encode_benchmark_util.h",
+        "main.cc",
+        "padded_struct_tree.cc",
+        "struct_tree.cc",
+        # TODO(https://fxbug.dev/42164869) Re-enable once v2 wire format migration is complete.
+        # "uint8_table.cc",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//visibility:private"],
+    deps = [
+        ":benchmark_suite_reference",
+        "//sdk/lib/fidl",
+        "//src/zircon/lib/zircon",
+        "//zircon/system/ulib/perftest",
+        "//zircon/system/ulib/sync",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "reference_fidl_microbenchmarks",
+    visibility = ["//visibility:private"],
+)
+
+fx_component_manifest(
+    name = "benchmark_manifest",
+    testonly = True,
+    component_name = "benchmark",
+    includes = ["//src/tests/benchmarks/fidl:meta/benchmark.shard"],
+    manifest = "meta/benchmark.cml",
+    visibility = ["//visibility:private"],
+)
+
+fx_component(
+    name = "benchmark",
+    testonly = True,
+    compiled_manifest = ":benchmark_manifest",
+    visibility = ["//visibility:private"],
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "fidl_microbenchmarks_reference",
+    package_name = "fidl_microbenchmarks_reference",
+    testonly = True,
+    components = [":benchmark"],
+    visibility = ["//src/tests/benchmarks:__subpackages__"],
+)
+# LINT.ThenChange(//src/tests/benchmarks/fidl/reference/BUILD.gn)

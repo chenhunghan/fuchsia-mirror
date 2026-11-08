@@ -36,7 +36,6 @@ ffx_plugin("ffx_log") {
     "//src/lib/fidl/rust/fidl",
     "//src/lib/fuchsia-async",
     "//third_party/rust_crates:anyhow",
-    "//third_party/rust_crates:async-trait",
     "//third_party/rust_crates:derivative",
     "//third_party/rust_crates:futures",
     "//third_party/rust_crates:log",
@@ -66,6 +65,7 @@ ffx_plugin("ffx_log") {
     "//src/developer/ffx/lib/target/behavior:lib",
     "//src/developer/ffx/lib/writer:lib",
     "//src/diagnostics/lib/log-command:log-command_fdomain",
+    "//src/lib/diagnostics/log/encoding/rust",
     "//src/lib/diagnostics/selectors",
     "//src/lib/fdomain/local",
     "//src/lib/fuchsia",
@@ -76,6 +76,7 @@ ffx_plugin("ffx_log") {
     "//third_party/rust_crates:pin-project",
     "//third_party/rust_crates:serde_json",
     "//third_party/rust_crates:tokio",
+    "//third_party/rust_crates:zerocopy",
   ]
 }
 

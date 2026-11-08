@@ -116,7 +116,7 @@
 #     Using `deps` might be necessary in the case where the headers are
 #     auto-generated, though.
 #
-#  defines, public_configs, metadata, testonly, visibility (optional)
+#  check_includes, check_includes_strict, defines, public_configs, metadata, testonly, visibility (optional)
 #     Usual GN meaning.
 #
 template("library_headers") {
@@ -139,6 +139,7 @@ template("library_headers") {
   source_set(target_name) {
     forward_variables_from(invoker,
                            [
+                             "check_includes",
                              "deps",
                              "metadata",
                              "public",
@@ -147,6 +148,9 @@ template("library_headers") {
                              "testonly",
                              "visibility",
                            ])
+    if (defined(invoker.check_includes_strict)) {
+      check_includes_strict = invoker.check_includes_strict
+    }
 
     # If `public` is not defined, use the paths in `headers` after adjustment.
     if (!defined(public)) {

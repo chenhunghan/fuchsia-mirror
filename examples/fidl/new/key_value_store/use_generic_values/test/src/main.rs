@@ -7,7 +7,17 @@ use example_tester::{Client, Server, TestKind, assert_logs_eq_to_golden, run_tes
 use fidl::prelude::*;
 use fidl_examples_keyvaluestore_usegenericvalues::StoreMarker;
 
-use fuchsia_component_test::{ChildRef, RealmBuilder};
+use fuchsia_component_test::{Capability, ChildRef, RealmBuilder, Ref, Route};
+
+const CONFIG_CAPABILITIES: [&str; 7] = [
+    "fuchsia.examples.keyvaluestore.usegenericvalues.SetOverwriteOption",
+    "fuchsia.examples.keyvaluestore.usegenericvalues.SetConcatOption",
+    "fuchsia.examples.keyvaluestore.usegenericvalues.WriteBytes",
+    "fuchsia.examples.keyvaluestore.usegenericvalues.WriteStrings",
+    "fuchsia.examples.keyvaluestore.usegenericvalues.WriteUint64s",
+    "fuchsia.examples.keyvaluestore.usegenericvalues.WriteInt64s",
+    "fuchsia.examples.keyvaluestore.usegenericvalues.WriteUint128s",
+];
 
 async fn test_write_items_twice(
     test_name: &str,
@@ -21,16 +31,62 @@ async fn test_write_items_twice(
         StoreMarker::PROTOCOL_NAME,
         TestKind::ClientAndServer { client: &client, server: &server },
         |builder: RealmBuilder, client: ChildRef| async move {
-            builder.init_mutable_config_to_empty(&client).await?;
-            builder.set_config_value(&client, "set_overwrite_option", set_overwrite.into()).await?;
-            builder.set_config_value(&client, "set_concat_option", set_concat.into()).await?;
-            builder.set_config_value(&client, "write_bytes", vec!["foo", "bar"].into()).await?;
-            builder.set_config_value(&client, "write_strings", vec!["baz", "qux"].into()).await?;
-            builder.set_config_value(&client, "write_uint64s", vec![1u64, 101u64].into()).await?;
             builder
-                .set_config_value(&client, "write_int64s", vec![-2 as i64, -102 as i64].into())
+                .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                    name: "fuchsia.examples.keyvaluestore.usegenericvalues.SetOverwriteOption"
+                        .parse()?,
+                    value: set_overwrite.into(),
+                }))
                 .await?;
-            builder.set_config_value(&client, "write_uint128s", vec![3u64, 103u64].into()).await?;
+            builder
+                .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                    name: "fuchsia.examples.keyvaluestore.usegenericvalues.SetConcatOption"
+                        .parse()?,
+                    value: set_concat.into(),
+                }))
+                .await?;
+            builder
+                .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                    name: "fuchsia.examples.keyvaluestore.usegenericvalues.WriteBytes".parse()?,
+                    value: vec!["foo", "bar"].into(),
+                }))
+                .await?;
+            builder
+                .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                    name: "fuchsia.examples.keyvaluestore.usegenericvalues.WriteStrings".parse()?,
+                    value: vec!["baz", "qux"].into(),
+                }))
+                .await?;
+            builder
+                .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                    name: "fuchsia.examples.keyvaluestore.usegenericvalues.WriteUint64s".parse()?,
+                    value: vec![1u64, 101u64].into(),
+                }))
+                .await?;
+            builder
+                .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                    name: "fuchsia.examples.keyvaluestore.usegenericvalues.WriteInt64s".parse()?,
+                    value: vec![-2 as i64, -102 as i64].into(),
+                }))
+                .await?;
+            builder
+                .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                    name: "fuchsia.examples.keyvaluestore.usegenericvalues.WriteUint128s"
+                        .parse()?,
+                    value: vec![3u64, 103u64].into(),
+                }))
+                .await?;
+            builder
+                .add_route(
+                    CONFIG_CAPABILITIES
+                        .into_iter()
+                        .fold(Route::new(), |route, name| {
+                            route.capability(Capability::configuration(name))
+                        })
+                        .from(Ref::self_())
+                        .to(&client),
+                )
+                .await?;
             Ok::<(RealmBuilder, ChildRef), Error>((builder, client))
         },
         |log_reader| {
@@ -70,14 +126,62 @@ async fn test_write_items_default_success() -> Result<(), Error> {
         StoreMarker::PROTOCOL_NAME,
         TestKind::ClientAndServer { client: &client, server: &server },
         |builder: RealmBuilder, client: ChildRef| async move {
-            builder.init_mutable_config_to_empty(&client).await?;
-            builder.set_config_value(&client, "set_overwrite_option", false.into()).await?;
-            builder.set_config_value(&client, "set_concat_option", false.into()).await?;
-            builder.set_config_value(&client, "write_bytes", vec!["foo"].into()).await?;
-            builder.set_config_value(&client, "write_strings", vec!["baz"].into()).await?;
-            builder.set_config_value(&client, "write_uint64s", vec![1u64].into()).await?;
-            builder.set_config_value(&client, "write_int64s", vec![-2 as i64].into()).await?;
-            builder.set_config_value(&client, "write_uint128s", vec![3u64].into()).await?;
+            builder
+                .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                    name: "fuchsia.examples.keyvaluestore.usegenericvalues.SetOverwriteOption"
+                        .parse()?,
+                    value: false.into(),
+                }))
+                .await?;
+            builder
+                .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                    name: "fuchsia.examples.keyvaluestore.usegenericvalues.SetConcatOption"
+                        .parse()?,
+                    value: false.into(),
+                }))
+                .await?;
+            builder
+                .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                    name: "fuchsia.examples.keyvaluestore.usegenericvalues.WriteBytes".parse()?,
+                    value: vec!["foo"].into(),
+                }))
+                .await?;
+            builder
+                .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                    name: "fuchsia.examples.keyvaluestore.usegenericvalues.WriteStrings".parse()?,
+                    value: vec!["baz"].into(),
+                }))
+                .await?;
+            builder
+                .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                    name: "fuchsia.examples.keyvaluestore.usegenericvalues.WriteUint64s".parse()?,
+                    value: vec![1u64].into(),
+                }))
+                .await?;
+            builder
+                .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                    name: "fuchsia.examples.keyvaluestore.usegenericvalues.WriteInt64s".parse()?,
+                    value: vec![-2 as i64].into(),
+                }))
+                .await?;
+            builder
+                .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                    name: "fuchsia.examples.keyvaluestore.usegenericvalues.WriteUint128s"
+                        .parse()?,
+                    value: vec![3u64].into(),
+                }))
+                .await?;
+            builder
+                .add_route(
+                    CONFIG_CAPABILITIES
+                        .into_iter()
+                        .fold(Route::new(), |route, name| {
+                            route.capability(Capability::configuration(name))
+                        })
+                        .from(Ref::self_())
+                        .to(&client),
+                )
+                .await?;
             Ok::<(RealmBuilder, ChildRef), Error>((builder, client))
         },
         |log_reader| {

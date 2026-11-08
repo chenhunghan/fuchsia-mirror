@@ -15,6 +15,10 @@ tests_with_err_logs = [
   {
     label = "management"
     long = true
+
+    # The `controller` component (depended on by `management`) launches
+    # `hermetic_network`, which resolves `netstack-conformance` as a subpackage.
+    subpackages = [ "//src/connectivity/network/netstack3:package-conformance" ]
   },
 ]
 
@@ -32,21 +36,11 @@ package_deps_for_tests = [
   # netemul-sandbox is used to create hermetic test realms.
   "//src/connectivity/network/testing/netemul/service:netemul-sandbox",
 
-  # netstack3 is under test.
-  "//src/connectivity/network/netstack3:component-debug",
-  "//src/connectivity/network/netstack3:component-for-tests",
-
   # reachability monitor is under test.
   "//src/connectivity/policy/reachability:component_with_fake_time",
 
   # stash_secure is used by dhcpd and netstack.
   "//src/sys/stash:stash_secure_v2",
-
-  # DHCPv4 Server is used to test DHCP address acquisition.
-  "//src/connectivity/network/dhcpv4/server:component",
-
-  # DHCP(v4) client is under test.
-  "//src/connectivity/network/dhcpv4/client/bindings:component",
 
   # DHCPv6 client is under test.
   "//src/connectivity/network/dhcpv6/client:component",
@@ -59,7 +53,7 @@ package_deps_for_tests = [
 
   # netcfg integration with netstack is tested.
   ":netcfg-netemul-configs",
-  "//src/connectivity/policy/netcfg:component-basic",
+  "//src/connectivity/policy/netcfg:component",
   "//src/connectivity/policy/netcfg/integration/fake-netcfg:component",
 
   # netcfg integration with socket-proxy is tested.
@@ -67,6 +61,18 @@ package_deps_for_tests = [
 
   # fake socket proxy for netcfg testing.
   "//src/connectivity/policy/socket-proxy/integration/fake-socket-proxy:svc",
+]
+
+subpackages_for_tests = [
+  # DHCP(v4) client is under test.
+  "//src/connectivity/network/dhcpv4/client/bindings:package",
+
+  # DHCPv4 Server is used to test DHCP address acquisition.
+  "//src/connectivity/network/dhcpv4/server:package",
+
+  # Netstack3 is under test.
+  "//src/connectivity/network/netstack3:package-debug",
+  "//src/connectivity/network/netstack3:package-for-tests",
 ]
 
 fuchsia_test_package("policy-integration-tests") {
@@ -77,6 +83,7 @@ fuchsia_test_package("policy-integration-tests") {
 
   deps = package_deps_for_tests +
          [ "//src/lib/testing/expectation:expectation_comparer" ]
+  subpackages = subpackages_for_tests
 }
 
 err_log_package_deps = []
@@ -84,6 +91,10 @@ foreach(test, tests_with_err_logs) {
   _long = false
   if (defined(test.long)) {
     _long = test.long
+  }
+  _subpackages = subpackages_for_tests
+  if (defined(test.subpackages)) {
+    _subpackages += test.subpackages
   }
   _name = "policy-${test.label}-integration-test"
   _no_err_logs_name = "${_name}-no-err-logs"
@@ -113,6 +124,7 @@ foreach(test, tests_with_err_logs) {
       ]
       deps = package_deps_for_tests +
              [ "//src/lib/testing/expectation:expectation_comparer" ]
+      subpackages = _subpackages
     }
 
     fuchsia_sharded_test_package(_with_err_logs_name) {
@@ -125,6 +137,7 @@ foreach(test, tests_with_err_logs) {
       ]
       deps = package_deps_for_tests +
              [ "//src/lib/testing/expectation:expectation_comparer" ]
+      subpackages = _subpackages
       test_specs = {
         log_settings = {
           max_severity = "ERROR"
@@ -146,6 +159,7 @@ foreach(test, tests_with_err_logs) {
       treatment_of_cases_with_error_logs = "SKIP_CASES_WITH_ERROR_LOGS"
       deps = package_deps_for_tests +
              [ "//src/lib/testing/expectation:expectation_comparer" ]
+      subpackages = _subpackages
     }
 
     fuchsia_test_with_expectations_package(_with_err_logs_name) {
@@ -154,6 +168,7 @@ foreach(test, tests_with_err_logs) {
       treatment_of_cases_with_error_logs = "RUN_ONLY_CASES_WITH_ERROR_LOGS"
       deps = package_deps_for_tests +
              [ "//src/lib/testing/expectation:expectation_comparer" ]
+      subpackages = _subpackages
       test_specs = {
         log_settings = {
           max_severity = "ERROR"

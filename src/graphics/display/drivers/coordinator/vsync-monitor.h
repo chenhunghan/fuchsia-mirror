@@ -52,6 +52,11 @@ class VsyncMonitor {
                display::DriverConfigStamp vsync_config_stamp,
                std::optional<zx::duration> expected_vsync_interval);
 
+  bool is_vsync_stalled() const { return vsync_stalled_; }
+  uint64_t vsync_stalls_count() const { return vsync_stalls_count_; }
+  uint64_t vsync_count() const { return vsync_count_; }
+  zx::time_boot current_stall_start_boot() const { return current_stall_start_boot_; }
+
  private:
   // The time elapsed since the last observed Vsync event.
   //
@@ -115,8 +120,13 @@ class VsyncMonitor {
   // Publishes the values that must be computed when the inspect tree is read.
   inspect::LazyNode live_values_;
 
-  // Fields that track how often vsync was detected to have been stalled.
-  std::atomic_bool vsync_stalled_ = false;
+  // Fields that track VSync count and stall episodes. Accessed exclusively on
+  // `dispatcher_` (only `last_vsync_timestamp_mono_` is read cross-thread by
+  // the `live` Inspect lazy node).
+  bool vsync_stalled_ = false;
+  uint64_t vsync_stalls_count_ = 0;
+  zx::time_boot current_stall_start_boot_{zx::time_boot::infinite_past()};
+  uint64_t vsync_count_ = 0;
   inspect::UintProperty vsync_stalls_detected_;
 
   async_dispatcher_t& dispatcher_;

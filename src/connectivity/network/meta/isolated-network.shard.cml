@@ -6,14 +6,13 @@
     // with Netstack and DNS resolver. It provides the common rules for services that Netstack and
     // DNS resolver need and their interdependencies.
     //
-    // It assumes the package it is included in also contains the netstack and dns_resolver
-    // components. You can add these as deps in your `fuchsia_package` or `fuchsia_test_package`
-    // declarations in the build file.
+    // It assumes the package it is included in subpackages netstack
+    // (`package-for-tests`) and contains the dns_resolver component (`deps`).
     include: [ "//src/connectivity/network/meta/isolated-network-offers.shard.cml" ],
     children: [
         {
             name: "netstack",
-            url: "#meta/netstack3.cm",
+            url: "netstack#meta/netstack3.cm",
         },
         {
             name: "dns_resolver",

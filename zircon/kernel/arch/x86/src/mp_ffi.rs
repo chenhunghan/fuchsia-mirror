@@ -4,87 +4,67 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-use core::ffi::c_char;
-use zx_types::zx_duration_t;
-
-use super::mp::{X86IdleState, X86IdleStates};
-
 unsafe extern "C" {
-    #[link_name = "use_monitor"]
-    pub(super) static mut USE_MONITOR: bool;
-
-    #[link_name = "x86_num_cpus"]
-    pub(super) static mut X86_NUM_CPUS: u8;
-
-    /// Returns a pointer to the bootstrap processor's `X86IdleStates` table.
+    /// Translates `apic_id` to its logical CPU number, or `-1` if not found.
     ///
     /// # Safety
     ///
-    /// Returns `bp_percpu.idle_states` initialized during early boot.
-    pub(super) fn cpp_x86_mp_bp_idle_states() -> *mut X86IdleStates;
+    /// The caller must ensure that AP structures have been allocated.
+    pub fn x86_apic_id_to_cpu_num(apic_id: u32) -> core::ffi::c_int;
 
-    /// Returns a pointer to AP `idx`'s `X86IdleStates` table (`ap_percpus[idx].idle_states`).
+    /// Returns a pointer to `cpu_num`'s `x86_percpu` structure.
     ///
     /// # Safety
     ///
-    /// Caller must ensure `idx < (x86_num_cpus - 1) as usize`.
-    pub(super) fn cpp_x86_mp_ap_idle_states(idx: usize) -> *mut X86IdleStates;
+    /// The caller must ensure that `cpu_num < x86_num_cpus`.
+    pub fn x86_percpu_for(
+        cpu_num: crate::kernel::types::cpu_num_t,
+    ) -> *mut crate::arch_rs::x86::handoff::X86Percpu;
 
-    /// Returns the static C string name of `state`.
+    /// Initializes the per-CPU state for `cpu_num`.
     ///
     /// # Safety
     ///
-    /// `state` must point to a valid, initialized `X86IdleState`.
-    pub(super) fn cpp_x86_idle_state_name(state: *const X86IdleState) -> *const c_char;
+    /// The caller must ensure that `%gs.base` points to `cpu_num`'s `x86_percpu` structure.
+    pub fn x86_init_percpu(cpu_num: crate::kernel::types::cpu_num_t);
 
-    /// Returns the MWAIT hint for `state`.
+    /// Forcibly stops all other CPUs except the current one and the BSP (which is cpu 0).
     ///
     /// # Safety
     ///
-    /// `state` must point to a valid, initialized `X86IdleState`.
-    pub(super) fn cpp_x86_idle_state_mwait_hint(state: *const X86IdleState) -> u32;
+    /// The caller must ensure that the system is panicking or halting.
+    pub fn x86_force_halt_all_but_local_and_bsp();
 
-    /// Returns the number of times `state` has been entered.
-    ///
-    /// # Safety
-    ///
-    /// `state` must point to a valid, initialized `X86IdleState`.
-    pub(super) fn cpp_x86_idle_state_times_entered(state: *const X86IdleState) -> u64;
+    #[link_name = "bp_percpu"]
+    pub static BP_PERCPU: crate::arch_rs::x86::handoff::X86Percpu;
+}
 
-    /// Returns the cumulative duration spent in `state`.
-    ///
-    /// # Safety
-    ///
-    /// `state` must point to a valid, initialized `X86IdleState`.
-    pub(super) fn cpp_x86_idle_state_cumulative_duration(
-        state: *const X86IdleState,
-    ) -> zx_duration_t;
+#[cfg(console_enabled)]
+pub mod console {
+    use crate::arch_rs::arch_x86::idle_states::X86IdleStates;
 
-    /// Resets the entry and duration counters of `state`.
-    ///
-    /// # Safety
-    ///
-    /// `state` must point to a valid, initialized `X86IdleState`.
-    pub(super) fn cpp_x86_idle_state_reset_counters(state: *mut X86IdleState);
+    unsafe extern "C" {
+        #[link_name = "use_monitor"]
+        pub static mut USE_MONITOR: bool;
 
-    /// Returns a pointer to the `X86_MAX_CSTATES`-element `states_` array in `states`.
-    ///
-    /// # Safety
-    ///
-    /// `states` must point to a valid, initialized `X86IdleStates`.
-    pub(super) fn cpp_x86_idle_states_states(states: *mut X86IdleStates) -> *mut X86IdleState;
+        #[link_name = "x86_num_cpus"]
+        pub static mut X86_NUM_CPUS: u8;
 
-    /// Returns the number of populated states in `states`.
-    ///
-    /// # Safety
-    ///
-    /// `states` must point to a valid, initialized `X86IdleStates`.
-    pub(super) fn cpp_x86_idle_states_num_states(states: *const X86IdleStates) -> usize;
+        /// Returns a pointer to the BSP's idle states.
+        ///
+        /// # Safety
+        ///
+        /// The caller must ensure that `x86_allocate_ap_structures` has been called.
+        #[link_name = "cpp_x86_mp_bp_idle_states"]
+        pub fn x86_mp_bp_idle_states() -> *mut X86IdleStates;
 
-    /// Updates the mask of valid C-states in `states`.
-    ///
-    /// # Safety
-    ///
-    /// `states` must point to a valid, initialized `X86IdleStates`.
-    pub(super) fn cpp_x86_idle_states_set_state_mask(states: *mut X86IdleStates, mask: u32);
+        /// Returns a pointer to the AP's idle states for the given index.
+        ///
+        /// # Safety
+        ///
+        /// The caller must ensure that `idx < x86_num_cpus - 1` and `x86_allocate_ap_structures`
+        /// has run.
+        #[link_name = "cpp_x86_mp_ap_idle_states"]
+        pub fn x86_mp_ap_idle_states(idx: usize) -> *mut X86IdleStates;
+    }
 }

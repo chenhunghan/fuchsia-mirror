@@ -8,6 +8,7 @@ use lock_api as _;
 
 use lock_api::RawMutex;
 
+#[allow(clippy::disallowed_types)]
 pub use fuchsia_sync::{
     MappedMutexGuard, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
 };
@@ -64,6 +65,7 @@ pub trait MutexLike {
     }
 }
 
+#[allow(clippy::disallowed_types)]
 impl<T> MutexLike for Mutex<T> {
     type Guard<'a>
         = MutexGuard<'a, T>
@@ -106,6 +108,7 @@ pub trait RwLockLike {
     }
 }
 
+#[allow(clippy::disallowed_types)]
 impl<T> RwLockLike for RwLock<T> {
     type ReadGuard<'a>
         = RwLockReadGuard<'a, T>

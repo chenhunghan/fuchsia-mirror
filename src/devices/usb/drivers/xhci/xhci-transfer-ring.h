@@ -5,7 +5,6 @@
 #ifndef SRC_DEVICES_USB_DRIVERS_XHCI_XHCI_TRANSFER_RING_H_
 #define SRC_DEVICES_USB_DRIVERS_XHCI_XHCI_TRANSFER_RING_H_
 
-#include <fuchsia/hardware/usb/request/c/banjo.h>
 #include <lib/stdcompat/span.h>
 #include <lib/zx/result.h>
 
@@ -92,9 +91,7 @@ class TransferRing {
   void RestoreLocked(const State& state) __TA_REQUIRES(mutex_);
   zx_status_t Init(size_t page_size, const zx::bti& bti, EventRing* ring, bool is_32bit,
                    fdf::MmioBuffer* mmio, UsbXhci* hci);
-  // Assumption: This function must ONLY be called from the interrupt
-  // thread. Otherwise thread-safety assumptions are violated.
-  zx_status_t DeinitIfActive() __TA_NO_THREAD_SAFETY_ANALYSIS;
+  zx_status_t DeinitIfActive();
   zx_status_t Deinit();
   bool active() {
     fbl::AutoLock l(&mutex_);
@@ -125,6 +122,7 @@ class TransferRing {
                                   bool bsr);
 
  private:
+  zx_status_t DeinitLocked() __TA_REQUIRES(mutex_);
   bool AvailableSlots(size_t count) __TA_REQUIRES(mutex_);
   zx_status_t AllocInternal(Control control) __TA_REQUIRES(mutex_);
   fbl::DoublyLinkedList<std::unique_ptr<TRBContext>> pending_trbs_ __TA_GUARDED(mutex_);

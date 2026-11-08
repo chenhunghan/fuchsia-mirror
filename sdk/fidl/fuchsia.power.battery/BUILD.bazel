@@ -20,6 +20,7 @@ fidl_library(
         "//src/power:__subpackages__",
         "//src/starnix:__subpackages__",
         "//src/storage:__subpackages__",
+        "//src/ui/lib/debug_telemetry:__subpackages__",
         "//vendor/google:__subpackages__",
     ],
     deps = [

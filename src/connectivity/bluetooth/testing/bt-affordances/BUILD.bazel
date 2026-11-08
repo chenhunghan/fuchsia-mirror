@@ -2,9 +2,90 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_staticlib.bzl", "rustc_staticlib")
+
 package(default_applicable_licenses = ["//:license"])
 
 exports_files(
     ["meta/bt-affordances-server.core_shard.cml"],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+# `rustc_staticlib` does not have a `hdrs` attribute in Bazel; pass `public`
+# through to GN for C++ consumers; TODO(https://fxbug.dev/570694755).
+# @bazel2gn:raw_attribute:public = [ "ffi_c/bindings.h" ]
+rustc_staticlib(
+    name = "affordances-c",
+    srcs = ["src/lib.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    # Track C FFI header in Bazel target inputs while `public` is emitted via
+    # `@bazel2gn:raw_attribute` in GN.
+    # @bazel2gn:skip
+    compile_data = ["ffi_c/bindings.h"],
+    edition = "2024",
+    # `rustc_staticlib.gni` sets `-Zstaticlib-allow-rdylib-deps` on Fuchsia when
+    # `dynamic_libstd = true`, which is required to link transitive `rustc_dylib`
+    # dependencies like `//src/storage/lib/vfs/rust:vfs_dylib`;
+    # TODO(https://fxbug.dev/570694755).
+    # @bazel2gn:skip
+    rustc_flags = ["-Zstaticlib-allow-rdylib-deps"],
+    visibility = ["//src/connectivity/bluetooth/testing/pandora/bt-pandora-server:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.bluetooth:fuchsia.bluetooth_rust",
+        "//sdk/fidl/fuchsia.bluetooth.gatt2:fuchsia.bluetooth.gatt2_rust",
+        "//sdk/rust/zx",
+        "//src/connectivity/bluetooth/lib/fuchsia-bluetooth",
+        "//src/connectivity/bluetooth/testing/bt-affordances/affordances",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:bitfield",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    binary_name = "bt-affordances-server-bin",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.bluetooth.affordances:fuchsia.bluetooth.affordances_rust",
+        "//src/connectivity/bluetooth/testing/bt-affordances/affordances",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "bt-affordances-server-bin",
+)
+
+fx_component_manifest(
+    name = "bt-affordances-server-manifest",
+    component_name = "bt-affordances-server",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/bt-affordances-server.cml",
+)
+
+fx_component(
+    name = "bt-affordances-server-component",
+    compiled_manifest = ":bt-affordances-server-manifest",
+    deps = [":bin_packaged"],
 )

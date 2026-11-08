@@ -3,9 +3,8 @@
 // found in the LICENSE file.
 
 use anyhow::{Context, Result};
-use emulator_instance::{EmulatorInstances, EngineState};
+use emulator_instance::EngineState;
 use ffx_config::EnvironmentContext;
-use ffx_config::keys::EMU_INSTANCE_ROOT_DIR;
 use ffx_emulator_config::EmulatorEngine;
 use ffx_emulator_engines::EngineBuilder;
 use ffx_emulator_screenshot_args::ScreenshotCommand;
@@ -58,10 +57,7 @@ impl FfxMain for ScreenshotTool {
 
 impl ScreenshotTool {
     async fn get_engine(&self) -> FhoResult<Box<dyn EmulatorEngine>> {
-        let instance_dir: PathBuf =
-            self.context.get(EMU_INSTANCE_ROOT_DIR).map_err(|e| bug!("{e}"))?;
-        let emu_instances = EmulatorInstances::new(instance_dir);
-        let builder = EngineBuilder::new(&self.context, emu_instances);
+        let builder = EngineBuilder::from_env(&self.context)?;
 
         let mut name = self.cmd.name.clone();
         builder
@@ -132,7 +128,6 @@ mod tests {
         config: EmulatorConfiguration,
     }
 
-    #[async_trait::async_trait(?Send)]
     impl EmulatorEngine for StubEngine {
         fn engine_state(&self) -> EngineState {
             self.state

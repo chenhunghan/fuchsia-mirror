@@ -16,6 +16,7 @@ class Lan:
         start: The start offset for the DHCP pool.
         limit: The number of addresses in the DHCP pool.
         broadcast: Always broadcast DHCP responses (--dhcp-broadcast).
+        dhcp_options_force: Unconditional DHCP options (uci dhcp_option_force).
     """
 
     dynamic_dhcp: bool = True
@@ -23,6 +24,7 @@ class Lan:
     start: int | None = None
     limit: int | None = None
     broadcast: bool = False
+    dhcp_options_force: list[str] = dataclasses.field(default_factory=list)
 
 
 @dataclasses.dataclass

@@ -56,19 +56,11 @@ fn default_parameters() -> configuration::ServerParameters {
     }
 }
 
-/// dhcpd is the Fuchsia DHCPv4 server.
-#[derive(argh::FromArgs)]
-struct Args {
-    /// enables storage of dhcpd lease and configuration state to persistent storage
-    #[argh(switch)]
-    persistent: bool,
-}
-
 #[fuchsia::main()]
 pub async fn main() -> Result<(), Error> {
     info!("starting");
 
-    let Args { persistent } = argh::from_env();
+    let config::Config { persistent } = config::Config::take_from_startup_handle();
     info!("persistent={}", persistent);
     if persistent {
         let stash = Stash::new(DEFAULT_STASH_ID).context("failed to instantiate stash")?;

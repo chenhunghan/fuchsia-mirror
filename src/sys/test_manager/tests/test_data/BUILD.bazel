@@ -1,0 +1,825 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_binary(
+    name = "passing-test-example-bin",
+    testonly = True,
+    srcs = ["passing_test_example.cc"],
+    build_flags = ["//build/config/lto:no-fat-lto-objects-linking"],
+    gn_output_name = "passing-test-example",
+    tags = ["manual"],
+    deps = ["//src/lib/test-suite:test_suite_lib"],
+)
+
+fx_cc_binary(
+    name = "test-with-stderr-bin",
+    testonly = True,
+    srcs = ["test_with_stderr.cc"],
+    build_flags = ["//build/config/lto:no-fat-lto-objects-linking"],
+    gn_output_name = "test-with-stderr",
+    tags = ["manual"],
+    deps = ["//src/lib/test-suite:test_suite_lib"],
+)
+
+fx_cc_binary(
+    name = "no-onfinished-after-test-example-bin",
+    testonly = True,
+    srcs = ["no_onfinished_after_test_example.cc"],
+    build_flags = ["//build/config/lto:no-fat-lto-objects-linking"],
+    gn_output_name = "no-onfinished-after-test-example",
+    tags = ["manual"],
+    deps = ["//src/lib/test-suite:test_suite_lib"],
+)
+
+fx_cc_binary(
+    name = "disabled-test-example-bin",
+    testonly = True,
+    srcs = ["disabled_test_example.cc"],
+    build_flags = ["//build/config/lto:no-fat-lto-objects-linking"],
+    gn_output_name = "disabled-test-example",
+    tags = ["manual"],
+    deps = ["//src/lib/test-suite:test_suite_lib"],
+)
+
+fx_cc_binary(
+    name = "failing-test-example-bin",
+    testonly = True,
+    srcs = ["failing_test_example.cc"],
+    build_flags = ["//build/config/lto:no-fat-lto-objects-linking"],
+    gn_output_name = "failing-test-example",
+    tags = ["manual"],
+    deps = ["//src/lib/test-suite:test_suite_lib"],
+)
+
+fx_cc_binary(
+    name = "incomplete-test-example-bin",
+    testonly = True,
+    srcs = ["incomplete_test_example.cc"],
+    build_flags = ["//build/config/lto:no-fat-lto-objects-linking"],
+    gn_output_name = "incomplete-test-example",
+    tags = ["manual"],
+    deps = ["//src/lib/test-suite:test_suite_lib"],
+)
+
+fx_cc_binary(
+    name = "invalid-test-example-bin",
+    testonly = True,
+    srcs = ["invalid_test_example.cc"],
+    build_flags = ["//build/config/lto:no-fat-lto-objects-linking"],
+    gn_output_name = "invalid-test-example",
+    tags = ["manual"],
+    deps = ["//src/lib/test-suite:test_suite_lib"],
+)
+
+fx_cc_binary(
+    name = "no-test-example-bin",
+    testonly = True,
+    srcs = ["no_test_example.cc"],
+    build_flags = ["//build/config/lto:no-fat-lto-objects-linking"],
+    gn_output_name = "no-test-example",
+    tags = ["manual"],
+    deps = ["//src/lib/test-suite:test_suite_lib"],
+)
+
+fx_cc_binary(
+    name = "huge-test-example-bin",
+    testonly = True,
+    srcs = ["huge_test_example.cc"],
+    build_flags = ["//build/config/lto:no-fat-lto-objects-linking"],
+    gn_output_name = "huge-test-example",
+    tags = ["manual"],
+    deps = ["//src/lib/test-suite:test_suite_lib"],
+)
+
+fx_cc_binary(
+    name = "get-tests-hangs-example-bin",
+    testonly = True,
+    srcs = ["get_tests_hangs_example.cc"],
+    build_flags = ["//build/config/lto:no-fat-lto-objects-linking"],
+    gn_output_name = "get-tests-hangs-example",
+    tags = ["manual"],
+    deps = ["//src/lib/test-suite:test_suite_lib"],
+)
+
+fx_cc_binary(
+    name = "get-tests-closes-channel-example-bin",
+    testonly = True,
+    srcs = ["get_tests_closes_channel_example.cc"],
+    build_flags = ["//build/config/lto:no-fat-lto-objects-linking"],
+    gn_output_name = "get-tests-closes-channel-example",
+    tags = ["manual"],
+    deps = ["//src/lib/test-suite:test_suite_lib"],
+)
+
+fx_cc_binary(
+    name = "run-hangs-example-bin",
+    srcs = ["run_hangs_example.cc"],
+    gn_output_name = "run-hangs-example",
+    tags = ["manual"],
+    deps = ["//src/lib/test-suite:test_suite_lib"],
+)
+
+fx_cc_binary(
+    name = "run-closes-channel-example-bin",
+    srcs = ["run_closes_channel_example.cc"],
+    gn_output_name = "run-closes-channel-example",
+    tags = ["manual"],
+    deps = ["//src/lib/test-suite:test_suite_lib"],
+)
+
+fx_packaged_binary(
+    name = "disabled-test-example-bin_packaged_bin",
+    testonly = True,
+    binary = ":disabled-test-example-bin",
+    binary_name = "disabled-test-example",
+)
+
+fx_component_manifest(
+    name = "disabled-test-example-manifest",
+    testonly = True,
+    component_name = "disabled-test-example",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/disabled-test-example.cml",
+)
+
+fx_component(
+    name = "disabled-test-example",
+    testonly = True,
+    compiled_manifest = ":disabled-test-example-manifest",
+    deps = [":disabled-test-example-bin_packaged_bin"],
+)
+
+fx_packaged_binary(
+    name = "failing-test-example-bin_packaged_bin",
+    testonly = True,
+    binary = ":failing-test-example-bin",
+    binary_name = "failing-test-example",
+)
+
+fx_component_manifest(
+    name = "failing-test-example-manifest",
+    testonly = True,
+    component_name = "failing-test-example",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/failing-test-example.cml",
+)
+
+fx_component(
+    name = "failing-test-example",
+    testonly = True,
+    compiled_manifest = ":failing-test-example-manifest",
+    deps = [":failing-test-example-bin_packaged_bin"],
+)
+
+fx_packaged_binary(
+    name = "get-tests-closes-channel-example-bin_packaged_bin",
+    testonly = True,
+    binary = ":get-tests-closes-channel-example-bin",
+    binary_name = "get-tests-closes-channel-example",
+)
+
+fx_component_manifest(
+    name = "get-tests-closes-channel-example-manifest",
+    testonly = True,
+    component_name = "get-tests-closes-channel-example",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/get-tests-closes-channel-example.cml",
+)
+
+fx_component(
+    name = "get-tests-closes-channel-example",
+    testonly = True,
+    compiled_manifest = ":get-tests-closes-channel-example-manifest",
+    deps = [":get-tests-closes-channel-example-bin_packaged_bin"],
+)
+
+fx_packaged_binary(
+    name = "get-tests-hangs-example-bin_packaged_bin",
+    testonly = True,
+    binary = ":get-tests-hangs-example-bin",
+    binary_name = "get-tests-hangs-example",
+)
+
+fx_component_manifest(
+    name = "get-tests-hangs-example-manifest",
+    testonly = True,
+    component_name = "get-tests-hangs-example",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/get-tests-hangs-example.cml",
+)
+
+fx_component(
+    name = "get-tests-hangs-example",
+    testonly = True,
+    compiled_manifest = ":get-tests-hangs-example-manifest",
+    deps = [":get-tests-hangs-example-bin_packaged_bin"],
+)
+
+fx_packaged_binary(
+    name = "huge-test-example-bin_packaged_bin",
+    testonly = True,
+    binary = ":huge-test-example-bin",
+    binary_name = "huge-test-example",
+)
+
+fx_component_manifest(
+    name = "huge-test-example-manifest",
+    testonly = True,
+    component_name = "huge-test-example",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/huge-test-example.cml",
+)
+
+fx_component(
+    name = "huge-test-example",
+    testonly = True,
+    compiled_manifest = ":huge-test-example-manifest",
+    deps = [":huge-test-example-bin_packaged_bin"],
+)
+
+fx_packaged_binary(
+    name = "incomplete-test-example-bin_packaged_bin",
+    testonly = True,
+    binary = ":incomplete-test-example-bin",
+    binary_name = "incomplete-test-example",
+)
+
+fx_component_manifest(
+    name = "incomplete-test-example-manifest",
+    testonly = True,
+    component_name = "incomplete-test-example",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/incomplete-test-example.cml",
+)
+
+fx_component(
+    name = "incomplete-test-example",
+    testonly = True,
+    compiled_manifest = ":incomplete-test-example-manifest",
+    deps = [":incomplete-test-example-bin_packaged_bin"],
+)
+
+fx_packaged_binary(
+    name = "invalid-test-example-bin_packaged_bin",
+    testonly = True,
+    binary = ":invalid-test-example-bin",
+    binary_name = "invalid-test-example",
+)
+
+fx_component_manifest(
+    name = "invalid-test-example-manifest",
+    testonly = True,
+    component_name = "invalid-test-example",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/invalid-test-example.cml",
+)
+
+fx_component(
+    name = "invalid-test-example",
+    testonly = True,
+    compiled_manifest = ":invalid-test-example-manifest",
+    deps = [":invalid-test-example-bin_packaged_bin"],
+)
+
+fx_packaged_binary(
+    name = "no-onfinished-after-test-example-bin_packaged_bin",
+    testonly = True,
+    binary = ":no-onfinished-after-test-example-bin",
+    binary_name = "no-onfinished-after-test-example",
+)
+
+fx_component_manifest(
+    name = "no-onfinished-after-test-example-manifest",
+    testonly = True,
+    component_name = "no-onfinished-after-test-example",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/no-onfinished-after-test-example.cml",
+)
+
+fx_component(
+    name = "no-onfinished-after-test-example",
+    testonly = True,
+    compiled_manifest = ":no-onfinished-after-test-example-manifest",
+    deps = [":no-onfinished-after-test-example-bin_packaged_bin"],
+)
+
+fx_packaged_binary(
+    name = "no-test-example-bin_packaged_bin",
+    testonly = True,
+    binary = ":no-test-example-bin",
+    binary_name = "no-test-example",
+)
+
+fx_component_manifest(
+    name = "no-test-example-manifest",
+    testonly = True,
+    component_name = "no-test-example",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/no-test-example.cml",
+)
+
+fx_component(
+    name = "no-test-example",
+    testonly = True,
+    compiled_manifest = ":no-test-example-manifest",
+    deps = [":no-test-example-bin_packaged_bin"],
+)
+
+fx_packaged_binary(
+    name = "passing-test-example-bin_packaged_bin",
+    testonly = True,
+    binary = ":passing-test-example-bin",
+    binary_name = "passing-test-example",
+)
+
+fx_component_manifest(
+    name = "passing-test-example-manifest",
+    testonly = True,
+    component_name = "passing-test-example",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/passing-test-example.cml",
+)
+
+fx_component(
+    name = "passing-test-example",
+    testonly = True,
+    compiled_manifest = ":passing-test-example-manifest",
+    deps = [":passing-test-example-bin_packaged_bin"],
+)
+
+fx_packaged_binary(
+    name = "test-with-stderr-bin_packaged_bin",
+    testonly = True,
+    binary = ":test-with-stderr-bin",
+    binary_name = "test-with-stderr",
+)
+
+fx_component_manifest(
+    name = "test-with-stderr-manifest",
+    testonly = True,
+    component_name = "test-with-stderr",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/test-with-stderr.cml",
+)
+
+fx_component(
+    name = "test-with-stderr",
+    testonly = True,
+    compiled_manifest = ":test-with-stderr-manifest",
+    deps = [":test-with-stderr-bin_packaged_bin"],
+)
+
+fx_packaged_binary(
+    name = "run-closes-channel-example-bin_packaged_bin",
+    binary = ":run-closes-channel-example-bin",
+    binary_name = "run-closes-channel-example",
+)
+
+fx_component_manifest(
+    name = "run-closes-channel-example-manifest",
+    component_name = "run-closes-channel-example",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/run-closes-channel-example.cml",
+)
+
+fx_component(
+    name = "run-closes-channel-example",
+    compiled_manifest = ":run-closes-channel-example-manifest",
+    deps = [":run-closes-channel-example-bin_packaged_bin"],
+)
+
+fx_packaged_binary(
+    name = "run-hangs-example-bin_packaged_bin",
+    binary = ":run-hangs-example-bin",
+    binary_name = "run-hangs-example",
+)
+
+fx_component_manifest(
+    name = "run-hangs-example-manifest",
+    component_name = "run-hangs-example",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/run-hangs-example.cml",
+)
+
+fx_component(
+    name = "run-hangs-example",
+    compiled_manifest = ":run-hangs-example-manifest",
+    deps = [":run-hangs-example-bin_packaged_bin"],
+)
+
+rustc_binary(
+    name = "echo_test_client_bin",
+    srcs = ["echo_test_client.rs"],
+    crate_name = "echo_test_client",
+    crate_root = "echo_test_client.rs",
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        "//examples/components/routing/fidl:echo_rust",
+        "//sdk/fidl/fuchsia.test:fuchsia.test_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "echo_test_client_bin_packaged_bin",
+    binary = ":echo_test_client_bin",
+    binary_name = "echo_test_client",
+)
+
+fx_component_manifest(
+    name = "echo_test_client-manifest",
+    component_name = "echo_test_client",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/echo_test_client.cml",
+)
+
+fx_component(
+    name = "echo_test_client",
+    compiled_manifest = ":echo_test_client-manifest",
+    visibility = [
+        "//src/sys/run_test_suite/tests:__pkg__",
+        "//src/sys/test_manager/tests:__pkg__",
+    ],
+    deps = [":echo_test_client_bin_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "echo_test_realm-manifest",
+    component_name = "echo_test_realm",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:offer.shard",
+    ],
+    manifest = "meta/echo_test_realm.cml",
+)
+
+fx_component(
+    name = "echo_test_realm",
+    compiled_manifest = ":echo_test_realm-manifest",
+    visibility = ["//src/sys/test_manager/tests:__pkg__"],
+)
+
+rustc_binary(
+    name = "no_suite_service_bin",
+    testonly = True,
+    srcs = ["no_suite_service.rs"],
+    crate_name = "no_suite_service",
+    crate_root = "no_suite_service.rs",
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "no_suite_service_bin_packaged_bin",
+    testonly = True,
+    binary = ":no_suite_service_bin",
+    binary_name = "no_suite_service",
+)
+
+fx_component_manifest(
+    name = "no_suite_service-manifest",
+    testonly = True,
+    component_name = "no_suite_service",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/no_suite_service.cml",
+)
+
+fx_component(
+    name = "no_suite_service",
+    testonly = True,
+    compiled_manifest = ":no_suite_service-manifest",
+    deps = [":no_suite_service_bin_packaged_bin"],
+)
+
+rustc_test(
+    name = "hanging_test_bin",
+    srcs = ["hanging_test.rs"],
+    crate_name = "hanging_test",
+    crate_root = "hanging_test.rs",
+    edition = "2024",
+)
+
+fx_packaged_binary(
+    name = "hanging_test_bin_packaged_bin",
+    testonly = True,
+    binary = ":hanging_test_bin",
+    binary_name = "hanging_test",
+)
+
+fx_component_manifest(
+    name = "hanging_test-manifest",
+    testonly = True,
+    component_name = "hanging_test",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/hanging_test.cml",
+)
+
+fx_component(
+    name = "hanging_test",
+    testonly = True,
+    compiled_manifest = ":hanging_test-manifest",
+    deps = [":hanging_test_bin_packaged_bin"],
+)
+
+rustc_test(
+    name = "noop_test_bin",
+    srcs = ["noop_test.rs"],
+    crate_name = "noop_test",
+    crate_root = "noop_test.rs",
+    edition = "2024",
+)
+
+fx_packaged_binary(
+    name = "noop_test_bin_packaged_bin",
+    testonly = True,
+    binary = ":noop_test_bin",
+    binary_name = "noop_test",
+    tags = ["manual"],
+)
+
+# `meta/check_build_info_chromium_realm_test.cml` does not exist on disk and the
+# GN target is unreferenced; tagged `manual` to preserve GN parity until deleted.
+fx_component_manifest(
+    name = "check_build_info_chromium_realm_test-manifest",
+    testonly = True,
+    component_name = "check_build_info_chromium_realm_test",
+    manifest = "meta/check_build_info_chromium_realm_test.cml",
+    tags = ["manual"],
+)
+
+fx_component(
+    name = "check_build_info_chromium_realm_test",
+    testonly = True,
+    compiled_manifest = ":check_build_info_chromium_realm_test-manifest",
+    tags = ["manual"],
+    deps = [":noop_test_bin_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "custom_artifact_realm_test-manifest",
+    testonly = True,
+    component_name = "custom_artifact_realm_test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:offer.shard",
+    ],
+    manifest = "meta/custom_artifact_realm_test.cml",
+)
+
+fx_component(
+    name = "custom_artifact_realm_test",
+    testonly = True,
+    compiled_manifest = ":custom_artifact_realm_test-manifest",
+    visibility = ["//src/sys/test_manager/tests:__pkg__"],
+)
+
+rustc_test(
+    name = "debug_data_test_bin",
+    srcs = ["debug_data_test.rs"],
+    crate_name = "debug_data_test",
+    crate_root = "debug_data_test.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.debugdata:fuchsia.debugdata_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+    ],
+)
+
+fx_packaged_binary(
+    name = "debug_data_test_bin_packaged_bin",
+    testonly = True,
+    binary = ":debug_data_test_bin",
+    binary_name = "debug_data_test",
+)
+
+fx_component_manifest(
+    name = "debug_data_test-manifest",
+    testonly = True,
+    component_name = "debug_data_test",
+    includes = [
+        "//sdk/lib/sys/testing:coverage.shard.cml",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/debug_data_test.cml",
+)
+
+fx_test_component(
+    name = "debug_data_test",
+    compiled_manifest = ":debug_data_test-manifest",
+    deps = [":debug_data_test_bin_packaged_bin"],
+)
+
+fx_package(
+    name = "debug-data-test",
+    package_name = "debug-data-test",
+    test_components = [":debug_data_test"],
+)
+
+fx_test(
+    name = "debug-data-test_test",
+    package = ":debug-data-test",
+    # TODO: https://fxbug.dev/42068707: Ensure that this test does not run
+    # when profile variant is selected. It adds a use for
+    # fuchsia.debugdata.Publisher capability via debug for coverage variant,
+    # and profile variant adds a use for this capability via diagnostics
+    # dictionary, which results in duplicate use target protocol error.
+    # This mirrors the GN `!is_profile` guards, which keep gating the GN copy.
+    # @bazel2gn:skip
+    target_compatible_with = select({
+        "//build/bazel/config/select/is_profile:true": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
+    visibility = ["//src/sys:__pkg__"],
+)
+
+rustc_test(
+    name = "debug_data_write_test_bin",
+    srcs = ["debug_data_write_test.rs"],
+    crate_name = "debug_data_write_test",
+    crate_root = "debug_data_write_test.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.debugdata:fuchsia.debugdata_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+    ],
+)
+
+fx_packaged_binary(
+    name = "debug_data_write_test_bin_packaged_bin",
+    testonly = True,
+    binary = ":debug_data_write_test_bin",
+    binary_name = "debug_data_write_test",
+)
+
+fx_component_manifest(
+    name = "debug_data_write_test-manifest",
+    testonly = True,
+    component_name = "debug_data_write_test",
+    includes = [
+        "//sdk/lib/sys/testing:coverage.shard.cml",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/debug_data_write_test.cml",
+)
+
+fx_component(
+    name = "debug_data_write_test",
+    testonly = True,
+    compiled_manifest = ":debug_data_write_test-manifest",
+    visibility = ["//src/sys/test_manager/tests:__pkg__"],
+    deps = [":debug_data_write_test_bin_packaged_bin"],
+)
+
+rustc_test(
+    name = "debug_data_spam_test_bin",
+    srcs = ["debug_data_spam_test.rs"],
+    crate_name = "debug_data_spam_test",
+    crate_root = "debug_data_spam_test.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.debugdata:fuchsia.debugdata_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+    ],
+)
+
+fx_packaged_binary(
+    name = "debug_data_spam_test_bin_packaged_bin",
+    testonly = True,
+    binary = ":debug_data_spam_test_bin",
+    binary_name = "debug_data_spam_test",
+)
+
+fx_component_manifest(
+    name = "debug_data_spam_test-manifest",
+    testonly = True,
+    component_name = "debug_data_spam_test",
+    includes = [
+        "//sdk/lib/sys/testing:coverage.shard.cml",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/debug_data_spam_test.cml",
+)
+
+fx_component(
+    name = "debug_data_spam_test",
+    testonly = True,
+    compiled_manifest = ":debug_data_spam_test-manifest",
+    visibility = ["//src/sys/test_manager/tests:__pkg__"],
+    deps = [":debug_data_spam_test_bin_packaged_bin"],
+)
+
+rustc_test(
+    name = "nonhermetic_capability_test_bin",
+    srcs = ["nonhermetic_capability_test.rs"],
+    crate_name = "nonhermetic_capability_test",
+    crate_root = "nonhermetic_capability_test.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.hwinfo:fuchsia.hwinfo_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+    ],
+)
+
+fx_packaged_binary(
+    name = "nonhermetic_capability_test_bin_packaged_bin",
+    testonly = True,
+    binary = ":nonhermetic_capability_test_bin",
+    binary_name = "nonhermetic_capability_test",
+)
+
+fx_component_manifest(
+    name = "nonhermetic_capability_test-manifest",
+    testonly = True,
+    component_name = "nonhermetic_capability_test",
+    includes = [
+        "//sdk/lib/sys/testing:coverage.shard.cml",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/nonhermetic_capability_test.cml",
+)
+
+fx_component(
+    name = "nonhermetic_capability_test",
+    testonly = True,
+    compiled_manifest = ":nonhermetic_capability_test-manifest",
+    deps = [":nonhermetic_capability_test_bin_packaged_bin"],
+)
+
+rustc_test(
+    name = "data_storage_test_bin",
+    srcs = ["data_storage_test.rs"],
+    crate_name = "data_storage_test",
+    crate_root = "data_storage_test.rs",
+    edition = "2024",
+    deps = ["//src/lib/fuchsia"],
+)
+
+fx_packaged_binary(
+    name = "data_storage_test_bin_packaged_bin",
+    testonly = True,
+    binary = ":data_storage_test_bin",
+    binary_name = "data_storage_test",
+)
+
+fx_component_manifest(
+    name = "data_storage_test-manifest",
+    testonly = True,
+    component_name = "data_storage_test",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/data_storage_test.cml",
+)
+
+fx_component(
+    name = "data_storage_test",
+    testonly = True,
+    compiled_manifest = ":data_storage_test-manifest",
+    deps = [":data_storage_test_bin_packaged_bin"],
+)

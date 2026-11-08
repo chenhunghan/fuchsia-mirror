@@ -25,10 +25,17 @@ closed protocol CommitStatusProvider {
     ///     EventPair is returned.
     /// * If the commit is pending, no signals are asserted on the EventPair. When the
     ///     system is committed, `ZX_USER_SIGNAL_0` is asserted on the EventPair.
+    /// * If the currently booted system was committed during this boot (as opposed to
+    ///     already being committed when booted), `ZX_USER_SIGNAL_1` is also asserted
+    ///     when `ZX_USER_SIGNAL_0` is asserted.
     /// * If the system fails to commit the currently booted version, the system
     ///     will reboot and terminate the component serving [`CommitStatusProvider`],
     ///     which will assert `ZX_EVENTPAIR_PEER_CLOSED`. At this point, any remaining
     ///     EventPairs will observe the `ZX_EVENTPAIR_PEER_CLOSED` signal.
+    ///
+    /// Additional `ZX_USER_SIGNAL_*` signals may be added in the future; clients must
+    /// filter the observed `zx.Signals` bitmask for the desired signals rather than
+    /// testing for equality.
     ///
     /// - response `event` an EventPair with rights `ZX_RIGHTS_BASIC`.
     strict IsCurrentSystemCommitted() -> (resource struct {

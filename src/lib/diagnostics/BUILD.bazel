@@ -21,6 +21,10 @@ test_suite(
     name = "target_tests",
     target_compatible_with = ["@platforms//os:fuchsia"],
     tests = [
+        "//src/lib/diagnostics/inspect/contrib/rust:fuchsia-inspect-contrib-tests",
         "//src/lib/diagnostics/inspect/derive/tests:fuchsia-inspect-derive-tests",
+        "//src/lib/diagnostics/inspect/rust/bench/snapshot_filter:rust-inspect-benchmarks-test",
+        "//src/lib/diagnostics/inspect/rust/bench/utils:inspect-bench-utils-unittests",
+        "//src/lib/diagnostics/selectors-ext:selectors-ext-test",
     ],
 )

@@ -5,6 +5,19 @@
 use diagnostics_hierarchy::DiagnosticsHierarchy;
 use diagnostics_reader::ArchiveReader;
 use fidl::endpoints::{ServerEnd, create_endpoints, create_proxy};
+use fidl_fuchsia_component as fcomponent;
+use fidl_fuchsia_component_decl as fdecl;
+use fidl_fuchsia_hardware_power_suspend as fhsuspend;
+use fidl_fuchsia_io as fio;
+use fidl_fuchsia_power_broker as fbroker;
+use fidl_fuchsia_power_suspend as fsuspend;
+use fidl_fuchsia_power_system as fsystem;
+use fidl_fuchsia_session as fsession;
+use fidl_fuchsia_session_power as fpower;
+use fidl_fuchsia_sys2 as fsys2;
+use fidl_test_suspendcontrol as tsc;
+use fidl_test_systemactivitygovernor as ftest;
+use fuchsia_async as fasync;
 use fuchsia_component::client::connect_to_protocol;
 use fuchsia_component::server::ServiceFs;
 use fuchsia_component_test::{
@@ -16,15 +29,6 @@ use realm_proxy_client::RealmProxyClient;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tsc::DeviceProxy;
-use {
-    fidl_fuchsia_component as fcomponent, fidl_fuchsia_component_decl as fdecl,
-    fidl_fuchsia_hardware_power_suspend as fhsuspend, fidl_fuchsia_io as fio,
-    fidl_fuchsia_power_broker as fbroker, fidl_fuchsia_power_suspend as fsuspend,
-    fidl_fuchsia_power_system as fsystem, fidl_fuchsia_session as fsession,
-    fidl_fuchsia_session_power as fpower, fidl_fuchsia_sys2 as fsys2,
-    fidl_test_suspendcontrol as tsc, fidl_test_systemactivitygovernor as ftest,
-    fuchsia_async as fasync,
-};
 
 const SESSION_URL: &'static str = "hello-world-session#meta/hello-world-session.cm";
 
@@ -360,6 +364,7 @@ async fn take_power_lease_and_suspend() -> anyhow::Result<()> {
 
     // Take the power lease.
     let lease = test.handoff.take().await.unwrap().unwrap();
+    assert_eq!(lease.basic_info()?.object_type, zx::ObjectType::EVENTPAIR);
 
     // Taking again should error.
     assert_eq!(test.handoff.take().await.unwrap().unwrap_err(), fpower::HandoffError::AlreadyTaken);
@@ -410,6 +415,7 @@ async fn take_power_lease_and_restart() -> anyhow::Result<()> {
 
     // Take the power lease.
     let lease = test.handoff.take().await.unwrap().unwrap();
+    assert_eq!(lease.basic_info()?.object_type, zx::ObjectType::EVENTPAIR);
 
     // Restart the session.
     let restarter: fsession::RestarterProxy =

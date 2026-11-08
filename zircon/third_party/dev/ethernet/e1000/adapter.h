@@ -93,8 +93,6 @@ struct adapter {
   std::optional<fdf::MmioBuffer> bar0_mmio;
   std::optional<fdf::MmioBuffer> flash_mmio;
 
-  fuchsia_hardware_pci::InterruptMode irq_mode;
-
   // Indicate a size for the arena so that we avoid re-allocation as much as possible. Don't use
   // this arena for anything other than these RX buffers.
   static constexpr size_t kRxArenaSize = fidl::MaxSizeInChannel<

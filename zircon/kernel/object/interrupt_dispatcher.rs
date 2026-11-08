@@ -4,6 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+use crate::ksync_kernel::{TrackedCriticalMutex, TrackedSpinlock};
 use affine::Round;
 use core::cell::UnsafeCell;
 use core::convert::Infallible;
@@ -11,7 +12,7 @@ use core::mem::MaybeUninit;
 use core::pin::Pin;
 use core::ptr::NonNull;
 use fbl::{Canary, RefPtr};
-use ksync::{KMutex, RawCriticalMutex, RawSpinlock, guarded, lock};
+use ksync::{KMutex, guarded, lock};
 use object_constants_rs as object_constants;
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
@@ -58,14 +59,7 @@ const DEFAULT_RIGHTS: zx_rights_t = ZX_DEFAULT_INTERRUPT_RIGHTS;
 /// The interrupt is virtual.
 pub const INTERRUPT_VIRTUAL: u32 = 1 << 0;
 /// The interrupt should be unmasked before waiting on the event.
-///
-/// Mutually exclusive with [`INTERRUPT_UNMASK_PREWAIT_UNLOCKED`].
 pub const INTERRUPT_UNMASK_PREWAIT: u32 = 1 << 1;
-/// The same as [`INTERRUPT_UNMASK_PREWAIT`] except release the dispatcher
-/// spinlock before waiting.
-///
-/// Mutually exclusive with [`INTERRUPT_UNMASK_PREWAIT`].
-const INTERRUPT_UNMASK_PREWAIT_UNLOCKED: u32 = 1 << 2;
 /// The interrupt should be masked following waiting.
 pub const INTERRUPT_MASK_POSTWAIT: u32 = 1 << 4;
 /// The interrupt may wake the system from suspend.
@@ -147,7 +141,7 @@ impl WakeEventGuard {
     #[inline]
     fn trigger(&mut self, disp: &InterruptDispatcher, timestamp: zx_instant_boot_t) {
         // SAFETY: `self` is `#[guarded_by(spinlock)]` in `InterruptDispatcherState`, so holding
-        // `&mut self` proves the caller holds `spinlock` (`RawSpinlock` with `IrqSavePolicy`),
+        // `&mut self` proves the caller holds `spinlock` (`TrackedSpinlock` with `IrqSavePolicy`),
         // satisfying `TA_GUARDED(spinlock_)` for `wake_event_.Trigger(...)`.
         unsafe {
             cpp_interrupt_dispatcher_wake_event_trigger(disp, timestamp);
@@ -158,7 +152,7 @@ impl WakeEventGuard {
     fn acknowledge(&mut self, disp: &InterruptDispatcher, behavior: AckBehavior) {
         let remain_signaled = matches!(behavior, AckBehavior::RemainSignaled);
         // SAFETY: `self` is `#[guarded_by(spinlock)]` in `InterruptDispatcherState`, so holding
-        // `&mut self` proves the caller holds `spinlock` (`RawSpinlock` with `IrqSavePolicy`),
+        // `&mut self` proves the caller holds `spinlock` (`TrackedSpinlock` with `IrqSavePolicy`),
         // satisfying `TA_GUARDED(spinlock_)` for `wake_event_.Acknowledge(...)`.
         unsafe {
             cpp_interrupt_dispatcher_wake_event_acknowledge(disp, remain_signaled);
@@ -254,11 +248,11 @@ pub struct InterruptDispatcherState {
     port_dispatcher: Option<RefPtr<PortDispatcher>>,
 
     #[mutex]
-    lock: KMutex<RawCriticalMutex>,
+    lock: KMutex<TrackedCriticalMutex>,
 
     // Controls the access to Interrupt properties
     #[mutex]
-    spinlock: KMutex<RawSpinlock>,
+    spinlock: KMutex<TrackedSpinlock>,
 }
 
 #[pinned_drop]
@@ -287,12 +281,6 @@ impl InterruptDispatcherState {
         flags: u32,
         options: u32,
     ) -> impl PinInit<Self, Infallible> {
-        // It is an error to specify both INTERRUPT_UNMASK_PREWAIT and
-        // INTERRUPT_UNMASK_PREWAIT_UNLOCKED.
-        debug_assert!(
-            (flags & INTERRUPT_UNMASK_PREWAIT) == 0
-                || (flags & INTERRUPT_UNMASK_PREWAIT_UNLOCKED) == 0
-        );
         pin_init!(Self {
             canary: Canary::new(),
             flags,
@@ -591,7 +579,6 @@ impl InterruptDispatcher {
     /// Performs the first phase of waiting for an interrupt.
     pub fn begin_wait_for_interrupt(&self) -> Option<Result<zx_time_t, Status>> {
         let state = self.state();
-        let mut defer_unmask = false;
 
         {
             // Disable preemption to ensure we don't trigger a reschedule while holding this
@@ -645,8 +632,6 @@ impl InterruptDispatcher {
 
                     if (state.flags & INTERRUPT_UNMASK_PREWAIT) != 0 {
                         state.kind().unmask_interrupt();
-                    } else if (state.flags & INTERRUPT_UNMASK_PREWAIT_UNLOCKED) != 0 {
-                        defer_unmask = true;
                     }
                 }
                 InterruptState::Idle => {}
@@ -655,10 +640,6 @@ impl InterruptDispatcher {
                 }
             }
             *fields.state = InterruptState::Waiting;
-        }
-
-        if defer_unmask {
-            state.kind().unmask_interrupt();
         }
 
         None
@@ -797,16 +778,6 @@ impl InterruptDispatcher {
             return Err(Status::ALREADY_BOUND);
         }
 
-        // If an interrupt is bound to a port there is a conflict between UNMASK_PREWAIT_UNLOCKED
-        // and MASK_POSTWAIT because the mask operation will by necessity happen before leaving the
-        // dispatcher spinlock, leading to a mask operation immediately followed by the deferred
-        // unmask operation.
-        if (state.flags & INTERRUPT_UNMASK_PREWAIT_UNLOCKED) != 0
-            && (state.flags & INTERRUPT_MASK_POSTWAIT) != 0
-        {
-            return Err(Status::INVALID_ARGS);
-        }
-
         *fields.port_dispatcher = Some(port_dispatcher);
         // SAFETY: `state.lock_spinlock()` is held and `port_packet` is not queued in any port
         // because `fields.port_dispatcher` was `None`.
@@ -892,7 +863,6 @@ impl InterruptDispatcher {
     pub fn ack_internal(&self) -> Result<PostAckState, Status> {
         let state = self.state();
         let mut post_ack_state = PostAckState::FullyAcked;
-        let mut defer_unmask = false;
         // Use preempt disable to reduce the likelihood of the woken thread running
         // while the spinlock is still held.
         let _preempt_disable = AutoPreemptDisabler::new();
@@ -912,8 +882,6 @@ impl InterruptDispatcher {
             if *fields.state == InterruptState::NeedAck {
                 if (state.flags & INTERRUPT_UNMASK_PREWAIT) != 0 {
                     state.kind().unmask_interrupt();
-                } else if (state.flags & INTERRUPT_UNMASK_PREWAIT_UNLOCKED) != 0 {
-                    defer_unmask = true;
                 }
 
                 if *fields.timestamp != 0 {
@@ -947,9 +915,6 @@ impl InterruptDispatcher {
             }
         }
 
-        if defer_unmask {
-            state.kind().unmask_interrupt();
-        }
         Ok(post_ack_state)
     }
 

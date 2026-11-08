@@ -1,0 +1,40 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["coding_tables_tests.cc"],
+    visibility = ["//src/lib/fidl/c:__pkg__"],
+    deps = [
+        ":fidl.test.example.codingtables_hlcpp",
+        "//sdk/lib/fdio",
+        "//sdk/lib/fidl",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/zx",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fidl_library(
+    name = "fidl.test.example.codingtablesdeps",
+    testonly = True,
+    srcs = ["coding_tables_deps.test.fidl"],
+    enable_hlcpp = True,
+    visibility = ["//visibility:private"],
+)
+
+fidl_library(
+    name = "fidl.test.example.codingtables",
+    testonly = True,
+    srcs = ["coding_tables.test.fidl"],
+    enable_hlcpp = True,
+    visibility = ["//visibility:private"],
+    deps = [":fidl.test.example.codingtablesdeps"],
+)

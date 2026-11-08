@@ -12,7 +12,6 @@
 #include <lib/fidl/cpp/clone.h>
 #include <lib/fit/defer.h>
 #include <lib/fit/function.h>
-#include <lib/media/codec_impl/fourcc.h>
 #include <lib/media/test/codec_client.h>
 #include <lib/media/test/one_shot_event.h>
 #include <lib/stdcompat/span.h>
@@ -77,6 +76,10 @@ constexpr uint32_t kInputMinBufferSizeVp9 = kInputLargeFrameSizeVp9;
 constexpr uint32_t kInputMinBufferSize = std::max(kInputMinBufferSizeH264, kInputMinBufferSizeVp9);
 
 constexpr uint32_t kFfmpegOutputFramePaddingBytes = 16;
+
+// Intel Legacy Y-tiled format has 128x32 byte tiles.
+constexpr uint32_t kTileWidthAlignment = 128;
+constexpr uint32_t kTileHeightAlignment = 32;
 
 // If readable_bytes is 0, that's considered a "start code", to allow the caller
 // to terminate a NAL the same way regardless of whether another start code is
@@ -220,102 +223,96 @@ bool IsSliceNalUnitType(uint8_t nal_unit_type) {
   return false;
 }
 
-// Ensures that the format does not exceed the packet allow bytes. It also ensures that the planes
-// do not overlap
-void CheckFormatIntegrity(const fuchsia::media::VideoUncompressedFormat& raw,
+fuchsia::math::SizeU GetDisplayDimensions(const fuchsia::images2::ImageFormat& image_format) {
+  ZX_ASSERT(image_format.has_size());
+  if (image_format.has_display_rect()) {
+    return {.width = image_format.display_rect().width,
+            .height = image_format.display_rect().height};
+  }
+  if (image_format.has_valid_size()) {
+    return image_format.valid_size();
+  }
+  return image_format.size();
+}
+
+// Exits unless `image_format` sets `pixel_format`, `size`, and `bytes_per_row`, any `display_rect`
+// starts at the origin, the display dimensions are non-zero and fit in `size`, and `packet` holds
+// all planes implied by `size` and `bytes_per_row`. Plane overlap cannot occur because plane
+// offsets are derived from `size` and `bytes_per_row`.
+void CheckFormatIntegrity(const fuchsia::images2::ImageFormat& image_format,
                           const fuchsia::media::Packet& packet) {
-  switch (raw.fourcc) {
-    case make_fourcc('N', 'V', '1', '2'): {
-      size_t y_size = raw.primary_height_pixels * raw.primary_line_stride_bytes;
-      if (raw.secondary_start_offset < y_size) {
-        Exit("raw.secondary_start_offset < y_size");
+  if (!image_format.has_pixel_format() || !image_format.has_size() ||
+      !image_format.has_bytes_per_row()) {
+    Exit("image_format missing pixel_format, size, or bytes_per_row");
+  }
+  size_t coded_width = image_format.size().width;
+  size_t coded_height = image_format.size().height;
+  size_t bytes_per_row = image_format.bytes_per_row();
+  if (coded_width == 0 || coded_height == 0 || coded_width > bytes_per_row) {
+    Exit("invalid coded size or bytes_per_row");
+  }
+  if (image_format.has_display_rect() &&
+      (image_format.display_rect().x != 0 || image_format.display_rect().y != 0)) {
+    Exit("display_rect x/y != 0");
+  }
+  if (image_format.has_valid_size() && (image_format.valid_size().width > coded_width ||
+                                        image_format.valid_size().height > coded_height)) {
+    Exit("valid_size exceeds size");
+  }
+  fuchsia::math::SizeU display_size = GetDisplayDimensions(image_format);
+  size_t display_width = display_size.width;
+  size_t display_height = display_size.height;
+  if (display_width == 0 || display_height == 0 || display_width > coded_width ||
+      display_height > coded_height) {
+    Exit("invalid display dimensions");
+  }
+  switch (image_format.pixel_format()) {
+    case fuchsia::images2::PixelFormat::NV12: {
+      bool is_y_tiled = image_format.has_pixel_format_modifier() &&
+                        image_format.pixel_format_modifier() ==
+                            fuchsia::images2::PixelFormatModifier::INTEL_I915_Y_TILED;
+      if (is_y_tiled && bytes_per_row % kTileWidthAlignment != 0) {
+        Exit("Y-tiled NV12 bytes_per_row not aligned to kTileWidthAlignment");
       }
-      // NV12 requires UV be same line stride as Y.
-      size_t total_size = raw.secondary_start_offset +
-                          raw.primary_height_pixels / 2 * raw.primary_line_stride_bytes;
+      size_t primary_height =
+          is_y_tiled ? fbl::round_up(coded_height, static_cast<size_t>(kTileHeightAlignment))
+                     : coded_height;
+      size_t uv_plane_height =
+          is_y_tiled ? fbl::round_up(coded_height / 2, static_cast<size_t>(kTileHeightAlignment))
+                     : (coded_height / 2);
+      size_t y_size = primary_height * bytes_per_row;
+      // NV12 requires UV be same line stride as Y; ensure odd display_width/height chroma samples
+      // fit within the allocated UV plane.
+      if (((display_width + 1) / 2) * 2 > bytes_per_row ||
+          (display_height + 1) / 2 > coded_height / 2) {
+        Exit("NV12 chroma dimensions exceed coded plane dimensions");
+      }
+      size_t total_size = y_size + uv_plane_height * bytes_per_row;
       if (packet.valid_length_bytes() < total_size) {
         Exit(
             "packet.valid_length_bytes < total_size (1) - valid_length_bytes: %u total_size: "
-            "%lu",
+            "%zu",
             packet.valid_length_bytes(), total_size);
       }
       break;
     }
-    case make_fourcc('Y', 'V', '1', '2'): {
-      size_t y_size = raw.primary_height_pixels * raw.primary_line_stride_bytes;
-      size_t v_size = raw.secondary_height_pixels * raw.secondary_line_stride_bytes;
+    case fuchsia::images2::PixelFormat::YV12: {
+      if ((display_width + 1) / 2 > bytes_per_row / 2 ||
+          (display_height + 1) / 2 > coded_height / 2) {
+        Exit("YV12 chroma dimensions exceed coded plane dimensions");
+      }
+      size_t y_size = coded_height * bytes_per_row;
+      size_t v_size = (coded_height / 2) * (bytes_per_row / 2);
       size_t u_size = v_size;
       size_t total_size = y_size + u_size + v_size;
 
       if (packet.valid_length_bytes() < total_size) {
         Exit("packet.valid_length_bytes < total_size (2)");
       }
-
-      if (raw.secondary_start_offset < y_size) {
-        Exit("raw.secondary_start_offset < y_size");
-      }
-
-      if (raw.tertiary_start_offset < y_size + v_size) {
-        Exit("raw.tertiary_start_offset < y_size + v_size");
-      }
       break;
     }
     default:
-      Exit("fourcc != NV12 && fourcc != YV12");
-  }
-}
-
-// Check to make sure that fields in the VideoUncompressedFormat matches the ImageFormat
-void CheckMismatchedFormats(const fuchsia::media::VideoUncompressedFormat& uncompressed,
-                            const fuchsia::sysmem::ImageFormat_2& image_format) {
-  switch (uncompressed.fourcc) {
-    case make_fourcc('N', 'V', '1', '2'): {
-      if (image_format.pixel_format.type != fuchsia::sysmem::PixelFormatType::NV12) {
-        Exit("Mismatched pixel format types between uncompressed and image format");
-      }
-
-      if ((uncompressed.primary_width_pixels != image_format.coded_width) ||
-          (uncompressed.secondary_width_pixels != image_format.coded_width / 2) ||
-          (uncompressed.primary_display_width_pixels != image_format.display_width)) {
-        Exit("Mismatched width between uncompressed and image format");
-      }
-
-      if ((uncompressed.primary_height_pixels != image_format.coded_height) ||
-          (uncompressed.secondary_height_pixels != image_format.coded_height / 2) ||
-          (uncompressed.primary_display_height_pixels != image_format.display_height)) {
-        Exit("Mismatched height between uncompressed and image format");
-      }
-
-      if ((uncompressed.primary_line_stride_bytes != image_format.bytes_per_row) ||
-          (uncompressed.secondary_line_stride_bytes != image_format.bytes_per_row)) {
-        Exit("Mismatched stride between uncompressed and image format");
-      }
-      break;
-    }
-    case make_fourcc('Y', 'V', '1', '2'): {
-      if (image_format.pixel_format.type != fuchsia::sysmem::PixelFormatType::YV12) {
-        Exit("Mismatched pixel format types between uncompressed and image format");
-      }
-
-      if ((uncompressed.primary_width_pixels != image_format.coded_width) ||
-          (uncompressed.secondary_width_pixels != image_format.coded_width / 2) ||
-          (uncompressed.primary_display_width_pixels != image_format.display_width)) {
-        Exit("Mismatched width between uncompressed and image format");
-      }
-      if ((uncompressed.primary_height_pixels != image_format.coded_height) ||
-          (uncompressed.secondary_height_pixels != image_format.coded_height / 2) ||
-          (uncompressed.primary_display_height_pixels != image_format.display_height)) {
-        Exit("Mismatched height between uncompressed and image format");
-      }
-
-      if ((uncompressed.primary_line_stride_bytes != image_format.bytes_per_row) ||
-          (uncompressed.secondary_line_stride_bytes != image_format.bytes_per_row / 2)) {
-        Exit("Mismatched stride between uncompressed and image format");
-      }
-      break;
-    }
-    default:
-      Exit("Unsupported pixel format");
+      Exit("pixel_format != NV12 && pixel_format != YV12");
   }
 }
 
@@ -1068,9 +1065,11 @@ void VideoDecoderRunner::Run() {
     // contrast we assert if the server sends multiple format updates with no
     // packets in between since that's not compliant with the protocol rules.
     std::shared_ptr<const fuchsia::media::StreamOutputFormat> prev_stream_format;
-    const fuchsia::media::VideoUncompressedFormat* raw = nullptr;
+    const fuchsia::images2::ImageFormat* raw_image_format = nullptr;
     std::optional<zx::time> frame_zero_time;
     uint64_t frame_index = 0;
+    std::unique_ptr<uint8_t[]> reusable_i420_bytes;
+    size_t reusable_i420_capacity = 0;
     while (true) {
       VLOGF("BlockingGetEmittedOutput()...");
       std::unique_ptr<CodecOutput> output = codec_client_->BlockingGetEmittedOutput();
@@ -1188,36 +1187,19 @@ void VideoDecoderRunner::Run() {
         // Every output has a format.  This happens exactly once.
         prev_stream_format = format;
 
-        ZX_ASSERT(format->format_details().has_domain());
-
         if (!format->has_format_details()) {
           Exit("!format_details");
         }
 
         const fuchsia::media::FormatDetails& format_details = format->format_details();
-        if (!format_details.has_domain()) {
-          Exit("!format.domain");
+        if (!format_details.has_image_format()) {
+          Exit("!format.image_format");
         }
 
-        if (!format_details.domain().is_video()) {
-          Exit("!format.domain.is_video()");
-        }
-        const fuchsia::media::VideoFormat& video_format = format_details.domain().video();
-        if (!video_format.is_uncompressed()) {
-          Exit("!video.is_uncompressed()");
-        }
+        raw_image_format = &format_details.image_format();
 
-        const fuchsia::media::VideoUncompressedFormat& uncompressed = video_format.uncompressed();
-        const fuchsia::sysmem::ImageFormat_2& image_format = uncompressed.image_format;
-
-        // Update uncompressed pointer for emit frame calculations
-        raw = &uncompressed;
-
-        // Ensure that uncompressed format doesn't exceed packet requirements
-        CheckFormatIntegrity(uncompressed, packet);
-
-        // Check to make sure that uncompressed matches image format
-        CheckMismatchedFormats(uncompressed, image_format);
+        // Ensure that image_format doesn't exceed packet requirements
+        CheckFormatIntegrity(*raw_image_format, packet);
       }
 
       if (frame_index == 0) {
@@ -1236,57 +1218,69 @@ void VideoDecoderRunner::Run() {
       }
 
       if (params_.emit_frame) {
-        // i420_bytes is in I420 format - Y plane first, then U plane, then V
-        // plane.  The U and V planes are half size in both directions.  Each
+        uint32_t coded_height = raw_image_format->size().height;
+        fuchsia::math::SizeU display_size = GetDisplayDimensions(*raw_image_format);
+        uint32_t display_width = display_size.width;
+        uint32_t display_height = display_size.height;
+        uint32_t bytes_per_row = raw_image_format->bytes_per_row();
+        // i420_ptr points to an I420 buffer - Y plane first, then U plane, then
+        // V plane.  The U and V planes are half size in both directions.  Each
         // plane is 8 bits per sample.
-        uint32_t i420_stride = fbl::round_up(raw->primary_display_width_pixels, 2u);
+        uint32_t i420_stride = fbl::round_up(display_width, 2u);
         // When width is odd, we want a chroma sample for the right-most luma.
-        uint32_t uv_width = (raw->primary_display_width_pixels + 1) / 2;
+        uint32_t uv_width = (display_width + 1) / 2;
         // When height is odd, we want a chroma sample for the bottom-most luma.
-        uint32_t uv_height = (raw->primary_display_height_pixels + 1) / 2;
+        uint32_t uv_height = (display_height + 1) / 2;
         uint32_t uv_stride = i420_stride / 2;
-        std::unique_ptr<uint8_t[]> i420_bytes;
+        const size_t i420_size = static_cast<size_t>(i420_stride) * display_height +
+                                 static_cast<size_t>(uv_stride) * uv_height * 2;
+        uint8_t* i420_ptr = nullptr;
         if (!params_.test_params->skip_formatting_output_pixels &&
             (kVerifySecureOutput || !params_.is_secure_output)) {
-          i420_bytes = std::make_unique<uint8_t[]>(
-              i420_stride * raw->primary_display_height_pixels + uv_stride * uv_height * 2);
-          std::memset(i420_bytes.get(), 0,
-                      i420_stride * raw->primary_display_height_pixels + uv_stride * uv_height * 2);
-          switch (raw->fourcc) {
-            case make_fourcc('N', 'V', '1', '2'): {
-              if (raw->image_format.pixel_format.has_format_modifier &&
-                  raw->image_format.pixel_format.format_modifier.value ==
-                      fuchsia::sysmem::FORMAT_MODIFIER_INTEL_I915_Y_TILED) {
+          // `reusable_i420_bytes` is reused across frames and not zeroed, so every pixel-format
+          // conversion path below must write every byte up to `i420_size` (including the luma
+          // right-edge pad byte when `display_width < i420_stride`).
+          if (i420_size > reusable_i420_capacity) {
+            reusable_i420_bytes = std::make_unique_for_overwrite<uint8_t[]>(i420_size);
+            reusable_i420_capacity = i420_size;
+          }
+          i420_ptr = reusable_i420_bytes.get();
+          switch (raw_image_format->pixel_format()) {
+            case fuchsia::images2::PixelFormat::NV12: {
+              if (raw_image_format->has_pixel_format_modifier() &&
+                  raw_image_format->pixel_format_modifier() ==
+                      fuchsia::images2::PixelFormatModifier::INTEL_I915_Y_TILED) {
+                size_t secondary_offset = static_cast<size_t>(bytes_per_row) *
+                                          fbl::round_up(coded_height, kTileHeightAlignment);
                 // Y
-                uint8_t* y_plane_src =
-                    buffer.base() + packet.start_offset() + raw->primary_start_offset;
-                uint8_t* y_plane_dst = i420_bytes.get();
+                uint8_t* y_plane_src = buffer.base() + packet.start_offset();
+                uint8_t* y_plane_dst = i420_ptr;
 
-                for (uint32_t y_offset = 0u; y_offset < raw->primary_display_height_pixels;
-                     y_offset++) {
-                  for (uint32_t x_offset = 0u; x_offset < raw->primary_display_width_pixels;
-                       x_offset++) {
-                    uint32_t swizzled_offset = ConvertLinearToLegacyYTiled(
-                        y_offset, x_offset, raw->primary_line_stride_bytes);
+                for (uint32_t y_offset = 0u; y_offset < display_height; y_offset++) {
+                  for (uint32_t x_offset = 0u; x_offset < display_width; x_offset++) {
+                    uint32_t swizzled_offset =
+                        ConvertLinearToLegacyYTiled(y_offset, x_offset, bytes_per_row);
                     y_plane_dst[x_offset] = y_plane_src[swizzled_offset];
+                  }
+                  if (display_width < i420_stride) {
+                    y_plane_dst[display_width] = 0;
                   }
                   y_plane_dst += i420_stride;
                 }
 
                 // UV
-                uint8_t* uv_src =
-                    buffer.base() + packet.start_offset() + raw->secondary_start_offset;
+                uint8_t* uv_src = buffer.base() + packet.start_offset() + secondary_offset;
                 uint8_t* u_dst_line = y_plane_dst;
-                uint8_t* v_dst_line = u_dst_line + uv_stride * uv_height;
+                uint8_t* v_dst_line = u_dst_line + static_cast<size_t>(uv_stride) * uv_height;
 
                 for (uint32_t uv_iter = 0; uv_iter < uv_height; uv_iter++) {
                   uint8_t* u_dst = u_dst_line;
                   uint8_t* v_dst = v_dst_line;
                   for (uint32_t uv_line_iter = 0; uv_line_iter < uv_width; ++uv_line_iter) {
-                    uint32_t u_offset = ConvertLinearToLegacyYTiled(uv_iter, uv_line_iter * 2,
-                                                                    raw->primary_line_stride_bytes);
-                    uint32_t v_offset = ConvertLinearToLegacyYTiled(uv_iter, uv_line_iter * 2 + 1,
-                                                                    raw->primary_line_stride_bytes);
+                    uint32_t u_offset =
+                        ConvertLinearToLegacyYTiled(uv_iter, uv_line_iter * 2, bytes_per_row);
+                    uint32_t v_offset =
+                        ConvertLinearToLegacyYTiled(uv_iter, uv_line_iter * 2 + 1, bytes_per_row);
                     *u_dst++ = uv_src[u_offset];
                     *v_dst++ = uv_src[v_offset];
                   }
@@ -1294,19 +1288,22 @@ void VideoDecoderRunner::Run() {
                   v_dst_line += uv_stride;
                 }
               } else {
+                size_t secondary_offset = static_cast<size_t>(bytes_per_row) * coded_height;
                 // Y
-                uint8_t* y_src = buffer.base() + packet.start_offset() + raw->primary_start_offset;
-                uint8_t* y_dst = i420_bytes.get();
-                for (uint32_t y_iter = 0; y_iter < raw->primary_display_height_pixels; y_iter++) {
-                  memcpy(y_dst, y_src, raw->primary_display_width_pixels);
-                  y_src += raw->primary_line_stride_bytes;
+                uint8_t* y_src = buffer.base() + packet.start_offset();
+                uint8_t* y_dst = i420_ptr;
+                for (uint32_t y_iter = 0; y_iter < display_height; y_iter++) {
+                  memcpy(y_dst, y_src, display_width);
+                  if (display_width < i420_stride) {
+                    y_dst[display_width] = 0;
+                  }
+                  y_src += bytes_per_row;
                   y_dst += i420_stride;
                 }
                 // UV
-                uint8_t* uv_src =
-                    buffer.base() + packet.start_offset() + raw->secondary_start_offset;
+                uint8_t* uv_src = buffer.base() + packet.start_offset() + secondary_offset;
                 uint8_t* u_dst_line = y_dst;
-                uint8_t* v_dst_line = u_dst_line + uv_stride * uv_height;
+                uint8_t* v_dst_line = u_dst_line + static_cast<size_t>(uv_stride) * uv_height;
                 for (uint32_t uv_iter = 0; uv_iter < uv_height; uv_iter++) {
                   uint8_t* u_dst = u_dst_line;
                   uint8_t* v_dst = v_dst_line;
@@ -1314,7 +1311,7 @@ void VideoDecoderRunner::Run() {
                     *u_dst++ = uv_src[uv_line_iter * 2];
                     *v_dst++ = uv_src[uv_line_iter * 2 + 1];
                   }
-                  uv_src += raw->primary_line_stride_bytes;
+                  uv_src += bytes_per_row;
                   u_dst_line += uv_stride;
                   v_dst_line += uv_stride;
                 }
@@ -1322,40 +1319,41 @@ void VideoDecoderRunner::Run() {
 
               break;
             }
-            case make_fourcc('Y', 'V', '1', '2'): {
+            case fuchsia::images2::PixelFormat::YV12: {
               // Y
-              uint8_t* y_src = buffer.base() + packet.start_offset() + raw->primary_start_offset;
-              uint8_t* y_dst = i420_bytes.get();
-              for (uint32_t y_iter = 0; y_iter < raw->primary_display_height_pixels; y_iter++) {
-                memcpy(y_dst, y_src, raw->primary_display_width_pixels);
-                y_src += raw->primary_line_stride_bytes;
+              uint8_t* y_src = buffer.base() + packet.start_offset();
+              uint8_t* y_dst = i420_ptr;
+              for (uint32_t y_iter = 0; y_iter < display_height; y_iter++) {
+                memcpy(y_dst, y_src, display_width);
+                if (display_width < i420_stride) {
+                  y_dst[display_width] = 0;
+                }
+                y_src += bytes_per_row;
                 y_dst += i420_stride;
               }
               // UV
-              uint8_t* v_src = buffer.base() + packet.start_offset() + raw->primary_start_offset +
-                               raw->primary_line_stride_bytes * raw->primary_height_pixels;
-              uint8_t* u_src =
-                  v_src + (raw->primary_line_stride_bytes / 2) * (raw->primary_height_pixels / 2);
+              uint8_t* v_src = buffer.base() + packet.start_offset() +
+                               static_cast<size_t>(bytes_per_row) * coded_height;
+              uint8_t* u_src = v_src + static_cast<size_t>(bytes_per_row / 2) * (coded_height / 2);
               uint8_t* u_dst = y_dst;
-              uint8_t* v_dst = u_dst + uv_stride * uv_height;
+              uint8_t* v_dst = u_dst + static_cast<size_t>(uv_stride) * uv_height;
               for (uint32_t uv_iter = 0; uv_iter < uv_height; uv_iter++) {
                 memcpy(u_dst, u_src, uv_width);
                 memcpy(v_dst, v_src, uv_width);
                 u_dst += uv_stride;
                 v_dst += uv_stride;
-                u_src += raw->primary_line_stride_bytes / 2;
-                v_src += raw->primary_line_stride_bytes / 2;
+                u_src += bytes_per_row / 2;
+                v_src += bytes_per_row / 2;
               }
               break;
             }
             default:
-              Exit("Feeding EmitFrame not yet implemented for fourcc: %s",
-                   fourcc_to_string(raw->fourcc).c_str());
+              Exit("Feeding EmitFrame not yet implemented for pixel_format: %u",
+                   static_cast<uint32_t>(raw_image_format->pixel_format()));
           }
         }
-        params_.emit_frame(output->stream_lifetime_ordinal(), i420_bytes.get(),
-                           raw->primary_display_width_pixels, raw->primary_display_height_pixels,
-                           i420_stride, packet.has_timestamp_ish(),
+        params_.emit_frame(output->stream_lifetime_ordinal(), i420_ptr, display_width,
+                           display_height, i420_stride, packet.has_timestamp_ish(),
                            packet.has_timestamp_ish() ? packet.timestamp_ish() : 0);
       }
 

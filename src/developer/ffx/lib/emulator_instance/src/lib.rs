@@ -342,6 +342,18 @@ pub struct HostConfig {
     /// Determines the networking type for the emulator.
     pub networking: NetworkingMode,
 
+    /// Whether external internet access (via SLiRP IPv4) is enabled alongside TAP networking.
+    #[serde(default)]
+    pub internet: bool,
+
+    /// Guest forwarding rules (`guestfwd=...`) for SLiRP user-mode networking.
+    #[serde(default)]
+    pub guestfwd: Vec<String>,
+
+    /// Host TCP address (`host:port`) for a companion `-netdev socket` attached to `hubid=0`.
+    #[serde(default)]
+    pub netdev_socket: Option<String>,
+
     /// Indicates the operating system the host system is running.
     pub os: OperatingSystem,
 
@@ -394,6 +406,30 @@ pub struct RuntimeConfig {
     /// The staging and working directory for the emulator instance.
     pub instance_directory: PathBuf,
 
+    /// Short path to the serial console UNIX domain socket.
+    #[serde(default)]
+    pub serial_socket: PathBuf,
+
+    /// Path to the QEMU human monitor (HMP) UNIX domain socket. When empty, the socket is
+    /// `monitor` inside `instance_directory`.
+    #[serde(default, skip_serializing_if = "is_empty_path")]
+    pub monitor_socket: PathBuf,
+
+    /// Path to the QEMU machine protocol (QMP) UNIX domain socket. When empty, the socket is
+    /// `qmp` inside `instance_directory`.
+    #[serde(default, skip_serializing_if = "is_empty_path")]
+    pub qmp_socket: PathBuf,
+
+    /// Path to the UNIX domain socket for the guest's console when it isn't attached to stdio.
+    /// When empty, the socket is `serial` inside `instance_directory`.
+    #[serde(default, skip_serializing_if = "is_empty_path")]
+    pub console_socket: PathBuf,
+
+    /// Path to the crosvm control UNIX domain socket. When empty, the socket is
+    /// `control.sock` inside `instance_directory`.
+    #[serde(default, skip_serializing_if = "is_empty_path")]
+    pub control_socket: PathBuf,
+
     /// The verbosity level of the logs for this instance.
     pub log_level: LogLevel,
 
@@ -443,6 +479,53 @@ pub struct RuntimeConfig {
     /// - `SerialMode::Enabled(serial)` contains the generated or custom stable serial number.
     #[serde(default)]
     pub serial_number: SerialMode,
+}
+
+const DEFAULT_SERIAL_SOCKET_NAME: &str = "serial_transport";
+const DEFAULT_MONITOR_SOCKET_NAME: &str = "monitor";
+const DEFAULT_QMP_SOCKET_NAME: &str = "qmp";
+const DEFAULT_CONSOLE_SOCKET_NAME: &str = "serial";
+const DEFAULT_CONTROL_SOCKET_NAME: &str = "control.sock";
+
+fn is_empty_path(path: &PathBuf) -> bool {
+    path.as_os_str().is_empty()
+}
+
+impl RuntimeConfig {
+    fn socket_path_or_default(&self, socket: &Path, default_name: &str) -> PathBuf {
+        if socket.as_os_str().is_empty() {
+            self.instance_directory.join(default_name)
+        } else {
+            socket.to_path_buf()
+        }
+    }
+
+    /// Returns the path to the emulator's serial console UNIX domain socket,
+    /// falling back to `serial_transport` inside `instance_directory` when
+    /// `serial_socket` is not explicitly configured.
+    pub fn get_serial_socket_path(&self) -> PathBuf {
+        self.socket_path_or_default(&self.serial_socket, DEFAULT_SERIAL_SOCKET_NAME)
+    }
+
+    /// Returns the path to the QEMU human monitor (HMP) UNIX domain socket.
+    pub fn get_monitor_socket_path(&self) -> PathBuf {
+        self.socket_path_or_default(&self.monitor_socket, DEFAULT_MONITOR_SOCKET_NAME)
+    }
+
+    /// Returns the path to the QEMU machine protocol (QMP) UNIX domain socket.
+    pub fn get_qmp_socket_path(&self) -> PathBuf {
+        self.socket_path_or_default(&self.qmp_socket, DEFAULT_QMP_SOCKET_NAME)
+    }
+
+    /// Returns the path to the UNIX domain socket for the guest's console.
+    pub fn get_console_socket_path(&self) -> PathBuf {
+        self.socket_path_or_default(&self.console_socket, DEFAULT_CONSOLE_SOCKET_NAME)
+    }
+
+    /// Returns the path to the crosvm control UNIX domain socket.
+    pub fn get_control_socket_path(&self) -> PathBuf {
+        self.socket_path_or_default(&self.control_socket, DEFAULT_CONTROL_SOCKET_NAME)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
@@ -617,7 +700,7 @@ impl EmulatorInstanceInfo for EmulatorInstanceData {
     }
 
     fn is_running(&self) -> bool {
-        is_pid_running(self.pid)
+        ffx_process::is_pid_running(self.pid)
     }
     fn get_engine_state(&self) -> EngineState {
         // If the static state is running, compare it with the process state
@@ -652,22 +735,6 @@ impl EmulatorInstanceInfo for EmulatorInstanceData {
         }
         None
     }
-}
-
-/// Returns true if the process identified by the pid is running.
-fn is_pid_running(pid: u32) -> bool {
-    if pid != 0 {
-        // First do a no-hang wait to collect the process if it's defunct.
-        let _ = nix::sys::wait::waitpid(
-            nix::unistd::Pid::from_raw(pid.try_into().unwrap()),
-            Some(nix::sys::wait::WaitPidFlag::WNOHANG),
-        );
-        // Check to see if it is running by sending signal 0. If there is no error,
-        // the process is running.
-        return nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid.try_into().unwrap()), None)
-            .is_ok();
-    }
-    return false;
 }
 
 #[cfg(test)]
@@ -734,5 +801,63 @@ mod tests {
         assert_eq!(serialized_disabled, r#"{"status":"disabled"}"#);
         let deserialized_disabled: SerialMode = serde_json::from_str(&serialized_disabled).unwrap();
         assert_eq!(deserialized_disabled, mode_disabled);
+    }
+
+    #[test]
+    fn test_get_serial_socket_path() {
+        let mut config = RuntimeConfig {
+            instance_directory: PathBuf::from("/tmp/emu_instance"),
+            ..Default::default()
+        };
+        assert_eq!(
+            config.get_serial_socket_path(),
+            PathBuf::from("/tmp/emu_instance/serial_transport")
+        );
+
+        config.serial_socket = PathBuf::from("/tmp/femu_s_12345");
+        assert_eq!(config.get_serial_socket_path(), PathBuf::from("/tmp/femu_s_12345"));
+    }
+
+    #[test]
+    fn test_get_control_socket_paths() {
+        let mut config = RuntimeConfig {
+            instance_directory: PathBuf::from("/tmp/emu_instance"),
+            ..Default::default()
+        };
+        assert_eq!(config.get_monitor_socket_path(), PathBuf::from("/tmp/emu_instance/monitor"));
+        assert_eq!(config.get_qmp_socket_path(), PathBuf::from("/tmp/emu_instance/qmp"));
+        assert_eq!(config.get_console_socket_path(), PathBuf::from("/tmp/emu_instance/serial"));
+        assert_eq!(
+            config.get_control_socket_path(),
+            PathBuf::from("/tmp/emu_instance/control.sock")
+        );
+
+        config.monitor_socket = PathBuf::from("/tmp/femu_m_12345");
+        config.qmp_socket = PathBuf::from("/tmp/femu_q_12345");
+        config.console_socket = PathBuf::from("/tmp/femu_c_12345");
+        config.control_socket = PathBuf::from("/tmp/femu_ctrl_12345");
+        assert_eq!(config.get_monitor_socket_path(), PathBuf::from("/tmp/femu_m_12345"));
+        assert_eq!(config.get_qmp_socket_path(), PathBuf::from("/tmp/femu_q_12345"));
+        assert_eq!(config.get_console_socket_path(), PathBuf::from("/tmp/femu_c_12345"));
+        assert_eq!(config.get_control_socket_path(), PathBuf::from("/tmp/femu_ctrl_12345"));
+    }
+
+    #[test]
+    fn test_runtime_config_without_control_sockets_deserializes() {
+        // engine.json files written before the control socket fields existed don't have them.
+        let mut value = serde_json::to_value(RuntimeConfig::default()).unwrap();
+        let fields = value.as_object_mut().unwrap();
+        assert!(!fields.contains_key("monitor_socket"));
+        assert!(!fields.contains_key("qmp_socket"));
+        assert!(!fields.contains_key("console_socket"));
+        assert!(!fields.contains_key("control_socket"));
+        fields.insert("instance_directory".into(), "/tmp/emu_instance".into());
+
+        let config: RuntimeConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(config.get_monitor_socket_path(), PathBuf::from("/tmp/emu_instance/monitor"));
+        assert_eq!(
+            config.get_control_socket_path(),
+            PathBuf::from("/tmp/emu_instance/control.sock")
+        );
     }
 }

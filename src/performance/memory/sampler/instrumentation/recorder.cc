@@ -4,14 +4,16 @@
 #include <zircon/availability.h>
 
 #if FUCHSIA_API_LEVEL_AT_LEAST(29)
-#include <elf-search.h>
+#include <elf.h>
 #include <fidl/fuchsia.memory.sampler/cpp/fidl.h>
 #include <fidl/fuchsia.memory.sampler/cpp/natural_types.h>
 #include <fidl/fuchsia.memory.sampler/cpp/wire_types.h>
 #include <lib/component/incoming/cpp/service.h>
 #include <lib/zx/result.h>
+#include <link.h>
 #include <pthread.h>
 #include <zircon/assert.h>
+#include <zircon/process.h>
 #include <zircon/sanitizer.h>
 #include <zircon/syscalls.h>
 #include <zircon/syscalls/object.h>
@@ -20,11 +22,13 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <unordered_set>
+#include <cstring>
+#include <span>
 #include <vector>
 
 #include <fbl/auto_lock.h>
 
+#include "allocation_table.h"
 #include "poisson_sampler.h"
 #include "recorder.h"
 
@@ -38,6 +42,75 @@ constexpr size_t kMaxStackFramesLength = 512;
 constexpr uint64_t kMinSamplingIntervalBytes =
     memory_sampler::Recorder::kDefaultSamplingIntervalBytes;
 constexpr uint64_t kMaxSamplingIntervalBytes = static_cast<uint64_t>(8 * 1024 * 1024);
+
+constexpr size_t AlignNoteSize(size_t size) { return (size + 3u) & ~size_t{3u}; }
+
+bool IsNoteInLoadableSegment(std::span<const ElfW(Phdr)> phdrs, const ElfW(Phdr) & note_phdr) {
+  const uintptr_t note_start = note_phdr.p_vaddr;
+  const uintptr_t note_end = note_start + note_phdr.p_filesz;
+  if (note_end < note_start) {
+    return false;
+  }
+  for (const auto& phdr : phdrs) {
+    if (phdr.p_type != PT_LOAD || (phdr.p_flags & PF_R) == 0) {
+      continue;
+    }
+    const uintptr_t load_start = phdr.p_vaddr;
+    const uintptr_t load_end = load_start + phdr.p_memsz;
+    if (load_end >= load_start && note_start >= load_start && note_end <= load_end) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::span<const uint8_t> ParseBuildIdFromNotes(uintptr_t vaddr, size_t size) {
+  const uintptr_t end = vaddr + size;
+  if ((vaddr & 3u) != 0 || end < vaddr) {
+    return {};
+  }
+  while (end - vaddr >= sizeof(ElfW(Nhdr))) {
+    ElfW(Nhdr) nhdr;
+    std::memcpy(&nhdr, reinterpret_cast<const void*>(vaddr), sizeof(nhdr));
+    vaddr += sizeof(ElfW(Nhdr));
+
+    const size_t aligned_name_size = AlignNoteSize(nhdr.n_namesz);
+    if (end - vaddr < aligned_name_size) {
+      break;
+    }
+    const uintptr_t name_addr = vaddr;
+    vaddr += aligned_name_size;
+
+    const size_t aligned_desc_size = AlignNoteSize(nhdr.n_descsz);
+    if (end - vaddr < aligned_desc_size) {
+      break;
+    }
+    const uintptr_t desc_addr = vaddr;
+    vaddr += aligned_desc_size;
+
+    if (nhdr.n_type == NT_GNU_BUILD_ID && nhdr.n_namesz == sizeof(ELF_NOTE_GNU) &&
+        nhdr.n_descsz > 0 && nhdr.n_descsz <= fuchsia_memory_sampler::kBuildIdBytes &&
+        std::memcmp(reinterpret_cast<const void*>(name_addr), ELF_NOTE_GNU, sizeof(ELF_NOTE_GNU)) ==
+            0) {
+      return {reinterpret_cast<const uint8_t*>(desc_addr), nhdr.n_descsz};
+    }
+  }
+  return {};
+}
+
+std::span<const uint8_t> ParseBuildId(const struct dl_phdr_info& info) {
+  const std::span<const ElfW(Phdr)> phdrs{info.dlpi_phdr, info.dlpi_phnum};
+  for (const auto& phdr : phdrs) {
+    if (phdr.p_type == PT_NOTE && IsNoteInLoadableSegment(phdrs, phdr)) {
+      std::span<const uint8_t> build_id =
+          ParseBuildIdFromNotes(info.dlpi_addr + phdr.p_vaddr, phdr.p_filesz);
+      if (!build_id.empty()) {
+        return build_id;
+      }
+    }
+  }
+  return {};
+}
 
 // Note: this implementation currently relies on `thread_local` to
 // track the allocated bytes and thresholds, which means that each
@@ -69,7 +142,7 @@ void Recorder::InitSingletonOnce() {
   fidl::SyncClient client{std::move(result.value())};
   zx::socket client_socket;
 
-#if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
+#if FUCHSIA_API_LEVEL_AT_LEAST(NEXT)
   zx::socket server_socket;
   zx_status_t status = zx::socket::create(ZX_SOCKET_DATAGRAM, &client_socket, &server_socket);
   ZX_ASSERT(status == ZX_OK);
@@ -105,17 +178,11 @@ void Recorder::Disconnect() {
     singleton.store(nullptr, std::memory_order_release);
   }
 
-  // Release the tracked allocations, but do so outside of `lock_`: clearing
-  // the set frees one node per entry, and this runs inside an allocator hook
-  // on an arbitrary application thread. Swapping the set out under the lock is
-  // O(1), and the nodes are then freed once `stale_allocations` goes out of
-  // scope, without any other thread waiting on us.
-  std::unordered_set<void*> stale_allocations;
   {
     fbl::AutoLock lock(&lock_);
     client_ = {};
-    stale_allocations.swap(recorded_allocations_);
   }
+  recorded_allocations_.Clear();
 }
 
 // Profiling every single allocation has a large impact on the
@@ -124,7 +191,7 @@ void Recorder::Disconnect() {
 // allocations, reducing the overhead while hopefully capturing enough
 // relevant data to be useful.
 void Recorder::MaybeRecordAllocation(void* address, size_t size) {
-  if (is_disabled_.load(std::memory_order_relaxed)) {
+  if (address == nullptr || is_disabled_.load(std::memory_order_relaxed)) {
     return;
   }
 
@@ -137,23 +204,30 @@ void Recorder::MaybeRecordAllocation(void* address, size_t size) {
     return;
   }
 
-  // Store the address of the allocation if still active.
-  {
-    fbl::AutoLock lock(&lock_);
-    if (!is_disabled_.load(std::memory_order_relaxed)) {
-      recorded_allocations_.emplace(address);
+  // Store the address of the allocation if still active. Re-check
+  // `is_disabled_` after inserting so that an allocation racing with
+  // `Disconnect()` cannot remain in `recorded_allocations_` after `Clear()`.
+  if (!is_disabled_.load(std::memory_order_relaxed)) {
+    recorded_allocations_.Insert(address);
+    if (is_disabled_.load(std::memory_order_acquire)) [[unlikely]] {
+      recorded_allocations_.TryRemove(address);
     }
   }
 }
 
-bool Recorder::RecordAllocation(void* address, size_t size, uint64_t sampling_interval) {
+// `RecordAllocation` and `ForgetAllocation` are marked `noinline` so LTO does
+// not inline their large stack buffers (backtrace buffer, FIDL arena) into the
+// Scudo hooks, which would otherwise force stack-clash probes, stack-protector
+// canaries, and extra register spills onto every allocation and deallocation.
+[[gnu::noinline]] bool Recorder::RecordAllocation(void* address, size_t size,
+                                                  uint64_t sampling_interval) {
   if (is_disabled_.load(std::memory_order_relaxed)) {
     return false;
   }
   uint64_t pc_buffer[kMaxStackFramesLength]{};
   const size_t count = __sanitizer_fast_backtrace(pc_buffer, kMaxStackFramesLength);
 
-#if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
+#if FUCHSIA_API_LEVEL_AT_LEAST(NEXT)
   fuchsia_memory_sampler::RecordAllocationEvent event{{
       .address = std::optional{reinterpret_cast<uint64_t>(address)},
       .stack_trace = std::optional<fuchsia_memory_sampler::StackTrace>{{{
@@ -248,30 +322,25 @@ bool Recorder::RecordAllocation(void* address, size_t size, uint64_t sampling_in
 }
 
 void Recorder::MaybeForgetAllocation(void* address) {
-  if (is_disabled_.load(std::memory_order_relaxed)) {
+  if (address == nullptr || is_disabled_.load(std::memory_order_relaxed)) {
     return;
   }
 
-  {
-    fbl::AutoLock lock(&lock_);
-    auto allocation = recorded_allocations_.find(address);
-    if (allocation == recorded_allocations_.end()) {
-      return;
-    }
-    recorded_allocations_.erase(allocation);
+  if (!recorded_allocations_.TryRemove(address)) {
+    return;
   }
 
   ForgetAllocation(address);
 }
 
-void Recorder::ForgetAllocation(void* address) {
+[[gnu::noinline]] void Recorder::ForgetAllocation(void* address) {
   if (is_disabled_.load(std::memory_order_relaxed)) {
     return;
   }
   uint64_t pc_buffer[kMaxStackFramesLength]{};
   const size_t count = __sanitizer_fast_backtrace(pc_buffer, kMaxStackFramesLength);
 
-#if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
+#if FUCHSIA_API_LEVEL_AT_LEAST(NEXT)
   fuchsia_memory_sampler::RecordDeallocationEvent event{{
       .address = std::optional{reinterpret_cast<uint64_t>(address)},
       .stack_trace = std::optional<fuchsia_memory_sampler::StackTrace>{{{
@@ -390,42 +459,44 @@ void Recorder::ApplyBackpressure() {
 
 void Recorder::SetModulesInfo() {
   // Collect the layout of the modules loaded in memory.
-  const zx_handle_t process = zx_process_self();
   std::vector<fuchsia_memory_sampler::ModuleMap> modules;
 
-  // Iterate through modules to map code memory ranges to the
-  // corresponding build id.
-  elf_search::ForEachModule(
-      *zx::unowned_process{process}, [&modules](const elf_search::ModuleInfo& info) mutable {
-        const size_t kPageSize = zx_system_get_page_size();
-        std::vector<fuchsia_memory_sampler::ExecutableSegment> segments;
+  // Iterate through loaded ELF modules via the dynamic linker's in-memory table
+  // to map executable segments to their corresponding GNU build ID.
+  dl_iterate_phdr(
+      [](struct dl_phdr_info* info, size_t /*size*/, void* data) -> int {
+        const std::span<const uint8_t> build_id = ParseBuildId(*info);
+        if (build_id.empty()) {
+          return 0;
+        }
 
-        // Iterate through program segments.
-        for (const auto& phdr : info.phdrs) {
-          // Skip non-loadable sections.
-          if (phdr.p_type != PT_LOAD) {
-            continue;
-          }
-          // Skip non-executable sections.
-          bool executable = !!(phdr.p_flags & PF_X);
-          if (!executable) {
+        auto* modules = static_cast<std::vector<fuchsia_memory_sampler::ModuleMap>*>(data);
+        const size_t kPageSize = zx_system_get_page_size();
+        const std::span<const ElfW(Phdr)> phdrs{info->dlpi_phdr, info->dlpi_phnum};
+        std::vector<fuchsia_memory_sampler::ExecutableSegment> segments;
+        for (const auto& phdr : phdrs) {
+          // Skip non-loadable or non-executable sections.
+          if (phdr.p_type != PT_LOAD || (phdr.p_flags & PF_X) == 0) {
             continue;
           }
 
           const uintptr_t start = phdr.p_vaddr & -kPageSize;
           const uintptr_t end = (phdr.p_vaddr + phdr.p_memsz + kPageSize - 1) & -kPageSize;
           auto& segment = segments.emplace_back();
-          segment.start_address(info.vaddr + start);
+          segment.start_address(info->dlpi_addr + start);
           segment.size(end - start);
           segment.relative_address(start);
         }
 
-        auto& module_map = modules.emplace_back();
-        module_map.build_id({{info.build_id.begin(), info.build_id.end()}});
-        module_map.executable_segments(segments);
-      });
+        auto& module_map = modules->emplace_back();
+        module_map.build_id({{build_id.begin(), build_id.end()}});
+        module_map.executable_segments(std::move(segments));
+        return 0;
+      },
+      &modules);
 
   // Retrieve the name of the current process.
+  const zx_handle_t process = zx_process_self();
   char name[ZX_MAX_NAME_LEN];
   zx_object_get_property(process, ZX_PROP_NAME, name, ZX_MAX_NAME_LEN);
 
@@ -446,7 +517,7 @@ Recorder::Recorder(fidl::SyncClient<fuchsia_memory_sampler::Sampler> client, zx:
 Recorder Recorder::CreateRecorderForTesting(
     fidl::SyncClient<fuchsia_memory_sampler::Sampler> client,
     std::function<PoissonSampler&()> get_poisson_sampler, bool use_socket) {
-#if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
+#if FUCHSIA_API_LEVEL_AT_LEAST(NEXT)
   if (use_socket) {
     zx::socket client_socket, server_socket;
     zx_status_t status = zx::socket::create(ZX_SOCKET_DATAGRAM, &client_socket, &server_socket);

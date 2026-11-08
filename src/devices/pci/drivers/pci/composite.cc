@@ -4,6 +4,8 @@
 
 #include "src/devices/pci/drivers/pci/composite.h"
 
+#include <lib/driver/component/cpp/composite_node_spec.h>
+#include <lib/driver/component/cpp/node_add_args.h>
 #include <lib/driver/legacy-bind-constants/legacy-bind-constants.h>
 
 #include <bind/fuchsia/acpi/cpp/bind.h>
@@ -11,51 +13,63 @@
 
 namespace pci {
 
-ddk::CompositeNodeSpec CreateCompositeNodeSpec(const CompositeInfo& info) {
-  auto kPciBindTopo =
-      static_cast<uint32_t>(BIND_PCI_TOPO_PACK(info.bus_id, info.dev_id, info.func_id));
+fuchsia_driver_framework::CompositeNodeSpec CreateCompositeNodeSpec(std::string_view name,
+                                                                    const CompositeInfo& info) {
+  uint32_t kPciBindTopo = BIND_PCI_TOPO_PACK(info.bus_id, info.dev_id, info.func_id);
 
-  const ddk::BindRule kAcpiRules[] = {
-      ddk::MakeAcceptBindRule(bind_fuchsia::PROTOCOL, bind_fuchsia_acpi::BIND_PROTOCOL_DEVICE),
-      ddk::MakeAcceptBindRule(bind_fuchsia::ACPI_BUS_TYPE,
-                              bind_fuchsia_acpi::BIND_ACPI_BUS_TYPE_PCI),
-      ddk::MakeAcceptBindRule(bind_fuchsia::PCI_TOPO, kPciBindTopo),
+  const std::vector<fuchsia_driver_framework::BindRule2> kPciBindRules = {
+      fdf::MakeAcceptBindRule(bind_fuchsia::SERVICE, "fuchsia.hardware.pci.Service"),
+      fdf::MakeAcceptBindRule(bind_fuchsia::PCI_VID, info.vendor_id),
+      fdf::MakeAcceptBindRule(bind_fuchsia::PCI_DID, info.device_id),
+      fdf::MakeAcceptBindRule(bind_fuchsia::PCI_CLASS, info.class_id),
+      fdf::MakeAcceptBindRule(bind_fuchsia::PCI_SUBCLASS, info.subclass),
+      fdf::MakeAcceptBindRule(bind_fuchsia::PCI_INTERFACE, info.program_interface),
+      fdf::MakeAcceptBindRule(bind_fuchsia::PCI_REVISION, info.revision_id),
+      fdf::MakeAcceptBindRule(bind_fuchsia::PCI_TOPO, kPciBindTopo),
+      fdf::MakeRejectBindRule(bind_fuchsia::COMPOSITE, 1u),
   };
 
-  const device_bind_prop_t kAcpiProperties[] = {
-      ddk::MakeProperty(bind_fuchsia::PROTOCOL, bind_fuchsia_acpi::BIND_PROTOCOL_DEVICE),
-      ddk::MakeProperty(bind_fuchsia::ACPI_BUS_TYPE, bind_fuchsia_acpi::BIND_ACPI_BUS_TYPE_PCI),
-      ddk::MakeProperty(bind_fuchsia::PCI_TOPO, kPciBindTopo),
+  const std::vector<fuchsia_driver_framework::NodeProperty2> kPciBindProperties = {
+      fdf::MakeProperty2(bind_fuchsia::SERVICE, "fuchsia.hardware.pci.Service"),
+      fdf::MakeProperty2(bind_fuchsia::PCI_VID, info.vendor_id),
+      fdf::MakeProperty2(bind_fuchsia::PCI_DID, info.device_id),
+      fdf::MakeProperty2(bind_fuchsia::PCI_CLASS, info.class_id),
+      fdf::MakeProperty2(bind_fuchsia::PCI_SUBCLASS, info.subclass),
+      fdf::MakeProperty2(bind_fuchsia::PCI_INTERFACE, info.program_interface),
+      fdf::MakeProperty2(bind_fuchsia::PCI_REVISION, info.revision_id),
+      fdf::MakeProperty2(bind_fuchsia::PCI_TOPO, kPciBindTopo),
   };
 
-  const ddk::BindRule kPciRules[] = {
-      ddk::MakeAcceptBindRule(bind_fuchsia::SERVICE, "fuchsia.hardware.pci.Service"),
-      ddk::MakeAcceptBindRule(bind_fuchsia::PCI_VID, info.vendor_id),
-      ddk::MakeAcceptBindRule(bind_fuchsia::PCI_DID, info.device_id),
-      ddk::MakeAcceptBindRule(bind_fuchsia::PCI_CLASS, info.class_id),
-      ddk::MakeAcceptBindRule(bind_fuchsia::PCI_SUBCLASS, info.subclass),
-      ddk::MakeAcceptBindRule(bind_fuchsia::PCI_INTERFACE, info.program_interface),
-      ddk::MakeAcceptBindRule(bind_fuchsia::PCI_REVISION, info.revision_id),
-      ddk::MakeAcceptBindRule(bind_fuchsia::PCI_TOPO, kPciBindTopo),
-      ddk::MakeRejectBindRule(bind_fuchsia::COMPOSITE, static_cast<uint32_t>(1)),
-  };
+  std::vector<fuchsia_driver_framework::ParentSpec2> parents;
+  parents.push_back(fuchsia_driver_framework::ParentSpec2{{
+      .bind_rules = kPciBindRules,
+      .properties = kPciBindProperties,
+  }});
 
-  const device_bind_prop_t kPciProperties[] = {
-      ddk::MakeProperty(bind_fuchsia::SERVICE, "fuchsia.hardware.pci.Service"),
-      ddk::MakeProperty(bind_fuchsia::PCI_VID, info.vendor_id),
-      ddk::MakeProperty(bind_fuchsia::PCI_DID, info.device_id),
-      ddk::MakeProperty(bind_fuchsia::PCI_CLASS, info.class_id),
-      ddk::MakeProperty(bind_fuchsia::PCI_SUBCLASS, info.subclass),
-      ddk::MakeProperty(bind_fuchsia::PCI_INTERFACE, info.program_interface),
-      ddk::MakeProperty(bind_fuchsia::PCI_REVISION, info.revision_id),
-      ddk::MakeProperty(bind_fuchsia::PCI_TOPO, kPciBindTopo),
-  };
-
-  auto composite_node_spec = ddk::CompositeNodeSpec(kPciRules, kPciProperties);
   if (info.has_acpi) {
-    composite_node_spec.AddParentSpec(kAcpiRules, kAcpiProperties);
+    const std::vector<fuchsia_driver_framework::BindRule2> kAcpiBindRules = {
+        fdf::MakeAcceptBindRule(bind_fuchsia::PROTOCOL, bind_fuchsia_acpi::BIND_PROTOCOL_DEVICE),
+        fdf::MakeAcceptBindRule(bind_fuchsia::ACPI_BUS_TYPE,
+                                bind_fuchsia_acpi::BIND_ACPI_BUS_TYPE_PCI),
+        fdf::MakeAcceptBindRule(bind_fuchsia::PCI_TOPO, kPciBindTopo),
+    };
+
+    const std::vector<fuchsia_driver_framework::NodeProperty2> kAcpiBindProperties = {
+        fdf::MakeProperty2(bind_fuchsia::PROTOCOL, bind_fuchsia_acpi::BIND_PROTOCOL_DEVICE),
+        fdf::MakeProperty2(bind_fuchsia::ACPI_BUS_TYPE, bind_fuchsia_acpi::BIND_ACPI_BUS_TYPE_PCI),
+        fdf::MakeProperty2(bind_fuchsia::PCI_TOPO, kPciBindTopo),
+    };
+
+    parents.push_back(fuchsia_driver_framework::ParentSpec2{{
+        .bind_rules = kAcpiBindRules,
+        .properties = kAcpiBindProperties,
+    }});
   }
-  return composite_node_spec;
+
+  return fuchsia_driver_framework::CompositeNodeSpec{{
+      .name = std::string(name),
+      .parents2 = std::move(parents),
+  }};
 }
 
 }  // namespace pci

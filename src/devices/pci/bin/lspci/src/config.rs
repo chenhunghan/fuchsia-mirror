@@ -92,7 +92,7 @@ impl Type01Config {
 // PCI Local Bus Specification v3.0 6.2.2.
 // Bit 7 was valid in v2.1 but in v3.0 is hardwired to 0.
 bitfield! {
-    pub struct CommandRegister(u16);
+    pub struct CommandRegister(pub u16);
     pub io_space, _: 0;
     pub memory_space, _: 1;
     pub bus_master_en, _: 2;
@@ -109,24 +109,27 @@ bitfield! {
 
 impl fmt::Display for CommandRegister {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "I/O{} Mem{} BusMaster{} SpecCycle{} MemWINV{} VGASnoop{} ParErr{} SERR{} FastB2B{} DisINTx{}",
-        is_set(self.io_space()),
-        is_set(self.memory_space()),
-        is_set(self.bus_master_en()),
-        is_set(self.special_cycles()),
-        is_set(self.mem_winv_en()),
-        is_set(self.vga_snoop()),
-        is_set(self.parity_error_response()),
-        is_set(self.serr_en()),
-        is_set(self.fb2b_en()),
-        is_set(self.int_disable()))
+        write!(
+            f,
+            "I/O{} Mem{} BusMaster{} SpecCycle{} MemWINV{} VGASnoop{} ParErr{} SERR{} FastB2B{} DisINTx{}",
+            is_set(self.io_space()),
+            is_set(self.memory_space()),
+            is_set(self.bus_master_en()),
+            is_set(self.special_cycles()),
+            is_set(self.mem_winv_en()),
+            is_set(self.vga_snoop()),
+            is_set(self.parity_error_response()),
+            is_set(self.serr_en()),
+            is_set(self.fb2b_en()),
+            is_set(self.int_disable())
+        )
     }
 }
 
 // PCI Local Bus Specification v3.0 6.2.3.
 // Bit 6 is reserved in v3.0, but was a valid field in v2.1.
 bitfield! {
-    pub struct StatusRegister(u16);
+    pub struct StatusRegister(pub u16);
     // 2:0 reserved
     pub int_status, _: 3;
     pub has_cap_list, _: 4;
@@ -144,28 +147,31 @@ bitfield! {
 
 impl fmt::Display for StatusRegister {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Cap{} 66Mhz{} FastB2B{} ParErr{} DEVSEL={} >TAbort{} <TAbort{} MAbort{} >SERR{} <PERR{} INTx{}",
-        is_set(self.has_cap_list()),
-        is_set(self.supports_66mhz()),
-        is_set(self.fb2b()),
-        is_set(self.master_data_parity_error()),
-        match self.devsel_timing() {
-            0 => "fast",
-            1 => "medium",
-            2 => "slow",
-            _ => "<3?>",
-        },
-        is_set(self.signaled_target_abort()),
-        is_set(self.received_target_abort()),
-        is_set(self.received_master_abort()),
-        is_set(self.signaled_system_error()),
-        is_set(self.detected_parity_error()),
-        is_set(self.int_status()))
+        write!(
+            f,
+            "Cap{} 66Mhz{} FastB2B{} ParErr{} DEVSEL={} >TAbort{} <TAbort{} MAbort{} >SERR{} <PERR{} INTx{}",
+            is_set(self.has_cap_list()),
+            is_set(self.supports_66mhz()),
+            is_set(self.fb2b()),
+            is_set(self.master_data_parity_error()),
+            match self.devsel_timing() {
+                0 => "fast",
+                1 => "medium",
+                2 => "slow",
+                _ => "<3?>",
+            },
+            is_set(self.signaled_target_abort()),
+            is_set(self.received_target_abort()),
+            is_set(self.received_master_abort()),
+            is_set(self.signaled_system_error()),
+            is_set(self.detected_parity_error()),
+            is_set(self.int_status())
+        )
     }
 }
 
 bitfield! {
-    pub struct SecondaryStatusRegister(u16);
+    pub struct SecondaryStatusRegister(pub u16);
     // 4:0 reserved
     pub supports_66mhz, _: 5;
     // 6 reserved
@@ -203,7 +209,7 @@ impl fmt::Display for SecondaryStatusRegister {
 }
 
 bitfield! {
-    pub struct BridgeControlRegister(u16);
+    pub struct BridgeControlRegister(pub u16);
     pub parity_error_response_en, _: 0;
     pub serr_en, _: 1;
     pub isa_en, _: 2;

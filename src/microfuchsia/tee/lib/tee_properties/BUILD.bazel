@@ -1,0 +1,48 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [],  # Include all tests in the package.
+    visibility = ["//src/microfuchsia:__pkg__"],
+)
+
+rustc_library(
+    name = "tee_properties",
+    srcs = ["src/lib.rs"],
+    edition = "2024",
+    visibility = [
+        "//src/microfuchsia/tee:__subpackages__",
+    ],
+    deps = [
+        "//src/microfuchsia/tee/tee_internal_api:tee_internal",
+        "//third_party/rust_crates/vendor:base64",
+        "//third_party/rust_crates/vendor:indexmap",
+        "//third_party/rust_crates/vendor:num-traits",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json5",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:uuid",
+    ],
+)
+
+# TODO(https://fxbug.dev/570694755): map to build_flags when crate issue is fixed.
+# @bazel2gn:raw_attribute:configs += ["//build/config/rust/lints:allow_unused_crate_dependencies"]
+rustc_test(
+    name = "tee_properties_test",
+    crate = ":tee_properties",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_unittest_package(
+    name = "tee_properties_tests",
+    unit_tests = [":tee_properties_test"],
+)

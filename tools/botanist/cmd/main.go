@@ -14,6 +14,7 @@ import (
 	"github.com/google/subcommands"
 
 	"go.fuchsia.dev/fuchsia/tools/botanist"
+	"go.fuchsia.dev/fuchsia/tools/botanist/targets"
 	"go.fuchsia.dev/fuchsia/tools/lib/color"
 	"go.fuchsia.dev/fuchsia/tools/lib/logger"
 	"go.fuchsia.dev/fuchsia/tools/lib/streams"
@@ -30,6 +31,10 @@ func init() {
 }
 
 func main() {
+	if len(os.Args) == 3 && os.Args[1] == "tcp-forward" {
+		os.Exit(targets.RunTCPForward(os.Args[2], os.Stdin, os.Stdout))
+	}
+
 	subcommands.Register(subcommands.HelpCommand(), "")
 	subcommands.Register(subcommands.CommandsCommand(), "")
 	subcommands.Register(subcommands.FlagsCommand(), "")

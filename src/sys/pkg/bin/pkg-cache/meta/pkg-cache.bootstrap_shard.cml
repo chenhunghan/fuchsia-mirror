@@ -22,6 +22,7 @@
             config: [
                 "fuchsia.pkgcache.AllPackagesExecutable",
                 "fuchsia.pkgcache.EnableUpgradablePackages",
+                "fuchsia.pkgcache.PostCommitGcEarliestBootSeconds",
                 "fuchsia.pkgcache.RequireSystemImage",
                 "fuchsia.pkgcache.UseDriverBlobPaging",
             ],

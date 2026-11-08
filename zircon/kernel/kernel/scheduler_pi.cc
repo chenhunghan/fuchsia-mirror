@@ -44,31 +44,6 @@ FFI_ALWAYS_INLINE void cpp_scheduler_save_state_list_push_front(Scheduler* sched
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_unblock_list_init(ffi::Uninitialized<Thread::UnblockList>* holder) {
-  holder->Initialize();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_unblock_list_destroy(Thread::UnblockList* holder) {
-  ktl::destroy_at(holder);
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_unblock_list_push_back(Thread::UnblockList* holder, Thread* thread) {
-  holder->push_back(thread);
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE Thread* cpp_unblock_list_pop_front(Thread::UnblockList* holder) {
-  return holder->pop_front();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE bool cpp_unblock_list_is_empty(const Thread::UnblockList* holder) {
-  return holder->is_empty();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE bool cpp_scheduler_save_state_list_is_empty(Scheduler* sched)
     TA_NO_THREAD_SAFETY_ANALYSIS {
   return sched->save_state_list_.is_empty();

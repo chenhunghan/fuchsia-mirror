@@ -38,7 +38,11 @@ class TestJsonGet(unittest.TestCase):
         self.assertIsNone(self.j.match({"c": Maybe}).c)
 
     def test_none(self) -> None:
-        self.assertEqual(self.j.match({"a": Any, "c": None}).a, 1)
+        m = self.j.match({"a": Any, "c": None})
+        self.assertEqual(m.a, 1)
+        self.assertFalse(hasattr(m, "c"))
+        # A leading `None` key must not leave an unbound match value behind.
+        self.assertEqual(self.j.match({"c": None, "a": Any}).a, 1)
         self.assertIsNone(self.j.match({"a": Any, "b": None}))
 
     def test_list_filter(self) -> None:

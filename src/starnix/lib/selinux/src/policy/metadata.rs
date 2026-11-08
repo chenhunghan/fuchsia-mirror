@@ -11,9 +11,6 @@ use super::traits::{Parse, Serialize, Validate};
 /// Magic number identifying a SELinux policy file.
 pub const SELINUX_MAGIC: u32 = 0xf97cff8c;
 
-/// Maximum allowed length for a signature in the policy database.
-pub const POLICYDB_STRING_MAX_LENGTH: u32 = 32;
-
 /// Expected signature prefix for a valid SELinux policy.
 pub const POLICYDB_SIGNATURE: &[u8] = b"SE Linux";
 
@@ -21,7 +18,7 @@ pub const POLICYDB_SIGNATURE: &[u8] = b"SE Linux";
 pub const POLICYDB_VERSION_MIN: u32 = 30;
 
 /// Maximum supported SELinux policy database version.
-pub const POLICYDB_VERSION_MAX: u32 = 33;
+pub const POLICYDB_VERSION_MAX: u32 = 35;
 
 /// Config flag indicating that MLS is enabled.
 pub const CONFIG_MLS_FLAG: u32 = 1;
@@ -45,7 +42,7 @@ pub enum HandleUnknown {
 }
 
 /// Magic number at the start of a SELinux policy binary.
-#[derive(Debug, Parse, Serialize)]
+#[derive(Clone, Copy, Debug, Parse, Serialize)]
 pub struct Magic {
     value: u32,
 }
@@ -60,17 +57,13 @@ impl Validate for Magic {
 }
 
 /// Signature string that identifies the policy database.
-#[derive(Debug, Parse, Serialize)]
+#[derive(Clone, Debug, Parse, Serialize)]
 pub struct Signature {
     value: ByteArray,
 }
 
 impl Validate for Signature {
     fn validate(&self, _policy: &super::Policy) -> Result<(), ValidateError> {
-        let len = self.value.len() as u32;
-        if len > POLICYDB_STRING_MAX_LENGTH {
-            return Err(ValidateError::InvalidSignatureLength { found_length: len });
-        }
         if self.value.as_ref() != POLICYDB_SIGNATURE {
             return Err(ValidateError::InvalidSignature {
                 found_signature: self.value.as_ref().into(),
@@ -96,11 +89,29 @@ impl Parse for PolicyVersion {
 }
 
 impl PolicyVersion {
-    pub const V30: Self = Self { value: 30 };
-    pub const V33: Self = Self { value: 33 };
+    /// Minimum supported policy version.
+    pub const MIN: Self = Self { value: POLICYDB_VERSION_MIN };
 
     /// Minimum policy version supporting InfiniBand partition keys and end ports.
     pub const MIN_INFINIBAND: Self = Self { value: 31 };
+
+    /// Minimum policy version supporting compressed filename transition tables.
+    pub const MIN_COMPRESSED_FILENAME_TRANSITIONS: Self = Self { value: 33 };
+
+    /// Minimum policy version supporting extended permission rules in conditional blocks.
+    pub const MIN_CONDITIONAL_XPERMS: Self = Self { value: 34 };
+
+    /// Minimum policy version supporting `neveraudit` domains.
+    pub const MIN_NEVERAUDIT: Self = Self { value: 35 };
+
+    #[cfg(test)]
+    pub const V30: Self = Self { value: 30 };
+    #[cfg(test)]
+    pub const V33: Self = Self { value: 33 };
+    #[cfg(test)]
+    pub const V34: Self = Self { value: 34 };
+    #[cfg(test)]
+    pub const V35: Self = Self { value: 35 };
 
     /// Returns the raw policy version value.
     #[cfg(test)]
@@ -120,7 +131,7 @@ impl Validate for PolicyVersion {
 }
 
 /// Configuration flags of the SELinux policy.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct Config {
     handle_unknown: HandleUnknown,
     raw_flags: u32,
@@ -177,9 +188,8 @@ impl Validate for Config {
     }
 }
 
-/// Contains various count fields representing the size of different registries
-/// and tables in the policy.
-#[derive(Debug, Parse, Serialize, Validate)]
+/// Element counts for registries and tables in the binary policy.
+#[derive(Clone, Copy, Debug, Parse, Serialize, Validate)]
 pub struct Counts {
     /// Number of symbols in the symbol table.
     symbols_count: u32,

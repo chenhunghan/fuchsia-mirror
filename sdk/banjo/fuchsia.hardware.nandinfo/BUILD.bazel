@@ -1,0 +1,17 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fidl_library(
+    name = "fuchsia.hardware.nandinfo",
+    srcs = ["nand_info.fidl"],
+    enable_banjo = True,
+    visibility = [
+        "//sdk/banjo/fuchsia.hardware.nand:__pkg__",
+        "//sdk/banjo/fuchsia.hardware.rawnand:__pkg__",
+    ],
+)

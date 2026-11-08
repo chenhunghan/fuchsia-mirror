@@ -9,36 +9,37 @@ import argparse
 import dataclasses
 import datetime
 import json
-import os
 import sys
 import typing as T
 from pathlib import Path
 
 # LINT.IfChange(imports)
-_SCRIPT_DIR = os.path.dirname(__file__)
-sys.path.insert(0, _SCRIPT_DIR)
-import bazel_action_impl
-import bazel_compdb_utils
-import bazel_rust_analyzer_utils
-import build_utils
-from bazel_action_file_copy_utils import write_file_if_changed
-from bazel_action_utils import (
+from build.bazel.scripts import (
+    bazel_action_impl,
+    bazel_compdb_utils,
+    bazel_rust_analyzer_utils,
+    build_utils,
+)
+from build.bazel.scripts.bazel_action_file_copy_utils import (
+    write_file_if_changed,
+)
+from build.bazel.scripts.bazel_action_utils import (
     BazelGlobalArguments,
     BazelTargetInfo,
     BazelTargetInfosMap,
     update_gn_targets_symlink,
 )
-from workspace_utils import (
+from build.bazel.scripts.workspace_utils import (
     GeneratedWorkspaceFiles,
     merge_gn_target_manifests,
     record_gn_targets_dir_from_entries,
 )
+from build.python.modules.depfile.depfile import DepFile
 
-_MODULES_DIR = os.path.join(_SCRIPT_DIR, "../../python/modules")
-sys.path.insert(0, _MODULES_DIR)
-from depfile import DepFile
-
-# LINT.ThenChange(//build/bazel/bazel_action.gni:delayed_action_imports, //build/bazel/scripts/BUILD.gn:delayed_action_imports)
+# LINT.ThenChange(
+#   //build/bazel/bazel_action.gni:bazel_action_python_script_inputs,
+#   //build/bazel/scripts/BUILD.gn:delayed_action_imports,
+# )
 
 # Set this to True to debug operations locally in this script.
 # IMPORTANT: Setting this to True will result in Ninja timeouts in CQ
@@ -109,6 +110,29 @@ def validate_extra_bazel_targets(
                     f"extra_bazel_targets_file of both {previous_owner.target} "
                     f"and {owner.target}, for platform {owner.platform}."
                 )
+
+
+def validate_export_test_packages_owners(
+    bazel_target_infos_map: BazelTargetInfosMap,
+) -> None:
+    """Checks that at most one action exports Bazel test packages.
+
+    All exported packages share one directory, from which each export deletes
+    the files of packages that aren't in the list.
+
+    Raises:
+        ValueError: if more than one action sets `export_test_packages`.
+    """
+    owners = sorted(
+        target_info.bazel_target
+        for target_info in bazel_target_infos_map.all_infos()
+        if target_info.export_test_packages
+    )
+    if len(owners) > 1:
+        raise ValueError(
+            "At most one bazel_action() may set export_test_packages, "
+            f"but these do: {', '.join(owners)}"
+        )
 
 
 def compute_sources_by_owner(
@@ -325,6 +349,7 @@ def main() -> int:
         validate_extra_bazel_targets(
             extra_targets_by_owner, bazel_target_infos_map
         )
+        validate_export_test_packages_owners(bazel_target_infos_map)
     except ValueError as e:
         parser.error(str(e))
 
@@ -580,6 +605,11 @@ def main() -> int:
                 extra_targets_file = target_info.extra_bazel_targets_file
                 if extra_targets_file:
                     depfile.add_input(extra_targets_file)
+                # `bazel_test_packages.list` (see `export_test_packages`) must
+                # not be recorded: its GN action (a no-op that marks the file
+                # as written by `fx gen`) depends on this one, so it would be a
+                # Ninja dependency cycle. Its contents are derived from the
+                # test suites in `extra_targets_file` anyway.
 
                 # And then write out the depfile
                 with open(action.ninja_depfile, "w") as f:

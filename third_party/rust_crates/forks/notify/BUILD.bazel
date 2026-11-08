@@ -77,16 +77,16 @@ rust_library(
     deps = [
         "//third_party/rust_crates/ask2patch/walkdir",
         "//third_party/rust_crates/forks/libc-0.2.190:libc",
-        "//third_party/rust_crates/vendor/log-0.4.29:log",
+        "//third_party/rust_crates/vendor/log-0.4.34:log",
         "//third_party/rust_crates/vendor/notify-types-2.1.0:notify_types",
     ] + select({
         "@rules_rust//rust/platform:aarch64-unknown-linux-gnu": [
             "//third_party/rust_crates/vendor/inotify-0.11.5:inotify",  # cfg(any(target_os = "linux", target_os = "android"))
-            "//third_party/rust_crates/vendor/mio-1.2.1:mio",  # cfg(any(target_os = "linux", target_os = "android"))
+            "//third_party/rust_crates/vendor/mio-1.2.4:mio",  # cfg(any(target_os = "linux", target_os = "android"))
         ],
         "@rules_rust//rust/platform:x86_64-unknown-linux-gnu": [
             "//third_party/rust_crates/vendor/inotify-0.11.5:inotify",  # cfg(any(target_os = "linux", target_os = "android"))
-            "//third_party/rust_crates/vendor/mio-1.2.1:mio",  # cfg(any(target_os = "linux", target_os = "android"))
+            "//third_party/rust_crates/vendor/mio-1.2.4:mio",  # cfg(any(target_os = "linux", target_os = "android"))
         ],
         "//conditions:default": [],
     }),

@@ -5,6 +5,7 @@
 #include "src/devices/bin/driver_runtime/thread_context.h"
 
 #include <lib/driver/testing/cpp/driver_runtime.h>
+#include <lib/zx/thread.h>
 
 #include <thread>
 
@@ -85,6 +86,28 @@ TEST_F(ThreadContextTest, CallStackPerThread) {
   EXPECT_FALSE(IsDriverInCallStack(driverB));
 
   PopDriver();
+}
+
+TEST_F(ThreadContextTest, RemoveCurrentDriverOnThreadExit) {
+  const void* driver = CreateFakeDriver();
+  zx_koid_t tid = ZX_KOID_INVALID;
+
+  std::thread t([&] {
+    zx_info_handle_basic_t info;
+    ASSERT_OK(
+        zx::thread::self()->get_info(ZX_INFO_HANDLE_BASIC, &info, sizeof(info), nullptr, nullptr));
+    tid = info.koid;
+
+    PushDriver(driver);
+    auto current = GetDriverOnTid(tid);
+    ASSERT_OK(current.status_value());
+    EXPECT_EQ(*current, driver);
+  });
+
+  t.join();
+
+  auto after_exit = GetDriverOnTid(tid);
+  EXPECT_EQ(after_exit.status_value(), ZX_ERR_NOT_FOUND);
 }
 
 }  // namespace thread_context

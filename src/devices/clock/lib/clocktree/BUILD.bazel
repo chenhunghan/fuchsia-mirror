@@ -19,7 +19,7 @@ cc_library(
     ],
     copts = [
         "-Isrc/devices/clock/lib/clocktree/include",
-    ],  # @bazel2gn:raw_overwrite:[ ":include" ]
+    ],
     implementation_deps = [
         "//sdk/lib/stdcompat",
         "//zircon/system/ulib/fbl",

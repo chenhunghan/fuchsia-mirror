@@ -1,0 +1,23 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "timeout_actor_bin",
+    testonly = True,
+    srcs = ["actor/main.rs"],
+    crate_name = "timeout_actor",
+    crate_root = "actor/main.rs",
+    edition = "2024",
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/sys/test_runners/stress_test/actor",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:rand",
+    ],
+)

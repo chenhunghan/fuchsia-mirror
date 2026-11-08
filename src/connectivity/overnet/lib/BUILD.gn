@@ -5,9 +5,6 @@
 group("lib") {
   testonly = true
   deps = [ "core" ]
-  if (is_host) {
-    deps += [ "ascendd" ]
-  }
 }
 
 group("tests") {

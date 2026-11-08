@@ -7,6 +7,7 @@ use std::marker::PhantomData;
 use std::num::{NonZeroU8, NonZeroU16, NonZeroU32};
 
 use fuchsia_rcu::RcuDroppable;
+use zerocopy::{Immutable, IntoBytes};
 
 use super::traits::PolicyId;
 
@@ -15,7 +16,10 @@ use super::traits::PolicyId;
 /// The `Tag` phantom parameter ensures that identifiers for different domain types
 /// (e.g., [`super::types::TypeId`]) cannot be mixed up at compile time, even if they share
 /// the same underlying integer representation.
-#[derive(Copy, Clone, Debug, Hash, Eq, Ord, PartialEq, PartialOrd, RcuDroppable)]
+#[derive(
+    Copy, Clone, Debug, Hash, Eq, Ord, PartialEq, PartialOrd, RcuDroppable, IntoBytes, Immutable,
+)]
+#[repr(transparent)]
 pub struct IdType<T, Tag> {
     value: T,
     _phantom: PhantomData<Tag>,
@@ -96,26 +100,6 @@ where
     fn from_u32(value: u32) -> Option<Self> {
         let value = NonZeroU32::new(value)?;
         Some(Self { value, _phantom: PhantomData })
-    }
-}
-
-impl<T, Tag> From<IdType<T, Tag>> for u32
-where
-    IdType<T, Tag>: PolicyId,
-{
-    fn from(id: IdType<T, Tag>) -> Self {
-        id.as_u32()
-    }
-}
-
-impl<T, Tag> TryFrom<u32> for IdType<T, Tag>
-where
-    IdType<T, Tag>: PolicyId,
-{
-    type Error = ();
-
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
-        Self::from_u32(value).ok_or(())
     }
 }
 

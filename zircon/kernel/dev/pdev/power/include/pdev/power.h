@@ -31,8 +31,6 @@ static_assert(alignof(pdev_power_ops) == 8, "pdev_power_ops align mismatch");
 
 void pdev_register_power(const pdev_power_ops* ops);
 
-const pdev_power_ops* pdev_swap_power_for_test(const pdev_power_ops* ops);
-
 __BEGIN_CDECLS
 
 void cpp_rppm_dump();

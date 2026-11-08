@@ -105,12 +105,9 @@ if (is_fuchsia) {
     ]
   }
 }
+
 fuchsia_unittest_package("profile-client-tests") {
   package_name = "profile-client-tests-gn"
   component_name = "profile-client-tests"
   deps = [ ":profile-client_test" ]
-  visibility = [
-    ":*",
-    "//src/connectivity/bluetooth:*",
-  ]
 }

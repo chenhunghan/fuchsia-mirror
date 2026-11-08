@@ -262,7 +262,7 @@ pub struct GenericWatchdog32 {
     inner: GenericWatchdog32Inner,
 
     #[mutex]
-    lock: ksync::KMutex<ksync::RawSpinlock>,
+    lock: ksync::KMutex<crate::ksync_kernel::TrackedSpinlock>,
 }
 
 unsafe impl Sync for GenericWatchdog32 {}
@@ -338,7 +338,7 @@ pub unsafe extern "C" fn generic_32bit_watchdog_early_init(config: *const DcfgGe
     let _ = unsafe {
         Pin::static_ref(&G_WATCHDOG).init_pin(pin_init::pin_init!(GenericWatchdog32 {
             inner: ksync::KCell::new(GenericWatchdog32Inner::new()),
-            lock <- ksync::KSpinlock::init(),
+            lock <- crate::ksync_kernel::KSpinlock::init(),
         }))
     };
     let is_ok = {
@@ -493,7 +493,7 @@ mod tests {
         // Verify trait methods on a local `GenericWatchdog32` instance.
         let initializer = pin_init::pin_init!(GenericWatchdog32 {
             inner: ksync::KCell::new(GenericWatchdog32Inner::new()),
-            lock <- ksync::KSpinlock::init(),
+            lock <- crate::ksync_kernel::KSpinlock::init(),
         });
         pin_init::stack_pin_init!(let watchdog = initializer);
 

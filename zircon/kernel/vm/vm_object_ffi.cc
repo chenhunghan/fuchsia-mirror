@@ -48,6 +48,15 @@ FFI_ALWAYS_INLINE bool cpp_vm_object_is_stream_compatible(const VmObject* vmo) {
   return vmo->is_stream_compatible();
 }
 
+FFI_ALWAYS_INLINE bool cpp_vm_object_is_dirty_tracked(const VmObject* vmo) {
+  return vmo->is_dirty_tracked();
+}
+
+FFI_ALWAYS_INLINE bool cpp_vm_object_debug_is_range_pinned(VmObject* vmo, uint64_t offset,
+                                                           uint64_t len) {
+  return vmo->DebugIsRangePinned(offset, len);
+}
+
 FFI_ALWAYS_INLINE void* cpp_vm_object_lock(const VmObject* vmo) { return vmo->lock(); }
 
 FFI_ALWAYS_INLINE zx_status_t cpp_vm_object_resize(VmObject* vmo, uint64_t size) {
@@ -175,6 +184,11 @@ FFI_ALWAYS_INLINE zx_status_t cpp_vm_object_lookup(VmObject* vmo, uint64_t offse
   return vmo->Lookup(offset, len, [ctx, callback](uint64_t offset, paddr_t pa) {
     return callback(ctx, offset, pa);
   });
+}
+
+FFI_ALWAYS_INLINE zx_status_t cpp_vm_object_lookup_fn_invoke(
+    const VmObject::LookupFunction* lookup_fn, uint64_t offset, paddr_t pa) {
+  return (*lookup_fn)(offset, pa);
 }
 
 FFI_ALWAYS_INLINE zx_status_t cpp_vm_object_lookup_contiguous(VmObject* vmo, uint64_t offset,
@@ -362,4 +376,8 @@ FFI_ALWAYS_INLINE void cpp_vm_object_commit_high_priority_pages(VmObject* vmo, u
   vmo->CommitHighPriorityPages(offset, len);
 }
 
+FFI_ALWAYS_INLINE void cpp_vm_object_get_name_locked(const VmObject* vmo, char* out_name,
+                                                     size_t len) TA_NO_THREAD_SAFETY_ANALYSIS {
+  vmo->get_name_locked(out_name, len);
+}
 }  // extern "C"

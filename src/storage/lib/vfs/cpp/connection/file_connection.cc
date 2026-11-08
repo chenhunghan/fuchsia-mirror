@@ -65,19 +65,6 @@ void FileConnection::Unbind() {
     binding_->Unbind();
 }
 
-#if FUCHSIA_API_LEVEL_LESS_THAN(29) || FUCHSIA_API_LEVEL_AT_LEAST(PLATFORM)
-void FileConnection::DeprecatedClone(DeprecatedCloneRequestView request,
-                                     DeprecatedCloneCompleter::Sync& completer) {
-  fidl::ServerEnd<fio::Node> server_end{std::move(request->object)};
-  if (request->flags & fio::wire::OpenFlags::kDescribe) {
-    // Ignore errors since there is nothing we can do if this fails.
-    [[maybe_unused]] auto result =
-        fidl::WireSendEvent(server_end)->OnOpen(ZX_ERR_NOT_SUPPORTED, {});
-  }
-  server_end.Close(ZX_ERR_NOT_SUPPORTED);
-}
-#endif
-
 void FileConnection::Clone(CloneRequestView request, CloneCompleter::Sync& completer) {
   const fio::Flags flags = fio::Flags::kProtocolFile | fs::internal::RightsToFlags(rights()) |
                            (GetAppend() ? fio::Flags::kFileAppend : fio::Flags());
@@ -167,34 +154,6 @@ void FileConnection::Sync(SyncCompleter::Sync& completer) {
   });
 }
 
-#if FUCHSIA_API_LEVEL_AT_LEAST(28)
-void FileConnection::DeprecatedGetAttr(DeprecatedGetAttrCompleter::Sync& completer) {
-#else
-void FileConnection::GetAttr(GetAttrCompleter::Sync& completer) {
-#endif  // FUCHSIA_API_LEVEL_AT_LEAST(28)
-  if (!(rights() & fio::Rights::kGetAttributes)) {
-    completer.Reply(ZX_ERR_BAD_HANDLE, {});
-    return;
-  }
-  zx::result attrs = vnode()->GetAttributes();
-  if (attrs.is_ok()) {
-    completer.Reply(ZX_OK, attrs->ToIoV1NodeAttributes(*vnode()));
-  } else {
-    completer.Reply(attrs.error_value(), {});
-  }
-}
-
-#if FUCHSIA_API_LEVEL_AT_LEAST(28)
-void FileConnection::DeprecatedSetAttr(DeprecatedSetAttrRequestView request,
-                                       DeprecatedSetAttrCompleter::Sync& completer) {
-#else
-void FileConnection::SetAttr(SetAttrRequestView request, SetAttrCompleter::Sync& completer) {
-#endif  // FUCHSIA_API_LEVEL_AT_LEAST(28)
-  VnodeAttributesUpdate update =
-      VnodeAttributesUpdate::FromIo1(request->attributes, request->flags);
-  completer.Reply(Connection::NodeUpdateAttributes(update).status_value());
-}
-
 void FileConnection::GetAttributes(fio::wire::NodeGetAttributesRequest* request,
                                    GetAttributesCompleter::Sync& completer) {
   if (!(rights() & fuchsia_io::Rights::kGetAttributes)) {
@@ -209,29 +168,6 @@ void FileConnection::UpdateAttributes(fio::wire::MutableNodeAttributes* request,
                                       UpdateAttributesCompleter::Sync& completer) {
   VnodeAttributesUpdate update = VnodeAttributesUpdate::FromIo2(*request);
   completer.Reply(Connection::NodeUpdateAttributes(update));
-}
-
-void FileConnection::DeprecatedGetFlags(DeprecatedGetFlagsCompleter::Sync& completer) {
-  fio::OpenFlags flags = {};
-  if (rights() & fio::Rights::kReadBytes) {
-    flags |= fio::OpenFlags::kRightReadable;
-  }
-  if (rights() & fio::Rights::kWriteBytes) {
-    flags |= fio::OpenFlags::kRightWritable;
-  }
-  if (rights() & fio::Rights::kExecute) {
-    flags |= fio::OpenFlags::kRightExecutable;
-  }
-  if (GetAppend()) {
-    flags |= fio::OpenFlags::kAppend;
-  }
-  completer.Reply(ZX_OK, flags);
-}
-
-void FileConnection::DeprecatedSetFlags(DeprecatedSetFlagsRequestView request,
-                                        DeprecatedSetFlagsCompleter::Sync& completer) {
-  const bool append = static_cast<bool>(request->flags & fio::OpenFlags::kAppend);
-  completer.Reply(SetAppend(append).status_value());
 }
 
 void FileConnection::GetFlags(GetFlagsCompleter::Sync& completer) {

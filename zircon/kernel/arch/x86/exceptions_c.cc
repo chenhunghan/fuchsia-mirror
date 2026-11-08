@@ -675,3 +675,17 @@ bool arch_install_exception_context(Thread* thread, const arch_exception_context
 }
 
 void arch_remove_exception_context(Thread* thread) { arch_reset_suspended_general_regs(thread); }
+
+static_assert(sizeof(CpuContext) == 448);
+static_assert(alignof(CpuContext) == 8);
+
+extern "C" {
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_status_t cpp_x86_request_context(cpu_num_t target_cpu,
+                                                      zx_duration_mono_t timeout,
+                                                      CpuContext* context) {
+  return g_cpu_context_exchange.RequestContext(target_cpu, timeout, *context);
+}
+
+}  // extern "C"

@@ -199,7 +199,8 @@ class UsbXhci : public fdf::DriverBase2,
 
   // Disables a slot
   fpromise::promise<void, zx_status_t> DisableSlotCommand(uint32_t slot_id);
-  fpromise::promise<void, zx_status_t> DisableSlotCommand(DeviceState& state);
+  fpromise::promise<void, zx_status_t> DisableSlotCommand(
+      DeviceState& state, fbl::RefPtr<DeviceState> keep_alive = nullptr);
 
   TRBPromise EnableSlotCommand();
 
@@ -390,6 +391,9 @@ class UsbXhci : public fdf::DriverBase2,
   }
 
  private:
+  std::vector<fbl::RefPtr<DeviceState>> CollectDisconnectSubtree(fbl::RefPtr<DeviceState> root);
+  static void DrainAndResetDeviceOnInterrupter(const fbl::RefPtr<DeviceState>& state);
+
   DISALLOW_COPY_ASSIGN_AND_MOVE(UsbXhci);
 
   // We don't currently take good advantage of multiple interrupters.  Limit the
@@ -431,7 +435,7 @@ class UsbXhci : public fdf::DriverBase2,
   fidl::ClientEnd<fuchsia_power_system::ActivityGovernor> activity_governer_;
 
   // PCI protocol client (if x86)
-  ddk::Pci pci_;
+  fdf::Pci pci_;
 
   // PDev (if ARM)
   fdf::PDev pdev_;

@@ -5,6 +5,8 @@
 #ifndef SRC_UI_LIB_ESCHER_RESOURCES_RESOURCE_H_
 #define SRC_UI_LIB_ESCHER_RESOURCES_RESOURCE_H_
 
+#include <atomic>
+
 #include "src/ui/lib/escher/base/ownable.h"
 #include "src/ui/lib/escher/base/owner.h"
 #include "src/ui/lib/escher/forward_declarations.h"
@@ -28,7 +30,7 @@ class Resource : public Ownable<Resource, ResourceTypeInfo> {
 
   // Return the sequence number of the last CommandBuffer that this resource is
   // referenced by.
-  uint64_t sequence_number() const { return sequence_number_; }
+  uint64_t sequence_number() const { return sequence_number_.load(std::memory_order_relaxed); }
 
   // Return our ResourceManager's VulkanContext.
   const VulkanContext& vulkan_context() const;
@@ -45,10 +47,16 @@ class Resource : public Ownable<Resource, ResourceTypeInfo> {
   // know that our owner (if any) is always a ResourceManager.
   ResourceManager* owner() const;
 
-  // Keep the resource alive until all CommandBuffers up to the specified
-  // sequence number have finished executing.
+  // Keep the resource alive until all CommandBuffers up to the specified sequence number have
+  // finished executing. Uses a relaxed load fast path when `seq_num` has not advanced, and an
+  // atomic compare-and-exchange loop when advancing so `sequence_number_` never regresses under
+  // concurrent updates or reads.
   void KeepAlive(uint64_t seq_num) const {
-    sequence_number_ = seq_num > sequence_number_ ? seq_num : sequence_number_;
+    uint64_t curr = sequence_number_.load(std::memory_order_relaxed);
+    while (seq_num > curr &&
+           !sequence_number_.compare_exchange_weak(curr, seq_num, std::memory_order_relaxed,
+                                                   std::memory_order_relaxed)) {
+    }
   }
 
   // Support CommandBuffer::KeepAlive().
@@ -60,7 +68,7 @@ class Resource : public Ownable<Resource, ResourceTypeInfo> {
 
   Escher* const escher_;
   const uint64_t uid_;
-  mutable uint64_t sequence_number_ = 0;
+  mutable std::atomic<uint64_t> sequence_number_{0};
 
   FXL_DISALLOW_COPY_AND_ASSIGN(Resource);
 };

@@ -51,7 +51,6 @@ fx_cc_binary(
         "//sdk/lib/async-loop:async-loop-cpp",
         "//sdk/lib/async-loop:async-loop-default",
         "//sdk/lib/component/outgoing/cpp",
-        "//sdk/lib/fdio",
         "//sdk/lib/syslog/cpp",
     ],
 )
@@ -74,7 +73,6 @@ fx_component_manifest(
 fx_component(
     name = "build-info-component",
     compiled_manifest = ":build-info-manifest",
-    component_name = "build-info",
     visibility = [
         # TODO(https://fxbug.dev/490178129): Remove this visibility when build-info-service package
         # is added to the Bazel assembly.

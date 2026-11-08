@@ -1,0 +1,36 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+# GN puts the binary in a per-target directory so the `server_bin` outputs
+# of the sibling canvas examples do not collide.
+# TODO(https://fxbug.dev/570694755): fx_cc_binary does not have an
+# output_dir attribute.
+# @bazel2gn:raw_attribute:output_dir = target_out_dir + "/cpp_natural"
+fx_cc_binary(
+    name = "bin",
+    srcs = ["main.cc"],
+    # main.cc uses angled `#include <src/lib/fxl/...>` headers, which GN
+    # resolves via `//build/config:default_include_dirs` (`-I//`), whereas
+    # Bazel defaults to `-iquote .`.
+    # TODO(https://fxbug.dev/570694755): Replace angled `src/lib/fxl` includes
+    # in `main.cc` with quoted includes in a source cleanup CL.
+    # @bazel2gn:skip
+    copts = ["-I."],
+    gn_output_name = "server_bin",
+    visibility = ["//examples/fidl/new/canvas/baseline/cpp_natural:__pkg__"],
+    deps = [
+        "//examples/fidl/new/canvas/baseline/fidl:examples.canvas.baseline_cpp",
+        "//sdk/lib/async-loop",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/component/outgoing/cpp",
+        "//sdk/lib/fdio",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl",
+    ],
+)

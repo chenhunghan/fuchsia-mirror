@@ -12,7 +12,7 @@ use fidl_fuchsia_io as fio;
 use fuchsia_async as fasync;
 use fuchsia_component::server::ServiceFs;
 use fuchsia_component_test::{
-    Capability, ChildOptions, ChildRef, LocalComponentHandles, RealmBuilder, Route,
+    Capability, ChildOptions, ChildRef, LocalComponentHandles, RealmBuilder, Ref, Route,
 };
 use fuchsia_driver_test::{
     DriverTestRealmBuilder, DriverTestRealmBuilder2, DriverTestRealmInstance,
@@ -315,8 +315,20 @@ async fn test_tunnel_boot_items() -> Result<()> {
         )
         .await?;
 
-    realm.init_mutable_config_from_package(&driver_test_realm).await?;
-    realm.set_config_value(&driver_test_realm, "tunnel_boot_items", true.into()).await?;
+    realm
+        .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+            name: "fuchsia.driver.testrealm.TunnelBootItems".parse()?,
+            value: cm_rust::ConfigValue::Single(cm_rust::ConfigSingleValue::Bool(true)),
+        }))
+        .await?;
+    realm
+        .add_route(
+            Route::new()
+                .capability(Capability::configuration("fuchsia.driver.testrealm.TunnelBootItems"))
+                .from(Ref::self_())
+                .to(&driver_test_realm),
+        )
+        .await?;
 
     let instance = realm.build().await?;
     let args = fdt::RealmArgs {

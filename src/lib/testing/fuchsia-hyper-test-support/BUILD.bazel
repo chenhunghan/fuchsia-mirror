@@ -21,8 +21,6 @@ rustc_library(
     ],
     crate_name = "fuchsia_hyper_test_support",
     edition = "2024",
-    # @bazel2gn:skip
-    lint_config = "//build/config/rust/lints:clippy_warn_default",
     visibility = ["//src:__subpackages__"],
     deps = [
         "//src/lib/fuchsia-async",

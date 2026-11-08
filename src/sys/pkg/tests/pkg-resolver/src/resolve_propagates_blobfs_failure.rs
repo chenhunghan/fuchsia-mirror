@@ -24,13 +24,13 @@ use {
 
 #[derive(Clone)]
 enum WriterFailure {
-    OnGetVmo,
-    OnBytesReady,
+    OnGetVmo(zx::Status),
+    OnBytesReady(zx::Status),
 }
 
 #[derive(Clone)]
 enum CreatorFailure {
-    OnCreate,
+    OnCreate(ffxfs::CreateBlobError),
     OnNeedsOverwrite,
 }
 
@@ -132,10 +132,8 @@ impl FakeCreator {
                 ffxfs::BlobCreatorRequest::Create { responder, hash, allow_existing } => {
                     if hash.as_slice() == self.target.0.as_slice() {
                         match &self.target.1 {
-                            FailureSource::Creator(CreatorFailure::OnCreate) => {
-                                responder
-                                    .send_no_shutdown_on_err(Err(ffxfs::CreateBlobError::Internal))
-                                    .unwrap();
+                            FailureSource::Creator(CreatorFailure::OnCreate(err)) => {
+                                responder.send_no_shutdown_on_err(Err(*err)).unwrap();
                             }
                             FailureSource::Creator(CreatorFailure::OnNeedsOverwrite) => {
                                 responder
@@ -194,16 +192,19 @@ impl FakeWriter {
         while let Some(req) = stream.next().await {
             match (&self.failure_type, req.unwrap()) {
                 (
-                    &WriterFailure::OnBytesReady,
+                    &WriterFailure::OnBytesReady(status),
                     ffxfs::BlobWriterRequest::BytesReady { responder, .. },
                 ) => {
-                    let _ = responder.send(Err(zx::Status::BAD_STATE.into_raw()));
+                    let _ = responder.send(Err(status.into_raw()));
                 }
                 (_, ffxfs::BlobWriterRequest::BytesReady { responder, .. }) => {
                     let _ = responder.send(Ok(()));
                 }
-                (&WriterFailure::OnGetVmo, ffxfs::BlobWriterRequest::GetVmo { responder, .. }) => {
-                    let _ = responder.send(Err(zx::Status::NO_MEMORY.into_raw()));
+                (
+                    &WriterFailure::OnGetVmo(status),
+                    ffxfs::BlobWriterRequest::GetVmo { responder, .. },
+                ) => {
+                    let _ = responder.send(Err(status.into_raw()));
                 }
                 (_, ffxfs::BlobWriterRequest::GetVmo { responder, .. }) => {
                     let _ = match zx::Vmo::create(8192) {
@@ -267,6 +268,7 @@ async fn make_mock_blobfs_with_failing_install_blob(
 async fn assert_resolve_package_with_failing_blobfs_fails(
     blobfs: BlobFsWithFileCreateOverride,
     pkg: Package,
+    expected_error: fidl_fuchsia_pkg::ResolveError,
 ) {
     let system_image = blobfs.system_image;
     let env = TestEnvBuilder::new()
@@ -291,7 +293,7 @@ async fn assert_resolve_package_with_failing_blobfs_fails(
         .unwrap();
     let res = env.resolve_package(format!("fuchsia-pkg://test/{}", pkg.name()).as_str()).await;
 
-    assert_matches!(res, Err(fidl_fuchsia_pkg::ResolveError::Io));
+    assert_matches!(res, Err(e) if e == expected_error);
 }
 
 // TODO(https://fxbug.dev/542690944): These have all been migrated.
@@ -299,11 +301,32 @@ async fn assert_resolve_package_with_failing_blobfs_fails(
 async fn fails_on_create_far_in_install_pkg() {
     let (blobfs, pkg) = make_mock_blobfs_with_failing_install_pkg(
         "fails_on_open_far_in_install_pkg",
-        FailureSource::Creator(CreatorFailure::OnCreate),
+        FailureSource::Creator(CreatorFailure::OnCreate(ffxfs::CreateBlobError::Internal)),
     )
     .await;
 
-    assert_resolve_package_with_failing_blobfs_fails(blobfs, pkg).await
+    assert_resolve_package_with_failing_blobfs_fails(
+        blobfs,
+        pkg,
+        fidl_fuchsia_pkg::ResolveError::Io,
+    )
+    .await
+}
+
+#[fuchsia::test]
+async fn fails_out_of_space_on_create_far_in_install_pkg() {
+    let (blobfs, pkg) = make_mock_blobfs_with_failing_install_pkg(
+        "fails_out_of_space_on_open_far_in_install_pkg",
+        FailureSource::Creator(CreatorFailure::OnCreate(ffxfs::CreateBlobError::OutOfSpace)),
+    )
+    .await;
+
+    assert_resolve_package_with_failing_blobfs_fails(
+        blobfs,
+        pkg,
+        fidl_fuchsia_pkg::ResolveError::NoSpace,
+    )
+    .await
 }
 
 #[fuchsia::test]
@@ -314,40 +337,92 @@ async fn fails_on_needs_overwrite_far_in_install_pkg() {
     )
     .await;
 
-    assert_resolve_package_with_failing_blobfs_fails(blobfs, pkg).await
+    assert_resolve_package_with_failing_blobfs_fails(
+        blobfs,
+        pkg,
+        fidl_fuchsia_pkg::ResolveError::Io,
+    )
+    .await
 }
 
 #[fuchsia::test]
 async fn fails_get_vmo_far_in_install_pkg() {
     let (blobfs, pkg) = make_mock_blobfs_with_failing_install_pkg(
         "fails_truncate_far_in_install_pkg",
-        FailureSource::Writer(WriterFailure::OnGetVmo),
+        FailureSource::Writer(WriterFailure::OnGetVmo(zx::Status::NO_MEMORY)),
     )
     .await;
 
-    assert_resolve_package_with_failing_blobfs_fails(blobfs, pkg).await
+    assert_resolve_package_with_failing_blobfs_fails(
+        blobfs,
+        pkg,
+        fidl_fuchsia_pkg::ResolveError::Io,
+    )
+    .await
+}
+
+#[fuchsia::test]
+async fn fails_out_of_space_get_vmo_far_in_install_pkg() {
+    let (blobfs, pkg) = make_mock_blobfs_with_failing_install_pkg(
+        "fails_out_of_space_truncate_far_in_install_pkg",
+        FailureSource::Writer(WriterFailure::OnGetVmo(zx::Status::NO_SPACE)),
+    )
+    .await;
+
+    assert_resolve_package_with_failing_blobfs_fails(
+        blobfs,
+        pkg,
+        fidl_fuchsia_pkg::ResolveError::NoSpace,
+    )
+    .await
 }
 
 #[fuchsia::test]
 async fn fails_bytes_ready_far_in_install_pkg() {
     let (blobfs, pkg) = make_mock_blobfs_with_failing_install_pkg(
         "fails_write_far_in_install_pkg",
-        FailureSource::Writer(WriterFailure::OnBytesReady),
+        FailureSource::Writer(WriterFailure::OnBytesReady(zx::Status::BAD_STATE)),
     )
     .await;
 
-    assert_resolve_package_with_failing_blobfs_fails(blobfs, pkg).await
+    assert_resolve_package_with_failing_blobfs_fails(
+        blobfs,
+        pkg,
+        fidl_fuchsia_pkg::ResolveError::Io,
+    )
+    .await
 }
 
 #[fuchsia::test]
 async fn fails_on_create_blob_in_install_blob() {
     let (blobfs, pkg) = make_mock_blobfs_with_failing_install_blob(
         "fails_on_open_blob_in_install_blob",
-        FailureSource::Creator(CreatorFailure::OnCreate),
+        FailureSource::Creator(CreatorFailure::OnCreate(ffxfs::CreateBlobError::Internal)),
     )
     .await;
 
-    assert_resolve_package_with_failing_blobfs_fails(blobfs, pkg).await
+    assert_resolve_package_with_failing_blobfs_fails(
+        blobfs,
+        pkg,
+        fidl_fuchsia_pkg::ResolveError::Io,
+    )
+    .await
+}
+
+#[fuchsia::test]
+async fn fails_out_of_space_on_create_blob_in_install_blob() {
+    let (blobfs, pkg) = make_mock_blobfs_with_failing_install_blob(
+        "fails_out_of_space_on_open_blob_in_install_blob",
+        FailureSource::Creator(CreatorFailure::OnCreate(ffxfs::CreateBlobError::OutOfSpace)),
+    )
+    .await;
+
+    assert_resolve_package_with_failing_blobfs_fails(
+        blobfs,
+        pkg,
+        fidl_fuchsia_pkg::ResolveError::NoSpace,
+    )
+    .await
 }
 
 #[fuchsia::test]
@@ -358,27 +433,58 @@ async fn fails_on_needs_overwrite_blob_in_install_blob() {
     )
     .await;
 
-    assert_resolve_package_with_failing_blobfs_fails(blobfs, pkg).await
+    assert_resolve_package_with_failing_blobfs_fails(
+        blobfs,
+        pkg,
+        fidl_fuchsia_pkg::ResolveError::Io,
+    )
+    .await
 }
 
 #[fuchsia::test]
 async fn fails_get_vmo_blob_in_install_blob() {
     let (blobfs, pkg) = make_mock_blobfs_with_failing_install_blob(
         "fails_truncate_blob_in_install_blob",
-        FailureSource::Writer(WriterFailure::OnGetVmo),
+        FailureSource::Writer(WriterFailure::OnGetVmo(zx::Status::NO_MEMORY)),
     )
     .await;
 
-    assert_resolve_package_with_failing_blobfs_fails(blobfs, pkg).await
+    assert_resolve_package_with_failing_blobfs_fails(
+        blobfs,
+        pkg,
+        fidl_fuchsia_pkg::ResolveError::Io,
+    )
+    .await
+}
+
+#[fuchsia::test]
+async fn fails_out_of_space_get_vmo_blob_in_install_blob() {
+    let (blobfs, pkg) = make_mock_blobfs_with_failing_install_blob(
+        "fails_out_of_space_truncate_blob_in_install_blob",
+        FailureSource::Writer(WriterFailure::OnGetVmo(zx::Status::NO_SPACE)),
+    )
+    .await;
+
+    assert_resolve_package_with_failing_blobfs_fails(
+        blobfs,
+        pkg,
+        fidl_fuchsia_pkg::ResolveError::NoSpace,
+    )
+    .await
 }
 
 #[fuchsia::test]
 async fn fails_bytes_ready_blob_in_install_blob() {
     let (blobfs, pkg) = make_mock_blobfs_with_failing_install_blob(
         "fails_write_blob_in_install_blob",
-        FailureSource::Writer(WriterFailure::OnBytesReady),
+        FailureSource::Writer(WriterFailure::OnBytesReady(zx::Status::BAD_STATE)),
     )
     .await;
 
-    assert_resolve_package_with_failing_blobfs_fails(blobfs, pkg).await
+    assert_resolve_package_with_failing_blobfs_fails(
+        blobfs,
+        pkg,
+        fidl_fuchsia_pkg::ResolveError::Io,
+    )
+    .await
 }

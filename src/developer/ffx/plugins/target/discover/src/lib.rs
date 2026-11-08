@@ -34,10 +34,7 @@ struct SystemProcessManager;
 
 impl ProcessManager for SystemProcessManager {
     fn is_running(&self, pid: u32) -> bool {
-        let nix_pid = nix::unistd::Pid::from_raw(pid as i32);
-        // First do a no-hand wait to collect the process if it's defunct.
-        let _ = nix::sys::wait::waitpid(nix_pid, Some(nix::sys::wait::WaitPidFlag::WNOHANG));
-        nix::sys::signal::kill(nix_pid, None).is_ok()
+        ffx_process::is_pid_running(pid)
     }
 
     fn daemonize(&self) -> Result<()> {

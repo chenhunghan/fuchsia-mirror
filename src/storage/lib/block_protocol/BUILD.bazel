@@ -16,6 +16,7 @@ rustc_library(
     edition = "2024",
     visibility = [
         "//src/devices/block/drivers/ramdisk:__pkg__",
+        "//src/devices/block/drivers/ufs:__pkg__",
         "//src/storage/fxfs/platform:__pkg__",
         "//src/storage/lib:__subpackages__",
     ],

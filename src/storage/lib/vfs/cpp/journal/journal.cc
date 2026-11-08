@@ -28,6 +28,7 @@
 #include "src/storage/lib/operation/operation.h"
 #include "src/storage/lib/operation/unbuffered_operation.h"
 #include "src/storage/lib/vfs/cpp/journal/format.h"
+#include "src/storage/lib/vfs/cpp/journal/format_assertions.h"
 #include "src/storage/lib/vfs/cpp/journal/journal_writer.h"
 #include "src/storage/lib/vfs/cpp/journal/superblock.h"
 #include "src/storage/lib/vfs/cpp/transaction/transaction_handler.h"

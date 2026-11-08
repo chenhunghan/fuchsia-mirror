@@ -28,12 +28,11 @@ This should ensure that the resulting output directory is a self-contained versi
 import argparse
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
 _SCRIPT_DIR = os.path.dirname(__file__)
-_BUILD_API_DIR = os.path.join(_SCRIPT_DIR, "../../api")
-sys.path.insert(0, _BUILD_API_DIR)
 
 
 def copy_tree(from_dir: Path, to_dir: Path) -> set[Path]:
@@ -90,6 +89,11 @@ def main() -> int:
         help="Fuchsia source directory (auto-detected).",
     )
     parser.add_argument(
+        "--buildifier",
+        type=Path,
+        help="Path to host buildifier tool, if available.",
+    )
+    parser.add_argument(
         "--stamp", type=Path, help="Optional output stamp path."
     )
     parser.add_argument(
@@ -117,6 +121,7 @@ def main() -> int:
     )
 
     # Step 3: Substitutue @fuchsia_rules_common// with //fuchsia_rules_common/ in output_dir
+    modified_files: list[Path] = []
     for rootdir, dirnames, filenames in os.walk(output_dir):
         for filename in filenames:
             if filename.endswith(".bzl") or filename.endswith(".bazel"):
@@ -131,6 +136,7 @@ def main() -> int:
                         "@rules_fuchsia//fuchsia_rules_common/",
                     )
                     filepath.write_text(content)
+                    modified_files.append(filepath)
 
     # Step 4: modify MODULE.bazel to remove specific segment.
     module_bazel_path = output_dir / "MODULE.bazel"
@@ -141,6 +147,16 @@ def main() -> int:
             "END_FUCHSIA_IN_TREE_ONLY",
         )
     )
+    if module_bazel_path not in modified_files:
+        modified_files.append(module_bazel_path)
+
+    # Step 5: Reformat modified Bazel files using buildifier, if available.
+    if args.buildifier and modified_files:
+        subprocess.run(
+            [str(args.buildifier.resolve()), "-mode=fix", "-lint=off"]
+            + [str(p) for p in sorted(modified_files)],
+            check=True,
+        )
 
     if args.depfile:
         assert args.stamp, f"--depfile requires --stamp path."

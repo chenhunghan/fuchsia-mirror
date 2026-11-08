@@ -97,7 +97,8 @@ zx::result<> Adapter::ServeConfigService(std::vector<fuchsia_driver_framework::O
     return zx::ok();
   }
   fuchsia_hardware_pci_root::ConfigService::InstanceHandler config_handler({
-      .config = config_bindings_.CreateHandler(this, dispatcher(), fidl::kIgnoreBindingClosure),
+      .config = config_bindings_.CreateHandler(this, fdf::Dispatcher::GetCurrent()->get(),
+                                               fidl::kIgnoreBindingClosure),
   });
   if (zx::result result = outgoing()->AddService<fuchsia_hardware_pci_root::ConfigService>(
           std::move(config_handler));
@@ -281,64 +282,69 @@ void Adapter::GetMsiHandle(GetMsiHandleRequestView request,
   completer.ReplySuccess(std::move(interrupt));
 }
 
-void Adapter::Read8(Read8RequestView request, Read8Completer::Sync& completer) {
+void Adapter::Read8(Read8RequestView request, fdf::Arena& arena, Read8Completer::Sync& completer) {
   pci_bdf_t addr = ToBanjoBdf(request->address);
   uint8_t value = 0;
   if (zx_status_t status = pciroot_.ReadConfig8(&addr, request->offset, &value); status != ZX_OK) {
-    completer.ReplyError(status);
+    completer.buffer(arena).ReplyError(status);
     return;
   }
-  completer.ReplySuccess(value);
+  completer.buffer(arena).ReplySuccess(value);
 }
 
-void Adapter::Read16(Read16RequestView request, Read16Completer::Sync& completer) {
+void Adapter::Read16(Read16RequestView request, fdf::Arena& arena,
+                     Read16Completer::Sync& completer) {
   pci_bdf_t addr = ToBanjoBdf(request->address);
   uint16_t value = 0;
   if (zx_status_t status = pciroot_.ReadConfig16(&addr, request->offset, &value); status != ZX_OK) {
-    completer.ReplyError(status);
+    completer.buffer(arena).ReplyError(status);
     return;
   }
-  completer.ReplySuccess(value);
+  completer.buffer(arena).ReplySuccess(value);
 }
 
-void Adapter::Read32(Read32RequestView request, Read32Completer::Sync& completer) {
+void Adapter::Read32(Read32RequestView request, fdf::Arena& arena,
+                     Read32Completer::Sync& completer) {
   pci_bdf_t addr = ToBanjoBdf(request->address);
   uint32_t value = 0;
   if (zx_status_t status = pciroot_.ReadConfig32(&addr, request->offset, &value); status != ZX_OK) {
-    completer.ReplyError(status);
+    completer.buffer(arena).ReplyError(status);
     return;
   }
-  completer.ReplySuccess(value);
+  completer.buffer(arena).ReplySuccess(value);
 }
 
-void Adapter::Write8(Write8RequestView request, Write8Completer::Sync& completer) {
+void Adapter::Write8(Write8RequestView request, fdf::Arena& arena,
+                     Write8Completer::Sync& completer) {
   pci_bdf_t addr = ToBanjoBdf(request->address);
   if (zx_status_t status = pciroot_.WriteConfig8(&addr, request->offset, request->value);
       status != ZX_OK) {
-    completer.ReplyError(status);
+    completer.buffer(arena).ReplyError(status);
     return;
   }
-  completer.ReplySuccess();
+  completer.buffer(arena).ReplySuccess();
 }
 
-void Adapter::Write16(Write16RequestView request, Write16Completer::Sync& completer) {
+void Adapter::Write16(Write16RequestView request, fdf::Arena& arena,
+                      Write16Completer::Sync& completer) {
   pci_bdf_t addr = ToBanjoBdf(request->address);
   if (zx_status_t status = pciroot_.WriteConfig16(&addr, request->offset, request->value);
       status != ZX_OK) {
-    completer.ReplyError(status);
+    completer.buffer(arena).ReplyError(status);
     return;
   }
-  completer.ReplySuccess();
+  completer.buffer(arena).ReplySuccess();
 }
 
-void Adapter::Write32(Write32RequestView request, Write32Completer::Sync& completer) {
+void Adapter::Write32(Write32RequestView request, fdf::Arena& arena,
+                      Write32Completer::Sync& completer) {
   pci_bdf_t addr = ToBanjoBdf(request->address);
   if (zx_status_t status = pciroot_.WriteConfig32(&addr, request->offset, request->value);
       status != ZX_OK) {
-    completer.ReplyError(status);
+    completer.buffer(arena).ReplyError(status);
     return;
   }
-  completer.ReplySuccess();
+  completer.buffer(arena).ReplySuccess();
 }
 
 }  // namespace pciroot_banjo_adapter

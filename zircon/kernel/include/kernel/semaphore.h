@@ -7,16 +7,20 @@
 #ifndef ZIRCON_KERNEL_INCLUDE_KERNEL_SEMAPHORE_H_
 #define ZIRCON_KERNEL_INCLUDE_KERNEL_SEMAPHORE_H_
 
-#include <lib/kconcurrent/chainlock.h>
 #include <lib/kconcurrent/chainlock_transaction.h>
-#include <lib/zircon-internal/macros.h>
 #include <stdint.h>
 #include <zircon/types.h>
 
-#include <kernel/ffi.h>
-#include <kernel/thread.h>
 #include <kernel/wait.h>
 #include <ktl/atomic.h>
+
+class Semaphore;
+
+// The implementation of Semaphore lives in Rust (zircon/kernel/kernel/semaphore.rs).
+extern "C" {
+void rust_semaphore_post(const Semaphore* semaphore);
+zx_status_t rust_semaphore_wait_infinite(const Semaphore* semaphore);
+}  // extern "C"
 
 // A basic counting semaphore used to control access to a shared resource.
 //
@@ -45,12 +49,7 @@ class Semaphore {
   // may return without blocking.
   //
   // |Post| has release memory order semantics and synchronizes with |Wait|.
-  //
-  // |queue_to_own| is the OwnedWaitQueue that the unblocked thread will take
-  // ownership of. If this is not-null, then we will perform an assign-owner
-  // operation on the queue. If there is no thread waiting, then no
-  // assign-owner operation will occur.
-  void Post(OwnedWaitQueue* queue_to_own = nullptr) TA_EXCL(chainlock_transaction_token);
+  void Post() TA_EXCL(chainlock_transaction_token) { rust_semaphore_post(this); }
 
   // If the count is positive, decrement the count and return ZX_OK.  Otherwise,
   // decrement the count and wait (uninterruptibly) until some other thread
@@ -58,37 +57,13 @@ class Semaphore {
   //
   // |Wait| has acquire memory order semantics and synchronizes with |Post|.
   zx_status_t Wait() TA_EXCL(chainlock_transaction_token) {
-    return WaitInternal(Deadline::infinite(), Interruptible::No);
-  }
-
-  // Just like Wait(), but interruptible.  In addition to ZX_OK, the return
-  // value can be ZX_ERR_TIMED_OUT if the deadline had passed or one of the
-  // ZX_ERR_INTERNAL_INTR errors if the thread had a signal delivered.
-  //
-  // |Wait| has acquire memory order semantics and synchronizes with |Post|.
-  zx_status_t Wait(const Deadline& deadline) TA_EXCL(chainlock_transaction_token) {
-    return WaitInternal(deadline, Interruptible::Yes);
-  }
-
-  // Observe the current internal count of the semaphore.
-  //
-  // This should only be used for testing/diagnostic purposes.
-  int64_t count() const { return count_.load(ktl::memory_order_relaxed); }
-
-  // Observe the current internal count of waiters.
-  //
-  // This should only be used for testing/diagnostic purposes.
-  uint64_t num_waiters() const TA_EXCL(chainlock_transaction_token, waitq_.get_lock()) {
-    SingleChainLockGuard guard{IrqSaveOption, waitq_.get_lock(), CLT_TAG("Semaphore::num_waiters")};
-    return waitq_.Count();
+    return rust_semaphore_wait_infinite(this);
   }
 
  private:
-  zx_status_t WaitInternal(const Deadline& deadline, Interruptible interruptible);
-
   // This class has two fields that must be kept in sync, a count and a
   // WaitQueue.  There are some rules for keeping them in sync.  See the
-  // implementation comments of |Post| and |Wait| for details.
+  // implementation comments of |Post| and |Wait| (in semaphore.rs) for details.
   //
   // When |count_| is greater than zero, a call to |Wait| will decrement the
   // count and "fall through" without blocking.
@@ -113,16 +88,10 @@ class Semaphore {
   //
   // It's critical that the lock protecting |waitq_| be held when transitioning
   // |count_| from negative to non-negative or from non-negative to negative.
+  //
+  // The layout of these fields must match the Rust `Semaphore`.
   ktl::atomic<int64_t> count_;
   WaitQueue waitq_;
 };
-
-extern "C" {
-void cpp_semaphore_init(ffi::Uninitialized<Semaphore>* semaphore, int64_t initial_count);
-void cpp_semaphore_destroy(Semaphore* semaphore);
-void cpp_semaphore_post(Semaphore* semaphore);
-void cpp_semaphore_post_etc(Semaphore* semaphore, OwnedWaitQueue* queue_to_own);
-zx_status_t cpp_semaphore_wait_deadline(Semaphore* semaphore, const Deadline* deadline);
-}
 
 #endif  // ZIRCON_KERNEL_INCLUDE_KERNEL_SEMAPHORE_H_

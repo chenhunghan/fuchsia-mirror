@@ -432,6 +432,7 @@ impl<S: HandleOwner> Directory<S> {
         src: Option<(&Directory<S>, &str)>,
         dst: &str,
         borrow_metadata_space: bool,
+        extra_keys: &[LockKey],
     ) -> Result<ReplaceContext<'_>, Error> {
         // Since we don't know the child object ID until we've looked up the child, we need to loop
         // until we have acquired a lock on a child whose ID is the same as it was in the last
@@ -447,10 +448,13 @@ impl<S: HandleOwner> Directory<S> {
         let fs = store.filesystem();
         let mut child_object_id = INVALID_OBJECT_ID;
         let mut src_object_id = src.map(|_| INVALID_OBJECT_ID);
-        let mut lock_keys = LockKeys::with_capacity(4);
+        let mut lock_keys = LockKeys::with_capacity(4 + extra_keys.len());
         lock_keys.push(LockKey::object(store.store_object_id(), self.object_id()));
+        for key in extra_keys {
+            lock_keys.push(key.clone());
+        }
         loop {
-            lock_keys.truncate(1);
+            lock_keys.truncate(1 + extra_keys.len());
             if let Some(src) = src {
                 lock_keys.push(LockKey::object(store.store_object_id(), src.0.object_id()));
                 if let Some(src_object_id) = src_object_id {
@@ -460,7 +464,8 @@ impl<S: HandleOwner> Directory<S> {
                 }
             }
             if child_object_id != INVALID_OBJECT_ID {
-                lock_keys.push(LockKey::object(store.store_object_id(), child_object_id));
+                let key = LockKey::object(store.store_object_id(), child_object_id);
+                lock_keys.push(key);
             };
             let truncate_guard = if child_object_id != INVALID_OBJECT_ID {
                 Some(fs.truncate_guard_owned(store.store_object_id(), child_object_id).await)
@@ -903,33 +908,38 @@ impl<S: HandleOwner> Directory<S> {
             .item
             .value
         else {
-            bail!(
-                anyhow!(FxfsError::Inconsistent)
-                    .context("Directory.create_child_file_with_options: expected mutation object")
-            );
+            bail!(anyhow!(FxfsError::Inconsistent).context(
+                "Directory.create_child_unnamed_temporary_file: expected mutation object"
+            ));
         };
 
-        // Update the object mutation with parent's project ID.
-        let mut child_mutation = transaction
-            .get_object_mutation(
+        if let Some(project_id) = project_id {
+            // Update the object mutation with parent's project ID.
+            let mut child_mutation = transaction
+                .get_object_mutation(
+                    self.store().store_object_id(),
+                    ObjectKey::object(handle.object_id()),
+                )
+                .unwrap()
+                .clone();
+            if let ObjectValue::Object {
+                attributes: ObjectAttributes { project_id: child_project_id, .. },
+                ..
+            } = &mut child_mutation.item.value
+            {
+                *child_project_id = Some(project_id);
+            } else {
+                bail!(anyhow!(FxfsError::Inconsistent).context(
+                    "Directory.create_child_unnamed_temporary_file: expected file object"
+                ));
+            }
+            transaction.add(self.store().store_object_id(), Mutation::ObjectStore(child_mutation));
+            transaction.merge_bytes_and_nodes(
                 self.store().store_object_id(),
-                ObjectKey::object(handle.object_id()),
-            )
-            .unwrap()
-            .clone();
-        if let ObjectValue::Object {
-            attributes: ObjectAttributes { project_id: child_project_id, .. },
-            ..
-        } = &mut child_mutation.item.value
-        {
-            *child_project_id = project_id;
-        } else {
-            bail!(
-                anyhow!(FxfsError::Inconsistent)
-                    .context("Directory.create_child_file_with_options: expected file object")
+                ObjectKey::project_usage(self.store().root_directory_object_id(), project_id),
+                BytesAndNodes { bytes: 0, nodes: 1 },
             );
         }
-        transaction.add(self.store().store_object_id(), Mutation::ObjectStore(child_mutation));
 
         // Add object to graveyard - the object should be removed on remount.
         self.store().add_to_graveyard(transaction, handle.object_id());
@@ -1015,14 +1025,19 @@ impl<S: HandleOwner> Directory<S> {
                             HandleOptions::default(),
                             /* trace: */ false,
                         );
-                        handle
-                            .write_new_attr_pre_encrypted(
-                                transaction,
-                                AttributeId::DATA,
-                                FSCRYPT_KEY_ID,
-                                &link,
-                            )
-                            .await?;
+                        // Symlinks fit within `WRITE_ATTR_BATCH_SIZE`, so
+                        // `write_new_attr_pre_encrypted` always completes in one transaction.
+                        assert!(
+                            handle
+                                .write_new_attr_pre_encrypted(
+                                    transaction,
+                                    AttributeId::DATA,
+                                    FSCRYPT_KEY_ID,
+                                    &link,
+                                )
+                                .await?
+                                .is_none()
+                        );
                     }
                     transaction.add(
                         store_id,
@@ -1082,7 +1097,14 @@ impl<S: HandleOwner> Directory<S> {
                         HandleOptions::default(),
                         /* trace: */ false,
                     );
-                    handle.write_new_attr(transaction, AttributeId::DATA, &link).await?;
+                    // Symlinks fit within `WRITE_ATTR_BATCH_SIZE`, so `write_new_attr` always
+                    // completes in one transaction.
+                    assert!(
+                        handle
+                            .write_new_attr(transaction, AttributeId::DATA, &link)
+                            .await?
+                            .is_none()
+                    );
                     cipher_set
                 } else {
                     None

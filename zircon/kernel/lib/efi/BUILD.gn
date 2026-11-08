@@ -5,6 +5,8 @@
 # https://opensource.org/licenses/MIT
 
 import("//build/cpp/library_headers.gni")
+import("//zircon/kernel/kernel_bindgen_crate.gni")
+import("//zircon/kernel/kernel_rust_crate.gni")
 
 static_library("efi") {
   visibility = [
@@ -16,6 +18,78 @@ static_library("efi") {
   public_deps = [ ":headers" ]
 
   sources = [ "guids.c" ]
+}
+
+source_set("efi-bindgen-c") {
+  visibility = [ ":*" ]
+  sources = [ "efi_bindgen.c" ]
+  deps = [ ":headers" ]
+}
+
+kernel_bindgen_crate("efi-bindings") {
+  visibility = [ ":*" ]
+  notice_year = 2026
+  headers = [ "efi_bindgen.h" ]
+  non_rust_deps = [ ":headers" ]
+  deps = [ "//third_party/rust_crates:zerocopy" ]
+
+  type_allowlist = [
+    "efi_boot_services",
+    "efi_guid",
+    "efi_memory_attributes_table_header",
+    "efi_memory_descriptor",
+    "efi_memory_type",
+    "efi_runtime_services",
+    "efi_simple_text_input_protocol",
+    "efi_simple_text_output_protocol",
+    "efi_status",
+    "efi_system_table",
+    "efi_time",
+  ]
+  var_allowlist = [
+    "EFI_VARIABLE_.*",
+    "ZIRCON_CRASHLOG_EFIATTR",
+    "kEfi.*",
+  ]
+
+  # Reachable from efi_system_table but never dereferenced by the kernel.
+  opaque_types = [
+    "efi_boot_services",
+    "efi_simple_text_input_protocol",
+    "efi_simple_text_output_protocol",
+  ]
+
+  std_derives = [
+    "default",
+    "eq",
+    "partialeq",
+  ]
+
+  no_debug_types = [ "efi_runtime_services" ]
+
+  additional_bindgen_flags = [
+    "--with-derive-custom-struct=efi_memory_(descriptor|attributes_table_header)=zerocopy::FromBytes,zerocopy::KnownLayout,zerocopy::Immutable",
+
+    # Function pointers are not meaningfully comparable.
+    "--no-partialeq=efi_runtime_services",
+  ]
+
+  expect_lints = [
+    "non_camel_case_types",
+    "non_snake_case",
+    "non_upper_case_globals",
+  ]
+
+  raw_lines = [ "#![no_std]" ]
+}
+
+kernel_rust_crate("efi-rs") {
+  crate_name = "efi"
+  sources = [ "src/lib.rs" ]
+  deps = [
+    ":efi-bindgen-c",
+    ":efi-bindings",
+  ]
 }
 
 library_headers("headers") {
@@ -47,6 +121,7 @@ library_headers("headers") {
     "efi/runtime-services.h",
     "efi/system-table.h",
     "efi/types.h",
+    "efi/zircon.h",
   ]
   public_deps = [
     # All headers use `#include <zircon/compiler.h>`.

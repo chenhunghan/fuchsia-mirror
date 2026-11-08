@@ -49,11 +49,19 @@ Examples
   bp 2 disable
       Disable a specific breakpoint.
 
+  tracepoint 2 disable
+  tp 2 disable
+      Disable a specific tracepoint.
+
   disable
       Disable the current breakpoint.
 )";
 
 void RunVerbDisable(const Command& cmd, fxl::RefPtr<CommandContext> cmd_context) {
+  if (cmd.HasNoun(Noun::kTracepoint)) {
+    ModifyTracepointsEnabled(cmd_context->GetConsoleContext(), cmd, false, "Disabled", cmd_context);
+    return;
+  }
   std::vector<Breakpoint*> breakpoints;
 
   if (Err err = ResolveBreakpointsForModification(cmd, "disable", &breakpoints); err.has_error())

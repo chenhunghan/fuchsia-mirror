@@ -1,0 +1,85 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+fidl_library(
+    name = "fidl",
+    srcs = ["deadline.fidl"],
+    enable_hlcpp = True,
+    library_name = "fuchsia.testing.deadline",
+    visibility = [
+        "//src/lib/fake-clock/fidl:__pkg__",
+        "//src/lib/fake-clock/svc:__pkg__",
+    ],
+)
+
+rustc_library(
+    name = "named-timer",
+    srcs = ["src/lib.rs"],
+    crate_name = "named_timer",
+    edition = "2024",
+    link_deps = [":named_timer_noop_lib"],
+    visibility = [
+        "//src/connectivity/policy/reachability:__subpackages__",
+        "//src/lib/fake-clock/examples/rust:__pkg__",
+        "//src/lib/fake-clock/svc:__pkg__",
+        "//src/power/power-manager:__subpackages__",
+    ],
+    deps = [
+        ":fidl_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fuchsia-async",
+    ],
+)
+
+fx_cc_library(
+    name = "named-timer-headers",
+    srcs = ["named_timer.h"],
+    visibility = ["//src/lib/fake-clock/lib:__pkg__"],
+    alwayslink = True,
+)
+
+# TODO(https://fxbug.dev/574676082): GN builds this as a shared_library so
+# that libfake_clock.so (//src/lib/fake-clock/lib) can override the weak
+# `create_named_deadline` at runtime. There is no platform (non-IDK) shared
+# library rule in Bazel yet, so the no-op is linked statically here and
+# Bazel-built binaries cannot use fake-clock named deadlines. Convert this to a
+# shared library before migrating any fake-clock consumer.
+# @bazel2gn:skip
+fx_cc_library(
+    name = "named_timer_noop_lib",
+    srcs = ["noop_timer.cc"],
+    implementation_deps = [":named-timer-headers"],
+    visibility = ["//visibility:private"],
+)
+
+rustc_test(
+    name = "named-timer_test",
+    crate = ":named-timer",
+    crate_name = "named_timer_lib_test",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//visibility:private"],
+    deps = ["//third_party/rust_crates/vendor:futures"],
+)
+
+fx_unittest_package(
+    name = "named-timer-test",
+    package_name = "named-timer-test",
+    unit_tests = [":named-timer_test"],
+    visibility = ["//visibility:private"],
+)

@@ -24,7 +24,6 @@ struct RustPDevPowerLevelController;
 
 extern "C" {
 
-void rust_pdev_power_level_controller_reset_for_test();
 zx_status_t rust_pdev_power_level_controller_get(
     uint32_t domain_id, const RustPDevPowerLevelController** out_controller);
 void rust_pdev_power_level_controller_release(const RustPDevPowerLevelController* controller);
@@ -33,9 +32,6 @@ zx_status_t rust_pdev_power_level_controller_post(const RustPDevPowerLevelContro
                                                   uint32_t* out_cpu_mask);
 zx_status_t rust_pdev_power_level_controller_get_current_power_level(
     const RustPDevPowerLevelController* controller, uint32_t domain_id, uint64_t* out_level);
-size_t rust_pdev_power_level_controller_domain_count(
-    const RustPDevPowerLevelController* controller);
-bool rust_pdev_power_level_controller_is_supported();
 
 }  // extern "C"
 
@@ -60,8 +56,6 @@ class PDevPowerLevelController final : public PowerLevelController {
 
     return zx::ok(std::move(instance));
   }
-
-  static void ResetForTest() { rust_pdev_power_level_controller_reset_for_test(); }
 
   explicit PDevPowerLevelController(PrivateConstructorTag tag,
                                     const RustPDevPowerLevelController* inner)
@@ -98,13 +92,14 @@ class PDevPowerLevelController final : public PowerLevelController {
   // this id.
   uint64_t id() const final { return ZX_KOID_INVALID; }
 
-  static bool IsSupported() { return rust_pdev_power_level_controller_is_supported(); }
-
-  size_t domain_count() const { return rust_pdev_power_level_controller_domain_count(inner_); }
-
  private:
   const RustPDevPowerLevelController* const inner_;
 };
+
+#ifdef _KERNEL
+extern "C" zx_status_t cpp_pdev_power_level_controller_get(
+    uint32_t domain_id, power_management::PowerLevelController** out_controller);
+#endif
 
 #ifdef UNITTESTS_ENABLED
 extern "C" {

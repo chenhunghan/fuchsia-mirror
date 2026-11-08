@@ -2,13 +2,15 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
 load(":assert_no_deps_test.bzl", "assert_no_deps_test_suite")
 load(":component_manifests_test.bzl", "component_manifests_test_suite")
+load(":pyrefly_test.bzl", "pyrefly_build_only_tests_group", "pyrefly_test_suite")
 
-package(
-    default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
-)
+package(default_applicable_licenses = ["//:license"])
 
 assert_no_deps_test_suite(
     name = "assert_no_deps_test",
@@ -18,10 +20,93 @@ component_manifests_test_suite(
     name = "component_manifests_test",
 )
 
+py_library(
+    name = "pyrefly_valid_lib",
+    testonly = True,
+    srcs = ["testdata/valid_lib.py"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+py_library(
+    name = "pyrefly_valid_pyi_lib",
+    testonly = True,
+    pyi_srcs = ["testdata/valid_stub.pyi"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+py_library(
+    name = "pyrefly_type_error_optout",
+    testonly = True,
+    srcs = ["testdata/type_error_optout.py"],
+    tags = ["no-pyrefly"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+py_binary(
+    name = "pyrefly_valid_bin",
+    testonly = True,
+    srcs = ["testdata/valid_binary.py"],
+    main = "testdata/valid_binary.py",
+    pyi_deps = [":pyrefly_valid_pyi_lib"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [":pyrefly_valid_lib"],
+)
+
+host_py_test(
+    name = "pyrefly_host_test_default",
+    testonly = True,
+    srcs = ["testdata/valid_test.py"],
+    main = "testdata/valid_test.py",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [":pyrefly_valid_lib"],
+)
+
+host_py_test(
+    name = "pyrefly_host_test_disabled",
+    testonly = True,
+    srcs = ["testdata/type_error_optout.py"],
+    main = "testdata/type_error_optout.py",
+    tags = ["no-pyrefly"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+pyrefly_test_suite(
+    name = "pyrefly_test",
+)
+
+pyrefly_build_only_tests_group(
+    name = "build_only_tests",
+    testonly = True,
+    stamp = "build_only_tests.stamp",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
+    deps = [
+        ":pyrefly_host_test_default_bin",
+        ":pyrefly_host_test_disabled_bin",
+        ":pyrefly_type_error_optout",
+        ":pyrefly_valid_bin",
+        ":pyrefly_valid_lib",
+        ":pyrefly_valid_pyi_lib",
+    ],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        ":pyrefly_host_test_default",
+        ":pyrefly_host_test_disabled",
+        "//build/bazel/aspects:pyrefly_runner_test",
+    ],
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
+)
+
 test_suite(
     name = "tests",
     tests = [
         ":assert_no_deps_test",
         ":component_manifests_test",
+        ":pyrefly_test",
     ],
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
 )

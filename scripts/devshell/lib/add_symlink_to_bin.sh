@@ -34,7 +34,7 @@ if [[ -d "${FUCHSIA_DIR}/.jiri_root/bin" ]]; then
     jiri_bin=""
     # jiri executes hooks as direct child processes (${PPID}), and is not on
     # PATH on LUCI bots (while also prepending .jiri_root/bin to PATH itself).
-    # Inspect the parent process first via /proc (Linux) and ps (macOS/POSIX)
+    # Inspect the parent process first via /proc and ps
     # before falling back to PATH lookup.
     for candidate in \
       "$(readlink -f "/proc/${PPID}/exe" 2>/dev/null || true)" \

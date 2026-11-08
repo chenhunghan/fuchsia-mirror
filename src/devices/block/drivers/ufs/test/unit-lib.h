@@ -24,106 +24,6 @@ namespace ufs {
 
 using fdf_power::testing::FakeElementControl;
 
-// Implement all the WireServer handlers of fuchsia_hardware_pci::Device as protocol as required by
-// FIDL.
-class FakePci : public fidl::WireServer<fuchsia_hardware_pci::Device> {
- public:
-  fuchsia_hardware_pci::Service::InstanceHandler GetInstanceHandler() {
-    return fuchsia_hardware_pci::Service::InstanceHandler({
-        .device = binding_group_.CreateHandler(
-            this, fdf::Dispatcher::GetCurrent()->async_dispatcher(), fidl::kIgnoreBindingClosure),
-    });
-  }
-
-  void SetDeviceInfo(uint16_t vendor_id, uint16_t device_id) {
-    vendor_id_ = vendor_id;
-    device_id_ = device_id;
-  }
-
-  void GetDeviceInfo(GetDeviceInfoCompleter::Sync& completer) override {
-    fuchsia_hardware_pci::wire::DeviceInfo info;
-    info.vendor_id = vendor_id_;
-    info.device_id = device_id_;
-    completer.Reply(info);
-  }
-  void GetBar(GetBarRequestView request, GetBarCompleter::Sync& completer) override {
-    fuchsia_hardware_pci::wire::Bar bar = {
-        .bar_id = 0,
-        .size = RegisterMap::kRegisterSize,
-        .result = fuchsia_hardware_pci::wire::BarResult::WithVmo(mock_device_->GetVmo()),
-    };
-    completer.ReplySuccess(std::move(bar));
-  }
-  void SetBusMastering(SetBusMasteringRequestView request,
-                       SetBusMasteringCompleter::Sync& completer) override {
-    completer.ReplySuccess();
-  }
-  void ResetDevice(ResetDeviceCompleter::Sync& completer) override { completer.ReplySuccess(); }
-  void AckInterrupt(AckInterruptCompleter::Sync& completer) override { completer.ReplySuccess(); }
-  void MapInterrupt(MapInterruptRequestView request,
-                    MapInterruptCompleter::Sync& completer) override {
-    completer.ReplySuccess(mock_device_->GetIrq());
-  }
-  void GetInterruptModes(GetInterruptModesCompleter::Sync& completer) override {
-    fuchsia_hardware_pci::wire::InterruptModes modes;
-    modes.has_legacy = true;
-    modes.msix_count = 0;
-    modes.msi_count = 0;
-    completer.Reply(modes);
-  }
-  void SetInterruptMode(SetInterruptModeRequestView request,
-                        SetInterruptModeCompleter::Sync& completer) override {
-    completer.ReplySuccess();
-  }
-  void ReadConfig8(ReadConfig8RequestView request, ReadConfig8Completer::Sync& completer) override {
-    completer.ReplySuccess(0);
-  }
-  void ReadConfig16(ReadConfig16RequestView request,
-                    ReadConfig16Completer::Sync& completer) override {
-    completer.ReplySuccess(0);
-  }
-  void ReadConfig32(ReadConfig32RequestView request,
-                    ReadConfig32Completer::Sync& completer) override {
-    completer.ReplySuccess(0);
-  }
-  void WriteConfig8(WriteConfig8RequestView request,
-                    WriteConfig8Completer::Sync& completer) override {
-    completer.ReplySuccess();
-  }
-  void WriteConfig16(WriteConfig16RequestView request,
-                     WriteConfig16Completer::Sync& completer) override {
-    completer.ReplySuccess();
-  }
-  void WriteConfig32(WriteConfig32RequestView request,
-                     WriteConfig32Completer::Sync& completer) override {
-    completer.ReplySuccess();
-  }
-  void GetCapabilities(GetCapabilitiesRequestView request,
-                       GetCapabilitiesCompleter::Sync& completer) override {
-    std::vector<uint8_t> empty_vec;
-    auto empty_vec_view = fidl::VectorView<uint8_t>::FromExternal(empty_vec);
-    completer.Reply(empty_vec_view);
-  }
-  void GetExtendedCapabilities(GetExtendedCapabilitiesRequestView request,
-                               GetExtendedCapabilitiesCompleter::Sync& completer) override {
-    std::vector<uint16_t> empty_vec;
-    auto empty_vec_view = fidl::VectorView<uint16_t>::FromExternal(empty_vec);
-    completer.Reply(empty_vec_view);
-  }
-  void GetBti(GetBtiRequestView request, GetBtiCompleter::Sync& completer) override {
-    completer.ReplySuccess(mock_device_->GetFakeBti());
-  }
-
-  void SetMockDevice(ufs_mock_device::UfsMockDevice* mock_device) { mock_device_ = mock_device; }
-
-  fidl::ServerBindingGroup<fuchsia_hardware_pci::Device> binding_group_;
-
-  zx::interrupt irq_;
-  ufs_mock_device::UfsMockDevice* mock_device_;
-  uint16_t vendor_id_ = 0;
-  uint16_t device_id_ = 0;
-};
-
 class FakeCpuElementManager
     : public fidl::testing::TestBase<fuchsia_power_system::CpuElementManager> {
  public:
@@ -258,9 +158,15 @@ class TestUfs : public UfsPci {
   inspect::ComponentInspector& GetInspector() { return *component_inspector_; }
 
   bool SupportsPowerDownSuspend() const override { return supports_power_down_suspend_; }
+  bool SupportsRuntimePowerManagement() const override {
+    return supports_runtime_power_management_;
+  }
 
   static void SetSupportsPowerDownSuspend(bool supports) {
     supports_power_down_suspend_ = supports;
+  }
+  static void SetSupportsRuntimePowerManagement(bool supports) {
+    supports_runtime_power_management_ = supports;
   }
 
   // Marks |slot| as holding a programmed inline encryption key, bypassing the inline encryption
@@ -281,6 +187,7 @@ class TestUfs : public UfsPci {
   // RegisterMmioProcessor to the TestUfs class.
   static ufs_mock_device::UfsMockDevice* mock_device_;
   static bool supports_power_down_suspend_;
+  static bool supports_runtime_power_management_;
 };
 
 class Environment : public fdf_testing::Environment {
@@ -292,7 +199,10 @@ class Environment : public fdf_testing::Environment {
 
     // Serve (fake) pci_server_
     auto result = to_driver_vfs.AddService<fuchsia_hardware_pci::Service>(
-        pci_server_.GetInstanceHandler(), "pci");
+        fuchsia_hardware_pci::Service::InstanceHandler({
+            .device = pci_server_.bind_handler(fdf::Dispatcher::GetCurrent()->async_dispatcher()),
+        }),
+        "pci");
     EXPECT_EQ(ZX_OK, result.status_value());
 
     // Serve (fake) cpu_element_manager.
@@ -304,12 +214,12 @@ class Environment : public fdf_testing::Environment {
     return zx::ok();
   }
 
-  FakePci& pci_server() { return pci_server_; }
+  pci::FakePciProtocol& pci_server() { return pci_server_; }
   FakeCpuElementManager& cpu_element_manager() { return cpu_element_manager_; }
   FakePowerBroker& power_broker() { return power_broker_; }
 
  private:
-  FakePci pci_server_;
+  pci::FakePciProtocol pci_server_;
   compat::DeviceServer device_server_;
   FakeCpuElementManager cpu_element_manager_;
   FakePowerBroker power_broker_;

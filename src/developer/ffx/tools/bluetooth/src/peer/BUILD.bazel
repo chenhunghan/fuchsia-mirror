@@ -1,0 +1,50 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//src/developer/ffx/build:ffx_plugin.bzl", "ffx_plugin")
+
+package(default_applicable_licenses = ["//:license"])
+
+# run: fx test ffx_bluetooth_peer_test
+ffx_plugin(
+    name = "ffx_bluetooth_peer",
+    srcs = ["src/lib.rs"],
+    args_deps = [
+        "//sdk/fidl/fuchsia.bluetooth.sys:fuchsia.bluetooth.sys_rust",
+        "//src/developer/ffx/core:lib",
+        "//src/developer/ffx/tools/bluetooth/common:ffx_bluetooth_common",
+        "//third_party/rust_crates/vendor:argh",
+    ],
+    args_srcs = ["src/args.rs"],
+    edition = "2024",
+    version = "0.1.0",
+    visibility = ["//src/developer/ffx/tools/bluetooth:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.bluetooth.affordances:fuchsia.bluetooth.affordances_rust_fdomain",
+        "//sdk/fidl/fuchsia.bluetooth:fuchsia.bluetooth_rust_fdomain",
+        "//sdk/fidl/fuchsia.bluetooth.sys:fuchsia.bluetooth.sys_rust_fdomain",
+        "//src/connectivity/bluetooth/lib/fuchsia-bluetooth",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/developer/ffx/lib/target/holders:lib",
+        "//src/developer/ffx/lib/writer:lib",
+        "//src/developer/ffx/tools/bluetooth/common:ffx_bluetooth_common",
+        "//src/lib/fdomain/client",
+        # prettytable-rs is a fork outside vendor/; GN reaches it through
+        # the //third_party/rust_crates:prettytable-rs alias group.
+        "//third_party/rust_crates/forks/prettytable-rs:prettytable",  # @bazel2gn:path_overwrite://third_party/rust_crates:prettytable-rs
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+host_rustc_test(
+    name = "ffx_bluetooth_peer_test",
+    crate = ":ffx_bluetooth_peer",
+    visibility = ["//src/developer/ffx:__pkg__"],
+    deps = [
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:regex",
+    ],
+)

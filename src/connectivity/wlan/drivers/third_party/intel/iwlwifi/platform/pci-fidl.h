@@ -21,7 +21,6 @@ extern "C" {
 // but since the iwl_pci_fidl struct is opaque and always accessed as a pointer,
 // it can be used by C code.
 
-void iwl_pci_ack_interrupt(const struct iwl_pci_fidl* fidl);
 zx_status_t iwl_pci_read_config16(const struct iwl_pci_fidl* fidl, uint16_t offset,
                                   uint16_t* out_value);
 zx_status_t iwl_pci_get_device_info(const struct iwl_pci_fidl* fidl, pci_device_info_t* out_info);

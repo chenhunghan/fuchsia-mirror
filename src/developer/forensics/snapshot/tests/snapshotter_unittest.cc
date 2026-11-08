@@ -17,9 +17,9 @@
 #include <gtest/gtest.h>
 
 #include "src/developer/forensics/testing/stubs/data_provider.h"
+#include "src/developer/forensics/utils/vmo.h"
 #include "src/lib/files/file.h"
 #include "src/lib/files/scoped_temp_dir.h"
-#include "src/lib/fsl/vmo/strings.h"
 #include "src/lib/testing/loop_fixture/test_loop_fixture.h"
 
 namespace forensics {
@@ -73,12 +73,9 @@ TEST_F(SnapshotterTest, Basic) {
   fuchsia_feedback::Attachment snapshot;
   snapshot.key("unused");
 
-  fsl::SizedVmo sized_vmo;
-  ASSERT_TRUE(fsl::VmoFromString(payload, &sized_vmo));
-  snapshot.value(fuchsia_mem::Buffer{{
-      .vmo = std::move(sized_vmo.vmo()),
-      .size = sized_vmo.size(),
-  }});
+  zx::result<fuchsia_mem::Buffer> buffer = BufferFromString(payload);
+  ASSERT_TRUE(buffer.is_ok());
+  snapshot.value(std::move(*buffer));
 
   SetUpDataProviderServer(std::move(snapshot));
 

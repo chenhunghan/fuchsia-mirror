@@ -10,10 +10,12 @@ import os
 import pathlib
 import stat
 import subprocess
+import sys
 import types
 from collections import defaultdict
 from collections.abc import Set
 from importlib.resources import as_file, files
+from types import MappingProxyType
 from typing import Any, NamedTuple, Self, TextIO
 
 from tp_shell import PerfettoTraceProcessor
@@ -22,6 +24,9 @@ from trace_processing import trace_model, trace_time
 
 _LOGGER: logging.Logger = logging.getLogger("Performance")
 _JSONLINES_SUFFIX = ".systemTraceEvents.jsonlines"
+_MISSING: object = object()
+_SCALAR_ARG_TYPES: tuple[type, ...] = (int, float, str, bool, type(None))
+_MAX_SINGLE_ARG_CACHE_SIZE: int = 4096
 
 
 class _FlowKey:
@@ -509,7 +514,6 @@ def create_model_from_file_paths(
         scheduling_records: dict[int, list[trace_model.SchedulingRecord]] = {}
         for line in jsonlines_file:
             system_trace_event = json.loads(line)
-            _validate_field_type(system_trace_event, "ph", str)
             _ingest_system_record(
                 system_trace_event,
                 pid_to_name,
@@ -545,6 +549,23 @@ def _consume_json_for_trace_events(
     # or is of a different type than what is asserted here, then the JSON trace
     # event is considered to be malformed.
     def check_trace_event(json_trace_event: dict[str, Any]) -> None:
+        ph = json_trace_event.get("ph")
+        if type(ph) is str and ph != "M":
+            cat = json_trace_event.get("cat")
+            name = json_trace_event.get("name")
+            ts = json_trace_event.get("ts")
+            pid = json_trace_event.get("pid")
+            tid = json_trace_event.get("tid")
+            args = json_trace_event.get("args", _MISSING)
+            if (
+                type(cat) is str
+                and type(name) is str
+                and isinstance(ts, (int, float))
+                and isinstance(pid, int)
+                and isinstance(tid, (int, float))
+                and (args is _MISSING or isinstance(args, dict))
+            ):
+                return
         _validate_field_type(json_trace_event, "ph", str)
         if json_trace_event["ph"] != "M":
             _validate_field_type(json_trace_event, "cat", str)
@@ -555,6 +576,18 @@ def _consume_json_for_trace_events(
         _validate_field_type(json_trace_event, "tid", float | int)
         if "args" in json_trace_event:
             _validate_field_type(json_trace_event, "args", dict)
+
+    # `DurationEvent.child_durations` and `DurationEvent.child_flows` are
+    # read-only tuples that default to the empty singleton `()` so leaf events
+    # do not allocate per-instance empty lists. Accumulate children and flows in
+    # temporary lists keyed by their parent/enclosing event and assign the
+    # frozen tuples once at the end of import.
+    children_by_parent: dict[
+        trace_model.DurationEvent, list[trace_model.DurationEvent]
+    ] = defaultdict(list)
+    flows_by_enclosing: dict[
+        trace_model.DurationEvent, list[trace_model.FlowEvent]
+    ] = defaultdict(list)
 
     # A helper lambda to add duration events to the appropriate duration stack
     # and do the appropriate duration/flow graph setup.  It is used for both
@@ -568,22 +601,23 @@ def _consume_json_for_trace_events(
             top = duration_stack[-1]
             top_parent = duration_stack[-2]
             top.parent = top_parent
-            top_parent.child_durations.append(duration_event)
+            children_by_parent[top_parent].append(duration_event)
 
-    # Obtain the overall list of trace events.
+    # Obtain the overall list of trace events without copying the list.
     _validate_field_type(root_object, "traceEvents", list)
-    trace_events: list[dict[str, Any]] = root_object["traceEvents"].copy()
+    trace_events: list[dict[str, Any]] = root_object.pop("traceEvents")
 
     # Add synthetic end events for each complete event in the trace data to
     # assist with maintaining each thread's duration stack.  This isn't strictly
     # necessary, however it makes the duration stack bookkeeping simpler.
-    for trace_event in root_object["traceEvents"]:
+    initial_event_count = len(trace_events)
+    for i in range(initial_event_count):
+        trace_event = trace_events[i]
         if trace_event["ph"] == "X":
             synthetic_end_event: dict[str, Any] = trace_event.copy()
             synthetic_end_event["ph"] = "fuchsia_synthetic_end"
             synthetic_end_event["ts"] = trace_event["ts"] + trace_event["dur"]
             trace_events.append(synthetic_end_event)
-    del root_object["traceEvents"]
 
     # Sort the events by their timestamp.  We need to iterate through the events
     # in sorted order to compute things such as duration stacks and flow
@@ -612,6 +646,26 @@ def _consume_json_for_trace_events(
     ] = defaultdict(list)
     # Final list of events to be written into the Model.
     result_events: list[trace_model.Event] = []
+    # Bounded cache of read-only views for repeated single-entry scalar args
+    # (such as kernel:power "Rate" counter events).
+    single_arg_cache: dict[
+        tuple[str, type, Any], MappingProxyType[str, Any]
+    ] = {}
+
+    def deduplicate_single_scalar_arg(event_dict: dict[str, Any]) -> None:
+        raw_args = event_dict.get("args")
+        if raw_args is not None and len(raw_args) == 1:
+            k, v = next(iter(raw_args.items()))
+            v_type = type(v)
+            if v_type in _SCALAR_ARG_TYPES:
+                cache_key = (k, v_type, v)
+                cached = single_arg_cache.get(cache_key)
+                if cached is not None:
+                    event_dict["args"] = cached
+                elif len(single_arg_cache) < _MAX_SINGLE_ARG_CACHE_SIZE:
+                    proxy = MappingProxyType({sys.intern(k): v})
+                    single_arg_cache[cache_key] = proxy
+                    event_dict["args"] = proxy
 
     dropped_flow_event_counter: int = 0
     dropped_async_event_counter: int = 0
@@ -627,11 +681,19 @@ def _consume_json_for_trace_events(
 
         phase: str = trace_event["ph"]
         pid: int = trace_event["pid"]
-        tid: int = int(trace_event["tid"])
-        track_key: tuple[int, int] = (pid, tid)
-        duration_stack = duration_stacks[track_key]
+        raw_tid = trace_event["tid"]
+        tid: int = raw_tid if type(raw_tid) is int else int(raw_tid)
+        if type(raw_tid) is not int:
+            trace_event["tid"] = tid
 
-        if phase in ("X", "B"):
+        if phase == "C":
+            deduplicate_single_scalar_arg(trace_event)
+            counter_event = trace_model.CounterEvent.consume_dict(trace_event)
+            result_events.append(counter_event)
+        elif phase in ("X", "B"):
+            deduplicate_single_scalar_arg(trace_event)
+            track_key: tuple[int, int] = (pid, tid)
+            duration_stack = duration_stacks[track_key]
             duration_event = trace_model.DurationEvent.consume_dict(trace_event)
             if track_key in unbound_flow_events:
                 for unbound_flow_event in unbound_flow_events[track_key]:
@@ -641,6 +703,7 @@ def _consume_json_for_trace_events(
             if phase == "X":
                 result_events.append(duration_event)
         elif phase == "E":
+            duration_stack = duration_stacks[(pid, tid)]
             if duration_stack:
                 popped_begin: trace_model.DurationEvent = duration_stack.pop()
                 # It's we drop the "Begin" or "End" part of a begin-end duration pair, or we get
@@ -655,11 +718,7 @@ def _consume_json_for_trace_events(
                     duration_stack.append(popped_begin)
                     continue
                 popped_begin.duration = (
-                    trace_time.TimePoint.from_epoch_delta(
-                        trace_time.TimeDelta.from_microseconds(
-                            trace_event["ts"]
-                        )
-                    )
+                    trace_time.TimePoint.from_microseconds(trace_event["ts"])
                     - popped_begin.start
                 )
                 if "args" in trace_event:
@@ -669,6 +728,7 @@ def _consume_json_for_trace_events(
                     }
                 result_events.append(popped_begin)
         elif phase == "fuchsia_synthetic_end":
+            duration_stack = duration_stacks[(pid, tid)]
             assert duration_stack
             popped_complete: trace_model.DurationEvent = duration_stack.pop()
             # We know that since we artificially insert the matching pairs for complete duration
@@ -680,6 +740,7 @@ def _consume_json_for_trace_events(
             while popped_complete.duration == None:
                 popped_complete = duration_stack.pop()
         elif phase == "b":
+            deduplicate_single_scalar_arg(trace_event)
             async_key: _AsyncKey = _AsyncKey.from_trace_event(trace_event)
             async_event = trace_model.AsyncEvent.consume_dict(
                 async_key.id, trace_event
@@ -692,11 +753,7 @@ def _consume_json_for_trace_events(
             )
             if begin_async_event is not None:
                 begin_async_event.duration = (
-                    trace_time.TimePoint.from_epoch_delta(
-                        trace_time.TimeDelta.from_microseconds(
-                            trace_event["ts"]
-                        )
-                    )
+                    trace_time.TimePoint.from_microseconds(trace_event["ts"])
                     - begin_async_event.start
                 )
                 if "args" in trace_event:
@@ -709,6 +766,7 @@ def _consume_json_for_trace_events(
                 continue
             result_events.append(begin_async_event)
         elif phase == "i" or phase == "I":
+            deduplicate_single_scalar_arg(trace_event)
             instant_event = trace_model.InstantEvent.consume_dict(trace_event)
             result_events.append(instant_event)
         elif phase == "s" or phase == "t" or phase == "f":
@@ -737,6 +795,8 @@ def _consume_json_for_trace_events(
                     dropped_flow_event_counter += 1
                     continue
 
+            track_key = (pid, tid)
+            duration_stack = duration_stacks[track_key]
             if not duration_stack:
                 dropped_flow_event_counter += 1
                 continue
@@ -744,11 +804,12 @@ def _consume_json_for_trace_events(
             enclosing_duration: trace_model.DurationEvent | None = (
                 duration_stack[-1] if binding_point == "enclosing" else None
             )
+            deduplicate_single_scalar_arg(trace_event)
             flow_event = trace_model.FlowEvent.consume_dict(
                 flow_key.id, enclosing_duration, trace_event
             )
             if enclosing_duration:
-                enclosing_duration.child_flows.append(flow_event)
+                flows_by_enclosing[enclosing_duration].append(flow_event)
             else:
                 unbound_flow_events[track_key].append(flow_event)
 
@@ -761,9 +822,6 @@ def _consume_json_for_trace_events(
             else:
                 live_flows.pop(flow_key)
             result_events.append(flow_event)
-        elif phase == "C":
-            counter_event = trace_model.CounterEvent.consume_dict(trace_event)
-            result_events.append(counter_event)
         elif phase == "n":
             # TODO(https://fxbug.dev/42117378): Support nested async events.  In the
             # meantime, just drop them.
@@ -821,7 +879,7 @@ def _consume_json_for_trace_events(
     # required to preserve the ordering of events when they share the same start
     # timestamp. Such events are more likely to occur on systems with a low
     # timer resolution.
-    result_events.sort(key=lambda x: x.start)
+    result_events.sort(key=lambda x: x.start.to_epoch_nanoseconds())
 
     # Print warnings about anomalous conditions in the trace.
     live_duration_events_count = sum(len(ds) for ds in duration_stacks.values())
@@ -853,6 +911,11 @@ def _consume_json_for_trace_events(
             f"Warning, dropped {dropped_nested_async_event_counter} nested "
             f"async events"
         )
+
+    for parent_event, children in children_by_parent.items():
+        parent_event.child_durations = children
+    for enclosing_event, flows in flows_by_enclosing.items():
+        enclosing_event.child_flows = flows
 
     return result_events
 
@@ -913,6 +976,11 @@ def consume_json_to_create_model(
     )
 
 
+_THREAD_STATE_BY_VALUE: dict[int, trace_model.ThreadState] = {
+    s.value: s for s in trace_model.ThreadState
+}
+
+
 def _ingest_system_record(
     system_trace_event: dict[str, Any],
     pid_to_name: dict[int, str],
@@ -920,24 +988,24 @@ def _ingest_system_record(
     tid_to_pid: dict[int, int],
     scheduling_records: dict[int, list[trace_model.SchedulingRecord]],
 ) -> None:
-    _validate_field_type(system_trace_event, "ph", str)
+    system_event_type = system_trace_event.get("ph")
+    if type(system_event_type) is not str:
+        _validate_field_type(system_trace_event, "ph", str)
+        assert isinstance(system_event_type, str)
 
-    system_event_type: str = system_trace_event["ph"]
-    if system_event_type == "p":
-        pid, name = _ingest_process_record(system_trace_event)
-        pid_to_name[pid] = name
+    if system_event_type == "k":
+        cpu, switch_record = _ingest_context_switch(system_trace_event)
+        scheduling_records.setdefault(cpu, []).append(switch_record)
+    elif system_event_type == "w":
+        cpu, waking_record = _ingest_waking_record(system_trace_event)
+        scheduling_records.setdefault(cpu, []).append(waking_record)
     elif system_event_type == "t":
         tid, pid, name = _ingest_thread_record(system_trace_event)
         tid_to_name[tid] = name
         tid_to_pid[tid] = pid
-    elif system_event_type == "k":
-        cpu, switch_record = _ingest_context_switch(system_trace_event)
-        scheduling_records.setdefault(cpu, [])
-        scheduling_records[cpu].append(switch_record)
-    elif system_event_type == "w":
-        cpu, waking_record = _ingest_waking_record(system_trace_event)
-        scheduling_records.setdefault(cpu, [])
-        scheduling_records[cpu].append(waking_record)
+    elif system_event_type == "p":
+        pid, name = _ingest_process_record(system_trace_event)
+        pid_to_name[pid] = name
     else:
         _LOGGER.warning(
             f"Unknown phase {system_event_type} from {system_trace_event}"
@@ -1031,36 +1099,44 @@ def _ingest_context_switch(
     The incoming or outgoing thread may be the idle thread, which is indicated by a
     priority of -0x80000000.
     """
-    _validate_field_type(system_trace_event, "ts", float | int)
-    _validate_field_type(system_trace_event, "cpu", int)
-    _validate_field_type(system_trace_event, "out", dict)
-    _validate_field_type(system_trace_event["out"], "tid", int)
-    _validate_field_type(system_trace_event["out"], "state", int)
-    _validate_field_type(system_trace_event, "in", dict)
-    _validate_field_type(system_trace_event["in"], "tid", int)
-
-    incoming_prio = None
-    outgoing_prio = None
-
-    if "prio" in system_trace_event["in"] and isinstance(
-        system_trace_event["in"]["prio"], int
+    ts = system_trace_event.get("ts")
+    cpu = system_trace_event.get("cpu")
+    out_rec = system_trace_event.get("out")
+    in_rec = system_trace_event.get("in")
+    if not (
+        isinstance(ts, (int, float))
+        and isinstance(cpu, int)
+        and isinstance(out_rec, dict)
+        and isinstance(in_rec, dict)
+        and isinstance(out_rec.get("tid"), int)
+        and isinstance(out_rec.get("state"), int)
+        and isinstance(in_rec.get("tid"), int)
     ):
-        incoming_prio = system_trace_event["in"]["prio"]
+        _validate_field_type(system_trace_event, "ts", float | int)
+        _validate_field_type(system_trace_event, "cpu", int)
+        _validate_field_type(system_trace_event, "out", dict)
+        _validate_field_type(system_trace_event["out"], "tid", int)
+        _validate_field_type(system_trace_event["out"], "state", int)
+        _validate_field_type(system_trace_event, "in", dict)
+        _validate_field_type(system_trace_event["in"], "tid", int)
+        assert isinstance(ts, (int, float))
+        assert isinstance(cpu, int)
+        assert isinstance(out_rec, dict)
+        assert isinstance(in_rec, dict)
 
-    if "prio" in system_trace_event["out"] and isinstance(
-        system_trace_event["out"]["prio"], int
-    ):
-        outgoing_prio = system_trace_event["out"]["prio"]
+    in_prio = in_rec.get("prio")
+    incoming_prio = in_prio if isinstance(in_prio, int) else None
+    out_prio = out_rec.get("prio")
+    outgoing_prio = out_prio if isinstance(out_prio, int) else None
 
-    timestamp = trace_time.TimePoint.from_epoch_delta(
-        trace_time.TimeDelta.from_microseconds(system_trace_event["ts"])
-    )
-
-    cpu = system_trace_event["cpu"]
-    incoming_tid = system_trace_event["in"]["tid"]
-    outgoing_tid = system_trace_event["out"]["tid"]
-    outgoing_state = system_trace_event["out"]["state"]
-    args = system_trace_event.get("args", {})
+    timestamp = trace_time.TimePoint.from_microseconds(ts)
+    incoming_tid: int = in_rec["tid"]
+    outgoing_tid: int = out_rec["tid"]
+    outgoing_state_raw: int = out_rec["state"]
+    outgoing_state = _THREAD_STATE_BY_VALUE.get(outgoing_state_raw)
+    if outgoing_state is None:
+        outgoing_state = trace_model.ThreadState(outgoing_state_raw)
+    args = system_trace_event.get("args")
 
     return ContextSwitchMapping(
         cpu,
@@ -1070,7 +1146,7 @@ def _ingest_context_switch(
             outgoing_tid=outgoing_tid,
             incoming_prio=incoming_prio,
             outgoing_prio=outgoing_prio,
-            outgoing_state=trace_model.ThreadState(outgoing_state),
+            outgoing_state=outgoing_state,
             args=args,
         ),
     )
@@ -1083,25 +1159,35 @@ def _ingest_waking_record(system_trace_event: dict[str, Any]) -> WakingMapping:
     Indicates that thread has woken up and is waiting to run on a given cpu. Frequent
     and lengthy waking records can indicate high cpu contention or starving threads.
     """
-    _validate_field_type(system_trace_event, "ts", float | int)
-    _validate_field_type(system_trace_event, "cpu", int)
-    _validate_field_type(system_trace_event, "tid", int)
+    ts = system_trace_event.get("ts")
+    cpu = system_trace_event.get("cpu")
+    tid = system_trace_event.get("tid")
+    prio = system_trace_event.get("prio", _MISSING)
+    args = system_trace_event.get("args", _MISSING)
+    if not (
+        isinstance(ts, (int, float))
+        and isinstance(cpu, int)
+        and isinstance(tid, int)
+        and (prio is _MISSING or isinstance(prio, int))
+        and (args is _MISSING or isinstance(args, dict))
+    ):
+        _validate_field_type(system_trace_event, "ts", float | int)
+        _validate_field_type(system_trace_event, "cpu", int)
+        _validate_field_type(system_trace_event, "tid", int)
+        if "prio" in system_trace_event:
+            _validate_field_type(system_trace_event, "prio", int)
+        if "args" in system_trace_event:
+            _validate_field_type(system_trace_event, "args", dict)
+        assert isinstance(ts, (int, float))
+        assert isinstance(cpu, int)
+        assert isinstance(tid, int)
 
-    # Args and prio are optional, if they exist, make sure they are correct
-    prio = None
-    if "prio" in system_trace_event:
-        _validate_field_type(system_trace_event, "prio", int)
-        prio = system_trace_event["prio"]
-
-    if "args" in system_trace_event:
-        _validate_field_type(system_trace_event, "args", dict)
-
-    timestamp = trace_time.TimePoint.from_epoch_delta(
-        trace_time.TimeDelta.from_microseconds(system_trace_event["ts"])
-    )
-    cpu = system_trace_event["cpu"]
-    tid = system_trace_event["tid"]
-    args = system_trace_event.get("args", {})
+    prio_val: int | None = prio if isinstance(prio, int) else None
+    args_val: dict[str, Any] | None = args if isinstance(args, dict) else None
+    timestamp = trace_time.TimePoint.from_microseconds(ts)
     return WakingMapping(
-        cpu, trace_model.Waking(start=timestamp, tid=tid, prio=prio, args=args)
+        cpu,
+        trace_model.Waking(
+            start=timestamp, tid=tid, prio=prio_val, args=args_val
+        ),
     )

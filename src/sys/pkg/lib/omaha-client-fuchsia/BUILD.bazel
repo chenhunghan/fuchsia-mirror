@@ -113,6 +113,5 @@ fx_component_manifest(
 fx_test_component(
     name = "omaha-client-fuchsia-tests-test-driver",
     compiled_manifest = ":test-driver-manifest",
-    component_name = "test-driver",
     deps = [":omaha-client-fuchsia_test_packaged_bin"],
 )

@@ -6,8 +6,7 @@
 
 #include <string>
 
-#include <re2/re2.h>
-
+#include "re2/re2.h"
 #include "src/lib/fxl/strings/concatenate.h"
 #include "src/lib/fxl/strings/substitute.h"
 

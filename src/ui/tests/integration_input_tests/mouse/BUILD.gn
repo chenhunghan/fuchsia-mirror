@@ -26,39 +26,18 @@ cc_test_executable("mouse-input-test-bin") {
   output_name = "mouse-input-test"
   deps = [
     "//sdk/fidl/fuchsia.accessibility.semantics:fuchsia.accessibility.semantics_cpp",
-    "//sdk/fidl/fuchsia.buildinfo:fuchsia.buildinfo_cpp",
-    "//sdk/fidl/fuchsia.component:fuchsia.component_cpp",
-    "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_cpp",
-    "//sdk/fidl/fuchsia.element:fuchsia.element_cpp",
-    "//sdk/fidl/fuchsia.fonts:fuchsia.fonts_cpp",
-    "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_cpp",
-    "//sdk/fidl/fuchsia.memorypressure:fuchsia.memorypressure_cpp",
-    "//sdk/fidl/fuchsia.metrics:fuchsia.metrics_cpp",
-    "//sdk/fidl/fuchsia.net.interfaces:fuchsia.net.interfaces_cpp",
-    "//sdk/fidl/fuchsia.posix.socket:fuchsia.posix.socket_cpp",
-    "//sdk/fidl/fuchsia.process:fuchsia.process_cpp",
-    "//sdk/fidl/fuchsia.scheduler:fuchsia.scheduler_cpp",
-    "//sdk/fidl/fuchsia.session.scene:fuchsia.session.scene_cpp",
-    "//sdk/fidl/fuchsia.tracing.provider:fuchsia.tracing.provider_cpp",
-    "//sdk/fidl/fuchsia.ui.app:fuchsia.ui.app_cpp",
-    "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_cpp",
-    "//sdk/fidl/fuchsia.vulkan.loader:fuchsia.vulkan.loader_cpp",
-    "//sdk/fidl/fuchsia.web:fuchsia.web_cpp",
-    "//sdk/lib/async-loop:async-loop-cpp",
-    "//sdk/lib/async-loop:async-loop-default",
-    "//sdk/lib/component/outgoing/cpp",
+    "//sdk/fidl/fuchsia.ui.composition:fuchsia.ui.composition_cpp",
+    "//sdk/fidl/fuchsia.ui.test.input:fuchsia.ui.test.input_cpp",
+    "//sdk/fidl/fuchsia.web:fuchsia.web_hlcpp",
     "//sdk/lib/sys/component/cpp/testing:cpp",
-    "//sdk/lib/sys/cpp",
-    "//sdk/lib/ui/scenic/cpp",
+    "//sdk/lib/syslog/cpp",
     "//src/lib/fxl/test:gtest_main",
-    "//src/lib/testing/loop_fixture",
+    "//src/lib/json_parser",
     "//src/ui/testing/util:portable_ui_test",
+    "//src/ui/testing/util:web_view_client",
     "//third_party/googletest:gtest",
+    "//third_party/rapidjson",
     "//zircon/system/ulib/zx",
-
-    # TODO(https://fxbug.dev/296294151): Fix after realm builder support new C++ binding.
-    "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_cpp_hlcpp_conversion",
-    "//sdk/lib/fidl/cpp:hlcpp_conversion",
   ]
 }
 
@@ -73,25 +52,19 @@ fuchsia_test_component("mouse-input-test-component") {
 fuchsia_test_package("mouse-input-test") {
   test_components = [ ":mouse-input-test-component" ]
   deps = [
-    # The test realms.
-    "mouse-input-chromium:mouse-input-chromium-component",
-
     # TODO(https://fxbug.dev/42070261): This should be provided by the Product
     # configurations on which these tests run rather than as deps.
     "//src/chromium:web_context_provider_for_test",
 
     # Launched in the test realm for hermeticity.
     "//src/cobalt/bin/testing/fake_cobalt",
-    "//src/connectivity/network/netstack3:component-for-tests",
     "//src/developer/build_info/testing:fake-build-info-component",
-    "//src/developer/memory/pressure_signaler:component",
     "//src/fonts:font_provider_hermetic_for_test",
-
-    # Include some default config (it doesn't matter which, since we're going to
-    # override it).
-    "//src/ui/testing/test_ui_stack:flatland_scene_manager_config",
+    "//src/memory/pressure_signaler:component",
+    "//src/testing/fidl/intl_property_manager:intl_property_manager_component",
     "//src/ui/testing/test_ui_stack:test-ui-stack-component",
   ]
+  subpackages = [ "//src/connectivity/network/netstack3:package-for-tests" ]
   test_specs = {
     # Do not fail the test if a message with level ERROR is logged.  Several
     # components will log ERROR if they miss a non-essential FIDL API in the

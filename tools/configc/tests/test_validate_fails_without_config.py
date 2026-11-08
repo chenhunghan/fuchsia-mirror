@@ -7,11 +7,11 @@ import pathlib
 import subprocess
 import sys
 
-PACKAGE = "configured_by_assembly"
-COMPONENT = "to_configure.cm"
+PACKAGE = "validate_structured_config_repackaging"
+COMPONENT = "fail_missing_config.cm"
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description="Ensure that configc validate-package fails with missing structured config."
     )

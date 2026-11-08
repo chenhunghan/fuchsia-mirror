@@ -230,6 +230,7 @@ python_library("tp_shell") {
   source_root = "."
   sources = [
     "__init__.py",
+    "tp_server.py",
     "tp_utils.py",
   ]
   library_deps = [ ":perfetto_py" ]

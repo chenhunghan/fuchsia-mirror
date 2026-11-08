@@ -63,9 +63,7 @@ class SARSettingTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         # Setup AP
         ssid: str = AccessPointConfig.random_string(AP_SSID_LENGTH_2G)
         if not self.openwrt_ap and not self.access_point:
-            raise signals.TestAbortClass(
-                "No access point configured for this test."
-            )
+            raise signals.TestError("No access point configured for this test.")
         if self.openwrt_ap:
             self.openwrt_ap.configure_wifi(
                 AccessPointConfig(
@@ -102,7 +100,12 @@ class SARSettingTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         ).unwrap()
 
         # Connect to the AP
-        await iface.scan_and_connect(ssid=ssid)
+        target_channel = (
+            DEFAULT_2G_CHANNEL.number
+            if self.openwrt_ap
+            else AP_DEFAULT_CHANNEL_2G
+        )
+        await iface.scan_and_connect(ssid=ssid, channels=[target_channel])
 
         # confirm the SAR scenario is still set
         get_sar_resp = (

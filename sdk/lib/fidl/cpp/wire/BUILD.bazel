@@ -156,7 +156,16 @@ idk_cc_source_library(
         "//sdk/lib/driver/runtime:__pkg__",
         "//sdk/lib/fidl/cpp:__subpackages__",
         "//sdk/lib/fidl_driver:__pkg__",
+        "//sdk/lib/sys/component/cpp/testing:__pkg__",
         "//sdk/lib/sys/cpp:__pkg__",
+        "//src/connectivity/network/lib/udp_serde:__pkg__",
+        "//src/devices/bin/driver_runtime:__pkg__",
+        "//src/graphics/display/lib/driver-framework-migration-utils/dispatcher:__pkg__",
+        "//src/graphics/display/lib/driver-framework-migration-utils/metadata:__pkg__",
+        "//src/lib/fidl/contrib/connection:__pkg__",
+        "//src/lib/fidl/llcpp:__subpackages__",
+        "//src/storage/memfs:__pkg__",
+        "//src/sys/loopback_resolver:__pkg__",
     ],  # @bazel2gn:raw_overwrite:[ "//*" ]
     public_configs = [":include"],  # For bazel2gn.
 )

@@ -14,7 +14,6 @@ rustc_binary("bin") {
   sources = [ "src/main.rs" ]
   deps = [
     "fidl:fuchsia.pkg.test_rust",
-    "//sdk/fidl/fuchsia.component.sandbox:fuchsia.component.sandbox_rust",
     "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
     "//sdk/fidl/fuchsia.testing.harness:fuchsia.testing.harness_rust",
     "//sdk/rust/zx",
@@ -42,7 +41,6 @@ rustc_binary("bin-fxblob") {
   sources = [ "src/main.rs" ]
   deps = [
     "fidl:fuchsia.pkg.test_rust",
-    "//sdk/fidl/fuchsia.component.sandbox:fuchsia.component.sandbox_rust",
     "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
     "//sdk/fidl/fuchsia.testing.harness:fuchsia.testing.harness_rust",
     "//sdk/rust/zx",

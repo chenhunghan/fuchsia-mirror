@@ -1,0 +1,65 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+exports_files(
+    ["data/config.json"],
+    visibility = ["//src/developer/ffx:__pkg__"],
+)
+
+rustc_library(
+    name = "lib",
+    srcs = [
+        "src/gcs.rs",
+        "src/lib.rs",
+        "src/pbms.rs",
+        "src/transfer_manifest.rs",
+    ],
+    crate_name = "pbms",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//build/assembly/tools/mos_tool:__pkg__",
+        "//src/developer/ffx:__subpackages__",
+    ],
+    deps = [
+        "//src/developer/ffx/config:lib",
+        "//src/developer/lib/credentials:lib",
+        "//src/lib/assembly/product_bundle",
+        "//src/lib/fuchsia-hyper",
+        "//src/lib/gcs",
+        "//src/lib/structured_ui",
+        "//src/lib/transfer_manifest",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:async-fs",
+        "//third_party/rust_crates/vendor:camino",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:http-body-util",
+        "//third_party/rust_crates/vendor:hyper",
+        "//third_party/rust_crates/vendor:hyper-util",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:url",
+    ],
+)
+
+# Needs reviewer attention (bazel2gn skip): pbms is listed in
+# tests_migrated_ffx_libraries and tested via //src/developer/ffx:tests.
+# @bazel2gn:skip
+host_rustc_test(
+    name = "pbms_lib_test",
+    crate = ":lib",
+    edition = "2024",
+    visibility = ["//src/developer/ffx:__pkg__"],
+    deps = [
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:tempfile",
+    ],
+)

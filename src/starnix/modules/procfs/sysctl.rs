@@ -7,6 +7,7 @@ use crate::sys_net::{
     ProcSysNetIpv6Neigh, RmemMaxFile, TcpRmemFile, TcpWmemFile, WmemMaxFile,
 };
 use crate::sysctl_directory::{SysctlDirectory, SysctlDirectoryMutator};
+use starnix_core::mm::DumpPolicy;
 use starnix_core::security;
 use starnix_core::task::{CurrentTask, SeccompAction};
 use starnix_core::vfs::pseudo::simple_directory::SimpleDirectory;
@@ -18,6 +19,7 @@ use starnix_uapi::auth::{CAP_LAST_CAP, CAP_SYS_ADMIN, CAP_SYS_RESOURCE, Capabili
 use starnix_uapi::errors::Errno;
 use starnix_uapi::file_mode::mode;
 use starnix_uapi::resource_limits::default_threads_max;
+use starnix_uapi::restricted_aspace::RESTRICTED_ASPACE_BASE;
 use starnix_uapi::version::{KERNEL_RELEASE, KERNEL_VERSION};
 use starnix_uapi::{errno, error, uapi};
 use std::borrow::Cow;
@@ -275,7 +277,10 @@ pub fn sysctl_directory(fs: &FileSystemHandle) -> FsNodeHandle {
         );
         dir.entry(
             "mmap_min_addr",
-            StubBytesFile::new_node(bug_ref!("https://fxbug.dev/322874526")),
+            StubBytesFile::new_node_with_data(
+                bug_ref!("https://fxbug.dev/322874526"),
+                format!("{}\n", RESTRICTED_ASPACE_BASE),
+            ),
             mode,
         );
         dir.entry(
@@ -341,11 +346,7 @@ pub fn sysctl_directory(fs: &FileSystemHandle) -> FsNodeHandle {
             StubBytesFile::new_node(bug_ref!("https://fxbug.dev/322874764")),
             mode,
         );
-        dir.entry(
-            "suid_dumpable",
-            StubBytesFile::new_node(bug_ref!("https://fxbug.dev/322874210")),
-            mode,
-        );
+        dir.entry("suid_dumpable", SystemLimitFile::<SuidDumpable>::new_node(), mode);
         dir.subdir("selinux", 0o555, |_dir| {});
         dir.subdir("verity", 0o555, |dir| {
             dir.entry("require_signatures", VerityRequireSignaturesFile::new_node(), mode);
@@ -358,8 +359,7 @@ pub fn sysctl_directory(fs: &FileSystemHandle) -> FsNodeHandle {
             mode,
         );
     });
-    // TODO: Validate the mode bits are correct.
-    root_dir.into_node(fs, 0o777)
+    root_dir.into_node(fs, 0o555)
 }
 
 struct VerityRequireSignaturesFile;
@@ -426,8 +426,7 @@ pub fn net_directory(fs: &FileSystemHandle) -> FsNodeHandle {
             );
         });
     });
-    // TODO: Validate the mode bits are correct.
-    dir.into_node(fs, 0o777)
+    dir.into_node(fs, 0o555)
 }
 
 struct KernelTaintedFile;
@@ -704,6 +703,21 @@ impl AtomicLimit for PipeMaxSize {
     }
 }
 
+struct SuidDumpable;
+impl AtomicLimit for SuidDumpable {
+    type ValueType = i32;
+    const WRITE_CAP: Capabilities = CAP_SYS_ADMIN;
+
+    fn load(current_task: &CurrentTask) -> i32 {
+        current_task.kernel().system_limits.suid_dumpable.load().into()
+    }
+    fn store(current_task: &CurrentTask, value: i32) -> Result<(), Errno> {
+        let policy = DumpPolicy::try_from(value)?;
+        current_task.kernel().system_limits.suid_dumpable.store(policy);
+        Ok(())
+    }
+}
+
 struct SoMaxConn;
 impl AtomicLimit for SoMaxConn {
     type ValueType = i32;
@@ -837,14 +851,14 @@ impl BytesFileOps for DropCachesFile {
                 "/proc/sys/vm/drop_caches pagecache"
             ),
             // 2: Frees dentries and inodes (and underlying VMO page cache).
-            2 => current_task.kernel().mounts.drop_caches(),
+            2 => current_task.kernel().mounts.drop_caches(current_task),
             // 3: Frees page cache, dentries, and inodes.
             3 => {
                 track_stub!(
                     TODO("https://fxbug.dev/322874299"),
                     "/proc/sys/vm/drop_caches pagecache"
                 );
-                current_task.kernel().mounts.drop_caches();
+                current_task.kernel().mounts.drop_caches(current_task);
             }
             // 4: Suppresses informational kernel logging of drop_caches; this
             // is a no-op in Starnix.

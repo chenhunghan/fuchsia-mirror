@@ -44,12 +44,17 @@ rustc_library("kgsl_strings") {
   ]
   source_root = "$target_gen_dir/lib.rs"
   edition = "2024"
+  visibility = [
+    ":*",
+    "//src/starnix/modules/kgsl:*",
+  ]
   deps = [ "//src/starnix/lib/starnix_uapi" ]
   non_rust_deps = [
     ":copy_lib",
     ":gen_strings",
   ]
 }
+
 action("gen_strings") {
   sources = [ "//src/starnix/lib/linux_uapi/src/arm64.rs" ]
   outputs = [ "$target_gen_dir/kgsl_strings.rs" ]

@@ -100,6 +100,7 @@ _ZXTEST_HDRS = [
   "include/zxtest/cpp/assert_streams.h",
   "include/zxtest/cpp/internal.h",
   "include/zxtest/cpp/scoped_trace.h",
+  "include/zxtest/cpp/streams_helper.h",
   "include/zxtest/cpp/zxtest.h",
   "include/zxtest/zxtest.h",
 ]
@@ -139,6 +140,7 @@ static_library("zxtest") {
   visibility = [ "//*" ]
   public_deps = _ZXTEST_DEPS
 }
+
 static_library("zxtest-streams") {
   sources = _ZXTEST_SRCS
   public = _ZXTEST_HDRS

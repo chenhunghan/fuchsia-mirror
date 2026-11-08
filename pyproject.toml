@@ -62,3 +62,16 @@ allow_untyped_calls = true
 [[tool.mypy.overrides]]
 module = "yaml"
 ignore_missing_imports = true
+
+
+# Pyrefly is being rolled out to replace mypy; see https://fxbug.dev/575968075.
+[tool.pyrefly]
+# Matches mypy's `ignore_missing_imports = true`: some dependencies live in
+# //third_party and are not always on the search path.
+ignore-missing-imports = ["*"]
+
+# Hermeticity: don't query a host Python interpreter; type check against the
+# vendored Python (//prebuilt/third_party/python3) on Linux.
+skip-interpreter-query = true
+python-version = "3.14"
+python-platform = "linux"

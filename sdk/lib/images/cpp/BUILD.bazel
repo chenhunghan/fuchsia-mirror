@@ -23,7 +23,6 @@ idk_cc_source_library(
     ],
     stable = True,
     visibility = [
-        "//build/sdk:__pkg__",
         "//sdk/lib/ui/scenic/cpp:__pkg__",
     ],
     deps = [

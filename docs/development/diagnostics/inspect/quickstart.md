@@ -268,7 +268,7 @@ to help you get started.
   In this example, the uint property associated with `name` is visible to readers
   until the parent `node` goes out of scope.
 
-### Dynamic values
+### Dynamic values {#dynamic-values}
 
 This section describes support in the Inspect libraries for nodes that are
 inflated lazily at read-time. The methods accept a callback function instead of
@@ -610,6 +610,77 @@ root:
       state = "disconnected"
 ```
 
+### Managing VMO size and capacity {#managing-vmo-size-and-capacity}
+
+Inspect hierarchies are stored in a mapped Virtual Memory Object (VMO) with a
+default maximum capacity of 256 KiB. When an Inspect hierarchy runs out of
+space, creating new nodes and properties fails silently without crashing or
+logging errors.
+
+You can configure custom VMO capacity and monitor memory usage by serving the
+`fuchsia.inspect.Stats` lazy node.
+
+* {C++}
+
+  In C++, specify `maximum_size` using `inspect::InspectSettings` when
+  constructing an `Inspector`, and call `CreateStatsNode()` to publish
+  statistics:
+
+  ```cpp
+  #include <lib/inspect/cpp/inspector.h>
+
+  // Initialize an Inspector with 1 MiB of VMO capacity.
+  inspect::InspectSettings settings{.maximum_size = 1024 * 1024};
+  inspect::Inspector inspector(settings);
+
+  // Serve real-time allocation statistics under root/fuchsia.inspect.Stats.
+  inspector.CreateStatsNode();
+  ```
+
+  When using `ComponentInspector` with an async dispatcher:
+
+  ```cpp
+  #include <lib/inspect/component/cpp/component.h>
+
+  inspect::InspectSettings settings{.maximum_size = 1024 * 1024};
+  auto inspector = inspect::ComponentInspector(dispatcher, {
+      .inspector = inspect::Inspector(settings),
+  });
+  inspector.inspector().CreateStatsNode();
+  ```
+
+* {Rust}
+
+  To increase the VMO size for the singleton component inspector, call
+  `init_inspector_with_size` before any other use of the singleton (such as
+  `fuchsia_inspect::component::inspector()` or `component::health()`); later
+  calls only log a warning and keep the existing size. Call
+  `serve_inspect_stats()` to publish allocation statistics:
+
+  ```rust
+  use fuchsia_inspect::component;
+
+  // Initialize the component inspector with 1 MiB of VMO capacity.
+  component::init_inspector_with_size(1024 * 1024);
+
+  // Serve real-time allocation statistics under root/fuchsia.inspect.Stats.
+  component::serve_inspect_stats();
+  ```
+
+  If you construct an `Inspector` manually, specify the size using
+  `InspectorConfig`:
+
+  ```rust
+  use fuchsia_inspect::stats::InspectorExt;
+  use fuchsia_inspect::{Inspector, InspectorConfig};
+
+  let inspector = Inspector::new(InspectorConfig::default().size(1024 * 1024));
+  inspector.record_lazy_stats();
+  ```
+
+For more details on capacity planning and failure modes, see
+[Size the Inspect VMO to prevent silent allocation failures][overview-vmo-size].
+
 ## Viewing Inspect Data {#view-inspect-data}
 
 You can use the [`ffx inspect`][ffx-inspect] command to view the Inspect data
@@ -721,6 +792,7 @@ Fuzzy matching failed due to too many matches, please re-try with one of these:
 bootstrap/boot-drivers:PCI0.bus.00_04_0.00_04_0.virtio-net
 core/network
 core/network-tun
+core/network/dhcp-client
 core/network/dhcpd
 core/network/dhcpv6-client
 core/network/dns-resolver
@@ -728,7 +800,6 @@ core/network/http-client
 core/network/netcfg
 core/network/netcfg/netcfg-config
 core/network/netstack
-core/network/netstack/dhcp-client
 core/network/reachability
 ```
 
@@ -778,3 +849,4 @@ use diagnostics_assertions::JsonGetter;
 [moniker]: /docs/reference/components/moniker.md
 [selectors]: /docs/reference/diagnostics/selectors.md
 [fuchsia-inspect-contrib]: https://fuchsia-docs.firebaseapp.com/rust/fuchsia_inspect_contrib/index.html
+[overview-vmo-size]: /docs/development/diagnostics/inspect/README.md#size-the-inspect-vmo-to-prevent-silent-allocation-failures

@@ -15,11 +15,9 @@ exports_files(
     ],
     visibility = [
         "//bundles/assembly:__subpackages__",
+        "//src/factory/fake_factory_items:__pkg__",
+        "//src/factory/fake_factory_store_providers:__pkg__",
         "//src/security/lib/scrutiny/tests/route_verification:__pkg__",
-        "//src/sys/pkg/bin/omaha-client:__pkg__",
-        "//src/sys/pkg/bin/system-update-checker:__pkg__",
-        "//src/sys/pkg/bin/system-update-committer:__pkg__",
-        "//src/sys/pkg/bin/system-updater:__pkg__",
         "//src/sys/pkg/lib/omaha-client-fuchsia:__pkg__",
         "//src/sys/pkg/tests/pkg-resolver:__pkg__",
     ],
@@ -29,7 +27,10 @@ exports_files(
 cml_shard(
     name = "offer.shard",
     shard = "offer.shard.cml",
-    visibility = ["//src/lib/fuchsia-hyper:__pkg__"],
+    visibility = [
+        "//sdk/lib/fdio/tests/getaddrinfo:__pkg__",
+        "//src:__subpackages__",
+    ],
 )
 
 # @bazel2gn:skip
@@ -47,10 +48,8 @@ cml_shard(
     ],
     shard = "client.shard.cml",
     visibility = [
-        "//src/connectivity/policy/http-client:__pkg__",
-        "//src/connectivity/wlan:__subpackages__",
-        "//src/power/shutdown-shim:__subpackages__",
-        "//src/sys/pkg/bin/pkg-cache:__pkg__",
+        "//examples:__subpackages__",
+        "//src:__subpackages__",
     ],
 )
 

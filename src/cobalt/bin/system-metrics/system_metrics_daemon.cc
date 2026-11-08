@@ -17,6 +17,7 @@
 #include <zircon/status.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <fstream>
 #include <memory>
 #include <utility>
@@ -48,6 +49,22 @@ namespace {
 // multiple of 1 hour.
 zx::duration SecondsBeforeNextHour(zx::duration uptime) {
   return zx::sec(3600 - (uptime.to_secs() % 3600));
+}
+
+// TODO(https://fxbug.dev/581232767): Eliminate kNumActivityStates. Until then, keep in sync with
+// the exhaustive switch in GetCobaltEventCodeForDeviceState.
+constexpr uint64_t kNumActivityStates = 3;
+
+template <typename T>
+T GetCobaltEventCodeForDeviceState(fuchsia::ui::activity::State state) {
+  switch (state) {
+    case fuchsia::ui::activity::State::IDLE:
+      return T::Idle;
+    case fuchsia::ui::activity::State::ACTIVE:
+      return T::Active;
+    case fuchsia::ui::activity::State::UNKNOWN:
+      return T::Unknown;
+  }
 }
 
 }  // namespace
@@ -434,10 +451,11 @@ void SystemMetricsDaemon::StoreCpuData(double cpu_percentage) {
   cpu_data_stored_++;
   if (cpu_data_stored_ >= 10 * 60) {  // Flush every 10 minutes.
     if (LogCpuToCobalt()) {
-      // If failed, attempt to log agin next time.
       activity_state_to_cpu_map_.clear();
-      cpu_data_stored_ = 0;
     }
+    // Reset the sample counter even when logging fails so we retry on the next 10-minute flush
+    // boundary (retaining accumulated histogram counts) instead of retrying at 1 Hz forever.
+    cpu_data_stored_ = 0;
   }
 
   cpu_usage_accumulator_ += cpu_percentage;
@@ -459,21 +477,41 @@ bool SystemMetricsDaemon::LogCpuToCobalt() {
   using EventCode = fuchsia_system_metrics::CpuPercentageMigratedMetricDimensionDeviceState;
   std::vector<MetricEvent> events;
   auto builder = MetricEventBuilder(fuchsia_system_metrics::kCpuPercentageMigratedMetricId);
-  for (const auto& pair : activity_state_to_cpu_map_) {
+  for (const auto& [activity_state, bucket_counts] : activity_state_to_cpu_map_) {
+    const EventCode event_code = GetCobaltEventCodeForDeviceState<EventCode>(activity_state);
     std::vector<HistogramBucket> cpu_buckets;
-    for (const auto& bucket_pair : pair.second) {
-      HistogramBucket bucket;
-      bucket.index = bucket_pair.first;
-      bucket.count = bucket_pair.second;
-      cpu_buckets.push_back(std::move(bucket));
+    for (const auto& [bucket_index, bucket_count] : bucket_counts) {
+      cpu_buckets.push_back(HistogramBucket{.index = bucket_index, .count = bucket_count});
+      if (cpu_buckets.size() == fuchsia::metrics::MAX_HISTOGRAM_BUCKETS) {
+        events.push_back(builder.Clone()
+                             .with_event_code(event_code)
+                             .as_integer_histogram(std::exchange(cpu_buckets, {})));
+      }
     }
-    events.push_back(builder.Clone()
-                         .with_event_code(GetCobaltEventCodeForDeviceState<EventCode>(pair.first))
-                         .as_integer_histogram(cpu_buckets));
+    if (!cpu_buckets.empty()) {
+      events.push_back(
+          builder.Clone().with_event_code(event_code).as_integer_histogram(std::move(cpu_buckets)));
+    }
   }
+  // At most kNumActivityStates (3) x ceil((1,000 + 2) / 500) = 9 MetricEvents can be emitted per
+  // flush, well below MAX_BATCHED_EVENTS (500), so a single LogMetricEvents call is safe. If this
+  // bound ever exceeds MAX_BATCHED_EVENTS, multi-batch flushing must also handle partial-batch
+  // failures so earlier succeeded batches are not re-sent and double-counted on retry.
+  constexpr uint64_t kMaxBucketsPerState =
+      uint64_t{fuchsia_system_metrics::kCpuPercentageMigratedIntBucketsNumBuckets} + 2;
+  constexpr uint64_t kMaxChunksPerState =
+      (kMaxBucketsPerState + fuchsia::metrics::MAX_HISTOGRAM_BUCKETS - 1) /
+      fuchsia::metrics::MAX_HISTOGRAM_BUCKETS;
+  static_assert(kNumActivityStates * kMaxChunksPerState <= fuchsia::metrics::MAX_BATCHED_EVENTS,
+                "You will have to upgrade to multi-batch flushing");
+
   // call cobalt FIDL
   fuchsia::metrics::MetricEventLogger_LogMetricEvents_Result result;
-  ReinitializeIfPeerClosed(logger_->LogMetricEvents(std::move(events), &result));
+  const zx_status_t zx_status =
+      ReinitializeIfPeerClosed(logger_->LogMetricEvents(std::move(events), &result));
+  if (zx_status != ZX_OK) {
+    return false;
+  }
   if (result.is_err()) {
     FX_LOGS(ERROR) << "LogCpuToCobalt returned error=" << ErrorToString(result.err());
     return false;

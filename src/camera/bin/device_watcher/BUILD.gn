@@ -14,7 +14,10 @@ group("device_watcher") {
 
 group("tests") {
   testonly = true
-  deps = [ ":camera_device_watcher_unittest" ]
+  deps = [
+    ":camera_device_watcher_impl_unittest",
+    ":camera_device_watcher_unittest",
+  ]
 }
 
 source_set("lib") {
@@ -33,13 +36,16 @@ source_set("lib") {
     "//sdk/fidl/fuchsia.hardware.camera:fuchsia.hardware.camera_cpp",
     "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
     "//sdk/fidl/fuchsia.process:fuchsia.process_cpp",
+    "//sdk/lib/async:async-cpp",
     "//sdk/lib/async-loop:async-loop-cpp",
     "//sdk/lib/async-loop:async-loop-default",
     "//sdk/lib/component/incoming/cpp",
     "//sdk/lib/component/outgoing/cpp",
     "//sdk/lib/fit-promise",
     "//sdk/lib/syslog/cpp",
+    "//src/lib/backoff",
     "//src/lib/fsl",
+    "//src/lib/fxl",
   ]
 
   defines = [ camera_debug_define ]
@@ -89,5 +95,29 @@ fuchsia_unittest_package("camera_device_watcher_unittest") {
   ]
   test_specs = {
     environments = [ sherlock_env ]
+  }
+}
+
+cc_test_executable("camera_device_watcher_impl_unittest_bin") {
+  testonly = true
+  sources = [ "device_watcher_impl_unittest.cc" ]
+  deps = [
+    ":lib",
+    "//sdk/fidl/fuchsia.component:fuchsia.component_cpp_testing",
+    "//src/lib/fxl/test:gtest_main",
+    "//src/lib/testing/loop_fixture",
+    "//third_party/googletest:gtest",
+  ]
+}
+
+fuchsia_unittest_package("camera_device_watcher_impl_unittest") {
+  deps = [ ":camera_device_watcher_impl_unittest_bin" ]
+
+  # StopsRelaunchingAfterRepeatedFailures makes CreateChild fail, which logs an
+  # error.
+  test_specs = {
+    log_settings = {
+      max_severity = "ERROR"
+    }
   }
 }

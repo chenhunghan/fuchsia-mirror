@@ -1,74 +1,23 @@
 // Copyright 2018 The Fuchsia Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+#include <lib/driver/logging/cpp/logger.h>
 #include <lib/pci/constants.h>
 #include <lib/pci/hw.h>
 #include <zircon/errors.h>
 
+#include <span>
+
 #include <fbl/string_buffer.h>
-#include <hwreg/bitfields.h>
 
 #include "src/devices/pci/drivers/pci/capabilities/msi.h"
 #include "src/devices/pci/drivers/pci/capabilities/msix.h"
-#include "src/devices/pci/drivers/pci/capabilities/pci_express.h"
-#include "src/devices/pci/drivers/pci/capabilities/power_management.h"
 #include "src/devices/pci/drivers/pci/device.h"
+#include "src/devices/pci/lib/cpp/capabilities.h"
+#include "src/devices/pci/lib/cpp/capabilities/pci_express.h"
+#include "src/devices/pci/lib/cpp/capabilities/power_management.h"
 
 namespace pci {
-
-struct CapabilityHdr {
-  uint8_t id;
-  uint8_t ptr;
-};
-
-bool ReadCapability(Config& cfg, uint8_t offset, CapabilityHdr* header) {
-  if (offset == 0 || (offset & 0xfc) == 0xfc) {
-    return false;
-  }
-
-  // Read the id (at offset + 0x0) and pointer to the next cap (at offset + 1
-  // The lower two bits must be masked off per PCI Local Bus Spec 6.7.
-  // In the case of PCIe, the ptr field also contains the revision number of
-  // the capability and that can be handled in the ParseExtCapabilities()
-  // method.
-  header->id = cfg.Read(PciReg8(offset));
-  header->ptr = cfg.Read(PciReg8(static_cast<uint16_t>(offset + 1u))) & static_cast<uint8_t>(~0x3);
-  return true;
-}
-
-// PCI Express Base Spec 7.6
-struct ExtCapabilityIdReg {
-  uint32_t value;
-  DEF_SUBFIELD(value, 31, 20, offset);
-  DEF_SUBFIELD(value, 19, 16, version);
-  DEF_SUBFIELD(value, 15, 0, id);
-};
-
-struct ExtCapabilityHdr {
-  uint16_t id;
-  uint16_t ptr;
-  uint8_t version;
-};
-
-bool ReadExtCapability(Config& cfg, uint16_t offset, ExtCapabilityHdr* header) {
-  if (offset == 0 || (offset & 0xffc) == 0xffc) {
-    return false;
-  }
-
-  ExtCapabilityIdReg reg = {.value = cfg.Read(PciReg32(offset))};
-  uint16_t id = static_cast<uint16_t>(reg.id());
-  if (id == 0xffff) {
-    return false;
-  }
-
-  // Extended capabilities start with a 16 bit id, followed by a 4 bit version
-  // and a 12 bit pointer to the next offset. Like standard capabilities, the bottom
-  // 2 bits off the offset must be masked off.
-  header->id = id;
-  header->ptr = static_cast<uint16_t>(reg.offset() & ~0x3);
-  header->version = static_cast<uint8_t>(reg.version());
-  return true;
-}
 
 namespace {
 // The methods here provide common helper functions that are useful to both
@@ -96,7 +45,7 @@ bool CapabilityCycleExists(const Config& cfg,
       log.AppendPrintf("%#x", (*cap)->base());
     }
     log.AppendPrintf(" -> %#x", offset);
-    zxlogf(ERROR, "%s", log.c_str());
+    fdf::error("{}", log.c_str());
     return true;
   }
 
@@ -125,17 +74,14 @@ zx_status_t AllocateCapability(
 
 zx::result<> Device::ConfigureCapabilities() {
   const fbl::AutoLock dev_lock(&dev_lock_);
-  if (caps_.msix && bars()[caps_.msix->table_bar()].has_value() &&
-      bars()[caps_.msix->pba_bar()].has_value()) {
-    auto& msix = *caps_.msix;
-    ZX_DEBUG_ASSERT(bars()[msix.table_bar()]);
-    ZX_DEBUG_ASSERT(bars()[msix.pba_bar()]);
+  if (!caps_.msix || disabled_) {
+    return zx::ok();
+  }
 
-    const zx_status_t status = msix.Init(*bars()[msix.table_bar()], *bars()[msix.pba_bar()]);
-    if (status != ZX_OK) {
-      zxlogf(ERROR, "Failed to initialize MSI-X: %d", status);
-      return zx::error(status);
-    }
+  const zx_status_t status = caps_.msix->Init(std::span(bars().data(), bar_count()));
+  if (status != ZX_OK) {
+    fdf::error("Failed to initialize MSI-X: {}", zx_status_get_string(status));
+    return zx::error(status);
   }
 
   return zx::ok();
@@ -143,17 +89,16 @@ zx::result<> Device::ConfigureCapabilities() {
 
 zx_status_t Device::ParseCapabilities() {
   // Our starting point comes from the Capability Pointer in the config header.
-  struct CapabilityHdr hdr;
-  auto cap_offset = cfg_->Read(Config::kCapabilitiesPtr);
+  uint8_t cap_offset = config::CapabilitiesPtr.ReadFrom(cfg_.get()).reg_value();
   if (!cap_offset) {
     return ZX_OK;
   }
 
   // Walk the pointer list for the standard capabilities table. Check for
   // cycles and invalid pointers.
-  while (ReadCapability(*cfg_, cap_offset, &hdr)) {
+  while (auto hdr = ReadCapability(*cfg_, cap_offset)) {
     if (CapabilityCycleExists<Capability>(*cfg_, caps_.list, cap_offset)) {
-      zxlogf(ERROR, "%s capability cycle detected", cfg_->addr());
+      fdf::error("{} capability cycle detected", cfg_->addr());
       return ZX_ERR_BAD_STATE;
     }
 
@@ -162,21 +107,21 @@ zx_status_t Device::ParseCapabilities() {
     // things like MSI & PCIE we'll cache a raw pointer to it for fast
     // access, but otherwise everything is found via the capability list.
     zx_status_t st;
-    switch (static_cast<Capability::Id>(hdr.id)) {
+    switch (static_cast<Capability::Id>(hdr->id)) {
       case Capability::Id::kPciPowerManagement:
         st = AllocateCapability<PowerManagementCapability>(cap_offset, *cfg_, &caps_.power,
                                                            &caps_.list);
         if (st != ZX_OK) {
-          zxlogf(ERROR, "%s Error allocating PowerManagement capability: %d, %p", cfg_->addr(), st,
-                 caps_.pcie);
+          fdf::error("{} Error allocating PowerManagement capability: {}, {:p}", cfg_->addr(),
+                     zx_status_get_string(st), static_cast<void*>(caps_.power));
           return st;
         }
         break;
       case Capability::Id::kPciExpress:
         st = AllocateCapability<PciExpressCapability>(cap_offset, *cfg_, &caps_.pcie, &caps_.list);
         if (st != ZX_OK) {
-          zxlogf(ERROR, "%s Error allocating PCIe capability: %d, %p", cfg_->addr(), st,
-                 caps_.pcie);
+          fdf::error("{} Error allocating PCIe capability: {}, {:p}", cfg_->addr(),
+                     zx_status_get_string(st), static_cast<void*>(caps_.pcie));
           return st;
         }
         is_pcie_ = true;
@@ -184,15 +129,16 @@ zx_status_t Device::ParseCapabilities() {
       case Capability::Id::kMsi:
         st = AllocateCapability<MsiCapability>(cap_offset, *cfg_, &caps_.msi, &caps_.list);
         if (st != ZX_OK) {
-          zxlogf(ERROR, "%s Error allocating MSI capability: %d, %p", cfg_->addr(), st, caps_.msi);
+          fdf::error("{} Error allocating MSI capability: {}, {:p}", cfg_->addr(),
+                     zx_status_get_string(st), static_cast<void*>(caps_.msi));
           return st;
         }
         break;
       case Capability::Id::kMsiX:
         st = AllocateCapability<MsixCapability>(cap_offset, *cfg_, &caps_.msix, &caps_.list);
         if (st != ZX_OK) {
-          zxlogf(ERROR, "%s Error allocating MSI-X capability: %d, %p", cfg_->addr(), st,
-                 caps_.msix);
+          fdf::error("{} Error allocating MSI-X capability: {}, {:p}", cfg_->addr(),
+                     zx_status_get_string(st), static_cast<void*>(caps_.msix));
           return st;
         }
         break;
@@ -214,14 +160,14 @@ zx_status_t Device::ParseCapabilities() {
       case Capability::Id::kAdvancedFeatures:
       case Capability::Id::kEnhancedAllocation:
       case Capability::Id::kFlatteningPortalBridge:
-        caps_.list.push_back(std::make_unique<Capability>(hdr.id, cap_offset));
+        caps_.list.push_back(std::make_unique<Capability>(hdr->id, cap_offset));
         break;
     }
 
-    cap_offset = hdr.ptr;
+    cap_offset = hdr->ptr;
     if (cap_offset && (cap_offset < kCapPtrMinValid || cap_offset > kCapPtrMaxValid)) {
-      zxlogf(ERROR, "%s capability pointer out of range: %#02x, disabling device", cfg_->addr(),
-             cap_offset);
+      fdf::error("{} capability pointer out of range: {:#02x}, disabling device", cfg_->addr(),
+                 cap_offset);
       return ZX_ERR_OUT_OF_RANGE;
     }
   }
@@ -232,14 +178,13 @@ zx_status_t Device::ParseCapabilities() {
 zx_status_t Device::ParseExtendedCapabilities() {
   // Extended capabilities always start at offset 256, the first byte in extended
   // configuration space.
-  struct ExtCapabilityHdr hdr;
   uint16_t cap_offset = kPcieExtCapBasePtr;
 
   // Walk the pointer list for the standard capabilities table. Check for
   // cycles and invalid pointers.
-  while (ReadExtCapability(*cfg_, cap_offset, &hdr)) {
+  while (auto hdr = ReadExtCapability(*cfg_, cap_offset)) {
     if (CapabilityCycleExists<ExtCapability>(*cfg_, caps_.ext_list, cap_offset)) {
-      zxlogf(TRACE, "%s ext_capability cycle detected", cfg_->addr());
+      fdf::trace("{} ext_capability cycle detected", cfg_->addr());
       return ZX_ERR_BAD_STATE;
     }
 
@@ -247,7 +192,7 @@ zx_status_t Device::ParseExtendedCapabilities() {
     // appropriate type and add it to the bookkeeping tree. For important
     // things like MSI & PCIE we'll cache a raw pointer to it for fast
     // access, but otherwise everything is found via the capability list.
-    switch (static_cast<ExtCapability::Id>(hdr.id)) {
+    switch (static_cast<ExtCapability::Id>(hdr->id)) {
       case ExtCapability::Id::kNull:
       case ExtCapability::Id::kAdvancedErrorReporting:
       case ExtCapability::Id::kVirtualChannelNoMFVC:
@@ -293,15 +238,16 @@ zx_status_t Device::ParseExtendedCapabilities() {
       case ExtCapability::Id::kPhysicalLayer32:
       case ExtCapability::Id::kAlternateProtocol:
       case ExtCapability::Id::kSystemFirmwareIntermediary:
-        caps_.ext_list.push_back(std::make_unique<ExtCapability>(hdr.id, hdr.version, cap_offset));
+        caps_.ext_list.push_back(
+            std::make_unique<ExtCapability>(hdr->id, hdr->version, cap_offset));
         break;
     }
 
-    cap_offset = hdr.ptr;
+    cap_offset = hdr->ptr;
     if (cap_offset &&
         (cap_offset < kPcieExtCapPtrMinValid || cap_offset > kPcieExtCapPtrMaxValid)) {
-      zxlogf(ERROR, "%s ext_capability pointer out of range: %#02x, disabling device", cfg_->addr(),
-             cap_offset);
+      fdf::error("{} ext_capability pointer out of range: {:#02x}, disabling device", cfg_->addr(),
+                 cap_offset);
       return ZX_ERR_OUT_OF_RANGE;
     }
   }

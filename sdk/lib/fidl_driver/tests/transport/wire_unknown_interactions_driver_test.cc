@@ -4,9 +4,8 @@
 
 #include <fidl/test.unknown.interactions/cpp/driver/wire.h>
 #include <fidl/test.unknown.interactions/cpp/wire.h>
-#include <lib/async-loop/cpp/loop.h>
-#include <lib/async-loop/default.h>
 #include <lib/async/cpp/task.h>
+#include <lib/driver/testing/cpp/driver_runtime.h>
 #include <lib/sync/cpp/completion.h>
 
 #include <algorithm>
@@ -14,8 +13,6 @@
 #include <optional>
 
 #include <zxtest/zxtest.h>
-
-#include "sdk/lib/fidl_driver/tests/transport/scoped_fake_driver.h"
 
 struct FakeUnknownMethod {
   static constexpr uint64_t kOrdinal = 0x10ff10ff10ff10ff;
@@ -259,7 +256,7 @@ class UnknownInteractions : public ::zxtest::Test {
   async_dispatcher_t* AsyncDispatcher() { return dispatcher_.value().async_dispatcher(); }
 
  private:
-  fidl_driver_testing::ScopedFakeDriver driver;
+  fdf_testing::DriverRuntime runtime_;
   std::shared_ptr<libsync::Completion> dispatcher_shutdown_ =
       std::make_shared<libsync::Completion>();
   std::optional<fdf::Dispatcher> dispatcher_;

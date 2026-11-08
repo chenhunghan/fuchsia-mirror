@@ -30,6 +30,8 @@ class DhcpController:
             self.ssh.run(f"uci set dhcp.lan.start='{config.lan.start}'")
         if config.lan.limit is not None:
             self.ssh.run(f"uci set dhcp.lan.limit='{config.lan.limit}'")
+        for opt in config.lan.dhcp_options_force:
+            self.ssh.run(f"uci add_list dhcp.lan.dhcp_option_force='{opt}'")
         if config.lan.broadcast:
             self.ssh.run("uci set dhcp.broadcast_all=mac")
             self.ssh.run(

@@ -18,6 +18,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
+#include <sys/statvfs.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -58,6 +59,10 @@ constexpr int kOLargeFile = 00400000;
 #ifndef RENAME_NOREPLACE
 #define RENAME_NOREPLACE (1 << 0)
 #endif  // RENAME_NOREPLACE
+
+#ifndef RENAME_EXCHANGE
+#define RENAME_EXCHANGE (1 << 1)
+#endif  // RENAME_EXCHANGE
 
 int renameat2(int olddirfd, const char* oldpath, int newdirfd,
               const char* newpath, unsigned int flags);
@@ -224,6 +229,15 @@ PosixErrorOr<bool> IsTmpfs(const std::string& path);
 
 // IsOverlayfs returns true if the file at path is backed by overlayfs.
 PosixErrorOr<bool> IsOverlayfs(const std::string& path);
+
+#ifdef __linux__
+// IsGoferfs returns true if the file at path is backed by goferfs.
+PosixErrorOr<bool> IsGoferfs(const std::string& path);
+#endif  // __linux__
+
+// IsNosuid returns true if the file at path is on a filesystem mounted with
+// nosuid.
+PosixErrorOr<bool> IsNosuid(const std::string& path);
 
 PosixError CheckSameFile(const FileDescriptor& fd1, const FileDescriptor& fd2);
 

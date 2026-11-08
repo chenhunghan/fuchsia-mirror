@@ -23,6 +23,7 @@ const CONFIG_HEADER_SIZE: usize = 64;
 const MSI_MAX_VECTORS: u32 = 32;
 const MSIX_MAX_VECTORS: u32 = 8;
 const PCI_EXPRESS_CAPABILITY_SIZE: u8 = 0x3B;
+const FAKE_BAR_ADDRESS: u64 = 0;
 
 // Note: IO BARs are not currently supported.
 enum Bar {
@@ -34,7 +35,12 @@ impl Bar {
         match self {
             Self::Vmo { size, vmo } => {
                 let vmo_dup = vmo.duplicate_handle(zx::Rights::SAME_RIGHTS)?;
-                Ok(fpci::Bar { bar_id, size: *size, result: fpci::BarResult::Vmo(vmo_dup) })
+                Ok(fpci::Bar {
+                    bar_id,
+                    size: *size,
+                    address: FAKE_BAR_ADDRESS,
+                    result: fpci::BarResult::Vmo(vmo_dup),
+                })
             }
         }
     }
@@ -356,14 +362,6 @@ impl State {
             _ => Err(zx::Status::BAD_STATE),
         }
     }
-
-    fn ack_interrupt(&self) -> Result<(), zx::Status> {
-        if self.interrupt_mode == fpci::InterruptMode::Legacy {
-            Ok(())
-        } else {
-            Err(zx::Status::BAD_STATE)
-        }
-    }
 }
 
 /// A fake implementation of the [`fpci::Device`] protocol for testing PCI drivers.
@@ -675,18 +673,6 @@ impl DeviceServerHandler for Server {
         responder.respond(()).await.expect_respond("reset_device");
     }
 
-    async fn ack_interrupt(&mut self, responder: Responder<fpci::device::AckInterrupt>) {
-        let result = self.state.lock().ack_interrupt();
-        match result {
-            Ok(()) => {
-                responder.respond(()).await.expect_respond("ack_interrupt");
-            }
-            Err(e) => {
-                responder.respond_err(e).await.expect_respond("ack_interrupt");
-            }
-        }
-    }
-
     async fn map_interrupt(
         &mut self,
         request: Request<fpci::device::MapInterrupt>,
@@ -971,9 +957,10 @@ mod tests {
             .await
             .expect("Failed to send get_bar request")
             .expect("get_bar returned error status");
-        let fpci::Bar { bar_id: actual_bar_id, size, result } = bar_res.result;
+        let fpci::Bar { bar_id: actual_bar_id, size, address, result } = bar_res.result;
         assert_eq!(actual_bar_id, bar_id);
         assert_eq!(size, bar_size);
+        assert_eq!(address, FAKE_BAR_ADDRESS);
 
         let fpci::BarResult::Vmo(returned_vmo) = result else {
             panic!("Expected VMO bar result");
@@ -1049,10 +1036,6 @@ mod tests {
         assert!(res.is_ok());
         assert_eq!(fake_pci.interrupt_mode(), fpci::InterruptMode::Legacy);
 
-        // Ack interrupt should succeed for legacy
-        let ack_res = client.ack_interrupt().await.expect("ack_interrupt failed");
-        assert!(ack_res.is_ok());
-
         // Map legacy interrupt
         let map_res = client.map_interrupt(0).await.expect("map_interrupt failed");
         let mapped = map_res.expect("map_interrupt error status").interrupt;
@@ -1072,10 +1055,6 @@ mod tests {
             .await
             .expect("set_interrupt_mode failed");
         assert!(set_msi_res.is_ok());
-
-        // Ack interrupt should fail for MSI mode
-        let ack_err = client.ack_interrupt().await.expect("ack_interrupt failed");
-        assert_eq!(ack_err.unwrap_err(), zx::Status::BAD_STATE);
 
         // Map MSI 0
         let map_msi = client.map_interrupt(0).await.expect("map_interrupt failed");

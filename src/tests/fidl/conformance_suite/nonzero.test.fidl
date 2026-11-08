@@ -1,0 +1,45 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+library test.conformance;
+
+type StructOfNonZeroUInt8 = struct {
+    foo uint8:nonzero;
+};
+
+type StructOfNonZeroUInt16 = struct {
+    foo uint16:nonzero;
+};
+
+type StructOfNonZeroUInt32 = struct {
+    foo uint32:nonzero;
+};
+
+type StructOfNonZeroUInt64 = struct {
+    foo uint64:nonzero;
+};
+
+type StructOfNonZeroInt8 = struct {
+    foo int8:nonzero;
+};
+
+type StructOfNonZeroInt16 = struct {
+    foo int16:nonzero;
+};
+
+type StructOfNonZeroInt32 = struct {
+    foo int32:nonzero;
+};
+
+type StructOfNonZeroInt64 = struct {
+    foo int64:nonzero;
+};
+
+type ArrayOfNonZeroInt32 = struct {
+    foo array<int32:nonzero, 2>;
+};
+
+type VectorOfNonZeroInt32 = struct {
+    foo vector<int32:nonzero>;
+};

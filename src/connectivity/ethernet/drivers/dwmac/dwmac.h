@@ -7,7 +7,6 @@
 
 #include <fidl/fuchsia.hardware.ethernet.board/cpp/wire.h>
 #include <fidl/fuchsia.hardware.network.driver/cpp/driver/fidl.h>
-#include <fuchsia/hardware/ethernet/cpp/banjo.h>
 #include <fuchsia/hardware/ethernet/mac/cpp/banjo.h>
 #include <lib/ddk/device.h>
 #include <lib/driver/mmio/cpp/mmio.h>

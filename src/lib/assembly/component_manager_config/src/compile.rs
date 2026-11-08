@@ -9,8 +9,8 @@ use cml::translate::CompileOptions;
 use cml::types::capability::{Capability, span_capability};
 use cml::types::capability_id::CapabilityId;
 use fidl::persist;
-use fidl_fuchsia_component_decl as fdecl;
-use fidl_fuchsia_component_internal as component_internal;
+use fidl_fuchsia_component_decl_common as fdecl;
+use fidl_fuchsia_component_internal_common as component_internal;
 use itertools::Itertools;
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -82,12 +82,24 @@ const SESSION_MONIKER: &str = "/core/session-manager/session:session";
 /// indicating their options if they choose an invalid capability.
 #[derive(Deserialize, Debug, Eq, PartialEq, Hash, Clone)]
 enum PlatformCapability {
+    #[serde(rename = "fuchsia.lowpan.device.CountersConnector")]
+    LowpanCountersConnector,
     #[serde(rename = "fuchsia.lowpan.device.DeviceConnector")]
     LowpanDeviceConnector,
     #[serde(rename = "fuchsia.lowpan.device.DeviceExtraConnector")]
     Lowpan,
+    #[serde(rename = "fuchsia.lowpan.device.EnergyScanConnector")]
+    LowpanEnergyScanConnector,
+    #[serde(rename = "fuchsia.lowpan.thread.CapabilitiesConnector")]
+    LowpanCapabilitiesConnector,
     #[serde(rename = "fuchsia.lowpan.thread.DatasetConnector")]
     LowpanDatasetConnector,
+    #[serde(rename = "fuchsia.lowpan.thread.EpskcConnector")]
+    LowpanEpskcConnector,
+    #[serde(rename = "fuchsia.lowpan.thread.FeatureConnector")]
+    LowpanFeatureConnector,
+    #[serde(rename = "fuchsia.lowpan.thread.MeshcopConnector")]
+    LowpanMeshcopConnector,
     #[serde(rename = "fuchsia.kernel.VmexResource")]
     VmexResource,
     #[serde(rename = "fuchsia.pkg.PackageCache")]
@@ -98,9 +110,21 @@ impl PlatformCapability {
     /// Convert the capability back to a string.
     fn source_name(&self) -> &str {
         match self {
+            &PlatformCapability::LowpanCountersConnector => {
+                "fuchsia.lowpan.device.CountersConnector"
+            }
             &PlatformCapability::LowpanDeviceConnector => "fuchsia.lowpan.device.DeviceConnector",
             &PlatformCapability::Lowpan => "fuchsia.lowpan.device.DeviceExtraConnector",
+            &PlatformCapability::LowpanEnergyScanConnector => {
+                "fuchsia.lowpan.device.EnergyScanConnector"
+            }
+            &PlatformCapability::LowpanCapabilitiesConnector => {
+                "fuchsia.lowpan.thread.CapabilitiesConnector"
+            }
             &PlatformCapability::LowpanDatasetConnector => "fuchsia.lowpan.thread.DatasetConnector",
+            &PlatformCapability::LowpanEpskcConnector => "fuchsia.lowpan.thread.EpskcConnector",
+            &PlatformCapability::LowpanFeatureConnector => "fuchsia.lowpan.thread.FeatureConnector",
+            &PlatformCapability::LowpanMeshcopConnector => "fuchsia.lowpan.thread.MeshcopConnector",
             &PlatformCapability::VmexResource => "fuchsia.kernel.VmexResource",
             &PlatformCapability::PackageCache => "fuchsia.pkg.PackageCache",
         }
@@ -109,9 +133,15 @@ impl PlatformCapability {
     /// Map the capability to the moniker of the source.
     fn source_moniker(&self) -> &str {
         match self {
-            &PlatformCapability::LowpanDeviceConnector
+            &PlatformCapability::LowpanCountersConnector
+            | &PlatformCapability::LowpanDeviceConnector
             | &PlatformCapability::Lowpan
-            | &PlatformCapability::LowpanDatasetConnector => "/core/lowpanservice",
+            | &PlatformCapability::LowpanEnergyScanConnector
+            | &PlatformCapability::LowpanCapabilitiesConnector
+            | &PlatformCapability::LowpanDatasetConnector
+            | &PlatformCapability::LowpanEpskcConnector
+            | &PlatformCapability::LowpanFeatureConnector
+            | &PlatformCapability::LowpanMeshcopConnector => "/core/lowpanservice",
             &PlatformCapability::VmexResource => "<component_manager>",
             &PlatformCapability::PackageCache => "/bootstrap/pkg-cache",
         }
@@ -570,8 +600,8 @@ fn translate_capability_policy(
         .map(|e| component_internal::CapabilityAllowlistEntry {
             source_moniker: e.source_moniker.clone(),
             source_name: e.source_name.clone(),
-            source: e.source.clone().map_or_else(|| None, |t| Some(t.into())),
-            capability: e.capability.clone().map_or_else(|| None, |t| Some(t.into())),
+            source: e.source.clone().map(|t| t.into()),
+            capability: e.capability.clone().map(|t| t.into()),
             target_monikers: e.target_monikers.clone(),
             ..Default::default()
         })
@@ -589,7 +619,7 @@ fn translate_debug_registration_policy(
         .iter()
         .map(|e| component_internal::DebugRegistrationAllowlistEntry {
             name: e.name.clone(),
-            debug: e.debug.clone().map_or_else(|| None, |t| Some(t.into())),
+            debug: e.debug.clone().map(|t| t.into()),
             moniker: e.moniker.clone(),
             environment_name: e.environment_name.clone(),
             ..Default::default()
@@ -858,8 +888,8 @@ mod tests {
     use super::*;
     use assert_matches::assert_matches;
     use fidl::unpersist;
-    use fidl_fuchsia_component_decl as fdecl;
-    use fidl_fuchsia_io as fio;
+    use fidl_fuchsia_component_decl_common as fdecl;
+    use fidl_fuchsia_io_common as fio;
     use std::io::Read;
     use tempfile::TempDir;
 
@@ -1646,5 +1676,110 @@ mod tests {
         let args =
             Args { output: output_path.clone(), input: vec![], product: vec![another_input_path] };
         assert_matches!(compile(args), Err(Error::Parse { .. }));
+    }
+
+    #[test]
+    fn test_lowpan_platform_capabilities() -> Result<(), Error> {
+        let tmp_dir = TempDir::new().expect("create temp dir");
+        let output_path = tmp_dir.path().join("config");
+        let product_path = tmp_dir.path().join("product.json");
+
+        let capabilities = [
+            "fuchsia.lowpan.device.CountersConnector",
+            "fuchsia.lowpan.device.DeviceConnector",
+            "fuchsia.lowpan.device.DeviceExtraConnector",
+            "fuchsia.lowpan.device.EnergyScanConnector",
+            "fuchsia.lowpan.thread.CapabilitiesConnector",
+            "fuchsia.lowpan.thread.DatasetConnector",
+            "fuchsia.lowpan.thread.EpskcConnector",
+            "fuchsia.lowpan.thread.FeatureConnector",
+            "fuchsia.lowpan.thread.MeshcopConnector",
+        ];
+
+        let product_input = r#"{
+            platform_capabilities: {
+                session: [
+                    {
+                        capability: "fuchsia.lowpan.device.CountersConnector",
+                        target_monikers: ["ntc"],
+                    },
+                    {
+                        capability: "fuchsia.lowpan.device.DeviceConnector",
+                        target_monikers: ["ntc"],
+                    },
+                    {
+                        capability: "fuchsia.lowpan.device.DeviceExtraConnector",
+                        target_monikers: ["ntc"],
+                    },
+                    {
+                        capability: "fuchsia.lowpan.device.EnergyScanConnector",
+                        target_monikers: ["ntc"],
+                    },
+                    {
+                        capability: "fuchsia.lowpan.thread.CapabilitiesConnector",
+                        target_monikers: ["ntc"],
+                    },
+                    {
+                        capability: "fuchsia.lowpan.thread.DatasetConnector",
+                        target_monikers: ["ntc"],
+                    },
+                    {
+                        capability: "fuchsia.lowpan.thread.EpskcConnector",
+                        target_monikers: ["ntc"],
+                    },
+                    {
+                        capability: "fuchsia.lowpan.thread.FeatureConnector",
+                        target_monikers: ["ntc"],
+                    },
+                    {
+                        capability: "fuchsia.lowpan.thread.MeshcopConnector",
+                        target_monikers: ["ntc"],
+                    },
+                ],
+            },
+        }"#;
+        File::create(&product_path)
+            .expect("create product config")
+            .write_all(product_input.as_bytes())
+            .expect("write product config");
+
+        let args = Args { output: output_path.clone(), input: vec![], product: vec![product_path] };
+        compile(args)?;
+
+        let mut bytes = Vec::new();
+        File::open(output_path)?.read_to_end(&mut bytes)?;
+        let config: component_internal::Config = unpersist(&bytes)?;
+
+        let expected_allowlist = capabilities
+            .into_iter()
+            .map(|name| component_internal::CapabilityAllowlistEntry {
+                source_moniker: Some("/core/lowpanservice".to_string()),
+                source_name: Some(name.to_string()),
+                source: Some(fdecl::Ref::Self_(fdecl::SelfRef {})),
+                capability: Some(component_internal::AllowlistedCapability::Protocol(
+                    component_internal::AllowlistedProtocol::default(),
+                )),
+                target_monikers: Some(vec![
+                    "/core/session-manager/session:session/ntc".to_string(),
+                ]),
+                ..Default::default()
+            })
+            .collect();
+
+        assert_eq!(
+            config.security_policy,
+            Some(component_internal::SecurityPolicy {
+                job_policy: Some(component_internal::JobPolicyAllowlists {
+                    ambient_mark_vmo_exec: Some(vec![]),
+                    ..Default::default()
+                }),
+                capability_policy: Some(component_internal::CapabilityPolicyAllowlists {
+                    allowlist: Some(expected_allowlist),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+        );
+        Ok(())
     }
 }

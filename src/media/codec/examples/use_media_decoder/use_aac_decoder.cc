@@ -410,21 +410,10 @@ void use_aac_decoder(async::Loop* main_loop, fuchsia::mediacodec::CodecFactoryHa
         }
 
         const fuchsia::media::FormatDetails& format_details = stream_format->format_details();
-        if (!format_details.has_domain()) {
-          Exit("!format.domain");
+        if (!format_details.has_pcm_format()) {
+          Exit("!format_details.has_pcm_format()");
         }
 
-        if (!format_details.domain().is_audio()) {
-          Exit("!format.domain.is_audio() - unexpected");
-        }
-        const fuchsia::media::AudioFormat& audio = format_details.domain().audio();
-        if (!audio.is_uncompressed()) {
-          Exit("!audio.is_uncompressed() - unexpected");
-        }
-        const fuchsia::media::AudioUncompressedFormat& uncompressed = audio.uncompressed();
-        if (!uncompressed.is_pcm()) {
-          Exit("!uncompressed.is_pcm() - unexpected");
-        }
         // For now, bail out if it's not audio PCM 16 bit 2 channel, if only
         // because that's what we expect from the one test file so far, so if
         // it's different it'll be good to know that immediately, for now.
@@ -437,36 +426,40 @@ void use_aac_decoder(async::Loop* main_loop, fuchsia::mediacodec::CodecFactoryHa
         // TODO(dustingreen): Once we have a video decoder, update this example
         // to handle at least one video format, or create a separate example for
         // video with some of the code in this file moved to a source_set.
-        const fuchsia::media::PcmFormat& pcm = uncompressed.pcm();
-        if (pcm.channel_map.size() < 1 || pcm.channel_map.size() > 2) {
+        const fuchsia::media::PcmFormat2& pcm = format_details.pcm_format();
+        if (!pcm.has_channel_map() || pcm.channel_map().size() < 1 ||
+            pcm.channel_map().size() > 2) {
           Exit(
-              "pcm.channel_map->size() outside range [1, 2] - unexpected - "
+              "pcm.channel_map().size() outside range [1, 2] - unexpected - "
               "actual: %zu\n",
-              pcm.channel_map.size());
+              pcm.has_channel_map() ? pcm.channel_map().size() : 0);
         }
-        if (static_cast<fuchsia::media::AudioChannelId>(pcm.channel_map[0]) !=
-            fuchsia::media::AudioChannelId::LF) {
+        if (pcm.channel_map()[0] != fuchsia::media::AudioChannelId2::FL) {
           Exit(
-              "pcm.channel_map[0] is unexpected given the input data used in "
+              "pcm.channel_map()[0] is unexpected given the input data used in "
               "this example");
         }
-        if (pcm.channel_map.size() >= 2 &&
-            static_cast<fuchsia::media::AudioChannelId>(pcm.channel_map[1]) !=
-                fuchsia::media::AudioChannelId::RF) {
+        if (pcm.channel_map().size() >= 2 &&
+            pcm.channel_map()[1] != fuchsia::media::AudioChannelId2::FR) {
           Exit(
-              "pcm.channel_map[1] is unexpected given the input data used in "
+              "pcm.channel_map()[1] is unexpected given the input data used in "
               "this example");
         }
-        if (pcm.bits_per_sample != 16) {
-          Exit("pcm.bits_per_sample != 16 - unexpected - actual: %d", pcm.bits_per_sample);
+        if (!pcm.has_pcm_mode() || pcm.pcm_mode() != fuchsia::media::AudioPcmMode2::LINEAR) {
+          Exit("pcm.pcm_mode() != LINEAR - unexpected");
         }
-        if (pcm.frames_per_second != 44100) {
-          Exit("pcm.frames_per_second != 44100 - unexpected - actual: %d", pcm.frames_per_second);
+        if (!pcm.has_bits_per_sample() || pcm.bits_per_sample() != 16) {
+          Exit("pcm.bits_per_sample() != 16 - unexpected - actual: %u",
+               pcm.has_bits_per_sample() ? pcm.bits_per_sample() : 0);
+        }
+        if (!pcm.has_frames_per_second() || pcm.frames_per_second() != 44100) {
+          Exit("pcm.frames_per_second() != 44100 - unexpected - actual: %u",
+               pcm.has_frames_per_second() ? pcm.frames_per_second() : 0);
         }
         if (!output_wav_file.empty()) {
           if (!wav_writer.Initialize(
                   output_wav_file.c_str(), fuchsia::media::AudioSampleFormat::SIGNED_16,
-                  pcm.channel_map.size(), pcm.frames_per_second, pcm.bits_per_sample)) {
+                  pcm.channel_map().size(), pcm.frames_per_second(), pcm.bits_per_sample())) {
             Exit("wav_writer.Initialize() failed");
           }
           is_wav_initialized = true;

@@ -1,0 +1,288 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "service-routing-branch-bin",
+    testonly = True,
+    srcs = ["src/branch.rs"],
+    crate_name = "service_routing_branch_bin",
+    crate_root = "src/branch.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/sys/component_manager/tests/fidl:components_rust",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "service-routing-branch-packaged-bin",
+    testonly = True,
+    binary = ":service-routing-branch-bin",
+    binary_name = "service_routing_branch_bin",
+)
+
+rustc_test(
+    name = "service-routing-test-bin",
+    srcs = ["src/service_routing_test.rs"],
+    crate_root = "src/service_routing_test.rs",
+    edition = "2024",
+    deps = [
+        "//examples/components/services/fidl:fuchsia.examples.services_rust",
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-fs",
+        "//src/storage/lib/vfs/rust:vfs",
+        "//src/sys/component_manager/tests/fidl:components_rust",
+        "//src/sys/component_manager/tests/services/src/fidl:fuchsia.examples_rust",
+        "//src/sys/lib/cm_rust",
+        "//src/sys/lib/cm_types",
+        "//src/sys/lib/component-events",
+        "//src/sys/lib/moniker",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+fx_packaged_binary(
+    name = "service-routing-test-packaged-bin",
+    testonly = True,
+    binary = ":service-routing-test-bin",
+    binary_name = "service_routing_test_bin",
+)
+
+rustc_test(
+    name = "filtered-service-routing-test-bin",
+    srcs = ["src/filtered_service_routing_test.rs"],
+    crate_root = "src/filtered_service_routing_test.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-fs",
+        "//src/sys/component_manager/tests/services/src/fidl:fuchsia.examples_rust",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "filtered-service-routing-test-packaged-bin",
+    testonly = True,
+    binary = ":filtered-service-routing-test-bin",
+    binary_name = "filtered_service_routing_test_bin",
+)
+
+rustc_binary(
+    name = "service-routing-client-bin",
+    testonly = True,
+    srcs = ["src/service_client.rs"],
+    crate_name = "service_routing_client_bin",
+    crate_root = "src/service_client.rs",
+    edition = "2024",
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/sys/component_manager/tests/services/src/fidl:fuchsia.examples_rust",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "service-routing-client-packaged-bin",
+    testonly = True,
+    binary = ":service-routing-client-bin",
+    binary_name = "service_routing_client_bin",
+)
+
+rustc_binary(
+    name = "multi_instance_echo_service_bin",
+    testonly = True,
+    srcs = ["src/multi_instance_echo_service.rs"],
+    crate_root = "src/multi_instance_echo_service.rs",
+    edition = "2024",
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/sys/component_manager/tests/services/src/fidl:fuchsia.examples_rust",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "multi_instance_echo_service_packaged_bin",
+    testonly = True,
+    binary = ":multi_instance_echo_service_bin",
+    binary_name = "multi_instance_echo_service_bin",
+)
+
+fx_component_manifest(
+    name = "service-routing-branch-onecoll-manifest",
+    testonly = True,
+    component_name = "service-routing-branch-onecoll",
+    includes = [
+        "meta/service-routing-branch.shard.cml",
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//sdk/lib/syslog:offer.shard",
+    ],
+    manifest = "meta/service-routing-branch-onecoll.cml",
+)
+
+fx_component(
+    name = "service-routing-branch-onecoll",
+    testonly = True,
+    compiled_manifest = ":service-routing-branch-onecoll-manifest",
+    deps = [":service-routing-branch-packaged-bin"],
+)
+
+fx_component_manifest(
+    name = "service-routing-branch-twocoll-manifest",
+    testonly = True,
+    component_name = "service-routing-branch-twocoll",
+    includes = [
+        "meta/service-routing-branch.shard.cml",
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//sdk/lib/syslog:offer.shard",
+    ],
+    manifest = "meta/service-routing-branch-twocoll.cml",
+)
+
+fx_component(
+    name = "service-routing-branch-twocoll",
+    testonly = True,
+    compiled_manifest = ":service-routing-branch-twocoll-manifest",
+    deps = [":service-routing-branch-packaged-bin"],
+)
+
+fx_component_manifest(
+    name = "echo-service-client-manifest",
+    testonly = True,
+    component_name = "echo-service-client",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/echo-service-client.cml",
+)
+
+fx_component(
+    name = "echo-service-client",
+    testonly = True,
+    compiled_manifest = ":echo-service-client-manifest",
+    deps = [":service-routing-client-packaged-bin"],
+)
+
+fx_component_manifest(
+    name = "multi-instance-echo-provider-manifest",
+    testonly = True,
+    component_name = "multi-instance-echo-provider",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/multi-instance-echo-provider.cml",
+)
+
+fx_component(
+    name = "multi-instance-echo-provider",
+    testonly = True,
+    compiled_manifest = ":multi-instance-echo-provider-manifest",
+    deps = [":multi_instance_echo_service_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "service-routing-test-manifest",
+    testonly = True,
+    component_name = "service-routing-test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/service-routing-test.cml",
+)
+
+fx_test_component(
+    name = "service-routing-test",
+    compiled_manifest = ":service-routing-test-manifest",
+    deps = [":service-routing-test-packaged-bin"],
+)
+
+fx_component_manifest(
+    name = "filtered-service-routing-test-manifest",
+    testonly = True,
+    component_name = "filtered-service-routing-test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/filtered-service-routing-test.cml",
+)
+
+fx_test_component(
+    name = "filtered-service-routing-test",
+    compiled_manifest = ":filtered-service-routing-test-manifest",
+    deps = [":filtered-service-routing-test-packaged-bin"],
+)
+
+fx_package(
+    name = "component-manager-services-tests-package",
+    package_name = "component-manager-services-tests",
+    components = [
+        ":echo-service-client",
+        ":multi-instance-echo-provider",
+        ":service-routing-branch-onecoll",
+        ":service-routing-branch-twocoll",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+        "//src/sys/component_manager:component-manager-realm-builder-cmp",
+        "//src/sys/component_manager/testing/services_provider:provider-a-cmp",
+        "//src/sys/component_manager/testing/services_provider:provider-b-cmp",
+    ],
+    test_components = [
+        ":service-routing-test",
+        ":filtered-service-routing-test",
+    ],
+)
+
+fx_test(
+    name = "component-manager-services-tests",
+    package = ":component-manager-services-tests-package",
+    visibility = ["//src/sys/component_manager:__pkg__"],
+)

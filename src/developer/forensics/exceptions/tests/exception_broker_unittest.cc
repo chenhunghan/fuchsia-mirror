@@ -45,8 +45,21 @@ TEST_F(ExceptionBrokerTest, IsActive) {
       ExceptionBroker::Create(dispatcher(), &InspectRoot(), 0, zx::sec(0),
                               /*suspend_enabled=*/false);
 
+  auto endpoints = fidl::CreateEndpoints<fuchsia_exception::Handler>();
+  ASSERT_TRUE(endpoints.is_ok());
+
+  fidl::ServerBinding<fuchsia_exception::Handler> binding(
+      dispatcher(), std::move(endpoints->server), broker.get(), fidl::kIgnoreBindingClosure);
+  fidl::Client<fuchsia_exception::Handler> client(std::move(endpoints->client), dispatcher());
+
   bool called{false};
-  broker->IsActive([&called] { called = true; });
+  client->IsActive().ThenExactlyOnce(
+      [&called](fidl::Result<fuchsia_exception::Handler::IsActive>& result) {
+        ASSERT_TRUE(result.is_ok());
+        called = true;
+      });
+
+  RunLoopUntilIdle();
   EXPECT_TRUE(called);
 }
 

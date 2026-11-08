@@ -5,8 +5,6 @@
 #ifndef SRC_DEVELOPER_FORENSICS_FEEDBACK_DATA_CONSTANTS_H_
 #define SRC_DEVELOPER_FORENSICS_FEEDBACK_DATA_CONSTANTS_H_
 
-#include <lib/zx/time.h>
-
 #include "src/developer/forensics/utils/cobalt/metrics.h"
 #include "src/developer/forensics/utils/storage_size.h"
 
@@ -53,17 +51,8 @@ constexpr char kUtcBootDifferenceFile[] = "current_utc_monotonic_difference.txt"
 // Logs from current boot.
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
-// Buffer up to 4MiB of logs in memory.
-constexpr StorageSize kCurrentLogBufferSize = StorageSize::Megabytes(4);
-
 // Buffer up to 8MiB of logs in memory when collecting a fallback snapshot from Archivist.
 constexpr StorageSize kFallbackLogBufferSize = StorageSize::Megabytes(8);
-
-// Stream and buffer logs for 5 minutes after a snapshot collected.
-//
-// TODO(https://fxbug.dev/42181644): Set the default value for userdebug to at least 1 hour. Logs
-// will be streamed indefinitely because of hourly snapshots.
-constexpr zx::duration kActiveLoggingPeriod = zx::min(5);
 
 // At most 16KB of logs will be persisted each second.
 constexpr StorageSize kMaxWriteSize = StorageSize::Kilobytes(16);
@@ -85,6 +74,9 @@ struct SnapshotVersion {
 
 // The name of the protocol to use to read Feedback data from the Archive.
 constexpr char kArchiveAccessorName[] = "fuchsia.diagnostics.ArchiveAccessor.feedback";
+
+// The name of the protocol to use to read system logs from the Archive.
+constexpr char kLogsArchiveAccessorName[] = "fuchsia.diagnostics.ArchiveAccessor.logs";
 
 }  // namespace feedback_data
 }  // namespace forensics

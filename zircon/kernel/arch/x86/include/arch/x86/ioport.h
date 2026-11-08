@@ -7,31 +7,29 @@
 #ifndef ZIRCON_KERNEL_ARCH_X86_INCLUDE_ARCH_X86_IOPORT_H_
 #define ZIRCON_KERNEL_ARCH_X86_INCLUDE_ARCH_X86_IOPORT_H_
 
-#include <sys/types.h>
+#include <zircon/compiler.h>
 
-#include <bitmap/rle-bitmap.h>
+#include <arch/x86/ioport_ffi.h>
+#include <kernel/ffi.h>
 #include <kernel/spinlock.h>
-#include <ktl/unique_ptr.h>
 
 class IoBitmap {
  public:
-  // Return the IoBitmap associated with the current thread, or nullptr if the
-  // thread has no associated IoBitmap (such as idle threads).
-  static IoBitmap* GetCurrent();
-
-  ~IoBitmap();
-
-  int SetIoBitmap(uint32_t port, uint32_t len, bool enable);
+  IoBitmap() { rust_io_bitmap_init(reinterpret_cast<ffi::Uninitialized<IoBitmap>*>(this)); }
+  ~IoBitmap() { rust_io_bitmap_destroy(this); }
+  IoBitmap(const IoBitmap&) = delete;
+  IoBitmap& operator=(const IoBitmap&) = delete;
 
  private:
-  // Task used for updating IO permissions on each CPU.
-  static void UpdateTask(void* context);
+  using LockType = DECLARE_SPINLOCK(IoBitmap);
+  static constexpr size_t kLockSize = (sizeof(LockType) + 7) & ~size_t{7};
+  static constexpr size_t kStorageSize = kLockSize + sizeof(void*);
 
-  friend void x86_set_tss_io_bitmap(IoBitmap& bitmap);
-  friend void x86_clear_tss_io_bitmap(IoBitmap& bitmap);
-
-  ktl::unique_ptr<bitmap::RleBitmap> bitmap_;
-  DECLARE_SPINLOCK(IoBitmap) lock_;
+  [[maybe_unused]] OpaqueStorage<kStorageSize, 8> storage_{};
 };
+
+static_assert(sizeof(IoBitmap) ==
+              ((sizeof(DECLARE_SPINLOCK(IoBitmap)) + 7) & ~size_t{7}) + sizeof(void*));
+static_assert(alignof(IoBitmap) == 8);
 
 #endif  // ZIRCON_KERNEL_ARCH_X86_INCLUDE_ARCH_X86_IOPORT_H_

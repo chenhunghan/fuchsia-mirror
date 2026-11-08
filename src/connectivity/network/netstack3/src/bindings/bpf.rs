@@ -10,10 +10,10 @@ use ebpf::{
     ProgramArgument, Type, VerifiedEbpfProgram,
 };
 use ebpf_api::{
-    __sk_buff, BpfSockContext, CGROUP_SKB_ARGS, CGROUP_SKB_SK_BUF_TYPE, Map, MapError, MapValueRef,
+    __sk_buff, BpfSockContext, CGROUP_SKB_SK_BUF_TYPE, Map, MapError, MapValueRef,
     PacketWithLoadBytes, PinnedMap, SKF_AD_OFF, SKF_AD_PKTTYPE, SKF_AD_PROTOCOL, SKF_LL_OFF,
     SKF_NET_OFF, SOCKET_FILTER_ARGS, SOCKET_FILTER_CBPF_CONFIG, SOCKET_FILTER_SK_BUF_TYPE,
-    SocketRef, StructId, bpf_sock, uaddr, uid_t,
+    SocketRef, bpf_sock, uaddr, uid_t,
 };
 use fidl_fuchsia_ebpf as febpf;
 use fidl_fuchsia_net as fnet;
@@ -31,7 +31,6 @@ use netstack3_core::filter::{
 use netstack3_core::ip::{Mark, Marks};
 use netstack3_core::{GsoInfo, NetworkSerializationContext};
 
-use netstack3_core::sync::{Mutex, RwLock};
 use netstack3_core::trace::trace_duration;
 use packet::{Buf, FragmentedByteSlice, LayoutBufferAlloc, PartialSerializeResult};
 use packet_formats::ethernet::EtherType;
@@ -41,6 +40,8 @@ use std::collections::{HashMap, hash_map};
 use std::mem::offset_of;
 use std::sync::{Arc, Weak};
 use zerocopy::FromBytes;
+
+use crate::bindings::sync::{CoreMutex, CoreRwLock};
 
 fn packet_type_to_raw(packet_type: PacketType) -> u32 {
     match packet_type {
@@ -453,7 +454,7 @@ pub(crate) enum SocketFilterResult {
 }
 
 impl SocketFilterProgram {
-    pub(crate) fn new(
+    pub(crate) async fn new(
         program: ValidVerifiedProgram,
         map_cache: &Arc<EbpfMapCache>,
     ) -> Result<Self, EbpfError> {
@@ -461,14 +462,24 @@ impl SocketFilterProgram {
         // This is safe because fuchsia.posix.socket.packet is routed only to Starnix,
         // but that may change in the future. We need a better mechanism for permissions & BPF
         // verification.
-        let (program, maps) =
-            parse_verified_program_fidl(program, map_cache, SOCKET_FILTER_ARGS.clone())?;
+        let program = parse_verified_program_fidl::<Self>(program, map_cache).await?;
 
-        let program = ebpf::link_program(&program, maps).map_err(|e| {
-            error!("Failed to link eBPF program: {:?}", e);
+        Ok(Self { program })
+    }
+
+    // TODO(https://fxbug.dev/477940321): Update AttachBpfFilterUnsafe to pass VerifiedProgram
+    // and remove this function.
+    pub(crate) fn new_from_bytecode(code: Vec<u64>) -> Result<Self, EbpfError> {
+        let program = VerifiedEbpfProgram::from_verified_code(
+            code_from_vec(code),
+            SOCKET_FILTER_ARGS.clone(),
+            vec![],
+            vec![],
+        );
+        let program = ebpf::link_program(&program, vec![]).map_err(|e| {
+            error!("Failed to link socket filter bytecode: {:?}", e);
             EbpfError::LinkFailed
         })?;
-
         Ok(Self { program })
     }
 
@@ -618,45 +629,68 @@ impl From<AttachmentError> for fnet_filter::SocketControlAttachEbpfProgramError 
 #[fidl_table_src(febpf::VerifiedProgram)]
 #[fidl_table_strict]
 pub(crate) struct ValidVerifiedProgram {
-    pub code: Vec<u64>,
-    pub struct_access_instructions: Vec<febpf::StructAccess>,
+    pub linker: fidl::endpoints::ClientEnd<febpf::ProgramLinkerMarker>,
     pub maps: Vec<febpf::Map>,
 }
 
 /// Translate FIDL representation of a verified eBPF program to
-/// `VerifiedEbpfProgram`. Initializes all included eBPF maps and adds them
+/// `VerifiedEbpfProgram` and link it. Initializes all included eBPF maps and adds them
 /// to the `map_cache`.
-fn parse_verified_program_fidl(
+async fn parse_verified_program_fidl<
+    C: EbpfProgramContext<Map = CachedMapRef> + ebpf::StaticHelperSet,
+>(
     program: ValidVerifiedProgram,
     map_cache: &Arc<EbpfMapCache>,
-    args: Vec<Type>,
-) -> Result<(VerifiedEbpfProgram, Vec<CachedMapRef>), EbpfError> {
-    let ValidVerifiedProgram { code, struct_access_instructions, maps } = program;
+) -> Result<EbpfProgram<C>, EbpfError> {
+    let ValidVerifiedProgram { linker, maps } = program;
 
     let maps = map_cache.init_maps(maps).map_err(|e| {
         error!("Failed to initialize eBPF map: {:?}", e);
         EbpfError::MapFailed
     })?;
-    let map_schemas = maps.iter().map(|m| m.schema().clone()).collect();
 
-    let struct_access_instructions = struct_access_instructions
-        .iter()
-        .map(|value| ebpf::StructAccess {
-            pc: value.pc.try_into().unwrap(),
-            memory_id: StructId::from(value.struct_id).as_memory_id(),
-            field_offset: value.field_offset.try_into().unwrap(),
-            is_32_bit_ptr_load: value.is_32_bit_ptr_load,
-        })
-        .collect();
+    let linkage = ebpf::collect_program_linkage::<C>(&maps);
+    let fidl_linkage = ebpf_api::program_linkage_to_fidl(linkage);
 
-    let program = VerifiedEbpfProgram::from_verified_code(
-        code_from_vec(code),
-        args,
-        struct_access_instructions,
-        map_schemas,
-    );
+    let linked_program = linker
+        .into_proxy()
+        .link(&fidl_linkage)
+        .await
+        .map_err(|e| {
+            error!("Failed to call ProgramLinker.Link: {:?}", e);
+            EbpfError::LinkFailed
+        })?
+        .map_err(|e| {
+            error!("ProgramLinker.Link returned error: {:?}", e);
+            EbpfError::LinkFailed
+        })?;
 
-    Ok((program, maps))
+    match linked_program {
+        febpf::LinkedProgram::CompiledProgram(_compiled_vmo) => {
+            // TODO(https://fxbug.dev/578040355): Map the compiled JIT VMO and create an
+            // `EbpfProgram` instance once JIT compilation is implemented.
+            error!("JIT eBPF programs are not supported yet");
+            Err(EbpfError::LinkFailed)
+        }
+        febpf::LinkedProgram::Bytecode(febpf::Bytecode { instructions }) => {
+            if instructions.is_empty() {
+                error!("Empty eBPF bytecode not allowed");
+                return Err(EbpfError::LinkFailed);
+            }
+
+            // SAFETY: `instructions` were verified and linked by `ProgramLinker` for context `C`
+            // and `maps`.
+            unsafe { EbpfProgram::from_linked_instructions(code_from_vec(instructions), maps) }
+                .map_err(|e| {
+                    error!("Failed to prepare eBPF program: {:?}", e);
+                    EbpfError::LinkFailed
+                })
+        }
+        febpf::LinkedProgramUnknown!() => {
+            error!("Unknown LinkedProgram variant");
+            Err(EbpfError::LinkFailed)
+        }
+    }
 }
 
 impl CgroupSkbProgram {
@@ -673,7 +707,7 @@ impl CgroupSkbProgram {
     // Max value that can be returned from a `CGROUP_INGRESS` program.
     const INGRESS_MAX_RESULT: u64 = Self::RESULT_PASS_BIT;
 
-    pub fn new(
+    pub async fn new(
         program: ValidVerifiedProgram,
         map_cache: &Arc<EbpfMapCache>,
     ) -> Result<Self, EbpfError> {
@@ -681,13 +715,7 @@ impl CgroupSkbProgram {
         // This is safe because `fuchsia.posix.filter.SocketControl` is routed only to Starnix,
         // but that may change in the future. We need a better mechanism for permissions & BPF
         // verification.
-        let (program, maps) =
-            parse_verified_program_fidl(program, map_cache, CGROUP_SKB_ARGS.clone())?;
-
-        let program = ebpf::link_program(&program, maps).map_err(|e| {
-            error!("Failed to link eBPF program: {:?}", e);
-            EbpfError::LinkFailed
-        })?;
+        let program = parse_verified_program_fidl::<Self>(program, map_cache).await?;
 
         Ok(Self { program })
     }
@@ -748,7 +776,7 @@ impl MapReference for CachedMapRef {
 /// only once per process.
 #[derive(Default)]
 pub(crate) struct EbpfMapCache {
-    maps: Mutex<HashMap<MapId, Weak<CachedMapRefInner>>>,
+    maps: CoreMutex<HashMap<MapId, Weak<CachedMapRefInner>>>,
 }
 
 impl EbpfMapCache {
@@ -842,7 +870,7 @@ struct EbpfManagerState {
 /// Holds state of eBPF programs attached in this process.
 #[derive(Default)]
 pub(crate) struct EbpfManager {
-    state: RwLock<EbpfManagerState>,
+    state: CoreRwLock<EbpfManagerState>,
     maps_cache: Arc<EbpfMapCache>,
 }
 
@@ -1007,6 +1035,7 @@ mod tests {
     use ebpf::{MapFlags, Packet};
     use ebpf_api::{AttachType, ProgramType, SKF_AD_MAX};
     use fidl_fuchsia_posix_socket_packet as fppacket;
+    use futures::StreamExt as _;
     use ip_test_macro::ip_test;
     use net_types::Witness;
     use netstack3_core::NetworkSerializationContext;
@@ -1273,7 +1302,8 @@ mod tests {
     #[test_case(AttachType::CgroupInetEgress, Some(TEST_GSO_INFO); "Egress GSO")]
     #[test_case(AttachType::CgroupInetIngress, None; "Ingress")]
     #[test_case(AttachType::CgroupInetIngress, Some(TEST_GSO_INFO); "Ingress GSO")]
-    fn run_skb_prog<I: TestIpExt + FilterIpExt>(
+    #[fuchsia::test]
+    async fn run_skb_prog<I: TestIpExt + FilterIpExt>(
         attach_type: AttachType,
         gso_info: Option<GsoInfo>,
     ) {
@@ -1282,6 +1312,7 @@ mod tests {
             ebpf_test_util::TestProgramDefinition::load(ProgramType::CgroupSkb).instantiate();
         let program = test_program.get_fidl_program();
         let program = CgroupSkbProgram::new(program.try_into().unwrap(), manager.maps_cache())
+            .await
             .expect("Failed to initialize a program");
 
         match attach_type {
@@ -1382,5 +1413,45 @@ mod tests {
             });
         assert_eq!(result.gso_segs, gso_segs);
         assert_eq!(result.gso_size, gso_size);
+    }
+
+    #[fuchsia::test]
+    async fn program_linker_handoff() {
+        let manager = EbpfManager::default();
+        let test_program =
+            ebpf_test_util::TestProgramDefinition::load(ProgramType::CgroupSkb).instantiate();
+        let mut fidl_program = test_program.get_fidl_program();
+        let (client_end, server_end) =
+            fidl::endpoints::create_endpoints::<febpf::ProgramLinkerMarker>();
+        let orig_linker = fidl_program
+            .linker
+            .replace(client_end)
+            .expect("expected ProgramLinker client_end in test_program.get_fidl_program()");
+
+        let server_thread = std::thread::spawn(move || {
+            let mut executor = fuchsia_async::LocalExecutor::default();
+            executor.run_singlethreaded(async move {
+                let mut stream = server_end.into_stream();
+                let febpf::ProgramLinkerRequest::Link { payload, responder } =
+                    stream.next().await.expect("stream item").expect("fidl request");
+                assert!(payload.struct_mappings.as_ref().is_some_and(|m| !m.is_empty()));
+                assert!(payload.helpers.as_ref().is_some_and(|h| !h.is_empty()));
+                assert_eq!(payload.maps.as_ref().map(|m| m.len()), Some(1));
+                assert_ne!(payload.maps.as_ref().unwrap()[0].data_addr, 0);
+                assert!(payload.packet_load_fn_addr.is_some_and(|fn_ptr| fn_ptr != 0));
+                let linked = orig_linker
+                    .into_proxy()
+                    .link(&payload)
+                    .await
+                    .expect("orig_linker FIDL")
+                    .expect("orig_linker Link");
+                responder.send(Ok(linked)).expect("send response");
+            });
+        });
+
+        let result =
+            CgroupSkbProgram::new(fidl_program.try_into().unwrap(), manager.maps_cache()).await;
+        assert!(result.is_ok());
+        server_thread.join().expect("server thread");
     }
 }

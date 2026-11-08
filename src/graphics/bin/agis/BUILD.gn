@@ -69,24 +69,15 @@ fuchsia_component("agis-cmp") {
 
 # Instructions on how to run vtc-test can be found in vtc_test.cc.
 fuchsia_package("vtc-test") {
-  deps = [
-    ":vtc-test-cmp",
-    "//build/validate:non_production_tag",
-  ]
+  deps = [ ":vtc-test-cmp" ]
 }
 
 fuchsia_test_package("agis-test") {
   test_components = [ ":test" ]
-  deps = [
-    ":agis-cmp",
-    "//build/validate:non_production_tag",
-    "//src/connectivity/network/netstack3:component-debug",
-  ]
+  deps = [ ":agis-cmp" ]
+  subpackages = [ "//src/connectivity/network/netstack3:package-debug" ]
 }
 
 fuchsia_package("agis") {
-  deps = [
-    ":agis-cmp",
-    "//build/validate:non_production_tag",
-  ]
+  deps = [ ":agis-cmp" ]
 }

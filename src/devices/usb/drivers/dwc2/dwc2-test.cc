@@ -23,6 +23,8 @@
 
 #include <atomic>
 #include <mutex>
+#include <string>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -82,6 +84,12 @@ class Environment : public fdf_testing::Environment {
   }
 
   fake_mmio::FakeMmioRegRegion& mmio() { return mmio_; }
+
+  void ResetGrstctlCallbacks() {
+    fake_grstctl_.Reset();
+    mmio_[GRSTCTL::Get().addr()].SetReadCallback([this]() { return fake_grstctl_.Read(); });
+    mmio_[GRSTCTL::Get().addr()].SetWriteCallback([this](uint64_t v) { fake_grstctl_.Write(v); });
+  }
 
  private:
   // A class which manages a poor emulation of the global reset register (for
@@ -214,9 +222,24 @@ class Dwc2Test : public testing::Test {
 
   void SetConnectedState(Dwc2& driver, bool connected) { driver.connected_.store(connected); }
 
-  void SetConfiguredState(Dwc2& driver, bool configured) { driver.configured_ = configured; }
+  void SetConfiguredState(Dwc2& driver, bool configured) { driver.configured_.store(configured); }
+
+  void SetConnected(Dwc2& driver, bool connected) { driver.SetConnected(connected); }
 
   bool IsConnected(const Dwc2& driver) const { return driver.connected_.load(); }
+
+  bool IsConfigured(const Dwc2& driver) const { return driver.configured_.load(); }
+
+  size_t GetQuarantinedRequestCount(Dwc2& driver) {
+    std::lock_guard<std::mutex> lock(driver.lock_);
+    return driver.quarantined_reqs_.size();
+  }
+
+  uint64_t GetBtiPmoCount(const Dwc2& driver) const {
+    zx_info_bti_t info{};
+    EXPECT_EQ(driver.bti().get_info(ZX_INFO_BTI, &info, sizeof(info), nullptr, nullptr), ZX_OK);
+    return info.pmo_count;
+  }
 
   // Inspects whether Dwc2.lock_ is locked.
   // This check is sound here because the driver dispatcher thread is synchronously blocked
@@ -230,6 +253,27 @@ class Dwc2Test : public testing::Test {
   }
 
   void HandleEp0TimeoutRecovery(Dwc2& driver) { driver.HandleEp0TimeoutRecovery(); }
+
+  fidl::SyncClient<fuchsia_hardware_usb_dci::UsbDci> ConnectDciClient() {
+    zx::result dci_client_end = dut_.Connect<fuchsia_hardware_usb_dci::UsbDciService::Device>();
+    EXPECT_TRUE(dci_client_end.is_ok());
+    if (dci_client_end.is_error()) {
+      return {};
+    }
+    return fidl::SyncClient<fuchsia_hardware_usb_dci::UsbDci>(std::move(*dci_client_end));
+  }
+
+  void ConfigureBulkEndpoint(fidl::SyncClient<fuchsia_hardware_usb_dci::UsbDci>& dci_client,
+                             uint8_t ep_addr, uint16_t max_packet_size = 64) {
+    fdescriptor::UsbEndpointDescriptor ep_desc{};
+    ep_desc.b_endpoint_address(ep_addr);
+    ep_desc.bm_attributes(static_cast<uint8_t>(fdescriptor::EndpointType::kBulk));
+    ep_desc.w_max_packet_size(max_packet_size);
+    fdescriptor::UsbSsEpCompDescriptor ss_comp_desc{};
+
+    auto config_result = dci_client->ConfigureEndpoint({ep_desc, ss_comp_desc});
+    ASSERT_TRUE(config_result.is_ok()) << config_result.error_value().FormatDescription();
+  }
 
   fdf_testing::BackgroundDriverTest<Config> dut_;
 };
@@ -516,26 +560,210 @@ namespace {
 class EndpointEventHandler
     : public fidl::AsyncEventHandler<fuchsia_hardware_usb_endpoint::Endpoint> {
  public:
+  struct CompletionRecord {
+    zx_status_t status;
+    std::optional<bool> is_short;
+    std::optional<size_t> length;
+  };
+
   void OnCompletion(
       fidl::Event<fuchsia_hardware_usb_endpoint::Endpoint::OnCompletion>& event) override {
+    std::lock_guard<std::mutex> lock(mutex_);
     auto signal = fit::defer([this] { completion_.Signal(); });
     ASSERT_FALSE(event.completion().empty());
-    ASSERT_TRUE(event.completion()[0].status().has_value());
-    last_status_.store(*event.completion()[0].status());
+    for (const auto& completion : event.completion()) {
+      ASSERT_TRUE(completion.status().has_value());
+      std::optional<bool> is_short;
+      std::optional<size_t> length;
+      if (completion.request().has_value()) {
+        is_short = completion.request()->short_();
+        if (completion.request()->data().has_value()) {
+          size_t total = 0;
+          for (const auto& region : *completion.request()->data()) {
+            total += region.size().value_or(0);
+          }
+          length = total;
+        }
+      }
+      completions_.push({
+          .status = *completion.status(),
+          .is_short = is_short,
+          .length = length,
+      });
+    }
   }
 
-  zx_status_t WaitForStatus() {
-    completion_.Wait();
-    completion_.Reset();
-    return last_status_.load();
+  zx::result<CompletionRecord> WaitForCompletion(zx::duration timeout) {
+    const zx::time deadline = zx::deadline_after(timeout);
+    while (true) {
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!completions_.empty()) {
+          CompletionRecord record = completions_.front();
+          completions_.pop();
+          if (completions_.empty()) {
+            completion_.Reset();
+          }
+          return zx::ok(record);
+        }
+        completion_.Reset();
+      }
+      zx_status_t wait_status = completion_.Wait(deadline);
+      if (wait_status != ZX_OK) {
+        return zx::error(wait_status);
+      }
+    }
+  }
+
+  CompletionRecord WaitForCompletion() {
+    zx::result<CompletionRecord> record = WaitForCompletion(zx::duration::infinite());
+    EXPECT_TRUE(record.is_ok()) << record.status_string();
+    return record.value_or(
+        CompletionRecord{.status = record.status_value(), .is_short = {}, .length = {}});
+  }
+
+  zx_status_t WaitForStatus() { return WaitForCompletion().status; }
+
+  size_t PendingCompletionCount() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return completions_.size();
   }
 
  private:
-  std::atomic<zx_status_t> last_status_{ZX_OK};
+  std::mutex mutex_;
+  std::queue<CompletionRecord> completions_ __TA_GUARDED(mutex_);
   libsync::Completion completion_;
 };
 
 }  // namespace
+
+TEST_F(Dwc2Test, SetConnectedFalseDrainsEndpointsBeforeNotifyingDci) {
+  FakeUsbDciInterface fake_dci;
+  fdf::UnownedSynchronizedDispatcher dci_dispatcher = dut_.runtime().StartBackgroundDispatcher();
+  fdf::UnownedSynchronizedDispatcher ep_dispatcher = dut_.runtime().StartBackgroundDispatcher();
+
+  auto cleanup_dispatchers = fit::defer([&] {
+    libsync::Completion dci_shutdown;
+    dut_.runtime().ShutdownBackgroundDispatcher(dci_dispatcher->get(),
+                                                [&] { dci_shutdown.Signal(); });
+    dci_shutdown.Wait();
+
+    libsync::Completion ep_shutdown;
+    dut_.runtime().ShutdownBackgroundDispatcher(ep_dispatcher->get(),
+                                                [&] { ep_shutdown.Signal(); });
+    ep_shutdown.Wait();
+  });
+
+  auto dci_endpoints = fidl::CreateEndpoints<fuchsia_hardware_usb_dci::UsbDciInterface>();
+  ASSERT_TRUE(dci_endpoints.is_ok());
+  auto binding = fidl::BindServer(dci_dispatcher->async_dispatcher(),
+                                  std::move(dci_endpoints->server), &fake_dci);
+
+  zx::result dci_client_end = dut_.Connect<fuchsia_hardware_usb_dci::UsbDciService::Device>();
+  ASSERT_TRUE(dci_client_end.is_ok());
+  fidl::SyncClient dci_client(std::move(*dci_client_end));
+
+  auto set_intf_result = dci_client->SetInterface({std::move(dci_endpoints->client)});
+  ASSERT_TRUE(set_intf_result.is_ok()) << set_intf_result.error_value().FormatDescription();
+
+  auto ep_endpoints = fidl::CreateEndpoints<fuchsia_hardware_usb_endpoint::Endpoint>();
+  ASSERT_TRUE(ep_endpoints.is_ok());
+
+  constexpr uint8_t kEpAddr = 0x81;  // EP 1 IN
+  auto connect_result = dci_client->ConnectToEndpoint({kEpAddr, std::move(ep_endpoints->server)});
+  ASSERT_TRUE(connect_result.is_ok());
+
+  EndpointEventHandler event_handler;
+  fidl::SharedClient<fuchsia_hardware_usb_endpoint::Endpoint> ep_client(
+      std::move(ep_endpoints->client), ep_dispatcher->async_dispatcher(), &event_handler);
+
+  bool callback_invoked = false;
+  bool configured_in_cb = true;
+  bool ep_enabled_in_cb = true;
+  bool pending_zlp_in_cb = true;
+  bool has_current_req_in_cb = true;
+  bool queued_reqs_empty_in_cb = false;
+
+  dut_.RunInDriverContext([&](Dwc2& driver) {
+    auto* ep0_in = GetEndpoint(driver, DWC_EP0_IN);
+    auto* ep0_out = GetEndpoint(driver, DWC_EP0_OUT);
+    ASSERT_NE(ep0_in, nullptr);
+    ASSERT_NE(ep0_out, nullptr);
+    ep0_in->req_offset = 8;
+    ep0_in->req_xfersize = 32;
+    ep0_in->req_length = 64;
+    ep0_out->req_offset = 16;
+    ep0_out->req_xfersize = 64;
+    ep0_out->req_length = 128;
+
+    uint8_t ep_num = DWC_ADDR_TO_INDEX(kEpAddr);
+    auto* ep = GetEndpoint(driver, ep_num);
+    ASSERT_NE(nullptr, ep);
+
+    {
+      std::lock_guard<std::mutex> lock(ep->lock);
+      ep->max_packet_size = 64;
+      ep->enabled = true;
+      ep->pending_zlp = true;
+
+      usb::FidlRequest active_req(usb::EndpointType::BULK);
+      active_req->defer_completion(false);
+      active_req->short_(true);
+      ep->current_req.emplace(std::move(active_req));
+
+      usb::FidlRequest queued_req(usb::EndpointType::BULK);
+      queued_req->defer_completion(false);
+      queued_req->short_(false);
+      ep->queued_reqs.push(std::move(queued_req));
+    }
+
+    SetConnectedState(driver, true);
+    SetConfiguredState(driver, true);
+
+    fake_dci.set_connected_callback([&](bool connected) {
+      if (!connected) {
+        callback_invoked = true;
+        configured_in_cb = IsConfigured(driver);
+        std::lock_guard<std::mutex> lock(ep->lock);
+        ep_enabled_in_cb = ep->enabled;
+        pending_zlp_in_cb = ep->pending_zlp;
+        has_current_req_in_cb = ep->current_req.has_value();
+        queued_reqs_empty_in_cb = ep->queued_reqs.empty();
+      }
+    });
+
+    // dci_intf_->SetConnected() is a synchronous two-way fidl::WireSyncClient call, so
+    // set_connected_cb_ runs to completion on dci_dispatcher before SetConnected() and
+    // RunInDriverContext() return.
+    SetConnected(driver, false);
+
+    // EP0 IN/OUT transfer counters belong to IrqThread without ep->lock and must not be reset by
+    // SetConnected(false).
+    EXPECT_EQ(ep0_in->req_offset, 8u);
+    EXPECT_EQ(ep0_in->req_xfersize, 32u);
+    EXPECT_EQ(ep0_in->req_length, 64u);
+    EXPECT_EQ(ep0_out->req_offset, 16u);
+    EXPECT_EQ(ep0_out->req_xfersize, 64u);
+    EXPECT_EQ(ep0_out->req_length, 128u);
+  });
+
+  EXPECT_TRUE(callback_invoked);
+  EXPECT_FALSE(configured_in_cb);
+  EXPECT_FALSE(ep_enabled_in_cb);
+  EXPECT_FALSE(pending_zlp_in_cb);
+  EXPECT_FALSE(has_current_req_in_cb);
+  EXPECT_TRUE(queued_reqs_empty_in_cb);
+
+  // Verify that the in-flight request (current_req, short_ == true) is completed before the
+  // queued request (queued_reqs, short_ == false).
+  EndpointEventHandler::CompletionRecord first_completion = event_handler.WaitForCompletion();
+  EXPECT_EQ(first_completion.status, ZX_ERR_IO_NOT_PRESENT);
+  EXPECT_EQ(first_completion.is_short, std::optional<bool>(true));
+
+  EndpointEventHandler::CompletionRecord second_completion = event_handler.WaitForCompletion();
+  EXPECT_EQ(second_completion.status, ZX_ERR_IO_NOT_PRESENT);
+  EXPECT_EQ(second_completion.is_short, std::optional<bool>(false));
+}
 
 TEST_F(Dwc2Test, QueueRequestOnDisabledOrUnconfiguredEndpointReturnsIoNotPresent) {
   fdf::UnownedSynchronizedDispatcher ep_dispatcher = dut_.runtime().StartBackgroundDispatcher();
@@ -598,6 +826,601 @@ TEST_F(Dwc2Test, QueueRequestOnDisabledOrUnconfiguredEndpointReturnsIoNotPresent
     ep->QueueRequest(std::move(req));
   });
   EXPECT_EQ(event_handler.WaitForStatus(), ZX_ERR_IO_NOT_PRESENT);
+}
+
+namespace {
+
+struct ScopedEndpointHaltMmio {
+  fdf_testing::BackgroundDriverTest<Config>& dut;
+  uint8_t ep_num;
+  bool is_in;
+  uint32_t epint_addr;
+
+  std::atomic<uint32_t> daintmsk = 0;
+  std::atomic<uint32_t> depctl = 0;
+  std::atomic<uint32_t> depdma = 0;
+  std::atomic<uint32_t> epint = 0;
+  std::atomic<uint32_t> dctl = 0;
+  std::atomic<uint32_t> gintsts = 0;
+  std::atomic<bool> saw_epdis = false;
+  std::atomic<bool> saw_sgoutnak = false;
+  std::atomic<bool> fail_nakeff = false;
+  std::atomic<bool> fail_epdis = false;
+  std::atomic<bool> clear_epena_on_first_depctl_read = false;
+  std::atomic<uint32_t> reset_daintmsk_on_epdis = UINT32_MAX;
+
+  ScopedEndpointHaltMmio(fdf_testing::BackgroundDriverTest<Config>& test_dut, uint8_t ep)
+      : dut(test_dut),
+        ep_num(ep),
+        is_in(DWC_EP_IS_IN(ep)),
+        epint_addr(is_in ? DIEPINT::Get(ep).addr() : DOEPINT::Get(ep).addr()) {
+    dut.RunInEnvironmentTypeContext([this](Environment& env) {
+      env.mmio()[DAINTMSK::Get().addr()].SetReadCallback(
+          [this]() -> uint64_t { return daintmsk.load(); });
+      env.mmio()[DAINTMSK::Get().addr()].SetWriteCallback(
+          [this](uint64_t val) { daintmsk.store(static_cast<uint32_t>(val)); });
+      env.mmio()[DEPCTL::Get(ep_num).addr()].SetReadCallback([this]() -> uint64_t {
+        const uint32_t cur = depctl.load();
+        if (clear_epena_on_first_depctl_read.exchange(false)) {
+          depctl.store(DEPCTL::Get(ep_num).FromValue(cur).set_epena(0).reg_value());
+        }
+        return cur;
+      });
+      env.mmio()[DEPCTL::Get(ep_num).addr()].SetWriteCallback([this](uint64_t val) {
+        const bool was_epena = DEPCTL::Get(ep_num).FromValue(depctl.load()).epena() != 0;
+        auto reg = DEPCTL::Get(ep_num).FromValue(static_cast<uint32_t>(val));
+        const bool wrote_epena = reg.epena() != 0;
+        // DEPCTL.epena is R_WS_SC in hardware: writing 0 does not clear an active transfer.
+        if (was_epena) {
+          reg.set_epena(1);
+        }
+        if (is_in && reg.snak() && !fail_nakeff.load()) {
+          epint.fetch_or(DIEPINT::Get(ep_num).FromValue(0).set_inepnakeff(1).reg_value());
+        }
+        // DWC2 requires both EPDis and EPEna to be written as 1 to disable an active endpoint.
+        if (reg.epdis() && was_epena && wrote_epena) {
+          saw_epdis.store(true);
+          const uint32_t override_daintmsk = reset_daintmsk_on_epdis.load();
+          if (override_daintmsk != UINT32_MAX) {
+            daintmsk.store(override_daintmsk);
+          }
+          if (!fail_epdis.load()) {
+            reg.set_epdis(0).set_epena(0);
+            epint.fetch_or(is_in ? DIEPINT::Get(ep_num).FromValue(0).set_epdisabled(1).reg_value()
+                                 : DOEPINT::Get(ep_num).FromValue(0).set_epdisabled(1).reg_value());
+          } else {
+            reg.set_epdis(0);
+          }
+        } else if (reg.epdis()) {
+          reg.set_epdis(0);
+        }
+        depctl.store(reg.reg_value());
+      });
+      env.mmio()[DEPDMA::Get(ep_num).addr()].SetReadCallback(
+          [this]() -> uint64_t { return depdma.load(); });
+      env.mmio()[DEPDMA::Get(ep_num).addr()].SetWriteCallback(
+          [this](uint64_t val) { depdma.store(static_cast<uint32_t>(val)); });
+      env.mmio()[epint_addr].SetReadCallback([this]() -> uint64_t { return epint.load(); });
+      env.mmio()[epint_addr].SetWriteCallback(
+          [this](uint64_t val) { epint.fetch_and(~static_cast<uint32_t>(val)); });
+      env.mmio()[DCTL::Get().addr()].SetReadCallback([this]() -> uint64_t { return dctl.load(); });
+      env.mmio()[DCTL::Get().addr()].SetWriteCallback([this](uint64_t val) {
+        auto reg = DCTL::Get().FromValue(static_cast<uint32_t>(val));
+        if (reg.sgoutnak()) {
+          saw_sgoutnak.store(true);
+          reg.set_sgoutnak(0);
+          if (!fail_nakeff.load()) {
+            reg.set_goutnaksts(1);
+            gintsts.fetch_or(GINTSTS::Get().FromValue(0).set_goutnakeff(1).reg_value());
+          }
+        }
+        if (reg.cgoutnak()) {
+          reg.set_cgoutnak(0).set_goutnaksts(0);
+          gintsts.fetch_and(~GINTSTS::Get().FromValue(0).set_goutnakeff(1).reg_value());
+        }
+        dctl.store(reg.reg_value());
+      });
+      env.mmio()[GINTSTS::Get().addr()].SetReadCallback(
+          [this]() -> uint64_t { return gintsts.load(); });
+    });
+  }
+
+  ~ScopedEndpointHaltMmio() {
+    dut.RunInEnvironmentTypeContext([this](Environment& env) {
+      env.mmio()[DAINTMSK::Get().addr()] = fake_mmio::FakeMmioReg{};
+      env.mmio()[DEPCTL::Get(ep_num).addr()] = fake_mmio::FakeMmioReg{};
+      env.mmio()[DEPDMA::Get(ep_num).addr()] = fake_mmio::FakeMmioReg{};
+      env.mmio()[epint_addr] = fake_mmio::FakeMmioReg{};
+      env.mmio()[DCTL::Get().addr()] = fake_mmio::FakeMmioReg{};
+      env.mmio()[GINTSTS::Get().addr()] = fake_mmio::FakeMmioReg{};
+    });
+  }
+
+  ScopedEndpointHaltMmio(const ScopedEndpointHaltMmio&) = delete;
+  ScopedEndpointHaltMmio& operator=(const ScopedEndpointHaltMmio&) = delete;
+};
+
+}  // namespace
+
+TEST_F(Dwc2Test, DisableEndpointMasksInterruptAndCompletesPendingRequests) {
+  // Exercise IN (0x81 -> index 1), OUT (0x01 -> index 17), and high OUT (0x0F -> index 31, bit 31
+  // of DAINTMSK).
+  for (uint8_t ep_addr : {uint8_t{0x81}, uint8_t{0x01}, uint8_t{0x0F}}) {
+    SCOPED_TRACE(static_cast<unsigned>(ep_addr));
+    EndpointEventHandler event_handler;
+    fdf::UnownedSynchronizedDispatcher ep_dispatcher = dut_.runtime().StartBackgroundDispatcher();
+    auto cleanup_dispatcher = fit::defer([&] {
+      libsync::Completion shutdown_complete;
+      dut_.runtime().ShutdownBackgroundDispatcher(ep_dispatcher->get(),
+                                                  [&] { shutdown_complete.Signal(); });
+      shutdown_complete.Wait();
+    });
+
+    fidl::SharedClient<fuchsia_hardware_usb_endpoint::Endpoint> ep_client;
+
+    const uint8_t ep_num = DWC_ADDR_TO_INDEX(ep_addr);
+    const bool is_in = DWC_EP_IS_IN(ep_num);
+    ScopedEndpointHaltMmio hw(dut_, ep_num);
+
+    fidl::SyncClient dci_client = ConnectDciClient();
+    ASSERT_TRUE(dci_client.is_valid());
+
+    auto ep_endpoints = fidl::CreateEndpoints<fuchsia_hardware_usb_endpoint::Endpoint>();
+    ASSERT_TRUE(ep_endpoints.is_ok());
+
+    auto connect_result = dci_client->ConnectToEndpoint({ep_addr, std::move(ep_endpoints->server)});
+    ASSERT_TRUE(connect_result.is_ok());
+
+    ep_client.Bind(std::move(ep_endpoints->client), ep_dispatcher->async_dispatcher(),
+                   &event_handler);
+
+    ASSERT_NO_FATAL_FAILURE(ConfigureBulkEndpoint(dci_client, ep_addr));
+    EXPECT_NE(hw.daintmsk.load() & (1u << ep_num), 0u);
+    EXPECT_EQ(DEPCTL::Get(ep_num).FromValue(hw.depctl.load()).usbactep(), 1u);
+
+    const uint32_t ahberr_bit = is_in ? DIEPINT::Get(ep_num).FromValue(0).set_ahberr(1).reg_value()
+                                      : DOEPINT::Get(ep_num).FromValue(0).set_ahberr(1).reg_value();
+    dut_.RunInDriverContext([&](Dwc2& driver) {
+      auto* ep = GetEndpoint(driver, ep_num);
+      ASSERT_NE(ep, nullptr);
+
+      std::lock_guard<std::mutex> lock(ep->lock);
+      ASSERT_TRUE(ep->enabled);
+      ep->pending_zlp = true;
+      hw.depctl.store(DEPCTL::Get(ep_num).FromValue(hw.depctl.load()).set_epena(1).reg_value());
+      hw.depdma.store(0x12340000u);
+      hw.epint.store(ahberr_bit);
+
+      usb::FidlRequest active_req(usb::EndpointType::BULK);
+      active_req->defer_completion(false);
+      active_req.add_data(std::vector<uint8_t>(64, 0), 64, 0);
+      ep->current_req.emplace(std::move(active_req));
+
+      usb::FidlRequest queued_req(usb::EndpointType::BULK);
+      queued_req->defer_completion(false);
+      queued_req.add_data(std::vector<uint8_t>(128, 0), 128, 0);
+      ep->queued_reqs.push(std::move(queued_req));
+    });
+
+    auto disable_result = dci_client->DisableEndpoint({ep_addr});
+    ASSERT_TRUE(disable_result.is_ok()) << disable_result.error_value().FormatDescription();
+
+    EXPECT_TRUE(hw.saw_epdis.load());
+    if (!is_in) {
+      EXPECT_TRUE(hw.saw_sgoutnak.load());
+      EXPECT_EQ(DCTL::Get().FromValue(hw.dctl.load()).goutnaksts(), 0u);
+    }
+    EXPECT_EQ(hw.daintmsk.load() & (1u << ep_num), 0u);
+    auto final_depctl = DEPCTL::Get(ep_num).FromValue(hw.depctl.load());
+    EXPECT_EQ(final_depctl.usbactep(), 0u);
+    EXPECT_EQ(final_depctl.snak(), 1u);
+    EXPECT_EQ(final_depctl.epena(), 0u);
+    EXPECT_EQ(final_depctl.epdis(), 0u);
+    EXPECT_EQ(hw.depdma.load(), 0u);
+    EXPECT_EQ(hw.epint.load(), ahberr_bit);
+
+    dut_.RunInDriverContext([&](Dwc2& driver) {
+      auto* ep = GetEndpoint(driver, ep_num);
+      ASSERT_NE(ep, nullptr);
+
+      std::lock_guard<std::mutex> lock(ep->lock);
+      EXPECT_FALSE(ep->enabled);
+      EXPECT_FALSE(ep->pending_zlp);
+      EXPECT_FALSE(ep->current_req.has_value());
+      EXPECT_TRUE(ep->queued_reqs.empty());
+    });
+
+    // Verify that active_req (submitted first) is completed before queued_req.
+    EndpointEventHandler::CompletionRecord comp1 = event_handler.WaitForCompletion();
+    EXPECT_EQ(comp1.status, ZX_ERR_IO_NOT_PRESENT);
+    EXPECT_EQ(comp1.length, 64u);
+
+    EndpointEventHandler::CompletionRecord comp2 = event_handler.WaitForCompletion();
+    EXPECT_EQ(comp2.status, ZX_ERR_IO_NOT_PRESENT);
+    EXPECT_EQ(comp2.length, 128u);
+  }
+}
+
+TEST_F(Dwc2Test, CancelAllHaltsActiveEndpointWithoutDeactivating) {
+  fidl::SyncClient dci_client = ConnectDciClient();
+  ASSERT_TRUE(dci_client.is_valid());
+
+  for (uint8_t ep_addr : {uint8_t{0x81}, uint8_t{0x01}}) {
+    SCOPED_TRACE(static_cast<unsigned>(ep_addr));
+    EndpointEventHandler event_handler;
+    fdf::UnownedSynchronizedDispatcher ep_dispatcher = dut_.runtime().StartBackgroundDispatcher();
+    auto cleanup_dispatcher = fit::defer([&] {
+      libsync::Completion shutdown_complete;
+      dut_.runtime().ShutdownBackgroundDispatcher(ep_dispatcher->get(),
+                                                  [&] { shutdown_complete.Signal(); });
+      shutdown_complete.Wait();
+    });
+
+    fidl::SharedClient<fuchsia_hardware_usb_endpoint::Endpoint> ep_client;
+
+    const uint8_t ep_num = DWC_ADDR_TO_INDEX(ep_addr);
+    const bool is_in = DWC_EP_IS_IN(ep_num);
+    ScopedEndpointHaltMmio hw(dut_, ep_num);
+    std::atomic<bool> tx_fifo_flushed = false;
+    std::atomic<bool> rx_fifo_flushed = false;
+    auto restore_grstctl = fit::defer([&] {
+      dut_.RunInEnvironmentTypeContext([](Environment& env) { env.ResetGrstctlCallbacks(); });
+    });
+    dut_.RunInEnvironmentTypeContext([&](Environment& env) {
+      env.mmio()[GRSTCTL::Get().addr()].SetReadCallback(
+          []() -> uint64_t { return GRSTCTL::Get().FromValue(0).set_ahbidle(1).reg_value(); });
+      env.mmio()[GRSTCTL::Get().addr()].SetWriteCallback([&](uint64_t val) {
+        auto reg = GRSTCTL::Get().FromValue(static_cast<uint32_t>(val));
+        if (reg.txfflsh()) {
+          tx_fifo_flushed.store(true);
+        }
+        if (reg.rxfflsh()) {
+          rx_fifo_flushed.store(true);
+        }
+      });
+    });
+
+    auto ep_endpoints = fidl::CreateEndpoints<fuchsia_hardware_usb_endpoint::Endpoint>();
+    ASSERT_TRUE(ep_endpoints.is_ok());
+    ASSERT_TRUE(dci_client->ConnectToEndpoint({ep_addr, std::move(ep_endpoints->server)}).is_ok());
+    ep_client.Bind(std::move(ep_endpoints->client), ep_dispatcher->async_dispatcher(),
+                   &event_handler);
+
+    ASSERT_NO_FATAL_FAILURE(ConfigureBulkEndpoint(dci_client, ep_addr));
+    constexpr uint32_t kOtherEpBit = 1u << 2;
+    hw.daintmsk.fetch_or((1u << DWC_EP0_IN) | (1u << DWC_EP0_OUT) | kOtherEpBit);
+    // Simulate HandleReset masking non-EP0 endpoints concurrently during
+    // StopEndpointTransferLocked.
+    hw.reset_daintmsk_on_epdis.store((1u << DWC_EP0_IN) | (1u << DWC_EP0_OUT));
+
+    dut_.RunInDriverContext([&](Dwc2& driver) {
+      auto* ep = GetEndpoint(driver, ep_num);
+      ASSERT_NE(ep, nullptr);
+
+      std::lock_guard<std::mutex> lock(ep->lock);
+      hw.depctl.store(DEPCTL::Get(ep_num).FromValue(hw.depctl.load()).set_epena(1).reg_value());
+      hw.depdma.store(0x56780000u);
+
+      usb::FidlRequest active_req(usb::EndpointType::BULK);
+      active_req->defer_completion(false);
+      active_req.add_data(std::vector<uint8_t>(64, 0), 64, 0);
+      ep->current_req.emplace(std::move(active_req));
+
+      usb::FidlRequest queued_req(usb::EndpointType::BULK);
+      queued_req->defer_completion(false);
+      queued_req.add_data(std::vector<uint8_t>(128, 0), 128, 0);
+      ep->queued_reqs.push(std::move(queued_req));
+    });
+
+    auto cancel_result = dci_client->CancelAll({ep_addr});
+    ASSERT_TRUE(cancel_result.is_ok()) << cancel_result.error_value().FormatDescription();
+
+    EXPECT_TRUE(hw.saw_epdis.load());
+    if (!is_in) {
+      EXPECT_TRUE(hw.saw_sgoutnak.load());
+      EXPECT_EQ(DCTL::Get().FromValue(hw.dctl.load()).goutnaksts(), 0u);
+    }
+    EXPECT_NE(hw.daintmsk.load() & (1u << ep_num), 0u);
+    EXPECT_EQ(hw.daintmsk.load() & kOtherEpBit, 0u);
+    auto final_depctl = DEPCTL::Get(ep_num).FromValue(hw.depctl.load());
+    EXPECT_EQ(final_depctl.usbactep(), 1u);
+    EXPECT_EQ(final_depctl.snak(), 1u);
+    EXPECT_EQ(final_depctl.epena(), 0u);
+    EXPECT_EQ(final_depctl.epdis(), 0u);
+    EXPECT_EQ(hw.depdma.load(), 0u);
+    EXPECT_EQ(tx_fifo_flushed.load(), is_in);
+    EXPECT_FALSE(rx_fifo_flushed.load());
+
+    dut_.RunInDriverContext([&](Dwc2& driver) {
+      auto* ep = GetEndpoint(driver, ep_num);
+      ASSERT_NE(ep, nullptr);
+      std::lock_guard<std::mutex> lock(ep->lock);
+      EXPECT_TRUE(ep->enabled);
+      EXPECT_FALSE(ep->current_req.has_value());
+      EXPECT_TRUE(ep->queued_reqs.empty());
+    });
+
+    EndpointEventHandler::CompletionRecord comp1 = event_handler.WaitForCompletion();
+    EXPECT_EQ(comp1.status, ZX_ERR_IO_NOT_PRESENT);
+    EXPECT_EQ(comp1.length, 64u);
+
+    EndpointEventHandler::CompletionRecord comp2 = event_handler.WaitForCompletion();
+    EXPECT_EQ(comp2.status, ZX_ERR_IO_NOT_PRESENT);
+    EXPECT_EQ(comp2.length, 128u);
+  }
+}
+
+TEST_F(Dwc2Test, DisableEndpointFlushesTxFifoForInOnly) {
+  std::atomic<bool> tx_fifo_flushed = false;
+  std::atomic<uint32_t> flushed_tx_fifo_num = 0;
+  std::atomic<bool> rx_fifo_flushed = false;
+
+  auto restore_grstctl = fit::defer([&] {
+    dut_.RunInEnvironmentTypeContext([](Environment& env) { env.ResetGrstctlCallbacks(); });
+  });
+
+  dut_.RunInEnvironmentTypeContext([&](Environment& env) {
+    env.mmio()[GRSTCTL::Get().addr()].SetReadCallback(
+        []() -> uint64_t { return GRSTCTL::Get().FromValue(0).set_ahbidle(1).reg_value(); });
+    env.mmio()[GRSTCTL::Get().addr()].SetWriteCallback([&](uint64_t val) {
+      auto write = GRSTCTL::Get().FromValue(static_cast<uint32_t>(val));
+      if (write.txfflsh()) {
+        tx_fifo_flushed.store(true);
+        flushed_tx_fifo_num.store(write.txfnum());
+      }
+      if (write.rxfflsh()) {
+        rx_fifo_flushed.store(true);
+      }
+    });
+  });
+
+  fidl::SyncClient dci_client = ConnectDciClient();
+  ASSERT_TRUE(dci_client.is_valid());
+
+  // IN endpoint: flushes its dedicated TX FIFO and does not flush the shared RX FIFO.
+  constexpr uint8_t kInEpAddr = 0x81;
+  ASSERT_NO_FATAL_FAILURE(ConfigureBulkEndpoint(dci_client, kInEpAddr));
+  ASSERT_TRUE(dci_client->DisableEndpoint({kInEpAddr}).is_ok());
+  EXPECT_TRUE(tx_fifo_flushed.load());
+  EXPECT_EQ(flushed_tx_fifo_num.load(), DWC_ADDR_TO_INDEX(kInEpAddr));
+  EXPECT_FALSE(rx_fifo_flushed.load());
+
+  // OUT endpoint: does not flush the shared RX FIFO (or any TX FIFO).
+  tx_fifo_flushed.store(false);
+  rx_fifo_flushed.store(false);
+  constexpr uint8_t kOutEpAddr = 0x01;
+  ASSERT_NO_FATAL_FAILURE(ConfigureBulkEndpoint(dci_client, kOutEpAddr));
+  ASSERT_TRUE(dci_client->DisableEndpoint({kOutEpAddr}).is_ok());
+  EXPECT_FALSE(tx_fifo_flushed.load());
+  EXPECT_FALSE(rx_fifo_flushed.load());
+}
+
+TEST_F(Dwc2Test, ConfigureEndpointClearsStaleInterrupts) {
+  fidl::SyncClient dci_client = ConnectDciClient();
+  ASSERT_TRUE(dci_client.is_valid());
+
+  // IN endpoint: stale DIEPINT bits are cleared via W1C before DAINTMSK unmasks the endpoint.
+  {
+    constexpr uint8_t kInEpAddr = 0x81;
+    const uint8_t ep_num = DWC_ADDR_TO_INDEX(kInEpAddr);
+    std::atomic<uint32_t> diepint = UINT32_MAX;
+    std::atomic<uint32_t> daintmsk = 0;
+    auto cleanup_callbacks = fit::defer([&] {
+      dut_.RunInEnvironmentTypeContext([&](Environment& env) {
+        env.mmio()[DIEPINT::Get(ep_num).addr()] = fake_mmio::FakeMmioReg{};
+        env.mmio()[DAINTMSK::Get().addr()] = fake_mmio::FakeMmioReg{};
+      });
+    });
+
+    dut_.RunInEnvironmentTypeContext([&](Environment& env) {
+      env.mmio()[DIEPINT::Get(ep_num).addr()].SetReadCallback(
+          [&diepint]() -> uint64_t { return diepint.load(); });
+      env.mmio()[DIEPINT::Get(ep_num).addr()].SetWriteCallback(
+          [&diepint](uint64_t val) { diepint.fetch_and(~static_cast<uint32_t>(val)); });
+      env.mmio()[DAINTMSK::Get().addr()].SetReadCallback(
+          [&daintmsk]() -> uint64_t { return daintmsk.load(); });
+      env.mmio()[DAINTMSK::Get().addr()].SetWriteCallback([&](uint64_t val) {
+        if (val & (1u << ep_num)) {
+          EXPECT_EQ(diepint.load(), 0u);
+        }
+        daintmsk.store(static_cast<uint32_t>(val));
+      });
+    });
+
+    ASSERT_NO_FATAL_FAILURE(ConfigureBulkEndpoint(dci_client, kInEpAddr));
+    EXPECT_EQ(diepint.load(), 0u);
+    EXPECT_NE(daintmsk.load() & (1u << ep_num), 0u);
+  }
+
+  // OUT endpoint: stale DOEPINT bits are cleared via W1C before DAINTMSK unmasks the endpoint.
+  {
+    constexpr uint8_t kOutEpAddr = 0x01;
+    const uint8_t ep_num = DWC_ADDR_TO_INDEX(kOutEpAddr);
+    std::atomic<uint32_t> doepint = UINT32_MAX;
+    std::atomic<uint32_t> daintmsk = 0;
+    auto cleanup_callbacks = fit::defer([&] {
+      dut_.RunInEnvironmentTypeContext([&](Environment& env) {
+        env.mmio()[DOEPINT::Get(ep_num).addr()] = fake_mmio::FakeMmioReg{};
+        env.mmio()[DAINTMSK::Get().addr()] = fake_mmio::FakeMmioReg{};
+      });
+    });
+
+    dut_.RunInEnvironmentTypeContext([&](Environment& env) {
+      env.mmio()[DOEPINT::Get(ep_num).addr()].SetReadCallback(
+          [&doepint]() -> uint64_t { return doepint.load(); });
+      env.mmio()[DOEPINT::Get(ep_num).addr()].SetWriteCallback(
+          [&doepint](uint64_t val) { doepint.fetch_and(~static_cast<uint32_t>(val)); });
+      env.mmio()[DAINTMSK::Get().addr()].SetReadCallback(
+          [&daintmsk]() -> uint64_t { return daintmsk.load(); });
+      env.mmio()[DAINTMSK::Get().addr()].SetWriteCallback([&](uint64_t val) {
+        if (val & (1u << ep_num)) {
+          EXPECT_EQ(doepint.load(), 0u);
+        }
+        daintmsk.store(static_cast<uint32_t>(val));
+      });
+    });
+
+    ASSERT_NO_FATAL_FAILURE(ConfigureBulkEndpoint(dci_client, kOutEpAddr));
+    EXPECT_EQ(doepint.load(), 0u);
+    EXPECT_NE(daintmsk.load() & (1u << ep_num), 0u);
+  }
+}
+
+TEST_F(Dwc2Test, StopEndpointSnakDoesNotRearmClearedEpEna) {
+  fidl::SyncClient dci_client = ConnectDciClient();
+  ASSERT_TRUE(dci_client.is_valid());
+
+  constexpr uint8_t kInEpAddr = 0x81;
+  const uint8_t ep_num = DWC_ADDR_TO_INDEX(kInEpAddr);
+  ScopedEndpointHaltMmio hw(dut_, ep_num);
+
+  ASSERT_NO_FATAL_FAILURE(ConfigureBulkEndpoint(dci_client, kInEpAddr));
+
+  dut_.RunInDriverContext([&](Dwc2& driver) {
+    auto* ep = GetEndpoint(driver, ep_num);
+    ASSERT_NE(ep, nullptr);
+    std::lock_guard<std::mutex> lock(ep->lock);
+    hw.depctl.store(DEPCTL::Get(ep_num).FromValue(hw.depctl.load()).set_epena(1).reg_value());
+    hw.depdma.store(0x11110000u);
+    // Simulate hardware completing the transfer right after the initial DEPCTL read in
+    // StopEndpointTransferLocked and before the SNAK RMW write lands.
+    hw.clear_epena_on_first_depctl_read.store(true);
+  });
+
+  auto disable_result = dci_client->DisableEndpoint({kInEpAddr});
+  ASSERT_TRUE(disable_result.is_ok()) << disable_result.error_value().FormatDescription();
+
+  EXPECT_FALSE(hw.saw_epdis.load());
+  auto final_depctl = DEPCTL::Get(ep_num).FromValue(hw.depctl.load());
+  EXPECT_EQ(final_depctl.epena(), 0u);
+  EXPECT_EQ(final_depctl.snak(), 1u);
+  EXPECT_EQ(final_depctl.usbactep(), 0u);
+  EXPECT_EQ(hw.depdma.load(), 0u);
+}
+
+TEST_F(Dwc2Test, HaltTimeoutQuarantinesInFlightRequestUntilResetCore) {
+  fidl::SyncClient dci_client = ConnectDciClient();
+  ASSERT_TRUE(dci_client.is_valid());
+
+  for (bool use_disable : {true, false}) {
+    for (uint8_t ep_addr : {uint8_t{0x81}, uint8_t{0x01}}) {
+      SCOPED_TRACE(std::string(use_disable ? "DisableEndpoint:" : "CancelAll:") +
+                   std::to_string(ep_addr));
+      EndpointEventHandler event_handler;
+      fdf::UnownedSynchronizedDispatcher ep_dispatcher = dut_.runtime().StartBackgroundDispatcher();
+      auto cleanup_dispatcher = fit::defer([&] {
+        libsync::Completion shutdown_complete;
+        dut_.runtime().ShutdownBackgroundDispatcher(ep_dispatcher->get(),
+                                                    [&] { shutdown_complete.Signal(); });
+        shutdown_complete.Wait();
+      });
+
+      const uint8_t ep_num = DWC_ADDR_TO_INDEX(ep_addr);
+      const bool is_in = DWC_EP_IS_IN(ep_num);
+
+      auto ep_endpoints = fidl::CreateEndpoints<fuchsia_hardware_usb_endpoint::Endpoint>();
+      ASSERT_TRUE(ep_endpoints.is_ok());
+      ASSERT_TRUE(
+          dci_client->ConnectToEndpoint({ep_addr, std::move(ep_endpoints->server)}).is_ok());
+      fidl::SharedClient<fuchsia_hardware_usb_endpoint::Endpoint> ep_client(
+          std::move(ep_endpoints->client), ep_dispatcher->async_dispatcher(), &event_handler);
+
+      uint64_t base_pmo_count = 0;
+      uint32_t expected_depdma = 0;
+      {
+        ScopedEndpointHaltMmio hw(dut_, ep_num);
+        hw.fail_nakeff.store(true);
+        hw.fail_epdis.store(true);
+
+        ASSERT_NO_FATAL_FAILURE(ConfigureBulkEndpoint(dci_client, ep_addr));
+
+        dut_.RunInDriverContext([&](Dwc2& driver) {
+          base_pmo_count = GetBtiPmoCount(driver);
+          EXPECT_EQ(GetQuarantinedRequestCount(driver), 0u);
+          SetConfiguredState(driver, true);
+
+          auto* ep = GetEndpoint(driver, ep_num);
+          ASSERT_NE(ep, nullptr);
+          std::lock_guard<std::mutex> lock(ep->lock);
+
+          usb::FidlRequest active_req(usb::EndpointType::BULK);
+          active_req->defer_completion(false);
+          active_req.add_data(std::vector<uint8_t>(64, 0xAB), 64, 0);
+          ep->queued_reqs.push(std::move(active_req));
+
+          usb::FidlRequest queued_req(usb::EndpointType::BULK);
+          queued_req->defer_completion(false);
+          queued_req.add_data(std::vector<uint8_t>(128, 0xCD), 128, 0);
+          ep->queued_reqs.push(std::move(queued_req));
+
+          QueueNextRequest(driver, ep);
+          EXPECT_TRUE(ep->current_req.has_value());
+          EXPECT_EQ(ep->queued_reqs.size(), 1u);
+          EXPECT_EQ(GetBtiPmoCount(driver), base_pmo_count + 1);
+          expected_depdma = hw.depdma.load();
+          EXPECT_NE(expected_depdma, 0u);
+          EXPECT_EQ(DEPCTL::Get(ep_num).FromValue(hw.depctl.load()).epena(), 1u);
+        });
+
+        if (use_disable) {
+          auto res = dci_client->DisableEndpoint({ep_addr});
+          ASSERT_TRUE(res.is_ok()) << res.error_value().FormatDescription();
+        } else {
+          auto res = dci_client->CancelAll({ep_addr});
+          ASSERT_TRUE(res.is_ok()) << res.error_value().FormatDescription();
+        }
+
+        EXPECT_TRUE(hw.saw_epdis.load());
+        if (!is_in) {
+          EXPECT_TRUE(hw.saw_sgoutnak.load());
+          EXPECT_EQ(DCTL::Get().FromValue(hw.dctl.load()).goutnaksts(), 0u);
+        }
+        // EPEna remained stuck at 1: DEPDMA must not be zeroed, and the endpoint interrupt must
+        // remain masked.
+        EXPECT_EQ(DEPCTL::Get(ep_num).FromValue(hw.depctl.load()).epena(), 1u);
+        EXPECT_EQ(hw.depdma.load(), expected_depdma);
+        EXPECT_EQ(hw.daintmsk.load() & (1u << ep_num), 0u);
+
+        // The unstarted queued_req (128 bytes) completes immediately with ZX_ERR_IO_NOT_PRESENT.
+        EndpointEventHandler::CompletionRecord comp = event_handler.WaitForCompletion();
+        EXPECT_EQ(comp.status, ZX_ERR_IO_NOT_PRESENT);
+        EXPECT_EQ(comp.length, 128u);
+
+        // Fence the endpoint channel and dispatcher to confirm active_req (64 bytes) was NOT
+        // completed or unpinned while EPEna remains stuck.
+        libsync::Completion ep_flushed;
+        ep_client->GetInfo().ThenExactlyOnce([&](auto& info_res) {
+          EXPECT_TRUE(info_res.is_error());
+          ep_flushed.Signal();
+        });
+        ep_flushed.Wait();
+        EXPECT_EQ(event_handler.PendingCompletionCount(), 0u);
+
+        dut_.RunInDriverContext([&](Dwc2& driver) {
+          auto* ep = GetEndpoint(driver, ep_num);
+          ASSERT_NE(ep, nullptr);
+          {
+            std::lock_guard<std::mutex> lock(ep->lock);
+            EXPECT_FALSE(ep->enabled);
+            EXPECT_FALSE(ep->current_req.has_value());
+            EXPECT_TRUE(ep->queued_reqs.empty());
+          }
+          EXPECT_EQ(GetQuarantinedRequestCount(driver), 1u);
+          EXPECT_EQ(GetBtiPmoCount(driver), base_pmo_count + 1);
+        });
+      }
+
+      // ResetCore() (invoked via StartController -> InitController) halts core DMA and releases the
+      // quarantined request's pinned pages.
+      auto start_res = dci_client->StartController();
+      ASSERT_TRUE(start_res.is_ok()) << start_res.error_value().FormatDescription();
+
+      dut_.RunInDriverContext([&](Dwc2& driver) {
+        EXPECT_EQ(GetQuarantinedRequestCount(driver), 0u);
+        EXPECT_EQ(GetBtiPmoCount(driver), base_pmo_count);
+      });
+    }
+  }
 }
 
 }  // namespace dwc2

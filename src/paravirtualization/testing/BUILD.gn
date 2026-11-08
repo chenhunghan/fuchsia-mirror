@@ -1,13 +1,17 @@
 # Copyright 2024 The Fuchsia Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
-import("//build/components.gni")
 
-fuchsia_package("vsock-for-test") {
+import("//build/bazel/bazel_fuchsia_package.gni")
+
+# Keep the GN target for //src/paravirtualization/lib/vsock:vsock_test and
+# //src/microfuchsia/tee/binder-proxy/tests subpackages.
+bazel_fuchsia_package("vsock-for-test") {
+  bazel_config = "fuchsia_platform"
+
+  # LINT.IfChange
   package_name = "vsock"
   testonly = true
-  deps = [
-    "//src/paravirtualization/vsock:vsock_service_component",
-    "//src/paravirtualization/vsock-loopback:component",
-  ]
+
+  # LINT.ThenChange(BUILD.bazel)
 }

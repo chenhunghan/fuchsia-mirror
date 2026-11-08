@@ -11,7 +11,9 @@
 #include "src/connectivity/wlan/drivers/testing/lib/sim-fake-ap/sim-fake-ap.h"
 #include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/cfg80211.h"
 #include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/defs.h"
+#include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/fweh.h"
 #include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/fwil.h"
+#include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/locks.h"
 #include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/sim/sim.h"
 #include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/sim/test/sim_test.h"
 #include "src/devices/lib/broadcom/commands.h"
@@ -318,15 +320,101 @@ TEST_F(DynamicIfTest, EventHandlingOnSoftAPDel) {
                                               fuchsia_wlan_common::WlanMacRole::kAp, std::nullopt,
                                               softap_ifc_.TakeMlme(), &wdev));
 
-    // Override callback function to validate that it does not get invoked for del event.
+    ASSERT_NE(wdev, nullptr);
+    struct net_device* ndev = wdev->netdev;
+    ASSERT_NE(ndev, nullptr);
+    struct brcmf_if* ifp = ndev_to_if(ndev);
+    ASSERT_NE(ifp, nullptr);
+
+    const uint8_t free_idx = 3;
+    brcmf_event_msg emsg = {.event_code = BRCMF_E_IF};
+    brcmf_if_event add_free = {
+        .ifidx = free_idx, .action = BRCMF_E_IF_ADD, .bsscfgidx = free_idx};
+
+    // Unexpected IF_ADD while DEL is armed is rejected in both fweh and notify_vif_event.
+    brcmf_cfg80211_arm_vif_event(sim->drvr->config, ifp->vif, BRCMF_E_IF_DEL);
+    {
+      ScopedSharedWriteLock lock(sim->drvr->if_mutex);
+      brcmf_fweh_handle_if_event(sim->drvr, &emsg, &add_free);
+    }
+    ASSERT_NE(sim->drvr->fweh.evt_handler[BRCMF_E_IF], nullptr);
+    EXPECT_EQ(ZX_ERR_SHOULD_WAIT, sim->drvr->fweh.evt_handler[BRCMF_E_IF](ifp, &emsg, &add_free));
+    EXPECT_EQ(sim->drvr->iflist[free_idx], nullptr);
+    EXPECT_EQ(ifp->vif->ifp, ifp);
+
+    // Occupied bsscfgidx/ifidx are ignored while ADD is armed, and handler failure rolls back ifp.
+    brcmf_cfg80211_vif pending_vif = {};
+    brcmf_cfg80211_arm_vif_event(sim->drvr->config, &pending_vif, BRCMF_E_IF_ADD);
     brcmf_fweh_unregister(sim->drvr, BRCMF_E_IF);
+    {
+      brcmf_if_event add_occupied_bss = {.ifidx = free_idx,
+                                         .action = BRCMF_E_IF_ADD,
+                                         .bsscfgidx = static_cast<uint8_t>(ifp->bsscfgidx)};
+      brcmf_if_event add_occupied_ifidx = {
+          .ifidx = 0, .action = BRCMF_E_IF_ADD, .bsscfgidx = free_idx};
+      ScopedSharedWriteLock lock(sim->drvr->if_mutex);
+      brcmf_fweh_handle_if_event(sim->drvr, &emsg, &add_occupied_bss);
+      brcmf_fweh_handle_if_event(sim->drvr, &emsg, &add_occupied_ifidx);
+      brcmf_fweh_handle_if_event(sim->drvr, &emsg, &add_free);
+    }
+    brcmf_cfg80211_disarm_vif_event(sim->drvr->config);
+    EXPECT_EQ(sim->drvr->iflist[ifp->bsscfgidx], ifp);
+    EXPECT_EQ(sim->drvr->iflist[free_idx], nullptr);
+    EXPECT_EQ(sim->drvr->if2bss[free_idx], BRCMF_BSSIDX_INVALID);
+
+    // Override callback function to validate that it does not get invoked for del event.
     EXPECT_EQ(ZX_OK, brcmf_fweh_register(sim->drvr, BRCMF_E_IF, validate_not_invoked_on_del));
 
-    struct net_device* ndev = wdev->netdev;
-    struct brcmf_if* ifp = ndev_to_if(ndev);
     EXPECT_EQ(wdev->iftype, fuchsia_wlan_common::WlanMacRole::kAp);
     EXPECT_EQ(ZX_OK, brcmf_fil_bsscfg_data_set(ifp, "interface_remove", nullptr, 0));
   });
+}
+
+// Firmware can delete an interface on its own (an unsolicited BRCMF_E_IF_DEL event) while a scan
+// is running on it. The driver must drop its cached scan interface pointer and end the scan before
+// freeing the interface, so that the scan timeout does not later use the freed interface and SME
+// is told the scan was canceled.
+TEST_F(DynamicIfTest, UnsolicitedIfDelDuringScan) {
+  constexpr uint64_t kScanTxnId = 0x4a7c;
+  Init();
+  ASSERT_EQ(ZX_OK, StartInterface(wlan_common::WlanMacRole::kClient, &client_ifc_));
+
+  // Have firmware accept the scan request but never report results, so the scan stays in
+  // progress until the escan timer fires.
+  WithSimDevice([this](brcmfmac::SimDevice* device) {
+    device->GetSim()->sim_fw->err_inj_.AddErrInjIovar("escan", ZX_OK, BCME_OK,
+                                                      client_ifc_.iface_id_);
+  });
+  client_ifc_.StartScan(kScanTxnId);
+
+  WithSimDevice([this](brcmfmac::SimDevice* device) {
+    brcmf_pub* drvr = device->GetSim()->drvr;
+    brcmf_cfg80211_info* cfg = drvr->config;
+    brcmf_if* ifp = brcmf_get_ifp(drvr, client_ifc_.iface_id_);
+    ASSERT_NE(ifp, nullptr);
+    ASSERT_TRUE(cfg->scan_in_progress.load());
+    ASSERT_EQ(cfg->escan_info.ifp, ifp);
+
+    // No vif event is armed, so the driver treats the resulting BRCMF_E_IF_DEL as unsolicited and
+    // frees `ifp` right away.
+    EXPECT_EQ(ZX_OK, brcmf_fil_bsscfg_data_set(ifp, "interface_remove", nullptr, 0));
+    EXPECT_NULL(brcmf_get_ifp(drvr, client_ifc_.iface_id_));
+
+    EXPECT_NULL(cfg->escan_info.ifp);
+    EXPECT_FALSE(cfg->scan_in_progress.load());
+    EXPECT_FALSE(brcmf_test_bit(brcmf_scan_status_bit_t::BUSY, &cfg->scan_status));
+  });
+
+  // SME must hear that the scan was aborted.
+  auto result = client_ifc_.ScanResultCode(kScanTxnId);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_EQ(*result, wlan_fullmac_wire::WlanScanResult::kCanceledByDriverOrFirmware);
+
+  // Run past the escan timeout. It must not fire on the removed interface.
+  env_->Run(zx::msec(BRCMF_ESCAN_TIMER_INTERVAL_MS) + zx::sec(1));
+
+  client_ifc_.Reset();
+  ifaces_.erase(client_ifc_.iface_id_);
 }
 
 // Verify if all iovars in metadata were set.

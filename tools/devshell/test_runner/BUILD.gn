@@ -4,12 +4,13 @@
 
 # Test driver for Bash script tests
 
-import("//build/go/go_binary.gni")
+import("//build/bazel/bazel_host_tool.gni")
 
-go_binary("host_runner") {
+bazel_host_tool("host_runner") {
   visibility = [
     "//tools/devshell/*",
     "//vendor/*",
   ]
-  sources = [ "main.go" ]
+  bazel_target = ":host_runner"
+  bazel_output_path = "{{BAZEL_TARGET_OUT_DIR}}/host_runner_/host_runner"
 }

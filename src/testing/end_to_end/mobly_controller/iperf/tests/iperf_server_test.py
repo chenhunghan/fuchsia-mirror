@@ -2,8 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-from __future__ import annotations
-
 import json
 import os
 import unittest
@@ -43,7 +41,9 @@ class IPerfServerModuleTest(unittest.TestCase):
             iperf_server.create(["not_a_port"])  # type: ignore[list-item]
 
     @mock.patch("libs.ssh.connection.SshConnection")
-    @mock.patch("antlion.utils.get_interface_based_on_ip", return_value="eth1")
+    @mock.patch(
+        "iperf.iperf_server.get_interface_based_on_ip", return_value="eth1"
+    )
     @mock.patch(
         "libs.commands.command.LinuxCommand.available", return_value=False
     )
@@ -68,7 +68,9 @@ class IPerfServerModuleTest(unittest.TestCase):
         self.assertEqual(server.test_interface, "lan")
 
     @mock.patch("libs.ssh.connection.SshConnection")
-    @mock.patch("antlion.utils.get_interface_based_on_ip", return_value="eth1")
+    @mock.patch(
+        "iperf.iperf_server.get_interface_based_on_ip", return_value="eth1"
+    )
     @mock.patch(
         "libs.commands.command.LinuxCommand.available", return_value=False
     )
@@ -233,6 +235,36 @@ class IPerfServerLocalTest(unittest.TestCase):
             self.assertEqual(server.port, 5201)
             self.assertEqual(mock_job.call_count, 2)
 
+    @mock.patch("builtins.open")
+    @mock.patch("subprocess.Popen")
+    @mock.patch("libs.proc.job.run")
+    def test_start_decodes_ss_stdout_and_parses_port(
+        self, mock_job: mock.Mock, mock_popen: mock.Mock, _mock_open: mock.Mock
+    ) -> None:
+        mock_proc = mock.Mock()
+        mock_proc.pid = 1234
+        mock_popen.return_value = mock_proc
+        mock_job.return_value.stdout = (
+            b"tcp LISTEN  0 5 127.0.0.1:5202  *:*"
+            b' users:(("iperf3",pid=1234,fd=3))\n'
+        )
+
+        server = IPerfServer(5201)
+        with (
+            mock.patch.object(
+                iperf_server,
+                "_get_port_from_ss_output",
+                wraps=_get_port_from_ss_output,
+            ),
+            mock.patch.object(
+                server, "_get_full_file_path", return_value=MOCK_LOGFILE_PATH
+            ),
+        ):
+            server.start()
+            self.assertTrue(server.started)
+            self.assertEqual(server.port, 5202)
+            server.stop()
+
 
 class IPerfServerOverSshTest(unittest.TestCase):
     """Tests remote IPerfServerOverSsh execution on both Raspi and OpenWrt-One."""
@@ -246,7 +278,9 @@ class IPerfServerOverSshTest(unittest.TestCase):
             }
         )
 
-    @mock.patch("antlion.utils.get_interface_based_on_ip", return_value="eth1")
+    @mock.patch(
+        "iperf.iperf_server.get_interface_based_on_ip", return_value="eth1"
+    )
     def test_raspberry_pi_setup_with_nmcli_and_journalctl(
         self, _mock_net: mock.Mock
     ) -> None:
@@ -339,8 +373,10 @@ class IPerfServerOverSshTest(unittest.TestCase):
                     ignore_status=True,
                 )
 
-    @mock.patch("antlion.utils.get_interface_based_on_ip", return_value="eth1")
-    @mock.patch("antlion.utils.renew_linux_ip_address")
+    @mock.patch(
+        "iperf.iperf_server.get_interface_based_on_ip", return_value="eth1"
+    )
+    @mock.patch("iperf.iperf_server.renew_linux_ip_address")
     def test_renew_test_interface_ip_address(
         self, mock_renew: mock.Mock, _mock_net: mock.Mock
     ) -> None:
@@ -414,7 +450,7 @@ class IPerfServerOverSshTest(unittest.TestCase):
         with mock.patch(
             "libs.commands.command.LinuxCommand.available", return_value=True
         ), mock.patch(
-            "antlion.utils.get_interface_based_on_ip", return_value="eth1"
+            "iperf.iperf_server.get_interface_based_on_ip", return_value="eth1"
         ):
             server = IPerfServerOverSsh(
                 ssh_settings=ssh_cfg,
@@ -468,7 +504,7 @@ class IPerfServerOverSshTest(unittest.TestCase):
         with mock.patch(
             "libs.commands.command.LinuxCommand.available", return_value=True
         ), mock.patch(
-            "antlion.utils.get_interface_based_on_ip", return_value="eth1"
+            "iperf.iperf_server.get_interface_based_on_ip", return_value="eth1"
         ):
             server = IPerfServerOverSsh(
                 ssh_settings=ssh_cfg,
@@ -500,7 +536,7 @@ class IPerfServerOverSshTest(unittest.TestCase):
         with mock.patch(
             "libs.commands.command.LinuxCommand.available", return_value=True
         ), mock.patch(
-            "antlion.utils.get_interface_based_on_ip", return_value="eth1"
+            "iperf.iperf_server.get_interface_based_on_ip", return_value="eth1"
         ):
             server = IPerfServerOverSsh(
                 ssh_settings=ssh_cfg,

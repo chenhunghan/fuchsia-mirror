@@ -5,6 +5,7 @@
 #include "src/devices/pci/drivers/pci/allocation.h"
 
 #include <err.h>
+#include <lib/driver/logging/cpp/logger.h>
 #include <lib/zx/resource.h>
 #include <lib/zx/result.h>
 #include <lib/zx/vmo.h>
@@ -45,29 +46,38 @@ zx::result<zx::resource> PciAllocation::CreateResource() const {
 zx::result<std::unique_ptr<PciAllocation>> PciRootAllocator::Allocate(
     std::optional<zx_paddr_t> base, size_t size) {
   zx_paddr_t in_base = (base) ? *base : 0;
-  zx_paddr_t out_base = {};
-  zx::resource res = {};
-  zx::eventpair ep = {};
-  zx_status_t status = pciroot_.GetAddressSpace(in_base, size, type(), low_, &out_base, &res, &ep);
+  fidl::WireResult result = root_->GetAddressSpace(in_base, size, type(), low_);
+  zx_status_t status = ZX_OK;
+  if (!result.ok()) {
+    status = result.status();
+  } else if (result->is_error()) {
+    status = result->error_value();
+  }
   if (status != ZX_OK) {
-    bool mmio = type() == PCI_ADDRESS_SPACE_MEMORY;
+    bool mmio = type() == fuchsia_hardware_pci_root::AddressSpace::kMemory;
+    std::string_view range_suffix;
+    if (mmio) {
+      range_suffix = low_ ? "<4GB" : ">4GB";
+    }
     // This error may not be fatal, the Device probe/allocation methods will know for sure.
-    zxlogf(DEBUG, "failed to allocate %s %s [%#8lx, %#8lx) from root: %s", (mmio) ? "mmio" : "io",
-           (mmio) ? ((low_) ? "<4GB" : ">4GB") : "", in_base, in_base + size,
-           zx_status_get_string(status));
+    fdf::debug("failed to allocate {} {} [{:#8x}, {:#8x}) from root: {}", mmio ? "mmio" : "io",
+               range_suffix, in_base, in_base + size, zx_status_get_string(status));
     return zx::error(status);
   }
 
   zx_info_resource_t resource_info;
-  status = res.get_info(ZX_INFO_RESOURCE, &resource_info, sizeof(resource_info), nullptr, nullptr);
+  status = result->value()->resource.get_info(ZX_INFO_RESOURCE, &resource_info,
+                                              sizeof(resource_info), nullptr, nullptr);
   if (status != ZX_OK) {
     return zx::error(status);
   }
-  pci_address_space_t elevation_type =
-      (resource_info.kind == ZX_RSRC_KIND_MMIO) ? PCI_ADDRESS_SPACE_MEMORY : PCI_ADDRESS_SPACE_IO;
+  fuchsia_hardware_pci_root::AddressSpace elevation_type =
+      (resource_info.kind == ZX_RSRC_KIND_MMIO) ? fuchsia_hardware_pci_root::AddressSpace::kMemory
+                                                : fuchsia_hardware_pci_root::AddressSpace::kIo;
 
-  auto allocation = std::unique_ptr<PciAllocation>(new PciRootAllocation(
-      pciroot_, elevation_type, std::move(res), std::move(ep), out_base, size));
+  auto allocation = std::unique_ptr<PciAllocation>(
+      new PciRootAllocation(elevation_type, std::move(result->value()->resource),
+                            std::move(result->value()->token), result->value()->base, size));
   return zx::ok(std::move(allocation));
 }
 
@@ -107,8 +117,8 @@ zx::result<std::unique_ptr<PciAllocation>> PciRegionAllocator::Allocate(
     return zx::error(status);
   }
 
-  zxlogf(TRACE, "bridge: assigned [%#lx, %#lx) downstream", region_uptr->base,
-         region_uptr->base + size);
+  fdf::trace("bridge: assigned [{:#x}, {:#x}) downstream", region_uptr->base,
+             region_uptr->base + size);
 
   auto allocation = std::unique_ptr<PciAllocation>(
       new PciRegionAllocation(type(), std::move(out_resource), std::move(region_uptr)));

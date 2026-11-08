@@ -19,6 +19,23 @@ developer overrides:
 
  Flash to device or fx ota. Then run **fx shell** to enter the shell. To run the simulator, type **battery_cli**.
 
+## Single commands
+
+Pass any command as arguments to run it once without starting the REPL (e.g. `battery_cli governor list`).
+
+## Charge governors
+
+`governor` subcommands use `fuchsia.power.battery.test.GovernorDebug` to inspect and control charge governors in `battery-manager`:
+
+| Subcommand | Description |
+| :--- | :--- |
+| `governor [list]` | List each charge governor with its lifecycle, restarts, and sample interval. |
+| `governor control` | Show effective charge control values, aggregate overrides, and per-governor votes. |
+| `governor pause <governor>` | Stop `<governor>` and withdraw its votes until resumed. |
+| `governor resume <governor>` | Restart a paused `<governor>`. |
+| `governor override [<governor>] --<field> <value> ...` | Override fields (`--mode`, `--icl`, `--fcc`, `--fv`, `--iterm`, `--vin`, `--topoff`) across all governors, or for `<governor>` alone. |
+| `governor clear [<governor>] [--<field> ...]` | Clear the specified field overrides (or all overrides if no flags are given). |
+
 ## Disconnect
 
 Disconnects the BatteryManager from the physical battery, providing clients with simulated BatteryInfo data.

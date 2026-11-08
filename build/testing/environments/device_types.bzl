@@ -32,6 +32,5 @@ host_device_types = struct(
     ampere_altra = "AmpereAltraMax-M128-30",
     ampere_one = "AmpereOne-A192-32X",
     gcp_c4a_highmem_96_bm = "GCP_C4A_HIGHMEM_96_BM",
-    lattepanda_sigma_cell = "LATTEPANDA_SIGMA_CELL",
 )
 # LINT.ThenChange(//build/testing/environments.gni:device_types)

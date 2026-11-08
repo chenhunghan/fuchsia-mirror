@@ -11,14 +11,26 @@
         runner: "elf",
         binary: "bin/program_writing_inspect_bin",
     },
+    use: [
+        {
+            config: "fuchsia.inspect.test.PublishInspector",
+            key: "publish_inspector",
+            type: "bool",
+            availability: "transitional",
+            default: false,
+        },
+        {
+            config: "fuchsia.inspect.test.PublishVmo",
+            key: "publish_vmo",
+            type: "bool",
+            availability: "transitional",
+            default: false,
+        },
+    ],
     expose: [
         {
             protocol: "fuchsia.component.Binder",
             from: "framework",
         },
     ],
-    config: {
-        publish_inspector: { type: "bool" },
-        publish_vmo: { type: "bool" },
-    },
 }

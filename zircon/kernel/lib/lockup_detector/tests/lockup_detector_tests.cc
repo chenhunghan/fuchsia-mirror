@@ -23,48 +23,6 @@
 
 namespace {
 
-bool NestedCriticalSectionTest() {
-  BEGIN_TEST;
-
-  AutoPreemptDisabler ap_disabler;
-
-  // For the context of this test, use the maximum threshold to prevent the detector from "firing".
-  auto cleanup = fit::defer(
-      [orig = lockup_get_cs_threshold_ticks()]() { lockup_set_cs_threshold_ticks(orig); });
-  lockup_set_cs_threshold_ticks(INT64_MAX);
-
-  const LockupDetectorState& state = gLockupDetectorPerCpuState[arch_curr_cpu_num()];
-  const auto& cs_state = state.critical_section;
-
-  EXPECT_EQ(0u, cs_state.depth);
-  EXPECT_EQ(0u, cs_state.begin_ticks);
-
-  static constexpr const char kOuter[] = "NestedCriticalSectionTest-outer";
-  lockup_begin(kOuter);
-  EXPECT_EQ(1u, cs_state.depth);
-  EXPECT_EQ(0u, cs_state.begin_ticks);
-  EXPECT_EQ(cs_state.name.load(), kOuter);
-
-  static constexpr const char kInner[] = "NestedCriticalSectionTest-inner";
-  lockup_begin(kInner);
-  EXPECT_EQ(2u, cs_state.depth);
-  // No change because only the outer most critical section is tracked.
-  EXPECT_EQ(0u, cs_state.begin_ticks);
-  EXPECT_EQ(cs_state.name.load(), kOuter);
-
-  lockup_end();
-  EXPECT_EQ(1u, cs_state.depth);
-  EXPECT_EQ(0u, cs_state.begin_ticks);
-  EXPECT_EQ(cs_state.name.load(), kOuter);
-
-  lockup_end();
-  EXPECT_EQ(0u, cs_state.depth);
-  EXPECT_EQ(0, cs_state.begin_ticks);
-  EXPECT_EQ(cs_state.name.load(), nullptr);
-
-  END_TEST;
-}
-
 bool NestedTimedCriticalSectionTest() {
   BEGIN_TEST;
 
@@ -306,7 +264,6 @@ bool GetBacktraceFromDapStateTest() {
 }  // namespace
 
 UNITTEST_START_TESTCASE(lockup_detetcor_tests)
-UNITTEST("nested_critical_section", NestedCriticalSectionTest)
 UNITTEST("nested_timed_critical_section", NestedTimedCriticalSectionTest)
 UNITTEST("get_backtrace_from_dap_state", GetBacktraceFromDapStateTest)
 UNITTEST_END_TESTCASE(lockup_detetcor_tests, "lockup_detector", "lockup_detector tests")

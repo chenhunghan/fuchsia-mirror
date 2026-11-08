@@ -223,6 +223,33 @@ open protocol ElementControl {
     /// necessary transitions (via ElementRunner.SetLevel calls) before this
     /// method will return.
     flexible AddDependency(LevelDependency) -> () error ModifyDependencyError;
+
+    /// Remove an existing dependency from this element.
+    ///
+    /// The dependency to remove is described by a `LevelDependency`, which is
+    /// interpreted as it is for AddDependency: the dependency of this element
+    /// at `dependent_level` upon the element that `requires_token` was
+    /// registered for, at the first valid level in `requires_level_by_preference`.
+    /// Passing the `LevelDependency` that was used to add a dependency, either
+    /// to AddDependency or in `ElementSchema.dependencies`, removes it. Other
+    /// dependencies of this element are not affected, including those upon the
+    /// same element on other levels. `remove_with_required_element` is ignored.
+    ///
+    /// The dependency is removed immediately. Open leases stop requiring it,
+    /// and the required element may be lowered right away if nothing else
+    /// requires it to remain at its current level. Elements that were only
+    /// required transitively through the removed dependency are lowered in
+    /// order, as when a lease is dropped: each of them stays at its current
+    /// level until the element that requires it has been lowered. This method
+    /// does not wait for these transitions.
+    ///
+    /// Returns `INVALID` if `dependent_level`, `requires_token` or
+    /// `requires_level_by_preference` is missing or not valid,
+    /// `NOT_AUTHORIZED` if `requires_token` is not a currently registered
+    /// dependency token (for example, if the token was unregistered or the
+    /// required element was removed), and `NOT_FOUND` if this element does not
+    /// have the dependency.
+    flexible RemoveDependency(LevelDependency) -> () error ModifyDependencyError;
 };
 
 /// The runner or operator of an element.

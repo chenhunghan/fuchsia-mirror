@@ -108,8 +108,12 @@ int dso_main_async(int argc, const char* argv[], const char* envp[], zx_handle_t
   auto display_coordinator_promise = display::GetCoordinator(std::move(provider));
 
   // Setup the input thread dispatcher, which runs on the fdf_dispatcher provided to dso_main.
-  utils::ScopedThreadDispatcherSetter setter(render_loop.dispatcher(), input_dispatcher);
-  async::PostTask(input_dispatcher, [input_dispatcher]() {
+  // TODO(https://fxbug.dev/485919515): Free `setter` when the program terminates. It is only safe
+  // to free `setter` once `input_dispatcher` is no longer running code that may access it. Not
+  // freeing this is a simple way to avoid a use after free during shutdown.
+  [[maybe_unused]] auto* const setter =
+      new utils::ScopedThreadDispatcherSetter(render_loop.dispatcher(), input_dispatcher);
+  async::PostTask(input_dispatcher, [input_dispatcher] {
     async_dispatcher_t* const current_dispatcher = async_get_default_dispatcher();
     if (current_dispatcher == nullptr) {
       async_set_default_dispatcher(input_dispatcher);
@@ -130,7 +134,7 @@ int dso_main_async(int argc, const char* argv[], const char* envp[], zx_handle_t
                                          std::move(config),
                                          inspector->root(),
                                          std::move(display_coordinator_promise),
-                                         [&render_loop]() { render_loop.Quit(); }};
+                                         [&render_loop] { render_loop.Quit(); }};
 
   // Apply the scheduler role defined for Scenic.
   const zx_status_t thread_status = fuchsia_scheduler::SetRoleForThisThread("fuchsia.scenic.main");

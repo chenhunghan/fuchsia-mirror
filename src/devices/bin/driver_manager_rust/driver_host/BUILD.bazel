@@ -1,0 +1,65 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "driver_manager_driver_host",
+    srcs = [
+        "src/driver_host.rs",
+        "src/lib.rs",
+        "src/runtime_dir.rs",
+    ],
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:async-trait",
+    ],
+    visibility = ["//src/devices/bin/driver_manager_rust:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.component.runner:fuchsia.component.runner_rust",
+        "//sdk/fidl/fuchsia.data:fuchsia.data_rust",
+        "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust",
+        "//sdk/fidl/fuchsia.driver.host:fuchsia.driver.host_rust",
+        "//sdk/fidl/fuchsia.driver.loader:fuchsia.driver.loader_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.ldsvc:fuchsia.ldsvc_rust",
+        "//sdk/fidl/fuchsia.mem:fuchsia.mem_rust",
+        "//sdk/rust/zx",
+        "//src/devices/bin/driver_manager_rust/types:driver_manager_types",
+        "//src/devices/bin/driver_manager_rust/utils:driver_manager_utils",
+        "//src/lib/fidl/rust/fidl",
+        "//src/storage/lib/vfs/rust:vfs",
+        "//third_party/rust_crates/vendor:async-lock",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+# GN's `with_unit_tests = true` forwards `clippy_warn_all` to the test target
+# without `clippy_warn_production`, whereas Bazel's `clippy_warn_all` bakes in
+# `clippy_warn_production` (including `redundant_clone`). Keep the GN attribute
+# while using `rustc_test`'s default `clippy_warn_default` in Bazel.
+# TODO(https://fxbug.dev/543568916): Remove raw_attribute once Bazel
+# `clippy_warn_all` separates test and production lint sets.
+# @bazel2gn:raw_attribute:lint_config = "//build/config/rust/lints:clippy_warn_all"
+rustc_test(
+    name = "driver_manager_driver_host_test",
+    crate = ":driver_manager_driver_host",
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-fs",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_unittest_package(
+    name = "driver-manager-driver-host-unittests",
+    unit_tests = [":driver_manager_driver_host_test"],
+    visibility = ["//src/devices/bin/driver_manager_rust:__pkg__"],
+)

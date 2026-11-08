@@ -14,8 +14,8 @@
 #include <span>
 
 #include <efi/protocol/managed-network.h>
-#include <phys/efi/protocol.h>
 
+#include "protocol.h"
 #include "utils.h"
 
 namespace gigaboot {

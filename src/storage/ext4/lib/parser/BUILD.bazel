@@ -1,0 +1,92 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "@fuchsia_rules_common//packages:resources.bzl",
+    "fuchsia_package_resource_group",
+)
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":storage-ext4-parser-tests"],
+    visibility = ["//src/storage:__pkg__"],
+)
+
+rustc_library(
+    name = "parser",
+    srcs = [
+        "src/directory.rs",
+        "src/file.rs",
+        "src/lib.rs",
+        "src/node.rs",
+        "src/symlink.rs",
+        "src/types.rs",
+    ],
+    crate_name = "ext4_parser",
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/storage/ext4:__subpackages__",
+        "//vendor/google:__subpackages__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_rust",
+        "//sdk/rust/zx",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-sync",
+        "//src/storage/ext4:ext4-lib",
+        "//src/storage/lib/vfs/rust:vfs",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+rustc_test(
+    name = "parser_test",
+    crate = ":parser",
+    # Matches the GN `with_unit_tests` binary name and avoids a generic
+    # `parser_test` binary name in the GN output directory.
+    crate_name = "ext4_parser_lib_test",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-fs",
+        "//src/storage/lib/block_server/vmo_backed:test_vmo_backed_block_server",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+# TODO(https://fxbug.dev/570694755): bazel2gn does not yet support fuchsia_package_resource_group() or resources on fx_unittest_package(), so the GN copy of this test is packaged by hand in BUILD.gn.
+# LINT.IfChange(test_images)
+# @bazel2gn:skip
+fuchsia_package_resource_group(
+    name = "test-images-bazel",
+    testonly = True,
+    srcs = [
+        "//src/storage/ext4:test_files/1file.img",
+        "//src/storage/ext4:test_files/dac_attributes.img",
+        "//src/storage/ext4:test_files/nest.img",
+        "//src/storage/ext4:test_files/symlink.img",
+    ],
+    basename_only = True,
+    dest = "data",
+)
+
+# @bazel2gn:skip
+fx_unittest_package(
+    name = "storage-ext4-parser-tests",
+    resources = [":test-images-bazel"],
+    unit_tests = [":parser_test"],
+)
+# LINT.ThenChange(BUILD.gn:test_images)

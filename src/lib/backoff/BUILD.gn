@@ -35,6 +35,7 @@ source_set("backoff") {
   ]
   visibility = [
     ":*",
+    "//src/camera/bin/device_watcher:*",
     "//src/camera/lib/cobalt_logger:*",
     "//src/cobalt/bin/app:*",
     "//src/connectivity/weave/adaptation:*",
@@ -49,15 +50,18 @@ source_set("backoff") {
     "//zircon/system/ulib/zx",
   ]
 }
-executable("backoff_unittests") {
-  testonly = true
+
+cc_test_executable("backoff_unittests") {
   sources = [ "exponential_backoff_unittest.cc" ]
   deps = [
     ":backoff",
     "//src/lib/fxl/test:gtest_main",
     "//third_party/googletest:gtest",
   ]
+  testonly = true
+  emit_tool_path = false
 }
+
 fuchsia_unittest_package("backoff_tests") {
   package_name = "backoff_tests-gn"
   component_name = "backoff_tests"

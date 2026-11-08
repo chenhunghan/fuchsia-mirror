@@ -47,13 +47,13 @@ group("tests") {
     "//sdk/lib/syslog:tests",
     "//src/developer/ffx/plugins/inspect:tests($host_toolchain)",
     "//src/developer/ffx/plugins/log:tests($host_toolchain)",
-    "//src/developer/ffx/tools/triage:tests($host_toolchain)",
     "//src/lib/diagnostics:tests",
   ]
 }
 
-# Diagnostics device tests defined in Bazel. See //src/diagnostics/BUILD.bazel.
+# Diagnostics tests defined in Bazel. See //src/diagnostics/BUILD.bazel.
 bazel_test_suite("bazel_tests") {
+  host_tests = [ "//src/diagnostics:host_tests" ]
   target_tests = [ "//src/diagnostics:target_tests" ]
 }
 

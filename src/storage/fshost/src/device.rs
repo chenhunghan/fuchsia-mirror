@@ -218,7 +218,9 @@ impl Device for VolumeServiceDevice {
             return Ok(format);
         }
         let block = self.block_proxy()?;
-        return Ok(detect_disk_format(&block).await);
+        let format = detect_disk_format(&block).await;
+        self.content_format = Some(format);
+        Ok(format)
     }
 
     fn path(&self) -> &str {
@@ -353,7 +355,9 @@ impl Device for LocalBlockDevice {
         if let Some(format) = self.content_format {
             return Ok(format);
         }
-        return Ok(detect_disk_format(&self.block_proxy).await);
+        let format = detect_disk_format(&self.block_proxy).await;
+        self.content_format = Some(format);
+        Ok(format)
     }
 
     fn path(&self) -> &str {
@@ -451,10 +455,15 @@ pub enum DeviceTag {
 
 #[cfg(test)]
 mod tests {
-    use super::{Device, Parent, VolumeServiceDevice};
+    use super::{Device, LocalBlockDevice, Parent, VolumeServiceDevice};
     use fidl_fuchsia_storage_block::{BlockInfo, BlockRequest, BlockRequestStream, DeviceFlag};
+    use fs_management::format::DiskFormat;
+    use fs_management::format::constants::{FVM_MAGIC, FXFS_MAGIC};
     use futures::StreamExt;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use vfs::execution_scope::ExecutionScope;
+    use vmo_backed_block_server::VmoBackedServer;
 
     #[fuchsia::test]
     async fn volume_service_device_is_removable_missing_token() {
@@ -517,5 +526,66 @@ mod tests {
         .await
         .unwrap();
         assert!(!device.is_removable().await);
+    }
+
+    #[fuchsia::test]
+    async fn volume_service_device_content_format_memoized() {
+        let vmo = zx::Vmo::create(100 * 512).unwrap();
+        vmo.write(&FXFS_MAGIC, 0).unwrap();
+        let server = Arc::new(
+            VmoBackedServer::from_vmo(512, vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap())
+                .unwrap(),
+        );
+        let connections = Arc::new(AtomicUsize::new(0));
+        let connections_clone = connections.clone();
+
+        let service_dir = vfs::pseudo_directory! {
+            "000" => vfs::pseudo_directory! {
+                "volume" => vfs::service::host(move |stream: BlockRequestStream| {
+                    connections_clone.fetch_add(1, Ordering::SeqCst);
+                    let server = server.clone();
+                    async move {
+                        let _ = server.serve(stream).await;
+                    }
+                }),
+            },
+        };
+
+        let dir_proxy = vfs::directory::serve_read_only(service_dir, ExecutionScope::new());
+        let mut device = VolumeServiceDevice::new(
+            &dir_proxy,
+            "000".to_string(),
+            "source".to_string(),
+            Parent::Dev,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(device.content_format().await.unwrap(), DiskFormat::Fxfs);
+        let connections_after_first = connections.load(Ordering::SeqCst);
+        assert_eq!(connections_after_first, 2);
+
+        // Overwrite the underlying VMO magic; memoized `content_format` must not reconnect or
+        // re-read the block device.
+        vmo.write(&FVM_MAGIC, 0).unwrap();
+        assert_eq!(device.content_format().await.unwrap(), DiskFormat::Fxfs);
+        assert_eq!(connections.load(Ordering::SeqCst), connections_after_first);
+    }
+
+    #[fuchsia::test]
+    async fn local_block_device_content_format_memoized() {
+        let vmo = zx::Vmo::create(100 * 512).unwrap();
+        vmo.write(&FXFS_MAGIC, 0).unwrap();
+        let server =
+            VmoBackedServer::from_vmo(512, vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap())
+                .unwrap();
+        let mut device = LocalBlockDevice::new(server).await.unwrap();
+
+        assert_eq!(device.content_format().await.unwrap(), DiskFormat::Fxfs);
+
+        // Overwrite the underlying VMO magic; memoized `content_format` must not re-read the block
+        // device.
+        vmo.write(&FVM_MAGIC, 0).unwrap();
+        assert_eq!(device.content_format().await.unwrap(), DiskFormat::Fxfs);
     }
 }

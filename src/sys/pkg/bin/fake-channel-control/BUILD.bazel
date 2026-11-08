@@ -2,14 +2,23 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules/rust:defs.bzl", "rustc_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
 
 package(default_applicable_licenses = ["//:license"])
 
 rustc_binary(
     name = "bin",
     srcs = ["src/main.rs"],
-    crate_name = "fake_channel_control",  # @bazel2gn:raw_overwrite:"fake-channel-control"
+    binary_name = "fake-channel-control",
     edition = "2024",
     lint_config = "//build/config/rust/lints:clippy_warn_all",
     visibility = ["//visibility:private"],
@@ -21,4 +30,28 @@ rustc_binary(
         "//third_party/rust_crates/vendor:anyhow",
         "//third_party/rust_crates/vendor:futures",
     ],
+)
+
+fx_packaged_binary(
+    name = "fake-channel-control_packaged_bin",
+    binary = ":bin",
+    binary_name = "fake-channel-control",
+)
+
+fx_component_manifest(
+    name = "fake-channel-control-manifest",
+    component_name = "fake-channel-control",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/fake-channel-control.cml",
+)
+
+fx_component(
+    name = "fake-channel-control",
+    compiled_manifest = ":fake-channel-control-manifest",
+    visibility = [
+        "//src/cobalt/bin/testapp:__pkg__",
+        "//src/sys/pkg/bin/omaha-client:__pkg__",
+        "//src/sys/pkg/lib/omaha-client-fuchsia:__pkg__",
+    ],
+    deps = [":fake-channel-control_packaged_bin"],
 )

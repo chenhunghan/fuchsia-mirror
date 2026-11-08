@@ -17,9 +17,7 @@ use crate::traits::realm_builder_ext::RealmBuilderExt as _;
 use crate::traits::test_realm_component::TestRealmComponent;
 use fidl_fuchsia_ui_pointerinjector as pointerinjector;
 use fuchsia_async::{self as fasync, TimeoutExt};
-use fuchsia_component_test::{
-    Capability, DirectoryContents, RealmBuilder, RealmBuilderParams, RealmInstance,
-};
+use fuchsia_component_test::{DirectoryContents, RealmBuilder, RealmBuilderParams, RealmInstance};
 use futures::StreamExt;
 use input_synthesis::{modern_backend, synthesizer};
 
@@ -49,14 +47,11 @@ async fn assemble_realm(
     // by FactoryResetHandler), scene_manager would remain dormant unless run eagerly.
     let scene_manager =
         PackagedComponent::new_eager_from_modern_url("input-owner", SCENE_MANAGER_URL);
-    let scene_manager_config =
-        PackagedComponent::new_from_modern_url("scene-manager-config", SCENE_MANAGER_CONFIG_URL);
 
     // Add packaged components and mocks to the test realm.
     b.add(&scenic_test_realm).await;
     b.add(&a11y_test_realm).await;
     b.add(&scene_manager).await;
-    b.add(&scene_manager_config).await;
     b.add(&sound_player_mock).await;
     b.add(&pointer_injector_mock).await;
     b.add(&factory_reset_mock).await;
@@ -135,26 +130,6 @@ async fn assemble_realm(
         &scene_manager,
     )
     .await;
-    b.add_route(
-        fuchsia_component_test::Route::new()
-            .capability(Capability::configuration("fuchsia.scenic.DisplayRotation"))
-            .capability(Capability::configuration("fuchsia.ui.AttachA11yView"))
-            .capability(Capability::configuration("fuchsia.ui.DisplayPixelDensity"))
-            .capability(Capability::configuration("fuchsia.ui.EnableButtonBatonPassing"))
-            .capability(Capability::configuration("fuchsia.ui.EnableMouseBatonPassing"))
-            .capability(Capability::configuration("fuchsia.ui.EnableTouchBatonPassing"))
-            .capability(Capability::configuration("fuchsia.ui.EnableMergeTouchEvents"))
-            .capability(Capability::configuration("fuchsia.ui.IdleThresholdMs"))
-            .capability(Capability::configuration("fuchsia.ui.SupportedInputDevices"))
-            .capability(Capability::configuration("fuchsia.ui.ViewingDistance"))
-            .capability(Capability::configuration("fuchsia.power.SuspendEnabled"))
-            .capability(Capability::configuration("fuchsia.ui.Prefetch"))
-            .capability(Capability::configuration("fuchsia.ui.VisualDebuggingLevel"))
-            .from(scene_manager_config.ref_())
-            .to(scene_manager.ref_()),
-    )
-    .await
-    .unwrap();
 
     // Route injection to input pipeline out to the test.
     b.route_to_parent::<fidl_fuchsia_input_injection::InputDeviceRegistryMarker>(&scene_manager)
@@ -222,7 +197,6 @@ const POINTER_INJECTOR_NAME: &'static str = "mock_pointer_injector";
 const FACTORY_RESET_NAME: &'static str = "mock_factory_reset";
 const INPUT_REPORT_NAME: &'static str = "mock_input_report";
 const SCENE_MANAGER_URL: &'static str = "#meta/scene_manager.cm";
-const SCENE_MANAGER_CONFIG_URL: &'static str = "#meta/scene_manager_config.cm";
 
 #[fuchsia::test]
 async fn injected_factory_reset_is_ignored() {

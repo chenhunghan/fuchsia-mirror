@@ -6,7 +6,6 @@ import("//build/rust/rustc_library.gni")
 import("//build/testing/boot_tests/boot_test.gni")
 import("//build/testing/boot_tests/kernel_zbi_test.gni")
 import("//src/bringup/bin/userboot/tests/rust_zbi_test_executable.gni")
-import("//zircon/kernel/params.gni")
 
 group("boot_tests") {
   testonly = true
@@ -95,13 +94,11 @@ if (current_toolchain == default_toolchain) {
   kernel_zbi_test("early-boot-bootfs-entries-test") {
     generate_cuckoo = false
     deps = [ ":early-boot-bootfs-entries-test-bin" ]
-    environments = kernel_test_environments
   }
 
   kernel_zbi_test("early-boot-single-process-test") {
     generate_cuckoo = false
     deps = [ ":early-boot-single-process-test-bin" ]
-    environments = kernel_test_environments
   }
 
   kernel_zbi_test("early-boot-multiple-process-test") {
@@ -110,6 +107,5 @@ if (current_toolchain == default_toolchain) {
       ":early-boot-multiple-process-test-bin",
       "data-publisher:early-boot-data-publisher-bin",
     ]
-    environments = kernel_test_environments
   }
 }

@@ -82,7 +82,6 @@ fx_component_manifest(
 fx_test_component(
     name = "power_state_recorder_rust_unittests-component",
     compiled_manifest = ":power_state_recorder_rust_unittests-manifest",
-    component_name = "power_state_recorder_rust_unittests",
     deps = [":rust_test_packaged_bin"],
 )
 

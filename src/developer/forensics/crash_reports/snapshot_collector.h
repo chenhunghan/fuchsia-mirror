@@ -5,6 +5,7 @@
 #ifndef SRC_DEVELOPER_FORENSICS_CRASH_REPORTS_SNAPSHOT_COLLECTOR_H_
 #define SRC_DEVELOPER_FORENSICS_CRASH_REPORTS_SNAPSHOT_COLLECTOR_H_
 
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
 #include <lib/async/cpp/task.h>
 #include <lib/async/dispatcher.h>
 #include <lib/fpromise/promise.h>
@@ -103,7 +104,7 @@ class SnapshotCollector {
 
   // Use |fidl_snapshot| to update all snapshot-related state with Uuid |uuid|.
   void CompleteWithSnapshot(const std::string& uuid, feedback::Annotations annotations,
-                            fuchsia::feedback::Attachment archive);
+                            fuchsia_feedback::Attachment archive);
 
   // Retrieves the MissingSnapshot from the store and returns the combination of annotations and
   // presence annotations.

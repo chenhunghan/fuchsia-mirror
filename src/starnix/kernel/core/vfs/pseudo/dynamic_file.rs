@@ -14,35 +14,14 @@ use starnix_uapi::errors::Errno;
 use starnix_uapi::{errno, error, off_t};
 use std::collections::VecDeque;
 
-unsafe extern "C" {
-    // Declare a symbol that doesn't exist. If the compiler cannot prove that this is never used,
-    // this will create a compilation error showing an issue with the usage of the traits in this
-    // file.
-    fn undefined_symbol_to_prevent_compilation();
-}
-
 pub trait SequenceFileSource: Send + Sync + 'static {
     type Cursor: Default + Send;
     fn next(
         &self,
-        _current_task: &CurrentTask,
-        _cursor: Self::Cursor,
-        _sink: &mut DynamicFileBuf,
-    ) -> Result<Option<Self::Cursor>, Errno> {
-        // SAFETY: This cannot compile and ensure this method is never reached
-        unsafe {
-            undefined_symbol_to_prevent_compilation();
-        }
-        panic!("Either next or next_locked must be implemented");
-    }
-    fn next_locked(
-        &self,
         current_task: &CurrentTask,
         cursor: Self::Cursor,
         sink: &mut DynamicFileBuf,
-    ) -> Result<Option<Self::Cursor>, Errno> {
-        self.next(current_task, cursor, sink)
-    }
+    ) -> Result<Option<Self::Cursor>, Errno>;
     fn write(
         &self,
         _current_task: &CurrentTask,
@@ -54,24 +33,7 @@ pub trait SequenceFileSource: Send + Sync + 'static {
 }
 
 pub trait DynamicFileSource: Send + Sync + 'static {
-    fn generate(
-        &self,
-        _current_task: &CurrentTask,
-        _sink: &mut DynamicFileBuf,
-    ) -> Result<(), Errno> {
-        // SAFETY: This cannot compile and ensure this method is never reached
-        unsafe {
-            undefined_symbol_to_prevent_compilation();
-        }
-        panic!("Either generate or generate_locked must be implemented");
-    }
-    fn generate_locked(
-        &self,
-        current_task: &CurrentTask,
-        sink: &mut DynamicFileBuf,
-    ) -> Result<(), Errno> {
-        self.generate(current_task, sink)
-    }
+    fn generate(&self, current_task: &CurrentTask, sink: &mut DynamicFileBuf) -> Result<(), Errno>;
     fn write(
         &self,
         _current_task: &CurrentTask,
@@ -87,13 +49,13 @@ where
     T: DynamicFileSource,
 {
     type Cursor = ();
-    fn next_locked(
+    fn next(
         &self,
         current_task: &CurrentTask,
         _cursor: (),
         sink: &mut DynamicFileBuf,
     ) -> Result<Option<()>, Errno> {
-        self.generate_locked(current_task, sink).map(|_| None)
+        self.generate(current_task, sink).map(|_| None)
     }
     fn write(
         &self,
@@ -283,10 +245,12 @@ impl<Source: SequenceFileSource> DynamicFileState<Source> {
     }
 }
 
+const DEFAULT_INITIAL_BUF_CAPACITY: usize = 256;
+
 impl<Source: SequenceFileSource> DynamicFileState<Source> {
     fn reset(&mut self) {
         self.cursor = Some(Source::Cursor::default());
-        self.buf = DynamicFileBuf::default();
+        self.buf.0.clear();
         self.byte_offset = 0;
     }
 
@@ -308,13 +272,14 @@ impl<Source: SequenceFileSource> DynamicFileState<Source> {
             } else {
                 break;
             };
-            let mut buf = std::mem::take(&mut self.buf);
-            self.cursor = self.source.next_locked(current_task, cursor, &mut buf).map_err(|e| {
+            if self.buf.0.capacity() == 0 {
+                self.buf.reserve(DEFAULT_INITIAL_BUF_CAPACITY);
+            }
+            self.cursor = self.source.next(current_task, cursor, &mut self.buf).map_err(|e| {
                 // Reset everything on failure
                 self.reset();
                 e
             })?;
-            self.buf = buf;
 
             // If the seek pointer is ahead of our current byte offset, we will generate data that
             // needs to be thrown away. Calculation for that is here.
@@ -350,8 +315,11 @@ impl<Source: SequenceFileSource> DynamicFileState<Source> {
 #[derive(Debug, Default)]
 pub struct DynamicFileBuf(VecDeque<u8>);
 impl DynamicFileBuf {
+    pub fn reserve(&mut self, additional: usize) {
+        self.0.reserve(additional);
+    }
     pub fn write(&mut self, data: &[u8]) {
-        self.0.extend(data.iter().copied());
+        self.0.extend(data);
     }
     pub fn write_iter<I>(&mut self, data: I)
     where
@@ -364,6 +332,13 @@ impl DynamicFileBuf {
         std::io::Write::write_fmt(&mut self.0, args).map_err(|_| errno!(EINVAL))?;
         let end_size = self.0.len();
         Ok(end_size - start_size)
+    }
+}
+
+#[cfg(test)]
+impl From<DynamicFileBuf> for Vec<u8> {
+    fn from(buf: DynamicFileBuf) -> Self {
+        buf.0.into()
     }
 }
 

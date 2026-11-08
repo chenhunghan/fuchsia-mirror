@@ -35,6 +35,7 @@ impl BlobActor {
             Ok(Ok(writer)) => writer,
             Ok(Err(CreateBlobError::AlreadyExists)) => return Err(Status::ALREADY_EXISTS),
             Ok(Err(CreateBlobError::Internal)) => return Err(Status::INTERNAL),
+            Ok(Err(CreateBlobError::OutOfSpace)) => return Err(Status::NO_SPACE),
             Err(e) if e.is_closed() => return Err(Status::PEER_CLOSED),
             Err(e) => panic!("Unexpected FIDL error: {:?}", e),
         };

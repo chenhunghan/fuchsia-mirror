@@ -1,0 +1,48 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [],  # Include all tests in the package.
+    visibility = ["//src/developer/ffx:__pkg__"],
+)
+
+rustc_library(
+    name = "lib",
+    srcs = ["src/lib.rs"],
+    crate_name = "target_connector",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/developer/ffx:__subpackages__"],
+    deps = [
+        "//src/developer/ffx/command/error:lib",
+        "//src/developer/ffx/fidl:fuchsia.developer.ffx_rust",
+        "//src/developer/ffx/lib/errors:lib",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/developer/ffx/lib/target/behavior:lib",
+        "//src/developer/ffx/lib/target_errors:lib",
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+host_rustc_test(
+    name = "lib_test",
+    crate = ":lib",
+    # Only used by bazel2gn to set GN output_name and avoid host_x64/lib_test collisions.
+    crate_name = "target_connector_lib_test",
+    deps = [
+        "//src/developer/ffx/config:lib",
+        "//src/developer/ffx/lib/addr:lib",
+        "//src/developer/ffx/lib/target:lib",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:serde_json",
+    ],
+)

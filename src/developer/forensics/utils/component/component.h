@@ -6,7 +6,6 @@
 #define SRC_DEVELOPER_FORENSICS_UTILS_COMPONENT_COMPONENT_H_
 
 #include <lib/async-loop/cpp/loop.h>
-#include <lib/fidl/cpp/binding.h>
 #include <lib/fidl/cpp/wire/channel.h>
 #include <lib/fit/function.h>
 #include <lib/inspect/component/cpp/component.h>
@@ -39,12 +38,6 @@ class Component {
 
   zx_status_t RunLoop();
   void ShutdownLoop();
-
-  template <typename Interface>
-  zx_status_t AddPublicService(::fidl::InterfaceRequestHandler<Interface> handler,
-                               std::string service_name = Interface::Name_) {
-    return context_->outgoing()->AddPublicService(std::move(handler), std::move(service_name));
-  }
 
   template <typename Protocol>
   zx_status_t AddPublicService(

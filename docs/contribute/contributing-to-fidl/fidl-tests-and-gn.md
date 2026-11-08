@@ -1,5 +1,5 @@
 keywords: category:FuchsiaTestAndDebug,category:FuchsiaBuild,category:FuchsiaFidl,category:FuchsiaDevelopment
-keywords_public: FIDL, GN, tests, naming conventions, build system, Fuchsia, host tests, device tests, packages, components, Rust, C++, Go, Dart
+keywords_public: FIDL, GN, tests, naming conventions, build system, Fuchsia, host tests, device tests, packages, components, Rust, C++, Dart
 description: This document outlines the standards and best practices for naming, organizing, and defining FIDL tests within the Fuchsia GN build system, covering host and device tests across various programming languages.
 <!-- These keywords are for search widget on fuchsia.dev. Do not remove. -->
 
@@ -9,7 +9,7 @@ This document standardizes the way we define and organize FIDL tests in the GN
 build system, respecting the following goals:
 
 *   **Name consistently**. If Rust uses `fx test fidl_rust_conformance_tests`,
-    then Go should use `fx test fidl_go_conformance_tests`. Consistent and
+    then HLCPP should use `fx test fidl_hlcpp_conformance_tests`. Consistent and
     predictable naming provides a better developer experience.
 *   **Run what you need**. The testing workflow should make it easy to run a
     single test component without building or running anything extra.
@@ -61,8 +61,7 @@ Where _tool_ is one of:
 And the other parts are:
 
 *   _bindings_
-    *   One of **c**, **cpp**, **cpp_wire**, **hlcpp**, **rust**, **go**,
-        **dart**
+    *   One of **c**, **cpp**, **cpp_wire**, **hlcpp**, **rust**, **dart**
 *   _category_, _subcategory_
     *   Example categories: **conformance**, **types**, **parser**, **lib**
     *   Do _not_ use: **frontend**, **backend**, **bindings** (_tool_

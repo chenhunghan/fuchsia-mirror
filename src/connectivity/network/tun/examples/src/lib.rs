@@ -115,7 +115,7 @@ async fn tap_like_over_network_tun() {
     // Add a port.
     let (tun_port, server_end) =
         fidl::endpoints::create_proxy::<fidl_fuchsia_net_tun::PortMarker>();
-    tun_device.add_port(&port_config, server_end).expect("failed to add port");
+    tun_device.add_port(port_config, server_end).expect("failed to add port");
 
     // Install the interface in the stack.
     //
@@ -234,7 +234,7 @@ async fn tun_like_over_network_tun() {
     // Add a port.
     let (tun_port, server_end) =
         fidl::endpoints::create_proxy::<fidl_fuchsia_net_tun::PortMarker>();
-    tun_device.add_port(&port_config, server_end).expect("failed to add port");
+    tun_device.add_port(port_config, server_end).expect("failed to add port");
 
     // Install the interface in the stack.
     //

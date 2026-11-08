@@ -4,38 +4,22 @@
 
 use anyhow::{Context as _, Error, format_err};
 use fidl::endpoints::Proxy as _;
-use fidl_fuchsia_device::{ControllerMarker, ControllerProxy};
 use fidl_fuchsia_hardware_bluetooth::{
-    EmulatorError, EmulatorMarker, EmulatorProxy, EmulatorSettings, VirtualControllerMarker,
+    EmulatorError, EmulatorProxy, EmulatorServiceMarker, EmulatorSettings,
+    VirtualControllerServiceMarker,
 };
 use fidl_fuchsia_io::DirectoryProxy;
 use fuchsia_async::{DurationExt as _, TimeoutExt as _};
-use fuchsia_bluetooth::constants::{DEV_DIR, INTEGRATION_TIMEOUT as WATCH_TIMEOUT};
-
-use futures::TryFutureExt as _;
+use fuchsia_bluetooth::constants::INTEGRATION_TIMEOUT as WATCH_TIMEOUT;
+use fuchsia_component::client::Service;
+use futures::{TryFutureExt as _, TryStreamExt as _};
 use log::error;
 
 pub mod types;
 
-const EMULATOR_DEVICE_DIR: &str = "class/bt-emulator";
-
-/// Returns true if `topological_path` is that of the emulator node `name` published directly
-/// under `<DEV_DIR>/<emulator_device_path>`. The whole last path component must match:
-/// `emulator-1` must not match `emulator-10`.
-fn is_emulator_node_path(topological_path: &str, emulator_device_path: &str, name: &str) -> bool {
-    topological_path
-        .strip_prefix(DEV_DIR)
-        .and_then(|path| path.strip_prefix('/'))
-        .and_then(|path| path.strip_prefix(emulator_device_path))
-        .and_then(|path| path.strip_prefix('/'))
-        .and_then(|path| path.strip_prefix(name))
-        .is_some_and(str::is_empty)
-}
-
-/// Represents a bt-hci device emulator. Instances of this type can be used manage the
-/// bt-hci-emulator driver within the test device hierarchy. The associated driver instance gets
-/// unbound and all bt-hci and bt-emulator device instances destroyed when
-/// `destroy_and_wait()` resolves successfully.
+/// Represents a bt-hci device emulator. Instances of this type can be used to manage the
+/// bt-hci-virtual emulator within the test hierarchy. The associated emulator instance gets
+/// destroyed when `destroy_and_wait()` resolves successfully.
 /// `destroy_and_wait()` MUST be called for proper clean up of the emulator device.
 pub struct Emulator {
     /// This will have a value when the emulator is instantiated and will be reset to None
@@ -58,22 +42,17 @@ impl Emulator {
         }
     }
 
-    /// Publish a new bt-emulator device and return a handle to it. No corresponding bt-hci device
-    /// will be published; to do so it must be explicitly configured and created with a call to
-    /// `publish()`. If `realm` is present, the device will be created inside it, otherwise it will
-    /// be created using the `/dev` directory in the component's namespace.
-    pub async fn create(dev_directory: DirectoryProxy) -> Result<Emulator, Error> {
-        let dev = TestDevice::create(dev_directory)
-            .await
-            .context(format!("Error creating test device"))?;
+    /// Publish a new bt-emulator instance and return a handle to it. No corresponding bt-hci
+    /// service instance will be published; to do so it must be explicitly configured and created
+    /// with a call to `publish()`.
+    pub async fn create(svc_directory: &DirectoryProxy) -> Result<Emulator, Error> {
+        let dev = TestDevice::create(svc_directory).await.context("Error creating test device")?;
         Ok(Emulator { dev: Some(dev) })
     }
 
-    /// Publish a bt-emulator and a bt-hci device using the default emulator settings. If `realm`
-    /// is present, the device will be created inside it, otherwise it will be created using the
-    /// `/dev` directory in the component's namespace.
-    pub async fn create_and_publish(dev_directory: DirectoryProxy) -> Result<Emulator, Error> {
-        let fake_dev = Self::create(dev_directory).await?;
+    /// Publish a bt-emulator and a bt-hci service instance using the default emulator settings.
+    pub async fn create_and_publish(svc_directory: &DirectoryProxy) -> Result<Emulator, Error> {
+        let fake_dev = Self::create(svc_directory).await?;
         fake_dev.publish(Self::default_settings()).await?;
         Ok(fake_dev)
     }
@@ -89,8 +68,8 @@ impl Emulator {
             .map_err(|e: EmulatorError| format_err!("failed to publish bt-hci device: {:#?}", e))
     }
 
-    /// Sends the test device a destroy message which will unbind the driver.
-    /// This will wait for the test device to be unpublished from devfs.
+    /// Closes the owner connection to the test device and waits for the emulator instance to
+    /// shut down.
     pub async fn destroy_and_wait(&mut self) -> Result<(), Error> {
         self.dev
             .take()
@@ -99,9 +78,9 @@ impl Emulator {
             .await
     }
 
-    pub async fn get_topological_path(&self) -> Result<String, Error> {
+    pub fn instance_name(&self) -> &str {
         let dev = self.dev.as_ref().expect("emulator device accessed after it was destroyed!");
-        dev.get_topological_path().await
+        &dev.instance_name
     }
 
     pub fn emulator(&self) -> &EmulatorProxy {
@@ -112,36 +91,33 @@ impl Emulator {
 impl Drop for Emulator {
     fn drop(&mut self) {
         if self.dev.is_some() {
-            error!("Did not call destroy() on Emulator");
+            error!("Did not call destroy_and_wait() on Emulator");
         }
     }
 }
 
-/// Represents the test device. `destroy()` MUST be called explicitly to remove the device.
-/// The device will be removed asynchronously so the caller cannot rely on synchronous
-/// execution of destroy() to know about device removal. Instead, the caller should watch for the
-/// device path to be removed.
+/// Represents the test device. `destroy_and_wait()` MUST be called explicitly to remove the
+/// device.
 struct TestDevice {
-    #[cfg(test)]
-    dev_directory: DirectoryProxy,
-    controller: ControllerProxy,
+    owner: Option<EmulatorProxy>,
     emulator: EmulatorProxy,
+    instance_name: String,
 }
 
 impl TestDevice {
-    /// Creates a new device as a child of the emulator controller device
-    async fn create(dev_directory: DirectoryProxy) -> Result<TestDevice, Error> {
-        // 0x30 => fuchsia.platform.BIND_PLATFORM_DEV_DID.BT_HCI_EMULATOR
-        let emulator_device_path: &str = "sys/platform/bt-hci-emulator";
-        let virtual_controller_device_path: String =
-            emulator_device_path.to_owned() + "/bt_hci_virtual";
-
-        let controller = device_watcher::recursive_wait_and_open::<VirtualControllerMarker>(
-            &dev_directory,
-            virtual_controller_device_path.as_str(),
-        )
-        .await
-        .with_context(|| format!("failed to open {}", virtual_controller_device_path))?;
+    /// Creates a new emulator instance via `VirtualControllerService` and connects to its
+    /// `EmulatorService` instance.
+    async fn create(svc_directory: &DirectoryProxy) -> Result<TestDevice, Error> {
+        let controller = Service::open_from_dir(svc_directory, VirtualControllerServiceMarker)
+            .context("failed to open VirtualControllerService")?
+            .watch_for_any()
+            .on_timeout(WATCH_TIMEOUT.after_now(), || {
+                Err(format_err!("timed out waiting for VirtualControllerService instance"))
+            })
+            .await
+            .context("failed to find VirtualControllerService instance")?
+            .connect_to_device()
+            .context("failed to connect to VirtualController protocol")?;
 
         let name = controller
             .create_emulator()
@@ -152,100 +128,52 @@ impl TestDevice {
             .await?
             .map_err(zx::Status::err_from_raw)?
             .ok_or_else(|| {
-                format_err!("name absent from EmulatorController::Create FIDL response")
+                format_err!("name absent from VirtualController::CreateEmulator FIDL response")
             })?;
 
-        let emulator_dir = fuchsia_fs::directory::open_directory_async(
-            &dev_directory,
-            EMULATOR_DEVICE_DIR,
-            fuchsia_fs::Flags::empty(),
-        )?;
-
-        // Wait until a bt-emulator device gets published under our test device.
-        let directory = device_watcher::wait_for_device_with(
-            &emulator_dir,
-            |device_watcher::DeviceInfo { filename, topological_path }| {
-                is_emulator_node_path(&topological_path, emulator_device_path, &name).then(|| {
-                    fuchsia_fs::directory::open_directory_async(
-                        &emulator_dir,
-                        filename,
-                        fuchsia_fs::Flags::empty(),
-                    )
-                })
-            },
-        )
-        .on_timeout(WATCH_TIMEOUT, || Err(format_err!("timed out waiting for device to appear")))
-        .await??;
-
-        let controller = fuchsia_component::client::connect_to_named_protocol_at_dir_root::<
-            ControllerMarker,
-        >(&directory, fidl_fuchsia_device_fs::DEVICE_CONTROLLER_NAME)?;
-        let emulator = fuchsia_component::client::connect_to_named_protocol_at_dir_root::<
-            EmulatorMarker,
-        >(&directory, fidl_fuchsia_device_fs::DEVICE_PROTOCOL_NAME)?;
-
-        Ok(Self {
-            #[cfg(test)]
-            dev_directory,
-            controller,
-            emulator,
-        })
-    }
-
-    /// Sends the test device a destroy message which will unbind the driver.
-    /// This will wait for the test device to be unpublished from devfs.
-    pub async fn destroy_and_wait(&mut self) -> Result<(), Error> {
-        let () = self.controller.schedule_unbind().await?.map_err(zx::Status::err_from_raw)?;
-        let _: (zx::Signals, zx::Signals) = futures::future::try_join(
-            self.controller.as_channel().on_closed(),
-            self.emulator.as_channel().on_closed(),
-        )
-        .await?;
-        Ok(())
-    }
-
-    pub async fn get_topological_path(&self) -> Result<String, Error> {
-        self.controller
-            .get_topological_path()
+        // Wait until the matching EmulatorService instance is published.
+        let mut watcher = Service::open_from_dir(svc_directory, EmulatorServiceMarker)
+            .context("failed to open EmulatorService")?
+            .watch()
             .await
-            .context("get topological path transport")?
-            .map_err(zx::Status::err_from_raw)
-            .context("get topological path")
+            .context("failed to watch EmulatorService")?;
+        let instance = async {
+            while let Some(instance) = watcher.try_next().await? {
+                if instance.instance_name() == name {
+                    return Ok(instance);
+                }
+            }
+            Err(format_err!("EmulatorService watcher closed before {name} appeared"))
+        }
+        .on_timeout(WATCH_TIMEOUT, || Err(format_err!("timed out waiting for device to appear")))
+        .await?;
+
+        // The first Emulator connection is the owner connection: closing it triggers
+        // EmulatorDevice::Shutdown() and closes all other Emulator bindings. Keep `owner`
+        // private and uncloned so `destroy_and_wait()` can deterministically close it even when
+        // callers clone `self.emulator`.
+        let owner = instance.connect_to_device().context("failed to connect owner to Emulator")?;
+        let emulator = instance.connect_to_device().context("failed to connect to Emulator")?;
+
+        Ok(Self { owner: Some(owner), emulator, instance_name: name })
+    }
+
+    /// Drops the owner connection and waits for the emulator to close the shared channel.
+    pub async fn destroy_and_wait(&mut self) -> Result<(), Error> {
+        drop(self.owner.take());
+        let _: zx::Signals = self.emulator.as_channel().on_closed().await?;
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fidl_fuchsia_driver_test as fdt;
-    use fuchsia_component_test::RealmBuilder;
-    use fuchsia_driver_test::{DriverTestRealmBuilder, DriverTestRealmInstance};
+    use fidl_fuchsia_hardware_bluetooth::ServiceMarker;
+    use fuchsia_component_test::{Capability, ChildOptions, RealmBuilder, Ref, Route};
 
-    #[fuchsia::test]
-    fn emulator_node_path_matches_whole_component() {
-        const DEV: &str = "sys/platform/bt-hci-emulator";
-        assert!(is_emulator_node_path(
-            "/dev/sys/platform/bt-hci-emulator/emulator-1",
-            DEV,
-            "emulator-1"
-        ));
-        assert!(!is_emulator_node_path(
-            "/dev/sys/platform/bt-hci-emulator/emulator-10",
-            DEV,
-            "emulator-1"
-        ));
-        assert!(!is_emulator_node_path(
-            "/dev/sys/platform/bt-hci-emulator/emulator",
-            DEV,
-            "emulator-1"
-        ));
-        assert!(!is_emulator_node_path(
-            "/dev/sys/platform/bt-hci-emulator/emulator-1/x",
-            DEV,
-            "emulator-1"
-        ));
-        assert!(!is_emulator_node_path("/dev/sys/platform/other/emulator-1", DEV, "emulator-1"));
-    }
+    const BT_HCI_VIRTUAL_URL: &str = "virtual#meta/bt-hci-virtual.cm";
+    const BT_HCI_VIRTUAL_MONIKER: &str = "bt-hci-virtual";
 
     fn default_settings() -> EmulatorSettings {
         EmulatorSettings {
@@ -258,77 +186,59 @@ mod tests {
         }
     }
 
+    // Tests that creating, publishing, and destroying an Emulator instance creates and closes
+    // its EmulatorService instance.
     #[fuchsia::test]
     async fn test_publish_lifecycle() {
-        // We need to resolve our test component manually. Eventually component framework could provide
-        // an introspection way of resolving your own component.
-        // This isn't exactly correct because if the test is running in ctf, the root package will not
-        // be called "hci-emulator-client-tests".
-        let resolved = {
-            let client = fuchsia_component::client::connect_to_protocol_at_path::<
-                fidl_fuchsia_component_resolution::ResolverMarker,
-            >("/svc/fuchsia.component.resolution.Resolver-hermetic")
-            .unwrap();
-            client
-            .resolve(
-                "fuchsia-pkg://fuchsia.com/hci-emulator-client-tests#meta/hci-emulator-client-tests.cm",
+        let builder = RealmBuilder::new().await.expect("realm builder");
+        let bt_hci_virtual = builder
+            .add_child(BT_HCI_VIRTUAL_MONIKER, BT_HCI_VIRTUAL_URL, ChildOptions::new())
+            .await
+            .expect("add bt-hci-virtual");
+        builder
+            .add_route(
+                Route::new()
+                    .capability(Capability::protocol_by_name("fuchsia.logger.LogSink"))
+                    .from(Ref::parent())
+                    .to(&bt_hci_virtual),
             )
             .await
-            .unwrap()
-            .expect("Failed to resolve root component")
-        };
-
-        // We use these watchers to verify the addition and removal of these devices as tied to the
-        // lifetime of the Emulator instance we create below.
-        let emul_dev: EmulatorProxy;
-        let realm = RealmBuilder::new().await.expect("realm builder");
-        let _: &RealmBuilder =
-            realm.driver_test_realm_setup().await.expect("driver test realm setup");
-        let realm = realm.build().await.expect("failed to build realm");
-        let args = fdt::RealmArgs {
-            root_driver: Some("fuchsia-boot:///platform-bus#meta/platform-bus.cm".to_string()),
-            software_devices: Some(vec![fidl_fuchsia_driver_test::SoftwareDevice {
-                device_name: "bt-hci-emulator".to_string(),
-                device_id: 48,
-            }]),
-            test_component: Some(resolved),
-            ..Default::default()
-        };
-        realm.driver_test_realm_start(args).await.expect("driver test realm start");
-
-        let dev_dir = realm.driver_test_realm_connect_to_dev().unwrap();
-        let mut fake_dev = Emulator::create(dev_dir).await.expect("Failed to construct Emulator");
-        let dev = fake_dev.dev.as_ref().expect("emulator device exists");
-        let topo = dev
-            .get_topological_path()
+            .expect("route LogSink");
+        builder
+            .add_route(
+                Route::new()
+                    .capability(Capability::service::<VirtualControllerServiceMarker>())
+                    .capability(Capability::service::<EmulatorServiceMarker>())
+                    .capability(Capability::service::<ServiceMarker>())
+                    .from(&bt_hci_virtual)
+                    .to(Ref::parent()),
+            )
             .await
-            .expect("Failed to obtain topological path for Emulator");
-        let TestDevice { dev_directory, controller: _, emulator: _ } = dev;
+            .expect("route bluetooth services");
+        let realm = builder.build().await.expect("failed to build realm");
 
-        // A bt-emulator device should already exist by now.
-        let emulator_dir = fuchsia_fs::directory::open_directory_async(
-            &dev_directory,
-            EMULATOR_DEVICE_DIR,
-            fuchsia_fs::Flags::empty(),
-        )
-        .expect("open emulator directory");
-        emul_dev = device_watcher::wait_for_device_with(
-            &emulator_dir,
-            |device_watcher::DeviceInfo { filename, topological_path }| {
-                (topological_path == topo).then(|| {
-                    fuchsia_component::client::connect_to_named_protocol_at_dir_root::<
-                        EmulatorMarker,
-                    >(&emulator_dir, filename)
-                    .expect("failed to connect to device")
-                })
-            },
-        )
+        let svc_dir = realm.root.get_exposed_dir();
+        let mut fake_dev = Emulator::create(svc_dir).await.expect("Failed to construct Emulator");
+
+        // An EmulatorService instance matching `fake_dev.instance_name()` should already exist.
+        let mut watcher = Service::open_from_dir(svc_dir, EmulatorServiceMarker)
+            .expect("open EmulatorService")
+            .watch()
+            .await
+            .expect("watch EmulatorService");
+        let emul_dev = async {
+            while let Some(instance) = watcher.try_next().await.expect("watch next") {
+                if instance.instance_name() == fake_dev.instance_name() {
+                    return instance.connect_to_device().expect("failed to connect to device");
+                }
+            }
+            panic!("EmulatorService watcher closed before instance appeared");
+        }
         .on_timeout(WATCH_TIMEOUT, || panic!("timed out waiting for device to appear"))
-        .await
-        .expect("failed to watch for device");
+        .await;
 
         // Send a publish message to the device. This call should succeed and result in a new
-        // bt-hci device.
+        // bt-hci service instance.
         let () = fake_dev
             .publish(default_settings())
             .await
@@ -336,9 +246,8 @@ mod tests {
 
         // Once a device is published, it should not be possible to publish again while the
         // Emulator is open.
-        let dev = fake_dev.dev.as_ref().expect("emulator device exists");
-        let result = dev
-            .emulator
+        let result = fake_dev
+            .emulator()
             .publish(&default_settings())
             .await
             .expect("Failed to send second Publish message to emulator device");
@@ -346,7 +255,7 @@ mod tests {
 
         fake_dev.destroy_and_wait().await.expect("Expected test device to be removed");
 
-        // Emulator should be destroyed when `fake_dev` gets dropped
+        // Observer Emulator connection should be closed when `fake_dev` is destroyed.
         let _ = emul_dev
             .as_channel()
             .on_closed()

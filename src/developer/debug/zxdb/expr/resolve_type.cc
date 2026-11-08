@@ -5,8 +5,10 @@
 #include "src/developer/debug/zxdb/expr/resolve_type.h"
 
 #include <algorithm>
+#include <string>
 #include <vector>
 
+#include "src/developer/debug/zxdb/expr/expr_parser.h"
 #include "src/developer/debug/zxdb/expr/find_name.h"
 #include "src/developer/debug/zxdb/expr/found_name.h"
 #include "src/developer/debug/zxdb/symbols/dwarf_die_ref.h"
@@ -102,6 +104,13 @@ fxl::RefPtr<Type> FindTypeDefinition(const FindNameContext& context, ParsedIdent
     return result.type();
   }
   return nullptr;
+}
+
+fxl::RefPtr<Type> FindTypeDefinition(const FindNameContext& context, std::string_view looking_for) {
+  ParsedIdentifier ident;
+  if (ExprParser::ParseIdentifier(std::string(looking_for), &ident).has_error())
+    return nullptr;
+  return FindTypeDefinition(context, std::move(ident));
 }
 
 }  // namespace zxdb

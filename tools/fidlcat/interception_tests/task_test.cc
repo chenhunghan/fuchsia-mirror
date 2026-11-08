@@ -38,38 +38,6 @@ TASK_SUSPEND_DISPLAY_TEST(
     "\x1B[32m0.000000\x1B[0m "
     "  -> \x1B[32mZX_OK\x1B[0m (token: \x1B[32mhandle\x1B[0m = \x1B[31mbde90caf\x1B[0m)\n")
 
-// zx_task_suspend_token tests.
-
-std::unique_ptr<SystemCallTest> ZxTaskSuspendToken(int64_t result, std::string_view result_name,
-                                                   zx_handle_t handle, zx_handle_t* token) {
-  auto value = std::make_unique<SystemCallTest>("zx_task_suspend_token", result, result_name);
-  value->AddInput(handle);
-  value->AddInput(reinterpret_cast<uint64_t>(token));
-  return value;
-}
-
-#define TASK_SUSPEND_TOKEN_DISPLAY_TEST_CONTENT(result, expected) \
-  zx_handle_t token = kHandleOut;                                 \
-  PerformDisplayTest("$plt(zx_task_suspend_token)",               \
-                     ZxTaskSuspendToken(result, #result, kHandle, &token), expected)
-
-#define TASK_SUSPEND_TOKEN_DISPLAY_TEST(name, errno, expected) \
-  TEST_F(InterceptionWorkflowTestX64, name) {                  \
-    TASK_SUSPEND_TOKEN_DISPLAY_TEST_CONTENT(errno, expected);  \
-  }                                                            \
-  TEST_F(InterceptionWorkflowTestArm, name) {                  \
-    TASK_SUSPEND_TOKEN_DISPLAY_TEST_CONTENT(errno, expected);  \
-  }
-
-TASK_SUSPEND_TOKEN_DISPLAY_TEST(
-    ZxTaskSuspendToken, ZX_OK,
-    "\n"
-    "\x1B[32m0.000000\x1B[0m "
-    "test_3141 \x1B[31m3141\x1B[0m:\x1B[31m8764\x1B[0m "
-    "zx_task_suspend_token(handle: \x1B[32mhandle\x1B[0m = \x1B[31mcefa1db0\x1B[0m)\n"
-    "\x1B[32m0.000000\x1B[0m "
-    "  -> \x1B[32mZX_OK\x1B[0m (token: \x1B[32mhandle\x1B[0m = \x1B[31mbde90caf\x1B[0m)\n")
-
 // zx_task_create_exception_channel tests.
 
 std::unique_ptr<SystemCallTest> ZxTaskCreateExceptionChannel(int64_t result,

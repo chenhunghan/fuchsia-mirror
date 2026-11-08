@@ -101,14 +101,93 @@ func TestLoadTestModifiers(t *testing.T) {
 }
 
 func TestAffectedModifiers(t *testing.T) {
+	specs := []build.TestSpec{
+		{
+			Test: build.Test{Name: "affected-arm64", OS: linux, CPU: "arm64"},
+			Envs: []build.Environment{{Dimensions: build.DimensionSet{"os": "Linux"}}},
+		},
+		{
+			Test: build.Test{Name: "affected-linux", OS: linux, CPU: x64},
+			Envs: []build.Environment{{Dimensions: build.DimensionSet{"os": "Linux"}}},
+		},
+		{
+			Test: build.Test{Name: "affected-mac", OS: "mac", CPU: x64},
+			Envs: []build.Environment{{Dimensions: build.DimensionSet{"os": "Mac"}}},
+		},
+		{
+			Test: build.Test{Name: "affected-host+target", OS: linux, CPU: x64},
+			Envs: []build.Environment{{Dimensions: build.DimensionSet{"device_type": "AEMU"}}},
+		},
+		{
+			Test: build.Test{Name: "affected-AEMU", OS: fuchsia, CPU: x64},
+			Envs: []build.Environment{{Dimensions: build.DimensionSet{"device_type": "AEMU"}}},
+		},
+		{
+			Test: build.Test{
+				Name:       "affected-test-pilot-AEMU",
+				PackageURL: "fuchsia-pkg://fuchsia.com/test#meta/test.cm",
+				Path:       "host_x64/test.sh",
+				OS:         linux,
+				CPU:        x64,
+			},
+			Envs: []build.Environment{{Dimensions: build.DimensionSet{"device_type": "AEMU"}}},
+		},
+		{
+			Test: build.Test{
+				Name:       "affected-test-pilot-other-device",
+				PackageURL: "fuchsia-pkg://fuchsia.com/other_test#meta/test.cm",
+				Path:       "host_x64/other_test.sh",
+				OS:         linux,
+				CPU:        x64,
+			},
+			Envs: []build.Environment{{Dimensions: build.DimensionSet{"device_type": "other-device"}}},
+		},
+		{
+			Test: build.Test{Name: "affected-other-device", OS: fuchsia, CPU: x64},
+			Envs: []build.Environment{{Dimensions: build.DimensionSet{"device_type": "other-device"}}},
+		},
+		{
+			Test: build.Test{Name: "affected-AEMU-and-other-device", OS: fuchsia, CPU: x64},
+			Envs: []build.Environment{
+				{Dimensions: build.DimensionSet{"device_type": "AEMU"}},
+				{Dimensions: build.DimensionSet{"device_type": "other-device"}},
+			},
+		},
+		{
+			Test: build.Test{
+				Name:       "affected-test-pilot-AEMU-and-other-device",
+				PackageURL: "fuchsia-pkg://fuchsia.com/multi_env_test#meta/test.cm",
+				Path:       "host_x64/multi_env_test.sh",
+				OS:         linux,
+				CPU:        x64,
+			},
+			Envs: []build.Environment{
+				{Dimensions: build.DimensionSet{"device_type": "AEMU"}},
+				{Dimensions: build.DimensionSet{"device_type": "other-device"}},
+			},
+		},
+		{Test: build.Test{Name: "not-affected"}},
+	}
 	affectedTests := []string{
-		"affected-arm64", "affected-linux", "affected-mac", "affected-host+target", "affected-AEMU", "affected-other-device",
+		"affected-arm64",
+		"affected-linux",
+		"affected-mac",
+		"affected-host+target",
+		"affected-AEMU",
+		"affected-test-pilot-AEMU",
+		"affected-test-pilot-other-device",
+		"affected-other-device",
+		"affected-AEMU-and-other-device",
+		"affected-test-pilot-AEMU-and-other-device",
 	}
 	const maxAttempts = 2
 	t.Run("not multiplied if over threshold", func(t *testing.T) {
-		mods, err := AffectedModifiers(nil, affectedTests, maxAttempts, len(affectedTests)-1)
+		mods, err := AffectedModifiers(specs, affectedTests, maxAttempts, len(affectedTests)-1)
 		if err != nil {
 			t.Errorf("AffectedModifiers() returned failed: %v", err)
+		}
+		if len(mods) != len(affectedTests) {
+			t.Errorf("got %d modifiers, want %d", len(mods), len(affectedTests))
 		}
 		for _, m := range mods {
 			mod := m.Modifier
@@ -125,65 +204,59 @@ func TestAffectedModifiers(t *testing.T) {
 	})
 
 	t.Run("multiplied", func(t *testing.T) {
-		specs := []build.TestSpec{
-			{Test: build.Test{Name: "affected-arm64", OS: linux, CPU: "arm64"}},
-			{Test: build.Test{Name: "affected-linux", OS: linux, CPU: x64}},
-			{Test: build.Test{Name: "affected-mac", OS: "mac", CPU: x64}},
-			{
-				Test: build.Test{Name: "affected-host+target", OS: linux, CPU: x64},
-				Envs: []build.Environment{{Dimensions: build.DimensionSet{"device_type": "AEMU"}}},
-			},
-			{
-				Test: build.Test{Name: "affected-AEMU", OS: fuchsia, CPU: x64},
-				Envs: []build.Environment{{Dimensions: build.DimensionSet{"device_type": "AEMU"}}},
-			},
-			{
-				Test: build.Test{Name: "affected-other-device", OS: fuchsia, CPU: x64},
-				Envs: []build.Environment{{Dimensions: build.DimensionSet{"device_type": "other-device"}}},
-			},
-			{
-				Test: build.Test{Name: "affected-AEMU-and-other-device", OS: fuchsia, CPU: x64},
-				Envs: []build.Environment{
-					{Dimensions: build.DimensionSet{"device_type": "AEMU"}},
-					{Dimensions: build.DimensionSet{"device_type": "other-device"}},
-				},
-			},
-			{Test: build.Test{Name: "not-affected"}},
-		}
 		nameToShouldBeMultiplied := map[string]bool{
-			"affected-arm64-Linux":                        false,
-			"affected-linux-Linux":                        true,
-			"affected-mac-Mac":                            false,
-			"affected-host+target-AEMU":                   false,
-			"affected-AEMU-AEMU":                          true,
-			"affected-other-device-other-device":          false,
-			"affected-AEMU-and-other-device-AEMU":         true,
-			"affected-AEMU-and-other-device-other-device": false,
+			"affected-arm64":                                         false,
+			"affected-linux-Linux":                                   true,
+			"affected-mac":                                           false,
+			"affected-host+target-AEMU":                              false,
+			"affected-AEMU-AEMU":                                     true,
+			"affected-test-pilot-AEMU-AEMU":                          true,
+			"affected-test-pilot-other-device-other_device":          false,
+			"affected-other-device-other_device":                     false,
+			"affected-AEMU-and-other-device-AEMU":                    true,
+			"affected-AEMU-and-other-device-other_device":            false,
+			"affected-test-pilot-AEMU-and-other-device-AEMU":         true,
+			"affected-test-pilot-AEMU-and-other-device-other_device": false,
 		}
 		mods, err := AffectedModifiers(specs, affectedTests, maxAttempts, len(affectedTests))
 		if err != nil {
 			t.Errorf("AffectedModifiers() returned failed: %v", err)
 		}
+		seen := make(map[string]bool)
 		for _, m := range mods {
 			mod := m.Modifier
-			shouldBeMultiplied := nameToShouldBeMultiplied[fmt.Sprintf("%s-%s", m.Test, environmentName(m.Env))]
+			key := m.Test
+			if envName := environmentName(m.Env); envName != "" {
+				key = fmt.Sprintf("%s-%s", m.Test, envName)
+			}
+			seen[key] = true
+			shouldBeMultiplied, ok := nameToShouldBeMultiplied[key]
+			if !ok {
+				t.Errorf("unexpected modifier match %q", key)
+				continue
+			}
+			if !mod.Affected {
+				t.Errorf("%s.Affected is false, want true", key)
+			}
 			if shouldBeMultiplied {
 				if mod.MaxAttempts != 0 {
-					t.Errorf("%s.MaxAttempts is %d, want 0", mod.Name, mod.MaxAttempts)
+					t.Errorf("%s.MaxAttempts is %d, want 0", key, mod.MaxAttempts)
 				}
 				if mod.TotalRuns != 0 {
-					t.Errorf("%s.TotalRuns is %d, want 0", mod.Name, mod.MaxAttempts)
+					t.Errorf("%s.TotalRuns is %d, want 0", key, mod.TotalRuns)
 				}
 			} else {
 				if mod.MaxAttempts != maxAttempts {
-					t.Errorf("%s.MaxAttempts is %d, want %d", mod.Name, mod.MaxAttempts, maxAttempts)
-				}
-				if !mod.Affected {
-					t.Errorf("%s.Affected is false, want true", mod.Name)
+					t.Errorf("%s.MaxAttempts is %d, want %d", key, mod.MaxAttempts, maxAttempts)
 				}
 				if mod.TotalRuns >= 0 {
-					t.Errorf("%s.TotalRuns is %d, want -1", mod.Name, mod.TotalRuns)
+					t.Errorf("%s.TotalRuns is %d, want -1", key, mod.TotalRuns)
 				}
+			}
+		}
+		for key := range nameToShouldBeMultiplied {
+			if !seen[key] {
+				t.Errorf("missing expected modifier match %q", key)
 			}
 		}
 	})

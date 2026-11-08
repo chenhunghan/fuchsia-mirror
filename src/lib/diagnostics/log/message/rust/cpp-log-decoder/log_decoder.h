@@ -169,17 +169,6 @@ struct LogMessages {
 
 extern "C" {
 
-/// # Safety
-///
-/// Same as for `std::slice::from_raw_parts`. Summarizing in terms of this API:
-///
-/// - `msg` must be valid for reads for `size`, and it must be properly aligned.
-/// - `msg` must point to `size` consecutive u8 values.
-/// - The `size` of the slice must be no larger than `isize::MAX`, and adding
-///   that size to data must not "wrap around" the address space. See the safety
-///   documentation of pointer::offset.
-extern "C" char *fuchsia_decode_log_message_to_json(const uint8_t *msg, uintptr_t size);
-
 extern "C" MessageParser *fuchsia_new_message_parser();
 
 /// # Safety
@@ -207,12 +196,6 @@ extern "C" void fuchsia_free_message_parser(MessageParser *parser);
 extern "C" LogMessages fuchsia_decode_log_messages_to_struct(const uint8_t *msg, uintptr_t size,
                                                              bool expect_extended_attribution,
                                                              MessageParser *parser);
-
-/// # Safety
-///
-/// This should only be called with a pointer obtained through
-/// `fuchsia_decode_log_message_to_json`.
-extern "C" void fuchsia_free_decoded_log_message(char *msg);
 
 /// # Safety
 ///

@@ -445,8 +445,10 @@ macro_rules! impl_not_segmentable {
 // TODO(https://fxbug.dev/566314871): Support UDP GSO.
 impl_not_segmentable!([S, A: IpAddress] Nested<S, UdpPacketBuilder<A>>);
 
-// TODO(https://fxbug.dev/452980285): Require serializers behind
-// `DynTransportSerializer` to be GSO-aware.
+// Anything behind `DynTransportSerializer` has already acknowledged it can't be
+// segmented via `NotSegmentableTransportSerializer`.
+// TODO(https://fxbug.dev/578576724): Support GSO behind
+// `DynTransportSerializer`.
 impl_not_segmentable!(['a, I: FilterIpExt] DynTransportSerializer<'a, I>);
 impl_not_segmentable!([I: IpExt, B: ParseBuffer] RawIpBody<I, B>);
 impl_not_segmentable!([S, I: IcmpIpExt, M: IcmpMessage<I>] Nested<S, IcmpPacketBuilder<I, M>>);
@@ -480,6 +482,11 @@ impl<A: IpAddress, O: InnerPacketBuilder + Clone> SegmentableTransportBuilder
         let prefix_builder = builder.prefix_builder_mut();
         let seq_num = prefix_builder.seq_num().wrapping_add(u32::from(offset));
         prefix_builder.set_seq_num(seq_num);
+        // TODO(https://fxbug.dev/352585572): Preserve the TCP CWR flag across
+        // all segments for forwarded GRO packets (where every coalesced ingress
+        // segment carried CWR=1, e.g. Accurate ECN), while ensuring locally
+        // generated RFC 3168 ECN packets only emit CWR on the first segment
+        // (either via `GsoInfo` or by bypassing GSO for the CWR segment).
         if has_more {
             // PSH and FIN carry end-of-data semantics, so they belong only on
             // the segment carrying the last byte of the payload.

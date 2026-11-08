@@ -30,6 +30,7 @@
 
 #include <stddef.h>
 #include <sys/types.h>
+#include <zircon/syscalls/debug.h>  // zx_arm64_thread_state_*, for arm64-thread-bindings.
 #include <zircon/tls.h>
 
 #include <arch/arm64/registers.h>

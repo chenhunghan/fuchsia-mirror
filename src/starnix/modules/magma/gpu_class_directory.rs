@@ -350,6 +350,14 @@ struct GpuPowerDomainState {
 
     /// Last effective max-frequency ceiling (in Hz) synced to `PowerElementProvider::SetClockLimit`.
     applied_max_freq_hz: Option<u64>,
+
+    /// Whether the active `PowerElementProvider` supports `GetClockSpeedLevel`. Latched to `false`
+    /// once the driver returns `ZX_ERR_NOT_SUPPORTED` and reset when a new provider connects.
+    clock_speed_level_supported: bool,
+
+    /// Whether the active `PowerElementProvider` supports `SetClockLimit`. Latched to `false`
+    /// once the driver returns `ZX_ERR_NOT_SUPPORTED` and reset when a new provider connects.
+    clock_limit_supported: bool,
 }
 
 impl Default for GpuPowerDomainState {
@@ -369,7 +377,32 @@ impl Default for GpuPowerDomainState {
             applied_min_freq_hz: None,
             max_freq_limit_handle: None,
             applied_max_freq_hz: None,
+            clock_speed_level_supported: true,
+            clock_limit_supported: true,
         }
+    }
+}
+
+impl GpuPowerDomainState {
+    /// Clears the active `PowerElementProvider` and all provider-bound state, returning any active
+    /// power or clock handles so the caller can drop them after releasing the state lock.
+    fn clear_provider(
+        &mut self,
+    ) -> (Option<zx::EventPair>, Option<zx::EventPair>, Option<zx::EventPair>) {
+        self.provider = None;
+        self.power_on_token = None;
+        self.clock_speed_level_supported = true;
+        self.clock_limit_supported = true;
+        self.applied_min_freq_hz = None;
+        self.applied_max_freq_hz = None;
+        self.power_generation = self.power_generation.wrapping_add(1);
+        self.min_freq_generation = self.min_freq_generation.wrapping_add(1);
+        self.max_freq_generation = self.max_freq_generation.wrapping_add(1);
+        (
+            self.active_power_lease.take(),
+            self.min_freq_lease.take(),
+            self.max_freq_limit_handle.take(),
+        )
     }
 }
 
@@ -433,32 +466,16 @@ impl GpuPowerDomain {
             }
         };
 
-        let (
-            reconcile_power,
-            reconcile_min_freq,
-            reconcile_max_freq,
-            _dropped_power_lease,
-            _dropped_min_freq_lease,
-            _dropped_max_freq_handle,
-        ) = {
+        let (reconcile_power, reconcile_min_freq, reconcile_max_freq, _dropped_handles) = {
             let mut state = self.state.lock();
+            let dropped = state.clear_provider();
             state.provider = Some(provider);
             state.power_on_token = power_on_token;
-            let power_lease = state.active_power_lease.take();
-            let min_freq_lease = state.min_freq_lease.take();
-            let max_freq_handle = state.max_freq_limit_handle.take();
-            state.applied_min_freq_hz = None;
-            state.applied_max_freq_hz = None;
-            state.power_generation = state.power_generation.wrapping_add(1);
-            state.min_freq_generation = state.min_freq_generation.wrapping_add(1);
-            state.max_freq_generation = state.max_freq_generation.wrapping_add(1);
             (
                 state.power_control_on,
                 !state.min_votes.is_empty(),
                 !state.max_votes.is_empty(),
-                power_lease,
-                min_freq_lease,
-                max_freq_handle,
+                dropped,
             )
         };
         if reconcile_power {
@@ -490,7 +507,10 @@ impl GpuPowerDomain {
                 requires_level: Some(level),
                 ..Default::default()
             }]),
-            should_return_pending_lease: Some(false),
+            // Return the pending lease immediately so Android Power HAL hints (e.g.
+            // DISPLAY_UPDATE_IMMINENT -> GPUPowerOn) do not block NodeLooperThread on
+            // cross-process Power Broker -> GPU driver -> google-cpm transitions.
+            should_return_pending_lease: Some(true),
             ..Default::default()
         };
         match topology.lease(schema, fidl_deadline()) {
@@ -579,6 +599,9 @@ impl GpuPowerDomain {
     fn sync_min_freq(&self) -> Result<(), Errno> {
         let (generation, target_hz, provider) = {
             let mut state = self.state.lock();
+            if !state.clock_speed_level_supported {
+                return Ok(());
+            }
             let effective_min_hz = state.min_votes.values().copied().max();
             if state.applied_min_freq_hz == effective_min_hz {
                 return Ok(());
@@ -631,10 +654,10 @@ impl GpuPowerDomain {
             }
             Ok(Err(status)) => {
                 let zx_status = zx::Status::err_from_raw(status);
-                log_warn!("GetClockSpeedLevel({}) returned status {}", target_hz, zx_status);
                 if zx_status == zx::Status::NOT_SUPPORTED {
                     not_supported = true;
                 } else {
+                    log_warn!("GetClockSpeedLevel({}) returned status {}", target_hz, zx_status);
                     sync_result = error!(EIO);
                 }
                 None
@@ -647,27 +670,33 @@ impl GpuPowerDomain {
             }
         };
 
-        let _dropped_lease = {
+        let _dropped_handles = {
             let mut state = self.state.lock();
-            if reset_provider && state.provider.as_ref().is_some_and(|p| Arc::ptr_eq(p, &provider))
+            let same_provider = state.provider.as_ref().is_some_and(|p| Arc::ptr_eq(p, &provider));
+            let dropped_existing = if reset_provider && same_provider {
+                state.clear_provider()
+            } else if not_supported && same_provider {
+                state.clock_speed_level_supported = false;
+                state.applied_min_freq_hz = None;
+                (None, state.min_freq_lease.take(), None)
+            } else {
+                (None, None, None)
+            };
+            let dropped_attempt = if !same_provider
+                || !state.clock_speed_level_supported
+                || state.min_freq_generation != generation
             {
-                state.power_on_token = None;
-                state.provider = None;
-            }
-            if state.min_freq_generation != generation {
                 new_lease
             } else if let Some(lease) = new_lease {
                 state.applied_min_freq_hz = Some(target_hz);
                 state.min_freq_lease.replace(lease)
-            } else if not_supported {
-                state.applied_min_freq_hz = Some(target_hz);
-                state.min_freq_lease.take()
             } else if state.applied_min_freq_hz != Some(target_hz) {
                 state.applied_min_freq_hz = None;
                 state.min_freq_lease.take()
             } else {
                 None
-            }
+            };
+            (dropped_existing, dropped_attempt)
         };
         sync_result
     }
@@ -702,6 +731,9 @@ impl GpuPowerDomain {
     fn sync_max_freq(&self) -> Result<(), Errno> {
         let (generation, target_hz, provider) = {
             let mut state = self.state.lock();
+            if !state.clock_limit_supported {
+                return Ok(());
+            }
             let effective_max_hz = state.max_votes.values().copied().min();
             if state.applied_max_freq_hz == effective_max_hz {
                 return Ok(());
@@ -742,10 +774,10 @@ impl GpuPowerDomain {
             }
             Ok(Err(status)) => {
                 let zx_status = zx::Status::err_from_raw(status);
-                log_warn!("SetClockLimit({}) returned status {}", target_hz, zx_status);
                 if zx_status == zx::Status::NOT_SUPPORTED {
                     not_supported = true;
                 } else {
+                    log_warn!("SetClockLimit({}) returned status {}", target_hz, zx_status);
                     sync_result = error!(EIO);
                 }
                 None
@@ -758,27 +790,33 @@ impl GpuPowerDomain {
             }
         };
 
-        let _dropped_handle = {
+        let _dropped_handles = {
             let mut state = self.state.lock();
-            if reset_provider && state.provider.as_ref().is_some_and(|p| Arc::ptr_eq(p, &provider))
+            let same_provider = state.provider.as_ref().is_some_and(|p| Arc::ptr_eq(p, &provider));
+            let dropped_existing = if reset_provider && same_provider {
+                state.clear_provider()
+            } else if not_supported && same_provider {
+                state.clock_limit_supported = false;
+                state.applied_max_freq_hz = None;
+                (None, None, state.max_freq_limit_handle.take())
+            } else {
+                (None, None, None)
+            };
+            let dropped_attempt = if !same_provider
+                || !state.clock_limit_supported
+                || state.max_freq_generation != generation
             {
-                state.power_on_token = None;
-                state.provider = None;
-            }
-            if state.max_freq_generation != generation {
                 new_handle
             } else if let Some(handle) = new_handle {
                 state.applied_max_freq_hz = Some(target_hz);
                 state.max_freq_limit_handle.replace(handle)
-            } else if not_supported {
-                state.applied_max_freq_hz = Some(target_hz);
-                state.max_freq_limit_handle.take()
             } else if state.applied_max_freq_hz != Some(target_hz) {
                 state.applied_max_freq_hz = None;
                 state.max_freq_limit_handle.take()
             } else {
                 None
-            }
+            };
+            (dropped_existing, dropped_attempt)
         };
         sync_result
     }
@@ -924,6 +962,7 @@ impl BytesFileOps for GpuPollingIntervalFile {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_types)]
 mod tests {
     use super::*;
     use fidl::endpoints::create_endpoints;
@@ -994,6 +1033,7 @@ mod tests {
         leased_clock_level: Arc<AtomicU64>,
         capped_clock_hz: Arc<AtomicU64>,
         clock_speed_calls: Arc<AtomicU64>,
+        clock_limit_calls: Arc<AtomicU64>,
         active_broker_tokens: Arc<Mutex<Vec<zx::EventPair>>>,
         active_limit_tokens: Arc<Mutex<Vec<zx::EventPair>>>,
     }
@@ -1014,6 +1054,7 @@ mod tests {
                 leased_clock_level: Arc::new(AtomicU64::new(0)),
                 capped_clock_hz: Arc::new(AtomicU64::new(0)),
                 clock_speed_calls: Arc::new(AtomicU64::new(0)),
+                clock_limit_calls: Arc::new(AtomicU64::new(0)),
                 active_broker_tokens: Arc::new(Mutex::new(Vec::new())),
                 active_limit_tokens: Arc::new(Mutex::new(Vec::new())),
             }
@@ -1031,6 +1072,7 @@ mod tests {
                 self.clock_token.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup");
             let capped_clock_recorder = self.capped_clock_hz.clone();
             let clock_speed_calls = self.clock_speed_calls.clone();
+            let clock_limit_calls = self.clock_limit_calls.clone();
             let limit_tokens_holder = self.active_limit_tokens.clone();
             scope.spawn(async move {
                 while let Some(Ok(req)) = stream.next().await {
@@ -1070,6 +1112,7 @@ mod tests {
                             payload,
                             responder,
                         } => {
+                            clock_limit_calls.fetch_add(1, Ordering::SeqCst);
                             if reject_576mhz_not_supported && payload.hz == Some(576_000_000) {
                                 let _ = responder.send(Err(zx::Status::NOT_SUPPORTED.into_raw()));
                             } else if reject_576mhz_not_supported && payload.hz == Some(396_000_000)
@@ -1110,6 +1153,7 @@ mod tests {
                 let mut stream = topology_server.into_stream();
                 while let Some(Ok(req)) = stream.next().await {
                     if let fpbroker::TopologyRequest::Lease { payload, responder } = req {
+                        assert_eq!(payload.should_return_pending_lease, Some(true));
                         if reject_leases {
                             let _ = responder.send(Err(fpbroker::LeaseError::Internal));
                             continue;
@@ -1275,14 +1319,17 @@ mod tests {
     async fn gpu_power_domain_returns_eio_on_lease_error_and_allows_not_supported() {
         let (provider_client, provider_server) =
             create_endpoints::<fmagma::PowerElementProviderMarker>();
+        let (provider2_client, provider2_server) =
+            create_endpoints::<fmagma::PowerElementProviderMarker>();
         let (topology_client, topology_server) = create_endpoints::<fpbroker::TopologyMarker>();
 
         let backend = MockPowerBackend::new();
         let scope = fasync::Scope::new();
         backend.spawn_provider(&scope, provider_server.into_stream(), true);
+        backend.spawn_provider(&scope, provider2_server.into_stream(), false);
         backend.spawn_topology(&scope, topology_server, true);
 
-        fasync::unblock(move || {
+        let domain = fasync::unblock(move || {
             let domain = GpuPowerDomain::with_proxies(
                 fmagma::PowerElementProviderSynchronousProxy::new(provider_client.into_channel()),
                 fpbroker::TopologySynchronousProxy::new(topology_client.into_channel()),
@@ -1291,24 +1338,301 @@ mod tests {
             // 1. Topology::Lease rejection on `GPUPowerOn` returns EIO.
             assert_eq!(domain.set_power_control(true), error!(EIO));
 
-            // 2. `ZX_ERR_NOT_SUPPORTED` from `GetClockSpeedLevel` is gracefully ignored (Ok(()))
-            // and cached in `applied_min_freq_hz` so redundant votes at the same target Hz do not
-            // make additional FIDL calls.
+            // 2. Topology::Lease rejection on `GetClockSpeedLevel` returns EIO.
+            assert_eq!(domain.update_min_freq_vote("powerhint_min_freq", 396_000), error!(EIO));
+
+            // 3. `ZX_ERR_NOT_SUPPORTED` from `GetClockSpeedLevel` is gracefully ignored (Ok(()))
+            // and latches `clock_speed_level_supported = false` so subsequent votes (including
+            // after dropping to 0 Hz or switching target frequencies) do not make additional
+            // FIDL calls.
             assert_eq!(domain.update_min_freq_vote("powerhint_min_freq", 576_000), Ok(()));
             assert_eq!(domain.update_min_freq_vote("soft_min_freq", 576_000), Ok(()));
             assert_eq!(domain.update_min_freq_vote("soft_min_freq", 0), Ok(()));
+            assert_eq!(domain.update_min_freq_vote("powerhint_min_freq", 0), Ok(()));
+            assert_eq!(domain.update_min_freq_vote("powerhint_min_freq", 576_000), Ok(()));
+            assert_eq!(domain.update_min_freq_vote("powerhint_min_freq", 396_000), Ok(()));
 
-            // 3. Topology::Lease rejection on `GetClockSpeedLevel` returns EIO.
-            assert_eq!(domain.update_min_freq_vote("powerhint_min_freq", 396_000), error!(EIO));
-
-            // 4. `ZX_ERR_NOT_SUPPORTED` from `SetClockLimit` is gracefully ignored (Ok(())), while
-            // non-`NOT_SUPPORTED` errors propagate EIO.
-            assert_eq!(domain.update_max_freq_vote("powerhint_max_freq", 576_000), Ok(()));
+            // 4. Non-`NOT_SUPPORTED` errors from `SetClockLimit` propagate EIO, while
+            // `ZX_ERR_NOT_SUPPORTED` is gracefully ignored (Ok(())) and latches
+            // `clock_limit_supported = false` across subsequent transitions (including dropping
+            // to 0 Hz so `max_votes` becomes empty).
             assert_eq!(domain.update_max_freq_vote("powerhint_max_freq", 396_000), error!(EIO));
+            assert_eq!(domain.update_max_freq_vote("powerhint_max_freq", 576_000), Ok(()));
+            assert_eq!(domain.update_max_freq_vote("powerhint_max_freq", 0), Ok(()));
+            assert_eq!(domain.update_max_freq_vote("powerhint_max_freq", 972_000), Ok(()));
+            assert_eq!(domain.update_max_freq_vote("powerhint_max_freq", 576_000), Ok(()));
+            assert_eq!(domain.update_max_freq_vote("powerhint_max_freq", 396_000), Ok(()));
+            domain
         })
         .await;
-        // 576_000_000 was queried once (cached across the two redundant votes) and 396_000_000
-        // was queried once.
+        // 396_000_000 was queried once and 576_000_000 was queried once on each method before
+        // latching `clock_speed_level_supported = false` and `clock_limit_supported = false`.
         assert_eq!(backend.clock_speed_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(backend.clock_limit_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(backend.capped_clock_hz.load(Ordering::SeqCst), 0);
+
+        // 5. Installing a new `PowerElementProvider` via `set_provider` resets both supported
+        // flags and reconciles the active 396 MHz min and max votes against the new provider.
+        let domain = fasync::unblock(move || {
+            domain.set_provider(Arc::new(fmagma::PowerElementProviderSynchronousProxy::new(
+                provider2_client.into_channel(),
+            )));
+            domain
+        })
+        .await;
+        assert_eq!(backend.clock_speed_calls.load(Ordering::SeqCst), 3);
+        assert_eq!(backend.clock_limit_calls.load(Ordering::SeqCst), 3);
+        assert_eq!(backend.capped_clock_hz.load(Ordering::SeqCst), 396_000_000);
+        drop(domain);
+    }
+
+    #[::fuchsia::test]
+    async fn concurrent_not_supported_and_provider_reset_do_not_leak_handles() {
+        let (topology_client, topology_server) = create_endpoints::<fpbroker::TopologyMarker>();
+        let backend = MockPowerBackend::new();
+        let scope = fasync::Scope::new();
+        backend.spawn_topology(&scope, topology_server, false);
+
+        let domain = Arc::new(GpuPowerDomain::with_topology(
+            fpbroker::TopologySynchronousProxy::new(topology_client.into_channel()),
+        ));
+
+        // 1. Concurrent `NOT_SUPPORTED` (older generation) + `Ok` (newer generation) must drop
+        // the newer lease/handle rather than installing it after `clock_*_supported` latches to
+        // `false`.
+        let (provider1_client, provider1_server) =
+            create_endpoints::<fmagma::PowerElementProviderMarker>();
+        let mut stream1 = provider1_server.into_stream();
+        let power_dup = backend.power_token.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup");
+        let domain_for_init = Arc::clone(&domain);
+        let init_fut = fasync::unblock(move || {
+            domain_for_init.set_provider(Arc::new(
+                fmagma::PowerElementProviderSynchronousProxy::new(provider1_client.into_channel()),
+            ));
+        });
+        match stream1.next().await.expect("GetPowerGoals").expect("fidl") {
+            fmagma::PowerElementProviderRequest::GetPowerGoals { responder } => {
+                responder
+                    .send(vec![fmagma::PowerGoal {
+                        type_: Some(fmagma::PowerGoalType::OnReadyForWork),
+                        token: Some(power_dup),
+                        ..Default::default()
+                    }])
+                    .expect("reply GetPowerGoals");
+            }
+            other => panic!("unexpected request: {other:?}"),
+        }
+        init_fut.await;
+
+        let d1 = Arc::clone(&domain);
+        let min_v1 = fasync::unblock(move || d1.update_min_freq_vote("v1", 576_000));
+        let min_resp1 = match stream1.next().await.expect("min req1").expect("fidl") {
+            fmagma::PowerElementProviderRequest::GetClockSpeedLevel { payload, responder } => {
+                assert_eq!(payload.hz, Some(576_000_000));
+                responder
+            }
+            other => panic!("unexpected request: {other:?}"),
+        };
+
+        let d2 = Arc::clone(&domain);
+        let min_v2 = fasync::unblock(move || d2.update_min_freq_vote("v2", 921_000));
+        let min_resp2 = match stream1.next().await.expect("min req2").expect("fidl") {
+            fmagma::PowerElementProviderRequest::GetClockSpeedLevel { payload, responder } => {
+                assert_eq!(payload.hz, Some(921_000_000));
+                responder
+            }
+            other => panic!("unexpected request: {other:?}"),
+        };
+
+        // Older generation latches `clock_speed_level_supported = false` first; newer generation
+        // then succeeds in FIDL + Power Broker lease acquisition, and must drop `new_lease`.
+        min_resp1.send(Err(zx::Status::NOT_SUPPORTED.into_raw())).expect("send NOT_SUPPORTED");
+        assert_eq!(min_v1.await, Ok(()));
+        let clock_dup = backend.clock_token.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup");
+        min_resp2
+            .send(Ok(fmagma::PowerElementProviderGetClockSpeedLevelResponse {
+                token: Some(clock_dup),
+                level: Some(6),
+                actual_hz: Some(921_000_000),
+                ..Default::default()
+            }))
+            .expect("send Ok");
+        assert_eq!(min_v2.await, Ok(()));
+        {
+            let state = domain.state.lock();
+            assert!(!state.clock_speed_level_supported);
+            assert!(state.min_freq_lease.is_none());
+            assert!(state.applied_min_freq_hz.is_none());
+        }
+        {
+            let broker_tokens = backend.active_broker_tokens.lock();
+            assert_eq!(broker_tokens.len(), 1);
+            assert!(
+                broker_tokens[0]
+                    .wait_one(
+                        zx::Signals::EVENTPAIR_PEER_CLOSED,
+                        zx::MonotonicInstant::INFINITE_PAST
+                    )
+                    .is_ok()
+            );
+        }
+
+        // Same interleaving on `SetClockLimit`.
+        let d1 = Arc::clone(&domain);
+        let max_v1 = fasync::unblock(move || d1.update_max_freq_vote("v1", 576_000));
+        let max_resp1 = match stream1.next().await.expect("max req1").expect("fidl") {
+            fmagma::PowerElementProviderRequest::SetClockLimit { payload, responder } => {
+                assert_eq!(payload.hz, Some(576_000_000));
+                responder
+            }
+            other => panic!("unexpected request: {other:?}"),
+        };
+
+        let d2 = Arc::clone(&domain);
+        let max_v2 = fasync::unblock(move || d2.update_max_freq_vote("v2", 396_000));
+        let max_resp2 = match stream1.next().await.expect("max req2").expect("fidl") {
+            fmagma::PowerElementProviderRequest::SetClockLimit { payload, responder } => {
+                assert_eq!(payload.hz, Some(396_000_000));
+                responder
+            }
+            other => panic!("unexpected request: {other:?}"),
+        };
+
+        max_resp1.send(Err(zx::Status::NOT_SUPPORTED.into_raw())).expect("send NOT_SUPPORTED");
+        assert_eq!(max_v1.await, Ok(()));
+        let (limit_client_ep, limit_server_ep) = zx::EventPair::create();
+        max_resp2
+            .send(Ok(fmagma::PowerElementProviderSetClockLimitResponse {
+                handle: Some(limit_client_ep),
+                actual_hz: Some(396_000_000),
+                ..Default::default()
+            }))
+            .expect("send Ok");
+        assert_eq!(max_v2.await, Ok(()));
+        {
+            let state = domain.state.lock();
+            assert!(!state.clock_limit_supported);
+            assert!(state.max_freq_limit_handle.is_none());
+            assert!(state.applied_max_freq_hz.is_none());
+        }
+        assert!(
+            limit_server_ep
+                .wait_one(zx::Signals::EVENTPAIR_PEER_CLOSED, zx::MonotonicInstant::INFINITE_PAST)
+                .is_ok()
+        );
+        drop(stream1);
+
+        // Reset votes before testing provider transport-error cleanup.
+        assert_eq!(domain.update_min_freq_vote("v1", 0), Ok(()));
+        assert_eq!(domain.update_min_freq_vote("v2", 0), Ok(()));
+        assert_eq!(domain.update_max_freq_vote("v1", 0), Ok(()));
+        assert_eq!(domain.update_max_freq_vote("v2", 0), Ok(()));
+
+        // 2. Transport error (`reset_provider`) when `min_freq_generation` advanced while the lock
+        // was dropped must still clear `provider`, `applied_*_freq_hz`, and all active provider
+        // leases/handles.
+        let (provider2_client, provider2_server) =
+            create_endpoints::<fmagma::PowerElementProviderMarker>();
+        let mut stream2 = provider2_server.into_stream();
+        let (active_limit_client, active_limit_server) = zx::EventPair::create();
+        let power_dup2 =
+            backend.power_token.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup");
+        let clock_dup2 =
+            backend.clock_token.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("dup");
+
+        let domain_setup = Arc::clone(&domain);
+        let setup_fut = fasync::unblock(move || {
+            domain_setup.set_provider(Arc::new(fmagma::PowerElementProviderSynchronousProxy::new(
+                provider2_client.into_channel(),
+            )));
+            domain_setup.set_power_control(true).expect("power on");
+            domain_setup.update_min_freq_vote("base", 396_000).expect("min 396");
+            domain_setup.update_max_freq_vote("base", 972_000).expect("max 972");
+        });
+        match stream2.next().await.expect("GetPowerGoals").expect("fidl") {
+            fmagma::PowerElementProviderRequest::GetPowerGoals { responder } => {
+                responder
+                    .send(vec![fmagma::PowerGoal {
+                        type_: Some(fmagma::PowerGoalType::OnReadyForWork),
+                        token: Some(power_dup2),
+                        ..Default::default()
+                    }])
+                    .expect("reply GetPowerGoals");
+            }
+            other => panic!("unexpected request: {other:?}"),
+        }
+        match stream2.next().await.expect("GetClockSpeedLevel").expect("fidl") {
+            fmagma::PowerElementProviderRequest::GetClockSpeedLevel { responder, .. } => {
+                responder
+                    .send(Ok(fmagma::PowerElementProviderGetClockSpeedLevelResponse {
+                        token: Some(clock_dup2),
+                        level: Some(3),
+                        actual_hz: Some(396_000_000),
+                        ..Default::default()
+                    }))
+                    .expect("reply GetClockSpeedLevel");
+            }
+            other => panic!("unexpected request: {other:?}"),
+        }
+        match stream2.next().await.expect("SetClockLimit").expect("fidl") {
+            fmagma::PowerElementProviderRequest::SetClockLimit { responder, .. } => {
+                responder
+                    .send(Ok(fmagma::PowerElementProviderSetClockLimitResponse {
+                        handle: Some(active_limit_client),
+                        actual_hz: Some(921_000_000),
+                        ..Default::default()
+                    }))
+                    .expect("reply SetClockLimit");
+            }
+            other => panic!("unexpected request: {other:?}"),
+        }
+        setup_fut.await;
+        {
+            let state = domain.state.lock();
+            assert!(state.active_power_lease.is_some());
+            assert!(state.min_freq_lease.is_some());
+            assert!(state.max_freq_limit_handle.is_some());
+        }
+
+        // Start an in-flight `GetClockSpeedLevel(576 MHz)`, then advance `min_freq_generation`
+        // back to the already-applied 396 MHz while the lock is dropped, then close the provider
+        // channel so the in-flight call hits `PEER_CLOSED` (`reset_provider = true`).
+        let d_err = Arc::clone(&domain);
+        let err_fut = fasync::unblock(move || d_err.update_min_freq_vote("boost", 576_000));
+        let pending_resp = match stream2.next().await.expect("boost req").expect("fidl") {
+            fmagma::PowerElementProviderRequest::GetClockSpeedLevel { payload, responder } => {
+                assert_eq!(payload.hz, Some(576_000_000));
+                responder
+            }
+            other => panic!("unexpected request: {other:?}"),
+        };
+        assert_eq!(domain.update_min_freq_vote("boost", 0), Ok(()));
+        drop(pending_resp);
+        drop(stream2);
+        assert_eq!(err_fut.await, error!(EIO));
+
+        {
+            let state = domain.state.lock();
+            assert!(state.provider.is_none());
+            assert!(state.applied_min_freq_hz.is_none());
+            assert!(state.applied_max_freq_hz.is_none());
+            assert!(state.active_power_lease.is_none());
+            assert!(state.min_freq_lease.is_none());
+            assert!(state.max_freq_limit_handle.is_none());
+        }
+        assert!(
+            active_limit_server
+                .wait_one(zx::Signals::EVENTPAIR_PEER_CLOSED, zx::MonotonicInstant::INFINITE_PAST)
+                .is_ok()
+        );
+        for bt in backend.active_broker_tokens.lock().iter() {
+            assert!(
+                bt.wait_one(
+                    zx::Signals::EVENTPAIR_PEER_CLOSED,
+                    zx::MonotonicInstant::INFINITE_PAST
+                )
+                .is_ok()
+            );
+        }
     }
 }

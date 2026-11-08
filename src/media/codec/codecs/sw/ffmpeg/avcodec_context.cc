@@ -16,11 +16,6 @@ namespace {
 // TODO(turnage): Add VP9, and more.
 static const std::map<std::string, AVCodecID> codec_ids = {{"video/h264", AV_CODEC_ID_H264}};
 
-static inline constexpr uint32_t make_fourcc(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
-  return (static_cast<uint32_t>(d) << 24) | (static_cast<uint32_t>(c) << 16) |
-         (static_cast<uint32_t>(b) << 8) | static_cast<uint32_t>(a);
-}
-
 }  // namespace
 
 std::optional<std::unique_ptr<AvCodecContext>> AvCodecContext::CreateDecoder(
@@ -145,53 +140,26 @@ AvCodecContext::FrameBufferRequest AvCodecContext::frame_buffer_request(AVFrame*
   int linesizes[4];
   av_image_fill_linesizes(linesizes, static_cast<AVPixelFormat>(frame->format), frame->width);
 
-  fuchsia::media::VideoUncompressedFormat uncompressed_format;
-  uncompressed_format.fourcc = make_fourcc('Y', 'V', '1', '2');
+  fuchsia::images2::ImageFormat image_format;
+  image_format.set_pixel_format(fuchsia::images2::PixelFormat::YV12);
+  image_format.set_size(fuchsia::math::SizeU{
+      .width = static_cast<uint32_t>(frame->width),
+      .height = static_cast<uint32_t>(frame->height),
+  });
+  image_format.set_bytes_per_row(static_cast<uint32_t>(linesizes[0]));
+  image_format.set_display_rect(fuchsia::math::RectU{
+      .x = 0,
+      .y = 0,
+      .width = static_cast<uint32_t>(frame->width - frame->crop_right),
+      .height = static_cast<uint32_t>(frame->height - frame->crop_bottom),
+  });
+  image_format.set_color_space(fuchsia::images2::ColorSpace::REC709);
 
-  uncompressed_format.primary_start_offset = 0;
-  uncompressed_format.primary_pixel_stride = 1;
-  uncompressed_format.primary_line_stride_bytes = linesizes[0];
-  uncompressed_format.primary_width_pixels = frame->width;
-  uncompressed_format.primary_height_pixels = frame->height;
-  uncompressed_format.primary_display_width_pixels =
-      static_cast<uint32_t>(frame->width - frame->crop_right);
-  uncompressed_format.primary_display_height_pixels =
-      static_cast<uint32_t>(frame->height - frame->crop_bottom);
-
-  // TODO(dustingreen): remove this field from the VideoUncompressedFormat or
-  // specify separately for primary / secondary.
-  uncompressed_format.planar = true;
-  uncompressed_format.swizzled = false;
-
-  uncompressed_format.secondary_pixel_stride = 1;
-  uncompressed_format.secondary_width_pixels = frame->width / 2;
-  uncompressed_format.secondary_height_pixels = frame->height / 2;
-  uncompressed_format.secondary_line_stride_bytes = linesizes[1];
-  uncompressed_format.secondary_start_offset = linesizes[0] * frame->height;
-
-  uncompressed_format.tertiary_start_offset =
-      uncompressed_format.secondary_start_offset +
-      uncompressed_format.secondary_height_pixels * linesizes[1];
-
-  uncompressed_format.image_format.pixel_format.type = fuchsia::sysmem::PixelFormatType::YV12;
-  uncompressed_format.image_format.coded_width = frame->width;
-  uncompressed_format.image_format.coded_height = frame->height;
-  uncompressed_format.image_format.bytes_per_row = linesizes[0];
-  uncompressed_format.image_format.display_width =
-      static_cast<uint32_t>(frame->width - frame->crop_right);
-  uncompressed_format.image_format.display_height =
-      static_cast<uint32_t>(frame->height - frame->crop_bottom);
-  uncompressed_format.image_format.layers = 1;
-  uncompressed_format.image_format.color_space.type = fuchsia::sysmem::ColorSpaceType::REC709;
-
-  uncompressed_format.image_format.has_pixel_aspect_ratio = !!frame->sample_aspect_ratio.num;
-  uncompressed_format.has_pixel_aspect_ratio = !!frame->sample_aspect_ratio.num;
-  if (uncompressed_format.has_pixel_aspect_ratio) {
-    uncompressed_format.pixel_aspect_ratio_width = frame->sample_aspect_ratio.num;
-    uncompressed_format.pixel_aspect_ratio_height = frame->sample_aspect_ratio.den;
-
-    uncompressed_format.image_format.pixel_aspect_ratio_width = frame->sample_aspect_ratio.num;
-    uncompressed_format.image_format.pixel_aspect_ratio_height = frame->sample_aspect_ratio.den;
+  if (frame->sample_aspect_ratio.num) {
+    image_format.set_pixel_aspect_ratio(fuchsia::math::SizeU{
+        .width = static_cast<uint32_t>(frame->sample_aspect_ratio.num),
+        .height = static_cast<uint32_t>(frame->sample_aspect_ratio.den),
+    });
   }
 
   int buffer_bytes_needed_int = av_image_get_buffer_size(static_cast<AVPixelFormat>(frame->format),
@@ -200,7 +168,7 @@ AvCodecContext::FrameBufferRequest AvCodecContext::frame_buffer_request(AVFrame*
   ZX_ASSERT(buffer_bytes_needed_int >= 0);
   size_t buffer_bytes_needed = static_cast<size_t>(buffer_bytes_needed_int);
 
-  return {.format = std::move(uncompressed_format), .buffer_bytes_needed = buffer_bytes_needed};
+  return {.format = std::move(image_format), .buffer_bytes_needed = buffer_bytes_needed};
 }
 
 // static

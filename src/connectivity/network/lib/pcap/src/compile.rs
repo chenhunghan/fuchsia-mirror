@@ -4,6 +4,7 @@
 
 use fidl_fuchsia_ebpf as febpf;
 use fidl_fuchsia_net_debug as fnet_debug;
+use futures::StreamExt as _;
 
 use std::ffi::{CString, NulError};
 use std::os::raw::c_int;
@@ -32,10 +33,10 @@ pub enum CompilationError {
 // See https://github.com/the-tcpdump-group/libpcap/blob/78415bc13031d145dc24d3c3ffffc281d3d629f1/pcap/pcap.h#L387
 const PCAP_NETMASK_UNKNOWN: u32 = 0xffffffff;
 
-/// Compiles a pcap filter string to BPF bytecode.
+/// Compiles a pcap filter string to verified eBPF bytecode instructions.
 ///
 /// Currently the pcap filter is intended for Ethernet links.
-pub fn compile_filter(filter: &str) -> Result<febpf::VerifiedProgram, CompilationError> {
+pub fn compile_filter_bytecode(filter: &str) -> Result<Vec<u64>, CompilationError> {
     let c_filter =
         CString::new(filter).map_err(|_: NulError| CompilationError::NullByteInFilter)?;
 
@@ -98,9 +99,35 @@ pub fn compile_filter(filter: &str) -> Result<febpf::VerifiedProgram, Compilatio
         pcap_close(handle);
     }
 
+    Ok(verified.code().iter().map(ebpf::EbpfInstruction::get).collect())
+}
+
+/// Compiles a pcap filter string to a [`febpf::VerifiedProgram`].
+///
+/// Currently the pcap filter is intended for Ethernet links.
+pub fn compile_filter(filter: &str) -> Result<febpf::VerifiedProgram, CompilationError> {
+    let instructions = compile_filter_bytecode(filter)?;
+    let (client_end, server_end) =
+        fidl::endpoints::create_endpoints::<febpf::ProgramLinkerMarker>();
+    let _: std::thread::JoinHandle<()> = std::thread::spawn(move || {
+        let mut executor = fuchsia_async::LocalExecutor::default();
+        executor.run_singlethreaded(async move {
+            let mut stream = server_end.into_stream();
+            if let Some(Ok(request)) = stream.next().await {
+                match request {
+                    febpf::ProgramLinkerRequest::Link { payload: _, responder } => {
+                        let _ =
+                            responder.send(Ok(febpf::LinkedProgram::Bytecode(febpf::Bytecode {
+                                instructions,
+                            })));
+                    }
+                }
+            }
+        });
+    });
+
     Ok(febpf::VerifiedProgram {
-        code: Some(verified.code().iter().map(ebpf::EbpfInstruction::get).collect()),
-        struct_access_instructions: Some(Vec::new()),
+        linker: Some(client_end),
         maps: Some(Vec::new()),
         ..Default::default()
     })

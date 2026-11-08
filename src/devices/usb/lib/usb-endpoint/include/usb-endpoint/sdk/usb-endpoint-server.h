@@ -7,11 +7,11 @@
 
 #include <fidl/fuchsia.hardware.usb.endpoint/cpp/fidl.h>
 #include <lib/async/dispatcher.h>
-#include <lib/fit/result.h>
 #include <lib/zx/bti.h>
 #include <zircon/types.h>
 
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <utility>
@@ -57,6 +57,9 @@ class EndpointServer : public fidl::Server<fuchsia_hardware_usb_endpoint::Endpoi
   zx::result<std::vector<dma_buffer::PhysIter>> get_iter(RequestVariant& req,
                                                          size_t max_length) const;
 
+  zx::result<std::optional<usb::MappedVmo>> GetMapped(
+      const fuchsia_hardware_usb_request::Buffer& buffer) const;
+
   const zx::bti& bti() { return bti_; }
   uint8_t ep_addr() const { return ep_addr_; }
   ScatterGatherSupport scatter_gather_support() const { return sg_support_; }
@@ -67,14 +70,7 @@ class EndpointServer : public fidl::Server<fuchsia_hardware_usb_endpoint::Endpoi
   };
 
   // Gets information about all registered VMOs (ID and size in bytes).
-  std::vector<VmoInfo> GetRegisteredVmosInfo() const {
-    std::lock_guard<std::mutex> lock(lock_);
-    std::vector<VmoInfo> info;
-    for (const auto& [id, vmo] : registered_vmos_) {
-      info.push_back({id, vmo.size});
-    }
-    return info;
-  }
+  std::vector<VmoInfo> GetRegisteredVmosInfo() const;
 
  protected:
   // OnUnbound: May be overwritten. If not overwritten, unregisters VMOs.
@@ -93,21 +89,31 @@ class EndpointServer : public fidl::Server<fuchsia_hardware_usb_endpoint::Endpoi
   std::vector<fuchsia_hardware_usb_endpoint::Completion> completions_ __TA_GUARDED(lock_);
 
   struct RegisteredVmo {
-    zx_handle_t pmt;
-    uint64_t* phys_list;
-    size_t phys_count;
-    uint64_t size;
+    RegisteredVmo(zx_handle_t pmt, std::unique_ptr<zx_paddr_t[]> phys_list, size_t phys_count,
+                  uint64_t size, zx_vaddr_t virt_addr, size_t mapped_size)
+        : pmt(pmt),
+          phys_list(std::move(phys_list)),
+          phys_count(phys_count),
+          size(size),
+          virt_addr(virt_addr),
+          mapped_size(mapped_size) {}
+    ~RegisteredVmo();
+    RegisteredVmo(const RegisteredVmo&) = delete;
+    RegisteredVmo& operator=(const RegisteredVmo&) = delete;
+
+    zx_handle_t pmt = ZX_HANDLE_INVALID;
+    std::unique_ptr<zx_paddr_t[]> phys_list;
+    size_t phys_count = 0;
+    uint64_t size = 0;
+    zx_vaddr_t virt_addr = 0;
+    size_t mapped_size = 0;
   };
   // registered_vmos_: All pre-registered VMOs registered through RegisterVmos(). Mapping from
   // vmo_id to RegisteredVmo.
-  std::map<fuchsia_hardware_usb_request::VmoId, RegisteredVmo> registered_vmos_ __TA_GUARDED(lock_);
-
-  // Unpins all VMOs in |vmos|, frees physical lists, and removes them from the map.
-  // Returns a successful result if all VMOs were unpinned successfully.
-  // Otherwise, returns a vector of pairs containing the VMO ID and the error status
-  // for each failed unpin operation.
-  fit::result<std::vector<std::pair<fuchsia_hardware_usb_request::VmoId, zx_status_t>>> UnpinVmos(
-      std::map<fuchsia_hardware_usb_request::VmoId, RegisteredVmo>& vmos);
+  std::map<fuchsia_hardware_usb_request::VmoId, std::shared_ptr<RegisteredVmo>> registered_vmos_
+      __TA_GUARDED(lock_);
+  mutable std::vector<std::pair<fuchsia_hardware_usb_request::VmoId, std::weak_ptr<RegisteredVmo>>>
+      unregistered_in_flight_vmos_ __TA_GUARDED(lock_);
 
   mutable std::mutex lock_;
 };

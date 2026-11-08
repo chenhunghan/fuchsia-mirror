@@ -72,9 +72,6 @@ fuchsia_component("sshd-host-component") {
 
   deps = [
     ":bin",
-
-    # Ensure this isn't included in production
-    "//build/validate:non_production_tag",
     "//third_party/openssh-portable:hostkeygen",
     "//third_party/openssh-portable:scp",
     "//third_party/openssh-portable:sftp-server",

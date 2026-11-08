@@ -24,18 +24,24 @@ pub struct TaskCommand {
 unsafe impl RcuDroppable for TaskCommand {}
 
 impl TaskCommand {
+    fn truncate_at_nul(bytes: &[u8]) -> &[u8] {
+        if let Some(idx) = memchr::memchr(b'\0', bytes) { &bytes[..idx] } else { bytes }
+    }
+
+    fn path_basename(path: &[u8]) -> &[u8] {
+        let path = Self::truncate_at_nul(path);
+        if let Some(idx) = memchr::memrchr(b'/', path) { &path[idx + 1..] } else { path }
+    }
+
     /// Create a new `TaskCommand` from a byte slice. The byte slice is truncated at the first null
     /// byte if any.
     pub fn new(name: &[u8]) -> Self {
-        let name = if let Some(idx) = memchr::memchr(b'\0', name) { &name[..idx] } else { name };
-        Self { name: FlyByteStr::new(name), linux_name_range: None }
+        Self { name: FlyByteStr::new(Self::truncate_at_nul(name)), linux_name_range: None }
     }
 
     /// Create a new `TaskCommand` from a path. The basename of the path is used as the name.
     pub fn from_path_bytes(path: &[u8]) -> Self {
-        let basename =
-            if let Some(idx) = memchr::memrchr(b'/', path) { &path[idx + 1..] } else { path };
-        Self::new(basename)
+        Self { name: FlyByteStr::new(Self::path_basename(path)), linux_name_range: None }
     }
 
     /// Returns the name truncated to 15 bytes.
@@ -67,14 +73,23 @@ impl TaskCommand {
         }
     }
 
-    /// Tries to embed `other` as the Linux name within this command.
-    /// Returns a new `TaskCommand` if `other` is a substring of this command.
-    pub fn try_embed(&self, other: &TaskCommand) -> Option<Self> {
+    /// Returns a `TaskCommand` extended with the basename of `argv0` if this command's Linux name
+    /// is a substring of it, or `self` unchanged otherwise (to avoid clobbering a custom name that
+    /// is unrelated to `argv[0]`).
+    pub fn with_argv0(self, argv0: &[u8]) -> Self {
         use bstr::ByteSlice;
-        self.name.as_bytes().find(other.linux_name_bytes()).map(|offset| Self {
-            name: self.name.clone(),
-            linux_name_range: Some(offset..offset + other.linux_name_bytes().len()),
-        })
+        let argv0 = Self::path_basename(argv0);
+        if argv0 == self.as_bytes() {
+            return self;
+        }
+        let linux_name = self.linux_name_bytes();
+        match argv0.find(linux_name) {
+            Some(offset) => Self {
+                name: FlyByteStr::new(argv0),
+                linux_name_range: Some(offset..offset + linux_name.len()),
+            },
+            None => self,
+        }
     }
 }
 
@@ -166,22 +181,38 @@ mod tests {
 
     #[test]
     fn test_sniffing() {
-        let argv0 = TaskCommand::new(b"/path/to/binary");
-        let short = TaskCommand::new(b"binary");
-        let embedded = argv0.try_embed(&short).expect("should embed");
-        assert_eq!(embedded.as_bytes(), b"/path/to/binary");
+        let embedded = TaskCommand::new(b"binary").with_argv0(b"/path/to/my_binary");
+        assert_eq!(embedded.as_bytes(), b"my_binary");
         assert_eq!(embedded.comm_name(), b"binary");
 
-        let other = TaskCommand::new(b"other");
-        assert!(argv0.try_embed(&other).is_none());
+        let other = TaskCommand::new(b"other").with_argv0(b"/path/to/my_binary");
+        assert_eq!(other.as_bytes(), b"other");
+        assert_eq!(other.comm_name(), b"other");
     }
 
     #[test]
     fn test_comm_name_sniffed() {
-        let long_argv0 = TaskCommand::new(b"/path/to/short_name_with_suffix");
-        let short_name = TaskCommand::new(b"short_name");
-        let embedded = long_argv0.try_embed(&short_name).expect("should embed");
-        // comm_name should be "short_name" (len 10), not truncated version of full path
+        let embedded =
+            TaskCommand::new(b"short_name").with_argv0(b"/path/to/short_name_with_suffix");
+        // comm_name should be "short_name" (len 10), not truncated version of full basename
+        assert_eq!(embedded.as_bytes(), b"short_name_with_suffix");
         assert_eq!(embedded.comm_name(), b"short_name");
+    }
+
+    #[test]
+    fn test_with_argv0() {
+        let cmd = TaskCommand::from_path_bytes(b"/bin/my_long_command_name")
+            .with_argv0(b"/custom/my_long_command_name_with_suffix");
+        assert_eq!(cmd.as_bytes(), b"my_long_command_name_with_suffix");
+        assert_eq!(cmd.comm_name(), b"my_long_command");
+
+        let same = TaskCommand::from_path_bytes(b"/bin/my_long_command_name")
+            .with_argv0(b"/bin/my_long_command_name");
+        assert_eq!(same.as_bytes(), b"my_long_command_name");
+        assert_eq!(same.comm_name(), b"my_long_command");
+
+        let unrelated = TaskCommand::new(b"custom_name").with_argv0(b"/bin/my_long_command_name");
+        assert_eq!(unrelated.as_bytes(), b"custom_name");
+        assert_eq!(unrelated.comm_name(), b"custom_name");
     }
 }

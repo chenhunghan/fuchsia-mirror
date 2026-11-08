@@ -34,7 +34,6 @@ sdk_source_set("structured_backend") {
     "cpp/logger.cc",
   ]
   public = [
-    "cpp/fuchsia_syslog.h",
     "cpp/log_buffer.h",
     "cpp/log_connection.h",
     "cpp/logger.h",
@@ -43,6 +42,8 @@ sdk_source_set("structured_backend") {
   ]
   sdk_area = "Diagnostics"
   category = "partner"
+  sdk_headers_for_internal_use = [ "cpp/fuchsia_syslog.h" ]
+  public += [ "cpp/fuchsia_syslog.h" ]
   sdk_name = "syslog_structured_backend"
   include_base = "//sdk"
   public_configs = [ "//sdk/config" ]
@@ -53,6 +54,7 @@ sdk_source_set("structured_backend") {
     "//zircon/system/ulib/zx",
   ]
 }
+
 source_set("host_cpp") {
   public = [ "fuchsia_syslog.h" ]
   visibility = [ "*" ]

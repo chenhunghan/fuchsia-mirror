@@ -10,7 +10,15 @@ use emulator_instance::EmulatorInstances;
 use futures::channel::mpsc::UnboundedSender;
 use std::path::{Path, PathBuf};
 
-struct EmulatorSource;
+/// Reads emulator instances from the watched instance root, falling back to `backup_roots` for
+/// instances created by older versions of ffx.
+///
+/// Only the instance root is watched for changes. Instances in `backup_roots` are reported when
+/// the watcher starts, but later additions or removals there don't generate events. The backup
+/// roots only hold legacy instances, which current versions of ffx never create.
+struct EmulatorSource {
+    backup_roots: Vec<PathBuf>,
+}
 
 impl InstanceSource for EmulatorSource {
     fn recursive(&self) -> bool {
@@ -18,7 +26,8 @@ impl InstanceSource for EmulatorSource {
     }
 
     fn get_all_targets(&self, root: &Path) -> Vec<(String, TargetHandle)> {
-        let emu_instances = EmulatorInstances::new(root.to_path_buf());
+        let roots = std::iter::once(root.to_path_buf()).chain(self.backup_roots.iter().cloned());
+        let emu_instances = EmulatorInstances::from(roots.collect::<Vec<_>>());
         emulator_instance::get_all_targets(&emu_instances)
             .unwrap_or_default()
             .into_iter()
@@ -48,12 +57,17 @@ pub struct EmulatorWatcher {
 
 impl EmulatorWatcher {
     pub fn new(
-        instance_root: PathBuf,
+        instance_roots: Vec<PathBuf>,
         sender: UnboundedSender<TargetEvent>,
     ) -> Result<Self, Error> {
-        let watcher = InstanceWatcher::new(instance_root, sender, EmulatorSource, |path, err| {
-            Error::EmulatorWatcher { path, err }
-        })?;
+        let mut roots = instance_roots.into_iter();
+        let instance_root = roots.next().unwrap_or_default();
+        let watcher = InstanceWatcher::new(
+            instance_root,
+            sender,
+            EmulatorSource { backup_roots: roots.collect() },
+            |path, err| Error::EmulatorWatcher { path, err },
+        )?;
         Ok(Self { _watcher: watcher })
     }
 }

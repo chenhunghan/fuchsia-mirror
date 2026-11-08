@@ -1,5 +1,5 @@
 keywords: category:FuchsiaBuild,docType:Guide,category:FuchsiaDevelopment,category:FuchsiaSDK,category:FuchsiaFidl
-keywords_public: FIDL, generated code, bindings, Rust, Go, C++, HLCPP, C, JSON IR, GN build, Fuchsia, documentation
+keywords_public: FIDL, generated code, bindings, Rust, C++, HLCPP, C, JSON IR, GN build, Fuchsia, documentation
 description: This guide explains how to locate and view the generated FIDL bindings code and JSON IR for various programming languages within the Fuchsia build system.
 <!-- These keywords are for search widget on fuchsia.dev. Do not remove. -->
 
@@ -34,8 +34,6 @@ to this as the root directory. It is structured as follows:
     ├── fuchsia.io.fidl.json
     └── fuchsia.io
        ├── fidl_fuchsia_io.rs
-       ├── fuchsia.io.fidl
-       │  └── impl.go
        ├── c
        │  └── fuchsia
        │     └── io
@@ -100,13 +98,6 @@ The Rust bindings are generated in the root directory as
 library name by replacing dots with underscores. For example, with `fuchsia.io`:
 
     out/default/fidling/gen/sdk/fidl/fuchsia.io/fuchsia.io/fidl_fuchsia_io.rs
-
-#### Go {#go}
-
-The Go bindings are generated in the root directory as
-`${target_name}/${library_name}.fidl/impl.go`. For example, with `fuchsia.io`:
-
-    out/default/fidling/gen/sdk/fidl/fuchsia.io/fuchsia.io/fuchsia.io.fidl/impl.go
 
 #### C++ {#c-family}
 

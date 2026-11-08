@@ -21,7 +21,7 @@
 #include <ktl/span.h>
 #include <ktl/string_view.h>
 #include <phys/address-space.h>
-#include <phys/fixed-address-boot-zbi.h>
+#include <phys/boot-zbi/fixed-address-boot-zbi.h>
 #include <phys/symbolize.h>
 #include <phys/zbitl-allocation.h>
 
@@ -203,7 +203,7 @@ void TurduckenTestBase::Boot() {
 }
 
 int TestMain(void* zbi_ptr, ktl::optional<EarlyBootZbi> zbi, arch::EarlyTicks entry_ticks) {
-  MainSymbolize symbolize(kTestName);
+  Symbolize symbolize(kTestName);
   symbolize.ContextAlways();
 
   AddressSpace aspace;

@@ -57,7 +57,7 @@ impl PackageFetcher {
     ///   2. a Self that enables pushing work onto the queue
     pub(crate) fn new(
         max_concurrency: usize,
-        package_index: Arc<async_lock::RwLock<crate::index::PackageIndex>>,
+        package_index: Arc<crate::index::PackageIndex>,
         blobfs_client: blobfs::Client,
         blob_fetcher: crate::blob_fetcher::BlobFetcher,
         root_dir_factory: crate::root_dir::RootDirFactory,
@@ -145,7 +145,7 @@ async fn fetch(
     pkg_id: fuchsia_hash::Hash,
     blob_source: http::Uri,
     gc_protection: fpkg::GcProtection,
-    package_index: &async_lock::RwLock<crate::index::PackageIndex>,
+    package_index: &crate::index::PackageIndex,
     blobfs_client: &blobfs::Client,
     blob_fetcher: &crate::blob_fetcher::BlobFetcher,
     root_dir_factory: &crate::root_dir::RootDirFactory,
@@ -160,7 +160,7 @@ async fn fetch(
         "hash" => pkg_id.to_string().as_str(),
         "gc_protection" => format!("{gc_protection:?}").as_str()
     );
-    let gc_guard = package_index.write().await.start_writing(pkg_id, gc_protection);
+    let gc_guard = package_index.start_writing(pkg_id, gc_protection).await;
     let fetch_ret = fetch_impl(
         pkg_id,
         blob_source,
@@ -174,7 +174,7 @@ async fn fetch(
         trace_id,
     )
     .await;
-    let stop_ret = package_index.write().await.stop_writing(gc_guard);
+    let stop_ret = package_index.stop_writing(gc_guard).await;
     match (fetch_ret, stop_ret) {
         (fetch_ret, Ok(())) => fetch_ret,
         (Ok(_), Err(e)) => Err(Error::ClearWritingIndex(e)),
@@ -188,7 +188,7 @@ async fn fetch(
 async fn fetch_impl(
     pkg_id: fuchsia_merkle::Hash,
     blob_source: http::Uri,
-    package_index: &async_lock::RwLock<crate::index::PackageIndex>,
+    package_index: &crate::index::PackageIndex,
     gc_protection: fpkg::GcProtection,
     blobfs_client: &blobfs::Client,
     blob_fetcher: &crate::blob_fetcher::BlobFetcher,
@@ -204,6 +204,7 @@ async fn fetch_impl(
     let inspect_outstanding = inspect.create_uint("known_outstanding_blobs", 1);
     let mut queue = std::collections::VecDeque::from([pkg_id]);
     let mut queued = HashSet::from([pkg_id]);
+    let mut all_blobs = HashSet::new();
     let context = crate::blob_fetcher::QueueContext::new(
         blob_source,
         crate::blob_fetcher::ConflictBehavior::AskBlobfs,
@@ -240,11 +241,11 @@ async fn fetch_impl(
             .await
             .map_err(|source| Error::ReadingSubpackages { source, pkg: blob_id })?
             .into_hashes_undeduplicated()
-            .collect::<Vec<_>>();
+            .collect::<HashSet<_>>();
+        all_blobs.extend(&subpackages);
         let () = package_index
-            .write()
+            .add_blobs(pkg_id, subpackages.clone(), gc_protection)
             .await
-            .add_blobs(pkg_id, HashSet::from_iter(subpackages.iter().copied()), gc_protection)
             .map_err(Error::ProtectBlobs)?;
         for sub in subpackages {
             if queued.insert(sub) {
@@ -254,15 +255,16 @@ async fn fetch_impl(
         }
         let content = root_dir.external_file_hashes().copied().collect::<HashSet<_>>();
         let () = package_index
-            .write()
-            .await
             .add_blobs(pkg_id, content.clone(), gc_protection)
+            .await
             .map_err(Error::ProtectBlobs)?;
         let mut missing_content = vec![];
         {
             let _guard = ftrace::async_enter!(trace_id, c"app", c"check content blob presence");
             for content_id in content.into_iter() {
-                if !blobfs_client.blob_present_and_up_to_date(&content_id).await {
+                if all_blobs.insert(content_id)
+                    && !blobfs_client.blob_present_and_up_to_date(&content_id).await
+                {
                     missing_content.push(content_id);
                 }
             }
@@ -280,6 +282,7 @@ async fn fetch_impl(
         }
         ret.get_or_insert(root_dir);
     }
+    let () = package_index.complete_retained_blobs(pkg_id, all_blobs).await;
     let root_dir = ret.expect("queue starts with an entry");
     Ok(match gc_protection {
         fpkg::GcProtection::Retained => MaybeCachedRootDir::Uncached(Arc::new(root_dir)),
@@ -376,7 +379,8 @@ fn fetch_to_component_resolve_err(
     use crate::blob_fetcher::FetchError::*;
     use fidl_fuchsia_component_resolution::ResolverError as Err;
     match err {
-        CreateBlob { .. } => Err::Io,
+        CreateBlob(blobfs::CreateError::OutOfSpace) => Err::NoSpace,
+        CreateBlob(_) => Err::Io,
         BlobUrl { .. } => Err::Internal,
         ConnectToHttpClient(_) => Err::Io,
         DownloadBlobFidl { .. } => Err::Internal,

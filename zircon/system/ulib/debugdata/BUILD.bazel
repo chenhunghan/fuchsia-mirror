@@ -1,0 +1,47 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules:zx_library.bzl", "cc_source_library_zx")
+
+package(default_applicable_licenses = ["//:license"])
+
+cc_source_library_zx(
+    name = "debugdata",
+    srcs = [
+        "datasink.cc",
+        "debugdata.cc",
+    ],
+    hdrs = [
+        "include/lib/debugdata/datasink.h",
+        "include/lib/debugdata/debugdata.h",
+    ],
+    implementation_deps = [
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        # debugdata.cc includes <lib/fdio/io.h>.
+        "//sdk/lib/fdio",
+        "//src/lib/fxl",
+        "//src/storage/lib/vfs/cpp",
+        "//zircon/system/ulib/fzl",
+    ],
+    includes = ["include"],
+    visibility = [
+        "//src/sys/instrumentation_data_processor:__pkg__",
+        "//src/sys/test_manager/debug_data_processor:__pkg__",
+        "//zircon/system/ulib/debugdata/test:__pkg__",
+        "//zircon/system/ulib/runtests-utils:__pkg__",
+    ],
+    deps = [
+        # <debugdata/debugdata.h has #include <fidl/fuchsia.debugdata/cpp/wire.h>.
+        "//sdk/fidl/fuchsia.debugdata:fuchsia.debugdata_cpp",
+        # <debugdata/debugdata.h> has #include <lib/async/cpp/wait.h>.
+        "//sdk/lib/async:async-cpp",
+        # <debugdata/debugdata.h> has #include <fbl/unique_fd.h>.
+        "//zircon/system/ulib/fbl",
+        # <debugdata/debugdata.h> has #include <lib/zircon-internal/fnv1hash.h>.
+        "//zircon/system/ulib/zircon-internal",
+        # <debugdata/datasink.h> has #include <lib/zx/vmo.h>.
+        "//zircon/system/ulib/zx",
+    ],
+)

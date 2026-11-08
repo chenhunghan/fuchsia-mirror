@@ -11,7 +11,7 @@ use diagnostics_reader::ArchiveReader;
 use fidl::endpoints::create_endpoints;
 use fidl_fuchsia_hardware_power_statecontrol as fstatecontrol;
 use fidl_fuchsia_hardware_power_suspend as fhsuspend;
-use fidl_fuchsia_power_broker::{self as fbroker, LeaseStatus};
+use fidl_fuchsia_power_broker as fbroker;
 use fidl_fuchsia_power_observability as fobs;
 use fidl_fuchsia_power_suspend as fsuspend;
 use fidl_fuchsia_power_system as fsystem;
@@ -144,16 +144,32 @@ async fn create_suspend_topology(realm: &RealmProxyClient) -> Result<Arc<PowerEl
     Ok(suspend_controller)
 }
 
-async fn lease(controller: &PowerElementContext, level: u8) -> Result<fbroker::LeaseControlProxy> {
-    let lease_control =
-        controller.lessor.lease(level).await?.map_err(|e| anyhow::anyhow!("{e:?}"))?.into_proxy();
+async fn lease(
+    realm: &RealmProxyClient,
+    controller: &PowerElementContext,
+    level: u8,
+) -> Result<fbroker::LeaseToken> {
+    let topology = realm.connect_to_protocol::<fbroker::TopologyMarker>().await?;
+    let (client_token, server_token) = fbroker::LeaseToken::create();
+    topology
+        .lease(fbroker::LeaseSchema {
+            lease_token: Some(server_token),
+            lease_name: Some("test_lease".into()),
+            dependencies: Some(vec![fbroker::LeaseDependency {
+                requires_token: Some(
+                    controller
+                        .assertive_dependency_token()
+                        .ok_or_else(|| anyhow::anyhow!("token not registered"))?,
+                ),
+                requires_level: Some(level),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        })
+        .await?
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
 
-    let mut lease_status = LeaseStatus::Unknown;
-    while lease_status != LeaseStatus::Satisfied {
-        lease_status = lease_control.watch_status(lease_status).await.unwrap();
-    }
-
-    Ok(lease_control)
+    Ok(client_token)
 }
 
 // Report prolonged match delay after this many loops.
@@ -266,7 +282,7 @@ async fn test_activity_governor_increments_suspend_success_on_application_activi
     assert_eq!(Some(0), current_stats.total_time_in_suspend);
 
     let suspend_controller = create_suspend_topology(&realm).await?;
-    let suspend_lease_control = lease(&suspend_controller, 1).await?;
+    let suspend_lease = lease(&realm, &suspend_controller, 1).await?;
     let boot_control = realm.connect_to_protocol::<fsystem::BootControlMarker>().await?;
     let () = boot_control.set_boot_complete().await.expect("SetBootComplete should have succeeded");
 
@@ -321,7 +337,7 @@ async fn test_activity_governor_increments_suspend_success_on_application_activi
         }
     );
 
-    drop(suspend_lease_control);
+    drop(suspend_lease);
     assert_eq!(0, suspend_device.await_suspend().await.unwrap().unwrap().state_index.unwrap());
 
     // Retrieve realm ID from moniker.
@@ -350,7 +366,7 @@ async fn test_activity_governor_increments_suspend_success_on_application_activi
         .unwrap();
 
     // Take a lease to prevent the system from suspending again before we can check Inspect.
-    let keep_awake_lease = lease(&suspend_controller, 1).await?;
+    let keep_awake_lease = lease(&realm, &suspend_controller, 1).await?;
 
     let current_stats = stats.watch().await?;
     assert_eq!(Some(1), current_stats.success_count);
@@ -572,7 +588,7 @@ async fn test_activity_governor_increments_fail_count_on_suspend_error() -> Resu
         .unwrap();
 
     let suspend_controller = create_suspend_topology(&realm).await?;
-    let suspend_lease_control = lease(&suspend_controller, 1).await?;
+    let suspend_lease = lease(&realm, &suspend_controller, 1).await?;
     let boot_control = realm.connect_to_protocol::<fsystem::BootControlMarker>().await?;
     let () = boot_control.set_boot_complete().await.expect("SetBootComplete should have succeeded");
 
@@ -627,7 +643,7 @@ async fn test_activity_governor_increments_fail_count_on_suspend_error() -> Resu
         }
     );
 
-    drop(suspend_lease_control);
+    drop(suspend_lease);
     assert_eq!(0u64, suspend_device.await_suspend().await.unwrap().unwrap().state_index.unwrap());
     suspend_device.resume(&tsc::DeviceResumeRequest::Error(7)).await.unwrap().unwrap();
 
@@ -736,7 +752,7 @@ async fn test_activity_governor_suspends_successfully_after_failure() -> Result<
         .unwrap();
 
     let suspend_controller = create_suspend_topology(&realm).await?;
-    let suspend_lease_control = lease(&suspend_controller, 1).await?;
+    let suspend_lease = lease(&realm, &suspend_controller, 1).await?;
     let boot_control = realm.connect_to_protocol::<fsystem::BootControlMarker>().await?;
     let () = boot_control.set_boot_complete().await.expect("SetBootComplete should have succeeded");
 
@@ -791,7 +807,7 @@ async fn test_activity_governor_suspends_successfully_after_failure() -> Result<
         }
     );
 
-    drop(suspend_lease_control);
+    drop(suspend_lease);
     assert_eq!(0u64, suspend_device.await_suspend().await.unwrap().unwrap().state_index.unwrap());
     suspend_device.resume(&tsc::DeviceResumeRequest::Error(7)).await.unwrap().unwrap();
 
@@ -1432,12 +1448,12 @@ async fn test_element_info_provider() -> Result<()> {
 
     // Trigger "boot complete" logic.
     let boot_control = realm.connect_to_protocol::<fsystem::BootControlMarker>().await?;
-    let suspend_lease_control = lease(&suspend_controller, 1).await?;
+    let suspend_lease = lease(&realm, &suspend_controller, 1).await?;
 
     assert_eq!(aa_status.watch_power_level().await?.unwrap(), 1);
     let () = boot_control.set_boot_complete().await.expect("SetBootComplete should have succeeded");
     assert_eq!(bc_status.watch_power_level().await?.unwrap(), 0);
-    drop(suspend_lease_control);
+    drop(suspend_lease);
 
     // Level may drop to 1 or 0 depending on power element response order, so check the level
     // again if it is not 0.
@@ -1460,9 +1476,9 @@ async fn test_element_info_provider() -> Result<()> {
         .unwrap();
 
     // Raise Execution State to Active then drop to trigger a suspend.
-    let suspend_lease_control = lease(&suspend_controller, 1).await?;
+    let suspend_lease = lease(&realm, &suspend_controller, 1).await?;
     assert_eq!(es_status.watch_power_level().await?.unwrap(), 2);
-    drop(suspend_lease_control);
+    drop(suspend_lease);
 
     // Level may drop to 1 or 0 depending on power element response order, so check the level
     // again if it is not 0.
@@ -1483,9 +1499,9 @@ async fn test_element_info_provider() -> Result<()> {
         .unwrap();
 
     // Raise Execution State to Active then drop to trigger a suspend.
-    let suspend_lease_control = lease(&suspend_controller, 1).await?;
+    let suspend_lease = lease(&realm, &suspend_controller, 1).await?;
     assert_eq!(es_status.watch_power_level().await?.unwrap(), 2);
-    drop(suspend_lease_control);
+    drop(suspend_lease);
 
     // Level may drop to 1 or 0 depending on power element response order, so check the level
     // again if it is not 0.
@@ -1892,7 +1908,7 @@ async fn test_activity_governor_add_application_activity_dependency() -> Result<
     //  3. Confirm that Execution State is at Active.
     //  4. Drop the lease.
     //  5. Confirm that a suspend call is issued.
-    let test_element_lease = self::lease(&test_element, 1).await?;
+    let test_element_lease = self::lease(&realm, &test_element, 1).await?;
     assert_eq!(status_client.watch_power_level().await?.unwrap(), 1);
 
     {
@@ -2627,7 +2643,7 @@ async fn test_activity_governor_cpu_element_allows_leases_during_boot() -> Resul
     );
 
     assert_eq!(0u8, cpu_driver_power_level.get());
-    let _cpu_lease = lease(&cpu_driver_controller, 1).await.unwrap();
+    let _cpu_lease = lease(&realm, &cpu_driver_controller, 1).await.unwrap();
     assert_eq!(1u8, cpu_driver_power_level.get());
     Ok(())
 }
@@ -4440,7 +4456,7 @@ async fn test_activity_governor_reports_on_suspend_blocker_stall(
         .map_err(|e| anyhow::anyhow!("Register failed: {:?}", e))?;
 
     let suspend_controller = create_suspend_topology(&realm).await?;
-    let suspend_lease_control = lease(&suspend_controller, 1).await?;
+    let suspend_lease = lease(&realm, &suspend_controller, 1).await?;
 
     let (terminal_client, mut terminal_stream) =
         fidl::endpoints::create_request_stream::<fstatecontrol::TerminalStateWatcherMarker>();
@@ -4455,7 +4471,7 @@ async fn test_activity_governor_reports_on_suspend_blocker_stall(
     let _ = querier.watch_file().await?;
 
     drop(token);
-    drop(suspend_lease_control);
+    drop(suspend_lease);
 
     let num_filed = querier
         .watch_file()
@@ -6267,6 +6283,245 @@ async fn test_acquire_wake_lease2_gapless_handoff_blocks_suspend() -> Result<()>
 
     let current_stats = next_stats_fut.await?;
     assert_eq!(Some(1), current_stats.success_count);
+
+    Ok(())
+}
+
+#[fuchsia::test]
+async fn test_post_resume_boost_hold_and_early_resuspend_cancellation() -> Result<()> {
+    let (realm, activity_governor_moniker) =
+        create_realm_ext(ftest::RealmOptions { use_fake_clock: Some(true), ..Default::default() })
+            .await?;
+    let fake_clock_control =
+        realm.connect_to_protocol::<ftesting::FakeClockControlMarker>().await?;
+    let suspend_device = realm.connect_to_protocol::<tsc::DeviceMarker>().await?;
+    set_up_default_suspender(&suspend_device).await;
+    let stats = realm.connect_to_protocol::<fsuspend::StatsMarker>().await?;
+    let _ = stats.watch().await?;
+
+    let suspend_controller = create_suspend_topology(&realm).await?;
+    let initial_lease = lease(&realm, &suspend_controller, 1).await?;
+
+    {
+        let boot_control = realm.connect_to_protocol::<fsystem::BootControlMarker>().await?;
+        boot_control.set_boot_complete().await.expect("SetBootComplete should have succeeded");
+    }
+
+    block_until_inspect_matches!(
+        activity_governor_moniker,
+        root: contains {
+            booting: false,
+            power_elements: contains {
+                execution_state: {
+                    power_level: 2u64,
+                },
+            },
+        }
+    );
+
+    let realm_id = activity_governor_moniker
+        .split('/')
+        .next()
+        .expect("moniker empty")
+        .split(':')
+        .nth(1)
+        .expect("moniker realm id missing");
+
+    // Cycle 1: Drop wake lease -> suspend -> boost becomes active.
+    drop(initial_lease);
+    assert_eq!(
+        0,
+        suspend_device
+            .await_suspend()
+            .await?
+            .expect("await_suspend failed")
+            .state_index
+            .expect("state_index missing")
+    );
+
+    block_until_inspect_matches!(
+        "",
+        root: contains {
+            ref realm_id: contains {
+                "fake-boost": contains {
+                    active: true,
+                }
+            }
+        }
+    );
+
+    // Pause SAG's fake clock before resuming so we can deterministically inspect the 100 ms
+    // post-resume boost hold window.
+    fake_clock_control.pause().await?;
+
+    suspend_device
+        .resume(&tsc::DeviceResumeRequest::Result(tsc::SuspendResult {
+            suspend_duration: Some(2i64),
+            suspend_overhead: Some(1i64),
+            ..Default::default()
+        }))
+        .await?
+        .expect("resume failed");
+
+    let keep_awake_lease = lease(&realm, &suspend_controller, 1).await?;
+    let current_stats = stats.watch().await?;
+    assert_eq!(Some(1), current_stats.success_count);
+
+    block_until_inspect_matches!(
+        activity_governor_moniker,
+        root: contains {
+            power_elements: contains {
+                execution_state: {
+                    power_level: 2u64,
+                },
+            },
+        }
+    );
+
+    // Step 10 ms to flush any queued executor work after ExecutionState activation, then advance
+    // 40 ms (50 ms < 100 ms hold window): boost must still be active.
+    fake_clock_control
+        .advance(&ftesting::Increment::Determined(
+            zx::MonotonicDuration::from_millis(10).into_nanos(),
+        ))
+        .await?
+        .map_err(|e| anyhow::anyhow!("failed to advance fake clock: {:?}", e))?;
+    fake_clock_control
+        .advance(&ftesting::Increment::Determined(
+            zx::MonotonicDuration::from_millis(40).into_nanos(),
+        ))
+        .await?
+        .map_err(|e| anyhow::anyhow!("failed to advance fake clock: {:?}", e))?;
+
+    block_until_inspect_matches!(
+        "",
+        root: contains {
+            ref realm_id: contains {
+                "fake-boost": contains {
+                    active: true,
+                }
+            }
+        }
+    );
+
+    // Advance another 60 ms (110 ms >= 100 ms total): boost must drop automatically.
+    fake_clock_control
+        .advance(&ftesting::Increment::Determined(
+            zx::MonotonicDuration::from_millis(60).into_nanos(),
+        ))
+        .await?
+        .map_err(|e| anyhow::anyhow!("failed to advance fake clock: {:?}", e))?;
+
+    block_until_inspect_matches!(
+        "",
+        root: contains {
+            ref realm_id: contains {
+                "fake-boost": contains {
+                    active: false,
+                }
+            }
+        }
+    );
+
+    // Cycle 2: Suspend and resume again, then drop the wake lease early (< 100 ms) while fake
+    // clock is paused to prove the post-resume boost hold never delays or blocks re-suspend and
+    // cancels the stale drop timer.
+    drop(keep_awake_lease);
+    assert_eq!(
+        0,
+        suspend_device
+            .await_suspend()
+            .await?
+            .expect("await_suspend failed")
+            .state_index
+            .expect("state_index missing")
+    );
+
+    block_until_inspect_matches!(
+        "",
+        root: contains {
+            ref realm_id: contains {
+                "fake-boost": contains {
+                    active: true,
+                }
+            }
+        }
+    );
+
+    suspend_device
+        .resume(&tsc::DeviceResumeRequest::Result(tsc::SuspendResult {
+            suspend_duration: Some(2i64),
+            suspend_overhead: Some(1i64),
+            ..Default::default()
+        }))
+        .await?
+        .expect("resume failed");
+
+    let keep_awake_lease_2 = lease(&realm, &suspend_controller, 1).await?;
+    let current_stats = stats.watch().await?;
+    assert_eq!(Some(2), current_stats.success_count);
+
+    block_until_inspect_matches!(
+        activity_governor_moniker,
+        root: contains {
+            power_elements: contains {
+                execution_state: {
+                    power_level: 2u64,
+                },
+            },
+        }
+    );
+
+    // Advance 50 ms (< 100 ms): post-resume boost hold is active.
+    fake_clock_control
+        .advance(&ftesting::Increment::Determined(
+            zx::MonotonicDuration::from_millis(50).into_nanos(),
+        ))
+        .await?
+        .map_err(|e| anyhow::anyhow!("failed to advance fake clock: {:?}", e))?;
+
+    block_until_inspect_matches!(
+        "",
+        root: contains {
+            ref realm_id: contains {
+                "fake-boost": contains {
+                    active: true,
+                }
+            }
+        }
+    );
+
+    // Drop the wake lease with fake clock still paused at 50 ms: SAG must suspend immediately
+    // without waiting for the 100 ms timer, and advancing past 100 ms while suspended must NOT
+    // drop the fresh boost token acquired for Cycle 3.
+    drop(keep_awake_lease_2);
+    assert_eq!(
+        0,
+        suspend_device
+            .await_suspend()
+            .await?
+            .expect("await_suspend failed")
+            .state_index
+            .expect("state_index missing")
+    );
+
+    fake_clock_control
+        .advance(&ftesting::Increment::Determined(
+            zx::MonotonicDuration::from_millis(150).into_nanos(),
+        ))
+        .await?
+        .map_err(|e| anyhow::anyhow!("failed to advance fake clock: {:?}", e))?;
+
+    block_until_inspect_matches!(
+        "",
+        root: contains {
+            ref realm_id: contains {
+                "fake-boost": contains {
+                    active: true,
+                }
+            }
+        }
+    );
 
     Ok(())
 }

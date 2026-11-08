@@ -62,9 +62,17 @@ fuchsia_test_package("net-cli-integration-tests") {
 
     # controller is used to interact with the Network Test Realm.
     "//src/connectivity/network/testing/network-test-realm/service:controller",
+  ]
+  subpackages = [
+    # TODO(https://fxbug.dev/581840882): Remove once the NTR controller is a
+    # subpackage. These are launched inside the hermetic network realm by the
+    # NTR controller.
+    "//src/connectivity/network/dhcpv4/client/bindings:package",
+    "//src/connectivity/network/dhcpv4/server:package",
+    "//src/connectivity/network/netstack3:package-conformance",
 
-    # component-debug corresponds to a Netstack3 instance configured by netemul.
-    "//src/connectivity/network/netstack3:component-debug",
+    # `package-debug` corresponds to a Netstack3 instance configured by netemul.
+    "//src/connectivity/network/netstack3:package-debug",
   ]
 }
 

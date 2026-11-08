@@ -6,6 +6,7 @@
 """Unit tests for tools/devshell/lib/shac_runner.py."""
 
 import io
+import json
 import os
 import pathlib
 import subprocess
@@ -108,6 +109,146 @@ class ShacRunnerTest(unittest.TestCase):
                 self.fuchsia_dir,
             )
 
+    def _populate_static_check_tools(self) -> None:
+        host_os, host_cpu = shac_runner._host_platform_and_cpu()
+        host_dir = self.build_dir / f"host_{host_cpu}"
+        host_dir.mkdir(parents=True, exist_ok=True)
+        entries = []
+        for tool_name in sorted(shac_runner._STATIC_CHECK_TOOLS):
+            relative_path = f"host_{host_cpu}/{tool_name}"
+            tool_binary = self.build_dir / relative_path
+            tool_binary.touch(mode=0o755)
+            tool_binary.chmod(0o755)
+            entries.append(
+                {
+                    "name": tool_name,
+                    "path": relative_path,
+                    "os": host_os,
+                    "cpu": host_cpu,
+                }
+            )
+        (self.build_dir / "tool_paths.json").write_text(json.dumps(entries))
+
+    def test_run_shac_skips_build_when_no_repo_has_shac(self) -> None:
+        repo_groups = (
+            scm.RepoGroup(
+                repo_root=self.fuchsia_dir,
+                has_shac=False,
+                files=(),
+            ),
+        )
+
+        with (
+            mock.patch.object(
+                scm, "get_repo_groups", autospec=True, return_value=repo_groups
+            ),
+            mock.patch.object(subprocess, "run", autospec=True) as mock_run,
+        ):
+            shac_runner.run_shac(
+                "check",
+                self.fuchsia_dir,
+                self.build_dir,
+                self.fuchsia_dir,
+            )
+
+        mock_run.assert_not_called()
+
+    def test_run_shac_skips_build_when_static_check_tools_present(self) -> None:
+        self._populate_static_check_tools()
+        repo_groups = (
+            scm.RepoGroup(
+                repo_root=self.fuchsia_dir,
+                has_shac=True,
+                files=("foo.cc",),
+            ),
+        )
+
+        with (
+            mock.patch.object(
+                scm, "get_repo_groups", autospec=True, return_value=repo_groups
+            ),
+            mock.patch.object(
+                subprocess,
+                "run",
+                autospec=True,
+                return_value=subprocess.CompletedProcess(args=[], returncode=0),
+            ) as mock_run,
+        ):
+            shac_runner.run_shac(
+                "check",
+                self.fuchsia_dir,
+                self.build_dir,
+                self.fuchsia_dir,
+            )
+
+        mock_run.assert_called_once()
+        command = mock_run.call_args.args[0]
+        self.assertEqual(command[0], str(self.shac_binary))
+
+    def test_run_shac_builds_when_static_check_tool_missing_from_disk(
+        self,
+    ) -> None:
+        self._populate_static_check_tools()
+        _, host_cpu = shac_runner._host_platform_and_cpu()
+        (self.build_dir / f"host_{host_cpu}" / "cmc").unlink()
+        repo_groups = (
+            scm.RepoGroup(
+                repo_root=self.fuchsia_dir,
+                has_shac=True,
+                files=("foo.cml",),
+            ),
+        )
+
+        with (
+            mock.patch.object(
+                scm, "get_repo_groups", autospec=True, return_value=repo_groups
+            ),
+            mock.patch.object(
+                subprocess,
+                "run",
+                autospec=True,
+                return_value=subprocess.CompletedProcess(args=[], returncode=0),
+            ) as mock_run,
+        ):
+            shac_runner.run_shac(
+                "check",
+                self.fuchsia_dir,
+                self.build_dir,
+                self.fuchsia_dir,
+            )
+
+        self.assertEqual(mock_run.call_count, 2)
+
+    def test_run_shac_builds_when_tool_paths_json_malformed(self) -> None:
+        (self.build_dir / "tool_paths.json").write_text("{not valid json")
+        repo_groups = (
+            scm.RepoGroup(
+                repo_root=self.fuchsia_dir,
+                has_shac=True,
+                files=("foo.cc",),
+            ),
+        )
+
+        with (
+            mock.patch.object(
+                scm, "get_repo_groups", autospec=True, return_value=repo_groups
+            ),
+            mock.patch.object(
+                subprocess,
+                "run",
+                autospec=True,
+                return_value=subprocess.CompletedProcess(args=[], returncode=0),
+            ) as mock_run,
+        ):
+            shac_runner.run_shac(
+                "check",
+                self.fuchsia_dir,
+                self.build_dir,
+                self.fuchsia_dir,
+            )
+
+        self.assertEqual(mock_run.call_count, 2)
+
     def test_run_shac_uses_prebuilt_shac_env(self) -> None:
         custom_shac = self.fuchsia_dir / "custom_shac"
         custom_shac.touch()
@@ -138,7 +279,8 @@ class ShacRunnerTest(unittest.TestCase):
                 self.fuchsia_dir,
             )
 
-        command = mock_run.call_args.args[0]
+        self.assertEqual(mock_run.call_count, 2)
+        command = mock_run.call_args_list[1].args[0]
         self.assertEqual(command[0], str(custom_shac))
 
     def test_run_shac_command_construction(self) -> None:
@@ -172,10 +314,28 @@ class ShacRunnerTest(unittest.TestCase):
                 extra_args=("--no-color",),
             )
 
-        mock_run.assert_called_once()
-        command = mock_run.call_args.args[0]
+        self.assertEqual(mock_run.call_count, 2)
+        build_call = mock_run.call_args_list[0]
         self.assertSequenceEqual(
-            command,
+            build_call.args[0],
+            (
+                str(self.fuchsia_dir / "scripts" / "fx"),
+                "build",
+                "--host",
+                "//bundles/buildbot/static_checks",
+            ),
+        )
+        self.assertEqual(
+            build_call.kwargs["env"]["FUCHSIA_DIR"],
+            str(self.fuchsia_dir),
+        )
+        self.assertEqual(
+            build_call.kwargs["env"]["FUCHSIA_BUILD_DIR"],
+            str(self.build_dir),
+        )
+        shac_command = mock_run.call_args_list[1].args[0]
+        self.assertSequenceEqual(
+            shac_command,
             (
                 str(self.shac_binary),
                 "check",
@@ -211,7 +371,9 @@ class ShacRunnerTest(unittest.TestCase):
                 autospec=True,
                 return_value=subprocess.CompletedProcess(args=[], returncode=0),
             ) as mock_run,
-            mock.patch.object(sys, "stdout", new_callable=io.StringIO),
+            mock.patch.object(
+                sys, "stdout", new_callable=io.StringIO
+            ) as mock_stdout,
         ):
             shac_runner.run_shac(
                 "check",
@@ -221,10 +383,10 @@ class ShacRunnerTest(unittest.TestCase):
                 verbose=True,
             )
 
-        mock_run.assert_called_once()
-        command = mock_run.call_args.args[0]
+        self.assertEqual(mock_run.call_count, 2)
+        shac_command = mock_run.call_args_list[1].args[0]
         self.assertSequenceEqual(
-            command,
+            shac_command,
             (
                 str(self.shac_binary),
                 "check",
@@ -235,6 +397,10 @@ class ShacRunnerTest(unittest.TestCase):
                 "--verbose",
                 "foo.cc",
             ),
+        )
+        self.assertIn(
+            "build --host //bundles/buildbot/static_checks",
+            mock_stdout.getvalue(),
         )
 
     def test_run_shac_dry_run_skips_execution(self) -> None:
@@ -264,7 +430,49 @@ class ShacRunnerTest(unittest.TestCase):
             )
 
         mock_run.assert_not_called()
-        self.assertIn("[dry-run] Would execute:", mock_stdout.getvalue())
+        stdout = mock_stdout.getvalue()
+        self.assertIn(
+            "[dry-run] Would execute:"
+            f" {self.fuchsia_dir / 'scripts' / 'fx'} build --host"
+            " //bundles/buildbot/static_checks",
+            stdout,
+        )
+        self.assertIn(
+            f"[dry-run] Would execute: {self.shac_binary} check",
+            stdout,
+        )
+
+    def test_run_shac_propagates_build_error(self) -> None:
+        repo_groups = (
+            scm.RepoGroup(
+                repo_root=self.fuchsia_dir,
+                has_shac=True,
+                files=("foo.cc",),
+            ),
+        )
+
+        with (
+            mock.patch.object(
+                scm, "get_repo_groups", autospec=True, return_value=repo_groups
+            ),
+            mock.patch.object(
+                subprocess,
+                "run",
+                autospec=True,
+                side_effect=subprocess.CalledProcessError(
+                    returncode=1, cmd=["fx", "build"]
+                ),
+            ) as mock_run,
+            self.assertRaises(subprocess.CalledProcessError),
+        ):
+            shac_runner.run_shac(
+                "check",
+                self.fuchsia_dir,
+                self.build_dir,
+                self.fuchsia_dir,
+            )
+
+        mock_run.assert_called_once()
 
     def test_run_shac_propagates_subprocess_error(self) -> None:
         repo_groups = (
@@ -283,10 +491,13 @@ class ShacRunnerTest(unittest.TestCase):
                 subprocess,
                 "run",
                 autospec=True,
-                side_effect=subprocess.CalledProcessError(
-                    returncode=1, cmd=["shac", "check"]
+                side_effect=(
+                    subprocess.CompletedProcess(args=[], returncode=0),
+                    subprocess.CalledProcessError(
+                        returncode=1, cmd=["shac", "check"]
+                    ),
                 ),
-            ),
+            ) as mock_run,
             self.assertRaises(subprocess.CalledProcessError),
         ):
             shac_runner.run_shac(
@@ -295,6 +506,8 @@ class ShacRunnerTest(unittest.TestCase):
                 self.build_dir,
                 self.fuchsia_dir,
             )
+
+        self.assertEqual(mock_run.call_count, 2)
 
     def test_run_shac_executes_across_multiple_repos(self) -> None:
         subrepo = self.fuchsia_dir / "vendor" / "google"
@@ -330,11 +543,21 @@ class ShacRunnerTest(unittest.TestCase):
                 self.fuchsia_dir,
             )
 
-        self.assertEqual(mock_run.call_count, 2)
-        first_command = mock_run.call_args_list[0].args[0]
-        second_command = mock_run.call_args_list[1].args[0]
+        self.assertEqual(mock_run.call_count, 3)
+        build_command = mock_run.call_args_list[0].args[0]
+        first_shac_command = mock_run.call_args_list[1].args[0]
+        second_shac_command = mock_run.call_args_list[2].args[0]
         self.assertSequenceEqual(
-            first_command,
+            build_command,
+            (
+                str(self.fuchsia_dir / "scripts" / "fx"),
+                "build",
+                "--host",
+                "//bundles/buildbot/static_checks",
+            ),
+        )
+        self.assertSequenceEqual(
+            first_shac_command,
             (
                 str(self.shac_binary),
                 "check",
@@ -347,7 +570,7 @@ class ShacRunnerTest(unittest.TestCase):
             ),
         )
         self.assertSequenceEqual(
-            second_command,
+            second_shac_command,
             (
                 str(self.shac_binary),
                 "check",

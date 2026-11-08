@@ -5,10 +5,9 @@
 // https://opensource.org/licenses/MIT
 
 use core::mem::MaybeUninit;
-use zx_status::Status;
 use zx_types::{ZX_MAX_NAME_LEN, ZX_OK, zx_rsrc_kind_t, zx_status_t};
 
-use region_alloc::Region;
+type Region = region_alloc::Region<crate::ksync_kernel::TrackedMutex>;
 
 use super::handle::KernelHandle;
 use super::resource_dispatcher::{ResourceDispatcher, ResourceDispatcherState, ResourceStorage};
@@ -50,21 +49,6 @@ crate::object::dispatcher::impl_dispatcher_state_init!(
     storage: *mut ResourceStorage,
     region: *mut Region,
 );
-
-/// Initializes allocator for `kind`.
-///
-/// # Safety
-///
-/// This function is safe to call from C with any arguments; it acquires the internal resource lock
-/// and validates `kind`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_resource_dispatcher_initialize_allocator(
-    kind: zx_rsrc_kind_t,
-    base: u64,
-    size: usize,
-) -> zx_status_t {
-    Status::result_into_raw(ResourceDispatcher::initialize_allocator(kind, base, size))
-}
 
 /// Copies the name of `disp` to `out_name`.
 ///

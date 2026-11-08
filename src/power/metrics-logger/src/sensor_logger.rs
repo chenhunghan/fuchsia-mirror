@@ -73,11 +73,16 @@ pub async fn generate_power_drivers(
     driver_aliases: HashMap<String, String>,
 ) -> Result<Vec<Driver<fpower::DeviceProxy>>> {
     let mut drivers = Vec::new();
+    // A sensor may be published more than once, e.g. by its driver and also through its devfs class
+    // (which is advertised as the same service), so deduplicate by sensor name.
+    let mut sensor_names: HashSet<String> = HashSet::new();
     for instance in fclient::Service::open(fpower::ServiceMarker)?.enumerate().await? {
         let power_proxy = instance.connect_to_device()?;
         let sensor_name = power_proxy.get_sensor_name().await?;
-        let alias = driver_aliases.get(&sensor_name);
-        drivers.push(Driver { sensor_name, proxy: power_proxy, alias: alias.cloned() });
+        if sensor_names.insert(sensor_name.clone()) {
+            let alias = driver_aliases.get(&sensor_name);
+            drivers.push(Driver { sensor_name, proxy: power_proxy, alias: alias.cloned() });
+        }
     }
     Ok(drivers)
 }

@@ -157,6 +157,23 @@ TEST(FsTest, WriteDeniedPreservesSuid) {
   EXPECT_NE(file_stat.st_mode & S_ISGID, 0u);
 }
 
+// Verify that renaming a directory across parent directories checks `reparent` on the moving
+// directory before checking `add_name` on the target parent directory.
+TEST(FsTest, RenameChecksReparentBeforeAddName) {
+  test_helper::ScopedTempDir old_dir;
+  test_helper::ScopedTempDir new_dir;
+  std::string moving_dir = old_dir.path() + "/sub";
+  std::string target_dir = new_dir.path() + "/dst";
+
+  ASSERT_THAT(mkdir(moving_dir.c_str(), 0700), SyscallSucceeds());
+
+  auto enforcing = ScopedEnforcement::SetEnforcing();
+
+  EXPECT_TRUE(RunSubprocessAs("test_u:test_r:test_fs_rename_no_reparent_t:s0", [&]() {
+    EXPECT_THAT(rename(moving_dir.c_str(), target_dir.c_str()), SyscallFailsWithErrno(EACCES));
+  }));
+}
+
 constexpr char kSendfileDstLabel[] = "test_u:object_r:test_fs_sendfile_dst_t:s0";
 constexpr char kPayload[] = "foo";
 constexpr size_t kPayloadSize = sizeof(kPayload) - 1;

@@ -41,7 +41,7 @@
 #include <phys/handoff/arm64/handoff.h>
 #elif defined(__riscv)
 #include <phys/handoff/riscv64/handoff.h>
-#elif defined(__x86_64__) || defined(__i386__)
+#elif defined(__x86_64__)
 #include <phys/handoff/x86/handoff.h>
 #endif
 
@@ -308,6 +308,7 @@ struct PhysElfImage {
 struct PhysHandoff {
   // Whether the given type represents physical memory that should be turned
   // into a VMO.
+  // LINT.IfChange(IsPhysVmoType)
   static bool IsPhysVmoType(memalloc::Type type) {
     switch (type) {
       case memalloc::Type::kDataZbi:
@@ -321,6 +322,7 @@ struct PhysHandoff {
     }
     return false;
   }
+  // LINT.ThenChange(//zircon/kernel/vm/pmm_node.rs:is_phys_vmo_type)
 
   constexpr bool Valid() const { return magic == kMagic; }
 
@@ -451,9 +453,11 @@ const PhysHandoff* cpp_phys_handoff_get();
 
 // Accessors for individual PhysHandoff fields, for Rust callers that cannot see
 // through the PhysHandoffSpan and stdbind::optional templates.
+const uint8_t* cpp_phys_handoff_crashlog(size_t* size);
 uint8_t* cpp_phys_handoff_nvram(size_t* size);
 const zbi_topology_node_t* cpp_phys_handoff_cpu_topology(size_t* count);
 const memalloc::Range* cpp_phys_handoff_memory(size_t* count);
+const uint8_t* cpp_phys_handoff_efi_memory_attributes(size_t* size);
 const MappedMmioRange* cpp_phys_handoff_periph_ranges(size_t* count);
 // Copies the platform ID into *out and returns true, or returns false if none
 // was handed off.

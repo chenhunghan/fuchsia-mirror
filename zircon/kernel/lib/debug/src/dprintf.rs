@@ -56,21 +56,7 @@ pub const ALWAYS: u32 = 0;
 pub const INFO: u32 = 1;
 pub const SPEW: u32 = 2;
 
-pub struct KernelConsoleWriter;
-
-impl core::fmt::Write for KernelConsoleWriter {
-    #[cfg(not(test))]
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        kprint::kprint!("{:s}", s);
-        Ok(())
-    }
-
-    #[cfg(test)]
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        std::print!("{}", s);
-        Ok(())
-    }
-}
+pub use crate::KernelConsoleWriter;
 
 #[doc(hidden)]
 #[inline(always)]
@@ -86,7 +72,8 @@ pub const fn dprintf_enabled(level: u32) -> bool {
 }
 
 #[doc(hidden)]
-#[inline(always)]
+#[cold]
+#[inline(never)]
 pub fn print_dprintf_args(args: core::fmt::Arguments<'_>) {
     use core::fmt::Write;
     let mut writer = KernelConsoleWriter;

@@ -20,6 +20,10 @@ CONFIG_RESULTSTORE_INFRA = "resultstore_infra"
 CONFIG_SPONGE_INFRA = "sponge_infra"
 # LINT.ThenChange(//build/bazel/templates/template.remote_services.bazelrc:bazel_remote_services_configs)
 
+VALID_RESULTSTORE_CONFIGS = frozenset(
+    {CONFIG_RESULTSTORE, CONFIG_RESULTSTORE_INFRA}
+)
+
 # Sockets and environment variable names used across orchestrator and wrappers.
 # Consumed in main_build.py, generate_invocation_bazelrc.py, wrapper.bazel.sh,
 # and bazel_launcher.sh.
@@ -27,6 +31,12 @@ ENV_BAZEL_RBE_SOCKET = "FX_INTERNAL_BAZEL_RBE_SOCKET_PATH"
 ENV_BAZEL_RESULTSTORE_SOCKET = "FX_INTERNAL_BAZEL_RESULTSTORE_SOCKET_PATH"
 
 ENV_RESULTSTORE_BAZEL = "FX_INTERNAL_RESULTSTORE_BAZEL"
+
+ENV_BAZEL_DISK_CACHE = "FUCHSIA_BAZEL_DISK_CACHE"
+ENV_BAZEL_DISK_CACHE_SIZE = "FUCHSIA_BAZEL_DISK_CACHE_SIZE"
+
+# Directory name for per-invocation Bazel log directories under FX_BUILD_LOGDIR or ninja build dir.
+BAZEL_LOGS_DIRNAME = "bazel_logs"
 
 
 def socket_env_vars(

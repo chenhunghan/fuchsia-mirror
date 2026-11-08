@@ -52,6 +52,14 @@ pub struct SwdConfig {
     /// Whether to use driver blob paging in pkg-cache.
     #[serde(skip_serializing_if = "crate::common::is_default")]
     pub use_driver_blob_paging: bool,
+
+    /// Earliest time, in seconds on the boot timeline (starting at 0), at which pkg-cache will
+    /// trigger garbage collection after the system is committed during that boot. If the commit
+    /// occurs after this time, garbage collection runs immediately. It is skipped if any garbage
+    /// collection already completed during that boot, and it is not retried on later boots if the
+    /// device reboots before it runs. If unset, post-commit garbage collection is disabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_commit_gc_earliest_boot_seconds: Option<u16>,
 }
 
 /// The trust store to use for SWD.
@@ -155,6 +163,7 @@ mod tests {
 
     #[test]
     fn test_default_serialization() {
+        crate::common::tests::default_serialization_helper::<SwdConfig>();
         crate::common::tests::default_serialization_helper::<PolicyConfig>();
     }
 
@@ -168,6 +177,7 @@ mod tests {
         assert_eq!(config.update_checker, None);
         assert_eq!(config.policy, None);
         assert_eq!(config.on_verification_failure, VerificationFailureAction::default());
+        assert_eq!(config.post_commit_gc_earliest_boot_seconds, None);
     }
 
     // Test full deserialization of the SWD Config
@@ -190,6 +200,7 @@ mod tests {
               "on_verification_failure": "reboot",
               "tuf_config_paths": ["/path/to/tuf_config.json"],
               "excessive_update_duration_seconds": 3600,
+              "post_commit_gc_earliest_boot_seconds": 300,
             }
         "#;
 
@@ -213,9 +224,22 @@ mod tests {
                 on_verification_failure: VerificationFailureAction::Reboot,
                 tuf_config_paths: vec!["/path/to/tuf_config.json".into()],
                 excessive_update_duration_seconds: Some(3600),
+                post_commit_gc_earliest_boot_seconds: Some(300),
                 ..Default::default()
             }
         );
+    }
+
+    #[test]
+    fn test_post_commit_gc_earliest_boot_seconds_negative_is_invalid() {
+        let json5 = r#"
+            {
+              "post_commit_gc_earliest_boot_seconds": -1,
+            }
+        "#;
+        let mut cursor = std::io::Cursor::new(json5);
+        let result: Result<SwdConfig> = util::from_reader(&mut cursor);
+        assert!(result.is_err());
     }
 
     #[test]

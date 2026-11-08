@@ -50,7 +50,6 @@ fx_component_manifest(
 fx_test_component(
     name = "fuchsia-rseq-tests-component",
     compiled_manifest = ":fuchsia-rseq-tests-manifest",
-    component_name = "fuchsia-rseq-tests",
     deps = [":fuchsia-rseq_test_packaged_bin"],
 )
 

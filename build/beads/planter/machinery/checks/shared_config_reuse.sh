@@ -22,14 +22,16 @@ set -euo pipefail
 #    BUILD.bazel (sibling BUILD.gn has the BAZEL2GN sentinel) whose package has no
 #    GN `config("<name>")`. bazel2gn copies lint_config verbatim, so the GN
 #    counterpart must sit next to the Bazel rust_lint_config under the same name.
-# 4. broken_lint_then_change (error): a `LINT.ThenChange(...)` in or next to a
+# 4. broken_ifttt (error): a `LINT.ThenChange(...)` in or next to a
 #    changed file that points at a missing file, or at a file without the matching
 #    `LINT.IfChange(<id>)` (e.g. after moving lint dicts into a .bzl).
-# 5. duplicated_gn_build_arg / inline_gn_declare_args / unexported_gn_build_arg /
-#    missing_gn_build_arg_lint_change (error): a GN `declare_args()` build argument
-#    re-defined or recalculated in a `.bzl` or `BUILD.bazel` file instead of being
-#    exported from its `.gni` file via `generated_file("gn_build_variables_for_bazel")`
-#    in `//build/bazel/BUILD.gn` and loaded from `@fuchsia_build_info//:args.bzl`
+# 5. duplicated_gn_build_arg / inline_gn_declare_args /
+#    unexported_gn_build_arg / missing_gn_build_arg_ifttt /
+#    unscoped_gn_build_arg_ifttt (error): a GN `declare_args()` build argument
+#    re-defined or recalculated in a `.bzl` or `BUILD.bazel` file instead of
+#    being exported from its `.gni` file via
+#    `generated_file("gn_build_variables_for_bazel")` in
+#    `//build/bazel/BUILD.gn` and loaded from `@fuchsia_build_info//:args.bzl`
 #    with bidirectional `LINT.IfChange` / `LINT.ThenChange` comments.
 #
 # All findings are change-wide, so with several target directories only the run
@@ -57,7 +59,7 @@ import sys
 workdir = os.path.abspath(sys.argv[1])
 raw_dirs = sys.argv[2] if len(sys.argv) > 2 else ""
 target_dirs = [d.strip().strip("/") for d in re.split(r"[\s,]+", raw_dirs) if d.strip().strip("/")]
-change_base = os.environ.get("PLANTER_CHANGE_BASE", "").strip() or "HEAD"
+change_base = (os.environ.get("PLANTER_RESOLVED_CHANGE_BASE") or os.environ.get("PLANTER_CHANGE_BASE") or "HEAD").strip()
 
 LINTS_PKG = "build/config/rust/lints"
 BAZEL_BUILD_FILES = ("BUILD.bazel", "BUILD")
@@ -102,8 +104,12 @@ def parse(text, rel):
         return None
 
 
-touched = set(git_lines(["diff", "--name-only", change_base]))
-touched.update(git_lines(["ls-files", "--others", "--exclude-standard"]))
+_env_changed = os.environ.get("PLANTER_CHANGED_FILES")
+if _env_changed is not None:
+    touched = {l.strip() for l in _env_changed.splitlines() if l.strip()}
+else:
+    touched = set(git_lines(["diff", "--name-only", change_base]))
+    touched.update(git_lines(["ls-files", "--others", "--exclude-standard"]))
 for td in target_dirs:
     td_abs = os.path.join(workdir, td)
     if not os.path.isdir(td_abs):
@@ -249,16 +255,12 @@ def add_chunks(tree, rel, chunks):
 findings = []
 
 
+def _emit(findings, category, severity, file, line, message, remediation=""):
+    findings.append({"source": "shared_config_reuse", "category": category, "severity": severity, "file": file, "line": line, "message": message, "remediation": remediation})
+
+
 def emit(category, severity, rel, line, message, remediation):
-    findings.append({
-        "source": "shared_config_reuse",
-        "category": category,
-        "severity": severity,
-        "file": rel,
-        "line": line,
-        "message": message,
-        "remediation": remediation,
-    })
+    _emit(findings, category, severity, rel, line, message, remediation)
 
 
 # 1. New alias() wrappers around lint configs.
@@ -491,7 +493,7 @@ for rel in sorted(scan):
         if item in base_items and problem_with(trel, label, git(["show", f"{change_base}:{trel}"])):
             continue
         emit(
-            "broken_lint_then_change", "error", rel, line,
+            "broken_ifttt", "error", rel, line,
             f"`LINT.ThenChange({item})` {problem}.",
             "Update the LINT.ThenChange path/label to the file that now holds the matching "
             "`LINT.IfChange(<id>)` block (e.g. the .bzl the lint dicts were moved to), keeping "
@@ -753,7 +755,7 @@ for rel in sorted(changed):
                         gni_has_lint = decl_info[3]
                         if not gni_has_lint:
                             emit(
-                                "missing_gn_build_arg_lint_change", "error", decl_rel, decl_info[1],
+                                "missing_gn_build_arg_ifttt", "error", decl_rel, decl_info[1],
                                 f"GN build argument `{sym}` in '{decl_rel}' is exported to Bazel in "
                                 "'build/bazel/BUILD.gn' but is missing `# LINT.IfChange` / "
                                 f"`# LINT.ThenChange(//build/bazel/BUILD.gn:{sym})` inside `declare_args()`.",
@@ -774,7 +776,7 @@ for rel in sorted(changed):
                                 if lbl and re.search(r"LINT\.IfChange\(\s*" + re.escape(lbl) + r"\s*\)", bb_all):
                                     continue
                                 emit(
-                                    "unscoped_gn_build_arg_lint_change", "error", decl_rel, t_line,
+                                    "unscoped_gn_build_arg_ifttt", "error", decl_rel, t_line,
                                     f"`LINT.ThenChange(//build/bazel/BUILD.gn{':' + lbl if lbl else ''})` in "
                                     f"'{decl_rel}' (exporting `{sym}`) "
                                     + ("names a label with no matching `LINT.IfChange(" + lbl + ")` in "
@@ -789,7 +791,7 @@ for rel in sorted(changed):
                                 )
                         if not bb_has_lint:
                             emit(
-                                "missing_gn_build_arg_lint_change", "error", "build/bazel/BUILD.gn", 1,
+                                "missing_gn_build_arg_ifttt", "error", "build/bazel/BUILD.gn", 1,
                                 f"Export block for `{sym}` (`declaration = \"//{exp_decl}\"`) in "
                                 "'build/bazel/BUILD.gn' is missing `# LINT.IfChange` / "
                                 f"`# LINT.ThenChange(//{exp_decl})`.",
@@ -798,7 +800,7 @@ for rel in sorted(changed):
                             )
 
 # 6. Check IFTTT LINT markers on dual-maintained build_flags() and GN config() definitions.
-def check_build_flags_ifttt_lint():
+def check_build_flags_ifttt():
     """Verify build_flags() mirroring a hand-maintained GN config() has LINT.IfChange/ThenChange."""
     for rel in sorted(changed):
         if os.path.basename(rel) not in BAZEL_BUILD_FILES:
@@ -840,7 +842,7 @@ def check_build_flags_ifttt_lint():
             )
             if not (has_bz_if and has_bz_then and has_gn_if and has_gn_then):
                 emit(
-                    "missing_build_flags_lint_ifttt",
+                    "missing_build_flags_ifttt",
                     "error",
                     rel,
                     call.lineno,
@@ -854,7 +856,7 @@ def check_build_flags_ifttt_lint():
                 )
 
 
-check_build_flags_ifttt_lint()
+check_build_flags_ifttt()
 
 unique, seen = [], set()
 for f in findings:

@@ -342,7 +342,7 @@ fn filter_relative(
     }
 
     // Reset our BFS structures.
-    visit_q = VecDeque::new();
+    visit_q.clear();
     visit_q.push_back(root);
 
     // Same as filter_descendant.

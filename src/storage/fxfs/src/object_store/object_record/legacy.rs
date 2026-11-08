@@ -6,13 +6,15 @@
 //! implementations should be placed in this module.
 
 use super::{
-    ChildValue, DirTypeV59, EncryptionKeyV59, EncryptionKeysV59, ExtendedAttributeValueV32,
-    ExtentValueV38, FsverityMetadataV50, Item, ObjectAttributesV49, ObjectKeyV54, ObjectKindV62,
-    ObjectValueV62,
+    AttributeId, AttributeKeyV32, BytesAndNodes, CasefoldString, ChildValue, DirTypeV59,
+    EncryptedCasefoldChild, EncryptedChild, EncryptionKeyV59, EncryptionKeysV59,
+    ExtendedAttributeValueV32, ExtentValueV38, FsverityMetadataV50, Item, ObjectAttributesV49,
+    ObjectKeyDataV63, ObjectKeyV63, ObjectKindV62, ObjectValueV62, ProjectId, ProjectPropertyV32,
 };
-use crate::serialized_types::{Migrate, Versioned, migrate_to_version};
+use crate::serialized_types::{Migrate, Versioned, migrate_nodefault, migrate_to_version};
 use fprint::TypeFingerprint;
 use fxfs_crypto::WrappingKeyId;
+use fxfs_macros::SerializeKey;
 use serde::de::Error as SerdeError;
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -138,14 +140,14 @@ pub enum ObjectValueV59 {
     Extent(ExtentValueV38),
     Child(ChildValue),
     Trim,
-    BytesAndNodes { bytes: i64, nodes: i64 },
+    BytesAndNodes(BytesAndNodes),
     ExtendedAttribute(ExtendedAttributeValueV32),
     VerifiedAttribute { size: u64, fsverity_metadata: FsverityMetadataV50 },
 }
 
 pub type ObjectItemV59 = Item<ObjectKeyV54, ObjectValueV59>;
 
-impl From<ObjectItemV59> for super::ObjectItemV62 {
+impl From<ObjectItemV59> for ObjectItemV62 {
     fn from(item: ObjectItemV59) -> Self {
         Self { key: item.key, value: item.value.into() }
     }
@@ -163,7 +165,7 @@ pub enum ObjectValueV56 {
     Extent(ExtentValueV38),
     Child(ChildValue),
     Trim,
-    BytesAndNodes { bytes: i64, nodes: i64 },
+    BytesAndNodes(BytesAndNodes),
     ExtendedAttribute(ExtendedAttributeValueV32),
     VerifiedAttribute { size: u64, fsverity_metadata: FsverityMetadataV50 },
 }
@@ -174,4 +176,82 @@ impl From<ObjectItemV56> for ObjectItemV59 {
     fn from(item: ObjectItemV56) -> Self {
         Self { key: item.key, value: item.value.into() }
     }
+}
+
+pub type ObjectItemV62 = Item<ObjectKeyV54, ObjectValueV62>;
+
+impl From<ObjectItemV62> for super::ObjectItemV63 {
+    fn from(item: ObjectItemV62) -> Self {
+        Self { key: item.key.into(), value: item.value }
+    }
+}
+
+#[derive(
+    Migrate,
+    Clone,
+    Debug,
+    Eq,
+    Hash,
+    PartialEq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    TypeFingerprint,
+    SerializeKey,
+)]
+#[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
+#[migrate_to_version(ObjectKeyDataV63)]
+pub enum ObjectKeyDataV54 {
+    Object,
+    Keys,
+    Attribute(AttributeId, AttributeKeyV32),
+    Child {
+        name: String,
+    },
+    GraveyardEntry {
+        object_id: u64,
+    },
+    Project {
+        project_id: ProjectId,
+        property: ProjectPropertyV32,
+    },
+    ExtendedAttribute {
+        #[serde(with = "crate::zerocopy_serialization")]
+        name: Vec<u8>,
+    },
+    GraveyardAttributeEntry {
+        object_id: u64,
+        attribute_id: AttributeId,
+    },
+    EncryptedCasefoldChild(EncryptedCasefoldChild),
+    LegacyCasefoldChild(CasefoldString),
+    EncryptedChild(EncryptedChild),
+    CasefoldChild {
+        hash_code: u32,
+        name: String,
+    },
+}
+
+#[derive(
+    Migrate,
+    Clone,
+    Debug,
+    Eq,
+    Ord,
+    Hash,
+    PartialEq,
+    PartialOrd,
+    Serialize,
+    Deserialize,
+    SerializeKey,
+    TypeFingerprint,
+    Versioned,
+)]
+#[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
+#[migrate_to_version(ObjectKeyV63)]
+#[migrate_nodefault]
+pub struct ObjectKeyV54 {
+    pub object_id: u64,
+    pub data: ObjectKeyDataV54,
 }

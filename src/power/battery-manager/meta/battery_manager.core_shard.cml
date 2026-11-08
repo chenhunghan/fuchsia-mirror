@@ -65,6 +65,7 @@
             protocol: [
                 "fuchsia.power.battery.BatteryManager",
                 "fuchsia.power.battery.test.BatterySimulator",
+                "fuchsia.power.battery.test.GovernorDebug",
             ],
             from: "#battery_manager",
             to: "self/toolbox",

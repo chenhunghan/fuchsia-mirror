@@ -13,13 +13,13 @@
 #include <string>
 
 #include "src/developer/forensics/feedback/attachments/attachment_manager.h"
+#include "src/developer/forensics/feedback/attachments/disk_backed_system_log.h"
 #include "src/developer/forensics/feedback/attachments/file_backed_provider.h"
 #include "src/developer/forensics/feedback/attachments/inspect.h"
 #include "src/developer/forensics/feedback/attachments/kernel_log.h"
 #include "src/developer/forensics/feedback/attachments/previous_boot_inspect.h"
 #include "src/developer/forensics/feedback/attachments/previous_boot_log.h"
 #include "src/developer/forensics/feedback/attachments/process_tree.h"
-#include "src/developer/forensics/feedback/attachments/system_log.h"
 #include "src/developer/forensics/feedback_data/inspect_data_budget.h"
 #include "src/developer/forensics/utils/cobalt/logger.h"
 #include "src/developer/forensics/utils/redact/redactor.h"
@@ -44,9 +44,8 @@ class AttachmentProviders {
   static std::unique_ptr<backoff::Backoff> AttachmentProviderBackoff();
 
  private:
-  LogBuffer log_buffer_;
   KernelLog kernel_log_;
-  std::unique_ptr<AttachmentProvider> system_log_;
+  DiskBackedSystemLog system_log_;
   Inspect inspect_;
   PreviousBootInspect previous_boot_inspect_;
   PreviousBootLog previous_boot_log_;

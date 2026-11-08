@@ -9,7 +9,7 @@
 #include <iomanip>
 #include <sstream>
 
-#include <re2/re2.h>
+#include "re2/re2.h"
 
 namespace fuzzing {
 

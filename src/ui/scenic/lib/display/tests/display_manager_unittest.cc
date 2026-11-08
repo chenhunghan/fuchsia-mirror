@@ -266,6 +266,62 @@ TEST_F(DisplayManagerMockTest, SelectPreferredMode) {
             kPreferredMode.refresh_rate_millihertz);
 }
 
+TEST_F(DisplayManagerMockTest, SelectPreferredModeWithVariableRefreshRate) {
+  static const display::WireDisplayId kDisplayId = {.value = 1};
+  static const WireDisplayMode kPreferredMode = {
+      .active_area = {.width = 1280, .height = 2856},
+      .refresh_rate_millihertz = 117'794,
+      .flags = fuchsia_hardware_display_types::wire::ModeFlags::kVariableRefreshRate,
+  };
+  static const WireDisplayMode kNonPreferredMode = {
+      .active_area = {.width = 1280, .height = 2856},
+      .refresh_rate_millihertz = 60'000,
+  };
+  std::vector<WireDisplayMode> modes = {
+      kPreferredMode,
+      kNonPreferredMode,
+  };
+  auto pixel_format = fuchsia_images2::PixelFormat::kR8G8B8A8;
+
+  auto [coordinator_client, coordinator_server] =
+      fidl::Endpoints<fuchsia_hardware_display::Coordinator>::Create();
+  auto [listener_client, listener_server] =
+      fidl::Endpoints<fuchsia_hardware_display::CoordinatorListener>::Create();
+  display_manager()->BindDefaultDisplayCoordinator(dispatcher(), std::move(coordinator_client),
+                                                   std::move(listener_server));
+
+  const WireDisplayInfo kDisplayInfo = {
+      .id = kDisplayId,
+      .modes = fidl::VectorView<WireDisplayMode>::FromExternal(modes),
+      .pixel_format =
+          fidl::VectorView<fuchsia_images2::wire::PixelFormat>::FromExternal(&pixel_format, 1),
+      .manufacturer_name = "manufacturer",
+      .monitor_name = "model",
+      .monitor_serial = "0001",
+      .horizontal_size_mm = 120,
+      .vertical_size_mm = 100,
+      .using_fallback_size = false,
+  };
+
+  MockDisplayCoordinator mock_display_coordinator(kDisplayInfo);
+  mock_display_coordinator.Bind(std::move(coordinator_server), std::move(listener_client));
+  mock_display_coordinator.SendOnDisplayChangedRequest();
+
+  EXPECT_TRUE(RunLoopUntilIdle());
+
+  const Display* default_display = display_manager()->default_display();
+  ASSERT_TRUE(default_display != nullptr);
+
+  EXPECT_EQ(default_display->width_in_px(), kPreferredMode.active_area.width);
+  EXPECT_EQ(default_display->height_in_px(), kPreferredMode.active_area.height);
+  EXPECT_EQ(default_display->mode().flags,
+            fuchsia_hardware_display_types::wire::ModeFlags::kVariableRefreshRate);
+  EXPECT_EQ(default_display->mode().refresh_rate_millihertz,
+            kPreferredMode.refresh_rate_millihertz);
+  EXPECT_EQ(default_display->maximum_refresh_rate_in_millihertz(),
+            kPreferredMode.refresh_rate_millihertz);
+}
+
 TEST(DisplayManager, ICanHazDisplayMode) {
   static const display::WireDisplayId kDisplayId = {.value = 1};
   static const WireDisplayMode kPreferredMode = {

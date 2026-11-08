@@ -4,6 +4,8 @@
 
 #include "src/developer/forensics/last_reboot/reporter.h"
 
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
+#include <fidl/fuchsia.mem/cpp/fidl.h>
 #include <lib/async/cpp/task.h>
 #include <lib/fpromise/bridge.h>
 #include <lib/fpromise/result.h>
@@ -16,8 +18,8 @@
 
 #include "src/developer/forensics/feedback/config.h"
 #include "src/developer/forensics/utils/errors.h"
+#include "src/developer/forensics/utils/vmo.h"
 #include "src/lib/files/file.h"
-#include "src/lib/fsl/vmo/strings.h"
 
 namespace forensics {
 namespace last_reboot {
@@ -28,7 +30,7 @@ constexpr char kHasReportedOnPath[] = "/tmp/has_reported_on_reboot_log.txt";
 }  // namespace
 
 Reporter::Reporter(async_dispatcher_t* dispatcher, cobalt::Logger* cobalt, RedactorBase* redactor,
-                   fuchsia::feedback::CrashReporter* crash_reporter)
+                   crash_reports::CrashReporterInternal* crash_reporter)
     : dispatcher_(dispatcher),
       executor_(dispatcher),
       cobalt_(cobalt),
@@ -61,29 +63,32 @@ void Reporter::ReportOn(const feedback::RebootLog& reboot_log, zx::duration cras
 
 namespace {
 
-fuchsia::feedback::CrashReport CreateCrashReport(
+fuchsia_feedback::CrashReport CreateCrashReport(
     const feedback::RebootLog& reboot_log, RedactorBase* redactor,
     feedback::SpontaneousRebootReason spontaneous_reboot_reason) {
   // Build the crash report.
-  fuchsia::feedback::CrashReport report;
   const feedback::FinalShutdownInfo& final_shutdown_info = reboot_log.GetFinalShutdownInfo();
 
-  report.set_program_name(final_shutdown_info.ToCrashProgramName())
-      .set_crash_signature(final_shutdown_info.ToCrashSignature(spontaneous_reboot_reason))
-      .set_is_fatal(true);
+  fuchsia_feedback::CrashReport report({
+      .program_name = final_shutdown_info.ToCrashProgramName(),
+      .crash_signature = final_shutdown_info.ToCrashSignature(spontaneous_reboot_reason),
+      .is_fatal = true,
+  });
   if (final_shutdown_info.Uptime().has_value()) {
-    report.set_program_uptime(final_shutdown_info.Uptime()->get());
+    report.program_uptime(final_shutdown_info.Uptime()->get());
   }
 
   std::string reboot_log_str = reboot_log.RebootLogStr();
 
   // Build the crash report attachments.
-  fsl::SizedVmo vmo;
-  if (fsl::VmoFromString(redactor->Redact(reboot_log_str), &vmo)) {
-    std::vector<fuchsia::feedback::Attachment> attachments(1);
-    attachments.back().key = "reboot_crash_log";
-    attachments.back().value = std::move(vmo).ToTransport();
-    report.set_attachments(std::move(attachments));
+  if (zx::result<fuchsia_mem::Buffer> buffer = BufferFromString(redactor->Redact(reboot_log_str));
+      buffer.is_ok()) {
+    std::vector<fuchsia_feedback::Attachment> attachments;
+    attachments.emplace_back(fuchsia_feedback::Attachment({
+        .key = "reboot_crash_log",
+        .value = std::move(*buffer),
+    }));
+    report.attachments(std::move(attachments));
   }
 
   return report;
@@ -94,7 +99,7 @@ fuchsia::feedback::CrashReport CreateCrashReport(
 ::fpromise::promise<void> Reporter::FileCrashReport(
     const feedback::RebootLog& reboot_log, const zx::duration delay,
     feedback::SpontaneousRebootReason spontaneous_reboot_reason) {
-  ::fuchsia::feedback::CrashReport report =
+  fuchsia_feedback::CrashReport report =
       CreateCrashReport(reboot_log, redactor_, spontaneous_reboot_reason);
 
   ::fpromise::bridge<void, Error> bridge;
@@ -103,13 +108,14 @@ fuchsia::feedback::CrashReport CreateCrashReport(
       std::make_shared<::fpromise::completer<void, Error>>(std::move(bridge.completer));
 
   delayed_crash_reporting_.Reset([this, report = std::move(report), completer]() mutable {
-    crash_reporter_->FileReport(
-        std::move(report), [completer](fuchsia::feedback::CrashReporter_FileReport_Result result) {
+    crash_reporter_->FileReportInternal(
+        std::move(report),
+        [completer](const fidl::Response<fuchsia_feedback::CrashReporter::FileReport>& result) {
           if (!*completer) {
             return;
           }
 
-          if (result.is_err()) {
+          if (result.is_error()) {
             completer->complete_error(Error::kBadValue);
           } else {
             completer->complete_ok();

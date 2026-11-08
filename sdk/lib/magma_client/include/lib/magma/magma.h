@@ -590,6 +590,27 @@ MAGMA_EXPORT magma_status_t magma_connection_create_context2(
     magma_priority_t priority,
     uint32_t* context_id_out);
 
+///
+/// \brief Creates a memory buffer of at least the given size. If flags includes
+///        MAGMA_BUFFER_FLAG_REMOTE_ALLOCATION, the memory is allocated by the system driver;
+///        otherwise this is equivalent to magma_connection_create_buffer.
+/// \param connection An open connection.
+/// \param size Requested buffer size.
+/// \param flags A union of MAGMA_BUFFER_FLAG_* flags. Vendor-specific flags are passed to the
+///        system driver.
+/// \param size_out The returned buffer's actual size.
+/// \param buffer_out The returned buffer.
+/// \param id_out The buffer id of the buffer.
+///
+MAGMA_EXPORT magma_status_t magma_connection_create_buffer2(
+    magma_connection_t connection,
+    uint64_t size,
+    magma_buffer_flags_t flags,
+    uint64_t* size_out,
+    magma_buffer_t* buffer_out,
+    magma_buffer_id_t* id_out)
+MAGMA_AVAILABLE_SINCE(NEXT);
+
 #if defined(__cplusplus)
 }
 #endif

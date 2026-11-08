@@ -75,21 +75,25 @@ TEST(ReaderTest, MergeRepeatedMessages) {
 !!! MESSAGE REPEATED 2 MORE TIMES !!!
 )"));
 
-  float compression_ratio;
   IdentityDecoder decoder;
 
-  const fit::result<ReaderError, std::string> result =
-      Concatenate(temp_dir.path(), kMaxDecompressedSize, &decoder, &compression_ratio);
+  const fit::result<ReaderError, ConcatenateResult> result =
+      Concatenate(temp_dir.path(), kMaxDecompressedSize, &decoder);
   ASSERT_TRUE(result.is_ok());
 
   // Verify output, expect: msg_0 x124 msg_1 x7.
-  EXPECT_EQ(*result, R"([00001.000][07559][07687][] INFO: line 0
+  EXPECT_EQ(result->logs, R"([00001.000][07559][07687][] INFO: line 0
 !!! MESSAGE REPEATED 124 MORE TIMES !!!
 [00001.000][07559][07687][] INFO: line 1
 !!! MESSAGE REPEATED 7 MORE TIMES !!!
 !!! MESSAGE REPEATED FOR 3 SECONDS !!!
 !!! MESSAGE REPEATED 72 MORE TIMES !!!
 )");
+  EXPECT_FALSE(result->is_at_capacity);
+  EXPECT_EQ(result->deduplicated_message_count, 2u);
+  EXPECT_EQ(result->message_count, 205u);
+  EXPECT_EQ(result->first_timestamp, zx::time_boot(zx::sec(1).to_nsecs()));
+  EXPECT_EQ(result->last_timestamp, zx::time_boot(zx::sec(1).to_nsecs()));
 }
 
 TEST(ReaderTest, SortsMessagesNoTimeTagOnly) {
@@ -101,13 +105,17 @@ TEST(ReaderTest, SortsMessagesNoTimeTagOnly) {
 
   EXPECT_TRUE(files::WriteFile(MakeLogFilePath(temp_dir, 0u), message));
 
-  float compression_ratio;
   IdentityDecoder decoder;
 
-  const fit::result<ReaderError, std::string> result =
-      Concatenate(temp_dir.path(), kMaxDecompressedSize, &decoder, &compression_ratio);
+  const fit::result<ReaderError, ConcatenateResult> result =
+      Concatenate(temp_dir.path(), kMaxDecompressedSize, &decoder);
   ASSERT_TRUE(result.is_ok());
-  EXPECT_EQ(*result, message);
+  EXPECT_EQ(result->logs, message);
+  EXPECT_FALSE(result->is_at_capacity);
+  EXPECT_EQ(result->deduplicated_message_count, 0u);
+  EXPECT_EQ(result->message_count, 0u);
+  EXPECT_FALSE(result->first_timestamp.has_value());
+  EXPECT_FALSE(result->last_timestamp.has_value());
 }
 
 TEST(ReaderTest, SortsMessagesMixed) {
@@ -125,13 +133,17 @@ TEST(ReaderTest, SortsMessagesMixed) {
 
   EXPECT_TRUE(files::WriteFile(MakeLogFilePath(temp_dir, 0u), input_message));
 
-  float compression_ratio;
   IdentityDecoder decoder;
 
-  const fit::result<ReaderError, std::string> result =
-      Concatenate(temp_dir.path(), kMaxDecompressedSize, &decoder, &compression_ratio);
+  const fit::result<ReaderError, ConcatenateResult> result =
+      Concatenate(temp_dir.path(), kMaxDecompressedSize, &decoder);
   ASSERT_TRUE(result.is_ok());
-  EXPECT_EQ(*result, output_message);
+  EXPECT_EQ(result->logs, output_message);
+  EXPECT_FALSE(result->is_at_capacity);
+  EXPECT_EQ(result->deduplicated_message_count, 2u);
+  EXPECT_EQ(result->message_count, 2u);
+  EXPECT_EQ(result->first_timestamp, zx::time_boot(zx::sec(1).to_nsecs()));
+  EXPECT_EQ(result->last_timestamp, zx::time_boot(zx::sec(2).to_nsecs()));
 }
 
 TEST(ReaderTest, SortsMessages) {
@@ -140,8 +152,8 @@ TEST(ReaderTest, SortsMessages) {
   IdentityRedactor redactor(inspect::BoolProperty{});
   LogMessageStore store(StorageSize::Kilobytes(8), StorageSize::Kilobytes(8), &redactor,
                         MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
-  SystemLogWriter writer(temp_dir.path(), 1u, kTotalLogSize, std::make_unique<IdentityDecoder>(),
-                         /*enable_periodic_metadata_writes=*/true);
+  SystemLogWriter writer(temp_dir.path(), /*max_num_files=*/1u, kTotalLogSize,
+                         std::make_unique<IdentityDecoder>());
 
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0", zx::msec(0))));
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 3", zx::msec(3))));
@@ -156,12 +168,11 @@ TEST(ReaderTest, SortsMessages) {
 
   IdentityDecoder decoder;
 
-  float compression_ratio;
-  const fit::result<ReaderError, std::string> result =
-      Concatenate(temp_dir.path(), kMaxDecompressedSize, &decoder, &compression_ratio);
+  const fit::result<ReaderError, ConcatenateResult> result =
+      Concatenate(temp_dir.path(), kMaxDecompressedSize, &decoder);
   ASSERT_TRUE(result.is_ok());
-  EXPECT_EQ(compression_ratio, 1.0);
-  EXPECT_EQ(*result, R"([15604.000][07559][07687][] INFO: line 0
+  EXPECT_EQ(result->compression_ratio, 1.0);
+  EXPECT_EQ(result->logs, R"([15604.000][07559][07687][] INFO: line 0
 [15604.001][07559][07687][] INFO: line 1
 [15604.001][07559][07687][] INFO: line 1.1
 [15604.002][07559][07687][] INFO: line 2
@@ -172,6 +183,11 @@ message
 [15604.005][07559][07687][] INFO: duplicated line
 !!! MESSAGE REPEATED 2 MORE TIMES !!!
 )");
+  EXPECT_FALSE(result->is_at_capacity);
+  EXPECT_EQ(result->deduplicated_message_count, 7u);
+  EXPECT_EQ(result->message_count, 9u);
+  EXPECT_EQ(result->first_timestamp, zx::time_boot(zx::sec(15604).to_nsecs()));
+  EXPECT_EQ(result->last_timestamp, zx::time_boot((zx::sec(15604) + zx::msec(5)).to_nsecs()));
 }
 
 TEST(ReaderTest, SortsMessagesDifferentTimestampLength) {
@@ -193,13 +209,60 @@ TEST(ReaderTest, SortsMessagesDifferentTimestampLength) {
 
   EXPECT_TRUE(files::WriteFile(MakeLogFilePath(temp_dir, 0u), input_message));
 
-  float compression_ratio;
   IdentityDecoder decoder;
 
-  const fit::result<ReaderError, std::string> result =
-      Concatenate(temp_dir.path(), kMaxDecompressedSize, &decoder, &compression_ratio);
+  const fit::result<ReaderError, ConcatenateResult> result =
+      Concatenate(temp_dir.path(), kMaxDecompressedSize, &decoder);
   ASSERT_TRUE(result.is_ok());
-  EXPECT_EQ(*result, output_message);
+  EXPECT_EQ(result->logs, output_message);
+  EXPECT_EQ(result->first_timestamp, zx::time_boot(zx::sec(50000).to_nsecs()));
+  EXPECT_EQ(result->last_timestamp, zx::time_boot(zx::sec(100000000).to_nsecs()));
+}
+
+TEST(ReaderTest, SortsMessagesUnpaddedTimestamps) {
+  files::ScopedTempDir temp_dir;
+
+  const std::string msg_0 = "[10.000][07559][07687][] INFO: line 0";
+  const std::string msg_1 = "[00002.000][07559][07687][] INFO: line 1";
+
+  const std::string input_message =
+      fxl::JoinStrings(std::vector<std::string>{msg_0, msg_1}, "\n") + "\n";
+  const std::string output_message =
+      fxl::JoinStrings(std::vector<std::string>{msg_1, msg_0}, "\n") + "\n";
+
+  EXPECT_TRUE(files::WriteFile(MakeLogFilePath(temp_dir, 0u), input_message));
+
+  IdentityDecoder decoder;
+
+  const fit::result<ReaderError, ConcatenateResult> result =
+      Concatenate(temp_dir.path(), kMaxDecompressedSize, &decoder);
+  ASSERT_TRUE(result.is_ok());
+  EXPECT_EQ(result->logs, output_message);
+}
+
+TEST(ReaderTest, TreatsInvalidHeadersAsContinuationLines) {
+  files::ScopedTempDir temp_dir;
+
+  const std::string leading = "[00000.5][07559][07687][] INFO: leading non-3-digit msecs";
+  const std::string msg_0 =
+      "[00002.000][07559][07687][] INFO: line 0\n"
+      "[00000.5][07559][07687][] INFO: non-3-digit msecs\n"
+      "[4294967296.000][07559][07687][] INFO: seconds overflow";
+  const std::string msg_1 = "[00001.000][07559][07687][] INFO: line 1";
+
+  const std::string input_message =
+      fxl::JoinStrings(std::vector<std::string>{leading, msg_0, msg_1}, "\n") + "\n";
+  const std::string output_message =
+      fxl::JoinStrings(std::vector<std::string>{leading, msg_1, msg_0}, "\n") + "\n";
+
+  EXPECT_TRUE(files::WriteFile(MakeLogFilePath(temp_dir, 0u), input_message));
+
+  IdentityDecoder decoder;
+
+  const fit::result<ReaderError, ConcatenateResult> result =
+      Concatenate(temp_dir.path(), kMaxDecompressedSize, &decoder);
+  ASSERT_TRUE(result.is_ok());
+  EXPECT_EQ(result->logs, output_message);
 }
 
 TEST(ReaderTest, SortsMessagesMultipleFiles) {
@@ -209,8 +272,8 @@ TEST(ReaderTest, SortsMessagesMultipleFiles) {
   IdentityRedactor redactor(inspect::BoolProperty{});
   LogMessageStore store(kMaxLogLineSize * 4, kMaxLogLineSize * 4, &redactor, MakeIdentityEncoder(),
                         /*ignore_before_timestamp=*/std::nullopt);
-  SystemLogWriter writer(temp_dir.path(), 8u, kTotalLogSize, std::make_unique<IdentityDecoder>(),
-                         /*enable_periodic_metadata_writes=*/true);
+  SystemLogWriter writer(temp_dir.path(), /*max_num_files=*/8u, kTotalLogSize,
+                         std::make_unique<IdentityDecoder>());
 
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0", zx::msec(0))));
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 3", zx::msec(3))));
@@ -227,12 +290,11 @@ TEST(ReaderTest, SortsMessagesMultipleFiles) {
 
   IdentityDecoder decoder;
 
-  float compression_ratio;
-  const fit::result<ReaderError, std::string> result =
-      Concatenate(temp_dir.path(), kMaxDecompressedSize, &decoder, &compression_ratio);
+  const fit::result<ReaderError, ConcatenateResult> result =
+      Concatenate(temp_dir.path(), kMaxDecompressedSize, &decoder);
   ASSERT_TRUE(result.is_ok());
-  EXPECT_EQ(compression_ratio, 1.0);
-  EXPECT_EQ(*result, R"([15604.000][07559][07687][] INFO: line 0
+  EXPECT_EQ(result->compression_ratio, 1.0);
+  EXPECT_EQ(result->logs, R"([15604.000][07559][07687][] INFO: line 0
 [15604.001][07559][07687][] INFO: line 1
 [15604.001][07559][07687][] INFO: line11
 [15604.002][07559][07687][] INFO: line 2
@@ -242,6 +304,61 @@ TEST(ReaderTest, SortsMessagesMultipleFiles) {
 [15604.005][07559][07687][] INFO: dup
 !!! MESSAGE REPEATED 2 MORE TIMES !!!
 )");
+  EXPECT_FALSE(result->is_at_capacity);
+  EXPECT_EQ(result->deduplicated_message_count, 7u);
+  EXPECT_EQ(result->message_count, 9u);
+  EXPECT_EQ(result->first_timestamp, zx::time_boot(zx::sec(15604).to_nsecs()));
+  EXPECT_EQ(result->last_timestamp, zx::time_boot((zx::sec(15604) + zx::msec(5)).to_nsecs()));
+}
+
+TEST(ReaderTest, PreservesSingleLineLog) {
+  files::ScopedTempDir temp_dir;
+
+  const std::string message = "[15604.000][07559][07687][] INFO: line 0\n";
+  EXPECT_TRUE(files::WriteFile(MakeLogFilePath(temp_dir, 0u), message));
+
+  IdentityDecoder decoder;
+
+  const fit::result<ReaderError, ConcatenateResult> result =
+      Concatenate(temp_dir.path(), kMaxDecompressedSize, &decoder);
+  ASSERT_TRUE(result.is_ok());
+  EXPECT_EQ(result->logs, message);
+  EXPECT_FALSE(result->is_at_capacity);
+  EXPECT_EQ(result->deduplicated_message_count, 1u);
+  EXPECT_EQ(result->message_count, 1u);
+  EXPECT_EQ(result->first_timestamp, zx::time_boot(zx::sec(15604).to_nsecs()));
+  EXPECT_EQ(result->last_timestamp, zx::time_boot(zx::sec(15604).to_nsecs()));
+}
+
+TEST(ReaderTest, IsAtCapacityWhenFirstFileMissing) {
+  files::ScopedTempDir temp_dir;
+
+  EXPECT_TRUE(files::WriteFile(MakeLogFilePath(temp_dir, 1u),
+                               "[15604.000][07559][07687][] INFO: line 0\n"));
+
+  IdentityDecoder decoder;
+  const fit::result<ReaderError, ConcatenateResult> result =
+      Concatenate(temp_dir.path(), kMaxDecompressedSize, &decoder);
+  ASSERT_TRUE(result.is_ok());
+  EXPECT_TRUE(result->is_at_capacity);
+}
+
+TEST(ReaderTest, IgnoresNonNumericFiles) {
+  files::ScopedTempDir temp_dir;
+
+  EXPECT_TRUE(files::WriteFile(MakeLogFilePath(temp_dir, 1u),
+                               "[15604.000][07559][07687][] INFO: line 0\n"));
+  EXPECT_TRUE(files::WriteFile(files::JoinPath(temp_dir.path(), "invalid_file.log"),
+                               "[99999.000][07559][07687][] INFO: invalid\n"));
+
+  IdentityDecoder decoder;
+  const fit::result<ReaderError, ConcatenateResult> result =
+      Concatenate(temp_dir.path(), kMaxDecompressedSize, &decoder);
+  ASSERT_TRUE(result.is_ok());
+  EXPECT_EQ(result->logs, "[15604.000][07559][07687][] INFO: line 0\n");
+  EXPECT_TRUE(result->is_at_capacity);
+  EXPECT_EQ(result->deduplicated_message_count, 1u);
+  EXPECT_EQ(result->message_count, 1u);
 }
 
 }  // namespace

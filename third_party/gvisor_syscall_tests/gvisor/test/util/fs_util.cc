@@ -16,16 +16,31 @@
 
 #include <dirent.h>
 #ifdef __linux__
+#include <linux/limits.h>
 #include <linux/magic.h>
 #endif  // __linux__
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
+#include <sys/statvfs.h>
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <cerrno>
+#include <cstddef>
+#include <cstring>
+#include <functional>
+#include <initializer_list>
+#include <string>
+#include <utility>
+#include <vector>
+
 #include "gmock/gmock.h"
+#include "gtest/gtest.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
 #include "absl/strings/str_split.h"
 #include "absl/strings/string_view.h"
 #include "absl/time/clock.h"
@@ -716,6 +731,22 @@ PosixErrorOr<bool> IsOverlayfs(const std::string& path) {
   return stat.f_type == OVERLAYFS_SUPER_MAGIC;
 }
 
+#ifdef __linux__
+PosixErrorOr<bool> IsGoferfs(const std::string& path) {
+  struct statfs stat;
+  if (statfs(path.c_str(), &stat)) {
+    if (errno == ENOENT) {
+      // Nothing at path, don't raise this as an error. Instead, just report no
+      // goferfs at path.
+      return false;
+    }
+    return PosixError(errno,
+                      absl::StrFormat("statfs(\"%s\", %#p)", path, &stat));
+  }
+  return stat.f_type == V9FS_MAGIC;
+}
+#endif  // __linux__
+
 PosixError CheckSameFile(const FileDescriptor& fd1, const FileDescriptor& fd2) {
   struct stat stat_result1, stat_result2;
   int res = fstat(fd1.get(), &stat_result1);
@@ -735,6 +766,14 @@ PosixError CheckSameFile(const FileDescriptor& fd1, const FileDescriptor& fd2) {
 
 ::testing::Matcher<mode_t> PermissionIs(mode_t want) {
   return MakeMatcher(new ModePermissionMatcher(want));
+}
+
+PosixErrorOr<bool> IsNosuid(const std::string& path) {
+  struct statvfs stat;
+  if (statvfs(path.c_str(), &stat) < 0) {
+    return PosixError(errno, absl::StrCat("statvfs(\"", path, "\")"));
+  }
+  return (stat.f_flag & ST_NOSUID) != 0;
 }
 
 #ifndef __Fuchsia__

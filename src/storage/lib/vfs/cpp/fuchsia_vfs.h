@@ -204,8 +204,6 @@ class FuchsiaVfs : public Vfs {
   virtual void CloseAllConnectionsForVnode(const Vnode& node,
                                            CloseAllConnectionsForVnodeCallback callback) = 0;
 
-  bool IsTokenAssociatedWithVnode(zx::event token) __TA_EXCLUDES(vfs_lock_);
-
  protected:
   // Unmounts the underlying filesystem. The result of shutdown is delivered via calling |closure|.
   //

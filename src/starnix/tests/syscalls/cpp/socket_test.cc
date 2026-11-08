@@ -15,6 +15,7 @@
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
@@ -24,6 +25,7 @@
 #include <unistd.h>
 
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <set>
 #include <thread>
@@ -1933,18 +1935,29 @@ class BpfTest : public testing::Test {
 
     packet_socket_fd_ = fbl::unique_fd(socket(AF_PACKET, SOCK_RAW, 0));
     ASSERT_TRUE(packet_socket_fd_) << strerror(errno);
-    sockaddr_ll addr_ll = {
-        .sll_family = AF_PACKET,
-        .sll_protocol = htons(ETH_P_ALL),
-    };
-    ASSERT_EQ(bind(packet_socket_fd_.get(), reinterpret_cast<sockaddr*>(&addr_ll), sizeof(addr_ll)),
-              0);
   }
 
+  void AttachFilterAndBind(const sock_fprog& filter);
   void SendPacketAndCheckReceived(int domain, uint16_t dst_port, bool expected);
 
   fbl::unique_fd packet_socket_fd_;
 };
+
+void BpfTest::AttachFilterAndBind(const sock_fprog& filter) {
+  // Attach the BPF filter before binding to ETH_P_ALL so no unfiltered packets
+  // (e.g. asynchronous loopback ICMP errors from prior tests) can be queued
+  // between bind() and setsockopt(SO_ATTACH_FILTER).
+  ASSERT_EQ(
+      setsockopt(packet_socket_fd_.get(), SOL_SOCKET, SO_ATTACH_FILTER, &filter, sizeof(filter)), 0)
+      << strerror(errno);
+  sockaddr_ll addr_ll = {
+      .sll_family = AF_PACKET,
+      .sll_protocol = htons(ETH_P_ALL),
+  };
+  ASSERT_EQ(bind(packet_socket_fd_.get(), reinterpret_cast<sockaddr*>(&addr_ll), sizeof(addr_ll)),
+            0)
+      << strerror(errno);
+}
 
 void BpfTest::SendPacketAndCheckReceived(int domain, uint16_t dst_port, bool expected) {
   sockaddr_in addr4 = {
@@ -2051,18 +2064,36 @@ TEST_F(BpfTest, SoAttachFilter) {
       filter_code,
   };
 
-  ASSERT_EQ(
-      setsockopt(packet_socket_fd_.get(), SOL_SOCKET, SO_ATTACH_FILTER, &filter, sizeof(filter)),
-      0);
+  ASSERT_NO_FATAL_FAILURE(AttachFilterAndBind(filter));
 
-  SendPacketAndCheckReceived(AF_INET, kTestDstPortIpv4, true);
-  SendPacketAndCheckReceived(AF_INET6, kTestDstPortIpv6, true);
-  SendPacketAndCheckReceived(AF_INET, kTestDstPortIpv6, false);
-  SendPacketAndCheckReceived(AF_INET6, kTestDstPortIpv4, false);
+  ASSERT_NO_FATAL_FAILURE(SendPacketAndCheckReceived(AF_INET, kTestDstPortIpv4, true));
+  ASSERT_NO_FATAL_FAILURE(SendPacketAndCheckReceived(AF_INET6, kTestDstPortIpv6, true));
+  ASSERT_NO_FATAL_FAILURE(SendPacketAndCheckReceived(AF_INET, kTestDstPortIpv6, false));
+  ASSERT_NO_FATAL_FAILURE(SendPacketAndCheckReceived(AF_INET6, kTestDstPortIpv4, false));
 }
 
 TEST_F(BpfTest, SoAttachFilterBpfLen) {
+  constexpr uint16_t kTestDstPortIpv4 = 1235;
+
   static sock_filter filter_code[] = {
+      // Check if this is IPv4.
+      BPF_STMT(BPF_LD | BPF_H | BPF_ABS, (__u32)SKF_AD_OFF + SKF_AD_PROTOCOL),
+      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, ETHERTYPE_IP, 0, 6),
+
+      // Check that the protocol is UDP.
+      BPF_STMT(BPF_LD | BPF_B | BPF_ABS, (__u32)SKF_NET_OFF + 9),
+      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, IPPROTO_UDP, 1, 0),
+      BPF_STMT(BPF_RET | BPF_K, 0),
+
+      // Get the IP header length.
+      BPF_STMT(BPF_LDX | BPF_B | BPF_MSH, (__u32)SKF_NET_OFF),
+
+      // Check the destination port.
+      BPF_STMT(BPF_LD | BPF_H | BPF_IND, (__u32)SKF_NET_OFF + 2),
+      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, kTestDstPortIpv4, 1, 0),
+      BPF_STMT(BPF_RET | BPF_K, 0),
+
+      // Accept up to packet length loaded via BPF_LEN.
       BPF_STMT(BPF_LDX | BPF_W | BPF_LEN, 0),
       BPF_STMT(BPF_LD | BPF_W | BPF_LEN, 0),
       BPF_STMT(BPF_RET | BPF_A, 0),
@@ -2073,15 +2104,13 @@ TEST_F(BpfTest, SoAttachFilterBpfLen) {
       filter_code,
   };
 
-  ASSERT_EQ(
-      setsockopt(packet_socket_fd_.get(), SOL_SOCKET, SO_ATTACH_FILTER, &filter, sizeof(filter)),
-      0);
+  ASSERT_NO_FATAL_FAILURE(AttachFilterAndBind(filter));
 
-  SendPacketAndCheckReceived(AF_INET, 1234, true);
+  ASSERT_NO_FATAL_FAILURE(SendPacketAndCheckReceived(AF_INET, kTestDstPortIpv4, true));
 }
 
 TEST_F(BpfTest, SoAttachFilterPktType) {
-  const uint16_t kTestDstPortIpv4 = 1234;
+  constexpr uint16_t kTestDstPortIpv4 = 1237;
 
   auto make_filter = [](uint8_t packet_type) -> std::vector<sock_filter> {
     return {
@@ -2118,9 +2147,7 @@ TEST_F(BpfTest, SoAttachFilterPktType) {
       .filter = filter_outgoing_code.data(),
   };
 
-  ASSERT_EQ(setsockopt(packet_socket_fd_.get(), SOL_SOCKET, SO_ATTACH_FILTER, &filter_outgoing,
-                       sizeof(filter_outgoing)),
-            0);
+  ASSERT_NO_FATAL_FAILURE(AttachFilterAndBind(filter_outgoing));
 
   // Send a packet to loopback. When sent to loopback without a filter, the packet is captured twice
   // (once as PACKET_OUTGOING on egress, once as PACKET_HOST on ingress). With the filter above,
@@ -2890,6 +2917,74 @@ TEST(SocketCrossFamilyTest, CrossFamilyBindConnectSendto) {
                        sizeof(addr_ipv4)),
                 SyscallFailsWithErrno(EOPNOTSUPP));
   }
+}
+
+TEST(UnixSocket, SendmsgCmsgLenExceedsControllenAtGuardPage) {
+  int fds[2] = {-1, -1};
+  ASSERT_THAT(socketpair(AF_UNIX, SOCK_DGRAM, 0, fds), SyscallSucceeds());
+  fbl::unique_fd sender(fds[0]);
+  fbl::unique_fd receiver(fds[1]);
+
+  const size_t page_size = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+  void* mapping =
+      mmap(nullptr, 2 * page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  ASSERT_NE(mapping, MAP_FAILED) << strerror(errno);
+  auto unmap = fit::defer([mapping, page_size] { munmap(mapping, 2 * page_size); });
+
+  auto* bytes = static_cast<uint8_t*>(mapping);
+  ASSERT_THAT(mprotect(bytes + page_size, page_size, PROT_NONE), SyscallSucceeds());
+
+  // Place cmsghdr flush against the PROT_NONE guard page with cmsg_len extending past
+  // msg_controllen into the unmapped page. The kernel must reject cmsg_len > msg_controllen with
+  // EINVAL rather than reading past msg_controllen and faulting with EFAULT.
+  auto* cmsg = reinterpret_cast<cmsghdr*>(bytes + page_size - sizeof(cmsghdr));
+  cmsg->cmsg_level = SOL_SOCKET;
+  cmsg->cmsg_type = SCM_RIGHTS;
+  cmsg->cmsg_len = sizeof(cmsghdr) + page_size;
+
+  char payload = 'x';
+  iovec iov = {
+      .iov_base = &payload,
+      .iov_len = sizeof(payload),
+  };
+  msghdr msg = {};
+  msg.msg_iov = &iov;
+  msg.msg_iovlen = 1;
+  msg.msg_control = cmsg;
+  msg.msg_controllen = sizeof(cmsghdr);
+
+  EXPECT_THAT(sendmsg(sender.get(), &msg, 0), SyscallFailsWithErrno(EINVAL));
+
+  cmsg->cmsg_len = std::numeric_limits<decltype(cmsg->cmsg_len)>::max();
+  EXPECT_THAT(sendmsg(sender.get(), &msg, 0), SyscallFailsWithErrno(EINVAL));
+}
+
+TEST(SocketTest, ExtremeSndbufAndRcvbufValuesDoNotOverflow) {
+  auto check_socket = [](fbl::unique_fd fd) {
+    ASSERT_TRUE(fd.is_valid()) << strerror(errno);
+    const int extreme_values[] = {
+        -1,
+        std::numeric_limits<int>::min(),
+        std::numeric_limits<int>::max(),
+        0x40000000,
+    };
+    for (int opt : {SO_SNDBUF, SO_RCVBUF}) {
+      for (int val : extreme_values) {
+        EXPECT_THAT(setsockopt(fd.get(), SOL_SOCKET, opt, &val, sizeof(val)), SyscallSucceeds())
+            << "opt=" << opt << " val=" << val;
+        int actual = 0;
+        socklen_t actual_len = sizeof(actual);
+        ASSERT_THAT(getsockopt(fd.get(), SOL_SOCKET, opt, &actual, &actual_len), SyscallSucceeds());
+        EXPECT_GT(actual, 0);
+      }
+    }
+  };
+
+  int unix_pair[2] = {-1, -1};
+  ASSERT_THAT(socketpair(AF_UNIX, SOCK_STREAM, 0, unix_pair), SyscallSucceeds());
+  fbl::unique_fd unix_peer(unix_pair[1]);
+  check_socket(fbl::unique_fd(unix_pair[0]));
+  check_socket(fbl::unique_fd(socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE)));
 }
 
 }  // namespace

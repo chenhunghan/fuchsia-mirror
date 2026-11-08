@@ -41,13 +41,11 @@ source_set("interface") {
 
 static_library("cpp") {
   public = [
-    "block_group_registry.h",
     "client.h",
     "pass_through_read_only_device.h",
     "remote_block_device.h",
   ]
   sources = [
-    "block_group_registry.cc",
     "client.cc",
     "remote_block_device.cc",
   ]
@@ -114,7 +112,6 @@ test("block_client_unit_test") {
     }
   }
   sources = [
-    "block_group_registry_unittest.cc",
     "fake_block_device_unittest.cc",
     "reader_writer_unittest.cc",
     "remote_block_device_unittest.cc",

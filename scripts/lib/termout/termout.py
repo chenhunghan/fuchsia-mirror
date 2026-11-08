@@ -192,7 +192,7 @@ def write_lines(
             )
 
         for line in prepend or []:
-            print(line + colorama.Style.RESET_ALL, file=write_buffer)
+            print(f"{line}{colorama.Style.RESET_ALL}", file=write_buffer)
 
         formatted_lines: list[str] = []
 
@@ -213,7 +213,7 @@ def write_lines(
                 max_index = index + 1
 
             formatted_lines.append(
-                "\r" + line[:max_index] + colorama.Style.RESET_ALL
+                f"\r{line[:max_index]}{colorama.Style.RESET_ALL}"
             )
 
         write_buffer.writelines(["\n".join(formatted_lines)])

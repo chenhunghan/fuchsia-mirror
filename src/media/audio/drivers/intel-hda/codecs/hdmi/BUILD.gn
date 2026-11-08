@@ -28,7 +28,6 @@ fuchsia_cc_driver("hdmi-audio-codec-driver") {
   ]
   deps = [
     ":ihda_codecs_hdmi_bind",
-    "//sdk/banjo/fuchsia.hardware.intelhda.codec:fuchsia.hardware.intelhda.codec_banjo_cpp",
     "//src/devices/lib/driver",
     "//src/graphics/display/lib/edid",
     "//src/lib/ddk",

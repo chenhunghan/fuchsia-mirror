@@ -44,6 +44,7 @@ rustc_library("blob_metadata") {
     "src/zerocopy_serialization.rs",
   ]
   edition = "2024"
+  proc_macro_deps = [ "//src/storage/fxfs:fxfs_macros" ]
   visibility = [
     ":*",
     "//src/storage/fxfs:*",
@@ -51,6 +52,7 @@ rustc_library("blob_metadata") {
   ]
   with_unit_tests = true
   deps = [
+    "//src/storage/lib/delivery_blob",
     "//src/storage/type-fprint:fprint",
     "//src/sys/pkg/lib/fuchsia-merkle",
     "//third_party/rust_crates:anyhow",

@@ -1,0 +1,25 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fidl_library(
+    name = "fuchsia.hardware.audio",
+    srcs = [
+        "audio.fidl",
+    ],
+    enable_banjo = True,
+    enable_rust = False,
+    visibility = [
+        "//src/devices/power/drivers/nelson-brownout-protection:__pkg__",
+        "//src/media/audio/drivers/aml-g12-tdm:__pkg__",
+        "//src/media/audio/drivers/testing/realm:__pkg__",
+        "//src/media/audio/lib/simple-codec/tests:__pkg__",
+    ],
+    deps = [
+        "//zircon/vdso/zx",
+    ],
+)

@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::input_controller::{InputController, InputError, Request};
-use crate::types::{DeviceStateSource, InputDevice, InputDeviceType, InputInfo};
+use crate::input_controller::{InputController, InputError, Request, SetInputDevice};
+use crate::types::{DeviceState, InputDeviceType, InputInfo};
 use anyhow::{Error, anyhow};
 use async_utils::hanging_get::server;
 use fidl_fuchsia_settings::{
@@ -18,29 +18,22 @@ use settings_common::inspect::event::{
     HangingGetObserver, RequestType, ResponseType, UsagePublisher,
 };
 
-fn to_request(fidl_input_states: Vec<InputState>) -> Result<Vec<InputDevice>, Error> {
-    // Every device requires at least a device type and state flags.
-    let mut input_states_invalid_args = fidl_input_states
-        .iter()
-        .filter(|input_state| input_state.device_type.is_none() || input_state.state.is_none());
-
-    // If any devices were filtered out, the args were invalid, so exit.
-    if input_states_invalid_args.next().is_some() {
-        return Err(anyhow!("Failed to parse input request: missing args"));
-    }
-
-    let input_states = fidl_input_states
-        .iter()
+fn to_request(fidl_input_states: Vec<InputState>) -> Result<Vec<SetInputDevice>, Error> {
+    fidl_input_states
+        .into_iter()
         .map(|input_state| {
-            let device_type: InputDeviceType = input_state.device_type.unwrap().into();
-            let device_state = input_state.state.clone().unwrap().into();
-            let device_name = input_state.name.clone().unwrap_or_else(|| device_type.to_string());
-            let source_states = [(DeviceStateSource::SOFTWARE, device_state)].into();
-            InputDevice { name: device_name, device_type, state: device_state, source_states }
+            // Every device requires at least a device type and state flags.
+            let (Some(fidl_device_type), Some(fidl_state)) =
+                (input_state.device_type, input_state.state)
+            else {
+                return Err(anyhow!("Failed to parse input request: missing args"));
+            };
+            let device_type: InputDeviceType = fidl_device_type.into();
+            let device_state = DeviceState::try_from(fidl_state)?;
+            let device_name = input_state.name.unwrap_or_else(|| device_type.to_string());
+            Ok(SetInputDevice { name: device_name, device_type, state: device_state })
         })
-        .collect();
-
-    Ok(input_states)
+        .collect()
 }
 
 pub(super) type SubscriberObject = HangingGetObserver<InputInfo, InputWatchResponder>;
@@ -69,8 +62,13 @@ impl InputFidlHandler {
 
     fn hanging_get(info: &InputInfo, observer: SubscriberObject) -> bool {
         let (usage_responder, responder) = observer.into_parts();
-        usage_responder.respond(format!("{info:?}"), ResponseType::OkSome);
-        if let Err(e) = responder.send(&InputSettings::from(info)) {
+        let result = usage_responder.send_and_respond(
+            responder,
+            |responder| responder.send(&InputSettings::from(info)),
+            format!("{info:?}"),
+            ResponseType::OkSome,
+        );
+        if let Err(e) = result {
             log::warn!("Failed to respond to watch request: {e:?}");
             return false;
         }
@@ -84,7 +82,14 @@ impl InputFidlHandler {
             usage_publisher: self.usage_publisher.clone(),
         };
         fasync::Task::local(async move {
-            while let Some(Ok(request)) = stream.next().await {
+            while let Some(request) = stream.next().await {
+                let request = match request {
+                    Ok(request) => request,
+                    Err(e) => {
+                        request_handler.usage_publisher.record_stream_error(&e);
+                        break;
+                    }
+                };
                 request_handler.handle_request(request).await;
             }
         })
@@ -141,8 +146,12 @@ impl RequestHandler {
                     usage_res.respond(format!("Err({e:?}"), ResponseType::from(&e));
                     let _ = responder.send(Err(SettingsError::Failed));
                 } else {
-                    usage_res.respond("Ok(())".to_string(), ResponseType::OkNone);
-                    let _ = responder.send(Ok(()));
+                    let _ = usage_res.send_and_respond(
+                        responder,
+                        |responder| responder.send(Ok(())),
+                        "Ok(())".to_string(),
+                        ResponseType::OkNone,
+                    );
                 }
             }
         }

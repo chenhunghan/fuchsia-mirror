@@ -563,7 +563,9 @@ async fn verify(
     );
     let mut f2fs =
         F2fsReader::open_device(ranged_device).await.context("Failed to open f2fs image")?;
-    f2fs.add_key(&[0; 64]);
+    if check_file_contents {
+        f2fs.add_key(&[0; 64]);
+    }
 
     crate::verify(&f2fs, fxfs, ino, root_directory, check_file_contents).await
 }

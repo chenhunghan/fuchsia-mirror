@@ -12,6 +12,6 @@
 ## into the specified output directory.
 ##
 ## Arguments:
-##   build_id   The Buildbucket build ID to download metrics from.
+##   build_id   The Buildbucket build ID to download metrics from (with or without 'b' prefix).
 ##   out_dir    The directory to save the downloaded CAS contents into.
 ##              This directory will be created if it does not exist.

@@ -1,0 +1,71 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules:zx_library.bzl", "cc_shared_library_zx")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Compile this with frame pointers so that if we crash
+# the simplistic unwinder will work. GN conditionally swaps
+# `default_frame_pointers` for `frame_pointers`.
+# Note: Fuchsia-only target matching platform-only deps via target_compatible_with.
+# TODO(https://fxbug.dev/582031294): Support the frame pointer configs directly
+# without a `raw_attribute` override.
+# @bazel2gn:raw_attribute:if (configs + [ "//build/config:default_frame_pointers" ] - [ "//build/config:default_frame_pointers" ] != configs) { configs -= [ "//build/config:default_frame_pointers" ] configs += [ "//build/config:frame_pointers" ] }
+cc_shared_library_zx(
+    name = "inspector",
+    srcs = [
+        "backtrace.cc",
+        "backtrace.h",
+        "debug-info.cc",
+        "memory.cc",
+        "registers.cc",
+    ],
+    hdrs = ["include/inspector/inspector.h"],
+    build_flags = ["//build/config/fuchsia:static_cpp_standard_library"],
+    # TODO(https://fxbug.dev/582031294): GN conditionally swaps
+    # `//build/config:default_frame_pointers` for `//build/config:frame_pointers`
+    # via the `raw_attribute` directive above; Bazel enables frame pointers
+    # directly via `copts` due to gaps in `cc_shared_library_zx`.
+    # @bazel2gn:skip
+    copts = ["-fno-omit-frame-pointer"],
+    implementation_deps = [
+        ":gwp-asan",
+        "//src/lib/debug:backtrace-request-utils",
+        "//src/lib/elf-search",
+        "//src/lib/unwinder",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/pretty",
+    ],
+    includes = ["include"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/bringup:__subpackages__",
+        "//src/developer:__subpackages__",
+        "//src/starnix:__subpackages__",
+        "//src/storage:__subpackages__",
+        "//src/sys:__subpackages__",
+        "//src/virtualization:__subpackages__",
+        "//zircon/system:__subpackages__",
+    ],
+)
+
+# GWP-ASan crash handling utility that wraps //sdk/lib/c/scudo:gwp-asan-common.
+# Note: Fuchsia-only target matching platform-only deps via target_compatible_with.
+fx_cc_library(
+    name = "gwp-asan",
+    srcs = ["gwp-asan.cc"],
+    hdrs = ["gwp-asan.h"],
+    implementation_deps = [
+        "//sdk/lib/c/scudo:gwp-asan-common",
+        "//src/lib/elf-search",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/developer/forensics/exceptions/handler:__pkg__",
+        "//zircon/system/ulib/inspector/tests:__pkg__",
+    ],
+    alwayslink = True,
+)

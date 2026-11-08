@@ -23,6 +23,9 @@ class DisplayMode {
   //
   // Validity constraints:
   // - `active_area` extent must not be empty.
+  // - `refresh_rate_millihertz` must be positive.
+  // - `mode_flags` must only contain bits defined in
+  //   `fuchsia.hardware.display.types/ModeFlags`.
   [[nodiscard]] static constexpr bool IsValid(const ConstructorArgs& args,
                                               bool should_assert = false);
   [[nodiscard]] static constexpr bool IsValid(
@@ -64,7 +67,7 @@ class DisplayMode {
 
   Extent2 active_area_;
   uint32_t refresh_rate_millihertz_;
-  // Reserved, must be 0 for now.
+  // Only bits defined in fuchsia.hardware.display.types/ModeFlags may be set.
   uint32_t mode_flags_;
 };
 
@@ -79,8 +82,8 @@ constexpr bool DisplayMode::IsValid(const ConstructorArgs& args, bool should_ass
                               << args.refresh_rate_millihertz;
     return false;
   }
-  if (args.mode_flags != 0) {
-    FX_DCHECK(!should_assert) << "mode_flags must be zero: " << std::hex << args.mode_flags
+  if (!fuchsia_hardware_display_types::wire::ModeFlags::TryFrom(args.mode_flags).has_value()) {
+    FX_DCHECK(!should_assert) << "mode_flags has unknown bits: " << std::hex << args.mode_flags
                               << std::dec;
     return false;
   }

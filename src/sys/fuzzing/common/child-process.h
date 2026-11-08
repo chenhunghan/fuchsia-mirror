@@ -6,6 +6,7 @@
 #define SRC_SYS_FUZZING_COMMON_CHILD_PROCESS_H_
 
 #include <lib/fdio/spawn.h>
+#include <lib/zx/job.h>
 #include <lib/zx/process.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -134,6 +135,9 @@ class ChildProcess final {
   // Kills the process and waits for the output threads to join.
   void KillSync();
 
+  // Spawns the child process with ZX_PROCESS_SHARED via fuchsia.process.Launcher.
+  zx_status_t SpawnShared(const std::vector<std::string>& envvars);
+
   ExecutorPtr executor_;
   bool spawned_ = false;
   bool killed_ = false;
@@ -145,7 +149,8 @@ class ChildProcess final {
   std::unordered_map<std::string, std::string> envvars_;
   std::vector<fdio_spawn_action_t> actions_;
 
-  // The handle to the spawned process.
+  // The handle to the spawned process (and isolated child job when SpawnShared is used).
+  zx::job job_;
   zx::process process_;
   zx_info_process_t info_;
 

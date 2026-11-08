@@ -19,6 +19,7 @@ import json
 import logging
 import re
 import shlex
+import time
 from typing import Any
 
 from honeydew import errors as honeydew_errors
@@ -27,7 +28,14 @@ from honeydew.fuchsia_device import fuchsia_device
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 _DONE_TOKEN: str = "[usb-cli:DONE]"
 _ERROR_TOKEN: str = "[usb-cli:ERROR]"
+_USB_CLI_ERR_PREFIX: str = "usb-cli error:"
 _IDENT_RE: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9_-]+$")
+_ANSI_CSI_RE: re.Pattern[str] = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
+class UsbConfigParseError(ValueError):
+    """Raised when `usb-cli get-config` output cannot be parsed into valid JSON."""
+
 
 GOOGLE_USB_VID: int = 0x18D1
 
@@ -56,6 +64,36 @@ FUNCTION_INTERFACES: dict[str, list[str]] = {
 KERNEL_LOG_RE: re.Pattern[str] = re.compile(r"\[\d+\.\d+\] \d+:\d+>[^\n]*\n?")
 
 
+def _strip_serial_noise(output: str) -> str:
+    """Strip UART CRs, ANSI CSI escapes, usb-cli tokens, and kernel log lines."""
+    cleaned = output.replace("\r\n", "\n").replace("\r", "")
+    cleaned = _ANSI_CSI_RE.sub("", cleaned)
+    cleaned = KERNEL_LOG_RE.sub("", cleaned)
+    cleaned = cleaned.replace(_DONE_TOKEN, "").replace(_ERROR_TOKEN, "")
+    return cleaned
+
+
+def _is_valid_config_payload(value: Any) -> bool:
+    """Return True if `value` matches the `usb-cli get-config` JSON schema."""
+    if not isinstance(value, dict):
+        return False
+    if "configurations" in value:
+        configs = value["configurations"]
+        return isinstance(configs, list) and all(
+            isinstance(cfg, list)
+            and all(
+                isinstance(fn, str) and bool(_IDENT_RE.match(fn)) for fn in cfg
+            )
+            for cfg in configs
+        )
+    if "functions" in value:
+        funcs = value["functions"]
+        return isinstance(funcs, list) and all(
+            isinstance(fn, str) and bool(_IDENT_RE.match(fn)) for fn in funcs
+        )
+    return False
+
+
 def build_config_matrix(functions: list[str]) -> list[list[str]]:
     """Returns every non-empty subset of `functions`, in every order."""
     return [
@@ -68,22 +106,25 @@ def build_config_matrix(functions: list[str]) -> list[list[str]]:
 def parse_get_config(output: str) -> dict[str, Any] | None:
     """Returns the JSON object that `usb-cli get-config` printed, if any.
 
-    The serial console also echoes the command and interleaves kernel log
-    lines, even inside the JSON. So drop the log lines, then try each `{`
-    until one starts an object with "configurations" or "functions".
+    The serial console echoes commands, translates LF to CRLF, and interleaves
+    kernel or Archivist log lines even inside JSON strings. Strip serial noise
+    first, reject explicit `usb-cli` errors, and scan each `{` until one
+    decodes to a valid configuration schema.
     """
-    output = KERNEL_LOG_RE.sub("", output)
+    if _ERROR_TOKEN in output:
+        return None
+    cleaned = _strip_serial_noise(output)
+    if _USB_CLI_ERR_PREFIX in cleaned:
+        return None
     decoder = json.JSONDecoder()
-    for start, char in enumerate(output):
+    for start, char in enumerate(cleaned):
         if char != "{":
             continue
         try:
-            value, _ = decoder.raw_decode(output, start)
+            value, _ = decoder.raw_decode(cleaned, start)
         except json.JSONDecodeError:
             continue
-        if isinstance(value, dict) and (
-            "configurations" in value or "functions" in value
-        ):
+        if _is_valid_config_payload(value):
             return value
     return None
 
@@ -178,11 +219,14 @@ def get_usb_config(dut: fuchsia_device.FuchsiaDevice) -> str:
         raise RuntimeError(
             "Failed to query USB config from the device over serial console."
         )
+    cleaned = _strip_serial_noise(res)
     if (
-        _DONE_TOKEN in res
-        or "{" in res
-        or "functions" in res
-        or "configurations" in res
+        (_DONE_TOKEN in res and cleaned.strip())
+        or _ERROR_TOKEN in res
+        or _USB_CLI_ERR_PREFIX in cleaned
+        or "{" in cleaned
+        or "functions" in cleaned
+        or "configurations" in cleaned
     ):
         return res.strip()
 
@@ -211,70 +255,99 @@ def parse_usb_config_functions(config_str: str) -> list[str]:
         config_str: Output string from usb-cli get-config.
 
     Returns:
-        List of function names (e.g. ['cdc', 'adb', 'test']).
+        List of function names (e.g. ['cdc', 'adb', 'vsock']).
+
+    Raises:
+        UsbConfigParseError: If `config_str` does not contain a valid
+            `usb-cli get-config` JSON payload.
     """
-    raw_functions: list[str] = []
-    # Try structured extraction via parse_get_config first, which strips
-    # interleaved serial console/kernel logs and parses JSON safely.
     data = parse_get_config(config_str)
-    if data:
-        if "configurations" in data and isinstance(
-            data["configurations"], list
-        ):
-            raw_functions = [
-                str(f)
-                for cfg in data["configurations"]
-                if isinstance(cfg, list)
-                for f in cfg
-            ]
-        elif "functions" in data and isinstance(data["functions"], list):
-            raw_functions = [str(f) for f in data["functions"]]
-
-    if not raw_functions:
-        try:
-            # usb-cli get-config outputs JSON: {"functions": ["cdc", "adb", ...]}
-            start_idx = config_str.find("{")
-            end_idx = config_str.rfind("}")
-            if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
-                data = json.loads(config_str[start_idx : end_idx + 1])
-                if "configurations" in data and isinstance(
-                    data["configurations"], list
-                ):
-                    raw_functions = [
-                        str(f)
-                        for cfg in data["configurations"]
-                        if isinstance(cfg, list)
-                        for f in cfg
-                    ]
-                elif "functions" in data and isinstance(
-                    data["functions"], list
-                ):
-                    raw_functions = [str(f) for f in data["functions"]]
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
-            _LOGGER.debug(
-                "Failed to parse JSON configuration (%s) from: %s",
-                e,
-                config_str,
-            )
-
-    if not raw_functions:
-        # Fallback to comma-separated splitting with identifier validation
-        cleaned = (
-            config_str.strip()
-            .replace(_DONE_TOKEN, "")
-            .replace("[", "")
-            .replace("]", "")
-            .replace('"', "")
+    if data is None:
+        raise UsbConfigParseError(
+            "Failed to parse valid usb-cli get-config JSON from serial "
+            f"output: {config_str!r}"
         )
-        raw_functions = [
-            p.strip()
-            for p in cleaned.split(",")
-            if p.strip()
-            and p.strip() != "usb-cli:DONE"
-            and _IDENT_RE.match(p.strip())
-        ]
+
+    raw_functions: list[str] = []
+    if "configurations" in data:
+        raw_functions = [fn for cfg in data["configurations"] for fn in cfg]
+    elif "functions" in data:
+        raw_functions = list(data["functions"])
 
     return normalize_usb_functions(raw_functions)
+
+
+_DEFAULT_CONFIG_READ_MAX_ATTEMPTS: int = 10
+_DEFAULT_CONFIG_READ_TIMEOUT_SEC: float = 30.0
+_DEFAULT_CONFIG_READ_DELAY_SEC: float = 1.0
+
+
+def read_usb_functions_over_serial(
+    dut: fuchsia_device.FuchsiaDevice,
+    max_attempts: int = _DEFAULT_CONFIG_READ_MAX_ATTEMPTS,
+    timeout_sec: float = _DEFAULT_CONFIG_READ_TIMEOUT_SEC,
+    retry_delay_sec: float = _DEFAULT_CONFIG_READ_DELAY_SEC,
+) -> tuple[str, list[str]]:
+    """Query and parse the DUT's active USB functions with deadline retries.
+
+    Retries transient empty or garbled serial console reads up to
+    `max_attempts` attempts within `timeout_sec`. Propagates `RuntimeError`
+    immediately if no serial console transport is available on the DUT.
+
+    Args:
+        dut: Fuchsia DUT device object.
+        max_attempts: Maximum number of query attempts.
+        timeout_sec: Maximum duration in seconds across all retries.
+        retry_delay_sec: Delay between retry attempts in seconds.
+
+    Returns:
+        A tuple of (last_raw_output, parsed_functions_list). If all attempts
+        fail or produce invalid/empty function lists, returns (last_raw, []).
+
+    Raises:
+        RuntimeError: Raised by `get_usb_config` if the DUT does not have a
+            usable serial console transport.
+    """
+    deadline = time.monotonic() + timeout_sec
+    last_raw = ""
+    attempt = 0
+    while attempt < max_attempts:
+        attempt += 1
+        raw_config = get_usb_config(dut)
+        last_raw = raw_config
+        if not raw_config:
+            _LOGGER.warning(
+                "Empty usb-cli get-config output on attempt %d/%d.",
+                attempt,
+                max_attempts,
+            )
+        else:
+            try:
+                functions = parse_usb_config_functions(raw_config)
+            except (UsbConfigParseError, ValueError) as err:
+                _LOGGER.warning(
+                    "Failed to parse usb-cli get-config output on attempt "
+                    "%d/%d: %s",
+                    attempt,
+                    max_attempts,
+                    err,
+                )
+            else:
+                if functions:
+                    return raw_config, functions
+                _LOGGER.warning(
+                    "Parsed empty USB function list from usb-cli "
+                    "get-config on attempt %d/%d: %r",
+                    attempt,
+                    max_attempts,
+                    raw_config,
+                )
+
+        if attempt >= max_attempts or time.monotonic() >= deadline:
+            break
+        time.sleep(retry_delay_sec)
+
+    return last_raw, []
 
 
 def _send_serial_command(
@@ -338,6 +411,12 @@ def _send_serial_command(
     return output
 
 
+def _notify_intentional_disconnect(dut: fuchsia_device.FuchsiaDevice) -> None:
+    """Combines multiple transport disconnect notifications."""
+    dut.fuchsia_controller.before_usb_disconnect()
+    dut.ffx.notify_intentional_disconnect()
+
+
 def set_usb_config(
     dut: fuchsia_device.FuchsiaDevice,
     config: str,
@@ -347,6 +426,11 @@ def set_usb_config(
     The command is dispatched deterministically over the serial console because
     serial is the only transport that survives the CDC Ethernet teardown caused
     by switching USB peripheral configurations.
+
+    Every switch tears down all USB functions and re-enumerates, so if CDC is
+    currently up this drops the FFX and SSH connections. The FFX monitor is
+    therefore always notified first that the upcoming disconnect is
+    intentional.
 
     Success is deliberately *not* gated on observing usb-cli's completion
     token, because Honeydew's serial `read()` offers no synchronization with
@@ -363,6 +447,9 @@ def set_usb_config(
         RuntimeError: If no serial console is available or the USB
             configuration command could not be dispatched over serial.
     """
+    # The switch drops CDC, and with it FFX and SSH.
+    _notify_intentional_disconnect(dut)
+
     _LOGGER.info(
         "Applying USB peripheral configuration '%s' on target...", config
     )

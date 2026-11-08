@@ -7,23 +7,20 @@ import dataclasses
 import os
 import pathlib
 import shlex
-import sys
 import typing as T
+
+from build.api import gn_ninja_outputs
+from build.bazel.scripts import bazel_build_args, build_utils
+from build.bazel.scripts.build_utils import BazelLauncher, NinjaRunner
+from build.beads.scripts import (
+    normalize_clang_args,
+    normalize_rustc_args,
+    path_normalizer,
+    shell_utils,
+)
 
 # Root directory of the Fuchsia source tree.
 _FUCHSIA_DIR = pathlib.Path(__file__).parent.parent.parent.parent
-
-sys.path.insert(0, str(_FUCHSIA_DIR / "build/api"))
-import gn_ninja_outputs
-
-sys.path.insert(0, str(_FUCHSIA_DIR / "build/bazel/scripts"))
-import bazel_build_args
-import build_utils
-import normalize_clang_args
-import normalize_rustc_args
-import path_normalizer
-import shell_utils
-from build_utils import BazelLauncher, NinjaRunner
 
 # When packaged into a python_binary zipapp (.pyz), bazel_build_args._EXPAND_BUILD_ARGS_JSON_CQUERY_PATH
 # resolves relative to the zip archive, which does not exist on the filesystem for Bazel cquery.
@@ -158,6 +155,7 @@ class ConfiguredBazelLabel:
 
     label: str
     config: str
+    use_pic: bool = False
 
     def __post_init__(self) -> None:
         _validate_bazel_config(self.config)
@@ -200,6 +198,17 @@ class CompareCommandsQuery:
                 "CompareCommandsQuery requires at least one of 'gn' or 'bazel' to be set."
             )
         _validate_action_type(self.action_type)
+        if (
+            self.bazel
+            and self.gn
+            and "-shared)" in self.gn
+            and not self.bazel.use_pic
+        ):
+            object.__setattr__(
+                self,
+                "bazel",
+                dataclasses.replace(self.bazel, use_pic=True),
+            )
 
     @property
     def bazel_label(self) -> str:
@@ -212,7 +221,7 @@ class CompareCommandsQuery:
         return self.bazel.config if (self.bazel is not None) else ""
 
     @classmethod
-    def from_dict(cls, data: JSONObject) -> "CompareCommandsQuery":
+    def from_dict(cls, data: JSONObject) -> CompareCommandsQuery:
         """Construct a CompareCommandsQuery from a dictionary.
 
         Supported dictionary keys:
@@ -524,6 +533,25 @@ def _normalize_label(label: str) -> str:
     return label
 
 
+def _is_pic_compile_action(tokens: list[str]) -> bool:
+    """Returns True if a compile command outputs a .pic.o object file.
+
+    When the `supports_pic` feature is enabled on a Bazel C++ toolchain,
+    `cc_library` and `cc_binary` register two `CppCompile` actions per source
+    file in the action graph: one producing `<src>.pic.o` (with `-fPIC`, listed
+    first in `aquery`) and one producing `<src>.o` (without `-fPIC`, archived
+    into `lib<target>.a`).
+    """
+    for i, token in enumerate(tokens):
+        if token == "-o" and i + 1 < len(tokens):
+            return tokens[i + 1].endswith(".pic.o")
+        if token.startswith(("-o=", "--output=")):
+            return token.partition("=")[2].endswith(".pic.o")
+        if token.startswith("-o") and len(token) > 2:
+            return token[2:].endswith(".pic.o")
+    return False
+
+
 def query_bazel_commands(
     bazel_launcher: BazelLauncher,
     bazel_execroot: str | pathlib.Path,
@@ -619,7 +647,16 @@ def query_bazel_commands(
 
             norm_label = _normalize_label(label)
             actions = target_actions_map.get(norm_label, [])
+            if not actions:
+                actions = target_actions_map.get(norm_label + ".actual", [])
+            if not actions:
+                base_name = norm_label.rsplit(":", 1)[-1].rsplit("/", 1)[-1]
+                actions = target_actions_map.get(
+                    f"{norm_label}.actual/{base_name}", []
+                )
             matched_cmd = None
+            fallback_cmd = None
+            expect_pic = query.bazel.use_pic
 
             for action in actions:
                 full_args = list(action.env_vars) + action.args
@@ -632,8 +669,22 @@ def query_bazel_commands(
                     source_file=source_file,
                     tokens=full_args,
                 ):
-                    matched_cmd = cmd_str
-                    break
+                    if action_type in (
+                        ACTION_C_COMPILE,
+                        ACTION_CPP_COMPILE,
+                        ACTION_ASSEMBLE,
+                    ):
+                        if _is_pic_compile_action(full_args) == expect_pic:
+                            matched_cmd = cmd_str
+                            break
+                        if fallback_cmd is None:
+                            fallback_cmd = cmd_str
+                    else:
+                        matched_cmd = cmd_str
+                        break
+
+            if matched_cmd is None:
+                matched_cmd = fallback_cmd
 
             if matched_cmd:
                 result[query.bazel] = matched_cmd

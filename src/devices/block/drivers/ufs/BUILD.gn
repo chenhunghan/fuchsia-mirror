@@ -163,10 +163,60 @@ fuchsia_driver_package("ufs-pdev-package") {
   export_to_bazel = true
 }
 
+fuchsia_component_manifest("ufs-rust-pci-manifest") {
+  component_name = "ufs-rust-pci"
+  manifest = "meta/ufs-rust-pci.cml"
+}
+
+fuchsia_driver_component("ufs-rust-pci") {
+  component_name = "ufs-rust-pci"
+  cm_label = ":ufs-rust-pci-manifest"
+  deps = [
+    ":ufs-pci-bind",
+    ":ufs_rust",
+  ]
+  info = "meta/ufs-info.json"
+}
+
+fuchsia_driver_package("ufs-rust-pci-package") {
+  package_name = "ufs-rust-pci"
+  driver_components = [ ":ufs-rust-pci" ]
+  export_to_bazel = true
+}
+
+fuchsia_component_manifest("ufs-rust-pdev-manifest") {
+  component_name = "ufs-rust-pdev"
+  manifest = "meta/ufs-rust-pdev.cml"
+}
+
+fuchsia_driver_component("ufs-rust-pdev") {
+  component_name = "ufs-rust-pdev"
+  cm_label = ":ufs-rust-pdev-manifest"
+  deps = [
+    ":ufs-pdev-bind",
+    ":ufs_rust",
+  ]
+  info = "meta/ufs-info.json"
+}
+
+# Shared by both `ufs-rust-pdev` and `ufs-rust-pci` (whose config blocks must
+# stay identical).
+fuchsia_structured_config_rust_lib("ufs_rust_config") {
+  cm_label = ":ufs-rust-pdev-manifest"
+}
+
+fuchsia_driver_package("ufs-rust-pdev-package") {
+  package_name = "ufs-rust-pdev"
+  driver_components = [ ":ufs-rust-pdev" ]
+  export_to_bazel = true
+}
+
 group("ufs") {
   deps = [
     ":ufs-pci-package",
     ":ufs-pdev-package",
+    ":ufs-rust-pci-package",
+    ":ufs-rust-pdev-package",
   ]
 }
 
@@ -212,6 +262,7 @@ test("ufs-unit-tests-bin") {
     "test/uic-test.cc",
     "test/unit-lib.cc",
     "ufs_pci.cc",
+    "ufs_pdev.cc",
   ]
   deps = [
            ":ufs-common",
@@ -235,18 +286,28 @@ fuchsia_unittest_package("ufs-tests") {
   }
 }
 
-rustc_library("ufs_rust") {
+fuchsia_rust_driver("ufs_rust") {
+  output_name = "ufs_rust"
   with_unit_tests = true
+
+  # The default test binary name (`${output_name}_test`) collides with the
+  # `ufs_rust_test` target alias that `with_unit_tests` generates.
+  test_output_name = "ufs_rust_lib_test"
   edition = "2024"
   sources = [
+    "src/block_device.rs",
+    "src/constants.rs",
     "src/controller.rs",
     "src/descriptors.rs",
+    "src/device_manager.rs",
     "src/dma_buffer.rs",
     "src/lib.rs",
     "src/query.rs",
     "src/registers.rs",
     "src/request_list.rs",
+    "src/rpmb.rs",
     "src/scsi.rs",
+    "src/server.rs",
     "src/testing.rs",
     "src/testing/fake_ufs.rs",
     "src/transfer.rs",
@@ -255,11 +316,30 @@ rustc_library("ufs_rust") {
     "src/upiu.rs",
   ]
   deps = [
+    ":ufs_rust_config",
+    "//sdk/fidl/fuchsia.device.fs:fuchsia.device.fs_rust",
+    "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust",
+    "//sdk/fidl/fuchsia.hardware.block.volume:fuchsia.hardware.block.volume_rust",
+    "//sdk/fidl/fuchsia.hardware.interconnect:fuchsia.hardware.interconnect_rust",
+    "//sdk/fidl/fuchsia.hardware.pci:fuchsia.hardware.pci_rust",
+    "//sdk/fidl/fuchsia.hardware.platform.device:fuchsia.hardware.platform.device_rust",
+    "//sdk/fidl/fuchsia.hardware.rpmb:fuchsia.hardware.rpmb_rust",
+    "//sdk/fidl/fuchsia.hardware.scsi:fuchsia.hardware.scsi_rust",
+    "//sdk/fidl/fuchsia.hardware.ufs:fuchsia.hardware.ufs_rust",
+    "//sdk/fidl/fuchsia.hardware.ufs.phy:fuchsia.hardware.ufs.phy_rust",
+    "//sdk/fidl/fuchsia.scheduler:fuchsia.scheduler_rust",
+    "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_rust",
+    "//sdk/lib/driver/component/rust",
     "//sdk/lib/driver/mmio/rust:mmio",
+    "//sdk/lib/scheduler/rust",
     "//sdk/rust/zx",
+    "//src/lib/diagnostics/inspect/rust",
+    "//src/lib/fidl/rust/fidl",
     "//src/lib/fuchsia-async",
+    "//src/lib/fuchsia-component",
     "//src/lib/fuchsia-runtime",
     "//src/lib/fuchsia-sync",
+    "//src/storage/lib/block_protocol",
     "//src/storage/lib/block_server",
     "//third_party/rust_crates:bitfield",
     "//third_party/rust_crates:futures",
@@ -269,7 +349,9 @@ rustc_library("ufs_rust") {
     "//third_party/rust_crates:zerocopy",
   ]
   test_deps = [
+    "//sdk/fidl/fuchsia.mem:fuchsia.mem_rust",
     "//sdk/lib/driver/fake-bti/rust",
+    "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
     "//src/lib/fuchsia",
   ]
 }

@@ -5,7 +5,7 @@
 #ifndef SRC_DEVELOPER_FORENSICS_CRASH_REPORTS_CRASH_REGISTER_H_
 #define SRC_DEVELOPER_FORENSICS_CRASH_REPORTS_CRASH_REGISTER_H_
 
-#include <fuchsia/feedback/cpp/fidl.h>
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
 
 #include <map>
 #include <memory>
@@ -17,14 +17,14 @@
 namespace forensics {
 namespace crash_reports {
 
-class CrashRegister : public fuchsia::feedback::CrashReportingProductRegister {
+class CrashRegister : public fidl::Server<fuchsia_feedback::CrashReportingProductRegister> {
  public:
   explicit CrashRegister(std::shared_ptr<InfoContext> info_context, std::string register_filepath);
 
-  // |fuchsia::feedback::CrashReportingProductRegister|
-  void Upsert(std::string component_url, fuchsia::feedback::CrashReportingProduct product) override;
-  void UpsertWithAck(std::string component_url, fuchsia::feedback::CrashReportingProduct product,
-                     UpsertWithAckCallback callback) override;
+  // |fuchsia_feedback::CrashReportingProductRegister|
+  void Upsert(UpsertRequest& request, UpsertCompleter::Sync& completer) override;
+  void UpsertWithAck(UpsertWithAckRequest& request,
+                     UpsertWithAckCompleter::Sync& completer) override;
 
   bool HasProduct(const std::string& program_name) const;
 
@@ -39,6 +39,8 @@ class CrashRegister : public fuchsia::feedback::CrashReportingProductRegister {
   static void AddVersionAndChannel(Product& product, const AnnotationMap& annotations);
 
  private:
+  void Upsert(const std::string& component_url,
+              const fuchsia_feedback::CrashReportingProduct& product);
   void RestoreFromJson();
   void UpdateJson();
 

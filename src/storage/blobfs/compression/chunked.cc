@@ -76,12 +76,6 @@ zx_status_t ChunkedCompressor::SetOutput(void* dst, size_t dst_len) {
   return ZX_OK;
 }
 
-size_t ChunkedCompressor::BufferMax(size_t input_length) {
-  CompressionParams params =
-      GetChunkedCompressionParamsForType(kDefaultBlobfsDeliveryBlobType, input_length).value();
-  return params.ComputeOutputSizeLimit(input_length);
-}
-
 size_t ChunkedCompressor::Size() const { return compressed_size_.value_or(0ul); }
 
 zx_status_t ChunkedCompressor::Update(const void* input_data, size_t input_length) {

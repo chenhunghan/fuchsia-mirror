@@ -153,6 +153,12 @@ pub trait Ipv4Header {
         self.get_header_prefix().dscp_and_ecn
     }
 
+    /// The total length of the packet (header + body) in bytes, as recorded
+    /// in the header's Total Length field.
+    fn total_len(&self) -> u16 {
+        self.get_header_prefix().total_len.get()
+    }
+
     /// The identification.
     fn id(&self) -> u16 {
         self.get_header_prefix().id.get()
@@ -584,6 +590,12 @@ impl<B: SplitByteSlice> Ipv4Packet<B> {
             // 'troubleshooting and ease of debugging'.
             Ipv4Proto::Other(val) => {
                 let v6_pkt_builder = v6_builder(Ipv6Proto::Other(val));
+                let common_serializer = Nat64Serializer::Other(self.body().into_serializer());
+                Nat64TranslationResult::Forward(v6_pkt_builder.wrap_body(common_serializer))
+            }
+
+            Ipv4Proto::Proto(proto @ (IpProto::Ipv4Encap | IpProto::Ipv6Encap | IpProto::Esp)) => {
+                let v6_pkt_builder = v6_builder(Ipv6Proto::Proto(proto));
                 let common_serializer = Nat64Serializer::Other(self.body().into_serializer());
                 Nat64TranslationResult::Forward(v6_pkt_builder.wrap_body(common_serializer))
             }
@@ -1534,6 +1546,7 @@ mod tests {
     fn test_parse() {
         let mut bytes = &hdr_prefix_to_bytes(new_hdr_prefix())[..];
         let packet = bytes.parse::<Ipv4Packet<_>>().unwrap();
+        assert_eq!(packet.total_len(), 20);
         assert_eq!(packet.id(), 0x0102);
         assert_eq!(packet.ttl(), 0x03);
         assert_eq!(packet.proto(), IpProto::Tcp.into());
@@ -1944,8 +1957,10 @@ mod tests {
     fn test_nat64_translate_non_tcp_udp_icmp() {
         const PAYLOAD: [u8; 10] = [0, 1, 2, 3, 3, 4, 5, 7, 8, 9];
 
+        // Use a protocol number reserved for experimentation (RFC 3692) so that
+        // this exercises the `Other` translation path.
         let (ipv4_builder, ipv6_builder) =
-            create_ipv4_and_ipv6_builders(Ipv4Proto::Other(50), Ipv6Proto::Other(50));
+            create_ipv4_and_ipv6_builders(Ipv4Proto::Other(253), Ipv6Proto::Other(253));
 
         let mut v4_pkt_buf = (&PAYLOAD)
             .into_serializer()

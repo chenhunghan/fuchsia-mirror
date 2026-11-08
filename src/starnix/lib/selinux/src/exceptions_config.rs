@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::num::NonZeroU32;
 
 /// Encapsulates a set of access-check exceptions parsed from a supplied configuration.
-#[derive(RcuDroppable)]
+#[derive(Clone, RcuDroppable)]
 pub(super) struct ExceptionsConfig {
     todo_deny_entries: HashMap<ExceptionsEntry, NonZeroU32>,
     permissive_entries: HashMap<TypeId, NonZeroU32>,
@@ -145,7 +145,7 @@ impl ExceptionsConfig {
 }
 
 /// Key used to index the access check exceptions table.
-#[derive(Eq, Hash, PartialEq, RcuDroppable)]
+#[derive(Clone, Eq, Hash, PartialEq, RcuDroppable)]
 struct ExceptionsEntry {
     source: TypeId,
     target: TypeId,

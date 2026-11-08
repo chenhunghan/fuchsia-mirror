@@ -10,9 +10,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"go.fuchsia.dev/fuchsia/build/tools/bazel2gn"
 )
 
 func writeFile(t *testing.T, path string, content string) {
@@ -22,35 +24,6 @@ func writeFile(t *testing.T, path string, content string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestDiscoverSentinelDirectories(t *testing.T) {
-	root := t.TempDir()
-	withSentinel := "# Preserved.\n\n" + sentinelComment + "\n\ngroup(\"foo\") {}\n"
-	writeFile(t, filepath.Join(root, "BUILD.gn"), withSentinel)
-	writeFile(t, filepath.Join(root, "a/b/BUILD.gn"), withSentinel)
-	// Nested repositories are included.
-	writeFile(t, filepath.Join(root, "vendor/google/c/BUILD.gn"), withSentinel)
-	// No sentinel.
-	writeFile(t, filepath.Join(root, "d/BUILD.gn"), "group(\"foo\") {}\n")
-	// Only BUILD.gn files are considered.
-	writeFile(t, filepath.Join(root, "e/BUILD.bazel"), "# "+sentinelComment+"\n")
-	// Skipped directories.
-	writeFile(t, filepath.Join(root, "out/default/BUILD.gn"), withSentinel)
-	writeFile(t, filepath.Join(root, "prebuilt/f/BUILD.gn"), withSentinel)
-	writeFile(t, filepath.Join(root, "third_party/golibs/vendor/BUILD.gn"), withSentinel)
-	writeFile(t, filepath.Join(root, "third_party/rust_crates/vendor/g/BUILD.gn"), withSentinel)
-	writeFile(t, filepath.Join(root, ".git/BUILD.gn"), withSentinel)
-	writeFile(t, filepath.Join(root, "vendor/google/.git/BUILD.gn"), withSentinel)
-
-	got, err := discoverSentinelDirectories(root)
-	if err != nil {
-		t.Fatalf("discoverSentinelDirectories() error: %v", err)
-	}
-	want := []string{".", "a/b", "vendor/google/c"}
-	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("discoverSentinelDirectories() diff (-want +got):\n%s", diff)
 	}
 }
 
@@ -66,7 +39,7 @@ func fakeTool(t *testing.T, name, script string) string {
 
 func TestJSONDiagnostics(t *testing.T) {
 	fuchsiaDir := t.TempDir()
-	sentinelGN := sentinelComment + "\n"
+	sentinelGN := bazel2gn.SentinelComment + "\n"
 
 	writeFile(t, filepath.Join(fuchsiaDir, "out_of_sync", "BUILD.bazel"), "")
 	writeFile(t, filepath.Join(fuchsiaDir, "out_of_sync", "BUILD.gn"), sentinelGN+"# edited\n")
@@ -123,5 +96,54 @@ printf '%s\n' "$input" | sed 's/  # UNFORMATTED//'
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("writeDiagnostics(runBatch(%q)) diff (-want +got):\n%s", dirs, diff)
+	}
+}
+
+func TestSyncCompiledActionIncludesMigrationImport(t *testing.T) {
+	fuchsiaDir := t.TempDir()
+	bazelPath := filepath.Join(fuchsiaDir, "pkg", "BUILD.bazel")
+	gnPath := filepath.Join(fuchsiaDir, "pkg", "BUILD.gn")
+
+	writeFile(t, bazelPath, `load("//build/bazel/rules:compiled_action.bzl", "compiled_action")
+
+compiled_action(
+    name = "generate_epoch",
+    srcs = ["//src/sys/pkg/bin/system-updater/epoch:history"],
+    outs = ["epoch.json"],
+    args = [
+        "--history",
+        "$(location //src/sys/pkg/bin/system-updater/epoch:history)",
+        "--output",
+        "$(location :epoch.json)",
+    ],
+    tool = "//src/sys/pkg/bin/system-updater/epoch:generator",
+    tool_output_name = "epoch_generator",
+)
+`)
+	writeFile(t, gnPath, "# Above sentinel\n\n"+bazel2gn.SentinelComment+"\n")
+
+	p := syncParams{
+		relDir:        "pkg",
+		buildifierBin: fakeTool(t, "buildifier", "cat\n"),
+		gnBin:         fakeTool(t, "gn", "cat\n"),
+		checkOnly:     false,
+	}
+	if err := syncDirectory(context.Background(), bazelPath, gnPath, p); err != nil {
+		t.Fatalf("syncDirectory() failed: %v", err)
+	}
+	gotBytes, err := os.ReadFile(gnPath)
+	if err != nil {
+		t.Fatalf("reading synced BUILD.gn: %v", err)
+	}
+	got := string(gotBytes)
+	for _, wantSubstr := range []string{
+		`import("//build/tools/bazel2gn/bazel_migration.gni")`,
+		`compiled_action("generate_epoch") {`,
+		`tool = "//src/sys/pkg/bin/system-updater/epoch:generator"`,
+		`tool_output_name = "epoch_generator"`,
+	} {
+		if !strings.Contains(got, wantSubstr) {
+			t.Errorf("synced BUILD.gn missing %q:\n%s", wantSubstr, got)
+		}
 	}
 }

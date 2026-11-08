@@ -160,6 +160,10 @@ def main() -> int:
         help="Build directory containing host tools.",
     )
     parser.add_argument(
+        "--prebuilt-target-sysroot-dir",
+        help="Build directory containing target sysroot.",
+    )
+    parser.add_argument(
         "--target-cpu",
         required=True,
         help="Target CPU for which to build the target.",
@@ -344,6 +348,23 @@ def main() -> int:
         # the top-level build, as there is no way to inject dependencies
         # between the two build graphs.
         args_gn_content += f'host_tools_base_path_override = "{args.prebuilt_host_tools_dir}"\n'
+
+    if args.prebuilt_target_sysroot_dir:
+        # Reuse the target sysroot from the top-level build to avoid redundant
+        # Musl libc, IFS stub, and header generations in the sub-build.
+        sysroot_path = Path(args.prebuilt_target_sysroot_dir)
+        if not sysroot_path.is_absolute():
+            # Relative to top-level build dir (parent of sub-build dir).
+            top_build_dir = (build_dir / "..").resolve()
+            sysroot_abs = (top_build_dir / sysroot_path).resolve()
+            sysroot_gn = "//" + str(
+                sysroot_abs.relative_to(fuchsia_dir.resolve())
+            )
+        else:
+            sysroot_gn = "//" + str(
+                sysroot_path.resolve().relative_to(fuchsia_dir.resolve())
+            )
+        args_gn_content += f'target_sysroot = "{sysroot_gn}"\n'
 
     args_gn_content += "sdk_inside_sub_build = true\n"
 

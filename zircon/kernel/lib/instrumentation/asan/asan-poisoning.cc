@@ -39,7 +39,7 @@ bool is_mem_zero(ktl::span<const uint8_t> region) {
 // Example:
 // (Shadow address)        (shadow map contents)
 //
-// KASAN detected a write error: ptr={{{data:0xffffff8043251830}}}, size=0x4, caller:
+// KASAN detected a WRITE error: ptr={{{data:0xffffff8043251830}}}, size=0x4, caller:
 // {{{pc:0xffffffff001d9371}}} Shadow memory state around the buggy address 0xffffffe00864a306:
 // 0xffffffe00864a2f0: 0xfa 0xfa 0xfa 0xfa 0xfa 0xfa 0xfa 0xfa
 // 0xffffffe00864a2f8: 0xfa 0xfa 0xfa 0xfa 0xfa 0xfa 0xfa 0xfa
@@ -48,13 +48,26 @@ bool is_mem_zero(ktl::span<const uint8_t> region) {
 // 0xffffffe00864a308: 0xfa 0xfa 0xfa 0xfa 0xfa 0xfa 0xfa 0xfa
 // 0xffffffe00864a310: 0xfa 0xfa 0xfa 0xfa 0xfa 0xfa 0xfa 0xfa
 // page 0xffffff807f475f30: address 0x43251000 state heap flags 0
-void print_error_shadow(uintptr_t address, size_t bytes, bool is_write, void* caller,
+void print_error_shadow(uintptr_t address, size_t bytes, AccessType access_type, void* caller,
                         uintptr_t poisoned_addr) {
   const uintptr_t shadow = reinterpret_cast<uintptr_t>(addr2shadow(address));
 
+  const char* access_type_str = nullptr;
+  switch (access_type) {
+    case AccessType::Assumption:
+      access_type_str = "ASSUME";
+      break;
+    case AccessType::Read:
+      access_type_str = "READ";
+      break;
+    case AccessType::Write:
+      access_type_str = "WRITE";
+      break;
+  }
+
   dprintf(CRITICAL,
           "\nKASAN detected a %s error: ptr={{{data:%#lx}}}, size=%#zx, caller: {{{pc:%p}}}\n",
-          !is_write ? "read" : "write", address, bytes, caller);
+          access_type_str, address, bytes, caller);
 
   // TODO(https://fxbug.dev/42104852): Decode the shadow value into 'use-after-free'/redzone/page
   // free/etc.
@@ -167,7 +180,7 @@ uintptr_t asan_region_is_poisoned(uintptr_t address, size_t size) {
   panic("Unreachable code\n");
 }
 
-void asan_check(uintptr_t address, size_t bytes, bool is_write, void* caller) {
+void asan_check(uintptr_t address, size_t bytes, AccessType access_type, void* caller) {
   // TODO(https://fxbug.dev/42104852): Inline the fast path for constant-size checks.
   if (!g_asan_initialized.load(ktl::memory_order_relaxed)) {
     return;
@@ -179,7 +192,7 @@ void asan_check(uintptr_t address, size_t bytes, bool is_write, void* caller) {
   }
 
   platform_panic_start();
-  print_error_shadow(address, bytes, is_write, caller, poisoned_addr);
+  print_error_shadow(address, bytes, access_type, caller, poisoned_addr);
   panic("kasan\n");
 }
 

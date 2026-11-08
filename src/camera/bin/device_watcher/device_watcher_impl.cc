@@ -10,6 +10,7 @@
 #include <fidl/fuchsia.component.decl/cpp/fidl.h>
 #include <fidl/fuchsia.component/cpp/fidl.h>
 #include <lib/async/cpp/task.h>
+#include <lib/async/cpp/time.h>
 #include <lib/fdio/directory.h>
 #include <lib/fdio/fdio.h>
 #include <lib/fit/function.h>
@@ -23,6 +24,7 @@
 #include <limits>
 
 #include "src/camera/bin/device_watcher/device_instance.h"
+#include "src/lib/backoff/exponential_backoff.h"
 
 namespace camera {
 
@@ -30,6 +32,15 @@ namespace camera {
 // fetched from device.
 constexpr uint16_t kFakeInfoReturnVendorId = 0x1212;
 constexpr uint16_t kFakeInfoReturnProductId = 0x9898;
+
+// How often to launch a device again after its child exits. The delay before each attempt starts
+// at about a second and doubles each time, with jitter.
+constexpr uint32_t kMaxRelaunchAttempts = 3;
+constexpr zx::duration kFirstRelaunchDelay = zx::sec(1);
+constexpr uint32_t kRelaunchDelayFactor = 2;
+constexpr zx::duration kMaxRelaunchDelay = zx::sec(8);
+// A child that ran at least this long before it exited gets a fresh set of attempts.
+constexpr zx::duration kStableRunTime = zx::min(1);
 
 using DeviceHandle = fidl::ClientEnd<fuchsia_hardware_camera::Device>;
 
@@ -113,12 +124,16 @@ fpromise::result<CameraType, zx_status_t> DeviceWatcherImpl::GetDeviceInfoAndIde
 }
 
 fpromise::result<std::unique_ptr<DeviceWatcherImpl>, zx_status_t> DeviceWatcherImpl::Create(
-    fidl::ClientEnd<fuchsia_component::Realm> realm, async_dispatcher_t* dispatcher) {
+    fidl::ClientEnd<fuchsia_component::Realm> realm, async_dispatcher_t* dispatcher,
+    CameraConnector camera_connector) {
   auto server = std::make_unique<DeviceWatcherImpl>();
 
   server->dispatcher_ = dispatcher;
 
   server->realm_ = fidl::Client<fuchsia_component::Realm>(std::move(realm), server->dispatcher_);
+
+  server->camera_connector_ =
+      camera_connector ? std::move(camera_connector) : CameraConnector(GetCameraHandle);
 
   return fpromise::ok(std::move(server));
 }
@@ -128,7 +143,7 @@ void DeviceWatcherImpl::AddDeviceByPath(const std::string& path) {
   auto full_path = GetCameraFullPath(path);
 
   // Grab the handle from opening the full path to the device.
-  auto result = GetCameraHandle(full_path);
+  auto result = camera_connector_(full_path);
   if (result.is_error()) {
     FX_PLOGS(INFO, result.error()) << "Couldn't get camera handle from " << full_path
                                    << ". This device will not be exposed to clients.";
@@ -151,7 +166,7 @@ void DeviceWatcherImpl::AddDeviceByPath(const std::string& path) {
   // TODO(https://fxbug.dev/42068996) - Need either A) an explanation for why this (2nd fetch of the
   // camera handle) is necessary, or B) figure out the right way to produce the right handle to pass
   // down to the child component.
-  auto handle_result = GetCameraHandle(full_path);
+  auto handle_result = camera_connector_(full_path);
   if (handle_result.is_error()) {
     FX_PLOGS(INFO, handle_result.error()) << "Couldn't get 2nd camera handle from " << full_path
                                           << ". This device will not be exposed to clients.";
@@ -174,6 +189,11 @@ void DeviceWatcherImpl::AddDeviceByPath(const std::string& path) {
                                           << ". This device will not be exposed to clients.";
     return;
   }
+
+  // Clients that connect before the first scan completes are queued until UpdateClients(), so this
+  // only reaches clients when the camera appears after that scan, e.g. because its driver started
+  // late. Their pending WatchDevices calls return with the new camera.
+  NotifyClients();
 }
 
 fpromise::result<PersistentDeviceId, zx_status_t> DeviceWatcherImpl::AddMipiCsiDevice(
@@ -192,23 +212,14 @@ fpromise::result<PersistentDeviceId, zx_status_t> DeviceWatcherImpl::AddMipiCsiD
       (static_cast<uint64_t>(device_info.vendor_id().value()) << kVendorShift) |
       device_info.product_id().value();
 
-  // Launch the camera device instance.
-  std::string collection_name = std::string(kMipiCsiDeviceInstanceCollectionName);
-  std::string instance_name = std::string(kMipiCsiDeviceInstanceNamePrefix) + path;
-  std::string url(kMipiCsiDeviceInstanceUrl);
-  auto result = DeviceInstance::Create(std::move(camera), realm_, dispatcher_, collection_name,
-                                       instance_name, url);
-  if (result.is_error()) {
-    FX_PLOGS(ERROR, result.error()) << "Failed to launch device instance.";
-    return fpromise::error(result.error());
+  auto& device = devices_[persistent_id];
+  device.type = kCameraTypeMipiCsi;
+  device.path = path;
+  device.relaunch_attempts = 0;
+  if (device.relaunch_backoff) {
+    device.relaunch_backoff->Reset();
   }
-  auto instance = result.take_value();
-
-  devices_[persistent_id] = {.id = device_id_next_, .instance = std::move(instance)};
-  FX_LOGS(DEBUG) << "Added device " << persistent_id << " as device ID " << device_id_next_;
-  ++device_id_next_;
-
-  return fpromise::ok(persistent_id);
+  return LaunchDevice(persistent_id, std::move(camera));
 }
 
 fpromise::result<PersistentDeviceId, zx_status_t> DeviceWatcherImpl::AddUvcDevice(
@@ -225,23 +236,110 @@ fpromise::result<PersistentDeviceId, zx_status_t> DeviceWatcherImpl::AddUvcDevic
       (static_cast<uint64_t>(device_info.vendor_id().value()) << kVendorShift) |
       device_info.product_id().value();
 
+  auto& device = devices_[persistent_id];
+  device.type = kCameraTypeUvc;
+  device.path = path;
+  device.relaunch_attempts = 0;
+  if (device.relaunch_backoff) {
+    device.relaunch_backoff->Reset();
+  }
+  return LaunchDevice(persistent_id, std::move(camera));
+}
+
+fpromise::result<PersistentDeviceId, zx_status_t> DeviceWatcherImpl::LaunchDevice(
+    PersistentDeviceId persistent_id, DeviceHandle camera) {
+  auto& device = devices_[persistent_id];
+  if (device.relaunch_task) {
+    device.relaunch_task->Cancel();
+  }
+
+  std::string collection_name;
+  std::string instance_name;
+  std::string url;
+  switch (device.type) {
+    case kCameraTypeMipiCsi:
+      collection_name = std::string(kMipiCsiDeviceInstanceCollectionName);
+      instance_name = std::string(kMipiCsiDeviceInstanceNamePrefix) + device.path;
+      url = std::string(kMipiCsiDeviceInstanceUrl);
+      break;
+    case kCameraTypeUvc:
+      collection_name = std::string(kUvcDeviceInstanceCollectionName);
+      instance_name = std::string(kUvcDeviceInstanceNamePrefix) + device.path;
+      url = std::string(kUvcDeviceInstanceUrl);
+      break;
+  }
+
   // Launch the camera device instance.
-  std::string collection_name = std::string(kUvcDeviceInstanceCollectionName);
-  std::string instance_name = std::string(kUvcDeviceInstanceNamePrefix) + path;
-  std::string url(kUvcDeviceInstanceUrl);
-  auto result = DeviceInstance::Create(std::move(camera), realm_, dispatcher_, collection_name,
-                                       instance_name, url);
+  uint32_t launch_count = ++device.launch_count;
+  auto result = DeviceInstance::Create(
+      std::move(camera), realm_, dispatcher_, collection_name, instance_name, url,
+      [this, persistent_id, launch_count]() { OnDeviceExited(persistent_id, launch_count); });
   if (result.is_error()) {
     FX_PLOGS(ERROR, result.error()) << "Failed to launch device instance.";
     return fpromise::error(result.error());
   }
-  auto instance = result.take_value();
-
-  devices_[persistent_id] = {.id = device_id_next_, .instance = std::move(instance)};
-  FX_LOGS(DEBUG) << "Added device " << persistent_id << " as device ID " << device_id_next_;
-  ++device_id_next_;
+  device.instance = result.take_value();
+  device.id = device_id_next_++;
+  device.launch_time = async::Now(dispatcher_);
+  if (!device.relaunch_task) {
+    device.relaunch_task = std::make_unique<async::TaskClosure>(
+        [this, persistent_id]() { RelaunchDevice(persistent_id); });
+    device.relaunch_backoff = std::make_unique<backoff::ExponentialBackoff>(
+        kFirstRelaunchDelay, kRelaunchDelayFactor, kMaxRelaunchDelay);
+  }
+  FX_LOGS(DEBUG) << "Added device " << persistent_id << " as device ID " << device.id;
 
   return fpromise::ok(persistent_id);
+}
+
+void DeviceWatcherImpl::OnDeviceExited(PersistentDeviceId persistent_id, uint32_t launch_count) {
+  auto it = devices_.find(persistent_id);
+  if (it == devices_.end() || it->second.launch_count != launch_count || !it->second.instance) {
+    return;
+  }
+  auto& device = it->second;
+  FX_LOGS(WARNING) << "Camera device " << device.instance->name() << " exited. Removing device ID "
+                   << device.id << ".";
+
+  device.instance.reset();
+  NotifyClients();
+
+  if (async::Now(dispatcher_) - device.launch_time >= kStableRunTime) {
+    device.relaunch_attempts = 0;
+    device.relaunch_backoff->Reset();
+  }
+  ScheduleRelaunch(persistent_id);
+}
+
+void DeviceWatcherImpl::ScheduleRelaunch(PersistentDeviceId persistent_id) {
+  auto& device = devices_[persistent_id];
+  if (device.relaunch_attempts >= kMaxRelaunchAttempts) {
+    FX_LOGS(ERROR) << "Camera device " << device.path << " failed " << device.relaunch_attempts
+                   << " relaunch attempts in a row. Not relaunching it again.";
+    return;
+  }
+  zx::duration delay = device.relaunch_backoff->GetNext();
+  ++device.relaunch_attempts;
+  FX_LOGS(INFO) << "Relaunching camera device " << device.path << " in " << delay.to_msecs()
+                << " ms.";
+  device.relaunch_task->Cancel();
+  device.relaunch_task->PostDelayed(dispatcher_, delay);
+}
+
+void DeviceWatcherImpl::RelaunchDevice(PersistentDeviceId persistent_id) {
+  auto& device = devices_[persistent_id];
+  auto full_path = GetCameraFullPath(device.path);
+  auto handle_result = camera_connector_(full_path);
+  if (handle_result.is_error()) {
+    FX_PLOGS(WARNING, handle_result.error()) << "Couldn't get camera handle from " << full_path;
+    ScheduleRelaunch(persistent_id);
+    return;
+  }
+  if (LaunchDevice(persistent_id, handle_result.take_value()).is_error()) {
+    ScheduleRelaunch(persistent_id);
+    return;
+  }
+  NotifyClients();
 }
 
 void DeviceWatcherImpl::UpdateClients() {
@@ -252,6 +350,10 @@ void DeviceWatcherImpl::UpdateClients() {
       requests_.pop();
     }
   }
+  NotifyClients();
+}
+
+void DeviceWatcherImpl::NotifyClients() {
   for (auto& client : clients_) {
     client.second->UpdateDevices(devices_);
   }
@@ -295,8 +397,10 @@ void DeviceWatcherImpl::ConnectDynamicChild(fidl::ServerEnd<fuchsia_camera3::Dev
              client_end = std::move(endpoints->client)](
                 fidl::Result<fuchsia_component::Realm::OpenExposedDir>& result) mutable {
         if (result.is_error()) {
-          FX_LOGS(FATAL) << "Failed to open exposed directory for " << child_name << ": "
-                         << result.error_value();
+          // The child is gone. Its exit is handled when its exposed directory closes.
+          FX_LOGS(WARNING) << "Failed to open exposed directory for " << child_name << ": "
+                           << result.error_value();
+          request.Close(ZX_ERR_UNAVAILABLE);
           return;
         }
 
@@ -331,7 +435,9 @@ DeviceWatcherImpl::Client::Create(DeviceWatcherImpl& watcher, ClientId id,
 void DeviceWatcherImpl::Client::UpdateDevices(const DevicesMap& devices) {
   last_known_ids_.clear();
   for (const auto& device : devices) {
-    last_known_ids_.insert(device.second.id);
+    if (device.second.instance) {
+      last_known_ids_.insert(device.second.id);
+    }
   }
   CheckDevicesChanged();
 }
@@ -429,8 +535,9 @@ void DeviceWatcherImpl::Client::ConnectToDevice(ConnectToDeviceRequest& request,
   auto id = request.id();
   // Find the UniqueDevice to connect to.
   const auto& devices = watcher_.devices_;
-  auto unique_device = std::find_if(devices.begin(), devices.end(),
-                                    [=](const auto& it) { return it.second.id == id; });
+  auto unique_device = std::find_if(devices.begin(), devices.end(), [=](const auto& it) {
+    return it.second.instance && it.second.id == id;
+  });
   if (unique_device == devices.end()) {
     if (request.request().is_valid()) {
       request.request().Close(ZX_ERR_NOT_FOUND);

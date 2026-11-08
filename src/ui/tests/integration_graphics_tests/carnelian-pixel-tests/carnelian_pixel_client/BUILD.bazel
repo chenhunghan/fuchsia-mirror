@@ -1,0 +1,53 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "static_square_bin",
+    srcs = ["src/main.rs"],
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        "//src/lib/ui/carnelian",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:euclid",
+    ],
+)
+
+fx_packaged_binary(
+    name = "static_square_bin_packaged",
+    binary = ":static_square_bin",
+    binary_name = "static_square_bin",
+)
+
+fx_component_manifest(
+    name = "static_square_component_manifest",
+    testonly = True,
+    component_name = "static_square",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/static_square.cml",
+)
+
+fx_component(
+    name = "static_square_component",
+    testonly = True,
+    compiled_manifest = ":static_square_component_manifest",
+    visibility = ["//src/ui/tests/integration_graphics_tests/carnelian-pixel-tests:__subpackages__"],
+    deps = [":static_square_bin_packaged"],
+)

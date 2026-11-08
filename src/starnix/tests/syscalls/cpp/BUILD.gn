@@ -191,7 +191,10 @@ syscall_tests_etc = [
   },
   {
     name = "overlayfs_test"
-    executables = [ "test_programs:exit_zero" ]
+    executables = [
+      ":print_uid_gid_exec_child",
+      "test_programs:exit_zero",
+    ]
   },
   {
     name = "task_test"
@@ -250,8 +253,10 @@ mlock_pin_flavors = [
 
 foreach(onfault_behavior, mlock_onfault_behaviors) {
   foreach(pin_flavor, mlock_pin_flavors) {
+    mlock_defines = []
     if (onfault_behavior) {
       onfault_str = "_always_onfault"
+      mlock_defines = [ "MLOCK_ALWAYS_ONFAULT" ]
     } else {
       onfault_str = ""
     }
@@ -259,6 +264,7 @@ foreach(onfault_behavior, mlock_onfault_behaviors) {
       {
         name = "mlock_test${onfault_str}_${pin_flavor}_pin"
         sources = [ "mlock_test.cc" ]
+        defines = mlock_defines
 
         # Sanitizer runtimes stub out mlock() because it is incompatible with
         # their virtual memory management.
@@ -718,7 +724,11 @@ fuchsia_test_package("linux_syscalls_cpp_tests") {
     _env = basic_envs
     _env += [ gce_env ]
     _env -= [ gce_env ]
-    environments = _env
+    if (_env == []) {
+      build_only = true
+    } else {
+      environments = _env
+    }
 
     log_settings = {
       # Tests exercise failure cases, so ERROR logs are expected.
@@ -805,7 +815,11 @@ fuchsia_test_package("starnix_syscalls_cpp_tests") {
     _env = basic_envs
     _env += [ gce_env ]
     _env -= [ gce_env ]
-    environments = _env
+    if (_env == []) {
+      build_only = true
+    } else {
+      environments = _env
+    }
 
     log_settings = {
       # Tests exercise failure cases, so ERROR logs are expected.
@@ -842,7 +856,11 @@ if (current_cpu == "arm64") {
       _env = arch32_envs
       _env += [ gce_env ]
       _env -= [ gce_env ]
-      environments = _env
+      if (_env == []) {
+        build_only = true
+      } else {
+        environments = _env
+      }
 
       log_settings = {
         # Tests exercise failure cases, so ERROR logs are expected.
@@ -879,7 +897,11 @@ if (current_cpu == "arm64") {
       _env = arch32_envs
       _env += [ gce_env ]
       _env -= [ gce_env ]
-      environments = _env
+      if (_env == []) {
+        build_only = true
+      } else {
+        environments = _env
+      }
 
       log_settings = {
         # Tests exercise failure cases, so ERROR logs are expected.

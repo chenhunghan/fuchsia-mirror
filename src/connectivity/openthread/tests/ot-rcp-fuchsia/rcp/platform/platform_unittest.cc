@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <string>
 
 #include <gtest/gtest.h>
@@ -77,9 +78,9 @@ void otPlatAlarmMilliFired(otInstance* aInstance) {
 namespace ot_rcp {
 namespace {
 
-// Node id passed to Platform::Create(). Only used by the platform as a log tag.
+// Node id passed to the Platform. Only used by the platform as a log tag.
 constexpr uint32_t kNodeId = 7;
-// A different node id, used to check that re-Create() takes effect.
+// A different node id, used to check that a re-created Platform takes effect.
 constexpr uint32_t kOtherNodeId = 42;
 
 // `otInstance` is opaque; the platform only passes the pointer back to the core.
@@ -92,13 +93,13 @@ class PlatformTest : public ::testing::Test {
  protected:
   void SetUp() override {
     Core() = FakeCore();
-    Platform::Create(loop_.dispatcher(), kNodeId);
+    platform_.emplace(loop_.dispatcher(), kNodeId);
   }
 
   void TearDown() override {
     // `loop_` belongs to this fixture and is destroyed right after TearDown(). Destroy the platform
     // state first so its TaskClosures cancel any task still posted to `loop_`.
-    Platform::Destroy();
+    platform_.reset();
   }
 
   // Advances fake time so that `otPlatAlarmMilliGetNow()` returns `now_ms`.
@@ -109,6 +110,8 @@ class PlatformTest : public ::testing::Test {
   }
 
   async::TestLoop loop_;
+  // Declared after `loop_` so that it is destroyed first, even if TearDown() does not run.
+  std::optional<Platform> platform_;
 };
 
 // Tasklets
@@ -157,11 +160,11 @@ TEST_F(PlatformTest, TaskletsSkippedWhileInstanceNotInitialized) {
 
 TEST_F(PlatformTest, DestroyCancelsPendingTaskletsAndRecreateIsUsable) {
   otTaskletsSignalPending(FakeInstance());
-  Platform::Destroy();
+  platform_.reset();
   loop_.RunUntilIdle();
   EXPECT_EQ(Core().tasklet_process_calls, 0);
 
-  Platform::Create(loop_.dispatcher(), kNodeId);
+  platform_.emplace(loop_.dispatcher(), kNodeId);
   otTaskletsSignalPending(FakeInstance());
   loop_.RunUntilIdle();
   EXPECT_EQ(Core().tasklet_process_calls, 1);
@@ -267,16 +270,16 @@ TEST_F(PlatformTest, StopCancelsAlarm) {
   EXPECT_EQ(Core().alarm_fired_calls, 0);
 }
 
-// When Platform::Destroy() is called, the old instance's alarm must not fire, and after Create()
-// the new instance's alarm must.
+// When the Platform is destroyed, the old instance's alarm must not fire, and a new Platform's
+// alarm must.
 TEST_F(PlatformTest, DestroyCancelsAlarmAndRecreateIsUsable) {
   otPlatAlarmMilliStartAt(FakeInstance(), otPlatAlarmMilliGetNow(), 10);
-  Platform::Destroy();
+  platform_.reset();
 
   loop_.RunFor(zx::sec(1));
   EXPECT_EQ(Core().alarm_fired_calls, 0);
 
-  Platform::Create(loop_.dispatcher(), kNodeId);
+  platform_.emplace(loop_.dispatcher(), kNodeId);
   otPlatAlarmMilliStartAt(FakeInstance(), otPlatAlarmMilliGetNow(), 10);
   loop_.RunFor(zx::msec(10));
   EXPECT_EQ(Core().alarm_fired_calls, 1);
@@ -301,13 +304,13 @@ TEST_F(PlatformTest, ResetReasonDefaultsToPowerOnAndIsSettable) {
 
 // Node id and log tag
 
-// The log tag belongs to the platform state, so it follows the node id of the latest Create().
+// The log tag belongs to the platform state, so it follows the node id of the latest Platform.
 TEST_F(PlatformTest, NodeIdAndLogTagFollowCreate) {
   EXPECT_EQ(Platform::Get().node_id(), kNodeId);
   EXPECT_EQ(Platform::Get().log_tag(), "rcp-" + std::to_string(kNodeId));
 
-  Platform::Destroy();
-  Platform::Create(loop_.dispatcher(), kOtherNodeId);
+  platform_.reset();
+  platform_.emplace(loop_.dispatcher(), kOtherNodeId);
   EXPECT_EQ(Platform::Get().node_id(), kOtherNodeId);
   EXPECT_EQ(Platform::Get().log_tag(), "rcp-" + std::to_string(kOtherNodeId));
 }

@@ -1,0 +1,44 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/host_tests:host_cc_test.bzl", "host_cc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "channel_util",
+    testonly = True,
+    srcs = [
+        "channel.cc",
+    ],
+    hdrs = [
+        "bytes.h",
+        "channel.h",
+    ],
+    implementation_deps = [
+        "//sdk/lib/fidl",
+    ],
+    visibility = [
+        "//src/tests/fidl/dynsuite:__subpackages__",
+    ],
+    deps = [
+        "//sdk/lib/fidl/cpp",
+    ],
+    alwayslink = True,
+)
+
+host_cc_test(
+    name = "channel_util_test",
+    srcs = [
+        "bytes.h",
+        "bytes_tests.cc",
+    ],
+    visibility = [":__pkg__"],
+    deps = [
+        "//sdk/lib/fidl/cpp:cpp_base",
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ],
+)

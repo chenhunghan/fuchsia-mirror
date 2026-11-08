@@ -99,6 +99,10 @@ class Acpi {
   // Initialise the ACPI subsystem.
   virtual acpi::status<> InitializeAcpi() = 0;
 
+  // Returns true if the FADT declares a legacy CMOS RTC: the platform is not hardware-reduced and
+  // IAPC_BOOT_ARCH does not set CMOS_RTC_NOT_PRESENT. See ACPI 6.4 section 5.2.9.3.
+  virtual bool HasLegacyCmosRtc() = 0;
+
   // Set up the given GPE for wake.
   virtual acpi::status<> SetupGpeForWake(ACPI_HANDLE wake_dev, ACPI_HANDLE gpe_dev,
                                          uint32_t gpe_num) = 0;

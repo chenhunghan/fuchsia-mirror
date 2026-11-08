@@ -2,8 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use fidl::endpoints::RequestStream;
 use fidl_fuchsia_sys2 as fsys;
 use fuchsia_inspect::Property;
+use fuchsia_sync::Mutex;
 use futures::prelude::*;
 use log::*;
 use std::sync::Arc;
@@ -12,6 +14,7 @@ pub struct BootController {
     _inspect_node: fuchsia_inspect::Node,
     purge_timestamp: fuchsia_inspect::UintProperty,
     purge_fn: Box<dyn Fn() -> Result<(), ()> + Send + Sync + 'static>,
+    subscribers: Mutex<Option<Vec<fsys::BootNotifierControlHandle>>>,
 }
 
 const INSPECT_KEY: &str = "last_memory_purge_timestamp";
@@ -29,6 +32,7 @@ impl BootController {
             _inspect_node: inspect_node,
             purge_fn: Box::new(purge_fn),
             purge_timestamp,
+            subscribers: Mutex::new(Some(Vec::new())),
         })
     }
 
@@ -50,9 +54,41 @@ impl BootController {
                             "mallopt(M_PURGE_ALL) failed. This is expected on sanitizer builds."
                         ),
                     }
+                    let subscribers = self.subscribers.lock().take().into_iter().flatten();
+                    for subscriber in subscribers {
+                        if let Err(e) = subscriber.send_on_boot_complete()
+                            && !e.is_closed()
+                        {
+                            warn!(e:?; "BootController: failed to send OnBootComplete event");
+                        }
+                    }
                     let _ = responder.send();
                 }
                 unknown_request => warn!("BootController: unknown request: {unknown_request:?}"),
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn serve_notifier(
+        self: Arc<Self>,
+        mut stream: fsys::BootNotifierRequestStream,
+    ) -> Result<(), anyhow::Error> {
+        {
+            let mut subscribers = self.subscribers.lock();
+            if let Some(subscribers) = subscribers.as_mut() {
+                subscribers.push(stream.control_handle());
+            } else if let Err(e) = stream.control_handle().send_on_boot_complete()
+                && !e.is_closed()
+            {
+                warn!(e:?; "BootController: failed to send OnBootComplete event");
+            }
+        }
+        while let Some(request) = stream.try_next().await? {
+            match request {
+                fsys::BootNotifierRequest::_UnknownMethod { ordinal, .. } => {
+                    warn!(ordinal; "BootNotifier: unknown request");
+                }
             }
         }
         Ok(())
@@ -137,5 +173,50 @@ mod tests {
         let () = rx.next().await.unwrap();
         let ts1 = read_property(&inspector).await;
         assert_eq!(ts1, 0);
+    }
+
+    #[fuchsia::test]
+    async fn boot_notifier() {
+        let scope = fasync::Scope::new();
+
+        let inspector = fuchsia_inspect::Inspector::default();
+        let node = inspector.root().create_child("boot");
+        let controller = BootController::new_inner(node, || Ok(()));
+
+        let (controller_client, controller_stream) =
+            endpoints::create_proxy_and_stream::<fsys::BootControllerMarker>();
+        let controller_clone = controller.clone();
+        scope.spawn(async move {
+            controller_clone.serve(controller_stream).await.unwrap();
+        });
+
+        // Subscribe before Notify().
+        let (notifier_client_1, notifier_stream_1) =
+            endpoints::create_proxy_and_stream::<fsys::BootNotifierMarker>();
+        let controller_clone = controller.clone();
+        scope.spawn(async move {
+            controller_clone.serve_notifier(notifier_stream_1).await.unwrap();
+        });
+        let mut event_stream_1 = notifier_client_1.take_event_stream();
+
+        controller_client.notify().await.unwrap();
+
+        assert_matches::assert_matches!(
+            event_stream_1.try_next().await.unwrap(),
+            Some(fsys::BootNotifierEvent::OnBootComplete {})
+        );
+
+        // Subscribe after Notify() should immediately receive OnBootComplete.
+        let (notifier_client_2, notifier_stream_2) =
+            endpoints::create_proxy_and_stream::<fsys::BootNotifierMarker>();
+        scope.spawn(async move {
+            controller.serve_notifier(notifier_stream_2).await.unwrap();
+        });
+        let mut event_stream_2 = notifier_client_2.take_event_stream();
+
+        assert_matches::assert_matches!(
+            event_stream_2.try_next().await.unwrap(),
+            Some(fsys::BootNotifierEvent::OnBootComplete {})
+        );
     }
 }

@@ -1,0 +1,20 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fidl_library(
+    name = "fuchsia.virtualization.guest.interaction",
+    srcs = ["fidl/guest_interaction.fidl"],
+    visibility = [
+        "//src/sys/test_runners/starnix:__pkg__",
+        "//src/virtualization/lib/guest_interaction/interactive_guest:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.io",
+        "//sdk/fidl/fuchsia.virtualization",
+    ],
+)

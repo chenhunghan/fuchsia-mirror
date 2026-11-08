@@ -11,10 +11,18 @@
 #include <zircon/types.h>
 
 #include <arch/aspace.h>
+#include <kernel/ffi.h>
 #include <vm/arch_vm_aspace.h>
+
+constexpr size_t kArchVmAspaceSize = sizeof(ArchVmAspace);
+constexpr size_t kArchVmAspaceAlign = alignof(ArchVmAspace);
 
 __BEGIN_CDECLS
 
+void cpp_arch_vm_aspace_construct(ffi::Uninitialized<ArchVmAspace>* aspace, vaddr_t base,
+                                  size_t size, arch_mmu_flags_t mmu_flags,
+                                  ArchVmAspaceInterface::page_alloc_fn_t test_paf);
+void cpp_arch_vm_aspace_destruct(ArchVmAspace* aspace);
 zx_status_t cpp_arch_vm_aspace_init(ArchVmAspace* aspace);
 zx_status_t cpp_arch_vm_aspace_init_shared(ArchVmAspace* aspace);
 zx_status_t cpp_arch_vm_aspace_init_restricted(ArchVmAspace* aspace);
@@ -44,6 +52,8 @@ zx_status_t cpp_arch_vm_aspace_harvest_accessed(
 zx_status_t cpp_arch_vm_aspace_mark_accessed(ArchVmAspace* aspace, vaddr_t vaddr, size_t count);
 bool cpp_arch_vm_aspace_accessed_since_last_check(ArchVmAspace* aspace, bool clear);
 paddr_t cpp_arch_vm_aspace_arch_table_phys(ArchVmAspace* aspace);
+vaddr_t cpp_arch_vm_aspace_next_user_page_table_offset(vaddr_t va);
+void cpp_arch_vm_aspace_handoff_page_tables_from_physboot(VmPageDoublyLinkedList* mmu_pages);
 
 __END_CDECLS
 

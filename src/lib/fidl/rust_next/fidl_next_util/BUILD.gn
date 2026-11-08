@@ -2,19 +2,24 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/bazel/bazel_test_suite.gni")
 import("//build/components.gni")
 import("//build/fidl/fidl.gni")
 import("//build/rust/fidl_rust_next.gni")
 import("//build/rust/rustc_library.gni")
 import("//build/rust/rustc_test.gni")
 
-fuchsia_unittest_package("fidl_next_util_test_package") {
-  deps = [ ":fidl_next_util_internal_test" ]
+bazel_test_suite("bazel_tests") {
+  target_tests =
+      [ "//src/lib/fidl/rust_next/fidl_next_util:fidl_next_util_test_package" ]
+  host_tests =
+      [ "//src/lib/fidl/rust_next/fidl_next_util:fidl_next_util_host_test" ]
 }
 
 group("tests") {
   testonly = true
   deps = [
+    ":bazel_tests",
     ":fidl_next_util_internal_test($host_toolchain)",
     ":fidl_next_util_test_package",
   ]
@@ -60,12 +65,20 @@ rustc_library("fidl_next_util_internal") {
     "//third_party/rust_crates:thiserror",
   ]
 }
+
 group("fidl_next_util") {
   public_deps = [ ":fidl_next_util_internal" ]
   visibility = fidl_rust_next_allowlist
 }
+
 group("fidl_next_util_test") {
   testonly = true
   public_deps = [ ":fidl_next_util_internal_test" ]
   visibility = fidl_rust_next_allowlist
+}
+
+fuchsia_unittest_package("fidl_next_util_test_package") {
+  package_name = "fidl_next_util_test_package-gn"
+  component_name = "fidl_next_util_test_package"
+  deps = [ ":fidl_next_util_internal_test" ]
 }

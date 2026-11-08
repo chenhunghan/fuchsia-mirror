@@ -124,6 +124,7 @@ struct BootOptions {
   OPTION_TYPE(EntropyTestSource);
   OPTION_TYPE(SerialDebugSyscalls);
   OPTION_TYPE(PageTableEvictionPolicy);
+  OPTION_TYPE(FairPlacementAffinity);
   OPTION_TYPE(RootJobBehavior);
   OPTION_TYPE(WallclockType);
   OPTION_TYPE(ScannerLruAction);

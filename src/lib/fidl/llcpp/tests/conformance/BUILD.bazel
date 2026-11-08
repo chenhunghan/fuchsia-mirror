@@ -1,0 +1,171 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+load("//build/bazel/rules/host_tests:host_cc_test.bzl", "host_cc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+load(
+    "//src/tests/fidl/conformance_suite:gidl_conformance_suite.bzl",
+    "CONFORMANCE_SUITE_FIDL_TARGET",
+    "CONFORMANCE_SUITE_GIDL_FILES",
+)
+load("//tools/fidl/gidl:gidl.bzl", "gidl_llcpp_conformance")
+
+package(default_applicable_licenses = ["//:license"])
+
+# LINT.IfChange
+# @bazel2gn:skip
+_GIDL_OUTPUT_PREFIX = "conformance_suite__"
+
+# @bazel2gn:skip
+_GIDL_DEPS = [
+    ":%s%s" % (
+        _GIDL_OUTPUT_PREFIX,
+        gidl_file.rsplit(":", 1)[1].removesuffix(".gidl"),
+    )
+    for gidl_file in CONFORMANCE_SUITE_GIDL_FILES
+]
+
+# @bazel2gn:skip
+[
+    gidl_llcpp_conformance(
+        name = "%s%s" % (
+            _GIDL_OUTPUT_PREFIX,
+            gidl_file.rsplit(":", 1)[1].removesuffix(".gidl"),
+        ),
+        fidl = CONFORMANCE_SUITE_FIDL_TARGET,
+        inputs = [gidl_file],
+        deps = [
+            ":conformance_utils",
+            "@com_google_googletest//:gtest",
+        ] + select({
+            "@platforms//os:fuchsia": ["//sdk/ctf/tests/pkg/fidl/cpp:handle_util"],
+            "//conditions:default": [],
+        }),
+    )
+    for gidl_file in CONFORMANCE_SUITE_GIDL_FILES
+]
+
+# @bazel2gn:skip
+fx_cc_binary(
+    name = "fidl_llcpp_conformance_tests_device_bin",
+    testonly = True,
+    deps = [
+        ":conformance_utils",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/tests/fidl/conformance_suite:conformance_fidl_cpp",
+        "@com_google_googletest//:gtest",
+    ] + _GIDL_DEPS,
+)
+
+# @bazel2gn:skip
+fx_unittest_package(
+    name = "fidl_llcpp_conformance_tests",
+    unit_tests = [":fidl_llcpp_conformance_tests_device_bin"],
+    visibility = ["//src/lib/fidl/llcpp/tests:__pkg__"],
+)
+
+# @bazel2gn:skip
+host_cc_test(
+    name = "fidl_llcpp_conformance_tests_bin",
+    visibility = ["//src/lib/fidl/llcpp/tests:__pkg__"],
+    deps = [
+        ":conformance_utils",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/tests/fidl/conformance_suite:conformance_fidl_cpp",
+        "@com_google_googletest//:gtest",
+    ] + _GIDL_DEPS,
+)
+# LINT.ThenChange(BUILD.gn)
+
+fidl_library(
+    name = "manual.conformance.large",
+    testonly = True,
+    srcs = ["large.test.fidl"],
+    excluded_checks = [
+        "vector-bounds-not-specified",
+        "wrong-prefix-for-platform-source-library",
+    ],
+    visibility = ["//visibility:private"],
+)
+
+# TODO(https://fxbug.dev/42150813): This test is Fuchsia only because the FIDL library
+# cannot compile on host.
+#
+# Runs only in Bazel: only `group("conformance")` in BUILD.gn listed the old
+# GN test, and the GN copy of :conformance_utils is a 1:1 translation.
+# @bazel2gn:skip
+fx_cc_binary(
+    name = "fidl_llcpp_manual_conformance_tests_bin",
+    testonly = True,
+    srcs = [
+        "manual_conformance_test.cc",
+        "persistence_test.cc",
+    ],
+    # TODO(https://fxbug.dev/42176699): This target uses mutable tables which are deprecated,
+    # rather than builders.
+    copts = ["-DFIDL_WIRE_ALLOW_DEPRECATED_MUTABLE_TABLES"],
+    tags = ["manual"],
+    deps = [
+        ":conformance_utils",
+        ":manual.conformance.large_cpp",
+        "//sdk/testing/fidl:fidl_test_cpp",
+        "//sdk/testing/fidl/types_tests:test.types_cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+# Runs only in Bazel (see :fidl_llcpp_manual_conformance_tests_bin).
+# @bazel2gn:skip
+fx_unittest_package(
+    name = "fidl_llcpp_manual_conformance_tests",
+    package_name = "fidl_llcpp_manual_conformance_tests",
+    unit_tests = [":fidl_llcpp_manual_conformance_tests_bin"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+# Runs only in Bazel: only `group("conformance")` in BUILD.gn listed the old
+# GN test, and its deps are already in Bazel.
+# @bazel2gn:skip
+fx_cc_binary(
+    name = "fidl_llcpp_request_response_tests_bin",
+    testonly = True,
+    srcs = ["request_response_test.cc"],
+    # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
+    copts = ["-Wno-conversion"],
+    tags = ["manual"],
+    deps = [
+        "//sdk/testing/fidl/types_tests:test.types_cpp",
+        "//src/lib/fxl/test:gtest_main",
+    ],
+)
+
+# Runs only in Bazel (see :fidl_llcpp_request_response_tests_bin).
+# @bazel2gn:skip
+fx_unittest_package(
+    name = "fidl_llcpp_request_response_tests",
+    package_name = "fidl_llcpp_request_response_tests",
+    unit_tests = [":fidl_llcpp_request_response_tests_bin"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+cc_library(
+    name = "conformance_utils",
+    testonly = True,
+    hdrs = ["conformance_utils.h"],
+    # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
+    copts = ["-Wno-conversion"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//sdk/lib/fidl/cpp/wire",
+        "//sdk/lib/fidl_base",
+        # On Fuchsia, //zircon/system/public would shadow the sysroot's
+        # <zircon/syscalls.h> without the generated syscalls/gen/*.inc files.
+        "//src/zircon/lib/zircon:headers",  # @bazel2gn:path_overwrite://zircon/system/public
+        "//zircon/system/ulib/zx",
+    ],
+)

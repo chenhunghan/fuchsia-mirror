@@ -120,7 +120,7 @@ class WlanPhyCompliance11NTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
     async def setup_class(self) -> None:
         await super().setup_class()
         if not self.openwrt_ap and not self.access_point:
-            raise signals.TestAbortClass("Requires at least one access point")
+            raise signals.TestError("Requires at least one access point")
         if self.access_point:
             self.access_point.stop_all_aps()
         self.phy = await self.dut.wlan_core.ensure_single_phy()
@@ -414,6 +414,7 @@ class WlanPhyCompliance11NTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
             ssid=target_ssid,
             password=target_pwd,
             security=target_security,
+            channels=[target_channel],
         )
         status = await iface.status()
         if status.connected is None:

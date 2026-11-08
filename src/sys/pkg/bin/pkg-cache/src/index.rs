@@ -3,12 +3,13 @@
 // found in the LICENSE file.
 
 //! Types to track and manage indices of packages.
+//!
+//! [`PackageIndex`] owns the only lock on these indices. See its documentation for how changes to
+//! them are serialized with garbage collection.
 
 mod package;
 mod retained;
 mod writing;
 
-pub use package::{
-    AddBlobsError, PackageIndex, retain_package, set_retained_blobs, set_retained_index,
-};
+pub use package::{AddBlobsError, PackageIndex, UpgradablePackagesInitialized};
 pub use writing::StopError;

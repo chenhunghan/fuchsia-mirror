@@ -538,7 +538,7 @@ fn handle_incoming_packet<WireI, BC, CC, H>(
                     None,
                     conn_addr,
                     seg.into_empty(),
-                    &TcpIpSockOptions { marks: *marks },
+                    &TcpIpSockOptions { marks: *marks, ..Default::default() },
                 );
             }
             None
@@ -1155,14 +1155,13 @@ where
     let Some(device_mss) = Mss::from_mms(device_mms) else {
         return ListenerIncomingSegmentDisposition::FoundSocket;
     };
-
     let mut state = State::Listen(Closed::<Initial>::listen(
         isn,
         timestamp_offset,
         buffer_sizes.clone(),
         device_mss,
         Mss::default::<WireI>(),
-        socket_options.user_timeout,
+        &socket_options,
     ));
 
     // Prepare a reply to be sent out.

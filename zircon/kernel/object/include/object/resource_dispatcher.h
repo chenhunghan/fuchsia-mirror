@@ -8,8 +8,6 @@
 #define ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_RESOURCE_DISPATCHER_H_
 
 #include <lib/object-constants.h>
-#include <sys/types.h>
-#include <zircon/compiler.h>
 #include <zircon/rights.h>
 #include <zircon/syscalls/resource.h>
 #include <zircon/types.h>
@@ -17,7 +15,6 @@
 #include <kernel/ffi.h>
 #include <object/dispatcher.h>
 #include <object/handle.h>
-#include <object/opaque_storage.h>
 
 class ResourceDispatcher;
 
@@ -33,17 +30,12 @@ void rust_resource_dispatcher_state_init(void* state, void* disp, zx_rsrc_kind_t
 void rust_resource_dispatcher_state_destroy(void* state);
 Lock<CriticalMutex>* rust_resource_dispatcher_state_get_lock(const void* state);
 
-zx_status_t rust_resource_dispatcher_initialize_allocator(zx_rsrc_kind_t kind, uint64_t base,
-                                                          size_t size);
 zx_status_t rust_resource_dispatcher_get_name(const ResourceDispatcher* disp,
                                               char out_name[ZX_MAX_NAME_LEN]);
 }  // extern "C"
 
 class ResourceDispatcher final : public Dispatcher {
  public:
-  // Initializes the static members used for bookkeeping and storage.
-  static zx_status_t InitializeAllocator(zx_rsrc_kind_t kind, uint64_t base, size_t size);
-
   zx_obj_type_t get_type() const final { return ZX_OBJ_TYPE_RESOURCE; }
   zx_koid_t get_related_koid() const final { return ZX_KOID_INVALID; }
   bool is_waitable() const final { return ZX_DEFAULT_RESOURCE_RIGHTS & ZX_RIGHT_WAIT; }

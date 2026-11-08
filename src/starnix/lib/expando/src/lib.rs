@@ -107,6 +107,7 @@ impl Expando {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_types)]
 mod tests {
     use super::*;
     use starnix_sync::Mutex;

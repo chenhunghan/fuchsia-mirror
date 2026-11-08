@@ -3,14 +3,13 @@
 # found in the LICENSE file.
 """Async Fuchsia base test class."""
 
-from __future__ import annotations
-
 import enum
 import importlib
 import logging
 import os
 import pathlib
 import typing
+from collections.abc import Mapping
 from typing import Any, Dict, ParamSpec, TypeVar, Union
 
 import fuchsia_async_extension
@@ -37,12 +36,10 @@ P = ParamSpec("P")
 T = TypeVar("T")
 
 
-# LINT.IfChange
 HEALTH_CHECK_FAILURE_MESSAGE = (
     "One or more FuchsiaDevice's health check failed in "
     "teardown_test. So failing the test case..."
 )
-# LINT.ThenChange(//tools/testing/tefmocheck/string_in_log_check.go)
 
 # How long to wait for FFX to reach a device before considering it unreachable
 # in teardown_class. A reachable device responds well within a second; this
@@ -343,8 +340,8 @@ class FuchsiaBaseTest(fuchsia_async_extension.AsyncBaseTestClass):
             device: FuchsiaDevice object.
         """
         switch, outlet = self._lookup_power_switch(device)
-        usb_power_hub, port = self._lookup_usb_power_hub(device)
-        if switch is None and usb_power_hub is None:
+        hub, port = self._lookup_usb_power_hub(device)
+        if switch is None and hub is None:
             return
 
         # Host-side check only; does not touch any auxiliary device.
@@ -365,16 +362,23 @@ class FuchsiaBaseTest(fuchsia_async_extension.AsyncBaseTestClass):
         if switch is not None:
             try:
                 switch.power_on(outlet=outlet)
-            except Exception as err:
+            except (power_switch.PowerSwitchError, errors.HoneydewError) as err:
+                # `HoneydewError` covers e.g. `HoneydewTimeoutError` from
+                # `host_shell.run()`, which implementations do not wrap.
                 _LOGGER.warning(
                     "Failed to power on power switch for %s with error: %s",
                     device.device_name,
                     err,
                 )
-        if usb_power_hub is not None:
+        if hub is not None:
             try:
-                usb_power_hub.power_on(port=port)
-            except Exception as err:
+                hub.power_on(port=port)
+            except (
+                usb_power_hub.UsbPowerHubError,
+                errors.HoneydewError,
+            ) as err:
+                # `HoneydewError` covers e.g. `HoneydewTimeoutError` from
+                # `host_shell.run()`, which implementations do not wrap.
                 _LOGGER.warning(
                     "Failed to power on USB power hub for %s with error: %s",
                     device.device_name,
@@ -456,7 +460,15 @@ class FuchsiaBaseTest(fuchsia_async_extension.AsyncBaseTestClass):
         for fx_device in self.fuchsia_devices:
             try:
                 await fx_device.snapshot(directory=directory)
-            except Exception as err:
+            except errors.FIDL_ERRORS + (
+                RuntimeError,
+                OSError,
+                errors.HoneydewError,
+            ) as err:
+                # Errors raised by `FuchsiaDevice.snapshot()` on failure to
+                # talk to the device (`RuntimeError` is raised by the native
+                # Fuchsia-Controller bindings for internal errors), and
+                # `OSError` on failure to save the snapshot file.
                 _LOGGER.exception(
                     "Unable to take snapshot of %s. Failed with error: %s",
                     fx_device.device_name,
@@ -559,11 +571,34 @@ class FuchsiaBaseTest(fuchsia_async_extension.AsyncBaseTestClass):
     def _lookup_power_switch(
         self, fx_device: fuchsia_device.FuchsiaDevice
     ) -> tuple[power_switch.PowerSwitch | None, int | None]:
+        """Returns the power switch and outlet to use for the given device."""
         device_config: dict[str, object] = self._get_device_config(
             controller_type="FuchsiaDevice",
             identifier_key="name",
             identifier_value=fx_device.device_name,
         )
+        return self._lookup_power_switch_from_config(
+            device_config=device_config,
+            device_name=fx_device.device_name,
+        )
+
+    def _lookup_power_switch_from_config(
+        self,
+        device_config: Mapping[str, object],
+        device_name: str | None,
+    ) -> tuple[power_switch.PowerSwitch | None, int | None]:
+        """Returns the power switch and outlet to use for a device config.
+
+        Selected in this order:
+          1. The switch described by `power_switch_hw` + `power_switch_impl`
+             in the local testbed config, when both are present.
+          2. DMC (`PowerSwitchUsingDmc`), for devices power cycled in Fuchsia
+             infra (when `DMC_PATH` is set in the environment and `device_name`
+             is provided).
+
+        Returns:
+            The power switch and its outlet, or `(None, None)` if none apply.
+        """
         power_switch_hw = typing.cast(
             dict[str, str], device_config.get("power_switch_hw", {})
         )
@@ -582,10 +617,10 @@ class FuchsiaBaseTest(fuchsia_async_extension.AsyncBaseTestClass):
                 power_switch_class(**power_switch_hw),
                 power_switch_outlet,
             )
-        elif power_switch_using_dmc.DMC_PATH_KEY in os.environ:
+        elif power_switch_using_dmc.DMC_PATH_KEY in os.environ and device_name:
             return (
                 power_switch_using_dmc.PowerSwitchUsingDmc(
-                    device_name=fx_device.device_name,
+                    device_name=device_name,
                 ),
                 None,
             )
@@ -596,13 +631,6 @@ class FuchsiaBaseTest(fuchsia_async_extension.AsyncBaseTestClass):
         self, fx_device: fuchsia_device.FuchsiaDevice
     ) -> tuple[usb_power_hub.UsbPowerHub | None, int | None]:
         """Returns the USB power hub and port to use for the given device.
-
-        LinuxVirtualUsbPowerHub is only used by USB E2E users now, so it
-        lives in usb_lib rather than Honeydew until wider demand (see
-        discussion on fxr/1876367). The `use_virtual_usb_hub` branch of
-        FuchsiaBaseTest._lookup_usb_power_hub() moves into an override in
-        UsbPowerHubBaseTest, handling the virtual hub when no physical hub
-        (`usb_power_hub_hw` + `usb_power_hub_impl`) configured.
 
         Selected in this order:
           1. The hub described by `usb_power_hub_hw` + `usb_power_hub_impl`
@@ -657,7 +685,13 @@ class FuchsiaBaseTest(fuchsia_async_extension.AsyncBaseTestClass):
         for fx_device in self.fuchsia_devices:
             try:
                 await fx_device.log_message_to_device(message, level)
-            except Exception as err:
+            except errors.FIDL_ERRORS + (
+                RuntimeError,
+                errors.HoneydewError,
+            ) as err:
+                # Errors raised by `FuchsiaDevice.log_message_to_device()` on
+                # failure to talk to the device. `RuntimeError` is raised by the
+                # native Fuchsia-Controller bindings for internal errors.
                 _LOGGER.exception(
                     "Unable to log message '%s' on '%s'. Failed with error: %s",
                     message,

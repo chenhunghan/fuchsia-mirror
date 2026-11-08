@@ -10,12 +10,10 @@ asynchronous waits, and the distinction between semantic device protocols and
 raw registers.
 """
 
-from __future__ import annotations
-
 import asyncio
 import dataclasses
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import Any
+from typing import Any, Self
 
 from driver_lab.models import InterruptOutcome, ResourceKind
 from driver_lab.transport import (
@@ -1041,7 +1039,7 @@ class HardwareSession:
             if self._direct_session is not None:
                 await self._direct_session.close()
 
-    async def __aenter__(self) -> "HardwareSession":
+    async def __aenter__(self) -> Self:
         self._check_not_closed()
         return self
 

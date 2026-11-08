@@ -5,26 +5,21 @@
 #include "fake_codec_adapter.h"
 
 #include <lib/media/codec_impl/codec_packet.h>
-#include <lib/media/codec_impl/fourcc.h>
 #include <zircon/assert.h>
 
 #include <limits>
-
-#include "fuchsia/sysmem/cpp/fidl.h"
 
 namespace {
 
 // We use "video/raw" for output since for now it makes sense to pretend to be a
 // video decoder.
 constexpr const char* kOutputMimeType = "video/raw";
-constexpr uint32_t kFourccRgba = make_fourcc('R', 'G', 'B', 'A');
 constexpr uint32_t kCodedWidth = 256;
 constexpr uint32_t kCodedHeight = 144;
 constexpr uint32_t kPixelStride = sizeof(uint32_t);
 constexpr uint32_t kBytesPerRow = kCodedWidth * kPixelStride;
 constexpr uint32_t kDisplayWidth = kCodedWidth;
 constexpr uint32_t kDisplayHeight = kCodedHeight;
-constexpr uint32_t kLayers = 1;
 
 constexpr uint32_t kInputMinBufferCountForCamping = 1;
 constexpr uint32_t kOutputMinBufferCountForCamping = 5;
@@ -199,26 +194,14 @@ fuchsia::media::StreamOutputFormat FakeCodecAdapter::CoreCodecGetOutputFormat(
   result.mutable_format_details()
       ->set_format_details_version_ordinal(new_output_format_details_version_ordinal)
       .set_mime_type(kOutputMimeType);
-  fuchsia::media::VideoFormat video_format;
-  fuchsia::media::VideoUncompressedFormat video_uncompressed;
-  fuchsia::sysmem::ImageFormat_2* image_format = &video_uncompressed.image_format;
-  image_format->pixel_format.type = fuchsia::sysmem::PixelFormatType::R8G8B8A8;
-  image_format->color_space.type = fuchsia::sysmem::ColorSpaceType::SRGB;
-  image_format->coded_width = kCodedWidth;
-  image_format->coded_height = kCodedHeight;
-  image_format->bytes_per_row = kBytesPerRow;
-  image_format->display_width = kDisplayWidth;
-  image_format->display_height = kDisplayHeight;
-  image_format->layers = kLayers;
-  video_uncompressed.fourcc = kFourccRgba;
-  video_uncompressed.primary_width_pixels = kCodedWidth;
-  video_uncompressed.primary_height_pixels = kCodedHeight;
-  video_uncompressed.primary_line_stride_bytes = kBytesPerRow;
-  video_uncompressed.primary_pixel_stride = kPixelStride;
-  video_uncompressed.primary_display_width_pixels = kDisplayWidth;
-  video_uncompressed.primary_display_height_pixels = kDisplayHeight;
-  video_format.set_uncompressed(std::move(video_uncompressed));
-  result.mutable_format_details()->mutable_domain()->set_video(std::move(video_format));
+  fuchsia::images2::ImageFormat* image_format =
+      result.mutable_format_details()->mutable_image_format();
+  image_format->set_pixel_format(fuchsia::images2::PixelFormat::R8G8B8A8);
+  image_format->set_color_space(fuchsia::images2::ColorSpace::SRGB);
+  image_format->set_size(fuchsia::math::SizeU{.width = kCodedWidth, .height = kCodedHeight});
+  image_format->set_bytes_per_row(kBytesPerRow);
+  image_format->set_display_rect(
+      fuchsia::math::RectU{.x = 0, .y = 0, .width = kDisplayWidth, .height = kDisplayHeight});
   return result;
 }
 

@@ -7,10 +7,10 @@ import("//build/testing/cc_test_executable.gni")
 
 group("tests") {
   testonly = true
-  deps = [
-    ":audio_lib_processing_death_unittests",
-    ":audio_lib_processing_unittests",
-  ]
+  deps = [ ":audio_lib_processing_unittests" ]
+  if (is_debug || is_coverage) {
+    deps += [ ":audio_lib_processing_death_unittests" ]
+  }
 }
 
 source_set("coefficient_table") {
@@ -44,7 +44,10 @@ source_set("processing") {
     "sinc_sampler.h",
   ]
 
-  public_deps = [ "//src/media/audio/lib/format2" ]
+  public_deps = [
+    "//src/lib/fxl",
+    "//src/media/audio/lib/format2",
+  ]
 
   deps = [
     ":coefficient_table",
@@ -136,6 +139,9 @@ cc_test_executable("unittest-bin") {
 
 fuchsia_unittest_package("audio_lib_processing_unittests") {
   deps = [ ":unittest-bin" ]
+  test_specs = {
+    parallel = 4
+  }
 }
 
 cc_test_executable("death-unittest-bin") {
@@ -161,5 +167,6 @@ fuchsia_unittest_package("audio_lib_processing_death_unittests") {
     log_settings = {
       max_severity = "FATAL"
     }
+    parallel = 4
   }
 }

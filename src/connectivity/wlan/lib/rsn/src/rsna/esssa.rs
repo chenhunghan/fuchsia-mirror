@@ -886,7 +886,7 @@ mod tests {
 
         // After reset, first message should not be dropped.
         supplicant.reset();
-        updates = vec![];
+        updates.clear();
         supplicant.start(&mut updates).expect("Failed starting Supplicant");
         assert_eq!(updates.len(), 1, "{:?}", updates);
         test_util::expect_reported_status(&updates[..], SecAssocStatus::PmkSaEstablished);
@@ -1315,7 +1315,7 @@ mod tests {
         let msg2 = test_util::expect_eapol_resp(&updates[..]);
 
         // Acknowledge the second frame sent.
-        updates = vec![];
+        updates.clear();
         supplicant
             .on_eapol_conf(&mut updates, EapolResultCode::Success)
             .expect("Failed to send eapol conf");
@@ -1323,7 +1323,7 @@ mod tests {
 
         // Timeout several times.
         for _ in 1..MAX_KEY_FRAME_RETRIES {
-            updates = vec![];
+            updates.clear();
             supplicant
                 .on_rsna_retransmission_timeout(&mut updates)
                 .expect("Failed to send key frame timeout");
@@ -1335,7 +1335,7 @@ mod tests {
         }
 
         // Go idle on the last retry.
-        updates = vec![];
+        updates.clear();
         assert_matches!(supplicant.on_rsna_retransmission_timeout(&mut updates), Ok(()));
         assert!(updates.is_empty(), "{:?}", updates);
     }
@@ -1353,7 +1353,7 @@ mod tests {
             // Send the first frame.
             updates = send_fourway_msg1(&mut supplicant, |_| {}).1;
             let msg2 = test_util::expect_eapol_resp(&updates[..]);
-            updates = vec![];
+            updates.clear();
             supplicant
                 .on_eapol_conf(&mut updates, EapolResultCode::Success)
                 .expect("Failed to send eapol conf");
@@ -1361,7 +1361,7 @@ mod tests {
 
             // Timeout several times.
             for _ in 1..MAX_KEY_FRAME_RETRIES {
-                updates = vec![];
+                updates.clear();
                 supplicant
                     .on_rsna_retransmission_timeout(&mut updates)
                     .expect("Failed to send key frame timeout");
@@ -1373,7 +1373,7 @@ mod tests {
             }
 
             // Go idle on the last retry.
-            updates = vec![];
+            updates.clear();
             assert_matches!(supplicant.on_rsna_retransmission_timeout(&mut updates), Ok(()));
             assert!(updates.is_empty(), "{:?}", updates);
         }
@@ -1405,7 +1405,7 @@ mod tests {
         let _msg2 = test_util::expect_eapol_resp(&updates[..]);
 
         // Acknowledge second frame sent
-        updates = vec![];
+        updates.clear();
         supplicant
             .on_eapol_conf(&mut updates, EapolResultCode::Success)
             .expect("Failed to send eapol conf");
@@ -1447,14 +1447,14 @@ mod tests {
         let msg2 = test_util::expect_eapol_resp(&updates[..]);
 
         // Acknowledge second frame sent.
-        updates = vec![];
+        updates.clear();
         supplicant
             .on_eapol_conf(&mut updates, EapolResultCode::Success)
             .expect("Failed to send eapol conf");
         assert!(updates.is_empty(), "{:?}", updates);
 
         // Respond to one timeout, but don't confirm the retry.
-        updates = vec![];
+        updates.clear();
         supplicant
             .on_rsna_retransmission_timeout(&mut updates)
             .expect("Failed to send key frame timeout");
@@ -1462,7 +1462,7 @@ mod tests {
         assert_eq!(msg2, msg2_retry);
 
         // Failure on the next timeout.
-        updates = vec![];
+        updates.clear();
         assert_matches!(
             supplicant.on_rsna_retransmission_timeout(&mut updates),
             Err(Error::NoKeyFrameTransmissionConfirm(0))
@@ -1540,7 +1540,7 @@ mod tests {
         //   * PTK
         //   * GTK
         //   * ESSSA Established
-        updates = vec![];
+        updates.clear();
         assert_matches!(
             supplicant.on_rsna_retransmission_timeout(&mut updates),
             Err(Error::NoKeyFrameTransmissionConfirm(4))

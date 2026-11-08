@@ -20,11 +20,11 @@ use crate::kernel::types::{INVALID_CPU, cpu_num_t, cpu_num_to_mask};
 use crate::platform_rs::timer::{DurationMono, InstantMono};
 use core::ffi::c_void;
 use core::fmt::Write as _;
-use core::mem::{MaybeUninit, align_of, offset_of, size_of};
+use core::mem::{align_of, offset_of, size_of};
 use core::ptr::NonNull;
 use fbl::{DoublyLinkedList, DoublyLinkedListContainable, DoublyLinkedListNode, StringBuffer};
 use ksync::{KMutex, LockToken, PhantomMutex};
-use pin_init::{InPlaceWrite, PinInit, pin_data, pin_init};
+use pin_init::{PinInit, pin_data, pin_init};
 use zx_status::Status;
 use zx_types::{ZX_MAX_NAME_LEN, zx_instant_mono_t, zx_status_t};
 
@@ -43,7 +43,7 @@ const PROFILE_LOW_LATENCY_DEADLINE: DurationMono = DurationMono::from_micros(300
 // A single spinlock protects the data members of all DpcRunners.
 //
 // Take care to drop this lock before calling any code that might acquire a chainlock.
-ksync::declare_singleton_spinlock!(DpcLock);
+crate::ksync_kernel::declare_singleton_spinlock!(DpcLock);
 
 /// Callback function signature for a [`Dpc`].
 pub type DpcFunc = extern "C" fn(&Dpc);
@@ -377,7 +377,7 @@ zr::static_assert!(offset_of!(DpcRunner, queue_general) == 8);
 zr::static_assert!(offset_of!(DpcRunner, queue_low_latency) == 104);
 
 impl DpcRunner {
-    fn new() -> impl PinInit<Self, core::convert::Infallible> {
+    pub fn new() -> impl PinInit<Self, core::convert::Infallible> {
         pin_init!(Self {
             lock: KMutex::new(PhantomMutex),
             cpu: INVALID_CPU.into(),
@@ -571,32 +571,6 @@ fn dpc_init(_level: init::LkInitLevel) {
 init::lk_init_hook!(dpc, dpc_init, init::LK_INIT_LEVEL_THREADING);
 
 // FFI entry points for C++ callers in `<kernel/dpc.h>`.
-
-/// Initializes a `DpcRunner` in-place.
-///
-/// # Safety
-///
-/// `runner` must point to valid, properly aligned, uninitialized storage for a `DpcRunner` that
-/// will remain pinned in memory until `rust_dpc_runner_destroy` is called.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_dpc_runner_init(runner: *mut MaybeUninit<DpcRunner>) {
-    // SAFETY: The caller guarantees `runner` points to valid, pinned uninitialized storage.
-    let runner = unsafe { &mut *runner };
-    let _ = runner.write_pin_init(DpcRunner::new());
-}
-
-/// Destroys a `DpcRunner` in-place.
-///
-/// # Safety
-///
-/// `runner` must point to a valid, initialized `DpcRunner` that is no longer in use.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_dpc_runner_destroy(runner: *mut DpcRunner) {
-    // SAFETY: The caller guarantees `runner` points to a valid initialized `DpcRunner`.
-    unsafe {
-        core::ptr::drop_in_place(runner);
-    }
-}
 
 /// Initializes `runner` for the current CPU.
 #[unsafe(no_mangle)]

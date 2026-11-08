@@ -105,6 +105,11 @@ struct SharedData {
   // This mutex is used to ensure safety of multi-threaded updates.
   std::mutex mutex;
   uint64_t test_buffer_id = 0xcafecafecafecafe;
+  uint64_t test_create_buffer_flags = 0x30000;
+  // CreateBuffer of this size fails with an allocation error.
+  static constexpr uint64_t kCreateBufferFailSize = 0xdead000;
+  // CreateBuffer of this size fails because the object id is in use.
+  static constexpr uint64_t kCreateBufferExistsSize = 0xbeef000;
   uint32_t test_context_id = 0xdeadbeef;
   uint64_t test_semaphore_id = ~0u;
   bool got_null_notification = false;
@@ -210,6 +215,57 @@ class TestPlatformConnection {
     EXPECT_EQ(client_connection_->Flush(), MAGMA_STATUS_OK);
     FlowControlCheck(2, buf->size());
   }
+
+#if FUCHSIA_API_LEVEL_AT_LEAST(NEXT)
+  void TestCreateBuffer() {
+    shared_data_->test_buffer_id = 0x1234;
+    FlowControlInit();
+
+    const uint64_t size = page_size() * 3;
+    uint32_t handle;
+    ASSERT_EQ(client_connection_->CreateBuffer(size, shared_data_->test_create_buffer_flags,
+                                               shared_data_->test_buffer_id, &handle),
+              MAGMA_STATUS_OK);
+
+    auto buf = magma::PlatformBuffer::Import(handle);
+    ASSERT_TRUE(buf);
+    EXPECT_GE(buf->size(), size);
+
+    EXPECT_EQ(client_connection_->Flush(), MAGMA_STATUS_OK);
+    // CreateBuffer is a two-way call, so it isn't subject to flow control.
+    FlowControlCheck(0, 0);
+  }
+
+  void TestCreateBufferAllocationFailure() {
+    shared_data_->test_buffer_id = 0x1234;
+    FlowControlInit();
+
+    uint32_t handle;
+    EXPECT_EQ(client_connection_->CreateBuffer(SharedData::kCreateBufferFailSize,
+                                               shared_data_->test_create_buffer_flags,
+                                               shared_data_->test_buffer_id, &handle),
+              MAGMA_STATUS_MEMORY_ERROR);
+
+    // An allocation failure doesn't close the connection.
+    EXPECT_EQ(client_connection_->Flush(), MAGMA_STATUS_OK);
+    FlowControlCheck(0, 0);
+  }
+
+  void TestCreateBufferAlreadyExists() {
+    shared_data_->test_buffer_id = 0x1234;
+    FlowControlInit();
+
+    uint32_t handle;
+    EXPECT_EQ(client_connection_->CreateBuffer(SharedData::kCreateBufferExistsSize,
+                                               shared_data_->test_create_buffer_flags,
+                                               shared_data_->test_buffer_id, &handle),
+              MAGMA_STATUS_ALREADY_EXISTS);
+
+    // An id in use doesn't close the connection, so the client can retry with another id.
+    EXPECT_EQ(client_connection_->Flush(), MAGMA_STATUS_OK);
+    FlowControlCheck(0, 0);
+  }
+#endif
 
   void TestImportSemaphoreDeprecated() {
     auto semaphore = magma::PlatformSemaphore::Create();
@@ -567,6 +623,21 @@ class TestDelegate : public msd::internal::PrimaryFidlServer::Delegate {
     return MAGMA_STATUS_OK;
   }
 
+  magma::Status CreateBuffer(uint64_t size, uint64_t flags, uint64_t object_id,
+                             zx::vmo* vmo_out) override {
+    std::unique_lock<std::mutex> lock(shared_data_->mutex);
+    EXPECT_EQ(shared_data_->test_buffer_id, object_id);
+    EXPECT_EQ(shared_data_->test_create_buffer_flags, flags);
+    shared_data_->test_complete = true;
+    if (size == SharedData::kCreateBufferFailSize)
+      return MAGMA_STATUS_MEMORY_ERROR;
+    if (size == SharedData::kCreateBufferExistsSize)
+      return MAGMA_STATUS_ALREADY_EXISTS;
+    zx_status_t status = zx::vmo::create(size, 0, vmo_out);
+    EXPECT_EQ(ZX_OK, status);
+    return status == ZX_OK ? MAGMA_STATUS_OK : MAGMA_STATUS_MEMORY_ERROR;
+  }
+
   magma::Status CreateContext(uint32_t context_id) override {
     std::unique_lock<std::mutex> lock(shared_data_->mutex);
     shared_data_->test_context_id = context_id;
@@ -820,6 +891,26 @@ TEST(PlatformConnection, ReleaseBuffer) {
   ASSERT_NE(Test, nullptr);
   Test->TestReleaseBuffer();
 }
+
+#if FUCHSIA_API_LEVEL_AT_LEAST(NEXT)
+TEST(PlatformConnection, CreateBuffer) {
+  auto Test = TestPlatformConnection::Create();
+  ASSERT_NE(Test, nullptr);
+  Test->TestCreateBuffer();
+}
+
+TEST(PlatformConnection, CreateBufferAllocationFailure) {
+  auto Test = TestPlatformConnection::Create();
+  ASSERT_NE(Test, nullptr);
+  Test->TestCreateBufferAllocationFailure();
+}
+
+TEST(PlatformConnection, CreateBufferAlreadyExists) {
+  auto Test = TestPlatformConnection::Create();
+  ASSERT_NE(Test, nullptr);
+  Test->TestCreateBufferAlreadyExists();
+}
+#endif
 
 TEST(PlatformConnection, TestImportSemaphoreDeprecated) {
   auto Test = TestPlatformConnection::Create();

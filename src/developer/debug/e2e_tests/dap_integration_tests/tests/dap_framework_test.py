@@ -8,7 +8,7 @@ import json
 import sys
 import unittest
 from io import StringIO
-from typing import Any, Dict
+from typing import Any, Dict, Self
 from unittest.mock import AsyncMock, Mock, patch
 
 from async_utils.command import StderrEvent, StdoutEvent, TerminationEvent
@@ -203,7 +203,7 @@ class TestDapFramework(unittest.IsolatedAsyncioTestCase):
                     TerminationEvent(return_code=0, runtime=1.0),
                 ]
 
-            def __aiter__(self) -> "FakeProc":
+            def __aiter__(self) -> Self:
                 return self
 
             async def __anext__(self) -> Any:

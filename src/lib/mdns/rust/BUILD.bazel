@@ -19,7 +19,6 @@ rustc_library(
         "//src/connectivity/lib/packet-formats:__pkg__",
         "//src/connectivity/lib/packet-formats-dhcp:__pkg__",
         "//src/developer/ffx/lib/mdns_discovery:__pkg__",
-        "//src/testing/end_to_end/antlion/runner:__pkg__",
     ],
     deps = [
         "//src/lib/network/packet",

@@ -5,6 +5,8 @@
 #ifndef SRC_DEVELOPER_FORENSICS_CRASH_REPORTS_SNAPSHOT_STORE_H_
 #define SRC_DEVELOPER_FORENSICS_CRASH_REPORTS_SNAPSHOT_STORE_H_
 
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
+
 #include <deque>
 #include <string>
 
@@ -31,7 +33,7 @@ class SnapshotStore {
                 StorageSize max_archives_size);
 
   // Stores the given data in memory for later retrieval.
-  void AddSnapshot(const std::string& uuid, fuchsia::feedback::Attachment archive);
+  void AddSnapshot(const std::string& uuid, fuchsia_feedback::Attachment archive);
 
   // Deletes the data for |uuid| from memory, if it still exists.
   void DeleteSnapshot(const std::string& uuid);

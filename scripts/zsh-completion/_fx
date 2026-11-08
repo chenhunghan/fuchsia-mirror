@@ -147,9 +147,6 @@ _fx() {
     Linux)
       local prebuilt_os=linux-x64
       ;;
-    Darwin)
-      local prebuilt_os=mac-x64
-      ;;
     *)
       # Unknown OS, don't complete
       return

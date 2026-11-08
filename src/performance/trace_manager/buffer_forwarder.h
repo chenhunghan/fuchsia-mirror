@@ -65,7 +65,8 @@ class BufferForwarder {
   TransferStatus WriteChunkBy(ForwardStrategy strategy, const zx::vmo& vmo, size_t vmo_offset,
                               size_t size) const;
 
-  virtual TransferStatus Flush() { return TransferStatus::kComplete; }
+  bool IsDestinationPeerClosed() const;
+  virtual TransferStatus Flush();
   virtual ~BufferForwarder() = default;
 
  protected:

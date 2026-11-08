@@ -1,0 +1,100 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+load("//tools/fidl/measure-tape:measure_tape.bzl", "measure_tape")
+
+package(default_applicable_licenses = ["//:license"])
+
+measure_tape(
+    name = "measure_tape_for_snapshot_element",
+    fidls = ["//sdk/fidl/fuchsia.memory.heapdump.client"],
+    target_binding = "rust",
+    target_types = ["fuchsia.memory.heapdump.client/SnapshotElement"],
+)
+
+rustc_library(
+    name = "heapdump_snapshot",
+    srcs = [
+        "src/lib.rs",
+        "src/snapshot.rs",
+        "src/streamer.rs",
+    ],
+    edition = "2024",
+    visibility = [
+        "//src/performance/memory/heapdump/collector:__pkg__",
+        "//src/performance/memory/heapdump/kernel-collector:__pkg__",
+    ],
+    deps = [
+        ":measure_tape_for_snapshot_element",
+        "//sdk/fidl/fuchsia.memory.heapdump.client:fuchsia.memory.heapdump.client_rust_flex",
+        "//sdk/rust/zx-status",
+        "//sdk/rust/zx-types",
+        "//src/lib/fidl/rust/fidl",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+rustc_library(
+    name = "heapdump_snapshot_fdomain",
+    srcs = [
+        "src/lib.rs",
+        "src/snapshot.rs",
+        "src/streamer.rs",
+    ],
+    crate_features = ["fdomain"],
+    edition = "2024",
+    visibility = [
+        "//src/developer/ffx/plugins/profile/heapdump:__subpackages__",
+    ],
+    deps = [
+        ":measure_tape_for_snapshot_element",
+        "//sdk/fidl/fuchsia.memory.heapdump.client:fuchsia.memory.heapdump.client_rust_fdomain_flex",
+        "//sdk/rust/zx-status",
+        "//sdk/rust/zx-types",
+        "//src/lib/fdomain/client",
+        "//src/lib/fidl/rust/fidl",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+rustc_test(
+    name = "heapdump_snapshot_test",
+    crate = ":heapdump_snapshot",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:maplit",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+host_rustc_test(
+    name = "heapdump_snapshot_fdomain_test",
+    crate = ":heapdump_snapshot_fdomain",
+    crate_features = ["fdomain"],
+    visibility = ["//src/performance/memory:__pkg__"],
+    deps = [
+        "//src/lib/fdomain/local",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:maplit",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+fx_unittest_package(
+    name = "heapdump-snapshot-tests",
+    package_name = "heapdump-snapshot-tests",
+    unit_tests = [":heapdump_snapshot_test"],
+    visibility = ["//src/performance/memory:__pkg__"],
+)

@@ -144,7 +144,8 @@ zx_status_t DispatcherCoordinator::ShutdownDispatchersAsync(
     }
   }
   for (auto& dispatcher : dispatchers) {
-    async::PostTask(dispatcher->GetAsyncDispatcher(), [=]() { dispatcher->ShutdownAsync(); });
+    async::PostTask(fdf_dispatcher_get_async_dispatcher(dispatcher->GetAlwaysOnDispatcher()),
+                    [=]() { dispatcher->ShutdownAsync(); });
   }
   if (dispatchers.empty()) {
     auto thread_pool = GetDispatcherCoordinator().default_thread_pool();

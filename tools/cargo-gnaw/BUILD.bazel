@@ -9,8 +9,6 @@ load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
 
 package(default_applicable_licenses = ["//:license"])
 
-# cargo-gnaw binary is Bazel-only (wrapped by bazel_tool_action in BUILD.gn).
-# @bazel2gn:skip
 rustc_binary(
     name = "cargo-gnaw-bin",
     srcs = ["src/main.rs"],
@@ -63,6 +61,7 @@ rustc_library(
         "//third_party/rust_crates/vendor:semver",
         "//third_party/rust_crates/vendor:serde",
         "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:tempfile",
         "//third_party/rust_crates/vendor:toml",
         "//third_party/rust_crates/vendor:walkdir",
     ],

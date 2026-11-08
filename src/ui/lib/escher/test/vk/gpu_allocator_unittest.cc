@@ -2,12 +2,20 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <atomic>
+#include <thread>
+#include <vector>
+
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include "src/ui/lib/escher/resources/resource_recycler.h"
+#include "src/ui/lib/escher/test/common/gtest_escher.h"
 #include "src/ui/lib/escher/test/common/gtest_vulkan.h"
 #include "src/ui/lib/escher/test/vk/fake_gpu_allocator.h"
 #include "src/ui/lib/escher/util/image_utils.h"
+#include "src/ui/lib/escher/vk/command_buffer.h"
+#include "src/ui/lib/escher/vk/image_factory.h"
 #include "src/ui/lib/escher/vk/naive_gpu_allocator.h"
 #include "src/ui/lib/escher/vk/vma_gpu_allocator.h"
 #include "src/ui/lib/escher/vk/vulkan_context.h"
@@ -564,6 +572,278 @@ VK_TEST(VmaGpuAllocatorTest, ProtectedMemoryIsDedicated) {
   info.memory_flags = vk::MemoryPropertyFlagBits::eProtected;
   auto image0 = allocator.AllocateImage(nullptr, info, nullptr);
   EXPECT_TRUE(allocation_create_info.flags & VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT);
+}
+
+using ImageFactoryAdapterTest = TestWithVkValidationLayer;
+
+VK_TEST_F(ImageFactoryAdapterTest, ImmediateAndDedicatedAllocationLifecycle) {
+  auto* escher = test::GetEscher();
+  EXPECT_VK_SUCCESS(escher->vk_device().waitIdle());
+  EXPECT_TRUE(escher->Cleanup());
+  const uint32_t baseline_ownable_count = escher->resource_recycler()->ownable_count();
+
+  FakeGpuAllocator allocator;
+  ResourceRecycler recycler(escher->GetWeakPtr());
+  ImageFactoryAdapter adapter(&allocator, &recycler);
+
+  constexpr uint32_t kWidth = 16;
+  constexpr uint32_t kHeight = 16;
+  constexpr vk::Format kFormat = vk::Format::eR8G8B8A8Unorm;
+  const size_t kMemorySize = kWidth * kHeight * image_utils::BytesPerPixel(kFormat);
+
+  ImageInfo info;
+  info.format = kFormat;
+  info.width = kWidth;
+  info.height = kHeight;
+  info.usage = vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eSampled;
+  info.color_space = ColorSpace::kSrgb;
+
+  // An image that is never referenced by a command buffer (`sequence_number() == 0`) is
+  // destroyed immediately when its last `ImagePtr` reference is dropped.
+  auto image = adapter.NewImage(info);
+  ASSERT_TRUE(image);
+  EXPECT_EQ(0u, image->sequence_number());
+  EXPECT_EQ(kMemorySize, allocator.GetTotalBytesAllocated());
+  EXPECT_EQ(1u, recycler.ownable_count());
+
+  image = nullptr;
+  EXPECT_EQ(0u, allocator.GetTotalBytesAllocated());
+  EXPECT_EQ(0u, recycler.ownable_count());
+
+  // Dedicated allocation (`out_ptr != nullptr`) populates `out_mem` and keeps the underlying
+  // `GpuMem` alive until both the `ImagePtr` and `out_mem` are dropped.
+  GpuMemPtr out_mem;
+  image = adapter.NewImage(info, &out_mem);
+  ASSERT_TRUE(image);
+  ASSERT_TRUE(out_mem);
+  EXPECT_EQ(kMemorySize, out_mem->size());
+  EXPECT_EQ(kMemorySize, allocator.GetTotalBytesAllocated());
+  EXPECT_EQ(1u, recycler.ownable_count());
+
+  // Dropping `image` first destroys the `Image` resource immediately, while `out_mem` keeps the
+  // backing memory allocation alive.
+  image = nullptr;
+  EXPECT_EQ(0u, recycler.ownable_count());
+  EXPECT_EQ(kMemorySize, allocator.GetTotalBytesAllocated());
+
+  out_mem = nullptr;
+  EXPECT_EQ(0u, allocator.GetTotalBytesAllocated());
+
+  // Verify the reverse drop order: dropping `out_mem` first keeps the backing memory alive
+  // until `image` is also dropped.
+  image = adapter.NewImage(info, &out_mem);
+  ASSERT_TRUE(image);
+  ASSERT_TRUE(out_mem);
+  EXPECT_EQ(kMemorySize, allocator.GetTotalBytesAllocated());
+  EXPECT_EQ(1u, recycler.ownable_count());
+
+  out_mem = nullptr;
+  EXPECT_EQ(kMemorySize, allocator.GetTotalBytesAllocated());
+  EXPECT_EQ(1u, recycler.ownable_count());
+
+  image = nullptr;
+  EXPECT_EQ(0u, allocator.GetTotalBytesAllocated());
+  EXPECT_EQ(0u, recycler.ownable_count());
+
+  // Also exercise dedicated allocation through `Escher::image_cache()` (backed by
+  // `VmaGpuAllocator` and `escher->resource_recycler()`). Because `VmaMappedGpuMem` holds a
+  // `keep_alive_` reference to the `VmaImage`, `ownable_count()` remains elevated until both
+  // the `ImagePtr` and `vma_out_mem` are dropped.
+  GpuMemPtr vma_out_mem;
+  auto vma_image = escher->image_cache()->NewImage(info, &vma_out_mem);
+  ASSERT_TRUE(vma_image);
+  ASSERT_TRUE(vma_out_mem);
+  EXPECT_GE(vma_out_mem->size(), kMemorySize);
+  EXPECT_EQ(baseline_ownable_count + 1u, escher->resource_recycler()->ownable_count());
+
+  vma_image = nullptr;
+  EXPECT_EQ(baseline_ownable_count + 1u, escher->resource_recycler()->ownable_count());
+
+  vma_out_mem = nullptr;
+  EXPECT_EQ(baseline_ownable_count, escher->resource_recycler()->ownable_count());
+
+  // Reverse drop order for `Escher::image_cache()`: drop `vma_out_mem` first, then `vma_image`.
+  vma_image = escher->image_cache()->NewImage(info, &vma_out_mem);
+  ASSERT_TRUE(vma_image);
+  ASSERT_TRUE(vma_out_mem);
+  EXPECT_EQ(baseline_ownable_count + 1u, escher->resource_recycler()->ownable_count());
+
+  vma_out_mem = nullptr;
+  EXPECT_EQ(baseline_ownable_count + 1u, escher->resource_recycler()->ownable_count());
+
+  vma_image = nullptr;
+  EXPECT_EQ(baseline_ownable_count, escher->resource_recycler()->ownable_count());
+}
+
+VK_TEST_F(ImageFactoryAdapterTest, InFlightImageDeferredUntilCommandBufferFinishes) {
+  auto* escher = test::GetEscher();
+  EXPECT_VK_SUCCESS(escher->vk_device().waitIdle());
+  EXPECT_TRUE(escher->Cleanup());
+
+  const uint32_t baseline_ownable_count = escher->resource_recycler()->ownable_count();
+
+  constexpr uint32_t kWidth = 16;
+  constexpr uint32_t kHeight = 16;
+  constexpr vk::Format kFormat = vk::Format::eR8G8B8A8Unorm;
+  const size_t kMemorySize = kWidth * kHeight * image_utils::BytesPerPixel(kFormat);
+
+  ImageInfo info;
+  info.format = kFormat;
+  info.width = kWidth;
+  info.height = kHeight;
+  info.usage = vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eTransferDst;
+  info.memory_flags = vk::MemoryPropertyFlagBits::eDeviceLocal;
+  info.color_space = ColorSpace::kSrgb;
+
+  auto image1 = escher->image_cache()->NewImage(info);
+  ASSERT_TRUE(image1);
+  EXPECT_EQ(baseline_ownable_count + 1u, escher->resource_recycler()->ownable_count());
+
+  auto cb = CommandBuffer::NewForGraphics(escher, /*use_protected_memory=*/false);
+  ASSERT_TRUE(cb);
+  cb->TransitionImageLayout(image1, vk::ImageLayout::eUndefined,
+                            vk::ImageLayout::eColorAttachmentOptimal);
+  EXPECT_EQ(cb->sequence_number(), image1->sequence_number());
+
+  // Dropping the last `ImagePtr` while `cb` is still in flight must defer destruction in
+  // `ResourceRecycler` rather than destroying or reusing the active image.
+  const Image* image1_raw = image1.get();
+  image1 = nullptr;
+  EXPECT_EQ(baseline_ownable_count + 1u, escher->resource_recycler()->ownable_count());
+
+  // A subsequent `NewImage(info)` call while `cb` is in flight must allocate a distinct `Image`
+  // rather than aliasing `image1`.
+  auto image2 = escher->image_cache()->NewImage(info);
+  ASSERT_TRUE(image2);
+  EXPECT_NE(image1_raw, image2.get());
+  EXPECT_EQ(baseline_ownable_count + 2u, escher->resource_recycler()->ownable_count());
+
+  // Also track exact byte deallocation timing via `FakeGpuAllocator` paired with a local
+  // `ResourceRecycler`.
+  FakeGpuAllocator fake_allocator;
+  ResourceRecycler fake_recycler(escher->GetWeakPtr());
+  ImageFactoryAdapter fake_adapter(&fake_allocator, &fake_recycler);
+  auto fake_image = fake_adapter.NewImage(info);
+  ASSERT_TRUE(fake_image);
+  EXPECT_EQ(kMemorySize, fake_allocator.GetTotalBytesAllocated());
+  EXPECT_EQ(1u, fake_recycler.ownable_count());
+
+  cb->KeepAlive(fake_image);
+  fake_image = nullptr;
+  EXPECT_EQ(kMemorySize, fake_allocator.GetTotalBytesAllocated());
+  EXPECT_EQ(1u, fake_recycler.ownable_count());
+
+  // Submitting and retiring `cb` destroys the deferred `image1` and `fake_image`, while `image2`
+  // remains alive.
+  EXPECT_TRUE(cb->Submit(nullptr));
+  EXPECT_VK_SUCCESS(escher->vk_device().waitIdle());
+  EXPECT_TRUE(escher->Cleanup());
+
+  EXPECT_EQ(0u, fake_allocator.GetTotalBytesAllocated());
+  EXPECT_EQ(0u, fake_recycler.ownable_count());
+  EXPECT_EQ(baseline_ownable_count + 1u, escher->resource_recycler()->ownable_count());
+
+  image2 = nullptr;
+  EXPECT_EQ(baseline_ownable_count, escher->resource_recycler()->ownable_count());
+}
+
+VK_TEST_F(ImageFactoryAdapterTest, ConcurrentInFlightImageReleaseAcrossThreads) {
+  auto* escher = test::GetEscher();
+  EXPECT_VK_SUCCESS(escher->vk_device().waitIdle());
+  EXPECT_TRUE(escher->Cleanup());
+
+  constexpr uint32_t kWidth = 16;
+  constexpr uint32_t kHeight = 16;
+  constexpr vk::Format kFormat = vk::Format::eR8G8B8A8Unorm;
+  const size_t kMemorySize = kWidth * kHeight * image_utils::BytesPerPixel(kFormat);
+
+  ImageInfo info;
+  info.format = kFormat;
+  info.width = kWidth;
+  info.height = kHeight;
+  info.usage = vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eSampled;
+  info.color_space = ColorSpace::kSrgb;
+
+  auto cb = CommandBuffer::NewForGraphics(escher, /*use_protected_memory=*/false);
+  ASSERT_TRUE(cb);
+  const uint64_t cb_seq = cb->sequence_number();
+  ASSERT_GT(cb_seq, 0u);
+
+  FakeGpuAllocator allocator;
+  ResourceRecycler recycler(escher->GetWeakPtr());
+  ImageFactoryAdapter adapter(&allocator, &recycler);
+
+  constexpr size_t kNumThreads = 4;
+  constexpr size_t kImagesPerThread = 32;
+  constexpr size_t kTotalImagesPerCategory = kNumThreads * kImagesPerThread;
+
+  // Pre-allocate both in-flight (`sequence_number() == cb_seq`) and unreferenced
+  // (`sequence_number() == 0`) images on the main thread so worker threads do not dereference
+  // thread-affine `fxl::WeakPtr` instances (`ImageFactoryAdapter::allocator_` and
+  // `ResourceManager::escher_`) off-thread.
+  std::vector<std::vector<ImagePtr>> in_flight_images(kNumThreads);
+  std::vector<std::vector<ImagePtr>> unreferenced_images(kNumThreads);
+  for (size_t t = 0; t < kNumThreads; ++t) {
+    in_flight_images[t].reserve(kImagesPerThread);
+    unreferenced_images[t].reserve(kImagesPerThread);
+    for (size_t i = 0; i < kImagesPerThread; ++i) {
+      auto in_flight_img = adapter.NewImage(info);
+      ASSERT_TRUE(in_flight_img);
+      cb->KeepAlive(in_flight_img);
+      EXPECT_EQ(cb_seq, in_flight_img->sequence_number());
+      in_flight_images[t].push_back(std::move(in_flight_img));
+
+      auto unreferenced_img = adapter.NewImage(info);
+      ASSERT_TRUE(unreferenced_img);
+      EXPECT_EQ(0u, unreferenced_img->sequence_number());
+      unreferenced_images[t].push_back(std::move(unreferenced_img));
+    }
+  }
+
+  EXPECT_EQ(2 * kTotalImagesPerCategory * kMemorySize, allocator.GetTotalBytesAllocated());
+  EXPECT_EQ(2 * kTotalImagesPerCategory, recycler.ownable_count());
+
+  // Gate worker threads on a start barrier so all threads contend concurrently on
+  // `ResourceRecycler::OnReceiveOwnable` (both the deferred `lock_` path and the immediate
+  // destruction path).
+  std::atomic<size_t> ready_workers{0};
+  std::atomic<bool> start{false};
+  std::vector<std::thread> threads;
+  threads.reserve(kNumThreads);
+  for (size_t t = 0; t < kNumThreads; ++t) {
+    threads.emplace_back([&, t]() {
+      ready_workers.fetch_add(1, std::memory_order_release);
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      for (size_t i = 0; i < kImagesPerThread; ++i) {
+        in_flight_images[t][i] = nullptr;
+        unreferenced_images[t][i] = nullptr;
+      }
+    });
+  }
+
+  while (ready_workers.load(std::memory_order_acquire) < kNumThreads) {
+    std::this_thread::yield();
+  }
+  start.store(true, std::memory_order_release);
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  // All unreferenced images were destroyed immediately, while all in-flight images remain
+  // retained in `recycler` waiting for `cb_seq` to finish.
+  EXPECT_EQ(kTotalImagesPerCategory * kMemorySize, allocator.GetTotalBytesAllocated());
+  EXPECT_EQ(kTotalImagesPerCategory, recycler.ownable_count());
+
+  // Submitting and retiring `cb` notifies `recycler` via `CommandBufferSequencer` and destroys
+  // all deferred in-flight images.
+  EXPECT_TRUE(cb->Submit(nullptr));
+  EXPECT_VK_SUCCESS(escher->vk_device().waitIdle());
+  EXPECT_TRUE(escher->Cleanup());
+
+  EXPECT_EQ(0u, allocator.GetTotalBytesAllocated());
+  EXPECT_EQ(0u, recycler.ownable_count());
 }
 
 }  // namespace

@@ -38,13 +38,17 @@ kernel_rust_mod("arch-rs") {
   source_root = "src/mod.rs"
   sources = [
     "src/api.rs",
+    "src/debugger.rs",
+    "src/exception.rs",
     "src/mod.rs",
     "src/ops.rs",
+    "src/spinlock.rs",
   ]
   deps = [
     ":arch-types-bindings",
     "//sdk/rust/zx-status",
     "//sdk/rust/zx-types",
+    "//src/lib/zr",
   ]
   if (current_cpu == "arm64") {
     deps += [ "//zircon/kernel/arch/arm64:arch-arm64-rs" ]

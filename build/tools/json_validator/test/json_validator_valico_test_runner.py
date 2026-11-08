@@ -28,6 +28,7 @@ def main() -> int:
     args = parser.parse_args()
 
     r = runfiles.Create()
+    assert r, "Cannot find runfiles"
 
     def resolve(rlocation: str) -> str:
         path = r.Rlocation(rlocation)

@@ -15,11 +15,14 @@
 #include <utility>
 
 #include <hwreg/bitfields.h>
+#include <hwreg/mmio.h>
 
 extern "C" {
 uint32_t rust_coresight_device_type_from_raw(uint32_t reg_value);
 const char* rust_coresight_class_id_to_string(uint8_t raw_classid, size_t* out_len);
 const char* rust_coresight_device_type_to_string(uint32_t dev_type, size_t* out_len);
+uint16_t rust_coresight_get_designer(const uint32_t* base);
+uint16_t rust_coresight_get_part_id(const uint32_t* base);
 }
 
 namespace coresight {
@@ -89,56 +92,16 @@ inline std::string_view ToString(ComponentIdRegister::Class classid) {
   return std::string_view(ptr, len);
 }
 
-// B.2.2
-struct PeripheralId0Register : public hwreg::RegisterBase<PeripheralId0Register, uint32_t> {
-  DEF_RSVDZ_FIELD(31, 8);
-  DEF_FIELD(7, 0, part0);
-
-  static auto Get() { return hwreg::RegisterAddr<PeripheralId0Register>(0xfe0); }
-};
-
-struct PeripheralId1Register : public hwreg::RegisterBase<PeripheralId1Register, uint32_t> {
-  DEF_RSVDZ_FIELD(31, 8);
-  DEF_FIELD(7, 4, des0);
-  DEF_FIELD(3, 0, part1);
-
-  static auto Get() { return hwreg::RegisterAddr<PeripheralId1Register>(0xfe4); }
-};
-
-struct PeripheralId2Register : public hwreg::RegisterBase<PeripheralId2Register, uint32_t> {
-  DEF_RSVDZ_FIELD(31, 8);
-  DEF_FIELD(7, 4, revision);
-  DEF_BIT(3, jedec);
-  DEF_FIELD(2, 0, des1);
-
-  static auto Get() { return hwreg::RegisterAddr<PeripheralId2Register>(0xfe8); }
-};
-
-struct PeripheralId4Register : public hwreg::RegisterBase<PeripheralId4Register, uint32_t> {
-  DEF_RSVDZ_FIELD(31, 8);
-  DEF_FIELD(7, 4, size);
-  DEF_FIELD(3, 0, des2);
-
-  static auto Get() { return hwreg::RegisterAddr<PeripheralId4Register>(0xfd0); }
-};
-
 // [CS] B2.2.2
 // JEDEC ID of the designer.
-template <typename IoProvider>
-inline uint16_t GetDesigner(IoProvider io) {
-  const auto des0 = static_cast<uint16_t>(PeripheralId1Register::Get().ReadFrom(&io).des0());
-  const auto des1 = static_cast<uint16_t>(PeripheralId2Register::Get().ReadFrom(&io).des1());
-  const auto des2 = static_cast<uint16_t>(PeripheralId4Register::Get().ReadFrom(&io).des2());
-  return static_cast<uint16_t>((des2 << 7) | (des1 << 4) | des0);
+inline uint16_t GetDesigner(hwreg::RegisterMmio io) {
+  return rust_coresight_get_designer(reinterpret_cast<const uint32_t*>(io.base()));
 }
 
 // [CS] B2.2.2
 // This number is an ID chosen by the designer.
-template <typename IoProvider>
-inline uint16_t GetPartId(IoProvider io) {
-  const auto part0 = static_cast<uint16_t>(PeripheralId0Register::Get().ReadFrom(&io).part0());
-  const auto part1 = static_cast<uint16_t>(PeripheralId1Register::Get().ReadFrom(&io).part1());
-  return static_cast<uint16_t>((part1 << 8) | part0);
+inline uint16_t GetPartId(hwreg::RegisterMmio io) {
+  return rust_coresight_get_part_id(reinterpret_cast<const uint32_t*>(io.base()));
 }
 
 // B2.3.3

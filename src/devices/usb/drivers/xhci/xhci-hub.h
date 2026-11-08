@@ -44,7 +44,9 @@ struct HubInfo {
   usb_speed_t hub_speed = 0;
   bool multi_tt = false;
   uint8_t rh_port = 0;
-  uint8_t port_to_device[256];
+  // Maps 0-based hub port index (port - 1) to the 0-based device_id (slot - 1) of the attached
+  // downstream device, or std::nullopt if no device is attached (since 0 is a valid device_id).
+  std::optional<uint8_t> port_to_device[256];
   uint8_t parent_port_number = 0;
   // Should only exist for hubs behind the TT.
   std::optional<tt_info_t> tt_info;

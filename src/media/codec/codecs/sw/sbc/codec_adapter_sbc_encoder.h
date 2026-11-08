@@ -54,7 +54,7 @@ class CodecAdapterSbcEncoder : public CodecAdapterSW<fit::deferred_action<fit::c
  private:
   struct Context {
     fuchsia::media::SbcChannelMode channel_mode;
-    fuchsia::media::PcmFormat input_format;
+    fuchsia::media::PcmFormat2 input_format;
     bool is_msbc;
     SBC_ENC_PARAMS params;
     size_t precomputed_sbc_frame_length = 0;
@@ -92,7 +92,7 @@ class CodecAdapterSbcEncoder : public CodecAdapterSW<fit::deferred_action<fit::c
       return params.s16NumOfBlocks * params.s16NumOfSubBands;
     }
 
-    size_t pcm_frame_size() const { return input_format.bits_per_sample / 8 * channel_count(); }
+    size_t pcm_frame_size() const { return input_format.bits_per_sample() / 8 * channel_count(); }
 
     size_t pcm_batch_size() const { return pcm_frame_size() * pcm_frames_per_sbc_frame(); }
 

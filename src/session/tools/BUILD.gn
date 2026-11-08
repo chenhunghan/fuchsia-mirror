@@ -5,9 +5,3 @@
 group("tools") {
   deps = [ "//src/session/tools/session_control" ]
 }
-
-group("tests") {
-  testonly = true
-
-  deps = [ "//src/session/tools/session_control:session_control_tests" ]
-}

@@ -5,6 +5,7 @@
 #include "buttons-device.h"
 
 #include <lib/driver/logging/cpp/logger.h>
+#include <lib/fit/defer.h>
 #include <lib/zx/clock.h>
 #include <zircon/assert.h>
 #include <zircon/status.h>
@@ -12,6 +13,8 @@
 #include <algorithm>
 #include <cinttypes>
 #include <cstddef>
+#include <string>
+#include <string_view>
 
 #include <fbl/alloc_checker.h>
 
@@ -85,17 +88,22 @@ void ButtonsDevice::ButtonsInputReport::ToFidlInputReport(
   input_report.event_time(event_time.get()).consumer_control(consumer_control.Build());
 }
 
-void ButtonsDevice::Notify(size_t button_index) {
+bool ButtonsDevice::Notify(size_t button_index) {
   zx::result<ButtonsInputReport> result = GetInputReportInternal();
   if (result.is_error()) {
     fdf::error("GetInputReport failed {}", zx_status_get_string(result.error_value()));
-  } else if (!last_report_.has_value() || *last_report_ != result.value()) {
+    debounce_states_[button_index].timestamp = zx::time_boot::infinite_past();
+    return false;
+  }
+
+  const bool state_changed = !last_report_.has_value() || *last_report_ != result.value();
+  if (state_changed) {
     last_report_ = result.value();
     readers_.SendReportToAllReaders(*last_report_);
 
-    if (debounce_states_[button_index].timestamp != zx::time::infinite_past()) {
-      const zx::duration latency =
-          zx::clock::get_monotonic() - debounce_states_[button_index].timestamp;
+    if (debounce_states_[button_index].timestamp != zx::time_boot::infinite_past()) {
+      const zx::duration latency = std::max(
+          zx::duration(0), zx::clock::get_boot() - debounce_states_[button_index].timestamp);
 
       total_latency_ += latency;
       report_count_++;
@@ -110,17 +118,37 @@ void ButtonsDevice::Notify(size_t button_index) {
     if (!last_report_->empty()) {
       total_report_count_.Add(1);
       last_event_timestamp_.Set(last_report_->event_time.get());
+      const zx::time_boot now_boot = zx::clock::get_boot();
+      std::scoped_lock lock(health_mutex_);
+      health_state_.total_reports_emitted++;
+      health_state_.last_event_timestamp = now_boot;
+    }
+    if (buttons_[button_index].id() == fuchsia_buttons::GpioButtonId::kFdr) {
+      fdf::info("FDR (up and down buttons) pressed");
     }
   }
-  if (buttons_[button_index].id() == fuchsia_buttons::GpioButtonId::kFdr) {
-    fdf::info("FDR (up and down buttons) pressed");
-  }
 
-  debounce_states_[button_index].enqueued = false;
-  debounce_states_[button_index].timestamp = zx::time::infinite_past();
+  debounce_states_[button_index].timestamp = zx::time_boot::infinite_past();
+  return state_changed;
 }
 
 int ButtonsDevice::Thread() {
+  auto on_exit = fit::defer([this] {
+    bool unexpected_exit = false;
+    {
+      std::scoped_lock lock(health_mutex_);
+      health_state_.thread_terminated_timestamp = zx::clock::get_boot();
+      health_state_.thread_running = false;
+      unexpected_exit = !health_state_.shutting_down;
+    }
+    if (unexpected_exit) {
+      health_latch_->Raise(
+          fuchsia_driver_framework::HealthCondition()
+              .status(fuchsia_driver_framework::HealthStatus::kUnhealthy)
+              .reason_code(std::string(kHealthReasonIrqThreadTerminated))
+              .message("Buttons interrupt/polling worker thread terminated unexpectedly"));
+    }
+  });
   thread_started_.Signal();
   if (poll_period_ != zx::duration::infinite()) {
     poll_timer_.set(zx::deadline_after(poll_period_), zx::duration(0));
@@ -160,22 +188,29 @@ int ButtonsDevice::Thread() {
         }
         debounce_states_[type].value = *reconfig_result;
 
-        // Notify
-        debounce_states_[type].timer.set(zx::deadline_after(zx::duration(kDebounceThresholdNs)),
-                                         zx::duration(0));
         if (!debounce_states_[type].enqueued) {
-          debounce_states_[type].timer.wait_async(port_, kPortKeyTimerStart + type,
-                                                  ZX_TIMER_SIGNALED, 0);
-          debounce_states_[type].timestamp = zx::time(packet.interrupt.timestamp);
+          debounce_states_[type].timestamp = zx::time_boot(packet.interrupt.timestamp);
+          // Leading-edge debounce: report validated state changes immediately (0 ms delay) and arm
+          // a 50 ms holdoff timer to suppress contact bounce and reconcile the settled GPIO state.
+          if (Notify(type)) {
+            debounce_states_[type].timer.set(zx::deadline_after(zx::duration(kDebounceThresholdNs)),
+                                             zx::duration(0));
+            debounce_states_[type].timer.wait_async(port_, kPortKeyTimerStart + type,
+                                                    ZX_TIMER_SIGNALED, 0);
+            debounce_states_[type].enqueued = true;
+          }
+        } else if (debounce_states_[type].timestamp == zx::time_boot::infinite_past()) {
+          debounce_states_[type].timestamp = zx::time_boot(packet.interrupt.timestamp);
         }
-        debounce_states_[type].enqueued = true;
       }
 
       gpios_[type].irq.ack();
     }
 
     if (packet.key >= kPortKeyTimerStart && packet.key < (kPortKeyTimerStart + buttons_.size())) {
-      Notify(packet.key - kPortKeyTimerStart);
+      const size_t button_index = packet.key - kPortKeyTimerStart;
+      debounce_states_[button_index].enqueued = false;
+      Notify(button_index);
     }
 
     if (packet.key == kPortKeyPollTimer) {
@@ -436,13 +471,13 @@ zx::result<bool> ButtonsDevice::ReconfigurePolarity(size_t idx, uint64_t int_por
   }
   current = read_result1.value()->value;
 
-  fidl::Arena arena;
-  auto config = fuchsia_hardware_gpio::wire::InterruptConfiguration::Builder(arena)
-                    .mode(current ? fuchsia_hardware_gpio::InterruptMode::kEdgeLow
-                                  : fuchsia_hardware_gpio::InterruptMode::kEdgeHigh)
-                    .Build();
   do {
     {
+      fidl::Arena arena;
+      auto config = fuchsia_hardware_gpio::wire::InterruptConfiguration::Builder(arena)
+                        .mode(current ? fuchsia_hardware_gpio::InterruptMode::kEdgeLow
+                                      : fuchsia_hardware_gpio::InterruptMode::kEdgeHigh)
+                        .Build();
       fidl::WireResult result = gpio.client->ConfigureInterrupt(config);
       if (!result.ok()) {
         fdf::error("Failed to send ConfigureInterrupt request to gpio {}: {}", idx,
@@ -559,11 +594,14 @@ zx_status_t ButtonsDevice::ConfigureInterrupt(size_t idx, uint64_t int_port) {
 ButtonsDevice::ButtonsDevice(async_dispatcher_t* dispatcher,
                              std::vector<fuchsia_buttons::GpioButtonConfig> buttons,
                              std::vector<Gpio> gpios,
-                             fidl::ClientEnd<fuchsia_power_system::ActivityGovernor> sag_client)
+                             fidl::ClientEnd<fuchsia_power_system::ActivityGovernor> sag_client,
+                             fdf::HealthAlertLatch* health_latch)
     : dispatcher_(dispatcher),
       buttons_(std::move(buttons)),
       gpios_(std::move(gpios)),
-      wake_lease_(dispatcher, "buttons-driver-wake", std::move(sag_client), nullptr, true) {
+      wake_lease_(dispatcher, "buttons-driver-wake", std::move(sag_client), nullptr, true),
+      health_latch_(health_latch) {
+  ZX_ASSERT(health_latch_ != nullptr);
   ZX_ASSERT(Init() == ZX_OK);
 }
 
@@ -747,16 +785,25 @@ zx_status_t ButtonsDevice::Init() {
     }
   }
 
+  {
+    std::scoped_lock lock(health_mutex_);
+    health_state_.thread_running = true;
+  }
   auto f = [](void* arg) -> int { return reinterpret_cast<ButtonsDevice*>(arg)->Thread(); };
   const int rc = thrd_create_with_name(&thread_, f, this, "buttons-thread");
   if (rc != thrd_success) {
+    std::scoped_lock lock(health_mutex_);
+    health_state_.thread_running = false;
     return ZX_ERR_INTERNAL;
   }
-
   return ZX_OK;
 }
 
 void ButtonsDevice::ShutDown() {
+  {
+    std::scoped_lock lock(health_mutex_);
+    health_state_.shutting_down = true;
+  }
   zx_port_packet packet = {kPortKeyShutDown, ZX_PKT_TYPE_USER, ZX_OK, {}};
   const zx_status_t status = port_.queue(&packet);
   ZX_ASSERT(status == ZX_OK);
@@ -767,6 +814,115 @@ void ButtonsDevice::ShutDown() {
       std::move(gpio.irq).destroy();
     }
   }
+}
+
+namespace {
+
+void AddUintDiagnostic(std::vector<fuchsia_driver_framework::HealthDiagnosticItem>& diagnostics,
+                       std::string_view key, uint64_t value) {
+  diagnostics.emplace_back(std::string(key),
+                           fuchsia_driver_framework::HealthDiagnosticValue::WithUintValue(value));
+}
+
+}  // namespace
+
+HealthCheckResult ButtonsDevice::PerformHealthCheck(
+    fuchsia_driver_framework::HealthCheckRequest request) {
+  HealthState state;
+  {
+    std::scoped_lock lock(health_mutex_);
+    state = health_state_;
+  }
+  if (state.shutting_down) {
+    return fit::error(fuchsia_driver_framework::HealthCheckError::kInvalidState);
+  }
+  if (request != fuchsia_driver_framework::HealthCheckRequest::kPing &&
+      request != fuchsia_driver_framework::HealthCheckRequest::kFast) {
+    return fit::error(fuchsia_driver_framework::HealthCheckError::kNotSupported);
+  }
+
+  std::vector<fuchsia_driver_framework::HealthDiagnosticItem> diagnostics;
+  diagnostics.reserve(7);
+  diagnostics.emplace_back(
+      std::string(kHealthDiagWorkerThreadRunning),
+      fuchsia_driver_framework::HealthDiagnosticValue::WithBoolValue(state.thread_running));
+  AddUintDiagnostic(diagnostics, kHealthDiagButtonCount, buttons_.size());
+  AddUintDiagnostic(diagnostics, kHealthDiagGpioCount, gpios_.size());
+  AddUintDiagnostic(diagnostics, kHealthDiagTotalReportCount, state.total_reports_emitted);
+  if (state.last_event_timestamp.has_value()) {
+    // Note: last_event_timestamp is on the boot timeline (correct for FIDL), while Inspect uses
+    // monotonic event_time.
+    diagnostics.emplace_back(std::string(kHealthDiagLastEventTimestamp),
+                             fuchsia_driver_framework::HealthDiagnosticValue::WithTimestamp(
+                                 *state.last_event_timestamp));
+  }
+  if (!state.thread_running && state.thread_terminated_timestamp.has_value()) {
+    diagnostics.emplace_back(std::string(kHealthDiagThreadTerminatedTimestamp),
+                             fuchsia_driver_framework::HealthDiagnosticValue::WithTimestamp(
+                                 *state.thread_terminated_timestamp));
+  }
+
+  if (request == fuchsia_driver_framework::HealthCheckRequest::kFast) {
+    uint64_t gpio_read_failures = 0;
+    size_t first_failed_gpio_index = 0;
+    zx_status_t first_error_status = ZX_OK;
+    bool has_transport_error = false;
+    for (size_t i = 0; i < gpios_.size(); ++i) {
+      const auto& gpio = gpios_[i];
+      if (!gpio.config.type().has_value()) {
+        continue;
+      }
+      const auto tag = gpio.config.type()->Which();
+      if (tag != fuchsia_buttons::GpioType::Tag::kInterrupt &&
+          tag != fuchsia_buttons::GpioType::Tag::kPoll) {
+        continue;
+      }
+      fidl::WireResult read_result = gpio.client->Read();
+      if (!read_result.ok() || read_result->is_error()) {
+        if (gpio_read_failures == 0) {
+          first_failed_gpio_index = i;
+          first_error_status = read_result.ok() ? read_result->error_value() : read_result.status();
+        }
+        gpio_read_failures++;
+        if (!read_result.ok()) {
+          has_transport_error = true;
+        }
+      }
+    }
+
+    AddUintDiagnostic(diagnostics, kHealthDiagFastGpioReadFailures, gpio_read_failures);
+
+    if (gpio_read_failures > 0) {
+      std::vector<fuchsia_driver_framework::HealthDiagnosticItem> cond_diag;
+      cond_diag.reserve(3);
+      AddUintDiagnostic(cond_diag, kHealthDiagFailedGpioCount, gpio_read_failures);
+      AddUintDiagnostic(cond_diag, kHealthDiagFirstFailedGpioIndex, first_failed_gpio_index);
+      cond_diag.emplace_back(std::string(kHealthDiagFirstErrorStatus),
+                             fuchsia_driver_framework::HealthDiagnosticValue::WithStringValue(
+                                 zx_status_get_string(first_error_status)));
+
+      // The latch owns first_observed / last_observed / occurrence_count: it stamps them on the
+      // first raise and preserves first_observed while counting consecutive failing checks.
+      health_latch_->Raise(
+          fuchsia_driver_framework::HealthCondition()
+              .status(has_transport_error ? fuchsia_driver_framework::HealthStatus::kUnhealthy
+                                          : fuchsia_driver_framework::HealthStatus::kDegraded)
+              .reason_code(std::string(kHealthReasonGpioReadFailed))
+              .message("Failed to read one or more direct button GPIOs during FAST health check")
+              .diagnostics(std::move(cond_diag)));
+    } else {
+      health_latch_->Clear(kHealthReasonGpioReadFailed);
+    }
+  }
+
+  fuchsia_driver_framework::HealthCheckResponse response;
+  response.diagnostics(std::move(diagnostics));
+  health_latch_->MergeInto(response);
+  // Populate an explicit empty conditions vector when healthy to report OK status.
+  if (!response.conditions().has_value()) {
+    response.conditions(std::vector<fuchsia_driver_framework::HealthCondition>());
+  }
+  return fit::ok(std::move(response));
 }
 
 }  // namespace buttons

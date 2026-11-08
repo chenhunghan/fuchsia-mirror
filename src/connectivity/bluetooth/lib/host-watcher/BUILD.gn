@@ -71,12 +71,9 @@ if (is_fuchsia) {
     configs += [ "//build/config/rust/lints:deny_unused_results" ]
   }
 }
+
 fuchsia_unittest_package("host-watcher-tests") {
   package_name = "host-watcher-tests-gn"
   component_name = "host-watcher-tests"
   deps = [ ":host-watcher_test" ]
-  visibility = [
-    ":*",
-    "//src/connectivity/bluetooth:*",
-  ]
 }

@@ -1,0 +1,49 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/idk:idk_cc_source_library.bzl", "idk_cc_source_library")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+idk_cc_source_library(
+    name = "cpp",
+    srcs = ["fake-bti.cc"],
+    hdrs = ["fake-bti.h"],
+    api_area = "Driver SDK",
+    category = "partner",
+    idk_name = "driver_fake_bti_cpp",
+    implementation_deps = ["//sdk/lib/driver/fake-object/cpp"],
+    include_base = "//sdk",
+    public_configs = ["//sdk/config"],
+    stable = True,
+    visibility = [
+        "//sdk/lib/driver/fake-bti/rust:__pkg__",
+        "//sdk/lib/driver/fake-platform-device/cpp:__pkg__",
+        "//sdk/lib/driver/platform-device/cpp/tests:__pkg__",
+        "//src/connectivity:__subpackages__",
+        "//src/devices:__subpackages__",
+        "//src/graphics:__subpackages__",
+        "//src/media:__subpackages__",
+        "//vendor:__subpackages__",
+    ],
+    deps = ["//zircon/system/ulib/zx"],
+)
+
+fx_cc_test_binary(
+    name = "fake_bti_test",
+    srcs = ["fake-bti-test.cc"],
+    deps = [
+        ":cpp",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "fake_bti_test_package",
+    unit_tests = [":fake_bti_test"],
+    visibility = ["//sdk/lib:__pkg__"],
+)

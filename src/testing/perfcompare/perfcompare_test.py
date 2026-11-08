@@ -18,6 +18,7 @@ import unittest
 import unittest.mock
 from typing import Any, Callable, Dict, List, Tuple, Union
 
+import local_workflow
 import perfcompare
 
 # The following allows perfcompare_test.py to be run either:
@@ -922,37 +923,61 @@ class LocalWorkflowTest(TempDirTestCase):
 
         return side_effect
 
-    @unittest.mock.patch("subprocess.run")
-    def test_download_metrics(self, mock_run):
-        mock_run.side_effect = self._make_bb_cas_fake(
-            {
-                ("auth-info",): "auth ok",
-                ("get", "-p"): json.dumps(
+    def test_download_metrics(self):
+        # Use unittest.TestCase.subTest rather than third_party/parameterized
+        # so perfcompare_test.py remains runnable directly via python3 (e.g.
+        # with --generate to update golden files) without requiring non-stdlib
+        # packages to be installed or packaged via GN.
+        for build_id in ("1000", "b1000"):
+            with (
+                self.subTest(build_id=build_id),
+                unittest.mock.patch("subprocess.run") as mock_run,
+            ):
+                mock_run.side_effect = self._make_bb_cas_fake(
                     {
-                        "output": {
-                            "properties": {
-                                "cas_instance": "chromium_swarm",
-                                "perf_dataset_digest": "123abc/82",
+                        ("auth-info",): "auth ok",
+                        ("get", "-p"): json.dumps(
+                            {
+                                "output": {
+                                    "properties": {
+                                        "cas_instance": "chromium_swarm",
+                                        "perf_dataset_digest": "123abc/82",
+                                    }
+                                }
                             }
-                        }
+                        ),
+                        ("download",): self._make_cas_download_fake(
+                            '{"metric": 1.0}'
+                        ),
                     }
-                ),
-                ("download",): self._make_cas_download_fake('{"metric": 1.0}'),
-            }
-        )
+                )
 
-        out_dir = self.MakeTempDir()
-        stdout = io.StringIO()
-        perfcompare.Main(["download_metrics", "1000", out_dir], stdout)
+                out_dir = self.MakeTempDir()
+                stdout = io.StringIO()
+                perfcompare.Main(
+                    ["download_metrics", build_id, out_dir], stdout
+                )
 
-        expected_file = os.path.join(out_dir, "metrics.json")
-        self.assertTrue(os.path.exists(expected_file))
-        with open(expected_file) as f:
-            self.assertEqual(f.read(), '{"metric": 1.0}')
+                expected_file = os.path.join(out_dir, "metrics.json")
+                self.assertTrue(os.path.exists(expected_file))
+                with open(expected_file) as f:
+                    self.assertEqual(f.read(), '{"metric": 1.0}')
 
-        output = stdout.getvalue()
-        self.assertIn("Fetching build info for 1000 using bb", output)
-        self.assertIn("Downloading from cas to", output)
+                output = stdout.getvalue()
+                self.assertIn("Fetching build info for 1000 using bb", output)
+                self.assertIn("Downloading from cas to", output)
+                bb_get_cmd = [
+                    call[0][0]
+                    for call in mock_run.call_args_list
+                    if "get" in call[0][0]
+                ][0]
+                self.assertEqual(bb_get_cmd[-1], "1000")
+
+    def test_normalize_build_id(self):
+        self.assertEqual(local_workflow._normalize_build_id("1000"), "1000")
+        self.assertEqual(local_workflow._normalize_build_id("b1000"), "1000")
+        self.assertEqual(local_workflow._normalize_build_id("B1000"), "1000")
+        self.assertEqual(local_workflow._normalize_build_id(" b1000 "), "1000")
 
     @unittest.mock.patch("subprocess.run")
     def test_download_metrics_perfcompare_digest(self, mock_run):

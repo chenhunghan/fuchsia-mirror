@@ -10,7 +10,7 @@ use fidl_fuchsia_hardware_display::{
     TEST_UTILITY_CLIENT_PRIORITY_VALUE as FidlTestUtilityClientPriorityValue,
 };
 use fidl_fuchsia_hardware_display_types::{
-    AlphaMode, Color as FidlColor, DisplayId as FidlDisplayId, INVALID_DISP_ID,
+    AlphaMode, Color as FidlColor, DisplayId as FidlDisplayId, INVALID_DISP_ID, ModeFlags,
 };
 use fuchsia_async::OnSignals;
 use std::fmt;
@@ -182,7 +182,7 @@ impl fmt::Display for DisplayInfo {
 
         writeln!(f, "\tDisplay Modes:")?;
         for (i, mode) in self.0.modes.iter().enumerate() {
-            writeln!(
+            write!(
                 f,
                 "\t\t{}:\t{:.2} Hz @ {}x{}",
                 i,
@@ -190,6 +190,10 @@ impl fmt::Display for DisplayInfo {
                 mode.active_area.width,
                 mode.active_area.height
             )?;
+            if mode.flags.contains(ModeFlags::VARIABLE_REFRESH_RATE) {
+                write!(f, " (variable refresh rate)")?;
+            }
+            writeln!(f)?;
         }
 
         write!(f, "")
@@ -272,7 +276,9 @@ impl From<&Color> for FidlColor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fidl_fuchsia_hardware_display_types::Mode as FidlMode;
     use fidl_fuchsia_images2::PixelFormat as FidlPixelFormat;
+    use fidl_fuchsia_math::SizeU;
     use googletest::prelude::*;
 
     #[gtest]
@@ -580,5 +586,47 @@ mod tests {
             }
             .into()
         );
+    }
+
+    #[gtest]
+    #[fuchsia::test]
+    fn display_info_format_marks_variable_refresh_rate_modes() {
+        let info = DisplayInfo(Info {
+            id: FidlDisplayId { value: 1 },
+            modes: vec![
+                FidlMode {
+                    active_area: SizeU { width: 1280, height: 2856 },
+                    refresh_rate_millihertz: 117_794,
+                    flags: ModeFlags::VARIABLE_REFRESH_RATE,
+                },
+                FidlMode {
+                    active_area: SizeU { width: 1280, height: 2856 },
+                    refresh_rate_millihertz: 60_000,
+                    flags: ModeFlags::empty(),
+                },
+            ],
+            pixel_format: vec![FidlPixelFormat::R8G8B8A8],
+            manufacturer_name: "Manufacturer".to_string(),
+            monitor_name: "Monitor".to_string(),
+            monitor_serial: "Serial".to_string(),
+            horizontal_size_mm: 70,
+            vertical_size_mm: 150,
+            using_fallback_size: false,
+            max_layer_count: 1,
+        });
+
+        let formatted = format!("{}", info);
+        let lines: Vec<&str> = formatted.lines().collect();
+        expect_eq!(lines[0], "Display (id: 1)");
+        expect_eq!(lines[1], "\tManufacturer Name: \"Manufacturer\"");
+        expect_eq!(lines[2], "\tMonitor Name: \"Monitor\"");
+        expect_eq!(lines[3], "\tMonitor Serial: \"Serial\"");
+        expect_eq!(lines[4], "\tPhysical Dimensions: 70mm x 150mm");
+        expect_eq!(lines[5], "\tPixel Formats:");
+        expect_eq!(lines[6], "\t\t0:\tRGBA 8888");
+        expect_eq!(lines[7], "\tDisplay Modes:");
+        expect_eq!(lines[8], "\t\t0:\t117.79 Hz @ 1280x2856 (variable refresh rate)");
+        expect_eq!(lines[9], "\t\t1:\t60.00 Hz @ 1280x2856");
+        expect_eq!(lines.len(), 10);
     }
 }

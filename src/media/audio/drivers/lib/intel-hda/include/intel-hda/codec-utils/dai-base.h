@@ -6,7 +6,6 @@
 #define SRC_MEDIA_AUDIO_DRIVERS_LIB_INTEL_HDA_INCLUDE_INTEL_HDA_CODEC_UTILS_DAI_BASE_H_
 
 #include <fidl/fuchsia.hardware.audio/cpp/wire.h>
-#include <fuchsia/hardware/intelhda/codec/c/banjo.h>
 #include <lib/async-loop/cpp/loop.h>
 
 #include "stream-base.h"

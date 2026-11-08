@@ -7,8 +7,8 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
-#include <re2/re2.h>
 
+#include "re2/re2.h"
 #include "src/lib/json_parser/json_parser.h"
 #include "src/virtualization/tests/lib/guest_test.h"
 

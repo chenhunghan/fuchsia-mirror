@@ -26,7 +26,7 @@ class AvCodecContext {
  public:
   // Describes the requirements of a buffer which can back a frame.
   struct FrameBufferRequest {
-    fuchsia::media::VideoUncompressedFormat format;
+    fuchsia::images2::ImageFormat format;
     size_t buffer_bytes_needed;
   };
 

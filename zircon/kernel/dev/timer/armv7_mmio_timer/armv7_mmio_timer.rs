@@ -86,6 +86,7 @@ mod registers;
 use crate::arch_rs::arm64::periph_paddr_to_vaddr;
 use crate::arch_rs::{InterruptDisableGuard, curr_cpu_num, ints_disabled};
 use crate::kernel::types::{BOOT_CPU_ID, INVALID_CPU, PAddr, cpu_mask_t, cpu_num_to_mask};
+use crate::ksync_kernel::NoIrqSavePolicy;
 use crate::pdev_interrupt::{
     InterruptHandler, InterruptPolarity, InterruptTriggerMode, InterruptVector,
     configure_interrupt, mask_interrupt, register_int_handler, set_interrupt_affinity,
@@ -262,7 +263,7 @@ pub struct Timer {
     supported: bool,
 
     #[mutex]
-    irq_lock: ksync::KSpinlock,
+    irq_lock: ksync::KMutex<crate::ksync_kernel::TrackedSpinlock>,
 
     #[guarded_by(irq_lock)]
     user_handler: IrqHandler,
@@ -286,7 +287,7 @@ impl Timer {
             timer_type,
             irq,
             supported: false,
-            irq_lock <- ksync::KSpinlock::init(),
+            irq_lock <- crate::ksync_kernel::KSpinlock::init(),
             user_handler: ksync::KCell::new(IrqHandler::empty()),
             enabled: ksync::KCell::new(false),
             active_cpu: AtomicU32::new(INVALID_CPU),
@@ -476,7 +477,7 @@ impl Timer {
 
     fn irq_handler_thunk(&self) {
         debug_assert!(ints_disabled());
-        ksync::lock!(let mut guard = self.lock_irq_lock_policy::<ksync::NoIrqSavePolicy>());
+        ksync::lock!(let mut guard = self.lock_irq_lock_policy::<NoIrqSavePolicy>());
 
         // If someone canceled us after the handler fired, but before we made it to
         // this point, then the Cancel operation won the race.  Don't run the handler,
@@ -542,7 +543,7 @@ impl Timer {
         let mut _old_handler = IrqHandler::empty();
         let current_cpu = curr_cpu_num();
         loop {
-            ksync::lock!(let mut guard = self.lock_irq_lock_policy::<ksync::NoIrqSavePolicy>());
+            ksync::lock!(let mut guard = self.lock_irq_lock_policy::<NoIrqSavePolicy>());
 
             // Users are not allowed to replace and existing handler with a new existing handler.
             // They must explicitly reset the existing handler first.
@@ -630,7 +631,7 @@ impl Timer {
         let current_cpu = curr_cpu_num();
 
         loop {
-            ksync::lock!(let mut guard = self.lock_irq_lock_policy::<ksync::NoIrqSavePolicy>());
+            ksync::lock!(let mut guard = self.lock_irq_lock_policy::<NoIrqSavePolicy>());
             // If there is an IRQ handler in flight, and it is not running on this CPU
             // (meaning it is calling us), wait until it completes before setting the
             // timer.

@@ -4,8 +4,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# mypy: disable-error-code="no-untyped-def,func-returns-value"
-
 import unittest
 from unittest.mock import Mock, patch
 
@@ -79,19 +77,20 @@ CORRECT_SIMPLE_RADVD_CONFIG = """interface wlan0 {
 
 class RadvdTest(unittest.TestCase):
     @patch("libs.commands.shell.ShellCommand.kill")
-    def test_radvd_ikill(self, kill):
+    def test_radvd_ikill(self, kill: Mock) -> None:
         kill.return_value = True
         radvd_mock = Radvd(Mock(), "wlan0")
-        self.assertIsNone(radvd_mock.stop())
+        radvd_mock.stop()
+        kill.assert_called_once()
 
     @patch("libs.commands.shell.ShellCommand.is_alive")
-    def test_radvd_is_alive_True(self, is_alive_mock):
+    def test_radvd_is_alive_True(self, is_alive_mock: Mock) -> None:
         is_alive_mock.return_value = True
         radvd_mock = Radvd(Mock(), "wlan0")
         self.assertTrue(radvd_mock.is_alive())
 
     @patch("libs.commands.shell.ShellCommand.is_alive")
-    def test_radvd_is_alive_False(self, is_alive_mock):
+    def test_radvd_is_alive_False(self, is_alive_mock: Mock) -> None:
         is_alive_mock.return_value = False
         radvd_mock = Radvd(Mock(), "wlan0")
         self.assertFalse(radvd_mock.is_alive())
@@ -99,16 +98,19 @@ class RadvdTest(unittest.TestCase):
     @patch("legacy_access_point.ap_lib.radvd.Radvd._scan_for_errors")
     @patch("legacy_access_point.ap_lib.radvd.Radvd.is_alive")
     def test_wait_for_process_process_alive(
-        self, is_alive_mock, _scan_for_errors_mock
-    ):
+        self, is_alive_mock: Mock, _scan_for_errors_mock: Mock
+    ) -> None:
         is_alive_mock.return_value = True
         _scan_for_errors_mock.return_value = True
         radvd_mock = Radvd(Mock(), "wlan0")
-        self.assertIsNone(radvd_mock._wait_for_process(timeout=2))
+        radvd_mock._wait_for_process(timeout=2)
+        _scan_for_errors_mock.assert_called_once_with(True)
 
     @patch("legacy_access_point.ap_lib.radvd.Radvd.is_alive")
     @patch(SEARCH_FILE)
-    def test_scan_for_errors_is_dead(self, search_file_mock, is_alive_mock):
+    def test_scan_for_errors_is_dead(
+        self, search_file_mock: Mock, is_alive_mock: Mock
+    ) -> None:
         is_alive_mock.return_value = False
         search_file_mock.return_value = False
         radvd_mock = Radvd(Mock(), "wlan0")
@@ -119,8 +121,8 @@ class RadvdTest(unittest.TestCase):
     @patch("legacy_access_point.ap_lib.radvd.Radvd.is_alive")
     @patch(SEARCH_FILE)
     def test_scan_for_errors_exited_prematurely(
-        self, search_file_mock, is_alive_mock
-    ):
+        self, search_file_mock: Mock, is_alive_mock: Mock
+    ) -> None:
         is_alive_mock.return_value = True
         search_file_mock.return_value = True
         radvd_mock = Radvd(Mock(), "wlan0")
@@ -130,15 +132,19 @@ class RadvdTest(unittest.TestCase):
 
     @patch("legacy_access_point.ap_lib.radvd.Radvd.is_alive")
     @patch(SEARCH_FILE)
-    def test_scan_for_errors_success(self, search_file_mock, is_alive_mock):
+    def test_scan_for_errors_success(
+        self, search_file_mock: Mock, is_alive_mock: Mock
+    ) -> None:
         is_alive_mock.return_value = True
         search_file_mock.return_value = False
         radvd_mock = Radvd(Mock(), "wlan0")
-        self.assertIsNone(radvd_mock._scan_for_errors(True))
+        radvd_mock._scan_for_errors(True)
 
     @patch(DELETE_FILE)
     @patch("libs.commands.shell.ShellCommand.write_file")
-    def test_write_configs_simple(self, write_file, delete_file):
+    def test_write_configs_simple(
+        self, write_file: Mock, delete_file: Mock
+    ) -> None:
         basic_radvd_config = RadvdConfig()
         radvd_mock = Radvd(Mock(), "wlan0")
         radvd_mock._write_configs(basic_radvd_config)
@@ -148,7 +154,9 @@ class RadvdTest(unittest.TestCase):
 
     @patch(DELETE_FILE)
     @patch("libs.commands.shell.ShellCommand.write_file")
-    def test_write_configs_complex(self, write_file, delete_file):
+    def test_write_configs_complex(
+        self, write_file: Mock, delete_file: Mock
+    ) -> None:
         complex_radvd_config = RadvdConfig(
             clients=["fe80::c66d:3c75:2cec:1d72", "fe80::c66d:3c75:2cec:1d73"],
             route=radvd_constants.DEFAULT_PREFIX,

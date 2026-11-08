@@ -11,7 +11,6 @@ if (is_host) {
   bazel_host_tool("cmc") {
     bazel_target = ":cmc"
     bazel_output_path = "{{BAZEL_TARGET_OUT_DIR}}/cmc"
-    install_host_tool = true
   }
 
   # TODO(https://fxbug.dev/438572714): Remove once the IDK uses the Bazel atom.
@@ -49,7 +48,6 @@ fuchsia_component_manifest("example_component_manifest") {
 
 fuchsia_component("example_component") {
   cm_label = ":example_component_manifest"
-  deps = [ ":example_component_config_values" ]
   testonly = true
   check_references = false
 }
@@ -59,20 +57,6 @@ fuchsia_unittest_package("cmc_integration_test") {
     ":cmc_integration_test_bin",
     ":example_component",
   ]
-}
-
-fuchsia_structured_config_values("example_component_config_values") {
-  testonly = true
-  cm_label = ":example_component_manifest"
-  values = {
-    my_flag = true
-    my_uint8 = 42
-    my_string = "test_string"
-    my_vector_of_string = [
-      "hello, world!",
-      "hello, again!",
-    ]
-  }
 }
 
 group("tests") {

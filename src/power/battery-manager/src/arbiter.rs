@@ -13,6 +13,12 @@
 //!   present in the mask (or all fields when the mask is empty).
 //! - Closing the connection withdraws all of the governor's votes.
 //!
+//! Debug overrides set through [`ChargeLimitArbiter::set_debug_override`] are cast by
+//! [`DEBUG_OVERRIDE_VOTER`] and take precedence over every governor's votes on the fields they
+//! set, until cleared. [`ChargeLimitArbiter::set_governor_override`] instead overrides one
+//! governor's votes on chosen fields while it is connected, without changing the votes it casts,
+//! so that it still competes with the other governors.
+//!
 //! Each field is arbitrated through its own [`Election`], and the vote that charges least wins:
 //! fields where lower values charge less (`input_current_limit_ua`, `charge_current_limit_ua`,
 //! `float_voltage_uv`, `top_off_duration`) take the minimum active vote, fields where higher values
@@ -29,14 +35,50 @@
 use election::Election;
 use fidl::endpoints::RequestStream;
 use fidl_fuchsia_hardware_power_charger as fcharger;
-use fuchsia_async as fasync;
 use futures::StreamExt;
 use futures::lock::Mutex;
 use governor::{clear_vote_fields, diff_controls, merge_vote};
 use log::{debug, error, info, warn};
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+
+/// Voter that casts debug overrides, which win over every governor's votes. No governor may vote
+/// under this name.
+pub(crate) const DEBUG_OVERRIDE_VOTER: &str = "debug_override";
+
+/// One voter's votes and the overrides of them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct GovernorVotes {
+    /// The votes the voter casts.
+    pub(crate) votes: fcharger::ControlOptions,
+    /// Overrides of its votes set through [`ChargeLimitArbiter::set_governor_override`].
+    pub(crate) overrides: fcharger::ControlOptions,
+}
+
+impl GovernorVotes {
+    /// Returns what the voter contributes to the elections: its votes, with its overrides applied
+    /// while it is `connected`, so that a paused governor has no influence.
+    fn contribution(&self, connected: bool) -> fcharger::ControlOptions {
+        let mut votes = self.votes.clone();
+        if connected {
+            merge_vote(&mut votes, &self.overrides);
+        }
+        votes
+    }
+}
+
+/// A snapshot of the arbitration: each governor's votes, the overrides of every governor's votes,
+/// and the effective values they elect.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Arbitration {
+    /// Votes of the governors that cast any or have overrides, keyed by governor name.
+    pub(crate) governors: BTreeMap<String, GovernorVotes>,
+    /// Debug overrides set through [`ChargeLimitArbiter::set_debug_override`].
+    pub(crate) debug_overrides: fcharger::ControlOptions,
+    /// The values sent to the charger driver.
+    pub(crate) effective: fcharger::ControlOptions,
+}
 
 const INSPECTOR_NODE_ELECTIONS: &str = "elections";
 const INSPECTOR_PROP_OPERATING_MODE: &str = "operating_mode";
@@ -132,22 +174,28 @@ struct ControlVotes {
     top_off_duration: Election<String, i64>,
 }
 
+/// Makes [`DEBUG_OVERRIDE_VOTER`]'s votes on `election` win over every governor's.
+fn overridable<V: Copy>(election: Election<String, V>) -> Election<String, V> {
+    election.with_override_voter(DEBUG_OVERRIDE_VOTER.to_owned())
+}
+
 impl Default for ControlVotes {
     fn default() -> Self {
         Self {
-            operating_mode: Election::new(cmp_operating_mode),
-            input_current_limit_ua: Election::min(),
-            charge_current_limit_ua: Election::min(),
-            float_voltage_uv: Election::min(),
-            charge_term_current_ua: Election::max(),
-            input_voltage_limit_uv: Election::max(),
-            top_off_duration: Election::min(),
+            operating_mode: overridable(Election::new(cmp_operating_mode)),
+            input_current_limit_ua: overridable(Election::min()),
+            charge_current_limit_ua: overridable(Election::min()),
+            float_voltage_uv: overridable(Election::min()),
+            charge_term_current_ua: overridable(Election::max()),
+            input_voltage_limit_uv: overridable(Election::max()),
+            top_off_duration: overridable(Election::min()),
         }
     }
 }
 
 impl ControlVotes {
     /// Returns `voter`'s current votes across all fields.
+    #[cfg(test)]
     fn votes_of(&self, voter: &str) -> fcharger::ControlOptions {
         let mut votes = fcharger::ControlOptions::default();
         macro_rules! get {
@@ -199,10 +247,22 @@ impl ControlVotes {
     }
 }
 
+/// Clears the fields of `options` that `mask` selects, or every field if `mask` is empty, as
+/// `ClearControl` does.
+fn clear_masked(options: &mut fcharger::ControlOptions, mask: &fcharger::ControlOptions) {
+    if *mask == fcharger::ControlOptions::default() {
+        *options = fcharger::ControlOptions::default();
+    } else {
+        clear_vote_fields(options, mask);
+    }
+}
+
 #[derive(Debug, Default)]
 struct ArbiterState {
-    /// Per-field votes keyed by governor name.
+    /// Per-field votes keyed by voter: what each voter contributes.
     votes: ControlVotes,
+    /// Each voter's votes and overrides. Overrides are kept across reconnections.
+    voters: BTreeMap<String, GovernorVotes>,
     /// Governors that currently hold a `Controller` connection.
     connected: BTreeSet<String>,
     /// Constraints last acknowledged by the downstream driver.
@@ -227,32 +287,38 @@ impl ArbiterState {
 
         if to_set != fcharger::ControlOptions::default() {
             info!("ChargeLimitArbiter: applying SetControl to driver: {to_set:?}");
-            let result = driver.set_control(&to_set).await;
-            self.handle_driver_result("SetControl", result)?;
+            // Record the in-flight fields before awaiting so a `withdraw` after `serve_controller`
+            // is cancelled mid-call still clears them from the driver; restored if rejected.
+            let prev_applied = self.applied.clone();
             merge_vote(&mut self.applied, &to_set);
+            let result = driver.set_control(&to_set).await;
+            self.handle_driver_result("SetControl", prev_applied, result)?;
         }
 
         if to_clear != fcharger::ControlOptions::default() {
             info!("ChargeLimitArbiter: applying ClearControl to driver: {to_clear:?}");
-            let result = driver.clear_control(&to_clear).await;
-            self.handle_driver_result("ClearControl", result)?;
+            let prev_applied = self.applied.clone();
             clear_vote_fields(&mut self.applied, &to_clear);
+            let result = driver.clear_control(&to_clear).await;
+            self.handle_driver_result("ClearControl", prev_applied, result)?;
         }
 
         Ok(())
     }
 
-    /// Maps a driver response to the arbiter's result, dropping the driver on any FIDL transport
-    /// error.
+    /// Maps a driver response to the arbiter's result, restoring `prev_applied` if the driver
+    /// rejected the request or dropping the driver on any FIDL transport error.
     fn handle_driver_result(
         &mut self,
         method: &str,
+        prev_applied: fcharger::ControlOptions,
         result: Result<Result<(), fcharger::Error>, fidl::Error>,
     ) -> Result<(), fcharger::Error> {
         match result {
             Ok(Ok(())) => Ok(()),
             Ok(Err(err)) => {
                 warn!("Hardware charger driver rejected {method}: {err:?}");
+                self.applied = prev_applied;
                 Err(err)
             }
             Err(fidl_err) => {
@@ -264,23 +330,50 @@ impl ArbiterState {
         }
     }
 
-    /// Applies `update` to `voter`'s votes and syncs the driver, restoring `voter`'s previous
-    /// votes if the driver rejects the new effective values. If the driver's channel fails, the
-    /// new votes stay cached, as when no driver is bound, and are replayed when one binds.
+    /// Stores `voter`'s votes and overrides, forgetting it once both are empty, and updates its
+    /// contribution to the elections.
+    fn store(&mut self, voter: &str, entry: GovernorVotes) {
+        self.votes.replace(voter, &entry.contribution(self.connected.contains(voter)));
+        if entry == GovernorVotes::default() {
+            self.voters.remove(voter);
+        } else {
+            self.voters.insert(voter.to_owned(), entry);
+        }
+    }
+
+    /// Forgets `governor`'s connection, withdraws its votes, and syncs the driver. Its
+    /// overrides, if any, are kept for its next connection.
+    async fn withdraw(&mut self, governor: &str) {
+        debug!("ChargeLimitArbiter: governor {governor} disconnected");
+        self.connected.remove(governor);
+        let overrides =
+            self.voters.get(governor).map(|voter| voter.overrides.clone()).unwrap_or_default();
+        self.store(governor, GovernorVotes { overrides, ..Default::default() });
+        if let Err(e) = self.sync_driver().await {
+            warn!(
+                "ChargeLimitArbiter: failed to sync driver after governor {governor} \
+                 disconnected: {e:?}"
+            );
+        }
+    }
+
+    /// Applies `update` to `voter`'s votes and overrides and syncs the driver, restoring both if
+    /// the driver rejects the new effective values. If the driver's channel fails, the new votes
+    /// stay cached, as when no driver is bound, and are replayed when one binds.
     async fn update_votes(
         &mut self,
         voter: &str,
-        update: impl FnOnce(&mut fcharger::ControlOptions),
+        update: impl FnOnce(&mut GovernorVotes),
     ) -> Result<(), fcharger::Error> {
-        let prev = self.votes.votes_of(voter);
+        let prev = self.voters.get(voter).cloned().unwrap_or_default();
         let mut next = prev.clone();
         update(&mut next);
-        self.votes.replace(voter, &next);
+        self.store(voter, next);
         if let Err(err) = self.sync_driver().await {
             if self.driver.is_none() {
                 return Ok(());
             }
-            self.votes.replace(voter, &prev);
+            self.store(voter, prev);
             // The failed sync may have partially applied the new effective values (e.g. a
             // `SetControl` relaxing one field succeeded before a `ClearControl` failed), so
             // re-sync to bring the driver back in line with the restored votes.
@@ -290,22 +383,6 @@ impl ArbiterState {
             return Err(err);
         }
         Ok(())
-    }
-}
-
-/// Withdraws `governor` from `arbiter` on a detached task when dropped while `arbiter` is set, so
-/// that a `serve_controller` future dropped mid-stream still withdraws the governor's votes.
-struct WithdrawOnDrop {
-    arbiter: Option<Arc<ChargeLimitArbiter>>,
-    governor: String,
-}
-
-impl Drop for WithdrawOnDrop {
-    fn drop(&mut self) {
-        if let Some(arbiter) = self.arbiter.take() {
-            let governor = std::mem::take(&mut self.governor);
-            fasync::Task::local(async move { arbiter.withdraw(&governor).await }).detach();
-        }
     }
 }
 
@@ -340,26 +417,70 @@ impl ChargeLimitArbiter {
         self.state.lock().await.votes.record_inspect(node);
     }
 
+    /// Returns every governor's votes and overrides, the debug overrides of every governor's votes,
+    /// and the effective values, read together.
+    pub(crate) async fn arbitration(&self) -> Arbitration {
+        let state = self.state.lock().await;
+        let governors = state
+            .voters
+            .iter()
+            .filter(|(voter, _)| *voter != DEBUG_OVERRIDE_VOTER)
+            .map(|(governor, votes)| (governor.clone(), votes.clone()))
+            .collect();
+        let debug_overrides = state
+            .voters
+            .get(DEBUG_OVERRIDE_VOTER)
+            .map(|voter| voter.votes.clone())
+            .unwrap_or_default();
+        Arbitration { governors, debug_overrides, effective: state.votes.effective() }
+    }
+
+    /// Returns `governor`'s votes and overrides.
+    pub(crate) async fn governor_votes(&self, governor: &str) -> GovernorVotes {
+        self.state.lock().await.voters.get(governor).cloned().unwrap_or_default()
+    }
+}
+
+/// Governor votes, cast through each governor's `Controller` connection.
+impl ChargeLimitArbiter {
     /// Serves `governor`'s `Controller` request stream, maintaining its votes until disconnect.
     ///
     /// A governor may hold only one connection at a time: while `governor` is connected, a second
     /// connection is closed with a `ZX_ERR_ALREADY_BOUND` epitaph before any request is served.
     ///
-    /// The votes are withdrawn even if this future is dropped before the stream ends, for example
-    /// when the governor is torn down.
+    /// If this future is dropped before the stream ends, the caller must [`Self::withdraw`] the
+    /// governor, as the governor supervisor does when it tears a governor down.
     pub(crate) async fn serve_controller(
         self: Arc<Self>,
         governor: String,
         mut stream: fcharger::ControllerRequestStream,
     ) -> Result<(), fidl::Error> {
-        if !self.state.lock().await.connected.insert(governor.clone()) {
-            warn!("ChargeLimitArbiter: rejecting duplicate Controller connection from {governor}");
-            stream.control_handle().shutdown_with_epitaph(zx::Status::ALREADY_BOUND);
+        if governor == DEBUG_OVERRIDE_VOTER {
+            warn!("ChargeLimitArbiter: rejecting Controller connection from reserved {governor}");
+            stream.control_handle().shutdown_with_epitaph(zx::Status::ACCESS_DENIED);
             return Ok(());
         }
+        {
+            let mut state = self.state.lock().await;
+            if !state.connected.insert(governor.clone()) {
+                warn!(
+                    "ChargeLimitArbiter: rejecting duplicate Controller connection from {governor}"
+                );
+                stream.control_handle().shutdown_with_epitaph(zx::Status::ALREADY_BOUND);
+                return Ok(());
+            }
+            // Overrides vote for the governor as soon as it connects.
+            if let Some(entry) = state.voters.get(&governor).cloned() {
+                state.store(&governor, entry);
+                if let Err(e) = state.sync_driver().await {
+                    warn!(
+                        "ChargeLimitArbiter: failed to sync driver after {governor} connected: \
+                         {e:?}"
+                    );
+                }
+            }
+        }
         debug!("ChargeLimitArbiter: governor {governor} connected");
-        let mut withdraw_on_drop =
-            WithdrawOnDrop { arbiter: Some(self.clone()), governor: governor.clone() };
 
         let mut stream_err = None;
         while let Some(item) = stream.next().await {
@@ -386,23 +507,13 @@ impl ChargeLimitArbiter {
             }
         }
 
-        withdraw_on_drop.arbiter = None;
         self.withdraw(&governor).await;
         stream_err.map_or(Ok(()), Err)
     }
 
-    /// Forgets `governor`'s connection, withdraws its votes, and syncs the driver.
-    async fn withdraw(&self, governor: &str) {
-        debug!("ChargeLimitArbiter: governor {governor} disconnected");
-        let mut state = self.state.lock().await;
-        state.connected.remove(governor);
-        state.votes.replace(governor, &fcharger::ControlOptions::default());
-        if let Err(e) = state.sync_driver().await {
-            warn!(
-                "ChargeLimitArbiter: failed to sync driver after governor {governor} \
-                 disconnected: {e:?}"
-            );
-        }
+    /// Forgets `governor`'s connection, if any, withdraws its votes, and syncs the driver.
+    pub(crate) async fn withdraw(&self, governor: &str) {
+        self.state.lock().await.withdraw(governor).await;
     }
 
     async fn handle_set_control(
@@ -415,7 +526,7 @@ impl ChargeLimitArbiter {
             return Ok(());
         }
         let mut state = self.state.lock().await;
-        state.update_votes(governor, |votes| merge_vote(votes, options)).await
+        state.update_votes(governor, |entry| merge_vote(&mut entry.votes, options)).await
     }
 
     async fn handle_clear_control(
@@ -425,15 +536,53 @@ impl ChargeLimitArbiter {
     ) -> Result<(), fcharger::Error> {
         validate_clear_options(mask)?;
         let mut state = self.state.lock().await;
-        state
-            .update_votes(governor, |votes| {
-                if *mask == fcharger::ControlOptions::default() {
-                    *votes = fcharger::ControlOptions::default();
-                } else {
-                    clear_vote_fields(votes, mask);
-                }
-            })
-            .await
+        state.update_votes(governor, |entry| clear_masked(&mut entry.votes, mask)).await
+    }
+}
+
+/// Debug overrides, set through `GovernorDebug` over every governor's votes and through `Governor`
+/// over one governor's votes.
+impl ChargeLimitArbiter {
+    /// Overrides `governor`'s votes on the fields `options` sets, as `SetControl` would, until
+    /// cleared; the overrides apply while it is connected and leave the votes it casts unchanged.
+    pub(crate) async fn set_governor_override(
+        &self,
+        governor: &str,
+        options: &fcharger::ControlOptions,
+    ) -> Result<(), fcharger::Error> {
+        validate_set_options(options)?;
+        let mut state = self.state.lock().await;
+        state.update_votes(governor, |entry| merge_vote(&mut entry.overrides, options)).await
+    }
+
+    /// Clears `governor`'s overrides of the fields in `mask`, or of every field if `mask` is
+    /// empty, restoring the votes it casts on them.
+    pub(crate) async fn clear_governor_override(
+        &self,
+        governor: &str,
+        mask: &fcharger::ControlOptions,
+    ) -> Result<(), fcharger::Error> {
+        validate_clear_options(mask)?;
+        let mut state = self.state.lock().await;
+        state.update_votes(governor, |entry| clear_masked(&mut entry.overrides, mask)).await
+    }
+
+    /// Overrides the present fields of `options` over every governor's votes until they are
+    /// cleared with [`Self::clear_debug_override`]. Accepts the same options as `SetControl`.
+    pub(crate) async fn set_debug_override(
+        &self,
+        options: &fcharger::ControlOptions,
+    ) -> Result<(), fcharger::Error> {
+        self.handle_set_control(DEBUG_OVERRIDE_VOTER, options).await
+    }
+
+    /// Clears the debug overrides for the fields present in `mask`, or every debug override if
+    /// `mask` is empty.
+    pub(crate) async fn clear_debug_override(
+        &self,
+        mask: &fcharger::ControlOptions,
+    ) -> Result<(), fcharger::Error> {
+        self.handle_clear_control(DEBUG_OVERRIDE_VOTER, mask).await
     }
 }
 
@@ -447,6 +596,8 @@ mod tests {
 
     const MSC: &str = "msc";
     const THERMAL: &str = "thermal";
+    /// Governor name for tests that don't model a specific governor.
+    const GOVERNOR_A: &str = "governor_a";
 
     const TEST_ICL_HIGH_UA: u32 = 1_500_000;
     const TEST_ICL_LOW_UA: u32 = 500_000;
@@ -536,6 +687,189 @@ mod tests {
 
     fn drain(calls: &StdMutex<Vec<DriverCall>>) -> Vec<DriverCall> {
         calls.lock().unwrap().drain(..).collect()
+    }
+
+    /// Returns the [`GovernorVotes`] of a governor that casts `votes` and has no overrides.
+    fn cast(votes: fcharger::ControlOptions) -> GovernorVotes {
+        GovernorVotes { votes, overrides: fcharger::ControlOptions::default() }
+    }
+
+    /// Verifies that a governor's overrides win over the votes it casts on the fields they set
+    /// while the governor still competes with the others, that the governor keeps voting
+    /// underneath, and that clearing the overrides restores its current votes.
+    #[fuchsia::test]
+    async fn test_governor_override_wins_until_cleared() {
+        let (arbiter, calls, _next_err, _driver_task) = new_arbiter_with_driver().await;
+        let (governor, _governor_task) = connect_client(&arbiter, GOVERNOR_A);
+        let (thermal, _thermal_task) = connect_client(&arbiter, THERMAL);
+        let fcc = |ua| fcharger::ControlOptions {
+            charge_current_limit_ua: Some(ua),
+            ..Default::default()
+        };
+        assert_eq!(governor.set_control(&fcc(TEST_FCC_HIGH_UA)).await.unwrap(), Ok(()));
+        assert_eq!(thermal.set_control(&fcc(TEST_FCC_MID_UA)).await.unwrap(), Ok(()));
+        let _ = drain(&calls);
+
+        // Overriding the governor's vote with a lower one makes it win against thermal.
+        assert_eq!(arbiter.set_governor_override(GOVERNOR_A, &fcc(TEST_FCC_LOW_UA)).await, Ok(()));
+        assert_eq!(drain(&calls), vec![DriverCall::Set(fcc(TEST_FCC_LOW_UA))]);
+        assert_eq!(
+            arbiter.arbitration().await.governors.get(GOVERNOR_A),
+            Some(&GovernorVotes { votes: fcc(TEST_FCC_HIGH_UA), overrides: fcc(TEST_FCC_LOW_UA) })
+        );
+
+        // The governor keeps voting; its votes on the overridden field are recorded but not
+        // applied.
+        let fv = fcharger::ControlOptions {
+            float_voltage_uv: Some(TEST_FV_MID_UV),
+            ..fcc(TEST_FCC_MID_UA)
+        };
+        assert_eq!(governor.set_control(&fv).await.unwrap(), Ok(()));
+        assert_eq!(
+            drain(&calls),
+            vec![DriverCall::Set(fcharger::ControlOptions {
+                float_voltage_uv: Some(TEST_FV_MID_UV),
+                ..Default::default()
+            })]
+        );
+
+        // Clearing the override restores the governor's current vote, which ties thermal's.
+        assert_eq!(
+            arbiter.clear_governor_override(GOVERNOR_A, &fcharger::ControlOptions::default()).await,
+            Ok(())
+        );
+        assert_eq!(drain(&calls), vec![DriverCall::Set(fcc(TEST_FCC_MID_UA))]);
+        assert_eq!(arbiter.arbitration().await.governors.get(GOVERNOR_A), Some(&cast(fv)));
+    }
+
+    /// Verifies that a governor's overrides apply only while the governor is connected, and are
+    /// kept across reconnections.
+    #[fuchsia::test]
+    async fn test_governor_override_applies_while_connected() {
+        let (arbiter, calls, _next_err, _driver_task) = new_arbiter_with_driver().await;
+        let fcc = fcharger::ControlOptions {
+            charge_current_limit_ua: Some(TEST_FCC_LOW_UA),
+            ..Default::default()
+        };
+        assert_eq!(arbiter.set_governor_override(GOVERNOR_A, &fcc).await, Ok(()));
+        assert_eq!(drain(&calls), vec![]);
+
+        for _ in 0..2 {
+            let (client, client_task) = connect_client(&arbiter, GOVERNOR_A);
+            // A request round trip ensures that the connection is being served.
+            assert_eq!(
+                client.set_control(&fcharger::ControlOptions::default()).await.unwrap(),
+                Ok(())
+            );
+            assert_eq!(drain(&calls), vec![DriverCall::Set(fcc.clone())]);
+
+            drop(client);
+            client_task.await;
+            assert_eq!(drain(&calls), vec![DriverCall::Clear(fcc.clone())]);
+            assert_eq!(
+                arbiter
+                    .arbitration()
+                    .await
+                    .governors
+                    .get(GOVERNOR_A)
+                    .map(|votes| votes.overrides.clone()),
+                Some(fcc.clone())
+            );
+        }
+    }
+
+    /// Verifies that governor overrides are validated like governor votes.
+    #[fuchsia::test(logging = false)]
+    async fn test_governor_override_rejects_invalid_requests() {
+        let (arbiter, calls, _next_err, _driver_task) = new_arbiter_with_driver().await;
+        let otg = fcharger::ControlOptions {
+            operating_mode: Some(fcharger::OperatingMode::Otg),
+            ..Default::default()
+        };
+        assert_eq!(
+            arbiter.set_governor_override(GOVERNOR_A, &otg).await,
+            Err(fcharger::Error::NotSupported)
+        );
+        assert_eq!(drain(&calls), vec![]);
+        assert_eq!(arbiter.arbitration().await.governors, BTreeMap::new());
+    }
+
+    /// Verifies that debug overrides win over every governor's votes on the fields they set, last
+    /// until cleared, and that clearing them restores the governors' arbitration.
+    #[fuchsia::test]
+    async fn test_debug_override_wins_until_cleared() {
+        let (arbiter, calls, _next_err, _driver_task) = new_arbiter_with_driver().await;
+        let (client, _client_task) = connect_client(&arbiter, GOVERNOR_A);
+        let fcc = |ua| fcharger::ControlOptions {
+            charge_current_limit_ua: Some(ua),
+            ..Default::default()
+        };
+        let governor_votes = fcharger::ControlOptions {
+            float_voltage_uv: Some(TEST_FV_MID_UV),
+            ..fcc(TEST_FCC_LOW_UA)
+        };
+        assert_eq!(client.set_control(&governor_votes).await.unwrap(), Ok(()));
+        let _ = drain(&calls);
+
+        // An override above the governor's minimum still wins, and leaves other fields alone.
+        assert_eq!(arbiter.set_debug_override(&fcc(TEST_FCC_HIGH_UA)).await, Ok(()));
+        assert_eq!(drain(&calls), vec![DriverCall::Set(fcc(TEST_FCC_HIGH_UA))]);
+        assert_eq!(
+            arbiter.arbitration().await,
+            Arbitration {
+                governors: BTreeMap::from([(GOVERNOR_A.to_owned(), cast(governor_votes.clone()))]),
+                debug_overrides: fcc(TEST_FCC_HIGH_UA),
+                effective: fcharger::ControlOptions {
+                    float_voltage_uv: Some(TEST_FV_MID_UV),
+                    ..fcc(TEST_FCC_HIGH_UA)
+                },
+            }
+        );
+
+        // Governor votes on an overridden field do not change the effective value.
+        assert_eq!(client.set_control(&fcc(TEST_FCC_MID_UA)).await.unwrap(), Ok(()));
+        assert_eq!(drain(&calls), vec![]);
+
+        assert_eq!(
+            arbiter.clear_debug_override(&fcharger::ControlOptions::default()).await,
+            Ok(())
+        );
+        assert_eq!(drain(&calls), vec![DriverCall::Set(fcc(TEST_FCC_MID_UA))]);
+        assert_eq!(
+            arbiter.arbitration().await.debug_overrides,
+            fcharger::ControlOptions::default()
+        );
+    }
+
+    /// Verifies that debug overrides are validated like governor votes.
+    #[fuchsia::test(logging = false)]
+    async fn test_debug_override_rejects_otg() {
+        let (arbiter, calls, _next_err, _driver_task) = new_arbiter_with_driver().await;
+        let otg = fcharger::ControlOptions {
+            operating_mode: Some(fcharger::OperatingMode::Otg),
+            ..Default::default()
+        };
+        assert_eq!(arbiter.set_debug_override(&otg).await, Err(fcharger::Error::NotSupported));
+        assert_eq!(drain(&calls), vec![]);
+    }
+
+    /// Verifies that no governor can vote under the debug override voter's name.
+    #[fuchsia::test(logging = false)]
+    async fn test_rejects_controller_named_debug_override_voter() {
+        let (arbiter, _calls, _next_err, _driver_task) = new_arbiter_with_driver().await;
+        let (client, client_task) = connect_client(&arbiter, DEBUG_OVERRIDE_VOTER);
+        client_task.await;
+        let err = client
+            .set_control(&fcharger::ControlOptions {
+                charge_current_limit_ua: Some(TEST_FCC_LOW_UA),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert_matches!(
+            err,
+            fidl::Error::ClientChannelClosed { epitaph, .. } if epitaph == zx::Status::ACCESS_DENIED
+        );
     }
 
     /// Verifies that partial `SetControl` updates preserve omitted fields and only send changed
@@ -734,43 +1068,6 @@ mod tests {
         );
 
         // The governor can reconnect once its previous connection has closed.
-        let (msc, _msc_task) = connect_client(&arbiter, MSC);
-        assert_eq!(
-            msc.set_control(&fcharger::ControlOptions {
-                float_voltage_uv: Some(TEST_FV_MID_UV),
-                ..Default::default()
-            })
-            .await
-            .unwrap(),
-            Ok(())
-        );
-    }
-
-    /// Verifies that dropping a governor's `serve_controller` future before its stream ends, as
-    /// when the governor is torn down, still withdraws its votes on the driver and lets it
-    /// reconnect.
-    #[fuchsia::test]
-    async fn test_dropped_serve_controller_withdraws_votes() {
-        let (arbiter, calls, _next_err, _driver_task) = new_arbiter_with_driver().await;
-        let (msc, msc_task) = connect_client(&arbiter, MSC);
-        let votes = fcharger::ControlOptions {
-            float_voltage_uv: Some(TEST_FV_LOW_UV),
-            ..Default::default()
-        };
-        assert_eq!(msc.set_control(&votes).await.unwrap(), Ok(()));
-        drain(&calls);
-
-        // Cancel the serving task while the governor's channel is still open.
-        drop(msc_task);
-        while calls.lock().unwrap().is_empty() {
-            fasync::Timer::new(zx::MonotonicDuration::from_millis(10)).await;
-        }
-        assert_eq!(drain(&calls), vec![DriverCall::Clear(votes)]);
-        assert_eq!(
-            arbiter.state.lock().await.votes.votes_of(MSC),
-            fcharger::ControlOptions::default()
-        );
-
         let (msc, _msc_task) = connect_client(&arbiter, MSC);
         assert_eq!(
             msc.set_control(&fcharger::ControlOptions {
@@ -1726,5 +2023,48 @@ mod tests {
                 charge_current_limit_ua: { overridden: false, votes: {} },
             },
         });
+    }
+
+    /// Verifies that if `serve_controller` is cancelled while a `SetControl` call to the driver is
+    /// in flight (as when a governor is paused mid-vote), the subsequent `withdraw` still clears
+    /// the in-flight field on the driver.
+    #[fuchsia::test]
+    async fn test_cancelled_set_control_followed_by_withdraw_clears_driver() {
+        let arbiter = Arc::new(ChargeLimitArbiter::new());
+        let (driver_proxy, mut driver_stream) =
+            fidl::endpoints::create_proxy_and_stream::<fcharger::ControllerMarker>();
+        arbiter.set_driver_controller(Some(driver_proxy)).await;
+
+        let (msc, msc_task) = connect_client(&arbiter, MSC);
+        let vote = fcharger::ControlOptions {
+            charge_current_limit_ua: Some(TEST_FCC_LOW_UA),
+            ..Default::default()
+        };
+        let _set_fut = msc.set_control(&vote);
+
+        // Wait until `serve_controller` has sent `SetControl` to the driver and is suspended
+        // waiting for the reply, then cancel `serve_controller` before answering.
+        let set_responder = match driver_stream.next().await.unwrap().unwrap() {
+            fcharger::ControllerRequest::SetControl { options, responder } => {
+                assert_eq!(options, vote);
+                responder
+            }
+            other => panic!("unexpected driver request: {other:?}"),
+        };
+        drop(msc_task);
+        let _ = set_responder.send(Ok(()));
+
+        let withdraw = arbiter.withdraw(MSC);
+        let clear = async {
+            match driver_stream.next().await.unwrap().unwrap() {
+                fcharger::ControllerRequest::ClearControl { options, responder } => {
+                    assert_eq!(options, vote);
+                    responder.send(Ok(())).unwrap();
+                }
+                other => panic!("unexpected driver request: {other:?}"),
+            }
+        };
+        futures::join!(withdraw, clear);
+        assert_eq!(arbiter.state.lock().await.applied, fcharger::ControlOptions::default());
     }
 }

@@ -10,7 +10,6 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::num::NonZeroU16;
 use std::pin::pin;
-use std::time::Duration;
 
 use fidl_fuchsia_hardware_network as fhardware_network;
 use fidl_fuchsia_net as fnet;
@@ -313,68 +312,33 @@ async fn test_filtering_udp(
 
     const PAYLOAD: &'static str = "Hello World";
 
-    if message_expected {
-        let sender_fut = async {
-            let r = sender_ep_sock
-                .send_to(PAYLOAD.as_bytes(), receiver_ep_addr)
-                .await
-                .expect("sendto failed");
-            assert_eq!(r, PAYLOAD.as_bytes().len());
-        };
-        let receiver_fut = async {
-            let mut buf = [0u8; 1024];
-            let (_, from) =
-                receiver_ep_sock.recv_from(&mut buf[..]).await.expect("recvfrom failed");
-            assert_eq!(from, sender_ep_addr);
-        };
-        let ((), ()) = futures::future::join(sender_fut, receiver_fut)
-            .on_timeout(ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT.after_now(), || {
-                panic!("timed out waiting for positive message")
-            })
-            .await;
+    let sender_fut = async move {
+        let r = sender_ep_sock
+            .send_to(PAYLOAD.as_bytes(), receiver_ep_addr)
+            .await
+            .expect("sendto failed");
+        assert_eq!(r, PAYLOAD.as_bytes().len());
+    };
+    let receiver_fut = async move {
+        let mut buf = [0u8; 1024];
+        let (_, from) = receiver_ep_sock.recv_from(&mut buf[..]).await.expect("recvfrom failed");
+        assert_eq!(from, sender_ep_addr);
+    };
+
+    // Choose a timeout dependent on whether we are looking for a positive
+    // check (message was received) or negative check (message was dropped).
+    let timeout = if message_expected {
+        ASYNC_EVENT_POSITIVE_CHECK_TIMEOUT
     } else {
-        // TODO(https://fxbug.dev/530218539): Remove this workaround once interface-type
-        // filters are installed at startup.
-        // For negative tests, netcfg installs packet filter rules
-        // asynchronously. Early packets may succeed before rules take
-        // effect, so retry until packets are consistently dropped or
-        // until timeout.
-        let deadline = ASYNC_EVENT_NEGATIVE_CHECK_TIMEOUT.after_now();
-        let mut filter_installed = false;
-        while fuchsia_async::MonotonicInstant::now() < deadline {
-            let r = sender_ep_sock
-                .send_to(PAYLOAD.as_bytes(), receiver_ep_addr)
-                .await
-                .expect("sendto failed");
-            assert_eq!(r, PAYLOAD.as_bytes().len());
+        ASYNC_EVENT_NEGATIVE_CHECK_TIMEOUT
+    };
 
-            let mut buf = [0u8; 1024];
-            let received = receiver_ep_sock
-                .recv_from(&mut buf[..])
-                .on_timeout(Duration::from_millis(100).after_now(), || {
-                    let kind = std::io::ErrorKind::TimedOut;
-                    Err(std::io::Error::new(kind, "timed out"))
-                })
-                .await;
+    let message_received = futures::future::join(sender_fut, receiver_fut)
+        .map(|((), ())| true)
+        .on_timeout(timeout.after_now(), || false)
+        .await;
 
-            match received {
-                Ok((_, from)) => {
-                    assert_eq!(from, sender_ep_addr);
-                    // Packet made it through (filter rules not yet active).
-                    // Backoff and retry.
-                    let backoff = Duration::from_millis(50);
-                    fuchsia_async::Timer::new(backoff.after_now()).await;
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                    // Packet was dropped as expected by packet filter.
-                    filter_installed = true;
-                    break;
-                }
-                Err(e) => panic!("recvfrom unexpected error: {e:?}"),
-            }
-        }
-        assert!(filter_installed, "timed out waiting for packet filter rules to drop packets");
-    }
+    assert_eq!(message_received, message_expected);
 
     // Wait for orderly shutdown of the test realms to complete before allowing
     // test interfaces to be cleaned up.

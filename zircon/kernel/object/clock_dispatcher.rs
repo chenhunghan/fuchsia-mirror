@@ -6,6 +6,7 @@
 
 use crate::arch_rs::InterruptDisableGuard;
 use crate::counters::define_kcounter;
+use crate::ksync_kernel::TrackedCriticalMutex;
 use crate::platform_rs::timer::{
     current_boot_time, current_mono_time, timer_current_boot_ticks, timer_current_mono_ticks,
     timer_get_ticks_to_time_ratio,
@@ -18,8 +19,8 @@ use affine::{Exact, Ratio, Round, Saturate, Transform};
 use concurrent::{SeqLock, SeqLockPayload, WriteGuard};
 use core::mem::MaybeUninit;
 use core::ptr::NonNull;
-use fbl::{Canary, Name, RefPtr};
-use ksync::{KMutex, RawCriticalMutex, guarded};
+use fbl::{Canary, RefPtr};
+use ksync::{KMutex, guarded};
 use page::SIZE as PAGE_SIZE;
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zerocopy::{FromBytes, Immutable, IntoBytes};
@@ -35,9 +36,9 @@ use zx_types::{
     zx_clock_update_args_v2_t, zx_rights_t, zx_time_t,
 };
 
-use super::KernelHandle;
 use super::clock_dispatcher_ffi::cpp_clock_dispatcher_create;
 use super::dispatcher::DispatcherOps;
+use super::{KernelHandle, Name};
 
 use object_constants_rs as object_constants;
 
@@ -641,7 +642,7 @@ pub struct ClockDispatcherState {
     canary: Canary<{ fbl::magic(b"CLOK") }>,
 
     #[mutex]
-    lock: KMutex<RawCriticalMutex>,
+    lock: KMutex<TrackedCriticalMutex>,
 
     local_storage: zr::Opaque<MaybeUninit<ClockTransformation>>,
     vmo: Option<RefPtr<VmObject>>,
@@ -761,7 +762,7 @@ impl ClockDispatcher {
     pub const MAPPED_SIZE: u64 = PAGE_SIZE as u64;
 
     /// Returns the default rights for a clock handle.
-    pub const fn default_rights() -> zx_rights_t {
+    const fn default_rights() -> zx_rights_t {
         ZX_DEFAULT_CLOCK_RIGHTS
     }
 

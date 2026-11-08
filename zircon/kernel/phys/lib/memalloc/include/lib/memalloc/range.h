@@ -212,9 +212,39 @@ std::span<Range> AsRanges(std::span<zbi_mem_range_t> ranges);
 // Gives a custom, normalized view of a container of ranges, `Ranges`.
 // `NormalizeTypeFn` is a callable with signature `std::optional<Type>(Type)`:
 // std::nullopt indicates that ranges of this type should not be passed to the
-// callback; otherwise, the returned type is indicates how the input type should
+// callback; otherwise, the returned type indicates how the input type should
 // be normalized. Adjacent ranges of the same normalized type are merged before
 // being passed to the callback.
+//
+// The input ranges are expected to be sorted and mutually disjoint. Ranges of
+// zero size are skipped and never passed to the callback (nor do they break up
+// the merging of their neighbors).
+//
+// The callback is permitted to mutate `ranges` (e.g., allocating from a
+// `memalloc::Pool` while iterating over its normalized RAM ranges) provided
+// that `ranges` remains sorted and disjoint. After each callback, iteration
+// resumes from the end of the range just passed to the callback, re-seeking
+// from `ranges.begin()`. Consequently:
+//
+//  * Mutations below the resume address are never observed; a range that now
+//    straddles the resume address is clipped to begin at it. Mutations at or
+//    above the resume address are observed.
+//
+//  * If the callback changes the (normalized) types of ranges at or above the
+//    resume address, the range passed to the next callback may be adjacent to
+//    and share a normalized type with the previous one; merging only applies
+//    to ranges visited between two consecutive callbacks.
+//
+//  * `normalize_type` may be invoked more than once on the same range, and so
+//    should be a pure function of its input.
+//
+//  * `Ranges` must support multiple passes (i.e., be iterable via at least a
+//    forward iterator).
+//
+//  * As every callback triggers a re-seek, the cost of iteration is quadratic
+//    in the number of ranges in the worst case. This is acceptable for the
+//    expected container sizes (e.g., tens to low hundreds of ranges in a
+//    `memalloc::Pool`).
 //
 // The callback itself is expected to return a boolean indicating whether it
 // should continue to be called.
@@ -224,28 +254,54 @@ constexpr void NormalizeRanges(Ranges&& ranges, RangeCallback&& cb,
   using iterator = typename std::decay_t<Ranges>::iterator;
   using value_type = typename std::iterator_traits<iterator>::value_type;
   static_assert(std::is_convertible_v<value_type, const Range&>);
+  // `ranges` is re-traversed from `begin()` after each callback.
+  static_assert(std::is_base_of_v<std::forward_iterator_tag,
+                                  typename std::iterator_traits<iterator>::iterator_category>,
+                "NormalizeRanges() requires a multi-pass (forward) iterator");
 
   static_assert(std::is_invocable_r_v<bool, RangeCallback, const Range&>);
   static_assert(std::is_invocable_r_v<std::optional<Type>, NormalizeTypeFn, Type>);
 
   std::optional<Range> prev;
-  for (const Range& range : ranges) {
-    std::optional<Type> normalized_type = normalize_type(range.type);
-    if (!normalized_type) {
+  uint64_t min_addr = 0;
+  for (auto it = ranges.begin(); it != ranges.end();) {
+    Range current = *it;
+    if (current.size == 0 || current.end() <= min_addr) {
+      ++it;
       continue;
     }
-    Range normalized = range;
-    normalized.type = *normalized_type;
-    if (!prev) {
-      prev = normalized;
-    } else if (prev->end() == normalized.addr && prev->type == normalized.type) {
-      prev->size += normalized.size;
-    } else {
-      if (!cb(*prev)) {
-        return;
-      }
-      prev = normalized;
+    if (current.addr < min_addr) {
+      current.size -= min_addr - current.addr;
+      current.addr = min_addr;
     }
+
+    std::optional<Type> normalized_type = normalize_type(current.type);
+    if (!normalized_type) {
+      ++it;
+      continue;
+    }
+    current.type = *normalized_type;
+    if (!prev) {
+      prev = current;
+      ++it;
+      continue;
+    }
+    if (prev->end() == current.addr && prev->type == current.type) {
+      prev->size += current.size;
+      ++it;
+      continue;
+    }
+
+    // Resume from the end of what has been emitted, rather than from
+    // `current.addr`: the callback may cause ranges in the gap
+    // [prev->end(), current.addr) to newly match `normalize_type`. This also
+    // ensures that `min_addr` strictly increases, guaranteeing termination.
+    min_addr = prev->end();
+    if (!cb(*prev)) {
+      return;
+    }
+    prev = std::nullopt;
+    it = ranges.begin();
   }
   if (prev) {
     cb(*prev);

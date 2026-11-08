@@ -24,6 +24,7 @@ pub enum RecordedInspectType {
     StringArray(StringArrayProperty),
     UintArray(UintArrayProperty),
     LazyNode(LazyNode),
+    BlobProperty(BlobProperty),
     Boxed(Box<dyn InspectType>),
 }
 

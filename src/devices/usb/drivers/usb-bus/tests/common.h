@@ -11,6 +11,9 @@
 #include <lib/async/dispatcher.h>
 #include <lib/fit/function.h>
 
+#include <optional>
+#include <utility>
+
 #include <fbl/ref_counted.h>
 #include <usb/request-cpp.h>
 
@@ -55,15 +58,18 @@ class FakeHci : public ddk::UsbHciProtocol<FakeHci>,
 
   virtual zx_status_t UsbHciConfigureHub(uint32_t device_id, usb_speed_t speed,
                                          const usb_hub_descriptor_t* desc, bool multi_tt) {
-    return ZX_ERR_NOT_SUPPORTED;
+    configured_hub_id_ = device_id;
+    return ZX_OK;
   }
 
   virtual zx_status_t UsbHciHubDeviceAdded(uint32_t device_id, uint32_t port, usb_speed_t speed) {
-    return ZX_ERR_NOT_SUPPORTED;
+    hub_device_added_ = {device_id, port};
+    return ZX_OK;
   }
 
   virtual zx_status_t UsbHciHubDeviceRemoved(uint32_t device_id, uint32_t port) {
-    return ZX_ERR_NOT_SUPPORTED;
+    hub_device_removed_ = {device_id, port};
+    return ZX_OK;
   }
 
   virtual zx_status_t UsbHciHubDeviceReset(uint32_t device_id, uint32_t port) {
@@ -142,6 +148,15 @@ class FakeHci : public ddk::UsbHciProtocol<FakeHci>,
     return hci_interface_client_;
   }
 
+  // Arguments of the most recent banjo hub calls, as (device_id, port).
+  std::optional<uint32_t> configured_hub_id() const { return configured_hub_id_; }
+  std::optional<std::pair<uint32_t, uint32_t>> hub_device_added() const {
+    return hub_device_added_;
+  }
+  std::optional<std::pair<uint32_t, uint32_t>> hub_device_removed() const {
+    return hub_device_removed_;
+  }
+
  private:
   async_dispatcher_t* dispatcher_;
   bool should_return_empty_ = false;
@@ -152,6 +167,9 @@ class FakeHci : public ddk::UsbHciProtocol<FakeHci>,
   uint8_t selected_configuration_ = 0;
   usb_hci_protocol_t proto_;
   uint8_t reset_endpoint_ = 0;
+  std::optional<uint32_t> configured_hub_id_;
+  std::optional<std::pair<uint32_t, uint32_t>> hub_device_added_;
+  std::optional<std::pair<uint32_t, uint32_t>> hub_device_removed_;
   fit::function<zx_status_t(uint32_t device_id, const usb_endpoint_descriptor_t* ep_desc,
                             const usb_ss_ep_comp_descriptor_t* ss_com_desc, bool enable)>
       enable_endpoint_hook_;

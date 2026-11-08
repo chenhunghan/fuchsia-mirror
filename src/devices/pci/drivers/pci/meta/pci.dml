@@ -3,11 +3,10 @@
 // found in the LICENSE file.
 {
     name: "bus-pci",
-    include: [ "//sdk/lib/driver/compat/compat.shard.cml" ],
     program: {
-        compat: "driver/bus-pci.so",
         colocate: "true",
-        bind: { banjo: "fuchsia.pci.BIND_PROTOCOL.ROOT" },
+        default_dispatcher_opts: [ "allow_sync_calls" ],
+        bind: { service: "fuchsia.hardware.pci.root.RootService" },
     },
     capabilities: [
         { service: "fuchsia.hardware.pci.Service" },
@@ -17,6 +16,22 @@
         {
             name: "default",
             service: "fuchsia.hardware.pci.BoardConfiguration",
+            generate_bind_rule: false,
+            availability: "optional",
+        },
+        {
+            name: "default",
+            service: "fuchsia.hardware.pci.root.RootService",
+            generate_bind_rule: false,
+        },
+        {
+            name: "default",
+            service: "fuchsia.hardware.pci.root.ConfigService",
+            availability: "optional",
+            generate_bind_rule: false,
+        },
+        {
+            protocol: "fuchsia.driver.framework.CompositeNodeManager",
             generate_bind_rule: false,
         },
     ],

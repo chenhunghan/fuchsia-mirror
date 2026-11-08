@@ -6,6 +6,8 @@
 #include <lib/fit/defer.h>
 #include <lib/trace/event.h>
 
+#include <vector>
+
 #include "src/devices/usb/drivers/dwc3/dwc3-metrics.h"
 #include "src/devices/usb/drivers/dwc3/dwc3-regs.h"
 #include "src/devices/usb/drivers/dwc3/dwc3-types.h"
@@ -208,7 +210,19 @@ void Dwc3::HandleIrq(async_dispatcher_t* dispatcher, async::IrqBase* irq, zx_sta
                      const zx_packet_interrupt_t* interrupt) {
   TRACE_DURATION("dwc3", "Dwc3::HandleIrq", "status", status);
 
+  // Not a hardware interrupt (e.g. the wait was canceled during shutdown): don't touch MMIO, ack,
+  // or count it.
+  if (status != ZX_OK) {
+    if (status != ZX_ERR_CANCELED) {
+      fdf::error("dwc3: irq wait failed: {}", zx_status_get_string(status));
+    }
+    return;
+  }
+
+  metrics_.IncrementIrqCount();
+
   if (!controller_started_ || !power_on_ || disconnect_in_flight_) {
+    metrics_.IncrementUnhandledIrqCount();
     // Ack but otherwise ignore interrupts that arrive while client has stopped us, while a
     // disconnect drain is in flight, or while the core is powered down. If the core is still
     // powered on, ensure event interrupts are masked to prevent level-triggered interrupts from
@@ -242,6 +256,9 @@ void Dwc3::HandleIrq(async_dispatcher_t* dispatcher, async::IrqBase* irq, zx_sta
         .set_EVNT_HANDLER_BUSY(1)
         .set_EVNTCOUNT(event_bytes)
         .WriteTo(mmio);
+  }
+  if (total_processed == 0) {
+    metrics_.IncrementUnhandledIrqCount();
   }
   metrics_.UpdateMaxEventBatch(total_processed);
 
@@ -311,18 +328,24 @@ void Dwc3::StopEvents() {
 
   // Clear GEVNTCOUNT to release any pending level-triggered interrupts, ending any
   // in-flight DEPSTRTXFER resources that completed before the event ring was stopped.
+  const auto find_endpoint = [this](uint8_t ep_num) -> Endpoint* {
+    if (ep_num == kEp0Out) {
+      return &ep0_.out;
+    }
+    if (ep_num == kEp0In) {
+      return &ep0_.in;
+    }
+    UserEndpoint* uep = get_user_endpoint(ep_num);
+    return (uep != nullptr) ? &uep->ep : nullptr;
+  };
+
+  std::vector<uint32_t> pending_events;
   uint32_t event_bytes;
   while ((event_bytes = GEVNTCOUNT::Get(0).ReadFrom(mmio).EVNTCOUNT()) > 0) {
-    uint32_t event_count = event_bytes / sizeof(uint32_t);
+    const uint32_t event_count = event_bytes / sizeof(uint32_t);
     if (event_fifo_.TotalSlots() > 0) {
-      for (uint32_t event : event_fifo_.Read(event_count)) {
-        if (link_connected_ && !(event & DEPEVT_NON_EP) && DEPEVT_TYPE(event) == DEPEVT_CMD_CMPLT &&
-            DEPEVT_CMD_CMPLT_CMD_TYPE(event) == DEPCMD::DEPSTRTXFER && DEPEVT_STATUS(event) == 0) {
-          Endpoint stale_ep(DEPEVT_PHYS_EP(event));
-          stale_ep.rsrc_id = DEPEVT_CMD_CMPLT_RSRC_ID(event);
-          CmdEpEndTransfer(stale_ep, /*cmd_ioc=*/false);
-        }
-      }
+      const std::vector<uint32_t> batch = event_fifo_.Read(event_count);
+      pending_events.insert(pending_events.end(), batch.begin(), batch.end());
       event_fifo_.Advance(event_count);
     }
     GEVNTCOUNT::Get(0)
@@ -332,7 +355,22 @@ void Dwc3::StopEvents() {
         .WriteTo(mmio);
   }
 
-  if (ep0_.out.stale_starts_to_end > 0 || ep0_.in.stale_starts_to_end > 0) {
+  for (auto it = pending_events.rbegin(); it != pending_events.rend(); ++it) {
+    const uint32_t event = *it;
+    if (!(event & DEPEVT_NON_EP) && DEPEVT_TYPE(event) == DEPEVT_CMD_CMPLT &&
+        DEPEVT_CMD_CMPLT_CMD_TYPE(event) == DEPCMD::DEPSTRTXFER && DEPEVT_STATUS(event) == 0) {
+      if (Endpoint* ep = find_endpoint(DEPEVT_PHYS_EP(event));
+          ep != nullptr && ep->stale_starts_to_end > 0) {
+        --ep->stale_starts_to_end;
+        CmdEpEndTransfer(*ep, DEPEVT_CMD_CMPLT_RSRC_ID(event), /*cmd_ioc=*/false);
+        if (ep->stale_starts_to_end == 0 && ep->stale_cancels_to_ignore == 0 && !ep->enabled) {
+          EpEnable(*ep, false);
+        }
+      }
+    }
+  }
+
+  if (ep0_.out.queued_trbs > 0 || ep0_.in.queued_trbs > 0) {
     ep0_.shared_fifo.SkipTrbs(ep0_.out.queued_trbs + ep0_.in.queued_trbs);
     ep0_.out.queued_trbs = 0;
     ep0_.in.queued_trbs = 0;

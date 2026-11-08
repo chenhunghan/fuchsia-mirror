@@ -17,6 +17,8 @@ that expose information.
 * [Codelab](codelab.md): A full codelab in C++ and Rust.
 * API reference for [C++][cpp-ref] and [Rust][rust-ref].
 * [Health checks]: Describes the health check subsystem.
+* [Best practices](#best-practices): Recommendations for hierarchy design and
+  Virtual Memory Object (VMO) sizing.
 
 ## Concepts
 
@@ -99,6 +101,9 @@ their primary or root tree as `out/diagnostics/root.inspect`.
   The [health][cpp-5] feature supports exposing structured health information
   in a format known by health checking tools.
 
+  The [stats][cpp-create-stats] feature supports exposing runtime Inspect
+  allocation metrics and buffer utilization.
+
   The [bounded list][cpp-7] feature supports recording rolling event histories
   in fixed-capacity FIFO node buffers.
 
@@ -173,6 +178,9 @@ their primary or root tree as `out/diagnostics/root.inspect`.
 
   The [health][rust-5] module supports exposing structured health information
   in a format known by health checking tools.
+
+  The [stats][rust-stats] module supports exposing runtime Inspect
+  allocation metrics and buffer utilization.
 
   The [contrib][rust-7] crate provides `BoundedListNode`, `inspect_log!`, and
   time utilities for timestamped event logging.
@@ -297,6 +305,128 @@ moniker.
 Important: Keep all Inspect metrics scoped to the component moniker that owns
 and produces the data.
 
+### Size the Inspect VMO to prevent silent allocation failures {:#size-the-inspect-vmo-to-prevent-silent-allocation-failures}
+
+Inspect hierarchies are stored in a mapped [VMO][vmo-concept] using the
+buddy-allocated [Inspect VMO format][Inspect File Format]. By default, both
+the C++ and Rust libraries allocate a maximum VMO size of 256 KiB (262,144
+bytes). Memory is committed in 4 KiB pages dynamically as nodes and properties
+are written to the hierarchy, up to this maximum limit.
+
+#### Silent allocation failures {:#silent-allocation-failures}
+
+If an Inspect tree exceeds its configured maximum VMO capacity, or if memory
+fragmentation prevents allocating a contiguous block of the requested size, the
+Inspect library fails silently by design:
+
+* Creating new child nodes or properties fails and returns no-op objects (or
+  stores a truncated prefix when a multi-extent string or bytes payload runs
+  out of space on a later extent).
+
+* Appending to bounded lists (such as `BoundedListNode`) still evicts the
+  oldest entry when at capacity before attempting to allocate the new entry,
+  and can drop the new entry or leave an empty or partially populated entry
+  node if space runs out while recording its properties.
+
+* In-place mutations on existing numeric properties, boolean properties,
+  numeric arrays, and histograms continue to function normally.
+
+* Updating a string property or string-array slot retains the previous value
+  if the initial string block or its first overflow extent cannot be
+  allocated, or stores a truncated prefix if a later overflow extent fails.
+  Updating a bytes property frees its old extents first, leaving an empty
+  value if the first extent fails to allocate or a truncated prefix if a later
+  extent fails.
+
+* The component does not crash or panic. Failed node and property creation is
+  not logged; the Rust library logs an error only when `StringProperty::set`
+  fails to allocate the initial string block or its first overflow extent, or
+  when `BytesProperty::set` fails to allocate its first extent.
+
+Note: Inspect prioritizes application reliability over diagnostic telemetry. A
+component must never crash or degrade its primary business logic because
+diagnostic data exceeds available buffer space.
+
+However, silent allocation failures mean that missing metrics or truncated
+historical event logs can go unnoticed during development and troubleshooting.
+
+#### Detecting allocation failures with fuchsia.inspect.Stats {:#detecting-allocation-failures}
+
+You can monitor Inspect memory usage and detect dropped allocations by serving
+the `fuchsia.inspect.Stats` lazy node at the root of your hierarchy:
+
+* **C++**: Call [`CreateStatsNode()`][cpp-create-stats] on your `Inspector`.
+
+* **Rust**: Call [`component::serve_inspect_stats()`][rust-serve-stats] to
+  instrument the singleton component inspector, or on a custom `Inspector`
+  call [`record_lazy_stats()`][rust-record-stats].
+
+When you query the component with [`ffx inspect show`][ffx-inspect-show], the
+`fuchsia.inspect.Stats` node displays real-time allocation metrics:
+
+```posix-terminal
+ffx inspect show <moniker>:root/fuchsia.inspect.Stats
+```
+
+This command outputs metrics similar to the following:
+
+```none {:.devsite-disable-click-to-copy}
+fuchsia.inspect.Stats:
+  allocated_blocks = 142
+  current_size = 36864
+  deallocated_blocks = 28
+  failed_allocations = 0
+  maximum_size = 262144
+  peak_bytes_requested = 34560
+  total_dynamic_children = 1
+  utilization_per_ten_k = 1406
+```
+
+A non-zero value for `failed_allocations` indicates that Inspect has exhausted
+its VMO capacity and dropped data. `peak_bytes_requested` reports the
+high-watermark of concurrently requested bytes. Requests that failed still
+count toward it and are never released, so repeated failed allocations
+inflate the value beyond the true peak demand. You can use this value as a
+hint for how large the Inspector VMO would have needed to be to avoid
+failing allocations.
+
+Note: `peak_bytes_requested` is a sizing hint, not a guarantee. Because it
+tracks requested block sizes without accounting for buddy allocator
+fragmentation or 4 KiB page boundaries, configure your VMO with additional
+headroom above this value.
+
+#### Sizing recommendations and configuration {:#sizing-recommendations-and-configuration}
+
+When designing component diagnostics:
+
+* **Estimate buffer requirements**: If your component records historical event
+  logs using bounded collections (such as `BoundedListNode`), calculate the
+  expected memory footprint (entry count &times; average entry size) or inspect
+  `peak_bytes_requested` in `fuchsia.inspect.Stats`, and ensure the VMO is
+  sized with adequate headroom.
+
+* **Configure custom VMO capacity**: When 256 KiB is insufficient, initialize
+  the Inspector with an explicit size:
+
+  * **C++**: Construct an `inspect::Inspector` from an
+    `inspect::InspectSettings` struct with `maximum_size` set. To publish it
+    through `inspect::ComponentInspector`, pass that `Inspector` in the
+    `inspector` field of `inspect::PublishOptions`.
+
+  * **Rust**: Call
+    `fuchsia_inspect::component::init_inspector_with_size(max_size)` before
+    any other use of the `component` singleton (`inspector()`, `health()`, or
+    `serve_inspect_stats()`), or configure `InspectorConfig` via
+    `Inspector::new(InspectorConfig::default().size(max_size))`.
+
+* **Use lazy nodes for large or dynamic datasets**: Offload large collections
+  (such as routing tables or detailed cache entries) to
+  [lazy nodes][quickstart-dynamic-values] so they are computed on demand rather
+  than permanently occupying VMO space.
+
+For concrete code samples on configuring VMO size and serving stats, see
+[Managing VMO size and capacity][quickstart-vmo-size] in the Quickstart guide.
+
 <!-- Reference links -->
 
 [cpp-1]: /zircon/system/ulib/inspect/include/lib/inspect/cpp/inspect.h
@@ -319,8 +449,15 @@ and produces the data.
 [Validator Architecture]: /docs/reference/diagnostics/inspect/validator/README.md
 [Health checks]: /docs/development/diagnostics/inspect/health.md
 [ffx-inspect]: https://fuchsia.dev/reference/tools/sdk/ffx.md#inspect
-[ffx-inspect-show]: https://fuchsia.dev/reference/tools/sdk/ffx.md#show_3
+[ffx-inspect-show]: https://fuchsia.dev/reference/tools/sdk/ffx.md#ffx_inspect_show
 [ffx-target-snapshot]: https://fuchsia.dev/reference/tools/sdk/ffx.md#snapshot
 [selectors]: /docs/reference/diagnostics/selectors.md
 [cpp-ref]: https://fuchsia-docs.firebaseapp.com/cpp/inspect/index.html
 [rust-ref]: https://fuchsia-docs.firebaseapp.com/rust/fuchsia_inspect/index.html
+[vmo-concept]: /docs/reference/kernel_objects/vm_object.md
+[quickstart-dynamic-values]: /docs/development/diagnostics/inspect/quickstart.md#dynamic-values
+[quickstart-vmo-size]: /docs/development/diagnostics/inspect/quickstart.md#managing-vmo-size-and-capacity
+[rust-stats]: https://fuchsia-docs.firebaseapp.com/rust/fuchsia_inspect/stats/index.html
+[rust-serve-stats]: https://fuchsia-docs.firebaseapp.com/rust/fuchsia_inspect/component/fn.serve_inspect_stats.html
+[rust-record-stats]: https://fuchsia-docs.firebaseapp.com/rust/fuchsia_inspect/stats/trait.InspectorExt.html#tymethod.record_lazy_stats
+[cpp-create-stats]: /zircon/system/ulib/inspect/include/lib/inspect/cpp/inspector.h

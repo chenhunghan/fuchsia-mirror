@@ -235,7 +235,9 @@ _SPEC = service_profile.ServiceProfileSpec(
 
 _MANAGER = service_profile.ServiceProfileManager(RbeProfile, _SPEC)
 
+WorkspaceSymlink = service_profile.WorkspaceSymlink
 resolve_paths = _MANAGER.resolve_paths
+workspace_symlinks = _MANAGER.workspace_symlinks
 main = _MANAGER.main
 
 

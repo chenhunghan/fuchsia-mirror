@@ -49,7 +49,10 @@
     ],
     use: [
         {
-            protocol: "fuchsia.component.Realm",
+            protocol: [
+                "fuchsia.component.Realm",
+                "fuchsia.component.runtime.Capabilities",
+            ],
             from: "framework",
         },
         {

@@ -220,3 +220,83 @@ TEST(MouseTest, DeviceType) {
   hid_input_report::Mouse device;
   ASSERT_EQ(hid_input_report::DeviceType::kMouse, device.GetDeviceType());
 }
+
+TEST(MouseTest, CreateDescriptorDoesNotWriteOutOfBounds) {
+  size_t descriptor_size;
+  const uint8_t* raw_desc = get_scroll_mouse_report_desc(&descriptor_size);
+  hid::DeviceDescriptor* dev_desc = nullptr;
+  ASSERT_EQ(hid::ParseResult::kParseOk,
+            hid::ParseReportDescriptor(raw_desc, descriptor_size, &dev_desc));
+  auto free_descriptor = fit::defer([dev_desc]() { hid::FreeDeviceDescriptor(dev_desc); });
+
+  hid_input_report::Mouse mouse;
+  ASSERT_EQ(hid_input_report::ParseResult::kOk, mouse.ParseReportDescriptor(dev_desc->report[0]));
+
+  hid_input_report::CanaryArena arena;
+  fuchsia_input_report::wire::DeviceDescriptor descriptor(arena);
+  ASSERT_EQ(hid_input_report::ParseResult::kOk, mouse.CreateDescriptor(arena, descriptor));
+  EXPECT_EQ(8U, descriptor.mouse().input().buttons().size());
+  arena.VerifyNoOutOfBoundsWrites();
+}
+
+TEST(MouseTest, ZeroButtonsTest) {
+  hid::ReportField field = {};
+  field.attr.usage = hid::USAGE(hid::usage::Page::kGenericDesktop, hid::usage::GenericDesktop::kX);
+  std::vector<hid::ReportField> fields(1, field);
+
+  hid::ReportDescriptor descriptor = {};
+  descriptor.input_count = 1;
+  descriptor.input_byte_sz = 1;
+  descriptor.input_fields = fields.data();
+
+  hid_input_report::Mouse mouse;
+  ASSERT_EQ(hid_input_report::ParseResult::kOk, mouse.ParseReportDescriptor(descriptor));
+
+  hid_input_report::TestDescriptorAllocator allocator;
+  fuchsia_input_report::wire::DeviceDescriptor desc(allocator);
+  ASSERT_EQ(hid_input_report::ParseResult::kOk, mouse.CreateDescriptor(allocator, desc));
+  EXPECT_TRUE(desc.has_mouse());
+  EXPECT_TRUE(desc.mouse().has_input());
+  EXPECT_TRUE(desc.mouse().input().has_buttons());
+  EXPECT_EQ(0U, desc.mouse().input().buttons().size());
+}
+
+TEST(MouseTest, MaxButtonsTest) {
+  constexpr uint32_t kMaxButtons = fuchsia_input_report::wire::kMouseMaxNumButtons;
+
+  hid::ReportField field = {};
+  field.attr.usage = hid::USAGE(hid::usage::Page::kButton, 1);
+  std::vector<hid::ReportField> fields(kMaxButtons, field);
+
+  hid::ReportDescriptor descriptor = {};
+  descriptor.input_count = kMaxButtons;
+  descriptor.input_byte_sz = kMaxButtons;
+  descriptor.input_fields = fields.data();
+
+  hid_input_report::Mouse mouse;
+  ASSERT_EQ(hid_input_report::ParseResult::kOk, mouse.ParseReportDescriptor(descriptor));
+
+  hid_input_report::TestDescriptorAllocator allocator;
+  fuchsia_input_report::wire::DeviceDescriptor desc(allocator);
+  ASSERT_EQ(hid_input_report::ParseResult::kOk, mouse.CreateDescriptor(allocator, desc));
+  EXPECT_TRUE(desc.has_mouse());
+  EXPECT_TRUE(desc.mouse().has_input());
+  EXPECT_TRUE(desc.mouse().input().has_buttons());
+  EXPECT_EQ(kMaxButtons, desc.mouse().input().buttons().size());
+}
+
+TEST(MouseTest, OverMaxButtonsTest) {
+  constexpr uint32_t kOverMaxButtons = 1 + fuchsia_input_report::wire::kMouseMaxNumButtons;
+
+  hid::ReportField field = {};
+  field.attr.usage = hid::USAGE(hid::usage::Page::kButton, 1);
+  std::vector<hid::ReportField> fields(kOverMaxButtons, field);
+
+  hid::ReportDescriptor descriptor = {};
+  descriptor.input_count = kOverMaxButtons;
+  descriptor.input_byte_sz = kOverMaxButtons;
+  descriptor.input_fields = fields.data();
+
+  hid_input_report::Mouse mouse;
+  ASSERT_EQ(hid_input_report::ParseResult::kTooManyItems, mouse.ParseReportDescriptor(descriptor));
+}

@@ -4,10 +4,13 @@
 
 #include "src/developer/forensics/feedback/annotations/data_register.h"
 
-#include <lib/fit/defer.h>
 #include <lib/syslog/cpp/macros.h>
 
+#include <format>
+
+#include "re2/re2.h"
 #include "src/developer/forensics/feedback/annotations/types.h"
+#include "src/developer/forensics/utils/regexp.h"
 #include "src/lib/files/file.h"
 #include "src/lib/files/path.h"
 #include "src/lib/fxl/strings/string_printf.h"
@@ -22,6 +25,9 @@ namespace {
 const char kDefaultNamespace[] = "misc";
 
 const char kNamespaceSeparator[] = ".";
+
+constexpr re2::LazyRE2 kNamespaceRegex = MakeLazyRE2(R"([a-z\-]+)");
+constexpr re2::LazyRE2 kKeyRegex = MakeLazyRE2(R"([a-z\-\.]+)");
 
 Annotations Flatten(const std::map<std::string, Annotations>& namespaced_annotations) {
   Annotations flat_annotations;
@@ -46,11 +52,10 @@ DataRegister::DataRegister(size_t max_num_annotations,
 }
 
 void DataRegister::Upsert(UpsertRequest& request, UpsertCompleter::Sync& completer) {
-  auto execute_callback = ::fit::defer([&completer]() { completer.Reply(); });
-
   const fuchsia_feedback::ComponentData& data = request.data();
   if (!data.annotations().has_value()) {
     FX_LOGS(WARNING) << "No non-platform annotations to upsert";
+    completer.Reply();
     return;
   }
 
@@ -59,8 +64,7 @@ void DataRegister::Upsert(UpsertRequest& request, UpsertCompleter::Sync& complet
     FX_LOGS(WARNING) << fxl::StringPrintf(
         "Ignoring non-platform annotations, %s is a reserved namespace",
         data.namespace_()->c_str());
-
-    // TODO(https://fxbug.dev/42125546): close connection with ZX_ERR_INVALID_ARGS instead.
+    completer.Close(ZX_ERR_INVALID_ARGS);
     return;
   }
 
@@ -69,8 +73,22 @@ void DataRegister::Upsert(UpsertRequest& request, UpsertCompleter::Sync& complet
   }
   const std::string ns = data.namespace_().value_or(kDefaultNamespace);
 
+  if (!re2::RE2::FullMatch(ns, *kNamespaceRegex)) {
+    FX_LOGS(WARNING) << std::format(
+        "Ignoring non-platform annotations, {} is not a valid namespace", ns);
+    completer.Close(ZX_ERR_INVALID_ARGS);
+    return;
+  }
+
   Annotations new_annotations = namespaced_annotations_[ns];
   for (const auto& annotation : *data.annotations()) {
+    if (!re2::RE2::FullMatch(annotation.key(), *kKeyRegex)) {
+      FX_LOGS(WARNING) << std::format("Ignoring non-platform annotations, {} is not a valid key",
+                                      annotation.key());
+      completer.Close(ZX_ERR_INVALID_ARGS);
+      return;
+    }
+
     new_annotations.insert_or_assign(annotation.key(), ErrorOrString(annotation.value()));
   }
 
@@ -89,12 +107,14 @@ void DataRegister::Upsert(UpsertRequest& request, UpsertCompleter::Sync& complet
     is_missing_annotations_ = true;
 
     // TODO(https://fxbug.dev/42125548): close all connections.
+    completer.Reply();
     return;
   }
 
   namespaced_annotations_[ns] = std::move(new_annotations);
 
   UpdateJson();
+  completer.Reply();
 }
 
 Annotations DataRegister::Get() { return Flatten(namespaced_annotations_); }

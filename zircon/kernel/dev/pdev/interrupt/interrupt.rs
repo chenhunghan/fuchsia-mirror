@@ -50,7 +50,7 @@ pub struct PdevInterruptManager {
     table: [IntHandlerStruct; MAX_INTERRUPTS],
 
     #[mutex]
-    lock: ksync::KMutex<ksync::RawSpinlock>,
+    lock: ksync::KMutex<crate::ksync_kernel::TrackedSpinlock>,
 }
 
 // SAFETY: Internal table synchronization is managed via `lock` for dynamic
@@ -326,7 +326,7 @@ pub unsafe fn register_interrupt_controller(driver: &'static dyn InterruptContro
                 };
                 MAX_INTERRUPTS
             ].into(),
-            lock <- ksync::KSpinlock::init(),
+            lock <- crate::ksync_kernel::KSpinlock::init(),
         }))
     };
 
@@ -539,22 +539,12 @@ pub unsafe extern "C" fn set_interrupt_affinity(
 }
 
 /// Gets the base interrupt vector.
-///
-/// # Safety
-///
-/// The global interrupt controller must be registered.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn interrupt_get_base_vector() -> InterruptVector {
+pub fn interrupt_get_base_vector() -> InterruptVector {
     get_driver().base_vector()
 }
 
 /// Gets the maximum interrupt vector.
-///
-/// # Safety
-///
-/// The global interrupt controller must be registered.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn interrupt_get_max_vector() -> InterruptVector {
+pub fn interrupt_get_max_vector() -> InterruptVector {
     get_driver().max_vector()
 }
 

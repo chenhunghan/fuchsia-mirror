@@ -5,7 +5,10 @@
 #ifndef SRC_DEVICES_PCI_DRIVERS_PCI_COMPOSITE_H_
 #define SRC_DEVICES_PCI_DRIVERS_PCI_COMPOSITE_H_
 
-#include <ddktl/device.h>
+#include <fidl/fuchsia.driver.framework/cpp/natural_types.h>
+
+#include <cstdint>
+#include <string_view>
 
 namespace pci {
 
@@ -24,7 +27,8 @@ struct CompositeInfo {
   bool has_acpi;
 };
 
-ddk::CompositeNodeSpec CreateCompositeNodeSpec(const CompositeInfo& info);
+fuchsia_driver_framework::CompositeNodeSpec CreateCompositeNodeSpec(std::string_view name,
+                                                                    const CompositeInfo& info);
 
 }  // namespace pci
 

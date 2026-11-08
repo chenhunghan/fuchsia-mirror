@@ -71,8 +71,8 @@ pub use sentinel::*;
 pub use singly_linked_list::{SinglyLinkedList, SinglyLinkedListContainable, SinglyLinkedListNode};
 pub use size_tracker::{NonTrackingSize, SizeTracker, TrackingSize};
 pub use slab_allocator::{
-    DEFAULT_SLAB_ALLOCATOR_SLAB_SIZE, InstancedSlabAllocated, IsRawMutex, RawLock, SlabAllocator,
-    SlabOrigin, StaticSlabAllocated,
+    DEFAULT_SLAB_ALLOCATOR_SLAB_SIZE, InstancedSlabAllocated, RawLock, SlabAllocator, SlabOrigin,
+    StaticSlabAllocated,
 };
 pub use string_buffer::StringBuffer;
 pub use tag::DefaultObjectTag;

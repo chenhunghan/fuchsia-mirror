@@ -7,6 +7,7 @@
 
 #include <lib/driver/component/cpp/driver_base2.h>
 #include <lib/driver/component/cpp/driver_export2.h>
+#include <lib/driver/component/cpp/health_alert_latch.h>
 
 #include "src/ui/input/drivers/buttons/buttons-device.h"
 #include "src/ui/input/drivers/buttons/buttons_config.h"
@@ -21,8 +22,13 @@ class Buttons : public fdf::DriverBase2 {
 
   zx::result<> Start(fdf::DriverContext context) override;
   void Stop(fdf::StopCompleter completer) override;
+  void HealthCheck(fuchsia_driver_framework::HealthCheckRequest request,
+                   HealthCheckCompleter completer) override;
+
+  ButtonsDevice* device_for_testing() { return device_.get(); }
 
  private:
+  fdf::HealthAlertLatch health_latch_{*this};
   std::unique_ptr<ButtonsDevice> device_;
   fidl::ServerBindingGroup<fuchsia_input_report::InputDevice> input_report_bindings_;
   fdf::OwnedChildNode child_;

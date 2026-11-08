@@ -32,6 +32,7 @@
         },
         {
             protocol: [
+                "fuchsia.net.reachability.Monitor",
                 "fuchsia.settings.Privacy",
                 "fuchsia.tracing.provider.Registry",
                 "fuchsia.update.channel.Provider",

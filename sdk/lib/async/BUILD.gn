@@ -4,6 +4,11 @@
 
 import("//build/zircon/migrated_targets.gni")
 
+group("tests") {
+  testonly = true
+  deps = [ "//sdk/lib/async/test" ]
+}
+
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
 #
 #  ________  _________  ________  ________
@@ -58,6 +63,7 @@ zx_library("async") {
   ]
   sdk = "source"
 }
+
 zx_library("async-cpp") {
   sources = [
     "executor.cc",
@@ -96,9 +102,4 @@ zx_library("async-cpp") {
     "//zircon/system/ulib/zx:headers",
   ]
   sdk = "source"
-}
-group("tests") {
-  deps = [ "//sdk/lib/async/test" ]
-  visibility = [ "*" ]
-  testonly = true
 }

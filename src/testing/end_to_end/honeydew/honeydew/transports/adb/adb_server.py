@@ -199,8 +199,12 @@ class AdbServer:
         return AdbServer._SERVER_HOST_IP
 
     def port(self) -> int:
-        assert self._server_port
-        return self._server_port
+        with self._lock:
+            if self._server_port is None:
+                raise adb_errors.AdbServerError(
+                    "ADB server is not running; no port is assigned."
+                )
+            return self._server_port
 
     def _run_server(self) -> None:
         """Runs (and re-runs) adb server until another thread requests that it stop.
@@ -247,21 +251,86 @@ class AdbServer:
                 _LOGGER.warning(f"Failed to run ADB server: {e}")
                 raise e
 
-    def _kill_shared_server(self) -> None:
-        _LOGGER.info("Killing any existing shared ADB servers.")
-        result = subprocess.run(
-            [self._adb_binary_path, "kill-server"],
-            capture_output=True,
-            text=True,
-        )
-        if result.stdout:
-            _LOGGER.debug(f"Output (stdout): {result.stdout}")
-        if result.stderr:
-            _LOGGER.debug(f"Output (stderr): {result.stderr}")
-        _LOGGER.info(
-            "Waiting 5 seconds to give time for the ADB server to stop..."
-        )
-        time.sleep(5)
+    @staticmethod
+    def _is_zombie_process(pid: int) -> bool:
+        """Returns True if the process is in zombie ('Z') state in /proc/<pid>/stat."""
+        try:
+            stat_content = Path(f"/proc/{pid}/stat").read_text(
+                encoding="utf-8", errors="replace"
+            )
+            close_paren = stat_content.rfind(")")
+            if close_paren == -1:
+                return False
+            after_comm = stat_content[close_paren + 1 :].split()
+            return bool(after_comm and after_comm[0] == "Z")
+        except OSError:
+            return False
+
+    @staticmethod
+    def _read_proc_cmdline(pid: int) -> list[str]:
+        """Reads the NUL-separated command-line arguments from /proc/<pid>/cmdline."""
+        try:
+            raw = Path(f"/proc/{pid}/cmdline").read_bytes().rstrip(b"\x00")
+            if not raw:
+                return []
+            return [
+                arg.decode("utf-8", errors="replace")
+                for arg in raw.split(b"\x00")
+            ]
+        except OSError:
+            return []
+
+    @staticmethod
+    def _get_process_attribution(pid: int) -> str:
+        """Returns 'ppid=<ppid>, uid=<uid>, etime=<elapsed>' for pid, or ''."""
+        if Path("/proc/uptime").exists():
+            try:
+                stat_content = Path(f"/proc/{pid}/stat").read_text(
+                    encoding="utf-8", errors="replace"
+                )
+                close_paren = stat_content.rfind(")")
+                if close_paren == -1:
+                    return ""
+                after_comm = stat_content[close_paren + 1 :].split()
+                if len(after_comm) <= 19:
+                    return ""
+                ppid = int(after_comm[1])
+                starttime_ticks = int(after_comm[19])
+                uptime_sec = float(
+                    Path("/proc/uptime").read_text(encoding="utf-8").split()[0]
+                )
+                clk_tck = os.sysconf("SC_CLK_TCK")
+                if clk_tck <= 0:
+                    return ""
+                uid = os.stat(f"/proc/{pid}").st_uid
+                elapsed = max(0.0, uptime_sec - (starttime_ticks / clk_tck))
+                return f"ppid={ppid}, uid={uid}, etime={elapsed:.1f}s"
+            except (OSError, ValueError, IndexError):
+                return ""
+        try:
+            res = subprocess.run(
+                [
+                    "ps",
+                    "-o",
+                    "ppid=",
+                    "-o",
+                    "uid=",
+                    "-o",
+                    "etime=",
+                    "-p",
+                    str(pid),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if res.returncode == 0:
+                parts = res.stdout.split()
+                if len(parts) >= 3:
+                    return f"ppid={parts[0]}, uid={parts[1]}, etime={parts[2]}"
+        except (OSError, UnicodeDecodeError):
+            pass
+        return ""
 
     def _check_for_conflicting_adb_servers(self) -> None:
         """Checks for and terminates conflicting adb server processes.
@@ -272,15 +341,25 @@ class AdbServer:
         1. Does not specify --one-device
         2. Specifies --one-device with our target serial ID
         """
+        uid = os.getuid()
         try:
-            # pgrep -a adb lists all processes matching 'adb' along with their full command line
+            # pgrep -u <uid> -af adb lists all processes owned by the current
+            # user matching 'adb' in their full command line (avoiding the
+            # 15-character /proc/<pid>/comm limit and cross-user matches).
             result = subprocess.run(
-                ["pgrep", "-a", "adb"],
+                ["pgrep", "-u", str(uid), "-af", "adb"],
                 capture_output=True,
                 text=True,
                 check=False,
             )
-        except Exception as e:
+        except (OSError, UnicodeDecodeError) as e:
+            # `subprocess.run()` raises:
+            # - `OSError` if `pgrep` cannot be started, e.g. `FileNotFoundError`
+            #   if it is not installed.
+            # - `UnicodeDecodeError` if the output of `pgrep` cannot be decoded
+            #   as text.
+            # A non-zero exit status of `pgrep` is handled via
+            # `result.returncode` below.
             _LOGGER.warning(
                 f"Failed to run pgrep to check for ADB servers: {e}"
             )
@@ -300,40 +379,59 @@ class AdbServer:
         killed_pids: list[int] = []
         for line in result.stdout.splitlines():
             parts = line.split(maxsplit=1)
-            if len(parts) < 2:
+            if not parts:
                 continue
-            pid_str, cmd = parts
             try:
-                pid = int(pid_str)
+                pid = int(parts[0])
             except ValueError:
                 continue
 
             if pid in own_pids:
                 continue
 
-            cmd_args = cmd.split()
+            # Prefer /proc/<pid>/cmdline on Linux to avoid pgrep output
+            # truncation or whitespace splitting; fall back to pgrep output
+            # (e.g. on macOS where /proc is absent).
+            cmd_args = self._read_proc_cmdline(pid)
+            if cmd_args:
+                cmd = " ".join(cmd_args)
+            elif len(parts) >= 2:
+                cmd = parts[1]
+                cmd_args = cmd.split()
+            else:
+                continue
+
+            if not cmd_args or not os.path.basename(cmd_args[0]).endswith(
+                "adb"
+            ):
+                continue
             if "server" not in cmd_args and "fork-server" not in cmd_args:
                 continue
 
-            is_conflicting = False
+            conflict_tag: str | None = None
             if "--one-device" not in cmd_args:
-                is_conflicting = True
-            elif self._serial_id:
-                try:
-                    idx = cmd_args.index("--one-device")
-                    if (
-                        idx + 1 < len(cmd_args)
-                        and cmd_args[idx + 1] == self._serial_id
-                    ):
-                        is_conflicting = True
-                except ValueError:
-                    pass
+                conflict_tag = "[UNSCOPED]"
+            else:
+                idx = cmd_args.index("--one-device")
+                if idx + 1 < len(cmd_args):
+                    other_serial = cmd_args[idx + 1]
+                    if self._serial_id and other_serial == self._serial_id:
+                        conflict_tag = "[ACTIVE DUT]"
+                    else:
+                        attr = self._get_process_attribution(pid)
+                        attr_suffix = f", {attr}" if attr else ""
+                        _LOGGER.info(
+                            "[PEER DEVICE - IGNORED] ADB server process "
+                            f"(PID: {pid}{attr_suffix}): {cmd}"
+                        )
 
-            if is_conflicting:
-                error_msg = (
-                    f"Found conflicting ADB server process (PID: {pid}): {cmd}"
+            if conflict_tag:
+                attr = self._get_process_attribution(pid)
+                attr_suffix = f", {attr}" if attr else ""
+                _LOGGER.error(
+                    f"{conflict_tag} Found conflicting ADB server process "
+                    f"(PID: {pid}{attr_suffix}): {cmd}"
                 )
-                _LOGGER.error(error_msg)
                 try:
                     _LOGGER.info(
                         f"Killing conflicting ADB server process (PID: {pid})..."
@@ -352,14 +450,18 @@ class AdbServer:
                 for pid in killed_pids:
                     try:
                         os.kill(pid, 0)
-                        remaining_pids.append(pid)
-                    except ProcessLookupError:
+                        if not self._is_zombie_process(pid):
+                            remaining_pids.append(pid)
+                    except (ProcessLookupError, PermissionError):
                         pass
-                    except PermissionError:
-                        remaining_pids.append(pid)
                 killed_pids = remaining_pids
                 if killed_pids:
                     time.sleep(0.05)
+            if killed_pids:
+                _LOGGER.warning(
+                    "Conflicting ADB server process(es) did not exit within "
+                    f"2.0s after SIGKILL (PIDs: {killed_pids})."
+                )
 
     def _run_one_server(self, server_name: str) -> None:
         """Runs a server and waits on the process.
@@ -369,7 +471,7 @@ class AdbServer:
         setting and clearing self._server_is_ready. While self._process is running, this method
         blocks.
 
-        Before running an isolated server, this method attempts to kill any shared adb server
+        Before running an isolated server, this method terminates any conflicting adb server
         running on the host.
 
         Args:
@@ -381,7 +483,6 @@ class AdbServer:
         assert not self._server_is_ready.is_set(), "Already running"
 
         try:
-            self._kill_shared_server()
             self._check_for_conflicting_adb_servers()
 
             with self._lock:

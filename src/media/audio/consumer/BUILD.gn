@@ -80,4 +80,7 @@ cc_test_executable("audio_consumer_tests_bin") {
 
 fuchsia_unittest_package("audio_consumer_tests") {
   deps = [ ":audio_consumer_tests_bin" ]
+  test_specs = {
+    parallel = 4
+  }
 }

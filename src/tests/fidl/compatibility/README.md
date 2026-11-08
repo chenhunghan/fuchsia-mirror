@@ -34,20 +34,20 @@ For a test instance, there is:
   - Language server 1
   - Language server 2
 
-So, if the language list is Go, Dart, and Rust, the following combinations of
+So, if the language list is C++, Dart, and Rust, the following combinations of
 servers will be tested:
 
-  - HLCPP and Go, Go and Dart
-  - HLCPP and Dart, Dart and Go
-  - HLCPP and Go, Go and Rust
-  - HLCPP and Rust, Rust and Go
+  - HLCPP and C++, C++ and Dart
+  - HLCPP and Dart, Dart and C++
+  - HLCPP and C++, C++ and Rust
+  - HLCPP and Rust, Rust and C++
   - HLCPP and Dart, Dart and Rust
   - HLCPP and Rust, Rust and Dart
 
 The basic logic for the test is along the lines of:
 
 ```python
-servers = ['go_server', 'cc_server', ...]
+servers = ['rust_server', 'cc_server', ...]
 
 for proxy_name in servers:
   for server_name in servers:
@@ -77,7 +77,7 @@ calling the client back directly, the server sends the `EchoEvent()`.
 
 The code for the compatibility tests are located at
 `src/tests/fidl/compatibility`. It contains FIDL definitions and the server
-implementations for Dart, HLCPP, LLCPP, Rust, and Go.
+implementations for Dart, HLCPP, LLCPP, and Rust.
 
 The test runner and all of the test server components are in a single package,
 `fuchsia-pkg://fuchsia.com/fidl-compatibility-test`.

@@ -1,0 +1,75 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = [
+        "src/main.rs",
+    ],
+    binary_name = "client_suite_under_test_rust_async",
+    edition = "2024",
+    visibility = [":__pkg__"],
+    deps = [
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/tests/fidl/dynsuite/client_suite/fidl:fidl.clientsuite_rust",
+        "//src/tests/fidl/dynsuite/client_suite/runners/rust_util",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "client_suite_under_test_rust_async",
+    visibility = [":__pkg__"],
+)
+
+fx_component_manifest(
+    name = "manifest",
+    testonly = True,
+    component_name = "client",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/client.cml",
+    visibility = [":__pkg__"],
+)
+
+fx_component(
+    name = "client",
+    testonly = True,
+    compiled_manifest = ":manifest",
+    visibility = [":__pkg__"],
+    deps = [
+        ":bin_packaged",
+    ],
+)
+
+fx_package(
+    name = "rust_async",
+    package_name = "fidl_client_suite_rust_async_client",
+    testonly = True,
+    components = [
+        ":client",
+    ],
+    visibility = [
+        "//src/tests/fidl/dynsuite/client_suite:__pkg__",
+    ],
+)

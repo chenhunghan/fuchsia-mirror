@@ -206,15 +206,22 @@ fuchsia_component_decl::Child DebugAgentLauncher::CreateChildDecl(
   child_decl.name(name);
   child_decl.url(kChildUrl);
   child_decl.startup(fuchsia_component_decl::StartupMode::kLazy);
-
-  if (options.monitor_root_job().has_value()) {
-    fuchsia_component_decl::ConfigOverride override;
-    override.key("monitor_root_job");
-    override.value(fuchsia_component_decl::ConfigValue::WithSingle(
-        fuchsia_component_decl::ConfigSingleValue::WithBool_(options.monitor_root_job().value())));
-    child_decl.config_overrides({{override}});
-  }
   return child_decl;
+}
+
+std::vector<fuchsia_component_decl::Offer> DebugAgentLauncher::CreateDynamicOffers(
+    const fuchsia_debugger::LaunchOptions& options) {
+  std::vector<fuchsia_component_decl::Offer> offers;
+  if (options.monitor_root_job().has_value()) {
+    fuchsia_component_decl::OfferConfiguration config_offer;
+    config_offer.source(fuchsia_component_decl::Ref::WithSelf({}))
+        .source_name(*options.monitor_root_job() ? "fuchsia.debugger.MonitorRootJobTrue"
+                                                 : "fuchsia.debugger.MonitorRootJobFalse")
+        .target_name("fuchsia.debugger.MonitorRootJob")
+        .availability(fuchsia_component_decl::Availability::kRequired);
+    offers.push_back(fuchsia_component_decl::Offer::WithConfig(std::move(config_offer)));
+  }
+  return offers;
 }
 
 void DebugAgentLauncher::LaunchDebugAgent(fidl::ServerEnd<fuchsia_debugger::DebugAgent> server_end,
@@ -242,6 +249,9 @@ void DebugAgentLauncher::LaunchDebugAgent(fidl::ServerEnd<fuchsia_debugger::Debu
   fuchsia_component::CreateChildArgs args;
   args.numbered_handles() = std::move(handles);
   args.controller(std::move(controller_server_end));
+  if (auto offers = CreateDynamicOffers(options); !offers.empty()) {
+    args.dynamic_offers(std::move(offers));
+  }
 
   // Create and Start the child.
   realm->CreateChild({collection, child_decl, std::move(args)})

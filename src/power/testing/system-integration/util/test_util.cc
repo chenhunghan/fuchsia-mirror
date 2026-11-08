@@ -100,6 +100,20 @@ class TestElementControlServer : public fidl::Server<fuchsia_power_broker::Eleme
     }
   }
 
+  void RemoveDependency(RemoveDependencyRequest& request,
+                        RemoveDependencyCompleter::Sync& completer) override {
+    auto result = fidl::Call(real_control_)->RemoveDependency(std::move(request));
+    if (result.is_error()) {
+      if (result.error_value().is_framework_error()) {
+        completer.Close(result.error_value().framework_error().status());
+      } else {
+        completer.Reply(fit::error(result.error_value().domain_error()));
+      }
+    } else {
+      completer.Reply(fit::ok());
+    }
+  }
+
   void handle_unknown_method(
       fidl::UnknownMethodMetadata<fuchsia_power_broker::ElementControl> metadata,
       fidl::UnknownMethodCompleter::Sync& completer) override {}

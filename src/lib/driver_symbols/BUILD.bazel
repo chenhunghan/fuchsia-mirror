@@ -1,0 +1,88 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load("//build/bazel/rules/testing:fx_unittest_component.bzl", "fx_unittest_component")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "driver_symbols",
+    srcs = [
+        "restricted_symbols.h",
+        "symbols.cc",
+    ],
+    hdrs = ["symbols.h"],
+    implementation_deps = ["//zircon/system/ulib/zircon-internal"],
+    visibility = ["//src/devices/misc/drivers/compat:__pkg__"],
+    deps = [
+        # On Fuchsia, //zircon/system/public would shadow the sysroot's
+        # <zircon/syscalls.h> without the generated syscalls/gen/*.inc files.
+        "//src/zircon/lib/zircon:headers",  # @bazel2gn:path_overwrite://zircon/system/public
+        "//zircon/system/ulib/zx",
+    ],
+)
+
+# Needs reviewer attention (bazel2gn skip): dual-running the GN test copy
+# alongside the Bazel test triggers testsharder duplicatedShardNames on
+# core.x64-asan under use_test_pilot.
+# @bazel2gn:skip
+fx_cc_test_binary(
+    name = "driver_symbols_test",
+    srcs = ["symbols_test.cc"],
+    deps = [
+        ":driver_symbols",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+# Needs reviewer attention (bazel2gn skip): dual-running the GN test copy
+# alongside the Bazel test triggers testsharder duplicatedShardNames on
+# core.x64-asan under use_test_pilot.
+# @bazel2gn:skip
+fx_unittest_component(
+    name = "driver_symbols_unittests",
+    binary = ":driver_symbols_test",
+)
+
+# Needs reviewer attention (bazel2gn skip): dual-running the GN test copy
+# alongside the Bazel test triggers testsharder duplicatedShardNames on
+# core.x64-asan under use_test_pilot.
+# @bazel2gn:skip
+fx_package(
+    name = "driver-restricted-symbols-tests",
+    package_name = "driver-restricted-symbols-tests",
+    test_components = [":driver_symbols_unittests"],
+)
+
+fx_test(
+    name = "driver-restricted-symbols-tests_test",
+    package = ":driver-restricted-symbols-tests",
+    visibility = ["//src/lib:__pkg__"],
+)
+
+# driver_symbols is C++, so Rust binaries that link driver_symbols_rust in GN
+# need the C++ standard library linked dynamically; Bazel's C++ toolchain
+# handles this automatically via link_deps.
+# @bazel2gn:raw_attribute:public_configs = [ "//build/config/fuchsia:dynamic_cpp_standard_library" ]
+rustc_library(
+    name = "driver_symbols_rust",
+    srcs = [
+        "src/bindings.rs",
+        "src/lib.rs",
+        "src/symbols.rs",
+    ],
+    crate_name = "driver_symbols",
+    edition = "2024",
+    link_deps = [":driver_symbols"],
+    visibility = ["//src/devices/bin/driver-host:__pkg__"],
+    deps = [
+        "//sdk/rust/zx",
+        "//sdk/rust/zx-types",
+    ],
+)

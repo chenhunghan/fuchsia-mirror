@@ -82,10 +82,7 @@ void UpdateSha256(SHA256_CTX* ctx, T field) {
   }
 }
 
-void SHA256_Update_AudioParameters(SHA256_CTX* sha256_ctx, const fuchsia::media::PcmFormat& pcm);
-
-void SHA256_Update_VideoParameters(SHA256_CTX* sha256_ctx,
-                                   const fuchsia::media::VideoUncompressedFormat& video);
+void SHA256_Update_AudioParameters(SHA256_CTX* sha256_ctx, const fuchsia::media::PcmFormat2& pcm);
 
 void SHA256_Update_VideoPlane(SHA256_CTX* sha256_ctx, uint8_t* start, uint32_t width,
                               uint32_t stride, uint32_t height);

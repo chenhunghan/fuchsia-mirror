@@ -56,7 +56,18 @@ rust_library(
         "alloc",
         "compiled_data",
         "std",
-    ],
+    ] + select({
+        "@rules_rust//rust/platform:aarch64-unknown-fuchsia": [
+            "default",  # aarch64-unknown-fuchsia
+        ],
+        "@rules_rust//rust/platform:riscv64gc-unknown-fuchsia": [
+            "default",  # riscv64gc-unknown-fuchsia
+        ],
+        "@rules_rust//rust/platform:x86_64-unknown-fuchsia": [
+            "default",  # x86_64-unknown-fuchsia
+        ],
+        "//conditions:default": [],
+    }),
     crate_root = "src/lib.rs",
     edition = "2018",
     rustc_flags = [
@@ -80,7 +91,7 @@ rust_library(
     version = "1.1.0",
     deps = [
         "//third_party/rust_crates/vendor/idna_adapter-1.2.2:idna_adapter",
-        "//third_party/rust_crates/vendor/smallvec-1.15.2:smallvec",
+        "//third_party/rust_crates/vendor/smallvec-1.16.3:smallvec",
         "//third_party/rust_crates/vendor/utf8_iter-1.0.4:utf8_iter",
     ],
 )

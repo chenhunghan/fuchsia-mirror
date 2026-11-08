@@ -6,6 +6,11 @@ load("@rules_cc//cc:defs.bzl", "cc_library")
 
 package(default_applicable_licenses = ["//:license"])
 
+exports_files(
+    ["internal.h"],
+    visibility = ["//zircon/system/ulib/tftp/test:__pkg__"],
+)
+
 # LINT.IfChange
 cc_library(
     name = "tftp",

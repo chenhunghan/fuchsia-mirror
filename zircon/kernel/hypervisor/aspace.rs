@@ -6,7 +6,6 @@
 
 //! Guest physical address space management (`<hypervisor/aspace.h>`).
 
-use core::ffi::c_void;
 use core::mem::{align_of, size_of};
 use core::ptr::with_exposed_provenance_mut;
 use fbl::RefPtr;
@@ -50,7 +49,7 @@ static_assert!(align_of::<GuestPtr>() == 8);
 impl GuestPtr {
     /// Creates a new `GuestPtr` from an active host `mapping`, `pinned_vmo`, and intra-page
     /// `offset`.
-    pub fn new(mapping: RefPtr<VmMapping>, pinned_vmo: PinnedVmObject, offset: zx_vaddr_t) -> Self {
+    fn new(mapping: RefPtr<VmMapping>, pinned_vmo: PinnedVmObject, offset: zx_vaddr_t) -> Self {
         Self { mapping: Some(mapping), pinned_vmo, offset }
     }
 
@@ -62,20 +61,14 @@ impl GuestPtr {
         self.pinned_vmo = PinnedVmObject::default();
     }
 
-    /// Returns a raw pointer to the mapped guest memory if `type_size` fits within the remaining
-    /// mapped size from `offset`, or null otherwise.
-    pub(super) fn as_raw_ptr(&self, type_size: usize) -> *mut c_void {
-        let mapping = self.mapping.as_ref().expect("GuestPtr is not initialized");
-        if self.offset + type_size > mapping.size() {
-            return core::ptr::null_mut();
-        }
-        with_exposed_provenance_mut(mapping.base().0 + self.offset)
-    }
-
     /// Returns a typed pointer to the mapped guest memory, or null if `size_of::<T>()` exceeds
     /// the remaining mapped size from `offset`.
     pub fn as_ptr<T>(&self) -> *mut T {
-        self.as_raw_ptr(size_of::<T>()).cast::<T>()
+        let mapping = self.mapping.as_ref().expect("GuestPtr is not initialized");
+        if self.offset + size_of::<T>() > mapping.size() {
+            return core::ptr::null_mut();
+        }
+        with_exposed_provenance_mut(mapping.base().0 + self.offset)
     }
 }
 
@@ -207,13 +200,18 @@ impl GuestPhysicalAspace {
                 if (mmu_flags & ARCH_MMU_FLAG_PERM_EXECUTE) != 0 {
                     pf_flags |= pf_flag::INSTRUCTION;
                 }
-                let (fault_status, _) = mapping.page_fault_locked(
-                    guard.as_mut().token_mut(),
-                    VAddr(guest_paddr),
-                    pf_flags,
-                    0,
-                    page_request.as_mut(),
-                );
+                // SAFETY: `mapping` is alive and the object lock is not held. `guest_paddr` is
+                // page-aligned and within `mapping`, the additional page count is less than
+                // `usize::MAX`, and `page_request` does not hold an active request.
+                let (fault_status, _) = unsafe {
+                    mapping.page_fault_locked(
+                        guard.as_mut().token_mut(),
+                        VAddr(guest_paddr),
+                        pf_flags,
+                        0,
+                        page_request.as_mut(),
+                    )
+                };
                 fault_status
             };
 
@@ -226,8 +224,14 @@ impl GuestPhysicalAspace {
     }
 
     /// Creates a pinned host kernel mapping (`GuestPtr`) for `[guest_paddr, guest_paddr + len)`.
+    ///
+    /// Until the returned `GuestPtr` is reset or dropped, the range is mapped writable in the
+    /// kernel address space and its pages are pinned, so a non-null pointer returned by
+    /// `GuestPtr::as_ptr` is valid for reads and writes of the requested type. The memory is
+    /// shared with the guest, so callers should access it through raw pointers rather than Rust
+    /// references.
     pub fn create_guest_ptr(
-        &mut self,
+        &self,
         guest_paddr: zx_gpaddr_t,
         len: usize,
         name: &[u8],
@@ -609,12 +613,16 @@ mod tests {
         let gpa = GuestPhysicalAspace::create().expect("Failed to create GuestPhysicalAspace");
         expect_ok!(create_mapping(&gpa.root_vmar(), vmo, 0, MMU_FLAGS));
 
-        expect_ok!(gpa.root_vmar().protect(
-            VAddr(0),
-            page::SIZE,
-            ARCH_MMU_FLAG_PERM_WRITE,
-            VmAddressRegionOpChildren::Yes,
-        ));
+        // SAFETY: Changes permissions on a guest physical address range rather than active host
+        // kernel memory.
+        expect_ok!(unsafe {
+            gpa.root_vmar().protect(
+                VAddr(0),
+                page::SIZE,
+                ARCH_MMU_FLAG_PERM_WRITE,
+                VmAddressRegionOpChildren::Yes,
+            )
+        });
     }
 
     /// Verifies `ArchVmAspace::query` across mappings with various permission flags.
@@ -663,7 +671,7 @@ mod tests {
     /// Verifies that `create_guest_ptr` maps and pins a guest region accessible from the host.
     #[test]
     fn guest_physical_aspace_create_guest_ptr() {
-        let mut gpa = GuestPhysicalAspace::create().expect("Failed to create GuestPhysicalAspace");
+        let gpa = GuestPhysicalAspace::create().expect("Failed to create GuestPhysicalAspace");
         let vmo = create_vmo(page::SIZE * 2).expect("Failed to create VMO");
         expect_ok!(create_mapping(&gpa.root_vmar(), vmo, page::SIZE, MMU_FLAGS));
 

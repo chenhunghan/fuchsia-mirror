@@ -1,0 +1,31 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fidl_library(
+    name = "fuchsia.hardware.usb",
+    srcs = ["usb.fidl"],
+    enable_banjo = True,
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    visibility = [
+        "//src/camera/drivers/usb_video:__pkg__",
+        "//src/connectivity/bluetooth/hci/transport/usb:__pkg__",
+        "//src/connectivity/bluetooth/hci/vendor/intel:__pkg__",
+        "//src/connectivity/ethernet/drivers:__subpackages__",
+        "//src/devices/serial/drivers:__subpackages__",
+        "//src/devices/usb:__subpackages__",
+        "//src/media/audio/drivers/usb-audio:__pkg__",
+        "//src/ui/input/drivers/usb-hid:__pkg__",
+    ],
+    deps = [
+        "//sdk/banjo/fuchsia.hardware.usb.request",
+        "//sdk/fidl/fuchsia.hardware.usb.descriptor",
+        "//zircon/vdso/zx",
+    ],
+)

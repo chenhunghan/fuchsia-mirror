@@ -37,12 +37,13 @@ fuchsia_test_component_with_expectations("external-network-test") {
   deps = [
     ":client",
     ":device-name-provider",
-    "//src/connectivity/network/testing/netemul/configurable-netstack:netstack3",
   ]
 }
 
 fuchsia_test_package("netstack-external-network-tests") {
   test_components = [ ":external-network-test" ]
+  subpackages =
+      [ "//src/connectivity/network/testing/netemul/configurable-netstack" ]
   deps = [ "//src/lib/testing/expectation:expectation_comparer" ]
 }
 

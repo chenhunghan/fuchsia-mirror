@@ -9,7 +9,7 @@ Only key field differences are listed here. Standard fields like `sources` -> `s
 | GN Field                 | Bazel Attribute               | Notes                                                      |
 | :----------------------- | :---------------------------- | :--------------------------------------------------------- |
 | `output_name`            | `crate_name`                  | The crate name used for linking and resulting binary name. |
-| `with_unit_tests = true` | `with_host_unit_tests = True` | Set to `True` to enable host unit tests.                   |
+| `with_unit_tests = true` | Standalone `rustc_test` / `host_rustc_test` | Define an explicit `rustc_test` or `host_rustc_test` target with `crate = ":<lib>"` (`with_unit_tests` and `with_host_unit_tests` on `rustc_*` are allowlist-restricted in `//build/bazel/rules/rust`), and include all tests in the package's `test_suite()`. |
 | `features`               | `crate_features`              | Features enabled for this crate.                           |
 | `lint_config`            | `lint_config`                 | Target-specific lints config. Same label on both sides.    |
 | `deps` (C/C++ targets)   | `link_deps`                   | rules_rust only allows Rust targets in `deps`; see below.  |
@@ -75,19 +75,18 @@ For other third-party dependencies (e.g. googletest, re2, boringssl), `bazel2gn`
 
 ## Test Migration for `rustc_library()` target
 
-In Bazel, the `rustc_library()` target creates a sub-target named `{target_name}_test` when the `with_host_unit_tests` or `with_unit_tests` attribute is set to `True`.
+Define a standalone `rustc_test` (with `fx_unittest_package` for Fuchsia target tests) or `host_rustc_test` (with `crate = ":<lib>"`) in `BUILD.bazel` (`with_unit_tests` and `with_host_unit_tests` on `rustc_*` are allowlist-restricted in `//build/bazel/rules/rust`), and expose a package `test_suite(name = "tests" | "host_tests", tests = [":<test_target>", ...], visibility = ["//<aggregation_dir>:__pkg__"])` (always listing explicit test targets in `tests = [...]`, never `tests = []`; if modifying an existing `test_suite()` that had an empty `tests` attribute, add all existing test targets in the package to `tests = [...]` or start from the existing list and remove entries, and request human verification that all relevant tests have been included without allowing agents to resolve the comment) as the first target in `BUILD.bazel` (never annotated with `# @bazel2gn:skip`; `bazel2gn` ignores `test_suite()`).
 
 - **If all dependencies in `test_deps` are migrated to Bazel:**
-  1. Register `{target_name}_test` in Bazel:
-      * For `//src/developer/ffx/lib/*` libraries, add `//src/developer/ffx/lib/<name>:{target_name}_test` to Bazel `//src/developer/ffx:tests`. Only add `"<name>"` to `tests_migrated_ffx_libraries` within `//src/developer/ffx/lib/ffx_libraries_list.gni` if the library no longer has GN users (`BUILD.gn` is removed) or its test uses `host_test_data_files` that `bazel2gn` cannot translate.
-      * For other rustc libraries, export the Bazel test via a GN `bazel_test_suite("bazel_tests")`.
+  1. Register the package `test_suite()` (`//<pkg>:tests` or `//<pkg>:host_tests`) in Bazel:
+      * For `//src/developer/ffx/lib/*` libraries, add `//src/developer/ffx/lib/<name>:host_tests` (or `:tests`) to the aggregation `test_suite()` in `//src/developer/ffx/BUILD.bazel`. Only add `"<name>"` to `tests_migrated_ffx_libraries` within `//src/developer/ffx/lib/ffx_libraries_list.gni` if the library no longer has GN users (`BUILD.gn` is removed) or its test uses `host_test_data_files` that `bazel2gn` cannot translate.
+      * For other rustc libraries, wire `"//<pkg>:tests"` or `"//<pkg>:host_tests"` into the area's aggregation `test_suite()` (referencing `"tests"` and `"host_tests"` from the same package in the same aggregation package / `BUILD.bazel` file, adding the companion aggregation `test_suite()` there and in its `BUILD.gn` `bazel_test_suite()` if only one type exists yet; never add a per-package `bazel_test_suite("bazel_tests")` in `BUILD.gn`). If no existing aggregation `test_suite()` can be found, define the package `test_suite()` in `BUILD.bazel` (omitting `visibility` until the aggregation package is known; never guess an aggregation directory): in interactive sessions, ask the user which aggregation `test_suite()` (or where a new one should be added if none exists) the package's `test_suite()`(s) should be added to and suggest asking the Build team if they do not know; in unattended Planter runs, report the unresolved finding in `CoderReport.disputed_findings` and `summary` for the reviewer.
   2. Clean up `BUILD.gn` file:
-      * If the library still has GN users (`BUILD.gn` is kept and synced with `bazel2gn`), its tests run in both build systems (see [Testing libraries in both build systems](../../../../../../docs/development/build/bazel_concepts/tests.md#tests-in-both-build-systems)): keep `with_host_unit_tests`/`with_unit_tests` and `test_deps` without `# @bazel2gn:skip` (or define a standalone `rustc_test(crate = ":<lib>")` without `# @bazel2gn:skip`), and keep the generated `:{target_name}_test` in `group("tests")` in `BUILD.gn`.
+      * If the library still has GN users (`BUILD.gn` is kept and synced with `bazel2gn`), its tests run in both build systems (see [Testing libraries in both build systems](../../../../../../docs/development/build/bazel_concepts/tests.md#tests-in-both-build-systems)): define a standalone `rustc_test(crate = ":<lib>")` or `host_rustc_test(crate = ":<lib>")` without `# @bazel2gn:skip` (on it or on the package `test_suite`, which `bazel2gn` ignores), and keep the generated `:{target_name}_test` in `group("tests")` in `BUILD.gn`.
       * Otherwise, remove `:{target_name}_test` from `group("tests")` in `BUILD.gn`. If `group("tests")` has no remaining dependencies, delete `group("tests")` and remove `":tests"` from the top-level library group.
 
 - **If any dependency in `test_deps` is NOT yet migrated to Bazel:**
-  * **Keep** `with_host_unit_tests = True` (or `with_unit_tests = True`) and `test_deps` on `rustc_library()` in `BUILD.bazel` so that `bazel2gn` continues syncing `with_unit_tests = true` to `BUILD.gn`.
-  * **Do not** add `{target_name}_test` to Bazel test suites or add the library name to the `tests_migrated_ffx_libraries` list, and **keep** `group("tests")` in `BUILD.gn` so the tests continue running in GN.
+  * Keep the unmigrated test target above `## BAZEL2GN SENTINEL` in `BUILD.gn` (or use `with_unit_tests = true` in `BUILD.gn` when blocked by unmigrated GN-only test deps) and **keep** `group("tests")` in `BUILD.gn` so the tests continue running in GN.
 
 ## Example
 

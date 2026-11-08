@@ -10,13 +10,13 @@ use fuchsia_async as fasync;
 use fuchsia_component::server::ServiceFs;
 use fuchsia_inspect::component;
 use futures::StreamExt;
-use futures::channel::mpsc::{self, UnboundedSender};
+use futures::channel::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use futures::lock::Mutex;
 use settings_common::config::AgentType;
 use settings_common::config::default_settings::DefaultSetting;
 use settings_common::inspect::config_logger::InspectConfigLogger;
 use settings_common::inspect::event::{
-    ExternalEventPublisher, SettingValuePublisher, UsagePublisher,
+    ExternalEventPublisher, SettingValuePublisher, UsageEvent, UsagePublisher,
 };
 use settings_common::inspect::listener_logger::ListenerInspectLogger;
 use settings_common::service_context::ServiceContext;
@@ -35,6 +35,9 @@ pub(crate) struct TestInputEnvironment {
 
     /// For watching, connecting to, and making requests on the camera device.
     pub(crate) camera3_service: Rc<Mutex<Camera3Service>>,
+
+    /// Usage events recorded for inspect.
+    pub(crate) usage_rx: UnboundedReceiver<UsageEvent>,
 }
 
 pub(crate) struct TestInputEnvironmentBuilder {
@@ -85,6 +88,13 @@ impl TestInputEnvironmentBuilder {
         self
     }
 
+    pub(crate) fn add_agent(mut self, agent: AgentType) -> Self {
+        if !self.agents.contains(&agent) {
+            self.agents.push(agent);
+        }
+        self
+    }
+
     pub(crate) async fn build(mut self) -> TestInputEnvironment {
         let service_registry = ServiceRegistry::create();
         let storage_factory = Rc::new(if let Some(info) = self.starting_input_info_sources {
@@ -104,7 +114,7 @@ impl TestInputEnvironmentBuilder {
         storage_factory.initialize_storage::<InputInfoSources>().await;
 
         let (value_tx, _value_rx) = mpsc::unbounded();
-        let (usage_tx, _usage_rx) = mpsc::unbounded();
+        let (usage_tx, usage_rx) = mpsc::unbounded();
         let (event_tx, _event_rx) = mpsc::unbounded();
         let setting_value_publisher = SettingValuePublisher::new(value_tx);
         let usage_publisher = UsagePublisher::new(usage_tx, Rc::new(ListenerInspectLogger::new()));
@@ -171,6 +181,7 @@ impl TestInputEnvironmentBuilder {
             input_service,
             input_button_service: input_button_service_handle,
             camera3_service: camera3_service_handle,
+            usage_rx,
         }
     }
 }

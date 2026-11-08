@@ -88,7 +88,7 @@ def ensure_file_exists(path: Path):
       FileNotFoundError if path does not exist, even after waiting.
     """
     for delay in (3, 6, 15):
-        if Path.exists():
+        if path.exists():
             return
 
         # This branch should be highly unlikely, so it is allowed to be slow.
@@ -200,7 +200,7 @@ class TempFileTransform(object):
       Example: "foo/bar.txt", with prefix="tmp-" -> foo/tmp-bar.txt
     """
 
-    temp_dir: Path = None
+    temp_dir: Path | None = None
     suffix: str = ""
     basename_prefix: str = ""
 
@@ -313,11 +313,12 @@ class Action(object):
         if self.command and "=" in self.command[0]:
             substituted_command += ["/usr/bin/env"]
 
+        # TODO(nathaniel): Maybe clarify this by migrating to itertools.pairwise.
         substituted_command += [
             lexically_rewrite_token(
                 tok, lambda x: str(replace_output_filename(x, prev_opt))
             )
-            for prev_opt, tok in zip([""] + self.command[:-1], self.command)
+            for prev_opt, tok in zip(["", *self.command[:-1]], self.command)
         ]
 
         return substituted_command, renamed_outputs
@@ -397,7 +398,7 @@ class Action(object):
     def run_repeatedly_and_compare_outputs(
         self,
         tempfile_transform: TempFileTransform,
-        diff_action: Callable[[Path, Path], int],
+        diff_action: Callable[[Path, Path], Any],
         max_attempts: int = 1,
         verbose: bool = False,
     ) -> int:
@@ -701,7 +702,7 @@ _MAIN_ARG_PARSER = _main_arg_parser()
 
 
 def default_diff_action(
-    left: Path, right: Path, miscomparison_export_dir: Path = None
+    left: Path, right: Path, miscomparison_export_dir: Path | None = None
 ) -> int:
     # Run detailed analysis, using various binary dumps.
     exit_code = detail_diff(left, right)

@@ -1,0 +1,22 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "openthread_sys",
+    srcs = [
+        "src/bindings.rs",
+        "src/lib.rs",
+        "src/spinel.rs",
+    ],
+    edition = "2024",
+    link_deps = ["//third_party/openthread:lib-ot-core"],
+    # TODO(b/413796835): Temporarily disable unnecessary_transmutes warnings
+    #                    while addressing underlying issues in "src/bindings.rs"
+    rustc_flags = ["-Aunnecessary_transmutes"],
+    visibility = ["//src/connectivity/lowpan:__subpackages__"],
+)

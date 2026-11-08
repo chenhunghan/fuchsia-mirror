@@ -11,6 +11,7 @@ use core::ffi::{c_char, c_void};
 use core::pin::Pin;
 use core::ptr::NonNull;
 
+use crate::ksync_kernel::IrqSavePolicy;
 #[cfg(console_enabled)]
 use kprint::{kprint, kprintln};
 #[cfg(console_enabled)]
@@ -303,7 +304,7 @@ impl RecoveredPersistentLog {
 #[ksync::guarded]
 struct PersistentDebugLog {
     #[mutex]
-    persistent_log_lock: ksync::KMutex<ksync::RawSpinlock>,
+    persistent_log_lock: ksync::KMutex<crate::ksync_kernel::TrackedSpinlock>,
 
     /// Info about where the persisted log is in RAM, if we have a persisted log.
     #[guarded_by(persistent_log_lock)]
@@ -380,7 +381,7 @@ impl PersistentDebugLog {
         // TODO(johngro): come back here and try to put a warning/OOPS in to the dlog
         // buffer?
         ksync::lock!(
-            let mut guard = self.lock_persistent_log_lock_policy::<ksync::IrqSavePolicy>()
+            let mut guard = self.lock_persistent_log_lock_policy::<IrqSavePolicy>()
         );
         if guard.plog().is_some() {
             return;
@@ -434,7 +435,7 @@ impl PersistentDebugLog {
     /// no-op.
     fn write(&self, str: &[u8]) {
         ksync::lock!(
-            let mut guard = self.lock_persistent_log_lock_policy::<ksync::IrqSavePolicy>()
+            let mut guard = self.lock_persistent_log_lock_policy::<IrqSavePolicy>()
         );
 
         // If we have no persistent log, just get out.
@@ -490,7 +491,7 @@ impl PersistentDebugLog {
     /// end up producing an unnecessary crashlog.
     fn invalidate(&self) {
         ksync::lock!(
-            let mut guard = self.lock_persistent_log_lock_policy::<ksync::IrqSavePolicy>()
+            let mut guard = self.lock_persistent_log_lock_policy::<IrqSavePolicy>()
         );
         if let Some(active_log) = guard.as_mut().plog_mut() {
             active_log.invalidate();
@@ -501,7 +502,7 @@ impl PersistentDebugLog {
     #[cfg(ktest)]
     fn force_reset(&self) {
         ksync::lock!(
-            let mut guard = self.lock_persistent_log_lock_policy::<ksync::IrqSavePolicy>()
+            let mut guard = self.lock_persistent_log_lock_policy::<IrqSavePolicy>()
         );
         *guard.as_mut().plog_mut() = None;
         // SAFETY: `force_reset` is used only by single-threaded testing while holding

@@ -2,27 +2,25 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-assert(is_host, "Python targets only build in a host toolchain")
-
 # All of the lacewing example tests and their dependencies.
 group("examples") {
   testonly = true
   public_deps = [
-    "data_resource_access_test",
-    "exoneration_failing_test",
-    "fidl_hello_world_test",
-    "hello_world_test",
-    "multi_device_test",
-    "openwrt_ap_test",
-    "power_cycle_test",
-    "test_case_revive_example:run_wo_test_case_revive",
-    "test_case_revive_example:test_case_revive_with_hard_reboot",
-    "test_case_revive_example:test_case_revive_with_soft_reboot",
-    "test_cases_example",
-    "test_cases_revive_example",
-    "test_soft_reboot:soft_reboot_test",
-    "test_soft_reboot:soft_reboot_test.hermetic",
-    "test_soft_reboot:soft_reboot_test_with_ffx_monitor",
+    "data_resource_access_test($host_toolchain)",
+    "exoneration_failing_test($host_toolchain)",
+    "fidl_hello_world_test($host_toolchain)",
+    "hello_world_test($host_toolchain)",
+    "multi_device_test($host_toolchain)",
+    "openwrt_ap_test($host_toolchain)",
+    "power_cycle_test($host_toolchain)",
+    "test_case_revive_example:run_wo_test_case_revive($host_toolchain)",
+    "test_case_revive_example:test_case_revive_with_hard_reboot($host_toolchain)",
+    "test_case_revive_example:test_case_revive_with_soft_reboot($host_toolchain)",
+    "test_cases_example($host_toolchain)",
+    "test_cases_revive_example($host_toolchain)",
+    "test_soft_reboot:soft_reboot_test($host_toolchain)",
+    "test_soft_reboot:soft_reboot_test.hermetic($host_toolchain)",
+    "test_soft_reboot:soft_reboot_test_with_ffx_monitor($host_toolchain)",
   ]
 }
 
@@ -31,9 +29,9 @@ group("examples") {
 group("emulator_tests") {
   testonly = true
   public_deps = [
-    "data_resource_access_test",
-    "fidl_hello_world_test",
-    "hello_world_test",
-    "test_cases_example",
+    "data_resource_access_test($host_toolchain)",
+    "fidl_hello_world_test($host_toolchain)",
+    "hello_world_test($host_toolchain)",
+    "test_cases_example($host_toolchain)",
   ]
 }

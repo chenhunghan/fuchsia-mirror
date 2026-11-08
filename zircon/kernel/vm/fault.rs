@@ -21,3 +21,20 @@ pub mod flag {
     pub const ACCESS: u32 = bindings::VMM_PF_FLAG_ACCESS;
     pub const FAULT_MASK: u32 = bindings::VMM_PF_FLAG_FAULT_MASK;
 }
+
+/// convenience routine for converting page fault flags to a string
+#[inline]
+pub fn flags_to_string(pf_flags: u32) -> [u8; 4] {
+    [
+        if (pf_flags & flag::WRITE) != 0 { b'w' } else { b'r' },
+        if (pf_flags & flag::USER) != 0 {
+            b'u'
+        } else if (pf_flags & flag::GUEST) != 0 {
+            b'g'
+        } else {
+            b's'
+        },
+        if (pf_flags & flag::INSTRUCTION) != 0 { b'i' } else { b'd' },
+        if (pf_flags & flag::NOT_PRESENT) != 0 { b'n' } else { b'p' },
+    ]
+}

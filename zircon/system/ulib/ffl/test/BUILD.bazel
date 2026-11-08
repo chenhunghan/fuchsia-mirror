@@ -1,0 +1,41 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/host_tests:host_test.bzl", "host_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_test_binary(
+    name = "ffl",
+    srcs = [
+        "assignment_tests.cc",
+        "exponential_average_tests.cc",
+        "ffl_tests.cc",
+    ],
+    gn_output_name = "ffl-test",
+    tags = ["manual"],
+    deps = [
+        "//zircon/system/ulib/ffl",
+        "//zircon/system/ulib/zxtest",
+    ] + select({
+        "@platforms//os:fuchsia": ["//sdk/lib/fdio"],
+        "//conditions:default": [],
+    }),
+)
+
+host_test(
+    name = "ffl_host_test",
+    binary = ":ffl",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+fx_unittest_package(
+    name = "ffl-test-pkg",
+    package_name = "ffl-test",
+    unit_tests = [":ffl"],
+    visibility = ["//zircon/system/ulib:__pkg__"],
+)

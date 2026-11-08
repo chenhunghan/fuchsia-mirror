@@ -93,6 +93,9 @@ enum BuiltinRunnerError {
 
     #[error("cannot create job: {}", _0)]
     JobCreation(zx_status::Status),
+
+    #[error("cannot set job name: {}", _0)]
+    JobSetName(zx_status::Status),
 }
 
 impl From<BuiltinRunnerError> for zx::Status {
@@ -104,7 +107,9 @@ impl From<BuiltinRunnerError> for zx::Status {
             | BuiltinRunnerError::IllegalProgram => {
                 zx::Status::err_from_raw(fcomponent::Error::InvalidArguments.into_primitive() as i32)
             }
-            BuiltinRunnerError::JobCreation(status) => status,
+            BuiltinRunnerError::JobCreation(status) | BuiltinRunnerError::JobSetName(status) => {
+                status
+            }
         }
     }
 }
@@ -145,6 +150,10 @@ impl BuiltinRunner {
         });
 
         let job = self.root_job.create_child_job().map_err(BuiltinRunnerError::JobCreation)?;
+        if let Some(url) = start_info.resolved_url.as_deref() {
+            let name = url.rsplit_once(['/', '#']).map_or(url, |(_, name)| name);
+            job.set_name(&zx::Name::new_lossy(name)).map_err(BuiltinRunnerError::JobSetName)?;
+        }
         let job2 = job.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap();
         let (lifecycle_client, lifecycle_server) =
             endpoints::create_proxy::<fprocess_lifecycle::LifecycleMarker>();
@@ -730,13 +739,14 @@ mod tests {
     fn make_test_exit_immediately() -> BuiltinProgramGen {
         Box::new(|| {
             Box::new(
-                move |_job: zx::Job,
+                move |job: zx::Job,
                       _namespace: Namespace,
                       _outgoing_dir: ServerEnd<fio::DirectoryMarker>,
                       lifecycle_server: ServerEnd<fprocess_lifecycle::LifecycleMarker>,
                       _program: Option<fdata::Dictionary>,
                       _config: Option<zx::Vmo>| {
                     async move {
+                        assert_eq!(job.get_name().unwrap(), zx::Name::new_lossy("elf_runner.cm"));
                         let _lifecycle_server = lifecycle_server;
                     }
                     .boxed()
@@ -748,13 +758,14 @@ mod tests {
     fn make_test_watch_lifecycle() -> BuiltinProgramGen {
         Box::new(|| {
             Box::new(
-                move |_job: zx::Job,
+                move |job: zx::Job,
                       _namespace: Namespace,
                       _outgoing_dir: ServerEnd<fio::DirectoryMarker>,
                       lifecycle_server: ServerEnd<fprocess_lifecycle::LifecycleMarker>,
                       _program: Option<fdata::Dictionary>,
                       _config: Option<zx::Vmo>| {
                     async move {
+                        assert_eq!(job.get_name().unwrap(), zx::Name::new_lossy("elf_runner.cm"));
                         let mut stream = lifecycle_server.into_stream();
                         let _ = stream.try_next().await;
                         drop(stream);
@@ -771,13 +782,14 @@ mod tests {
     fn make_test_hang() -> BuiltinProgramGen {
         Box::new(|| {
             Box::new(
-                move |_job: zx::Job,
+                move |job: zx::Job,
                       _namespace: Namespace,
                       _outgoing_dir: ServerEnd<fio::DirectoryMarker>,
                       lifecycle_server: ServerEnd<fprocess_lifecycle::LifecycleMarker>,
                       _program: Option<fdata::Dictionary>,
                       _config: Option<zx::Vmo>| {
                     async move {
+                        assert_eq!(job.get_name().unwrap(), zx::Name::new_lossy("elf_runner.cm"));
                         let _lifecycle_server = lifecycle_server;
                         std::future::pending::<()>().await;
                     }
@@ -787,10 +799,11 @@ mod tests {
         })
     }
 
-    #[test_case(false; "non-critical")]
-    #[test_case(true; "critical")]
+    #[test_case(false, "fuchsia-builtin://elf_runner.cm"; "non-critical")]
+    #[test_case(false, "fuchsia-builtin://#elf_runner.cm"; "non-critical-fragment-url")]
+    #[test_case(true, "fuchsia-builtin://#elf_runner.cm"; "critical")]
     #[fuchsia::test]
-    async fn builtin_component_exit(main_process_critical: bool) {
+    async fn builtin_component_exit(main_process_critical: bool, resolved_url: &str) {
         static ROOT_JOB: LazyLock<zx::Job> =
             LazyLock::new(|| fuchsia_runtime::job_default().create_child_job().unwrap());
         let root_job_handle = ROOT_JOB.as_handle_ref().cast();
@@ -817,7 +830,8 @@ mod tests {
         // Start the "test" component.
         let (svc, svc_server_end) = fidl::endpoints::create_endpoints();
         open_channel_in_namespace("/svc", fio::PERM_READABLE, svc_server_end).unwrap();
-        let (start_info, _outgoing_dir) = make_start_info(svc, main_process_critical);
+        let (mut start_info, _outgoing_dir) = make_start_info(svc, main_process_critical);
+        start_info.resolved_url = Some(resolved_url.to_string());
         client.start(start_info, server_end).unwrap();
 
         // The test component exits immediately, so we should observe a stop event on the

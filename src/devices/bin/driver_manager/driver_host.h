@@ -113,6 +113,7 @@ class DriverHostComponent final
                       fbl::DoublyLinkedList<std::unique_ptr<DriverHostComponent>>* driver_hosts,
                       std::shared_ptr<bool> server_connected, std::string_view name_for_colocation,
                       fidl::ClientEnd<fuchsia_driver_loader::DriverHost> loader_client = {});
+  ~DriverHostComponent() { alive_.reset(); }
 
   void Start(fidl::ClientEnd<fuchsia_driver_framework::Node> client_end, std::string node_name,
              fuchsia_driver_framework::wire::NodePropertyDictionary2 node_properties,
@@ -154,6 +155,7 @@ class DriverHostComponent final
 
   bool IsDynamicLinkingEnabled() const override { return dynamic_linker_driver_loader_.is_valid(); }
 
+  std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
   fidl::WireSharedClient<fuchsia_driver_host::DriverHost> driver_host_;
   std::string name_for_colocation_;
   mutable std::optional<fuchsia_driver_host::ProcessInfo> process_info_;

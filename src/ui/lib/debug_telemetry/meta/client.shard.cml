@@ -2,5 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 {
-    include: [ "//src/ui/lib/debug_telemetry/meta/kernel.shard.cml" ],
+    include: [
+        "//src/ui/lib/debug_telemetry/meta/gpu.shard.cml",
+        "//src/ui/lib/debug_telemetry/meta/kernel.shard.cml",
+        "//src/ui/lib/debug_telemetry/meta/power.shard.cml",
+        "//src/ui/lib/debug_telemetry/meta/scenic.shard.cml",
+    ],
 }

@@ -1,0 +1,39 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_binary(
+    name = "mkfs-msdosfs",
+    srcs = [
+        "mkfs_msdos.c",
+        "mkfs_msdos.h",
+        "newfs_msdos.c",
+    ],
+    # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
+    copts = ["-Wno-conversion"],
+    defines = select({
+        "//build/bazel/platforms:is_host_os": [
+            "_XOPEN_SOURCE",
+            "_GNU_SOURCE",
+        ],
+        "//conditions:default": [],
+    }),
+    disable_build_flags = select({
+        "@platforms//os:fuchsia": ["//build/config/fuchsia:fdio_config"],
+        "//conditions:default": [],
+    }),
+    visibility = [
+        "//:__pkg__",
+        "//src/storage/fuchsia-fatfs:__pkg__",
+        "//tools/make-fuchsia-vol:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
+    deps = select({
+        "@platforms//os:fuchsia": ["//sdk/lib/fdio"],
+        "//conditions:default": [],
+    }),
+)

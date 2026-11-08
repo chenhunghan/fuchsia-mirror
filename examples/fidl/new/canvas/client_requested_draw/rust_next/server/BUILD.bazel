@@ -1,0 +1,48 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/components:fx_component.bzl", "fx_component", "fx_component_manifest")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    # Preserve the GN output_name expected by meta/server.cml.
+    binary_name = "server_bin",
+    edition = "2024",
+    deps = [
+        "//examples/fidl/new/canvas/client_requested_draw/fidl:examples.canvas.clientrequesteddraw_rust_next",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust_next/fidl_next",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-sync",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged_bin",
+    binary = ":bin",
+    binary_name = "server_bin",
+)
+
+fx_component_manifest(
+    name = "server_manifest",
+    component_name = "canvas_clientrequesteddraw_server",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "//examples/fidl/new/canvas/client_requested_draw:meta/server.cml",
+)
+
+fx_component(
+    name = "server",
+    compiled_manifest = ":server_manifest",
+    visibility = ["//examples/fidl/new/canvas/client_requested_draw/rust_next:__pkg__"],
+    deps = [":bin_packaged_bin"],
+)

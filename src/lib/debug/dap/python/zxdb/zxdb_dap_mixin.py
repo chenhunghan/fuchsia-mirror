@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+from collections.abc import Sequence
 from typing import Any, Protocol
 
 from pydantic import Field, model_validator
@@ -14,8 +15,11 @@ from zxdb_dap.models import (
     ZxdbConsoleCommandArguments,
     ZxdbConsoleCommandResponse,
     ZxdbPauseArguments,
+    ZxdbSetTracepointsArguments,
+    ZxdbSetTracepointsResponse,
     ZxdbStackTraceResponse,
     ZxdbThreadsResponse,
+    ZxdbTracepointSpec,
 )
 
 
@@ -43,7 +47,7 @@ class ZxdbDetachArguments(DapBaseModel):
     detach_all: bool | None = Field(alias="all", default=None)
 
     @model_validator(mode="after")
-    def validate_exclusive_args(self) -> "ZxdbDetachArguments":
+    def validate_exclusive_args(self) -> ZxdbDetachArguments:
         if self.detach_all and self.pid is not None:
             raise ValueError("Cannot specify pid when detach_all is True")
         if not self.detach_all and self.pid is None:
@@ -175,3 +179,20 @@ class ZxdbDapMixin:
         """
         resp = await self._send_request("zxdb.ConsoleCommand", args)
         return ZxdbConsoleCommandResponse.model_validate(resp)
+
+    async def zxdb_set_tracepoints(
+        self: SupportsSendRequest,
+        args: ZxdbSetTracepointsArguments | Sequence[ZxdbTracepointSpec],
+    ) -> ZxdbSetTracepointsResponse:
+        """Sends a custom zxdb.SetTracepoints request.
+
+        Args:
+            args: Arguments or sequence of tracepoint specifications.
+
+        Returns:
+            ZxdbSetTracepointsResponse: Response containing tracepoints info.
+        """
+        if not isinstance(args, ZxdbSetTracepointsArguments):
+            args = ZxdbSetTracepointsArguments(tracepoints=list(args))
+        resp = await self._send_request("zxdb.SetTracepoints", args)
+        return ZxdbSetTracepointsResponse.model_validate(resp)

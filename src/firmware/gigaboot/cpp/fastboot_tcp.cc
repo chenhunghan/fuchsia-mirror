@@ -15,7 +15,7 @@
 #include "gigaboot/src/tcp.h"
 #include "lib/zx/time.h"
 #include "mdns.h"
-#include "phys/efi/main.h"
+#include "utils.h"
 #include "zircon_boot_ops.h"
 
 namespace gigaboot {

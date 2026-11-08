@@ -41,11 +41,17 @@ void cpp_dlog_sync() { dlog_sync(); }
 FFI_ALWAYS_INLINE void cpp_dlog_panic_start() { dlog_panic_start(); }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE bool cpp_dlog_panic_started() { return dlog_panic_started(); }
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE void cpp_dlog_bluescreen_init() { dlog_bluescreen_init(); }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE size_t cpp_dlog_render_to_crashlog(char* ptr, size_t len) {
   return dlog_render_to_crashlog({ptr, len});
 }
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE bool cpp_dlog_bypass() { return dlog_bypass(); }
 
 }  // extern "C"

@@ -79,11 +79,18 @@ class FakeCodecAdapterEvents : public CodecAdapterEvents {
 
   void onCoreCodecOutputPacket(CodecPacket *packet, bool error_detected_before,
                                bool error_detected_during) override {
-    auto output_format = codec_adapter_->CoreCodecGetOutputFormat(1u, 1u);
-    // Test a representative value.
-    EXPECT_EQ(
-        kBearVideoWidth,
-        output_format.format_details().domain().video().uncompressed().image_format.coded_width);
+    // Run `ASSERT_TRUE` checks inside a lambda so an assertion failure returns only from the
+    // lambda rather than skipping `output_packets_done_.push_back` / `cond_.notify_all()` below
+    // (which would deadlock `WaitForOutputPacketCount` on the main test thread).
+    [&]() {
+      auto output_format = codec_adapter_->CoreCodecGetOutputFormat(1u, 1u);
+      ASSERT_TRUE(output_format.has_format_details());
+      ASSERT_TRUE(output_format.format_details().has_image_format());
+      const auto &image_format = output_format.format_details().image_format();
+      ASSERT_TRUE(image_format.has_size());
+      // Test a representative value.
+      EXPECT_EQ(kBearVideoWidth, image_format.size().width);
+    }();
 
     std::lock_guard lock(lock_);
     output_packets_done_.push_back(packet);

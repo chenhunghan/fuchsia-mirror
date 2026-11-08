@@ -1,0 +1,61 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_rules_common//packages:resources.bzl", "resource")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_component.bzl",
+    "fx_unittest_component",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "pkg_from_framework_bin",
+    srcs = ["pkg_from_framework.rs"],
+    aspect_hints = ["//src/lib/fuchsia-component-test:includes"],
+    crate_name = "pkg_from_framework",
+    crate_root = "pkg_from_framework.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-fs",
+        "//src/sys/lib/cm_rust",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+resource(
+    name = "example_config",
+    src = "example_config.txt",
+    dest = "data/example_config",
+)
+
+fx_unittest_component(
+    name = "pkg_from_framework_test_component",
+    binary = ":pkg_from_framework_bin",
+    component_name = "pkg_from_framework_test",
+)
+
+fx_package(
+    name = "pkg_from_framework_test_package",
+    package_name = "pkg_from_framework_test",
+    components = [
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+        "//src/sys/component_manager:component-manager-realm-builder-cmp",
+    ],
+    resources = [":example_config"],
+    test_components = [":pkg_from_framework_test_component"],
+)
+
+fx_test(
+    name = "pkg_from_framework_test",
+    package = ":pkg_from_framework_test_package",
+    visibility = ["//src/sys/component_manager:__pkg__"],
+)

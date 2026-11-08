@@ -8,15 +8,15 @@
 //! runtime.
 
 use crate::enumerations::{EngineConsoleType, ShowDetail, SnapshotInfo};
-use async_trait::async_trait;
+use crate::input_types::InputStep;
 use emulator_instance::{EmulatorConfiguration, EmulatorInstanceData, EngineState, EngineType};
 use ffx_config::EnvironmentContext;
+pub use ffx_futures::LocalBoxFuture as BoxFuture;
 use fho::{Result, user_error};
 use std::backtrace::Backtrace;
 use std::path::Path;
 use std::process::Command;
 
-#[async_trait(?Send)]
 pub trait EmulatorEngine: Send + Sync {
     /// Expose the EmulatorInstanceData object. This stores all the instance data for the
     /// emulator instance. There is no "mut" getter to avoid changing the contents without
@@ -34,42 +34,50 @@ pub trait EmulatorEngine: Send + Sync {
     /// input, since the object should be fully configured by the EngineBuilder. At its most basic,
     /// this should assemble the command-line to invoke the emulator binary. If support processes
     /// are required, or temporary files need to be written to disk, that would be handled here.
-    async fn stage(&mut self) -> Result<()> {
-        let bt = Backtrace::force_capture();
-        unimplemented!(
-            "These default trait implementations are to allow for easier testing and \
-            should not be used directly\n{:?}",
-            bt
-        )
+    fn stage(&mut self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async {
+            let bt = Backtrace::force_capture();
+            unimplemented!(
+                "These default trait implementations are to allow for easier testing and \
+                should not be used directly\n{:?}",
+                bt
+            )
+        })
     }
 
     /// Given a staged emulator instance, start it running. When the function returns, either the
     /// emulator will be running independently, or an error will be sent back explaining the failure.
-    async fn start(
-        &mut self,
-        _context: &EnvironmentContext,
+    fn start<'a>(
+        &'a mut self,
+        _context: &'a EnvironmentContext,
         mut _emulator_cmd: Command,
-    ) -> Result<i32> {
-        let bt = Backtrace::force_capture();
-        unimplemented!(
-            "These default trait implementations are to allow for easier testing and \
-            should not be used directly\n{:?}",
-            bt
-        )
+    ) -> BoxFuture<'a, Result<i32>> {
+        Box::pin(async {
+            let bt = Backtrace::force_capture();
+            unimplemented!(
+                "These default trait implementations are to allow for easier testing and \
+                should not be used directly\n{:?}",
+                bt
+            )
+        })
     }
 
     /// Shut down a running emulator instance. The engine should have been instantiated from a saved
     /// and serialized instance, so no additional initialization should be needed. This function
-    /// will terminate a running emulator instance, which will be specified on the command line. It
-    /// may return an error if the instance doesn't exist or the shut down fails, but should succeed
-    /// if it's no longer running or gets successfully shut down.
-    async fn stop(&mut self) -> Result<()> {
-        let bt = Backtrace::force_capture();
-        unimplemented!(
-            "These default trait implementations are to allow for easier testing and \
-            should not be used directly\n{:?}",
-            bt
-        )
+    /// will terminate a running emulator instance, which will be specified on the command line.
+    /// The QEMU-based engines (femu and qemu) also wait for the emulator's process to exit, so
+    /// that the instance can be started again as soon as this returns. It may return an error if
+    /// the instance doesn't exist or the shut down fails, but should succeed if it's no longer
+    /// running or gets successfully shut down.
+    fn stop(&mut self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async {
+            let bt = Backtrace::force_capture();
+            unimplemented!(
+                "These default trait implementations are to allow for easier testing and \
+                should not be used directly\n{:?}",
+                bt
+            )
+        })
     }
 
     /// Takes a screenshot of the emulator's primary display and saves it to the given path.
@@ -91,13 +99,15 @@ pub trait EmulatorEngine: Send + Sync {
     /// # Errors
     ///
     /// Returns an error if the underlying capture, conversion, or file I/O fails.
-    async fn screenshot(&mut self, _path: &Path) -> Result<()> {
-        let bt = Backtrace::force_capture();
-        unimplemented!(
-            "These default trait implementations are to allow for easier testing and \
-            should not be used directly\n{:?}",
-            bt
-        )
+    fn screenshot<'a>(&'a mut self, _path: &'a Path) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async {
+            let bt = Backtrace::force_capture();
+            unimplemented!(
+                "These default trait implementations are to allow for easier testing and \
+                should not be used directly\n{:?}",
+                bt
+            )
+        })
     }
 
     /// Saves a snapshot of the running emulator under the given name. A snapshot captures the
@@ -106,8 +116,8 @@ pub trait EmulatorEngine: Send + Sync {
     ///
     /// Snapshots are an optional capability: the default implementation, which is used by the
     /// engines that don't support them, returns an error.
-    async fn save_snapshot(&mut self, _name: &str) -> Result<()> {
-        Err(user_error!("Snapshots are not supported by this emulator engine."))
+    fn save_snapshot<'a>(&'a mut self, _name: &'a str) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { Err(user_error!("Snapshots are not supported by this emulator engine.")) })
     }
 
     /// Restores the running emulator to the state which was saved in the snapshot with the given
@@ -115,8 +125,8 @@ pub trait EmulatorEngine: Send + Sync {
     ///
     /// The default implementation, which is used by the engines that don't support snapshots,
     /// returns an error.
-    async fn load_snapshot(&mut self, _name: &str) -> Result<()> {
-        Err(user_error!("Snapshots are not supported by this emulator engine."))
+    fn load_snapshot<'a>(&'a mut self, _name: &'a str) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { Err(user_error!("Snapshots are not supported by this emulator engine.")) })
     }
 
     /// Returns the snapshots which have been saved for the emulator instance: the ones which the
@@ -124,8 +134,34 @@ pub trait EmulatorEngine: Send + Sync {
     ///
     /// The default implementation, which is used by the engines that don't support snapshots,
     /// returns an error.
-    async fn list_snapshots(&mut self) -> Result<Vec<SnapshotInfo>> {
-        Err(user_error!("Snapshots are not supported by this emulator engine."))
+    fn list_snapshots(&mut self) -> BoxFuture<'_, Result<Vec<SnapshotInfo>>> {
+        Box::pin(async { Err(user_error!("Snapshots are not supported by this emulator engine.")) })
+    }
+
+    /// Deletes the snapshot with the given name, whether the emulator is running or stopped.
+    ///
+    /// The default implementation, which is used by the engines that don't support snapshots,
+    /// returns an error.
+    fn delete_snapshot<'a>(&'a mut self, _name: &'a str) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async { Err(user_error!("Snapshots are not supported by this emulator engine.")) })
+    }
+
+    /// Injects input events into the emulator's virtual input devices.
+    ///
+    /// Each [`InputStep`] is sent as one QMP `input-send-event` command. The engine waits for
+    /// [`InputStep::delay_after`] after each step except the last. Only the QEMU engine supports
+    /// this method.
+    ///
+    /// # Errors
+    ///
+    /// Errors if the engine doesn't support input, the emulator is not running, or the emulator
+    /// rejects an event. The error names the step that failed. The steps before it were delivered.
+    fn send_input<'a>(&'a mut self, _steps: &'a [InputStep]) -> BoxFuture<'a, Result<()>> {
+        // Input injection is an optional capability, like snapshots. Engines that support it
+        // override this method; the others return this error.
+        Box::pin(async {
+            Err(user_error!("Input injection is not supported by this emulator engine."))
+        })
     }
 
     /// Output the details of an existing emulation instance. The engine should have been
@@ -169,13 +205,15 @@ pub trait EmulatorEngine: Send + Sync {
     /// Returns true if this instance of the emulator is currently running.
     /// This is checked by using signal to the process id, no consideration is
     /// made for multi threaded access.
-    async fn is_running(&mut self) -> bool {
-        let bt = Backtrace::force_capture();
-        unimplemented!(
-            "These default trait implementations are to allow for easier testing and \
-            should not be used directly\n{:?}",
-            bt
-        )
+    fn is_running(&mut self) -> BoxFuture<'_, bool> {
+        Box::pin(async {
+            let bt = Backtrace::force_capture();
+            unimplemented!(
+                "These default trait implementations are to allow for easier testing and \
+                should not be used directly\n{:?}",
+                bt
+            )
+        })
     }
 
     /// Once the engine has been staged, this generates the command line required to start
@@ -241,12 +279,14 @@ pub trait EmulatorEngine: Send + Sync {
     }
     /// Serialize the contents of the EmulatorEngine to its instance directory on the
     /// local file system.
-    async fn save_to_disk(&self) -> Result<()> {
-        let bt = Backtrace::force_capture();
-        unimplemented!(
-            "These default trait implementations are to allow for easier testing and \
-            should not be used directly\n{:?}",
-            bt
-        )
+    fn save_to_disk(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async {
+            let bt = Backtrace::force_capture();
+            unimplemented!(
+                "These default trait implementations are to allow for easier testing and \
+                should not be used directly\n{:?}",
+                bt
+            )
+        })
     }
 }

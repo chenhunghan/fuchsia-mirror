@@ -11,8 +11,7 @@
 #include <sstream>
 #include <string_view>
 
-#include <re2/re2.h>
-
+#include "re2/re2.h"
 #include "src/developer/forensics/utils/regexp.h"
 #include "src/lib/fxl/strings/split_string.h"
 #include "src/lib/fxl/strings/string_printf.h"

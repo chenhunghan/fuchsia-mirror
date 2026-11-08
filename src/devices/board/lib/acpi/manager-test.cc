@@ -18,6 +18,7 @@
 #include <zxtest/zxtest.h>
 
 #include "src/devices/board/lib/acpi/acpi.h"
+#include "src/devices/board/lib/acpi/device.h"
 #include "src/devices/board/lib/acpi/manager-fuchsia.h"
 #include "src/devices/board/lib/acpi/test/mock-acpi.h"
 #include "src/devices/board/lib/acpi/test/mock-pci.h"
@@ -553,10 +554,7 @@ TEST_F(AcpiManagerTest, TestInterruptsMakeFragments) {
                       .Shareable = 0,
                       .WakeCapable = 0,
                       .InterruptCount = 1,
-                      .u =
-                          {
-                              .Interrupt = 2,
-                          },
+                      .Interrupt = 2,
                   },
           },
   };
@@ -585,6 +583,154 @@ TEST_F(AcpiManagerTest, TestInterruptsMakeFragments) {
   device_async_remove(mock_root_.get());
   ASSERT_OK(mock_ddk::ReleaseFlaggedDevices(mock_root_.get()));
   mock_root_.reset();
+}
+
+class AcpiManagerCmosRtcTest : public AcpiManagerTest {
+ public:
+  void SetUp() override {
+    AcpiManagerTest::SetUp();
+    acpi_.SetHasLegacyCmosRtc(true);
+    ASSERT_NO_FATAL_FAILURE(InsertDeviceBelow("\\", std::make_unique<Device>("_SB_")));
+  }
+
+  // Adds a CMOS RTC below \_SB_ with standard I/O port and IRQ resources and returns its handle.
+  Device* AddRtc(const std::string& name, uint64_t sta, const std::string& hid = "PNP0B00",
+                 std::initializer_list<std::string> cids = {}) {
+    auto device = std::make_unique<Device>(name);
+    device->SetSta(sta);
+    device->SetHid(hid);
+    device->SetCids(cids);
+    device->AddResource(ACPI_RESOURCE{
+        .Type = ACPI_RESOURCE_TYPE_IO,
+        .Length = sizeof(ACPI_RESOURCE),
+        .Data = {.Io = {.IoDecode = ACPI_DECODE_16,
+                        .Alignment = 1,
+                        .AddressLength = 8,
+                        .Minimum = 0x70,
+                        .Maximum = 0x70}},
+    });
+    device->AddResource(ACPI_RESOURCE{
+        .Type = ACPI_RESOURCE_TYPE_IRQ,
+        .Data = {.Irq = {.DescriptorLength = sizeof(ACPI_RESOURCE_IRQ),
+                         .Triggering = ACPI_EDGE_SENSITIVE,
+                         .Polarity = ACPI_ACTIVE_HIGH,
+                         .InterruptCount = 1,
+                         .Interrupt = 8}},
+    });
+    Device* handle = device.get();
+    InsertDeviceBelow("\\_SB_", std::move(device));
+    ZX_ASSERT(!CURRENT_TEST_HAS_FATAL_FAILURE());
+    return handle;
+  }
+
+  void DiscoverConfigure() {
+    ASSERT_TRUE(manager_.DiscoverDevices().is_ok());
+    ASSERT_TRUE(manager_.ConfigureDiscoveredDevices().is_ok());
+  }
+};
+
+TEST_F(AcpiManagerCmosRtcTest, HiddenRtcIsEnabledWhenFadtDeclaresIt) {
+  Device* rtc = AddRtc("RTC_", 0);
+  rtc->SetResourcesReadableWhileDisabled();
+  ASSERT_NO_FATAL_FAILURE(DiscoverConfigurePublish());
+
+  acpi::DeviceBuilder* builder = manager_.LookupDevice(rtc);
+  ASSERT_NOT_NULL(builder);
+  ASSERT_NO_FATAL_FAILURE(
+      ExpectProps(builder, {ddk::MakeStrProperty("fuchsia.acpi.HID", "PNP0B00")}));
+
+  // <root> -> _SB_ -> RTC_ -> RTC_-irq000, pt
+  zx_device_t* sb = mock_root_->GetLatestChild();
+  ASSERT_NOT_NULL(sb);
+  ASSERT_STREQ("_SB_", sb->name());
+  zx_device_t* dev = sb->GetLatestChild();
+  ASSERT_NOT_NULL(dev);
+  ASSERT_STREQ("RTC_", dev->name());
+  std::unordered_set<std::string> expected{"RTC_-irq000", "pt"};
+  for (auto& child : dev->children()) {
+    EXPECT_EQ(expected.erase(child->name()), 1, "Unexpected child %s", child->name());
+  }
+  EXPECT_EQ(0, expected.size());
+
+  acpi::Device* acpi_dev = dev->GetDeviceContext<acpi::Device>();
+  ASSERT_NOT_NULL(acpi_dev);
+  EXPECT_EQ(acpi_dev->GetInterrupt(0).status_value(), ZX_ERR_INTERNAL);
+  EXPECT_EQ(acpi_dev->GetInterrupt(1).status_value(), ZX_ERR_OUT_OF_RANGE);
+
+  device_async_remove(mock_root_.get());
+  ASSERT_OK(mock_ddk::ReleaseFlaggedDevices(mock_root_.get()));
+  mock_root_.reset();
+}
+
+TEST_F(AcpiManagerCmosRtcTest, MatchesFirstCid) {
+  Device* rtc = AddRtc("RTC_", 0, "INT0001", {"PNP0B00"});
+  rtc->SetResourcesReadableWhileDisabled();
+  ASSERT_NO_FATAL_FAILURE(DiscoverConfigure());
+
+  acpi::DeviceBuilder* builder = manager_.LookupDevice(rtc);
+  ASSERT_NOT_NULL(builder);
+  ASSERT_NO_FATAL_FAILURE(
+      ExpectProps(builder, {ddk::MakeStrProperty("fuchsia.acpi.HID", "INT0001"),
+                            ddk::MakeStrProperty("fuchsia.acpi.FIRST_CID", "PNP0B00")}));
+}
+
+TEST_F(AcpiManagerCmosRtcTest, DoesNotMatchSecondCid) {
+  Device* rtc = AddRtc("RTC_", 0, "INT0001", {"INT0002", "PNP0B00"});
+  ASSERT_NO_FATAL_FAILURE(DiscoverConfigure());
+
+  EXPECT_NULL(manager_.LookupDevice(rtc));
+}
+
+TEST_F(AcpiManagerCmosRtcTest, NotEnabledWithoutLegacyCmosRtc) {
+  acpi_.SetHasLegacyCmosRtc(false);
+  Device* rtc = AddRtc("RTC_", 0);
+  ASSERT_NO_FATAL_FAILURE(DiscoverConfigure());
+
+  EXPECT_NULL(manager_.LookupDevice(rtc));
+}
+
+TEST_F(AcpiManagerCmosRtcTest, NotEnabledWhenEnabledRtcFollows) {
+  Device* hidden = AddRtc("RTC_", 0);
+  Device* enabled = AddRtc("RTC1", 0xf);
+  ASSERT_NO_FATAL_FAILURE(DiscoverConfigure());
+
+  EXPECT_NULL(manager_.LookupDevice(hidden));
+  ASSERT_NOT_NULL(manager_.LookupDevice(enabled));
+}
+
+TEST_F(AcpiManagerCmosRtcTest, NotEnabledWhenEnabledRtcPrecedes) {
+  Device* enabled = AddRtc("RTC1", 0xf);
+  Device* hidden = AddRtc("RTC_", 0);
+  ASSERT_NO_FATAL_FAILURE(DiscoverConfigure());
+
+  EXPECT_NULL(manager_.LookupDevice(hidden));
+  ASSERT_NOT_NULL(manager_.LookupDevice(enabled));
+}
+
+TEST_F(AcpiManagerCmosRtcTest, OnlyFirstHiddenRtcIsEnabled) {
+  Device* first = AddRtc("RTC_", 0);
+  first->SetResourcesReadableWhileDisabled();
+  Device* second = AddRtc("RTC1", 0);
+  ASSERT_NO_FATAL_FAILURE(DiscoverConfigure());
+
+  acpi::DeviceBuilder* builder = manager_.LookupDevice(first);
+  ASSERT_NOT_NULL(builder);
+  ASSERT_NO_FATAL_FAILURE(
+      ExpectProps(builder, {ddk::MakeStrProperty("fuchsia.acpi.HID", "PNP0B00")}));
+  EXPECT_NULL(manager_.LookupDevice(second));
+}
+
+TEST_F(AcpiManagerCmosRtcTest, PresentButDisabledRtcIsNotForceEnabled) {
+  Device* present_disabled = AddRtc("RTC_", ACPI_STA_DEVICE_PRESENT | ACPI_STA_DEVICE_FUNCTIONING);
+  Device* hidden = AddRtc("RTC1", 0);
+  ASSERT_NO_FATAL_FAILURE(DiscoverConfigure());
+
+  // The present-but-disabled RTC remains discovered without decoding _CRS (so only ACPI_ID is
+  // populated), and suppresses force-enabling the hidden RTC.
+  acpi::DeviceBuilder* builder = manager_.LookupDevice(present_disabled);
+  ASSERT_NOT_NULL(builder);
+  EXPECT_EQ(builder->GetStrProps().size(), 1u);
+  EXPECT_NULL(manager_.LookupDevice(hidden));
 }
 
 }  // namespace

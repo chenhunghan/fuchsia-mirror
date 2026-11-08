@@ -8,7 +8,10 @@
 
 #include <zircon/types.h>
 
+#include <new>
+
 #include <kernel/ffi.h>
+#include <ktl/memory.h>
 
 #include "vm/vm_object_paged.h"
 
@@ -74,6 +77,10 @@ FFI_ALWAYS_INLINE const VmCowPages* cpp_vm_object_paged_cow_pages(const VmObject
   return vmo->cow_pages_.get();
 }
 
+FFI_ALWAYS_INLINE uint64_t cpp_vm_object_paged_lock_order(const VmObjectPaged* vmo) {
+  return vmo->lock_order();
+}
+
 FFI_ALWAYS_INLINE VmObjectPaged* cpp_vm_object_as_vm_object_paged(VmObject* vmo) {
   return DownCastVmObject<VmObjectPaged>(vmo);
 }
@@ -123,4 +130,32 @@ FFI_ALWAYS_INLINE bool cpp_vm_object_paged_user_stream_size_locked(
   return false;
 }
 
+FFI_ALWAYS_INLINE zx_status_t cpp_vm_object_paged_get_lookup_cursor_locked(
+    ffi::Uninitialized<VmCowPagesLookupCursorResult>* out, VmObjectPaged* vmo, uint64_t offset,
+    uint64_t max_len) TA_NO_THREAD_SAFETY_ANALYSIS {
+  // Not out->Initialize(), which would move the result from a temporary on the stack.
+  auto* cursor = new (out->GetAddressUnchecked())
+      VmCowPagesLookupCursorResult{vmo->GetLookupCursorLocked(offset, max_len)};
+  zx_status_t status = cursor->result.status_value();
+  if (unlikely(status != ZX_OK)) {
+    ktl::destroy_at(cursor);
+  }
+  return status;
+}
+
+FFI_ALWAYS_INLINE void cpp_vm_object_paged_mark_modified_locked(VmObjectPaged* vmo)
+    TA_NO_THREAD_SAFETY_ANALYSIS {
+  vmo->mark_modified_locked();
+}
+
+FFI_ALWAYS_INLINE void cpp_vm_object_paged_range_change_update_locked(
+    VmObjectPaged* vmo, uint64_t offset, uint64_t len, VmObject::RangeChangeOp op)
+    TA_NO_THREAD_SAFETY_ANALYSIS {
+  vmo->RangeChangeUpdateLocked(VmCowRange(offset, len), op);
+}
+
+FFI_ALWAYS_INLINE bool cpp_vm_object_paged_can_dedup_zero_pages_locked(VmObjectPaged* vmo)
+    TA_NO_THREAD_SAFETY_ANALYSIS {
+  return vmo->CanDedupZeroPagesLocked();
+}
 }  // extern "C"

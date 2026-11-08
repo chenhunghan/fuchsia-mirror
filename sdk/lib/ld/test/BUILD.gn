@@ -108,6 +108,10 @@ source_set("load-tests") {
       "load-tests-llvm-profdata.cc",
       "remote-tests.cc",
     ]
+
+    # TODO(https://fxbug.dev/581073414): Enable on host once
+    # rust_eh_personality handling is resolved.
+    sources += [ "load-tests-rust.cc" ]
     deps += [
       ":load-tests-libc-needed",
       ":remote-perfect-symbol-filter-test",
@@ -141,11 +145,13 @@ source_set("load-tests") {
 
 # Collect all the .test-data deps used by load-tests.
 load_tests_in_process = [
+  "all-weak-symbols",
   "basic-dep",
   "indirect-deps",
   "init-fini",
   "ld-dep",
   "many-deps",
+  "one-weak-symbol",
   "partial-page-bss",
   "partial-page-bss-garbage-at-eof",
   "passive-abi-basic",
@@ -156,8 +162,6 @@ load_tests_in_process = [
   "relative-reloc",
   "ret17",
   "symbolic-namespace",
-  "one-weak-symbol",
-  "all-weak-symbols",
   "symbolic-reloc",
   "tls-desc",
   "tls-exec-only",
@@ -184,6 +188,11 @@ if (is_fuchsia) {
     "ldsvc-config",
     "llvm-profdata",
   ]
+
+  # TODO(https://fxbug.dev/581073414): Enable on host once
+  # rust_eh_personality handling is resolved.
+  load_tests_in_process += [ "rust-basic" ]
+
   load_tests += [
     "second-session",
     "second-session-module",

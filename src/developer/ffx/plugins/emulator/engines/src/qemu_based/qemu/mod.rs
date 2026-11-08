@@ -10,16 +10,18 @@
 use super::get_host_tool;
 use crate::qemu_based::QemuBasedEngine;
 use crate::qemu_based::comms::QemuSocket;
-use async_trait::async_trait;
 use emulator_instance::{
     CpuArchitecture, DiskImage, EmulatorConfiguration, EmulatorInstanceData, EmulatorInstanceInfo,
-    EmulatorInstances, EngineState, EngineType, NetworkingMode, PointingDevice, write_to_disk,
+    EmulatorInstances, EngineState, EngineType, PointingDevice, write_to_disk,
 };
 use ffx_config::EnvironmentContext;
 use ffx_emulator_common::config::QEMU_TOOL;
 use ffx_emulator_common::{find_unused_vsock_cid, validate_snapshot_name};
-use ffx_emulator_config::{EmulatorEngine, EngineConsoleType, ShowDetail, SnapshotInfo};
-use fho::{Result, bug, return_bug, return_user_error};
+use ffx_emulator_config::{
+    BoxFuture, EmulatorEngine, EngineConsoleType, InputStep, ShowDetail, SnapshotInfo,
+};
+use fho::{Result, bug, return_bug, return_user_error, user_error};
+use fuchsia_async::Timer;
 use monitor::Monitor;
 use serde_json::{Deserializer, Value, json};
 use std::path::{Path, PathBuf};
@@ -116,18 +118,16 @@ impl QemuEngine {
         }
         self.check_snapshots_enabled()?;
         let emu_config = self.data.get_emulator_configuration();
-        let socket_path = self.get_path_for_console_type(
-            &emu_config.runtime.instance_directory,
-            EngineConsoleType::Command,
-        );
+        let socket_path = self.get_path_for_console_type(EngineConsoleType::Command);
         let memory = emu_config.device.memory.as_bytes().unwrap_or(u64::MAX);
         Monitor::connect(&socket_path, monitor::snapshot_timeout(memory))
     }
 
-    /// Returns the snapshots which are stored in the disk image of the stopped emulator, as
-    /// listed by the `qemu-img` tool. While the emulator is running it holds a lock on the image,
-    /// and the snapshots are listed through its monitor instead.
-    fn stored_snapshots(&self) -> Result<Vec<SnapshotInfo>> {
+    /// Runs `qemu-img snapshot` with the given arguments on the disk image of the stopped
+    /// emulator, which holds its snapshots, and returns what the tool prints. If the tool fails,
+    /// the error is described as "Error <action> <image>". While the emulator is running it holds
+    /// a lock on the image, and its snapshots are managed through its monitor instead.
+    fn run_image_snapshot_command(&self, args: &[&str], action: &str) -> Result<String> {
         self.check_snapshots_enabled()?;
         // The snapshots are stored in the qcow2 image which the instance was staged with.
         let image_path = match &self.data.get_emulator_configuration().guest.disk_image {
@@ -138,23 +138,39 @@ impl QemuEngine {
             ),
         };
         let qemu_img = super::get_qemu_img_tool(&self.context)?;
-        let mut list_command = Command::new(&qemu_img);
-        list_command.args(["snapshot", "-l", "-f", "qcow2"]).arg(image_path);
-        log::debug!("Running command to list the snapshots of the disk image: {:?}", list_command);
+        let mut command = Command::new(&qemu_img);
+        command.arg("snapshot").args(args).args(["-f", "qcow2"]).arg(image_path);
+        log::debug!("Running command on the snapshots of the disk image: {:?}", command);
 
-        let list_result =
-            list_command.output().map_err(|e| bug!("Error running {}: {e}", qemu_img.display()))?;
-        if !list_result.status.success() {
+        let result =
+            command.output().map_err(|e| bug!("Error running {}: {e}", qemu_img.display()))?;
+        if !result.status.success() {
             return_bug!(
-                "Error reading the snapshots of {}: {}",
+                "Error {action} {}: {}",
                 image_path.display(),
-                String::from_utf8_lossy(&list_result.stderr)
+                String::from_utf8_lossy(&result.stderr)
             );
         }
-        monitor::parse_snapshot_table(
-            &String::from_utf8_lossy(&list_result.stdout),
-            IMAGE_SNAPSHOTS_HEADING,
-        )
+        Ok(String::from_utf8_lossy(&result.stdout).into_owned())
+    }
+
+    /// Returns the snapshots which are stored in the disk image of the stopped emulator.
+    fn stored_snapshots(&self) -> Result<Vec<SnapshotInfo>> {
+        let output = self.run_image_snapshot_command(&["-l"], "reading the snapshots of")?;
+        monitor::parse_snapshot_table(&output, IMAGE_SNAPSHOTS_HEADING)
+    }
+
+    /// Deletes the snapshot with the given name from the disk image of the stopped emulator.
+    fn delete_stored_snapshot(&self, name: &str) -> Result<()> {
+        // qemu-img only says that a snapshot was not found if there is none with the name. Look
+        // for it first, so that the snapshots which do exist are listed instead, as they are for
+        // a running emulator.
+        monitor::check_snapshot_exists(name, &self.stored_snapshots()?)?;
+        self.run_image_snapshot_command(
+            &["-d", name],
+            &format!("deleting snapshot '{name}' from"),
+        )?;
+        Ok(())
     }
 
     /// Checks that the instance was staged with support for snapshots.
@@ -171,46 +187,51 @@ impl QemuEngine {
     }
 }
 
-#[async_trait(?Send)]
 impl EmulatorEngine for QemuEngine {
     fn get_instance_data(&self) -> &EmulatorInstanceData {
         &self.data
     }
 
-    async fn stage(&mut self) -> Result<()> {
-        if let Some(vsock) = &mut self.emu_config_mut().device.vsock {
-            // The default CID value of 0 indicates that selection should be
-            // left to ffx.
-            if vsock.enabled && vsock.cid == 0 {
-                vsock.cid = find_unused_vsock_cid()?;
+    fn stage(&mut self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            if let Some(vsock) = &mut self.emu_config_mut().device.vsock {
+                // The default CID value of 0 indicates that selection should be
+                // left to ffx.
+                if vsock.enabled && vsock.cid == 0 {
+                    vsock.cid = find_unused_vsock_cid()?;
+                }
             }
-        }
-        let ctx_clone = self.context.clone();
-        let result = <Self as QemuBasedEngine>::stage(&mut self, &ctx_clone)
-            .await
-            .and_then(|()| self.validate_staging());
-        match result {
-            Ok(()) => {
-                self.data.set_engine_state(EngineState::Staged);
-                self.save_to_disk().await
+            let ctx_clone = self.context.clone();
+            let result = <Self as QemuBasedEngine>::stage(self, &ctx_clone)
+                .await
+                .and_then(|()| self.validate_staging());
+            match result {
+                Ok(()) => {
+                    self.data.set_engine_state(EngineState::Staged);
+                    self.save_to_disk().await
+                }
+                Err(e) => {
+                    self.data.set_engine_state(EngineState::Error);
+                    self.save_to_disk().await.and(Err(e))
+                }
             }
-            Err(e) => {
-                self.data.set_engine_state(EngineState::Error);
-                self.save_to_disk().await.and(Err(e))
-            }
-        }
+        })
     }
 
-    async fn start(&mut self, context: &EnvironmentContext, emulator_cmd: Command) -> Result<i32> {
-        self.run(context, emulator_cmd).await
+    fn start<'a>(
+        &'a mut self,
+        context: &'a EnvironmentContext,
+        emulator_cmd: Command,
+    ) -> BoxFuture<'a, Result<i32>> {
+        Box::pin(async move { self.run(context, emulator_cmd).await })
     }
 
     fn show(&self, details: Vec<ShowDetail>) -> Vec<ShowDetail> {
         <Self as QemuBasedEngine>::show(self, details)
     }
 
-    async fn stop(&mut self) -> Result<()> {
-        self.stop_emulator().await
+    fn stop(&mut self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move { self.stop_emulator().await })
     }
 
     fn configure(&mut self) -> Result<()> {
@@ -222,25 +243,6 @@ impl EmulatorEngine for QemuEngine {
         } else {
             self.validate_configuration()
         };
-        // QEMU 9+ does not support auto-assignment of host ports
-        // for the guest ports which are forwarded with user-mode
-        // networking, so the host ports which are still unassigned
-        // are picked here, and the ones which were asked for
-        // explicitly are checked to be free. This is done in
-        // configure() rather than stage() because an instance
-        // which is reused is not staged again, but is configured
-        // again with the port map of the new invocation. That map
-        // replaces the saved one, so the host ports of the previous
-        // run are not kept: unassigned ports are picked afresh, and
-        // a port which another process has taken since is either
-        // avoided or reported as in use.
-        let result = result.and_then(|()| {
-            if self.emu_config().host.networking == NetworkingMode::User {
-                crate::finalize_port_mapping(self.emu_config_mut())
-            } else {
-                Ok(())
-            }
-        });
         if result.is_ok() {
             self.data.set_engine_state(EngineState::Configured);
         } else {
@@ -257,37 +259,56 @@ impl EmulatorEngine for QemuEngine {
         self.data.get_engine_type()
     }
 
-    async fn is_running(&mut self) -> bool {
-        let running = self.data.is_running();
-        if self.engine_state() == EngineState::Running && running == false {
-            self.set_engine_state(EngineState::Staged);
-            if self.save_to_disk().await.is_err() {
-                log::warn!("Problem saving serialized emulator to disk during state update.");
+    fn is_running(&mut self) -> BoxFuture<'_, bool> {
+        Box::pin(async move {
+            let running = self.data.is_running();
+            if self.engine_state() == EngineState::Running && running == false {
+                self.set_engine_state(EngineState::Staged);
+                if self.save_to_disk().await.is_err() {
+                    log::warn!("Problem saving serialized emulator to disk during state update.");
+                }
             }
-        }
-        running
+            running
+        })
     }
 
     fn attach(&self, console: EngineConsoleType) -> Result<()> {
-        self.attach_to(&self.data.get_emulator_configuration().runtime.instance_directory, console)
+        self.attach_to(console)
     }
 
-    async fn save_snapshot(&mut self, name: &str) -> Result<()> {
-        validate_snapshot_name(name)?;
-        self.connect_to_snapshot_monitor()?.save_snapshot(name)
+    fn save_snapshot<'a>(&'a mut self, name: &'a str) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            validate_snapshot_name(name)?;
+            self.connect_to_snapshot_monitor()?.save_snapshot(name)
+        })
     }
 
-    async fn load_snapshot(&mut self, name: &str) -> Result<()> {
-        validate_snapshot_name(name)?;
-        self.connect_to_snapshot_monitor()?.load_snapshot(name)
+    fn load_snapshot<'a>(&'a mut self, name: &'a str) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            validate_snapshot_name(name)?;
+            self.connect_to_snapshot_monitor()?.load_snapshot(name)
+        })
     }
 
-    async fn list_snapshots(&mut self) -> Result<Vec<SnapshotInfo>> {
-        if self.get_engine_state() == EngineState::Running {
-            self.connect_to_snapshot_monitor()?.list_snapshots()
-        } else {
-            self.stored_snapshots()
-        }
+    fn list_snapshots(&mut self) -> BoxFuture<'_, Result<Vec<SnapshotInfo>>> {
+        Box::pin(async move {
+            if self.get_engine_state() == EngineState::Running {
+                self.connect_to_snapshot_monitor()?.list_snapshots()
+            } else {
+                self.stored_snapshots()
+            }
+        })
+    }
+
+    fn delete_snapshot<'a>(&'a mut self, name: &'a str) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            validate_snapshot_name(name)?;
+            if self.get_engine_state() == EngineState::Running {
+                self.connect_to_snapshot_monitor()?.delete_snapshot(name)
+            } else {
+                self.delete_stored_snapshot(name)
+            }
+        })
     }
 
     /// Build the Command to launch Qemu emulator running Fuchsia.
@@ -373,31 +394,45 @@ impl EmulatorEngine for QemuEngine {
         self.data.get_emulator_configuration_mut()
     }
 
-    async fn screenshot(&mut self, output_path: &Path) -> Result<()> {
-        let absolute_path = crate::qemu_based::make_absolute_path(output_path)?;
-        crate::qemu_based::check_screenshot_preconditions(self, &absolute_path);
-        self.capture_screenshot_qmp(&absolute_path).await
+    fn screenshot<'a>(&'a mut self, output_path: &'a Path) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let absolute_path = crate::qemu_based::make_absolute_path(output_path)?;
+            crate::qemu_based::check_screenshot_preconditions(self, &absolute_path);
+            self.capture_screenshot_qmp(&absolute_path).await
+        })
     }
 
-    async fn save_to_disk(&self) -> Result<()> {
-        write_to_disk(
-            &self.data,
-            &self
-                .emu_instances
-                .get_instance_dir(self.data.get_name(), true)
-                .unwrap_or_else(|_| panic!("instance directory for {}", self.data.get_name())),
-        )
-        .map_err(|e| bug!("Error saving instance to disk: {e}"))
+    fn send_input<'a>(&'a mut self, steps: &'a [InputStep]) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            if self.engine_state() != EngineState::Running {
+                return Err(user_error!(
+                    "Emulator is not running (current state: {:?}). \
+                    Please start the emulator before sending input.",
+                    self.engine_state()
+                ));
+            }
+            self.send_input_qmp(steps).await
+        })
+    }
+
+    fn save_to_disk(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            write_to_disk(
+                &self.data,
+                &self
+                    .emu_instances
+                    .get_instance_dir(self.data.get_name(), true)
+                    .unwrap_or_else(|_| panic!("instance directory for {}", self.data.get_name())),
+            )
+            .map_err(|e| bug!("Error saving instance to disk: {e}"))
+        })
     }
 }
 
 impl QemuEngine {
     /// Captures a screenshot and saves it as a PNG file using QEMU's QMP screendump command.
     async fn capture_screenshot_qmp(&mut self, absolute_path: &Path) -> Result<()> {
-        let instance_dir =
-            self.data.get_emulator_configuration().runtime.instance_directory.clone();
-        let console_path =
-            self.get_path_for_console_type(&instance_dir, EngineConsoleType::Machine);
+        let console_path = self.get_path_for_console_type(EngineConsoleType::Machine);
 
         let mut socket = QemuSocket::new(&console_path);
         let stream = self.open_socket(&mut socket, &QMP_TIMEOUT).await?;
@@ -423,6 +458,63 @@ impl QemuEngine {
             /* png_destination= */ absolute_path,
         )
     }
+
+    /// Sends each step as one QMP `input-send-event` command over a single QMP connection.
+    async fn send_input_qmp(&mut self, steps: &[InputStep]) -> Result<()> {
+        let console_path = self.get_path_for_console_type(EngineConsoleType::Machine);
+
+        let mut socket = QemuSocket::new(&console_path);
+        let stream = self.open_socket(&mut socket, &QMP_TIMEOUT).await?;
+        let mut responses = Deserializer::from_reader(&stream).into_iter::<Value>();
+
+        // The QMP helpers block on socket reads. This is fine because ffx runs one command on a
+        // single-threaded executor.
+        crate::qemu_based::qmp_wait_for_greeting(&stream, &mut responses, QMP_TIMEOUT)?;
+        for (index, step) in steps.iter().enumerate() {
+            crate::qemu_based::qmp_execute(
+                &stream,
+                &mut responses,
+                "input-send-event",
+                Some(step.to_qmp_arguments()),
+                QMP_TIMEOUT,
+            )
+            .map_err(|error| input_step_error(error, index, steps))?;
+            // There is nothing to wait for after the last step.
+            if index + 1 < steps.len() {
+                Timer::new(step.delay_after).await;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Adds the failed step's position, and a hint for a missing input device, to a user error from
+/// sending `steps[step_index]`.
+fn input_step_error(error: fho::Error, step_index: usize, steps: &[InputStep]) -> fho::Error {
+    let fho::Error::User(error) = error else {
+        return error;
+    };
+    let message = error.to_string();
+    // QEMU reports this, as a GenericError, when no virtual device accepts the event type.
+    let event_type =
+        message.rsplit_once("Input handler not found for event type ").map(|(_, name)| name);
+    let hint = match event_type {
+        None => "",
+        Some("rel") => {
+            "\n`rel` events need a virtual device whose pointing device is 'mouse'. \
+            Check it with `ffx emu show`."
+        }
+        Some("mtt") => {
+            "\n`mtt` events need a virtual device whose pointing device is 'touch'. \
+            Check it with `ffx emu show`."
+        }
+        Some("abs") => {
+            "\nThe virtual devices of `ffx emu` don't accept `abs` events. Use `rel` events \
+            with a 'mouse' pointing device, or `mtt` events with a 'touch' one."
+        }
+        Some(_) => "\nCheck the virtual device's input devices with `ffx emu show`.",
+    };
+    user_error!("Failed to send input step {} of {}: {message}{hint}", step_index + 1, steps.len())
 }
 
 impl QemuBasedEngine for QemuEngine {
@@ -450,10 +542,12 @@ mod tests {
     use crate::EngineBuilder;
     use crate::qemu_based::tests::make_fake_sdk;
     use emulator_instance::{NetworkingMode, PortMapping};
+    use ffx_emulator_config::InputEvent;
     use std::ffi::OsStr;
     use std::io::Write as _;
     use std::os::unix::net::UnixListener;
     use std::sync::mpsc;
+    use std::time::Instant;
     use std::{fs, thread};
     use tempfile::tempdir;
 
@@ -521,6 +615,59 @@ mod tests {
     }
 
     #[fuchsia::test]
+    async fn test_delete_snapshot() {
+        let env = ffx_config::test_init().unwrap();
+        let (temp, _socket_path, monitor) =
+            start_fake_monitor(vec![("info snapshots", SNAPSHOT_LIST), ("delvm booted", "")]);
+        let mut engine = running_engine(&env, temp.path(), true);
+
+        engine.delete_snapshot("booted").await.expect("delete snapshot");
+
+        assert_eq!(monitor.join().unwrap(), vec!["info snapshots", "delvm booted"]);
+    }
+
+    #[fuchsia::test]
+    async fn test_delete_snapshot_of_stopped_emulator() {
+        let builder = ffx_config::test_env();
+        let builder = make_fake_sdk(builder).await;
+        let env = builder.build().unwrap();
+        let temp = tempdir().expect("cannot get tempdir");
+        // The fake qemu-img tool lists the snapshots in an image by printing its contents, and
+        // records the arguments of other commands in the image.
+        let image_path = temp.path().join("fxfs.blk.qcow2");
+        fs::write(
+            &image_path,
+            "Snapshot list:\n\
+            ID      TAG               VM_SIZE                DATE        VM_CLOCK     ICOUNT\n\
+            1       booted            382 MiB 2026-09-30 22:30:24  0000:00:19.615         --\n\
+            2       second           1.45 GiB 2026-10-01 08:15:00  0001:02:03.004         --\n",
+        )
+        .expect("write image");
+
+        let mut cfg = EmulatorConfiguration::default();
+        cfg.runtime.name = "test-emu".to_string();
+        cfg.runtime.snapshots_enabled = true;
+        cfg.guest.disk_image = Some(DiskImage::Fxfs(image_path.clone()));
+        let data = EmulatorInstanceData::new(cfg, EngineType::Qemu, EngineState::Staged);
+        let mut engine =
+            QemuEngine::new(&env.context, data, EmulatorInstances::new(PathBuf::new()));
+
+        // A snapshot which doesn't exist is reported along with the ones which do.
+        let err = engine.delete_snapshot("missing").await.expect_err("no such snapshot");
+        assert_eq!(
+            err.to_string(),
+            "Snapshot 'missing' does not exist. The available snapshots are: booted, second."
+        );
+
+        // The snapshot is deleted from the disk image, without the emulator having to run.
+        engine.delete_snapshot("booted").await.expect("delete snapshot");
+        assert_eq!(
+            fs::read_to_string(&image_path).expect("read image"),
+            format!("snapshot -d booted -f qcow2 {}\n", image_path.display())
+        );
+    }
+
+    #[fuchsia::test]
     async fn test_snapshots_require_running_emulator() {
         let env = ffx_config::test_init().unwrap();
         let temp = tempdir().expect("cannot get tempdir");
@@ -552,6 +699,8 @@ mod tests {
         assert!(err.contains(expected), "unexpected error: {err}");
         let err = engine.list_snapshots().await.expect_err("list fails").to_string();
         assert!(err.contains(expected), "unexpected error: {err}");
+        let err = engine.delete_snapshot("booted").await.expect_err("delete fails").to_string();
+        assert!(err.contains(expected), "unexpected error: {err}");
     }
 
     #[fuchsia::test]
@@ -566,6 +715,8 @@ mod tests {
             let err = engine.save_snapshot(name).await.expect_err("save fails").to_string();
             assert!(err.contains("Invalid snapshot name"), "unexpected error: {err}");
             let err = engine.load_snapshot(name).await.expect_err("load fails").to_string();
+            assert!(err.contains("Invalid snapshot name"), "unexpected error: {err}");
+            let err = engine.delete_snapshot(name).await.expect_err("delete fails").to_string();
             assert!(err.contains("Invalid snapshot name"), "unexpected error: {err}");
         }
     }
@@ -685,7 +836,7 @@ mod tests {
     }
 
     #[fuchsia::test]
-    fn test_configure_assigns_host_ports() {
+    fn test_configure_leaves_unassigned_host_ports_for_qmp() {
         let env = ffx_config::test_init().unwrap();
         let mut cfg = EmulatorConfiguration::default();
         cfg.host.networking = NetworkingMode::User;
@@ -696,13 +847,13 @@ mod tests {
         let mut engine =
             QemuEngine::new(&env.context, data, EmulatorInstances::new(PathBuf::new()));
 
-        // QEMU needs a host port for every port which is forwarded to the guest. An instance
-        // which is reused is configured, but not staged, so they have to be assigned here.
+        // Unassigned host ports are passed to QEMU as port 0 and discovered via QMP at runtime
+        // rather than pre-allocated during configure().
         engine.configure().expect("configure engine");
 
         let ssh = engine.emu_config().host.port_map.get("ssh").expect("ssh port mapping");
         assert_eq!(ssh.guest, 22);
-        assert!(ssh.host.is_some_and(|port| port != 0), "no host port assigned: {ssh:?}");
+        assert_eq!(ssh.host, None);
         assert_eq!(engine.engine_state(), EngineState::Configured);
     }
 
@@ -860,5 +1011,120 @@ mod tests {
         assert_eq!(request["arguments"]["filename"], output.to_str().unwrap());
         drop(engine);
         handle.join().unwrap();
+    }
+
+    fn key_event_json(down: bool) -> Value {
+        json!({"type": "key", "data": {"key": {"type": "qcode", "data": "a"}, "down": down}})
+    }
+
+    /// Two steps that press and release the 'a' key.
+    fn key_steps(delay_after: Duration) -> Vec<InputStep> {
+        [true, false]
+            .into_iter()
+            .map(|down| InputStep {
+                events: vec![InputEvent::Raw(key_event_json(down))],
+                delay_after,
+            })
+            .collect()
+    }
+
+    #[fuchsia::test]
+    async fn test_send_input() {
+        let env = ffx_config::test_init().unwrap();
+        let temp = tempdir().expect("cannot get tempdir");
+        let (receiver, handle) = start_fake_qmp(temp.path(), None);
+        let mut engine = running_engine(&env, temp.path(), false);
+
+        let start = Instant::now();
+        engine.send_input(&key_steps(Duration::from_millis(300))).await.expect("send_input");
+        // Only the delay between the two steps is waited for, not the one after the last step.
+        let elapsed = start.elapsed();
+        assert!(elapsed >= Duration::from_millis(300), "{elapsed:?}");
+        assert!(elapsed < Duration::from_millis(600), "{elapsed:?}");
+
+        let sent: Vec<Value> = receiver.try_iter().collect();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0]["execute"], "input-send-event");
+        assert_eq!(sent[0]["arguments"], json!({"events": [key_event_json(true)]}));
+        assert_eq!(sent[1]["arguments"], json!({"events": [key_event_json(false)]}));
+        drop(engine);
+        handle.join().unwrap();
+    }
+
+    #[fuchsia::test]
+    async fn test_send_input_qmp_error() {
+        let env = ffx_config::test_init().unwrap();
+        let temp = tempdir().expect("cannot get tempdir");
+        let desc = "Input handler not found for event type key";
+        let error = FakeQmpError { command_index: 1, desc };
+        let (receiver, handle) = start_fake_qmp(temp.path(), Some(error));
+        let mut engine = running_engine(&env, temp.path(), false);
+
+        let err = engine.send_input(&key_steps(Duration::ZERO)).await.unwrap_err().to_string();
+        assert!(err.starts_with("Failed to send input step 2 of 2: "), "{err}");
+        assert!(err.contains(desc), "{err}");
+        assert!(err.contains("ffx emu show"), "{err}");
+        assert_eq!(receiver.try_iter().count(), 2);
+        drop(engine);
+        handle.join().unwrap();
+    }
+
+    #[fuchsia::test]
+    async fn test_send_input_qmp_error_without_hint() {
+        let env = ffx_config::test_init().unwrap();
+        let temp = tempdir().expect("cannot get tempdir");
+        let error = FakeQmpError { command_index: 0, desc: "VM not running" };
+        let (_receiver, handle) = start_fake_qmp(temp.path(), Some(error));
+        let mut engine = running_engine(&env, temp.path(), false);
+
+        let err = engine.send_input(&key_steps(Duration::ZERO)).await.unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "Failed to send input step 1 of 2: \
+            QMP command 'input-send-event' failed: VM not running"
+        );
+        drop(engine);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn test_input_step_error_hints() {
+        let steps = key_steps(Duration::ZERO);
+        for (event_type, expected) in [
+            ("rel", "pointing device is 'mouse'"),
+            ("mtt", "pointing device is 'touch'"),
+            ("abs", "don't accept `abs` events"),
+            ("key", "input devices with `ffx emu show`"),
+        ] {
+            let error = user_error!(
+                "QMP command 'input-send-event' failed: \
+                Input handler not found for event type {event_type}"
+            );
+            let message = input_step_error(error, 1, &steps).to_string();
+            assert!(message.starts_with("Failed to send input step 2 of 2: "), "{message}");
+            assert!(message.contains(expected), "{message}");
+        }
+    }
+
+    #[test]
+    fn test_input_step_error_keeps_bugs() {
+        let error = input_step_error(bug!("broken"), 0, &key_steps(Duration::ZERO));
+        assert!(matches!(error, fho::Error::Unexpected(_)), "{error:?}");
+        assert!(!error.to_string().contains("Failed to send"), "{error}");
+    }
+
+    #[fuchsia::test]
+    async fn test_send_input_not_running() {
+        let env = ffx_config::test_init().unwrap();
+        let temp = tempdir().expect("cannot get tempdir");
+        let data = EmulatorInstanceData::new(
+            EmulatorConfiguration::default(),
+            EngineType::Qemu,
+            EngineState::Staged,
+        );
+        let mut engine =
+            QemuEngine::new(&env.context, data, EmulatorInstances::new(temp.path().to_owned()));
+        let err = engine.send_input(&key_steps(Duration::ZERO)).await.unwrap_err().to_string();
+        assert!(err.contains("Emulator is not running"), "{err}");
     }
 }

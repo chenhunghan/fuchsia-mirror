@@ -25,12 +25,12 @@ class GnLabel:
     """Whether the label has a local name, e.g. True for `//foo/bar:baz` but false for `//foo/bar/baz`"""
     is_local_name: bool = dataclasses.field(hash=False, compare=False)
     """The toolchain part of the label, e.g. `//toolchain` in `//foo/bar(//toolchain)`"""
-    toolchain: "GnLabel|None" = dataclasses.field(hash=False, compare=False)
+    toolchain: GnLabel | None = dataclasses.field(hash=False, compare=False)
     """The URL pointing to this GN label, e.g. https://cs.opensource.google/fuchsia/..."""
     url_str: str = dataclasses.field(hash=False, compare=False)
 
     @staticmethod
-    def from_str(original_str: str, url: str = "") -> "GnLabel":
+    def from_str(original_str: str, url: str = "") -> GnLabel:
         """Constructs a GnLabel instance from a GN target label string"""
         assert original_str.startswith(
             "//"
@@ -75,7 +75,7 @@ class GnLabel:
         )
 
     @staticmethod
-    def from_path(path: Path | str, url: str = "") -> "GnLabel":
+    def from_path(path: Path | str, url: str = "") -> GnLabel:
         """Constructs a GnLabel instance from a Path object."""
         if isinstance(path, Path):
             if path.name == "" and path.parent.name == "":
@@ -92,7 +92,7 @@ class GnLabel:
             assert False, f"Expected path of type Path but got {type(path)}"
 
     @staticmethod
-    def check_type(other: Any) -> "GnLabel":
+    def check_type(other: Any) -> GnLabel:
         """Asserts that `other` is of type GnLabel"""
         assert isinstance(
             other, GnLabel
@@ -100,13 +100,13 @@ class GnLabel:
         return other
 
     @staticmethod
-    def check_types_in_list(list: list["GnLabel"]) -> list["GnLabel"]:
+    def check_types_in_list(list: list[GnLabel]) -> list[GnLabel]:
         """Asserts that all values in `list` are of type GnLabel"""
         for v in list:
             GnLabel.check_type(v)
         return list
 
-    def parent_label(self) -> "GnLabel":
+    def parent_label(self) -> GnLabel:
         """Returns //foo/bar for //foo/bar/baz and //foo/bar:baz"""
         assert self.has_parent_label(), f"{self} has no parent label"
         if not self.is_local_name and self.name == os.path.basename(
@@ -121,14 +121,14 @@ class GnLabel:
     def has_parent_label(self) -> bool:
         return self.gn_str != "//"
 
-    def without_toolchain(self) -> "GnLabel":
+    def without_toolchain(self) -> GnLabel:
         """Removes the toolchain part of the label"""
         if self.toolchain:
             return GnLabel.from_str(self.gn_str.split("(", maxsplit=1)[0])
         else:
             return self
 
-    def ensure_toolchain(self, toolchain: "GnLabel") -> "GnLabel":
+    def ensure_toolchain(self, toolchain: GnLabel) -> GnLabel:
         """Sets a toolchain if there is none already"""
         if self.toolchain:
             return self
@@ -180,7 +180,7 @@ class GnLabel:
 
     def create_child_from_str(
         self, child_path_str: str, url: str = ""
-    ) -> "GnLabel":
+    ) -> GnLabel:
         """Create a GnLabel relative to this label from a child path GN string"""
         if child_path_str.startswith("//"):
             return GnLabel.from_str(child_path_str)
@@ -209,7 +209,7 @@ class GnLabel:
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}({self.gn_str})"
 
-    def __gt__(self, other: "GnLabel") -> bool:
+    def __gt__(self, other: GnLabel) -> bool:
         return self.gn_str > other.gn_str
 
     @staticmethod

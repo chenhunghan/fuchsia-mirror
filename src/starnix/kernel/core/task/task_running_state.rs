@@ -88,6 +88,11 @@ impl TaskRunningState {
     pub fn fs(&self) -> Result<Arc<FsContext>, Errno> {
         self.fs.upgrade().ok_or_else(|| errno!(ESRCH))
     }
+
+    /// Returns `true` if the task's live resources (`files`, `mm`, and `fs`) have been released.
+    pub(crate) fn is_released(&self) -> bool {
+        self.files.lock().is_none() && self.mm.is_none() && self.fs.is_none()
+    }
 }
 
 /// A synchronized container for a Zircon thread and its cached KOID.
@@ -108,13 +113,17 @@ pub struct ZirconThread {
     /// until all references are dropped. When the task exits and execution stops, reference holders
     /// will observe the thread transition to [`zx::ThreadState::Dead`] normally.
     pub thread: Arc<zx::Thread>,
-    pub koid: zx::Koid,
+    koid: OnceLock<zx::Koid>,
 }
 
 impl ZirconThread {
     pub fn new(thread: Arc<zx::Thread>) -> Self {
-        let koid = thread.koid().expect("Failed to get thread koid");
-        Self { thread, koid }
+        Self { thread, koid: OnceLock::new() }
+    }
+
+    /// Returns the cached KOID of the underlying Zircon thread, querying Zircon on first access.
+    pub fn koid(&self) -> zx::Koid {
+        *self.koid.get_or_init(|| self.thread.koid().expect("Failed to get thread koid"))
     }
 }
 

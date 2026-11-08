@@ -200,16 +200,32 @@ class FakeCodecAdapterEvents : public CodecAdapterEvents {
 
   void onCoreCodecOutputPacket(CodecPacket* packet, bool error_detected_before,
                                bool error_detected_during) override {
-    auto output_format = codec_adapter_->CoreCodecGetOutputFormat(1u, 1u);
+    // Run `ASSERT_TRUE` checks inside a lambda so an assertion failure returns only from the
+    // lambda rather than skipping `output_packets_done_.push_back` / `cond_.notify_all()` below
+    // (which would deadlock `WaitForOutputPacketCount` on the main test thread).
+    [&]() {
+      auto output_format = codec_adapter_->CoreCodecGetOutputFormat(1u, 1u);
+      ASSERT_TRUE(output_format.has_format_details());
+      ASSERT_TRUE(output_format.format_details().has_image_format());
 
-    const auto& image_format =
-        output_format.format_details().domain().video().uncompressed().image_format;
+      const auto& image_format = output_format.format_details().image_format();
+      ASSERT_TRUE(image_format.has_size());
+      ASSERT_TRUE(image_format.has_bytes_per_row());
+      ASSERT_TRUE(image_format.has_display_rect());
 
-    // Test a representative value.
-    EXPECT_EQ(kVideoWidth, image_format.coded_width);
-    EXPECT_EQ(kVideoHeight, image_format.coded_height);
-    EXPECT_EQ(fuchsia::sysmem::PixelFormatType::NV12, image_format.pixel_format.type);
-    EXPECT_EQ(fuchsia::sysmem::ColorSpaceType::REC709, image_format.color_space.type);
+      // Test representative values.
+      EXPECT_EQ(kVideoWidth, image_format.size().width);
+      EXPECT_EQ(kVideoHeight, image_format.size().height);
+      EXPECT_EQ(fbl::round_up(kVideoWidth, CodecAdapterVaApiDecoder::kLinearSurfaceWidthAlignment),
+                image_format.bytes_per_row());
+      EXPECT_EQ(0u, image_format.display_rect().x);
+      EXPECT_EQ(0u, image_format.display_rect().y);
+      EXPECT_EQ(kVideoWidth, image_format.display_rect().width);
+      EXPECT_EQ(kVideoHeight, image_format.display_rect().height);
+      EXPECT_FALSE(image_format.has_pixel_format_modifier());
+      EXPECT_EQ(fuchsia::images2::PixelFormat::NV12, image_format.pixel_format());
+      EXPECT_EQ(fuchsia::images2::ColorSpace::REC709, image_format.color_space());
+    }();
 
     std::lock_guard lock(lock_);
     output_packets_done_.push_back(packet);

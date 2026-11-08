@@ -1,0 +1,99 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/bazel/bazel_host_tool.gni")
+
+# Builds and copies Bazel-built host test or tool executables into
+# `${root_out_dir}/<name>` (`host_<cpu>/<name>`) and emits `tool_paths` metadata
+# entries for `//:tool_paths` (`out/<dir>/tool_paths.json`). Must be invoked in
+# a host toolchain (`is_host`).
+#
+# Parameters:
+#   tools (required): Non-empty list of scopes describing Bazel host executables
+#     (`bazel_target`, optional `name`, `is_go`, `bazel_output_path`,
+#     `install_host_tool`, `companion_files`, `deps`, `subtarget_name`).
+#   deps, bazel_inputs, include_host_tools_licenses,
+#   ignore_license_collection_errors, check_for_output_dir_leaks, testonly,
+#   visibility (optional): Forwarded to the generated targets.
+template("bazel_tool_paths") {
+  assert(is_host, "bazel_tool_paths() can only be called in a host toolchain.")
+  assert(defined(invoker.tools) && invoker.tools != [],
+         "bazel_tool_paths() requires a non-empty 'tools' list.")
+
+  _subtargets = []
+  foreach(_tool, invoker.tools) {
+    assert(defined(_tool.bazel_target),
+           "Each entry in 'tools' must define 'bazel_target'.")
+
+    if (defined(_tool.name)) {
+      _tool_name = _tool.name
+    } else {
+      _tool_name = get_label_info(_tool.bazel_target, "name")
+    }
+
+    assert(
+        !(defined(_tool.bazel_output_path) && defined(_tool.is_go)),
+        "Specify at most one of 'bazel_output_path' or 'is_go' for tool '${_tool_name}'.")
+
+    if (defined(_tool.bazel_output_path)) {
+      _bazel_output_path = _tool.bazel_output_path
+    } else if (defined(_tool.is_go) && _tool.is_go) {
+      _bazel_output_path = "{{BAZEL_TARGET_OUT_DIR}}/{{BAZEL_TARGET_NAME}}_/{{BAZEL_TARGET_NAME}}"
+    } else {
+      _bazel_output_path = "{{BAZEL_TARGET_OUT_PATH}}"
+    }
+
+    if (defined(_tool.subtarget_name)) {
+      _subtarget_name = _tool.subtarget_name
+    } else {
+      _subtarget_name = "${target_name}.${_tool_name}"
+    }
+
+    _tool_deps = []
+    if (defined(invoker.deps)) {
+      _tool_deps += invoker.deps
+    }
+    if (defined(_tool.deps)) {
+      _tool_deps += _tool.deps
+    }
+
+    bazel_host_tool(_subtarget_name) {
+      forward_variables_from(invoker,
+                             [
+                               "bazel_inputs",
+                               "check_for_output_dir_leaks",
+                               "ignore_license_collection_errors",
+                               "include_host_tools_licenses",
+                               "testonly",
+                             ])
+      if (defined(invoker.visibility)) {
+        visibility = invoker.visibility + [ ":*" ]
+      }
+      if (defined(_tool.install_host_tool)) {
+        install_host_tool = _tool.install_host_tool
+      }
+      if (defined(_tool.companion_files)) {
+        companion_files = _tool.companion_files
+      }
+
+      bazel_target = _tool.bazel_target
+      output_name = _tool_name
+      bazel_output_path = _bazel_output_path
+      if (_tool_deps != []) {
+        deps = _tool_deps
+      }
+    }
+
+    _subtargets += [ ":${_subtarget_name}" ]
+  }
+
+  group(target_name) {
+    forward_variables_from(invoker,
+                           [
+                             "testonly",
+                             "visibility",
+                           ])
+    public_deps = _subtargets
+  }
+}

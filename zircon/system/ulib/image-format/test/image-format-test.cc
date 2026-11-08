@@ -6,6 +6,8 @@
 #include <lib/sysmem-version/sysmem-version.h>
 #include <lib/zbi-format/graphics.h>
 
+#include <string>
+
 #include <zxtest/zxtest.h>
 
 namespace sysmem_v1 = fuchsia_sysmem;
@@ -2470,4 +2472,282 @@ TEST(ImageFormat, ImageConstraintsToFormatZeroSizeAlignmentFails) {
   EXPECT_FALSE(ImageConstraintsToFormat(constraints, 64u, 32u).is_ok());
   constraints.size_alignment() = {1u, 1u};
   EXPECT_TRUE(ImageConstraintsToFormat(constraints, 64u, 32u).is_ok());
+}
+
+TEST(ImageFormat, AfbcTePlaneOnlyWithTeModifier) {
+  fuchsia_images2::ImageFormat image_format;
+  image_format.pixel_format() = fuchsia_images2::PixelFormat::kB8G8R8A8;
+  image_format.size() = {1920u, 1080u};
+  image_format.bytes_per_row() = 1920u * 4;
+
+  uint64_t offset;
+  uint32_t row_bytes;
+  image_format.pixel_format_modifier() = fuchsia_images2::PixelFormatModifier::kArmAfbc16X16;
+  EXPECT_FALSE(ImageFormatPlaneByteOffset(image_format, 3, &offset));
+  EXPECT_FALSE(ImageFormatPlaneRowBytes(image_format, 3, &row_bytes));
+
+  image_format.pixel_format_modifier() = fuchsia_images2::PixelFormatModifier::kArmAfbc16X16Te;
+  ASSERT_TRUE(ImageFormatPlaneByteOffset(image_format, 3, &offset));
+  EXPECT_LT(offset, ImageFormatImageSize(image_format));
+  EXPECT_TRUE(ImageFormatPlaneRowBytes(image_format, 3, &row_bytes));
+}
+
+TEST(ImageFormat, GoldfishOptimalSupportsOnlyLinearPixelFormats) {
+  // Not a defined fuchsia_images2::PixelFormat enum member; exercises default: branches.
+  constexpr auto kUnknownPixelFormat = static_cast<fuchsia_images2::PixelFormat>(12345);
+
+  struct TestCase {
+    fuchsia_images2::PixelFormat pixel_format;
+    const char* name;
+    bool supported;
+  };
+  constexpr TestCase kTestCases[] = {
+      {fuchsia_images2::PixelFormat::kInvalid, "INVALID", false},
+      {fuchsia_images2::PixelFormat::kR8G8B8A8, "R8G8B8A8", true},
+      {fuchsia_images2::PixelFormat::kR8G8B8X8, "R8G8B8X8", true},
+      {fuchsia_images2::PixelFormat::kB8G8R8A8, "B8G8R8A8", true},
+      {fuchsia_images2::PixelFormat::kB8G8R8X8, "B8G8R8X8", true},
+      {fuchsia_images2::PixelFormat::kI420, "I420", true},
+      {fuchsia_images2::PixelFormat::kM420, "M420", true},
+      {fuchsia_images2::PixelFormat::kNv12, "NV12", true},
+      {fuchsia_images2::PixelFormat::kYuy2, "YUY2", true},
+      {fuchsia_images2::PixelFormat::kMjpeg, "MJPEG", false},
+      {fuchsia_images2::PixelFormat::kYv12, "YV12", true},
+      {fuchsia_images2::PixelFormat::kB8G8R8, "B8G8R8", true},
+      {fuchsia_images2::PixelFormat::kR5G6B5, "R5G6B5", true},
+      {fuchsia_images2::PixelFormat::kR3G3B2, "R3G3B2", true},
+      {fuchsia_images2::PixelFormat::kR2G2B2X2, "R2G2B2X2", true},
+      {fuchsia_images2::PixelFormat::kL8, "L8", true},
+      {fuchsia_images2::PixelFormat::kR8, "R8", true},
+      {fuchsia_images2::PixelFormat::kR8G8, "R8G8", true},
+      {fuchsia_images2::PixelFormat::kA2R10G10B10, "A2R10G10B10", true},
+      {fuchsia_images2::PixelFormat::kA2B10G10R10, "A2B10G10R10", true},
+      {fuchsia_images2::PixelFormat::kP010, "P010", true},
+      {fuchsia_images2::PixelFormat::kR8G8B8, "R8G8B8", true},
+      {fuchsia_images2::PixelFormat::kDoNotCare, "DO_NOT_CARE", false},
+      {kUnknownPixelFormat, "UNKNOWN_12345", false},
+  };
+
+  constexpr uint32_t kWidth = 64;
+  constexpr uint32_t kHeight = 64;
+
+  for (const auto& tc : kTestCases) {
+    SCOPED_TRACE(std::string(tc.name) + " (" + std::to_string(fidl::ToUnderlying(tc.pixel_format)) +
+                 ")");
+
+    const PixelFormatAndModifier linear(tc.pixel_format,
+                                        fuchsia_images2::PixelFormatModifier::kLinear);
+    const PixelFormatAndModifier arm_te(tc.pixel_format,
+                                        fuchsia_images2::PixelFormatModifier::kArmLinearTe);
+    const PixelFormatAndModifier goldfish(
+        tc.pixel_format, fuchsia_images2::PixelFormatModifier::kGoogleGoldfishOptimal);
+
+    EXPECT_EQ(tc.supported, ImageFormatIsSupported(linear));
+    EXPECT_EQ(tc.supported, ImageFormatIsSupported(arm_te));
+    EXPECT_EQ(tc.supported, ImageFormatIsSupported(goldfish));
+
+    if (tc.supported) {
+      const uint32_t bytes_per_row = ImageFormatStrideBytesPerWidthPixel(linear) * kWidth;
+
+      fuchsia_images2::ImageFormat linear_image;
+      linear_image.pixel_format() = tc.pixel_format;
+      linear_image.pixel_format_modifier() = fuchsia_images2::PixelFormatModifier::kLinear;
+      linear_image.size() = {kWidth, kHeight};
+      linear_image.bytes_per_row() = bytes_per_row;
+
+      fuchsia_images2::ImageFormat goldfish_image = linear_image;
+      goldfish_image.pixel_format_modifier() =
+          fuchsia_images2::PixelFormatModifier::kGoogleGoldfishOptimal;
+
+      const uint64_t goldfish_size = ImageFormatImageSize(goldfish_image);
+      EXPECT_GT(goldfish_size, 0u);
+      EXPECT_EQ(ImageFormatImageSize(linear_image), goldfish_size);
+    }
+  }
+}
+
+TEST(ImageFormat, P010BitsPerPixel) {
+  PixelFormatAndModifier p010(fuchsia_images2::PixelFormat::kP010,
+                              fuchsia_images2::PixelFormatModifier::kLinear);
+  PixelFormatAndModifier nv12(fuchsia_images2::PixelFormat::kNv12,
+                              fuchsia_images2::PixelFormatModifier::kLinear);
+  EXPECT_EQ(12u, ImageFormatBitsPerPixel(nv12));
+  // P010 has the same layout as NV12, with each sample in 2 bytes instead of 1.
+  EXPECT_EQ(2 * ImageFormatBitsPerPixel(nv12), ImageFormatBitsPerPixel(p010));
+  EXPECT_EQ(2 * ImageFormatStrideBytesPerWidthPixel(nv12),
+            ImageFormatStrideBytesPerWidthPixel(p010));
+}
+
+TEST(ImageFormat, TenBitRgbColorSpaces) {
+  for (auto pixel_format :
+       {fuchsia_images2::PixelFormat::kA2B10G10R10, fuchsia_images2::PixelFormat::kA2R10G10B10}) {
+    PixelFormatAndModifier format(pixel_format, fuchsia_images2::PixelFormatModifier::kLinear);
+    EXPECT_TRUE(
+        ImageFormatIsSupportedColorSpaceForPixelFormat(fuchsia_images2::ColorSpace::kSrgb, format));
+    EXPECT_FALSE(ImageFormatIsSupportedColorSpaceForPixelFormat(
+        fuchsia_images2::ColorSpace::kRec2020, format));
+  }
+}
+
+TEST(ImageFormat, LinearMinimumRowBytesChecksAlignedWidth) {
+  sysmem_v2::ImageFormatConstraints constraints;
+  constraints.pixel_format() = fuchsia_images2::PixelFormat::kB8G8R8A8;
+  constraints.pixel_format_modifier() = fuchsia_images2::PixelFormatModifier::kLinear;
+  constraints.size_alignment() = {32u, 1u};
+  uint32_t row_bytes;
+
+  // 17 aligns up to 32, which is more than max_size.width.
+  constraints.max_size() = {20u, 20u};
+  EXPECT_FALSE(ImageFormatMinimumRowBytes(constraints, 17u, &row_bytes));
+
+  constraints.max_size() = {32u, 32u};
+  ASSERT_TRUE(ImageFormatMinimumRowBytes(constraints, 17u, &row_bytes));
+  EXPECT_EQ(32u * 4, row_bytes);
+
+  // 17 is less than min_size.width, but aligns up to 32, which isn't.
+  constraints.min_size() = {20u, 1u};
+  ASSERT_TRUE(ImageFormatMinimumRowBytes(constraints, 17u, &row_bytes));
+  EXPECT_EQ(32u * 4, row_bytes);
+
+  constraints.min_size() = {32u, 1u};
+  ASSERT_TRUE(ImageFormatMinimumRowBytes(constraints, 17u, &row_bytes));
+  EXPECT_EQ(32u * 4, row_bytes);
+
+  // 17 aligns up to 32, which is still less than min_size.width.
+  constraints.max_size() = {64u, 64u};
+  constraints.min_size() = {33u, 1u};
+  EXPECT_FALSE(ImageFormatMinimumRowBytes(constraints, 17u, &row_bytes));
+
+  // Overflowing or zero size_alignment.width fails cleanly before checking min_size/max_size.
+  EXPECT_FALSE(ImageFormatMinimumRowBytes(constraints, 0xFFFFFFE1u, &row_bytes));
+  constraints.size_alignment() = {0u, 1u};
+  EXPECT_FALSE(ImageFormatMinimumRowBytes(constraints, 17u, &row_bytes));
+}
+
+TEST(ImageFormat, ImageConstraintsToFormatZeroWidthFails) {
+  sysmem_v2::ImageFormatConstraints constraints;
+  constraints.pixel_format() = fuchsia_images2::PixelFormat::kB8G8R8A8;
+  constraints.pixel_format_modifier() = fuchsia_images2::PixelFormatModifier::kLinear;
+
+  // The minimum row bytes for width 0 is 0.
+  auto row_bytes = ImageFormatMinimumRowBytesChecked(constraints, 0u);
+  ASSERT_TRUE(row_bytes.IsValid());
+  EXPECT_EQ(0u, row_bytes.ValueOrDie());
+
+  EXPECT_FALSE(ImageConstraintsToFormat(constraints, 0u, 32u).is_ok());
+}
+
+TEST(ImageFormat, V1ConversionFailure) {
+  sysmem_v1::wire::ImageFormatConstraints constraints = {
+      .pixel_format =
+          {
+              .type = sysmem_v1::wire::PixelFormatType::kBgra32,
+              .has_format_modifier = true,
+              .format_modifier = {.value = sysmem_v1::wire::kFormatModifierLinear},
+          },
+      .layers = 2,
+  };
+  uint32_t row_bytes;
+  EXPECT_FALSE(ImageFormatMinimumRowBytes(constraints, 64u, &row_bytes));
+#if FUCHSIA_API_LEVEL_AT_LEAST(32)
+  EXPECT_FALSE(ImageFormatMinimumRowBytesChecked(constraints, 64u).IsValid());
+#endif
+  EXPECT_FALSE(ImageConstraintsToFormat(constraints, 64u, 32u).is_ok());
+
+  sysmem_v1::wire::ImageFormat2 image_format = {
+      .pixel_format = constraints.pixel_format,
+      .coded_width = 64,
+      .coded_height = 32,
+      .bytes_per_row = 256,
+      .layers = 2,
+  };
+  uint64_t offset;
+  EXPECT_FALSE(ImageFormatPlaneByteOffset(image_format, 0, &offset));
+  EXPECT_FALSE(ImageFormatPlaneRowBytes(image_format, 0, &row_bytes));
+#if FUCHSIA_API_LEVEL_AT_LEAST(32)
+  EXPECT_FALSE(ImageFormatImageSizeChecked(image_format).IsValid());
+#endif
+  ASSERT_DEATH([&] { ImageFormatImageSize(image_format); });
+}
+
+TEST(ImageFormat, Linear420OddHeight) {
+  fuchsia_images2::ImageFormat image_format;
+  image_format.pixel_format_modifier() = fuchsia_images2::PixelFormatModifier::kLinear;
+  image_format.size() = {2u, 3u};
+  image_format.bytes_per_row() = 4u;
+
+  // 3 luma rows and 2 chroma rows.
+  for (auto pixel_format :
+       {fuchsia_images2::PixelFormat::kNv12, fuchsia_images2::PixelFormat::kP010,
+        fuchsia_images2::PixelFormat::kM420, fuchsia_images2::PixelFormat::kI420,
+        fuchsia_images2::PixelFormat::kYv12}) {
+    SCOPED_TRACE(std::to_string(fidl::ToUnderlying(pixel_format)));
+    image_format.pixel_format() = pixel_format;
+    EXPECT_EQ(20u, ImageFormatImageSize(image_format));
+  }
+
+  // The second chroma plane of I420 and YV12 starts after 2 chroma rows of 2 bytes.
+  for (auto pixel_format :
+       {fuchsia_images2::PixelFormat::kI420, fuchsia_images2::PixelFormat::kYv12}) {
+    SCOPED_TRACE(std::to_string(fidl::ToUnderlying(pixel_format)));
+    image_format.pixel_format() = pixel_format;
+    uint64_t offset;
+    ASSERT_TRUE(ImageFormatPlaneByteOffset(image_format, 1, &offset));
+    EXPECT_EQ(12u, offset);
+    ASSERT_TRUE(ImageFormatPlaneByteOffset(image_format, 2, &offset));
+    EXPECT_EQ(12u + 2 * (4 / 2), offset);
+  }
+
+  // An even height gives 1.5 times the luma size.
+  image_format.size() = {2u, 4u};
+  image_format.pixel_format() = fuchsia_images2::PixelFormat::kNv12;
+  EXPECT_EQ(4u * 4 * 3 / 2, ImageFormatImageSize(image_format));
+}
+
+TEST(ImageFormat, AfbcMinimumRowBytesCoversAlignedWidth) {
+  constexpr auto kAfbc32X8TiledHeader = static_cast<fuchsia_images2::PixelFormatModifier>(
+      fidl::ToUnderlying(fuchsia_images2::PixelFormatModifier::kArmAfbc32X8) |
+      fuchsia_images2::kFormatModifierArmTiledHeaderBit);
+  struct TestCase {
+    fuchsia_images2::PixelFormatModifier modifier;
+    const char* name;
+    uint32_t width_alignment;
+  };
+  constexpr TestCase kTestCases[] = {
+      // Without a tiled header, the width is aligned to the block width.
+      {fuchsia_images2::PixelFormatModifier::kArmAfbc16X16, "kArmAfbc16X16", 16u},
+      {fuchsia_images2::PixelFormatModifier::kArmAfbc32X8, "kArmAfbc32X8", 32u},
+      // With a tiled header (8x8 blocks), the width is aligned to 128 pixels (16x16) or 256 pixels
+      // (32x8).
+      {fuchsia_images2::PixelFormatModifier::kArmAfbc16X16YuvTiledHeader,
+       "kArmAfbc16X16YuvTiledHeader", 128u},
+      {kAfbc32X8TiledHeader, "kArmAfbc32X8|kFormatModifierArmTiledHeaderBit", 256u},
+  };
+
+  sysmem_v2::ImageFormatConstraints constraints;
+  constraints.pixel_format() = fuchsia_images2::PixelFormat::kB8G8R8A8;
+  uint32_t row_bytes = 0;
+
+  for (const auto& tc : kTestCases) {
+    SCOPED_TRACE(tc.name);
+    constraints.pixel_format_modifier() = tc.modifier;
+
+    ASSERT_TRUE(ImageFormatMinimumRowBytes(constraints, 1u, &row_bytes));
+    EXPECT_EQ(tc.width_alignment * 4u, row_bytes);
+
+    ASSERT_TRUE(ImageFormatMinimumRowBytes(constraints, tc.width_alignment, &row_bytes));
+    EXPECT_EQ(tc.width_alignment * 4u, row_bytes);
+
+    ASSERT_TRUE(ImageFormatMinimumRowBytes(constraints, tc.width_alignment + 1u, &row_bytes));
+    EXPECT_EQ(2u * tc.width_alignment * 4u, row_bytes);
+  }
+
+  // Check the uint32_t upper bound for a 256-pixel-aligned tiled-header modifier:
+  // 0x3FFFFF00 * 4 = 0xFFFFFC00 fits in uint32_t, whereas 0x3FFFFF01 rounds up to 0x40000000
+  // pixels (0x100000000 bytes) and overflows uint32_t.
+  constraints.pixel_format_modifier() = kAfbc32X8TiledHeader;
+  ASSERT_TRUE(ImageFormatMinimumRowBytes(constraints, 0x3FFFFF00u, &row_bytes));
+  EXPECT_EQ(0xFFFFFC00u, row_bytes);
+  EXPECT_FALSE(ImageFormatMinimumRowBytes(constraints, 0x3FFFFF01u, &row_bytes));
+  EXPECT_FALSE(ImageFormatMinimumRowBytes(constraints, 0xFFFFFFFFu, &row_bytes));
 }

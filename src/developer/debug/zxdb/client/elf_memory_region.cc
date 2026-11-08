@@ -10,6 +10,7 @@
 
 #include "lib/syslog/cpp/macros.h"
 #include "src/developer/debug/shared/largest_less_or_equal.h"
+#include "src/developer/debug/zxdb/common/checked_math.h"
 #include "src/developer/debug/zxdb/common/err.h"
 #include "src/lib/fxl/strings/string_printf.h"
 #include "src/lib/unwinder/error.h"
@@ -19,7 +20,8 @@ namespace zxdb {
 namespace {
 unwinder::Error ReadFromData(const std::vector<uint8_t>& data, uint64_t offset, uint64_t size,
                              void* dst) {
-  if (offset + size > data.size()) {
+  auto read_end = CheckedAdd(offset, size);
+  if (!read_end || *read_end > data.size()) {
     return unwinder::Error("Read out of bounds.");
   }
 
@@ -87,7 +89,7 @@ Err ElfMemoryRegion::DecompressSection(const elflib::Elf64_Shdr& hdr) {
 }
 
 unwinder::Error ElfMemoryRegion::ReadBytes(uint64_t addr, uint64_t size, void* dst) {
-  if (addr < load_address_) {
+  if (addr < load_address_ || !CheckedAdd(addr, size)) {
     return unwinder::Error("out of boundary");
   }
 
@@ -190,7 +192,9 @@ unwinder::Error ElfMemoryRegion::ReadBytes(uint64_t addr, uint64_t size, void* d
       // within the decompressed data then we will read from that. We already know that the
       // decompressed section offset is less than the offset passed to us from the user from
       // LargestLessOrEqual above so we don't need to check that here.
-      if (found->first + found->second.size() <= offset + size) {
+      auto section_end = CheckedAdd(found->first, found->second.size());
+      auto read_end = CheckedAdd(offset, size);
+      if (section_end && read_end && *read_end <= *section_end) {
         return ReadFromData(found->second, offset - found->first, size, dst);
       }
       // else fall through to decompress the section corresponding to |section_header|.

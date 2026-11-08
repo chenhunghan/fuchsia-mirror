@@ -305,6 +305,11 @@ def process_one(
 
         return full_block
 
+    if 'license_text = "license"' in content:
+        content = content.replace('":license"', '":license_metadata"').replace(
+            'name = "license"', 'name = "license_metadata"'
+        )
+
     new_content = alias_block_pattern.sub(replacement_func, content)
     if new_content != orig_content:
         with open(build_file, "w") as f:

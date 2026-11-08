@@ -5,22 +5,19 @@
 import("//build/components.gni")
 import("//build/rust/rustc_test.gni")
 
-# The library is defined in BUILD.bazel. The unit tests stay in GN: they depend
-# on //src/devices/bin/driver_runtime, which is not built by Bazel yet.
+# The library is defined in BUILD.bazel. The tests stay in GN: they depend on
+# //src/devices/bin/driver_runtime, which is not built by Bazel yet.
 rustc_test("core_test") {
   output_name = "fdf_core_lib_test"
   edition = "2024"
   configs += [ "//build/config/rust/lints:clippy_warn_all" ]
   deps = [
     "//sdk/lib/async",
-    "//sdk/lib/async/rust",
     "//sdk/lib/async/rust/dispatcher",
     "//sdk/lib/driver/runtime/rust/fdf_sys",
     "//sdk/rust/zx",
     "//src/devices/bin/driver_runtime",
     "//src/devices/lib/driver:driver_runtime",
-    "//src/lib/fuchsia-async",
-    "//third_party/rust_crates:futures",
   ]
   sources = [
     "src/dispatcher.rs",
@@ -30,13 +27,41 @@ rustc_test("core_test") {
   ]
 }
 
+# Dispatcher tests, which use the driver test helpers in fdf_env. These are
+# integration tests rather than unit tests, as fdf_env itself depends on this
+# library.
+rustc_test("core_integration_test") {
+  output_name = "fdf_core_integration_test"
+  edition = "2024"
+  configs += [ "//build/config/rust/lints:clippy_warn_all" ]
+  source_root = "tests/dispatcher.rs"
+  deps = [
+    ":core",
+    "//sdk/lib/async/rust",
+    "//sdk/lib/async/rust/dispatcher",
+    "//sdk/lib/driver/runtime/rust/env",
+    "//sdk/rust/zx",
+    "//src/devices/bin/driver_runtime",
+    "//src/lib/fuchsia-async",
+    "//third_party/rust_crates:futures",
+  ]
+  sources = [ "tests/dispatcher.rs" ]
+}
+
 fuchsia_unittest_package("fdf_rust_core_tests") {
   deps = [ ":core_test" ]
 }
 
+fuchsia_unittest_package("fdf_rust_core_integration_tests") {
+  deps = [ ":core_integration_test" ]
+}
+
 group("tests") {
   testonly = true
-  deps = [ ":fdf_rust_core_tests" ]
+  deps = [
+    ":fdf_rust_core_integration_tests",
+    ":fdf_rust_core_tests",
+  ]
 }
 
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##

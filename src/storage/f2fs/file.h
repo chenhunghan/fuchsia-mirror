@@ -46,7 +46,6 @@ class File : public VnodeF2fs, public fbl::Recyclable<File> {
 
  private:
   friend FileTester;
-  zx_status_t ReadInline(void* data, size_t len, size_t off, size_t* out_actual);
   zx_status_t TruncateInline(size_t len) __TA_EXCLUDES(mutex_);
   // for tests
   zx_status_t WriteInline(const void* data, size_t len, size_t offset, size_t* out_actual);

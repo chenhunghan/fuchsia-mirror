@@ -107,6 +107,7 @@ class DeviceTest : public zxtest::Test {
   uint8_t get_reset_endpoint() { return hci_->reset_endpoint(); }
   void SetEmptyState(bool should_return_empty) { hci_->SetEmptyState(should_return_empty); }
   void SetErrorState(zx_status_t error) { hci_->SetErrorState(error); }
+  FakeHci& hci() { return *hci_; }
 
  protected:
   std::shared_ptr<MockDevice> root_{MockDevice::FakeRootParent()};
@@ -519,6 +520,56 @@ TEST_F(DeviceTest, FidlGetHubDeviceId) {
   auto result = fidl->GetHubDeviceId();
   ASSERT_TRUE(result.ok());
   ASSERT_EQ(result.value().hub_device_id, kHubId);
+}
+
+// USB Bus protocol tests. The protocol is served per device, so hub operations must target
+// this device's ID.
+TEST_F(DeviceTest, UsbBusConfigureHubUsesDeviceId) {
+  auto bus = get_usb_bus_protocol();
+  usb_hub_descriptor_t desc = {};
+  ASSERT_OK(bus.ConfigureHub(USB_SPEED_HIGH, &desc, false));
+  ASSERT_EQ(hci().configured_hub_id(), kDeviceId);
+}
+
+TEST_F(DeviceTest, UsbBusDeviceAddedUsesDeviceId) {
+  auto bus = get_usb_bus_protocol();
+  ASSERT_OK(bus.DeviceAdded(3, USB_SPEED_HIGH));
+  ASSERT_EQ(hci().hub_device_added(), std::make_pair(kDeviceId, uint32_t{3}));
+}
+
+TEST_F(DeviceTest, UsbBusDeviceRemovedUsesDeviceId) {
+  auto bus = get_usb_bus_protocol();
+  ASSERT_OK(bus.DeviceRemoved(4));
+  ASSERT_EQ(hci().hub_device_removed(), std::make_pair(kDeviceId, uint32_t{4}));
+}
+
+class FakeHubInterface : public ddk::UsbHubInterfaceProtocol<FakeHubInterface> {
+ public:
+  zx_status_t UsbHubInterfaceResetPort(uint32_t port) {
+    reset_port_ = port;
+    return ZX_OK;
+  }
+  const usb_hub_interface_protocol_ops_t* ops() const { return &usb_hub_interface_protocol_ops_; }
+  std::optional<uint32_t> reset_port() const { return reset_port_; }
+
+ private:
+  std::optional<uint32_t> reset_port_;
+};
+
+TEST_F(DeviceTest, UsbBusSetHubInterface) {
+  auto& device = get_device();
+  // No hub interface registered yet.
+  ASSERT_EQ(device.HubResetPort(1), ZX_ERR_BAD_STATE);
+
+  FakeHubInterface hub;
+  auto bus = get_usb_bus_protocol();
+  ASSERT_OK(bus.SetHubInterface(&hub, hub.ops()));
+  ASSERT_OK(device.HubResetPort(7));
+  ASSERT_EQ(hub.reset_port(), 7u);
+
+  // Clear the interface so the device does not retain a pointer to |hub|.
+  ASSERT_OK(bus.SetHubInterface(nullptr, nullptr));
+  ASSERT_EQ(device.HubResetPort(1), ZX_ERR_BAD_STATE);
 }
 
 TEST_F(DeviceTest, FidlGetConfiguration) {

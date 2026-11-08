@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 library fuchsia.media;
 
+using fuchsia.images2;
 using fuchsia.sysmem;
 
 const MAX_KEY_ID_SIZE uint32 = 16;
@@ -117,7 +118,10 @@ type AudioCompressedFormatCvsd = table {};
 @available(added=HEAD)
 type AudioCompressedFormatLc3 = table {};
 
+/// Legacy PCM waveform encoding mode; prefer `AudioPcmMode2`
+/// (`FormatDetails.pcm_format`).
 @strict_audit(bug="https://fxbug.dev/467128527", state="PENDING_REVIEW")
+@available(deprecated=NEXT, note="use AudioPcmMode2")
 type AudioPcmMode = strict enum {
     // 16 bit signed int linear or 32 bit float linear, for now
     // 1-N channels ok, with "A.B" channels designated as A+B channel_count -
@@ -131,12 +135,10 @@ type AudioPcmMode = strict enum {
     MULAW = 2;
 };
 
-/// AudioChannelId
-///
-/// Used in specifying which audio channel is for which speaker location / type.
-///
-/// TODO(b/529511595): Do we need/want more channel IDs than this?
+/// Legacy channel role identifier; prefer `AudioChannelId2`
+/// (`FormatDetails.pcm_format`).
 @strict_audit(bug="https://fxbug.dev/467128527", state="PENDING_REVIEW")
+@available(deprecated=NEXT, note="use AudioChannelId2")
 type AudioChannelId = strict enum {
     SKIP = 0; // unused channel
     LF = 1; // left front
@@ -159,9 +161,9 @@ type AudioChannelId = strict enum {
     MAX = 0x7fffffff;
 };
 
-/// PcmFormat
-///
-/// PCM audio format details.
+/// Legacy PCM audio format details; prefer `PcmFormat2`
+/// (`FormatDetails.pcm_format`).
+@available(deprecated=NEXT, note="use FormatDetails.pcm_format")
 type PcmFormat = struct {
     // Implicit details:
     //   * For bits_per_sample > 8, host-endian is implied.
@@ -196,10 +198,175 @@ type PcmFormat = struct {
     channel_map vector<AudioChannelId>:16;
 };
 
-/// AudioUncompressedFormat
+/// Channel role identifier in a `PcmFormat2` `channel_map`.
 ///
-// Uncompressed audio format details.
+/// All non-`SKIP` enum member names (`FL`..`FWR`, including `LFE` and `LFE2`)
+/// and bit-position ordering (`value = bit_position + 1` for bits `0..25`) are
+/// consistent with Android's `AAUDIO_CHANNEL_*` (`<aaudio/AAudio.h>`),
+/// `AudioChannelLayout.CHANNEL_*`, and `android.media.AudioFormat`
+/// channel-diagram abbreviations (for example, `FL`, `FR`, `FC`, `LFE`, `BL`,
+/// `BR`, `FLC`, `FRC`, `BC`, `SL`, `SR`, ..., and `FWL`/`FWR` for
+/// `FRONT_WIDE_LEFT`/`FRONT_WIDE_RIGHT`).
+@available(added=NEXT)
+type AudioChannelId2 = flexible enum : uint32 {
+    /// Unused channel (skip).
+    SKIP = 0;
+    /// Front Left (Android bit 0: `AAUDIO_CHANNEL_FRONT_LEFT = 1 << 0`;
+    /// legacy [`AudioChannelId.LF`]).
+    FL = 1;
+    /// Front Right (Android bit 1: `AAUDIO_CHANNEL_FRONT_RIGHT = 1 << 1`;
+    /// legacy [`AudioChannelId.RF`]).
+    FR = 2;
+    /// Front Center (Android bit 2: `AAUDIO_CHANNEL_FRONT_CENTER = 1 << 2`;
+    /// legacy [`AudioChannelId.CF`]).
+    FC = 3;
+    /// Low Frequency Effects (Android bit 3:
+    /// `AAUDIO_CHANNEL_LOW_FREQUENCY = 1 << 3`).
+    LFE = 4;
+    /// Back Left (Android bit 4: `AAUDIO_CHANNEL_BACK_LEFT = 1 << 4`;
+    /// legacy [`AudioChannelId.LR`]).
+    BL = 5;
+    /// Back Right (Android bit 5: `AAUDIO_CHANNEL_BACK_RIGHT = 1 << 5`;
+    /// legacy [`AudioChannelId.RR`]).
+    BR = 6;
+    /// Front Left of Center (Android bit 6:
+    /// `AAUDIO_CHANNEL_FRONT_LEFT_OF_CENTER = 1 << 6`).
+    FLC = 7;
+    /// Front Right of Center (Android bit 7:
+    /// `AAUDIO_CHANNEL_FRONT_RIGHT_OF_CENTER = 1 << 7`).
+    FRC = 8;
+    /// Back Center (Android bit 8: `AAUDIO_CHANNEL_BACK_CENTER = 1 << 8`;
+    /// legacy [`AudioChannelId.CS`]).
+    BC = 9;
+    /// Side Left (Android bit 9: `AAUDIO_CHANNEL_SIDE_LEFT = 1 << 9`;
+    /// legacy [`AudioChannelId.LS`]).
+    SL = 10;
+    /// Side Right (Android bit 10: `AAUDIO_CHANNEL_SIDE_RIGHT = 1 << 10`;
+    /// legacy [`AudioChannelId.RS`]).
+    SR = 11;
+    /// Top Center (Android bit 11: `AAUDIO_CHANNEL_TOP_CENTER = 1 << 11`).
+    TC = 12;
+    /// Top Front Left (Android bit 12:
+    /// `AAUDIO_CHANNEL_TOP_FRONT_LEFT = 1 << 12`).
+    TFL = 13;
+    /// Top Front Center (Android bit 13:
+    /// `AAUDIO_CHANNEL_TOP_FRONT_CENTER = 1 << 13`).
+    TFC = 14;
+    /// Top Front Right (Android bit 14:
+    /// `AAUDIO_CHANNEL_TOP_FRONT_RIGHT = 1 << 14`).
+    TFR = 15;
+    /// Top Back Left (Android bit 15:
+    /// `AAUDIO_CHANNEL_TOP_BACK_LEFT = 1 << 15`).
+    TBL = 16;
+    /// Top Back Center (Android bit 16:
+    /// `AAUDIO_CHANNEL_TOP_BACK_CENTER = 1 << 16`).
+    TBC = 17;
+    /// Top Back Right (Android bit 17:
+    /// `AAUDIO_CHANNEL_TOP_BACK_RIGHT = 1 << 17`).
+    TBR = 18;
+    /// Top Side Left (Android bit 18:
+    /// `AAUDIO_CHANNEL_TOP_SIDE_LEFT = 1 << 18`).
+    TSL = 19;
+    /// Top Side Right (Android bit 19:
+    /// `AAUDIO_CHANNEL_TOP_SIDE_RIGHT = 1 << 19`).
+    TSR = 20;
+    /// Bottom Front Left (Android bit 20:
+    /// `AAUDIO_CHANNEL_BOTTOM_FRONT_LEFT = 1 << 20`).
+    BFL = 21;
+    /// Bottom Front Center (Android bit 21:
+    /// `AAUDIO_CHANNEL_BOTTOM_FRONT_CENTER = 1 << 21`).
+    BFC = 22;
+    /// Bottom Front Right (Android bit 22:
+    /// `AAUDIO_CHANNEL_BOTTOM_FRONT_RIGHT = 1 << 22`).
+    BFR = 23;
+    /// Low Frequency Effects 2 (Android bit 23:
+    /// `AAUDIO_CHANNEL_LOW_FREQUENCY_2 = 1 << 23`).
+    LFE2 = 24;
+    /// Front Wide Left (Android bit 24:
+    /// `AAUDIO_CHANNEL_FRONT_WIDE_LEFT = 1 << 24`).
+    FWL = 25;
+    /// Front Wide Right (Android bit 25:
+    /// `AAUDIO_CHANNEL_FRONT_WIDE_RIGHT = 1 << 25`).
+    FWR = 26;
+};
+
+/// Minimum value for format-specific (or ad-hoc) `AudioChannelId2` values, to
+/// avoid colliding with standard `AudioChannelId2` values. Values in this range
+/// are not guaranteed to avoid collision across different formats.
+@available(added=NEXT)
+const MIN_EXTENDED_AUDIO_CHANNEL_ID2 uint32 = 0x6f000000;
+
+/// Maximum valid `AudioChannelId2` value. Values with the high bit set are
+/// reserved.
+@available(added=NEXT)
+const MAX_AUDIO_CHANNEL_ID2 uint32 = 0x7fffffff;
+
+/// Waveform encoding mode for `PcmFormat2`.
+@available(added=NEXT)
+type AudioPcmMode2 = flexible enum : uint32 {
+    /// Linear PCM, host-endian, signed integer.
+    LINEAR = 1;
+    /// G.711 A-law 8-bit format-defined waveform semantics (1 channel).
+    ALAW = 2;
+    /// G.711 mu-law 8-bit format-defined waveform semantics (1 channel).
+    MULAW = 3;
+    /// Linear PCM, host-endian, IEEE 754 floating-point (nominal [-1.0, 1.0]).
+    FLOAT = 4;
+};
+
+/// Maximum number of channels supported in `PcmFormat2.channel_map`.
+@available(added=NEXT)
+const MAX_PCM_FORMAT2_CHANNEL_COUNT uint32 = 64;
+
+/// Uncompressed PCM audio format details.
+///
+/// Whenever `FormatDetails.pcm_format` is set, `pcm_mode`, `bits_per_sample`,
+/// `frames_per_second`, and a non-empty `channel_map` are all required;
+/// `bytes_per_sample` is optional.
+///
+/// For `bits_per_sample > 8`, host-endian byte order is implied. For
+/// multi-channel streams (`channel_map` length >= 2), interleaved sample layout
+/// in `channel_map` order is implied.
+///
+/// When `bits_per_sample < bytes_per_sample * 8` (for `AudioPcmMode2.LINEAR`,
+/// such as `bits_per_sample == 24` with `bytes_per_sample == 4`), the
+/// `bits_per_sample` valid bits occupy the most-significant (high-order /
+/// left-justified) bits of the host-endian `bytes_per_sample`-byte sample
+/// container (for example, bits `31..8` for 24-in-32). Producers should set any
+/// remaining low-order padding bits (bits `7..0` for 24-in-32) to `0`, and
+/// receivers must ignore them.
+@available(added=NEXT)
+type PcmFormat2 = table {
+    /// PCM waveform encoding mode. Required.
+    1: pcm_mode AudioPcmMode2;
+    /// Number of valid bits per single-channel sample (e.g. 16 for CD quality).
+    /// Must be `<= bytes_per_sample * 8`. If less than `bytes_per_sample * 8`,
+    /// the valid bits are most-significant (left-justified) within the sample
+    /// container and any low-order padding bits must be ignored by the
+    /// receiver.
+    /// Required.
+    2: bits_per_sample uint32;
+    /// Number of multi-channel frames per second (e.g. 44100 or 48000).
+    /// Required.
+    3: frames_per_second uint32;
+    /// Channel role assignment for each channel in interleaved frame order.
+    /// Required; must be non-empty (`channel_map` length is the channel count).
+    /// If a channel has no standard `AudioChannelId2`, an ad-hoc value in
+    /// `[MIN_EXTENDED_AUDIO_CHANNEL_ID2, MAX_AUDIO_CHANNEL_ID2]` may be used.
+    4: channel_map vector<AudioChannelId2>:MAX_PCM_FORMAT2_CHANNEL_COUNT;
+    /// Container size in bytes per single-channel sample (for example, `4` for
+    /// 24-bit signed PCM left-justified in a 32-bit container vs. `3` for
+    /// packed 24-bit PCM). Must be `>= (bits_per_sample + 7) / 8` (for `ALAW`,
+    /// `MULAW`, and `FLOAT`, `bytes_per_sample * 8 == bits_per_sample`).
+    /// Optional; when omitted, packed `(bits_per_sample + 7) / 8` bytes per
+    /// sample is implied.
+    5: bytes_per_sample uint32;
+};
+
+/// Legacy uncompressed audio format details; prefer
+/// `FormatDetails.pcm_format` (`PcmFormat2`).
 @strict_audit(bug="https://fxbug.dev/467128527", state="PENDING_REVIEW")
+@available(deprecated=NEXT, note="use FormatDetails.pcm_format")
 type AudioUncompressedFormat = strict union {
     1: pcm PcmFormat;
 };
@@ -210,6 +377,7 @@ type AudioUncompressedFormat = strict union {
 @strict_audit(bug="https://fxbug.dev/467128527", state="PENDING_REVIEW")
 type AudioFormat = strict union {
     1: compressed AudioCompressedFormat;
+    @available(deprecated=NEXT, note="use FormatDetails.pcm_format")
     2: uncompressed AudioUncompressedFormat;
 };
 
@@ -234,11 +402,9 @@ type VideoColorSpace = strict enum {
     INVALID = 0;
 };
 
-/// VideoUncompressedFormat
-///
-/// Uncompressed video format details.
-///
-// TODO(b/529511595): Switch to fuchsia.images2.ImageFormat for this purpose.
+/// Legacy uncompressed video format details; prefer
+/// `FormatDetails.image_format` ([`fuchsia.images2/ImageFormat`]).
+@available(deprecated=NEXT, note="use FormatDetails.image_format")
 type VideoUncompressedFormat = struct {
     image_format fuchsia.sysmem.ImageFormat_2;
 
@@ -341,6 +507,7 @@ type VideoUncompressedFormat = struct {
 @strict_audit(bug="https://fxbug.dev/467128527", state="PENDING_REVIEW")
 type VideoFormat = strict union {
     1: compressed VideoCompressedFormat;
+    @available(deprecated=NEXT, note="use FormatDetails.image_format")
     2: uncompressed VideoUncompressedFormat;
 };
 
@@ -431,11 +598,10 @@ type EncryptedFormat = table {
     5: pattern EncryptionPattern;
 };
 
-/// DecryptedFormat
-///
-/// This describes the format of the decrypted content. It is required to be
-/// sent by the StreamProcessor server prior to the delivery of output packets.
-/// Currently, there is no additional format details for decrypted output.
+/// Legacy decrypted content format marker (`domain.crypto.decrypted`).
+/// Prefer omitting both `encrypted_format` and `domain` on decrypted output
+/// `FormatDetails` (sent by the `StreamProcessor` server prior to delivering
+/// output packets, with no additional crypto format details).
 type DecryptedFormat = table {
     // TODO(https://fxbug.dev/42160640): Empty tables cause dart analysis error. Remove this
     // unused field once the issue is resolved.
@@ -648,8 +814,9 @@ type Lc3FrameDuration = flexible enum {
 };
 
 
-/// Settings for LC3 Encoders. Contains parameters stated in LC3 Specification v1.0.
-/// Contains fields that are not represented by PcmFormat.
+/// Settings for LC3 Encoders. Contains parameters stated in LC3 Specification
+/// v1.0. Contains fields that are not represented by `PcmFormat2`
+/// (`FormatDetails.pcm_format`).
 @available(added=HEAD)
 type Lc3EncoderSettings = table {
     /// External byte count values to be used for the frame encoding of audio.
@@ -730,8 +897,6 @@ type CodecProfile = flexible enum : uint32 {
 // data which we can't already determine from the data itself, and which isn't
 // already covered by a format's defined OOB binary config blob, which is
 // conveyed in oob_bytes.
-//
-// Most decoders can have FormatDetails.domain null.
 type FormatDetails = table {
     /// Particular instances of FormatDetails will set this field to make it
     /// easier for a receiver to determine if any part of the format has changed
@@ -782,36 +947,27 @@ type FormatDetails = table {
     // ZX_CHANNEL_MAX_MSG_BYTES.
     3: oob_bytes vector<uint8>:MAX;
 
-    // Decoder input format:
-    //
-    // If a format is not self-describing given the mime_type and a
-    // format-spec-defined oob_bytes, this domain field can be set to
-    // provide the additional compressed-format-specific details.  This is
-    // expected to be fairly rare, so most compressed input formats will have
-    // only the mime_type and possibly oob_bytes set, with domain typically
-    // null.  If an encoder is upstream however, domain may be set to convey the
-    // encoder settings that were used, but a decoder consumer doesn't need to
-    // look at those.
-    //
-    // Encoder output format:
-    //
-    // The encoder's compressed data output typically needs some configuration
-    // (provided in this field) that's convenient to provide in a form that's
-    // not oob_bytes, and the codec can convert that config to oob_bytes on
-    // encoder output via OnOutputConstraints().  We retain these encoder settings
-    // in the output FormatDetails to allow for cases where a downstream
-    // consumer knowing the encoder settings could be useful.
-    //
-    // Encoder input format / decoder output format:
-    //
-    // This field contains fairly detailed information re. uncompressed data
-    // format details, which tends to _not_ be self-describing in-band.
+    /// Legacy domain-specific format details.
+    ///
+    /// Deprecated in favor of top-level fields on `FormatDetails`:
+    /// * Uncompressed video: `image_format`.
+    /// * Uncompressed PCM audio: `pcm_format`.
+    /// * Encrypted input: `encrypted_format` (decrypted output omits both
+    ///   `encrypted_format` and `domain`).
+    /// * Compressed decoder input: `mime_type` and `oob_bytes` (with `domain`
+    ///   left unset).
+    /// * Compressed encoder input / output: `mime_type` and `encoder_settings`
+    ///   on encoder input, and `mime_type` and `oob_bytes` on encoder output
+    ///   (with `domain` left unset). Encoders convert structured
+    ///   `encoder_settings` into the format's standard binary configuration in
+    ///   `oob_bytes` on output rather than setting `encoder_settings` on
+    ///   output, since downstream consumers and containers consume standard
+    ///   `oob_bytes`.
+    ///
+    /// When both a top-level replacement field and `domain` are set (for
+    /// example, during soft transition bridging), the top-level field is
+    /// authoritative.
     4: domain DomainFormat;
-
-    // TODO(b/476248640): Soft migration from VideoUncompressedFormat to an
-    // ImageFormat field here.
-    //
-    // X: image_format fuchsia.images2.ImageFormat;
 
     // See comments above on Parameter.  At the time we lock relevant FIDL
     // interfaces, there should be zero use of this field outside tests, but
@@ -861,4 +1017,41 @@ type FormatDetails = table {
     /// the stream is encoded in. Regardless, clients should provide the encoded profile if
     /// possible.
     8: profile CodecProfile;
+
+    /// Uncompressed video image format ([`fuchsia.images2/ImageFormat`], for
+    /// encoder input or decoder output).
+    ///
+    /// Replaces `domain.video.uncompressed` (`VideoUncompressedFormat`). Takes
+    /// precedence over `domain.video.uncompressed` if both are set.
+    ///
+    /// Any conflict between `image_format` and the Sysmem-negotiated
+    /// `BufferCollectionInfo` for the stream's buffers is an error and causes
+    /// the stream (or channel) to fail.
+    ///
+    /// When creating an encoder (`CodecFactory.CreateEncoder`), `image_format`
+    /// may specify partial input requirements (for example, `size` or
+    /// `display_rect` while omitting `pixel_format` or `bytes_per_row` to be
+    /// negotiated via Sysmem constraints). When conveyed via
+    /// `QueueInputFormatDetails` or `OnOutputFormat`, `image_format` describes
+    /// the complete image format matching the allocated buffers (for linear
+    /// formats, omitting `bytes_per_row` implies unpadded rows per
+    /// [`fuchsia.images2/ImageFormat.bytes_per_row`]).
+    @available(added=NEXT)
+    9: image_format fuchsia.images2.ImageFormat;
+
+    /// Uncompressed PCM audio format (for encoder input or decoder output).
+    ///
+    /// Replaces `domain.audio.uncompressed.pcm` (`PcmFormat`). Takes precedence
+    /// over `domain.audio.uncompressed.pcm` if both are set.
+    @available(added=NEXT)
+    10: pcm_format PcmFormat2;
+
+    /// Encrypted stream format parameters (for decryptor or secure decoder
+    /// input).
+    ///
+    /// Replaces `domain.crypto.encrypted` (`EncryptedFormat`). Takes precedence
+    /// over `domain.crypto.encrypted` if both are set. Decrypted output omits
+    /// this field (and `domain`).
+    @available(added=NEXT)
+    11: encrypted_format EncryptedFormat;
 };

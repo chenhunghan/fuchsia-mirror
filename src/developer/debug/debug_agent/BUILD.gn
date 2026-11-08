@@ -160,7 +160,7 @@ static_library("lib") {
 
     deps += [
       "//sdk/lib/component/incoming/cpp",
-      "//src/lib/diagnostics/accessor2logger",
+      "//src/lib/diagnostics/fidl_log_message_parser",
     ]
 
     # Fuchsia architecture-specific files.
@@ -276,19 +276,9 @@ fuchsia_structured_config_cpp_elf_lib("debug_agent_config") {
   cm_label = ":debug_agent_manifest"
 }
 
-fuchsia_structured_config_values("debug_agent_config_default") {
-  cm_label = ":debug_agent_manifest"
-  values = {
-    monitor_root_job = true
-  }
-}
-
 fuchsia_component("debug_agent_component") {
   cm_label = ":debug_agent_manifest"
-  deps = [
-    ":bin",
-    ":debug_agent_config_default",
-  ]
+  deps = [ ":bin" ]
 }
 
 fuchsia_component("debug_agent_launcher_component") {

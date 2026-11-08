@@ -20,11 +20,13 @@ use errors::ffx_bail;
 use ffx_config::EnvironmentContext;
 use ffx_emulator_common::config::EMU_SERIAL_ENABLED;
 use ffx_emulator_config::EmulatorEngine;
-use fho::{Result, bug, return_bug, return_user_error};
-use port_picker::{is_free_tcp_port, pick_unused_port};
+use fho::{Result, bug, return_user_error};
 use qemu_based::crosvm::CrosvmEngine;
 use qemu_based::femu::FemuEngine;
 use qemu_based::qemu::QemuEngine;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 
 /// The EngineBuilder is used to create and configure an EmulatorEngine, while ensuring the
 /// configuration will result in a valid emulation instance.
@@ -73,6 +75,13 @@ impl EngineBuilder {
             emu_instances,
             serial_enabled: None,
         }
+    }
+
+    /// Create a new EngineBuilder using the emulator instance directories from `context`.
+    pub fn from_env(context: &EnvironmentContext) -> Result<Self> {
+        let dirs: Vec<PathBuf> =
+            context.get(ffx_config::keys::EMU_INSTANCE_ROOT_DIR).map_err(|e| bug!("{e}"))?;
+        Ok(Self::new(context, EmulatorInstances::from(dirs)))
     }
 
     /// Set the configuration to use when building a new engine.
@@ -140,18 +149,11 @@ impl EngineBuilder {
         // Set up the instance directory, now that we have enough information.
         let name = self.emulator_configuration.runtime.name.clone();
         self.emulator_configuration.runtime.engine_type = self.engine_type;
-        self.emulator_configuration.runtime.instance_directory =
-            self.emu_instances.get_instance_dir(&name, true).map_err(anyhow::Error::from)?;
-
-        let serial_enabled = self
-            .serial_enabled
-            .unwrap_or_else(|| self.context.get(EMU_SERIAL_ENABLED).unwrap_or(true));
-        update_serial_number(&mut self.emulator_configuration, serial_enabled);
 
         // Make sure we don't overwrite an existing instance.
-        if let Ok(EngineOption::DoesExist(instance_data)) =
-            read_from_disk(&self.emulator_configuration.runtime.instance_directory)
-        {
+        let existing_dir =
+            self.emu_instances.get_instance_dir(&name, false).map_err(anyhow::Error::from)?;
+        if let Ok(EngineOption::DoesExist(instance_data)) = read_from_disk(&existing_dir) {
             if instance_data.is_running() {
                 return_user_error!(
                     "An emulator named {} is already running. \
@@ -162,6 +164,17 @@ impl EngineBuilder {
                 );
             }
         }
+
+        let instance_dir =
+            self.emu_instances.get_instance_dir(&name, true).map_err(anyhow::Error::from)?;
+        self.emulator_configuration.runtime.instance_directory = instance_dir.clone();
+
+        self.configure_short_sockets(&instance_dir);
+
+        let serial_enabled = self
+            .serial_enabled
+            .unwrap_or_else(|| self.context.get(EMU_SERIAL_ENABLED).unwrap_or(true));
+        update_serial_number(&mut self.emulator_configuration, serial_enabled);
 
         // Build and complete configuration on the engine, then pass it back to the caller.
         let instance_data = EmulatorInstanceData::new(
@@ -182,6 +195,56 @@ impl EngineBuilder {
         engine.save_to_disk().await?;
 
         Ok(engine)
+    }
+
+    fn configure_short_sockets(&mut self, instance_dir: &Path) {
+        // UNIX domain socket paths are limited to 108 characters on Linux (sockaddr_un.sun_path).
+        // In isolated test environments (e.g. on LUCI builders), the instance directory path
+        // can be extremely deep, exceeding this limit and causing the emulator to fail to bind
+        // its sockets.
+        // To prevent this, we generate unique socket paths in the system temporary directory
+        // (which is typically short and writeable) and store them in the emulator configuration
+        // (engine.json). Clients read this configuration to connect directly to the short paths,
+        // completely bypassing the limit without requiring fragile symlinks. We use a hash of
+        // the instance directory and the user's UID to ensure the socket paths are unique and
+        // do not conflict between multiple users or different emulator instances.
+        let mut hasher = DefaultHasher::new();
+        instance_dir.hash(&mut hasher);
+        nix::unistd::getuid().hash(&mut hasher);
+        let hash_val = hasher.finish();
+        let set_short_socket = |socket: &mut PathBuf, prefix: &str| {
+            if socket.as_os_str().is_empty() {
+                *socket = std::env::temp_dir().join(format!("femu_{prefix}_{hash_val:x}"));
+            }
+        };
+
+        let uart_enabled = qemu_based::is_uart_enabled(&self.emulator_configuration);
+        let runtime = &mut self.emulator_configuration.runtime;
+        match self.engine_type {
+            EngineType::Qemu | EngineType::Femu => {
+                if uart_enabled {
+                    set_short_socket(&mut runtime.serial_socket, "s");
+                }
+                // Custom flag templates may place the QEMU control sockets anywhere (typically
+                // in the instance directory), so only the built-in templates use the short paths.
+                if runtime.template.is_none() {
+                    for (socket, prefix) in [
+                        (&mut runtime.monitor_socket, "m"),
+                        (&mut runtime.qmp_socket, "q"),
+                        (&mut runtime.console_socket, "c"),
+                    ] {
+                        set_short_socket(socket, prefix);
+                    }
+                }
+            }
+            EngineType::Crosvm => {
+                // Custom flag templates pass their own flags; only built-in staging uses
+                // `control_socket`.
+                if runtime.template.is_none() {
+                    set_short_socket(&mut runtime.control_socket, "ctrl");
+                }
+            }
+        }
     }
 
     /// Returns the EmulatorEngine instance based on the name.
@@ -263,61 +326,6 @@ pub fn process_flags_from_str_with_context(
         .map_err(|e| bug!("Error processing flags: {e}"))
 }
 
-/// Ensures all ports are mapped with available port values, assigning free ports any that are
-/// missing, and making sure there are no conflicts within the map.
-pub(crate) fn finalize_port_mapping(emu_config: &mut EmulatorConfiguration) -> Result<()> {
-    let port_map = &mut emu_config.host.port_map;
-    let mut used_ports = Vec::new();
-    for (name, port) in port_map {
-        let mut need_allocation = true;
-        if let Some(value) = port.host {
-            if value != 0 {
-                if used_ports.contains(&value) {
-                    return_user_error!("Host port {} was mapped to multiple guest ports.", value);
-                }
-                if is_free_tcp_port(value).is_none() {
-                    return_user_error!("Host port {} is already in use by another process.", value);
-                }
-                // This port is good, so we claim it to make sure there are no conflicts later.
-                used_ports.push(value);
-                need_allocation = false;
-            }
-        }
-        if need_allocation {
-            log::warn!(
-                "No host-side port specified for '{:?}', a host port will be dynamically \
-                assigned. Check `ffx emu show {}` to see which port is assigned.",
-                name,
-                emu_config.runtime.name
-            );
-
-            // There have been some incidents in automated tests of the same port
-            // being returned multiple times.
-            // So we'll try multiple times and avoid duplicates.
-            let mut assigned = false;
-            for _ in 0..10 {
-                if let Some(value) = pick_unused_port() {
-                    if !used_ports.contains(&value) {
-                        port.host = Some(value);
-                        used_ports.push(value);
-                        assigned = true;
-                        break;
-                    } else {
-                        log::warn!("pick unused port returned: {} multiple times\n", value);
-                    }
-                } else {
-                    log::warn!("pick unused port returned: None\n");
-                }
-            }
-            if !assigned {
-                return_bug!("Unable to assign a host port for '{}'. Terminating emulation.", name);
-            }
-        }
-    }
-    log::debug!("Port map finalized: {:?}\n", emu_config.host.port_map);
-    Ok(())
-}
-
 fn generate_serial() -> String {
     format!("EM-{:09X}", rand::random::<u64>() & 0xFFFFFFFFF)
 }
@@ -352,25 +360,6 @@ pub fn update_serial_number(config: &mut EmulatorConfiguration, serial_enabled: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use emulator_instance::PortMapping;
-
-    #[test]
-    fn test_finalize_port_mapping_zero() {
-        let mut emu_config = EmulatorConfiguration::default();
-        emu_config
-            .host
-            .port_map
-            .insert("test_port".to_string(), PortMapping { host: Some(0), guest: 2222 });
-
-        let result = finalize_port_mapping(&mut emu_config);
-        assert!(result.is_ok(), "Expected OK, got {:?}", result);
-
-        let mapping = emu_config.host.port_map.get("test_port").unwrap();
-        assert!(mapping.host.is_some());
-        let host_port = mapping.host.unwrap();
-        assert_ne!(host_port, 0, "Host port should not be 0 after finalization");
-        assert_eq!(mapping.guest, 2222);
-    }
 
     #[fuchsia::test]
     async fn test_serial_number_generation() {
@@ -391,6 +380,40 @@ mod tests {
             .engine_type(EngineType::Qemu);
 
         let engine = builder.build().await.expect("engine built");
+        assert!(engine.emu_config().runtime.serial_socket.as_os_str().is_empty());
+        // The QEMU control sockets are kept short regardless of the instance directory's length.
+        let runtime = &engine.emu_config().runtime;
+        for (socket, prefix) in [
+            (&runtime.monitor_socket, "femu_m_"),
+            (&runtime.qmp_socket, "femu_q_"),
+            (&runtime.console_socket, "femu_c_"),
+        ] {
+            let short_prefix = std::env::temp_dir().join(prefix);
+            assert!(socket.to_string_lossy().starts_with(&*short_prefix.to_string_lossy()));
+        }
+        assert!(runtime.control_socket.as_os_str().is_empty());
+
+        // Custom flag templates choose their own socket paths, so these stay unset.
+        let mut cfg_template = EmulatorConfiguration::default();
+        cfg_template.runtime.name = "test-emu-template".to_string();
+        cfg_template.runtime.config_override = true;
+        let template_path = temp_dir.path().join("custom.json.template");
+        std::fs::write(
+            &template_path,
+            r#"{"args": [], "envs": {}, "features": [], "kernel_args": [], "options": []}"#,
+        )
+        .expect("write template");
+        cfg_template.runtime.template = Some(template_path);
+        let engine_template = EngineBuilder::new(&env.context, emu_instances.clone())
+            .config(cfg_template)
+            .engine_type(EngineType::Qemu)
+            .build()
+            .await
+            .expect("custom template engine built");
+        let runtime = &engine_template.emu_config().runtime;
+        assert!(runtime.monitor_socket.as_os_str().is_empty());
+        assert!(runtime.qmp_socket.as_os_str().is_empty());
+        assert!(runtime.console_socket.as_os_str().is_empty());
         let serial = match &engine.emu_config().runtime.serial_number {
             SerialMode::Enabled(s) => s,
             _ => panic!(
@@ -404,6 +427,26 @@ mod tests {
             serial[3..]
                 .chars()
                 .all(|c| c.is_ascii_hexdigit() && (c.is_numeric() || c.is_uppercase()))
+        );
+
+        let mut cfg_uart = EmulatorConfiguration::default();
+        cfg_uart.runtime.name = "test-emu-uart".to_string();
+        cfg_uart.runtime.config_override = true;
+        cfg_uart.runtime.addl_kernel_args = vec!["dev.fdomain.uart=true".to_string()];
+        let engine_uart = EngineBuilder::new(&env.context, emu_instances.clone())
+            .config(cfg_uart)
+            .engine_type(EngineType::Qemu)
+            .build()
+            .await
+            .expect("uart engine built");
+        assert!(
+            engine_uart
+                .emu_config()
+                .runtime
+                .serial_socket
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("femu_s_"))
         );
 
         // 2. Disabled: Config is false.
@@ -438,5 +481,54 @@ mod tests {
             engine_custom.emu_config().runtime.serial_number,
             SerialMode::Enabled("custom-serial".to_string())
         );
+    }
+
+    #[fuchsia::test]
+    async fn test_crosvm_control_socket_paths() {
+        use tempfile::tempdir;
+
+        let builder = ffx_config::test_env();
+        let builder = crate::qemu_based::tests::make_fake_sdk(builder).await;
+        let env = builder.build().expect("test env");
+        let temp_dir = tempdir().expect("cannot get tempdir");
+        let emu_instances = EmulatorInstances::new(temp_dir.path().to_path_buf());
+
+        let mut cfg = EmulatorConfiguration::default();
+        cfg.runtime.name = "test-crosvm".to_string();
+        cfg.runtime.config_override = true;
+        let engine = EngineBuilder::new(&env.context, emu_instances.clone())
+            .config(cfg)
+            .engine_type(EngineType::Crosvm)
+            .build()
+            .await
+            .expect("crosvm engine built");
+
+        let runtime = &engine.emu_config().runtime;
+        let short_prefix = std::env::temp_dir().join("femu_ctrl_");
+        assert!(
+            runtime.control_socket.to_string_lossy().starts_with(&*short_prefix.to_string_lossy())
+        );
+        assert!(runtime.serial_socket.as_os_str().is_empty());
+        assert!(runtime.monitor_socket.as_os_str().is_empty());
+        assert!(runtime.qmp_socket.as_os_str().is_empty());
+        assert!(runtime.console_socket.as_os_str().is_empty());
+
+        let template_path = temp_dir.path().join("custom.json.template");
+        std::fs::write(
+            &template_path,
+            r#"{"args": [], "envs": {}, "features": [], "kernel_args": [], "options": []}"#,
+        )
+        .expect("write template");
+        let mut cfg_template = EmulatorConfiguration::default();
+        cfg_template.runtime.name = "test-crosvm-template".to_string();
+        cfg_template.runtime.config_override = true;
+        cfg_template.runtime.template = Some(template_path);
+        let engine_template = EngineBuilder::new(&env.context, emu_instances)
+            .config(cfg_template)
+            .engine_type(EngineType::Crosvm)
+            .build()
+            .await
+            .expect("custom template crosvm engine built");
+        assert!(engine_template.emu_config().runtime.control_socket.as_os_str().is_empty());
     }
 }

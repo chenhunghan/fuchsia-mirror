@@ -233,14 +233,6 @@ class CodecAdapterVaApiEncoder : public CodecAdapter {
         new_output_format_details_version_ordinal);
 
     result.mutable_format_details()->set_mime_type("video/h264");
-
-    fuchsia::media::VideoFormat video_format;
-
-    auto compressed_format = fuchsia::media::VideoCompressedFormat();
-    compressed_format.set_temp_field_todo_remove(0);
-    video_format.set_compressed(std::move(compressed_format));
-
-    result.mutable_format_details()->mutable_domain()->set_video(std::move(video_format));
     return result;
   }
 

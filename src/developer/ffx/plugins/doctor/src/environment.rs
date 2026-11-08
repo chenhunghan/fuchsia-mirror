@@ -11,6 +11,7 @@ use ffx_config::{EnvironmentContext, print_config};
 use ffx_ssh::{SshKeyErrorKind, SshKeyFiles};
 use fuchsia_lockfile::{LockfileCreateError, LockfileCreateErrorKind};
 use std::io::{BufWriter, Write};
+use std::path::PathBuf;
 use std::time::Duration;
 
 const RECORD_CONFIG_SETTING: &str = "doctor.record_config";
@@ -107,8 +108,9 @@ pub async fn check_emulators<W: Write>(
     ledger: &mut LedgerNodeGuard<'_, W>,
     env_context: &EnvironmentContext,
 ) -> Result<(), anyhow::Error> {
-    let emu_instance_root = env_context.get(ffx_config::keys::EMU_INSTANCE_ROOT_DIR)?;
-    let emu_instances = EmulatorInstances::new(emu_instance_root);
+    let emu_instances = EmulatorInstances::from(
+        env_context.get::<Vec<PathBuf>, _>(ffx_config::keys::EMU_INSTANCE_ROOT_DIR)?,
+    );
     let instances = emu_instances.get_all_instances()?;
     let mut emu_node = ledger.add_node("FFX Emulator Instances", LedgerMode::Normal);
     for instance in &instances {

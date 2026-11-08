@@ -1,0 +1,16 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    offer: [
+        {
+            // test-only: lets input-helper register synthetic devices with Starnix.
+            protocol: [ "fuchsia.input.injection.InputDeviceRegistry" ],
+            from: "#starnix_runner",
+            to: "#ui",
+            dependency: "weak",
+            availability: "optional",
+            source_availability: "unknown",
+        },
+    ],
+}

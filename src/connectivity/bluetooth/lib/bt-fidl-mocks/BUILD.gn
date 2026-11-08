@@ -99,12 +99,9 @@ if (is_fuchsia) {
     configs += [ "//build/config/rust/lints:deny_unused_results" ]
   }
 }
+
 fuchsia_unittest_package("bt-fidl-mocks-tests") {
   package_name = "bt-fidl-mocks-tests-gn"
   component_name = "bt-fidl-mocks-tests"
   deps = [ ":bt-fidl-mocks_test" ]
-  visibility = [
-    ":*",
-    "//src/connectivity/bluetooth:*",
-  ]
 }

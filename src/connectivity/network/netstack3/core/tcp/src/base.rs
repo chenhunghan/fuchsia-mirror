@@ -9,9 +9,9 @@ use core::time::Duration;
 
 use derivative::Derivative;
 use net_types::SpecifiedAddr;
-use net_types::ip::{GenericOverIp, Ip, Ipv4, Ipv6, Mtu};
+use net_types::ip::{GenericOverIp, Ip, IpVersion, Ipv4, Ipv6, Mtu};
 use netstack3_base::{
-    ChecksumOffloadResult, IcmpErrorCode, Icmpv4ErrorCode, Icmpv6ErrorCode, IpExt, Marks, Mms,
+    ChecksumOffloadResult, IcmpErrorCode, Icmpv4ErrorCode, Icmpv6ErrorCode, IpExt, Marks, Mms, Mss,
     UnscaledWindowSize, WeakDeviceIdentifier, WindowSize,
 };
 use netstack3_ip::socket::{RouteResolutionOptions, SendOptions};
@@ -186,7 +186,7 @@ impl IcmpErrorResult {
 /// Metadata associated with an outgoing TCP packet.
 #[derive(Derivative, GenericOverIp)]
 #[generic_over_ip(I, Ip)]
-#[derivative(Debug(bound = ""))]
+#[derivative(Clone(bound = ""), Debug(bound = ""))]
 #[cfg_attr(any(test, feature = "testutils"), derivative(PartialEq(bound = "")))]
 pub struct TcpSocketTxMetadata<I: DualStackIpExt, D: WeakDeviceIdentifier, BT: TcpBindingsTypes> {
     /// The socket from which the packet originates.
@@ -215,6 +215,13 @@ impl<I: DualStackIpExt, D: WeakDeviceIdentifier, BT: TcpBindingsTypes>
     /// Sets the checksum offload result.
     pub fn set_checksum_offload_result(&mut self, result: Option<ChecksumOffloadResult>) {
         self.checksum_offload_result = result;
+    }
+
+    /// Splits metadata for multiple frames.
+    ///
+    /// Returns `(primary, secondary)`.
+    pub fn split_for_multiple_frames(self) -> (Self, Self) {
+        (self.clone(), self)
     }
 }
 
@@ -313,11 +320,28 @@ impl<'a, R, S> BuffersRefMut<'a, R, S> {
     }
 }
 
+/// Default traffic class for outgoing TCP segments.
+const DEFAULT_DSCP_AND_ECN: DscpAndEcn = DscpAndEcn::default();
+
 /// The IP sock options used by TCP.
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct TcpIpSockOptions {
     /// Socket marks used for routing.
     pub marks: Marks,
+    /// Traffic class used for outgoing IPv4 segments.
+    pub ipv4_dscp_and_ecn: Option<DscpAndEcn>,
+    /// Traffic class used for outgoing IPv6 segments.
+    pub ipv6_dscp_and_ecn: Option<DscpAndEcn>,
+}
+
+impl TcpIpSockOptions {
+    pub(crate) fn dscp_and_ecn_for_version(&self, ip_version: IpVersion) -> DscpAndEcn {
+        let dscp_and_ecn = match ip_version {
+            IpVersion::V4 => self.ipv4_dscp_and_ecn,
+            IpVersion::V6 => self.ipv6_dscp_and_ecn,
+        };
+        dscp_and_ecn.unwrap_or(DEFAULT_DSCP_AND_ECN)
+    }
 }
 
 impl<I: Ip> RouteResolutionOptions<I> for TcpIpSockOptions {
@@ -344,7 +368,7 @@ impl<I: IpExt> SendOptions<I> for TcpIpSockOptions {
     }
 
     fn dscp_and_ecn(&self) -> DscpAndEcn {
-        DscpAndEcn::default()
+        self.dscp_and_ecn_for_version(I::VERSION)
     }
 
     fn mtu(&self) -> Mtu {
@@ -373,6 +397,8 @@ pub struct SocketOptions {
     pub max_syn_retries: NonZeroU8,
     /// Ip socket options.
     pub ip_options: TcpIpSockOptions,
+    /// The user-configured maximum segment size.
+    pub user_mss: Option<Mss>,
 }
 
 impl Default for SocketOptions {
@@ -388,6 +414,7 @@ impl Default for SocketOptions {
             fin_wait2_timeout: Some(DEFAULT_FIN_WAIT2_TIMEOUT),
             max_syn_retries: DEFAULT_MAX_SYN_RETRIES,
             ip_options: TcpIpSockOptions::default(),
+            user_mss: None,
         }
     }
 }

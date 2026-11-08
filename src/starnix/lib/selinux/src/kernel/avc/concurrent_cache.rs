@@ -2,13 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 use super::cache_stats::{AtomicCacheStats, CacheStats, ShardedCacheStats};
+use crate::HashStats;
 use crate::sync::{LockDepRwLock, SeLinuxQueryCacheResetLock};
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use core::arch::asm;
+use crossbeam_utils::CachePadded;
 use starnix_logging::CATEGORY_STARNIX_SECURITY;
 use std::hint::cold_path;
 use std::mem::size_of;
-use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering, compiler_fence};
+use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering, fence};
+use zerocopy::{Immutable, IntoBytes};
 
 /// Lock-free N-way associative cache with static capacity.
 ///
@@ -42,8 +45,10 @@ pub struct LockFreeQueryCache<
     buckets: Box<[Bucket<WAYS4, INLINE_U64S, INLINE_U32S, INLINE_U16S, INLINE_U8S>]>,
     /// Out-of-line storage.
     out_of_line_data: Box<[[AtomicU64; OUT_OF_LINE_U64S]]>,
-    /// Reset lock.
-    reset_lock: LockDepRwLock<(), SeLinuxQueryCacheResetLock>,
+    /// Reset lock, padded to its own cache line so reader lock acquisitions on cache misses do
+    /// not invalidate the read-only slice headers (`buckets`, `out_of_line_data`, `stats`) for
+    /// concurrent cache hits.
+    reset_lock: CachePadded<LockDepRwLock<(), SeLinuxQueryCacheResetLock>>,
     /// The stats are sharded and padded to reduce cache line contention.
     stats: ShardedCacheStats,
     /// The storage strategy may contain state (this is useful in tests).
@@ -68,12 +73,15 @@ pub trait StorageStrategy<
 >
 {
     /// Type to be used as cache key.
-    type Key;
+    type Key: IntoBytes + Immutable;
     /// Type of values to be stored in the cache.
     type Value;
 
     /// Computes a hash of `key`.
-    fn hash_key(&self, key: &Self::Key) -> u64;
+    #[inline(always)]
+    fn hash_key(&self, key: &Self::Key) -> u64 {
+        rapidhash::rapidhash(key.as_bytes())
+    }
 
     /// Checks that the stored values match `key`.
     fn check_key(
@@ -127,6 +135,10 @@ struct Bucket<
     /// by clearing a bit and incrementing the seqlock once a write is done. A read is valid if the
     /// way is unmasked both before and after, and the seqlock counter hasn't changed between the two
     /// reads.
+    ///
+    /// After initialization, every modification is a read-modify-write. This ensures that each
+    /// unlock's release sequence extends through later updates by other writers, so that any
+    /// thread that acquires a later state also sees the stores that preceded the unlock.
     seqlock_state: AtomicU64,
     /// Clock eviction algorithm state.
     clock: ClockState,
@@ -232,11 +244,12 @@ impl ClockState {
         // access to confirm that the entry is frequently accessed.
         let new_state = ((hand as u32) << 16) | (hotness as u32);
 
-        // Try committing the state.
+        // Try committing the state. The clock only guides victim selection: `seqlock_state`
+        // provides exclusive access to the victim and orders its data, so Relaxed suffices here.
         match self.state.compare_exchange_weak(
             old_state,
             new_state,
-            Ordering::AcqRel,
+            Ordering::Relaxed,
             Ordering::Relaxed,
         ) {
             Ok(_) => Some(evict_way as usize),
@@ -332,7 +345,7 @@ impl<
             buckets: buckets.into_boxed_slice(),
             out_of_line_data: outline_data.into_boxed_slice(),
             stats: ShardedCacheStats::new(),
-            reset_lock: LockDepRwLock::new(()),
+            reset_lock: CachePadded::new(LockDepRwLock::new(())),
             storage,
         }
     }
@@ -409,6 +422,8 @@ impl<
         const MAX_READ_SPINS: usize = 3;
         for _ in 0..MAX_READ_SPINS {
             // Acquire the seqlock. Subsequent reads can be relaxed (although they may read garbage).
+            // Acquire ensures that any reader observing a completed write here also sees all of
+            // that write's tag and data stores.
             let state1 = bucket.seqlock_state.load(Ordering::Acquire);
             let write_mask = (state1 & 0xFFFF) as u16;
 
@@ -478,17 +493,20 @@ impl<
                 break;
             }
             let (value, way) = found.unwrap();
-            // A compiler fence ensures preceding reads aren't delayed, and an Acquire
-            // memory barrier ensures data reads are not reordered with the state validation.
-            compiler_fence(Ordering::SeqCst);
-            std::sync::atomic::fence(Ordering::Acquire);
+            // This Acquire fence pairs with the Release fence that writers issue after setting
+            // their write_mask bit (see `insert_miss`). It ensures that any reader whose tag or
+            // data loads above observed a concurrent writer's store also sees, in the load below,
+            // that writer's write_mask bit or its incremented counter, and therefore retries. The
+            // fence provides the synchronization, so the load below can be relaxed.
+            fence(Ordering::Acquire);
 
-            let state2 = bucket.seqlock_state.load(Ordering::Acquire);
+            let state2 = bucket.seqlock_state.load(Ordering::Relaxed);
             // Our read is valid if the seqlock counter wasn't incremented, and the way we read is
             // not being written to.
             let way_mask = !(0xFFFF & !(1 << way));
             if (state1 & way_mask) == (state2 & way_mask) {
-                // Record the hit - hopefully we will still hold the cache line since our Acquire load.
+                // Record the hit - hopefully we will still hold the cache line since our `state1`
+                // load.
                 bucket.clock.record_access(way);
                 stats.hits.fetch_add(1, Ordering::Relaxed);
                 return Ok(value);
@@ -527,7 +545,10 @@ impl<
         let mut way_to_write = None;
         const MAX_WRITE_SPINS: usize = 10;
         'select_victim: for _ in 0..MAX_WRITE_SPINS {
-            let mut state = bucket.seqlock_state.load(Ordering::Acquire);
+            // This value guides victim selection and seeds the compare-exchange below. The
+            // compare-exchange provides the synchronization with prior writers, so Relaxed
+            // suffices.
+            let mut state = bucket.seqlock_state.load(Ordering::Relaxed);
             let write_mask = (state & 0xFFFF) as u16;
 
             if write_mask == ((1_usize << (WAYS4 * 4)) - 1) as u16 {
@@ -542,7 +563,8 @@ impl<
                 continue 'select_victim;
             };
             'write_flag: loop {
-                // Set the write_mask bit for the targeted way.
+                // Set the write_mask bit for the targeted way. On success, Acquire ensures that our
+                // stores to this way are ordered after those of every previous writer of this way.
                 let new_state = state | (1 << victim);
                 match bucket.seqlock_state.compare_exchange_weak(
                     state,
@@ -551,6 +573,13 @@ impl<
                     Ordering::Relaxed,
                 ) {
                     Ok(_) => {
+                        // This Release fence pairs with the Acquire fence in `get_or_try_insert`.
+                        // It ensures that any reader that observes one of our tag or data stores
+                        // below also sees our write_mask bit, and therefore retries. A fence is
+                        // used because neither ordering on the compare-exchange orders its store
+                        // before subsequent accesses: Acquire applies only to its load, and
+                        // Release applies only to preceding accesses.
+                        fence(Ordering::Release);
                         way_to_write = Some(victim);
                         break 'select_victim;
                     }
@@ -596,7 +625,8 @@ impl<
             &self.out_of_line_data[bucket_idx * WAYS4 * 4 + way_to_write],
         );
 
-        // Write the new tag
+        // Write the new tag. Like the data, tags are protected by the seqlock: readers validate
+        // any tag they use against `seqlock_state`, so Relaxed suffices.
         let mut old_tag_cluster = bucket.tags[tag_word_idx].load(Ordering::Relaxed);
         loop {
             let new_tag_cluster =
@@ -604,7 +634,7 @@ impl<
             match bucket.tags[tag_word_idx].compare_exchange_weak(
                 old_tag_cluster,
                 new_tag_cluster,
-                Ordering::Release,
+                Ordering::Relaxed,
                 Ordering::Relaxed,
             ) {
                 Ok(_) => break,
@@ -613,24 +643,15 @@ impl<
         }
 
         // Unlock and increment the seqlock. We unset the bit and increment the counter at once.
+        // Release ensures that any reader (Acquire load of `state1`) or writer (Acquire
+        // compare-exchange) that observes this unlock also sees our tag and data stores.
         bucket.seqlock_state.fetch_add((1 << 16) - (1 << way_to_write) as u64, Ordering::Release);
         Ok(result)
     }
 
     #[cfg(test)]
     pub fn is_full(&self) -> bool {
-        let mut count = 0;
-        for bucket in self.buckets.iter() {
-            for way4 in 0..WAYS4 {
-                let tags = bucket.tags[way4].load(Ordering::Relaxed);
-                for i in 0..4 {
-                    if (tags >> (i * 8)) & 0xFF != 0 {
-                        count += 1;
-                    }
-                }
-            }
-        }
-        count >= self.capacity()
+        self.hash_stats().entries >= self.capacity()
     }
 
     #[cfg(test)]
@@ -659,6 +680,30 @@ impl<
 
     pub fn cache_stats(&self) -> CacheStats {
         self.stats.read()
+    }
+
+    /// Returns hash bucket occupancy statistics for the cache.
+    pub fn hash_stats(&self) -> HashStats {
+        let mut entries = 0;
+        let mut buckets_used = 0;
+        let mut longest_chain = 0;
+        for bucket in self.buckets.iter() {
+            let mut chain_len = 0;
+            for way4 in 0..WAYS4 {
+                let tags = bucket.tags[way4].load(Ordering::Relaxed);
+                for i in 0..4 {
+                    if (tags >> (i * 8)) & 0xFF != 0 {
+                        chain_len += 1;
+                    }
+                }
+            }
+            if chain_len > 0 {
+                entries += chain_len;
+                buckets_used += 1;
+                longest_chain = longest_chain.max(chain_len);
+            }
+        }
+        HashStats { entries, buckets_used, total_buckets: self.buckets.len(), longest_chain }
     }
 }
 

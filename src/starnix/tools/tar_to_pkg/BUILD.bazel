@@ -56,7 +56,6 @@ rustc_binary_host_tool(
     ],
 )
 
-# @bazel2gn:skip
 test_suite(
     name = "host_tests",
     target_compatible_with = HOST_OS_CONSTRAINTS,

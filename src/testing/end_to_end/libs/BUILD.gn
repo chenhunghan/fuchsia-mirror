@@ -20,7 +20,6 @@ python_library("libs") {
     ":*",
     "//src/connectivity/policy/tests/e2e/*",
     "//src/connectivity/wlan/tests/wlancfg/*",
-    "//src/testing/end_to_end/antlion:*",
     "//src/testing/end_to_end/libs/*",
     "//src/testing/end_to_end/mobly_base_tests/*",
     "//src/testing/end_to_end/mobly_controller:*",
@@ -41,6 +40,7 @@ python_library("libs") {
     "commands/shell.py",
     "commands/tcpdump.py",
     "exception_utils.py",
+    "ip_utils.py",
     "net.py",
     "proc/__init__.py",
     "proc/job.py",
@@ -55,4 +55,9 @@ python_library("libs") {
   ]
   source_root = "//src/testing/end_to_end/libs"
   library_deps = []
+}
+
+group("tests") {
+  testonly = true
+  deps = [ "tests" ]
 }

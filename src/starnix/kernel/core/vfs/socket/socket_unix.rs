@@ -584,7 +584,7 @@ impl SocketOps for UnixSocket {
     fn read_and_append(
         &self,
         socket: &Socket,
-        _current_task: &CurrentTask,
+        current_task: &CurrentTask,
         read_info: &mut MessageReadInfo,
         data: &mut dyn OutputBuffer,
         flags: SocketMessageFlags,
@@ -597,6 +597,15 @@ impl SocketOps for UnixSocket {
                 (read_info.bytes_read > bytes_read_before).then(|| inner.peer().cloned()).flatten();
             (can_coalesce, peer)
         };
+        if let Some(security_token) = read_info.security_state.take() {
+            if let Some(context) =
+                security::security_token_to_context_with_nul(current_task, security_token)
+            {
+                read_info
+                    .ancillary_data
+                    .push(AncillaryData::Unix(UnixControlData::Security(context.into())));
+            }
+        }
         if let Some(socket) = peer {
             if let Some(socket) = socket.downcast_socket::<UnixSocket>() {
                 socket.waiters.notify_fd_events(FdEvents::POLLOUT);
@@ -643,11 +652,9 @@ impl SocketOps for UnixSocket {
             (None, None, _) => return error!(ENOTCONN),
         };
 
-        let dgram_security_context = if socket.socket_type == SocketType::Datagram {
+        let dgram_security = if socket.socket_type == SocketType::Datagram {
             security::unix_may_send(current_task, socket, &peer)?;
-            // TODO: https://fxbug.dev/364568855 - Store the opaque LSM property value, and expand
-            // it to a string upon readmsg.
-            Some(security::socket_getpeersec_dgram(current_task, socket))
+            security::socket_getpeersec_dgram(current_task, socket)
         } else {
             None
         };
@@ -664,7 +671,7 @@ impl SocketOps for UnixSocket {
                 data,
                 local_address,
                 default_creds,
-                dgram_security_context,
+                dgram_security,
                 ancillary_data,
                 socket,
             )
@@ -903,7 +910,7 @@ impl SocketOps for UnixSocket {
                 SO_SNDBUF => {
                     let requested_capacity: socklen_t = optval.read(current_task)?;
                     // See StreamUnixSocketPairTest.SetSocketSendBuf for why we multiply by 2 here.
-                    self.set_send_capacity(requested_capacity as usize * 2);
+                    self.set_send_capacity((requested_capacity as usize).saturating_mul(2));
                 }
                 SO_RCVBUF => {
                     let requested_capacity: socklen_t = optval.read(current_task)?;
@@ -1128,8 +1135,7 @@ impl UnixSocketInner {
 
         // Security labels are only delivered if passsec is currently enabled on this socket.
         if !self.passsec {
-            info.ancillary_data
-                .retain(|m| !matches!(m, AncillaryData::Unix(UnixControlData::Security(..))));
+            info.security_state = None;
         }
 
         Ok(info)
@@ -1170,7 +1176,7 @@ impl UnixSocketInner {
         data: &mut dyn InputBuffer,
         address: Option<SocketAddress>,
         default_credentials: Option<ucred>,
-        dgram_security_context: Option<Vec<u8>>,
+        dgram_security: Option<security::SecurityContextToken>,
         ancillary_data: &mut Vec<AncillaryData>,
         socket: &Socket,
     ) -> Result<usize, Errno> {
@@ -1185,11 +1191,7 @@ impl UnixSocketInner {
             return error!(EPIPE);
         }
         let filter = |mut message: Message| {
-            if let Some(context) = dgram_security_context {
-                message
-                    .ancillary_data
-                    .push(AncillaryData::Unix(UnixControlData::Security(context.into())));
-            }
+            message.security_state = dgram_security;
             let Some(bpf_program) = self.bpf_program.as_ref() else {
                 return Some(message);
             };
@@ -1305,8 +1307,9 @@ type UnixSocketFilter = EbpfProgram<UnixSocketEbpfContext>;
 mod tests {
     use super::*;
     use crate::mm::MemoryAccessor;
-    use crate::testing::{map_memory, spawn_kernel_and_run};
-    use crate::vfs::{DirectoryMode, UnlinkKind};
+    use crate::testing::{map_memory, spawn_kernel_and_run, spawn_kernel_with_selinux_and_run};
+    use crate::vfs::buffers::{VecInputBuffer, VecOutputBuffer};
+    use crate::vfs::{DirectoryMode, FsString, UnlinkKind};
     use starnix_types::user_buffer::UserBuffer;
     use starnix_uapi::file_mode::mode;
 
@@ -1454,6 +1457,79 @@ mod tests {
 
             assert!(weak_fs_node.upgrade().is_none());
             assert!(weak_socket.upgrade().is_none());
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_datagram_passsec_deferred_resolution_and_peek() {
+        spawn_kernel_with_selinux_and_run(async |current_task, security_server| {
+            let policy_bytes = include_bytes!(
+                "../../../../lib/selinux/testdata/micro_policies/hooks_tests_policy"
+            )
+            .to_vec();
+            security_server.set_enforcing(false);
+            security::selinuxfs_load_policy(current_task, policy_bytes).expect("load policy");
+
+            let (sender_file, receiver_file) = UnixSocket::new_pair(
+                current_task,
+                SocketDomain::Unix,
+                SocketType::Datagram,
+                OpenFlags::RDWR,
+            )
+            .expect("new_pair");
+            let sender = Socket::get_from_file(&sender_file).expect("sender socket");
+            let receiver = Socket::get_from_file(&receiver_file).expect("receiver socket");
+
+            let expected_token = security::socket_getpeersec_dgram(current_task, sender)
+                .expect("expected security token");
+            let expected_context: FsString =
+                security::security_token_to_context_with_nul(current_task, expected_token)
+                    .expect("expected security context")
+                    .into();
+            assert!(!expected_context.is_empty());
+
+            // When `SO_PASSSEC` is disabled, no `SCM_SECURITY` ancillary data is delivered.
+            let mut input = VecInputBuffer::new(b"first");
+            assert_eq!(
+                sender.write(current_task, &mut input, &mut None, &mut Vec::new()).expect("write"),
+                5
+            );
+            let mut out = VecOutputBuffer::new(16);
+            let info =
+                receiver.read(current_task, &mut out, SocketMessageFlags::empty()).expect("read");
+            assert_eq!(info.bytes_read, 5);
+            assert!(info.security_state.is_none());
+            assert!(info.ancillary_data.is_empty());
+
+            // Write a datagram before `SO_PASSSEC` is enabled, then enable `SO_PASSSEC` and verify
+            // both `MSG_PEEK` and consuming `read` materialize `SCM_SECURITY`.
+            let mut input = VecInputBuffer::new(b"second");
+            assert_eq!(
+                sender.write(current_task, &mut input, &mut None, &mut Vec::new()).expect("write"),
+                6
+            );
+            downcast_socket_to_unix(receiver).set_passsec(true);
+
+            let mut peek_out = VecOutputBuffer::new(16);
+            let peek_info = receiver
+                .read(current_task, &mut peek_out, SocketMessageFlags::PEEK)
+                .expect("peek read");
+            assert_eq!(peek_info.bytes_read, 6);
+            assert_eq!(
+                peek_info.ancillary_data,
+                vec![AncillaryData::Unix(UnixControlData::Security(expected_context.clone()))]
+            );
+
+            let mut read_out = VecOutputBuffer::new(16);
+            let read_info = receiver
+                .read(current_task, &mut read_out, SocketMessageFlags::empty())
+                .expect("consuming read");
+            assert_eq!(read_info.bytes_read, 6);
+            assert_eq!(
+                read_info.ancillary_data,
+                vec![AncillaryData::Unix(UnixControlData::Security(expected_context))]
+            );
         })
         .await;
     }

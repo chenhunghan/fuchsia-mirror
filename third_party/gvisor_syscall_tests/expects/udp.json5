@@ -85,6 +85,9 @@
 
                 // https://fxbug.dev/42154343
                 "AllUDPSockets/AllSocketPairTest.GetSetSocketRcvlowatOption/*",
+
+                // TODO(https://fxbug.dev/42095226): Implement IP_MTU_DISCOVER.
+                "AllInetTests/UdpSocketTest.SetPMTUD/*",
             ],
         },
     ],

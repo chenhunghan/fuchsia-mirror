@@ -29,7 +29,6 @@
 #include <efi/system-table.h>
 #include <efi/types.h>
 #include <fbl/vector.h>
-#include <phys/efi/main.h>
 
 #include "acpi.h"
 #include "page_size.h"

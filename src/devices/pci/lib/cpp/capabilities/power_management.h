@@ -1,0 +1,151 @@
+// Copyright 2022 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+#ifndef SRC_DEVICES_PCI_LIB_CPP_CAPABILITIES_POWER_MANAGEMENT_H_
+#define SRC_DEVICES_PCI_LIB_CPP_CAPABILITIES_POWER_MANAGEMENT_H_
+
+#include <lib/zx/time.h>
+
+#include <utility>
+
+#include <hwreg/bitfields.h>
+
+#include "src/devices/pci/lib/cpp/capabilities.h"
+#include "src/devices/pci/lib/cpp/config.h"
+
+namespace pci {
+
+constexpr uint8_t kPmcVersion = 0b011;
+
+// The Power Management capability is detailed in the PCIe Base Spec chapter 7.5.2.1: Power
+// Management Capability.
+
+// All fields in this register are read only.
+struct PmcReg : public hwreg::RegisterBase<PmcReg, uint16_t> {
+  // Hardwired to 011 in this specification version.
+  DEF_FIELD(2, 0, version);
+  // Hardwired to 0 in PCIe.
+  DEF_BIT(3, pme_clock);
+  // Set if no delay is needed following a transition to state D0.
+  DEF_BIT(4, immediate_readiness_on_return_to_d0);
+  // Set if the device has a special initialization sequence following a D0 transition
+  // and cannot be managed entirely by the bus driver.
+  DEF_BIT(5, dsi);
+  // Details the auxiliary current required. Hardwired to 0 if the Data register is implemented.
+  // 111 -> 375 mA
+  // 110 -> 320 mA
+  // 101 -> 270 mA
+  // 100 -> 220 mA
+  // 011 -> 160 mA
+  // 010 -> 100 mA
+  // 001 -> 55 mA
+  // 000 -> 0 (self powered)
+  DEF_FIELD(8, 6, aux_current);
+  // Set if D1 is supported.
+  DEF_BIT(9, d1_support);
+  // Set if D2 is supported.
+  DEF_BIT(10, d2_support);
+  // A bitmask corresponding to whether a given power state can generate a PME#.
+  // In order from 15:11, D3cold D3hot D2 D1 D0
+  DEF_FIELD(15, 11, pme_support);
+};
+
+struct PmcsrReg : public hwreg::RegisterBase<PmcsrReg, uint16_t> {
+  // RW. The current power state from 0 to D3hot.
+  DEF_FIELD(1, 0, power_state);
+  // RO. Set if function state is preserved after state transition from D3hot to
+  //     D0. Otherwise, the device state is undefined.
+  DEF_BIT(3, no_soft_reset);
+  // RW/RWS. Set if the function is permitted to generate a PME.
+  DEF_BIT(8, pme_en);
+  // RW. Controls which data to route to the Data register.
+  DEF_FIELD(12, 9, data_select);
+  // RO. Scaling factor for the data register.
+  DEF_FIELD(14, 13, data_scale);
+  // RW1CS. Set when the function would normally generate a PME, regardless of pme_en. Writing 1
+  //        clears it and writing 0 has no effect.
+  DEF_BIT(15, pme_status);
+};
+
+class PowerManagementCapability : public Capability {
+ public:
+  // The minimum amount of time needed to wait following a transition from one
+  // state to another. In the case of invalid transitions (Dx -> Dy (x < y))
+  // they are just zero because they will not be used. The exception is D0 which
+  // can transition to any other state.
+  // PCIe Base Spec rev 4 5.9.1 State Transition Recovery Time Requirements
+  // clang-format off
+  static constexpr zx::duration kStateRecoveryTime[4][4] = {
+      /*D0*/ {/*D0*/ zx::usec(0),   /*D1*/ zx::usec(0), /*D2*/ zx::usec(200), /*D3hot*/ zx::msec(10)},
+      /*D1*/ {/*D0*/ zx::usec(0),   /*D1*/ zx::usec(0), /*D2*/ zx::usec(200), /*D3hot*/ zx::msec(10)},
+      /*D2*/ {/*D0*/ zx::usec(200), /*D1*/ zx::usec(0), /*D2*/ zx::usec(0),   /*D3hot*/ zx::msec(10)},
+      /*D3*/ {/*D0*/ zx::msec(10),  /*D1*/ zx::usec(0), /*D2*/ zx::usec(0),   /*D3hot*/ zx::usec(0)},
+  };
+  // clang-format on
+
+  // Power states as defined in the spec. D3cold is considered "powered off" and
+  // is not reflected in power states.
+  enum PowerState : uint8_t {
+    D0 = 0,
+    D1 = 1,
+    D2 = 2,
+    D3 = 3,  // D3hot
+  };
+
+  PowerManagementCapability(const Config& cfg, uint8_t base)
+      : Capability(std::to_underlying(Capability::Id::kPciPowerManagement), base),
+        pmc_(static_cast<uint16_t>(base + 0x2)),
+        pmcsr_(static_cast<uint16_t>(base + 0x4)) {}
+
+  static void WaitForTransitionRecovery(PowerState old_state, PowerState new_state) {
+    zx::duration wait_time = kStateRecoveryTime[old_state][new_state];
+    zx::nanosleep(zx::deadline_after(wait_time));
+  }
+
+  PowerState GetPowerState(const pci::Config& cfg) const {
+    return static_cast<PowerState>(pmcsr_.ReadFrom(&cfg).power_state());
+  }
+
+  // Transitions the function to |new_state|, blocking the calling thread with zx::nanosleep for
+  // the PCIe state-transition recovery delay when required by the specification.
+  void SetPowerState(const pci::Config& cfg, PowerState new_state) const {
+    auto pmc = pmc_.ReadFrom(&cfg);
+
+    // If we're already in the requested power state then we're finished.
+    auto pmcsr = pmcsr_.ReadFrom(&cfg);
+    // PME_Status is RW1CS, so writing back the value read would clear a pending PME.
+    pmcsr.set_pme_status(0);
+    uint8_t old_state_u8 = static_cast<uint8_t>(pmcsr.power_state());
+    if (new_state == old_state_u8) {
+      return;
+    }
+
+    // Power down transitions are always allowed, but power up transitions must
+    // always go through D0. In other words, to go from D3 to D2 we must change
+    // state from D3 > D0 > D2, whereas D1 to D3 is permitted directly.
+    // ACPI 6.1 spec, section 2.3 Device Power State Definitions
+    if (new_state != PowerState::D0 && old_state_u8 > new_state) {
+      pmcsr.set_power_state(PowerState::D0).WriteTo(&cfg);
+      if (!pmc.immediate_readiness_on_return_to_d0()) {
+        WaitForTransitionRecovery(static_cast<PowerState>(old_state_u8), PowerState::D0);
+      }
+      old_state_u8 = PowerState::D0;
+    }
+
+    pmcsr.set_power_state(new_state).WriteTo(&cfg);
+    if (new_state != PowerState::D0 || !pmc.immediate_readiness_on_return_to_d0()) {
+      WaitForTransitionRecovery(static_cast<PowerState>(old_state_u8), new_state);
+    }
+  }
+
+  hwreg::RegisterAddr<PmcReg> pmc() const { return pmc_; }
+  hwreg::RegisterAddr<PmcsrReg> pmcsr() const { return pmcsr_; }
+
+ private:
+  const hwreg::RegisterAddr<PmcReg> pmc_;      // Power Management Capabilities
+  const hwreg::RegisterAddr<PmcsrReg> pmcsr_;  // Power Management Control/Status Register
+};
+
+}  // namespace pci
+
+#endif  // SRC_DEVICES_PCI_LIB_CPP_CAPABILITIES_POWER_MANAGEMENT_H_

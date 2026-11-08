@@ -4,9 +4,9 @@
 
 #include "src/developer/forensics/feedback/main_service.h"
 
+#include <fidl/fuchsia.hardware.power.statecontrol/cpp/fidl.h>
+#include <fidl/fuchsia.process.lifecycle/cpp/fidl.h>
 #include <fuchsia/feedback/cpp/fidl.h>
-#include <fuchsia/hardware/power/statecontrol/cpp/fidl.h>
-#include <fuchsia/process/lifecycle/cpp/fidl.h>
 #include <lib/async-loop/default.h>
 #include <lib/fidl/cpp/interface_request.h>
 #include <lib/fit/defer.h>
@@ -24,11 +24,10 @@
 #include "src/developer/forensics/feedback/redactor_factory.h"
 #include "src/developer/forensics/feedback/stop_signals.h"
 #include "src/developer/forensics/utils/cobalt/logger.h"
+#include "src/lib/backoff/exponential_backoff.h"
 
 namespace forensics::feedback {
 namespace {
-
-using fuchsia::hardware::power::statecontrol::ShutdownWatcherRegister_RegisterWatcher_Result;
 
 std::unique_ptr<CachedAsyncAnnotationProvider> MakeDeviceIdProvider(
     const std::optional<std::string>& local_device_id_path, async_dispatcher_t* dispatcher,
@@ -54,12 +53,12 @@ std::set<std::string> RemoveExcludedAnnotations(const std::set<std::string>& def
 
 }  // namespace
 
-MainService::MainService(
-    async_dispatcher_t* dispatcher, const std::shared_ptr<sys::ServiceDirectory> services,
-    timekeeper::Clock* clock, inspect::Node* inspect_root, cobalt::Logger* cobalt,
-    const Annotations& startup_annotations,
-    fidl::InterfaceRequest<fuchsia::process::lifecycle::Lifecycle> lifecycle_channel,
-    std::unique_ptr<RedactorBase> redactor, Options options)
+MainService::MainService(async_dispatcher_t* dispatcher,
+                         const std::shared_ptr<sys::ServiceDirectory> services,
+                         timekeeper::Clock* clock, inspect::Node* inspect_root,
+                         cobalt::Logger* cobalt, const Annotations& startup_annotations,
+                         fidl::ServerEnd<fuchsia_process_lifecycle::Lifecycle> lifecycle_channel,
+                         std::unique_ptr<RedactorBase> redactor, Options options)
     : dispatcher_(dispatcher),
       executor_(dispatcher),
       services_(services),
@@ -77,7 +76,10 @@ MainService::MainService(
           options.feedback_data_options.snapshot_exclusion_config.excluded_annotations,
           startup_annotations,
           MakeDeviceIdProvider(options.local_device_id_path, dispatcher_, services_)),
-      network_watcher_(dispatcher, *services),
+      network_watcher_(dispatcher, services,
+                       std::make_unique<backoff::ExponentialBackoff>(
+                           /*initial_delay=*/zx::min(1), /*retry_factor=*/2u,
+                           /*max_delay=*/zx::hour(1))),
       feedback_data_(dispatcher_, services_, clock_, inspect_root_, cobalt_, redactor_.get(),
                      annotations_.GetAnnotationManager(), std::move(options.feedback_data_options)),
       crash_reports_(dispatcher_, services_, clock_, inspect_root_,
@@ -115,9 +117,10 @@ MainService::MainService(
             FX_LOGS(ERROR) << "Won't receive lifecycle signal: " << ToString(error);
           }));
 
-  fidl::InterfaceHandle<fuchsia::hardware::power::statecontrol::ShutdownWatcher> handle;
+  auto [watcher_client, watcher_server] =
+      fidl::Endpoints<fuchsia_hardware_power_statecontrol::ShutdownWatcher>::Create();
   executor_.schedule_task(
-      WaitForShutdownInfo(dispatcher_, handle.NewRequest())
+      WaitForShutdownInfo(dispatcher_, std::move(watcher_server))
           .and_then([this, path = options.graceful_shutdown_info_write_path](
                         GracefulShutdownInfoSignal& signal) {
             const GracefulShutdownAction action = signal.Action();
@@ -138,9 +141,16 @@ MainService::MainService(
   //
   // The ack response is ignored because the failures aren't expected unless the system is in a dire
   // state.
-  services->Connect<fuchsia::hardware::power::statecontrol::ShutdownWatcherRegister>()
-      ->RegisterWatcher(std::move(handle),
-                        [](const ShutdownWatcherRegister_RegisterWatcher_Result& result) {});
+  auto [register_client, register_server] =
+      fidl::Endpoints<fuchsia_hardware_power_statecontrol::ShutdownWatcherRegister>::Create();
+  services->Connect(
+      fidl::DiscoverableProtocolName<fuchsia_hardware_power_statecontrol::ShutdownWatcherRegister>,
+      register_server.TakeChannel());
+  const fidl::Client client(std::move(register_client), dispatcher_);
+  client->RegisterWatcher({std::move(watcher_client)})
+      .Then([](const fidl::Result<
+                fuchsia_hardware_power_statecontrol::ShutdownWatcherRegister::RegisterWatcher>&
+                   result) {});
 
   network_watcher_.Register(
       fit::bind_member(&crash_reports_, &CrashReports::SetNetworkIsReachable));
@@ -160,27 +170,27 @@ MainService::MainService(
 MainService::~MainService() { system_time_tracker_loop_.Shutdown(); }
 
 template <>
-::fidl::InterfaceRequestHandler<fuchsia::feedback::LastRebootInfoProvider>
-MainService::GetHandler() {
-  return [this](::fidl::InterfaceRequest<fuchsia::feedback::LastRebootInfoProvider> request) {
-    last_reboot_info_bindings_.AddBinding(std::move(request));
+::fidl::ProtocolHandler<fuchsia_feedback::LastRebootInfoProvider>
+MainService::GetHandler<fuchsia_feedback::LastRebootInfoProvider>() {
+  return [this](::fidl::ServerEnd<fuchsia_feedback::LastRebootInfoProvider> server_end) {
+    last_reboot_info_bindings_.AddBinding(std::move(server_end));
   };
 }
 
 template <>
-::fidl::InterfaceRequestHandler<fuchsia::feedback::CrashReporter> MainService::GetHandler() {
-  return [this](::fidl::InterfaceRequest<fuchsia::feedback::CrashReporter> request) {
-    crash_reporter_bindings_.AddBinding(std::move(request));
+::fidl::ProtocolHandler<fuchsia_feedback::CrashReporter>
+MainService::GetHandler<fuchsia_feedback::CrashReporter>() {
+  return [this](::fidl::ServerEnd<fuchsia_feedback::CrashReporter> server_end) {
+    crash_reporter_bindings_.AddBinding(std::move(server_end));
   };
 }
 
 template <>
-::fidl::InterfaceRequestHandler<fuchsia::feedback::CrashReportingProductRegister>
-MainService::GetHandler() {
-  return
-      [this](::fidl::InterfaceRequest<fuchsia::feedback::CrashReportingProductRegister> request) {
-        crash_register_bindings_.AddBinding(std::move(request));
-      };
+::fidl::ProtocolHandler<fuchsia_feedback::CrashReportingProductRegister>
+MainService::GetHandler<fuchsia_feedback::CrashReportingProductRegister>() {
+  return [this](::fidl::ServerEnd<fuchsia_feedback::CrashReportingProductRegister> server_end) {
+    crash_register_bindings_.AddBinding(std::move(server_end));
+  };
 }
 
 template <>
@@ -192,9 +202,10 @@ MainService::GetHandler<fuchsia_feedback::ComponentDataRegister>() {
 }
 
 template <>
-::fidl::InterfaceRequestHandler<fuchsia::feedback::DataProvider> MainService::GetHandler() {
-  return [this](::fidl::InterfaceRequest<fuchsia::feedback::DataProvider> request) {
-    data_provider_bindings_.AddBinding(std::move(request));
+::fidl::ProtocolHandler<fuchsia_feedback::DataProvider>
+MainService::GetHandler<fuchsia_feedback::DataProvider>() {
+  return [this](::fidl::ServerEnd<fuchsia_feedback::DataProvider> server_end) {
+    data_provider_bindings_.AddBinding(std::move(server_end));
   };
 }
 

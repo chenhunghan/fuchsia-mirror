@@ -1,0 +1,78 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":hw_shell_tests"],
+    visibility = ["//src/developer:__pkg__"],
+)
+
+rustc_binary(
+    name = "hw_shell_bin",
+    srcs = ["shell.rs"],
+    binary_name = "hw-info",
+    crate_root = "shell.rs",
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        "//sdk/fidl/fuchsia.hwinfo:fuchsia.hwinfo_rust",
+        "//sdk/fidl/fuchsia.intl:fuchsia.intl_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+rustc_test(
+    name = "hw_shell_bin_test",
+    crate = ":hw_shell_bin",
+)
+
+fx_unittest_package(
+    name = "hw_shell_tests",
+    unit_tests = [":hw_shell_bin_test"],
+)
+
+fx_packaged_binary(
+    name = "hw_shell_packaged_bin",
+    binary = ":hw_shell_bin",
+    binary_name = "hw-info",
+)
+
+fx_component_manifest(
+    name = "hw-info-shell_manifest",
+    component_name = "hw-info-shell",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/hw_info_shell.cml",
+)
+
+fx_component(
+    name = "hw-info-shell_component",
+    compiled_manifest = ":hw-info-shell_manifest",
+    deps = [":hw_shell_packaged_bin"],
+)
+
+fx_package(
+    name = "hw-info-shell",
+    package_name = "hw-info-shell",
+    components = [":hw-info-shell_component"],
+)

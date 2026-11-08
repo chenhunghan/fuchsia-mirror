@@ -8,7 +8,7 @@ use crate::NullessByteStr;
 use crate::policy::{
     AccessDecision, AccessVector, Class, ClassId, HandleUnknown, HasPolicyId as _, PermissionId,
     Policy, PolicyCap, SELINUX_AVD_FLAGS_PERMISSIVE, SecurityContext, XpermsAccessDecision,
-    XpermsKind,
+    XpermsBitmap, XpermsKind,
 };
 
 use fuchsia_rcu::RcuDroppable;
@@ -24,7 +24,7 @@ type KernelPermissionIdsArray = [Option<PermissionId>; 32];
 
 /// Cached `process` class identifier and permission bitmask for `transition` and `dyntransition`
 /// checks across different roles.
-#[derive(Debug, RcuDroppable)]
+#[derive(Clone, Debug, RcuDroppable)]
 struct ProcessTransitionPermissions {
     class: ClassId,
     permissions: AccessVector,
@@ -37,7 +37,7 @@ struct ProcessTransitionPermissions {
 /// of classes that are identified by string names included in each collection entry. However,
 /// `policy_index.class(KernelClass::Process.into()).unwrap()` yields the [`Class`] entry in the
 /// policy's collection of classes without scanning by name.
-#[derive(Debug, RcuDroppable)]
+#[derive(Clone, Debug, RcuDroppable)]
 pub(crate) struct PolicyIndex {
     /// Index mapping [`KernelClass`]es to their corresponding [`ClassId`]s in the associated
     /// policy's classes collection.
@@ -126,7 +126,7 @@ impl PolicyIndex {
     }
 
     /// Returns the policy [`AccessVector`] for a well-known kernel object class permission.
-    fn kernel_permission_to_access_vector<P: ClassPermission>(
+    pub(crate) fn kernel_permission_to_access_vector<P: ClassPermission>(
         &self,
         permission: P,
     ) -> Option<AccessVector> {
@@ -184,6 +184,9 @@ impl PolicyIndex {
             decision
         } else {
             let mut decision = AccessDecision::allow(AccessVector::NONE);
+            if self.policy.is_neveraudit(source_context.type_()) {
+                decision.auditdeny = AccessVector::NONE;
+            }
             if self.policy.is_permissive(source_context.type_()) {
                 decision.flags |= SELINUX_AVD_FLAGS_PERMISSIVE;
             }
@@ -210,7 +213,17 @@ impl PolicyIndex {
                 xperms_prefix,
             )
         } else {
-            XpermsAccessDecision::DENY_ALL
+            let mut decision = XpermsAccessDecision::allow(
+                if self.policy.handle_unknown() == HandleUnknown::Allow {
+                    XpermsBitmap::ALL
+                } else {
+                    XpermsBitmap::NONE
+                },
+            );
+            if self.policy.is_neveraudit(source_context.type_()) {
+                decision.auditdeny = XpermsBitmap::NONE;
+            }
+            decision
         }
     }
 
@@ -221,7 +234,7 @@ impl PolicyIndex {
         fs_type: NullessByteStr<'_>,
         node_path: NullessByteStr<'_>,
         class: Option<KernelClass>,
-    ) -> Option<SecurityContext> {
+    ) -> Option<&SecurityContext> {
         let node_path = if class == Some(FileClass::LnkFile.into())
             && !self.policy.has_policycap(PolicyCap::GenfsSeclabelSymlinks)
         {
@@ -237,14 +250,25 @@ impl PolicyIndex {
         self.policy.genfscon_label_for_fs_and_path(fs_type, node_path, class_id)
     }
 
+    /// Updates the active values of the specified conditional booleans and re-evaluates which
+    /// conditional rules are active in the policy. Any boolean names not defined in the policy are
+    /// ignored.
+    pub fn update_conditional_booleans(
+        &mut self,
+        booleans: impl IntoIterator<Item = (impl AsRef<[u8]>, bool)>,
+    ) {
+        self.policy.update_conditional_booleans(booleans);
+    }
+
     /// Translates the given [`AccessDecision`] to a [`KernelAccessDecision`].
     ///
     /// The loaded policy's "handle unknown" configuration determines how `permissions`
     /// entries not explicitly defined by the policy are handled. Allow-unknown will
     /// result in unknown `permissions` being allowed, while they are denied (and audited)
     /// if the policy uses deny-unknown.
-    pub fn access_decision_to_kernel_access_decision(
+    pub(crate) fn access_decision_to_kernel_access_decision(
         &self,
+        source_context: &SecurityContext,
         class: KernelClass,
         access_decision: AccessDecision,
     ) -> KernelAccessDecision {
@@ -257,14 +281,15 @@ impl PolicyIndex {
             kernel_allow = u32::MAX;
             kernel_audit = 0u32;
         } else {
-            // Otherwise, a bit is by default audited and not allowed.
+            // Otherwise, a bit is by default denied, and audited unless the source domain is
+            // `neveraudit`.
             kernel_allow = 0u32;
-            kernel_audit = u32::MAX;
+            kernel_audit =
+                if self.policy.is_neveraudit(source_context.type_()) { 0u32 } else { u32::MAX };
         }
 
         let decision_allow = access_decision.allow;
-        let decision_audit = (access_decision.allow & access_decision.auditallow)
-            | (!access_decision.allow & access_decision.auditdeny);
+        let decision_audit = access_decision.audit();
         for (id, permission_id) in self.permissions[class as usize].iter().enumerate() {
             if let Some(permission_id) = permission_id {
                 // If the permission is known, set the corresponding bit according to
@@ -349,5 +374,159 @@ mod tests {
             index.compute_access_decision(&source, &target, process_class.id()).allow,
             AccessVector::NONE
         );
+    }
+
+    #[test]
+    fn compute_access_decision_neveraudit() {
+        let policy_bytes =
+            include_bytes!("../../testdata/composite_policies/compiled/handle_unknown_policy-deny");
+        let mut policy = Policy::parse_and_validate(policy_bytes);
+        let context = policy
+            .parse_security_context(b"user0:object_r:type0:s0".into())
+            .expect("valid security context");
+        let baseline_index = PolicyIndex::new(policy.clone()).expect("build baseline policy index");
+        policy.set_neveraudit([context.type_()]);
+
+        let mut v35_bytes = Vec::new();
+        policy.serialize(&mut v35_bytes).expect("serialize v35 policy");
+        let policy = Policy::parse_and_validate(&v35_bytes);
+        let index = PolicyIndex::new(policy).expect("build policy index");
+
+        // Known class ("dir") with both known and unknown permissions: auditallow and auditdeny
+        // are cleared, and `access_decision_to_kernel_access_decision` suppresses auditing for
+        // both known and unknown permissions.
+        let dir_decision = index.compute_access_decision(&context, &context, FileClass::Dir);
+        assert_eq!(dir_decision.auditallow, AccessVector::NONE);
+        assert_eq!(dir_decision.auditdeny, AccessVector::NONE);
+        let kernel_dir_decision = index.access_decision_to_kernel_access_decision(
+            &context,
+            FileClass::Dir.into(),
+            dir_decision,
+        );
+        assert_eq!(kernel_dir_decision.audit, AccessVector::NONE);
+
+        // If a non-`neveraudit` decision has `auditdeny == AccessVector::NONE` (e.g. from
+        // `dontaudit` rules clearing all defined permissions), unknown permissions on the class
+        // are still audited under `handle_unknown = deny`.
+        let mut dontaudit_all_decision = AccessDecision::allow(AccessVector::NONE);
+        dontaudit_all_decision.auditdeny = AccessVector::NONE;
+        let kernel_dontaudit_decision = baseline_index.access_decision_to_kernel_access_decision(
+            &context,
+            FileClass::Dir.into(),
+            dontaudit_all_decision,
+        );
+        assert_ne!(kernel_dontaudit_decision.audit, AccessVector::NONE);
+
+        let dir_xperms = index.compute_xperms_access_decision(
+            XpermsKind::Ioctl,
+            &context,
+            &context,
+            FileClass::Dir,
+            /* xperms_prefix = */ 0x12,
+        );
+        assert_eq!(dir_xperms.auditallow, XpermsBitmap::NONE);
+        assert_eq!(dir_xperms.auditdeny, XpermsBitmap::NONE);
+
+        // Unknown class ("process"): fallback decisions also suppress auditing.
+        let process_decision =
+            index.compute_access_decision(&context, &context, KernelClass::Process);
+        assert_eq!(process_decision.auditallow, AccessVector::NONE);
+        assert_eq!(process_decision.auditdeny, AccessVector::NONE);
+        let kernel_process_decision = index.access_decision_to_kernel_access_decision(
+            &context,
+            KernelClass::Process,
+            process_decision,
+        );
+        assert_eq!(kernel_process_decision.audit, AccessVector::NONE);
+
+        let process_xperms = index.compute_xperms_access_decision(
+            XpermsKind::Ioctl,
+            &context,
+            &context,
+            KernelClass::Process,
+            /* xperms_prefix = */ 0x12,
+        );
+        assert_eq!(process_xperms.allow, XpermsBitmap::NONE);
+        assert_eq!(process_xperms.auditallow, XpermsBitmap::NONE);
+        assert_eq!(process_xperms.auditdeny, XpermsBitmap::NONE);
+
+        let allow_unknown_policy = Policy::parse_and_validate(include_bytes!(
+            "../../testdata/composite_policies/compiled/handle_unknown_policy-allow"
+        ));
+        let allow_unknown_context = allow_unknown_policy
+            .parse_security_context(b"user0:object_r:type0:s0".into())
+            .expect("valid security context");
+        let allow_unknown_index =
+            PolicyIndex::new(allow_unknown_policy).expect("build policy index");
+        let allow_unknown_xperms = allow_unknown_index.compute_xperms_access_decision(
+            XpermsKind::Ioctl,
+            &allow_unknown_context,
+            &allow_unknown_context,
+            KernelClass::Process,
+            /* xperms_prefix = */ 0x12,
+        );
+        assert_eq!(allow_unknown_xperms.allow, XpermsBitmap::ALL);
+        assert_eq!(allow_unknown_xperms.audit(), XpermsBitmap::NONE);
+
+        // `handle_unknown_policy` has no `auditallow` or xperm rules; also verify against policies
+        // with non-empty `auditallow` and `auditallowxperm` bitmaps before `set_neveraudit`.
+        let mut audit_policy = Policy::parse_and_validate(include_bytes!(
+            "../../testdata/micro_policies/security_server_tests_policy"
+        ));
+        let audit_context = audit_policy
+            .parse_security_context(b"user0:object_r:test_audit_t:s0".into())
+            .expect("valid test_audit_t security context");
+        let baseline_index = PolicyIndex::new(audit_policy.clone()).expect("build policy index");
+        let baseline_decision = baseline_index.compute_access_decision(
+            &audit_context,
+            &audit_context,
+            KernelClass::Process,
+        );
+        assert_ne!(baseline_decision.auditallow, AccessVector::NONE);
+        assert_ne!(baseline_decision.auditdeny, AccessVector::NONE);
+        assert_ne!(baseline_decision.audit(), AccessVector::NONE);
+
+        audit_policy.set_neveraudit([audit_context.type_()]);
+        let audit_index = PolicyIndex::new(audit_policy).expect("build v35 policy index");
+        let suppressed_decision = audit_index.compute_access_decision(
+            &audit_context,
+            &audit_context,
+            KernelClass::Process,
+        );
+        assert_eq!(suppressed_decision.auditallow, AccessVector::NONE);
+        assert_eq!(suppressed_decision.auditdeny, AccessVector::NONE);
+        assert_eq!(suppressed_decision.audit(), AccessVector::NONE);
+
+        let mut xperm_policy = Policy::parse_and_validate(include_bytes!(
+            "../../testdata/micro_policies/allowxperm_policy"
+        ));
+        let xperm_context = xperm_policy
+            .parse_security_context(b"user0:object_r:type0:s0".into())
+            .expect("valid type0 security context");
+        let baseline_xperm_index =
+            PolicyIndex::new(xperm_policy.clone()).expect("build xperm policy index");
+        let baseline_xperms = baseline_xperm_index.compute_xperms_access_decision(
+            XpermsKind::Ioctl,
+            &xperm_context,
+            &xperm_context,
+            KernelClass::File,
+            /* xperms_prefix = */ 0xab,
+        );
+        assert_ne!(baseline_xperms.auditallow, XpermsBitmap::NONE);
+        assert_ne!(baseline_xperms.auditdeny, XpermsBitmap::NONE);
+        assert_ne!(baseline_xperms.audit(), XpermsBitmap::NONE);
+
+        xperm_policy.set_neveraudit([xperm_context.type_()]);
+        let xperm_index = PolicyIndex::new(xperm_policy).expect("build v35 xperm policy index");
+        let suppressed_xperms = xperm_index.compute_xperms_access_decision(
+            XpermsKind::Ioctl,
+            &xperm_context,
+            &xperm_context,
+            KernelClass::File,
+            /* xperms_prefix = */ 0xab,
+        );
+        assert_eq!(suppressed_xperms.auditallow, XpermsBitmap::NONE);
+        assert_eq!(suppressed_xperms.auditdeny, XpermsBitmap::NONE);
+        assert_eq!(suppressed_xperms.audit(), XpermsBitmap::NONE);
     }
 }

@@ -1,0 +1,79 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "entry_point",
+    srcs = ["entry_point.cc"],
+    hdrs = ["entry_point.h"],
+    deps = [
+        "//src/zircon/lib/zircon",
+        # On Fuchsia, //zircon/system/public would shadow the sysroot's
+        # <zircon/syscalls.h> without the generated syscalls/gen/*.inc files.
+        "//src/zircon/lib/zircon:headers",  # @bazel2gn:path_overwrite://zircon/system/public
+    ],
+)
+
+# The user.basic environment doesn't use toolchain-provided instrumentation
+# runtimes that wouldn't be compatible.  But it supports variants like ubsan
+# that require plumbing a custom runtime, which isn't handled for this
+# experimental test stub binary.
+# @bazel2gn:raw_attribute:exclude_toolchain_tags = [ "custom-runtime" ]
+fx_cc_binary(
+    name = "bin",
+    srcs = ["driver_host.cc"],
+    # In GN, `:modules.basic` redirects `:bin` to the `user.basic` toolchain,
+    # which applies `//build/config/zircon:user-executable` by default.
+    # @bazel2gn:skip
+    build_flags = ["//build/config/zircon:user-executable"],
+    gn_output_name = "driver_host2",
+    deps = [":entry_point"],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "driver_host2",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "driver_host2",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/driver_host2.cml",
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":manifest",
+    visibility = ["//src/devices/bin/driver_manager/tests:__pkg__"],
+    deps = [
+        # In GN, the component depends on `:modules.basic` (`user_basic_redirect`)
+        # to redirect `:bin` to the `user.basic` toolchain.
+        ":bin_packaged",  # @bazel2gn:path_overwrite::modules.basic
+    ],
+)
+
+fx_package(
+    name = "package",
+    package_name = "driver_host2",
+    components = [":component"],
+)

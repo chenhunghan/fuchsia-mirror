@@ -6,7 +6,6 @@
 
 #include <fuchsia/diagnostics/cpp/fidl.h>
 #include <fuchsia/logger/cpp/fidl.h>
-#include <lib/async/cpp/task.h>
 #include <lib/fit/defer.h>
 #include <lib/sys/cpp/service_directory.h>
 #include <lib/syslog/cpp/macros.h>
@@ -14,47 +13,30 @@
 #include <memory>
 
 #include "src/developer/forensics/feedback_data/constants.h"
-#include "src/lib/backoff/backoff.h"
-#include "src/lib/diagnostics/accessor2logger/log_message.h"
+#include "src/lib/diagnostics/fidl_log_message_parser/log_message.h"
 
 namespace forensics::feedback_data {
 
 LogSource::LogSource(async_dispatcher_t* dispatcher,
-                     std::shared_ptr<sys::ServiceDirectory> services, LogSink* sink,
-                     std::unique_ptr<backoff::Backoff> backoff)
-    : dispatcher_(dispatcher),
-      services_(std::move(services)),
-      sink_(sink),
-      backoff_(std::move(backoff)) {
+                     std::shared_ptr<sys::ServiceDirectory> services, LogSink* sink)
+    : dispatcher_(dispatcher), services_(std::move(services)), sink_(sink) {
   FX_CHECK(dispatcher_ != nullptr);
   FX_CHECK(services_ != nullptr);
   FX_CHECK(sink_ != nullptr);
 
-  // |backoff_| can only be null if we know a reconnection won't occur.
-  if (sink_->SafeAfterInterruption()) {
-    FX_CHECK(backoff_ != nullptr);
-  }
-
   archive_accessor_.set_error_handler([this](const zx_status_t status) {
-    FX_LOGS(WARNING) << "Lost connection to " << kArchiveAccessorName;
+    FX_LOGS(WARNING) << "Lost connection to " << kLogsArchiveAccessorName;
 
     // The batch iterator and archive accessor connections are not expected to close. Ensure both
-    // are unbound at the same time to simplify reconnections.
+    // are unbound at the same time.
     if (batch_iterator_) {
       batch_iterator_->Unbind();
     }
-
-    OnDisconnect();
   });
 }
 
 void LogSource::Start() {
-  if (is_stopped_ && !sink_->SafeAfterInterruption()) {
-    FX_LOGS(FATAL) << "Log streaming unsafe to resume";
-  }
-
-  is_stopped_ = false;
-  services_->Connect(archive_accessor_.NewRequest(dispatcher_), kArchiveAccessorName);
+  services_->Connect(archive_accessor_.NewRequest(dispatcher_), kLogsArchiveAccessorName);
 
   auto format = fuchsia::diagnostics::Format::FXT;
   fuchsia::diagnostics::StreamParameters params;
@@ -66,37 +48,16 @@ void LogSource::Start() {
 
   fuchsia::diagnostics::BatchIteratorPtr batch_iterator;
   archive_accessor_->StreamDiagnostics(std::move(params), batch_iterator.NewRequest(dispatcher_));
-  batch_iterator_ = std::make_unique<diagnostics::accessor2logger::LogBatchIterator>(
+  batch_iterator_ = std::make_unique<diagnostics::fidl_log_message_parser::LogBatchIterator>(
       std::move(batch_iterator), format);
   batch_iterator_->set_error_handler([this](const zx_status_t status) {
     FX_LOGS(WARNING) << "Lost connection to fuchsia.diagnostics.BatchIterator";
 
     // The batch iterator and archive accessor connections are not expected to close. Ensure both
-    // are unbound at the same time to simplify reconnections.
+    // are unbound at the same time.
     archive_accessor_.Unbind();
-
-    OnDisconnect();
   });
   GetNext();
-}
-
-void LogSource::OnDisconnect() {
-  is_stopped_ = true;
-
-  sink_->NotifyInterruption();
-  if (!sink_->SafeAfterInterruption()) {
-    return;
-  }
-
-  async::PostDelayedTask(
-      dispatcher_,
-      [self = ptr_factory_.GetWeakPtr()] {
-        // Safe to call Start because it's confirmed the sink can safely resume receiving messages.
-        if (self) {
-          self->Start();
-        }
-      },
-      backoff_->GetNext());
 }
 
 void LogSource::GetNext() {
@@ -115,17 +76,6 @@ void LogSource::GetNext() {
       sink_->Add(std::move(formatted));
     }
   });
-}
-
-void LogSource::Stop() {
-  is_stopped_ = true;
-
-  if (batch_iterator_) {
-    batch_iterator_->Unbind();
-  }
-  archive_accessor_.Unbind();
-
-  sink_->NotifyInterruption();
 }
 
 }  // namespace forensics::feedback_data

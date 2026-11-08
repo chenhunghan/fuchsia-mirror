@@ -133,9 +133,9 @@ impl<'a> Node<'a> {
         let futs = pingable
             .iter()
             .chain(std::iter::once(self))
-            .tuple_combinations()
+            .array_combinations()
             .map(
-                |(
+                |[
                     Node {
                         realm,
                         local_interface_id: src_id,
@@ -148,7 +148,7 @@ impl<'a> Node<'a> {
                         v4_addrs: dst_v4_addrs,
                         v6_addrs: dst_v6_addrs,
                     },
-                )| {
+                ]| {
                     const UNSPECIFIED_PORT: u16 = 0;
                     const PING_SEQ: u16 = 1;
                     let v4_futs = (!src_v4_addrs.is_empty()).then(|| {

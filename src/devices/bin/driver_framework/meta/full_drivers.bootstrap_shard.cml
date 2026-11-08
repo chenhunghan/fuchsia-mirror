@@ -2,21 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 {
-    children: [
-        // #driver_index needs fuchsia.component.resolution.Resolver-full, which is routed to it in
-        // driver_framework.bootstrap_shard.cml with `source_availability: "unknown"` so that the
-        // route is replaced with `from: "void"` when this shard is not included. We cannot route
-        // directly from #pkg-cache in driver_framework.bootstrap_shard.cml because #pkg-cache is
-        // present even when this shard is not included. Instead, we create a local instance of
-        // loopback_resolver here that only exists when this shard is included, and redirect the
-        // capability from #pkg-cache through it.
-        // TODO(https://fxbug.dev/42180879): Remove need for this component.
-        {
-            name: "full_resolver",
-            url: "fuchsia-pkg://fuchsia.com/loopback_resolver#meta/loopback_resolver.cm",
-            environment: "#base-resolver-env",
-        },
-    ],
     collections: [
         {
             name: "full-drivers",
@@ -38,16 +23,20 @@
         {
             dictionary: "diagnostics",
             from: "self",
-            to: [
-                "#full-drivers",
-                "#full_resolver",
-            ],
+            to: [ "#full-drivers" ],
         },
         {
+            // This is only used when the #driver_index |enable_ephemeral_drivers| config
+            // is set, which enables loading drivers ephemerally. This is intended for
+            // eng builds only and is set through product assembly.
             protocol: "fuchsia.component.resolution.Resolver-full",
             from: "#pkg-cache",
-            as: "fuchsia.component.resolution.Resolver",
-            to: "#full_resolver",
+            to: "#driver_index",
+
+            // pkg-cache depends on fshost for blobfs and fshost depends transitively on
+            // driver_index and driver_manager, but driver_index and driver_manager don't need full
+            // packages to provide fshost's (transitive) dependencies.
+            dependency: "weak",
         },
         {
             protocol: "fuchsia.tracing.provider.Registry",
@@ -169,6 +158,10 @@
                 "fuchsia.gpu.magma.TrustedService",
                 "fuchsia.hardware.clock.DebugService",
                 "fuchsia.hardware.gnss.Service",
+                "fuchsia.hardware.google.cryptobam.Service",
+                "fuchsia.hardware.google.cryptobam.TestService",
+                "fuchsia.hardware.google.gpdma.Service",
+                "fuchsia.hardware.google.gpdma.TestService",
                 "fuchsia.hardware.google.nanohub.DataChannelService",
                 "fuchsia.hardware.google.nanohub.DisplayService",
                 "fuchsia.hardware.google.nanohub.Service",
@@ -287,8 +280,8 @@
                     scheme: "fuchsia-boot",
                 },
                 {
-                    resolver: "resolver",
-                    from: "#full_resolver",
+                    resolver: "full_resolver",
+                    from: "#pkg-cache",
                     scheme: "fuchsia-pkg",
                 },
             ],

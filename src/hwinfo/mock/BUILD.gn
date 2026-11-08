@@ -6,8 +6,7 @@
 # is located at `//tools/create/templates/component-default/BUILD.gn.tmpl-rust`.
 # If you find something broken, we are eager to review fixes.
 
-import("//build/components.gni")
-import("//build/rust/rustc_binary.gni")
+import("//build/bazel/bazel_fuchsia_package.gni")
 
 group("mock") {
   testonly = true
@@ -22,41 +21,10 @@ group("tests") {
   deps = [ "integration/tests" ]
 }
 
-rustc_binary("bin") {
+# //src/hwinfo/mock/integration/testing/realm-factory still uses this package
+# from GN.
+bazel_fuchsia_package("package") {
   testonly = true
-  output_name = "mock"
-  edition = "2024"
-
-  # Generates a GN target for unit-tests with the label `bin_test`, and
-  # a binary named `mock_bin_test`.
-  with_unit_tests = true
-
-  deps = [
-    "fidl:fuchsia.hwinfo.mock_rust",
-    "//sdk/fidl/fuchsia.hwinfo:fuchsia.hwinfo_rust",
-    "//src/lib/diagnostics/inspect/runtime/rust",
-    "//src/lib/diagnostics/inspect/rust",
-    "//src/lib/fuchsia",
-    "//src/lib/fuchsia-async",
-    "//src/lib/fuchsia-component",
-    "//src/lib/fuchsia-sync",
-    "//third_party/rust_crates:anyhow",
-    "//third_party/rust_crates:futures",
-    "//third_party/rust_crates:log",
-  ]
-
-  sources = [ "src/main.rs" ]
-}
-
-fuchsia_component("component") {
-  testonly = true
-  component_name = "mock"
-  manifest = "meta/mock.cml"
-  deps = [ ":bin" ]
-}
-
-fuchsia_package("package") {
-  testonly = true
+  bazel_config = "fuchsia_platform"
   package_name = "hwinfo-mock"
-  deps = [ ":component" ]
 }

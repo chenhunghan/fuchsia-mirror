@@ -151,7 +151,7 @@ mod test {
     use std::path::PathBuf;
     use std::str::FromStr;
     use std::sync::Arc;
-    use target_behavior::{ConnectionBehavior, setup_fake_resolution, target_interface};
+    use target_behavior::{DirectConnector, setup_fake_resolution, target_interface};
     use target_holders::fake_proxy;
 
     const TARGET_NAME: &str = "some-target";
@@ -256,7 +256,7 @@ mod test {
         let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "repo", "test"]);
         let target_env = target_interface(&fho_env);
         let resolution = setup_fake_resolution(Some("1.2.3.4".to_string())).await;
-        target_env.set_behavior_for_test(ConnectionBehavior::fake_direct_connector(resolution));
+        target_env.set_behavior_for_test(DirectConnector::from_resolution_for_test(resolution));
 
         let engine_proxy = setup_fake_engine_proxy(Arc::clone(&client), None).await;
 
@@ -282,7 +282,7 @@ mod test {
         let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "repo", "test"]);
         let target_env = target_interface(&fho_env);
         let resolution = setup_fake_resolution(Some("1.2.3.4".to_string())).await;
-        target_env.set_behavior_for_test(ConnectionBehavior::fake_direct_connector(resolution));
+        target_env.set_behavior_for_test(DirectConnector::from_resolution_for_test(resolution));
 
         let engine_proxy = setup_fake_engine_proxy(Arc::clone(&client), None).await;
 
@@ -313,7 +313,7 @@ mod test {
         let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "repo", "test"]);
         let target_env = target_interface(&fho_env);
         let resolution = setup_fake_resolution(Some("1.2.3.4".to_string())).await;
-        target_env.set_behavior_for_test(ConnectionBehavior::fake_direct_connector(resolution));
+        target_env.set_behavior_for_test(DirectConnector::from_resolution_for_test(resolution));
 
         let engine_proxy = setup_fake_engine_proxy(Arc::clone(&client), None).await;
 
@@ -339,7 +339,7 @@ mod test {
         let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "repo", "test"]);
         let target_env = target_interface(&fho_env);
         let resolution = setup_fake_resolution(Some("1.2.3.4".to_string())).await;
-        target_env.set_behavior_for_test(ConnectionBehavior::fake_direct_connector(resolution));
+        target_env.set_behavior_for_test(DirectConnector::from_resolution_for_test(resolution));
 
         let engine_proxy = setup_fake_engine_proxy(Arc::clone(&client), None).await;
 
@@ -368,7 +368,7 @@ mod test {
         let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "repo", "test"]);
         let target_env = target_interface(&fho_env);
         let resolution = setup_fake_resolution(Some("1.2.3.4".to_string())).await;
-        target_env.set_behavior_for_test(ConnectionBehavior::fake_direct_connector(resolution));
+        target_env.set_behavior_for_test(DirectConnector::from_resolution_for_test(resolution));
 
         let engine_proxy = setup_fake_engine_proxy(Arc::clone(&client), None).await;
 

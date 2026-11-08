@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
 load("//build/bazel/rules/components:expect_includes.bzl", "expect_includes")
 load(
     "//build/bazel/rules/components:fx_component.bzl",
@@ -16,6 +17,12 @@ load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
 package(default_applicable_licenses = ["//:license"])
 
+cml_shard(
+    name = "meta/nested_component_manager.shard",
+    shard = "meta/nested_component_manager.shard.cml",
+    visibility = ["//src/sys/component_manager/tests:__subpackages__"],
+)
+
 rustc_library(
     name = "fuchsia-component-test-lib",
     srcs = [
@@ -25,6 +32,7 @@ rustc_library(
     ],
     crate_name = "fuchsia_component_test",
     edition = "2024",
+    visibility = ["//:__subpackages__"],
     deps = [
         "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
         "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
@@ -56,7 +64,11 @@ rustc_library(
 expect_includes(
     name = "includes",
     includes = ["//sdk/lib/sys/component:realm_builder.shard"],
-    visibility = ["//sdk/lib/sys/component/cpp/testing:__pkg__"],
+    visibility = [
+        "//sdk/lib/sys/component/cpp/testing:__pkg__",
+        "//src/lib/fidl/rust/fidl-contrib:__pkg__",
+        "//src/sys/component_manager:__subpackages__",
+    ],
 )
 
 # @bazel2gn:skip
@@ -92,7 +104,6 @@ fx_component_manifest(
 fx_test_component(
     name = "fuchsia_component_test_unittests_component",
     compiled_manifest = ":fuchsia_component_test_unittests_manifest",
-    component_name = "fuchsia_component_test_unittests",
     deps = [":fuchsia-component-test-lib_test_packaged_bin"],
 )
 

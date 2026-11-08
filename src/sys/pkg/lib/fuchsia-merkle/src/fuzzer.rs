@@ -91,9 +91,9 @@ fn fuchsia_merkle_fuzzer_impl(input: RandomMerkleVerifierInput) {
     verifier.verify(0, &data[0..input.data_size]).unwrap();
 
     // Verifying too many and too few bytes should fail.
-    if (input.data_size - 1) % BLOCK_SIZE != 0 {
-        // If the input size - 1 is a multiple of the block size then verifying 1 too few bytes is
-        // valid.
+    if input.data_size == 1 || !(input.data_size - 1).is_multiple_of(BLOCK_SIZE) {
+        // If input.data_size > 1 and input.data_size - 1 is a multiple of the block size then
+        // verifying 1 too few bytes is a valid block-aligned prefix read.
         verifier.verify(0, &data[0..input.data_size - 1]).unwrap_err();
     }
     verifier.verify(0, &data[0..input.data_size + 1]).unwrap_err();
@@ -104,15 +104,11 @@ fn fuchsia_merkle_fuzzer_impl(input: RandomMerkleVerifierInput) {
     for (i, chunk) in data[0..input.data_size].chunks(input.read_size).enumerate() {
         read_aligned_verifier.verify(i * input.read_size, chunk).unwrap();
     }
-    // Verifying too many and too few bytes should fail.
-    let ending_start_offset = (input.data_size / input.read_size) * input.read_size;
-    if ending_start_offset < input.data_size - 1 {
-        // If the input size - 1 is a multiple of the read size then 0 bytes would be verified which
-        // isn't supported.
-        read_aligned_verifier
-            .verify(ending_start_offset, &data[ending_start_offset..input.data_size - 1])
-            .unwrap_err();
-    }
+    // Verifying too many and too few bytes in the final read-aligned chunk should fail.
+    let ending_start_offset = ((input.data_size - 1) / input.read_size) * input.read_size;
+    read_aligned_verifier
+        .verify(ending_start_offset, &data[ending_start_offset..input.data_size - 1])
+        .unwrap_err();
     read_aligned_verifier
         .verify(ending_start_offset, &data[ending_start_offset..input.data_size + 1])
         .unwrap_err();

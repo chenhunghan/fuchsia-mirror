@@ -371,8 +371,8 @@ mod tests {
 
     use super::*;
     use emulator_instance::{
-        AccelerationMode, DeviceConfig, EngineType, GuestConfig, HostConfig, NetworkingMode,
-        OperatingSystem, RuntimeConfig, VirtualCpu,
+        AccelerationMode, DeviceConfig, EngineType, GpuType, GuestConfig, HostConfig,
+        NetworkingMode, OperatingSystem, RuntimeConfig, VirtualCpu,
     };
     use ffx_emulator_config::AudioModel;
     use serde::Serialize;
@@ -984,6 +984,10 @@ mod tests {
                 cpu: VirtualCpu { architecture: sdk_metadata::CpuArchitecture::X64, count: 2 },
                 ..Default::default()
             },
+            runtime: RuntimeConfig {
+                serial_socket: "/serial_transport".into(),
+                ..Default::default()
+            },
             ..Default::default()
         };
 
@@ -1005,6 +1009,8 @@ mod tests {
             "unix:/monitor,server,nowait",
             "-serial",
             "unix:/serial,server,nowait,logfile=.serial",
+            "-serial",
+            "unix:/serial_transport,server,nowait",
             "-machine",
             "q35",
             "-fw_cfg",
@@ -1029,6 +1035,37 @@ mod tests {
         .collect();
 
         assert_eq!(actual.args, expected_args)
+    }
+
+    #[fuchsia::test]
+    fn test_templates_use_configured_qemu_sockets() {
+        for kernel_image in [None, Some(PathBuf::from("/path/to/some.efi"))] {
+            let config = EmulatorConfiguration {
+                guest: GuestConfig { kernel_image: kernel_image.clone(), ..Default::default() },
+                host: HostConfig { networking: NetworkingMode::None, ..Default::default() },
+                runtime: RuntimeConfig {
+                    instance_directory: "/instance".into(),
+                    monitor_socket: "/tmp/femu_m_1".into(),
+                    qmp_socket: "/tmp/femu_q_1".into(),
+                    console_socket: "/tmp/femu_c_1".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            let args = process_flag_template(&config).expect("ok processing").args;
+            for expected in [
+                "unix:/tmp/femu_q_1,server,nowait",
+                "unix:/tmp/femu_m_1,server,nowait",
+                "unix:/tmp/femu_c_1,server,nowait,logfile=.serial",
+            ] {
+                assert!(
+                    args.iter().any(|a| a == expected),
+                    "{kernel_image:?}: {expected} in {args:?}"
+                );
+            }
+            assert!(!args.iter().any(|a| a.contains("/instance/")), "{kernel_image:?}: {args:?}");
+        }
     }
 
     #[fuchsia::test]
@@ -1448,5 +1485,171 @@ mod tests {
                 .expect("processed");
         assert_eq!(flags.args.len(), 1);
         assert_eq!(flags.args[0], r#"val", "injected_arg"#);
+    }
+
+    #[test]
+    fn test_lavapipe_gl_mode_swiftshader() {
+        // Test default template (non-EFI, non-GPT).
+        let default_config = EmulatorConfiguration {
+            host: HostConfig { gpu: GpuType::Lavapipe, ..Default::default() },
+            ..Default::default()
+        };
+        let actual = process_flag_template(&default_config).expect("ok processing");
+        assert_eq!(
+            actual.envs.get("ANDROID_EMU_LAVAPIPE_GL_MODE_SWIFTSHADER"),
+            Some(&"1".to_string())
+        );
+
+        // Test EFI template.
+        let efi_config = EmulatorConfiguration {
+            guest: GuestConfig {
+                kernel_image: Some(PathBuf::from("/path/to/some.efi")),
+                ovmf_code: "/some/ovmf_code.fd".into(),
+                ovmf_vars: "/some/ovmf_vars.fd".into(),
+                ..Default::default()
+            },
+            host: HostConfig { gpu: GpuType::Lavapipe, ..Default::default() },
+            ..Default::default()
+        };
+        let actual_efi = process_flag_template(&efi_config).expect("ok processing");
+        assert_eq!(
+            actual_efi.envs.get("ANDROID_EMU_LAVAPIPE_GL_MODE_SWIFTSHADER"),
+            Some(&"1".to_string())
+        );
+    }
+
+    #[test]
+    fn test_non_lavapipe_no_gl_mode_swiftshader() {
+        // Test default template with swiftshader_indirect (default GPU).
+        let default_config = EmulatorConfiguration {
+            host: HostConfig { gpu: GpuType::SwiftshaderIndirect, ..Default::default() },
+            ..Default::default()
+        };
+        let actual = process_flag_template(&default_config).expect("ok processing");
+        assert_eq!(actual.envs.get("ANDROID_EMU_LAVAPIPE_GL_MODE_SWIFTSHADER"), None);
+
+        // Test EFI template with swiftshader_indirect.
+        let efi_config = EmulatorConfiguration {
+            guest: GuestConfig {
+                kernel_image: Some(PathBuf::from("/path/to/some.efi")),
+                ovmf_code: "/some/ovmf_code.fd".into(),
+                ovmf_vars: "/some/ovmf_vars.fd".into(),
+                ..Default::default()
+            },
+            host: HostConfig { gpu: GpuType::SwiftshaderIndirect, ..Default::default() },
+            ..Default::default()
+        };
+        let actual_efi = process_flag_template(&efi_config).expect("ok processing");
+        assert_eq!(actual_efi.envs.get("ANDROID_EMU_LAVAPIPE_GL_MODE_SWIFTSHADER"), None);
+    }
+
+    #[fuchsia::test]
+    fn test_templates_user_networking_port_forwarding() {
+        let mut config = networked_config(
+            sdk_metadata::CpuArchitecture::X64,
+            emulator_instance::EngineType::Qemu,
+            NetworkingMode::User,
+        );
+        config
+            .host
+            .port_map
+            .insert("ssh".to_string(), emulator_instance::PortMapping { host: None, guest: 22 });
+        config.host.port_map.insert(
+            "zero".to_string(),
+            emulator_instance::PortMapping { host: Some(0), guest: 2345 },
+        );
+        config.host.port_map.insert(
+            "fixed".to_string(),
+            emulator_instance::PortMapping { host: Some(8022), guest: 80 },
+        );
+
+        let flags = process_flag_template(&config).expect("ok processing default template");
+        let netdev = flag_value(&flags, "-netdev");
+        assert!(netdev.starts_with("type=user,id=net0,restrict=off,"), "netdev: {netdev}");
+        assert!(netdev.contains(",hostfwd=tcp::0-:22"), "netdev: {netdev}");
+        assert!(netdev.contains(",hostfwd=tcp::0-:2345"), "netdev: {netdev}");
+        assert!(netdev.contains(",hostfwd=tcp::8022-:80"), "netdev: {netdev}");
+        assert!(!netdev.contains("hostfwd=tcp::-:"), "netdev: {netdev}");
+
+        config.guest.kernel_image = Some(PathBuf::from("/path/to/some.efi"));
+        assert!(config.guest.is_efi());
+        let efi_flags = process_flag_template(&config).expect("ok processing efi template");
+        let efi_netdev = flag_value(&efi_flags, "-netdev");
+        assert!(
+            efi_netdev.starts_with("type=user,id=net0,restrict=off,"),
+            "efi_netdev: {efi_netdev}"
+        );
+        assert!(efi_netdev.contains(",hostfwd=tcp::0-:22"), "efi_netdev: {efi_netdev}");
+        assert!(efi_netdev.contains(",hostfwd=tcp::0-:2345"), "efi_netdev: {efi_netdev}");
+        assert!(efi_netdev.contains(",hostfwd=tcp::8022-:80"), "efi_netdev: {efi_netdev}");
+        assert!(!efi_netdev.contains("hostfwd=tcp::-:"), "efi_netdev: {efi_netdev}");
+    }
+
+    #[fuchsia::test]
+    fn test_tap_networking_internet() {
+        let mut config = EmulatorConfiguration {
+            guest: GuestConfig {
+                kernel_image: Some(PathBuf::from("/path/to/kernel")),
+                ..Default::default()
+            },
+            host: HostConfig {
+                networking: NetworkingMode::Tap,
+                internet: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        // By default (internet = false), TAP networking should only configure the tap netdev.
+        let actual_default = process_flag_template(&config).expect("ok processing");
+        assert!(
+            actual_default
+                .args
+                .contains(&"type=tap,ifname=qemu,id=net0,script=no,downscript=no".to_string())
+        );
+        assert!(
+            !actual_default.args.contains(&"type=user,id=user0,restrict=on,ipv6=off".to_string())
+        );
+
+        // When internet = true, TAP networking should bridge tap0 and user0 (with restrict=on)
+        // via hubport onto net0, and include guestfwd and netdev_socket when specified.
+        config.host.internet = true;
+        config.host.guestfwd = vec![
+            "tcp:10.0.2.100:443-cmd:/bin/proxy 443".to_string(),
+            "tcp:10.0.2.100:80-cmd:/bin/proxy 80".to_string(),
+        ];
+        config.host.netdev_socket = Some("127.0.0.1:12345".to_string());
+        let actual_internet = process_flag_template(&config).expect("ok processing");
+        assert!(
+            actual_internet
+                .args
+                .contains(&"type=tap,ifname=qemu,id=tap0,script=no,downscript=no".to_string())
+        );
+        assert!(
+            actual_internet
+                .args
+                .contains(&"type=hubport,id=hubport0,hubid=0,netdev=tap0".to_string())
+        );
+        assert!(
+            actual_internet.args.contains(
+                &"type=user,id=user0,restrict=on,ipv6=off,guestfwd=tcp:10.0.2.100:443-cmd:/bin/proxy 443,guestfwd=tcp:10.0.2.100:80-cmd:/bin/proxy 80".to_string()
+            )
+        );
+        assert!(
+            actual_internet
+                .args
+                .contains(&"type=hubport,id=hubport1,hubid=0,netdev=user0".to_string())
+        );
+        assert!(
+            actual_internet
+                .args
+                .contains(&"type=socket,id=netproxy0,connect=127.0.0.1:12345".to_string())
+        );
+        assert!(
+            actual_internet
+                .args
+                .contains(&"type=hubport,id=hubport2,hubid=0,netdev=netproxy0".to_string())
+        );
+        assert!(actual_internet.args.contains(&"type=hubport,id=net0,hubid=0".to_string()));
     }
 }

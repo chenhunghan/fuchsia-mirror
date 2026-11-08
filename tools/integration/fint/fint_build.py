@@ -51,9 +51,10 @@ import shutil
 import subprocess
 import tempfile
 import time
+from collections.abc import Generator, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Generator, Iterable, TextIO
+from typing import Any, Self, TextIO
 
 from build.scripts import build_timeout, signal_utils
 from google.protobuf import json_format, text_format
@@ -120,7 +121,7 @@ class Timer:
         self.duration: float = 0.0
         self._start: float = 0.0
 
-    def __enter__(self) -> "Timer":
+    def __enter__(self) -> Self:
         self._start = time.time()
         return self
 
@@ -155,7 +156,7 @@ class HostProperties:
     cpu: str
 
     @classmethod
-    def detect(cls) -> "HostProperties":
+    def detect(cls) -> HostProperties:
         """Auto-detects the host system's OS and CPU architecture."""
         host_os = platform.system().lower()
         if host_os == "darwin":
@@ -204,7 +205,7 @@ class HostProperties:
             / "ninja"
         )
 
-    def matches_tool(self, tool: "ToolPathSpec") -> bool:
+    def matches_tool(self, tool: ToolPathSpec) -> bool:
         """Returns True if the tool's OS and CPU match this host."""
         return tool.os == self.os and tool.cpu == self.cpu
 
@@ -426,7 +427,7 @@ class NinjaFailure:
     output: str
 
     @classmethod
-    def from_dict(cls, data: JSONObject) -> "NinjaFailure":
+    def from_dict(cls, data: JSONObject) -> NinjaFailure:
         """Constructs a NinjaFailure from a JSONObject."""
         artifacts = data.get("artifacts")
         exit_code = data.get("exit_code")
@@ -487,7 +488,7 @@ class TestSpec:
     source_label: str = ""
 
     @classmethod
-    def from_dict(cls, data: JSONObject) -> "TestSpec":
+    def from_dict(cls, data: JSONObject) -> TestSpec:
         """Constructs a TestSpec safely from a JSONObject."""
         test_dict = data.get("test")
         if not isinstance(test_dict, dict):
@@ -580,7 +581,7 @@ class ToolPathSpec:
     cpu: str
 
     @classmethod
-    def from_dict(cls, data: JSONObject) -> "ToolPathSpec":
+    def from_dict(cls, data: JSONObject) -> ToolPathSpec:
         """Constructs a ToolPathSpec safely from a JSONObject."""
         name = data.get("name")
         path_val = data.get("path")
@@ -609,7 +610,7 @@ class ClippyTargetSpec:
     disable_clippy: bool
 
     @classmethod
-    def from_dict(cls, data: JSONObject) -> "ClippyTargetSpec":
+    def from_dict(cls, data: JSONObject) -> ClippyTargetSpec:
         """Constructs a ClippyTargetSpec safely from a JSONObject."""
         output_val = data.get("clippy_output")
         sources_val = data.get("src", data.get("sources", []))
@@ -1714,16 +1715,16 @@ def make_build_context(
     )
 
 
-def _load_timeout_metadata(
+def _load_metadata_dict(
     metadata_path: pathlib.Path, verbose: bool = False
-) -> build_timeout.TimeoutMetadata | None:
-    """Loads and deserializes TimeoutMetadata from output_metadata.json."""
+) -> JSONObject:
+    """Loads and deserializes output_metadata.json into a dictionary."""
     if not metadata_path.exists():
         ts_msg(
-            f"{metadata_path} does not exist; skipping timeout metadata ingestion.",
+            f"{metadata_path} does not exist; skipping metadata ingestion.",
             verbose,
         )
-        return None
+        return {}
 
     try:
         metadata_text = metadata_path.read_text(encoding="utf-8")
@@ -1732,17 +1733,24 @@ def _load_timeout_metadata(
             f"Failed to read metadata JSON from {metadata_path}: {e}",
             file=sys.stderr,
         )
-        return None
+        return {}
 
     try:
-        metadata_dict = json.loads(metadata_text)
+        data = json.loads(metadata_text)
+        return data if isinstance(data, dict) else {}
     except json.JSONDecodeError as e:
         msg(
             f"Failed to parse metadata JSON from {metadata_path}: {e}",
             file=sys.stderr,
         )
-        return None
+        return {}
 
+
+def _parse_timeout_metadata(
+    metadata_dict: JSONObject,
+    metadata_path: pathlib.Path,
+) -> build_timeout.TimeoutMetadata | None:
+    """Deserializes TimeoutMetadata from loaded metadata JSON dictionary."""
     timeout_dict = metadata_dict.get("timeout")
     if not isinstance(timeout_dict, dict):
         return None
@@ -1777,10 +1785,16 @@ def _format_timeout_failure_summary_addon(
 
 def _update_build_artifacts_failure_summary(
     artifacts_path: pathlib.Path,
-    addon: str,
+    primary_summary: str | None = None,
+    timeout_addon: str | None = None,
     verbose: bool = False,
 ) -> bool:
-    """Reads build_artifacts.json, appends addon to failure_summary, and writes back."""
+    """Reads build_artifacts.json, updates failure_summary, and writes back.
+
+    If primary_summary is provided (e.g. from buildminder), it replaces any
+    existing preliminary summary (from ninja_errors.json). If timeout_addon
+    is provided, it is appended to the summary.
+    """
     artifacts = build_artifacts_pb2.BuildArtifacts()
     if artifacts_path.exists():
         try:
@@ -1800,8 +1814,27 @@ def _update_build_artifacts_failure_summary(
             )
             return False
 
-    artifacts.failure_summary = (artifacts.failure_summary + addon).strip()
+    if primary_summary:
+        summary = primary_summary.strip()
+    else:
+        summary = artifacts.failure_summary.strip()
 
+    if timeout_addon:
+        stripped_addon = timeout_addon.strip()
+        if stripped_addon and stripped_addon not in summary:
+            if summary:
+                summary = f"{summary}\n\n{stripped_addon}"
+            else:
+                summary = stripped_addon
+
+    if summary == artifacts.failure_summary:
+        ts_msg(
+            "Failure summary unchanged; skipping update.",
+            verbose,
+        )
+        return True
+
+    artifacts.failure_summary = summary
     try:
         new_text = (
             json_format.MessageToJson(
@@ -1821,7 +1854,7 @@ def _update_build_artifacts_failure_summary(
     try:
         artifacts_path.write_text(new_text, encoding="utf-8")
         ts_msg(
-            f"Successfully ingested timeout diagnostics into {artifacts_path}",
+            f"Successfully updated failure_summary in {artifacts_path}",
             verbose,
         )
         return True
@@ -1833,12 +1866,12 @@ def _update_build_artifacts_failure_summary(
         return False
 
 
-def ingest_timeout_metadata(
+def ingest_build_metadata(
     context_path: pathlib.Path,
     metadata_path: pathlib.Path,
     verbose: bool = False,
 ) -> int:
-    """Ingests active process timeout diagnostics into failure_summary in build_artifacts.json.
+    """Ingests active process timeout diagnostics and failure summary into build_artifacts.json.
 
     Args:
         context_path: Path to context spec textproto (used to resolve artifact_dir).
@@ -1850,7 +1883,7 @@ def ingest_timeout_metadata(
     """
     if not context_path.exists():
         ts_msg(
-            f"Context path {context_path} does not exist; skipping timeout metadata ingestion.",
+            f"Context path {context_path} does not exist; skipping metadata ingestion.",
             verbose,
         )
         return 0
@@ -1858,7 +1891,7 @@ def ingest_timeout_metadata(
     context_spec = load_context_spec(context_path)
     if not context_spec.artifact_dir:
         ts_msg(
-            "No artifact_dir configured in context spec; skipping timeout metadata ingestion.",
+            "No artifact_dir configured in context spec; skipping metadata ingestion.",
             verbose,
         )
         return 0
@@ -1868,18 +1901,45 @@ def ingest_timeout_metadata(
     )
     if not artifacts_path.parent.is_dir():
         ts_msg(
-            f"{artifacts_path.parent} does not exist; skipping timeout metadata ingestion.",
+            f"{artifacts_path.parent} does not exist; skipping metadata ingestion.",
             verbose,
         )
         return 0
 
-    timeout_meta = _load_timeout_metadata(metadata_path, verbose=verbose)
-    if not timeout_meta or not timeout_meta.active_processes:
+    metadata_dict = _load_metadata_dict(metadata_path, verbose=verbose)
+    if not metadata_dict:
         return 0
 
-    addon = _format_timeout_failure_summary_addon(timeout_meta)
+    # 1. Ingest failure summary text if present
+    summary_text = None
+    summary_file = metadata_dict.get("failure_summary")
+    if isinstance(summary_file, str):
+        summary_path = pathlib.Path(summary_file)
+        if summary_path.exists():
+            try:
+                text = summary_path.read_text(encoding="utf-8").strip()
+                if text:
+                    summary_text = text
+            except OSError as e:
+                ts_msg(
+                    f"Failed to read failure summary from {summary_path}: {e}",
+                    verbose,
+                )
+
+    # 2. Ingest active processes at timeout if present
+    timeout_addon = None
+    timeout_meta = _parse_timeout_metadata(metadata_dict, metadata_path)
+    if timeout_meta and timeout_meta.active_processes:
+        timeout_addon = _format_timeout_failure_summary_addon(timeout_meta)
+
+    if not summary_text and not timeout_addon:
+        return 0
+
     success = _update_build_artifacts_failure_summary(
-        artifacts_path, addon, verbose=verbose
+        artifacts_path,
+        primary_summary=summary_text,
+        timeout_addon=timeout_addon,
+        verbose=verbose,
     )
     return 0 if success else 1
 
@@ -1921,10 +1981,19 @@ def _main_arg_parser() -> argparse.ArgumentParser:
         help="Print the resolved job_count from the context spec and exit.",
     )
     parser.add_argument(
-        "--ingest-timeout-metadata",
+        "--ingest-build-metadata",
         type=pathlib.Path,
         default=None,
-        help="Path to output_metadata.json. Ingests active process timeout diagnostics into failure_summary in build_artifacts.json.",
+        help=(
+            "Path to output_metadata.json. Ingests active process timeout "
+            "diagnostics and the failure summary into build_artifacts.json."
+        ),
+    )
+    parser.add_argument(
+        "--use-failure-summary",
+        type=pathlib.Path,
+        default=None,
+        help="Path to a text file containing the failure summary to record in build_artifacts.json if the build fails.",
     )
     parser.add_argument(
         "--verbose",
@@ -1996,15 +2065,15 @@ def main(argv: list[str]) -> int:
         print(context_spec.job_count)
         return 0
 
-    if args.ingest_timeout_metadata:
+    if args.ingest_build_metadata:
         if not args.context:
             msg(
-                "Error: --context is required with --ingest-timeout-metadata",
+                "Error: --context is required with --ingest-build-metadata",
                 file=sys.stderr,
             )
             return 1
-        return ingest_timeout_metadata(
-            args.context, args.ingest_timeout_metadata, verbose=args.verbose
+        return ingest_build_metadata(
+            args.context, args.ingest_build_metadata, verbose=args.verbose
         )
 
     # Ensure build execution requirements are satisfied if not querying
@@ -2074,7 +2143,20 @@ def main(argv: list[str]) -> int:
         )
         failure_summary = run.failure_summary
         if run.exit_code != 0 and not failure_summary:
-            if args.ninja_error_logging_output:
+            if args.use_failure_summary and args.use_failure_summary.exists():
+                try:
+                    text = args.use_failure_summary.read_text(
+                        encoding="utf-8"
+                    ).strip()
+                    if text:
+                        failure_summary = text
+                except OSError as e:
+                    ts_msg(
+                        f"Failed to read failure summary from {args.use_failure_summary}: {e}",
+                        args.verbose,
+                    )
+
+            if not failure_summary and args.ninja_error_logging_output:
                 failure_summary = parse_ninja_failures(
                     args.ninja_error_logging_output
                 )

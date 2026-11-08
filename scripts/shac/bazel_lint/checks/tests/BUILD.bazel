@@ -11,12 +11,19 @@ filegroup(
     name = "files",
     testonly = True,
     srcs = [
+        "base_test.star",
         "checks_test.star",
         # LINT.IfChange(all_check_test_files)
+        "bzl_require_load_visibility_test.star",
+        "fuchsia_wrappers_test.star",
+        "host_constraints_test.star",
         "load_visibility_test.star",
         "package_default_visibility_test.star",
+        "repository_paths_test.star",
         "root_package_labels_test.star",
         "target_visibility_test.star",
+        "vendor_paths_test.star",
+        "visibility_for_public_by_default_types_test.star",
         # LINT.ThenChange(//scripts/shac/bazel_lint/checks/__init__.py:all_checks)
     ],
     visibility = [

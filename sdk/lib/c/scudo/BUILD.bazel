@@ -1,0 +1,53 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Bazel equivalent of the GN config `gwp-asan-common-config` in `BUILD.gn`,
+# which adds `${gwp_asan}/..` (`//third_party/scudo`) to `include_dirs` so
+# GWP-ASan code and consumers can `#include "gwp_asan/..."`.
+# @bazel2gn:skip
+fx_cc_library(
+    name = "gwp_asan_headers",
+    hdrs = [
+        "//third_party/scudo:gwp_asan/common.h",
+        "//third_party/scudo:gwp_asan/crash_handler.h",
+        "//third_party/scudo:gwp_asan/definitions.h",
+        "//third_party/scudo:gwp_asan/options.h",
+        "//third_party/scudo:gwp_asan/options.inc",
+        "//third_party/scudo:gwp_asan/stack_trace_compressor.h",
+    ],
+    strip_include_prefix = "/third_party/scudo",
+)
+
+# Crash handlers should depend on this target.
+# GN uses `..:libc_source_set.deps` which has no direct Bazel equivalent.
+# @bazel2gn:raw_attribute:deps = [ "..:libc_source_set.deps" ]
+fx_cc_library(
+    name = "gwp-asan-common",
+    # GN references GWP-ASan sources via `${gwp_asan}` from `//sdk/lib/c/libc.gni`.
+    srcs = [
+        # GN references this file via `${gwp_asan}` from `//sdk/lib/c/libc.gni`.
+        "//third_party/scudo:gwp_asan/common.cpp",  # @bazel2gn:path_overwrite:${gwp_asan}/common.cpp
+        # GN references this file via `${gwp_asan}` from `//sdk/lib/c/libc.gni`.
+        "//third_party/scudo:gwp_asan/crash_handler.cpp",  # @bazel2gn:path_overwrite:${gwp_asan}/crash_handler.cpp
+        # GN references this file via `${gwp_asan}` from `//sdk/lib/c/libc.gni`.
+        "//third_party/scudo:gwp_asan/platform_specific/common_fuchsia.cpp",  # @bazel2gn:path_overwrite:${gwp_asan}/platform_specific/common_fuchsia.cpp
+        # GN references this file via `${gwp_asan}` from `//sdk/lib/c/libc.gni`.
+        "//third_party/scudo:gwp_asan/stack_trace_compressor.cpp",  # @bazel2gn:path_overwrite:${gwp_asan}/stack_trace_compressor.cpp
+    ],
+    hdrs = ["gwp_asan_info.h"],
+    public_configs = [":gwp-asan-common-config"],
+    visibility = [
+        "//sdk/lib/c/test:__pkg__",
+        "//zircon/system/ulib/inspector:__subpackages__",
+    ],
+    # GWP-ASan headers and their include directory are provided to GN consumers
+    # via `gwp-asan-common-config` in `public_configs`.
+    # @bazel2gn:skip
+    deps = [":gwp_asan_headers"],
+    alwayslink = True,
+)

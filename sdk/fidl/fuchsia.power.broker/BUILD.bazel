@@ -20,13 +20,12 @@ fidl_library(
     # This is still experimental, so restricting visibility for now.
     visibility = [
         "//examples/power:__subpackages__",
-        "//sdk:__pkg__",
-        "//sdk/fidl:__pkg__",
         "//sdk/fidl/fuchsia.driver.development:__subpackages__",
         "//sdk/fidl/fuchsia.driver.framework:__subpackages__",
         "//sdk/fidl/fuchsia.hardware.hrtimer:__subpackages__",
         "//sdk/fidl/fuchsia.hardware.network:__subpackages__",
         "//sdk/fidl/fuchsia.hardware.network.driver:__subpackages__",
+        "//sdk/fidl/fuchsia.net.tun:__subpackages__",
         "//sdk/fidl/fuchsia.power.cpu:__subpackages__",
         "//sdk/fidl/fuchsia.power.system:__subpackages__",
         "//sdk/fidl/fuchsia.power.topology.test:__subpackages__",

@@ -44,6 +44,7 @@ rustc_library("sync_io_client") {
   visibility = [
     ":*",
     "//src/starnix/kernel/core:*",
+    "//src/storage/fxfs/remote_volume:*",
   ]
   deps = [
     "//sdk/fidl/fuchsia.io:fuchsia.io_rust",

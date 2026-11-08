@@ -5,9 +5,10 @@
 use anyhow::{Context, Result};
 use cm_rust::{ComponentDecl, FidlIntoNative, ProgramDecl};
 use fidl::unpersist;
+use fidl_fuchsia_component_decl_common as fdecl;
+use fidl_fuchsia_data_common as fdata;
 use fuchsia_archive::Utf8Reader;
 use std::io::Cursor;
-use {fidl_fuchsia_component_decl as fdecl, fidl_fuchsia_data as fdata};
 
 pub type FarReader = Utf8Reader<Cursor<Vec<u8>>>;
 
@@ -37,11 +38,7 @@ pub fn is_driver_component(component: &ComponentDecl) -> bool {
 }
 
 pub fn pluralize(n: u64, noun: &str) -> String {
-    if n == 1 {
-        format!("{} {}", n, noun)
-    } else {
-        format!("{} {}s", n, noun)
-    }
+    if n == 1 { format!("{} {}", n, noun) } else { format!("{} {}s", n, noun) }
 }
 
 // Color codes taken from third_party/dart-pkg/pub/io/lib/src/ansi_code.dart (same as used by ffx

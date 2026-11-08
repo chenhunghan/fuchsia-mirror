@@ -59,8 +59,6 @@
                 "AllInetTests/SimpleTcpSocketTest.SetTCPWindowClampAboveHalfMinRcvBuf/*",
                 "AllInetTests/SimpleTcpSocketTest.SetTCPDeferAcceptNeg/*",
                 "AllInetTests/SimpleTcpSocketTest.SetTCPDeferAcceptGreaterThanZero/*",
-                "AllInetTests/SimpleTcpSocketTest.SetMaxSegFailsForInvalidMSSValues/*",
-                "AllInetTests/SimpleTcpSocketTest.SetMaxSeg/*",
                 "AllInetTests/SimpleTcpSocketTest.SetGetTCPCongestionShortReadBuffer/*",
                 "AllInetTests/SimpleTcpSocketTest.SetGetTCPCongestionLargeReadBuffer/*",
                 "AllInetTests/SimpleTcpSocketTest.SetCongestionControlSucceedsForSupported/*",
@@ -70,7 +68,6 @@
                 "AllInetTests/SimpleTcpSocketTest.NonBlockingConnectNoListenerPeek/*",
                 "AllInetTests/SimpleTcpSocketTest.NonBlockingConnectNoListener/*",
                 "AllInetTests/SimpleTcpSocketTest.NonBlockingConnect_PollWrNorm/*",
-                "AllInetTests/SimpleTcpSocketTest.MaxSegDefault/*",
                 "AllInetTests/SimpleTcpSocketTest.GetTCPDeferAcceptDefault/*",
                 "AllInetTests/SimpleTcpSocketTest.ConnectUnspecifiedAddress/*",
                 "AllInetTests/SimpleTcpSocketTest.CloseNonConnectedLingerOption/*",
@@ -113,6 +110,9 @@
 
                 // Fuchsia does not implement IP_MTU_DISCOVER socket option.
                 "AllInetTests/SimpleTcpSocketTest.SetUnsupportedPMTUDISC/*",
+
+                // TODO(https://fxbug.dev/507936011): Support TCP_CORK, TCP_DEFER_ACCEPT, and TCP_WINDOW_CLAMP.
+                "AllInetTests/TcpSocketTest.IntegerOptGetsockoptSmallBuffer/*",
             ],
         },
     ],

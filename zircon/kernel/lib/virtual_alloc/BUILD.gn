@@ -4,22 +4,10 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT
 
-import("//build/cpp/library_headers.gni")
 import("//zircon/kernel/kernel_rust_mod.gni")
 
-library_headers("virtual_alloc_headers") {
-  headers = [ "lib/virtual_alloc.h" ]
-  public_deps = [
-    "//zircon/system/ulib/fbl:headers",
-    "//zircon/system/ulib/zx",
-  ]
-}
-
 kernel_rust_mod("virtual_alloc-rs") {
-  sources = [
-    "virtual_alloc.rs",
-    "virtual_alloc_ffi.rs",
-  ]
+  sources = [ "virtual_alloc.rs" ]
   deps = [
     "//sdk/rust/zx-status",
     "//sdk/rust/zx-types",
@@ -36,8 +24,8 @@ kernel_rust_mod("virtual_alloc-rs") {
   ]
 }
 
-source_set("virtual_alloc") {
-  public_deps = [ ":virtual_alloc_headers" ]
+group("virtual_alloc") {
+  public_deps = [ ":virtual_alloc-rs" ]
 }
 
 group("tests") {
@@ -46,7 +34,6 @@ group("tests") {
 
 group("kernel-tests") {
   testonly = true
-  deps = [ "tests" ]
 }
 
 group("phys-tests") {

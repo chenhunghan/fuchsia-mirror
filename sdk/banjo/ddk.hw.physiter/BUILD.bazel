@@ -1,0 +1,19 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fidl_library(
+    name = "ddk.hw.physiter",
+    srcs = ["phys-iter.fidl"],
+    enable_banjo = True,
+    enable_rust = False,
+    excluded_checks = ["wrong-prefix-for-platform-source-library"],
+    visibility = [
+        "//sdk/banjo/fuchsia.hardware.usb.request:__pkg__",
+        "//src/devices/usb/lib/usb:__subpackages__",
+    ],
+)

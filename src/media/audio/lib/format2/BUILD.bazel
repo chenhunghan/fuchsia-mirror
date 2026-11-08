@@ -1,0 +1,93 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Export tests to the ancestor test_suite.
+test_suite(
+    name = "tests",
+    tests = [],  # Include all tests in the package.
+    visibility = ["//src/media:__pkg__"],
+)
+
+fx_cc_library(
+    name = "fixed",
+    hdrs = ["fixed.h"],
+    visibility = ["//src/media/audio:__subpackages__"],
+    deps = ["//zircon/system/ulib/ffl"],
+    alwayslink = True,
+)
+
+# TODO(https://fxbug.dev/570694755): Add a //build/config:fast-math build_flags() target.
+# @bazel2gn:raw_attribute:configs += ["//build/config:fast-math"]
+fx_cc_library(
+    name = "format2",
+    srcs = [
+        "format.cc",
+        "stream_converter.cc",
+    ],
+    hdrs = [
+        "channel_mapper.h",
+        "format.h",
+        "sample_converter.h",
+        "stream_converter.h",
+    ],
+    # Building without optimizations causes significant slowdowns for these
+    # components; the additional CPU load may lead to audio glitches on debug
+    # builds. These config settings enable the needed code optimization while
+    # maintaining other 'debug' aspects (e.g. DCHECK is still enabled).
+    build_flags = ["//build/config:optimize_speed"],
+    # Allow some of our loops to be vectorized by the compiler.
+    # These flags match //build/config:fast-math in GN.
+    # @bazel2gn:skip
+    copts = [
+        "-fno-math-errno",
+        "-fno-rounding-math",
+        "-funsafe-math-optimizations",
+        "-fno-finite-math-only",
+    ],
+    implementation_deps = ["//sdk/lib/syslog/cpp"],
+    visibility = ["//src/media/audio:__subpackages__"],
+    deps = [
+        ":fixed",
+        "//sdk/fidl/fuchsia.audio:fuchsia.audio_cpp",
+        "//sdk/fidl/fuchsia.hardware.audio:fuchsia.hardware.audio_cpp",
+        "//sdk/fidl/fuchsia.media:fuchsia.media_cpp",
+        "//sdk/fidl/fuchsia.mediastreams:fuchsia.mediastreams_cpp",
+        "//sdk/lib/fidl/cpp",
+        "//sdk/lib/fit-promise",
+        "//src/media/audio/lib/timeline",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "unittest-bin",
+    srcs = [
+        "channel_mapper_unittest.cc",
+        "format_unittest.cc",
+        "sample_converter_unittest.cc",
+        "stream_converter_unittest.cc",
+    ],
+    gn_output_name = "audio_lib_format2_unittests",
+    tags = ["manual"],
+    deps = [
+        ":format2",
+        "//src/lib/fxl/test:gtest_main",
+        # Bazel's gtest target bundles gmock, whereas GN defines gmock separately.
+        "@com_google_googletest//:gtest",  # @bazel2gn:path_overwrite://third_party/googletest:gmock
+    ],
+)
+
+fx_unittest_package(
+    name = "audio_lib_format2_unittests",
+    # TODO(https://fxbug.dev/570694755): Map fx_unittest_package parallel to GN test_specs in bazel2gn.
+    # @bazel2gn:skip
+    parallel = 4,
+    unit_tests = [":unittest-bin"],
+)

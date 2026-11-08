@@ -117,20 +117,11 @@ impl TestHarness {
         }
     }
 
-    /// Returns the abilities [`io_test::Symlink`] objects should have for the harness.
-    pub fn supported_symlink_abilities(&self) -> fio::Abilities {
-        let mut abilities = fio::Abilities::GET_ATTRIBUTES;
-        if self.supports_mutable_attrs() {
-            abilities |= fio::Abilities::UPDATE_ATTRIBUTES;
-        }
-        abilities
-    }
-
     /// Returns true if the harness supports at least one mutable attribute, false otherwise.
     ///
-    /// *NOTE*: To allow testing both the io1 SetAttrs and io2 UpdateAttributes methods, harnesses
-    /// that support mutable attributes must support [`fio::NodeAttributesQuery::CREATION_TIME`]
-    /// and [`fio::NodeAttributesQuery::MODIFICATION_TIME`].
+    /// *NOTE*: To allow testing the [`fio::NodeProxy::update_attributes`] method, harnesses that
+    /// support mutable attributes must support [`fio::NodeAttributesQuery::CREATION_TIME`] and
+    /// [`fio::NodeAttributesQuery::MODIFICATION_TIME`].
     pub fn supports_mutable_attrs(&self) -> bool {
         supports_mutable_attrs(&self.config)
     }
@@ -201,9 +192,9 @@ fn get_supported_symlink_rights(config: &io_test::HarnessConfig) -> fio::Rights 
 
 // Returns true if the harness supports at least one mutable attribute, false otherwise.
 //
-// *NOTE*: To allow testing both the io1 SetAttrs and io2 UpdateAttributes methods, harnesses
-// that support mutable attributes must support [`fio::NodeAttributesQuery::CREATION_TIME`]
-// and [`fio::NodeAttributesQuery::MODIFICATION_TIME`].
+// *NOTE*: To allow testing the io2 UpdateAttributes method, harnesses that support mutable
+// attributes must support [`fio::NodeAttributesQuery::CREATION_TIME`] and
+// [`fio::NodeAttributesQuery::MODIFICATION_TIME`].
 fn supports_mutable_attrs(config: &io_test::HarnessConfig) -> bool {
     if !config.supports_mutable_file && !config.supports_modify_directory {
         return false;

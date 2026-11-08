@@ -274,13 +274,27 @@ template("generate_svc-tests") {
                          ])
   not_needed([ "fidl_coverage" ])
 
-  fuchsia_package_with_test(target_name) {
-    subpackages = [
-      test_info.target_label,
-      # These tests do not currently use a test realm factory.
-    ]
-    test_component = "//sdk/ctf/tests/pkg/svc:svc-tests-root"
-    test_component_name = "svc-tests-root.cm"
+  # TODO(https://fxbug.dev/581980567): Remove once API level 30 is retired.
+  # F30's prebuilt libfdio calls fuchsia.io/Node.DeprecatedGetFlags in
+  # fcntl(F_GETFL) (invoked by musl fdopen() during zxtest enumeration).
+  if (defined(test_info.target_api_level) &&
+      test_info.target_api_level == "30") {
+    not_needed([
+                 "test_info",
+                 "fidl_coverage",
+               ])
+
+    group(target_name) {
+    }
+  } else {
+    fuchsia_package_with_test(target_name) {
+      subpackages = [
+        test_info.target_label,
+        # These tests do not currently use a test realm factory.
+      ]
+      test_component = "//sdk/ctf/tests/pkg/svc:svc-tests-root"
+      test_component_name = "svc-tests-root.cm"
+    }
   }
 }
 
@@ -292,17 +306,31 @@ template("generate_vulkan-loader-tests") {
                          ])
   not_needed([ "fidl_coverage" ])
 
-  fuchsia_package_with_test(target_name) {
-    subpackages = [
-      test_info.target_label,
-      # These tests do not currently use a test realm factory.
-    ]
-    test_component = "//sdk/ctf/tests/pkg/vulkan:vulkan-loader-test-root"
-    test_component_name = "vulkan-loader-test-root.cm"
-    test_specs = {
-      environments = vulkan_envs
-      log_settings = {
-        max_severity = "WARN"
+  # TODO(https://fxbug.dev/581980567): Remove once API level 30 is retired.
+  # F30's prebuilt libfdio calls fuchsia.io/Node.DeprecatedGetFlags in
+  # fcntl(F_GETFL) (invoked by musl fdopen() when loading ICD manifests).
+  if (defined(test_info.target_api_level) &&
+      test_info.target_api_level == "30") {
+    not_needed([
+                 "test_info",
+                 "fidl_coverage",
+               ])
+
+    group(target_name) {
+    }
+  } else {
+    fuchsia_package_with_test(target_name) {
+      subpackages = [
+        test_info.target_label,
+        # These tests do not currently use a test realm factory.
+      ]
+      test_component = "//sdk/ctf/tests/pkg/vulkan:vulkan-loader-test-root"
+      test_component_name = "vulkan-loader-test-root.cm"
+      test_specs = {
+        environments = vulkan_envs
+        log_settings = {
+          max_severity = "WARN"
+        }
       }
     }
   }

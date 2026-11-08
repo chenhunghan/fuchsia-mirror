@@ -27,6 +27,13 @@ static_assert(alignof(VmCowRange) == 8);
 static_assert(offsetof(VmCowRange, offset) == 0);
 static_assert(offsetof(VmCowRange, len) == 8);
 
+// Holds the result of VmObjectPaged::GetLookupCursorLocked, so that Rust can keep it and use the
+// cursor in it in place, as C++ callers do, instead of moving the cursor out of it. A struct and
+// not an alias, so that bindgen gives the Rust type the size and alignment of the result.
+struct VmCowPagesLookupCursorResult {
+  zx::result<VmCowPages::LookupCursor> result;
+};
+
 typedef zx_status_t (*cpp_vm_cow_pages_lookup_readable_fn)(void* ctx, uint64_t offset,
                                                            uint64_t paddr);
 
@@ -37,17 +44,11 @@ zx_status_t cpp_vm_cow_pages_replace_page(VmCowPages* cow, vm_page_t* before_pag
                                           AnonymousPageRequest* page_request);
 void* cpp_vm_cow_pages_get_ref_counted(const VmCowPages* cow);
 void cpp_vm_cow_pages_free(VmCowPages* cow);
-void cpp_vm_cow_pages_initialize_page_cache(uint32_t level);
-PmmOptDelayReuse cpp_vm_cow_pages_should_delay_reuse_on_free(const VmCowPages* cow);
 VmCowPages* cpp_vm_cow_pages_debug_get_parent(VmCowPages* cow);
 bool cpp_vm_cow_pages_dedup_zero_page(VmCowPages* cow, vm_page_t* page, uint64_t offset);
 zx_status_t cpp_vm_cow_pages_evict_loaned_page(VmCowPages* cow, vm_page_t* page, uint64_t offset);
-vm_page_t* cpp_vm_cow_pages_debug_get_page(const VmCowPages* cow, uint64_t offset);
-bool cpp_vm_cow_pages_debug_is_empty(const VmCowPages* cow, uint64_t offset);
-bool cpp_vm_cow_pages_debug_is_page(const VmCowPages* cow, uint64_t offset);
-bool cpp_vm_cow_pages_debug_is_high_memory_priority(const VmCowPages* cow);
 bool cpp_vm_cow_pages_lock_is_held(const VmCowPages* cow);
-DiscardableVmoTracker* cpp_vm_cow_pages_debug_get_discardable_tracker(const VmCowPages* cow);
+__PURE DiscardableVmoTracker* cpp_vm_cow_pages_discardable_tracker(const VmCowPages* cow);
 bool cpp_vm_cow_pages_reclaim_page(VmCowPages* cow, vm_page_t* page, uint64_t offset,
                                    VmCowPages::EvictionAction eviction_action,
                                    VmCompressor* compressor, VmCowReclaimSuccess* out_success,
@@ -56,9 +57,36 @@ zx_status_t cpp_vm_cow_pages_debug_lookup_readable(VmCowPages* cow, VmCowRange r
                                                    cpp_vm_cow_pages_lookup_readable_fn callback);
 
 void* cpp_vm_cow_pages_get_lock(const VmCowPages* cow);
-void cpp_vm_cow_pages_deferred_ops_construct(ffi::Uninitialized<VmCowPages::DeferredOps>* ops,
-                                             VmCowPages* cow);
-void cpp_vm_cow_pages_deferred_ops_destroy(VmCowPages::DeferredOps* ops);
+// Invoke the VmObject::LookupFunction / VmCowPages::DirtyRangeEnumerateFunction that
+// |lookup_fn| / |dirty_range_fn| point at.
+zx_status_t cpp_vm_cow_pages_call_lookup_fn(void* lookup_fn, uint64_t offset, paddr_t pa);
+zx_status_t cpp_vm_cow_pages_call_dirty_range_fn(void* dirty_range_fn, uint64_t range_offset,
+                                                 uint64_t range_len, bool range_is_zero);
+void cpp_vm_cow_pages_deferred_ops_init_page_source_lock(
+    ffi::Uninitialized<DeferredPageSourceLock>* lock_storage, VmCowPages* cow);
+void cpp_vm_cow_pages_deferred_ops_destroy_page_source_lock(DeferredPageSourceLock* lock_storage);
+void cpp_vm_cow_pages_range_change_update_cow_children(VmCowPages* cow, uint64_t offset,
+                                                       uint64_t len, VmObject::RangeChangeOp op);
+void cpp_vm_cow_pages_lookup_cursor_destroy(VmCowPagesLookupCursorResult* cursor);
+VmCowPages::LookupCursor* cpp_vm_cow_pages_lookup_cursor_result_value(
+    VmCowPagesLookupCursorResult* cursor);
+bool cpp_vm_cow_pages_lookup_cursor_lock_is_held(const VmCowPagesLookupCursorResult* cursor);
+void cpp_vm_cow_pages_lookup_cursor_disable_mark_accessed(VmCowPages::LookupCursor* cursor);
+zx_status_t cpp_vm_cow_pages_lookup_cursor_require_owned_page(
+    VmCowPages::LookupCursor* cursor, bool will_write, uint64_t max_request_pages,
+    VmCowPages::DeferredOps* deferred, MultiPageRequest* page_request, vm_page_t** out_page,
+    bool* out_writable);
+zx_status_t cpp_vm_cow_pages_lookup_cursor_require_page(VmCowPages::LookupCursor* cursor,
+                                                        bool will_write, uint64_t max_request_pages,
+                                                        VmCowPages::DeferredOps* deferred,
+                                                        MultiPageRequest* page_request,
+                                                        vm_page_t** out_page, bool* out_writable);
+vm_page_t* cpp_vm_cow_pages_lookup_cursor_maybe_page(VmCowPages::LookupCursor* cursor,
+                                                     bool will_write);
+uint64_t cpp_vm_cow_pages_lookup_cursor_skip_missing_pages(VmCowPages::LookupCursor* cursor);
+uint64_t cpp_vm_cow_pages_lookup_cursor_if_exist_pages(VmCowPages::LookupCursor* cursor,
+                                                       bool will_write, uint64_t max_pages,
+                                                       paddr_t* paddrs);
 zx_status_t cpp_vm_cow_pages_add_new_pages_locked(VmCowPages* cow, uint64_t start_offset,
                                                   VmPageDoublyLinkedList* pages,
                                                   VmCowPages::CanOverwriteSlot overwrite, bool zero,
@@ -71,15 +99,13 @@ zx_status_t cpp_vm_cow_pages_supply_pages_locked(VmCowPages* cow, VmCowRange ran
                                                  VmPageSpliceList* pages, SupplyOptions options,
                                                  VmCowPages::DeferredOps* deferred,
                                                  MultiPageRequest* page_request);
-uint32_t cpp_vm_cow_pages_debug_get_populated_slots_count(const VmCowPages* cow);
-bool cpp_vm_cow_pages_debug_is_parent_content(const VmCowPages* cow, uint64_t offset);
 bool cpp_vm_cow_pages_can_borrow(const VmCowPages* cow);
 bool cpp_vm_cow_pages_can_evict(const VmCowPages* cow);
-bool cpp_vm_cow_pages_is_discardable(const VmCowPages* cow);
 VmCowPages* cpp_vm_cow_pages_upgrade_from_raw(VmCowPages* cow);
-void cpp_vm_cow_pages_debug_get_discardable_page_counts(
-    const VmCowPages* cow, VmCowPages::DiscardablePageCounts* out_counts);
 void cpp_vm_cow_pages_debug_dump_reclaim_counters();
+__PURE PageSourceType cpp_vm_cow_pages_page_source_type(const VmCowPages* cow);
+__PURE PageSource* cpp_vm_cow_pages_page_source(const VmCowPages* cow);
+__PURE VmObjectPaged* cpp_vm_cow_pages_get_paged_backlink_locked(const VmCowPages* cow);
 
 void cpp_priority_changer_construct(ffi::Uninitialized<PriorityChanger>* out, VmCowPages* cow,
                                     int64_t delta);

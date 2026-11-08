@@ -38,6 +38,20 @@ fx_test_environment(
     visibility = ["//visibility:public"],
 )
 
+# An AEMU environment with external internet access. Only AEMU on x64 is
+# supported and tested so far. Internet access is strictly opt-in, so this isn't
+# public: new users are reviewed here.
+fx_test_environment(
+    name = "aemu_internet_env",
+    allow_internet = True,
+    dimensions = {"device_type": device_types.aemu},
+    emulator = {"name": "internet"},
+    visibility = [
+        "//src/tests/emulator_internet:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
+)
+
 fx_test_environment(
     name = "astro_env",
     dimensions = {"device_type": device_types.astro},
@@ -45,8 +59,27 @@ fx_test_environment(
 )
 
 fx_test_environment(
-    name = "crosvm_env",
+    name = "crosvm_arm64_env",
+    dimensions = {
+        "device_type": device_types.crosvm,
+        "host_device_type": host_device_types.gcp_c4a_highmem_96_bm,
+    },
+    visibility = ["//zircon/kernel:__subpackages__"],
+)
+
+fx_test_environment(
+    name = "crosvm_x64_env",
     dimensions = {"device_type": device_types.crosvm},
+    visibility = ["//zircon/kernel:__subpackages__"],
+)
+
+alias(
+    name = "crosvm_env",
+    actual = select({
+        "//build/bazel/platforms:is_fuchsia_x64": ":crosvm_x64_env",
+        "//build/bazel/platforms:is_fuchsia_arm64": ":crosvm_arm64_env",
+        "//conditions:default": ":crosvm_x64_env",
+    }),
     visibility = ["//zircon/kernel:__subpackages__"],
 )
 
@@ -273,20 +306,6 @@ fx_test_environment(
     name = "iris_env",
     dimensions = {"device_type": device_types.iris},
     visibility = ["//visibility:public"],
-)
-
-# Iris devices that are hosted by a LattePanda Sigma "Fuchsia cell". Use this
-# instead of `:iris_env` for tests that require a cell testbed.
-fx_test_environment(
-    name = "iris_cell_env",
-    dimensions = {
-        "device_type": device_types.iris,
-        "host_device_type": host_device_types.lattepanda_sigma_cell,
-    },
-    visibility = [
-        "//src/tests:__subpackages__",
-        "//vendor/google:__subpackages__",
-    ],
 )
 
 fx_test_environment(

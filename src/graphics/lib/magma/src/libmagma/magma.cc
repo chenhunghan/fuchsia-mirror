@@ -51,7 +51,7 @@ class IdGenerator {
 
 IdGenerator s_semaphore_id_generator;
 
-void set_buffer_local_id(magma::PlatformBuffer* platform_buffer) {
+uint64_t generate_buffer_local_id() {
   // Local id must be locally unique so a buffer can be imported more than once.
   // It should also be globally unique to satisfy perfetto trace flow events, and
   // trace events in magma_connection)execute_command use local id because koid
@@ -59,12 +59,15 @@ void set_buffer_local_id(magma::PlatformBuffer* platform_buffer) {
   // TODO(https://fxbug.dev/458808956) - revert to the simple ID generator.
 #if FUCHSIA_API_LEVEL_AT_LEAST(28)
   // Like TRACE_RANDOM_ID() but usable when tracing is disabled.
-  uint64_t id = trace_time_based_id(thrd_get_zx_handle(thrd_current()));
+  return trace_time_based_id(thrd_get_zx_handle(thrd_current()));
 #else
   static IdGenerator s_buffer_id_generator;
-  uint64_t id = s_buffer_id_generator.get();
+  return s_buffer_id_generator.get();
 #endif
-  platform_buffer->set_local_id(id);
+}
+
+void set_buffer_local_id(magma::PlatformBuffer* platform_buffer) {
+  platform_buffer->set_local_id(generate_buffer_local_id());
 }
 
 }  // namespace
@@ -161,6 +164,48 @@ magma_status_t magma_connection_create_buffer(magma_connection_t connection, uin
           ->ImportObject(handle, /*flags=*/0, magma::PlatformObject::BUFFER, platform_buffer->id());
   if (result != MAGMA_STATUS_OK)
     return DRET_MSG(result, "ImportObject failed");
+
+  *size_out = platform_buffer->size();
+  *buffer_id_out = platform_buffer->id();
+  *buffer_out = reinterpret_cast<magma_buffer_t>(platform_buffer.release());  // Ownership passed
+
+  return MAGMA_STATUS_OK;
+}
+
+magma_status_t magma_connection_create_buffer2(magma_connection_t connection, uint64_t size,
+                                               magma_buffer_flags_t flags, uint64_t* size_out,
+                                               magma_buffer_t* buffer_out,
+                                               magma_buffer_id_t* buffer_id_out) {
+  if (!(flags & MAGMA_BUFFER_FLAG_REMOTE_ALLOCATION)) {
+    return magma_connection_create_buffer(connection, size, size_out, buffer_out, buffer_id_out);
+  }
+
+  // The buffer id is chosen locally so the system driver can import the buffer under it. If the
+  // id is already in use (MAGMA_STATUS_ALREADY_EXISTS), choose another one and try again.
+  // TODO(b/582360278): Remove the retries once buffer ids are unique.
+  constexpr int kMaxAttempts = 4;
+  uint64_t buffer_id;
+  uint32_t handle;
+  magma_status_t result = MAGMA_STATUS_ALREADY_EXISTS;
+  for (int attempt = 0; attempt < kMaxAttempts && result == MAGMA_STATUS_ALREADY_EXISTS;
+       attempt++) {
+    buffer_id = generate_buffer_local_id();
+    result =
+        magma::PlatformConnectionClient::cast(connection)
+            ->CreateBuffer(size, flags & ~MAGMA_BUFFER_FLAG_REMOTE_ALLOCATION, buffer_id, &handle);
+  }
+  if (result != MAGMA_STATUS_OK)
+    return DRET_MSG(result, "CreateBuffer failed");
+
+  auto platform_buffer = magma::PlatformBuffer::Import(handle);
+  if (!platform_buffer) {
+    // The system driver has already imported the buffer, so release it.
+    magma::PlatformConnectionClient::cast(connection)
+        ->ReleaseObject(buffer_id, magma::PlatformObject::BUFFER);
+    return DRET_MSG(MAGMA_STATUS_INTERNAL_ERROR, "PlatformBuffer::Import failed");
+  }
+
+  platform_buffer->set_local_id(buffer_id);
 
   *size_out = platform_buffer->size();
   *buffer_id_out = platform_buffer->id();

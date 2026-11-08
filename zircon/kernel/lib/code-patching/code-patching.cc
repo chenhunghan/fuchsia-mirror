@@ -11,7 +11,7 @@
 
 #include <ktl/string_view.h>
 #include <ktl/utility.h>
-#include <phys/main.h>
+#include <phys/runtime/main.h>
 
 #include <ktl/enforce.h>
 

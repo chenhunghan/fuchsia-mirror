@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 use argh::FromArgs;
-use ser::{CasesToRun, Expectation, Include, UnmergedExpectation, ALL_CASES_LABEL};
+use ser::{ALL_CASES_LABEL, CasesToRun, Expectation, Include, UnmergedExpectation};
 use std::str::FromStr;
 
 #[derive(FromArgs)]
@@ -15,7 +15,11 @@ struct PreprocessArgs {
 
     /// location to write depfile
     #[argh(option)]
-    depfile: std::path::PathBuf,
+    depfile: Option<std::path::PathBuf>,
+
+    /// path to the Fuchsia workspace root (relative to working directory)
+    #[argh(option, default = "std::path::PathBuf::from(\"../..\")")]
+    fuchsia_dir: std::path::PathBuf,
 
     /// location to write merged expectations file
     #[argh(option)]
@@ -41,6 +45,7 @@ fn preprocess(
     PreprocessArgs {
         root_expectations_file,
         depfile,
+        fuchsia_dir,
         preprocessed_expectations_file,
         cases_to_run,
     }: PreprocessArgs,
@@ -52,6 +57,7 @@ fn preprocess(
             let mut expectations = Vec::new();
             push_expectations(
                 root_build_dir,
+                &fuchsia_dir,
                 &mut expectations,
                 &mut discovered_deps,
                 &mut ancestors,
@@ -76,19 +82,21 @@ fn preprocess(
     // expectations file rather than in GN directly), we must write a depfile
     // so that GN can track our dependencies.
     // See `fx gn help depfile` for more information.
-    std::fs::write(
-        &depfile,
-        format!(
-            "{}: {}",
-            preprocessed_expectations_file.display(),
-            discovered_deps
-                .into_iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<String>>()
-                .join(" "),
-        ),
-    )
-    .expect("failed to write depfile");
+    if let Some(depfile) = depfile {
+        std::fs::write(
+            &depfile,
+            format!(
+                "{}: {}",
+                preprocessed_expectations_file.display(),
+                discovered_deps
+                    .into_iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<String>>()
+                    .join(" "),
+            ),
+        )
+        .expect("failed to write depfile");
+    }
 }
 
 fn run_final_validation(merged_expectations: &ser::Expectations) {
@@ -108,6 +116,7 @@ fn run_final_validation(merged_expectations: &ser::Expectations) {
 
 fn push_expectations(
     root_build_dir: &std::path::Path,
+    fuchsia_dir: &std::path::Path,
     expectations: &mut Vec<Expectation>,
     discovered_deps: &mut std::collections::HashSet<std::path::PathBuf>,
     ancestors: &mut std::collections::HashSet<std::path::PathBuf>,
@@ -130,7 +139,7 @@ fn push_expectations(
                         // Got absolute path (or rather, path relative to $FUCHSIA_DIR)
                         std::path::PathBuf::from_iter([
                             root_build_dir,
-                            std::path::Path::new("../.."),
+                            fuchsia_dir,
                             std::path::Path::new(fuchsia_dir_relative_path),
                         ])
                     } else {
@@ -146,6 +155,7 @@ fn push_expectations(
                 );
                 push_expectations(
                     root_build_dir,
+                    fuchsia_dir,
                     expectations,
                     discovered_deps,
                     &mut ancestors,
@@ -158,7 +168,7 @@ fn push_expectations(
 
 #[cfg(test)]
 mod tests {
-    use crate::{preprocess, PreprocessArgs};
+    use crate::{PreprocessArgs, preprocess};
     use std::str::FromStr as _;
 
     struct TestFile {
@@ -193,7 +203,8 @@ mod tests {
                     root_build_dir.clone(),
                 )
                 .unwrap(),
-                depfile: root_build_dir.join(std::path::Path::new("testdepfile.d")),
+                depfile: Some(root_build_dir.join(std::path::Path::new("testdepfile.d"))),
+                fuchsia_dir: std::path::PathBuf::from("../.."),
                 preprocessed_expectations_file: actual_filepath.clone(),
                 cases_to_run: crate::ALL_CASES_LABEL.to_string(),
             },
@@ -392,5 +403,64 @@ mod tests {
             ],
             serde_json::json!("unused"),
         )
+    }
+
+    #[test]
+    fn custom_fuchsia_dir_without_depfile() {
+        const ROOT_CONTENTS: &str = r#"
+{
+    actions: [
+        {
+            include: "//an/absolute/path.json5",
+        },
+    ],
+}
+"#;
+        const INCLUDED_CONTENTS: &str = r#"
+{
+    actions: [
+        {
+            type: "expect_pass",
+            matchers: [ "some_case" ],
+        },
+    ],
+}
+"#;
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let execroot = temp_dir.path();
+        let root_path = execroot.join("place/in/tree/root.json5");
+        let included_path = execroot.join("an/absolute/path.json5");
+        std::fs::create_dir_all(root_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(included_path.parent().unwrap()).unwrap();
+        std::fs::write(&root_path, ROOT_CONTENTS).unwrap();
+        std::fs::write(&included_path, INCLUDED_CONTENTS).unwrap();
+
+        let actual_filepath = execroot.join("actual_preprocessed_file.json");
+        preprocess(
+            execroot,
+            PreprocessArgs {
+                root_expectations_file: "place/in/tree/root.json5".into(),
+                depfile: None,
+                fuchsia_dir: std::path::PathBuf::from("."),
+                preprocessed_expectations_file: actual_filepath.clone(),
+                cases_to_run: crate::ALL_CASES_LABEL.to_string(),
+            },
+        );
+
+        let actual_contents = std::fs::read_to_string(&actual_filepath).unwrap();
+        pretty_assertions::assert_eq!(
+            serde_json::Value::from_str(&actual_contents).unwrap(),
+            serde_json::json!({
+                "actions": [
+                    {
+                        "type": "expect_pass",
+                        "matchers": [ "some_case" ],
+                    },
+                ],
+                "cases_to_run": {
+                    "type": "all",
+                }
+            })
+        );
     }
 }

@@ -29,7 +29,6 @@ fuchsia_package("examples_fidl_keyvaluestore_supportexports_cpp") {
   deps = [
     ":client",
     ":server",
-    "//examples/fidl/new/key_value_store/support_exports:client_config_values",
   ]
 }
 
@@ -51,7 +50,6 @@ fuchsia_test_package(
   deps = [
     ":client",
     ":server",
-    "//examples/fidl/new/key_value_store/support_exports:client_config_values",
     "//examples/fidl/new/key_value_store/support_exports/realm",
   ]
   test_components = [ ":test" ]

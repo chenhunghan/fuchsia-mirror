@@ -15,7 +15,6 @@ rustc_binary("bin") {
   with_unit_tests = true
   edition = "2024"
   deps = [
-    "//build/validate:non_production_tag",
     "//src/security/lib/tpm:tpm-device",
     "//third_party/rust_crates:anyhow",
   ]

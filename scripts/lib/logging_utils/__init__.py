@@ -3,8 +3,6 @@
 # found in the LICENSE file.
 """Generic logging utilities with ANSI color support."""
 
-from __future__ import annotations
-
 import logging
 import os
 import re
@@ -13,12 +11,17 @@ from typing import Callable
 
 from colorama import Fore, Style
 
+# NOTE(jayzhuang): We work around an incompatibility between Pyrefly and
+# //third_party/colorama. colorama ships without type stubs and defines
+# AnsiCodes attributes (Fore.*, Style.*) as int class constants before mutating
+# them into str escape sequences in __init__, so Pyrefly infers int without
+# f-string formatting.
 _LEVEL_COLORS: dict[int, str] = {
-    logging.DEBUG: Fore.LIGHTBLACK_EX,
-    logging.INFO: Fore.GREEN,
-    logging.WARNING: Fore.YELLOW,
-    logging.ERROR: Fore.RED + Style.BRIGHT,
-    logging.CRITICAL: Fore.RED + Style.BRIGHT,
+    logging.DEBUG: f"{Fore.LIGHTBLACK_EX}",
+    logging.INFO: f"{Fore.GREEN}",
+    logging.WARNING: f"{Fore.YELLOW}",
+    logging.ERROR: f"{Fore.RED}{Style.BRIGHT}",
+    logging.CRITICAL: f"{Fore.RED}{Style.BRIGHT}",
 }
 
 _PREFIX_RE: re.Pattern[str] = re.compile(r"^(\[[^\]\n]+\])")

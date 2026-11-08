@@ -62,10 +62,10 @@ fn reset_requested_opps_for_test() {
     }
 }
 
-ksync::declare_singleton_lock!(Domain0Lock, ::ksync::RawSpinlock);
-ksync::declare_singleton_lock!(Domain1Lock, ::ksync::RawSpinlock);
-ksync::declare_singleton_lock!(Domain2Lock, ::ksync::RawSpinlock);
-ksync::declare_singleton_lock!(Domain3Lock, ::ksync::RawSpinlock);
+crate::ksync_kernel::declare_singleton_spinlock!(Domain0Lock);
+crate::ksync_kernel::declare_singleton_spinlock!(Domain1Lock);
+crate::ksync_kernel::declare_singleton_spinlock!(Domain2Lock);
+crate::ksync_kernel::declare_singleton_spinlock!(Domain3Lock);
 
 /// Acquires the spinlock corresponding to `domain_index` and executes `f`.
 fn with_domain_lock<R>(
@@ -537,7 +537,10 @@ pub unsafe extern "C" fn iris_power_init(
         },
     ];
 
-    if let Err(status) = power_management_register_domains(&domain_configs) {
+    // SAFETY: Each `PowerDomainConfigFfi` in `domain_configs` points to a valid local slice of
+    // `ProcessorPowerLevelFfi` entries whose `diagnostic_name` pointers come from NUL-terminated
+    // string literals.
+    if let Err(status) = unsafe { power_management_register_domains(&domain_configs) } {
         dprintf!(CRITICAL, "POWER: Failed to register iris power domains: {}\n", status.into_raw());
         return;
     }

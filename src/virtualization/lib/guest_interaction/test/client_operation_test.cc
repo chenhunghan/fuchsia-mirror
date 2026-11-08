@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <fidl/fuchsia.virtualization.guest.interaction/cpp/fidl.h>
 #include <lib/syslog/cpp/macros.h>
 #include <unistd.h>
 
@@ -546,26 +547,35 @@ TEST_F(AsyncEndToEndTest, PutGrpcFailure) {
 
 TEST_F(AsyncEndToEndTest, Client_Exec_ImmediateFailure) {
   // Create a service that can accept incoming Exec requests.
-  bool operation_status_done = false;
-  bool termination_status_done = false;
   grpc::ServerContext srv_ctx;
   grpc::ServerAsyncReaderWriter<ExecResponse, ExecRequest> rw(&srv_ctx);
 
   service_->RequestExec(&srv_ctx, &rw, server_cq_.get(), server_cq_.get(), &srv_ctx);
 
-  fuchsia::virtualization::guest::interaction::CommandListenerPtr listener;
-  listener.events().OnStarted = [&operation_status_done](zx_status_t status) {
-    operation_status_done = true;
-    EXPECT_STATUS(status, ZX_ERR_INTERNAL);
-    operation_status_done = status;
-  };
-  listener.events().OnTerminated = [&termination_status_done](zx_status_t status,
-                                                              int32_t exit_code) {
-    EXPECT_STATUS(status, ZX_ERR_PEER_CLOSED);
-    termination_status_done = true;
-  };
+  struct ListenerHandler
+      : public fidl::AsyncEventHandler<fuchsia_virtualization_guest_interaction::CommandListener> {
+    void OnStarted(
+        fidl::Event<fuchsia_virtualization_guest_interaction::CommandListener::OnStarted>& event)
+        override {
+      operation_status_done = true;
+      EXPECT_STATUS(event.status(), ZX_ERR_INTERNAL);
+    }
+    void OnTerminated(
+        fidl::Event<fuchsia_virtualization_guest_interaction::CommandListener::OnTerminated>& event)
+        override {
+      EXPECT_STATUS(event.status(), ZX_ERR_PEER_CLOSED);
+      termination_status_done = true;
+    }
+    bool operation_status_done = false;
+    bool termination_status_done = false;
+  } event_handler;
+
+  auto [listener_client, listener_server] =
+      fidl::Endpoints<fuchsia_virtualization_guest_interaction::CommandListener>::Create();
+  fidl::Client<fuchsia_virtualization_guest_interaction::CommandListener> listener(
+      std::move(listener_client), loop_.dispatcher(), &event_handler);
   std::unique_ptr<ListenerInterface> listener_interface =
-      std::make_unique<ListenerInterface>(listener.NewRequest(), loop_.dispatcher());
+      std::make_unique<ListenerInterface>(loop_.dispatcher(), std::move(listener_server));
 
   // Create components required to perform a client Exec request.
   std::string test_argv = "echo hello";
@@ -583,8 +593,8 @@ TEST_F(AsyncEndToEndTest, Client_Exec_ImmediateFailure) {
   client_call_data->Proceed(false);
 
   // The client sets the operation status in the callback.
-  RunLoopUntil([&operation_status_done, &termination_status_done]() {
-    return operation_status_done && termination_status_done;
+  RunLoopUntil([&event_handler]() {
+    return event_handler.operation_status_done && event_handler.termination_status_done;
   });
 }
 
@@ -649,19 +659,26 @@ TEST_F(AsyncEndToEndTest, Client_ExecWrite_Test) {
 }
 
 TEST_F(AsyncEndToEndTest, Client_ExecRead_Test) {
-  constexpr int32_t kReturnCode = 1234;
+  static constexpr int32_t kReturnCode = 1234;
 
-  // Create a service that can accept incoming Exec requests.
-  bool operation_status_done = false;
-  fuchsia::virtualization::guest::interaction::CommandListenerPtr listener;
-  listener.events().OnTerminated = [&operation_status_done, kReturnCode](zx_status_t status,
-                                                                         int32_t ret_code) {
-    operation_status_done = true;
-    EXPECT_OK(status);
-    EXPECT_EQ(ret_code, kReturnCode);
-  };
+  struct ListenerHandler
+      : public fidl::AsyncEventHandler<fuchsia_virtualization_guest_interaction::CommandListener> {
+    void OnTerminated(
+        fidl::Event<fuchsia_virtualization_guest_interaction::CommandListener::OnTerminated>& event)
+        override {
+      operation_status_done = true;
+      EXPECT_OK(event.status());
+      EXPECT_EQ(event.return_code(), kReturnCode);
+    }
+    bool operation_status_done = false;
+  } event_handler;
+
+  auto [listener_client, listener_server] =
+      fidl::Endpoints<fuchsia_virtualization_guest_interaction::CommandListener>::Create();
+  fidl::Client<fuchsia_virtualization_guest_interaction::CommandListener> listener(
+      std::move(listener_client), loop_.dispatcher(), &event_handler);
   std::unique_ptr<ListenerInterface> listener_interface =
-      std::make_unique<ListenerInterface>(listener.NewRequest(), loop_.dispatcher());
+      std::make_unique<ListenerInterface>(loop_.dispatcher(), std::move(listener_server));
 
   grpc::ServerContext srv_ctx;
   std::shared_ptr<grpc::ClientContext> cli_ctx = std::make_shared<grpc::ClientContext>();
@@ -704,5 +721,5 @@ TEST_F(AsyncEndToEndTest, Client_ExecRead_Test) {
   client_call_data->Proceed(true);
 
   // The client sets the operation status in the callback.
-  RunLoopUntil([&operation_status_done]() { return operation_status_done; });
+  RunLoopUntil([&event_handler]() { return event_handler.operation_status_done; });
 }

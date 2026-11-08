@@ -1,0 +1,117 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    binary_name = "fake_fonts_bin",
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        "//sdk/fidl/fuchsia.fonts.experimental:fuchsia.fonts.experimental_rust",
+        "//sdk/fidl/fuchsia.fonts:fuchsia.fonts_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "fake_fonts_bin",
+)
+
+fx_component_manifest(
+    name = "fake-fonts-cm_manifest",
+    component_name = "fake_fonts",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/fake_fonts.cml",
+)
+
+fx_component(
+    name = "fake-fonts-cm",
+    compiled_manifest = ":fake-fonts-cm_manifest",
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "pkg",
+    package_name = "fake-fonts",
+    components = [":fake-fonts-cm"],
+)
+
+rustc_test(
+    name = "test-bin",
+    srcs = ["src/test.rs"],
+    crate_name = "fake_fonts_test_bin",
+    crate_root = "src/test.rs",
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.fonts.experimental:fuchsia.fonts.experimental_rust",
+        "//sdk/fidl/fuchsia.fonts:fuchsia.fonts_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:assert_matches",
+    ],
+)
+
+fx_packaged_binary(
+    name = "test-bin_packaged",
+    testonly = True,
+    binary = ":test-bin",
+    binary_name = "fake_fonts_test_bin",
+)
+
+fx_component_manifest(
+    name = "fake-fonts-test-cm_manifest",
+    testonly = True,
+    component_name = "fake_fonts_test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/fake_fonts_test.cml",
+)
+
+fx_test_component(
+    name = "fake-fonts-test-cm",
+    compiled_manifest = ":fake-fonts-test-cm_manifest",
+    deps = [":test-bin_packaged"],
+)
+
+fx_package(
+    name = "test-pkg",
+    testonly = True,
+    components = [":fake-fonts-cm"],
+    test_components = [":fake-fonts-test-cm"],
+)
+
+fx_test(
+    name = "test-pkg_test",
+    package = ":test-pkg",
+)

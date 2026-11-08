@@ -34,4 +34,7 @@ test("unittest-bin") {
 
 fuchsia_unittest_package("audio_drivers_lib_inspect_unittests") {
   deps = [ ":unittest-bin" ]
+  test_specs = {
+    parallel = 4
+  }
 }

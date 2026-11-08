@@ -1,0 +1,43 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Keep starnix-usbfs-tests in GN because the usb-virtual-bus integration test
+# depends on DriverTestRealm and USB drivers that are not yet migrated to Bazel.
+# TODO(https://fxbug.dev/42059075): Re-enable starnix in these environments.
+# @bazel2gn:raw_attribute:with_unit_tests = true
+# @bazel2gn:raw_attribute:exclude_toolchain_tags = [ "asan", "hwasan" ]
+# @bazel2gn:raw_attribute:test_deps = [ "//sdk/fidl/fuchsia.driver.test:fuchsia.driver.test_rust", "//sdk/fidl/fuchsia.hardware.usb.peripheral:fuchsia.hardware.usb.peripheral_rust", "//sdk/fidl/fuchsia.hardware.usb.virtual.bus:fuchsia.hardware.usb.virtual.bus_rust", "//sdk/lib/device-watcher/rust", "//sdk/lib/driver_test_realm/realm_builder/rust", "//src/devices/usb/drivers/usb-virtual-bus/tests:fuchsia.hardware.usb.virtualbustest_rust", "//src/lib/fuchsia", "//src/lib/fuchsia-async", "//src/lib/fuchsia-component-test" ]
+rustc_library(
+    name = "usbfs",
+    srcs = [
+        "device.rs",
+        "lib.rs",
+        "sysfs.rs",
+    ],
+    crate_name = "starnix_modules_usbfs",
+    crate_root = "lib.rs",
+    edition = "2024",
+    lint_config = "//src/starnix/build:kernel_library_config",
+    visibility = ["//src/starnix/modules:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.usb.descriptor:fuchsia.hardware.usb.descriptor_rust",
+        "//sdk/fidl/fuchsia.hardware.usb.endpoint:fuchsia.hardware.usb.endpoint_rust",
+        "//sdk/fidl/fuchsia.hardware.usb:fuchsia.hardware.usb_rust",
+        "//sdk/fidl/fuchsia.hardware.usb.request:fuchsia.hardware.usb.request_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-component",
+        "//src/starnix/kernel/core",
+        "//src/starnix/lib/starnix_logging",
+        "//src/starnix/lib/starnix_sync",
+        "//src/starnix/lib/starnix_syscalls",
+        "//src/starnix/lib/starnix_uapi",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)

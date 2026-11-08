@@ -403,6 +403,7 @@ struct TestEnvBuilder<BlobfsAndSystemImageFut> {
         Box<dyn FnOnce(blobfs_ramdisk::Implementation) -> BlobfsAndSystemImageFut>,
     require_system_image: bool,
     enable_upgradable_packages: bool,
+    post_commit_gc_earliest_boot_seconds: Option<i32>,
     blob_fetch_concurrency_limit: Option<u16>,
     blob_network_header_timeout_seconds: Option<u32>,
     blob_network_body_timeout_seconds: Option<u32>,
@@ -430,6 +431,7 @@ impl TestEnvBuilder<BoxFuture<'static, (BlobfsRamdisk, Option<Hash>)>> {
             pkg_authority: None,
             require_system_image: true,
             enable_upgradable_packages: false,
+            post_commit_gc_earliest_boot_seconds: None,
             blob_fetch_concurrency_limit: None,
             blob_network_header_timeout_seconds: None,
             blob_network_body_timeout_seconds: None,
@@ -470,6 +472,7 @@ where
             pkg_authority: self.pkg_authority,
             require_system_image: self.require_system_image,
             enable_upgradable_packages: self.enable_upgradable_packages,
+            post_commit_gc_earliest_boot_seconds: self.post_commit_gc_earliest_boot_seconds,
             blob_fetch_concurrency_limit: self.blob_fetch_concurrency_limit,
             blob_network_header_timeout_seconds: self.blob_network_header_timeout_seconds,
             blob_network_body_timeout_seconds: self.blob_network_body_timeout_seconds,
@@ -512,6 +515,7 @@ where
             pkg_authority: self.pkg_authority,
             require_system_image: self.require_system_image,
             enable_upgradable_packages: self.enable_upgradable_packages,
+            post_commit_gc_earliest_boot_seconds: self.post_commit_gc_earliest_boot_seconds,
             blob_fetch_concurrency_limit: self.blob_fetch_concurrency_limit,
             blob_network_header_timeout_seconds: self.blob_network_header_timeout_seconds,
             blob_network_body_timeout_seconds: self.blob_network_body_timeout_seconds,
@@ -538,6 +542,11 @@ where
     fn enable_upgradable_packages(self) -> Self {
         assert_eq!(self.enable_upgradable_packages, false);
         Self { enable_upgradable_packages: true, ..self }
+    }
+
+    fn post_commit_gc_earliest_boot_seconds(self, seconds: i32) -> Self {
+        assert_eq!(self.post_commit_gc_earliest_boot_seconds, None);
+        Self { post_commit_gc_earliest_boot_seconds: Some(seconds), ..self }
     }
 
     fn blob_fetch_concurrency_limit(self, limit: u16) -> Self {
@@ -748,6 +757,10 @@ where
             ("fuchsia.pkgcache.AllPackagesExecutable", false.into()),
             ("fuchsia.pkgcache.RequireSystemImage", self.require_system_image.into()),
             ("fuchsia.pkgcache.EnableUpgradablePackages", self.enable_upgradable_packages.into()),
+            (
+                "fuchsia.pkgcache.PostCommitGcEarliestBootSeconds",
+                self.post_commit_gc_earliest_boot_seconds.unwrap_or(-1).into(),
+            ),
             (
                 "fuchsia.pkgcache.BlobFetchConcurrencyLimit",
                 self.blob_fetch_concurrency_limit.unwrap_or(2).into(),

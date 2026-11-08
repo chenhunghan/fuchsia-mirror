@@ -18,8 +18,9 @@
 #include <rapidjson/document.h>
 #include <rapidjson/prettywriter.h>
 #include <rapidjson/stringbuffer.h>
-#include <re2/re2.h>
 #include <zxtest/zxtest.h>
+
+#include "re2/re2.h"
 
 namespace {
 

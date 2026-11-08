@@ -1,0 +1,141 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/idk:idk_ffx_tool.bzl", "idk_ffx_tool")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "ffx_assembly_args",
+    srcs = ["src/args.rs"],
+    crate_root = "src/args.rs",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        "//src/lib/assembly/cli_args",
+        "//src/lib/assembly/images_config",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:camino",
+    ],
+)
+
+rustc_library(
+    name = "ffx_assembly",
+    srcs = [
+        "src/lib.rs",
+        "src/operations.rs",
+        "src/operations/create_update.rs",
+        "src/operations/size_check.rs",
+        "src/operations/size_check/breakdown.rs",
+        "src/operations/size_check/common.rs",
+        "src/operations/size_check/diff.rs",
+        "src/operations/size_check/package.rs",
+        "src/operations/size_check/product.rs",
+        "src/operations/size_check/visualization.rs",
+        "src/subpackage_blobs_package.rs",
+    ],
+    compile_data = [
+        # scripts/third_party/d3_v3 has no BUILD.bazel file, so Bazel uses
+        # root-package filegroup targets without a slash.
+        "//:d3_v3_js",  # @bazel2gn:path_overwrite://scripts/third_party/d3_v3/d3.js
+        # scripts/third_party/d3_v3 has no BUILD.bazel file, so Bazel uses
+        # root-package filegroup targets without a slash.
+        "//:d3_v3_license",  # @bazel2gn:path_overwrite://scripts/third_party/d3_v3/LICENSE
+        "src/operations/size_check/D3BlobTreeMap.js",
+        "src/operations/size_check/index.html",
+    ],
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        ":ffx_assembly_args",
+        "//src/developer/ffx/config:lib",
+        "//src/developer/ffx/lib/errors:lib",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/developer/ffx/lib/pbms:lib",
+        "//src/developer/ffx/lib/writer:lib",
+        "//src/lib/assembly/api",
+        "//src/lib/assembly/assembled_system",
+        "//src/lib/assembly/blob_size",
+        "//src/lib/assembly/components",
+        "//src/lib/assembly/container",
+        "//src/lib/assembly/partitions_config",
+        "//src/lib/assembly/sdk",
+        "//src/lib/assembly/subpackage_blobs_package",
+        "//src/lib/assembly/tool",
+        "//src/lib/assembly/update_package",
+        "//src/lib/assembly/update_packages_manifest",
+        "//src/lib/assembly/util",
+        "//src/lib/fuchsia-url",
+        "//src/lib/gcs",
+        "//src/lib/structured_ui",
+        "//src/sys/pkg/lib/epoch",
+        "//src/sys/pkg/lib/fuchsia-hash",
+        "//src/sys/pkg/lib/fuchsia-merkle",
+        "//src/sys/pkg/lib/fuchsia-pkg",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:camino",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:schemars",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:url",
+    ],
+)
+
+# LINT.IfChange
+# We avoid instrumenting assembly for certain builds as this negatively
+# impacts performance.
+# TODO(https://fxbug.dev/576944236): Disable instrumentation (asan, coverage,
+# profile) for this tool once Rust rules support it in Bazel.
+idk_ffx_tool(
+    name = "ffx_assembly_tool",
+    srcs = ["src/main.rs"],
+    category = "partner",
+    edition = "2024",
+    idk_name = "ffx-assembly",
+    visibility = [
+        "//build/assembly:__pkg__",
+        "//build/images:__subpackages__",
+        "//build/testing/boot_tests:__pkg__",
+        "//src/developer:__subpackages__",
+        "//src/microfuchsia:__subpackages__",
+        "//src/security:__subpackages__",
+        "//src/sys:__subpackages__",
+        "//src/tests/assembly:__subpackages__",
+        "//src/tests/limited_netsvc/image:__pkg__",
+        "//tools/dupefinder/tests/e2e:__pkg__",
+    ],
+    deps = [
+        ":ffx_assembly",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/lib/fuchsia-async",
+    ],
+)
+# LINT.ThenChange(BUILD.gn)
+
+host_rustc_test(
+    name = "ffx_assembly_args_test",
+    crate = ":ffx_assembly_args",
+    visibility = ["//src/developer/ffx:__pkg__"],
+)
+
+host_rustc_test(
+    name = "ffx_assembly_test",
+    crate = ":ffx_assembly",
+    visibility = ["//src/developer/ffx:__pkg__"],
+    deps = [
+        "//src/lib/assembly/images_config",
+        "//src/lib/assembly/release_info",
+        "//src/lib/utf8_path",
+        "//src/lib/versioning/version-history/rust",
+        "//src/sys/pkg/lib/far/rust:fuchsia-archive",
+        "//third_party/rust_crates/vendor:camino",
+        "//third_party/rust_crates/vendor:pretty_assertions",
+        "//third_party/rust_crates/vendor:tempfile",
+    ],
+)

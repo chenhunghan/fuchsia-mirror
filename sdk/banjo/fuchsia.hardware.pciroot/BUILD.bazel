@@ -1,0 +1,25 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fidl_library(
+    name = "fuchsia.hardware.pciroot",
+    srcs = [
+        "pciroot.fidl",
+    ],
+    enable_banjo = True,
+    enable_rust_next = False,
+    visibility = [
+        "//src/devices/board:__subpackages__",
+        "//src/devices/pci/drivers/pciroot-banjo-adapter:__pkg__",
+        "//src/devices/pci/lib/pci:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
+    deps = [
+        "//zircon/vdso/zx",
+    ],
+)

@@ -10,8 +10,23 @@ import("//build/rust/rustc_test.gni")
 # Parameters
 #
 #   output_name (optional)
-#     Name of the crate as defined in its manifest file. If not specified, it is
-#     assumed to be the same as the target name.
+#     Base name of the output shared library (`lib<output_name>.so`). If not
+#     specified, defaults to `crate_name` (with `-` replaced by `_`) if set, or
+#     the target name otherwise.
+#
+#   crate_name (optional)
+#     Name of the crate. Matches the attribute name used by `rustc_library()`,
+#     `rustc_dylib()`, and Bazel Rust rules.
+#
+#   proc_macro_deps (optional)
+#     For proc_macro dependencies, has the same semantics as deps in GN,
+#     except that these are always built in `$host_toolchain`. Used by
+#     Bazel-converted targets, see //build/tools/bazel2gn/README.md.
+#
+#   link_deps (optional)
+#     Native (e.g. C/C++) libraries to link against, has the same semantics
+#     as deps in GN. Used by Bazel-converted targets, see
+#     //build/tools/bazel2gn/README.md.
 #
 #   version
 #     Semver version of the crate as seen on crates.io.
@@ -121,12 +136,34 @@ import("//build/rust/rustc_test.gni")
 #     with_unit_tests = true
 #   }
 template("rustc_cdylib") {
-  not_needed(invoker, [ "version" ])
+  not_needed(invoker,
+             [
+               "ldflags",
+               "version",
+             ])
 
   if (defined(invoker.original_target_name)) {
     _original_target_name = invoker.original_target_name
   } else {
     _original_target_name = target_name
+  }
+
+  rustc_target = "_${target_name}_rustc"
+  rustc_target = string_replace(rustc_target, "-", "_")
+  group_target = "${target_name}"
+
+  if (defined(invoker.crate_name)) {
+    _crate_name = invoker.crate_name
+  } else {
+    _crate_name = rustc_target
+  }
+
+  if (defined(invoker.output_name)) {
+    _lib_output_name = invoker.output_name
+  } else if (defined(invoker.crate_name)) {
+    _lib_output_name = string_replace(invoker.crate_name, "-", "_")
+  } else {
+    _lib_output_name = "${target_name}"
   }
 
   # Resolve `with_unit_tests`, which may be a boolean or one of "host",
@@ -164,26 +201,41 @@ template("rustc_cdylib") {
     rustc_test("${target_name}_test") {
       not_needed(invoker,
                  [
-                   "public",
-                   "metadata",
-                   "variant_selector_target_type",
+                   "crate_name",
                    "is_loadable_module",
+                   "metadata",
+                   "output_extension",
+                   "public",
+                   "use_lib_prefix",
+                   "validations",
+                   "variant_selector_target_type",
                  ])
       if (defined(invoker.test_output_name)) {
         output_name = invoker.test_output_name
-      } else if (defined(invoker.output_name)) {
-        output_name = invoker.output_name + "_test"
       } else {
-        output_name = invoker.target_name + "_test"
+        output_name = _lib_output_name + "_test"
       }
+      forward_variables_from(invoker,
+                             [
+                               "applicable_licenses",
+                               "visibility",
+                             ])
       forward_variables_from(invoker,
                              "*",
                              [
-                               "output_name",
-                               "metatada",
-                               "variant_selector_target_type",
+                               "applicable_licenses",
+                               "assert_no_deps",
+                               "crate_name",
                                "is_loadable_module",
+                               "ldflags",
+                               "metadata",
+                               "output_extension",
+                               "output_name",
+                               "public",
+                               "use_lib_prefix",
                                "validations",
+                               "variant_selector_target_type",
+                               "visibility",
                              ])
       original_target_name = _original_target_name
     }
@@ -203,46 +255,76 @@ template("rustc_cdylib") {
                ])
   }
 
-  rustc_target = "_${target_name}_rustc"
-  rustc_target = string_replace(rustc_target, "-", "_")
-  group_target = "${target_name}"
-
   if (!defined(invoker.source_root)) {
     source_root = "src/lib.rs"
   } else {
     source_root = invoker.source_root
   }
 
-  if (!defined(invoker.output_name)) {
-    _lib_output_name = "${target_name}"
-  } else {
-    _lib_output_name = invoker.output_name
-  }
-
   rustc_artifact(rustc_target) {
     forward_variables_from(invoker,
                            [
+                             "allow_legacy_edition",
+                             "applicable_licenses",
+                             "check_cfgs",
+                             "data_deps",
                              "disable_clippy",
+                             "disable_rbe",
                              "edition",
                              "enforce_source_listing",
+                             "features",
                              "inputs",
+                             "link_deps",
                              "lint_config",
                              "metadata",
+                             "output_dir",
+                             "output_extension",
+                             "pool",
+                             "proc_macro_deps",
+                             "public_configs",
+                             "public_deps",
+                             "quiet_clippy",
                              "runtime_deps",
                              "rustenv",
+                             "rustflags",
                              "sources",
                              "testonly",
                              "validations",
-                             "variant_selector_target_type",
-                             "visibility",
                            ])
+    visibility = [ ":*" ]
 
     if (defined(invoker.is_loadable_module) && invoker.is_loadable_module) {
+      # Rust drivers (`fuchsia_rust_driver`) currently transitively depend on
+      # `//src/devices/bin/driver_runtime` via
+      # `//sdk/lib/driver/runtime/rust/fidl` in GN, which trips
+      # `_fuchsia_driver`'s `assert_no_deps` until that dependency is switched
+      # to `//src/devices/lib/driver:driver_runtime`.
+      not_needed(invoker, [ "assert_no_deps" ])
+      forward_variables_from(invoker,
+                             [
+                               "exclude_toolchain_tags",
+                               "variant_selector_target_type",
+                             ])
       target_type = "loadable_module"
 
       # default to not using the lib prefix for loadable_modules
       _use_lib_prefix = false
     } else {
+      forward_variables_from(invoker, [ "assert_no_deps" ])
+      if (toolchain_variant.with_shared && !toolchain_variant.is_pic_default &&
+          in_default_toolchain && select_variant_canonical != []) {
+        forward_variables_from(invoker,
+                               [
+                                 "exclude_toolchain_tags",
+                                 "variant_selector_target_type",
+                               ])
+      } else {
+        not_needed(invoker,
+                   [
+                     "exclude_toolchain_tags",
+                     "variant_selector_target_type",
+                   ])
+      }
       target_type = "shared_library"
 
       # default to using the lib prefix for shared_library
@@ -261,7 +343,7 @@ template("rustc_cdylib") {
 
     crate_root = source_root
     crate_type = "cdylib"
-    crate_name = rustc_target
+    crate_name = _crate_name
     output_name = _lib_output_name
     original_target_name = _original_target_name
 
@@ -277,10 +359,6 @@ template("rustc_cdylib") {
 
     configs = []
     configs = invoker.configs
-
-    if (defined(invoker.disable_rbe)) {
-      disable_rbe = invoker.disable_rbe
-    }
   }
 
   public_hdrs = []
@@ -291,6 +369,13 @@ template("rustc_cdylib") {
   header_target = "_${_lib_output_name}_cdylib_headers"
 
   source_set(header_target) {
+    forward_variables_from(invoker,
+                           [
+                             "applicable_licenses",
+                             "public_configs",
+                             "public_deps",
+                             "testonly",
+                           ])
     public = public_hdrs
     visibility = [ ":$group_target" ]
     deps = []
@@ -303,7 +388,12 @@ template("rustc_cdylib") {
   }
 
   group(target_name) {
-    forward_variables_from(invoker, [ "testonly" ])
+    forward_variables_from(invoker,
+                           [
+                             "applicable_licenses",
+                             "testonly",
+                             "visibility",
+                           ])
     public_deps = [
       ":$header_target",
       ":$rustc_target",

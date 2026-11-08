@@ -6,8 +6,8 @@ use crate::client::config_management::Credential;
 use crate::client::types;
 use crate::util::pseudo_energy::{EwmaSignalData, RssiVelocity};
 use fidl_fuchsia_wlan_common as fidl_common;
-use fidl_fuchsia_wlan_internal as fidl_internal;
 use fidl_fuchsia_wlan_sme as fidl_sme;
+use fidl_fuchsia_wlan_stats as fidl_stats;
 use fuchsia_async as fasync;
 use log::error;
 use wlan_common::historical_list::{HistoricalList, Timestamped};
@@ -108,7 +108,7 @@ impl PreviousRoamScanData {
 // MUST read all trigger data types from the channel, even if they ignore/drop it.
 #[derive(Clone, Debug)]
 pub enum RoamTriggerData {
-    SignalReportInd(fidl_internal::SignalReportIndication),
+    ConnectionSignalReport(fidl_stats::ConnectionSignalReport),
 }
 
 // Actions that could be taken after handling new roam trigger data.

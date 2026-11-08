@@ -1,0 +1,60 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_go_test.bzl", "host_go_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+go_library(
+    name = "expectation",
+    srcs = [
+        "expectation.go",
+
+        # Per-suite expectations.
+        "arp.go",
+        "dhcp_client.go",
+        "dhcp_server.go",
+        "dhcpv6_client.go",
+        "dhcpv6_client_pd.go",
+        "icmp.go",
+        "icmp_router.go",
+        "icmpv6.go",
+        "icmpv6_router.go",
+        "igmp.go",
+        "igmpv3.go",
+        "ip.go",
+        "ip_router.go",
+        "ipv6.go",
+        "ipv6_autoconfig.go",
+        "ipv6_mld.go",
+        "ipv6_mldv2.go",
+        "ipv6_pmtu.go",
+        "ipv6_router.go",
+        "ipv6ndp.go",
+        "tcp_advanced.go",
+        "tcp_advanced_v6.go",
+        "tcp_highperf.go",
+        "tcp_highperf_v6.go",
+        "tcpcore.go",
+        "tcpcorev6.go",
+        "udp.go",
+        "udp_v6.go",
+    ],
+    importpath = "go.fuchsia.dev/fuchsia/src/connectivity/network/testing/conformance/expectation",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//third_party/network-conformance:__subpackages__"],
+    deps = [
+        "//src/connectivity/network/testing/conformance/expectation/outcome",
+        "//src/connectivity/network/testing/conformance/parseoutput",
+    ],
+)
+
+host_go_test(
+    name = "expectation_test",
+    srcs = ["expectation_test.go"],
+    embed = [":expectation"],
+    visibility = ["//src/connectivity/network:__pkg__"],
+)

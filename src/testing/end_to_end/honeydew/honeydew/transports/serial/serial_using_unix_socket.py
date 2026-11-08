@@ -110,7 +110,8 @@ class SerialUsingUnixSocket(serial_interface.Serial):
         self,
         cmd: str,
         stop_tokens: Sequence[str] = (),
-        timeout_sec: float = 5.0,
+        timeout_sec: float = 60.0,
+        inactivity_timeout_sec: float = 5.0,
         recv_size: int = 4096,
         log_output: bool = True,
     ) -> str:
@@ -126,7 +127,10 @@ class SerialUsingUnixSocket(serial_interface.Serial):
                 appears in the accumulated output. Callers should choose tokens
                 that do not appear in `cmd` itself, as the serial console echoes
                 the command upon entry.
-            timeout_sec: Maximum duration in seconds to wait for command output.
+            timeout_sec: Maximum overall duration in seconds to wait for
+                command output.
+            inactivity_timeout_sec: Inactivity timeout in seconds; reading stops
+                if no new data is received for this duration.
             recv_size: Maximum number of bytes to read per recv call.
             log_output: When True, logs the output in DEBUG level. Callers
                 may set this to False when expecting particularly large
@@ -146,21 +150,23 @@ class SerialUsingUnixSocket(serial_interface.Serial):
 
         output = ""
         decoder = codecs.getincrementaldecoder("utf-8")(errors="ignore")
-        deadline = time.monotonic() + timeout_sec
+        overall_deadline = time.monotonic() + timeout_sec
 
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
-                s.settimeout(timeout_sec)
+                s.settimeout(inactivity_timeout_sec)
                 s.connect(self._socket_path)
                 s.sendall(
                     _CARRIAGE_RETURN + cmd.encode("utf-8") + _CARRIAGE_RETURN
                 )
 
                 while True:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
+                    remaining_overall = overall_deadline - time.monotonic()
+                    if remaining_overall <= 0:
                         break
-                    s.settimeout(remaining)
+                    # Time out if inactive for inactivity_timeout_sec, or if
+                    # overall deadline is reached.
+                    s.settimeout(min(inactivity_timeout_sec, remaining_overall))
                     try:
                         chunk_bytes = s.recv(recv_size)
                     except socket.timeout:

@@ -26,8 +26,7 @@ cc_test_executable("msd_intel_gen_nonhardware_tests") {
 
   sources = []
 
-  deps = []
-  public_deps = [
+  deps = [
     ":nonhardware_tests",
     "//src/devices/testing/no_ddk",
     "//src/graphics/magma/lib/magma/test_util:logger_init_helper",

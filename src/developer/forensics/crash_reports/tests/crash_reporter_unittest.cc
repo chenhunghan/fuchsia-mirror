@@ -4,9 +4,8 @@
 
 #include "src/developer/forensics/crash_reports/crash_reporter.h"
 
-#include <fuchsia/feedback/cpp/fidl.h>
-#include <fuchsia/mem/cpp/fidl.h>
-#include <fuchsia/settings/cpp/fidl.h>
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
+#include <fidl/fuchsia.mem/cpp/fidl.h>
 #include <fuchsia/time/cpp/fidl.h>
 #include <lib/fpromise/result.h>
 #include <lib/syslog/cpp/macros.h>
@@ -42,9 +41,9 @@
 #include "src/developer/forensics/testing/unit_test_fixture.h"
 #include "src/developer/forensics/utils/cobalt/event.h"
 #include "src/developer/forensics/utils/cobalt/metrics.h"
+#include "src/developer/forensics/utils/vmo.h"
 #include "src/lib/files/path.h"
 #include "src/lib/files/scoped_temp_dir.h"
-#include "src/lib/fsl/vmo/strings.h"
 #include "src/lib/fxl/strings/substitute.h"
 #include "src/lib/timekeeper/test_clock.h"
 
@@ -52,17 +51,15 @@ namespace forensics {
 namespace crash_reports {
 namespace {
 
-using fuchsia::feedback::Annotation;
-using fuchsia::feedback::Attachment;
-using fuchsia::feedback::CrashReport;
-using fuchsia::feedback::CrashReporter_FileReport_Result;
-using fuchsia::feedback::FilingError;
-using fuchsia::feedback::FilingSuccess;
-using fuchsia::feedback::NativeCrashReport;
-using fuchsia::feedback::RuntimeCrashReport;
-using fuchsia::feedback::SpecificCrashReport;
-using fuchsia::feedback::TextBacktraceCrashReport;
-using fuchsia::settings::PrivacySettings;
+using fuchsia_feedback::Annotation;
+using fuchsia_feedback::Attachment;
+using fuchsia_feedback::CrashReport;
+using fuchsia_feedback::FilingError;
+using fuchsia_feedback::FilingSuccess;
+using fuchsia_feedback::NativeCrashReport;
+using fuchsia_feedback::RuntimeCrashReport;
+using fuchsia_feedback::SpecificCrashReport;
+using fuchsia_feedback::TextBacktraceCrashReport;
 using inspect::testing::ChildrenMatch;
 using inspect::testing::NameMatches;
 using inspect::testing::NodeMatches;
@@ -122,19 +119,15 @@ constexpr char kEmptyAttachmentBundleKey[] = "empty.attachment.key";
 
 constexpr zx::duration kSnapshotSharedRequestWindow = zx::sec(5);
 
-Attachment BuildAttachment(const std::string& key, const std::string& value) {
-  Attachment attachment;
-  attachment.key = key;
-  FX_CHECK(fsl::VmoFromString(value, &attachment.value));
-  return attachment;
+fuchsia_mem::Buffer BuildBuffer(const std::string& value) {
+  return BufferFromString(value).value();
 }
 
-PrivacySettings MakePrivacySettings(const std::optional<bool> user_data_sharing_consent) {
-  PrivacySettings settings;
-  if (user_data_sharing_consent.has_value()) {
-    settings.set_user_data_sharing_consent(user_data_sharing_consent.value());
-  }
-  return settings;
+Attachment BuildAttachment(const std::string& key, const std::string& value) {
+  return Attachment({
+      .key = key,
+      .value = BuildBuffer(value),
+  });
 }
 
 template <typename K, typename V>
@@ -146,10 +139,27 @@ std::vector<testing::internal::PairMatcher<K, V>> Linearize(const std::map<K, V>
   return linearized;
 }
 
+// Matches a fuchsia.feedback.CrashReporter/FileReport result that failed with the FilingError
+// |expected|.
+MATCHER_P(IsFilingError, expected, "") {
+  if (arg.is_ok()) {
+    *result_listener << "succeeded";
+    return false;
+  }
+  if (!arg.error_value().is_domain_error()) {
+    *result_listener << "failed with framework error "
+                     << arg.error_value().framework_error().FormatDescription();
+    return false;
+  }
+  *result_listener << "failed with FilingError "
+                   << static_cast<uint32_t>(arg.error_value().domain_error());
+  return arg.error_value().domain_error() == expected;
+}
+
 // Unit-tests the implementation of the fuchsia.feedback.CrashReporter FIDL interface.
 //
-// This does not test the environment service. It directly instantiates the class, without
-// connecting through FIDL.
+// This does not test the environment service. It directly instantiates the class and serves it
+// over a local channel via fidl::BindServer.
 class CrashReporterTest : public UnitTestFixture {
  public:
   void SetUp() override {
@@ -225,6 +235,10 @@ class CrashReporterTest : public UnitTestFixture {
         &report_store_->GetReportStore(), data_provider_server_.get(), kSnapshotSharedRequestWindow,
         kResetOffset);
     FX_CHECK(crash_reporter_);
+
+    auto [client_end, server_end] = fidl::Endpoints<fuchsia_feedback::CrashReporter>::Create();
+    fidl::BindServer(dispatcher(), std::move(server_end), crash_reporter_.get());
+    crash_reporter_client_.Bind(std::move(client_end), dispatcher());
   }
 
   // Sets up the underlying crash reporter using a default config.
@@ -312,31 +326,34 @@ class CrashReporterTest : public UnitTestFixture {
   }
 
   // Files one crash report.
-  CrashReporter_FileReport_Result FileOneCrashReport(CrashReport report) {
+  fidl::Result<fuchsia_feedback::CrashReporter::FileReport> FileOneCrashReport(CrashReport report) {
     // Run loop to start the clock.
     RunLoopUntilIdle();
     FX_CHECK(crash_reporter_ != nullptr)
         << "crash_reporter_ is nullptr. Call SetUpCrashReporter() or one of its variants "
            "at the beginning of a test case.";
-    std::optional<CrashReporter_FileReport_Result> out_result{std::nullopt};
-    crash_reporter_->FileReport(
-        std::move(report),
-        [&out_result](CrashReporter_FileReport_Result result) { out_result = std::move(result); });
+    std::optional<fidl::Result<fuchsia_feedback::CrashReporter::FileReport>> out_result{
+        std::nullopt};
+    crash_reporter_client_->FileReport(std::move(report))
+        .Then([&out_result](fidl::Result<fuchsia_feedback::CrashReporter::FileReport>& result) {
+          out_result = std::move(result);
+        });
     RunLoopFor(kSnapshotSharedRequestWindow);
     FX_CHECK(out_result.has_value());
     return std::move(*out_result);
   }
 
   // Files one crash report.
-  CrashReporter_FileReport_Result FileOneCrashReport(
+  fidl::Result<fuchsia_feedback::CrashReporter::FileReport> FileOneCrashReport(
       const std::vector<Annotation>& annotations = {}, std::vector<Attachment> attachments = {}) {
-    CrashReport report;
-    report.set_program_name(kProgramName);
+    CrashReport report({
+        .program_name = kProgramName,
+    });
     if (!annotations.empty()) {
-      report.set_annotations(annotations);
+      report.annotations(annotations);
     }
     if (!attachments.empty()) {
-      report.set_attachments(std::move(attachments));
+      report.attachments(std::move(attachments));
     }
     return FileOneCrashReport(std::move(report));
   }
@@ -345,7 +362,7 @@ class CrashReporterTest : public UnitTestFixture {
   //
   // |attachment| is useful to control the lower bound of the size of the report by controlling the
   // size of some of the attachment(s).
-  CrashReporter_FileReport_Result FileOneCrashReportWithSingleAttachment(
+  fidl::Result<fuchsia_feedback::CrashReporter::FileReport> FileOneCrashReportWithSingleAttachment(
       const std::string& attachment = kSingleAttachmentValue) {
     std::vector<Attachment> attachments;
     attachments.emplace_back(BuildAttachment(kSingleAttachmentKey, attachment));
@@ -354,119 +371,97 @@ class CrashReporterTest : public UnitTestFixture {
   }
 
   // Files one native crash report.
-  CrashReporter_FileReport_Result FileOneNativeCrashReport(
-      std::optional<fuchsia::mem::Buffer> minidump,
+  fidl::Result<fuchsia_feedback::CrashReporter::FileReport> FileOneNativeCrashReport(
+      std::optional<fuchsia_mem::Buffer> minidump,
       const std::optional<std::string>& crash_signature) {
-    NativeCrashReport native_report;
-    if (minidump.has_value()) {
-      native_report.set_minidump(std::move(minidump.value()));
-    }
-    native_report.set_process_name("crashing_process");
-    native_report.set_process_koid(123u);
-    native_report.set_thread_name("crashing_thread");
-    native_report.set_thread_koid(1234u);
+    NativeCrashReport native_report({
+        .minidump = std::move(minidump),
+        .process_name = "crashing_process",
+        .process_koid = 123u,
+        .thread_name = "crashing_thread",
+        .thread_koid = 1234u,
+    });
 
-    SpecificCrashReport specific_report;
-    specific_report.set_native(std::move(native_report));
-
-    CrashReport report;
-    report.set_program_name("crashing_program_native");
-    report.set_specific_report(std::move(specific_report));
-
-    if (crash_signature.has_value()) {
-      report.set_crash_signature(crash_signature.value());
-    }
+    CrashReport report({
+        .program_name = "crashing_program_native",
+        .specific_report = SpecificCrashReport::WithNative(std::move(native_report)),
+        .crash_signature = crash_signature,
+    });
 
     return FileOneCrashReport(std::move(report));
   }
 
   // Files one Dart crash report.
-  CrashReporter_FileReport_Result FileOneDartCrashReport(
+  fidl::Result<fuchsia_feedback::CrashReporter::FileReport> FileOneDartCrashReport(
       const std::optional<std::string>& exception_type,
       const std::optional<std::string>& exception_message,
-      std::optional<fuchsia::mem::Buffer> exception_stack_trace) {
-    RuntimeCrashReport dart_report;
-    if (exception_type.has_value()) {
-      dart_report.set_exception_type(exception_type.value());
-    }
-    if (exception_message.has_value()) {
-      dart_report.set_exception_message(exception_message.value());
-    }
-    if (exception_stack_trace.has_value()) {
-      dart_report.set_exception_stack_trace(std::move(exception_stack_trace.value()));
-    }
+      std::optional<fuchsia_mem::Buffer> exception_stack_trace) {
+    RuntimeCrashReport dart_report({
+        .exception_type = exception_type,
+        .exception_message = exception_message,
+        .exception_stack_trace = std::move(exception_stack_trace),
+    });
 
-    SpecificCrashReport specific_report;
-    specific_report.set_dart(std::move(dart_report));
-
-    CrashReport report;
-    report.set_program_name("crashing_program_dart");
-    report.set_specific_report(std::move(specific_report));
+    CrashReport report({
+        .program_name = "crashing_program_dart",
+        .specific_report = SpecificCrashReport::WithDart(std::move(dart_report)),
+    });
 
     return FileOneCrashReport(std::move(report));
   }
 
   // Files one Fuchsia text backtrace crash report.
-  CrashReporter_FileReport_Result FileOneFuchsiaTextBacktraceCrashReport(
-      std::optional<fuchsia::mem::Buffer> backtrace,
+  fidl::Result<fuchsia_feedback::CrashReporter::FileReport> FileOneFuchsiaTextBacktraceCrashReport(
+      std::optional<fuchsia_mem::Buffer> backtrace,
       const std::optional<std::string>& crash_signature) {
-    TextBacktraceCrashReport text_backtrace_report;
-    if (backtrace.has_value()) {
-      text_backtrace_report.set_fuchsia_backtrace(std::move(backtrace.value()));
-    }
-    text_backtrace_report.set_process_name("crashing_process");
-    text_backtrace_report.set_process_koid(123u);
-    text_backtrace_report.set_thread_name("crashing_thread");
-    text_backtrace_report.set_thread_koid(1234u);
+    TextBacktraceCrashReport text_backtrace_report({
+        .fuchsia_backtrace = std::move(backtrace),
+        .process_name = "crashing_process",
+        .process_koid = 123u,
+        .thread_name = "crashing_thread",
+        .thread_koid = 1234u,
+    });
 
-    SpecificCrashReport specific_report;
-    specific_report.set_text_backtrace(std::move(text_backtrace_report));
-
-    CrashReport report;
-    report.set_program_name("crashing_program_text_backtrace");
-    report.set_specific_report(std::move(specific_report));
-
-    if (crash_signature.has_value()) {
-      report.set_crash_signature(crash_signature.value());
-    }
+    CrashReport report({
+        .program_name = "crashing_program_text_backtrace",
+        .specific_report = SpecificCrashReport::WithTextBacktrace(std::move(text_backtrace_report)),
+        .crash_signature = crash_signature,
+    });
 
     return FileOneCrashReport(std::move(report));
   }
 
   // Files one empty crash report.
-  CrashReporter_FileReport_Result FileOneEmptyCrashReport() {
+  fidl::Result<fuchsia_feedback::CrashReporter::FileReport> FileOneEmptyCrashReport() {
     CrashReport report;
     return FileOneCrashReport(std::move(report));
   }
 
   // Files one crash report with the provided crash signature.
-  CrashReporter_FileReport_Result FileOneCrashReportWithSignature(const std::string& signature) {
-    CrashReport report;
-    report.set_program_name("crashing_program_generic");
-    report.set_crash_signature(signature);
+  fidl::Result<fuchsia_feedback::CrashReporter::FileReport> FileOneCrashReportWithSignature(
+      const std::string& signature) {
+    CrashReport report({
+        .program_name = "crashing_program_generic",
+        .crash_signature = signature,
+    });
 
     return FileOneCrashReport(std::move(report));
   }
 
   // Files one crash report with the provided is fatal value.
-  CrashReporter_FileReport_Result FileOneCrashReportWithIsFatal(const bool is_fatal) {
-    CrashReport report;
-    report.set_program_name("crashing_program_generic");
-    report.set_is_fatal(is_fatal);
+  fidl::Result<fuchsia_feedback::CrashReporter::FileReport> FileOneCrashReportWithIsFatal(
+      const bool is_fatal) {
+    CrashReport report({
+        .program_name = "crashing_program_generic",
+        .is_fatal = is_fatal,
+    });
 
     return FileOneCrashReport(std::move(report));
   }
 
   void SetPrivacySettings(std::optional<bool> user_data_sharing_consent) {
     FX_CHECK(privacy_settings_server_);
-
-    ::fpromise::result<void, fuchsia::settings::Error> set_result;
-    privacy_settings_server_->Set(
-        MakePrivacySettings(user_data_sharing_consent),
-        [&set_result](::fpromise::result<void, fuchsia::settings::Error> result) {
-          set_result = std::move(result);
-        });
-    EXPECT_TRUE(set_result.is_ok());
+    privacy_settings_server_->SetUserDataSharingConsent(user_data_sharing_consent);
   }
 
  private:
@@ -486,6 +481,7 @@ class CrashReporterTest : public UnitTestFixture {
   std::shared_ptr<InfoContext> info_context_;
   std::unique_ptr<ScopedTestReportStore> report_store_;
   zx::clock clock_handle_;
+  fidl::Client<fuchsia_feedback::CrashReporter> crash_reporter_client_;
 
  protected:
   std::unique_ptr<feedback::AnnotationManager> annotation_manager_;
@@ -498,9 +494,9 @@ TEST_F(CrashReporterTest, Succeed_OnInputCrashReport) {
       std::make_unique<stubs::DataProvider>(kFeedbackAnnotations, kDefaultAttachmentBundleKey));
   SetUpCrashReporterDefaultConfig({kUploadSuccessful});
 
-  const CrashReporter_FileReport_Result result = FileOneCrashReport();
-  ASSERT_TRUE(result.is_response());
-  EXPECT_EQ(result.response().results.result(), FilingSuccess::REPORT_UPLOADED);
+  const fidl::Result<fuchsia_feedback::CrashReporter::FileReport> result = FileOneCrashReport();
+  ASSERT_TRUE(result.is_ok());
+  EXPECT_EQ(result->results().result(), FilingSuccess::kReportUploaded);
 
   CheckAnnotationsOnServer();
   CheckAttachmentsOnServer({kDefaultAttachmentBundleKey});
@@ -516,12 +512,10 @@ TEST_F(CrashReporterTest, EnforcesQuota) {
       std::vector<CrashServer::UploadStatus>(kDailyPerProductQuota, kUploadSuccessful));
 
   for (size_t i = 0; i < kDailyPerProductQuota; ++i) {
-    ASSERT_TRUE(FileOneCrashReport().is_response());
+    ASSERT_TRUE(FileOneCrashReport().is_ok());
   }
 
-  const CrashReporter_FileReport_Result result = FileOneCrashReport();
-  ASSERT_TRUE(result.is_err());
-  EXPECT_EQ(result.err(), FilingError::QUOTA_REACHED_ERROR);
+  EXPECT_THAT(FileOneCrashReport(), IsFilingError(FilingError::kQuotaReachedError));
 }
 
 TEST_F(CrashReporterTest, ResetsQuota) {
@@ -534,7 +528,7 @@ TEST_F(CrashReporterTest, ResetsQuota) {
       std::vector<CrashServer::UploadStatus>(kDailyPerProductQuota * 2, kUploadSuccessful));
 
   for (size_t i = 0; i < kDailyPerProductQuota; ++i) {
-    ASSERT_TRUE(FileOneCrashReport().is_response());
+    ASSERT_TRUE(FileOneCrashReport().is_ok());
   }
 
   timekeeper::time_utc utc_time;
@@ -542,7 +536,7 @@ TEST_F(CrashReporterTest, ResetsQuota) {
   clock_.SetUtc(utc_time + zx::hour(24) + kResetOffset);
 
   for (size_t i = 0; i < kDailyPerProductQuota; ++i) {
-    ASSERT_TRUE(FileOneCrashReport().is_response());
+    ASSERT_TRUE(FileOneCrashReport().is_ok());
   }
 }
 
@@ -557,7 +551,7 @@ TEST_F(CrashReporterTest, NoQuota) {
                                              kUploadSuccessful));
 
   for (size_t i = 0; i < kDailyPerProductQuota; ++i) {
-    ASSERT_TRUE(FileOneCrashReport().is_response());
+    ASSERT_TRUE(FileOneCrashReport().is_ok());
   }
 }
 
@@ -566,13 +560,24 @@ TEST_F(CrashReporterTest, Check_RegisteredProduct) {
       std::make_unique<stubs::DataProvider>(kFeedbackAnnotations, kDefaultAttachmentBundleKey));
   SetUpCrashReporterDefaultConfig({kUploadSuccessful});
 
-  fuchsia::feedback::CrashReportingProduct product;
-  product.set_name("some name");
-  product.set_version("some version");
-  product.set_channel("some channel");
-  crash_register_->Upsert(kProgramName, std::move(product));
+  auto [client_end, server_end] =
+      fidl::Endpoints<fuchsia_feedback::CrashReportingProductRegister>::Create();
+  fidl::BindServer(dispatcher(), std::move(server_end), crash_register_.get());
+  fidl::Client crash_register_client(std::move(client_end), dispatcher());
 
-  ASSERT_TRUE(FileOneCrashReport().is_response());
+  fuchsia_feedback::CrashReportingProduct product({
+      .name = "some name",
+      .version = "some version",
+      .channel = "some channel",
+  });
+  ASSERT_TRUE(crash_register_client
+                  ->Upsert({{
+                      .component_url = kProgramName,
+                      .product = std::move(product),
+                  }})
+                  .is_ok());
+
+  ASSERT_TRUE(FileOneCrashReport().is_ok());
 
   ASSERT_TRUE(crash_server_->latest_annotations().Contains("product"));
   EXPECT_EQ(crash_server_->latest_annotations().Get("product"), "some name");
@@ -593,10 +598,10 @@ TEST_F(CrashReporterTest, Succeed_OnInputCrashReportWithAdditionalData) {
   ASSERT_TRUE(FileOneCrashReport(
                   /*annotations=*/
                   {
-                      {"annotation.key", "annotation.value"},
+                      {{.key = "annotation.key", .value = "annotation.value"}},
                   },
                   /*attachments=*/std::move(attachments))
-                  .is_response());
+                  .is_ok());
   CheckAnnotationsOnServer({
       {"annotation.key", "annotation.value"},
   });
@@ -608,11 +613,12 @@ TEST_F(CrashReporterTest, Succeed_OnInputCrashReportWithEventId) {
       std::make_unique<stubs::DataProvider>(kFeedbackAnnotations, kDefaultAttachmentBundleKey));
   SetUpCrashReporterDefaultConfig({kUploadSuccessful});
 
-  CrashReport report;
-  report.set_program_name(kProgramName);
-  report.set_event_id("some-event-id");
+  CrashReport report({
+      .program_name = kProgramName,
+      .event_id = "some-event-id",
+  });
 
-  ASSERT_TRUE(FileOneCrashReport(std::move(report)).is_response());
+  ASSERT_TRUE(FileOneCrashReport(std::move(report)).is_ok());
   CheckAnnotationsOnServer({
       {"comments", "some-event-id"},
   });
@@ -624,13 +630,14 @@ TEST_F(CrashReporterTest, Succeed_OnInputCrashReportWithProgramUptime) {
       std::make_unique<stubs::DataProvider>(kFeedbackAnnotations, kDefaultAttachmentBundleKey));
   SetUpCrashReporterDefaultConfig({kUploadSuccessful});
 
-  CrashReport report;
-  report.set_program_name(kProgramName);
   const zx::duration uptime =
       zx::hour(3) * 24 + zx::hour(15) + zx::min(33) + zx::sec(17) + zx::msec(54);
-  report.set_program_uptime(uptime.get());
+  CrashReport report({
+      .program_name = kProgramName,
+      .program_uptime = uptime.get(),
+  });
 
-  ASSERT_TRUE(FileOneCrashReport(std::move(report)).is_response());
+  ASSERT_TRUE(FileOneCrashReport(std::move(report)).is_ok());
   CheckAnnotationsOnServer({
       {"ptime", std::to_string(uptime.to_msecs())},
   });
@@ -642,10 +649,8 @@ TEST_F(CrashReporterTest, Succeed_OnNativeInputCrashReport) {
       std::make_unique<stubs::DataProvider>(kFeedbackAnnotations, kDefaultAttachmentBundleKey));
   SetUpCrashReporterDefaultConfig({kUploadSuccessful});
 
-  fuchsia::mem::Buffer minidump;
-  fsl::VmoFromString("minidump", &minidump);
-
-  ASSERT_TRUE(FileOneNativeCrashReport(std::move(minidump), std::nullopt).is_response());
+  ASSERT_TRUE(
+      FileOneNativeCrashReport(BuildBuffer("minidump"), /*crash_signature=*/std::nullopt).is_ok());
   CheckAnnotationsOnServer({
       {"crash.process.name", "crashing_process"},
       {"crash.process.koid", "123"},
@@ -660,7 +665,8 @@ TEST_F(CrashReporterTest, Succeed_OnNativeInputCrashReportWithoutMinidump) {
       std::make_unique<stubs::DataProvider>(kFeedbackAnnotations, kDefaultAttachmentBundleKey));
   SetUpCrashReporterDefaultConfig({kUploadSuccessful});
 
-  ASSERT_TRUE(FileOneNativeCrashReport(std::nullopt, std::nullopt).is_response());
+  ASSERT_TRUE(FileOneNativeCrashReport(/*minidump=*/std::nullopt, /*crash_signature=*/std::nullopt)
+                  .is_ok());
   CheckAnnotationsOnServer({
       {"crash.process.name", "crashing_process"},
       {"crash.process.koid", "123"},
@@ -676,7 +682,7 @@ TEST_F(CrashReporterTest, Succeed_OnNativeInputCrashReportWithoutMinidumpButCras
       std::make_unique<stubs::DataProvider>(kFeedbackAnnotations, kDefaultAttachmentBundleKey));
   SetUpCrashReporterDefaultConfig({kUploadSuccessful});
 
-  ASSERT_TRUE(FileOneNativeCrashReport(std::nullopt, "some-signature").is_response());
+  ASSERT_TRUE(FileOneNativeCrashReport(/*minidump=*/std::nullopt, "some-signature").is_ok());
   CheckAnnotationsOnServer({
       {"crash.process.name", "crashing_process"},
       {"crash.process.koid", "123"},
@@ -692,12 +698,8 @@ TEST_F(CrashReporterTest, Succeed_OnDartInputCrashReport) {
       std::make_unique<stubs::DataProvider>(kFeedbackAnnotations, kEmptyAttachmentBundleKey));
   SetUpCrashReporterDefaultConfig({kUploadSuccessful});
 
-  fuchsia::mem::Buffer stack_trace;
-  fsl::VmoFromString("#0", &stack_trace);
-
   ASSERT_TRUE(
-      FileOneDartCrashReport("FileSystemException", "cannot open file", std::move(stack_trace))
-          .is_response());
+      FileOneDartCrashReport("FileSystemException", "cannot open file", BuildBuffer("#0")).is_ok());
   CheckAnnotationsOnServer({
       {"error_runtime_type", "FileSystemException"},
       {"error_message", "cannot open file"},
@@ -711,7 +713,10 @@ TEST_F(CrashReporterTest, Succeed_OnDartInputCrashReportWithoutExceptionData) {
       std::make_unique<stubs::DataProvider>(kFeedbackAnnotations, kDefaultAttachmentBundleKey));
   SetUpCrashReporterDefaultConfig({kUploadSuccessful});
 
-  ASSERT_TRUE(FileOneDartCrashReport(std::nullopt, std::nullopt, std::nullopt).is_response());
+  ASSERT_TRUE(FileOneDartCrashReport(/*exception_type=*/std::nullopt,
+                                     /*exception_message=*/std::nullopt,
+                                     /*exception_stack_trace=*/std::nullopt)
+                  .is_ok());
   CheckAnnotationsOnServer({
       {"type", "DartError"},
       {"signature", "fuchsia-no-dart-stack-trace"},
@@ -724,11 +729,9 @@ TEST_F(CrashReporterTest, Succeed_OnFuchsiaTextBacktraceInputCrashReport) {
       std::make_unique<stubs::DataProvider>(kFeedbackAnnotations, kEmptyAttachmentBundleKey));
   SetUpCrashReporterDefaultConfig({kUploadSuccessful});
 
-  fuchsia::mem::Buffer backtrace;
-  fsl::VmoFromString("#0", &backtrace);
-
-  ASSERT_TRUE(
-      FileOneFuchsiaTextBacktraceCrashReport(std::move(backtrace), std::nullopt).is_response());
+  ASSERT_TRUE(FileOneFuchsiaTextBacktraceCrashReport(BuildBuffer("#0"),
+                                                     /*crash_signature=*/std::nullopt)
+                  .is_ok());
   CheckAnnotationsOnServer({
       {"crash.process.name", "crashing_process"},
       {"crash.process.koid", "123"},
@@ -743,7 +746,9 @@ TEST_F(CrashReporterTest, Succeed_OnFuchsiaTextBacktraceInputCrashReportWithoutB
       std::make_unique<stubs::DataProvider>(kFeedbackAnnotations, kDefaultAttachmentBundleKey));
   SetUpCrashReporterDefaultConfig({kUploadSuccessful});
 
-  ASSERT_TRUE(FileOneFuchsiaTextBacktraceCrashReport(std::nullopt, std::nullopt).is_response());
+  ASSERT_TRUE(FileOneFuchsiaTextBacktraceCrashReport(/*backtrace=*/std::nullopt,
+                                                     /*crash_signature=*/std::nullopt)
+                  .is_ok());
   CheckAnnotationsOnServer({
       {"crash.process.name", "crashing_process"},
       {"crash.process.koid", "123"},
@@ -759,7 +764,7 @@ TEST_F(CrashReporterTest, Succeed_OnInputCrashReportWithSignature) {
       std::make_unique<stubs::DataProvider>(kFeedbackAnnotations, kDefaultAttachmentBundleKey));
   SetUpCrashReporterDefaultConfig({kUploadSuccessful});
 
-  ASSERT_TRUE(FileOneCrashReportWithSignature("some-signature").is_response());
+  ASSERT_TRUE(FileOneCrashReportWithSignature("some-signature").is_ok());
   CheckAnnotationsOnServer({
       {"signature", "some-signature"},
   });
@@ -770,124 +775,112 @@ TEST_F(CrashReporterTest, FailOnInvalidInputNoProgramName) {
   SetUpDataProviderServer(std::make_unique<stubs::DataProviderReturnsEmptySnapshot>());
   SetUpCrashReporterDefaultConfig();
 
-  const CrashReporter_FileReport_Result result = FileOneEmptyCrashReport();
-  EXPECT_TRUE(result.is_err());
-  EXPECT_EQ(result.err(), FilingError::INVALID_ARGS_ERROR);
+  EXPECT_THAT(FileOneEmptyCrashReport(), IsFilingError(FilingError::kInvalidArgsError));
 }
 
 TEST_F(CrashReporterTest, FailOnInvalidInputEmptyShortenedProgramName) {
   SetUpDataProviderServer(std::make_unique<stubs::DataProviderReturnsEmptySnapshot>());
   SetUpCrashReporterDefaultConfig();
 
-  CrashReport report;
-  report.set_program_name("fuchsia-pkg://");
-  const CrashReporter_FileReport_Result result = FileOneCrashReport(std::move(report));
-
-  EXPECT_TRUE(result.is_err());
-  EXPECT_EQ(result.err(), FilingError::INVALID_ARGS_ERROR);
+  CrashReport report({
+      .program_name = "fuchsia-pkg://",
+  });
+  EXPECT_THAT(FileOneCrashReport(std::move(report)), IsFilingError(FilingError::kInvalidArgsError));
 }
 
 TEST_F(CrashReporterTest, FailOnInvalidInputZeroWeight) {
   SetUpDataProviderServer(std::make_unique<stubs::DataProviderReturnsEmptySnapshot>());
   SetUpCrashReporterDefaultConfig();
 
-  CrashReport report;
-  report.set_program_name("crashing_program_generic");
-  report.set_weight(0);
-  const CrashReporter_FileReport_Result result = FileOneCrashReport(std::move(report));
-
-  EXPECT_TRUE(result.is_err());
-  EXPECT_EQ(result.err(), FilingError::INVALID_ARGS_ERROR);
+  CrashReport report({
+      .program_name = "crashing_program_generic",
+      .weight = 0,
+  });
+  EXPECT_THAT(FileOneCrashReport(std::move(report)), IsFilingError(FilingError::kInvalidArgsError));
 }
 
 TEST_F(CrashReporterTest, FailOnInvalidInputAttachmentKeyIsEmpty) {
   SetUpDataProviderServer(std::make_unique<stubs::DataProviderReturnsEmptySnapshot>());
   SetUpCrashReporterDefaultConfig();
 
-  CrashReport report;
-  report.set_program_name("crashing_program_generic");
   std::vector<Attachment> attachments;
   attachments.emplace_back(BuildAttachment("", "content"));
-  report.set_attachments(std::move(attachments));
+  CrashReport report({
+      .program_name = "crashing_program_generic",
+      .attachments = std::move(attachments),
+  });
 
-  const CrashReporter_FileReport_Result result = FileOneCrashReport(std::move(report));
-  ASSERT_TRUE(result.is_err());
-  EXPECT_EQ(result.err(), FilingError::INVALID_ARGS_ERROR);
+  EXPECT_THAT(FileOneCrashReport(std::move(report)), IsFilingError(FilingError::kInvalidArgsError));
 }
 
 TEST_F(CrashReporterTest, FailOnInvalidInputAttachmentKeyContainsSlash) {
   SetUpDataProviderServer(std::make_unique<stubs::DataProviderReturnsEmptySnapshot>());
   SetUpCrashReporterDefaultConfig();
 
-  CrashReport report;
-  report.set_program_name("crashing_program_generic");
   std::vector<Attachment> attachments;
   attachments.emplace_back(BuildAttachment("my/attachment.key", "content"));
-  report.set_attachments(std::move(attachments));
+  CrashReport report({
+      .program_name = "crashing_program_generic",
+      .attachments = std::move(attachments),
+  });
 
-  const CrashReporter_FileReport_Result result = FileOneCrashReport(std::move(report));
-  ASSERT_TRUE(result.is_err());
-  EXPECT_EQ(result.err(), FilingError::INVALID_ARGS_ERROR);
+  EXPECT_THAT(FileOneCrashReport(std::move(report)), IsFilingError(FilingError::kInvalidArgsError));
 }
 
 TEST_F(CrashReporterTest, FailOnInvalidInputAttachmentKeyContainsSpace) {
   SetUpDataProviderServer(std::make_unique<stubs::DataProviderReturnsEmptySnapshot>());
   SetUpCrashReporterDefaultConfig();
 
-  CrashReport report;
-  report.set_program_name("crashing_program_generic");
   std::vector<Attachment> attachments;
   attachments.emplace_back(BuildAttachment("my attachment.key", "content"));
-  report.set_attachments(std::move(attachments));
+  CrashReport report({
+      .program_name = "crashing_program_generic",
+      .attachments = std::move(attachments),
+  });
 
-  const CrashReporter_FileReport_Result result = FileOneCrashReport(std::move(report));
-  ASSERT_TRUE(result.is_err());
-  EXPECT_EQ(result.err(), FilingError::INVALID_ARGS_ERROR);
+  EXPECT_THAT(FileOneCrashReport(std::move(report)), IsFilingError(FilingError::kInvalidArgsError));
 }
 
 TEST_F(CrashReporterTest, FailOnInvalidInputAttachmentKeyContainsNonPrintableAscii) {
   SetUpDataProviderServer(std::make_unique<stubs::DataProviderReturnsEmptySnapshot>());
   SetUpCrashReporterDefaultConfig();
 
-  CrashReport report;
-  report.set_program_name("crashing_program_generic");
   std::vector<Attachment> attachments;
   attachments.emplace_back(BuildAttachment(std::string("key\0with_null", 13), "content"));
-  report.set_attachments(std::move(attachments));
+  CrashReport report({
+      .program_name = "crashing_program_generic",
+      .attachments = std::move(attachments),
+  });
 
-  const CrashReporter_FileReport_Result result = FileOneCrashReport(std::move(report));
-  ASSERT_TRUE(result.is_err());
-  EXPECT_EQ(result.err(), FilingError::INVALID_ARGS_ERROR);
+  EXPECT_THAT(FileOneCrashReport(std::move(report)), IsFilingError(FilingError::kInvalidArgsError));
 }
 
 TEST_F(CrashReporterTest, FailOnInvalidInputAttachmentKeyIsDot) {
   SetUpDataProviderServer(std::make_unique<stubs::DataProviderReturnsEmptySnapshot>());
   SetUpCrashReporterDefaultConfig();
 
-  CrashReport report;
-  report.set_program_name("crashing_program_generic");
   std::vector<Attachment> attachments;
   attachments.emplace_back(BuildAttachment(".", "content"));
-  report.set_attachments(std::move(attachments));
+  CrashReport report({
+      .program_name = "crashing_program_generic",
+      .attachments = std::move(attachments),
+  });
 
-  const CrashReporter_FileReport_Result result = FileOneCrashReport(std::move(report));
-  ASSERT_TRUE(result.is_err());
-  EXPECT_EQ(result.err(), FilingError::INVALID_ARGS_ERROR);
+  EXPECT_THAT(FileOneCrashReport(std::move(report)), IsFilingError(FilingError::kInvalidArgsError));
 }
 
 TEST_F(CrashReporterTest, FailOnInvalidInputAttachmentKeyIsDotDot) {
   SetUpDataProviderServer(std::make_unique<stubs::DataProviderReturnsEmptySnapshot>());
   SetUpCrashReporterDefaultConfig();
 
-  CrashReport report;
-  report.set_program_name("crashing_program_generic");
   std::vector<Attachment> attachments;
   attachments.emplace_back(BuildAttachment("..", "content"));
-  report.set_attachments(std::move(attachments));
+  CrashReport report({
+      .program_name = "crashing_program_generic",
+      .attachments = std::move(attachments),
+  });
 
-  const CrashReporter_FileReport_Result result = FileOneCrashReport(std::move(report));
-  ASSERT_TRUE(result.is_err());
-  EXPECT_EQ(result.err(), FilingError::INVALID_ARGS_ERROR);
+  EXPECT_THAT(FileOneCrashReport(std::move(report)), IsFilingError(FilingError::kInvalidArgsError));
 }
 
 struct ReservedAttachmentKeyTestParam {
@@ -932,15 +925,14 @@ TEST_P(ReservedAttachmentKeyTest, FailOnInvalidInputAttachmentKeyIsReserved) {
   SetUpDataProviderServer(std::make_unique<stubs::DataProviderReturnsEmptySnapshot>());
   SetUpCrashReporterDefaultConfig();
 
-  CrashReport report;
-  report.set_program_name("crashing_program_generic");
   std::vector<Attachment> attachments;
   attachments.emplace_back(BuildAttachment(param.key, "content"));
-  report.set_attachments(std::move(attachments));
+  CrashReport report({
+      .program_name = "crashing_program_generic",
+      .attachments = std::move(attachments),
+  });
 
-  const CrashReporter_FileReport_Result result = FileOneCrashReport(std::move(report));
-  ASSERT_TRUE(result.is_err());
-  EXPECT_EQ(result.err(), FilingError::INVALID_ARGS_ERROR);
+  EXPECT_THAT(FileOneCrashReport(std::move(report)), IsFilingError(FilingError::kInvalidArgsError));
 }
 
 TEST_F(CrashReporterTest, Succeed_OnInputCrashReportWithIsFatalTrue) {
@@ -948,7 +940,7 @@ TEST_F(CrashReporterTest, Succeed_OnInputCrashReportWithIsFatalTrue) {
       std::make_unique<stubs::DataProvider>(kFeedbackAnnotations, kDefaultAttachmentBundleKey));
   SetUpCrashReporterDefaultConfig({kUploadSuccessful});
 
-  ASSERT_TRUE(FileOneCrashReportWithIsFatal(true).is_response());
+  ASSERT_TRUE(FileOneCrashReportWithIsFatal(/*is_fatal=*/true).is_ok());
   CheckAnnotationsOnServer({
       {"isFatal", "true"},
   });
@@ -960,7 +952,7 @@ TEST_F(CrashReporterTest, Succeed_OnInputCrashReportWithIsFatalFalse) {
       std::make_unique<stubs::DataProvider>(kFeedbackAnnotations, kDefaultAttachmentBundleKey));
   SetUpCrashReporterDefaultConfig({kUploadSuccessful});
 
-  ASSERT_TRUE(FileOneCrashReportWithIsFatal(false).is_response());
+  ASSERT_TRUE(FileOneCrashReportWithIsFatal(/*is_fatal=*/false).is_ok());
   CheckAnnotationsOnServer({
       {"isFatal", "false"},
   });
@@ -977,7 +969,7 @@ TEST_F(CrashReporterTest, Upload_OnUserAlreadyOptedInDataSharing) {
   SetUpPrivacySettingsServer(std::make_unique<fakes::PrivacySettings>());
   SetPrivacySettings(kUserOptInDataSharing);
 
-  ASSERT_TRUE(FileOneCrashReport().is_response());
+  ASSERT_TRUE(FileOneCrashReport().is_ok());
   CheckAnnotationsOnServer();
   CheckAttachmentsOnServer({kDefaultAttachmentBundleKey});
 }
@@ -992,9 +984,9 @@ TEST_F(CrashReporterTest, Archive_OnUserAlreadyOptedOutDataSharing) {
   SetPrivacySettings(kUserOptOutDataSharing);
   RunLoopUntilIdle();
 
-  const CrashReporter_FileReport_Result result = FileOneCrashReport();
-  ASSERT_TRUE(result.is_response());
-  EXPECT_EQ(result.response().results.result(), FilingSuccess::REPORT_NOT_FILED_USER_OPTED_OUT);
+  const fidl::Result<fuchsia_feedback::CrashReporter::FileReport> result = FileOneCrashReport();
+  ASSERT_TRUE(result.is_ok());
+  EXPECT_EQ(result->results().result(), FilingSuccess::kReportNotFiledUserOptedOut);
 }
 
 TEST_F(CrashReporterTest, Upload_OnceUserOptInDataSharing) {
@@ -1006,7 +998,7 @@ TEST_F(CrashReporterTest, Upload_OnceUserOptInDataSharing) {
       /*enable_hourly_snapshots=*/true, std::vector({kUploadSuccessful}));
   SetUpPrivacySettingsServer(std::make_unique<fakes::PrivacySettings>());
 
-  ASSERT_TRUE(FileOneCrashReport().is_response());
+  ASSERT_TRUE(FileOneCrashReport().is_ok());
   CheckServerStillExpectRequests();
 
   SetPrivacySettings(kUserOptInDataSharing);
@@ -1024,9 +1016,9 @@ TEST_F(CrashReporterTest, Succeed_OnFailedUploadPutIntoDisk) {
       /*daily_per_product_quota=*/kDailyPerProductQuota,
       /*enable_hourly_snapshots=*/true, std::vector({kUploadFailed}));
 
-  const CrashReporter_FileReport_Result result = FileOneCrashReport();
-  ASSERT_TRUE(result.is_response());
-  EXPECT_EQ(result.response().results.result(), FilingSuccess::REPORT_ON_DISK);
+  const fidl::Result<fuchsia_feedback::CrashReporter::FileReport> result = FileOneCrashReport();
+  ASSERT_TRUE(result.is_ok());
+  EXPECT_EQ(result->results().result(), FilingSuccess::kReportOnDisk);
 }
 
 TEST_F(CrashReporterTest, Succeed_OnFailedUploadPutIntoMemory) {
@@ -1038,9 +1030,9 @@ TEST_F(CrashReporterTest, Succeed_OnFailedUploadPutIntoMemory) {
       /*enable_hourly_snapshots=*/true, std::vector({kUploadFailed}),
       /*max_reports_cache_size=*/StorageSize::Bytes(0));
 
-  const CrashReporter_FileReport_Result result = FileOneCrashReport();
-  ASSERT_TRUE(result.is_response());
-  EXPECT_EQ(result.response().results.result(), FilingSuccess::REPORT_IN_MEMORY);
+  const fidl::Result<fuchsia_feedback::CrashReporter::FileReport> result = FileOneCrashReport();
+  ASSERT_TRUE(result.is_ok());
+  EXPECT_EQ(result->results().result(), FilingSuccess::kReportInMemory);
 }
 
 TEST_F(CrashReporterTest, Fail_OnThrottledUpload) {
@@ -1051,9 +1043,7 @@ TEST_F(CrashReporterTest, Fail_OnThrottledUpload) {
       /*daily_per_product_quota=*/kDailyPerProductQuota,
       /*enable_hourly_snapshots=*/true, std::vector({kUploadThrottled}));
 
-  const CrashReporter_FileReport_Result result = FileOneCrashReport();
-  ASSERT_TRUE(result.is_err());
-  EXPECT_EQ(result.err(), FilingError::SERVER_ERROR);
+  EXPECT_THAT(FileOneCrashReport(), IsFilingError(FilingError::kServerError));
 }
 
 TEST_F(CrashReporterTest, Fail_OnUploadTimeout) {
@@ -1064,9 +1054,7 @@ TEST_F(CrashReporterTest, Fail_OnUploadTimeout) {
       /*daily_per_product_quota=*/kDailyPerProductQuota,
       /*enable_hourly_snapshots=*/true, std::vector({kUploadTimeout}));
 
-  const CrashReporter_FileReport_Result result = FileOneCrashReport();
-  ASSERT_TRUE(result.is_err());
-  EXPECT_EQ(result.err(), FilingError::SERVER_ERROR);
+  EXPECT_THAT(FileOneCrashReport(), IsFilingError(FilingError::kServerError));
 }
 
 TEST_F(CrashReporterTest, Succeed_OnDisabledUpload) {
@@ -1077,9 +1065,9 @@ TEST_F(CrashReporterTest, Succeed_OnDisabledUpload) {
       /*daily_per_product_quota=*/std::nullopt,
       /*enable_hourly_snapshots=*/true);
 
-  const CrashReporter_FileReport_Result result = FileOneCrashReport();
-  ASSERT_TRUE(result.is_response());
-  EXPECT_EQ(result.response().results.result(), FilingSuccess::REPORT_ON_DISK);
+  const fidl::Result<fuchsia_feedback::CrashReporter::FileReport> result = FileOneCrashReport();
+  ASSERT_TRUE(result.is_ok());
+  EXPECT_EQ(result->results().result(), FilingSuccess::kReportOnDisk);
 }
 
 TEST_F(CrashReporterTest, Succeed_OnNoFeedbackAttachments) {
@@ -1087,7 +1075,7 @@ TEST_F(CrashReporterTest, Succeed_OnNoFeedbackAttachments) {
       std::make_unique<stubs::DataProviderReturnsNoAttachment>(kFeedbackAnnotations));
   SetUpCrashReporterDefaultConfig({kUploadSuccessful});
 
-  EXPECT_TRUE(FileOneCrashReportWithSingleAttachment().is_response());
+  EXPECT_TRUE(FileOneCrashReportWithSingleAttachment().is_ok());
   CheckAnnotationsOnServer({{feedback::kDebugSnapshotPresentKey, "false"}});
   CheckAttachmentsOnServer({kSingleAttachmentKey});
 }
@@ -1132,7 +1120,7 @@ TEST_F(CrashReporterTest, Check_CobaltAfterSuccessfulUpload) {
       std::make_unique<stubs::DataProvider>(kFeedbackAnnotations, kEmptyAttachmentBundleKey));
   SetUpCrashReporterDefaultConfig({kUploadSuccessful});
 
-  EXPECT_TRUE(FileOneCrashReport().is_response());
+  EXPECT_TRUE(FileOneCrashReport().is_ok());
 
   EXPECT_THAT(ReceivedCobaltEvents(),
               UnorderedElementsAreArray({
@@ -1151,7 +1139,7 @@ TEST_F(CrashReporterTest, Check_CobaltAfterQuotaReached) {
       /*daily_per_product_quota=*/0u,
       /*enable_hourly_snapshots=*/true);
 
-  EXPECT_TRUE(FileOneCrashReport().is_err());
+  EXPECT_THAT(FileOneCrashReport(), IsFilingError(FilingError::kQuotaReachedError));
   EXPECT_THAT(ReceivedCobaltEvents(), UnorderedElementsAreArray({
                                           cobalt::Event(cobalt::CrashState::kOnDeviceQuotaReached),
                                       }));
@@ -1161,7 +1149,7 @@ TEST_F(CrashReporterTest, CheckCobaltAfterInvalidInputNoProgramName) {
   SetUpDataProviderServer(std::make_unique<stubs::DataProviderReturnsEmptySnapshot>());
   SetUpCrashReporterDefaultConfig();
 
-  EXPECT_TRUE(FileOneEmptyCrashReport().is_err());
+  EXPECT_THAT(FileOneEmptyCrashReport(), IsFilingError(FilingError::kInvalidArgsError));
   EXPECT_THAT(ReceivedCobaltEvents(), UnorderedElementsAreArray({
                                           cobalt::Event(cobalt::CrashState::kDropped),
                                       }));
@@ -1171,12 +1159,11 @@ TEST_F(CrashReporterTest, CheckCobaltAfterInvalidInputZeroWeight) {
   SetUpDataProviderServer(std::make_unique<stubs::DataProviderReturnsEmptySnapshot>());
   SetUpCrashReporterDefaultConfig();
 
-  CrashReport report;
-  report.set_program_name("crashing_program_generic");
-  report.set_weight(0);
-  const CrashReporter_FileReport_Result result = FileOneCrashReport(std::move(report));
-
-  EXPECT_TRUE(result.is_err());
+  CrashReport report({
+      .program_name = "crashing_program_generic",
+      .weight = 0,
+  });
+  EXPECT_THAT(FileOneCrashReport(std::move(report)), IsFilingError(FilingError::kInvalidArgsError));
   EXPECT_THAT(ReceivedCobaltEvents(), UnorderedElementsAreArray({
                                           cobalt::Event(cobalt::CrashState::kDropped),
                                       }));

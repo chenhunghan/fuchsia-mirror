@@ -423,7 +423,11 @@ async fn retained_index_inital_state() {
 async fn retained_index_updated_and_persisted() {
     let env = TestEnv::builder().build().await;
     let packages = [
-        PackageBuilder::new("pkg-a").build().await.unwrap(),
+        PackageBuilder::new("pkg-a")
+            .add_resource_at("bin/bar", "a-bin-bar".as_bytes())
+            .build()
+            .await
+            .unwrap(),
         PackageBuilder::new("multi-pkg-a")
             .add_resource_at("bin/foo", "a-bin-foo".as_bytes())
             .add_resource_at("data/content", "a-data-content".as_bytes())
@@ -459,10 +463,12 @@ async fn retained_index_updated_and_persisted() {
                 "retained" : {
                     "entries" : {
                         blob_ids[0].to_string() => {
-                            "state": "need-meta-far",
+                            "state": "partial-blob-set",
+                            "blobs-count": 0u64,
                         },
                         blob_ids[1].to_string() => {
-                            "state": "need-meta-far",
+                            "state": "partial-blob-set",
+                            "blobs-count": 0u64,
                         }
                     },
                 }
@@ -482,8 +488,8 @@ async fn retained_index_updated_and_persisted() {
                 "retained" : {
                     "entries" : contains {
                         blob_ids[0].to_string() => {
-                            "state": "known",
-                            "blobs-count": 0u64
+                            "state": "partial-blob-set",
+                            "blobs-count": 1u64
                         }
                     },
                 }
@@ -520,7 +526,7 @@ async fn retained_index_updated_and_persisted() {
                 "retained" : {
                     "entries" : contains {
                         blob_ids[1].to_string() => {
-                            "state": "known",
+                            "state": "partial-blob-set",
                             "blobs-count": 2u64
                         },
                     },
@@ -543,11 +549,34 @@ async fn retained_index_updated_and_persisted() {
                 "retained" : {
                     "entries" : {
                         blob_ids[0].to_string() => {
-                            "state": "known",
-                            "blobs-count": 0u64
+                            "state": "partial-blob-set",
+                            "blobs-count": 1u64
                         },
                         blob_ids[1].to_string() => {
-                            "state": "known",
+                            "state": "partial-blob-set",
+                            "blobs-count": 2u64
+                        },
+                    },
+                }
+            }
+        }
+    );
+
+    // Re-retaining once both meta.fars are resident in blobfs marks both entries complete.
+    replace_retained_packages(&env.proxies.retained_packages, blob_ids.as_slice()).await;
+    let hierarchy = env.inspect_hierarchy().await;
+    assert_data_tree!(
+        hierarchy,
+        root: contains {
+            "index": contains {
+                "retained" : {
+                    "entries" : {
+                        blob_ids[0].to_string() => {
+                            "state": "complete-blob-set",
+                            "blobs-count": 1u64
+                        },
+                        blob_ids[1].to_string() => {
+                            "state": "complete-blob-set",
                             "blobs-count": 2u64
                         },
                     },
@@ -598,7 +627,7 @@ async fn index_updated_mid_package_write() {
                 "retained" : {
                     "entries" : {
                         blob_id.to_string() => {
-                            "state": "known",
+                            "state": "complete-blob-set",
                             "blobs-count": 2u64,
                         },
                     },
@@ -620,7 +649,7 @@ async fn index_updated_mid_package_write() {
                 "retained" : {
                     "entries" : {
                         blob_id.to_string() => {
-                            "state": "known",
+                            "state": "complete-blob-set",
                             "blobs-count": 2u64,
                         },
                     },

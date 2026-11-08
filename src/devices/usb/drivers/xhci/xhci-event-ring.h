@@ -118,6 +118,7 @@ class EventRing {
   void SchedulePortStatusChange(uint8_t port_id, bool preempt = false);
   fpromise::promise<void, zx_status_t> HandlePortStatusChangeEvent(uint8_t port_id);
   fpromise::promise<void, zx_status_t> WaitForPortStatusChange(uint8_t port_id);
+  void SchedulePortStatusChangePoll(uint8_t port_id, uint64_t wait_generation, uint32_t attempt);
 
   fpromise::promise<void, zx_status_t> LinkUp(uint8_t port_id);
   void CallPortStatusChanged(fbl::RefPtr<PortStatusChangeState> state);

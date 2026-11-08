@@ -14,7 +14,7 @@ use serde_derive::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 mod build;
@@ -442,6 +442,7 @@ pub fn generate_from_manifest<W: io::Write>(mut output: &mut W, opt: &Opt) -> Re
     let metadata = cmd.exec().with_context(|| {
         format!("while running cargo metadata: supplied cargo binary: {:?}", opt.cargo)
     })?;
+    let split_metadata = resolve_split_metadata(manifest_path, &contents, opt)?;
 
     gn::write_header(&mut output, manifest_path).context("writing header")?;
 
@@ -451,7 +452,8 @@ pub fn generate_from_manifest<W: io::Write>(mut output: &mut W, opt: &Opt) -> Re
     }
 
     // Construct a build graph of all the targets for GN
-    let mut build_graph = GnBuildGraph::new(&metadata);
+    let mut build_graph =
+        GnBuildGraph::new(&metadata, split_metadata.as_ref().map(|(k, u)| (k, u)));
     match metadata.resolve.as_ref() {
         Some(resolve) => {
             let top_level_id =
@@ -823,12 +825,13 @@ pub fn generate_from_manifest<W: io::Write>(mut output: &mut W, opt: &Opt) -> Re
 
         // Check to see if we need to review individual features for this crate
         let reviewed_features = reviewed_features_map.get(target);
+        let all_target_features = target.all_features();
         if require_feature_reviews.contains(target.name().as_str()) {
             match reviewed_features {
                 Some(Some(_)) => {}
                 _ => {
                     let mut features_map = std::collections::BTreeMap::new();
-                    let _ = features_map.insert("features", &target.features);
+                    let _ = features_map.insert("features", &all_target_features);
 
                     anyhow::bail!(
                         "{name} {version} requires feature review but reviewed features not found.\n\n\
@@ -857,11 +860,10 @@ pub fn generate_from_manifest<W: io::Write>(mut output: &mut W, opt: &Opt) -> Re
         if let Some(&Some(reviewed_features)) = reviewed_features {
             let reviewed_features_set =
                 reviewed_features.iter().map(|s| s.as_str()).collect::<HashSet<_>>();
-            let unreviewed_features = target
-                .features
+            let unreviewed_features = all_target_features
                 .iter()
-                .filter(|f| !reviewed_features_set.contains(f.as_str()))
-                .map(|feature| feature.to_string())
+                .filter(|f| !reviewed_features_set.contains(**f))
+                .map(|feature| (*feature).to_string())
                 .collect::<Vec<_>>();
             if !unreviewed_features.is_empty() {
                 anyhow::bail!(
@@ -1004,6 +1006,204 @@ pub fn run(args: &[impl AsRef<str>]) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn rewrite_relative_manifest_paths(val: &mut toml::Value, base_dir: &Path) {
+    let Some(table) = val.as_table_mut() else {
+        return;
+    };
+    if let Some(ws) = table.get_mut("workspace").and_then(|v| v.as_table_mut()) {
+        for key in ["members", "exclude"] {
+            if let Some(arr) = ws.get_mut(key).and_then(|v| v.as_array_mut()) {
+                for item in arr {
+                    if let Some(s) = item.as_str()
+                        && Path::new(s).is_relative()
+                    {
+                        *item =
+                            toml::Value::String(base_dir.join(s).to_string_lossy().into_owned());
+                    }
+                }
+            }
+        }
+    }
+    rewrite_nested_path_keys(val, base_dir);
+}
+
+fn rewrite_nested_path_keys(val: &mut toml::Value, base_dir: &Path) {
+    match val {
+        toml::Value::Table(table) => {
+            if let Some(p_val) = table.get_mut("path")
+                && let Some(p_str) = p_val.as_str()
+                && Path::new(p_str).is_relative()
+            {
+                *p_val = toml::Value::String(base_dir.join(p_str).to_string_lossy().into_owned());
+            }
+            for (_, v) in table.iter_mut() {
+                rewrite_nested_path_keys(v, base_dir);
+            }
+        }
+        toml::Value::Array(arr) => {
+            for v in arr {
+                rewrite_nested_path_keys(v, base_dir);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn write_temp_cargo_config(parent_dir: &Path, temp_dir: &Path) -> Result<()> {
+    let config_toml_path = parent_dir.join(".cargo").join("config.toml");
+    let legacy_config_path = parent_dir.join(".cargo").join("config");
+    let source_path = if config_toml_path.exists() {
+        Some(config_toml_path)
+    } else if legacy_config_path.exists() {
+        Some(legacy_config_path)
+    } else {
+        None
+    };
+
+    let mut cfg_val = if let Some(path) = source_path {
+        let raw = std::fs::read_to_string(&path)?;
+        toml::from_str::<toml::Value>(&raw)?
+    } else {
+        toml::Value::Table(toml::map::Map::new())
+    };
+
+    if let Some(root) = cfg_val.as_table_mut() {
+        if let Some(sources) = root.get_mut("source").and_then(|s| s.as_table_mut()) {
+            for (_, src) in sources.iter_mut() {
+                if let Some(src_tbl) = src.as_table_mut()
+                    && let Some(dir_val) = src_tbl.get_mut("directory")
+                    && let Some(dir_str) = dir_val.as_str()
+                    && Path::new(dir_str).is_relative()
+                {
+                    *dir_val = toml::Value::String(
+                        parent_dir.join(dir_str).to_string_lossy().into_owned(),
+                    );
+                }
+            }
+        }
+        let build_tbl =
+            root.entry("build").or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+        if let Some(tbl) = build_tbl.as_table_mut() {
+            let _ = tbl.insert(
+                "target-dir".to_string(),
+                toml::Value::String(temp_dir.join("target").to_string_lossy().into_owned()),
+            );
+        }
+    }
+
+    let cargo_cfg_dir = temp_dir.join(".cargo");
+    std::fs::create_dir_all(&cargo_cfg_dir)?;
+    std::fs::write(cargo_cfg_dir.join("config.toml"), toml::to_string(&cfg_val)?)?;
+    Ok(())
+}
+
+fn run_cargo_metadata_in_temp_dir(
+    parent_dir: &Path,
+    manifest_toml: &toml::Value,
+    opt: &Opt,
+    apply_feature_flags: bool,
+    tag: &str,
+) -> Result<cargo_metadata::Metadata> {
+    let temp = tempfile::tempdir()?;
+    std::fs::create_dir_all(temp.path().join("src"))?;
+    std::fs::write(temp.path().join("src").join("lib.rs"), "")?;
+    let lock_src = parent_dir.join("Cargo.lock");
+    if lock_src.exists() {
+        let _ = std::fs::copy(&lock_src, temp.path().join("Cargo.lock"))?;
+    }
+    write_temp_cargo_config(parent_dir, temp.path())?;
+
+    let temp_manifest = temp.path().join("Cargo.toml");
+    std::fs::write(&temp_manifest, toml::to_string(manifest_toml)?)?;
+
+    let mut cmd = cargo_metadata::MetadataCommand::new();
+    let _ = cmd.current_dir(temp.path());
+    let _ = cmd.manifest_path(&temp_manifest);
+    if let Some(ref cargo_path) = opt.cargo {
+        let _ = cmd.cargo_path(cargo_path);
+    }
+    if apply_feature_flags {
+        if opt.all_features {
+            let _ = cmd.features(CargoOpt::AllFeatures);
+        }
+        if opt.no_default_features {
+            let _ = cmd.features(CargoOpt::NoDefaultFeatures);
+        }
+        if !opt.features.is_empty() {
+            let _ = cmd.features(CargoOpt::SomeFeatures(opt.features.clone()));
+        }
+    }
+    let _ = cmd.other_options(vec![String::from("--offline")]);
+    cmd.exec().with_context(|| format!("running split cargo metadata ({})", tag))
+}
+
+fn resolve_split_metadata(
+    manifest_path: &Path,
+    manifest_contents: &str,
+    opt: &Opt,
+) -> Result<Option<(cargo_metadata::Metadata, cargo_metadata::Metadata)>> {
+    let mut parsed: toml::Value = toml::from_str(manifest_contents)?;
+    let has_kernel_deps = parsed
+        .get("target")
+        .and_then(|t| t.get("cfg(kernel)"))
+        .and_then(|k| k.get("dependencies"))
+        .and_then(|d| d.as_table())
+        .is_some_and(|t| !t.is_empty());
+    if !has_kernel_deps {
+        return Ok(None);
+    }
+
+    let parent_dir = manifest_path
+        .parent()
+        .with_context(|| format!("manifest has no parent dir: {}", manifest_path.display()))?;
+    rewrite_relative_manifest_paths(&mut parsed, parent_dir);
+
+    let kernel_deps = parsed["target"]["cfg(kernel)"]["dependencies"].clone();
+
+    // 1. Kernel manifest: standalone root with `[dependencies]` set strictly to `[target.'cfg(kernel)'.dependencies]`.
+    let mut kernel_toml = toml::map::Map::new();
+    if let Some(pkg) = parsed.get("package") {
+        let _ = kernel_toml.insert("package".to_string(), pkg.clone());
+    }
+    if let Some(ws) = parsed.get("workspace").and_then(|w| w.as_table()) {
+        let mut clean_ws = toml::map::Map::new();
+        if let Some(resolver) = ws.get("resolver") {
+            let _ = clean_ws.insert("resolver".to_string(), resolver.clone());
+        }
+        let _ = kernel_toml.insert("workspace".to_string(), toml::Value::Table(clean_ws));
+    }
+    if let Some(patch) = parsed.get("patch") {
+        let _ = kernel_toml.insert("patch".to_string(), patch.clone());
+    }
+    let _ = kernel_toml.insert("dependencies".to_string(), kernel_deps);
+
+    // 2. Userspace manifest: full manifest minus `[target.'cfg(kernel)'.dependencies]`.
+    let mut userspace_toml = parsed;
+    if let Some(ws_tbl) = userspace_toml.get_mut("workspace").and_then(|w| w.as_table_mut()) {
+        let _ = ws_tbl.remove("members");
+    }
+    if let Some(kernel_tbl) = userspace_toml
+        .get_mut("target")
+        .and_then(|t| t.as_table_mut())
+        .and_then(|t| t.get_mut("cfg(kernel)"))
+        .and_then(|k| k.as_table_mut())
+    {
+        let _ = kernel_tbl.remove("dependencies");
+    }
+
+    let kernel_meta = run_cargo_metadata_in_temp_dir(
+        parent_dir,
+        &toml::Value::Table(kernel_toml),
+        opt,
+        false,
+        "kernel",
+    )?;
+    let userspace_meta =
+        run_cargo_metadata_in_temp_dir(parent_dir, &userspace_toml, opt, true, "userspace")?;
+
+    Ok(Some((kernel_meta, userspace_meta)))
 }
 
 #[cfg(test)]

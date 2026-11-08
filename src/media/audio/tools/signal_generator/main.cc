@@ -5,8 +5,7 @@
 #include <lib/async-loop/default.h>
 #include <lib/async/cpp/task.h>
 
-#include <re2/re2.h>
-
+#include "re2/re2.h"
 #include "src/lib/fxl/command_line.h"
 #include "src/lib/fxl/strings/string_number_conversions.h"
 #include "src/media/audio/tools/signal_generator/signal_generator.h"

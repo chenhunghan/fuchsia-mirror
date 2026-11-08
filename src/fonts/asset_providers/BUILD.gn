@@ -4,7 +4,6 @@
 
 # See README.md for details.
 
-import("//build/bazel/export_fuchsia_package_to_bazel.gni")
 import("//build/components.gni")
 import("//src/fonts/build/font_asset_provider.gni")
 import("//src/fonts/build/fonts.gni")
@@ -75,26 +74,17 @@ fuchsia_package("provider.package") {
 
 # Generate bazel inputs for the font asset provider packages above.
 group("bazel_inputs") {
-  public_deps = [
-    ":open-fonts-collection-bazel",
-    ":small-open-fonts-collection-bazel",
-  ]
+  public_deps = [ "//build/bazel/target_tests:font_manifest_generator_bazel_input($host_toolchain)" ]
 }
 
+# LINT.IfChange
 # Font asset provider definitions.
 # Expect to have one for each font collection in //src/fonts/collections.
 font_asset_provider("open-fonts-collection") {
   deps = [ "//src/fonts/collections:open-fonts-collection" ]
 }
 
-export_fuchsia_package_to_bazel("open-fonts-collection-bazel") {
-  package = ":open-fonts-collection.asset-provider.package"
-}
-
 font_asset_provider("small-open-fonts-collection") {
   deps = [ "//src/fonts/collections:small-open-fonts-collection" ]
 }
-
-export_fuchsia_package_to_bazel("small-open-fonts-collection-bazel") {
-  package = ":small-open-fonts-collection.asset-provider.package"
-}
+# LINT.ThenChange(BUILD.bazel)

@@ -95,17 +95,6 @@ pub fn timespec_is_zero(ts: timespec) -> bool {
     ts.tv_sec == 0 && ts.tv_nsec == 0
 }
 
-/// Returns an `itimerspec` with `it_value` set to `deadline` and `it_interval` set to `interval`.
-pub fn itimerspec_from_deadline_interval<T: zx::Timeline>(
-    deadline: zx::Instant<T>,
-    interval: zx::MonotonicDuration,
-) -> itimerspec {
-    itimerspec {
-        it_interval: timespec_from_duration(interval),
-        it_value: timespec_from_time(deadline),
-    }
-}
-
 pub fn duration_to_scheduler_clock(duration: zx::MonotonicDuration) -> i64 {
     duration.into_nanos() / NANOS_PER_SCHEDULER_TICK
 }
@@ -115,16 +104,6 @@ mod test {
     use super::*;
 
     const NANOS_PER_MICRO: i64 = 1000;
-
-    #[::fuchsia::test]
-    fn test_itimerspec() {
-        let deadline = zx::MonotonicInstant::from_nanos(2 * NANOS_PER_SECOND + 50);
-        let interval = zx::MonotonicDuration::from_nanos(1000);
-        let time_spec = itimerspec_from_deadline_interval(deadline, interval);
-        assert_eq!(time_spec.it_value.tv_sec, 2);
-        assert_eq!(time_spec.it_value.tv_nsec, 50);
-        assert_eq!(time_spec.it_interval.tv_nsec, 1000);
-    }
 
     #[::fuchsia::test]
     fn test_time_from_timespec() {

@@ -1,0 +1,55 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/idk:idk_ffx_tool.bzl", "idk_ffx_tool")
+load("//src/developer/ffx/build:ffx_plugin.bzl", "ffx_plugin")
+
+package(default_applicable_licenses = ["//:license"])
+
+ffx_plugin(
+    name = "ffx_package",
+    args_deps = [
+        "//src/developer/ffx/core:lib",
+        "//third_party/rust_crates/vendor:argh",
+    ],
+    args_srcs = ["src/args.rs"],
+    edition = "2024",
+    plugin_deps = [
+        "//src/developer/ffx/plugins/package/archive:ffx_package_archive",
+        "//src/developer/ffx/plugins/package/blob:ffx_package_blob",
+        "//src/developer/ffx/plugins/package/build:ffx_package_build",
+        "//src/developer/ffx/plugins/package/far:ffx_package_far",
+        "//src/developer/ffx/plugins/package/file-hash:ffx_package_file_hash",
+        "//src/developer/ffx/plugins/package/ota-manifest:ffx_package_ota_manifest",
+    ],
+    sdk_category = "partner",
+    version = "0.1.0",
+)
+
+# LINT.IfChange(ffx_package_tool)
+idk_ffx_tool(
+    name = "ffx_package_tool",
+    srcs = ["src/main.rs"],
+    category = "partner",
+    edition = "2024",
+    idk_name = "ffx-package",
+    visibility = [
+        "//sdk:__pkg__",
+        "//src/developer/build_info/testing:__pkg__",
+        "//src/developer/ffx/build/tests:__pkg__",
+        "//src/graphics/examples/vkproto/cmd-buf-benchmark:__pkg__",
+        "//src/graphics/examples/vkproto/driver-tests:__pkg__",
+        "//src/graphics/tests:__subpackages__",
+        "//src/lib/fuchsia-component-test/realm_builder_server:__pkg__",
+        "//src/performance/memory/heapdump/collector:__pkg__",
+        "//src/sys/pkg/tests/system-tests:__pkg__",
+        "//src/testing/fidl/intl_property_manager:__pkg__",
+        "//src/tests/end_to_end/package_manager:__pkg__",
+    ],
+    deps = [
+        ":ffx_package_suite",
+        "//src/lib/fuchsia-async",
+    ],
+)
+# LINT.ThenChange(//src/developer/ffx/plugins/package/BUILD.gn:ffx_package_tool)

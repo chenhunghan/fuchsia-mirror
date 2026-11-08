@@ -21,6 +21,12 @@
             availability: "optional",
         },
         {
+            config: "fuchsia.connectivity.RedactNetworkIdentifiers",
+            from: "parent",
+            to: "#wlandevicemonitor",
+            availability: "same_as_target",
+        },
+        {
             service: "fuchsia.wlan.phy.Service",
             from: "parent",
             to: "#wlandevicemonitor",

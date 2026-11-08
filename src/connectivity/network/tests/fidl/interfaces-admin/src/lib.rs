@@ -1558,7 +1558,7 @@ async fn device_control_owns_interfaces_lifetimes(name: &str, detach: bool) {
                 fidl::endpoints::create_proxy::<fidl_fuchsia_net_tun::PortMarker>();
             tun_dev
                 .add_port(
-                    &fidl_fuchsia_net_tun::DevicePortConfig {
+                    fidl_fuchsia_net_tun::DevicePortConfig {
                         base: Some(fidl_fuchsia_net_tun::BasePortConfig {
                             id: Some(index),
                             rx_types: Some(vec![
@@ -1753,7 +1753,7 @@ async fn control_terminal_events(
             fidl::endpoints::create_proxy::<fidl_fuchsia_net_tun::PortMarker>();
         tun_dev
             .add_port(
-                &fidl_fuchsia_net_tun::DevicePortConfig {
+                fidl_fuchsia_net_tun::DevicePortConfig {
                     base: Some(config),
                     mac: Some(fidl_mac!("02:aa:bb:cc:dd:ee")),
                     ..Default::default()
@@ -3177,7 +3177,7 @@ async fn reinstall_same_port(name: &str) {
             fidl::endpoints::create_proxy::<fidl_fuchsia_net_tun::PortMarker>();
         tun_dev
             .add_port(
-                &fidl_fuchsia_net_tun::DevicePortConfig {
+                fidl_fuchsia_net_tun::DevicePortConfig {
                     base: Some(fidl_fuchsia_net_tun::BasePortConfig {
                         id: Some(PORT_ID),
                         rx_types: Some(vec![fidl_fuchsia_hardware_network::FrameType::Ethernet]),

@@ -1,0 +1,48 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# The test component and package (`:system-update-committer-integration-test`
+# and `:package`) stay in BUILD.gn because they use RealmBuilder and
+# `//src/lib/fuchsia-component-test/realm_builder_server` is not in Bazel.
+rustc_test(
+    name = "test_driver",
+    srcs = ["src/lib.rs"],
+    # Matches `program.binary` in
+    # meta/system-update-committer-integration-test.cml.
+    crate_name = "system_update_committer_integration_test",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.power.statecontrol:fuchsia.hardware.power.statecontrol_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.logger:fuchsia.logger_rust",
+        "//sdk/fidl/fuchsia.paver:fuchsia.paver_rust",
+        "//sdk/fidl/fuchsia.update:fuchsia.update_rust",
+        "//sdk/rust/zx",
+        "//src/lib/diagnostics/hierarchy/rust:diagnostics-hierarchy",
+        "//src/lib/diagnostics/reader/rust",
+        "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        # GN `//src/lib/fuchsia-component-test` is a group that also pulls in
+        # `:includes` and `realm_builder_server_component`.
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-sync",
+        "//src/sys/lib/cm_rust",
+        "//src/sys/lib/component-events",
+        "//src/sys/pkg/fidl/fuchsia.update.verify:fuchsia.update.verify_rust",
+        "//src/sys/pkg/testing/mock-health-verification",
+        "//src/sys/pkg/testing/mock-paver",
+        "//src/sys/pkg/testing/mock-reboot",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)

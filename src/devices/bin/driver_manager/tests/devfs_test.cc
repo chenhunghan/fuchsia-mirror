@@ -126,7 +126,7 @@ TEST(Devfs, Export_WithProtocol) {
   Devnode& root_node = root_slot.value();
 
   std::vector<std::unique_ptr<Devnode>> out;
-  ASSERT_OK(root_node.export_dir(Devnode::Target(), "one/two", "block", out));
+  ASSERT_OK(root_node.export_dir(Devnode::Target(), "one/two", "test", out));
 
   std::optional node_one = lookup(root_node, "one");
   ASSERT_TRUE(node_one.has_value());

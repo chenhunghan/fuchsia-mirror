@@ -18,6 +18,9 @@ pub const SHIFT: usize = 12;
 /// Mask that will extract the offset into a page of an address.
 pub const MASK: usize = 4095;
 
+/// The additional bit shift of the virtual address mask used for page table walking.
+pub const TABLE_LEVEL_SHIFT: usize = 9;
+
 /// Returns true if `val` is aligned to a page boundary.
 #[inline]
 pub const fn is_aligned(val: usize) -> bool {

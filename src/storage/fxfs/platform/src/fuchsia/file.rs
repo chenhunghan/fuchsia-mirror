@@ -613,38 +613,81 @@ impl vfs::node::Node for FxFile {
         self: Arc<Self>,
         destination_dir: Arc<dyn MutableDirectory>,
         name: Name,
+        options: fio::LinkIntoOptions,
     ) -> Result<(), zx::Status> {
-        let dir = destination_dir.into_any().downcast::<FxDirectory>().unwrap();
-        let store = self.handle.store();
+        let flags = options.flags.unwrap_or_default();
+        if flags.has_unknown_bits() {
+            return Err(zx::Status::INVALID_ARGS);
+        }
+        if !(flags - fio::LinkIntoFlags::REPLACE_EXISTING).is_empty() {
+            return Err(zx::Status::NOT_SUPPORTED);
+        }
+        let replace = flags.contains(fio::LinkIntoFlags::REPLACE_EXISTING);
+
+        let dir = destination_dir
+            .into_any()
+            .downcast::<FxDirectory>()
+            .map_err(|_| zx::Status::INVALID_ARGS)?;
         let object_id = self.object_id();
-        let transaction = store
-            .new_transaction(
-                lock_keys![
-                    LockKey::object(store.store_object_id(), object_id),
-                    LockKey::object(store.store_object_id(), dir.object_id()),
-                ],
-                Options::default(),
-            )
-            .await
-            .map_err(map_to_status)?;
+        let wrapping_key_id = self.fscrypt_wrapping_key_id().await?;
 
-        dir.check_fscrypt_policy_equivalence(self.fscrypt_wrapping_key_id().await?)?;
-
-        let state = self.load_state();
-        let is_unnamed_temporary = state.is_unnamed_temporary();
-        let to_be_purged = state.to_be_purged();
-        if is_unnamed_temporary {
-            // Remove object from graveyard and link it to `name`.
-            dir.link_graveyard_object(transaction, &name, object_id, ObjectDescriptor::File, || {
-                self.mark_as_permanent()
-            })
-            .await
-        } else {
-            // Check that we're not unlinked.
-            if to_be_purged {
+        if replace {
+            let extra_keys = [LockKey::object(dir.store().store_object_id(), object_id)];
+            let replace_context = dir
+                .directory()
+                .acquire_context_for_replace(None, &name, false, &extra_keys)
+                .await
+                .map_err(map_to_status)?;
+            dir.check_fscrypt_policy_equivalence(wrapping_key_id)?;
+            let state = self.load_state();
+            let is_unnamed_temporary = state.is_unnamed_temporary();
+            if !is_unnamed_temporary && state.to_be_purged() {
                 return Err(zx::Status::NOT_FOUND);
             }
-            dir.link_object(transaction, &name, object_id, ObjectDescriptor::File).await
+            dir.link_object_into_allowing_replacement(
+                replace_context,
+                &name,
+                object_id,
+                ObjectDescriptor::File,
+                is_unnamed_temporary,
+                move || {
+                    if is_unnamed_temporary {
+                        self.mark_as_permanent();
+                    }
+                },
+            )
+            .await
+        } else {
+            let store = dir.store();
+            let transaction = store
+                .new_transaction(
+                    lock_keys![
+                        LockKey::object(store.store_object_id(), dir.object_id()),
+                        LockKey::object(store.store_object_id(), object_id),
+                    ],
+                    Options::default(),
+                )
+                .await
+                .map_err(map_to_status)?;
+            dir.check_fscrypt_policy_equivalence(wrapping_key_id)?;
+            let state = self.load_state();
+            let is_unnamed_temporary = state.is_unnamed_temporary();
+            if !is_unnamed_temporary && state.to_be_purged() {
+                return Err(zx::Status::NOT_FOUND);
+            }
+            dir.link_object_into(
+                transaction,
+                &name,
+                object_id,
+                ObjectDescriptor::File,
+                is_unnamed_temporary,
+                move || {
+                    if is_unnamed_temporary {
+                        self.mark_as_permanent();
+                    }
+                },
+            )
+            .await
         }
     }
 
@@ -693,13 +736,7 @@ impl File for FxFile {
     }
 
     async fn enable_verity(&self, options: fio::VerificationOptions) -> Result<(), Status> {
-        // `set_read_only()` MUST be called before `flush()`. `flush()` acquires and releases
-        // the truncate lock (`truncate_guard`), acting as a barrier to ensure that any
-        // subsequent `truncate()` call will observe `read_only == true` under `truncate_guard`
-        // and fail.
-        self.handle.set_read_only();
-        self.handle.flush(FlushType::Sync).await.map_err(map_to_status)?;
-        self.handle.uncached_handle().enable_verity(options).await.map_err(map_to_status)
+        self.handle.enable_verity(options).await.map_err(map_to_status)
     }
 
     // Returns a VMO handle that supports paging.
@@ -2473,6 +2510,64 @@ mod tests {
     }
 
     #[fuchsia::test]
+    async fn test_enable_verity_failure_does_not_wedge_file() {
+        let fixture = TestFixture::new().await;
+        let root = fixture.root();
+
+        let file = open_file_checked(
+            &root,
+            "foo",
+            fio::Flags::FLAG_MAYBE_CREATE
+                | fio::PERM_READABLE
+                | fio::PERM_WRITABLE
+                | fio::Flags::PROTOCOL_FILE,
+            &Default::default(),
+        )
+        .await;
+
+        file.write(&[1; 8192])
+            .await
+            .expect("FIDL call failed")
+            .map_err(Status::err_from_raw)
+            .expect("write failed");
+
+        // Failing enable_verity (e.g. missing hash algorithm) should not leave the file wedged as
+        // read-only.
+        file.enable_verity(&fio::VerificationOptions {
+            hash_algorithm: None,
+            salt: Some(vec![0xFF; 8]),
+            ..Default::default()
+        })
+        .await
+        .expect("FIDL transport error")
+        .expect_err("enable_verity with missing hash_algorithm should fail");
+
+        // Writing, resizing, and subsequently enabling verity with valid options should succeed.
+        file.write(&[2; 4096])
+            .await
+            .expect("FIDL call failed")
+            .map_err(Status::err_from_raw)
+            .expect("write after failed enable_verity failed");
+        file.resize(4096)
+            .await
+            .expect("FIDL call failed")
+            .map_err(Status::err_from_raw)
+            .expect("resize after failed enable_verity failed");
+
+        file.enable_verity(&fio::VerificationOptions {
+            hash_algorithm: Some(fio::HashAlgorithm::Sha256),
+            salt: Some(vec![0xFF; 8]),
+            ..Default::default()
+        })
+        .await
+        .expect("FIDL transport error")
+        .expect("enable_verity after prior failure failed");
+
+        close_file_checked(file).await;
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
     async fn test_get_attributes_fsverity_not_enabled() {
         let fixture = TestFixture::new().await;
         let root = fixture.root();
@@ -2742,7 +2837,11 @@ mod tests {
             let (status, dst_token) = root.deprecated_get_token().await.expect("FIDL call failed");
             zx::Status::ok(status).expect("get_token failed");
             tmpfile
-                .link_into(zx::Event::from(dst_token.unwrap()), FILE1)
+                .link_into(
+                    zx::Event::from(dst_token.unwrap()),
+                    FILE1,
+                    &fio::LinkIntoOptions::default(),
+                )
                 .await
                 .expect("link_into wire message failed")
                 .map_err(zx::Status::err_from_raw)
@@ -2752,7 +2851,11 @@ mod tests {
             let (status, dst_token) = root.deprecated_get_token().await.expect("FIDL call failed");
             zx::Status::ok(status).expect("get_token failed");
             tmpfile
-                .link_into(zx::Event::from(dst_token.unwrap()), FILE2)
+                .link_into(
+                    zx::Event::from(dst_token.unwrap()),
+                    FILE2,
+                    &fio::LinkIntoOptions::default(),
+                )
                 .await
                 .expect("link_into wire message failed")
                 .map_err(zx::Status::err_from_raw)
@@ -2816,6 +2919,597 @@ mod tests {
     }
 
     #[fuchsia::test]
+    async fn test_file_link_into_self_replacement() {
+        let fixture = TestFixture::new().await;
+        let root = fixture.root();
+
+        let file = open_file_checked(
+            &root,
+            "foo",
+            fio::Flags::FLAG_MAYBE_CREATE
+                | fio::Flags::PROTOCOL_FILE
+                | fio::PERM_READABLE
+                | fio::PERM_WRITABLE,
+            &fio::Options::default(),
+        )
+        .await;
+        file::write(&file, b"hello").await.expect("write failed");
+
+        let dst_token =
+            root.get_token().await.expect("FIDL call failed").expect("get_token failed");
+
+        file.link_into(
+            dst_token,
+            "foo",
+            &fio::LinkIntoOptions {
+                flags: Some(fio::LinkIntoFlags::REPLACE_EXISTING),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("link_into failed")
+        .map_err(zx::Status::err_from_raw)
+        .expect("link_into failed");
+
+        let reopened = open_file_checked(
+            &root,
+            "foo",
+            fio::Flags::PROTOCOL_FILE | fio::PERM_READABLE,
+            &fio::Options::default(),
+        )
+        .await;
+        assert_eq!(file::read(&reopened).await.expect("read failed"), b"hello");
+
+        close_file_checked(reopened).await;
+        close_file_checked(file).await;
+        fsck(fixture.fs().clone()).await.expect("fsck failed");
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_symlink_link_into_replace_file() {
+        let fixture = TestFixture::new().await;
+        let root = fixture.root();
+
+        let (symlink, symlink_server) = fidl::endpoints::create_proxy::<fio::SymlinkMarker>();
+        root.create_symlink("foo", b"target", Some(symlink_server))
+            .await
+            .expect("FIDL call failed")
+            .map_err(zx::Status::err_from_raw)
+            .expect("create_symlink failed");
+
+        let file = open_file_checked(
+            &root,
+            "bar",
+            fio::Flags::FLAG_MAYBE_CREATE
+                | fio::Flags::PROTOCOL_FILE
+                | fio::PERM_READABLE
+                | fio::PERM_WRITABLE,
+            &fio::Options::default(),
+        )
+        .await;
+        file::write(&file, b"world").await.expect("write failed");
+        close_file_checked(file).await;
+
+        let dst_token =
+            root.get_token().await.expect("FIDL call failed").expect("get_token failed");
+
+        symlink
+            .link_into(
+                dst_token,
+                "bar",
+                &fio::LinkIntoOptions {
+                    flags: Some(fio::LinkIntoFlags::REPLACE_EXISTING),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("link_into failed")
+            .map_err(zx::Status::err_from_raw)
+            .expect("link_into failed");
+
+        let (bar_symlink, bar_server) = fidl::endpoints::create_proxy::<fio::SymlinkMarker>();
+        root.open(
+            "bar",
+            fio::Flags::PROTOCOL_SYMLINK | fio::PERM_READABLE,
+            &fio::Options::default(),
+            bar_server.into_channel(),
+        )
+        .expect("open failed");
+        let info = bar_symlink.describe().await.expect("describe failed");
+        assert_eq!(info.target.as_deref(), Some(&b"target"[..]));
+
+        fsck(fixture.fs().clone()).await.expect("fsck failed");
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_file_link_into_replace_symlink() {
+        let fixture = TestFixture::new().await;
+        let root = fixture.root();
+
+        let file = open_file_checked(
+            &root,
+            "foo",
+            fio::Flags::FLAG_MAYBE_CREATE
+                | fio::Flags::PROTOCOL_FILE
+                | fio::PERM_READABLE
+                | fio::PERM_WRITABLE,
+            &fio::Options::default(),
+        )
+        .await;
+        file::write(&file, b"hello").await.expect("write failed");
+
+        root.create_symlink("bar", b"target", None)
+            .await
+            .expect("FIDL call failed")
+            .map_err(zx::Status::err_from_raw)
+            .expect("create_symlink failed");
+
+        let dst_token =
+            root.get_token().await.expect("FIDL call failed").expect("get_token failed");
+
+        file.link_into(
+            dst_token,
+            "bar",
+            &fio::LinkIntoOptions {
+                flags: Some(fio::LinkIntoFlags::REPLACE_EXISTING),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("link_into failed")
+        .map_err(zx::Status::err_from_raw)
+        .expect("link_into failed");
+
+        let bar = open_file_checked(
+            &root,
+            "bar",
+            fio::Flags::PROTOCOL_FILE | fio::PERM_READABLE,
+            &fio::Options::default(),
+        )
+        .await;
+        let read_buf = file::read(&bar).await.expect("read failed");
+        assert_eq!(read_buf, b"hello");
+
+        close_file_checked(bar).await;
+        close_file_checked(file).await;
+        fsck(fixture.fs().clone()).await.expect("fsck failed");
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_file_link_into_replace_existing_open_file() {
+        let fixture = TestFixture::new().await;
+        let root = fixture.root();
+
+        let file1 = open_file_checked(
+            &root,
+            "foo",
+            fio::Flags::FLAG_MAYBE_CREATE
+                | fio::Flags::PROTOCOL_FILE
+                | fio::PERM_READABLE
+                | fio::PERM_WRITABLE,
+            &fio::Options::default(),
+        )
+        .await;
+        file::write(&file1, b"hello").await.expect("write failed");
+
+        let file2 = open_file_checked(
+            &root,
+            "bar",
+            fio::Flags::FLAG_MAYBE_CREATE
+                | fio::Flags::PROTOCOL_FILE
+                | fio::PERM_READABLE
+                | fio::PERM_WRITABLE,
+            &fio::Options::default(),
+        )
+        .await;
+        file::write(&file2, b"world").await.expect("write failed");
+
+        let dst_token =
+            root.get_token().await.expect("FIDL call failed").expect("get_token failed");
+
+        file1
+            .link_into(
+                dst_token,
+                "bar",
+                &fio::LinkIntoOptions {
+                    flags: Some(fio::LinkIntoFlags::REPLACE_EXISTING),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("link_into failed")
+            .map_err(zx::Status::err_from_raw)
+            .expect("link_into failed");
+
+        let bar = open_file_checked(
+            &root,
+            "bar",
+            fio::Flags::PROTOCOL_FILE | fio::PERM_READABLE,
+            &fio::Options::default(),
+        )
+        .await;
+        let read_buf = file::read(&bar).await.expect("read failed");
+        assert_eq!(read_buf, b"hello");
+
+        file2
+            .seek(fio::SeekOrigin::Start, 0)
+            .await
+            .expect("seek")
+            .map_err(zx::Status::err_from_raw)
+            .expect("seek");
+        let old_content = file::read(&file2).await.expect("read failed");
+        assert_eq!(old_content, b"world");
+
+        close_file_checked(bar).await;
+        close_file_checked(file2).await;
+        close_file_checked(file1).await;
+        fsck(fixture.fs().clone()).await.expect("fsck failed");
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_unnamed_temporary_file_link_into_replace_existing() {
+        const FILE: &str = "foo";
+        let fixture = TestFixture::new().await;
+        let root = fixture.root();
+
+        // Create an existing file.
+        let file = open_file_checked(
+            &root,
+            FILE,
+            fio::Flags::FLAG_MAYBE_CREATE
+                | fio::Flags::PROTOCOL_FILE
+                | fio::PERM_READABLE
+                | fio::PERM_WRITABLE,
+            &fio::Options::default(),
+        )
+        .await;
+        file::write(&file, b"initial contents").await.expect("Failed to write to file");
+
+        // Create an unnamed temporary file.
+        let tmpfile = open_file_checked(
+            &root,
+            ".",
+            fio::Flags::PROTOCOL_FILE
+                | fio::Flags::FLAG_CREATE_AS_UNNAMED_TEMPORARY
+                | fio::PERM_READABLE
+                | fio::PERM_WRITABLE,
+            &fio::Options::default(),
+        )
+        .await;
+        file::write(&tmpfile, b"updated contents").await.expect("Failed to write to file");
+
+        let dst_token =
+            root.get_token().await.expect("FIDL call failed").expect("get_token failed");
+
+        // Without REPLACE_EXISTING, link_into should fail with ALREADY_EXISTS.
+        let status = tmpfile
+            .link_into(dst_token, FILE, &fio::LinkIntoOptions::default())
+            .await
+            .expect("link_into wire message failed")
+            .map_err(zx::Status::err_from_raw);
+        assert_eq!(status, Err(zx::Status::ALREADY_EXISTS));
+
+        // Now link with REPLACE_EXISTING.
+        let dst_token =
+            root.get_token().await.expect("FIDL call failed").expect("get_token failed");
+        tmpfile
+            .link_into(
+                dst_token,
+                FILE,
+                &fio::LinkIntoOptions {
+                    flags: Some(fio::LinkIntoFlags::REPLACE_EXISTING),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("link_into wire message failed")
+            .map_err(zx::Status::err_from_raw)
+            .expect("link_into failed");
+
+        // The file should now contain "updated contents".
+        let file = open_file_checked(
+            &root,
+            FILE,
+            fio::Flags::PROTOCOL_FILE | fio::PERM_READABLE,
+            &fio::Options::default(),
+        )
+        .await;
+        let data = file::read(&file).await.expect("read failed");
+        assert_eq!(data, b"updated contents");
+
+        fsck(fixture.fs().clone()).await.expect("fsck failed");
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_unnamed_temporary_file_link_into_cannot_replace_directory() {
+        const DIR: &str = "somedir";
+        let fixture = TestFixture::new().await;
+        let root = fixture.root();
+
+        // Create a directory.
+        let _dir = open_dir_checked(
+            &root,
+            DIR,
+            fio::Flags::FLAG_MAYBE_CREATE
+                | fio::Flags::PROTOCOL_DIRECTORY
+                | fio::PERM_READABLE
+                | fio::PERM_WRITABLE,
+            fio::Options::default(),
+        )
+        .await;
+
+        // Create an unnamed temporary file.
+        let tmpfile = open_file_checked(
+            &root,
+            ".",
+            fio::Flags::PROTOCOL_FILE
+                | fio::Flags::FLAG_CREATE_AS_UNNAMED_TEMPORARY
+                | fio::PERM_READABLE
+                | fio::PERM_WRITABLE,
+            &fio::Options::default(),
+        )
+        .await;
+
+        let dst_token =
+            root.get_token().await.expect("FIDL call failed").expect("get_token failed");
+
+        // Attempt to replace the directory with REPLACE_EXISTING. Should fail with NOT_FILE.
+        let status = tmpfile
+            .link_into(
+                dst_token,
+                DIR,
+                &fio::LinkIntoOptions {
+                    flags: Some(fio::LinkIntoFlags::REPLACE_EXISTING),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("link_into wire message failed")
+            .map_err(zx::Status::err_from_raw);
+        assert_eq!(status, Err(zx::Status::NOT_FILE));
+
+        fsck(fixture.fs().clone()).await.expect("fsck failed");
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_link_into_invalid_flags() {
+        let fixture = TestFixture::new().await;
+        let root = fixture.root();
+
+        let tmpfile = open_file_checked(
+            &root,
+            ".",
+            fio::Flags::PROTOCOL_FILE
+                | fio::Flags::FLAG_CREATE_AS_UNNAMED_TEMPORARY
+                | fio::PERM_READABLE
+                | fio::PERM_WRITABLE,
+            &fio::Options::default(),
+        )
+        .await;
+
+        let unknown_flag = fio::LinkIntoFlags::from_bits_allow_unknown(1 << 1);
+        for flags in [unknown_flag, fio::LinkIntoFlags::REPLACE_EXISTING | unknown_flag] {
+            let dst_token =
+                root.get_token().await.expect("FIDL call failed").expect("get_token failed");
+            let status = tmpfile
+                .link_into(
+                    dst_token,
+                    "foo",
+                    &fio::LinkIntoOptions { flags: Some(flags), ..Default::default() },
+                )
+                .await
+                .expect("link_into wire message failed")
+                .map_err(zx::Status::err_from_raw);
+            assert_eq!(status, Err(zx::Status::INVALID_ARGS));
+        }
+
+        let (symlink, symlink_server) = fidl::endpoints::create_proxy::<fio::SymlinkMarker>();
+        root.create_symlink("sym", b"target", Some(symlink_server))
+            .await
+            .expect("FIDL call failed")
+            .map_err(zx::Status::err_from_raw)
+            .expect("create_symlink failed");
+        for flags in [unknown_flag, fio::LinkIntoFlags::REPLACE_EXISTING | unknown_flag] {
+            let dst_token =
+                root.get_token().await.expect("FIDL call failed").expect("get_token failed");
+            let status = symlink
+                .link_into(
+                    dst_token,
+                    "sym2",
+                    &fio::LinkIntoOptions { flags: Some(flags), ..Default::default() },
+                )
+                .await
+                .expect("link_into wire message failed")
+                .map_err(zx::Status::err_from_raw);
+            assert_eq!(status, Err(zx::Status::INVALID_ARGS));
+        }
+
+        fsck(fixture.fs().clone()).await.expect("fsck failed");
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_concurrent_link_into_unnamed_temporary_file() {
+        use fxfs::object_store::transaction::{LockKey, Options, lock_keys};
+        use std::pin::pin;
+        use vfs::name::Name;
+        use vfs::node::Node;
+
+        let fixture = TestFixture::new().await;
+        let root = fixture.root();
+
+        let tmpfile = open_file_checked(
+            &root,
+            ".",
+            fio::Flags::PROTOCOL_FILE
+                | fio::Flags::FLAG_CREATE_AS_UNNAMED_TEMPORARY
+                | fio::PERM_READABLE
+                | fio::PERM_WRITABLE,
+            &fio::Options::default(),
+        )
+        .await;
+        file::write(&tmpfile, b"shared contents").await.expect("Failed to write to file");
+
+        let (_, immutable_attrs) = tmpfile
+            .get_attributes(fio::NodeAttributesQuery::ID)
+            .await
+            .expect("FIDL call failed")
+            .map_err(zx::Status::err_from_raw)
+            .expect("get_attributes failed");
+        let file_id = immutable_attrs.id.unwrap();
+
+        let volume = fixture.volume().volume();
+        let file_node = volume
+            .cache()
+            .get(file_id)
+            .expect("file node missing")
+            .into_any()
+            .downcast::<FxFile>()
+            .unwrap();
+        let root_dir = volume
+            .cache()
+            .get(volume.store().root_directory_object_id())
+            .expect("root dir missing")
+            .into_any()
+            .downcast::<super::FxDirectory>()
+            .unwrap();
+
+        // Hold the transaction lock on `file_id` so both `link_into` futures reach the lock
+        // acquisition point concurrently before either can commit.
+        let store = volume.store();
+        let txn = store
+            .new_transaction(
+                lock_keys![LockKey::object(store.store_object_id(), file_id)],
+                Options::default(),
+            )
+            .await
+            .expect("new_transaction failed");
+
+        let mut fut1 = pin!(file_node.clone().link_into(
+            root_dir.clone(),
+            Name::try_from("link1".to_string()).unwrap(),
+            fio::LinkIntoOptions::default(),
+        ));
+        let mut fut2 = pin!(file_node.clone().link_into(
+            root_dir.clone(),
+            Name::try_from("link2".to_string()).unwrap(),
+            fio::LinkIntoOptions::default(),
+        ));
+
+        assert!(futures::poll!(&mut fut1).is_pending());
+        assert!(futures::poll!(&mut fut2).is_pending());
+
+        drop(txn);
+
+        let (res1, res2) = futures::join!(fut1, fut2);
+        res1.expect("first link_into failed");
+        res2.expect("second link_into failed");
+
+        for name in ["link1", "link2"] {
+            let f = open_file_checked(
+                &root,
+                name,
+                fio::Flags::PROTOCOL_FILE | fio::PERM_READABLE,
+                &fio::Options::default(),
+            )
+            .await;
+            assert_eq!(file::read(&f).await.expect("read failed"), b"shared contents");
+            close_file_checked(f).await;
+        }
+
+        drop(file_node);
+        drop(root_dir);
+        close_file_checked(tmpfile).await;
+        fsck(fixture.fs().clone()).await.expect("fsck failed");
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_link_into_races_with_unlink() {
+        use fxfs::object_store::transaction::{LockKey, Options, lock_keys};
+        use std::pin::pin;
+        use vfs::directory::entry_container::MutableDirectory;
+        use vfs::name::Name;
+        use vfs::node::Node;
+
+        let fixture = TestFixture::new().await;
+        let root = fixture.root();
+
+        let file = open_file_checked(
+            &root,
+            "foo",
+            fio::Flags::FLAG_MAYBE_CREATE
+                | fio::Flags::PROTOCOL_FILE
+                | fio::PERM_READABLE
+                | fio::PERM_WRITABLE,
+            &fio::Options::default(),
+        )
+        .await;
+        let (_, immutable_attrs) = file
+            .get_attributes(fio::NodeAttributesQuery::ID)
+            .await
+            .expect("FIDL call failed")
+            .map_err(zx::Status::err_from_raw)
+            .expect("get_attributes failed");
+        let file_id = immutable_attrs.id.unwrap();
+
+        let volume = fixture.volume().volume();
+        let file_node = volume
+            .cache()
+            .get(file_id)
+            .expect("file node missing")
+            .into_any()
+            .downcast::<FxFile>()
+            .unwrap();
+        let root_dir = volume
+            .cache()
+            .get(volume.store().root_directory_object_id())
+            .expect("root dir missing")
+            .into_any()
+            .downcast::<super::FxDirectory>()
+            .unwrap();
+
+        // Hold the transaction lock on `file_id` and poll `unlink` first so `unlink` completes
+        // its initial lookup on `root_dir` and blocks on `file_id` (while holding `root_dir`),
+        // and `link_into` queues behind `unlink`.
+        let store = volume.store();
+        let txn = store
+            .new_transaction(
+                lock_keys![LockKey::object(store.store_object_id(), file_id)],
+                Options::default(),
+            )
+            .await
+            .expect("new_transaction failed");
+
+        let mut unlink_fut = pin!(root_dir.clone().unlink("foo", false));
+        assert!(futures::poll!(&mut unlink_fut).is_pending());
+
+        let mut link_fut = pin!(file_node.clone().link_into(
+            root_dir.clone(),
+            Name::try_from("bar".to_string()).unwrap(),
+            fio::LinkIntoOptions::default(),
+        ));
+        assert!(futures::poll!(&mut link_fut).is_pending());
+
+        drop(txn);
+        unlink_fut.await.expect("unlink failed");
+
+        assert_eq!(link_fut.await, Err(zx::Status::NOT_FOUND));
+
+        drop(file_node);
+        drop(root_dir);
+        close_file_checked(file).await;
+        fsck(fixture.fs().clone()).await.expect("fsck failed");
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
     async fn test_unnamed_temporary_file_in_encrypted_directory() {
         let fixture = TestFixture::new().await;
         let root = fixture.root();
@@ -2874,7 +3568,7 @@ mod tests {
             encrypted_directory.deprecated_get_token().await.expect("FIDL call failed");
         zx::Status::ok(status).expect("get_token failed");
         encryped_tmpfile
-            .link_into(zx::Event::from(dst_token.unwrap()), "foo")
+            .link_into(zx::Event::from(dst_token.unwrap()), "foo", &fio::LinkIntoOptions::default())
             .await
             .expect("link_into wire message failed")
             .expect("link_into failed");
@@ -2901,7 +3595,11 @@ mod tests {
         zx::Status::ok(status).expect("get_token failed");
         assert_eq!(
             unencryped_tmpfile
-                .link_into(zx::Event::from(dst_token.unwrap()), "bar")
+                .link_into(
+                    zx::Event::from(dst_token.unwrap()),
+                    "bar",
+                    &fio::LinkIntoOptions::default(),
+                )
                 .await
                 .expect("link_into wire message failed")
                 .map_err(zx::Status::err_from_raw)
@@ -3016,14 +3714,22 @@ mod tests {
             join!(
                 fasync::Task::spawn(async move {
                     tmpfile_clone1
-                        .link_into(zx::Event::from(dst_token1.unwrap()), &(2 * i).to_string())
+                        .link_into(
+                            zx::Event::from(dst_token1.unwrap()),
+                            &(2 * i).to_string(),
+                            &fio::LinkIntoOptions::default(),
+                        )
                         .await
                         .expect("link_into wire message failed")
                         .expect("link_into failed");
                 }),
                 fasync::Task::spawn(async move {
                     tmpfile_clone2
-                        .link_into(zx::Event::from(dst_token2.unwrap()), &(2 * i + 1).to_string())
+                        .link_into(
+                            zx::Event::from(dst_token2.unwrap()),
+                            &(2 * i + 1).to_string(),
+                            &fio::LinkIntoOptions::default(),
+                        )
                         .await
                         .expect("link_into wire message failed")
                         .expect("link_into failed");

@@ -168,7 +168,7 @@ impl PidEntry {
 
             let (parent_tg, my_sid) = {
                 let tg_state = tg.read();
-                if !tg_state.is_running() {
+                if !tg.is_running() {
                     continue;
                 }
                 (tg_state.parent.as_ref().map(|p| p.upgrade()), tg_state.session.id)
@@ -190,7 +190,7 @@ impl PidEntry {
 
             let (parent_pgid, parent_sid) = {
                 let parent_state = parent_tg.read();
-                if !parent_state.is_running() {
+                if !parent_tg.is_running() {
                     continue;
                 }
                 (parent_tg.pgid().id, parent_state.session.id)
@@ -211,7 +211,7 @@ impl PidEntry {
         for tg in self.pgid_thread_groups(scope) {
             let stop_state = tg.load_stopped();
             if matches!(stop_state, StopState::GroupStopping | StopState::GroupStopped)
-                && tg.read().is_running()
+                && tg.is_running()
             {
                 return true;
             }
@@ -228,7 +228,7 @@ impl PidEntry {
         for &signal in signals {
             for tg in self.pgid_thread_groups(&scope) {
                 let state = tg.write();
-                if !state.is_exited() {
+                if !tg.is_exited() {
                     state.send_signal(SignalInfo::kernel(signal));
                 }
             }

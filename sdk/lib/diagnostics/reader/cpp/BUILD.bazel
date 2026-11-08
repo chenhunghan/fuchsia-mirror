@@ -1,0 +1,98 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_component.bzl",
+    "fx_unittest_component",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [],  # Include all tests in the package.
+    visibility = ["//sdk/lib:__pkg__"],
+)
+
+alias(
+    name = "cpp",
+    testonly = True,
+    actual = ":archive_reader",
+    visibility = ["//:__subpackages__"],
+)
+
+fx_cc_library(
+    name = "archive_reader",
+    srcs = [
+        "archive_reader.cc",
+        "inspect.cc",
+        "logs.cc",
+    ],
+    hdrs = [
+        "archive_reader.h",
+        "constants.h",
+        "inspect.h",
+        "logs.h",
+    ],
+    # TODO(https://fxbug.dev/570694755): archive_reader.cc and logs.cc use
+    # angled `#include <src/lib/...>`, which GN resolves via its root `-I` flag
+    # while Bazel only adds `-iquote .`.
+    # @bazel2gn:skip
+    copts = ["-I."],
+    implementation_deps = [
+        "//sdk/fidl/fuchsia.inspect:fuchsia.inspect_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//src/lib/fsl",
+        "//src/lib/fxl",
+        "//zircon/system/ulib/sync",
+    ],
+    # Callers include these headers as <lib/diagnostics/reader/cpp/...>.
+    includes = ["../../../.."],
+    public_configs = ["//sdk/config"],  # For bazel2gn.
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_cpp",
+        "//sdk/fidl/fuchsia.diagnostics.types:fuchsia.diagnostics.types_cpp",
+        "//sdk/lib/async",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/fit-promise",
+        "//sdk/lib/stdcompat",
+        "//third_party/rapidjson",
+        "//zircon/system/ulib/inspect",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "archive_reader_test",
+    srcs = [
+        "archive_reader_unittest.cc",
+        "inspect_unittest.cc",
+        "logs_unittest.cc",
+    ],
+    deps = [
+        ":archive_reader",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_component(
+    name = "archive_reader_unittest",
+    binary = ":archive_reader_test",
+)
+
+fx_package(
+    name = "diagnostics_reader_cpp_tests_package",
+    package_name = "diagnostics_reader_cpp_tests",
+    test_components = [":archive_reader_unittest"],
+)
+
+fx_test(
+    name = "diagnostics_reader_cpp_tests",
+    package = ":diagnostics_reader_cpp_tests_package",
+)

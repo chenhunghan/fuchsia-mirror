@@ -5,6 +5,10 @@
 // The trace category used for starnix-related traces.
 pub const CATEGORY_STARNIX: &'static str = "starnix";
 
+// The trace category used for the duration of every syscall handled by starnix
+// (`sys_*` events).
+pub const CATEGORY_STARNIX_SYSCALLS: &'static str = "starnix:syscalls";
+
 // The trace category used for memory manager related traces.
 pub const CATEGORY_STARNIX_MM: &'static str = "starnix:mm";
 

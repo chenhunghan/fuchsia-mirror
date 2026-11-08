@@ -51,7 +51,7 @@ use fidl_fuchsia_storage_block as fblock;
 use fidl_fuchsia_storage_mapping as fmapping;
 use fuchsia_async as fasync;
 use fuchsia_hash::{HASH_SIZE, Hash};
-use fuchsia_merkle::{MerkleVerifier, ReadSizedMerkleVerifier};
+use fuchsia_merkle::{BLOCK_SIZE, MerkleVerifier, ReadSizedMerkleVerifier};
 use fuchsia_sync::Mutex;
 use futures::TryStreamExt as _;
 use linked_hash_map::LinkedHashMap;
@@ -509,11 +509,26 @@ impl Cache {
         })?;
         let remaining_in_parent = cached_blob.len.saturating_sub(parent_offset);
         let unaligned_parent_len = std::cmp::min(length as u64, remaining_in_parent) as usize;
-        if let Err(e) =
-            verifier.verify_aligned(parent_offset as usize, parent_slice, unaligned_parent_len)
-        {
+        if unaligned_parent_len == 0 {
+            return Err(Error::from(zx::Status::IO_DATA_INTEGRITY)
+                .context(format!("Empty or out-of-bounds parent payload for blob {parent_key}")));
+        }
+        let verify_len =
+            std::cmp::min(parent_slice.len(), unaligned_parent_len.next_multiple_of(BLOCK_SIZE));
+        if let Err(e) = verifier.verify_aligned(
+            parent_offset as usize,
+            parent_slice.subslice(0..verify_len),
+            unaligned_parent_len,
+        ) {
             return Err(Error::from(zx::Status::IO_DATA_INTEGRITY)
                 .context(format!("Failed to verify parent payload for blob {parent_key}: {e:?}")));
+        }
+        if verify_len < parent_slice.len()
+            && !is_zeroed(parent_slice.subslice(verify_len..parent_slice.len()))
+        {
+            return Err(Error::from(zx::Status::IO_DATA_INTEGRITY).context(format!(
+                "Non-zero trailing bytes in parent payload for blob {parent_key}"
+            )));
         }
         Ok(())
     }
@@ -785,6 +800,20 @@ impl Cache {
     }
 }
 
+fn is_zeroed(slice: PtrByteSlice<'_>) -> bool {
+    let align = std::mem::align_of::<u128>();
+    let size = std::mem::size_of::<u128>();
+    if (slice.as_ptr() as usize).is_multiple_of(align) && slice.len().is_multiple_of(size) {
+        slice.iter_as::<u128>().all(|word| word == 0)
+    } else {
+        slice.chunks(std::mem::size_of::<u64>()).all(|word| {
+            word.read::<u64>().is_some_and(|v| v == 0)
+                || (word.len() < std::mem::size_of::<u64>()
+                    && word.chunks(1).all(|b| b.read::<u8>() == Some(0)))
+        })
+    }
+}
+
 /// Bundles the context for a child VMO page delivery and reports a pager failure on `Drop`
 /// unless [`ChildPagesDelivery::deliver`] succeeds in supplying the pages.
 struct ChildPagesDelivery<'a> {
@@ -954,17 +983,30 @@ impl delivery::DeliveryQueueProvider for Cache {
         let chunk_range = target_offset..target_offset + bounded_len;
 
         // For the final chunk of an unaligned blob, the buffer passed to `verify_aligned` is
-        // page-aligned and zero-padded, but `verify_aligned` expects the remaining unaligned length
-        // of the valid data.
+        // page-aligned and zero-padded, and `verify_aligned` requires the slice not to extend into
+        // blocks beyond `unaligned_len.next_multiple_of(BLOCK_SIZE)`. When the system page size
+        // exceeds `BLOCK_SIZE` (e.g. 16 KiB or 64 KiB pages), verify the Merkle-covered prefix and
+        // confirm any remaining bytes up to `bounded_len` are zero before supplying pages.
         let remaining_in_blob = cached_blob.len.saturating_sub(target_offset);
         let unaligned_len = std::cmp::min(chunk_len, remaining_in_blob) as usize;
+        if unaligned_len == 0 {
+            self.report_pager_failure(&cached_blob.vmo, chunk_range, zx::Status::IO_DATA_INTEGRITY);
+            bail!("Empty or out-of-bounds payload for blob {}", key);
+        }
+        let bounded_bytes = bounded_len as usize;
+        let verify_len = std::cmp::min(bounded_bytes, unaligned_len.next_multiple_of(BLOCK_SIZE));
+        let slice = unverified_pages.as_ptr_byte_slice();
         if let Err(e) = verifier.verify_aligned(
             target_offset as usize,
-            unverified_pages.as_ptr_byte_slice(),
+            slice.subslice(0..verify_len),
             unaligned_len,
         ) {
             self.report_pager_failure(&cached_blob.vmo, chunk_range, zx::Status::IO_DATA_INTEGRITY);
             bail!("Failed to verify payload for blob {}: {:?}", key, e);
+        }
+        if verify_len < bounded_bytes && !is_zeroed(slice.subslice(verify_len..bounded_bytes)) {
+            self.report_pager_failure(&cached_blob.vmo, chunk_range, zx::Status::IO_DATA_INTEGRITY);
+            bail!("Non-zero trailing bytes in payload for blob {}", key);
         }
 
         if let Err(e) = self.pager.supply_pages(
@@ -2455,14 +2497,17 @@ mod tests {
         // Start a reader on page 0 and deliver the valid first chunk (0..read_alignment).
         let paged_vmo_clone1 =
             paged_vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("duplicate_handle failed");
+        let (started_tx1, started_rx1) = oneshot::channel();
         let (tx1, rx1) = oneshot::channel();
         let expected_page0 = env.blob_data[..page_size].to_vec();
         let thread1 = std::thread::spawn(move || {
             let mut buf = vec![0u8; page_size];
+            let _ = started_tx1.send(());
             paged_vmo_clone1.read(&mut buf, 0).expect("read should succeed");
             assert_eq!(buf, expected_page0);
             let _ = tx1.send(());
         });
+        started_rx1.await.expect("reader thread failed to start");
         fasync::Timer::new(std::time::Duration::from_millis(5)).await;
 
         let valid_chunk = &env.blob_data[..read_alignment];
@@ -3460,5 +3505,192 @@ mod tests {
             fasync::Timer::new(std::time::Duration::from_millis(5)).await;
         }
         assert!(pager_and_verifier.cache.get_child_vmo(child_key1).is_some());
+
+        // Sparse ChildData (`length == 0`) supplies zero-filled pages at page 1 of `vmo1`.
+        let (child_key_sparse, vmo_sparse) = session1_proxy
+            .create_vmo(8192, fblock::CreateVmoOptions::empty())
+            .await
+            .expect("create_vmo fidl failed")
+            .expect("create_vmo failed");
+        sender
+            .push(
+                DeliveryCommand::ChildData {
+                    parent_offset: 0,
+                    offset: 0,
+                    length: 0,
+                    child_key: child_key_sparse,
+                    child_target_offset: 0,
+                    in_chunk_offset: 0,
+                    child_length: 4096,
+                }
+                .into(),
+            )
+            .expect("push sparse ChildData failed");
+        let mut sparse_buf = vec![0xFFu8; 4096];
+        vmo_sparse.read(&mut sparse_buf, 0).expect("vmo_sparse page 0 read failed");
+        assert_eq!(sparse_buf, vec![0u8; 4096]);
+
+        // Corrupted parent payload in `ChildData` fails the child VMO pager request with
+        // `zx::Status::IO_DATA_INTEGRITY`.
+        let mut bad_payload = sender.reserve_payload(blob_size).expect("reserve_payload failed");
+        let mut corrupted = blob_data.clone();
+        corrupted[4096] ^= 0xFF;
+        bad_payload.data().copy_from_slice(&corrupted);
+        let bad_off = bad_payload.offset();
+        let mut reader =
+            spawn_reader_expect_error(&vmo_sparse, 4096, 4096, zx::Status::IO_DATA_INTEGRITY);
+        reader.wait_started().await;
+        fasync::Timer::new(std::time::Duration::from_millis(5)).await;
+        bad_payload
+            .commit(
+                DeliveryCommand::ChildData {
+                    parent_offset: 0,
+                    offset: bad_off,
+                    length: blob_size as u32,
+                    child_key: child_key_sparse,
+                    child_target_offset: 4096,
+                    in_chunk_offset: 4096,
+                    child_length: 4096,
+                }
+                .into(),
+            )
+            .expect("commit corrupted ChildData failed");
+        reader.wait_and_verify().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_oversized_payload_clamps_merkle_blocks_and_checks_zero_tail() {
+        #[repr(align(16))]
+        struct AlignedBuf([u8; 4096]);
+
+        let mut aligned = AlignedBuf([0u8; 4096]);
+        assert!(is_zeroed(PtrByteSlice::from(&aligned.0[..])));
+        assert!(is_zeroed(PtrByteSlice::from(&aligned.0[1..4095])));
+        aligned.0[4094] = 1;
+        assert!(!is_zeroed(PtrByteSlice::from(&aligned.0[..])));
+        assert!(!is_zeroed(PtrByteSlice::from(&aligned.0[1..4095])));
+
+        // Single-block 5,000-byte parent blob (`next_multiple_of(BLOCK_SIZE) == 8192`) delivered in
+        // a 16 KiB page-aligned payload.
+        let env = TestEnv::new(5000).await;
+        let _parent_vmo =
+            env.pager_and_verifier.create_vmo(&env.valid_root).await.expect("create_vmo failed");
+
+        let page_size = zx::system_get_page_size() as usize;
+        let mut sender = SyncSender::<RawDeliveryCommand>::new(
+            env.delivery_vmo
+                .duplicate_handle(zx::Rights::SAME_RIGHTS)
+                .expect("duplicate_handle failed"),
+            page_size,
+            mapping::PENDING_DELIVERY_COMMANDS_CAPACITY,
+        )
+        .expect("SyncSender::new failed");
+
+        let mut reg_payload =
+            sender.reserve_payload(env.valid_leaves.len()).expect("reserve_payload failed");
+        reg_payload.data().copy_from_slice(&env.valid_leaves);
+        let reg_off = reg_payload.offset();
+        reg_payload
+            .commit(
+                DeliveryCommand::RegisterBlob {
+                    key: TEST_VMO_KEY,
+                    offset: reg_off,
+                    length: env.valid_leaves.len() as u32,
+                    read_alignment: 16 * 1024,
+                }
+                .into(),
+            )
+            .expect("commit RegisterBlob failed");
+
+        let blob =
+            env.pager_and_verifier.cache.get_by_key(TEST_VMO_KEY).expect("get_by_key failed");
+        while blob.merkle_verifier.get().is_none() {
+            fasync::Timer::new(std::time::Duration::from_millis(5)).await;
+        }
+
+        let child_port = zx::Port::create();
+        let child_key_ok = 88u64;
+        let child_vmo_ok = env
+            .pager_and_verifier
+            .cache
+            .pager
+            .create_vmo(zx::VmoOptions::empty(), &child_port, child_key_ok, 100)
+            .unwrap();
+        env.pager_and_verifier.cache.register_child_vmo(
+            TEST_VMO_KEY,
+            child_key_ok,
+            child_vmo_ok.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
+            100,
+        );
+
+        let payload_len = std::cmp::max(16 * 1024, page_size);
+        let mut clean_buf = vec![0u8; payload_len];
+        clean_buf[..env.blob_data.len()].copy_from_slice(&env.blob_data);
+        let mut payload_ok = sender.reserve_payload(payload_len).expect("reserve_payload failed");
+        payload_ok.data().copy_from_slice(&clean_buf);
+        let off_ok = payload_ok.offset();
+        payload_ok
+            .commit(
+                DeliveryCommand::ChildData {
+                    parent_offset: 0,
+                    offset: off_ok,
+                    length: payload_len as u32,
+                    child_key: child_key_ok,
+                    child_target_offset: 0,
+                    in_chunk_offset: 0,
+                    child_length: page_size as u32,
+                }
+                .into(),
+            )
+            .expect("commit clean ChildData failed");
+
+        let mut read_buf = vec![0u8; page_size];
+        child_vmo_ok.read(&mut read_buf, 0).expect("read child_vmo_ok failed");
+        assert_eq!(&read_buf[..100], &env.blob_data[..100]);
+        assert_eq!(&read_buf[100..], &vec![0u8; page_size - 100][..]);
+
+        // Non-zero byte beyond `BLOCK_SIZE` (8 KiB) in the 16 KiB parent payload must fail with
+        // `IO_DATA_INTEGRITY`.
+        let child_key_bad = 89u64;
+        let child_vmo_bad = env
+            .pager_and_verifier
+            .cache
+            .pager
+            .create_vmo(zx::VmoOptions::empty(), &child_port, child_key_bad, 100)
+            .unwrap();
+        env.pager_and_verifier.cache.register_child_vmo(
+            TEST_VMO_KEY,
+            child_key_bad,
+            child_vmo_bad.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
+            100,
+        );
+
+        let mut reader =
+            spawn_reader_expect_error(&child_vmo_bad, 0, page_size, zx::Status::IO_DATA_INTEGRITY);
+        reader.wait_started().await;
+        fasync::Timer::new(std::time::Duration::from_millis(5)).await;
+
+        let mut dirty_buf = clean_buf;
+        dirty_buf[payload_len - 1] = 0x5A;
+        let mut payload_bad = sender.reserve_payload(payload_len).expect("reserve_payload failed");
+        payload_bad.data().copy_from_slice(&dirty_buf);
+        let off_bad = payload_bad.offset();
+        payload_bad
+            .commit(
+                DeliveryCommand::ChildData {
+                    parent_offset: 0,
+                    offset: off_bad,
+                    length: payload_len as u32,
+                    child_key: child_key_bad,
+                    child_target_offset: 0,
+                    in_chunk_offset: 0,
+                    child_length: page_size as u32,
+                }
+                .into(),
+            )
+            .expect("commit dirty ChildData failed");
+        reader.wait_and_verify().await;
+
+        env.teardown().await;
     }
 }

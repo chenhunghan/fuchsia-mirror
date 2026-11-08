@@ -75,7 +75,7 @@ CRATE_ANNOTATIONS = {
     ],
     "crc32fast": [
         crate.annotation(
-            version = "1.5.0",
+            version = "1.5.3",
             rustc_flags = [
                 "--cfg=stable_arm_crc32_intrinsics",
             ],
@@ -141,7 +141,7 @@ CRATE_ANNOTATIONS = {
     ],
     "indexmap": [
         crate.annotation(
-            version = "1.9.2",
+            version = "1.9.3",
             rustc_flags = [
                 "--cfg=has_std",
             ],
@@ -274,22 +274,6 @@ CRATE_ANNOTATIONS = {
             ],
         ),
     ],
-    "num-integer": [
-        crate.annotation(
-            version = "0.1.46",
-            rustc_flags = [
-                "--cfg=has_i128",
-            ],
-        ),
-    ],
-    "num-iter": [
-        crate.annotation(
-            version = "0.1.45",
-            rustc_flags = [
-                "--cfg=has_i128",
-            ],
-        ),
-    ],
     "num-rational": [
         crate.annotation(
             version = "0.4.2",
@@ -355,23 +339,6 @@ CRATE_ANNOTATIONS = {
             rustc_flags = [
                 "--cfg=span_locations",
                 "--cfg=wrap_proc_macro",
-            ],
-        ),
-    ],
-    "rand": [
-        crate.annotation(
-            version = "*",
-            crate_features = [
-                "alloc",
-                "default",
-                "std",
-                "std_rng",
-                "sys_rng",
-                "thread_rng",
-            ],
-            deps = [
-                "//third_party/rust_crates/vendor/chacha20-0.10.2:chacha20",
-                "//third_party/rust_crates/vendor/getrandom-0.4.3:getrandom",
             ],
         ),
     ],
@@ -441,7 +408,7 @@ CRATE_ANNOTATIONS = {
     ],
     "serde_json": [
         crate.annotation(
-            version = "1.0.151",
+            version = "1.0.154",
             rustc_flags = [
                 '--cfg=fast_arithmetic="64"',
             ],
@@ -473,7 +440,7 @@ CRATE_ANNOTATIONS = {
     ],
     "tokio": [
         crate.annotation(
-            version = "1.53.1",
+            version = "1.54.1",
             crate_features = crate.select(
                 common = [],
                 selects = {
@@ -520,7 +487,7 @@ CRATE_ANNOTATIONS = {
                         "//third_party/rust_crates/ask2patch/memchr",
                         "//third_party/rust_crates/forks/libc-0.2.190:libc",
                         "//third_party/rust_crates/vendor/bytes-1.12.1:bytes",
-                        "//third_party/rust_crates/vendor/mio-1.2.1:mio",
+                        "//third_party/rust_crates/vendor/mio-1.2.4:mio",
                         "//third_party/rust_crates/vendor/num_cpus-1.17.0:num_cpus",
                         "//third_party/rust_crates/vendor/signal-hook-registry-1.4.8:signal_hook_registry",
                         "//third_party/rust_crates/vendor/socket2-0.6.5:socket2",
@@ -529,7 +496,7 @@ CRATE_ANNOTATIONS = {
                         "//third_party/rust_crates/ask2patch/memchr",
                         "//third_party/rust_crates/forks/libc-0.2.190:libc",
                         "//third_party/rust_crates/vendor/bytes-1.12.1:bytes",
-                        "//third_party/rust_crates/vendor/mio-1.2.1:mio",
+                        "//third_party/rust_crates/vendor/mio-1.2.4:mio",
                         "//third_party/rust_crates/vendor/num_cpus-1.17.0:num_cpus",
                         "//third_party/rust_crates/vendor/signal-hook-registry-1.4.8:signal_hook_registry",
                         "//third_party/rust_crates/vendor/socket2-0.6.5:socket2",
@@ -622,11 +589,7 @@ CRATE_ANNOTATIONS = {
     ],
     "zerocopy": [
         crate.annotation(
-            version = "0.8.48",
-            crate_features = [
-                "alloc",
-                "std",
-            ],
+            version = "0.8.63",
             rustc_flags = [
                 "--cfg=zerocopy_inline_always",
             ],
@@ -634,7 +597,7 @@ CRATE_ANNOTATIONS = {
     ],
     "zerocopy-derive": [
         crate.annotation(
-            version = "0.8.48",
+            version = "0.8.63",
             rustc_flags = [
                 "--cfg=zerocopy_derive_union_into_bytes",
             ],
@@ -646,6 +609,14 @@ CRATE_ANNOTATIONS = {
             rustc_env = {
                 "CARGO_PKG_VERSION": "9.0.5",
             },
+        ),
+    ],
+    "zmij": [
+        crate.annotation(
+            version = "1.0.23",
+            rustc_flags = [
+                '--cfg=opt_level="s"',
+            ],
         ),
     ],
 }

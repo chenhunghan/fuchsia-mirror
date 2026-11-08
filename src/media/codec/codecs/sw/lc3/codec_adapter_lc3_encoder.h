@@ -25,9 +25,11 @@ struct Lc3EncoderParams {
   // Sample rate in Hz.
   const int sr_hz;
   const int nbytes;
-  // Number of bits per audio sample enc.
+  const size_t bytes_per_sample;
+  // PCM sample format passed to liblc3.
   const lc3_pcm_format fmt;
-  // Scratch buffer used when input_data is not aligned to int16_t/int32_t.
+  // Codec-private scratch buffer used to snapshot each input chunk from shared client VMO memory
+  // (and guarantee alignment / normalize 24-in-32 samples before passing to liblc3).
   std::vector<int32_t> aligned_input_scratch;
 };
 

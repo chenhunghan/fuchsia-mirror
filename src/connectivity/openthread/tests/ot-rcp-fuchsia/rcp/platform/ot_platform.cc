@@ -67,6 +67,15 @@ otPlatResetReason otPlatGetResetReason(otInstance* aInstance) {
   return Platform::Get().reset_reason();
 }
 
+// Reached via otInstanceReset(), i.e. for SPINEL_CMD_RESET with any type other than STACK (which
+// OpenThread handles internally). lowpan-ot-driver runs with `no-reset` and "resets" the RCP by
+// re-running Device.Open(), which RcpInstance handles; the only other reset it can issue is
+// RESET_BOOTLOADER via otPlatResetToBootloader(), which nothing calls. So this is deliberately
+// fatal for now.
+void otPlatReset(otInstance* aInstance) {
+  FX_LOGS(FATAL) << "otPlatReset: platform reset is not supported";
+}
+
 void otPlatAssertFail(const char* aFilename, int aLineNumber) {
   FX_LOGS(FATAL) << "OpenThread assertion failed at " << aFilename << ":" << aLineNumber;
 }

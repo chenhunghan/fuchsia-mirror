@@ -28,11 +28,13 @@ template("library_fuzzer") {
   target(target_type, target_name) {
     # Library fuzzers include the engine in-process.
     variant_selector_target_type = "fuzzer_engine"
+    fuzzable = true
     testonly = true
     deps = []
     forward_variables_from(invoker,
                            "*",
                            [
+                             "fuzzable",
                              "target_configs",
                              "target_type",
                              "variant_selector_target_type",

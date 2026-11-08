@@ -16,8 +16,7 @@
 
 class AuditChecker : public testing::EmptyTestEventListener {
  public:
-  // Constructor: Uses the path of the JSON file containing expected audit logs.
-  AuditChecker();
+  AuditChecker() = default;
 
   // Creates an `AuditChecker` with debug prints enabled.
   static AuditChecker* for_debug();
@@ -25,6 +24,7 @@ class AuditChecker : public testing::EmptyTestEventListener {
   // Creates an `AuditChecker` with audit log JSON generation.
   static AuditChecker* with_json_generation();
 
+  void OnTestProgramStart(const testing::UnitTest& unit_test) override;
   void OnTestSuiteEnd(const testing::TestSuite& test_suite) override;
   void OnTestStart(const testing::TestInfo& test_info) override;
   void OnTestEnd(const testing::TestInfo& test_info) override;
@@ -38,10 +38,6 @@ class AuditChecker : public testing::EmptyTestEventListener {
     bool permissive;
 
     bool operator==(const AuditLogEntry& other) const;
-
-    // Returns true if `other` matches scontext/tcontext/tclass, and the permission is one of those
-    // described by this entry.
-    bool contains(const AuditLogEntry& other) const;
 
     std::string ToString() const;
   };
@@ -60,16 +56,17 @@ class AuditChecker : public testing::EmptyTestEventListener {
   // Checks if a give test is in the expected failures.
   bool IsExpectedToFail(const std::string& test_name) const;
 
-  // The main method to perform the audit check against the expectations file
-  // provided in the constructor.
+  // The main method to perform the audit check against the expectations file.
   bool CheckAuditExpectations(const std::string& test_name);
 
-  std::unordered_map<std::string, std::vector<AuditChecker::AuditLogEntry>> expectations_map_;
+  std::unordered_map<std::string, std::vector<std::string>> raw_expectations_map_;
   std::vector<std::string> skipped_tests_;
   std::vector<std::string> expected_failure_tests_;
 
   std::vector<std::tuple<std::vector<std::string>, std::string>> current_test_suite_raw_logs_;
   std::vector<std::string> current_test_raw_logs_;
+
+  bool needs_drain_ = false;
 
   // Set to true to generate audit log JSON objects without audit checks.
   bool generate_json_ = false;

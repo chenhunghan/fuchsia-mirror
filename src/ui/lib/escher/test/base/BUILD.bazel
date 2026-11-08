@@ -1,0 +1,22 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "base_unittests",
+    testonly = True,
+    srcs = [
+        "ownable_unittest.cc",
+        "typed_reffable_unittest.cc",
+    ],
+    implementation_deps = [
+        "//src/ui/lib/escher/base:escher_base",
+        "@com_google_googletest//:gtest",
+    ],
+    visibility = ["//src/ui/lib/escher/test:__pkg__"],
+    alwayslink = True,
+)

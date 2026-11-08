@@ -11,7 +11,7 @@ group("static_checks") {
     "//build/tools/formatjson5",
     "//tools/check-licenses",
     "//tools/cmc",
-    "//tools/doc_checker:doc_checker_bin.actual",
+    "//tools/doc_checker",
     "//tools/fidl/fidlc:fidl-format",
     "//tools/fidl/fidlc:fidl-lint",
     "//tools/fidl/gidl-format",

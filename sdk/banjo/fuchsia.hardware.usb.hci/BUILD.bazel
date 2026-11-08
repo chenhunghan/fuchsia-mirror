@@ -1,0 +1,29 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fidl_library(
+    name = "fuchsia.hardware.usb.hci",
+    srcs = [
+        "usb-hci.fidl",
+    ],
+    enable_banjo = True,
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    visibility = [
+        "//src/devices/usb/drivers/usb-bus:__pkg__",
+        "//src/devices/usb/drivers/usb-virtual-bus:__pkg__",
+        "//src/devices/usb/drivers/xhci:__pkg__",
+    ],
+    deps = [
+        "//sdk/banjo/fuchsia.hardware.usb.bus",
+        "//sdk/banjo/fuchsia.hardware.usb.request",
+        "//sdk/fidl/fuchsia.hardware.usb.descriptor",
+        "//zircon/vdso/zx",
+    ],
+)

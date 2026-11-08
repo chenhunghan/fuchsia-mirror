@@ -1,0 +1,65 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":typec-tests"],
+    visibility = ["//src/devices:__pkg__"],
+)
+
+rustc_library(
+    name = "typec",
+    srcs = [
+        "src/cc.rs",
+        "src/lib.rs",
+        "src/port.rs",
+        "src/state.rs",
+        "src/tests/cc.rs",
+        "src/tests/mod.rs",
+        "src/tests/spec.rs",
+        "src/tests/state.rs",
+        "src/typec.rs",
+    ],
+    edition = "2024",
+    # TODO(https://fxbug.dev/575661321): Remove once in-progress crate items are used outside tests.
+    # @bazel2gn:skip
+    rustc_flags = ["-Adead_code"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.usb.connector:fuchsia.hardware.usb.connector_rust_next",
+        "//sdk/rust/zx",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-sync",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+rustc_test(
+    name = "typec_test",
+    crate = ":typec",
+    # @bazel2gn:skip
+    rustc_flags = ["-Adead_code"],
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+        "//src/lib/fuchsia",
+    ],
+)
+
+fx_unittest_package(
+    name = "typec-tests",
+    max_log_severity = "ERROR",
+    unit_tests = [":typec_test"],
+)

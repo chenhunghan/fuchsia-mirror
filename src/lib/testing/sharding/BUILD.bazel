@@ -1,0 +1,81 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["src/main.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate_name = "sharder",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.test:fuchsia.test_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-fs",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:itertools",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:regex",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+    ],
+)
+
+rustc_test(
+    name = "bin_test",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate = ":bin",
+    # Sets GN output_name via bazel2gn to match the original with_unit_tests binary name.
+    crate_name = "sharder_bin_test",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_packaged_binary(
+    name = "sharder_packaged_bin",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "sharder",
+)
+
+fx_component_manifest(
+    name = "sharder_manifest",
+    testonly = True,
+    component_name = "sharder",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/sharder.cml",
+)
+
+fx_component(
+    name = "sharder",
+    testonly = True,
+    compiled_manifest = ":sharder_manifest",
+    visibility = ["//:__subpackages__"],
+    deps = [":sharder_packaged_bin"],
+)
+
+fx_unittest_package(
+    name = "sharder-test",
+    unit_tests = [":bin_test"],
+)

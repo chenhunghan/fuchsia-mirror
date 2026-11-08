@@ -8,7 +8,6 @@ group("inspect") {
     "codelab",
     "cpp",
     "rust",
-    "rust-ergonomic",
   ]
 }
 
@@ -18,6 +17,5 @@ group("hermetic_tests") {
     "codelab:hermetic_tests",
     "cpp:hermetic_tests",
     "rust:hermetic_tests",
-    "rust-ergonomic:hermetic_tests",
   ]
 }

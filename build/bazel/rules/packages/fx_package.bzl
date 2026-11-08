@@ -39,7 +39,7 @@ def _build_fuchsia_package_impl(ctx):
         api_level = ctx.attr._current_api_level[BuildSettingInfo].value,
     )
 
-_build_fuchsia_package = rule(
+build_fuchsia_package = rule(
     implementation = _build_fuchsia_package_impl,
     doc = """
     Generates actions to build and archive a Fuchsia package containing components,
@@ -49,8 +49,7 @@ _build_fuchsia_package = rule(
     """,
     attrs = COMMON_BUILD_FUCHSIA_PACKAGE_ATTRIBUTES | {
         "_package_tool": attr.label(
-            # TODO(b/519244675): Replace with a Bazel label once `package-tool` is migrated to Bazel.
-            default = "@gn_targets//toolchain_host_x64/src/sys/pkg/bin/package-tool",
+            default = "//src/sys/pkg/bin/package-tool",
             executable = True,
             cfg = "exec",
         ),
@@ -65,21 +64,42 @@ _build_fuchsia_package = rule(
     },
 )
 
-def _fx_package_impl(
+def fx_package_common_impl(
         name,
         package_name,
         archive_name,
-        components,
-        test_components,
-        resources,
-        tools,
-        subpackages,
-        testonly,
-        tags,
-        visibility,
+        components = None,
+        test_components = None,
+        resources = None,
+        tools = None,
+        subpackages = None,
+        testonly = None,
+        tags = None,
+        visibility = None,
+        rebase_collected_resources = None,
         **kwargs):
+    """Shared macro implementation for `fx_package()` and `fx_bootfs_files_package()`.
+
+    Args:
+      name: Target name.
+      package_name: Optional Fuchsia package name override.
+      archive_name: Optional FAR archive name override.
+      components: Optional list of `fx_component()` targets.
+      test_components: Optional list of `fx_test_component()` targets.
+      resources: Optional list of `resource()` or `fx_packaged_binary()` targets.
+      tools: Optional list of `fx_tool()` targets.
+      subpackages: Optional list of subpackage targets.
+      testonly: Whether the target is testonly.
+      tags: Optional list of Bazel tags.
+      visibility: Target visibility.
+      rebase_collected_resources: Optional rule/callable to transform collected resources.
+      **kwargs: Additional keyword arguments forwarded to `build_fuchsia_package`.
+    """
+
     # The default value of non-mandatory inherited attributes is always overridden to be None,
-    # regardless of the original attribute definition's default value.
+    # regardless of the original attribute definition's default value. Thus, `testonly` must be
+    # checked against `None` to distinguish an explicit `testonly = False` from an omitted value,
+    # and inherited list attributes below require `or []` before concatenation.
     #
     # See https://bazel.build/extending/macros#attribute-inheritance.
     if test_components:
@@ -100,20 +120,35 @@ def _fx_package_impl(
     )
 
     collected_resources = "%s_fuchsia_package.resources" % name
-    fuchsia_find_all_package_resources(
-        name = collected_resources,
-        deps = _deps_to_search,
-        testonly = testonly,
-        tags = tags + ["manual"],
-    )
+    if rebase_collected_resources:
+        raw_collected_resources = "%s_fuchsia_package.raw_resources" % name
+        fuchsia_find_all_package_resources(
+            name = raw_collected_resources,
+            deps = _deps_to_search,
+            testonly = testonly,
+            tags = tags + ["manual"],
+        )
+        rebase_collected_resources(
+            name = collected_resources,
+            collected_resources = ":" + raw_collected_resources,
+            testonly = testonly,
+            tags = tags + ["manual"],
+        )
+    else:
+        fuchsia_find_all_package_resources(
+            name = collected_resources,
+            deps = _deps_to_search,
+            testonly = testonly,
+            tags = tags + ["manual"],
+        )
 
-    _build_fuchsia_package(
+    build_fuchsia_package(
         name = name,
         components = components,
         test_components = test_components,
         resources = resources,
-        processed_binaries = processed_binaries,
-        collected_resources = collected_resources,
+        processed_binaries = ":" + processed_binaries,
+        collected_resources = ":" + collected_resources,
         tools = tools,
         subpackages = subpackages,
         package_name = package_name or name,
@@ -124,9 +159,37 @@ def _fx_package_impl(
         **kwargs
     )
 
+def _fx_package_impl(
+        name,
+        package_name,
+        archive_name,
+        components,
+        test_components,
+        resources,
+        tools,
+        subpackages,
+        testonly,
+        tags,
+        visibility,
+        **kwargs):
+    fx_package_common_impl(
+        name = name,
+        package_name = package_name,
+        archive_name = archive_name,
+        components = components,
+        test_components = test_components,
+        resources = resources,
+        tools = tools,
+        subpackages = subpackages,
+        testonly = testonly,
+        tags = tags,
+        visibility = visibility,
+        **kwargs
+    )
+
 fx_package = macro(
     implementation = _fx_package_impl,
-    inherit_attrs = _build_fuchsia_package,
+    inherit_attrs = build_fuchsia_package,
     doc = """Produces a Fuchsia package that can be published to a package server and loaded on a device.
 
     Example usage:
@@ -144,6 +207,9 @@ fx_package = macro(
 
             Defaults to `name` to match the behavior of the GN `fuchsia_package()` template.
             Note that this is different from the Bazel SDK behavior.""",
+            # Otherwise an unset value reaches the impl as an always-truthy
+            # select(), and the `name` fallback never applies.
+            configurable = False,
         ),
         # Do not inherit implementation details passed to `_build_fuchsia_package()`.
         "collected_resources": None,

@@ -7,7 +7,6 @@ group("tests") {
   deps = [
     "//src/performance/lib/fuchsiaperf:tests",
     "//src/performance/lib/fxt:tests",
-    "//src/performance/lib/memory:tests",
     "//src/performance/lib/perf_publish/tests($host_toolchain)",
     "//src/performance/lib/storage:tests",
     "//src/performance/lib/tp_shell:tests",

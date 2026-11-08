@@ -8,17 +8,12 @@ schema as `//src/developer/ffx/plugins/assembly`.
 """
 
 from dataclasses import dataclass, field
-from typing import TypeVar
 
 import serialization
 
 __all__ = ["ImageAssemblyConfig", "KernelInfo"]
 
 from .common import FileEntry, FilePath
-
-ExtendsImageAssemblyConfig = TypeVar(
-    "ExtendsImageAssemblyConfig", bound="ImageAssemblyConfig"
-)
 
 
 @dataclass

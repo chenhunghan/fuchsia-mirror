@@ -9,6 +9,7 @@ if (is_host) {
   # containing all copied paths.
   copy("templates") {
     # All template files available to fx create.
+    # LINT.IfChange(templates)
     sources = [
       "_copyright.tmpl",
       "_generated.tmpl",
@@ -51,6 +52,8 @@ if (is_host) {
       "driver-default/{{snake_case PROJECT_NAME}}.cc.tmpl-cpp",
       "driver-default/{{snake_case PROJECT_NAME}}.h.tmpl-cpp",
     ]
+
+    # LINT.ThenChange(templates.bzl:templates)
     outputs =
         [ "${host_tools_dir}/create_templates/{{source_target_relative}}" ]
 
@@ -60,13 +63,5 @@ if (is_host) {
     write_file("${host_tools_dir}/create_templates/templates.json",
                sources,
                "json")
-
-    metadata = {
-      # Include the template files as test dependencies. Tests that depend on
-      # the `create` binary need to pull in the template files transitively.
-      test_runtime_deps =
-          rebase_path(sources, "", "${host_tools_dir}/create_templates") +
-          [ "${host_tools_dir}/create_templates/templates.json" ]
-    }
   }
 }

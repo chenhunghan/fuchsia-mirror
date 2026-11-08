@@ -1,0 +1,26 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "underlying_test_to_be_sharded",
+    srcs = ["src/lib.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:paste"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+rustc_test(
+    name = "underlying_test_to_be_sharded_with_failures",
+    srcs = ["src/lib.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:paste"],
+    rustc_flags = ["--cfg=make_case_f_fail"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)

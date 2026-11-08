@@ -1,0 +1,107 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_binary(
+    name = "getaddrinfo_test",
+    testonly = True,
+    srcs = ["getaddrinfo_test.cc"],
+    build_flags = ["//build/config/lto:no-fat-lto-objects-linking"],
+    tags = ["manual"],
+    deps = [
+        "//sdk/lib/fit",
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "getaddrinfo_test_packaged_bin",
+    testonly = True,
+    binary = ":getaddrinfo_test",
+    binary_name = "getaddrinfo_test",
+)
+
+rustc_binary(
+    name = "lookup_server",
+    srcs = ["src/main.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        "//sdk/fidl/fuchsia.net.name:fuchsia.net.name_rust",
+        "//src/connectivity/lib/net-declare",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "lookup_server_packaged_bin",
+    binary = ":lookup_server",
+    binary_name = "lookup_server",
+)
+
+fx_component_manifest(
+    name = "getaddrinfo_test_component-manifest",
+    testonly = True,
+    component_name = "getaddrinfo_test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/getaddrinfo_test.cml",
+)
+
+fx_test_component(
+    name = "getaddrinfo_test_component",
+    compiled_manifest = ":getaddrinfo_test_component-manifest",
+    deps = [":getaddrinfo_test_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "lookup_server_component-manifest",
+    component_name = "lookup_server",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/lookup_server.cml",
+)
+
+fx_component(
+    name = "lookup_server_component",
+    compiled_manifest = ":lookup_server_component-manifest",
+    deps = [":lookup_server_packaged_bin"],
+)
+
+fx_package(
+    name = "getaddrinfo_tests-package",
+    package_name = "getaddrinfo_tests",
+    testonly = True,
+    components = [":lookup_server_component"],
+    test_components = [":getaddrinfo_test_component"],
+)
+
+fx_test(
+    name = "getaddrinfo_tests",
+    package = ":getaddrinfo_tests-package",
+    visibility = ["//sdk/lib:__pkg__"],
+)

@@ -14,9 +14,8 @@ interchangeable HW to be used.
 See http://www.minicircuits.com/softwaredownload/Prog_Manual-6-Programmable_Attenuator.pdf
 """
 
-# Blanket ignores to enable mypy in Antlion
-# mypy: disable-error-code="no-untyped-def"
 import urllib.request
+from collections.abc import Sequence
 
 import attenuator
 
@@ -45,6 +44,10 @@ class AttenuatorInstrument(attenuator.AttenuatorInstrument):
     @property
     def num_atten(self) -> int:
         return self._num_atten
+
+    @property
+    def ports(self) -> Sequence[int]:
+        return range(1, self._num_atten + 1)
 
     @property
     def max_atten(self) -> float:
@@ -98,7 +101,7 @@ class AttenuatorInstrument(attenuator.AttenuatorInstrument):
             InvalidDataError if the attenuator does not respond with the
             expected output.
         """
-        if not (0 <= idx < self._num_atten):
+        if idx not in self.ports:
             raise IndexError(
                 "Attenuator index out of range!", self._num_atten, idx
             )
@@ -107,11 +110,11 @@ class AttenuatorInstrument(attenuator.AttenuatorInstrument):
             raise ValueError(
                 "Attenuator value out of range!", self._max_atten, value
             )
-        # The actual device uses one-based index for channel numbers.
+        # The device uses one-based index for channel numbers.
         adjusted_value = min(max(0, value), self._max_atten)
         att_req = urllib.request.urlopen(
             "http://{}:{}/CHAN:{}:SETATT:{}".format(
-                self._ip_address, self._port, idx + 1, adjusted_value
+                self._ip_address, self._port, idx, adjusted_value
             ),
             timeout=self._timeout,
         )
@@ -138,12 +141,12 @@ class AttenuatorInstrument(attenuator.AttenuatorInstrument):
         Returns:
             the current attenuation value as a float
         """
-        if not (0 <= idx < self._num_atten):
+        if idx not in self.ports:
             raise IndexError(
                 "Attenuator index out of range!", self._num_atten, idx
             )
         att_req = urllib.request.urlopen(
-            f"http://{self._ip_address}:{self._port}/CHAN:{idx + 1}:ATT?",
+            f"http://{self._ip_address}:{self._port}/CHAN:{idx}:ATT?",
             timeout=self._timeout,
         )
         att_resp = att_req.read().decode("utf-8").strip()

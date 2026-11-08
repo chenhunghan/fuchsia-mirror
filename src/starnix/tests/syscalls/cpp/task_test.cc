@@ -12,6 +12,7 @@
 #include <sys/fsuid.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/select.h>
 #include <sys/syscall.h>
 #include <sys/time.h>
@@ -25,6 +26,7 @@
 #include <thread>
 
 #include <fbl/algorithm.h>
+#include <fbl/unique_fd.h>
 #include <gtest/gtest.h>
 #include <linux/capability.h>
 #include <linux/sched.h>
@@ -36,6 +38,7 @@
 #include "src/lib/fxl/strings/split_string.h"
 #include "src/lib/fxl/strings/string_number_conversions.h"
 #include "src/lib/fxl/strings/string_printf.h"
+#include "src/lib/fxl/strings/trim.h"
 #include "src/starnix/tests/syscalls/cpp/capabilities_helper.h"
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
@@ -917,6 +920,29 @@ TEST(Task, ExecveArgvExceedsLimit) {
   ASSERT_TRUE(helper.WaitForChildren());
 }
 
+TEST(Task, ExecveArgvExceedsArgCountLimit) {
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([] {
+    // Lower RLIMIT_STACK in the child so the combined argv/envp limit in execve(2) is floored at
+    // 32 pages (32 * PAGE_SIZE) rather than 1/4 of the default 8 MiB stack limit.
+    const size_t limit_bytes = kPageLimit * static_cast<size_t>(sysconf(_SC_PAGESIZE));
+    struct rlimit rlim = {};
+    ASSERT_THAT(getrlimit(RLIMIT_STACK, &rlim), SyscallSucceeds());
+    rlim.rlim_cur = limit_bytes;
+    ASSERT_THAT(setrlimit(RLIMIT_STACK, &rlim), SyscallSucceeds());
+
+    // Each empty string element consumes sizeof(char*) bytes for the pointer plus 1 byte for the
+    // terminating NUL byte. Choose a count (~15,000 on 4 KiB pages) whose string bytes alone stay
+    // well below the 32-page limit, but whose combined pointer and string bytes exceed it.
+    const size_t num_args = (limit_bytes / (sizeof(char*) + 1)) + 1;
+    std::vector<char*> argv(num_args + 1, const_cast<char*>(""));
+    argv[num_args] = nullptr;
+    char* envp[] = {nullptr};
+    EXPECT_THAT(execve("/proc/self/exe", argv.data(), envp), SyscallFailsWithErrno(E2BIG));
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+}
+
 TEST(Task, ExecveArgvEnvExceedLimit) {
   test_helper::ForkHelper helper;
   helper.RunInForkedProcess([] {
@@ -929,6 +955,24 @@ TEST(Task, ExecveArgvEnvExceedLimit) {
     envp[kVecSize - 1] = nullptr;
     EXPECT_NE(execve("/proc/self/exe", argv, envp), 0);
     EXPECT_EQ(errno, E2BIG);
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+}
+
+TEST(Task, ExecveEnvpExceedsArgCountLimit) {
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([] {
+    const size_t limit_bytes = kPageLimit * static_cast<size_t>(sysconf(_SC_PAGESIZE));
+    struct rlimit rlim = {};
+    ASSERT_THAT(getrlimit(RLIMIT_STACK, &rlim), SyscallSucceeds());
+    rlim.rlim_cur = limit_bytes;
+    ASSERT_THAT(setrlimit(RLIMIT_STACK, &rlim), SyscallSucceeds());
+
+    const size_t num_env = (limit_bytes / (sizeof(char*) + 1)) + 1;
+    std::vector<char*> envp(num_env + 1, const_cast<char*>(""));
+    envp[num_env] = nullptr;
+    char* argv[] = {const_cast<char*>("/proc/self/exe"), nullptr};
+    EXPECT_THAT(execve("/proc/self/exe", argv, envp.data()), SyscallFailsWithErrno(E2BIG));
   });
   ASSERT_TRUE(helper.WaitForChildren());
 }
@@ -1584,21 +1628,26 @@ TEST_F(CloneAndExecTest, ExecveAsRootRequiresAnyExecutableBitSet) {
 
 class DumpableTest : public ::testing::Test {
  protected:
-  void SetUp() {
+  static constexpr const char kSuidDumpablePath[] = "/proc/sys/fs/suid_dumpable";
+
+  void SetUp() override {
     if (!test_helper::HasSysAdmin()) {
       GTEST_SKIP() << "test requires root privileges";
     }
 
-    FILE* fp = fopen("/proc/sys/fs/suid_dumpable", "r");
-    EXPECT_NE(fp, nullptr);
-    // TODO(https://fxbug.dev/322874210): EXPECT that the read succeeds, do not
-    // hard-code a value.
-    if (fscanf(fp, "%d", &dumpable_default_) != 1) {
-      dumpable_default_ = 0;
-    }
-
-    fclose(fp);
+    std::string dumpable_str;
+    ASSERT_TRUE(files::ReadFileToString(kSuidDumpablePath, &dumpable_str)) << strerror(errno);
+    ASSERT_TRUE(
+        fxl::StringToNumberWithError(fxl::TrimString(dumpable_str, " \t\r\n"), &dumpable_default_))
+        << dumpable_str;
   }
+
+  void TearDown() override {
+    if (dumpable_default_ != -1) {
+      EXPECT_TRUE(files::WriteFile(kSuidDumpablePath, std::to_string(dumpable_default_)));
+    }
+  }
+
   int dumpable_default_ = -1;
 };
 
@@ -1660,6 +1709,40 @@ TEST_F(DumpableTest, DumpableDropsOnUserChange) {
 
     EXPECT_TRUE(helper.WaitForChildren());
   }
+}
+
+TEST_F(DumpableTest, SuidDumpableRejectsInvalidValues) {
+  fbl::unique_fd fd(open(kSuidDumpablePath, O_WRONLY));
+  ASSERT_THAT(fd.get(), SyscallSucceeds());
+
+  for (std::string_view invalid : {"-1", "3", "invalid"}) {
+    EXPECT_THAT(write(fd.get(), invalid.data(), invalid.size()), SyscallFailsWithErrno(EINVAL))
+        << invalid;
+  }
+}
+
+TEST_F(DumpableTest, DumpableResetsToSuidDumpableUser) {
+  ASSERT_TRUE(files::WriteFile(kSuidDumpablePath, "1")) << strerror(errno);
+
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&] {
+    ASSERT_THAT(prctl(PR_SET_DUMPABLE, 0), SyscallSucceeds());
+    ASSERT_THAT(seteuid(kUser1Uid), SyscallSucceeds());
+    EXPECT_THAT(prctl(PR_GET_DUMPABLE), SyscallSucceedsWithValue(1));
+  });
+  EXPECT_TRUE(helper.WaitForChildren());
+}
+
+TEST_F(DumpableTest, DumpableResetsToSuidDumpableDisable) {
+  ASSERT_TRUE(files::WriteFile(kSuidDumpablePath, "0")) << strerror(errno);
+
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&] {
+    ASSERT_THAT(prctl(PR_SET_DUMPABLE, 1), SyscallSucceeds());
+    ASSERT_THAT(seteuid(kUser1Uid), SyscallSucceeds());
+    EXPECT_THAT(prctl(PR_GET_DUMPABLE), SyscallSucceedsWithValue(0));
+  });
+  EXPECT_TRUE(helper.WaitForChildren());
 }
 
 TEST(Task, SetgroupsWithoutCapSetgidFails) {

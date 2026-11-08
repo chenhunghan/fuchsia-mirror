@@ -1,0 +1,277 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "stop_with_escrow_integration_test_bin",
+    srcs = ["stop_with_escrow_integration_test.rs"],
+    crate_name = "stop_with_escrow_integration_test",
+    crate_root = "stop_with_escrow_integration_test.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.process:fuchsia.process_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-runtime",
+        "//src/sys/component_manager/tests/fidl:components_rust",
+        "//src/sys/lib/component-events",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "stop_with_escrow_integration_test_packaged_bin",
+    testonly = True,
+    binary = ":stop_with_escrow_integration_test_bin",
+    binary_name = "stop_with_escrow_integration_test",
+)
+
+rustc_binary(
+    name = "stop_with_pending_request_bin",
+    testonly = True,
+    srcs = ["stop_with_pending_request.rs"],
+    crate_name = "stop_with_pending_request",
+    crate_root = "stop_with_pending_request.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.process.lifecycle:fuchsia.process.lifecycle_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-runtime",
+        "//src/sys/component_manager/tests/fidl:components_rust",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "stop_with_pending_request_packaged_bin",
+    testonly = True,
+    binary = ":stop_with_pending_request_bin",
+    binary_name = "stop_with_pending_request",
+)
+
+rustc_binary(
+    name = "stop_with_delivery_on_readable_request_bin",
+    testonly = True,
+    srcs = ["stop_with_delivery_on_readable_request.rs"],
+    crate_name = "stop_with_delivery_on_readable_request",
+    crate_root = "stop_with_delivery_on_readable_request.rs",
+    edition = "2024",
+    deps = [
+        "//src/lib/detect-stall",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/sys/component_manager/tests/fidl:components_rust",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "stop_with_delivery_on_readable_request_packaged_bin",
+    testonly = True,
+    binary = ":stop_with_delivery_on_readable_request_bin",
+    binary_name = "stop_with_delivery_on_readable_request",
+)
+
+rustc_binary(
+    name = "stop_with_dynamic_dictionary_bin",
+    testonly = True,
+    srcs = ["stop_with_dynamic_dictionary.rs"],
+    crate_name = "stop_with_dynamic_dictionary",
+    crate_root = "stop_with_dynamic_dictionary.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_rust",
+        "//sdk/fidl/fuchsia.process.lifecycle:fuchsia.process.lifecycle_rust",
+        "//sdk/rust/zx",
+        "//src/lib/detect-stall",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-runtime",
+        "//src/sys/component_manager/tests/fidl:components_rust",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "stop_with_dynamic_dictionary_packaged_bin",
+    testonly = True,
+    binary = ":stop_with_dynamic_dictionary_bin",
+    binary_name = "stop_with_dynamic_dictionary",
+)
+
+rustc_binary(
+    name = "stop_with_escrowed_dictionary_bin",
+    testonly = True,
+    srcs = ["stop_with_escrowed_dictionary.rs"],
+    crate_name = "stop_with_escrowed_dictionary",
+    crate_root = "stop_with_escrowed_dictionary.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.process.lifecycle:fuchsia.process.lifecycle_rust",
+        "//sdk/rust/zx",
+        "//src/lib/detect-stall",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-runtime",
+        "//src/sys/component_manager/tests/fidl:components_rust",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "stop_with_escrowed_dictionary_packaged_bin",
+    testonly = True,
+    binary = ":stop_with_escrowed_dictionary_bin",
+    binary_name = "stop_with_escrowed_dictionary",
+)
+
+fx_component_manifest(
+    name = "stop_with_pending_request-manifest",
+    testonly = True,
+    component_name = "stop_with_pending_request",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/stop_with_pending_request.cml",
+)
+
+fx_component(
+    name = "stop_with_pending_request",
+    testonly = True,
+    compiled_manifest = ":stop_with_pending_request-manifest",
+    deps = [":stop_with_pending_request_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "stop_with_delivery_on_readable_request-manifest",
+    testonly = True,
+    component_name = "stop_with_delivery_on_readable_request",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/stop_with_delivery_on_readable_request.cml",
+)
+
+fx_component(
+    name = "stop_with_delivery_on_readable_request",
+    testonly = True,
+    compiled_manifest = ":stop_with_delivery_on_readable_request-manifest",
+    deps = [":stop_with_delivery_on_readable_request_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "stop_with_dynamic_dictionary-manifest",
+    testonly = True,
+    component_name = "stop_with_dynamic_dictionary",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/stop_with_dynamic_dictionary.cml",
+    restricted_features = ["dynamic_dictionaries"],
+)
+
+fx_component(
+    name = "stop_with_dynamic_dictionary",
+    testonly = True,
+    compiled_manifest = ":stop_with_dynamic_dictionary-manifest",
+    deps = [":stop_with_dynamic_dictionary_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "stop_with_escrowed_dictionary-manifest",
+    testonly = True,
+    component_name = "stop_with_escrowed_dictionary",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/stop_with_escrowed_dictionary.cml",
+)
+
+fx_component(
+    name = "stop_with_escrowed_dictionary",
+    testonly = True,
+    compiled_manifest = ":stop_with_escrowed_dictionary-manifest",
+    deps = [":stop_with_escrowed_dictionary_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "test_root-manifest",
+    testonly = True,
+    component_name = "test_root",
+    includes = [
+        "//src/sys/component_manager:meta/passthrough_diagnostics.shard.cml",
+        "//src/sys/component_manager/tests:meta/elf_runner_and_environment.shard",
+    ],
+    manifest = "meta/test_root.cml",
+)
+
+fx_component(
+    name = "test_root",
+    testonly = True,
+    compiled_manifest = ":test_root-manifest",
+)
+
+fx_component_manifest(
+    name = "stop_with_escrow_integration_test-manifest",
+    testonly = True,
+    component_name = "stop_with_escrow_integration_test",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/lib/fuchsia-component-test:meta/nested_component_manager.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/stop_with_escrow_integration_test.cml",
+)
+
+fx_test_component(
+    name = "stop_with_escrow_integration_test_component",
+    compiled_manifest = ":stop_with_escrow_integration_test-manifest",
+    deps = [":stop_with_escrow_integration_test_packaged_bin"],
+)
+
+fx_package(
+    name = "stop_with_escrow_integration_test_package",
+    package_name = "stop_with_escrow_integration_test",
+    components = [
+        ":stop_with_delivery_on_readable_request",
+        ":stop_with_dynamic_dictionary",
+        ":stop_with_escrowed_dictionary",
+        ":stop_with_pending_request",
+        ":test_root",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+        "//src/sys/component_manager:component-manager-realm-builder-debug-cmp",
+    ],
+    test_components = [":stop_with_escrow_integration_test_component"],
+)
+
+fx_test(
+    name = "stop_with_escrow_integration_test",
+    package = ":stop_with_escrow_integration_test_package",
+    visibility = ["//src/sys/component_manager:__pkg__"],
+)

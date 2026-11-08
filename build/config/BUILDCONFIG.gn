@@ -22,6 +22,11 @@ flutter_root = "//third_party/flutter"
 # in place of // to refer to the root of the cobalt source tree.
 cobalt_root = "//third_party/cobalt"
 
+# GN now sets this variable to true by default, override the default
+# here to allow `gn gen` to succeed in the Fuchsia tree.
+# TODO(https://fxbug.dev/573092893): Remove this.
+check_includes_strict = false
+
 declare_args() {
   # If set, the build will produce compilation analysis dumps, used for code
   # cross-referencing in code search.  The extra work done during analysis
@@ -218,6 +223,7 @@ _fuzzer_remove_shared_configs = [ "//build/config:symbol_no_undefined" ]
 # RTTI be enabled everywhere, and then get the vptr checking everywhere
 # too.
 # LINT.IfChange(ubsan)
+# In Bazel, this corresponds to -frtti in sanitizer.bzl:ubsan_feature.
 _ubsan_remove_common_configs = [ "//build/config:no_rtti" ]
 
 # LINT.ThenChange(//build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/sanitizer.bzl:ubsan)
@@ -330,12 +336,11 @@ declare_args() {
     {
       configs = [ "//build/config/profile:coverage-rust" ]
       tags = [
-        # Note this does not include "llvm-profdata" because that is only
-        # actually used to check if C++ code will use such instrumentation.
         "coverage",
         "coverage_rust",
         "debugdata",
         "instrumented",
+        "llvm-profdata",
         "needs-writable-globals",
       ]
     },
@@ -365,11 +370,9 @@ declare_args() {
     {
       configs = [ "//build/config/profile:profile-rust" ]
       tags = [
-        # Note that this list, as for coverage-rust above, does not include
-        # "llvm-profdata" because that is only actually used to check if C++
-        # code will use such instrumentation.
         "debugdata",
         "instrumented",
+        "llvm-profdata",
         "needs-writable-globals",
         "profile",
       ]
@@ -662,10 +665,8 @@ declare_args() {
             "//zircon/kernel/bin",
             "//zircon/kernel/arch/$_zircon_cpu/phys",
             "//zircon/kernel/arch/$_zircon_cpu/phys/boot-shim",
-            "//zircon/kernel/arch/$_zircon_cpu/phys/efi",
             "//zircon/kernel/phys",
             "//zircon/kernel/phys/boot-shim",
-            "//zircon/kernel/phys/efi",
             "//zircon/kernel/phys/test",
           ]
         },
@@ -1099,11 +1100,14 @@ if (_host_toolchain_variant_name == false ||
 #
 # IMPORTANT: KEEP THIS IN SYNC WITH //sdk/lib/c/sysroot_entries.gni
 #
+# LINT.IfChange(sysroot_variants)
 toolchain_variant.libprefix = ""
 if (toolchain_variant.instrumented) {
   toolchain_variant.libprefix =
       string_replace(toolchain_variant.name, "-fuzzer", "") + "/"
 }
+
+# LINT.ThenChange(//sdk/lib/c/sysroot_entries.gni:sysroot_variants)
 
 # [START toolchain_is_variables]
 is_android = false
@@ -1406,7 +1410,6 @@ is_heapdump = fuchsia_toolchain_tags + [ "heapdump" ] - [ "heapdump" ] !=
 default_common_binary_configs = toolchain_variant.prefix_configs
 
 default_common_rust_configs = [
-  "//build/config/rust:next_solver",
   "//build/config/rust:parallel_frontend_threads",
   "//build/config/rust:error_format_human",
   "//build/config/rust:incremental",
@@ -1514,6 +1517,8 @@ if (zircon_toolchain == false) {
 
   if (toolchain_variant.is_pic_default) {
     default_common_binary_configs += [ "//build/config:shared_library_config" ]
+  } else if (is_fuchsia) {
+    default_common_binary_configs += [ "//build/config:executable_config" ]
   }
 } else {
   # Zircon-specific toolchain use a different list of default configs.
@@ -1533,6 +1538,7 @@ if (zircon_toolchain == false) {
     "//build/config:werror",
     "//build/config:no-template-backtrace-limit",
     "//build/config/zircon:compiler",
+    "//build/config/zircon:${zircon_toolchain.environment}",
     "//build/config:libc++-include",
     "//build/config/zircon:default_assert_level",
     "//build/config/zircon:default_icf",
@@ -1559,7 +1565,8 @@ if (zircon_toolchain == false) {
   default_executable_deps = []
 }
 
-default_common_source_deps = toolchain_variant.source_deps
+default_common_source_deps =
+    [ "//build/config/rust:source_deps" ] + toolchain_variant.source_deps
 foreach(config,
         toolchain_variant.configs + toolchain_variant.remove_common_configs -
             toolchain_variant.remove_common_configs) {
@@ -1586,7 +1593,6 @@ default_rust_proc_macro_configs = default_shared_library_configs + [
 e2e_test_libs = [
   "//sdk/testing/sl4f/client",
   "//third_party/mobly($host_toolchain)",
-  "//src/testing/end_to_end/antlion($host_toolchain)",
   "//src/testing/end_to_end/honeydew($host_toolchain)",
 ]
 
@@ -1604,9 +1610,9 @@ if (host_os == "linux") {
 e2e_lib_unit_tests = [
   "//sdk/testing/sl4f/client:tests",
   "//tools/emulator:tests",
-  "//src/connectivity/wlan/tests/utils:odpm_utils_test($host_toolchain)",
-  "//src/testing/end_to_end/antlion:unit_tests($host_toolchain)",
+  "//src/connectivity/wlan/tests/utils:tests_host",
   "//src/testing/end_to_end/honeydew:unit_tests",
+  "//src/testing/end_to_end/libs:tests($host_toolchain)",
   "//src/testing/end_to_end/mobly_base_tests:tests($host_toolchain)",
   "//src/testing/end_to_end/mobly_controller:tests($host_toolchain)",
   "//src/testing/end_to_end/mobly_driver/tests/unit_tests:tests",
@@ -3309,6 +3315,13 @@ template("_fuchsia_shared_library") {
     output_file = "$output_dir/$output_file_name"
     rebased_output_file = rebase_path(output_file, root_build_dir)
 
+    dist_output_file = output_file
+    if (zircon_toolchain == false && current_os == "fuchsia" &&
+        defined(invoker.crate_type) && invoker.crate_type == "dylib") {
+      dist_output_file = "$output_dir/dist/$output_file_name"
+    }
+    rebased_dist_output_file = rebase_path(dist_output_file, root_build_dir)
+
     install_name = output_file_name
     if (defined(invoker.install_name)) {
       install_name = invoker.install_name
@@ -3327,6 +3340,10 @@ template("_fuchsia_shared_library") {
         rebase_path(get_path_info(link_output_file, "dir"), root_build_dir)
 
     _label = get_label_info(":$target_name", "label_with_toolchain")
+
+    if (defined(invoker.crate_type) && !defined(crate_name)) {
+      crate_name = target_name
+    }
 
     # Note: the manifest-related metadata is added to the builder target as
     # some targets (e.g. drivers) depend on it directly in the builder
@@ -3353,7 +3370,7 @@ template("_fuchsia_shared_library") {
       if (!defined(distribution_entries)) {
         distribution_entries = [
           {
-            source = rebased_output_file
+            source = rebased_dist_output_file
             destination = "lib/${toolchain_variant.libprefix}$install_name"
             label = _label
           },
@@ -3367,7 +3384,7 @@ template("_fuchsia_shared_library") {
         sdk_runtime_deps = [
           {
             label = _label
-            source = rebased_output_file
+            source = rebased_dist_output_file
           },
         ]
       }
@@ -3380,7 +3397,7 @@ template("_fuchsia_shared_library") {
           cpu = current_cpu
           os = current_os
           debug = rebase_path(link_output_file, root_build_dir)
-          dist = rebased_output_file
+          dist = rebased_dist_output_file
           if (is_elf) {
             elf_build_id = rebased_output_file + ".build-id.stamp"
           }
@@ -4450,6 +4467,9 @@ template("rust_library") {
     _rmeta_path = rebase_path(_rmeta_path, root_build_dir)
     _searchdir_path = rebase_path(_searchdir_path, root_build_dir)
 
+    if (!defined(crate_name)) {
+      crate_name = target_name
+    }
     metadata = {
       rust_aux_externs = []
       kernel_rust_externs = []
@@ -4554,6 +4574,9 @@ template("rust_proc_macro") {
 
       if (!defined(public_deps)) {
         public_deps = []
+      }
+      if (!defined(crate_name)) {
+        crate_name = target_name
       }
       metadata = {
         rust_aux_externs = []

@@ -213,6 +213,10 @@ bazel_fuchsia_test_package("aml-g12-composite-test") {
   bazel_target = ":aml-g12-composite-test-package"
   test_component_names = [ "aml-g12-composite-test-bin" ]
   test_specs = {
+    environments = [ emu_env ]
+    if (is_fuchsia) {
+      parallel = 4
+    }
     log_settings = {
       max_severity = "ERROR"
     }

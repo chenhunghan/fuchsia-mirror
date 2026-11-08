@@ -7,9 +7,7 @@ import("//build/components.gni")
 executable("benchmark_example") {
   sources = [ "main.cc" ]
 
-  deps = []
-
-  public_deps = [
+  deps = [
     "//sdk/lib/async-loop:async-loop-cpp",
     "//sdk/lib/async-loop:async-loop-default",
     "//src/lib/fsl",

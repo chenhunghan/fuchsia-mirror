@@ -65,4 +65,7 @@ fuchsia_unittest_package("audio_effects_example_tests") {
     ":audio_effects_example",
     ":test_bin",
   ]
+  test_specs = {
+    parallel = 4
+  }
 }

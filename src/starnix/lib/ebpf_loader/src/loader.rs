@@ -316,9 +316,12 @@ pub fn load_ebpf_program_from_file(
     let prog_sym = elf_file
         .symbol_by_name(program_name.into(), BStr::new(section_name))?
         .ok_or_else(|| Error::InvalidProgramName(program_name.to_owned()))?;
-    let mut code = <[EbpfInstruction]>::ref_from_bytes(prog_sym.data)
+    let mut code = <[u64]>::ref_from_bytes(prog_sym.data)
         .map_err(|_| Error::ElfParse("Failed to load program instructions"))?
-        .to_vec();
+        .iter()
+        .copied()
+        .map(EbpfInstruction::from)
+        .collect::<Vec<_>>();
 
     // Walk through the relocation table to update all map references
     // in the program while building the maps list.

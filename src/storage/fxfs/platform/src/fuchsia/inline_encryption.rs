@@ -47,10 +47,9 @@ mod tests {
             );
 
             let filesystem = FxFilesystemBuilder::new()
-                .format(true)
                 .inline_crypto_enabled(inline_crypto_enabled)
                 .barriers_enabled(barriers_enabled)
-                .open(DeviceHolder::new(
+                .format(DeviceHolder::new(
                     BlockDevice::new(
                         new_block_client(block_server.connect())
                             .await
@@ -61,7 +60,7 @@ mod tests {
                     .expect("failed to create block device"),
                 ))
                 .await
-                .expect("failed to open filesystem");
+                .expect("failed to format filesystem");
 
             Self { block_server, filesystem }
         }

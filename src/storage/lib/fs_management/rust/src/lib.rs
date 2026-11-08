@@ -30,8 +30,6 @@ pub const FVM_TYPE_GUID: [u8; 16] = [
     0xb8, 0x7c, 0xfd, 0x49, 0x15, 0xdf, 0x73, 0x4e, 0xb9, 0xd9, 0x99, 0x20, 0x70, 0x12, 0x7f, 0x0f,
 ];
 
-pub const FVM_TYPE_GUID_STR: &str = "49fd7cb8-df15-4e73-b9d9-992070127f0f";
-
 pub const FS_COLLECTION_NAME: &'static str = "fs-collection";
 
 #[derive(Clone)]

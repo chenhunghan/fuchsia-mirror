@@ -162,9 +162,13 @@ rustc_library("selinux") {
   if (is_host) {
     deps += [ "//third_party/rust_crates:parking_lot" ]
   } else {
-    deps += [ "//src/starnix/lib/starnix_sync" ]
+    deps += [
+      "//sdk/rust/zx",
+      "//src/starnix/lib/starnix_sync",
+    ]
   }
 }
+
 rustc_test("selinux_lib_test") {
   sources = [
     "src/exceptions_config.rs",
@@ -278,7 +282,10 @@ rustc_test("selinux_lib_test") {
   if (is_host) {
     deps += [ "//third_party/rust_crates:parking_lot" ]
   } else {
-    deps += [ "//src/starnix/lib/starnix_sync" ]
+    deps += [
+      "//sdk/rust/zx",
+      "//src/starnix/lib/starnix_sync",
+    ]
   }
   deps += [
     "//src/lib/fuchsia-sync",
@@ -292,6 +299,7 @@ rustc_test("selinux_lib_test") {
   }
   lint_config = "//src/starnix/config:starnix_clippy_lints_test"
 }
+
 fuchsia_unittest_package("starnix-selinux-unit-tests") {
   package_name = "starnix-selinux-unit-tests-gn"
   component_name = "starnix-selinux-unit-tests"

@@ -2,10 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-group("libmagma") {
-  public_deps = [ ":kgsl_libmagma" ]
-}
-
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
 #
 #  ________  _________  ________  ________
@@ -31,14 +27,19 @@ group("libmagma") {
 
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
-rustc_library("kgsl_libmagma") {
+rustc_library("libmagma") {
   sources = [
     "kgsl_libmagma.rs",
     "lib.rs",
   ]
+  crate_name = "kgsl_libmagma"
   source_root = "lib.rs"
   edition = "2024"
   lint_config = "//src/starnix/build:kernel_library_config"
+  visibility = [
+    ":*",
+    "//src/starnix/modules/kgsl:*",
+  ]
   deps = [
     "//sdk/rust/zx",
     "//src/starnix/lib/magma",

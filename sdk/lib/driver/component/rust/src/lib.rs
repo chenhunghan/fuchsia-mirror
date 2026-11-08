@@ -21,8 +21,9 @@ pub mod testing;
 pub use context::*;
 pub use error::DriverError;
 pub use health::{
-    HEALTH_INSPECT_NODE_NAME, HealthAlertReporter, HealthCheckInspect, HealthCheckResult,
-    record_health_check_to_inspect,
+    HEALTH_INSPECT_NODE_NAME, HealthAlertLatch, HealthAlertReporter, HealthCheckInspect,
+    HealthCheckResult, MAX_HEALTH_CONDITIONS, diag_bool, diag_int, diag_str, diag_timestamp,
+    diag_uint, overall_status, record_health_check_to_inspect,
 };
 pub use incoming::*;
 pub use node::*;

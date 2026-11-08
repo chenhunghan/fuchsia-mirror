@@ -34,6 +34,9 @@ fxl::RefPtr<Type> AddCVQualifiersToMatch(const Type* reference, fxl::RefPtr<Type
 
 bool NameHasTemplate(std::string_view name);
 
+// Strips any template parameter list starting with '<' from a type or function name.
+std::string_view StripTemplate(std::string_view type_name);
+
 void AddTemplateParameterToName(std::string& original, const char* type_name);
 
 void AddAllTemplateParametersToName(std::string& name,

@@ -6,7 +6,7 @@ use crate::utils;
 use anyhow::{Context, Result};
 use bind::interpreter::decode_bind_rules::DecodedRules;
 use cm_rust::ComponentDecl;
-use fidl_fuchsia_data as fdata;
+use fidl_fuchsia_data_common as fdata;
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -56,7 +56,10 @@ pub fn check_device_categories(
     if let Some(device_categories) = get_device_categories(component) {
         if device_categories.is_empty() {
             return Ok(Err(StaticCheckFail {
-                reason: format!("The 'device_categories' field in the 'program' section of the driver's component manifest is empty. {}", DEVICE_CATEGORIES_HELP),
+                reason: format!(
+                    "The 'device_categories' field in the 'program' section of the driver's component manifest is empty. {}",
+                    DEVICE_CATEGORIES_HELP
+                ),
             }));
         }
 
@@ -69,7 +72,10 @@ pub fn check_device_categories(
         Ok(Ok(StaticCheckPass {}))
     } else {
         Ok(Err(StaticCheckFail {
-            reason: format!("The 'device_categories' field in the 'program' section of the driver's component manifest is missing or an invalid type. {}", DEVICE_CATEGORIES_HELP),
+            reason: format!(
+                "The 'device_categories' field in the 'program' section of the driver's component manifest is missing or an invalid type. {}",
+                DEVICE_CATEGORIES_HELP
+            ),
         }))
     }
 }
@@ -83,7 +89,10 @@ pub fn check_bind_rules(
         let contents = far_reader.read_file(&bind_path)?;
         if let Err(e) = DecodedRules::new(contents) {
             Ok(Err(StaticCheckFail {
-                reason: format!("The bind decoder returned an error while decoding the driver's bind rules at {}: {}", bind_path, e),
+                reason: format!(
+                    "The bind decoder returned an error while decoding the driver's bind rules at {}: {}",
+                    bind_path, e
+                ),
             }))
         } else {
             Ok(Ok(StaticCheckPass {}))
@@ -151,7 +160,7 @@ fn is_device_category_valid(
         if json_category.contains_key(&device_category.subcategory) {
             Ok(StaticCheckPass {})
         } else {
-            Err(StaticCheckFail  {
+            Err(StaticCheckFail {
                 reason: format!(
                     "In the 'device_categories' field of the driver's component manifest, '{}' is not a known subcategory of '{}'.",
                     device_category.subcategory, device_category.category
@@ -160,7 +169,10 @@ fn is_device_category_valid(
         }
     } else {
         Err(StaticCheckFail {
-            reason: format!("In the 'device_categories' field of the driver's component manifest, '{}' is not a known device category.", device_category.category),
+            reason: format!(
+                "In the 'device_categories' field of the driver's component manifest, '{}' is not a known device category.",
+                device_category.category
+            ),
         })
     }
 }

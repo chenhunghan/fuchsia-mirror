@@ -50,25 +50,31 @@ def generate_python_build_action(
     Args:
         ctx: The context of the rule. The corresponding rule definition
             must include PY_TOOLCHAIN_ATTRS in its `attrs`.
-        py_script [File]: The Python script to run.
-        arguments [List[str]]: The script's arguments, default to empty list.
-        inputs [List[File]]: The action's inputs. This must include all modules imported
-            transitively from the script, that are not part of the standard library.
-        outputs [List[File]]: The action's outputs.
+        py_script: The Python script File to run.
+        inputs: List or depset of File objects required by the action. This must
+            include all non-stdlib modules imported transitively from the script.
+        outputs: List of output File objects.
+        arguments: List of string arguments passed to the script.
         **kwargs: Additional arguments to pass to ctx.actions.run().
     """
     # Get Python3 interpreter and its runfiles.
 
     python3_executable, python3_runfiles = _find_python_interpreter_and_runfiles(ctx)
 
-    runfiles = ctx.runfiles(
-        files = [py_script] + inputs,
-        transitive_files = python3_runfiles.files,
-    )
+    if type(inputs) == "depset":
+        action_inputs = depset(
+            direct = [py_script],
+            transitive = [inputs, python3_runfiles.files],
+        )
+    else:
+        action_inputs = depset(
+            direct = [py_script] + inputs,
+            transitive = [python3_runfiles.files],
+        )
     ctx.actions.run(
         executable = python3_executable,
         arguments = [py_script.path] + arguments,
-        inputs = runfiles.files,
+        inputs = action_inputs,
         outputs = outputs,
         **kwargs
     )

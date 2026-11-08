@@ -20,7 +20,7 @@ group("tests") {
     "dev-operation:tests",
     "dma-buffer:tests",
     "driver:tests",
-    "fidl-metadata:tests",
+    "fidl-ir:tests",
     "fragment-irq:tests",
     "goldfish/pipe_io:tests",
     "io-buffer:tests",

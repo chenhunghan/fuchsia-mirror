@@ -349,6 +349,10 @@ pub fn sys_rt_sigtimedwait(
                     break signal;
                 }
             } else if e == ETIMEDOUT {
+                // Check if a signal we were waiting for became pending before timing out.
+                if let Some(signal) = current_task.write().take_signal_with_mask(!unblock) {
+                    break signal;
+                }
                 return error!(EAGAIN);
             }
 

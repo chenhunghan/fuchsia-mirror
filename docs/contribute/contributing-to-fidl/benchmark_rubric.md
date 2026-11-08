@@ -95,10 +95,10 @@ All benchmarks should export to chromeperf and use the test_suite: fuchsia.fidl_
 Example:
 
 ```
-Go/Builder/ByteArray/16/WallTime
+Rust/Builder/ByteArray/16/WallTime
 ```
 
-Binding names are one of: `LLCPP`,` HLCPP`,` Rust`,` Go`,` Dart` (case sensitive)
+Binding names are one of: `LLCPP`, `HLCPP`, `Rust`, `Dart` (case sensitive)
 
 Benchmark paths are strings identifying a particular benchmark. They can contain slashes e.g. “`ByteArray/1`”. Each word is upper camel case. Benchmark names and parts of the names should be singular e.g. ManyStructField (NOT ManyStructFields).
 
@@ -112,7 +112,7 @@ Generally moving from least specific towards more specific going left to right.
 
 Some details:
 
-* If the benchmark is specific to a binding, it should be prefixed with `[Binding Flavour]/` in the path (e.g. `Go/`). If the benchmark is unrelated to a specific binding, no binding prefix should be used (e.g. `Count/` or `Memcpy/`). If there is one instance of a benchmark perf binding flavour, it should be prefixed with the binding flavour.
+* If the benchmark is specific to a binding, it should be prefixed with `[Binding Flavour]/` in the path (e.g. `Rust/`). If the benchmark is unrelated to a specific binding, no binding prefix should be used (e.g. `Count/` or `Memcpy/`). If there is one instance of a benchmark perf binding flavour, it should be prefixed with the binding flavour.
 * Subbenchmarks (such as sizes) appear after the main benchmark, from most significant to least significant left to right.
 * Substeps appear just before the measurement (this is required by the C++ perftest structure).
 * A measurement type should be specified if there is a possibility of having multiple measurement types for the benchmark. Otherwise it can be omitted.
@@ -125,7 +125,7 @@ Examples:
     * Benchmark name is followed by size and subbenchmark name (16)
     * It is then followed by substep name
     * Last, it has the measurement
-* `Go/Roundtrip/AsciiString/Len256/Concurrency100`
+* `Rust/Roundtrip/AsciiString/Len256/Concurrency100`
     * Starts with binding, then type of benchmark (roundtrip)
     * Benchmark name is followed by two named subbenchmark parameters
     * No measurement because only wall time is expect to ever be measured
@@ -138,6 +138,6 @@ Examples:
 
 Benchmarks should be created in `src/tests/benchmarks/fidl`. If part of the benchmark code _must_ exist elsewhere, effort should be made in creating an executable and build target in `src/tests/benchmarks/fidl` (see wrapper in dart).
 
-Builder/encode/decode benchmarks can exist in a binding specific directory `src/tests/benchmarks/fidl/{go,rust,dart,hlcpp,llcpp}`.
+Builder/encode/decode benchmarks can exist in a binding specific directory `src/tests/benchmarks/fidl/{rust,dart,hlcpp,llcpp}`.
 
 Other benchmarks should be put in a subfolder corresponding to benchmark type. e.g. `src/tests/benchmarks/fidl/roundtrip`. In rare cases, where it is access is needed to specific generated types, they can be placed elsewhere (for instance memcpy benchmark inside of llcpp to access llcpp types to test memcpy of correct size). This should be considered tech debt and eventually moved to a dedicated benchmark and folder.

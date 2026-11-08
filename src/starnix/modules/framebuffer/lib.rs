@@ -126,13 +126,13 @@ impl Framebuffer {
         })?;
 
         let graphics_class = registry.objects.graphics_class();
-        registry.register_device(
+        registry.add_device(
             kernel,
             "fb0".into(),
             DeviceMetadata::new("fb0".into(), DeviceId::FB0, DeviceMode::Char),
             graphics_class,
             FramebufferDevice { framebuffer: framebuffer.clone() },
-        )?;
+        );
 
         register_display_stub_devices(registry);
 

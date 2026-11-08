@@ -15,6 +15,7 @@ use tracing_mutex as _;
 use anyhow::{Context as _, Error};
 use async_lock::OnceCell;
 use fidl_fuchsia_component_runner as frunner;
+use fidl_fuchsia_input_injection as finputinjection;
 use fidl_fuchsia_memory_attribution as fattribution;
 use fidl_fuchsia_process_lifecycle as flifecycle;
 use fidl_fuchsia_starnix_container as fstarcontainer;
@@ -27,7 +28,8 @@ use starnix_core::mm::{init_usercopy, zxio_maybe_faultable_copy_impl};
 use starnix_core::task::OomWatermarksMb;
 use starnix_kernel_runner::{
     Container, ContainerServiceConfig, create_component_from_stream, serve_component_runner,
-    serve_container_controller, serve_memory_attribution_provider_elfkernel,
+    serve_container_controller, serve_input_device_registry,
+    serve_memory_attribution_provider_elfkernel,
 };
 use starnix_kernel_structured_config::Config as KernelStructuredConfig;
 use starnix_logging::{
@@ -120,6 +122,10 @@ enum KernelServices {
     /// The starnix runner connects to this protocol to report memory attribution
     /// information for each container it runs.
     MemoryAttributionProvider(fattribution::ProviderRequestStream),
+
+    /// This service lets test frameworks and synthetic input devices inject
+    /// input reports into Starnix direct input.
+    InputDeviceRegistry(finputinjection::InputDeviceRegistryRequestStream),
 }
 
 #[fuchsia::main(
@@ -198,7 +204,8 @@ async fn main() -> Result<(), Error> {
         .add_fidl_service_at("fuchsia.starnix.container.Runner", KernelServices::ContainerRunner)
         .add_fidl_service(KernelServices::ComponentRunner)
         .add_fidl_service(KernelServices::ContainerController)
-        .add_fidl_service(KernelServices::MemoryAttributionProvider);
+        .add_fidl_service(KernelServices::MemoryAttributionProvider)
+        .add_fidl_service(KernelServices::InputDeviceRegistry);
 
     let inspector = fuchsia_inspect::component::inspector();
     #[cfg(target_arch = "x86_64")]
@@ -280,6 +287,14 @@ async fn main() -> Result<(), Error> {
                     serve_memory_attribution_provider_elfkernel(stream, container.wait().await)
                         .await
                         .expect("failed to start memory attribution provider");
+                })
+                .detach();
+            }
+            KernelServices::InputDeviceRegistry(stream) => {
+                let container = container.clone();
+                fuchsia_async::Task::local(async move {
+                    let container = container.wait().await;
+                    serve_input_device_registry(&container.kernel, stream);
                 })
                 .detach();
             }

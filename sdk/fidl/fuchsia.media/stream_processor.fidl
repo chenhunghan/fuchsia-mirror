@@ -456,7 +456,7 @@ type StreamBufferPartialSettings = resource table {
     /// BufferCollectionEvents.OnDuplicatedTokensKnownByServer()).
     @available(added=23)
     7: sysmem2_token client_end:fuchsia.sysmem2.BufferCollectionToken;
-    @available(deprecated=23, note="use sysmem2_token")
+    @available(deprecated=23, removed=NEXT, note="use sysmem2_token")
     6: sysmem_token client_end:fuchsia.sysmem.BufferCollectionToken;
 
     @available(deprecated=23, note="fuchsia.sysmem2.BufferCollection.SetConstraints")
@@ -675,12 +675,14 @@ type Packet = table {
     /// [start_offset, start_offset + valid_length_bytes) is the contiguously
     /// valid data referred to by this packet.
     ///
-    /// For uncompressed video frames, FormatDetails is the primary means of
-    /// determining which bytes are relevant.  The offsets in FormatDetails
-    /// are relative to the start_offset here.  The valid_length_bytes must be
-    /// large enough to include the full last line of pixel data, including the
-    /// full line stride of the last line (not just the width in pixels of the
-    /// last line).
+    /// For uncompressed video frames, `FormatDetails.image_format` (or legacy
+    /// `FormatDetails.domain.video.uncompressed`) is the primary means of
+    /// determining which bytes are relevant. Plane byte offsets derived from
+    /// `FormatDetails.image_format` (or legacy `FormatDetails` plane offsets)
+    /// are relative to `start_offset`. `valid_length_bytes` must be large
+    /// enough to include the full last line of pixel data, including the full
+    /// line stride of the last line (not just the width in pixels of the last
+    /// line).
     ///
     /// Despite these being filled out, some uncompressed video buffers are of
     /// types that are not readable by the CPU.  These fields being here don't

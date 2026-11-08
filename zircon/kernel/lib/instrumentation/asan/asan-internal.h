@@ -55,9 +55,15 @@ static inline uint8_t* addr2shadow(uintptr_t address) {
   return shadow_byte_address;
 }
 
+enum class AccessType : uint8_t {
+  Read = 0,
+  Write = 1,
+  Assumption = 2,
+};
+
 // Checks the validity of an entire region. This function panics and prints an
 // error message if any part of [address, address+bytes) is poisoned.
-void asan_check(uintptr_t address, size_t bytes, bool is_write, void* caller);
+void asan_check(uintptr_t address, size_t bytes, AccessType access_type, void* caller);
 
 // Checks whether the two memory ranges defined by [offseta, offseta+lena) and
 // [offsetb, offsetb + lenb) overlap. This function panics and prints an error message if

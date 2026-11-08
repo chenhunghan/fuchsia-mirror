@@ -203,8 +203,8 @@ These goals are achieved by doing the following:
     _flag_configs = struct(
         ...
         debuginfo = _make_flag_config(
-            cflags = [ "-g3", "-gdwarf-5", ... ],
-            ldflags = [ "-g3", "-gdwarf-5", ... ],
+            cflags = [ "-g3", "-gdwarf-5", "-gpubnames", ... ],
+            ldflags = [ "-g3", "-gdwarf-5", ..., "-Wl,--debug-names" ],
             ...
         ),
     )

@@ -11,13 +11,27 @@ use starnix_uapi::errors::Errno;
 use starnix_uapi::{errno, error};
 use std::os::unix::thread::JoinHandleExt;
 use std::sync::Arc;
-use std::sync::mpsc::sync_channel;
-use thread_create_vmars::ThreadCreateVmars;
+use std::sync::mpsc::{Receiver, sync_channel};
+use std::thread::JoinHandle;
+use thread_create_vmars::{GrowableVmars, ThreadCreateVmars};
 
 /// Wrapper for `ThreadCreateVmars` to be stored in the kernel expando.
 ///
 /// This is a module-private singleton used to manage VMARs for thread creation.
 struct ExecutorVmarManager(LockDepMutex<ThreadCreateVmars, ExecutorVmarManagerLock>);
+
+fn get_thread_create_handles(
+    process: zx::sys::zx_handle_t,
+    create_vmars: &mut ThreadCreateVmars,
+    mut get_vmar: impl FnMut(&mut GrowableVmars) -> Result<Arc<zx::Vmar>, Errno>,
+) -> Result<thrd_zx_create_handles, Errno> {
+    Ok(thrd_zx_create_handles {
+        process,
+        machine_stack_vmar: get_vmar(&mut create_vmars.machine_stack)?.raw_handle(),
+        security_stack_vmar: get_vmar(&mut create_vmars.security_stack)?.raw_handle(),
+        thread_block_vmar: get_vmar(&mut create_vmars.thread_block)?.raw_handle(),
+    })
+}
 
 pub fn execute_task_with_prerun_result<F, R, G>(
     task_builder: TaskBuilder,
@@ -68,20 +82,26 @@ where
         kernel.expando.get_or_init(|| ExecutorVmarManager(ThreadCreateVmars::new().into()));
     let mut create_vmars = create_vmars.0.lock();
 
+    // Reuse the current VMARs without probing them for free space. If one of them is full, thread
+    // creation fails with `WouldBlock` and we probe and retry below.
+    let handles =
+        get_thread_create_handles(process_handle, &mut create_vmars, |vmars| vmars.current());
+    let handles = match handles {
+        Ok(handles) => handles,
+        Err(errno) => {
+            std::mem::drop(create_vmars);
+            task_builder.release(());
+            return Err(errno);
+        }
+    };
+
     // SAFETY: thread_set_zx_create_handles only manipulates the handles for the current thread and
     // so there is no possibility of races. The process_handle is only used for diagnostic
     // purposes. The remaining handles are defined by ThreadCreateVmars to not be valid and not
     // destroyed until ThreadCreateVmars is destroyed. As ThreadCreateVmars has a lifetime of the
     // kernel, it will not be destroyed until all threads are terminated, at which point all usages
     // and references to these handles will have ended.
-    let old_handles = unsafe {
-        thrd_set_zx_create_handles(thrd_zx_create_handles {
-            process: process_handle,
-            machine_stack_vmar: create_vmars.machine_stack.probe()?.raw_handle(),
-            security_stack_vmar: create_vmars.security_stack.probe()?.raw_handle(),
-            thread_block_vmar: create_vmars.thread_block.probe()?.raw_handle(),
-        })
-    };
+    let old_handles = unsafe { thrd_set_zx_create_handles(handles) };
     scopeguard::defer! {
         // SAFETY: thrd_set_zx_create_handles only manipulates handles for the current thread and
         // so there is no possibility of races. This is resetting to the old values that were
@@ -95,51 +115,32 @@ where
     let ref_task = Arc::clone(&task_builder.task);
     let running_state = ref_task.running_state().unwrap();
 
-    // Spawn the process' thread. Note, this closure ends up executing in the process referred to by
+    // Spawn the process' thread. Note, the thread ends up executing in the process referred to by
     // `process_handle`.
-    let (sender, receiver) = sync_channel::<TaskBuilder>(1);
-    let result = std::thread::Builder::new().name("user-thread".to_string()).spawn(move || {
-        let _rcu_registration = fuchsia_rcu::register_thread();
-
-        // Note, cross-process shared resources allocated in this function that aren't freed by the
-        // Zircon kernel upon thread and/or process termination (like mappings in the shared region)
-        // should be freed using the delayed finalizer mechanism and Task drop.
-        let mut current_task: CurrentTask = receiver
-            .recv()
-            .expect("caller should always send task builder before disconnecting")
-            .into();
-
-        // We don't need the receiver anymore. If we don't drop the receiver now, we'll keep it
-        // allocated for the lifetime of the thread.
-        std::mem::drop(receiver);
-
-        let pre_run_result = { pre_run(&mut current_task) };
-        if pre_run_result.is_err() {
-            // Only log if the pre run didn't exit the task. Otherwise, consider this is expected
-            // by the caller.
-            if current_task.exit_status().is_none() {
-                log_error!("Pre run failed from {pre_run_result:?}. The task will not be run.");
+    let (mut sender, receiver) = sync_channel::<(TaskBuilder, F, G)>(1);
+    let mut result = spawn_user_thread(receiver);
+    if matches!(&result, Err(e) if e.kind() == std::io::ErrorKind::WouldBlock) {
+        // One of the current VMARs is full. Probe for VMARs with free space and retry once.
+        let handles =
+            get_thread_create_handles(process_handle, &mut create_vmars, |vmars| vmars.probe());
+        let handles = match handles {
+            Ok(handles) => handles,
+            Err(errno) => {
+                std::mem::drop(create_vmars);
+                task_builder.release(());
+                return Err(errno);
             }
-
-            // Drop the task_complete callback to ensure that the closure isn't holding any
-            // releasables.
-            std::mem::drop(task_complete);
-        } else {
-            let exit_status = enter_syscall_loop(&mut current_task);
-            current_task.write().set_exit_status(exit_status.clone());
-            task_complete(Ok(exit_status));
-        }
-
-        // `release` must be called as the absolute last action on this thread to ensure that
-        // any deferred release are done before it.
-        current_task.release(());
-
-        // Ensure that no releasables are registered after this point as we unwind the stack.
-        DelayedReleaser::finalize();
-    });
+        };
+        // SAFETY: See above.
+        unsafe { thrd_set_zx_create_handles(handles) };
+        let receiver;
+        (sender, receiver) = sync_channel(1);
+        result = spawn_user_thread(receiver);
+    }
     let join_handle = match result {
         Ok(handle) => handle,
         Err(e) => {
+            std::mem::drop(create_vmars);
             task_builder.release(());
             match e.kind() {
                 std::io::ErrorKind::WouldBlock => return error!(EAGAIN),
@@ -186,10 +187,59 @@ where
     // spawned successfully, as we need to ensure the builder is always explicitly
     // released.
     sender
-        .send(task_builder)
+        .send((task_builder, pre_run, task_complete))
         .expect("receiver should not be disconnected because thread spawned successfully");
 
     Ok(())
+}
+
+/// Spawns the thread that runs a user task. The `TaskBuilder` and callbacks are sent over
+/// `receiver` only after the spawn succeeds, so a failed spawn can be retried.
+fn spawn_user_thread<F, G>(
+    receiver: Receiver<(TaskBuilder, F, G)>,
+) -> std::io::Result<JoinHandle<()>>
+where
+    F: FnOnce(&mut CurrentTask) -> Result<(), Errno> + Send + Sync + 'static,
+    G: FnOnce(Result<ExitStatus, Error>) + Send + Sync + 'static,
+{
+    std::thread::Builder::new().name("user-thread".to_string()).spawn(move || {
+        let _rcu_registration = fuchsia_rcu::register_thread();
+
+        // Note, cross-process shared resources allocated in this function that aren't freed by the
+        // Zircon kernel upon thread and/or process termination (like mappings in the shared region)
+        // should be freed using the delayed finalizer mechanism and Task drop.
+        let (task_builder, pre_run, task_complete) =
+            receiver.recv().expect("caller should always send task builder before disconnecting");
+        let mut current_task: CurrentTask = task_builder.into();
+
+        // We don't need the receiver anymore. If we don't drop the receiver now, we'll keep it
+        // allocated for the lifetime of the thread.
+        std::mem::drop(receiver);
+
+        let pre_run_result = { pre_run(&mut current_task) };
+        if pre_run_result.is_err() {
+            // Only log if the pre run didn't exit the task. Otherwise, consider this is expected
+            // by the caller.
+            if current_task.exit_status().is_none() {
+                log_error!("Pre run failed from {pre_run_result:?}. The task will not be run.");
+            }
+
+            // Drop the task_complete callback to ensure that the closure isn't holding any
+            // releasables.
+            std::mem::drop(task_complete);
+        } else {
+            let exit_status = enter_syscall_loop(&mut current_task);
+            current_task.write().set_exiting(exit_status.clone());
+            task_complete(Ok(exit_status));
+        }
+
+        // `release` must be called as the absolute last action on this thread to ensure that
+        // any deferred release are done before it.
+        current_task.release(());
+
+        // Ensure that no releasables are registered after this point as we unwind the stack.
+        DelayedReleaser::finalize();
+    })
 }
 
 #[repr(C)]

@@ -9,22 +9,16 @@ import os
 import pathlib
 import statistics
 import subprocess
-from typing import TYPE_CHECKING, Any, TextIO, Tuple
-
-if TYPE_CHECKING:
-    # The object returned by ArgumentParser.add_subparsers().
-    # This is the most accurate type for static analysis.
-    # We conditionalize on TYPE_CHECKING because _SubParsersAction is a private field
-    # and we don't want to depend on implementation details at runtime.
-    SubParsersAction = argparse._SubParsersAction
-else:
-    # Fallback for runtime, Any is sufficient.
-    SubParsersAction = Any
-
+from typing import TextIO, Tuple
 
 _DEFAULT_STATE_FILE = (
     "/google/data/ro/teams/tq-performance/sample_builds_state.json"
 )
+
+
+def _normalize_build_id(build_id: str) -> str:
+    """Normalizes a Buildbucket build ID by stripping any leading 'b' or 'B' prefix."""
+    return build_id.strip().removeprefix("b").removeprefix("B")
 
 
 def download_metrics(args, out_fh: TextIO) -> None:
@@ -53,7 +47,12 @@ def extract_metrics(args, out_fh: TextIO) -> None:
     _extract_metrics(args.suite_prefix, args.data_dir, args.out_file, out_fh)
 
 
-def register_subparsers(subparsers: SubParsersAction, out_fh: TextIO) -> None:
+# TODO(https://github.com/python/cpython/issues/101503): Fix the visibility
+# violation by changing the type specification of "subparsers" to whatever
+# publicly-available type is determined for it to have.
+def register_subparsers(
+    subparsers: argparse._SubParsersAction, out_fh: TextIO
+) -> None:
     """Registers subparsers for workflow commands."""
     subparser = subparsers.add_parser(
         "download_metrics",
@@ -61,7 +60,7 @@ def register_subparsers(subparsers: SubParsersAction, out_fh: TextIO) -> None:
     )
     subparser.add_argument(
         "build_id",
-        help="The Buildbucket build ID for which to download metrics.",
+        help="The Buildbucket build ID for which to download metrics (with or without 'b' prefix).",
     )
     subparser.add_argument(
         "out_dir",
@@ -119,6 +118,7 @@ def register_subparsers(subparsers: SubParsersAction, out_fh: TextIO) -> None:
 def _download_metrics(
     bb_tool: str, build_id: str, out_dir: str, out_fh: TextIO
 ) -> None:
+    build_id = _normalize_build_id(build_id)
     os.makedirs(out_dir, exist_ok=True)
 
     cas_tool = _find_cas_tool()
@@ -294,6 +294,7 @@ def _download_from_cas(
 
 def _get_build_status(bb_tool: pathlib.Path, build_id: str) -> str:
     """Uses the `bb` tool to get the status of a build."""
+    build_id = _normalize_build_id(build_id)
     cmd = [bb_tool, "get", "-json", build_id]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)

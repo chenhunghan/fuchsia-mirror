@@ -4,7 +4,7 @@
 
 use safe_string::{ControlCharError, TermSafe};
 use std::ops::Deref;
-use target_behavior::{ConnectionBehavior, target_interface};
+use target_behavior::target_interface;
 
 use fho::{FhoEnvironment, TryFromEnv};
 
@@ -78,9 +78,8 @@ impl TryFromEnv for NodenameHolder {
     type Error = ffx_command_error::Error;
     async fn try_from_env(env: &FhoEnvironment) -> std::result::Result<Self, Self::Error> {
         let target_env = target_interface(env);
-        let behavior = target_env.init_connection_behavior(env.environment_context()).await?;
-        let ConnectionBehavior::Direct(ref dc) = *behavior;
-        let (resolution, _conn) = dc.connect(env.environment_context()).await?;
+        let connector = target_env.init_connection_behavior(env.environment_context()).await?;
+        let (resolution, _conn) = connector.connect(env.environment_context()).await?;
         let identity = resolution
             .identify(&env.environment_context())
             .await

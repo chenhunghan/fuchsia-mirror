@@ -5,6 +5,9 @@
 #ifndef SRC_DEVELOPER_FORENSICS_FEEDBACK_NAMESPACE_INIT_H_
 #define SRC_DEVELOPER_FORENSICS_FEEDBACK_NAMESPACE_INIT_H_
 
+#include <lib/zx/time.h>
+
+#include <optional>
 #include <string>
 
 #include "src/developer/forensics/feedback/constants.h"
@@ -23,9 +26,10 @@ void MoveFile(const std::string& from, const std::string& to);
 
 // Feedback data
 //
-// Decompress and concatenate the logs from the previous boot in |dir| and store the at
-// |write_path|.
+// Decompress and concatenate the logs from the previous boot in |dir| and store them at
+// |write_path|. Also logs metrics about the previous boot logs to |cobalt|.
 void CreatePreviousLogsFile(cobalt::Logger* cobalt, StorageSize max_decompressed_size,
+                            std::optional<zx::duration> last_boot_uptime,
                             const std::string& dir = kCurrentLogsDir,
                             const std::string& write_path = kPreviousLogsFilePath);
 

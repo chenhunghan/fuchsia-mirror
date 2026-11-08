@@ -1,0 +1,92 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/host_tests:host_rustc_test.bzl",
+    "wrap_host_rust_test",
+)
+load(
+    "//build/bazel/rules/rust:rustc_library.bzl",
+    "rustc_library",
+)
+load(
+    "//build/bazel/rules/rust:rustc_test.bzl",
+    "rustc_test",
+)
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        ":zbi-rs-lib-unit-tests",
+    ],
+    visibility = ["//src/firmware:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    tests = [
+        ":zbi-rs_host_test",
+    ],
+    visibility = ["//src/firmware:__pkg__"],
+)
+
+rustc_library(
+    name = "zbi-rs",
+    srcs = [
+        "src/lib.rs",
+        "src/zbi_format.rs",
+    ],
+    build_flags = [
+        "//build/config/rust/lints:deny_unused_results",
+    ],
+    crate_name = "zbi",
+    edition = "2024",
+    link_deps = [
+        "//sdk/lib/zbi-format",
+    ],
+    visibility = [
+        "//src/bringup/bin/userboot:__pkg__",
+        "//src/bringup/lib/userboot/rust:__pkg__",
+        "//src/firmware/paver/rust/paver-core:__pkg__",
+    ],
+    deps = [
+        "//third_party/rust_crates/vendor:bitflags",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)
+
+# This is just for unit tests to have different name Since `with_unit_tests =
+# true` produces binary that is in conflict with c implementation
+rustc_test(
+    name = "zbi-rs-test",
+    build_flags = [
+        "//build/config/rust/lints:deny_unused_results",
+    ],
+    crate = ":zbi-rs",
+    # Preserves GN output_name to avoid a lib_test collision with the C implementation.
+    crate_name = "firmware_zbi_rs_test",
+    # Run only through the fx_unittest_package and wrap_host_rust_test wrappers.
+    tags = ["manual"],
+    deps = [
+        "//third_party/rust_crates/vendor:hex",
+    ],
+)
+
+fx_unittest_package(
+    name = "zbi-rs-lib-unit-tests",
+    unit_tests = [
+        ":zbi-rs-test",
+    ],
+)
+
+wrap_host_rust_test(
+    name = "zbi-rs_host_test",
+    binary_name = "zbi-rs-test",
+)

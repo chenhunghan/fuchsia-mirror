@@ -317,10 +317,9 @@ impl<I: IpExt, D: WeakDeviceIdentifier, S: DatagramSocketSpec> SocketState<I, D,
             SocketInfo::Unbound => (None, None),
             SocketInfo::Listener(ListenerInfo { local_ip, local_identifier }) => (
                 Some((
-                    local_ip.map_or_else(
-                        || ZonedAddr::Unzoned(I::UNSPECIFIED_ADDRESS),
-                        |addr| addr.into_inner_without_witness(),
-                    ),
+                    local_ip.map_or(ZonedAddr::Unzoned(I::UNSPECIFIED_ADDRESS), |addr| {
+                        addr.into_inner_without_witness()
+                    }),
                     local_identifier,
                 )),
                 None,
@@ -4218,7 +4217,16 @@ where
                     DatagramBoundStateContext::with_transport_context(core_ctx, |core_ctx| {
                         let tx_metadata = core_ctx.convert_tx_meta(tx_metadata);
                         core_ctx
-                            .send_ip_packet(bindings_ctx, &socket, packet, &options, tx_metadata)
+                            .send_ip_packet(
+                                bindings_ctx,
+                                &socket,
+                                packet,
+                                // TODO(https://fxbug.dev/566314871): Support
+                                // UDP GSO.
+                                None,
+                                &options,
+                                tx_metadata,
+                            )
                             .map_err(|send_error| SendError::IpSock(send_error))
                     })
                 }
@@ -4234,6 +4242,9 @@ where
                                     bindings_ctx,
                                     &socket,
                                     packet,
+                                    // TODO(https://fxbug.dev/566314871):
+                                    // Support UDP GSO.
+                                    None,
                                     &options,
                                     tx_metadata,
                                 )

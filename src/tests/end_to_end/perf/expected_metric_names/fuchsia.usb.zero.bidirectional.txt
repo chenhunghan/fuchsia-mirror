@@ -1,0 +1,2 @@
+fuchsia.usb.zero.bidirectional: Rate
+fuchsia.usb.zero.bidirectional: WallTime

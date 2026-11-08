@@ -3,12 +3,12 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import pathlib
 import sys
-from pathlib import Path
 
 # Dynamically resolve and insert the Fuchsia root directory into sys.path
 # to support standalone script package imports (e.g. from build.rbe).
-_FUCHSIA_DIR = Path(__file__).resolve().parent.parent.parent
+_FUCHSIA_DIR = pathlib.Path(__file__).resolve().parent.parent.parent
 if str(_FUCHSIA_DIR) not in sys.path:
     sys.path.insert(0, str(_FUCHSIA_DIR))
 
@@ -19,11 +19,9 @@ import getpass
 import io
 import json
 import os
-import pathlib
 import shutil
 import signal
 import subprocess
-import sys
 import tempfile
 import time
 import unittest
@@ -37,9 +35,15 @@ if str(_FUCHSIA_ROOT) not in sys.path:
     sys.path.insert(0, str(_FUCHSIA_ROOT))
 
 from build.auth import gcloud
+from build.bazel.scripts import bazel_invocation as bazel_inv
 from build.rbe import build_summary, casfs, rbe_profile, rbe_settings
 from build.resultstore import rs_profile
-from build.scripts import main_build, signal_utils
+from build.scripts import (
+    main_build,
+    python_subprocess,
+    signal_utils,
+    top_build_wrap,
+)
 
 _FAKE_RBE_SETTINGS = rbe_settings.fake()
 
@@ -205,10 +209,6 @@ class FuchsiaBuildContextTest(MainBuildTestBase):
         self.assertEqual(
             context.select_auth_script,
             source_dir / "build/auth/select_auth_method.py",
-        )
-        self.assertEqual(
-            context.top_build_wrapper,
-            source_dir / "build/scripts/top_build_wrap.sh",
         )
         self.assertEqual(context.args_gn, build_dir / "args.gn")
         self.assertEqual(context.args_json, build_dir / "args.json")
@@ -390,19 +390,14 @@ class FuchsiaBuildContextTest(MainBuildTestBase):
             context = self.create_context()
             context.env = {"FOO": "BAR"}
             with mock.patch.object(
-                subprocess,
-                "check_output",
+                context,
+                "check_python_output",
                 return_value="some output\noauth\n",
             ) as mock_sub:
                 self.assertEqual(context._run_select_auth_script(), "oauth")
                 mock_sub.assert_called_once_with(
-                    [
-                        str(main_build.PYTHON_BIN),
-                        str(context.select_auth_script),
-                    ],
-                    text=True,
+                    [str(context.select_auth_script)],
                     stderr=None,
-                    env=context.env,
                 )
         finally:
             self.run_select_patcher.start()
@@ -412,8 +407,8 @@ class FuchsiaBuildContextTest(MainBuildTestBase):
         try:
             context = self.create_context()
             with mock.patch.object(
-                subprocess,
-                "check_output",
+                context,
+                "check_python_output",
                 side_effect=subprocess.CalledProcessError(
                     1, cmd="cmd", stderr="My strict auth error"
                 ),
@@ -460,20 +455,16 @@ class FuchsiaBuildContextTest(MainBuildTestBase):
             fint_context_path=pathlib.Path("/fake/context.textpb")
         )
         with mock.patch.object(
-            subprocess, "check_output", return_value="32\n"
+            context, "check_python_output", return_value="32\n"
         ) as mock_check:
             self.assertEqual(context.fint_job_count, 32)
             mock_check.assert_called_once_with(
-                [
-                    str(main_build.PYTHON_BIN),
-                    "-S",
-                    "-u",
-                    str(context.fint_build_py),
-                    "--context",
-                    "/fake/context.textpb",
-                    "--print-job-count",
-                ],
-                text=True,
+                list(
+                    context._fint_wrapper_cmd(
+                        context_path=pathlib.Path("/fake/context.textpb"),
+                        print_job_count=True,
+                    )
+                ),
                 stderr=subprocess.PIPE,
             )
 
@@ -526,6 +517,18 @@ class FuchsiaBuildContextTest(MainBuildTestBase):
             ):
                 # Even though max_concurrency is set to 16, the Fint job_count override (32) is returned directly
                 self.assertEqual(context.concurrency, 32)
+
+    @mock.patch.object(python_subprocess, "check_output", return_value="out")
+    def test_check_python_output_delegates(self, mock_check: mock.Mock) -> None:
+        context = self.create_context()
+        res = context.check_python_output(["script.py", "arg"], timeout=10.0)
+        self.assertEqual(res, "out")
+        mock_check.assert_called_once_with(
+            cmd=["script.py", "arg"],
+            source_dir=context.source_dir,
+            base_env=context.env,
+            timeout=10.0,
+        )
 
     def test_load_user_preference(self) -> None:
         with mock.patch.object(
@@ -775,10 +778,10 @@ class FuchsiaBuildContextTest(MainBuildTestBase):
             self.assertEqual(env["RS_cas_service"], f"unix://{rbe_socket}")
             self.assertEqual(env["RS_rs_service"], f"unix://{bes_socket}")
             self.assertEqual(
-                env["FX_INTERNAL_BAZEL_RBE_SOCKET_PATH"], str(rbe_socket)
+                env[bazel_inv.ENV_BAZEL_RBE_SOCKET], str(rbe_socket)
             )
             self.assertEqual(
-                env["FX_INTERNAL_BAZEL_RESULTSTORE_SOCKET_PATH"],
+                env[bazel_inv.ENV_BAZEL_RESULTSTORE_SOCKET],
                 str(bes_socket),
             )
 
@@ -1393,8 +1396,8 @@ class BuildInvocationTest(MainBuildTestBase):
         with self.mock_invocation_context():
             invocation = main_build.BuildInvocation(context)
             env = invocation.get_build_env()
-            self.assertEqual(env["FX_INTERNAL_RESULTSTORE_NINJA"], "0")
-            self.assertEqual(env["FX_INTERNAL_RESULTSTORE_BAZEL"], "0")
+            self.assertEqual(env[rs_profile.ENV_RESULTSTORE_NINJA], "0")
+            self.assertEqual(env[bazel_inv.ENV_RESULTSTORE_BAZEL], "0")
 
         # 2. Test resultstore="ninja" (only Ninja)
         context = self.create_context(resultstore="ninja")
@@ -1402,8 +1405,8 @@ class BuildInvocationTest(MainBuildTestBase):
         with self.mock_invocation_context():
             invocation = main_build.BuildInvocation(context)
             env = invocation.get_build_env()
-            self.assertEqual(env["FX_INTERNAL_RESULTSTORE_NINJA"], "1")
-            self.assertEqual(env["FX_INTERNAL_RESULTSTORE_BAZEL"], "0")
+            self.assertEqual(env[rs_profile.ENV_RESULTSTORE_NINJA], "1")
+            self.assertEqual(env[bazel_inv.ENV_RESULTSTORE_BAZEL], "0")
 
         # 3. Test resultstore="bazel" (only Bazel, local dev with unrestricted LOAS)
         context = self.create_context(resultstore="bazel")
@@ -1417,9 +1420,9 @@ class BuildInvocationTest(MainBuildTestBase):
             ):
                 invocation = main_build.BuildInvocation(context)
                 env = invocation.get_build_env()
-                self.assertEqual(env["FX_INTERNAL_RESULTSTORE_NINJA"], "0")
+                self.assertEqual(env[rs_profile.ENV_RESULTSTORE_NINJA], "0")
                 self.assertEqual(
-                    env["FX_INTERNAL_RESULTSTORE_BAZEL"], "resultstore"
+                    env[bazel_inv.ENV_RESULTSTORE_BAZEL], "resultstore"
                 )
 
         # 4. Test resultstore="bazel" (only Bazel, infra with BUILDBUCKET_ID)
@@ -1428,9 +1431,9 @@ class BuildInvocationTest(MainBuildTestBase):
         with self.mock_invocation_context():
             invocation = main_build.BuildInvocation(context)
             env = invocation.get_build_env()
-            self.assertEqual(env["FX_INTERNAL_RESULTSTORE_NINJA"], "0")
+            self.assertEqual(env[rs_profile.ENV_RESULTSTORE_NINJA], "0")
             self.assertEqual(
-                env["FX_INTERNAL_RESULTSTORE_BAZEL"], "resultstore_infra"
+                env[bazel_inv.ENV_RESULTSTORE_BAZEL], "resultstore_infra"
             )
 
         # 5. Test resultstore="all" (both tools)
@@ -1439,9 +1442,9 @@ class BuildInvocationTest(MainBuildTestBase):
         with self.mock_invocation_context():
             invocation = main_build.BuildInvocation(context)
             env = invocation.get_build_env()
-            self.assertEqual(env["FX_INTERNAL_RESULTSTORE_NINJA"], "1")
+            self.assertEqual(env[rs_profile.ENV_RESULTSTORE_NINJA], "1")
             self.assertEqual(
-                env["FX_INTERNAL_RESULTSTORE_BAZEL"], "resultstore_infra"
+                env[bazel_inv.ENV_RESULTSTORE_BAZEL], "resultstore_infra"
             )
 
     def test_get_build_env_rbe_casfs(self) -> None:
@@ -1475,10 +1478,10 @@ class BuildInvocationTest(MainBuildTestBase):
             self.assertEqual(env["RS_cas_service"], f"unix://{rbe_socket}")
             self.assertEqual(env["RS_rs_service"], f"unix://{bes_socket}")
             self.assertEqual(
-                env["FX_INTERNAL_BAZEL_RBE_SOCKET_PATH"], str(rbe_socket)
+                env[bazel_inv.ENV_BAZEL_RBE_SOCKET], str(rbe_socket)
             )
             self.assertEqual(
-                env["FX_INTERNAL_BAZEL_RESULTSTORE_SOCKET_PATH"],
+                env[bazel_inv.ENV_BAZEL_RESULTSTORE_SOCKET],
                 str(bes_socket),
             )
 
@@ -1787,11 +1790,8 @@ class BuildCommandExecutionTest(MainBuildTestBase):
                 )
 
     @mock.patch.object(main_build, "BuildLock")
-    @mock.patch.object(subprocess, "Popen")
     @mock.patch.dict(os.environ, {"FX_BUILD_QUIET": "0"})
-    def test_run_dry_run(
-        self, mock_popen: mock.Mock, mock_lock: mock.Mock
-    ) -> None:
+    def test_run_dry_run(self, mock_lock: mock.Mock) -> None:
         config = main_build.FuchsiaBuildConfig(
             rbe=False,
             resultstore="none",
@@ -1831,16 +1831,14 @@ class BuildCommandExecutionTest(MainBuildTestBase):
             cleanup_files=[],
         )
 
-        mock_process = mock.Mock()
-        mock_process.pid = 5678
-        mock_process.wait.return_value = 0
-        mock_popen.return_value = mock_process
-
-        result = exec_info.run()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            result = exec_info.run()
         self.assertEqual(result.return_code, 0)
-        # Even in dry_run mode, we should call the subprocess because
-        # we forwarded --dry-run to the wrapper.
-        mock_popen.assert_called_once()
+        self.assertEqual(
+            out.getvalue().splitlines(),
+            ["[main_build.py] Running: VAR=VAL cmd arg", "cmd arg"],
+        )
         mock_lock.assert_called_once()
 
     @mock.patch.object(signal_utils, "SignalManagedProcess")
@@ -1884,10 +1882,7 @@ class BuildCommandExecutionTest(MainBuildTestBase):
             )
             self.assertEqual(calls, expected_calls)
 
-    @mock.patch.object(signal_utils, "SignalManagedProcess")
-    def test_run_dry_run_skips_preflight_actions(
-        self, mock_managed: mock.Mock
-    ) -> None:
+    def test_run_dry_run_skips_preflight_actions(self) -> None:
         context = self.create_context(dry_run=True)
         with self.mock_invocation_context():
             invocation = main_build.BuildInvocation(context)
@@ -1899,12 +1894,16 @@ class BuildCommandExecutionTest(MainBuildTestBase):
             invocation=invocation,
             preflight_actions=[action],
         )
-        mock_managed.return_value.run.return_value = 0
 
-        result = exec_info._run_without_locking()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            result = exec_info._run_without_locking()
         self.assertEqual(result.return_code, 0)
         action.assert_not_called()
-        mock_managed.return_value.run.assert_called_once()
+        self.assertEqual(
+            out.getvalue().splitlines(),
+            ["[main_build.py] Running: VAR=VAL cmd arg", "cmd arg"],
+        )
 
 
 class BuildLockTest(unittest.TestCase):
@@ -2064,20 +2063,18 @@ class TopBuildCommandPrefixTest(MainBuildTestBase):
         context = self.create_context(rbe=False, resultstore="none")
         with self.mock_invocation_context():
             invocation = main_build.BuildInvocation(context)
-            prefix = list(invocation.top_build_command_prefix())
-            self.assertIn(
-                "/tmp/fuchsia/build/scripts/top_build_wrap.sh", prefix[0]
-            )
-            self.assertIn("--build-dir", prefix)
-            self.assertNotIn("--rbe", prefix)
-            self.assertNotIn("--dry-run", prefix)
+            config = invocation.top_build_wrap_config()
+            self.assertFalse(config.needs_reproxy_rbe)
+            self.assertFalse(config.enable_resultstore)
+            self.assertFalse(config.tui)
+            self.assertEqual(invocation.top_build_command_prefix(), [])
 
     def test_dry_run_forwarding(self) -> None:
         context = self.create_context(dry_run=True)
         with self.mock_invocation_context():
             invocation = main_build.BuildInvocation(context)
-            prefix = list(invocation.top_build_command_prefix())
-            self.assertIn("--dry-run", prefix)
+            config = invocation.top_build_wrap_config()
+            self.assertTrue(config.dry_run)
 
     def test_rbe_resultstore(self) -> None:
         context = self.create_context(rbe=True, resultstore="all")
@@ -2088,17 +2085,84 @@ class TopBuildCommandPrefixTest(MainBuildTestBase):
         ):
             with self.mock_invocation_context():
                 invocation = main_build.BuildInvocation(context)
-                prefix = list(invocation.top_build_command_prefix())
-                self.assertIn("--rbe", prefix)
-                self.assertIn("--reproxy-cfg", prefix)
-                self.assertIn("--resultstore", prefix)
+                prefix = invocation.top_build_command_prefix()
+                self.assertIsNotNone(invocation.wrap_context.rbe)
+                self.assertIsNotNone(invocation.wrap_context.resultstore)
+                assert invocation.wrap_context.rbe is not None
+                assert invocation.wrap_context.resultstore is not None
+                self.assertIn(invocation.wrap_context.rbe.prefix[0], prefix)
+                self.assertIn(
+                    invocation.wrap_context.resultstore.prefix[0],
+                    prefix,
+                )
 
     def test_tui(self) -> None:
         context = self.create_context(tui=True)
         with self.mock_invocation_context():
             invocation = main_build.BuildInvocation(context)
-            prefix = list(invocation.top_build_command_prefix())
-            self.assertIn("--tui", prefix)
+            prefix = invocation.top_build_command_prefix()
+            self.assertIsNotNone(invocation.wrap_context.tui)
+            assert invocation.wrap_context.tui is not None
+            self.assertIn(invocation.wrap_context.tui.prefix[0], prefix)
+
+    def test_summarize_failures(self) -> None:
+        context = self.create_context(tui=False)
+        context.config.summarize_failures = True
+        with self.mock_invocation_context():
+            invocation = main_build.BuildInvocation(context)
+            prefix = invocation.top_build_command_prefix()
+            self.assertIsNotNone(invocation.wrap_context.tui)
+            self.assertIn("--headless", prefix)
+            self.assertIn("--print_failed_actions", prefix)
+            self.assertIn("--unsuccessful_actions_report", prefix)
+            self.assertIn("--write_failed_actions", prefix)
+            self.assertIsNotNone(invocation.wrap_context.resultstore)
+
+    def test_summarize_failures_defaults(self) -> None:
+        parser = main_build._main_arg_parser()
+
+        # 1. Local build: default is False
+        args = parser.parse_args(["--build-dir", "/tmp/build", "ninja"])
+        config = main_build.FuchsiaBuildConfig.from_args(args)
+        self.assertFalse(config.summarize_failures)
+
+        # 2. Infra / Fint build: default is False until enabled by default
+        args_fint = parser.parse_args(
+            [
+                "--build-dir",
+                "/tmp/build",
+                "--fint-params-path",
+                "/path/to/params.textproto",
+                "ninja",
+            ]
+        )
+        config_fint = main_build.FuchsiaBuildConfig.from_args(args_fint)
+        self.assertFalse(config_fint.summarize_failures)
+
+        # 3. Explicit override in Fint: --summarize-failures enables it
+        args_fint_enabled = parser.parse_args(
+            [
+                "--build-dir",
+                "/tmp/build",
+                "--fint-params-path",
+                "/path/to/params.textproto",
+                "--summarize-failures",
+                "ninja",
+            ]
+        )
+        config_fint_enabled = main_build.FuchsiaBuildConfig.from_args(
+            args_fint_enabled
+        )
+        self.assertTrue(config_fint_enabled.summarize_failures)
+
+        # 4. Explicit override in local build: --summarize-failures enables it
+        args_local_enabled = parser.parse_args(
+            ["--build-dir", "/tmp/build", "--summarize-failures", "ninja"]
+        )
+        config_local_enabled = main_build.FuchsiaBuildConfig.from_args(
+            args_local_enabled
+        )
+        self.assertTrue(config_local_enabled.summarize_failures)
 
     def test_use_machine_credentials_omitted_when_resultstore_is_none(
         self,
@@ -2112,7 +2176,9 @@ class TopBuildCommandPrefixTest(MainBuildTestBase):
         ):
             with self.mock_invocation_context():
                 invocation = main_build.BuildInvocation(context)
-                prefix = list(invocation.top_build_command_prefix())
+                config = invocation.top_build_wrap_config()
+                self.assertFalse(config.use_machine_credentials)
+                prefix = invocation.top_build_command_prefix()
                 self.assertNotIn("--use-machine-credentials", prefix)
 
     def test_use_machine_credentials_passed_when_both_machine(self) -> None:
@@ -2125,7 +2191,9 @@ class TopBuildCommandPrefixTest(MainBuildTestBase):
         ):
             with self.mock_invocation_context():
                 invocation = main_build.BuildInvocation(context)
-                prefix = list(invocation.top_build_command_prefix())
+                config = invocation.top_build_wrap_config()
+                self.assertTrue(config.use_machine_credentials)
+                prefix = invocation.top_build_command_prefix()
                 self.assertIn("--use-machine-credentials", prefix)
 
 
@@ -2193,9 +2261,8 @@ class NewBuildCommandExecutionTest(MainBuildTestBase):
                     )
                     self.assertEqual(
                         exec_info.full_command[0],
-                        str(context.top_build_wrapper),
+                        "ninja",
                     )
-                    self.assertIn("--", exec_info.full_command)
                     self.assertEqual(exec_info.env["FX_BUILD_UUID"], "uuid-123")
 
     def test_new_build_command_execution_ninja_resultstore(self) -> None:
@@ -2206,7 +2273,11 @@ class NewBuildCommandExecutionTest(MainBuildTestBase):
                 exec_info = invocation.new_build_command_execution(
                     "ninja", ["ninja", "target"]
                 )
-                self.assertIn("--post-build-uploads", exec_info.full_command)
+                self.assertIn(
+                    invocation.wrap_context.resultstore.prefix[0],
+                    exec_info.full_command,
+                )
+                self.assertIn("--post_build_uploads", exec_info.full_command)
                 metrics_path = invocation.ninja_action_metrics_path
                 self.assertIn(str(metrics_path), exec_info.full_command)
 
@@ -2269,9 +2340,7 @@ class NewBuildCommandExecutionTest(MainBuildTestBase):
 
                     self.assertIn("--", full_cmd)
                     sep_idx = full_cmd.index("--")
-                    self.assertEqual(
-                        full_cmd[sep_idx + 1], str(context.top_build_wrapper)
-                    )
+                    self.assertEqual(full_cmd[sep_idx + 1], "ninja")
                     self.assertEqual(full_cmd[-1], "target")
 
     def test_new_build_command_execution_non_build_ignores_timeout(
@@ -2308,9 +2377,6 @@ class PrepareFunctionsTest(MainBuildTestBase):
             )
             self.assertIsInstance(exec_info, main_build.BuildCommandExecution)
             self.assertFalse(exec_info.is_build)
-            self.assertNotIn(
-                str(context.top_build_wrapper), exec_info.full_command
-            )
             self.assertEqual(exec_info.full_command, ["bazel", "info"])
 
     def test_ninja_non_build(self) -> None:
@@ -2321,9 +2387,6 @@ class PrepareFunctionsTest(MainBuildTestBase):
             )
             self.assertIsInstance(exec_info, main_build.BuildCommandExecution)
             self.assertFalse(exec_info.is_build)
-            self.assertNotIn(
-                str(context.top_build_wrapper), exec_info.full_command
-            )
             self.assertIn("--help", exec_info.full_command)
             # Non-build commands never probe the persistent server.
             self.assertEqual(exec_info.preflight_actions, [])
@@ -2344,7 +2407,7 @@ class PrepareFunctionsTest(MainBuildTestBase):
             )
             self.assertEqual(len(exec_info.cleanup_files), 0)
             fint_part = exec_info.full_command[
-                exec_info.full_command.index("--") + 1 :
+                : exec_info.full_command.index("--")
             ]
             self.assertIn("--build-dir", fint_part)
             self.assertIn(str(context.build_dir), fint_part)
@@ -2362,7 +2425,7 @@ class PrepareFunctionsTest(MainBuildTestBase):
             self.assertIsInstance(exec_info, main_build.BuildCommandExecution)
             self.assertEqual(len(exec_info.cleanup_files), 0)
             fint_part = exec_info.full_command[
-                exec_info.full_command.index("--") + 1 :
+                : exec_info.full_command.index("--")
             ]
             self.assertIn("--context", fint_part)
             self.assertIn("/tmp/explicit_context.proto", fint_part)
@@ -3022,7 +3085,7 @@ class ContextPropertiesAndLoggingTest(MainBuildTestBase):
                 "summarize_rbe_metrics_from_logdir",
                 return_value=mock_metrics,
             ) as mock_summary:
-                meta = main_build._collect_rbe_metadata(log_dir)
+                meta = main_build._collect_rbe_metadata(reproxy_log_dir)
                 self.assertIn("metrics_summary", meta)
                 self.assertEqual(meta["metrics_summary"], mock_metrics)
                 mock_summary.assert_called_once_with(reproxy_log_dir.resolve())
@@ -3039,7 +3102,7 @@ class ContextPropertiesAndLoggingTest(MainBuildTestBase):
                 "summarize_rbe_metrics_from_logdir",
                 return_value=None,
             ):
-                meta = main_build._collect_rbe_metadata(log_dir)
+                meta = main_build._collect_rbe_metadata(reproxy_log_dir)
                 self.assertNotIn("metrics_summary", meta)
 
     @mock.patch.object(subprocess, "check_output")
@@ -3066,28 +3129,26 @@ class ContextPropertiesAndLoggingTest(MainBuildTestBase):
             env={"USER": "fake-user"},
             config=config,
         )
-        self.assertEqual(
-            context.fint_artifact_dir, pathlib.Path("/mock/resolved/artifacts")
-        )
-        mock_check_output.assert_called_once_with(
-            [
-                str(main_build.PYTHON_BIN),
-                "-S",
-                "-u",
-                "/tmp/fuchsia/tools/integration/fint/fint_build.py",
-                "--context",
-                "/tmp/context.proto",
-                "--print-artifact-dir",
-            ],
-            text=True,
-            stderr=subprocess.PIPE,
-        )
+        with mock.patch.object(
+            context,
+            "check_python_output",
+            return_value="/mock/resolved/artifacts",
+        ) as mock_check_output:
+            self.assertEqual(
+                context.fint_artifact_dir,
+                pathlib.Path("/mock/resolved/artifacts"),
+            )
+            mock_check_output.assert_called_once_with(
+                list(
+                    context._fint_wrapper_cmd(
+                        context_path=pathlib.Path("/tmp/context.proto"),
+                        print_artifact_dir=True,
+                    )
+                ),
+                stderr=subprocess.PIPE,
+            )
 
-    @mock.patch.object(subprocess, "check_output")
-    def test_fint_artifact_dir_failure(
-        self, mock_check_output: mock.Mock
-    ) -> None:
-        mock_check_output.side_effect = subprocess.CalledProcessError(2, "cmd")
+    def test_fint_artifact_dir_failure(self) -> None:
         config = main_build.FuchsiaBuildConfig(
             rbe=True,
             resultstore="all",
@@ -3107,7 +3168,12 @@ class ContextPropertiesAndLoggingTest(MainBuildTestBase):
             env={"USER": "fake-user"},
             config=config,
         )
-        self.assertIsNone(context.fint_artifact_dir)
+        with mock.patch.object(
+            context,
+            "check_python_output",
+            side_effect=subprocess.CalledProcessError(2, "cmd"),
+        ):
+            self.assertIsNone(context.fint_artifact_dir)
 
     def test_write_metadata_json_no_profile_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -3256,7 +3322,7 @@ class ContextPropertiesAndLoggingTest(MainBuildTestBase):
             main_build.mkdir(build_dir)
             main_build.mkdir(out_dir)
 
-            bazel_logs_dir = log_dir / "bazel_logs"
+            bazel_logs_dir = log_dir / bazel_inv.BAZEL_LOGS_DIRNAME
             inv_dir = bazel_logs_dir / "invocation-20261001-143000--uuid"
             main_build.mkdir(inv_dir)
             main_build.write_text(inv_dir / "bazel_invocation", "bazel build")
@@ -3297,6 +3363,71 @@ class ContextPropertiesAndLoggingTest(MainBuildTestBase):
                         "invocation-20261001-143000--uuid"
                     ],
                     ["bazel_invocation"],
+                )
+
+    def test_write_metadata_json_with_unsuccessful_actions_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = pathlib.Path(tmp_dir)
+            log_dir = tmp_path / "logs"
+            out_dir = tmp_path / "out"
+            build_dir = tmp_path / "out/default"
+            output_json_path = tmp_path / "metadata.json"
+
+            main_build.mkdir(log_dir)
+            main_build.mkdir(build_dir)
+            main_build.mkdir(out_dir)
+
+            context = self.create_context(
+                env={"USER": "fake-user"},
+                rbe=False,
+                resultstore="none",
+                profile=False,
+                tui=False,
+                verbose=False,
+                dry_run=False,
+                output_metadata_json=output_json_path,
+            )
+            context.config.summarize_failures = True
+            context.out_dir = out_dir
+            context.build_dir = build_dir
+
+            invocation = main_build.BuildInvocation(context)
+            with mock.patch.object(
+                main_build.BuildInvocation,
+                "log_dir",
+                new_callable=mock.PropertyMock,
+                return_value=log_dir,
+            ):
+                assert invocation.wrap_context.tui is not None
+                report_path = invocation.wrap_context.tui.artifacts[
+                    "unsuccessful_actions"
+                ]
+                summary_path = invocation.wrap_context.tui.artifacts[
+                    "failure_summary"
+                ]
+                self.assertEqual(
+                    report_path,
+                    log_dir
+                    / top_build_wrap.UNSUCCESSFUL_ACTIONS_REPORT_RELPATH,
+                )
+                self.assertEqual(
+                    summary_path,
+                    log_dir / top_build_wrap.FAILURE_SUMMARY_RELPATH,
+                )
+                main_build.mkdir(report_path.parent)
+                main_build.write_text(report_path, "{}")
+                main_build.write_text(summary_path, "summary text")
+
+                invocation.write_metadata_json(output_json_path)
+                data = json.loads(output_json_path.read_text())
+                self.assertIn("unsuccessful_actions", data)
+                self.assertEqual(
+                    data["unsuccessful_actions"], str(report_path.resolve())
+                )
+                self.assertIn("failure_summary", data)
+                self.assertEqual(
+                    data["failure_summary"],
+                    str(summary_path.resolve()),
                 )
 
 
@@ -3392,16 +3523,15 @@ class CollectBazelMetadataTest(unittest.TestCase):
 class CollectResultStoreMetadataTest(unittest.TestCase):
     def test_collect_resultstore_metadata_empty(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            log_dir = pathlib.Path(tmpdir)
-            metadata = main_build._collect_resultstore_metadata(log_dir)
+            rsproxy_log_dir = pathlib.Path(tmpdir) / "rsproxy_logs"
+            metadata = main_build._collect_resultstore_metadata(rsproxy_log_dir)
             self.assertEqual(metadata, {})
 
     def test_collect_resultstore_metadata_empty_rsproxy_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            log_dir = pathlib.Path(tmpdir)
-            rsproxy_log_dir = log_dir / "rsproxy_logs"
+            rsproxy_log_dir = pathlib.Path(tmpdir) / "rsproxy_logs"
             main_build.mkdir(rsproxy_log_dir)
-            metadata = main_build._collect_resultstore_metadata(log_dir)
+            metadata = main_build._collect_resultstore_metadata(rsproxy_log_dir)
             self.assertEqual(metadata, {})
 
     def test_collect_resultstore_metadata_with_logs(self) -> None:
@@ -3435,7 +3565,7 @@ class CollectResultStoreMetadataTest(unittest.TestCase):
                 rsproxy_log_dir / "rsproxy.other.log", "unrelated"
             )
 
-            metadata = main_build._collect_resultstore_metadata(log_dir)
+            metadata = main_build._collect_resultstore_metadata(rsproxy_log_dir)
 
             self.assertIn("diagnostic_logs", metadata)
             diagnostic_logs = metadata["diagnostic_logs"]
@@ -3491,7 +3621,7 @@ class CollectTimeoutMetadataTest(MainBuildTestBase):
             invocation = main_build.BuildInvocation(context)
             with (
                 mock.patch.object(
-                    invocation, "_run_fint_ingest_timeout"
+                    invocation, "_run_fint_ingest_metadata"
                 ) as mock_ingest,
                 tempfile.TemporaryDirectory() as tmpdir,
             ):
@@ -3510,8 +3640,39 @@ class CollectTimeoutMetadataTest(MainBuildTestBase):
                     invocation.write_metadata_json(out_path)
                     mock_ingest.assert_called_once_with(out_path)
 
-    def test_run_fint_ingest_timeout(self) -> None:
-        """Verifies _run_fint_ingest_timeout invokes fint_build.py with expected arguments."""
+    def test_write_metadata_json_triggers_fint_ingest_on_failure_summary(
+        self,
+    ) -> None:
+        """Verifies write_metadata_json triggers fint ingestion when failure_summary is present."""
+        context = self.create_context()
+        context.config.fint_context_path = pathlib.Path("/path/to/context.pb")
+        context.config.summarize_failures = True
+        with self.mock_invocation_context():
+            invocation = main_build.BuildInvocation(context)
+            with (
+                mock.patch.object(
+                    invocation, "_run_fint_ingest_metadata"
+                ) as mock_ingest,
+                tempfile.TemporaryDirectory() as tmpdir,
+            ):
+                tmp_path = pathlib.Path(tmpdir)
+                summary_file = tmp_path / "failure_summary.txt"
+                summary_file.write_text("failure text")
+                mock_tui = mock.Mock(
+                    artifacts={"failure_summary": summary_file}
+                )
+                with mock.patch.object(
+                    top_build_wrap.WrapContext,
+                    "tui",
+                    new_callable=mock.PropertyMock,
+                    return_value=mock_tui,
+                ):
+                    out_path = tmp_path / "output_metadata.json"
+                    invocation.write_metadata_json(out_path)
+                    mock_ingest.assert_called_once_with(out_path)
+
+    def test_run_fint_ingest_metadata(self) -> None:
+        """Verifies _run_fint_ingest_metadata invokes fint_build.py with expected arguments."""
         context = self.create_context()
         context.config.fint_context_path = pathlib.Path("/path/to/context.pb")
         context.config.verbose = True
@@ -3521,11 +3682,11 @@ class CollectTimeoutMetadataTest(MainBuildTestBase):
             mock.patch("subprocess.run") as mock_run,
         ):
             meta_path = pathlib.Path("/path/to/metadata.json")
-            invocation._run_fint_ingest_timeout(meta_path)
+            invocation._run_fint_ingest_metadata(meta_path)
             expected_cmd = context.fint_build_cmd_prefix + [
                 "--context",
                 "/path/to/context.pb",
-                "--ingest-timeout-metadata",
+                "--ingest-build-metadata",
                 "/path/to/metadata.json",
                 "--verbose",
             ]

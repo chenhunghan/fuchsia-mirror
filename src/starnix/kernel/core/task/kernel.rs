@@ -10,7 +10,6 @@ use crate::mm::{FutexTable, MappingSummary, MlockPinFlavor};
 use crate::power::{SuspendResumeManagerHandle, create_watcher_for_wake_events};
 use crate::ptrace::StopState;
 use crate::security::{self, AuditLogger};
-use crate::signals::SignalInfo;
 use crate::task::container_namespace::ContainerNamespace;
 use crate::task::limits::SystemLimits;
 use crate::task::memory_attribution::MemoryAttributionManager;
@@ -53,7 +52,7 @@ use starnix_lifecycle::AtomicCounter;
 use starnix_logging::{SyscallLogFilter, log_debug, log_error, log_info, log_warn};
 use starnix_sync::{
     ComponentControllerLock, KernelSwapFiles, LockDepGuard, LockDepMutex, MountsLevel, RwSeqLock,
-    RwSeqLockGuard, SyscallLogFiltersLock,
+    RwSeqLockGuard, SyscallLogFiltersLock, WriteProof,
 };
 use starnix_uapi::device_id::DeviceId;
 use starnix_uapi::errors::{Errno, errno};
@@ -238,11 +237,15 @@ impl MountsWriteToken {
     }
 }
 
+impl WriteProof<MountsWriteToken> for MountsWriteToken {}
+
 /// A guard special cased for mount operations to defer destroying mounts until after all
 /// modifications of the global mount tree are completed.
 pub struct MountsWriteGuard<'a> {
     guard: Option<RwSeqLockGuard<'a, LockDepGuard<'a, MountsWriteToken>>>,
 }
+
+impl WriteProof<MountsWriteToken> for MountsWriteGuard<'_> {}
 
 impl<'a> MountsWriteGuard<'a> {
     fn new(guard: RwSeqLockGuard<'a, LockDepGuard<'a, MountsWriteToken>>) -> Self {
@@ -545,7 +548,7 @@ impl InterfacesHandler for InterfacesHandlerImpl {
 
     fn handle_deleted_link(&mut self, name: &str) {
         if let Some(kernel) = self.kernel() {
-            kernel.netstack_devices.remove_device(&kernel, name.into());
+            kernel.netstack_devices.remove_device(kernel.kthreads.system_task(), name.into());
         }
     }
 
@@ -824,13 +827,18 @@ impl Kernel {
         let own_koid = fuchsia_runtime::process_self().koid().unwrap();
 
         log_info!("waiting for this to be the only process in the job");
+        let mut terminated_pids = HashSet::from([own_koid]);
         loop {
             let mut remaining_processes = kernel_job
                 .processes()
                 .unwrap()
                 .into_iter()
-                // Don't wait for ourselves to exit.
-                .filter(|pid| pid != &own_koid)
+                // Don't wait for ourselves or already-terminated processes to exit.
+                // In Zircon, a dying process asserts `ZX_PROCESS_TERMINATED` before removing
+                // itself from its parent job's process list (`ProcessDispatcher::FinishDeadTransition`),
+                // so `kernel_job.processes()` can briefly still return a process whose
+                // `PROCESS_TERMINATED` signal has already been awaited.
+                .filter(|pid| terminated_pids.insert(*pid))
                 .peekable();
             if remaining_processes.peek().is_none() {
                 log_info!("No stray Zircon processes.");
@@ -920,7 +928,7 @@ impl Kernel {
                 .collect::<Vec<_>>()
         };
         for tg in created {
-            tg.kill(ExitStatus::Kill(SignalInfo::kernel(SIGKILL)), None);
+            tg.kill(ExitStatus::Kill(SIGKILL), None);
         }
     }
 

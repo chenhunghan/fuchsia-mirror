@@ -54,6 +54,17 @@ pub mod testutils {
                 vars: make_hashmap(vars),
             }
         }
+
+        /// Creates a `FakeEnv` from explicit argument and environment variable slices.
+        pub fn from_parts(args: &[&str], vars: &[(&str, &str)]) -> Self {
+            Self {
+                args: args.iter().map(|arg| String::from(*arg)).collect(),
+                vars: vars
+                    .iter()
+                    .map(|(key, value)| (String::from(*key), String::from(*value)))
+                    .collect(),
+            }
+        }
     }
 
     impl EnvLike for FakeEnv {

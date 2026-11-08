@@ -58,10 +58,10 @@ source_set("main") {
     "reboot_log",
     "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_cpp",
     "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_cpp",
+    "//sdk/fidl/fuchsia.process.lifecycle:fuchsia.process.lifecycle_cpp",
     "//sdk/lib/async:async-cpp",
     "//sdk/lib/component/incoming/cpp",
     "//sdk/lib/syslog/cpp",
-    "//src/developer/forensics/feedback_data/system_log_recorder:src",
     "//src/developer/forensics/utils/component",
     "//src/lib/files",
     "//src/lib/uuid",
@@ -94,8 +94,10 @@ source_set("main_service") {
     "reboot_log",
     "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_cpp",
     "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_hlcpp",
+    "//sdk/fidl/fuchsia.hardware.power.statecontrol:fuchsia.hardware.power.statecontrol_cpp",
     "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
     "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_cpp",
+    "//sdk/fidl/fuchsia.process.lifecycle:fuchsia.process.lifecycle_cpp",
     "//sdk/fidl/fuchsia.process.lifecycle:fuchsia.process.lifecycle_hlcpp",
     "//sdk/lib/async:async-cpp",
     "//sdk/lib/component/incoming/cpp",
@@ -105,6 +107,7 @@ source_set("main_service") {
     "//src/developer/forensics/crash_reports:constants",
     "//src/developer/forensics/crash_reports:crash_register",
     "//src/developer/forensics/crash_reports:crash_reporter",
+    "//src/developer/forensics/crash_reports:crash_reporter_internal",
     "//src/developer/forensics/crash_reports:crash_server",
     "//src/developer/forensics/crash_reports:log_tags",
     "//src/developer/forensics/crash_reports:snapshot_collector",
@@ -126,7 +129,6 @@ source_set("main_service") {
     "//src/developer/forensics/feedback/attachments:previous_boot_inspect",
     "//src/developer/forensics/feedback/attachments:previous_boot_log",
     "//src/developer/forensics/feedback/attachments:process_tree",
-    "//src/developer/forensics/feedback/attachments:system_log",
     "//src/developer/forensics/feedback_data:constants",
     "//src/developer/forensics/feedback_data:data_provider",
     "//src/developer/forensics/feedback_data:inspect_budget",
@@ -176,11 +178,11 @@ source_set("network_watcher") {
   ]
 
   public_deps = [
-    "//sdk/fidl/fuchsia.net.interfaces:fuchsia.net.interfaces_hlcpp",
+    "//sdk/fidl/fuchsia.net.reachability:fuchsia.net.reachability_cpp",
     "//sdk/lib/async",
+    "//sdk/lib/async:async-cpp",
     "//sdk/lib/fit",
     "//sdk/lib/sys/cpp",
-    "//src/connectivity/network/lib/net_interfaces/cpp",
     "//src/lib/backoff",
   ]
 
@@ -208,12 +210,17 @@ source_set("stop_signals") {
 
   public_deps = [
     "reboot_log",
-    "//sdk/fidl/fuchsia.hardware.power.statecontrol:fuchsia.hardware.power.statecontrol_hlcpp",
-    "//sdk/fidl/fuchsia.process.lifecycle:fuchsia.process.lifecycle_hlcpp",
+    "//sdk/fidl/fuchsia.hardware.power.statecontrol:fuchsia.hardware.power.statecontrol_cpp",
+    "//sdk/fidl/fuchsia.process.lifecycle:fuchsia.process.lifecycle_cpp",
     "//sdk/lib/async:async-cpp",
     "//sdk/lib/fit",
     "//src/developer/forensics/utils:errors",
     "//zircon/system/ulib/zx",
+  ]
+
+  deps = [
+    "//sdk/fidl/fuchsia.hardware.power.statecontrol:fuchsia.hardware.power.statecontrol_cpp_hlcpp_conversion",
+    "//sdk/lib/syslog/cpp",
   ]
 }
 

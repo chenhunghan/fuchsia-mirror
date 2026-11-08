@@ -88,7 +88,6 @@ rustc_binary("fshost") {
     "//third_party/rust_crates:zstd",
     "//third_party/zstd",
   ]
-  non_rust_deps = [ "//src/storage/lib/fs_management/c" ]
   test_deps = [
     "//src/lib/fdio/rust:fdio",
     "//src/lib/fuchsia-async",
@@ -140,19 +139,6 @@ fuchsia_unittest_component("fshost_tests_component") {
 
 fuchsia_test_package("fshost_tests") {
   test_components = [ ":fshost_tests_component" ]
-}
-
-source_set("admin-client") {
-  sources = [
-    "admin-client.cc",
-    "admin-client.h",
-  ]
-  public_deps = [
-    "//sdk/fidl/fuchsia.fshost:fuchsia.fshost_cpp",
-    "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_cpp",
-    "//sdk/lib/component/incoming/cpp",
-    "//zircon/system/ulib/zx",
-  ]
 }
 
 group("tests") {

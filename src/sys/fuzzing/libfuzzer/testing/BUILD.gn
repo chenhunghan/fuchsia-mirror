@@ -50,13 +50,11 @@ executable("fuzzer") {
     "fuzzer.cc",
     "fuzzer.h",
   ]
-  public_deps = [
-    ":test.fuzzer_hlcpp",
-    "//src/sys/fuzzing/common/testing",
-  ]
   deps = [
+    ":test.fuzzer_hlcpp",
     "//sdk/lib/sys/cpp",
     "//sdk/lib/syslog/cpp",
+    "//src/sys/fuzzing/common/testing",
     "//src/sys/fuzzing/common/testing:sanitizer",
     "//zircon/system/ulib/zx",
   ]
@@ -73,15 +71,15 @@ executable("relay") {
     "relay.cc",
     "relay.h",
   ]
-  public_deps = [
+  deps = [
     ":test.fuzzer_hlcpp",
+    "//sdk/lib/sys/cpp",
     "//sdk/lib/syslog/cpp",
     "//sdk/testing/fidl:test_support",
     "//src/lib/fxl",
     "//src/sys/fuzzing/common",
     "//zircon/system/ulib/sync",
   ]
-  deps = [ "//sdk/lib/sys/cpp" ]
 }
 
 resource("data") {

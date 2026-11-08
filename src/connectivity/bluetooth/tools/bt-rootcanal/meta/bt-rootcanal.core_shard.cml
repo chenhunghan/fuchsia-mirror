@@ -8,12 +8,33 @@
             url: "fuchsia-pkg://fuchsia.com/bt-rootcanal#meta/bt-rootcanal.cm",
             environment: "#core-env",
         },
+        {
+            name: "bt-hci-virtual",
+            url: "fuchsia-pkg://fuchsia.com/virtual#meta/bt-hci-virtual.cm",
+            environment: "#core-env",
+        },
     ],
     offer: [
+        // TODO(https://fxbug.dev/345827642): Remove once out-of-tree binaries
+        // use the diagnostics dictionary.
         {
-            directory: "dev-topological",
-            from: "parent",
+            protocol: "fuchsia.logger.LogSink",
+            from: "parent/diagnostics",
+            to: "#bt-hci-virtual",
+        },
+        {
+            service: "fuchsia.hardware.bluetooth.VirtualControllerService",
+            from: "#bt-hci-virtual",
             to: "#bt-rootcanal",
+        },
+        {
+            service: "fuchsia.hardware.bluetooth.Service",
+            from: "#bt-hci-virtual",
+            to: [
+                "#bluetooth-core",
+                "#bt-snoop",
+            ],
+            target_availability: "unknown",
         },
         {
             protocol: "fuchsia.posix.socket.Provider",

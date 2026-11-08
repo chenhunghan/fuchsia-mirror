@@ -9,13 +9,13 @@ use fidl_fuchsia_bluetooth_sys::AccessMarker;
 use fuchsia_async as fasync;
 use fuchsia_bluetooth::types::HostId;
 use fuchsia_sync::RwLock;
-use futures::stream::FuturesUnordered;
 use futures::Future;
+use futures::stream::FuturesUnordered;
 use proptest::prelude::*;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::iter;
-use std::pin::{pin, Pin};
+use std::pin::{Pin, pin};
 use std::sync::Arc;
 
 // Maximum number of mock access.fidl clients we simulate.
@@ -114,7 +114,8 @@ proptest! {
         let mut add_mock_host_fut_1 = pin!(add_mock_host_fut_1);
         let (host_stream_1, host_device_1, _gatt_server_1, _bonding) = executor.run_singlethreaded(&mut add_mock_host_fut_1).unwrap();
         let host_info_1 = Arc::new(RwLock::new(host_device_1.info()));
-        hd.set_active_host(host_device_1.id())?;
+        let mut set_active_fut = pin!(hd.set_active_host(host_device_1.id()));
+        executor.run_singlethreaded(&mut set_active_fut)?;
         let mut active_host = 1;
 
         let mut host_server_task_1 =

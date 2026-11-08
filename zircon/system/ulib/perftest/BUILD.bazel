@@ -1,0 +1,47 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# LINT.IfChange
+fx_cc_library(
+    name = "perftest",
+    testonly = True,
+    srcs = [
+        "results.cc",
+        "runner.cc",
+    ],
+    hdrs = [
+        "include/perftest/perftest.h",
+        "include/perftest/results.h",
+        "include/perftest/runner.h",
+    ],
+    implementation_deps = [
+        "@re2",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "//zircon/system/ulib/trace",
+            "//zircon/system/ulib/trace-engine",
+            "//zircon/system/ulib/trace-provider",
+        ],
+        "//conditions:default": [],
+    }),
+    includes = ["include"],
+    visibility = [
+        ":__subpackages__",
+        "//src/connectivity:__subpackages__",
+        "//src/devices:__subpackages__",
+        "//src/media:__subpackages__",
+        "//src/performance:__subpackages__",
+        "//src/tests:__subpackages__",
+        "//vendor/google:__subpackages__",
+    ],
+    deps = [
+        "//sdk/lib/fit",
+        "//zircon/system/ulib/fbl",
+    ],
+)
+# LINT.ThenChange(BUILD.gn)

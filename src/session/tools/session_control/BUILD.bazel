@@ -1,0 +1,121 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load(
+    "//build/bazel/rules/packages:fx_package.bzl",
+    "fx_package",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [],
+    visibility = ["//src/session:__pkg__"],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    crate_name = "session_control",
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        "//sdk/fidl/fuchsia.element:fuchsia.element_rust",
+        "//sdk/fidl/fuchsia.session:fuchsia.session_rust",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/sys/lib/component_debug",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "session_control",
+)
+
+fx_component_manifest(
+    name = "session_control_manifest",
+    component_name = "session_control",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/session_control.cml",
+)
+
+fx_component(
+    name = "session_control_component",
+    compiled_manifest = ":session_control_manifest",
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "session_control",
+    package_name = "session_control",
+    components = [":session_control_component"],
+)
+
+rustc_test(
+    name = "session_control_bin_test",
+    crate = ":bin",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "session_control_bin_test_packaged",
+    testonly = True,
+    binary = ":session_control_bin_test",
+    binary_name = "session_control_bin_test",
+)
+
+fx_component_manifest(
+    name = "session_control_tests_manifest",
+    testonly = True,
+    component_name = "session_control_tests",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/session_control_bin_test.cml",
+)
+
+fx_test_component(
+    name = "session_control_tests_component",
+    compiled_manifest = ":session_control_tests_manifest",
+    deps = [":session_control_bin_test_packaged"],
+)
+
+fx_package(
+    name = "session_control_tests_pkg",
+    package_name = "session_control_tests",
+    testonly = True,
+    test_components = [":session_control_tests_component"],
+)
+
+fx_test(
+    name = "session_control_tests",
+    package = ":session_control_tests_pkg",
+)

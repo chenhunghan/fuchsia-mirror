@@ -7,6 +7,7 @@
 
 #include <lib/async/cpp/task.h>
 #include <lib/async/dispatcher.h>
+#include <lib/fit/function.h>
 #include <lib/zx/clock.h>
 #include <lib/zx/time.h>
 
@@ -14,6 +15,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -39,11 +41,19 @@ enum class KeyFetchStatus : uint8_t {
   kExpiredKey = 5,
 };
 
+[[nodiscard]] const char* KeyFetchStatusToString(KeyFetchStatus status);
+
 class KeyFetcher {
  public:
   // Returns the current time on ZX_CLOCK_BOOT (which continues advancing while
   // the system is suspended).
   using BootClock = std::function<zx::time_boot()>;
+
+  // Invoked on |dispatcher| after each scheduled network key fetch attempt
+  // (after any newly fetched keys have been applied to the makers) with the
+  // resulting status, current consecutive failure count, and the UTC Unix
+  // timestamp in seconds when the fetch was attempted.
+  using StatusObserver = fit::function<void(KeyFetchStatus, uint32_t, int64_t)>;
 
   struct ScheduleOptions {
     // Upper bound for the uniform random delay [0, max_initial_jitter] before
@@ -68,6 +78,23 @@ class KeyFetcher {
 
     // Clock used to measure key rotation deadlines across system suspend.
     BootClock boot_clock;
+
+    // Remaining active key lifetime in UTC Unix seconds (measured on
+    // |system_clock|, >= 1 second) below which polling accelerates from
+    // |steady_state_interval| to |urgent_poll_interval|.
+    zx::duration urgent_expiry_threshold;
+
+    // Base interval on |boot_clock| (ZX_CLOCK_BOOT, > 0,
+    // <= |steady_state_interval|) between key fetches when an active dynamic
+    // key has less than |urgent_expiry_threshold| of remaining lifetime.
+    zx::duration urgent_poll_interval;
+
+    // Maximum uniform random jitter [-urgent_poll_jitter, +urgent_poll_jitter]
+    // (>= 0, < |urgent_poll_interval|) added to |urgent_poll_interval| after
+    // each successful key fetch, so devices whose fetches happen to align
+    // (for example, after reconnecting from a shared network outage) do not
+    // stay synchronized while polling urgently.
+    zx::duration urgent_poll_jitter;
   };
 
   // |dispatcher|, |http_client|, |shuffler_maker|, |analyzer_maker|, and
@@ -105,8 +132,22 @@ class KeyFetcher {
   // or expired, or with uniform random jitter otherwise).
   void OnSystemClockBecomesAccurate();
 
+  // Called on |dispatcher| when network reachability is restored. Triggers an
+  // immediate network key fetch if the system clock is accurate and the
+  // previous fetch failed, an active key is uninitialized or expired, or the
+  // scheduled boot-time deadline has elapsed.
+  void OnNetworkReconnect();
+
+  // Sets the optional observer invoked after each scheduled network fetch
+  // attempt, replacing any previous observer. Earlier attempts are not
+  // replayed. Captured pointers must outlive this KeyFetcher.
+  void SetStatusObserver(StatusObserver observer) { status_observer_ = std::move(observer); }
+
   [[nodiscard]] uint32_t consecutive_fetch_failures() const { return consecutive_fetch_failures_; }
   [[nodiscard]] KeyFetchStatus last_fetch_status() const { return last_fetch_status_; }
+  [[nodiscard]] int64_t last_fetch_attempt_time_secs() const {
+    return last_fetch_attempt_time_secs_;
+  }
   [[nodiscard]] const std::string& cache_file_path() const { return cache_file_path_; }
 
  private:
@@ -115,6 +156,8 @@ class KeyFetcher {
   static constexpr zx::duration kMaxRetryDelay = zx::hour(1);
 
   [[nodiscard]] bool IsOlderThanActiveKeys(const util::ParsedKeyset& keyset) const;
+  [[nodiscard]] bool IsActiveKeyExpiringSoon() const;
+  [[nodiscard]] bool IsActiveKeyMissingOrExpired() const;
   [[nodiscard]] KeyFetchStatus FetchAndCachePublicKeys();
   void ApplyKeyset(util::ParsedKeyset keyset);
   void RunScheduledFetch();
@@ -122,6 +165,7 @@ class KeyFetcher {
   void CheckBootDeadlineAndFetch();
   [[nodiscard]] zx::duration ComputeInitialJitter() const;
   [[nodiscard]] zx::duration ComputeSteadyStateIntervalWithJitter() const;
+  [[nodiscard]] zx::duration ComputeUrgentIntervalWithJitter() const;
 
   async_dispatcher_t* const dispatcher_;
   const std::unique_ptr<lib::HTTPClient> http_client_;
@@ -136,8 +180,15 @@ class KeyFetcher {
 
   backoff::ExponentialBackoff retry_backoff_{kInitialRetryDelay, kRetryBackoffFactor,
                                              kMaxRetryDelay};
+  bool system_clock_accurate_ = false;
   uint32_t consecutive_fetch_failures_ = 0;
   KeyFetchStatus last_fetch_status_ = KeyFetchStatus::kUninitialized;
+  int64_t last_fetch_attempt_time_secs_ = 0;
+  StatusObserver status_observer_;
+  std::optional<zx::time_boot> last_fetch_boot_time_;
+  // Jittered urgent polling delay drawn after the last successful fetch, so
+  // every poll wakeup clamps against the same deadline.
+  zx::duration urgent_poll_delay_;
   zx::time_boot target_boot_deadline_{0};
   async::TaskClosureMethod<KeyFetcher, &KeyFetcher::CheckBootDeadlineAndFetch> scheduled_task_{
       this};

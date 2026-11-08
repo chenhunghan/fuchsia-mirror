@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 use fidl::endpoints::DiscoverableProtocolMarker;
-use fidl_fuchsia_io as fio;
 
 pub use block_matcher::Guid;
 use block_matcher::create_random_guid;
@@ -26,7 +25,7 @@ async fn create_ramdisk(vmo: &Vmo, ramdisk_block_size: u64) -> RamdiskClient {
 
 /// A wrapper around a running FVM component instance backed by a ramdisk.
 pub struct FvmInstance {
-    ramdisk: RamdiskClient,
+    _ramdisk: RamdiskClient,
     fvm_instance: ServingMultiVolumeFilesystem,
 }
 
@@ -71,7 +70,7 @@ impl FvmInstance {
             fs.format().await.unwrap();
         }
 
-        Self { ramdisk, fvm_instance: fs.serve_multi_volume().await.unwrap() }
+        Self { _ramdisk: ramdisk, fvm_instance: fs.serve_multi_volume().await.unwrap() }
     }
 
     pub async fn new_volume(
@@ -105,10 +104,6 @@ impl FvmInstance {
             .await
             .unwrap();
         FvmVolume::new(serving_volume, guid.unwrap())
-    }
-
-    pub fn ramdisk_get_dir(&self) -> Option<&fio::DirectoryProxy> {
-        Some(self.ramdisk.outgoing())
     }
 
     pub async fn free_space(&self) -> u64 {

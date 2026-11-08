@@ -263,23 +263,18 @@ def get_api_file_path(*, idk_name, stable, api_file_path):
             fail("`api_file_path` must only be specified for stable IDK atoms.")
         return None
 
-def _get_golden_file_path_for_api_level(golden_file_name, api_level):
-    """Returns the path to the specified golden file for the specified API level.
-
-    The paths are in the format of absolute labels (with leading slashes and a
-    colon) except for the "PLATFORM" API level where the path is just a file name.
+def _get_golden_file_for_api_level(golden_file_name, api_level):
+    """Returns the label of the specified golden file for the specified API level.
 
     Args:
         golden_file_name: The name of the golden file in each API level.
-        api_level: The API level for which to get the golden file path.
+        api_level: The API level for which to get the golden file. Must
+            not be "PLATFORM".
 
     Returns:
-        The path to the golden file for the specified API level.
+        The label of the golden file for the specified API level.
     """
-    if api_level == "PLATFORM":
-        return golden_file_name
-    else:
-        return "//sdk/history/" + api_level + ":" + golden_file_name
+    return "//sdk/history/" + api_level + ":" + golden_file_name
 
 def _get_api_level_condition(api_level):
     """Returns the label for the condition that is true when the current API level is `api_level`.
@@ -292,7 +287,11 @@ def _get_api_level_condition(api_level):
     """
     return "//build/bazel/versioning:is_api_level_" + api_level
 
-def get_golden_file(golden_file_name, *, support_platform = False):
+# Buildifier considers this to be a macro because `native.package_relative_label()`
+# is considered a rule. However, this is a function, not a macro.
+# See https://fxbug.dev/524667764.
+# buildifier: disable=unnamed-macro
+def get_golden_file(golden_file_name, *, support_platform = False, api_file_path = None):
     """Returns a `select()` statement for the golden file for the current API level.
 
     The `select()` statement maps each API level to the label for the
@@ -301,18 +300,29 @@ def get_golden_file(golden_file_name, *, support_platform = False):
     Args:
         golden_file_name: The name of the golden file in each API level.
         support_platform: Whether to include an entry for the "PLATFORM" API
-            level in the `select()` statement. If True, the file is assumed to
-            be located in the same directory as the `BUILD.bazel` file.
+            level in the `select()` statement.
+        api_file_path: Optional label of the atom's `.api` file. When
+            `support_platform` is True, the "PLATFORM" golden file is located in
+            the same directory as the `.api` file (defaulting to the current
+            package directory when `api_file_path` is None).
 
     Returns:
         A `select()` statement for the golden file for the current API level.
     """
-    api_levels = list(idk_buildable_api_levels)
-    if support_platform:
-        api_levels.append("PLATFORM")
+    level_map = {
+        _get_api_level_condition(api_level): _get_golden_file_for_api_level(golden_file_name, api_level)
+        for api_level in idk_buildable_api_levels
+    }
 
-    level_map = {}
-    for api_level in api_levels:
-        level_map[_get_api_level_condition(api_level)] = _get_golden_file_path_for_api_level(golden_file_name, api_level)
+    if support_platform:
+        if api_file_path:
+            api_label = native.package_relative_label(api_file_path)
+            platform_golden_file = api_label.same_package_label(
+                paths.join(paths.dirname(api_label.name), golden_file_name),
+            )
+        else:
+            platform_golden_file = golden_file_name
+
+        level_map[_get_api_level_condition("PLATFORM")] = platform_golden_file
 
     return select(level_map)

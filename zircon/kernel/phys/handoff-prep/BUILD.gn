@@ -1,0 +1,130 @@
+# Copyright 2026 The Fuchsia Authors
+#
+# Use of this source code is governed by a MIT-style
+# license that can be found in the LICENSE file or at
+# https://opensource.org/licenses/MIT
+
+import("//build/cpp/library_headers.gni")
+import("//build/zircon/zircon_cpu.gni")
+import("//zircon/kernel/phys/test/phys_zbi_test.gni")
+
+library_headers("headers") {
+  headers = [ "phys/handoff-prep/handoff-prep.h" ]
+  public_deps = [
+    "//zircon/kernel/lib/ktl:headers",
+    "//zircon/kernel/lib/libc:headers",
+
+    # <phys/handoff-prep/handoff-prep.h> has #include <lib/fit/function.h>
+    "//sdk/lib/fit:headers",
+
+    # <phys/handoff-prep/handoff-prep.h> has #include <lib/zbi-format/zbi.h>
+    "//sdk/lib/zbi-format",
+
+    # <phys/handoff-prep/handoff-prep.h> has
+    #   #include <lib/trivial-allocator/basic-leaky-allocator.h>
+    # <phys/handoff-prep/handoff-prep.h> has
+    #   #include <lib/trivial-allocator/new.h>
+    # <phys/handoff-prep/handoff-prep.h> has
+    #   #include <lib/trivial-allocator/page-allocator.h>
+    "//src/lib/trivial-allocator:headers",
+
+    # <phys/handoff-prep/handoff-prep.h> has #include <lib/zbitl/image.h>
+    "//src/lib/zbitl:headers",
+
+    # <phys/handoff-prep/handoff-prep.h> has #include <phys/address-space.h>
+    "//zircon/kernel/phys:address-space.header",
+
+    # <phys/handoff-prep/handoff-prep.h> has #include <phys/elf-image.h>
+    "//zircon/kernel/phys:elf-image",
+
+    # <phys/handoff-prep/handoff-prep.h> has #include <phys/new.h>
+    "//zircon/kernel/phys:new",
+
+    # <phys/handoff-prep/handoff-prep.h> has #include <phys/uart/driver.h>
+    "//zircon/kernel/phys/uart:headers",
+
+    # <phys/handoff-prep/handoff-prep.h> has #include <phys/zbitl-allocation.h>
+    "//zircon/kernel/phys:zbitl-allocation",
+
+    # <phys/handoff-prep/handoff-prep.h> has #include <phys/handoff/handoff.h>
+    # <phys/handoff-prep/handoff-prep.h> has #include <phys/handoff/ptr.h>
+    # <phys/handoff-prep/handoff-prep.h> has #include
+    # <phys/handoff/zircon-abi-spec.h>
+    "//zircon/kernel/phys/handoff:headers",
+
+    # <phys/handoff-prep/handoff-prep.h> has #include
+    # <phys/kernel-package/kernel-package.h>
+    "//zircon/kernel/phys/kernel-package:headers",
+
+    # <phys/handoff-prep/handoff-prep.h> has #include <fbl/alloc_checker.h>
+    # <phys/handoff-prep/handoff-prep.h> has #include
+    # <fbl/intrusive_single_list.h>
+    "//zircon/system/ulib/fbl:headers",
+  ]
+}
+
+source_set("handoff-prep") {
+  sources = [
+    "${zircon_cpu}-handoff-prep.cc",
+    "handoff-entropy.cc",
+    "handoff-entropy.h",
+    "handoff-prep-version.cc",
+    "handoff-prep-vm.cc",
+    "handoff-prep-zbi.cc",
+    "handoff-prep.cc",
+  ]
+  public_deps = [ ":headers" ]
+  deps = [
+    "//sdk/lib/zbi-format",
+    "//src/lib/elfldltl",
+    "//src/lib/llvm-profdata",
+    "//src/lib/zbitl",
+    "//zircon/kernel/lib/boot-options",
+    "//zircon/kernel/lib/code-patching",
+    "//zircon/kernel/lib/crypto:crypto-entropy-src",
+    "//zircon/kernel/lib/instrumentation",
+    "//zircon/kernel/lib/ktl",
+    "//zircon/kernel/lib/libc",
+    "//zircon/kernel/phys:address-space-map",
+    "//zircon/kernel/phys:allocation",
+    "//zircon/kernel/phys:boot-options",
+    "//zircon/kernel/phys:elf-image",
+    "//zircon/kernel/phys:new",
+    "//zircon/kernel/phys:stdio",
+    "//zircon/kernel/phys:symbolize",
+    "//zircon/kernel/phys:zbitl-allocation",
+    "//zircon/kernel/phys/handoff",
+    "//zircon/kernel/phys/lib/memalloc",
+    "//zircon/kernel/phys/log",
+    "//zircon/kernel/phys/runtime:headers",
+    "//zircon/system/ulib/explicit-memory",
+    "//zircon/system/ulib/fbl",
+    "//zircon/system/ulib/region-alloc:headers",
+  ]
+}
+
+phys_zbi_test("zbi-handoff-entropy-test") {
+  sources = [
+    "handoff-entropy-test.cc",
+    "handoff-entropy.cc",
+    "handoff-entropy.h",
+  ]
+  deps = [
+    "//src/lib/zbitl",
+    "//zircon/kernel/lib/boot-options",
+    "//zircon/kernel/lib/crypto:crypto-entropy-src",
+    "//zircon/kernel/lib/ktl",
+    "//zircon/kernel/lib/libc",
+    "//zircon/kernel/lib/unittest",
+    "//zircon/kernel/phys:stdio",
+    "//zircon/kernel/phys:symbolize",
+    "//zircon/kernel/phys/test:phys-unittest",
+    "//zircon/kernel/phys/test:test-main",
+    "//zircon/system/ulib/explicit-memory",
+  ]
+}
+
+group("tests") {
+  testonly = true
+  deps = [ ":zbi-handoff-entropy-test" ]
+}

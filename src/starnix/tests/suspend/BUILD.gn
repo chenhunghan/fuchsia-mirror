@@ -18,17 +18,42 @@ rustc_test("suspend_integration_test_bin") {
   edition = "2024"
 
   deps = [
+    "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+    "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+    "//sdk/fidl/fuchsia.power.system:fuchsia.power.system_rust",
+    "//sdk/fidl/fuchsia.process:fuchsia.process_rust",
     "//sdk/fidl/fuchsia.starnix.runner:fuchsia.starnix.runner_rust",
+    "//sdk/fidl/fuchsia.time.alarms:fuchsia.time.alarms_rust",
     "//sdk/rust/zx",
+    "//src/lib/fidl/rust/fidl",
     "//src/lib/fuchsia",
     "//src/lib/fuchsia-async",
+    "//src/lib/fuchsia-component",
     "//src/lib/fuchsia-component-test",
     "//src/lib/fuchsia-runtime",
+    "//src/lib/fuchsia-sync",
+    "//third_party/rust_crates:anyhow",
     "//third_party/rust_crates:futures",
   ]
 
   source_root = "src/test_runner.rs"
   sources = [ source_root ]
+}
+
+starnix_linux_executable("wake_alarm_epoll_puppet_bin") {
+  testonly = true
+  output_name = "wake_alarm_epoll_puppet"
+  sources = [ "src/wake_alarm_epoll_puppet.cc" ]
+  deps = [ "//src/lib/files" ]
+}
+
+fuchsia_test_component("wake_alarm_epoll_puppet") {
+  manifest = "meta/wake_alarm_epoll_puppet.cml"
+  deps = [ ":wake_alarm_epoll_puppet_bin" ]
+}
+
+fuchsia_test_component("container_realm") {
+  manifest = "meta/container_realm.cml"
 }
 
 fuchsia_test_component("realm") {
@@ -43,7 +68,11 @@ fuchsia_test_component("suspend_integration_test") {
 
 fuchsia_test_package("starnix_suspend_integration_tests") {
   test_components = [ ":suspend_integration_test" ]
-  deps = [ ":realm" ]
+  deps = [
+    ":container_realm",
+    ":realm",
+    ":wake_alarm_epoll_puppet",
+  ]
 
   subpackages = starnix_test_subpackages +
                 [ "//src/starnix/containers/debian:debian_package" ]

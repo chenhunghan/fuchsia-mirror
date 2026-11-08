@@ -15,7 +15,6 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-#include "src/developer/forensics/testing/backoff.h"
 #include "src/developer/forensics/testing/log_message.h"
 #include "src/developer/forensics/testing/stubs/diagnostics_archive.h"
 #include "src/developer/forensics/testing/stubs/diagnostics_batch_iterator.h"
@@ -85,9 +84,6 @@ bool operator==(const std::vector<LogSink::MessageOr>& lhs,
 
 class SimpleLogSink : public LogSink {
  public:
-  SimpleLogSink(bool safe_after_interruption = false)
-      : safe_after_interruption_(safe_after_interruption) {}
-
   bool Add(LogSink::MessageOr message) override {
     messages_.push_back(std::move(message));
     return true;
@@ -95,21 +91,8 @@ class SimpleLogSink : public LogSink {
 
   const std::vector<LogSink::MessageOr>& Messages() const { return messages_; }
 
-  void NotifyInterruption() override {
-    was_interrupted_ = true;
-    if (safe_after_interruption_) {
-      messages_.clear();
-    }
-  }
-
-  bool SafeAfterInterruption() const override { return safe_after_interruption_; }
-
-  bool WasInterrupted() const { return was_interrupted_; }
-
  private:
   std::vector<LogSink::MessageOr> messages_;
-  bool safe_after_interruption_;
-  bool was_interrupted_{false};
 };
 
 using LogSourceTest = UnitTestFixture;
@@ -119,7 +102,7 @@ TEST_F(LogSourceTest, WritesToSink) {
   const zx::duration kArchivePeriod = zx::msec(750);
 
   SimpleLogSink sink;
-  LogSource source(dispatcher(), services(), &sink, std::make_unique<MonotonicBackoff>());
+  LogSource source(dispatcher(), services(), &sink);
 
   const std::vector<std::vector<std::string>> batches({
       {
@@ -148,7 +131,7 @@ TEST_F(LogSourceTest, WritesToSink) {
       dispatcher(), std::make_unique<stubs::DiagnosticsBatchIteratorDelayedBatches>(
                         dispatcher(), batches, kTimeWaitForLimitedLogs, kArchivePeriod));
 
-  InjectServiceProvider(&archive, "fuchsia.diagnostics.ArchiveAccessor.feedback");
+  InjectServiceProvider(&archive, "fuchsia.diagnostics.ArchiveAccessor.logs");
 
   source.Start();
   RunLoopFor(kTimeWaitForLimitedLogs);
@@ -168,138 +151,19 @@ TEST_F(LogSourceTest, WritesToSink) {
   }
 
   EXPECT_TRUE(archive.IsBound());
-  source.Stop();
-
-  RunLoopUntilIdle();
-  EXPECT_FALSE(archive.IsBound());
 }
 
-TEST_F(LogSourceTest, NotifyInterruptionOnStop) {
-  const zx::duration kTimeWaitForLimitedLogs = zx::sec(60);
-  const zx::duration kArchivePeriod = zx::msec(750);
-
-  SimpleLogSink sink(/*safe_after_interruption=*/true);
-  LogSource source(dispatcher(), services(), &sink, std::make_unique<MonotonicBackoff>());
-
-  source.Stop();
-  EXPECT_TRUE(sink.WasInterrupted());
-
-  const std::vector<std::vector<std::string>> batches({
-      {
-          BuildInputLogMessage("line 0"),
-          BuildInputLogMessage("line 1"),
-          BuildInputLogMessage("line 2"),
-          BuildInputLogMessage("line 3"),
-
-      },
-      {
-          BuildInputLogMessage("line 4"),
-          BuildInputLogMessage("line 5"),
-          BuildInputLogMessage("line 6"),
-          BuildInputLogMessage("line 7"),
-      },
-      {BuildInputLogMessage("line 8")},
-      {BuildInputLogMessage("line 9")},
-      {BuildInputLogMessage("line A")},
-      {BuildInputLogMessage("line B")},
-      {BuildInputLogMessage("line C")},
-      {BuildInputLogMessage("line D")},
-      {},
-  });
-
-  stubs::DiagnosticsArchive archive(
-      dispatcher(), std::make_unique<stubs::DiagnosticsBatchIteratorDelayedBatches>(
-                        dispatcher(), batches, kTimeWaitForLimitedLogs, kArchivePeriod));
-
-  InjectServiceProvider(&archive, "fuchsia.diagnostics.ArchiveAccessor.feedback");
-
-  source.Start();
-  RunLoopFor(kTimeWaitForLimitedLogs);
-
-  std::vector<LogSink::MessageOr> expected;
-  for (const std::vector<std::string>& batch : batches) {
-    // Break to prevent |source| from fetching more messages.
-    if (batch.empty()) {
-      break;
-    }
-
-    for (const std::string& msg : batch) {
-      expected.push_back(BuildOutputLogMessage(msg));
-    }
-    EXPECT_TRUE(sink.Messages() == expected);
-    RunLoopFor(kArchivePeriod);
-  }
-
-  EXPECT_TRUE(archive.IsBound());
-  source.Stop();
-
-  RunLoopUntilIdle();
-  EXPECT_FALSE(archive.IsBound());
-}
-
-TEST_F(LogSourceTest, NotifyInterruptionArchive) {
+TEST_F(LogSourceTest, UnbindsOnIteratorClose) {
   SimpleLogSink sink;
-  LogSource source(dispatcher(), services(), &sink, std::make_unique<MonotonicBackoff>());
-
-  stubs::DiagnosticsArchiveClosesArchiveConnection archive;
-
-  InjectServiceProvider(&archive, "fuchsia.diagnostics.ArchiveAccessor.feedback");
-
-  source.Start();
-  RunLoopUntilIdle();
-
-  EXPECT_TRUE(sink.WasInterrupted());
-}
-
-TEST_F(LogSourceTest, NotifyInterruptionIterator) {
-  SimpleLogSink sink;
-  LogSource source(dispatcher(), services(), &sink, std::make_unique<MonotonicBackoff>());
+  LogSource source(dispatcher(), services(), &sink);
 
   stubs::DiagnosticsArchiveClosesIteratorConnection archive;
 
-  InjectServiceProvider(&archive, "fuchsia.diagnostics.ArchiveAccessor.feedback");
+  InjectServiceProvider(&archive, "fuchsia.diagnostics.ArchiveAccessor.logs");
 
   source.Start();
   RunLoopUntilIdle();
 
-  EXPECT_TRUE(sink.WasInterrupted());
-}
-
-TEST_F(LogSourceTest, ReconnectsOnSafeAfterInterruption) {
-  SimpleLogSink sink(/*safe_after_interruption=*/true);
-  LogSource source(dispatcher(), services(), &sink, std::make_unique<MonotonicBackoff>());
-
-  stubs::DiagnosticsArchiveClosesFirstIteratorConnection archive(
-      dispatcher(), std::make_unique<stubs::DiagnosticsBatchIteratorNeverResponds>());
-
-  InjectServiceProvider(&archive, "fuchsia.diagnostics.ArchiveAccessor.feedback");
-
-  source.Start();
-  RunLoopUntilIdle();
-
-  EXPECT_TRUE(sink.WasInterrupted());
-  EXPECT_FALSE(archive.IsBound());
-
-  RunLoopFor(zx::sec(1));
-  EXPECT_TRUE(archive.IsBound());
-}
-
-TEST_F(LogSourceTest, DoesNotReconnectsOnNotSafeAfterInterruption) {
-  SimpleLogSink sink(/*safe_after_interruption=*/false);
-  LogSource source(dispatcher(), services(), &sink, std::make_unique<MonotonicBackoff>());
-
-  stubs::DiagnosticsArchiveClosesFirstIteratorConnection archive(
-      dispatcher(), std::make_unique<stubs::DiagnosticsBatchIteratorNeverResponds>());
-
-  InjectServiceProvider(&archive, "fuchsia.diagnostics.ArchiveAccessor.feedback");
-
-  source.Start();
-  RunLoopUntilIdle();
-
-  EXPECT_TRUE(sink.WasInterrupted());
-  EXPECT_FALSE(archive.IsBound());
-
-  RunLoopFor(zx::sec(1));
   EXPECT_FALSE(archive.IsBound());
 }
 

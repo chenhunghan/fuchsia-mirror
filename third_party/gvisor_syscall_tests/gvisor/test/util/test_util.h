@@ -226,6 +226,7 @@ namespace Platform {
 constexpr char kNative[] = "native";
 constexpr char kPtrace[] = "ptrace";
 constexpr char kKVM[] = "kvm";
+constexpr char kSlimVM[] = "slimvm";
 constexpr char kFuchsia[] = "fuchsia";
 constexpr char kStarnix[] = "starnix";
 constexpr char kSystrap[] = "systrap";
@@ -251,6 +252,7 @@ bool operator==(const KernelVersion& first, const KernelVersion& second);
 
 PosixErrorOr<KernelVersion> ParseKernelVersion(absl::string_view vers_string);
 PosixErrorOr<KernelVersion> GetKernelVersion();
+PosixErrorOr<KernelVersion> GetHostKernelVersion();
 
 static const size_t kPageSize = sysconf(_SC_PAGESIZE);
 

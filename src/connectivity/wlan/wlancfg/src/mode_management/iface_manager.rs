@@ -119,8 +119,18 @@ async fn create_client_state_machine(
     // would cause wlancfg to panic.
     let (sme_proxy, remote) = create_proxy();
     dev_monitor_proxy.get_client_sme(iface_id, remote).await?.map_err(zx::Status::err_from_raw)?;
+    let (telemetry_proxy, telemetry_remote) = create_proxy();
+    dev_monitor_proxy
+        .get_sme_telemetry(iface_id, telemetry_remote)
+        .await?
+        .map_err(zx::Status::err_from_raw)?;
     let event_stream = sme_proxy.take_event_stream();
-    let sme_proxy = SmeForClientStateMachine::new(sme_proxy, iface_id, defect_sender.clone());
+    let sme_proxy = SmeForClientStateMachine::new_with_telemetry(
+        sme_proxy,
+        telemetry_proxy,
+        iface_id,
+        defect_sender.clone(),
+    );
 
     // State machine status information
     let (publisher, status) = status_publisher_and_reader::<client_fsm::Status>();
@@ -1991,6 +2001,16 @@ mod tests {
                 }
             );
             _sme_stream = sme_server.into_stream().into_future();
+
+            assert_matches!(exec.run_until_stalled(&mut connect_fut), Poll::Pending);
+            assert_matches!(
+                poll_service_req(&mut exec, &mut monitor_service_fut),
+                Poll::Ready(fidl_fuchsia_wlan_device_service::DeviceMonitorRequest::GetSmeTelemetry {
+                    iface_id: TEST_CLIENT_IFACE_ID, responder, ..
+                }) => {
+                    assert!(responder.send(Ok(())).is_ok());
+                }
+            );
 
             let mut connect_fut = pin!(connect_fut);
             match exec.run_until_stalled(&mut connect_fut) {
@@ -4932,6 +4952,16 @@ mod tests {
                 }
             );
 
+            assert_matches!(exec.run_until_stalled(&mut reconnect_fut), Poll::Pending);
+            assert_matches!(
+                poll_service_req(&mut exec, &mut monitor_service_fut),
+                Poll::Ready(fidl_fuchsia_wlan_device_service::DeviceMonitorRequest::GetSmeTelemetry {
+                    iface_id: TEST_CLIENT_IFACE_ID, responder, ..
+                }) => {
+                    assert!(responder.send(Ok(())).is_ok());
+                }
+            );
+
             // The reconnect future should finish up.
             assert_matches!(exec.run_until_stalled(&mut reconnect_fut), Poll::Ready(Ok(())));
 
@@ -5278,6 +5308,16 @@ mod tests {
                     assert!(responder.send(Ok(())).is_ok());
 
                     sme_server
+                }
+            );
+
+            assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
+            assert_matches!(
+                poll_service_req(&mut exec, &mut monitor_service_fut),
+                Poll::Ready(fidl_fuchsia_wlan_device_service::DeviceMonitorRequest::GetSmeTelemetry {
+                    iface_id: TEST_CLIENT_IFACE_ID, responder, ..
+                }) => {
+                    assert!(responder.send(Ok(())).is_ok());
                 }
             );
 

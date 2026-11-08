@@ -311,63 +311,6 @@ void UsbBus::ReinitializeDevice(ReinitializeDeviceRequest& request,
   }
 }
 
-zx_status_t UsbBus::GetDeviceId(/* zx_device_t* */ uint64_t device, uint32_t* out) {
-  usb_protocol_t usb;
-  if (device_get_protocol(reinterpret_cast<zx_device_t*>(device), ZX_PROTOCOL_USB, &usb) != ZX_OK) {
-    return ZX_ERR_INTERNAL;
-  }
-  auto id = usb_get_device_id(&usb);
-  if (id >= devices_.size()) {
-    return ZX_ERR_INTERNAL;
-  }
-  *out = id;
-  return ZX_OK;
-}
-
-zx_status_t UsbBus::UsbBusConfigureHub(/* zx_device_t* */ uint64_t hub_device, usb_speed_t speed,
-                                       const usb_hub_descriptor_t* desc, bool multi_tt) {
-  uint32_t hub_id;
-  if (GetDeviceId(hub_device, &hub_id) != ZX_OK) {
-    return ZX_ERR_INTERNAL;
-  }
-  return hci_.ConfigureHub(hub_id, speed, desc, multi_tt);
-}
-
-zx_status_t UsbBus::UsbBusDeviceAdded(/* zx_device_t* */ uint64_t hub_device, uint32_t port,
-                                      usb_speed_t speed) {
-  uint32_t hub_id;
-  if (GetDeviceId(hub_device, &hub_id) != ZX_OK) {
-    return ZX_ERR_INTERNAL;
-  }
-  return hci_.HubDeviceAdded(hub_id, port, speed);
-}
-
-zx_status_t UsbBus::UsbBusDeviceRemoved(/* zx_device_t* */ uint64_t hub_device, uint32_t port) {
-  uint32_t hub_id;
-  if (GetDeviceId(hub_device, &hub_id) != ZX_OK) {
-    return ZX_ERR_INTERNAL;
-  }
-  return hci_.HubDeviceRemoved(hub_id, port);
-}
-
-zx_status_t UsbBus::UsbBusSetHubInterface(/* zx_device_t* */ uint64_t usb_device,
-                                          const usb_hub_interface_protocol_t* hub) {
-  uint32_t usb_device_id;
-  auto status = GetDeviceId(usb_device, &usb_device_id);
-  if (status != ZX_OK) {
-    return status;
-  }
-
-  auto usb_dev = devices_[usb_device_id];
-  if (usb_dev == nullptr) {
-    zxlogf(ERROR, "%s: no device for usb_device_id %u", __func__, usb_device_id);
-    return ZX_ERR_INTERNAL;
-  }
-
-  usb_dev->SetHubInterface(hub);
-  return ZX_OK;
-}
-
 void UsbBus::DdkChildPreRelease(void* child_ctx) {
   if (dispatcher_ == fdf::Dispatcher::GetCurrent()->async_dispatcher()) {
     uint32_t device_id = reinterpret_cast<UsbDevice*>(child_ctx)->device_id();

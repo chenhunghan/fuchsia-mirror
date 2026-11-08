@@ -23,7 +23,6 @@ func init() {
 					"size": 1,
 				},
 				HandleDefs: util.RepeatHandleDef(config.HandleDef{Subtype: config.Event}, 1),
-				Denylist:   []config.Binding{config.Go},
 			},
 			{
 				Name:    "HandleArray/Event/16",
@@ -32,7 +31,6 @@ func init() {
 					"size": 16,
 				},
 				HandleDefs: util.RepeatHandleDef(config.HandleDef{Subtype: config.Event}, 16),
-				Denylist:   []config.Binding{config.Go},
 			},
 			{
 				Name:    "HandleArray/Event/64",
@@ -43,7 +41,6 @@ func init() {
 				EnableSendEventBenchmark: true,
 				EnableEchoCallBenchmark:  true,
 				HandleDefs:               util.RepeatHandleDef(config.HandleDef{Subtype: config.Event}, 64),
-				Denylist:                 []config.Binding{config.Go},
 			},
 		},
 	})

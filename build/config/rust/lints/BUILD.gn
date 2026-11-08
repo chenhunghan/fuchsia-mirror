@@ -23,7 +23,7 @@ config("clippy_warn_default") {
     "-Wclippy::unnecessary_mut_passed",
 
     # go/keep-sorted end
-    # LINT.ThenChange(//build/config/rust/lints/BUILD.bazel:clippy_warn_default)
+    # LINT.ThenChange(BUILD.bazel:clippy_warn_default)
   ]
 }
 
@@ -42,7 +42,7 @@ config("clippy_warn_production") {
     "-Wclippy::unnecessary_lazy_evaluations",
 
     # go/keep-sorted end
-    # LINT.ThenChange(//build/config/rust/lints/BUILD.bazel:clippy_warn_production)
+    # LINT.ThenChange(BUILD.bazel:clippy_warn_production)
   ]
 }
 
@@ -71,14 +71,14 @@ config("allow_unused_crate_dependencies") {
   ]
 }
 
-# LINT.ThenChange(//build/config/rust/lints/BUILD.bazel:allow_unused_crate_dependencies)
+# LINT.ThenChange(BUILD.bazel:allow_unused_crate_dependencies)
 
 # LINT.IfChange(allow_default)
 config("allow_default") {
   rustflags = [ "-Aunknown_lints" ]
 }
 
-# LINT.ThenChange(//build/config/rust/lints/BUILD.bazel:allow_default,//build/config/rust/lints/BUILD.bazel:rustc_allow_default)
+# LINT.ThenChange(BUILD.bazel:allow_default,BUILD.bazel:rustc_allow_default)
 
 # LINT.IfChange(warn_default)
 config("warn_default") {
@@ -89,7 +89,7 @@ config("warn_default") {
   ]
 }
 
-# LINT.ThenChange(//build/config/rust/lints/BUILD.bazel:warn_default,//build/config/rust/lints/BUILD.bazel:rustc_warn_default)
+# LINT.ThenChange(BUILD.bazel:warn_default,BUILD.bazel:rustc_warn_default)
 
 #  ________  _________  ________  ________
 # |\   ____\|\___   ___\\   __  \|\   __  \
@@ -136,7 +136,7 @@ config("deny_default") {
   ]
 }
 
-# LINT.ThenChange(//build/config/rust/lints/BUILD.bazel:deny_default,//build/config/rust/lints/BUILD.bazel:rustc_deny_default)
+# LINT.ThenChange(BUILD.bazel:deny_default,BUILD.bazel:rustc_deny_default)
 
 #  ________  _________  ________  ________
 # |\   ____\|\___   ___\\   __  \|\   __  \
@@ -168,10 +168,10 @@ config("toolchain_roll_exceptions") {
   ]
 }
 
-# LINT.ThenChange(//build/config/rust/lints/BUILD.bazel:toolchain_roll_exceptions,//build/config/rust/lints/BUILD.bazel:rustc_toolchain_roll_exceptions)
+# LINT.ThenChange(BUILD.bazel:toolchain_roll_exceptions,BUILD.bazel:rustc_toolchain_roll_exceptions)
 
 # LINT.IfChange(deny_unused_results)
 config("deny_unused_results") {
   rustflags = [ "-Dunused_results" ]
 }
-# LINT.ThenChange(//build/config/rust/lints/BUILD.bazel:deny_unused_results)
+# LINT.ThenChange(BUILD.bazel:deny_unused_results)

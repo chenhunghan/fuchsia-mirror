@@ -9,9 +9,97 @@ load(
     "BUILD_FLAGS_RUST_MACRO_ATTRS",
     "wrap_rust_macro_args_with_build_flags",
 )
-load("@rules_rust//rust:defs.bzl", "rust_dylib_library")
-load("//build/bazel/rules/rust:common.bzl", "with_fuchsia_rust_stdlib_link_deps", "with_fuchsia_rust_tags", "with_fuchsia_rustc_flags")
+load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
+load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
+load("@rules_rust//rust:defs.bzl", "rust_clippy_aspect", "rust_dylib_library")
+load("@rules_rust//rust:rust_common.bzl", "BuildInfo", "rust_common")
+load(
+    "//build/bazel/rules/rust:common.bzl",
+    "with_fuchsia_rust_link_exec_properties",
+    "with_fuchsia_rust_stdlib_link_deps",
+    "with_fuchsia_rust_tags",
+    "with_fuchsia_rustc_flags",
+)
 load("//build/bazel/rules/rust:generate_unit_tests.bzl", "generate_unit_tests")
+
+def _nonstatic_linker_inputs(linker_inputs):
+    """Drops static libraries from `linker_inputs`, keeping shared libraries and link flags."""
+    result = []
+    for linker_input in linker_inputs:
+        dylibs = [lib for lib in linker_input.libraries if not (lib.static_library or lib.pic_static_library)]
+        if dylibs or linker_input.user_link_flags or linker_input.additional_inputs:
+            result.append(cc_common.create_linker_input(
+                owner = linker_input.owner,
+                libraries = depset(dylibs),
+                user_link_flags = depset(linker_input.user_link_flags),
+                additional_inputs = depset(linker_input.additional_inputs),
+            ))
+    return result
+
+# TODO(https://fxbug.dev/579828353): Remove this work-around once @rules_rust no
+# longer propagates the static native deps of a rust_dylib_library() to its
+# dependents.
+def _rustc_dylib_link_boundary_impl(ctx):
+    dylib = ctx.attr.crate
+    crate_info = dylib[rust_common.crate_info]
+    dep_info = dylib[rust_common.dep_info]
+    cc_info = dylib[CcInfo]
+
+    # A Rust dylib already bundles its static native dependencies (C/C++
+    # archives, rlibs and, with link_std_dylib = False, the static std).
+    # rules_rust still propagates all of them to dependents, which relink them
+    # into every binary. Only forward shared libraries and link flags.
+    dep_info_fields = {
+        field: getattr(dep_info, field)
+        for field in dir(dep_info)
+        if field not in ("to_json", "to_proto")
+    }
+    dep_info_fields["transitive_noncrates"] = depset(
+        _nonstatic_linker_inputs(dep_info.transitive_noncrates.to_list()),
+    )
+    filtered_cc_info = CcInfo(
+        compilation_context = cc_info.compilation_context,
+        linking_context = cc_common.create_linking_context(
+            linker_inputs = depset(_nonstatic_linker_inputs(cc_info.linking_context.linker_inputs.to_list())),
+        ),
+    )
+    providers = [
+        rust_common.crate_group_info(
+            dep_variant_infos = depset([rust_common.dep_variant_info(
+                crate_info = crate_info,
+                dep_info = rust_common.dep_info(**dep_info_fields),
+                build_info = dylib[BuildInfo] if BuildInfo in dylib else None,
+                cc_info = filtered_cc_info,
+                crate_group_info = None,
+            )]),
+        ),
+        filtered_cc_info,
+        DefaultInfo(
+            files = dylib[DefaultInfo].files,
+            runfiles = dylib[DefaultInfo].default_runfiles,
+        ),
+        coverage_common.instrumented_files_info(ctx, dependency_attributes = ["crate"]),
+    ]
+    if OutputGroupInfo in dylib:
+        providers.append(dylib[OutputGroupInfo])
+    return providers
+
+_rustc_dylib_link_boundary = rule(
+    implementation = _rustc_dylib_link_boundary_impl,
+    doc = "Forwards a rust_dylib_library to dependents without its bundled static native deps.",
+    attrs = {
+        # Named `crate` so that rules_rust aspects (clippy, rustfmt,
+        # rust-analyzer) traverse into the real dylib. rust_clippy_aspect is
+        # also attached directly, so the `clippy_checks` output group of the
+        # real dylib can be forwarded (see _rustc_dylib_link_boundary_impl()).
+        "crate": attr.label(
+            aspects = [rust_clippy_aspect],
+            mandatory = True,
+            providers = [rust_common.crate_info, rust_common.dep_info, CcInfo],
+        ),
+    },
+    provides = [rust_common.crate_group_info, CcInfo],
+)
 
 def _rustc_dylib_impl(
         name,
@@ -33,7 +121,9 @@ def _rustc_dylib_impl(
     if public_deps:
         kwargs["link_deps"] = (kwargs.get("link_deps") or []) + public_deps
     if lint_config == None:
-        lint_config = "//build/config/rust/lints:clippy_warn_production"
+        lint_config = (
+            "//build/config/rust/lints:clippy_warn_default" if kwargs.get("testonly") else "//build/config/rust/lints:clippy_warn_production"
+        )
         test_lint_config = "//build/config/rust/lints:clippy_warn_default"
     else:
         test_lint_config = lint_config
@@ -49,18 +139,35 @@ def _rustc_dylib_impl(
         target_type = "rust_shared_library",
     )
 
+    # The real dylib is a private target. `name` is a link boundary in front of
+    # it, see _rustc_dylib_link_boundary_impl().
+    dylib_name = "{}.dylib".format(name)
+    if not library_kwargs.get("crate_name"):
+        library_kwargs["crate_name"] = name.replace("-", "_")
     rust_dylib_library(
-        name = name,
+        name = dylib_name,
         lint_config = lint_config,
         # The Fuchsia Rust toolchain already passes -Cprefer-dynamic to every
         # crate, so libstd is dynamically linked. Setting this to True would
         # also add libstd-<hash>.so to the dylib's runfiles, which causes it
         # to be installed twice by fx_packaged_binary().
         link_std_dylib = False,
-        visibility = visibility,
+        # Only the link boundary below (and tests in this package) should
+        # depend on the real dylib.
+        visibility = ["//{}:__pkg__".format(native.package_name())],
         **(library_kwargs | {
+            "exec_properties": with_fuchsia_rust_link_exec_properties(library_kwargs.get("exec_properties")),
             "link_deps": with_fuchsia_rust_stdlib_link_deps(library_kwargs.get("link_deps")),
         })
+    )
+
+    _rustc_dylib_link_boundary(
+        name = name,
+        crate = ":" + dylib_name,
+        tags = kwargs.get("tags"),
+        target_compatible_with = kwargs.get("target_compatible_with"),
+        testonly = kwargs.get("testonly"),
+        visibility = visibility,
     )
 
     if with_unit_tests:
@@ -80,6 +187,7 @@ def _rustc_dylib_impl(
             with_host_unit_tests = False,
             with_unit_tests = with_unit_tests,
             test_deps = test_deps,
+            crate = ":" + dylib_name,
             lint_config = test_lint_config,
             visibility = visibility,
             **test_kwargs
@@ -97,9 +205,14 @@ Apply Fuchsia-specific Rust flags.
 
 Generate a test target when with_unit_tests is enabled. The test target will
 be named "<name>_test" and will include extra dependencies from test_deps.
+Standalone `rustc_test()` targets testing this crate directly should set
+`crate = ":<name>.dylib"`, as `:<name>` is a link-boundary wrapper rule that
+prevents static archives bundled into the dylib from being relinked into
+dependents.
 
 The default lint_config value is //build/config/rust/lints:clippy_warn_production
-for the target, and //build/config/rust/lints:clippy_warn_default for the test target.
+for non-testonly targets, and //build/config/rust/lints:clippy_warn_default when
+testonly = True is set on the target or for the generated test target.
 If specified by the caller, lint_config is applied to both main and test targets.
 
 Also used to allow easier syncing between Bazel and GN targets, where this

@@ -1,0 +1,23 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+# `fx_cc_binary` has no `output_name` attribute in Bazel.
+# @bazel2gn:raw_attribute:output_name = "guest_package"
+fx_cc_binary(
+    name = "guest_package_bin",
+    srcs = ["main.cc"],
+    visibility = ["//src/virtualization/packages:__subpackages__"],
+    deps = [
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/fdio",
+        "//sdk/lib/syslog/cpp",
+        "//src/storage/lib/vfs/cpp",
+        "//zircon/system/ulib/svc",
+    ],
+)

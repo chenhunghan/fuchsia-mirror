@@ -2,16 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use anyhow::{format_err, Error};
-use bt_test_harness::access::{expectation, AccessHarness};
+use anyhow::{Error, format_err};
+use bt_test_harness::access::{AccessHarness, expectation};
 use bt_test_harness::profile::ProfileHarness;
 use fidl::endpoints::create_request_stream;
 use fidl_fuchsia_bluetooth::{ErrorCode, MAJOR_DEVICE_CLASS_MISCELLANEOUS};
 use fidl_fuchsia_bluetooth_bredr::{
-    ConnectParameters, ConnectionReceiverRequestStream, DataElement, L2capParameters,
+    ConnectParameters, ConnectionReceiverRequestStream, DataElement, L2capParameters, PSM_AVDTP,
     ProfileAdvertiseRequest, ProfileDescriptor, ProfileSearchRequest, ProtocolDescriptor,
     ProtocolIdentifier, SearchResultsRequest, SearchResultsRequestStream,
-    ServiceClassProfileIdentifier, ServiceDefinition, PSM_AVDTP,
+    ServiceClassProfileIdentifier, ServiceDefinition,
 };
 use fidl_fuchsia_bluetooth_sys::ProcedureTokenProxy;
 use fidl_fuchsia_hardware_bluetooth::{EmulatorProxy, PeerParameters, PeerProxy};
@@ -115,16 +115,12 @@ fn default_address() -> Address {
     Address::Public([1, 0, 0, 0, 0, 0])
 }
 
-#[test_harness::run_singlethreaded_test(
-    test_component = "fuchsia-pkg://fuchsia.com/bt-profile-integration-tests#meta/bt-profile-integration-tests-component.cm"
-)]
+#[test_harness::run_singlethreaded_test]
 async fn test_add_profile(profile: ProfileHarness) {
     let _ = add_service(&profile).expect("can add service for profile");
 }
 
-#[test_harness::run_singlethreaded_test(
-    test_component = "fuchsia-pkg://fuchsia.com/bt-profile-integration-tests#meta/bt-profile-integration-tests-component.cm"
-)]
+#[test_harness::run_singlethreaded_test]
 async fn test_same_psm_twice_fails(profile: ProfileHarness) {
     let _request_stream = add_service(&profile).expect("can add service for profile");
     let mut second_request_stream =
@@ -142,9 +138,7 @@ async fn test_same_psm_twice_fails(profile: ProfileHarness) {
     }
 }
 
-#[test_harness::run_singlethreaded_test(
-    test_component = "fuchsia-pkg://fuchsia.com/bt-profile-integration-tests#meta/bt-profile-integration-tests-component.cm"
-)]
+#[test_harness::run_singlethreaded_test]
 async fn test_add_and_remove_profile(profile: ProfileHarness) {
     let request_stream = add_service(&profile).expect("can add service for profile");
 
@@ -159,9 +153,7 @@ async fn test_add_and_remove_profile(profile: ProfileHarness) {
     }
 }
 
-#[test_harness::run_singlethreaded_test(
-    test_component = "fuchsia-pkg://fuchsia.com/bt-profile-integration-tests#meta/bt-profile-integration-tests-component.cm"
-)]
+#[test_harness::run_singlethreaded_test]
 async fn test_connect_unknown_peer(profile: ProfileHarness) {
     let fut = profile.aux().profile.connect(
         &PeerId(0xDEAD).into(),

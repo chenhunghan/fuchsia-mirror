@@ -22,6 +22,7 @@ rustc_binary("bin") {
     "//src/lib/fidl/rust/fidl",
     "//src/lib/fuchsia-async",
   ]
+  configs += [ "//build/config/rust:bootfs" ]
 }
 
 fuchsia_component("fake-shutdown-shim") {

@@ -37,6 +37,7 @@ namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 constexpr uint32_t kBulkTxCount = 16;
 constexpr uint32_t kBulkRxCount = 16;
 constexpr size_t kVmoDataSize = 4096;
+constexpr size_t kScatterGatherBulkTxVmoSize = 16384;
 
 constexpr uint16_t kBulkMaxPacket = 512;
 
@@ -265,7 +266,8 @@ class UsbAdbDevice : public fdf::DriverBase2,
   };
 
   zx_status_t InitEndpoint(fidl::ClientEnd<fuchsia_hardware_usb_endpoint::Endpoint> endpoint_client,
-                           usb::EndpointClient<UsbAdbDevice>& ep, uint32_t req_count);
+                           usb::EndpointClient<UsbAdbDevice>& ep, uint32_t req_count,
+                           size_t vmo_data_size);
 
   // Bulk OUT/RX endpoint
   usb::EndpointClient<UsbAdbDevice> bulk_out_ep_{usb::EndpointType::BULK, this,
@@ -278,6 +280,7 @@ class UsbAdbDevice : public fdf::DriverBase2,
   // Bulk IN/TX endpoint
   usb::EndpointClient<UsbAdbDevice> bulk_in_ep_{usb::EndpointType::BULK, this,
                                                 std::mem_fn(&UsbAdbDevice::TxComplete)};
+  size_t bulk_tx_vmo_size_ = kVmoDataSize;
   // Queue of pending and in-flight transfer requests awaiting BULK IN transmission completion.
   std::deque<txn_req_t> tx_pending_reqs_;
 

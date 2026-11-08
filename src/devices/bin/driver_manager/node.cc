@@ -1000,6 +1000,12 @@ void Node::FinishShutdown(fit::callback<void()> shutdown_callback) {
 
   // Store a shared_ptr to ourselves so we won't be freed halfway through this function.
   std::shared_ptr this_node = shared_from_this();
+  bool was_bound = is_bound();
+  is_bound_override_ = std::nullopt;
+  state_ = Unbound{};
+  if (was_bound && node_manager_.has_value()) {
+    node_manager_.value()->OnNodeUnbinding(this_node);
+  }
   for (auto& parent : parents()) {
     if (auto ptr = parent.lock(); ptr) {
       ptr->RemoveChild(this_node);
@@ -1007,7 +1013,6 @@ void Node::FinishShutdown(fit::callback<void()> shutdown_callback) {
     }
     fdf_log::warn("Parent freed before child {} could be removed from it", name());
   }
-  state_ = Unbound{};
   ResetPowerHandles();
 
   for (auto& resource : received_resources_) {
@@ -1089,6 +1094,10 @@ void Node::FinishQuarantine() {
   // |QuarantineNode()| sets this.
   ZX_ASSERT_MSG(std::holds_alternative<Quarantined>(state_),
                 "Node::state_ was not set to Quarantined");
+
+  if (node_manager_.has_value()) {
+    node_manager_.value()->OnNodeUnbinding(shared_from_this());
+  }
 }
 
 void Node::ClearHostDriver() {
@@ -3123,8 +3132,10 @@ void Node::OnDriverHostFidlError(fidl::UnbindInfo info) {
 
   bool is_crash = (info.status() != ZX_OK && info.status() != ZX_ERR_CANCELED);
   if (is_crash && is_driver_host_root_ && node_manager_.has_value()) {
+    // LINT.IfChange(driver_host_crashed_reboot)
     fdf_log::error("Node {} driver host crashed. Rebooting system.", name());
     node_manager_.value()->RebootSystem();
+    // LINT.ThenChange(//tools/testing/tefmocheck/check-configs.yaml:driver_host_crashed_reboot)
   }
 
   // If the driver fails to bind to the node, don't remove the node.
@@ -3362,7 +3373,6 @@ zx::duration Node::HealthCheckBackstopDeadline(fuchsia_driver_framework::HealthC
     case fuchsia_driver_framework::HealthCheckRequest::kFast:
       return kFastHealthCheckDeadline + kHealthCheckBackstopSlack;
     case fuchsia_driver_framework::HealthCheckRequest::kDeep:
-    default:
       return kDeepHealthCheckDeadline + kHealthCheckBackstopSlack;
   }
 }
@@ -3413,8 +3423,9 @@ void Node::RunHealthCheck(
           cb(fit::error(fuchsia_driver_framework::HealthCheckError::kInvalidState));
           return;
         }
-        fdf_log::warn("Node '{}': driver host did not answer {} HealthCheck within {} ms",
-                      self->name(), level, HealthCheckBackstopDeadline(level).to_msecs());
+        // The throttled [DHC] transition line carries the user-visible WARN; this is only a trace.
+        fdf_log::debug("Node '{}': driver host did not answer {} HealthCheck within {} ms",
+                       self->name(), level, HealthCheckBackstopDeadline(level).to_msecs());
         self->MaybeStoreHealthCheckRecord(HealthCheckRecord{
             .error = fuchsia_driver_framework::HealthCheckError::kTimeout,
             .level = level,
@@ -3509,11 +3520,40 @@ fuchsia_driver_framework::HealthCondition Node::HealthCheckRecord::SyntheticCond
   }};
 }
 
+// NOLINTNEXTLINE(readability-convert-member-functions-to-static)
+const fuchsia_driver_framework::HealthCondition* Node::HealthCheckRecord::primary_condition()
+    const {
+  if (conditions.empty()) {
+    return nullptr;
+  }
+  if (status.has_value()) {
+    for (const auto& cond : conditions) {
+      const auto cond_status =
+          cond.status().value_or(fuchsia_driver_framework::HealthStatus::kUnhealthy);
+      if (cond_status == *status) {
+        return &cond;
+      }
+    }
+  }
+  return &conditions.front();
+}
+
+// NOLINTNEXTLINE(readability-convert-member-functions-to-static)
 std::string_view Node::HealthCheckRecord::first_reason_code() const {
-  if (conditions.empty() || !conditions.front().reason_code().has_value()) {
+  const auto* cond = primary_condition();
+  if (!cond || !cond->reason_code().has_value() || cond->reason_code()->empty()) {
     return "-";
   }
-  return conditions.front().reason_code().value();
+  return cond->reason_code().value();
+}
+
+// NOLINTNEXTLINE(readability-convert-member-functions-to-static)
+std::string_view Node::HealthCheckRecord::first_message() const {
+  const auto* cond = primary_condition();
+  if (!cond || !cond->message().has_value()) {
+    return "";
+  }
+  return cond->message().value();
 }
 
 bool Node::HealthCheckRecord::is_informative() const {
@@ -3587,6 +3627,269 @@ Node::HealthCheckRecord Node::HealthCheckRecord::FromError(
   return record;
 }
 
+// NOLINTNEXTLINE(readability-convert-member-functions-to-static)
+const char* Node::HealthCheckLevelString(
+    std::optional<fuchsia_driver_framework::HealthCheckRequest> level) {
+  if (!level.has_value()) {
+    return "ALERT";
+  }
+  // NOLINTNEXTLINE(readability-trivial-switch)
+  switch (*level) {
+    case fuchsia_driver_framework::HealthCheckRequest::kPing:
+      return "PING";
+    case fuchsia_driver_framework::HealthCheckRequest::kFast:
+      return "FAST";
+    case fuchsia_driver_framework::HealthCheckRequest::kDeep:
+      return "DEEP";
+  }
+}
+
+// NOLINTNEXTLINE(readability-convert-member-functions-to-static)
+const char* Node::HealthCheckErrorString(fuchsia_driver_framework::HealthCheckError error) {
+  // NOLINTNEXTLINE(readability-trivial-switch)
+  switch (error) {
+    case fuchsia_driver_framework::HealthCheckError::kTimeout:
+      return "TIMEOUT";
+    case fuchsia_driver_framework::HealthCheckError::kInternalError:
+      return "INTERNAL_ERROR";
+    case fuchsia_driver_framework::HealthCheckError::kNotSupported:
+      return "NOT_SUPPORTED";
+    case fuchsia_driver_framework::HealthCheckError::kInvalidState:
+      return "INVALID_STATE";
+    case fuchsia_driver_framework::HealthCheckError::kUnavailable:
+      return "UNAVAILABLE";
+    case fuchsia_driver_framework::HealthCheckError::kCommunicationError:
+      return "COMMUNICATION_ERROR";
+    case fuchsia_driver_framework::HealthCheckError::kNotFound:
+      return "NOT_FOUND";
+    default:
+      return "UNKNOWN";
+  }
+}
+
+// NOLINTNEXTLINE(readability-convert-member-functions-to-static)
+const char* Node::HealthStatusString(std::optional<fuchsia_driver_framework::HealthStatus> status) {
+  if (!status.has_value()) {
+    return "UNKNOWN";
+  }
+  // NOLINTNEXTLINE(readability-trivial-switch)
+  switch (*status) {
+    case fuchsia_driver_framework::HealthStatus::kOk:
+      return "OK";
+    case fuchsia_driver_framework::HealthStatus::kDegraded:
+      return "DEGRADED";
+    case fuchsia_driver_framework::HealthStatus::kUnhealthy:
+      return "UNHEALTHY";
+  }
+}
+
+namespace {
+
+bool IsRecordUnhealthyOrError(const Node::HealthCheckRecord& record) {
+  return record.error.has_value() ||
+         record.status == fuchsia_driver_framework::HealthStatus::kUnhealthy;
+}
+
+int RecordSeverityRank(const Node::HealthCheckRecord& record) {
+  if (IsRecordUnhealthyOrError(record)) {
+    return 2;
+  }
+  if (record.status == fuchsia_driver_framework::HealthStatus::kDegraded) {
+    return 1;
+  }
+  return 0;
+}
+
+bool SameEffectiveHealthOutcome(const Node::HealthCheckRecord& a,
+                                const Node::HealthCheckRecord& b) {
+  return a.status == b.status && a.error == b.error &&
+         a.first_reason_code() == b.first_reason_code();
+}
+
+bool IsRecordOk(const Node::HealthCheckRecord& record) {
+  return !record.error.has_value() && record.status == fuchsia_driver_framework::HealthStatus::kOk;
+}
+
+std::string TruncateMessageUtf8(std::string_view raw) {
+  constexpr size_t kMaxLen = 256;
+  if (raw.size() <= kMaxLen) {
+    return std::string(raw);
+  }
+  size_t len = kMaxLen;
+  while (len > 0 && (static_cast<uint8_t>(raw[len]) & 0xc0u) == 0x80u) {
+    --len;
+  }
+  return std::string(raw.substr(0, len));
+}
+
+}  // namespace
+
+namespace {
+
+// Process-wide token bucket bounding how many [DHC] fault transitions are logged at WARN per
+// Node::kGlobalDhcWarnWindow across all nodes.
+struct GlobalDhcWarnBucket {
+  zx::time window_start = zx::time::infinite_past();
+  size_t warns_in_window = 0;
+};
+GlobalDhcWarnBucket g_global_dhc_warn_bucket;
+
+// Returns true (and consumes a token) if a WARN-level [DHC] line may be emitted at |now|.
+bool TakeGlobalDhcWarnToken(zx::time now) {
+  auto& bucket = g_global_dhc_warn_bucket;
+  if (now < bucket.window_start || now - bucket.window_start >= Node::kGlobalDhcWarnWindow) {
+    bucket.window_start = now;
+    bucket.warns_in_window = 0;
+  }
+  if (bucket.warns_in_window >= Node::kMaxGlobalDhcWarns) {
+    return false;
+  }
+  ++bucket.warns_in_window;
+  return true;
+}
+
+}  // namespace
+
+void Node::ResetGlobalDhcWarnBucketForTesting() { g_global_dhc_warn_bucket = {}; }
+
+// NOLINTNEXTLINE(readability-convert-member-functions-to-static)
+std::string Node::SanitizeDhcReason(std::string_view raw) {
+  std::string out(raw);
+  for (char& c : out) {
+    const auto uc = static_cast<unsigned char>(c);
+    if (uc <= 0x20 || uc >= 0x7f) {
+      c = '_';
+    }
+  }
+  return out;
+}
+
+// NOLINTNEXTLINE(readability-convert-member-functions-to-static)
+std::string Node::SanitizeDhcMessage(std::string_view raw) {
+  std::string out = TruncateMessageUtf8(raw);
+  for (char& c : out) {
+    const auto uc = static_cast<unsigned char>(c);
+    if (c == '"') {
+      c = '\'';
+    } else if (uc < 0x20 || uc == 0x7f) {
+      c = ' ';
+    }
+  }
+  return out;
+}
+
+void Node::MaybeRecordHealthTransition(bool had_informative_prev, bool same_outcome,
+                                       const HealthCheckRecord& next, bool republished,
+                                       std::optional<zx::time> transition_time) {
+  if (had_informative_prev && same_outcome) {
+    return;
+  }
+  // A node that has never been anything but OK has nothing to record. Once there is history (a
+  // past fault or a DRIVER_STARTED marker), an OK result is a transition worth keeping so the
+  // history shows how the episode ended.
+  if (!had_informative_prev && health_history_.empty() && IsRecordOk(next)) {
+    return;
+  }
+  const int prev_rank = last_transition_rank_;
+  const int next_rank = RecordSeverityRank(next);
+  if (prev_rank < 2 && next_rank == 2) {
+    ++unhealthy_count_;
+  } else if (prev_rank == 2 && next_rank < 2) {
+    ++recovered_count_;
+  }
+  last_transition_rank_ = next_rank;
+
+  const zx::time effective_time = transition_time.value_or(next.timestamp);
+  if (health_history_.size() >= kMaxHealthHistoryEntries) {
+    health_history_.pop_front();
+  }
+  health_history_.push_back(HealthTransitionEntry{
+      .timestamp = effective_time,
+      .status = next.status,
+      .error = next.error,
+      .level = next.level,
+      .reason_code = std::string(next.first_reason_code()),
+      .message = TruncateMessageUtf8(next.first_message()),
+  });
+
+  // Per-node throttle: kMaxDhcLogsPerWindow lines per kDhcLogWindow, then a trailing summary.
+  if (effective_time < dhc_log_window_start_ ||
+      effective_time - dhc_log_window_start_ >= kDhcLogWindow) {
+    dhc_log_window_start_ = effective_time;
+    dhc_logs_in_window_ = 0;
+  }
+  if (dhc_logs_in_window_ >= kMaxDhcLogsPerWindow) {
+    if (dhc_logs_suppressed_pending_ == 0) {
+      async::PostTaskForTime(
+          dispatcher_,
+          [weak = weak_from_this()] {
+            if (auto self = weak.lock()) {
+              self->EmitTrailingDhcSummary();
+            }
+          },
+          dhc_log_window_start_ + kDhcLogWindow);
+    }
+    ++dhc_logs_suppressed_pending_;
+    ++dhc_logs_suppressed_total_;
+    return;
+  }
+  ++dhc_logs_in_window_;
+  const uint64_t suppressed = std::exchange(dhc_logs_suppressed_pending_, 0);
+
+  const std::string moniker = MakeComponentMoniker();
+  const std::string_view url = driver_url();
+  const std::string_view state_str = next.error.has_value() ? HealthCheckErrorString(*next.error)
+                                                            : HealthStatusString(next.status);
+  const std::string_view level_str = HealthCheckLevelString(next.level);
+  const std::string reason_str = SanitizeDhcReason(next.first_reason_code());
+  const std::string msg_str = SanitizeDhcMessage(next.first_message());
+
+  // A new or worsening fault is WARN (subject to the global token bucket, which demotes the
+  // overflow to DEBUG). Recoveries, downgrades, and republished retained faults are INFO.
+  const bool fault_transition = !republished && next_rank > 0 && next_rank >= prev_rank;
+  if (fault_transition) {
+    if (TakeGlobalDhcWarnToken(effective_time)) {
+      fdf_log::warn("[DHC][{}] node={} url={} level={} reason={} suppressed={} msg=\"{}\"",
+                    state_str, moniker, url, level_str, reason_str, suppressed, msg_str);
+    } else {
+      fdf_log::debug("[DHC][{}] node={} url={} level={} reason={} suppressed={} msg=\"{}\"",
+                     state_str, moniker, url, level_str, reason_str, suppressed, msg_str);
+    }
+  } else if (republished) {
+    fdf_log::info(
+        "[DHC][{}] node={} url={} level={} reason={} suppressed={} msg=\"{}\" republished=true",
+        state_str, moniker, url, level_str, reason_str, suppressed, msg_str);
+  } else {
+    fdf_log::info("[DHC][{}] node={} url={} level={} reason={} suppressed={} msg=\"{}\"", state_str,
+                  moniker, url, level_str, reason_str, suppressed, msg_str);
+  }
+}
+
+void Node::EmitTrailingDhcSummary() {
+  if (dhc_logs_suppressed_pending_ == 0) {
+    return;
+  }
+  const uint64_t suppressed = std::exchange(dhc_logs_suppressed_pending_, 0);
+  const std::string moniker = MakeComponentMoniker();
+  const std::string_view url = driver_url();
+  if (!last_health_check_.has_value()) {
+    // The driver restarted before the window ended; the latest state is gone but the count is
+    // still worth reporting.
+    fdf_log::info("[DHC][RESTARTED] node={} url={} suppressed={} (summary)", moniker, url,
+                  suppressed);
+    return;
+  }
+  const auto& next = *last_health_check_;
+  const std::string_view state_str = next.error.has_value() ? HealthCheckErrorString(*next.error)
+                                                            : HealthStatusString(next.status);
+  const std::string_view level_str = HealthCheckLevelString(next.level);
+  const std::string reason_str = SanitizeDhcReason(next.first_reason_code());
+  const std::string msg_str = SanitizeDhcMessage(next.first_message());
+
+  fdf_log::info("[DHC][{}] node={} url={} level={} reason={} suppressed={} msg=\"{}\" (summary)",
+                state_str, moniker, url, level_str, reason_str, suppressed, msg_str);
+}
+
 void Node::MaybeStoreHealthCheckRecord(HealthCheckRecord record) {
   // (a) A result that carries no health information never hides one that does.
   if (!record.is_informative()) {
@@ -3595,27 +3898,72 @@ void Node::MaybeStoreHealthCheckRecord(HealthCheckRecord record) {
     }
     return;
   }
+
+  // Capture what the transition is measured against before last_health_check_ changes.
+  const bool had_informative_prev =
+      last_health_check_.has_value() && last_health_check_->is_informative();
+  const bool same_outcome =
+      had_informative_prev && SameEffectiveHealthOutcome(*last_health_check_, record);
+
   if (!record.is_ping()) {
-    last_non_ping_health_check_ = record;
+    // Only cache non-PING records that produced a status (FAST/DEEP response, SELF_FAULT alert, or
+    // DRIVER_HOST_PEER_CLOSED) in last_non_ping_health_check_. A status-less TIMEOUT or
+    // INTERNAL_ERROR from a FAST/DEEP check carries no hardware verdict (the dispatcher may have
+    // stalled, or an asynchronous wait may simply have exceeded the budget), so it is published
+    // but not retained as the hardware baseline: a later OK PING replaces it rather than
+    // republishing it forever. The event stays visible in the transition history and the [DHC]
+    // log, and the next non-PING check re-establishes the hardware status.
+    if (record.status.has_value()) {
+      last_non_ping_health_check_ = record;
+    }
     last_health_check_ = std::move(record);
+    MaybeRecordHealthTransition(had_informative_prev, same_outcome, *last_health_check_);
     return;
   }
-  // (b) A liveness ping says nothing about the hardware, so an OK PING does not hide a non-OK
+
+  // (b) A liveness ping says nothing about the hardware, so a lower-severity PING response (e.g.
+  // OK, or DEGRADED when the retained non-PING status is UNHEALTHY) does not hide a higher-severity
   // result from a FAST or DEEP check or a self_fault alert. The non-PING record is kept separately
   // so that a failed PING in between (which does replace the published record, since a wedged
   // dispatcher or crashed host is the more urgent news) cannot launder the hardware fault away.
-  if (record.status == fuchsia_driver_framework::HealthStatus::kOk &&
-      last_non_ping_health_check_.has_value() &&
-      last_non_ping_health_check_->status != fuchsia_driver_framework::HealthStatus::kOk) {
+  if (record.status.has_value() && last_non_ping_health_check_.has_value() &&
+      RecordSeverityRank(record) < RecordSeverityRank(*last_non_ping_health_check_)) {
+    // The republished record keeps its own timestamp; the history entry gets the PING's, which is
+    // when the node was observed to be back on the retained outcome.
+    const auto ping_timestamp = record.timestamp;
+    const bool same_republished_outcome =
+        had_informative_prev &&
+        SameEffectiveHealthOutcome(*last_health_check_, *last_non_ping_health_check_);
     last_health_check_ = last_non_ping_health_check_;
+    MaybeRecordHealthTransition(had_informative_prev, same_republished_outcome, *last_health_check_,
+                                /*republished=*/true, ping_timestamp);
     return;
   }
   last_health_check_ = std::move(record);
+  MaybeRecordHealthTransition(had_informative_prev, same_outcome, *last_health_check_);
 }
 
 void Node::ResetHealthCheckState() {
+  // Report anything suppressed in the current window against the outgoing driver instance so the
+  // count neither disappears nor leaks onto the new instance's first transition.
+  EmitTrailingDhcSummary();
   last_health_check_.reset();
   last_non_ping_health_check_.reset();
+  if (!health_history_.empty()) {
+    // Consecutive restarts collapse into one marker so a crash loop cannot evict the fault that
+    // caused it from the bounded history.
+    if (health_history_.back().reason_code == kDriverStartedReasonCode) {
+      health_history_.back().timestamp = async::Now(dispatcher_);
+    } else {
+      if (health_history_.size() >= kMaxHealthHistoryEntries) {
+        health_history_.pop_front();
+      }
+      health_history_.push_back(HealthTransitionEntry{
+          .timestamp = async::Now(dispatcher_),
+          .reason_code = std::string(kDriverStartedReasonCode),
+      });
+    }
+  }
   last_alert_probe_time_.reset();
   last_alert_probe_level_.reset();
 }
@@ -3709,17 +4057,10 @@ void Node::HandleSelfFault(fuchsia_driver_framework::HealthCheckResponse details
   HealthCheckRecord record = HealthCheckRecord::FromResponse(details, std::nullopt, now);
   // FromResponse always derives a status.
   const auto status = *record.status;
-  // Only a change in status is worth a warning; a driver re-raising the same fault logs at debug
-  // so that a repeating alert cannot flood the log.
-  const bool status_changed =
-      !last_health_check_.has_value() || last_health_check_->status != record.status;
-  if (status_changed) {
-    fdf_log::warn("Node {} ({}) reported SELF_FAULT health alert: status={}, reason={}",
-                  MakeComponentMoniker(), driver_url(), status, record.first_reason_code());
-  } else {
-    fdf_log::debug("Node {} ({}) repeated SELF_FAULT health alert: status={}, reason={}",
-                   MakeComponentMoniker(), driver_url(), status, record.first_reason_code());
-  }
+  // The throttled [DHC] transition line (see MaybeRecordHealthTransition) is the user-visible
+  // record of this alert; this trace exists for debugging the alert path itself.
+  fdf_log::debug("Node {} ({}) reported SELF_FAULT health alert: status={}, reason={}",
+                 MakeComponentMoniker(), driver_url(), status, record.first_reason_code());
   MaybeStoreHealthCheckRecord(std::move(record));
 
   // A recovery (empty conditions, derived status OK) is not a fault, so there is nothing upstream

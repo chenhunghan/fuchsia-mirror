@@ -175,7 +175,7 @@ pub enum MmuCommand {
 }
 
 bitfield! {
-    pub struct AddressSpaceStatus(u32);
+    pub struct AddressSpaceStatus(pub u32);
     impl Debug;
     pub active, set_active: 0, 0;
 }
@@ -191,7 +191,7 @@ bitfield! {
 // MemoryAttribute is a u64 broken up into 8 attributes. We define one byte here
 // and use bit manipulation to fill in the rest.
 bitfield! {
-    pub struct MemoryAttribute(u64);
+    pub struct MemoryAttribute(pub u64);
     impl Debug;
     pub write_allocate, set_write_allocate: 0, 0;
     pub read_allocate, set_read_allocate: 1, 1;

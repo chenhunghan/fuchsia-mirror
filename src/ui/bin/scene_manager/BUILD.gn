@@ -114,6 +114,12 @@ fuchsia_component_manifest("manifest_dso") {
   manifest = "meta/scene_manager.dso.cml"
 }
 
+fuchsia_component_manifest("manifest_for_test") {
+  testonly = true
+  component_name = "scene_manager"
+  manifest = "meta/scene_manager.test.cml"
+}
+
 fuchsia_component("component") {
   cm_label = ":manifest"
   deps = [ ":bin" ]
@@ -124,23 +130,20 @@ fuchsia_component("component_dso") {
   deps = [ ":dso" ]
 }
 
-# TODO(https://fxbug.dev/42057898): Remove test-only target when
-# default config values are available.
-group("scene_manager_component_for_test") {
-  deps = [
-    ":component",
-    ":config_for_test",
-  ]
+# Stand-in for `:component` with transitional default configuration values for
+# hermetic integration tests.
+fuchsia_component("scene_manager_component_for_test") {
+  testonly = true
+  cm_label = ":manifest_for_test"
+  deps = [ ":bin" ]
 }
 
 fuchsia_package("scene_manager") {
-  validate_structured_config = false
   deps = [ ":component" ]
 }
 
 fuchsia_package("scene_manager_dso") {
   package_name = "scene_manager"
-  validate_structured_config = false
   deps = [ ":component_dso" ]
 }
 
@@ -156,30 +159,6 @@ fuchsia_unittest_package("scene_manager_tests") {
 
 fuchsia_structured_config_rust_lib("scene_manager_structured_config") {
   cm_label = ":manifest"
-}
-
-fuchsia_structured_config_values2("config_for_test") {
-  visibility = [ ":scene_manager_component_for_test" ]
-  cm_label = ":manifest"
-  output_component_name = "scene_manager_config"
-  values = {
-    idle_threshold_ms = 5000
-    supported_input_devices = [
-      "button",
-      "keyboard",
-      "lightsensor",
-      "mouse",
-      "touchscreen",
-    ]
-    display_rotation = 270
-    display_pixel_density = "4.1668"
-    viewing_distance = "near"
-    suspend_enabled = false
-    attach_a11y_view = true
-    enable_merge_touch_events = false
-    prefetch = false
-    visual_debugging_level = 0
-  }
 }
 
 group("tests") {

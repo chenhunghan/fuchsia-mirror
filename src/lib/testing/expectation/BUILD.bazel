@@ -1,0 +1,286 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:cml_shard.bzl",
+    "cml_shard",
+)
+load(
+    "//build/bazel/rules/components:expect_includes.bzl",
+    "expect_includes",
+)
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:defs.bzl", "rustc_binary", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+load(
+    "//src/lib/testing/expectation/rules:fx_expectations.bzl",
+    "fx_expectations",
+)
+load(
+    "//src/lib/testing/expectation/rules:fx_generated_expectations.bzl",
+    "fx_generated_expectations",
+)
+load(
+    "//src/lib/testing/expectation/rules:fx_test_component_with_expectations.bzl",
+    "fx_component_manifest_with_expectations",
+    "fx_test_component_with_expectations",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+# Referenced by the implicit `_default_expectations` attribute of
+# `fx_generated_expectations()`.
+exports_files(
+    ["default_expectations.json5"],
+    visibility = ["//src/lib/testing/expectation/rules:__pkg__"],
+)
+
+# Exported only for rule and macro tests under
+# `//src/lib/testing/expectation/rules/tests`.
+exports_files(
+    [
+        "example_expectations.json5",
+        "example_expectations_part1.json5",
+        "example_expectations_part2.json5",
+        "included_expectations.json5",
+        "meta/test_root.cml",
+    ],
+    visibility = ["//src/lib/testing/expectation:__subpackages__"],
+)
+
+cml_shard(
+    name = "meta/common.shard",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    shard = "meta/common.shard.cml",
+    visibility = [
+        "//src:__subpackages__",
+        "//third_party/gvisor_syscall_tests:__subpackages__",
+        "//vendor:__subpackages__",
+    ],
+)
+
+# Appended to `deps` by `fx_test_component_with_expectations()` and
+# `fuchsia_test_component_with_expectations()` so the built-in
+# `cmc check-includes` check verifies that the test manifest includes
+# `meta/common.shard.cml`.
+expect_includes(
+    name = "expected_includes_common",
+    includes = [":meta/common.shard"],
+    visibility = [
+        "//src:__subpackages__",
+        "//third_party/gvisor_syscall_tests:__subpackages__",
+        "//vendor:__subpackages__",
+    ],
+)
+
+cml_shard(
+    name = "meta/client.shard",
+    includes = [":meta/common.shard"],
+    shard = "meta/client.shard.cml",
+    visibility = [
+        "//src:__subpackages__",
+        "//third_party/gvisor_syscall_tests:__subpackages__",
+        "//vendor:__subpackages__",
+    ],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate_name = "expectation_comparer",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.test:fuchsia.test_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-fs",
+        "//src/lib/testing/expectation/expectations_matcher",
+        "//src/lib/testing/expectation/ser",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:itertools",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:serde_json5",
+    ],
+)
+
+rustc_test(
+    name = "bin_test",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate = ":bin",
+    crate_name = "expectation_comparer_bin_test",
+    deps = [
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:glob",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+fx_unittest_package(
+    name = "expectation-unittests",
+    unit_tests = [":bin_test"],
+    visibility = ["//src/lib/testing/expectation/rules/tests:__pkg__"],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "expectation_comparer",
+)
+
+fx_component_manifest(
+    name = "expectation_comparer_manifest",
+    component_name = "expectation_comparer",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/expectation_comparer.cml",
+)
+
+fx_component(
+    name = "expectation_comparer",
+    compiled_manifest = ":expectation_comparer_manifest",
+    visibility = [
+        "//src:__subpackages__",
+        "//third_party/gvisor_syscall_tests:__subpackages__",
+        "//vendor:__subpackages__",
+    ],
+    deps = [":bin_packaged"],
+)
+
+rustc_test(
+    name = "example_tests",
+    srcs = ["src/tests.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate_name = "expectation_comparer_example_tests",
+    crate_root = "src/tests.rs",
+    edition = "2024",
+    deps = [
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "example_tests_packaged",
+    testonly = True,
+    binary = ":example_tests",
+    binary_name = "expectation_comparer_example_tests",
+    visibility = ["//src/lib/testing/expectation/rules/tests:__pkg__"],
+)
+
+fx_component_manifest_with_expectations(
+    name = "expectation_example_tests_manifest",
+    includes = [":meta/client.shard"],
+    manifest = "meta/test_root.cml",
+)
+
+fx_expectations(
+    name = "example_expectations",
+    expectations = "example_expectations.json5",
+    includes = ["included_expectations.json5"],
+    visibility = ["//src/lib/testing/expectation/rules/tests:__pkg__"],
+)
+
+fx_test_component_with_expectations(
+    name = "expectation-example-tests",
+    compiled_manifest = ":expectation_example_tests_manifest",
+    expectations = ":example_expectations",
+    deps = [":example_tests_packaged"],
+)
+
+fx_package(
+    name = "expectation-example-package.package",
+    package_name = "expectation-example-package",
+    test_components = [":expectation-example-tests"],
+)
+
+fx_test(
+    name = "expectation-example-package",
+    max_log_severity = "ERROR",
+    package = ":expectation-example-package.package",
+    visibility = ["//src/lib/testing/expectation/rules/tests:__pkg__"],
+)
+
+fx_test_component_with_expectations(
+    name = "expectation-example-tests-just-err-logs-cases",
+    compiled_manifest = ":expectation_example_tests_manifest",
+    expectations = ":example_expectations",
+    treatment_of_cases_with_error_logs = "RUN_ONLY_CASES_WITH_ERROR_LOGS",
+    deps = [":example_tests_packaged"],
+)
+
+fx_package(
+    name = "expectation-example-package-just-err-logs-cases.package",
+    package_name = "expectation-example-package-just-err-logs-cases",
+    test_components = [":expectation-example-tests-just-err-logs-cases"],
+)
+
+fx_test(
+    name = "expectation-example-package-just-err-logs-cases",
+    max_log_severity = "ERROR",
+    package = ":expectation-example-package-just-err-logs-cases.package",
+    visibility = ["//src/lib/testing/expectation/rules/tests:__pkg__"],
+)
+
+fx_test_component_with_expectations(
+    name = "expectation-example-tests-no-err-logs-cases",
+    compiled_manifest = ":expectation_example_tests_manifest",
+    expectations = ":example_expectations",
+    treatment_of_cases_with_error_logs = "SKIP_CASES_WITH_ERROR_LOGS",
+    deps = [":example_tests_packaged"],
+)
+
+fx_package(
+    name = "expectation-example-package-no-err-logs-cases.package",
+    package_name = "expectation-example-package-no-err-logs-cases",
+    test_components = [":expectation-example-tests-no-err-logs-cases"],
+)
+
+fx_test(
+    name = "expectation-example-package-no-err-logs-cases",
+    package = ":expectation-example-package-no-err-logs-cases.package",
+    visibility = ["//src/lib/testing/expectation/rules/tests:__pkg__"],
+)
+
+fx_generated_expectations(
+    name = "generated_expectations_example",
+    includes = [
+        "example_expectations_part1.json5",
+        "example_expectations_part2.json5",
+    ],
+)
+
+fx_test_component_with_expectations(
+    name = "expectation-example-tests-generated",
+    compiled_manifest = ":expectation_example_tests_manifest",
+    expectations = ":generated_expectations_example",
+    treatment_of_cases_with_error_logs = "SKIP_CASES_WITH_ERROR_LOGS",
+    deps = [":example_tests_packaged"],
+)
+
+fx_package(
+    name = "expectation-example-package-generated.package",
+    package_name = "expectation-example-package-generated",
+    test_components = [":expectation-example-tests-generated"],
+)
+
+fx_test(
+    name = "expectation-example-package-generated",
+    package = ":expectation-example-package-generated.package",
+    visibility = ["//src/lib/testing/expectation/rules/tests:__pkg__"],
+)

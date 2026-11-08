@@ -36,15 +36,16 @@ group("prod-fuchsia-component-test") {
 }
 
 bazel_test_suite("fuchsia_component_test_unittests") {
-  target_tests =
-      [ "//src/lib/fuchsia-component-test:fuchsia_component_test_unittests" ]
+  target_tests = [
+    "//src/lib/fuchsia-component-test:fuchsia_component_test_unittests",
+    "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_unit_tests",
+  ]
 }
 
 group("tests") {
   testonly = true
   deps = [
     ":fuchsia_component_test_unittests",
-    "realm_builder_server:realm_builder_server_unit_tests",
     "tests",
   ]
 }
@@ -82,6 +83,7 @@ rustc_library("fuchsia-component-test-lib") {
   ]
   crate_name = "fuchsia_component_test"
   edition = "2024"
+  visibility = [ "//*" ]
   deps = [
     "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
     "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
@@ -109,10 +111,13 @@ rustc_library("fuchsia-component-test-lib") {
     "//third_party/rust_crates:thiserror",
   ]
 }
+
 expect_includes("includes") {
   includes = [ "//sdk/lib/sys/component/realm_builder.shard.cml" ]
   visibility = [
     ":*",
     "//sdk/lib/sys/component/cpp/testing:*",
+    "//src/lib/fidl/rust/fidl-contrib:*",
+    "//src/sys/component_manager/*",
   ]
 }

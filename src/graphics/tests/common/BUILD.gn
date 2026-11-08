@@ -60,11 +60,8 @@ executable("vkcontext_bin") {
 
   deps = [
     ":common",
-    "//src/lib/vulkan",
-  ]
-
-  public_deps = [
     "//src/lib/fxl/test:test_settings",
+    "//src/lib/vulkan",
     "//third_party/googletest:gtest",
   ]
 

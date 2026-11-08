@@ -12,7 +12,7 @@ use crate::object_store::allocator::{AllocatorItem, Hold, Reservation};
 use crate::object_store::object_manager::{ObjectManager, reserved_space_from_journal_usage};
 use crate::object_store::object_record::{
     BytesAndNodes, FxfsKey, FxfsKeyV49, ObjectItem, ObjectItemV56, ObjectItemV59, ObjectItemV62,
-    ObjectKey, ObjectKeyData, ObjectValue, ProjectProperty,
+    ObjectItemV63, ObjectKey, ObjectKeyData, ObjectValue, ProjectProperty,
 };
 use crate::object_store::{AttributeId, AttributeKey, ProjectId};
 use crate::serialized_types::{Migrate, Versioned, migrate_nodefault, migrate_to_version};
@@ -237,14 +237,14 @@ pub trait TransactionSink: Send + Sync + 'static {
 /// transaction, these are stored as a set which allows some mutations to be deduplicated and found
 /// (and we require custom comparison functions below).  For example, we need to be able to find
 /// object size changes.
-pub type Mutation = MutationV62;
+pub type Mutation = MutationV63;
 
 #[derive(
     Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize, TypeFingerprint, Versioned,
 )]
 #[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-pub enum MutationV62 {
-    ObjectStore(ObjectStoreMutationV62),
+pub enum MutationV63 {
+    ObjectStore(ObjectStoreMutationV63),
     EncryptedObjectStore(#[serde(with = "crate::zerocopy_serialization")] Box<[u8]>),
     Allocator(AllocatorMutationV32),
 
@@ -268,6 +268,21 @@ pub enum MutationV62 {
     /// when it is removed.
     #[serde(skip)]
     #[cfg_attr(fuzz, arbitrary(skip))]
+    UpdateBorrowed(u64),
+}
+
+#[derive(Migrate, Clone, Debug, PartialEq, Serialize, Deserialize, TypeFingerprint, Versioned)]
+#[migrate_to_version(MutationV63)]
+pub enum MutationV62 {
+    ObjectStore(ObjectStoreMutationV62),
+    EncryptedObjectStore(#[serde(with = "crate::zerocopy_serialization")] Box<[u8]>),
+    Allocator(AllocatorMutationV32),
+    BeginFlush,
+    EndFlush(u64),
+    DeleteVolume,
+    UpdateMutationsKey(UpdateMutationsKey),
+    CreateInternalDir(u64),
+    #[serde(skip)]
     UpdateBorrowed(u64),
 }
 
@@ -386,10 +401,18 @@ impl Mutation {
 // We have custom comparison functions for mutations that just use the key, rather than the key and
 // value that would be used by default so that we can deduplicate and find mutations (see
 // get_object_mutation below).
-pub type ObjectStoreMutation = ObjectStoreMutationV62;
+pub type ObjectStoreMutation = ObjectStoreMutationV63;
 
 #[derive(Clone, Debug, Serialize, Deserialize, TypeFingerprint)]
 #[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
+pub struct ObjectStoreMutationV63 {
+    pub item: ObjectItemV63,
+    pub op: Operation,
+}
+
+#[derive(Migrate, Clone, Debug, PartialEq, Serialize, Deserialize, TypeFingerprint, Versioned)]
+#[migrate_to_version(ObjectStoreMutationV63)]
+#[migrate_nodefault]
 pub struct ObjectStoreMutationV62 {
     pub item: ObjectItemV62,
     pub op: Operation,
@@ -422,25 +445,25 @@ pub enum OperationV32 {
     Merge,
 }
 
-impl Ord for ObjectStoreMutation {
+impl Ord for ObjectStoreMutationV63 {
     fn cmp(&self, other: &Self) -> Ordering {
         self.item.key.cmp(&other.item.key)
     }
 }
 
-impl PartialOrd for ObjectStoreMutation {
+impl PartialOrd for ObjectStoreMutationV63 {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl PartialEq for ObjectStoreMutation {
+impl PartialEq for ObjectStoreMutationV63 {
     fn eq(&self, other: &Self) -> bool {
         self.item.key.eq(&other.item.key)
     }
 }
 
-impl Eq for ObjectStoreMutation {}
+impl Eq for ObjectStoreMutationV63 {}
 
 impl Ord for AllocatorItem {
     fn cmp(&self, other: &Self) -> Ordering {
@@ -1063,9 +1086,9 @@ impl<'a> Transaction<'a> {
     ) {
         let delta = match self.get_object_mutation(store_object_id, key.clone()) {
             Some(ObjectStoreMutation {
-                item: Item { value: ObjectValue::BytesAndNodes { bytes, nodes }, .. },
+                item: Item { value: ObjectValue::BytesAndNodes(existing), .. },
                 ..
-            }) => delta + BytesAndNodes { bytes: *bytes, nodes: *nodes },
+            }) => delta + *existing,
             _ => delta,
         };
         if delta.is_zero() {
@@ -1111,7 +1134,8 @@ impl<'a> Transaction<'a> {
                 Mutation::ObjectStore(ObjectStoreMutation {
                     item: ObjectItem {
                         key: ObjectKey {
-                            data: ObjectKeyData::Project { property: ProjectProperty::Usage, .. },
+                            data: ObjectKeyData::Project { property: ProjectProperty::Usage, .. }
+                                | ObjectKeyData::PosixOwner { .. },
                             ..
                         },
                         ..
@@ -1281,10 +1305,11 @@ impl<'a> Transaction<'a> {
                             )
                         }
                     }
-                    ObjectKeyData::Project { property: ProjectProperty::Usage, .. } => match op {
+                    ObjectKeyData::Project { property: ProjectProperty::Usage, .. }
+                    | ObjectKeyData::PosixOwner { .. } => match op {
                         Operation::Insert | Operation::ReplaceOrInsert => {
                             panic!(
-                                "Project usage is all handled by merging deltas, no inserts or \
+                                "Usage is all handled by merging deltas, no inserts or \
                                 replacements should be used"
                             );
                         }
@@ -1370,12 +1395,40 @@ impl<'a> Transaction<'a> {
         Ok(res.expect("callback should have been called"))
     }
 
-    /// Commits the transaction, but allows the transaction to be used again.  The locks are not
-    /// dropped (but transaction locks will get downgraded to read locks).
-    pub async fn commit_and_continue(&mut self) -> Result<(), Error> {
+    /// Commits the current batch of mutations in the transaction, runs `f` synchronously once the
+    /// batch is committed while write locks are still held, and prepares `self` to be used again
+    /// with write locks downgraded to transaction locks and a fresh metadata reservation.
+    ///
+    /// # Partial-commit and drop-safety caveats
+    ///
+    /// `commit_and_continue` is split into three phases:
+    /// 1. **Pre-commit (async, fallible)**: upgrades transaction locks, waits for journal space,
+    ///    and acquires the journal commit mutex. If an error or task cancellation (future drop)
+    ///    occurs here, the current batch of mutations is **not** committed and `f` is **not**
+    ///    called.
+    /// 2. **Commit point (synchronous, infallible)**: applies the mutations to in-memory state and
+    ///    buffers them in the journal, then immediately invokes `f()` with no intervening `.await`
+    ///    points while write locks are still held.
+    /// 3. **Post-commit (async, fallible)**: downgrades write locks to transaction locks and
+    ///    acquires a new metadata reservation for the next batch. **If an error (e.g.,
+    ///    `FxfsError::NoSpace`) or task cancellation occurs during this phase, the batch committed
+    ///    in phase 2 remains committed and `f` has already run.**
+    ///
+    /// Because of this, callers must uphold two invariants:
+    /// - **Intermediate on-disk consistency**: Every batch committed via `commit_and_continue` must
+    ///   leave on-disk state valid on its own (or protected by a graveyard entry included in that
+    ///   batch so orphaned state is cleaned up on remount or by a background reaper).
+    /// - **Synchronizing cleanup guards and state via `f`**: Any caller-side state transition or
+    ///   cleanup guard (such as arming a `scopeguard` to queue a graveyard tombstone or trim) that
+    ///   must take effect if and only if the batch commits **must** be performed inside `f` by
+    ///   mutating state in the caller's frame (or in `AssociatedObject::will_apply_mutation`).
+    ///   Arming a cleanup guard *before* `commit_and_continue` will fire spuriously if phase 1
+    ///   fails or is cancelled; arming it *after* `commit_and_continue(...).await` returns will
+    ///   miss failures or cancellation in phase 3 after the batch has already committed.
+    pub async fn commit_and_continue(&mut self, f: impl FnOnce() + Send) -> Result<(), Error> {
         debug!(txn:? = self; "Commit");
         let sink = self.sink.clone();
-        sink.commit(self).await?;
+        sink.commit_with_callback(self, Box::new(|_| f())).await?;
         assert!(self.mutations.is_empty());
         assert!(self.new_objects.is_empty());
         assert!(self.checksums.is_empty());
@@ -2043,7 +2096,7 @@ mod tests {
     };
     use crate::filesystem::FxFilesystem;
     use crate::object_store::allocator::{Reservation, ReservationOwner};
-    use crate::object_store::{BytesAndNodes, ObjectKey};
+    use crate::object_store::{BytesAndNodes, ObjectKey, ObjectValue};
     use anyhow::Error;
     use async_trait::async_trait;
     use fuchsia_async as fasync;
@@ -2639,7 +2692,7 @@ mod tests {
         assert_eq!(mutation.op, super::Operation::Merge);
         assert_eq!(
             mutation.item.value,
-            crate::object_store::object_record::ObjectValue::BytesAndNodes { bytes: 100, nodes: 2 }
+            ObjectValue::BytesAndNodes(BytesAndNodes { bytes: 100, nodes: 2 })
         );
 
         // Second delta for the same key folds into the first rather than replacing it.
@@ -2648,7 +2701,7 @@ mod tests {
         assert_eq!(mutation.op, super::Operation::Merge);
         assert_eq!(
             mutation.item.value,
-            crate::object_store::object_record::ObjectValue::BytesAndNodes { bytes: 150, nodes: 3 }
+            ObjectValue::BytesAndNodes(BytesAndNodes { bytes: 150, nodes: 3 })
         );
 
         // Negative delta brings it back down.
@@ -2657,7 +2710,7 @@ mod tests {
         assert_eq!(mutation.op, super::Operation::Merge);
         assert_eq!(
             mutation.item.value,
-            crate::object_store::object_record::ObjectValue::BytesAndNodes { bytes: 100, nodes: 2 }
+            ObjectValue::BytesAndNodes(BytesAndNodes { bytes: 100, nodes: 2 })
         );
 
         // Folding to zero removes the mutation completely.
@@ -2667,6 +2720,70 @@ mod tests {
         // Calling with (0, 0) when no mutation exists is a no-op.
         t.merge_bytes_and_nodes(store_id, key.clone(), BytesAndNodes { bytes: 0, nodes: 0 });
         assert!(t.get_object_mutation(store_id, key.clone()).is_none());
+    }
+
+    #[fuchsia::test]
+    async fn test_merge_bytes_and_nodes_posix_owner() {
+        let device = DeviceHolder::new(FakeDevice::new(4096, 1024));
+        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
+        let root_store = fs.root_store();
+        let store_id = root_store.store_object_id();
+        let root_dir_id = root_store.root_directory_object_id();
+        let mut t = root_store
+            .new_transaction(lock_keys![], Options::default())
+            .await
+            .expect("new_transaction failed");
+
+        let user_key =
+            ObjectKey::posix_owner_usage(root_dir_id, crate::object_store::PosixOwner::User(1000));
+        let group_key =
+            ObjectKey::posix_owner_usage(root_dir_id, crate::object_store::PosixOwner::Group(1000));
+
+        // Initial deltas for User(1000) and Group(1000) stay separate.
+        t.merge_bytes_and_nodes(store_id, user_key.clone(), BytesAndNodes { bytes: 100, nodes: 2 });
+        t.merge_bytes_and_nodes(store_id, group_key.clone(), BytesAndNodes { bytes: 40, nodes: 1 });
+        let user_mutation =
+            t.get_object_mutation(store_id, user_key.clone()).expect("user mutation expected");
+        assert_eq!(user_mutation.op, super::Operation::Merge);
+        assert_eq!(
+            user_mutation.item.value,
+            ObjectValue::BytesAndNodes(BytesAndNodes { bytes: 100, nodes: 2 })
+        );
+        let group_mutation =
+            t.get_object_mutation(store_id, group_key.clone()).expect("group mutation expected");
+        assert_eq!(group_mutation.op, super::Operation::Merge);
+        assert_eq!(
+            group_mutation.item.value,
+            ObjectValue::BytesAndNodes(BytesAndNodes { bytes: 40, nodes: 1 })
+        );
+
+        // Second delta for User(1000) folds into User(1000) without affecting Group(1000).
+        t.merge_bytes_and_nodes(store_id, user_key.clone(), BytesAndNodes { bytes: 50, nodes: 1 });
+        let user_mutation =
+            t.get_object_mutation(store_id, user_key.clone()).expect("user mutation expected");
+        assert_eq!(
+            user_mutation.item.value,
+            ObjectValue::BytesAndNodes(BytesAndNodes { bytes: 150, nodes: 3 })
+        );
+        let group_mutation =
+            t.get_object_mutation(store_id, group_key.clone()).expect("group mutation expected");
+        assert_eq!(
+            group_mutation.item.value,
+            ObjectValue::BytesAndNodes(BytesAndNodes { bytes: 40, nodes: 1 })
+        );
+
+        // Folding to zero removes User(1000) while leaving Group(1000) intact.
+        t.merge_bytes_and_nodes(
+            store_id,
+            user_key.clone(),
+            BytesAndNodes { bytes: -150, nodes: -3 },
+        );
+        assert!(t.get_object_mutation(store_id, user_key.clone()).is_none());
+        assert!(t.get_object_mutation(store_id, group_key.clone()).is_some());
+
+        // Calling with (0, 0) when no mutation exists is a no-op.
+        t.merge_bytes_and_nodes(store_id, user_key.clone(), BytesAndNodes { bytes: 0, nodes: 0 });
+        assert!(t.get_object_mutation(store_id, user_key.clone()).is_none());
     }
 
     #[fuchsia::test]
@@ -2685,10 +2802,9 @@ mod tests {
         let fs = FxFilesystemBuilder::new()
             .hooks(fs_hooks)
             .journal_options(JournalOptions { reclaim_size, ..Default::default() })
-            .format(true)
-            .open(device)
+            .format(device)
             .await
-            .expect("open failed");
+            .expect("format failed");
 
         let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
         let store = root_volume
@@ -2729,7 +2845,7 @@ mod tests {
                     ),
                 );
             }
-            transaction.commit_and_continue().await.expect("commit_and_continue failed");
+            transaction.commit_and_continue(|| {}).await.expect("commit_and_continue failed");
         }
         transaction.commit().await.expect("commit failed");
 
@@ -2771,7 +2887,7 @@ mod tests {
         assert!(transaction.includes_write());
         assert!(!transaction.checksums().is_empty());
 
-        transaction.commit_and_continue().await.expect("commit_and_continue failed");
+        transaction.commit_and_continue(|| {}).await.expect("commit_and_continue failed");
 
         assert!(!transaction.includes_write());
         assert!(transaction.checksums().is_empty());
@@ -2914,8 +3030,13 @@ mod tests {
                 .await
                 .unwrap();
             for i in 0..100 {
-                txn.commit_and_continue().await.expect("commit_and_continue should succeed");
+                let mut callback_called = false;
+                txn.commit_and_continue(|| callback_called = true)
+                    .await
+                    .expect("commit_and_continue should succeed");
+                assert!(callback_called);
                 assert_eq!(sink.commits.load(Ordering::Relaxed), 3 + i);
+                assert_eq!(sink.callbacks.load(Ordering::Relaxed), 2 + i);
                 assert_eq!(sink.downgrades.load(Ordering::Relaxed), 1 + i);
             }
             std::mem::drop(txn);

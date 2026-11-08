@@ -64,8 +64,6 @@ struct TaskRuntimeStats {
   operator zx_info_task_runtime_t() const;
 };
 
-struct TaskRuntimeStatsTests;  // fwd decl so we can be friends with our tests.
-
 namespace task_runtime_stats::internal {
 
 // Manages sequence locked updates and access to per-thread runtime stats.
@@ -171,9 +169,6 @@ class ThreadRuntimeStats {
                             .lock_contention_ticks = lock_contention_ticks_};
   }
 
- private:
-  friend struct ::TaskRuntimeStatsTests;
-
   struct ReadResult {
     ThreadStats stats;
     zx_instant_mono_ticks_t now{};
@@ -220,6 +215,7 @@ class ThreadRuntimeStats {
     return ret;
   }
 
+ private:
   // This lock is acquired in the scheduler. Disable reporting to prevent
   // interacting with the debug log and interfering with the last result, which
   // can cause lockdep failures.

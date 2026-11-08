@@ -4,62 +4,62 @@
 
 #include "src/developer/forensics/crash_reports/filing_result.h"
 
-#include <gtest/gtest.h>
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
 
-#include "fuchsia/feedback/cpp/fidl.h"
+#include <gtest/gtest.h>
 
 namespace forensics::crash_reports {
 namespace {
 
-using fuchsia::feedback::FilingError;
-using fuchsia::feedback::FilingSuccess;
+using fuchsia_feedback::FilingError;
+using fuchsia_feedback::FilingSuccess;
 
 TEST(FilingResult, ReportUploaded) {
   const auto fidl_result = ToFidlFilingResult(FilingResult::kReportUploaded);
   ASSERT_TRUE(fidl_result.is_ok());
-  EXPECT_EQ(fidl_result.value(), FilingSuccess::REPORT_UPLOADED);
+  EXPECT_EQ(fidl_result.value(), FilingSuccess::kReportUploaded);
 }
 
 TEST(FilingResult, ReportOnDisk) {
   const auto fidl_result = ToFidlFilingResult(FilingResult::kReportOnDisk);
   ASSERT_TRUE(fidl_result.is_ok());
-  EXPECT_EQ(fidl_result.value(), FilingSuccess::REPORT_ON_DISK);
+  EXPECT_EQ(fidl_result.value(), FilingSuccess::kReportOnDisk);
 }
 
 TEST(FilingResult, ReportInMemory) {
   const auto fidl_result = ToFidlFilingResult(FilingResult::kReportInMemory);
   ASSERT_TRUE(fidl_result.is_ok());
-  EXPECT_EQ(fidl_result.value(), FilingSuccess::REPORT_IN_MEMORY);
+  EXPECT_EQ(fidl_result.value(), FilingSuccess::kReportInMemory);
 }
 
 TEST(FilingResult, ReportNotFiledUserOptedOut) {
   const auto fidl_result = ToFidlFilingResult(FilingResult::kReportNotFiledUserOptedOut);
   ASSERT_TRUE(fidl_result.is_ok());
-  EXPECT_EQ(fidl_result.value(), FilingSuccess::REPORT_NOT_FILED_USER_OPTED_OUT);
+  EXPECT_EQ(fidl_result.value(), FilingSuccess::kReportNotFiledUserOptedOut);
 }
 
 TEST(FilingResult, InvalidArgsError) {
   const auto fidl_result = ToFidlFilingResult(FilingResult::kInvalidArgsError);
   ASSERT_TRUE(fidl_result.is_error());
-  EXPECT_EQ(fidl_result.error(), FilingError::INVALID_ARGS_ERROR);
+  EXPECT_EQ(fidl_result.error(), FilingError::kInvalidArgsError);
 }
 
 TEST(FilingResult, ServerError) {
   const auto fidl_result = ToFidlFilingResult(FilingResult::kServerError);
   ASSERT_TRUE(fidl_result.is_error());
-  EXPECT_EQ(fidl_result.error(), FilingError::SERVER_ERROR);
+  EXPECT_EQ(fidl_result.error(), FilingError::kServerError);
 }
 
 TEST(FilingResult, PersistenceError) {
   const auto fidl_result = ToFidlFilingResult(FilingResult::kPersistenceError);
   ASSERT_TRUE(fidl_result.is_error());
-  EXPECT_EQ(fidl_result.error(), FilingError::PERSISTENCE_ERROR);
+  EXPECT_EQ(fidl_result.error(), FilingError::kPersistenceError);
 }
 
 TEST(FilingResult, QuotaReachedError) {
   const auto fidl_result = ToFidlFilingResult(FilingResult::kQuotaReachedError);
   ASSERT_TRUE(fidl_result.is_error());
-  EXPECT_EQ(fidl_result.error(), FilingError::QUOTA_REACHED_ERROR);
+  EXPECT_EQ(fidl_result.error(), FilingError::kQuotaReachedError);
 }
 
 }  // namespace

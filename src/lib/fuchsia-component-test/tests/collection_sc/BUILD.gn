@@ -32,22 +32,11 @@ fuchsia_component("component") {
   check_includes = false
 }
 
-fuchsia_structured_config_values("config_values") {
-  values = {
-    to_override = "lol"
-    dont_override = to_override
-  }
-  cm_label = ":manifest"
-}
-
 fuchsia_structured_config_rust_lib("config_lib") {
   cm_label = ":manifest"
 }
 
 group("collection_sc") {
   testonly = true
-  deps = [
-    ":component",
-    ":config_values",
-  ]
+  deps = [ ":component" ]
 }

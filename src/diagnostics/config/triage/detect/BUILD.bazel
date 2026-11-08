@@ -16,6 +16,7 @@ exports_files(
         "wlan-detect.triage",
         "omaha-client-detect.triage",
         "mali-detect.triage",
+        "driver_health_detect.triage",
     ],
     visibility = ["//bundles/assembly:__subpackages__"],
 )

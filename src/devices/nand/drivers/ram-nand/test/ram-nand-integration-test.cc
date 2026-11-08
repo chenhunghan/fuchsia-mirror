@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <dirent.h>
 #include <fcntl.h>
 #include <fidl/fuchsia.driver.test/cpp/wire.h>
 #include <fidl/fuchsia.hardware.nand/cpp/wire.h>
@@ -13,9 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include <algorithm>
-#include <iterator>
-#include <set>
+#include <string>
 #include <utility>
 
 #include <bind/fuchsia/platform/cpp/bind.h>
@@ -144,56 +141,19 @@ TEST_F(RamNandIntegrationTest, CreateFailure) {
   ASSERT_STATUS(device.status_value(), ZX_ERR_INVALID_ARGS);
 }
 
-namespace {
-std::set<std::string> GetNandDevices() {
-  std::set<std::string> devices;
-  DIR* dir = opendir("/dev/class/nand");
-  if (!dir) {
-    return devices;
-  }
-  struct dirent* de;
-  while ((de = readdir(dir)) != nullptr) {
-    if (std::string_view(de->d_name) == "." || std::string_view(de->d_name) == "..") {
-      continue;
-    }
-    devices.insert(de->d_name);
-  }
-  closedir(dir);
-  return devices;
-}
-}  // namespace
-
-TEST_F(RamNandIntegrationTest, ServiceInstancesRemoved) {
-  std::set<std::string> before = GetNandDevices();
-
-  std::string class_filename;
+TEST_F(RamNandIntegrationTest, DeviceNodeRemoved) {
+  std::string path;
   {
     zx::result result = NandDevice::Create();
     ASSERT_OK(result.status_value());
-
-    // Wait for the new device to appear in /dev/class/nand.
-    bool found = false;
-    for (int i = 0; i < 50; ++i) {
-      std::set<std::string> after = GetNandDevices();
-      std::vector<std::string> diff;
-      std::set_difference(after.begin(), after.end(), before.begin(), before.end(),
-                          std::back_inserter(diff));
-      if (!diff.empty()) {
-        class_filename = diff[0];
-        found = true;
-        break;
-      }
-      zx::nanosleep(zx::deadline_after(zx::msec(100)));
-    }
-    ASSERT_TRUE(found) << "Timeout waiting for class node to appear";
+    path = result->path();
+    fbl::unique_fd fd(open(path.c_str(), O_RDONLY | O_DIRECTORY));
+    ASSERT_TRUE(fd);
   }
 
-  // Synchronously check that the class node is gone.
-  std::string path = std::string("/dev/class/nand/") + class_filename;
-  fbl::unique_fd fd(open(path.c_str(), O_RDONLY));
-  EXPECT_FALSE(fd) << "Class node still exists after destruction: " << path;
+  // Synchronously check that the device node is gone.
+  fbl::unique_fd fd(open(path.c_str(), O_RDONLY | O_DIRECTORY));
+  EXPECT_FALSE(fd) << "Device node still exists after destruction: " << path;
   EXPECT_EQ(errno, ENOENT);
 }
-
-// Force rebuild comment.
 }  // namespace ram_nand::testing

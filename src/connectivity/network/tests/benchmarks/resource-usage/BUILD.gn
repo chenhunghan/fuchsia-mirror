@@ -50,13 +50,13 @@ fuchsia_test_component("resource-usage-benchmark-netstack3") {
   manifest = "meta/resource-usage-benchmark-netstack3.cml"
   deps = [
            ":resource_usage_benchmark",
-           "//src/connectivity/network/netstack3:component-for-tests",
            "//src/connectivity/network/testing/netemul/service:netemul-sandbox",
          ] + shared_deps
 }
 
 fuchsia_test_package("resource-usage-benchmarks-netstack3") {
   test_components = [ ":resource-usage-benchmark-netstack3" ]
+  subpackages = [ "//src/connectivity/network/netstack3:package-for-tests" ]
 }
 
 fuchsia_component_perf_test("resource_usage_benchmarks_netstack3") {

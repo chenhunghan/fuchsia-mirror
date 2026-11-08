@@ -206,53 +206,42 @@ impl Directory for ErofsDirectory {
             "ErofsDirectory::read_dirents",
             "nid" => self.node.nid()
         );
-        let mut entry_offset = match pos {
+        let start_offset = match pos {
             TraversalPosition::Start => 0,
-            TraversalPosition::Index(index) => *index,
+            TraversalPosition::Index(index) => *index as usize,
             TraversalPosition::End => return Ok((TraversalPosition::End, sink.seal())),
             _ => return Err(zx::Status::NOT_SUPPORTED),
         };
 
         let mut sink = sink;
-        let mut buffer = vec![erofs::DirectoryEntry::default(); 16];
 
-        loop {
-            let filled = self
-                .volume
-                .fs()
-                .read_directory(&self.node, entry_offset as usize, &mut buffer)
-                .map_err(|e| {
-                    log::error!("Read directory failed at offset {}: {:?}", entry_offset, e);
-                    e.to_status()
-                })?;
-
-            for i in 0..filled {
-                let entry = &buffer[i];
-                if entry.name == ".." {
-                    entry_offset += 1;
-                    continue;
-                }
-                let dirent_type = match entry.file_type {
-                    FileType::RegFile => fio::DirentType::File,
-                    FileType::Dir => fio::DirentType::Directory,
-                    FileType::Symlink => fio::DirentType::Symlink,
-                    _ => fio::DirentType::Unknown,
-                };
-
-                let entry_info = EntryInfo::new(entry.nid, dirent_type);
-                match sink.append(&entry_info, &entry.name) {
-                    AppendResult::Ok(new_sink) => {
-                        sink = new_sink;
-                        entry_offset += 1;
-                    }
-                    AppendResult::Sealed(sealed) => {
-                        return Ok((TraversalPosition::Index(entry_offset), sealed));
-                    }
-                }
+        for (entry_offset, entry) in
+            self.volume.fs().read_directory(&self.node).enumerate().skip(start_offset)
+        {
+            let entry = entry.map_err(|e| {
+                log::error!("Read directory failed at offset {}: {:?}", entry_offset, e);
+                e.to_status()
+            })?;
+            // On-disk EROFS directories include both "." and "..", whereas fuchsia.io includes "."
+            // and excludes "..".
+            if entry.name == ".." {
+                continue;
             }
+            let dirent_type = match entry.file_type {
+                FileType::RegFile => fio::DirentType::File,
+                FileType::Dir => fio::DirentType::Directory,
+                FileType::Symlink => fio::DirentType::Symlink,
+                _ => fio::DirentType::Unknown,
+            };
 
-            if filled < buffer.len() {
-                break;
+            let entry_info = EntryInfo::new(entry.nid, dirent_type);
+            match sink.append(&entry_info, &entry.name) {
+                AppendResult::Ok(new_sink) => {
+                    sink = new_sink;
+                }
+                AppendResult::Sealed(sealed) => {
+                    return Ok((TraversalPosition::Index(entry_offset as u64), sealed));
+                }
             }
         }
 
@@ -266,30 +255,16 @@ impl Directory for ErofsDirectory {
         watcher: DirectoryWatcher,
     ) -> Result<(), zx::Status> {
         let mut entry_names = vec![];
-        let mut entry_offset = 0;
-        let mut buffer = vec![erofs::DirectoryEntry::default(); 16];
-        loop {
-            let filled =
-                self.volume.fs().read_directory(&self.node, entry_offset, &mut buffer).map_err(
-                    |e| {
-                        log::error!(
-                            "Watcher read directory failed at offset {}: {:?}",
-                            entry_offset,
-                            e
-                        );
-                        e.to_status()
-                    },
-                )?;
-            if filled == 0 {
-                break;
+        for (entry_offset, entry) in self.volume.fs().read_directory(&self.node).enumerate() {
+            let entry = entry.map_err(|e| {
+                log::error!("Watcher read directory failed at offset {}: {:?}", entry_offset, e);
+                e.to_status()
+            })?;
+            // On-disk EROFS directories include both "." and "..", whereas fuchsia.io includes "."
+            // and excludes "..".
+            if entry.name != ".." {
+                entry_names.push(entry.name);
             }
-            for i in 0..filled {
-                let name = &buffer[i].name;
-                if name != ".." {
-                    entry_names.push(name.clone());
-                }
-            }
-            entry_offset += filled;
         }
 
         let mut names = StaticVecEventProducer::existing(entry_names);

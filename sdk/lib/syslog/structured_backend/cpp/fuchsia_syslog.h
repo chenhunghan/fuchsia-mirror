@@ -7,20 +7,10 @@
 
 #include <zircon/availability.h>
 
-#if FUCHSIA_API_LEVEL_LESS_THAN(29)
-
-#include <lib/syslog/structured_backend/cpp/log_buffer.h>
-#include <lib/zx/clock.h>
-
-#include <cstdint>
-
-namespace fuchsia_syslog {
-
-using fuchsia_logging::FlushConfig;
-using fuchsia_logging::LogBuffer;
-
-}  // namespace fuchsia_syslog
-
+// Excluded at HEAD so bazel_sdk's all-headers test (which builds at HEAD) can
+// still compile every header in the SDK.
+#if FUCHSIA_API_LEVEL_AT_LEAST(NEXT) && FUCHSIA_API_LEVEL_LESS_THAN(HEAD)
+#error "<lib/syslog/structured_backend/cpp/fuchsia_syslog.h> is obsolete and must not be included."
 #endif
 
 #endif  // LIB_SYSLOG_STRUCTURED_BACKEND_CPP_FUCHSIA_SYSLOG_H_

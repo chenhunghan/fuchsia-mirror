@@ -1,0 +1,33 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# The `elf_runner_stdout_test` package stays in BUILD.gn because the test
+# uses RealmBuilder via GN-only `//src/lib/fuchsia-component-test` (which
+# packages
+# `//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component`).
+rustc_test(
+    name = "test",
+    srcs = ["src/lib.rs"],
+    # Matches `program.binary` in meta/stdout.cml.
+    crate_name = "elf_runner_stdout",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//src/lib/diagnostics/data/rust",
+        "//src/lib/diagnostics/reader/rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        # GN depends on the `//src/lib/fuchsia-component-test` group, which
+        # bundles `realm_builder_server_component` for the GN test package;
+        # Bazel depends on the Rust library target directly.
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)

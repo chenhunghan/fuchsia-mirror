@@ -20,7 +20,6 @@ kernel_cmdline("kernel.debug_uart_poll--true") {
 
 kernel_cmdline("kernel.enable-serial-syscalls--output-only") {
   args = []
-  deps = [ "//build/validate:non_production_tag" ]
 }
 
 kernel_cmdline("kernel.halt-on-panic--true") {
@@ -55,6 +54,5 @@ kernel_cmdline("kernel_active_aging_2_15_2") {
 if (target_cpu == "x64") {
   kernel_cmdline("kernel.serial--legacy") {
     args = [ "kernel.serial=legacy" ]
-    deps = [ "//build/validate:non_production_tag" ]
   }
 }

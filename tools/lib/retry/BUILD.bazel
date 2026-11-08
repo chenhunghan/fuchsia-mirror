@@ -19,6 +19,7 @@ go_library(
     target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = [
         "//src/sys/pkg/lib/repo:__pkg__",
+        "//src/testing/host-target-testing/artifacts:__pkg__",
         "//src/testing/host-target-testing/cli:__pkg__",
         "//src/testing/host-target-testing/device:__pkg__",
         "//tools:__subpackages__",

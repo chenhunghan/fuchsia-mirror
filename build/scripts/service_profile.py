@@ -194,6 +194,19 @@ class ProfilePaths:
         return [self.active_json]
 
 
+@dataclasses.dataclass(frozen=True)
+class WorkspaceSymlink:
+    """Represents a symlink to be populated into a synthetic Bazel workspace.
+
+    Attributes:
+        workspace_relpath: Destination symlink path relative to the Bazel workspace root.
+        target_path: Source file or directory path in the Fuchsia checkout.
+    """
+
+    workspace_relpath: Path
+    target_path: Path
+
+
 class ServiceProfileManager(Generic[T]):
     """Protocol-based, schema-agnostic manager for service configuration profiles.
 
@@ -283,6 +296,29 @@ class ServiceProfileManager(Generic[T]):
     ) -> str:
         """Returns the active profile name."""
         return self.resolve_paths(fuchsia_dir, environ).active_name
+
+    def workspace_symlinks(self, fuchsia_dir: Path) -> list[WorkspaceSymlink]:
+        """Returns symlinks required in synthetic Bazel workspaces.
+
+        If an active on-disk configuration file exists, returns a WorkspaceSymlink
+        mapping its relative path within the workspace to the source file in fuchsia_dir.
+        Returns an empty list if no active on-disk configuration exists.
+
+        Args:
+            fuchsia_dir: Root directory of the Fuchsia source checkout.
+
+        Returns:
+            List of WorkspaceSymlink instances describing workspace symlinks.
+        """
+        config_path = fuchsia_dir / self.spec.config_relpath
+        if config_path.is_file():
+            return [
+                WorkspaceSymlink(
+                    workspace_relpath=self.spec.config_relpath,
+                    target_path=config_path,
+                )
+            ]
+        return []
 
     def select(self, fuchsia_dir: Path, name: str) -> None:
         """Selects a profile by copying its template and recording the name into the single JSON config.

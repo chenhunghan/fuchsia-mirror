@@ -1,0 +1,98 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//src/developer/ffx/build:ffx_tool.bzl", "ffx_tool")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "ffx_triage_lib",
+    srcs = [
+        "src/args.rs",
+        "src/config.rs",
+        "src/lib.rs",
+        "src/snapshot.rs",
+    ],
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_rust_fdomain",
+        "//src/developer/ffx/config:lib",
+        "//src/developer/ffx/lib/errors:lib",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/developer/ffx/lib/target/holders:lib",
+        "//src/developer/ffx/lib/writer:lib",
+        "//src/developer/ffx/plugins/target/snapshot:ffx_snapshot",
+        "//src/developer/ffx/plugins/target/snapshot:ffx_snapshot_args",
+        "//src/diagnostics/lib/triage",
+        "//src/diagnostics/triage:triage_app_lib",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:tempfile",
+        "//third_party/rust_crates/vendor:zip",
+    ],
+)
+
+# LINT.IfChange
+ffx_tool(
+    name = "ffx_triage",
+    srcs = ["src/main.rs"],
+    binary_name = "ffx-triage",
+    edition = "2024",
+    deps = [
+        ":ffx_triage_lib",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/lib/fuchsia-async",
+    ],
+)
+# LINT.ThenChange(BUILD.gn)
+
+host_rustc_test(
+    name = "ffx_triage_lib_test",
+    compile_data = [
+        # Expected Structured output golden files.
+        "test_data/structured/annotation_test.golden.json",
+        "test_data/structured/annotation_test2.golden.json",
+        "test_data/structured/bundle_test.golden.json",
+        "test_data/structured/error_rate_with_moniker_payload.golden.json",
+        "test_data/structured/exclude_actions_with_excluded_tags.golden.json",
+        "test_data/structured/fail_on_missing_namespace.golden.json",
+        "test_data/structured/include_tagged_actions.golden.json",
+        "test_data/structured/included_tags_override_excludes.golden.json",
+        "test_data/structured/log_tests.golden.json",
+        "test_data/structured/map_fold_test.golden.json",
+        "test_data/structured/only_runs_included_actions.golden.json",
+        "test_data/structured/successfully_read_correct_files.golden.json",
+        "test_data/structured/use_namespace_in_actions.golden.json",
+        "test_data/structured/use_namespace_in_metrics.golden.json",
+        # Test config files.
+        "//src/diagnostics/triage:test_data/config/annotation_tests.triage",
+        "//src/diagnostics/triage:test_data/config/error_rate.triage",
+        "//src/diagnostics/triage:test_data/config/log_tests.triage",
+        "//src/diagnostics/triage:test_data/config/map_fold.triage",
+        "//src/diagnostics/triage:test_data/config/other.triage",
+        "//src/diagnostics/triage:test_data/config/sample.triage",
+        "//src/diagnostics/triage:test_data/config/sample_bundle.json",
+        "//src/diagnostics/triage:test_data/config/sample_bundle_file_type_error.json",
+        "//src/diagnostics/triage:test_data/config/sample_bundle_files_error.json",
+        "//src/diagnostics/triage:test_data/config/sample_tags.triage",
+        # Test snapshot files.
+        "//src/diagnostics/triage:test_data/snapshot/annotations.json",
+        "//src/diagnostics/triage:test_data/snapshot/inspect.json",
+    ],
+    crate = ":ffx_triage_lib",
+    visibility = [
+        "//src/developer/ffx:__pkg__",
+        "//src/diagnostics:__pkg__",
+    ],
+    deps = [
+        "//src/lib/fdomain/local",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:pretty_assertions",
+        "//third_party/rust_crates/vendor:serde_json",
+    ],
+)

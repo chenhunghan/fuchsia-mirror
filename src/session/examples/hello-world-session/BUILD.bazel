@@ -1,0 +1,71 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/components:fx_component.bzl", "fx_component", "fx_component_manifest")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [],  # Include all tests in the package.
+    visibility = ["//src/session:__pkg__"],
+)
+
+# [START session_binary]
+# Preserve GN output_name "hello-world-session" (hyphens are invalid in crate_name).
+# @bazel2gn:raw_attribute:output_name = "hello-world-session"
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+# [END session_binary]
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "hello-world-session",
+)
+
+rustc_test(
+    name = "bin_test",
+    crate = ":bin",
+    # Used by bazel2gn to preserve GN output_name.
+    crate_name = "hello_world_session_bin_test",
+    tags = ["manual"],
+)
+
+fx_component_manifest(
+    name = "component_manifest",
+    component_name = "hello-world-session",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/hello-world-session.cml",
+)
+
+# [START component_package]
+fx_component(
+    name = "component",
+    compiled_manifest = ":component_manifest",
+    deps = [":bin_packaged"],
+)
+# [END component_package]
+
+# Run with `fx test hello-world-session-unittests`.
+fx_unittest_package(
+    name = "hello-world-session-unittests",
+    unit_tests = [":bin_test"],
+)

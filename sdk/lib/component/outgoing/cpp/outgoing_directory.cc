@@ -158,6 +158,9 @@ zx::result<> OutgoingDirectory::RemoveUnmanagedProtocolAt(std::string_view path,
     return zx::error(status);
   }
 
+  // The entry is gone, so no new connections will reach the handler.
+  inner().registered_handlers_[directory_entry].erase(protocol_entry);
+
   return zx::ok();
 }
 

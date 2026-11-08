@@ -51,14 +51,8 @@ static_library("fvm") {
   ]
 
   if (is_fuchsia) {
-    sources += [
-      "fvm_check.cc",
-      "vmo_metadata_buffer.cc",
-    ]
-    public += [
-      "fvm_check.h",
-      "vmo_metadata_buffer.h",
-    ]
+    sources += [ "fvm_check.cc" ]
+    public += [ "fvm_check.h" ]
 
     deps += [
       "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",

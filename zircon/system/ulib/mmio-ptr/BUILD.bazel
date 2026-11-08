@@ -1,0 +1,44 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/idk:idk_cc_source_library.bzl", "idk_cc_source_library_zx")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+idk_cc_source_library_zx(
+    name = "mmio-ptr",
+    hdrs = [
+        "include/lib/mmio-ptr/fake.h",
+        "include/lib/mmio-ptr/mmio-ptr.h",
+    ],
+    api_area = "Kernel",
+    api_file_path = "//sdk/lib/mmio-ptr:mmio-ptr.api",
+    category = "partner",
+    idk_name = "mmio-ptr",
+    stable = True,
+    visibility = ["//:__subpackages__"],
+)
+
+fx_cc_library(
+    name = "wrappers",
+    srcs = ["mmio-ptr.cc"],
+    implementation_deps = [":mmio-ptr"],
+    visibility = ["//visibility:private"],
+    alwayslink = True,
+)
+
+rustc_library(
+    name = "mmio-ptr-rs",
+    srcs = ["mmio-ptr.rs"],
+    crate_name = "mmio_ptr",
+    crate_root = "mmio-ptr.rs",
+    edition = "2024",
+    link_deps = [
+        ":mmio-ptr",
+        ":wrappers",
+    ],
+    visibility = ["//:__subpackages__"],
+)

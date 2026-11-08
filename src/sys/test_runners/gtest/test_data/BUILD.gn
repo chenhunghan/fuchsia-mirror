@@ -3,77 +3,12 @@
 # found in the LICENSE file.
 
 import("//build/components.gni")
-import("//build/test.gni")
-import("//build/testing/cc_test_executable.gni")
-
-# We don't have gunit in-tree, so this main function will replace all gunit
-# flags with gtest flags and run the tests using gtest framework.
-source_set("gunit_main") {
-  testonly = true
-
-  sources = [ "gunit_main.cc" ]
-
-  deps = [
-    "//src/lib/fxl",
-    "//src/lib/fxl/test:test_settings",
-  ]
-
-  public_deps = [ "//third_party/googletest:gtest" ]
-}
-
-cc_test_executable("echo_gtest_client") {
-  testonly = true
-  sources = [ "echo_test.cc" ]
-
-  deps = [
-    "//examples/components/routing/fidl:echo_hlcpp",
-    "//sdk/lib/async-default",
-    "//sdk/lib/async-loop:async-loop-cpp",
-    "//sdk/lib/async-loop:async-loop-default",
-    "//sdk/lib/sys/cpp",
-    "//src/lib/fxl/test:gtest_main",
-  ]
-}
 
 fuchsia_component("echo_gtest_client_component") {
   testonly = true
   manifest = "meta/echo_gtest_client.cml"
   component_name = "echo_gtest_client"
   deps = [ ":echo_gtest_client" ]
-}
-
-# Generates two executables. One for gtest and other for gunit.
-template("executable_gtest_gunit") {
-  gtest_target = "gtest_${target_name}"
-  gunit_target = "gunit_${target_name}"
-
-  cc_test_executable(gtest_target) {
-    forward_variables_from(invoker, "*")
-
-    if (!defined(deps)) {
-      deps = []
-    }
-    deps += [ "//src/lib/fxl/test:gtest_main" ]
-  }
-
-  executable(gunit_target) {
-    forward_variables_from(invoker, "*")
-
-    if (!defined(deps)) {
-      deps = []
-    }
-    deps += [ ":gunit_main" ]
-  }
-}
-
-cc_test_executable("death_gtest") {
-  testonly = true
-  sources = [ "death_test.cc" ]
-
-  deps = [
-    "//sdk/lib/syslog/cpp",
-    "//src/lib/fxl/test:gtest_main",
-  ]
 }
 
 fuchsia_component("death_gtest_component") {
@@ -83,13 +18,6 @@ fuchsia_component("death_gtest_component") {
   deps = [ ":death_gtest" ]
 }
 
-executable_gtest_gunit("runner_no_tests") {
-  testonly = true
-  sources = [ "empty_test_file.cc" ]
-
-  deps = [ "//src/lib/testing/loop_fixture" ]
-}
-
 fuchsia_component("empty_test_component") {
   testonly = true
   manifest = "meta/empty_test.cml"
@@ -97,23 +25,9 @@ fuchsia_component("empty_test_component") {
   deps = [ ":gtest_runner_no_tests" ]
 }
 
-cc_test_executable("gtest_setup_failure") {
-  testonly = true
-  sources = [ "gtest_setup_failure.cc" ]
-
-  deps = [ "//src/lib/fxl/test:gtest_main" ]
-}
-
 fuchsia_unittest_component("gtest_setup_failure_component") {
   component_name = "gtest_setup_failure"
   deps = [ ":gtest_setup_failure" ]
-}
-
-executable_gtest_gunit("runner_sample_tests") {
-  testonly = true
-  sources = [ "sample_tests.cc" ]
-
-  deps = [ "//src/lib/testing/loop_fixture" ]
 }
 
 fuchsia_component("gtest_runner_sample_tests_component") {
@@ -123,32 +37,11 @@ fuchsia_component("gtest_runner_sample_tests_component") {
   deps = [ ":gtest_runner_sample_tests" ]
 }
 
-cc_test_executable("gtest_runner_test_with_custom_args") {
-  testonly = true
-  sources = [ "gtest_with_custom_args.cc" ]
-
-  deps = [ "//src/lib/testing/loop_fixture" ]
-}
-
-cc_test_executable("gunit_runner_test_with_custom_args") {
-  testonly = true
-  sources = [ "gunit_with_custom_args.cc" ]
-
-  deps = [ "//src/lib/testing/loop_fixture" ]
-}
-
 fuchsia_component("gtest_runner_test_with_custom_args_component") {
   testonly = true
   manifest = "meta/test_with_custom_args.cml"
   component_name = "test_with_custom_args"
   deps = [ ":gtest_runner_test_with_custom_args" ]
-}
-
-executable_gtest_gunit("runner_test_with_environ") {
-  testonly = true
-  sources = [ "test_with_environ.cc" ]
-
-  deps = [ "//src/lib/testing/loop_fixture" ]
 }
 
 fuchsia_component("gtest_runner_test_with_environ_component") {
@@ -158,30 +51,11 @@ fuchsia_component("gtest_runner_test_with_environ_component") {
   deps = [ ":gtest_runner_test_with_environ" ]
 }
 
-executable_gtest_gunit("huge_runner_example") {
-  testonly = true
-  sources = [ "huge_gtest.cc" ]
-}
-
 fuchsia_component("huge_gtest_component") {
   testonly = true
   manifest = "meta/huge_gtest.cml"
   component_name = "huge_gtest"
   deps = [ ":gtest_huge_runner_example" ]
-}
-
-cc_test_executable("concurrency_test_driver_gtest") {
-  testonly = true
-  sources = [ "concurrency_test_driver.cc" ]
-
-  deps = [
-    "//examples/components/routing/fidl:echo_hlcpp",
-    "//sdk/lib/async-default",
-    "//sdk/lib/async-loop:async-loop-cpp",
-    "//sdk/lib/async-loop:async-loop-default",
-    "//sdk/lib/sys/cpp",
-    "//src/lib/fxl/test:gtest_main",
-  ]
 }
 
 fuchsia_component("concurrency_test_driver_component") {
@@ -191,19 +65,9 @@ fuchsia_component("concurrency_test_driver_component") {
   deps = [ ":concurrency_test_driver_gtest" ]
 }
 
-test("zxtest_success") {
-  sources = [ "zxtest_success.cc" ]
-  deps = [ "//zircon/system/ulib/zxtest" ]
-}
-
 fuchsia_unittest_component("zxtest_success_component") {
   component_name = "zxtest_success"
   deps = [ ":zxtest_success" ]
-}
-
-test("zxtest_failure") {
-  sources = [ "zxtest_failure.cc" ]
-  deps = [ "//zircon/system/ulib/zxtest" ]
 }
 
 fuchsia_unittest_component("zxtest_failure_component") {
@@ -211,19 +75,9 @@ fuchsia_unittest_component("zxtest_failure_component") {
   deps = [ ":zxtest_failure" ]
 }
 
-test("zxtest_setup_failure") {
-  sources = [ "zxtest_setup_failure.cc" ]
-  deps = [ "//zircon/system/ulib/zxtest" ]
-}
-
 fuchsia_unittest_component("zxtest_setup_failure_component") {
   component_name = "zxtest_setup_failure"
   deps = [ ":zxtest_setup_failure" ]
-}
-
-test("zxtest_env_setup_failure") {
-  sources = [ "zxtest_env_setup_failure.cc" ]
-  deps = [ "//zircon/system/ulib/zxtest" ]
 }
 
 fuchsia_unittest_component("zxtest_env_setup_failure_component") {
@@ -287,4 +141,200 @@ fuchsia_package("gtest-runner-example-tests") {
     "//src/sys/component_manager/testing/echo_server",
     "//src/sys/test_runners:echo_server_for_concurrency_test",
   ]
+}
+
+## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
+#
+#  ________  _________  ________  ________
+# |\   ____\|\___   ___\\   __  \|\   __  \
+# \ \  \___|\|___ \  \_\ \  \|\  \ \  \|\  \
+#  \ \_____  \   \ \  \ \ \  \\\  \ \   ____\
+#   \|____|\  \   \ \  \ \ \  \\\  \ \  \___|
+#     ____\_\  \   \ \__\ \ \_______\ \__\
+#    |\_________\   \|__|  \|_______|\|__|
+#    \|_________|
+#
+#
+# AUTO-GENERATED - DO NOT EDIT
+#
+# The targets below are auto-generated based on the targets defined in the
+# BUILD.bazel file from the same directory. If you made changes to targets in
+# Bazel, instead of editing this file manually, run:
+#
+#   > fx bazel2gn
+#
+# Please do NOT edit this file directly. Instead, edit the BUILD.bazel file and
+# rerun bazel2gn.
+
+import("//build/tools/bazel2gn/bazel_migration.gni")
+
+source_set("gunit_main") {
+  testonly = true
+  sources = [ "gunit_main.cc" ]
+  deps = [
+    "//src/lib/fxl",
+    "//src/lib/fxl/test:test_settings",
+  ]
+  visibility = [
+    ":*",
+    "//src/sys/test_runners/gunit/tests:*",
+  ]
+  public_deps = [ "//third_party/googletest:gtest" ]
+}
+
+executable("echo_gtest_client") {
+  testonly = true
+  sources = [ "echo_test.cc" ]
+  configs += [ "//build/config/lto:no-fat-lto-objects-linking" ]
+  deps = [
+    "//examples/components/routing/fidl:echo_hlcpp",
+    "//sdk/lib/async-default",
+    "//sdk/lib/async-loop:async-loop-cpp",
+    "//sdk/lib/async-loop:async-loop-default",
+    "//sdk/lib/sys/cpp",
+    "//src/lib/fxl/test:gtest_main",
+  ]
+}
+
+executable("death_gtest") {
+  testonly = true
+  sources = [ "death_test.cc" ]
+  configs += [ "//build/config/lto:no-fat-lto-objects-linking" ]
+  deps = [
+    "//sdk/lib/syslog/cpp",
+    "//src/lib/fxl/test:gtest_main",
+  ]
+}
+
+executable("gtest_runner_no_tests") {
+  testonly = true
+  sources = [ "empty_test_file.cc" ]
+  configs += [ "//build/config/lto:no-fat-lto-objects-linking" ]
+  deps = [
+    "//src/lib/fxl/test:gtest_main",
+    "//src/lib/testing/loop_fixture",
+  ]
+}
+
+executable("gunit_runner_no_tests") {
+  testonly = true
+  sources = [ "empty_test_file.cc" ]
+  deps = [
+    ":gunit_main",
+    "//src/lib/testing/loop_fixture",
+  ]
+}
+
+executable("gtest_setup_failure") {
+  testonly = true
+  sources = [ "gtest_setup_failure.cc" ]
+  configs += [ "//build/config/lto:no-fat-lto-objects-linking" ]
+  deps = [ "//src/lib/fxl/test:gtest_main" ]
+}
+
+executable("gtest_runner_sample_tests") {
+  testonly = true
+  sources = [ "sample_tests.cc" ]
+  configs += [ "//build/config/lto:no-fat-lto-objects-linking" ]
+  deps = [
+    "//src/lib/fxl/test:gtest_main",
+    "//src/lib/testing/loop_fixture",
+  ]
+}
+
+executable("gunit_runner_sample_tests") {
+  testonly = true
+  sources = [ "sample_tests.cc" ]
+  deps = [
+    ":gunit_main",
+    "//src/lib/testing/loop_fixture",
+  ]
+}
+
+executable("gtest_runner_test_with_custom_args") {
+  testonly = true
+  sources = [ "gtest_with_custom_args.cc" ]
+  configs += [ "//build/config/lto:no-fat-lto-objects-linking" ]
+  deps = [ "//src/lib/testing/loop_fixture" ]
+}
+
+executable("gunit_runner_test_with_custom_args") {
+  testonly = true
+  sources = [ "gunit_with_custom_args.cc" ]
+  configs += [ "//build/config/lto:no-fat-lto-objects-linking" ]
+  deps = [ "//src/lib/testing/loop_fixture" ]
+}
+
+executable("gtest_runner_test_with_environ") {
+  testonly = true
+  sources = [ "test_with_environ.cc" ]
+  configs += [ "//build/config/lto:no-fat-lto-objects-linking" ]
+  deps = [
+    "//src/lib/fxl/test:gtest_main",
+    "//src/lib/testing/loop_fixture",
+  ]
+}
+
+executable("gunit_runner_test_with_environ") {
+  testonly = true
+  sources = [ "test_with_environ.cc" ]
+  deps = [
+    ":gunit_main",
+    "//src/lib/testing/loop_fixture",
+  ]
+}
+
+executable("gtest_huge_runner_example") {
+  testonly = true
+  sources = [ "huge_gtest.cc" ]
+  configs += [ "//build/config/lto:no-fat-lto-objects-linking" ]
+  deps = [ "//src/lib/fxl/test:gtest_main" ]
+}
+
+executable("gunit_huge_runner_example") {
+  testonly = true
+  sources = [ "huge_gtest.cc" ]
+  deps = [ ":gunit_main" ]
+}
+
+executable("concurrency_test_driver_gtest") {
+  testonly = true
+  sources = [ "concurrency_test_driver.cc" ]
+  configs += [ "//build/config/lto:no-fat-lto-objects-linking" ]
+  deps = [
+    "//examples/components/routing/fidl:echo_hlcpp",
+    "//sdk/lib/async-default",
+    "//sdk/lib/async-loop:async-loop-cpp",
+    "//sdk/lib/async-loop:async-loop-default",
+    "//sdk/lib/sys/cpp",
+    "//src/lib/fxl/test:gtest_main",
+  ]
+}
+
+cc_test_executable("zxtest_success") {
+  sources = [ "zxtest_success.cc" ]
+  deps = [ "//zircon/system/ulib/zxtest" ]
+  testonly = true
+  emit_tool_path = false
+}
+
+cc_test_executable("zxtest_failure") {
+  sources = [ "zxtest_failure.cc" ]
+  deps = [ "//zircon/system/ulib/zxtest" ]
+  testonly = true
+  emit_tool_path = false
+}
+
+cc_test_executable("zxtest_setup_failure") {
+  sources = [ "zxtest_setup_failure.cc" ]
+  deps = [ "//zircon/system/ulib/zxtest" ]
+  testonly = true
+  emit_tool_path = false
+}
+
+cc_test_executable("zxtest_env_setup_failure") {
+  sources = [ "zxtest_env_setup_failure.cc" ]
+  deps = [ "//zircon/system/ulib/zxtest" ]
+  testonly = true
+  emit_tool_path = false
 }

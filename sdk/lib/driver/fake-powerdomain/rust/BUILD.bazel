@@ -1,0 +1,29 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "rust",
+    srcs = [
+        "src/lib.rs",
+    ],
+    crate_name = "fake_powerdomain",
+    edition = "2024",
+    visibility = [
+        "//src/devices/spi/drivers/dw-spi:__pkg__",
+        "//vendor:__subpackages__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust",
+        "//sdk/fidl/fuchsia.hardware.powerdomain:fuchsia.hardware.powerdomain_rust_next",
+        "//sdk/lib/driver/component/rust",
+        "//src/lib/fidl/rust_next/fidl_next",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-sync",
+    ],
+)

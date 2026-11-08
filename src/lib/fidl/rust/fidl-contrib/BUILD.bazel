@@ -2,14 +2,23 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_component.bzl",
+    "fx_unittest_component",
+)
 
 package(default_applicable_licenses = ["//:license"])
 
-# The unit tests (`:fidl-contrib_test` and `:fidl_contrib_rust_lib_tests`) stay
-# in BUILD.gn because they use RealmBuilder via GN-only
-# `//src/lib/fuchsia-component-test` (which packages
-# `//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component`).
+test_suite(
+    name = "tests",
+    tests = [":fidl_contrib_rust_lib_tests"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
 rustc_library(
     name = "fidl-contrib",
     srcs = [
@@ -31,4 +40,45 @@ rustc_library(
         "//third_party/rust_crates/vendor:futures",
         "//third_party/rust_crates/vendor:log",
     ],
+)
+
+rustc_test(
+    name = "fidl-contrib_test",
+    aspect_hints = ["//src/lib/fuchsia-component-test:includes"],
+    crate = ":fidl-contrib",
+    # Only used by bazel2gn, to keep the GN `output_name` of the test binary.
+    crate_name = "fidl_contrib_lib_test",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/testing/fidl/protocols_tests:test.protocol.connector_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        # GN's //src/lib/fuchsia-component-test group also pulls in the
+        # RealmBuilder shard and server, which Bazel adds via `aspect_hints`
+        # and the package's `components`.
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//third_party/rust_crates/vendor:anyhow",
+    ],
+)
+
+fx_unittest_component(
+    name = "fidl_contrib_rust_lib_tests_component",
+    binary = ":fidl-contrib_test",
+    component_name = "fidl_contrib_rust_lib_tests",
+)
+
+fx_package(
+    name = "fidl_contrib_rust_lib_tests_package",
+    package_name = "fidl_contrib_rust_lib_tests",
+    testonly = True,
+    components = [
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":fidl_contrib_rust_lib_tests_component"],
+)
+
+fx_test(
+    name = "fidl_contrib_rust_lib_tests",
+    package = ":fidl_contrib_rust_lib_tests_package",
 )

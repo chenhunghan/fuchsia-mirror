@@ -7,7 +7,8 @@
 #ifndef ZIRCON_KERNEL_ARCH_X86_INCLUDE_ARCH_HYPERVISOR_H_
 #define ZIRCON_KERNEL_ARCH_X86_INCLUDE_ARCH_HYPERVISOR_H_
 
-#include <lib/id_allocator.h>
+#include <lib/object-constants.h>
+#include <lib/zx/result.h>
 #include <zircon/compiler.h>
 #include <zircon/syscalls/hypervisor.h>
 #include <zircon/syscalls/object.h>
@@ -22,12 +23,22 @@
 #include <hypervisor/page.h>
 #include <hypervisor/trap_map.h>
 #include <kernel/event.h>
+#include <kernel/ffi.h>
+#include <kernel/mutex.h>
 #include <kernel/spinlock.h>
 #include <kernel/timer.h>
 #include <ktl/unique_ptr.h>
 
 class AutoVmcs;
 struct VmxInfo;
+class VpidAllocator;
+
+extern "C" {
+void rust_vpid_allocator_init(VpidAllocator* allocator);
+void rust_vpid_allocator_destroy(VpidAllocator* allocator);
+zx_status_t rust_vpid_allocator_try_alloc(VpidAllocator* allocator, uint16_t* out);
+zx_status_t rust_vpid_allocator_free(VpidAllocator* allocator, uint16_t vpid);
+}  // extern "C"
 
 class VmxPage : public hypervisor::Page {
  public:
@@ -36,6 +47,47 @@ class VmxPage : public hypervisor::Page {
  private:
   using hypervisor::Page::Alloc;
 };
+
+// Allocates the VPIDs of a guest's VCPUs.
+//
+// This is a facade over the Rust `VpidAllocator` in arch/x86/hypervisor/guest.rs, which is stored
+// in place in `storage_`.
+class VpidAllocator {
+ public:
+  VpidAllocator() { rust_vpid_allocator_init(this); }
+  ~VpidAllocator() { rust_vpid_allocator_destroy(this); }
+
+  // The Rust `VpidAllocator` is pinned in place in `storage_`, so it must never be copied or moved.
+  VpidAllocator(const VpidAllocator&) = delete;
+  VpidAllocator(VpidAllocator&&) = delete;
+  VpidAllocator& operator=(const VpidAllocator&) = delete;
+  VpidAllocator& operator=(VpidAllocator&&) = delete;
+
+  zx::result<uint16_t> TryAlloc() {
+    uint16_t vpid = 0;
+    if (zx_status_t status = rust_vpid_allocator_try_alloc(this, &vpid); status != ZX_OK) {
+      return zx::error(status);
+    }
+    return zx::ok(vpid);
+  }
+  zx::result<> Free(uint16_t vpid) { return zx::make_result(rust_vpid_allocator_free(this, vpid)); }
+
+ private:
+  // The number of `usize` words in the Rust bitmap, which holds a bit for each VPID in
+  // [0, Guest::kMaxGuestVcpus]. The size and alignment of `VpidAllocator` are asserted against the
+  // Rust type in arch/x86/hypervisor/guest.rs.
+  static constexpr size_t kBitmapWords = 2;
+
+  // The Rust `VpidAllocator` holds a lockdep-tracked `Mutex` (prefixed by a lock class ID when
+  // lockdep is enabled), a `usize` search hint, and a bitmap of a `usize` size and `kBitmapWords`
+  // `usize` words.
+  static constexpr size_t kStorageSize =
+      kLockClassIdSize + sizeof(Mutex) + sizeof(size_t) + ((1 + kBitmapWords) * sizeof(size_t));
+
+  [[maybe_unused]] OpaqueStorage<kStorageSize, 8> storage_{};
+};
+
+static_assert(alignof(VpidAllocator) == 8);
 
 // Represents a guest within the hypervisor.
 class Guest {
@@ -68,7 +120,7 @@ class Guest {
 
   hypervisor::GuestPhysicalAspace gpa_;
   hypervisor::TrapMap traps_;
-  id_allocator::IdAllocator<uint16_t, kMaxGuestVcpus + 1, 1> vpid_allocator_;
+  VpidAllocator vpid_allocator_;
   VmxPage msr_bitmaps_page_;
 };
 
@@ -97,6 +149,9 @@ struct LocalApicState {
 //
 // System time is time since boot time, and boot time is some fixed point in the
 // past.
+//
+// `system_time` points into the mapping owned by `guest_ptr`; both must only be
+// modified through the pv_clock_* functions in arch/x86/hypervisor/pv_priv.h.
 struct pv_clock_system_time;
 struct PvClockState {
   bool is_stable = false;
@@ -104,6 +159,13 @@ struct PvClockState {
   pv_clock_system_time* system_time = nullptr;
   hypervisor::GuestPtr guest_ptr;
 };
+// The layout is shared with `PvClockState` in arch/x86/hypervisor/pv.rs.
+static_assert(offsetof(PvClockState, is_stable) == 0);
+static_assert(offsetof(PvClockState, version) == 4);
+static_assert(offsetof(PvClockState, system_time) == 8);
+static_assert(offsetof(PvClockState, guest_ptr) == 16);
+static_assert(sizeof(PvClockState) == 56);
+static_assert(alignof(PvClockState) == 8);
 
 // Represents a virtual CPU within a guest.
 class Vcpu {

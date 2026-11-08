@@ -45,6 +45,14 @@ inline constexpr auto Enum<PageTableEvictionPolicy> = [](auto&& Switch) {
 };
 
 template <>
+inline constexpr auto Enum<FairPlacementAffinity> = [](auto&& Switch) {
+  return Switch  //
+      .Case("cluster", FairPlacementAffinity::kCluster)
+      .Case("idle", FairPlacementAffinity::kIdle)
+      .Case("headroom", FairPlacementAffinity::kHeadroom);
+};
+
+template <>
 inline constexpr auto Enum<EntropyTestSource> = [](auto&& Switch) {
   return Switch  //
       .Case("hw_rng", EntropyTestSource::kHwRng)

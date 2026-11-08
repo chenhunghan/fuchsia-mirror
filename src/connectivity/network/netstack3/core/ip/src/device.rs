@@ -36,8 +36,9 @@ use netstack3_base::{
 };
 use netstack3_filter::ProofOfEgressCheck;
 use packet::BufferMut;
+use packet_formats::icmp::IcmpPacket;
 use packet_formats::icmp::mld::MldPacket;
-use packet_formats::icmp::ndp::NonZeroNdpLifetime;
+use packet_formats::icmp::ndp::{NonZeroNdpLifetime, RouterAdvertisement};
 use packet_formats::utils::NonZeroDuration;
 use zerocopy::SplitByteSlice;
 
@@ -1080,6 +1081,16 @@ pub trait Ipv6DeviceHandler<BC>: IpDeviceHandler<Ipv6, BC> {
         packet: MldPacket<B>,
         header_info: &H,
     );
+
+    /// Handles receipt of a valid Router Advertisement with a non-zero router
+    /// lifetime, desisting from sending further Router Solicitations once at
+    /// least one solicitation has been sent.
+    fn handle_router_advertisement<B: SplitByteSlice>(
+        &mut self,
+        bindings_ctx: &mut BC,
+        device_id: &Self::DeviceId,
+        packet: &IcmpPacket<Ipv6, B, RouterAdvertisement>,
+    );
 }
 
 impl<
@@ -1170,6 +1181,17 @@ impl<
                 packet,
                 header_info,
             )
+        })
+    }
+
+    fn handle_router_advertisement<B: SplitByteSlice>(
+        &mut self,
+        bindings_ctx: &mut BC,
+        device_id: &Self::DeviceId,
+        packet: &IcmpPacket<Ipv6, B, RouterAdvertisement>,
+    ) {
+        self.with_ipv6_device_configuration(device_id, |_config, mut core_ctx| {
+            RsHandler::handle_router_advertisement(&mut core_ctx, bindings_ctx, device_id, packet)
         })
     }
 }

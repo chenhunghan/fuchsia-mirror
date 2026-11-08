@@ -7,8 +7,11 @@
 #include <lib/media/codec_impl/codec_port.h>
 #include <lib/media/codec_impl/log.h>
 
+#include <bit>
 #include <cstring>
+#include <optional>
 #include <unordered_set>
+#include <utility>
 
 #include <safemath/safe_math.h>
 
@@ -16,6 +19,9 @@
 #include "lc3.h"
 
 namespace {
+
+static_assert(std::endian::native == std::endian::little,
+              "LC3_PCM_FORMAT_S24_3LE and host-endian PcmFormat2 require little-endian host");
 
 bool IsAcceptableSamplingFrequency(const uint32_t freq) {
   // See LC3 specification v1.0 section 2.2 and 2.4 for acceptable sampling
@@ -32,11 +38,30 @@ bool IsAcceptableBitsPerUncompAudioSample(const uint32_t bits_per_sample) {
   return supported.find(bits_per_sample) != supported.end();
 }
 
-Lc3EncoderParams CreateEncoderParams(const fuchsia::media::FormatDetails& format_details) {
-  auto& input_format = format_details.domain().audio().uncompressed().pcm();
-  auto& settings = format_details.encoder_settings().lc3();
+std::optional<std::pair<lc3_pcm_format, size_t>> ResolveLc3PcmFormat(
+    const fuchsia::media::PcmFormat2& input_format) {
+  const uint32_t bits_per_sample = input_format.bits_per_sample();
+  const uint32_t effective_bytes_per_sample = input_format.has_bytes_per_sample()
+                                                  ? input_format.bytes_per_sample()
+                                                  : (bits_per_sample + 7) / 8;
+  if (bits_per_sample == 16 && effective_bytes_per_sample == 2) {
+    return std::make_pair(LC3_PCM_FORMAT_S16, size_t{2});
+  }
+  if (bits_per_sample == 24 && effective_bytes_per_sample == 3) {
+    return std::make_pair(LC3_PCM_FORMAT_S24_3LE, size_t{3});
+  }
+  if (bits_per_sample == 24 && effective_bytes_per_sample == 4) {
+    return std::make_pair(LC3_PCM_FORMAT_S24, size_t{4});
+  }
+  return std::nullopt;
+}
 
-  auto num_channels = static_cast<int>(input_format.channel_map.size());
+Lc3EncoderParams CreateEncoderParams(const fuchsia::media::FormatDetails& format_details,
+                                     lc3_pcm_format fmt, size_t bytes_per_sample) {
+  const auto& input_format = format_details.pcm_format();
+  const auto& settings = format_details.encoder_settings().lc3();
+
+  auto num_channels = static_cast<int>(input_format.channel_map().size());
   std::vector<Lc3CodecContainer<lc3_encoder_t>> encoders;
 
   int frame_us =
@@ -44,9 +69,9 @@ Lc3EncoderParams CreateEncoderParams(const fuchsia::media::FormatDetails& format
 
   // According to LC3 Specification v1.0 section 2.1, when the sampling frequency of the
   // input signal is 44.1 kHz, the same frame length is used as for 48 kHz.
-  int sampling_freq = (input_format.frames_per_second == 44100)
+  int sampling_freq = (input_format.frames_per_second() == 44100)
                           ? 48000
-                          : static_cast<int>(input_format.frames_per_second);
+                          : static_cast<int>(input_format.frames_per_second());
   encoders.reserve(num_channels);
   auto encoder_size = lc3_encoder_size(frame_us, sampling_freq);
 
@@ -67,7 +92,8 @@ Lc3EncoderParams CreateEncoderParams(const fuchsia::media::FormatDetails& format
       .dt_us = frame_us,
       .sr_hz = sampling_freq,
       .nbytes = static_cast<int>(settings.nbytes()),
-      .fmt = (input_format.bits_per_sample == 16) ? LC3_PCM_FORMAT_S16 : LC3_PCM_FORMAT_S24,
+      .bytes_per_sample = bytes_per_sample,
+      .fmt = fmt,
   };
 }
 
@@ -78,20 +104,17 @@ CodecAdapterLc3Encoder::CodecAdapterLc3Encoder(std::mutex& lock,
     : CodecAdapterSWImpl(lock, codec_adapter_events) {}
 
 std::pair<fuchsia::media::FormatDetails, size_t> CodecAdapterLc3Encoder::OutputFormatDetails() {
-  std::lock_guard<std::mutex> lock(lock_);
-  ZX_DEBUG_ASSERT(codec_params_);
-  fuchsia::media::AudioCompressedFormatLc3 lc3;
-  fuchsia::media::AudioCompressedFormat compressed_format;
-  compressed_format.set_lc3(std::move(lc3));
-
-  fuchsia::media::AudioFormat audio_format;
-  audio_format.set_compressed(std::move(compressed_format));
+  size_t min_output_buffer_size = 0;
+  {
+    std::lock_guard<std::mutex> lock(lock_);
+    ZX_DEBUG_ASSERT(codec_params_);
+    min_output_buffer_size = MinOutputBufferSize();
+  }
 
   fuchsia::media::FormatDetails format_details;
   format_details.set_mime_type(kLc3MimeType);
-  format_details.mutable_domain()->set_audio(std::move(audio_format));
 
-  return {std::move(format_details), MinOutputBufferSize()};
+  return {std::move(format_details), min_output_buffer_size};
 }
 
 CodecAdapterLc3Encoder::InputLoopStatus CodecAdapterLc3Encoder::ProcessFormatDetails(
@@ -100,9 +123,7 @@ CodecAdapterLc3Encoder::InputLoopStatus CodecAdapterLc3Encoder::ProcessFormatDet
     events_->onCoreCodecFailCodec("LC3 Encoder: Midstream input format change is not supported.");
     return kShouldTerminate;
   }
-  if (!format_details.has_domain() || !format_details.domain().is_audio() ||
-      !format_details.domain().audio().is_uncompressed() ||
-      !format_details.domain().audio().uncompressed().is_pcm()) {
+  if (!format_details.has_pcm_format()) {
     events_->onCoreCodecFailCodec(
         "LC3 Encoder received input that was not uncompressed pcm audio.");
     return kShouldTerminate;
@@ -111,22 +132,37 @@ CodecAdapterLc3Encoder::InputLoopStatus CodecAdapterLc3Encoder::ProcessFormatDet
     events_->onCoreCodecFailCodec("LC3 Encoder did not receive encoder settings.");
     return kShouldTerminate;
   }
-  auto& input_format = format_details.domain().audio().uncompressed().pcm();
-  auto& settings = format_details.encoder_settings().lc3();
+  const auto& input_format = format_details.pcm_format();
+  const auto& settings = format_details.encoder_settings().lc3();
 
-  if (input_format.channel_map.empty() || input_format.channel_map.size() > kMaxChannelCount) {
-    events_->onCoreCodecFailCodec("Unsupported channel count for LC3 Encoder: %zu",
-                                  input_format.channel_map.size());
+  if (!input_format.has_channel_map() || input_format.channel_map().empty() ||
+      input_format.channel_map().size() > kMaxChannelCount) {
+    events_->onCoreCodecFailCodec(
+        "Unsupported channel count for LC3 Encoder: %zu",
+        input_format.has_channel_map() ? input_format.channel_map().size() : 0);
     return kShouldTerminate;
   }
 
-  if (input_format.pcm_mode != fuchsia::media::AudioPcmMode::LINEAR ||
-      !IsAcceptableBitsPerUncompAudioSample(input_format.bits_per_sample)) {
+  if (!input_format.has_pcm_mode() ||
+      input_format.pcm_mode() != fuchsia::media::AudioPcmMode2::LINEAR ||
+      !input_format.has_bits_per_sample() ||
+      !IsAcceptableBitsPerUncompAudioSample(input_format.bits_per_sample())) {
     events_->onCoreCodecFailCodec("Unsupported bits per sample LC3 Encoder.");
     return kShouldTerminate;
   }
 
-  if (!IsAcceptableSamplingFrequency(input_format.frames_per_second)) {
+  auto resolved_pcm_format = ResolveLc3PcmFormat(input_format);
+  if (!resolved_pcm_format.has_value()) {
+    const uint32_t effective_bytes_per_sample = input_format.has_bytes_per_sample()
+                                                    ? input_format.bytes_per_sample()
+                                                    : (input_format.bits_per_sample() + 7) / 8;
+    events_->onCoreCodecFailCodec("Unsupported bytes_per_sample %u for %u-bit LC3 Encoder.",
+                                  effective_bytes_per_sample, input_format.bits_per_sample());
+    return kShouldTerminate;
+  }
+
+  if (!input_format.has_frames_per_second() ||
+      !IsAcceptableSamplingFrequency(input_format.frames_per_second())) {
     events_->onCoreCodecFailCodec("Unsupported sampling frequency for LC3 Encoder.");
     return kShouldTerminate;
   }
@@ -144,7 +180,8 @@ CodecAdapterLc3Encoder::InputLoopStatus CodecAdapterLc3Encoder::ProcessFormatDet
     return kShouldTerminate;
   }
 
-  auto encoder_params = CreateEncoderParams(format_details);
+  auto encoder_params =
+      CreateEncoderParams(format_details, resolved_pcm_format->first, resolved_pcm_format->second);
   {
     std::lock_guard<std::mutex> lock(lock_);
     codec_params_.emplace(std::move(encoder_params));
@@ -162,23 +199,30 @@ int CodecAdapterLc3Encoder::ProcessInputChunkData(const uint8_t* input_data, siz
     return -1;
   }
 
+  // Copy the entire input chunk from shared client VMO memory into codec-private
+  // `aligned_input_scratch` in a single bulk `memcpy`. We copy unconditionally both to mitigate a
+  // producer changing shared input VMO data out from under us while `liblc3` reads samples (note
+  // `load_s16` and `load_s24` dereference `*pcm` twice per sample) and to guarantee
+  // `int16_t`/`int32_t` alignment regardless of client packet `start_offset` or
+  // `valid_length_bytes`.
+  auto& scratch = codec_params_->aligned_input_scratch;
+  const size_t num_words = (input_data_size + sizeof(int32_t) - 1) / sizeof(int32_t);
+  if (scratch.size() < num_words) {
+    scratch.resize(num_words);
+  }
+  std::memcpy(scratch.data(), input_data, input_data_size);
+
   const lc3_pcm_format pcm_fmt = codec_params_->fmt;
-  const size_t required_alignment =
-      (pcm_fmt == LC3_PCM_FORMAT_S16) ? alignof(int16_t) : alignof(int32_t);
-  const uint8_t* aligned_input = input_data;
-  if (reinterpret_cast<uintptr_t>(input_data) % required_alignment != 0) {
-    // ChunkInputStream passes input_packet.data_at_offset() directly when a packet has at least
-    // InputChunkSize() unread bytes. Because client-supplied packets can have arbitrary
-    // start_offset or valid_length_bytes (which can leave subsequent chunks at unaligned byte
-    // offsets within a packet buffer), input_data is not guaranteed to be aligned to
-    // int16_t/int32_t. Copy unaligned input chunk data to an aligned scratch buffer to avoid
-    // Undefined Behavior when liblc3 dereferences sample pointers in lc3_encode().
-    const size_t num_words = (input_data_size + sizeof(int32_t) - 1) / sizeof(int32_t);
-    if (codec_params_->aligned_input_scratch.size() < num_words) {
-      codec_params_->aligned_input_scratch.resize(num_words);
+  if (pcm_fmt == LC3_PCM_FORMAT_S24) {
+    // `PcmFormat2` places 24-in-32 valid audio in the high-order (most-significant /
+    // left-justified) bits `31..8` with low-order padding bits `7..0` ignored by receivers, whereas
+    // `liblc3`'s `LC3_PCM_FORMAT_S24` expects sign-extended 24-bit values in the low-order bits
+    // `23..0` (`[-2^23, 2^23 - 1]`). Arithmetic right-shift by 8 converts in place and discards any
+    // low-order padding bits.
+    const size_t num_samples = input_data_size / sizeof(int32_t);
+    for (size_t i = 0; i < num_samples; ++i) {
+      scratch[i] >>= 8;
     }
-    std::memcpy(codec_params_->aligned_input_scratch.data(), input_data, input_data_size);
-    aligned_input = reinterpret_cast<const uint8_t*>(codec_params_->aligned_input_scratch.data());
   }
 
   int nch = codec_params_->num_channels;
@@ -190,11 +234,30 @@ int CodecAdapterLc3Encoder::ProcessInputChunkData(const uint8_t* input_data, siz
     ZX_DEBUG_ASSERT(output_buffer_size >=
                     static_cast<size_t>(bytes_produced + codec_params_->nbytes));
 
-    // In the case of 24 bits per input sample, we pad each sample to 32 bits with low 8 bits zero.
-    const void* pcm =
-        (pcm_fmt == LC3_PCM_FORMAT_S16)
-            ? static_cast<const void*>(reinterpret_cast<const int16_t*>(aligned_input) + ich)
-            : static_cast<const void*>(reinterpret_cast<const int32_t*>(aligned_input) + ich);
+    const void* pcm = nullptr;
+    switch (pcm_fmt) {
+      case LC3_PCM_FORMAT_S16:
+        // Advance by `ich` 16-bit samples (`ich * sizeof(int16_t)` = `ich * 2` bytes) via
+        // `int16_t*` pointer arithmetic to channel `ich`'s first interleaved sample (`lc3_encode`
+        // then steps by `stride = nch` 16-bit samples per frame sample).
+        pcm = reinterpret_cast<const int16_t*>(scratch.data()) + ich;
+        break;
+      case LC3_PCM_FORMAT_S24_3LE:
+        // Advance by `ich` packed 24-bit samples (`ich * 3` bytes) via `uint8_t*` byte pointer
+        // arithmetic to channel `ich`'s first interleaved sample (`lc3_encode` then steps by
+        // `stride = nch` 3-byte samples per frame sample).
+        pcm = reinterpret_cast<const uint8_t*>(scratch.data()) + static_cast<size_t>(ich) * 3;
+        break;
+      case LC3_PCM_FORMAT_S24:
+        // `scratch` is `std::vector<int32_t>`, so `scratch.data() + ich` uses `int32_t*` pointer
+        // arithmetic to advance by `ich` 24-in-32 samples (`ich * sizeof(int32_t)` = `ich * 4`
+        // bytes) to channel `ich`'s first interleaved sample (`lc3_encode` then steps by
+        // `stride = nch` `int32_t` samples per frame sample).
+        pcm = scratch.data() + ich;
+        break;
+      default:
+        ZX_PANIC("Unexpected lc3_pcm_format: %d", static_cast<int>(pcm_fmt));
+    }
     if (lc3_encode(codec_params_->encoders[ich].GetCodec(), pcm_fmt, pcm, nch,
                    codec_params_->nbytes, buffer) != 0) {
       return -1;
@@ -226,18 +289,15 @@ fuchsia::sysmem::BufferCollectionConstraints CodecAdapterLc3Encoder::BufferColle
 
 size_t CodecAdapterLc3Encoder::InputChunkSize() {
   ZX_DEBUG_ASSERT(codec_params_);
-  // CreateEncoderParams supports LC3_PCM_FORMAT_S16 and LC3_PCM_FORMAT_S24,
-  // which are 2 and 4 bytes per sample respectively.
-  size_t num_bytes_per_sample = (codec_params_->fmt == LC3_PCM_FORMAT_S16) ? 2 : 4;
 
   // LC3 Spec v1.0 section 2.2. Encoder Interfaces.
   // The total size of an input frame is specified by the session
   // configured number of channels, the frame size in samples, and the
-  // configured encoder PCM bits per audio sample.
+  // configured sample container size (`bytes_per_sample`).
   int frame_samples = lc3_frame_samples(codec_params_->dt_us, codec_params_->sr_hz);
   ZX_DEBUG_ASSERT(frame_samples > 0);
   return static_cast<size_t>(codec_params_->num_channels) * static_cast<size_t>(frame_samples) *
-         num_bytes_per_sample;
+         codec_params_->bytes_per_sample;
 }
 
 size_t CodecAdapterLc3Encoder::MinOutputBufferSize() {
@@ -254,21 +314,18 @@ TimestampExtrapolator CodecAdapterLc3Encoder::CreateTimestampExtrapolator(
   ZX_DEBUG_ASSERT(codec_params_);
 
   if (format_details.has_timebase()) {
-    const auto& input_format = format_details.domain().audio().uncompressed().pcm();
-    // CreateEncoderParams supports LC3_PCM_FORMAT_S16 and LC3_PCM_FORMAT_S24,
-    // which are 2 and 4 bytes per sample respectively. We can't use
-    // input_format.bits_per_sample / 8 as num_bytes_per_sample because 24 in
-    // bits_per_sample means 4 bytes per sample not 3.
-    size_t num_bytes_per_sample = (codec_params_->fmt == LC3_PCM_FORMAT_S16) ? 2 : 4;
+    const auto& input_format = format_details.pcm_format();
+    // Use `codec_params_->bytes_per_sample` (2 for S16, 3 for packed S24_3LE, or 4 for 24-in-32
+    // S24) rather than `bits_per_sample / 8`.
     // Bytes per second is input PCM sampling frequency * number_of_channels * bytes_per_sample.
     // Note that when the input signal is 44.1 kHz, liblc3 uses the 48 kHz frame sample count
     // (480 samples for 10 ms nominal interval, 360 samples for 7.5 ms nominal interval) via
     // codec_params_->sr_hz in InputChunkSize(). Dividing that 480-sample chunk size by
-    // input_format.frames_per_second (44.1 kHz) yields the actual frame duration of 10.884 ms
+    // input_format.frames_per_second() (44.1 kHz) yields the actual frame duration of 10.884 ms
     // (or 8.16 ms for 7.5 ms interval) per LC3 specification v1.0 section 2.1.
     const size_t bytes_per_second = static_cast<size_t>(codec_params_->num_channels) *
-                                    static_cast<size_t>(input_format.frames_per_second) *
-                                    num_bytes_per_sample;
+                                    static_cast<size_t>(input_format.frames_per_second()) *
+                                    codec_params_->bytes_per_sample;
     return TimestampExtrapolator(format_details.timebase(), bytes_per_second);
   }
   return TimestampExtrapolator();

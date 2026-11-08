@@ -275,6 +275,14 @@ template("rust_auxiliary") {
         # Additional metadata to differentiate the clippy target from the actual
         # target.
         "-Cmetadata=clippy",
+
+        # Only use the next-generation trait solver for coherence checks. With
+        # `-Znext-solver=globally`, well-formedness checking of some crates
+        # takes minutes instead of seconds (e.g. netstack3-core.clippy:
+        # ~440s vs ~6s), and clippy actions always run locally.
+        # TODO(b/556328773): Remove once the compile-time regression in the
+        # next-generation trait solver is fixed.
+        "-Znext-solver=coherence",
       ]
 
       # this has to go after the `-<level>clippy::all` flags to prevent

@@ -37,10 +37,10 @@ _AIB_TOOLS_DEPS = [
   "//build/assembly/tools/assembly_config:bazel_input($host_toolchain)",
 
   # Tools included by the AIBs.
+  "//build/bazel/target_tests:font_manifest_generator_bazel_input($host_toolchain)",
   "//src/storage/bin/fvm:bazel_input($host_toolchain)",
   "//src/storage/blobfs/tools:bazel_input($host_toolchain)",
   "//src/storage/fxfs/fxfs_pbtool:bazel_input($host_toolchain)",
-  "//src/sys/pkg/bin/package-tool:bazel_input($host_toolchain)",
   "//zircon/tools/zbi:bazel_input($host_toolchain)",
 ]
 
@@ -154,7 +154,6 @@ group("bootstrap") {
     "//bundles/assembly/bazel_inputs/src/bringup/bin/kernel-args-forwarder:package",
     "//bundles/assembly/bazel_inputs/src/bringup/bin/sysinfo:package",
     "//bundles/assembly/bazel_inputs/src/devices/adc/drivers/adc:package",
-    "//bundles/assembly/bazel_inputs/src/devices/block/drivers/sdmmc:package",
     "//bundles/assembly/bazel_inputs/src/devices/clock/drivers/clock:package",
     "//bundles/assembly/bazel_inputs/src/devices/gpio/drivers/gpio:package",
     "//bundles/assembly/bazel_inputs/src/devices/i2c/drivers/i2c:package",
@@ -163,15 +162,6 @@ group("bootstrap") {
     "//bundles/assembly/bazel_inputs/src/sysmem/server:pkg",
     "//bundles/assembly/bazel_inputs/src/zircon/bin/role_manager:package",
   ]
-
-  # Enabling profiling fundamentally changes how the platform is
-  # compiled and requires the addition of instrumentation_data_processor
-  # package in bootfs packages to collect and process profiles.
-  #
-  # This needs to always be included as a GN dep to satisfy the GN->Bazel
-  # bridge mechanics, which can't quite figure out that it's only needed when
-  # `is_profile` is true.
-  deps += [ "//bundles/assembly/bazel_inputs/src/sys/instrumentation_data_processor:instrumentation_data_processor_pkg" ]
 }
 
 group("base_drivers_storage") {
@@ -291,8 +281,6 @@ fuchsia_package("embeddable_userdebug.bootfs_files_package") {
     "//src/bringup/bin/dlog:bootfs",
     "//src/bringup/bin/waitfor:bootfs",
     "//src/developer/forensics/crasher/cpp:bootfs",
-    "//src/sys/bin/psutils:bootfs",
-    "//src/sys/tools/component:bootfs",
     "//src/zircon/bin/kcounter:bootfs",
   ]
   deps += [ "//src/zircon/bin/zxsh:bootfs" ]
@@ -301,6 +289,31 @@ fuchsia_package("embeddable_userdebug.bootfs_files_package") {
 export_fuchsia_package_to_bazel(
     "embeddable_userdebug.bootfs_files_package.bazel_input") {
   package = ":embeddable_userdebug.bootfs_files_package"
+}
+
+group("component_tool") {
+  deps = [ ":component_tool.bootfs_files_package.bazel_input" ]
+}
+
+fuchsia_package("component_tool.bootfs_files_package") {
+  deps = [ "//src/sys/tools/component:bootfs" ]
+}
+
+export_fuchsia_package_to_bazel(
+    "component_tool.bootfs_files_package.bazel_input") {
+  package = ":component_tool.bootfs_files_package"
+}
+
+group("psutils") {
+  deps = [ ":psutils.bootfs_files_package.bazel_input" ]
+}
+
+fuchsia_package("psutils.bootfs_files_package") {
+  deps = [ "//src/sys/bin/psutils:bootfs" ]
+}
+
+export_fuchsia_package_to_bazel("psutils.bootfs_files_package.bazel_input") {
+  package = ":psutils.bootfs_files_package"
 }
 
 group("bootstrap_userdebug") {
@@ -370,6 +383,12 @@ group("fake_display_stack_host") {
   deps = [ "//bundles/assembly/bazel_inputs/src/graphics/display/testing/fake-display-stack-host:bazel_input" ]
 }
 
+group("sdmmc_driver") {
+  deps = [
+    "//bundles/assembly/bazel_inputs/src/devices/block/drivers/sdmmc:package",
+  ]
+}
+
 group("sdhci_driver") {
   deps = [
     "//bundles/assembly/bazel_inputs/src/devices/block/drivers/sdhci:package",
@@ -433,13 +452,11 @@ fuchsia_package("bootstrap_eng.bootfs_files_package") {
     "//src/devices/cpu/bin/cpuctl:bootfs",
     "//src/devices/gpio/bin/gpioutil:bootfs",
     "//src/devices/i2c/bin:bootfs",
-    "//src/devices/power/bin/batteryutil:bootfs",
     "//src/devices/power/bin/lspwr:bootfs",
     "//src/devices/ram/bin/ram-info:bootfs",
     "//src/devices/registers/bin/register-util:bootfs",
     "//src/devices/serial/bin/serialutil:bootfs",
     "//src/devices/spi/bin/spiutil:bootfs",
-    "//src/devices/spmi/bin/spmi-ctl:bootfs",
     "//src/devices/suspend/bin/suspendctl:bootfs",
     "//src/devices/tee/bin:bootfs",
     "//src/devices/thermal/bin/temperature-cli:bootfs",
@@ -447,7 +464,6 @@ fuchsia_package("bootstrap_eng.bootfs_files_package") {
     "//src/devices/usb/bin/lsusb:bootfs",
     "//src/devices/usb/bin/usb-cli:bootfs",
     "//src/security/bin/syscall-check:bootfs",
-    "//src/sys/tools/package:bootfs",
     "//src/ui/backlight/bin/backlight:bootfs",
     "//src/ui/input/bin/hid:bootfs",
     "//src/ui/tools/print-input-report:bootfs",
@@ -459,6 +475,19 @@ export_fuchsia_package_to_bazel(
     "bootstrap_eng.bootfs_files_package.bazel_input") {
   testonly = true
   package = ":bootstrap_eng.bootfs_files_package"
+}
+
+group("package_tool") {
+  deps = [ ":package_tool.bootfs_files_package.bazel_input" ]
+}
+
+fuchsia_package("package_tool.bootfs_files_package") {
+  deps = [ "//src/sys/tools/package:bootfs" ]
+}
+
+export_fuchsia_package_to_bazel(
+    "package_tool.bootfs_files_package.bazel_input") {
+  package = ":package_tool.bootfs_files_package"
 }
 
 group("lspci") {
@@ -483,6 +512,31 @@ fuchsia_package("ufsutil.bootfs_files_package") {
 
 export_fuchsia_package_to_bazel("ufsutil.bootfs_files_package.bazel_input") {
   package = ":ufsutil.bootfs_files_package"
+}
+
+group("spmi-ctl") {
+  deps = [ ":spmi-ctl.bootfs_files_package.bazel_input" ]
+}
+
+fuchsia_package("spmi-ctl.bootfs_files_package") {
+  deps = [ "//src/devices/spmi/bin/spmi-ctl:bootfs" ]
+}
+
+export_fuchsia_package_to_bazel("spmi-ctl.bootfs_files_package.bazel_input") {
+  package = ":spmi-ctl.bootfs_files_package"
+}
+
+group("batteryutil") {
+  deps = [ ":batteryutil.bootfs_files_package.bazel_input" ]
+}
+
+fuchsia_package("batteryutil.bootfs_files_package") {
+  deps = [ "//src/devices/power/bin/batteryutil:bootfs" ]
+}
+
+export_fuchsia_package_to_bazel(
+    "batteryutil.bootfs_files_package.bazel_input") {
+  package = ":batteryutil.bootfs_files_package"
 }
 
 group("kernel_debug_broker_userdebug") {
@@ -604,6 +658,7 @@ group("core_realm") {
     "//bundles/assembly/bazel_inputs/src/developer/forensics:pkg",
     "//bundles/assembly/bazel_inputs/src/devices/serial/drivers/serial:package",
     "//bundles/assembly/bazel_inputs/src/sys/pkg/bin/pkg-cache",
+    "//bundles/assembly/bazel_inputs/src/sys/pkg/bin/pkg-resolver",
     "//bundles/assembly/bazel_inputs/src/sys/pkg/bin/system-update-committer",
   ]
 }
@@ -638,12 +693,13 @@ group("network_realm") {
 group("network_realm_packages") {
   deps = [
     "//bundles/assembly/bazel_inputs/src/connectivity/network:netstack3",
+    "//bundles/assembly/bazel_inputs/src/connectivity/network/dhcpv4/client/bindings:package",
     "//bundles/assembly/bazel_inputs/src/connectivity/network/dhcpv4/server:package",
     "//bundles/assembly/bazel_inputs/src/connectivity/network/dhcpv6/client:package",
     "//bundles/assembly/bazel_inputs/src/connectivity/network/dns:package",
     "//bundles/assembly/bazel_inputs/src/connectivity/policy/http-client:google_package",
     "//bundles/assembly/bazel_inputs/src/connectivity/policy/http-client:package",
-    "//bundles/assembly/bazel_inputs/src/connectivity/policy/netcfg:package-basic",
+    "//bundles/assembly/bazel_inputs/src/connectivity/policy/netcfg:package",
     "//bundles/assembly/bazel_inputs/src/connectivity/policy/reachability:package",
   ]
 }
@@ -655,7 +711,6 @@ group("core_realm_eng") {
     "//bundles/assembly/bazel_inputs/src/devices/bin/driver_debug",
     "//bundles/assembly/bazel_inputs/src/storage/bin:fs_realm_tools",
     "//bundles/assembly/bazel_inputs/src/storage/fs_realm",
-    "//bundles/assembly/bazel_inputs/src/sys/pkg/bin/pkg-resolver:pkg-resolver-eng",
     "//bundles/assembly/bazel_inputs/src/sys/tools/debug-dash-launcher",
   ]
 
@@ -671,7 +726,7 @@ group("dso_runner") {
 }
 
 group("core_realm_user_and_userdebug") {
-  deps = [ "//bundles/assembly/bazel_inputs/src/sys/pkg/bin/pkg-resolver" ]
+  deps = []
 }
 
 group("swd_trust_store_restricted") {
@@ -684,7 +739,6 @@ group("swd_trust_store_public") {
 
 group("core_realm_development_access") {
   deps = [
-    "//bundles/assembly/bazel_inputs/src/developer/forensics/snapshot:pkg",
     "//bundles/assembly/bazel_inputs/src/developer/remote-control:remote-control-package",
     "//bundles/assembly/bazel_inputs/src/developer/sshd-host",
     "//bundles/assembly/bazel_inputs/src/diagnostics/log_listener:log_listener_shell_pkg",
@@ -792,15 +846,13 @@ group("factory_reset_trigger") {
 
 group("common_standard") {
   deps = [
-    ":common_standard.bootfs_files_package.bazel_input",
     ":global_metrics_registry_pb",
     "//bundles/assembly/bazel_inputs/src/cobalt/bin/app:cobalt",
     "//bundles/assembly/bazel_inputs/src/cobalt/bin/system-metrics:cobalt_system_metrics",
-    "//bundles/assembly/bazel_inputs/src/developer/memory/pressure_signaler",
     "//bundles/assembly/bazel_inputs/src/diagnostics/persistence:diagnostics-persistence",
     "//bundles/assembly/bazel_inputs/src/diagnostics/sampler",
     "//bundles/assembly/bazel_inputs/src/intl/tzdata_provider:tzdata_provider_pkg",
-    "//bundles/assembly/bazel_inputs/src/sys/activity",
+    "//bundles/assembly/bazel_inputs/src/memory/pressure_signaler",
     "//bundles/assembly/bazel_inputs/src/sys/pkg/bin/system-updater",
   ]
 }
@@ -809,15 +861,6 @@ bazel_input_file("global_metrics_registry_pb") {
   generator = "//src/cobalt/bin/app:global_metrics_registry"
   outputs = [ "$root_gen_dir/src/cobalt/bin/app/global_metrics_registry.pb" ]
   gn_targets_name = "global_metrics_registry_pb"
-}
-
-fuchsia_package("common_standard.bootfs_files_package") {
-  deps = [ "//src/sys/core:bootfs" ]
-}
-
-export_fuchsia_package_to_bazel(
-    "common_standard.bootfs_files_package.bazel_input") {
-  package = ":common_standard.bootfs_files_package"
 }
 
 group("standard_userdebug") {
@@ -830,7 +873,6 @@ group("standard_eng") {
     "//bundles/assembly/bazel_inputs/src/developer/process_explorer:process_explorer_package",
     "//bundles/assembly/bazel_inputs/src/devices/bin/driver_playground:pkg",
     "//bundles/assembly/bazel_inputs/src/power/metrics-logger:metrics-logger-pkg",
-    "//bundles/assembly/bazel_inputs/src/sys/loopback_resolver:loopback_resolver_pkg",
   ]
 }
 
@@ -843,12 +885,12 @@ group("standard_userdebug_and_eng") {
 }
 
 group("memory_monitor") {
-  deps = [ "//bundles/assembly/bazel_inputs/src/developer/memory/monitor:monitor_without_memory_sampler" ]
+  deps = [ "//bundles/assembly/bazel_inputs/src/memory/legacy/monitor:monitor_without_memory_sampler" ]
 }
 
 group("memory_monitor_with_memory_sampler") {
   deps = [
-    "//bundles/assembly/bazel_inputs/src/developer/memory/monitor:monitor_with_memory_sampler",
+    "//bundles/assembly/bazel_inputs/src/memory/legacy/monitor:monitor_with_memory_sampler",
     "//bundles/assembly/bazel_inputs/src/performance/memory/sampler:memory_sampler",
   ]
 }
@@ -886,7 +928,6 @@ group("bluetooth_avrcp") {
 
 group("bluetooth_core") {
   deps = [
-    "//bundles/assembly/bazel_inputs/src/connectivity/bluetooth/core/bt-host",
     "//bundles/assembly/bazel_inputs/src/connectivity/bluetooth/core/bt-init",
   ]
 }
@@ -972,6 +1013,10 @@ group("driver_framework_with_heapdump") {
 }
 
 group("full_drivers") {
+  deps = []
+}
+
+group("no_full_drivers") {
   deps = []
 }
 
@@ -1095,12 +1140,11 @@ group("fshost_non_recovery") {
 }
 
 group("fshost_storage") {
-  deps = [ "//bundles/assembly/bazel_inputs/src/storage/memfs:package" ]
+  deps = []
 }
 
 group("fshost_storage_host_fxfs") {
   deps = [
-    "//bundles/assembly/bazel_inputs/src/storage/crypt/fxfs:package",
     "//bundles/assembly/bazel_inputs/src/storage/fxfs:package",
     "//bundles/assembly/bazel_inputs/src/storage/gpt/component:package",
   ]
@@ -1133,10 +1177,7 @@ group("fshost_storage_host_fvm_minfs") {
 }
 
 group("fshost_fxfs") {
-  deps = [
-    "//bundles/assembly/bazel_inputs/src/storage/crypt/fxfs:package",
-    "//bundles/assembly/bazel_inputs/src/storage/fxfs:package",
-  ]
+  deps = [ "//bundles/assembly/bazel_inputs/src/storage/fxfs:package" ]
 }
 
 group("fshost_gpt_fvm_minfs") {
@@ -1162,10 +1203,7 @@ group("fshost_fvm") {
 }
 
 group("fshost_fvm_fxfs") {
-  deps = [
-    "//bundles/assembly/bazel_inputs/src/storage/crypt/fxfs:package",
-    "//bundles/assembly/bazel_inputs/src/storage/fxfs:package",
-  ]
+  deps = [ "//bundles/assembly/bazel_inputs/src/storage/fxfs:package" ]
 }
 
 group("fshost_provision_fxfs") {
@@ -1178,7 +1216,6 @@ group("fshost_fvm_minfs") {
 
 group("fshost_fvm_minfs_migration") {
   deps = [
-    "//bundles/assembly/bazel_inputs/src/storage/crypt/fxfs:package",
     "//bundles/assembly/bazel_inputs/src/storage/fxfs:package",
     "//bundles/assembly/bazel_inputs/src/storage/minfs/bin:package",
   ]
@@ -1208,7 +1245,7 @@ group("omaha_client_empty_eager_config") {
 }
 
 group("product_provided_update_checker") {
-  deps = [ "//bundles/assembly/bazel_inputs/src/sys/pkg/bin/null-update-checker:package" ]
+  deps = []
 }
 
 group("no_update_checker") {
@@ -1220,7 +1257,7 @@ group("system_update_configurator") {
 }
 
 group("pkgfs_disable_executability_restrictions") {
-  deps = [ "//bundles/assembly/bazel_inputs/src/sys/pkg/bin/pkg-cache:disable-executability-restrictions" ]
+  deps = []
 }
 
 group("virtualization_support") {
@@ -1294,7 +1331,7 @@ group("wlan_virtio_hwsim_driver") {
 }
 
 group("wlan_wlanix") {
-  deps = [ "//bundles/assembly/bazel_inputs/src/connectivity/wlan/wlanix" ]
+  deps = []
 }
 
 group("location_emergency") {
@@ -1335,13 +1372,11 @@ group("virtual_audio_legacy_driver") {
 }
 
 group("virtual_audio_util") {
-  deps = [
-    "//bundles/assembly/bazel_inputs/src/media/audio/tools/virtual_audio_util",
-  ]
+  deps = []
 }
 
 group("virtual_audio_legacy_util") {
-  deps = [ "//bundles/assembly/bazel_inputs/src/media/audio/tools/virtual_audio_legacy_util" ]
+  deps = []
 }
 
 group("audio_legacy_driver_tools") {
@@ -1359,10 +1394,7 @@ group("audio_driver_development_tools") {
 group("audio_full_stack_development_tools") {
   deps = [
     "//bundles/assembly/bazel_inputs/src/media/audio/tools/audio-capture-timestamp-validator",
-    "//bundles/assembly/bazel_inputs/src/media/audio/tools/audio-effects-ctl",
-    "//bundles/assembly/bazel_inputs/src/media/audio/tools/audio_listener",
     "//bundles/assembly/bazel_inputs/src/media/audio/tools/signal_generator",
-    "//bundles/assembly/bazel_inputs/src/media/audio/tools/vol",
     "//bundles/assembly/bazel_inputs/src/media/audio/tools/wav_player",
     "//bundles/assembly/bazel_inputs/src/media/audio/tools/wav_recorder",
   ]

@@ -52,12 +52,15 @@ class EthernetDevice : public DeviceType,
     mtx_init(&edev->tx_lock_, mtx_plain);
     cnd_init(&edev->tx_cond_);
 
-    edev->pci_ = ddk::Pci::FromFragment(parent);
-    if (!edev->pci_.is_valid()) {
-      return ZX_ERR_INTERNAL;
+    auto client =
+        ddk::Device<void>::DdkConnectFragmentFidlProtocol<fuchsia_hardware_pci::Service::Device>(
+            parent, fdf::Pci::kFragmentName);
+    if (client.is_error()) {
+      return client.error_value();
     }
+    edev->pci_ = fdf::Pci(std::move(*client));
 
-    status = edev->pci_.ConfigureInterruptMode(1, &edev->irq_mode_);
+    status = edev->pci_.ConfigureInterruptMode(1, nullptr);
     if (status != ZX_OK) {
       zxlogf(ERROR, "rtl8111: failed to configure irqs");
       return status;
@@ -255,10 +258,6 @@ class EthernetDevice : public DeviceType,
       }
 
       mmio_->Write16(RTL_ISR, 0xffff);
-
-      if (irq_mode_ == fuchsia_hardware_pci::InterruptMode::kLegacy) {
-        pci_.AckInterrupt();
-      }
     }
     return 0;
   }
@@ -365,8 +364,7 @@ class EthernetDevice : public DeviceType,
   mtx_t lock_;
   mtx_t tx_lock_;
   cnd_t tx_cond_;
-  ddk::Pci pci_;
-  fuchsia_hardware_pci::InterruptMode irq_mode_;
+  fdf::Pci pci_;
   zx::interrupt irq_;
   std::optional<fdf::MmioBuffer> mmio_;
   thrd_t irq_thread_;

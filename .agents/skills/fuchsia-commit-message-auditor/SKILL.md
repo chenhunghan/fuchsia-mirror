@@ -108,16 +108,18 @@ Test: fx test commit_msg_checker_test
     body: `(1/3)`.
   - Never include "DO NOT SUBMIT".
 - **Footers (Bottom, separated by blank line)**:
-  - `Test: <actual_verification>` (**Required**): State how the change was
-    verified. Must describe the concrete automated test targets that actually
-    ran (e.g., `Test: fx test //src/diagnostics/iquery:lib_test`, not a `:tests`
-    group label that matched zero tests), manual testing, or ad-hoc verification
-    genuinely performed (or `Test: None, doc update`). Diagnostics (e.g.,
-    `--list`, `git status`) and code formatting are **not** tests. Never
-    fabricate tests or use `TODO`/`TBD`. Wrap at 72 chars; use multiple `Test:`
-    lines for multiple suites.
-  - `Bug: <id>` / `Fixed: <id>` (**Recommended**): One per line (`Bug: None` if
-    standalone). `Fixed:` auto-closes the issue upon submission.
+  - `Test: <actual_verification>` (Optional): Indicator for human reviewers
+    stating how the change was verified (has no effect on presubmit tests; omit
+    when no tests were run rather than writing `Test: None`). When included,
+    must describe the concrete automated test targets that actually ran (e.g.,
+    `Test: fx test //src/diagnostics/iquery:lib_test`, not a `:tests` group
+    label that matched zero tests), manual testing, or ad-hoc verification
+    genuinely performed. Diagnostics (e.g., `--list`, `git status`) and code
+    formatting are **not** tests. Never fabricate tests or use `TODO`/`TBD`.
+    Wrap at 72 chars; use multiple `Test:` lines for multiple suites.
+  - `Bug: <id>` / `Fixed: <id>` / `Fixes: <id>` (**Recommended**): One per line
+    (`Bug: None` if standalone). `Fixed:` and `Fixes:` auto-close the issue upon
+    submission.
   - `Multiply: <test_name>` (Optional): Trigger deflake runs in infra for
     new/modified tests.
   - `Change-Id:` (**Gerrit Hook**):
@@ -152,7 +154,7 @@ Cross-check the diff against your draft scratch file:
       text).
     - Component names match touched files in `git diff --stat` (no
       overgeneralized subsystem claims).
-    - Every `Test:` line describes actual automated, manual, or ad-hoc
+    - Any `Test:` line describes actual automated, manual, or ad-hoc
       verification performed in this session. Diagnostic queries (like `--list`
       or `status`) and formatting tools are not tests.
 

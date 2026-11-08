@@ -69,12 +69,15 @@ impl DefineSubsystemConfiguration<(&GraphicsConfig, &PlatformUiConfig)>
             let allow_lavapipe =
                 graphics_config.vulkan_icd.allow_lavapipe.unwrap_or(default_lavapipe);
 
-            // TODO(https://fxbug.dev/541271630): Restrict lavapipe to eng build types.
+            // Lavapipe requires userspace JIT and insecure execmem, which is disallowed
+            // on physical hardware in userdebug. Restrict userdebug lavapipe to x64
+            // (emulators).
+            let allowed_build_types = match context.board_config.arch {
+                Architecture::X64 => &[BuildType::Eng, BuildType::UserDebug][..],
+                _ => &[BuildType::Eng][..],
+            };
             if allow_lavapipe {
-                context.ensure_build_type(
-                    &[BuildType::Eng, BuildType::UserDebug],
-                    "vulkan_icd lavapipe",
-                )?;
+                context.ensure_build_type(allowed_build_types, "vulkan_icd lavapipe")?;
                 builder.platform_bundle("lavapipe_pkg")?;
                 builder.core_shard(&context.get_resource("lavapipe.core_shard.cml"));
             } else {
@@ -104,11 +107,14 @@ impl DefineSubsystemConfiguration<(&GraphicsConfig, &PlatformUiConfig)>
                     );
                 }
                 builder.platform_bundle("fake_display_stack_host")?;
-                let mut component = builder
-                    .package("fake-display-stack-host")
-                    .component("meta/fake-display-stack-host.cm")?;
-                component.field("active_width_px", values.width)?;
-                component.field("active_height_px", values.height)?;
+                builder.set_config_capability(
+                    "fuchsia.display.testing.ActiveWidthPx",
+                    Config::new(ConfigValueType::Uint32, values.width.into()),
+                )?;
+                builder.set_config_capability(
+                    "fuchsia.display.testing.ActiveHeightPx",
+                    Config::new(ConfigValueType::Uint32, values.height.into()),
+                )?;
             }
             FakeDisplayConfig::OnWithDefaultValues => {
                 if !ui_config.enabled {
@@ -117,6 +123,14 @@ impl DefineSubsystemConfiguration<(&GraphicsConfig, &PlatformUiConfig)>
                     );
                 }
                 builder.platform_bundle("fake_display_stack_host")?;
+                builder.set_config_capability(
+                    "fuchsia.display.testing.ActiveWidthPx",
+                    Config::new_void(),
+                )?;
+                builder.set_config_capability(
+                    "fuchsia.display.testing.ActiveHeightPx",
+                    Config::new_void(),
+                )?;
             }
 
             // TODO(https://fxbug.dev/543145106): Remove BoardFeature::FakeDisplay and force product configs
@@ -126,6 +140,14 @@ impl DefineSubsystemConfiguration<(&GraphicsConfig, &PlatformUiConfig)>
                     && ui_config.enabled
                 {
                     builder.platform_bundle("fake_display_stack_host")?;
+                    builder.set_config_capability(
+                        "fuchsia.display.testing.ActiveWidthPx",
+                        Config::new_void(),
+                    )?;
+                    builder.set_config_capability(
+                        "fuchsia.display.testing.ActiveHeightPx",
+                        Config::new_void(),
+                    )?;
                 }
             }
         }
@@ -437,6 +459,100 @@ mod tests {
     }
 
     #[test]
+    fn test_vulkan_loader_lavapipe_arm64_userdebug_fails() {
+        let board_config = BoardConfig {
+            arch: Architecture::ARM64,
+            provided_features: vec![BoardFeature::VulkanGpu.as_ref().to_string()],
+            ..Default::default()
+        };
+        let context = ConfigurationContext {
+            feature_set_level: &FeatureSetLevel::Standard,
+            build_type: &BuildType::UserDebug,
+            board_config: &board_config,
+            ..ConfigurationContext::default_for_tests()
+        };
+        let config = GraphicsConfig {
+            vulkan_icd: VulkanIcd {
+                allow_magma: Some(false),
+                allow_goldfish: Some(false),
+                allow_lavapipe: Some(true),
+            },
+            virtual_console: VirtconConfig { enable: Some(false), ..Default::default() },
+            ..Default::default()
+        };
+        let mut builder = ConfigurationBuilderImpl::default();
+        let result = GraphicsSubsystemConfig::define_configuration(
+            &context,
+            &(&config, &PlatformUiConfig::default()),
+            &mut builder,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_vulkan_loader_lavapipe_arm64_eng() {
+        let board_config = BoardConfig {
+            arch: Architecture::ARM64,
+            provided_features: vec![BoardFeature::VulkanGpu.as_ref().to_string()],
+            ..Default::default()
+        };
+        let context = ConfigurationContext {
+            feature_set_level: &FeatureSetLevel::Standard,
+            build_type: &BuildType::Eng,
+            board_config: &board_config,
+            ..ConfigurationContext::default_for_tests()
+        };
+        let config = GraphicsConfig {
+            vulkan_icd: VulkanIcd {
+                allow_magma: Some(false),
+                allow_goldfish: Some(false),
+                allow_lavapipe: Some(true),
+            },
+            virtual_console: VirtconConfig { enable: Some(false), ..Default::default() },
+            ..Default::default()
+        };
+        let mut builder = ConfigurationBuilderImpl::default();
+        GraphicsSubsystemConfig::define_configuration(
+            &context,
+            &(&config, &PlatformUiConfig::default()),
+            &mut builder,
+        )
+        .unwrap();
+        let config = builder.build();
+        assert!(config.bundles.contains("lavapipe_pkg"));
+    }
+
+    #[test]
+    fn test_vulkan_loader_lavapipe_user_fails() {
+        let board_config = BoardConfig {
+            provided_features: vec![BoardFeature::VulkanGpu.as_ref().to_string()],
+            ..Default::default()
+        };
+        let context = ConfigurationContext {
+            feature_set_level: &FeatureSetLevel::Standard,
+            build_type: &BuildType::User,
+            board_config: &board_config,
+            ..ConfigurationContext::default_for_tests()
+        };
+        let config = GraphicsConfig {
+            vulkan_icd: VulkanIcd {
+                allow_magma: Some(false),
+                allow_goldfish: Some(false),
+                allow_lavapipe: Some(true),
+            },
+            virtual_console: VirtconConfig { enable: Some(false), ..Default::default() },
+            ..Default::default()
+        };
+        let mut builder = ConfigurationBuilderImpl::default();
+        let result = GraphicsSubsystemConfig::define_configuration(
+            &context,
+            &(&config, &PlatformUiConfig::default()),
+            &mut builder,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_fake_display_custom_dimensions() {
         use assembly_config_schema::platform_settings::graphics_config::{
             FakeDisplayConfig, FakeDisplayValues,
@@ -465,20 +581,13 @@ mod tests {
         )
         .unwrap();
         let config = builder.build();
-        let component_config = config
-            .package_configs
-            .get("fake-display-stack-host")
-            .unwrap()
-            .components
-            .get("meta/fake-display-stack-host.cm")
-            .unwrap();
         assert_eq!(
-            component_config.fields.get("active_width_px").unwrap(),
-            &serde_json::json!(1080)
+            config.configuration_capabilities.get("fuchsia.display.testing.ActiveWidthPx"),
+            Some(&Config::new(ConfigValueType::Uint32, 1080.into()))
         );
         assert_eq!(
-            component_config.fields.get("active_height_px").unwrap(),
-            &serde_json::json!(2410)
+            config.configuration_capabilities.get("fuchsia.display.testing.ActiveHeightPx"),
+            Some(&Config::new(ConfigValueType::Uint32, 2410.into()))
         );
     }
 
@@ -511,20 +620,13 @@ mod tests {
         .unwrap();
         let config = builder.build();
         assert!(config.bundles.contains("fake_display_stack_host"));
-        let component_config = config
-            .package_configs
-            .get("fake-display-stack-host")
-            .unwrap()
-            .components
-            .get("meta/fake-display-stack-host.cm")
-            .unwrap();
         assert_eq!(
-            component_config.fields.get("active_width_px").unwrap(),
-            &serde_json::json!(1080)
+            config.configuration_capabilities.get("fuchsia.display.testing.ActiveWidthPx"),
+            Some(&Config::new(ConfigValueType::Uint32, 1080.into()))
         );
         assert_eq!(
-            component_config.fields.get("active_height_px").unwrap(),
-            &serde_json::json!(2410)
+            config.configuration_capabilities.get("fuchsia.display.testing.ActiveHeightPx"),
+            Some(&Config::new(ConfigValueType::Uint32, 2410.into()))
         );
     }
 
@@ -550,7 +652,14 @@ mod tests {
         .unwrap();
         let config = builder.build();
         assert!(config.bundles.contains("fake_display_stack_host"));
-        assert!(!config.package_configs.contains_key("fake-display-stack-host"));
+        assert_eq!(
+            config.configuration_capabilities.get("fuchsia.display.testing.ActiveWidthPx"),
+            Some(&Config::new_void())
+        );
+        assert_eq!(
+            config.configuration_capabilities.get("fuchsia.display.testing.ActiveHeightPx"),
+            Some(&Config::new_void())
+        );
     }
 
     #[test]
@@ -573,7 +682,14 @@ mod tests {
         .unwrap();
         let config = builder.build();
         assert!(config.bundles.contains("fake_display_stack_host"));
-        assert!(!config.package_configs.contains_key("fake-display-stack-host"));
+        assert_eq!(
+            config.configuration_capabilities.get("fuchsia.display.testing.ActiveWidthPx"),
+            Some(&Config::new_void())
+        );
+        assert_eq!(
+            config.configuration_capabilities.get("fuchsia.display.testing.ActiveHeightPx"),
+            Some(&Config::new_void())
+        );
     }
 
     #[test]

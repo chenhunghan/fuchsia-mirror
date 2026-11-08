@@ -17,7 +17,7 @@ use log::warn;
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
-use test_harness::{SHARED_STATE_TEST_COMPONENT_INDEX, SharedState, TestHarness};
+use test_harness::{SharedState, TestHarness};
 
 use crate::core_realm::SHARED_STATE_INDEX;
 use crate::emulator::{EmulatorState, watch_controller_parameters};
@@ -95,11 +95,8 @@ impl TestHarness for HostHarness {
     ) -> BoxFuture<'static, Result<(Self, Self::Env, Self::Runner), Error>> {
         let shared_state = shared_state.clone();
         async move {
-            let test_component: Arc<String> = shared_state
-                .get(SHARED_STATE_TEST_COMPONENT_INDEX)
-                .expect("SharedState must have TEST-COMPONENT")?;
-            let inserter = move || HostRealm::create(test_component.to_string());
-            let realm = shared_state.get_or_insert_with(SHARED_STATE_INDEX, inserter).await?;
+            let realm =
+                shared_state.get_or_insert_with(SHARED_STATE_INDEX, HostRealm::create).await?;
 
             let (harness, emulator) = new_host_harness(realm.clone()).await?;
 
@@ -133,9 +130,8 @@ impl TestHarness for HostHarness {
 
 async fn new_host_harness(realm: Arc<HostRealm>) -> Result<(HostHarness, Emulator), Error> {
     // Publishing an HCI device can only occur after HostRealm::create() is called
-    let dev_dir = realm.dev().context("failed to open dev directory")?;
     let emulator =
-        Emulator::create(dev_dir).await.context("Error creating emulator root device")?;
+        Emulator::create(realm.svc()).await.context("Error creating emulator root device")?;
     emulator
         .publish(Emulator::default_settings())
         .await

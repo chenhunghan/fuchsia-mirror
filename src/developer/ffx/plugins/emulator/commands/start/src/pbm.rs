@@ -144,6 +144,9 @@ async fn apply_command_line_options(
     // Process any values that are Options, have Auto values, or need any transformation.
     emu_config.host.gpu = GpuType::from_str(&cmd.gpu(ctx)?)?;
     emu_config.host.networking = NetworkingMode::from_str(&cmd.net(ctx)?)?;
+    emu_config.host.internet = cmd.internet;
+    emu_config.host.guestfwd = cmd.guestfwd.clone();
+    emu_config.host.netdev_socket = cmd.netdev_socket.clone();
 
     if let Some(log) = &cmd.log {
         // It'd be nice to canonicalize this path, to clean up relative bits like "..", but the
@@ -256,8 +259,11 @@ async fn apply_command_line_options(
     emu_config.runtime.hidpi_scaling = cmd.hidpi_scaling;
     emu_config.runtime.addl_kernel_args = cmd.kernel_args.clone();
     emu_config.runtime.name = cmd.name(ctx)?;
+    // Don't create the instance directory here: `ffx emu start` hasn't yet checked whether an
+    // instance with this name is already running. `EngineBuilder::build` creates it after that
+    // check.
     emu_config.runtime.instance_directory =
-        emu_instances.get_instance_dir(&emu_config.runtime.name, true)?;
+        emu_instances.get_instance_dir(&emu_config.runtime.name, false)?;
     emu_config.runtime.reuse = cmd.reuse;
     emu_config.runtime.snapshots_enabled = cmd.enable_snapshots;
     emu_config.runtime.from_snapshot = cmd.from_snapshot.clone();
@@ -495,6 +501,7 @@ mod tests {
             gpu: Some(String::from("host")),
             headless: true,
             hidpi_scaling: true,
+            internet: true,
             log: Some(PathBuf::from("/path/to/log")),
             name: Some("SomeName".to_string()),
             net: Some("tap".to_string()),
@@ -508,6 +515,7 @@ mod tests {
         assert_eq!(emu_config.host.gpu, GpuType::SwiftshaderIndirect);
         assert_eq!(emu_config.host.log, PathBuf::from(""));
         assert_eq!(emu_config.host.networking, NetworkingMode::Auto);
+        assert_eq!(emu_config.host.internet, false);
         assert_eq!(emu_config.runtime.console, ConsoleType::None);
         assert_eq!(emu_config.runtime.debugger, false);
         assert_eq!(emu_config.runtime.headless, false);
@@ -524,6 +532,7 @@ mod tests {
         assert_eq!(opts.host.gpu, GpuType::HostExperimental);
         assert_eq!(opts.host.log, PathBuf::from("/path/to/log"));
         assert_eq!(opts.host.networking, NetworkingMode::Tap);
+        assert_eq!(opts.host.internet, true);
         assert_eq!(opts.runtime.console, ConsoleType::Console);
         assert_eq!(opts.runtime.debugger, true);
         assert_eq!(opts.runtime.headless, true);

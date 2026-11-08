@@ -7,6 +7,25 @@
 
 namespace scudo {
 
+struct CustomSizeClassConfig {
+  static const uptr NumBits = 7;
+  static const uptr MinSizeLog = 4;
+  static const uptr MidSizeLog = 7;
+  static const uptr MaxSizeLog = 17;
+  static const u16 MaxNumCachedHint = 12;
+  static const uptr MaxBytesCachedLog = 10;
+
+  static constexpr uptr Classes[] = {
+      32,   48,   64,   80,   96,    112,   128,   144,   160,   192,   208,
+      224,  240,  256,  272,  320,   352,   384,   400,   448,   544,   576,
+      672,  784,  864,  1040, 1184,  1744,  2160,  2672,  3760,  4176,  5008,
+      6160, 7248, 8336, 9616, 12432, 16656, 18704, 25360, 29200, 67600, 131088,
+  };
+  static const uptr SizeDelta = Chunk::getHeaderSize();
+};
+
+using CustomSizeClassMap = TableSizeClassMap<CustomSizeClassConfig>;
+
 struct DefaultConfig {
   static const bool MaySupportMemoryTagging = false;
   static const bool EnableZeroOnDealloc = true;
@@ -14,7 +33,7 @@ struct DefaultConfig {
   using TSDRegistryT = TSDRegistrySharedT<A, 8U, 4U>;  // Shared, max 8 TSDs.
 
   struct Primary {
-    using SizeClassMap = FuchsiaSizeClassMap;
+    using SizeClassMap = CustomSizeClassMap;
 #if defined(__riscv)
     // Support 39-bit VMA for riscv-64
     static const uptr RegionSizeLog = 27U;

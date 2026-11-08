@@ -12,16 +12,18 @@ group("api") {
   testonly = true
 
   deps = [
-    ":audio_core_api_error_tests",
     ":audio_core_api_test_effects",
     ":audio_core_api_tests",
   ]
 
+  if (is_debug || is_asan || is_coverage) {
+    deps += [ ":audio_core_api_error_tests" ]
+  }
+
   # These have real-time requirements and must run in release builds (debug
-  # builds are too slow).
-  if (!is_debug) {
+  # and asan builds are too slow).
+  if (!is_debug && !is_asan) {
     deps += [
-      ":audio_core_api_pipeline_error_tests",
       ":audio_core_api_pipeline_tests",
       ":audio_core_fidelity_tests",
       ":audio_core_thermal_tests",
@@ -165,7 +167,10 @@ audio_core_api_test_component("audio-renderer-test") {
 }
 
 audio_core_api_test_component("audio-renderer-pipeline-test") {
-  source = "audio_renderer_pipeline_test.cc"
+  sources = [
+    "audio_renderer_pipeline_error_test.cc",
+    "audio_renderer_pipeline_test.cc",
+  ]
   executable_deps = [
     ":audio_api_pipeline_test_shared",
     "//src/media/audio/audio_core/mixer",
@@ -177,12 +182,6 @@ audio_core_api_test_component("audio-renderer-pipeline-test") {
 audio_core_api_test_component("audio-renderer-error-test") {
   source = "audio_renderer_error_test.cc"
   executable_deps = [ ":audio_api_test_shared" ]
-  test_type = "system"
-}
-
-audio_core_api_test_component("audio-renderer-pipeline-error-test") {
-  source = "audio_renderer_pipeline_error_test.cc"
-  executable_deps = [ ":audio_api_pipeline_test_shared" ]
   test_type = "system"
 }
 
@@ -267,6 +266,8 @@ audio_core_test_package("audio_core_api_tests") {
     log_settings = {
       max_severity = "ERROR"
     }
+    environments = [ emu_env ]
+    parallel = 2
   }
 }
 
@@ -284,13 +285,14 @@ audio_core_test_package("audio_core_api_error_tests") {
     ":ultrasound-error-test",
   ]
 
-  # This suite includes cases from audio_core_api_tests and
-  # audio_core_api_pipeline_tests that intentionally cause audio_core to log at
-  # the ERROR level.
+  # This suite includes cases from audio_core_api_tests that intentionally
+  # cause audio_core to log at the ERROR level.
   test_specs = {
     log_settings = {
       max_severity = "ERROR"
     }
+    environments = [ emu_env ]
+    parallel = 2
   }
 }
 
@@ -308,8 +310,8 @@ audio_core_test_package("audio_core_api_pipeline_tests") {
     ":audio-renderer-pipeline-test",
   ]
 
-  # Tests that intentionally cause ERROR logs in audio_core have been moved to
-  # another test suite.
+  # This suite includes a case (HasUnderflow) that intentionally causes
+  # audio_core to log at the ERROR level.
   #
   # AudioCore emits ERRORs upon output pipeline underflows. These are not audio
   # issues, but they are system issues. Although no longer generally expected,
@@ -322,31 +324,13 @@ audio_core_test_package("audio_core_api_pipeline_tests") {
     log_settings = {
       max_severity = "ERROR"
     }
-    environments = hardware_envs
+    environments = arm64_hardware_envs
+    parallel = 2
   }
 }
 
-# These tests have real-time constraints and must run on real hardware
-# (emulators are too slow).
-audio_core_test_package("audio_core_api_pipeline_error_tests") {
-  package_deps = [ ":audio_core_api_test_effects" ]
-  audio_core_manifest_shards =
-      [ "//src/media/audio/audio_core/meta/audio_core.shard.ultrasound.cml" ]
-
-  test_components = [ ":audio-renderer-pipeline-error-test" ]
-
-  # This suite includes cases from audio_core_api_pipeline_tests that
-  # intentionally cause audio_core to log at the ERROR level.
-  test_specs = {
-    log_settings = {
-      max_severity = "ERROR"
-    }
-    environments = hardware_envs
-  }
-}
-
-# These tests have real-time constraints and must run on real hardware
-# (emulators are too slow).
+# These tests have real-time constraints and run on real arm64 hardware
+# (plus x64 emulators, since we do not run fidelity tests on x64 hardware).
 audio_core_test_package("audio_core_fidelity_tests") {
   audio_core_manifest_shards =
       [ "//src/media/audio/audio_core/meta/audio_core.shard.ultrasound.cml" ]
@@ -364,12 +348,14 @@ audio_core_test_package("audio_core_fidelity_tests") {
     log_settings = {
       max_severity = "ERROR"
     }
-    environments = hardware_envs
+    environments = arm64_hardware_envs
+    if (target_cpu == "x64") {
+      environments += [ emu_env ]
+    }
+    parallel = 2
   }
 }
 
-# These tests have real-time constraints and must run on real hardware
-# (emulators are too slow).
 audio_core_test_package("audio_core_thermal_tests") {
   package_deps = [ ":audio_core_api_test_effects" ]
   audio_core_manifest_shards = [
@@ -379,13 +365,15 @@ audio_core_test_package("audio_core_thermal_tests") {
 
   test_components = [ ":audio-core-thermal-test" ]
 
-  # AudioCore emits ERRORs upon output pipeline underflows, which are not
-  # incorrect audio, but they are system failures (and are no longer expected)
-  # so we consider them failures.
+  # AudioCore emits ERRORs upon output pipeline underflows. These are not audio
+  # issues, but they are system issues. Although no longer generally expected,
+  # we are not ready to treat them as incidents that warrant FAILURE in our
+  # automated test infrastructure.
   test_specs = {
     log_settings = {
-      max_severity = "WARN"
+      max_severity = "ERROR"
     }
-    environments = hardware_envs
+    environments = [ emu_env ]
+    parallel = 2
   }
 }

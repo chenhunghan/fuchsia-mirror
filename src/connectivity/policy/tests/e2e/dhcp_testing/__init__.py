@@ -66,7 +66,7 @@ class DhcpHelper:
         self.access_point = access_point
         self.log_path = log_path
         if not self.openwrt_ap and not self.access_point:
-            raise signals.TestAbortClass("Requires at least one access point")
+            raise signals.TestError("Requires at least one access point")
 
     def setup_ap(
         self,
@@ -156,7 +156,7 @@ class DhcpHelper:
                 network=network,
             )
         else:
-            raise signals.TestAbortClass("Requires at least one access point")
+            raise signals.TestError("Requires at least one access point")
 
     async def get_device_ipv4_addr(
         self,
@@ -203,29 +203,14 @@ class DhcpHelper:
         else:
             raise signals.TestFailure("No access point found")
 
-    async def run_test_case_expect_dhcp_success(
-        self,
-        dhcp_parameters: dict[str, str] | None = None,
-        dhcp_options: dict[str, int | str] | None = None,
-    ) -> None:
+    async def run_test_case_expect_dhcp_success(self) -> None:
         """Starts the AP and DHCP server, and validates that the client
         connects and obtains an address.
-
-        Args:
-            dhcp_parameters: a dictionary of DHCP parameters.
-            dhcp_options: a dictionary of DHCP options.
         """
-        if dhcp_parameters is None:
-            dhcp_parameters = {}
-        if dhcp_options is None:
-            dhcp_options = {}
-
         ap_params = self.setup_ap()
         subnet_conf = dhcp_config.Subnet(
             subnet=ap_params.network,
             router=ap_params.ip,
-            additional_parameters=dhcp_parameters,
-            additional_options=dhcp_options,
         )
         dhcp_conf = dhcp_config.DhcpConfig(subnets=[subnet_conf])
 
@@ -268,7 +253,7 @@ class DhcpHelper:
                     )
                     raise signals.TestFailure("DUT failed to get an IP address")
         else:
-            raise signals.TestAbortClass("Requires at least one access point")
+            raise signals.TestError("Requires at least one access point")
 
         dhcp_logs = self.get_dhcp_logs()
         discover_count = dhcp_logs.count("DHCPDISCOVER")

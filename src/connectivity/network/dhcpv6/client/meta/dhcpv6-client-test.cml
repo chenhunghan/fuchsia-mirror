@@ -14,7 +14,7 @@
     children: [
         {
             name: "netstack_debug",
-            url: "#meta/netstack3-debug.cm",
+            url: "netstack-debug#meta/netstack3-debug.cm",
         },
     ],
     use: [

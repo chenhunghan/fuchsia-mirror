@@ -156,11 +156,6 @@ class VmPageOrMarker {
     return raw_ >> kMarkerShareCountShift;
   }
 
-  void SetMarkerShareCount(uint32_t share_count) {
-    DEBUG_ASSERT(IsMarker());
-    raw_ = kZeroMarkerType | (share_count << (kMarkerShareCountShift));
-  }
-
   void IncrementMarkerShareCount() {
     DEBUG_ASSERT(IsMarker());
     raw_ += (1 << (kMarkerShareCountShift));
@@ -847,13 +842,6 @@ class VmPageList final {
     return ForEveryPage<const VmPageOrMarker*>(this, per_page_func);
   }
 
-  // similar to ForEveryPage, but the per_page_func gets called with a VmPageOrMarkerRef instead of
-  // a const VmPageOrMarker*, allowing for limited mutation.
-  template <typename F>
-  zx_status_t ForEveryPageMutable(F per_page_func) {
-    return ForEveryPage<VmPageOrMarkerRef>(this, per_page_func);
-  }
-
   // walk the page tree, calling the passed in function on every tree node.
   template <typename F>
   zx_status_t ForEveryPageInRange(F per_page_func, uint64_t start_offset,
@@ -1224,11 +1212,6 @@ class VmPageList final {
       }
     }
     return true;
-  }
-
-  uint64_t HeapAllocationBytes() const {
-    auto utilization = list_.calculate_utilization_slow();
-    return utilization.nodes_in_bytes() + (utilization.stored_values * sizeof(VmPageListNode));
   }
 
   // Allow the implementation to use a one-past-the-end for VmPageListNode offsets.

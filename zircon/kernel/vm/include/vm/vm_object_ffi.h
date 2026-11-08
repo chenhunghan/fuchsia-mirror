@@ -35,6 +35,9 @@ FFI_ALWAYS_INLINE bool cpp_vm_object_is_resizable(const VmObject* vmo);
 FFI_ALWAYS_INLINE bool cpp_vm_object_is_discardable(const VmObject* vmo);
 FFI_ALWAYS_INLINE bool cpp_vm_object_is_contiguous(const VmObject* vmo);
 FFI_ALWAYS_INLINE bool cpp_vm_object_is_stream_compatible(const VmObject* vmo);
+FFI_ALWAYS_INLINE bool cpp_vm_object_is_dirty_tracked(const VmObject* vmo);
+FFI_ALWAYS_INLINE bool cpp_vm_object_debug_is_range_pinned(VmObject* vmo, uint64_t offset,
+                                                           uint64_t len);
 FFI_ALWAYS_INLINE void* cpp_vm_object_lock(const VmObject* vmo);
 FFI_ALWAYS_INLINE zx_status_t cpp_vm_object_resize(VmObject* vmo, uint64_t size);
 FFI_ALWAYS_INLINE zx_status_t cpp_vm_object_write(VmObject* vmo, const void* ptr, uint64_t offset,
@@ -73,6 +76,8 @@ FFI_ALWAYS_INLINE uint64_t cpp_vm_object_parent_user_id(const VmObject* vmo);
 FFI_ALWAYS_INLINE uint32_t cpp_vm_object_num_children(const VmObject* vmo);
 FFI_ALWAYS_INLINE zx_status_t cpp_vm_object_lookup(VmObject* vmo, uint64_t offset, uint64_t len,
                                                    void* ctx, cpp_vm_object_lookup_fn callback);
+FFI_ALWAYS_INLINE zx_status_t cpp_vm_object_lookup_fn_invoke(
+    const VmObject::LookupFunction* lookup_fn, uint64_t offset, paddr_t pa);
 FFI_ALWAYS_INLINE zx_status_t cpp_vm_object_lookup_contiguous(VmObject* vmo, uint64_t offset,
                                                               uint64_t len, paddr_t* out_paddr);
 FFI_ALWAYS_INLINE zx_status_t cpp_vm_object_get_page(VmObject* vmo, uint64_t offset,
@@ -149,6 +154,7 @@ FFI_ALWAYS_INLINE zx_status_t cpp_vm_object_zero_range_untracked(VmObject* vmo, 
                                                                  uint64_t len);
 FFI_ALWAYS_INLINE void cpp_vm_object_set_user_stream_size(VmObject* vmo, StreamSizeManager* ssm);
 
+void cpp_vm_object_get_name_locked(const VmObject* vmo, char* out_name, size_t len);
 __END_CDECLS
 
 #endif  // ZIRCON_KERNEL_VM_INCLUDE_VM_VM_OBJECT_FFI_H_

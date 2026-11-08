@@ -73,8 +73,61 @@ bool ProcSelfStatTest(perftest::RepeatState* state, int num_mappings) {
   return true;
 }
 
+// Measure the time taken by readlink() on /proc/self/fd/<N>.
+bool ProcSelfFdReadlinkTest(perftest::RepeatState* state) {
+  fbl::unique_fd fd(open("/dev/null", O_RDONLY));
+  FX_CHECK(fd.is_valid());
+  std::string path = "/proc/self/fd/" + std::to_string(fd.get());
+
+  char buf[256];
+  while (state->KeepRunning()) {
+    FX_CHECK(readlink(path.c_str(), buf, sizeof(buf)) > 0);
+  }
+  return true;
+}
+
+// Measure the time taken by stat() on /proc/self/fd/<N>.
+bool ProcSelfFdStatTest(perftest::RepeatState* state) {
+  fbl::unique_fd fd(open("/dev/null", O_RDONLY));
+  FX_CHECK(fd.is_valid());
+  std::string path = "/proc/self/fd/" + std::to_string(fd.get());
+
+  struct stat st;
+  while (state->KeepRunning()) {
+    FX_CHECK(stat(path.c_str(), &st) == 0);
+  }
+  return true;
+}
+
+// Measure the time taken by open()+read()+close() on /proc/self/fdinfo/<N>.
+bool ProcSelfFdInfoTest(perftest::RepeatState* state) {
+  state->DeclareStep("open");
+  state->DeclareStep("read");
+  state->DeclareStep("close");
+
+  fbl::unique_fd target_fd(open("/dev/null", O_RDONLY));
+  FX_CHECK(target_fd.is_valid());
+  std::string path = "/proc/self/fdinfo/" + std::to_string(target_fd.get());
+
+  char buf[256];
+  while (state->KeepRunning()) {
+    int fd = open(path.c_str(), O_RDONLY);
+    FX_CHECK(fd >= 0);
+    state->NextStep();
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    FX_CHECK(n > 0);
+    state->NextStep();
+    FX_CHECK(close(fd) == 0);
+  }
+  return true;
+}
+
 void RegisterTests() {
   perftest::RegisterTest("Filesystem_Stat_Ext4", StatTest, "/");
+  perftest::RegisterTest("Filesystem_Stat_ProcSelf", StatTest, "/proc/self");
+  perftest::RegisterTest("Filesystem_Stat_ProcSelfAttrCurrent", StatTest,
+                         "/proc/self/attr/current");
+  perftest::RegisterTest("Filesystem_Stat_ProcSelfNsMnt", StatTest, "/proc/self/ns/mnt");
   perftest::RegisterTest("Filesystem_Fstat_Ext4", FstatTest, "/");
 
   // Test open() times for different filesystem implementations.
@@ -82,6 +135,7 @@ void RegisterTests() {
   perftest::RegisterTest("Filesystem_Open_DevPts", OpenTest, "/dev/pts");
   perftest::RegisterTest("Filesystem_Open_DevTmpfs", OpenTest, "/dev");
   perftest::RegisterTest("Filesystem_Open_Ext4", OpenTest, "/");
+  perftest::RegisterTest("Filesystem_Open_Proc", OpenTest, "/proc");
   perftest::RegisterTest("Filesystem_Open_Remotefs", OpenTest, "/container");
   perftest::RegisterTest("Filesystem_Open_Sysfs", OpenTest, "/sys");
   perftest::RegisterTest("Filesystem_Open_Tmpfs", OpenTest, "/tmp");
@@ -90,6 +144,10 @@ void RegisterTests() {
     std::string name = "Filesystem_ProcSelfStat/" + std::to_string(num_mappings) + "mappings";
     perftest::RegisterTest(name.c_str(), ProcSelfStatTest, num_mappings);
   }
+
+  perftest::RegisterTest("Filesystem_Readlink_ProcSelfFd", ProcSelfFdReadlinkTest);
+  perftest::RegisterTest("Filesystem_Stat_ProcSelfFd", ProcSelfFdStatTest);
+  perftest::RegisterTest("Filesystem_OpenRead_ProcSelfFdInfo", ProcSelfFdInfoTest);
 }
 PERFTEST_CTOR(RegisterTests)
 

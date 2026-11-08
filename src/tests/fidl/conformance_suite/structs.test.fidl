@@ -22,3 +22,20 @@ type Uint64Uint32Uint16Uint8 = struct {
     f3 uint16;
     f4 uint8;
 };
+
+type InnerStructWithString = struct {
+    s string;
+};
+
+type NestedStructWithStringBeforeUint8 = struct {
+    inner InnerStructWithString;
+    trailing uint8;
+};
+
+type BoolArrayStruct = struct {
+    arr array<bool, 4>;
+};
+
+type BoolVectorStruct = struct {
+    vec vector<bool>;
+};

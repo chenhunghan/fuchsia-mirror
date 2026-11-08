@@ -69,12 +69,12 @@ Attributes mapping table for `go_binary` targets:
    - Set `srcs` to test Go source files (e.g. `["*_test.go"]` or specific test files).
    - Set `embed = [":lib"]` (or `[":main"]`) to embed the library under test.
    - Set `deps` to test-specific dependencies (e.g., `//third_party/golibs:github.com/google/go-cmp/cmp`, `//third_party/golibs:github.com/google/go-cmp/cmp/cmpopts`).
-   - Set `visibility = ["//tools:__pkg__"]` (or the parent package containing the top-level `host_tests` suite).
+   - Omit `visibility` on `host_go_test` (individual test targets are always package-private).
 
 
 ### Step 4: Host Test Integration
-1. **Do NOT create intermediate package-level `test_suite(name = "tests", ...)` targets** inside each tool's `BUILD.bazel`.
-2. Integrate individual `host_go_test` target(s) directly into the top-level `"host_tests"` `test_suite` in the parent or ancestor directory (e.g., `//tools:host_tests` in `//tools/BUILD.bazel` or `//build/tools:host_tests` in `//build/tools/BUILD.bazel`).
+1. Define a package `test_suite(name = "host_tests", tests = [":<test_target>", ...], target_compatible_with = HOST_OS_CONSTRAINTS, visibility = ["//tools:__pkg__"])` (always listing explicit test targets in `tests = [...]`, never `tests = []`, and setting `visibility` to the aggregation package containing the area `host_tests` `test_suite()`; if modifying an existing `test_suite()` that had an empty `tests` attribute, add all existing test targets in the package to `tests = [...]` or start from the existing list and remove entries, and request human verification that all relevant tests have been included without allowing agents to resolve the comment) as the **first** target in the tool's `BUILD.bazel` (never annotated with `# @bazel2gn:skip`; `bazel2gn` ignores `test_suite()`).
+2. Add `"//<pkg>:host_tests"` to the area's `"host_tests"` aggregation `test_suite()` (e.g., `//tools:host_tests` in `//tools/BUILD.bazel` or `//build/tools:host_tests` in `//build/tools/BUILD.bazel`).
 3. **Remove migrated tests from GN:** Remove the legacy test target from the parent GN test group (e.g., `group("tests_no_e2e")` in `//tools/BUILD.gn` or `group("tests")` in `//build/tools/BUILD.gn`). Ensure unmigrated GN tests remain in GN. Exception: if `BUILD.gn` is kept because the library still has GN users, the test runs in both build systems (see [Testing libraries in both build systems](../../../../../../docs/development/build/bazel_concepts/tests.md#tests-in-both-build-systems)): `bazel2gn` generates a GN `go_test` from the `host_go_test`, so keep it listed in the GN test group as `":<name>($host_toolchain)"`.
 
 
@@ -119,9 +119,9 @@ Bazel enforces strict dependency checking for Go compile steps.
   - If all targets in original `BUILD.gn` are migrated and not referenced by targets in other GN build file (and not in `host_labels`): omit `# @bazel2gn:skip`.
   - If any migrated target in `BUILD.gn` is referenced by targets in other GN build files: add `# @bazel2gn:skip` before the binary in `BUILD.bazel`, and sync remaining targets with `bazel2gn`.
 
-### 7. Creating Unnecessary Package-Level Test Suites
-- **Pitfall:** Defining an intermediate `test_suite(name = "tests", ...)` inside each tool's package `BUILD.bazel`.
-- **Rule:** Do NOT create package-level `test_suite` targets for Go host tools. Include the individual `host_go_test` target(s) directly into the top-level `//tools:host_tests` suite in `//tools/BUILD.bazel`, and restrict test target visibility to `visibility = ["//tools:__pkg__"]`.
+### 7. Package-Level `test_suite` and Test Visibility
+- **Pitfall:** Referencing individual `host_go_test` targets directly from `//tools:host_tests` or setting `visibility` on `host_go_test`.
+- **Rule:** Keep `host_go_test` targets package-private (omit `visibility`), define `test_suite(name = "host_tests", tests = [":<test_target>", ...], target_compatible_with = HOST_OS_CONSTRAINTS, visibility = ["//tools:__pkg__"])` (always listing explicit test targets in `tests = [...]`, never `tests = []`) as the first target in the package's `BUILD.bazel` (without `# @bazel2gn:skip`; `bazel2gn` ignores `test_suite()`), and add `"//<pkg>:host_tests"` to the area's `//tools:host_tests` (or `//build/tools:host_tests`) aggregation `test_suite()`.
 
 ### 8. Test Dependencies After Library Sync (When `BUILD.gn` is Retained)
 - **Pitfall:** When `BUILD.gn` is retained and `bazel2gn` syncs `go_library` back to GN without test files, the synced GN library will not depend on test-only libraries.

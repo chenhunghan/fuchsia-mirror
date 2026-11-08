@@ -65,11 +65,7 @@ fuchsia_component("vsock-sshd-component") {
   component_name = "vsock-sshd"
   manifest = "meta/vsock-sshd.cml"
 
-  deps = [
-    # Ensure this isn't included in production
-    "//build/validate:non_production_tag",
-    "//third_party/openssh-portable:sshd",
-  ]
+  deps = [ "//third_party/openssh-portable:sshd" ]
 }
 
 fuchsia_component("vsock-sshd-host-component") {
@@ -78,9 +74,6 @@ fuchsia_component("vsock-sshd-host-component") {
 
   deps = [
     ":bin",
-
-    # Ensure this isn't included in production
-    "//build/validate:non_production_tag",
     "//third_party/openssh-portable:hostkeygen",
   ]
 }

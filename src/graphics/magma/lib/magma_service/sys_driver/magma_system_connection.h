@@ -42,6 +42,8 @@ class MagmaSystemConnection : private MagmaSystemContext::Owner,
                              uint64_t client_id) override;
   magma::Status ReleaseObject(uint64_t object_id,
                               fuchsia_gpu_magma::wire::ObjectType object_type) override;
+  magma::Status CreateBuffer(uint64_t size, uint64_t flags, uint64_t client_id,
+                             zx::vmo* vmo_out) override;
   magma::Status CreateContext(uint32_t context_id) override;
   magma::Status CreateContext2(uint32_t context_id, uint64_t priority) override;
   magma::Status DestroyContext(uint32_t context_id) override;

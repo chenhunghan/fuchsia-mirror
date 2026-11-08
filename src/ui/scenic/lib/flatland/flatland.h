@@ -380,6 +380,11 @@ class Flatland : public fidl::WireServer<fuchsia_ui_composition::Flatland>,
   void ResetLayer(ResetLayerRequestView request, ResetLayerCompleter::Sync& completer) override;
   void ResetLayer(LayerId layer_id);
 
+  // |fuchsia_ui_composition::Flatland2|
+  void ResetLayerImage(ResetLayerImageRequestView request,
+                       ResetLayerImageCompleter::Sync& completer) override;
+  void ResetLayerImage(LayerId layer_id);
+
   // Called just before the FIDL client receives the event of the same name, indicating that this
   // Flatland instance should allow a |additional_present_credits| calls to Present().
   void OnNextFrameBegin(uint32_t additional_present_credits,
@@ -668,7 +673,8 @@ class Flatland : public fidl::WireServer<fuchsia_ui_composition::Flatland>,
   void BindLayerImage(LayerObject& layer, allocation::GlobalImageId id);
 
   // Releases `ids` through the buffer collection importers and forgets their
-  // import tokens.  Called when a frame's release fence signals.
+  // import tokens. Called when a frame's release fence signals, or synchronously
+  // from `ReleaseImageImmediately()` and `ReleaseImageImmediately2()`.
   void ReleaseImages(std::span<const allocation::GlobalImageId> ids);
 
   // TODO(https://fxbug.dev/523371761): after transition to Flatland2 UberStruct schema is complete,

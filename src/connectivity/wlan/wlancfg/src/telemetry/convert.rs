@@ -188,7 +188,7 @@ pub fn convert_disconnect_info(
         disconnect_source: info.disconnect_source,
         original_bss_desc: Box::new(info.ap_state.original().clone()),
         current_rssi_dbm: info.ap_state.tracked.signal.rssi_dbm,
-        current_snr_db: info.ap_state.tracked.signal.snr_db,
+        current_snr_db: Some(info.ap_state.tracked.signal.snr_db),
         current_channel: info.ap_state.tracked.channel,
     }
 }
@@ -352,7 +352,7 @@ mod tests {
         );
         assert_eq!(converted.original_bss_desc.bssid, bss.bssid);
         assert_eq!(converted.current_rssi_dbm, -55);
-        assert_eq!(converted.current_snr_db, 32);
+        assert_eq!(converted.current_snr_db, Some(32));
         assert_eq!(converted.current_channel, bss.channel);
     }
 

@@ -54,7 +54,6 @@ fx_test_component(
     name = "tuf-lib-test-component",
     testonly = True,
     compiled_manifest = ":test-component",
-    component_name = "tuf-lib-test",
     visibility = ["//visibility:private"],
     deps = [":tuf_lib_test_packaged_bin"],
 )

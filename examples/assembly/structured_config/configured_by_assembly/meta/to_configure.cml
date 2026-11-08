@@ -8,9 +8,15 @@
     },
 
     // [START config]
-    config: {
-        enable_foo: { type: "bool" },
-    },
+    use: [
+        {
+            config: "fuchsia.example.EnableFoo",
+            key: "enable_foo",
+            type: "bool",
+            availability: "transitional",
+            default: false,
+        },
+    ],
 
     // [END config]
 }

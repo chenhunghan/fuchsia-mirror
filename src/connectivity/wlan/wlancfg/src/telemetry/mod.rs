@@ -19,6 +19,7 @@ use fidl_fuchsia_wlan_common as fidl_common;
 use fidl_fuchsia_wlan_ieee80211 as fidl_ieee80211;
 use fidl_fuchsia_wlan_internal as fidl_internal;
 use fidl_fuchsia_wlan_sme as fidl_sme;
+use fidl_fuchsia_wlan_stats as fidl_stats;
 use fuchsia_async::{self as fasync, TimeoutExt};
 use fuchsia_inspect::{
     ArrayProperty, InspectType, Inspector, LazyNode, Node as InspectNode, NumericProperty,
@@ -302,7 +303,7 @@ pub enum TelemetryEvent {
         info: Option<DisconnectInfo>,
     },
     OnSignalReport {
-        ind: fidl_internal::SignalReportIndication,
+        report: fidl_stats::ConnectionSignalReport,
     },
     OnSignalVelocityUpdate {
         rssi_velocity: f64,
@@ -1577,18 +1578,18 @@ impl Telemetry {
                 };
                 self.last_checked_connection_state = now;
             }
-            TelemetryEvent::OnSignalReport { ind } => {
+            TelemetryEvent::OnSignalReport { report } => {
                 if let ConnectionState::Connected(state) = &mut self.connection_state {
-                    if let Some(rssi) = ind.rssi_dbm {
+                    if let Some(rssi) = report.rssi_dbm {
                         state.ap_state.tracked.signal.rssi_dbm = rssi;
                         self.stats_logger
-                            .log_signal_report_metrics(rssi, ind.tx_rate_500kbps)
+                            .log_signal_report_metrics(rssi, report.tx_rate_500kbps)
                             .await;
                     }
-                    if let Some(snr) = ind.snr_db {
+                    if let Some(snr) = report.snr_db {
                         state.ap_state.tracked.signal.snr_db = snr;
                     }
-                    if ind.rssi_dbm.is_some() || ind.snr_db.is_some() {
+                    if report.rssi_dbm.is_some() || report.snr_db.is_some() {
                         state.last_signal_report = now;
                     }
                 }
@@ -4541,13 +4542,13 @@ mod tests {
         });
 
         // Send a signal, which resets timing information for determining driver unresponsiveness
-        let ind = fidl_internal::SignalReportIndication {
+        let report = fidl_stats::ConnectionSignalReport {
             rssi_dbm: Some(-40),
             snr_db: Some(30),
             tx_rate_500kbps: Some(0),
             ..Default::default()
         };
-        test_helper.telemetry_sender.send(TelemetryEvent::OnSignalReport { ind });
+        test_helper.telemetry_sender.send(TelemetryEvent::OnSignalReport { report });
 
         test_helper.advance_by(UNRESPONSIVE_FLAG_MIN_DURATION, test_fut.as_mut());
         assert_data_tree_with_respond_blocking_req!(test_helper, test_fut, root: contains {
@@ -6505,21 +6506,23 @@ mod tests {
         test_helper.send_connected_event(random_bss_description!(Wpa2));
 
         // Send some RSSI velocities
-        let ind_1 = fidl_internal::SignalReportIndication {
+        let report_1 = fidl_stats::ConnectionSignalReport {
             rssi_dbm: Some(-50),
             snr_db: Some(30),
             tx_rate_500kbps: Some(0),
             ..Default::default()
         };
-        let ind_2 = fidl_internal::SignalReportIndication {
+        let report_2 = fidl_stats::ConnectionSignalReport {
             rssi_dbm: Some(-61),
             snr_db: Some(40),
             tx_rate_500kbps: Some(0),
             ..Default::default()
         };
-        test_helper.telemetry_sender.send(TelemetryEvent::OnSignalReport { ind: ind_1.clone() });
-        test_helper.telemetry_sender.send(TelemetryEvent::OnSignalReport { ind: ind_1 });
-        test_helper.telemetry_sender.send(TelemetryEvent::OnSignalReport { ind: ind_2 });
+        test_helper
+            .telemetry_sender
+            .send(TelemetryEvent::OnSignalReport { report: report_1.clone() });
+        test_helper.telemetry_sender.send(TelemetryEvent::OnSignalReport { report: report_1 });
+        test_helper.telemetry_sender.send(TelemetryEvent::OnSignalReport { report: report_2 });
 
         // After an hour has passed, the RSSI should be logged to cobalt
         test_helper.advance_by(zx::MonotonicDuration::from_hours(1), test_fut.as_mut());
@@ -6535,13 +6538,13 @@ mod tests {
         test_helper.clear_cobalt_events();
 
         // Send another different RSSI
-        let ind_3 = fidl_internal::SignalReportIndication {
+        let report_3 = fidl_stats::ConnectionSignalReport {
             rssi_dbm: Some(-75),
             snr_db: Some(30),
             tx_rate_500kbps: Some(0),
             ..Default::default()
         };
-        test_helper.telemetry_sender.send(TelemetryEvent::OnSignalReport { ind: ind_3 });
+        test_helper.telemetry_sender.send(TelemetryEvent::OnSignalReport { report: report_3 });
         test_helper.advance_by(zx::MonotonicDuration::from_hours(1), test_fut.as_mut());
 
         // Check that the previously logged values are not logged again, and the new value is
@@ -6619,38 +6622,46 @@ mod tests {
         // RSSI is only logged if in the connected state.
         test_helper.send_connected_event(random_bss_description!(Wpa2));
 
-        let ind_min = fidl_internal::SignalReportIndication {
+        let report_min = fidl_stats::ConnectionSignalReport {
             rssi_dbm: Some(-128),
             snr_db: Some(30),
             tx_rate_500kbps: Some(0),
             ..Default::default()
         };
         // 0 is the highest histogram bucket and 1 and above are in the overflow bucket.
-        let ind_max = fidl_internal::SignalReportIndication {
+        let report_max = fidl_stats::ConnectionSignalReport {
             rssi_dbm: Some(0),
             snr_db: Some(30),
             tx_rate_500kbps: Some(0),
             ..Default::default()
         };
-        let ind_overflow_1 = fidl_internal::SignalReportIndication {
+        let report_overflow_1 = fidl_stats::ConnectionSignalReport {
             rssi_dbm: Some(1),
             snr_db: Some(30),
             tx_rate_500kbps: Some(0),
             ..Default::default()
         };
-        let ind_overflow_2 = fidl_internal::SignalReportIndication {
+        let report_overflow_2 = fidl_stats::ConnectionSignalReport {
             rssi_dbm: Some(127),
             snr_db: Some(30),
             tx_rate_500kbps: Some(0),
             ..Default::default()
         };
         // Send the telemetry events. -10 is the min velocity bucket and 10 is the max.
-        test_helper.telemetry_sender.send(TelemetryEvent::OnSignalReport { ind: ind_min.clone() });
-        test_helper.telemetry_sender.send(TelemetryEvent::OnSignalReport { ind: ind_min.clone() });
-        test_helper.telemetry_sender.send(TelemetryEvent::OnSignalReport { ind: ind_min });
-        test_helper.telemetry_sender.send(TelemetryEvent::OnSignalReport { ind: ind_max });
-        test_helper.telemetry_sender.send(TelemetryEvent::OnSignalReport { ind: ind_overflow_1 });
-        test_helper.telemetry_sender.send(TelemetryEvent::OnSignalReport { ind: ind_overflow_2 });
+        test_helper
+            .telemetry_sender
+            .send(TelemetryEvent::OnSignalReport { report: report_min.clone() });
+        test_helper
+            .telemetry_sender
+            .send(TelemetryEvent::OnSignalReport { report: report_min.clone() });
+        test_helper.telemetry_sender.send(TelemetryEvent::OnSignalReport { report: report_min });
+        test_helper.telemetry_sender.send(TelemetryEvent::OnSignalReport { report: report_max });
+        test_helper
+            .telemetry_sender
+            .send(TelemetryEvent::OnSignalReport { report: report_overflow_1 });
+        test_helper
+            .telemetry_sender
+            .send(TelemetryEvent::OnSignalReport { report: report_overflow_2 });
         test_helper.advance_by(zx::MonotonicDuration::from_hours(1), test_fut.as_mut());
 
         // Check that the min, max, underflow, and overflow buckets are used correctly.

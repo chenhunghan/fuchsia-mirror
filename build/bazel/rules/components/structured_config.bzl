@@ -15,12 +15,7 @@ load("@fuchsia_rules_common//components:providers.bzl", "FuchsiaComponentManifes
 load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
 
-# TODO(wittrock): Build configc with Bazel and use `//tools/configc` instead,
-# once it and its dependencies (in particular //src/sys/pkg/lib/fuchsia-pkg)
-# are available in Bazel. Until then, configc is built by GN and exposed to
-# Bazel through @gn_targets, which requires every bazel_action() that builds
-# these targets to depend on "//tools/configc:bazel_input($host_toolchain)".
-_CONFIGC = "@gn_targets//toolchain_host_x64/tools/configc:configc"
+_CONFIGC = "//tools/configc"
 
 _CONFIGC_ATTRS = {
     "compiled_manifest": attr.label(

@@ -25,6 +25,7 @@
             "kgsl",
             "magma supported_vendors=0x13B5,0x5143,0x8086",
             "power_residency",
+            "usbfs",
 
             // keep-sorted end
         ],

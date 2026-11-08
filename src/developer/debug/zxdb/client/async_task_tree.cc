@@ -4,6 +4,8 @@
 
 #include "src/developer/debug/zxdb/client/async_task_tree.h"
 
+#include <ranges>
+
 #include "src/developer/debug/zxdb/client/stack.h"
 #include "src/developer/debug/zxdb/client/thread.h"
 
@@ -34,8 +36,10 @@ void AsyncTaskTree::Sync(Stack& stack,
 void AsyncTaskTree::ForEach(fit::function<void(const TaskEntry&)> fn) const {
   std::vector<TaskEntry> stack;
 
-  // Initialize the stack with the root tasks.
-  for (const auto& root_task : GetRootTasks()) {
+  // Push root tasks in reverse order so the first root task is popped and
+  // visited first.
+  const auto roots = GetRootTasks();
+  for (const auto& root_task : std::views::reverse(roots)) {
     stack.push_back({.task = root_task, .depth = 0});
   }
 
@@ -45,9 +49,9 @@ void AsyncTaskTree::ForEach(fit::function<void(const TaskEntry&)> fn) const {
 
     fn(entry);
 
-    // Children are added at the end (they will be processed next).
-    const auto& children = entry.task.GetChildren();
-    for (const auto& child : children) {
+    // Push children in reverse order so the first child is processed next.
+    const auto children = entry.task.GetChildren();
+    for (const auto& child : std::views::reverse(children)) {
       stack.push_back({.task = child, .depth = entry.depth + 1});
     }
   }

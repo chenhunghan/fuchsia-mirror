@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#![allow(clippy::disallowed_types)]
+
 use crate::{MutexLike, RwLockLike};
 use fuchsia_rcu::RcuDroppable;
 use fuchsia_sync::{
@@ -10,7 +12,7 @@ use fuchsia_sync::{
 };
 use std::marker::PhantomData;
 
-pub use tracking::LockLevelToken;
+pub use tracking::{DynamicLockTracking, LockLevelToken};
 
 #[cfg(feature = "detect_lock_dep_cycles")]
 mod tracking {
@@ -283,23 +285,25 @@ mod tracking {
     }
 
     /// Tracking information for dynamic locks.
-    #[derive(RcuDroppable)]
+    #[derive(Debug, RcuDroppable)]
     pub struct DynamicLockTracking {
         lock_id: usize,
         name: &'static str,
     }
 
     impl DynamicLockTracking {
-        pub(super) const fn new(lock_id: usize, name: &'static str) -> Self {
-            Self { lock_id, name }
+        pub const fn new<L: crate::LockLevel>() -> Self {
+            Self { lock_id: L::LOCK_ID, name: L::NAME }
+        }
+
+        #[inline(always)]
+        #[track_caller]
+        pub fn acquire(&self) -> LockLevelToken {
+            LockLevelToken::new(self.lock_id, self.name)
         }
 
         pub(super) fn lock_id(&self) -> usize {
             self.lock_id
-        }
-
-        pub(super) fn name(&self) -> &'static str {
-            self.name
         }
     }
 
@@ -432,20 +436,17 @@ mod tracking {
     pub struct UnlockedGuard {}
 
     /// Tracking information for dynamic locks.
-    #[derive(RcuDroppable)]
+    #[derive(Debug, RcuDroppable)]
     pub struct DynamicLockTracking {}
 
     impl DynamicLockTracking {
-        pub(super) const fn new(_lock_id: usize, _name: &'static str) -> Self {
+        pub const fn new<L: crate::LockLevel>() -> Self {
             Self {}
         }
 
-        pub(super) fn lock_id(&self) -> usize {
-            0
-        }
-
-        pub(super) fn name(&self) -> &'static str {
-            ""
+        #[inline(always)]
+        pub fn acquire(&self) -> LockLevelToken {
+            LockLevelToken::new(0, "")
         }
     }
 
@@ -499,14 +500,14 @@ impl<T> DynamicLockDepMutex<T> {
     pub const fn new<L: crate::LockLevel>(value: T) -> Self {
         Self {
             inner: fuchsia_sync::Mutex::new(value),
-            tracking: tracking::DynamicLockTracking::new(L::LOCK_ID, L::NAME),
+            tracking: tracking::DynamicLockTracking::new::<L>(),
         }
     }
 
     #[inline(always)]
     #[track_caller]
     pub fn lock(&self) -> LockDepGuard<'_, T> {
-        let token = tracking::LockLevelToken::new(self.tracking.lock_id(), self.tracking.name());
+        let token = self.tracking.acquire();
         LockDepGuard { inner: self.inner.lock(), token }
     }
 
@@ -514,7 +515,7 @@ impl<T> DynamicLockDepMutex<T> {
     #[track_caller]
     pub fn try_lock(&self) -> Option<LockDepGuard<'_, T>> {
         let inner = self.inner.try_lock()?;
-        let token = tracking::LockLevelToken::new(self.tracking.lock_id(), self.tracking.name());
+        let token = self.tracking.acquire();
         Some(LockDepGuard { inner, token })
     }
 
@@ -712,14 +713,14 @@ impl<T> DynamicLockDepRwLock<T> {
     pub const fn new<L: crate::LockLevel>(value: T) -> Self {
         Self {
             inner: fuchsia_sync::RwLock::new(value),
-            tracking: tracking::DynamicLockTracking::new(L::LOCK_ID, L::NAME),
+            tracking: tracking::DynamicLockTracking::new::<L>(),
         }
     }
 
     #[inline(always)]
     #[track_caller]
     pub fn read(&self) -> LockDepReadGuard<'_, T> {
-        let token = tracking::LockLevelToken::new(self.tracking.lock_id(), self.tracking.name());
+        let token = self.tracking.acquire();
         LockDepReadGuard { inner: self.inner.read(), token }
     }
 
@@ -727,14 +728,14 @@ impl<T> DynamicLockDepRwLock<T> {
     #[track_caller]
     pub fn try_read(&self) -> Option<LockDepReadGuard<'_, T>> {
         let inner = self.inner.try_read()?;
-        let token = tracking::LockLevelToken::new(self.tracking.lock_id(), self.tracking.name());
+        let token = self.tracking.acquire();
         Some(LockDepReadGuard { inner, token })
     }
 
     #[inline(always)]
     #[track_caller]
     pub fn write(&self) -> LockDepWriteGuard<'_, T> {
-        let token = tracking::LockLevelToken::new(self.tracking.lock_id(), self.tracking.name());
+        let token = self.tracking.acquire();
         LockDepWriteGuard { inner: self.inner.write(), token }
     }
 
@@ -742,7 +743,7 @@ impl<T> DynamicLockDepRwLock<T> {
     #[track_caller]
     pub fn try_write(&self) -> Option<LockDepWriteGuard<'_, T>> {
         let inner = self.inner.try_write()?;
-        let token = tracking::LockLevelToken::new(self.tracking.lock_id(), self.tracking.name());
+        let token = self.tracking.acquire();
         Some(LockDepWriteGuard { inner, token })
     }
 

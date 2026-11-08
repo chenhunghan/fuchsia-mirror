@@ -335,20 +335,27 @@
                 ],
             },
             {
-                // We restrict access to component.resolution.Resolver because it gives direct
-                // access to executable package handles.
-                source_moniker: "/bootstrap/full_resolver",
+                source_moniker: "/core/lowpanservice",
                 source: "component",
-                source_name: "fuchsia.component.resolution.Resolver",
+                source_name: "fuchsia.factory.lowpan.FactoryLookup",
                 capability: "protocol",
                 target_monikers: [
-                    "/bootstrap/driver_index",
+                    "/toolbox",
                 ],
             },
             {
                 source_moniker: "/core/lowpanservice",
                 source: "component",
-                source_name: "fuchsia.factory.lowpan.FactoryLookup",
+                source_name: "fuchsia.lowpan.device.CountersConnector",
+                capability: "protocol",
+                target_monikers: [
+                    "/toolbox",
+                ],
+            },
+            {
+                source_moniker: "/core/lowpanservice",
+                source: "component",
+                source_name: "fuchsia.lowpan.device.DeviceConnector",
                 capability: "protocol",
                 target_monikers: [
                     "/toolbox",
@@ -370,7 +377,79 @@
             {
                 source_moniker: "/core/lowpanservice",
                 source: "component",
-                source_name: "fuchsia.lowpan.device.DeviceRouterExtraConnector",
+                source_name: "fuchsia.lowpan.device.EnergyScanConnector",
+                capability: "protocol",
+                target_monikers: [
+                    "/toolbox",
+                ],
+            },
+            {
+                source_moniker: "/core/lowpanservice",
+                source: "component",
+                source_name: "fuchsia.lowpan.experimental.DeviceConnector",
+                capability: "protocol",
+                target_monikers: [
+                    "/toolbox",
+                ],
+            },
+            {
+                source_moniker: "/core/lowpanservice",
+                source: "component",
+                source_name: "fuchsia.lowpan.experimental.DeviceExtraConnector",
+                capability: "protocol",
+                target_monikers: [
+                    "/toolbox",
+                ],
+            },
+            {
+                source_moniker: "/core/lowpanservice",
+                source: "component",
+                source_name: "fuchsia.lowpan.experimental.DeviceRouteConnector",
+                capability: "protocol",
+                target_monikers: [
+                    "/toolbox",
+                ],
+            },
+            {
+                source_moniker: "/core/lowpanservice",
+                source: "component",
+                source_name: "fuchsia.lowpan.experimental.DeviceRouteExtraConnector",
+                capability: "protocol",
+                target_monikers: [
+                    "/toolbox",
+                ],
+            },
+            {
+                source_moniker: "/core/lowpanservice",
+                source: "component",
+                source_name: "fuchsia.lowpan.experimental.LegacyJoiningConnector",
+                capability: "protocol",
+                target_monikers: [
+                    "/toolbox",
+                ],
+            },
+            {
+                source_moniker: "/core/lowpanservice",
+                source: "component",
+                source_name: "fuchsia.lowpan.thread.DatasetConnector",
+                capability: "protocol",
+                target_monikers: [
+                    "/toolbox",
+                ],
+            },
+            {
+                source_moniker: "/core/lowpanservice",
+                source: "component",
+                source_name: "fuchsia.lowpan.thread.FeatureConnector",
+                capability: "protocol",
+                target_monikers: [
+                    "/toolbox",
+                ],
+            },
+            {
+                source_moniker: "/core/lowpanservice",
+                source: "component",
+                source_name: "fuchsia.lowpan.thread.MeshcopConnector",
                 capability: "protocol",
                 target_monikers: [
                     "/toolbox",
@@ -408,7 +487,6 @@
                     "/bootstrap/sysinfo",
                     "/bootstrap/vboot-fwparam",
                     "/core/audio_recording",
-                    "/core/bt-rootcanal",
                     "/core/driver_playground",
                     "/core/factory",
                     "/core/factory_env",

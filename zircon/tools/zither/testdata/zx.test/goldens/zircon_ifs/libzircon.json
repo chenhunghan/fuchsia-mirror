@@ -1,4 +1,5 @@
 [
+    "zx_channel_create",
     "zx_channel_read",
     "zx_channel_write",
     "zx_clock_get_monotonic",

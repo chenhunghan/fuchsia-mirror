@@ -384,7 +384,7 @@ bitfield! {
     /// [Record headers]: https://fuchsia.dev/fuchsia-src/development/tracing/trace-format#record_header
     /// [Argument headers]: https://fuchsia.dev/fuchsia-src/development/tracing/trace-format#argument_header
     #[derive(IntoBytes, FromBytes, KnownLayout, Immutable)]
-    pub struct Header(u64);
+    pub struct Header(pub u64);
     impl Debug;
 
     /// Record type.

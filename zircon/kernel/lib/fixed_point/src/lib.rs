@@ -5,7 +5,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-//! Fixed point arithmetic helpers mirroring `<lib/fixed_point.h>`.
+//! Fixed point arithmetic helpers.
 //!
 //! The central type is [`Fp3264`], a 32.64 unsigned fixed point number (32
 //! integer bits and 64 fractional bits) used by platform timer code to convert

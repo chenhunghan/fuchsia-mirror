@@ -19,6 +19,7 @@
             protocol: [
                 "fuchsia.power.battery.BatteryManager",
                 "fuchsia.power.battery.test.BatterySimulator",
+                "fuchsia.power.battery.test.GovernorDebug",
             ],
         },
     ],
@@ -82,7 +83,10 @@
             from: "self",
         },
         {
-            protocol: "fuchsia.power.battery.test.BatterySimulator",
+            protocol: [
+                "fuchsia.power.battery.test.BatterySimulator",
+                "fuchsia.power.battery.test.GovernorDebug",
+            ],
             from: "self",
         },
     ],

@@ -64,8 +64,8 @@ fn handle_dup_replace_process(
     }
 
     // When replacing, the source handle is removed from the table (and closed when the returned
-    // `HandleOwner` drops) exactly where C++ called `RemoveHandleLocked`: on a rights mismatch and
-    // after a successful `Handle::dup`. A `NO_MEMORY` failure leaves the source handle in place.
+    // `HandleOwner` drops) on a rights mismatch and after a successful `dup`; a `NO_MEMORY`
+    // failure from `dup` leaves the source handle in place.
     if rights == ZX_RIGHT_SAME_RIGHTS {
         rights = source.as_ref().rights();
     } else if (source.as_ref().rights() & rights) != rights {
@@ -125,7 +125,7 @@ pub fn sys_handle_replace(
 mod tests {
     use super::{handle_dup_replace_process, sys_handle_close};
     use crate::object::{
-        EventPairDispatcher, Handle, HandleValue, JobDispatcher, ProcessDispatcher,
+        EventPairDispatcher, Handle, HandleValue, ProcessDispatcher, get_root_job_dispatcher,
     };
     use unittest::{expect_eq, expect_err, expect_ok};
     use zx_status::Status;
@@ -141,7 +141,7 @@ mod tests {
     #[test]
     fn test_handle_duplicate_and_replace_logic() {
         let (proc_handle, _proc_rights, _vmar, _vmar_rights) =
-            ProcessDispatcher::create(JobDispatcher::get_root_job(), b"test-handle-ops", 0)
+            ProcessDispatcher::create(get_root_job_dispatcher().clone(), b"test-handle-ops", 0)
                 .expect("failed to create process");
         let process = proc_handle.dispatcher();
 

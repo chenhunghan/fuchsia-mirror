@@ -363,5 +363,5 @@ tests:
 python3 -m unittest discover -s tools/devshell/worktree/tests -p "test_*.py"
 
 # Host test execution via fx test
-fx test //tools/devshell/worktree:tests
+fx test //tools/devshell/worktree:host_tests
 ```

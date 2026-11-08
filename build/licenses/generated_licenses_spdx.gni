@@ -80,12 +80,6 @@ template("_generated_licenses_spdx_stub") {
 #     correspond with a stable, developer-friendly, short name of
 #     the target.
 #
-#   compare_with_legacy_spdx (resource, optional)
-#     Compares the output to reference spdx file.
-#
-#   ignore_comparison_errors (bool, optional)
-#     Ignores comparison errors when comparing with a legacy spdx file.
-#
 #   debug_hints (bool, optional)
 #     Will add "_hint" elements to output spdx for debugging purposes.
 #     Default is false.
@@ -204,18 +198,6 @@ template("generated_licenses_spdx") {
         "--dep-file",
         rebase_path(_files.generated_depfile, root_build_dir),
       ]
-
-      if (defined(invoker.compare_with_legacy_spdx)) {
-        args += [
-          "--compare-with-legacy-spdx",
-          rebase_path(invoker.compare_with_legacy_spdx, root_build_dir),
-        ]
-      }
-
-      if (defined(invoker.ignore_comparison_errors) &&
-          invoker.ignore_comparison_errors) {
-        args += [ "--ignore-comparison-errors" ]
-      }
 
       if (defined(invoker.debug_hints) && invoker.debug_hints) {
         args += [ "--debug-hints" ]

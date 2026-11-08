@@ -37,6 +37,7 @@ fuchsia_unittest_package("audio_core_unittests") {
     log_settings = {
       max_severity = "FATAL"
     }
+    parallel = 4
   }
 }
 

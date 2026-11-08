@@ -4,6 +4,8 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+use core::ops;
+
 use affine::Ratio;
 use zx_types::{ZX_TIME_INFINITE, ZX_TIME_INFINITE_PAST};
 
@@ -101,6 +103,15 @@ pub struct InstantMonoTicks(pub i64);
 #[repr(transparent)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct InstantBoot(pub i64);
+
+impl ops::Sub<InstantBoot> for InstantBoot {
+    type Output = DurationBoot;
+
+    #[inline]
+    fn sub(self, rhs: InstantBoot) -> DurationBoot {
+        DurationBoot(self.0.saturating_sub(rhs.0))
+    }
+}
 
 /// Boot timeline instant in ticks.
 #[repr(transparent)]
@@ -283,6 +294,18 @@ pub struct CurrentTicksObservation {
 
 zr::static_assert_size_and_align!(CurrentTicksObservation, 16, 8);
 
+/// The `GetTicksSyncFlag` bits of `<platform/timer.h>`: which of the surrounding
+/// memory accesses a raw ticks observation must be ordered against (`kNone`).
+pub const GET_TICKS_SYNC_FLAG_NONE: u8 = 0;
+/// `GetTicksSyncFlag::kAfterPreviousLoads`: order tick observation after previous loads.
+pub const GET_TICKS_SYNC_FLAG_AFTER_PREVIOUS_LOADS: u8 = 1 << 0;
+/// `GetTicksSyncFlag::kAfterPreviousStores`: order tick observation after previous stores.
+pub const GET_TICKS_SYNC_FLAG_AFTER_PREVIOUS_STORES: u8 = 1 << 1;
+/// `GetTicksSyncFlag::kBeforeSubsequentLoads`: order tick observation before subsequent loads.
+pub const GET_TICKS_SYNC_FLAG_BEFORE_SUBSEQUENT_LOADS: u8 = 1 << 2;
+/// `GetTicksSyncFlag::kBeforeSubsequentStores`: order tick observation before subsequent stores.
+pub const GET_TICKS_SYNC_FLAG_BEFORE_SUBSEQUENT_STORES: u8 = 1 << 3;
+
 unsafe extern "C" {
     fn cpp_timer_current_mono_ticks() -> InstantMonoTicks;
     fn cpp_timer_current_boot_ticks() -> InstantBootTicks;
@@ -301,16 +324,62 @@ unsafe extern "C" {
     ) -> bool;
     fn cpp_platform_set_oneshot_timer(deadline: i64) -> zx_types::zx_status_t;
     fn cpp_platform_stop_timer();
+    /// Pauses the monotonic clock during system suspend entry.
+    fn cpp_timer_pause_monotonic();
+    /// Resumes the monotonic clock during system suspend exit.
+    fn cpp_timer_unpause_monotonic();
+    /// Returns `true` if the monotonic clock is currently paused.
+    fn cpp_timer_is_monotonic_paused() -> bool;
 }
 
-unsafe extern "C" {
-    /// Runs the expired timers of the current CPU.
-    ///
-    /// # Safety
-    ///
-    /// Must be called from the timer interrupt, with interrupts disabled.
-    pub fn timer_tick();
+/// Pauses the monotonic clock during system suspend entry.
+///
+/// Safe to call concurrently with `timer_current_mono_ticks_synchronized`, which will retry its
+/// read of the current ticks if `mono_ticks_modifier` is `ZX_TIME_INFINITE_PAST` (set before the
+/// update) or if it notices that the value changed during its read.
+///
+/// # Safety
+///
+/// The monotonic clock must not currently be paused (`!timer_is_monotonic_paused()`), and there
+/// must be no concurrent calls to [`timer_pause_monotonic`] or [`timer_unpause_monotonic`] across
+/// CPUs.
+#[inline]
+pub unsafe fn timer_pause_monotonic() {
+    // SAFETY: Caller guarantees the monotonic clock is not currently paused and no concurrent
+    // `timer_pause_monotonic` or `timer_unpause_monotonic` calls occur.
+    unsafe { cpp_timer_pause_monotonic() }
 }
+
+/// Resumes the monotonic clock during system suspend exit.
+///
+/// Safe to call concurrently with `timer_current_mono_ticks_synchronized`, which retries its read
+/// if it notices that `mono_ticks_modifier` changed during its read.
+///
+/// # Safety
+///
+/// The monotonic clock must currently be paused (`timer_is_monotonic_paused()`), raw ticks must
+/// not have regressed since the clock was paused, and there must be no concurrent calls to
+/// [`timer_pause_monotonic`] or [`timer_unpause_monotonic`] across CPUs.
+#[inline]
+pub unsafe fn timer_unpause_monotonic() {
+    // SAFETY: Caller guarantees the monotonic clock is currently paused, raw ticks have not
+    // regressed since pause, and no concurrent `timer_pause_monotonic` or
+    // `timer_unpause_monotonic` calls occur.
+    unsafe { cpp_timer_unpause_monotonic() }
+}
+
+/// Returns `true` if the monotonic clock is currently paused.
+///
+/// Performs a `Relaxed` atomic read of `mono_ticks_modifier` intended to be used in diagnostic
+/// assertions; does not synchronize-with anything (establishes no happens-before ordering).
+#[inline]
+pub fn timer_is_monotonic_paused() -> bool {
+    // SAFETY: Performs a relaxed atomic load of `mono_ticks_modifier` with no safety
+    // preconditions.
+    unsafe { cpp_timer_is_monotonic_paused() }
+}
+
+pub use crate::kernel::timer::timer_tick;
 
 /// Returns the current monotonic time in ticks.
 #[inline]
@@ -436,6 +505,23 @@ pub fn platform_stop_timer() {
     // SAFETY: Calling this FFI function has no memory-safety preconditions; it only stops the
     // calling CPU's platform timer.
     unsafe { cpp_platform_stop_timer() }
+}
+
+/// Shuts down the calling CPU's platform timer.
+#[inline]
+pub fn platform_shutdown_timer() {
+    #[cfg(target_arch = "aarch64")]
+    {
+        crate::arm_generic_timer::platform_shutdown_timer();
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        crate::generic_riscv64::timer::platform_shutdown_timer();
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        crate::platform_pc::timer::platform_shutdown_timer();
+    }
 }
 
 /// Platform timer tests.

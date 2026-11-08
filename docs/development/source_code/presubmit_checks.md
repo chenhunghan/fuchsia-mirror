@@ -51,12 +51,16 @@ keep-sorted is also enforced by `fx format-code`.
 #### IfThisThenThat
 
 IfThisThenThat is a check that can be used to ensure files that co-change with
-one another stay synchronized. If one file changes, a warning is given that the
-other file(s) should change too in the same changelist. Ideally, such a check
-should not be necessary, but can come up when executable code needs to be
+one another stay synchronized. If one file changes, an error is reported that
+the other file(s) should change too in the same changelist. Ideally, such a
+check should not be necessary, but can come up when executable code needs to be
 synchronized with configuration files.
 
-IfThisThenThat leaves _warnings_ and so does not block changelist submission.
+IfThisThenThat findings block changelist submission. When a changelist violates
+an IfThisThenThat directive, or contains a malformed `LINT.IfChange` or
+`LINT.ThenChange` directive, the `Lint` label is set to -1 and the changelist
+cannot be submitted until the finding is resolved. See
+[Opting out](#opting-out).
 
 ##### Example
 
@@ -147,11 +151,12 @@ must the other file that is pointed to. Files should always have the LINT
 directives in each file that is joined. A one-way directive would mean that one
 file can lose synchronization from the other.
 
-If an IfThisThenThat directive is violated, a comment is left on the CL:
+If an IfThisThenThat directive is violated, a comment is left on the CL and the
+`Lint` label is set to -1:
 
 ![IfThisThenThat appearing as a line comment](ifttt_line_comment.png)
 
-The warning also appears on the **Checks** tab:
+The finding also appears on the **Checks** tab:
 
 ![IfThisThenThat appearing in the Checks tab](ifttt_checks_tab.png)
 

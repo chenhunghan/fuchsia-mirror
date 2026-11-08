@@ -5,13 +5,12 @@
 // https://opensource.org/licenses/MIT
 
 use crate::counters::define_kcounter;
+use crate::ksync_kernel::TrackedCriticalMutex;
 use fbl::{Canary, RefPtr};
-use ksync::{KMutex, RawCriticalMutex, guarded};
+use ksync::{KMutex, guarded};
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
-use zx_types::{
-    ZX_DEFAULT_BTI_RIGHTS, ZX_MAX_NAME_LEN, ZX_OBJ_TYPE_BTI, zx_info_bti_t, zx_rights_t,
-};
+use zx_types::{ZX_DEFAULT_BTI_RIGHTS, ZX_OBJ_TYPE_BTI, zx_info_bti_t, zx_rights_t};
 
 use super::bti::Bti;
 use super::bus_transaction_initiator_dispatcher_ffi::cpp_bus_transaction_initiator_dispatcher_create;
@@ -48,7 +47,7 @@ pub struct BusTransactionInitiatorDispatcherState {
 
     /// Mutex guarding state operations.
     #[mutex]
-    lock: KMutex<RawCriticalMutex>,
+    lock: KMutex<TrackedCriticalMutex>,
 }
 
 impl BusTransactionInitiatorDispatcherState {
@@ -67,12 +66,12 @@ impl BusTransactionInitiatorDispatcherState {
     }
 
     /// Returns a reference to the underlying `Bti` facade object.
-    pub fn bti(&self) -> &RefPtr<Bti> {
+    fn bti(&self) -> &RefPtr<Bti> {
         &self.bti
     }
 
     /// Marks the dispatcher as having zero handles.
-    pub fn set_zero_handles(&self) {
+    fn set_zero_handles(&self) {
         ksync::lock!(let mut guard = self.lock_lock());
         // Prevent new pinning from happening. The Dispatcher will stick around
         // until all of the PMTs are closed.
@@ -80,7 +79,7 @@ impl BusTransactionInitiatorDispatcherState {
     }
 
     /// Returns whether this dispatcher has hit zero handles.
-    pub fn zero_handles_locked(
+    fn zero_handles_locked(
         &self,
         token: &ksync::LockToken<'_, BusTransactionInitiatorDispatcherStateLockClass>,
     ) -> bool {
@@ -105,11 +104,6 @@ crate::object::dispatcher::impl_dispatcher_facade_with_state!(
 );
 
 impl BusTransactionInitiatorDispatcher {
-    /// Returns default rights for a BusTransactionInitiatorDispatcher handle.
-    pub fn default_rights() -> zx_rights_t {
-        ZX_DEFAULT_BTI_RIGHTS
-    }
-
     /// Creates a new BusTransactionInitiatorDispatcher and returns its kernel handle and rights.
     pub fn create(iommu: &Iommu, bti_id: u64) -> Result<(KernelHandle<Self>, zx_rights_t), Status> {
         // SAFETY: `iommu` points to a valid `Iommu`, and the FFI function initializes `handle`
@@ -168,11 +162,6 @@ impl BusTransactionInitiatorDispatcher {
         self.state().bti()
     }
 
-    /// Returns the hardware transaction ID represented by this BTI.
-    pub fn bti_id(&self) -> u64 {
-        self.bti().bti_id()
-    }
-
     /// Returns the minimum contiguity guarantee in bytes.
     ///
     /// [`pin`](Self::pin) will always be able to return addresses that are contiguous for at
@@ -213,7 +202,7 @@ impl BusTransactionInitiatorDispatcher {
     }
 
     /// Returns whether this dispatcher has hit zero handles.
-    pub fn zero_handles_locked(
+    fn zero_handles_locked(
         &self,
         token: &ksync::LockToken<'_, BusTransactionInitiatorDispatcherStateLockClass>,
     ) -> bool {
@@ -230,15 +219,5 @@ impl BusTransactionInitiatorDispatcher {
             pmo_count: self.pmo_count(),
             quarantine_count: self.quarantine_count(),
         }
-    }
-
-    /// Sets the debug name of this BTI.
-    pub fn set_name(&self, name: &[u8]) -> Result<(), Status> {
-        self.bti().set_name(name)
-    }
-
-    /// Gets the debug name of this BTI.
-    pub fn get_name(&self, out_name: &mut [u8; ZX_MAX_NAME_LEN]) -> Result<(), Status> {
-        self.bti().get_name(out_name)
     }
 }

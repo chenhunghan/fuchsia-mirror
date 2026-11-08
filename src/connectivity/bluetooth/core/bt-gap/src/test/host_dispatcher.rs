@@ -500,7 +500,7 @@ async fn test_set_active_host_invalid_id_does_not_shutdown_active_host() {
 
     // Try to set active host to an invalid ID.
     let invalid_id = HostId(0);
-    let result = host_dispatcher.set_active_host(invalid_id);
+    let result = host_dispatcher.set_active_host(invalid_id).await;
     assert!(result.is_err());
 
     // Verify that the active host is still the original host.
@@ -509,6 +509,41 @@ async fn test_set_active_host_invalid_id_does_not_shutdown_active_host() {
     assert_eq!(active_host.unwrap().id(), host_id);
 
     // Verify that no shutdown request was sent to the active host.
+    let next_request = host_server.next().now_or_never();
+    assert!(next_request.is_none(), "Expected no request to host, but got: {:?}", next_request);
+}
+
+#[fuchsia::test]
+async fn test_set_active_host_already_active_is_noop() {
+    let host_dispatcher = hd_test::make_simple_test_dispatcher();
+    let host_id = HostId(42);
+    let (mut host_server, _, _gatt_server, _bonding) =
+        hd_test::create_and_add_test_host_to_dispatcher(host_id, &host_dispatcher).await.unwrap();
+
+    let active_host = host_dispatcher.active_host().await;
+    assert_eq!(active_host.unwrap().id(), host_id);
+
+    // Establish an active discovery session on the host and consume the initial StartDiscovery
+    // request while keeping the session and server token open.
+    let _discovery_session =
+        host_dispatcher.start_discovery().await.expect("start_discovery succeeds");
+    let _discovery_token = match host_server.next().await.expect("valid request") {
+        Ok(fidl_fuchsia_bluetooth_host::HostRequest::StartDiscovery { payload, .. }) => {
+            payload.token.expect("valid discovery token")
+        }
+        x => panic!("Expected StartDiscovery request, got: {:?}", x),
+    };
+
+    // Setting active host to the ID that is already active should succeed and be a no-op
+    // (skipping both Shutdown and configure_newly_active_adapter).
+    let result = host_dispatcher.set_active_host(host_id).await;
+    assert_matches!(result, Ok(()));
+
+    // Verify active host is still host_id.
+    let active_host = host_dispatcher.active_host().await;
+    assert_eq!(active_host.unwrap().id(), host_id);
+
+    // Verify that neither Shutdown nor a migrated StartDiscovery request was sent to the host.
     let next_request = host_server.next().now_or_never();
     assert!(next_request.is_none(), "Expected no request to host, but got: {:?}", next_request);
 }

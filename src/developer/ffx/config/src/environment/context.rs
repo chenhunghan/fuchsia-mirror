@@ -116,8 +116,8 @@ impl EnvironmentContext {
         serde_json::from_reader(std::io::BufReader::new(file)).map_err(Into::into)
     }
 
-    fn default_env_vars(exe_kind: ExecutableKind, is_isolated: bool) -> EnvVars {
-        if exe_kind == ExecutableKind::Test || is_isolated {
+    fn default_env_vars(exe_kind: ExecutableKind) -> EnvVars {
+        if exe_kind == ExecutableKind::Test {
             EnvVars::new()
         } else {
             EnvVars::from_iter(std::env::vars())
@@ -133,15 +133,11 @@ impl EnvironmentContext {
         env_file_path: Option<PathBuf>,
         no_environment: bool,
     ) -> Result<Self, ContextError> {
-        if let Some(isolate_root) = kind.isolate_root() {
-            let keep_existing_home = exe_kind == ExecutableKind::Test
-                || env_vars.get("HOME").is_some_and(|h| Path::new(h).starts_with(isolate_root));
-            if keep_existing_home {
+        if exe_kind == ExecutableKind::Test {
+            if let Some(isolate_root) = kind.isolate_root() {
                 env_vars
                     .entry("HOME".to_string())
                     .or_insert_with(|| isolate_root.to_string_lossy().into_owned());
-            } else {
-                env_vars.insert("HOME".to_string(), isolate_root.to_string_lossy().into_owned());
             }
         }
         let config = if !no_environment {
@@ -193,7 +189,7 @@ impl EnvironmentContext {
             env_file_path,
             config,
             override_target_spec: None,
-            self_path: std::env::current_exe().unwrap(),
+            self_path: sdk::invoked_exe_path().expect("determining the ffx executable path"),
             no_environment,
         })
     }
@@ -211,7 +207,7 @@ impl EnvironmentContext {
             no_environment: true,
             override_target_spec: None,
             config: Config::new(None, None, None, runtime_args.clone(), ConfigMap::new()),
-            self_path: std::env::current_exe().unwrap(),
+            self_path: sdk::invoked_exe_path().expect("determining the ffx executable path"),
         };
 
         // Since environment variables won't be
@@ -235,7 +231,7 @@ impl EnvironmentContext {
         isolate_root: Option<PathBuf>,
         no_environment: bool,
     ) -> Result<Self, ContextError> {
-        let env_vars = Self::default_env_vars(exe_kind, isolate_root.is_some());
+        let env_vars = Self::default_env_vars(exe_kind);
         Self::new(
             EnvironmentKind::ConfigDomain { domain: Box::new(domain), isolate_root },
             exe_kind,
@@ -271,7 +267,7 @@ impl EnvironmentContext {
         env_file_path: Option<PathBuf>,
         no_environment: bool,
     ) -> Result<Self, ContextError> {
-        let env_vars = Self::default_env_vars(exe_kind, false);
+        let env_vars = Self::default_env_vars(exe_kind);
         Self::new(
             EnvironmentKind::InTree { tree_root, build_dir, isolate_root: None },
             exe_kind,
@@ -349,7 +345,7 @@ impl EnvironmentContext {
         env_file_path: Option<PathBuf>,
         no_environment: bool,
     ) -> Result<Self, ContextError> {
-        let env_vars = Self::default_env_vars(exe_kind, false);
+        let env_vars = Self::default_env_vars(exe_kind);
         Self::new(
             EnvironmentKind::NoContext,
             exe_kind,
@@ -635,10 +631,13 @@ impl EnvironmentContext {
     /// Creates a command builder that starts with everything necessary to re-run ffx within the same context,
     /// without any subcommands.
     pub fn rerun_prefix(&self) -> Result<Command, ContextError> {
-        // we may have been run by a wrapper script, so we want to make sure we're using the 'real' executable.
-        let mut ffx_path = self.rerun_bin()?;
-        // if we daemonize, our path will change to /, so get the canonical path before that occurs.
-        ffx_path = std::fs::canonicalize(ffx_path)?;
+        // Use an absolute path so the child can be launched regardless of its
+        // working directory, but do not resolve symlinks: ffx and its subtools
+        // are often installed as symlink trees (e.g. Bazel runfiles), and the
+        // child locates the SDK (and therefore its subtools) by walking up
+        // from the path it was invoked with. The symlink target lives outside
+        // the SDK, so a canonical path would make that search fail.
+        let ffx_path = std::path::absolute(self.rerun_bin()?)?;
 
         let mut cmd = Command::new(&ffx_path);
         if let Some(isolate_root) = self.kind.isolate_root() {
@@ -768,6 +767,7 @@ mod test {
     use crate::paths::PathsError;
 
     use assert_matches::assert_matches;
+    use std::ffi::OsStr;
     use tempfile::tempdir;
 
     const DOMAINS_TEST_DATA_PATH: &str = env!("DOMAINS_TEST_DATA_PATH");
@@ -878,6 +878,172 @@ mod test {
         .expect("Isolated context");
 
         check_isolated_paths(&context, &isolate_dir.path());
+    }
+
+    #[fuchsia::test]
+    fn test_isolated_main_ffx_preserves_host_home_and_env_vars() {
+        let isolate_dir = tempdir().expect("tempdir");
+        let isolate_path = std::path::absolute(isolate_dir.path()).expect("absolute path");
+        let env_vars = HashMap::from_iter([
+            ("HOME".to_string(), "/home/builder".to_string()),
+            ("PATH".to_string(), "/usr/bin".to_string()),
+        ]);
+        let context = EnvironmentContext::isolated(
+            ExecutableKind::MainFfx,
+            isolate_dir.path().to_owned(),
+            env_vars,
+            Default::default(),
+            None,
+            None,
+            false,
+        )
+        .expect("isolated MainFfx context");
+
+        assert!(context.is_isolated());
+        assert_eq!(context.get_config_path().unwrap(), isolate_path.join("config"));
+        assert_eq!(context.get_data_path().unwrap(), isolate_path.join("data"));
+        assert_eq!(context.get_cache_path().unwrap(), isolate_path.join("cache"));
+        assert_eq!(context.get_runtime_path().unwrap(), isolate_path.join("runtime"));
+        assert_eq!(context.get_shared_data_path().unwrap(), isolate_path.join("shared"));
+
+        assert_eq!(context.env_var("HOME"), Ok("/home/builder".to_string()));
+        assert_eq!(context.env_var("PATH"), Ok("/usr/bin".to_string()));
+        assert_eq!(context.get_home_dir().unwrap(), PathBuf::from("/home/builder"));
+
+        let ssh_priv: Vec<PathBuf> = context.get("ssh.priv").expect("ssh.priv config");
+        assert_eq!(ssh_priv, vec![PathBuf::from("/home/builder/.ssh/fuchsia_ed25519")]);
+    }
+
+    #[fuchsia::test]
+    fn test_isolated_main_ffx_without_home_env_falls_back_to_system_home() {
+        let isolate_dir = tempdir().expect("tempdir");
+        let isolate_path = std::path::absolute(isolate_dir.path()).expect("absolute path");
+        let context = EnvironmentContext::isolated(
+            ExecutableKind::MainFfx,
+            isolate_dir.path().to_owned(),
+            EnvVars::new(),
+            Default::default(),
+            None,
+            None,
+            false,
+        )
+        .expect("isolated MainFfx context without HOME env");
+
+        assert_eq!(context.env_var("HOME"), Err(std::env::VarError::NotPresent));
+        if let Some(system_home) = home::home_dir() {
+            assert_eq!(context.get_home_dir().unwrap(), system_home);
+            assert_ne!(context.get_home_dir().unwrap(), isolate_path);
+        }
+    }
+
+    /// Lays out an SDK under `root` whose `ffx` entry is a symlink to a binary stored elsewhere,
+    /// as happens with Bazel runfiles and google3 objfs. Returns `(sdk_dir, link)`.
+    #[cfg(unix)]
+    fn make_symlinked_sdk_ffx(root: &Path) -> (PathBuf, PathBuf) {
+        let real_bin = root.join("store").join("blob");
+        let sdk_dir = root.join("sdk");
+        let link = sdk_dir.join("tools").join("ffx");
+        std::fs::create_dir_all(real_bin.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(sdk_dir.join("meta")).unwrap();
+        std::fs::write(sdk_dir.join("meta").join("manifest.json"), b"{}").unwrap();
+        std::fs::write(&real_bin, b"").unwrap();
+        std::os::unix::fs::symlink(&real_bin, &link).unwrap();
+        (sdk_dir, link)
+    }
+
+    /// Asserts that `cmd` re-runs ffx through `link`, and that a child started that way finds
+    /// the SDK at `sdk_dir`.
+    #[cfg(unix)]
+    fn assert_reruns_through(cmd: &Command, link: &Path, sdk_dir: &Path) {
+        assert_eq!(Path::new(cmd.get_program()), link);
+        let ffx_bin_env = cmd
+            .get_envs()
+            .find(|(k, _)| *k == OsStr::new(EnvironmentContext::FFX_BIN_ENV))
+            .and_then(|(_, v)| v)
+            .expect("FFX_BIN set on child");
+        assert_eq!(Path::new(ffx_bin_env), link);
+        assert_matches!(
+            SdkRoot::from_exe_path(Path::new(cmd.get_program())),
+            Ok(SdkRoot::Full { root, .. }) if root == sdk_dir
+        );
+    }
+
+    #[cfg(unix)]
+    #[fuchsia::test]
+    fn test_rerun_prefix_from_subtool_keeps_symlinked_ffx_bin() {
+        let root = tempdir().expect("tempdir");
+        let (sdk_dir, link) = make_symlinked_sdk_ffx(root.path());
+
+        // A subtool receives the main ffx's path in FFX_BIN.
+        let isolate_dir = tempdir().expect("tempdir");
+        let env_vars = HashMap::from_iter([(
+            EnvironmentContext::FFX_BIN_ENV.to_string(),
+            link.to_str().unwrap().to_string(),
+        )]);
+        let context = EnvironmentContext::isolated(
+            ExecutableKind::Subtool,
+            isolate_dir.path().to_owned(),
+            env_vars,
+            Default::default(),
+            None,
+            None,
+            false,
+        )
+        .expect("isolated context");
+
+        let cmd = context.rerun_prefix().expect("rerun prefix");
+        assert_reruns_through(&cmd, &link, &sdk_dir);
+    }
+
+    #[cfg(unix)]
+    #[fuchsia::test]
+    fn test_rerun_prefix_from_main_ffx_keeps_symlinked_self_path() {
+        let root = tempdir().expect("tempdir");
+        let (sdk_dir, link) = make_symlinked_sdk_ffx(root.path());
+
+        // The main ffx has no FFX_BIN; it re-runs itself from `self_path`, which holds the
+        // path it was invoked through.
+        let isolate_dir = tempdir().expect("tempdir");
+        let mut context = EnvironmentContext::isolated(
+            ExecutableKind::MainFfx,
+            isolate_dir.path().to_owned(),
+            EnvVars::new(),
+            Default::default(),
+            None,
+            None,
+            false,
+        )
+        .expect("isolated context");
+        context.self_path = link.clone();
+
+        let cmd = context.rerun_prefix().expect("rerun prefix");
+        assert_reruns_through(&cmd, &link, &sdk_dir);
+    }
+
+    #[fuchsia::test]
+    fn test_isolated_config_domain_main_ffx_preserves_env_vars() {
+        let isolate_dir = tempdir().expect("tempdir");
+        let isolate_path = std::path::absolute(isolate_dir.path()).expect("absolute path");
+        let domain_root = domains_test_data_path().join("basic_example");
+        let context = EnvironmentContext::config_domain_root(
+            ExecutableKind::MainFfx,
+            domain_root,
+            Default::default(),
+            Some(isolate_path.clone()),
+            false,
+        )
+        .expect("isolated MainFfx config domain context");
+
+        assert!(context.is_isolated());
+        if let Ok(host_path) = std::env::var("PATH") {
+            assert_eq!(context.env_var("PATH"), Ok(host_path));
+        }
+        if let Ok(host_home) = std::env::var("HOME").map(PathBuf::from) {
+            if !host_home.as_os_str().is_empty() {
+                assert_eq!(context.get_home_dir().unwrap(), host_home);
+            }
+        }
     }
 
     #[fuchsia::test]

@@ -13,7 +13,10 @@
 #include <lib/driver/fake-platform-device/cpp/fake-pdev.h>
 #include <lib/media/codec_impl/codec_buffer.h>
 #include <lib/media/codec_impl/codec_packet.h>
+#include <lib/zx/eventpair.h>
 #include <zircon/types.h>
+
+#include <utility>
 
 #include <gtest/gtest.h>
 
@@ -27,6 +30,9 @@ namespace test {
 class FakeSysmem : public fidl::testing::WireTestBase<fuchsia_sysmem2::Allocator> {
  public:
   FakeSysmem() {}
+
+  void SetDebugClientInfo(SetDebugClientInfoRequestView request,
+                          SetDebugClientInfoCompleter::Sync& completer) override {}
 
   void NotImplemented_(const std::string& name, ::fidl::CompleterBase& completer) final {
     completer.Close(ZX_ERR_NOT_SUPPORTED);
@@ -102,6 +108,8 @@ class DummyEvents : public CodecAdapterEvents {
 };
 class BindingTest : public testing::Test {
  protected:
+  void SetUp() override { ASSERT_EQ(ZX_OK, incoming_loop_.StartThread("incoming-ns-thread")); }
+
   void InitPdev() {
     fdf_fake::FakePDev::Config config;
     config.use_fake_bti = true;
@@ -124,7 +132,6 @@ class BindingTest : public testing::Test {
     }
 
     auto outgoing_endpoints = fidl::Endpoints<fuchsia_io::Directory>::Create();
-    ASSERT_EQ(ZX_OK, incoming_loop_.StartThread("incoming-ns-thread"));
     incoming_.SyncCall([config = std::move(config), server = std::move(outgoing_endpoints.server)](
                            IncomingNamespace* infra) mutable {
       infra->pdev_server.SetConfig(std::move(config));
@@ -225,6 +232,11 @@ class BindingTest : public testing::Test {
   std::shared_ptr<MockDevice> root_ = MockDevice::FakeRootParent();
 };
 
+TEST_F(BindingTest, DestroyBeforeBind) {
+  auto device = std::make_unique<DeviceCtx>(&driver_ctx_, root_.get());
+  device.reset();
+}
+
 TEST_F(BindingTest, Destruction) {
   auto device = Init();
   device->DdkAsyncRemove();
@@ -236,10 +248,76 @@ TEST_F(BindingTest, Suspend) {
   auto device = Init();
   ASSERT_EQ(1u, root_->child_count());
   auto* child = root_->GetLatestChild();
+
+  EXPECT_FALSE(std::as_const(driver_ctx_).IsSharedFidlSynchronized());
+  {
+    libsync::Completion checked_on_shared_fidl;
+    ASSERT_EQ(ZX_OK, async::PostTask(driver_ctx_.shared_fidl_loop()->dispatcher(), [&] {
+                EXPECT_TRUE(std::as_const(driver_ctx_).IsSharedFidlSynchronized());
+                checked_on_shared_fidl.Signal();
+              }));
+    checked_on_shared_fidl.Wait();
+  }
+
   ddk::SuspendTxn txn(device->zxdev(), 0, false, DEVICE_SUSPEND_REASON_REBOOT);
   device->DdkSuspend(std::move(txn));
   child->WaitUntilSuspendReplyCalled();
+  EXPECT_EQ(nullptr, driver_ctx_.shared_fidl_loop());
 
+  root_.reset();
+}
+
+TEST_F(BindingTest, CodecFactoryAndDecoderLifecycle) {
+  auto* device = Init();
+
+  auto drain_shared_fidl = [this](size_t hops) {
+    for (size_t i = 0; i < hops; ++i) {
+      libsync::Completion done;
+      driver_ctx_.PostToSharedFidl([&done] { done.Signal(); });
+      done.Wait();
+    }
+  };
+
+  fuchsia::mediacodec::CodecFactorySyncPtr factory1;
+  device->device_fidl()->ConnectChannelBoundCodecFactory(factory1.NewRequest().TakeChannel());
+
+  fuchsia::mediacodec::CodecFactorySyncPtr factory2;
+  device->device_fidl()->ConnectChannelBoundCodecFactory(factory2.NewRequest().TakeChannel());
+
+  // Confirm factory2 is bound on the shared FIDL sequence while keeping it open across teardown.
+  fuchsia::mediacodec::CodecFactoryGetDetailedCodecDescriptionsResponse descriptions;
+  ASSERT_EQ(ZX_OK, factory2->GetDetailedCodecDescriptions(&descriptions));
+  EXPECT_FALSE(descriptions.codecs().empty());
+
+  zx::eventpair lifetime_client;
+  zx::eventpair lifetime_codec;
+  ASSERT_EQ(ZX_OK, zx::eventpair::create(0, &lifetime_client, &lifetime_codec));
+  ASSERT_EQ(ZX_OK, factory1->AttachLifetimeTracking(std::move(lifetime_codec)));
+
+  fuchsia::mediacodec::CreateDecoder_Params params;
+  params.mutable_input_details()->set_mime_type("video/h264");
+  fuchsia::media::StreamProcessorSyncPtr stream_processor;
+  ASSERT_EQ(ZX_OK, factory1->CreateDecoder(std::move(params), stream_processor.NewRequest()));
+
+  // Wait until CodecImpl is constructed, bound via BindCodecImpl(), and serving StreamProcessor.
+  ASSERT_EQ(ZX_OK, stream_processor->Sync());
+
+  // Close StreamProcessor and wait for ~CodecImpl (via BindCodecImpl()'s error handler) to drop
+  // lifetime_codec.
+  stream_processor.Unbind();
+  zx_signals_t observed = 0;
+  ASSERT_EQ(ZX_OK,
+            lifetime_client.wait_one(ZX_EVENTPAIR_PEER_CLOSED, zx::time::infinite(), &observed));
+
+  // Drain ~CodecImpl's posted ~CodecAdmission task, then close factory1 and drain the
+  // SetErrorHandler() -> PostAfterPreviouslyStartedClosesDone() -> ClosureQueue -> DeleteFactory()
+  // chain before tearing down the device with factory2 still bound.
+  drain_shared_fidl(1);
+  factory1.Unbind();
+  drain_shared_fidl(3);
+
+  device->DdkAsyncRemove();
+  mock_ddk::ReleaseFlaggedDevices(root_.get());
   root_.reset();
 }
 

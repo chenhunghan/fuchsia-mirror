@@ -4,23 +4,21 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-#include <lib/counters.h>
 #include <lib/object-constants.h>
-#include <lib/user_copy/user_ptr.h>
 
 #include <fbl/alloc_checker.h>
 #include <kernel/ffi.h>
-#include <object/channel_dispatcher.h>
 #include <object/process_dispatcher.h>
 #include <object/thread_dispatcher.h>
-
-KCOUNTER(thread_legacy_yield, "thread.legacy_yield")
 
 static_assert(sizeof(ThreadDispatcher::CoreThreadObservation) == 2 * sizeof(uintptr_t));
 static_assert(alignof(ThreadDispatcher::CoreThreadObservation) == alignof(uintptr_t));
 
-static_assert(sizeof(ChannelDispatcher::MessageWaiter) == kMessageWaiterSize);
-static_assert(alignof(ChannelDispatcher::MessageWaiter) == kMessageWaiterAlign);
+// Keep in sync with `DummyArchExceptionContext` in `thread_dispatcher.rs` tests.
+// LINT.IfChange(arch_exception_context)
+static_assert(sizeof(arch_exception_context_t) == 32);
+static_assert(alignof(arch_exception_context_t) == 8);
+// LINT.ThenChange(//zircon/kernel/object/thread_dispatcher.rs:arch_exception_context)
 
 // The blocked reason crosses the FFI as a raw uint32_t in both directions (SetBlockedReason and
 // rust_thread_dispatcher_set_blocked_reason), and the mapping to zx_thread_state_t lives on the
@@ -37,7 +35,6 @@ static_assert(static_cast<uint32_t>(ThreadDispatcher::Blocked::WAIT_MANY) == 7);
 static_assert(static_cast<uint32_t>(ThreadDispatcher::Blocked::INTERRUPT) == 8);
 static_assert(static_cast<uint32_t>(ThreadDispatcher::Blocked::PAGER) == 9);
 // LINT.ThenChange(//zircon/kernel/object/thread_dispatcher.rs:Blocked)
-
 extern "C" {
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
@@ -89,11 +86,10 @@ FFI_ALWAYS_INLINE void cpp_thread_dispatcher_release_core_thread_observation(
 }
 
 zx_status_t cpp_thread_dispatcher_alloc(
-    ProcessDispatcher* process, uint32_t flags,
-    ffi::Uninitialized<KernelHandle<ThreadDispatcher>>* out_handle) {
+    ProcessDispatcher* process, ffi::Uninitialized<KernelHandle<ThreadDispatcher>>* out_handle) {
   fbl::RefPtr<ProcessDispatcher> process_ref = fbl::ImportFromRawPtr(process);
   fbl::AllocChecker ac;
-  auto user_thread = fbl::AdoptRef(new (&ac) ThreadDispatcher(ktl::move(process_ref), flags));
+  auto user_thread = fbl::AdoptRef(new (&ac) ThreadDispatcher(ktl::move(process_ref)));
   if (!ac.check()) {
     return ZX_ERR_NO_MEMORY;
   }
@@ -143,18 +139,6 @@ FFI_ALWAYS_INLINE int cpp_thread_start_routine_entry(void* thread) {
   return ThreadDispatcher::StartRoutine(thread);
 }
 
-zx_status_t cpp_thread_dispatcher_read_state(ThreadDispatcher* thread, uint32_t state_kind,
-                                             void* buffer, size_t buffer_size) {
-  return thread->ReadState(static_cast<zx_thread_state_topic_t>(state_kind),
-                           make_user_out_ptr(buffer), buffer_size);
-}
-
-zx_status_t cpp_thread_dispatcher_write_state(ThreadDispatcher* thread, uint32_t state_kind,
-                                              const void* buffer, size_t buffer_size) {
-  return thread->WriteState(static_cast<zx_thread_state_topic_t>(state_kind),
-                            make_user_in_ptr(buffer), buffer_size);
-}
-
 zx_status_t cpp_sys_thread_raise_exception(uint32_t options, zx_excp_type_t type,
                                            const zx_exception_context_t* user_context) {
   if (options != ZX_EXCEPTION_TARGET_JOB_DEBUGGER || type != ZX_EXCP_USER || !user_context) {
@@ -170,24 +154,7 @@ zx_status_t cpp_sys_thread_raise_exception(uint32_t options, zx_excp_type_t type
   return ZX_OK;
 }
 
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE zx_status_t cpp_sys_thread_legacy_yield(uint32_t options) {
-  if (options != 0) {
-    return ZX_ERR_INVALID_ARGS;
-  }
-  kcounter_add(thread_legacy_yield, 1);
-  Thread::Current::Yield();
-  return ZX_OK;
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE zx_status_t cpp_thread_dispatcher_get_exception_report(
-    const ThreadDispatcher* thread, ffi::Uninitialized<zx_exception_report_t>* out_report) {
-  return const_cast<ThreadDispatcher*>(thread)->GetExceptionReport(
-      out_report->GetAddressUnchecked());
-}
-
-// TRANSITIONAL: while HandleSingleShotException remains a C++ method.
+// TRANSITIONAL: while arch_exception_context_t remains a C++ type on x86_64 and arm64.
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE void cpp_thread_handle_single_shot_exiting(ProcessDispatcher* process,
                                                              ThreadDispatcher* thread) {
@@ -206,4 +173,5 @@ FFI_ALWAYS_INLINE void cpp_thread_dispatcher_reset_core_thread(ThreadDispatcher*
   Guard<SpinLock, IrqSave> core_thread_guard{core_thread_lock};
   thread->core_thread_ = nullptr;
 }
+
 }  // extern "C"

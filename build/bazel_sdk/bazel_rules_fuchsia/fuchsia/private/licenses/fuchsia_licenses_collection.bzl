@@ -54,11 +54,14 @@ def _is_target_in_ignore_policy(target):
 
     # Repos created by the root module have canonical names starting with "+"
     # (the root module's own name is empty), e.g. "+_repo_rules<N>+internal_sdk".
-    # Only those are matched by apparent name, so a same-named repo from some
-    # other module isn't silently exempted from license checks.
-    if workspace_name in ignore_policy.workspaces or (
-        workspace_name.startswith("+") and
-        workspace_name.split("+")[-1] in ignore_policy.workspaces
+    # Direct Bzlmod module dependencies not visible in `rules_fuchsia`'s repo
+    # mapping (e.g. "rules_rust") have canonical names "<module_name>+".
+    # Only those are matched by apparent/module name, so a same-named repo
+    # from some other module isn't silently exempted from license checks.
+    if (
+        workspace_name in ignore_policy.workspaces or
+        (workspace_name.startswith("+") and workspace_name.split("+")[-1] in ignore_policy.workspaces) or
+        (workspace_name.endswith("+") and workspace_name.removesuffix("+") in ignore_policy.workspaces)
     ):
         return True
     label_str = to_label_str(label)

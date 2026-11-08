@@ -10,11 +10,7 @@
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 readonly ROOT_DIR="$(dirname $(dirname "${SCRIPT_DIR}"))"
 
-if [[ "$(uname -s)" = "Darwin" ]]; then
-  readonly PLATFORM="mac-x64"
-else
-  readonly PLATFORM="linux-x64"
-fi
+readonly PLATFORM="linux-x64"
 readonly RUST_BASE="$ROOT_DIR/buildtools/$PLATFORM/rust"
 readonly CARGO="$RUST_BASE/bin/cargo"
 

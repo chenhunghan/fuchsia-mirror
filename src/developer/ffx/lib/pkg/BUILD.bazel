@@ -1,0 +1,123 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/host_tests:host_test_data.bzl", "host_test_data_files")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+host_test_data_files(
+    name = "empty-repo-keys",
+    testonly = True,
+    srcs = [
+        "//src/sys/pkg/tests/pkg-resolver/template:keys/root.json",
+        "//src/sys/pkg/tests/pkg-resolver/template:keys/snapshot.json",
+        "//src/sys/pkg/tests/pkg-resolver/template:keys/targets.json",
+        "//src/sys/pkg/tests/pkg-resolver/template:keys/timestamp.json",
+    ],
+    dest_dir = "test_data/ffx_lib_pkg/empty-repo/keys",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//src/developer/ffx:__subpackages__",
+        "//tools/pbtool:__pkg__",
+    ],
+)
+
+host_test_data_files(
+    name = "empty-repo-metadata",
+    testonly = True,
+    srcs = [
+        "//src/sys/pkg/tests/pkg-resolver/template:repository/1.root.json",
+        "//src/sys/pkg/tests/pkg-resolver/template:repository/1.snapshot.json",
+        "//src/sys/pkg/tests/pkg-resolver/template:repository/1.targets.json",
+        "//src/sys/pkg/tests/pkg-resolver/template:repository/root.json",
+        "//src/sys/pkg/tests/pkg-resolver/template:repository/snapshot.json",
+        "//src/sys/pkg/tests/pkg-resolver/template:repository/targets.json",
+        "//src/sys/pkg/tests/pkg-resolver/template:repository/timestamp.json",
+    ],
+    dest_dir = "test_data/ffx_lib_pkg/empty-repo/repository",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//src/developer/ffx/plugins/repository/server/start:__pkg__",
+        "//src/developer/ffx/plugins/target/update:__pkg__",
+        "//tools/pbtool:__pkg__",
+    ],
+)
+
+rustc_library(
+    name = "pkg",
+    srcs = [
+        "src/config.rs",
+        "src/instance.rs",
+        "src/lib.rs",
+        "src/repo.rs",
+    ],
+    crate_features = ["fdomain"],
+    edition = "2024",
+    rustc_env = {
+        # Bazel stages test_data relative to the test working directory ("."), whereas GN uses $relative_root_out_dir.
+        "ROOT_OUT_DIR": ".",  # @bazel2gn:value_overwrite:$relative_root_out_dir
+    },
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/developer/ffx:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.pkg:fuchsia.pkg_rust_fdomain_flex",
+        "//sdk/fidl/fuchsia.pkg.rewrite:fuchsia.pkg.rewrite_rust_fdomain_flex",
+        "//sdk/rust/zx-status",
+        "//src/developer/ffx/config:lib",
+        "//src/developer/ffx/lib/process:lib",
+        "//src/developer/ffx/lib/target_net:lib",
+        "//src/developer/ffx/lib/timeout:lib",
+        "//src/lib/fdomain/client:flex_fdomain",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-hyper",
+        "//src/lib/fuchsia-url",
+        "//src/sys/lib/fidl-fuchsia-pkg-ext",
+        "//src/sys/lib/fidl-fuchsia-pkg-rewrite-ext:fidl-fuchsia-pkg-rewrite-ext_fdomain",
+        "//src/sys/pkg/lib/fuchsia-repo",
+        # Forked third-party crate lives under forks/tuf-0.3.0-beta14 in Bazel; GN aliases it at //third_party/rust_crates:tuf.
+        "//third_party/rust_crates/forks/tuf-0.3.0-beta14:tuf",  # @bazel2gn:path_overwrite://third_party/rust_crates:tuf
+        "//third_party/rust_crates/vendor:async-lock",
+        "//third_party/rust_crates/vendor:camino",
+        "//third_party/rust_crates/vendor:http",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:nix",
+        "//third_party/rust_crates/vendor:schemars",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:url",
+    ],
+)
+
+alias(
+    name = "pkg_fdomain",
+    actual = ":pkg",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/developer/ffx:__subpackages__"],
+)
+
+# bazel2gn cannot translate `test_data`, so this test is wired into
+# //src/developer/ffx:tests in Bazel.
+# @bazel2gn:skip
+host_rustc_test(
+    name = "pkg_test",
+    crate = ":pkg",
+    crate_features = ["fdomain"],
+    edition = "2024",
+    rustc_env = {
+        "ROOT_OUT_DIR": ".",
+    },
+    test_data = [
+        ":empty-repo-keys",
+        ":empty-repo-metadata",
+    ],
+    visibility = ["//src/developer/ffx:__pkg__"],
+    deps = [
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:tempfile",
+    ],
+)

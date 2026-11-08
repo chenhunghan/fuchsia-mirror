@@ -36,7 +36,6 @@ DeferredBufferForwarder::DeferredBufferForwarder(zx::socket destination,
 }
 
 DeferredBufferForwarder::~DeferredBufferForwarder() {
-  Flush();
   if (buffer_file_ != nullptr) {
     fclose(buffer_file_);
   }
@@ -46,7 +45,7 @@ DeferredBufferForwarder::~DeferredBufferForwarder() {
 }
 TransferStatus DeferredBufferForwarder::Flush() {
   if (flushed_) {
-    return TransferStatus::kComplete;
+    return BufferForwarder::Flush();
   }
   FX_LOGS(INFO) << "Flushing trace file to socket: backpressure threshold="
                 << backpressure_percentage_
@@ -55,10 +54,11 @@ TransferStatus DeferredBufferForwarder::Flush() {
     FX_LOGS(ERROR) << "Failed to open trace file: " << buffer_path_ << " for read!";
     return TransferStatus::kWriteError;
   }
-  if (fseek(buffer_file_, 0, SEEK_SET) != 0) {
-    FX_LOGS(ERROR) << "Failed to seek to beginning of: " << buffer_path_ << " for read!";
+  if (fseeko(buffer_file_, read_offset_, SEEK_SET) != 0) {
+    FX_LOGS(ERROR) << "Failed to seek in: " << buffer_path_ << " for read!";
     return TransferStatus::kWriteError;
   }
+  reading_from_file_ = true;
 
   for (;;) {
     if (TransferStatus status = WaitForSocketDrain(); status != TransferStatus::kComplete) {
@@ -72,15 +72,17 @@ TransferStatus DeferredBufferForwarder::Flush() {
         FX_LOGS(ERROR) << "Error reading trace file during flush: " << buffer_path_;
         return TransferStatus::kWriteError;
       }
+      clearerr(buffer_file_);
       break;
     }
     if (TransferStatus status = BufferForwarder::WriteBuffer({chunk_buffer_.data(), bytes_read});
         status != TransferStatus::kComplete) {
       return status;
     }
+    read_offset_ += static_cast<off_t>(bytes_read);
   }
   flushed_ = true;
-  return TransferStatus::kComplete;
+  return BufferForwarder::Flush();
 }
 
 TransferStatus DeferredBufferForwarder::WriteBuffer(cpp20::span<const uint8_t> data) const {
@@ -88,10 +90,25 @@ TransferStatus DeferredBufferForwarder::WriteBuffer(cpp20::span<const uint8_t> d
     FX_LOGS(ERROR) << "Failed to open trace file for write: " << buffer_path_;
     return TransferStatus::kWriteError;
   }
+  if (data.empty()) {
+    return TransferStatus::kComplete;
+  }
+  if (reading_from_file_) {
+    if (fseeko(buffer_file_, 0, SEEK_END) != 0) {
+      FX_LOGS(ERROR) << "Failed to seek to end of trace file: " << buffer_path_;
+      return TransferStatus::kWriteError;
+    }
+    reading_from_file_ = false;
+  }
   while (!data.empty()) {
     size_t actual = fwrite(data.data(), sizeof(uint8_t), data.size(), buffer_file_);
+    if (actual == 0) {
+      FX_LOGS(ERROR) << "Failed to write to trace file: " << buffer_path_;
+      return TransferStatus::kWriteError;
+    }
     data = data.subspan(actual);
   }
+  flushed_ = false;
   return TransferStatus::kComplete;
 }
 

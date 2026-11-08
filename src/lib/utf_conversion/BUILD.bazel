@@ -1,0 +1,73 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/host_tests:host_test.bzl", "host_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":utf_conversion_test_pkg"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":utf_conversion_test_host_test"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+# TODO(https://fxbug.dev/570694755): The kernel build is not yet supported in
+# Bazel, so the kernel-only dependencies are emitted in GN via raw_attribute.
+# @bazel2gn:raw_attribute:if (is_kernel) { deps += [ "//zircon/kernel/lib/ktl", "//zircon/kernel/lib/libc" ] }
+fx_cc_library(
+    name = "utf_conversion",
+    srcs = ["utf_conversion.cc"],
+    hdrs = ["utf_conversion.h"],
+    implementation_deps = ["//sdk/lib/stdcompat"],
+    visibility = [
+        "//src/devices/usb/drivers/usb-bus:__pkg__",
+        "//src/firmware/gigaboot/cpp:__pkg__",
+        "//src/storage/gpt:__pkg__",
+        "//zircon/kernel/lib/efi/string:__pkg__",
+    ],
+    deps = [
+        # Needed on host in Bazel for <zircon/compiler.h>, <zircon/types.h>,
+        # and <zircon/assert.h>; GN provides these via default toolchain
+        # dependencies and the Fuchsia sysroot.
+        # @bazel2gn:skip
+        "//sdk/lib/zircon-assert",
+    ],
+)
+
+fx_cc_test_binary(
+    name = "utf_conversion_test",
+    srcs = ["utf_conversion_test.cc"],
+    deps = [
+        ":utf_conversion",
+        "//sdk/lib/stdcompat",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/zxtest",
+    ] + select({
+        "@platforms//os:fuchsia": ["//sdk/lib/fdio"],
+        "//conditions:default": [],
+    }),
+)
+
+fx_unittest_package(
+    name = "utf_conversion_test_pkg",
+    package_name = "utf_conversion_test",
+    unit_tests = [":utf_conversion_test"],
+)
+
+host_test(
+    name = "utf_conversion_test_host_test",
+    binary = ":utf_conversion_test",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)

@@ -951,24 +951,32 @@ impl CommandQueueExcl {
         // bit which can be used, but since we use this for recovery and the device may be in a bad
         // state, polling is safer.
         const HALT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_micros(500);
-
-        // NOTE: for tests, the deadline is disabled because it can cause test flakes.
-        const HALT_DEADLINE: std::time::Duration = std::time::Duration::from_millis(100);
+        const HALT_SLOW_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+        const HALT_WARNING_DEADLINE: std::time::Duration = std::time::Duration::from_millis(100);
 
         let start = std::time::Instant::now();
+        let mut warned = false;
         loop {
             let ctl = CqhciCqCtlRegister::from_bits_retain(
                 self.inner.lock().cqhci_mmio.load32(CQHCI_CQ_CTL_OFFSET),
             );
             if ctl.contains(CqhciCqCtlRegister::HALT) {
                 break;
-            } else if cfg!(not(test)) && start.elapsed() >= HALT_DEADLINE {
-                warn!("Failed to halt CQE after deadline; assuming stalled");
-                break;
+            } else if !warned && start.elapsed() >= HALT_WARNING_DEADLINE {
+                // We must not return before the CQE has halted, as callers may unpin DMA buffers
+                // once `halt` returns.
+                warn!("Failed to halt CQE after {HALT_WARNING_DEADLINE:?}; continuing to wait");
+                warned = true;
             }
-            fasync::Timer::new(HALT_POLL_INTERVAL).await;
+            let interval = if warned { HALT_SLOW_POLL_INTERVAL } else { HALT_POLL_INTERVAL };
+            fasync::Timer::new(interval).await;
         }
-        trace!("Halted");
+        if warned {
+            let elapsed = start.elapsed();
+            info!("Halted CQE after {elapsed:?}");
+        } else {
+            trace!("Halted");
+        }
     }
 
     /// Clears all pending tasks from the CQE host controller.
@@ -993,22 +1001,34 @@ impl CommandQueueExcl {
         }
         // Per JESD84-B51A B.4.3, CLEAR_ALL_TASKS is reset to 0 when all tasks have been cleared.
         const CLEAR_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_micros(500);
-        const CLEAR_DEADLINE: std::time::Duration = std::time::Duration::from_millis(100);
+        const CLEAR_SLOW_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+        const CLEAR_WARNING_DEADLINE: std::time::Duration = std::time::Duration::from_millis(100);
 
         let start = std::time::Instant::now();
+        let mut warned = false;
         loop {
             let ctl = CqhciCqCtlRegister::from_bits_retain(
                 self.inner.lock().cqhci_mmio.load32(CQHCI_CQ_CTL_OFFSET),
             );
             if !ctl.contains(CqhciCqCtlRegister::CLEAR_ALL_TASKS) {
                 break;
-            } else if cfg!(not(test)) && start.elapsed() >= CLEAR_DEADLINE {
-                warn!("Failed to clear CQE tasks after deadline; assuming stalled");
-                break;
+            } else if !warned && start.elapsed() >= CLEAR_WARNING_DEADLINE {
+                // We must not return before the CQE has cleared all tasks, as callers may unpin DMA
+                // buffers once `clear_all_tasks` returns.
+                warn!(
+                    "Failed to clear CQE tasks after {CLEAR_WARNING_DEADLINE:?}; continuing to wait"
+                );
+                warned = true;
             }
-            fasync::Timer::new(CLEAR_POLL_INTERVAL).await;
+            let interval = if warned { CLEAR_SLOW_POLL_INTERVAL } else { CLEAR_POLL_INTERVAL };
+            fasync::Timer::new(interval).await;
         }
-        trace!("Cleared all tasks");
+        if warned {
+            let elapsed = start.elapsed();
+            info!("Cleared all tasks after {elapsed:?}");
+        } else {
+            trace!("Cleared all tasks");
+        }
     }
 
     /// Executes a DCMD, waiting for its completion.

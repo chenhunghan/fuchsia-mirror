@@ -59,6 +59,14 @@ rust_toolchain(
 )
 
 toolchain(
+    name = "cc_toolchain_linux_x64",
+    exec_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_CONSTRAINTS,
+    toolchain = "@@rules_cc++cc_configure_extension+local_config_cc//:local",
+    toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+)
+
+toolchain(
     name = "toolchain_linux_x64",
     exec_compatible_with = HOST_CONSTRAINTS,
     target_compatible_with = HOST_CONSTRAINTS,

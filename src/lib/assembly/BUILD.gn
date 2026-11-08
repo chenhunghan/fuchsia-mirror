@@ -8,6 +8,7 @@ import("//build/testing/standardized_test_groups.gni")
 standardized_test_groups("tests") {
   host = [
     ":bazel_tests",
+    "//src/lib/assembly/android_config:android_config_test",
     "//src/lib/assembly/api:api_test",
     "//src/lib/assembly/artifact_cache:artifact_cache_test",
     "//src/lib/assembly/assembled_system:assembled_system_test",

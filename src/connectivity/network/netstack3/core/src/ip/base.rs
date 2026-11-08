@@ -494,6 +494,9 @@ impl<BC: BindingsContext, L: LockBefore<crate::lock_ordering::IcmpAllSocketsSet<
             }
             Ipv4Proto::Icmp
             | Ipv4Proto::Igmp
+            | Ipv4Proto::Proto(IpProto::Ipv4Encap)
+            | Ipv4Proto::Proto(IpProto::Ipv6Encap)
+            | Ipv4Proto::Proto(IpProto::Esp)
             | Ipv4Proto::Proto(IpProto::Reserved)
             | Ipv4Proto::Other(_) => None,
         }
@@ -554,9 +557,16 @@ impl<BC: BindingsContext, L: LockBefore<crate::lock_ordering::IcmpAllSocketsSet<
                 )
                 .map_err(|(_body, err)| err)
             }
-            Ipv4Proto::Proto(IpProto::Reserved) | Ipv4Proto::Other(_) => {
-                Err(Icmpv4Error::ProtocolUnreachable)
-            }
+            // IPsec isn't supported, so drop the packet. Per RFC 4303 Section
+            // 3.4.2, an ESP packet for which no valid Security Association
+            // exists must be discarded, so don't send an ICMP error.
+            //
+            // TODO(https://fxbug.dev/567135187): Process ESP packets.
+            Ipv4Proto::Proto(IpProto::Esp) => Ok(()),
+            Ipv4Proto::Proto(IpProto::Ipv4Encap)
+            | Ipv4Proto::Proto(IpProto::Ipv6Encap)
+            | Ipv4Proto::Proto(IpProto::Reserved)
+            | Ipv4Proto::Other(_) => Err(Icmpv4Error::ProtocolUnreachable),
         }
     }
 }
@@ -600,6 +610,9 @@ impl<BC: BindingsContext, L: LockBefore<crate::lock_ordering::IcmpAllSocketsSet<
             }
             Ipv6Proto::Icmpv6
             | Ipv6Proto::NoNextHeader
+            | Ipv6Proto::Proto(IpProto::Ipv4Encap)
+            | Ipv6Proto::Proto(IpProto::Ipv6Encap)
+            | Ipv6Proto::Proto(IpProto::Esp)
             | Ipv6Proto::Proto(IpProto::Reserved)
             | Ipv6Proto::Other(_) => None,
         }
@@ -660,7 +673,12 @@ impl<BC: BindingsContext, L: LockBefore<crate::lock_ordering::IcmpAllSocketsSet<
                 )
                 .map_err(|(_body, err)| err)
             }
-            Ipv6Proto::Proto(IpProto::Reserved) | Ipv6Proto::Other(_) => {
+            // TODO(https://fxbug.dev/577472820): Support receiving ESP packets.
+            Ipv6Proto::Proto(IpProto::Esp) => Ok(()),
+            Ipv6Proto::Proto(IpProto::Ipv4Encap)
+            | Ipv6Proto::Proto(IpProto::Ipv6Encap)
+            | Ipv6Proto::Proto(IpProto::Reserved)
+            | Ipv6Proto::Other(_) => {
                 // The next header should not be unrecognized at this point.
                 // Packet parsing should have detected this, and for fragmented
                 // packets additional parsing and checks after reassembly should
@@ -727,7 +745,12 @@ impl<
                     err,
                 )
             }
-            Ipv4Proto::Igmp | Ipv4Proto::Other(_) | Ipv4Proto::Proto(IpProto::Reserved) => {
+            Ipv4Proto::Igmp
+            | Ipv4Proto::Other(_)
+            | Ipv4Proto::Proto(IpProto::Ipv4Encap)
+            | Ipv4Proto::Proto(IpProto::Ipv6Encap)
+            | Ipv4Proto::Proto(IpProto::Esp)
+            | Ipv4Proto::Proto(IpProto::Reserved) => {
                 trace!(
                     "Received ICMP error message ({:?}) for unsupported IP protocol: {:?}",
                     err, original_proto
@@ -806,7 +829,12 @@ impl<
                     err,
                 )
             }
-            Ipv6Proto::NoNextHeader | Ipv6Proto::Other(_) | Ipv6Proto::Proto(IpProto::Reserved) => {
+            Ipv6Proto::NoNextHeader
+            | Ipv6Proto::Other(_)
+            | Ipv6Proto::Proto(IpProto::Ipv4Encap)
+            | Ipv6Proto::Proto(IpProto::Ipv6Encap)
+            | Ipv6Proto::Proto(IpProto::Esp)
+            | Ipv6Proto::Proto(IpProto::Reserved) => {
                 trace!(
                     "Received ICMPv6 error message ({:?}) for unsupported IP protocol: {:?}",
                     err, original_next_header

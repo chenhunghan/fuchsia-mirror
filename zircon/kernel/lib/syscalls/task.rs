@@ -47,8 +47,3 @@ pub fn sys_task_suspend(handle: HandleValue, token: &mut HandleValue) -> Result<
     *token = ProcessDispatcher::with_current(|up| up.make_and_add_handle(new_token, rights))?;
     Ok(())
 }
-
-#[syscall]
-pub fn sys_task_suspend_token(handle: HandleValue, token: &mut HandleValue) -> Result<(), Status> {
-    sys_task_suspend(handle, token)
-}

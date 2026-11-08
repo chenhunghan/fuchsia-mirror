@@ -26,6 +26,7 @@ class Filter;
 class Frame;
 class Target;
 class Thread;
+class Tracepoint;
 class SymbolServer;
 
 // Command ---------------------------------------------------------------------
@@ -109,6 +110,9 @@ class Command {
   Filter* filter() const { return filters_.size() == 1 ? filters_[0] : nullptr; }
   const std::vector<Filter*>& all_filters() const { return filters_; }
   void add_filter(Filter* f) { filters_.push_back(f); }
+  Tracepoint* tracepoint() const { return tracepoints_.size() == 1 ? tracepoints_[0] : nullptr; }
+  const std::vector<Tracepoint*>& all_tracepoints() const { return tracepoints_; }
+  void add_tracepoint(Tracepoint* t) { tracepoints_.push_back(t); }
   SymbolServer* sym_server() const {
     return symbol_servers_.size() == 1 ? symbol_servers_[0] : nullptr;
   }
@@ -136,6 +140,7 @@ class Command {
   std::vector<Frame*> frames_;                 // Will be empty if no valid thread stopped.
   std::vector<Breakpoint*> breakpoints_;       // May be empty.
   std::vector<Filter*> filters_;               // May be empty.
+  std::vector<Tracepoint*> tracepoints_;       // May be empty.
   std::vector<SymbolServer*> symbol_servers_;  // May be empty.
 
   Verb verb_ = Verb::kNone;

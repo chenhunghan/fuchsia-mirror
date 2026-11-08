@@ -20,7 +20,7 @@ from typing import Any
 
 import cl_utils
 import fuchsia
-import rbe_profile
+from build.rbe import rbe_profile
 
 _SCRIPT_BASENAME = Path(__file__).name
 _SCRIPT_DIR = Path(__file__).parent
@@ -134,7 +134,7 @@ class ShowActionResult(object):
             and self.output_files == other.output_files
         )
 
-    def diff(self, other: "ShowActionResult") -> ActionDifferences:
+    def diff(self, other: ShowActionResult) -> ActionDifferences:
         return ActionDifferences(
             command_unified_diffs=list(
                 difflib.unified_diff(

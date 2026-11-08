@@ -21,7 +21,7 @@ use crate::kconcurrent::{
 use crate::kernel::mp::{SMP_MAX_CPUS, cpu_num_to_mask};
 use crate::kernel::percpu::{CpuStats, PerCpu};
 use crate::kernel::recurring_callback::StaticRecurringCallback;
-use crate::kernel::scheduler::{self, Scheduler};
+use crate::kernel::scheduler;
 use crate::kernel::thread::{
     Backtrace, DEFAULT_PRIORITY, Thread, ThreadPtr, create_with_priority, reschedule,
     thread_id_to_thread_slow,
@@ -147,11 +147,10 @@ unsafe extern "C" fn cmd_thread(argc: c_int, argv: *const CmdArgs, flags: u32) -
 /// Nothing: `argv` is never dereferenced. The function is `unsafe` only to match the console
 /// command signature.
 unsafe extern "C" fn cmd_threadstats(_argc: c_int, _argv: *const CmdArgs, _flags: u32) -> c_int {
-    for i in 0..(PerCpu::processor_count() as cpu_num_t) {
+    for (i, percpu) in PerCpu::iter() {
         if !scheduler::peek_is_active(i) {
             continue;
         }
-        let percpu = PerCpu::get(i);
         // SAFETY: `percpu.stats.get()` points to a valid, aligned `CpuStats` instance whose
         // counter fields are updated via atomic operations.
         let stats = unsafe { CpuStats::read_atomic_fields_relaxed(percpu.stats.get()) };
@@ -171,7 +170,7 @@ unsafe extern "C" fn cmd_threadstats(_argc: c_int, _argv: *const CmdArgs, _flags
     0
 }
 
-ksync::declare_singleton_spinlock!(ThreadLoadStateLock);
+crate::ksync_kernel::declare_singleton_spinlock!(ThreadLoadStateLock);
 
 struct ThreadLoadState {
     old_stats: [CpuStats; SMP_MAX_CPUS],
@@ -184,12 +183,20 @@ static THREADLOAD_STATE: ksync::KCell<ThreadLoadState, ThreadLoadStateLock> =
         last_idle_time: [0; SMP_MAX_CPUS],
     });
 
-extern "C" fn threadload_callback() {
+fn threadload_callback() {
     kprintln!(
         "cpu    load sched (cs ylds pmpts)   sysc ints (hw  tmr tmr_cb) ipi (rs  gen)     watts"
     );
-    for i in 0..(PerCpu::processor_count() as cpu_num_t) {
-        let idle_power_thread = PerCpu::get(i).idle_power_thread.thread();
+    for (i, percpu) in PerCpu::iter() {
+        // Don't display time for inactive cpus, and avoid forming a reference to an unbooted CPU's
+        // `idle_power_thread.thread_` when `kernel.smp.maxcpus` leaves it unconstructed.
+        if !scheduler::peek_is_active(i) {
+            continue;
+        }
+        // SAFETY: `ConstructFirstThread` / `CreateIdleThread` placement-news `thread_` at most once
+        // during boot before CPU `i` can ever be observed active (`Thread::ReviveIdlePowerThread`
+        // during CPU hotplug only mutates interior-mutable fields under `thread->get_lock()`).
+        let idle_power_thread = unsafe { percpu.idle_power_thread.thread() };
         let mut stats = CpuStats::new();
 
         let maybe_idle_time: Option<zx_duration_mono_t> = {
@@ -200,14 +207,13 @@ extern "C" fn threadload_callback() {
                 clt_tag!("g_threadload_callback")
             );
 
-            Scheduler::run_in_locked_scheduler(i, |_scheduler| -> Option<zx_duration_mono_t> {
+            percpu.scheduler.run_in_locked_scheduler(|_scheduler| -> Option<zx_duration_mono_t> {
                 // Don't display time for inactive cpus.
                 if !scheduler::peek_is_active(i) {
                     return None;
                 }
 
                 // The scheduler queue lock synchronizes this copy.
-                let percpu = PerCpu::get(i);
                 // SAFETY: `percpu.stats.get()` points to a valid initialized `CpuStats`, and
                 // `run_in_locked_scheduler` holds CPU `i`'s scheduler queue lock.
                 stats = unsafe { CpuStats::copy_from_relaxed(percpu.stats.get()) };
@@ -283,23 +289,23 @@ extern "C" fn threadload_callback() {
     }
 }
 
-extern "C" fn threadq_callback() {
+fn threadq_callback() {
     kprintln!("----------------------------------------------------");
-    for i in 0..(PerCpu::processor_count() as cpu_num_t) {
+    for (i, percpu) in PerCpu::iter() {
         if scheduler::peek_is_active(i) {
             kprintln!("thread queue cpu {:2}:", i);
-            PerCpu::get(i).scheduler.dump(false);
+            percpu.scheduler.dump(false);
         }
     }
     kprintln!("");
 }
 
-extern "C" fn threadq_stats_callback() {
+fn threadq_stats_callback() {
     kprintln!("----------------------------------------------------");
-    for i in 0..(PerCpu::processor_count() as cpu_num_t) {
+    for (i, percpu) in PerCpu::iter() {
         if scheduler::peek_is_active(i) {
             kprintln!("thread queue cpu {:2}:", i);
-            PerCpu::get(i).scheduler.dump(true);
+            percpu.scheduler.dump(true);
         }
     }
     kprintln!("");

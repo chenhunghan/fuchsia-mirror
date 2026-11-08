@@ -5,7 +5,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-//! 32.64 unsigned fixed point arithmetic, mirroring `<lib/fixed_point.h>`.
+//! 32.64 unsigned fixed point arithmetic.
 
 use core::ptr::NonNull;
 
@@ -16,8 +16,6 @@ use crate::fixed_point_debug::{
 
 /// A 32.64 unsigned fixed point number: 32 integer bits followed by 64
 /// fractional bits, stored as three little-endian-by-significance limbs.
-///
-/// Layout-compatible with the C `struct fp_32_64`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Fp3264 {
@@ -131,48 +129,6 @@ pub fn u64_mul_u64_fp32_64(a: u64, b: Fp3264) -> u64 {
     debug_u64_mul_u64_fp32_64(a, b, res_0, res_l32_32, ret);
 
     ret
-}
-
-/// FFI trampoline for C++ `fp_32_64_div_32_32`.
-///
-/// Called from C via `<lib/fixed_point.h>`; the C caller must pass a valid,
-/// aligned, non-null pointer to a `struct fp_32_64`.
-///
-/// # Safety
-///
-/// `result` must be valid for writes and properly aligned.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_fixed_point_fp_32_64_div_32_32(
-    result: NonNull<Fp3264>,
-    dividend: u32,
-    divisor: u32,
-) {
-    // SAFETY: Forwarding caller's safety contract to `fp_32_64_div_32_32`.
-    unsafe { fp_32_64_div_32_32(result, dividend, divisor) }
-}
-
-/// FFI trampoline for C++ `u64_mul_u32_fp32_64`.
-///
-/// Called from C via `<lib/fixed_point.h>`; `b` is passed by value matching C++.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_fixed_point_u64_mul_u32_fp32_64(a: u32, b: Fp3264) -> u64 {
-    u64_mul_u32_fp32_64(a, b)
-}
-
-/// FFI trampoline for C++ `u32_mul_u64_fp32_64`.
-///
-/// Called from C via `<lib/fixed_point.h>`; `b` is passed by value matching C++.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_fixed_point_u32_mul_u64_fp32_64(a: u64, b: Fp3264) -> u32 {
-    u32_mul_u64_fp32_64(a, b)
-}
-
-/// FFI trampoline for C++ `u64_mul_u64_fp32_64`.
-///
-/// Called from C via `<lib/fixed_point.h>`; `b` is passed by value matching C++.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_fixed_point_u64_mul_u64_fp32_64(a: u64, b: Fp3264) -> u64 {
-    u64_mul_u64_fp32_64(a, b)
 }
 
 #[cfg(test)]
@@ -420,26 +376,5 @@ mod tests {
                 "{a32:#x} * {b:x?}"
             );
         }
-    }
-
-    #[test]
-    fn ffi_trampolines() {
-        let mut result = Fp3264::default();
-        // SAFETY: `result` is a valid, aligned mutable reference.
-        unsafe { rust_fixed_point_fp_32_64_div_32_32(NonNull::from(&mut result), 1, 3) };
-        let mut expected = Fp3264::default();
-        // SAFETY: `expected` is a valid, aligned mutable reference.
-        unsafe { fp_32_64_div_32_32(NonNull::from(&mut expected), 1, 3) };
-        assert_eq!(result, expected);
-        assert_eq!(rust_fixed_point_u64_mul_u32_fp32_64(3, result), u64_mul_u32_fp32_64(3, result));
-        assert_eq!(
-            rust_fixed_point_u32_mul_u64_fp32_64(3_000_000_000, result),
-            u32_mul_u64_fp32_64(3_000_000_000, result)
-        );
-        assert_eq!(
-            rust_fixed_point_u64_mul_u64_fp32_64(3_000_000_000, result),
-            u64_mul_u64_fp32_64(3_000_000_000, result)
-        );
-        assert_eq!(rust_fixed_point_u64_mul_u64_fp32_64(3_000_000_000, result), 1_000_000_000);
     }
 }

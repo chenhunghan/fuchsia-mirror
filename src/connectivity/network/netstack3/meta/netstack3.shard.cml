@@ -5,8 +5,7 @@
 // Common manifest shard for all Netstack3 component variants.
 {
     include: [
-        "inspect/offer.shard.cml",
-        "inspect/use.shard.cml",
+        "inspect/client.shard.cml",
         "syslog/client.shard.cml",
         "trace/client.shard.cml",
     ],
@@ -61,7 +60,16 @@
             protocol: [
                 "fuchsia.power.broker.Topology",
                 "fuchsia.power.system.ActivityGovernor",
+                "fuchsia.time.alarms.WakeAlarms",
             ],
+            availability: "optional",
+        },
+        {
+            // Per-boot salt used when redact_network_identifiers is true.
+            // TODO(https://fxbug.dev/576752502): Remove this dependency once the
+            // salt is provided at startup.
+            protocol: "fuchsia.diagnostics.SaltProvider",
+            from: "parent/diagnostics",
             availability: "optional",
         },
         {

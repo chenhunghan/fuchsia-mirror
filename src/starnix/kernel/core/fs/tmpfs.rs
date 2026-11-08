@@ -5,6 +5,7 @@
 use crate::mm::PAGE_SIZE;
 use crate::task::{CurrentTask, Kernel};
 use crate::vfs::memory_directory::MemoryDirectoryFile;
+use crate::vfs::pipe::Pipe;
 use crate::vfs::{
     CacheMode, FileOps, FileSystem, FileSystemHandle, FileSystemOps, FileSystemOptions, FsNode,
     FsNodeHandle, FsNodeInfo, FsNodeOps, FsStr, MemoryRegularNode, MemoryXattrStorage,
@@ -26,6 +27,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 pub struct TmpFs {
     name: &'static FsStr,
     casefold: bool,
+    noswap: bool,
 }
 
 impl FileSystemOps for Arc<TmpFs> {
@@ -147,7 +149,23 @@ pub fn tmp_fs(
     current_task: &CurrentTask,
     options: FileSystemOptions,
 ) -> Result<FileSystemHandle, Errno> {
-    TmpFs::new_fs_with_options(&current_task.kernel(), options)
+    TmpFs::new_fs_with_options_and_cred(
+        &current_task.kernel(),
+        options,
+        current_task.current_fscred(),
+    )
+}
+
+/// Registers a `TmpFs`-backed `"ramfs"` filesystem for use by the SELinux test suite.
+pub fn register_selinux_test_suite_ramfs(kernel: &Kernel) {
+    let registry = kernel.expando.get::<crate::vfs::fs_registry::FsRegistry>();
+    registry.register(
+        b"ramfs".into(),
+        starnix_uapi::fs_type::FileSystemTypeFlags::empty(),
+        |current_task, options| {
+            TmpFs::new_fs_with_options_and_name(current_task.kernel(), options, "ramfs".into())
+        },
+    );
 }
 
 impl TmpFs {
@@ -164,13 +182,30 @@ impl TmpFs {
         kernel: &Kernel,
         options: FileSystemOptions,
     ) -> Result<FileSystemHandle, Errno> {
-        Self::new_fs_with_options_and_name(kernel, options, "tmpfs".into())
+        Self::new_fs_with_options_and_cred(kernel, options, FsCred::root())
+    }
+
+    pub fn new_fs_with_options_and_cred(
+        kernel: &Kernel,
+        options: FileSystemOptions,
+        default_cred: FsCred,
+    ) -> Result<FileSystemHandle, Errno> {
+        Self::new_fs_with_options_name_and_cred(kernel, options, "tmpfs".into(), default_cred)
     }
 
     fn new_fs_with_options_and_name(
         kernel: &Kernel,
         options: FileSystemOptions,
         name: &'static FsStr,
+    ) -> Result<FileSystemHandle, Errno> {
+        Self::new_fs_with_options_name_and_cred(kernel, options, name, FsCred::root())
+    }
+
+    fn new_fs_with_options_name_and_cred(
+        kernel: &Kernel,
+        options: FileSystemOptions,
+        name: &'static FsStr,
+        default_cred: FsCred,
     ) -> Result<FileSystemHandle, Errno> {
         let mut mount_options = options.params.clone();
         let mode = if let Some(mode) = mount_options.remove(b"mode") {
@@ -181,18 +216,23 @@ impl TmpFs {
         let uid = if let Some(uid) = mount_options.remove(b"uid") {
             fs_args::parse::<uid_t>(uid.as_ref())?
         } else {
-            0
+            default_cred.uid
         };
         let gid = if let Some(gid) = mount_options.remove(b"gid") {
             fs_args::parse::<gid_t>(gid.as_ref())?
         } else {
-            0
+            default_cred.gid
         };
         let casefold = mount_options.remove(b"casefold").is_some();
+        let noswap = match mount_options.remove(b"noswap") {
+            Some(val) if val.is_empty() => true,
+            Some(_) => return error!(EINVAL),
+            None => false,
+        };
         let fs = FileSystem::new(
             kernel,
             CacheMode::Permanent,
-            Arc::new(TmpFs { name, casefold }),
+            Arc::new(TmpFs { name, casefold, noswap }),
             options,
         )?;
         let root_ino = fs.allocate_ino();
@@ -229,13 +269,25 @@ impl TmpFsDirectory {
 }
 
 fn create_child_node(
+    current_task: &CurrentTask,
     parent: &FsNode,
     mode: FileMode,
     dev: DeviceId,
     owner: FsCred,
 ) -> Result<FsNodeHandle, Errno> {
     let ops: Box<dyn FsNodeOps> = match mode.fmt() {
-        FileMode::IFREG => Box::new(MemoryRegularNode::new()?),
+        FileMode::IFREG => {
+            let noswap = parent
+                .fs()
+                .downcast_ops::<Arc<TmpFs>>()
+                .expect("TmpFs node must belong to TmpFs")
+                .noswap;
+            if noswap {
+                Box::new(MemoryRegularNode::new_pinned(current_task.kernel())?)
+            } else {
+                Box::new(MemoryRegularNode::new()?)
+            }
+        }
         FileMode::IFIFO | FileMode::IFBLK | FileMode::IFCHR | FileMode::IFSOCK => {
             Box::new(TmpFsSpecialNode::new())
         }
@@ -273,25 +325,26 @@ impl FsNodeOps for TmpFsDirectory {
         mode: FileMode,
         owner: FsCred,
     ) -> Result<FsNodeHandle, Errno> {
-        node.update_info(|info| {
+        let casefold = node.update_info(|info| {
             info.link_count += 1;
+            info.casefold
         });
         self.child_count.fetch_add(1, Ordering::Release);
         let mut info = FsNodeInfo::new(mode, owner);
-        info.casefold = node.info().casefold;
+        info.casefold = casefold;
         Ok(node.fs().create_node_and_allocate_node_id(TmpFsDirectory::new(), info))
     }
 
     fn mknod(
         &self,
         node: &FsNode,
-        _current_task: &CurrentTask,
+        current_task: &CurrentTask,
         _name: &FsStr,
         mode: FileMode,
         dev: DeviceId,
         owner: FsCred,
     ) -> Result<FsNodeHandle, Errno> {
-        let child = create_child_node(node, mode, dev, owner)?;
+        let child = create_child_node(current_task, node, mode, dev, owner)?;
         self.child_count.fetch_add(1, Ordering::Release);
         Ok(child)
     }
@@ -312,12 +365,12 @@ impl FsNodeOps for TmpFsDirectory {
     fn create_tmpfile(
         &self,
         node: &FsNode,
-        _current_task: &CurrentTask,
+        current_task: &CurrentTask,
         mode: FileMode,
         owner: FsCred,
     ) -> Result<FsNodeHandle, Errno> {
         assert!(mode.is_reg());
-        create_child_node(node, mode, DeviceId::NONE, owner)
+        create_child_node(current_task, node, mode, DeviceId::NONE, owner)
     }
 
     fn link(
@@ -380,21 +433,23 @@ impl FsNodeOps for TmpFsSpecialNode {
 
     fn create_file_ops(
         &self,
-        _node: &FsNode,
-        _current_task: &CurrentTask,
-        _flags: OpenFlags,
+        node: &FsNode,
+        current_task: &CurrentTask,
+        flags: OpenFlags,
     ) -> Result<Box<dyn FileOps>, Errno> {
-        unreachable!("Special nodes cannot be opened.");
+        assert!(node.is_fifo(), "Only FIFO special nodes can create file ops.");
+        Pipe::open(current_task, node.fifo(current_task), flags)
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::mm::{MlockShadowProcess, ProtectionFlags};
     use crate::testing::spawn_kernel_and_run;
     use crate::vfs::buffers::{VecInputBuffer, VecOutputBuffer};
     use crate::vfs::fs_args::MountParams;
-    use crate::vfs::{DirectoryMode, FdNumber, UnlinkKind};
+    use crate::vfs::{DirectoryMode, FdNumber, LookupContext, Namespace, UnlinkKind};
     use starnix_uapi::errno;
     use starnix_uapi::mount_flags::FileSystemFlags;
     use starnix_uapi::vfs::ResolveFlags;
@@ -631,6 +686,131 @@ mod test {
             assert_eq!(info.mode, mode!(IFDIR, 0o123));
             assert_eq!(info.uid, 42);
             assert_eq!(info.gid, 84);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_noswap_pins_vmo_until_unlinked() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+
+            // 1. Default tmpfs does not pin backing VMOs in the shadow process.
+            let default_fs = TmpFs::new_fs(kernel);
+            let default_ns = Namespace::new(default_fs);
+            default_ns
+                .root()
+                .create_node(
+                    current_task,
+                    "regular.bin".into(),
+                    mode!(IFREG, 0o600),
+                    DeviceId::NONE,
+                )
+                .expect("create regular.bin");
+            let mut context = LookupContext::default();
+            let regular_node = default_ns
+                .root()
+                .lookup_child(current_task, &mut context, "regular.bin".into())
+                .expect("lookup regular.bin");
+            let regular_file =
+                regular_node.open(current_task, OpenFlags::RDWR).expect("open regular.bin");
+            let regular_koid = regular_file
+                .get_memory(current_task, None, ProtectionFlags::READ)
+                .expect("get_memory regular.bin")
+                .get_koid();
+            assert!(!MlockShadowProcess::pinned_vmo_koids(kernel).contains(&regular_koid));
+
+            // 2. Mounting tmpfs with `-o noswap` pins backing VMOs in the shadow process.
+            let noswap_fs = tmp_fs(
+                current_task,
+                FileSystemOptions {
+                    source: Default::default(),
+                    flags: FileSystemFlags::empty().into(),
+                    params: MountParams::parse(b"noswap".into()).expect("parsed noswap"),
+                },
+            )
+            .expect("tmp_fs with noswap");
+            let noswap_ns = Namespace::new(noswap_fs);
+            noswap_ns
+                .root()
+                .create_node(current_task, "pinned.bin".into(), mode!(IFREG, 0o600), DeviceId::NONE)
+                .expect("create pinned.bin");
+
+            let pinned_koid = {
+                let mut context = LookupContext::default();
+                let pinned_node = noswap_ns
+                    .root()
+                    .lookup_child(current_task, &mut context, "pinned.bin".into())
+                    .expect("lookup pinned.bin");
+                let pinned_file =
+                    pinned_node.open(current_task, OpenFlags::RDWR).expect("open pinned.bin");
+                pinned_file
+                    .write(current_task, &mut VecInputBuffer::new(b"hello noswap"))
+                    .expect("write pinned.bin");
+                let koid = pinned_file
+                    .get_memory(current_task, None, ProtectionFlags::READ)
+                    .expect("get_memory pinned.bin")
+                    .get_koid();
+                assert!(MlockShadowProcess::pinned_vmo_koids(kernel).contains(&koid));
+                koid
+            };
+
+            // Closing the open `FileHandle` while the file remains linked in `tmpfs` keeps the
+            // backing VMO pinned.
+            current_task.trigger_delayed_releaser();
+            assert!(MlockShadowProcess::pinned_vmo_koids(kernel).contains(&pinned_koid));
+
+            // 3. Unlinking the file and releasing its `FsNode` drops the shadow-process pin.
+            noswap_ns
+                .root()
+                .unlink(
+                    current_task,
+                    "pinned.bin".into(),
+                    UnlinkKind::NonDirectory,
+                    DirectoryMode::AllowAny,
+                )
+                .expect("unlink pinned.bin");
+            current_task.trigger_delayed_releaser();
+            assert!(!MlockShadowProcess::pinned_vmo_koids(kernel).contains(&pinned_koid));
+
+            // 4. Creating an anonymous `O_TMPFILE` node on a `noswap` mount also pins its backing
+            // VMO until the node is dropped.
+            let tmpfile_koid = {
+                let tmpfile_node = noswap_ns
+                    .root()
+                    .create_tmpfile(current_task, mode!(IFREG, 0o600), OpenFlags::RDWR)
+                    .expect("create_tmpfile");
+                let tmpfile =
+                    tmpfile_node.open(current_task, OpenFlags::RDWR).expect("open tmpfile");
+                let koid = tmpfile
+                    .get_memory(current_task, None, ProtectionFlags::READ)
+                    .expect("get_memory tmpfile")
+                    .get_koid();
+                assert!(MlockShadowProcess::pinned_vmo_koids(kernel).contains(&koid));
+                koid
+            };
+            current_task.trigger_delayed_releaser();
+            assert!(!MlockShadowProcess::pinned_vmo_koids(kernel).contains(&tmpfile_koid));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_noswap_rejects_value() {
+        spawn_kernel_and_run(async |current_task| {
+            // `noswap` is a flag-only mount option; passing a value must return EINVAL.
+            let err = match tmp_fs(
+                current_task,
+                FileSystemOptions {
+                    source: Default::default(),
+                    flags: FileSystemFlags::empty().into(),
+                    params: MountParams::parse(b"noswap=1".into()).expect("parsed noswap=1"),
+                },
+            ) {
+                Ok(_) => panic!("expected EINVAL for noswap=1"),
+                Err(e) => e,
+            };
+            assert_eq!(err, errno!(EINVAL));
         })
         .await;
     }

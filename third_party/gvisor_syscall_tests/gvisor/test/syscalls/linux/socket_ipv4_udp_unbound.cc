@@ -15,20 +15,25 @@
 #include "test/syscalls/linux/socket_ipv4_udp_unbound.h"
 
 #include <arpa/inet.h>
+#include <netinet/in.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/un.h>
+#include <unistd.h>
 
 #include <cerrno>
 #include <cstdio>
+#include <cstring>
 #include <memory>
+#include <vector>
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "absl/cleanup/cleanup.h"
 #include "test/syscalls/linux/ip_socket_test_util.h"
 #include "test/util/posix_error.h"
+#include "test/util/save_util.h"
 #include "test/util/socket_util.h"
 #include "test/util/test_util.h"
 
@@ -88,7 +93,7 @@ TEST_P(IPv4UDPUnboundSocketTest, IpMulticastLoopbackNoGroup) {
 // from being sent. Group membership interface configured by address.
 TEST_P(IPv4UDPUnboundSocketTest, IpMulticastLoopbackAddrNoDefaultSendIf) {
   // TODO(b/185517803): Fix for native test.
-  SKIP_IF(!IsRunningOnGvisor());
+  SKIP_IF(GvisorPlatform() == Platform::kNative);
   auto socket1 = ASSERT_NO_ERRNO_AND_VALUE(NewSocket());
   auto socket2 = ASSERT_NO_ERRNO_AND_VALUE(NewSocket());
 
@@ -128,7 +133,7 @@ TEST_P(IPv4UDPUnboundSocketTest, IpMulticastLoopbackAddrNoDefaultSendIf) {
 // from being sent. Group membership interface configured by NIC ID.
 TEST_P(IPv4UDPUnboundSocketTest, IpMulticastLoopbackNicNoDefaultSendIf) {
   // TODO(b/185517803): Fix for native test.
-  SKIP_IF(!IsRunningOnGvisor());
+  SKIP_IF(GvisorPlatform() == Platform::kNative);
   auto socket1 = ASSERT_NO_ERRNO_AND_VALUE(NewSocket());
   auto socket2 = ASSERT_NO_ERRNO_AND_VALUE(NewSocket());
 
@@ -1502,7 +1507,7 @@ TEST_P(IPv4UDPUnboundSocketTest, ReuseAddrDistribution) {
 
     // Send a new message to the SO_REUSEADDR group. We use a new socket each
     // time so that a new ephemeral port will be used each time. This ensures
-    // that we aren't doing REUSEPORT-like hash load blancing.
+    // that we aren't doing REUSEPORT-like hash load balancing.
     auto sender = ASSERT_NO_ERRNO_AND_VALUE(NewSocket());
     char send_buf[kMessageSize];
     RandomizeBuffer(send_buf, sizeof(send_buf));
@@ -2310,8 +2315,9 @@ TEST_P(IPv4UDPUnboundSocketTest, IpMulticastIPPacketInfo) {
   recv_msg.msg_iovlen = 1;
   recv_msg.msg_controllen = CMSG_LEN(cmsg_data_len);
   recv_msg.msg_control = recv_cmsg_buf;
-  ASSERT_THAT(RetryEINTR(recvmsg)(receiver_socket->get(), &recv_msg, 0),
-              SyscallSucceedsWithValue(sizeof(send_buf)));
+  ASSERT_THAT(
+      RecvMsgTimeout(receiver_socket->get(), &recv_msg, kPositiveTimeoutSecs),
+      IsPosixErrorOkAndHolds(sizeof(send_buf)));
   EXPECT_EQ(0, memcmp(send_buf, recv_buf, sizeof(send_buf)));
 
   // Check the IP_PKTINFO control message.

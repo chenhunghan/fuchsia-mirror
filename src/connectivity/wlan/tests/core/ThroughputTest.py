@@ -3,6 +3,7 @@
 # found in the LICENSE file.
 
 import asyncio
+from collections.abc import Sequence
 
 import fuchsia_wlan_base_test
 import honeydew.affordances.connectivity.wlan.core as wlan_core
@@ -16,6 +17,7 @@ from legacy_access_point.ap_lib.hostapd_security import (
     Security as DeprecatedSecurity,
 )
 from mobly import asserts, signals, test_runner
+from openwrt_access_point import OpenWrtAP
 from openwrt_access_point.lib.access_point_config import (
     AccessPointConfig,
     BssChannel,
@@ -34,7 +36,6 @@ class ThroughputTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
     iperf_server: IPerfServerOverSsh
     dut_board: str
     dut_phy_caps: throughput_utils.WlanPhyCaps
-    ap_phy_caps: throughput_utils.WlanPhyCaps
     reporter: throughput_utils.ThroughputReporter
 
     async def pre_run(self) -> None:
@@ -54,9 +55,6 @@ class ThroughputTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
 
         self.dut_board = self.dut.board.lower()
         self.dut_phy_caps = throughput_utils.get_dut_phy_caps(self.dut_board)
-        self.ap_phy_caps = throughput_utils.resolve_ap_phy_caps(
-            self.openwrt_ap, self.access_point
-        )
 
         self.reporter = throughput_utils.ThroughputReporter(
             self.log_path,
@@ -69,8 +67,8 @@ class ThroughputTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         await self.dut.wlan_core.destroy_all_ifaces()
 
     async def teardown_test(self) -> None:
-        if self.access_point is not None:
-            self.access_point.stop_all_aps()
+        for ap in self.access_points:
+            ap.stop_all_aps()
         await super().teardown_test()
 
     async def teardown_class(self) -> None:
@@ -118,13 +116,33 @@ class ThroughputTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
     async def run_channel_performance(
         self, test: throughput_utils.TestParams
     ) -> None:
+        aps: Sequence[OpenWrtAP | AccessPoint] = (
+            self.openwrt_aps or self.access_points
+        )
+        for i, ap in enumerate(aps):
+            await self._run_channel_performance_on_ap(
+                test, ap, ap_name=f"ap{i}", is_primary_ap=(i == 0)
+            )
+            await self.dut.wlan_core.destroy_all_ifaces()
+
+    async def _run_channel_performance_on_ap(
+        self,
+        test: throughput_utils.TestParams,
+        ap: OpenWrtAP | AccessPoint,
+        ap_name: str,
+        is_primary_ap: bool,
+    ) -> None:
         iface = await self.phy.create_client_iface()
         ssid = AccessPointConfig.random_string(8)
         password = throughput_utils.generate_password(test.security_mode)
-        if self.openwrt_ap:
+
+        openwrt_ap = ap if isinstance(ap, OpenWrtAP) else None
+        legacy_ap = ap if isinstance(ap, AccessPoint) else None
+
+        if openwrt_ap:
             # HE / Wifi 6 / 802.11ax is the latest supported by OpenWRT One
             phy_mode = HeMode(bw=test.channel_bandwidth)
-            self.openwrt_ap.configure_wifi(
+            openwrt_ap.configure_wifi(
                 AccessPointConfig(
                     radios=[
                         RadioConfig(
@@ -144,9 +162,11 @@ class ThroughputTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
                     ]
                 )
             )
-        elif isinstance(self.access_point, AccessPoint):
+            iperf_server = openwrt_ap.iperf_server
+            iperf_server.start()
+        elif legacy_ap:
             setup_ap(
-                access_point=self.access_point,
+                access_point=legacy_ap,
                 profile_name="whirlwind",
                 channel=test.channel,
                 ssid=ssid,
@@ -160,17 +180,19 @@ class ThroughputTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
                 force_wmm=True,  # Gets maximum speed in 802.11ac
                 setup_bridge=True,  # Necessary for the separate iperf server
             )
+            iperf_server = self.iperf_server
 
         await iface.scan_and_connect(
             ssid=ssid,
             password=password,
             security=test.security_mode.to_fidl_wlan_internal(),
+            channels=[test.channel],
         )
 
-        if self.openwrt_ap is None:
+        if openwrt_ap is None:
             # Necessary while the iperf server is separate from the AP
-            self.iperf_server.renew_test_interface_ip_address()
-        iperf_server_address = self.iperf_server.get_addr()
+            iperf_server.renew_test_interface_ip_address()
+        iperf_server_address = iperf_server.get_addr()
 
         # Wait for IP routing to settle before running throughput tests
         netstack_iface = await self.dut.netstack.wait_for_interface(
@@ -180,9 +202,10 @@ class ThroughputTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         asserts.assert_equal(netstack_iface.mac, dut_mac)
         await self.dut.netstack.wait_for_ipv4_addr(netstack_iface.id_)
 
+        ap_phy_caps = throughput_utils.resolve_ap_phy_caps(ap)
         max_phy_mbps = throughput_utils.theoretical_max_phy_mbps(
             self.dut_phy_caps,
-            self.ap_phy_caps,
+            ap_phy_caps,
             test.band,
             test.channel_bandwidth,
         )
@@ -190,8 +213,8 @@ class ThroughputTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         async def _measure() -> throughput_utils.MeasurementsByDirection:
             return await throughput_utils.run_iperf_measurements(
                 iperf_server_address=iperf_server_address,
-                openwrt_ap=self.openwrt_ap,
-                access_point=self.access_point,
+                openwrt_ap=openwrt_ap,
+                access_point=legacy_ap,
                 dut_mac=dut_mac,
                 band=test.band,
                 channel_bandwidth=test.channel_bandwidth,
@@ -200,7 +223,7 @@ class ThroughputTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
                 sample_dut_metrics=lambda: self._sample_dut_metrics(iface),
             )
 
-        if test.record_odpm:
+        if test.record_odpm and is_primary_ap:
             async with odpm_utils.record_odpm_metrics(
                 self.dut.tracing,
                 test_case_path=self.test_case_path,
@@ -210,7 +233,9 @@ class ThroughputTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         else:
             measurements = await _measure()
 
-        self.reporter.record_test_case(test, measurements)
+        self.reporter.record_test_case(
+            test, measurements, ap_name=ap_name, is_primary_ap=is_primary_ap
+        )
         throughput_utils.assert_phy_rate_targets(
             measurements, max_phy_mbps, self.dut_board
         )

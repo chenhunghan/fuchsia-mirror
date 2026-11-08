@@ -77,6 +77,7 @@ class TracingFfxTests(unittest.IsolatedAsyncioTestCase):
             "starnix",
             "starnix:binder",
             "starnix:pager",
+            "starnix:syscalls",
             "storage",
             "system_metrics",
             "view",
@@ -94,7 +95,7 @@ class TracingFfxTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             tracing_using_ffx.DEFAULT_CATEGORIES, expected_categories
         )
-        self.assertEqual(len(tracing_using_ffx.DEFAULT_CATEGORIES), 34)
+        self.assertEqual(len(tracing_using_ffx.DEFAULT_CATEGORIES), 35)
 
     @parameterized.expand(
         [

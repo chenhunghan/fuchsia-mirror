@@ -10,9 +10,8 @@
 #include <lib/arch/riscv64/feature.h>
 #include <lib/arch/riscv64/paging-traits.h>
 
-#include <phys/main.h>
-
-#include "arch-phys-info.h"
+#include <phys/runtime/main.h>
+#include <phys/runtime/riscv64/info.h>
 
 using ArchLowerPagingTraits = arch::RiscvSv39PagingTraits;
 using ArchUpperPagingTraits = ArchLowerPagingTraits;

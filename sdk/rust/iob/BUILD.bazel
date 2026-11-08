@@ -1,0 +1,48 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":iob-rust-tests"],
+    visibility = ["//sdk:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    tests = [":iob_host_test"],
+    visibility = ["//sdk:__pkg__"],
+)
+
+rustc_library(
+    name = "iob",
+    srcs = [
+        "src/blob_id_allocator.rs",
+        "src/lib.rs",
+    ],
+    edition = "2024",
+    visibility = ["//zircon/kernel/object:__pkg__"],
+    deps = ["//sdk/rust/zx-status"],
+)
+
+rustc_test(
+    name = "iob_test",
+    crate = ":iob",
+)
+
+wrap_host_rust_test(
+    name = "iob_host_test",
+    binary_name = "iob_test",
+)
+
+fx_unittest_package(
+    name = "iob-rust-tests",
+    unit_tests = [":iob_test"],
+)

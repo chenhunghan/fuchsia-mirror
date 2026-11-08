@@ -18,6 +18,9 @@ use std::fs::File;
 const OTA_MANIFEST_DEV_PUBLIC_KEY: &str =
     "b1d9c9414b0a97a225da46ce6ae05753fa69cf722da706132ced72ccf48213e9";
 const OTA_MANIFEST_PUBLIC_KEY_HEX_LEN: usize = 64;
+// Value of fuchsia.pkgcache.PostCommitGcEarliestBootSeconds that disables post-commit garbage
+// collection in pkg-cache, which treats any negative value as disabled.
+const POST_COMMIT_GC_DISABLED: i32 = -1;
 
 /// SWD Configuration implementation detail which clarifies different subsystem behavior, derived
 /// from the PolicyLabels
@@ -122,6 +125,20 @@ impl DefineSubsystemConfiguration<(&SwdConfig, &VolumeConfig)> for SwdSubsystemC
         builder.set_config_capability(
             "fuchsia.pkgcache.UseDriverBlobPaging",
             Config::new(ConfigValueType::Bool, use_driver_blob_paging.into()),
+        )?;
+        if subsystem_config.post_commit_gc_earliest_boot_seconds.is_some() {
+            context.ensure_feature_set_level(
+                &[FeatureSetLevel::Standard, FeatureSetLevel::Utility],
+                "Post-commit garbage collection",
+            )?;
+        }
+        let post_commit_gc_earliest_boot_seconds = subsystem_config
+            .post_commit_gc_earliest_boot_seconds
+            .map(i32::from)
+            .unwrap_or(POST_COMMIT_GC_DISABLED);
+        builder.set_config_capability(
+            "fuchsia.pkgcache.PostCommitGcEarliestBootSeconds",
+            Config::new(ConfigValueType::Int32, post_commit_gc_earliest_boot_seconds.into()),
         )?;
 
         let manifest_public_keys = if subsystem_config.ota_manifest_public_keys.is_empty()
@@ -350,6 +367,7 @@ impl VerificationFailureConfigDetails {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::subsystems::ConfigurationBuilderImpl;
 
     #[test]
     fn test_swd_config_default_from_build_type_eng() {
@@ -424,8 +442,6 @@ mod tests {
 
     #[test]
     fn test_swd_trust_store_config() {
-        use crate::subsystems::ConfigurationBuilderImpl;
-
         let context = ConfigurationContext {
             feature_set_level: &FeatureSetLevel::Standard,
             build_type: &BuildType::Eng,
@@ -483,8 +499,6 @@ mod tests {
 
     #[test]
     fn test_excessive_update_duration_seconds_config() {
-        use crate::subsystems::ConfigurationBuilderImpl;
-
         let context = ConfigurationContext {
             feature_set_level: &FeatureSetLevel::Standard,
             build_type: &BuildType::Eng,
@@ -530,6 +544,146 @@ mod tests {
                     .configuration_capabilities
                     .get("fuchsia.system-updater.ExcessiveUpdateDurationSeconds"),
                 Some(&Config::new(ConfigValueType::Uint32, 3600.into())),
+            );
+        }
+    }
+
+    #[test]
+    fn test_use_driver_blob_paging_config() {
+        let context = ConfigurationContext {
+            feature_set_level: &FeatureSetLevel::Standard,
+            build_type: &BuildType::Eng,
+            board_config: &Default::default(),
+            gendir: Default::default(),
+            resource_dir: Default::default(),
+            developer_only_options: Default::default(),
+        };
+
+        // Default with Fxfs: true
+        {
+            let mut builder: ConfigurationBuilderImpl = Default::default();
+            let config = SwdConfig::default();
+            SwdSubsystemConfig::define_configuration(
+                &context,
+                &(&config, &VolumeConfig::Fxfs),
+                &mut builder,
+            )
+            .unwrap();
+            let completed_config = builder.build();
+            assert_eq!(
+                completed_config
+                    .configuration_capabilities
+                    .get("fuchsia.pkgcache.UseDriverBlobPaging"),
+                Some(&Config::new(ConfigValueType::Bool, true.into())),
+            );
+        }
+
+        // Default with Fvm: false
+        {
+            let mut builder: ConfigurationBuilderImpl = Default::default();
+            let config = SwdConfig::default();
+            SwdSubsystemConfig::define_configuration(
+                &context,
+                &(&config, &VolumeConfig::Fvm(Default::default())),
+                &mut builder,
+            )
+            .unwrap();
+            let completed_config = builder.build();
+            assert_eq!(
+                completed_config
+                    .configuration_capabilities
+                    .get("fuchsia.pkgcache.UseDriverBlobPaging"),
+                Some(&Config::new(ConfigValueType::Bool, false.into())),
+            );
+        }
+    }
+
+    #[test]
+    fn test_post_commit_gc_earliest_boot_seconds_config() {
+        let board_config = Default::default();
+        let make_context = |feature_set_level| ConfigurationContext {
+            feature_set_level,
+            build_type: &BuildType::Eng,
+            board_config: &board_config,
+            gendir: Default::default(),
+            resource_dir: Default::default(),
+            developer_only_options: Default::default(),
+        };
+        let context = make_context(&FeatureSetLevel::Standard);
+
+        // Default: disabled
+        {
+            let mut builder: ConfigurationBuilderImpl = Default::default();
+            let config = SwdConfig::default();
+            SwdSubsystemConfig::define_configuration(
+                &context,
+                &(&config, &VolumeConfig::Fxfs),
+                &mut builder,
+            )
+            .unwrap();
+            let completed_config = builder.build();
+            assert_eq!(
+                completed_config
+                    .configuration_capabilities
+                    .get("fuchsia.pkgcache.PostCommitGcEarliestBootSeconds"),
+                Some(&Config::new(ConfigValueType::Int32, (-1).into())),
+            );
+        }
+
+        // Configured: 0 and 300 on Standard and Utility
+        for level in [&FeatureSetLevel::Standard, &FeatureSetLevel::Utility] {
+            let context = make_context(level);
+            for seconds in [0u16, 300] {
+                let mut builder: ConfigurationBuilderImpl = Default::default();
+                let config = SwdConfig {
+                    post_commit_gc_earliest_boot_seconds: Some(seconds),
+                    ..Default::default()
+                };
+                SwdSubsystemConfig::define_configuration(
+                    &context,
+                    &(&config, &VolumeConfig::Fxfs),
+                    &mut builder,
+                )
+                .unwrap();
+                let completed_config = builder.build();
+                assert_eq!(
+                    completed_config
+                        .configuration_capabilities
+                        .get("fuchsia.pkgcache.PostCommitGcEarliestBootSeconds"),
+                    Some(&Config::new(ConfigValueType::Int32, seconds.into())),
+                );
+            }
+        }
+
+        // Disallowed when configured on Bootstrap or Embeddable, allowed when unset (None)
+        for level in [&FeatureSetLevel::Bootstrap, &FeatureSetLevel::Embeddable] {
+            let context = make_context(level);
+
+            let mut builder: ConfigurationBuilderImpl = Default::default();
+            SwdSubsystemConfig::define_configuration(
+                &context,
+                &(&SwdConfig::default(), &VolumeConfig::Fxfs),
+                &mut builder,
+            )
+            .unwrap();
+            assert_eq!(
+                builder
+                    .build()
+                    .configuration_capabilities
+                    .get("fuchsia.pkgcache.PostCommitGcEarliestBootSeconds"),
+                Some(&Config::new(ConfigValueType::Int32, (-1).into())),
+            );
+
+            let mut builder: ConfigurationBuilderImpl = Default::default();
+            let config =
+                SwdConfig { post_commit_gc_earliest_boot_seconds: Some(300), ..Default::default() };
+            assert!(
+                SwdSubsystemConfig::define_configuration(
+                    &context,
+                    &(&config, &VolumeConfig::Fxfs),
+                    &mut builder,
+                )
+                .is_err()
             );
         }
     }

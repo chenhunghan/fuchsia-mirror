@@ -68,6 +68,9 @@ python_library("honeydew_no_testonly") {
     "affordances/android_diagnostics/__init__.py",
     "affordances/android_diagnostics/android_diagnostics.py",
     "affordances/android_diagnostics/errors.py",
+    "affordances/android_idle/__init__.py",
+    "affordances/android_idle/android_idle.py",
+    "affordances/android_idle/errors.py",
     "affordances/android_package/__init__.py",
     "affordances/android_package/android_package.py",
     "affordances/android_package/errors.py",
@@ -117,6 +120,9 @@ python_library("honeydew_no_testonly") {
     "affordances/hello_world/errors.py",
     "affordances/hello_world/hello_world.py",
     "affordances/hello_world/hello_world_using_ffx.py",
+    "affordances/input/__init__.py",
+    "affordances/input/errors.py",
+    "affordances/input/input.py",
     "affordances/location/__init__.py",
     "affordances/location/errors.py",
     "affordances/media/__init__.py",
@@ -156,6 +162,9 @@ python_library("honeydew_no_testonly") {
     "affordances/ui/user_input/types.py",
     "affordances/ui/user_input/user_input.py",
     "affordances/ui/user_input/user_input_using_fc.py",
+    "affordances/ui_navigation/__init__.py",
+    "affordances/ui_navigation/errors.py",
+    "affordances/ui_navigation/ui_navigation.py",
     "affordances/virtual_audio/__init__.py",
     "affordances/virtual_audio/audio.py",
     "affordances/virtual_audio/audio_using_fuchsia_controller.py",
@@ -167,6 +176,7 @@ python_library("honeydew_no_testonly") {
     "auxiliary_devices/power_switch/power_switch.py",
     "auxiliary_devices/power_switch/power_switch_using_dmc.py",
     "auxiliary_devices/power_switch/power_switch_using_pdu.py",
+    "auxiliary_devices/power_switch/power_switch_using_synaccess.py",
     "auxiliary_devices/usb_power_hub/__init__.py",
     "auxiliary_devices/usb_power_hub/usb_power_hub.py",
     "auxiliary_devices/usb_power_hub/usb_power_hub_using_dmc.py",
@@ -223,6 +233,12 @@ python_library("honeydew_no_testonly") {
     "//src/lib/diagnostics/python/fuchsia_inspect",
     "//src/testing/end_to_end/mobly_base_tests/fuchsia_async_extension",
     "//third_party/pypng",
+
+    # Note: In //third_party/snippet-uiautomator/BUILD.gn,
+    # group("snippet-uiautomator") sets testonly = true while
+    # python_library("snippet-uiautomator_testonly") is the underlying
+    # non-testonly python_library target.
+    "//third_party/snippet-uiautomator:snippet-uiautomator_testonly",
   ]
 
   data_package_name = "data"
@@ -314,6 +330,7 @@ group("unit_tests") {
   if (host_os != "mac") {
     public_deps += [
       "honeydew/affordances/android_diagnostics/tests/unit_tests:tests",
+      "honeydew/affordances/android_idle/tests/unit_tests:tests",
       "honeydew/affordances/android_package/tests/unit_tests:tests",
       "honeydew/affordances/android_session/tests/unit_tests:tests",
       "honeydew/affordances/connectivity/bluetooth/bluetooth_common/tests/unit_tests:tests",
@@ -327,6 +344,7 @@ group("unit_tests") {
       "honeydew/affordances/drivers/fake_battery/tests:unit_tests($host_toolchain)",
       "honeydew/affordances/drivers/hardware/power/tests:unit_tests($host_toolchain)",
       "honeydew/affordances/hello_world/tests/unit_tests:tests",
+      "honeydew/affordances/input/tests/unit_tests:tests",
       "honeydew/affordances/location/tests:unit_tests($host_toolchain)",
       "honeydew/affordances/media/tests/unit_tests($host_toolchain)",
       "honeydew/affordances/power/system_power_state_controller/tests/unit_tests:tests",
@@ -336,6 +354,7 @@ group("unit_tests") {
       "honeydew/affordances/tracing/tests/unit_tests:tests",
       "honeydew/affordances/ui/screenshot/tests/unit_tests:tests",
       "honeydew/affordances/ui/user_input/tests/unit_tests:tests",
+      "honeydew/affordances/ui_navigation/tests/unit_tests:tests",
       "honeydew/auxiliary_devices/power_switch/tests/unit_tests:tests",
       "honeydew/auxiliary_devices/usb_power_hub/tests/unit_tests:tests",
       "honeydew/device_classes/tests/unit_tests:tests",
@@ -359,6 +378,7 @@ group("functional_tests") {
   if (host_os != "mac") {
     public_deps += [
       "honeydew/affordances/android_diagnostics/tests/functional_tests:tests",
+      "honeydew/affordances/android_idle/tests/functional_tests:tests",
       "honeydew/affordances/android_package/tests/functional_tests:tests",
       "honeydew/affordances/android_session/tests/functional_tests:tests",
       "honeydew/affordances/connectivity/bluetooth/gap/tests/functional_tests:tests",
@@ -366,6 +386,7 @@ group("functional_tests") {
       "honeydew/affordances/connectivity/wlan/wlan_policy/tests:functional_tests($host_toolchain)",
       "honeydew/affordances/connectivity/wlan/wlan_policy_ap/tests:functional_tests($host_toolchain)",
       "honeydew/affordances/hello_world/tests/functional_tests:tests",
+      "honeydew/affordances/input/tests/functional_tests:tests",
       "honeydew/affordances/location/tests:functional_tests($host_toolchain)",
       "honeydew/affordances/media/tests/functional_tests:tests",
       "honeydew/affordances/power/system_power_state_controller/tests/functional_tests/test_system_power_state_controller:tests",
@@ -375,6 +396,7 @@ group("functional_tests") {
       "honeydew/affordances/tracing/tests/functional_tests:tests",
       "honeydew/affordances/ui/screenshot/tests/functional_tests:tests",
       "honeydew/affordances/ui/user_input/tests/functional_tests:tests",
+      "honeydew/affordances/ui_navigation/tests/functional_tests:tests",
       "honeydew/affordances/virtual_audio/tests/functional_tests:tests",
       "honeydew/auxiliary_devices/power_switch/tests/functional_tests:tests",
       "honeydew/auxiliary_devices/usb_power_hub/tests/functional_tests:tests",

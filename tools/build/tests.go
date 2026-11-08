@@ -230,4 +230,8 @@ type EmulatorInfo struct {
 	// VbmetaKeyMetadata is the path to the vbmeta key metadata to use when running the
 	// emulator with UEFI.
 	VbmetaKeyMetadata string `json:"vbmeta_key_metadata,omitempty"`
+
+	// AllowInternet specifies whether the emulator should have external
+	// internet access enabled.
+	AllowInternet bool `json:"allow_internet,omitempty"`
 }

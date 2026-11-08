@@ -18,7 +18,7 @@ struct Lc3DecoderParams {
   // Sample rate in Hz.
   const int sr_hz;
   const int nbytes;
-  std::vector<fuchsia::media::AudioChannelId> channels;
+  std::vector<fuchsia::media::AudioChannelId2> channels;
 };
 
 class CodecAdapterLc3Decoder : public CodecAdapterSWImpl<Lc3DecoderParams> {

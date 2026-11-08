@@ -11,10 +11,13 @@
 #include <lib/driver/fake-platform-device/cpp/fake-pdev.h>
 #include <lib/driver/testing/cpp/driver_test.h>
 #include <lib/sync/completion.h>
+#include <lib/sync/cpp/completion.h>
 #include <lib/zx/bti.h>
+#include <lib/zx/clock.h>
 #include <lib/zx/vmar.h>
 
 #include <list>
+#include <memory>
 
 #include <fake-dma-buffer/fake-dma-buffer.h>
 #include <gtest/gtest.h>
@@ -136,7 +139,7 @@ class FakeDevice {
       HCSPARAMS1 parms = HCSPARAMS1::Get().FromValue(0);
       parms.set_MaxIntrs(1);
       parms.set_MaxPorts(4);
-      parms.set_MaxSlots(32);
+      parms.set_MaxSlots(max_slots_);
       return parms.reg_value();
     });
 
@@ -200,7 +203,7 @@ class FakeDevice {
       dcbaa_ = val.PTR();
     });
     doorbell_callback_ = [](uint8_t doorbell, uint8_t target) {};
-    for (size_t i = 0; i < 32; i++) {
+    for (size_t i = 0; i <= 64; i++) {
       region()[kDoorbellBase + i * sizeof(uint32_t)].SetWriteCallback([=](uint64_t value) {
         auto buffer = mmio();
         auto bell = DOORBELL::Get(DoorbellOffset::Get().ReadFrom(&buffer), 0)
@@ -227,6 +230,10 @@ class FakeDevice {
     doorbell_callback_ = std::move(callback);
   }
 
+  void set_max_slots(uint8_t max_slots) { max_slots_ = max_slots; }
+
+  zx_paddr_t dcbaa_phys() const { return dcbaa_; }
+
   FakeTRB* crcr() { return FakeTRB::get(crcr_); }
 
  private:
@@ -238,6 +245,7 @@ class FakeDevice {
   bool event_wrap_enable_ = false;
   bool irq_enable_ = false;
   bool host_system_error_enable_ = false;
+  uint8_t max_slots_ = 32;
   uint32_t slots_enabled_ = 0;
   zx_paddr_t crcr_ = 0;
   zx_paddr_t dcbaa_ = 0;
@@ -270,12 +278,14 @@ class FakeUsbBus : public ddk::UsbBusInterfaceProtocol<FakeUsbBus> {
     return &proto_;
   }
 
+  void set_max_slots(uint32_t max_slots) { max_slots_ = max_slots; }
+
   zx_status_t UsbBusInterfaceAddDevice(uint32_t device_id, uint32_t hub_id, usb_speed_t speed) {
     FakeUsbDevice fake_device;
     fake_device.device_id = device_id;
     fake_device.hub_id = hub_id;
     fake_device.speed = speed;
-    fake_device.fake_root_hub = device_id >= 32;
+    fake_device.fake_root_hub = device_id >= max_slots_;
     devices_[device_id] = fake_device;
     sync_completion_signal(&completion_);
     return ZX_OK;
@@ -295,6 +305,7 @@ class FakeUsbBus : public ddk::UsbBusInterfaceProtocol<FakeUsbBus> {
   const std::map<uint32_t, FakeUsbDevice>& devices() { return devices_; }
 
  private:
+  uint32_t max_slots_ = 32;
   std::map<uint32_t, FakeUsbDevice> devices_;
   sync_completion_t completion_;
   sync_completion_t remove_completion_;
@@ -409,18 +420,48 @@ class XhciHarness : public ::testing::Test {
     return retval;
   }
 
+  void FreeSlot(uint8_t slot) { slot_freelist_.push_back(slot); }
+
   FakeUsbDevice ConnectDevice(uint8_t port, usb_speed_t speed) {
     std::optional<HubInfo> hub;
     uint8_t slot = AllocateSlot();
     driver_test().driver()->GetPortState(port).is_connected = true;
     driver_test().driver()->GetPortState(port).link_active = true;
     driver_test().driver()->GetPortState(port).slot_id = slot;
-    driver_test().driver()->SetDeviceInformation(slot, slot, hub);
+    driver_test().driver()->SetDeviceInformation(slot, port, hub);
     driver_test().driver()->AddressDeviceCommand(slot, port, hub, true);
     bus_.reset();
     driver_test().driver()->DeviceOnline(slot, port, speed);
     EXPECT_OK(driver_test().RunOnBackgroundDispatcherSync([this]() { bus_.wait(); }));
     return bus_.devices().find(slot - 1)->second;
+  }
+
+  // Runs DeviceOffline(slot) to completion on interrupter 0's executor. FakeUsbBus::wait_for_remove
+  // signals inside UsbBusInterfaceRemoveDevice on ddk_interaction_dispatcher_ before PostCallback
+  // invokes bridge.completer.complete_ok(), so pumping RunUntilIdle() until the outer DeviceOffline
+  // promise resolves ensures any chained continuations (such as DisableSlotCommand) have finished.
+  void RunDeviceOffline(uint32_t slot) {
+    bus_.reset_remove();
+    auto offline_completed = std::make_shared<libsync::Completion>();
+    UsbXhci* xhci = driver_test().driver();
+    xhci->ScheduleTask(0,
+                       xhci->DeviceOffline(slot)
+                           .then([offline_completed](fpromise::result<void, zx_status_t>& result) {
+                             offline_completed->Signal();
+                             return result;
+                           })
+                           .box());
+    xhci->RunUntilIdle();
+    EXPECT_OK(driver_test().RunOnBackgroundDispatcherSync([this] { bus_.wait_for_remove(); }));
+    const zx::time deadline = zx::deadline_after(zx::sec(30));
+    while (!offline_completed->signaled()) {
+      ASSERT_LT(zx::clock::get_monotonic(), deadline)
+          << "Timed out waiting for DeviceOffline(" << slot << ") to complete";
+      xhci->RunUntilIdle();
+      if (!offline_completed->signaled()) {
+        zx::nanosleep(zx::deadline_after(zx::usec(50)));
+      }
+    }
   }
 
   void EnableEndpoint(uint32_t device_id, uint8_t ep_num, bool is_in_endpoint) {
@@ -479,7 +520,14 @@ class XhciMmioHarness : public XhciHarness {
     driver_test().driver()->UsbHciSetBusInterface(bus_.proto());
   }
 
-  void TearDown() override { ASSERT_TRUE(driver_test().StopDriver().is_ok()); }
+  void TearDown() override {
+    if (!stopped_) {
+      ASSERT_TRUE(driver_test().StopDriver().is_ok());
+    }
+  }
+
+ protected:
+  bool stopped_ = false;
 };
 
 fbl::DoublyLinkedList<std::unique_ptr<TRBContext>> TransferRing::TakePendingTRBs() {
@@ -716,6 +764,7 @@ zx_status_t Interrupter::Init(uint16_t interrupter, size_t page_size, fdf::MmioB
 
 zx_status_t Interrupter::Start(const RuntimeRegisterOffset& offset,
                                fdf::MmioView interrupter_regs) {
+  active_ = true;
   return ZX_OK;
 }
 
@@ -1225,10 +1274,18 @@ TEST_F(XhciMmioHarness, DeviceOfflineWithBoundFidlEndpointAndPendingRequest) {
     ASSERT_TRUE(queue_res.is_ok());
   }));
 
-  bus_.reset_remove();
-  driver_test().driver()->ScheduleTask(0, driver_test().driver()->DeviceOffline(1));
-  driver_test().driver()->RunUntilIdle();
-  EXPECT_OK(driver_test().RunOnBackgroundDispatcherSync([this] { bus_.wait_for_remove(); }));
+  SetDoorbellListener([&](uint8_t doorbell, uint8_t target) {
+    if (doorbell == 0) {
+      auto pending_cmds = driver_test().driver()->GetCommandRing()->TakePendingTRBs();
+      for (auto& cmd : pending_cmds) {
+        if (cmd.completer.has_value()) {
+          cmd.completer->complete_ok(&success_event);
+        }
+      }
+    }
+  });
+
+  RunDeviceOffline(1);
   EXPECT_FALSE(driver_test().driver()->GetDeviceState()[0]);
 
   // Verify FIDL calls and channel unbind after DeviceOffline dropped device_state_[0] do not
@@ -1742,10 +1799,7 @@ TEST_F(XhciMmioHarness, UsbBusAndUsbDeviceMultiCycleHotplugWithInFlightFidlEndpo
 
     // 6. Simulate physical cable unplug / role transition while both FIDL and Banjo transfers are
     // in flight and the FIDL Endpoint channel is still bound.
-    bus_.reset_remove();
-    driver_test().driver()->ScheduleTask(0, driver_test().driver()->DeviceOffline(slot_id));
-    driver_test().driver()->RunUntilIdle();
-    EXPECT_OK(driver_test().RunOnBackgroundDispatcherSync([this] { bus_.wait_for_remove(); }));
+    RunDeviceOffline(slot_id);
     EXPECT_FALSE(driver_test().driver()->GetDeviceState()[device_id]);
 
     // Both the in-flight Banjo request and the in-flight FIDL request must have been unmapped and
@@ -1776,6 +1830,7 @@ TEST_F(XhciMmioHarness, HubDeviceRemovedWhenBusInvalidDoesNotAssert) {
   const uint32_t hub_id = hub_dev.device_id;
   auto hub_state = driver_test().driver()->GetDeviceState()[hub_id];
   ASSERT_TRUE(hub_state);
+  EXPECT_EQ(driver_test().driver()->UsbHciHubDeviceRemoved(hub_id, 1), ZX_OK);
 
   // 2. Connect a child device on root hub port 2 (to allocate device state and slot).
   FakeUsbDevice child_dev = ConnectDevice(2, USB_SPEED_FULL);
@@ -1795,10 +1850,351 @@ TEST_F(XhciMmioHarness, HubDeviceRemovedWhenBusInvalidDoesNotAssert) {
   // (matching DFv2 bottom-up unbind where usb-bus clears the bus interface).
   driver_test().driver()->UsbHciSetBusInterface(nullptr);
 
+  CommandCompletionEvent success_event;
+  success_event.set_CompletionCode(CommandCompletionEvent::Success);
+  SetDoorbellListener([&](uint8_t doorbell, uint8_t target) {
+    if (doorbell == 0) {
+      auto pending_cmds = driver_test().driver()->GetCommandRing()->TakePendingTRBs();
+      for (auto& cmd : pending_cmds) {
+        if (cmd.completer.has_value()) {
+          cmd.completer->complete_ok(&success_event);
+        }
+      }
+    }
+  });
+
   // 5. Invoke UsbHciHubDeviceRemoved for the child device on hub port 1.
   // Without the fix, ZX_ASSERT(bus_.is_valid()) fails fatally because bus_ was cleared.
   // With the fix, UsbHciHubDeviceRemoved returns ZX_OK safely.
   EXPECT_OK(driver_test().driver()->UsbHciHubDeviceRemoved(hub_id, 1));
+}
+
+class Xhci64SlotMmioHarness : public XhciHarness {
+ protected:
+  void SetUp() override {
+    bus_.set_max_slots(64);
+    driver_test().RunInEnvironmentTypeContext(
+        [](XhciTestEnvironment& env) { env.fake_device().set_max_slots(64); });
+    ASSERT_TRUE(driver_test()
+                    .StartDriverWithCustomStartArgs([&](fdf::DriverStartArgs& args) {
+                      xhci_config::Config fake_config;
+                      fake_config.enable_suspend() = false;
+                      args.config(fake_config.ToVmo());
+                    })
+                    .is_ok());
+    ASSERT_OK(driver_test().driver()->TestInit(this));
+    driver_test().driver()->UsbHciSetBusInterface(bus_.proto());
+  }
+
+  void TearDown() override { ASSERT_TRUE(driver_test().StopDriver().is_ok()); }
+};
+
+TEST_F(Xhci64SlotMmioHarness, RepeatedHotplugOn64SlotControllerDisablesSlotBeforeUnpinningDma) {
+  UsbXhci* xhci = driver_test().driver();
+  ASSERT_EQ(GetMaxDeviceCount(), 66UL);
+
+  const zx_paddr_t dcbaa_phys = driver_test().RunInEnvironmentTypeContext<zx_paddr_t>(
+      [](XhciTestEnvironment& env) { return env.fake_device().dcbaa_phys(); });
+  ASSERT_NE(dcbaa_phys, 0u);
+  auto* dcbaa = static_cast<uint64_t*>(
+      reinterpret_cast<FakeVMO*>(dcbaa_phys)->virt);  // NOLINT(performance-no-int-to-ptr)
+
+  CommandCompletionEvent success_event;
+  success_event.set_CompletionCode(CommandCompletionEvent::Success);
+
+  uint64_t hw_enabled_slots = 0;
+  size_t disable_slot_count = 0;
+  std::atomic<bool> expect_inflight_dma{false};
+  std::atomic<bool> saw_disable_before_unpin{false};
+  libsync::Completion inflight_req_completed;
+
+  SetDoorbellListener([&](uint8_t doorbell, uint8_t target) {
+    if (doorbell == 0) {
+      auto pending_cmds = xhci->GetCommandRing()->TakePendingTRBs();
+      for (auto& cmd : pending_cmds) {
+        if (cmd.trb && Control::FromTRB(cmd.trb).Type() == Control::DisableSlot) {
+          const uint8_t disabled_slot =
+              static_cast<uint8_t>(reinterpret_cast<DisableSlot*>(cmd.trb)->slot());
+          EXPECT_GE(disabled_slot, 1u);
+          EXPECT_LE(disabled_slot, 64u);
+          const uint64_t slot_bit = uint64_t{1} << (disabled_slot - 1u);
+          EXPECT_NE(hw_enabled_slots & slot_bit, 0u);
+          if (expect_inflight_dma.load(std::memory_order_acquire)) {
+            EXPECT_FALSE(inflight_req_completed.signaled());
+            saw_disable_before_unpin.store(!inflight_req_completed.signaled(),
+                                           std::memory_order_release);
+          }
+          hw_enabled_slots &= ~slot_bit;
+          FreeSlot(disabled_slot);
+          ++disable_slot_count;
+        }
+        if (cmd.completer.has_value()) {
+          cmd.completer->complete_ok(&success_event);
+        }
+      }
+    }
+  });
+
+  // Attach an external hub on root hub port 2 so we exercise both root-hub DeviceOffline and
+  // downstream-hub UsbHciHubDeviceRemoved across >64 hotplug cycles.
+  FakeUsbDevice hub_dev = ConnectDevice(2, USB_SPEED_HIGH);
+  const uint32_t hub_id = hub_dev.device_id;
+  const uint8_t hub_slot = static_cast<uint8_t>(hub_id + 1);
+  ASSERT_GE(hub_slot, 1u);
+  ASSERT_LE(hub_slot, 64u);
+  hw_enabled_slots |= (uint64_t{1} << (hub_slot - 1u));
+  auto hub_state = xhci->GetDeviceState()[hub_id];
+  ASSERT_TRUE(hub_state);
+  {
+    fbl::AutoLock _(&hub_state->transaction_lock());
+    HubInfo hub_info = {};
+    hub_info.hub_state = hub_state;
+    hub_info.speed = USB_SPEED_HIGH;
+    hub_info.hub_speed = USB_SPEED_HIGH;
+    hub_info.rh_port = 2;
+    hub_state->GetHubLocked() = hub_info;
+  }
+
+  constexpr size_t kHotplugCycles = 100;
+  for (size_t cycle = 0; cycle < kHotplugCycles; ++cycle) {
+    const bool via_hub = (cycle % 2) == 1;
+    uint32_t dev_id = 0;
+    uint8_t slot = 0;
+
+    if (!via_hub) {
+      FakeUsbDevice dev = ConnectDevice(1, USB_SPEED_SUPER);
+      dev_id = dev.device_id;
+      slot = static_cast<uint8_t>(dev_id + 1);
+    } else {
+      slot = AllocateSlot();
+      ASSERT_GE(slot, 1u);
+      ASSERT_LE(slot, 64u);
+      dev_id = slot - 1;
+      HubInfo child_hub_info = {};
+      child_hub_info.hub_state = hub_state;
+      child_hub_info.speed = USB_SPEED_HIGH;
+      child_hub_info.hub_speed = USB_SPEED_HIGH;
+      child_hub_info.rh_port = 2;
+      child_hub_info.parent_port_number = 1;
+      xhci->SetDeviceInformation(slot, 1, child_hub_info);
+      xhci->ScheduleTask(0, xhci->AddressDeviceCommand(slot, 1, child_hub_info, true));
+      xhci->RunUntilIdle();
+      bus_.reset();
+      ASSERT_OK(xhci->DeviceOnline(slot, 1, USB_SPEED_HIGH));
+      EXPECT_OK(driver_test().RunOnBackgroundDispatcherSync([this] { bus_.wait(); }));
+    }
+
+    ASSERT_GE(slot, 1u);
+    ASSERT_LE(slot, 64u);
+    const uint64_t slot_bit = uint64_t{1} << (slot - 1u);
+    ASSERT_EQ(hw_enabled_slots & slot_bit, 0u) << "Hardware slot leaked on cycle " << cycle;
+    hw_enabled_slots |= slot_bit;
+    EXPECT_NE(dcbaa[slot], 0u);
+
+    EnableEndpoint(dev_id, 1, false);
+    xhci->RunUntilIdle();
+
+    inflight_req_completed.Reset();
+    saw_disable_before_unpin.store(false, std::memory_order_release);
+    zx_status_t completion_status = ZX_OK;
+
+    std::optional<usb::Request<void>> req;
+    ASSERT_OK(usb::Request<void>::Alloc(&req, zx_system_get_page_size(), 0x01,
+                                        xhci->UsbHciGetRequestSize()));
+    req->request()->header.device_id = dev_id;
+    req->request()->header.ep_address = 0x01;
+    req->request()->header.length = zx_system_get_page_size();
+
+    struct CallbackCtx {
+      zx_status_t* status;
+      libsync::Completion* done;
+      size_t parent_req_size;
+    } cb_ctx{
+        .status = &completion_status,
+        .done = &inflight_req_completed,
+        .parent_req_size = xhci->UsbHciGetRequestSize(),
+    };
+    usb_request_complete_callback_t complete_cb = {
+        .callback =
+            [](void* ctx, usb_request_t* r) {
+              auto* state = static_cast<CallbackCtx*>(ctx);
+              *state->status = r->response.status;
+              usb::Request<void> owned(r, state->parent_req_size);
+              state->done->Signal();
+            },
+        .ctx = &cb_ctx,
+    };
+    xhci->UsbHciRequestQueue(req->take(), &complete_cb);
+    ASSERT_FALSE(inflight_req_completed.signaled());
+
+    expect_inflight_dma.store(true, std::memory_order_release);
+    if (!via_hub) {
+      RunDeviceOffline(slot);
+      EXPECT_EQ(xhci->GetPortState(1).slot_id, 0u);
+    } else {
+      EXPECT_OK(driver_test().RunOnBackgroundDispatcherSync(
+          [&] { EXPECT_OK(xhci->UsbHciHubDeviceRemoved(hub_id, 1)); }));
+      {
+        fbl::AutoLock _(&hub_state->transaction_lock());
+        EXPECT_EQ(hub_state->GetHubLocked()->port_to_device[0], std::nullopt);
+      }
+    }
+    expect_inflight_dma.store(false, std::memory_order_release);
+
+    EXPECT_TRUE(saw_disable_before_unpin.load(std::memory_order_acquire))
+        << "Slot was not disabled prior to unpinning in-flight DMA on cycle " << cycle;
+    EXPECT_OK(inflight_req_completed.Wait(zx::sec(5)));
+    EXPECT_EQ(completion_status, ZX_ERR_IO_NOT_PRESENT);
+    EXPECT_EQ(hw_enabled_slots & slot_bit, 0u);
+    EXPECT_EQ(dcbaa[slot], 0u);
+    EXPECT_FALSE(xhci->GetDeviceState()[dev_id]);
+  }
+
+  EXPECT_EQ(disable_slot_count, kHotplugCycles);
+  EXPECT_EQ(hw_enabled_slots, uint64_t{1} << (hub_slot - 1u));
+
+  // Finally unplug the root-hub-attached hub itself and verify its slot and PortState are freed.
+  RunDeviceOffline(hub_slot);
+  {
+    fbl::AutoLock _(&hub_state->transaction_lock());
+    EXPECT_FALSE(hub_state->GetHubLocked().has_value());
+  }
+  EXPECT_EQ(xhci->GetPortState(2).slot_id, 0u);
+  EXPECT_EQ(dcbaa[hub_slot], 0u);
+  EXPECT_EQ(hw_enabled_slots, 0u);
+  EXPECT_EQ(disable_slot_count, kHotplugCycles + 1);
+}
+
+TEST_F(Xhci64SlotMmioHarness, UnpluggingExternalHubDisablesDownstreamChildSlotsBeforeUnpin) {
+  UsbXhci* xhci = driver_test().driver();
+  ASSERT_EQ(GetMaxDeviceCount(), 66UL);
+
+  const zx_paddr_t dcbaa_phys = driver_test().RunInEnvironmentTypeContext<zx_paddr_t>(
+      [](XhciTestEnvironment& env) { return env.fake_device().dcbaa_phys(); });
+  ASSERT_NE(dcbaa_phys, 0u);
+  auto* dcbaa = static_cast<uint64_t*>(
+      reinterpret_cast<FakeVMO*>(dcbaa_phys)->virt);  // NOLINT(performance-no-int-to-ptr)
+
+  CommandCompletionEvent success_event;
+  success_event.set_CompletionCode(CommandCompletionEvent::Success);
+
+  uint64_t hw_enabled_slots = 0;
+  bool saw_child_disable_before_unpin = false;
+  bool saw_hub_disable = false;
+  std::atomic<bool> expect_inflight_dma{false};
+  libsync::Completion inflight_req_completed;
+
+  SetDoorbellListener([&](uint8_t doorbell, uint8_t target) {
+    if (doorbell == 0) {
+      auto pending_cmds = xhci->GetCommandRing()->TakePendingTRBs();
+      for (auto& cmd : pending_cmds) {
+        if (cmd.trb && Control::FromTRB(cmd.trb).Type() == Control::DisableSlot) {
+          const uint8_t disabled_slot =
+              static_cast<uint8_t>(reinterpret_cast<DisableSlot*>(cmd.trb)->slot());
+          if (disabled_slot == 2) {  // child_slot is 2
+            if (expect_inflight_dma.load(std::memory_order_acquire)) {
+              saw_child_disable_before_unpin = !inflight_req_completed.signaled();
+            }
+          }
+          if (disabled_slot == 1) {  // hub_slot is 1
+            saw_hub_disable = true;
+          }
+          hw_enabled_slots &= ~(uint64_t{1} << (disabled_slot - 1u));
+          success_event.set_SlotID(disabled_slot);
+          FreeSlot(disabled_slot);
+        }
+        if (cmd.completer.has_value()) {
+          cmd.completer->complete_ok(&success_event);
+        }
+      }
+    }
+  });
+
+  FakeUsbDevice hub_dev = ConnectDevice(2, USB_SPEED_HIGH);
+  const uint32_t hub_id = hub_dev.device_id;
+  const uint8_t hub_slot = static_cast<uint8_t>(hub_id + 1);
+  ASSERT_EQ(hub_slot, 1u);
+  hw_enabled_slots |= (uint64_t{1} << (hub_slot - 1u));
+  auto hub_state = xhci->GetDeviceState()[hub_id];
+  ASSERT_TRUE(hub_state);
+  {
+    fbl::AutoLock _(&hub_state->transaction_lock());
+    HubInfo hub_info = {};
+    hub_info.hub_state = hub_state;
+    hub_info.speed = USB_SPEED_HIGH;
+    hub_info.hub_speed = USB_SPEED_HIGH;
+    hub_info.rh_port = 2;
+    hub_state->GetHubLocked() = hub_info;
+  }
+
+  uint8_t child_slot = AllocateSlot();
+  ASSERT_EQ(child_slot, 2u);
+  uint32_t child_id = child_slot - 1;
+  HubInfo child_hub_info = {};
+  child_hub_info.hub_state = hub_state;
+  child_hub_info.speed = USB_SPEED_HIGH;
+  child_hub_info.hub_speed = USB_SPEED_HIGH;
+  child_hub_info.rh_port = 2;
+  child_hub_info.parent_port_number = 1;
+  xhci->SetDeviceInformation(child_slot, 1, child_hub_info);
+  xhci->ScheduleTask(0, xhci->AddressDeviceCommand(child_slot, 1, child_hub_info, true));
+  xhci->RunUntilIdle();
+  bus_.reset();
+  ASSERT_OK(xhci->DeviceOnline(child_slot, 1, USB_SPEED_HIGH));
+  EXPECT_OK(driver_test().RunOnBackgroundDispatcherSync([this] { bus_.wait(); }));
+  hw_enabled_slots |= (uint64_t{1} << (child_slot - 1u));
+
+  EnableEndpoint(child_id, 1, false);
+  xhci->RunUntilIdle();
+
+  zx_status_t completion_status = ZX_OK;
+  std::optional<usb::Request<void>> req;
+  ASSERT_OK(usb::Request<void>::Alloc(&req, zx_system_get_page_size(), 0x01,
+                                      xhci->UsbHciGetRequestSize()));
+  req->request()->header.device_id = child_id;
+  req->request()->header.ep_address = 0x01;
+  req->request()->header.length = zx_system_get_page_size();
+
+  struct CallbackCtx {
+    zx_status_t* status;
+    libsync::Completion* done;
+    size_t parent_req_size;
+  } cb_ctx{
+      .status = &completion_status,
+      .done = &inflight_req_completed,
+      .parent_req_size = xhci->UsbHciGetRequestSize(),
+  };
+  usb_request_complete_callback_t complete_cb = {
+      .callback =
+          [](void* ctx, usb_request_t* r) {
+            auto* state = static_cast<CallbackCtx*>(ctx);
+            *state->status = r->response.status;
+            usb::Request<void> owned(r, state->parent_req_size);
+            state->done->Signal();
+          },
+      .ctx = &cb_ctx,
+  };
+  xhci->UsbHciRequestQueue(req->take(), &complete_cb);
+  ASSERT_FALSE(inflight_req_completed.signaled());
+
+  expect_inflight_dma.store(true, std::memory_order_release);
+  RunDeviceOffline(hub_slot);
+  EXPECT_EQ(bus_.devices().count(hub_id), 0u);
+  EXPECT_EQ(bus_.devices().count(child_id), 0u);
+
+  EXPECT_TRUE(saw_child_disable_before_unpin)
+      << "Child slot was not disabled prior to unpinning in-flight DMA on hub unplug";
+  EXPECT_TRUE(saw_hub_disable) << "Hub slot was not disabled on hub unplug";
+
+  EXPECT_OK(inflight_req_completed.Wait(zx::sec(5)));
+  EXPECT_EQ(completion_status, ZX_ERR_IO_NOT_PRESENT);
+
+  EXPECT_EQ(xhci->GetPortState(2).slot_id, 0u);
+  EXPECT_EQ(dcbaa[hub_slot], 0u);
+  EXPECT_EQ(dcbaa[child_slot], 0u);
+  EXPECT_FALSE(xhci->GetDeviceState()[hub_id]);
+  EXPECT_FALSE(xhci->GetDeviceState()[child_id]);
+  EXPECT_EQ(hw_enabled_slots, 0u);
 }
 
 TEST_F(XhciMmioHarness, IrqCountClampedToPDevDeviceInfo) {
@@ -1950,6 +2346,164 @@ TEST_F(XhciMmioHarness, CancelAllBoundsAndEP0) {
   zx_status_t status = driver_test().driver()->UsbHciCancelAll(0, 0);
   EXPECT_TRUE(got_stop_endpoint);
   EXPECT_OK(status);
+}
+
+TEST_F(XhciMmioHarness, DestructorCompletesPendingCommandWithIoNotPresent) {
+  ConnectDevice(1, USB_SPEED_HIGH);
+  CommandCompletionEvent success_event;
+  success_event.set_CompletionCode(CommandCompletionEvent::Success);
+  auto cr = crcr_next();
+  ASSERT_NE(cr, nullptr);
+  ASSERT_OK(CompleteCommand(cr, &success_event));
+
+  UsbXhci* xhci = driver_test().driver();
+  auto context = xhci->GetCommandRing()->AllocateContext();
+  ASSERT_TRUE(context);
+  fpromise::bridge<TRB*, zx_status_t> bridge;
+  context->completer = std::move(bridge.completer);
+
+  bool completed = false;
+  zx_status_t completion_error = ZX_OK;
+  xhci->ScheduleTask(0, bridge.consumer.promise()
+                            .then([&](fpromise::result<TRB*, zx_status_t>& result)
+                                      -> fpromise::result<void, zx_status_t> {
+                              completed = true;
+                              if (result.is_error()) {
+                                completion_error = result.error();
+                              }
+                              return fpromise::ok();
+                            })
+                            .box());
+
+  TRB cmd{};
+  ASSERT_OK(xhci->GetCommandRing()->AddTRB(cmd, std::move(context)));
+
+  // Also queue an EP0 transfer request whose completion wakes an interrupter task that queues a
+  // follow-up command (modeling EnumerateDevice's GetDeviceDescriptor failure scheduling
+  // DisableSlotCommand during teardown).
+  fpromise::bridge<void, void> ep0_bridge;
+  bool followup_cmd_completed = false;
+  zx_status_t followup_cmd_error = ZX_OK;
+  xhci->ScheduleTask(
+      0, ep0_bridge.consumer.promise()
+             .then([&](fpromise::result<void, void>&) -> fpromise::result<void, zx_status_t> {
+               auto followup_ctx = xhci->GetCommandRing()->AllocateContext();
+               EXPECT_TRUE(followup_ctx);
+               fpromise::bridge<TRB*, zx_status_t> followup_bridge;
+               followup_ctx->completer = std::move(followup_bridge.completer);
+               xhci->ScheduleTask(0, followup_bridge.consumer.promise()
+                                         .then([&](fpromise::result<TRB*, zx_status_t>& res)
+                                                   -> fpromise::result<void, zx_status_t> {
+                                           followup_cmd_completed = true;
+                                           if (res.is_error()) {
+                                             followup_cmd_error = res.error();
+                                           }
+                                           return fpromise::ok();
+                                         })
+                                         .box());
+               TRB followup_trb{};
+               EXPECT_OK(xhci->GetCommandRing()->AddTRB(followup_trb, std::move(followup_ctx)));
+               return fpromise::ok();
+             })
+             .box());
+
+  bool ep0_req_completed = false;
+  std::optional<TestRequest> ep0_req;
+  ASSERT_OK(AllocateRequest(&ep0_req, 0, 8, 0, [&](TestRequest req) {
+    ep0_req_completed = true;
+    EXPECT_EQ(req.request()->response.status, ZX_ERR_IO_NOT_PRESENT);
+    ep0_bridge.completer.complete_ok();
+  }));
+  RequestQueue(std::move(*ep0_req));
+
+  // Verify that StopDriver() and ShutdownAndDestroyDriver() drain the pending command with
+  // ZX_ERR_IO_NOT_PRESENT and run the stopped interrupter's executor after both command ring and
+  // transfer ring drains so follow-up commands scheduled by transfer completions also drain.
+  stopped_ = true;
+  ASSERT_TRUE(driver_test().StopDriver().is_ok());
+  driver_test().ShutdownAndDestroyDriver();
+  EXPECT_TRUE(completed);
+  EXPECT_EQ(completion_error, ZX_ERR_IO_NOT_PRESENT);
+  EXPECT_TRUE(ep0_req_completed);
+  EXPECT_TRUE(followup_cmd_completed);
+  EXPECT_EQ(followup_cmd_error, ZX_ERR_IO_NOT_PRESENT);
+}
+
+TEST_F(XhciMmioHarness, DestructorDoesNotInstantiateUnusedEndpointsOrLeakConfiguredHub) {
+  ConnectDevice(1, USB_SPEED_HIGH);
+  CommandCompletionEvent success_event;
+  success_event.set_CompletionCode(CommandCompletionEvent::Success);
+  auto cr = crcr_next();
+  ASSERT_NE(cr, nullptr);
+  ASSERT_OK(CompleteCommand(cr, &success_event));
+
+  UsbXhci* xhci = driver_test().driver();
+  auto root_hub_state = xhci->GetDeviceState()[0];
+  ASSERT_TRUE(root_hub_state);
+
+  SetDoorbellListener([&](uint8_t doorbell, uint8_t target) {
+    if (doorbell == 0) {
+      cr = FakeTRB::get(cr->next);
+      ASSERT_NE(cr, nullptr);
+      EXPECT_OK(CompleteCommand(cr, &success_event));
+    }
+  });
+
+  usb_hub_descriptor_t hub_desc = {};
+  hub_desc.b_nbr_ports = 4;
+  ASSERT_OK(xhci->UsbHciConfigureHub(0, USB_SPEED_HIGH, &hub_desc, true));
+
+  // Set up a nested hub on slot 2 parented to root_hub_state.
+  const uint8_t child_slot = AllocateSlot();
+  ASSERT_EQ(child_slot, 2u);
+  HubInfo parent_hub_info(root_hub_state, 0, USB_SPEED_HIGH, true);
+  parent_hub_info.speed = USB_SPEED_HIGH;
+  parent_hub_info.rh_port = 1;
+  parent_hub_info.parent_port_number = 1;
+  parent_hub_info.route_string = 1;
+  xhci->SetDeviceInformation(child_slot, 1, parent_hub_info);
+  (void)xhci->AddressDeviceCommand(child_slot, 1, parent_hub_info, true);
+
+  auto child_hub_state = xhci->GetDeviceState()[1];
+  ASSERT_TRUE(child_hub_state);
+  ASSERT_OK(xhci->UsbHciConfigureHub(1, USB_SPEED_HIGH, &hub_desc, false));
+
+  {
+    fbl::AutoLock _(&root_hub_state->transaction_lock());
+    ASSERT_TRUE(root_hub_state->GetHubLocked().has_value());
+    EXPECT_EQ(root_hub_state->GetHubLocked()->hub_state.get(), nullptr);
+    for (uint8_t i = 0; i < kMaxEndpoints; i++) {
+      EXPECT_EQ(root_hub_state->TryGetEndpoint(i), nullptr);
+    }
+  }
+  {
+    fbl::AutoLock _(&child_hub_state->transaction_lock());
+    ASSERT_TRUE(child_hub_state->GetHubLocked().has_value());
+    EXPECT_EQ(child_hub_state->GetHubLocked()->hub_state.get(), root_hub_state.get());
+    EXPECT_EQ(child_hub_state->GetHubLocked()->hub_depth, 1u);
+    for (uint8_t i = 0; i < kMaxEndpoints; i++) {
+      EXPECT_EQ(child_hub_state->TryGetEndpoint(i), nullptr);
+    }
+  }
+
+  stopped_ = true;
+  ASSERT_TRUE(driver_test().StopDriver().is_ok());
+  driver_test().ShutdownAndDestroyDriver();
+
+  {
+    fbl::AutoLock _(&root_hub_state->transaction_lock());
+    EXPECT_FALSE(root_hub_state->GetHubLocked().has_value());
+    for (uint8_t i = 0; i < kMaxEndpoints; i++) {
+      EXPECT_EQ(root_hub_state->TryGetEndpoint(i), nullptr);
+    }
+  }
+  {
+    fbl::AutoLock _(&child_hub_state->transaction_lock());
+    EXPECT_FALSE(child_hub_state->GetHubLocked().has_value());
+    for (uint8_t i = 0; i < kMaxEndpoints; i++) {
+      EXPECT_EQ(child_hub_state->TryGetEndpoint(i), nullptr);
+    }
+  }
 }
 
 }  // namespace

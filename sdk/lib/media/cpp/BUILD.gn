@@ -92,7 +92,6 @@ sdk_source_set("no_converters") {
   visibility = [
     ":*",
     "//build/bazel/bazel_idk/tests/*",
-    "//build/sdk:*",
     "//sdk/lib/media/*",
     "//src/media/*",
   ]

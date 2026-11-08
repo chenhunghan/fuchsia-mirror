@@ -6,8 +6,9 @@
 
 use crate::counters::define_kcounter;
 use crate::debuglog_rs::{DlogReaderStorage, dlog_record_t, dlog_write};
+use crate::ksync_kernel::TrackedCriticalMutex;
 use fbl::Canary;
-use ksync::{KMutex, RawCriticalMutex, guarded};
+use ksync::{KMutex, guarded};
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
 use zx_types::{
@@ -53,12 +54,12 @@ pub struct LogDispatcherState {
 
     #[pin]
     #[guarded_by(lock)]
-    pub reader: DlogReaderStorage,
+    reader: DlogReaderStorage,
 
     flags: u32,
 
     #[mutex]
-    lock: KMutex<RawCriticalMutex>,
+    lock: KMutex<TrackedCriticalMutex>,
 }
 
 impl LogDispatcherState {
@@ -84,7 +85,7 @@ impl LogDispatcherState {
         })
     }
 
-    pub fn flags(&self) -> u32 {
+    fn flags(&self) -> u32 {
         self.flags
     }
 }
@@ -110,7 +111,7 @@ crate::object::dispatcher::impl_dispatcher_facade_with_state!(
 
 impl LogDispatcher {
     /// Returns default rights for a LogDispatcher given creation `flags`.
-    pub fn default_rights(flags: u32) -> zx_rights_t {
+    fn default_rights(flags: u32) -> zx_rights_t {
         if (flags & ZX_LOG_FLAG_READABLE) != 0 {
             ZX_DEFAULT_LOG_READ_RIGHTS
         } else {
@@ -132,19 +133,15 @@ impl LogDispatcher {
     }
 
     /// Reads a record from debuglog.
-    pub fn read(
-        &self,
-        flags: u32,
-        record: &mut dlog_record_t,
-        actual: &mut usize,
-    ) -> Result<(), Status> {
+    pub fn read(&self, record: &mut dlog_record_t) -> Result<(), Status> {
         if (self.state().flags() & ZX_LOG_FLAG_READABLE) == 0 {
             return Err(Status::BAD_STATE);
         }
 
         ksync::lock!(let mut guard = self.state().lock_lock());
         let mut fields = guard.as_mut().fields_mut();
-        let res = fields.reader.as_mut().read(flags, record, actual);
+        let mut actual = 0;
+        let res = fields.reader.as_mut().read(0, record, &mut actual);
         if res == Err(Status::SHOULD_WAIT) {
             self.update_state_locked(guard.token(), ZX_LOG_READABLE, 0);
         }

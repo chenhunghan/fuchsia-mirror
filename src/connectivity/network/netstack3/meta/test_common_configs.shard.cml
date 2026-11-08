@@ -44,5 +44,12 @@
             availability: "transitional",
             default: false,
         },
+        {
+            config: "fuchsia.connectivity.RedactNetworkIdentifiers",
+            key: "redact_network_identifiers",
+            type: "bool",
+            availability: "transitional",
+            default: false,
+        },
     ],
 }

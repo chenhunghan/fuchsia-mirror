@@ -6,8 +6,6 @@
 
 #include "lib/stall.h"
 
-StallAccumulator::StallAccumulator() { rust_stall_accumulator_init(this); }
-
 void StallAccumulator::Update(int op_contributors_progressing, int op_contributors_stalling) {
   rust_stall_accumulator_update(this, op_contributors_progressing, op_contributors_stalling);
 }

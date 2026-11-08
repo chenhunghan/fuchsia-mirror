@@ -88,7 +88,7 @@ zx::result<std::vector<io_buffer::PhysIter>> EndpointServer::get_iter(RequestVar
     }
     iters.push_back(iter);
   } else {
-    const auto& fidl_request = std::get<usb::FidlRequest>(req);
+    auto& fidl_request = std::get<usb::FidlRequest>(req);
     if (!fidl_request->data().has_value()) {
       return zx::ok(std::move(iters));
     }
@@ -113,10 +113,10 @@ zx::result<std::vector<io_buffer::PhysIter>> EndpointServer::get_iter(RequestVar
           const auto& registered_vmo = it->second;
           const zx_off_t vmo_offset = d.offset().value_or(0);
           const uint64_t req_size = *d.size();
-          if (vmo_offset >= registered_vmo.size || req_size > registered_vmo.size - vmo_offset) {
+          if (vmo_offset >= registered_vmo->size || req_size > registered_vmo->size - vmo_offset) {
             return zx::error(ZX_ERR_OUT_OF_RANGE);
           }
-          auto iter = phys_iter(registered_vmo.phys_list, registered_vmo.phys_count, req_size,
+          auto iter = phys_iter(registered_vmo->phys_list, registered_vmo->phys_count, req_size,
                                 vmo_offset, max_length);
           if (sg_support_ == ScatterGatherSupport::kUnsupported && req_size > 0) {
             auto it_p = iter.begin();
@@ -124,6 +124,7 @@ zx::result<std::vector<io_buffer::PhysIter>> EndpointServer::get_iter(RequestVar
               return zx::error(ZX_ERR_NOT_SUPPORTED);
             }
           }
+          fidl_request.add_shared_context(registered_vmo);
           iters.push_back(iter);
           break;
         }
@@ -148,6 +149,42 @@ zx::result<std::vector<io_buffer::PhysIter>> EndpointServer::get_iter(RequestVar
   return zx::success(std::move(iters));
 }
 
+// NOLINTNEXTLINE(readability-convert-member-functions-to-static)
+zx::result<std::optional<usb::MappedVmo>> EndpointServer::GetMapped(
+    const fuchsia_hardware_usb_request::Buffer& buffer) const {
+  std::scoped_lock lock(lock_);
+  if (buffer.data().has_value()) {
+    return zx::ok(std::nullopt);
+  }
+  if (buffer.vmo_id().has_value()) {
+    auto it = registered_vmos_.find(buffer.vmo_id().value());
+    if (it != registered_vmos_.end() && it->second->virt_addr != 0) {
+      return zx::ok(usb::MappedVmo{it->second->virt_addr, it->second->size});
+    }
+
+    auto prune_it = unregistered_in_flight_vmos_.begin();
+    while (prune_it != unregistered_in_flight_vmos_.end()) {
+      if (prune_it->second.expired()) {
+        prune_it = unregistered_in_flight_vmos_.erase(prune_it);
+      } else {
+        ++prune_it;
+      }
+    }
+    for (auto rit = unregistered_in_flight_vmos_.rbegin();
+         rit != unregistered_in_flight_vmos_.rend(); ++rit) {
+      if (rit->first == buffer.vmo_id().value()) {
+        if (auto locked = rit->second.lock()) {
+          if (locked->virt_addr != 0) {
+            return zx::ok(usb::MappedVmo{locked->virt_addr, locked->size});
+          }
+        }
+      }
+    }
+    return zx::error(ZX_ERR_NOT_FOUND);
+  }
+  return zx::error(ZX_ERR_NOT_SUPPORTED);
+}
+
 void EndpointServer::Connect(async_dispatcher_t* dispatcher,
                              fidl::ServerEnd<fendpoint::Endpoint> server_end) {
   std::lock_guard<std::mutex> lock(lock_);
@@ -158,19 +195,24 @@ void EndpointServer::Connect(async_dispatcher_t* dispatcher,
 void EndpointServer::OnUnbound(fidl::UnbindInfo info,
                                fidl::ServerEnd<fendpoint::Endpoint> server_end) {
   std::vector<fendpoint::Completion> completions;
-  std::map<frequest::VmoId, RegisteredVmo> registered_vmos;
+  std::map<frequest::VmoId, std::shared_ptr<RegisteredVmo>> registered_vmos;
   {
     std::lock_guard<std::mutex> lock(lock_);
     completions = std::move(completions_);
+    for (const auto& [id, vmo] : registered_vmos_) {
+      if (vmo.use_count() > 1) {
+        unregistered_in_flight_vmos_.emplace_back(id, vmo);
+      }
+    }
     registered_vmos = std::move(registered_vmos_);
     binding_ref_.reset();
   }
 
   SendCompletionsBatch(server_end, std::move(completions));
 
-  // Unregister VMOs
-  auto result = UnpinVmos(registered_vmos);
-  ZX_DEBUG_ASSERT(result.is_ok());
+  // Unregister VMOs (dropped when registered_vmos goes out of scope or when in-flight requests
+  // complete).
+  registered_vmos.clear();
 
   if (info.is_user_initiated()) {
     return;
@@ -221,23 +263,48 @@ void EndpointServer::RegisterVmos(RegisterVmosRequest& request,
         continue;
       }
 
+      zx_vaddr_t virt_addr = 0;
+      const size_t kPageSize = zx_system_get_page_size();
+      const size_t map_size = (size + kPageSize - 1) & ~(kPageSize - 1);
+      if (map_size > 0) {
+        status = zx::vmar::root_self()->map(ZX_VM_PERM_READ | ZX_VM_PERM_WRITE, 0, vmo, 0, map_size,
+                                            &virt_addr);
+        if (status != ZX_OK) {
+          zxlogf(ERROR, "zx::vmar::map(): %s", zx_status_get_string(status));
+          zx_pmt_unpin(req.pmt);
+          free(req.phys_list);
+          continue;
+        }
+      }
+
       // Save
       vmos.emplace_back(std::move(fendpoint::VmoHandle().id(id).vmo(std::move(vmo))));
-      registered_vmos_[id] = {
-          .pmt = req.pmt, .phys_list = req.phys_list, .phys_count = req.phys_count, .size = size};
+      registered_vmos_.emplace(
+          id, std::make_shared<RegisteredVmo>(req.pmt, req.phys_list, req.phys_count, size,
+                                              virt_addr, map_size));
     }
   }
 
   completer.Reply({std::move(vmos)});
 }
 
+EndpointServer::RegisteredVmo::~RegisteredVmo() {
+  if (virt_addr != 0 && mapped_size != 0) {
+    zx_status_t status = zx::vmar::root_self()->unmap(virt_addr, mapped_size);
+    ZX_DEBUG_ASSERT(status == ZX_OK);
+  }
+  if (pmt != ZX_HANDLE_INVALID) {
+    zx_status_t status = zx_pmt_unpin(pmt);
+    ZX_DEBUG_ASSERT(status == ZX_OK);
+  }
+  free(phys_list);
+}
+
 void EndpointServer::UnregisterVmos(UnregisterVmosRequest& request,
                                     UnregisterVmosCompleter::Sync& completer) {
   std::vector<zx_status_t> errors;
   std::vector<uint64_t> failed_vmo_ids;
-
-  std::map<frequest::VmoId, RegisteredVmo> vmos_to_unmap;
-
+  std::vector<std::shared_ptr<RegisteredVmo>> vmos_to_unmap;
   {
     std::lock_guard<std::mutex> lock(lock_);
     for (const auto& id : request.vmo_ids()) {
@@ -247,17 +314,13 @@ void EndpointServer::UnregisterVmos(UnregisterVmosRequest& request,
         errors.emplace_back(ZX_ERR_NOT_FOUND);
         continue;
       }
-      vmos_to_unmap.emplace(id, registered_vmo.mapped());
+      if (registered_vmo.mapped().use_count() > 1) {
+        unregistered_in_flight_vmos_.emplace_back(id, registered_vmo.mapped());
+      }
+      vmos_to_unmap.push_back(std::move(registered_vmo.mapped()));
     }
   }
-
-  auto unpin_result = UnpinVmos(vmos_to_unmap);
-  if (unpin_result.is_error()) {
-    for (const auto& [id, status] : unpin_result.error_value()) {
-      failed_vmo_ids.push_back(id);
-      errors.push_back(status);
-    }
-  }
+  vmos_to_unmap.clear();
   completer.Reply({std::move(failed_vmo_ids), std::move(errors)});
 }
 
@@ -270,6 +333,7 @@ void EndpointServer::RequestComplete(zx_status_t status, size_t actual, RequestV
   auto& req = std::get<usb::FidlRequest>(request);
 
   auto defer_completion = *req->defer_completion();
+  auto fidl_req = req.take_request();
 
   std::vector<fendpoint::Completion> completions;
   std::optional<fidl::ServerBindingRef<fendpoint::Endpoint>> binding;
@@ -277,7 +341,7 @@ void EndpointServer::RequestComplete(zx_status_t status, size_t actual, RequestV
   {
     std::lock_guard<std::mutex> lock(lock_);
     completions_.emplace_back(std::move(fendpoint::Completion()
-                                            .request(req.take_request())
+                                            .request(std::move(fidl_req))
                                             .status(status)
                                             .transfer_size(actual)
                                             .wake_lease(std::move(wake_lease))));
@@ -298,27 +362,7 @@ void EndpointServer::RequestComplete(zx_status_t status, size_t actual, RequestV
 
 EndpointServer::~EndpointServer() {
   std::lock_guard<std::mutex> lock(lock_);
-  auto result = UnpinVmos(registered_vmos_);
-  ZX_DEBUG_ASSERT(result.is_ok());
-}
-
-fit::result<std::vector<std::pair<frequest::VmoId, zx_status_t>>> EndpointServer::UnpinVmos(
-    std::map<frequest::VmoId, RegisteredVmo>& vmos) {
-  std::vector<std::pair<frequest::VmoId, zx_status_t>> failures;
-  for (auto& [id, vmo] : vmos) {
-    free(vmo.phys_list);
-    vmo.phys_list = nullptr;
-    zx_status_t status = zx_pmt_unpin(vmo.pmt);
-    if (status != ZX_OK) {
-      zxlogf(ERROR, "Failed to unpin VMO: %s", zx_status_get_string(status));
-      failures.emplace_back(id, status);
-    }
-  }
-  vmos.clear();
-  if (!failures.empty()) {
-    return fit::error(std::move(failures));
-  }
-  return fit::ok();
+  registered_vmos_.clear();
 }
 
 }  // namespace usb

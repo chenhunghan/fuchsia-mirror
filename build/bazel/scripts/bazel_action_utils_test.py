@@ -5,24 +5,21 @@
 
 import json
 import os
-import sys
 import tempfile
 import typing as T
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(__file__))
-import bazel_build_events
-from bazel_action_utils import (
+from build.bazel.scripts import bazel_build_events
+from build.bazel.scripts.bazel_action_utils import (
     AspectManifestOutputs,
+    BazelTargetInfosMap,
     parse_build_event_manifests,
 )
 
 
 class BazelTargetInfosMapTest(unittest.TestCase):
     def test_update_rust_project(self) -> None:
-        from bazel_action_utils import BazelTargetInfosMap
-
         sample_content: list[dict[str, T.Any]] = [
             {
                 "type": "file",
@@ -182,6 +179,65 @@ class BazelTargetInfosMapTest(unittest.TestCase):
         )
         assert bar_info is not None
         self.assertIsNone(bar_info.debug_symbols_manifest)
+
+    def test_package_outputs(self) -> None:
+        from bazel_action_utils import BazelTargetInfosMap, PackageOutput
+
+        def entry(name: str, **extra: T.Any) -> dict[str, T.Any]:
+            return {
+                "type": "package",
+                "bazel_target": f"//src:{name}",
+                "bazel_platform_label": "//build/bazel/platforms:fuchsia",
+                "bazel_platform_config": "fuchsia",
+                "ninja_depfile": f"obj/src/{name}.d",
+                "gn_targets_manifest": "gen/gn_targets.manifest",
+                "stamp_path": f"obj/src/{name}.stamp",
+                "ninja_archive": f"obj/src/{name}.far",
+                "copy_debug_symbols": True,
+                "update_rust_project": False,
+                **extra,
+            }
+
+        target_map = BazelTargetInfosMap(
+            [
+                entry(
+                    "foo",
+                    ninja_package_out_dir="obj/src/foo",
+                ),
+            ]
+        )
+
+        foo_info = target_map.get_info(
+            "//src:foo", "//build/bazel/platforms:fuchsia"
+        )
+        assert foo_info is not None
+        self.assertEqual(
+            foo_info.package_outputs,
+            [
+                PackageOutput(
+                    package_label="//src:foo",
+                    archive_path="obj/src/foo.far",
+                    copy_debug_symbols=True,
+                    package_out_dir="obj/src/foo",
+                )
+            ],
+        )
+        self.assertEqual(
+            foo_info.package_outputs[0].extracted_ninja_paths(),
+            ["obj/src/foo/package_manifest.json", "obj/src/foo/blobs.json"],
+        )
+        # The extracted files must map back to the Bazel target so that
+        # Ninja delayed actions requesting them can be resolved.
+        for path in [
+            "obj/src/foo.far",
+            "obj/src/foo/package_manifest.json",
+            "obj/src/foo/blobs.json",
+        ]:
+            self.assertEqual(target_map.get_target(path), foo_info, path)
+
+        # The extraction fields are required.
+        with self.assertRaises(KeyError):
+            BazelTargetInfosMap([entry("bar")])
 
 
 class AspectManifestOutputsTest(unittest.TestCase):

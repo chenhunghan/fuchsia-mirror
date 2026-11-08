@@ -7,52 +7,101 @@ use fidl_fuchsia_media::*;
 use itertools::Itertools;
 use stream_processor_test::*;
 
-const PCM_SAMPLE_SIZE: usize = 2;
 const PCM_MIME_TYPE: &str = "audio/pcm";
+
+fn sample_bytes_for_format(pcm_format: &PcmFormat2) -> usize {
+    let bits_per_sample = pcm_format.bits_per_sample.expect("bits_per_sample required") as usize;
+    pcm_format
+        .bytes_per_sample
+        .map(|bytes| bytes as usize)
+        .unwrap_or_else(|| bits_per_sample.div_ceil(8))
+}
+
+fn append_s16_sample_in_format(
+    buffer: &mut Vec<u8>,
+    pcm_format: &PcmFormat2,
+    sample_index: usize,
+    sample: i16,
+) {
+    assert_eq!(pcm_format.pcm_mode, Some(AudioPcmMode2::Linear));
+    let bits_per_sample = pcm_format.bits_per_sample.expect("bits_per_sample required");
+    let sample_bytes = sample_bytes_for_format(pcm_format);
+    match (bits_per_sample, sample_bytes) {
+        (16, 2) => {
+            let mut bytes = [0u8; std::mem::size_of::<i16>()];
+            NativeEndian::write_i16(&mut bytes, sample);
+            buffer.extend_from_slice(&bytes);
+        }
+        (24, 3) => {
+            let [lo, hi] = sample.to_le_bytes();
+            buffer.extend_from_slice(&[0x00, lo, hi]);
+        }
+        (24, 4) => {
+            // `PcmFormat2` places valid 24-bit samples in the high-order (left-justified) bits
+            // `31..8`, and requires receivers to ignore low-order padding bits `7..0`. Populate
+            // non-zero low-byte padding so tests verify receivers ignore bits `7..0`.
+            let low_byte_padding =
+                ((sample_index as u32).wrapping_mul(73).wrapping_add(0xA5)) & 0xFF;
+            let word = ((sample as u16 as u32) << 16) | low_byte_padding;
+            buffer.extend_from_slice(&word.to_ne_bytes());
+        }
+        _ => panic!(
+            "Unsupported test PCM format: bits_per_sample={}, bytes_per_sample={}",
+            bits_per_sample, sample_bytes
+        ),
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct PcmAudio {
-    pcm_format: PcmFormat,
+    pcm_format: PcmFormat2,
     buffer: Vec<u8>,
 }
 
 impl PcmAudio {
-    pub fn create_saw_wave(pcm_format: PcmFormat, frame_count: usize) -> Self {
+    pub fn create_saw_wave(pcm_format: PcmFormat2, frame_count: usize) -> Self {
         const FREQUENCY: f32 = 20.0;
         const AMPLITUDE: f32 = 0.2;
 
-        let pcm_frame_size = PCM_SAMPLE_SIZE * pcm_format.channel_map.len();
-        let samples_per_frame = pcm_format.channel_map.len();
+        assert_eq!(pcm_format.pcm_mode, Some(AudioPcmMode2::Linear));
+
+        let channel_count = pcm_format.channel_map.as_ref().unwrap().len();
+        let frames_per_second = pcm_format.frames_per_second.unwrap();
+        let pcm_frame_size = sample_bytes_for_format(&pcm_format) * channel_count;
+        let samples_per_frame = channel_count;
         let sample_count = frame_count * samples_per_frame;
 
-        let mut buffer = vec![0; frame_count * pcm_frame_size];
+        let mut buffer = Vec::with_capacity(frame_count * pcm_frame_size);
 
         for i in 0..sample_count {
             let frame = (i / samples_per_frame) as f32;
-            let value =
-                ((frame * FREQUENCY / (pcm_format.frames_per_second as f32)) % 1.0) * AMPLITUDE;
+            let value = ((frame * FREQUENCY / (frames_per_second as f32)) % 1.0) * AMPLITUDE;
             let sample = (value * i16::MAX as f32) as i16;
-
-            let mut sample_bytes = [0; std::mem::size_of::<i16>()];
-            NativeEndian::write_i16(&mut sample_bytes, sample);
-
-            let offset = i * PCM_SAMPLE_SIZE;
-            buffer[offset] = sample_bytes[0];
-            buffer[offset + 1] = sample_bytes[1];
+            append_s16_sample_in_format(&mut buffer, &pcm_format, i, sample);
         }
 
         Self { pcm_format, buffer }
     }
 
-    pub fn create_from_data(pcm_format: PcmFormat, raw_data: &[i16]) -> Self {
-        Self {
-            pcm_format,
-            buffer: raw_data.iter().flat_map(|pcm_sample| pcm_sample.to_ne_bytes()).collect(),
+    pub fn create_from_data(pcm_format: PcmFormat2, raw_data: &[i16]) -> Self {
+        let mut buffer = Vec::with_capacity(raw_data.len() * sample_bytes_for_format(&pcm_format));
+        for (i, &pcm_sample) in raw_data.iter().enumerate() {
+            append_s16_sample_in_format(&mut buffer, &pcm_format, i, pcm_sample);
         }
+        Self { pcm_format, buffer }
+    }
+
+    pub fn create_from_raw_bytes(pcm_format: PcmFormat2, buffer: Vec<u8>) -> Self {
+        Self { pcm_format, buffer }
+    }
+
+    pub fn pcm_format(&self) -> &PcmFormat2 {
+        &self.pcm_format
     }
 
     pub fn frame_size(&self) -> usize {
-        self.pcm_format.channel_map.len() * PCM_SAMPLE_SIZE
+        self.pcm_format.channel_map.as_ref().unwrap().len()
+            * sample_bytes_for_format(&self.pcm_format)
     }
 }
 
@@ -83,9 +132,7 @@ where
     I: Iterator<Item = usize> + Clone,
 {
     pub fn bytes_per_second(&self) -> usize {
-        self.pcm_audio.pcm_format.frames_per_second as usize
-            * std::mem::size_of::<i16>()
-            * self.pcm_audio.pcm_format.channel_map.len()
+        self.pcm_audio.pcm_format.frames_per_second.unwrap() as usize * self.pcm_audio.frame_size()
     }
 
     pub fn timestamp_generator(&self) -> Option<TimestampGenerator> {
@@ -102,9 +149,7 @@ where
 {
     fn format_details(&self, format_details_version_ordinal: u64) -> FormatDetails {
         FormatDetails {
-            domain: Some(DomainFormat::Audio(AudioFormat::Uncompressed(
-                AudioUncompressedFormat::Pcm(self.pcm_audio.pcm_format.clone()),
-            ))),
+            pcm_format: Some(self.pcm_audio.pcm_format.clone()),
             encoder_settings: Some(self.encoder_settings.clone()),
             format_details_version_ordinal: Some(format_details_version_ordinal),
             mime_type: Some(String::from(PCM_MIME_TYPE)),
@@ -172,11 +217,12 @@ mod test {
 
     #[fuchsia::test]
     fn elementary_chunk_data() {
-        let pcm_format = PcmFormat {
-            pcm_mode: AudioPcmMode::Linear,
-            bits_per_sample: 16,
-            frames_per_second: 44100,
-            channel_map: vec![AudioChannelId::Lf, AudioChannelId::Rf],
+        let pcm_format = PcmFormat2 {
+            pcm_mode: Some(AudioPcmMode2::Linear),
+            bits_per_sample: Some(16),
+            frames_per_second: Some(44100),
+            channel_map: Some(vec![AudioChannelId2::Fl, AudioChannelId2::Fr]),
+            ..Default::default()
         };
         let pcm_audio = PcmAudio::create_saw_wave(pcm_format, /*frame_count=*/ 100);
 
@@ -201,11 +247,12 @@ mod test {
             "2bf4f233a179f0cb572b72570a28c07a334e406baa7fb4fc65f641b82d0ae64a";
 
         let pcm_audio = PcmAudio::create_saw_wave(
-            PcmFormat {
-                pcm_mode: AudioPcmMode::Linear,
-                bits_per_sample: 16,
-                frames_per_second: 44100,
-                channel_map: vec![AudioChannelId::Lf, AudioChannelId::Rf],
+            PcmFormat2 {
+                pcm_mode: Some(AudioPcmMode2::Linear),
+                bits_per_sample: Some(16),
+                frames_per_second: Some(44100),
+                channel_map: Some(vec![AudioChannelId2::Fl, AudioChannelId2::Fr]),
+                ..Default::default()
             },
             /*frame_count=*/ 50000,
         );
@@ -216,11 +263,12 @@ mod test {
 
     #[fuchsia::test]
     fn stream_timestamps() {
-        let pcm_format = PcmFormat {
-            pcm_mode: AudioPcmMode::Linear,
-            bits_per_sample: 16,
-            frames_per_second: 50,
-            channel_map: vec![AudioChannelId::Lf, AudioChannelId::Rf],
+        let pcm_format = PcmFormat2 {
+            pcm_mode: Some(AudioPcmMode2::Linear),
+            bits_per_sample: Some(16),
+            frames_per_second: Some(50),
+            channel_map: Some(vec![AudioChannelId2::Fl, AudioChannelId2::Fr]),
+            ..Default::default()
         };
         let pcm_audio = PcmAudio::create_saw_wave(pcm_format, /*frame_count=*/ 100);
 
@@ -233,10 +281,42 @@ mod test {
 
         let mut chunks = stream.stream();
 
-        assert_eq!(chunks.next().and_then(|chunk| chunk.timestamp), Some(0));
+        assert_eq!(&chunks.next().and_then(|chunk| chunk.timestamp), &Some(0));
         assert_eq!(
             chunks.next().and_then(|chunk| chunk.timestamp),
             Some(zx::MonotonicDuration::from_seconds(1).into_nanos() as u64)
         );
+    }
+
+    #[fuchsia::test]
+    fn stream_timestamps_24bit_packed_and_padded() {
+        for (bytes_per_sample, expected_frame_size) in [(None, 6usize), (Some(3), 6), (Some(4), 8)]
+        {
+            let pcm_format = PcmFormat2 {
+                pcm_mode: Some(AudioPcmMode2::Linear),
+                bits_per_sample: Some(24),
+                bytes_per_sample,
+                frames_per_second: Some(50),
+                channel_map: Some(vec![AudioChannelId2::Fl, AudioChannelId2::Fr]),
+                ..Default::default()
+            };
+            let pcm_audio = PcmAudio::create_saw_wave(pcm_format, /*frame_count=*/ 100);
+            assert_eq!(pcm_audio.frame_size(), expected_frame_size);
+
+            let stream = PcmAudioStream {
+                pcm_audio,
+                encoder_settings: DUMMY_ENCODER_SETTINGS,
+                frames_per_packet: (0..).map(|_| 50),
+                timebase: Some(zx::MonotonicDuration::from_seconds(1).into_nanos() as u64),
+            };
+            assert_eq!(stream.bytes_per_second(), 50 * expected_frame_size);
+
+            let mut chunks = stream.stream();
+            assert_eq!(chunks.next().and_then(|chunk| chunk.timestamp), Some(0));
+            assert_eq!(
+                chunks.next().and_then(|chunk| chunk.timestamp),
+                Some(zx::MonotonicDuration::from_seconds(1).into_nanos() as u64)
+            );
+        }
     }
 }

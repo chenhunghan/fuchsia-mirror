@@ -1,0 +1,120 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":lowpan-driver-common-tests"],
+    visibility = ["//src/connectivity:__pkg__"],
+)
+
+# TODO(https://fxbug.dev/356474618): re-enable and fix existing lints
+# (configs += [ "//build/config/rust/lints:clippy_warn_all" ]).
+# TODO: Verify whether lowpan_driver_common should use target_compatible_with (was not gated by if (is_fuchsia) in GN).
+# Match GN disable_rustdoc = true (https://issuetracker.google.com/issues/284368914);
+# Bazel rustc_library does not generate rustdoc by default.
+# @bazel2gn:raw_attribute:disable_rustdoc = true
+rustc_library(
+    name = "lowpan_driver_common",
+    srcs = [
+        "src/async_condition.rs",
+        "src/dummy_device.rs",
+        "src/lib.rs",
+        "src/lowpan_device.rs",
+        "src/net/backbone.rs",
+        "src/net/debug.rs",
+        "src/net/iface.rs",
+        "src/net/matcher.rs",
+        "src/net/mod.rs",
+        "src/net/tun.rs",
+        "src/register.rs",
+        "src/serve_to.rs",
+        "src/spinel/correlated.rs",
+        "src/spinel/device_client.rs",
+        "src/spinel/flow_window.rs",
+        "src/spinel/frame_handler/commands.rs",
+        "src/spinel/frame_handler/mod.rs",
+        "src/spinel/frame_handler/prop_returning.rs",
+        "src/spinel/frame_handler/request_desc.rs",
+        "src/spinel/frame_handler/request_tracker.rs",
+        "src/spinel/frame_handler/response_handler.rs",
+        "src/spinel/mock/fake_device_client.rs",
+        "src/spinel/mock/mock_device_client.rs",
+        "src/spinel/mock/mod.rs",
+        "src/spinel/mod.rs",
+        "src/spinel/types/enums.rs",
+        "src/spinel/types/mod.rs",
+        "src/spinel/types/net_flags.rs",
+        "src/tests.rs",
+    ],
+    crate_features = ["poll_debugger"],
+    edition = "2024",
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:async-trait",
+        "//third_party/rust_crates/vendor:derivative",
+    ],
+    # Fuchsia-only because this library unconditionally uses zx and Fuchsia FIDL bindings.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/connectivity/lowpan:__subpackages__",
+        "//src/testing/sl4f:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.factory.lowpan:fuchsia.factory.lowpan_rust",
+        "//sdk/fidl/fuchsia.hardware.network:fuchsia.hardware.network_rust",
+        "//sdk/fidl/fuchsia.lowpan.device:fuchsia.lowpan.device_rust",
+        "//sdk/fidl/fuchsia.lowpan.driver:fuchsia.lowpan.driver_rust",
+        "//sdk/fidl/fuchsia.lowpan.experimental:fuchsia.lowpan.experimental_rust",
+        "//sdk/fidl/fuchsia.lowpan:fuchsia.lowpan_rust",
+        "//sdk/fidl/fuchsia.lowpan.spinel:fuchsia.lowpan.spinel_rust",
+        "//sdk/fidl/fuchsia.lowpan.test:fuchsia.lowpan.test_rust",
+        "//sdk/fidl/fuchsia.lowpan.thread:fuchsia.lowpan.thread_rust",
+        "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
+        "//sdk/fidl/fuchsia.net.interfaces.admin:fuchsia.net.interfaces.admin_rust",
+        "//sdk/fidl/fuchsia.net.interfaces:fuchsia.net.interfaces_rust",
+        "//sdk/fidl/fuchsia.net.routes.admin:fuchsia.net.routes.admin_rust",
+        "//sdk/fidl/fuchsia.net.routes:fuchsia.net.routes_rust",
+        "//sdk/fidl/fuchsia.net.tun:fuchsia.net.tun_rust",
+        "//sdk/rust/zx",
+        "//sdk/rust/zx-status",
+        "//src/connectivity/lib/net-types",
+        "//src/connectivity/lib/packet-formats",
+        "//src/connectivity/lowpan/lib/openthread_sys",
+        "//src/connectivity/lowpan/lib/spinel_pack",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-sync",
+        "//src/lib/network/fidl_fuchsia_net_ext",
+        "//src/lib/network/fidl_fuchsia_net_interfaces_ext",
+        "//src/lib/network/packet",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:hex",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:slab",
+        "//third_party/rust_crates/vendor:socket2",
+        "//third_party/rust_crates/vendor:static_assertions",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+rustc_test(
+    name = "lowpan_driver_common_test",
+    crate = ":lowpan_driver_common",
+    crate_features = ["poll_debugger"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = ["//src/lib/fuchsia"],
+)
+
+fx_unittest_package(
+    name = "lowpan-driver-common-tests",
+    unit_tests = [":lowpan_driver_common_test"],
+)

@@ -48,19 +48,22 @@ source_set("timeline") {
   ]
   public_deps = [ "//zircon/system/ulib/zx" ]
 }
-executable("unittest_bin") {
-  testonly = true
+
+cc_test_executable("unittest_bin") {
   sources = [
     "timeline_function_unittest.cc",
     "timeline_rate_unittest.cc",
   ]
+  output_name = "audio_lib_timeline_unittests"
   deps = [
     ":timeline",
     "//sdk/lib/syslog/cpp",
     "//src/lib/fxl/test:gtest_main",
   ]
-  output_name = "audio_lib_timeline_unittests"
+  testonly = true
+  emit_tool_path = false
 }
+
 fuchsia_unittest_package("audio_lib_timeline_unittests") {
   package_name = "audio_lib_timeline_unittests-gn"
   component_name = "audio_lib_timeline_unittests"

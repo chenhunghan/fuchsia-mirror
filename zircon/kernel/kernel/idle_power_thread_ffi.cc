@@ -10,31 +10,19 @@
 extern "C" {
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE wake_vector::WakeResult cpp_idle_power_thread_trigger_system_wake_event() {
-  return IdlePowerThread::TriggerSystemWakeEvent();
+FFI_ALWAYS_INLINE void cpp_idle_power_thread_init(ffi::Uninitialized<IdlePowerThread>* out) {
+  DEBUG_ASSERT(out != nullptr);
+  out->Initialize();
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_idle_power_thread_acknowledge_system_wake_event() {
-  IdlePowerThread::AcknowledgeSystemWakeEvent();
+FFI_ALWAYS_INLINE void cpp_resume_timer_wake_vector_init() {
+  IdlePowerThread::resume_timer_wake_vector_.Initialize();
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE zx_instant_boot_t
-cpp_idle_power_thread_transition_all_active_to_suspend(zx_instant_boot_t resume_deadline) {
-  return IdlePowerThread::TransitionAllActiveToSuspend(resume_deadline);
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE zx_instant_boot_t
-cpp_idle_power_thread_suspend_system(zx_instant_boot_t resume_deadline) {
-  return IdlePowerThread::SuspendSystem(resume_deadline);
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE const Thread* cpp_idle_power_thread_get_thread(const IdlePowerThread* ipt) {
-  DEBUG_ASSERT(ipt != nullptr);
-  return &ipt->thread();
+FFI_ALWAYS_INLINE const wake_vector::WakeEvent* cpp_resume_timer_wake_vector_get_wake_event() {
+  return &IdlePowerThread::resume_timer_wake_vector_->wake_event;
 }
 
 }  // extern "C"

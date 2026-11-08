@@ -3,28 +3,258 @@
 # found in the LICENSE file.
 
 load("//build/bazel/rules/components:expect_includes.bzl", "expect_includes")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
 
 package(default_applicable_licenses = ["//:license"])
 
 exports_files(
     ["tmp_storage.shard.cml"],
     visibility = [
+        "//examples/components/storage:__pkg__",
+        "//examples/tests/rust:__pkg__",
+        "//src/connectivity/bluetooth/core/bt-gap:__pkg__",
+        "//src/diagnostics/lib/sampler-config:__pkg__",
         "//src/lib/files:__pkg__",
         "//src/media/audio/lib/wav:__pkg__",
+        "//src/settings/storage:__pkg__",
+        "//src/sys/component_manager/lib/builtins:__pkg__",
+        "//src/sys/fuzzing/common:__pkg__",
+        "//src/sys/fuzzing/fuzzctl:__pkg__",
+        "//src/sys/pkg/bin/system-update-checker:__pkg__",
+        "//src/sys/pkg/bin/system-updater:__pkg__",
         "//src/sys/pkg/lib/eager-package-config:__pkg__",
         "//src/sys/pkg/lib/far/cpp:__pkg__",
         "//src/sys/pkg/lib/forced-fdr:__pkg__",
         "//src/sys/pkg/lib/fuchsia-pkg:__pkg__",
         "//src/sys/pkg/lib/omaha-client-fuchsia:__pkg__",
+        "//src/sys/pkg/lib/package-directory:__pkg__",
         "//src/sys/pkg/lib/tuf:__pkg__",
         "//src/sys/pkg/lib/update-package:__pkg__",
         "//src/sys/pkg/testing/mock-resolver:__pkg__",
         "//src/sys/pkg/tests/far:__pkg__",
+        "//src/sys/run_test_suite:__subpackages__",
+        "//src/sys/test_manager/debug_data_processor:__pkg__",
+        "//src/zircon/bin/zxsh:__pkg__",
     ],
 )
 
 expect_includes(
     name = "tmp_storage",
     includes = ["tmp_storage.shard.cml"],
-    visibility = ["//src/sys/time/timekeeper/persistence:__pkg__"],
+    visibility = ["//:__subpackages__"],
+)
+
+rustc_library(
+    name = "lib",
+    srcs = [
+        "src/cases.rs",
+        "src/elf/elf_component.rs",
+        "src/elf/mod.rs",
+        "src/elf/server.rs",
+        "src/errors.rs",
+        "src/launch.rs",
+        "src/lib.rs",
+        "src/logs.rs",
+    ],
+    crate_name = "test_runners_lib",
+    edition = "2024",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:async-trait"],
+    # Only for internal use.
+    visibility = ["//src/sys/test_runners:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.component.runner:fuchsia.component.runner_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.ldsvc:fuchsia.ldsvc_rust",
+        "//sdk/fidl/fuchsia.process:fuchsia.process_rust",
+        "//sdk/fidl/fuchsia.test:fuchsia.test_rust",
+        "//sdk/fidl/fuchsia.test:rust_measure_tape_for_case",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-runtime",
+        "//src/lib/trace/rust:trace",
+        "//src/storage/lib/vfs/rust:vfs",
+        "//src/sys/lib/cm_types",
+        "//src/sys/lib/library_loader",
+        "//src/sys/lib/namespace",
+        "//src/sys/lib/runner",
+        "//src/sys/test_runners/fidl/fuchsia.test.runner:fuchsia.test.runner_rust",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+rustc_test(
+    name = "lib_test",
+    crate = ":lib",
+    # Preserves GN `output_name = "test_runners_lib_lib_test"`.
+    crate_name = "test_runners_lib_lib_test",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-fs",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:rand",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+rustc_library(
+    name = "test_lib",
+    testonly = True,
+    srcs = ["src/test_lib.rs"],
+    crate_name = "test_runners_test_lib",
+    crate_root = "src/test_lib.rs",
+    edition = "2024",
+    # Only for use by test runners.
+    visibility = [
+        "//src/connectivity/network/testing/netemul/runner:__subpackages__",
+        "//src/lib/testing/sharding/tests:__subpackages__",
+        "//src/sys/test_runners:__subpackages__",
+    ],
+    deps = [
+        ":lib",
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.component.runner:fuchsia.component.runner_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.test:fuchsia.test_rust",
+        "//sdk/fidl/fuchsia.test.manager:fuchsia.test.manager_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-fs",
+        "//src/lib/fuchsia-runtime",
+        "//src/sys/lib/namespace",
+        "//src/sys/test_manager:test_lib",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+rustc_test(
+    name = "test_lib_test",
+    crate = ":test_lib",
+    # Preserves GN `output_name = "test_runners_test_lib_lib_test"`.
+    crate_name = "test_runners_test_lib_lib_test",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = ["//third_party/rust_crates/vendor:maplit"],
+)
+
+rustc_binary(
+    name = "echo_server_for_concurrency_test_bin",
+    srcs = ["src/echo_server_for_concurrency_test.rs"],
+    binary_name = "echo_server_for_concurrency_test",
+    crate_root = "src/echo_server_for_concurrency_test.rs",
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        "//examples/components/routing/fidl:echo_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "echo_server_for_concurrency_test_packaged_bin",
+    binary = ":echo_server_for_concurrency_test_bin",
+    binary_name = "echo_server_for_concurrency_test",
+)
+
+fx_component_manifest(
+    name = "echo_server_for_concurrency_test_manifest",
+    testonly = True,
+    component_name = "echo-server-for-concurrency-test",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/echo-server-for-concurrency-test.cml",
+)
+
+fx_component(
+    name = "echo_server_for_concurrency_test",
+    testonly = True,
+    compiled_manifest = ":echo_server_for_concurrency_test_manifest",
+    visibility = ["//src/sys/test_runners:__subpackages__"],
+    deps = [":echo_server_for_concurrency_test_packaged_bin"],
+)
+
+fx_packaged_binary(
+    name = "lib_test_packaged_bin",
+    testonly = True,
+    binary = ":lib_test",
+    binary_name = "test_runners_lib_lib_test",
+)
+
+fx_component_manifest(
+    name = "test-component_manifest",
+    testonly = True,
+    component_name = "test-component",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//sdk/lib/syslog:offer.shard",
+        "//src/sys/test_runners/rust:default",
+    ],
+    manifest = "meta/test_component.cml",
+)
+
+# Placeholder for GN-only `group("test-with-process-launcher")`, whose manifest
+# metadata is inlined into `meta/test_component.cml` in Bazel.
+# @bazel2gn:skip
+filegroup(
+    name = "test-with-process-launcher",
+    testonly = True,
+)
+
+fx_test_component(
+    name = "test-component",
+    compiled_manifest = ":test-component_manifest",
+    deps = [
+        ":lib_test_packaged_bin",
+        ":test-with-process-launcher",
+    ],
+)
+
+fx_package(
+    name = "test-runner-unit-tests_package",
+    package_name = "test-runner-unit-tests",
+    components = ["//src/sys/test_runners/lib_loader_cache:lib_loader_runner_cache_cmp"],
+    test_components = [":test-component"],
+)
+
+fx_test(
+    name = "test-runner-unit-tests",
+    package = ":test-runner-unit-tests_package",
+    visibility = ["//src/sys:__pkg__"],
+)
+
+fx_unittest_package(
+    name = "test-runner-test-lib-unit-tests",
+    unit_tests = [":test_lib_test"],
+    visibility = ["//src/sys:__pkg__"],
 )

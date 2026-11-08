@@ -19,7 +19,7 @@ use futures::future::BoxFuture;
 use fxfs::errors::FxfsError;
 use fxfs::filesystem::{SyncOptions, TruncateGuard};
 use fxfs::log::*;
-use fxfs::object_store::directory::{self, ReplacedChild};
+use fxfs::object_store::directory::{self, ReplaceContext, ReplacedChild};
 use fxfs::object_store::transaction::{
     LockKey, Options, ReservationOptions, Transaction, lock_keys,
 };
@@ -385,38 +385,22 @@ impl FxDirectory {
 
     pub(crate) async fn link_object(
         &self,
-        mut transaction: Transaction<'_>,
+        transaction: Transaction<'_>,
         name: &str,
         source_id: u64,
         kind: ObjectDescriptor,
     ) -> Result<(), zx::Status> {
-        let store = self.store();
-        if self.is_deleted() {
-            return Err(zx::Status::ACCESS_DENIED);
-        }
-        if self.directory.lookup(&name).await.map_err(map_to_status)?.is_some() {
-            return Err(zx::Status::ALREADY_EXISTS);
-        }
-        self.directory
-            .insert_child(&mut transaction, &name, source_id, kind.clone())
-            .await
-            .map_err(map_to_status)?;
-        store.adjust_refs(&mut transaction, source_id, 1).await.map_err(map_to_status)?;
-        transaction
-            .commit_with_callback(|_| self.did_add(&name, None))
-            .await
-            .map_err(map_to_status)?;
-        Ok(())
+        self.link_object_into(transaction, name, source_id, kind, false, || {}).await
     }
 
-    // Move graveyard object out from the graveyard and link it to this path. We only expect to do
-    // this when linking an unnamed temporary file for the first time.
-    pub(crate) async fn link_graveyard_object<F>(
+    // Links an object into this directory without overwriting an existing entry.
+    pub(crate) async fn link_object_into<F>(
         &self,
         mut transaction: Transaction<'_>,
         name: &str,
         source_id: u64,
         kind: ObjectDescriptor,
+        is_unnamed_temporary: bool,
         transaction_callback: F,
     ) -> Result<(), zx::Status>
     where
@@ -429,13 +413,18 @@ impl FxDirectory {
         if self.directory.lookup(&name).await.map_err(map_to_status)?.is_some() {
             return Err(zx::Status::ALREADY_EXISTS);
         }
-        // Move object out from the graveyard and place into record. As we are moving the object
-        // from one record to the other, the reference count should stay the same.
-        store.remove_from_graveyard(&mut transaction, source_id);
         self.directory
             .insert_child(&mut transaction, &name, source_id, kind.clone())
             .await
             .map_err(map_to_status)?;
+        if is_unnamed_temporary {
+            // Move object out from the graveyard and place into dir. Since we are moving the
+            // object from the graveyard directly to this directory, the reference count remains
+            // unchanged.
+            store.remove_from_graveyard(&mut transaction, source_id);
+        } else {
+            store.adjust_refs(&mut transaction, source_id, 1).await.map_err(map_to_status)?;
+        }
         transaction
             .commit_with_callback(|_| {
                 transaction_callback();
@@ -443,6 +432,79 @@ impl FxDirectory {
             })
             .await
             .map_err(map_to_status)?;
+        Ok(())
+    }
+
+    // Links an object into this directory, replacing any existing file or symlink entry.
+    pub(crate) async fn link_object_into_allowing_replacement<F>(
+        &self,
+        replace_context: ReplaceContext<'_>,
+        name: &str,
+        source_id: u64,
+        kind: ObjectDescriptor,
+        is_unnamed_temporary: bool,
+        transaction_callback: F,
+    ) -> Result<(), zx::Status>
+    where
+        F: FnOnce() + Send,
+    {
+        if self.is_deleted() {
+            return Err(zx::Status::ACCESS_DENIED);
+        }
+
+        let mut transaction = replace_context.transaction;
+        let actual_dst_name = replace_context.dst_name.as_deref().unwrap_or(name).to_owned();
+
+        if let Some((dst_id, dst_descriptor)) = replace_context.dst_id_and_descriptor.as_ref() {
+            if *dst_id == source_id {
+                return Ok(());
+            }
+            if !matches!(dst_descriptor, ObjectDescriptor::File | ObjectDescriptor::Symlink) {
+                return Err(zx::Status::NOT_FILE);
+            }
+        }
+
+        let store = self.store();
+        if is_unnamed_temporary {
+            // Move object out from the graveyard and place into dir. Since we are moving the
+            // object from the graveyard directly to this directory, the reference count remains
+            // unchanged.
+            store.remove_from_graveyard(&mut transaction, source_id);
+        } else {
+            store.adjust_refs(&mut transaction, source_id, 1).await.map_err(map_to_status)?;
+        }
+
+        let replace_result = directory::replace_child_with_object(
+            &mut transaction,
+            Some((source_id, kind)),
+            (self.directory(), name),
+            0,
+            false,
+            Timestamp::now(),
+        )
+        .await
+        .map_err(map_to_status)?;
+
+        let is_replacement = replace_context.dst_id_and_descriptor.is_some();
+        transaction
+            .commit_with_callback(|_| {
+                transaction_callback();
+                if is_replacement {
+                    self.did_remove(&actual_dst_name);
+                }
+                self.did_add(name, None);
+            })
+            .await
+            .map_err(map_to_status)?;
+
+        if let ReplacedChild::Object(id) = replace_result {
+            if let Err(e) =
+                self.volume().maybe_purge_file(id, replace_context.truncate_guard.as_ref()).await
+            {
+                warn!(error:? = e; "Failed to purge replaced file during link_into");
+            }
+        }
+
         Ok(())
     }
 
@@ -526,6 +588,7 @@ impl FxDirectory {
                     src.map(|(dir, name)| (dir.directory(), name)),
                     dst,
                     borrow_metadata_space,
+                    &[],
                 )
                 .await
                 .map_err(map_to_status)?;
@@ -3738,7 +3801,11 @@ mod tests {
                 parent.deprecated_get_token().await.expect("FIDL call failed");
             zx::Status::ok(status).expect("get_token failed");
             proxy
-                .link_into(zx::Event::from(dst_token.unwrap()), "symlink2")
+                .link_into(
+                    zx::Event::from(dst_token.unwrap()),
+                    "symlink2",
+                    &fio::LinkIntoOptions::default(),
+                )
                 .await
                 .expect("link_into (FIDL) failed")
                 .expect("link_into failed");
@@ -3749,98 +3816,311 @@ mod tests {
         fixture.close().await;
     }
 
+    async fn create_encrypted_dir(
+        parent: &fio::DirectoryProxy,
+        name: &str,
+        key_id: WrappingKeyId,
+    ) -> fio::DirectoryProxy {
+        let dir = open_dir_checked(
+            parent,
+            name,
+            fio::Flags::FLAG_MAYBE_CREATE
+                | fio::PERM_READABLE
+                | fio::PERM_WRITABLE
+                | fio::Flags::PROTOCOL_DIRECTORY,
+            Default::default(),
+        )
+        .await;
+        dir.update_attributes(&fio::MutableNodeAttributes {
+            encryption_policy: Some(fio::FscryptPolicy {
+                key_identifier: key_id,
+                flags: fxfs::object_store::LEGACY_FSCRYPT_FLAGS,
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect("FIDL call failed")
+        .map_err(zx::ok)
+        .expect("update_attributes failed");
+        dir
+    }
+
+    async fn symlink_link_into(
+        symlink: &fio::SymlinkProxy,
+        dst_dir: &fio::DirectoryProxy,
+        dst_name: &str,
+        replace: bool,
+    ) -> Result<(), zx::Status> {
+        let token = dst_dir.get_token().await.expect("FIDL call failed").expect("get_token failed");
+        let options = if replace {
+            fio::LinkIntoOptions {
+                flags: Some(fio::LinkIntoFlags::REPLACE_EXISTING),
+                ..Default::default()
+            }
+        } else {
+            fio::LinkIntoOptions::default()
+        };
+        symlink
+            .link_into(token, dst_name, &options)
+            .await
+            .expect("link_into (FIDL) failed")
+            .map_err(zx::Status::err_from_raw)
+    }
+
+    async fn read_symlink_target(dir: &fio::DirectoryProxy, name: &str) -> Vec<u8> {
+        let (proxy, server_end) = create_proxy::<fio::SymlinkMarker>();
+        dir.open(name, fio::PERM_READABLE, &Default::default(), server_end.into_channel())
+            .expect("open failed");
+        proxy.describe().await.expect("describe failed").target.expect("missing symlink target")
+    }
+
     #[fuchsia::test]
-    async fn test_link_symlink_into_locked_directory_fails() {
+    async fn test_link_unencrypted_symlink_into_encrypted_directory_fails() {
         let fixture = TestFixture::new().await;
         let crypt: Arc<CryptBase> = fixture.crypt().unwrap();
         let root = fixture.root();
-        let open_dir = || {
-            open_dir_checked(
-                &root,
-                "foo",
-                fio::Flags::FLAG_MAYBE_CREATE
-                    | fio::PERM_READABLE
-                    | fio::PERM_WRITABLE
-                    | fio::Flags::PROTOCOL_DIRECTORY,
-                Default::default(),
-            )
-        };
-        let parent = Arc::new(open_dir().await);
         crypt
             .add_wrapping_key(WRAPPING_KEY_ID, [1; 32].into())
             .expect("Failed to add wrapping key");
-        parent
-            .update_attributes(&fio::MutableNodeAttributes {
-                encryption_policy: Some(fio::FscryptPolicy {
-                    key_identifier: WRAPPING_KEY_ID,
-                    flags: fxfs::object_store::LEGACY_FSCRYPT_FLAGS,
-                }),
-                ..Default::default()
-            })
+        let enc_dir = create_encrypted_dir(&root, "enc", WRAPPING_KEY_ID).await;
+
+        enc_dir
+            .create_symlink("existing", b"enc_target", None)
             .await
             .expect("FIDL call failed")
-            .map_err(zx::ok)
-            .expect("update_attributes failed");
-        close_dir_checked(Arc::try_unwrap(parent).unwrap()).await;
+            .expect("create_symlink failed");
 
-        let device = fixture.close().await;
-        let new_fixture = TestFixture::new_with_device(device).await;
-        let root = new_fixture.root();
-        let open_dir = || {
-            open_dir_checked(
-                &root,
-                "foo",
-                fio::PERM_READABLE | fio::PERM_WRITABLE | fio::Flags::PROTOCOL_DIRECTORY,
-                Default::default(),
-            )
-        };
-        let parent: Arc<fio::DirectoryProxy> = Arc::new(open_dir().await);
+        for (label, target) in
+            [("unenc_inline", b"unenc_target".to_vec()), ("unenc_spilled", vec![b'u'; 512])]
         {
-            root.create_symlink("symlink", b"target", None)
+            let (unenc_symlink, server_end) = create_proxy::<fio::SymlinkMarker>();
+            root.create_symlink(label, &target, Some(server_end))
                 .await
                 .expect("FIDL call failed")
                 .expect("create_symlink failed");
 
-            async fn open_symlink(root: &fio::DirectoryProxy, path: &str) -> fio::SymlinkProxy {
-                let (proxy, server_end) = create_proxy::<fio::SymlinkMarker>();
-                root.open(
-                    path,
-                    fio::PERM_READABLE | fio::PERM_WRITABLE | fio::Flags::FLAG_SEND_REPRESENTATION,
+            assert_eq!(
+                symlink_link_into(&unenc_symlink, &enc_dir, label, false).await,
+                Err(zx::Status::BAD_STATE)
+            );
+            assert_eq!(
+                symlink_link_into(&unenc_symlink, &enc_dir, "existing", true).await,
+                Err(zx::Status::BAD_STATE)
+            );
+        }
+
+        assert_eq!(read_symlink_target(&enc_dir, "existing").await, b"enc_target");
+
+        close_dir_checked(enc_dir).await;
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_link_encrypted_symlink_across_encryption_policies() {
+        const WRAPPING_KEY_ID_2: WrappingKeyId = u128::to_le_bytes(3);
+
+        let fixture = TestFixture::new().await;
+        let crypt: Arc<CryptBase> = fixture.crypt().unwrap();
+        let root = fixture.root();
+
+        crypt
+            .add_wrapping_key(WRAPPING_KEY_ID, [1; 32].into())
+            .expect("Failed to add wrapping key 1");
+        crypt
+            .add_wrapping_key(WRAPPING_KEY_ID_2, [2; 32].into())
+            .expect("Failed to add wrapping key 2");
+
+        let enc_dir_1a = create_encrypted_dir(&root, "enc_1a", WRAPPING_KEY_ID).await;
+        let enc_dir_1b = create_encrypted_dir(&root, "enc_1b", WRAPPING_KEY_ID).await;
+        let enc_dir_2 = create_encrypted_dir(&root, "enc_2", WRAPPING_KEY_ID_2).await;
+        let unenc_dir = open_dir_checked(
+            &root,
+            "unenc",
+            fio::Flags::FLAG_MAYBE_CREATE
+                | fio::PERM_READABLE
+                | fio::PERM_WRITABLE
+                | fio::Flags::PROTOCOL_DIRECTORY,
+            Default::default(),
+        )
+        .await;
+
+        enc_dir_2
+            .create_symlink("victim", b"original_victim", None)
+            .await
+            .expect("FIDL call failed")
+            .expect("create_symlink failed");
+
+        // Test both inline and non-inline (spilled) encrypted symlinks.
+        for (label, target) in [("inline", b"short_target".to_vec()), ("spilled", vec![b'x'; 512])]
+        {
+            let (sym_proxy, server_end) = create_proxy::<fio::SymlinkMarker>();
+            enc_dir_1a
+                .create_symlink(label, &target, Some(server_end))
+                .await
+                .expect("FIDL call failed")
+                .expect("create_symlink failed");
+
+            // 1. Linking into another encrypted directory with the SAME policy succeeds
+            // (both standard and REPLACE_EXISTING).
+            assert_eq!(symlink_link_into(&sym_proxy, &enc_dir_1b, label, false).await, Ok(()));
+            enc_dir_1b
+                .create_symlink("replace_me", b"old_target", None)
+                .await
+                .expect("FIDL call failed")
+                .expect("create_symlink failed");
+            assert_eq!(
+                symlink_link_into(&sym_proxy, &enc_dir_1b, "replace_me", true).await,
+                Ok(())
+            );
+            assert_eq!(read_symlink_target(&enc_dir_1b, "replace_me").await, target);
+            enc_dir_1b
+                .unlink("replace_me", &fio::UnlinkOptions::default())
+                .await
+                .expect("FIDL call failed")
+                .expect("unlink failed");
+
+            // 2. Linking into an encrypted directory with a DIFFERENT key fails with BAD_STATE
+            // (both standard and REPLACE_EXISTING).
+            assert_eq!(
+                symlink_link_into(&sym_proxy, &enc_dir_2, label, false).await,
+                Err(zx::Status::BAD_STATE)
+            );
+            assert_eq!(
+                symlink_link_into(&sym_proxy, &enc_dir_2, "victim", true).await,
+                Err(zx::Status::BAD_STATE)
+            );
+
+            // 3. Linking an encrypted symlink into an unencrypted directory is permitted by
+            // fscrypt (both standard and REPLACE_EXISTING), and subsequent link_into from that
+            // handle into a mismatched encrypted directory still fails with BAD_STATE.
+            assert_eq!(symlink_link_into(&sym_proxy, &unenc_dir, label, false).await, Ok(()));
+            unenc_dir
+                .create_symlink("unenc_replace", b"old_unenc", None)
+                .await
+                .expect("FIDL call failed")
+                .expect("create_symlink failed");
+            assert_eq!(
+                symlink_link_into(&sym_proxy, &unenc_dir, "unenc_replace", true).await,
+                Ok(())
+            );
+            assert_eq!(read_symlink_target(&unenc_dir, "unenc_replace").await, target);
+            unenc_dir
+                .unlink("unenc_replace", &fio::UnlinkOptions::default())
+                .await
+                .expect("FIDL call failed")
+                .expect("unlink failed");
+
+            let (unenc_sym_proxy, server_end) = create_proxy::<fio::SymlinkMarker>();
+            unenc_dir
+                .open(
+                    label,
+                    fio::PERM_READABLE | fio::PERM_WRITABLE,
                     &Default::default(),
                     server_end.into_channel(),
                 )
                 .expect("open failed");
-
-                let representation = proxy
-                    .take_event_stream()
-                    .next()
-                    .await
-                    .expect("missing Symlink event")
-                    .expect("failed to read Symlink event")
-                    .into_on_representation()
-                    .expect("failed to decode OnRepresentation");
-
-                assert_matches!(representation,
-                    fio::Representation::Symlink(fio::SymlinkInfo{
-                        target: Some(target), ..
-                    }) if target == b"target"
-                );
-
-                proxy
-            }
-
-            let proxy = open_symlink(&root, "symlink").await;
-
-            let (status, dst_token) =
-                parent.deprecated_get_token().await.expect("FIDL call failed");
-            zx::Status::ok(status).expect("get_token failed");
-            proxy
-                .link_into(zx::Event::from(dst_token.unwrap()), "symlink2")
-                .await
-                .expect("link_into (FIDL) failed")
-                .expect_err("linking into a locked directory should fail");
+            assert_eq!(
+                symlink_link_into(&unenc_sym_proxy, &enc_dir_2, label, false).await,
+                Err(zx::Status::BAD_STATE)
+            );
         }
 
+        assert_eq!(read_symlink_target(&enc_dir_2, "victim").await, b"original_victim");
+
+        close_dir_checked(enc_dir_1a).await;
+        close_dir_checked(enc_dir_1b).await;
+        close_dir_checked(enc_dir_2).await;
+        close_dir_checked(unenc_dir).await;
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_link_symlink_into_locked_directory_fails() {
+        const WRAPPING_KEY_ID_2: WrappingKeyId = u128::to_le_bytes(3);
+
+        let fixture = TestFixture::new().await;
+        let crypt: Arc<CryptBase> = fixture.crypt().unwrap();
+        let root = fixture.root();
+        crypt
+            .add_wrapping_key(WRAPPING_KEY_ID, [1; 32].into())
+            .expect("Failed to add wrapping key 1");
+        crypt
+            .add_wrapping_key(WRAPPING_KEY_ID_2, [2; 32].into())
+            .expect("Failed to add wrapping key 2");
+
+        let src_dir = create_encrypted_dir(&root, "foo", WRAPPING_KEY_ID).await;
+        let dst_same_key = create_encrypted_dir(&root, "foo_2", WRAPPING_KEY_ID).await;
+        let dst_other_key = create_encrypted_dir(&root, "other", WRAPPING_KEY_ID_2).await;
+        src_dir
+            .create_symlink("symlink", b"target", None)
+            .await
+            .expect("FIDL call failed")
+            .expect("create_symlink failed");
+        dst_same_key
+            .create_symlink("existing", b"existing_target", None)
+            .await
+            .expect("FIDL call failed")
+            .expect("create_symlink failed");
+        close_dir_checked(src_dir).await;
+        close_dir_checked(dst_same_key).await;
+        close_dir_checked(dst_other_key).await;
+
+        let device = fixture.close().await;
+        let new_fixture = TestFixture::new_with_device(device).await;
+        let root = new_fixture.root();
+        let open_locked = |name| {
+            open_dir_checked(
+                &root,
+                name,
+                fio::PERM_READABLE | fio::PERM_WRITABLE | fio::Flags::PROTOCOL_DIRECTORY,
+                Default::default(),
+            )
+        };
+        let src_dir = open_locked("foo").await;
+        let dst_same_key = open_locked("foo_2").await;
+        let dst_other_key = open_locked("other").await;
+
+        let (status, buf) = src_dir.read_dirents(fio::MAX_BUF).await.expect("FIDL call failed");
+        zx::Status::ok(status).expect("read_dirents failed");
+        let encrypted_name = fuchsia_fs::directory::parse_dir_entries(&buf)
+            .into_iter()
+            .map(|res| res.expect("Failed to parse entry"))
+            .find(|entry| entry.name != ".")
+            .expect("missing encrypted symlink entry")
+            .name;
+
+        let (locked_symlink, server_end) = create_proxy::<fio::SymlinkMarker>();
+        src_dir
+            .open(
+                &encrypted_name,
+                fio::PERM_READABLE | fio::PERM_WRITABLE,
+                &Default::default(),
+                server_end.into_channel(),
+            )
+            .expect("open failed");
+
+        // Same wrapping key, but destination directory is locked -> ACCESS_DENIED.
+        assert_eq!(
+            symlink_link_into(&locked_symlink, &dst_same_key, "symlink2", false).await,
+            Err(zx::Status::ACCESS_DENIED)
+        );
+        assert_eq!(
+            symlink_link_into(&locked_symlink, &dst_same_key, "existing", true).await,
+            Err(zx::Status::ACCESS_DENIED)
+        );
+
+        // Different wrapping key -> BAD_STATE even when locked.
+        assert_eq!(
+            symlink_link_into(&locked_symlink, &dst_other_key, "symlink2", false).await,
+            Err(zx::Status::BAD_STATE)
+        );
+
+        // Unencrypted destination directory -> permitted even while source key is locked.
+        assert_eq!(symlink_link_into(&locked_symlink, &root, "unenc_link", false).await, Ok(()));
+
+        close_dir_checked(src_dir).await;
+        close_dir_checked(dst_same_key).await;
+        close_dir_checked(dst_other_key).await;
         new_fixture.close().await;
     }
 
@@ -4213,7 +4493,8 @@ mod tests {
             let dst_token =
                 root.get_token().await.expect("FIDL call failed").expect("get_token failed");
 
-            let link_result = proxy.link_into(dst_token, "symlink_new").await;
+            let link_result =
+                proxy.link_into(dst_token, "symlink_new", &fio::LinkIntoOptions::default()).await;
             assert_matches!(
                 link_result,
                 Ok(Err(status)) if status == zx::Status::NOT_FOUND.into_raw()
@@ -4410,7 +4691,11 @@ mod tests {
             let (status, dst_token) = root.deprecated_get_token().await.expect("FIDL call failed");
             zx::Status::ok(status).expect("get_token failed");
             proxy
-                .link_into(zx::Event::from(dst_token.unwrap()), "symlink2")
+                .link_into(
+                    zx::Event::from(dst_token.unwrap()),
+                    "symlink2",
+                    &fio::LinkIntoOptions::default(),
+                )
                 .await
                 .expect("link_into (FIDL) failed")
                 .expect("link_into failed");
@@ -5948,6 +6233,45 @@ mod tests {
         assert_watch_event(&mut dst_watcher, WatchEvent::REMOVE_FILE, "bar").await;
         assert_watch_event(&mut dst_watcher, WatchEvent::ADD_FILE, "BAR").await;
 
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_casefold_link_into_replace_watcher_events() {
+        let fixture = TestFixture::new().await;
+        let (dir, mut watcher) = set_up_casefold_dir_with_files(&fixture, "dir", &["foo"]).await;
+
+        let tmpfile = open_file_checked(
+            &dir,
+            ".",
+            fio::Flags::PROTOCOL_FILE
+                | fio::Flags::FLAG_CREATE_AS_UNNAMED_TEMPORARY
+                | fio::PERM_READABLE
+                | fio::PERM_WRITABLE,
+            &fio::Options::default(),
+        )
+        .await;
+        file::write(&tmpfile, b"new content").await.expect("write failed");
+
+        let dst_token = dir.get_token().await.expect("FIDL call failed").expect("get_token failed");
+        tmpfile
+            .link_into(
+                dst_token,
+                "FOO",
+                &fio::LinkIntoOptions {
+                    flags: Some(fio::LinkIntoFlags::REPLACE_EXISTING),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("link_into FIDL call failed")
+            .map_err(zx::Status::err_from_raw)
+            .expect("link_into failed");
+
+        assert_watch_event(&mut watcher, WatchEvent::REMOVE_FILE, "foo").await;
+        assert_watch_event(&mut watcher, WatchEvent::ADD_FILE, "FOO").await;
+
+        close_file_checked(tmpfile).await;
         fixture.close().await;
     }
 

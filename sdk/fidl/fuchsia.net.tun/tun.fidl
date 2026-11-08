@@ -4,9 +4,10 @@
 @available(added=HEAD)
 library fuchsia.net.tun;
 
-using zx;
 using fuchsia.hardware.network;
 using fuchsia.net;
+using fuchsia.power.broker;
+using zx;
 
 /// Maximum number of multicast filters that a device holds in `MacState`.
 // NOTE: this number mirrors the number in the low level banjo definition in
@@ -275,7 +276,7 @@ closed protocol Device {
     /// + request `port` grants control over the port. Closed with an epitaph if
     /// `config` is not valid.
     strict AddPort(resource struct {
-        config @generated_name("DevicePortConfig") table {
+        config @generated_name("DevicePortConfig") resource table {
             /// Base port configuration.
             ///
             /// Required.
@@ -290,6 +291,18 @@ closed protocol Device {
             /// [`fuchsia.hardware.network/MacAddressing`] implementation /
             /// through [`fuchsia.hardware.network/Port.GetMac`].
             3: mac fuchsia.net.MacAddress;
+            /// Power element dependency token to report.
+            ///
+            /// If set, the port returns duplicates of this token from
+            /// [`fuchsia.hardware.network/Port.GetPowerDependencyToken`], so it
+            /// must have `ZX_RIGHT_DUPLICATE` and `ZX_RIGHT_TRANSFER`. If not
+            /// set, the port reports no token.
+            ///
+            /// The token is only reported: tun does not otherwise participate
+            /// in power management, so the port's behavior doesn't depend on
+            /// the power element's level. The client is responsible for
+            /// managing the power element associated with this token.
+            4: power_dependency_token fuchsia.power.broker.DependencyToken;
         };
         port server_end:Port;
     });

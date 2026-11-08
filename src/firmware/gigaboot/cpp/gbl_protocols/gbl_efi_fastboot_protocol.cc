@@ -10,7 +10,8 @@
 
 #include <gbl/gbl_efi_protocols.h>
 #include <gbl/uefi/protocols/gbl_efi_fastboot_protocol.h>
-#include <phys/efi/main.h>
+
+#include "utils.h"
 
 namespace {
 

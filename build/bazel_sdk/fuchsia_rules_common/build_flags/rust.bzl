@@ -2,6 +2,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+"""Rules and helpers for applying build_flags() to Rust targets."""
+
+load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
 load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
 load(
@@ -51,10 +54,91 @@ RUST_ACTION_KINDS = [
 #####    wrap_rust_rule_with_build_flags()
 #####
 
+def _final_rust_build_flags_impl(ctx):
+    # Compute per-target build_flags for response files (default rustflags are
+    # already set on the rust_toolchain via rust_toolchain_with_build_flags).
+    target_infos = compute_final_build_flags_from(
+        [target[BuildFlagsInfo] for target in ctx.attr.build_flags],
+        [],  # no disable_build_flags support in Rust for now.
+    )
+
+    if ctx.attr.target_type != "rust_common":
+        build_flags_infos = []
+        use_default_build_flags = ctx.attr._use_default_build_flags[BuildSettingInfo].value
+        toolchain = ctx.toolchains["@fuchsia_rules_common//build_flags:toolchain_type"]
+        if use_default_build_flags:
+            if not toolchain:
+                fail("@fuchsia_rules_common//build_flags:use_default_build_flags is True, but no @fuchsia_rules_common//build_flags:toolchain_type toolchain is registered.")
+            target_type = ctx.attr.target_type
+            if target_type == "rust_executable":
+                build_flags_infos.extend(toolchain.default_flags.rust_common_infos)
+                build_flags_infos.extend(toolchain.default_flags.rust_executable_infos)
+            elif target_type == "rust_shared_library":
+                build_flags_infos.extend(toolchain.default_flags.rust_common_infos)
+                build_flags_infos.extend(toolchain.default_flags.rust_shared_library_infos)
+            else:
+                fail("Invalid target_type {}".format(target_type))
+        build_flags_infos.extend(target_infos)
+        all_infos = compute_final_build_flags_from(build_flags_infos, [])
+
+        link_inputs = [
+            f
+            for info in all_infos
+            for f in info.link_inputs
+        ]
+        cc_infos = [
+            cc_info
+            for info in all_infos
+            for cc_info in info.link_deps
+        ]
+        runfiles_list = [
+            rf
+            for info in all_infos
+            for rf in info.link_deps_runfiles
+        ]
+        if ctx.attr.target_type == "rust_executable":
+            cc_infos.extend([
+                cc_info
+                for info in all_infos
+                for cc_info in info.executable_link_deps
+            ])
+            runfiles_list.extend([
+                rf
+                for info in all_infos
+                for rf in info.executable_link_deps_runfiles
+            ])
+        if link_inputs:
+            linker_input = cc_common.create_linker_input(
+                owner = ctx.label,
+                additional_inputs = depset(link_inputs),
+            )
+            cc_infos.append(
+                CcInfo(
+                    linking_context = cc_common.create_linking_context(
+                        linker_inputs = depset([linker_input]),
+                    ),
+                ),
+            )
+        merged_cc_info = cc_common.merge_cc_infos(
+            direct_cc_infos = cc_infos,
+            cc_infos = cc_infos,
+        )
+        cc_info = CcInfo(linking_context = merged_cc_info.linking_context)
+        runfiles = ctx.runfiles().merge_all(runfiles_list)
+    else:
+        cc_info = CcInfo()
+        runfiles = ctx.runfiles()
+
+    return [
+        DefaultInfo(runfiles = runfiles),
+        BuildFlagsListInfo(infos = target_infos),
+        cc_info,
+    ]
+
 _final_rust_build_flags = rule(
     doc = "Provides the final ordered list of BuildFlagsInfo values. This is used " +
           "to generate response files for different action types.",
-    provides = [BuildFlagsListInfo],
+    provides = [BuildFlagsListInfo, CcInfo],
     attrs = {
         "build_flags": attr.label_list(
             doc = "List of build_flags() target labels.",
@@ -66,16 +150,18 @@ _final_rust_build_flags = rule(
             mandatory = True,
             values = list(BUILD_FLAGS_RUST_TARGET_TYPES),
         ),
+        "_use_default_build_flags": attr.label(
+            default = "@fuchsia_rules_common//build_flags:use_default_build_flags",
+            providers = [BuildSettingInfo],
+        ),
     },
-    implementation = lambda ctx: [
-        # For now this basic implementation is enough.
-        BuildFlagsListInfo(
-            infos = compute_final_build_flags_from(
-                [target[BuildFlagsInfo] for target in ctx.attr.build_flags],
-                [],  # no disable_build_flags support in Rust for now.
-            ),
+    toolchains = [
+        config_common.toolchain_type(
+            "@fuchsia_rules_common//build_flags:toolchain_type",
+            mandatory = False,
         ),
     ],
+    implementation = _final_rust_build_flags_impl,
 )
 
 def _compute_build_flags_for_rust_action(build_flags_infos, action_kind):
@@ -198,9 +284,10 @@ def _rustc_env_file(target_name, final_build_flags, testonly):
 def wrap_rust_macro_args_with_build_flags(
         kwargs,
         name,
-        rust_rule_name,  # buildifier: disable=unused-variable
+        rust_rule_name,
         build_flags,
-        target_type):
+        target_type,
+        default_build_flags = []):
     """Wrap the keyword arguments of a given rust_xxx() wrapping macro.
 
     This is useful in macros that need to wrap regular rust_xxxx() rules
@@ -230,6 +317,8 @@ def wrap_rust_macro_args_with_build_flags(
        build_flags: (list[string]) List of build_flags() labels.
        target_type: (string) The type of target being wrapped, must
            be one of "rust_common", "rust_executable" or "rust_shared_library".
+       default_build_flags: (list[Label]) List of default build_flags() labels
+           to apply to this target (e.g. for executables).
     Returns:
        A new keyword-argument with updated values.
     """
@@ -239,7 +328,7 @@ def wrap_rust_macro_args_with_build_flags(
             ", ".join(BUILD_FLAGS_RUST_TARGET_TYPES),
         ))
 
-    if not build_flags:
+    if not build_flags and not default_build_flags and (target_type == "rust_common" or rust_rule_name == "rust_proc_macro"):
         # Note that this check will not work when the lists are empty
         # `select("//conditions/default": [])` values, which happens
         # when the attributes are defined without `configurable = False`
@@ -256,37 +345,56 @@ def wrap_rust_macro_args_with_build_flags(
     final_build_flags_name = name + ".final_build_flags"
     _final_rust_build_flags(
         name = final_build_flags_name,
-        build_flags = build_flags,
+        build_flags = default_build_flags + build_flags,
         target_type = target_type,
         testonly = testonly,
     )
 
-    # Generate response files for all action types that may be generated by rust targets.
-    # This response file will include rustflags, and its
-    # path will be added to the result's compile_data list to make it available
-    # to the rust compiler's sandbox.
-    rustc_flags_response_name = _rust_response_file(
-        target_name = name,
-        action_kind = ACTION_KIND_RUST_COMPILE,
-        final_build_flags = final_build_flags_name,
-        testonly = testonly,
-    )
-
-    # This env file contains the rustenv environment variable definitions
-    # that need to be passed to the rustc action.
-    rustc_env_file_name = _rustc_env_file(
-        target_name = name,
-        final_build_flags = final_build_flags_name,
-        testonly = testonly,
-    )
-
-    # Add the response files to the corresponding action attributes.
     result = dict(kwargs)
-    result["rustc_flags"] = ["@$(location {})".format(rustc_flags_response_name)] + (kwargs.get("rustc_flags") or [])
-    result["rustc_env_files"] = (kwargs.get("rustc_env_files") or []) + [":" + rustc_env_file_name]
 
-    result["compile_data"] = (kwargs.get("compile_data") or []) + [
-        ":" + rustc_flags_response_name,
-    ]
+    if build_flags:
+        # Generate response files for all action types that may be generated by rust targets.
+        # This response file will include rustflags, and its
+        # path will be added to the result's compile_data list to make it available
+        # to the rust compiler's sandbox.
+        rustc_flags_response_name = _rust_response_file(
+            target_name = name,
+            action_kind = ACTION_KIND_RUST_COMPILE,
+            final_build_flags = final_build_flags_name,
+            testonly = testonly,
+        )
+
+        # This env file contains the rustenv environment variable definitions
+        # that need to be passed to the rustc action.
+        rustc_env_file_name = _rustc_env_file(
+            target_name = name,
+            final_build_flags = final_build_flags_name,
+            testonly = testonly,
+        )
+
+        # Add the response files to the corresponding action attributes.
+        result["rustc_flags"] = ["@$(location {})".format(rustc_flags_response_name)] + (kwargs.get("rustc_flags") or [])
+        result["rustc_env_files"] = (kwargs.get("rustc_env_files") or []) + [":" + rustc_env_file_name]
+
+        result["compile_data"] = (kwargs.get("compile_data") or []) + [
+            ":" + rustc_flags_response_name,
+        ]
+
+    # Forward extra_linker_flags() dependencies (link_inputs, link_deps, and
+    # executable_link_deps) provided via CcInfo on the .final_build_flags target
+    # to terminal Rust executable targets.
+    #
+    # Note: Even though rustc_proc_macro() passes target_type = "rust_shared_library",
+    # @rules_rust's rust_proc_macro rule explicitly omits the `link_deps` attribute
+    # from _COMMON_ATTRS and deprecates passing CcInfo targets in `deps`. In GN
+    # (//build/rust/rustc_macro.gni), proc-macros are also always built in the
+    # unvarianted host_toolchain without variant executable_deps/link_deps, so
+    # rust_proc_macro targets must not receive .final_build_flags in link_deps.
+    #
+    # Furthermore, to prevent link dependencies from leaking into downstream
+    # binaries that depend on rust_shared_library, link_deps is only attached
+    # to rust_executable targets.
+    if target_type == "rust_executable":
+        result["link_deps"] = (result.get("link_deps") or []) + [":" + final_build_flags_name]
 
     return result

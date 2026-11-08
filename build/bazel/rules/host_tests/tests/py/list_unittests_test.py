@@ -21,7 +21,9 @@ parser.add_argument(
 args = parser.parse_args()
 
 r = runfiles.Create()
+assert r, "Cannot find runfiles"
 test_location = r.Rlocation(args.test_script)
+assert test_location, "Cannot find test in runfiles"
 test_env = r.EnvVars()
 
 if args.verbose:

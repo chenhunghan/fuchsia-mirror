@@ -1,0 +1,20 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_binary(
+    name = "magma-debug-utils-bin",
+    testonly = True,
+    srcs = ["magma_debug_utils.cc"],
+    gn_output_name = "magma-debug-utils",
+    deps = [
+        "//sdk/fidl/fuchsia.gpu.magma:fuchsia.gpu.magma_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//src/lib/fxl:fxl_cli",
+        "//src/zircon/lib/zircon",
+    ],
+)

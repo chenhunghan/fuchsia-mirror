@@ -478,15 +478,15 @@ struct NaturalTableCodingTraits {
                                                            const auto& ordinal_integral) {
       constexpr size_t kPrevOrdinal = cpp20::remove_cvref_t<decltype(prev_ordinal_integral)>::value;
       constexpr size_t kMemberOrdinal = cpp20::remove_cvref_t<decltype(ordinal_integral)>::value;
+      // This block will disappear if there are no reserved ordinals in-between.
+      if constexpr (kPrevOrdinal + 1 < kMemberOrdinal) {
+        for (size_t i = kPrevOrdinal + 1; i < kMemberOrdinal && i <= count; i++) {
+          decoder->DecodeUnknownEnvelopeOptional(envelope_offset(i));
+        }
+      }
       if (member_info.ordinal > count) {
         member->reset();
         return;
-      }
-      // This block will disappear if there are no reserved ordinals in-between.
-      if constexpr (kPrevOrdinal + 1 < kMemberOrdinal) {
-        for (size_t i = kPrevOrdinal + 1; i < kMemberOrdinal; i++) {
-          decoder->DecodeUnknownEnvelopeOptional(envelope_offset(i));
-        }
       }
       size_t member_offset = envelope_offset(member_info.ordinal);
       using Constraint = typename std::remove_reference_t<decltype(member_info)>::Constraint;

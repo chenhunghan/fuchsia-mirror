@@ -4,10 +4,9 @@
 
 #include "src/developer/forensics/feedback/stop_signals.h"
 
-#include <fuchsia/hardware/power/statecontrol/cpp/fidl.h>
-#include <fuchsia/process/lifecycle/cpp/fidl.h>
+#include <fidl/fuchsia.hardware.power.statecontrol/cpp/fidl.h>
+#include <fidl/fuchsia.process.lifecycle/cpp/fidl.h>
 #include <lib/async/cpp/executor.h>
-#include <lib/fidl/cpp/interface_request.h>
 #include <lib/fit/function.h>
 
 #include <gmock/gmock.h>
@@ -20,16 +19,42 @@ namespace forensics::feedback {
 namespace {
 
 using WaitForLifecycleStopTest = UnitTestFixture;
-using ::fuchsia::hardware::power::statecontrol::ShutdownAction;
-using ::fuchsia::hardware::power::statecontrol::ShutdownWatcher_OnShutdown_Result;
+using ::fuchsia_hardware_power_statecontrol::ShutdownAction;
+using ::fuchsia_hardware_power_statecontrol::ShutdownOptions;
+using ::fuchsia_hardware_power_statecontrol::ShutdownReason;
+using ::fuchsia_hardware_power_statecontrol::ShutdownWatcher;
+using ::fuchsia_process_lifecycle::Lifecycle;
+
+class LifecycleEventHandler : public fidl::AsyncEventHandler<Lifecycle> {
+ public:
+  LifecycleEventHandler() : is_bound_(true) {}
+
+  void on_fidl_error(const fidl::UnbindInfo info) override { is_bound_ = false; }
+  bool is_bound() const { return is_bound_; }
+
+ private:
+  bool is_bound_;
+};
+
+class ShutdownWatcherEventHandler : public fidl::AsyncEventHandler<ShutdownWatcher> {
+ public:
+  ShutdownWatcherEventHandler() : is_bound_(true) {}
+
+  void on_fidl_error(const fidl::UnbindInfo info) override { is_bound_ = false; }
+  void handle_unknown_event(const fidl::UnknownEventMetadata<ShutdownWatcher> metadata) override {}
+  bool is_bound() const { return is_bound_; }
+
+ private:
+  bool is_bound_;
+};
 
 TEST_F(WaitForLifecycleStopTest, BadChannel) {
   async::Executor executor(dispatcher());
 
   std::optional<Error> error;
-  fidl::InterfaceRequest<fuchsia::process::lifecycle::Lifecycle> request;
+  fidl::ServerEnd<Lifecycle> server_end;
   executor.schedule_task(
-      WaitForLifecycleStop(dispatcher(), std::move(request)).or_else([&error](const Error& e) {
+      WaitForLifecycleStop(dispatcher(), std::move(server_end)).or_else([&error](const Error& e) {
         error = e;
         return fpromise::error();
       }));
@@ -42,14 +67,14 @@ TEST_F(WaitForLifecycleStopTest, ClientDisconnects) {
   async::Executor executor(dispatcher());
 
   std::optional<Error> error;
-  fuchsia::process::lifecycle::LifecyclePtr ptr;
-  executor.schedule_task(WaitForLifecycleStop(dispatcher(), ptr.NewRequest(dispatcher()))
-                             .or_else([&error](const Error& e) {
-                               error = e;
-                               return fpromise::error();
-                             }));
+  auto [client_end, server_end] = fidl::Endpoints<Lifecycle>::Create();
+  executor.schedule_task(
+      WaitForLifecycleStop(dispatcher(), std::move(server_end)).or_else([&error](const Error& e) {
+        error = e;
+        return fpromise::error();
+      }));
 
-  ptr.Unbind();
+  client_end.reset();
   RunLoopUntilIdle();
   EXPECT_EQ(error, Error::kConnectionError);
 }
@@ -58,42 +83,46 @@ TEST_F(WaitForLifecycleStopTest, ServerDisconnectsOnCallbackExecution) {
   async::Executor executor(dispatcher());
 
   std::optional<LifecycleStopSignal> signal;
-  fuchsia::process::lifecycle::LifecyclePtr ptr;
-  executor.schedule_task(WaitForLifecycleStop(dispatcher(), ptr.NewRequest(dispatcher()))
+  auto [client_end, server_end] = fidl::Endpoints<Lifecycle>::Create();
+  LifecycleEventHandler event_handler;
+  const fidl::Client client(std::move(client_end), dispatcher(), &event_handler);
+  executor.schedule_task(WaitForLifecycleStop(dispatcher(), std::move(server_end))
                              .and_then([&signal](LifecycleStopSignal& s) {
                                signal = std::move(s);
                                return fpromise::ok();
                              }));
 
-  ptr->Stop();
+  ASSERT_TRUE(client->Stop().is_ok());
   RunLoopUntilIdle();
-  EXPECT_TRUE(ptr.is_bound());
+  EXPECT_TRUE(event_handler.is_bound());
   ASSERT_NE(signal, std::nullopt);
 
   signal->Respond();
   RunLoopUntilIdle();
-  EXPECT_FALSE(ptr.is_bound());
+  EXPECT_FALSE(event_handler.is_bound());
 }
 
 TEST_F(WaitForLifecycleStopTest, ServerDisconnectsOnCallbackDeletion) {
   async::Executor executor(dispatcher());
 
   std::optional<LifecycleStopSignal> signal;
-  fuchsia::process::lifecycle::LifecyclePtr ptr;
-  executor.schedule_task(WaitForLifecycleStop(dispatcher(), ptr.NewRequest(dispatcher()))
+  auto [client_end, server_end] = fidl::Endpoints<Lifecycle>::Create();
+  LifecycleEventHandler event_handler;
+  const fidl::Client client(std::move(client_end), dispatcher(), &event_handler);
+  executor.schedule_task(WaitForLifecycleStop(dispatcher(), std::move(server_end))
                              .and_then([&signal](LifecycleStopSignal& s) {
                                signal = std::move(s);
                                return fpromise::ok();
                              }));
 
-  ptr->Stop();
+  ASSERT_TRUE(client->Stop().is_ok());
   RunLoopUntilIdle();
-  EXPECT_TRUE(ptr.is_bound());
+  EXPECT_TRUE(event_handler.is_bound());
   ASSERT_NE(signal, std::nullopt);
 
   signal = std::nullopt;
   RunLoopUntilIdle();
-  EXPECT_FALSE(ptr.is_bound());
+  EXPECT_FALSE(event_handler.is_bound());
 }
 
 using WaitForRebootReasonTest = UnitTestFixture;
@@ -102,9 +131,9 @@ TEST_F(WaitForRebootReasonTest, BadChannel) {
   async::Executor executor(dispatcher());
 
   std::optional<Error> error;
-  fidl::InterfaceRequest<fuchsia::hardware::power::statecontrol::ShutdownWatcher> request;
+  fidl::ServerEnd<ShutdownWatcher> server_end;
   executor.schedule_task(
-      WaitForShutdownInfo(dispatcher(), std::move(request)).or_else([&error](const Error& e) {
+      WaitForShutdownInfo(dispatcher(), std::move(server_end)).or_else([&error](const Error& e) {
         error = e;
         return fpromise::error();
       }));
@@ -117,14 +146,14 @@ TEST_F(WaitForRebootReasonTest, ClientDisconnects) {
   async::Executor executor(dispatcher());
 
   std::optional<Error> error;
-  fuchsia::hardware::power::statecontrol::ShutdownWatcherPtr ptr;
-  executor.schedule_task(WaitForShutdownInfo(dispatcher(), ptr.NewRequest(dispatcher()))
-                             .or_else([&error](const Error& e) {
-                               error = e;
-                               return fpromise::error();
-                             }));
+  auto [client_end, server_end] = fidl::Endpoints<ShutdownWatcher>::Create();
+  executor.schedule_task(
+      WaitForShutdownInfo(dispatcher(), std::move(server_end)).or_else([&error](const Error& e) {
+        error = e;
+        return fpromise::error();
+      }));
 
-  ptr.Unbind();
+  client_end.reset();
   RunLoopUntilIdle();
   EXPECT_EQ(error, Error::kConnectionError);
 }
@@ -133,8 +162,10 @@ TEST_F(WaitForRebootReasonTest, ServerDisconnectsOnCallbackExecution) {
   async::Executor executor(dispatcher());
 
   std::optional<GracefulShutdownInfoSignal> signal;
-  fuchsia::hardware::power::statecontrol::ShutdownWatcherPtr ptr;
-  executor.schedule_task(WaitForShutdownInfo(dispatcher(), ptr.NewRequest(dispatcher()))
+  auto [client_end, server_end] = fidl::Endpoints<ShutdownWatcher>::Create();
+  ShutdownWatcherEventHandler event_handler;
+  const fidl::Client client(std::move(client_end), dispatcher(), &event_handler);
+  executor.schedule_task(WaitForShutdownInfo(dispatcher(), std::move(server_end))
                              .and_then([&signal](GracefulShutdownInfoSignal& s) {
                                signal = std::move(s);
                                return fpromise::ok();
@@ -142,31 +173,35 @@ TEST_F(WaitForRebootReasonTest, ServerDisconnectsOnCallbackExecution) {
 
   bool called{false};
 
-  fuchsia::hardware::power::statecontrol::ShutdownOptions options;
-  std::vector<fuchsia::hardware::power::statecontrol::ShutdownReason> reasons = {
-      fuchsia::hardware::power::statecontrol::ShutdownReason::USER_REQUEST};
-  options.set_reasons(reasons);
-  options.set_action(ShutdownAction::REBOOT);
-  ptr->OnShutdown(std::move(options),
-                  [&called](const ShutdownWatcher_OnShutdown_Result& result) { called = true; });
+  ShutdownOptions options;
+  std::vector<ShutdownReason> reasons = {ShutdownReason::kUserRequest};
+  options.reasons(reasons);
+  options.action(ShutdownAction::kReboot);
+  client->OnShutdown({std::move(options)})
+      .Then([&called](const fidl::Result<ShutdownWatcher::OnShutdown>& result) {
+        EXPECT_TRUE(result.is_ok());
+        called = true;
+      });
 
   RunLoopUntilIdle();
-  EXPECT_TRUE(ptr.is_bound());
+  EXPECT_TRUE(event_handler.is_bound());
   ASSERT_NE(signal, std::nullopt);
   EXPECT_THAT(signal->Reasons(), testing::ElementsAre(GracefulShutdownReason::kUserRequest));
 
   signal->Respond();
   RunLoopUntilIdle();
   EXPECT_TRUE(called);
-  EXPECT_FALSE(ptr.is_bound());
+  EXPECT_FALSE(event_handler.is_bound());
 }
 
 TEST_F(WaitForRebootReasonTest, ServerDisconnectsOnCallbackDeletion) {
   async::Executor executor(dispatcher());
 
   std::optional<GracefulShutdownInfoSignal> signal;
-  fuchsia::hardware::power::statecontrol::ShutdownWatcherPtr ptr;
-  executor.schedule_task(WaitForShutdownInfo(dispatcher(), ptr.NewRequest(dispatcher()))
+  auto [client_end, server_end] = fidl::Endpoints<ShutdownWatcher>::Create();
+  ShutdownWatcherEventHandler event_handler;
+  const fidl::Client client(std::move(client_end), dispatcher(), &event_handler);
+  executor.schedule_task(WaitForShutdownInfo(dispatcher(), std::move(server_end))
                              .and_then([&signal](GracefulShutdownInfoSignal& s) {
                                signal = std::move(s);
                                return fpromise::ok();
@@ -174,13 +209,15 @@ TEST_F(WaitForRebootReasonTest, ServerDisconnectsOnCallbackDeletion) {
 
   bool called{false};
 
-  fuchsia::hardware::power::statecontrol::ShutdownOptions options;
-  std::vector<fuchsia::hardware::power::statecontrol::ShutdownReason> reasons = {
-      fuchsia::hardware::power::statecontrol::ShutdownReason::USER_REQUEST};
-  options.set_reasons(reasons);
-  options.set_action(ShutdownAction::REBOOT);
-  ptr->OnShutdown(std::move(options),
-                  [&called](const ShutdownWatcher_OnShutdown_Result& result) { called = true; });
+  ShutdownOptions options;
+  std::vector<ShutdownReason> reasons = {ShutdownReason::kUserRequest};
+  options.reasons(reasons);
+  options.action(ShutdownAction::kReboot);
+  client->OnShutdown({std::move(options)})
+      .Then([&called](const fidl::Result<ShutdownWatcher::OnShutdown>& result) {
+        EXPECT_TRUE(result.is_ok());
+        called = true;
+      });
 
   RunLoopUntilIdle();
   ASSERT_NE(signal, std::nullopt);
@@ -189,15 +226,16 @@ TEST_F(WaitForRebootReasonTest, ServerDisconnectsOnCallbackDeletion) {
   signal = std::nullopt;
   RunLoopUntilIdle();
   EXPECT_TRUE(called);
-  EXPECT_FALSE(ptr.is_bound());
+  EXPECT_FALSE(event_handler.is_bound());
 }
 
 TEST_F(WaitForRebootReasonTest, NoCompletionOnNoAction) {
   async::Executor executor(dispatcher());
 
   std::optional<GracefulShutdownInfoSignal> signal;
-  fuchsia::hardware::power::statecontrol::ShutdownWatcherPtr ptr;
-  executor.schedule_task(WaitForShutdownInfo(dispatcher(), ptr.NewRequest(dispatcher()))
+  auto [client_end, server_end] = fidl::Endpoints<ShutdownWatcher>::Create();
+  const fidl::Client client(std::move(client_end), dispatcher());
+  executor.schedule_task(WaitForShutdownInfo(dispatcher(), std::move(server_end))
                              .and_then([&signal](GracefulShutdownInfoSignal& s) {
                                signal = std::move(s);
                                return fpromise::ok();
@@ -205,12 +243,14 @@ TEST_F(WaitForRebootReasonTest, NoCompletionOnNoAction) {
 
   bool called{false};
 
-  fuchsia::hardware::power::statecontrol::ShutdownOptions options;
-  std::vector<fuchsia::hardware::power::statecontrol::ShutdownReason> reasons = {
-      fuchsia::hardware::power::statecontrol::ShutdownReason::USER_REQUEST};
-  options.set_reasons(reasons);
-  ptr->OnShutdown(std::move(options),
-                  [&called](const ShutdownWatcher_OnShutdown_Result& result) { called = true; });
+  ShutdownOptions options;
+  std::vector<ShutdownReason> reasons = {ShutdownReason::kUserRequest};
+  options.reasons(reasons);
+  client->OnShutdown({std::move(options)})
+      .Then([&called](const fidl::Result<ShutdownWatcher::OnShutdown>& result) {
+        EXPECT_TRUE(result.is_ok());
+        called = true;
+      });
 
   RunLoopUntilIdle();
   EXPECT_EQ(signal, std::nullopt);
@@ -230,22 +270,22 @@ INSTANTIATE_TEST_SUITE_P(WithVariousShutdownActions, WaitForRebootReasonParamete
                          ::testing::ValuesIn(std::vector<TestParam>({
                              {
                                  "Poweroff",
-                                 ShutdownAction::POWEROFF,
+                                 ShutdownAction::kPoweroff,
                                  GracefulShutdownAction::kPoweroff,
                              },
                              {
                                  "Reboot",
-                                 ShutdownAction::REBOOT,
+                                 ShutdownAction::kReboot,
                                  GracefulShutdownAction::kReboot,
                              },
                              {
                                  "RebootToBootloader",
-                                 ShutdownAction::REBOOT_TO_BOOTLOADER,
+                                 ShutdownAction::kRebootToBootloader,
                                  GracefulShutdownAction::kRebootToBootloader,
                              },
                              {
                                  "RebootToRecovery",
-                                 ShutdownAction::REBOOT_TO_RECOVERY,
+                                 ShutdownAction::kRebootToRecovery,
                                  GracefulShutdownAction::kRebootToRecovery,
                              },
                          })),
@@ -258,8 +298,9 @@ TEST_P(WaitForRebootReasonParameterizedTest, CompletionWithExpectedAction) {
   async::Executor executor(dispatcher());
 
   std::optional<GracefulShutdownInfoSignal> signal;
-  fuchsia::hardware::power::statecontrol::ShutdownWatcherPtr ptr;
-  executor.schedule_task(WaitForShutdownInfo(dispatcher(), ptr.NewRequest(dispatcher()))
+  auto [client_end, server_end] = fidl::Endpoints<ShutdownWatcher>::Create();
+  const fidl::Client client(std::move(client_end), dispatcher());
+  executor.schedule_task(WaitForShutdownInfo(dispatcher(), std::move(server_end))
                              .and_then([&signal](GracefulShutdownInfoSignal& s) {
                                signal = std::move(s);
                                return fpromise::ok();
@@ -267,13 +308,15 @@ TEST_P(WaitForRebootReasonParameterizedTest, CompletionWithExpectedAction) {
 
   bool called{false};
 
-  fuchsia::hardware::power::statecontrol::ShutdownOptions options;
-  std::vector<fuchsia::hardware::power::statecontrol::ShutdownReason> reasons = {
-      fuchsia::hardware::power::statecontrol::ShutdownReason::USER_REQUEST};
-  options.set_reasons(reasons);
-  options.set_action(param.action);
-  ptr->OnShutdown(std::move(options),
-                  [&called](const ShutdownWatcher_OnShutdown_Result& result) { called = true; });
+  ShutdownOptions options;
+  std::vector<ShutdownReason> reasons = {ShutdownReason::kUserRequest};
+  options.reasons(reasons);
+  options.action(param.action);
+  client->OnShutdown({std::move(options)})
+      .Then([&called](const fidl::Result<ShutdownWatcher::OnShutdown>& result) {
+        EXPECT_TRUE(result.is_ok());
+        called = true;
+      });
 
   RunLoopUntilIdle();
   ASSERT_TRUE(signal.has_value());

@@ -3,12 +3,10 @@
 // found in the LICENSE file.
 
 #include <fidl/fuchsia.hardware.pci/cpp/wire.h>
-#include <lib/device-protocol/pci.h>
-#include <lib/fake-bti/bti.h>
 #include <lib/pci/constants.h>
+#include <lib/zx/bti.h>
 #include <zircon/errors.h>
 
-#include <ddktl/device.h>
 #include <fbl/algorithm.h>
 
 #ifndef SRC_DEVICES_PCI_TESTING_PROTOCOL_INTERNAL_H_
@@ -30,15 +28,14 @@ class FakePciProtocolInternal {
 
   FakePciProtocolInternal();
   ~FakePciProtocolInternal() = default;
-  zx_status_t PciGetBar(uint32_t bar_id, pci_bar_t* out_res);
-  zx_status_t PciAckInterrupt();
+
   zx_status_t PciMapInterrupt(uint32_t which_irq, zx::interrupt* out_handle);
   void PciGetInterruptModes(fuchsia_hardware_pci::wire::InterruptModes* modes);
   zx_status_t PciSetInterruptMode(fuchsia_hardware_pci::InterruptMode mode,
                                   uint32_t requested_irq_count);
   zx_status_t PciSetBusMastering(bool enable);
   zx_status_t PciResetDevice();
-  zx_status_t PciGetDeviceInfo(pci_device_info_t* out_info);
+  zx_status_t PciGetDeviceInfo(fuchsia_hardware_pci::wire::DeviceInfo* out_info);
 
   constexpr zx_status_t PciReadConfig8(uint16_t offset, uint8_t* out_value) {
     return ReadConfig(offset, out_value);
@@ -71,7 +68,8 @@ class FakePciProtocolInternal {
  protected:
   struct FakeBar {
     size_t size;
-    pci_bar_type_t type;
+    bool is_mmio;
+    uint64_t address = 0;
     std::optional<zx::vmo> vmo;
   };
 
@@ -100,6 +98,7 @@ class FakePciProtocolInternal {
   zx::interrupt& AddInterrupt(fuchsia_hardware_pci::InterruptMode mode);
   fuchsia_hardware_pci::wire::DeviceInfo SetDeviceInfoInternal(
       fuchsia_hardware_pci::wire::DeviceInfo new_info);
+  void SetBtiInternal(zx::bti bti) { bti_ = std::move(bti); }
 
   fuchsia_hardware_pci::InterruptMode irq_mode() const { return irq_mode_; }
   uint32_t irq_cnt() const { return irq_cnt_; }

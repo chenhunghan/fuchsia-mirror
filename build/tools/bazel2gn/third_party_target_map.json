@@ -16,6 +16,8 @@
     "@googletest//:gtest_prod": "//third_party/googletest:gtest_prod",
     "@googletest//:gmock": "//third_party/googletest:gmock",
     "@googletest//:gmock_main": "//third_party/googletest:gmock_main",
+    "@double-conversion": "//third_party/double-conversion",
+    "@double-conversion//:double-conversion": "//third_party/double-conversion",
     "@re2": "//third_party/re2",
     "@re2//:re2": "//third_party/re2",
     "@zlib": "//third_party/zlib",

@@ -182,12 +182,24 @@ config("fdio_config") {
   # need to be a proper dependency.
   # See the override of the `executable` template in
   # //build/config/BUILDCONFIG.gni where that build edge is added.
+  #
+  # The Bazel equivalent is an extra_linker_flags() target that adds the
+  # //sdk/lib/fdio dependency directly through executable_link_deps, and
+  # fx_cc_binary() applies it via build_flags.
 }
 
-# LINT.ThenChange(//build/config/fuchsia/BUILD.bazel:fdio_config)
+# LINT.ThenChange(BUILD.bazel:fdio_config)
 
 # LINT.IfChange(executable_config)
 config("executable_config") {
+  # This is the default for the Fuchsia toolchain when targeting Fuchsia
+  # but making it explicit makes our GN/Bazel equivalence scripts
+  # simpler.
+  cflags = [ "-fPIE" ]
+
+  # Ensure assembly code can use `#ifdef __PIE__`
+  asmflags = cflags
+  ldflags = cflags
 }
 
 # LINT.ThenChange(BUILD.bazel:executable_config)
@@ -203,15 +215,16 @@ config("zircon_asserts") {
   }
 }
 
-# LINT.ThenChange(//build/config/fuchsia/BUILD.bazel:zircon_asserts)
+# LINT.ThenChange(BUILD.bazel:zircon_asserts)
 
 # LINT.IfChange(no_cpp_standard_library)
 config("no_cpp_standard_library") {
   ldflags = [ "-nostdlib++" ]
 }
 
-# LINT.ThenChange(//build/config/fuchsia/BUILD.bazel:no_cpp_standard_library)
+# LINT.ThenChange(BUILD.bazel:no_cpp_standard_library)
 
+# LINT.IfChange(static_cpp_standard_library)
 config("static_cpp_standard_library") {
   ldflags = [
     # Use libc++ as the C++ standard library.
@@ -235,6 +248,8 @@ config("static_cpp_standard_library") {
   rustflags = [ "-Clink-args=--push-state -Bstatic -lc++ -Bdynamic -lm --pop-state -l:libunwind.a" ]
 }
 
+# LINT.ThenChange(BUILD.bazel:static_cpp_standard_library)
+
 # Configure a rust target to link to libc++ dynamically.
 config("dynamic_cpp_standard_library") {
   rustflags = [ "-Clink-args=--push-state -Bdynamic -lc++ --pop-state" ]
@@ -245,7 +260,7 @@ config("dynamic_rust_standard_library") {
   rustflags = [ "-Cprefer-dynamic" ]
 }
 
-# LINT.ThenChange(//build/config/fuchsia/BUILD.bazel:dynamic_rust_standard_library)
+# LINT.ThenChange(BUILD.bazel:dynamic_rust_standard_library)
 
 config("static_rust_standard_library") {
   rustflags = [ "-Cprefer-dynamic=no" ]
@@ -262,7 +277,7 @@ config("large_rust_stack") {
   rustflags = [ "-Clink-args=-zstack-size=0x200000" ]
 }
 
-# LINT.ThenChange(//build/config/fuchsia/BUILD.bazel:large_rust_stack)
+# LINT.ThenChange(BUILD.bazel:large_rust_stack)
 
 # Enable additional integer-math sanitizers
 config("integer-paranoia") {
@@ -302,8 +317,9 @@ compiler_config("static-pie-config") {
   linker_flags = [ "-no-dynamic-linker" ]
 }
 
-# LINT.ThenChange(//build/config/fuchsia/BUILD.bazel:static-pie-config)
+# LINT.ThenChange(BUILD.bazel:static-pie-config)
 
+# LINT.IfChange(scudo_default_options)
 group("maybe_scudo_default_options") {
   if (scudo_default_options != "" && scudo_default_options != []) {
     public_deps = [ ":scudo_default_options" ]
@@ -312,6 +328,8 @@ group("maybe_scudo_default_options") {
 
 sanitizer_default_options("scudo_default_options") {
 }
+
+# LINT.ThenChange(BUILD.bazel:scudo_default_options)
 
 # TODO(https://fxbug.dev/42180987): This works around a toolchain issue in LTO builds
 # where code generation results in a dependency on a Zircon vDSO call but
@@ -352,7 +370,22 @@ group("terminal_link_deps") {
   # responsible for making sure there are data_deps for any shared_library()
   # targets that may be runtime file dependencies.  This gets those files into
   # the Fuchsia package via their distribution_entries metadata.
-  data_deps = [ "//zircon/public/sysroot:data($variant_base_toolchain)" ]
+  if (target_sysroot == "") {
+    data_deps = [ "//zircon/public/sysroot:data($variant_base_toolchain)" ]
+  } else {
+    metadata = {
+      distribution_entries = [
+        {
+          destination = "lib/${toolchain_variant.libprefix}ld.so.1"
+          source = rebase_path(
+                  "${target_sysroot}/dist/lib/${toolchain_variant.libprefix}ld.so.1",
+                  root_build_dir)
+          label = get_label_info(":$target_name", "label_with_toolchain")
+          elf_runtime_dir = "lib/${toolchain_variant.libprefix}"
+        },
+      ]
+    }
+  }
 }
 
 group("executable_deps") {
@@ -370,7 +403,10 @@ group("link_deps") {
   # is linked.  But it doesn't contribute any link inputs as a GN target, so it
   # does no harm to have it in deps even when the link uses -nostartfiles or
   # equivalent.
-  data_deps = [ "//zircon/public/sysroot:startfiles($variant_base_toolchain)" ]
+  if (target_sysroot == "") {
+    data_deps =
+        [ "//zircon/public/sysroot:startfiles($variant_base_toolchain)" ]
+  }
 }
 
 group("source_deps") {
@@ -389,8 +425,10 @@ group("source_deps") {
   # as a whole.  So these must be deps and action re-runs will cause rebuilds.
   # But the link steps have direct order-only Ninja deps on their data_deps, so
   # action re-runs for those alone won't always cause relinks.
-  deps = [
-    "//zircon/public/sysroot:include($variant_base_toolchain)",
-    "//zircon/public/sysroot:lib($variant_base_toolchain)",
-  ]
+  if (target_sysroot == "") {
+    deps = [
+      "//zircon/public/sysroot:include($variant_base_toolchain)",
+      "//zircon/public/sysroot:lib($variant_base_toolchain)",
+    ]
+  }
 }

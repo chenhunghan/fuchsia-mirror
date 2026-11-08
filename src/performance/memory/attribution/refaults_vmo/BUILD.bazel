@@ -19,6 +19,7 @@ rustc_library(
         "//src/performance/memory/attribution/monitor:__pkg__",
         "//src/starnix/runner/lib/kernel_manager:__pkg__",
         "//src/storage/fxfs/platform:__pkg__",
+        "//src/storage/fxfs/remote_volume:__pkg__",
         "//src/storage/fxfs/test-fxfs:__pkg__",
         "//src/storage/fxfs/tools:__pkg__",
     ],

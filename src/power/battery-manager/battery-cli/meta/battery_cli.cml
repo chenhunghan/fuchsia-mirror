@@ -22,11 +22,19 @@
         },
     ],
     use: [
-        { protocol: "fuchsia.power.battery.test.BatterySimulator" },
+        {
+            protocol: [
+                "fuchsia.power.battery.test.BatterySimulator",
+                "fuchsia.power.battery.test.GovernorDebug",
+            ],
+        },
     ],
     offer: [
         {
-            protocol: "fuchsia.power.battery.test.BatterySimulator",
+            protocol: [
+                "fuchsia.power.battery.test.BatterySimulator",
+                "fuchsia.power.battery.test.GovernorDebug",
+            ],
             from: "#battery_manager",
             to: "#battery_cli",
         },

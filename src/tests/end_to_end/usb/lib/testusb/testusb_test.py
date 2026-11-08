@@ -1336,5 +1336,336 @@ class TestMaxPacketExtraction(unittest.TestCase):
                 self.assertEqual(res.status, TestStatus.PASS)
 
 
+class TestResetUsbDevice(unittest.TestCase):
+    """Tests for reset_usb_device issuing USBDEVFS_RESET."""
+
+    def _reset(self, ioctl_ret: int, err: int = 0) -> tuple[bool, MagicMock]:
+        mock_cdll = MagicMock()
+        mock_cdll.ioctl.return_value = ioctl_ret
+        with (
+            patch.object(ioctl, "_get_libc", return_value=mock_cdll),
+            patch("os.open", return_value=42) as mock_open,
+            patch("os.close") as mock_close,
+            patch("ctypes.get_errno", return_value=err),
+        ):
+            try:
+                return ioctl.reset_usb_device("/dev/bus/usb/003/005"), mock_cdll
+            finally:
+                mock_open.assert_called_once_with(
+                    "/dev/bus/usb/003/005", os.O_RDWR
+                )
+                mock_close.assert_called_once_with(42)
+
+    def test_reset_in_place(self) -> None:
+        reenumerated, mock_cdll = self._reset(ioctl_ret=0)
+        self.assertFalse(reenumerated)
+        mock_cdll.ioctl.assert_called_once_with(42, ioctl.USBDEVFS_RESET, 0)
+
+    def test_enodev_reports_reenumeration(self) -> None:
+        reenumerated, _ = self._reset(ioctl_ret=-1, err=errno.ENODEV)
+        self.assertTrue(reenumerated)
+
+    def test_other_errors_raise(self) -> None:
+        with self.assertRaises(OSError) as ctx:
+            self._reset(ioctl_ret=-1, err=errno.EBUSY)
+        self.assertEqual(ctx.exception.errno, errno.EBUSY)
+
+    def test_usbdevfs_reset_request_number(self) -> None:
+        # _IO('U', 20) from <linux/usbdevice_fs.h>.
+        self.assertEqual(ioctl.USBDEVFS_RESET, 0x5514)
+
+
+class TestIoctlBackendTestMode(unittest.TestCase):
+    """Tests for USB 2.0 USB_DEVICE_TEST_MODE control transfer checks."""
+
+    def test_reset_device_success_and_failure(self) -> None:
+        dev = ioctl.USBTestIoctlBackend("/dev/bus/usb/001/002")
+        with self.assertRaises(RuntimeError):
+            dev.reset_device()
+
+        dev._fd = 123
+        dev.is_open = True
+        dev._maxpacket = 512
+
+        mock_cdll = MagicMock()
+        mock_cdll.ioctl.return_value = 0
+        with patch.object(ioctl, "_get_libc", return_value=mock_cdll):
+            self.assertTrue(dev.reset_device())
+            self.assertIsNone(dev._maxpacket)
+            mock_cdll.ioctl.assert_called_once_with(
+                123, ioctl.USBDEVFS_RESET, 0
+            )
+
+        mock_cdll.reset_mock()
+        dev._maxpacket = 512
+        mock_cdll.ioctl.return_value = -1
+        with (
+            patch.object(ioctl, "_get_libc", return_value=mock_cdll),
+            patch("ctypes.get_errno", return_value=errno.ENODEV),
+        ):
+            self.assertTrue(dev.reset_device())
+            self.assertIsNone(dev._maxpacket)
+
+        mock_cdll.reset_mock()
+        mock_cdll.ioctl.return_value = -1
+        with (
+            patch.object(ioctl, "_get_libc", return_value=mock_cdll),
+            patch("ctypes.get_errno", return_value=errno.EBUSY),
+        ):
+            self.assertFalse(dev.reset_device())
+
+    def test_run_test_mode_negative_all_stall_and_recover(self) -> None:
+        dev = ioctl.USBTestIoctlBackend("/dev/bus/usb/001/002")
+        with self.assertRaises(RuntimeError):
+            dev.run_test_mode_negative()
+
+        dev._fd = 123
+        dev.is_open = True
+
+        mock_cdll = MagicMock()
+        seen_requests: list[tuple[int, int, int, int, int]] = []
+
+        def ioctl_side_effect(fd: int, request: int, arg_ptr: Any) -> int:
+            self.assertEqual(fd, 123)
+            self.assertEqual(request, ioctl.USBDEVFS_CONTROL)
+            ctrl = arg_ptr._obj
+            seen_requests.append(
+                (
+                    ctrl.bRequestType,
+                    ctrl.bRequest,
+                    ctrl.wValue,
+                    ctrl.wIndex,
+                    ctrl.wLength,
+                )
+            )
+            if ctrl.bRequest == 0x08:  # GET_CONFIGURATION
+                buf = (ctypes.c_char * 1).from_address(ctrl.data)
+                buf[0] = b"\x01"
+                return 1
+            return -1
+
+        mock_cdll.ioctl.side_effect = ioctl_side_effect
+        with (
+            patch.object(ioctl, "_get_libc", return_value=mock_cdll),
+            patch("ctypes.get_errno", return_value=errno.EPIPE),
+        ):
+            res = dev.run_test_mode_negative(params=TestParams(iterations=2))
+            self.assertEqual(res.status, TestStatus.PASS)
+            self.assertEqual(res.iterations_completed, 2)
+            # 6 negative requests + 1 GET_CONFIGURATION recovery check per
+            # iteration
+            self.assertEqual(len(seen_requests), 14)
+            expected_iter = [
+                (0x00, 0x03, ioctl.USB_DEVICE_TEST_MODE, 0x0000, 0),
+                (0x00, 0x03, ioctl.USB_DEVICE_TEST_MODE, 0x0600, 0),
+                (0x00, 0x03, ioctl.USB_DEVICE_TEST_MODE, 0xC000, 0),
+                (0x00, 0x03, ioctl.USB_DEVICE_TEST_MODE, 0x0101, 0),
+                (0x00, 0x01, ioctl.USB_DEVICE_TEST_MODE, 0x0000, 0),
+                (0x00, 0x01, ioctl.USB_DEVICE_TEST_MODE, 0x0100, 0),
+                (0x80, 0x08, 0x0000, 0x0000, 1),
+            ]
+            self.assertEqual(seen_requests[:7], expected_iter)
+
+    def test_run_test_mode_negative_unexpected_success_fails(self) -> None:
+        dev = ioctl.USBTestIoctlBackend("/dev/bus/usb/001/002")
+        dev._fd = 123
+        dev.is_open = True
+
+        mock_cdll = MagicMock()
+        mock_cdll.ioctl.return_value = 0
+
+        with patch.object(ioctl, "_get_libc", return_value=mock_cdll):
+            res = dev.run_test_mode_negative()
+            self.assertEqual(res.status, TestStatus.FAIL)
+            self.assertIn("unexpectedly succeeded", res.error_message or "")
+
+    def test_run_test_mode_negative_wrong_errno_fails(self) -> None:
+        dev = ioctl.USBTestIoctlBackend("/dev/bus/usb/001/002")
+        dev._fd = 123
+        dev.is_open = True
+
+        mock_cdll = MagicMock()
+        mock_cdll.ioctl.return_value = -1
+
+        with (
+            patch.object(ioctl, "_get_libc", return_value=mock_cdll),
+            patch("ctypes.get_errno", return_value=errno.ETIMEDOUT),
+        ):
+            res = dev.run_test_mode_negative()
+            self.assertEqual(res.status, TestStatus.FAIL)
+            self.assertIn("expected errno", res.error_message or "")
+
+    def test_run_test_mode_negative_recovery_failure(self) -> None:
+        dev = ioctl.USBTestIoctlBackend("/dev/bus/usb/001/002")
+        dev._fd = 123
+        dev.is_open = True
+
+        mock_cdll = MagicMock()
+        mock_cdll.ioctl.return_value = -1
+
+        with (
+            patch.object(ioctl, "_get_libc", return_value=mock_cdll),
+            patch("ctypes.get_errno", return_value=errno.EPIPE),
+        ):
+            res = dev.run_test_mode_negative()
+            self.assertEqual(res.status, TestStatus.FAIL)
+            self.assertIn("EP0 unresponsive", res.error_message or "")
+
+    def test_run_test_mode_valid_selectors_with_reset(self) -> None:
+        dev = ioctl.USBTestIoctlBackend("/dev/bus/usb/001/002")
+        with self.assertRaises(RuntimeError):
+            dev.run_test_mode()
+
+        dev._fd = 123
+        dev.is_open = True
+
+        for selector in ioctl.UsbTestModeSelector:
+            with self.subTest(selector=selector):
+                mock_cdll = MagicMock()
+                calls: list[tuple[int, int, int, int]] = []
+
+                def ioctl_side_effect(
+                    fd: int,
+                    request: int,
+                    arg_ptr: Any,
+                    calls_ref: list[tuple[int, int, int, int]] = calls,
+                ) -> int:
+                    if request == ioctl.USBDEVFS_CONTROL:
+                        ctrl = arg_ptr._obj
+                        calls_ref.append(
+                            (
+                                ctrl.bRequestType,
+                                ctrl.bRequest,
+                                ctrl.wValue,
+                                ctrl.wIndex,
+                            )
+                        )
+                        return 0
+                    if request == ioctl.USBDEVFS_RESET:
+                        calls_ref.append((request, 0, 0, 0))
+                        return 0
+                    return -1
+
+                mock_cdll.ioctl.side_effect = ioctl_side_effect
+                with patch.object(ioctl, "_get_libc", return_value=mock_cdll):
+                    res = dev.run_test_mode(selector=selector, reset_after=True)
+                    self.assertEqual(res.status, TestStatus.PASS)
+                    self.assertEqual(res.iterations_completed, 1)
+                    self.assertEqual(
+                        calls,
+                        [
+                            (
+                                0x00,
+                                0x03,
+                                ioctl.USB_DEVICE_TEST_MODE,
+                                int(selector) << 8,
+                            ),
+                            (ioctl.USBDEVFS_RESET, 0, 0, 0),
+                        ],
+                    )
+
+    def test_context_manager_enter_and_exit(self) -> None:
+        mock_cdll = MagicMock()
+        mock_cdll.ioctl.return_value = 0
+        with (
+            patch("os.open", return_value=123) as mock_open,
+            patch("os.close") as mock_close,
+            patch.object(ioctl, "_get_libc", return_value=mock_cdll),
+        ):
+            with ioctl.USBTestIoctlBackend("/dev/bus/usb/001/002") as dev:
+                self.assertTrue(dev.is_open)
+                self.assertEqual(dev._fd, 123)
+                mock_open.assert_called_once_with(
+                    "/dev/bus/usb/001/002", os.O_RDWR
+                )
+            self.assertFalse(dev.is_open)
+            self.assertIsNone(dev._fd)
+            mock_close.assert_called_once_with(123)
+
+    def test_run_test_mode_custom_reset_callback(self) -> None:
+        dev = ioctl.USBTestIoctlBackend("/dev/bus/usb/001/002")
+        dev._fd = 123
+        dev.is_open = True
+
+        mock_cdll = MagicMock()
+        mock_cdll.ioctl.return_value = 0
+        callback_called = False
+
+        def custom_reset() -> None:
+            nonlocal callback_called
+            callback_called = True
+
+        with patch.object(ioctl, "_get_libc", return_value=mock_cdll):
+            res = dev.run_test_mode(
+                selector=ioctl.UsbTestModeSelector.TEST_PACKET,
+                reset_callback=custom_reset,
+            )
+            self.assertEqual(res.status, TestStatus.PASS)
+            self.assertTrue(callback_called)
+            # Only USBDEVFS_CONTROL should be called, not USBDEVFS_RESET
+            self.assertEqual(mock_cdll.ioctl.call_count, 1)
+
+        def failing_reset() -> None:
+            raise RuntimeError("hub port power-cycle failed")
+
+        with patch.object(ioctl, "_get_libc", return_value=mock_cdll):
+            res = dev.run_test_mode(
+                selector=ioctl.UsbTestModeSelector.TEST_PACKET,
+                reset_callback=failing_reset,
+            )
+            self.assertEqual(res.status, TestStatus.FAIL)
+            self.assertIn(
+                "Port reset callback failed after entering TEST_PACKET",
+                res.error_message or "",
+            )
+            self.assertIn(
+                "hub port power-cycle failed", res.error_message or ""
+            )
+
+    def test_run_test_mode_invalid_selector_raises_value_error(self) -> None:
+        dev = ioctl.USBTestIoctlBackend("/dev/bus/usb/001/002")
+        dev._fd = 123
+        dev.is_open = True
+
+        for invalid in (0, 6, 0x40, 0xC0, -1):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    dev.run_test_mode(selector=invalid)
+
+    def test_run_test_mode_control_or_reset_failure(self) -> None:
+        dev = ioctl.USBTestIoctlBackend("/dev/bus/usb/001/002")
+        dev._fd = 123
+        dev.is_open = True
+
+        # 1. Control transfer failure
+        mock_cdll = MagicMock()
+        mock_cdll.ioctl.return_value = -1
+        with (
+            patch.object(ioctl, "_get_libc", return_value=mock_cdll),
+            patch("ctypes.get_errno", return_value=errno.EPIPE),
+        ):
+            res = dev.run_test_mode(selector=ioctl.UsbTestModeSelector.TEST_J)
+            self.assertEqual(res.status, TestStatus.FAIL)
+            self.assertIn("SET_FEATURE", res.error_message or "")
+
+        # 2. USBDEVFS_RESET failure after control transfer succeeds
+        def ioctl_reset_fails(fd: int, request: int, arg_ptr: Any) -> int:
+            if request == ioctl.USBDEVFS_CONTROL:
+                return 0
+            return -1
+
+        mock_cdll.ioctl.side_effect = ioctl_reset_fails
+        with (
+            patch.object(ioctl, "_get_libc", return_value=mock_cdll),
+            patch("ctypes.get_errno", return_value=errno.EBUSY),
+        ):
+            res = dev.run_test_mode(
+                selector=ioctl.UsbTestModeSelector.TEST_K,
+                reset_after=True,
+            )
+            self.assertEqual(res.status, TestStatus.FAIL)
+            self.assertIn("USBDEVFS_RESET failed", res.error_message or "")
+
+
 if __name__ == "__main__":
     unittest.main()

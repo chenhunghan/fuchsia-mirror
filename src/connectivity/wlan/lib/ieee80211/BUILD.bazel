@@ -2,7 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules/rust:defs.bzl", "rustc_library", "rustc_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
 load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
@@ -22,9 +23,9 @@ rustc_library(
     ],
     deps = [
         "//sdk/fidl/fuchsia.wlan.ieee80211:fuchsia.wlan.ieee80211_rust",
+        "//src/diagnostics/lib/redactor",
         "//third_party/rust_crates/vendor:anyhow",
         "//third_party/rust_crates/vendor:arbitrary",
-        "//third_party/rust_crates/vendor:hex",
         "//third_party/rust_crates/vendor:thiserror",
         "//third_party/rust_crates/vendor:zerocopy",
     ],
@@ -33,12 +34,27 @@ rustc_library(
 rustc_test(
     name = "ieee80211_test",
     crate = ":ieee80211",
+    visibility = ["//visibility:private"],
+)
+
+# Exercises the process-global redactor, so it must be its own binary.
+rustc_test(
+    name = "ieee80211-redaction_test",
+    srcs = ["tests/redaction.rs"],
+    crate_root = "tests/redaction.rs",
     edition = "2024",
     visibility = ["//visibility:private"],
+    deps = [
+        ":ieee80211",
+        "//src/diagnostics/lib/redactor",
+    ],
 )
 
 fx_unittest_package(
     name = "ieee80211-tests",
-    unit_tests = [":ieee80211_test"],
+    unit_tests = [
+        ":ieee80211_test",
+        ":ieee80211-redaction_test",
+    ],
     visibility = ["//src/connectivity/wlan:__pkg__"],
 )

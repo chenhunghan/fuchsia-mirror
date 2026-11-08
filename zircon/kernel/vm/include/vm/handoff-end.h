@@ -17,9 +17,7 @@
 #include <ktl/type_traits.h>
 #include <object/handle.h>
 #include <phys/handoff/handoff.h>
-
-// Forward declaration; defined in <vm/vm_object.h>
-class VmObject;
+#include <vm/vm_object.h>
 
 // Called as soon as the kernel is entered to finish the earliest kernel
 // bootstrapping. In particular, this sets the gPhysHandoff pointer.

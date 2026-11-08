@@ -3,13 +3,13 @@
 // found in the LICENSE file.
 
 use async_utils::hanging_get::server as hanging_get;
-
+use fidl::endpoints::Responder as _;
 use fidl_fuchsia_net_reachability as freachability;
 use fuchsia_async as fasync;
 use fuchsia_component::server::{ServiceFsDir, ServiceObjLocal};
 use futures::lock::Mutex;
 use futures::{TryFutureExt as _, TryStreamExt as _};
-use log::error;
+use log::{error, warn};
 use std::sync::Arc;
 
 type WatchResponder = freachability::MonitorWatchResponder;
@@ -107,7 +107,16 @@ impl ReachabilityHandler {
                             match req {
                                 freachability::MonitorRequest::Watch { responder } => {
                                     watch_called = true;
-                                    subscriber.register(responder)?
+                                    if let Err(responder) = subscriber.register2(responder) {
+                                        warn!(
+                                            "Client called Watch while a previous Watch was \
+                                            pending; closing channel."
+                                        );
+                                        responder
+                                            .control_handle()
+                                            .shutdown_with_epitaph(fidl::Status::ALREADY_EXISTS);
+                                        break;
+                                    }
                                 }
                                 freachability::MonitorRequest::SetOptions {
                                     payload: _,
@@ -339,6 +348,39 @@ mod tests {
         assert_matches!(
             client.watcher_proxy.set_options(&freachability::MonitorOptions::default()),
             Ok(())
+        );
+        assert_matches!(executor.run_singlethreaded(client.watcher_proxy.on_closed()), Ok(_));
+    }
+
+    // Tests that the handler closes the request stream with ALREADY_EXISTS if the client calls
+    // Watch while a previous Watch call on the same connection is still in flight.
+    #[test]
+    fn test_cannot_call_watch_concurrently() {
+        let mut executor = fasync::TestExecutor::new();
+        let mut service_fs = ServiceFs::new_local();
+        let mut handler = ReachabilityHandler::new();
+        handler.publish_service(service_fs.root_dir());
+        let test_env = TestEnv::new(service_fs);
+        let client = test_env.connect_client();
+
+        // First Watch consumes the initial snapshot.
+        assert_matches!(client.get_reachability_state(&mut executor), Ok(Some(_)));
+
+        // Second Watch hangs because state has not changed.
+        let mut watch_fut1 = client.watcher_proxy.watch();
+        assert_matches!(executor.run_until_stalled(&mut watch_fut1), Poll::Pending);
+
+        // Concurrent Watch over the same connection closes the channel with ALREADY_EXISTS.
+        let mut watch_fut2 = client.watcher_proxy.watch();
+        assert_matches!(
+            executor.run_until_stalled(&mut watch_fut2),
+            Poll::Ready(Err(fidl::Error::ClientChannelClosed { epitaph, .. }))
+                if epitaph == fidl::Status::ALREADY_EXISTS
+        );
+        assert_matches!(
+            executor.run_until_stalled(&mut watch_fut1),
+            Poll::Ready(Err(fidl::Error::ClientChannelClosed { epitaph, .. }))
+                if epitaph == fidl::Status::ALREADY_EXISTS
         );
         assert_matches!(executor.run_singlethreaded(client.watcher_proxy.on_closed()), Ok(_));
     }

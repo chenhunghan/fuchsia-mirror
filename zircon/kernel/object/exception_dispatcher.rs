@@ -7,25 +7,24 @@
 use super::exception_dispatcher_ffi::cpp_exception_dispatcher_create;
 use super::handle::HandleOwner;
 use super::thread_dispatcher::ThreadDispatcher;
+use crate::arch_rs::{ArchExceptionContext, arch_fill_in_exception_context};
 use crate::counters::define_kcounter;
 use crate::kernel::deadline::Deadline;
 use crate::kernel::event::AutounsignalEvent;
 use crate::kernel::thread::THREAD_SIGNAL_SUSPEND;
+use crate::ksync_kernel::TrackedCriticalMutex;
 use core::ptr::NonNull;
 use fbl::{Canary, RefPtr};
-use ksync::{KMutex, RawCriticalMutex, guarded};
+use ksync::{KMutex, guarded};
 use object_constants_rs as object_constants;
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
+use zerocopy::FromZeros;
 use zx_status::Status;
 use zx_types::{
     ZX_DEFAULT_EXCEPTION_RIGHTS, ZX_ERR_INTERNAL_INTR_KILLED, ZX_EXCEPTION_STATE_HANDLED,
     ZX_EXCEPTION_STATE_THREAD_EXIT, ZX_EXCEPTION_STATE_TRY_NEXT, ZX_OBJ_TYPE_EXCEPTION,
     zx_exception_report_t, zx_excp_type_t, zx_rights_t,
 };
-
-/// Opaque type representing a C++ `arch_exception_context_t`.
-#[repr(C)]
-pub struct ArchExceptionContext([u8; 0]);
 
 zr::static_assert_size_and_align!(
     ExceptionDispatcherState,
@@ -43,22 +42,26 @@ define_kcounter!(DISPATCHER_EXCEPTION_DESTROY_COUNT, "dispatcher.exception.destr
 pub struct ExceptionDispatcherState {
     canary: Canary<{ fbl::magic(b"EXCD") }>,
 
-    // These are const and only set during construction, so don't need to be
-    // guarded with lock.
+    /// Set during construction and immutable thereafter, so does not need to be guarded by `lock`.
     thread: RefPtr<ThreadDispatcher>,
+    /// Set during construction and immutable thereafter, so does not need to be guarded by `lock`.
     exception_type: zx_excp_type_t,
 
-    // These get updated by the Exceptionate whenever we get transmitted,
-    // according to the rights that specific Exceptionate was registered with.
+    /// Updated by `Exceptionate` whenever we get transmitted, according to the rights that
+    /// specific `Exceptionate` was registered with.
     #[guarded_by(lock)]
     thread_rights: zx_rights_t,
+    /// Updated by `Exceptionate` whenever we get transmitted, according to the rights that
+    /// specific `Exceptionate` was registered with.
     #[guarded_by(lock)]
     process_rights: zx_rights_t,
 
-    // These will be nulled out if the underlying thread is killed while
-    // userspace still has access to this exception.
+    /// Cleared if the underlying thread is killed or finishes exception handling while userspace
+    /// still has access to this exception.
     #[guarded_by(lock)]
     report: Option<NonNull<zx_exception_report_t>>,
+    /// Cleared if the underlying thread is killed or finishes exception handling while userspace
+    /// still has access to this exception.
     #[guarded_by(lock)]
     arch_context: Option<NonNull<ArchExceptionContext>>,
 
@@ -71,7 +74,7 @@ pub struct ExceptionDispatcherState {
     response_event: AutounsignalEvent,
 
     #[mutex]
-    lock: KMutex<RawCriticalMutex>,
+    lock: KMutex<TrackedCriticalMutex>,
 }
 
 // SAFETY: `report` and `arch_context` are protected by `lock` and cleared before the pointed-to
@@ -134,8 +137,29 @@ crate::object::dispatcher::impl_dispatcher_facade_with_state!(
 
 impl ExceptionDispatcher {
     /// Returns the default rights for an `ExceptionDispatcher` handle.
+    #[inline]
     pub const fn default_rights() -> zx_rights_t {
         ZX_DEFAULT_EXCEPTION_RIGHTS
+    }
+
+    /// Builds an architecture-specific `zx_exception_report_t` from `context`.
+    ///
+    /// # Safety
+    ///
+    /// `context` must point to a valid, initialized `arch_exception_context_t`.
+    pub unsafe fn build_arch_report(
+        exception_type: u32,
+        context: *const ArchExceptionContext,
+    ) -> zx_exception_report_t {
+        let mut report = zx_exception_report_t::new_zeroed();
+        report.header.size = core::mem::size_of::<zx_exception_report_t>() as u32;
+        report.header.type_ = exception_type;
+        // SAFETY: Caller guarantees `context` points to a valid `arch_exception_context_t`, and
+        // `report` is a valid writable local.
+        unsafe {
+            arch_fill_in_exception_context(context, &mut report);
+        }
+        report
     }
 
     /// Creates a new `ExceptionDispatcher`, returning `None` on memory allocation failure.
@@ -144,7 +168,7 @@ impl ExceptionDispatcher {
     ///
     /// `report` and `arch_context` must remain valid until [`Self::clear`] is called or the
     /// returned `ExceptionDispatcher` is destroyed.
-    pub unsafe fn create(
+    pub(super) unsafe fn create(
         thread: RefPtr<ThreadDispatcher>,
         exception_type: zx_excp_type_t,
         report: *const zx_exception_report_t,
@@ -164,6 +188,7 @@ impl ExceptionDispatcher {
     }
 
     /// Returns a reference to the exception's thread.
+    #[inline]
     pub fn thread(&self) -> &RefPtr<ThreadDispatcher> {
         let state = self.state();
         state.canary.assert();
@@ -171,6 +196,7 @@ impl ExceptionDispatcher {
     }
 
     /// Returns the exception type (`ZX_EXCP_*`).
+    #[inline]
     pub fn exception_type(&self) -> zx_excp_type_t {
         let state = self.state();
         state.canary.assert();
@@ -371,5 +397,13 @@ impl ExceptionDispatcher {
         let fields = guard.as_mut().fields_mut();
         *fields.report = None;
         *fields.arch_context = None;
+    }
+
+    /// Returns whether the internal response event is currently signaled (for unit tests).
+    #[cfg(ktest)]
+    pub(crate) fn is_response_event_signaled(&self) -> bool {
+        let state = self.state();
+        state.canary.assert();
+        state.response_event.is_signaled()
     }
 }

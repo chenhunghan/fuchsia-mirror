@@ -453,7 +453,6 @@ TEST(UffdTest, RegisterThenFork) {
       char c_from_fork = reinterpret_cast<char *>(full_range.mapping())[0];
       // Accessing the registered range from child doesn't trigger uffd
       EXPECT_EQ(c_from_fork, 0);
-      exit(EXIT_SUCCESS);
     });
     ASSERT_TRUE(helper2.WaitForChildren());
     // Accessing the registered range from parent triggers uffd
@@ -488,7 +487,6 @@ TEST(UffdTest, ForkThenRegister) {
       // Accessing the registered range from child doesn't trigger uffd
       char c_from_fork = reinterpret_cast<char *>(full_range.mapping())[0];
       EXPECT_EQ(c_from_fork, 0);
-      exit(EXIT_SUCCESS);
     });
     ASSERT_TRUE(helper2.WaitForChildren());
     // Accessing the registered range from parent triggers uffd
@@ -522,7 +520,6 @@ TEST(UffdTest, ForkThenInit) {
       // Accessing the registered range from child doesn't trigger uffd
       char c_from_fork = reinterpret_cast<char *>(full_range.mapping())[0];
       EXPECT_EQ(c_from_fork, 0);
-      exit(EXIT_SUCCESS);
     });
     ASSERT_TRUE(helper2.WaitForChildren());
     // Accessing the registered range from parent triggers uffd

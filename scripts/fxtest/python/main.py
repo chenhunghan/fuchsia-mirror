@@ -2,8 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-from __future__ import annotations
-
 import argparse
 import asyncio
 import atexit
@@ -488,7 +486,7 @@ class AsyncMain:
     _BAZEL_TEST_PACKAGE_MANIFESTS_PATH = [
         "bazel_test_packages.list",
     ]
-    # LINT.ThenChange(//build/bazel/scripts/bazel_tests_utils.py:bazel_test_packages_list)
+    # LINT.ThenChange(//build/bazel/scripts/bazel_test_packages.py:bazel_test_packages_list)
 
     def __init__(
         self,

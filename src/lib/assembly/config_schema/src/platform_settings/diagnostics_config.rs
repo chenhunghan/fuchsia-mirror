@@ -8,6 +8,7 @@ use moniker::Moniker;
 use schemars::JsonSchema;
 use serde::de::Error;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::num::NonZeroU32;
 use std::str::FromStr;
 
 pub use diagnostics_log_types::Severity;
@@ -278,6 +279,44 @@ pub struct MemoryMonitorConfig {
     /// pressure is normal, in seconds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub normal_capture_delay_s: Option<u32>,
+
+    /// Control whether memory monitor periodically captures memory usage, to
+    /// report it to Cobalt and record it in Inspect.
+    ///
+    /// This is either the string `"disabled"`, or an object containing the
+    /// (optional) delay between periodic captures.
+    #[serde(skip_serializing_if = "crate::common::is_default")]
+    pub capture_periodically: PeriodicCaptureConfig,
+}
+
+/// Configuration for periodic memory captures.
+#[derive(Debug, Deserialize, Serialize, PartialEq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PeriodicCaptureConfig {
+    /// Periodic captures are disabled.
+    Disabled,
+
+    /// Periodic captures are enabled.
+    #[serde(untagged)]
+    Enabled(PeriodicCaptureEnabledConfig),
+}
+
+impl Default for PeriodicCaptureConfig {
+    /// Periodic captures are enabled by default, using the component's
+    /// default delay.
+    fn default() -> Self {
+        Self::Enabled(PeriodicCaptureEnabledConfig::default())
+    }
+}
+
+/// Configuration for enabled periodic memory captures.
+#[derive(Debug, Default, Deserialize, Serialize, PartialEq, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct PeriodicCaptureEnabledConfig {
+    /// Delay between periodic captures, in seconds. If not set, the
+    /// component's default delay is used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delay_s: Option<NonZeroU32>,
 }
 
 // LINT.IfChange
@@ -559,5 +598,129 @@ mod tests {
                 "storage_stall_watchdog_enabled": false,
             })
         );
+    }
+
+    #[test]
+    fn test_memory_monitor_periodic_capture_default() {
+        let json5 = r#"
+        {
+          build_type: "eng",
+        }
+    "#;
+        let mut cursor = std::io::Cursor::new(json5);
+        let config: PlatformSettings = util::from_reader(&mut cursor).unwrap();
+        assert_eq!(
+            config.diagnostics.memory_monitor.capture_periodically,
+            PeriodicCaptureConfig::Enabled(PeriodicCaptureEnabledConfig::default())
+        );
+    }
+
+    #[test]
+    fn test_memory_monitor_periodic_capture_enabled_with_delay() {
+        let json5 = r#"
+        {
+          build_type: "eng",
+          diagnostics: {
+            memory_monitor: {
+              capture_periodically: {
+                delay_s: 600,
+              },
+            },
+          },
+        }
+    "#;
+        let mut cursor = std::io::Cursor::new(json5);
+        let config: PlatformSettings = util::from_reader(&mut cursor).unwrap();
+        assert_eq!(
+            config.diagnostics.memory_monitor,
+            MemoryMonitorConfig {
+                capture_periodically: PeriodicCaptureConfig::Enabled(
+                    PeriodicCaptureEnabledConfig { delay_s: NonZeroU32::new(600) }
+                ),
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn test_memory_monitor_periodic_capture_enabled_without_delay() {
+        let json5 = r#"
+        {
+          build_type: "eng",
+          diagnostics: {
+            memory_monitor: {
+              capture_periodically: {},
+            },
+          },
+        }
+    "#;
+        let mut cursor = std::io::Cursor::new(json5);
+        let config: PlatformSettings = util::from_reader(&mut cursor).unwrap();
+        assert_eq!(
+            config.diagnostics.memory_monitor.capture_periodically,
+            PeriodicCaptureConfig::Enabled(PeriodicCaptureEnabledConfig::default())
+        );
+    }
+
+    #[test]
+    fn test_memory_monitor_periodic_capture_disabled() {
+        let json5 = r#"
+        {
+          build_type: "eng",
+          diagnostics: {
+            memory_monitor: {
+              capture_periodically: "disabled",
+            },
+          },
+        }
+    "#;
+        let mut cursor = std::io::Cursor::new(json5);
+        let config: PlatformSettings = util::from_reader(&mut cursor).unwrap();
+        assert_eq!(
+            config.diagnostics.memory_monitor.capture_periodically,
+            PeriodicCaptureConfig::Disabled
+        );
+    }
+
+    #[test]
+    fn test_memory_monitor_periodic_capture_zero_delay_is_rejected() {
+        let json5 = r#"
+        {
+          build_type: "eng",
+          diagnostics: {
+            memory_monitor: {
+              capture_periodically: {
+                delay_s: 0,
+              },
+            },
+          },
+        }
+    "#;
+        let mut cursor = std::io::Cursor::new(json5);
+        let result: Result<PlatformSettings, _> = util::from_reader(&mut cursor);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn serialize_deserialize_memory_monitor_config() {
+        for original in [
+            MemoryMonitorConfig::default(),
+            MemoryMonitorConfig {
+                capture_periodically: PeriodicCaptureConfig::Disabled,
+                ..Default::default()
+            },
+            MemoryMonitorConfig {
+                capture_periodically: PeriodicCaptureConfig::Enabled(
+                    PeriodicCaptureEnabledConfig { delay_s: NonZeroU32::new(600) },
+                ),
+                normal_capture_delay_s: Some(60),
+                ..Default::default()
+            },
+        ] {
+            let serialized = serde_json::to_string(&original).expect("serialize config");
+            let deserialized: MemoryMonitorConfig =
+                serde_json::from_str(&serialized).expect("deserialize config");
+            assert_eq!(deserialized, original);
+        }
     }
 }

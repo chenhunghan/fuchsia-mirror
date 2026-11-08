@@ -1282,3 +1282,495 @@ decode_failure("RecursiveOptionalStructWithStringExceedLimit") {
     },
     err = EXCEEDED_MAX_OUT_OF_LINE_DEPTH,
 }
+
+success("RecursiveOptionalWithInlineUnionUnderLimit") {
+    // gidl-format off
+    value = RecursiveOptionalWithInlineUnion { // 0
+    inner: RecursiveOptionalWithInlineUnion { // 1
+    inner: RecursiveOptionalWithInlineUnion { // 2
+    inner: RecursiveOptionalWithInlineUnion { // 3
+    inner: RecursiveOptionalWithInlineUnion { // 4
+    inner: RecursiveOptionalWithInlineUnion { // 5
+    inner: RecursiveOptionalWithInlineUnion { // 6
+    inner: RecursiveOptionalWithInlineUnion { // 7
+    inner: RecursiveOptionalWithInlineUnion { // 8
+    inner: RecursiveOptionalWithInlineUnion { // 9
+    inner: RecursiveOptionalWithInlineUnion { // 10
+    inner: RecursiveOptionalWithInlineUnion { // 11
+    inner: RecursiveOptionalWithInlineUnion { // 12
+    inner: RecursiveOptionalWithInlineUnion { // 13
+    inner: RecursiveOptionalWithInlineUnion { // 14
+    inner: RecursiveOptionalWithInlineUnion { // 15
+    inner: RecursiveOptionalWithInlineUnion { // 16
+    inner: RecursiveOptionalWithInlineUnion { // 17
+    inner: RecursiveOptionalWithInlineUnion { // 18
+    inner: RecursiveOptionalWithInlineUnion { // 19
+    inner: RecursiveOptionalWithInlineUnion { // 20
+    inner: RecursiveOptionalWithInlineUnion { // 21
+    inner: RecursiveOptionalWithInlineUnion { // 22
+    inner: RecursiveOptionalWithInlineUnion { // 23
+    inner: RecursiveOptionalWithInlineUnion { // 24
+    inner: RecursiveOptionalWithInlineUnion { // 25
+    inner: RecursiveOptionalWithInlineUnion { // 26
+    inner: RecursiveOptionalWithInlineUnion { // 27
+    inner: RecursiveOptionalWithInlineUnion { // 28
+    inner: RecursiveOptionalWithInlineUnion { // 29
+    inner: RecursiveOptionalWithInlineUnion { // 30
+    inner: RecursiveOptionalWithInlineUnion { // 31
+        inner: null,
+        u: InlineUint32Union { // 32
+            x: 42,
+        },
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    },
+    // gidl-format on
+    bytes = {
+        v2 = [
+            // 0
+            repeat(0xff):8, repeat(0x00):16,
+            // 1
+            repeat(0xff):8, repeat(0x00):16,
+            // 2
+            repeat(0xff):8, repeat(0x00):16,
+            // 3
+            repeat(0xff):8, repeat(0x00):16,
+            // 4
+            repeat(0xff):8, repeat(0x00):16,
+            // 5
+            repeat(0xff):8, repeat(0x00):16,
+            // 6
+            repeat(0xff):8, repeat(0x00):16,
+            // 7
+            repeat(0xff):8, repeat(0x00):16,
+            // 8
+            repeat(0xff):8, repeat(0x00):16,
+            // 9
+            repeat(0xff):8, repeat(0x00):16,
+            // 10
+            repeat(0xff):8, repeat(0x00):16,
+            // 11
+            repeat(0xff):8, repeat(0x00):16,
+            // 12
+            repeat(0xff):8, repeat(0x00):16,
+            // 13
+            repeat(0xff):8, repeat(0x00):16,
+            // 14
+            repeat(0xff):8, repeat(0x00):16,
+            // 15
+            repeat(0xff):8, repeat(0x00):16,
+            // 16
+            repeat(0xff):8, repeat(0x00):16,
+            // 17
+            repeat(0xff):8, repeat(0x00):16,
+            // 18
+            repeat(0xff):8, repeat(0x00):16,
+            // 19
+            repeat(0xff):8, repeat(0x00):16,
+            // 20
+            repeat(0xff):8, repeat(0x00):16,
+            // 21
+            repeat(0xff):8, repeat(0x00):16,
+            // 22
+            repeat(0xff):8, repeat(0x00):16,
+            // 23
+            repeat(0xff):8, repeat(0x00):16,
+            // 24
+            repeat(0xff):8, repeat(0x00):16,
+            // 25
+            repeat(0xff):8, repeat(0x00):16,
+            // 26
+            repeat(0xff):8, repeat(0x00):16,
+            // 27
+            repeat(0xff):8, repeat(0x00):16,
+            // 28
+            repeat(0xff):8, repeat(0x00):16,
+            // 29
+            repeat(0xff):8, repeat(0x00):16,
+            // 30
+            repeat(0xff):8, repeat(0x00):16,
+            // 31
+            repeat(0x00):8,
+            num(1):8, // ordinal 1
+            num(42):4, num(0):2, num(1):2, // inlined envelope
+        ],
+    },
+}
+
+encode_failure("RecursiveOptionalWithInlineUnionExceedLimit") {
+    // TODO(https://fxbug.dev/579582163): Check recursion depth on encode in rust_next.
+    bindings_denylist = [rust_next],
+    // gidl-format off
+    value = RecursiveOptionalWithInlineUnion { // 0
+    inner: RecursiveOptionalWithInlineUnion { // 1
+    inner: RecursiveOptionalWithInlineUnion { // 2
+    inner: RecursiveOptionalWithInlineUnion { // 3
+    inner: RecursiveOptionalWithInlineUnion { // 4
+    inner: RecursiveOptionalWithInlineUnion { // 5
+    inner: RecursiveOptionalWithInlineUnion { // 6
+    inner: RecursiveOptionalWithInlineUnion { // 7
+    inner: RecursiveOptionalWithInlineUnion { // 8
+    inner: RecursiveOptionalWithInlineUnion { // 9
+    inner: RecursiveOptionalWithInlineUnion { // 10
+    inner: RecursiveOptionalWithInlineUnion { // 11
+    inner: RecursiveOptionalWithInlineUnion { // 12
+    inner: RecursiveOptionalWithInlineUnion { // 13
+    inner: RecursiveOptionalWithInlineUnion { // 14
+    inner: RecursiveOptionalWithInlineUnion { // 15
+    inner: RecursiveOptionalWithInlineUnion { // 16
+    inner: RecursiveOptionalWithInlineUnion { // 17
+    inner: RecursiveOptionalWithInlineUnion { // 18
+    inner: RecursiveOptionalWithInlineUnion { // 19
+    inner: RecursiveOptionalWithInlineUnion { // 20
+    inner: RecursiveOptionalWithInlineUnion { // 21
+    inner: RecursiveOptionalWithInlineUnion { // 22
+    inner: RecursiveOptionalWithInlineUnion { // 23
+    inner: RecursiveOptionalWithInlineUnion { // 24
+    inner: RecursiveOptionalWithInlineUnion { // 25
+    inner: RecursiveOptionalWithInlineUnion { // 26
+    inner: RecursiveOptionalWithInlineUnion { // 27
+    inner: RecursiveOptionalWithInlineUnion { // 28
+    inner: RecursiveOptionalWithInlineUnion { // 29
+    inner: RecursiveOptionalWithInlineUnion { // 30
+    inner: RecursiveOptionalWithInlineUnion { // 31
+    inner: RecursiveOptionalWithInlineUnion { // 32
+        inner: null,
+        u: InlineUint32Union { // 33
+            x: 42,
+        },
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    }
+    },
+    // gidl-format on
+    err = EXCEEDED_MAX_OUT_OF_LINE_DEPTH,
+}
+
+decode_failure("RecursiveOptionalWithInlineUnionExceedLimit") {
+    // TODO(https://fxbug.dev/579582741): Increment recursion depth on inline envelopes in rust and rust_codec.
+    // TODO(https://fxbug.dev/579582163): Check recursion depth on decode in rust_next.
+    bindings_denylist = [rust, rust_codec, rust_next],
+    type = RecursiveOptionalWithInlineUnion,
+    bytes = {
+        v2 = [
+            // 0
+            repeat(0xff):8, repeat(0x00):16,
+            // 1
+            repeat(0xff):8, repeat(0x00):16,
+            // 2
+            repeat(0xff):8, repeat(0x00):16,
+            // 3
+            repeat(0xff):8, repeat(0x00):16,
+            // 4
+            repeat(0xff):8, repeat(0x00):16,
+            // 5
+            repeat(0xff):8, repeat(0x00):16,
+            // 6
+            repeat(0xff):8, repeat(0x00):16,
+            // 7
+            repeat(0xff):8, repeat(0x00):16,
+            // 8
+            repeat(0xff):8, repeat(0x00):16,
+            // 9
+            repeat(0xff):8, repeat(0x00):16,
+            // 10
+            repeat(0xff):8, repeat(0x00):16,
+            // 11
+            repeat(0xff):8, repeat(0x00):16,
+            // 12
+            repeat(0xff):8, repeat(0x00):16,
+            // 13
+            repeat(0xff):8, repeat(0x00):16,
+            // 14
+            repeat(0xff):8, repeat(0x00):16,
+            // 15
+            repeat(0xff):8, repeat(0x00):16,
+            // 16
+            repeat(0xff):8, repeat(0x00):16,
+            // 17
+            repeat(0xff):8, repeat(0x00):16,
+            // 18
+            repeat(0xff):8, repeat(0x00):16,
+            // 19
+            repeat(0xff):8, repeat(0x00):16,
+            // 20
+            repeat(0xff):8, repeat(0x00):16,
+            // 21
+            repeat(0xff):8, repeat(0x00):16,
+            // 22
+            repeat(0xff):8, repeat(0x00):16,
+            // 23
+            repeat(0xff):8, repeat(0x00):16,
+            // 24
+            repeat(0xff):8, repeat(0x00):16,
+            // 25
+            repeat(0xff):8, repeat(0x00):16,
+            // 26
+            repeat(0xff):8, repeat(0x00):16,
+            // 27
+            repeat(0xff):8, repeat(0x00):16,
+            // 28
+            repeat(0xff):8, repeat(0x00):16,
+            // 29
+            repeat(0xff):8, repeat(0x00):16,
+            // 30
+            repeat(0xff):8, repeat(0x00):16,
+            // 31
+            repeat(0xff):8, repeat(0x00):16,
+            // 32
+            repeat(0x00):8,
+            num(1):8, // ordinal 1
+            num(42):4, num(0):2, num(1):2, // inlined envelope
+        ],
+    },
+    err = EXCEEDED_MAX_OUT_OF_LINE_DEPTH,
+}
+
+success("RecursiveTableHolderAtLimit") {
+    // Each level of RecursiveTable -> s (out-of-line envelope) -> o (box) adds 3 to
+    // out-of-line depth; the final level with o: null adds 2.
+    // 10 * 3 + 2 = 32 (at the max out-of-line depth limit).
+    // gidl-format off
+    value = RecursiveTableHolder{
+    t: RecursiveTable{ // depth 1 (table vector), 2 (envelope s)
+    s: RecursiveTableOptionalHolder{
+    o: RecursiveTableHolder{ // depth 3
+    t: RecursiveTable{ // depth 4, 5
+    s: RecursiveTableOptionalHolder{
+    o: RecursiveTableHolder{ // depth 6
+    t: RecursiveTable{ // depth 7, 8
+    s: RecursiveTableOptionalHolder{
+    o: RecursiveTableHolder{ // depth 9
+    t: RecursiveTable{ // depth 10, 11
+    s: RecursiveTableOptionalHolder{
+    o: RecursiveTableHolder{ // depth 12
+    t: RecursiveTable{ // depth 13, 14
+    s: RecursiveTableOptionalHolder{
+    o: RecursiveTableHolder{ // depth 15
+    t: RecursiveTable{ // depth 16, 17
+    s: RecursiveTableOptionalHolder{
+    o: RecursiveTableHolder{ // depth 18
+    t: RecursiveTable{ // depth 19, 20
+    s: RecursiveTableOptionalHolder{
+    o: RecursiveTableHolder{ // depth 21
+    t: RecursiveTable{ // depth 22, 23
+    s: RecursiveTableOptionalHolder{
+    o: RecursiveTableHolder{ // depth 24
+    t: RecursiveTable{ // depth 25, 26
+    s: RecursiveTableOptionalHolder{
+    o: RecursiveTableHolder{ // depth 27
+    t: RecursiveTable{ // depth 28, 29
+    s: RecursiveTableOptionalHolder{
+    o: RecursiveTableHolder{ // depth 30
+    t: RecursiveTable{ // depth 31, 32
+    s: RecursiveTableOptionalHolder{
+        o: null,
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    // gidl-format on
+    bytes = {
+        v2 = [
+            num(1):8, repeat(0xff):8, num(328):4, num(0):2, num(0):2, repeat(0xff):8,
+            num(1):8, repeat(0xff):8, num(296):4, num(0):2, num(0):2, repeat(0xff):8,
+            num(1):8, repeat(0xff):8, num(264):4, num(0):2, num(0):2, repeat(0xff):8,
+            num(1):8, repeat(0xff):8, num(232):4, num(0):2, num(0):2, repeat(0xff):8,
+            num(1):8, repeat(0xff):8, num(200):4, num(0):2, num(0):2, repeat(0xff):8,
+            num(1):8, repeat(0xff):8, num(168):4, num(0):2, num(0):2, repeat(0xff):8,
+            num(1):8, repeat(0xff):8, num(136):4, num(0):2, num(0):2, repeat(0xff):8,
+            num(1):8, repeat(0xff):8, num(104):4, num(0):2, num(0):2, repeat(0xff):8,
+            num(1):8, repeat(0xff):8, num(72):4, num(0):2, num(0):2, repeat(0xff):8,
+            num(1):8, repeat(0xff):8, num(40):4, num(0):2, num(0):2, repeat(0xff):8,
+            num(1):8, repeat(0xff):8, num(8):4, num(0):2, num(0):2, repeat(0x00):8,
+        ],
+    },
+}
+
+encode_failure("RecursiveTableHolderExceedLimit") {
+    // TODO(https://fxbug.dev/579582163): Check recursion depth on encode in rust_next.
+    bindings_denylist = [rust_next],
+    // gidl-format off
+    value = RecursiveTableHolder{
+    t: RecursiveTable{ // depth 1, 2
+    s: RecursiveTableOptionalHolder{
+    o: RecursiveTableHolder{ // depth 3
+    t: RecursiveTable{ // depth 4, 5
+    s: RecursiveTableOptionalHolder{
+    o: RecursiveTableHolder{ // depth 6
+    t: RecursiveTable{ // depth 7, 8
+    s: RecursiveTableOptionalHolder{
+    o: RecursiveTableHolder{ // depth 9
+    t: RecursiveTable{ // depth 10, 11
+    s: RecursiveTableOptionalHolder{
+    o: RecursiveTableHolder{ // depth 12
+    t: RecursiveTable{ // depth 13, 14
+    s: RecursiveTableOptionalHolder{
+    o: RecursiveTableHolder{ // depth 15
+    t: RecursiveTable{ // depth 16, 17
+    s: RecursiveTableOptionalHolder{
+    o: RecursiveTableHolder{ // depth 18
+    t: RecursiveTable{ // depth 19, 20
+    s: RecursiveTableOptionalHolder{
+    o: RecursiveTableHolder{ // depth 21
+    t: RecursiveTable{ // depth 22, 23
+    s: RecursiveTableOptionalHolder{
+    o: RecursiveTableHolder{ // depth 24
+    t: RecursiveTable{ // depth 25, 26
+    s: RecursiveTableOptionalHolder{
+    o: RecursiveTableHolder{ // depth 27
+    t: RecursiveTable{ // depth 28, 29
+    s: RecursiveTableOptionalHolder{
+    o: RecursiveTableHolder{ // depth 30
+    t: RecursiveTable{ // depth 31, 32
+    s: RecursiveTableOptionalHolder{
+    o: RecursiveTableHolder{ // depth 33 (exceeds limit)
+        t: RecursiveTable{},
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    },
+    // gidl-format on
+    err = EXCEEDED_MAX_OUT_OF_LINE_DEPTH,
+}
+
+decode_failure("RecursiveTableHolderExceedLimit") {
+    // TODO(https://fxbug.dev/42084096): Check recursion depth on table decode in cpp.
+    // TODO(https://fxbug.dev/579582163): Check recursion depth on decode in rust_next.
+    bindings_denylist = [cpp, rust_next],
+    type = RecursiveTableHolder,
+    bytes = {
+        v2 = [
+            num(1):8, repeat(0xff):8, num(344):4, num(0):2, num(0):2, repeat(0xff):8,
+            num(1):8, repeat(0xff):8, num(312):4, num(0):2, num(0):2, repeat(0xff):8,
+            num(1):8, repeat(0xff):8, num(280):4, num(0):2, num(0):2, repeat(0xff):8,
+            num(1):8, repeat(0xff):8, num(248):4, num(0):2, num(0):2, repeat(0xff):8,
+            num(1):8, repeat(0xff):8, num(216):4, num(0):2, num(0):2, repeat(0xff):8,
+            num(1):8, repeat(0xff):8, num(184):4, num(0):2, num(0):2, repeat(0xff):8,
+            num(1):8, repeat(0xff):8, num(152):4, num(0):2, num(0):2, repeat(0xff):8,
+            num(1):8, repeat(0xff):8, num(120):4, num(0):2, num(0):2, repeat(0xff):8,
+            num(1):8, repeat(0xff):8, num(88):4, num(0):2, num(0):2, repeat(0xff):8,
+            num(1):8, repeat(0xff):8, num(56):4, num(0):2, num(0):2, repeat(0xff):8,
+            num(1):8, repeat(0xff):8, num(24):4, num(0):2, num(0):2, repeat(0xff):8,
+            num(0):8, repeat(0xff):8,
+        ],
+    },
+    err = EXCEEDED_MAX_OUT_OF_LINE_DEPTH,
+}

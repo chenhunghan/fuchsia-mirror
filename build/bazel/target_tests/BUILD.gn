@@ -3,6 +3,14 @@
 # found in the LICENSE file.
 
 import("//build/bazel/bazel_action.gni")
+import("//build/bazel/bazel_inputs.gni")
+
+if (is_host) {
+  bazel_input_file("font_manifest_generator_bazel_input") {
+    generator = "//src/fonts/tools/manifest_generator:font_manifest_generator"
+    outputs = [ "${root_out_dir}/font_manifest_generator" ]
+  }
+}
 
 bazel_action("target_tests") {
   testonly = true
@@ -24,15 +32,12 @@ bazel_action("target_tests") {
   # symbols are needed to symbolize test failures.
   copy_debug_symbols = true
 
-  deps = [
-    # The following are currently needed by `fx_package()`.
-    # TODO(b/519244675): Remove once `package-tool` is migrated to Bazel.
-    "//src/sys/pkg/bin/package-tool:bazel_input($host_toolchain)",
+  # Consumers of `bazel_test_packages.list` read the packages' manifests and
+  # blobs from the Ninja build directory, so export them there after
+  # building, while they're guaranteed to be on disk.
+  export_test_packages = true
 
-    # The following is needed by `fuchsia_structured_config_rust_lib()`.
-    # TODO(wittrock): Remove once configc is migrated to Bazel.
-    "//tools/configc:bazel_input($host_toolchain)",
-  ]
+  deps = [ ":font_manifest_generator_bazel_input($host_toolchain)" ]
 
   copy_outputs = [
     {
@@ -44,8 +49,9 @@ bazel_action("target_tests") {
 
 # Pretends to generate bazel_test_packages.list, which is actually written by
 # regenerator.py during `fx gen`, and depends on `:target_tests` so that the
-# package manifests and blobs listed in it exist on disk before any consumer
-# (such as //build/images/updates:all_package_manifests.list) reads them.
+# exported package manifests and blobs listed in it exist on disk before any
+# consumer (such as //build/images/updates:all_package_manifests.list) reads
+# them.
 action("bazel_test_packages.list") {
   testonly = true
   script = "//build/scripts/no_op.sh"

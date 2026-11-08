@@ -77,6 +77,67 @@ fn example_cml_integration_test() {
     fancy_assert_eq(&cm_decl.program.as_ref(), &Some(&program));
 
     let uses = vec![
+        Use::Config(UseConfiguration {
+            source: Some(Ref::Parent(ParentRef {})),
+            source_name: Some("fuchsia.config.MyFlag".to_string()),
+            target_name: Some("my_flag".to_string()),
+            availability: Some(Availability::Optional),
+            type_: Some(ConfigType {
+                layout: ConfigTypeLayout::Bool,
+                parameters: Some(vec![]),
+                constraints: vec![],
+            }),
+            default: Some(ConfigValue::Single(ConfigSingleValue::Bool(true))),
+            ..Default::default()
+        }),
+        Use::Config(UseConfiguration {
+            source: Some(Ref::Parent(ParentRef {})),
+            source_name: Some("fuchsia.config.MyString".to_string()),
+            target_name: Some("my_string".to_string()),
+            availability: Some(Availability::Optional),
+            type_: Some(ConfigType {
+                layout: ConfigTypeLayout::String,
+                constraints: vec![LayoutConstraint::MaxSize(100)],
+                parameters: Some(vec![]),
+            }),
+            default: Some(ConfigValue::Single(ConfigSingleValue::String(
+                "test_string".to_string(),
+            ))),
+            ..Default::default()
+        }),
+        Use::Config(UseConfiguration {
+            source: Some(Ref::Parent(ParentRef {})),
+            source_name: Some("fuchsia.config.MyUint8".to_string()),
+            target_name: Some("my_uint8".to_string()),
+            availability: Some(Availability::Optional),
+            type_: Some(ConfigType {
+                layout: ConfigTypeLayout::Uint8,
+                parameters: Some(vec![]),
+                constraints: vec![],
+            }),
+            default: Some(ConfigValue::Single(ConfigSingleValue::Uint8(42))),
+            ..Default::default()
+        }),
+        Use::Config(UseConfiguration {
+            source: Some(Ref::Parent(ParentRef {})),
+            source_name: Some("fuchsia.config.MyVectorOfString".to_string()),
+            target_name: Some("my_vector_of_string".to_string()),
+            availability: Some(Availability::Optional),
+            type_: Some(ConfigType {
+                layout: ConfigTypeLayout::Vector,
+                constraints: vec![LayoutConstraint::MaxSize(100)],
+                parameters: Some(vec![LayoutParameter::NestedType(ConfigType {
+                    layout: ConfigTypeLayout::String,
+                    constraints: vec![LayoutConstraint::MaxSize(50)],
+                    parameters: Some(vec![]),
+                })]),
+            }),
+            default: Some(ConfigValue::Vector(ConfigVectorValue::StringVector(vec![
+                "hello, world!".to_string(),
+                "hello, again!".to_string(),
+            ]))),
+            ..Default::default()
+        }),
         Use::EventStream(UseEventStream {
             source_name: Some("events".to_string()),
             source: Some(Ref::Parent(ParentRef {})),
@@ -561,7 +622,7 @@ fn example_cml_integration_test() {
             227, 126, 183, 151, 1, 15, 67, 110, 144, 49, 222, 176, 221, 111, 19, 165, 34, 204, 240,
             41, 165, 95, 117, 57, 203, 42, 186, 167, 84, 26, 25, 231,
         ])),
-        value_source: Some(ConfigValueSource::PackagePath("meta/example.cvf".to_string())),
+        value_source: Some(ConfigValueSource::Capabilities(ConfigSourceCapabilities::default())),
         ..Default::default()
     };
     fancy_assert_eq(&cm_decl.config.as_ref(), &Some(&config));

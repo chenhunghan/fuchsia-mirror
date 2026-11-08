@@ -4,6 +4,7 @@
 
 #include "src/cobalt/bin/app/key_fetcher.h"
 
+#include <lib/async/cpp/time.h>
 #include <lib/syslog/cpp/macros.h>
 #include <zircon/syscalls.h>
 
@@ -28,6 +29,20 @@ bool IsKeysetExpired(const util::ParsedKeyset& keyset, int64_t now_secs) {
          now_secs >= keyset.analyzer_key().expiration_timestamp_secs();
 }
 
+bool IsKeyExpiringSoon(const util::DynamicEncryptedMessageMaker& maker, int64_t now_secs,
+                       int64_t threshold_secs) {
+  if (!maker.IsInitialized()) {
+    return false;
+  }
+  const int64_t expiration_secs = maker.expiration_timestamp_secs();
+  if (expiration_secs <= now_secs) {
+    return true;
+  }
+  const uint64_t remaining_secs =
+      static_cast<uint64_t>(expiration_secs) - static_cast<uint64_t>(now_secs);
+  return std::cmp_less(remaining_secs, threshold_secs);
+}
+
 zx::duration RandomDuration(zx::duration min_inclusive, zx::duration max_inclusive) {
   if (max_inclusive <= min_inclusive) {
     return min_inclusive;
@@ -43,6 +58,24 @@ zx::duration RandomDuration(zx::duration min_inclusive, zx::duration max_inclusi
 
 }  // namespace
 
+const char* KeyFetchStatusToString(KeyFetchStatus status) {
+  switch (status) {
+    case KeyFetchStatus::kUninitialized:
+      return "Uninitialized";
+    case KeyFetchStatus::kSuccess:
+      return "Success";
+    case KeyFetchStatus::kNetworkError:
+      return "NetworkError";
+    case KeyFetchStatus::kParseError:
+      return "ParseError";
+    case KeyFetchStatus::kInvalidTinkKeyset:
+      return "InvalidTinkKeyset";
+    case KeyFetchStatus::kExpiredKey:
+      return "ExpiredKey";
+  }
+  return "Unknown";
+}
+
 KeyFetcher::KeyFetcher(async_dispatcher_t* dispatcher, std::unique_ptr<lib::HTTPClient> http_client,
                        util::DynamicEncryptedMessageMaker* shuffler_maker,
                        util::DynamicEncryptedMessageMaker* analyzer_maker,
@@ -57,6 +90,9 @@ KeyFetcher::KeyFetcher(async_dispatcher_t* dispatcher, std::unique_ptr<lib::HTTP
                      .steady_state_jitter = zx::hour(2),
                      .poll_interval = zx::hour(1),
                      .boot_clock = zx::clock::get_boot,
+                     .urgent_expiry_threshold = zx::hour(int64_t{24} * 7),
+                     .urgent_poll_interval = zx::hour(1),
+                     .urgent_poll_jitter = zx::min(10),
                  }) {}
 
 KeyFetcher::KeyFetcher(async_dispatcher_t* dispatcher, std::unique_ptr<lib::HTTPClient> http_client,
@@ -86,6 +122,11 @@ KeyFetcher::KeyFetcher(async_dispatcher_t* dispatcher, std::unique_ptr<lib::HTTP
   FX_CHECK(schedule_options_.steady_state_interval > zx::sec(0));
   FX_CHECK(schedule_options_.steady_state_jitter >= zx::sec(0));
   FX_CHECK(schedule_options_.steady_state_jitter < schedule_options_.steady_state_interval);
+  FX_CHECK(schedule_options_.urgent_expiry_threshold >= zx::sec(1));
+  FX_CHECK(schedule_options_.urgent_poll_interval > zx::sec(0));
+  FX_CHECK(schedule_options_.urgent_poll_interval <= schedule_options_.steady_state_interval);
+  FX_CHECK(schedule_options_.urgent_poll_jitter >= zx::sec(0));
+  FX_CHECK(schedule_options_.urgent_poll_jitter < schedule_options_.urgent_poll_interval);
 }
 
 KeyFetcher::~KeyFetcher() { scheduled_task_.Cancel(); }
@@ -95,6 +136,18 @@ bool KeyFetcher::IsOlderThanActiveKeys(const util::ParsedKeyset& keyset) const {
           keyset.shuffler_key().key_index() < shuffler_maker_->key_index()) ||
          (analyzer_maker_->IsInitialized() &&
           keyset.analyzer_key().key_index() < analyzer_maker_->key_index());
+}
+
+bool KeyFetcher::IsActiveKeyExpiringSoon() const {
+  const int64_t now_secs = util::ToUnixSeconds(system_clock_->now());
+  const int64_t threshold_secs = schedule_options_.urgent_expiry_threshold.to_secs();
+  return IsKeyExpiringSoon(*shuffler_maker_, now_secs, threshold_secs) ||
+         IsKeyExpiringSoon(*analyzer_maker_, now_secs, threshold_secs);
+}
+
+bool KeyFetcher::IsActiveKeyMissingOrExpired() const {
+  return !shuffler_maker_->IsInitialized() || !analyzer_maker_->IsInitialized() ||
+         shuffler_maker_->IsExpired() || analyzer_maker_->IsExpired();
 }
 
 bool KeyFetcher::LoadKeysFromDiskCache() {
@@ -144,6 +197,7 @@ bool KeyFetcher::LoadKeysFromDiskCache() {
 }
 
 void KeyFetcher::OnSystemClockBecomesAccurate() {
+  system_clock_accurate_ = true;
   zx::duration initial_jitter = ComputeInitialJitter();
   const bool is_expired = shuffler_maker_->IsExpired() || analyzer_maker_->IsExpired();
   const bool is_uninitialized =
@@ -161,6 +215,29 @@ void KeyFetcher::OnSystemClockBecomesAccurate() {
   ScheduleNextPoll(std::min(initial_jitter, schedule_options_.poll_interval));
 }
 
+void KeyFetcher::OnNetworkReconnect() {
+  if (!system_clock_accurate_) {
+    return;
+  }
+  const zx::time_boot now_boot = schedule_options_.boot_clock();
+  if (consecutive_fetch_failures_ == 0 && last_fetch_boot_time_.has_value() &&
+      IsActiveKeyExpiringSoon()) {
+    target_boot_deadline_ =
+        std::min(target_boot_deadline_, *last_fetch_boot_time_ + urgent_poll_delay_);
+  }
+  if (consecutive_fetch_failures_ > 0 || IsActiveKeyMissingOrExpired() ||
+      now_boot >= target_boot_deadline_) {
+    FX_LOGS(INFO) << "KeyFetcher: Triggering key fetch on network reconnect.";
+    RunScheduledFetch();
+    return;
+  }
+  const zx::duration next_delay =
+      std::min(target_boot_deadline_ - now_boot, schedule_options_.poll_interval);
+  if (!scheduled_task_.is_pending() ||
+      async::Now(dispatcher_) + next_delay < scheduled_task_.last_deadline()) {
+    ScheduleNextPoll(next_delay);
+  }
+}
 KeyFetchStatus KeyFetcher::FetchAndCachePublicKeys() {
   const auto deadline = std::chrono::steady_clock::now() + kHttpFetchTimeout;
   lib::statusor::StatusOr<lib::HTTPResponse> response =
@@ -198,36 +275,31 @@ KeyFetchStatus KeyFetcher::FetchAndCachePublicKeys() {
 }
 
 void KeyFetcher::ApplyKeyset(util::ParsedKeyset keyset) {
-  // Clamp both keys to the earlier expiration timestamp so they expire together and
-  // neither maker remains usable while the other is expired.
-  // TODO(https://fxbug.dev/539564173): Pass keyset.TakeShufflerKey() and
-  // keyset.TakeAnalyzerKey() directly after https://fxrev.dev/1887274 rolls into
-  // //third_party/cobalt.
-  const int64_t effective_expiration_secs =
-      std::min(keyset.shuffler_key().expiration_timestamp_secs(),
-               keyset.analyzer_key().expiration_timestamp_secs());
-  util::ParsedKey shuffler_key = keyset.TakeShufflerKey();
-  util::ParsedKey analyzer_key = keyset.TakeAnalyzerKey();
-  const uint32_t shuffler_index = shuffler_key.key_index();
-  const uint32_t analyzer_index = analyzer_key.key_index();
-  shuffler_maker_->UpdateKey(util::ParsedKey(std::move(shuffler_key).TakeMaker(), shuffler_index,
-                                             effective_expiration_secs));
-  analyzer_maker_->UpdateKey(util::ParsedKey(std::move(analyzer_key).TakeMaker(), analyzer_index,
-                                             effective_expiration_secs));
+  shuffler_maker_->UpdateKey(keyset.TakeShufflerKey());
+  analyzer_maker_->UpdateKey(keyset.TakeAnalyzerKey());
 }
 
 void KeyFetcher::RunScheduledFetch() {
+  const zx::time_boot now_boot = schedule_options_.boot_clock();
+  last_fetch_boot_time_ = now_boot;
+  last_fetch_attempt_time_secs_ = util::ToUnixSeconds(system_clock_->now());
   last_fetch_status_ = FetchAndCachePublicKeys();
   zx::duration next_delay;
   if (last_fetch_status_ == KeyFetchStatus::kSuccess) {
     consecutive_fetch_failures_ = 0;
     retry_backoff_.Reset();
-    next_delay = ComputeSteadyStateIntervalWithJitter();
+    urgent_poll_delay_ = ComputeUrgentIntervalWithJitter();
+    next_delay =
+        IsActiveKeyExpiringSoon() ? urgent_poll_delay_ : ComputeSteadyStateIntervalWithJitter();
   } else {
     ++consecutive_fetch_failures_;
     next_delay = retry_backoff_.GetNext();
   }
-  target_boot_deadline_ = schedule_options_.boot_clock() + next_delay;
+  if (status_observer_) {
+    status_observer_(last_fetch_status_, consecutive_fetch_failures_,
+                     last_fetch_attempt_time_secs_);
+  }
+  target_boot_deadline_ = now_boot + next_delay;
   ScheduleNextPoll(std::min(next_delay, schedule_options_.poll_interval));
 }
 
@@ -241,9 +313,15 @@ void KeyFetcher::ScheduleNextPoll(zx::duration delay) {
 
 void KeyFetcher::CheckBootDeadlineAndFetch() {
   const zx::time_boot now_boot = schedule_options_.boot_clock();
-  // Only trigger an immediate fetch on active key expiration when not already in
-  // failure backoff; once a fetch fails, wait for the backoff deadline in
-  // target_boot_deadline_ rather than retrying on every poll wakeup.
+  // Only trigger an immediate fetch on active key expiration or accelerate to
+  // urgent polling when not already in failure backoff; once a fetch fails,
+  // wait for the backoff deadline in target_boot_deadline_ rather than retrying
+  // on every poll wakeup.
+  if (consecutive_fetch_failures_ == 0 && last_fetch_boot_time_.has_value() &&
+      IsActiveKeyExpiringSoon()) {
+    target_boot_deadline_ =
+        std::min(target_boot_deadline_, *last_fetch_boot_time_ + urgent_poll_delay_);
+  }
   const bool active_key_expired = consecutive_fetch_failures_ == 0 &&
                                   (shuffler_maker_->IsExpired() || analyzer_maker_->IsExpired());
   if (now_boot >= target_boot_deadline_ || active_key_expired) {
@@ -268,6 +346,15 @@ zx::duration KeyFetcher::ComputeSteadyStateIntervalWithJitter() const {
   return schedule_options_.steady_state_interval +
          RandomDuration(-schedule_options_.steady_state_jitter,
                         schedule_options_.steady_state_jitter);
+}
+
+zx::duration KeyFetcher::ComputeUrgentIntervalWithJitter() const {
+  if (schedule_options_.urgent_poll_jitter <= zx::sec(0)) {
+    return schedule_options_.urgent_poll_interval;
+  }
+  return schedule_options_.urgent_poll_interval +
+         RandomDuration(-schedule_options_.urgent_poll_jitter,
+                        schedule_options_.urgent_poll_jitter);
 }
 
 }  // namespace cobalt

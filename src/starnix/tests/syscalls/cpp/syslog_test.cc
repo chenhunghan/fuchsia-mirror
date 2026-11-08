@@ -62,9 +62,10 @@ TEST_F(SyslogTest, ReadDevKmsg) {
 
   char read_buffer[4096];
   do {
-    size_t size_read = read(kmsg_fd, read_buffer, sizeof(read_buffer));
-    ASSERT_GT(size_read, 0ul);
-  } while (strstr(message, "Hello from the dev/kmsg test") == nullptr);
+    ssize_t size_read = read(kmsg_fd, read_buffer, sizeof(read_buffer) - 1);
+    ASSERT_GT(size_read, 0);
+    read_buffer[size_read] = '\0';
+  } while (strstr(read_buffer, "Hello from the dev/kmsg test") == nullptr);
 
   close(kmsg_fd);
 }
@@ -107,8 +108,9 @@ TEST_F(SyslogTest, Read) {
   //// Read that first log we wrote.
   char buf[4096];
   do {
-    int size_read = klogctl(SYSLOG_ACTION_READ, buf, sizeof(buf));
+    int size_read = klogctl(SYSLOG_ACTION_READ, buf, sizeof(buf) - 1);
     ASSERT_GT(size_read, 0);
+    buf[size_read] = '\0';
   } while (strstr(buf, "SyslogRead -- first") == nullptr);
 
   // Write a second log.
@@ -117,22 +119,23 @@ TEST_F(SyslogTest, Read) {
 
   // Check that the first log we syslog(READ) from isn't present anymore.
   do {
-    std::fill_n(buf, 4096, 0);
-    int size_read = klogctl(SYSLOG_ACTION_READ, buf, sizeof(buf));
+    int size_read = klogctl(SYSLOG_ACTION_READ, buf, sizeof(buf) - 1);
     ASSERT_GT(size_read, 0);
+    buf[size_read] = '\0';
     EXPECT_EQ(strstr(buf, "SyslogRead -- first"), nullptr);
   } while (strstr(buf, "SyslogRead -- second") == nullptr);
 
   // Check that all logs are present when reading from /dev/kmsg.
   do {
-    std::fill_n(buf, 4096, 0);
-    size_t size_read = read(kmsg_fd, buf, sizeof(buf));
-    ASSERT_GT(size_read, 0ul);
+    ssize_t size_read = read(kmsg_fd, buf, sizeof(buf) - 1);
+    ASSERT_GT(size_read, 0);
+    buf[size_read] = '\0';
   } while (strstr(buf, "SyslogRead -- first") == nullptr);
 
   while (strstr(buf, "SyslogRead -- second") == nullptr) {
-    size_t size_read = read(kmsg_fd, buf, sizeof(buf));
-    ASSERT_GT(size_read, 0ul);
+    ssize_t size_read = read(kmsg_fd, buf, sizeof(buf) - 1);
+    ASSERT_GT(size_read, 0);
+    buf[size_read] = '\0';
   }
 
   // Check that all logs are present when reading using SYSLOG_ACTION_READ_ALL
@@ -168,8 +171,9 @@ TEST_F(SyslogTest, ReadProcKmsg) {
   // Read that first log we wrote.
   char buf[4096];
   do {
-    size_t size_read = read(proc_kmsg_fd, buf, sizeof(buf));
-    ASSERT_GT(size_read, 0ul);
+    ssize_t size_read = read(proc_kmsg_fd, buf, sizeof(buf) - 1);
+    ASSERT_GT(size_read, 0);
+    buf[size_read] = '\0';
   } while (strstr(buf, "ReadProcKmsg -- log one") == nullptr);
 
   // Write a second log.
@@ -178,10 +182,10 @@ TEST_F(SyslogTest, ReadProcKmsg) {
   close(kmsg_fd);
 
   // Check that the first log we read isn't present anymore.
-  std::fill_n(buf, 4096, 0);
   do {
-    size_t size_read = read(proc_kmsg_fd, buf, sizeof(buf));
-    ASSERT_GT(size_read, 0ul);
+    ssize_t size_read = read(proc_kmsg_fd, buf, sizeof(buf) - 1);
+    ASSERT_GT(size_read, 0);
+    buf[size_read] = '\0';
     EXPECT_EQ(strstr(buf, "ReadProcKmsg -- log one"), nullptr);
 
   } while (strstr(buf, "ReadProcKmsg -- log two") == nullptr);
@@ -192,10 +196,11 @@ TEST_F(SyslogTest, ReadProcKmsg) {
 TEST_F(SyslogTest, NonBlockingRead) {
   int fd = open("/dev/kmsg", O_RDONLY | O_NONBLOCK);
   char buf[4096];
-  ssize_t size_read = 0;
-  while (size_read != -1) {
+  ssize_t size_read;
+  do {
     size_read = read(fd, buf, sizeof(buf));
-  }
+  } while (size_read >= 0 || (size_read == -1 && errno == EINTR));
+  EXPECT_EQ(size_read, -1);
   EXPECT_EQ(errno, EAGAIN);
   close(fd);
 }
@@ -268,8 +273,9 @@ TEST_F(SyslogTest, DevKmsgSeekSet) {
   // Advance until we have read the log written above.
   char buf[4096];
   do {
-    size_t size_read = read(fd, buf, sizeof(buf));
-    ASSERT_GT(size_read, 0ul);
+    ssize_t size_read = read(fd, buf, sizeof(buf) - 1);
+    ASSERT_GT(size_read, 0);
+    buf[size_read] = '\0';
   } while (strstr(buf, "DevKmsgSeekSet: hello") == nullptr);
 
   // Seek to the beginning of the log.
@@ -277,10 +283,10 @@ TEST_F(SyslogTest, DevKmsgSeekSet) {
 
   // We see the previous log again. If we had not done SEEK_SET,0. This would hang until some
   // unseen log arrives.
-  std::fill_n(buf, 4096, 0);
   do {
-    size_t size_read = read(fd, buf, sizeof(buf));
-    ASSERT_GT(size_read, 0ul);
+    ssize_t size_read = read(fd, buf, sizeof(buf) - 1);
+    ASSERT_GT(size_read, 0);
+    buf[size_read] = '\0';
   } while (strstr(buf, "DevKmsgSeekSet: hello") == nullptr);
 
   close(fd);
@@ -298,8 +304,9 @@ TEST_F(SyslogTest, DevKmsgSeekEnd) {
   // Ensure the log has been written.
   char buf[4096];
   do {
-    size_t size_read = read(fd, buf, sizeof(buf));
-    ASSERT_GT(size_read, 0ul);
+    ssize_t size_read = read(fd, buf, sizeof(buf) - 1);
+    ASSERT_GT(size_read, 0);
+    buf[size_read] = '\0';
   } while (strstr(buf, "DevKmsgSeekEnd: hello") == nullptr);
   close(fd);
 
@@ -316,10 +323,15 @@ TEST_F(SyslogTest, DevKmsgSeekEnd) {
   write(fd, bye_message, strlen(bye_message));
 
   // We should see the second log but never the first one.
-  std::fill_n(buf, 4096, 0);
+  buf[0] = '\0';
   do {
-    size_t size_read = read(fd, buf, sizeof(buf));
-    ASSERT_GT(size_read, 0ul);
+    ssize_t size_read = read(fd, buf, sizeof(buf) - 1);
+    if (size_read < 0 && (errno == EAGAIN || errno == EINTR)) {
+      usleep(1000);
+      continue;
+    }
+    ASSERT_GT(size_read, 0);
+    buf[size_read] = '\0';
     EXPECT_EQ(strstr(buf, "DevKmsgSeekEnd: hello"), nullptr);
   } while (strstr(buf, "DevKmsgSeekEnd: bye") == nullptr);
 

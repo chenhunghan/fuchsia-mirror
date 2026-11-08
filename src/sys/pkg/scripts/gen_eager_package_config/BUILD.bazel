@@ -66,7 +66,6 @@ host_rustc_test(
     ],
 )
 
-# @bazel2gn:skip
 test_suite(
     name = "host_tests",
     tests = [

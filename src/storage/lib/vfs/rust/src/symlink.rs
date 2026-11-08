@@ -76,17 +76,6 @@ impl<T: Symlink> Connection<T> {
     // Returns true if the connection should terminate.
     async fn handle_request(&mut self, req: fio::SymlinkRequest) -> Result<bool, fidl::Error> {
         match req {
-            #[cfg(any(
-                fuchsia_api_level_at_least = "PLATFORM",
-                not(fuchsia_api_level_at_least = "29")
-            ))]
-            fio::SymlinkRequest::DeprecatedClone { flags, object, control_handle: _ } => {
-                crate::common::send_on_open_with_error(
-                    flags.contains(fio::OpenFlags::DESCRIBE),
-                    object,
-                    Status::NOT_SUPPORTED,
-                );
-            }
             fio::SymlinkRequest::Clone { request, control_handle: _ } => {
                 self.handle_clone(ServerEnd::new(request.into_channel()))
                     .trace(trace::trace_future_args!("storage", "Symlink::Clone"))
@@ -97,6 +86,35 @@ impl<T: Symlink> Connection<T> {
                 responder.send(Ok(()))?;
                 return Ok(true);
             }
+            #[cfg(fuchsia_api_level_at_least = "NEXT")]
+            fio::SymlinkRequest::DeprecatedLinkInto { dst_parent_token, dst, responder } => {
+                async move {
+                    responder.send(
+                        self.handle_link_into(
+                            dst_parent_token,
+                            dst,
+                            fio::LinkIntoOptions::default(),
+                        )
+                        .await
+                        .map_err(|s| s.into_raw()),
+                    )
+                }
+                .trace(trace::trace_future_args!("storage", "Symlink::DeprecatedLinkInto"))
+                .await?;
+            }
+            #[cfg(fuchsia_api_level_at_least = "NEXT")]
+            fio::SymlinkRequest::LinkInto { dst_parent_token, dst, options, responder } => {
+                async move {
+                    responder.send(
+                        self.handle_link_into(dst_parent_token, dst, options)
+                            .await
+                            .map_err(|s| s.into_raw()),
+                    )
+                }
+                .trace(trace::trace_future_args!("storage", "Symlink::LinkInto"))
+                .await?;
+            }
+            #[cfg(not(fuchsia_api_level_at_least = "NEXT"))]
             fio::SymlinkRequest::LinkInto { dst_parent_token, dst, responder } => {
                 async move {
                     responder.send(
@@ -111,34 +129,6 @@ impl<T: Symlink> Connection<T> {
             fio::SymlinkRequest::Sync { responder } => {
                 trace::duration!("storage", "Symlink::Sync");
                 responder.send(Ok(()))?;
-            }
-            #[cfg(fuchsia_api_level_at_least = "28")]
-            fio::SymlinkRequest::DeprecatedGetAttr { responder } => {
-                // TODO(https://fxbug.dev/293947862): Restrict GET_ATTRIBUTES.
-                let (status, attrs) = crate::common::io2_to_io1_attrs(
-                    self.symlink.as_ref(),
-                    fio::Rights::GET_ATTRIBUTES,
-                )
-                .await;
-                responder.send(status, &attrs)?;
-            }
-            #[cfg(not(fuchsia_api_level_at_least = "28"))]
-            fio::SymlinkRequest::GetAttr { responder } => {
-                // TODO(https://fxbug.dev/293947862): Restrict GET_ATTRIBUTES.
-                let (status, attrs) = crate::common::io2_to_io1_attrs(
-                    self.symlink.as_ref(),
-                    fio::Rights::GET_ATTRIBUTES,
-                )
-                .await;
-                responder.send(status, &attrs)?;
-            }
-            #[cfg(fuchsia_api_level_at_least = "28")]
-            fio::SymlinkRequest::DeprecatedSetAttr { responder, .. } => {
-                responder.send(Status::ACCESS_DENIED.into_raw())?;
-            }
-            #[cfg(not(fuchsia_api_level_at_least = "28"))]
-            fio::SymlinkRequest::SetAttr { responder, .. } => {
-                responder.send(Status::ACCESS_DENIED.into_raw())?;
             }
             fio::SymlinkRequest::GetAttributes { query, responder } => {
                 async move {
@@ -211,12 +201,6 @@ impl<T: Symlink> Connection<T> {
                 trace::duration!("storage", "Symlink::SetFlags");
                 responder.send(Err(Status::NOT_SUPPORTED.into_raw()))?;
             }
-            fio::SymlinkRequest::DeprecatedGetFlags { responder } => {
-                responder.send(Status::NOT_SUPPORTED.into_raw(), fio::OpenFlags::empty())?;
-            }
-            fio::SymlinkRequest::DeprecatedSetFlags { responder, .. } => {
-                responder.send(Status::ACCESS_DENIED.into_raw())?;
-            }
             fio::SymlinkRequest::Query { responder } => {
                 trace::duration!("storage", "Symlink::Query");
                 responder.send(fio::SymlinkMarker::PROTOCOL_NAME.as_bytes())?;
@@ -280,6 +264,7 @@ impl<T: Symlink> Connection<T> {
         &mut self,
         target_parent_token: flex_client::Event,
         target_name: String,
+        #[cfg(fuchsia_api_level_at_least = "NEXT")] options: fio::LinkIntoOptions,
     ) -> Result<(), Status> {
         let target_name = Name::try_from(target_name).map_err(|_| Status::INVALID_ARGS)?;
 
@@ -307,7 +292,10 @@ impl<T: Symlink> Connection<T> {
 
         let target_parent = target_parent.into_mutable_directory().ok_or(Status::INVALID_ARGS)?;
 
-        self.symlink.clone().link_into(target_parent, target_name).await
+        #[cfg(fuchsia_api_level_at_least = "NEXT")]
+        return self.symlink.clone().link_into(target_parent, target_name, options).await;
+        #[cfg(not(fuchsia_api_level_at_least = "NEXT"))]
+        return self.symlink.clone().link_into(target_parent, target_name).await;
     }
 
     async fn handle_list_extended_attribute(

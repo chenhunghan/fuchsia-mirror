@@ -4,10 +4,7 @@
 {
     offer: [
         {
-            protocol: [
-                "fuchsia.cobalt.SystemDataUpdater",
-                "fuchsia.metrics.MetricEventLoggerFactory",
-            ],
+            protocol: [ "fuchsia.metrics.MetricEventLoggerFactory" ],
             from: "#cobalt",
             to: "#system-update",
         },

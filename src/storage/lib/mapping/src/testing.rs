@@ -158,10 +158,6 @@ impl TestVecBuffer {
         (buf, receiver)
     }
 
-    pub fn new_unprepared() -> (Self, TestVecBufferReceiver) {
-        Self::new_unprepared_with_range(0..0)
-    }
-
     pub fn new_unprepared_with_range(range: Range<u64>) -> (Self, TestVecBufferReceiver) {
         let receiver = TestVecBufferReceiver::default();
         let buf = Self {
@@ -210,6 +206,21 @@ impl PageRequest for TestVecBuffer {
         self.offset = read_range.start;
         Ok(())
     }
+
+    fn split_at(&mut self, mid: u64) -> Self {
+        assert_eq!(self.committed_len, 0, "split_at must be called before commit");
+        assert!(mid > self.range.start && mid < self.range.end);
+        let head_range = self.range.start..mid;
+        self.range.start = mid;
+        self.offset = mid;
+        Self {
+            data: AlignedBuffer::default(),
+            range: head_range.clone(),
+            committed_len: 0,
+            offset: head_range.start,
+            receiver: self.receiver.clone(),
+        }
+    }
 }
 
 /// A [`DeliveryHandler`] test adapter that implements `get_page_request` via a closure.
@@ -232,22 +243,4 @@ where
     fn get_page_request(self: &Arc<Self>, key: u64, range: Range<u64>) -> Self::Request {
         (self.0)(key, range)
     }
-}
-
-/// Serializes uncompressed `BlobMetadata` with the given `merkle_leaves` for testing.
-pub fn serialize_uncompressed_blob_metadata(merkle_leaves: &[[u8; 32]]) -> Vec<u8> {
-    use bincode::Options as _;
-    use blob_metadata::{BlobFormat, BlobMetadata};
-    use byteorder::{LittleEndian, WriteBytesExt as _};
-    let metadata = BlobMetadata {
-        merkle_leaves: merkle_leaves.to_vec().into(),
-        format: BlobFormat::Uncompressed,
-    };
-    let mut bytes = Vec::new();
-    bytes.write_u32::<LittleEndian>(crate::file::BLOB_METADATA_VERSION).unwrap();
-    bincode::DefaultOptions::new()
-        .allow_trailing_bytes()
-        .serialize_into(&mut bytes, &metadata)
-        .unwrap();
-    bytes
 }

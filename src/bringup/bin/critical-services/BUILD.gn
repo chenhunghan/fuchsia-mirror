@@ -43,9 +43,8 @@ executable("critical-services") {
     "//zircon/system/ulib/fbl",
     "//zircon/system/ulib/fzl",
     "//zircon/system/ulib/svc",
+    "//zircon/system/ulib/zx",
   ]
-
-  public_deps = [ "//zircon/system/ulib/zx" ]
 }
 
 test("critical-services-unittests-bin") {

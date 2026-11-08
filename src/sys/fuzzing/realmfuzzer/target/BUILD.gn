@@ -14,7 +14,6 @@ source_set("instrumented") {
   public = [ "instrumented-process.h" ]
   sources = [ "instrumented-process.cc" ]
   public_deps = [ ":no_hooks" ]
-  deps = [ "//build/validate:non_production_tag" ]
 }
 
 # Version of the `target` library that does not install hooks, and can be used
@@ -34,7 +33,6 @@ source_set("no_hooks") {
     "//src/sys/fuzzing/fidl:fuchsia.fuzzer_hlcpp",
   ]
   deps = [
-    "//build/validate:non_production_tag",
     "//sdk/lib/syslog/cpp",
     "//src/lib/debug:backtrace-request",
     "//third_party/github.com/simdutf/simdutf",

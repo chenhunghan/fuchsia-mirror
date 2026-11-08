@@ -9,7 +9,7 @@ use fidl_fuchsia_bluetooth_sys::{
 };
 use fuchsia_bluetooth::types::HostId;
 use futures::stream::StreamExt;
-use futures::{select, FutureExt};
+use futures::{FutureExt, select};
 use std::pin::pin;
 
 use crate::host_dispatcher;
@@ -26,7 +26,7 @@ async fn set_pairing_delegate() {
         host_dispatcher::test::create_and_add_test_host_to_dispatcher(HostId(1), &hd)
             .await
             .unwrap();
-    hd.set_active_host(HostId(1)).expect("can set active host");
+    hd.set_active_host(HostId(1)).await.expect("can set active host");
 
     // Create the pairing server
     let (pairing_client, pairing_server) = endpoints::create_proxy_and_stream::<PairingMarker>();

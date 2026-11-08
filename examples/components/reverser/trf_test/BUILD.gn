@@ -10,6 +10,7 @@ if (is_fuchsia) {
     source = "src/reverser_trf_test.rs"
     mocks = [ "src/mocks.rs" ]
     cut = [ "//examples/components/reverser" ]
+    cut_manifest = "//examples/components/reverser/meta/reverser.cml"
     deps = [
       "//examples/components/reverser/fidl:fuchsia.examples.reverser_rust",
       "//third_party/rust_crates:anyhow",

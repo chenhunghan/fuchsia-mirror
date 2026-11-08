@@ -4,11 +4,19 @@
 
 #include "src/ui/scenic/lib/types/display_mode.h"
 
+#include <fidl/fuchsia.hardware.display.types/cpp/wire.h>
+
+#include <cstdint>
+
 #include <gtest/gtest.h>
 
 namespace types {
 
 namespace {
+
+// Sets every bit that is not defined in fuchsia.hardware.display.types/ModeFlags.
+constexpr uint32_t kUnknownModeFlags =
+    ~static_cast<uint32_t>(fuchsia_hardware_display_types::wire::ModeFlags::kMask);
 
 constexpr DisplayMode kDisplayMode1({.active_area = Extent2({.width = 1024, .height = 768}),
                                      .refresh_rate_millihertz = 60000,
@@ -63,10 +71,17 @@ TEST(DisplayModeTest, IsValid) {
                                      .refresh_rate_millihertz = 0,
                                      .mode_flags = 0}));
 
-  // Invalid mode_flags.
+  // Invalid mode_flags: bits not defined in fuchsia.hardware.display.types/ModeFlags.
   EXPECT_FALSE(DisplayMode::IsValid({.active_area = Extent2({.width = 1, .height = 1}),
                                      .refresh_rate_millihertz = 1,
-                                     .mode_flags = 1}));
+                                     .mode_flags = kUnknownModeFlags}));
+
+  // Valid mode_flags: VARIABLE_REFRESH_RATE.
+  EXPECT_TRUE(DisplayMode::IsValid(
+      {.active_area = Extent2({.width = 1, .height = 1}),
+       .refresh_rate_millihertz = 1,
+       .mode_flags = static_cast<uint32_t>(
+           fuchsia_hardware_display_types::wire::ModeFlags::kVariableRefreshRate)}));
 }
 
 TEST(DisplayModeTest, FromFidl) {

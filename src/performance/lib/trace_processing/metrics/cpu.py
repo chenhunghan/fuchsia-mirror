@@ -10,6 +10,7 @@ import itertools
 import logging
 import sys
 import typing
+import weakref
 from collections.abc import Collection, Mapping, MutableSequence, Sequence
 from typing import (
     NotRequired,
@@ -122,6 +123,9 @@ class CpuProcessingRateTimeline:
             rates: An iterable of ProcessingRateSample objects.
         """
         self.rates = sorted(rates, key=lambda r: r.timestamp_ms)
+        self._timestamps: list[float] = [r.timestamp_ms for r in self.rates]
+        self._rate_values: list[float] = [r.rate for r in self.rates]
+        self._rate_strs: list[str] = [str(int(r)) for r in self._rate_values]
 
     def get_virtual_slices(
         self, start_ts: float, stop_ts: float
@@ -140,20 +144,17 @@ class CpuProcessingRateTimeline:
 
         virtual_slices: list[VirtualProcessingSlice] = []
         curr_ts = start_ts
+        timestamps = self._timestamps
+        rate_values = self._rate_values
+        n_rates = len(timestamps)
 
-        idx = bisect.bisect_right(
-            self.rates, curr_ts, key=lambda r: r.timestamp_ms
-        )
+        idx = bisect.bisect_right(timestamps, curr_ts)
         current_rate = (
-            _DEFAULT_PROCESSING_RATE if idx == 0 else self.rates[idx - 1].rate
+            _DEFAULT_PROCESSING_RATE if idx == 0 else rate_values[idx - 1]
         )
 
         while curr_ts < stop_ts:
-            next_change_ts = (
-                self.rates[idx].timestamp_ms
-                if idx < len(self.rates)
-                else float("inf")
-            )
+            next_change_ts = timestamps[idx] if idx < n_rates else float("inf")
             seg_end = min(stop_ts, next_change_ts)
 
             virtual_slices.append(
@@ -165,7 +166,7 @@ class CpuProcessingRateTimeline:
 
             curr_ts = seg_end
             if curr_ts >= next_change_ts:
-                current_rate = self.rates[idx].rate
+                current_rate = rate_values[idx]
                 idx += 1
 
         return virtual_slices
@@ -229,6 +230,19 @@ class CpuMetricsProcessor(trace_metrics.MetricsProcessor):
         """
         self.aggregates_only: bool = aggregates_only
         self._percent_cutoff = percent_cutoff
+        self._cached_rates: tuple[
+            weakref.ReferenceType[trace_model.Model],
+            Mapping[int, CpuProcessingRateTimeline],
+        ] | None = None
+
+    def _get_cached_cpu_rates(
+        self, model: trace_model.Model
+    ) -> Mapping[int, CpuProcessingRateTimeline]:
+        if self._cached_rates is not None and self._cached_rates[0]() is model:
+            return self._cached_rates[1]
+        timelines = _get_cpu_rates(model)
+        self._cached_rates = (weakref.ref(model), timelines)
+        return timelines
 
     @property
     @typing.override
@@ -248,7 +262,7 @@ class CpuMetricsProcessor(trace_metrics.MetricsProcessor):
             name=_CPU_USAGE_EVENT_NAME,
             type=trace_model.CounterEvent,
         ):
-            cpu_starts.append(event.start.to_epoch_delta().to_nanoseconds())
+            cpu_starts.append(event.start.to_epoch_nanoseconds())
             cpu_percentages.append(
                 event.args.get("average_cpu_percentage") or 0
             )
@@ -291,7 +305,7 @@ class CpuMetricsProcessor(trace_metrics.MetricsProcessor):
             )
 
         # Calculate normalized metrics if Processing Rate events are present
-        cpu_timelines = _get_cpu_rates(model)
+        cpu_timelines = self._get_cached_cpu_rates(model)
         if cpu_timelines:
             total_cpu_count = max(1, len(model.scheduling_records))
             norm_percentages = _calculate_normalized_percentages(
@@ -341,7 +355,9 @@ class CpuMetricsProcessor(trace_metrics.MetricsProcessor):
             Breakdown: Per-process, per-thread CPU usage breakdown.
         """
         (breakdown, _) = _process_metrics_and_get_total_time(
-            model, self._percent_cutoff
+            model,
+            self._percent_cutoff,
+            cpu_timelines=self._get_cached_cpu_rates(model),
         )
         # TODO(https://github.com/python/mypy/issues/18176): eliminate this cast;
         # the type-checker ought understand that a ThreadBreakdown is suitable
@@ -354,6 +370,7 @@ class CpuMetricsProcessor(trace_metrics.MetricsProcessor):
 def _process_metrics_and_get_total_time(
     model: trace_model.Model,
     percent_cutoff: float,
+    cpu_timelines: Mapping[int, CpuProcessingRateTimeline] | None = None,
 ) -> tuple[ThreadBreakdown, float]:
     """
     Given trace_model.Model, iterates through all the SchedulingRecords and calculates the
@@ -376,7 +393,8 @@ def _process_metrics_and_get_total_time(
             tid_to_thread_name[t.tid] = t.name
 
     # Parse Processing rate events for DVFS CPU normalization.
-    cpu_timelines = _get_cpu_rates(model)
+    if cpu_timelines is None:
+        cpu_timelines = _get_cpu_rates(model)
 
     # Calculate durations for each CPU for each tid.
     durations = DurationsBreakdown.calculate(
@@ -478,30 +496,28 @@ def _get_cpu_rates(
     Returns:
         A dictionary keyed by cpu_index, containing CpuProcessingRateTimeline objects.
     """
-    power_events = tuple(
-        e
-        for e in trace_utils.filter_events(
-            model.all_events(),
-            type=trace_model.CounterEvent,
-        )
-        if e.name.startswith(_RATE_EVENT_NAME)
-    )
-
     rates_by_cpu: collections.defaultdict[
         int, list[ProcessingRateSample]
     ] = collections.defaultdict(list)
-    for event in power_events:
-        # For "Rate" events, the CPU index is encoded in `event.id`.
-        # When the CPU index is 0, the `event.id` field is omitted from the trace.
-        cpu_idx = event.id if event.id is not None else 0
-        rate = event.args.get("CPU", _DEFAULT_PROCESSING_RATE)
-
-        rates_by_cpu[cpu_idx].append(
-            ProcessingRateSample(
-                timestamp_ms=DurationsBreakdown._timestamp_ms(event.start),
-                rate=rate,
-            )
-        )
+    for process in model.processes:
+        for thread in process.threads:
+            for event in thread.events:
+                if isinstance(
+                    event, trace_model.CounterEvent
+                ) and event.name.startswith(_RATE_EVENT_NAME):
+                    # For "Rate" events, the CPU index is encoded in `event.id`.
+                    # When the CPU index is 0, the `event.id` field is omitted from the trace.
+                    cpu_idx = event.id if event.id is not None else 0
+                    rate = event.args.get("CPU", _DEFAULT_PROCESSING_RATE)
+                    rates_by_cpu[cpu_idx].append(
+                        ProcessingRateSample(
+                            timestamp_ms=float(
+                                event.start.to_epoch_nanoseconds()
+                            )
+                            / _NS_PER_MS,
+                            rate=rate,
+                        )
+                    )
 
     return {
         cpu_idx: CpuProcessingRateTimeline(rates)
@@ -612,10 +628,22 @@ class DurationsBreakdown:
                 s.duration * (s.rate / _DEFAULT_PROCESSING_RATE)
                 for s in virtual_slices
             )
+            timestamps = rate_timeline._timestamps
+            rate_values = rate_timeline._rate_values
+            rate_strs = rate_timeline._rate_strs
+            n_rates = len(timestamps)
         else:
             self.cpu_to_total_normalized_duration[cpu] = (
                 largest_timestamp - smallest_timestamp
             )
+            timestamps = []
+            rate_values = []
+            rate_strs = []
+            n_rates = 0
+
+        default_rate_str = str(int(_DEFAULT_PROCESSING_RATE))
+        rate_idx = 0
+        inf = float("inf")
 
         for prev_record, curr_record in itertools.pairwise(records):
             # Check that the previous ContextSwitch's incoming_tid ("this thread is starting work
@@ -639,21 +667,55 @@ class DurationsBreakdown:
                     # Add stats to the total duration for that tid and CPU.
                     cpu_stats = self.tid_to_stats[curr_record.outgoing_tid][cpu]
                     cpu_stats.duration += duration
+                    duration_per_rate = cpu_stats.rate_stats.duration_per_rate
 
                     if rate_timeline:
-                        virtual_slices = rate_timeline.get_virtual_slices(
-                            start_ts, stop_ts
-                        )
-                        for s in virtual_slices:
-                            norm_dur = s.duration * (
-                                s.rate / _DEFAULT_PROCESSING_RATE
+                        if start_ts < stop_ts:
+                            while (
+                                rate_idx < n_rates
+                                and timestamps[rate_idx] <= start_ts
+                            ):
+                                rate_idx += 1
+                            current_rate = (
+                                _DEFAULT_PROCESSING_RATE
+                                if rate_idx == 0
+                                else rate_values[rate_idx - 1]
                             )
-                            cpu_stats.normalized_duration += norm_dur
-                            cpu_stats.rate_stats.add(s.rate, s.duration)
+                            current_rate_str = (
+                                default_rate_str
+                                if rate_idx == 0
+                                else rate_strs[rate_idx - 1]
+                            )
+                            curr_ts = start_ts
+                            while curr_ts < stop_ts:
+                                next_change_ts = (
+                                    timestamps[rate_idx]
+                                    if rate_idx < n_rates
+                                    else inf
+                                )
+                                seg_end = (
+                                    stop_ts
+                                    if stop_ts < next_change_ts
+                                    else next_change_ts
+                                )
+                                seg_dur = seg_end - curr_ts
+                                cpu_stats.normalized_duration += seg_dur * (
+                                    current_rate / _DEFAULT_PROCESSING_RATE
+                                )
+                                duration_per_rate[current_rate_str] = (
+                                    duration_per_rate.get(current_rate_str, 0.0)
+                                    + seg_dur
+                                )
+                                curr_ts = seg_end
+                                if curr_ts >= next_change_ts:
+                                    current_rate = rate_values[rate_idx]
+                                    current_rate_str = rate_strs[rate_idx]
+                                    rate_idx += 1
                     else:
                         cpu_stats.normalized_duration += duration
-                        cpu_stats.rate_stats.add(
-                            _DEFAULT_PROCESSING_RATE, duration
+                        duration_per_rate[default_rate_str] = (
+                            duration_per_rate.get(default_rate_str, 0.0)
+                            + duration
                         )
 
         if skipped_duration > 0:
@@ -664,7 +726,7 @@ class DurationsBreakdown:
         """
         Return timestamp in ms.
         """
-        return timestamp.to_epoch_delta().to_milliseconds_f()
+        return float(timestamp.to_epoch_nanoseconds()) / _NS_PER_MS
 
     @classmethod
     def calculate(
@@ -677,14 +739,15 @@ class DurationsBreakdown:
     ) -> Self:
         durations = cls()
         for cpu, records in per_cpu_scheduling_records.items():
+            cs_records = [
+                r for r in records if isinstance(r, trace_model.ContextSwitch)
+            ]
+            cs_records.sort(
+                key=lambda record: record.start.to_epoch_nanoseconds()
+            )
             durations._calculate_duration_per_cpu(
                 cpu,
-                sorted(
-                    trace_utils.filter_records(
-                        iter(records), trace_model.ContextSwitch
-                    ),
-                    key=lambda record: record.start,
-                ),
+                cs_records,
                 tid_to_thread_name,
                 cpu_timelines.get(cpu),
             )

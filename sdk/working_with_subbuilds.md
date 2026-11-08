@@ -43,7 +43,12 @@ idk_buildable_api_levels = [ 16, 22, "NEXT" ]
 
 **Before working with sub-builds directly, you must have generated the sub-build
 directories by generating build files via the main build.**
-The quickest way to do this is to build the sub-build once as follows:
+IDK sub-builds reuse prebuilt host tools (`//sdk:idk_build_tools`) and the
+prebuilt sysroot (`//zircon/public/sysroot_sdk:sysroot_sdk_export`) generated
+by the top-level build, avoiding redundant host tool and libc compilations.
+
+The quickest way to generate the sub-build directory and ensure these top-level
+prerequisites are built is to build the sub-build target once as follows:
 ```
 fx build //sdk:fuchsia_collection_subbuilds-api${level}-${arch}
 ```

@@ -8,6 +8,7 @@ import("//build/testing/environments.gni")
 import("//src/tests/benchmarks/fidl/benchmark_suite/benchmark_suite.gni")
 import("//tools/fidl/gidl/gidl.gni")
 
+# LINT.IfChange
 gidl_deps = []
 foreach(suite, benchmark_suites) {
   suite_target = "benchmark_suite__${suite.name}"
@@ -23,6 +24,7 @@ foreach(suite, benchmark_suites) {
       "//sdk/lib/async-loop:async-loop-default",
       "//sdk/lib/fidl",
       "//zircon/system/ulib/perftest",
+      "//zircon/system/ulib/sync:sync-cpp",
     ]
     extra_args = [
       "-cpp-benchmarks-fidl-library",
@@ -49,3 +51,4 @@ fuchsia_package_with_single_component("fidl_microbenchmarks_llcpp") {
   component_name = "benchmark"
   deps = [ ":bin" ]
 }
+# LINT.ThenChange(//src/tests/benchmarks/fidl/llcpp/BUILD.bazel)

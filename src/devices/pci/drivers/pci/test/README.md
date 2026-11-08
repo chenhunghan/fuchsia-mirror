@@ -6,7 +6,7 @@ This directory contains unit and integration tests for the Fuchsia PCI bus drive
 
 The test suite consists of two primary test packages:
 
-1. **`pci-unit-test`**: C++ unit tests verifying internal bus driver subsystems against mock DDK and fakes.
+1. **`pci-unit-test`**: C++ unit tests verifying internal bus driver subsystems against fakes.
 2. **`pci-driver-test`**: Modern DFv2 Rust integration test suite verifying all `fuchsia.hardware.pci` protocol operations against `fake-bus-pci` (build target `pci_fake`) inside `DriverTestRealm` (DTR).
 
 ---
@@ -17,7 +17,7 @@ The test suite consists of two primary test packages:
 
 * **Source**: [`unit/`](unit/)
 * **Build Target**: `//src/devices/pci/drivers/pci/test:pci-unit-test`
-* **Framework**: C++ (GoogleTest / `mock-ddk`)
+* **Framework**: C++ (GoogleTest / `fdf_testing`)
 
 Runs isolated unit tests across driver internal components:
 
@@ -25,14 +25,13 @@ Runs isolated unit tests across driver internal components:
 * `bus_tests.cc`: Bus scanning, device topology lifecycle, and upstream node configuration.
 * `config_tests.cc`: Configuration space accessors for Type 0 and Type 1 headers.
 * `device_tests.cc`: PCI device lifecycle, capability traversal, BAR allocation, and IRQ modes.
-* `fake_pciroot_tests.cc`: Verification of the `FakePciroot` test fake implementation.
 * `msix_tests.cc`: MSI-X vector allocation, table programming, and capability configuration.
 
 Unit tests are supported by test fakes located in [`fakes/`](fakes/):
 * `fake_allocator.h`: VMO-backed `PciAllocation` fakes.
 * `fake_bus.h`: Hardware-decoupled `BusDeviceInterface` implementation.
 * `fake_config.h`, `fake_ecam.h`: MMIO-backed fake configuration space.
-* `fake_pciroot.h`: Fake `fuchsia.hardware.pciroot` implementation.
+* `fake_root_service.h`: `fuchsia.hardware.pci.root` `Root` and `Config` FIDL server fakes.
 * `fake_upstream_node.h`: Fake upstream bridges and root complexes.
 * `test_device.h`: NVIDIA Quadro K2200 reference configuration dump.
 

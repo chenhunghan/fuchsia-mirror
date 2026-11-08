@@ -28,7 +28,13 @@
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
 fidl("fuchsia.power.battery.test") {
-  sources = [ "simulator.fidl" ]
+  sources = [
+    "governor.fidl",
+    "simulator.fidl",
+  ]
   visibility = [ "*" ]
-  public_deps = [ "//sdk/fidl/fuchsia.power.battery" ]
+  public_deps = [
+    "//sdk/fidl/fuchsia.hardware.power.charger",
+    "//sdk/fidl/fuchsia.power.battery",
+  ]
 }

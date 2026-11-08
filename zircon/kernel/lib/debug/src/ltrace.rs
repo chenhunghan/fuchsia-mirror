@@ -73,24 +73,11 @@
 //! * `LTRACEF_LEVEL(lvl, x...)` -> [`ltracef_level!`]
 
 #[doc(hidden)]
-pub struct KernelConsoleWriter;
-
-impl core::fmt::Write for KernelConsoleWriter {
-    #[cfg(not(test))]
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        kprint::kprint!("{:s}", s);
-        Ok(())
-    }
-
-    #[cfg(test)]
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        std::print!("{}", s);
-        Ok(())
-    }
-}
+pub use crate::KernelConsoleWriter;
 
 #[doc(hidden)]
-#[inline(always)]
+#[cold]
+#[inline(never)]
 pub fn print_trace_args(module_path: &str, line: u32, args: core::fmt::Arguments<'_>) {
     use core::fmt::Write;
     let mut writer = KernelConsoleWriter;
@@ -99,7 +86,8 @@ pub fn print_trace_args(module_path: &str, line: u32, args: core::fmt::Arguments
 }
 
 #[doc(hidden)]
-#[inline(always)]
+#[cold]
+#[inline(never)]
 pub fn print_trace_location(module_path: &str, line: u32) {
     use core::fmt::Write;
     let mut writer = KernelConsoleWriter;
@@ -107,7 +95,8 @@ pub fn print_trace_location(module_path: &str, line: u32) {
 }
 
 #[doc(hidden)]
-#[inline(always)]
+#[cold]
+#[inline(never)]
 pub fn print_trace_action(module_path: &str, line: u32, action: &str) {
     use core::fmt::Write;
     let mut writer = KernelConsoleWriter;
@@ -115,7 +104,8 @@ pub fn print_trace_action(module_path: &str, line: u32, action: &str) {
 }
 
 #[doc(hidden)]
-#[inline(always)]
+#[cold]
+#[inline(never)]
 pub fn print_trace_action_named(name: &str, action: &str) {
     use core::fmt::Write;
     let mut writer = KernelConsoleWriter;
@@ -125,8 +115,13 @@ pub fn print_trace_action_named(name: &str, action: &str) {
 #[doc(hidden)]
 #[inline(always)]
 pub fn print_trace_obj<T: ?Sized>(module_path: &str, line: u32, obj: &T, action: &str) {
+    print_trace_obj_ptr(module_path, line, obj as *const T as *const (), action);
+}
+
+#[cold]
+#[inline(never)]
+fn print_trace_obj_ptr(module_path: &str, line: u32, ptr: *const (), action: &str) {
     use core::fmt::Write;
-    let ptr = obj as *const T as *const ();
     let mut writer = KernelConsoleWriter;
     let _ = writeln!(writer, "{}:{}: {} {:p}", module_path, line, action, ptr);
 }
@@ -134,8 +129,13 @@ pub fn print_trace_obj<T: ?Sized>(module_path: &str, line: u32, obj: &T, action:
 #[doc(hidden)]
 #[inline(always)]
 pub fn print_trace_obj_named<T: ?Sized>(name: &str, obj: &T, action: &str) {
+    print_trace_obj_named_ptr(name, obj as *const T as *const (), action);
+}
+
+#[cold]
+#[inline(never)]
+fn print_trace_obj_named_ptr(name: &str, ptr: *const (), action: &str) {
     use core::fmt::Write;
-    let ptr = obj as *const T as *const ();
     let mut writer = KernelConsoleWriter;
     let _ = writeln!(writer, "{}: {} {:p}", name, action, ptr);
 }

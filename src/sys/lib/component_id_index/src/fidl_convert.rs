@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 use crate::{Index, IndexEntry, InstanceId, InstanceIdError, PersistedIndex, ValidationError};
-use fidl_fuchsia_component_internal as fcomponent_internal;
+use fidl_fuchsia_component_internal_common as fcomponent_internal;
 use moniker::{Moniker, MonikerError};
 use thiserror::Error;
 

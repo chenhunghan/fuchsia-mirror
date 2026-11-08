@@ -39,7 +39,6 @@ host_device_types = {
   ampere_altra = "AmpereAltraMax-M128-30"
   ampere_one = "AmpereOne-A192-32X"
   gcp_c4a_highmem_96_bm = "GCP_C4A_HIGHMEM_96_BM"
-  lattepanda_sigma_cell = "LATTEPANDA_SIGMA_CELL"
 }
 
 # LINT.ThenChange(//build/testing/environments/device_types.bzl:device_types)
@@ -60,6 +59,19 @@ _all_named_fuchsia_envs += [
     env = aemu_env
   },
 ]
+
+# An AEMU environment with external internet access enabled, mirrored by
+# `aemu_internet_env` in //build/testing/environments/BUILD.bazel. Only AEMU on
+# x64 is supported and tested so far, so there are no equivalents for other
+# emulators yet. Deliberately not added to `_all_named_fuchsia_envs` so that
+# internet access is strictly opt-in for tests that explicitly request it.
+aemu_internet_env = {
+  forward_variables_from(aemu_env, "*")
+  emulator = {
+    name = "internet"
+    allow_internet = true
+  }
+}
 
 astro_env = {
   dimensions = {
@@ -313,18 +325,6 @@ _all_named_fuchsia_envs += [
     env = iris_env
   },
 ]
-
-# Iris devices that are hosted by a LattePanda Sigma "Fuchsia cell". Use this
-# instead of `iris_env` for tests that require a cell testbed.
-#
-# This is deliberately not added to `_all_named_fuchsia_envs`, so that it is
-# not swept into `all_fuchsia_envs` and does not pull unrelated tests onto it.
-iris_cell_env = {
-  dimensions = {
-    device_type = device_types.iris
-    host_device_type = host_device_types.lattepanda_sigma_cell
-  }
-}
 
 luis_env = {
   dimensions = {
@@ -592,6 +592,7 @@ foreach(named_env, _all_named_fuchsia_envs) {
 guest_envs = all_fuchsia_envs - [
                aemu_env,
                astro_env,
+               gce_env,
                qemu_env,
                sherlock_env,
                vim3_env,
@@ -622,10 +623,7 @@ if (target_cpu == "arm64") {
 all_fuchsia_except_cavium_skip_envs = all_fuchsia_envs - cavium_skip_envs
 
 # Set of environments where both virtualization and vulkan are available.
-guest_vulkan_envs = guest_envs - [
-                      nuc11_env,
-                      gce_env,
-                    ]
+guest_vulkan_envs = guest_envs - [ nuc11_env ]
 
 # Set of environments for Lacewing Bluetooth multi-device testing.
 lacewing_bluetooth_envs = [

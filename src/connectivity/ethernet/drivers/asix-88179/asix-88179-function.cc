@@ -8,7 +8,6 @@
 #include <fidl/fuchsia.hardware.usb.endpoint/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.usb.function/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.usb.request/cpp/fidl.h>
-#include <fuchsia/hardware/ethernet/cpp/banjo.h>
 #include <lib/driver/compat/cpp/banjo_client.h>
 #include <lib/driver/component/cpp/driver_base2.h>
 #include <lib/driver/component/cpp/driver_export2.h>

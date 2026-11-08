@@ -8,6 +8,12 @@ load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package
 
 package(default_applicable_licenses = ["//:license"])
 
+test_suite(
+    name = "tests",
+    tests = [":profile-client-tests"],
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)
+
 rustc_library(
     name = "profile-client",
     srcs = [
@@ -73,5 +79,4 @@ fx_unittest_package(
     name = "profile-client-tests",
     package_name = "profile-client-tests",
     unit_tests = [":profile-client_test"],
-    visibility = ["//src/connectivity/bluetooth:__pkg__"],
 )

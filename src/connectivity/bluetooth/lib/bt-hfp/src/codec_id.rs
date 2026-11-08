@@ -3,8 +3,9 @@
 // found in the LICENSE file.
 
 use anyhow::format_err;
+use fidl_fuchsia_bluetooth_bredr as bredr;
+use fidl_fuchsia_media as media;
 use thiserror::Error;
-use {fidl_fuchsia_bluetooth_bredr as bredr, fidl_fuchsia_media as media};
 
 use crate::audio;
 
@@ -71,7 +72,7 @@ impl TryFrom<CodecId> for media::EncoderSettings {
     }
 }
 
-impl TryFrom<CodecId> for media::PcmFormat {
+impl TryFrom<CodecId> for media::PcmFormat2 {
     type Error = audio::Error;
 
     fn try_from(value: CodecId) -> Result<Self, Self::Error> {
@@ -80,22 +81,13 @@ impl TryFrom<CodecId> for media::PcmFormat {
             CodecId::MSBC => 16000,
             _ => return Err(unsupported_codec_id(value)),
         };
-        Ok(media::PcmFormat {
-            pcm_mode: media::AudioPcmMode::Linear,
-            bits_per_sample: 16,
-            frames_per_second,
-            channel_map: vec![media::AudioChannelId::Lf],
+        Ok(media::PcmFormat2 {
+            pcm_mode: Some(media::AudioPcmMode2::Linear),
+            bits_per_sample: Some(16),
+            frames_per_second: Some(frames_per_second),
+            channel_map: Some(vec![media::AudioChannelId2::Fl]),
+            ..Default::default()
         })
-    }
-}
-
-impl TryFrom<CodecId> for media::DomainFormat {
-    type Error = audio::Error;
-
-    fn try_from(value: CodecId) -> Result<Self, Self::Error> {
-        Ok(media::DomainFormat::Audio(media::AudioFormat::Uncompressed(
-            media::AudioUncompressedFormat::Pcm(media::PcmFormat::try_from(value)?),
-        )))
     }
 }
 

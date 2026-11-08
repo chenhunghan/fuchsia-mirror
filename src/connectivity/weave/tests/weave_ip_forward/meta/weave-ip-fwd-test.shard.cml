@@ -40,7 +40,7 @@
     children: [
         {
             name: "sync-manager",
-            url: "#meta/sync-manager.cm",
+            url: "sync-manager#meta/sync-manager.cm",
         },
         {
             name: "fuchsia-node",
@@ -48,7 +48,7 @@
         },
         {
             name: "fuchsia-netstack",
-            url: "#meta/configurable-netstack-netstack3.cm",
+            url: "configurable-netstack#meta/configurable-netstack.cm",
         },
         {
             name: "weave-node",
@@ -56,15 +56,15 @@
         },
         {
             name: "weave-netstack",
-            url: "#meta/configurable-netstack-netstack3.cm",
+            url: "configurable-netstack#meta/configurable-netstack.cm",
         },
         {
             name: "wlan-netstack",
-            url: "#meta/configurable-netstack-netstack3.cm",
+            url: "configurable-netstack#meta/configurable-netstack.cm",
         },
         {
             name: "wpan-netstack",
-            url: "#meta/configurable-netstack-netstack3.cm",
+            url: "configurable-netstack#meta/configurable-netstack.cm",
         },
     ],
     use: [

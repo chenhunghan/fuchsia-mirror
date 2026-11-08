@@ -5,6 +5,7 @@
 #include <sys/mount.h>
 
 #include <string>
+#include <vector>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -548,6 +549,23 @@ TEST_F(NmfsTest, NmfsDefaultNetworkFile) {
 }
 
 TEST_F(NmfsTest, NmfsV2NetworkFileWriteSuccessTransportList) {
+  auto read_transports = [](const std::string& json_string) {
+    rapidjson::Document document;
+    document.Parse(json_string.c_str());
+    EXPECT_FALSE(document.HasParseError());
+    std::vector<int> transports;
+    if (!document.HasParseError() && document.HasMember("transports") &&
+        document["transports"].IsArray()) {
+      for (const auto& val : document["transports"].GetArray()) {
+        EXPECT_TRUE(val.IsInt());
+        if (val.IsInt()) {
+          transports.push_back(val.GetInt());
+        }
+      }
+    }
+    return transports;
+  };
+
   ExpectFileWriteSuccess("/tmp/fuchsia_network_monitor/7",
                          R"({
     "version": "V2",
@@ -556,7 +574,7 @@ TEST_F(NmfsTest, NmfsV2NetworkFileWriteSuccessTransportList) {
     "handle": 78,
     "dnsv4": [],
     "dnsv6": [],
-    "transports": [0, 1, 2, 3],
+    "transports": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
     "capabilities": [],
     "name": "test",
     "addrv4": true,
@@ -565,10 +583,38 @@ TEST_F(NmfsTest, NmfsV2NetworkFileWriteSuccessTransportList) {
     "defaultv6": false
   })",
                          "All JSON fields must be provided with proper formatting");
-  // File output should be able to be rewritten to the file without formatting changes.
+  // File output should preserve all known transport values (0..=10) and be rewriteable to the file
+  // without formatting changes.
   std::string network_info;
-  EXPECT_TRUE(files::ReadFileToString("/tmp/fuchsia_network_monitor/7", &network_info))
+  ASSERT_TRUE(files::ReadFileToString("/tmp/fuchsia_network_monitor/7", &network_info))
       << "Network file should be readable";
+  EXPECT_THAT(read_transports(network_info),
+              ::testing::ElementsAre(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10));
+  EXPECT_TRUE(files::WriteFile("/tmp/fuchsia_network_monitor/7", network_info))
+      << "Contents from read should be writeable to the same file";
+
+  // Also verify a network carrying only Test/Usb/Thread/Satellite transports (7..=10) so
+  // consolidation exercises those variants without short-circuiting on an earlier transport.
+  ExpectFileWriteSuccess("/tmp/fuchsia_network_monitor/7",
+                         R"({
+    "version": "V2",
+    "netid": 7,
+    "mark": 56,
+    "handle": 78,
+    "dnsv4": [],
+    "dnsv6": [],
+    "transports": [7, 8, 9, 10],
+    "capabilities": [],
+    "name": "usb0",
+    "addrv4": true,
+    "addrv6": false,
+    "defaultv4": false,
+    "defaultv6": false
+  })",
+                         "Extended transport values 7..=10 must be accepted");
+  ASSERT_TRUE(files::ReadFileToString("/tmp/fuchsia_network_monitor/7", &network_info))
+      << "Network file should be readable";
+  EXPECT_THAT(read_transports(network_info), ::testing::ElementsAre(7, 8, 9, 10));
   EXPECT_TRUE(files::WriteFile("/tmp/fuchsia_network_monitor/7", network_info))
       << "Contents from read should be writeable to the same file";
 }

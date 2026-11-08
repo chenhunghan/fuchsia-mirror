@@ -7,6 +7,7 @@ filegroup(
     name = "bzl_srcs",
     srcs = [
         "local_actions.bzl",
+        "transition_utils.bzl",
         "utils.bzl",
         "@fuchsia_rules_common//assembly:bzl_srcs",
         "@fuchsia_rules_common//build_flags:bzl_srcs",

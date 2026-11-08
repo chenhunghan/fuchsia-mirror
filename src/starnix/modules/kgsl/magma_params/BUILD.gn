@@ -2,10 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-group("magma_params") {
-  public_deps = [ ":kgsl_magma_params" ]
-}
-
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
 #
 #  ________  _________  ________  ________
@@ -31,14 +27,20 @@ group("magma_params") {
 
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
-rustc_library("kgsl_magma_params") {
+rustc_library("magma_params") {
   sources = [
     "kgsl_magma_params.rs",
     "lib.rs",
   ]
+  crate_name = "kgsl_magma_params"
   source_root = "lib.rs"
   edition = "2024"
   lint_config = "//src/starnix/config:starnix_clippy_lints"
+  visibility = [
+    ":*",
+    "//src/starnix/modules/kgsl:*",
+    "//vendor/google/*",
+  ]
   deps = [
     "//src/starnix/lib/magma",
     "//src/starnix/lib/starnix_uapi",

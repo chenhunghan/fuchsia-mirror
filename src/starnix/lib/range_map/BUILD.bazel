@@ -2,20 +2,59 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load("//build/bazel/rules/testing:fx_unittest_component.bzl", "fx_unittest_component")
 
-package(
-    default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
-)
+package(default_applicable_licenses = ["//:license"])
 
 rustc_library(
     name = "range_map",
     srcs = ["src/lib.rs"],
-    crate_name = "range_map",
     edition = "2024",
     lint_config = "//src/starnix/build:kernel_library_config",
+    visibility = [
+        "//src/starnix/kernel/core:__pkg__",
+        "//src/starnix/lib/starnix_uapi:__pkg__",
+        "//src/starnix/modules/ashmem:__pkg__",
+    ],
     deps = [
         "//third_party/rust_crates/vendor:arrayvec",
     ],
+)
+
+# Include starnix in the name for easier dashboarding of flakes.
+rustc_test(
+    name = "starnix_range_map_test",
+    crate = ":range_map",
+    lint_config = "//src/starnix/build:kernel_library_config",
+    deps = [
+        "//src/lib/fuchsia",
+    ],
+)
+
+wrap_host_rust_test(
+    name = "range_map_host_test",
+    binary_name = "starnix_range_map_test",
+    visibility = ["//src/starnix/lib:__pkg__"],
+)
+
+fx_unittest_component(
+    name = "unittests_component",
+    binary = ":starnix_range_map_test",
+    component_name = "range_map_unittests",
+)
+
+fx_package(
+    name = "starnix_range_map_unittests",
+    test_components = [":unittests_component"],
+)
+
+fx_test(
+    name = "range_map_unittests",
+    package = ":starnix_range_map_unittests",
+    visibility = ["//src/starnix/lib:__pkg__"],
 )

@@ -55,16 +55,26 @@ impl Routable<Connector> for EventStreamUseRouter {
         let mut routing_tasks = FuturesUnordered::new();
         for source_route in self.sources.iter() {
             let filter = source_route.filter.clone();
+            let fut1 = source_route.router.route(request.clone(), target.clone());
+            let fut2 = source_route.router.route_debug(request.clone(), target.clone());
             routing_tasks.push(
-                source_route
-                    .router
-                    .route(request.clone(), target.clone())
-                    .map(move |res| (res, filter)),
+                futures::future::join(fut1, fut2).map(move |(res1, res2)| (res1, res2, filter)),
             );
         }
         let mut routed_dictionaries = vec![];
-        while let Some((result, filter)) = routing_tasks.next().await {
-            if let Some(dictionary) = result? {
+        while let Some((result1, result2, filter)) = routing_tasks.next().await {
+            if !matches!(result2?, CapabilitySource::Builtin(_)) {
+                // Ignore any results that don't come from component manager, as only component
+                // manager can create new event stream capabilities. This is important to enforce
+                // the event stream routing semantics (see https://fxbug.dev/521638569 for more
+                // context).
+                //
+                // Also note that it's currently impossible to forge capability sources because
+                // debug routing never leaves component manager, and we also rely on this property
+                // to enforce capability access allowlists.
+                continue;
+            }
+            if let Some(dictionary) = result1? {
                 routed_dictionaries.push((dictionary, filter))
             }
         }

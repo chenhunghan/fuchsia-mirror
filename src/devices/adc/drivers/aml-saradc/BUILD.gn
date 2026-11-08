@@ -75,6 +75,12 @@ fuchsia_driver_package("package") {
 fuchsia_unittest_package("aml-saradc-rust-test") {
   package_name = "aml-saradc-rust-test"
   deps = [ ":aml-saradc-driver_test" ]
+  test_specs = {
+    log_settings = {
+      # test_get_sample_fails_if_interrupt_cannot_be_waited_on logs an error.
+      max_severity = "ERROR"
+    }
+  }
 }
 
 group("tests") {

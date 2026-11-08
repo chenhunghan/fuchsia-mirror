@@ -2,4 +2,24 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
+
 package(default_applicable_licenses = ["//:license"])
+
+exports_files(
+    ["pyrefly_runner.py"],
+    visibility = ["//build/bazel/aspects:__pkg__"],
+)
+
+host_py_test(
+    name = "pyrefly_runner_test",
+    testonly = True,
+    srcs = [
+        "pyrefly_runner.py",
+        "pyrefly_runner_test.py",
+    ],
+    main = "pyrefly_runner_test.py",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//build/bazel/aspects/tests:__pkg__"],
+)

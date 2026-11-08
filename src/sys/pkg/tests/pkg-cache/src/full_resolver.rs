@@ -551,7 +551,12 @@ async fn inspect_success() {
                     },
                 },
                 "recent": {},
-            }
+            },
+            "index": contains {
+                "retained": {
+                    "entries": {},
+                },
+            },
         }
     );
 
@@ -600,7 +605,12 @@ async fn inspect_success() {
                         "end_boot_ns": AnyProperty,
                     },
                 },
-            }
+            },
+            "index": contains {
+                "retained": {
+                    "entries": {},
+                },
+            },
         }
     );
 }
@@ -668,7 +678,12 @@ async fn inspect_failure() {
                         "end_boot_ns": AnyProperty,
                     },
                 },
-            }
+            },
+            "index": contains {
+                "retained": {
+                    "entries": {},
+                },
+            },
         }
     );
 }

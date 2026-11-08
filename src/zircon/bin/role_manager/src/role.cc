@@ -5,10 +5,13 @@
 #include "role.h"
 
 #include <fidl/fuchsia.scheduler/cpp/fidl.h>
+#include <fidl/fuchsia.sys2/cpp/fidl.h>
+#include <lib/component/incoming/cpp/protocol.h>
 #include <lib/syslog/cpp/log_settings.h>
 #include <lib/syslog/cpp/macros.h>
 #include <lib/zx/profile.h>
 #include <lib/zx/thread.h>
+#include <lib/zx/time.h>
 #include <zircon/syscalls.h>
 #include <zircon/syscalls/object.h>
 #include <zircon/syscalls/profile.h>
@@ -18,8 +21,10 @@
 using zircon_profile::Role;
 
 constexpr char kConfigPath[] = "/config/profiles";
+constexpr zx::duration kUnclaimedProfileWarningDelay = zx::min(3);
 
-zx::result<std::unique_ptr<RoleManager>> RoleManager::Create(inspect::Node& parent) {
+zx::result<std::unique_ptr<RoleManager>> RoleManager::Create(async_dispatcher_t* dispatcher,
+                                                             inspect::Node& parent) {
   auto profile_resource_result = GetSystemProfileResource();
   if (profile_resource_result.is_error()) {
     FX_LOGS(ERROR) << "failed to get profile resource: " << profile_resource_result.status_string();
@@ -62,6 +67,7 @@ zx::result<std::unique_ptr<RoleManager>> RoleManager::Create(inspect::Node& pare
   }
   const auto search = config_result->thread.find(*dispatch_role);
   if (search != config_result->thread.end()) {
+    search->second.request_count++;
     const zx_status_t status = zx::thread::self()->set_profile(search->second.profile, 0);
     if (status != ZX_OK) {
       FX_LOG_KV(ERROR, "Failed to set role", FX_KV("error", zx_status_get_string(status)),
@@ -70,9 +76,76 @@ zx::result<std::unique_ptr<RoleManager>> RoleManager::Create(inspect::Node& pare
   }
 
   auto manager = std::unique_ptr<RoleManager>(
-      new RoleManager{std::move(profile_resource), std::move(config_result.value())});
+      new RoleManager{dispatcher, std::move(profile_resource), std::move(config_result.value())});
   manager->PublishInspect(parent);
+
+  zx::result boot_notifier = component::Connect<fuchsia_sys2::BootNotifier>();
+  if (boot_notifier.is_ok()) {
+    manager->boot_notifier_client_.Bind(std::move(boot_notifier.value()), dispatcher,
+                                        manager.get());
+  } else {
+    FX_LOG_KV(WARNING, "Failed to connect to fuchsia.sys2.BootNotifier",
+              FX_KV("status", boot_notifier.status_string()), FX_KV("tag", "RoleManager"));
+  }
+
   return zx::ok(std::move(manager));
+}
+
+std::unique_ptr<RoleManager> RoleManager::CreateForTesting(
+    async_dispatcher_t* dispatcher, zircon_profile::ConfiguredProfiles profiles,
+    fidl::ClientEnd<fuchsia_sys2::BootNotifier> boot_notifier,
+    UnclaimedProfileCallback on_unclaimed_profile) {
+  auto manager = std::unique_ptr<RoleManager>(new RoleManager{
+      dispatcher, zx::resource{}, std::move(profiles), std::move(on_unclaimed_profile)});
+  if (boot_notifier.is_valid()) {
+    manager->boot_notifier_client_.Bind(std::move(boot_notifier), dispatcher, manager.get());
+  }
+  return manager;
+}
+
+void RoleManager::OnBootComplete() {
+  FX_LOG_KV(INFO, "Boot complete notification received; scheduling unclaimed profile check",
+            FX_KV("tag", "RoleManager"));
+  boot_notifier_client_ = {};
+  if (!unclaimed_profile_warning_task_.is_pending()) {
+    zx_status_t status =
+        unclaimed_profile_warning_task_.PostDelayed(dispatcher_, kUnclaimedProfileWarningDelay);
+    if (status != ZX_OK) {
+      FX_LOG_KV(WARNING, "Failed to schedule unclaimed profile check",
+                FX_KV("status", zx_status_get_string(status)), FX_KV("tag", "RoleManager"));
+    }
+  }
+}
+
+void RoleManager::on_fidl_error(fidl::UnbindInfo error) {
+  FX_LOG_KV(WARNING, "fuchsia.sys2.BootNotifier disconnected unexpectedly",
+            FX_KV("error", error.FormatDescription()), FX_KV("tag", "RoleManager"));
+}
+
+void RoleManager::handle_unknown_event(
+    fidl::UnknownEventMetadata<fuchsia_sys2::BootNotifier> metadata) {
+  FX_LOG_KV(WARNING, "Got unknown BootNotifier event", FX_KV("ordinal", metadata.event_ordinal),
+            FX_KV("tag", "RoleManager"));
+}
+
+void RoleManager::LogUnclaimedProfiles() {
+  auto check_profiles = [this](const zircon_profile::ProfileMap& profiles, std::string_view type) {
+    for (const auto& [role, profile] : profiles) {
+      if ((profile.scope == zircon_profile::ProfileScope::Board ||
+           profile.scope == zircon_profile::ProfileScope::Product) &&
+          profile.request_count == 0) {
+        FX_LOG_KV(WARNING, "Configured profile was never claimed after boot",
+                  FX_KV("role", role.name()), FX_KV("type", type),
+                  FX_KV("scope", zircon_profile::ScopeToString(profile.scope)),
+                  FX_KV("tag", "RoleManager"));
+        if (on_unclaimed_profile_) {
+          on_unclaimed_profile_(role.name(), type, profile.scope);
+        }
+      }
+    }
+  };
+  check_profiles(profiles_.thread, "thread");
+  check_profiles(profiles_.memory, "memory");
 }
 
 void RoleManager::handle_unknown_method(

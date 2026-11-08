@@ -4,8 +4,6 @@
 {
     include: [
         "//src/sys/test_runners/rust/default.shard.cml",
-        "driver_test_realm/realm_builder/client.shard.cml",
-        "//src/sys/test_runners/rust/default.shard.cml",
         "sys/component/realm_builder.shard.cml",
         "syslog/client.shard.cml",
     ],
@@ -18,24 +16,11 @@
             url: "bt-host#meta/bt-host.cm",
         },
     ],
-    use: [
-        { protocol: "fuchsia.component.resolution.Resolver-hermetic" },
-    ],
     offer: [
         {
             storage: "tmp",
             from: "parent",
             to: [ "#realm_builder" ],
-        },
-        {
-            protocol: "fuchsia.component.resolution.Resolver-hermetic",
-            from: "parent",
-            to: "#realm_builder",
-        },
-        {
-            protocol: "fuchsia.pkg.PackageResolver-hermetic",
-            from: "parent",
-            to: "#realm_builder",
         },
     ],
 }

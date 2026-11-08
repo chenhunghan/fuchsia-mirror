@@ -7,6 +7,7 @@
 
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async-loop/default.h>
+#include <lib/async/cpp/sequence_checker.h>
 #include <lib/async/cpp/task.h>
 #include <lib/ddk/driver.h>
 #include <lib/fit/function.h>
@@ -14,7 +15,9 @@
 #include <lib/media/codec_impl/codec_metrics.h>
 
 #include <memory>
+#include <optional>
 #include <string_view>
+#include <variant>
 
 namespace amlogic_decoder {
 
@@ -55,20 +58,20 @@ class DriverCtx {
   // interference among clients.  Blocking work should use some other thread.
   async::Loop* shared_fidl_loop() { return shared_fidl_loop_.get(); }
 
-  // Can be compared to thrd_current() to determine if the caller is running on
-  // the shared FIDL thread.
+  // Used to apply thread scheduling profile. For sequence synchronization
+  // checks, use IsSharedFidlSynchronized() instead.
   thrd_t shared_fidl_thread() { return shared_fidl_thread_; }
 
-  bool IsSharedFidlSynchronized() {
-    ZX_DEBUG_ASSERT(shared_fidl_checker_.has_value());
+  bool IsSharedFidlSynchronized() const {
+    ZX_ASSERT(shared_fidl_checker_.has_value());
     return std::holds_alternative<std::monostate>(shared_fidl_checker_->is_synchronized());
   }
 
   // Run to_run on given dispatcher, in order.
   void PostSerial(async_dispatcher_t* dispatcher, fit::closure to_run);
 
-  // Run to_run_on_shared_fidl_thread on shared_fidl_thread().
-  void PostToSharedFidl(fit::closure to_run_on_shared_fidl_thread);
+  // Run to_run_on_shared_fidl_sequence on the shared fidl sequence.
+  void PostToSharedFidl(fit::closure to_run_on_shared_fidl_sequence);
 
   void SetAuxServiceDirectory(fidl::InterfaceHandle<fuchsia::io::Directory> aux_service_directory);
 
@@ -76,10 +79,14 @@ class DriverCtx {
 
   CodecDiagnostics& diagnostics();
 
+  // One-way terminal shutdown hook called from DeviceCtx::DdkSuspend() during
+  // system shutdown/reboot. DDK (zx_protocol_device_t) does not have a resume
+  // hook, and the driver does not resume after Suspend().
   void Suspend() {
     metrics_ = std::nullopt;
     shared_fidl_loop_->Quit();
     shared_fidl_loop_->JoinThreads();
+    shared_fidl_checker_.reset();
     shared_fidl_loop_->Shutdown();
     shared_fidl_loop_.reset();
   }
@@ -99,7 +106,7 @@ class DriverCtx {
   // Inspector diagnostics
   CodecDiagnostics diagnostics_;
 
-  // set very early; stays set from then on
+  // set very early; stays set until one-way Suspend() or ~DriverCtx()
   std::optional<async::synchronization_checker> shared_fidl_checker_;
 };
 

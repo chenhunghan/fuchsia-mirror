@@ -205,7 +205,7 @@ where
             init_task,
             move |current_task| -> Result<(), Errno> {
                 let result = callback(current_task);
-                current_task.write().set_exit_status_if_not_already(ExitStatus::Exit(0));
+                current_task.write().set_exiting(ExitStatus::Exit(0));
                 sender.send(result).map_err(|e| errno!(EIO, e))?;
                 error!(EHWPOISON)
             },

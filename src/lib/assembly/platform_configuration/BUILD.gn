@@ -69,8 +69,8 @@ rustc_library("platform_configuration") {
     "src/util.rs",
   ]
   deps = [
-    "//sdk/fidl/fuchsia.images2:fuchsia.images2_rust",
-    "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_rust",
+    "//sdk/fidl/fuchsia.images2:fuchsia.images2_rust_common",
+    "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_rust_common",
     "//src/devices/bind/fuchsia.platform:fuchsia.platform_rust",
     "//src/diagnostics/lib/sampler-config",
     "//src/lib/assembly/cli_args",
@@ -100,7 +100,7 @@ rustc_library("platform_configuration") {
     "//tools/lib/cml",
   ]
   test_deps = [
-    "//sdk/fidl/fuchsia.component.internal:fuchsia.component.internal_rust",
+    "//sdk/fidl/fuchsia.component.internal:fuchsia.component.internal_rust_common",
     "//src/lib/assembly/images_config",
     "//src/lib/assembly/util",
     "//src/lib/diagnostics/selectors",

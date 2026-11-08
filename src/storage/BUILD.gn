@@ -34,7 +34,6 @@ group("tests") {
     "fxfs/trace:fxfs-trace-tests-package",
     "gpt:tests",
     "host_fs_test:tests",
-    "io_stress:tests",
     "lib:tests",
     "lib/units:storage-units-tests",
     "memfs:tests",

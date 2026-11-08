@@ -8,6 +8,12 @@ load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package
 
 package(default_applicable_licenses = ["//:license"])
 
+test_suite(
+    name = "tests",
+    tests = [":bt-rfcomm-lib-tests"],
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)
+
 rustc_library(
     name = "bt-rfcomm",
     srcs = [
@@ -58,5 +64,4 @@ fx_unittest_package(
     name = "bt-rfcomm-lib-tests",
     package_name = "bt-rfcomm-lib-tests",
     unit_tests = [":bt-rfcomm_test"],
-    visibility = ["//src/connectivity/bluetooth:__pkg__"],
 )

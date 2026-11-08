@@ -5,6 +5,7 @@
 #![recursion_limit = "256"]
 
 mod binder;
+mod binder_thread_channel;
 mod fs;
 mod objects;
 mod process;

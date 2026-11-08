@@ -39,9 +39,6 @@ uint64_t cpp_bti_aspace_size(const iommu::Bti* bti);
 uint64_t cpp_bti_pmo_count(const iommu::Bti* bti);
 uint64_t cpp_bti_quarantine_count(const iommu::Bti* bti);
 bool cpp_bti_in_fault_state(const iommu::Bti* bti);
-uint64_t cpp_bti_bti_id(const iommu::Bti* bti);
-zx_status_t cpp_bti_set_name(iommu::Bti* bti, const char* name, size_t len);
-zx_status_t cpp_bti_get_name(const iommu::Bti* bti, char out_name[ZX_MAX_NAME_LEN]);
 zx_status_t cpp_bti_map(iommu::Bti* bti, PinnedVmObject* pinned_vmo, uint32_t perms,
                         bool require_contiguous,
                         ffi::Uninitialized<fbl::RefPtr<iommu::Pmt>>* pmt_out);
@@ -51,21 +48,27 @@ namespace iommu {
 
 class Bti : public fbl::RefCounted<Bti> {
  public:
-  enum class BtiPageLeakReason {
+  // LINT.IfChange(BtiPageLeakReason)
+  enum class BtiPageLeakReason : uint32_t {  // NOLINT(performance-enum-size)
     // The final handle to a BTI was closed while it still had quarantined PMTs.
     // User-mode no longer has any way to release the quarantine on these PMTs,
     // and they are now permanently leaked.
-    BtiOrphanedWithQuarantinedPmts,
+    BtiOrphanedWithQuarantinedPmts = 0,
 
     // The final handle to a PMT was closed without it having been formally
     // unpinned, and after its BTI had become orphaned.  Once again, user-mode
     // no longer has any way to release the quarantine on these PMTs, and they
     // are now permanently leaked.
-    PmtQuarantinedWhenBtiOrphaned,
+    PmtQuarantinedWhenBtiOrphaned = 1,
 
     // The final handle to a PMT was closed without it having been unpinned.
-    PmtQuarantined,
+    PmtQuarantined = 2,
   };
+  // LINT.ThenChange(
+  //   //zircon/kernel/dev/iommu/arm_smmu/common/constants.rs:BtiPageLeakReason,
+  //   //zircon/kernel/dev/iommu/bti.rs:BtiPageLeakReason,
+  //   //zircon/kernel/dev/iommu/bti_ffi.cc:BtiPageLeakReason,
+  // )
 
   Bti(const Bti&) = delete;
   Bti(Bti&&) = delete;
@@ -197,7 +200,7 @@ class Bti : public fbl::RefCounted<Bti> {
   }
 
   void PrintQuarantineWarning(BtiPageLeakReason reason, uint64_t total_leaked_pages,
-                              size_t total_leaked_vmos);
+                              size_t total_leaked_vmos) const;
 
  protected:
   friend class fbl::RefPtr<Bti>;

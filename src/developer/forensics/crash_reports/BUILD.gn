@@ -37,7 +37,7 @@ source_set("crash_register") {
   public_deps = [
     ":annotation_map",
     ":product",
-    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_hlcpp",
+    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_cpp",
     "//src/developer/forensics/crash_reports/info",
     "//src/developer/forensics/feedback:constants",
     "//src/developer/forensics/feedback/annotations",
@@ -48,7 +48,15 @@ source_set("crash_register") {
   deps = [
     "//sdk/lib/syslog/cpp",
     "//src/lib/files",
-    "//src/lib/fostr/fidl/fuchsia.feedback",
+  ]
+}
+
+source_set("crash_reporter_internal") {
+  sources = [ "crash_reporter_internal.h" ]
+
+  public_deps = [
+    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_cpp",
+    "//sdk/lib/fit",
   ]
 }
 
@@ -62,6 +70,7 @@ source_set("crash_reporter") {
 
   public_deps = [
     ":crash_register",
+    ":crash_reporter_internal",
     ":crash_server",
     ":filing_result",
     ":log_tags",
@@ -71,7 +80,7 @@ source_set("crash_reporter") {
     ":report_util",
     ":reporting_policy_watcher",
     ":snapshot_collector",
-    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_hlcpp",
+    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_cpp",
     "//sdk/lib/async",
     "//sdk/lib/async:async-cpp",
     "//sdk/lib/fit-promise",
@@ -87,6 +96,7 @@ source_set("crash_reporter") {
 
   deps = [
     ":constants",
+    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_cpp_hlcpp_conversion",
     "//sdk/lib/fit",
     "//sdk/lib/syslog/cpp",
     "//src/developer/forensics/utils/cobalt",
@@ -136,7 +146,7 @@ source_set("filing_result") {
   ]
 
   public_deps = [
-    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_hlcpp",
+    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_cpp",
     "//sdk/lib/fit-promise",
   ]
 }
@@ -303,6 +313,7 @@ source_set("snapshot") {
   ]
 
   public_deps = [
+    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_cpp",
     "//src/developer/forensics/feedback/annotations",
     "//src/developer/forensics/utils:sized_data",
   ]
@@ -325,6 +336,7 @@ source_set("snapshot_collector") {
     ":constants",
     ":queue",
     ":store",
+    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_cpp",
     "//sdk/lib/async",
     "//sdk/lib/fit-promise",
     "//sdk/lib/sys/cpp",
@@ -362,6 +374,7 @@ source_set("store") {
     ":log_tags",
     ":report",
     ":report_id",
+    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_cpp",
     "//src/developer/forensics/crash_reports/info",
     "//src/developer/forensics/utils:storage_size",
   ]

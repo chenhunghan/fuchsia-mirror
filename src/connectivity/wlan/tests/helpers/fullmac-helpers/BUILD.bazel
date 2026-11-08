@@ -16,8 +16,6 @@ rustc_library(
         "src/recorded_request_stream.rs",
     ],
     edition = "2024",
-    # @bazel2gn:skip
-    lint_config = "//build/config/rust/lints:clippy_warn_default",
     visibility = ["//src/connectivity/wlan/tests/drivers-only/fullmac-tests:__pkg__"],
     deps = [
         "//sdk/fidl/fuchsia.wlan.common:fuchsia.wlan.common_rust",

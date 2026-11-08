@@ -17,11 +17,11 @@ source_set("last_reboot_info_provider") {
   ]
 
   public_deps = [
-    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_hlcpp",
+    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_cpp",
     "//src/developer/forensics/feedback/reboot_log",
   ]
 
-  deps = [ "//sdk/lib/syslog/cpp" ]
+  deps = [ "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_cpp_hlcpp_conversion" ]
 }
 
 source_set("reporter") {
@@ -31,10 +31,10 @@ source_set("reporter") {
   ]
 
   public_deps = [
-    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_hlcpp",
     "//sdk/fidl/fuchsia.metrics:fuchsia.metrics_hlcpp",
     "//sdk/lib/fit-promise",
     "//sdk/lib/sys/cpp",
+    "//src/developer/forensics/crash_reports:crash_reporter_internal",
     "//src/developer/forensics/feedback/reboot_log",
     "//src/developer/forensics/utils:errors",
     "//src/developer/forensics/utils/cobalt",
@@ -42,10 +42,12 @@ source_set("reporter") {
   ]
 
   deps = [
+    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_cpp",
+    "//sdk/fidl/fuchsia.mem:fuchsia.mem_cpp",
     "//sdk/lib/async:async-cpp",
     "//sdk/lib/syslog/cpp",
+    "//src/developer/forensics/utils:vmo",
     "//src/lib/files",
-    "//src/lib/fsl",
     "//src/lib/fxl",
     "//zircon/system/ulib/zx",
   ]

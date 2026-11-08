@@ -125,7 +125,7 @@ class X86ArchVmAspace final : public ArchVmAspaceInterface {
 
   bool AccessedSinceLastCheck(bool clear) override;
 
-  paddr_t arch_table_phys() const override { return pt_->phys(); }
+  paddr_t arch_table_phys() const override { return pt_ ? pt_->phys() : 0; }
   paddr_t pt_phys() const { return pt_->phys(); }
   size_t pt_pages() const { return pt_->pages(); }
   uint16_t pcid() const { return pcid_; }
@@ -137,7 +137,7 @@ class X86ArchVmAspace final : public ArchVmAspaceInterface {
   cpu_mask_t pcid_dirty_cpus() const { return pcid_dirty_cpus_.load(); }
   cpu_mask_t MarkPcidDirtyCpus(cpu_mask_t mask) { return pcid_dirty_cpus_.fetch_or(mask); }
 
-  IoBitmap& io_bitmap() { return io_bitmap_; }
+  const IoBitmap& io_bitmap() const { return io_bitmap_; }
 
   static void ContextSwitch(X86ArchVmAspace* from, X86ArchVmAspace* to);
 
@@ -175,7 +175,7 @@ class X86ArchVmAspace final : public ArchVmAspaceInterface {
 
   // This will be either a normal page table or an EPT, depending on whether
   // flags_ includes ARCH_ASPACE_FLAG_GUEST.
-  X86PageTableBase* pt_;
+  X86PageTableBase* pt_ = nullptr;
 
   // PCID assigned to the aspace. Defaults to unused if PCIDs are not being used.
   uint16_t pcid_ = MMU_X86_UNUSED_PCID;
@@ -218,5 +218,9 @@ class X86VmICacheConsistencyManager final : public ArchVmICacheConsistencyManage
 
 using ArchVmAspace = X86ArchVmAspace;
 using ArchVmICacheConsistencyManager = X86VmICacheConsistencyManager;
+
+extern "C" {
+const IoBitmap* cpp_x86_arch_aspace_io_bitmap(const X86ArchVmAspace* aspace);
+}
 
 #endif  // ZIRCON_KERNEL_ARCH_X86_INCLUDE_ARCH_ASPACE_H_

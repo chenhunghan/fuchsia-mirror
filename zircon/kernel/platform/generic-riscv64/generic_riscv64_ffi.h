@@ -9,7 +9,6 @@
 
 #include <lib/zbi-format/driver-config.h>
 #include <stdbool.h>
-#include <stddef.h>
 #include <stdint.h>
 #include <zircon/compiler.h>
 #include <zircon/types.h>
@@ -20,9 +19,7 @@
 __BEGIN_CDECLS
 
 // The Rust platform's entry points, behind the C++-linkage declarations of
-// <platform.h>, <platform/efi.h>, <platform/timer.h> and <dev/init.h>.
-
-bool rust_is_efi_expected(void);
+// <platform.h>, <platform/timer.h> and <dev/init.h>.
 
 void rust_platform_early_init(void);
 void rust_platform_prevm_init(void);
@@ -67,12 +64,6 @@ void rust_platform_driver_handoff_early(const zbi_dcfg_riscv_plic_driver_t* plic
                                         const zbi_dcfg_riscv_generic_timer_driver_t* timer_driver);
 void rust_platform_driver_handoff_post_vm(const zbi_dcfg_riscv_plic_driver_t* plic_driver);
 void rust_platform_driver_handoff_late(const zbi_dcfg_riscv_plic_driver_t* plic_driver);
-
-// C++ helpers for the Rust platform.
-
-// Binds the platform's MappedCrashlog to the `size` bytes of persistent RAM at
-// `base`.
-void cpp_mapped_crashlog_bind(void* base, size_t size);
 
 __END_CDECLS
 

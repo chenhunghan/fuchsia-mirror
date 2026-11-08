@@ -51,7 +51,7 @@ class TestSuite:
         self,
         name: str = "",
         cases: list[TestCase] | None = None,
-        dict_suite: "_DictTestSuite | None" = None,
+        dict_suite: _DictTestSuite | None = None,
     ) -> None:
         assert cases is None or dict_suite is None
         if dict_suite:
@@ -64,7 +64,7 @@ class TestSuite:
             "^fuchsia-pkg://fuchsia.com/", "fx/", self.name
         )
 
-    def _to_dict_suite(self) -> "_DictTestSuite":
+    def _to_dict_suite(self) -> _DictTestSuite:
         return _DictTestSuite(
             name=self.name, cases={case.name: case for case in self.cases}
         )
@@ -137,7 +137,7 @@ class Tests:
         return _DictStructuredTests(suites)
 
 
-def _saved_tests() -> "Tests":
+def _saved_tests() -> Tests:
     """Loads the program state file and parses the JSON."""
 
     raw_tests = util.load_program_state()
@@ -154,7 +154,7 @@ def _saved_tests() -> "Tests":
     return Tests(test_list=suites)
 
 
-def load_and_merge(enumerated_tests: "Tests") -> "Tests":
+def load_and_merge(enumerated_tests: Tests) -> Tests:
     """Combines the saved test state with the enumerated tests."""
 
     test_dict = enumerated_tests._to_dict_tests()

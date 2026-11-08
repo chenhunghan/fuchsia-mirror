@@ -125,7 +125,7 @@ class PcirootBase : public PcirootInspect {
     // is safe to have config handled in the bus driver through MMIO. This can
     // be overriden by a given derived Pciroot implementation for a specific
     // board target.
-    return !root_host_->mcfgs().empty();
+    return root_host_->mcfgs().empty();
   }
 
   // Config space read/write accessors for PCI systems that require platform

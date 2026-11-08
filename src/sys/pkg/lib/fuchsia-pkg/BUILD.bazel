@@ -156,7 +156,6 @@ fx_component_manifest(
 fx_test_component(
     name = "test-component",
     compiled_manifest = ":test-component-manifest",
-    component_name = "fuchsia-pkg-lib-test",
     deps = [
         ":dup1",
         ":dup2",

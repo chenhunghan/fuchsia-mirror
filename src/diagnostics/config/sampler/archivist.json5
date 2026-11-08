@@ -37,7 +37,7 @@
                     ],
                     metric_name: "batch_iterator_get_next_requests_migrated",
                     metric_type: "Occurrence",
-                    selector: "bootstrap/archivist:root/archive_accessor_stats/feedback/logs/batch_iterator/get_next:requests",
+                    selector: "bootstrap/archivist:root/archive_accessor_stats/logs/logs/batch_iterator/get_next:requests",
                 },
                 {
                     event_codes: [
@@ -109,7 +109,7 @@
                     ],
                     metric_name: "batch_iterator_get_next_result_count_migrated",
                     metric_type: "Occurrence",
-                    selector: "bootstrap/archivist:root/archive_accessor_stats/feedback/logs/batch_iterator/get_next:result_count",
+                    selector: "bootstrap/archivist:root/archive_accessor_stats/logs/logs/batch_iterator/get_next:result_count",
                 },
                 {
                     event_codes: [
@@ -181,7 +181,7 @@
                     ],
                     metric_name: "batch_iterator_get_next_result_errors_migrated",
                     metric_type: "Occurrence",
-                    selector: "bootstrap/archivist:root/archive_accessor_stats/feedback/logs/batch_iterator/get_next:result_errors",
+                    selector: "bootstrap/archivist:root/archive_accessor_stats/logs/logs/batch_iterator/get_next:result_errors",
                 },
                 {
                     event_codes: [
@@ -253,7 +253,7 @@
                     ],
                     metric_name: "component_timeouts_count_migrated",
                     metric_type: "Occurrence",
-                    selector: "bootstrap/archivist:root/archive_accessor_stats/feedback/logs:component_timeouts_count",
+                    selector: "bootstrap/archivist:root/archive_accessor_stats/logs/logs:component_timeouts_count",
                 },
                 {
                     event_codes: [

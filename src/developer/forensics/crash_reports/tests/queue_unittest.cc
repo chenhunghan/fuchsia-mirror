@@ -4,6 +4,7 @@
 
 #include "src/developer/forensics/crash_reports/queue.h"
 
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
 #include <lib/syslog/cpp/macros.h>
 #include <lib/zx/time.h>
 
@@ -28,6 +29,7 @@
 #include "src/developer/forensics/testing/unit_test_fixture.h"
 #include "src/developer/forensics/utils/cobalt/metrics.h"
 #include "src/developer/forensics/utils/storage_size.h"
+#include "src/developer/forensics/utils/vmo.h"
 #include "src/lib/files/directory.h"
 #include "src/lib/files/path.h"
 #include "src/lib/fsl/vmo/strings.h"
@@ -405,9 +407,9 @@ TEST_F(QueueTest, ReportingPolicyChangedToDoNotFileAndDelete_DeletesSnapshots) {
 
   const std::optional<ReportId> report_id = AddNewReport(/*is_hourly_report=*/false);
 
-  fuchsia::feedback::Attachment snapshot;
-  snapshot.key = kAttachmentKey;
-  FX_CHECK(fsl::VmoFromString("", &snapshot.value));
+  fuchsia_feedback::Attachment snapshot;
+  snapshot.key(kAttachmentKey);
+  snapshot.value(BufferFromString("").value());
 
   GetSnapshotStore()->AddSnapshot(kSnapshotUuidValue, std::move(snapshot));
   ASSERT_TRUE(GetSnapshotStore()->SnapshotExists(kSnapshotUuidValue));
@@ -1047,9 +1049,9 @@ TEST_F(QueueTest, SnapshotKeptAllReportsAdded) {
   queue_->AddReportUsingSnapshot(kSnapshotUuidValue, report_id_ + 1);
   queue_->AddReportUsingSnapshot(kSnapshotUuidValue, report_id_ + 2);
 
-  fuchsia::feedback::Attachment snapshot;
-  snapshot.key = kAttachmentKey;
-  FX_CHECK(fsl::VmoFromString("", &snapshot.value));
+  fuchsia_feedback::Attachment snapshot;
+  snapshot.key(kAttachmentKey);
+  snapshot.value(BufferFromString("").value());
 
   GetSnapshotStore()->AddSnapshot(kSnapshotUuidValue, std::move(snapshot));
   ASSERT_TRUE(GetSnapshotStore()->SnapshotExists(kSnapshotUuidValue));
@@ -1083,9 +1085,9 @@ TEST_F(QueueTest, SnapshotKeptNotAllReportsAdded) {
   queue_->AddReportUsingSnapshot(kSnapshotUuidValue, report_id_ + 1);
   queue_->AddReportUsingSnapshot(kSnapshotUuidValue, report_id_ + 2);
 
-  fuchsia::feedback::Attachment snapshot;
-  snapshot.key = kAttachmentKey;
-  FX_CHECK(fsl::VmoFromString("", &snapshot.value));
+  fuchsia_feedback::Attachment snapshot;
+  snapshot.key(kAttachmentKey);
+  snapshot.value(BufferFromString("").value());
 
   GetSnapshotStore()->AddSnapshot(kSnapshotUuidValue, std::move(snapshot));
   ASSERT_TRUE(GetSnapshotStore()->SnapshotExists(kSnapshotUuidValue));
@@ -1116,9 +1118,9 @@ TEST_F(QueueTest, Check_SpecialCaseClientsRemoved) {
   });
   reporting_policy_watcher_.Set(ReportingPolicy::kUpload);
 
-  fuchsia::feedback::Attachment snapshot;
-  snapshot.key = kAttachmentKey;
-  FX_CHECK(fsl::VmoFromString("", &snapshot.value));
+  fuchsia_feedback::Attachment snapshot;
+  snapshot.key(kAttachmentKey);
+  snapshot.value(BufferFromString("").value());
 
   GetSnapshotStore()->AddSnapshot(kSnapshotUuidValue, std::move(snapshot));
   ASSERT_TRUE(GetSnapshotStore()->SnapshotExists(kSnapshotUuidValue));
@@ -1167,9 +1169,9 @@ TEST_F(QueueTest, PreventStrandedSnapshot) {
   ASSERT_TRUE(report_id2);
   EXPECT_TRUE(queue_->Contains(*report_id2));
 
-  fuchsia::feedback::Attachment snapshot;
-  snapshot.key = kAttachmentKey;
-  FX_CHECK(fsl::VmoFromString("", &snapshot.value));
+  fuchsia_feedback::Attachment snapshot;
+  snapshot.key(kAttachmentKey);
+  snapshot.value(BufferFromString("").value());
   GetSnapshotStore()->AddSnapshot(kSnapshotUuidValue, std::move(snapshot));
 
   ASSERT_TRUE(GetSnapshotStore()->SnapshotExists(kSnapshotUuidValue));
@@ -1214,9 +1216,9 @@ TEST_F(QueueTest, PreventStrandedSnapshot_FailedMove) {
   ASSERT_TRUE(report_id2);
   EXPECT_TRUE(queue_->Contains(*report_id2));
 
-  fuchsia::feedback::Attachment snapshot;
-  snapshot.key = kAttachmentKey;
-  FX_CHECK(fsl::VmoFromString("", &snapshot.value));
+  fuchsia_feedback::Attachment snapshot;
+  snapshot.key(kAttachmentKey);
+  snapshot.value(BufferFromString("").value());
   GetSnapshotStore()->AddSnapshot(kSnapshotUuidValue, std::move(snapshot));
 
   ASSERT_TRUE(GetSnapshotStore()->SnapshotExists(kSnapshotUuidValue));
@@ -1264,9 +1266,9 @@ TEST_F(QueueTest, Check_SnapshotClientsReloaded) {
 
   ASSERT_TRUE(garbage_collected_reports.empty());
 
-  fuchsia::feedback::Attachment snapshot;
-  snapshot.key = kAttachmentKey;
-  FX_CHECK(fsl::VmoFromString("", &snapshot.value));
+  fuchsia_feedback::Attachment snapshot;
+  snapshot.key(kAttachmentKey);
+  snapshot.value(BufferFromString("").value());
 
   GetSnapshotStore()->AddSnapshot(kSnapshotUuidValue, std::move(snapshot));
   ASSERT_EQ(GetSnapshotStore()->SnapshotLocation(kSnapshotUuidValue), ItemLocation::kMemory);
@@ -1309,9 +1311,9 @@ TEST_F(QueueTest, Check_CleansUpStrandedSnapshotsInCache) {
 
   SetUpQueue();
 
-  fuchsia::feedback::Attachment snapshot;
-  snapshot.key = kAttachmentKey;
-  FX_CHECK(fsl::VmoFromString("", &snapshot.value));
+  fuchsia_feedback::Attachment snapshot;
+  snapshot.key(kAttachmentKey);
+  snapshot.value(BufferFromString("").value());
 
   const std::string kTestUuid = "test uuid";
   GetSnapshotStore()->AddSnapshot(kTestUuid, std::move(snapshot));
@@ -1335,9 +1337,9 @@ TEST_F(QueueTest, Check_CleansUpStrandedSnapshotsInTmp) {
 
   SetUpQueue();
 
-  fuchsia::feedback::Attachment snapshot;
-  snapshot.key = kAttachmentKey;
-  FX_CHECK(fsl::VmoFromString("", &snapshot.value));
+  fuchsia_feedback::Attachment snapshot;
+  snapshot.key(kAttachmentKey);
+  snapshot.value(BufferFromString("").value());
 
   const std::string kTestUuid = "test uuid";
   GetSnapshotStore()->AddSnapshot(kTestUuid, std::move(snapshot));

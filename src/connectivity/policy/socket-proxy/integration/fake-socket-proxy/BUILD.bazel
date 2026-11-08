@@ -1,0 +1,64 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "fake_socket_proxy_svc",
+    testonly = True,
+    srcs = ["src/main.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        "//sdk/fidl/fuchsia.net.policy.properties:fuchsia.net.policy.properties_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "fake_socket_proxy_svc_packaged_bin",
+    testonly = True,
+    binary = ":fake_socket_proxy_svc",
+    binary_name = "fake_socket_proxy_svc",
+)
+
+fx_component_manifest(
+    name = "svc_manifest",
+    testonly = True,
+    component_name = "fake_socket_proxy",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/fake_socket_proxy.cml",
+)
+
+fx_component(
+    name = "svc",
+    testonly = True,
+    compiled_manifest = ":svc_manifest",
+    visibility = ["//src/connectivity/policy/tests/integration:__pkg__"],
+    deps = [":fake_socket_proxy_svc_packaged_bin"],
+)
+
+fx_package(
+    name = "pkg",
+    package_name = "fake_socket_proxy",
+    testonly = True,
+    components = [":svc"],
+)

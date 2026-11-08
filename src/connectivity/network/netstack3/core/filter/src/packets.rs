@@ -343,6 +343,21 @@ pub trait DynamicMaybeIcmpErrorMut<I: IpExt> {
     fn dyn_icmp_error_mut(&mut self) -> Option<&mut dyn DynamicIcmpErrorMut<I>>;
 }
 
+/// A marker for transport serializers that never carry a payload that can be
+/// segmented in software (GSO).
+///
+/// Implementing this trait is an acknowledgement that packets built from the
+/// serializer can't be segmented and so must never be sent with GSO metadata
+/// attached. It is a prerequisite for [`DynamicTransportSerializer`], whose
+/// dyn-compatible API does not expose segmentation, so GSO is unsupported
+/// behind [`DynTransportSerializer`]. Serializers that *can* be segmented
+/// (e.g. TCP) must not implement it.
+///
+/// TODO(https://fxbug.dev/578576724): Support GSO behind
+/// `DynTransportSerializer` so segmentable serializers (TCP, and UDP once it
+/// supports GSO) can be dispatched dynamically; then remove this marker.
+pub trait NotSegmentableTransportSerializer {}
+
 /// A serializer that may also be a valid transport layer packet.
 pub trait TransportPacketSerializer<I: FilterIpExt>:
     NetworkSerializer
@@ -371,6 +386,10 @@ where
 /// This is dynamic-dispatch equivalent of [`TransportPacketSerializer`]. Used
 /// in conjunction with [`DynTransportSerializer`] it allows dynamic dispatch
 /// for slow-path protocols.
+///
+/// Only serializers that acknowledge they can't be segmented in software (via
+/// [`NotSegmentableTransportSerializer`]) may be used dynamically, since this
+/// API does not expose segmentation and so GSO is unsupported here.
 pub trait DynamicTransportSerializer<I: FilterIpExt>:
     DynamicNetworkSerializer
     + DynamicNetworkPartialSerializer
@@ -378,6 +397,7 @@ pub trait DynamicTransportSerializer<I: FilterIpExt>:
     + DynamicMaybeTransportPacketMut<I>
     + DynamicMaybeIcmpErrorMut<I>
     + MaybeIcmpErrorPayload<I>
+    + NotSegmentableTransportSerializer
 {
 }
 
@@ -385,6 +405,7 @@ impl<O, I> DynamicTransportSerializer<I> for O
 where
     I: FilterIpExt,
     O: TransportPacketSerializer<I>
+        + NotSegmentableTransportSerializer
         + DynamicMaybeTransportPacketMut<I>
         + DynamicMaybeIcmpErrorMut<I>,
 {
@@ -1874,6 +1895,11 @@ impl<I: IpExt, Inner, M: IcmpMessage<I>> DynamicMaybeTransportPacketMut<I>
     }
 }
 
+impl<I: IpExt, Inner, M: IcmpMessage<I>> NotSegmentableTransportSerializer
+    for Nested<Inner, IcmpPacketBuilder<I, M>>
+{
+}
+
 impl<I: IpExt, M: IcmpMessage<I>> TransportPacketMut<I> for IcmpPacketBuilder<I, M> {
     fn set_src_port(&mut self, id: NonZeroU16) {
         if M::IS_REWRITABLE {
@@ -2292,6 +2318,11 @@ impl<M: igmp::MessageType<EmptyBuf>> DynamicMaybeTransportPacketMut<Ipv4>
     }
 }
 
+impl<M: igmp::MessageType<EmptyBuf>> NotSegmentableTransportSerializer
+    for InnerSerializer<IgmpPacketBuilder<EmptyBuf, M>, EmptyBuf>
+{
+}
+
 impl<M: igmp::MessageType<EmptyBuf>> MaybeTransportPacketMut<Ipv4>
     for InnerSerializer<IgmpPacketBuilder<EmptyBuf, M>, EmptyBuf>
 {
@@ -2338,6 +2369,11 @@ impl<I> DynamicMaybeTransportPacketMut<Ipv4>
     fn dyn_transport_packet_mut(&mut self) -> Option<&mut dyn TransportPacketMut<Ipv4>> {
         self.transport_packet_mut().map(|x| match x {})
     }
+}
+
+impl<I> NotSegmentableTransportSerializer
+    for InnerSerializer<IgmpMembershipReportV3Builder<I>, EmptyBuf>
+{
 }
 
 impl<I: IpExt, II, B> MaybeIcmpErrorPayload<I>
@@ -2513,10 +2549,7 @@ impl<I: IpExt, B: BufferMut> PartialSerializer<NetworkSerializationContext> for 
         buffer.with_parts_mut(|_prefix, mut body, _suffix| {
             body.copy_from_slice(&self.body.as_ref()[..bytes_to_copy]);
         });
-        let total_size = cmp::max(
-            constraints.min_body_len(),
-            cmp::min(self.body.len(), constraints.max_body_len()),
-        );
+        let total_size = cmp::min(self.body.len(), constraints.max_body_len());
         Ok((buffer, total_size))
     }
 }
@@ -2531,7 +2564,12 @@ fn parse_transport_header_in_ipv4_packet<B: ParseBuffer>(
         Ipv4Proto::Proto(IpProto::Udp) => parse_udp_header::<_, Ipv4>(body),
         Ipv4Proto::Proto(IpProto::Tcp) => parse_tcp_header::<_, Ipv4>(body, src_ip, dst_ip),
         Ipv4Proto::Icmp => parse_icmpv4_header(body),
-        Ipv4Proto::Proto(IpProto::Reserved) | Ipv4Proto::Igmp | Ipv4Proto::Other(_) => None,
+        Ipv4Proto::Proto(IpProto::Ipv4Encap)
+        | Ipv4Proto::Proto(IpProto::Ipv6Encap)
+        | Ipv4Proto::Proto(IpProto::Esp)
+        | Ipv4Proto::Proto(IpProto::Reserved)
+        | Ipv4Proto::Igmp
+        | Ipv4Proto::Other(_) => None,
     }
 }
 
@@ -2545,7 +2583,12 @@ fn parse_transport_header_in_ipv6_packet<B: ParseBuffer>(
         Ipv6Proto::Proto(IpProto::Udp) => parse_udp_header::<_, Ipv6>(body),
         Ipv6Proto::Proto(IpProto::Tcp) => parse_tcp_header::<_, Ipv6>(body, src_ip, dst_ip),
         Ipv6Proto::Icmpv6 => parse_icmpv6_header(body),
-        Ipv6Proto::Proto(IpProto::Reserved) | Ipv6Proto::NoNextHeader | Ipv6Proto::Other(_) => None,
+        Ipv6Proto::Proto(IpProto::Ipv4Encap)
+        | Ipv6Proto::Proto(IpProto::Ipv6Encap)
+        | Ipv6Proto::Proto(IpProto::Esp)
+        | Ipv6Proto::Proto(IpProto::Reserved)
+        | Ipv6Proto::NoNextHeader
+        | Ipv6Proto::Other(_) => None,
     }
 }
 
@@ -2682,7 +2725,12 @@ impl<'a> ParsedTransportHeaderMut<'a, Ipv4> {
                 Some(Self::Tcp(TcpSegmentRaw::parse_mut(body, ()).ok()?))
             }
             Ipv4Proto::Icmp => Some(Self::Icmp(Icmpv4PacketRaw::parse_mut(body, ()).ok()?)),
-            Ipv4Proto::Proto(IpProto::Reserved) | Ipv4Proto::Igmp | Ipv4Proto::Other(_) => None,
+            Ipv4Proto::Proto(IpProto::Ipv4Encap)
+            | Ipv4Proto::Proto(IpProto::Ipv6Encap)
+            | Ipv4Proto::Proto(IpProto::Esp)
+            | Ipv4Proto::Proto(IpProto::Reserved)
+            | Ipv4Proto::Igmp
+            | Ipv4Proto::Other(_) => None,
         }
     }
 }
@@ -2700,9 +2748,12 @@ impl<'a> ParsedTransportHeaderMut<'a, Ipv6> {
                 Some(Self::Tcp(TcpSegmentRaw::parse_mut(body, ()).ok()?))
             }
             Ipv6Proto::Icmpv6 => Some(Self::Icmp(Icmpv6PacketRaw::parse_mut(body, ()).ok()?)),
-            Ipv6Proto::Proto(IpProto::Reserved) | Ipv6Proto::NoNextHeader | Ipv6Proto::Other(_) => {
-                None
-            }
+            Ipv6Proto::Proto(IpProto::Ipv4Encap)
+            | Ipv6Proto::Proto(IpProto::Ipv6Encap)
+            | Ipv6Proto::Proto(IpProto::Esp)
+            | Ipv6Proto::Proto(IpProto::Reserved)
+            | Ipv6Proto::NoNextHeader
+            | Ipv6Proto::Other(_) => None,
         }
     }
 }

@@ -11,6 +11,7 @@ group("tests") {
   deps = [
     ":fuchsia-rcu-atomic-tests-pkg",
     ":fuchsia-rcu-tests",
+    ":fuchsia-rcu-traits_test($host_toolchain)",
   ]
 }
 
@@ -87,13 +88,9 @@ _COMMON_SRCS = [
 not_needed([ "_COMMON_SRCS" ])
 
 _COMMON_DEPS = [
+  ":fuchsia-rcu-traits",
   "//sdk/rust/zx",
-  "//src/lib/fuchsia-runtime",
   "//src/lib/fuchsia-sync",
-  "//src/lib/shared-buffer",
-  "//src/lib/trace/rust:trace",
-  "//third_party/rust_crates:bstr",
-  "//third_party/rust_crates:futures",
 ]
 
 # To avoid "Assignment had no effect" from GN.
@@ -110,28 +107,46 @@ rustc_macro("fuchsia-rcu-derive") {
     "//third_party/rust_crates:syn",
   ]
 }
-rustc_library("fuchsia-rcu") {
-  sources = _COMMON_SRCS
-  features = [ "rseq_backend" ]
+
+rustc_library("fuchsia-rcu-traits") {
+  sources = [ "traits/src/lib.rs" ]
+  features = [ "std" ]
+  source_root = "traits/src/lib.rs"
   edition = "2024"
   proc_macro_deps = [ ":fuchsia-rcu-derive" ]
   version = "0.1.0"
   with_unit_tests = true
+  deps = []
+  deps += [
+    "//third_party/rust_crates:bstr",
+    "//third_party/rust_crates:lock_api",
+  ]
+  if (is_fuchsia) {
+    deps += [ "//sdk/rust/zx" ]
+  }
+}
+
+rustc_library("fuchsia-rcu") {
+  sources = _COMMON_SRCS
+  features = [ "rseq_backend" ]
+  edition = "2024"
+  version = "0.1.0"
+  with_unit_tests = true
   deps = _COMMON_DEPS + [ "//src/lib/fuchsia-rseq" ]
 }
+
 rustc_library("fuchsia-rcu-atomic") {
   testonly = true
   sources = _COMMON_SRCS
   crate_name = "fuchsia_rcu"
   edition = "2024"
-  proc_macro_deps = [ ":fuchsia-rcu-derive" ]
   version = "0.1.0"
   deps = _COMMON_DEPS
 }
+
 rustc_test("fuchsia-rcu-atomic-tests") {
   sources = _COMMON_SRCS
   edition = "2024"
-  proc_macro_deps = [ ":fuchsia-rcu-derive" ]
   version = "0.1.0"
   deps = _COMMON_DEPS
 }

@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 use anyhow::Error;
-use cm_rust::{self, FidlIntoNative};
 use fidl_fuchsia_scheduler::RoleManagerMarker;
 use fidl_fuchsia_ui_composition::{
     AllocatorMarker, FlatlandDisplayMarker, FlatlandFactoryMarker, FlatlandMarker,
@@ -24,7 +23,7 @@ use fidl_fuchsia_ui_views::ViewRefInstalledMarker;
 use fuchsia_async as fasync;
 use fuchsia_component::server::ServiceFs;
 use fuchsia_component_test::{
-    Capability, ChildOptions, RealmBuilder, RealmBuilderParams, RealmInstance, Ref, Route,
+    Capability, RealmBuilder, RealmBuilderParams, RealmInstance, Ref, Route,
 };
 use futures::{StreamExt, TryStreamExt};
 use zx_status;
@@ -95,8 +94,6 @@ async fn run_realm_factory_server(stream: ui_test_context::ScenicRealmFactoryReq
 
 const SCENIC: &str = "scenic";
 const SCENIC_REALM_URL: &str = "#meta/scenic_no_config.cm";
-const CONFIG: &str = "config";
-const CONFIG_URL: &str = "#meta/config.cm";
 
 // Must match the child name specified in `scenic.shard.cml`.
 const FAKE_DISPLAY_STACK_HOST: &str = "fake-display-stack-host";
@@ -125,52 +122,6 @@ async fn assemble_realm(
         .await
         .expect("Failed to route fuchsia.scheduler.RoleManager capabilities.");
 
-    let config = builder
-        .add_child(CONFIG, CONFIG_URL, ChildOptions::new())
-        .await
-        .expect("Failed to add config component.");
-
-    builder
-        .add_route(
-            Route::new()
-                .capability(Capability::configuration(
-                    "fuchsia.scenic.DisplayCompositionEnableHeuristics",
-                ))
-                .capability(Capability::configuration("fuchsia.scenic.FrameCounterOverlay"))
-                .capability(Capability::configuration("fuchsia.scenic.FramePredictionMarginInUs"))
-                .capability(Capability::configuration(
-                    "fuchsia.scenic.FrameSchedulerMinPredictedFrameDurationInUs",
-                ))
-                .capability(Capability::configuration("fuchsia.scenic.ICanHazDisplayId"))
-                .capability(Capability::configuration("fuchsia.scenic.ICanHazDisplayMode"))
-                .capability(Capability::configuration(
-                    "fuchsia.scenic.MaxDisplayHorizontalResolutionPx",
-                ))
-                .capability(Capability::configuration(
-                    "fuchsia.scenic.MaxDisplayRefreshRateMillihertz",
-                ))
-                .capability(Capability::configuration(
-                    "fuchsia.scenic.MaxDisplayVerticalResolutionPx",
-                ))
-                .capability(Capability::configuration(
-                    "fuchsia.scenic.MinDisplayHorizontalResolutionPx",
-                ))
-                .capability(Capability::configuration(
-                    "fuchsia.scenic.MinDisplayRefreshRateMillihertz",
-                ))
-                .capability(Capability::configuration(
-                    "fuchsia.scenic.MinDisplayVerticalResolutionPx",
-                ))
-                .capability(Capability::configuration("fuchsia.scenic.PointerAutoFocus"))
-                .capability(Capability::configuration("fuchsia.scenic.UseSeparateInputThread"))
-                .capability(Capability::configuration("fuchsia.ui.Prefetch"))
-                .capability(Capability::configuration("fuchsia.ui.VisualDebuggingLevel"))
-                .from(&config)
-                .to(Ref::child(SCENIC)),
-        )
-        .await
-        .expect("Failed to route config capabilities.");
-
     let renderer_type = match renderer {
         Some(ui_test_context::RendererType::Null) => "null".to_string(),
         Some(ui_test_context::RendererType::Vulkan) => "vulkan".to_string(),
@@ -179,7 +130,7 @@ async fn assemble_realm(
 
     builder
         .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
-            name: "fuchsia.scenic.Renderer".to_string().fidl_into_native(),
+            name: "fuchsia.scenic.Renderer".parse().unwrap(),
             value: renderer_type.into(),
         }))
         .await
@@ -192,7 +143,7 @@ async fn assemble_realm(
 
     builder
         .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
-            name: "fuchsia.scenic.DisplayRotation".to_string().fidl_into_native(),
+            name: "fuchsia.scenic.DisplayRotation".parse().unwrap(),
             value: display_rotation_value.into(),
         }))
         .await
@@ -216,7 +167,7 @@ async fn assemble_realm(
 
     builder
         .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
-            name: "fuchsia.scenic.DisplayComposition".to_string().fidl_into_native(),
+            name: "fuchsia.scenic.DisplayComposition".parse().unwrap(),
             value: display_composition.into(),
         }))
         .await
@@ -261,35 +212,69 @@ async fn assemble_realm(
         .expect("Failed to route capabilities.");
 
     // Set up fake-display-stack-host's config.
-    builder
-        .init_mutable_config_from_package(FAKE_DISPLAY_STACK_HOST)
-        .await
-        .expect("failed to init mutable config for fake display stack host");
     if let Some(dimensions) = display_dimensions {
         builder
-            .set_config_value(FAKE_DISPLAY_STACK_HOST, "active_width_px", dimensions.width.into())
+            .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                name: "fuchsia.display.testing.ActiveWidthPx".parse().unwrap(),
+                value: dimensions.width.into(),
+            }))
             .await
             .expect("failed to set width");
         builder
-            .set_config_value(FAKE_DISPLAY_STACK_HOST, "active_height_px", dimensions.height.into())
+            .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                name: "fuchsia.display.testing.ActiveHeightPx".parse().unwrap(),
+                value: dimensions.height.into(),
+            }))
             .await
             .expect("failed to set height");
+        builder
+            .add_route(
+                Route::new()
+                    .capability(Capability::configuration("fuchsia.display.testing.ActiveWidthPx"))
+                    .capability(Capability::configuration("fuchsia.display.testing.ActiveHeightPx"))
+                    .from(Ref::self_())
+                    .to(Ref::child(FAKE_DISPLAY_STACK_HOST)),
+            )
+            .await
+            .expect("failed to route display dimensions");
     }
     if let Some(refresh_rate_millihertz) = display_refresh_rate_millihertz {
         builder
-            .set_config_value(
-                FAKE_DISPLAY_STACK_HOST,
-                "refresh_rate_millihertz",
-                refresh_rate_millihertz.into(),
-            )
+            .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                name: "fuchsia.display.testing.RefreshRateMillihertz".parse().unwrap(),
+                value: refresh_rate_millihertz.into(),
+            }))
             .await
             .expect("failed to set refresh rate");
+        builder
+            .add_route(
+                Route::new()
+                    .capability(Capability::configuration(
+                        "fuchsia.display.testing.RefreshRateMillihertz",
+                    ))
+                    .from(Ref::self_())
+                    .to(Ref::child(FAKE_DISPLAY_STACK_HOST)),
+            )
+            .await
+            .expect("failed to route refresh rate");
     }
     if let Some(max_layer_count) = display_max_layer_count {
         builder
-            .set_config_value(FAKE_DISPLAY_STACK_HOST, "max_layer_count", max_layer_count.into())
+            .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                name: "fuchsia.display.testing.MaxLayerCount".parse().unwrap(),
+                value: max_layer_count.into(),
+            }))
             .await
             .expect("failed to set max layer count");
+        builder
+            .add_route(
+                Route::new()
+                    .capability(Capability::configuration("fuchsia.display.testing.MaxLayerCount"))
+                    .from(Ref::self_())
+                    .to(Ref::child(FAKE_DISPLAY_STACK_HOST)),
+            )
+            .await
+            .expect("failed to route max layer count");
     }
 
     // Create the test realm.

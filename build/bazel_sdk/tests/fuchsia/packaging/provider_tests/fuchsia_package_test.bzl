@@ -114,7 +114,6 @@ def _mock_component(name, is_driver):
 
         fuchsia_driver_component(
             name = name,
-            component_name = name,
             manifest = name + "_manifest",
             driver_lib = name + "_lib",
             bind_bytecode = name + "_bind",
@@ -124,7 +123,6 @@ def _mock_component(name, is_driver):
         fuchsia_component(
             name = name,
             tags = ["manual"],
-            component_name = name,
             manifest = name + "_manifest",
         )
 

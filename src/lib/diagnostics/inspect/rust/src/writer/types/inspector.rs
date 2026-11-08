@@ -2,10 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use crate::writer::blob_buffer::BlobBuffer;
 use crate::writer::private::InspectTypeInternal;
 use crate::writer::state::Stats;
 use crate::writer::{Error, Heap, Node, State};
 use diagnostics_hierarchy::{DiagnosticsHierarchy, DiagnosticsHierarchyGetter};
+use fuchsia_sync::Mutex;
 use inspect_format::{BlockContainer, Container, constants};
 use log::error;
 use std::borrow::Cow;
@@ -121,6 +123,36 @@ impl Inspector {
         })
     }
 
+    /// Returns a read-only duplicate of the VMO backing the blob child identified by
+    /// `link_name` (the unique link content key stored in the `LINK_VALUE` block's `content`
+    /// index, e.g. `"events-0"`, rather than the user-provided property name).
+    ///
+    /// The returned handle has `zx::Rights::BASIC | zx::Rights::READ | zx::Rights::MAP |
+    /// zx::Rights::GET_PROPERTY` (no `zx::Rights::WRITE`).
+    pub fn duplicate_blob_vmo(&self, link_name: &str) -> Option<zx::Vmo> {
+        let blob = self.get_blob(link_name)?;
+        blob.try_lock()?.duplicate_vmo()
+    }
+
+    /// Produces a read-only Copy-on-Write VMO snapshot with `VMO_FROZEN` set in its
+    /// `"BLOB"` header for the blob child identified by `link_name` (the unique link content
+    /// key stored in the `LINK_VALUE` block's `content` index, e.g. `"events-0"`).
+    pub fn frozen_blob_vmo_copy(&self, link_name: &str) -> Result<zx::Vmo, Error> {
+        let blob = self.get_blob(link_name).ok_or(Error::VmoMissing)?;
+        let mut guard = blob.try_lock().ok_or(Error::ExpectedLockState(false))?;
+        guard.frozen_vmo_copy()
+    }
+
+    /// Returns a VMO holding a deep copy of the data in the blob child identified by
+    /// `link_name` (the unique link content key stored in the `LINK_VALUE` block's `content`
+    /// index, e.g. `"events-0"`).
+    pub fn copy_blob_vmo(&self, link_name: &str) -> Option<zx::Vmo> {
+        self.copy_blob_vmo_data(link_name).and_then(|data| {
+            let vmo = zx::Vmo::create(data.len() as u64).ok()?;
+            vmo.write(&data, 0).ok().map(|_| vmo)
+        })
+    }
+
     pub(crate) fn get_storage_handle(&self) -> Option<Arc<zx::Vmo>> {
         // We can'just share a reference to the underlying vec<u8> storage, so we copy the data
         self.storage.clone()
@@ -178,6 +210,21 @@ impl Inspector {
     /// stored data.
     pub fn copy_vmo_data(&self) -> Option<Vec<u8>> {
         self.root_node.inner.inner_ref().and_then(|inner_ref| inner_ref.state.copy_vmo_bytes())
+    }
+
+    /// Returns a copy of the bytes (32-byte `"BLOB"` header + payload) stored in the external
+    /// VMO for the blob child identified by `link_name` (the unique link content key stored in
+    /// the `LINK_VALUE` block's `content` index, e.g. `"events-0"`, rather than the
+    /// user-provided property name).
+    pub fn copy_blob_vmo_data(&self, link_name: &str) -> Option<Box<[u8]>> {
+        let blob = self.get_blob(link_name)?;
+        blob.try_lock()?.copy_vmo_bytes()
+    }
+
+    pub(crate) fn get_blob(&self, link_name: &str) -> Option<Arc<Mutex<BlobBuffer>>> {
+        let state = self.state()?;
+        let guard = state.try_lock().ok()?;
+        guard.blobs().get(link_name).cloned()
     }
 
     pub fn max_size(&self) -> Option<usize> {

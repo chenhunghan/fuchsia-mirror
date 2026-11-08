@@ -30,6 +30,7 @@ bringup_platform_aib_names = [
     "driver_framework_common",
     "driver_framework_rust",
     "driver_framework_no_instrumentation",
+    "no_full_drivers",
 
     # Power
     "legacy_power_framework",
@@ -86,11 +87,14 @@ bringup_platform_aib_names = [
     "realtek_8211f_driver",
     "xhci_driver",
     "usb_bus_driver",
+    "sdmmc_driver",
     "sdhci_driver",
     "cqhci_driver",
 
     # The embeddable feature-set-level
     "embeddable_userdebug",
+    "component_tool",
+    "psutils",
 
     # The bootstrap feature-set-level
     "bootstrap_userdebug",
@@ -135,6 +139,7 @@ bringup_platform_aib_names = [
 
     # The bootstrap feature-set-level
     "bootstrap_eng",
+    "package_tool",
 
     # Kernel args
     "kernel_oom_reboot_timeout_low",
@@ -165,6 +170,12 @@ bringup_platform_aib_names = [
 
     # UFS device user-space utility.
     "ufsutil",
+
+    # SPMI device user-space utility.
+    "spmi-ctl",
+
+    # Battery and charger user-space utility.
+    "batteryutil",
 ]
 
 platform_aib_names = bringup_platform_aib_names + [

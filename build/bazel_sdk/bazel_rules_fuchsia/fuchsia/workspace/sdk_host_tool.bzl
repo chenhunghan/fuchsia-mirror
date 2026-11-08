@@ -2,9 +2,10 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+"""Rule for wrapping host tools found in the Fuchsia SDK toolchain."""
+
 load("//fuchsia/private:fuchsia_toolchains.bzl", "FUCHSIA_TOOLCHAIN_DEFINITION", "get_fuchsia_sdk_toolchain")
 
-# buildifier: disable=module-docstring
 # buildifier: disable=function-docstring
 def _sdk_host_tool_impl(ctx):
     sdk = get_fuchsia_sdk_toolchain(ctx)

@@ -8,6 +8,12 @@ load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package
 
 package(default_applicable_licenses = ["//:license"])
 
+test_suite(
+    name = "tests",
+    tests = [":host-watcher-tests"],
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)
+
 rustc_library(
     name = "host-watcher",
     srcs = ["src/lib.rs"],
@@ -44,5 +50,4 @@ fx_unittest_package(
     name = "host-watcher-tests",
     package_name = "host-watcher-tests",
     unit_tests = [":host-watcher_test"],
-    visibility = ["//src/connectivity/bluetooth:__pkg__"],
 )

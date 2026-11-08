@@ -1,0 +1,53 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":char_collection_tests"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+# Library for working with collections of Unicode code points.
+rustc_library(
+    name = "char_collection",
+    srcs = [
+        "src/char_collection.rs",
+        "src/conversions.rs",
+        "src/lib.rs",
+        "src/macros.rs",
+        "src/operators.rs",
+    ],
+    edition = "2024",
+    visibility = [
+        "//src/fonts:__pkg__",
+        "//src/fonts/char_set:__pkg__",
+        "//src/fonts/offset_string:__pkg__",
+        "//src/fonts/tools/manifest_generator:__pkg__",
+        "//src/lib/intl/unicode_utils:__pkg__",
+    ],
+    deps = [
+        "//src/lib/intl/unicode_utils/unicode_blocks",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:unic-char-range",
+        "//third_party/rust_crates/vendor:unic-ucd-block",
+    ],
+)
+
+rustc_test(
+    name = "char_collection_test",
+    crate = ":char_collection",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:paste"],
+)
+
+fx_unittest_package(
+    name = "char_collection_tests",
+    package_name = "char_collection_tests",
+    unit_tests = [":char_collection_test"],
+)

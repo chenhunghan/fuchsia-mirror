@@ -62,8 +62,6 @@ if (is_fuchsia) {
     stable = true
     visibility = [
       ":*",
-      "//build/sdk:*",
-      "//sdk:*",
       "//sdk/lib/async_patterns/cpp/tests:*",
       "//sdk/lib/async_patterns/testing/cpp:*",
       "//sdk/lib/driver/devicetree/manager:*",

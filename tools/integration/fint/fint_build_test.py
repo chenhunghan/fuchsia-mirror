@@ -2686,7 +2686,7 @@ class BuildDirResolutionTest(unittest.TestCase):
                     resolved = fint_build.resolve_fallback_build_dir()
                     self.assertEqual(resolved, default_out.resolve())
 
-    def test_ingest_timeout_metadata(self) -> None:
+    def test_ingest_build_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = pathlib.Path(tmp_dir)
             artifact_dir = tmp_path / "artifacts"
@@ -2724,9 +2724,7 @@ class BuildDirResolutionTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            ret = fint_build.ingest_timeout_metadata(
-                context_path, metadata_path
-            )
+            ret = fint_build.ingest_build_metadata(context_path, metadata_path)
             self.assertEqual(ret, 0)
 
             # Verify build_artifacts.json was updated with active processes
@@ -2741,7 +2739,7 @@ class BuildDirResolutionTest(unittest.TestCase):
             self.assertIn("* [DISK-WAIT] clang++ bar.cc (pid 1002)", summary)
             self.assertIn("... and 1 more (see pstree_stop.json)", summary)
 
-    def test_ingest_timeout_metadata_initializes_fresh_artifacts_when_absent(
+    def test_ingest_build_metadata_initializes_fresh_artifacts_when_absent(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -2775,9 +2773,7 @@ class BuildDirResolutionTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            ret = fint_build.ingest_timeout_metadata(
-                context_path, metadata_path
-            )
+            ret = fint_build.ingest_build_metadata(context_path, metadata_path)
             self.assertEqual(ret, 0)
 
             # Verify build_artifacts.json was created with active processes
@@ -2789,6 +2785,95 @@ class BuildDirResolutionTest(unittest.TestCase):
             summary = updated_artifacts.failure_summary
             self.assertIn("Active processes at timeout:", summary)
             self.assertIn("* [CPU] rustc foo.rs (pid 1001)", summary)
+
+    def test_ingest_metadata_with_failure_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = pathlib.Path(tmp_dir)
+            artifact_dir = tmp_path / "artifacts"
+            artifact_dir.mkdir(parents=True)
+
+            context_path = tmp_path / "context.textproto"
+            context_path.write_text(
+                f'artifact_dir: "{artifact_dir}"\n', encoding="utf-8"
+            )
+
+            artifacts_path = artifact_dir / fint_build.BUILD_ARTIFACTS_JSON
+            initial_artifacts = build_artifacts_pb2.BuildArtifacts(
+                failure_summary="Initial failure"
+            )
+            artifacts_path.write_text(
+                json_format.MessageToJson(initial_artifacts), encoding="utf-8"
+            )
+
+            failure_summary_file = tmp_path / "failure_summary.txt"
+            failure_summary_file.write_text(
+                "1 Failed Action Detected\n[FAILED] foo.o\nerror: syntax error\n",
+                encoding="utf-8",
+            )
+
+            metadata_path = tmp_path / "output_metadata.json"
+            metadata_path.write_text(
+                json.dumps({"failure_summary": str(failure_summary_file)}),
+                encoding="utf-8",
+            )
+
+            ret = fint_build.ingest_build_metadata(context_path, metadata_path)
+            self.assertEqual(ret, 0)
+
+            updated_artifacts = build_artifacts_pb2.BuildArtifacts()
+            json_format.Parse(
+                artifacts_path.read_text(encoding="utf-8"), updated_artifacts
+            )
+            summary = updated_artifacts.failure_summary
+            # Primary failure summary replaces initial preliminary summary
+            self.assertNotIn("Initial failure", summary)
+            self.assertIn("1 Failed Action Detected", summary)
+            self.assertIn("[FAILED] foo.o", summary)
+            self.assertEqual(summary.count("1 Failed Action Detected"), 1)
+
+            # Ingesting a second time should detect content is already present and skip duplicating.
+            ret2 = fint_build.ingest_build_metadata(context_path, metadata_path)
+            self.assertEqual(ret2, 0)
+            updated_artifacts2 = build_artifacts_pb2.BuildArtifacts()
+            json_format.Parse(
+                artifacts_path.read_text(encoding="utf-8"), updated_artifacts2
+            )
+            self.assertEqual(
+                updated_artifacts2.failure_summary.count(
+                    "1 Failed Action Detected"
+                ),
+                1,
+            )
+            self.assertNotIn(
+                "Initial failure", updated_artifacts2.failure_summary
+            )
+
+    def test_ingest_metadata_propagates_write_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = pathlib.Path(tmp_dir)
+            artifact_dir = tmp_path / "artifacts"
+            artifact_dir.mkdir(parents=True)
+
+            context_path = tmp_path / "context.textproto"
+            context_path.write_text(
+                f'artifact_dir: "{artifact_dir}"\n', encoding="utf-8"
+            )
+
+            artifacts_path = artifact_dir / fint_build.BUILD_ARTIFACTS_JSON
+            # Corrupt artifacts file to trigger parse/write failure
+            artifacts_path.write_text("invalid json", encoding="utf-8")
+
+            failure_summary_file = tmp_path / "failure_summary.txt"
+            failure_summary_file.write_text("error", encoding="utf-8")
+
+            metadata_path = tmp_path / "output_metadata.json"
+            metadata_path.write_text(
+                json.dumps({"failure_summary": str(failure_summary_file)}),
+                encoding="utf-8",
+            )
+
+            ret = fint_build.ingest_build_metadata(context_path, metadata_path)
+            self.assertEqual(ret, 1)
 
 
 if __name__ == "__main__":

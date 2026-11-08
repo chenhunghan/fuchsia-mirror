@@ -19,6 +19,7 @@
 #define PERCPU_IN_RESTRICTED_MODE 0x28
 #define PERCPU_GPF_RETURN_OFFSET 0x50
 #define PERCPU_CPU_NUM_OFFSET 0x58
+#define PERCPU_NUM_SPINLOCKS_OFFSET 0x5c  // NOLINT(modernize-macro-to-enum)
 #define PERCPU_HIGH_LEVEL_PERCPU_OFFSET 0x68
 #define PERCPU_DEFAULT_TSS_OFFSET 0x70
 #define PERCPU_INTERRUPT_STACKS_NMI_OFFSET 0x20e0
@@ -118,6 +119,7 @@ static_assert(__offsetof(x86_percpu, kernel_unsafe_sp) == ZX_TLS_UNSAFE_SP_OFFSE
 static_assert(__offsetof(x86_percpu, saved_user_sp) == PERCPU_SAVED_USER_SP_OFFSET);
 static_assert(__offsetof(x86_percpu, gpf_return_target) == PERCPU_GPF_RETURN_OFFSET);
 static_assert(__offsetof(x86_percpu, cpu_num) == PERCPU_CPU_NUM_OFFSET);
+static_assert(__offsetof(x86_percpu, num_spinlocks) == PERCPU_NUM_SPINLOCKS_OFFSET);
 static_assert(__offsetof(x86_percpu, high_level_percpu) == PERCPU_HIGH_LEVEL_PERCPU_OFFSET);
 static_assert(__offsetof(x86_percpu, default_tss) == PERCPU_DEFAULT_TSS_OFFSET);
 static_assert(__offsetof(x86_percpu, default_tss.rsp0) == PERCPU_KERNEL_SP_OFFSET);
@@ -125,38 +127,32 @@ static_assert(__offsetof(x86_percpu, interrupt_stacks.nmi) == PERCPU_INTERRUPT_S
 
 static_assert(sizeof(ktl::declval<x86_percpu>().interrupt_stacks.nmi) == INTERRUPT_STACK_SIZE);
 
-extern x86_percpu bp_percpu;
+extern "C" x86_percpu bp_percpu;
 
 x86_percpu& x86_get_percpu(cpu_num_t);
 
 x86_percpu* x86_get_percpu_for_test(cpu_num_t);
+
+extern "C" {
+__NO_SAFESTACK struct x86_percpu* x86_percpu_for(cpu_num_t cpu_num);
 
 // This needs to be run very early in the boot process from
 // ArchPostHandoffBootstrap() and as each CPU is brought up.
 void x86_init_percpu(cpu_num_t cpu_num);
 
 // used to set the bootstrap processor's apic_id once the APIC is initialized
-extern "C" void x86_set_local_apic_id(uint32_t apic_id);
+void x86_set_local_apic_id(uint32_t apic_id);
 
-extern "C" {
 uint32_t cpp_x86_percpu_get_apic_id(cpu_num_t cpu_num);
 uint32_t cpp_x86_curr_percpu_get_apic_id();
 X86IdleStates* cpp_x86_mp_bp_idle_states();
 X86IdleStates* cpp_x86_mp_ap_idle_states(size_t idx);
-const char* cpp_x86_idle_state_name(const X86IdleState* state);
-uint32_t cpp_x86_idle_state_mwait_hint(const X86IdleState* state);
-uint64_t cpp_x86_idle_state_times_entered(const X86IdleState* state);
-zx_duration_t cpp_x86_idle_state_cumulative_duration(const X86IdleState* state);
-void cpp_x86_idle_state_reset_counters(X86IdleState* state);
-X86IdleState* cpp_x86_idle_states_states(X86IdleStates* states);
-size_t cpp_x86_idle_states_num_states(const X86IdleStates* states);
-void cpp_x86_idle_states_set_state_mask(X86IdleStates* states, uint32_t mask);
-}
 
-int x86_apic_id_to_cpu_num(uint32_t apic_id);
+__NO_SAFESTACK int x86_apic_id_to_cpu_num(uint32_t apic_id);
 
 // Allocate all of the necessary structures for all of the APs to run.
 zx_status_t x86_allocate_ap_structures(uint32_t* apic_ids, uint8_t cpu_count);
+}
 
 template <typename T, size_t Offset>
 [[gnu::always_inline]] inline T x86_read_percpu_field() {
@@ -201,10 +197,10 @@ void x86_ipi_halt_handler() __NO_RETURN;
 // Called from assembly.
 extern "C" void x86_secondary_entry(ktl::atomic<unsigned int>* aps_still_booting, Thread* thread);
 
-void x86_force_halt_all_but_local_and_bsp();
+extern "C" void x86_force_halt_all_but_local_and_bsp();
 
 // Setup the high-level percpu struct pointer for |cpu_num|.
-void arch_setup_percpu(cpu_num_t cpu_num, percpu* percpu);
+extern "C" void arch_setup_percpu(cpu_num_t cpu_num, percpu* percpu);
 
 inline void arch_set_restricted_flag(bool restricted) {
   WRITE_PERCPU_FIELD(in_restricted_mode, restricted ? 1 : 0);

@@ -53,6 +53,25 @@ template <> struct IsPrimitive<float> : public std::true_type {};
 template <> struct IsPrimitive<double> : public std::true_type {};
 // clang-format on
 
+// A type trait that indicates whether the given type is a primitive FIDL integer.
+template <typename T>
+struct IsInteger : public std::false_type {};
+
+// Const-ness is not significant for determining IsInteger.
+template <typename T>
+struct IsInteger<const T> : public IsInteger<T> {};
+
+// clang-format off
+template <> struct IsInteger<uint8_t> : public std::true_type {};
+template <> struct IsInteger<uint16_t> : public std::true_type {};
+template <> struct IsInteger<uint32_t> : public std::true_type {};
+template <> struct IsInteger<uint64_t> : public std::true_type {};
+template <> struct IsInteger<int8_t> : public std::true_type {};
+template <> struct IsInteger<int16_t> : public std::true_type {};
+template <> struct IsInteger<int32_t> : public std::true_type {};
+template <> struct IsInteger<int64_t> : public std::true_type {};
+// clang-format on
+
 }  // namespace internal
 
 // A type trait that indicates whether the given type is a request/response type

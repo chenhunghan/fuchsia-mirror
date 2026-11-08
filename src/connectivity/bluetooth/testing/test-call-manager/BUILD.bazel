@@ -8,6 +8,12 @@ load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package
 
 package(default_applicable_licenses = ["//:license"])
 
+test_suite(
+    name = "tests",
+    tests = [":test-call-manager-tests"],
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)
+
 rustc_library(
     name = "test-call-manager",
     srcs = ["src/lib.rs"],
@@ -52,5 +58,4 @@ rustc_test(
 fx_unittest_package(
     name = "test-call-manager-tests",
     unit_tests = [":test-call-manager_test"],
-    visibility = ["//src/connectivity/bluetooth:__pkg__"],
 )

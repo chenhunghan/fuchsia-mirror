@@ -4,6 +4,9 @@
 
 #include "src/sys/fuzzing/common/child-process.h"
 
+#include <lib/fit/defer.h>
+#include <stdlib.h>
+
 #include <string>
 
 #include <gtest/gtest.h>
@@ -144,5 +147,31 @@ TEST_F(ChildProcessTest, Kill) {
   EXPECT_EQ(process.AddArg(kEcho), ZX_OK);
   EXPECT_EQ(process.Spawn(), ZX_OK);
 }
+
+#if !__has_feature(address_sanitizer) && !__has_feature(hwaddress_sanitizer)
+TEST_F(ChildProcessTest, SpawnShared) {
+  ASSERT_EQ(setenv("FUZZER_SHARED_PROCESS", "1", 1), 0);
+  auto cleanup = fit::defer([] { unsetenv("FUZZER_SHARED_PROCESS"); });
+
+  ChildProcess process(executor());
+  EXPECT_EQ(process.AddArg("bogus"), ZX_OK);
+  EXPECT_EQ(process.Spawn(), ZX_ERR_NOT_FOUND);
+  RunUntilIdle();
+
+  process.Reset();
+  std::string hello("hello");
+  EXPECT_EQ(process.AddArgs({kEcho, "--stdout"}), ZX_OK);
+  EXPECT_EQ(process.AddStdinPipe(), ZX_OK);
+  EXPECT_EQ(process.AddStdoutPipe(), ZX_OK);
+  EXPECT_EQ(process.SetEnvVar("FUZZING_COMMON_TESTING_ECHO_EXITCODE", "7"), ZX_OK);
+  ASSERT_EQ(process.Spawn(), ZX_OK);
+
+  FUZZING_EXPECT_OK(process.ReadFromStdout(), hello);
+  EXPECT_EQ(process.WriteToStdin(hello + "\n"), ZX_OK);
+  process.CloseStdin();
+  FUZZING_EXPECT_OK(process.Wait(), 7);
+  RunUntilIdle();
+}
+#endif  // !__has_feature(address_sanitizer) && !__has_feature(hwaddress_sanitizer)
 
 }  // namespace fuzzing

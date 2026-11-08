@@ -11,6 +11,7 @@
 #include "src/developer/debug/zxdb/console/console_context.h"
 #include "src/developer/debug/zxdb/console/format_filter.h"
 #include "src/developer/debug/zxdb/console/format_target.h"
+#include "src/developer/debug/zxdb/console/format_tracepoint.h"
 #include "src/developer/debug/zxdb/console/verbs.h"
 
 namespace zxdb {
@@ -43,11 +44,19 @@ bp rm
 bp * rm
 
   Removes the breakpoint(s). This is equivalent to "clear".
+
+tracepoint rm
+tracepoint 2 rm
+tp rm
+tp * rm
+
+  Removes the tracepoint(s).
 )";
 
 void RunVerbRm(const Command& cmd, fxl::RefPtr<CommandContext> cmd_context) {
-  if (Err err = cmd.ValidateNouns(
-          {Noun::kBreakpoint, Noun::kFilter, Noun::kFrame, Noun::kProcess, Noun::kSymServer}, true);
+  if (Err err = cmd.ValidateNouns({Noun::kBreakpoint, Noun::kFilter, Noun::kFrame, Noun::kProcess,
+                                   Noun::kSymServer, Noun::kTracepoint},
+                                  true);
       err.has_error()) {
     return cmd_context->ReportError(err);
   }
@@ -95,6 +104,20 @@ void RunVerbRm(const Command& cmd, fxl::RefPtr<CommandContext> cmd_context) {
         console_context->session()->system().DeleteBreakpoint(cmd.breakpoint());
       } else {
         return cmd_context->ReportError(Err("No breakpoint to remove."));
+      }
+      break;
+    }
+    case Noun::kTracepoint: {
+      if (cmd.GetNounIndex(Noun::kTracepoint) == Command::kWildcard) {
+        description = std::to_string(cmd.all_tracepoints().size());
+        description.Append(" tracepoints.");
+        console_context->session()->system().DeleteAllTracepoints();
+      } else if (cmd.tracepoint()) {
+        description = FormatTracepoint(console_context, cmd.tracepoint());
+        console_context->session()->system().DeleteTracepoint(cmd.tracepoint());
+      } else {
+        cmd_context->ReportError(Err("No tracepoint to remove."));
+        return;
       }
       break;
     }

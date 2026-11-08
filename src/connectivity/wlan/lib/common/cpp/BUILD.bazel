@@ -2,8 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
 load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
 load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
@@ -64,11 +64,9 @@ fx_cc_library(
     alwayslink = True,
 )
 
-fx_cc_binary(
+fx_cc_test_binary(
     name = "mcs_rate_lookup_test",
-    testonly = True,
     srcs = ["mcs_rate_lookup_test.cc"],
-    tags = ["manual"],
     deps = [
         ":common",
         "//sdk/fidl/fuchsia.wlan.common:fuchsia.wlan.common_cpp",
@@ -83,11 +81,9 @@ fx_unittest_package(
     visibility = ["//src/connectivity/wlan:__pkg__"],
 )
 
-fx_cc_binary(
+fx_cc_test_binary(
     name = "wlan_cpp_bitfield_test",
-    testonly = True,
     srcs = ["bitfield_test.cc"],
-    tags = ["manual"],
     deps = [
         ":common",
         "//src/lib/fxl/test:gtest_main",

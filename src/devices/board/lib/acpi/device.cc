@@ -31,7 +31,7 @@
 #include "src/devices/board/lib/acpi/manager.h"
 #include "src/devices/board/lib/acpi/power-resource.h"
 #include "src/devices/lib/iommu/iommu.h"
-#include "third_party/acpica-migrating/src/source/include/actypes.h"
+#include "third_party/acpica/src/source/include/actypes.h"
 
 namespace acpi {
 namespace {
@@ -90,28 +90,29 @@ zx_status_t Device::ReportCurrentResources() {
     return ZX_OK;
   }
 
-  // Check device state.
-  auto state = acpi_->EvaluateObject(acpi_handle_, "_STA", std::nullopt);
-  uint64_t sta;
-  if (state.is_error() || state->Type != ACPI_TYPE_INTEGER) {
-    sta = 0xf;
-  } else {
-    sta = state->Integer.Value;
-  }
+  if (!sta_enabled_) {
+    // Check device state.
+    auto state = acpi_->EvaluateObject(acpi_handle_, "_STA", std::nullopt);
+    uint64_t sta;
+    if (state.is_error() || state->Type != ACPI_TYPE_INTEGER) {
+      sta = 0xf;
+    } else {
+      sta = state->Integer.Value;
+    }
 
-  if ((sta & ACPI_STA_DEVICE_ENABLED) == 0) {
-    // We're not allowed to enumerate resources if the device is not enabled.
-    // see ACPI 6.4 section 6.3.7.
-    return ZX_OK;
+    if ((sta & ACPI_STA_DEVICE_ENABLED) == 0) {
+      // We're not allowed to enumerate resources if the device is not enabled.
+      // see ACPI 6.4 section 6.3.7.
+      return ZX_OK;
+    }
   }
 
   // call _CRS to fill in resources
-  ACPI_STATUS acpi_status = AcpiWalkResources(
-      acpi_handle_, const_cast<char*>("_CRS"),
-      [](ACPI_RESOURCE* res, void* ctx) __TA_REQUIRES(reinterpret_cast<Device*>(ctx)->lock_) {
-        return reinterpret_cast<Device*>(ctx)->AddResource(res);
-      },
-      this);
+  auto walk_status =
+      acpi_->WalkResources(acpi_handle_, "_CRS", [this](ACPI_RESOURCE* res) __TA_REQUIRES(lock_) {
+        return acpi::make_status(AddResource(res));
+      });
+  ACPI_STATUS acpi_status = walk_status.status_value();
   if ((acpi_status != AE_NOT_FOUND) && (acpi_status != AE_OK)) {
     return acpi_to_zx_status(acpi_status);
   }

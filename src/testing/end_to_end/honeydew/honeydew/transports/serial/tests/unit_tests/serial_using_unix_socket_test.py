@@ -4,6 +4,7 @@
 """Unit tests for honeydew.transports.serial_using_unix_socket.py."""
 
 import socket
+import time
 import unittest
 from unittest import mock
 
@@ -85,6 +86,7 @@ class FastbootTests(unittest.TestCase):
     )
     def test_send_and_recv(self, mock_socket: mock.Mock) -> None:
         """Test case for serial_using_unix_socket.Socket.send_and_recv()."""
+        mock_socket.error = socket.error
         mock_ctx = mock_socket.socket.return_value.__enter__.return_value
         mock_ctx.recv.side_effect = [
             b"$ echo hello\r\n",
@@ -94,7 +96,7 @@ class FastbootTests(unittest.TestCase):
         output = self.serial_obj.send_and_recv(
             cmd="echo hello",
             stop_tokens=("[DONE]",),
-            timeout_sec=5.0,
+            inactivity_timeout_sec=5.0,
         )
         self.assertEqual(output, "$ echo hello\r\nhello\r\n[DONE]\r\n")
         mock_socket.socket.assert_called_once()
@@ -113,6 +115,7 @@ class FastbootTests(unittest.TestCase):
     ) -> None:
         """Test case for send_and_recv() handling split UTF-8 and timeout."""
         mock_socket.timeout = socket.timeout
+        mock_socket.error = socket.error
         mock_ctx = mock_socket.socket.return_value.__enter__.return_value
         mock_ctx.recv.side_effect = [
             b"$ echo caf\xc3",
@@ -123,10 +126,44 @@ class FastbootTests(unittest.TestCase):
         output = self.serial_obj.send_and_recv(
             cmd="echo café",
             stop_tokens=("[DONE]",),
-            timeout_sec=5.0,
+            inactivity_timeout_sec=5.0,
         )
         self.assertEqual(output, "$ echo café\r\n")
         self.assertEqual(mock_ctx.recv.call_count, 3)
+
+    @mock.patch.object(time, "monotonic")
+    @mock.patch.object(
+        serial_using_unix_socket,
+        "socket",
+        autospec=True,
+    )
+    def test_send_and_recv_timeout_exceeded(
+        self, mock_socket: mock.Mock, mock_monotonic: mock.Mock
+    ) -> None:
+        """Test case for send_and_recv() stopping on timeout."""
+        mock_socket.error = socket.error
+        mock_ctx = mock_socket.socket.return_value.__enter__.return_value
+        # Continuously return data so inactivity timeout doesn't fire.
+        mock_ctx.recv.return_value = b"streaming continuous data\r\n"
+
+        # Simulate monotonic time advancing past timeout_sec (10.0s):
+        # 1. start: overall_deadline = 0.0 + 10.0 = 10.0
+        # 2. iteration 1: time = 1.0 (remaining = 9.0) -> reads chunk 1
+        # 3. iteration 2: time = 6.0 (remaining = 4.0) -> reads chunk 2
+        # 4. iteration 3: time = 10.0 (remaining <= 0) -> breaks
+        mock_monotonic.side_effect = [0.0, 1.0, 6.0, 10.0]
+
+        output = self.serial_obj.send_and_recv(
+            cmd="echo hello",
+            stop_tokens=("[DONE]",),
+            timeout_sec=10.0,
+            inactivity_timeout_sec=5.0,
+        )
+        self.assertEqual(
+            output,
+            "streaming continuous data\r\nstreaming continuous data\r\n",
+        )
+        self.assertEqual(mock_ctx.recv.call_count, 2)
 
     @mock.patch.object(
         serial_using_unix_socket,
@@ -174,6 +211,7 @@ class FastbootTests(unittest.TestCase):
         self, mock_socket: mock.Mock, mock_logger_debug: mock.Mock
     ) -> None:
         """Test case for send_and_recv() log_output parameter."""
+        mock_socket.error = socket.error
         mock_ctx = mock_socket.socket.return_value.__enter__.return_value
         mock_ctx.recv.side_effect = [
             b"$ echo hello\r\n",

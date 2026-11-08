@@ -1,0 +1,43 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "service_hub_connector",
+    hdrs = ["service_hub_connector.h"],
+    visibility = [
+        "//src/lib/fidl/contrib/tests/connection:__pkg__",
+        "//src/media/audio/audio_core/metrics:__pkg__",
+        "//src/ui/scenic/lib/utils:__pkg__",
+    ],
+    deps = [
+        ":service_reconnector",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-default",
+        "//sdk/lib/fidl/cpp",
+        "//sdk/lib/fidl/cpp/wire",
+        "//src/lib/backoff",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "service_reconnector",
+    hdrs = ["service_reconnector.h"],
+    visibility = [
+        "//src/lib/fidl/contrib/tests/connection:__pkg__",
+    ],
+    deps = [
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-default",
+        "//sdk/lib/fidl/cpp",
+        "//sdk/lib/fidl/cpp/wire",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/backoff",
+    ],
+    alwayslink = True,
+)

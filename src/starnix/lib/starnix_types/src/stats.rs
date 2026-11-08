@@ -2,7 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#[derive(Copy, Clone, Eq, PartialEq, Default, Debug)]
+use fuchsia_rcu_traits::RcuDroppable;
+
+#[derive(Copy, Clone, Eq, PartialEq, Default, Debug, RcuDroppable)]
 pub struct TaskTimeStats {
     pub user_time: zx::MonotonicDuration,
     pub system_time: zx::MonotonicDuration,

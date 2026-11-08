@@ -5,6 +5,7 @@
 use crate::bpf::fs::get_bpf_object;
 use crate::bpf::{BpfMapHandle, check_cap_or_sys_admin};
 use crate::security;
+use crate::task::dynamic_thread_spawner::SpawnRequestBuilder;
 use crate::task::{CurrentTask, Kernel, register_delayed_release};
 use crate::vfs::{FdNumber, OutputBuffer};
 use ebpf::{
@@ -13,8 +14,9 @@ use ebpf::{
     EbpfProgram, EbpfProgramContext, NullVerifierLogger, StaticHelperSet, VerifiedEbpfProgram,
     VerifierError, VerifierLogger, link_program, verify_program,
 };
-use ebpf_api::{AttachType, EbpfApiError, MapsContext, PinnedMap, ProgramType, StructId};
+use ebpf_api::{AttachType, EbpfApiError, MapsContext, PinnedMap, ProgramType};
 use fidl_fuchsia_ebpf as febpf;
+use futures::StreamExt as _;
 use starnix_lifecycle::{AtomicCounter, ObjectReleaser, ReleaserAction};
 use starnix_logging::track_stub;
 use starnix_types::ownership::{Releasable, ReleaseGuard};
@@ -68,7 +70,7 @@ pub struct Program {
     pub info: ProgramInfo,
 
     /// Verified program.
-    program: VerifiedEbpfProgram,
+    program: Arc<VerifiedEbpfProgram>,
 
     /// eBPF maps used by the program. These should match the `maps` field in
     /// the `program`.
@@ -149,11 +151,15 @@ impl Program {
         mut code: Vec<EbpfInstruction>,
     ) -> Result<ProgramHandle, Errno> {
         let maps = link_maps_fds(current_task, &mut code)?;
+        let allow_ptr_leaks = check_cap_or_sys_admin(current_task, CAP_PERFMON).is_ok();
         let program = verify_with_logger(code, info.log_level, logger, || {
             let maps_schema = maps.iter().map(|m| m.schema).collect();
-            info.program_type
+            let mut calling_context = info
+                .program_type
                 .create_calling_context(info.expected_attach_type, maps_schema)
-                .map_err(map_ebpf_api_error)
+                .map_err(map_ebpf_api_error)?;
+            calling_context.allow_ptr_leaks = allow_ptr_leaks;
+            Ok(calling_context)
         })?;
 
         let (fidl_handle, service_handle) = zx::EventPair::create();
@@ -164,7 +170,7 @@ impl Program {
         let program = ProgramHandle::new(
             Self {
                 info,
-                program,
+                program: Arc::new(program),
                 maps,
                 id: new_program_id(),
                 fidl_handle,
@@ -299,31 +305,54 @@ pub type ProgramReleaser = ObjectReleaser<Program, ProgramReleaserAction>;
 pub type ProgramHandle = Arc<ProgramReleaser>;
 pub type WeakProgramHandle = Weak<ProgramReleaser>;
 
+fn link_program_to_fidl_bytecode(
+    program: &VerifiedEbpfProgram,
+    linkage: &ebpf::ProgramLinkageInfo,
+) -> Result<febpf::Bytecode, febpf::LinkError> {
+    let linked = ebpf::link_instructions(program, linkage).map_err(ebpf_api::link_error_to_fidl)?;
+    Ok(febpf::Bytecode { instructions: linked.into_iter().map(u64::from).collect() })
+}
+
+fn spawn_program_linker(
+    kernel: &Kernel,
+    program: Arc<VerifiedEbpfProgram>,
+) -> fidl::endpoints::ClientEnd<febpf::ProgramLinkerMarker> {
+    let (client_end, server_end) =
+        fidl::endpoints::create_endpoints::<febpf::ProgramLinkerMarker>();
+    let req = SpawnRequestBuilder::new()
+        .with_debug_name("ebpf-program-linker")
+        .with_async_closure(async move |_current_task: &CurrentTask| {
+            let mut stream = server_end.into_stream();
+            if let Some(Ok(request)) = stream.next().await {
+                match request {
+                    febpf::ProgramLinkerRequest::Link { payload, responder } => {
+                        let result =
+                            ebpf_api::program_linkage_from_fidl(payload).and_then(|linkage| {
+                                link_program_to_fidl_bytecode(&program, &linkage)
+                                    .map(febpf::LinkedProgram::Bytecode)
+                            });
+                        let _ = responder.send(result);
+                    }
+                }
+            }
+        })
+        .build();
+    kernel.kthreads.spawner().spawn_from_request(req);
+    client_end
+}
+
 impl TryFrom<&Program> for febpf::VerifiedProgram {
     type Error = Errno;
 
     fn try_from(program: &Program) -> Result<febpf::VerifiedProgram, Errno> {
+        let kernel = program.kernel.upgrade().ok_or_else(|| errno!(EIO))?;
         let mut maps = Vec::with_capacity(program.maps.len());
         for map in program.maps.iter() {
             maps.push(map.share().map_err(|_| errno!(EIO))?);
         }
 
-        let code_u64: &[u64] = zerocopy::transmute_ref!(program.program.code());
-
-        let mut struct_access_instructions =
-            Vec::with_capacity(program.program.struct_access_instructions().len());
-        for v in program.program.struct_access_instructions() {
-            let struct_id = StructId::try_from(&v.memory_id).map_err(|()| errno!(EINVAL))?.into();
-            struct_access_instructions.push(febpf::StructAccess {
-                pc: v.pc.try_into().unwrap(),
-                struct_id,
-                field_offset: v.field_offset.try_into().unwrap(),
-                is_32_bit_ptr_load: v.is_32_bit_ptr_load,
-            })
-        }
         Ok(febpf::VerifiedProgram {
-            code: Some(code_u64.to_vec()),
-            struct_access_instructions: Some(struct_access_instructions),
+            linker: Some(spawn_program_linker(&kernel, Arc::clone(&program.program))),
             maps: Some(maps),
             ..Default::default()
         })

@@ -27,8 +27,11 @@ The primary way to use this crate is via the `#[guarded]` attribute macro.
 
 Apply `#[guarded]` to your struct and use the helper attributes:
 
-*   `#[mutex]` to mark a `KMutex` field.
-*   `#[brwlock]` to mark a `BrwLockPi` (Reader-Writer) field.
+*   `#[mutex]` to mark a `KMutex<RawLockType>` field (e.g.
+    `KMutex<TrackedMutex>`). The raw lock type is required; see
+    [Raw lock types](#raw-lock-types).
+*   `#[brwlock]` to mark a `BrwLockPi<RawLockType>` (Reader-Writer) field (e.g.
+    `BrwLockPi<RawBrwLockPi>`).
 *   `#[guarded_by(lock_field_name)]` to mark fields protected by that lock.
 
 Under the hood, the macro:
@@ -42,13 +45,14 @@ Under the hood, the macro:
 ### Mutex Example
 
 ```rust
+use crate::ksync_kernel::TrackedMutex;
 use ksync::{guarded, KMutex, lock};
 
 #[derive(Default)]
 #[guarded]
 struct ImageCache {
     #[mutex]
-    mu: KMutex,
+    mu: KMutex<TrackedMutex>,
 
     #[guarded_by(mu)]
     hits: u32,
@@ -94,13 +98,14 @@ fn main() {
 ### Reader-Writer Lock Example
 
 ```rust
+use crate::ksync_kernel::RawBrwLockPi;
 use ksync::{guarded, BrwLockPi, lock};
 
 #[derive(Default)]
 #[guarded]
 struct Database {
     #[brwlock]
-    lock: BrwLockPi,
+    lock: BrwLockPi<RawBrwLockPi>,
 
     #[guarded_by(lock)]
     data: Vec<String>,
@@ -141,15 +146,16 @@ distinct, unique lock class for each lock field. You can lock them independently
 and access their respective fields:
 
 ```rust
+use crate::ksync_kernel::TrackedMutex;
 use ksync::{guarded, KMutex, lock};
 
 #[derive(Default)]
 #[guarded]
 struct DualCache {
     #[mutex]
-    mu1: KMutex,
+    mu1: KMutex<TrackedMutex>,
     #[mutex]
-    mu2: KMutex,
+    mu2: KMutex<TrackedMutex>,
 
     #[guarded_by(mu1)]
     data1: u32,
@@ -193,14 +199,15 @@ A field can be annotated with `#[guarded_by(mu1, mu2, ...)]` (comparable to
     `fields_mut()` only proves a single lock is held.
 
 ```rust
+use crate::ksync_kernel::TrackedMutex;
 use ksync::{guarded, KMutex, lock};
 
 #[guarded]
 struct SharedNode {
     #[mutex]
-    mu1: KMutex,
+    mu1: KMutex<TrackedMutex>,
     #[mutex]
-    mu2: KMutex,
+    mu2: KMutex<TrackedMutex>,
 
     #[guarded_by(mu1, mu2)]
     all_filled: bool,
@@ -218,6 +225,47 @@ fn check_and_arm(node: &SharedNode) {
     lock!(let mut g2 = node.lock_mu2());
     *g1.as_mut().all_filled_mut(&mut g2) = true;
 }
+```
+
+## Raw Lock Types
+
+`KMutex` and `BrwLockPi` are generic over their raw lock type, and there is no
+default. The examples in this file use `TrackedMutex`, which refers to:
+
+*   In the kernel: `crate::ksync_kernel::TrackedMutex` (a lockdep-tracked
+    kernel `Mutex`). The other kernel raw locks (`TrackedCriticalMutex`,
+    `TrackedSpinlock`, `TrackedMonitoredSpinlock`, `RawBrwLockPi`,
+    `RawBrwLockNoPi`), the `KSpinlock` / `KMonitoredSpinlock` aliases, and the
+    `declare_singleton_mutex!`, `declare_singleton_critical_mutex!`,
+    `declare_singleton_spinlock!` and `declare_singleton_monitored_spinlock!`
+    macros are also in `crate::ksync_kernel`. These are defined in
+    `//zircon/kernel/lib/ksync` (the mutexes are defined alongside the kernel
+    `Mutex` in `//zircon/kernel/kernel/mutex.rs`, and the spinlocks alongside
+    the kernel `SpinLock` in `//zircon/kernel/kernel/spinlock.rs`, and
+    re-exported from `crate::ksync_kernel`), which is a `kernel_rust_mod`
+    compiled directly into the kernel crate rather than part of the `ksync`
+    crate.
+*   Outside the kernel (host builds and tests), use `ksync::RawMutex` in its
+    place.
+
+Because only the kernel crate can name the kernel's raw locks, code outside of
+the kernel crate that uses `ksync` (for example `fbl` or `region_alloc`) must
+be generic over its lock type (`M: ksync::RawLock`) and let the kernel usage
+site supply the concrete raw lock:
+
+```rust
+// In a library crate:
+#[guarded]
+pub struct Allocator<M: ksync::RawLock> {
+    #[mutex]
+    mu: KMutex<M>,
+
+    #[guarded_by(mu)]
+    next: u64,
+}
+
+// In the kernel crate:
+type KernelAllocator = Allocator<crate::ksync_kernel::TrackedMutex>;
 ```
 
 ## Locked Inherent Methods
@@ -256,7 +304,7 @@ access.
 #[guarded]
 struct Connection {
     #[mutex]
-    mu: KMutex,
+    mu: KMutex<TrackedMutex>,
 
     #[guarded_by(mu)]
     bytes_sent: u64,
@@ -353,7 +401,7 @@ You can configure lock validation flags directly in `#[mutex]` and `#[brwlock]`:
 #[guarded]
 struct StreamDispatcherState {
     #[mutex(flags = lockdep::LOCK_FLAGS_ACTIVE_LIST_DISABLED)]
-    seek_lock: KMutex,
+    seek_lock: KMutex<TrackedMutex>,
 
     #[guarded_by(seek_lock)]
     seek: u64,

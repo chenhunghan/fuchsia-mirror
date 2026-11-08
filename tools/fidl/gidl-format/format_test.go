@@ -89,7 +89,7 @@ success("foo") {
 		input: `
  decode_failure ( "TooManyHandles" )   {
  // TODO: Close handles on encode/decode failure.
-bindings_denylist=[ go,rust ,],
+bindings_denylist=[ cpp,rust ,],
 	handle_defs ={
 		# 0=event( ),
 		# 1 = event ( ) ,
@@ -112,7 +112,7 @@ repeat( 0xff): 4 , padding : 4,
 		output: `
 decode_failure("TooManyHandles") {
     // TODO: Close handles on encode/decode failure.
-    bindings_denylist = [go, rust],
+    bindings_denylist = [cpp, rust],
     handle_defs = {
         #0 = event(),
         #1 = event(),
@@ -137,7 +137,7 @@ decode_failure("TooManyHandles") {
 		input: `
  decode_failure ( "TooManyHandles" )   {
  // TODO: Close handles on encode/decode failure.
-bindings_denylist=[ go,rust ,],
+bindings_denylist=[ cpp,rust ,],
 	handle_defs ={
 		# 0=event( ),
 		# 1 = event ( ) ,
@@ -156,7 +156,7 @@ bindings_denylist=[ go,rust ,],
 		output: `
 decode_failure("TooManyHandles") {
     // TODO: Close handles on encode/decode failure.
-    bindings_denylist = [go, rust],
+    bindings_denylist = [cpp, rust],
     handle_defs = {
         #0 = event(),
         #1 = event(),
@@ -176,7 +176,7 @@ decode_failure("TooManyHandles") {
 	{
 		input: `
 encode_success("EncodeHandleTypeAndRightsComeFromFIDL") {
-	bindings_allowlist = [llcpp, hlcpp, go, rust, dart,],
+	bindings_allowlist = [llcpp, hlcpp, cpp, rust, dart,],
 handle_defs = {
 		# 0 = channel ( rights : channel_default ) ,
 	},
@@ -195,7 +195,7 @@ handle_defs = {
 `,
 		output: `
 encode_success("EncodeHandleTypeAndRightsComeFromFIDL") {
-    bindings_allowlist = [llcpp, hlcpp, go, rust, dart],
+    bindings_allowlist = [llcpp, hlcpp, cpp, rust, dart],
     handle_defs = {
         #0 = channel(rights: channel_default),
     },

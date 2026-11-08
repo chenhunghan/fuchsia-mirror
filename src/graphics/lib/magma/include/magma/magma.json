@@ -1,6 +1,6 @@
 {
     "magma-interface": {
-        "next-free-ordinal": 93,
+        "next-free-ordinal": 94,
         "exports": [
             {
                 "ordinal": 46,
@@ -991,6 +991,45 @@
                         "name": "context_id_out",
                         "type": "uint32_t*",
                         "description": "The returned context id."
+                    }
+                ]
+            },
+            {
+                "ordinal": 93,
+                "name": "magma_connection_create_buffer2",
+                "type": "magma_status_t",
+                "description": "Creates a memory buffer of at least the given size. If flags includes MAGMA_BUFFER_FLAG_REMOTE_ALLOCATION, the memory is allocated by the system driver; otherwise this is equivalent to magma_connection_create_buffer.",
+                "attributes": "MAGMA_AVAILABLE_SINCE(NEXT)",
+                "arguments": [
+                    {
+                        "name": "connection",
+                        "type": "magma_connection_t",
+                        "description": "An open connection."
+                    },
+                    {
+                        "name": "size",
+                        "type": "uint64_t",
+                        "description": "Requested buffer size."
+                    },
+                    {
+                        "name": "flags",
+                        "type": "magma_buffer_flags_t",
+                        "description": "A union of MAGMA_BUFFER_FLAG_* flags. Vendor-specific flags are passed to the system driver."
+                    },
+                    {
+                        "name": "size_out",
+                        "type": "uint64_t*",
+                        "description": "The returned buffer's actual size."
+                    },
+                    {
+                        "name": "buffer_out",
+                        "type": "magma_buffer_t*",
+                        "description": "The returned buffer."
+                    },
+                    {
+                        "name": "id_out",
+                        "type": "magma_buffer_id_t*",
+                        "description": "The buffer id of the buffer."
                     }
                 ]
             }

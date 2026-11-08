@@ -11,6 +11,7 @@
 #include <map>
 #include <string>
 
+#include "src/developer/forensics/utils/vmo.h"
 #include "src/lib/fsl/vmo/strings.h"
 
 namespace forensics {
@@ -40,22 +41,10 @@ feedback::Annotations BuildFeedbackAnnotations(
 }
 
 Attachment BuildAttachment(const std::string& key) {
-  fsl::SizedVmo sized_vmo;
-  FX_CHECK(fsl::VmoFromString("", &sized_vmo));
   return Attachment{{
       .key = key,
-      .value = fuchsia_mem::Buffer{{
-          .vmo = std::move(sized_vmo.vmo()),
-          .size = sized_vmo.size(),
-      }},
+      .value = BufferFromString("").value(),
   }};
-}
-
-fuchsia::feedback::Attachment BuildHlcppAttachment(const std::string& key) {
-  fuchsia::feedback::Attachment attachment;
-  attachment.key = key;
-  FX_CHECK(fsl::VmoFromString("", &attachment.value));
-  return attachment;
 }
 
 }  // namespace
@@ -67,10 +56,9 @@ void DataProvider::GetSnapshot(GetSnapshotRequest& request, GetSnapshotCompleter
   completer.Reply(std::move(snapshot));
 }
 
-void DataProvider::GetSnapshotInternal(
-    zx::duration timeout, const std::string& uuid,
-    fit::callback<void(feedback::Annotations, fuchsia::feedback::Attachment)> callback) {
-  callback(BuildFeedbackAnnotations(annotations_), BuildHlcppAttachment(snapshot_key_));
+void DataProvider::GetSnapshotInternal(zx::duration timeout, const std::string& uuid,
+                                       GetSnapshotInternalCallback callback) {
+  callback(BuildFeedbackAnnotations(annotations_), BuildAttachment(snapshot_key_));
 }
 
 void DataProviderReturnsNoAttachment::GetSnapshot(GetSnapshotRequest& request,
@@ -78,9 +66,9 @@ void DataProviderReturnsNoAttachment::GetSnapshot(GetSnapshotRequest& request,
   completer.Reply(std::move(Snapshot().annotations2(BuildFidlAnnotations(annotations_))));
 }
 
-void DataProviderReturnsNoAttachment::GetSnapshotInternal(
-    zx::duration timeout, const std::string& uuid,
-    fit::callback<void(feedback::Annotations, fuchsia::feedback::Attachment)> callback) {
+void DataProviderReturnsNoAttachment::GetSnapshotInternal(zx::duration timeout,
+                                                          const std::string& uuid,
+                                                          GetSnapshotInternalCallback callback) {
   callback(BuildFeedbackAnnotations(annotations_), {});
 }
 
@@ -89,9 +77,9 @@ void DataProviderReturnsEmptySnapshot::GetSnapshot(GetSnapshotRequest& request,
   completer.Reply(Snapshot());
 }
 
-void DataProviderReturnsEmptySnapshot::GetSnapshotInternal(
-    zx::duration timeout, const std::string& uuid,
-    fit::callback<void(feedback::Annotations, fuchsia::feedback::Attachment)> callback) {
+void DataProviderReturnsEmptySnapshot::GetSnapshotInternal(zx::duration timeout,
+                                                           const std::string& uuid,
+                                                           GetSnapshotInternalCallback callback) {
   callback({}, {});
 }
 
@@ -106,9 +94,8 @@ void DataProviderTracksNumCalls::GetSnapshot(GetSnapshotRequest& request,
   completer.Reply(Snapshot());
 }
 
-void DataProviderTracksNumCalls::GetSnapshotInternal(
-    zx::duration timeout, const std::string& uuid,
-    fit::callback<void(feedback::Annotations, fuchsia::feedback::Attachment)> callback) {
+void DataProviderTracksNumCalls::GetSnapshotInternal(zx::duration timeout, const std::string& uuid,
+                                                     GetSnapshotInternalCallback callback) {
   ++num_calls_;
   callback({}, {});
 }
@@ -118,9 +105,9 @@ void DataProviderReturnsOnDemand::GetSnapshot(GetSnapshotRequest& request,
   snapshot_callbacks_.push(completer.ToAsync());
 }
 
-void DataProviderReturnsOnDemand::GetSnapshotInternal(
-    const zx::duration timeout, const std::string& uuid,
-    fit::callback<void(feedback::Annotations, fuchsia::feedback::Attachment)> callback) {
+void DataProviderReturnsOnDemand::GetSnapshotInternal(const zx::duration timeout,
+                                                      const std::string& uuid,
+                                                      GetSnapshotInternalCallback callback) {
   snapshot_internal_callbacks_.push(std::move(callback));
   pending_uuids_.push_back(uuid);
 }
@@ -143,7 +130,7 @@ void DataProviderReturnsOnDemand::PopSnapshotInternalCallback() {
   FX_CHECK(!snapshot_internal_callbacks_.empty());
 
   snapshot_internal_callbacks_.front()(BuildFeedbackAnnotations(annotations_),
-                                       BuildHlcppAttachment(snapshot_key_));
+                                       BuildAttachment(snapshot_key_));
   snapshot_internal_callbacks_.pop();
   pending_uuids_.pop_front();
 }
@@ -153,14 +140,9 @@ void DataProviderSnapshotOnly::GetSnapshot(GetSnapshotRequest& request,
   completer.Reply(std::move(Snapshot().archive(std::move(snapshot_))));
 }
 
-void DataProviderSnapshotOnly::GetSnapshotInternal(
-    zx::duration timeout, const std::string& uuid,
-    fit::callback<void(feedback::Annotations, fuchsia::feedback::Attachment)> callback) {
-  fuchsia::feedback::Attachment hlcpp_snapshot;
-  hlcpp_snapshot.key = snapshot_.key();
-  hlcpp_snapshot.value.vmo = std::move(snapshot_.value().vmo());
-  hlcpp_snapshot.value.size = snapshot_.value().size();
-  callback({}, std::move(hlcpp_snapshot));
+void DataProviderSnapshotOnly::GetSnapshotInternal(zx::duration timeout, const std::string& uuid,
+                                                   GetSnapshotInternalCallback callback) {
+  callback({}, std::move(snapshot_));
 }
 
 }  // namespace stubs

@@ -2,6 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+"""Providers for Fuchsia components."""
+
 FuchsiaComponentInfo = provider(
     doc = "Contains information about a fuchsia component",
     fields = {

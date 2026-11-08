@@ -78,7 +78,6 @@ class CommandBufferPool;
 class CommandBufferSequencer;
 class ComputeShader;
 class FrameManager;
-class ImageCache;
 class Pipeline;
 class UniformBufferPool;
 

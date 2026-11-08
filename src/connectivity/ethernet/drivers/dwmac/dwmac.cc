@@ -14,7 +14,6 @@
 #include <lib/driver/component/cpp/node_add_args.h>
 #include <lib/fit/defer.h>
 #include <lib/fzl/vmar-manager.h>
-#include <lib/operation/ethernet.h>
 #include <lib/zircon-internal/align.h>
 #include <lib/zx/clock.h>
 #include <stdio.h>

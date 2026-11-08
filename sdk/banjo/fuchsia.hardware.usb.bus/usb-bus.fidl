@@ -11,42 +11,35 @@ using fuchsia.hardware.usb.request;
 
 alias UsbSpeed = uint32;
 
-// Note: the "uint64 foo_device" parameters should be interpreted as zx_device_t*.
-// TODO(https://fxbug.dev/42148112): restore types.
+/// Protocol served by each USB device published by the USB bus driver. All methods
+/// implicitly operate on the USB device that serves the protocol instance (typically a
+/// hub), so no device handle is passed.
 @transport("Banjo")
 @banjo_layout("ddk-protocol")
 closed protocol UsbBus {
-    /// Configures a new hub based on its USB hub descriptor.
+    /// Configures this device as a hub based on its USB hub descriptor.
     strict ConfigureHub(struct {
-        @in_out
-        hub_device uint64;
         speed UsbSpeed;
         desc fuchsia.hardware.usb.descriptor.UsbHubDescriptor;
         multi_tt bool;
     }) -> (struct {
         s zx.Result;
     });
-    /// Informs the USB bus that a new device has been added.
+    /// Informs the USB bus that a new device has been added to a port of this hub.
     strict DeviceAdded(struct {
-        @in_out
-        hub_device uint64;
         port uint32;
         speed UsbSpeed;
     }) -> (struct {
         s zx.Result;
     });
-    /// Informs the USB bus that a device has been removed.
+    /// Informs the USB bus that a device has been removed from a port of this hub.
     strict DeviceRemoved(struct {
-        @in_out
-        hub_device uint64;
         port uint32;
     }) -> (struct {
         s zx.Result;
     });
     /// Used by USB hub driver to register its USB hub protocol with the USB bus driver.
     strict SetHubInterface(resource struct {
-        @in_out
-        usb_device uint64;
         hub client_end:fuchsia.hardware.usb.hub.UsbHubInterface;
     }) -> (struct {
         s zx.Result;

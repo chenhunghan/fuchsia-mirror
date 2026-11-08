@@ -173,35 +173,6 @@ int emu_mount(const char* path) {
   return emu_mount_bcache(std::move(bc));
 }
 
-int emu_get_used_resources(const char* path, uint64_t* out_data_size, uint64_t* out_inodes,
-                           uint64_t* out_used_size) {
-  std::unique_ptr<minfs::Bcache> bc;
-  if (emu_create_bcache(path, &bc) != 0) {
-    return -1;
-  }
-
-  auto data_size_or = minfs::UsedDataSize(bc);
-  if (data_size_or.is_error()) {
-    return -1;
-  }
-
-  auto inodes_or = minfs::UsedInodes(bc);
-  if (inodes_or.is_error()) {
-    return -1;
-  }
-
-  auto used_size_or = minfs::UsedSize(bc);
-  if (used_size_or.is_error()) {
-    return -1;
-  }
-
-  *out_data_size = data_size_or.value();
-  *out_inodes = inodes_or.value();
-  *out_used_size = used_size_or.value();
-
-  return 0;
-}
-
 bool emu_is_mounted() { return fake_fs.fake_root != nullptr; }
 
 namespace {

@@ -174,7 +174,6 @@
     "zx_task_create_exception_channel",
     "zx_task_kill",
     "zx_task_suspend",
-    "zx_task_suspend_token",
     "zx_thread_create",
     "zx_thread_exit",
     "zx_thread_legacy_yield",

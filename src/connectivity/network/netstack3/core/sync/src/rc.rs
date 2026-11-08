@@ -20,7 +20,25 @@ use core::ops::Deref;
 use core::panic::Location;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use alloc::boxed::Box;
 use derivative::Derivative;
+
+/// Returns `true` if the current thread is unwinding due to a panic.
+///
+/// Always returns `false` when panics abort, since no code runs while
+/// panicking in that case.
+#[inline]
+fn thread_panicking() -> bool {
+    #[cfg(panic = "abort")]
+    {
+        false
+    }
+    #[cfg(not(panic = "abort"))]
+    {
+        extern crate std;
+        std::thread::panicking()
+    }
+}
 
 mod caller {
     //! Provides tracking of instances via tracked caller location.
@@ -123,9 +141,9 @@ mod caller {
 
 mod resource_token {
     use core::fmt::Debug;
+    use core::marker::PhantomData;
+    use core::num::NonZeroU64;
     use core::sync::atomic::{AtomicU64, Ordering};
-    use std::marker::PhantomData;
-    use std::num::NonZeroU64;
 
     /// An opaque token associated with a resource.
     ///
@@ -215,33 +233,6 @@ mod resource_token {
 }
 
 pub use resource_token::{ResourceToken, ResourceTokenValue};
-
-mod debug_id {
-    use super::ResourceToken;
-    use core::fmt::Debug;
-
-    /// A debug identifier for the RC types exposed in the parent module.
-    ///
-    /// Encompasses the underlying pointer for the RC type, as well as
-    /// (optionally) the globally unique [`ResourceToken`].
-    pub(super) enum DebugId<T> {
-        /// Used in contexts that have access to the [`ResourceToken`], e.g.
-        /// [`Primary`], [`Strong`], and sometimes [`Weak`] RC types.
-        WithToken { ptr: *const T, token: ResourceToken<'static> },
-        /// Used in contexts that don't have access to the [`ResourceToken`], e.g.
-        /// [`Weak`] RC types that cannot be upgraded.
-        WithoutToken { ptr: *const T },
-    }
-
-    impl<T> Debug for DebugId<T> {
-        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> Result<(), core::fmt::Error> {
-            match self {
-                DebugId::WithToken { ptr, token } => write!(f, "{:?}:{:?}", token, ptr),
-                DebugId::WithoutToken { ptr } => write!(f, "?:{:?}", ptr),
-            }
-        }
-    }
-}
 
 /// A slot for the destruction notifier.
 ///
@@ -407,7 +398,7 @@ impl<T> Drop for Primary<T> {
         // invariants provided by Primary are possibly violated during an
         // unwind, but we're sidestepping that problem because Fuchsia is our
         // only audience here.
-        if !std::thread::panicking() {
+        if !thread_panicking() {
             assert_eq!(was_marked, false, "Must not be marked for destruction yet");
 
             let Inner {
@@ -481,12 +472,16 @@ impl<T> Primary<T> {
     /// cannot be upgraded until the [`Primary`] is constructed.
     pub fn new_cyclic(data_fn: impl FnOnce(Weak<T>) -> T) -> Primary<T> {
         Primary {
-            inner: core::mem::ManuallyDrop::new(alloc::sync::Arc::new_cyclic(move |weak| Inner {
-                marked_for_destruction: AtomicBool::new(false),
-                callers: caller::Callers::default(),
-                data: core::mem::ManuallyDrop::new(data_fn(Weak(weak.clone()))),
-                notifier: NotifierSlot(UnsafeCell::new(None)),
-                resource_token: ResourceTokenValue::default(),
+            inner: core::mem::ManuallyDrop::new(alloc::sync::Arc::new_cyclic(move |weak| {
+                let resource_token = ResourceTokenValue::default();
+                let token = resource_token.token().extend_lifetime();
+                Inner {
+                    marked_for_destruction: AtomicBool::new(false),
+                    callers: caller::Callers::default(),
+                    data: core::mem::ManuallyDrop::new(data_fn(Weak { weak: weak.clone(), token })),
+                    notifier: NotifierSlot(UnsafeCell::new(None)),
+                    resource_token,
+                }
             })),
         }
     }
@@ -502,7 +497,10 @@ impl<T> Primary<T> {
 
     /// Returns a weak reference pointing to the same underlying data.
     pub fn downgrade(Self { inner }: &Self) -> Weak<T> {
-        Weak(alloc::sync::Arc::downgrade(inner))
+        Weak {
+            weak: alloc::sync::Arc::downgrade(inner),
+            token: inner.resource_token.token().extend_lifetime(),
+        }
     }
 
     /// Returns true if the two pointers point to the same allocation.
@@ -517,12 +515,7 @@ impl<T> Primary<T> {
     /// for the data held behind this [`Primary`].
     pub fn debug_id(&self) -> impl Debug + '_ {
         let Self { inner } = self;
-
-        // The lifetime of the returned `DebugId` is bound to the lifetime
-        // of `self`.
-        let token = inner.resource_token.token().extend_lifetime();
-
-        debug_id::DebugId::WithToken { ptr: alloc::sync::Arc::as_ptr(inner), token }
+        inner.resource_token.token()
     }
 
     fn mark_for_destruction_and_take_inner(mut this: Self) -> alloc::sync::Arc<Inner<T>> {
@@ -662,19 +655,17 @@ impl<T> Clone for Strong<T> {
 impl<T> Strong<T> {
     /// Returns a weak reference pointing to the same underlying data.
     pub fn downgrade(Self { inner, caller: _ }: &Self) -> Weak<T> {
-        Weak(alloc::sync::Arc::downgrade(inner))
+        Weak {
+            weak: alloc::sync::Arc::downgrade(inner),
+            token: inner.resource_token.token().extend_lifetime(),
+        }
     }
 
     /// Returns [`Debug`] implementation that is stable and unique
     /// for the data held behind this [`Strong`].
     pub fn debug_id(&self) -> impl Debug + '_ {
         let Self { inner, caller: _ } = self;
-
-        // The lifetime of the returned `DebugId` is bound to the lifetime
-        // of `self`.
-        let token = inner.resource_token.token().extend_lifetime();
-
-        debug_id::DebugId::WithToken { ptr: alloc::sync::Arc::as_ptr(inner), token }
+        inner.resource_token.token()
     }
 
     /// Returns a [`ResourceToken`] that corresponds to this object.
@@ -694,7 +685,10 @@ impl<T> Strong<T> {
     }
 
     /// Returns true if the two pointers point to the same allocation.
-    pub fn weak_ptr_eq(Self { inner: this, caller: _ }: &Self, Weak(other): &Weak<T>) -> bool {
+    pub fn weak_ptr_eq(
+        Self { inner: this, caller: _ }: &Self,
+        Weak { weak: other, token: _ }: &Weak<T>,
+    ) -> bool {
         core::ptr::eq(alloc::sync::Arc::as_ptr(this), other.as_ptr())
     }
 
@@ -734,7 +728,10 @@ impl<T> Strong<T> {
 /// Note that `Weak`'s implementation of [`Hash`] and [`PartialEq`] operate on
 /// the pointer itself and not the underlying data.
 #[derive(Debug)]
-pub struct Weak<T>(alloc::sync::Weak<Inner<T>>);
+pub struct Weak<T> {
+    weak: alloc::sync::Weak<Inner<T>>,
+    token: ResourceToken<'static>,
+}
 
 impl<T> core::cmp::Eq for Weak<T> {}
 
@@ -746,44 +743,30 @@ impl<T> core::cmp::PartialEq for Weak<T> {
 
 impl<T> Hash for Weak<T> {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        let Self(this) = self;
-        this.as_ptr().hash(state)
+        let Self { weak, token: _ } = self;
+        weak.as_ptr().hash(state)
     }
 }
 
 impl<T> Clone for Weak<T> {
     fn clone(&self) -> Self {
-        let Self(this) = self;
-        Weak(this.clone())
+        let Self { weak, token } = self;
+        Self { weak: weak.clone(), token: token.clone() }
     }
 }
 
 impl<T> Weak<T> {
     /// Returns true if the two pointers point to the same allocation.
-    pub fn ptr_eq(&self, Self(other): &Self) -> bool {
-        let Self(this) = self;
+    pub fn ptr_eq(&self, Self { weak: other, token: _ }: &Self) -> bool {
+        let Self { weak: this, token: _ } = self;
         this.ptr_eq(other)
     }
 
     /// Returns [`Debug`] implementation that is stable and unique
     /// for the data held behind this [`Weak`].
     pub fn debug_id(&self) -> impl Debug + '_ {
-        match self.upgrade() {
-            Some(strong) => {
-                let Strong { inner, caller: _ } = &strong;
-
-                // The lifetime of the returned `DebugId` is still bound to the
-                // lifetime of `self`.
-                let token = inner.resource_token.token().extend_lifetime();
-
-                debug_id::DebugId::WithToken { ptr: alloc::sync::Arc::as_ptr(&inner), token }
-            }
-            None => {
-                let Self(this) = self;
-                // NB: If we can't upgrade the socket, we can't know the token.
-                debug_id::DebugId::WithoutToken { ptr: this.as_ptr() }
-            }
-        }
+        let Self { weak: _, token } = self;
+        token
     }
 
     /// Attempts to upgrade to a [`Strong`].
@@ -791,7 +774,7 @@ impl<T> Weak<T> {
     /// Returns `None` if the inner value has since been marked for destruction.
     #[cfg_attr(feature = "rc-debug-names", track_caller)]
     pub fn upgrade(&self) -> Option<Strong<T>> {
-        let Self(weak) = self;
+        let Self { weak, token: _ } = self;
         let arc = weak.upgrade()?;
         let Inner { marked_for_destruction, data: _, callers, notifier: _, resource_token: _ } =
             arc.deref();
@@ -810,14 +793,14 @@ impl<T> Weak<T> {
 
     /// Gets the number of [`Primary`] and [`Strong`] references to this allocation.
     pub fn strong_count(&self) -> usize {
-        let Self(weak) = self;
+        let Self { weak, token: _ } = self;
         weak.strong_count()
     }
 
     /// Creates a [`DebugReferences`] instance.
     pub fn debug_references(&self) -> DebugReferences<T> {
-        let Self(inner) = self;
-        DebugReferences(inner.clone())
+        let Self { weak, token: _ } = self;
+        DebugReferences(weak.clone())
     }
 }
 
@@ -905,11 +888,11 @@ pub trait Notifier<T>: Send {
 /// `Clone` type.
 ///
 /// Useful for tests where completion assertions are possible and useful.
-#[derive(Debug, Derivative)]
-#[derivative(Clone(bound = ""))]
-pub struct ArcNotifier<T>(alloc::sync::Arc<crate::Mutex<Option<T>>>);
+#[derive(Derivative)]
+#[derivative(Clone(bound = ""), Debug(bound = "T: Debug, R: lock_api::RawMutex"))]
+pub struct ArcNotifier<T, R>(alloc::sync::Arc<crate::Mutex<Option<T>, R>>);
 
-impl<T> ArcNotifier<T> {
+impl<T, R: lock_api::RawMutex> ArcNotifier<T, R> {
     /// Creates a new `ArcNotifier`.
     pub fn new() -> Self {
         Self(alloc::sync::Arc::new(crate::Mutex::new(None)))
@@ -922,7 +905,7 @@ impl<T> ArcNotifier<T> {
     }
 }
 
-impl<T: Send> Notifier<T> for ArcNotifier<T> {
+impl<T: Send, R: lock_api::RawMutex + Send + Sync> Notifier<T> for ArcNotifier<T, R> {
     fn notify(&mut self, data: T) {
         let Self(inner) = self;
         assert!(inner.lock().replace(data).is_none(), "notified twice");
@@ -966,6 +949,11 @@ impl<T> Notifier<T> for ! {
 mod tests {
     use super::*;
 
+    use alloc::format;
+    use fuchsia_sync::RawMutex;
+
+    type ArcNotifier<T> = super::ArcNotifier<T, RawMutex>;
+
     #[test]
     fn zombie_weak() {
         let primary = Primary::new(());
@@ -983,14 +971,14 @@ mod tests {
         const INITIAL_VAL: u8 = 1;
         const NEW_VAL: u8 = 2;
 
-        let primary = Primary::new(crate::sync::Mutex::new(INITIAL_VAL));
+        let primary = Primary::new(crate::Mutex::<_, RawMutex>::new(INITIAL_VAL));
         let strong = Primary::clone_strong(&primary);
         let weak = Strong::downgrade(&strong);
 
-        *primary.lock().unwrap() = NEW_VAL;
-        assert_eq!(*primary.deref().lock().unwrap(), NEW_VAL);
-        assert_eq!(*strong.deref().lock().unwrap(), NEW_VAL);
-        assert_eq!(*weak.upgrade().unwrap().deref().lock().unwrap(), NEW_VAL);
+        *primary.lock() = NEW_VAL;
+        assert_eq!(*primary.deref().lock(), NEW_VAL);
+        assert_eq!(*strong.deref().lock(), NEW_VAL);
+        assert_eq!(*weak.upgrade().unwrap().deref().lock(), NEW_VAL);
     }
 
     #[test]
@@ -1152,21 +1140,6 @@ mod tests {
         assert_eq!(notifier.take(), Some((10, 11)));
     }
 
-    #[test]
-    fn new_cyclic() {
-        #[derive(Debug)]
-        struct Data {
-            value: i32,
-            weak: Weak<Data>,
-        }
-
-        let primary = Primary::new_cyclic(|weak| Data { value: 2, weak });
-        assert_eq!(primary.value, 2);
-        let strong = primary.weak.upgrade().unwrap();
-        assert_eq!(strong.value, 2);
-        assert!(Primary::ptr_eq(&primary, &strong));
-    }
-
     macro_rules! assert_debug_id_eq {
         ($id1:expr, $id2:expr) => {
             assert_eq!(alloc::format!("{:?}", $id1), alloc::format!("{:?}", $id2))
@@ -1179,6 +1152,30 @@ mod tests {
     }
 
     #[test]
+    fn new_cyclic() {
+        #[derive(Debug)]
+        struct Data {
+            value: i32,
+            weak: Weak<Data>,
+            cyclic_debug_id: alloc::string::String,
+        }
+
+        let primary = Primary::new_cyclic(|weak| {
+            // While inside `data_fn`, `weak` cannot be upgraded yet, but it
+            // already carries the resource's debug ID.
+            assert!(weak.upgrade().is_none());
+            let cyclic_debug_id = alloc::format!("{:?}", weak.debug_id());
+            Data { value: 2, weak, cyclic_debug_id }
+        });
+        assert_eq!(primary.value, 2);
+        assert_eq!(primary.cyclic_debug_id, alloc::format!("{:?}", primary.debug_id()));
+        assert_debug_id_eq!(&primary.debug_id(), &primary.weak.debug_id());
+        let strong = primary.weak.upgrade().unwrap();
+        assert_eq!(strong.value, 2);
+        assert!(Primary::ptr_eq(&primary, &strong));
+    }
+
+    #[test]
     fn debug_ids_are_stable() {
         // Verify that transforming a given RC doesn't change it's debug_id.
         let primary = Primary::new(1);
@@ -1186,10 +1183,19 @@ mod tests {
         let weak_p = Primary::downgrade(&primary);
         let weak_s = Strong::downgrade(&strong);
         let weak_c = weak_p.clone();
+        let id = alloc::format!("{:?}", primary.debug_id());
         assert_debug_id_eq!(&primary.debug_id(), &strong.debug_id());
         assert_debug_id_eq!(&primary.debug_id(), &weak_p.debug_id());
         assert_debug_id_eq!(&primary.debug_id(), &weak_s.debug_id());
         assert_debug_id_eq!(&primary.debug_id(), &weak_c.debug_id());
+
+        // Verify that Weak retains the same debug_id after destruction.
+        let notifier = ArcNotifier::new();
+        Primary::unwrap_with_notifier(primary, notifier);
+        assert!(weak_p.upgrade().is_none());
+        assert_eq!(alloc::format!("{:?}", weak_p.debug_id()), id);
+        core::mem::drop(strong);
+        assert_eq!(alloc::format!("{:?}", weak_p.debug_id()), id);
     }
 
     #[test]

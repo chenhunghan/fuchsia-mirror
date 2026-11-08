@@ -1,0 +1,78 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":fidl_rust_external_tests"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    tests = [":fidl_rust_external_tests_host_test"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+fidl_library(
+    name = "test.external",
+    testonly = True,
+    srcs = [
+        "data_types.test.fidl",
+        "handle_rights.test.fidl",
+    ],
+    # TODO(https://fxbug.dev/570694755): Generated `rust_next` bindings for
+    # `zx.Handle:EVENT` reference `fidl_next::fuchsia::zx::Event`, which is
+    # unavailable on host.
+    enable_rust_next = False,
+    visibility = ["//build/bazel/rules/fidl:__pkg__"],
+    deps = ["//zircon/vdso/zx"],
+)
+
+rustc_test(
+    name = "fidl_rust_external_tests_bin",
+    srcs = [
+        "src/data_types.rs",
+        "src/handle_rights.rs",
+        "src/lib.rs",
+        "src/message.rs",
+        "src/persistence.rs",
+        "src/unknown_interactions.rs",
+    ],
+    crate_name = "fidl_rust_external_tests",
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        ":test.external_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fidl/rust/fidl_message",
+        "//third_party/rust_crates/vendor:assert_matches",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "//sdk/rust/zx",
+            "//sdk/testing/fidl/protocols_tests:test.unknown.interactions_rust",
+            "//src/lib/fuchsia-async",
+            "//third_party/rust_crates/vendor:futures",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+fx_unittest_package(
+    name = "fidl_rust_external_tests",
+    unit_tests = [":fidl_rust_external_tests_bin"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+wrap_host_rust_test(
+    name = "fidl_rust_external_tests_host_test",
+    binary_name = "fidl_rust_external_tests_bin",
+    visibility = ["//src/lib:__pkg__"],
+)

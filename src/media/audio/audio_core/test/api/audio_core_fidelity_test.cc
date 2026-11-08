@@ -6,6 +6,7 @@
 #include <zircon/device/audio.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 #include "src/media/audio/audio_core/driver_output.h"
@@ -297,7 +298,7 @@ TEST_F(AudioCoreSourceFormatFidelityTest, DISABLED_Uint8PassThru) {
       .renderer_clock_mode = ClockMode::Default,
 
       .pipeline = pipeline_constants(kSourceRate),
-      .single_frequency_to_test = 1000,
+      .frequencies_to_test = std::array{1000},
 
       .device_id = kOutputDeviceId,
       .output_format = Format::Create<ASF::FLOAT>(kDeviceChannels, kDeviceFrameRate).take_value(),
@@ -329,7 +330,7 @@ TEST_F(AudioCoreSourceFormatFidelityTest, Int16PassThru) {
       .renderer_clock_mode = ClockMode::Default,
 
       .pipeline = pipeline_constants(kSourceRate),
-      .single_frequency_to_test = 1000,
+      .frequencies_to_test = std::array{1000},
 
       .device_id = kOutputDeviceId,
       .output_format = Format::Create<ASF::FLOAT>(kDeviceChannels, kDeviceFrameRate).take_value(),
@@ -361,7 +362,7 @@ TEST_F(AudioCoreSourceFormatFidelityTest, DISABLED_Int24PassThru) {
       .renderer_clock_mode = ClockMode::Default,
 
       .pipeline = pipeline_constants(kSourceRate),
-      .single_frequency_to_test = 1000,
+      .frequencies_to_test = std::array{1000},
 
       .device_id = kOutputDeviceId,
       .output_format = Format::Create<ASF::FLOAT>(kDeviceChannels, kDeviceFrameRate).take_value(),
@@ -393,7 +394,7 @@ TEST_F(AudioCoreSourceFormatFidelityTest, DISABLED_Float32PassThru) {
       .renderer_clock_mode = ClockMode::Default,
 
       .pipeline = pipeline_constants(kSourceRate),
-      .single_frequency_to_test = 1000,
+      .frequencies_to_test = std::array{1000},
 
       .device_id = kOutputDeviceId,
       .output_format = Format::Create<ASF::FLOAT>(kDeviceChannels, kDeviceFrameRate).take_value(),
@@ -531,6 +532,33 @@ TEST_F(AudioCore48kFidelityTest, 96kMicro48k) {
       .renderer_clock_mode = ClockMode::Offset,
 
       .pipeline = pipeline_constants(kSourceRate),
+      .frequencies_to_test = kSummaryFrequencies,
+
+      .device_id = kOutputDeviceId,
+      .output_format = Format::Create<ASF::FLOAT>(kDeviceChannels, kDeviceFrameRate).take_value(),
+      .channels_to_measure{
+          {
+              0,
+              FidelityResults::k96kMicro48kLimitsDb,
+              FidelityResults::k96kMicro48kSinadLimitsDb,
+          },
+      },
+  });
+}
+
+// 96k float32 stereo stream (with custom ref clock) to a 48k stereo mix stage (full spectrum).
+TEST_F(AudioCore48kFidelityTest, DISABLED_96kMicro48kFullSpectrum) {
+  constexpr uint32_t kSourceRate = 96000;
+
+  Run(HermeticFidelityTest::TestCase<ASF::FLOAT, ASF::FLOAT>{
+      .test_name = "audio_core_float32_2chan_96k_microsrc_48k_full",
+
+      .input_format = Format::Create<ASF::FLOAT>(2, kSourceRate).take_value(),
+      .path = RenderPath::Media,
+      .channels_to_play{0},
+      .renderer_clock_mode = ClockMode::Offset,
+
+      .pipeline = pipeline_constants(kSourceRate),
 
       .device_id = kOutputDeviceId,
       .output_format = Format::Create<ASF::FLOAT>(kDeviceChannels, kDeviceFrameRate).take_value(),
@@ -661,6 +689,39 @@ TEST_F(AudioCore48k96kFidelityTest, 96kTo48kTo96k) {
       .renderer_clock_mode = ClockMode::Flexible,
 
       .pipeline = pipeline_constants(kSourceRate, 2),
+      .frequencies_to_test = kSummaryFrequencies,
+      .low_pass_frequency = 24000,
+
+      .device_id = kOutputDeviceId,
+      .output_format = Format::Create<ASF::FLOAT>(kDeviceChannels, kDeviceFrameRate).take_value(),
+      .channels_to_measure{
+          {
+              0,
+              FidelityResults::k96kTo48kTo96kLimitsDb,
+              FidelityResults::k96kTo48kTo96kSinadLimitsDb,
+          },
+          {
+              1,
+              FidelityResults::kSilenceDb,
+              FidelityResults::kFloat32SinadLimitsDb,
+          },
+      },
+  });
+}
+
+// 96k float32 stereo stream to 48k stereo mix stage, to 96k stereo mix stage (full spectrum).
+TEST_F(AudioCore48k96kFidelityTest, DISABLED_96kTo48kTo96kFullSpectrum) {
+  constexpr uint32_t kSourceRate = 96000;
+
+  Run(HermeticFidelityTest::TestCase<ASF::FLOAT, ASF::FLOAT>{
+      .test_name = "audio_core_float32_2chan_96k_48k_96k_full",
+
+      .input_format = Format::Create<ASF::FLOAT>(2, kSourceRate).take_value(),
+      .path = RenderPath::Media,
+      .channels_to_play{0},
+      .renderer_clock_mode = ClockMode::Flexible,
+
+      .pipeline = pipeline_constants(kSourceRate, 2),
       .low_pass_frequency = 24000,
 
       .device_id = kOutputDeviceId,
@@ -695,7 +756,7 @@ TEST_F(AudioCoreMaxGainTest, MaxGainTest) {
       .gain_db = +20.0f,  // This clips heavily (low SiNAD) without "max_gain=0" in static config.
 
       .pipeline = pipeline_constants(kSourceRate, 1),
-      .single_frequency_to_test = 8000,
+      .frequencies_to_test = std::array{8000},
 
       .device_id = kOutputDeviceId,
       .output_format = Format::Create<ASF::FLOAT>(kDeviceChannels, kDeviceFrameRate).take_value(),
@@ -724,7 +785,7 @@ TEST_F(AudioCoreMinGainTest, MinGainTest) {
       .gain_db = -20.0f,  // Without "min_gain=0" in static config, FR is -20dB (not unity 0dB).
 
       .pipeline = pipeline_constants(kSourceRate, 1),
-      .single_frequency_to_test = 8000,
+      .frequencies_to_test = std::array{8000},
 
       .device_id = kOutputDeviceId,
       .output_format = Format::Create<ASF::FLOAT>(kDeviceChannels, kDeviceFrameRate).take_value(),
@@ -753,7 +814,7 @@ TEST_F(AudioCoreMinGainTest, MinGainTestAtMutedGainDb) {
       .gain_db = fuchsia::media::audio::MUTED_GAIN_DB,
 
       .pipeline = pipeline_constants(kSourceRate, 1),
-      .single_frequency_to_test = 8000,
+      .frequencies_to_test = std::array{8000},
 
       .device_id = kOutputDeviceId,
       .output_format = Format::Create<ASF::FLOAT>(kDeviceChannels, kDeviceFrameRate).take_value(),

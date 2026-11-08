@@ -152,6 +152,29 @@ magma::Status MagmaSystemConnection::ImportBuffer(zx::handle handle, uint64_t id
   return MAGMA_STATUS_OK;
 }
 
+magma::Status MagmaSystemConnection::CreateBuffer(uint64_t size, uint64_t flags, uint64_t id,
+                                                  zx::vmo* vmo_out) {
+  if (buffer_map_.contains(id))
+    return MAGMA_DRET_MSG(MAGMA_STATUS_ALREADY_EXISTS, "buffer id %lu already imported", id);
+
+  zx::vmo vmo;
+  magma_status_t status = msd_connection()->MsdCreateBuffer(size, flags, id, &vmo);
+  if (status != MAGMA_STATUS_OK)
+    return MAGMA_DRET_MSG(status, "MsdCreateBuffer failed");
+
+  zx::vmo client_vmo;
+  zx_status_t zx_status = vmo.duplicate(ZX_RIGHT_SAME_RIGHTS, &client_vmo);
+  if (zx_status != ZX_OK)
+    return MAGMA_DRET_MSG(MAGMA_STATUS_INTERNAL_ERROR, "duplicate failed: %d", zx_status);
+
+  magma::Status import_status = ImportBuffer(zx::handle(vmo.release()), id);
+  if (!import_status.ok())
+    return import_status;
+
+  *vmo_out = std::move(client_vmo);
+  return MAGMA_STATUS_OK;
+}
+
 magma::Status MagmaSystemConnection::ReleaseBuffer(uint64_t id) {
   auto iter = buffer_map_.find(id);
   if (iter == buffer_map_.end())

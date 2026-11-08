@@ -19,6 +19,7 @@ go_library(
     ],
     importpath = "go.fuchsia.dev/fuchsia/tools/testing/resultdb",
     target_compatible_with = HOST_CONSTRAINTS,
+    visibility = ["//tools/testing/tefmocheck:__pkg__"],
     deps = [
         "//third_party/golibs:google.golang.org/protobuf/encoding/protojson",
         "//third_party/golibs:google.golang.org/protobuf/proto",

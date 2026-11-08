@@ -33,10 +33,10 @@ rustc_library(
     ],
 )
 
-# @bazel2gn:raw_attribute:output_name = "fxfs_crypt_common_lib_test"
 rustc_test(
     name = "lib_test",
     crate = ":lib",
+    crate_name = "fxfs_crypt_common_lib_test",
     edition = "2024",
     deps = ["//src/lib/fuchsia"],
 )

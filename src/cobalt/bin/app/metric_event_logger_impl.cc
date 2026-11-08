@@ -6,6 +6,8 @@
 
 #include <lib/trace/event.h>
 
+#include <optional>
+
 #include "src/cobalt/bin/app/utils.h"
 
 namespace cobalt {
@@ -61,22 +63,23 @@ void MetricEventLoggerImpl::LogMetricEvents(
   // this logging while we work through the batch.
   logger_->PauseInternalLogging();
 
-  auto failures = 0;
+  std::optional<fuchsia::metrics::Error> failure_error;
 
   auto end = std::make_move_iterator(events.end());
 
   for (auto it = std::make_move_iterator(events.begin()); it != end; it++) {
-    if (LogMetricEvent(std::move(*it)).is_error()) {
-      failures += 1;
+    fpromise::result<void, fuchsia::metrics::Error> status = LogMetricEvent(std::move(*it));
+    if (status.is_error() && !failure_error.has_value()) {
+      failure_error = status.error();
     }
   }
 
   logger_->ResumeInternalLogging();
 
-  if (failures == 0) {
+  if (!failure_error.has_value()) {
     callback(fpromise::ok());
   } else {
-    callback(fpromise::error(fuchsia::metrics::Error::INTERNAL_ERROR));
+    callback(fpromise::error(*failure_error));
   }
 }
 

@@ -2,6 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+"""Fuchsia package resource rules."""
+
 load(
     "@fuchsia_rules_common//packages:resources.bzl",
     _fuchsia_package_resource_collection = "fuchsia_package_resource_collection",

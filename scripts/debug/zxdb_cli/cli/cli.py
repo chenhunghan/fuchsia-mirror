@@ -9,15 +9,21 @@ import sys
 from typing import Any, Final
 
 from cli.commands import (
+    aspace,
     async_backtrace,
     attach,
     break_cmd,
     console,
     continue_cmd,
     detach,
+    diagnose_hang,
+    driver_list,
     evaluate,
     finish,
     get_state,
+    handles,
+    mem_read,
+    modules,
     next_cmd,
     pause,
     schema,
@@ -26,6 +32,7 @@ from cli.commands import (
     step_in,
     stop,
     threads,
+    tracepoint,
     variables,
     wait_for_event,
     watch_cmd,
@@ -69,17 +76,23 @@ async def main(args: list[str]) -> int:
 
     # Statically register commands.
     commands: dict[str, type[BaseCommand]] = {}
-    command_classes = [
+    command_classes: list[type[BaseCommand]] = [
         # keep-sorted start
+        aspace.Command,
         async_backtrace.Command,
         attach.Command,
         break_cmd.Command,
         console.Command,
         continue_cmd.Command,
         detach.Command,
+        diagnose_hang.Command,
+        driver_list.Command,
         evaluate.Command,
         finish.Command,
         get_state.Command,
+        handles.Command,
+        mem_read.Command,
+        modules.Command,
         next_cmd.Command,
         pause.Command,
         schema.Command,
@@ -88,6 +101,7 @@ async def main(args: list[str]) -> int:
         step_in.Command,
         stop.Command,
         threads.Command,
+        tracepoint.Command,
         variables.Command,
         wait_for_event.Command,
         watch_cmd.Command,
@@ -128,9 +142,11 @@ async def main(args: list[str]) -> int:
             data = json.loads(parsed_args.json)
             if not isinstance(data, dict):
                 raise ValueError("JSON payload must be an object")
+
             if "command" in data and data["command"] in alias_map:
                 data["command"] = alias_map[data["command"]]
             req = make_request(data)
+
             cmd_cls: type[BaseCommand] | None = commands.get(req.command)
             if cmd_cls is not None:
                 exit_code = await cmd_cls.execute(request_to_namespace(req))
@@ -145,6 +161,7 @@ async def main(args: list[str]) -> int:
             exit_code = await cmd_cls.execute(parsed_args)
             if exit_code is not None:
                 return exit_code
+
         try:
             args_dict = vars(parsed_args)
             if cmd_cls is not None and cmd_cls.COMMAND_NAME:

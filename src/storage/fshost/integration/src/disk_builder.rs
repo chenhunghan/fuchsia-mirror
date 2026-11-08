@@ -315,8 +315,6 @@ pub struct DiskBuilder {
     // Note: fvm also means fxfs acting as the volume manager when using fxblob.
     format_volume_manager: bool,
     legacy_data_label: bool,
-    // Only used if 'fs_switch' set.
-    fs_switch: Option<String>,
     // The type guid of the ramdisk when it's created for the test fshost.
     type_guid: Option<[u8; 16]>,
     system_partition_label: &'static str,
@@ -342,7 +340,6 @@ impl std::fmt::Debug for DiskBuilder {
             .field("gpt", &self.gpt)
             .field("format_volume_manager", &self.format_volume_manager)
             .field("legacy_data_label", &self.legacy_data_label)
-            .field("fs_switch", &self.fs_switch)
             .field("type_guid", &self.type_guid)
             .field("system_partition_label", &self.system_partition_label)
             .field("keymint_old_blob", &self.keymint_old_blob)
@@ -370,7 +367,6 @@ impl DiskBuilder {
             extra_gpt_partitions: Vec::new(),
             format_volume_manager: true,
             legacy_data_label: false,
-            fs_switch: None,
             type_guid: Some(DEFAULT_TEST_TYPE_GUID),
             system_partition_label: "fvm",
             keymint_old_blob: None,
@@ -431,11 +427,6 @@ impl DiskBuilder {
             self.data_volume_size(self.data_volume_size.max(DEFAULT_F2FS_MIN_BYTES));
         }
         self.data_spec = data_spec;
-        self
-    }
-
-    pub fn set_fs_switch(&mut self, content: &str) -> &mut Self {
-        self.fs_switch = Some(content.to_string());
         self
     }
 
@@ -854,17 +845,6 @@ impl DiskBuilder {
         fuchsia_fs::directory::create_directory(&root, "problems", fio::PERM_READABLE)
             .await
             .unwrap();
-
-        if let Some(content) = &self.fs_switch {
-            let fs_switch = fuchsia_fs::directory::open_file(
-                &root,
-                "fs_switch",
-                fio::Flags::FLAG_MAYBE_CREATE | fio::PERM_READABLE | fio::PERM_WRITABLE,
-            )
-            .await
-            .unwrap();
-            fuchsia_fs::file::write(&fs_switch, content).await.unwrap();
-        }
     }
 
     async fn write_magic<const N: usize>(

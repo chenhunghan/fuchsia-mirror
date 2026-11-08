@@ -14,7 +14,7 @@ FxTestEnvironmentInfo = provider(
 
 # Only the string-valued fields of tests.json's emulator config. `uefi` (a
 # bool) and `kernel_args` (a list) can't go in a `string_dict`, and no Bazel
-# test needs them yet.
+# test needs them yet. `allow_internet` (a bool) has its own attribute.
 _ALLOWED_EMULATOR_KEYS = ("accel", "device", "name")
 
 def _fx_test_environment_impl(ctx):
@@ -34,7 +34,11 @@ def _fx_test_environment_impl(ctx):
                 ))
         if not ctx.attr.emulator.get("name"):
             fail("`emulator` requires a unique 'name'.")
-        env["emulator"] = ctx.attr.emulator
+        env["emulator"] = dict(ctx.attr.emulator)
+        if ctx.attr.allow_internet:
+            env["emulator"]["allow_internet"] = True
+    elif ctx.attr.allow_internet:
+        fail("`allow_internet` requires `emulator`.")
     if ctx.attr.env_tags:
         env["tags"] = ctx.attr.env_tags
     if ctx.attr.service_account:
@@ -52,6 +56,14 @@ Bazel rule, with an unrelated meaning.
 _SERVICE_ACCOUNT_DOC = "The service account that the test's Swarming task runs as."
 
 _NETBOOT_DOC = "Whether to netboot the device instead of paving it."
+
+_ALLOW_INTERNET_DOC = """Whether the emulator has external internet access.
+
+Emitted as `allow_internet` in the tests.json emulator config. Botanist then
+gives the guest access to the hosts in its emulator internet allowlist, through
+a filtering proxy. Requires `emulator`. Tests should opt in to this explicitly
+with `//build/testing/environments:aemu_internet_env`.
+"""
 
 fx_test_environment = rule(
     doc = """Defines an infra test environment for `fx_test(environments = ...)`.
@@ -88,6 +100,7 @@ fx_test_environment = rule(
             tests.json emulator config.
             """,
         ),
+        "allow_internet": attr.bool(doc = _ALLOW_INTERNET_DOC),
         "env_tags": attr.string_list(doc = _ENV_TAGS_DOC),
         "service_account": attr.string(doc = _SERVICE_ACCOUNT_DOC),
         "netboot": attr.bool(doc = _NETBOOT_DOC),

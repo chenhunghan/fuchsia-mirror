@@ -81,14 +81,30 @@ function __fx_env_main() {
   ### fx-prompt-info: prints the current configuration for display in a prompt
 
   function fx-prompt-info {
-    if [[ ${PWD}/ = ${FUCHSIA_DIR}/* ]]; then
+    local fuchsia_dir="${FUCHSIA_DIR%/}"
+    # Ensure PWD is fuchsia_dir or a subdirectory of fuchsia_dir.
+    if [[ -n "${fuchsia_dir}" && "${PWD}/" == "${fuchsia_dir}/"* ]]; then
+      local tree_root="${PWD}"
+      while [[ "${tree_root}" != "${fuchsia_dir}" && ( ! -f "${tree_root}/.fx-root" || ! -f "${tree_root}/tools/devshell/lib/vars.sh" ) ]]; do
+        tree_root="${tree_root%/*}"
+      done
+      [[ -f "${tree_root}/tools/devshell/lib/vars.sh" ]] || return 0
       # Run in a subshell to avoid polluting this shell's environment with data
       # from the config file, which can change without updating this shell's
       # environment.
       (
-        source "${FUCHSIA_DIR}/tools/devshell/lib/vars.sh"
+        source "${tree_root}/tools/devshell/lib/vars.sh"
         if fx-build-dir-if-present; then
-          echo "${FUCHSIA_BUILD_DIR##*/}"
+          main_pb=""
+          main_pb_script="${FUCHSIA_DIR}/scripts/lib/build_dir/main_pb.py"
+          if [[ -f "${FUCHSIA_BUILD_DIR}/args.json" && -f "${main_pb_script}" ]]; then
+            if command -v python3 >/dev/null 2>&1; then
+              main_pb="$(python3 -IBS "${main_pb_script}" --build-dir "${FUCHSIA_BUILD_DIR}" 2>/dev/null || true)"
+            elif [[ -x "${FUCHSIA_DIR}/scripts/fuchsia-vendored-python" ]]; then
+              main_pb="$("${FUCHSIA_DIR}/scripts/fuchsia-vendored-python" -BS "${main_pb_script}" --build-dir "${FUCHSIA_BUILD_DIR}" 2>/dev/null || true)"
+            fi
+          fi
+          echo "${main_pb:-${FUCHSIA_BUILD_DIR##*/}}"
         else
           echo "???"
         fi

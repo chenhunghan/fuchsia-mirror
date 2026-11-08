@@ -1,0 +1,86 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [],  # Include all tests in the package.
+    visibility = ["//src/devices:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["rpmb-integration-test.cc"],
+    # Packaged into :component via :bin_packaged.
+    tags = ["manual"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.rpmb:fuchsia.hardware.rpmb_cpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/fit",
+        "//sdk/lib/fit-promise",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//zircon/system/ulib/zx",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "rpmb-integration-test",
+)
+
+fx_component_manifest(
+    name = "component_manifest",
+    testonly = True,
+    component_name = "component",
+    includes = [
+        "//sdk/lib/sys/testing:gtest_runner.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/rpmb-integration-test.cml",
+)
+
+fx_test_component(
+    name = "component",
+    compiled_manifest = ":component_manifest",
+    test_type = "device",
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "rpmb-integration-test_package",
+    package_name = "rpmb-integration-test",
+    testonly = True,
+    test_components = [":component"],
+)
+
+fx_test(
+    name = "rpmb-integration-test",
+    environments = [
+        "//build/testing/environments:lilac_env",
+        "//build/testing/environments:nelson_env",
+        "//build/testing/environments:sherlock_env",
+        "//build/testing/environments:sorrel_env",
+    ],
+    package = ":rpmb-integration-test_package",
+)

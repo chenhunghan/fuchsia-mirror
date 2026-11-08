@@ -76,12 +76,6 @@ class SimpleRedactor : public RedactorBase {
   int num_calls_{0};
 };
 
-TEST_F(LogMessageStoreTest, NotSafeAfterInterruption) {
-  LogMessageStore store(kMaxLogLineSize * 10, kMaxLogLineSize, GetIdentityRedactor(),
-                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
-  EXPECT_FALSE(store.SafeAfterInterruption());
-}
-
 TEST_F(LogMessageStoreTest, UnlimitedMessages) {
   // Set the block to hold 10 log messages while the buffer holds 1 log message (but the buffer
   // limits should be ignored because the component has just started up).
@@ -675,38 +669,7 @@ DONE
   EXPECT_FALSE(result.end_of_block);
 }
 
-TEST_F(LogMessageStoreTest, ConsumeReturnsExpectedResults) {
-  LogMessageStore store(kVeryLargeBlockSize, kMaxLogLineSize * 10, GetIdentityRedactor(),
-                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
-
-  EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 1")));
-  EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 2")));
-
-  const ConsumeResult result = store.Consume();
-  EXPECT_EQ(result.stats.message_count, 2u);
-  EXPECT_EQ(result.stats.deduplicated_message_count, 2u);
-  EXPECT_FALSE(result.end_of_block);
-}
-
-TEST_F(LogMessageStoreTest, BlockStatsResetOnConsume) {
-  LogMessageStore store(kVeryLargeBlockSize, kMaxLogLineSize * 10, GetIdentityRedactor(),
-                        MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
-
-  EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 1")));
-  EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 2")));
-
-  ConsumeResult result = store.Consume();
-  EXPECT_EQ(result.stats.message_count, 2u);
-  EXPECT_EQ(result.stats.deduplicated_message_count, 2u);
-
-  EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 3")));
-
-  result = store.Consume();
-  EXPECT_EQ(result.stats.message_count, 1u);
-  EXPECT_EQ(result.stats.deduplicated_message_count, 1u);
-}
-
-TEST_F(LogMessageStoreTest, ResetClearsBufferAndStats) {
+TEST_F(LogMessageStoreTest, ResetClearsBuffer) {
   LogMessageStore store(kVeryLargeBlockSize, kMaxLogLineSize * 10, GetIdentityRedactor(),
                         MakeIdentityEncoder(), /*ignore_before_timestamp=*/std::nullopt);
 
@@ -717,15 +680,12 @@ TEST_F(LogMessageStoreTest, ResetClearsBufferAndStats) {
 
   const ConsumeResult result = store.Consume();
   EXPECT_TRUE(result.log.empty());
-  EXPECT_EQ(result.stats.message_count, 0u);
-  EXPECT_EQ(result.stats.deduplicated_message_count, 0u);
   EXPECT_FALSE(result.end_of_block);
 
   // After reset, new messages can be added and consumed normally.
   EXPECT_TRUE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 3")));
   const ConsumeResult next_result = store.Consume();
   EXPECT_FALSE(next_result.log.empty());
-  EXPECT_EQ(next_result.stats.message_count, 1u);
 }
 
 TEST_F(LogMessageStoreTest, IgnoresMessagesAtOrBeforeTimestamp) {
@@ -736,7 +696,7 @@ TEST_F(LogMessageStoreTest, IgnoresMessagesAtOrBeforeTimestamp) {
                         kIgnoreBeforeTimestamp);
 
   // Messages with timestamp <= kIgnoreBeforeTimestamp should be ignored without invoking the
-  // redactor, incrementing stats, or affecting repeat tracking.
+  // redactor or affecting repeat tracking.
   EXPECT_FALSE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "line 0", zx::sec(0))));
   EXPECT_FALSE(store.Add(BuildLogMessage(FUCHSIA_LOG_INFO, "R: 1", zx::sec(1))));
 
@@ -749,10 +709,6 @@ TEST_F(LogMessageStoreTest, IgnoresMessagesAtOrBeforeTimestamp) {
   EXPECT_EQ(result.log, R"([15607.000][07559][07687][] INFO: R: 1
 [15606.000][07559][07687][] INFO: R: 2
 )");
-  EXPECT_EQ(result.stats.message_count, 2u);
-  EXPECT_EQ(result.stats.deduplicated_message_count, 2u);
-  EXPECT_EQ(result.stats.first_timestamp, zx::time_boot((zx::sec(15604) + zx::sec(3)).to_nsecs()));
-  EXPECT_EQ(result.stats.last_timestamp, zx::time_boot((zx::sec(15604) + zx::sec(2)).to_nsecs()));
 }
 
 TEST_F(LogMessageStoreTest, ResetClearsIgnoreBeforeTimestamp) {
@@ -774,7 +730,6 @@ TEST_F(LogMessageStoreTest, ResetClearsIgnoreBeforeTimestamp) {
   const ConsumeResult result = store.Consume();
   EXPECT_EQ(result.log, R"([15604.000][07559][07687][] INFO: line 0
 )");
-  EXPECT_EQ(result.stats.message_count, 1u);
 }
 
 TEST_F(LogMessageStoreTest, InsertRawMessage) {
@@ -790,7 +745,6 @@ TEST_F(LogMessageStoreTest, InsertRawMessage) {
 [15604.000][07559][07687][] INFO: line 0
 END
 )");
-  EXPECT_EQ(result.stats.message_count, 1u);
 }
 
 TEST_F(LogMessageStoreTest, InsertRawMessageResetsRepeatTracking) {
@@ -811,8 +765,6 @@ TEST_F(LogMessageStoreTest, InsertRawMessageResetsRepeatTracking) {
 RAW
 [15604.000][07559][07687][] INFO: line 0
 )");
-  EXPECT_EQ(result.stats.message_count, 4u);
-  EXPECT_EQ(result.stats.deduplicated_message_count, 2u);
 }
 
 }  // namespace

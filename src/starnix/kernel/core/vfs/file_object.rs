@@ -316,6 +316,16 @@ pub trait FileOps: Send + Sync + AsAny + 'static {
         Ok(FdEvents::POLLIN | FdEvents::POLLOUT)
     }
 
+    /// Returns whether `query_events` alone reports the current readiness of this file.
+    ///
+    /// poll(2) and select(2) use this to skip `wait_async`, and the waiter it requires, when they
+    /// do not block: when a file is already ready or the timeout has expired. Only return `true`
+    /// if `wait_async` merely arms a notification for future events and has no side effect that
+    /// `query_events` depends on.
+    fn can_query_events_without_wait(&self) -> bool {
+        false
+    }
+
     fn ioctl(
         &self,
         _file: &FileObject,
@@ -557,6 +567,10 @@ impl<T: FileOps + CloseFreeSafe, P: Deref<Target = T> + Send + Sync + 'static> F
         current_task: &CurrentTask,
     ) -> Result<FdEvents, Errno> {
         self.deref().query_events(file, current_task)
+    }
+
+    fn can_query_events_without_wait(&self) -> bool {
+        self.deref().can_query_events_without_wait()
     }
 
     fn ioctl(
@@ -1188,6 +1202,11 @@ pub fn default_vfs_ioctl(
             )]
             let identifier = unsafe { fscrypt_remove_key_arg.key_spec.u.identifier.value };
             crypt_service.forget_wrapping_key(identifier, user_id)?;
+            // Directories that use the key can be locked now. Uses of cached entries in locked
+            // directories are not recorded, so drop the uses recorded while they were unlocked.
+            // A lookup that checked its directory before the key was removed can still record a
+            // use after this, which only keeps that entry cached for one more pass.
+            file.node().fs().forget_dir_entry_uses();
             Ok(Some(SUCCESS))
         }
         linux_uapi::FICLONE | linux_uapi::FICLONERANGE | linux_uapi::FIDEDUPERANGE => {
@@ -2313,6 +2332,12 @@ impl FileObject {
     /// The events currently active on this file.
     pub fn query_events(&self, current_task: &CurrentTask) -> Result<FdEvents, Errno> {
         self.ops().query_events(self, current_task).map(FdEvents::add_equivalent_fd_events)
+    }
+
+    /// Whether `query_events` alone reports the current readiness of this file, without a prior
+    /// `wait_async`. See `FileOps::can_query_events_without_wait`.
+    pub fn can_query_events_without_wait(&self) -> bool {
+        self.ops().can_query_events_without_wait()
     }
 
     pub fn record_lock(

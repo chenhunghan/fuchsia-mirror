@@ -2,27 +2,28 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::{DynamicLockDepMutex, LockDepGuard, LockLevel, RcuLockLevel};
-use fuchsia_rcu::{
-    RcuArc, RcuBox, RcuDroppable, RcuDroppableArc, RcuOptionArc, RcuOptionBox, RcuReadGuard,
-    RcuReadScope, RcuWeak,
-};
+use crate::{DynamicLockDepMutex, LockDepGuard, LockGuarded, LockLevel, RcuLockLevel};
+use fuchsia_rcu::RcuDroppable;
 use fuchsia_rcu_collections::rcu_array::RcuArray;
 use std::cell::Cell;
 use std::marker::PhantomData;
 use std::ops::Deref;
-use std::sync::{Arc, Weak};
+
+/// Uninhabited state marker used by [`DynamicRcuLock`] so that [`LockGuarded::write`] cannot be
+/// called on a [`DynamicRcuLock`] or [`RcuLock`] via [`Deref`]; writers must use
+/// [`DynamicRcuLock::lock`] or [`DynamicRcuLock::try_lock`] instead.
+pub enum RcuLockState {}
 
 /// A synchronization wrapper that combines an RCU primitive `T` with a [`DynamicLockDepMutex`] to
 /// serialize updates while permitting lock-free RCU reads, without using types for lock levels.
 ///
 /// Readers access the underlying RCU value without acquiring the mutex via the read methods on
-/// `DynamicRcuLock`. Writers must acquire the mutex via [`DynamicRcuLock::lock`] or
+/// [`LockGuarded`]. Writers must acquire the mutex via [`DynamicRcuLock::lock`] or
 /// [`DynamicRcuLock::try_lock`] to obtain an [`RcuLockGuard`], which grants exclusive writer
 /// access to `T`.
 #[derive(RcuDroppable)]
 pub struct DynamicRcuLock<T> {
-    rcu: T,
+    rcu: LockGuarded<T, RcuLockState>,
     lock: DynamicLockDepMutex<()>,
 }
 
@@ -30,7 +31,7 @@ pub struct DynamicRcuLock<T> {
 /// serialize updates while permitting lock-free RCU reads.
 ///
 /// Readers access the underlying RCU value without acquiring the mutex via the read methods on
-/// [`DynamicRcuLock`]. Writers must acquire the mutex via [`DynamicRcuLock::lock`] or
+/// [`LockGuarded`]. Writers must acquire the mutex via [`DynamicRcuLock::lock`] or
 /// [`DynamicRcuLock::try_lock`] to obtain an [`RcuLockGuard`], which grants exclusive writer
 /// access to `T`.
 #[derive(RcuDroppable)]
@@ -50,27 +51,43 @@ pub struct RcuLockGuard<'a, T> {
 impl<T> DynamicRcuLock<T> {
     /// Creates a new `DynamicRcuLock` wrapping `rcu` at lock level `L`.
     pub const fn new<L: LockLevel>(rcu: T) -> Self {
-        Self { rcu, lock: DynamicLockDepMutex::new::<L>(()) }
+        Self { rcu: LockGuarded::new(rcu), lock: DynamicLockDepMutex::new::<L>(()) }
     }
 
     /// Acquires the update lock and returns a guard that allows updating the RCU cell.
     #[inline(always)]
     #[track_caller]
     pub fn lock(&self) -> RcuLockGuard<'_, T> {
-        RcuLockGuard { rcu: &self.rcu, _guard: self.lock.lock(), _not_sync: PhantomData }
+        RcuLockGuard { rcu: &self.rcu.inner, _guard: self.lock.lock(), _not_sync: PhantomData }
     }
 
     /// Attempts to acquire the update lock without blocking.
     #[inline(always)]
     #[track_caller]
     pub fn try_lock(&self) -> Option<RcuLockGuard<'_, T>> {
-        Some(RcuLockGuard { rcu: &self.rcu, _guard: self.lock.try_lock()?, _not_sync: PhantomData })
+        Some(RcuLockGuard {
+            rcu: &self.rcu.inner,
+            _guard: self.lock.try_lock()?,
+            _not_sync: PhantomData,
+        })
+    }
+}
+
+impl<T> Deref for DynamicRcuLock<T> {
+    type Target = LockGuarded<T, RcuLockState>;
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        &self.rcu
     }
 }
 
 impl<T: std::fmt::Debug> std::fmt::Debug for DynamicRcuLock<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DynamicRcuLock").field("rcu", &self.rcu).field("lock", &self.lock).finish()
+        f.debug_struct("DynamicRcuLock")
+            .field("rcu", &self.rcu.inner)
+            .field("lock", &self.lock)
+            .finish()
     }
 }
 
@@ -89,7 +106,7 @@ impl<T> crate::MutexLike for DynamicRcuLock<T> {
     #[inline(always)]
     fn lock(&self, context: &mut Self::Context) -> Self::Guard<'_> {
         RcuLockGuard {
-            rcu: &self.rcu,
+            rcu: &self.rcu.inner,
             _guard: <DynamicLockDepMutex<()> as crate::MutexLike>::lock(&self.lock, context),
             _not_sync: PhantomData,
         }
@@ -135,7 +152,7 @@ impl<T, L: LockLevel> From<T> for RcuLock<T, L> {
 impl<T: std::fmt::Debug, L> std::fmt::Debug for RcuLock<T, L> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RcuLock")
-            .field("rcu", &self.inner.rcu)
+            .field("rcu", &self.inner.rcu.inner)
             .field("lock", &self.inner.lock)
             .field("level", &std::any::type_name::<L>())
             .finish()
@@ -184,37 +201,6 @@ impl<T: std::fmt::Debug> std::fmt::Debug for RcuLockGuard<'_, T> {
     }
 }
 
-impl<T: Send + Sync + 'static> DynamicRcuLock<RcuArc<T>> {
-    /// Reads the contents of the underlying [`RcuArc`] without acquiring the update lock.
-    ///
-    /// Returns `None` if the wrapped `Arc` is `None` or is no longer valid.
-    pub fn upgrade(&self) -> Option<Arc<T>> {
-        self.rcu.upgrade()
-    }
-
-    /// Returns `true` if the underlying [`RcuArc`] currently contains a value.
-    pub fn is_some(&self) -> bool {
-        self.rcu.is_some()
-    }
-
-    /// Returns `true` if the underlying [`RcuArc`] does not contain a value.
-    pub fn is_none(&self) -> bool {
-        self.rcu.is_none()
-    }
-}
-
-impl<T: RcuDroppable + Sync> DynamicRcuLock<RcuArray<T>> {
-    /// Returns a reference to the element at `index`, or `None` if `index` is out of bounds.
-    pub fn get<'a>(&self, scope: &'a RcuReadScope, index: usize) -> Option<&'a T> {
-        self.rcu.get(scope, index)
-    }
-
-    /// Returns a slice containing the entire array bound to `scope`.
-    pub fn as_slice<'a>(&self, scope: &'a RcuReadScope) -> &'a [T] {
-        self.rcu.as_slice(scope)
-    }
-}
-
 impl<T: RcuDroppable + Sync> RcuLockGuard<'_, RcuArray<T>> {
     /// Ensures that the array has at least `requested_size` elements, filling with
     /// `T::default()` if the array needs to be grown.
@@ -228,120 +214,16 @@ impl<T: RcuDroppable + Sync> RcuLockGuard<'_, RcuArray<T>> {
     }
 }
 
-impl<T: RcuDroppable + Sync> DynamicRcuLock<RcuBox<T>> {
-    /// Reads the value of the wrapped [`RcuBox`] without acquiring the update lock.
-    pub fn read(&self) -> RcuReadGuard<T> {
-        self.rcu.read()
-    }
-
-    /// Returns a reference to the value of the wrapped [`RcuBox`] bound to `scope`.
-    pub fn as_ref<'a>(&self, scope: &'a RcuReadScope) -> &'a T {
-        self.rcu.as_ref(scope)
-    }
-
-    /// Returns a clone of the value of the wrapped [`RcuBox`].
-    pub fn cloned(&self) -> T
-    where
-        T: Clone,
-    {
-        self.rcu.cloned()
-    }
-}
-
-impl<T: RcuDroppable + Sync> DynamicRcuLock<RcuDroppableArc<T>> {
-    /// Reads the value of the wrapped [`RcuDroppableArc`] without acquiring the update lock.
-    pub fn read(&self) -> RcuReadGuard<T> {
-        self.rcu.read()
-    }
-
-    /// Returns a reference to the value of the wrapped [`RcuDroppableArc`] bound to `scope`.
-    pub fn as_ref<'a>(&self, scope: &'a RcuReadScope) -> &'a T {
-        self.rcu.as_ref(scope)
-    }
-
-    /// Creates a new `Arc<T>` referencing the same object as the underlying [`RcuDroppableArc`].
-    pub fn to_arc(&self) -> Arc<T> {
-        self.rcu.to_arc()
-    }
-}
-
-impl<T: RcuDroppable + Sync> DynamicRcuLock<RcuOptionArc<T>> {
-    /// Reads the value of the wrapped [`RcuOptionArc`] without acquiring the update lock.
-    pub fn read(&self) -> Option<RcuReadGuard<T>> {
-        self.rcu.read()
-    }
-
-    /// Returns a reference to the value of the wrapped [`RcuOptionArc`] bound to `scope`.
-    pub fn as_ref<'a>(&self, scope: &'a RcuReadScope) -> Option<&'a T> {
-        self.rcu.as_ref(scope)
-    }
-
-    /// Creates a new `Option<Arc<T>>` referencing the same object as the underlying
-    /// [`RcuOptionArc`].
-    pub fn to_option_arc(&self) -> Option<Arc<T>> {
-        self.rcu.to_option_arc()
-    }
-}
-
-impl<T: RcuDroppable + Sync> DynamicRcuLock<RcuOptionBox<T>> {
-    /// Reads the value of the wrapped [`RcuOptionBox`] without acquiring the update lock.
-    pub fn read(&self) -> Option<RcuReadGuard<T>> {
-        self.rcu.read()
-    }
-
-    /// Returns a reference to the value of the wrapped [`RcuOptionBox`] bound to `scope`.
-    pub fn as_ref<'a>(&self, scope: &'a RcuReadScope) -> Option<&'a T> {
-        self.rcu.as_ref(scope)
-    }
-
-    /// Returns `true` if the underlying [`RcuOptionBox`] currently contains a value.
-    pub fn is_some(&self, scope: &RcuReadScope) -> bool {
-        self.rcu.is_some(scope)
-    }
-
-    /// Returns `true` if the underlying [`RcuOptionBox`] does not contain a value.
-    pub fn is_none(&self, scope: &RcuReadScope) -> bool {
-        self.rcu.is_none(scope)
-    }
-
-    /// Returns a clone of the value of the wrapped [`RcuOptionBox`].
-    pub fn cloned(&self) -> Option<T>
-    where
-        T: Clone,
-    {
-        self.rcu.cloned()
-    }
-}
-
-impl<T: Send + Sync + 'static> DynamicRcuLock<RcuWeak<T>> {
-    /// Attempts to upgrade the wrapped [`Weak`] pointer to an [`Arc`] without acquiring the update
-    /// lock.
-    pub fn upgrade(&self) -> Option<Arc<T>> {
-        self.rcu.upgrade()
-    }
-
-    /// Creates a new [`Weak`] pointer to the object referenced by the underlying [`RcuWeak`].
-    pub fn to_weak(&self) -> Weak<T> {
-        self.rcu.to_weak()
-    }
-
-    /// Returns `true` if the wrapped weak pointer points to the same allocation as `other`.
-    pub fn ptr_eq(&self, other: &Weak<T>) -> bool {
-        self.rcu.ptr_eq(other)
-    }
-
-    /// Returns the number of strong (`Arc`) pointers pointing to the allocation.
-    pub fn strong_count(&self, scope: &RcuReadScope) -> usize {
-        self.rcu.strong_count(scope)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{LockDepMutex, lock_ordering, ordered_lock, ordered_lock_vec};
-    use fuchsia_rcu::rcu_run_callbacks;
+    use fuchsia_rcu::{
+        RcuArc, RcuBox, RcuDroppableArc, RcuOptionArc, RcuOptionBox, RcuReadScope, RcuWeak,
+        rcu_run_callbacks,
+    };
     use fuchsia_sync::ResetDependencies;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     lock_ordering! {

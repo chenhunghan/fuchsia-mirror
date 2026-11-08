@@ -59,10 +59,7 @@ fuchsia_component("process_explorer_component") {
 
 fuchsia_package("process_explorer_package") {
   package_name = "process_explorer"
-  deps = [
-    ":process_explorer_component",
-    "//build/validate:non_production_tag",
-  ]
+  deps = [ ":process_explorer_component" ]
 }
 
 group("tests") {

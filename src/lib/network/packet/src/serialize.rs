@@ -1575,6 +1575,12 @@ pub trait Serializer<C: SerializationContext>: NestableSerializer + Sized {
     /// that new buffer. Unlike all other serialize methods,
     /// `serialize_new_buf` takes `self` by reference. This allows to use the
     /// same `Serializer` to serialize the data more than once.
+    ///
+    /// As with [`Serializer::serialize`], the returned buffer has enough
+    /// suffix space for any padding required to satisfy
+    /// `constraints.min_body_len()` and for the footers, but the padding
+    /// itself is not added. It belongs to the encapsulating packet which
+    /// requires it, and is added by [`Nested`] at that layer.
     fn serialize_new_buf<B: GrowBufferMut, A: LayoutBufferAlloc<B>>(
         &self,
         context: &mut C,
@@ -1791,9 +1797,6 @@ impl<C: SerializationContext, I: InnerPacketBuilder> PacketBuilder<C>
     ) {
         let Self(wrapped) = self;
 
-        // Note that the body might be non-empty if an outer
-        // PacketBuilder added a minimum body length constraint that
-        // required padding.
         debug_assert_eq!(target.header.len(), wrapped.bytes_len());
         debug_assert_eq!(target.footer.len(), 0);
 
@@ -1869,7 +1872,6 @@ impl<C: SerializationContext, B: GrowBuffer + ShrinkBuffer> Serializer<C> for B 
         let tail_size = padding + constraints.footer_len();
         let mut buffer = alloc.layout_alloc(constraints.header_len(), self.len(), tail_size)?;
         buffer.copy_from(self);
-        buffer.grow_back_zero(padding);
         Ok(buffer)
     }
 }
@@ -2052,7 +2054,6 @@ impl<C: SerializationContext, B: GrowBuffer + ShrinkBuffer> Serializer<C>
                 Ok(())
             })
         })?;
-        buffer.grow_back_zero(padding);
         Ok(buffer)
     }
 }
@@ -2157,6 +2158,13 @@ pub trait PartialSerializer<C: SerializationContext> {
     ///
     /// The second returned value indicates total number of bytes in the
     /// packet, including the headers.
+    ///
+    /// The returned total must not include padding required to satisfy
+    /// `constraints.min_body_len()`. As in full serialization, that padding
+    /// belongs to the encapsulating packet which requires it, and is accounted
+    /// for by [`Nested`] at that layer. Including it here would cause
+    /// intermediate layers to observe a longer body than they would during
+    /// full serialization.
     fn partial_serialize_new_buf<B: GrowBufferMut, A: LayoutBufferAlloc<B>>(
         &self,
         context: &mut C,
@@ -2192,10 +2200,7 @@ where
         constraints: PacketConstraints,
         alloc: A,
     ) -> Result<(BB, usize), SerializeError<A::Error>> {
-        let total_size = cmp::max(
-            constraints.min_body_len(),
-            cmp::min(self.buffer().len(), constraints.max_body_len()),
-        );
+        let total_size = cmp::min(self.buffer().len(), constraints.max_body_len());
         let buffer = alloc.layout_alloc(constraints.header_len(), 0, 0)?;
         Ok((buffer, total_size))
     }
@@ -2213,7 +2218,7 @@ where
         constraints: PacketConstraints,
         alloc: A,
     ) -> Result<(BB, usize), SerializeError<A::Error>> {
-        let total_size = cmp::max(self.inner().bytes_len(), constraints.min_body_len());
+        let total_size = self.inner().bytes_len();
         let buffer = alloc.layout_alloc(constraints.header_len(), 0, 0)?;
         Ok((buffer, total_size))
     }
@@ -2256,15 +2261,20 @@ where
                 return Err(SerializeError::SizeLimitExceeded);
             };
             let header_len = header_constraints.header_len();
-            let (mut buffer, mut total_size) =
+            let (mut buffer, inner_len) =
                 self.inner.partial_serialize_new_buf(context, constraints, alloc)?;
+            // Account for any padding required to satisfy this packet's minimum
+            // body length, as `GrowBufferMut::serialize` does when fully
+            // serializing. Per the contract of `partial_serialize_new_buf`, the
+            // inner serializer does not include it in `inner_len`.
+            let body_len = cmp::max(inner_len, header_constraints.min_body_len());
             buffer.with_parts_mut(|prefix, _body, _suffix| {
                 let header_offset = prefix.len() - header_len;
                 let header = &mut prefix[header_offset..];
-                self.outer.partial_serialize(context, total_size, header);
+                self.outer.partial_serialize(context, body_len, header);
             });
             buffer.grow_front(header_len);
-            total_size += header_len + header_constraints.footer_len();
+            let total_size = header_len + body_len + header_constraints.footer_len();
             Ok((buffer, total_size))
         })
     }
@@ -2611,7 +2621,7 @@ mod tests {
     use crate::BufferMut;
     use assert_matches::assert_matches;
     use core::fmt::Debug;
-    use test_case::test_case;
+    use test_case::{test_case, test_matrix};
     use test_util::{assert_geq, assert_leq};
 
     fn dirty_buf_alloc(len: usize) -> Result<Buf<Vec<u8>>, !> {
@@ -3386,6 +3396,180 @@ mod tests {
             result,
             Ok(PartialSerializeResult::NewBuffer { buffer, total_size: 30 }) => buffer);
         assert_eq!(buffer.as_ref(), EXPECTED_HEADER);
+    }
+
+    // A `PacketBuilder` with a 1-byte header and a 1-byte footer. The header
+    // holds the length of the body (which must fit in a `u8`), so tests can
+    // check the body length passed to `PartialPacketBuilder::partial_serialize`
+    // against the one used by `PacketBuilder::serialize`.
+    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+    struct BodyLenPacketBuilder {
+        min_body_len: usize,
+    }
+
+    impl BodyLenPacketBuilder {
+        const FOOTER_BYTE: u8 = 0xFE;
+    }
+
+    impl NestablePacketBuilder for BodyLenPacketBuilder {
+        fn constraints(&self) -> PacketConstraints {
+            PacketConstraints::new(1, 1, self.min_body_len, usize::MAX)
+        }
+    }
+
+    impl<C: SerializationContext> PacketBuilder<C> for BodyLenPacketBuilder {
+        fn serialize(
+            &self,
+            _context: &mut C,
+            target: &mut SerializeTarget<'_>,
+            body: FragmentedBytesMut<'_, '_>,
+        ) {
+            target.header[0] = u8::try_from(body.len()).unwrap();
+            target.footer.fill(Self::FOOTER_BYTE);
+        }
+    }
+
+    impl<C: SerializationContext> PartialPacketBuilder<C> for BodyLenPacketBuilder {
+        fn partial_serialize(&self, _context: &mut C, body_len: usize, buffer: &mut [u8]) {
+            buffer[0] = u8::try_from(body_len).unwrap();
+        }
+    }
+
+    // The innermost body of the packet built by `wrap_min_body_len`.
+    const MIN_BODY_LEN_BODY: &[u8] = &[1, 2];
+
+    // The minimum body length of the outer packet built by `wrap_min_body_len`.
+    // The inner packet is only 4 bytes long, so the outer packet requires
+    // `OUTER_MIN_BODY_LEN - 4` bytes of padding after it.
+    const OUTER_MIN_BODY_LEN: usize = 8;
+
+    // The expected serialization of `wrap_min_body_len(body)`, where `body`
+    // holds `MIN_BODY_LEN_BODY`. The padding required by the outer packet's
+    // minimum body length follows the inner packet's footer, and is not
+    // included in the body length seen by the inner packet.
+    #[rustfmt::skip]
+    const EXPECTED_MIN_BODY_LEN_PACKET: &[u8] = &[
+        OUTER_MIN_BODY_LEN as u8, // Outer header (body length)
+        2,                        // Inner header (body length)
+        1, 2,                     // Inner body
+        0xFE,                     // Inner footer
+        0, 0, 0, 0,               // Padding to satisfy outer minimum body length requirement
+        0xFE,                     // Outer footer
+    ];
+
+    // The headers of `EXPECTED_MIN_BODY_LEN_PACKET`, which is all that partial
+    // serialization writes.
+    const EXPECTED_MIN_BODY_LEN_HEADER: &[u8] = &[8, 2];
+
+    // The constraints of an encapsulating packet whose minimum body length
+    // requires padding beyond `EXPECTED_MIN_BODY_LEN_PACKET`. That padding
+    // belongs to the encapsulating packet, so serializers must not include it.
+    const OUTER_CONSTRAINTS_WITH_PADDING: PacketConstraints = PacketConstraints {
+        header_len: 2,
+        footer_len: 2,
+        min_body_len: EXPECTED_MIN_BODY_LEN_PACKET.len() + 1,
+        max_body_len: usize::MAX,
+    };
+
+    fn buf_body() -> Buf<Vec<u8>> {
+        Buf::new(MIN_BODY_LEN_BODY.to_vec(), ..)
+    }
+
+    fn inner_serializer_body() -> InnerSerializer<&'static [u8], EmptyBuf> {
+        MIN_BODY_LEN_BODY.into_serializer()
+    }
+
+    fn truncating_serializer_body() -> TruncatingSerializer<Buf<Vec<u8>>> {
+        TruncatingSerializer::new(buf_body(), TruncateDirection::NoTruncating)
+    }
+
+    // Wraps `body` in an inner packet with no minimum body length, and then in
+    // an outer packet whose minimum body length requires padding.
+    fn wrap_min_body_len<S: NestableSerializer>(
+        body: S,
+    ) -> Nested<Nested<S, BodyLenPacketBuilder>, BodyLenPacketBuilder> {
+        body.wrap_in(BodyLenPacketBuilder { min_body_len: 0 })
+            .wrap_in(BodyLenPacketBuilder { min_body_len: OUTER_MIN_BODY_LEN })
+    }
+
+    // The serialization methods exercised by `test_min_body_len_all_methods`.
+    //
+    // All but `PartialSerialize` run with `OUTER_CONSTRAINTS_WITH_PADDING`.
+    // `partial_serialize` takes no constraints, so `PartialSerialize` runs
+    // unconstrained.
+    #[derive(Copy, Clone, Debug)]
+    enum SerializeMethod {
+        Serialize,
+        SerializeNewBuf,
+        PartialSerialize,
+        PartialSerializeNewBuf,
+    }
+
+    #[test_matrix(
+        [buf_body(), inner_serializer_body(), truncating_serializer_body()],
+        [
+            SerializeMethod::Serialize,
+            SerializeMethod::SerializeNewBuf,
+            SerializeMethod::PartialSerialize,
+            SerializeMethod::PartialSerializeNewBuf
+        ]
+    )]
+    fn test_min_body_len_all_methods<S>(body: S, method: SerializeMethod)
+    where
+        S: Serializer<NoOpSerializationContext>
+            + PartialSerializer<NoOpSerializationContext>
+            + Debug,
+        S::Buffer: ReusableBuffer + AsRef<[u8]>,
+    {
+        // Test that every serialization method adds the padding required by a
+        // packet's minimum body length at the layer which requires it, so that
+        // it is not included in the body length seen by inner layers.
+        let ser = wrap_min_body_len(body);
+        let ctx = &mut NoOpSerializationContext;
+
+        // Asserts that `buf` holds `EXPECTED_MIN_BODY_LEN_PACKET`, with room
+        // reserved for `OUTER_CONSTRAINTS_WITH_PADDING`'s header, padding and
+        // footer, but without the padding added.
+        fn assert_outer_room<B: GrowBuffer + AsRef<[u8]>>(buf: &B) {
+            assert_eq!(buf.as_ref(), EXPECTED_MIN_BODY_LEN_PACKET);
+            assert_eq!(buf.prefix_len(), OUTER_CONSTRAINTS_WITH_PADDING.header_len());
+            assert_eq!(
+                buf.suffix_len(),
+                OUTER_CONSTRAINTS_WITH_PADDING.min_body_len() - EXPECTED_MIN_BODY_LEN_PACKET.len()
+                    + OUTER_CONSTRAINTS_WITH_PADDING.footer_len()
+            );
+        }
+
+        match method {
+            SerializeMethod::Serialize => {
+                let buf = ser.serialize_vec(ctx, OUTER_CONSTRAINTS_WITH_PADDING).unwrap();
+                assert_outer_room(&buf);
+            }
+            SerializeMethod::SerializeNewBuf => {
+                let buf = ser
+                    .serialize_new_buf(ctx, OUTER_CONSTRAINTS_WITH_PADDING, new_buf_vec)
+                    .unwrap();
+                assert_outer_room(&buf);
+            }
+            SerializeMethod::PartialSerialize => {
+                let (header, total_size) = assert_matches!(
+                    ser.partial_serialize(ctx, new_buf_vec),
+                    Ok(PartialSerializeResult::NewBuffer { buffer, total_size }) => {
+                        (buffer, total_size)
+                    }
+                );
+                assert_eq!(header.as_ref(), EXPECTED_MIN_BODY_LEN_HEADER);
+                assert_eq!(total_size, EXPECTED_MIN_BODY_LEN_PACKET.len());
+            }
+            SerializeMethod::PartialSerializeNewBuf => {
+                let (header, total_size) = ser
+                    .partial_serialize_new_buf(ctx, OUTER_CONSTRAINTS_WITH_PADDING, new_buf_vec)
+                    .unwrap();
+                assert_eq!(header.prefix_len(), OUTER_CONSTRAINTS_WITH_PADDING.header_len());
+                assert_eq!(header.as_ref(), EXPECTED_MIN_BODY_LEN_HEADER);
+                assert_eq!(total_size, EXPECTED_MIN_BODY_LEN_PACKET.len());
+            }
+        }
     }
 
     #[test]

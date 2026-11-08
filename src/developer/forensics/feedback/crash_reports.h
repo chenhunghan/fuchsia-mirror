@@ -5,7 +5,7 @@
 #ifndef SRC_DEVELOPER_FORENSICS_FEEDBACK_CRASH_REPORTS_H_
 #define SRC_DEVELOPER_FORENSICS_FEEDBACK_CRASH_REPORTS_H_
 
-#include <fuchsia/feedback/cpp/fidl.h>
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
 #include <lib/async/dispatcher.h>
 
 #include "src/developer/forensics/crash_reports/crash_register.h"
@@ -38,8 +38,8 @@ class CrashReports {
                feedback::AnnotationManager* annotation_manager,
                feedback_data::DataProviderInternal* data_provider, Options options);
 
-  fuchsia::feedback::CrashReporter* CrashReporter();
-  fuchsia::feedback::CrashReportingProductRegister* CrashRegister();
+  crash_reports::CrashReporter* CrashReporter();
+  fidl::Server<fuchsia_feedback::CrashReportingProductRegister>* CrashRegister();
 
   void SetNetworkIsReachable(bool is_reachable);
   void ShutdownImminent();

@@ -21,9 +21,12 @@
 #include <lib/sync/cpp/completion.h>
 #include <lib/zx/time.h>
 
+#include <array>
+#include <cstdint>
 #include <memory>
 #include <span>
 #include <thread>
+#include <vector>
 
 #include <gmock/gmock.h>
 
@@ -1473,7 +1476,8 @@ TEST_F(DisplayCompositorTest, HardwareFrameCorrectnessTest) {
             EXPECT_EQ(request->layer_id.value, layer_id_value++);
             completer.Reply(fit::ok());
           }));
-  EXPECT_CALL(*mock_display_coordinator_, SetLayerColorConfig(_, _)).Times(1).WillOnce(Return());
+  // The empty-scene layer is not displayed, so the proxy does not send its color config.
+  EXPECT_CALL(*mock_display_coordinator_, SetLayerColorConfig(_, _)).Times(0);
 
   std::vector<display::WireLayerId> layers = {{.value = 2}, {.value = 3}};
 
@@ -1680,7 +1684,8 @@ void DisplayCompositorTest::HardwareFrameCorrectnessWithRotationTester(
             EXPECT_EQ(request->layer_id.value, layer_id_value++);
             completer.Reply(fit::ok());
           }));
-  EXPECT_CALL(*mock_display_coordinator_, SetLayerColorConfig(_, _)).Times(1).WillOnce(Return());
+  // The empty-scene layer is not displayed, so the proxy does not send its color config.
+  EXPECT_CALL(*mock_display_coordinator_, SetLayerColorConfig(_, _)).Times(0);
 
   // However, we only set one display layer for the image.
   const std::vector<fuchsia_hardware_display::wire::LayerId> layers = {{.value = 2}};
@@ -1989,6 +1994,57 @@ TEST_F(DisplayCompositorTest, SetDisplayLayers_WithNoImages_UsesEmptySceneLayer)
   }
 }
 
+// If showing the empty scene fails `CheckConfig()`, the proxy discards the empty-scene layer's
+// draft color config.  The compositor sets the config again each time it shows the empty scene, so
+// the next attempt has the same config, which the proxy's cache already knows fails.  Without that,
+// the next attempt would check, and could commit, a config whose empty-scene layer was never
+// configured.
+TEST_F(DisplayCompositorTest, EmptySceneColorConfigIsSetEachTimeItIsShown) {
+  const display::DisplayId kDisplayId(1);
+  glm::uvec2 resolution(1024, 768);
+  DisplayInfo display_info = {resolution, {kPixelFormat}, kMaxDisplayLayersCount};
+  display::Display display({kDisplayId.ToFidl()}, resolution.x, resolution.y,
+                           kMaxDisplayLayersCount);
+
+  uint64_t layer_id_value = 1;
+  EXPECT_CALL(*mock_display_coordinator_, CreateLayer(_, _))
+      .Times(kMaxDisplayLayersCount + 1)
+      .WillRepeatedly(testing::Invoke(
+          [&](fidl::WireServer<fuchsia_hardware_display::Coordinator>::CreateLayerRequestView
+                  request,
+              MockDisplayCoordinator::CreateLayerCompleter::Sync& completer) {
+            EXPECT_EQ(request->layer_id.value, layer_id_value++);
+            completer.Reply(fit::ok());
+          }));
+  display_compositor_->AddDisplay(&display, display_info, /*num_vmos*/ 0,
+                                  /*out_buffer_collection*/ nullptr);
+
+  EXPECT_CALL(*mock_display_coordinator_, SetLayerColorConfig(_, _)).Times(1).WillOnce(Return());
+  EXPECT_CALL(*mock_display_coordinator_, SetDisplayLayers(_, _)).Times(1).WillOnce(Return());
+  EXPECT_CALL(*mock_display_coordinator_, SetDisplayMode(_, _)).Times(testing::AnyNumber());
+  EXPECT_CALL(*mock_display_coordinator_, CheckConfig(_))
+      .Times(1)
+      .WillOnce(testing::Invoke([](MockDisplayCoordinator::CheckConfigCompleter::Sync& completer) {
+        completer.Reply(display::WireConfigResult::kUnsupportedConfig);
+      }));
+  EXPECT_CALL(*mock_display_coordinator_, CommitConfig(_, _)).Times(0);
+  EXPECT_CALL(*mock_display_coordinator_, DiscardConfig(_)).Times(testing::AnyNumber());
+
+  RenderData render_data = {.display_id = kDisplayId, .layers = {}};
+  EXPECT_FALSE(TryDirectToDisplay(std::span<const RenderData>(&render_data, 1)));
+  EXPECT_FALSE(TryDirectToDisplay(std::span<const RenderData>(&render_data, 1)));
+
+  // Cleanup: All layers should be destroyed.
+  for (uint64_t i = 1; i < layer_id_value; ++i) {
+    EXPECT_CALL(
+        *mock_display_coordinator_,
+        DestroyLayer(
+            MatchRequestField(DestroyLayer, layer_id, Eq(display::WireLayerId{.value = i})), _))
+        .Times(1)
+        .WillOnce(Return());
+  }
+}
+
 TEST_F(DisplayCompositorTest, TryDirectToDisplayExceedsHardwareLayerLimitFallbackToGpu) {
   static constexpr display::DisplayId kDisplayId(1);
   static constexpr glm::uvec2 resolution(1024, 768);
@@ -2040,7 +2096,19 @@ TEST_F(DisplayCompositorTest, TryDirectToDisplayExceedsHardwareLayerLimitFallbac
   EXPECT_CALL(*mock_display_coordinator_, DiscardConfig(_)).Times(1).WillOnce(Return());
 }
 
-TEST_F(DisplayCompositorTest, SolidColorContentTakesColorLayerPath) {
+struct SolidColorAlphaByteParam {
+  BlendMode blend_mode;
+  uint8_t expected_alpha;
+};
+
+class DisplayCompositorSolidColorAlphaTest
+    : public DisplayCompositorTest,
+      public testing::WithParamInterface<SolidColorAlphaByteParam> {};
+
+// A `kReplace` fill is sent opaque, even if its color is translucent: the GPU path draws a
+// `kReplace` layer opaque, and the fill must not change when Scenic switches between the paths. A
+// premultiplied-alpha fill keeps its alpha, so the Coordinator blends it.
+TEST_P(DisplayCompositorSolidColorAlphaTest, SolidColorAlphaByteFollowsBlendMode) {
   const display::DisplayId kDisplayId(1);
   glm::uvec2 resolution(1024, 768);
   DisplayInfo display_info = {resolution, {kPixelFormat}, kMaxDisplayLayersCount};
@@ -2061,23 +2129,36 @@ TEST_F(DisplayCompositorTest, SolidColorContentTakesColorLayerPath) {
   display_compositor_->AddDisplay(&display, display_info, /*num_vmos*/ 0,
                                   /*out_buffer_collection*/ nullptr);
 
+  // A premultiplied half-opaque orange, at layer opacity 1, in the blend mode under test. Red and
+  // blue differ, so the expected bytes and format also check the channel order.
   ResolvedLayer layer = {
       .geometry = SrcToDest(types::RectangleF({.x = 0,
                                                .y = 0,
                                                .width = static_cast<float>(resolution.x),
                                                .height = static_cast<float>(resolution.y)})),
       .multiply_color = {1.f, 1.f, 1.f, 1.f},
-      .blend_mode = BlendMode::kReplace(),
-      .content = ResolvedLayer::SolidColorContent{.color = {1.f, 0.f, 0.f, 1.f}},
+      .blend_mode = GetParam().blend_mode,
+      .content = ResolvedLayer::SolidColorContent{.color = {0.5f, 0.25f, 0.f, 0.5f}},
   };
   RenderData render_data = {
       .display_id = kDisplayId,
       .layers = std::span<const ResolvedLayer>(&layer, 1),
   };
 
+  // Only the displayed solid-color layer's config is sent.  The empty-scene layer, whose color
+  // config `AddDisplay()` set to black, is not displayed, so the proxy does not send that config.
+  std::vector<std::array<uint8_t, 4>> sent_color_bytes;
+  std::vector<fuchsia_images2::wire::PixelFormat> sent_color_formats;
   EXPECT_CALL(*mock_display_coordinator_, SetLayerColorConfig(_, _))
-      .Times(2)
-      .WillRepeatedly(Return());
+      .Times(1)
+      .WillOnce(testing::Invoke(
+          [&](fidl::WireServer<
+                  fuchsia_hardware_display::Coordinator>::SetLayerColorConfigRequestView request,
+              MockDisplayCoordinator::SetLayerColorConfigCompleter::Sync& completer) {
+            const fidl::Array<uint8_t, 8>& bytes = request->color.bytes;
+            sent_color_bytes.push_back({bytes[0], bytes[1], bytes[2], bytes[3]});
+            sent_color_formats.push_back(request->color.format);
+          }));
   EXPECT_CALL(*mock_display_coordinator_, SetLayerPrimaryConfig(_, _)).Times(0);
   EXPECT_CALL(*mock_display_coordinator_, SetLayerImage2(_, _)).Times(0);
 
@@ -2093,6 +2174,12 @@ TEST_F(DisplayCompositorTest, SolidColorContentTakesColorLayerPath) {
   bool result = TryDirectToDisplay(std::span<const RenderData>(&render_data, 1));
   EXPECT_TRUE(result);
 
+  EXPECT_THAT(sent_color_formats,
+              testing::ElementsAre(fuchsia_images2::wire::PixelFormat::kB8G8R8A8));
+  EXPECT_THAT(sent_color_bytes,
+              testing::ElementsAre(testing::ElementsAre(uint8_t{0}, uint8_t{63}, uint8_t{127},
+                                                        GetParam().expected_alpha)));
+
   // Cleanup: All layers should be destroyed.
   for (uint64_t i = 1; i <= kMaxDisplayLayersCount + 1; ++i) {
     EXPECT_CALL(
@@ -2104,6 +2191,13 @@ TEST_F(DisplayCompositorTest, SolidColorContentTakesColorLayerPath) {
   }
   EXPECT_CALL(*mock_display_coordinator_, DiscardConfig(_)).Times(1).WillOnce(Return());
 }
+
+INSTANTIATE_TEST_SUITE_P(
+    BlendModes, DisplayCompositorSolidColorAlphaTest,
+    testing::Values(SolidColorAlphaByteParam{.blend_mode = BlendMode::kReplace(),
+                                             .expected_alpha = 255},
+                    SolidColorAlphaByteParam{.blend_mode = BlendMode::kPremultipliedAlpha(),
+                                             .expected_alpha = 127}));
 
 TEST_F(DisplayCompositorTest, ImageContentTakesImageLayerPath) {
   const uint64_t kGlobalBufferCollectionId = allocation::GenerateUniqueBufferCollectionId();
@@ -2210,7 +2304,8 @@ TEST_F(DisplayCompositorTest, ImageContentTakesImageLayerPath) {
       .layers = std::span<const ResolvedLayer>(&layer, 1),
   };
 
-  EXPECT_CALL(*mock_display_coordinator_, SetLayerColorConfig(_, _)).Times(1).WillOnce(Return());
+  // The empty-scene layer is not displayed, so the proxy does not send its color config.
+  EXPECT_CALL(*mock_display_coordinator_, SetLayerColorConfig(_, _)).Times(0);
   EXPECT_CALL(*mock_display_coordinator_, SetLayerPrimaryConfig(_, _)).Times(1).WillOnce(Return());
   EXPECT_CALL(*mock_display_coordinator_, SetLayerPrimaryPosition(_, _))
       .Times(1)
@@ -3270,7 +3365,8 @@ TEST_F(DisplayCompositorTest, LazyImageImport_DirectToDisplayOnlyImportsToDispla
       }));
   EXPECT_CALL(*renderer_, ImportBufferImage(image_metadata, _)).Times(0);
 
-  EXPECT_CALL(*mock_display_coordinator_, SetLayerColorConfig(_, _)).Times(1).WillOnce(Return());
+  // The empty-scene layer is not displayed, so the proxy does not send its color config.
+  EXPECT_CALL(*mock_display_coordinator_, SetLayerColorConfig(_, _)).Times(0);
   EXPECT_CALL(*mock_display_coordinator_, SetLayerPrimaryConfig(_, _)).Times(1).WillOnce(Return());
   EXPECT_CALL(*mock_display_coordinator_, SetLayerPrimaryPosition(_, _))
       .Times(1)
@@ -3344,7 +3440,8 @@ TEST_F(DisplayCompositorTest, LazyImageImport_ImportedToBothDisplayAndGpuRelease
                                    MockDisplayCoordinator::ImportImageCompleter::Sync& completer) {
         completer.Reply(fit::ok());
       }));
-  EXPECT_CALL(*mock_display_coordinator_, SetLayerColorConfig(_, _)).Times(1).WillOnce(Return());
+  // The empty-scene layer is not displayed, so the proxy does not send its color config.
+  EXPECT_CALL(*mock_display_coordinator_, SetLayerColorConfig(_, _)).Times(0);
   EXPECT_CALL(*mock_display_coordinator_, SetLayerPrimaryConfig(_, _)).Times(1).WillOnce(Return());
   EXPECT_CALL(*mock_display_coordinator_, SetLayerPrimaryPosition(_, _))
       .Times(1)
@@ -3661,7 +3758,8 @@ TEST_F(DisplayCompositorTest, LazyImageImport_DisplayImportFailureFallsBackToGpu
   DisplayInfo display_info = {resolution, {kPixelFormat}, kMaxDisplayLayersCount};
   display::Display display({kDisplayId.ToFidl()}, resolution.x, resolution.y,
                            kMaxDisplayLayersCount);
-  EXPECT_CALL(*mock_display_coordinator_, SetLayerColorConfig(_, _)).Times(1).WillOnce(Return());
+  // The empty-scene layer is not displayed, so the proxy does not send its color config.
+  EXPECT_CALL(*mock_display_coordinator_, SetLayerColorConfig(_, _)).Times(0);
   AddDisplayWithExpectations(&display, display_info);
 
   // Set up a synthetic render target on the display so `PerformGpuComposition()` can run.
@@ -3889,7 +3987,8 @@ TEST_F(DisplayCompositorTest,
   DisplayInfo display_info = {resolution, {kPixelFormat}, kMaxDisplayLayersCount};
   display::Display display({kDisplayId.ToFidl()}, resolution.x, resolution.y,
                            kMaxDisplayLayersCount);
-  EXPECT_CALL(*mock_display_coordinator_, SetLayerColorConfig(_, _)).Times(1).WillOnce(Return());
+  // The empty-scene layer is not displayed, so the proxy does not send its color config.
+  EXPECT_CALL(*mock_display_coordinator_, SetLayerColorConfig(_, _)).Times(0);
   AddDisplayWithExpectations(&display, display_info);
 
   auto token_ref = ImportDisplaySupportedClientCollection(kGlobalBufferCollectionId);
@@ -4049,7 +4148,8 @@ TEST_F(DisplayCompositorTest,
   DisplayInfo display_info = {resolution, {kPixelFormat}, kMaxDisplayLayersCount};
   display::Display display({kDisplayId.ToFidl()}, resolution.x, resolution.y,
                            kMaxDisplayLayersCount);
-  EXPECT_CALL(*mock_display_coordinator_, SetLayerColorConfig(_, _)).Times(1).WillOnce(Return());
+  // The empty-scene layer is not displayed, so the proxy does not send its color config.
+  EXPECT_CALL(*mock_display_coordinator_, SetLayerColorConfig(_, _)).Times(0);
   AddDisplayWithExpectations(&display, display_info);
 
   auto token_ref = ImportDisplaySupportedClientCollection(kGlobalBufferCollectionId);
@@ -4316,11 +4416,26 @@ TEST_F(DisplayCompositorTest, ClientImageUsageInspectCounts) {
 
   EXPECT_EQ(ReadClientImageUsageCounts(), (ClientImageUsageCounts{}));
 
-  EXPECT_CALL(*mock_display_coordinator_, ReleaseImage(_, _)).Times(1).WillOnce(Return());
+  auto expect_display_release_image = [&](const ImageMetadata& image,
+                                          libsync::Completion& released) {
+    EXPECT_CALL(
+        *mock_display_coordinator_,
+        ReleaseImage(MatchRequestField(ReleaseImage, image_id, Eq(image.identifier.ToFidl())), _))
+        .Times(1)
+        .WillOnce(testing::Invoke(
+            [&released](fuchsia_hardware_display::wire::CoordinatorReleaseImageRequest*,
+                        MockDisplayCoordinator::ReleaseImageCompleter::Sync&) {
+              released.Signal();
+            }));
+  };
+
+  libsync::Completion render_target_released;
+  expect_display_release_image(render_target_image, render_target_released);
   EXPECT_CALL(*renderer_, ReleaseBufferImage(render_target_image.identifier))
       .Times(1)
       .WillOnce(Return());
   display_compositor_->ReleaseBufferImage(render_target_image.identifier);
+  render_target_released.Wait();
   testing::Mock::VerifyAndClearExpectations(renderer_.get());
 
   EXPECT_EQ(ReadClientImageUsageCounts(), (ClientImageUsageCounts{}));
@@ -4462,9 +4577,11 @@ TEST_F(DisplayCompositorTest, ClientImageUsageInspectCounts) {
   // Release image1 (D2D-only) first, then image4 (Unused), image5 (GPU-only), and image2 (Both)
   // one by one, verifying after each release that `Active` decrements by 1 and all four lifetime
   // bucket counts remain intact.
-  EXPECT_CALL(*mock_display_coordinator_, ReleaseImage(_, _)).Times(1).WillOnce(Return());
+  libsync::Completion image1_released;
+  expect_display_release_image(image1, image1_released);
   EXPECT_CALL(*renderer_, ReleaseBufferImage(_)).Times(0);
   display_compositor_->ReleaseBufferImage(image1.identifier);
+  image1_released.Wait();
   EXPECT_EQ(ReadClientImageUsageCounts(), (ClientImageUsageCounts{
                                               .total_imported = 5u,
                                               .active = 4u,
@@ -4498,9 +4615,11 @@ TEST_F(DisplayCompositorTest, ClientImageUsageInspectCounts) {
                                               .unused = 1u,
                                           }));
 
-  EXPECT_CALL(*mock_display_coordinator_, ReleaseImage(_, _)).Times(1).WillOnce(Return());
+  libsync::Completion image2_released;
+  expect_display_release_image(image2, image2_released);
   EXPECT_CALL(*renderer_, ReleaseBufferImage(image2.identifier)).Times(1).WillOnce(Return());
   display_compositor_->ReleaseBufferImage(image2.identifier);
+  image2_released.Wait();
   EXPECT_EQ(ReadClientImageUsageCounts(), (ClientImageUsageCounts{
                                               .total_imported = 5u,
                                               .active = 1u,

@@ -9,7 +9,8 @@ use crate::objects::{
     SerializedBinderObject, TransactionData,
 };
 use crate::process::{
-    ActiveTransaction, BinderProcess, BinderProcessGuard, RequestType, TransientTransactionState,
+    ActiveTransaction, BinderFreezeState, BinderProcess, BinderProcessGuard, BinderProcessState,
+    RequestType, TransientTransactionState,
 };
 use crate::resource_accessor::{
     RemoteIoctl, RemoteMemoryAccessor, RemoteResourceAccessor, ResourceAccessor,
@@ -17,7 +18,7 @@ use crate::resource_accessor::{
 use crate::shared_memory::{SharedBuffer, SharedMemory, TransactionBuffers};
 use crate::thread::{
     BinderThread, BinderThreadGuard, BinderThreadState, Command, QueuedCommand, RegistrationState,
-    RequeueEventRegistration, TransactionError, TransactionRole, TransactionSender, WeakBinderPeer,
+    TransactionError, TransactionRole, TransactionSender, WeakBinderPeer,
 };
 use crate::user_memory_cursor::UserMemoryCursor;
 use fidl::endpoints::ClientEnd;
@@ -36,9 +37,7 @@ use crate::trace::{
 use starnix_core::security;
 #[cfg(test)]
 use starnix_core::task::Task;
-use starnix_core::task::{
-    CurrentTask, EventHandler, Kernel, Pid, SimpleWaiter, WaitCanceler, Waiter,
-};
+use starnix_core::task::{CurrentTask, EventHandler, Kernel, Pid, WaitCanceler, Waiter};
 use starnix_core::vfs::buffers::{InputBuffer, OutputBuffer};
 use starnix_core::vfs::{
     FdFlags, FdNumber, FileObject, FileObjectState, FileOps, FsStr, FsString, NamespaceNode,
@@ -46,7 +45,7 @@ use starnix_core::vfs::{
 };
 use starnix_logging::{log_error, log_trace, log_warn, track_stub, with_zx_name};
 use starnix_sync::{
-    BinderContextManagerLevel, BinderProcsLevel, InterruptibleEvent, LockDepMutex, LockDepRwLock,
+    BinderContextManagerLevel, BinderProcsLevel, LockDepGuard, LockDepMutex, LockDepRwLock,
     ordered_lock_vec,
 };
 use starnix_syscalls::{SUCCESS, SyscallArg, SyscallResult};
@@ -58,7 +57,7 @@ use starnix_types::ownership::{
 use starnix_types::user_buffer::UserBuffer;
 use starnix_uapi::auth::Credentials;
 use starnix_uapi::device_id::DeviceId;
-use starnix_uapi::errors::{EINTR, Errno};
+use starnix_uapi::errors::{EINTR, ETIMEDOUT, Errno};
 use starnix_uapi::math::round_up_to_increment;
 use starnix_uapi::open_flags::OpenFlags;
 use starnix_uapi::user_address::{UserAddress, UserRef};
@@ -193,7 +192,7 @@ impl FileOps for BinderConnection {
                         drop(thread_state);
 
                         let proc_state = binder_process.lock();
-                        if !proc_state.command_queue.is_empty() {
+                        if proc_state.has_runnable_commands() {
                             FdEvents::POLLIN | FdEvents::POLLOUT
                         } else {
                             FdEvents::POLLOUT
@@ -629,71 +628,175 @@ impl BinderDriver {
 
                 let mut pending_notifications = Vec::with_capacity(target_binder_procs.len());
 
-                let res = release_iter_after!(target_binder_procs, current_task.kernel(), {
-                    let freeze_locks =
-                        target_binder_procs.iter().map(|p| &p.freeze_state).collect::<Vec<_>>();
-                    // Do not allow freezing process with more than 16 binders as lockdep
-                    // doesn't support it.
-                    if freeze_locks.len() > 16 {
-                        return error!(ENOTSUP);
-                    }
-                    let mut target_binder_procs_freeze_locked = ordered_lock_vec(&freeze_locks);
-
-                    if !freezing {
-                        target_binder_procs_freeze_locked.iter_mut().for_each(|bp| {
-                            pending_notifications.extend(bp.thaw());
-                        });
-                        return Ok(SUCCESS);
-                    }
-
-                    let state_locks =
-                        target_binder_procs.iter().map(|p| &p.state).collect::<Vec<_>>();
-                    let target_binder_procs_state_locked = ordered_lock_vec(&state_locks);
-
-                    let thread_pool_locks =
-                        target_binder_procs.iter().map(|p| &p.thread_pool).collect::<Vec<_>>();
-                    let target_binder_procs_thread_pool_locked =
-                        ordered_lock_vec(&thread_pool_locks);
-                    let threads_locks = target_binder_procs_thread_pool_locked
-                        .iter()
-                        .flat_map(|pool| pool.values().map(|t| &t.state))
-                        .collect::<Vec<_>>();
-                    let threads_locked = ordered_lock_vec(&threads_locks);
-
-                    // Avoid freezing the target procs if there is any pending transaction
-                    if target_binder_procs_state_locked
-                        .iter()
-                        .any(|binder_process| binder_process.has_pending_transactions())
-                        || threads_locked
-                            .iter()
-                            .any(|binder_thread| binder_thread.has_pending_transactions())
-                    {
-                        if timeout_ms > 0 {
-                            track_stub!(
-                                TODO("https://fxbug.dev/391657004"),
-                                "BINDER_FREEZE timeout"
-                            );
+                let wait_state =
+                    release_iter_after!(target_binder_procs, current_task.kernel(), {
+                        let freeze_locks =
+                            target_binder_procs.iter().map(|p| &p.freeze_state).collect::<Vec<_>>();
+                        // Do not allow freezing process with more than 16 binders as lockdep
+                        // doesn't support it.
+                        if freeze_locks.len() > 16 {
+                            return error!(ENOTSUP);
                         }
-                        return error!(EAGAIN);
-                    }
+                        let state_locks =
+                            target_binder_procs.iter().map(|p| &p.state).collect::<Vec<_>>();
 
-                    target_binder_procs_freeze_locked.iter_mut().for_each(|bp| {
-                        pending_notifications.extend(bp.freeze());
-                    });
-                    Ok(SUCCESS)
-                });
+                        let mut target_binder_procs_freeze_locked = ordered_lock_vec(&freeze_locks);
+                        let mut target_binder_procs_state_locked = ordered_lock_vec(&state_locks);
+                        if !freezing {
+                            let mut procs_to_wake = Vec::new();
+                            for (proc, (bp_freeze, bp_state)) in target_binder_procs.iter().zip(
+                                target_binder_procs_freeze_locked
+                                    .iter_mut()
+                                    .zip(target_binder_procs_state_locked.iter_mut()),
+                            ) {
+                                let (notifications, should_wake) = bp_freeze.thaw(bp_state);
+                                pending_notifications.extend(notifications);
+                                if should_wake {
+                                    procs_to_wake.push(proc);
+                                }
+                            }
+                            drop(target_binder_procs_state_locked);
+                            drop(target_binder_procs_freeze_locked);
+                            for proc in &target_binder_procs {
+                                proc.freeze_waiters.notify_all();
+                            }
+                            for proc in procs_to_wake {
+                                proc.wake_process_and_available_thread();
+                            }
+                            return Ok(None);
+                        }
 
-                if res.is_ok() {
-                    for (proc, cmd) in pending_notifications {
-                        proc.enqueue_command(cmd.into());
-                        proc.release(current_task.kernel());
-                    }
-                } else {
-                    for (proc, _) in pending_notifications {
-                        proc.release(current_task.kernel());
+                        let waiter = (timeout_ms > 0).then(|| {
+                            let waiter = Waiter::new();
+                            for proc in target_binder_procs.iter() {
+                                proc.freeze_waiters.wait_async(&waiter);
+                            }
+                            waiter
+                        });
+
+                        if !target_binder_procs
+                            .iter()
+                            .zip(target_binder_procs_state_locked.iter())
+                            .any(|(proc, state)| proc.has_pending_transactions(state))
+                        {
+                            for bp in target_binder_procs_freeze_locked.iter_mut() {
+                                bp.begin_freeze();
+                                pending_notifications.extend(bp.notify_frozen());
+                            }
+                            return Ok(None);
+                        }
+
+                        let Some(waiter) = waiter else {
+                            return error!(EAGAIN);
+                        };
+
+                        let weak_target_procs = target_binder_procs
+                            .iter()
+                            .zip(target_binder_procs_freeze_locked.iter_mut())
+                            .map(|(proc, bp)| (OwnedRef::downgrade(proc), bp.begin_freeze()))
+                            .collect::<Vec<(WeakRef<BinderProcess>, u64)>>();
+
+                        let deadline = zx::MonotonicInstant::after(
+                            zx::MonotonicDuration::from_millis(timeout_ms as i64),
+                        );
+
+                        Ok(Some((weak_target_procs, waiter, deadline)))
+                    })?;
+
+                if let Some((weak_target_procs, mut waiter, deadline)) = wait_state {
+                    let rollback_freezes = |live_procs: &[(TempRef<'_, BinderProcess>, u64)],
+                                            mut freeze_locked: Vec<
+                        LockDepGuard<'_, BinderFreezeState>,
+                    >,
+                                            mut state_locked: Vec<
+                        LockDepGuard<'_, BinderProcessState>,
+                    >| {
+                        let mut procs_to_wake = Vec::new();
+                        for ((proc, expected_gen), (bp_freeze, bp_state)) in live_procs
+                            .iter()
+                            .zip(freeze_locked.iter_mut().zip(state_locked.iter_mut()))
+                        {
+                            if bp_freeze.cancel_freeze(*expected_gen, bp_state) {
+                                procs_to_wake.push(proc.deref());
+                            }
+                        }
+                        drop(state_locked);
+                        drop(freeze_locked);
+                        for proc in procs_to_wake {
+                            proc.wake_process_and_available_thread();
+                        }
+                    };
+
+                    loop {
+                        let wait_res = waiter.wait_until(current_task, deadline);
+
+                        let live_procs = weak_target_procs
+                            .iter()
+                            .filter_map(|(proc, expected_gen)| {
+                                Some((proc.upgrade()?, *expected_gen))
+                            })
+                            .collect::<Vec<_>>();
+                        let freeze_locks =
+                            live_procs.iter().map(|(p, _)| &p.freeze_state).collect::<Vec<_>>();
+                        let state_locks =
+                            live_procs.iter().map(|(p, _)| &p.state).collect::<Vec<_>>();
+                        let mut target_binder_procs_freeze_locked = ordered_lock_vec(&freeze_locks);
+                        let target_binder_procs_state_locked = ordered_lock_vec(&state_locks);
+
+                        let timed_out = match wait_res {
+                            Ok(()) => false,
+                            Err(err) if err == ETIMEDOUT => true,
+                            Err(err) => {
+                                rollback_freezes(
+                                    &live_procs,
+                                    target_binder_procs_freeze_locked,
+                                    target_binder_procs_state_locked,
+                                );
+                                return Err(err);
+                            }
+                        };
+                        if live_procs.is_empty() {
+                            return error!(EINVAL);
+                        }
+
+                        let thawed = target_binder_procs_freeze_locked
+                            .iter()
+                            .zip(live_procs.iter())
+                            .any(|(bp, (_, expected_gen))| bp.thaw_generation != *expected_gen);
+
+                        if !timed_out && !thawed {
+                            waiter = Waiter::new();
+                            for (proc, _) in live_procs.iter() {
+                                proc.freeze_waiters.wait_async(&waiter);
+                            }
+                        }
+
+                        if !thawed
+                            && !live_procs
+                                .iter()
+                                .zip(target_binder_procs_state_locked.iter())
+                                .any(|((proc, _), state)| proc.has_pending_transactions(state))
+                        {
+                            target_binder_procs_freeze_locked.iter_mut().for_each(|bp| {
+                                pending_notifications.extend(bp.notify_frozen());
+                            });
+                            break;
+                        } else if thawed || timed_out {
+                            rollback_freezes(
+                                &live_procs,
+                                target_binder_procs_freeze_locked,
+                                target_binder_procs_state_locked,
+                            );
+                            return error!(EAGAIN);
+                        }
                     }
                 }
-                return res;
+
+                for (proc, cmd) in pending_notifications {
+                    proc.enqueue_command(cmd.into());
+                    proc.release(current_task.kernel());
+                }
+                return Ok(SUCCESS);
             }
             uapi::BINDER_GET_FROZEN_INFO => {
                 if user_arg.is_null() {
@@ -714,21 +817,21 @@ impl BinderDriver {
                 }
                 let mut has_sync_recv = false;
                 let mut has_async_recv = false;
+                let mut has_pending_txns = false;
                 release_iter_after!(target_binder_procs, current_task.kernel(), {
                     target_binder_procs.iter().for_each(|binder_proc| {
                         let freeze_state = binder_proc.freeze_state.lock();
+                        let proc_state = binder_proc.state.lock();
                         has_sync_recv |= freeze_state.freeze_status.has_sync_recv;
                         has_async_recv |= freeze_state.freeze_status.has_async_recv;
+                        has_pending_txns |= binder_proc.has_pending_transactions(&proc_state);
                     });
                 });
                 memory_accessor.write_object(
                     user_ref,
                     &binder_frozen_status_info {
                         pid,
-                        // TODO(https://fxbug.dev/391657004): After timeout is supported, use
-                        // the second right bit as the indicator whether it has any pending
-                        // transactions.
-                        sync_recv: has_sync_recv as u32,
+                        sync_recv: (has_sync_recv as u32) | ((has_pending_txns as u32) << 1),
                         async_recv: has_async_recv as u32,
                     },
                 )?;
@@ -987,7 +1090,8 @@ impl BinderDriver {
                 context.binder_proc.handle_clear_death_notification(handle, cookie)
             }
             binder_driver_command_protocol_BC_DEAD_BINDER_DONE => {
-                let _cookie = cursor.read_object::<binder_uintptr_t>()?;
+                let cookie = cursor.read_object::<binder_uintptr_t>()?;
+                context.binder_proc.handle_dead_binder_done(cookie);
                 Ok(())
             }
             binder_driver_command_protocol_BC_TRANSACTION => {
@@ -1062,7 +1166,12 @@ impl BinderDriver {
             "data_size" => data.transaction_data.data_size as u64,
             "offsets_size" => data.transaction_data.offsets_size as u64
         );
-        context.binder_thread.lock().reset_extended_error();
+        let oneway = data.transaction_data.flags & transaction_flags_TF_ONE_WAY != 0;
+        let in_flight_transaction = {
+            let mut thread_state = context.binder_thread.lock();
+            thread_state.reset_extended_error();
+            (!oneway).then(|| thread_state.begin_transaction())
+        };
         // SAFETY: Transactions can only refer to handles.
         let handle = unsafe { data.transaction_data.target.handle }.into();
 
@@ -1086,19 +1195,15 @@ impl BinderDriver {
         release_after!(actions, (), {
             release_after!(guard, &mut actions, {
                 let target_proc = target_proc.ok_or(TransactionError::Dead)?;
-                let oneway = data.transaction_data.flags & transaction_flags_TF_ONE_WAY != 0;
-                // Track freeze status if the target proc is frozen
-                let is_target_frozen = {
+                // Reject synchronous transactions immediately if the target process is already
+                // frozen. Freeze state is also re-checked when registering the transaction in
+                // `active_transactions` after `copy_transaction_buffers`.
+                if !oneway {
                     let mut freeze_state = target_proc.freeze_state.lock();
                     if freeze_state.freeze_status.frozen {
-                        freeze_state.freeze_status.has_sync_recv |= !oneway;
-                        freeze_state.freeze_status.has_async_recv |= oneway;
+                        freeze_state.freeze_status.has_sync_recv = true;
+                        return Err(TransactionError::Frozen);
                     }
-                    freeze_state.freeze_status.frozen
-                };
-                // If the target proc is frozen in the sync transaction, reply with the Frozen error
-                if is_target_frozen && !oneway {
-                    return Err(TransactionError::Frozen);
                 }
                 let target_task = target_proc.get_task().ok_or(TransactionError::Dead)?;
 
@@ -1151,122 +1256,151 @@ impl BinderDriver {
 
                 let trace_id = fuchsia_trace::Id::new();
 
-                if oneway {
-                    // The caller is not expecting a reply.
-                    context.binder_thread.lock().enqueue_command(
-                        if is_target_frozen {
-                            Command::PendingFrozen
-                        } else {
-                            Command::OnewayTransactionComplete
+                // Re-check `target_proc.freeze_state` while holding `target_proc.state` to avoid
+                // racing with a concurrent `BINDER_FREEZE` during `copy_transaction_buffers`.
+                {
+                    let mut freeze_state = target_proc.freeze_state.lock();
+                    let is_target_frozen = freeze_state.freeze_status.frozen;
+                    if is_target_frozen {
+                        freeze_state.freeze_status.has_sync_recv |= !oneway;
+                        freeze_state.freeze_status.has_async_recv |= oneway;
+                        if !oneway {
+                            drop(freeze_state);
+                            transaction_state.release(());
+                            if let Some(shared_memory) = target_proc.shared_memory.lock().as_mut() {
+                                let _ = shared_memory.free_buffer(buffers.data.address);
+                            }
+                            return Err(TransactionError::Frozen);
                         }
-                        .into(),
-                    );
+                    }
+                    let mut target_proc_state = target_proc.lock();
 
-                    // Register the transaction buffer.
-                    target_proc.lock().active_transactions.insert(
+                    // Register the transaction buffer. Oneway transactions sent to an already
+                    // frozen process are buffered until thaw/unfreeze and do not count as pending
+                    // in-flight transactions while the process remains frozen.
+                    target_proc_state.active_transactions.insert(
                         buffers.data.address,
                         ActiveTransaction {
-                            request_type: RequestType::Oneway { object: object.clone() },
+                            request_type: if oneway {
+                                RequestType::Oneway { object: object.clone() }
+                            } else {
+                                RequestType::RequestResponse
+                            },
+                            is_pending: !is_target_frozen,
                             state: transaction_state.into_state(),
                         }
                         .into(),
                     );
 
-                    // Oneway transactions are enqueued on the binder object and processed one at a time.
-                    // This guarantees that oneway transactions are processed in the order they are
-                    // submitted, and one at a time.
-                    let mut object_state = object.lock();
-                    if object_state.handling_oneway_transaction {
-                        // Currently, a oneway transaction is being handled. Queue this one so that it is
-                        // scheduled when the buffer from the in-progress transaction is freed.
-                        object_state.oneway_transactions.push_back((transaction, trace_id));
+                    if oneway {
+                        // The caller is not expecting a reply.
+                        context.binder_thread.lock().enqueue_command(
+                            if is_target_frozen {
+                                Command::PendingFrozen
+                            } else {
+                                Command::OnewayTransactionComplete
+                            }
+                            .into(),
+                        );
+
+                        // Oneway transactions are enqueued on the binder object and processed one
+                        // at a time. Keep `freeze_state` and `target_proc_state` locked while
+                        // locking `object` and enqueueing so a post-freeze oneway transaction
+                        // cannot overtake a pre-freeze oneway transaction.
+                        let mut object_state = object.lock();
+                        if object_state.handling_oneway_transaction {
+                            // Currently, a oneway transaction is being handled. Queue this one so
+                            // that it is scheduled when the buffer from the in-progress transaction
+                            // is freed.
+                            object_state.oneway_transactions.push_back((transaction, trace_id));
+                            return Ok(());
+                        }
+
+                        // No oneway transactions are being handled, which means that no buffer will
+                        // be freed, kicking off scheduling from the oneway queue. Instead, we must
+                        // schedule the transaction regularly, but mark the object as handling a
+                        // oneway transaction.
+                        object_state.handling_oneway_transaction = true;
+                        drop(object_state);
+
+                        let queued =
+                            QueuedCommand::new(Command::OnewayTransaction(transaction), trace_id);
+                        on_command_enqueued(&queued.command, queued.trace_id);
+                        target_proc_state.command_queue.push_back(queued);
+                        drop(target_proc_state);
+                        drop(freeze_state);
+
+                        if !is_target_frozen {
+                            target_proc.wake_process_and_available_thread();
+                        }
                         return Ok(());
                     }
+                }
 
-                    // No oneway transactions are being handled, which means that no buffer will be
-                    // freed, kicking off scheduling from the oneway queue. Instead, we must schedule
-                    // the transaction regularly, but mark the object as handling a oneway transaction.
-                    object_state.handling_oneway_transaction = true;
-
-                    drop(object_state);
-                    target_proc.enqueue_command(QueuedCommand::new(
-                        Command::OnewayTransaction(transaction),
-                        trace_id,
-                    ));
-                } else {
-                    // Make the sender thread part of the transaction so it doesn't get scheduled to handle
-                    // any other transactions. `TwoWayTransactionComplete` is enqueued before the
-                    // transaction is dispatched to the target, so that it is always read before
-                    // the reply (or failure) for this transaction.
-                    let (target_thread, expected_len) = {
-                        let mut thread_state = context.binder_thread.lock();
-                        let target_thread = match match thread_state.transactions.last() {
-                            Some(TransactionRole::Receiver { peer, .. }) => peer.upgrade(),
-                            _ => None,
-                        } {
-                            Some((proc, thread)) if proc.key == target_proc.key => Some(thread),
-                            _ => None,
-                        };
-
-                        let transaction_sender = TransactionSender {
-                            target_proc: target_proc.identifier(),
-                            target_thread: target_thread.as_ref().map(|t| t.tid.clone()),
-                            is_alive: true,
-                            target_thread_handle: target_thread.as_ref().map(|t| t.thread.clone()),
-                            trace_id,
-                        };
-
-                        thread_state.enqueue_command(Command::TwoWayTransactionComplete.into());
-                        thread_state.transactions.push(TransactionRole::Sender(transaction_sender));
-                        (target_thread, thread_state.transactions.len())
+                // Make the sender thread part of the transaction so it doesn't get scheduled to handle
+                // any other transactions. `TwoWayTransactionComplete` is enqueued before the
+                // transaction is dispatched to the target, so that it is always read before
+                // the reply (or failure) for this transaction.
+                let (target_thread, expected_len) = {
+                    let mut thread_state = context.binder_thread.lock();
+                    let target_thread = match match thread_state.transactions.last() {
+                        Some(TransactionRole::Receiver { peer, .. }) => peer.upgrade(),
+                        _ => None,
+                    } {
+                        Some((proc, thread)) if proc.key == target_proc.key => Some(thread),
+                        _ => None,
                     };
 
-                    // Register the transaction buffer.
-                    target_proc.lock().active_transactions.insert(
-                        buffers.data.address,
-                        ActiveTransaction {
-                            request_type: RequestType::RequestResponse,
-                            state: transaction_state.into_state(),
-                        }
-                        .into(),
-                    );
-
-                    let queued = QueuedCommand::new(
-                        Command::Transaction {
-                            sender: WeakBinderPeer::new(context.binder_proc, context.binder_thread),
-                            data: transaction,
-                        },
+                    let transaction_sender = TransactionSender {
+                        target_proc: target_proc.identifier(),
+                        target_thread: target_thread.as_ref().map(|t| t.tid.clone()),
+                        is_alive: true,
+                        target_thread_handle: target_thread.as_ref().map(|t| t.thread.clone()),
                         trace_id,
-                    );
+                    };
 
-                    if let Some(target_thread) = target_thread {
-                        target_thread.lock().enqueue_command(queued);
-                    } else {
-                        // If we don't have an already known target thread, select one if
-                        // available.
-                        if let Some(thread) = target_proc.enqueue_command(queued) {
-                            // If we were able to schedule on a thread's queue (rather than on a
-                            // process' queue), we can update the sender record with that
-                            // information.
-                            let mut binder_thread_state = context.binder_thread.lock();
-                            // If in the time between us dropping the thread lock and reacquiring
-                            // it, if target has died, generate_dead_replies could have popped the
-                            // transaction from our stack.
-                            if binder_thread_state.transactions.len() == expected_len {
-                                if let Some(TransactionRole::Sender(TransactionSender {
-                                    target_proc: id,
-                                    is_alive: true,
-                                    target_thread_handle,
-                                    ..
-                                })) = binder_thread_state.transactions.last_mut()
-                                    && *id == target_proc.identifier()
-                                {
-                                    *target_thread_handle = Some(thread.thread.clone());
-                                }
+                    thread_state.complete_begin_transaction(
+                        in_flight_transaction.expect("two-way transaction in flight"),
+                        transaction_sender,
+                    );
+                    (target_thread, thread_state.transactions.len())
+                };
+
+                let queued = QueuedCommand::new(
+                    Command::Transaction {
+                        sender: WeakBinderPeer::new(context.binder_proc, context.binder_thread),
+                        data: transaction,
+                    },
+                    trace_id,
+                );
+
+                if let Some(target_thread) = target_thread {
+                    target_thread.lock().enqueue_command(queued);
+                } else {
+                    // If we don't have an already known target thread, select one if
+                    // available.
+                    if let Some(thread) = target_proc.enqueue_command(queued) {
+                        // If we were able to schedule on a thread's queue (rather than on a
+                        // process' queue), we can update the sender record with that
+                        // information.
+                        let mut binder_thread_state = context.binder_thread.lock();
+                        // If in the time between us dropping the thread lock and reacquiring
+                        // it, if target has died, generate_dead_replies could have popped the
+                        // transaction from our stack.
+                        if binder_thread_state.transactions.len() == expected_len {
+                            if let Some(TransactionRole::Sender(TransactionSender {
+                                target_proc: id,
+                                is_alive: true,
+                                target_thread_handle,
+                                ..
+                            })) = binder_thread_state.transactions.last_mut()
+                                && *id == target_proc.identifier()
+                            {
+                                *target_thread_handle = Some(thread.thread.clone());
                             }
                         }
                     }
-                };
+                }
                 Ok(())
             })
         })
@@ -1294,14 +1428,14 @@ impl BinderDriver {
             "offsets_size" => data.transaction_data.offsets_size as u64
         );
         // Find the process and thread that initiated the transaction. This reply is for them.
-        let (peer, trace_id) = {
+        let (peer, trace_id, in_flight_reply) = {
             let mut thread_state = context.binder_thread.lock();
             thread_state.reset_extended_error();
             thread_state.pop_transaction_caller()?
         };
         let Some((target_proc, target_thread)) = peer.upgrade() else {
             // The thread that initiated the transaction is dead, so there is nobody to reply to.
-            context.binder_thread.lock().enqueue_command(Command::TransactionComplete.into());
+            context.binder_thread.lock().complete_reply(in_flight_reply);
             return Ok(());
         };
         let mut send_reply = || -> Result<TransactionBuffers, TransactionError> {
@@ -1317,11 +1451,13 @@ impl BinderDriver {
                 None,
             )?;
 
-            // Register the transaction buffer.
+            // Register the transaction buffer. The sender thread's transaction stack already
+            // tracks this transaction as pending until BR_REPLY is read.
             target_proc.lock().active_transactions.insert(
                 buffers.data.address,
                 ActiveTransaction {
                     request_type: RequestType::RequestResponse,
+                    is_pending: false,
                     state: transaction_state.into_state(),
                 }
                 .into(),
@@ -1362,7 +1498,7 @@ impl BinderDriver {
                 target_thread.deliver_failed_reply(context.binder_proc.identifier(), &e, trace_id);
             }
         }
-        binder_thread.enqueue_command(Command::TransactionComplete.into());
+        binder_thread.complete_reply(in_flight_reply);
         Ok(())
     }
 
@@ -1426,29 +1562,31 @@ impl BinderDriver {
                 from_process_queue: false,
             }
         } else if wait_for_proc_work {
-            if let Some(queued) = proc_state.command_queue.front() {
-                if !is_first_command && queued.command.is_terminal() {
-                    return DequeueResult::Empty;
-                }
-                if !may_fit(&queued.command) {
-                    return DequeueResult::InsufficientBuffer;
-                }
-                let queued = proc_state
-                    .command_queue
-                    .pop_front()
-                    .expect("process command queue was checked to be non-empty");
-                on_command_dequeued(&queued.command, queued.trace_id);
-                if let Command::Transaction { sender, .. } = &queued.command {
-                    if let Some((_proc, sender_thread)) = sender.upgrade() {
-                        if let Some(event) = &*sender_thread.requeue_event.lock() {
-                            let _ = event.assign_new_owner(worker_thread);
-                        }
-                    }
-                }
-                DequeueResult::Command { queued, from_process_queue: true }
-            } else {
-                DequeueResult::Empty
+            let Some(idx) = proc_state
+                .command_queue
+                .iter()
+                .position(|queued| proc_state.is_command_runnable(&queued.command))
+            else {
+                return DequeueResult::Empty;
+            };
+            let queued = &proc_state.command_queue[idx];
+            if !is_first_command && queued.command.is_terminal() {
+                return DequeueResult::Empty;
             }
+            if !may_fit(&queued.command) {
+                return DequeueResult::InsufficientBuffer;
+            }
+            let queued = proc_state
+                .command_queue
+                .remove(idx)
+                .expect("process command queue index was checked to be valid");
+            on_command_dequeued(&queued.command, queued.trace_id);
+            if let Command::Transaction { sender, .. } = &queued.command {
+                if let Some((_proc, sender_thread)) = sender.upgrade() {
+                    sender_thread.try_assign_owner(worker_thread);
+                }
+            }
+            DequeueResult::Command { queued, from_process_queue: true }
         } else {
             DequeueResult::Empty
         }
@@ -1703,9 +1841,16 @@ impl BinderDriver {
 
                 let is_terminal = command.is_terminal();
                 match command {
-                    Command::Transaction { sender, .. } => {
+                    Command::Transaction { sender, data } => {
                         // The transaction is synchronous and we're expected to give a reply, so
-                        // push the transaction onto the transaction stack.
+                        // push the transaction onto the transaction stack. Once on the thread's
+                        // transaction stack, its pending status is tracked by the thread until
+                        // BC_REPLY rather than by the buffer entry in `active_transactions`.
+                        if let Some(active) =
+                            proc_state.active_transactions.get_mut(&data.buffers.data.address)
+                        {
+                            active.is_pending = false;
+                        }
                         let tx = TransactionRole::Receiver { peer: sender, trace_id };
                         thread_state.transactions.push(tx);
                     }
@@ -1740,7 +1885,7 @@ impl BinderDriver {
             if bytes_read > batch_start || end_read {
                 let wake_process = thread_state.transactions.is_empty()
                     && thread_state.command_queue.is_empty()
-                    && !proc_state.command_queue.is_empty();
+                    && proc_state.has_runnable_commands();
                 drop(thread_state);
                 drop(proc_state);
 
@@ -1763,10 +1908,10 @@ impl BinderDriver {
                 return if bytes_read > 0 { Ok(bytes_read) } else { error!(EBADF) };
             }
             // `kick_all_threads` only locks `thread_pool` (not `proc_state`), so it can set
-            // `request_kick` and notify `command_queue_waiters` while `thread_state` is
-            // temporarily dropped in `try_cancel_transient_refcount` above, before
-            // `wait_async_simple` registers `waiter`. Re-check `request_kick` before setting up
-            // the waiter so the kick is not missed.
+            // `request_kick` and notify `command_event` while `thread_state` is temporarily
+            // dropped in `try_cancel_transient_refcount` above, before `begin_wait` transitions
+            // `command_event` to `WAITING`. Re-check `request_kick` before setting up the wait so
+            // the kick is not missed.
             if thread_state.request_kick {
                 thread_state.request_kick = false;
                 return Ok(bytes_read);
@@ -1775,27 +1920,23 @@ impl BinderDriver {
             // No commands readily available to read. Wait for work. The thread will wait on both
             // the thread queue and the process queue, and loop back to check whether some work is
             // available.
-            let target_thread = thread_state
-                .transactions
-                .iter()
-                .rev()
-                .find_map(|t| match t {
-                    // Only look for the most recently sent transaction, even if it doesn't have a
-                    // target_thread set. Earlier transactions (if any) won't unblock this thread
-                    // any sooner by inheriting increased priority.
-                    TransactionRole::Sender(sender) => Some(sender),
-                    _ => None,
-                })
-                .and_then(|s| s.target_thread_handle.clone());
+            let latest_sender = thread_state.transactions.iter().rev().find_map(|t| match t {
+                // Only look for the most recently sent transaction, even if it doesn't have a
+                // target_thread set. Earlier transactions (if any) won't unblock this thread
+                // any sooner by inheriting increased priority.
+                TransactionRole::Sender(sender) => Some(sender),
+                _ => None,
+            });
+            let target_thread = latest_sender.and_then(|s| s.target_thread_handle.clone());
 
-            let event = InterruptibleEvent::new();
-            let _requeue_registration = if target_thread.is_none() {
-                Some(RequeueEventRegistration::new(context.binder_thread, event.clone()))
+            // Only allow dynamic PI owner assignment when waiting on an unscheduled sent
+            // transaction (`latest_sender` is present with `target_thread == None`). Known-target
+            // waits and idle worker waits use `begin_wait()`, which rejects `assign_new_owner`.
+            let guard = if latest_sender.is_some() && target_thread.is_none() {
+                thread_state.begin_wait_requeueable()
             } else {
-                None
+                thread_state.begin_wait()
             };
-            let (mut waiter, guard) = SimpleWaiter::new(&event);
-            thread_state.command_queue.wait_async_simple(&mut waiter);
 
             // Drop locks before sleeping. Order matters: thread_state first, then proc_state
             // because dropping thread_state registers it in available_threads. If we drop
@@ -1813,6 +1954,15 @@ impl BinderDriver {
                 target_thread.as_deref(),
                 zx::MonotonicInstant::INFINITE,
             ) {
+                // The wait failed (e.g. the thread was interrupted), so this thread no longer
+                // waits, but may still be queued in `available_threads`. Remove its entry, so that
+                // it does not stay queued below the threads that keep becoming available (see
+                // `AvailableThreads::is_empty`), and clear `available`, so that it is queued again
+                // when it next waits.
+                let mut thread_state = context.binder_thread.lock();
+                thread_state.available = false;
+                context.binder_thread.available_threads.remove(&context.binder_thread.weak_self);
+                drop(thread_state);
                 return if bytes_read > 0 { Ok(bytes_read) } else { Err(err) };
             }
         }
@@ -1980,15 +2130,24 @@ impl BinderDriver {
             TransientTransactionState::new(target_resource_accessor, target_proc);
         release_on_error!(transaction_state, (), {
             let mut sg_remaining_buffer = sg_buffer.user_buffer();
-            let mut sg_buffer_offset = 0;
+            let mut sg_buffer_offset = 0usize;
+            let mut min_offset = 0usize;
+            let mut active_parent_chain: Vec<(usize, usize)> = Vec::new();
             let mut files = Vec::new();
             for (offset_idx, object_offset) in offsets.iter().map(|o| *o as usize).enumerate() {
-                // Bounds-check the offset.
-                if object_offset >= transaction_data.len() {
+                // Enforce 4-byte alignment and monotonically non-overlapping object offsets,
+                // matching Linux's binder_transaction off_min validation.
+                if object_offset % std::mem::size_of::<u32>() != 0
+                    || object_offset < min_offset
+                    || object_offset >= transaction_data.len()
+                {
                     return error!(EINVAL)?;
                 }
                 let serialized_object =
                     SerializedBinderObject::from_bytes(&transaction_data[object_offset..])?;
+                min_offset = object_offset
+                    .checked_add(serialized_object.serialized_size())
+                    .ok_or_else(|| errno!(EINVAL))?;
                 let translated_object = match serialized_object {
                     SerializedBinderObject::Handle { handle, flags, cookie } => {
                         security::binder_transfer_binder(
@@ -2086,15 +2245,21 @@ impl BinderDriver {
                         parent,
                         parent_offset,
                     } => {
-                        // Copy the memory pointed to by this buffer object into the receiver.
-                        if length > sg_remaining_buffer.length {
+                        // Pad the length of this buffer so that the next buffer starts at an aligned
+                        // offset, and check against the remaining scatter-gather capacity up front.
+                        let padded_length =
+                            round_up_to_increment(length, std::mem::size_of::<binder_uintptr_t>())?;
+                        if padded_length > sg_remaining_buffer.length {
                             return error!(EINVAL)?;
                         }
-                        source.memory_accessor.read_memory_to_slice(
-                            buffer,
-                            &mut sg_buffer.as_mut_bytes()
-                                [sg_buffer_offset..sg_buffer_offset + length],
-                        )?;
+                        let dst_end =
+                            sg_buffer_offset.checked_add(length).ok_or_else(|| errno!(EINVAL))?;
+                        let dst_slice = sg_buffer
+                            .as_mut_bytes()
+                            .get_mut(sg_buffer_offset..dst_end)
+                            .ok_or_else(|| errno!(EINVAL))?;
+                        // Copy the memory pointed to by this buffer object into the receiver.
+                        source.memory_accessor.read_memory_to_slice(buffer, dst_slice)?;
 
                         let translated_buffer_address = sg_remaining_buffer.address;
 
@@ -2102,13 +2267,18 @@ impl BinderDriver {
                         // this buffer. This pointer will need to be translated to the receiver's
                         // address space.
                         if flags & BINDER_BUFFER_FLAG_HAS_PARENT != 0 {
-                            // The parent buffer must come earlier in the object list and already be
-                            // copied into the receiver's address space. Otherwise we would be fixing
-                            // up memory in the sender's address space, which is marked const in the
-                            // userspace runtime.
+                            // The parent buffer must come earlier in the object list, be on the
+                            // active ancestor chain, and have monotonically non-overlapping fixup
+                            // offsets (matching Linux's `binder_validate_fixup`).
                             if parent >= offset_idx {
                                 return error!(EINVAL)?;
                             }
+                            validate_and_advance_parent_fixup(
+                                &mut active_parent_chain,
+                                parent,
+                                parent_offset,
+                                std::mem::size_of::<binder_uintptr_t>(),
+                            )?;
 
                             // Find the parent buffer payload. There is a pointer in the buffer
                             // that points to this object.
@@ -2127,13 +2297,12 @@ impl BinderDriver {
                             translated_buffer_address
                                 .write_to_prefix(&mut parent_buffer_payload[parent_offset..])
                                 .map_err(|_| errno!(EINVAL))?;
+                        } else {
+                            active_parent_chain.clear();
                         }
+                        active_parent_chain.push((offset_idx, 0));
 
                         // Update the scatter-gather buffer to account for the buffer we just wrote.
-                        // We pad the length of this buffer so that the next buffer starts at an aligned
-                        // offset.
-                        let padded_length =
-                            round_up_to_increment(length, std::mem::size_of::<binder_uintptr_t>())?;
                         sg_remaining_buffer = UserBuffer {
                             address: (sg_remaining_buffer.address + padded_length)?,
                             length: sg_remaining_buffer.length - padded_length,
@@ -2150,13 +2319,21 @@ impl BinderDriver {
                         }
                     }
                     SerializedBinderObject::FileArray { num_fds, parent, parent_offset } => {
-                        // The parent buffer must come earlier in the object list and already be
-                        // copied into the receiver's address space. Otherwise we would be fixing
-                        // up memory in the sender's address space, which is marked const in the
-                        // userspace runtime.
+                        // The parent buffer must come earlier in the object list, be on the
+                        // active ancestor chain, and have monotonically non-overlapping fixup
+                        // offsets (matching Linux's `binder_validate_fixup`).
                         if parent >= offset_idx {
                             return error!(EINVAL)?;
                         }
+                        let fixup_size = num_fds
+                            .checked_mul(std::mem::size_of::<u32>())
+                            .ok_or_else(|| errno!(EINVAL))?;
+                        validate_and_advance_parent_fixup(
+                            &mut active_parent_chain,
+                            parent,
+                            parent_offset,
+                            fixup_size,
+                        )?;
 
                         // Find the parent buffer payload. The file descriptor array is in here.
                         let parent_buffer_payload = find_parent_buffer(
@@ -2309,6 +2486,26 @@ impl BinderDriver {
     }
 }
 
+/// Validates that `parent` is on the active ancestor chain and that `parent_offset` is at or after
+/// `parent`'s `min_fixup_offset`, then pops any completed descendant subtrees and advances
+/// `parent`'s `min_fixup_offset` by `fixup_size` (matching Linux's `binder_validate_fixup`).
+fn validate_and_advance_parent_fixup(
+    active_parent_chain: &mut Vec<(usize, usize)>,
+    parent: usize,
+    parent_offset: usize,
+    fixup_size: usize,
+) -> Result<(), Errno> {
+    while active_parent_chain.last().is_some_and(|(idx, _)| *idx != parent) {
+        active_parent_chain.pop();
+    }
+    let (_, min_fixup_offset) = active_parent_chain.last_mut().ok_or_else(|| errno!(EINVAL))?;
+    if parent_offset < *min_fixup_offset {
+        return error!(EINVAL);
+    }
+    *min_fixup_offset = parent_offset.checked_add(fixup_size).ok_or_else(|| errno!(EINVAL))?;
+    Ok(())
+}
+
 /// Finds a buffer object's payload in the transaction. The buffer object describing the payload is
 /// deserialized from `transaction_data` at `buffer_object_offset`. The actual payload is located in
 /// `sg_buffer`. The buffer object must have already been validated and its payload copied to
@@ -2350,7 +2547,10 @@ fn find_parent_buffer<'a>(
         buffer_payload_start.checked_add(buffer_payload_length).ok_or_else(|| errno!(EINVAL))?;
 
     // Return a slice that represents the parent buffer.
-    Ok(&mut sg_buffer.as_mut_bytes()[buffer_payload_start..buffer_payload_end])
+    sg_buffer
+        .as_mut_bytes()
+        .get_mut(buffer_payload_start..buffer_payload_end)
+        .ok_or_else(|| errno!(EINVAL))
 }
 
 /// Represents a file descriptor during a binder transaction.

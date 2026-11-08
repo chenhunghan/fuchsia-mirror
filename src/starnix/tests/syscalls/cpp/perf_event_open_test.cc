@@ -116,7 +116,6 @@ TEST(PerfEventOpenTest, InvalidPidAndCpuFails) {
     int32_t file_descriptor =
         sys_perf_event_open(&example_attr, pid, cpu, example_group_fd, example_flags);
     EXPECT_THAT(file_descriptor, SyscallFailsWithErrno(EINVAL));
-    EXPECT_NE(syscall(__NR_close, file_descriptor), EXIT_FAILURE);
   }
 }
 

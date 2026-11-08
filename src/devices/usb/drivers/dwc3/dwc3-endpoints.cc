@@ -202,16 +202,30 @@ void Dwc3::EpServer::CancelAll(zx_status_t reason) {
     return;
   }
 
-  // Any request that hasn't been enqueued yet is immediately returned.
-  for (; !queued_reqs.empty(); queued_reqs.pop()) {
-    RequestComplete(reason, 0, std::move(queued_reqs.front()), /*send_now=*/false);
+  // For idle endpoints, or non-teardown cancellations (ZX_ERR_CANCELED / ZX_ERR_IO_REFUSED)
+  // when no endpoint-disable/reset teardown (ZX_ERR_IO_NOT_PRESENT) is already in flight,
+  // return queued_reqs immediately so callers can pipeline new QueueRequests before
+  // DEPEVT_CMD_CMPLT arrives. For endpoint-disable/reset teardown (ZX_ERR_IO_NOT_PRESENT)
+  // on active endpoints, defer queued_reqs to HandleEpTransferEndedEvent so active_reqs
+  // and queued_reqs complete in FIFO order in one batch.
+  const bool teardown_in_flight =
+      pending_cancel_reason.has_value() && *pending_cancel_reason == ZX_ERR_IO_NOT_PRESENT;
+  if (uep_->ep.transfer_state == Endpoint::TransferState::kIdle ||
+      (reason != ZX_ERR_IO_NOT_PRESENT && !teardown_in_flight)) {
+    for (; !queued_reqs.empty(); queued_reqs.pop()) {
+      RequestComplete(reason, 0, std::move(queued_reqs.front()), /*send_now=*/false);
+    }
+    SendCompletions();
   }
-  SendCompletions();
 
   switch (uep_->ep.transfer_state) {
     case Endpoint::TransferState::kIdle:
+      return;
     case Endpoint::TransferState::kCanceling:
     case Endpoint::TransferState::kPendingCancel:
+      if (reason == ZX_ERR_IO_NOT_PRESENT) {
+        pending_cancel_reason = reason;
+      }
       return;
     case Endpoint::TransferState::kActiveOngoing:
     case Endpoint::TransferState::kActiveSingle:
@@ -530,7 +544,6 @@ void Dwc3::UserEpCompleteTransfers(UserEndpoint& uep) {
     return;
   }
 
-  // Complete all finished TRBs.
   while (!uep.server->active_reqs.empty()) {
     zx::result trb_res = uep.fifo.ReadOne();
     if (trb_res.is_error()) {
@@ -577,6 +590,18 @@ void Dwc3::UserEpCompleteTransfers(UserEndpoint& uep) {
     uep.server->RequestComplete(ZX_OK, current_req.completed_bytes, std::move(req),
                                 /*send_now=*/false);
     uep.server->active_reqs.pop();
+
+    // Complete at most one request per transfer event. Every request ends in a
+    // TRB_IOC TRB, and an IN request that needs a ZLP has a second TRB_IOC on the
+    // trailing ZLP TRB, so each request raises at least one event. Stopping after
+    // one request prevents racing ahead into a subsequent multi-TRB Bulk OUT
+    // request whose first TRB has TRB_HWO=0 due to a short packet while the
+    // controller is still skipping the rest of its chained TRBs without clearing
+    // their TRB_HWO bit. An extra event from an IN ZLP may complete the next IN
+    // request early, which is harmless because IN requests never skip TRBs.
+    // TODO(https://fxbug.dev/579572059): Make IN+ZLP raise a single event and
+    // drop this caveat.
+    break;
   }
 }
 
@@ -604,9 +629,7 @@ void Dwc3::HandleEpTransferStartedEvent(uint8_t ep_num, uint32_t rsrc_id) {
     Endpoint& ep0_dir = (ep_num == kEp0Out) ? ep0_.out : ep0_.in;
     if (ep0_dir.stale_starts_to_end > 0) {
       ep0_dir.stale_starts_to_end--;
-      Endpoint stale_ep(ep0_dir.ep_num);
-      stale_ep.rsrc_id = rsrc_id;
-      CmdEpEndTransfer(stale_ep, /*cmd_ioc=*/false);
+      CmdEpEndTransfer(ep0_dir, rsrc_id, /*cmd_ioc=*/false);
       ep0_.shared_fifo.SkipTrbs(1);
       ZX_DEBUG_ASSERT(ep0_dir.queued_trbs > 0);
       ep0_dir.queued_trbs--;
@@ -628,9 +651,7 @@ void Dwc3::HandleEpTransferStartedEvent(uint8_t ep_num, uint32_t rsrc_id) {
       return;
     }
     if (ep0_dir.transfer_state != Endpoint::TransferState::kStartingSingle) {
-      Endpoint stale_ep(ep0_dir.ep_num);
-      stale_ep.rsrc_id = rsrc_id;
-      CmdEpEndTransfer(stale_ep, /*cmd_ioc=*/false);
+      CmdEpEndTransfer(ep0_dir, rsrc_id, /*cmd_ioc=*/false);
       return;
     }
     ep0_dir.rsrc_id = rsrc_id;
@@ -642,9 +663,7 @@ void Dwc3::HandleEpTransferStartedEvent(uint8_t ep_num, uint32_t rsrc_id) {
   ZX_ASSERT(uep != nullptr);
   if (uep->ep.stale_starts_to_end > 0) {
     uep->ep.stale_starts_to_end--;
-    Endpoint stale_ep(uep->ep.ep_num);
-    stale_ep.rsrc_id = rsrc_id;
-    CmdEpEndTransfer(stale_ep, /*cmd_ioc=*/false);
+    CmdEpEndTransfer(uep->ep, rsrc_id, /*cmd_ioc=*/false);
     if (uep->ep.stale_starts_to_end == 0 && !uep->ep.enabled) {
       EpEnable(uep->ep, false);
     }
@@ -722,6 +741,13 @@ void Dwc3::HandleEpTransferEndedEvent(uint8_t ep_num) {
       pending_trbs += request_state.total_trbs - request_state.completed_trbs;
       uep->server->RequestComplete(reason, 0, std::move(request_state.request), /*send_now=*/false);
       uep->server->active_reqs.pop();
+    }
+    if (reason == ZX_ERR_IO_NOT_PRESENT) {
+      while (!uep->server->queued_reqs.empty()) {
+        uep->server->RequestComplete(reason, 0, std::move(uep->server->queued_reqs.front()),
+                                     /*send_now=*/false);
+        uep->server->queued_reqs.pop();
+      }
     }
     uep->server->SendCompletions();
     size_t active_count = uep->fifo.GetActiveCount();

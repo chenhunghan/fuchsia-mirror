@@ -20,6 +20,7 @@ use crate::kernel::mp::{
     MpIpi, SMP_MAX_CPUS, mbx_generic_irq, mbx_interrupt_irq, mbx_reschedule_irq,
 };
 use crate::kernel::types::{BOOT_CPU_ID, PAddr, cpu_mask_t, cpu_num_t, cpu_num_to_mask};
+use crate::ksync_kernel::TrackedMutex;
 use crate::pdev_interrupt::{
     InterruptControllerOps, InterruptHandler, InterruptPolarity, InterruptTriggerMode,
     InterruptVector, MsiBlock, pdev_invoke_int_if_present, register_interrupt_controller,
@@ -106,7 +107,7 @@ static ITS_CPU0_RDBASE: AtomicU64 = AtomicU64::new(0);
 static SAVED_SGI_PPI_ENABLES: [AtomicU32; SMP_MAX_CPUS] =
     [const { AtomicU32::new(0) }; SMP_MAX_CPUS];
 
-ksync::declare_singleton_monitored_spinlock!(
+crate::ksync_kernel::declare_singleton_monitored_spinlock!(
     /// Serializes the ITS command queue and LPI configuration table updates.
     GicItsLock
 );
@@ -121,7 +122,7 @@ struct ItsState {
 static ITS_STATE: KCell<ItsState, GicItsLock> =
     KCell::new(ItsState { cmdq_cwriter: 0, lpi_mapped: [false; MAX_LPIS as usize] });
 
-ksync::declare_singleton_spinlock!(
+crate::ksync_kernel::declare_singleton_spinlock!(
     /// Guards `LPI_HANDLERS`. The IRQ path holds it across the handler call, so replacing a
     /// handler waits for any call of it in flight, as the pdev table does.
     ///
@@ -140,7 +141,7 @@ static LPI_HANDLERS: KCell<[InterruptHandler; MAX_LPIS as usize], GicLpiHandlerL
 
 /// The LPI range allocator. Constructed in `rust_arm_gicv3_init_early`; `gic_init_its` sizes it
 /// with `init`.
-static LPI_ALLOC: LazyInit<Pow2RangeAllocator> = LazyInit::uninit();
+static LPI_ALLOC: LazyInit<Pow2RangeAllocator<TrackedMutex>> = LazyInit::uninit();
 
 /// Returns a bank covering the distributor registers, accessed 32 bits at a time.
 fn gicd_bank() -> MmioBank<u32, RwSafe> {
@@ -1283,7 +1284,7 @@ impl InterruptControllerOps for Gicv3 {
     }
 
     fn init_percpu(&self) {
-        crate::kernel::mp::set_curr_cpu_online(true);
+        crate::kernel::mp::set_curr_cpu_online();
         let ipi_base = IPI_BASE.load(Ordering::Relaxed);
         let _ = self.unmask(InterruptVector(MpIpi::Generic as u32 + ipi_base));
         let _ = self.unmask(InterruptVector(MpIpi::Reschedule as u32 + ipi_base));
@@ -1333,7 +1334,7 @@ impl InterruptControllerOps for Gicv3 {
             if idx < MAX_LPIS {
                 ksync::lock!(
                     let guard =
-                        GicLpiHandlerLock::lock_policy::<ksync::NoIrqSavePolicy>()
+                        GicLpiHandlerLock::lock_policy::<crate::ksync_kernel::NoIrqSavePolicy>()
                 );
                 // SAFETY: `guard` holds `GicLpiHandlerLock`, which guards `LPI_HANDLERS`.
                 let handler = unsafe { LPI_HANDLERS.get(guard.token()) }[idx as usize];
@@ -1402,9 +1403,10 @@ impl InterruptControllerOps for Gicv3 {
         //
         // * Nothing depends on this CPU handling such an interrupt.  It is already offline (see
         //   mp_set_curr_cpu_online(false) in mp_unplug_current_cpu) and inactive, so mp_reschedule
-        //   no longer targets it, its unpinned threads have been migrated, and mp_sync_exec stops
-        //   waiting for (and dequeues its tasks from) CPUs that go offline.  IPIs may still be sent
-        //   to an offline CPU (e.g. by mp_interrupt), but they have no work to do there.
+        //   no longer targets it, its unpinned threads have been migrated, and any mp_sync_exec
+        //   tasks still queued for it were drained when it was marked offline (and no new ones are
+        //   queued for offline CPUs).  IPIs may still be sent to an offline CPU (e.g. by
+        //   mp_interrupt or a late mp_sync_exec IPI), but they have no work to do there.
         //
         // * An offline CPU is brought back online by PSCI CPU_ON, not by an interrupt.  When it
         //   comes back online, init_percpu_early masks and clears all SGIs and PPIs anyway (as it
@@ -1627,11 +1629,13 @@ unsafe extern "C" {
 }
 
 extern "C" fn sgi_generic_handler(_: *mut c_void) {
-    mbx_generic_irq();
+    // SAFETY: SGI handlers execute in hard-IRQ context with interrupts and preemption disabled.
+    unsafe { mbx_generic_irq() };
 }
 
 extern "C" fn sgi_reschedule_handler(_: *mut c_void) {
-    mbx_reschedule_irq();
+    // SAFETY: SGI handlers execute in hard-IRQ context with interrupts and preemption disabled.
+    unsafe { mbx_reschedule_irq() };
 }
 
 extern "C" fn sgi_interrupt_handler(_: *mut c_void) {
@@ -1816,7 +1820,7 @@ mod tests {
             // Send a reschedule IPI to ourselves.  Interrupts are disabled, so it remains pending.
             expect_ok!(GICV3_DRIVER.send_ipi(cpu_num_to_mask(cpu), MpIpi::Reschedule));
             let pending_before = (0..MAX_POLLS).any(|_| {
-                core::hint::spin_loop();
+                libarch::r#yield();
                 is_sgi_ppi_pending(cpu, vector)
             });
             assert_true!(pending_before, "self IPI did not become pending");
@@ -1842,7 +1846,7 @@ mod tests {
 
         // Now that interrupts are enabled again, the preserved IPI should be taken (harmlessly).
         let taken = (0..MAX_POLLS).any(|_| {
-            core::hint::spin_loop();
+            libarch::r#yield();
             !is_sgi_ppi_pending(cpu, vector)
         });
         expect_true!(taken);

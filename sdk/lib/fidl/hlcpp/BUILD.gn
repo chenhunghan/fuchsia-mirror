@@ -37,13 +37,11 @@ config("config") {
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
 hlcpp_bindings_libraries_visibility = [
-  "//build/sdk:*",
   "//examples/components/routing/fidl:*",
   "//examples/components/services/fidl:*",
   "//examples/diagnostics/inspect/codelab/fidl:*",
   "//examples/fidl/fuchsia.examples:*",
   "//examples/intl/wisdom/fidl:*",
-  "//sdk:*",
   "//sdk/ctf/tests/examples/fidl/fuchsia.examples/testing/fidl:*",
   "//sdk/ctf/tests/fidl/fuchsia.element/testing/fidl:*",
   "//sdk/ctf/tests/fidl/fuchsia.settings/testing/fidl:*",
@@ -80,7 +78,6 @@ hlcpp_bindings_libraries_visibility = [
   "//src/lib/intl/examples:*",
   "//src/lib/intl/intl_property_provider_impl:*",
   "//src/lib/intl/lookup/rust:*",
-  "//src/lib/ui/input-synthesis:*",
   "//src/power/fidl/testing:*",
   "//src/sys/component_manager/tests/structured_config/fidl:*",
   "//src/sys/fuzzing/fidl:*",
@@ -181,7 +178,6 @@ if (is_fuchsia) {
     stable = true
     visibility = [
       ":*",
-      "//build/sdk:*",
       "//src/tests/fidl/dynsuite/client_suite/*",
     ]
     public_deps = [
@@ -192,6 +188,7 @@ if (is_fuchsia) {
     ]
   }
 }
+
 sdk_source_set("hlcpp_base") {
   sources = [
     "clone.cc",

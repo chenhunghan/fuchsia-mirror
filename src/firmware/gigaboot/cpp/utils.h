@@ -19,6 +19,7 @@
 #include <efi/protocol/disk-io.h>
 #include <efi/protocol/file.h>
 #include <efi/protocol/graphics-output.h>
+#include <efi/protocol/loaded-image.h>
 #include <efi/protocol/managed-network.h>
 #include <efi/protocol/serial-io.h>
 #include <efi/protocol/simple-text-output.h>
@@ -26,8 +27,12 @@
 #include <efi/system-table.h>
 #include <efi/types.h>
 #include <fbl/vector.h>
-#include <phys/efi/main.h>
-#include <phys/efi/protocol.h>
+
+#include "main.h"
+#include "protocol.h"
+
+template <>
+inline constexpr const efi_guid& kEfiProtocolGuid<efi_loaded_image_protocol> = LoadedImageProtocol;
 
 template <>
 inline constexpr const efi_guid& kEfiProtocolGuid<efi_device_path_protocol> = DevicePathProtocol;

@@ -12,7 +12,9 @@ if (is_host) {
       ":build_timeout",
       ":properties_lib",
       ":pstree_lib",
+      ":python_subprocess_lib",
       ":signal_utils_lib",
+      ":top_build_wrap_lib",
       "//build/auth:gcloud",
       "//build/auth:gcloud_creds",
       "//build/bazel/scripts:bazel_invocation",
@@ -24,6 +26,10 @@ if (is_host) {
       "//build/resultstore:rs_profile",
     ]
     data_deps = [ "//build/auth:select_auth_method" ]
+  }
+
+  python_library("python_subprocess_lib") {
+    sources = [ "python_subprocess.py" ]
   }
 
   python_library("managed_process_lib") {
@@ -63,6 +69,14 @@ if (is_host) {
     ]
   }
 
+  python_library("top_build_wrap_lib") {
+    sources = [ "top_build_wrap.py" ]
+    library_deps = [
+      ":python_subprocess_lib",
+      "//build/tui:build_tui_wrap",
+    ]
+  }
+
   python_library("ninjatrace2json_lib") {
     sources = [ "ninjatrace2json.py" ]
   }
@@ -89,6 +103,11 @@ if (is_host) {
   python_build_time_tests("properties_test") {
     tests = [ "properties_test.py" ]
     deps = [ ":properties_lib" ]
+  }
+
+  python_build_time_tests("python_subprocess_test") {
+    tests = [ "python_subprocess_test.py" ]
+    deps = [ ":python_subprocess_lib" ]
   }
 
   python_build_time_tests("service_profile_test") {
@@ -133,6 +152,11 @@ if (is_host) {
     ]
   }
 
+  python_build_time_tests("top_build_wrap_test") {
+    tests = [ "top_build_wrap_test.py" ]
+    deps = [ ":top_build_wrap_lib" ]
+  }
+
   python_build_time_tests("ninjatrace2json_test") {
     tests = [ "ninjatrace2json_test.py" ]
     deps = [ ":ninjatrace2json_lib" ]
@@ -149,7 +173,9 @@ group("tests") {
     ":ninjatrace2json_test($host_toolchain)",
     ":properties_test($host_toolchain)",
     ":pstree_test($host_toolchain)",
+    ":python_subprocess_test($host_toolchain)",
     ":service_profile_test($host_toolchain)",
     ":signal_utils_test($host_toolchain)",
+    ":top_build_wrap_test($host_toolchain)",
   ]
 }

@@ -6,8 +6,6 @@
 
 use async_trait::async_trait;
 use fidl_fuchsia_images2 as images2;
-use fidl_fuchsia_media::*;
-use fuchsia_image_format::images2_image_format_from_sysmem_image_format;
 use hex::encode;
 use mundane::hash::{Digest, Hasher, Sha256};
 use std::convert::*;
@@ -15,10 +13,14 @@ use std::fmt;
 use stream_processor_test::{ExpectedDigest, FatalError, Output, OutputPacket, OutputValidator};
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum Error {
     DataTooSmallToBeFrame { expected_size: usize, actual_size: usize },
     FormatDetailsNotUncompressedVideo,
+    MissingImageFormatField(&'static str),
+    InconsistentFormatDimensions,
+    FormatHasNonZeroDisplayOrigin,
+    FrameSizeOverflow,
     UnsupportedPixelFormat(images2::PixelFormat),
     FormatHasNoPlane { plane_requested: usize, planes_in_format: usize },
 }
@@ -31,19 +33,54 @@ impl fmt::Display for Error {
 
 struct Frame<'a> {
     data: &'a [u8],
-    format: images2::ImageFormat,
+    format: &'a images2::ImageFormat,
+}
+
+fn display_dimensions(format: &images2::ImageFormat) -> Result<(u32, u32), Error> {
+    let size = format.size.as_ref().ok_or(Error::MissingImageFormatField("size"))?;
+    if let Some(rect) = &format.display_rect {
+        if rect.x != 0 || rect.y != 0 {
+            return Err(Error::FormatHasNonZeroDisplayOrigin);
+        }
+        Ok((rect.width, rect.height))
+    } else if let Some(valid) = &format.valid_size {
+        Ok((valid.width, valid.height))
+    } else {
+        Ok((size.width, size.height))
+    }
 }
 
 trait Subsample420 {
     const CHROMA_SUBSAMPLE_RATIO: usize = 2;
 
-    fn frame_size(format: &images2::ImageFormat) -> usize {
+    fn frame_size(format: &images2::ImageFormat) -> Result<usize, Error> {
         // For 4:2:0 YUV, the UV data is 1/2 the size of the Y data,
         // so the size of the frame is 3/2 the size of the Y plane.
-        *format.bytes_per_row.as_ref().unwrap() as usize
-            * format.size.as_ref().unwrap().height as usize
-            * 3
-            / 2
+        let bytes_per_row =
+            *format.bytes_per_row.as_ref().ok_or(Error::MissingImageFormatField("bytes_per_row"))?
+                as usize;
+        let size = format.size.as_ref().ok_or(Error::MissingImageFormatField("size"))?;
+        let coded_width = size.width as usize;
+        let coded_height = size.height as usize;
+        let (display_width, display_height) = display_dimensions(format)?;
+        let display_width = display_width as usize;
+        let display_height = display_height as usize;
+        if bytes_per_row < Self::CHROMA_SUBSAMPLE_RATIO
+            || coded_width == 0
+            || coded_height == 0
+            || coded_width > bytes_per_row
+            || display_width == 0
+            || display_height == 0
+            || display_width > coded_width
+            || display_height > coded_height
+        {
+            return Err(Error::InconsistentFormatDimensions);
+        }
+        bytes_per_row
+            .checked_mul(coded_height)
+            .and_then(|y| y.checked_mul(3))
+            .map(|n| n / 2)
+            .ok_or(Error::FrameSizeOverflow)
     }
 }
 
@@ -54,22 +91,21 @@ struct Yv12Frame<'a> {
 impl<'a> Subsample420 for Yv12Frame<'a> {}
 
 impl<'a> Yv12Frame<'a> {
-    /// Returns an iterator over the display data in Yv12 format.
-    fn yv12_iter(&self) -> impl Iterator<Item = u8> + 'a {
+    /// Updates `hasher` with the display data in canonical planar YV12 order (Y, V, U).
+    fn hash_yv12(&self, hasher: &mut Sha256) {
         let luminance_plane_stride = *self.frame.format.bytes_per_row.as_ref().unwrap() as usize;
-        let luminance_plane_display_height =
-            self.frame.format.display_rect.as_ref().unwrap().height as usize;
-        let luminance_plane_display_width =
-            self.frame.format.display_rect.as_ref().unwrap().width as usize;
-        let luminance = self
-            .frame
-            .data
-            .chunks(luminance_plane_stride)
-            .take(luminance_plane_display_height)
-            .flat_map(move |row| row.iter().take(luminance_plane_display_width));
+        let (display_width, display_height) =
+            display_dimensions(self.frame.format).expect("validated by TryFrom");
+        let luminance_plane_display_width = display_width as usize;
+        let luminance_plane_display_height = display_height as usize;
+        for row in
+            self.frame.data.chunks(luminance_plane_stride).take(luminance_plane_display_height)
+        {
+            hasher.update(&row[..luminance_plane_display_width]);
+        }
 
-        let luminance_plane_coded_size =
-            luminance_plane_stride * self.frame.format.size.as_ref().unwrap().height as usize;
+        let coded_height = self.frame.format.size.as_ref().unwrap().height as usize;
+        let luminance_plane_coded_size = luminance_plane_stride * coded_height;
         let chroma_plane_display_height =
             luminance_plane_display_height / Self::CHROMA_SUBSAMPLE_RATIO;
         let chroma_plane_display_width =
@@ -79,27 +115,21 @@ impl<'a> Yv12Frame<'a> {
         let chroma_rows = self.frame.data[luminance_plane_coded_size..]
             .chunks(luminance_plane_stride / Self::CHROMA_SUBSAMPLE_RATIO);
 
-        let chroma_v = chroma_rows
-            .clone()
-            .take(chroma_plane_display_height)
-            .flat_map(move |row| row.iter().take(chroma_plane_display_width));
+        for row in chroma_rows.clone().take(chroma_plane_display_height) {
+            hasher.update(&row[..chroma_plane_display_width]);
+        }
 
-        let chroma_plane_coded_height =
-            self.frame.format.size.as_ref().unwrap().height as usize / Self::CHROMA_SUBSAMPLE_RATIO;
-        let chroma_u = chroma_rows
-            .clone()
-            .skip(chroma_plane_coded_height)
-            .take(chroma_plane_display_height)
-            .flat_map(move |row| row.iter().take(chroma_plane_display_width));
-
-        luminance.chain(chroma_v).chain(chroma_u).cloned()
+        let chroma_plane_coded_height = coded_height / Self::CHROMA_SUBSAMPLE_RATIO;
+        for row in chroma_rows.skip(chroma_plane_coded_height).take(chroma_plane_display_height) {
+            hasher.update(&row[..chroma_plane_display_width]);
+        }
     }
 }
 
 impl<'a> TryFrom<Frame<'a>> for Yv12Frame<'a> {
     type Error = Error;
     fn try_from(frame: Frame<'a>) -> Result<Self, Self::Error> {
-        let expected_size = Self::frame_size(&frame.format);
+        let expected_size = Self::frame_size(frame.format)?;
         if frame.data.len() < expected_size {
             return Err(Error::DataTooSmallToBeFrame {
                 actual_size: frame.data.len(),
@@ -118,32 +148,42 @@ struct Nv12Frame<'a> {
 impl<'a> Subsample420 for Nv12Frame<'a> {}
 
 impl<'a> Nv12Frame<'a> {
-    /// Returns an iterator over the display data in Yv12 format.
-    fn yv12_iter(&self) -> impl Iterator<Item = u8> + 'a {
-        let rows =
-            self.frame.data.chunks(*self.frame.format.bytes_per_row.as_ref().unwrap() as usize);
-        let luminance_row_count = self.frame.format.display_rect.as_ref().unwrap().height as usize;
+    /// Updates `hasher` with the display data in canonical planar YV12 order (Y, V, U).
+    fn hash_yv12(&self, hasher: &mut Sha256) {
+        let stride = *self.frame.format.bytes_per_row.as_ref().unwrap() as usize;
+        let (display_width, display_height) =
+            display_dimensions(self.frame.format).expect("validated by TryFrom");
+        let row_length = display_width as usize;
+        let luminance_row_count = display_height as usize;
         let chroma_row_count = luminance_row_count / Self::CHROMA_SUBSAMPLE_RATIO;
-        let row_length = self.frame.format.display_rect.as_ref().unwrap().width as usize;
+        let coded_height = self.frame.format.size.as_ref().unwrap().height as usize;
 
-        let luminance =
-            rows.clone().take(luminance_row_count).flat_map(move |row| row.iter().take(row_length));
-        let chroma_rows = rows
-            .skip(self.frame.format.size.as_ref().unwrap().height as usize)
-            .take(chroma_row_count);
-        let chroma_u =
-            chroma_rows.clone().flat_map(move |row| row.iter().take(row_length).step_by(2));
-        let chroma_v =
-            chroma_rows.flat_map(move |row| row.iter().take(row_length).skip(1).step_by(2));
+        for row in self.frame.data.chunks(stride).take(luminance_row_count) {
+            hasher.update(&row[..row_length]);
+        }
 
-        luminance.chain(chroma_v).chain(chroma_u).cloned()
+        let chroma_rows =
+            self.frame.data[stride * coded_height..].chunks(stride).take(chroma_row_count);
+        let mut chroma_scratch = Vec::with_capacity(row_length.div_ceil(2));
+
+        // V plane first, then U plane, matching Yv12Frame canonical digest order.
+        for row in chroma_rows.clone() {
+            chroma_scratch.clear();
+            chroma_scratch.extend(row[..row_length].iter().skip(1).step_by(2).copied());
+            hasher.update(&chroma_scratch);
+        }
+        for row in chroma_rows {
+            chroma_scratch.clear();
+            chroma_scratch.extend(row[..row_length].iter().step_by(2).copied());
+            hasher.update(&chroma_scratch);
+        }
     }
 }
 
 impl<'a> TryFrom<Frame<'a>> for Nv12Frame<'a> {
     type Error = Error;
     fn try_from(frame: Frame<'a>) -> Result<Self, Self::Error> {
-        let expected_size = Self::frame_size(&frame.format);
+        let expected_size = Self::frame_size(frame.format)?;
         if frame.data.len() < expected_size {
             return Err(Error::DataTooSmallToBeFrame {
                 actual_size: frame.data.len(),
@@ -155,32 +195,28 @@ impl<'a> TryFrom<Frame<'a>> for Nv12Frame<'a> {
     }
 }
 
-fn packet_display_data<'a>(
-    src: &'a OutputPacket,
-) -> Result<Box<dyn Iterator<Item = u8> + 'a>, Error> {
-    let sysmem_format = src
+/// Updates `hasher` with `src`'s display data in canonical planar YV12 order (Y, V, U) without
+/// finishing it. On `Err`, `hasher` is unchanged.
+fn hash_packet_display_data(src: &OutputPacket, hasher: &mut Sha256) -> Result<(), Error> {
+    let format = src
         .format
         .format_details
-        .domain
+        .image_format
         .as_ref()
-        .and_then(|domain| match domain {
-            DomainFormat::Video(VideoFormat::Uncompressed(uncompressed_format)) => {
-                Some(uncompressed_format.image_format)
-            }
-            _ => None,
-        })
         .ok_or(Error::FormatDetailsNotUncompressedVideo)?;
-    let format = images2_image_format_from_sysmem_image_format(&sysmem_format).unwrap();
 
-    Ok(match format.pixel_format.as_ref().unwrap() {
+    let pixel_format =
+        *format.pixel_format.as_ref().ok_or(Error::MissingImageFormatField("pixel_format"))?;
+    match pixel_format {
         images2::PixelFormat::Yv12 => {
-            Box::new(Yv12Frame::try_from(Frame { data: src.data.as_slice(), format })?.yv12_iter())
+            Yv12Frame::try_from(Frame { data: src.data.as_slice(), format })?.hash_yv12(hasher);
         }
         images2::PixelFormat::Nv12 => {
-            Box::new(Nv12Frame::try_from(Frame { data: src.data.as_slice(), format })?.yv12_iter())
+            Nv12Frame::try_from(Frame { data: src.data.as_slice(), format })?.hash_yv12(hasher);
         }
-        _ => Err(Error::UnsupportedPixelFormat(*format.pixel_format.as_ref().unwrap()))?,
-    })
+        _ => return Err(Error::UnsupportedPixelFormat(pixel_format)),
+    }
+    Ok(())
 }
 
 pub struct VideoFrameHasher {
@@ -205,9 +241,9 @@ impl OutputValidator for VideoFrameHasher {
                 .count();
             if per_frame_bytes.len() != packet_count {
                 return Err(FatalError(format!(
-                    "per_frame_bytes.len() != output.len() - {} vs {}",
+                    "per_frame_bytes.len() != packet_count - {} vs {}",
                     per_frame_bytes.len(),
-                    output.len()
+                    packet_count
                 ))
                 .into());
             }
@@ -217,7 +253,7 @@ impl OutputValidator for VideoFrameHasher {
             .iter()
             .map(|output| {
                 if let Output::Packet(packet) = output {
-                    packet_display_data(packet)?.for_each(|b| hasher.update(&[b]));
+                    hash_packet_display_data(packet, &mut hasher)?;
                     let tmp_hasher = hasher.clone();
                     let frame_digest = tmp_hasher.finish().bytes();
                     if let Some(per_frame_bytes) = &self.expected_digest.per_frame_bytes {
@@ -257,7 +293,7 @@ mod test {
     use super::*;
     use fidl_fuchsia_images2::{self as fimages2, *};
     use fidl_fuchsia_math::{RectU, SizeU};
-    use fuchsia_image_format::sysmem1_image_format_from_images2_image_format;
+    use fidl_fuchsia_media::FormatDetails;
     use fuchsia_stream_processors::{ValidPacket, ValidPacketHeader};
     use rand::prelude::*;
     use std::rc::Rc;
@@ -279,69 +315,60 @@ mod test {
         }
     }
 
-    impl Into<OutputPacket> for TestSpec {
-        fn into(self) -> OutputPacket {
-            let mut format_details = FormatDetails::default();
-            format_details.domain = Some(DomainFormat::Video(VideoFormat::Uncompressed(
-                new_video_uncompressed_format(ImageFormat {
-                    pixel_format: Some(self.pixel_format),
-                    size: Some(SizeU {
-                        width: self.coded_width.try_into().unwrap(),
-                        height: self.coded_height().try_into().unwrap(),
-                    }),
-                    bytes_per_row: Some(self.bytes_per_row.try_into().unwrap()),
-                    display_rect: Some(RectU {
-                        x: 0,
-                        y: 0,
-                        width: self.display_width.try_into().unwrap(),
-                        height: self.display_height.try_into().unwrap(),
-                    }),
-                    color_space: Some(fimages2::ColorSpace::Rec709),
-                    ..Default::default()
-                }),
-            )));
-            OutputPacket {
-                data: vec![0; (self.bytes_per_row * self.coded_height() * 3 / 2) as usize],
-                format: Rc::new(ValidStreamOutputFormat {
-                    stream_lifetime_ordinal: 0,
-                    format_details,
-                }),
-                packet: ValidPacket {
-                    header: ValidPacketHeader { buffer_lifetime_ordinal: 0, packet_index: 0 },
-                    buffer_index: 0,
-                    stream_lifetime_ordinal: 0,
-                    start_offset: 0,
-                    valid_length_bytes: 0,
-                    timestamp_ish: None,
-                    start_access_unit: false,
-                    known_end_access_unit: false,
-                },
-            }
+    fn make_output_packet(
+        pixel_format: PixelFormat,
+        coded_width: usize,
+        coded_height: usize,
+        display_width: usize,
+        display_height: usize,
+        bytes_per_row: usize,
+        data: Vec<u8>,
+    ) -> OutputPacket {
+        let mut format_details = FormatDetails::default();
+        format_details.image_format = Some(ImageFormat {
+            pixel_format: Some(pixel_format),
+            size: Some(SizeU {
+                width: coded_width.try_into().unwrap(),
+                height: coded_height.try_into().unwrap(),
+            }),
+            bytes_per_row: Some(bytes_per_row.try_into().unwrap()),
+            display_rect: Some(RectU {
+                x: 0,
+                y: 0,
+                width: display_width.try_into().unwrap(),
+                height: display_height.try_into().unwrap(),
+            }),
+            color_space: Some(fimages2::ColorSpace::Rec709),
+            ..Default::default()
+        });
+        OutputPacket {
+            data,
+            format: Rc::new(ValidStreamOutputFormat { stream_lifetime_ordinal: 0, format_details }),
+            packet: ValidPacket {
+                header: ValidPacketHeader { buffer_lifetime_ordinal: 0, packet_index: 0 },
+                buffer_index: 0,
+                stream_lifetime_ordinal: 0,
+                start_offset: 0,
+                valid_length_bytes: 0,
+                timestamp_ish: None,
+                start_access_unit: false,
+                known_end_access_unit: false,
+            },
         }
     }
 
-    fn new_video_uncompressed_format(image_format: ImageFormat) -> VideoUncompressedFormat {
-        VideoUncompressedFormat {
-            image_format: sysmem1_image_format_from_images2_image_format(&image_format).unwrap(),
-            fourcc: 0,
-            primary_width_pixels: 0,
-            primary_height_pixels: 0,
-            secondary_width_pixels: 0,
-            secondary_height_pixels: 0,
-            planar: false,
-            swizzled: false,
-            primary_line_stride_bytes: 0,
-            secondary_line_stride_bytes: 0,
-            primary_start_offset: 0,
-            secondary_start_offset: 0,
-            tertiary_start_offset: 0,
-            primary_pixel_stride: 0,
-            secondary_pixel_stride: 0,
-            primary_display_width_pixels: 0,
-            primary_display_height_pixels: 0,
-            has_pixel_aspect_ratio: false,
-            pixel_aspect_ratio_width: 0,
-            pixel_aspect_ratio_height: 0,
+    impl Into<OutputPacket> for TestSpec {
+        fn into(self) -> OutputPacket {
+            let coded_height = self.coded_height();
+            make_output_packet(
+                self.pixel_format,
+                self.coded_width,
+                coded_height,
+                self.display_width,
+                self.display_height,
+                self.bytes_per_row,
+                vec![0; self.bytes_per_row * coded_height * 3 / 2],
+            )
         }
     }
 
@@ -467,14 +494,104 @@ mod test {
                     .for_each(&mut assign_index)
             }
 
-            let from_yv12 = packet_display_data(&yv12_packet)?;
-            let from_nv12 = packet_display_data(&nv12_packet)?;
+            let mut yv12_hasher = Sha256::default();
+            let mut nv12_hasher = Sha256::default();
+            hash_packet_display_data(&yv12_packet, &mut yv12_hasher)?;
+            hash_packet_display_data(&nv12_packet, &mut nv12_hasher)?;
 
-            let yv12_hash = Sha256::hash(&from_yv12.collect::<Vec<u8>>().as_slice());
-            let nv12_hash = Sha256::hash(&from_nv12.collect::<Vec<u8>>().as_slice());
-
-            assert_eq!(yv12_hash, nv12_hash);
+            assert_eq!(yv12_hasher.finish(), nv12_hasher.finish());
         }
+
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    fn nv12_and_yv12_hash_expected_cropped_canonical_yv12_bytes() -> Result<(), Error> {
+        const DISPLAY_WIDTH: usize = 4;
+        const DISPLAY_HEIGHT: usize = 4;
+        const CODED_WIDTH: usize = 6;
+        const CODED_HEIGHT: usize = 6;
+        const BYTES_PER_ROW: usize = 8;
+
+        #[rustfmt::skip]
+        let nv12_data: Vec<u8> = vec![
+            // Luminance rows 0..4 (4 visible bytes, 2 coded-width pad bytes, 2 stride pad bytes).
+            0x01, 0x02, 0x03, 0x04, 0xa0, 0xa1, 0xa2, 0xa3,
+            0x05, 0x06, 0x07, 0x08, 0xa4, 0xa5, 0xa6, 0xa7,
+            0x09, 0x0a, 0x0b, 0x0c, 0xa8, 0xa9, 0xaa, 0xab,
+            0x0d, 0x0e, 0x0f, 0x10, 0xac, 0xad, 0xae, 0xaf,
+            // Coded-height padding luminance rows 4..6 (cropped by display_height = 4).
+            0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7,
+            0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf,
+            // NV12 interleaved [U0, V0, U1, V1, pad..] chroma rows 0..2, plus coded-height pad row.
+            0x31, 0x21, 0x32, 0x22, 0xc0, 0xc1, 0xc2, 0xc3,
+            0x33, 0x23, 0x34, 0x24, 0xc4, 0xc5, 0xc6, 0xc7,
+            0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf,
+        ];
+
+        #[rustfmt::skip]
+        let yv12_data: Vec<u8> = vec![
+            // Luminance rows 0..4 (4 visible bytes, 2 coded-width pad bytes, 2 stride pad bytes).
+            0x01, 0x02, 0x03, 0x04, 0xd0, 0xd1, 0xd2, 0xd3,
+            0x05, 0x06, 0x07, 0x08, 0xd4, 0xd5, 0xd6, 0xd7,
+            0x09, 0x0a, 0x0b, 0x0c, 0xd8, 0xd9, 0xda, 0xdb,
+            0x0d, 0x0e, 0x0f, 0x10, 0xdc, 0xdd, 0xde, 0xdf,
+            // Coded-height padding luminance rows 4..6 (cropped by display_height = 4).
+            0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7,
+            0xe8, 0xe9, 0xea, 0xeb, 0xec, 0xed, 0xee, 0xef,
+            // YV12 planar V rows 0..2 (2 visible bytes, 2 pad bytes) plus coded-height pad row.
+            0x21, 0x22, 0xf0, 0xf1,
+            0x23, 0x24, 0xf2, 0xf3,
+            0xf4, 0xf5, 0xf6, 0xf7,
+            // YV12 planar U rows 0..2 (2 visible bytes, 2 pad bytes) plus coded-height pad row.
+            0x31, 0x32, 0xf8, 0xf9,
+            0x33, 0x34, 0xfa, 0xfb,
+            0xfc, 0xfd, 0xfe, 0xff,
+        ];
+
+        #[rustfmt::skip]
+        let expected_canonical_yv12: [u8; 24] = [
+            // Y (4x4)
+            0x01, 0x02, 0x03, 0x04,
+            0x05, 0x06, 0x07, 0x08,
+            0x09, 0x0a, 0x0b, 0x0c,
+            0x0d, 0x0e, 0x0f, 0x10,
+            // V (2x2)
+            0x21, 0x22,
+            0x23, 0x24,
+            // U (2x2)
+            0x31, 0x32,
+            0x33, 0x34,
+        ];
+
+        let nv12_packet = make_output_packet(
+            PixelFormat::Nv12,
+            CODED_WIDTH,
+            CODED_HEIGHT,
+            DISPLAY_WIDTH,
+            DISPLAY_HEIGHT,
+            BYTES_PER_ROW,
+            nv12_data,
+        );
+        let yv12_packet = make_output_packet(
+            PixelFormat::Yv12,
+            CODED_WIDTH,
+            CODED_HEIGHT,
+            DISPLAY_WIDTH,
+            DISPLAY_HEIGHT,
+            BYTES_PER_ROW,
+            yv12_data,
+        );
+
+        let expected_digest = Sha256::hash(&expected_canonical_yv12);
+
+        let mut nv12_hasher = Sha256::default();
+        hash_packet_display_data(&nv12_packet, &mut nv12_hasher)?;
+        assert_eq!(nv12_hasher.finish(), expected_digest);
+
+        let mut yv12_hasher = Sha256::default();
+        hash_packet_display_data(&yv12_packet, &mut yv12_hasher)?;
+        assert_eq!(yv12_hasher.finish(), expected_digest);
 
         Ok(())
     }
@@ -511,15 +628,326 @@ mod test {
             let idx = y * nv12_spec.bytes_per_row + x;
             nv12_packet.data[idx] = nv12_packet.data[idx].overflowing_add(1).0;
 
-            let from_yv12 = packet_display_data(&yv12_packet)?;
-            let from_nv12 = packet_display_data(&nv12_packet)?;
+            let mut yv12_hasher = Sha256::default();
+            let mut nv12_hasher = Sha256::default();
+            hash_packet_display_data(&yv12_packet, &mut yv12_hasher)?;
+            hash_packet_display_data(&nv12_packet, &mut nv12_hasher)?;
 
-            let yv12_hash = Sha256::hash(&from_yv12.collect::<Vec<u8>>().as_slice());
-            let nv12_hash = Sha256::hash(&from_nv12.collect::<Vec<u8>>().as_slice());
-
-            assert_ne!(yv12_hash, nv12_hash);
+            assert_ne!(yv12_hasher.finish(), nv12_hasher.finish());
         }
 
         Ok(())
+    }
+
+    #[fuchsia::test]
+    fn missing_size_returns_err_without_panic() {
+        let spec = specs(PixelFormat::Nv12).next().unwrap();
+        let mut packet: OutputPacket = spec.into();
+        {
+            let image_format = Rc::get_mut(&mut packet.format)
+                .unwrap()
+                .format_details
+                .image_format
+                .as_mut()
+                .unwrap();
+            image_format.size = None;
+            assert_eq!(
+                display_dimensions(image_format),
+                Err(Error::MissingImageFormatField("size"))
+            );
+        }
+        let mut err_hasher = Sha256::default();
+        assert_eq!(
+            hash_packet_display_data(&packet, &mut err_hasher),
+            Err(Error::MissingImageFormatField("size"))
+        );
+        assert_eq!(err_hasher.finish(), Sha256::default().finish());
+    }
+
+    #[fuchsia::test]
+    fn display_rect_none_falls_back_to_valid_size_then_coded_size() {
+        let mut rng = StdRng::seed_from_u64(46);
+        let spec = specs(PixelFormat::Nv12).next().unwrap();
+        let mut packet: OutputPacket = spec.into();
+        rng.fill(packet.data.as_mut_slice());
+
+        // Clearing `display_rect` (with `valid_size` unset) falls back to the coded-size display
+        // area.
+        {
+            let image_format = Rc::get_mut(&mut packet.format)
+                .unwrap()
+                .format_details
+                .image_format
+                .as_mut()
+                .unwrap();
+            image_format.display_rect = None;
+            image_format.valid_size = None;
+        }
+        let mut coded_fallback_hasher = Sha256::default();
+        hash_packet_display_data(&packet, &mut coded_fallback_hasher)
+            .expect("fallback to coded size should succeed");
+
+        let mut twin_coded_rect_packet: OutputPacket = spec.into();
+        twin_coded_rect_packet.data.copy_from_slice(&packet.data);
+        {
+            let image_format = Rc::get_mut(&mut twin_coded_rect_packet.format)
+                .unwrap()
+                .format_details
+                .image_format
+                .as_mut()
+                .unwrap();
+            image_format.display_rect = Some(RectU {
+                x: 0,
+                y: 0,
+                width: spec.coded_width.try_into().unwrap(),
+                height: spec.coded_height().try_into().unwrap(),
+            });
+        }
+        let mut twin_coded_rect_hasher = Sha256::default();
+        hash_packet_display_data(&twin_coded_rect_packet, &mut twin_coded_rect_hasher)
+            .expect("coded display_rect packet should succeed");
+        let coded_fallback_digest = coded_fallback_hasher.finish();
+        assert_eq!(coded_fallback_digest, twin_coded_rect_hasher.finish());
+
+        // `valid_size`-only (with `display_rect == None`) yields the exact same digest as a twin
+        // packet carrying the equivalent `display_rect` (and differs from the larger coded-size
+        // fallback digest).
+        let mut valid_size_packet: OutputPacket = spec.into();
+        valid_size_packet.data.copy_from_slice(&packet.data);
+        {
+            let image_format = Rc::get_mut(&mut valid_size_packet.format)
+                .unwrap()
+                .format_details
+                .image_format
+                .as_mut()
+                .unwrap();
+            image_format.display_rect = None;
+            image_format.valid_size = Some(SizeU {
+                width: spec.display_width.try_into().unwrap(),
+                height: spec.display_height.try_into().unwrap(),
+            });
+        }
+        let mut twin_display_rect_packet: OutputPacket = spec.into();
+        twin_display_rect_packet.data.copy_from_slice(&packet.data);
+
+        let mut valid_size_hasher = Sha256::default();
+        hash_packet_display_data(&valid_size_packet, &mut valid_size_hasher)
+            .expect("valid_size fallback should succeed");
+        let mut display_rect_hasher = Sha256::default();
+        hash_packet_display_data(&twin_display_rect_packet, &mut display_rect_hasher)
+            .expect("display_rect packet should succeed");
+        let valid_size_digest = valid_size_hasher.finish();
+        assert_eq!(valid_size_digest, display_rect_hasher.finish());
+        assert_ne!(valid_size_digest, coded_fallback_digest);
+    }
+
+    #[fuchsia::test]
+    fn format_rejection_cases_return_expected_errors() {
+        type Mutator = fn(&mut OutputPacket);
+        let empty_digest = Sha256::default().finish();
+
+        for pixel_format in [PixelFormat::Nv12, PixelFormat::Yv12] {
+            let spec = specs(pixel_format).next().unwrap();
+            let expected_size = spec.bytes_per_row * spec.coded_height() * 3 / 2;
+            let cases: &[(&str, Mutator, Error)] = &[
+                (
+                    "missing image_format",
+                    |p| {
+                        Rc::get_mut(&mut p.format).unwrap().format_details.image_format = None;
+                    },
+                    Error::FormatDetailsNotUncompressedVideo,
+                ),
+                (
+                    "bytes_per_row < 2",
+                    |p| {
+                        let fmt = Rc::get_mut(&mut p.format)
+                            .unwrap()
+                            .format_details
+                            .image_format
+                            .as_mut()
+                            .unwrap();
+                        fmt.bytes_per_row = Some(1);
+                        fmt.size = Some(SizeU { width: 1, height: 2 });
+                        fmt.display_rect = Some(RectU { x: 0, y: 0, width: 1, height: 2 });
+                    },
+                    Error::InconsistentFormatDimensions,
+                ),
+                (
+                    "zero coded width",
+                    |p| {
+                        let fmt = Rc::get_mut(&mut p.format)
+                            .unwrap()
+                            .format_details
+                            .image_format
+                            .as_mut()
+                            .unwrap();
+                        fmt.size.as_mut().unwrap().width = 0;
+                    },
+                    Error::InconsistentFormatDimensions,
+                ),
+                (
+                    "zero coded height",
+                    |p| {
+                        let fmt = Rc::get_mut(&mut p.format)
+                            .unwrap()
+                            .format_details
+                            .image_format
+                            .as_mut()
+                            .unwrap();
+                        fmt.size.as_mut().unwrap().height = 0;
+                    },
+                    Error::InconsistentFormatDimensions,
+                ),
+                (
+                    "coded_width > bytes_per_row",
+                    |p| {
+                        let fmt = Rc::get_mut(&mut p.format)
+                            .unwrap()
+                            .format_details
+                            .image_format
+                            .as_mut()
+                            .unwrap();
+                        fmt.size.as_mut().unwrap().width = fmt.bytes_per_row.unwrap() + 2;
+                    },
+                    Error::InconsistentFormatDimensions,
+                ),
+                (
+                    "zero display dimension",
+                    |p| {
+                        let fmt = Rc::get_mut(&mut p.format)
+                            .unwrap()
+                            .format_details
+                            .image_format
+                            .as_mut()
+                            .unwrap();
+                        fmt.display_rect.as_mut().unwrap().width = 0;
+                    },
+                    Error::InconsistentFormatDimensions,
+                ),
+                (
+                    "display larger than coded",
+                    |p| {
+                        let fmt = Rc::get_mut(&mut p.format)
+                            .unwrap()
+                            .format_details
+                            .image_format
+                            .as_mut()
+                            .unwrap();
+                        let coded_w = fmt.size.as_ref().unwrap().width;
+                        fmt.display_rect.as_mut().unwrap().width = coded_w + 2;
+                    },
+                    Error::InconsistentFormatDimensions,
+                ),
+                (
+                    "missing bytes_per_row",
+                    |p| {
+                        let fmt = Rc::get_mut(&mut p.format)
+                            .unwrap()
+                            .format_details
+                            .image_format
+                            .as_mut()
+                            .unwrap();
+                        fmt.bytes_per_row = None;
+                    },
+                    Error::MissingImageFormatField("bytes_per_row"),
+                ),
+                (
+                    "missing pixel_format",
+                    |p| {
+                        let fmt = Rc::get_mut(&mut p.format)
+                            .unwrap()
+                            .format_details
+                            .image_format
+                            .as_mut()
+                            .unwrap();
+                        fmt.pixel_format = None;
+                    },
+                    Error::MissingImageFormatField("pixel_format"),
+                ),
+                (
+                    "unsupported pixel_format",
+                    |p| {
+                        let fmt = Rc::get_mut(&mut p.format)
+                            .unwrap()
+                            .format_details
+                            .image_format
+                            .as_mut()
+                            .unwrap();
+                        fmt.pixel_format = Some(PixelFormat::R8G8B8A8);
+                    },
+                    Error::UnsupportedPixelFormat(PixelFormat::R8G8B8A8),
+                ),
+                (
+                    "truncated packet data",
+                    |p| {
+                        p.data.pop();
+                    },
+                    Error::DataTooSmallToBeFrame { expected_size, actual_size: expected_size - 1 },
+                ),
+            ];
+
+            for (name, mutate, expected_err) in cases {
+                let mut packet: OutputPacket = spec.into();
+                mutate(&mut packet);
+                let mut hasher = Sha256::default();
+                assert_eq!(
+                    hash_packet_display_data(&packet, &mut hasher).err().as_ref(),
+                    Some(expected_err),
+                    "{pixel_format:?} {name}"
+                );
+                assert_eq!(
+                    hasher.finish(),
+                    empty_digest,
+                    "{pixel_format:?} {name}: hasher must be unchanged on Err"
+                );
+            }
+        }
+    }
+
+    #[fuchsia::test]
+    fn non_zero_display_origin_returns_err() {
+        let spec = specs(PixelFormat::Nv12).next().unwrap();
+        let empty_digest = Sha256::default().finish();
+        for (x, y) in [(2, 0), (0, 2)] {
+            let mut packet: OutputPacket = spec.into();
+            let rect = Rc::get_mut(&mut packet.format)
+                .unwrap()
+                .format_details
+                .image_format
+                .as_mut()
+                .unwrap()
+                .display_rect
+                .as_mut()
+                .unwrap();
+            rect.x = x;
+            rect.y = y;
+            let mut hasher = Sha256::default();
+            assert_eq!(
+                hash_packet_display_data(&packet, &mut hasher),
+                Err(Error::FormatHasNonZeroDisplayOrigin)
+            );
+            assert_eq!(hasher.finish(), empty_digest);
+        }
+    }
+
+    #[fuchsia::test]
+    fn frame_size_overflow_returns_err() {
+        let spec = specs(PixelFormat::Yv12).next().unwrap();
+        let mut packet: OutputPacket = spec.into();
+        let mut hasher = Sha256::default();
+        packet.data.clear();
+        let image_format =
+            Rc::get_mut(&mut packet.format).unwrap().format_details.image_format.as_mut().unwrap();
+        image_format.size = Some(SizeU { width: u32::MAX, height: u32::MAX });
+        image_format.bytes_per_row = Some(u32::MAX);
+        image_format.display_rect = None;
+        image_format.valid_size = None;
+        // With `u32` inputs on a 64-bit `usize`, `bytes_per_row.checked_mul(coded_height)` fits in
+        // `usize` and only the subsequent `.checked_mul(3)` overflows. Check both `Yv12Frame` and
+        // `Nv12Frame` in case either overrides `Subsample420::frame_size` in the future.
+        assert_eq!(Yv12Frame::frame_size(image_format), Err(Error::FrameSizeOverflow));
+        assert_eq!(Nv12Frame::frame_size(image_format), Err(Error::FrameSizeOverflow));
+        assert_eq!(hash_packet_display_data(&packet, &mut hasher), Err(Error::FrameSizeOverflow));
+        assert_eq!(hasher.finish(), Sha256::default().finish());
     }
 }

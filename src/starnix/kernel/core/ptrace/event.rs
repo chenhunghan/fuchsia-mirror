@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 use bitflags::bitflags;
+use fuchsia_rcu::RcuDroppable;
 use starnix_uapi::{
     PTRACE_EVENT_CLONE, PTRACE_EVENT_EXEC, PTRACE_EVENT_EXIT, PTRACE_EVENT_FORK,
     PTRACE_EVENT_SECCOMP, PTRACE_EVENT_STOP, PTRACE_EVENT_VFORK, PTRACE_EVENT_VFORK_DONE,
@@ -29,7 +30,7 @@ bitflags! {
 }
 
 #[repr(u32)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, RcuDroppable)]
 pub enum PtraceEvent {
     #[default]
     None = 0,

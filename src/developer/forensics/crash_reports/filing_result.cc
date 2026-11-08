@@ -6,27 +6,27 @@
 
 namespace forensics::crash_reports {
 
-using fuchsia::feedback::FilingError;
-using fuchsia::feedback::FilingSuccess;
+using fuchsia_feedback::FilingError;
+using fuchsia_feedback::FilingSuccess;
 
 fpromise::result<FilingSuccess, FilingError> ToFidlFilingResult(const FilingResult result) {
   switch (result) {
     case FilingResult::kReportUploaded:
-      return fpromise::ok(FilingSuccess::REPORT_UPLOADED);
+      return fpromise::ok(FilingSuccess::kReportUploaded);
     case FilingResult::kReportOnDisk:
-      return fpromise::ok(FilingSuccess::REPORT_ON_DISK);
+      return fpromise::ok(FilingSuccess::kReportOnDisk);
     case FilingResult::kReportInMemory:
-      return fpromise::ok(FilingSuccess::REPORT_IN_MEMORY);
+      return fpromise::ok(FilingSuccess::kReportInMemory);
     case FilingResult::kReportNotFiledUserOptedOut:
-      return fpromise::ok(FilingSuccess::REPORT_NOT_FILED_USER_OPTED_OUT);
+      return fpromise::ok(FilingSuccess::kReportNotFiledUserOptedOut);
     case FilingResult::kInvalidArgsError:
-      return fpromise::error(FilingError::INVALID_ARGS_ERROR);
+      return fpromise::error(FilingError::kInvalidArgsError);
     case FilingResult::kServerError:
-      return fpromise::error(FilingError::SERVER_ERROR);
+      return fpromise::error(FilingError::kServerError);
     case FilingResult::kPersistenceError:
-      return fpromise::error(FilingError::PERSISTENCE_ERROR);
+      return fpromise::error(FilingError::kPersistenceError);
     case FilingResult::kQuotaReachedError:
-      return fpromise::error(FilingError::QUOTA_REACHED_ERROR);
+      return fpromise::error(FilingError::kQuotaReachedError);
   }
 }
 

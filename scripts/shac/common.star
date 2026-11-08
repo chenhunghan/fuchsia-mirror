@@ -4,12 +4,15 @@
 
 FORMATTER_MSG = "File not formatted. Run `fx format-code` to fix."
 
-def os_exec(ctx, cmd, *args, **kwargs):
+def os_exec(ctx, cmd, *args, env = None, **kwargs):
     """Runs `ctx.os.exec()`, validating that the executable path is absolute.
     """
     if not cmd[0].startswith("/"):
         fail("%s is not absolute" % cmd[0])
-    return ctx.os.exec(cmd, *args, **kwargs)
+    merged_env = {"PYTHONDONTWRITEBYTECODE": "1"}
+    if env:
+        merged_env.update(env)
+    return ctx.os.exec(cmd, env = merged_env, *args, **kwargs)
 
 def get_fuchsia_dir(ctx):
     rel_fuchsia_dir = ctx.vars.get("fuchsia_dir")
@@ -22,9 +25,7 @@ def cipd_platform_name(ctx):
 
     This is the platform name that appears in most prebuilt paths.
     """
-    os = {
-        "darwin": "mac",
-    }.get(ctx.platform.os, ctx.platform.os)
+    os = ctx.platform.os
     arch = {
         "amd64": "x64",
     }.get(ctx.platform.arch, ctx.platform.arch)

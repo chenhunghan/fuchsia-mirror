@@ -97,6 +97,7 @@ DriverCtx::~DriverCtx() {
   if (shared_fidl_loop_) {
     shared_fidl_loop_->Quit();
     shared_fidl_loop_->JoinThreads();
+    shared_fidl_checker_.reset();
     shared_fidl_loop_->Shutdown();
   }
 }
@@ -141,10 +142,10 @@ void DriverCtx::PostSerial(async_dispatcher_t* dispatcher, fit::closure to_run) 
   }
 }
 
-// Run to_run_on_shared_fidl_thread on shared_fidl_thread().
-void DriverCtx::PostToSharedFidl(fit::closure to_run_on_shared_fidl_thread) {
+// Run to_run_on_shared_fidl_sequence on the shared fidl sequence.
+void DriverCtx::PostToSharedFidl(fit::closure to_run_on_shared_fidl_sequence) {
   // Switch the implementation here to fit::function when possible.
-  PostSerial(shared_fidl_loop()->dispatcher(), std::move(to_run_on_shared_fidl_thread));
+  PostSerial(shared_fidl_loop()->dispatcher(), std::move(to_run_on_shared_fidl_sequence));
 }
 
 void DriverCtx::SetAuxServiceDirectory(

@@ -12,7 +12,7 @@
 
 #include <ktl/optional.h>
 #include <ktl/span.h>
-#include <phys/main.h>
+#include <phys/runtime/main.h>
 
 #include <ktl/enforce.h>
 

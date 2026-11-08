@@ -2,7 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/go/go_test.gni")
 import("//build/testing/host_test_data.gni")
 
 if (is_host) {
@@ -24,10 +23,11 @@ if (is_host) {
       zbi_tool_target,
     ]
   }
+}
 
-  go_test("host-target-testing-omaha_tool-test") {
-    embed = [ ":omaha_tool" ]
-  }
+group("tests") {
+  testonly = true
+  deps = [ ":host-target-testing-omaha_tool-test($host_toolchain)" ]
 }
 
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
@@ -62,17 +62,24 @@ if (is_host) {
     sources = [
       "omaha.go",
       "omaha_structs.go",
-      "omaha_test.go",
     ]
     visibility = [
       ":*",
-      "//src/testing/host-target-testing/artifacts:*",
-      "//src/testing/host-target-testing/cli:*",
-      "//src/testing/host-target-testing/updater:*",
+      "//src/testing/host-target-testing/*",
     ]
     deps = [
       "//tools/lib/color",
       "//tools/lib/logger",
+    ]
+  }
+}
+if (is_host) {
+  go_test("host-target-testing-omaha_tool-test") {
+    sources = [ "omaha_test.go" ]
+    embed = [ ":omaha_tool" ]
+    visibility = [
+      ":*",
+      "//src/testing/host-target-testing:*",
     ]
   }
 }

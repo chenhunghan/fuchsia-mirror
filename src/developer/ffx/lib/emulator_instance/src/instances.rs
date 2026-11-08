@@ -1,58 +1,131 @@
 // Copyright 2023 The Fuchsia Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-use crate::{EmulatorInstanceData, EmulatorInstanceError, EngineOption, EngineState, Result};
+use crate::{
+    EmulatorInstanceData, EmulatorInstanceError, EmulatorInstanceInfo, EngineOption, EngineState,
+    Result,
+};
+use std::collections::HashSet;
 use std::fs::{File, create_dir_all};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub(crate) const SERIALIZE_FILE_NAME: &str = "engine.json";
 
 #[derive(Debug, Clone)]
 pub struct EmulatorInstances {
     instance_root: PathBuf,
+    backup_roots: Vec<PathBuf>,
+}
+
+/// Builds an `EmulatorInstances` from the list of instance roots in `emu.instance_dir`. The first
+/// root is where instances are created; the rest are lookup-only backups, such as the location
+/// used by older versions of ffx.
+impl From<Vec<PathBuf>> for EmulatorInstances {
+    fn from(roots: Vec<PathBuf>) -> Self {
+        let mut roots = roots.into_iter();
+        EmulatorInstances {
+            instance_root: roots.next().unwrap_or_default(),
+            backup_roots: roots.collect(),
+        }
+    }
 }
 
 impl EmulatorInstances {
     pub fn new(instance_root: PathBuf) -> Self {
-        EmulatorInstances { instance_root }
+        EmulatorInstances { instance_root, backup_roots: Vec::new() }
     }
+
     /// Return a PathBuf with the path to the instance directory for this engine. If the "create" flag
-    /// is set, the directory and its ancestors will be created if it doesn't already exist.
+    /// is set, the directory and its ancestors will be created in the primary instance root if it
+    /// doesn't already exist. When "create" is false and the primary root has no `engine.json` for
+    /// the instance, the first backup root that has one is used.
     pub fn get_instance_dir(&self, instance_name: &str, create: bool) -> Result<PathBuf> {
         let path = self.instance_root.join(&instance_name);
-        if !path.exists() {
-            if create {
+        if create {
+            if !path.exists() {
                 log::debug!("Creating {:?} for {}", path, instance_name);
                 create_dir_all(&path.as_path())?;
-            } else {
-                log::debug!(
-                    "Path {} doesn't exist. Check the spelling of the instance name.",
-                    instance_name
-                );
             }
+            return Ok(path);
+        }
+        if !path.join(SERIALIZE_FILE_NAME).exists()
+            && let Some(backup_path) = self
+                .backup_roots
+                .iter()
+                .map(|root| root.join(instance_name))
+                .find(|p| p.join(SERIALIZE_FILE_NAME).exists())
+        {
+            return Ok(backup_path);
+        }
+        if !path.exists() {
+            log::debug!(
+                "Path {} doesn't exist. Check the spelling of the instance name.",
+                instance_name
+            );
         }
         Ok(path)
     }
 
-    /// Given an instance name, empty and remove the instance directory associated with that name.
-    /// Fails if the directory can't be removed; returns Ok(()) if the directory doesn't exist.
+    /// Given an instance name, empty and remove the instance directory associated with that name
+    /// in the primary and all backup roots. Fails if a directory can't be removed; returns Ok(())
+    /// if it doesn't exist.
     pub fn clean_up_instance_dir(&self, instance_name: &str) -> Result<()> {
-        let path = self.get_instance_dir(instance_name, false)?;
-        if path.exists() {
-            log::debug!("Removing {:?} for {:?}", path, path.as_path().file_name().unwrap());
-            std::fs::remove_dir_all(&path.as_path()).map_err(|e| {
-                EmulatorInstanceError::RemoveDirectory { path: path.to_path_buf(), source: e }
-            })
-        } else {
-            // It's already gone, so just return Ok(()).
-            Ok(())
+        for root in std::iter::once(&self.instance_root).chain(&self.backup_roots) {
+            Self::remove_instance_dir(&root.join(instance_name))?;
         }
+        Ok(())
+    }
+
+    /// Removes the instance directory at `path`, along with any of the instance's sockets that are
+    /// outside it. Returns Ok(()) if the directory doesn't exist.
+    fn remove_instance_dir(path: &Path) -> Result<()> {
+        if !path.exists() {
+            return Ok(());
+        }
+        if let Ok(EngineOption::DoesExist(data)) = read_from_disk(&path.to_path_buf()) {
+            let runtime = &data.get_emulator_configuration().runtime;
+            // Some sockets live outside the instance directory (e.g. in /tmp).
+            for socket_path in [
+                &runtime.serial_socket,
+                &runtime.monitor_socket,
+                &runtime.qmp_socket,
+                &runtime.console_socket,
+                &runtime.control_socket,
+            ] {
+                let _ = std::fs::remove_file(socket_path);
+            }
+        }
+        log::debug!("Removing {:?} for {:?}", path, path.file_name().unwrap_or_default());
+        std::fs::remove_dir_all(path).map_err(|e| EmulatorInstanceError::RemoveDirectory {
+            path: path.to_path_buf(),
+            source: e,
+        })
     }
 
     /// Retrieve a list of all of the names of instances currently present on the local system.
+    ///
+    /// Instances in earlier roots take precedence over instances with the same name in later ones.
+    /// Errors reading a backup root are logged and otherwise ignored, so that a problem with a
+    /// legacy location doesn't hide instances in the primary root.
     pub fn get_all_instances(&self) -> Result<Vec<EmulatorInstanceData>> {
+        let mut result = Self::get_instances_in_dir(self.instance_root.as_path())?;
+        let mut names: HashSet<String> =
+            result.iter().map(|data| data.get_name().to_string()).collect();
+        for backup_root in &self.backup_roots {
+            match Self::get_instances_in_dir(backup_root.as_path()) {
+                Ok(backup_instances) => result.extend(
+                    backup_instances.into_iter().filter(|d| names.insert(d.get_name().to_string())),
+                ),
+                Err(e) => {
+                    log::warn!("Cannot read legacy emulator instances in {backup_root:?}: {e:?}")
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    fn get_instances_in_dir(root: &Path) -> Result<Vec<EmulatorInstanceData>> {
         let mut result = Vec::new();
-        let root = self.instance_root.as_path();
         if root.is_dir() {
             for entry in root.read_dir()? {
                 if let Ok(entry) = entry {
@@ -88,7 +161,7 @@ impl EmulatorInstances {
                 }
             }
         }
-        return Ok(result);
+        Ok(result)
     }
 }
 
@@ -128,7 +201,7 @@ pub fn read_from_disk_untyped(instance_directory: &PathBuf) -> Result<serde_json
 }
 
 pub fn write_to_disk(data: &EmulatorInstanceData, instance_directory: &PathBuf) -> Result<()> {
-    // The engine's serialized form will be saved in ${EMU_INSTANCE_ROOT_DIR}/${runtime.name}.
+    // The engine's serialized form will be saved in ${instance_root}/${runtime.name}.
     // This is the path set up by the EngineBuilder, so it's expected to already exist.
 
     // Create the engine.json file to hold the serialized data, and write it out to disk,
@@ -145,7 +218,7 @@ pub fn write_to_disk(data: &EmulatorInstanceData, instance_directory: &PathBuf) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EmulatorInstanceInfo, EngineType};
+    use crate::EngineType;
     use std::fs::remove_file;
     use std::io::Write;
     use tempfile::tempdir;
@@ -267,6 +340,34 @@ mod tests {
         // Clean up an non-existing directory
         emu_instances.clean_up_instance_dir("path3").expect("cleanup path3");
         assert!(!path1.exists());
+
+        // Clean up an instance with external socket files
+        let path4 = instance_root.join("path4");
+        create_dir_all(path4.as_path())?;
+        let external_socket = instance_root.join("femu_s_external");
+        let _ = File::create(&external_socket)?;
+        assert!(external_socket.exists());
+        let monitor_socket = instance_root.join("femu_m_external");
+        let _ = File::create(&monitor_socket)?;
+        let qmp_socket = instance_root.join("femu_q_external");
+        let _ = File::create(&qmp_socket)?;
+        let control_socket = instance_root.join("femu_ctrl_external");
+        let _ = File::create(&control_socket)?;
+
+        let mut instance_data = EmulatorInstanceData::new_with_state("path4", EngineState::Staged);
+        instance_data.emulator_configuration.runtime.instance_directory = path4.clone();
+        instance_data.emulator_configuration.runtime.serial_socket = external_socket.clone();
+        instance_data.emulator_configuration.runtime.monitor_socket = monitor_socket.clone();
+        instance_data.emulator_configuration.runtime.qmp_socket = qmp_socket.clone();
+        instance_data.emulator_configuration.runtime.control_socket = control_socket.clone();
+        write_to_disk(&instance_data, &path4)?;
+
+        emu_instances.clean_up_instance_dir("path4").expect("cleanup path4");
+        assert!(!path4.exists());
+        assert!(!external_socket.exists());
+        assert!(!monitor_socket.exists());
+        assert!(!qmp_socket.exists());
+        assert!(!control_socket.exists());
         Ok(())
     }
 
@@ -400,6 +501,62 @@ mod tests {
             EngineOption::DoesExist(data) => assert_eq!(data.get_engine_type(), EngineType::Femu),
             other => panic!("Expected DoesExist, got {other:?}"),
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_with_backup() -> Result<()> {
+        let primary_temp = tempdir().expect("primary tempdir");
+        let backup_temp = tempdir().expect("backup tempdir");
+        let primary_root = primary_temp.path().to_path_buf();
+        let backup_root = backup_temp.path().to_path_buf();
+        let emu_instances =
+            EmulatorInstances::from(vec![primary_root.clone(), backup_root.clone()]);
+        let write_instance = |root: &Path, name: &str, state: EngineState| -> Result<PathBuf> {
+            let dir = root.join(name);
+            create_dir_all(&dir)?;
+            write_to_disk(&EmulatorInstanceData::new_with_state(name, state), &dir)?;
+            Ok(dir)
+        };
+
+        // Instance only in backup root should be found when create=false.
+        let backup_only_dir = write_instance(&backup_root, "backup_only", EngineState::Staged)?;
+        assert_eq!(emu_instances.get_instance_dir("backup_only", false)?, backup_only_dir);
+
+        // Creating an instance directory always uses primary_root, even if it exists in backup_root.
+        let created_dir = emu_instances.get_instance_dir("backup_only", true)?;
+        assert_eq!(created_dir, primary_root.join("backup_only"));
+        assert!(created_dir.exists());
+
+        // While primary_root/backup_only has no engine.json yet, get_instance_dir(..., false)
+        // still falls back to backup_root/backup_only.
+        assert_eq!(emu_instances.get_instance_dir("backup_only", false)?, backup_only_dir);
+
+        // Once engine.json is written to primary_root/backup_only, primary_root takes precedence.
+        write_instance(&primary_root, "backup_only", EngineState::Configured)?;
+        assert_eq!(emu_instances.get_instance_dir("backup_only", false)?, created_dir);
+
+        // Add another instance only in backup_root and one only in primary_root.
+        let backup_two_dir = write_instance(&backup_root, "backup_two", EngineState::Staged)?;
+        let primary_one_dir = write_instance(&primary_root, "primary_one", EngineState::Staged)?;
+        assert!(primary_one_dir.exists());
+
+        // get_all_instances returns all three, with primary_root taking precedence for "backup_only".
+        let all = emu_instances.get_all_instances()?;
+        assert_eq!(all.len(), 3);
+        let resolved_backup_only = all.iter().find(|i| i.get_name() == "backup_only").unwrap();
+        assert_eq!(resolved_backup_only.get_engine_state(), EngineState::Configured);
+        assert!(all.iter().any(|i| i.get_name() == "backup_two"));
+        assert!(all.iter().any(|i| i.get_name() == "primary_one"));
+
+        // clean_up_instance_dir removes from both primary_root and backup_root.
+        emu_instances.clean_up_instance_dir("backup_only")?;
+        assert!(!created_dir.exists());
+        assert!(!backup_only_dir.exists());
+
+        emu_instances.clean_up_instance_dir("backup_two")?;
+        assert!(!backup_two_dir.exists());
 
         Ok(())
     }

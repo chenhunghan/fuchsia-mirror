@@ -8,9 +8,13 @@ group("structured_config") {
   # Available to all components in fuchsia.git
 }
 
+# LINT.IfChange(dynamic_dictionaries)
 # The allowlist of components that can define dynamic dictionaries in CML.
 group("dynamic_dictionaries") {
   visibility = [
+    # Tests of the Bazel `fx_component_manifest(restricted_features = ...)`.
+    "//build/bazel/rules/packages/tests:example_compiled_manifest",
+    "//build/bazel/rules/packages/tests:example_dynamic_dictionaries_manifest",
     "//examples/components/dictionaries/*",
     "//src/bringup/bin/kernel-args-forwarder:*",
     "//src/diagnostics/archivist:*",
@@ -24,6 +28,8 @@ group("dynamic_dictionaries") {
   ]
 }
 
+# LINT.ThenChange(//tools/cmc/build/restricted_features/allowlists.bzl:dynamic_dictionaries)
+
 # The allowlist of components that can use the "allow_long_names" feature in
 # CML.
 group("allow_long_names") {
@@ -32,7 +38,6 @@ group("allow_long_names") {
     "//sdk/lib/driver_test_realm/*",
     "//src/devices/bin/driver_manager/*",
     "//src/devices/bin/driver_manager_rust/*",
-    "//src/sys/bootstrap/*",
     "//tools/cmc:*",
   ]
 }
@@ -88,4 +93,16 @@ group("enable_allow_non_hermetic_packages_feature") {
 # feature in CML.
 group("restrict_test_type_in_facets") {
   # Available to all components in fuchsia.git
+}
+
+# The allowlist of fuzzer components that can specify `fuchsia.test` type in
+# facets (omitting the "restrict_test_type_in_facets" feature in CML).
+group("allow_test_type_in_facets") {
+  visibility = [
+    "//src/starnix/kernel/fuzzers:*",
+    "//src/starnix/modules:*",
+    "//src/starnix/modules/binderfs:*",
+    "//src/starnix/modules/device_mapper:*",
+    "//src/starnix/modules/fuse:*",
+  ]
 }

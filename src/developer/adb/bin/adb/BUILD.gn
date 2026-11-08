@@ -50,6 +50,7 @@ test("adb-test-bin") {
     "adb-test.cc",
     "adb.cc",
     "service-manager.cc",
+    "state-controller.cc",
   ]
   deps = [
     ":common",

@@ -13,7 +13,9 @@ from trace_processing.metrics import memory
 
 class MemoryTest(unittest.TestCase):
     @staticmethod
-    def construct_trace_model(event_count: int) -> trace_model.Model:
+    def construct_trace_model(
+        event_count: int, include_page_request_wait: bool = True
+    ) -> trace_model.Model:
         power_events: list[trace_model.Event] = [
             trace_model.CounterEvent.consume_dict(
                 {
@@ -92,12 +94,78 @@ class MemoryTest(unittest.TestCase):
             ]
         }
 
+        page_request_wait_events: list[trace_model.Event] = []
+        if include_page_request_wait:
+            page_request_wait_events = [
+                *(
+                    trace_model.DurationEvent.consume_dict(
+                        {
+                            "cat": "kernel:oom",
+                            "name": "page_request_wait",
+                            "pid": 1000,
+                            "tid": 1,
+                            "ts": 500000 + i * 20,  # microseconds
+                            "dur": i + 1,  # microseconds
+                            "args": {
+                                "pager_name": "fxfs.cm",
+                                "vmo_id": 42,
+                                "offset": i * 4096,
+                                "length": 4096,
+                                "type": "Read",
+                            },
+                        }
+                    )
+                    for i in range(0, event_count)
+                ),
+                *(
+                    trace_model.DurationEvent.consume_dict(
+                        {
+                            "cat": "kernel:oom",
+                            "name": "page_request_wait",
+                            "pid": 1000,
+                            "tid": 1,
+                            "ts": 500005 + i * 20,  # microseconds
+                            "dur": 2 * (i + 1),  # microseconds
+                            "args": {
+                                "pager_name": "fxfs.cm",
+                                "vmo_id": 42,
+                                "offset": i * 4096,
+                                "length": 4096,
+                                "type": "Dirty",
+                            },
+                        }
+                    )
+                    for i in range(0, event_count)
+                ),
+                trace_model.DurationEvent.consume_dict(
+                    {
+                        "cat": "kernel:oom",
+                        "name": "page_request_wait",
+                        "pid": 1000,
+                        "tid": 1,
+                        "ts": 600000,  # microseconds
+                        "dur": 999,  # microseconds
+                        "args": {
+                            "pager_name": "",
+                            "vmo_id": 43,
+                            "offset": 0,
+                            "length": 4096,
+                            "type": "Read",
+                        },
+                    }
+                ),
+            ]
+
         processes = [
             power_process,
             trace_model.Process(
                 1000,
                 "load_generator.cm",
-                [trace_model.Thread(1, "load-generator-thread-1")],
+                [
+                    trace_model.Thread(
+                        1, "load-generator-thread-1", page_request_wait_events
+                    )
+                ],
             ),
             trace_model.Process(
                 0, "kernel", [eviction_thread, scanner_request_thread]
@@ -134,6 +202,140 @@ class MemoryTest(unittest.TestCase):
                     unit=reporting_metrics.Unit.milliseconds,
                     values=(0.5,),
                     direction=reporting_metrics.Direction.smallerIsBetter,
+                ),
+                reporting_metrics.TestCaseResult(
+                    label="Memory/System/PageRequestTime/Read",
+                    unit=reporting_metrics.Unit.nanoseconds,
+                    values=[1000 * (i + 1) for i in range(100)],
+                    direction=reporting_metrics.Direction.smallerIsBetter,
+                ),
+                reporting_metrics.TestCaseResult(
+                    label="Memory/System/PageRequestTime/Dirty",
+                    unit=reporting_metrics.Unit.nanoseconds,
+                    values=[2000 * (i + 1) for i in range(100)],
+                    direction=reporting_metrics.Direction.smallerIsBetter,
+                ),
+            ],
+        )
+
+    def test_process_metrics_without_page_request_wait(self) -> None:
+        model = self.construct_trace_model(100, include_page_request_wait=False)
+        metrics = memory.MemoryMetricsProcessor().process_metrics(model)
+        self.assertEqual(
+            metrics,
+            [
+                reporting_metrics.TestCaseResult(
+                    label="Memory/System/StallTimeSome",
+                    unit=reporting_metrics.Unit.nanoseconds,
+                    values=(99,),
+                ),
+                reporting_metrics.TestCaseResult(
+                    label="Memory/System/PageRefaults",
+                    unit=reporting_metrics.Unit.count,
+                    direction=reporting_metrics.Direction.smallerIsBetter,
+                    values=(99,),
+                ),
+                reporting_metrics.TestCaseResult(
+                    label="Memory/System/PageFaults/Major",
+                    unit=reporting_metrics.Unit.count,
+                    direction=reporting_metrics.Direction.smallerIsBetter,
+                    values=(99,),
+                ),
+                reporting_metrics.TestCaseResult(
+                    label="Memory/System/ManagementTime",
+                    unit=reporting_metrics.Unit.milliseconds,
+                    values=(0.5,),
+                    direction=reporting_metrics.Direction.smallerIsBetter,
+                ),
+            ],
+        )
+
+    def test_process_kernel_private_memory_metrics(self) -> None:
+        events: list[trace_model.Event] = [
+            trace_model.CounterEvent.consume_dict(
+                {
+                    "cat": "memory:kernel",
+                    "name": "kmem_stats_a",
+                    "pid": 1,
+                    "tid": 2,
+                    "ts": 500000 + i,
+                    "args": {
+                        "wired_bytes": 20 + i,
+                        "total_heap_bytes": 30 + i,
+                        "mmu_overhead_bytes": 40 + i,
+                        "ipc_bytes": 50 + i,
+                        "cache_bytes": 60 + i,
+                        "slab_bytes": 70 + i,
+                        "other_bytes": 80 + i,
+                    },
+                }
+            )
+            for i in range(100)
+        ]
+        model = trace_model.Model(
+            [
+                trace_model.Process(
+                    1, "MemoryData", [trace_model.Thread(2, "Fake", events)]
+                )
+            ],
+            {},
+        )
+        metrics = memory.MemoryMetricsProcessor().process_metrics(model)
+        doc_prefix = (
+            "Total bytes used by Kernel "
+            "(wired_bytes, total_heap_bytes, mmu_overhead_bytes, "
+            "ipc_bytes, cache_bytes, slab_bytes, other_bytes)"
+        )
+        self.assertEqual(
+            list(metrics)[:8],
+            [
+                reporting_metrics.TestCaseResult(
+                    label="Memory/Kernel/TotalPrivateP5",
+                    unit=reporting_metrics.Unit.bytes,
+                    values=(384.65,),
+                    doc=f"{doc_prefix}, 5th percentile",
+                ),
+                reporting_metrics.TestCaseResult(
+                    label="Memory/Kernel/TotalPrivateP25",
+                    unit=reporting_metrics.Unit.bytes,
+                    values=(523.25,),
+                    doc=f"{doc_prefix}, 25th percentile",
+                ),
+                reporting_metrics.TestCaseResult(
+                    label="Memory/Kernel/TotalPrivateP50",
+                    unit=reporting_metrics.Unit.bytes,
+                    values=(696.5,),
+                    doc=f"{doc_prefix}, 50th percentile",
+                ),
+                reporting_metrics.TestCaseResult(
+                    label="Memory/Kernel/TotalPrivateP75",
+                    unit=reporting_metrics.Unit.bytes,
+                    values=(869.75,),
+                    doc=f"{doc_prefix}, 75th percentile",
+                ),
+                reporting_metrics.TestCaseResult(
+                    label="Memory/Kernel/TotalPrivateP95",
+                    unit=reporting_metrics.Unit.bytes,
+                    values=(1008.3500000000001,),
+                    doc=f"{doc_prefix}, 95th percentile",
+                ),
+                reporting_metrics.TestCaseResult(
+                    label="Memory/Kernel/TotalPrivateMin",
+                    unit=reporting_metrics.Unit.bytes,
+                    values=(350,),
+                    doc=f"{doc_prefix}, minimum",
+                ),
+                reporting_metrics.TestCaseResult(
+                    label="Memory/Kernel/TotalPrivateMax",
+                    unit=reporting_metrics.Unit.bytes,
+                    values=(1043,),
+                    doc=f"{doc_prefix}, maximum",
+                ),
+                reporting_metrics.TestCaseResult(
+                    label="Memory/Kernel/TotalPrivateAverage",
+                    unit=reporting_metrics.Unit.bytes,
+                    values=(696.5,),
+                    doc=f"{doc_prefix}, mean",
                 ),
             ],
         )

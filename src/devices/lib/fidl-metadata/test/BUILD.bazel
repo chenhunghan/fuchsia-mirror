@@ -1,0 +1,40 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [],
+    visibility = ["//src/devices:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "fidl-metadata-unittest",
+    srcs = [
+        "adc-test.cc",
+        "i2c-test.cc",
+        "registers-test.cc",
+        "spi-test.cc",
+        "tee-test.cc",
+    ],
+    tags = ["manual"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.adcimpl:fuchsia.hardware.adcimpl_cpp",
+        "//sdk/fidl/fuchsia.hardware.i2c.businfo:fuchsia.hardware.i2c.businfo_cpp",
+        "//sdk/fidl/fuchsia.hardware.registers:fuchsia.hardware.registers_cpp",
+        "//sdk/fidl/fuchsia.hardware.spi.businfo:fuchsia.hardware.spi.businfo_cpp",
+        "//sdk/fidl/fuchsia.hardware.tee:fuchsia.hardware.tee_cpp",
+        "//src/devices/lib/fidl-metadata",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "fidl-metadata-tests",
+    unit_tests = [":fidl-metadata-unittest"],
+)

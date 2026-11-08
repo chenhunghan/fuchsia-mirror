@@ -2,6 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
+
 package(default_applicable_licenses = ["//:license"])
 
 exports_files(
@@ -14,5 +16,30 @@ exports_files(
         "//bundles/assembly:__subpackages__",
         "//sdk/lib/vulkan:__pkg__",
         "//src/connectivity/policy/http-client:__pkg__",
+        "//src/starnix/modules/usbfs:__pkg__",
+    ],
+)
+
+cml_shard(
+    name = "offer.shard",
+    shard = "offer.shard.cml",
+)
+
+cml_shard(
+    name = "use.shard",
+    shard = "use.shard.cml",
+    visibility = ["//src/virtualization/bin/vmm/device:__subpackages__"],
+)
+
+cml_shard(
+    name = "client.shard",
+    includes = [
+        ":offer.shard",
+        ":use.shard",
+    ],
+    shard = "client.shard.cml",
+    visibility = [
+        "//examples:__subpackages__",
+        "//src/sys/time/timekeeper:__pkg__",
     ],
 )

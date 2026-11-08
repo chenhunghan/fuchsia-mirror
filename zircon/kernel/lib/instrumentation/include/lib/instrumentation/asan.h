@@ -60,24 +60,24 @@ extern "C" void asan_unpoison_shadow(uintptr_t address, size_t size);
 
 // Return the address of the first poisoned byte in [|address|, |address + size|).
 // If no bytes are poisoned, returns 0.
-uintptr_t asan_region_is_poisoned(uintptr_t address, size_t size);
+extern "C" uintptr_t asan_region_is_poisoned(uintptr_t address, size_t size);
 
 // Return true if kernel |address| is poisoned.
-bool asan_address_is_poisoned(uintptr_t address);
+extern "C" bool asan_address_is_poisoned(uintptr_t address);
 
 // Return true if all bytes in [|address|, |address + size|) are poisoned.
-bool asan_entire_region_is_poisoned(uintptr_t address, size_t size);
+extern "C" bool asan_entire_region_is_poisoned(uintptr_t address, size_t size);
 
 // Returns number of bytes to add to heap allocations of |size| for a redzone, to detect out-of
 // bounds accesses. (Rounds up the size to an ASAN granule)
-size_t asan_heap_redzone_size(size_t size);
+extern "C" size_t asan_heap_redzone_size(size_t size);
 
 // Adds the virtual region defined by [start, start+size) to the regions
 // instrumented by asan. After calling this function, users can call
 // asan_poison_shadow on the bytes in the newly added region.
 // On x86-64 This function can only be called before SMP is set up.
 // TODO(https://fxbug.dev/42104852): Allow calling after SMP is set up.
-void asan_map_shadow_for(uintptr_t start, size_t size);
+extern "C" void asan_map_shadow_for(uintptr_t start, size_t size);
 
 // Distinguished kasan poison values.
 // LLVM defines userspace equivalents of these in compiler-rt/lib/asan/asan_internal.h

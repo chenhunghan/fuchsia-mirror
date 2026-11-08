@@ -53,7 +53,6 @@ inline constexpr std::string_view kCreateThreadSymbolsDriversAllowlist[] = {
     "#meta/bt-hci-broadcom.cm",
     "#meta/bt-hci-intel.cm",
     "#meta/bt-hci-marvell.cm",
-    "#meta/bt-hci-virtual.cm",
     "#meta/bt-host.cm",
     "#meta/bt-transport-uart.cm",
     "#meta/bt-transport-usb.cm",
@@ -133,7 +132,6 @@ inline constexpr std::string_view kCreateThreadSymbolsDriversAllowlist[] = {
     "#meta/qemu-arm64.cm",
     "#meta/qemu-audio-codec.cm",
     "#meta/qmi-fake-transport.cm",
-    "#meta/qmi-transport.cm",
     "#meta/ram-nand.cm",
     "#meta/ramdisk.cm",
     "#meta/realtek-audio-codec.cm",
@@ -1392,7 +1390,7 @@ inline constexpr std::string_view kRestrictedDriverRuntimeSymbolsDriversAllowlis
     // TODO(https://fxbug.dev/300157652): Stop `amlogic_video_decoder` from using the the global
     // logger.
     "#meta/amlogic_video_decoder.cm",
-    //
+    // TODO(579528349): creates a dispatcher with a synthetic driver owner pointer.
     "#meta/network-device.cm",
     // keep-sorted end
 };
@@ -1403,10 +1401,10 @@ inline constexpr std::string_view kRestrictedDriverRuntimeSymbols[] = {
     // Technically, these aren't driver runtime symbols, but for the time being, it's not worth
     // adding a separate list just for these right now. We don't want drivers using the global
     // syslog logger which is indicated with the following symbols.
-    "FuchsiaLogAcquireState",
     "FuchsiaLogGetGlobalLogger",
     "FuchsiaLogInitGlobalLogger",
     //
+    "fdf_env_add_allowed_scheduler_role_for_driver",
     "fdf_env_destroy_all_dispatchers",
     "fdf_env_dispatcher_create_with_owner",
     "fdf_env_dispatcher_dump",

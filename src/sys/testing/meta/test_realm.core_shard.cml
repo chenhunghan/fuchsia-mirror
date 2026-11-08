@@ -195,6 +195,7 @@
         },
         {
             protocol: [
+                "fuchsia.element.GraphicalPresenter",
                 "fuchsia.session.scene.Manager",
                 "fuchsia.ui.composition.Allocator",
                 "fuchsia.ui.composition.Flatland",
@@ -594,6 +595,16 @@
         },
         {
             service: "fuchsia.hardware.spi.TestService",
+            from: "parent",
+            to: "#testing",
+        },
+        {
+            service: [
+                "fuchsia.hardware.google.cryptobam.Service",
+                "fuchsia.hardware.google.cryptobam.TestService",
+                "fuchsia.hardware.google.gpdma.Service",
+                "fuchsia.hardware.google.gpdma.TestService",
+            ],
             from: "parent",
             to: "#testing",
         },

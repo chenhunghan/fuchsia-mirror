@@ -13,10 +13,8 @@
 #include <zircon/syscalls/object.h>
 #include <zircon/types.h>
 
-#include <kernel/deadline.h>
 #include <kernel/ffi.h>
-#include <ktl/span.h>
-#include <object/fifo_dispatcher.h>
+#include <object/channel_dispatcher.h>
 #include <object/handle.h>
 #include <object/io_buffer_dispatcher.h>
 #include <object/job_dispatcher.h>
@@ -24,7 +22,7 @@
 #include <object/socket_dispatcher.h>
 #include <object/vm_object_dispatcher.h>
 #include <pretty/cpp/sizes.h>
-#include <vm/fault.h>
+#include <vm/vm_object_paged.h>
 
 #include <ktl/enforce.h>
 
@@ -52,28 +50,6 @@ class ProcessWalker final : public JobEnumerator {
 template <typename ProcessCallbackType>
 ProcessWalker<ProcessCallbackType> MakeProcessWalker(ProcessCallbackType cb) {
   return ProcessWalker<ProcessCallbackType>(cb);
-}
-
-// Machinery to walk over a job tree and run a callback on each job.
-template <typename JobCallbackType>
-class JobWalker final : public JobEnumerator {
- public:
-  JobWalker(JobCallbackType cb) : cb_(cb) {}
-  JobWalker(const JobWalker&) = delete;
-  JobWalker(JobWalker&& other) : cb_(other.cb_) {}
-
- private:
-  bool OnJob(JobDispatcher* job) final {
-    cb_(job);
-    return true;
-  }
-
-  const JobCallbackType cb_;
-};
-
-template <typename JobCallbackType>
-JobWalker<JobCallbackType> MakeJobWalker(JobCallbackType cb) {
-  return JobWalker<JobCallbackType>(cb);
 }
 
 const char* ObjectTypeToString(zx_obj_type_t type) {
@@ -143,66 +119,6 @@ const char* ObjectTypeToString(zx_obj_type_t type) {
     default:
       return "???";
   }
-}
-
-// Returns the count of a process's handles. For each handle, the corresponding
-// zx_obj_type_t-indexed element of |handle_types| is incremented.
-using HandleTypeCounts = ktl::span<uint32_t, ZX_OBJ_TYPE_UPPER_BOUND>;
-uint32_t BuildHandleStats(const ProcessDispatcher& pd, HandleTypeCounts handle_types) {
-  uint32_t total = 0;
-  pd.handle_table().ForEachHandle(
-      [&](zx_handle_t handle, zx_rights_t rights, const Dispatcher* disp) {
-        uint32_t type = static_cast<uint32_t>(disp->get_type());
-        ++handle_types[type];
-        ++total;
-        return ZX_OK;
-      });
-  return total;
-}
-
-// Counts the process's handles by type and formats them into the provided
-// buffer as strings.
-void FormatHandleTypeCount(const ProcessDispatcher& pd, char* buf, size_t buf_len) {
-  uint32_t types[ZX_OBJ_TYPE_UPPER_BOUND] = {0};
-  uint32_t handle_count = BuildHandleStats(pd, types);
-
-  snprintf(buf, buf_len, "%4u: %4u %3u %3u %3u %3u %3u %3u %3u %3u %3u %3u %3u", handle_count,
-           types[ZX_OBJ_TYPE_JOB], types[ZX_OBJ_TYPE_PROCESS], types[ZX_OBJ_TYPE_THREAD],
-           types[ZX_OBJ_TYPE_VMO], types[ZX_OBJ_TYPE_VMAR], types[ZX_OBJ_TYPE_CHANNEL],
-           types[ZX_OBJ_TYPE_EVENT] + types[ZX_OBJ_TYPE_EVENTPAIR], types[ZX_OBJ_TYPE_PORT],
-           types[ZX_OBJ_TYPE_SOCKET], types[ZX_OBJ_TYPE_TIMER], types[ZX_OBJ_TYPE_FIFO],
-           types[ZX_OBJ_TYPE_INTERRUPT] + types[ZX_OBJ_TYPE_LOG] + types[ZX_OBJ_TYPE_RESOURCE] +
-               types[ZX_OBJ_TYPE_GUEST] + types[ZX_OBJ_TYPE_VCPU] + types[ZX_OBJ_TYPE_IOMMU] +
-               types[ZX_OBJ_TYPE_BTI] + types[ZX_OBJ_TYPE_PROFILE] + types[ZX_OBJ_TYPE_PMT] +
-               types[ZX_OBJ_TYPE_SUSPEND_TOKEN] + types[ZX_OBJ_TYPE_PAGER] +
-               types[ZX_OBJ_TYPE_EXCEPTION]);
-}
-
-void DumpProcessList() {
-  printf("%7s   #h:  #jb #pr #th #vo #vm #ch #ev #po #so #tm #fi #?? [name]\n", "id");
-
-  auto walker = MakeProcessWalker([](ProcessDispatcher* process) {
-    char handle_counts[(ZX_OBJ_TYPE_UPPER_BOUND * 4) + 1 + /*slop*/ 16];
-    FormatHandleTypeCount(*process, handle_counts, sizeof(handle_counts));
-
-    char pname[ZX_MAX_NAME_LEN];
-    [[maybe_unused]] zx_status_t status = process->get_name(pname);
-    DEBUG_ASSERT(status == ZX_OK);
-    printf("%7" PRIu64 " %s [%s]\n", process->get_koid(), handle_counts, pname);
-  });
-  GetRootJobDispatcher()->EnumerateChildrenRecursive(&walker);
-}
-
-void DumpJobList() {
-  printf("All jobs:\n");
-  printf("%7s %s\n", "koid", "name");
-  auto walker = MakeJobWalker([](JobDispatcher* job) {
-    char name[ZX_MAX_NAME_LEN];
-    [[maybe_unused]] zx_status_t status = job->get_name(name);
-    DEBUG_ASSERT(status == ZX_OK);
-    printf("%7" PRIu64 " '%s'\n", job->get_koid(), name);
-  });
-  GetRootJobDispatcher()->EnumerateChildrenRecursive(&walker);
 }
 
 void DumpPeerInfo(zx_obj_type_t type, const Dispatcher* disp) {
@@ -321,107 +237,6 @@ void FormatHandleRightsMask(zx_rights_t rights, char* buf, size_t buf_len) {
            HasRights(rights, ZX_RIGHT_MANAGE_JOB), HasRights(rights, ZX_RIGHT_MANAGE_PROCESS),
            HasRights(rights, ZX_RIGHT_MANAGE_THREAD), HasRights(rights, ZX_RIGHT_APPLY_PROFILE),
            HasRights(rights, ZX_RIGHT_MANAGE_SOCKET));
-}
-
-struct JobPolicyNameValue {
-  const char* name;
-  uint32_t value;
-};
-
-#define ENTRY(x) \
-  JobPolicyNameValue { #x, x }
-
-constexpr ktl::array<JobPolicyNameValue, ZX_POL_MAX> kJobPolicies = {
-    ENTRY(ZX_POL_BAD_HANDLE),  ENTRY(ZX_POL_WRONG_OBJECT),
-    ENTRY(ZX_POL_VMAR_WX),     ENTRY(ZX_POL_NEW_ANY),
-    ENTRY(ZX_POL_NEW_VMO),     ENTRY(ZX_POL_NEW_CHANNEL),
-    ENTRY(ZX_POL_NEW_EVENT),   ENTRY(ZX_POL_NEW_EVENTPAIR),
-    ENTRY(ZX_POL_NEW_PORT),    ENTRY(ZX_POL_NEW_SOCKET),
-    ENTRY(ZX_POL_NEW_FIFO),    ENTRY(ZX_POL_NEW_TIMER),
-    ENTRY(ZX_POL_NEW_PROCESS), ENTRY(ZX_POL_NEW_PROFILE),
-    ENTRY(ZX_POL_NEW_PAGER),   ENTRY(ZX_POL_AMBIENT_MARK_VMO_EXEC),
-    ENTRY(ZX_POL_NEW_IOB),     ENTRY(ZX_POL_NEW_SAMPLER),
-};
-
-static_assert(kJobPolicies.size() == ZX_POL_MAX, "Missing Policy Id");
-
-const char* PolicyActionToString(uint32_t action) {
-  if (action >= ZX_POL_ACTION_MAX) {
-    return "INVALID ACTION";
-  }
-
-  switch (action) {
-    case ZX_POL_ACTION_ALLOW:
-      return "Allow";
-    case ZX_POL_ACTION_DENY:
-      return "Deny";
-    case ZX_POL_ACTION_ALLOW_EXCEPTION:
-      return "Allow+Exception";
-    case ZX_POL_ACTION_DENY_EXCEPTION:
-      return "Deny+Exception";
-    case ZX_POL_ACTION_KILL:
-      return "Kill";
-    default:
-      return "Unknown";
-  }
-}
-
-const char* PolicyOverrideToString(uint32_t override_val) {
-  switch (override_val) {
-    case ZX_POL_OVERRIDE_ALLOW:
-      return "Allow override";
-    case ZX_POL_OVERRIDE_DENY:
-      return "Deny override";
-    default:
-      return "Unknown";
-  }
-}
-
-const char* SlackModeToString(slack_mode mode) {
-  switch (mode) {
-    case TIMER_SLACK_CENTER:
-      return "TIMER_SLACK_CENTER";
-    case TIMER_SLACK_EARLY:
-      return "TIMER_SLACK_EARLY";
-    case TIMER_SLACK_LATE:
-      return "TIMER_SLACK_LATE";
-    default:
-      return "Unknown";
-  }
-}
-
-void DumpJobPolicies(JobDispatcher* job) {
-  char jname[ZX_MAX_NAME_LEN] = {0};
-  [[maybe_unused]] zx_status_t status = job->get_name(jname);
-  DEBUG_ASSERT(status == ZX_OK);
-  printf("job %" PRIu64 " ('%s') Basic Policies:\n", job->get_koid(), jname);
-  printf("%-30s\t%-15s\t%-15s\n", "Policy", "Action", "Override");
-
-  JobPolicy policy = job->GetPolicy();
-
-  for (size_t i = 0; i < kJobPolicies.size(); i++) {
-    uint32_t action = policy.QueryBasicPolicy(kJobPolicies[i].value);
-    uint32_t policy_override = policy.QueryBasicPolicyOverride(kJobPolicies[i].value);
-
-    printf("%-30s\t%-15s\t%-15s\n", kJobPolicies[i].name, PolicyActionToString(action),
-           PolicyOverrideToString(policy_override));
-  }
-
-  printf("Slack Policy:\n");
-  const TimerSlack slack = policy.GetTimerSlack();
-  printf("mode: %s\n", SlackModeToString(slack.mode()));
-  printf("duration: %" PRId64 "ns\n", slack.amount());
-}
-
-void DumpJobPolicies(zx_koid_t id) {
-  auto walker = MakeJobWalker([id](JobDispatcher* job) {
-    if (job->get_koid() != id) {
-      return;
-    }
-
-    DumpJobPolicies(job);
-  });
-  GetRootJobDispatcher()->EnumerateChildrenRecursive(&walker);
 }
 
 void DumpProcessHandles(zx_koid_t id) {
@@ -926,18 +741,6 @@ void DumpVmObjectCowTree(zx_koid_t id) {
   });
 }
 
-void KillProcess(zx_koid_t id) {
-  // search the process list and send a kill if found
-  auto pd = ProcessDispatcher::LookupProcessById(id);
-  if (!pd) {
-    printf("process not found!\n");
-    return;
-  }
-  // if found, outside of the lock hit it with kill
-  printf("killing process %" PRIu64 "\n", id);
-  pd->Kill(ZX_TASK_RETCODE_SYSCALL_KILL);
-}
-
 // Counts memory usage under a VmAspace.
 class VmCounter final : public VmEnumerator {
  public:
@@ -1029,15 +832,6 @@ void DumpProcessMemoryUsage(const char* prefix, size_t min_bytes) {
 extern "C" {
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_dump_process_list() { DumpProcessList(); }
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_dump_job_list() { DumpJobList(); }
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_dump_job_policies(zx_koid_t id) { DumpJobPolicies(id); }
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE void cpp_dump_process_handles(zx_koid_t id) { DumpProcessHandles(id); }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
@@ -1074,9 +868,6 @@ FFI_ALWAYS_INLINE void cpp_dump_process_vm_objects(zx_koid_t id, char format_uni
 FFI_ALWAYS_INLINE void cpp_dump_vm_object_cow_tree(zx_koid_t id) { DumpVmObjectCowTree(id); }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_kill_process(zx_koid_t id) { KillProcess(id); }
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE void cpp_dump_process_address_space(zx_koid_t id) { DumpProcessAddressSpace(id); }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
@@ -1086,15 +877,5 @@ FFI_ALWAYS_INLINE void cpp_dump_process_memory_usage(const char* prefix, size_t 
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE void cpp_dump_handles_for_koid(zx_koid_t id) { DumpHandlesForKoid(id); }
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE size_t cpp_handle_diagnostics_outstanding_handles() {
-  return Handle::diagnostics::OutstandingHandles();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_handle_diagnostics_dump_table_info() {
-  Handle::diagnostics::DumpTableInfo();
-}
 
 }  // extern "C"

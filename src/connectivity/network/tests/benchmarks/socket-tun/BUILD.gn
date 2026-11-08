@@ -17,6 +17,7 @@ rustc_binary("tun_socket_benchmarks") {
     "//sdk/fidl/fuchsia.hardware.network:fuchsia.hardware.network_rust",
     "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
     "//sdk/fidl/fuchsia.net.interfaces.admin:fuchsia.net.interfaces.admin_rust",
+    "//sdk/fidl/fuchsia.net.resources:fuchsia.net.resources_rust",
     "//sdk/fidl/fuchsia.net.tun:fuchsia.net.tun_rust",
     "//sdk/fidl/fuchsia.posix.socket:fuchsia.posix.socket_rust",
     "//sdk/fidl/fuchsia.tracing.controller:fuchsia.tracing.controller_rust",
@@ -30,6 +31,7 @@ rustc_binary("tun_socket_benchmarks") {
     "//src/lib/fuchsia-component",
     "//src/lib/network/fidl_fuchsia_net_ext",
     "//src/lib/network/fidl_fuchsia_net_interfaces_ext",
+    "//src/lib/network/fidl_fuchsia_net_routes_ext",
     "//src/lib/trace/rust:trace",
     "//src/lib/trace/rust:trace-provider",
     "//src/performance/lib/fuchsiaperf",
@@ -46,20 +48,16 @@ rustc_binary("tun_socket_benchmarks") {
 common_deps = [
   ":tun_socket_benchmarks",
   "//src/connectivity/network/testing/netemul/service:netemul-sandbox",
-  "//src/connectivity/network/tun/network-tun:component",
   "//src/sys/stash:stash_secure_v2",
 ]
 
-netstack3_deps =
-    common_deps + [ "//src/connectivity/network/netstack3:component-for-tests" ]
-
 fuchsia_test_component("tun-socket-benchmarks-netstack3") {
-  deps = netstack3_deps
+  deps = common_deps
   manifest = "meta/tun-socket-benchmarks-ns3.cml"
 }
 
 fuchsia_test_component("tun-socket-benchmarks-netstack3-with-tracing") {
-  deps = netstack3_deps
+  deps = common_deps
   manifest = "meta/tun-socket-benchmarks-ns3-with-tracing.cml"
   test_type = "system"
 }
@@ -68,6 +66,10 @@ fuchsia_test_package("tun-socket-benchmarks-tests-netstack3") {
   test_components = [
     ":tun-socket-benchmarks-netstack3",
     ":tun-socket-benchmarks-netstack3-with-tracing",
+  ]
+  subpackages = [
+    "//src/connectivity/network/netstack3:package-for-tests",
+    "//src/connectivity/network/tun/network-tun",
   ]
 }
 

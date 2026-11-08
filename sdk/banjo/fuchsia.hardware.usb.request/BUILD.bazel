@@ -1,0 +1,30 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fidl_library(
+    name = "fuchsia.hardware.usb.request",
+    srcs = ["usb-request.fidl"],
+    enable_banjo = True,
+    enable_rust = False,
+    enable_rust_next = False,
+    visibility = [
+        "//sdk/banjo/fuchsia.hardware.usb:__pkg__",
+        "//sdk/banjo/fuchsia.hardware.usb.bus:__pkg__",
+        "//sdk/banjo/fuchsia.hardware.usb.hci:__pkg__",
+        "//src/connectivity/bluetooth/hci/transport/usb:__pkg__",
+        "//src/connectivity/ethernet/drivers:__subpackages__",
+        "//src/devices/serial/drivers/ftdi:__pkg__",
+        "//src/devices/usb:__subpackages__",
+        "//src/media/audio/drivers/usb-audio:__pkg__",
+    ],
+    deps = [
+        "//sdk/banjo/ddk.hw.physiter",
+        "//sdk/fidl/fuchsia.hardware.usb.descriptor",
+        "//zircon/vdso/zx",
+    ],
+)

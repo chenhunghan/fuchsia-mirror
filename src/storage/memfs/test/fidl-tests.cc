@@ -96,10 +96,12 @@ TEST(FidlTests, TestFidlOpenReadOnly) {
   ASSERT_OK(fdio_open3("/fidltmp-ro/file-ro", static_cast<uint64_t>(fio::wire::kPermReadable),
                        endpoints.server.TakeChannel().release()));
 
-  auto result = fidl::WireCall(endpoints.client)->DeprecatedGetFlags();
+  auto result = fidl::WireCall(endpoints.client)->GetFlags();
   ASSERT_OK(result.status());
-  ASSERT_OK(result->s);
-  ASSERT_EQ(result->flags, fio::wire::OpenFlags::kRightReadable);
+  ASSERT_TRUE(result->is_ok(), "%s", zx_status_get_string(result->error_value()));
+  ASSERT_EQ(result->value()->flags, fio::wire::Flags::kProtocolFile |
+                                        fio::wire::Flags::kPermReadBytes |
+                                        fio::wire::Flags::kPermGetAttributes);
   endpoints.client.TakeChannel().reset();
 
   std::promise<zx_status_t> promise;

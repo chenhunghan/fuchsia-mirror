@@ -7,7 +7,11 @@ import("//build/bazel/bazel_action.gni")
 bazel_action("host_tests") {
   testonly = true
   command = "build"
+
+  # LINT.IfChange(host_tests_bazel_target)
   bazel_target = "//build/bazel/host_tests:host_tests_stamp"
+
+  # LINT.ThenChange(//build/bazel/scripts/bazel_tests_utils.py:host_tests_bazel_target)
   bazel_config = "host"
 
   # The suites themselves are built as top-level Bazel targets, because they
@@ -19,6 +23,11 @@ bazel_action("host_tests") {
   # default `--build_runfile_links=true` and `--enable_runfiles=auto` flags to
   # materialize runfile trees during `bazel build`.
   extra_bazel_targets_file = "$root_build_dir/bazel_host_test_suites.txt"
+
+  deps = [
+    # Expose GN-built ffx and subtools for Bazel host tests (e.g. system-tests).
+    "//src/developer/ffx:host_test_data_bazel_inputs($host_toolchain)",
+  ]
 
   copy_outputs = [
     {

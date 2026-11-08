@@ -20,6 +20,7 @@ if (is_fuchsia) {
     output_name = "dml_config_lib_test"
     edition = "2024"
     sources = [
+      "src/dump.rs",
       "src/lib.rs",
       "src/parser.rs",
     ]
@@ -32,6 +33,7 @@ if (is_fuchsia) {
       "//sdk/fidl/fuchsia.hardware.power:fuchsia.hardware.power_rust_next",
       "//sdk/lib/driver/runtime/rust/fidl",
       "//sdk/rust/zx",
+      "//src/lib/fidl/rust/fidl",
       "//src/lib/fidl/rust_next/fidl_next",
       "//third_party/rust_crates:anyhow",
       "//third_party/rust_crates:futures",
@@ -54,6 +56,7 @@ group("tests") {
   deps = [
     ":dml-config-host-tests",
     ":dml-config-unittests",
+    ":dml-config_host_test($host_toolchain)",
   ]
 }
 
@@ -91,8 +94,10 @@ fidl("fuchsia.board.dml.config") {
   ]
   public_deps = [ "//sdk/fidl/fuchsia.driver.metadata" ]
 }
+
 rustc_library("dml-config") {
   sources = [
+    "src/dump.rs",
     "src/lib.rs",
     "src/parser.rs",
   ]
@@ -106,7 +111,10 @@ rustc_library("dml-config") {
   deps += [
     ":fuchsia.board.dml.config_rust_common",
     "//sdk/fidl/fuchsia.driver.metadata:fuchsia.driver.metadata_rust_common",
+    "//src/lib/fidl/rust/fidl",
     "//third_party/rust_crates:anyhow",
+    "//third_party/rust_crates:log",
+    "//third_party/rust_crates:phf",
   ]
   if (is_fuchsia) {
     deps += [
@@ -118,8 +126,65 @@ rustc_library("dml-config") {
       "//sdk/rust/zx",
       "//src/lib/fidl/rust_next/fidl_next",
       "//third_party/rust_crates:futures",
+    ]
+  } else {
+    deps += [
+      "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust_common",
+      "//sdk/fidl/fuchsia.hardware.platform.bus:fuchsia.hardware.platform.bus_rust_common",
+      "//sdk/fidl/fuchsia.hardware.power:fuchsia.hardware.power_rust_common",
+    ]
+  }
+}
+if (is_host) {
+  rustc_binary("dml-dump-parsed") {
+    sources = [ "src/dump_main.rs" ]
+    source_root = "src/dump_main.rs"
+    edition = "2024"
+    visibility = [
+      ":*",
+      "//src/devices/*",
+      "//vendor/google/*",
+    ]
+    deps = [
+      ":dml-config",
+      "//third_party/rust_crates:anyhow",
+    ]
+  }
+}
+if (is_host) {
+  rustc_test("dml-config_host_test") {
+    sources = [
+      "src/dump.rs",
+      "src/lib.rs",
+      "src/parser.rs",
+    ]
+    edition = "2024"
+    deps = []
+    deps += [
+      ":fuchsia.board.dml.config_rust_common",
+      "//sdk/fidl/fuchsia.driver.metadata:fuchsia.driver.metadata_rust_common",
+      "//src/lib/fidl/rust/fidl",
+      "//third_party/rust_crates:anyhow",
       "//third_party/rust_crates:log",
       "//third_party/rust_crates:phf",
     ]
+    if (is_fuchsia) {
+      deps += [
+        ":board_structured_config",
+        "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust_next",
+        "//sdk/fidl/fuchsia.hardware.platform.bus:fuchsia.hardware.platform.bus_rust_next",
+        "//sdk/fidl/fuchsia.hardware.power:fuchsia.hardware.power_rust_next",
+        "//sdk/lib/driver/runtime/rust/fidl",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust_next/fidl_next",
+        "//third_party/rust_crates:futures",
+      ]
+    } else {
+      deps += [
+        "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust_common",
+        "//sdk/fidl/fuchsia.hardware.platform.bus:fuchsia.hardware.platform.bus_rust_common",
+        "//sdk/fidl/fuchsia.hardware.power:fuchsia.hardware.power_rust_common",
+      ]
+    }
   }
 }

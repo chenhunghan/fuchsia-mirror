@@ -20,7 +20,7 @@ PREBUILT_PATH = os.path.join(FUCHSIA_ROOT, "prebuilt")
 
 
 def get_os():
-    return platform.system().lower().replace("darwin", "mac")
+    return platform.system().lower()
 
 
 def get_arch():

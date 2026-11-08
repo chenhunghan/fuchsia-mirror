@@ -84,12 +84,14 @@ filegroup(
         "//build/bazel/bazel_idk/tests:analysis_tests",
         "//build/bazel/bazel_idk/tests:api_level_and_cpu_combinations_build_only_tests",
         "//build/bazel/bazel_idk/tests:build_only_tests",
+        "//build/bazel/rules/fidl/tests:api_level_and_cpu_combinations_build_only_tests",
+        "//build/bazel/rules/fidl/tests:build_only_tests",
         # Not yet built elsewhere.
         "//sdk/lib/zxio",
         # Tests `fx_cc_library_headers()`.
         "//zircon/system/ulib/zircon-internal",
         # Tests the macros in zx_library.bzl.
-        "//build/bazel/rules/tests/zx_library:build_only_tests",
+        "//build/bazel/rules/cc/tests:build_only_tests",
         # Tests `fx_package()`.
         "//src/security/bin/root_ssl_certificates",
         # Tests `fx_component()`.
@@ -100,17 +102,20 @@ filegroup(
         "//src/recovery/factory-reset-trigger",
         # Tests `compiled_action()`.
         "//src/sys/pkg/testing/invalid-fars:resource",
+        # Tests `cmc_merge()` and `fx_component_manifest()`.
+        "//build/bazel/rules/components/tests:build_only_tests",
         # Tests `fx_test()`.
         "//build/bazel/rules/packages/tests:build_only_tests",
         # Tests `fx_package()`, `fx_test_component()`, `fx_test()`,
         # `fx_unittest_component()`, and `fx_unittest_package()`.
         "//build/bazel/rules/packages/tests:quick_build_only_tests",
-        # Build libraries that support next-generation FIDL bindings for Rust.
-        # TODO(https://fxbug.dev/454452299): Replace these build-only tests with:
-        # * A `test_suite()` containing all the test targets in the package once the tests build.
-        # * A "..._rust_next" bindings target or (better) an executable that
-        #   uses the bindings once they are implemented.
-        "//src/lib/fidl/rust_next:build_only_tests",
+        # Tests `fx_expectations()`, `fx_generated_expectations()`,
+        # `preprocess_expectations()`, `fx_component_manifest_with_expectations()`,
+        # and `fx_test_component_with_expectations()`.
+        "//src/lib/testing/expectation/rules/tests:quick_build_only_tests",
+        # Build tests for libraries that support next-generation FIDL bindings for Rust.
+        "//src/lib/fidl/rust_next:tests",
+        "//tools/fidl/fidlgen_rust_next/benchmark:bin",
     ],
     # This target is only intended to be built in Fuchsia configurations.
     # Individual test groups can use a transition to build targets in host
@@ -123,10 +128,13 @@ filegroup(
     testonly = True,
     srcs = [
         "//build/bazel/bazel_idk/tests:targets_to_build_in_host_configurations",
-        "//build/bazel/toolchains/tests:build",
+        "//build/bazel/rules/fidl/tests:targets_to_build_in_host_configurations",
+        "//build/bazel/toolchains/tests",
 
-        # Aspect tests
+        # Aspect and component rule tests
         "//build/bazel/aspects/tests",
+        "//build/bazel/aspects/tests:build_only_tests",
+        "//build/bazel/rules/components/tests",
         "//build/bazel/rules/rust/tests",
     ],
     target_compatible_with = HOST_OS_CONSTRAINTS,
@@ -161,12 +169,9 @@ filegroup(
         # To guard against build regression before ffx main binary target is fully migrated.
         "//src/developer/ffx/frontends/ffx",
 
-        # Build libraries that support next-generation FIDL bindings for Rust.
-        # TODO(https://fxbug.dev/454452299): Replace these build-only tests with:
-        # * A `test_suite()` containing all the test targets in the package once the tests build.
-        # * A "..._rust_next" bindings target or (better) an executable that
-        #   uses the bindings once they are implemented.
-        "//src/lib/fidl/rust_next:build_only_tests",
+        # Build tests for libraries that support next-generation FIDL bindings for Rust.
+        "//src/lib/fidl/rust_next:tests",
+        "//tools/fidl/fidlgen_rust_next/benchmark:bin",
     ],
     target_compatible_with = HOST_OS_CONSTRAINTS,
 )
@@ -203,6 +208,9 @@ filegroup(
         # Compile, generate the atom, and run compatibility tests for all FIDL
         # libraries in all categories.
         "//sdk/fidl:compatibility_tests",
+
+        # FIDL microbenchmark packages.
+        "//src/tests/benchmarks/fidl:build_only_tests",
     ],
     # This target is only intended to be built in Fuchsia configurations.
     # Individual test groups can use a transition to build targets in host
@@ -223,6 +231,7 @@ test_suite(
     name = "host_tests",
     target_compatible_with = HOST_OS_CONSTRAINTS,
     tests = [
+        "//build/bazel/aspects/tests:host_tests",
         "//build/bazel/rules/build_flags/tests:host_tests",
         "//build/bazel/rules/host_tests/tests:host_tests",
     ],

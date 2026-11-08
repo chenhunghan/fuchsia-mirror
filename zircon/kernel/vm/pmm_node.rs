@@ -4,11 +4,15 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+use crate::arch_rs::ints_disabled;
 use crate::counters::define_kcounter;
-use crate::kernel::deadline::{Deadline, SlackMode, TimerSlack};
+use crate::kernel::deadline::Deadline;
 use crate::kernel::event::{AutounsignalEvent, Event};
+use crate::kernel::scheduler::peek_active_mask;
 use crate::kernel::thread::{AutoPreemptDisabler, THREAD_SIGNAL_SUSPEND};
 use crate::kernel::types::PAddr;
+use crate::ksync_kernel::TrackedMutex;
+use crate::vm::arch_vm_aspace::ArchVmAspace;
 use crate::vm::compression::VmCompression;
 use crate::vm::evictor::Evictor;
 use crate::vm::page::{VmPage, VmPageDoublyLinkedList, VmPagePtr};
@@ -21,22 +25,20 @@ use boot_options::BootOptions;
 use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
 use core::pin::Pin;
-use core::ptr::NonNull;
+use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use debug::{dprintf, ltracef};
 use fbl::{DoublyLinkedList, SinglyLinkedListNode};
-use ksync::{KMutex, LockToken, RawMutex, guarded, kcell_init};
+use ksync::{KMutex, LockToken, guarded, kcell_init};
 use pin_init::{PinInit, Wrapper, pin_data, pin_init};
 use pmm_node_bindings as bindings;
 use zx_status::Status;
-use zx_types::{zx_duration_t, zx_instant_mono_t, zx_status_t};
+use zx_types::{zx_paddr_t, zx_status_t};
 
 const LOCAL_TRACE: u32 = 0;
 
-// TODO(https://fxbug.dev/549318457): Ideally we would use an rng from the standard rand crate, but
-// even the smallest rng source is 128 bits, and to maintain data layout compatibility with C++ it
-// must be 64-bits. Once C++ no longer references the data structure directly this can be dropped,
-// the C library rand_r no longer used and this definition removed.
+// TODO(https://fxbug.dev/549318457): Replace the C library `rand_r` with an RNG from the standard
+// `rand` crate and remove this definition.
 const RAND_MAX: core::ffi::c_int = 0x7fff_ffff;
 
 // TODO(https://fxbug.dev/521834554): Replicating the C++ version of this constant here until a
@@ -46,7 +48,15 @@ const ASAN_PMM_FREE_MAGIC: u8 = 0xfb;
 define_kcounter!(PMM_ALLOC_FAILED, "vm.pmm.alloc.failed", Sum);
 define_kcounter!(PMM_ALLOC_DELAYED, "vm.pmm.alloc.delayed", Sum);
 
-pub type AllocFailureType = bindings::PmmNode_AllocFailure_Type;
+/// The source of a user-visible allocation failure reported to [`PmmNode::report_alloc_failure`].
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+pub enum AllocFailureType {
+    None,
+    Pmm,
+    Heap,
+    Handle,
+    Other,
+}
 
 /// This enum is used to specify whether a page, when freed, should have its reuse
 /// (i.e. reallocation) delayed.  This feature exists to both improve the PMM checker's ability
@@ -76,7 +86,6 @@ pub const ALLOC_FLAG_CAN_WAIT: u32 = bindings::PMM_ALLOC_FLAG_CAN_WAIT;
 /// Tell this PmmNode that we've failed a user-visible allocation.  Calling this method will
 /// (optionally) trigger an asynchronous OOM response. To improve diagnostics some information
 /// about the source of the failure can be provided.
-#[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct AllocFailure {
     pub r#type: AllocFailureType,
@@ -106,29 +115,7 @@ impl AllocFailure {
     }
 }
 
-// Compile-time layout assertions against C++ AllocFailure
-zr::static_assert!(
-    core::mem::size_of::<AllocFailure>() == core::mem::size_of::<bindings::PmmNode_AllocFailure>()
-);
-zr::static_assert!(
-    core::mem::align_of::<AllocFailure>()
-        == core::mem::align_of::<bindings::PmmNode_AllocFailure>()
-);
-zr::static_assert!(
-    core::mem::offset_of!(AllocFailure, r#type)
-        == core::mem::offset_of!(bindings::PmmNode_AllocFailure, type_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(AllocFailure, size)
-        == core::mem::offset_of!(bindings::PmmNode_AllocFailure, size)
-);
-zr::static_assert!(
-    core::mem::offset_of!(AllocFailure, free_count)
-        == core::mem::offset_of!(bindings::PmmNode_AllocFailure, free_count)
-);
-
 /// Controls the behavior of requests that have the PMM_ALLOC_FLAG_CAN_WAIT.
-#[repr(u32)]
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum ShouldWaitState {
     /// The PMM_ALLOC_FLAG_CAN_WAIT should never be followed and we will always attempt to perform
@@ -141,22 +128,6 @@ pub enum ShouldWaitState {
     /// level is reset.
     UntilReset,
 }
-
-// Compile-time layout assertions against C++ ShouldWaitState
-zr::static_assert!(
-    core::mem::size_of::<ShouldWaitState>()
-        == core::mem::size_of::<bindings::PmmNode_ShouldWaitState>()
-);
-zr::static_assert!(
-    ShouldWaitState::Never as u32 == bindings::PmmNode_ShouldWaitState::Never as u32
-);
-zr::static_assert!(
-    ShouldWaitState::OnceLevelTripped as u32
-        == bindings::PmmNode_ShouldWaitState::OnceLevelTripped as u32
-);
-zr::static_assert!(
-    ShouldWaitState::UntilReset as u32 == bindings::PmmNode_ShouldWaitState::UntilReset as u32
-);
 
 /// Waiter node for loaned page freeing synchronization.
 #[derive(fbl::SinglyLinkedListContainable)]
@@ -196,12 +167,12 @@ pub struct FreeLoanedPagesHolder {
     /// FreeLoanedPagesHolder repeatedly having pages moved into it and free'd to the PMM
     /// concurrently with attempts to wait on it.
     /// Although the lock cannot be annotated, this member is guarded by the relevant
-    /// PmmNode::loaned_list_lock_.
+    /// `PmmNode::loaned_list_lock`.
     pub used: bool,
     /// List of pages presently owned by this object. Every page in this list is defined to be in
     /// the ALLOC state with |owner| set to this object.
     /// Although the lock cannot be annotated, this member is guarded by the relevant
-    /// PmmNode::loaned_list_lock_.
+    /// `PmmNode::loaned_list_lock`.
     #[pin]
     pub pages: VmPageDoublyLinkedList,
     /// Maintain a list of waiters to be notified once pages have been freed. The Waiter object
@@ -279,6 +250,20 @@ fn asan_unpoison_page(page: &VmPage) {
     }
 }
 
+// LINT.IfChange(is_phys_vmo_type)
+/// Whether the given type represents physical memory that should be turned into a VMO.
+fn is_phys_vmo_type(ty: memalloc::Type) -> bool {
+    matches!(
+        ty,
+        memalloc::Type::DataZbi
+            | memalloc::Type::PhysDebugdata
+            | memalloc::Type::PhysLog
+            | memalloc::Type::Userboot
+            | memalloc::Type::Vdso
+    )
+}
+// LINT.ThenChange(//zircon/kernel/phys/handoff/include/phys/handoff/handoff.h:IsPhysVmoType)
+
 fn return_pages_to_free_list(
     target_list: Pin<&mut VmPageDoublyLinkedList>,
     to_free: Pin<&mut VmPageDoublyLinkedList>,
@@ -292,16 +277,19 @@ fn return_pages_to_free_list(
 }
 
 /// Per-NUMA node collection of physical memory arenas and bookkeeping.
+// `repr(C)` preserves the declaration order of the fields, which groups related fields together,
+// rather than allowing the compiler to reorder them.
 #[repr(C)]
 #[guarded]
 pub struct PmmNode {
     canary: fbl::Canary<{ fbl::magic(b"PNOD") }>,
 
     #[mutex]
-    lock: KMutex<RawMutex>,
+    lock: KMutex<TrackedMutex>,
 
-    #[guarded_by(lock)]
-    arena_cumulative_size: u64,
+    /// Total bytes across all initialized arenas. Only mutated during single-threaded early boot
+    /// (`init_arena`) and read-only thereafter.
+    arena_cumulative_size: UnsafeCell<u64>,
     // This is both an atomic and guarded by lock as we would like modifications to require the
     // lock, as logic in the system relies on the free_count not changing whilst the lock is
     // held, but also be an atomic so it can be correctly read without the lock.
@@ -319,25 +307,25 @@ pub struct PmmNode {
     #[pin]
     free_list: VmPageDoublyLinkedList,
     #[mutex]
-    loaned_list_lock: KMutex<RawMutex>,
+    loaned_list_lock: KMutex<TrackedMutex>,
     /// Free pages where loaned && !loan_cancelled.
     #[guarded_by(loaned_list_lock)]
     #[pin]
     free_loaned_list: VmPageDoublyLinkedList,
 
     /// The pages comprising the memory temporarily used during phys hand-off,
-    /// populated on Init(). It is the responsibility of EndHandoff() to free this
-    /// list.
+    /// populated on init_from_ranges(). It is the responsibility of end_handoff() to
+    /// free this list.
     #[pin]
     phys_handoff_temporary_list: UnsafeCell<VmPageDoublyLinkedList>,
 
     /// The pages comprising the page-aligned regions of memory that we expect to
     /// turn into VMOs to hand-off to userspace - as determined by
-    /// PhysHandoff::IsPhysVmoType() - populated and marked as wired on Init().
+    /// PhysHandoff::IsPhysVmoType() - populated and marked as wired on init_from_ranges().
     ///
     /// It is expected that this memory will be unwired and turned into VMOs by the
     /// end of the phys hand-off phase, and it is the responsibility of
-    /// PmmNode::EndHandoff() to ensure afterward that this list is empty.
+    /// PmmNode::end_handoff() to ensure afterward that this list is empty.
     #[guarded_by(lock)]
     #[pin]
     phys_handoff_vmo_list: VmPageDoublyLinkedList,
@@ -384,7 +372,7 @@ pub struct PmmNode {
     evictor: UnsafeCell<Evictor>,
 
     #[mutex]
-    compression_lock: KMutex<RawMutex>,
+    compression_lock: KMutex<TrackedMutex>,
     /// The page_compression is a lazily initialized RefPtr to keep the PmmNode constructor
     /// simple, at the cost needing to hold a lock to read the RefPtr. To avoid unnecessarily
     /// contending on the main pmm lock, use a separate one.
@@ -413,158 +401,54 @@ pub struct PmmNode {
     #[guarded_by(lock)]
     random_should_wait_seed: usize,
 
-    #[guarded_by(lock)]
-    used_arena_count: usize,
-    #[guarded_by(lock)]
-    arenas: [PmmArena; PmmNode::ARENA_COUNT],
-
-    phantom: core::marker::PhantomData<core::marker::PhantomPinned>,
+    // Initialized once during single-threaded early boot (`init_arena`) and read-only thereafter,
+    // allowing lockless shared references after boot (`PmmArena` interior state mutated at runtime
+    // is atomic).
+    // Safety invariant: `used_arena_count <= Self::ARENA_COUNT`.
+    used_arena_count: UnsafeCell<usize>,
+    arenas: UnsafeCell<[PmmArena; PmmNode::ARENA_COUNT]>,
 }
 
-// Compile-time layout assertions against the C++ PmmNode type via bindgen.
-zr::static_assert!(core::mem::size_of::<PmmNode>() == core::mem::size_of::<bindings::PmmNode>());
-zr::static_assert!(core::mem::align_of::<PmmNode>() == core::mem::align_of::<bindings::PmmNode>());
+zr::static_assert!(PmmNode::ARENA_COUNT == (1 << PmmNode::ARENA_BITS));
+// C++ code that packs page indices (see <vm/vm_page_list.h>) relies on this value.
+zr::static_assert!(PmmNode::INDEX_ZERO_BITS == bindings::PmmNode_kIndexZeroBits);
+// `page_to_index` packs a 1-based page index (`get_index(page) + 1`), so `MAX_PAGES_PER_ARENA`
+// must fit without overflowing the `u32` representation when shifted into place.
 zr::static_assert!(
-    core::mem::offset_of!(PmmNode, canary) == core::mem::offset_of!(bindings::PmmNode, canary_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(PmmNode, lock) == core::mem::offset_of!(bindings::PmmNode, lock_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(PmmNode, arena_cumulative_size)
-        == core::mem::offset_of!(bindings::PmmNode, arena_cumulative_size_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(PmmNode, free_count)
-        == core::mem::offset_of!(bindings::PmmNode, free_count_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(PmmNode, free_loaned_count)
-        == core::mem::offset_of!(bindings::PmmNode, free_loaned_count_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(PmmNode, loaned_count)
-        == core::mem::offset_of!(bindings::PmmNode, loaned_count_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(PmmNode, loan_cancelled_count)
-        == core::mem::offset_of!(bindings::PmmNode, loan_cancelled_count_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(PmmNode, free_list)
-        == core::mem::offset_of!(bindings::PmmNode, free_list_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(PmmNode, loaned_list_lock)
-        == core::mem::offset_of!(bindings::PmmNode, loaned_list_lock_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(PmmNode, free_loaned_list)
-        == core::mem::offset_of!(bindings::PmmNode, free_loaned_list_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(PmmNode, phys_handoff_temporary_list)
-        == core::mem::offset_of!(bindings::PmmNode, phys_handoff_temporary_list_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(PmmNode, phys_handoff_vmo_list)
-        == core::mem::offset_of!(bindings::PmmNode, phys_handoff_vmo_list_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(PmmNode, permanently_reserved_list)
-        == core::mem::offset_of!(bindings::PmmNode, permanently_reserved_list_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(PmmNode, should_wait)
-        == core::mem::offset_of!(bindings::PmmNode, should_wait_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(PmmNode, should_wait_free_pages_level)
-        == core::mem::offset_of!(bindings::PmmNode, should_wait_free_pages_level_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(PmmNode, may_allocate_evt)
-        == core::mem::offset_of!(bindings::PmmNode, may_allocate_evt_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(PmmNode, alloc_failed_no_mem)
-        == core::mem::offset_of!(bindings::PmmNode, alloc_failed_no_mem_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(PmmNode, first_alloc_failure)
-        == core::mem::offset_of!(bindings::PmmNode, first_alloc_failure_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(PmmNode, mem_signal)
-        == core::mem::offset_of!(bindings::PmmNode, mem_signal_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(PmmNode, mem_signal_lower_bound)
-        == core::mem::offset_of!(bindings::PmmNode, mem_signal_lower_bound_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(PmmNode, mem_signal_upper_bound)
-        == core::mem::offset_of!(bindings::PmmNode, mem_signal_upper_bound_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(PmmNode, page_queues)
-        == core::mem::offset_of!(bindings::PmmNode, page_queues_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(PmmNode, evictor) == core::mem::offset_of!(bindings::PmmNode, evictor_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(PmmNode, compression_lock)
-        == core::mem::offset_of!(bindings::PmmNode, compression_lock_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(PmmNode, page_compression)
-        == core::mem::offset_of!(bindings::PmmNode, page_compression_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(PmmNode, free_fill_enabled)
-        == core::mem::offset_of!(bindings::PmmNode, free_fill_enabled_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(PmmNode, all_free_pages_filled)
-        == core::mem::offset_of!(bindings::PmmNode, all_free_pages_filled_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(PmmNode, checker) == core::mem::offset_of!(bindings::PmmNode, checker_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(PmmNode, random_should_wait_seed)
-        == core::mem::offset_of!(bindings::PmmNode, random_should_wait_seed_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(PmmNode, used_arena_count)
-        == core::mem::offset_of!(bindings::PmmNode, used_arena_count_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(PmmNode, arenas) == core::mem::offset_of!(bindings::PmmNode, arenas_)
+    (((PmmNode::MAX_PAGES_PER_ARENA as u64) << PmmNode::ARENA_BITS) << PmmNode::INDEX_ZERO_BITS)
+        <= u32::MAX as u64
 );
 
+// SAFETY: All mutable state in `PmmNode` is either atomic, guarded by one of its locks (enforced
+// via lock tokens), or is only mutated during single-threaded early boot. This is required for the
+// global `PmmNode` to be stored in a `static` (see pmm.rs).
 unsafe impl Sync for PmmNode {}
+// SAFETY: `PmmNode` has no thread affinity; the raw pointers it holds (e.g. `mem_signal`) refer to
+// kernel objects that may be accessed from any thread.
 unsafe impl Send for PmmNode {}
 
 impl PmmNode {
     /// Arenas are allocated from the node itself to avoid any boot allocations. Walking linearly
     /// through them at run time should also be fairly efficient.
-    const ARENA_COUNT: usize = bindings::PmmNode_kArenaCount;
+    const ARENA_COUNT: usize = 16;
     /// Bit constants to fold a vm_page_t pointer into a uint32 and back. The format from LSB
     /// to MSB is : zero-bits | arena-index | page-index |. Where arena-index is 4 bits wide and
-    /// zero-bits is 3 bits wide. This limits the number of pages per arena to 2^25.
-    const ARENA_BITS: i32 = bindings::PmmNode_kArenaBits;
-    pub const INDEX_ZERO_BITS: i32 = bindings::PmmNode_kIndexZeroBits;
-    const MAX_PAGES_PER_ARENA: usize = bindings::PmmNode_kMaxPagesPerArena;
-    const ARENA_MASK: u32 = bindings::PmmNode_kArenaMask;
+    /// zero-bits is 3 bits wide. As page-index is 1-based so that 0 can represent "no page", this
+    /// limits the number of pages per arena to 2^25 - 1.
+    const ARENA_BITS: i32 = 4;
+    pub const INDEX_ZERO_BITS: i32 = 3;
+    const MAX_PAGES_PER_ARENA: usize = (1 << (32 - (Self::ARENA_BITS + Self::INDEX_ZERO_BITS))) - 1;
+    const ARENA_MASK: u32 = (1 << Self::ARENA_BITS) - 1;
 
     /// Creates an in-place pinned initializer for `PmmNode`.
+    ///
+    /// This is used early in the boot sequence (see `pmm_node_init`), so must not do any "real
+    /// work" or depend on any globals.
     pub fn init() -> impl PinInit<Self, core::convert::Infallible> {
         pin_init!(Self {
             canary: fbl::Canary::new(),
             lock <- KMutex::init(),
-            arena_cumulative_size: 0.into(),
+            arena_cumulative_size: UnsafeCell::new(0),
             free_count: AtomicU64::new(0).into(),
             free_loaned_count: AtomicU64::new(0).into(),
             loaned_count: AtomicU64::new(0).into(),
@@ -591,23 +475,241 @@ impl PmmNode {
             all_free_pages_filled: false.into(),
             checker <- UnsafeCell::pin_init(PmmChecker::init()),
             random_should_wait_seed: 0.into(),
-            used_arena_count: 0.into(),
-            arenas: [const { PmmArena::new() }; PmmNode::ARENA_COUNT].into(),
-            phantom: core::marker::PhantomData,
+            used_arena_count: UnsafeCell::new(0),
+            arenas: UnsafeCell::new([const { PmmArena::new() }; PmmNode::ARENA_COUNT]),
         })
     }
 
-    /// Domain-specific conversion: returns raw pointer for `PmmNode`.
-    pub fn as_raw(&self) -> *mut bindings::PmmNode {
-        (self as *const Self).cast_mut().cast()
+    /// Initializes the PMM node's arenas from the memory ranges handed off by physboot. This in
+    /// particular initializes its arenas and wires any previously allocated special subranges or
+    /// holes.
+    ///
+    /// # Safety
+    ///
+    /// Must only be called once during single-threaded early boot before the PMM is used, and
+    /// `ranges` must be normalized and accurately describe the system's physical memory map.
+    pub unsafe fn init_from_memory_ranges(&self, ranges: &[memalloc::Range]) -> Result<(), Status> {
+        // SAFETY: The caller guarantees that `ranges` is normalized.
+        let ranges = unsafe { NormalizedRangesWitness::new_unchecked(ranges.iter().copied()) };
+        // SAFETY: The caller guarantees single-threaded early boot and a valid memory map.
+        unsafe { self.init_from_ranges(ranges) }
+    }
+
+    /// Initializes the PMM node's arenas from the normalized memory ranges handed off by physboot.
+    ///
+    /// # Safety
+    ///
+    /// Must only be called once during single-threaded early boot before the PMM is used, and
+    /// `ranges` must accurately describe the system's physical memory map.
+    unsafe fn init_from_ranges(
+        &self,
+        ranges: impl memalloc::NormalizedRangeIterator + Clone,
+    ) -> Result<(), Status> {
+        // Make sure we're in early boot (ints disabled and no active Schedulers)
+        assert!(peek_active_mask() == 0);
+        assert!(ints_disabled());
+
+        let mut status = Ok(());
+        let mut allocation_excluded = false;
+        let selections = arena::SelectionIterator::<_, { page::SIZE as u64 }>::new(
+            ranges.clone(),
+            arena::MAX_WASTED_BYTES,
+        );
+        for result in selections {
+            match result {
+                // SAFETY: Caller guarantees single-threaded early boot.
+                Ok(selected) => unsafe {
+                    if status == Err(Status::NO_MEMORY) {
+                        continue;
+                    }
+                    let init_status = self.init_arena(selected);
+                    if status.is_ok() {
+                        status = init_status;
+                    }
+                },
+                Err(error) => {
+                    let range = error.range();
+                    let allocated = range.ty().is_allocated();
+                    allocation_excluded |= allocated;
+                    // If we have to throw out less than two pages of free RAM, don't regard that
+                    // as a full blown error.
+                    let level = match error {
+                        arena::SelectionError::TooSmall(_) if !allocated => "warning",
+                        _ => "error",
+                    };
+                    kprint::kprintln!(
+                        "PMM: {level:s}: unable to include [{:#x}, {:#x}) ({:s}) in arena: {:s}",
+                        range.addr(),
+                        range.end(),
+                        range.ty().as_str(),
+                        error.as_str(),
+                    );
+                }
+            }
+        }
+
+        // Exit early if we could not initialize one of the arenas.
+        status?;
+
+        // If we fail to include a pre-PMM allocation in an arena that could be disastrous in
+        // unpredictable / hard-to-debug ways, so fail hard early.
+        assert!(!allocation_excluded);
+
+        // Now mark all pre-PMM allocations and holes within our arenas as reserved.
+        let arenas = self.active_arenas();
+        let mut arena_idx = 0;
+        let aligned =
+            arena::AlignedAllocationOrHoleIterator::<_, { page::SIZE as u64 }>::new(ranges);
+        for range in aligned {
+            // Find the first arena encompassing this range.
+            //
+            // Note that trying to include `range` in an arena may have resulted in an error during
+            // the selection process. If we do encounter a range not in an arena, just skip it.
+            while arena_idx < arenas.len() && (arenas[arena_idx].end().0 as u64) <= range.addr() {
+                arena_idx += 1;
+            }
+            let Some(arena) = arenas.get(arena_idx) else {
+                // In this case the tail of ranges did not end up in any arenas, so we can just
+                // short-circuit.
+                break;
+            };
+            if !arena.address_in_arena(PAddr(range.addr() as usize)) {
+                continue;
+            }
+
+            debug_assert!(arena.address_in_arena(PAddr((range.end() - 1) as usize)));
+            // SAFETY: Caller guarantees single-threaded early boot and valid memory ranges.
+            unsafe {
+                self.init_reserved_range(range);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Append a new arena to the PmmNode, and initialize it.
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure no concurrent access to `self` (e.g., during single-threaded early boot
+    /// before `self` is shared across threads), and if `selected` is within arena limits, its arena
+    /// and bookkeeping ranges must refer to valid, unaliased physical memory mapped in the physmap.
+    unsafe fn init_arena(&self, selected: arena::Selection) -> Result<(), Status> {
+        // No need to acquire the global pmm lock, this function can only be called within a single
+        // threaded context.
+        // SAFETY: Caller guarantees exclusive access to `self` with no concurrent readers/writers.
+        let used_count = unsafe { *self.used_arena_count.get() };
+        if used_count >= Self::ARENA_COUNT {
+            return Err(Status::NOT_SUPPORTED);
+        }
+        if selected.arena().size() > (Self::MAX_PAGES_PER_ARENA * page::SIZE) as u64 {
+            // We have this limit since we need to compress a page_t pointer to a 24 bit integer.
+            return Err(Status::NOT_SUPPORTED);
+        }
+
+        // SAFETY: Caller guarantees no concurrent access to `self` and valid physical memory
+        // ranges, `used_count < Self::ARENA_COUNT`, and `PmmArena::init` only accesses
+        // `self.free_list`, `self.free_count`, and `self.may_allocate_evt` (via `add_free_pages`),
+        // which do not alias `self.arenas`, `self.used_arena_count`, or
+        // `self.arena_cumulative_size`.
+        unsafe {
+            (&mut *self.arenas.get().cast::<PmmArena>().add(used_count)).init(
+                selected.arena().base(),
+                selected.arena().size(),
+                selected.bookkeeping().base(),
+                selected.bookkeeping().size(),
+                self,
+            );
+            *self.used_arena_count.get() = used_count + 1;
+            *self.arena_cumulative_size.get() += selected.arena().size();
+        }
+        Ok(())
+    }
+
+    /// Updates PMM bookkeeping to reflect that a given page-aligned range is reserved (e.g.,
+    /// wired). Used for both pre-PMM allocations and holes in RAM contained within arenas.
+    ///
+    /// # Safety
+    ///
+    /// Must only be called during single-threaded early boot, and `range` must be a valid
+    /// page-aligned reserved/allocated range within an initialized arena.  `range` is expected to
+    /// be page-aligned and to not intersect with past ranges provided to this method.  Also calls
+    /// to `alloc_page` must not fail.
+    unsafe fn init_reserved_range(&self, range: memalloc::Range) {
+        debug_assert!(page::is_page_rounded(range.addr() as usize));
+        debug_assert!(page::is_page_rounded(range.size() as usize));
+
+        let what = if range.ty() == memalloc::Type::Reserved {
+            "hole in RAM"
+        } else {
+            range.ty().as_str()
+        };
+
+        pin_init::stack_pin_init!(let reserved = VmPageDoublyLinkedList::new());
+        if let Err(status) = self.alloc_range(
+            PAddr(range.addr() as usize),
+            (range.size() as usize) / page::SIZE,
+            reserved.as_mut(),
+        ) {
+            dprintf!(
+                INFO,
+                "PMM: unable to reserve [{:#x}, {:#x}): {what}: {}\n",
+                range.addr(),
+                range.end(),
+                status.into_raw(),
+            );
+            return; // this is probably fatal but go ahead and continue
+        }
+        dprintf!(INFO, "PMM: reserved [{:#x}, {:#x}): {what}\n", range.addr(), range.end());
+
+        // Kernel page tables belong to the arch-specific VM backend, just as they'd
+        // be if they were created post-Physboot.
+        if range.ty() == memalloc::Type::KernelPageTables {
+            // SAFETY: `reserved` contains valid allocated kernel page table pages from physboot.
+            unsafe {
+                ArchVmAspace::handoff_page_tables_from_physboot(reserved);
+            }
+            return;
+        }
+
+        // Otherwise, mark it as wired and merge it into the appropriate reserved list.
+        for p in reserved.iter() {
+            // SAFETY: We have ownership of the freshly allocated pages in `reserved`.
+            unsafe {
+                p.set_state(VmPageState::WIRED);
+            }
+        }
+
+        // SAFETY: `PmmNode` is pinned in memory for its entire lifetime, and we are in
+        // single-threaded early boot.
+        let mut token = unsafe { LockToken::new() };
+        let list = unsafe {
+            if range.ty() == memalloc::Type::TemporaryPhysHandoff {
+                Pin::new_unchecked(&mut *self.phys_handoff_temporary_list.get())
+            } else if is_phys_vmo_type(range.ty()) {
+                self.phys_handoff_vmo_list.get_pinned_mut_locked(&mut token)
+            } else {
+                self.permanently_reserved_list.get_pinned_mut_locked(&mut token)
+            }
+        };
+        list.splice(reserved);
     }
 
     /// Return the slice of arenas from the built-in array that are known to be active. Used in
     /// loops that iterate across all arenas.
-    fn active_arenas<'a>(&'a self, token: &'a LockToken<'_, PmmNodeLockClass>) -> &'a [PmmArena] {
-        // SAFETY: The lock token proves that either the lock protecting these fields is held, or
-        // the caller has determined it is safe.
-        unsafe { &self.arenas.get(token)[..*self.used_arena_count.get(token)] }
+    fn active_arenas(&self) -> &[PmmArena] {
+        // SAFETY: `used_arena_count` and `arenas` are only mutated in `init_arena` before `self` is
+        // shared across threads, and `PmmArena` uses atomics for all post-boot interior mutation
+        // (`search_hint`), so forming shared references here never aliases a `&mut`.
+        // `used_arena_count` never exceeds `ARENA_COUNT` as `init_arena` refuses to add more arenas
+        // than that, so the range is in bounds. Using an unchecked range avoids inlining a panic
+        // path into every caller, including the C++ callers of `PmmNode::PaddrToPage()` and
+        // `PmmNode::PageToIndex()`.
+        unsafe {
+            let used = *self.used_arena_count.get();
+            debug_assert!(used <= Self::ARENA_COUNT);
+            (*self.arenas.get()).get_unchecked(..used)
+        }
     }
 
     /// Converts the number returned by page_to_index() back to a VmPagePtr pointer.
@@ -618,15 +720,20 @@ impl PmmNode {
     ///
     /// # Safety
     ///
-    /// The `index` must be a valid PMM page index.
+    /// The `index` must be a non-zero value previously returned by `page_to_index` on `self`.
     pub unsafe fn index_to_page(&self, index: u32) -> VmPagePtr {
         let index = index >> Self::INDEX_ZERO_BITS;
         let arena_ix = (index & Self::ARENA_MASK) as usize;
         let page_ix = (index >> Self::ARENA_BITS) as usize;
-        // SAFETY: Active arenas are initialized during early boot and arena metadata is immutable.
+        // SAFETY: `arenas` and `used_arena_count` are only mutated in `init_arena` before `self` is
+        // shared across threads, and all post-boot interior mutation in `PmmArena` is atomic. The
+        // caller guarantees `index` came from `page_to_index`, so `arena_ix` refers to an active
+        // arena and `page_ix` is a valid, non-zero, one-based page index within it.
         unsafe {
-            let token = LockToken::new();
-            VmPagePtr::new(self.active_arenas(&token)[arena_ix].get_page(page_ix - 1))
+            debug_assert!(arena_ix < *self.used_arena_count.get());
+            // `arena_ix` is masked to `ARENA_BITS`, so indexing the full `ARENA_COUNT` sized array
+            // needs no runtime bounds check (or load of `used_arena_count`) on this hot path.
+            VmPagePtr::new((*self.arenas.get())[arena_ix].get_page(page_ix - 1))
         }
     }
 
@@ -636,11 +743,10 @@ impl PmmNode {
     ///
     /// Note: This method needs to traverse (up to) all the memory pools so it's cost is
     ///       low but not trivial.
+    #[inline(always)]
     pub fn page_to_index(&self, page: VmPagePtr) -> u32 {
         let page_raw = page.as_raw();
-        // SAFETY: Active arenas are initialized during early boot and arena metadata is immutable.
-        let token = unsafe { LockToken::new() };
-        for (arena_ix, a) in self.active_arenas(&token).iter().enumerate() {
+        for (arena_ix, a) in self.active_arenas().iter().enumerate() {
             // SAFETY: `page` is a valid VmPagePtr so `page_raw` is a valid pointer.
             if unsafe { a.page_belongs_to_arena(page_raw) } {
                 // SAFETY: `page_raw` belongs to this arena's `page_array`.
@@ -660,21 +766,32 @@ impl PmmNode {
     ///
     /// # Safety
     ///
-    /// The `index` must be a valid PMM page index.
+    /// The `index` must be a non-zero value previously returned by `page_to_index` on `self`.
     pub unsafe fn index_to_paddr(&self, index: u32) -> PAddr {
         let index = index >> Self::INDEX_ZERO_BITS;
         let arena_ix = (index & Self::ARENA_MASK) as usize;
         let page_ix = (index >> Self::ARENA_BITS) as usize;
-        // SAFETY: Active arenas are initialized during early boot and arena metadata is immutable.
+        // SAFETY: `arenas` and `used_arena_count` are only mutated in `init_arena` before `self` is
+        // shared across threads, and all post-boot interior mutation in `PmmArena` is atomic. The
+        // caller guarantees `index` came from `page_to_index`, so `arena_ix` refers to an active
+        // arena and `page_ix` is a valid, non-zero, one-based page index within it.
         unsafe {
-            let token = LockToken::new();
-            let base = self.active_arenas(&token)[arena_ix].base().0;
+            debug_assert!(arena_ix < *self.used_arena_count.get());
+            // See `index_to_page` for why the full array is indexed.
+            let base = (*self.arenas.get())[arena_ix].base().0;
             PAddr(base + (page_ix - 1) * page::SIZE)
         }
     }
 
     /// Ends phys handoff by freeing temporary allocations.
-    pub fn end_handoff(&self) {
+    ///
+    /// # Safety
+    ///
+    /// Must be called at most once after hand-off from physboot completes, and not concurrently
+    /// with [`Self::init_from_memory_ranges`].
+    pub unsafe fn end_handoff(&self) {
+        // SAFETY: The caller guarantees exclusive access to `phys_handoff_temporary_list` and
+        // ownership of the temporary hand-off pages in it.
         unsafe {
             self.free_list(
                 Pin::new_unchecked(&mut *self.phys_handoff_temporary_list.get()),
@@ -686,9 +803,7 @@ impl PmmNode {
 
     /// Converts physical address to VmPagePtr if it belongs to any active arena.
     pub fn paddr_to_page(&self, addr: PAddr) -> Option<VmPagePtr> {
-        // SAFETY: Active arenas are initialized during early boot and arena metadata is immutable.
-        let token = unsafe { LockToken::new() };
-        for a in self.active_arenas(&token) {
+        for a in self.active_arenas() {
             if a.address_in_arena(addr) {
                 let index = (addr.0 - a.base().0) / page::SIZE;
                 // SAFETY: index is within arena bounds.
@@ -848,7 +963,7 @@ impl PmmNode {
     }
 
     /// Allocates physical pages in the specific address range.
-    pub fn alloc_range(
+    fn alloc_range(
         &self,
         mut address: PAddr,
         count: usize,
@@ -875,27 +990,12 @@ impl PmmNode {
                 *self.guard_lock_from_guard(&guard).all_free_pages_filled();
             let token = guard.as_mut().token_mut();
 
-            // SAFETY: token proves lock is held.
-            let num_arenas = unsafe { *self.used_arena_count.get(token) };
             // walk through the arenas, looking to see if the physical page belongs to it.
-            for arena_idx in 0..num_arenas {
-                loop {
-                    if allocated >= count {
-                        break;
-                    }
-                    // SAFETY: token proves lock is held, arena_idx < num_arenas.
-                    let in_arena =
-                        unsafe { self.arenas.get(token) }[arena_idx].address_in_arena(address);
-                    if !in_arena {
-                        break;
-                    }
-                    // SAFETY: token proves lock is held, arena_idx < num_arenas.
-                    let page_nonnull =
-                        unsafe { self.arenas.get(token) }[arena_idx].find_specific(address);
-                    let Some(page_nonnull) = page_nonnull else {
+            for arena in self.active_arenas() {
+                while allocated < count && arena.address_in_arena(address) {
+                    let Some(page_ptr) = arena.find_specific(address) else {
                         break;
                     };
-                    let page_ptr = page_nonnull;
 
                     // As we hold lock_, we can assume that any page in the FREE state is owned by
                     // us, and protected by lock_, and so should is_free() be true we will be
@@ -907,7 +1007,7 @@ impl PmmNode {
                         break;
                     }
 
-                    // We never allocate loaned pages for caller of AllocRange()
+                    // We never allocate loaned pages for caller of alloc_range()
                     if page.is_loaned() {
                         break;
                     }
@@ -985,16 +1085,11 @@ impl PmmNode {
         ksync::lock!(let mut guard = self.lock.lock());
         let token = guard.as_mut().token_mut();
 
-        // SAFETY: token proves lock is held.
-        let num_arenas = unsafe { *self.used_arena_count.get(token) };
-        for arena_idx in 0..num_arenas {
+        for arena in self.active_arenas() {
             // find_free_contiguous will search the arena for FREE pages. As we hold lock, any pages
             // in the FREE state are assumed to be owned by us, and would only be modified if lock
             // were held.
-            // SAFETY: token proves lock is held, arena_idx < num_arenas.
-            let p_nonnull = unsafe { self.arenas.get_mut(token) }[arena_idx]
-                .find_free_contiguous(count, alignment_log2);
-            let Some(p_nonnull) = p_nonnull else {
+            let Some(p_nonnull) = arena.find_free_contiguous(count, alignment_log2) else {
                 continue;
             };
             let p = p_nonnull.as_ptr();
@@ -1005,13 +1100,9 @@ impl PmmNode {
             let mut curr_pa = pa;
             // remove the pages from the run out of the free list.
             for _ in 0..count {
-                // SAFETY: token proves lock is held, arena_idx < num_arenas.
-                let curr_nonnull =
-                    unsafe { self.arenas.get(token) }[arena_idx].find_specific(curr_pa);
-                let Some(curr_nonnull) = curr_nonnull else {
+                let Some(curr_p) = arena.find_specific(curr_pa) else {
                     panic!("arena find_specific failed on page allocated from it");
                 };
-                let curr_p = curr_nonnull;
                 // SAFETY: curr_p is valid VmPage in arena and was verified free.
                 unsafe {
                     let page = curr_p.as_ref();
@@ -1145,23 +1236,26 @@ impl PmmNode {
 
     /// Return amount of physical memory in this node, in bytes.
     pub fn count_total_bytes(&self) -> u64 {
-        let token = unsafe { LockToken::new() };
-        // SAFETY: Reading arena_cumulative_size.
-        unsafe { *self.arena_cumulative_size.get(&token) }
+        // SAFETY: `arena_cumulative_size` is only mutated in `init_arena` before `self` is shared
+        // across threads.
+        unsafe { *self.arena_cumulative_size.get() }
     }
 
     /// Enable the free fill checker with the specified fill size and action, and begin filling
     /// freed pages (including freed loaned pages) going forward.  See |PmmChecker| for definition
     /// of fill size.
     ///
-    /// Note, pages freed piror to calling this method will remain unfilled.  To fill them, call
-    /// |FillFreePagesAndArm|.
+    /// Note, pages freed prior to calling this method will remain unfilled.  To fill them, call
+    /// [`Self::fill_free_pages_and_arm`].
     ///
     /// Returns true if the checker was enabled with the requested fill_size, or |false| otherwise.
     ///
     /// # Safety
     ///
-    /// `fill_size` must satisfy [`PmmChecker::is_valid_fill_size`].
+    /// - `fill_size` must satisfy [`PmmChecker::is_valid_fill_size`].
+    /// - Must only be called during boot, before the kernel console can run, or from the kernel
+    ///   console's `pmm checker` command, as that command reads the checker without holding the
+    ///   PMM locks.
     pub unsafe fn enable_free_page_filling(
         &self,
         fill_size: usize,
@@ -1178,8 +1272,9 @@ impl PmmNode {
         // checker. free_fill_enabled is false, so checker has not been published to the lockless
         // readers in the free paths, and its other accesses are made under these locks. The
         // exception is the kernel console's `pmm checker` command, which reads the checker without
-        // these locks; console commands are serialized by the console's command lock, and this is
-        // only called during boot (before the console runs) or by `pmm checker enable`.
+        // these locks; console commands are serialized by the console's command lock, and the
+        // caller guarantees this is only called during boot (before the console runs) or by
+        // `pmm checker enable`.
         let checker = unsafe { &mut *self.checker.get() };
         // SAFETY: The caller guarantees `fill_size` is valid.
         unsafe { checker.set_fill_size(fill_size) };
@@ -1194,7 +1289,7 @@ impl PmmNode {
     /// Fill all free pages (both non-loaned and loaned) with a pattern and arm the checker.  See
     /// |PmmChecker|.
     ///
-    /// This is a no-op if the checker is not enabled.  See |EnableFreePageFilling|
+    /// This is a no-op if the checker is not enabled.  See [`Self::enable_free_page_filling`]
     pub fn fill_free_pages_and_arm(&self) {
         // Require both locks so we can process both of the free lists and modify
         // all_free_pages_filled.
@@ -1314,7 +1409,7 @@ impl PmmNode {
 
     /// Waits the system to exit low memory state and then attempts to allocate.
     ///
-    /// To prevent herding problem, and because allocation compete for the `PmmNode::lock_` anyway,
+    /// To prevent herding problem, and because allocation compete for the `PmmNode::lock` anyway,
     /// only one thread is woken up a time, only if the previous thread successfully allocated.
     ///
     /// In normal conditions,  when the system is in low memory state, this method will return
@@ -1746,7 +1841,7 @@ impl PmmNode {
     /// # Safety
     ///
     /// Caller guarantees that all pages in |list| are valid and owned by them.
-    pub unsafe fn add_free_pages(&mut self, mut list: Pin<&mut VmPageDoublyLinkedList>) {
+    pub unsafe fn add_free_pages(&self, mut list: Pin<&mut VmPageDoublyLinkedList>) {
         ltracef!("list {:p}\n", list.as_ref().get_ref() as *const _);
 
         // SAFETY: called at boot time as arenas are brought online, no locks are acquired
@@ -1984,32 +2079,24 @@ impl PmmNode {
 
     /// Returns the number of active arenas.
     pub fn num_arenas(&self) -> usize {
-        ksync::lock!(let guard = self.lock.lock());
-        let token = guard.token();
-        // SAFETY: token proves lock is held.
-        unsafe { *self.used_arena_count.get(token) }
+        self.active_arenas().len()
     }
 
     /// Fills |buffer| with PmmArenaInfo objects starting at |offset| arena, ordered by base
     /// address. For example, passing an |offset| of 1 would skip the 1st arena.
     ///
-    /// Returns OUT_OF_RANGE if |offset| would yield an invalid.
+    /// Returns OUT_OF_RANGE if |offset| would yield an invalid range or |buffer| is too large.
     pub fn get_arena_info<'a>(
         &self,
         offset: usize,
         buffer: &'a mut [MaybeUninit<PmmArenaInfo>],
     ) -> Result<&'a mut [PmmArenaInfo], Status> {
-        ksync::lock!(let guard = self.lock.lock());
-        let token = guard.token();
-        let active = self.active_arenas(token);
+        let active = self.active_arenas();
         let active_len = active.len();
 
-        if buffer.is_empty() || (offset >= active_len) {
+        if buffer.is_empty() || offset >= active_len || buffer.len() > active_len - offset {
             return Err(Status::OUT_OF_RANGE);
         }
-
-        let count = (active_len - offset).min(buffer.len());
-        let buffer = &mut buffer[0..count];
 
         // Skip the first |offset| elements and copy the next elements.
         for off in 0..buffer.len() {
@@ -2037,8 +2124,7 @@ impl PmmNode {
             let loaned_token = unsafe { LockToken::new() };
             let free_loaned_count =
                 unsafe { self.free_loaned_count.get(&loaned_token) }.load(Ordering::Relaxed);
-            // SAFETY: token proves lock is held or synthesized in panic.
-            let total_size = unsafe { *self.arena_cumulative_size.get(token) };
+            let total_size = self.count_total_bytes();
             kprint::kprintln!(
                 "pmm node {:p}: free_count {} ({} bytes), free_loaned_count: {} ({} bytes), total \
                  size {}\n",
@@ -2050,7 +2136,7 @@ impl PmmNode {
                 total_size
             );
             let mut count_sum = PmmStateCount::default();
-            for a in self.active_arenas(token) {
+            for a in self.active_arenas() {
                 a.dump(false, false, Some(&mut count_sum));
             }
             kprint::kprintln!("Totals\n");
@@ -2068,14 +2154,24 @@ impl PmmNode {
         }
     }
 
+    /// Returns the raw pointer to any page compression instance.
+    fn page_compression_ptr(&self) -> Option<NonNull<VmCompression>> {
+        ksync::lock!(let guard = self.lock_compression_lock());
+        guard.page_compression().as_ref().map(|ptr| {
+            // Return the `RefPtr` pointer directly rather than round-tripping through
+            // `&VmCompression` so callers (such as FFI) retain full provenance.
+            // SAFETY: `RefPtr` wraps a `NonNull<VmCompression>`, so `as_ptr` is always non-null.
+            unsafe { NonNull::new_unchecked(fbl::RefPtr::as_ptr(ptr).cast_mut()) }
+        })
+    }
+
     /// Retrieve any page compression instance. If this returns non-null then it's return value will
     /// not change and the result can be cached.
     pub fn get_page_compression(&self) -> Option<&VmCompression> {
-        ksync::lock!(let guard = self.compression_lock.lock());
-        let token = guard.token();
-        // SAFETY: token proves lock is held. Once `page_compression` is set to `Some`, it is never
-        // modified or cleared for the lifetime of `self`.
-        unsafe { self.page_compression.get(token).as_ref().map(|ptr| &*fbl::RefPtr::as_ptr(ptr)) }
+        // SAFETY: Once `page_compression` is set to `Some` in `set_page_compression`, it is never
+        // modified or cleared for the lifetime of `self`, and `RefPtr<VmCompression>` only permits
+        // shared access.
+        self.page_compression_ptr().map(|ptr| unsafe { ptr.as_ref() })
     }
 
     /// Set the page compression instance. Returns an error if one has already been set.
@@ -2210,15 +2306,15 @@ impl PmmNode {
         }
     }
 
-    /// This method is racy as it allows us to read free_fill_enabled_ without holding the lock. If
+    /// This method is racy as it allows us to read free_fill_enabled without holding the lock. If
     /// we receive a value of 'true', then as there is no mechanism to re-set it to false, we
     /// know it is still true. If we receive the value of 'false', then it could still become
     /// 'true' later. The intent of this method is to allow for filling the free pattern outside
     /// of the lock in most cases, and in the unlikely event of a race during the checker being
     /// armed, the pattern can resort to being filled inside the lock.
     fn is_free_fill_enabled_racy(&self) -> bool {
-        // Read with acquire semantics to ensure that any modifications to checker_ are visible
-        // before changes to free_fill_enabled_. See EnableFreePageFilling for where the
+        // Read with acquire semantics to ensure that any modifications to checker are visible
+        // before changes to free_fill_enabled. See `enable_free_page_filling` for where the
         // release is performed.
         // SAFETY: `free_fill_enabled` is an `AtomicBool` specifically intended to be read racily
         // outside the lock with Acquire ordering.
@@ -2528,11 +2624,113 @@ impl PmmNode {
     }
 }
 
+// TODO(https://fxbug.dev/549318457): Delete this temporary witness module when we have ported
+// PhysHandoff to Rust.
+mod witness {
+
+    /// A temporary type witness for normalized range iterators.
+    #[derive(Clone)]
+    pub struct NormalizedRangesWitness<Ranges> {
+        ranges: Ranges,
+    }
+
+    impl<Ranges> NormalizedRangesWitness<Ranges>
+    where
+        Ranges: Iterator<Item = memalloc::Range> + Clone,
+    {
+        /// # Safety
+        ///
+        /// `ranges` must yield normalized ranges (sorted, disjoint, and maximally contiguous).
+        pub unsafe fn new_unchecked(ranges: Ranges) -> Self {
+            Self { ranges }
+        }
+    }
+
+    impl<Ranges> Iterator for NormalizedRangesWitness<Ranges>
+    where
+        Ranges: Iterator<Item = memalloc::Range> + Clone,
+    {
+        type Item = memalloc::Range;
+
+        fn next(&mut self) -> Option<memalloc::Range> {
+            self.ranges.next()
+        }
+    }
+
+    // SAFETY: `NormalizedRangesWitness::new_unchecked` requires the underlying iterator to be
+    // normalized.
+    unsafe impl<Ranges> memalloc::NormalizedRangeIterator for NormalizedRangesWitness<Ranges> where
+        Ranges: Iterator<Item = memalloc::Range> + Clone
+    {
+    }
+}
+
+use witness::*;
+
+/// FFI wrapper for [`PmmNode::paddr_to_page`]; see `PmmNode::PaddrToPage()`.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn rust_pmm_node_end_handoff(node: *mut PmmNode) {
-    // SAFETY: node is a valid PmmNode pointer.
-    let node = unsafe { &*node };
-    node.end_handoff();
+extern "C" fn rust_pmm_node_paddr_to_page(
+    node: &PmmNode,
+    addr: zx_paddr_t,
+) -> *mut page_bindings::vm_page_t {
+    node.paddr_to_page(PAddr(addr)).map_or(core::ptr::null_mut(), VmPagePtr::as_ffi)
+}
+
+/// FFI wrapper for [`PmmNode::page_to_index`]; see `PmmNode::PageToIndex()`.
+///
+/// # Safety
+///
+/// `page` must be a non-null, valid pointer to a `vm_page_t`.
+// This is on the hot path of encoding pages into a `VmPageOrMarker`, so the inline C++
+// `PmmNode::PageToIndex()` forces it to be inlined (via LTO) into its callers. `page_to_index` is
+// `#[inline(always)]` so that this function contains the whole implementation.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn rust_pmm_node_page_to_index(
+    node: &PmmNode,
+    page: *const page_bindings::vm_page_t,
+) -> u32 {
+    debug_assert!(!page.is_null());
+    // SAFETY: The caller guarantees `page` is a non-null, valid page.
+    node.page_to_index(unsafe { VmPagePtr::from_ffi_unchecked(page.cast_mut()) })
+}
+
+/// FFI wrapper for [`PmmNode::index_to_page`]; see `PmmNode::IndexToPage()`.
+///
+/// # Safety
+///
+/// `index` must be a non-zero value previously returned by [`rust_pmm_node_page_to_index`].
+#[unsafe(no_mangle)]
+unsafe extern "C" fn rust_pmm_node_index_to_page(
+    node: &PmmNode,
+    index: u32,
+) -> *mut page_bindings::vm_page_t {
+    // SAFETY: The caller guarantees `index` is a non-zero value returned by `page_to_index`.
+    unsafe { node.index_to_page(index) }.as_ffi()
+}
+
+/// FFI wrapper for [`PmmNode::index_to_paddr`]; see `PmmNode::IndexToPaddr()`.
+///
+/// # Safety
+///
+/// `index` must be a non-zero value previously returned by [`rust_pmm_node_page_to_index`].
+#[unsafe(no_mangle)]
+unsafe extern "C" fn rust_pmm_node_index_to_paddr(node: &PmmNode, index: u32) -> zx_paddr_t {
+    // SAFETY: The caller guarantees `index` is a non-zero value returned by `page_to_index`.
+    unsafe { node.index_to_paddr(index) }.0
+}
+
+/// FFI wrapper for [`PmmNode::page_queues`]; see `PmmNode::GetPageQueues()`.
+#[unsafe(no_mangle)]
+extern "C" fn rust_pmm_node_get_page_queues(node: &PmmNode) -> *mut PageQueues {
+    // Return the `UnsafeCell` pointer directly, rather than round tripping through `&PageQueues`,
+    // so that the pointer handed to C++ retains the provenance of the cell.
+    node.page_queues.get()
+}
+
+/// FFI wrapper for [`PmmNode::get_page_compression`]; see `PmmNode::GetPageCompression()`.
+#[unsafe(no_mangle)]
+extern "C" fn rust_pmm_node_get_page_compression(node: &PmmNode) -> *mut VmCompression {
+    node.page_compression_ptr().map_or(ptr::null_mut(), NonNull::as_ptr)
 }
 
 #[unsafe(no_mangle)]
@@ -2546,59 +2744,6 @@ unsafe extern "C" fn rust_pmm_node_alloc_page(
     match node.alloc_page(alloc_flags) {
         Ok(page) => {
             unsafe { *out_page = page.as_ffi() };
-            zx_types::ZX_OK
-        }
-        Err(status) => status.into_raw(),
-    }
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_pmm_node_alloc_pages(
-    node: *mut PmmNode,
-    count: usize,
-    alloc_flags: u32,
-    list: *mut VmPageDoublyLinkedList,
-) -> zx_status_t {
-    // SAFETY: node and list are valid and pinned.
-    let node = unsafe { &*node };
-    let list = unsafe { Pin::new_unchecked(&mut *list) };
-    match node.alloc_pages(count, alloc_flags, list) {
-        Ok(()) => zx_types::ZX_OK,
-        Err(status) => status.into_raw(),
-    }
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_pmm_node_alloc_range(
-    node: *mut PmmNode,
-    address: u64,
-    count: usize,
-    list: *mut VmPageDoublyLinkedList,
-) -> zx_status_t {
-    // SAFETY: node and list are valid and pinned.
-    let node = unsafe { &*node };
-    let list = unsafe { Pin::new_unchecked(&mut *list) };
-    match node.alloc_range(PAddr(address as usize), count, list) {
-        Ok(()) => zx_types::ZX_OK,
-        Err(status) => status.into_raw(),
-    }
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_pmm_node_alloc_contiguous(
-    node: *mut PmmNode,
-    count: usize,
-    alloc_flags: u32,
-    alignment_log2: u8,
-    pa: *mut u64,
-    list: *mut VmPageDoublyLinkedList,
-) -> zx_status_t {
-    // SAFETY: node, pa, and list are valid and pinned.
-    let node = unsafe { &*node };
-    let list = unsafe { Pin::new_unchecked(&mut *list) };
-    match node.alloc_contiguous(count, alloc_flags, alignment_log2, list) {
-        Ok(out_pa) => {
-            unsafe { *pa = out_pa.0 as u64 };
             zx_types::ZX_OK
         }
         Err(status) => status.into_raw(),
@@ -2719,277 +2864,6 @@ unsafe extern "C" fn rust_pmm_node_begin_free_loaned_array(
     }
 }
 
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_pmm_node_unwire_page(
-    node: *mut PmmNode,
-    page: *mut page_bindings::vm_page_t,
-) {
-    // SAFETY: node and page are valid.
-    let node = unsafe { &*node };
-    let page = unsafe { VmPagePtr::from_ffi(page) }.expect("null page");
-    node.unwire_page(page);
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_pmm_node_begin_loan(
-    node: *mut PmmNode,
-    page_list: *mut VmPageDoublyLinkedList,
-    delay_reuse: PmmOptDelayReuse,
-) {
-    // SAFETY: node and page_list are valid and pinned.
-    let node = unsafe { &*node };
-    let page_list = unsafe { Pin::new_unchecked(&mut *page_list) };
-    unsafe { node.begin_loan(page_list, delay_reuse) };
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_pmm_node_cancel_loan(
-    node: *mut PmmNode,
-    page: *mut page_bindings::vm_page_t,
-) {
-    // SAFETY: node and page are valid.
-    let node = unsafe { &*node };
-    let page = unsafe { VmPagePtr::from_ffi(page) }.expect("null page");
-    unsafe { node.cancel_loan(page) };
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_pmm_node_end_loan(
-    node: *mut PmmNode,
-    page: *mut page_bindings::vm_page_t,
-) {
-    // SAFETY: node and page are valid.
-    let node = unsafe { &*node };
-    let page = unsafe { VmPagePtr::from_ffi(page) }.expect("null page");
-    unsafe { node.end_loan(page) };
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_pmm_node_set_free_memory_signal(
-    node: *mut PmmNode,
-    free_lower_bound: u64,
-    free_upper_bound: u64,
-    delay_allocations_pages: u64,
-    event: *mut Event,
-) -> bool {
-    // SAFETY: node is valid and caller guarantees event is valid.
-    unsafe {
-        let node = &*node;
-        node.set_free_memory_signal(
-            free_lower_bound,
-            free_upper_bound,
-            delay_allocations_pages,
-            event,
-        )
-    }
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_pmm_node_wait_for_single_page_allocation(
-    node: *mut PmmNode,
-    deadline: zx_instant_mono_t,
-    slack_amount: zx_duration_t,
-    slack_mode: SlackMode,
-    suspendable: bool,
-    out_page: *mut *mut page_bindings::vm_page_t,
-) -> zx_status_t {
-    // SAFETY: node and out_page are valid.
-    let node = unsafe { &*node };
-    let slack =
-        TimerSlack::new(crate::platform_rs::timer::DurationUnknown(slack_amount), slack_mode);
-    let deadline = Deadline::new(crate::platform_rs::timer::InstantUnknown(deadline), slack);
-    match node.wait_for_single_page_allocation(deadline, suspendable) {
-        Ok(page) => {
-            unsafe { *out_page = page.as_ffi() };
-            zx_types::ZX_OK
-        }
-        Err(status) => status.into_raw(),
-    }
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_pmm_node_stop_returning_should_wait(node: *mut PmmNode) {
-    // SAFETY: node is valid.
-    let node = unsafe { &*node };
-    node.stop_returning_should_wait();
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_pmm_node_count_free_pages(node: *const PmmNode) -> u64 {
-    // SAFETY: node is valid.
-    let node = unsafe { &*node };
-    node.count_free_pages()
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_pmm_node_count_loaned_free_pages(node: *const PmmNode) -> u64 {
-    // SAFETY: node is valid.
-    let node = unsafe { &*node };
-    node.count_loaned_free_pages()
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_pmm_node_count_loan_cancelled_pages(node: *const PmmNode) -> u64 {
-    // SAFETY: node is valid.
-    let node = unsafe { &*node };
-    node.count_loan_cancelled_pages()
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_pmm_node_count_loaned_not_free_pages(node: *const PmmNode) -> u64 {
-    // SAFETY: node is valid.
-    let node = unsafe { &*node };
-    node.count_loaned_not_free_pages()
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_pmm_node_count_loaned_pages(node: *const PmmNode) -> u64 {
-    // SAFETY: node is valid.
-    let node = unsafe { &*node };
-    node.count_loaned_pages()
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_pmm_node_count_total_bytes(node: *const PmmNode) -> u64 {
-    // SAFETY: node is valid.
-    let node = unsafe { &*node };
-    node.count_total_bytes()
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_pmm_node_dump_free(node: *const PmmNode) {
-    // SAFETY: node is valid.
-    let node = unsafe { &*node };
-    node.dump_free();
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_pmm_node_dump(node: *const PmmNode, is_panic: bool) {
-    // SAFETY: node is valid.
-    let node = unsafe { &*node };
-    node.dump(is_panic);
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_pmm_node_get_arena_info(
-    node: *const PmmNode,
-    count: usize,
-    i: u64,
-    buffer: *mut PmmArenaInfo,
-    buffer_size: usize,
-) -> zx_status_t {
-    // SAFETY: node is valid.
-    let node = unsafe { &*node };
-    let num_arenas = node.num_arenas();
-    if count == 0 || (count + i as usize > num_arenas) || (i as usize >= num_arenas) {
-        return zx_types::ZX_ERR_OUT_OF_RANGE;
-    }
-    if buffer_size < count * core::mem::size_of::<PmmArenaInfo>() {
-        return zx_types::ZX_ERR_BUFFER_TOO_SMALL;
-    }
-    // SAFETY: Validated count is not 0 and buffer is at least large enough.
-    let slice =
-        unsafe { core::slice::from_raw_parts_mut(buffer as *mut MaybeUninit<PmmArenaInfo>, count) };
-    // SAFETY: buffer is checked against buffer_size in get_arena_info_raw.
-    match node.get_arena_info(i as usize, slice) {
-        Ok(result) => {
-            if result.len() < count {
-                zx_types::ZX_ERR_BUFFER_TOO_SMALL
-            } else {
-                zx_types::ZX_OK
-            }
-        }
-        Err(status) => status.into_raw(),
-    }
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_pmm_node_fill_free_pages_and_arm(node: *mut PmmNode) {
-    // SAFETY: node is valid.
-    let node = unsafe { &*node };
-    node.fill_free_pages_and_arm();
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_pmm_node_check_all_free_pages(node: *mut PmmNode) {
-    // SAFETY: node is valid.
-    let node = unsafe { &*node };
-    node.check_all_free_pages();
-}
-
-#[unsafe(no_mangle)]
-#[cfg(sanitize = "address")]
-unsafe extern "C" fn rust_pmm_node_poison_all_free_pages(node: *mut PmmNode) {
-    // SAFETY: node is valid.
-    let node = unsafe { &*node };
-    node.poison_all_free_pages();
-}
-
-/// # Safety
-///
-/// `node` must be valid and `fill_size` must satisfy [`PmmChecker::is_valid_fill_size`].
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_pmm_node_enable_free_page_filling(
-    node: *mut PmmNode,
-    fill_size: usize,
-    action: u8,
-) -> bool {
-    // SAFETY: node is valid.
-    let node = unsafe { &*node };
-    let action = match action {
-        1 => CheckFailAction::Panic,
-        _ => CheckFailAction::Oops,
-    };
-    // SAFETY: The caller guarantees `fill_size` is valid; the C++ callers either check it with
-    // `PmmChecker::IsValidFillSize` (pmm.cc) or pass `kPageSize` (pmm_unittest.cc).
-    unsafe { node.enable_free_page_filling(fill_size, action) }
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_pmm_node_get_alloc_failed_count() -> i64 {
-    PmmNode::get_alloc_failed_count()
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_pmm_node_seed_random_should_wait(node: *mut PmmNode) {
-    // SAFETY: node is valid.
-    let node = unsafe { &*node };
-    node.seed_random_should_wait();
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_pmm_node_report_alloc_failure(
-    node: *mut PmmNode,
-    failure: *const AllocFailure,
-) {
-    // SAFETY: node and failure are valid.
-    let node = unsafe { &*node };
-    let failure = unsafe { *failure };
-    node.report_alloc_failure(failure);
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_pmm_node_get_first_alloc_failure(
-    node: *const PmmNode,
-    out_failure: *mut AllocFailure,
-) {
-    // SAFETY: node and out_failure are valid.
-    let node = unsafe { &*node };
-    let failure = node.get_first_alloc_failure();
-    unsafe { *out_failure = failure };
-}
-
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_pmm_node_add_free_pages(
-    node: *mut PmmNode,
-    list: *mut VmPageDoublyLinkedList,
-) {
-    // SAFETY: Caller guarantees these are not null and are pinned.
-    unsafe {
-        (*node).add_free_pages(Pin::new_unchecked(&mut *list));
-    }
-}
-
 /// Unit tests for PmmNode.
 #[cfg(ktest)]
 #[unittest::suite(name = "pmm_node_rust")]
@@ -3009,8 +2883,8 @@ mod pmm_node_rust {
     use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
     use pin_init::{stack_pin_init, stack_try_pin_init};
     use unittest::{
-        assert_gt, assert_ok, assert_true, expect_eq, expect_false, expect_ne, expect_ok,
-        expect_true, unwrap_ok,
+        assert_gt, assert_ne, assert_ok, assert_true, expect_eq, expect_false, expect_ne,
+        expect_ok, expect_true, unwrap_ok,
     };
     use zx_status::Status;
 
@@ -3065,7 +2939,8 @@ mod pmm_node_rust {
             // SAFETY: Pages were allocated and transitioned to FREE state above.
             unsafe { this.node.add_free_pages(list.as_mut()) };
 
-            // SAFETY: `page::SIZE` is a valid fill size.
+            // SAFETY: `page::SIZE` is a valid fill size, and this test-local node is not reachable
+            // from the kernel console's `pmm checker` command.
             assert!(unsafe {
                 this.node.enable_free_page_filling(
                     page::SIZE,
@@ -3189,6 +3064,26 @@ mod pmm_node_rust {
     #[test]
     fn smoke() {
         stack_pin_init!(let _pmm = PmmNode::init());
+    }
+
+    /// Rejects arenas whose page count would overflow packed indices.
+    #[test]
+    fn init_arena_rejects_overflowing_page_count() {
+        // An arena with 2^25 pages (`MAX_PAGES_PER_ARENA + 1`) would assign 1-based page index
+        // 2^25 to its top page, overflowing the packed u32 index in `page_to_index` to 0.
+        stack_pin_init!(let node = PmmNode::init());
+        let too_many_pages_bytes = ((PmmNode::MAX_PAGES_PER_ARENA + 1) * page::SIZE) as u64;
+        let selected = arena::Selection::new(
+            arena::Range::new(0, too_many_pages_bytes),
+            arena::Range::new(0, page::SIZE as u64),
+            0,
+        );
+        // SAFETY: `node` is local to this stack frame with no concurrent readers or writers, and
+        // `selected` exceeds `MAX_PAGES_PER_ARENA` so `init_arena` returns before dereferencing
+        // physical addresses.
+        let status = unsafe { node.init_arena(selected) };
+        expect_true!(status == Err(Status::NOT_SUPPORTED));
+        expect_eq!(node.num_arenas(), 0);
     }
 
     /// Allocates more than one page and frees them.
@@ -4120,6 +4015,40 @@ mod pmm_node_rust {
         }
     }
 
+    /// Verifies that kasan poisons freed PMM pages and unpoisons allocated pages.
+    #[test]
+    fn kasan_detects_use_after_free() {
+        unsafe extern "C" {
+            fn asan_region_is_poisoned(address: usize, size: usize) -> usize;
+            fn asan_entire_region_is_poisoned(address: usize, size: usize) -> bool;
+        }
+
+        // TODO(https://fxbug.dev/42104852): Enable on arm64 when kasan poisoning works there.
+        if cfg!(all(sanitize = "address", target_arch = "x86_64")) {
+            stack_try_pin_init!(let node = ManagedPmmNode::init());
+            let mut node = unwrap_ok!(node);
+            assert_ok!(node.as_mut().setup());
+
+            let page =
+                unwrap_ok!(node.node().alloc_page(ALLOC_FLAG_ANY), "pmm_alloc_page one page");
+            // SAFETY: `page` is a valid allocated page.
+            let paddr = unsafe { page.paddr() };
+            assert_ne!(paddr.0, 0);
+            // SAFETY: `paddr` is a valid physical page address in the physmap.
+            expect_eq!(0, unsafe {
+                asan_region_is_poisoned(paddr_to_physmap(paddr).0, page::SIZE)
+            });
+            // SAFETY: `page` was allocated from `node` and is owned by this test.
+            unsafe {
+                node.node().free_page(page, PmmOptDelayReuse::Default);
+            }
+            // SAFETY: `paddr` is a valid physical page address in the physmap.
+            expect_true!(unsafe {
+                asan_entire_region_is_poisoned(paddr_to_physmap(paddr).0, page::SIZE)
+            });
+        }
+    }
+
     struct WithLoanedPageWaiterArgs {
         node: *const PmmNode,
         page: VmPagePtr,
@@ -4257,5 +4186,123 @@ mod pmm_node_rust {
             node.node().end_loan(page);
             node.node().free_page(page, PmmOptDelayReuse::Default);
         }
+    }
+
+    struct PmmSlabWaiterArgs {
+        node: *const PmmNode,
+        num_pages: usize,
+        started: *const AtomicBool,
+        status: *const AtomicI32,
+    }
+
+    // SAFETY: Raw pointers point to valid test data living for the test duration.
+    unsafe impl Send for PmmSlabWaiterArgs {}
+    // SAFETY: Raw pointers point to valid test data living for the test duration.
+    unsafe impl Sync for PmmSlabWaiterArgs {}
+
+    extern "C" fn pmm_slab_waiter_thread(arg: *mut core::ffi::c_void) -> i32 {
+        const WAIT_TIMEOUT_SECS: i64 = 5;
+
+        // SAFETY: `arg` is a valid pointer to `PmmSlabWaiterArgs` passed during `thread::spawn`
+        // that outlives this thread (which is joined before `PmmSlabWaiterArgs` is dropped).
+        let args = unsafe { &*(arg as *const PmmSlabWaiterArgs) };
+        // SAFETY: `args.node` points to a pinned `PmmNode` living for the test duration.
+        let node = unsafe { &*args.node };
+        // SAFETY: `args.started` points to a stack `AtomicBool` living for the test duration.
+        let started = unsafe { &*args.started };
+        // SAFETY: `args.status` points to a stack `AtomicI32` living for the test duration.
+        let status = unsafe { &*args.status };
+
+        stack_pin_init!(let slab_pages = VmPageDoublyLinkedList::new());
+        started.store(true, Ordering::SeqCst);
+
+        for _ in 0..args.num_pages {
+            let mut res = node.alloc_page(ALLOC_FLAG_ANY | ALLOC_FLAG_CAN_WAIT);
+            while matches!(res, Err(Status::SHOULD_WAIT)) {
+                res = node.wait_for_single_page_allocation(
+                    Deadline::after_mono(
+                        DurationMono::from_seconds(WAIT_TIMEOUT_SECS),
+                        TimerSlack::none(),
+                    ),
+                    /*suspendable=*/ true,
+                );
+            }
+            match res {
+                Ok(page) => {
+                    // SAFETY: `page` was just allocated from `node`, so it is valid and not in any
+                    // list.
+                    unsafe { slab_pages.as_mut().push_back_raw(page.as_non_null()) };
+                }
+                Err(err) => {
+                    if !slab_pages.is_empty() {
+                        // SAFETY: `slab_pages` contains only pages allocated from `node` above.
+                        unsafe {
+                            node.free_list(slab_pages.as_mut(), PmmOptDelayReuse::Default);
+                        }
+                    }
+                    status.store(err.into_raw(), Ordering::SeqCst);
+                    return 0;
+                }
+            }
+        }
+
+        // SAFETY: `slab_pages` contains only pages allocated from `node` above.
+        unsafe {
+            node.free_list(slab_pages.as_mut(), PmmOptDelayReuse::Default);
+        }
+        status.store(zx_types::ZX_OK, Ordering::SeqCst);
+        0
+    }
+
+    /// Verifies 64-page waitable allocation wakes and completes when SHOULD_WAIT clears.
+    #[test]
+    fn node_delayed_slab_alloc() {
+        // Regression test for https://fxbug.dev/573602747:
+        // Verifies that a 64-page waitable allocation on a `PmmNode` in the `SHOULD_WAIT`
+        // low-memory state blocks in `wait_for_single_page_allocation` until
+        // `set_free_memory_signal` clears the low-memory state, and then wakes and completes all 64
+        // page allocations.
+        const POLL_SLEEP_MS: i64 = 1;
+        const BLOCK_CHECK_SLEEP_MS: i64 = 50;
+
+        stack_try_pin_init!(let node = ManagedPmmNode::init());
+        let mut node = unwrap_ok!(node);
+        assert_ok!(node.as_mut().setup());
+
+        expect_true!(node.set_free_memory_signal(0, ManagedPmmNode::NUM_PAGES as u64, u64::MAX));
+
+        let started = AtomicBool::new(false);
+        let status = AtomicI32::new(Status::INTERNAL.into_raw());
+        let waiter_args = PmmSlabWaiterArgs {
+            node: node.node() as *const _,
+            num_pages: ManagedPmmNode::NUM_PAGES,
+            started: &started as *const _,
+            status: &status as *const _,
+        };
+
+        // SAFETY: `waiter_args` and its referenced atomics/node outlive the spawned thread, which
+        // is joined before returning from this test.
+        let thread = unwrap_ok!(unsafe {
+            thread::spawn(
+                c"pmm slab waiter".as_ptr(),
+                pmm_slab_waiter_thread,
+                &waiter_args as *const _ as *mut core::ffi::c_void,
+            )
+        });
+
+        while !started.load(Ordering::SeqCst) {
+            let _ = thread::sleep_relative(DurationMono::from_millis(POLL_SLEEP_MS));
+        }
+        let _ = thread::sleep_relative(DurationMono::from_millis(BLOCK_CHECK_SLEEP_MS));
+        // Still blocked waiting for low-memory SHOULD_WAIT to clear.
+        expect_eq!(status.load(Ordering::SeqCst), Status::INTERNAL.into_raw());
+
+        // Re-enable allocations with delay_pages = 0 so all 64 pages in the node can be allocated
+        // without re-tripping SHOULD_WAIT mid-slab.
+        expect_true!(node.set_free_memory_signal(0, u64::MAX, 0));
+
+        // SAFETY: `thread` is a valid `Thread` handle spawned above.
+        let _ = unsafe { thread.join(InstantMono::INFINITE) };
+        expect_eq!(status.load(Ordering::SeqCst), zx_types::ZX_OK);
     }
 }

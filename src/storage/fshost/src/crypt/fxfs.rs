@@ -52,6 +52,50 @@ const KEYMINT_PERSISTENCE_FILE: &'static str = "keymint.0";
 
 const KEYBAG_FILE_NAME: &str = "fxfs-data";
 
+/// Zeroes a plaintext key buffer before it is dropped.
+fn zeroize_key(mut key: Vec<u8>) {
+    key.fill(0);
+    std::hint::black_box(key.as_mut_slice());
+}
+
+fn into_aes256_key(key: Vec<u8>, label: &str) -> Result<Aes256Key, Error> {
+    if key.len() != AES256_KEY_SIZE {
+        zeroize_key(key);
+        return Err(anyhow!("Invalid {label} key"));
+    }
+    Aes256Key::try_from(key).map_err(|_| anyhow!("Invalid {label} key"))
+}
+
+/// Unseals the data and metadata keys concurrently.
+///
+/// Returns `None` if Keymint reported that the sealing key requires an upgrade for either key.
+/// If one unseal fails (or requires an upgrade) while the other succeeds, the successfully
+/// unsealed plaintext key is zeroed before being dropped.
+async fn unseal_key_pair(keymint: &KeymintSealedData) -> Result<Option<(Vec<u8>, Vec<u8>)>, Error> {
+    use crypt_policy::UnsealResult::{KeyRequiresUpgrade, Success};
+
+    let (data, metadata) =
+        futures::join!(keymint.unseal_key("data.data"), keymint.unseal_key("data.metadata"));
+    let (data, metadata) = match (data, metadata) {
+        (Ok(data), Ok(metadata)) => (data, metadata),
+        (Err(err), Ok(other)) | (Ok(other), Err(err)) => {
+            if let Success(key) = other {
+                zeroize_key(key);
+            }
+            return Err(err);
+        }
+        (Err(err), Err(_)) => return Err(err),
+    };
+    match (data, metadata) {
+        (Success(data), Success(metadata)) => Ok(Some((data, metadata))),
+        (Success(key), KeyRequiresUpgrade) | (KeyRequiresUpgrade, Success(key)) => {
+            zeroize_key(key);
+            Ok(None)
+        }
+        (KeyRequiresUpgrade, KeyRequiresUpgrade) => Ok(None),
+    }
+}
+
 impl KeyManager {
     async fn load_keymint_data(&self) -> Result<Option<KeymintSealedData>, Error> {
         let contents =
@@ -108,38 +152,6 @@ impl KeyManager {
         Ok(())
     }
 
-    async fn handle_key_unseal(
-        &self,
-        keymint: &mut KeymintSealedData,
-        label: &str,
-    ) -> Result<Vec<u8>, Error> {
-        let mut upgraded = false;
-        let key = loop {
-            match keymint.unseal_key(label).await? {
-                crypt_policy::UnsealResult::Success(key) => {
-                    break key;
-                }
-                crypt_policy::UnsealResult::KeyRequiresUpgrade => {
-                    // Hardware requested an upgrade. Perform the upgrade logic.
-                    if upgraded {
-                        return Err(anyhow!("KeyRequiresUpgrade returned twice"));
-                    }
-                    keymint
-                        .upgrade_sealing_blob()
-                        .await
-                        .context("Failed to upgrade sealing key")?;
-                    upgraded = true;
-                }
-            }
-        };
-
-        if upgraded {
-            self.commit_keymint_upgrade(keymint).await?;
-        }
-
-        Ok(key)
-    }
-
     async fn unseal_keymint_keys(&mut self) -> Result<Option<(Aes256Key, Aes256Key)>, Error> {
         let Some(mut keymint) =
             self.load_keymint_data().await.context("Failed to load keymint data")?
@@ -147,13 +159,23 @@ impl KeyManager {
             return Ok(None);
         };
 
-        let data = self.handle_key_unseal(&mut keymint, "data.data").await?;
-        let metadata = self.handle_key_unseal(&mut keymint, "data.metadata").await?;
+        let (data, metadata) = match unseal_key_pair(&keymint).await? {
+            Some(keys) => keys,
+            None => {
+                // Hardware requested an upgrade. Upgrade the sealing blob, and only commit the
+                // upgrade once both keys have been successfully unsealed with it.
+                keymint.upgrade_sealing_blob().await.context("Failed to upgrade sealing key")?;
+                let keys = unseal_key_pair(&keymint)
+                    .await?
+                    .ok_or_else(|| anyhow!("KeyRequiresUpgrade returned twice"))?;
+                self.commit_keymint_upgrade(&mut keymint).await?;
+                keys
+            }
+        };
 
-        Ok(Some((
-            Aes256Key::try_from(data).map_err(|_| anyhow!("Invalid data key"))?,
-            Aes256Key::try_from(metadata).map_err(|_| anyhow!("Invalid metadata key"))?,
-        )))
+        let data_key = into_aes256_key(data, "data");
+        let metadata_key = into_aes256_key(metadata, "metadata");
+        Ok(Some((data_key?, metadata_key?)))
     }
 
     async fn create_keymint_keys(&mut self) -> Result<Option<(Aes256Key, Aes256Key)>, Error> {
@@ -169,10 +191,9 @@ impl KeyManager {
         let metadata = keymint.create_key("data.metadata").await?;
         self.store_keymint_data(&keymint).await.context("Failed to store keymint data")?;
 
-        Ok(Some((
-            Aes256Key::try_from(data).map_err(|_| anyhow!("Invalid data key"))?,
-            Aes256Key::try_from(metadata).map_err(|_| anyhow!("Invalid metadata key"))?,
-        )))
+        let data_key = into_aes256_key(data, "data");
+        let metadata_key = into_aes256_key(metadata, "metadata");
+        Ok(Some((data_key?, metadata_key?)))
     }
 
     // Returns `None` if the keybag was absent when attempting to unwrap.  (`None` is never returned
@@ -421,22 +442,18 @@ impl CryptService {
         let wrapping_key_id_0 = [0; 16];
         let mut wrapping_key_id_1 = [0; 16];
         wrapping_key_id_1[0] = 1;
-        crypt_management
-            .add_wrapping_key(&wrapping_key_id_0, data_key.deref())
-            .await?
-            .map_err(zx::Status::err_from_raw)?;
-        crypt_management
-            .add_wrapping_key(&wrapping_key_id_1, metadata_key.deref())
-            .await?
-            .map_err(zx::Status::err_from_raw)?;
-        crypt_management
-            .set_active_key(KeyPurpose::Data, &wrapping_key_id_0)
-            .await?
-            .map_err(zx::Status::err_from_raw)?;
-        crypt_management
-            .set_active_key(KeyPurpose::Metadata, &wrapping_key_id_1)
-            .await?
-            .map_err(zx::Status::err_from_raw)?;
+        let (add_data, add_metadata) = futures::try_join!(
+            crypt_management.add_wrapping_key(&wrapping_key_id_0, data_key.deref()),
+            crypt_management.add_wrapping_key(&wrapping_key_id_1, metadata_key.deref()),
+        )?;
+        add_data.map_err(zx::Status::err_from_raw)?;
+        add_metadata.map_err(zx::Status::err_from_raw)?;
+        let (set_data, set_metadata) = futures::try_join!(
+            crypt_management.set_active_key(KeyPurpose::Data, &wrapping_key_id_0),
+            crypt_management.set_active_key(KeyPurpose::Metadata, &wrapping_key_id_1),
+        )?;
+        set_data.map_err(zx::Status::err_from_raw)?;
+        set_metadata.map_err(zx::Status::err_from_raw)?;
 
         Ok(CryptService { component_name, exposed_dir })
     }

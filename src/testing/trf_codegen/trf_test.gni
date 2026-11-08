@@ -27,8 +27,16 @@ import("//sdk/ctf/build/ctf.gni")
 #     Type: string
 #
 #   cut_manifest (optional)
-#     The path to the cml manifest of the CUT, used to parse exposed capability configurations.
+#     The path to the cml manifest of the CUT, used to parse used/exposed protocols
+#     and configuration capabilities. Required when tests specify `config(...)` overrides
+#     unless `cut_config_namespace` is set.
 #     Type: path
+#
+#   cut_config_namespace (optional)
+#     Configuration capability namespace prefix (for example, "fuchsia.examples.reverser")
+#     used to derive `<cut_config_namespace>.<UpperCamelKey>` capability names for config
+#     overrides not explicitly mapped by `cut_manifest`.
+#     Type: string
 #
 #   deps (optional)
 #     Additional Rust dependencies for the test driver and injectable universe binary targets.
@@ -122,6 +130,12 @@ template("trf_test") {
         rebase_path(_cut_manifest_inputs[0], root_build_dir),
       ]
     }
+    if (defined(invoker.cut_config_namespace)) {
+      args += [
+        "--cut-config-namespace",
+        invoker.cut_config_namespace,
+      ]
+    }
   }
 
   # 2. FIDL compilation targets
@@ -190,19 +204,6 @@ template("trf_test") {
     cm_label = ":$iu_manifest_target_name"
   }
 
-  iu_cvf_target_name = "${target_name}_iu_cvf"
-
-  fuchsia_structured_config_values(iu_cvf_target_name) {
-    testonly = true
-    cm_label = ":$iu_manifest_target_name"
-    values = {
-      # The injectable universe dynamically expects a 'hat' parameter via
-      # structured config which serves as a namespace partition string routing
-      # concurrent mock data, but it defaults to an empty global namespace.
-      hat = ""
-    }
-  }
-
   iu_bin_target_name = "${target_name}_iu_bin"
 
   rustc_binary(iu_bin_target_name) {
@@ -248,11 +249,7 @@ template("trf_test") {
   fuchsia_package(iu_pkg_target_name) {
     package_name = "${_main_target_name}_injectable_universe"
     testonly = true
-    validate_structured_config = false
-    deps = [
-      ":$iu_comp_target_name",
-      ":$iu_cvf_target_name",
-    ]
+    deps = [ ":$iu_comp_target_name" ]
   }
 
   # 5. Test Driver component
@@ -332,7 +329,6 @@ template("trf_test") {
 
   # 8. Main Test Package
   fuchsia_test_package(target_name) {
-    validate_structured_config = false
     test_components = [ ":$test_root_comp_target_name" ]
     deps = [ ":$td_comp_target_name" ]
     subpackages = [ ":$rf_pkg_target_name" ]

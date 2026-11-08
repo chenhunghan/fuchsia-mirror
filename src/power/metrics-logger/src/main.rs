@@ -9,20 +9,20 @@ mod network_activity_logger;
 mod sensor_logger;
 
 use crate::cpu_load_logger::{CpuLoadLogger, CpuStatsDriver, generate_cpu_stats_driver};
-use crate::driver_utils::Config;
+use crate::driver_utils::{Config, Driver, DriverAlias};
 use crate::gpu_usage_logger::{GpuDriver, GpuUsageLogger, generate_gpu_drivers};
 use crate::network_activity_logger::{NetworkActivityLoggerBuilder, generate_network_devices};
 use crate::sensor_logger::{
     ActivityListener, PowerDriver, PowerLogger, PowerLoggerArgs, TemperatureDriver,
     TemperatureLogger, TemperatureLoggerArgs, generate_power_drivers, generate_temperature_drivers,
 };
-use anyhow::{Error, Result};
+use anyhow::{Error, Result, format_err};
 use argh::FromArgs;
 use fidl::endpoints::ProtocolMarker;
 use fidl_fuchsia_hardware_network as fhwnet;
 use fidl_fuchsia_power_metrics::{self as fmetrics, RecorderRequest};
 use fidl_fuchsia_ui_activity as factivity;
-use fuchsia_async as fasync;
+use fuchsia_async::{self as fasync, TimeoutExt};
 use fuchsia_component::client::connect_to_protocol;
 use fuchsia_component::server::ServiceFs;
 use fuchsia_inspect as inspect;
@@ -30,10 +30,11 @@ use futures::future::join_all;
 use futures::stream::{FuturesUnordered, StreamExt, TryStreamExt};
 use futures::task::Context;
 use futures::{FutureExt, TryFutureExt};
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use serde_json as json;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 
@@ -62,6 +63,140 @@ const CONFIG_PATH: &'static str = "/config/data/config.json";
 const STANDALONE_SAMPLING_INTERVAL: u32 = 1000; // 1 sec.
 const STANDALONE_STATISTICS_INTERVAL: u32 = 60 * 1000; // 60 secs.
 const STANDALONE_CLIENT_ID: &'static str = "metrics-logger-standalone";
+
+// Sensor drivers bind asynchronously during boot, and metrics-logger-standalone is started eagerly,
+// so drivers may not be available yet when it starts. In standalone mode, driver discovery is
+// retried every `STANDALONE_DRIVER_DISCOVERY_POLL_INTERVAL` until all the sensors listed in the
+// config have been found, or until `STANDALONE_DRIVER_DISCOVERY_TIMEOUT` has elapsed.
+const STANDALONE_DRIVER_DISCOVERY_TIMEOUT: zx::MonotonicDuration =
+    zx::MonotonicDuration::from_seconds(60);
+const STANDALONE_DRIVER_DISCOVERY_POLL_INTERVAL: zx::MonotonicDuration =
+    zx::MonotonicDuration::from_seconds(1);
+// Each discovery attempt is abandoned if it hasn't completed after this long (e.g. because a sensor
+// driver doesn't respond), and retried at the next poll.
+const STANDALONE_DRIVER_DISCOVERY_ATTEMPT_TIMEOUT: zx::MonotonicDuration =
+    zx::MonotonicDuration::from_seconds(5);
+
+/// Returns a map from sensor name to alias for the given driver aliases from the config.
+fn driver_alias_map(aliases: Option<&[DriverAlias]>) -> HashMap<String, String> {
+    aliases
+        .into_iter()
+        .flatten()
+        .map(|alias| (alias.sensor_name.clone(), alias.alias.clone()))
+        .collect()
+}
+
+/// The sensor drivers that `wait_for_drivers` waits for.
+#[derive(Debug, PartialEq)]
+enum ExpectedSensors {
+    /// Wait until all of these sensors are found.
+    Named(HashSet<String>),
+    /// Wait until at least one driver is found.
+    Any,
+    /// Don't wait for drivers to appear; use the result of the first successful discovery.
+    NotRequired,
+}
+
+impl ExpectedSensors {
+    /// Returns the sensors to wait for in standalone mode, given whether there is a board config
+    /// and the config's driver aliases for one sensor type.
+    fn from_config(has_config: bool, aliases: Option<&[DriverAlias]>) -> Self {
+        match (has_config, aliases) {
+            (_, Some(aliases)) => {
+                Self::Named(aliases.iter().map(|alias| alias.sensor_name.clone()).collect())
+            }
+            // Without a config, the sensors are unknown, so wait for any.
+            (false, None) => Self::Any,
+            // The config doesn't list sensors of this type, so the board may not have any.
+            (true, None) => Self::NotRequired,
+        }
+    }
+}
+
+/// Repeatedly discovers drivers using `discover` until the `expected` sensors have been found, or
+/// until `timeout` has elapsed. Returns the drivers from the most recent successful discovery.
+///
+/// `sensor_type` is only used for logging. Attempts are made every `poll_interval`, and no attempt
+/// is started at or after the deadline. A discovery attempt that hasn't completed after
+/// `attempt_timeout` (or by the deadline) is abandoned and retried at the next poll, so a sensor
+/// driver that doesn't respond can't block logging indefinitely.
+async fn wait_for_drivers<T, F, Fut>(
+    sensor_type: &str,
+    expected: &ExpectedSensors,
+    timeout: zx::MonotonicDuration,
+    poll_interval: zx::MonotonicDuration,
+    attempt_timeout: zx::MonotonicDuration,
+    mut discover: F,
+) -> Vec<Driver<T>>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<Vec<Driver<T>>>>,
+{
+    let deadline = fasync::MonotonicInstant::after(timeout);
+    let mut drivers = Vec::new();
+    let mut succeeded = false;
+    let mut failed_attempts = 0;
+    loop {
+        let attempt_deadline =
+            std::cmp::min(fasync::MonotonicInstant::after(attempt_timeout), deadline);
+        match discover()
+            .on_timeout(attempt_deadline, || Err(format_err!("Driver discovery timed out")))
+            .await
+        {
+            Ok(found) => {
+                drivers = found;
+                succeeded = true;
+            }
+            Err(err) => {
+                // Discovery may keep failing for a while during boot, so only warn once.
+                if failed_attempts == 0 {
+                    warn!(sensor_type:%, err:%; "Failed to discover sensor drivers; retrying");
+                } else {
+                    debug!(sensor_type:%, err:%; "Failed to discover sensor drivers; retrying");
+                }
+                failed_attempts += 1;
+            }
+        }
+
+        let mut found_names: Vec<&str> = drivers.iter().map(|d| d.sensor_name.as_str()).collect();
+        found_names.sort();
+        let done = match expected {
+            ExpectedSensors::Named(names) => {
+                names.iter().all(|name| found_names.contains(&name.as_str()))
+            }
+            ExpectedSensors::Any => !drivers.is_empty(),
+            ExpectedSensors::NotRequired => succeeded,
+        };
+        if done {
+            info!(sensor_type:%, sensors:? = found_names; "Found sensor drivers");
+            return drivers;
+        }
+
+        // Don't start another attempt at or after the deadline: it would have no time to complete.
+        let next_attempt = fasync::MonotonicInstant::now() + poll_interval;
+        if next_attempt >= deadline {
+            let mut missing: Vec<&str> = match expected {
+                ExpectedSensors::Named(names) => names
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|name| !found_names.contains(name))
+                    .collect(),
+                ExpectedSensors::Any | ExpectedSensors::NotRequired => Vec::new(),
+            };
+            missing.sort();
+            warn!(
+                sensor_type:%,
+                sensors:? = found_names,
+                missing:?,
+                failed_attempts = failed_attempts;
+                "Timed out waiting for sensor drivers; continuing with the drivers found"
+            );
+            return drivers;
+        }
+
+        fasync::Timer::new(next_attempt).await;
+    }
+}
 
 /// Builds a MetricsLoggerServer.
 pub struct ServerBuilder<'a> {
@@ -530,35 +665,99 @@ impl MetricsLoggerServer {
         Ok(device)
     }
 
+    /// Populates the power and temperature drivers for standalone mode, waiting for the sensors
+    /// listed in the config to be published. Drivers that were injected (e.g. in tests) are kept.
+    /// Power and temperature drivers are discovered concurrently, so a missing sensor of one type
+    /// doesn't delay logging of the other beyond the discovery timeout.
+    async fn discover_standalone_drivers(&self) {
+        let power = async {
+            if self.power_drivers.borrow().is_some() {
+                return;
+            }
+            let aliases = self.config.as_ref().and_then(|c| c.power_drivers.as_deref());
+            let alias_map = driver_alias_map(aliases);
+            let expected = ExpectedSensors::from_config(self.config.is_some(), aliases);
+            let drivers = wait_for_drivers(
+                "power",
+                &expected,
+                STANDALONE_DRIVER_DISCOVERY_TIMEOUT,
+                STANDALONE_DRIVER_DISCOVERY_POLL_INTERVAL,
+                STANDALONE_DRIVER_DISCOVERY_ATTEMPT_TIMEOUT,
+                || generate_power_drivers(alias_map.clone()),
+            )
+            .await;
+            self.power_drivers.replace(Some(Rc::new(drivers)));
+        };
+
+        let temperature = async {
+            if self.temperature_drivers.borrow().is_some() {
+                return;
+            }
+            let aliases = self.config.as_ref().and_then(|c| c.temperature_drivers.as_deref());
+            let alias_map = driver_alias_map(aliases);
+            let expected = ExpectedSensors::from_config(self.config.is_some(), aliases);
+            let drivers = wait_for_drivers(
+                "temperature",
+                &expected,
+                STANDALONE_DRIVER_DISCOVERY_TIMEOUT,
+                STANDALONE_DRIVER_DISCOVERY_POLL_INTERVAL,
+                STANDALONE_DRIVER_DISCOVERY_ATTEMPT_TIMEOUT,
+                || generate_temperature_drivers(alias_map.clone()),
+            )
+            .await;
+            self.temperature_drivers.replace(Some(Rc::new(drivers)));
+        };
+
+        futures::join!(power, temperature);
+    }
+
     async fn run_logging_standalone(
         &self,
         sampling_interval_ms: u32,
         statistics_interval_ms: u32,
         duration_ms: Option<u32>,
-    ) {
-        self.start_logging(
-            STANDALONE_CLIENT_ID,
-            vec![
-                fmetrics::Metric::Power(fmetrics::Power {
-                    sampling_interval_ms,
-                    statistics_args: Some(Box::new(fmetrics::StatisticsArgs {
-                        statistics_interval_ms,
-                    })),
-                }),
-                fmetrics::Metric::Temperature(fmetrics::Temperature {
-                    sampling_interval_ms,
-                    statistics_args: Some(Box::new(fmetrics::StatisticsArgs {
-                        statistics_interval_ms,
-                    })),
-                }),
-            ],
-            false,
-            true,
-            duration_ms,
-        )
-        .await
-        .expect("logging to start");
-        self.client_tasks.borrow_mut().remove(STANDALONE_CLIENT_ID).unwrap().await;
+    ) -> Result<()> {
+        self.discover_standalone_drivers().await;
+
+        // Log whichever sensor types have drivers, rather than failing entirely when one type has
+        // none.
+        let has_power_drivers = self.power_drivers.borrow().as_ref().is_some_and(|d| !d.is_empty());
+        let has_temperature_drivers =
+            self.temperature_drivers.borrow().as_ref().is_some_and(|d| !d.is_empty());
+        let statistics_args =
+            || Some(Box::new(fmetrics::StatisticsArgs { statistics_interval_ms }));
+        let mut metrics = Vec::new();
+        if has_power_drivers {
+            metrics.push(fmetrics::Metric::Power(fmetrics::Power {
+                sampling_interval_ms,
+                statistics_args: statistics_args(),
+            }));
+        } else {
+            warn!("No power sensor drivers found; power will not be logged");
+        }
+        if has_temperature_drivers {
+            metrics.push(fmetrics::Metric::Temperature(fmetrics::Temperature {
+                sampling_interval_ms,
+                statistics_args: statistics_args(),
+            }));
+        } else {
+            warn!("No temperature sensor drivers found; temperature will not be logged");
+        }
+        if metrics.is_empty() {
+            return Err(format_err!("No power or temperature sensor drivers found"));
+        }
+
+        self.start_logging(STANDALONE_CLIENT_ID, metrics, false, true, duration_ms)
+            .await
+            .map_err(|e| format_err!("Failed to start standalone logging: {:?}", e))?;
+
+        // Take the task out in a separate statement so the `RefCell` borrow isn't held across the
+        // await.
+        let task = self.client_tasks.borrow_mut().remove(STANDALONE_CLIENT_ID);
+        if let Some(task) = task {
+            task.await;
+        }
+        Ok(())
     }
 }
 
@@ -624,7 +823,7 @@ async fn inner_main(args: CmdArgs) -> Result<()> {
                 STANDALONE_STATISTICS_INTERVAL,
                 None,
             )
-            .await;
+            .await?;
     } else {
         info!("Running test protocols");
         let mut fs = ServiceFs::new_local();
@@ -654,7 +853,9 @@ mod tests {
     use fmetrics::{
         CpuLoad, GpuUsage, Metric, NetworkActivity, Power, StatisticsArgs, Temperature,
     };
+    use futures::future::{LocalBoxFuture, pending, ready};
     use futures::task::Poll;
+    use std::cell::Cell;
 
     // A helper struct to create Fuchsia Executor and optionally add drivers for different logging
     // request tests.
@@ -816,7 +1017,8 @@ mod tests {
                         STANDALONE_STATISTICS_INTERVAL,
                         None,
                     )
-                    .await;
+                    .await
+                    .expect("standalone logging failed");
             });
         }
     }
@@ -2032,6 +2234,359 @@ mod tests {
                 }
             }
         );
+    }
+
+    // Verifies that standalone mode logs the sensor types that have drivers when another type has
+    // none, instead of failing to start.
+    #[fuchsia::test]
+    fn test_logging_standalone_skips_sensor_type_without_drivers() {
+        let runner_builder = RunnerBuilder::new();
+
+        let (_power_driver_tasks, power_drivers, power1, power2) = create_power_drivers();
+        power1.set(14.0);
+        power2.set(106.0);
+
+        let mut runner = runner_builder
+            .with_power_drivers(power_drivers)
+            .with_temperature_drivers(Vec::new())
+            .build();
+
+        runner.run_logging_standalone();
+        runner.run_server_task_until_stalled();
+        for _ in 0..100 {
+            assert!(runner.iterate_logging_task());
+        }
+
+        // Only PowerLogger is present.
+        assert_data_tree!(
+            @executor runner.executor,
+            runner.inspector,
+            root: {
+                MetricsLogger: {
+                    "metrics-logger-standalone": {
+                        PowerLogger: contains {
+                            "power_1": contains {
+                                "data (W)": 14.0,
+                            },
+                            "power_alias": contains {
+                                "data (W)": 106.0,
+                            },
+                        },
+                    }
+                }
+            }
+        );
+    }
+
+    // Verifies that standalone mode returns an error instead of panicking when there are no
+    // power or temperature drivers.
+    #[fuchsia::test]
+    fn test_logging_standalone_without_drivers_returns_error() {
+        let mut runner = RunnerBuilder::new()
+            .with_power_drivers(Vec::new())
+            .with_temperature_drivers(Vec::new())
+            .build();
+
+        let server = runner.server.clone();
+        let mut task = server
+            .run_logging_standalone(
+                STANDALONE_SAMPLING_INTERVAL,
+                STANDALONE_STATISTICS_INTERVAL,
+                None,
+            )
+            .boxed_local();
+        match runner.executor.run_until_stalled(&mut task) {
+            Poll::Ready(Err(err)) => {
+                assert!(err.to_string().contains("No power or temperature sensor drivers found"))
+            }
+            other => panic!("Expected an error, got {:?}", other),
+        }
+        assert!(runner.server.client_tasks.borrow().is_empty());
+    }
+
+    // An attempt timeout longer than the test timeouts, for tests that don't exercise it.
+    const LONG_ATTEMPT_TIMEOUT: zx::MonotonicDuration = zx::MonotonicDuration::from_seconds(100);
+
+    fn fake_driver(sensor_name: &str) -> Driver<()> {
+        Driver { alias: None, sensor_name: sensor_name.to_string(), proxy: () }
+    }
+
+    fn sorted_sensor_names(drivers: &[Driver<()>]) -> Vec<&str> {
+        let mut names: Vec<&str> = drivers.iter().map(|d| d.sensor_name.as_str()).collect();
+        names.sort();
+        names
+    }
+
+    fn fake_time_executor() -> fasync::TestExecutor {
+        let executor = fasync::TestExecutor::new_with_fake_time();
+        executor.set_fake_time(fasync::MonotonicInstant::from_nanos(0));
+        executor
+    }
+
+    fn fake_time_after(duration: zx::MonotonicDuration) -> fasync::MonotonicInstant {
+        fasync::MonotonicInstant::from_nanos(0) + duration
+    }
+
+    // Runs `fut` to completion, advancing fake time to the next timer whenever it stalls.
+    fn run_with_fake_time<T>(
+        executor: &mut fasync::TestExecutor,
+        mut fut: LocalBoxFuture<'_, T>,
+    ) -> T {
+        loop {
+            if let Poll::Ready(result) = executor.run_until_stalled(&mut fut) {
+                return result;
+            }
+            let next_time = fasync::TestExecutor::next_timer().expect("future stalled forever");
+            executor.set_fake_time(next_time);
+        }
+    }
+
+    #[fuchsia::test]
+    fn test_wait_for_drivers_waits_for_expected_sensors() {
+        let mut executor = fake_time_executor();
+
+        // The second sensor is published on the third discovery attempt.
+        let attempts = Cell::new(0);
+        let expected = ExpectedSensors::Named(HashSet::from(["a".to_string(), "b".to_string()]));
+        let drivers = run_with_fake_time(
+            &mut executor,
+            wait_for_drivers(
+                "test",
+                &expected,
+                zx::MonotonicDuration::from_seconds(60),
+                zx::MonotonicDuration::from_seconds(1),
+                LONG_ATTEMPT_TIMEOUT,
+                || {
+                    attempts.set(attempts.get() + 1);
+                    let drivers = if attempts.get() < 3 {
+                        vec![fake_driver("a")]
+                    } else {
+                        vec![fake_driver("a"), fake_driver("b")]
+                    };
+                    ready(Ok(drivers))
+                },
+            )
+            .boxed_local(),
+        );
+
+        assert_eq!(sorted_sensor_names(&drivers), vec!["a", "b"]);
+        assert_eq!(attempts.get(), 3);
+        assert_eq!(
+            fasync::MonotonicInstant::now(),
+            fake_time_after(zx::MonotonicDuration::from_seconds(2))
+        );
+    }
+
+    #[fuchsia::test]
+    fn test_wait_for_drivers_times_out_with_drivers_found() {
+        let mut executor = fake_time_executor();
+
+        // Sensor "b" is never published. Discovery is attempted every second (t = 0..=9s), and it
+        // returns instead of starting an attempt at the 10s deadline.
+        let attempts = Cell::new(0);
+        let expected = ExpectedSensors::Named(HashSet::from(["a".to_string(), "b".to_string()]));
+        let drivers = run_with_fake_time(
+            &mut executor,
+            wait_for_drivers(
+                "test",
+                &expected,
+                zx::MonotonicDuration::from_seconds(10),
+                zx::MonotonicDuration::from_seconds(1),
+                LONG_ATTEMPT_TIMEOUT,
+                || {
+                    attempts.set(attempts.get() + 1);
+                    ready(Ok(vec![fake_driver("a")]))
+                },
+            )
+            .boxed_local(),
+        );
+
+        assert_eq!(sorted_sensor_names(&drivers), vec!["a"]);
+        assert_eq!(attempts.get(), 10);
+        assert_eq!(
+            fasync::MonotonicInstant::now(),
+            fake_time_after(zx::MonotonicDuration::from_seconds(9))
+        );
+    }
+
+    #[fuchsia::test]
+    fn test_wait_for_drivers_does_not_start_attempt_at_deadline() {
+        let mut executor = fake_time_executor();
+
+        // With a 2.5s deadline, attempts are made at t = 0, 1, 2s. The next attempt would start
+        // after the deadline, so it returns at t = 2s instead.
+        let attempts = Cell::new(0);
+        let expected = ExpectedSensors::Named(HashSet::from(["a".to_string(), "b".to_string()]));
+        let timeout = zx::MonotonicDuration::from_millis(2500);
+        let drivers = run_with_fake_time(
+            &mut executor,
+            wait_for_drivers(
+                "test",
+                &expected,
+                timeout,
+                zx::MonotonicDuration::from_seconds(1),
+                LONG_ATTEMPT_TIMEOUT,
+                || {
+                    attempts.set(attempts.get() + 1);
+                    ready(Ok(vec![fake_driver("a")]))
+                },
+            )
+            .boxed_local(),
+        );
+
+        assert_eq!(sorted_sensor_names(&drivers), vec!["a"]);
+        assert_eq!(attempts.get(), 3);
+        assert_eq!(
+            fasync::MonotonicInstant::now(),
+            fake_time_after(zx::MonotonicDuration::from_seconds(2))
+        );
+    }
+
+    #[fuchsia::test]
+    fn test_wait_for_drivers_without_expected_sensors_waits_for_any_driver() {
+        let mut executor = fake_time_executor();
+
+        // Discovery fails, then finds nothing, then finds a driver.
+        let attempts = Cell::new(0);
+        let drivers = run_with_fake_time(
+            &mut executor,
+            wait_for_drivers(
+                "test",
+                &ExpectedSensors::Any,
+                zx::MonotonicDuration::from_seconds(60),
+                zx::MonotonicDuration::from_seconds(1),
+                LONG_ATTEMPT_TIMEOUT,
+                || {
+                    attempts.set(attempts.get() + 1);
+                    ready(match attempts.get() {
+                        1 => Err(format_err!("service not available")),
+                        2 => Ok(vec![]),
+                        _ => Ok(vec![fake_driver("a")]),
+                    })
+                },
+            )
+            .boxed_local(),
+        );
+
+        assert_eq!(sorted_sensor_names(&drivers), vec!["a"]);
+        assert_eq!(attempts.get(), 3);
+        assert_eq!(
+            fasync::MonotonicInstant::now(),
+            fake_time_after(zx::MonotonicDuration::from_seconds(2))
+        );
+    }
+
+    #[fuchsia::test]
+    fn test_wait_for_drivers_keeps_last_result_when_discovery_fails() {
+        let mut executor = fake_time_executor();
+
+        // The first discovery finds one of the expected sensors, then discovery keeps failing.
+        let attempts = Cell::new(0);
+        let expected = ExpectedSensors::Named(HashSet::from(["a".to_string(), "b".to_string()]));
+        let drivers = run_with_fake_time(
+            &mut executor,
+            wait_for_drivers(
+                "test",
+                &expected,
+                zx::MonotonicDuration::from_seconds(5),
+                zx::MonotonicDuration::from_seconds(1),
+                LONG_ATTEMPT_TIMEOUT,
+                || {
+                    attempts.set(attempts.get() + 1);
+                    ready(if attempts.get() == 1 {
+                        Ok(vec![fake_driver("a")])
+                    } else {
+                        Err(format_err!("discovery failed"))
+                    })
+                },
+            )
+            .boxed_local(),
+        );
+
+        assert_eq!(sorted_sensor_names(&drivers), vec!["a"]);
+        assert_eq!(attempts.get(), 5);
+    }
+
+    #[fuchsia::test]
+    fn test_wait_for_drivers_retries_hung_discovery() {
+        let mut executor = fake_time_executor();
+
+        // The first discovery finds one of the expected sensors, then discovery hangs. Hung attempts
+        // are abandoned after 3s: attempts start at t = 0, 1, 5, 9s and the last is abandoned at the
+        // 10s deadline.
+        let attempts = Cell::new(0);
+        let expected = ExpectedSensors::Named(HashSet::from(["a".to_string(), "b".to_string()]));
+        let timeout = zx::MonotonicDuration::from_seconds(10);
+        let drivers = run_with_fake_time(
+            &mut executor,
+            wait_for_drivers(
+                "test",
+                &expected,
+                timeout,
+                zx::MonotonicDuration::from_seconds(1),
+                zx::MonotonicDuration::from_seconds(3),
+                || {
+                    attempts.set(attempts.get() + 1);
+                    if attempts.get() == 1 {
+                        ready(Ok(vec![fake_driver("a")])).left_future()
+                    } else {
+                        pending().right_future()
+                    }
+                },
+            )
+            .boxed_local(),
+        );
+
+        assert_eq!(sorted_sensor_names(&drivers), vec!["a"]);
+        assert_eq!(attempts.get(), 4);
+        assert_eq!(fasync::MonotonicInstant::now(), fake_time_after(timeout));
+    }
+
+    #[fuchsia::test]
+    fn test_wait_for_drivers_not_required_uses_first_successful_discovery() {
+        let mut executor = fake_time_executor();
+
+        // Discovery fails once, then succeeds without finding any drivers. Since no drivers are
+        // required, it returns right away instead of waiting for the timeout.
+        let attempts = Cell::new(0);
+        let drivers = run_with_fake_time(
+            &mut executor,
+            wait_for_drivers(
+                "test",
+                &ExpectedSensors::NotRequired,
+                zx::MonotonicDuration::from_seconds(60),
+                zx::MonotonicDuration::from_seconds(1),
+                LONG_ATTEMPT_TIMEOUT,
+                || {
+                    attempts.set(attempts.get() + 1);
+                    ready(if attempts.get() == 1 {
+                        Err(format_err!("service not available"))
+                    } else {
+                        Ok(Vec::<Driver<()>>::new())
+                    })
+                },
+            )
+            .boxed_local(),
+        );
+
+        assert!(drivers.is_empty());
+        assert_eq!(attempts.get(), 2);
+        assert_eq!(
+            fasync::MonotonicInstant::now(),
+            fake_time_after(zx::MonotonicDuration::from_seconds(1))
+        );
+    }
+
+    #[fuchsia::test]
+    fn test_expected_sensors_from_config() {
+        let aliases =
+            vec![DriverAlias { sensor_name: "a".to_string(), alias: "alias".to_string() }];
+        assert_eq!(
+            ExpectedSensors::from_config(true, Some(&aliases)),
+            ExpectedSensors::Named(HashSet::from(["a".to_string()]))
+        );
+        assert_eq!(ExpectedSensors::from_config(false, None), ExpectedSensors::Any);
+        assert_eq!(ExpectedSensors::from_config(true, None), ExpectedSensors::NotRequired);
     }
 
     #[fuchsia::test]

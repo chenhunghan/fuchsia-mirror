@@ -23,6 +23,9 @@ readonly _SCRIPT_DIR
 _SRCDIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" >/dev/null 2>&1 && pwd)"
 readonly _SRCDIR
 
+_FUCHSIA_DIR="${FUCHSIA_DIR:-$(cd "${_SRCDIR}/../.." >/dev/null 2>&1 && pwd)}"
+readonly _FUCHSIA_DIR
+
 function die {
   echo >&2 "ERROR: $*"
   exit 1
@@ -72,6 +75,8 @@ source "${_SCRIPT_ARGS_FILE}"
 [[ -n "${_PREBUILT_PYTHON_DIR}" ]] || die "Missing _PREBUILT_PYTHON_DIR config variable"
 [[ -d "${_PREBUILT_PYTHON_DIR}" ]] || die "_PREBUILT_PYTHON_DIR should be a directory: ${_PREBUILT_PYTHON_DIR}"
 
+[[ -n "${_BAZEL_LOGS_DIRNAME}" ]] || die "Missing _BAZEL_LOGS_DIRNAME config variable"
+
 readonly _REMOTE_SERVICES_BAZELRC="${_NINJA_BUILD_DIR}/regenerator_outputs/remote_services.bazelrc"
 
 readonly _GENERATE_INVOCATION_BAZELRC="${_SRCDIR}/scripts/generate_invocation_bazelrc.py"
@@ -97,110 +102,17 @@ readonly _PREBUILT_PYTHON3="${_PREBUILT_PYTHON_DIR}/bin/python3"
 # installed (Bazel would complain otherwise with an error).
 export BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
 
-# Determines the command used in this invocation, and separate arguments
-# that follow a -- from the rest, so we can inject extra arguments
-# *before* it, as this is crucial to properly wrap invocations such
-# as `bazel run <config_args> -- <target> <cmd_args>`.
-#
-# This sets the following global variable:
-#
-# _BAZEL_COMMAND: The bazel command (e.g. "version", "info" or "build")
-# _BAZEL_PRE_COMMAND_ARGS: All options that appear before the command
-# _BAZEL_POST_COMMAND_ARGS: All options that appear after the command,
-#     up to -- if provided.
-# _BAZEL_REST_ARGS: Empty list, or "--" followed by other arguments that
-#     follow it.
-#
-function parse_bazel_command () {
-  _BAZEL_COMMAND=
-  _BAZEL_PRE_COMMAND_ARGS=()
-  _BAZEL_POST_COMMAND_ARGS=()
-  _BAZEL_REST_ARGS=()
-
-  while [[ "${#@}" -gt 0 ]]; do
-    case "$1" in
-      --)
-       _BAZEL_REST_ARGS=("$@")
-       break
-       ;;
-      -*)
-       if [[ -z "${_BAZEL_COMMAND}" ]]; then
-         _BAZEL_PRE_COMMAND_ARGS+=("$1")
-       else
-         _BAZEL_POST_COMMAND_ARGS+=("$1")
-       fi
-       ;;
-      *)
-       if [[ -z "${_BAZEL_COMMAND}" ]]; then
-         _BAZEL_COMMAND="$1"
-       else
-         _BAZEL_POST_COMMAND_ARGS+=("$1")
-       fi
-       ;;
-    esac
-    shift
-  done
-}
-
-parse_bazel_command "$@"
-
-# The original invocation without -- and the args that follow it.
-_BAZEL_DIRECT_ARGS=(
-    "${_BAZEL_PRE_COMMAND_ARGS[@]}"
-    "${_BAZEL_COMMAND}"
-    "${_BAZEL_POST_COMMAND_ARGS[@]}"
-)
-
-# Make bazel_command_does_configuration non-empty when the current
-# Bazel command requires analysis / build configurations.
-bazel_command_does_configuration=
-case "${_BAZEL_COMMAND}" in
-  cquery | aquery | build | run | test | vendor)
-      bazel_command_does_configuration=true
-      ;;
-esac
+_BAZEL_PRE_COMMAND_ARGS=()
 
 # We generate our own invocation id, to make it easier to propagate its value
 # to sub-build invocations.
-readonly RESULTSTORE_invocation_id="$("${_PREBUILT_PYTHON3}" -S -c 'import uuid; print(uuid.uuid4())')"
-
-# main_build.py is already expected to set RS_results_url from the active
-# ResultStore profile into the build environment, but this fallback path
-# exists to make this wrapper usable standalone (outside of main_build.py).
-if [[ -z "${RS_results_url:-}" ]]; then
-  RS_results_url="$("${_PREBUILT_PYTHON3}" -S "${_SRCDIR}/../resultstore/rs_profile.py" run -- printenv RS_results_url 2>/dev/null || :)"
+# If top-level fx bazel build, use FX_BUILD_UUID as the invocation id.
+# If sub-build under Ninja, generate a unique child invocation id.
+if [[ -z "${RESULTSTORE_PARENT_BUILD_ID:-}" && -n "${FX_BUILD_UUID:-}" ]]; then
+  readonly RESULTSTORE_invocation_id="${FX_BUILD_UUID}"
+else
+  readonly RESULTSTORE_invocation_id="${RESULTSTORE_invocation_id:-$("${_PREBUILT_PYTHON3}" -S -c 'import uuid; print(uuid.uuid4())')}"
 fi
-readonly RESULTSTORE_URL="$RS_results_url"
-readonly RESULTSTORE_SUB_BUILDS_LINK="$RESULTSTORE_URL/?q=PARENT_BUILD_ID:$RESULTSTORE_invocation_id"
-
-# A list of extra Bazel arguments that must appear after the
-# command.
-_BAZEL_EXTRA_ARGS=(
-  --invocation_id="$RESULTSTORE_invocation_id"
-)
-
-# LINT.IfChange(resultstore_bazel_env_vars)
-# Enable ResultStore reporting if requested by the orchestrator.
-# FX_INTERNAL_RESULTSTORE_BAZEL (set by build/scripts/main_build.py based on
-# resultstore_auth_type) can be set to "resultstore" or "resultstore_infra"
-# (configs defined in build/bazel/templates/template.remote_services.gni).
-case "${FX_INTERNAL_RESULTSTORE_BAZEL:-0}" in
-  "" | "0")
-    # Disabled or empty, do nothing
-    ;;
-  resultstore | resultstore_infra)
-    # The resultstore configs (build:resultstore, build:resultstore_infra) are only
-    # defined for commands that use build configuration. Subcommands like query do not
-    # recognize build: configs.
-    if [[ -n "${bazel_command_does_configuration}" ]]; then
-      _BAZEL_EXTRA_ARGS+=( --config="${FX_INTERNAL_RESULTSTORE_BAZEL}" )
-    fi
-    ;;
-  *)
-    die "Invalid FX_INTERNAL_RESULTSTORE_BAZEL value: ${FX_INTERNAL_RESULTSTORE_BAZEL:-}. Expected 'resultstore' or 'resultstore_infra'."
-    ;;
-esac
-# LINT.ThenChange(//build/scripts/main_build.py:resultstore_bazel_env_vars)
 
 # The following step is sensitive to special environment variables:
 #   * per-invocation build metadata
@@ -213,27 +125,11 @@ esac
 # These environment-sensitive modifications to config definitions
 # manifest in the short-lived 'invocation.bazelrc'.
 # Cleanup handler called on script exit.
-function cleanup {
-  local exit_code=$?
-  rm -f "${_INVOCATION_BAZELRC}"
-  # Preserve the completed invocation's command.log (stdout/stderr stream from Bazel).
-  if [[ -n "${_BAZEL_INVOCATION_LOG_DIR:-}" && -d "${_BAZEL_INVOCATION_LOG_DIR}" && -f "${_BAZEL_OUTPUT_BASE}/command.log" ]]; then
-    cp -f "${_BAZEL_OUTPUT_BASE}/command.log" "${_BAZEL_INVOCATION_LOG_DIR}/command.log" 2>/dev/null || true
-  fi
-  return "$exit_code"
-}
-trap cleanup EXIT
-"${_PREBUILT_PYTHON3}" -S "${_GENERATE_INVOCATION_BAZELRC}" > "${_INVOCATION_BAZELRC}" || die "Failed to generate ${_INVOCATION_BAZELRC}"
-
 # Save per-invocation logs.
 # Log directories are generated dynamically per fx-build invocation,
 # organized by bazel invocations.
 readonly _BAZEL_INVOCATION_DATE="$(date +%Y%m%d-%H%M%S)"
 readonly _BAZEL_INVOCATION_LOG_DIR_NAME="invocation-${_BAZEL_INVOCATION_DATE}--${RESULTSTORE_invocation_id}"
-
-# LINT.IfChange(bazel_logs_dir)
-readonly _BAZEL_LOGS_DIRNAME="bazel_logs"
-# LINT.ThenChange(//build/scripts/main_build.py:bazel_logs_dir)
 
 if [[ -n "$FX_BUILD_LOGDIR" ]]; then
   readonly _BAZEL_INVOCATION_LOG_PARENT="$FX_BUILD_LOGDIR/${_BAZEL_LOGS_DIRNAME}"
@@ -245,18 +141,23 @@ fi
 readonly _BAZEL_INVOCATION_LOG_DIR="${_BAZEL_INVOCATION_LOG_PARENT}/${_BAZEL_INVOCATION_LOG_DIR_NAME}"
 mkdir -p "${_BAZEL_INVOCATION_LOG_DIR}"
 
-# Override log locations for this specific invocation.
-# Bazel doesn't have a single log-dir control for writing all logs,
-# so we must direct each one individually.
-cat >> "${_INVOCATION_BAZELRC}" <<EOF
-# Logs for this specific invocation.
-common --experimental_workspace_rules_log_file=${_BAZEL_INVOCATION_LOG_DIR}/workspace_events.log
-common:exec_log --execution_log_compact_file=${_BAZEL_INVOCATION_LOG_DIR}/exec_log.pb.zstd
-common:_profiling --profile=${_BAZEL_INVOCATION_LOG_DIR}/command.profile.gz
-EOF
+function cleanup {
+  local exit_code=$?
+  rm -f "${_INVOCATION_BAZELRC}"
+  # Preserve the completed invocation's command.log (stdout/stderr stream from Bazel).
+  if [[ -n "${_BAZEL_INVOCATION_LOG_DIR:-}" && -d "${_BAZEL_INVOCATION_LOG_DIR}" && -f "${_BAZEL_OUTPUT_BASE}/command.log" ]]; then
+    cp -f "${_BAZEL_OUTPUT_BASE}/command.log" "${_BAZEL_INVOCATION_LOG_DIR}/command.log" 2>/dev/null || true
+  fi
+  return "$exit_code"
+}
+trap cleanup EXIT
 
-# Save a copy of the final invocation.bazelrc for debugging.
-cp "${_INVOCATION_BAZELRC}" "${_BAZEL_INVOCATION_LOG_DIR}/invocation.bazelrc"
+PYTHONPATH="${_FUCHSIA_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
+"${_PREBUILT_PYTHON3}" -S "${_GENERATE_INVOCATION_BAZELRC}" \
+  --output-bazelrc="${_INVOCATION_BAZELRC}" \
+  --invocation-id="${RESULTSTORE_invocation_id}" \
+  --log-dir="${_BAZEL_INVOCATION_LOG_DIR}" \
+  || die "Failed to generate ${_INVOCATION_BAZELRC}"
 
 # Maintain a 'recent' symlink to the latest log directory.
 # Use a relative path for the symlink target so it works in archives.
@@ -264,24 +165,7 @@ ln -snf "${_BAZEL_INVOCATION_LOG_DIR_NAME}" "${_BAZEL_INVOCATION_LOG_PARENT}/rec
 
 # For convenience, link from the top_dir to the most recent "bazel_logs" dir.
 # Note that _BAZEL_WORKSPACE is top_dir/workspace.
-ln -snf "${_BAZEL_INVOCATION_LOG_PARENT}" "${_BAZEL_WORKSPACE}/../bazel_logs"
-
-
-# Non-remote configuration permits use of a disk-cache, below.
-has_remote_config=
-for arg in "${_BAZEL_DIRECT_ARGS[@]}"
-do
-  # Check for infra and non-infra config variations to allow for local testing.
-  # "sponge" and "resultstore" come from 'build/bazel/remote_services.gni',
-  # and are added in 'build/bazel/bazel_action.gni'.
-  # TODO(https://fxbug.dev/445093719): This method doesn't work if the same
-  # configs are indirectly enabled.
-  case "$arg" in
-    --config=remote | --config=remote_cache_only)  # Remote build execution service
-      has_remote_config=true
-      ;;
-  esac
-done
+ln -snf "${_BAZEL_INVOCATION_LOG_PARENT}" "${_BAZEL_WORKSPACE}/../${_BAZEL_LOGS_DIRNAME}"
 
 # In Corp environments with valid gcert credentials, use the credential helper
 # to automatically exchange LOAS for OAuth (Google Cloud Platform) tokens.
@@ -324,43 +208,20 @@ _BAZEL_PRE_COMMAND_ARGS+=(
 # Except when running the 'vendor' command itself, include
 # .bazelrc arguments to enable the use of our custom
 # Bazel registry and vendor directory.
-if [[ "${_BAZEL_COMMAND}" != "vendor" ]]; then
+is_vendor_command=false
+for arg in "$@"; do
+  case "$arg" in
+    --) break ;;
+    -*) ;;
+    vendor) is_vendor_command=true; break ;;
+    *) break ;;
+  esac
+done
+if [[ "$is_vendor_command" == "false" ]]; then
   _BAZEL_PRE_COMMAND_ARGS+=(
     --bazelrc="${_VENDORING_BAZELRC}"
   )
 fi
-
-# Use a shared disk cache if FUCHSIA_BAZEL_DISK_CACHE is set. Bazel
-# documentation states that --disk_cache is compatible with remote caching.
-#
-# This is useful when several checkouts are used on the same machine,
-# or when performing repeated clean builds frequently.
-#
-# Define FUCHSIA_BAZEL_DISK_CACHE_SIZE to enable automatic garbage
-# collection, which will be performed by Bazel in the background when idle.
-# If undefined, the cache is unlimited, and users will need to clean it
-# manually.
-[[ -n "${FUCHSIA_BAZEL_DISK_CACHE}" && -n "${_BAZEL_COMMAND}" ]] && {
-  if [[ "${FUCHSIA_BAZEL_DISK_CACHE}" =~ ^/ ]]; then
-    _BAZEL_EXTRA_ARGS+=(--disk_cache="${FUCHSIA_BAZEL_DISK_CACHE}")
-    if [[ -n "${FUCHSIA_BAZEL_DISK_CACHE_SIZE}" ]]; then
-      # The size should be a size in bytes, optionally followed by K, M, G or T.
-      _BAZEL_EXTRA_ARGS+=(--experimental_disk_cache_gc_max_size="${FUCHSIA_BAZEL_DISK_CACHE_SIZE}")
-    fi
-  else
-    echo >&2 "ERROR: FUCHSIA_BAZEL_DISK_CACHE ignored (not absolute): $FUCHSIA_BAZEL_DISK_CACHE"
-    exit 1
-  fi
-}
-
-# Add remote related arguments for configuration-sensitive commands.
-# It is likely that this is only required for commands that build artifacts
-# (i.e. build, run, test but not cquery and aquery) but err on the side of
-# caution.
-[[ -n "${bazel_command_does_configuration}" ]] &&
-  _BAZEL_EXTRA_ARGS+=(
-    --config=_profiling
-  )
 
 # Setting $USER so `bazel` won't fail in environments with fake UIDs. Even if
 # the USER is not actually used. See https://fxbug.dev/42063551#c9.
@@ -370,18 +231,7 @@ _user="${USER:-unused-bazel-build-user}"
 
 _bazel_env=(
     env USER="${_user}"
-
-    # Inform sub-builds of this bazel invocation where to find related builds.
-    # These environment variables are read by generate_invocation_bazelrc.py
-    # and rsninja.sh, but do not impact actions from this bazel invocation.
-    # LINT.IfChange(related_invocations_env_vars)
     RESULTSTORE_PARENT_BUILD_ID="$RESULTSTORE_invocation_id"
-    RESULTSTORE_PARENT_BUILD_LINK="$RESULTSTORE_URL/$RESULTSTORE_invocation_id"
-    RESULTSTORE_SIBLING_BUILDS_LINK="$RESULTSTORE_SUB_BUILDS_LINK"
-    # LINT.ThenChange(
-    #   //build/bazel/scripts/generate_invocation_bazelrc.py:related_invocations_env_vars,
-    #   //build/resultstore/rsninja.sh:related_invocations_env_vars
-    # )
 )
 
 _bazel_exec="${_BAZEL_BIN}"
@@ -426,13 +276,7 @@ _bazel_command=(
     "${_bazel_env[@]}"
     "${_bazel_exec}"
     "${_BAZEL_PRE_COMMAND_ARGS[@]}"
-)
-# When "${BAZEL_COMMAND} is empty, do not add it nor _BAZEL_EXTRA_ARGS to _bazel_command,
-[[ -n "${_BAZEL_COMMAND}" ]] && _bazel_command+=("${_BAZEL_COMMAND}" "${_BAZEL_EXTRA_ARGS[@]}")
-
-_bazel_command+=(
-    "${_BAZEL_POST_COMMAND_ARGS[@]}"
-    "${_BAZEL_REST_ARGS[@]}"
+    "$@"
 )
 
 # Save the final invocation to a log file.

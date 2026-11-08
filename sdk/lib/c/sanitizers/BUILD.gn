@@ -12,7 +12,7 @@ if (zircon_toolchain != false) {
       "__sanitizer_change_code_protection.cc",
       "__sanitizer_fast_backtrace.cc",
       "asan-stubs.c",
-      "hooks.c",
+      "hooks.cc",
       "hwasan-stubs.cc",
       "safestack.cc",
       "ubsan-stubs.cc",

@@ -19,15 +19,14 @@ shim_executable("linux-arm64-boot-shim") {
     "//zircon/kernel/lib/libc",
     "//zircon/kernel/phys:address-space",
     "//zircon/kernel/phys:allocation",
-    "//zircon/kernel/phys:boot-zbi",
-    "//zircon/kernel/phys:exception",
-    "//zircon/kernel/phys:main",
     "//zircon/kernel/phys:new",
     "//zircon/kernel/phys:stdio",
     "//zircon/kernel/phys:symbolize",
-    "//zircon/kernel/phys:uart",
     "//zircon/kernel/phys/boot-shim:devicetree",
+    "//zircon/kernel/phys/boot-zbi",
     "//zircon/kernel/phys/lib/boot-shim",
+    "//zircon/kernel/phys/runtime",
+    "//zircon/kernel/phys/uart",
   ]
 }
 

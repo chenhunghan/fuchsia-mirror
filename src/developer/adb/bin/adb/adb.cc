@@ -7,7 +7,10 @@
 #include <lib/async/cpp/task.h>
 #include <lib/component/incoming/cpp/protocol.h>
 #include <lib/component/incoming/cpp/service_member_watcher.h>
+#include <lib/fit/function.h>
 #include <lib/syslog/cpp/macros.h>
+
+#include "src/developer/adb/third_party/adb/adb-protocol.h"
 
 namespace adb {
 
@@ -25,8 +28,7 @@ void Adb::ReceiveCallback(
   }
   fit::result response = result.value();
   if (response.is_error() && response.error_value() == ZX_ERR_BAD_STATE) {
-    FX_PLOGS(ERROR, response.error_value())
-        << "Connection to underlying UsbAdbImpl failed. Quitting.";
+    FX_PLOGS(INFO, response.error_value()) << "Connection to underlying UsbAdbImpl closed";
     return;
   }
 
@@ -51,6 +53,7 @@ void Adb::ReceiveCallback(
     } else if (pending_packet_) {
       packet = std::move(pending_packet_);
       write_len = copied_len_;
+      copied_len_ = 0;
       FX_LOGS(DEBUG) << "Reusing last times packet";
     } else {
       packet = std::make_unique<apacket>();
@@ -71,7 +74,8 @@ void Adb::ReceiveCallback(
         FX_LOGS(DEBUG) << "Short header";
       }
 
-      memcpy((&packet->msg) + write_len, response->data.data() + offset, copy_len);
+      memcpy(reinterpret_cast<uint8_t*>(&packet->msg) + write_len, response->data.data() + offset,
+             copy_len);
       data_left -= copy_len;
       offset += copy_len;
       write_len += copy_len;
@@ -81,10 +85,15 @@ void Adb::ReceiveCallback(
       if (!complete) {
         continue;
       }
+
+      if (!check_header(packet.get(), &transport_)) {
+        FX_LOGS(ERROR) << "Invalid header received";
+        return;
+      }
+      packet->payload.resize(packet->msg.data_length);
     }
 
     if (packet->msg.data_length) {
-      packet->payload.resize(packet->msg.data_length);
       if (packet->msg.data_length - (write_len - sizeof(packet->msg)) <= data_left) {
         copy_len = packet->msg.data_length - (write_len - sizeof(packet->msg));
         complete = true;
@@ -109,7 +118,7 @@ void Adb::ReceiveCallback(
     }
   }
 
-  if (!complete) {
+  if (!complete && packet) {
     pending_packet_ = std::move(packet);
     copied_len_ = write_len;
     FX_LOGS(DEBUG) << "Storing incomplete packet " << write_len;
@@ -129,13 +138,13 @@ bool Adb::SendUsbPacket(uint8_t* buf, size_t len) {
   auto result = impl_.sync()->QueueTx(fidl::VectorView<uint8_t>::FromExternal(buf, len));
   if (!result.ok() || result->is_error()) {
     FX_LOGS(WARNING) << "Packet " << payload_cnt << " send failed "
-                     << (result.ok() ? result->error_value() : ZX_ERR_INTERNAL);
+                     << (result.ok() ? result->error_value() : result.status());
   } else {
     total_sent += len;
     FX_LOGS(DEBUG) << "sent packet " << payload_cnt << " of len " << len << " total " << total_sent;
     success = true;
   }
-  FX_LOGS(DEBUG) << "queued packet " << payload_cnt << " " << result->is_ok();
+  FX_LOGS(DEBUG) << "queued packet " << payload_cnt << " " << success;
   return success;
 }
 
@@ -200,22 +209,39 @@ zx_status_t Adb::StartUsbAdbImpl() {
     return ends.status_value();
   }
 
-  auto cb = teardown_callback_;
+  pending_packet_.reset();
+  copied_len_ = 0;
+
+  impl_teardown_ = std::make_shared<libsync::Completion>();
   impl_ = fidl::WireSharedClient<fuchsia_hardware_adb::UsbAdbImpl>(
-      std::move(ends->client), dispatcher_, fidl::ObserveTeardown([cb] {
-        fit::callback<void()> target = std::move(*cb);
-        if (target) {
-          target();
-        }
-      }));
+      std::move(ends->client), dispatcher_,
+      fidl::ObserveTeardown([teardown = impl_teardown_] { teardown->Signal(); }));
   impl_->Receive().Then(fit::bind_member<&Adb::ReceiveCallback>(this));
 
   auto result = fidl::WireCall(device_client_)->StartAdb(std::move(ends->server));
-  if (result->is_error()) {
-    FX_LOGS(ERROR) << "Could not call start for UsbAdbImpl " << result->error_value();
-    return result->error_value();
+  if (!result.ok() || result->is_error()) {
+    zx_status_t status = result.ok() ? result->error_value() : result.status();
+    // Callers report the failure: Init() fails adb startup and Reset() returns the error to
+    // StateController.SetSystemType().
+    FX_PLOGS(WARNING, status) << "Could not call start for UsbAdbImpl";
+    StopUsbAdbImpl();
+    return status;
   }
   return ZX_OK;
+}
+
+void Adb::StopUsbAdbImpl() {
+  std::shared_ptr<libsync::Completion> teardown = std::move(impl_teardown_);
+  {
+    fidl::WireSharedClient<fuchsia_hardware_adb::UsbAdbImpl> old_impl = std::move(impl_);
+    if (old_impl.is_valid()) {
+      old_impl.AsyncTeardown();
+    }
+  }
+  if (teardown) {
+    teardown->Wait();
+  }
+  handle_offline(&transport_);
 }
 
 zx::result<std::unique_ptr<Adb>> Adb::Create(async_dispatcher_t* dispatcher) {
@@ -246,17 +272,22 @@ zx::result<std::unique_ptr<Adb>> Adb::Create(async_dispatcher_t* dispatcher) {
   return zx::ok(std::move(adb));
 }
 
-Adb::~Adb() { *teardown_callback_ = nullptr; }
+Adb::~Adb() {
+  StopUsbAdbImpl();
+  if (auto connection = transport_.connection()) {
+    connection->Stop();
+  }
+}
 
-void Adb::Reset() {
+zx_status_t Adb::Reset() {
   auto result = fidl::WireCall(device_client_)->StopAdb();
-  if (!result.ok()) {
-    FX_PLOGS(ERROR, result.status()) << "Failed to stop adb";
+  if (!result.ok() || result->is_error()) {
+    zx_status_t status = result.ok() ? result->error_value() : result.status();
+    FX_PLOGS(WARNING, status) << "Failed to stop adb";
   }
 
-  *teardown_callback_ = [this]() mutable { this->StartUsbAdbImpl(); };
-
-  impl_.AsyncTeardown();
+  StopUsbAdbImpl();
+  return StartUsbAdbImpl();
 }
 
 }  // namespace adb

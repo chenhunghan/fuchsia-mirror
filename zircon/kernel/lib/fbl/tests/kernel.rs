@@ -8,7 +8,7 @@
 #[cfg(ktest)]
 #[unittest::suite(name = "name_rust")]
 mod tests {
-    use fbl::Name;
+    type Name<const SIZE: usize> = fbl::Name<SIZE, crate::ksync_kernel::TrackedSpinlock>;
     use pin_init::stack_pin_init;
     use unittest::{assert_eq, assert_false, assert_true};
 

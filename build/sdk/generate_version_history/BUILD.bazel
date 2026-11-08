@@ -4,18 +4,20 @@
 
 load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
 load("@rules_python//python:defs.bzl", "py_binary", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
 
-package(
-    default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
-)
+package(default_applicable_licenses = ["//:license"])
 
 py_library(
     name = "generate_version_history",
     srcs = ["__init__.py"],
     imports = [".."],
-    target_compatible_with = HOST_CONSTRAINTS,
-    visibility = ["//build/sdk/generate_version_history:__subpackages__"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//build:__pkg__",
+        "//build/sdk/generate_version_history:__subpackages__",
+    ],
 )
 
 py_binary(
@@ -23,5 +25,17 @@ py_binary(
     srcs = ["cmd.py"],
     main = "cmd.py",
     target_compatible_with = HOST_CONSTRAINTS,
+    visibility = [
+        "//build/sdk:__subpackages__",
+        "//sdk:__pkg__",
+    ],
+    deps = [":generate_version_history"],
+)
+
+host_py_test(
+    name = "generate_version_history_unittest",
+    srcs = ["generate_version_history_unittest.py"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//build:__pkg__"],
     deps = [":generate_version_history"],
 )

@@ -1,0 +1,100 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = [
+        "src/loader_cache.rs",
+        "src/main.rs",
+    ],
+    build_flags = ["//build/config/rust:bootfs"],
+    crate_name = "lib_loader_runner_cache",
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.ldsvc:fuchsia.ldsvc_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/sys/lib/library_loader",
+        "//src/sys/test_runners/fidl/fuchsia.test.runner:fuchsia.test.runner_rust",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+rustc_test(
+    name = "bin_test",
+    build_flags = ["//build/config/rust:bootfs"],
+    crate = ":bin",
+    # Sets GN output_name via bazel2gn to match the original with_unit_tests binary name.
+    crate_name = "lib_loader_runner_cache_bin_test",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/fuchsia-fs",
+        "//third_party/rust_crates/vendor:assert_matches",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged_bin",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "lib_loader_runner_cache",
+)
+
+fx_component_manifest(
+    name = "lib_loader_runner_cache_cmp-manifest",
+    testonly = True,
+    component_name = "lib_loader_runner_cache",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/lib_loader_runner_cache.cml",
+)
+
+fx_component(
+    name = "lib_loader_runner_cache_cmp",
+    testonly = True,
+    compiled_manifest = ":lib_loader_runner_cache_cmp-manifest",
+    visibility = [
+        "//src/sys/test_manager:__pkg__",
+        "//src/sys/test_runners:__subpackages__",
+    ],
+    deps = [":bin_packaged_bin"],
+)
+
+# TODO(https://fxbug.dev/42085293): bazel2gn does not support resources on fx_unittest_package; the GN copy is kept above the sentinel in BUILD.gn.
+# @bazel2gn:skip
+fx_unittest_package(
+    name = "lib_loader_runner_cache_unit_tests",
+    resources = [
+        "//src/sys/lib/library_loader:config_test_bar_baz",
+        "//src/sys/lib/library_loader:config_test_foo",
+    ],
+    unit_tests = [":bin_test"],
+    visibility = ["//src/sys:__pkg__"],
+)

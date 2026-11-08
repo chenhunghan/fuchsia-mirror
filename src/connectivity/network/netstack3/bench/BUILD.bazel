@@ -1,0 +1,48 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "netstack3-benchmarks",
+    testonly = True,
+    srcs = [
+        "src/forwarding.rs",
+        "src/main.rs",
+    ],
+    build_flags = [
+        "//build/config/rust/lints:deny_unused_results",
+        "//src/connectivity/network/netstack3/core:benchmark",
+    ],
+    crate_name = "netstack3_benchmarks",
+    edition = "2024",
+    deps = [
+        "//src/connectivity/lib/net-types",
+        "//src/connectivity/lib/packet-formats",
+        "//src/connectivity/network/netstack3/core:netstack3-core-benchmarks",
+        "//src/connectivity/network/netstack3/core/base:netstack3-base-benchmarks",
+        "//src/developer/fuchsia-criterion",
+        "//src/lib/network/packet",
+        "//third_party/rust_crates/vendor:criterion",
+    ],
+)
+
+rustc_test(
+    name = "netstack3-benchmarks_test",
+    build_flags = [
+        "//build/config/rust/lints:deny_unused_results",
+        "//src/connectivity/network/netstack3/core:benchmark",
+    ],
+    crate = ":netstack3-benchmarks",
+)
+
+fx_unittest_package(
+    name = "netstack3-benchmarks-test",
+    unit_tests = [":netstack3-benchmarks_test"],
+    visibility = ["//src/connectivity/network:__pkg__"],
+)

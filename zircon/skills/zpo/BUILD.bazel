@@ -1,0 +1,124 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
+load("@fuchsia_build_config//:defs.bzl", "build_config")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules:cipd_prebuilt.bzl", "cipd_prebuilt_file")
+load("//build/bazel/rules/host:defs.bzl", "rustc_binary_host_tool")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/host_tests:host_test_data.bzl", "host_test_data_files")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+_LIB_SRCS = [
+    "src/lib.rs",
+    "src/model.rs",
+    "src/proc.rs",
+    "src/tp/client.rs",
+    "src/tp/mod.rs",
+    "src/tp/queries.rs",
+    "src/tp/session.rs",
+]
+
+_LIB_DEPS = [
+    "//third_party/rust_crates/vendor:anyhow",
+    "//third_party/rust_crates/vendor:glob",
+    "//third_party/rust_crates/vendor:indexmap",
+    "//third_party/rust_crates/vendor:regex-lite",
+    "//third_party/rust_crates/vendor:serde_json",
+    "//third_party/rust_crates/vendor:sha2",
+]
+
+_TEST_DEPS = [
+    "//third_party/rust_crates/vendor:tempfile",
+]
+
+# zpo's logic, shared by the binary and the tests.
+rustc_library(
+    name = "lib",
+    srcs = _LIB_SRCS,
+    crate_name = "zpo",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = _LIB_DEPS,
+)
+
+rustc_binary_host_tool(
+    name = "zpo",
+    srcs = ["src/main.rs"],
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    deps = [
+        ":lib",
+        "//third_party/rust_crates/vendor:clap",
+    ],
+)
+
+host_rustc_test(
+    name = "lib_test",
+    crate = ":lib",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = _TEST_DEPS,
+)
+
+# zpo reads traces with the prebuilt trace processor, installed next to the
+# binary (see `tp::INSTALLED_NAME`). The end-to-end tests run it too.
+cipd_prebuilt_file(
+    name = "trace_processor_shell",
+    path = "//prebuilt/third_party/perfetto/trace_processor_shell/%s/trace_processor_shell" % build_config.host_tag,
+)
+
+copy_file(
+    name = "zpo_trace_processor_shell",
+    src = ":trace_processor_shell",
+    out = "zpo_trace_processor_shell",
+    is_executable = True,
+)
+
+# What the GN `bazel_host_tool` installs: the binary and its trace processor.
+filegroup(
+    name = "zpo_with_trace_processor",
+    srcs = [
+        ":zpo",
+        ":zpo_trace_processor_shell",
+    ],
+)
+
+host_test_data_files(
+    name = "e2e_test_data",
+    testonly = True,
+    srcs = [":trace_processor_shell"],
+    dest_dir = select({
+        "@platforms//cpu:aarch64": "host_arm64/test_data/zpo",
+        "@platforms//cpu:x86_64": "host_x64/test_data/zpo",
+    }),
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+host_rustc_test(
+    name = "e2e_test",
+    srcs = [
+        "tests/e2e.rs",
+        "tests/fxt_writer.rs",
+    ],
+    crate_root = "tests/e2e.rs",
+    edition = "2024",
+    test_data = [":e2e_test_data"],
+    deps = [
+        ":lib",
+        "//third_party/rust_crates/vendor:tempfile",
+    ],
+)
+
+test_suite(
+    name = "host_tests",
+    tests = [
+        ":e2e_test",
+        ":lib_test",
+    ],
+)

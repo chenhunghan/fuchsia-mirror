@@ -47,7 +47,7 @@ rm -r examples/fidl/rust/fidl_crates/*
    To do this, add the following to `examples/fidl/rust/fidl_crates/BUILD.gn`:
 
    ```gn
-   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/rust/fidl_crates/BUILD.gn" region_tag="imports" %}
+   import("//build/rust/rustc_binary.gni")
 
    rustc_binary("fidl_crates_bin") {
      edition = "2024"
@@ -138,14 +138,26 @@ mod test {
 You then need to build with tests by setting the `with_unit_tests` argument:
 
 ```gn
-{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/rust/fidl_crates/BUILD.gn" region_tag="test" %}
+rustc_binary("fidl_crates_bin") {
+  edition = "2024"
+  test_deps = [ "//examples/fidl/fuchsia.examples:fuchsia.examples_rust" ]
+  with_unit_tests = true
+
+  sources = [ "src/main.rs" ]
+}
 ```
 
 This will generate a `fidl_crates_bin_test` target, which should then be added
 to the build group:
 
 ```
-{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/rust/fidl_crates/BUILD.gn" region_tag="group" %}
+group("fidl_crates") {
+  testonly = true
+  deps = [
+    ":fidl_crates_bin($host_toolchain)",
+    ":fidl_crates_bin_test($host_toolchain)",
+  ]
+}
 ```
 
 To import the crate, add the following to the top of the `tests` module.

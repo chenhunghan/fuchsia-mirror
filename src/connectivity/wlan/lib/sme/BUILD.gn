@@ -74,7 +74,7 @@ rustc_library("wlan-sme") {
     "//src/connectivity/wlan/lib/rsn:wlan-rsn",
     "//src/connectivity/wlan/lib/statemachine:wlan-statemachine",
     "//src/lib/diagnostics/inspect/contrib/rust",
-    "//src/lib/diagnostics/inspect/rust:fuchsia-inspect",
+    "//src/lib/diagnostics/inspect/rust",
     "//src/lib/fidl/rust/fidl",
     "//src/lib/fuchsia-sync",
     "//third_party/rust_crates:anyhow",
@@ -83,6 +83,7 @@ rustc_library("wlan-sme") {
     "//third_party/rust_crates:thiserror",
   ]
 }
+
 rustc_test("wlan-sme_test") {
   sources = [
     "src/ap/aid.rs",
@@ -124,7 +125,7 @@ rustc_test("wlan-sme_test") {
            "//src/connectivity/wlan/lib/rsn:wlan-rsn",
            "//src/connectivity/wlan/lib/statemachine:wlan-statemachine",
            "//src/lib/diagnostics/inspect/contrib/rust",
-           "//src/lib/diagnostics/inspect/rust:fuchsia-inspect",
+           "//src/lib/diagnostics/inspect/rust",
            "//src/lib/fidl/rust/fidl",
            "//src/lib/fuchsia-sync",
            "//third_party/rust_crates:anyhow",
@@ -145,6 +146,7 @@ rustc_test("wlan-sme_test") {
   configs += [ "//build/config/rust/lints:deny_unused_results" ]
   lint_config = "//build/config/rust/lints:clippy_warn_all"
 }
+
 fuchsia_unittest_package("wlan-sme-tests") {
   package_name = "wlan-sme-tests-gn"
   component_name = "wlan-sme-tests"

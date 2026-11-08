@@ -764,6 +764,41 @@ TEST_F(OutgoingDirectoryTest, AddProtocolAtFailsIfEntryExists) {
             ZX_ERR_ALREADY_EXISTS);
 }
 
+// Test that an unmanaged protocol can be added again after it is removed, and
+// that the removed handler is destroyed.
+TEST_F(OutgoingDirectoryTest, AddUnmanagedProtocolAtSucceedsAfterRemove) {
+  constexpr std::string_view kProtocolName = fidl::DiscoverableProtocolName<fuchsia_examples::Echo>;
+
+  bool first_handler_destroyed = false;
+  component::AnyHandler handler = [on_destruction =
+                                       fit::deferred_callback([&first_handler_destroyed]() {
+                                         first_handler_destroyed = true;
+                                       })](zx::channel request) {};
+  ASSERT_EQ(GetOutgoingDirectory()
+                ->AddUnmanagedProtocolAt(std::move(handler), /*path=*/kSvcDirectoryPath,
+                                         /*name=*/kProtocolName)
+                .status_value(),
+            ZX_OK);
+  ASSERT_EQ(GetOutgoingDirectory()
+                ->RemoveUnmanagedProtocolAt(/*path=*/kSvcDirectoryPath, /*name=*/kProtocolName)
+                .status_value(),
+            ZX_OK);
+  EXPECT_TRUE(first_handler_destroyed);
+
+  bool connected = false;
+  component::AnyHandler another_handler = [&connected](zx::channel request) { connected = true; };
+  ASSERT_EQ(GetOutgoingDirectory()
+                ->AddUnmanagedProtocolAt(std::move(another_handler), /*path=*/kSvcDirectoryPath,
+                                         /*name=*/kProtocolName)
+                .status_value(),
+            ZX_OK);
+
+  fidl::ClientEnd<fuchsia_io::Directory> svc_directory = GetSvcClientEnd(GetRootClientEnd());
+  zx::result client_end = component::ConnectAt<fuchsia_examples::Echo>(svc_directory.borrow());
+  ASSERT_EQ(client_end.status_value(), ZX_OK);
+  RunLoopUntil([&connected]() { return connected; });
+}
+
 TEST_F(OutgoingDirectoryTest, AddProtocolAtFailsIfNameIsEmpty) {
   component::AnyHandler handler = [](zx::channel request) {};
   EXPECT_EQ(

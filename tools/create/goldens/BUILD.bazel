@@ -1,0 +1,144 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//tools/create/goldens:golden_test.bzl", "golden_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Create a C++ v2 component project named `my-component-v2-cpp` and
+# compare its file contents to the golden project of the same name.
+golden_test(
+    name = "my-component-v2-cpp_test",
+    golden_files = [
+        "my-component-v2-cpp/BUILD.gn",
+        "my-component-v2-cpp/main.cc",
+        "my-component-v2-cpp/meta/my_component_v2_cpp.cml",
+        "my-component-v2-cpp/my_component_v2_cpp.cc",
+        "my-component-v2-cpp/my_component_v2_cpp.h",
+        "my-component-v2-cpp/my_component_v2_cpp_unittest.cc",
+        "my-component-v2-cpp/README.md",
+    ],
+    language = "cpp",
+    project_name = "my-component-v2-cpp",
+    project_type = "component",
+)
+
+# Create a Rust v2 component project named `my-component-v2-rust` and
+# compare its file contents to the golden project of the same name.
+golden_test(
+    name = "my-component-v2-rust_test",
+    golden_files = [
+        "my-component-v2-rust/BUILD.gn",
+        "my-component-v2-rust/meta/my_component_v2_rust.cml",
+        "my-component-v2-rust/README.md",
+        "my-component-v2-rust/src/main.rs",
+    ],
+    language = "rust",
+    project_name = "my-component-v2-rust",
+    project_type = "component",
+)
+
+# Create a C++ component test project named `my-component-test-cpp` and
+# compare its file contents to the golden project of the same name.
+golden_test(
+    name = "my-component-test-cpp_test",
+    golden_files = [
+        "my-component-test-cpp/BUILD.gn",
+        "my-component-test-cpp/meta/my_component_test_cpp.cml",
+        "my-component-test-cpp/README.md",
+        "my-component-test-cpp/my_component_test_cpp.cc",
+    ],
+    language = "cpp",
+    project_name = "my-component-test-cpp",
+    project_subtype = "test",
+    project_type = "component",
+)
+
+# Create a Rust component test project named `my-component-test-rust` and
+# compare its file contents to the golden project of the same name.
+golden_test(
+    name = "my-component-test-rust_test",
+    golden_files = [
+        "my-component-test-rust/BUILD.gn",
+        "my-component-test-rust/meta/my_component_test_rust.cml",
+        "my-component-test-rust/README.md",
+        "my-component-test-rust/src/lib.rs",
+    ],
+    language = "rust",
+    project_name = "my-component-test-rust",
+    project_subtype = "test",
+    project_type = "component",
+)
+
+# Create a C++ driver project named `my-driver-cpp` and
+# compare its file contents to the golden project of the same name.
+golden_test(
+    name = "my-driver-cpp_test",
+    golden_files = [
+        "my-driver-cpp/BUILD.gn",
+        "my-driver-cpp/BUILD.bazel",
+        "my-driver-cpp/README.md",
+        "my-driver-cpp/meta/my_driver_cpp.bind",
+        "my-driver-cpp/meta/my_driver_cpp.cml",
+        "my-driver-cpp/meta/my_driver_cpp_info.json",
+        "my-driver-cpp/my_driver_cpp.cc",
+        "my-driver-cpp/my_driver_cpp.h",
+        "my-driver-cpp/tests/my_driver_cpp_test.cc",
+    ],
+    language = "cpp",
+    project_name = "my-driver-cpp",
+    project_type = "driver",
+    year = "2025",
+)
+
+# Create a Rust driver project named `my-driver-rust` and
+# compare its file contents to the golden project of the same name.
+golden_test(
+    name = "my-driver-rust_test",
+    golden_files = [
+        "my-driver-rust/BUILD.gn",
+        "my-driver-rust/BUILD.bazel",
+        "my-driver-rust/README.md",
+        "my-driver-rust/meta/my_driver_rust.bind",
+        "my-driver-rust/meta/my_driver_rust.cml",
+        "my-driver-rust/meta/my_driver_rust_info.json",
+        "my-driver-rust/src/lib.rs",
+    ],
+    language = "rust",
+    project_name = "my-driver-rust",
+    project_type = "driver",
+    year = "2026",
+)
+
+# Create a C++ driver project named `my-devicetree-visitor` and
+# compare its file contents to the golden project of the same name.
+golden_test(
+    name = "my-devicetree-visitor_test",
+    golden_files = [
+        "my-devicetree-visitor/BUILD.gn",
+        "my-devicetree-visitor/my-devicetree-visitor.cc",
+        "my-devicetree-visitor/my-devicetree-visitor.h",
+        "my-devicetree-visitor/my-devicetree-visitor.yaml",
+        "my-devicetree-visitor/test/my-devicetree-visitor-test.cc",
+        "my-devicetree-visitor/test/dts/my-devicetree-visitor.dts",
+    ],
+    language = "cpp",
+    project_name = "my-devicetree-visitor",
+    project_subtype = "visitor",
+    project_type = "devicetree",
+)
+
+test_suite(
+    name = "host_tests",
+    tests = [
+        ":my-component-test-cpp_test",
+        ":my-component-test-rust_test",
+        ":my-component-v2-cpp_test",
+        ":my-component-v2-rust_test",
+        ":my-devicetree-visitor_test",
+        ":my-driver-cpp_test",
+        ":my-driver-rust_test",
+    ],
+    visibility = ["//tools/create/goldens:__pkg__"],
+)

@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 use crate::writer::Inspector;
+use crate::writer::blob_buffer::BlobBuffer;
 use crate::writer::error::Error;
 use crate::writer::heap::Heap;
 use derivative::Derivative;
@@ -380,6 +381,11 @@ impl<'a> LockedStateGuard<'a> {
         &self.inner_lock.callbacks
     }
 
+    /// Returns a reference to the blob properties map.
+    pub(crate) fn blobs(&self) -> &HashMap<String, Arc<Mutex<BlobBuffer>>> {
+        &self.inner_lock.blobs
+    }
+
     /// Allocate a NODE block with the given |name| and |parent_index|.
     pub fn create_node<'b>(
         &mut self,
@@ -406,6 +412,21 @@ impl<'a> LockedStateGuard<'a> {
 
     pub fn free_lazy_node(&mut self, index: BlockIndex) -> Result<(), Error> {
         self.inner_lock.free_lazy_node(index)
+    }
+
+    /// Allocate a LINK block with `LinkNodeDisposition::Blob` and a dedicated external
+    /// `"BLOB"` VMO with `payload_size` bytes of payload capacity (excluding the 32-byte header).
+    pub(crate) fn create_blob_property<'b>(
+        &mut self,
+        name: impl Into<Cow<'b, str>>,
+        payload_size: usize,
+        parent_index: BlockIndex,
+    ) -> Result<(BlockIndex, Arc<Mutex<BlobBuffer>>), Error> {
+        self.inner_lock.create_blob_property(name, payload_size, parent_index)
+    }
+
+    pub(crate) fn free_blob_property(&mut self, index: BlockIndex) -> Result<(), Error> {
+        self.inner_lock.free_blob_property(index)
     }
 
     /// Free a *_VALUE block at the given |index|.
@@ -602,6 +623,9 @@ struct InnerState {
 
     #[derivative(Debug = "ignore")]
     callbacks: HashMap<String, LazyNodeContextFnArc>,
+
+    #[derivative(Debug = "ignore")]
+    blobs: HashMap<String, Arc<Mutex<BlobBuffer>>>,
 }
 
 #[cfg(target_os = "fuchsia")]
@@ -965,6 +989,7 @@ impl InnerState {
             storage,
             next_unique_link_id: AtomicU64::new(0),
             callbacks: HashMap::new(),
+            blobs: HashMap::new(),
             transaction_count: 0,
             string_reference_block_indexes: HashMap::new(),
             block_index_string_references: HashMap::new(),
@@ -1130,6 +1155,52 @@ impl InnerState {
         }
 
         txn.state.callbacks.remove(content.as_str());
+        txn.commit();
+        Ok(())
+    }
+
+    /// Allocate a LINK block with `LinkNodeDisposition::Blob` and a dedicated external
+    /// `"BLOB"` VMO with `payload_size` bytes of payload capacity (excluding the 32-byte header).
+    fn create_blob_property<'a>(
+        &mut self,
+        name: impl Into<Cow<'a, str>>,
+        payload_size: usize,
+        parent_index: BlockIndex,
+    ) -> Result<(BlockIndex, Arc<Mutex<BlobBuffer>>), Error> {
+        let blob_buffer = BlobBuffer::new(payload_size)?;
+        let name = name.into();
+        let content = self.unique_link_name(&name);
+        let link = {
+            let mut txn = Txn::new(self);
+            let link =
+                txn.allocate_link(name, &content, LinkNodeDisposition::Blob, parent_index)?;
+            txn.commit();
+            link
+        };
+        let blob = Arc::new(Mutex::new(blob_buffer));
+        self.blobs.insert(content, Arc::clone(&blob));
+        Ok((link, blob))
+    }
+
+    fn free_blob_property(&mut self, index: BlockIndex) -> Result<(), Error> {
+        let mut txn = Txn::new(self);
+        let content_block_index =
+            txn.state.heap.container.block_at_unchecked::<Link>(index).content_index();
+        let content_block_type =
+            txn.state.heap.container.block_at(content_block_index).block_type();
+        let content = txn.state.load_key_string(content_block_index)?;
+        txn.state.delete_value(index)?;
+        // Free the name or string reference block used for content.
+        match content_block_type {
+            Some(BlockType::StringReference) => {
+                txn.release_string_ref(content_block_index)?;
+            }
+            _ => {
+                txn.state.heap.free_block(content_block_index)?;
+            }
+        }
+
+        txn.state.blobs.remove(content.as_str());
         txn.commit();
         Ok(())
     }

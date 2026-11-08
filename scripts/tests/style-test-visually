@@ -10,7 +10,7 @@
 # can validate the expected style is rendered.
 
 # Note that some terminals do not support all terminal styles.
-# For instance, italic may not render as italic on MacOS.
+# For instance, italic may not render as italic in some terminals.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")"/../devshell/lib >/dev/null 2>&1 && pwd)"/style.sh || exit $?
 

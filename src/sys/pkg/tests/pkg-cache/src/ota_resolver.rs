@@ -325,7 +325,17 @@ async fn inspect_success() {
                     },
                 },
                 "recent": {},
-            }
+            },
+            "index": contains {
+                "retained": {
+                    "entries": {
+                        package.hash().to_string() => {
+                            "state": "partial-blob-set",
+                            "blobs-count": 1u64,
+                        },
+                    },
+                },
+            },
         }
     );
 
@@ -373,7 +383,17 @@ async fn inspect_success() {
                         "end_boot_ns": AnyProperty,
                     },
                 },
-            }
+            },
+            "index": contains {
+                "retained": {
+                    "entries": {
+                        package.hash().to_string() => {
+                            "state": "complete-blob-set",
+                            "blobs-count": 1u64,
+                        },
+                    },
+                },
+            },
         }
     );
 }
@@ -440,7 +460,17 @@ async fn inspect_failure() {
                         "end_boot_ns": AnyProperty,
                     },
                 },
-            }
+            },
+            "index": contains {
+                "retained": {
+                    "entries": {
+                        package.hash().to_string() => {
+                            "state": "partial-blob-set",
+                            "blobs-count": 0u64,
+                        },
+                    },
+                },
+            },
         }
     );
 }

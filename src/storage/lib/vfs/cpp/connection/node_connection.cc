@@ -56,19 +56,6 @@ void NodeConnection::Unbind() {
     binding_->Unbind();
 }
 
-#if FUCHSIA_API_LEVEL_LESS_THAN(29) || FUCHSIA_API_LEVEL_AT_LEAST(PLATFORM)
-void NodeConnection::DeprecatedClone(DeprecatedCloneRequestView request,
-                                     DeprecatedCloneCompleter::Sync& completer) {
-  fidl::ServerEnd<fio::Node> server_end{std::move(request->object)};
-  if (request->flags & fio::wire::OpenFlags::kDescribe) {
-    // Ignore errors since there is nothing we can do if this fails.
-    [[maybe_unused]] auto result =
-        fidl::WireSendEvent(server_end)->OnOpen(ZX_ERR_NOT_SUPPORTED, {});
-  }
-  server_end.Close(ZX_ERR_NOT_SUPPORTED);
-}
-#endif
-
 void NodeConnection::Clone(CloneRequestView request, CloneCompleter::Sync& completer) {
   Connection::NodeClone(fio::Flags::kProtocolNode | fs::internal::RightsToFlags(rights()),
                         request->request.TakeChannel());
@@ -88,32 +75,6 @@ void NodeConnection::Query(QueryCompleter::Sync& completer) {
 
 void NodeConnection::Sync(SyncCompleter::Sync& completer) {
   completer.Reply(zx::make_result(ZX_ERR_BAD_HANDLE));
-}
-
-#if FUCHSIA_API_LEVEL_AT_LEAST(28)
-void NodeConnection::DeprecatedGetAttr(DeprecatedGetAttrCompleter::Sync& completer) {
-#else
-void NodeConnection::GetAttr(GetAttrCompleter::Sync& completer) {
-#endif  // FUCHSIA_API_LEVEL_AT_LEAST(28)
-  if (!(rights() & fio::Rights::kGetAttributes)) {
-    completer.Reply(ZX_ERR_BAD_HANDLE, {});
-    return;
-  }
-  zx::result attrs = vnode()->GetAttributes();
-  if (attrs.is_ok()) {
-    completer.Reply(ZX_OK, attrs->ToIoV1NodeAttributes(*vnode()));
-  } else {
-    completer.Reply(attrs.error_value(), {});
-  }
-}
-
-#if FUCHSIA_API_LEVEL_AT_LEAST(28)
-void NodeConnection::DeprecatedSetAttr(DeprecatedSetAttrRequestView request,
-                                       DeprecatedSetAttrCompleter::Sync& completer) {
-#else
-void NodeConnection::SetAttr(SetAttrRequestView request, SetAttrCompleter::Sync& completer) {
-#endif  // FUCHSIA_API_LEVEL_AT_LEAST(28)
-  completer.Reply(ZX_ERR_BAD_HANDLE);
 }
 
 void NodeConnection::GetAttributes(fio::wire::NodeGetAttributesRequest* request,
@@ -136,15 +97,6 @@ void NodeConnection::GetFlags(GetFlagsCompleter::Sync& completer) {
 }
 void NodeConnection::SetFlags(SetFlagsRequestView, SetFlagsCompleter::Sync& completer) {
   completer.ReplyError(ZX_ERR_NOT_SUPPORTED);
-}
-
-void NodeConnection::DeprecatedGetFlags(DeprecatedGetFlagsCompleter::Sync& completer) {
-  completer.Reply(ZX_OK, fio::OpenFlags::kNodeReference);
-}
-
-void NodeConnection::DeprecatedSetFlags(DeprecatedSetFlagsRequestView,
-                                        DeprecatedSetFlagsCompleter::Sync& completer) {
-  completer.Reply(ZX_ERR_BAD_HANDLE);
 }
 
 void NodeConnection::QueryFilesystem(QueryFilesystemCompleter::Sync& completer) {

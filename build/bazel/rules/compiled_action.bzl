@@ -56,11 +56,11 @@ def _compiled_action_impl(ctx):
 
     ctx.actions.run(
         outputs = ctx.outputs.outs,
-        inputs = ctx.files.srcs,
+        inputs = depset(ctx.files.srcs + ctx.files.deps),
         executable = ctx.executable.tool,
         arguments = args,
         env = {"RUST_BACKTRACE": "1"},
-        mnemonic = "CompiledAction",
+        mnemonic = ctx.attr.mnemonic or "CompiledAction",
         progress_message = "Running %s for %%{label}" % ctx.attr.tool.label.name,
     )
 
@@ -90,9 +90,23 @@ compiled_action = rule(
             mandatory = True,
             cfg = "exec",
         ),
+        "tool_output_name": attr.string(
+            doc = """Optional output filename of `tool` in the GN build when it
+            differs from the target name of `tool` (for example, when `tool` is
+            a `rustc_binary()` whose `crate_name` or `binary_name` differs from
+            `name`). Unused by Bazel, forwarded to GN `compiled_action()` by
+            `bazel2gn`.
+            """,
+        ),
         "srcs": attr.label_list(
             doc = """Input files of the action. These can be referred to in
             `args` with `$(location ...)`.
+            """,
+            allow_files = True,
+        ),
+        "deps": attr.label_list(
+            doc = """Additional targets whose default outputs are inputs to this
+            action.
             """,
             allow_files = True,
         ),
@@ -103,12 +117,24 @@ compiled_action = rule(
             mandatory = True,
             allow_empty = False,
         ),
+        "depfile": attr.string(
+            doc = """Optional depfile path for the GN build (relative to the
+            target's output directory; pass in `args` as
+            `$(RULEDIR)/<depfile>`). Unused by Bazel, forwarded to GN
+            `compiled_action()` by `bazel2gn`.
+            """,
+        ),
         "args": attr.string_list(
             doc = """Command line arguments of the tool. Each element is passed
             as a single argument (no shell tokenization), after substituting
             `$(location ...)`, `$(execpath ...)`, and `$(RULEDIR)`.
             """,
             mandatory = True,
+        ),
+        "mnemonic": attr.string(
+            doc = """Optional one-word action mnemonic shown in build progress
+            logs. Defaults to `"CompiledAction"` in Bazel if unset.
+            """,
         ),
     },
 )

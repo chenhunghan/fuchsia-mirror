@@ -64,9 +64,7 @@ const TEST_NAME1: &str = "Name1";
 const TEST_NAME2: &str = "Name2";
 
 // Tests initializing bonded LE devices.
-#[test_harness::run_singlethreaded_test(
-    test_component = "fuchsia-pkg://fuchsia.com/bt-bonding-integration-tests#meta/bt-bonding-integration-tests-component.cm"
-)]
+#[test_harness::run_singlethreaded_test]
 async fn test_restore_bonded_devices_success(harness: HostHarness) {
     // Peers should be initially empty.
     assert_eq!(harness.write_state().peers().len(), 0);

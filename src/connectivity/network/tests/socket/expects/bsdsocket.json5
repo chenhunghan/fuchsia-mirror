@@ -20,12 +20,6 @@
                 "IntSocketOptionTests/IntSocketOptionTest.SetChar/IPv4_Stream_IPPROTO_IP_IP_MULTICAST_LOOP",
                 "IntSocketOptionTests/IntSocketOptionTest.SetChar/IPv6_Stream_IPPROTO_IP_IP_MULTICAST_LOOP",
 
-                // IPPROTO_IP_IP_TOS
-                "IntSocketOptionTests/IntSocketOptionTest.SetValid/IPv4_Stream_IPPROTO_IP_IP_TOS",
-                "IntSocketOptionTests/IntSocketOptionTest.SetValid/IPv6_Stream_IPPROTO_IP_IP_TOS",
-                "IntSocketOptionTests/IntSocketOptionTest.SetChar/IPv4_Stream_IPPROTO_IP_IP_TOS",
-                "IntSocketOptionTests/IntSocketOptionTest.SetChar/IPv6_Stream_IPPROTO_IP_IP_TOS",
-
                 // IPPROTO_IP_IP_RECVTOS
                 "IntSocketOptionTests/IntSocketOptionTest.Default/IPv4_Stream_IPPROTO_IP_IP_RECVTOS",
                 "IntSocketOptionTests/IntSocketOptionTest.Default/IPv6_Stream_IPPROTO_IP_IP_RECVTOS",
@@ -76,8 +70,9 @@
                 "IntSocketOptionTests/IntSocketOptionTest.SetChar/IPv6_Stream_IPPROTO_IPV6_IPV6_MULTICAST_LOOP",
 
                 // IPPROTO_IPV6_IPV6_TCLASS
-                "IntSocketOptionTests/IntSocketOptionTest.SetValid/IPv4_Stream_IPPROTO_IPV6_IPV6_TCLASS",
-                "IntSocketOptionTests/IntSocketOptionTest.SetValid/IPv6_Stream_IPPROTO_IPV6_IPV6_TCLASS",
+                // These tests return EINVAL instead of the expected ENOPROTOOPT because zxio
+                // validates the option length and value range client-side before Netstack3 checks
+                // the socket domain.
                 "IntSocketOptionTests/IntSocketOptionTest.SetChar/IPv4_Stream_IPPROTO_IPV6_IPV6_TCLASS",
                 "IntSocketOptionTests/IntSocketOptionTest.SetChar/IPv4_Datagram_IPPROTO_IPV6_IPV6_TCLASS",
                 "IntSocketOptionTests/IntSocketOptionTest.SetInvalid/IPv4_Stream_IPPROTO_IPV6_IPV6_TCLASS",
@@ -165,13 +160,6 @@
 
                 // IP_TTL
                 "LocalhostTest/SocketOptsTest.ResetTtlToDefault/IPv*_Stream",
-
-                // IP_TOS + IPV6_TCLASS
-                "LocalhostTest/SocketOptsTest.SmallTOSOptionSize/IPv4_Stream",
-                "LocalhostTest/SocketOptsTest.NegativeTOS/IPv4_Stream",
-                "LocalhostTest/SocketOptsTest.LargeTOSOptionSize/IPv?_Stream",
-                "LocalhostTest/SocketOptsTest.InvalidNegativeTOS/IPv4_Stream",
-                "LocalhostTest/SocketOptsTest.CheckSkipECN/IPv?_Stream",
 
                 // SO_TIMESTAMP{NS}
                 "LocalhostTest/SocketOptsTest.UpdateAnyTimestampDisablesOtherTimestampOptions/IPv4_Stream",

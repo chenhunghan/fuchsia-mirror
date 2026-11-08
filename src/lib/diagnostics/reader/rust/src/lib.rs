@@ -844,11 +844,20 @@ mod tests {
                     .to(&test_component),
             )
             .await?;
-        builder.init_mutable_config_to_empty(&test_component).await.unwrap();
         builder
-            .set_config_value(&test_component, "publish_n_trees", opts.publish_n_trees.into())
-            .await
-            .unwrap();
+            .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                name: "fuchsia.inspect.test.PublishNTrees".parse()?,
+                value: opts.publish_n_trees.into(),
+            }))
+            .await?;
+        builder
+            .add_route(
+                Route::new()
+                    .capability(Capability::configuration("fuchsia.inspect.test.PublishNTrees"))
+                    .from(Ref::self_())
+                    .to(&test_component),
+            )
+            .await?;
         let instance = builder.build().await?;
         Ok(instance)
     }

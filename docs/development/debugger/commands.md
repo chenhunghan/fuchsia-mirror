@@ -46,6 +46,10 @@ The possible nouns (and their abbreviations) are:
 
   Select or list threads.
 
+* `tracepoint` (`tp`)
+
+  Select or list non-stopping tracepoints.
+
 ### Listing nouns
 
 If you type a noun by itself, it lists the available objects of that type. For
@@ -95,6 +99,16 @@ example:
       2 Blocked 1356 some-other-thread
     ```
 
+  * {tracepoint}
+
+    List all tracepoints in the session:
+
+    ```none {: .devsite-terminal data-terminal-prefix="[zxdb]" }
+    tracepoint
+      # State   Hits Location   Expressions
+    ▶ 1 enabled 0/10 MyFunction x, y
+    ```
+
 
 ### Selecting active nouns {#selecting-active-nouns}
 
@@ -118,6 +132,15 @@ about the new active noun. For example:
     ```none {: .devsite-terminal data-terminal-prefix="[zxdb]" }
     breakpoint 2
     Breakpoint 2 (Software) on Global, Enabled, stop=All, @ MyFunction
+    ```
+
+  * {tracepoint}
+
+    Select tracepoint 1 to be the active noun:
+
+    ```none {: .devsite-terminal data-terminal-prefix="[zxdb]" }
+    tracepoint 1
+    Tracepoint 1 state=enabled hits=0/10 location=MyFunction condition=x > 0 capture=[locals] exprs=[x, y]
     ```
 
 ## Verbs

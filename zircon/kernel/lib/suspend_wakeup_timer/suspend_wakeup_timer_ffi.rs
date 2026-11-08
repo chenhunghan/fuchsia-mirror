@@ -4,11 +4,8 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-use super::{Callback, SuspendWakeupTimer};
-use crate::platform_rs::timer::InstantBoot;
-use core::mem::MaybeUninit;
-use core::ptr::NonNull;
-
+#[cfg(target_arch = "aarch64")]
+use super::SuspendWakeupTimer;
 #[cfg(target_arch = "aarch64")]
 use crate::kernel::types::cpu_mask_t;
 #[cfg(target_arch = "aarch64")]
@@ -18,72 +15,9 @@ use core::ffi::c_void;
 #[cfg(target_arch = "aarch64")]
 use core::pin::Pin;
 #[cfg(target_arch = "aarch64")]
+use core::ptr::NonNull;
+#[cfg(target_arch = "aarch64")]
 use zx_status::Status;
-
-/// Wrapper around a C++ `SuspendWakeupTimer::Callback`
-/// (`fit::inline_function<void(zx_instant_boot_t, zx_instant_boot_t), sizeof(void*)>`).
-///
-/// Note: `CppCallback` is moved by value into [`Callback`] (`zr::SendSyncInlineFn`), which
-/// bitwise-relocates its storage. This relies on `fit::inline_function` and its inline
-/// pointer-sized target (such as a function pointer or stateless/pointer-capturing lambda) being
-/// trivially relocatable.
-#[repr(C, align(8))]
-pub struct CppCallback(zr::OpaqueBytes<16>);
-
-zr::static_assert_size_and_align!(CppCallback, 16, 8);
-
-unsafe extern "C" {
-    fn cpp_suspend_wakeup_timer_callback_move(
-        dst: &mut MaybeUninit<CppCallback>,
-        src: NonNull<CppCallback>,
-    );
-    fn cpp_suspend_wakeup_timer_callback_call(
-        cb: &CppCallback,
-        now: InstantBoot,
-        resume_at: InstantBoot,
-    );
-    fn cpp_suspend_wakeup_timer_callback_destroy(cb: &mut CppCallback);
-}
-
-// SAFETY: `CppCallback` wraps a thread-safe IRQ callback moved from C++.
-unsafe impl Send for CppCallback {}
-// SAFETY: `CppCallback` is only invoked via shared reference at IRQ time or dropped once.
-unsafe impl Sync for CppCallback {}
-
-impl CppCallback {
-    /// Moves a C++ `SuspendWakeupTimer::Callback` into inline [`CppCallback`] storage.
-    ///
-    /// # Safety
-    ///
-    /// `src` must point to a valid, initialized C++ `SuspendWakeupTimer::Callback` that may be
-    /// moved from.
-    unsafe fn from_cpp(src: NonNull<Self>) -> Self {
-        let mut dst = MaybeUninit::uninit();
-        // SAFETY: `dst` has the exact size and alignment of `SuspendWakeupTimer::Callback`,
-        // and the caller guarantees `src` points to a valid `SuspendWakeupTimer::Callback`.
-        unsafe {
-            cpp_suspend_wakeup_timer_callback_move(&mut dst, src);
-            dst.assume_init()
-        }
-    }
-
-    fn call(&self, now: InstantBoot, resume_at: InstantBoot) {
-        // SAFETY: `self` was initialized by `cpp_suspend_wakeup_timer_callback_move`.
-        unsafe {
-            cpp_suspend_wakeup_timer_callback_call(self, now, resume_at);
-        }
-    }
-}
-
-impl Drop for CppCallback {
-    fn drop(&mut self) {
-        // SAFETY: `self` was initialized by `cpp_suspend_wakeup_timer_callback_move` and is
-        // destroyed at most once on drop.
-        unsafe {
-            cpp_suspend_wakeup_timer_callback_destroy(self);
-        }
-    }
-}
 
 /// Opaque facade representing a C++ `Armv7MmioTimer`.
 #[cfg(target_arch = "aarch64")]
@@ -234,67 +168,4 @@ pub extern "C" fn rust_armv7_mmio_suspend_wakeup_timer_irq_handler(
     timer: &SuspendWakeupTimer,
 ) -> IrqHandlerResult {
     super::Armv7MmioSuspendWakeupTimer::irq_handler(timer)
-}
-
-/// Initializes a [`SuspendWakeupTimer`] in-place from C++.
-///
-/// # Safety
-///
-/// - `timer` must point to valid, properly aligned, uninitialized storage for a
-///   [`SuspendWakeupTimer`], and the initialized object must remain pinned in memory until
-///   dropped by [`rust_suspend_wakeup_timer_destroy`].
-/// - `callback` must be a non-null pointer to a valid, initialized C++
-///   `SuspendWakeupTimer::Callback` that may be moved from.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_suspend_wakeup_timer_init(
-    timer: *mut SuspendWakeupTimer,
-    callback: NonNull<CppCallback>,
-) {
-    // SAFETY: The caller guarantees `callback` points to a valid `SuspendWakeupTimer::Callback`.
-    let cpp_callback = unsafe { CppCallback::from_cpp(callback) };
-    let callback = Callback::new(move |now, resume_at| {
-        cpp_callback.call(now, resume_at);
-    });
-    // SAFETY: The caller guarantees `timer` points to valid, aligned, uninitialized storage that
-    // remains pinned until `rust_suspend_wakeup_timer_destroy`.
-    unsafe {
-        let _ = pin_init::PinInit::__pinned_init(SuspendWakeupTimer::init(callback), timer);
-    }
-}
-
-/// Destroys a [`SuspendWakeupTimer`] in-place that was previously initialized by
-/// [`rust_suspend_wakeup_timer_init`].
-///
-/// # Safety
-///
-/// `timer` must point to a valid, initialized [`SuspendWakeupTimer`] and must not be used after
-/// this call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_suspend_wakeup_timer_destroy(timer: *mut SuspendWakeupTimer) {
-    // SAFETY: The caller guarantees `timer` points to a valid, initialized `SuspendWakeupTimer`
-    // that will not be used again after this call.
-    unsafe {
-        core::ptr::drop_in_place(timer);
-    }
-}
-
-/// Sets the resume deadline on `timer`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_suspend_wakeup_timer_set_resume_deadline(
-    timer: &SuspendWakeupTimer,
-    resume_at: InstantBoot,
-) {
-    timer.set_resume_deadline(resume_at);
-}
-
-/// Ensures that `timer` is started if a deadline has been configured.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_suspend_wakeup_timer_ensure_started(timer: &SuspendWakeupTimer) {
-    timer.ensure_started();
-}
-
-/// Cancels any pending wakeup timer and resets its deadline.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_suspend_wakeup_timer_cancel_timer(timer: &SuspendWakeupTimer) {
-    timer.cancel_timer();
 }

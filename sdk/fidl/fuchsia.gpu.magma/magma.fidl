@@ -167,6 +167,14 @@ type ImportFlags = flexible bits : uint64 {
     SEMAPHORE_ONE_SHOT = 0x1;
 };
 
+/// Flags for buffers created by the system driver with CreateBuffer.
+/// MAGMA_BUFFER_FLAG_REMOTE_ALLOCATION is client-side only: it selects CreateBuffer and isn't sent.
+@available(added=NEXT)
+type CreateBufferFlags = flexible bits : uint64 {
+    /// Vendor specific definitions start here
+    VENDOR_FLAG_0 = 0x10000;
+};
+
 type BufferOp = flexible enum : uint32 {
     /// Populate the hardware page tables with the pages mapped in this range, committing pages
     /// as needed. This is not needed for allocations mapped GROWABLE, since the page tables will
@@ -361,6 +369,36 @@ closed protocol Primary {
         op BufferOp;
         range BufferRange;
     });
+
+    /// Creates a buffer whose memory is allocated by the system driver, and imports it into this
+    /// connection with the client-chosen `object_id`, as if by ImportObject. Returns a handle to
+    /// the buffer's memory.
+    ///
+    /// Unlike ImportObject, failures the client may recover from are returned as an error:
+    ///  * ZX_ERR_ALREADY_EXISTS if `object_id` is already in use in this connection, or conflicts
+    ///    with state in the system driver. The client may retry with another id.
+    ///  * ZX_ERR_NOT_SUPPORTED if the system driver doesn't support remote allocation, or doesn't
+    ///    support the given flags.
+    ///  * ZX_ERR_NO_MEMORY if the allocation fails.
+    ///  * Other errors reported by the system driver, except invalid arguments.
+    ///
+    /// A request without `size` or `object_id`, or that the system driver rejects as invalid,
+    /// closes the connection with ZX_ERR_INVALID_ARGS.
+    @available(added=NEXT)
+    strict CreateBuffer(table {
+        /// Required. The requested size in bytes; the actual size may be larger.
+        1: size uint64;
+
+        /// Required. The id used to refer to the buffer in this connection.
+        2: object_id ObjectId;
+
+        /// Optional.
+        3: flags CreateBufferFlags;
+    }) -> (resource table {
+        /// Required. A duplicate of the system driver's handle to the buffer's VMO, with the same
+        /// rights.
+        1: buffer zx.Handle:VMO;
+    }) error zx.Status;
 
     /// Enables the events OnNotifyMessagesConsumed and OnNotifyMemoryImported.
     strict EnableFlowControl();

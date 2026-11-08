@@ -1,0 +1,119 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/host_tests:host_test.bzl", "host_test")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "json_parser",
+    srcs = [
+        "json_parser.cc",
+        "rapidjson_validation.cc",
+    ],
+    hdrs = [
+        "json_parser.h",
+        "pretty_print.h",
+        "rapidjson_validation.h",
+    ],
+    visibility = [
+        "//src/cobalt:__subpackages__",
+        "//src/connectivity:__subpackages__",
+        "//src/developer:__subpackages__",
+        "//src/devices:__subpackages__",
+        "//src/graphics:__subpackages__",
+        "//src/starnix:__subpackages__",
+        "//src/storage:__subpackages__",
+        "//src/sys:__subpackages__",
+        "//src/ui:__subpackages__",
+        "//src/virtualization:__subpackages__",
+        "//vendor/google:__subpackages__",
+    ],
+    deps = [
+        "//sdk/lib/fit",
+        "//src/lib/fxl",
+        "//third_party/rapidjson",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_binary(
+    name = "json_parser_unittests_bin",
+    testonly = True,
+    srcs = [
+        "json_parser_unittest.cc",
+        "rapidjson_validation_unittest.cc",
+    ],
+    build_flags = ["//build/config/lto:no-fat-lto-objects-linking"],
+    gn_output_name = "json_parser_unittests",
+    tags = ["manual"],
+    deps = [
+        ":json_parser",
+        "//src/lib/files",
+        "//src/lib/fxl",
+        "//src/lib/fxl/test:gtest_main",
+        "//third_party/rapidjson",
+    ],
+)
+
+host_test(
+    name = "json_parser_unittests_host_test",
+    binary = ":json_parser_unittests_bin",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/lib:__pkg__"],
+)
+
+fx_packaged_binary(
+    name = "json_parser_unittests_packaged_bin",
+    testonly = True,
+    binary = ":json_parser_unittests_bin",
+    binary_name = "json_parser_unittests",
+)
+
+fx_component_manifest(
+    name = "json_parser_unittests_manifest",
+    testonly = True,
+    component_name = "json_parser_unittests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/json_parser_unittests.cml",
+)
+
+fx_test_component(
+    name = "json_parser_unittests_component",
+    compiled_manifest = ":json_parser_unittests_manifest",
+    deps = [
+        ":json_parser_unittests_packaged_bin",
+    ],
+)
+
+fx_package(
+    name = "json_parser_unittests_package",
+    package_name = "json_parser_unittests",
+    test_components = [
+        ":json_parser_unittests_component",
+    ],
+)
+
+fx_test(
+    name = "json_parser_unittests",
+    environments = ["//build/testing/environments:emu_env"],
+    package = ":json_parser_unittests_package",
+    visibility = ["//src/lib:__pkg__"],
+)

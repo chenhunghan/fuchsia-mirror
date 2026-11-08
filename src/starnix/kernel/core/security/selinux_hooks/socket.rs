@@ -3,24 +3,24 @@
 // found in the LICENSE file.
 
 use super::audit::Auditable;
-use super::fs_node::compute_new_fs_node_sid;
 use super::{
-    NonPrivateFsNode, NonPrivateSocket, NonPrivateSocketFile, build_permission_check,
-    check_permission, current_task_state, fs_node_effective_sid_and_class,
+    FsNodeSidAndClass, NonPrivateFsNode, NonPrivateSocket, NonPrivateSocketFile,
+    SecurityContextToken, build_permission_check, check_permission, current_task_state,
+    fs_node_effective_sid_and_class,
 };
-use crate::security::selinux_hooks::{FsNodeSidAndClass, superblock};
 use crate::task::CurrentTask;
 use crate::vfs::socket::{
     NetlinkFamily, Socket, SocketAddress, SocketDomain, SocketPeer, SocketProtocol,
-    SocketShutdownFlags, SocketType, socket_fs,
+    SocketShutdownFlags, SocketType,
 };
 use selinux::permission_check::PermissionCheck;
 use selinux::{
     CommonFsNodePermission, CommonSocketPermission, ForClass, FsNodeClass, InitialSid,
-    KernelPermission, PolicyCap, SecurityId, SecurityServer, SocketClass,
+    KernelPermission, PolicyCap, SecurityId, SecurityServer, SocketClass, TaskAttrs,
     UnixStreamSocketPermission,
 };
 use starnix_logging::track_stub;
+use starnix_uapi::errno;
 use starnix_uapi::errors::Errno;
 
 /// Checks that `current_task` has the specified `permission` for the `socket_node`.
@@ -29,7 +29,7 @@ pub(super) fn has_socket_permission(
     current_task: &CurrentTask,
     subject_sid: SecurityId,
     socket_node: NonPrivateFsNode<'_>,
-    permission: impl ForClass<SocketClass>,
+    permission: impl ForClass<SocketClass, Output = KernelPermission>,
     audit_context: Auditable<'_>,
 ) -> Result<(), Errno> {
     let FsNodeSidAndClass { sid: socket_sid, class: socket_class } =
@@ -135,6 +135,26 @@ fn compute_socket_security_class(
     }
 }
 
+/// Returns the SID to apply to a new socket of `new_socket_class` created by `current_task`.
+/// Panics if called before any policy has been loaded.
+pub(super) fn compute_new_socket_sid(
+    security_server: &SecurityServer,
+    current_task: &CurrentTask,
+    new_socket_class: SocketClass,
+) -> Result<SecurityId, Errno> {
+    let TaskAttrs { current_sid, sockcreate_sid, .. } = *current_task_state(current_task);
+    if let Some(sid) = sockcreate_sid {
+        return Ok(sid);
+    }
+
+    // `compute_create_sid` fails if the computed security context is invalid under the policy
+    // (for example, an unauthorized role/type combination or a non-overlapping `glblub` range).
+    let permission_check = build_permission_check(current_task, security_server);
+    permission_check
+        .compute_create_sid(current_sid, current_sid, new_socket_class.into(), b"")
+        .map_err(|_| errno!(EPERM))
+}
+
 /// Checks that `current_task` has permission to create a socket with `domain`, `socket_type` and
 /// `protocol`.
 pub(in crate::security) fn check_socket_create_access(
@@ -144,26 +164,10 @@ pub(in crate::security) fn check_socket_create_access(
     socket_type: SocketType,
     protocol: SocketProtocol,
 ) -> Result<(), Errno> {
-    let sockfs = socket_fs(current_task.kernel());
-    // Ensure sockfs gets labeled, in case it was mounted after the SELinux policy has been loaded.
-    superblock::file_system_resolve_security(security_server, &current_task, &sockfs)
-        .expect("resolve fs security");
     let current_sid = current_task_state(current_task).current_sid;
     let new_socket_class =
         compute_socket_security_class(security_server, domain, socket_type, protocol);
-    let new_socket_sid = if let Some(fs_label) = sockfs.security_state.state.label() {
-        compute_new_fs_node_sid(
-            security_server,
-            current_task,
-            fs_label,
-            None,
-            new_socket_class.into(),
-            "".into(),
-        )?
-    } else {
-        // TODO: https://fxbug.dev/409951346 - default to socket-related initial SIDs.
-        InitialSid::Unlabeled.into()
-    };
+    let new_socket_sid = compute_new_socket_sid(security_server, current_task, new_socket_class)?;
 
     check_permission(
         &build_permission_check(current_task, security_server),
@@ -182,26 +186,32 @@ pub(in crate::security) fn socket_socketpair(
 ) -> Result<(), Errno> {
     let left_sid = fs_node_effective_sid_and_class(left.node()).sid;
     let right_sid = fs_node_effective_sid_and_class(right.node()).sid;
-    *left.socket().security.state.peer_sid.lock() = Some(right_sid);
-    *right.socket().security.state.peer_sid.lock() = Some(left_sid);
+    *left.socket().security_state.state.peer_sid.lock() = Some(right_sid);
+    *right.socket().security_state.state.peer_sid.lock() = Some(left_sid);
     Ok(())
 }
 
-/// Computes and sets the security class for `socket`.
+/// Computes and sets the security class and label for `socket`.
 pub(in crate::security) fn socket_post_create(
     security_server: &SecurityServer,
+    current_task: &CurrentTask,
     socket: NonPrivateSocket<'_>,
 ) {
     let socket_node = socket.fs_node().expect("socket_post_create without FsNode");
-    socket_node.selinux_state().update_class(
-        compute_socket_security_class(
-            security_server,
-            socket.domain,
-            socket.socket_type,
-            socket.protocol,
-        )
-        .into(),
+    let socket_class = compute_socket_security_class(
+        security_server,
+        socket.domain,
+        socket.socket_type,
+        socket.protocol,
     );
+    let sid = if security_server.has_policy() {
+        compute_new_socket_sid(security_server, current_task, socket_class)
+            .unwrap_or_else(|_| InitialSid::Unlabeled.into())
+    } else {
+        // Sockets created before policy load receive the `kernel` initial SID.
+        InitialSid::Kernel.into()
+    };
+    socket_node.selinux_state().set_sid_and_class(sid, socket_class.into());
 }
 
 /// Checks that `current_task` has the right permissions to perform a bind operation on
@@ -288,7 +298,6 @@ pub(in crate::security) fn socket_accept(
     accepted_socket: NonPrivateSocketFile<'_>,
 ) -> Result<(), Errno> {
     let current_sid = current_task_state(current_task).current_sid;
-    let listening_security_state = (*listening_socket.node().selinux_state().read()).clone();
     has_socket_permission(
         &build_permission_check(current_task, security_server),
         current_task,
@@ -297,8 +306,8 @@ pub(in crate::security) fn socket_accept(
         CommonSocketPermission::Accept,
         current_task.into(),
     )?;
-    let _lock = accepted_socket.node().selinux_state().update_lock.lock();
-    accepted_socket.node().selinux_state().label.update(listening_security_state);
+    let FsNodeSidAndClass { sid, class } = fs_node_effective_sid_and_class(listening_socket.node());
+    accepted_socket.node().selinux_state().set_sid_and_class(sid, class);
     Ok(())
 }
 
@@ -462,25 +471,32 @@ pub(in crate::security) fn socket_getpeersec_stream(
     _current_task: &CurrentTask,
     socket: NonPrivateSocket<'_>,
 ) -> Result<Vec<u8>, Errno> {
-    let peer_sid = socket.security.state.peer_sid.lock().unwrap_or(InitialSid::Unlabeled.into());
+    let peer_sid =
+        socket.security_state.state.peer_sid.lock().unwrap_or(InitialSid::Unlabeled.into());
     // The SELinux Test Suite assumes that `SO_PEERSEC` will return a NUL terminated label.
     Ok(security_server.sid_to_security_context_with_nul(peer_sid).unwrap())
 }
 
-/// Returns the Security Context with which messages sent by this [`crate::vfs::Socket`] should
-/// be labeled.
+/// Returns a [`SecurityContextToken`] encoding the [`SecurityId`] with which messages sent by this
+/// [`crate::vfs::Socket`] should be labeled.
 pub(in crate::security) fn socket_getpeersec_dgram(
-    security_server: &SecurityServer,
-    _current_task: &CurrentTask,
     socket: NonPrivateSocket<'_>,
-) -> Vec<u8> {
+) -> SecurityContextToken {
     let socket_sid = if let Some(socket_node) = socket.fs_node() {
         fs_node_effective_sid_and_class(socket_node).sid
     } else {
         track_stub!(TODO("https://fxbug.dev/414583985"), "socket_getpeersec_dgram without FsNode");
         InitialSid::Unlabeled.into()
     };
-    security_server.sid_to_security_context_with_nul(socket_sid).unwrap()
+    SecurityContextToken { sid: socket_sid }
+}
+
+/// Resolves a [`SecurityContextToken`] into a NUL-terminated Security Context byte string.
+pub(in crate::security) fn security_token_to_context_with_nul(
+    security_server: &SecurityServer,
+    token: SecurityContextToken,
+) -> Option<Vec<u8>> {
+    security_server.sid_to_security_context_with_nul(token.sid)
 }
 
 /// Checks if the Unix domain `sending_socket` is allowed to send a message to the
@@ -541,8 +557,8 @@ pub(in crate::security) fn unix_stream_connect(
     // TODO: https://fxbug.dev/414583985 - the `server_socket` does not yet have an associated
     // `FsNode`, nor security label, so the `listening_socket` label must be used for now.
     let listening_sid = fs_node_effective_sid_and_class(listening_node).sid;
-    *client_socket.security.state.peer_sid.lock() = Some(listening_sid);
-    *server_socket.security.state.peer_sid.lock() = Some(client_sid);
+    *client_socket.security_state.state.peer_sid.lock() = Some(listening_sid);
+    *server_socket.security_state.state.peer_sid.lock() = Some(client_sid);
 
     Ok(())
 }
@@ -593,8 +609,10 @@ mod tests {
             )
             .expect("failed to create socket");
 
-            let socket_label = socket_node.node().security_state.selinux_for_test().read();
-            assert_eq!(socket_label.class(), SocketClass::UnixStreamSocket.into());
+            assert_eq!(
+                socket_node.node().security_state.selinux_for_test().class(),
+                Some(SocketClass::UnixStreamSocket.into())
+            );
             assert_eq!(get_cached_sid(socket_node.node()), Some(task_sid));
         })
         .await;

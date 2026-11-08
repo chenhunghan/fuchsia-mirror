@@ -670,34 +670,6 @@ mod console_tests {
 
         assert_true!(found);
     }
-
-    // Verifies that the test command is registered correctly from the Rust side.
-    // We must expose this via FFI to ensure the C++ tests runner links this file.
-    // The alternative would be to move these tests directly into
-    // `zircon/kernel/lib/console/rust/src/lib.rs`, but keeping them in a separate
-    // test crate avoids cluttering the main library with mocks and helpers.
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn command_visibility_from_rust_test() -> bool {
-        unsafe {
-            let start = &__start_commands as *const Cmd;
-            let stop = &__stop_commands as *const Cmd;
-            let len = stop.offset_from(start) as usize;
-            let commands = core::slice::from_raw_parts(start, len);
-
-            for cmd in commands {
-                if cmd.name() == "mock_success" {
-                    if cmd.help() != "mock_success help" {
-                        return false;
-                    }
-                    if cmd.availability_mask != CMD_AVAIL_NORMAL {
-                        return false;
-                    }
-                    return true;
-                }
-            }
-        }
-        false
-    }
 }
 
 /// Tests for the kernel console with history enabled.

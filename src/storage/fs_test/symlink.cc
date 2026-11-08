@@ -58,7 +58,7 @@ TEST_P(SymlinkTest, LinkIntoFromUnlinkedSymlinkFails) {
 
   // Call LinkInto using the client end we held
   auto link_result = fidl::WireCall(symlink_endpoints.client)
-                         ->LinkInto(std::move(token), fidl::StringView("new_symlink"));
+                         ->LinkInto(std::move(token), fidl::StringView("new_symlink"), {});
 
   // It must fail with NOT_FOUND.
   ASSERT_TRUE(link_result.ok());

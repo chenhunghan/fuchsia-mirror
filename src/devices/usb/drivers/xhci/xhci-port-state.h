@@ -31,6 +31,10 @@ struct PortState {
   uint8_t slot_id;
 
   std::unique_ptr<TRBContext> wait_for_port_status_change_;
+
+  // Incremented every time wait_for_port_status_change_ is armed, so that a PORTSC poll scheduled
+  // for an earlier wait never completes a newer one.
+  uint64_t port_status_change_wait_generation = 0;
 };
 
 }  // namespace usb_xhci

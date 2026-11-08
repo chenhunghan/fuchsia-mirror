@@ -799,7 +799,7 @@ zx::result<> MinfsChecker::CheckSuperblockIntegrity() const {
   journal_block = fs_.GetBlockOffsets().JournalStartBlock();
 #endif
 
-  if (fs_.bc_->Readblk(journal_block, data).is_error()) {
+  if (fs_.GetMutableBcache()->Readblk(journal_block, data).is_error()) {
     FX_LOGS(ERROR) << "could not read journal block";
     return zx::error(ZX_ERR_IO);
   }
@@ -832,16 +832,17 @@ zx::result<> MinfsChecker::CheckSuperblockIntegrity() const {
 #endif
   }
 
-  if (fs_.bc_->Readblk(backup_location, data).is_error()) {
+  if (fs_.GetMutableBcache()->Readblk(backup_location, data).is_error()) {
     FX_LOGS(ERROR) << "could not read backup superblock";
     return zx::error(ZX_ERR_IO);
   }
 
   Superblock* backup_info = reinterpret_cast<Superblock*>(data);
 #ifdef __Fuchsia__
-  return CheckSuperblock(*backup_info, fs_.bc_->device(), fs_.bc_->Maxblk());
+  return CheckSuperblock(*backup_info, fs_.GetMutableBcache()->device(),
+                         fs_.GetMutableBcache()->Maxblk());
 #else
-  return CheckSuperblock(*backup_info, fs_.bc_->Maxblk());
+  return CheckSuperblock(*backup_info, fs_.GetMutableBcache()->Maxblk());
 #endif
 }
 

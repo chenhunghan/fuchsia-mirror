@@ -1,0 +1,9 @@
+# Verify that atomic RMW instructions reject stack slots holding spilled pointers.
+-- asm
+stxdw [%r10-8], %r10
+mov %r2, 8
+lock fetch add [%r10-8], %r2
+mov %r0, 0
+exit
+-- error
+reading non scalar value from the stack

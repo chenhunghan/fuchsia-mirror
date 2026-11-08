@@ -862,9 +862,9 @@ async fn test_installation_deferred() {
     // Wait for system to commit.
     let event_pair =
         env.proxies.commit_status_provider.is_current_system_committed().await.unwrap();
-    assert_eq!(
+    assert_matches!(
         fasync::OnSignals::new(&event_pair, zx::Signals::USER_0).await,
-        Ok(zx::Signals::USER_0)
+        Ok(signals) if signals.contains(zx::Signals::USER_0)
     );
 
     // Now that the system is committed, we should be able to perform an update. Before we do the

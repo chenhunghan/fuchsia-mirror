@@ -1,0 +1,35 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Import definitions into the protocol being tested.
+fidl_library(
+    name = "fidl_import",
+    testonly = True,
+    srcs = ["compatibility_imported.test.fidl"],
+    enable_hlcpp = True,
+    library_name = "fidl.test.imported",
+    visibility = ["//src/tests/fidl/compatibility:__subpackages__"],
+)
+
+# The protocol used in the test.
+fidl_library(
+    name = "fidl_service",
+    testonly = True,
+    srcs = [
+        "compatibility_service.test.fidl",
+        "config.fidl",
+    ],
+    enable_hlcpp = True,
+    library_name = "fidl.test.compatibility",
+    visibility = ["//src/tests/fidl/compatibility:__subpackages__"],
+    deps = [
+        ":fidl_import",
+        "//sdk/fidl/fuchsia.url",
+        "//zircon/vdso/zx",
+    ],
+)

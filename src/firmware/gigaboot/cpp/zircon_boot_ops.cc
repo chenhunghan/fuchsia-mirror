@@ -4,9 +4,9 @@
 
 #include <lib/zbitl/error-stdio.h>
 #include <lib/zircon_boot/zircon_boot.h>
+#include <stdio.h>
 
-#include <phys/boot-zbi.h>
-#include <phys/stdio.h>
+#include <phys/boot-zbi/boot-zbi.h>
 
 #include "backends.h"
 #include "boot_zbi_items.h"
@@ -94,11 +94,10 @@ void Boot(ZirconBootOps* ops, zbi_header_t* zbi, size_t capacity) {
     abort();
   }
 
-  // Once we exit boot service, console output will be set to NULL. Thus we must not print from now
-  // on otherwise it crashes.
-  PhysConsole& console = PhysConsole::Get();
-  console.set_serial(*console.null());
-  console.set_graphics(*console.null());
+  // Once we exit boot services, console output and boot services are no longer available.
+  // Install a no-op writer and clear gEfiSystemTable so post-exit assertions trap cleanly.
+  gStdout = FILE{[](void*, const char*, size_t len) { return static_cast<int>(len); }, nullptr};
+  gEfiSystemTable = nullptr;
   boot.Boot();
 }
 

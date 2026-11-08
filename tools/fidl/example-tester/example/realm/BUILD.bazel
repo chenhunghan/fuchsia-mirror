@@ -1,0 +1,25 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_component_manifest(
+    name = "realm_manifest",
+    component_name = "realm",
+    manifest = "meta/realm.cml",
+)
+
+# The `realm` component wires the example client, proxy and server together
+# and is packaged into the example-tester test packages.
+fx_component(
+    name = "realm",
+    compiled_manifest = ":realm_manifest",
+    visibility = ["//tools/fidl/example-tester/example:__subpackages__"],
+)

@@ -17,31 +17,58 @@ set_defaults("fuchsia_rust_dso") {
 
 template("fuchsia_cc_dso") {
   assert(defined(invoker.async), "async must be set to true or false")
-  if (!defined(invoker.deps)) {
-    invoker.deps = []
-  }
   if (invoker.async) {
-    invoker.deps += [ "//src/lib/dso/cpp:async" ]
+    _dso_deps = [ "//src/lib/dso/cpp:async" ]
   } else {
-    invoker.deps += [ "//src/lib/dso/cpp:sync" ]
+    _dso_deps = [ "//src/lib/dso/cpp:sync" ]
   }
 
-  shared_library("$target_name") {
-    forward_variables_from(invoker, "*")
+  shared_library(target_name) {
+    forward_variables_from(invoker,
+                           [
+                             "applicable_licenses",
+                             "visibility",
+                           ])
+    forward_variables_from(invoker,
+                           "*",
+                           [
+                             "applicable_licenses",
+                             "async",
+                             "visibility",
+                           ])
+    if (!defined(deps)) {
+      deps = []
+    }
+    deps += _dso_deps
+    deps -= _dso_deps
+    deps += _dso_deps
   }
 }
 
 template("fuchsia_rust_dso") {
-  if (!defined(invoker.deps)) {
-    invoker.deps = []
-  }
-  invoker.deps += [
-    "//src/lib/fuchsia",
-    "//src/lib/dso/rust",
+  _dso_deps = [
     "//sdk/rust/zx",
+    "//src/lib/dso/rust",
+    "//src/lib/fuchsia",
   ]
 
-  rustc_cdylib("$target_name") {
-    forward_variables_from(invoker, "*")
+  rustc_cdylib(target_name) {
+    forward_variables_from(invoker,
+                           [
+                             "applicable_licenses",
+                             "visibility",
+                           ])
+    forward_variables_from(invoker,
+                           "*",
+                           [
+                             "applicable_licenses",
+                             "visibility",
+                           ])
+    if (!defined(deps)) {
+      deps = []
+    }
+    deps += _dso_deps
+    deps -= _dso_deps
+    deps += _dso_deps
   }
 }

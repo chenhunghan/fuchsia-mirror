@@ -1,0 +1,77 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "component-time-test",
+    srcs = ["src/test.rs"],
+    crate_root = "src/test.rs",
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = ["//src/lib/fuchsia"],
+)
+
+# Run with `fx test component-v1-time-unittests`.
+fx_unittest_package(
+    name = "component-v1-time-unittests",
+    unit_tests = [":component-time-test"],
+    visibility = ["//src/sys/component_manager:__pkg__"],
+)
+
+fx_packaged_binary(
+    name = "component-time-test_packaged_bin",
+    testonly = True,
+    binary = ":component-time-test",
+    binary_name = "component_time_test",
+)
+
+fx_component_manifest(
+    name = "component-v2-time-unittests-manifest",
+    testonly = True,
+    component_name = "component-v2-time-unittests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/component-v2-time-unittests.cml",
+)
+
+fx_test_component(
+    name = "component-v2-time-unittests-component",
+    compiled_manifest = ":component-v2-time-unittests-manifest",
+    deps = [":component-time-test_packaged_bin"],
+)
+
+fx_package(
+    name = "component-v2-time-unittests_package",
+    package_name = "component-v2-time-unittests",
+    components = [
+        # https://fxbug.dev/42052321: Dep included for affected tests presubmit
+        "//src/sys/component_manager:component-manager-realm-builder-cmp",
+    ],
+    test_components = [":component-v2-time-unittests-component"],
+)
+
+# Run with `fx test component-v2-time-unittests`.
+# https://fxbug.dev/42052321: Dep included for affected tests presubmit
+fx_test(
+    name = "component-v2-time-unittests",
+    package = ":component-v2-time-unittests_package",
+    visibility = ["//src/sys/component_manager:__pkg__"],
+)

@@ -99,14 +99,12 @@ def get_dut_phy_caps(
     return caps[board]
 
 
-def resolve_ap_phy_caps(
-    openwrt_ap: OpenWrtAP | None, access_point: AccessPoint | None = None
-) -> WlanPhyCaps:
-    if openwrt_ap is not None:
+def resolve_ap_phy_caps(ap: OpenWrtAP | AccessPoint) -> WlanPhyCaps:
+    if isinstance(ap, OpenWrtAP):
         return OPENWRT_ONE_CAPS
-    if isinstance(access_point, AccessPoint):
+    if isinstance(ap, AccessPoint):
         return WHIRLWIND_CAPS
-    raise signals.TestFailure("No supported AP controller available")
+    raise signals.TestFailure(f"Unsupported AP controller: {type(ap)}")
 
 
 def theoretical_max_phy_mbps(
@@ -121,8 +119,8 @@ def theoretical_max_phy_mbps(
     return round(_MAX_PHY_RATE_1SS_MBPS[(gen, bw)] * nss, 1)
 
 
-def phy_rate_target_mbps(phy_max_mbps: float) -> float:
-    return round(PHY_RATE_TARGET_RATIO * phy_max_mbps, 1)
+def phy_rate_target_mbps(phy_possible_mbps: float) -> float:
+    return round(PHY_RATE_TARGET_RATIO * phy_possible_mbps, 1)
 
 
 LinkMetricKey = Literal[
@@ -186,7 +184,7 @@ class MeasurementRecord(TypedDict):
     throughput_mbps: float
     phy_mode: str | None
     nss: int | None
-    phy_max_mbps: float
+    phy_possible_mbps: float
     link_metrics: LinkMetricsDict
 
 
@@ -208,6 +206,10 @@ class MeasurementsByDirection(TypedDict):
 
 
 class TestCaseRecord(TypedDict):
+    ap: str
+    # In multi-ap testbeds, only the primary AP will publish data to perf
+    # dashboards.
+    is_primary_ap: bool
     security: str
     channel: int
     channel_bandwidth: int
@@ -260,7 +262,7 @@ class MetricStats:
     @classmethod
     def from_values(
         cls, values: list[int | float | None], round_digits: int = 1
-    ) -> "MetricStats":
+    ) -> MetricStats:
         valid = [v for v in values if v is not None]
         if not valid:
             return cls()
@@ -294,9 +296,7 @@ class LinkMetricSummary:
     samples: list[LinkMetricSample]
 
     @classmethod
-    def from_samples(
-        cls, samples: list[LinkMetricSample]
-    ) -> "LinkMetricSummary":
+    def from_samples(cls, samples: list[LinkMetricSample]) -> LinkMetricSummary:
         # Find the most recent valid phy_mode and nss from the collected samples,
         # reflecting the steady-state negotiated configuration under load.
         phy_mode: str | None = None
@@ -556,37 +556,53 @@ def format_band(band: Band) -> str:
             return str(band)
 
 
-def compute_phy_avg_pct(measurement: MeasurementRecord) -> float | None:
-    phy_max_mbps = measurement["phy_max_mbps"]
-    if phy_max_mbps <= 0:
-        return None
+def get_phy_avg_mbps(measurement: MeasurementRecord) -> float | None:
+    """Returns the average PHY rate in Mbps in the data-carrying direction.
+
+    Direction is relative to the DUT: AP RX rate for DUT TX ("tx"), and
+    AP TX rate for DUT RX ("rx").
+    """
     metric_key: LinkMetricKey = (
         "ap_rx_rate_mbps"
         if measurement["direction"] == "tx"
         else "ap_tx_rate_mbps"
     )
-    avg_rate = measurement["link_metrics"][metric_key]["avg"]
+    return measurement["link_metrics"][metric_key]["avg"]
+
+
+def compute_phy_avg_pct(measurement: MeasurementRecord) -> float | None:
+    phy_possible_mbps = measurement["phy_possible_mbps"]
+    if phy_possible_mbps <= 0:
+        return None
+    avg_rate = get_phy_avg_mbps(measurement)
     if avg_rate is None:
         return None
-    return round((avg_rate / phy_max_mbps) * 100.0, 1)
+    return round((avg_rate / phy_possible_mbps) * 100.0, 1)
 
 
 def is_phy_rate_below_target(measurement: MeasurementRecord) -> bool:
-    phy_max = measurement["phy_max_mbps"]
-    metric_key: LinkMetricKey = (
-        "ap_rx_rate_mbps"
-        if measurement["direction"] == "tx"
-        else "ap_tx_rate_mbps"
+    phy_possible = measurement["phy_possible_mbps"]
+    avg_rate = get_phy_avg_mbps(measurement)
+    return avg_rate is None or avg_rate < phy_rate_target_mbps(phy_possible)
+
+
+def has_phy_rate_below_target(measurements: MeasurementsByDirection) -> bool:
+    return any(
+        is_phy_rate_below_target(measurement)
+        for measurement in (
+            measurements["tcp_tx"],
+            measurements["tcp_rx"],
+            measurements["udp_tx"],
+            measurements["udp_rx"],
+        )
     )
-    avg_rate = measurement["link_metrics"][metric_key]["avg"]
-    return avg_rate is None or avg_rate < phy_rate_target_mbps(phy_max)
 
 
 def build_tcp_measurement_record(
     direction: Literal["tx", "rx"],
     iperf_res: IperfTcpResult,
     metrics: LinkMetricSummary,
-    phy_max_mbps: float,
+    phy_possible_mbps: float,
 ) -> TcpMeasurementRecord:
     raw_bps = iperf_res["tcp_bps"]
     return {
@@ -595,7 +611,7 @@ def build_tcp_measurement_record(
         "throughput_mbps": bps_to_mbps(raw_bps),
         "phy_mode": metrics.phy_mode,
         "nss": metrics.nss,
-        "phy_max_mbps": phy_max_mbps,
+        "phy_possible_mbps": phy_possible_mbps,
         "link_metrics": metrics.to_link_metrics_dict(),
         "iperf_details": {
             "server_cpu_utilization_percent": iperf_res[
@@ -610,7 +626,7 @@ def build_udp_measurement_record(
     direction: Literal["tx", "rx"],
     iperf_res: IperfUdpResult,
     metrics: LinkMetricSummary,
-    phy_max_mbps: float,
+    phy_possible_mbps: float,
 ) -> UdpMeasurementRecord:
     return {
         "protocol": "udp",
@@ -618,7 +634,7 @@ def build_udp_measurement_record(
         "throughput_mbps": bps_to_mbps(iperf_res["udp_bps_corrected"]),
         "phy_mode": metrics.phy_mode,
         "nss": metrics.nss,
-        "phy_max_mbps": phy_max_mbps,
+        "phy_possible_mbps": phy_possible_mbps,
         "link_metrics": metrics.to_link_metrics_dict(),
         "iperf_details": {
             "server_cpu_utilization_percent": iperf_res[
@@ -634,9 +650,22 @@ def build_udp_measurement_record(
 def build_test_case_record(
     test: TestParams,
     measurements: MeasurementsByDirection,
+    ap_name: str,
+    is_primary_ap: bool = True,
 ) -> TestCaseRecord:
+    """Builds a test case record dict.
+
+    Args:
+        test: The parameters for the test case.
+        measurements: The throughput measurements.
+        ap_name: Identifier for the AP.
+        is_primary_ap: In multi-ap testbeds, only the primary AP will publish
+            data to perf dashboards.
+    """
     sec_name = ConfigMapper.to_hostapd_security(test.security_mode).value
     return {
+        "ap": ap_name,
+        "is_primary_ap": is_primary_ap,
         "security": sec_name,
         "channel": test.channel,
         "channel_bandwidth": test.channel_bandwidth,
@@ -649,11 +678,11 @@ def _log_measurement_result(
     test_label: str,
     mbps: float,
     metrics: LinkMetricSummary,
-    phy_max_mbps: float,
+    phy_possible_mbps: float,
 ) -> None:
-    target_mbps = phy_rate_target_mbps(phy_max_mbps)
+    target_mbps = phy_rate_target_mbps(phy_possible_mbps)
     phy_target = (
-        f" | PHY Theoretical max: {phy_max_mbps:.1f} Mbps, "
+        f" | PHY Theoretical max: {phy_possible_mbps:.1f} Mbps, "
         f"PHY target ({PHY_RATE_TARGET_RATIO:.0%}): {target_mbps:.1f} Mbps"
     )
     logger.info(
@@ -1073,9 +1102,27 @@ class ThroughputReporter:
         self._write_json_report()
 
     def record_test_case(
-        self, test: TestParams, measurements: MeasurementsByDirection
+        self,
+        test: TestParams,
+        measurements: MeasurementsByDirection,
+        ap_name: str,
+        is_primary_ap: bool = True,
     ) -> None:
-        test_case_record = build_test_case_record(test, measurements)
+        """Records a test case.
+
+        Args:
+            test: The parameters for the test case.
+            measurements: The throughput measurements.
+            ap_name: Identifier for the AP.
+            is_primary_ap: In multi-ap testbeds, only the primary AP will
+                publish data to perf dashboards.
+        """
+        test_case_record = build_test_case_record(
+            test,
+            measurements,
+            ap_name=ap_name,
+            is_primary_ap=is_primary_ap,
+        )
         self.test_cases.append(test_case_record)
         self._write_json_report()
 
@@ -1104,6 +1151,7 @@ class ThroughputReporter:
             return
 
         header_row = [
+            "ap",
             "security",
             "band",
             "channel",
@@ -1113,8 +1161,9 @@ class ThroughputReporter:
             "udp_or_tcp",
             "dut_tx_or_rx",
             "result_mbps",
-            "phy_max_mbps",
+            "phy_avg_mbps",
             "phy_avg_pct",
+            "phy_possible_mbps",
             *(f"{m}_{s}" for m in LINK_METRIC_KEYS for s in STAT_KEYS),
         ]
 
@@ -1129,6 +1178,7 @@ class ThroughputReporter:
             ):
                 link_metrics = measurement["link_metrics"]
                 row: list[Any] = [
+                    test_case["ap"],
                     test_case["security"],
                     test_case["band"],
                     test_case["channel"],
@@ -1138,8 +1188,9 @@ class ThroughputReporter:
                     proto,
                     measurement["direction"],
                     measurement["throughput_mbps"],
-                    measurement["phy_max_mbps"],
+                    get_phy_avg_mbps(measurement),
                     compute_phy_avg_pct(measurement),
+                    measurement["phy_possible_mbps"],
                 ]
                 for m_key in LINK_METRIC_KEYS:
                     stat = link_metrics[m_key]
@@ -1255,7 +1306,18 @@ class ThroughputReporter:
     ) -> list[dict[str, Any]]:
         entries_by_label: dict[str, dict[str, Any]] = {}
         for test_case in test_cases:
+            # In multi-ap testbeds, only the primary AP will publish data to perf
+            # dashboards. Secondary AP metrics remain recorded in the JSON and
+            # HTML reports.
+            if not test_case.get("is_primary_ap", True):
+                continue
             measurements = test_case["measurements"]
+            if has_phy_rate_below_target(measurements):
+                logger.info(
+                    f"Skipping fuchsiaperf publish for ch{test_case['channel']}_"
+                    f"{test_case['channel_bandwidth']}mhz: PHY rate below target"
+                )
+                continue
             for proto, measurement in (
                 ("tcp", measurements["tcp_tx"]),
                 ("tcp", measurements["tcp_rx"]),
@@ -1295,6 +1357,9 @@ class ThroughputReporter:
             return
 
         fuchsiaperf_data = self._build_fuchsiaperf_data(test_cases)
+        if not fuchsiaperf_data:
+            return
+
         with open(self.fuchsiaperf_file_path, "w", encoding="utf-8") as f:
             json.dump(fuchsiaperf_data, f, indent=2)
             f.write("\n")

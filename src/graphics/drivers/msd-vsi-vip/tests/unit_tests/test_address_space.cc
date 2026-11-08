@@ -259,3 +259,35 @@ TEST_F(TestAddressSpace, RollbackAcrossPageTableBoundary) {
   // The first page table (index 0) should be garbage collected.
   EXPECT_EQ(nullptr, root()->GetPageTable(0, false));
 }
+
+TEST_F(TestAddressSpace, InsertVirtualAddressTooLarge) {
+  constexpr uint64_t kHighGpuAddr = 1ull << 32;
+  constexpr uint32_t kPageCount = 1;
+
+  auto buffer = magma::PlatformBuffer::Create(kPageCount * kPageSize, "test");
+  auto bus_mapping = owner_.GetBusMapper()->MapPageRangeBus(buffer.get(), 0, kPageCount);
+
+  // Inserting at or above 4GB should fail and not alias to 0x0.
+  EXPECT_FALSE(address_space_->Insert(kHighGpuAddr, bus_mapping.get()));
+  EXPECT_EQ(nullptr, root()->GetPageTable(0, false));
+
+  // Inserting a range that crosses the 4GB boundary should also fail.
+  const uint64_t kBoundaryGpuAddr = (1ull << 32) - kPageSize;
+  auto buffer2 = magma::PlatformBuffer::Create(2 * kPageSize, "test2");
+  auto bus_mapping2 = owner_.GetBusMapper()->MapPageRangeBus(buffer2.get(), 0, 2);
+  EXPECT_FALSE(address_space_->Insert(kBoundaryGpuAddr, bus_mapping2.get()));
+}
+
+TEST_F(TestAddressSpace, MapBufferGpuVirtualAddressTooLarge) {
+  constexpr uint64_t kBufferSizeInPages = 1;
+  constexpr uint64_t kHighGpuAddr = 1ull << 32;
+
+  std::shared_ptr<MsdVsiBuffer> buffer =
+      MsdVsiBuffer::Create(kBufferSizeInPages * magma::page_size(), "test");
+
+  std::shared_ptr<GpuMapping> mapping;
+  magma::Status status = AddressSpace::MapBufferGpu(
+      address_space_, buffer, kHighGpuAddr, 0 /* page_offset */, kBufferSizeInPages, &mapping);
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(nullptr, mapping);
+}

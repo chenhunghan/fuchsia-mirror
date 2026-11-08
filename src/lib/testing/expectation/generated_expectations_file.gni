@@ -2,6 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+# LINT.IfChange
+
 # Generates an expectations JSON5 file from a list of expectation files to
 # include. All test cases without matching expectations will be expected to
 # pass by default.
@@ -12,6 +14,11 @@
 #     Type: list of paths
 template("generated_expectations_file") {
   generated_file(target_name) {
+    forward_variables_from(invoker,
+                           [
+                             "testonly",
+                             "visibility",
+                           ])
     output_file = "${target_gen_dir}/${target_name}.json5"
     outputs = [ output_file ]
     output_conversion = "json"
@@ -32,3 +39,4 @@ template("generated_expectations_file") {
     }
   }
 }
+# LINT.ThenChange(//src/lib/testing/expectation/rules/fx_generated_expectations.bzl)

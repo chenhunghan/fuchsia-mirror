@@ -46,8 +46,21 @@ class FakeProviderV2 : public fidl::Server<fuchsia_tracing_provider::ProviderV2>
   // Helper to move the provider to a start where it does not respond to fidl calls
   void MarkUnresponsive();
   void MarkResponsive();
+  void Disconnect() {
+    start_completer_.reset();
+    stop_completer_.reset();
+    terminate_completer_.reset();
+    pending_cat_completers_.clear();
+    // Destroying a ServerBindingRef does not unbind the server, so close the channel explicitly.
+    if (binding_) {
+      binding_->Unbind();
+      binding_.reset();
+    }
+  }
 
   void SendOnSaveBuffer(uint32_t wrapped_count, uint64_t durable_data_end);
+  void SendOnAlert(const std::string& alert_name);
+  void SendLateStopReply();
   void SetBinding(fidl::ServerBindingRef<fuchsia_tracing_provider::ProviderV2> binding) {
     binding_ = std::move(binding);
   }
@@ -119,6 +132,14 @@ struct FakeProviderV2Binding {
   explicit FakeProviderV2Binding(std::unique_ptr<FakeProviderV2> p) : provider(std::move(p)) {}
 
   fidl::ClientEnd<fuchsia_tracing_provider::ProviderV2> NewBinding(async_dispatcher_t* dispatcher);
+
+  void Disconnect() {
+    provider->Disconnect();
+    if (binding) {
+      binding->Unbind();
+      binding.reset();
+    }
+  }
 
   std::unique_ptr<FakeProviderV2> provider;
   std::optional<fidl::ServerBindingRef<fuchsia_tracing_provider::ProviderV2>> binding;

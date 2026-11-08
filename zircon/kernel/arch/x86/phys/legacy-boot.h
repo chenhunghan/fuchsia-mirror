@@ -35,15 +35,6 @@ struct LegacyBoot {
 // allocator after InitMemory().
 extern LegacyBoot gLegacyBoot;
 
-// InitMemory() calls this to adjust gLegacyBoot before using its data.
-// It need not be defined.
-[[gnu::weak]] void LegacyBootQuirks();
-
-// Wires up the associated UART to stdout, and possibly finishes initializing
-// it (which in the non-legacy case is assumed to be properly done by the
-// bootloader).
-void LegacyBootSetUartConsole(const uart::all::Config<>& uart);
-
 // This is a subroutine of InitMemory().  It primes the allocator and reserves
 // ranges based on the data in gLegacyBoot, then sets up paging.
 void LegacyBootInitMemory(AddressSpace* aspace);

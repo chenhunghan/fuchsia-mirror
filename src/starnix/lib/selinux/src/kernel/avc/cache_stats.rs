@@ -71,18 +71,33 @@ impl AtomicCacheStats {
 }
 
 /// Number of shards to use for the cache stats.
-// TODO: https://fxbug.dev/483629131 - Do per-CPU sharding using rseq.
 fn num_shards() -> usize {
-    8
+    #[cfg(target_os = "fuchsia")]
+    {
+        zx::system_get_num_cpus() as usize
+    }
+    #[cfg(not(target_os = "fuchsia"))]
+    {
+        1
+    }
 }
 
-unsafe extern "C" {
-    fn thrd_current() -> std::ffi::c_ulong;
+/// Returns the current CPU index from RCU when available.
+#[inline(always)]
+fn current_cpu_index() -> usize {
+    #[cfg(target_os = "fuchsia")]
+    {
+        fuchsia_rcu::try_current_cpu().unwrap_or(0) as usize
+    }
+    #[cfg(not(target_os = "fuchsia"))]
+    {
+        0
+    }
 }
 
 /// Sharded accumulator for cache statistics.
 pub(super) struct ShardedCacheStats {
-    shards: Vec<CachePadded<AtomicCacheStats>>,
+    shards: Box<[CachePadded<AtomicCacheStats>]>,
 }
 
 impl ShardedCacheStats {
@@ -94,10 +109,9 @@ impl ShardedCacheStats {
         }
     }
 
+    #[inline]
     pub fn shard(&self) -> &AtomicCacheStats {
-        // SAFETY: there's nothing unsafe about this, we're just calling a C function.
-        let index = (rapidhash::rapidhash(&unsafe { thrd_current() }.to_ne_bytes()) as usize)
-            % num_shards();
+        let index = current_cpu_index() % self.shards.len();
         &self.shards[index]
     }
 

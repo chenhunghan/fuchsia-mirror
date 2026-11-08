@@ -167,7 +167,6 @@ impl<Marker: Send + Sync + 'static> FrozenIndex<Marker> {
                 blobfs,
                 &package,
                 memoized_packages,
-                crate::required_blobs::ErrorStrategy::PropagateFailure,
             )
             .await
             .with_context(|| format!("determining required blobs for package {package}"))?,

@@ -16,7 +16,6 @@ const (
 	DriverLLCPP Binding = "driver_llcpp"
 	Dart        Binding = "dart"
 	Rust        Binding = "rust"
-	Go          Binding = "go"
 	Reference   Binding = "reference"
 )
 

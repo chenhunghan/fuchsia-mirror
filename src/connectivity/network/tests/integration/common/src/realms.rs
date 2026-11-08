@@ -59,8 +59,8 @@ impl NetstackVersion {
     /// Gets the Fuchsia URL for this Netstack component.
     pub fn get_url(&self) -> &'static str {
         match self {
-            NetstackVersion::Netstack3 => "#meta/netstack3-debug.cm",
-            NetstackVersion::ProdNetstack3 => "#meta/netstack3.cm",
+            NetstackVersion::Netstack3 => "netstack-debug#meta/netstack3-debug.cm",
+            NetstackVersion::ProdNetstack3 => "netstack#meta/netstack3.cm",
         }
     }
 
@@ -208,7 +208,7 @@ pub mod constants {
     }
     pub mod netcfg {
         pub const COMPONENT_NAME: &str = "netcfg";
-        pub const COMPONENT_URL: &str = "#meta/netcfg-basic.cm";
+        pub const COMPONENT_URL: &str = "#meta/netcfg.cm";
         pub mod fake {
             pub const COMPONENT_URL: &str = "#meta/fake_netcfg.cm";
         }
@@ -227,11 +227,11 @@ pub mod constants {
     }
     pub mod dhcp_server {
         pub const COMPONENT_NAME: &str = "dhcpd";
-        pub const COMPONENT_URL: &str = "#meta/dhcpv4_server.cm";
+        pub const COMPONENT_URL: &str = "dhcpv4-server#meta/dhcpv4_server.cm";
     }
     pub mod dhcp_client {
         pub const COMPONENT_NAME: &str = "dhcp-client";
-        pub const COMPONENT_URL: &str = "#meta/dhcp-client.cm";
+        pub const COMPONENT_URL: &str = "dhcp-client#meta/dhcp-client.cm";
     }
     pub mod dhcpv6_client {
         pub const COMPONENT_NAME: &str = "dhcpv6-client";
@@ -500,11 +500,12 @@ impl<'a> From<&'a KnownServiceProvider> for fnetemul::ChildDef {
                     ))))
                     .collect(),
                 )),
-                program_args: if *persistent {
-                    Some(vec![String::from("--persistent")])
-                } else {
-                    None
-                },
+                config_values: persistent.then(|| {
+                    vec![fnetemul::ChildConfigValue {
+                        capability: "fuchsia.net.dhcp.Persistent".to_string(),
+                        value: cm_rust::ConfigValue::from(true).native_into_fidl(),
+                    }]
+                }),
                 ..Default::default()
             },
             KnownServiceProvider::DhcpClient => fnetemul::ChildDef {
@@ -743,26 +744,26 @@ impl<'a> From<&'a KnownServiceProvider> for fnetemul::ChildDef {
 
 /// Set the `opaque_iids` structured configuration value for Netstack3.
 pub fn set_netstack3_opaque_iids(netstack: &mut fnetemul::ChildDef, value: bool) {
-    const KEY: &str = "opaque_iids";
-    set_structured_config_value(netstack, KEY.to_owned(), cm_rust::ConfigValue::from(value));
+    const CAPABILITY: &str = "fuchsia.netstack3.OpaqueIids";
+    set_structured_config_value(netstack, CAPABILITY.to_owned(), cm_rust::ConfigValue::from(value));
 }
 
 /// Set the `suspend_enabled` structured configuration value for Netstack3.
 pub fn set_netstack3_suspend_enabled(netstack: &mut fnetemul::ChildDef, value: bool) {
-    const KEY: &str = "suspend_enabled";
-    set_structured_config_value(netstack, KEY.to_owned(), cm_rust::ConfigValue::from(value));
+    const CAPABILITY: &str = "fuchsia.power.SuspendEnabled";
+    set_structured_config_value(netstack, CAPABILITY.to_owned(), cm_rust::ConfigValue::from(value));
 }
 
 /// Set a structured configuration value for the provided component.
 fn set_structured_config_value(
     component: &mut fnetemul::ChildDef,
-    key: String,
+    capability: String,
     value: cm_rust::ConfigValue,
 ) {
     component
         .config_values
         .get_or_insert_default()
-        .push(fnetemul::ChildConfigValue { key, value: value.native_into_fidl() });
+        .push(fnetemul::ChildConfigValue { capability, value: value.native_into_fidl() });
 }
 
 /// Abstraction for a Fuchsia component which offers network stack services.

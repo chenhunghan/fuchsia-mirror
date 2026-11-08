@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::{HealthAlertReporter, Incoming, Node, ParentProperty, PropertyValue};
+use crate::{HealthAlertLatch, HealthAlertReporter, Incoming, Node, ParentProperty, PropertyValue};
 use fuchsia_async::ScopeHandle;
 use fuchsia_component::server::{ServiceFs, ServiceObjTrait};
 use fuchsia_component_config::Config;
@@ -29,14 +29,38 @@ pub struct DriverContext {
     /// consumes the incoming namespace from [`Self::start_args`], that will always be [`None`].
     pub incoming: Incoming,
     health_alert_reporter: HealthAlertReporter,
+    // Lazily initialized and type-erased so drivers that do not call `health_alert_latch()` do not
+    // pull `HealthAlertLatch` or `HealthCheckInspect` drop glue into bootfs binaries.
+    health_alert_latch: std::sync::OnceLock<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 impl DriverContext {
     /// Returns a reporter through which the driver can proactively emit
     /// `fuchsia.driver.framework/Driver.OnHealthAlert` events after [`crate::Driver::start`] has
     /// consumed this context. The reporter is cheap to clone and may be used from any thread.
+    ///
+    /// For self-reported faults (`HealthAlert::SelfFault`), prefer [`Self::health_alert_latch`] so
+    /// active conditions are deduplicated and merged across the driver and any SDK wrappers (such
+    /// as `fdf_power::Suspendable`). Use `health_alert_reporter` directly for upstream or
+    /// downstream neighbor fault alerts.
     pub fn health_alert_reporter(&self) -> HealthAlertReporter {
         self.health_alert_reporter.clone()
+    }
+
+    /// Returns the shared [`HealthAlertLatch`] for this driver instance.
+    ///
+    /// Every clone returned by `health_alert_latch` shares the same active self-fault condition
+    /// set, allowing the driver and wrapper libraries to raise and clear independent `reason_code`
+    /// conditions without overwriting each other's `OnHealthAlert` reports.
+    pub fn health_alert_latch(&self) -> HealthAlertLatch {
+        let erased = self.health_alert_latch.get_or_init(|| {
+            std::sync::Arc::new(HealthAlertLatch::new(self.health_alert_reporter.clone()))
+                as std::sync::Arc<dyn std::any::Any + Send + Sync>
+        });
+        erased
+            .downcast_ref::<HealthAlertLatch>()
+            .expect("DriverContext health_alert_latch holds HealthAlertLatch")
+            .clone()
     }
 
     /// Reports `alert` to the driver framework. Equivalent to
@@ -198,7 +222,13 @@ impl DriverContext {
             incoming_namespace.add(&path, directory).map_err(|_| Status::INVALID_ARGS)?;
         }
         let incoming = Incoming::from(incoming_namespace);
-        Ok(DriverContext { root_dispatcher, start_args, incoming, health_alert_reporter })
+        Ok(DriverContext {
+            root_dispatcher,
+            start_args,
+            incoming,
+            health_alert_reporter,
+            health_alert_latch: std::sync::OnceLock::new(),
+        })
     }
 
     pub(crate) fn start_logging(&self, driver_name: &str) -> Result<(), Status> {

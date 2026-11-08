@@ -10,12 +10,13 @@ use crate::arch_rs::curr_cpu_num;
 use crate::kernel::relaxed_atomic::RelaxedAtomicI64;
 use crate::kernel::timer::{Timer, ZX_CLOCK_BOOT};
 use crate::kernel::types::BOOT_CPU_ID;
+use crate::ksync_kernel::TrackedSpinlock;
 use crate::platform_rs::timer::InstantBoot;
 use core::convert::Infallible;
 use core::ffi::c_void;
 use core::pin::Pin;
 use debug::dprintf;
-use ksync::{KMutex, RawSpinlock, guarded};
+use ksync::{KMutex, guarded};
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_types::{ZX_TIME_INFINITE, zx_instant_boot_t};
 
@@ -28,9 +29,8 @@ use crate::platform_rs::timer::{DurationBoot, current_boot_time};
 #[cfg(target_arch = "aarch64")]
 use zx_status::Status;
 
-/// Inline storage capacity in bytes for [`Callback`], sufficient to hold a single Rust
-/// context pointer or a C++ `SuspendWakeupTimer::Callback` (`fit::inline_function`).
-pub const CALLBACK_INLINE_SIZE: usize = 2 * core::mem::size_of::<usize>();
+/// Inline storage capacity in bytes for [`Callback`], sufficient to hold a single context pointer.
+pub const CALLBACK_INLINE_SIZE: usize = core::mem::size_of::<usize>();
 
 /// Callback invoked when a [`SuspendWakeupTimer`] fires.
 ///
@@ -207,7 +207,7 @@ impl Backend {
 #[repr(align(8))]
 pub struct SuspendWakeupTimer {
     #[mutex]
-    lock: KMutex<RawSpinlock>,
+    lock: KMutex<TrackedSpinlock>,
     #[guarded_by(lock)]
     started: bool,
     resume_at: RelaxedAtomicI64,
@@ -218,21 +218,6 @@ pub struct SuspendWakeupTimer {
     #[pin]
     generic_timer: Timer,
 }
-
-const EXPECTED_SPINLOCK_SIZE: usize = if cfg!(scheduler_lock_spin_tracing_enabled) {
-    24
-} else if cfg!(with_lock_dep) {
-    16
-} else {
-    8
-};
-/// [`Backend`] is zero-sized unless the [`Backend::Armv7Mmio`] variant exists.
-const EXPECTED_BACKEND_SIZE: usize = if cfg!(target_arch = "aarch64") { 8 } else { 0 };
-const EXPECTED_SUSPEND_WAKEUP_TIMER_SIZE: usize =
-    EXPECTED_SPINLOCK_SIZE + EXPECTED_BACKEND_SIZE + 128;
-
-zr::static_assert!(core::mem::size_of::<Backend>() == EXPECTED_BACKEND_SIZE);
-zr::static_assert_size_and_align!(SuspendWakeupTimer, EXPECTED_SUSPEND_WAKEUP_TIMER_SIZE, 8);
 
 #[pinned_drop]
 impl PinnedDrop for SuspendWakeupTimer {
@@ -480,9 +465,12 @@ mod tests {
     /// Runs `timer.ensure_started()` on `BOOT_CPU_ID` with interrupts disabled, matching the
     /// protocol requirements of `SuspendWakeupTimer::ensure_started`.
     fn ensure_started_on_boot_cpu(timer: &SuspendWakeupTimer) {
-        sync_exec(MpIpiTarget::Mask, cpu_num_to_mask(BOOT_CPU_ID), || {
-            timer.ensure_started();
-        });
+        // SAFETY: `MpIpiTarget::Mask` does not require interrupts to be disabled.
+        unsafe {
+            sync_exec(MpIpiTarget::Mask, cpu_num_to_mask(BOOT_CPU_ID), || {
+                timer.ensure_started();
+            });
+        }
     }
 
     /// Verifies that `cancel_timer` is idempotent and resets the deadline.

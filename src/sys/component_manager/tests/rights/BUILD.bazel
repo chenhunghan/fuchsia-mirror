@@ -1,0 +1,545 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load("//build/component:config.bzl", "component_config")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "rights_integration_test_bin",
+    srcs = ["rights_integration_test.rs"],
+    crate_name = "rights_integration_test",
+    crate_root = "rights_integration_test.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/sys/component_manager/tests/fidl:components_rust",
+    ],
+)
+
+fx_packaged_binary(
+    name = "rights_integration_test_packaged_bin",
+    testonly = True,
+    binary = ":rights_integration_test_bin",
+    binary_name = "rights_integration_test",
+)
+
+fx_cc_binary(
+    name = "expose_dir_rights_bin",
+    testonly = True,
+    srcs = ["expose_dir_rights.cc"],
+    gn_output_name = "expose_dir_rights",
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/fdio",
+        "//src/storage/lib/vfs/cpp",
+        "//src/storage/memfs:lib",
+        "//zircon/system/ulib/svc",
+        "//zircon/system/ulib/zx",
+    ],
+)
+
+fx_packaged_binary(
+    name = "expose_dir_rights_packaged_bin",
+    testonly = True,
+    binary = ":expose_dir_rights_bin",
+    binary_name = "expose_dir_rights",
+)
+
+rustc_binary(
+    name = "use_dir_rights_bin",
+    testonly = True,
+    srcs = ["use_dir_rights.rs"],
+    crate_name = "use_dir_rights",
+    crate_root = "use_dir_rights.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fdio/rust:fdio",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/sys/component_manager/tests/fidl:components_rust",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "use_dir_rights_packaged_bin",
+    testonly = True,
+    binary = ":use_dir_rights_bin",
+    binary_name = "use_dir_rights",
+)
+
+rustc_binary(
+    name = "use_storage_bin",
+    testonly = True,
+    srcs = ["use_storage.rs"],
+    crate_name = "use_storage",
+    crate_root = "use_storage.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-fs",
+        "//src/sys/component_manager/tests/fidl:components_rust",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "use_storage_packaged_bin",
+    testonly = True,
+    binary = ":use_storage_bin",
+    binary_name = "use_storage",
+)
+
+fx_component_manifest(
+    name = "root_alias_offer_dir_rights-manifest",
+    testonly = True,
+    component_name = "root_alias_offer_dir_rights",
+    includes = [
+        "//src/sys/component_manager:meta/passthrough_diagnostics.shard.cml",
+        "//src/sys/component_manager/tests:meta/elf_runner_and_environment.shard",
+    ],
+    manifest = "meta/root_alias_offer_dir_rights.cml",
+)
+
+fx_component(
+    name = "root_alias_offer_dir_rights",
+    testonly = True,
+    compiled_manifest = ":root_alias_offer_dir_rights-manifest",
+)
+
+fx_component_manifest(
+    name = "root_expose_intermediate_offer_dir_rights-manifest",
+    testonly = True,
+    component_name = "root_expose_intermediate_offer_dir_rights",
+    includes = [
+        "//src/sys/component_manager:meta/passthrough_diagnostics.shard.cml",
+        "//src/sys/component_manager/tests:meta/elf_runner_and_environment.shard",
+    ],
+    manifest = "meta/root_expose_intermediate_offer_dir_rights.cml",
+)
+
+fx_component(
+    name = "root_expose_intermediate_offer_dir_rights",
+    testonly = True,
+    compiled_manifest = ":root_expose_intermediate_offer_dir_rights-manifest",
+)
+
+fx_component_manifest(
+    name = "root_invalid_expose_intermediate_offer_dir_rights-manifest",
+    testonly = True,
+    component_name = "root_invalid_expose_intermediate_offer_dir_rights",
+    includes = [
+        "//src/sys/component_manager:meta/passthrough_diagnostics.shard.cml",
+        "//src/sys/component_manager/tests:meta/elf_runner_and_environment.shard",
+    ],
+    manifest = "meta/root_invalid_expose_intermediate_offer_dir_rights.cml",
+)
+
+fx_component(
+    name = "root_invalid_expose_intermediate_offer_dir_rights",
+    testonly = True,
+    compiled_manifest = ":root_invalid_expose_intermediate_offer_dir_rights-manifest",
+)
+
+fx_component_manifest(
+    name = "root_invalid_offer_dir_rights-manifest",
+    testonly = True,
+    component_name = "root_invalid_offer_dir_rights",
+    includes = [
+        "//src/sys/component_manager:meta/passthrough_diagnostics.shard.cml",
+        "//src/sys/component_manager/tests:meta/elf_runner_and_environment.shard",
+    ],
+    manifest = "meta/root_invalid_offer_dir_rights.cml",
+)
+
+fx_component(
+    name = "root_invalid_offer_dir_rights",
+    testonly = True,
+    compiled_manifest = ":root_invalid_offer_dir_rights-manifest",
+)
+
+fx_component_manifest(
+    name = "root_invalid_offer_intermediate_offer_dir_rights-manifest",
+    testonly = True,
+    component_name = "root_invalid_offer_intermediate_offer_dir_rights",
+    includes = [
+        "//src/sys/component_manager:meta/passthrough_diagnostics.shard.cml",
+        "//src/sys/component_manager/tests:meta/elf_runner_and_environment.shard",
+    ],
+    manifest = "meta/root_invalid_offer_intermediate_offer_dir_rights.cml",
+)
+
+fx_component(
+    name = "root_invalid_offer_intermediate_offer_dir_rights",
+    testonly = True,
+    compiled_manifest = ":root_invalid_offer_intermediate_offer_dir_rights-manifest",
+)
+
+fx_component_manifest(
+    name = "root_invalid_storage_offer_rights-manifest",
+    testonly = True,
+    component_name = "root_invalid_storage_offer_rights",
+    includes = [
+        "//src/sys/component_manager:meta/passthrough_diagnostics.shard.cml",
+        "//src/sys/component_manager/tests:meta/elf_runner_and_environment.shard",
+    ],
+    manifest = "meta/root_invalid_storage_offer_rights.cml",
+)
+
+fx_component(
+    name = "root_invalid_storage_offer_rights",
+    testonly = True,
+    compiled_manifest = ":root_invalid_storage_offer_rights-manifest",
+)
+
+fx_component_manifest(
+    name = "root_invalid_use_in_offer_dir_rights-manifest",
+    testonly = True,
+    component_name = "root_invalid_use_in_offer_dir_rights",
+    includes = [
+        "//src/sys/component_manager:meta/passthrough_diagnostics.shard.cml",
+        "//src/sys/component_manager/tests:meta/elf_runner_and_environment.shard",
+    ],
+    manifest = "meta/root_invalid_use_in_offer_dir_rights.cml",
+)
+
+fx_component(
+    name = "root_invalid_use_in_offer_dir_rights",
+    testonly = True,
+    compiled_manifest = ":root_invalid_use_in_offer_dir_rights-manifest",
+)
+
+fx_component_manifest(
+    name = "root_offer_dir_rights-manifest",
+    testonly = True,
+    component_name = "root_offer_dir_rights",
+    includes = [
+        "//src/sys/component_manager:meta/passthrough_diagnostics.shard.cml",
+        "//src/sys/component_manager/tests:meta/elf_runner_and_environment.shard",
+    ],
+    manifest = "meta/root_offer_dir_rights.cml",
+)
+
+fx_component(
+    name = "root_offer_dir_rights",
+    testonly = True,
+    compiled_manifest = ":root_offer_dir_rights-manifest",
+)
+
+fx_component_manifest(
+    name = "root_offer_intermediate_offer_dir_rights-manifest",
+    testonly = True,
+    component_name = "root_offer_intermediate_offer_dir_rights",
+    includes = [
+        "//src/sys/component_manager:meta/passthrough_diagnostics.shard.cml",
+        "//src/sys/component_manager/tests:meta/elf_runner_and_environment.shard",
+    ],
+    manifest = "meta/root_offer_intermediate_offer_dir_rights.cml",
+)
+
+fx_component(
+    name = "root_offer_intermediate_offer_dir_rights",
+    testonly = True,
+    compiled_manifest = ":root_offer_intermediate_offer_dir_rights-manifest",
+)
+
+fx_component_manifest(
+    name = "root_route_directories_from_component_manager_namespace-manifest",
+    testonly = True,
+    component_name = "root_route_directories_from_component_manager_namespace",
+    includes = [
+        "//src/sys/component_manager:meta/passthrough_diagnostics.shard.cml",
+        "//src/sys/component_manager/tests:meta/elf_runner_and_environment.shard",
+    ],
+    manifest = "meta/root_route_directories_from_component_manager_namespace.cml",
+)
+
+fx_component(
+    name = "root_route_directories_from_component_manager_namespace",
+    testonly = True,
+    compiled_manifest = ":root_route_directories_from_component_manager_namespace-manifest",
+)
+
+fx_component_manifest(
+    name = "root_storage_offer_rights-manifest",
+    testonly = True,
+    component_name = "root_storage_offer_rights",
+    includes = [
+        "//src/sys/component_manager:meta/passthrough_diagnostics.shard.cml",
+        "//src/sys/component_manager/tests:meta/elf_runner_and_environment.shard",
+    ],
+    manifest = "meta/root_storage_offer_rights.cml",
+)
+
+fx_component(
+    name = "root_storage_offer_rights",
+    testonly = True,
+    compiled_manifest = ":root_storage_offer_rights-manifest",
+)
+
+fx_component_manifest(
+    name = "intermediate_expose_dir_rights-manifest",
+    testonly = True,
+    component_name = "intermediate_expose_dir_rights",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:offer.shard",
+    ],
+    manifest = "meta/intermediate_expose_dir_rights.cml",
+)
+
+fx_component(
+    name = "intermediate_expose_dir_rights",
+    testonly = True,
+    compiled_manifest = ":intermediate_expose_dir_rights-manifest",
+)
+
+fx_component_manifest(
+    name = "intermediate_offer_dir_rights-manifest",
+    testonly = True,
+    component_name = "intermediate_offer_dir_rights",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:offer.shard",
+    ],
+    manifest = "meta/intermediate_offer_dir_rights.cml",
+)
+
+fx_component(
+    name = "intermediate_offer_dir_rights",
+    testonly = True,
+    compiled_manifest = ":intermediate_offer_dir_rights-manifest",
+)
+
+fx_component_manifest(
+    name = "invalid_intermediate_expose_dir_rights-manifest",
+    testonly = True,
+    component_name = "invalid_intermediate_expose_dir_rights",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:offer.shard",
+    ],
+    manifest = "meta/invalid_intermediate_expose_dir_rights.cml",
+)
+
+fx_component(
+    name = "invalid_intermediate_expose_dir_rights",
+    testonly = True,
+    compiled_manifest = ":invalid_intermediate_expose_dir_rights-manifest",
+)
+
+fx_component_manifest(
+    name = "invalid_intermediate_offer_dir_rights-manifest",
+    testonly = True,
+    component_name = "invalid_intermediate_offer_dir_rights",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:offer.shard",
+    ],
+    manifest = "meta/invalid_intermediate_offer_dir_rights.cml",
+)
+
+fx_component(
+    name = "invalid_intermediate_offer_dir_rights",
+    testonly = True,
+    compiled_manifest = ":invalid_intermediate_offer_dir_rights-manifest",
+)
+
+fx_component_manifest(
+    name = "use_storage-manifest",
+    testonly = True,
+    component_name = "use_storage",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/use_storage.cml",
+)
+
+fx_component(
+    name = "use_storage",
+    testonly = True,
+    compiled_manifest = ":use_storage-manifest",
+    deps = [":use_storage_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "expose_dir_rights-manifest",
+    testonly = True,
+    component_name = "expose_dir_rights",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/expose_dir_rights.cml",
+)
+
+fx_component(
+    name = "expose_dir_rights",
+    testonly = True,
+    compiled_manifest = ":expose_dir_rights-manifest",
+    visibility = ["//src/lib/fuchsia-component-test/tests:__pkg__"],
+    deps = [":expose_dir_rights_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "use_dir_rights-manifest",
+    testonly = True,
+    component_name = "use_dir_rights",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/use_dir_rights.cml",
+)
+
+fx_component(
+    name = "use_dir_rights",
+    testonly = True,
+    compiled_manifest = ":use_dir_rights-manifest",
+    deps = [":use_dir_rights_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "invalid_use_dir_rights-manifest",
+    testonly = True,
+    component_name = "invalid_use_dir_rights",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/invalid_use_dir_rights.cml",
+)
+
+fx_component(
+    name = "invalid_use_dir_rights",
+    testonly = True,
+    compiled_manifest = ":invalid_use_dir_rights-manifest",
+    deps = [":use_dir_rights_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "elf_runner_and_environment-manifest",
+    testonly = True,
+    component_name = "elf_runner_and_environment",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/component_manager/tests:meta/elf_runner_and_environment.shard",
+    ],
+    manifest = "meta/elf_runner_and_environment.cml",
+)
+
+fx_component(
+    name = "elf_runner_and_environment",
+    testonly = True,
+    compiled_manifest = ":elf_runner_and_environment-manifest",
+    visibility = ["//src/lib/fuchsia-component-test/tests:__pkg__"],
+)
+
+# Retained in BUILD.gn above the sentinel because bazel2gn does not translate
+# component_config.
+# @bazel2gn:skip
+component_config(
+    name = "component_manager_config",
+    testonly = True,
+    srcs = [
+        "rights_test_config.json5",
+        "//src/sys/component_manager/configs:test_config.base.json5",
+    ],
+)
+
+fx_component_manifest(
+    name = "component_manager_for_rights_test-manifest",
+    testonly = True,
+    component_name = "component_manager_for_rights_test",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/component_manager:meta/component_manager.cml",
+    ],
+    manifest = "meta/component_manager_for_rights_test.cml",
+)
+
+fx_component(
+    name = "component_manager_for_rights_test",
+    testonly = True,
+    compiled_manifest = ":component_manager_for_rights_test-manifest",
+    deps = [
+        ":component_manager_config",
+        "//src/sys/component_manager:bin_with_tracing_packaged",  # @bazel2gn:path_overwrite://src/sys/component_manager:bin_with_tracing
+    ],
+)
+
+fx_component_manifest(
+    name = "rights_integration_test-manifest",
+    testonly = True,
+    component_name = "rights_integration_test",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/lib/fuchsia-component-test:meta/nested_component_manager.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/rights_integration_test.cml",
+)
+
+fx_test_component(
+    name = "rights_integration_test_component",
+    compiled_manifest = ":rights_integration_test-manifest",
+    deps = [":rights_integration_test_packaged_bin"],
+)
+
+fx_package(
+    name = "rights_integration_test_package",
+    package_name = "rights_integration_test",
+    components = [
+        ":component_manager_for_rights_test",
+        ":elf_runner_and_environment",
+        ":expose_dir_rights",
+        ":intermediate_expose_dir_rights",
+        ":intermediate_offer_dir_rights",
+        ":invalid_intermediate_expose_dir_rights",
+        ":invalid_intermediate_offer_dir_rights",
+        ":invalid_use_dir_rights",
+        ":root_alias_offer_dir_rights",
+        ":root_expose_intermediate_offer_dir_rights",
+        ":root_invalid_expose_intermediate_offer_dir_rights",
+        ":root_invalid_offer_dir_rights",
+        ":root_invalid_offer_intermediate_offer_dir_rights",
+        ":root_invalid_storage_offer_rights",
+        ":root_invalid_use_in_offer_dir_rights",
+        ":root_offer_dir_rights",
+        ":root_offer_intermediate_offer_dir_rights",
+        ":root_route_directories_from_component_manager_namespace",
+        ":root_storage_offer_rights",
+        ":use_dir_rights",
+        ":use_storage",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":rights_integration_test_component"],
+)
+
+fx_test(
+    name = "rights_integration_test",
+    package = ":rights_integration_test_package",
+    visibility = ["//src/sys/component_manager:__pkg__"],
+)

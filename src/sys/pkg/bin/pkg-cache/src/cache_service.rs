@@ -4,7 +4,6 @@
 
 use crate::frozen_index::{BaseIndex, CacheIndex};
 use crate::index::PackageIndex;
-use crate::upgradable_packages::UpgradablePackages;
 use anyhow::{Error, anyhow};
 use cobalt_sw_delivery_registry as metrics;
 use fidl::endpoints::ServerEnd;
@@ -38,12 +37,11 @@ mod missing_blobs;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn serve(
-    package_index: Arc<async_lock::RwLock<PackageIndex>>,
+    package_index: Arc<PackageIndex>,
     blobfs: blobfs::Client,
     root_dir_factory: crate::RootDirFactory,
     base_packages: Arc<BaseIndex>,
     cache_packages: Arc<CacheIndex>,
-    upgradable_packages: Option<Arc<UpgradablePackages>>,
     executability_restrictions: system_image::ExecutabilityRestrictions,
     scope: package_directory::ExecutionScope,
     open_packages: crate::RootDirCache,
@@ -99,7 +97,9 @@ pub(crate) async fn serve(
                     if let Some(o) = guard {
                         match &response {
                             Ok(()) => o.end(&[ftrace::ArgValue::of("status", "OK")]),
-                            Err(s) => o.end(&[ftrace::ArgValue::of("status", s.to_string().as_str())]),
+                            Err(s) => {
+                                o.end(&[ftrace::ArgValue::of("status", s.to_string().as_str())])
+                            }
                         }
                     }
                     drop(node);
@@ -139,15 +139,13 @@ pub(crate) async fn serve(
                     }))?;
                 }
                 PackageCacheRequest::SetUpgradableUrls { pinned_urls, responder } => {
-                    let res = if let Some(upgradable_packages) = &upgradable_packages {
-                        upgradable_packages.set_upgradable_urls(pinned_urls, base_packages.as_ref())
-                    } else {
-                        error!("SetUpgradableUrls called but upgradable packages are not enabled in pkg-cache");
-                        Err(fpkg::SetUpgradableUrlsError::Internal)
-                    };
-                    responder.send(res)?;
+                    responder.send(
+                        package_index
+                            .set_upgradable_urls(pinned_urls, base_packages.as_ref())
+                            .await,
+                    )?;
                 }
-                PackageCacheRequest::WriteBlobs { needed_blobs, control_handle: _  } => {
+                PackageCacheRequest::WriteBlobs { needed_blobs, control_handle: _ } => {
                     let id = serve_id.fetch_add(1, Ordering::SeqCst);
                     let node = get_node.create_child(id.to_string());
                     if let Err(e) = write_blobs(needed_blobs.into_stream(), &blobfs, &node).await {
@@ -223,7 +221,7 @@ impl From<ExecutabilityStatus> for fio::Flags {
 #[allow(clippy::too_many_arguments)]
 /// Fetch a package and optionally open it.
 async fn get(
-    package_index: &async_lock::RwLock<PackageIndex>,
+    package_index: &PackageIndex,
     base_packages: &BaseIndex,
     cache_packages: &CacheIndex,
     executability_restrictions: system_image::ExecutabilityRestrictions,
@@ -238,8 +236,7 @@ async fn get(
     cobalt_sender: ProtocolSender<MetricEvent>,
     node: &finspect::Node,
 ) -> Result<(), Status> {
-    let guard =
-        package_index.write().await.start_writing(meta_far_blob.blob_id.into(), gc_protection);
+    let guard = package_index.start_writing(meta_far_blob.blob_id.into(), gc_protection).await;
     let get_ret = get_impl(
         package_index,
         base_packages,
@@ -257,7 +254,7 @@ async fn get(
         node,
     )
     .await;
-    let stop_ret = package_index.write().await.stop_writing(guard);
+    let stop_ret = package_index.stop_writing(guard).await;
     match (get_ret, stop_ret) {
         (get_ret, Ok(())) => get_ret,
         (Ok(()), Err(e)) => {
@@ -278,7 +275,7 @@ async fn get(
 #[allow(clippy::too_many_arguments)]
 /// Fetch a package and optionally open it.
 async fn get_impl(
-    package_index: &async_lock::RwLock<PackageIndex>,
+    package_index: &PackageIndex,
     base_packages: &BaseIndex,
     cache_packages: &CacheIndex,
     executability_restrictions: system_image::ExecutabilityRestrictions,
@@ -503,7 +500,7 @@ enum ServeNeededBlobsError {
 /// GC.
 #[derive(Debug)]
 struct IndexBlobRecorder<'a> {
-    package_index: &'a async_lock::RwLock<PackageIndex>,
+    package_index: &'a PackageIndex,
     meta_far: Hash,
     gc_protection: fpkg::GcProtection,
 }
@@ -514,11 +511,7 @@ impl missing_blobs::BlobRecorder for IndexBlobRecorder<'_> {
         blobs: HashSet<Hash>,
     ) -> futures::future::BoxFuture<'_, Result<(), anyhow::Error>> {
         async move {
-            Ok(self.package_index.write().await.add_blobs(
-                self.meta_far,
-                blobs,
-                self.gc_protection,
-            )?)
+            Ok(self.package_index.add_blobs(self.meta_far, blobs, self.gc_protection).await?)
         }
         .boxed()
     }
@@ -539,7 +532,7 @@ async fn serve_needed_blobs(
     mut stream: NeededBlobsRequestStream,
     meta_far_info: BlobInfo,
     gc_protection: fpkg::GcProtection,
-    package_index: &async_lock::RwLock<PackageIndex>,
+    package_index: &PackageIndex,
     blobfs: &blobfs::Client,
     root_dir_factory: &crate::RootDirFactory,
     node: &finspect::Node,
@@ -848,6 +841,7 @@ async fn open_blob(
             warn!(blob_id:%; "fidl error opening blob {:#}", anyhow!(e));
             (Err(fErr::UnspecifiedIo), Ok(Needed))
         }
+        Err(OutOfSpace) => (Err(fErr::OutOfSpace), Ok(Needed)),
         Err(BlobCreator(error)) => {
             warn!(error:?, blob_id:%; "error calling blob creator");
             (Err(fErr::UnspecifiedIo), Ok(Needed))
@@ -985,7 +979,7 @@ mod serve_needed_blobs_tests {
 
         let (blobfs, _, _, _) = blobfs::Client::new_test();
         let inspector = finspect::Inspector::default();
-        let package_index = Arc::new(async_lock::RwLock::new(PackageIndex::new()));
+        let package_index = PackageIndex::new(blobfs.clone(), None);
 
         assert_matches!(
             serve_needed_blobs(
@@ -1010,16 +1004,14 @@ mod serve_needed_blobs_tests {
 
         let (blobfs, blobfs_mock) = blobfs::Client::new_mock();
         let inspector = finspect::Inspector::default();
-        let package_index = Arc::new(async_lock::RwLock::new(PackageIndex::new()));
+        let package_index = PackageIndex::new(blobfs.clone(), None);
 
         (
             Task::spawn(async move {
                 let (root_dir_factory, _) = crate::root_dir::new_test(blobfs.clone()).await;
 
-                let guard = package_index
-                    .write()
-                    .await
-                    .start_writing(meta_blob_info.blob_id.into(), gc_protection);
+                let guard =
+                    package_index.start_writing(meta_blob_info.blob_id.into(), gc_protection).await;
                 let res = serve_needed_blobs(
                     stream,
                     meta_blob_info,
@@ -1031,7 +1023,7 @@ mod serve_needed_blobs_tests {
                 )
                 .await
                 .map(|_| ());
-                let () = package_index.write().await.stop_writing(guard).unwrap();
+                let () = package_index.stop_writing(guard).await.unwrap();
                 res
             }),
             proxy,
@@ -2451,7 +2443,7 @@ mod get_handler_tests {
         let meta_blob_info = BlobInfo { blob_id: [0; 32].into(), length: 0 };
         let (blobfs, _, _, _) = blobfs::Client::new_test();
         let inspector = fuchsia_inspect::Inspector::default();
-        let package_index = Arc::new(async_lock::RwLock::new(PackageIndex::new()));
+        let package_index = PackageIndex::new(blobfs.clone(), None);
         let (root_dir_factory, open_packages) = crate::root_dir::new_test(blobfs.clone()).await;
 
         assert_matches::assert_matches!(

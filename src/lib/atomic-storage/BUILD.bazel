@@ -70,7 +70,6 @@ fx_component_manifest(
 fx_test_component(
     name = "atomic-storage-tests-component",
     compiled_manifest = ":atomic-storage-tests-manifest",
-    component_name = "atomic-storage-tests",
     visibility = ["//visibility:private"],
     deps = [":atomic_storage_lib_test_packaged_bin"],
 )

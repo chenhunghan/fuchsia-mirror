@@ -16,7 +16,6 @@ idk_cc_source_library(
     public_configs = [":include"],
     stable = True,
     visibility = [
-        "//build/sdk:__pkg__",
         "//sdk/lib/driver/incoming/cpp:__pkg__",
         "//sdk/lib/driver/outgoing/cpp:__pkg__",
         "//src/devices/bin/driver_runtime:__pkg__",

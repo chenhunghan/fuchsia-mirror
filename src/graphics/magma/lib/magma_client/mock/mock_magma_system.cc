@@ -84,6 +84,13 @@ magma_status_t magma_connection_create_buffer(magma_connection_t connection, uin
   return MAGMA_STATUS_OK;
 }
 
+magma_status_t magma_connection_create_buffer2(magma_connection_t connection, uint64_t size,
+                                               uint64_t flags, uint64_t* size_out,
+                                               magma_buffer_t* buffer_out,
+                                               magma_buffer_id_t* id_out) {
+  return magma_connection_create_buffer(connection, size, size_out, buffer_out, id_out);
+}
+
 void magma_connection_release_buffer(magma_connection_t connection, magma_buffer_t buffer) {
   delete reinterpret_cast<magma::PlatformBuffer*>(buffer);
 }

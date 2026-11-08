@@ -84,7 +84,6 @@ fx_component_manifest(
 fx_test_component(
     name = "audio_lib_wav_unittests_component",
     compiled_manifest = ":audio_lib_wav_unittests_manifest",
-    component_name = "audio_lib_wav_unittests",
     deps = [":unittest_bin_packaged"],
 )
 

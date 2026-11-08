@@ -15,11 +15,13 @@ use core::ptr;
 use debug::dprintf::{SPEW, dprintf_enabled};
 use debug::{dprintf, ltracef};
 use pin_init::{InPlaceWrite as _, PinInit, pin_data, pin_init};
-use region_alloc::{AllowOverlap, RegionAllocator, RegionSpan, TestRegionSet};
+use region_alloc::{AllowOverlap, RegionSpan, TestRegionSet};
 use zx_types::{ZX_RSRC_KIND_MMIO, zx_rsrc_kind_t};
 
 #[cfg(target_arch = "x86_64")]
 use zx_types::ZX_RSRC_KIND_IOPORT;
+
+type RegionAllocator = region_alloc::RegionAllocator<crate::ksync_kernel::TrackedMutex>;
 
 const LOCAL_TRACE: u32 = 0;
 

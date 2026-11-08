@@ -13,11 +13,11 @@
 #include <fbl/string_buffer.h>
 #include <fbl/unique_fd.h>
 #include <fbl/vector.h>
-#include <re2/re2.h>
 #include <runtests-utils/fuchsia-run-test.h>
 #include <runtests-utils/runtests-utils.h>
 #include <zxtest/zxtest.h>
 
+#include "re2/re2.h"
 #include "runtests-utils-test-utils.h"
 
 namespace runtests {

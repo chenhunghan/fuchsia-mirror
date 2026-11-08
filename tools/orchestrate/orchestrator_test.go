@@ -364,6 +364,9 @@ func runOrchestratorScenario(t *testing.T, isEmulator bool, runInput *RunInput, 
 	// Test execution environment setup (ApplyEnv)
 	mockFfx.expectCall("ApplyEnv")
 
+	// Test output symbolization
+	mockFfx.expectCall("Symbolize")
+
 	// Snapshot call
 	mockFfx.expectCall("TargetSnapshot", tmpDir)
 
@@ -487,6 +490,39 @@ func TestOrchestrator_Run_HardwareLocalPB(t *testing.T) {
 		},
 	}
 	runOrchestratorScenario(t, false, runInput, deviceConfig)
+}
+
+func TestOrchestrator_Test_CancelForwardsSigterm(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("TEST_UNDECLARED_OUTPUTS_DIR", tmpDir)
+
+	orchestrator := NewTestOrchestrator(nil)
+	runInput := &RunInput{
+		ExperimentSlice: []string{"orchestrate-error-on-test-failure"},
+	}
+
+	readyFile := filepath.Join(tmpDir, "ready")
+	testCmdPath := filepath.Join(tmpDir, "test_cmd.sh")
+	script := fmt.Sprintf("#!/bin/bash\ntrap 'exit 0' TERM\ntouch %q\nwhile true; do sleep 0.1; done\n", readyFile)
+	if err := os.WriteFile(testCmdPath, []byte(script), 0755); err != nil {
+		t.Fatalf("write test cmd: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		for {
+			if _, err := os.Stat(readyFile); err == nil {
+				cancel()
+				return
+			}
+		}
+	}()
+
+	if err := orchestrator.test(ctx, []string{testCmdPath}, runInput); err != nil {
+		t.Errorf("orchestrator.test failed on SIGTERM cancel: %v", err)
+	}
 }
 
 // TestInstantiateFfx_PathResolution verifies that instantiateFfx correctly resolves ffx_path.

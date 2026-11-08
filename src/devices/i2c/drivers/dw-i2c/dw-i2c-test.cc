@@ -9,6 +9,19 @@
 #include <lib/driver/fake-powerdomain/cpp/fake-powerdomain.h>
 #include <lib/driver/fake-reset/cpp/fake-reset.h>
 #include <lib/driver/testing/cpp/driver_test.h>
+#include <lib/fit/function.h>
+#include <lib/zx/clock.h>
+#include <lib/zx/interrupt.h>
+
+#include <algorithm>
+#include <array>
+#include <deque>
+#include <initializer_list>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include <fake-mmio-reg/fake-mmio-reg.h>
 #include <gtest/gtest.h>
@@ -19,6 +32,9 @@ namespace dw_i2c {
 
 class TestDwI2c : public DwI2c {
  public:
+  using DwI2c::health_latch;
+  using DwI2c::set_transfer_timeout;
+
   explicit TestDwI2c() : DwI2c() {}
 
   static DriverRegistration GetDriverRegistration() {
@@ -42,32 +58,381 @@ class TestDwI2c : public DwI2c {
 
 std::optional<fdf::MmioBuffer> TestDwI2c::mmio_;
 
+// Fake DesignWare I2C controller.
+//
+// Once given the driver's virtual interrupt via `set_interrupt()`, the fake also models the I2C bus
+// and the level-triggered interrupt line, synchronously inside the driver's MMIO accesses:
+//  - The bus only makes progress when the driver reads a zero InterruptStatusReg while no interrupt
+//    is pending, i.e. just before the driver waits for the interrupt. At that point all queued
+//    commands complete on the wire (or the transfer aborts, see `AbortNextTransfer()`), and the
+//    interrupt is triggered if this asserted an unmasked status bit. The read still returns zero,
+//    so the driver must be woken by the interrupt. A consequence of this model is that the driver
+//    must re-read InterruptStatusReg after acknowledging the interrupt for the bus to advance.
+//  - Whenever an unmasked status bit is asserted while no interrupt is pending, a level-triggered
+//    interrupt would fire again. The fake detects this on every register access, re-triggers the
+//    interrupt, and counts it in `spurious_retrigger_count()`.
 class FakeDwI2cController {
  public:
   static constexpr size_t kRegCount = 0x100;
+  static constexpr uint32_t kTxFifoDepth = 8;
+  static constexpr uint32_t kRxFifoDepth = 8;
+
+  // Register offsets.
+  static constexpr size_t kControl = 0x00;               // ControlReg
+  static constexpr size_t kTargetAddress = 0x04;         // TargetAddressReg
+  static constexpr size_t kDataCommand = 0x10;           // DataCommandReg
+  static constexpr size_t kIntrStat = 0x2c;              // InterruptStatusReg
+  static constexpr size_t kIntrMask = 0x30;              // InterruptMaskReg
+  static constexpr size_t kRawIntrStat = 0x34;           // RawInterruptStatusReg
+  static constexpr size_t kRxTl = 0x38;                  // RxFifoThresholdReg
+  static constexpr size_t kTxTl = 0x3c;                  // TxFifoThresholdReg
+  static constexpr size_t kClrIntr = 0x40;               // ClearInterruptReg
+  static constexpr size_t kClrTxAbrt = 0x54;             // ClearTxAbrtReg
+  static constexpr size_t kClrStopDet = 0x60;            // ClearStopDetReg
+  static constexpr size_t kEnable = 0x6c;                // EnableReg
+  static constexpr size_t kTxFifoLevel = 0x74;           // TxFifoLevelReg
+  static constexpr size_t kRxFifoLevel = 0x78;           // RxFifoLevelReg
+  static constexpr size_t kTxAbrtSource = 0x80;          // TxAbrtSourceReg
+  static constexpr size_t kEnableStatus = 0x9c;          // EnableStatusReg
+  static constexpr size_t kSclStuckAtLowTimeout = 0xac;  // SclStuckAtLowTimeoutReg
+  static constexpr size_t kClrSclStuckDet = 0xb4;        // ClearSclStuckDetReg
+  static constexpr size_t kCompParam1 = 0xf4;            // CompParam1Reg
+  static constexpr size_t kCompType = 0xfc;              // CompTypeReg
+
+  struct RecordedCommand {
+    uint16_t target_addr;
+    uint8_t data;
+    bool is_read;
+    bool start;
+    bool stop;
+  };
 
   FakeDwI2cController() : mmio_(sizeof(uint32_t), kRegCount) {
     for (size_t i = 0; i < kRegCount; ++i) {
-      size_t offset = i * sizeof(uint32_t);
-      mmio_[offset].SetReadCallback([this, i]() { return regs_[i]; });
-      mmio_[offset].SetWriteCallback(
-          [this, i](uint64_t val) { regs_[i] = static_cast<uint32_t>(val); });
+      OnRead(i * sizeof(uint32_t), [this, i]() { return regs_[i]; });
+      OnWrite(i * sizeof(uint32_t), [this, i](uint32_t val) { regs_[i] = val; });
     }
-    // Mock CompTypeReg (0xfc) to return kDwCompTypeNum (0x44570140)
-    mmio_[0xfc].SetReadCallback([]() { return DwI2c::kDwCompTypeNum; });
-    // Mock CompParam1Reg (0xf4) to return depths (8 for tx and rx)
-    mmio_[0xf4].SetReadCallback([]() { return (8 << 16) | (8 << 8); });
+
+    // Writing queues TX/read commands; reading pops from RX FIFO.
+    OnRead(kDataCommand, [this]() -> uint32_t {
+      uint8_t byte = 0;
+      if (!rx_fifo_.empty()) {
+        byte = rx_fifo_.front();
+        rx_fifo_.pop_front();
+      }
+      UpdateRxFifoStateLocked();
+      return byte;
+    });
+    OnWrite(kDataCommand, [this](uint32_t val) {
+      auto cmd = DataCommandReg::Get().FromValue(val);
+      auto tar = TargetAddressReg::Get().FromValue(RegLocked(kTargetAddress));
+      tx_commands_.push_back(RecordedCommand{
+          .target_addr = static_cast<uint16_t>(tar.target_address()),
+          .data = static_cast<uint8_t>(cmd.data()),
+          .is_read = cmd.command() != 0,
+          .start = cmd.start() != 0,
+          .stop = cmd.stop() != 0,
+      });
+      if (tx_fifo_level_ < kTxFifoDepth) {
+        ++tx_fifo_level_;
+      }
+      UpdateTxFifoStateLocked();
+      if (cmd.command() != 0) {
+        uint8_t rx_byte = 0;
+        if (!canned_rx_bytes_.empty()) {
+          rx_byte = canned_rx_bytes_.front();
+          canned_rx_bytes_.pop_front();
+        }
+        pending_wire_rx_.push_back(rx_byte);
+      }
+      if (cmd.stop() != 0) {
+        stop_pending_ = true;
+      }
+    });
+
+    // InterruptStatusReg = RawInterruptStatusReg & InterruptMaskReg.
+    OnRead(kIntrStat, [this]() {
+      const uint32_t status = InterruptStatusLocked();
+      if (status == 0 && irq_.is_valid() && !IsInterruptTriggered()) {
+        if (!bus_stalled_) {
+          AdvanceBusLocked();
+          if (InterruptStatusLocked() != 0) {
+            TriggerInterruptLocked();
+          }
+        } else if (scl_held_low_ &&
+                   ControlReg::Get().FromValue(RegLocked(kControl)).bus_clear_feature_ctrl() != 0 &&
+                   RegLocked(kSclStuckAtLowTimeout) != 0 &&
+                   RegLocked(kSclStuckAtLowTimeout) < 0xffffffffu) {
+          auto raw = RawInterruptStatusReg::Get().FromValue(RegLocked(kRawIntrStat));
+          raw.set_scl_stuck_low(1);
+          RegLocked(kRawIntrStat) = raw.reg_value();
+        }
+      }
+      return status;
+    });
+
+    // The FIFO thresholds determine the raw RX_FULL / TX_EMPTY bits.
+    OnWrite(kRxTl, [this](uint32_t val) {
+      RegLocked(kRxTl) = val;
+      UpdateRxFifoStateLocked();
+    });
+    OnWrite(kTxTl, [this](uint32_t val) {
+      RegLocked(kTxTl) = val;
+      UpdateTxFifoStateLocked();
+    });
+
+    // Reading the clear registers clears latched raw interrupt status bits.
+    const uint32_t tx_abrt = RawInterruptStatusReg::Get().FromValue(0).set_tx_abrt(1).reg_value();
+    const uint32_t stop_det = RawInterruptStatusReg::Get().FromValue(0).set_stop_det(1).reg_value();
+    const uint32_t scl_stuck_low =
+        RawInterruptStatusReg::Get().FromValue(0).set_scl_stuck_low(1).reg_value();
+    OnReadClearsRaw(kClrIntr, tx_abrt | stop_det | scl_stuck_low);
+    OnReadClearsRaw(kClrTxAbrt, tx_abrt);
+    OnReadClearsRaw(kClrSclStuckDet, scl_stuck_low);
+    OnRead(kClrStopDet, [this, stop_det]() {
+      RegLocked(kRawIntrStat) &= ~stop_det;
+      if (retrigger_on_stop_det_clear_) {
+        retrigger_on_stop_det_clear_ = false;
+        TriggerInterruptLocked();
+      }
+      return 0u;
+    });
+
+    // EnableReg mirrors enable state into EnableStatusReg and flushes FIFOs when disabled, unless
+    // the controller has been made to ignore disable requests (see `StickEnabled()`).
+    OnWrite(kEnable, [this](uint32_t val) {
+      RegLocked(kEnable) = val;
+      if ((val & 0x1u) == 0 && stick_enabled_) {
+        return;
+      }
+      RegLocked(kEnableStatus) = val & 0x1u;
+      if ((val & 0x1u) == 0) {
+        FlushFifosLocked();
+      }
+      UpdateTxFifoStateLocked();
+    });
+
+    // Report FIFO depths of 8 for tx and rx.
+    OnRead(kCompParam1, []() { return (kTxFifoDepth << 16) | (kRxFifoDepth << 8); });
+    // Report kDwCompTypeNum (0x44570140) when powered.
+    OnRead(kCompType, [this]() { return powered_ ? DwI2c::kDwCompTypeNum : 0u; });
   }
 
   fdf::MmioBuffer GetMmioBuffer() { return mmio_.GetMmioBuffer(); }
 
-  uint32_t ReadReg(size_t offset) const { return regs_[offset / sizeof(uint32_t)]; }
-  void ResetWritableRegs() { regs_.fill(0); }
-  void set_powered(bool powered) {
-    mmio_[0xfc].SetReadCallback([powered]() { return powered ? DwI2c::kDwCompTypeNum : 0u; });
+  uint32_t ReadReg(size_t offset) const {
+    std::lock_guard lock(lock_);
+    return regs_[offset / sizeof(uint32_t)];
   }
 
+  void ResetWritableRegs() {
+    std::lock_guard lock(lock_);
+    regs_.fill(0);
+    FlushFifosLocked();
+  }
+
+  void set_powered(bool powered) {
+    std::lock_guard lock(lock_);
+    powered_ = powered;
+  }
+
+  // Asserts or clears the SCL_STUCK_AT_LOW raw interrupt status bit so tests can simulate a stuck
+  // bus with no transaction in flight.
+  void set_scl_stuck_low(bool stuck) {
+    std::lock_guard lock(lock_);
+    auto raw = RawInterruptStatusReg::Get().FromValue(RegLocked(kRawIntrStat));
+    raw.set_scl_stuck_low(stuck ? 1 : 0);
+    RegLocked(kRawIntrStat) = raw.reg_value();
+  }
+
+  // Enables modelling of the bus and the level-triggered interrupt line. `irq` must be a duplicate
+  // of the virtual interrupt given to the driver, and must be set before the driver starts.
+  void set_interrupt(zx::interrupt irq) {
+    std::lock_guard lock(lock_);
+    irq_ = std::move(irq);
+  }
+
+  // Prevents the bus from making progress, so queued transfers never complete. When
+  // `scl_stuck_low` is true and Bus Clear is enabled with a finite SCL timeout, asserts
+  // `SCL_STUCK_AT_LOW` in `RawInterruptStatusReg` while stalled.
+  void StallBus(bool scl_stuck_low = false) {
+    std::lock_guard lock(lock_);
+    bus_stalled_ = true;
+    scl_held_low_ = scl_stuck_low;
+  }
+
+  // Lets a previously stalled bus make progress again.
+  void UnstallBus() {
+    std::lock_guard lock(lock_);
+    bus_stalled_ = false;
+    scl_held_low_ = false;
+  }
+
+  // Makes the controller ignore disable requests: IC_ENABLE_STATUS keeps reporting enabled after
+  // the driver writes IC_ENABLE = 0, so the driver's disable wait times out.
+  void StickEnabled(bool stick) {
+    std::lock_guard lock(lock_);
+    stick_enabled_ = stick;
+    if (!stick) {
+      RegLocked(kEnableStatus) = RegLocked(kEnable) & 0x1u;
+    }
+  }
+
+  // Makes the next transfer on the bus fail with TX_ABRT, latching `abort_source` in
+  // TxAbrtSourceReg (e.g. 0x1 for an address NACK).
+  void AbortNextTransfer(uint32_t abort_source) {
+    std::lock_guard lock(lock_);
+    abort_source_ = abort_source;
+  }
+
+  // Triggers the interrupt once more when the driver next clears STOP_DET, i.e. while the driver
+  // still has to acknowledge the interrupt that reported it.
+  void RetriggerOnNextStopDetClear() {
+    std::lock_guard lock(lock_);
+    retrigger_on_stop_det_clear_ = true;
+  }
+
+  void QueueCannedRxBytes(std::initializer_list<uint8_t> bytes) {
+    std::lock_guard lock(lock_);
+    canned_rx_bytes_.insert(canned_rx_bytes_.end(), bytes);
+  }
+
+  std::vector<RecordedCommand> TakeTxCommands() {
+    std::lock_guard lock(lock_);
+    return std::exchange(tx_commands_, {});
+  }
+
+  // Returns true if the interrupt has been triggered and not yet acknowledged.
+  //
+  // `irq_` is set once before the driver starts, so this can read it without holding `lock_` (and
+  // is also called from MMIO callbacks with `lock_` held).
+  bool IsInterruptTriggered() const {
+    zx_signals_t observed = 0;
+    return irq_.is_valid() && irq_.wait_one(ZX_VIRTUAL_INTERRUPT_UNTRIGGERED,
+                                            zx::time::infinite_past(), &observed) != ZX_OK;
+  }
+
+  // Number of times the fake triggered the interrupt, excluding spurious re-triggers.
+  uint32_t irq_trigger_count() const {
+    std::lock_guard lock(lock_);
+    return irq_trigger_count_;
+  }
+
+  // Number of times an unmasked status bit was asserted while the interrupt wasn't pending (e.g.
+  // the driver acknowledged the interrupt too early, or unmasked an already-asserted bit), so the
+  // fake re-asserted the level-triggered interrupt.
+  uint32_t spurious_retrigger_count() const {
+    std::lock_guard lock(lock_);
+    return spurious_retrigger_count_;
+  }
+
+ private:
+  // Installs MMIO callbacks that run with `lock_` held, after re-triggering the interrupt if an
+  // unmasked status bit is asserted while the interrupt isn't pending.
+  void OnRead(size_t offset, fit::function<uint32_t()> read) {
+    mmio_[offset].SetReadCallback([this, read = std::move(read)]() -> uint64_t {
+      std::lock_guard lock(lock_);
+      RetriggerIfLevelAssertedLocked();
+      return read();
+    });
+  }
+  void OnWrite(size_t offset, fit::function<void(uint32_t)> write) {
+    mmio_[offset].SetWriteCallback([this, write = std::move(write)](uint64_t val) {
+      std::lock_guard lock(lock_);
+      RetriggerIfLevelAssertedLocked();
+      write(static_cast<uint32_t>(val));
+    });
+  }
+  // Installs a read callback that clears `bits` in RawInterruptStatusReg.
+  void OnReadClearsRaw(size_t offset, uint32_t bits) {
+    OnRead(offset, [this, bits]() {
+      RegLocked(kRawIntrStat) &= ~bits;
+      return 0u;
+    });
+  }
+
+  uint32_t& RegLocked(size_t offset) { return regs_[offset / sizeof(uint32_t)]; }
+
+  uint32_t InterruptStatusLocked() { return RegLocked(kRawIntrStat) & RegLocked(kIntrMask); }
+
+  void TriggerInterruptLocked() {
+    ++irq_trigger_count_;
+    EXPECT_OK(irq_.trigger(0, zx::clock::get_boot()));
+  }
+
+  void RetriggerIfLevelAssertedLocked() {
+    if (InterruptStatusLocked() != 0 && irq_.is_valid() && !IsInterruptTriggered()) {
+      ++spurious_retrigger_count_;
+      EXPECT_OK(irq_.trigger(0, zx::clock::get_boot()));
+    }
+  }
+
+  // Completes (or aborts) all commands queued in the TX FIFO.
+  void AdvanceBusLocked() {
+    auto raw = RawInterruptStatusReg::Get().FromValue(RegLocked(kRawIntrStat));
+    if (abort_source_) {
+      RegLocked(kTxAbrtSource) = *std::exchange(abort_source_, std::nullopt);
+      raw.set_tx_abrt(1);
+    } else {
+      rx_fifo_.insert(rx_fifo_.end(), pending_wire_rx_.begin(), pending_wire_rx_.end());
+      if (stop_pending_) {
+        raw.set_stop_det(1);
+      }
+    }
+    RegLocked(kRawIntrStat) = raw.reg_value();
+    tx_fifo_level_ = 0;
+    pending_wire_rx_.clear();
+    stop_pending_ = false;
+    UpdateTxFifoStateLocked();
+    UpdateRxFifoStateLocked();
+  }
+
+  void FlushFifosLocked() {
+    tx_fifo_level_ = 0;
+    pending_wire_rx_.clear();
+    stop_pending_ = false;
+    rx_fifo_.clear();
+    auto raw = RawInterruptStatusReg::Get().FromValue(RegLocked(kRawIntrStat));
+    raw.set_scl_stuck_low(0);
+    RegLocked(kRawIntrStat) = raw.reg_value();
+    UpdateRxFifoStateLocked();
+  }
+
+  void UpdateTxFifoStateLocked() {
+    RegLocked(kTxFifoLevel) = tx_fifo_level_;
+    const bool enabled = (RegLocked(kEnable) & 0x1u) != 0;
+    const uint32_t tx_tl = RegLocked(kTxTl) & 0xffu;
+    auto raw = RawInterruptStatusReg::Get().FromValue(RegLocked(kRawIntrStat));
+    raw.set_tx_empty(enabled && tx_fifo_level_ <= tx_tl ? 1 : 0);
+    RegLocked(kRawIntrStat) = raw.reg_value();
+  }
+
+  void UpdateRxFifoStateLocked() {
+    RegLocked(kRxFifoLevel) = static_cast<uint32_t>(rx_fifo_.size());
+    const uint32_t rx_tl = RegLocked(kRxTl) & 0xffu;
+    auto raw = RawInterruptStatusReg::Get().FromValue(RegLocked(kRawIntrStat));
+    raw.set_rx_full(!rx_fifo_.empty() && rx_fifo_.size() > rx_tl ? 1 : 0);
+    RegLocked(kRawIntrStat) = raw.reg_value();
+  }
+
+  mutable std::mutex lock_;
+  bool powered_ = true;
+  uint32_t tx_fifo_level_ = 0;
   std::array<uint32_t, kRegCount> regs_{};
+  std::vector<RecordedCommand> tx_commands_;
+  std::deque<uint8_t> canned_rx_bytes_;
+  // Bytes to be read by the queued read commands, and whether a queued command has STOP set.
+  std::deque<uint8_t> pending_wire_rx_;
+  bool stop_pending_ = false;
+  std::deque<uint8_t> rx_fifo_;
+  zx::interrupt irq_;
+  bool bus_stalled_ = false;
+  bool scl_held_low_ = false;
+  bool stick_enabled_ = false;
+  std::optional<uint32_t> abort_source_;
+  bool retrigger_on_stop_det_clear_ = false;
+  uint32_t irq_trigger_count_ = 0;
+  uint32_t spurious_retrigger_count_ = 0;
   ddk_fake::FakeMmioRegRegion mmio_;
 };
 
@@ -294,15 +659,15 @@ class TestConfig final {
 };
 
 TEST(DwI2cTest, Lifecycle) {
+  FakeDwI2cController controller;
+  TestDwI2c::set_mmio(controller.GetMmioBuffer());
+
   fdf_testing::BackgroundDriverTest<TestConfig> driver_test;
 
   zx::interrupt interrupt;
   ASSERT_EQ(ZX_OK, zx::interrupt::create(zx::resource(), 0, ZX_INTERRUPT_VIRTUAL, &interrupt));
 
   driver_test.RunInEnvironmentTypeContext([&](auto& env) { env.Init(std::move(interrupt)); });
-
-  FakeDwI2cController controller;
-  TestDwI2c::set_mmio(controller.GetMmioBuffer());
 
   ASSERT_TRUE(driver_test.StartDriver().is_ok());
   driver_test.RunInEnvironmentTypeContext([](TestEnvironment& env) {
@@ -450,17 +815,17 @@ TEST(DwI2cTest, StopWhileSuspendedDoesNotDoubleDisable) {
 }
 
 TEST(DwI2cTest, StartRollbackOnError) {
+  // Simulate CompTypeReg returning 0x0 so HostInit() fails with ZX_ERR_NOT_SUPPORTED during Start.
+  FakeDwI2cController controller;
+  controller.set_powered(false);
+  TestDwI2c::set_mmio(controller.GetMmioBuffer());
+
   fdf_testing::BackgroundDriverTest<TestConfig> driver_test;
 
   zx::interrupt interrupt;
   ASSERT_EQ(ZX_OK, zx::interrupt::create(zx::resource(), 0, ZX_INTERRUPT_VIRTUAL, &interrupt));
 
   driver_test.RunInEnvironmentTypeContext([&](auto& env) { env.Init(std::move(interrupt)); });
-
-  // Simulate CompTypeReg returning 0x0 so HostInit() fails with ZX_ERR_NOT_SUPPORTED during Start.
-  FakeDwI2cController controller;
-  controller.set_powered(false);
-  TestDwI2c::set_mmio(controller.GetMmioBuffer());
 
   EXPECT_STATUS(driver_test.StartDriver(), ZX_ERR_NOT_SUPPORTED);
 
@@ -472,15 +837,15 @@ TEST(DwI2cTest, StartRollbackOnError) {
 }
 
 TEST(DwI2cTest, SuspendAndResume) {
+  FakeDwI2cController controller;
+  TestDwI2c::set_mmio(controller.GetMmioBuffer());
+
   fdf_testing::BackgroundDriverTest<TestConfig> driver_test;
 
   zx::interrupt interrupt;
   ASSERT_EQ(ZX_OK, zx::interrupt::create(zx::resource(), 0, ZX_INTERRUPT_VIRTUAL, &interrupt));
 
   driver_test.RunInEnvironmentTypeContext([&](auto& env) { env.Init(std::move(interrupt)); });
-
-  FakeDwI2cController controller;
-  TestDwI2c::set_mmio(controller.GetMmioBuffer());
 
   ASSERT_OK(driver_test.StartDriver());
 
@@ -495,6 +860,7 @@ TEST(DwI2cTest, SuspendAndResume) {
   EXPECT_NE(controller.ReadReg(0x1c), 0u);  // FastSpeedSclHighCountReg
   EXPECT_NE(controller.ReadReg(0x3c), 0u);  // TxFifoThresholdReg
   EXPECT_NE(controller.ReadReg(0x7c), 0u);  // SdaHoldReg
+  EXPECT_NE(controller.ReadReg(0xac), 0u);  // SclStuckAtLowTimeoutReg
 
   zx::result<> suspend_result = zx::error(ZX_ERR_INTERNAL);
   driver_test.RunInDriverContext([&](TestDwI2c& driver) {
@@ -524,6 +890,7 @@ TEST(DwI2cTest, SuspendAndResume) {
   EXPECT_EQ(controller.ReadReg(0x1c), 0u);
   EXPECT_EQ(controller.ReadReg(0x3c), 0u);
   EXPECT_EQ(controller.ReadReg(0x7c), 0u);
+  EXPECT_EQ(controller.ReadReg(0xac), 0u);
 
   zx::result<> resume_result = zx::error(ZX_ERR_INTERNAL);
   driver_test.RunInDriverContext([&](TestDwI2c& driver) {
@@ -544,20 +911,21 @@ TEST(DwI2cTest, SuspendAndResume) {
   EXPECT_NE(controller.ReadReg(0x1c), 0u);  // FastSpeedSclHighCountReg
   EXPECT_NE(controller.ReadReg(0x3c), 0u);  // TxFifoThresholdReg
   EXPECT_NE(controller.ReadReg(0x7c), 0u);  // SdaHoldReg
+  EXPECT_NE(controller.ReadReg(0xac), 0u);  // SclStuckAtLowTimeoutReg
 
   ASSERT_OK(driver_test.StopDriver());
 }
 
 TEST(DwI2cTest, SuspendAndResumeRollbackOnError) {
+  FakeDwI2cController controller;
+  TestDwI2c::set_mmio(controller.GetMmioBuffer());
+
   fdf_testing::BackgroundDriverTest<TestConfig> driver_test;
 
   zx::interrupt interrupt;
   ASSERT_EQ(ZX_OK, zx::interrupt::create(zx::resource(), 0, ZX_INTERRUPT_VIRTUAL, &interrupt));
 
   driver_test.RunInEnvironmentTypeContext([&](auto& env) { env.Init(std::move(interrupt)); });
-
-  FakeDwI2cController controller;
-  TestDwI2c::set_mmio(controller.GetMmioBuffer());
 
   ASSERT_OK(driver_test.StartDriver());
 
@@ -612,6 +980,575 @@ TEST(DwI2cTest, SuspendAndResumeRollbackOnError) {
   ASSERT_OK(resume_result);
 
   ASSERT_OK(driver_test.StopDriver());
+}
+
+// Fixture for Transact tests. The fake controller models the bus and the level-triggered interrupt
+// line, so no extra test threads are needed: each transfer completes inside the driver's
+// InterruptStatusReg read just before it waits for the interrupt. The bus only advances on a zero
+// status read while no interrupt is pending, so the driver must re-read the status after acking.
+class DwI2cTransactTest : public ::testing::Test {
+ protected:
+  using I2cImplOp = fuchsia_hardware_i2cimpl::wire::I2cImplOp;
+  static constexpr uint16_t kAddress = 0x60;
+
+  void SetUp() override {
+    TestDwI2c::set_mmio(controller_.GetMmioBuffer());
+
+    zx::interrupt interrupt;
+    ASSERT_OK(zx::interrupt::create(zx::resource(), 0, ZX_INTERRUPT_VIRTUAL, &interrupt));
+    zx::interrupt controller_irq;
+    ASSERT_OK(interrupt.duplicate(ZX_RIGHT_SAME_RIGHTS, &controller_irq));
+    controller_.set_interrupt(std::move(controller_irq));
+    driver_test_.RunInEnvironmentTypeContext([&](auto& env) { env.Init(std::move(interrupt)); });
+
+    ASSERT_OK(driver_test_.StartDriver());
+    driver_started_ = true;
+
+    zx::result client_end = driver_test_.Connect<fuchsia_hardware_i2cimpl::Service::Device>();
+    ASSERT_OK(client_end);
+    i2c_ = fdf::WireSyncClient(std::move(*client_end));
+  }
+
+  void TearDown() override {
+    if (driver_started_) {
+      EXPECT_OK(driver_test_.StopDriver());
+    }
+  }
+
+  I2cImplOp WriteOp(const std::vector<uint8_t>& data, bool stop) {
+    fidl::VectorView<uint8_t> bytes(arena_, data);
+    return {
+        .address = kAddress,
+        .type = fuchsia_hardware_i2cimpl::wire::I2cImplOpType::WithWriteData(arena_, bytes),
+        .stop = stop,
+    };
+  }
+
+  static I2cImplOp ReadOp(uint32_t size, bool stop) {
+    return {
+        .address = kAddress,
+        .type = fuchsia_hardware_i2cimpl::wire::I2cImplOpType::WithReadSize(size),
+        .stop = stop,
+    };
+  }
+
+  // Performs a transaction and returns the data received by its read ops.
+  zx::result<std::vector<std::vector<uint8_t>>> Transact(std::vector<I2cImplOp> ops) {
+    auto result = i2c_.buffer(arena_)->Transact(fidl::VectorView<I2cImplOp>::FromExternal(ops));
+    EXPECT_OK(result.status());
+    if (!result.ok()) {
+      return zx::error(result.status());
+    }
+    if (result->is_error()) {
+      return zx::error(result->error_value());
+    }
+    std::vector<std::vector<uint8_t>> reads;
+    for (const auto& read : result->value()->read) {
+      reads.emplace_back(read.data.begin(), read.data.end());
+    }
+    return zx::ok(std::move(reads));
+  }
+
+  // Checks that the driver masked interrupts, disabled the controller, and acknowledged the
+  // interrupt only once it was no longer asserted.
+  void ExpectIdle() {
+    EXPECT_EQ(controller_.ReadReg(FakeDwI2cController::kIntrMask), 0u);
+    EXPECT_EQ(controller_.ReadReg(FakeDwI2cController::kEnable), 0u);
+    EXPECT_FALSE(controller_.IsInterruptTriggered());
+    EXPECT_EQ(controller_.spurious_retrigger_count(), 0u);
+  }
+
+  // The controller must outlive the driver.
+  FakeDwI2cController controller_;
+  fdf_testing::BackgroundDriverTest<TestConfig> driver_test_;
+  bool driver_started_ = false;
+  fdf::WireSyncClient<fuchsia_hardware_i2cimpl::Device> i2c_;
+  fdf::Arena arena_{'TEST'};
+};
+
+TEST_F(DwI2cTransactTest, WakesOnLevelIrqWithoutSpuriousRetrigger) {
+  // Execute 3 back-to-back 2-byte writes followed by a 1-byte write + 2-byte read transaction.
+  for (uint8_t i = 0; i < 3; ++i) {
+    zx::result reads =
+        Transact({WriteOp({static_cast<uint8_t>(0x10 + i), static_cast<uint8_t>(0x80 | i)},
+                          /*stop=*/true)});
+    ASSERT_OK(reads);
+    EXPECT_TRUE(reads->empty());
+    ExpectIdle();
+  }
+
+  controller_.QueueCannedRxBytes({0xa5, 0x5a});
+  zx::result reads = Transact({WriteOp({0x42}, /*stop=*/false), ReadOp(2, /*stop=*/true)});
+  ASSERT_OK(reads);
+  ASSERT_EQ(reads->size(), 1u);
+  EXPECT_EQ(reads->at(0), (std::vector<uint8_t>{0xa5, 0x5a}));
+  ExpectIdle();
+
+  // Each transaction is completed by a single STOP_DET interrupt.
+  EXPECT_EQ(controller_.irq_trigger_count(), 4u);
+
+  const std::vector<FakeDwI2cController::RecordedCommand> cmds = controller_.TakeTxCommands();
+  ASSERT_EQ(cmds.size(), 9u);
+  for (uint8_t i = 0; i < 3; ++i) {
+    EXPECT_EQ(cmds[2 * i].data, 0x10 + i);
+    EXPECT_FALSE(cmds[2 * i].stop);
+    EXPECT_EQ(cmds[2 * i + 1].data, 0x80 | i);
+    EXPECT_TRUE(cmds[2 * i + 1].stop);
+  }
+  EXPECT_EQ(cmds[6].target_addr, kAddress);
+  EXPECT_FALSE(cmds[6].is_read);
+  EXPECT_EQ(cmds[6].data, 0x42);
+  EXPECT_FALSE(cmds[6].stop);
+  EXPECT_TRUE(cmds[7].is_read);
+  EXPECT_TRUE(cmds[7].start);
+  EXPECT_FALSE(cmds[7].stop);
+  EXPECT_TRUE(cmds[8].is_read);
+  EXPECT_TRUE(cmds[8].stop);
+}
+
+using HealthCheckResult = fit::result<fuchsia_driver_framework::HealthCheckError,
+                                      fuchsia_driver_framework::HealthCheckResponse>;
+
+// Runs a synchronous HealthCheck on `driver` (must be called in driver context).
+HealthCheckResult RunHealthCheck(TestDwI2c& driver,
+                                 fuchsia_driver_framework::HealthCheckRequest level) {
+  HealthCheckResult result = fit::error(fuchsia_driver_framework::HealthCheckError::kInternalError);
+  driver.HealthCheck(level, [&](HealthCheckResult res) { result = std::move(res); });
+  return result;
+}
+
+TEST_F(DwI2cTransactTest, TxAbortMasksBeforeAck) {
+  // Use a transfer longer than the TX FIFO so TX_EMPTY is still unmasked when the abort is handled.
+  // The abort flushes the TX FIFO, asserting TX_EMPTY, so acknowledging the interrupt before
+  // masking it would re-trigger the level-triggered interrupt.
+  controller_.AbortNextTransfer(0x1);
+
+  EXPECT_STATUS(Transact({WriteOp({0, 1, 2, 3, 4, 5}, /*stop=*/false),
+                          WriteOp({6, 7, 8, 9, 10, 11}, /*stop=*/true)}),
+                ZX_ERR_IO);
+  EXPECT_EQ(controller_.irq_trigger_count(), 1u);
+  ExpectIdle();
+  // Nothing is transmitted after the abort.
+  EXPECT_EQ(controller_.TakeTxCommands().size(), 8u);
+
+  driver_test_.RunInDriverContext([](TestDwI2c& driver) {
+    HealthCheckResult ping_res =
+        RunHealthCheck(driver, fuchsia_driver_framework::HealthCheckRequest::kPing);
+    ASSERT_TRUE(ping_res.is_ok());
+    EXPECT_TRUE(!ping_res->conditions().has_value() || ping_res->conditions()->empty());
+    ASSERT_TRUE(ping_res->diagnostics().has_value());
+
+    bool found = false;
+    for (const auto& item : *ping_res->diagnostics()) {
+      if (item.key() == DwI2c::kDiagTxAbortCount) {
+        EXPECT_EQ(item.value().uint_value().value(), 1u);
+        found = true;
+      }
+    }
+    EXPECT_TRUE(found);
+  });
+}
+
+TEST_F(DwI2cTransactTest, TimeoutMasksAndDisables) {
+  controller_.StallBus();
+  driver_test_.RunInDriverContext(
+      [](TestDwI2c& driver) { driver.set_transfer_timeout(zx::msec(5)); });
+
+  const zx::time start = zx::clock::get_monotonic();
+  zx::result reads = Transact({WriteOp({0x01, 0x02}, /*stop=*/true)});
+  const zx::duration elapsed = zx::clock::get_monotonic() - start;
+
+  EXPECT_STATUS(reads, ZX_ERR_TIMED_OUT);
+  EXPECT_GE(elapsed, zx::msec(5));
+  EXPECT_EQ(controller_.irq_trigger_count(), 0u);
+  ExpectIdle();
+}
+
+TEST_F(DwI2cTransactTest, MultiChunkTxEmptyAndStopDetLevelIrq) {
+  // Two 6-byte WriteOps = 12 commands (> tx_fifo_depth_ == 8), while each op is <= kMaxTransfer
+  // (8), forcing a priming 8-command chunk + TX_EMPTY wakeup + 4-command chunk + STOP_DET wakeup.
+  const std::vector<uint8_t> chunk0 = {0x10, 0x11, 0x12, 0x13, 0x14, 0x15};
+  const std::vector<uint8_t> chunk1 = {0x20, 0x21, 0x22, 0x23, 0x24, 0x25};
+  ASSERT_OK(Transact({WriteOp(chunk0, /*stop=*/false), WriteOp(chunk1, /*stop=*/true)}));
+  EXPECT_EQ(controller_.irq_trigger_count(), 2u);
+  ExpectIdle();
+
+  const std::vector<FakeDwI2cController::RecordedCommand> cmds = controller_.TakeTxCommands();
+  ASSERT_EQ(cmds.size(), 12u);
+  for (size_t i = 0; i < 6; ++i) {
+    EXPECT_EQ(cmds[i].data, chunk0[i]);
+    EXPECT_FALSE(cmds[i].is_read);
+    EXPECT_FALSE(cmds[i].stop);
+  }
+  for (size_t i = 0; i < 6; ++i) {
+    EXPECT_EQ(cmds[6 + i].data, chunk1[i]);
+    EXPECT_FALSE(cmds[6 + i].is_read);
+    EXPECT_EQ(cmds[6 + i].start, i == 0);
+    EXPECT_EQ(cmds[6 + i].stop, i == 5);
+  }
+}
+
+TEST_F(DwI2cTransactTest, DrainsRetriggeredInterruptOnAck) {
+  // Trigger the interrupt again when ClearStopDetReg is read (before the end-of-transaction ack)
+  // so acknowledging the first interrupt re-queues a packet on irq_port_.
+  controller_.RetriggerOnNextStopDetClear();
+  ASSERT_OK(Transact({WriteOp({0x33, 0x44}, /*stop=*/true)}));
+  EXPECT_EQ(controller_.irq_trigger_count(), 2u);
+
+  // Verify the re-queued interrupt packet was drained and acknowledged before Transact returned.
+  ExpectIdle();
+
+  // Verify a subsequent transaction still wakes cleanly via irq_port_.
+  ASSERT_OK(Transact({WriteOp({0x33, 0x44}, /*stop=*/true)}));
+  EXPECT_EQ(controller_.irq_trigger_count(), 3u);
+  ExpectIdle();
+}
+
+TEST(DwI2cTest, HealthCheckHealthyPingFastAndDeep) {
+  FakeDwI2cController controller;
+  TestDwI2c::set_mmio(controller.GetMmioBuffer());
+
+  fdf_testing::BackgroundDriverTest<TestConfig> driver_test;
+
+  zx::interrupt interrupt;
+  ASSERT_EQ(ZX_OK, zx::interrupt::create(zx::resource(), 0, ZX_INTERRUPT_VIRTUAL, &interrupt));
+
+  driver_test.RunInEnvironmentTypeContext([&](auto& env) { env.Init(std::move(interrupt)); });
+
+  ASSERT_OK(driver_test.StartDriver());
+
+  driver_test.RunInDriverContext([](TestDwI2c& driver) {
+    HealthCheckResult ping_res =
+        RunHealthCheck(driver, fuchsia_driver_framework::HealthCheckRequest::kPing);
+    ASSERT_TRUE(ping_res.is_ok());
+    EXPECT_TRUE(!ping_res->conditions().has_value() || ping_res->conditions()->empty());
+    ASSERT_TRUE(ping_res->diagnostics().has_value());
+    EXPECT_FALSE(ping_res->diagnostics()->empty());
+
+    HealthCheckResult fast_res =
+        RunHealthCheck(driver, fuchsia_driver_framework::HealthCheckRequest::kFast);
+    ASSERT_TRUE(fast_res.is_ok());
+    EXPECT_TRUE(!fast_res->conditions().has_value() || fast_res->conditions()->empty());
+    ASSERT_TRUE(fast_res->diagnostics().has_value());
+    EXPECT_FALSE(fast_res->diagnostics()->empty());
+
+    HealthCheckResult deep_res =
+        RunHealthCheck(driver, fuchsia_driver_framework::HealthCheckRequest::kDeep);
+    ASSERT_TRUE(deep_res.is_error());
+    EXPECT_EQ(deep_res.error_value(), fuchsia_driver_framework::HealthCheckError::kNotSupported);
+  });
+
+  ASSERT_OK(driver_test.StopDriver());
+}
+
+TEST(DwI2cTest, FastRaisesOnceAndClearsUnclockedMmioRead) {
+  FakeDwI2cController controller;
+  TestDwI2c::set_mmio(controller.GetMmioBuffer());
+
+  fdf_testing::BackgroundDriverTest<TestConfig> driver_test;
+
+  zx::interrupt interrupt;
+  ASSERT_EQ(ZX_OK, zx::interrupt::create(zx::resource(), 0, ZX_INTERRUPT_VIRTUAL, &interrupt));
+
+  driver_test.RunInEnvironmentTypeContext([&](auto& env) { env.Init(std::move(interrupt)); });
+
+  ASSERT_OK(driver_test.StartDriver());
+
+  // Simulate unclocked MMIO read (CompTypeReg returning 0x0 while resources_enabled_ is true).
+  controller.set_powered(false);
+  driver_test.RunInDriverContext([](TestDwI2c& driver) {
+    HealthCheckResult fast_res =
+        RunHealthCheck(driver, fuchsia_driver_framework::HealthCheckRequest::kFast);
+    ASSERT_TRUE(fast_res.is_ok());
+    ASSERT_TRUE(fast_res->conditions().has_value());
+    ASSERT_EQ(fast_res->conditions()->size(), 1u);
+    EXPECT_EQ(fast_res->conditions()->at(0).reason_code(), DwI2c::kReasonUnclockedMmioRead);
+    EXPECT_EQ(fast_res->conditions()->at(0).status(),
+              fuchsia_driver_framework::HealthStatus::kUnhealthy);
+    EXPECT_EQ(fast_res->conditions()->at(0).occurrence_count(), 1u);
+
+    // Status registers must not be read when CompTypeReg indicates an unclocked APB window.
+    ASSERT_TRUE(fast_res->diagnostics().has_value());
+    for (const auto& item : *fast_res->diagnostics()) {
+      EXPECT_NE(item.key(), DwI2c::kDiagEnableStatus);
+      EXPECT_NE(item.key(), DwI2c::kDiagStatus);
+      EXPECT_NE(item.key(), DwI2c::kDiagRawIntrStat);
+      EXPECT_NE(item.key(), DwI2c::kDiagTxAbrtSource);
+    }
+
+    // Repeated kFast polls in the same unclocked episode increment unclocked_read_count without
+    // re-raising the latched condition or inflating occurrence_count.
+    HealthCheckResult second_fast_res =
+        RunHealthCheck(driver, fuchsia_driver_framework::HealthCheckRequest::kFast);
+    ASSERT_TRUE(second_fast_res.is_ok());
+    ASSERT_TRUE(second_fast_res->conditions().has_value());
+    ASSERT_EQ(second_fast_res->conditions()->size(), 1u);
+    EXPECT_EQ(second_fast_res->conditions()->at(0).occurrence_count(), 1u);
+    bool found_unclocked_count = false;
+    for (const auto& item : *second_fast_res->diagnostics()) {
+      if (item.key() == DwI2c::kDiagUnclockedReadCount) {
+        EXPECT_EQ(item.value().uint_value().value(), 2u);
+        found_unclocked_count = true;
+      }
+    }
+    EXPECT_TRUE(found_unclocked_count);
+
+    // Ping must also report the active I2C_UNCLOCKED_MMIO_READ condition.
+    HealthCheckResult ping_res =
+        RunHealthCheck(driver, fuchsia_driver_framework::HealthCheckRequest::kPing);
+    ASSERT_TRUE(ping_res.is_ok());
+    ASSERT_TRUE(ping_res->conditions().has_value());
+    ASSERT_EQ(ping_res->conditions()->size(), 1u);
+    EXPECT_EQ(ping_res->conditions()->at(0).reason_code(), DwI2c::kReasonUnclockedMmioRead);
+    EXPECT_EQ(ping_res->conditions()->at(0).status(),
+              fuchsia_driver_framework::HealthStatus::kUnhealthy);
+  });
+
+  // Restore power and verify Fast clears I2C_UNCLOCKED_MMIO_READ.
+  controller.set_powered(true);
+  driver_test.RunInDriverContext([](TestDwI2c& driver) {
+    HealthCheckResult fast_res =
+        RunHealthCheck(driver, fuchsia_driver_framework::HealthCheckRequest::kFast);
+    ASSERT_TRUE(fast_res.is_ok());
+    EXPECT_TRUE(!fast_res->conditions().has_value() || fast_res->conditions()->empty());
+  });
+
+  ASSERT_OK(driver_test.StopDriver());
+}
+
+TEST(DwI2cTest, FastSclStuckLowStaysLatchedUntilTransfer) {
+  FakeDwI2cController controller;
+  TestDwI2c::set_mmio(controller.GetMmioBuffer());
+
+  fdf_testing::BackgroundDriverTest<TestConfig> driver_test;
+
+  zx::interrupt interrupt;
+  ASSERT_EQ(ZX_OK, zx::interrupt::create(zx::resource(), 0, ZX_INTERRUPT_VIRTUAL, &interrupt));
+
+  driver_test.RunInEnvironmentTypeContext([&](auto& env) { env.Init(std::move(interrupt)); });
+
+  ASSERT_OK(driver_test.StartDriver());
+
+  controller.set_scl_stuck_low(true);
+  driver_test.RunInDriverContext([](TestDwI2c& driver) {
+    HealthCheckResult fast_res =
+        RunHealthCheck(driver, fuchsia_driver_framework::HealthCheckRequest::kFast);
+    ASSERT_TRUE(fast_res.is_ok());
+    ASSERT_TRUE(fast_res->conditions().has_value());
+    ASSERT_EQ(fast_res->conditions()->size(), 1u);
+    EXPECT_EQ(fast_res->conditions()->at(0).reason_code(), DwI2c::kReasonSclStuckLow);
+    EXPECT_EQ(fast_res->conditions()->at(0).occurrence_count(), 1u);
+
+    // A second kFast poll while the bit remains set does not inflate occurrence_count.
+    HealthCheckResult second_fast_res =
+        RunHealthCheck(driver, fuchsia_driver_framework::HealthCheckRequest::kFast);
+    ASSERT_TRUE(second_fast_res.is_ok());
+    ASSERT_TRUE(second_fast_res->conditions().has_value());
+    ASSERT_EQ(second_fast_res->conditions()->size(), 1u);
+    EXPECT_EQ(second_fast_res->conditions()->at(0).occurrence_count(), 1u);
+  });
+
+  // The sticky status bit reading clear again is not evidence of recovery (the driver wipes it
+  // after every transfer attempt), so Fast keeps I2C_SCL_STUCK_LOW latched without re-raising it.
+  // Only a completed transfer clears it (see SuccessfulTransactClearsLatchedFaults).
+  controller.set_scl_stuck_low(false);
+  driver_test.RunInDriverContext([](TestDwI2c& driver) {
+    HealthCheckResult fast_res =
+        RunHealthCheck(driver, fuchsia_driver_framework::HealthCheckRequest::kFast);
+    ASSERT_TRUE(fast_res.is_ok());
+    ASSERT_TRUE(fast_res->conditions().has_value());
+    ASSERT_EQ(fast_res->conditions()->size(), 1u);
+    EXPECT_EQ(fast_res->conditions()->at(0).reason_code(), DwI2c::kReasonSclStuckLow);
+    EXPECT_EQ(fast_res->conditions()->at(0).occurrence_count(), 1u);
+  });
+
+  ASSERT_OK(driver_test.StopDriver());
+}
+
+TEST(DwI2cTest, HealthCheckWhileSuspendedAndAfterResumeFailure) {
+  FakeDwI2cController controller;
+  TestDwI2c::set_mmio(controller.GetMmioBuffer());
+
+  fdf_testing::BackgroundDriverTest<TestConfig> driver_test;
+
+  zx::interrupt interrupt;
+  ASSERT_EQ(ZX_OK, zx::interrupt::create(zx::resource(), 0, ZX_INTERRUPT_VIRTUAL, &interrupt));
+
+  driver_test.RunInEnvironmentTypeContext([&](auto& env) { env.Init(std::move(interrupt)); });
+
+  ASSERT_OK(driver_test.StartDriver());
+
+  zx::result<> suspend_result = zx::error(ZX_ERR_INTERNAL);
+  driver_test.RunInDriverContext([&](TestDwI2c& driver) {
+    driver.SystemSuspend(
+        fdf::SuspendCompleter([&](zx::result<> result) { suspend_result = result; }));
+  });
+  ASSERT_OK(suspend_result);
+
+  // Ping while cleanly suspended returns OK with resources_enabled == false; Fast returns
+  // kUnavailable.
+  driver_test.RunInDriverContext([](TestDwI2c& driver) {
+    HealthCheckResult ping_res =
+        RunHealthCheck(driver, fuchsia_driver_framework::HealthCheckRequest::kPing);
+    ASSERT_TRUE(ping_res.is_ok());
+    EXPECT_TRUE(!ping_res->conditions().has_value() || ping_res->conditions()->empty());
+    ASSERT_TRUE(ping_res->diagnostics().has_value());
+    bool found_resources_enabled = false;
+    for (const auto& item : *ping_res->diagnostics()) {
+      if (item.key() == DwI2c::kDiagResourcesEnabled) {
+        EXPECT_FALSE(item.value().bool_value().value());
+        found_resources_enabled = true;
+      }
+    }
+    EXPECT_TRUE(found_resources_enabled);
+
+    HealthCheckResult fast_res =
+        RunHealthCheck(driver, fuchsia_driver_framework::HealthCheckRequest::kFast);
+    ASSERT_TRUE(fast_res.is_error());
+    EXPECT_EQ(fast_res.error_value(), fuchsia_driver_framework::HealthCheckError::kUnavailable);
+  });
+
+  // Fail SystemResume. Ping reports I2C_RESUME_FAILED (kUnhealthy); Fast also returns the latched
+  // fault (not kUnavailable) even though the controller is unpowered.
+  driver_test.RunInEnvironmentTypeContext(
+      [](TestEnvironment& env) { env.clock_regs().set_enable_result(zx::error(ZX_ERR_IO)); });
+  zx::result<> resume_result = zx::ok();
+  driver_test.RunInDriverContext([&](TestDwI2c& driver) {
+    driver.SystemResume(std::nullopt,
+                        fdf::ResumeCompleter([&](zx::result<> result) { resume_result = result; }));
+  });
+  EXPECT_STATUS(resume_result, ZX_ERR_IO);
+
+  driver_test.RunInDriverContext([](TestDwI2c& driver) {
+    EXPECT_EQ(fuchsia_driver_framework::HealthStatus::kUnhealthy, driver.health_latch().status());
+
+    HealthCheckResult ping_res =
+        RunHealthCheck(driver, fuchsia_driver_framework::HealthCheckRequest::kPing);
+    ASSERT_TRUE(ping_res.is_ok());
+    ASSERT_TRUE(ping_res->conditions().has_value());
+    ASSERT_EQ(1u, ping_res->conditions()->size());
+    EXPECT_EQ(DwI2c::kReasonResumeFailed, ping_res->conditions()->at(0).reason_code());
+    EXPECT_EQ(fuchsia_driver_framework::HealthStatus::kUnhealthy,
+              ping_res->conditions()->at(0).status());
+
+    HealthCheckResult fast_res =
+        RunHealthCheck(driver, fuchsia_driver_framework::HealthCheckRequest::kFast);
+    ASSERT_TRUE(fast_res.is_ok());
+    ASSERT_TRUE(fast_res->conditions().has_value());
+    ASSERT_EQ(1u, fast_res->conditions()->size());
+    EXPECT_EQ(DwI2c::kReasonResumeFailed, fast_res->conditions()->at(0).reason_code());
+    ASSERT_TRUE(fast_res->diagnostics().has_value());
+    bool found = false;
+    for (const auto& item : *fast_res->diagnostics()) {
+      if (item.key() == DwI2c::kDiagResourcesEnabled) {
+        EXPECT_FALSE(item.value().bool_value().value());
+        found = true;
+      }
+    }
+    EXPECT_TRUE(found);
+  });
+
+  // A second resume failure doesn't add a new condition but increments occurrence_count.
+  driver_test.RunInDriverContext([&](TestDwI2c& driver) {
+    driver.SystemResume(std::nullopt,
+                        fdf::ResumeCompleter([&](zx::result<> result) { resume_result = result; }));
+  });
+  EXPECT_STATUS(resume_result, ZX_ERR_IO);
+  driver_test.RunInDriverContext([](TestDwI2c& driver) {
+    std::vector<fuchsia_driver_framework::HealthCondition> snap = driver.health_latch().Snapshot();
+    ASSERT_EQ(1u, snap.size());
+    EXPECT_EQ(2u, snap[0].occurrence_count());
+  });
+
+  // A successful resume sends a single recovery alert and clears the latch.
+  driver_test.RunInEnvironmentTypeContext(
+      [](TestEnvironment& env) { env.clock_regs().set_enable_result(zx::ok()); });
+  driver_test.RunInDriverContext([&](TestDwI2c& driver) {
+    driver.SystemResume(std::nullopt,
+                        fdf::ResumeCompleter([&](zx::result<> result) { resume_result = result; }));
+  });
+  EXPECT_OK(resume_result);
+  driver_test.RunInDriverContext([](TestDwI2c& driver) {
+    EXPECT_EQ(fuchsia_driver_framework::HealthStatus::kOk, driver.health_latch().status());
+    EXPECT_TRUE(driver.health_latch().Snapshot().empty());
+  });
+
+  ASSERT_OK(driver_test.StopDriver());
+}
+
+// A completed transfer is the recovery proof for every fault the driver raises: with two faults
+// latched (a transaction timeout and SCL stuck low observed by Fast), one successful Transact
+// clears the whole set at once.
+TEST_F(DwI2cTransactTest, SuccessfulTransactClearsLatchedFaults) {
+  controller_.StallBus(/*scl_stuck_low=*/true);
+  driver_test_.RunInDriverContext(
+      [](TestDwI2c& driver) { driver.set_transfer_timeout(zx::msec(5)); });
+  EXPECT_STATUS(Transact({WriteOp({0x01}, /*stop=*/true)}), ZX_ERR_TIMED_OUT);
+  controller_.UnstallBus();
+
+  // Post-transfer cleanup already wiped SCL_STUCK_AT_LOW in RawInterruptStatusReg, yet both
+  // conditions were latched in WaitForInterrupt() and stay latched across HealthCheck(kFast).
+  EXPECT_EQ(controller_.ReadReg(FakeDwI2cController::kRawIntrStat), 0u);
+  driver_test_.RunInDriverContext([](TestDwI2c& driver) {
+    HealthCheckResult fast_res =
+        RunHealthCheck(driver, fuchsia_driver_framework::HealthCheckRequest::kFast);
+    ASSERT_TRUE(fast_res.is_ok());
+    ASSERT_TRUE(fast_res->conditions().has_value());
+    EXPECT_EQ(fast_res->conditions()->size(), 2u);
+
+    std::vector<std::string> codes;
+    for (const auto& cond : driver.health_latch().Snapshot()) {
+      codes.push_back(cond.reason_code().value_or(""));
+    }
+    std::sort(codes.begin(), codes.end());
+    EXPECT_EQ(codes, (std::vector<std::string>{std::string(DwI2c::kReasonSclStuckLow),
+                                               std::string(DwI2c::kReasonTransactionTimeout)}));
+  });
+
+  ASSERT_OK(Transact({WriteOp({0x02}, /*stop=*/true)}));
+  ExpectIdle();
+  driver_test_.RunInDriverContext([](TestDwI2c& driver) {
+    EXPECT_TRUE(driver.health_latch().Snapshot().empty());
+    EXPECT_EQ(fuchsia_driver_framework::HealthStatus::kOk, driver.health_latch().status());
+  });
+}
+
+// A controller that completes the transfer but then refuses to disable still returns the
+// transfer's data, latches I2C_DISABLE_TIMEOUT (which the transfer did not disprove), and clears
+// it on the next transfer that disables cleanly.
+TEST_F(DwI2cTransactTest, DisableTimeoutIsLatchedAndClearedByCleanTransfer) {
+  controller_.StickEnabled(true);
+  ASSERT_OK(Transact({WriteOp({0x11}, /*stop=*/true)}));
+  EXPECT_EQ(controller_.ReadReg(FakeDwI2cController::kEnable), 0u);
+  EXPECT_EQ(controller_.ReadReg(FakeDwI2cController::kEnableStatus), 1u);
+
+  driver_test_.RunInDriverContext([](TestDwI2c& driver) {
+    std::vector<fuchsia_driver_framework::HealthCondition> snap = driver.health_latch().Snapshot();
+    ASSERT_EQ(snap.size(), 1u);
+    EXPECT_EQ(snap[0].reason_code(), DwI2c::kReasonDisableTimeout);
+    EXPECT_EQ(snap[0].status(), fuchsia_driver_framework::HealthStatus::kDegraded);
+
+    HealthCheckResult ping_res =
+        RunHealthCheck(driver, fuchsia_driver_framework::HealthCheckRequest::kPing);
+    ASSERT_TRUE(ping_res.is_ok());
+    ASSERT_TRUE(ping_res->conditions().has_value());
+    ASSERT_EQ(ping_res->conditions()->size(), 1u);
+    EXPECT_EQ(ping_res->conditions()->at(0).reason_code(), DwI2c::kReasonDisableTimeout);
+    bool found = false;
+    for (const auto& item : *ping_res->diagnostics()) {
+      if (item.key() == DwI2c::kDiagTimeoutCount) {
+        EXPECT_EQ(item.value().uint_value().value(), 1u);
+        found = true;
+      }
+    }
+    EXPECT_TRUE(found);
+  });
+
+  controller_.StickEnabled(false);
+  ASSERT_OK(Transact({WriteOp({0x12}, /*stop=*/true)}));
+  ExpectIdle();
+  driver_test_.RunInDriverContext(
+      [](TestDwI2c& driver) { EXPECT_TRUE(driver.health_latch().Snapshot().empty()); });
 }
 
 }  // namespace dw_i2c

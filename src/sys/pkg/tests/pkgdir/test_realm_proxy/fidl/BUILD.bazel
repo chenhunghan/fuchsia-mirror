@@ -16,7 +16,6 @@ fidl_library(
     category = "compat_test",
     stable = True,
     visibility = [
-        "//sdk/fidl:__pkg__",
         "//src/sys/pkg/tests/pkgdir:__subpackages__",
     ],
     deps = [

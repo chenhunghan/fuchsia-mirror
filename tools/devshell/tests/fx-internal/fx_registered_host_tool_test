@@ -1,0 +1,1457 @@
+#!/bin/bash
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+### Test fx_host_tool registry lookup, script mode, PATH isolation, and vendor precedence
+
+BT_FILE_DEPS=(
+  "build/bazel/config/bazel_top_dir"
+  "scripts/fx"
+  "scripts/fx-env.sh"
+  "scripts/fx-help.awk"
+  "scripts/hermetic-env"
+  "tools/devshell/fx_cli/__init__.py"
+  "tools/devshell/fx_cli/builder.py"
+  "tools/devshell/fx_cli/locator.py"
+  "tools/devshell/fx_cli/registry.py"
+  "tools/devshell/fx_host_tools.json"
+  "tools/devshell/lib/bazel_utils.sh"
+  "tools/devshell/lib/fx-cmd-locator.sh"
+  "tools/devshell/lib/fx-optional-features.sh"
+  "tools/devshell/lib/generate-ssh-config.sh"
+  "tools/devshell/lib/host_symbolizer.sh"
+  "tools/devshell/lib/is_invoked_by_agent.sh"
+  "tools/devshell/lib/agent_session_ids.txt"
+  "tools/devshell/lib/agents.txt"
+  "tools/devshell/lib/metrics.sh"
+  "tools/devshell/lib/platform.sh"
+  "tools/devshell/lib/style.sh"
+  "tools/devshell/lib/vars.sh"
+  "tools/devshell/rbe"
+  "tools/devshell/sync"
+  "tools/devshell/test"
+  "tools/devshell/vendor"
+)
+
+BT_MOCKED_TOOLS=(
+  "tools/devshell/build"
+)
+
+declare fx
+
+BT_SET_UP() {
+  source "${BT_TEMP_DIR}/tools/devshell/tests/lib/fuchsia-mock.sh"
+  fx="$(btf::setup_fx)"
+  FUCHSIA_DIR="${BT_TEMP_DIR}"
+  mkdir -p "${BT_TEMP_DIR}/.git" \
+    "${BT_TEMP_DIR}/manifests" \
+    "${BT_TEMP_DIR}/integration" \
+    "${BT_TEMP_DIR}/tools/devshell/host_tools/cipd" \
+    "${BT_TEMP_DIR}/build/bazel/rules/host" \
+    "${BT_TEMP_DIR}/scripts/developer"
+  echo "rev-initial-1111" > "${BT_TEMP_DIR}/.git/JIRI_HEAD"
+  echo '[{"package":"initial-lock-v1"}]' > "${BT_TEMP_DIR}/manifests/jiri.lock"
+  echo '[{"package":"integration-lock-v1"}]' > "${BT_TEMP_DIR}/integration/jiri.lock"
+  echo "# cipd build v1" > "${BT_TEMP_DIR}/tools/devshell/host_tools/cipd/BUILD.bazel"
+  echo "# fx_host_tool.bzl v1" > "${BT_TEMP_DIR}/build/bazel/rules/host/fx_host_tool.bzl"
+  echo "# developer build v1" > "${BT_TEMP_DIR}/scripts/developer/BUILD.bazel"
+  cp -f "${BT_TEMP_DIR}/tools/devshell/fx_host_tools.json" "${BT_TEMP_DIR}/tools/devshell/fx_host_tools.json.orig"
+
+  source "${BT_TEMP_DIR}/tools/devshell/lib/platform.sh"
+  local py_var="PREBUILT_""PYTHON3"
+  local paths_var="PREBUILT_""ALL_PATHS"
+  _TEST_PY3="${!py_var}"
+  _TEST_ALL_PATHS="${!paths_var}"
+  mkdir -p "$(dirname "${_TEST_PY3}")"
+  ln -sf "$(command -v python3)" "${_TEST_PY3}"
+
+  cat > "${BT_TEMP_DIR}/tools/devshell/fx_host_tools.json" <<'EOF'
+{
+  "my-reg-tool": "//scripts/developer:my-reg-tool",
+  "other-tool": {
+    "target": "//tools/other:other_bin"
+  }
+}
+EOF
+
+  _install_mock_bazel_wrapper
+}
+
+_install_mock_bazel_wrapper() {
+  local bazel_bin="${BT_TEMP_DIR}/out/default/gen/build/bazel/bazel"
+  mkdir -p "$(dirname "${bazel_bin}")"
+  cat > "${bazel_bin}" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BUILD_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+STATE_FILE="${BUILD_DIR}/bazel.mock_state"
+printf '%s\n' "$*" >> "${STATE_FILE}"
+
+if [[ -f "${BUILD_DIR}/bazel.mock_side_effects" ]]; then
+  source "${BUILD_DIR}/bazel.mock_side_effects"
+fi
+
+bep_file=""
+target_label=""
+for arg in "$@"; do
+  case "${arg}" in
+    --build_event_json_file=*)
+      bep_file="${arg#--build_event_json_file=}"
+      ;;
+    @//*|//*)
+      target_label="${arg#@}"
+      ;;
+  esac
+done
+
+if [[ -n "${bep_file}" && -n "${target_label}" ]]; then
+  clean_rel="${target_label#//}"
+  if [[ "${clean_rel}" == *:* ]]; then
+    pkg_rel="${clean_rel%%:*}"
+    tname="${clean_rel#*:}"
+  else
+    pkg_rel="${clean_rel}"
+    tname="${pkg_rel##*/}"
+  fi
+  exec_bin_dir="${SCRIPT_DIR}/output_base/execroot/_main/bazel-out/x86_64-opt/bin/${pkg_rel}"
+  out_bin=""
+  for cand in "${exec_bin_dir}/${tname}" "${exec_bin_dir}"/*; do
+    if [[ -f "${cand}" && "${cand}" != *.runtime_dir ]]; then
+      out_bin="${cand}"
+      break
+    fi
+  done
+  if [[ -n "${out_bin}" ]]; then
+    out_name="$(basename "${out_bin}")"
+    encoded_out_bin="${out_bin// /%20}"
+    cat > "${bep_file}" <<JSON
+{"id":{"namedSet":{"id":"0"}},"namedSetOfFiles":{"files":[{"name":"${pkg_rel}/${out_name}","uri":"file://${encoded_out_bin}"}]}}
+{"id":{"targetCompleted":{"label":"@@//${pkg_rel}:${tname}"}},"completed":{"success":true}}
+JSON
+  fi
+fi
+EOF
+  chmod +x "${bazel_bin}"
+}
+
+_stage_fake_bazel_output() {
+  local pkg_rel="$1"
+  local out_name="$2"
+  local message="$3"
+  local always_build="${4:-0}"
+  # Stage ONLY in output_base/execroot (NO workspace/bazel-bin symlink!)
+  local bazel_pkg_bin="${BT_TEMP_DIR}/out/default/gen/build/bazel/output_base/execroot/_main/bazel-out/x86_64-opt/bin/${pkg_rel}"
+  mkdir -p "${bazel_pkg_bin}/${out_name}.runtime_dir"
+  cat > "${bazel_pkg_bin}/${out_name}.runtime_dir/payload.txt" <<EOF
+${message}
+EOF
+  if [[ "${always_build}" == "1" ]]; then
+    : > "${bazel_pkg_bin}/${out_name}.runtime_dir/.always_build"
+  else
+    rm -f "${bazel_pkg_bin}/${out_name}.runtime_dir/.always_build"
+  fi
+  cat > "${bazel_pkg_bin}/${out_name}" <<EOF
+#!/bin/bash
+set -euo pipefail
+if [[ "\${1:-}" == "--help" || "\${1:-}" == "-h" ]]; then
+  echo "usage: fx ${out_name} [--flag] (${message})"
+  exit 0
+fi
+SCRIPT_DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+PAYLOAD="\$(cat "\${SCRIPT_DIR}/${out_name}.runtime_dir/payload.txt")"
+echo "\${PAYLOAD}|cwd=\${PWD}|args=\$*"
+EOF
+  chmod +x "${bazel_pkg_bin}/${out_name}"
+}
+
+TEST_registry_lookup() {
+  source "${BT_TEMP_DIR}/tools/devshell/lib/vars.sh"
+  source "${BT_TEMP_DIR}/tools/devshell/lib/fx-cmd-locator.sh"
+
+  if declare -f get_registered_host_tool_scope >/dev/null 2>&1; then
+    BT_FAIL "get_registered_host_tool_scope should not exist; all tools live in \$FUCHSIA_BUILD_DIR/host-tools"
+  fi
+
+  local target
+  target="$(get_registered_host_tool_target "my-reg-tool")"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_EQ "${target}" "//scripts/developer:my-reg-tool"
+
+  target="$(get_registered_host_tool_target "other-tool")"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_EQ "${target}" "//tools/other:other_bin"
+
+  BT_EXPECT_FAIL get_registered_host_tool_target "nonexistent-tool"
+
+  mkdir -p "${BT_TEMP_DIR}/vendor/acme/scripts/devshell"
+  cat > "${BT_TEMP_DIR}/vendor/acme/scripts/devshell/fx_host_tools.json" <<'EOF'
+{
+  "acme-tool": "//vendor/acme/tools:acme-tool"
+}
+EOF
+  target="$(get_registered_host_tool_target "acme-tool" "acme")"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_EQ "${target}" "//vendor/acme/tools:acme-tool"
+
+  rm -rf "${BT_TEMP_DIR}/out/_fx_host_tools"
+  BT_EXPECT_EQ "$(get_registered_host_tool_install_path "my-reg-tool")" "${BT_TEMP_DIR}/out/_fx_host_tools/my-reg-tool"
+}
+
+TEST_fails_cleanly_without_build_dir() {
+  rm -rf "${BT_TEMP_DIR}/.fx-build-dir" "${BT_TEMP_DIR}/out"
+  local err_out
+  err_out="$("${fx}" my-reg-tool 2>&1)"
+  [[ $? -ne 0 ]]
+  BT_EXPECT_GOOD_STATUS $?
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${err_out}" "No build directory found"
+}
+
+TEST_fx_command_run_and_vendor_dispatch_registered_tools() {
+  mkdir -p "${BT_TEMP_DIR}/tools/devshell/host_tools/reg_run"
+  cat > "${BT_TEMP_DIR}/tools/devshell/host_tools/reg_run/reg_run.sh" <<'EOF'
+#!/bin/bash
+echo "CALLED_CMD:reg-run|$*"
+EOF
+  chmod +x "${BT_TEMP_DIR}/tools/devshell/host_tools/reg_run/reg_run.sh"
+
+  cat > "${BT_TEMP_DIR}/tools/devshell/fx_host_tools.json" <<'EOF'
+{
+  "reg-run": {
+    "category": "Build",
+    "script": "//tools/devshell/host_tools/reg_run/reg_run.sh",
+    "summary": "reg-run tool"
+  }
+}
+EOF
+
+  local caller_script="${BT_TEMP_DIR}/tools/devshell/my-caller-subcmd"
+  cat > "${caller_script}" <<EOF
+#!/bin/bash
+source "${BT_TEMP_DIR}/tools/devshell/lib/vars.sh" || exit \$?
+fx-command-run reg-run pass_arg1 pass_arg2
+EOF
+  chmod +x "${caller_script}"
+
+  local out
+  out="$("${fx}" my-caller-subcmd 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_EQ "${out}" "CALLED_CMD:reg-run|pass_arg1 pass_arg2"
+
+  mkdir -p "${BT_TEMP_DIR}/vendor/google/scripts/devshell"
+  cat > "${BT_TEMP_DIR}/vendor/google/scripts/devshell/vendor_sh.sh" <<'EOF'
+#!/bin/bash
+echo "VENDOR_CALLED:vendor_sh|$*"
+EOF
+  chmod +x "${BT_TEMP_DIR}/vendor/google/scripts/devshell/vendor_sh.sh"
+  cat > "${BT_TEMP_DIR}/vendor/google/scripts/devshell/fx_host_tools.json" <<'EOF'
+{
+  "vendor-sh": {
+    "script": "//vendor/google/scripts/devshell/vendor_sh.sh",
+    "summary": "vendor registered shell tool"
+  }
+}
+EOF
+
+  out="$("${fx}" vendor google vendor-sh v_arg1 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_EQ "${out}" "VENDOR_CALLED:vendor_sh|v_arg1"
+}
+
+TEST_skips_legacy_path_injection_by_default_and_honors_incremental_opt_in() {
+  local fake_clang_bin="${BT_TEMP_DIR}/pre""built/third_party/clang/linux-x64/bin"
+  local fake_rt_bin="${BT_TEMP_DIR}/out/_fx_host_tools/parent.runtime_dir/.bin"
+  mkdir -p "${fake_clang_bin}" "${fake_rt_bin}"
+  touch "${fake_clang_bin}/clang" "${fake_rt_bin}/staged_tool"
+  chmod +x "${fake_clang_bin}/clang" "${fake_rt_bin}/staged_tool"
+
+  mkdir -p "${BT_TEMP_DIR}/tools/devshell/host_tools/path_test"
+  cat > "${BT_TEMP_DIR}/tools/devshell/host_tools/path_test/clean_tool.sh" <<'EOF'
+#!/bin/bash
+echo "CLEAN|FLAG=${FX_INJECT_PREBUILT_PATHS:-unset}|PATH=${PATH}"
+EOF
+  chmod +x "${BT_TEMP_DIR}/tools/devshell/host_tools/path_test/clean_tool.sh"
+
+  cat > "${BT_TEMP_DIR}/tools/devshell/host_tools/path_test/optin_tool.sh" <<'EOF'
+#!/bin/bash
+echo "OPTIN|FLAG=${FX_INJECT_PREBUILT_PATHS:-unset}|PATH=${PATH}"
+EOF
+  chmod +x "${BT_TEMP_DIR}/tools/devshell/host_tools/path_test/optin_tool.sh"
+
+  cat > "${BT_TEMP_DIR}/tools/devshell/fx_host_tools.json" <<'EOF'
+{
+  "clean-reg-tool": {
+    "category": "Build",
+    "script": "//tools/devshell/host_tools/path_test/clean_tool.sh",
+    "summary": "clean registered tool"
+  },
+  "optin-reg-tool": {
+    "category": "Build",
+    "inject_prebuilt_paths": true,
+    "script": "//tools/devshell/host_tools/path_test/optin_tool.sh",
+    "summary": "optin registered tool"
+  }
+}
+EOF
+
+  local out_clean
+  out_clean="$(PATH="/usr/bin:/bin" "${fx}" clean-reg-tool 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out_clean}" "CLEAN|FLAG=0|"
+  if [[ "${out_clean}" == *"/third_party/clang/"* ]]; then
+    BT_FAIL "Expected clean-reg-tool to omit /third_party/clang/ from PATH, got: ${out_clean}"
+  fi
+
+  local out_optin
+  out_optin="$(PATH="/usr/bin:/bin" "${fx}" optin-reg-tool 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out_optin}" "OPTIN|FLAG=1|"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out_optin}" "/third_party/clang/"
+
+  cat > "${BT_TEMP_DIR}/tools/devshell/fx_host_tools.json" <<'EOF'
+{
+  "clean-reg-tool": {
+    "script": "//tools/devshell/host_tools/path_test/clean_tool.sh"
+  },
+  "optin-reg-tool": {
+    "inject_prebuilt_paths": true,
+    "script": "//tools/devshell/host_tools/path_test/optin_tool.sh"
+  },
+  "hop-0-to-1": {
+    "script": "//tools/devshell/hop_0_to_1.sh"
+  },
+  "hop-1-to-0": {
+    "script": "//tools/devshell/hop_1_to_0.sh",
+    "inject_prebuilt_paths": true
+  }
+}
+EOF
+  cat > "${BT_TEMP_DIR}/tools/devshell/hop_0_to_1.sh" <<EOF
+#!/bin/bash
+source "${BT_TEMP_DIR}/tools/devshell/lib/vars.sh" || exit \$?
+echo "OUTER_0|FLAG=\${FX_INJECT_PREBUILT_PATHS}"
+fx-command-run optin-reg-tool
+EOF
+  chmod +x "${BT_TEMP_DIR}/tools/devshell/hop_0_to_1.sh"
+
+  cat > "${BT_TEMP_DIR}/tools/devshell/hop_1_to_0.sh" <<EOF
+#!/bin/bash
+source "${BT_TEMP_DIR}/tools/devshell/lib/vars.sh" || exit \$?
+echo "OUTER_1|FLAG=\${FX_INJECT_PREBUILT_PATHS}"
+fx-command-run clean-reg-tool
+EOF
+  chmod +x "${BT_TEMP_DIR}/tools/devshell/hop_1_to_0.sh"
+
+  local hop_01 hop_10
+  hop_01="$(PATH="/usr/bin:/bin" "${fx}" hop-0-to-1 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${hop_01}" "OUTER_0|FLAG=0"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${hop_01}" "FLAG=1"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${hop_01}" "/third_party/clang/"
+
+  hop_10="$(PATH="/usr/bin:/bin" "${fx}" hop-1-to-0 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${hop_10}" "OUTER_1|FLAG=1"
+  local inner_10_line
+  inner_10_line="$(printf '%s\n' "${hop_10}" | tail -n 1)"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${inner_10_line}" "FLAG=0"
+  if [[ "${inner_10_line}" == *"/third_party/clang/"* ]]; then
+    BT_FAIL "Expected hop 1->0 child clean-reg-tool to omit /third_party/clang/, got: ${inner_10_line}"
+  fi
+
+  local legacy_cmd="${BT_TEMP_DIR}/tools/devshell/legacy-path-cmd"
+  cat > "${legacy_cmd}" <<'EOF'
+#!/bin/bash
+echo "PATH=${PATH}"
+EOF
+  chmod +x "${legacy_cmd}"
+  local out_legacy
+  out_legacy="$(PATH="/usr/bin:/bin" "${fx}" legacy-path-cmd 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out_legacy}" "/third_party/clang/"
+}
+
+TEST_locates_and_prints_help_from_registry_without_fx_files() {
+  cat > "${BT_TEMP_DIR}/tools/devshell/fx_host_tools.json" <<'EOF'
+{
+  "reg-build-tool": {
+    "category": "Build",
+    "summary": "build widget from registry",
+    "target": "//scripts/developer:reg-build-tool"
+  },
+  "reg-contrib-tool": {
+    "category": "Testing",
+    "contrib": true,
+    "summary": "contrib widget from registry",
+    "target": "//scripts/developer:reg-contrib-tool"
+  }
+}
+EOF
+
+  local cmd_help
+  cmd_help="$("${fx}" help reg-build-tool 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${cmd_help}" "build widget from registry"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${cmd_help}" "Run fx reg-build-tool --help to build and view full flag documentation."
+
+  local full_help
+  full_help="$("${fx}" help --full 2>/dev/null)"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${full_help}" "reg-build-tool"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${full_help}" "build widget from registry"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${full_help}" "(contrib) contrib widget from registry"
+  if [[ "${full_help}" == *"Host binaries produced by the build with no metadata"* ]]; then
+    BT_FAIL "Registered tools should not be listed as lacking metadata: ${full_help}"
+  fi
+
+  local no_contrib_help
+  no_contrib_help="$("${fx}" help --full --no-contrib 2>/dev/null)"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${no_contrib_help}" "reg-build-tool"
+  if [[ "${no_contrib_help}" == *"reg-contrib-tool"* ]]; then
+    BT_FAIL "--no-contrib should hide contrib registered tools: ${no_contrib_help}"
+  fi
+}
+
+TEST_default_registry_contains_registry() {
+  cp -f "${BT_TEMP_DIR}/tools/devshell/fx_host_tools.json.orig" "${BT_TEMP_DIR}/tools/devshell/fx_host_tools.json"
+  source "${BT_TEMP_DIR}/tools/devshell/lib/vars.sh"
+  source "${BT_TEMP_DIR}/tools/devshell/lib/fx-cmd-locator.sh"
+
+  local reg_script
+  reg_script="$(get_registered_host_tool_script "registry")"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_EQ "${reg_script}" "//tools/devshell/fx_cli/registry.py"
+
+  BT_ASSERT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/tools/devshell/registry.fx"
+
+  local reg_list
+  reg_list="$("${fx}" registry list)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${reg_list}" "registry"
+}
+
+TEST_script_mode_executes_without_build_dir_for_sh_and_py() {
+  rm -rf "${BT_TEMP_DIR}/.fx-build-dir" "${BT_TEMP_DIR}/out"
+
+  mkdir -p "${BT_TEMP_DIR}/tools/devshell/host_tools/mock_sh"
+  cat > "${BT_TEMP_DIR}/tools/devshell/host_tools/mock_sh/mock_sh.sh" <<'EOF'
+#!/bin/bash
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  echo "usage: fx mock-sh [--arg]"
+  exit 0
+fi
+echo "SH_OK|FLAG=${FX_INJECT_PREBUILT_PATHS:-unset}|ARGS=$*"
+EOF
+  chmod +x "${BT_TEMP_DIR}/tools/devshell/host_tools/mock_sh/mock_sh.sh"
+
+  mkdir -p "${BT_TEMP_DIR}/tools/devshell/host_tools/mock_py"
+  cat > "${BT_TEMP_DIR}/tools/devshell/host_tools/mock_py/helper_mod.py" <<'EOF'
+TAG = "PY_SIBLING_OK"
+EOF
+  cat > "${BT_TEMP_DIR}/tools/devshell/host_tools/mock_py/mock_py.py" <<'EOF'
+import os
+import sys
+import helper_mod
+
+if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
+    print("usage: fx mock-py [--arg]")
+    sys.exit(0)
+print(f"{helper_mod.TAG}|FLAG={os.environ.get('FX_INJECT_PREBUILT_PATHS', 'unset')}|ARGS={' '.join(sys.argv[1:])}")
+EOF
+
+  cat > "${BT_TEMP_DIR}/tools/devshell/fx_host_tools.json" <<'EOF'
+{
+  "mock-sh": {
+    "category": "Build",
+    "script": "//tools/devshell/host_tools/mock_sh/mock_sh.sh",
+    "summary": "mock shell bootstrap command"
+  },
+  "mock-py": {
+    "category": "Source tree",
+    "script": "//tools/devshell/host_tools/mock_py/mock_py.py",
+    "summary": "mock python bootstrap command"
+  }
+}
+EOF
+
+  source "${BT_TEMP_DIR}/tools/devshell/lib/vars.sh"
+  source "${BT_TEMP_DIR}/tools/devshell/lib/fx-cmd-locator.sh"
+
+  BT_EXPECT_EQ "$(get_registered_host_tool_script "mock-sh")" "//tools/devshell/host_tools/mock_sh/mock_sh.sh"
+  BT_EXPECT_FAIL get_registered_host_tool_target "mock-sh"
+  BT_EXPECT_EQ "$(get_registered_host_tool_install_path "mock-sh")" "${BT_TEMP_DIR}/tools/devshell/host_tools/mock_sh/mock_sh.sh"
+
+  local out_sh out_py help_sh help_py full_help caller_out
+  out_sh="$(PATH="/usr/bin:/bin" "${fx}" mock-sh --alpha 1 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_EQ "${out_sh}" "SH_OK|FLAG=0|ARGS=--alpha 1"
+
+  out_py="$(PATH="/usr/bin:/bin" "${fx}" mock-py --beta 2 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_EQ "${out_py}" "PY_SIBLING_OK|FLAG=0|ARGS=--beta 2"
+
+  help_sh="$("${fx}" help mock-sh 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${help_sh}" "usage: fx mock-sh [--arg]"
+
+  help_py="$("${fx}" help mock-py 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${help_py}" "usage: fx mock-py [--arg]"
+
+  full_help="$("${fx}" help --full 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${full_help}" "mock-sh"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${full_help}" "mock shell bootstrap command"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${full_help}" "mock-py"
+
+  local caller_script="${BT_TEMP_DIR}/tools/devshell/caller-script-cmd"
+  cat > "${caller_script}" <<EOF
+#!/bin/bash
+source "${BT_TEMP_DIR}/tools/devshell/lib/vars.sh" || exit \$?
+fx-command-run mock-sh from-run
+fx-command-run mock-py from-py-run
+EOF
+  chmod +x "${caller_script}"
+  caller_out="$("${fx}" caller-script-cmd 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${caller_out}" "SH_OK|"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${caller_out}" "ARGS=from-run"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${caller_out}" "PY_SIBLING_OK|"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${caller_out}" "ARGS=from-py-run"
+
+  BT_ASSERT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/.fx-build-dir"
+}
+
+TEST_large_registry_no_build_dispatch_stays_subsecond() {
+  mkdir -p "${BT_TEMP_DIR}/tools/devshell/host_tools/fast_sh"
+  cat > "${BT_TEMP_DIR}/tools/devshell/host_tools/fast_sh/fast.sh" <<'EOF'
+#!/bin/bash
+echo "fast-v1|args=$*"
+EOF
+  chmod +x "${BT_TEMP_DIR}/tools/devshell/host_tools/fast_sh/fast.sh"
+
+  "${_TEST_PY3}" - "${BT_TEMP_DIR}/tools/devshell/fx_host_tools.json.orig" "${BT_TEMP_DIR}/tools/devshell/fx_host_tools.json" <<'PY'
+import json
+import sys
+
+data = json.loads(open(sys.argv[1], encoding="utf-8").read())
+data["my-fast-tool"] = {
+    "category": "Build",
+    "summary": "Target under \"latency\" test",
+    "script": "//tools/devshell/host_tools/fast_sh/fast.sh",
+}
+with open(sys.argv[2], "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PY
+
+  "${fx}" my-fast-tool warmup >/dev/null 2>&1
+  BT_EXPECT_EQ $? 0
+
+  local start_us="${EPOCHREALTIME/./}"
+  local out
+  out="$(LC_ALL=C.UTF-8 "${fx}" my-fast-tool --ping 2>/dev/null)"
+  local rc=$?
+  local end_us="${EPOCHREALTIME/./}"
+  local elapsed_ms=$(( (10#${end_us} - 10#${start_us}) / 1000 ))
+
+  BT_EXPECT_EQ "${rc}" 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out}" "fast-v1|"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out}" "args=--ping"
+  if (( elapsed_ms >= 1000 )); then
+    BT_FAIL "Expected 'fx' dispatch with full registry to finish in <1000ms, took ${elapsed_ms}ms"
+  fi
+}
+
+TEST_vendor_first_precedence_collision_and_oss_no_vendor() {
+  rm -rf "${BT_TEMP_DIR}/vendor"
+  local oss_vendor_err
+  oss_vendor_err="$("${fx}" vendor 2>&1)"
+  [[ $? -ne 0 ]]
+  BT_EXPECT_GOOD_STATUS $?
+  if [[ "${oss_vendor_err}" == *"vendor/*"* || "${oss_vendor_err}" == *"*"* ]]; then
+    BT_FAIL "Expected clean OSS 'fx vendor' output without unexpanded glob, got: ${oss_vendor_err}"
+  fi
+
+  mkdir -p "${BT_TEMP_DIR}/tools/devshell/host_tools/flash_kola"
+  cat > "${BT_TEMP_DIR}/tools/devshell/host_tools/flash_kola/core_flash.sh" <<'EOF'
+#!/bin/bash
+echo "CORE_FLASH_KOLA|FLAG=${FX_INJECT_PREBUILT_PATHS:-unset}"
+EOF
+  chmod +x "${BT_TEMP_DIR}/tools/devshell/host_tools/flash_kola/core_flash.sh"
+
+  cat > "${BT_TEMP_DIR}/tools/devshell/fx_host_tools.json" <<'EOF'
+{
+  "flash-kola": {
+    "category": "Device management",
+    "script": "//tools/devshell/host_tools/flash_kola/core_flash.sh",
+    "summary": "core oss stub flash-kola"
+  },
+  "vendor": {
+    "category": "Other",
+    "script": "//tools/devshell/vendor",
+    "summary": "forward commands to vendor/*/scripts/devshell"
+  }
+}
+EOF
+
+  local out
+  out="$(PATH="/usr/bin:/bin" "${fx}" flash-kola 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_EQ "${out}" "CORE_FLASH_KOLA|FLAG=0"
+
+  mkdir -p "${BT_TEMP_DIR}/vendor/google/scripts/devshell"
+  cat > "${BT_TEMP_DIR}/vendor/google/scripts/devshell/flash-kola" <<'EOF'
+#!/bin/bash
+echo "LEGACY_VENDOR_FLASH_KOLA|FLAG=${FX_INJECT_PREBUILT_PATHS:-unset}|PATH=${PATH}"
+EOF
+  chmod +x "${BT_TEMP_DIR}/vendor/google/scripts/devshell/flash-kola"
+
+  out="$(PATH="/usr/bin:/bin" "${fx}" flash-kola 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out}" "LEGACY_VENDOR_FLASH_KOLA|"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out}" "/third_party/clang/"
+
+  out="$(PATH="/usr/bin:/bin" "${fx}" vendor google flash-kola 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out}" "LEGACY_VENDOR_FLASH_KOLA|"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out}" "/third_party/clang/"
+
+  cat > "${BT_TEMP_DIR}/vendor/google/scripts/devshell/reg_flash.sh" <<'EOF'
+#!/bin/bash
+echo "REG_GOOGLE_FLASH_KOLA|FLAG=${FX_INJECT_PREBUILT_PATHS:-unset}|PATH=${PATH}"
+EOF
+  chmod +x "${BT_TEMP_DIR}/vendor/google/scripts/devshell/reg_flash.sh"
+  cat > "${BT_TEMP_DIR}/vendor/google/scripts/devshell/fx_host_tools.json" <<'EOF'
+{
+  "flash-kola": {
+    "script": "//vendor/google/scripts/devshell/reg_flash.sh",
+    "summary": "google registered flash-kola"
+  },
+  "google-only-cmd": {
+    "script": "//vendor/google/scripts/devshell/reg_flash.sh",
+    "summary": "google top-level registered tool"
+  }
+}
+EOF
+
+  out="$(PATH="/usr/bin:/bin" "${fx}" flash-kola 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out}" "REG_GOOGLE_FLASH_KOLA|FLAG=0|"
+  if [[ "${out}" == *"/third_party/clang/"* ]]; then
+    BT_FAIL "Expected registered vendor tool to have FX_INJECT_PREBUILT_PATHS=0, got: ${out}"
+  fi
+
+  local vendor_help
+  vendor_help="$("${fx}" vendor 2>&1)"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${vendor_help}" "vendor google flash-kola"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${vendor_help}" "google registered flash-kola"
+  local occ_flash
+  occ_flash="$(printf '%s\n' "${vendor_help}" | grep -c "vendor google flash-kola" || true)"
+  BT_EXPECT_EQ "${occ_flash}" 1
+
+  out="$(PATH="/usr/bin:/bin" "${fx}" google-only-cmd 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out}" "REG_GOOGLE_FLASH_KOLA|FLAG=0|"
+
+  source "${BT_TEMP_DIR}/tools/devshell/lib/vars.sh"
+  source "${BT_TEMP_DIR}/tools/devshell/lib/fx-cmd-locator.sh"
+  local all_reg
+  all_reg="$(list_registered_host_tools)"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${all_reg}" "google-only-cmd"
+
+  mkdir -p "${BT_TEMP_DIR}/vendor/acme/scripts/devshell"
+  cat > "${BT_TEMP_DIR}/vendor/acme/scripts/devshell/acme_flash.sh" <<'EOF'
+#!/bin/bash
+echo "REG_ACME_FLASH_KOLA|FLAG=${FX_INJECT_PREBUILT_PATHS:-unset}"
+EOF
+  chmod +x "${BT_TEMP_DIR}/vendor/acme/scripts/devshell/acme_flash.sh"
+  cat > "${BT_TEMP_DIR}/vendor/acme/scripts/devshell/fx_host_tools.json" <<'EOF'
+{
+  "flash-kola": {
+    "script": "//vendor/acme/scripts/devshell/acme_flash.sh",
+    "summary": "acme registered flash-kola"
+  }
+}
+EOF
+
+  local coll_err
+  coll_err="$("${fx}" flash-kola 2>&1)"
+  local coll_rc=$?
+  BT_EXPECT_EQ "${coll_rc}" 2
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${coll_err}" "acme"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${coll_err}" "google"
+
+  local help_coll_err
+  help_coll_err="$("${fx}" help flash-kola 2>&1)"
+  local help_coll_rc=$?
+  BT_EXPECT_EQ "${help_coll_rc}" 2
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${help_coll_err}" "acme"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${help_coll_err}" "google"
+
+  out="$(PATH="/usr/bin:/bin" "${fx}" vendor acme flash-kola 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_EQ "${out}" "REG_ACME_FLASH_KOLA|FLAG=0"
+}
+
+TEST_strict_schema_fail_closed() {
+  source "${BT_TEMP_DIR}/tools/devshell/lib/vars.sh"
+  source "${BT_TEMP_DIR}/tools/devshell/lib/fx-cmd-locator.sh"
+
+  cat > "${BT_TEMP_DIR}/_bad1.json" <<'EOF'
+{"unclosed": "//scripts/developer:tool"
+EOF
+  BT_EXPECT_FAIL "${_TEST_PY3}" "${BT_TEMP_DIR}/tools/devshell/fx_cli/registry.py" --registry-file "${BT_TEMP_DIR}/_bad1.json" check
+
+  cat > "${BT_TEMP_DIR}/_bad2.json" <<'EOF'
+{"BadUpper": "//scripts/developer:tool"}
+EOF
+  BT_EXPECT_FAIL "${_TEST_PY3}" "${BT_TEMP_DIR}/tools/devshell/fx_cli/registry.py" --registry-file "${BT_TEMP_DIR}/_bad2.json" check
+
+  cat > "${BT_TEMP_DIR}/_bad3.json" <<'EOF'
+{"bad-target": "//scripts/developer_missing_colon"}
+EOF
+  BT_EXPECT_FAIL "${_TEST_PY3}" "${BT_TEMP_DIR}/tools/devshell/fx_cli/registry.py" --registry-file "${BT_TEMP_DIR}/_bad3.json" check
+
+  cat > "${BT_TEMP_DIR}/_bad4.json" <<'EOF'
+{"bad-script": {"script": "//tools/../escape.sh"}}
+EOF
+  BT_EXPECT_FAIL "${_TEST_PY3}" "${BT_TEMP_DIR}/tools/devshell/fx_cli/registry.py" --registry-file "${BT_TEMP_DIR}/_bad4.json" check
+}
+
+TEST_hermetic_env_preserves_fx_host_tool_vars() {
+  local herm_out
+  herm_out="$(
+    cd "${BT_TEMP_DIR}" && \
+    PATH="/usr/bin:/bin" \
+    FX_INJECT_PREBUILT_PATHS=0 \
+    FX_NO_BUILD_HOST_TOOL=1 \
+    FX_FORCE_BUILD_HOST_TOOL=1 \
+    FX_RUNTIME_TOOLS_DIR="/tmp/rt_tools" \
+    RUNFILES_DIR="/tmp/rf_dir" \
+    RUNFILES_MANIFEST_FILE="/tmp/rf_manifest" \
+    XDG_CACHE_HOME="/tmp/xdg_cache" \
+    JIRI_PROXY_SOCKET="/tmp/jiri.sock" \
+    "${BT_TEMP_DIR}/scripts/hermetic-env" /usr/bin/env
+  )"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${herm_out}" "FX_INJECT_PREBUILT_PATHS=0"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${herm_out}" "FX_NO_BUILD_HOST_TOOL=1"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${herm_out}" "FX_FORCE_BUILD_HOST_TOOL=1"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${herm_out}" "FX_RUNTIME_TOOLS_DIR=/tmp/rt_tools"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${herm_out}" "RUNFILES_DIR=/tmp/rf_dir"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${herm_out}" "RUNFILES_MANIFEST_FILE=/tmp/rf_manifest"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${herm_out}" "XDG_CACHE_HOME=/tmp/xdg_cache"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${herm_out}" "JIRI_PROXY_SOCKET=/tmp/jiri.sock"
+  if [[ "${herm_out}" == *"/third_party/clang/"* ]]; then
+    BT_FAIL "Expected hermetic-env to omit PREBUILT_ALL_PATHS when FX_INJECT_PREBUILT_PATHS=0, got: ${herm_out}"
+  fi
+}
+
+TEST_single_python_invocation_per_command_dispatch() {
+  local real_py3
+  real_py3="$(command -v python3)"
+  local py_wrapper="${BT_TEMP_DIR}/_mock_bin/py3_spy"
+  mkdir -p "$(dirname "${py_wrapper}")"
+  cat > "${py_wrapper}" <<EOF
+#!/bin/bash
+for arg in "\$@"; do
+  if [[ "\${arg}" == *"locator.py"* || "\${arg}" == *"registry.py"* ]]; then
+    printf '%s\n' "\$*" >> "${BT_TEMP_DIR}/_py_calls.log"
+    break
+  fi
+done
+exec "${real_py3}" "\$@"
+EOF
+  chmod +x "${py_wrapper}"
+  ln -sf "${py_wrapper}" "${_TEST_PY3}"
+
+  _count_py_calls() {
+    if [[ -f "${BT_TEMP_DIR}/_py_calls.log" ]]; then
+      wc -l < "${BT_TEMP_DIR}/_py_calls.log" | tr -d ' '
+    else
+      echo 0
+    fi
+  }
+
+  mkdir -p "${BT_TEMP_DIR}/tools/devshell/host_tools/single_sh"
+  cat > "${BT_TEMP_DIR}/tools/devshell/host_tools/single_sh/single_sh.sh" <<'EOF'
+#!/bin/bash
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  echo "usage: fx single-sh [--flag]"
+  exit 0
+fi
+echo "SINGLE_SH_OK|$*"
+EOF
+  chmod +x "${BT_TEMP_DIR}/tools/devshell/host_tools/single_sh/single_sh.sh"
+
+  cat > "${BT_TEMP_DIR}/tools/devshell/fx_host_tools.json" <<'EOF'
+{
+  "single-sh": {
+    "category": "Build",
+    "script": "//tools/devshell/host_tools/single_sh/single_sh.sh",
+    "summary": "single-sh tool summary"
+  },
+  "single-target-unbuilt": {
+    "category": "Build",
+    "summary": "unbuilt target summary",
+    "target": "//scripts/developer:single-target-unbuilt"
+  },
+  "single-target-built": {
+    "category": "Build",
+    "summary": "built target summary",
+    "target": "//scripts/developer:single-target-built"
+  }
+}
+EOF
+
+  # Set up built mock binary in both host-tools (Commit 1) and _fx_host_tools (Commit 3+)
+  mkdir -p "${BT_TEMP_DIR}/out/default/host-tools" "${BT_TEMP_DIR}/out/_fx_host_tools"
+  cat > "${BT_TEMP_DIR}/out/default/host-tools/single-target-built" <<'EOF'
+#!/bin/bash
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  echo "BUILT_TARGET_HELP"
+  exit 0
+fi
+echo "BUILT_TARGET_OK"
+EOF
+  chmod +x "${BT_TEMP_DIR}/out/default/host-tools/single-target-built"
+  cp -f "${BT_TEMP_DIR}/out/default/host-tools/single-target-built" "${BT_TEMP_DIR}/out/_fx_host_tools/single-target-built"
+
+  # Vendor setup
+  mkdir -p "${BT_TEMP_DIR}/vendor/acme/scripts/devshell"
+  cat > "${BT_TEMP_DIR}/vendor/acme/scripts/devshell/v_single.sh" <<'EOF'
+#!/bin/bash
+echo "V_SINGLE_OK|$*"
+EOF
+  chmod +x "${BT_TEMP_DIR}/vendor/acme/scripts/devshell/v_single.sh"
+  cat > "${BT_TEMP_DIR}/vendor/acme/scripts/devshell/fx_host_tools.json" <<'EOF'
+{
+  "v-single-sh": {
+    "category": "Build",
+    "script": "//vendor/acme/scripts/devshell/v_single.sh",
+    "summary": "vendor single-sh summary"
+  }
+}
+EOF
+
+  # 1. fx <registered-script-cmd>
+  : > "${BT_TEMP_DIR}/_py_calls.log"
+  local out_cmd
+  out_cmd="$("${fx}" single-sh arg1 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_EQ "${out_cmd}" "SINGLE_SH_OK|arg1"
+  BT_EXPECT_EQ "$(_count_py_calls)" 1
+
+  # 2. fx help <registered-script-cmd>
+  : > "${BT_TEMP_DIR}/_py_calls.log"
+  local help_sh
+  help_sh="$("${fx}" help single-sh 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${help_sh}" "usage: fx single-sh [--flag]"
+  BT_EXPECT_EQ "$(_count_py_calls)" 1
+
+  # 3. fx help <registered-target-cmd> (unbuilt)
+  : > "${BT_TEMP_DIR}/_py_calls.log"
+  local help_unbuilt
+  help_unbuilt="$("${fx}" help single-target-unbuilt 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${help_unbuilt}" "unbuilt target summary"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${help_unbuilt}" "Run fx single-target-unbuilt --help"
+  BT_EXPECT_EQ "$(_count_py_calls)" 1
+
+  # 4. fx help <registered-target-cmd> (built)
+  : > "${BT_TEMP_DIR}/_py_calls.log"
+  local help_built
+  help_built="$("${fx}" help single-target-built 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${help_built}" "BUILT_TARGET_HELP"
+  BT_EXPECT_EQ "$(_count_py_calls)" 1
+
+  # 5. fx help --full
+  : > "${BT_TEMP_DIR}/_py_calls.log"
+  local help_full
+  help_full="$("${fx}" help --full 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${help_full}" "single-sh"
+  BT_EXPECT_EQ "$(_count_py_calls)" 1
+
+  # 6. fx-command-run <registered-script-cmd>
+  : > "${BT_TEMP_DIR}/_py_calls.log"
+  local out_run
+  out_run="$(
+    source "${BT_TEMP_DIR}/tools/devshell/lib/vars.sh" || exit $?
+    fx-command-run single-sh from-run 2>/dev/null
+  )"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_EQ "${out_run}" "SINGLE_SH_OK|from-run"
+  BT_EXPECT_EQ "$(_count_py_calls)" 1
+
+  # 7. tools/devshell/vendor direct invocation
+  : > "${BT_TEMP_DIR}/_py_calls.log"
+  local out_vendor
+  out_vendor="$("${BT_TEMP_DIR}/tools/devshell/vendor" acme v-single-sh 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_EQ "${out_vendor}" "V_SINGLE_OK|"
+  BT_EXPECT_EQ "$(_count_py_calls)" 1
+}
+
+TEST_supports_spaces_in_fuchsia_dir() {
+  local spaced_dir="${BT_TEMP_DIR}/dir with spaces"
+  mkdir -p "${spaced_dir}"
+  cp -a "${BT_TEMP_DIR}/scripts" "${BT_TEMP_DIR}/tools" "${BT_TEMP_DIR}/.fx-root" "${spaced_dir}/"
+  mkdir -p "$(dirname "${spaced_dir}/${_TEST_PY3#"${BT_TEMP_DIR}/"}")"
+  ln -sf "$(command -v python3)" "${spaced_dir}/${_TEST_PY3#"${BT_TEMP_DIR}/"}"
+
+  mkdir -p "${spaced_dir}/tools/devshell/host_tools/space_test"
+  cat > "${spaced_dir}/tools/devshell/host_tools/space_test/space_py.py" <<'EOF'
+import sys
+print("SPACE_PY_OK|" + " ".join(sys.argv[1:]))
+EOF
+  cat > "${spaced_dir}/tools/devshell/host_tools/space_test/space_sh.sh" <<'EOF'
+#!/bin/bash
+echo "SPACE_SH_OK|$*"
+EOF
+  chmod +x "${spaced_dir}/tools/devshell/host_tools/space_test/space_sh.sh"
+
+  cat > "${spaced_dir}/tools/devshell/fx_host_tools.json" <<'EOF'
+{
+  "space-py": {
+    "category": "Build",
+    "script": "//tools/devshell/host_tools/space_test/space_py.py",
+    "summary": "python script in checkout with spaces"
+  },
+  "space-sh": {
+    "category": "Build",
+    "script": "//tools/devshell/host_tools/space_test/space_sh.sh",
+    "summary": "shell script in checkout with spaces"
+  }
+}
+EOF
+
+  local out_py out_sh
+  out_py="$(cd "${spaced_dir}" && "${spaced_dir}/scripts/fx" space-py --arg "val with space" 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_EQ "${out_py}" "SPACE_PY_OK|--arg val with space"
+
+  out_sh="$(cd "${spaced_dir}" && "${spaced_dir}/scripts/fx" space-sh --arg "val with space" 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_EQ "${out_sh}" "SPACE_SH_OK|--arg val with space"
+}
+
+TEST_builds_and_installs_into_host_tools_on_demand() {
+  rm -rf "${BT_TEMP_DIR}/out/_fx_host_tools" "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  cat > "${BT_TEMP_DIR}/out/default/bazel.mock_side_effects" <<'EOF'
+echo "Simulated noisy build stdout that must stay off command stdout"
+EOF
+  _stage_fake_bazel_output "scripts/developer" "my-reg-tool" "v1"
+
+  cat > "${BT_TEMP_DIR}/tools/devshell/fx_host_tools.json" <<'EOF'
+{
+  "my-reg-tool": "//scripts/developer:my-reg-tool"
+}
+EOF
+
+  local stdout_file="${BT_TEMP_DIR}/_test_stdout"
+  local stderr_file="${BT_TEMP_DIR}/_test_stderr"
+  local sub_cwd="${BT_TEMP_DIR}/deep/subdir"
+  mkdir -p "${sub_cwd}"
+
+  # Execute tool via `fx my-reg-tool`
+  (cd "${sub_cwd}" && "${fx}" my-reg-tool --foo bar >"${stdout_file}" 2>"${stderr_file}")
+  BT_EXPECT_EQ $? 0
+
+  # Verify Bazel build was invoked for target
+  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/out/default/bazel.mock_state" "@//scripts/developer:my-reg-tool"
+
+  # Verify binary and runtime_dir were copied into out/_fx_host_tools/
+  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/_fx_host_tools/my-reg-tool"
+  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/_fx_host_tools/my-reg-tool.runtime_dir/payload.txt"
+
+  # Verify stdout was NOT polluted by build chatter and caller PWD was preserved
+  BT_EXPECT_EQ "$(<"${stdout_file}")" "v1|cwd=$(cd "${sub_cwd}" && pwd)|args=--foo bar"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${stderr_file}" "Building required tool 'my-reg-tool' with Bazel (log: //out/_fx_host_tools/.bazel_logs/my-reg-tool."
+  local log_matches=("${BT_TEMP_DIR}/out/_fx_host_tools/.bazel_logs"/my-reg-tool.*.log)
+  BT_ASSERT_FILE_EXISTS "${log_matches[0]}"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${log_matches[0]}" "Simulated noisy build stdout"
+}
+
+TEST_skips_rebuild_when_stamp_is_fresh_and_rebuilds_on_revision_change() {
+  rm -rf "${BT_TEMP_DIR}/out/_fx_host_tools" "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  _stage_fake_bazel_output "scripts/developer" "my-reg-tool" "v1"
+
+  # Also verify git worktree gitfile layout (.git is a file, not a directory).
+  rm -rf "${BT_TEMP_DIR}/.git"
+  echo "gitdir: ${BT_TEMP_DIR}/.fake_worktree_gitdir" > "${BT_TEMP_DIR}/.git"
+
+  local out
+  out="$("${fx}" my-reg-tool first 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out}" "v1|"
+  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+
+  # Remove mock_state; warm invocation at same lockfile/BUILD state should NOT rebuild.
+  rm -f "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  out="$("${fx}" my-reg-tool second 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out}" "v1|"
+  BT_ASSERT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+
+  # Updating manifests/jiri.lock invalidates the stamp and triggers a rebuild + reinstall.
+  echo '[{"package":"updated-lock-v2"}]' > "${BT_TEMP_DIR}/manifests/jiri.lock"
+  _stage_fake_bazel_output "scripts/developer" "my-reg-tool" "v2"
+  out="$("${fx}" my-reg-tool third 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out}" "v2|"
+  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+
+  # Updating <target_pkg>/BUILD.bazel also invalidates the stamp.
+  rm -f "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  echo "# developer build v3" > "${BT_TEMP_DIR}/scripts/developer/BUILD.bazel"
+  _stage_fake_bazel_output "scripts/developer" "my-reg-tool" "v3"
+  out="$("${fx}" my-reg-tool fourth 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out}" "v3|"
+  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+
+  # Removing .runtime_dir on a warm stamp hit triggers recovery rebuild instead of failing.
+  rm -rf "${BT_TEMP_DIR}/out/default/bazel.mock_state" \
+    "${BT_TEMP_DIR}/out/_fx_host_tools/my-reg-tool.runtime_dir"
+  out="$("${fx}" my-reg-tool fifth 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out}" "v3|"
+}
+
+TEST_global_no_build_flag() {
+  cat > "${BT_TEMP_DIR}/tools/devshell/fx_host_tools.json" <<'EOF'
+{
+  "my-reg-tool": "//scripts/developer:my-reg-tool"
+}
+EOF
+
+  # 1. Missing host-tools/my-reg-tool with --no-build fails fast with zero build invocation
+  rm -rf "${BT_TEMP_DIR}/out/_fx_host_tools" "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  local err_file="${BT_TEMP_DIR}/_no_build_err"
+  BT_EXPECT_FAIL "${fx}" --no-build my-reg-tool 2>"${err_file}"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${err_file}" "no-build was specified"
+  BT_ASSERT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+
+  # 2. --no-build followed by --build honors last-flag-wins (--build) and builds the tool
+  _stage_fake_bazel_output "scripts/developer" "my-reg-tool" "ran-v1"
+  local out
+  out="$("${fx}" --no-build --build my-reg-tool 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out}" "ran-v1|"
+  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/_fx_host_tools/my-reg-tool"
+
+  # 3. Once built, --build followed by --no-build honors last-flag-wins (--no-build) and skips rebuild
+  echo "rev-new-9999" > "${BT_TEMP_DIR}/.git/JIRI_HEAD"
+  rm -f "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  out="$("${fx}" --build --no-build my-reg-tool 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out}" "ran-v1|"
+  BT_ASSERT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+}
+
+TEST_always_build_compiled_marker_rebuilds_each_run_and_honors_no_build() {
+  cat > "${BT_TEMP_DIR}/tools/devshell/fx_host_tools.json" <<'EOF'
+{
+  "compiled-tool": "//scripts/developer:compiled-tool"
+}
+EOF
+
+  rm -rf "${BT_TEMP_DIR}/out/_fx_host_tools" "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  _stage_fake_bazel_output "scripts/developer" "compiled-tool" "compiled-v1" 1
+
+  # Run 1 builds and runs
+  local out1
+  out1="$("${fx}" compiled-tool 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out1}" "compiled-v1|"
+  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+
+  # Run 2 on same tree revision rebuilds because .always_build is present
+  rm -f "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  _stage_fake_bazel_output "scripts/developer" "compiled-tool" "compiled-v2" 1
+  local out2
+  out2="$("${fx}" compiled-tool 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out2}" "compiled-v2|"
+  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+
+  # --no-build skips rebuild and runs existing staged binary
+  rm -f "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  _stage_fake_bazel_output "scripts/developer" "compiled-tool" "compiled-v3" 1
+  local out3
+  out3="$("${fx}" --no-build compiled-tool 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out3}" "compiled-v2|"
+  BT_ASSERT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+}
+
+TEST_materialize_preserves_internal_symlinks_and_aborts_on_staging_failure() {
+  rm -rf "${BT_TEMP_DIR}/out/_fx_host_tools" "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+
+  # 1. Stage a tool with:
+  #    (a) an internal relative symlink (.bin/helper.runfiles -> ../my-reg-tool.runfiles)
+  #    (b) an ephemeral bazel-out directory symlink containing multicall relative symlinks
+  #        (bin/clang++ -> clang -> llvm) plus an external ephemeral file symlink.
+  local bazel_pkg_bin="${BT_TEMP_DIR}/out/default/gen/build/bazel/output_base/execroot/_main/bazel-out/x86_64-opt/bin/scripts/developer"
+  local eph_tc="${bazel_pkg_bin}/_ephemeral_tc"
+  local eph_ext_file="${bazel_pkg_bin}/_ephemeral_ext.txt"
+  mkdir -p "${bazel_pkg_bin}/my-reg-tool.runtime_dir/.bin" \
+    "${bazel_pkg_bin}/my-reg-tool.runtime_dir/my-reg-tool.runfiles/_main" \
+    "${eph_tc}/bin"
+  echo "RUNFILE_OK" > "${bazel_pkg_bin}/my-reg-tool.runtime_dir/my-reg-tool.runfiles/_main/data.txt"
+  ln -snf "../my-reg-tool.runfiles" "${bazel_pkg_bin}/my-reg-tool.runtime_dir/.bin/helper.runfiles"
+
+  echo "EXT_FILE_OK" > "${eph_ext_file}"
+  cat > "${eph_tc}/bin/llvm" <<'EOF'
+#!/bin/bash
+echo "mc:$(basename "$0")"
+EOF
+  chmod +x "${eph_tc}/bin/llvm"
+  ln -snf "llvm" "${eph_tc}/bin/clang"
+  ln -snf "clang" "${eph_tc}/bin/clang++"
+  ln -snf "${eph_ext_file}" "${eph_tc}/ext_cfg.txt"
+  ln -snf "${eph_tc}" "${bazel_pkg_bin}/my-reg-tool.runtime_dir/ephemeral_tc"
+
+  cat > "${bazel_pkg_bin}/my-reg-tool" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RT_DIR="${SCRIPT_DIR}/my-reg-tool.runtime_dir"
+echo "$(cat "${RT_DIR}/.bin/helper.runfiles/_main/data.txt")|$("${RT_DIR}/ephemeral_tc/bin/clang++")|$(cat "${RT_DIR}/ephemeral_tc/ext_cfg.txt")"
+EOF
+  chmod +x "${bazel_pkg_bin}/my-reg-tool"
+
+  local out
+  out="$("${fx}" my-reg-tool 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_EQ "${out}" "RUNFILE_OK|mc:clang++|EXT_FILE_OK"
+
+  local staged_rt="${BT_TEMP_DIR}/out/_fx_host_tools/my-reg-tool.runtime_dir"
+  # Internal relative symlink MUST stay a symlink (never duplicated via cp -RL).
+  if [[ ! -L "${staged_rt}/.bin/helper.runfiles" ]]; then
+    BT_FAIL "Expected .bin/helper.runfiles to remain a relative symlink"
+  fi
+  BT_EXPECT_EQ "$(readlink "${staged_rt}/.bin/helper.runfiles")" "../my-reg-tool.runfiles"
+
+  # Ephemeral directory MUST be materialized as a directory, while preserving its internal
+  # multicall relative symlinks (clang++ -> clang -> llvm) and materializing external ephemeral links.
+  if [[ -L "${staged_rt}/ephemeral_tc" || ! -d "${staged_rt}/ephemeral_tc" ]]; then
+    BT_FAIL "Expected ephemeral_tc directory symlink to be materialized as a real directory"
+  fi
+  if [[ ! -L "${staged_rt}/ephemeral_tc/bin/clang" || ! -L "${staged_rt}/ephemeral_tc/bin/clang++" ]]; then
+    BT_FAIL "Expected multicall symlinks clang and clang++ inside ephemeral_tc to remain relative symlinks"
+  fi
+  BT_EXPECT_EQ "$(readlink "${staged_rt}/ephemeral_tc/bin/clang")" "llvm"
+  BT_EXPECT_EQ "$(readlink "${staged_rt}/ephemeral_tc/bin/clang++")" "clang"
+  if [[ -L "${staged_rt}/ephemeral_tc/ext_cfg.txt" ]]; then
+    BT_FAIL "Expected external ephemeral file symlink inside ephemeral_tc to be materialized"
+  fi
+
+  # Wipe output_base (simulating `fx bazel clean`) and verify staged tool still runs.
+  rm -rf "${BT_TEMP_DIR}/out/default/gen/build/bazel/output_base"
+  out="$("${fx}" my-reg-tool 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_EQ "${out}" "RUNFILE_OK|mc:clang++|EXT_FILE_OK"
+
+  # 2. Simulate a copy failure during staging (e.g. unreadable file / ENOSPC):
+  #    fx MUST fail closed without installing a corrupted binary or writing a .stamp file!
+  cat > "${BT_TEMP_DIR}/tools/devshell/fx_host_tools.json" <<'EOF'
+{
+  "other-tool": "//tools/other:other_bin"
+}
+EOF
+  local bad_pkg_bin="${BT_TEMP_DIR}/out/default/gen/build/bazel/output_base/execroot/_main/bazel-out/x86_64-opt/bin/tools/other"
+  mkdir -p "${bad_pkg_bin}/other_bin.runtime_dir"
+  echo "secret" > "${bad_pkg_bin}/other_bin.runtime_dir/unreadable.bin"
+  chmod 000 "${bad_pkg_bin}/other_bin.runtime_dir/unreadable.bin"
+  cat > "${bad_pkg_bin}/other_bin" <<'EOF'
+#!/bin/bash
+echo "SHOULD_NEVER_RUN"
+EOF
+  chmod +x "${bad_pkg_bin}/other_bin"
+
+  local fail_out
+  fail_out="$("${fx}" other-tool 2>&1)"
+  local fail_rc=$?
+  chmod 644 "${bad_pkg_bin}/other_bin.runtime_dir/unreadable.bin"
+
+  if [[ "${fail_rc}" -eq 0 ]]; then
+    BT_FAIL "Expected staging copy failure to return non-zero, got 0 (output: ${fail_out})"
+  fi
+  BT_ASSERT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/out/_fx_host_tools/.stamps/other-tool.stamp"
+  BT_ASSERT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/out/_fx_host_tools/other-tool"
+}
+
+_git_blob_sha1() {
+  "${_TEST_PY3}" -c 'import hashlib, pathlib, sys; d = pathlib.Path(sys.argv[1]).read_bytes(); print(hashlib.sha1(f"blob {len(d)}\0".encode() + d).hexdigest())' "$1"
+}
+
+TEST_sources_manifest_and_force_build_flag() {
+  # Simulate LUCI Swarming test shard environment where git is not installed.
+  git() { return 127; }
+  rm -rf "${BT_TEMP_DIR}/out/_fx_host_tools" "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+
+  local src_pkg="${BT_TEMP_DIR}/tools/sample_tool"
+  mkdir -p "${src_pkg}"
+  echo 'print("hello-v1")' > "${src_pkg}/sample.py"
+
+  cat > "${BT_TEMP_DIR}/tools/devshell/fx_host_tools.json" <<'EOF'
+{
+  "manifest-tool": "//tools/sample_tool:manifest-tool"
+}
+EOF
+
+  local bazel_pkg_bin="${BT_TEMP_DIR}/out/default/gen/build/bazel/output_base/execroot/_main/bazel-out/x86_64-opt/bin/tools/sample_tool"
+  mkdir -p "${bazel_pkg_bin}/manifest-tool.runtime_dir"
+  : > "${bazel_pkg_bin}/manifest-tool.runtime_dir/.always_build"
+
+  cat > "${bazel_pkg_bin}/manifest-tool" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+echo "RUNNING:$(python3 "${SCRIPT_DIR}/manifest-tool.runtime_dir/tools/sample_tool/sample.py")"
+EOF
+  chmod +x "${bazel_pkg_bin}/manifest-tool"
+
+  mkdir -p "${bazel_pkg_bin}/manifest-tool.runtime_dir/tools/sample_tool"
+  cp -f "${src_pkg}/sample.py" "${bazel_pkg_bin}/manifest-tool.runtime_dir/tools/sample_tool/sample.py"
+
+  # Write sources.manifest matching current source file
+  local sha
+  sha="$(_git_blob_sha1 "${src_pkg}/sample.py")"
+  printf '%s  tools/sample_tool/sample.py
+' "${sha}" > "${bazel_pkg_bin}/manifest-tool.runtime_dir/sources.manifest"
+
+  # First run builds and installs
+  local out1
+  out1="$("${fx}" manifest-tool 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_EQ "${out1}" "RUNNING:hello-v1"
+  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+
+  # Warm run with matching sources.manifest skips Bazel (even with .always_build present!)
+  rm -f "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  local out_warm
+  out_warm="$("${fx}" manifest-tool 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_EQ "${out_warm}" "RUNNING:hello-v1"
+  BT_ASSERT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+
+  # Modifying the source file invalidates sources.manifest and triggers Bazel rebuild
+  echo 'print("hello-v2")' > "${src_pkg}/sample.py"
+  cp -f "${src_pkg}/sample.py" "${bazel_pkg_bin}/manifest-tool.runtime_dir/tools/sample_tool/sample.py"
+  sha="$(_git_blob_sha1 "${src_pkg}/sample.py")"
+  printf '%s  tools/sample_tool/sample.py
+' "${sha}" > "${bazel_pkg_bin}/manifest-tool.runtime_dir/sources.manifest"
+
+  local out_edit
+  out_edit="$("${fx}" manifest-tool 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_EQ "${out_edit}" "RUNNING:hello-v2"
+  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+
+  # fx --build forces Bazel rebuild even when sources.manifest is fresh
+  rm -f "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  local out_force
+  out_force="$("${fx}" --build manifest-tool 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_EQ "${out_force}" "RUNNING:hello-v2"
+  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+
+  # Multi-file sources.manifest validation: when all listed files match their
+  # git blob SHA-1, _sources_manifest_check succeeds without rebuilding.
+  echo 'HELPER = 1' > "${src_pkg}/helper.py"
+  local sha2
+  sha2="$(_git_blob_sha1 "${src_pkg}/helper.py")"
+  printf '%s  tools/sample_tool/sample.py\n%s  tools/sample_tool/helper.py\n' "${sha}" "${sha2}" \
+    > "${BT_TEMP_DIR}/out/_fx_host_tools/manifest-tool.runtime_dir/sources.manifest"
+
+  rm -f "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  local out_mixed
+  out_mixed="$("${fx}" manifest-tool 2>/dev/null)"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_EQ "${out_mixed}" "RUNNING:hello-v2"
+  BT_ASSERT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+}
+
+TEST_concurrent_build_lock_runs_existing_binary_with_warning_and_waits_when_unbuilt() {
+  rm -rf "${BT_TEMP_DIR}/out/_fx_host_tools" "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  _stage_fake_bazel_output "scripts/developer" "my-reg-tool" "locked-v1" "1"
+  "${fx}" my-reg-tool warmup >/dev/null 2>&1
+  BT_EXPECT_EQ $? 0
+  rm -f "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+
+  # Stage v2 in Bazel, then hold out/default.build_lock with a live background sleep PID.
+  _stage_fake_bazel_output "scripts/developer" "my-reg-tool" "locked-v2" "1"
+  sleep 30 &
+  local holder_pid=$!
+  printf '%s\n' "${holder_pid}" > "${BT_TEMP_DIR}/out/default.build_lock"
+
+  local out_existing="${BT_TEMP_DIR}/_lock_out"
+  local err_existing="${BT_TEMP_DIR}/_lock_err"
+  "${fx}" my-reg-tool during-build >"${out_existing}" 2>"${err_existing}"
+  local rc_existing=$?
+  kill "${holder_pid}" 2>/dev/null || true
+  wait "${holder_pid}" 2>/dev/null || true
+  rm -f "${BT_TEMP_DIR}/out/default.build_lock"
+
+  BT_EXPECT_EQ "${rc_existing}" 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "$(<"${out_existing}")" "locked-v1|"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${err_existing}" "active fx build"
+  BT_ASSERT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+
+  # When host-tools/<cmd> does NOT exist yet and .build_lock is held briefly,
+  # fx prints a waiting notice to stderr, waits for the lock holder to exit, and builds!
+  rm -rf "${BT_TEMP_DIR}/out/_fx_host_tools" "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  (
+    sleep 1
+    rm -f "${BT_TEMP_DIR}/out/default.build_lock"
+  ) &
+  local short_pid=$!
+  printf '%s\n' "${short_pid}" > "${BT_TEMP_DIR}/out/default.build_lock"
+
+  local out_wait="${BT_TEMP_DIR}/_wait_out"
+  local err_wait="${BT_TEMP_DIR}/_wait_err"
+  "${fx}" my-reg-tool after-lock >"${out_wait}" 2>"${err_wait}"
+  local rc_wait=$?
+  wait "${short_pid}" 2>/dev/null || true
+  rm -f "${BT_TEMP_DIR}/out/default.build_lock"
+
+  BT_EXPECT_EQ "${rc_wait}" 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "$(<"${out_wait}")" "locked-v2|"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${err_wait}" "Waiting for active fx build"
+  BT_ASSERT_FILE_EXISTS "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+
+  # Missing fx.config during clean-build:
+  # Existing staged tool runs via fast path without triggering fx-gen even if fx.config was wiped.
+  _stage_fake_bazel_output "scripts/developer" "my-reg-tool" "locked-v2" "0"
+  "${fx}" my-reg-tool warmup >/dev/null 2>&1
+  rm -f "${BT_TEMP_DIR}/out/default/fx.config" "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  local out_nocfg="${BT_TEMP_DIR}/_nocfg_out"
+  local err_nocfg="${BT_TEMP_DIR}/_nocfg_err"
+  "${fx}" my-reg-tool warm-nocfg >"${out_nocfg}" 2>"${err_nocfg}"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "$(<"${out_nocfg}")" "locked-v2|"
+  BT_ASSERT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+}
+
+TEST_fx_output_registry_actions_logs_lookup_fallback_build_and_skip() {
+  rm -rf "${BT_TEMP_DIR}/out/_fx_host_tools" "${BT_TEMP_DIR}/out/default/bazel.mock_state"
+  _stage_fake_bazel_output "scripts/developer" "my-reg-tool" "v1"
+
+  mkdir -p "${BT_TEMP_DIR}/tools/devshell/host_tools/mock_sh"
+  cat > "${BT_TEMP_DIR}/tools/devshell/host_tools/mock_sh/mock_sh.sh" <<'EOF'
+#!/bin/bash
+echo "SCRIPT_OUTPUT"
+EOF
+  chmod +x "${BT_TEMP_DIR}/tools/devshell/host_tools/mock_sh/mock_sh.sh"
+
+  cat > "${BT_TEMP_DIR}/tools/devshell/legacy-unregistered-cmd" <<'EOF'
+#!/bin/bash
+echo "LEGACY_OUTPUT"
+EOF
+  chmod +x "${BT_TEMP_DIR}/tools/devshell/legacy-unregistered-cmd"
+
+  cat > "${BT_TEMP_DIR}/tools/devshell/fx_host_tools.json" <<'EOF'
+{
+  "my-reg-tool": "//scripts/developer:my-reg-tool",
+  "my-script-tool": {
+    "script": "//tools/devshell/host_tools/mock_sh/mock_sh.sh"
+  }
+}
+EOF
+
+  # 1. When FX_OUTPUT_REGISTRY_ACTIONS is unset or 0, stderr must NOT contain [fx-registry].
+  local out_quiet
+  out_quiet="$("${fx}" my-script-tool 2>"${BT_TEMP_DIR}/_quiet_err")"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_EQ "${out_quiet}" "SCRIPT_OUTPUT"
+  if grep -q "\[fx-registry\]" "${BT_TEMP_DIR}/_quiet_err"; then
+    BT_FAIL "Expected no [fx-registry] logs when FX_OUTPUT_REGISTRY_ACTIONS is unset, got: $(<"${BT_TEMP_DIR}/_quiet_err")"
+  fi
+
+  out_quiet="$(FX_OUTPUT_REGISTRY_ACTIONS=0 "${fx}" my-script-tool 2>"${BT_TEMP_DIR}/_quiet_err_0")"
+  BT_EXPECT_EQ $? 0
+  if grep -q "\[fx-registry\]" "${BT_TEMP_DIR}/_quiet_err_0"; then
+    BT_FAIL "Expected no [fx-registry] logs when FX_OUTPUT_REGISTRY_ACTIONS=0, got: $(<"${BT_TEMP_DIR}/_quiet_err_0")"
+  fi
+
+  # 2. Cold target run with FX_OUTPUT_REGISTRY_ACTIONS=1 logs lookup, build trigger, and staging.
+  local out_cold err_cold
+  out_cold="$(FX_OUTPUT_REGISTRY_ACTIONS=1 "${fx}" my-reg-tool cold 2>"${BT_TEMP_DIR}/_cold_err")"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out_cold}" "v1|"
+  err_cold="$(<"${BT_TEMP_DIR}/_cold_err")"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${err_cold}" "\[fx-registry\] lookup 'my-reg-tool': found in core registry (mode=target, target=//scripts/developer:my-reg-tool)"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${err_cold}" "\[fx-registry\] build 'my-reg-tool' (//scripts/developer:my-reg-tool): building @//scripts/developer:my-reg-tool with Bazel (reason: staged binary missing"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${err_cold}" "\[fx-registry\] build 'my-reg-tool' (//scripts/developer:my-reg-tool): staged binary to //out/_fx_host_tools/my-reg-tool"
+
+  # 3. Warm target run logs lookup and skip build (up-to-date).
+  local out_warm err_warm
+  out_warm="$(FX_OUTPUT_REGISTRY_ACTIONS=1 "${fx}" my-reg-tool warm 2>"${BT_TEMP_DIR}/_warm_err")"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out_warm}" "v1|"
+  err_warm="$(<"${BT_TEMP_DIR}/_warm_err")"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${err_warm}" "\[fx-registry\] lookup 'my-reg-tool': found in core registry (mode=target, target=//scripts/developer:my-reg-tool)"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${err_warm}" "\[fx-registry\] skip build 'my-reg-tool' (//scripts/developer:my-reg-tool): up-to-date (stamp and sources.manifest valid), using //out/_fx_host_tools/my-reg-tool"
+
+  # 4. fx --no-build logs lookup and skip build (--no-build specified).
+  local out_nobuild err_nobuild
+  out_nobuild="$(FX_OUTPUT_REGISTRY_ACTIONS=1 "${fx}" --no-build my-reg-tool nobuild 2>"${BT_TEMP_DIR}/_nobuild_err")"
+  BT_EXPECT_EQ $? 0
+  err_nobuild="$(<"${BT_TEMP_DIR}/_nobuild_err")"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${err_nobuild}" "\[fx-registry\] skip build 'my-reg-tool' (//scripts/developer:my-reg-tool): --no-build specified, using existing //out/_fx_host_tools/my-reg-tool"
+
+  # 5. fx --build logs lookup and forced rebuild (even when FX_NO_BUILD=1 is in the environment).
+  local out_force err_force
+  out_force="$(FX_NO_BUILD=1 FX_OUTPUT_REGISTRY_ACTIONS=1 "${fx}" --build my-reg-tool force 2>"${BT_TEMP_DIR}/_force_err")"
+  BT_EXPECT_EQ $? 0
+  err_force="$(<"${BT_TEMP_DIR}/_force_err")"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${err_force}" "\[fx-registry\] build 'my-reg-tool' (//scripts/developer:my-reg-tool): building @//scripts/developer:my-reg-tool with Bazel (reason: --build forced rebuild)"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${err_force}" "\[fx-registry\] build 'my-reg-tool' (//scripts/developer:my-reg-tool): staged binary to //out/_fx_host_tools/my-reg-tool"
+
+  # 6. Script mode logs lookup and skip build (script mode).
+  local out_script err_script
+  out_script="$(FX_OUTPUT_REGISTRY_ACTIONS=1 "${fx}" my-script-tool 2>"${BT_TEMP_DIR}/_script_err")"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_EQ "${out_script}" "SCRIPT_OUTPUT"
+  err_script="$(<"${BT_TEMP_DIR}/_script_err")"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${err_script}" "\[fx-registry\] lookup 'my-script-tool': found in core registry (mode=script, script=//tools/devshell/host_tools/mock_sh/mock_sh.sh)"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${err_script}" "\[fx-registry\] skip build 'my-script-tool': script mode, running //tools/devshell/host_tools/mock_sh/mock_sh.sh directly"
+
+  # 7. Legacy unregistered command logs lookup and fallback.
+  local out_legacy err_legacy
+  out_legacy="$(FX_OUTPUT_REGISTRY_ACTIONS=1 "${fx}" legacy-unregistered-cmd 2>"${BT_TEMP_DIR}/_legacy_err")"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_EQ "${out_legacy}" "LEGACY_OUTPUT"
+  err_legacy="$(<"${BT_TEMP_DIR}/_legacy_err")"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${err_legacy}" "\[fx-registry\] lookup 'legacy-unregistered-cmd': not in registry; falling back to legacy path //tools/devshell/legacy-unregistered-cmd"
+
+  # 8. Legacy host-tools binary logs lookup and fallback to legacy host-tools binary.
+  mkdir -p "${BT_TEMP_DIR}/out/default/host-tools"
+  cat > "${BT_TEMP_DIR}/out/default/host-tools/legacy-ht-bin" <<'EOF'
+#!/bin/bash
+echo "LEGACY_HT_BIN_OUTPUT"
+EOF
+  chmod +x "${BT_TEMP_DIR}/out/default/host-tools/legacy-ht-bin"
+  local out_legacy_ht err_legacy_ht
+  out_legacy_ht="$(FX_OUTPUT_REGISTRY_ACTIONS=1 "${fx}" legacy-ht-bin 2>"${BT_TEMP_DIR}/_legacy_ht_err")"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_EQ "${out_legacy_ht}" "LEGACY_HT_BIN_OUTPUT"
+  err_legacy_ht="$(<"${BT_TEMP_DIR}/_legacy_ht_err")"
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${err_legacy_ht}" "\[fx-registry\] lookup 'legacy-ht-bin': not in registry; falling back to legacy host-tools binary //out/default/host-tools/legacy-ht-bin"
+
+  # 9. Staged host tool works with fx --no-build and fx help even when .fx-build-dir is absent.
+  rm -f "${BT_TEMP_DIR}/.fx-build-dir"
+  local out_no_bdir_nobuild
+  out_no_bdir_nobuild="$("${fx}" --no-build my-reg-tool after-rm-bdir 2>"${BT_TEMP_DIR}/_no_bdir_err")"
+  BT_EXPECT_EQ $? 0
+  BT_EXPECT_STRING_CONTAINS_SUBSTRING "${out_no_bdir_nobuild}" "v1|"
+}
+
+BT_RUN_TESTS "$@"

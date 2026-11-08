@@ -79,10 +79,6 @@ std::string g_initial_task_security_context;
 
 class TaskSecurityContextChecker : public ::testing::EmptyTestEventListener {
  public:
-  void OnTestStart(const testing::TestInfo& test_info) override {
-    CheckSecurityContext(test_info, "start");
-  }
-
   void OnTestEnd(const testing::TestInfo& test_info) override {
     CheckSecurityContext(test_info, "end");
   }

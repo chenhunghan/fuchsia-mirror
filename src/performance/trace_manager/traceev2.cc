@@ -98,18 +98,22 @@ void TraceeV2::Terminate(fit::closure cb) {
     return;
   }
 
-  connection_->provider->Terminate().ThenExactlyOnce(
+  connection_->provider->Terminate().Then(
       [weak = weak_ptr_factory_.GetWeakPtr(), cb = std::move(cb),
        conn = this->connection_](fidl::Result<fuchsia_tracing_provider::ProviderV2::Terminate>& e) {
         if (e.is_error()) {
-          FX_LOGS(ERROR) << std::format("{}: Failed to terminate provider: {}", *conn,
-                                        e.error_value().FormatDescription());
+          if (!e.error_value().is_canceled()) {
+            FX_LOGS(ERROR) << std::format("{}: Failed to terminate provider: {}", *conn,
+                                          e.error_value().FormatDescription());
+          }
           return;
         }
         if (weak) {
           FX_DCHECK(weak->state() != State::kReady && weak->state() != State::kTerminated);
           weak->TransitionToState(State::kTerminated);
         }
+        // |cb| reports that the provider acknowledged Terminate, so it runs even if this TraceeV2
+        // has since been destroyed. Callers must not assume the TraceeV2 still exists.
         cb();
       });
 
@@ -127,12 +131,13 @@ void TraceeV2::Start(fuchsia_tracing::BufferDisposition buffer_disposition,
   start_options.buffer_disposition(buffer_disposition);
   start_options.additional_categories(additional_categories);
   connection_->provider->Start({std::move(start_options)})
-      .ThenExactlyOnce([weak = weak_ptr_factory_.GetWeakPtr(), cb = std::move(cb),
-                        conn = this->connection_](
-                           fidl::Result<fuchsia_tracing_provider::ProviderV2::Start>& e) {
+      .Then([weak = weak_ptr_factory_.GetWeakPtr(), cb = std::move(cb), conn = this->connection_](
+                fidl::Result<fuchsia_tracing_provider::ProviderV2::Start>& e) {
         if (e.is_error()) {
-          FX_LOGS(ERROR) << std::format("{}: Failed to start provider: {}", *conn,
-                                        e.error_value().FormatDescription());
+          if (!e.error_value().is_canceled()) {
+            FX_LOGS(ERROR) << std::format("{}: Failed to start provider: {}", *conn,
+                                          e.error_value().FormatDescription());
+          }
           return;
         }
         if (weak) {
@@ -149,6 +154,10 @@ void TraceeV2::Start(fuchsia_tracing::BufferDisposition buffer_disposition,
   TransitionToState(State::kStarting);
   was_started_ = true;
   results_written_ = false;
+  // Reset here rather than in the Start() reply: the provider can send OnSaveBuffer for the new run
+  // before it replies to Start(), and we handle saves while kStarting. Resetting in the reply would
+  // validate those saves against the previous run's offsets, then discard the offsets they set.
+  buffer_->OnStart(buffer_disposition);
 }
 
 void TraceeV2::Stop(fit::closure cb) {
@@ -162,12 +171,14 @@ void TraceeV2::Stop(fit::closure cb) {
     return;
   }
   zx_time_t start_time = zx_clock_get_monotonic();
-  connection_->provider->Stop().ThenExactlyOnce(
+  connection_->provider->Stop().Then(
       [weak = weak_ptr_factory_.GetWeakPtr(), cb = std::move(cb), conn = this->connection_,
        start_time](fidl::Result<fuchsia_tracing_provider::ProviderV2::Stop>& e) {
         if (e.is_error()) {
-          FX_LOGS(ERROR) << std::format("{}: Failed to stop provider: {}", *conn,
-                                        e.error_value().FormatDescription());
+          if (!e.error_value().is_canceled()) {
+            FX_LOGS(ERROR) << std::format("{}: Failed to stop provider: {}", *conn,
+                                          e.error_value().FormatDescription());
+          }
           return;
         }
         if (!weak) {

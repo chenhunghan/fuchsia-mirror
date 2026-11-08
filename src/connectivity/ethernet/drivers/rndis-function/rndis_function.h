@@ -19,6 +19,8 @@
 #include <lib/inspect/cpp/inspect.h>
 
 #include <array>
+#include <deque>
+#include <optional>
 #include <queue>
 
 #include <fbl/mutex.h>
@@ -67,6 +69,8 @@ class RndisFunction : public fdf::DriverBase2,
 
   inspect::ComponentInspector &inspector() { return *inspector_; }
   usb_inspect::ThroughputTracker &GetThroughputTrackerForTesting() { return *throughput_tracker_; }
+  bool BulkOutRequestsFullForTesting() { return bulk_out_ep_.RequestsFull(); }
+  bool BulkInRequestsFullForTesting() { return bulk_in_ep_.RequestsFull(); }
 
   zx::result<> Start(fdf::DriverContext context) override;
   void Stop(fdf::StopCompleter completer) override;
@@ -133,6 +137,8 @@ class RndisFunction : public fdf::DriverBase2,
 
   void DiscardPendingTxBuffers(zx_status_t status);
   void ReturnPendingRxSpace();
+  void CompleteTxBatch(fdf::Arena &arena, std::span<fnetdev::wire::TxResult> results);
+  void CompleteRxBatch(fdf::Arena &arena, std::span<fnetdev::wire::RxBuffer> rx_buffers);
 
   fuchsia_hardware_network::PortStatus ReadStatus() const;
 
@@ -196,7 +202,7 @@ class RndisFunction : public fdf::DriverBase2,
   VmoStore vmo_store_;
 
   std::queue<fnetdev::wire::RxSpaceBuffer> rx_space_buffers_;
-  std::queue<uint32_t> tx_completion_queue_;
+  std::deque<std::optional<uint32_t>> tx_completion_queue_;
   std::vector<fuchsia_hardware_usb_endpoint::Completion> rx_completion_queue_;
 
   struct {

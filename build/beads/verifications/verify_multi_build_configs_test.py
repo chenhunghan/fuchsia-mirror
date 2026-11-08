@@ -9,18 +9,15 @@ import io
 import json
 import pathlib
 import subprocess
-import sys
 import tempfile
 import unittest
 from unittest import mock
 
-_FUCHSIA_DIR = pathlib.Path(__file__).parent.parent.parent.parent
-sys.path.insert(0, str(_FUCHSIA_DIR / "build/beads/scripts"))
-sys.path.insert(0, str(_FUCHSIA_DIR / "build/beads/verifications"))
-
-import compare_utils
-import verify_build_commands
-import verify_multi_build_configs
+from build.beads.scripts import compare_utils
+from build.beads.verifications import (
+    verify_build_commands,
+    verify_multi_build_configs,
+)
 
 
 class VerifyMultiBuildConfigsTest(unittest.TestCase):
@@ -223,6 +220,22 @@ variants: "{variant=\\"asan-fuzzer\\" target_type=[\\"fuzzed_executable\\"]}"
                 variant_tc,
             ),
             "//build/beads/verifications/cc:beads_cc_example_bin(//build/toolchain:host_x64_custom)",
+        )
+
+        # Fuchsia shared toolchain redirection:
+        self.assertEqual(
+            verify_build_commands.resolve_gn_label_for_toolchains(
+                "//build/beads/verifications/cc:beads_cc_example_shlib(//build/toolchain/fuchsia:x64-shared)",
+                variant_tc,
+            ),
+            "//build/beads/verifications/cc:beads_cc_example_shlib(//build/toolchain/fuchsia:arm64-asan-ubsan-shared)",
+        )
+        self.assertEqual(
+            verify_build_commands.resolve_gn_label_for_toolchains(
+                "//build/beads/verifications/cc:beads_cc_example_shlib(//build/toolchain/fuchsia:x64-shared)",
+                non_variant_tc,
+            ),
+            "//build/beads/verifications/cc:beads_cc_example_shlib(//build/toolchain/fuchsia:x64-shared)",
         )
 
     def test_resolve_queries_for_build_dir(self) -> None:

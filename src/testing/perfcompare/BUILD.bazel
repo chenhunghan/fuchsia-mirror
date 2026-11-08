@@ -1,0 +1,34 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    tests = [
+        ":perfcompare_test",
+    ],
+    visibility = ["//src/testing:__pkg__"],
+)
+
+# TODO(https://fxbug.dev/496596903): Add type declarations to this
+# code and make it pass MyPy's type checks.
+# TODO(https://fxbug.dev/575968075): Fix Pyrefly errors and remove no-pyrefly.
+host_py_test(
+    name = "perfcompare_test",
+    srcs = [
+        "local_workflow.py",
+        "perfcompare.py",
+        "perfcompare_test.py",
+        "stats.py",
+    ],
+    imports = ["."],
+    main = "perfcompare_test.py",
+    tags = ["no-pyrefly"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    test_data = ["perfcompare_test_output.txt"],
+)

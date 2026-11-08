@@ -34,6 +34,14 @@ load(
 
 package(default_applicable_licenses = ["//:license"])
 
+exports_files(
+    [
+        "schema/common-00000000.json",
+        "schema/ffx_test/run_summary-8d1dd964.json",
+    ],
+    visibility = ["//src/sys/run_test_suite/directory:__pkg__"],
+)
+
 sdk_version_history(
     name = "version_history",
     category = "partner",
@@ -171,6 +179,14 @@ filegroup(
         "//build/bazel/platforms:is_fuchsia_" + target_cpu: [
             atom.removesuffix("_idk")
             for atom in ALL_CC_SOURCE_LIBRARY_ATOMS
+            # TODO(https://fxbug.dev/579123566): Remove exceptions once
+            # fuchsia.driver.framework builds at numbered API levels.
+            if atom not in [
+                "//sdk/lib/driver/component/cpp:cpp_idk",
+                "//sdk/lib/driver/incoming/cpp:cpp_idk",
+                "//sdk/lib/driver/logging/cpp:cpp_idk",
+                "//sdk/lib/driver/node/cpp:cpp_idk",
+            ]
         ],
         "//conditions:default": [],
     }),
@@ -249,8 +265,17 @@ test_suite(
     name = "host_tests",
     target_compatible_with = HOST_CONSTRAINTS,
     tests = [
+        "//sdk/ctf/build/scripts:fidl_api_compatibility_test_test",
         "//sdk/ctf/plasa/clang_doc_filter:clang_doc_filter_test",
         "//sdk/ctf/plasa/model:model_test",
         "//sdk/ctf/plasa/plasa_test_coverage_report:plasa_test_coverage_report_test",
+        "//sdk/rust/iob:host_tests",
+    ],
+)
+
+test_suite(
+    name = "target_tests",
+    tests = [
+        "//sdk/rust/iob:tests",
     ],
 )

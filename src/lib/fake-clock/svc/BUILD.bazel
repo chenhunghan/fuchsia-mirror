@@ -1,0 +1,93 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "fake_clock_svc",
+    srcs = ["src/main.rs"],
+    edition = "2024",
+    tags = ["manual"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//sdk/rust/zx",
+        "//src/lib/fake-clock/fidl:fidl_rust",
+        "//src/lib/fake-clock/named-timer:fidl_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-sync",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:rand",
+    ],
+)
+
+rustc_test(
+    name = "fake_clock_svc_test",
+    crate = ":fake_clock_svc",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//visibility:private"],
+    deps = ["//src/lib/fake-clock/named-timer"],
+)
+
+fx_packaged_binary(
+    name = "fake_clock_svc_packaged_bin",
+    testonly = True,
+    binary = ":fake_clock_svc",
+    binary_name = "fake_clock_svc",
+)
+
+fx_component_manifest(
+    name = "svc_manifest",
+    testonly = True,
+    component_name = "fake_clock",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/fake_clock.cml",
+    visibility = ["//visibility:private"],
+)
+
+fx_component(
+    name = "svc",
+    testonly = True,
+    compiled_manifest = ":svc_manifest",
+    visibility = [
+        "//src/connectivity:__subpackages__",
+        "//src/lib/fake-clock:__subpackages__",
+        "//src/power:__subpackages__",
+        "//src/recovery:__subpackages__",
+        "//src/sys:__subpackages__",
+        "//src/ui:__subpackages__",
+    ],
+    deps = [":fake_clock_svc_packaged_bin"],
+)
+
+fx_unittest_package(
+    name = "tests",
+    package_name = "fake_clock_test",
+    unit_tests = [":fake_clock_svc_test"],
+    visibility = [
+        "//src/lib:__pkg__",
+        "//src/lib/fake-clock:__pkg__",
+    ],
+)

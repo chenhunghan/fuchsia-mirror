@@ -2,39 +2,12 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-import("//build/rust/rustc_binary.gni")
+import("//build/bazel/bazel_fuchsia_package.gni")
 
-rustc_binary("bin") {
-  name = "state_recorder_rust_example"
-  edition = "2024"
-  deps = [
-    "//sdk/lib/power/state_recorder/rust",
-    "//src/lib/diagnostics/inspect/runtime/rust",
-    "//src/lib/diagnostics/inspect/rust",
-    "//src/lib/fuchsia",
-    "//src/lib/fuchsia-async",
-    "//src/lib/fuchsia-component",
-    "//src/lib/trace/rust:trace-provider",
-    "//third_party/rust_crates:anyhow",
-    "//third_party/rust_crates:futures",
-    "//third_party/rust_crates:log",
-    "//third_party/rust_crates:strum",
-    "//third_party/rust_crates:strum_macros",
-  ]
-
-  sources = [ "src/main.rs" ]
-}
-
-fuchsia_component("component") {
-  component_name = "state_recorder_rust_example"
-  manifest = "meta/state_recorder_rust_example.cml"
-  deps = [ ":bin" ]
-}
-
-fuchsia_package("package") {
+# //examples/power/state_recorder still builds this package from GN.
+bazel_fuchsia_package("package") {
+  bazel_config = "fuchsia_platform"
   package_name = "state_recorder_rust_example"
-  deps = [ ":component" ]
 }
 
 group("rust") {

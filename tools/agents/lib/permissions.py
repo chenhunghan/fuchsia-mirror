@@ -4,8 +4,6 @@
 
 """Permission definitions, profile resolution, command list reading, and regex expansion."""
 
-from __future__ import annotations
-
 import dataclasses
 import pathlib
 import re
@@ -43,6 +41,13 @@ JIRI_GLOBAL_FLAGS_PATTERN = (
     r"|-quiet|-q|--quiet|-time|--time|-vv|-v|--vv|--v"
     r"))*"
 )
+JJ_GLOBAL_FLAGS_PATTERN = (
+    rf"(\s+("
+    rf"(--at-operation|--at-op|--color)(\s+|=){_ARG_VALUE_PATTERN}"
+    r"|--ignore-working-copy|--ignore-immutable|--no-integrate-operation|--no-pager|--quiet|--debug"
+    r"))*"
+)
+JJ_DISALLOWED_FLAGS_PATTERN = r"(?:\s|^)[\"']?(?:--config|-R\b|--repository\b)"
 
 PYTHON_COMMAND_NAMES: set[str] = {
     "python",
@@ -57,6 +62,7 @@ PYTHON_TOOL_PREFIXES: tuple[str, ...] = (
     "scripts/fuchsia-vendored-python",
     "./scripts/fuchsia-vendored-python",
     ".jiri_root/bin/fuchsia-vendored-python",
+    "./.jiri_root/bin/fuchsia-vendored-python",
 )
 
 REASON_PREFIX = "# Reason:"
@@ -155,6 +161,7 @@ class ToolSpec:
     binary_prefix: str
     global_flags_pattern: str = ""
     allow_flags_anywhere: bool = False
+    disallowed_trailing_pattern: str = ""
 
     @property
     def prefix(self) -> str:
@@ -168,8 +175,13 @@ class ToolSpec:
     def expand(self, arguments: str) -> list[str]:
         """Expand tool arguments into anchored regex pattern grants."""
         prefix = self.prefix
+        guard = (
+            f"(?!.*{self.disallowed_trailing_pattern})"
+            if self.disallowed_trailing_pattern
+            else ""
+        )
         if not arguments:
-            return [f"command(regex:{prefix}(\\s+.*)?)"]
+            return [f"command(regex:{prefix}(?:{guard}\\s+.*)?)"]
 
         if self.allow_flags_anywhere:
             try:
@@ -198,11 +210,11 @@ class ToolSpec:
                     escaped_subcmd = re.escape(subcmd)
                     return [
                         f"command(regex:{prefix}\\s+{escaped_subcmd}"
-                        f"(?:\\s+{_ARG_VALUE_PATTERN})*\\s+{flag_pattern}(?:\\s+.*)?)"
+                        f"(?:\\s+{_ARG_VALUE_PATTERN})*\\s+{flag_pattern}(?:{guard}\\s+.*)?)"
                     ]
 
         escaped_args = re.escape(arguments)
-        return [f"command(regex:{prefix}\\s+{escaped_args}(\\s+.*)?)"]
+        return [f"command(regex:{prefix}\\s+{escaped_args}(?:{guard}\\s+.*)?)"]
 
 
 TOOL_SPECS: dict[str, ToolSpec] = {
@@ -223,6 +235,11 @@ TOOL_SPECS: dict[str, ToolSpec] = {
         global_flags_pattern=GIT_GLOBAL_FLAGS_PATTERN,
         allow_flags_anywhere=True,
     ),
+    "jj": ToolSpec(
+        binary_prefix=r"(\S+/)?jj",
+        global_flags_pattern=JJ_GLOBAL_FLAGS_PATTERN,
+        disallowed_trailing_pattern=JJ_DISALLOWED_FLAGS_PATTERN,
+    ),
 }
 
 
@@ -236,9 +253,15 @@ def _tool_prefix(base_name: str) -> str:
 
 def _expand_help_variants(base_name: str) -> list[str]:
     """Expand trusted tool help commands into subcommands and --help flag."""
+    spec = TOOL_SPECS.get(base_name)
+    guard = (
+        f"(?!.*{spec.disallowed_trailing_pattern})"
+        if spec and spec.disallowed_trailing_pattern
+        else ""
+    )
     prefix = _tool_prefix(base_name)
     return [
-        f"command(regex:{prefix}(?:\\s+help(?:\\s+.*)?|(?:\\s+{_ARG_VALUE_PATTERN})*\\s+--help))"
+        f"command(regex:{prefix}(?:\\s+help(?:{guard}\\s+.*)?|(?:{guard}(?:\\s+{_ARG_VALUE_PATTERN})*\\s+--help)))"
     ]
 
 
@@ -253,6 +276,17 @@ def _expand_python_variants(arguments: str) -> list[str]:
         )
         if candidate not in results:
             results.append(candidate)
+    regex_prefix = (
+        f"{ENV_VARS_PREFIX_PATTERN}"
+        r"(?:(\S+/)?fuchsia-vendored-python|(?:/usr/bin/)?python3?)\b"
+    )
+    if arguments:
+        escaped_args = re.escape(arguments)
+        results.append(
+            f"command(regex:{regex_prefix}\\s+{escaped_args}(?:\\s+.*)?)"
+        )
+    else:
+        results.append(f"command(regex:{regex_prefix}(?:\\s+.*)?)")
     return results
 
 

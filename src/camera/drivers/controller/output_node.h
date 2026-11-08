@@ -6,7 +6,6 @@
 #define SRC_CAMERA_DRIVERS_CONTROLLER_OUTPUT_NODE_H_
 
 #include <fuchsia/camera2/cpp/fidl.h>
-#include <fuchsia/hardware/ge2d/cpp/banjo.h>
 #include <lib/fidl/cpp/binding.h>
 
 #include <map>
@@ -84,7 +83,6 @@ class OutputNode : public ProcessNode, public fuchsia::camera2::Stream {
   bool started_ = false;
   fidl::Binding<fuchsia::camera2::Stream> binding_;
   std::map<uint32_t, FrameToken> client_tokens_;
-  fuchsia::sysmem::BufferCollectionPtr observer_collection_;
   uint32_t binding_warnings_ = 0;
   uint32_t frame_count_ = 0;
 };

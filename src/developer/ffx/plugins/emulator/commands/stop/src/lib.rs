@@ -4,6 +4,7 @@
 
 use emulator_instance::{EmulatorInstanceInfo, EmulatorInstances};
 use ffx_config::EnvironmentContext;
+#[cfg(test)]
 use ffx_config::keys::EMU_INSTANCE_ROOT_DIR;
 use ffx_emulator_engines::EngineBuilder;
 use ffx_emulator_stop_args::StopCommand;
@@ -58,9 +59,9 @@ impl EmuStopTool {
         writer: &mut <EmuStopTool as fho::FfxMain>::Writer,
     ) -> fho::Result<Vec<Error>> {
         let mut names = vec![self.cmd.name];
-        let instance_dir: PathBuf =
-            self.context.get(EMU_INSTANCE_ROOT_DIR).map_err(|e| bug!("{e}"))?;
-        let emu_instances = EmulatorInstances::new(instance_dir);
+        let dirs: Vec<PathBuf> =
+            self.context.get(ffx_config::keys::EMU_INSTANCE_ROOT_DIR).map_err(|e| bug!("{e}"))?;
+        let emu_instances = EmulatorInstances::from(dirs);
 
         if self.cmd.all {
             names = match emu_instances.get_all_instances() {

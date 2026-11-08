@@ -41,6 +41,7 @@ pub fn main() {
         multi_vmo,
         max_rolling_capture_buffer_size,
         tcp_gro_enabled,
+        redact_network_identifiers,
     } = &config;
     let num_threads = NonZeroU8::new(*num_threads).expect("invalid 0 thread count value");
     let mut executor = SendExecutorBuilder::new().num_threads(num_threads.get().into()).build();
@@ -63,6 +64,16 @@ pub fn main() {
     }
     diagnostics_log::initialize(log_options).expect("failed to initialize log");
 
+    // Enable redaction of MAC addresses in logs and Inspect before anything
+    // else can log them. `enable()` installs masking synchronously; the
+    // returned future fetches the per-boot salt and is awaited by the
+    // executor below before the netstack starts serving.
+    // TODO(https://fxbug.dev/576752502): Initialize the redactor synchronously
+    // once the salt is provided at startup.
+    let redactor_fut = futures::future::OptionFuture::from(
+        redact_network_identifiers.then(redactor_client::enable),
+    );
+
     fuchsia_trace_provider::trace_provider_create_with_fdio();
 
     info!("starting netstack3 with {config:?}");
@@ -70,13 +81,6 @@ pub fn main() {
     let mut fs = ServiceFs::new();
     let _: &mut ServiceFsDir<'_, _> = fs
         .dir("svc")
-        // TODO(https://fxbug.dev/42076541): This is transitional. Once the
-        // out-of-stack DHCP client is being used by both netstacks, it
-        // should be moved out of the netstack realm and into the network
-        // realm. The trip through Netstack3 allows for availability of DHCP
-        // client to be dependent on Netstack version when using
-        // netstack-proxy.
-        .add_proxy_service::<fidl_fuchsia_net_dhcp::ClientProviderMarker, _>()
         .add_fidl_service(Service::Control)
         .add_service_connector(Service::DebugDiagnostics)
         .add_fidl_service(Service::DebugInterfaces)
@@ -136,7 +140,12 @@ pub fn main() {
     // Short circuit when we receive a lifecycle stop request.
     let fs = fs.take_until(get_lifecycle_stop_fut());
 
-    executor.run(seed.serve(fs, inspect_publisher))
+    executor.run(async move {
+        // Install the salted redactor before serving so that, once the
+        // netstack starts, identifiers are hashed rather than masked.
+        let _: Option<()> = redactor_fut.await;
+        seed.serve(fs, inspect_publisher).await
+    })
 }
 
 /// Takes the lifecycle handle from startup and returns a future that resolves

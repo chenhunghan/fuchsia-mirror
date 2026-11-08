@@ -15,6 +15,20 @@
             protocol: "fuchsia.examples.reverser.Replacer",
             availability: "optional",
         },
+        {
+            config: "fuchsia.examples.reverser.SwitchCase",
+            key: "switch_case",
+            type: "bool",
+            availability: "transitional",
+            default: false,
+        },
+        {
+            config: "fuchsia.examples.reverser.UseReplacer",
+            key: "use_replacer",
+            type: "bool",
+            availability: "transitional",
+            default: false,
+        },
     ],
     expose: [
         {
@@ -22,14 +36,4 @@
             from: "self",
         },
     ],
-    config: {
-        switch_case: {
-            type: "bool",
-            mutability: [ "parent" ],
-        },
-        use_replacer: {
-            type: "bool",
-            mutability: [ "parent" ],
-        },
-    },
 }

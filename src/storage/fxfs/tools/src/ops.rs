@@ -140,7 +140,7 @@ pub async fn unlink(
     let dir = walk_dir(vol, path.parent().unwrap()).await?;
     // Not worried about the race between lookup and lock, this is a single-threaded mode.
     let replace_context = dir
-        .acquire_context_for_replace(None, path.file_name().unwrap().to_str().unwrap(), true)
+        .acquire_context_for_replace(None, path.file_name().unwrap().to_str().unwrap(), true, &[])
         .await?;
     let mut transaction = replace_context.transaction;
     if replace_context.dst_id_and_descriptor.is_none() {

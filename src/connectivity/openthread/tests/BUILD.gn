@@ -8,6 +8,7 @@ group("tests") {
     "fake-drivers",
     "fake-drivers/fake-ot-radio:tests",
     "ot-rcp-fuchsia:tests",
+    "rf_medium_dispatcher:tests",
   ]
 }
 

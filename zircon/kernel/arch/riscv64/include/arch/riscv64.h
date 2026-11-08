@@ -135,7 +135,6 @@
 
 #include <arch/regs.h>
 #include <kernel/cpu.h>
-#include <syscalls/syscalls.h>
 
 #define __ASM_STR(x) #x
 
@@ -217,7 +216,6 @@ extern "C" Riscv64ExceptionFn Riscv64UserException, Riscv64KernelException,
     Riscv64EmergencyException;
 
 extern "C" void riscv64_context_switch(vaddr_t* old_sp, vaddr_t new_sp);
-extern "C" syscall_result riscv64_syscall_dispatcher(iframe_t* frame);
 
 extern "C" void riscv64_timer_exception();
 extern "C" void riscv64_software_exception();

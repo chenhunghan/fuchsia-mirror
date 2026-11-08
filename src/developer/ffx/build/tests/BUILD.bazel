@@ -1,0 +1,65 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@io_bazel_rules_go//go:def.bzl", "go_binary", "go_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_go_test.bzl", "host_go_test")
+load("//build/bazel/rules/host_tests:host_test.bzl", "host_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+_ALL_FFX_TEST_DATA = [
+    "//src/developer/ffx:test_data",
+    "//src/developer/ffx/plugins/component:ffx_component_tool_test_data",
+    "//src/developer/ffx/plugins/emulator:ffx_emulator_tool_test_data",
+    "//src/developer/ffx/plugins/inspect:ffx_inspect_tool_test_data",
+    "//src/developer/ffx/plugins/log:ffx_log_tool_test_data",
+    "//src/developer/ffx/plugins/package:ffx_package_tool_test_data",
+    "//src/developer/ffx/plugins/product:ffx_product_tool_test_data",
+    "//src/developer/ffx/plugins/product_bundle:ffx_product_bundle_tool_test_data",
+    "//src/developer/ffx/plugins/repository:ffx_repository_tool_test_data",
+]
+
+# Mirrors how system-tests attach ffx test_data to a go_library embedded by
+# host_go_test.
+go_library(
+    name = "lib",
+    testonly = True,
+    srcs = ["lib.go"],
+    data = _ALL_FFX_TEST_DATA,
+    importpath = "go.fuchsia.dev/fuchsia/src/developer/ffx/build/tests/lib",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+host_go_test(
+    name = "gn_ffx_test_data_test",
+    srcs = ["gn_ffx_test_data_test.go"],
+    embed = [":lib"],
+    rundir = ".",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/developer/ffx:__pkg__"],
+)
+
+host_test(
+    name = "gn_ffx_test_data_host_test",
+    binary = ":gn_ffx_test_data_test_bin",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    test_args = ["-test.v"],
+    visibility = ["//src/developer/ffx:__pkg__"],
+)
+
+go_binary(
+    name = "verify_runfiles_bin",
+    testonly = True,
+    srcs = ["verify_runfiles/main.go"],
+    data = _ALL_FFX_TEST_DATA,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+host_test(
+    name = "gn_ffx_test_data_runfiles_test",
+    binary = ":verify_runfiles_bin",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/developer/ffx:__pkg__"],
+)

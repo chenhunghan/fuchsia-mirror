@@ -2,11 +2,17 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
 
-# LINT.IfChange
+# Allow the unstable `c_size_t` feature required by Fuchsia libc definitions
+# (# bazel2gn can't generate `configs -=` directly).
+# TODO: Verify whether rust should use target_compatible_with (was not gated by if (is_fuchsia) in GN).
+# TODO(https://fxbug.dev/566966051): Switch to disable_build_flags in rustc_library.
+# @bazel2gn:raw_attribute:configs -= [ "//build/config/rust:no_features" ]
 rustc_library(
     name = "rust",
     srcs = [
@@ -18,8 +24,28 @@ rustc_library(
     edition = "2024",
     rustc_flags = ["-Zallow_features=c_size_t"],
     target_compatible_with = ["@platforms//os:fuchsia"],
-    visibility = ["//visibility:public"],
-    with_unit_tests = True,
+    visibility = [
+        "//sdk/lib/c/test/sanitizer:__pkg__",
+        "//src/bringup:__subpackages__",
+        "//src/lib/fuchsia-runtime:__pkg__",
+        "//src/performance:__subpackages__",
+        "//src/starnix/kernel/core:__pkg__",
+    ],
     deps = ["//sdk/rust/zx"],
 )
-# LINT.ThenChange(BUILD.gn)
+
+# TODO(https://fxbug.dev/566966051): Switch to disable_build_flags in rustc_library.
+# @bazel2gn:raw_attribute:configs -= [ "//build/config/rust:no_features" ]
+rustc_test(
+    name = "zx-libc_test",
+    crate = ":rust",
+    crate_name = "zx_libc_lib_test",
+    rustc_flags = ["-Zallow_features=c_size_t"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_unittest_package(
+    name = "zx-libc-unittests",
+    unit_tests = [":zx-libc_test"],
+    visibility = ["//sdk/lib:__pkg__"],
+)

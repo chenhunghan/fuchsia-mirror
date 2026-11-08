@@ -12,6 +12,7 @@ import struct
 import sys
 from collections import namedtuple
 from contextlib import contextmanager
+from typing import Any
 
 # Standard ELF constants.
 ELFMAG = b"\x7fELF"
@@ -214,7 +215,19 @@ def gen_elf():
 
     # All the accessors for a format (class, byte-order) form one elf,
     # e.g. use elf.Ehdr and elf.Phdr.
-    elf = namedtuple("elf", list(elf_types.keys()))
+    elf = namedtuple(
+        "elf",
+        [
+            "Ehdr",
+            "Phdr",
+            "Shdr",
+            "Dyn",
+            "Nhdr",
+            "dwarf2_line_header",
+            "dwarf4_line_header",
+        ],
+    )
+    assert list(elf._fields) == list(elf_types.keys())
 
     def gen_accessors(is64, struct_byte_order):
         def make_accessor(type, decoder):
@@ -232,7 +245,10 @@ def gen_elf():
         for name, fields in elf_types.items():
             if isinstance(fields, tuple):
                 fields = fields[1 if is64 else 0]
-            type = namedtuple(name, [field_name for field_name, fmt in fields])
+            # The field names are computed, which Pyrefly can't analyze.
+            type = namedtuple(  # pyrefly: ignore[bad-class-definition]
+                name, [field_name for field_name, fmt in fields]
+            )
             decoder = struct.Struct(
                 struct_byte_order + "".join(fmt for field_name, fmt in fields)
             )
@@ -301,7 +317,7 @@ def mmapper(filename):
     if size == 0:
         # mmap can't handle empty files.
         try:
-            yield fd, "", 0
+            yield fd, b"", 0
         finally:
             fileobj.close()
     else:
@@ -311,14 +327,6 @@ def mmapper(filename):
         finally:
             mmapobj.close()
             fileobj.close()
-
-
-def makedirs(dirs):
-    try:
-        os.makedirs(dirs)
-    except OSError as e:
-        if e.errno != os.errno.EEXIST:
-            raise e
 
 
 elf_sizes = namedtuple(
@@ -357,6 +365,9 @@ class elf_info(
         ],
     )
 ):
+    # Set by get_elf_info() and copied by _replace().
+    elf: Any
+
     def rename(self, filename):
         assert os.path.samefile(self.filename, filename)
         return self._replace(filename=filename)
@@ -378,7 +389,7 @@ class elf_info(
         return clone
 
     # This is replaced with a closure by the creator in get_elf_info.
-    def get_sources(self):
+    def get_sources(self) -> set[str]:
         raise Exception("uninitialized elf_info object!")
 
     def strip(self, stripped_filename):
@@ -434,10 +445,11 @@ class elf_info(
 
 
 def get_elf_info(filename, match_notes=False):
-    file = None
-    elf = None
-    ehdr = None
-    phdrs = None
+    # These are set below, before any of the closures that use them are called.
+    file: bytes | mmap.mmap
+    elf: Any
+    ehdr: Any
+    phdrs: list[Any]
 
     # Yields an elf_note for each note in any PT_NOTE segment.
     def gen_notes():
@@ -711,6 +723,7 @@ def get_elf_info(filename, match_notes=False):
                 name = file[start:end].decode()
                 start = end + 1
                 # Decode 3 ULEB128s to advance start, but only use the first.
+                include_idx = 0
                 for i in range(3):
                     value = 0
                     bits = 0
@@ -756,8 +769,11 @@ def get_elf_info(filename, match_notes=False):
     # Map in the whole file's contents and use it as a string.
     with mmapper(filename) as mapped:
         fd, file, filesize = mapped
-        elf = get_elf_accessor(file)
-        if elf is not None:
+        elf_accessor = get_elf_accessor(file)
+        if elf_accessor is not None:
+            # Only assign `elf` once it is known to be valid, since the
+            # closures above use it.
+            elf = elf_accessor
             # ELF header leads to program headers.
             ehdr = elf.Ehdr.read(file)
             if ehdr.e_type not in (ET_EXEC, ET_DYN):
@@ -822,7 +838,9 @@ def main():
     files = args.file
     if args.zbi:
         if not args.bootfs_dir:
-            parser.exit("--zbi and --bootfs-dir must be specified together")
+            parser.exit(
+                1, "--zbi and --bootfs-dir must be specified together\n"
+            )
         bootfs_map = {}
         with open(args.zbi) as f:
             zbi = json.load(f)
@@ -833,6 +851,7 @@ def main():
                 filepath = os.path.join(args.bootfs_dir, item["name"])
                 files.append(filepath)
                 bootfs_map[filepath] = item
+    blobs = []
     if args.blobs:
         with open(args.blobs) as f:
             blobs = json.load(f)
@@ -852,9 +871,9 @@ def main():
                     info.sizes.file == item["length"]
                 ), "%r != %r in %r vs %r" % (
                     info.sizes.file,
-                    blob["length"],
+                    item["length"],
                     info,
-                    blob,
+                    item,
                 )
                 sizes["zbi"] = item["size"]
             if args.blobs and info.filename in blob_map:
@@ -894,6 +913,7 @@ def main():
     else:
         for file in files:
             info = get_elf_info(file)
+            assert info is not None, "%s: not an ELF file" % file
 
             if args.strip:
                 stripped_filename = info.filename + ".ei-strip"

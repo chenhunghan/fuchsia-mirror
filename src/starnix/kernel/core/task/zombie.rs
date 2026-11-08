@@ -7,6 +7,7 @@ use crate::signals::{SignalDetail, SignalInfo};
 use crate::task::{
     ExitStatus, Pid, PidTableGuard, ProcessSelector, Task, ThreadGroup, ThreadGroupStateRef,
 };
+use fuchsia_rcu::RcuDroppable;
 use starnix_logging::log_warn;
 use starnix_types::ownership::{OwnedRef, Releasable};
 use starnix_types::stats::TaskTimeStats;
@@ -209,7 +210,7 @@ impl WaitResult {
 }
 
 /// State of a task or thread group which has exited.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, RcuDroppable)]
 pub struct ZombieState {
     pub exit_status: ExitStatus,
     pub time_stats: TaskTimeStats,

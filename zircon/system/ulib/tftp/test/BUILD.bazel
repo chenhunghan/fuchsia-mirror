@@ -1,0 +1,42 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [],
+    visibility = ["//zircon/system/ulib:__pkg__"],
+)
+
+# TODO(https://fxbug.dev/570694755): In GN, `tftp-test` sets `include_dirs = [ ".." ]` to include `../internal.h`.
+# @bazel2gn:raw_attribute:include_dirs = [ ".." ]
+fx_cc_test_binary(
+    name = "tftp-test",
+    srcs = [
+        "tftp-file-test.cc",
+        "tftp-test.cc",
+        "//zircon/system/ulib/tftp:internal.h",
+    ],
+    # TODO(https://fxbug.dev/570694755): Allow `#include "internal.h"` to resolve `zircon/system/ulib/tftp/internal.h`.
+    # @bazel2gn:skip
+    copts = ["-Izircon/system/ulib/tftp"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//sdk/lib/fdio",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/tftp",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "tftp-test-pkg",
+    package_name = "tftp-test",
+    unit_tests = [":tftp-test"],
+    visibility = ["//visibility:private"],
+)

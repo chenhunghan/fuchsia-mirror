@@ -7,6 +7,7 @@
 use crate::object::{HandleValue, JobDispatcher, ProcessDispatcher, ThreadDispatcher};
 use crate::user_copy::{UserInPtr, UserOutPtr};
 use crate::userabi::VDso;
+use crate::vm::vm_mapping::VmMapping;
 use crate::vm::vm_object::VmObjectReadWriteOptions;
 use boot_options::BootOptions;
 use debug::ltracef;
@@ -62,7 +63,7 @@ pub fn sys_process_create(
         new_proc.dispatcher().get_koid(),
         ZX_OBJ_TYPE_PROCESS,
         sp,
-        "job" => crate::ktrace_rs::Koid(new_proc.dispatcher().job().map(|j| j.get_koid()).unwrap_or(0)),
+        "job" => crate::ktrace_rs::Koid(new_proc.dispatcher().job().get_koid()),
     );
     // GCC workaround - in the GCC config the ktrace_rs::kernel_object!() macro is disabled
     // so the parameters are not used and GCC complains that ZX_OBJ_TYPE_PROCESS is unused.
@@ -122,7 +123,7 @@ pub fn sys_process_create_shared(
         new_proc.dispatcher().get_koid(),
         ZX_OBJ_TYPE_PROCESS,
         sp,
-        "job" => crate::ktrace_rs::Koid(new_proc.dispatcher().job().map(|j| j.get_koid()).unwrap_or(0)),
+        "job" => crate::ktrace_rs::Koid(new_proc.dispatcher().job().get_koid()),
     );
 
     let (p_handle, v_handle) = ProcessDispatcher::with_current(|up| -> Result<_, Status> {
@@ -297,7 +298,7 @@ pub fn sys_process_write_memory(
     // TODO(https://fxbug.dev/42106188): Inform the mapping that we are going to ignore its
     // permissions and perform a write. This provides it the chance to ensure our writes go to a
     // mapping local clone to avoid corrupting a potentially read-only VMO.
-    let vm_mapping = vm_mapping.force_writable()?;
+    let vm_mapping = VmMapping::force_writable(vm_mapping)?;
 
     let vmo = vm_mapping.vmo().ok_or(Status::NOT_FOUND)?;
 

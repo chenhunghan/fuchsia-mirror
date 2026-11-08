@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::{BlockContainer, CopyBytes, ReadBytes, WriteBytes};
+use crate::{BlockContainer, CopyBytes, ReadBytes, WriteBytes, constants};
 
 #[derive(Debug)]
 pub struct Container {
@@ -22,7 +22,7 @@ impl Container {
     }
 
     pub fn read_only(vmo: &zx::Vmo) -> Result<Self, zx::Status> {
-        let vmo_size = vmo.get_size()? as usize;
+        let vmo_size = std::cmp::min(vmo.get_size()?, constants::MAX_VMO_SIZE as u64) as usize;
         let flags = zx::VmarFlags::PERM_READ | zx::VmarFlags::REQUIRE_NON_RESIZABLE;
         let buffer_addr = Self::map_vmo(vmo, vmo_size, flags)?;
         Ok(Self { buffer_addr, vmo_size })

@@ -1,0 +1,36 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fidl_library(
+    name = "fuchsia.hardware.ethernet",
+    srcs = ["ethernet.fidl"],
+    enable_banjo = True,
+    enable_cpp = False,
+    enable_rust_next = False,
+
+    #  ________  _________  ________  ________
+    # |\   ____\|\___   ___\\   __  \|\   __  \
+    # \ \  \___|\|___ \  \_\ \  \|\  \ \  \|\  \
+    #  \ \_____  \   \ \  \ \ \  \\\  \ \   ____\
+    #   \|____|\  \   \ \  \ \ \  \\\  \ \  \___|
+    #     ____\_\  \   \ \__\ \ \_______\ \__\
+    #    |\_________\   \|__|  \|_______|\|__|
+    #    \|_________|
+    #
+    # New drivers should not use fuchsia.hardware.ethernet, but use
+    # fuchsia.hardware.network.driver banjo instead.
+    #
+    # TODO(https://fxbug.dev/42154225): Migrate all of these away from
+    # fuchsia.hardware.ethernet.
+    visibility = [
+        "//src/connectivity/ethernet/drivers:__subpackages__",
+        "//src/connectivity/wlan/drivers/wlansoftmac:__pkg__",
+        "//src/lib/ddktl/tests:__pkg__",
+    ],
+    deps = ["//zircon/vdso/zx"],
+)

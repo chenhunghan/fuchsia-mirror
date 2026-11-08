@@ -40,9 +40,6 @@ LogMessageStore::LogMessageStore(StorageSize max_block_capacity, StorageSize max
                                  std::optional<zx::time_boot> ignore_before_timestamp)
     : buffer_stats_(max_buffer_capacity),
       block_stats_(max_block_capacity),
-      incremental_stats_(/*message_count=*/0, /*deduplicated_message_count=*/0,
-                         /*first_timestamp=*/std::nullopt,
-                         /*last_timestamp=*/std::nullopt),
       ignore_before_timestamp_(ignore_before_timestamp),
       redactor_(redactor),
       encoder_(std::move(encoder)) {
@@ -75,14 +72,7 @@ bool LogMessageStore::Add(LogSink::MessageOr message) {
     for (std::string& tag : message.value().tags) {
       redactor_->Redact(tag);
     }
-
-    if (!incremental_stats_.first_timestamp.has_value()) {
-      incremental_stats_.first_timestamp = message.value().time;
-    }
-    incremental_stats_.last_timestamp = message.value().time;
   }
-
-  incremental_stats_.message_count++;
 
   const std::string& log_msg = message.is_ok() ? message.value().msg : message.error();
   const int32_t& log_severity = (message.is_ok()) ? message.value().severity : kDefaultLogSeverity;
@@ -95,8 +85,6 @@ bool LogMessageStore::Add(LogSink::MessageOr message) {
     last_pushed_message_count_++;
     return true;
   }
-
-  incremental_stats_.deduplicated_message_count++;
 
   // 2. Push the repeated message if any.
   if (last_pushed_message_count_ > 1) {
@@ -162,13 +150,14 @@ LogMessageStore::ConsumeResult LogMessageStore::Consume() {
   }
 
   // We assume all messages end with a newline character.
-  ConsumeResult result(fxl::JoinStrings(buffer_), /*end_of_block=*/false, incremental_stats_);
+  ConsumeResult result{
+      .log = fxl::JoinStrings(buffer_),
+      .end_of_block = false,
+  };
 
   buffer_.clear();
   buffer_stats_.Reset();
   num_messages_dropped_ = 0;
-  incremental_stats_ = LogStats(/*message_count=*/0, /*deduplicated_message_count=*/0,
-                                /*first_timestamp=*/std::nullopt, /*last_timestamp=*/std::nullopt);
 
   // Reset the encoder at the end of a block.
   if (block_stats_.IsFull()) {
@@ -193,8 +182,6 @@ void LogMessageStore::Reset() {
   ResetLastPushedMessage();
   repeat_buffer_count_ = 0;
   num_messages_dropped_ = 0;
-  incremental_stats_ = LogStats(/*message_count=*/0, /*deduplicated_message_count=*/0,
-                                /*first_timestamp=*/std::nullopt, /*last_timestamp=*/std::nullopt);
   ignore_before_timestamp_ = std::nullopt;
   to_append_ = std::nullopt;
 }

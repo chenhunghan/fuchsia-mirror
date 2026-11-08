@@ -347,7 +347,7 @@ fn extract_offer_config_val(offer: &DmlOffer) -> Value {
             return props.clone();
         }
         if !meta.extra.is_empty() {
-            return Value::Object(meta.extra.clone().into_iter().collect());
+            return Value::Object(meta.extra.clone());
         }
         return Value::Object(serde_json::Map::new());
     }
@@ -355,7 +355,7 @@ fn extract_offer_config_val(offer: &DmlOffer) -> Value {
         return props.clone();
     }
     if !offer.extra.is_empty() {
-        return Value::Object(offer.extra.clone().into_iter().collect());
+        return Value::Object(offer.extra.clone());
     }
     Value::Object(serde_json::Map::new())
 }
@@ -512,12 +512,14 @@ fn resolve_bti_iommus(
 /// // BTI constraint before.
 /// {
 ///   "id": 0,
+///   "mask": 31,
 ///   "iommu": "#foo"
 /// }
 ///
 /// // BTI constraint after.
 /// {
 ///   "id": 0,
+///   "mask": 31,
 ///
 ///   // Assuming the ID of IOMMU "foo" is 2.
 ///   "iommu_id": 2
@@ -619,10 +621,21 @@ pub fn compile_board(args: &CompileBoardArgs, year: &str) -> Result<(), anyhow::
     // Process children
     for child in &board_dml.children {
         let idx = get_or_create_device_idx(&mut devices, &child.name, child.url.clone());
-        devices[idx].compatible = child.compatible.clone();
-        devices[idx].id = child.id;
-        devices[idx].disabled = child.disabled;
-        devices[idx].driver_host = child.driver_host.clone();
+        if child.compatible.is_some() {
+            devices[idx].compatible = child.compatible.clone();
+        }
+        if child.id.is_some() {
+            devices[idx].id = child.id;
+        }
+        if child.disabled.is_some() {
+            devices[idx].disabled = child.disabled;
+        }
+        if child.driver_host.is_some() {
+            devices[idx].driver_host = child.driver_host.clone();
+        }
+        if child.publish_priority.is_some() {
+            devices[idx].publish_priority = child.publish_priority;
+        }
         // Map the child device name to its driver's config ID in `driver_config_map`.
         if let Some(url) = &child.url {
             // Extract driver name from component URL (e.g. "fuchsia-pkg://.../buttons#meta/buttons.cm" -> "buttons").
@@ -2677,7 +2690,14 @@ mod tests {
                     },
                     {
                         "name": "node_enabled",
-                        "compatible": "fuchsia,enabled"
+                        "compatible": "fuchsia,enabled",
+                        "publish_priority": 5
+                    },
+                    {
+                        "name": "node_enabled",
+                        "metadata": [
+                            { "id": "test.meta", "data": [1, 2] }
+                        ]
                     }
                 ],
                 "offers": [
@@ -2725,7 +2745,10 @@ mod tests {
         assert_eq!(explicit_false.disabled, Some(false));
 
         let normal = devices.iter().find(|d| d.name.as_deref() == Some("node_enabled")).unwrap();
+        assert_eq!(normal.compatible.as_deref(), Some("fuchsia,enabled"));
         assert_eq!(normal.disabled, None);
+        assert_eq!(normal.publish_priority, Some(5));
+        assert_eq!(disabled.publish_priority, None);
 
         let offer_only =
             devices.iter().find(|d| d.name.as_deref() == Some("node_offer_only")).unwrap();
@@ -2793,6 +2816,7 @@ mod tests {
                                 {
                                     "iommu": "#arm-smmu",
                                     "id": 1,
+                                    "mask": 31,
                                     "name": "bti_0"
                                 },
                                 {
@@ -2858,10 +2882,12 @@ mod tests {
         assert_eq!(btis.len(), 3);
         assert_eq!(btis[0].id, 1);
         assert_eq!(btis[0].iommu_id, 1);
+        assert_eq!(btis[0].bti_id_mask, Some(31));
         assert_eq!(btis[0].name.as_deref(), Some("bti_0"));
 
         assert_eq!(btis[1].id, 2);
         assert_eq!(btis[1].iommu_id, 1);
+        assert_eq!(btis[1].bti_id_mask, None);
         assert_eq!(btis[1].name.as_deref(), Some("bti_1"));
 
         assert_eq!(btis[2].id, 3);

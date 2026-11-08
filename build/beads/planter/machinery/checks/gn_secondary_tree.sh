@@ -6,8 +6,9 @@
 set -euo pipefail
 
 # Rejects Bazel build files added or modified under build/secondary/, Bazel
-# dependencies on //build/secondary/... labels, and bazel2gn target-map entries
-# pointing into build/secondary/.
+# dependencies on //build/secondary/... labels, bazel2gn target-map entries
+# pointing into build/secondary/, and new MODULE.bazel repositories over
+# current-layout third_party/<name>/src code.
 #
 # build/secondary/ is GN's secondary source tree: GN-only overlay BUILD.gn files
 # for third-party code that ships without one. Bazel has no equivalent, so a
@@ -21,6 +22,7 @@ WORKDIR="${PLANTER_WORKDIR:-.}"
 python3 - "$WORKDIR" <<'PYEOF'
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -119,6 +121,48 @@ for path in sorted(changed):
                 "line": 0,
                 "message": f"Bazel file depends on a GN secondary-tree label: {line[1:].strip()}",
                 "remediation": REMEDIATION,
+            })
+
+# Check new repositories over current-layout third-party code: a third_party/<name>/ directory
+# whose upstream code lives in third_party/<name>/src is tracked in fuchsia.git, so its
+# BUILD.bazel belongs next to its BUILD.gn rather than in a new MODULE.bazel repository.
+# A repository is only justified when src/ ships its own Bazel package markers.
+LAYOUT_REMEDIATION = (
+    "This third-party directory already uses the current layout (upstream code in "
+    "third_party/<name>/src, Fuchsia build files in third_party/<name>/, tracked in "
+    "fuchsia.git). Do not add a (new_)local_repository for it in a MODULE.bazel file. "
+    "Instead add third_party/<name>/BUILD.bazel (next to its BUILD.gn, mirroring it) with "
+    "cc_library/filegroup targets over the files it needs, give them the needed visibility, and "
+    "depend on //third_party/<name>:<target> from the migrated package. Remove the "
+    "repository and any @<repo>// labels."
+)
+BAZEL_PKG_MARKERS = ("BUILD", "BUILD.bazel", "WORKSPACE", "WORKSPACE.bazel", "MODULE.bazel")
+REPO_PATH_RE = re.compile(r'^\+\s*path\s*=\s*"(third_party/[^/"]+)(?:/src)?/?"')
+
+
+def current_layout_third_party(rel):
+    src = os.path.join(workdir, rel, "src")
+    if not os.path.isdir(src):
+        return False
+    return not any(os.path.exists(os.path.join(src, m)) for m in BAZEL_PKG_MARKERS)
+
+
+for path in sorted(changed):
+    if not path.endswith("MODULE.bazel"):
+        continue
+    diff = git(["diff", "-U0", change_base, "--", path])
+    for line in diff.splitlines():
+        m = REPO_PATH_RE.match(line)
+        if m and current_layout_third_party(m.group(1)):
+            findings.append({
+                "source": "gn_secondary_tree",
+                "category": "repository_for_current_layout_third_party",
+                "severity": "error",
+                "file": path,
+                "line": 0,
+                "message": f"Added repository path '{m.group(1)}' points at current-layout "
+                           "third-party code that can host its own BUILD.bazel.",
+                "remediation": LAYOUT_REMEDIATION,
             })
 
 print(json.dumps(findings, indent=2))

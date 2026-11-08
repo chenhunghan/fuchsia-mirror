@@ -4,8 +4,8 @@
 
 #include <fidl/test.transport/cpp/driver/wire.h>
 #include <lib/async_patterns/testing/cpp/dispatcher_bound.h>
+#include <lib/driver/testing/cpp/driver_runtime.h>
 #include <lib/fdf/cpp/dispatcher.h>
-#include <lib/fdf/dispatcher.h>
 #include <lib/sync/cpp/completion.h>
 
 #include <memory>
@@ -13,13 +13,12 @@
 #include <gtest/gtest.h>
 
 #include "sdk/lib/fidl_driver/tests/transport/api_test_helper.h"
-#include "sdk/lib/fidl_driver/tests/transport/scoped_fake_driver.h"
 #include "src/lib/testing/predicates/status.h"
 
 namespace {
 
 TEST(ServerBindingGroup, Control) {
-  fidl_driver_testing::ScopedFakeDriver driver;
+  fdf_testing::DriverRuntime runtime;
   auto [dispatcher, dispatcher_shutdown] = CreateSyncDispatcher();
 
   struct Server : public fdf::WireServer<test_transport::TwoWayTest> {
@@ -81,7 +80,7 @@ TEST(ServerBindingGroup, Control) {
 }
 
 TEST(ServerBindingGroup, CloseHandler) {
-  fidl_driver_testing::ScopedFakeDriver driver;
+  fdf_testing::DriverRuntime runtime;
   auto [dispatcher, dispatcher_shutdown] = CreateSyncDispatcher();
 
   struct Server : public fdf::WireServer<test_transport::EmptyProtocol> {};
@@ -125,7 +124,7 @@ TEST(ServerBindingGroup, CloseHandler) {
 
 TEST(ServerBindingGroup, CannotBindUnsynchronizedDispatcher) {
   DEBUG_ONLY_TEST_MAY_SKIP();
-  fidl_driver_testing::ScopedFakeDriver driver;
+  fdf_testing::DriverRuntime runtime;
 
   libsync::Completion dispatcher_shutdown;
   zx::result dispatcher = fdf::UnsynchronizedDispatcher::Create(

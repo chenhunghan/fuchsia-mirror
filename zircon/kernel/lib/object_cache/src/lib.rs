@@ -29,6 +29,7 @@ use crate::counters::define_kcounter;
 use crate::kernel::percpu::PerCpu as KernelPerCpu;
 use crate::kernel::thread::{AutoPreemptDisabler, current_memory_allocation_state_is_enabled};
 use crate::kernel::types::VAddr;
+use crate::ksync_kernel::TrackedMutex;
 use crate::vm::page_state::VmPageState;
 use crate::vm::page_state::bindings::vm_page_state;
 use crate::vm::{physmap, pmm};
@@ -44,7 +45,7 @@ use fbl::{
     DoublyLinkedListNode, HasRefCount, ManagedPtr, MutPtr, PtrTraits, Recyclable, RefCounted,
     RefPtr, TrackingSize, magic,
 };
-use ksync::{KCell, KMutex, RawMutex};
+use ksync::{KCell, KMutex};
 use pin_init::{Init, PinInit, init_from_closure, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
 
@@ -639,7 +640,7 @@ struct SlabControl<T, A: SlabAllocator> {
     list_node: DoublyLinkedListNode<Slab<T, A>>,
     orphan_flag: AtomicBool,
     #[mutex]
-    lock: KMutex<RawMutex>,
+    lock: KMutex<TrackedMutex>,
     #[guarded_by(lock)]
     object_cache: NonNull<SingleCache<T, A>>,
     #[pin]
@@ -840,7 +841,8 @@ impl<T, A: SlabAllocator> Slab<T, A> {
         let base_raw = Self::base_ptr(slab_ptr);
         // SAFETY: `slab_ptr` is valid and uniquely owned; `PinnedDrop` checks `is_empty()` and
         // empties `free_list` via `clear_unsafe` (or the per-entry erase loop when
-        // `ENTRY_ALLOW_CLEAR_UNSAFE` is false), and `RawMutex` drop asserts the lock is not held.
+        // `ENTRY_ALLOW_CLEAR_UNSAFE` is false), and `TrackedMutex` drop asserts the lock is not
+        // held.
         unsafe {
             core::ptr::drop_in_place(slab_ptr);
         }
@@ -1089,7 +1091,7 @@ pub struct SingleCache<T, A: SlabAllocator = DefaultAllocator> {
     reserve_slabs: usize,
     slab_free_ops_in_flight: AtomicU32,
     #[mutex]
-    lock: KMutex<RawMutex>,
+    lock: KMutex<TrackedMutex>,
     #[guarded_by(lock)]
     slab_count: usize,
     // Lists of slabs in the object cache with the following functions:
@@ -1130,7 +1132,7 @@ impl<T, A: SlabAllocator> PinnedDrop for SingleCache<T, A> {
         );
 
         let this = self.as_ref().get_ref();
-        {
+        let (full_list_ptr, partial_list_ptr) = {
             ksync::lock!(let guard = this.lock_lock());
             let fields = guard.fields();
 
@@ -1147,37 +1149,43 @@ impl<T, A: SlabAllocator> PinnedDrop for SingleCache<T, A> {
             for slab in fields.partial_list.iter() {
                 slab.set_orphan();
             }
-        }
+            let token = guard.token();
+            // SAFETY: `guard` holds `this.lock`, and after all slabs in `full_list` and
+            // `partial_list` are marked orphan above, no thread in `Slab::free` will
+            // mutate `full_list` or `partial_list`.
+            unsafe { (this.full_list.as_ptr(token), this.partial_list.as_ptr(token)) }
+        };
 
         // Wait for any threads racing in `Slab::free` to release their slab locks to
         // ensure that the cache lock is not destroyed while they hold it.
-        // We have exclusive `&mut Self` in `PinnedDrop` and all slabs in `full_list` and
-        // `partial_list` are marked orphan, so no thread in `Slab::free` will mutate the lists.
-        let mut projected = self.project();
-        let mut full_list = projected.full_list.as_mut().get_pinned_mut();
-        for slab in full_list.iter() {
+        // SAFETY: All slabs in `full_list` and `partial_list` were marked orphan under
+        // `this.lock` above, so no thread in `Slab::free` will mutate either list.
+        for slab in unsafe { (*full_list_ptr).iter() } {
             ksync::lock!(let _guard = slab.control.lock_lock());
         }
-        let mut partial_list = projected.partial_list.as_mut().get_pinned_mut();
-        for slab in partial_list.iter() {
+        for slab in unsafe { (*partial_list_ptr).iter() } {
             ksync::lock!(let _guard = slab.control.lock_lock());
         }
 
-        // Finally, wait until the `slab_free_ops_in_flight` count hits zero. There
-        // is an extremely small chance that there is a thread still in the process
-        // of releasing our `lock` which we contested during the "orphan" pass above.
-        // If we failed to synchronize with this thread (because we had already
-        // moved our slab to the free list, or removed it entirely), the
-        // `slab_free_ops_in_flight` count provides us one last way to make sure that
-        // this thread has completely exited our lock before we allow it to become
-        // destructed. Acq/Rel semantics here guarantee that we will properly see
-        // the full release of the lock as we destruct.
-        while projected.slab_free_ops_in_flight.load(Ordering::Acquire) != 0 {
+        // Finally, wait until the `slab_free_ops_in_flight` count hits zero before
+        // calling `self.project()` (which forms `&mut AtomicU32` on
+        // `slab_free_ops_in_flight`). There is an extremely small chance that there is
+        // a thread still in the process of releasing our `lock` which we contested
+        // during the "orphan" pass above. If we failed to synchronize with this thread
+        // (because we had already moved our slab to the free list, or removed it
+        // entirely), the `slab_free_ops_in_flight` count provides us one last way to
+        // make sure that this thread has completely exited our lock before we allow it
+        // to become destructed. Acq/Rel semantics here guarantee that we will properly
+        // see the full release of the lock as we destruct.
+        while this.slab_free_ops_in_flight.load(Ordering::Acquire) != 0 {
             libarch::r#yield();
         }
 
         // Clear all slab lists explicitly while `self` and `self.allocator` are still live.
+        let mut projected = self.project();
+        let mut full_list = projected.full_list.as_mut().get_pinned_mut();
         let mut empty_list = projected.empty_list.as_mut().get_pinned_mut();
+        let mut partial_list = projected.partial_list.as_mut().get_pinned_mut();
         full_list.as_mut().clear();
         empty_list.as_mut().clear();
         partial_list.as_mut().clear();
@@ -1340,6 +1348,13 @@ pub struct PerCpuCache<T, A: SlabAllocator = DefaultAllocator> {
     processor_count: usize,
     cpu_caches: Option<Pin<Array<ObjectCache<T, Single, A>>>>,
 }
+
+// SAFETY: Each per-CPU `ObjectCache<T, Single, A>` element is `Send` and `Sync` when `T: Send` and
+// `A: SlabAllocator + Send + Sync`.
+unsafe impl<T: Send, A: SlabAllocator + Send + Sync> Send for PerCpuCache<T, A> {}
+// SAFETY: Shared access to `PerCpuCache` delegates to per-CPU `ObjectCache<T, Single, A>`
+// instances which synchronize access via their internal locks and atomics.
+unsafe impl<T: Send, A: SlabAllocator + Send + Sync> Sync for PerCpuCache<T, A> {}
 
 impl<T, A: SlabAllocator> Default for PerCpuCache<T, A> {
     fn default() -> Self {

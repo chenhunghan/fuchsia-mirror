@@ -22,7 +22,7 @@
 #include <ktl/utility.h>
 #include <phys/allocation.h>
 #include <phys/stdio.h>
-#include <phys/uart-console.h>
+#include <phys/uart/driver.h>
 
 #include <ktl/enforce.h>
 

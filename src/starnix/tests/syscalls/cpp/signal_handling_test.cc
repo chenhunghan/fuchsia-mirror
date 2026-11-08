@@ -930,6 +930,9 @@ void spam_processes(std::atomic<bool> &done, std::latch &start) {
     if (pid == 0) {
       _exit(0);
     }
+    if (pid > 0) {
+      waitpid(pid, nullptr, 0);
+    }
     nanosleep(&ts, nullptr);
   }
 }
@@ -963,9 +966,9 @@ TEST(SignalHandling, SIGCHLDDeliveredToOnlyThreadNotBlockingIt) {
       sigaddset(&child_mask, SIGCHLD);
       start.count_down();
 
-      // wait for a SIGCHLD, 1 second.
+      // wait for a SIGCHLD, 30 seconds.
       timespec ts;
-      ts.tv_sec = 1;
+      ts.tv_sec = 30;
       ts.tv_nsec = 0;
       int ret = static_cast<int>(TEMP_FAILURE_RETRY(sigtimedwait(&child_mask, nullptr, &ts)));
       EXPECT_EQ(ret, SIGCHLD);
@@ -1378,8 +1381,9 @@ TEST(SignalHandling, FutexIsInterruptedBySignalHandler) {
 
 // Test to ensure that syscall restart machinery doesn't blindly trust user-controlled registers.
 TEST(SignalHandling, Repro347063218) {
-  pid_t pid = SAFE_SYSCALL(fork());
-  if (pid == 0) {
+  test_helper::ForkHelper helper;
+  helper.ExpectSignal(SIGILL);
+  helper.RunInForkedProcess([] {
     // crash with return register containing a bad value.
     constexpr uint64_t value = 0x8000'0000'0000'0000ul;
 #ifdef __x86_64__
@@ -1390,7 +1394,7 @@ TEST(SignalHandling, Repro347063218) {
         "udf #0\n"
         :
         : "r"(value)
-        : "r0");
+        : "x0");
 #elif __arm__
     __asm__ volatile(
         "mov r0, %0\n"
@@ -1400,15 +1404,14 @@ TEST(SignalHandling, Repro347063218) {
         : "r0");
 #elif __riscv
     __asm__ volatile(
-        "mv x0, %0\n"
+        "mv a0, %0\n"
         "unimp\n"
         :
         : "r"(value)
-        : "x0");
+        : "a0");
 #endif
-  }
-
-  SAFE_SYSCALL(waitpid(pid, nullptr, 0));
+  });
+  EXPECT_TRUE(helper.WaitForChildren());
 }
 
 #ifdef __x86_64__
@@ -1422,8 +1425,8 @@ void ignore_sigtrap(int signal_number) {}
 // the return register are unable to convince the kernel to rewind the instruction pointer into
 // arbitrary blocks of code.
 TEST(SignalHandling, Repro347756382) {
-  pid_t pid = SAFE_SYSCALL(fork());
-  if (pid == 0) {
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&] {
 // It should be sufficient to test this behavior on x64 where we have an existing repro case. The
 // logic for whether or not to trust register values is architecture-agnostic.
 #ifdef __x86_64__
@@ -1440,13 +1443,8 @@ TEST(SignalHandling, Repro347756382) {
         : "rdi");
 
 #endif
-    exit(EXIT_SUCCESS);
-  }
-
-  int status;
-  SAFE_SYSCALL(waitpid(pid, &status, 0));
-  EXPECT_TRUE(WIFEXITED(status));
-  EXPECT_EQ(WEXITSTATUS(status), 0);
+  });
+  EXPECT_TRUE(helper.WaitForChildren());
 }
 
 #if defined(__x86_64__)

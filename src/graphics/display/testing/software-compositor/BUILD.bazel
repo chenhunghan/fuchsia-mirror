@@ -1,0 +1,63 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        # Include all tests in the package.
+        ":software-compositor-tests",
+    ],
+    visibility = ["//src/graphics/display:__pkg__"],
+)
+
+fx_cc_library(
+    name = "software-compositor",
+    srcs = [
+        "pixel.cc",
+        "software-compositor.cc",
+    ],
+    hdrs = [
+        "pixel.h",
+        "software-compositor.h",
+    ],
+    build_flags = [
+        # Always optimize speed, even if it's debug mode.
+        "//build/config:optimize_speed",
+    ],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.images2:fuchsia.images2_cpp",
+        "//src/graphics/display/lib/api-types/cpp",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "software-compositor-tests-bin",
+    srcs = ["software-compositor-tests.cc"],
+    build_flags = [
+        # Always optimize speed, even if it's debug mode.
+        "//build/config:optimize_speed",
+    ],
+    # Bazel's @com_google_googletest//:gtest bundles both gtest and gmock, while
+    # GN separates //third_party/googletest:gmock and :gtest.
+    deps = [
+        ":software-compositor",
+        "//sdk/lib/fit",
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ],  # @bazel2gn:raw_overwrite:[ ":software-compositor", "//sdk/lib/fit", "//src/lib/fxl/test:gtest_main", "//third_party/googletest:gmock", "//third_party/googletest:gtest" ]
+)
+
+fx_unittest_package(
+    name = "software-compositor-tests",
+    unit_tests = [":software-compositor-tests-bin"],
+)

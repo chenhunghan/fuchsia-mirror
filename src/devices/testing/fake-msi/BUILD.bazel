@@ -1,0 +1,38 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules:zx_library.bzl", "cc_static_library_zx")
+
+package(default_applicable_licenses = ["//:license"])
+
+cc_static_library_zx(
+    name = "fake-msi",
+    testonly = True,
+    srcs = ["fake-msi.cc"],
+    hdrs = ["include/lib/fake-msi/msi.h"],
+    build_flags = ["//build/config/fuchsia:static_cpp_standard_library"],
+    implementation_deps = [
+        "//sdk/lib/fdio",
+        "//sdk/lib/stdcompat",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/zircon-internal",
+        "//zircon/system/ulib/zx",
+    ],
+    includes = ["include"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/devices/pci/drivers/pci/test:__pkg__",
+        "//src/devices/pci/drivers/pciroot-banjo-adapter:__pkg__",
+        "//src/devices/pci/lib/pci:__pkg__",
+        "//src/devices/testing/fake-msi/test:__pkg__",
+    ],
+    deps = [
+        # Note: technically this dependency isn't necessary in the ZN build,
+        # but if it is missing the fake-msi --> fake-object dependency is
+        # not properly captured in the metadata passed to the GN build.
+        # This will become moot when both libraries are migrated to that
+        # build.
+        "//src/devices/testing/fake-object",
+    ],
+)

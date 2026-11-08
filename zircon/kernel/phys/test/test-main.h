@@ -10,7 +10,7 @@
 #include <lib/arch/ticks.h>
 
 #include <ktl/variant.h>
-#include <phys/main.h>
+#include <phys/runtime/main.h>
 #include <phys/symbolize.h>
 
 class AddressSpace;

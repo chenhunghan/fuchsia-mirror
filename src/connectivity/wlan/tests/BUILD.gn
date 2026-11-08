@@ -17,9 +17,9 @@ group("tests") {
 group("tests_host") {
   testonly = true
   deps = [
-    "core:tests_host",
-    "utils:odpm_utils_test($host_toolchain)",
-    "wlancfg:tests_host",
-    "wlanix:tests_host",
+    "core:tests_host($host_toolchain)",
+    "utils:tests_host($host_toolchain)",
+    "wlancfg:tests_host($host_toolchain)",
+    "wlanix:tests_host($host_toolchain)",
   ]
 }

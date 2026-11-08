@@ -7,6 +7,7 @@
 #include <elf.h>
 #include <lib/zircon-internal/align.h>
 #include <lib/zx/vmar.h>
+#include <zircon/errors.h>
 #include <zircon/status.h>
 
 #include <algorithm>
@@ -14,7 +15,6 @@
 #include <string_view>
 
 #include "restricted_symbols.h"
-#include "zircon/system/public/zircon/errors.h"
 
 namespace {
 

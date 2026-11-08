@@ -5,6 +5,7 @@
 
 """Unit-tests for rbe_profile.py."""
 
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -302,6 +303,27 @@ class RbeProfileTest(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             rbe_profile.fake(nonexistent_key=True)
         self.assertIn("nonexistent_key", str(ctx.exception))
+
+    def test_workspace_symlinks_empty_when_no_active_config(self) -> None:
+        symlinks = rbe_profile.workspace_symlinks(Path("/fake"))
+        self.assertEqual(symlinks, [])
+
+    def test_workspace_symlinks_present_when_active_config_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            fuchsia_dir = Path(td)
+            config_file = fuchsia_dir / rbe_profile._CONFIG_PATH
+            config_file.parent.mkdir(parents=True, exist_ok=True)
+            config_file.write_text("{}")
+            symlinks = rbe_profile.workspace_symlinks(fuchsia_dir)
+            self.assertEqual(
+                symlinks,
+                [
+                    rbe_profile.WorkspaceSymlink(
+                        workspace_relpath=rbe_profile._CONFIG_PATH,
+                        target_path=config_file,
+                    )
+                ],
+            )
 
 
 if __name__ == "__main__":

@@ -1,0 +1,150 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":debug_data_processor_unittests"],
+    visibility = ["//src/sys:__pkg__"],
+)
+
+fx_cc_library(
+    name = "lib",
+    testonly = True,
+    srcs = [
+        "data_processor.cc",
+        "data_processor_fidl.cc",
+    ],
+    hdrs = [
+        "abstract_data_processor.h",
+        "common.h",
+        "data_processor.h",
+        "data_processor_fidl.h",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.debugdata:fuchsia.debugdata_hlcpp",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_hlcpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/fdio",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl",
+        "//src/lib/json_parser",
+        "//src/sys/test_manager/fidl/fuchsia.test.debug:fuchsia.test.debug_hlcpp",
+        "//zircon/system/ulib/debugdata",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_binary(
+    name = "debug_data_processor_bin",
+    testonly = True,
+    srcs = ["processor_main.cc"],
+    gn_output_name = "debug_data_processor",
+    tags = ["manual"],
+    deps = [
+        ":lib",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_hlcpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/sys/test_manager/fidl/fuchsia.test.debug:fuchsia.test.debug_hlcpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "debug_data_processor_packaged_bin",
+    testonly = True,
+    binary = ":debug_data_processor_bin",
+    binary_name = "debug_data_processor",
+)
+
+fx_component_manifest(
+    name = "debug_data_processor_manifest",
+    testonly = True,
+    component_name = "debug_data_processor",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/debug_data_processor.cml",
+)
+
+fx_component(
+    name = "debug_data_processor",
+    testonly = True,
+    compiled_manifest = ":debug_data_processor_manifest",
+    visibility = ["//src/sys/test_manager:__pkg__"],
+    deps = [":debug_data_processor_packaged_bin"],
+)
+
+fx_cc_test_binary(
+    name = "test_bin",
+    srcs = [
+        "data_processor_fidl_unittests.cc",
+        "data_processor_unittests.cc",
+        "test_data_processor.h",
+    ],
+    # Source files use angle-bracket includes for repo-root-relative paths.
+    copts = ["-I."],  # @bazel2gn:skip
+    gn_output_name = "debug_data_processor_unittests",
+    tags = ["manual"],
+    deps = [
+        ":lib",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+    ],
+)
+
+fx_packaged_binary(
+    name = "test_packaged_bin",
+    testonly = True,
+    binary = ":test_bin",
+    binary_name = "debug_data_processor_unittests",
+)
+
+fx_component_manifest(
+    name = "debug_data_processor_unittests_manifest",
+    testonly = True,
+    component_name = "debug_data_processor_unittests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners:tmp_storage.shard.cml",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/debug_data_processor_unittests.cml",
+)
+
+fx_test_component(
+    name = "debug_data_processor_unittests_component",
+    compiled_manifest = ":debug_data_processor_unittests_manifest",
+    deps = [":test_packaged_bin"],
+)
+
+fx_package(
+    name = "debug_data_processor_unittests_package",
+    package_name = "debug_data_processor_unittests",
+    test_components = [":debug_data_processor_unittests_component"],
+)
+
+fx_test(
+    name = "debug_data_processor_unittests",
+    max_log_severity = "ERROR",
+    package = ":debug_data_processor_unittests_package",
+)

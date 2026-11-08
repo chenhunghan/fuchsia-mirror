@@ -3,8 +3,7 @@
 // found in the LICENSE file.
 
 use crate::fs::{HidePid, ProcFs};
-use itertools::Itertools;
-use regex_lite::Regex;
+use fuchsia_rcu::RcuReadScope;
 use starnix_core::mm::{
     MemoryAccessor, MemoryAccessorExt, MemoryManager, MemoryStats, PAGE_SIZE, ProcMapsFile,
     ProcPagemapFile, ProcSmapsFile, ProcSmapsRollupFile, SelfStatsCacheMode,
@@ -15,7 +14,6 @@ use starnix_core::task::{
 };
 use starnix_core::vfs::buffers::{InputBuffer, OutputBuffer};
 use starnix_core::vfs::pseudo::dynamic_file::{DynamicFile, DynamicFileBuf, DynamicFileSource};
-use starnix_core::vfs::pseudo::simple_directory::SimpleDirectory;
 use starnix_core::vfs::pseudo::simple_file::{
     BytesFile, BytesFileOps, SimpleFileNode, parse_i32_file, parse_unsigned_file,
     serialize_for_file,
@@ -24,11 +22,12 @@ use starnix_core::vfs::pseudo::stub_empty_file::StubEmptyFile;
 use starnix_core::vfs::pseudo::vec_directory::{VecDirectory, VecDirectoryEntry};
 use starnix_core::vfs::{
     CallbackSymlinkNode, CheckAccessReason, CloseFreeSafe, DirEntry, DirEntryOps,
-    DirectoryEntryType, DirentSink, FdNumber, FileObject, FileOps, FileSystemHandle, FsNode,
-    FsNodeHandle, FsNodeInfo, FsNodeOps, FsStr, FsString, ProcMountinfoFile, ProcMountsFile,
-    SeekTarget, StatxFlags, SymlinkTarget, default_seek, emit_dotdot, fileops_impl_directory,
-    fileops_impl_noop_sync, fileops_impl_seekable, fileops_impl_unbounded_seek,
-    fs_node_impl_dir_readonly, fs_node_impl_dir_readonly_ops,
+    DirectoryEntryType, DirentSink, FdFlags, FdNumber, FdTable, FileObject, FileOps,
+    FileSystemHandle, FsNode, FsNodeHandle, FsNodeInfo, FsNodeOps, FsStr, FsString,
+    MountNamespaceFile, Namespace, ProcMountinfoFile, ProcMountsFile, SeekTarget, StatxFlags,
+    SymlinkTarget, default_seek, emit_dotdot, fileops_impl_directory, fileops_impl_noop_sync,
+    fileops_impl_seekable, fileops_impl_unbounded_seek, fs_node_impl_dir_readonly,
+    fs_node_impl_dir_readonly_ops, fs_node_impl_not_dir, fs_node_impl_symlink,
 };
 use starnix_logging::{bug_ref, track_stub};
 use starnix_sync::{DynamicLockDepRwLock, LockDepReadGuard};
@@ -39,7 +38,6 @@ use starnix_uapi::auth::{
     CAP_SYS_NICE, CAP_SYS_RESOURCE, PTRACE_MODE_ATTACH_FSCREDS, PTRACE_MODE_NOAUDIT,
     PTRACE_MODE_READ_FSCREDS, PtraceAccessMode,
 };
-use starnix_uapi::device_id::DeviceId;
 use starnix_uapi::errors::Errno;
 use starnix_uapi::file_mode::{Access, FileMode, mode};
 use starnix_uapi::open_flags::OpenFlags;
@@ -51,7 +49,7 @@ use starnix_uapi::{
 };
 use std::borrow::Cow;
 use std::ops::{Deref, Range};
-use std::sync::{Arc, LazyLock, Weak};
+use std::sync::{Arc, Weak};
 
 /// Static table of entries in `/proc/<pid>` and `/proc/<pid>/task/<tid>`.
 const TASK_ENTRIES: &[(&[u8], FileMode)] = &[
@@ -110,6 +108,9 @@ fn task_entries(scope: TaskEntryScope) -> &'static [(&'static [u8], FileMode)] {
 pub struct TaskDirectory {
     target: TaskContainer,
     inode_range: Range<ino_t>,
+    /// Inode numbers for the entries of `attr`, reserved here so that they don't change each time
+    /// `attr` is looked up again.
+    attr_inode_range: Range<ino_t>,
 }
 
 #[derive(Clone)]
@@ -134,6 +135,7 @@ impl TaskDirectory {
                 task_directory: Arc::new(TaskDirectory {
                     target,
                     inode_range: fs.allocate_ino_range(task_entries(scope).len()),
+                    attr_inode_range: fs.allocate_ino_range(ATTR_ENTRIES.len()),
                 }),
             },
             FsNodeInfo::new(mode!(IFDIR, 0o555), creds),
@@ -301,34 +303,7 @@ impl FsNodeOps for TaskDirectoryNode {
             b"environ" => Box::new(EnvironFile::new_node(target)),
             b"auxv" => Box::new(AuxvFile::new_node(target)),
             b"comm" => Box::new(CommFile::new_node(target)),
-            b"attr" => {
-                let dir = SimpleDirectory::new();
-                dir.edit(&fs, |dir| {
-                    for (attr, name) in [
-                        (security::ProcAttr::Current, "current"),
-                        (security::ProcAttr::Exec, "exec"),
-                        (security::ProcAttr::FsCreate, "fscreate"),
-                        (security::ProcAttr::KeyCreate, "keycreate"),
-                        (security::ProcAttr::SockCreate, "sockcreate"),
-                    ] {
-                        dir.entry_etc(
-                            name.into(),
-                            AttrNode::new(target.clone(), attr),
-                            mode!(IFREG, 0o666),
-                            DeviceId::NONE,
-                            creds,
-                        );
-                    }
-                    dir.entry_etc(
-                        "prev".into(),
-                        AttrNode::new(target, security::ProcAttr::Previous),
-                        mode!(IFREG, 0o444),
-                        DeviceId::NONE,
-                        creds,
-                    );
-                });
-                Box::new(dir)
-            }
+            b"attr" => Box::new(AttrDirectory::new(target, self.attr_inode_range.clone())),
             b"ns" => Box::new(NsDirectory::new(target)),
             b"mountinfo" => Box::new(ProcMountinfoFile::new_node(target)),
             b"mounts" => Box::new(ProcMountsFile::new_node(target)),
@@ -435,8 +410,9 @@ impl FsNodeOps for FdDirectory {
         _flags: OpenFlags,
     ) -> Result<Box<dyn FileOps>, Errno> {
         let task = self.target.get_task()?;
-        let fds = task.files().map_or_else(|_| Vec::new(), |files| files.get_all_fds());
-        Ok(VecDirectory::new_file(fds_to_directory_entries(fds)))
+        let entries =
+            task.files().map_or_else(|_| Vec::new(), |files| fds_to_directory_entries(&files));
+        Ok(VecDirectory::new_file(entries))
     }
 
     fn lookup(
@@ -469,18 +445,220 @@ impl FsNodeOps for FdDirectory {
     }
 }
 
-const NS_ENTRIES: &[&str] = &[
-    "cgroup",
-    "ipc",
-    "mnt",
-    "net",
-    "pid",
-    "pid_for_children",
-    "time",
-    "time_for_children",
-    "user",
-    "uts",
+/// The entries in `/proc/<pid>/ns`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NsType {
+    Cgroup,
+    Ipc,
+    Mnt,
+    Net,
+    Pid,
+    PidForChildren,
+    Time,
+    TimeForChildren,
+    User,
+    Uts,
+}
+
+impl NsType {
+    /// All entries, in `/proc/<pid>/ns` listing order.
+    const ALL: [NsType; 10] = [
+        NsType::Cgroup,
+        NsType::Ipc,
+        NsType::Mnt,
+        NsType::Net,
+        NsType::Pid,
+        NsType::PidForChildren,
+        NsType::Time,
+        NsType::TimeForChildren,
+        NsType::User,
+        NsType::Uts,
+    ];
+
+    /// Returns the entry's name in `/proc/<pid>/ns`.
+    fn name(self) -> &'static str {
+        match self {
+            NsType::Cgroup => "cgroup",
+            NsType::Ipc => "ipc",
+            NsType::Mnt => "mnt",
+            NsType::Net => "net",
+            NsType::Pid => "pid",
+            NsType::PidForChildren => "pid_for_children",
+            NsType::Time => "time",
+            NsType::TimeForChildren => "time_for_children",
+            NsType::User => "user",
+            NsType::Uts => "uts",
+        }
+    }
+
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "cgroup" => Some(NsType::Cgroup),
+            "ipc" => Some(NsType::Ipc),
+            "mnt" => Some(NsType::Mnt),
+            "net" => Some(NsType::Net),
+            "pid" => Some(NsType::Pid),
+            "pid_for_children" => Some(NsType::PidForChildren),
+            "time" => Some(NsType::Time),
+            "time_for_children" => Some(NsType::TimeForChildren),
+            "user" => Some(NsType::User),
+            "uts" => Some(NsType::Uts),
+            _ => None,
+        }
+    }
+
+    /// Returns the type of namespace the entry's link refers to: `pid_for_children` and
+    /// `time_for_children` refer to `pid` and `time` namespaces, so their link targets use the
+    /// `pid:` and `time:` prefixes.
+    fn link_type(self) -> Self {
+        match self {
+            NsType::PidForChildren => NsType::Pid,
+            NsType::TimeForChildren => NsType::Time,
+            ns_type => ns_type,
+        }
+    }
+
+    /// Returns the ID of `task`'s namespace of this type, or `ENOENT` if `task` has exited
+    /// (including zombies).
+    ///
+    /// Namespace types without per-namespace IDs in Starnix use fixed placeholder IDs from the
+    /// `0xEFFF_FFF9..=0xEFFF_FFFF` range that Linux uses for initial namespaces, which does not
+    /// collide with `Namespace::id` (counting up from 1).
+    /// TODO(https://fxbug.dev/297313673): Report real per-namespace `nsfs` inode IDs.
+    fn namespace_id(self, task: &Task) -> Result<u64, Errno> {
+        let fs = task.fs().map_err(|_| errno!(ENOENT))?;
+        Ok(match self {
+            NsType::Mnt => fs.namespace().id,
+            NsType::Net => 0xEFFF_FFF9,
+            NsType::Time | NsType::TimeForChildren => 0xEFFF_FFFA,
+            NsType::Cgroup => 0xEFFF_FFFB,
+            NsType::Pid | NsType::PidForChildren => 0xEFFF_FFFC,
+            NsType::User => 0xEFFF_FFFD,
+            NsType::Uts => 0xEFFF_FFFE,
+            NsType::Ipc => 0xEFFF_FFFF,
+        })
+    }
+}
+
+/// Parses a `/proc/<pid>/ns` entry name: either `<ns>` (the link) or `<ns>:[<id>]` (the link's
+/// target). Returns `None` if `name` is neither.
+fn parse_ns_entry_name(name: &[u8]) -> Option<(NsType, Option<u64>)> {
+    let name = std::str::from_utf8(name).ok()?;
+    let Some((ns, target)) = name.split_once(':') else {
+        return Some((NsType::from_name(name)?, None));
+    };
+    let ns_type = NsType::from_name(ns)?;
+    // Only the form that links actually point to is accepted: the `<ns>` of a target is never
+    // `pid_for_children` or `time_for_children`.
+    if ns_type.link_type() != ns_type {
+        return None;
+    }
+    let digits = target.strip_prefix('[')?.strip_suffix(']')?;
+    // Reject non-canonical forms like `+1` or `01` so they cannot create duplicate cached entries.
+    if digits.starts_with(['+', '0']) {
+        return None;
+    }
+    let id = digits.parse().ok()?;
+    Some((ns_type, Some(id)))
+}
+
+/// Entries exposed in `/proc/<pid>/attr` and `/proc/<pid>/task/<tid>/attr` with their modes, in
+/// the order that readdir lists them, which matches Linux.
+const ATTR_ENTRIES: &[(&str, security::ProcAttr, FileMode)] = &[
+    ("current", security::ProcAttr::Current, mode!(IFREG, 0o666)),
+    ("prev", security::ProcAttr::Previous, mode!(IFREG, 0o444)),
+    ("exec", security::ProcAttr::Exec, mode!(IFREG, 0o666)),
+    ("fscreate", security::ProcAttr::FsCreate, mode!(IFREG, 0o666)),
+    ("keycreate", security::ProcAttr::KeyCreate, mode!(IFREG, 0o666)),
+    ("sockcreate", security::ProcAttr::SockCreate, mode!(IFREG, 0o666)),
 ];
+
+/// Represents the `/proc/<pid>/attr` or `/proc/<pid>/task/<tid>/attr` directory.
+///
+/// This directory lazily creates its child entries on lookup. Each entry is owned by the task's
+/// effective uid/gid at the time it is looked up.
+///
+/// The inode numbers of the entries come from `inode_range`, which is reserved by the parent
+/// `TaskDirectory`. They therefore stay the same across instances of this directory for as long as
+/// that `TaskDirectory` lives, like the inode numbers of the other `/proc/<pid>` entries.
+#[derive(Clone)]
+struct AttrDirectory {
+    target: TaskContainer,
+    inode_range: Range<ino_t>,
+}
+
+impl AttrDirectory {
+    fn new(target: TaskContainer, inode_range: Range<ino_t>) -> Self {
+        Self { target, inode_range }
+    }
+}
+
+impl FsNodeOps for AttrDirectory {
+    fs_node_impl_dir_readonly!();
+
+    fn create_file_ops(
+        &self,
+        _node: &FsNode,
+        _current_task: &CurrentTask,
+        _flags: OpenFlags,
+    ) -> Result<Box<dyn FileOps>, Errno> {
+        Ok(Box::new(self.clone()))
+    }
+
+    fn lookup(
+        &self,
+        entry: &DirEntry,
+        _current_task: &CurrentTask,
+        name: &FsStr,
+    ) -> Result<FsNodeHandle, Errno> {
+        let (index, &(_, attr, mode)) = ATTR_ENTRIES
+            .iter()
+            .enumerate()
+            .find(|&(_, &(entry_name, _, _))| name == entry_name)
+            .ok_or_else(|| errno!(ENOENT))?;
+        // Entries of a task that no longer exists don't exist either.
+        let task = self.target.get_task().map_err(|_| errno!(ENOENT))?;
+        let ino = self.inode_range.start + index as ino_t;
+        Ok(entry.node.fs().create_node(
+            ino,
+            AttrNode::new(self.target.clone(), attr),
+            FsNodeInfo::new(mode, task.real_creds().euid_as_fscred()),
+        ))
+    }
+}
+
+/// `AttrDirectory` doesn't implement the `close` method.
+impl CloseFreeSafe for AttrDirectory {}
+impl FileOps for AttrDirectory {
+    fileops_impl_directory!();
+    fileops_impl_noop_sync!();
+    fileops_impl_unbounded_seek!();
+
+    fn readdir(
+        &self,
+        file: &FileObject,
+        _current_task: &CurrentTask,
+        sink: &mut dyn DirentSink,
+    ) -> Result<(), Errno> {
+        // Like Linux, listing the directory of a task that no longer exists fails.
+        let _task = self.target.get_task().map_err(|_| errno!(ENOENT))?;
+        emit_dotdot(file, sink)?;
+
+        // Skip through the entries until the current offset is reached.
+        // Subtract 2 from the offset to account for `.` and `..`.
+        for (index, &(name, _, mode)) in
+            ATTR_ENTRIES.iter().enumerate().skip(sink.offset() as usize - 2)
+        {
+            sink.add(
+                self.inode_range.start + index as ino_t,
+                sink.offset() + 1,
+                DirectoryEntryType::from_mode(mode),
+                name.into(),
+            )?;
+        }
+        Ok(())
+    }
+}
 
 /// /proc/<pid>/attr directory entry.
 struct AttrNode {
@@ -511,7 +689,7 @@ impl FileOps for AttrNode {
     ) -> Result<usize, Errno> {
         let task = self.target.get_task()?;
         let response = security::get_procattr(current_task, &task, self.attr)?;
-        data.write(&response[offset..])
+        data.write_tail(&response, offset)
     }
 
     fn write(
@@ -538,6 +716,96 @@ impl FileOps for AttrNode {
     }
 }
 
+/// Checks `PTRACE_MODE_READ_FSCREDS` access to `task` for `/proc/<pid>/ns` operations.
+///
+/// Unlike `PtraceCheckedNode` (which exempts kernel threads without an `mm`), `/proc/<pid>/ns`
+/// enforces ptrace read access unconditionally so unprivileged callers cannot read a kernel
+/// thread's namespace IDs or follow its namespace links.
+fn check_ns_ptrace_access(current_task: &CurrentTask, task: &Task) -> Result<(), Errno> {
+    current_task
+        .check_ptrace_access_mode(PTRACE_MODE_READ_FSCREDS, task)
+        .map_err(|_| errno!(EACCES))
+}
+
+/// A node representing a mount namespace in `/proc/<pid>/ns/mnt:[<id>]`.
+///
+/// Holds `Weak<Namespace>` so `FsNode` handles do not retain a `Namespace` or create reference
+/// cycles with it (with full `nsfs` bind-mount persistence tracked under
+/// `https://fxbug.dev/297313673`). Opening the node fails with `ENOENT` once the namespace is
+/// gone.
+///
+/// Like an `nsfs` file on Linux, opening the node does not check ptrace access again: access is
+/// checked when the `/proc/<pid>/ns` link is read or followed, so a node that was already
+/// resolved (e.g. held by an `O_PATH` descriptor) can be reopened after the caller drops
+/// privileges or the target task exits.
+struct MountNamespaceNode {
+    mount_namespace: Weak<Namespace>,
+}
+
+impl FsNodeOps for MountNamespaceNode {
+    fs_node_impl_not_dir!();
+
+    fn create_file_ops(
+        &self,
+        _node: &FsNode,
+        _current_task: &CurrentTask,
+        _flags: OpenFlags,
+    ) -> Result<Box<dyn FileOps>, Errno> {
+        let mount_namespace = self.mount_namespace.upgrade().ok_or_else(|| errno!(ENOENT))?;
+        Ok(Box::new(MountNamespaceFile(mount_namespace)))
+    }
+}
+
+/// A `/proc/<pid>/ns/<name>` symlink node.
+///
+/// Lazily resolves `<ns_type>:[<id>]` against `target` on `readlink`, failing with `EACCES`
+/// without `PTRACE_MODE_READ_FSCREDS` access and `ENOENT` once the target task has exited.
+struct NsSymlinkNode {
+    target: TaskContainer,
+    ns_type: NsType,
+}
+
+impl FsNodeOps for NsSymlinkNode {
+    fs_node_impl_symlink!();
+
+    fn readlink(&self, _node: &FsNode, current_task: &CurrentTask) -> Result<SymlinkTarget, Errno> {
+        let task = self.target.get_task().map_err(|_| errno!(ENOENT))?;
+        check_ns_ptrace_access(current_task, &task)?;
+        let link_type = self.ns_type.link_type();
+        let id = link_type.namespace_id(&task)?;
+        Ok(SymlinkTarget::Path(format!("{}:[{id}]", link_type.name()).into()))
+    }
+}
+
+/// Revalidates `/proc/<pid>/ns` entries against task liveness and, for `<ns>:[<id>]` entries,
+/// ptrace access and namespace ID changes on unshare or setns.
+struct NsDirEntryOps {
+    target: TaskContainer,
+}
+
+impl DirEntryOps for NsDirEntryOps {
+    fn revalidate(&self, current_task: &CurrentTask, dir_entry: &DirEntry) -> Result<bool, Errno> {
+        let Ok(task) = self.target.get_task() else {
+            return Ok(false);
+        };
+        // Bind outside the `match` scrutinee so `RcuReadScope` is dropped before the arms take
+        // locks or drop `Arc<Namespace>`.
+        let parsed = parse_ns_entry_name(dir_entry.local_name(&RcuReadScope::new()));
+        match parsed {
+            None => Ok(false),
+            Some((_ns_type, None)) => Ok(true),
+            Some((ns_type, Some(id))) => {
+                // Linux requires ptrace access to read or follow a `/proc/<pid>/ns` link but not
+                // to look up the link itself (e.g. `lstat`). Starnix follows the link by looking
+                // up its `<ns>:[<id>]` target in this directory, so such entries require the same
+                // access.
+                check_ns_ptrace_access(current_task, &task)?;
+                Ok(ns_type.namespace_id(&task).is_ok_and(|current_id| current_id == id))
+            }
+        }
+    }
+}
+
 /// /proc/[pid]/ns directory
 struct NsDirectory {
     target: TaskContainer,
@@ -552,6 +820,10 @@ impl NsDirectory {
 impl FsNodeOps for NsDirectory {
     fs_node_impl_dir_readonly!();
 
+    fn create_child_dir_entry_ops(&self) -> Option<Box<dyn DirEntryOps>> {
+        Some(Box::new(NsDirEntryOps { target: self.target.clone() }))
+    }
+
     fn create_file_ops(
         &self,
         _node: &FsNode,
@@ -559,13 +831,13 @@ impl FsNodeOps for NsDirectory {
         _flags: OpenFlags,
     ) -> Result<Box<dyn FileOps>, Errno> {
         // For each namespace, this contains a link to the current identifier of the given namespace
-        // for the current task.
+        // for the target task.
         Ok(VecDirectory::new_file(
-            NS_ENTRIES
-                .iter()
-                .map(|&name| VecDirectoryEntry {
+            NsType::ALL
+                .into_iter()
+                .map(|ns_type| VecDirectoryEntry {
                     entry_type: DirectoryEntryType::LNK,
-                    name: FsString::from(name),
+                    name: FsString::from(ns_type.name()),
                     inode: None,
                 })
                 .collect(),
@@ -578,88 +850,45 @@ impl FsNodeOps for NsDirectory {
         current_task: &CurrentTask,
         name: &FsStr,
     ) -> Result<FsNodeHandle, Errno> {
-        // If name is a given namespace, link to the current identifier of the that namespace for
-        // the current task.
+        // If name is a given namespace, link to the current identifier of that namespace for
+        // the target task.
         // If name is {namespace}:[id], get a file descriptor for the given namespace.
+        let task = self.target.get_task().map_err(|_| errno!(ENOENT))?;
+        let (ns_type, id) = parse_ns_entry_name(name).ok_or_else(|| errno!(ENOENT))?;
+        let Some(id) = id else {
+            return Ok(entry.node.fs().create_node_and_allocate_node_id(
+                NsSymlinkNode { target: self.target.clone(), ns_type },
+                FsNodeInfo::new(mode!(IFLNK, 0o777), task.real_fscred()),
+            ));
+        };
 
-        let name = String::from_utf8(name.to_vec()).map_err(|_| errno!(ENOENT))?;
-        let mut elements = name.split(':');
-        let ns = elements.next().expect("name must not be empty");
-        // The name doesn't starts with a known namespace.
-        if !NS_ENTRIES.contains(&ns) {
-            return error!(ENOENT);
-        }
-
-        let task = self.target.get_task()?;
-        if let Some(id) = elements.next() {
-            // The name starts with {namespace}:, check that it matches {namespace}:[id]
-            static NS_IDENTIFIER_RE: LazyLock<Regex> =
-                LazyLock::new(|| Regex::new("^\\[[0-9]+\\]$").unwrap());
-            if !NS_IDENTIFIER_RE.is_match(id) {
-                return error!(ENOENT);
+        // See `NsDirEntryOps::revalidate`.
+        check_ns_ptrace_access(current_task, &task)?;
+        let node_info = FsNodeInfo::new(mode!(IFREG, 0o444), task.real_fscred());
+        // The ID must be the target's current one, so a stale name (e.g. after the target
+        // unshares) is not resolved and cached as if it were current.
+        match ns_type {
+            NsType::Mnt => {
+                // TODO(https://fxbug.dev/297313673): Implement `nsfs`.
+                let mount_namespace = task.fs().map_err(|_| errno!(ENOENT))?.namespace();
+                if mount_namespace.id != id {
+                    return error!(ENOENT);
+                }
+                Ok(entry.node.fs().create_node_and_allocate_node_id(
+                    MountNamespaceNode { mount_namespace: Arc::downgrade(&mount_namespace) },
+                    node_info,
+                ))
             }
-            let node_info = || FsNodeInfo::new(mode!(IFREG, 0o444), task.real_fscred());
-            let fallback = || {
-                entry
+            _ => {
+                if ns_type.namespace_id(&task)? != id {
+                    return error!(ENOENT);
+                }
+                track_stub!(TODO("https://fxbug.dev/297313673"), ns_type.name());
+                Ok(entry
                     .node
                     .fs()
-                    .create_node_and_allocate_node_id(BytesFile::new_node(vec![]), node_info())
-            };
-            Ok(match ns {
-                "cgroup" => {
-                    track_stub!(TODO("https://fxbug.dev/297313673"), "cgroup namespaces");
-                    fallback()
-                }
-                "ipc" => {
-                    track_stub!(TODO("https://fxbug.dev/297313673"), "ipc namespaces");
-                    fallback()
-                }
-                "mnt" => entry
-                    .node
-                    .fs()
-                    .create_node_and_allocate_node_id(current_task.fs().namespace(), node_info()),
-                "net" => {
-                    track_stub!(TODO("https://fxbug.dev/297313673"), "net namespaces");
-                    fallback()
-                }
-                "pid" => {
-                    track_stub!(TODO("https://fxbug.dev/297313673"), "pid namespaces");
-                    fallback()
-                }
-                "pid_for_children" => {
-                    track_stub!(TODO("https://fxbug.dev/297313673"), "pid_for_children namespaces");
-                    fallback()
-                }
-                "time" => {
-                    track_stub!(TODO("https://fxbug.dev/297313673"), "time namespaces");
-                    fallback()
-                }
-                "time_for_children" => {
-                    track_stub!(
-                        TODO("https://fxbug.dev/297313673"),
-                        "time_for_children namespaces"
-                    );
-                    fallback()
-                }
-                "user" => {
-                    track_stub!(TODO("https://fxbug.dev/297313673"), "user namespaces");
-                    fallback()
-                }
-                "uts" => {
-                    track_stub!(TODO("https://fxbug.dev/297313673"), "uts namespaces");
-                    fallback()
-                }
-                _ => return error!(ENOENT),
-            })
-        } else {
-            // The name is {namespace}, link to the correct one of the current task.
-            let id = current_task.fs().namespace().id;
-            Ok(entry.node.fs().create_node_and_allocate_node_id(
-                CallbackSymlinkNode::new(move || {
-                    Ok(SymlinkTarget::Path(format!("{name}:[{id}]").into()))
-                }),
-                FsNodeInfo::new(mode!(IFLNK, 0o7777), task.real_fscred()),
-            ))
+                    .create_node_and_allocate_node_id(BytesFile::new_node(vec![]), node_info))
+            }
         }
     }
 }
@@ -693,40 +922,72 @@ impl FsNodeOps for FdInfoDirectory {
             .check_ptrace_access_mode(PTRACE_MODE_READ_FSCREDS, &task)
             .map_err(|_| errno!(EACCES))?;
 
-        let fds = task.files().map_or_else(|_| Vec::new(), |files| files.get_all_fds());
-        Ok(VecDirectory::new_file(fds_to_directory_entries(fds)))
+        let entries =
+            task.files().map_or_else(|_| Vec::new(), |files| fds_to_directory_entries(&files));
+        Ok(VecDirectory::new_file(entries))
     }
 
     fn lookup(
         &self,
         entry: &DirEntry,
-        current_task: &CurrentTask,
+        _current_task: &CurrentTask,
         name: &FsStr,
     ) -> Result<FsNodeHandle, Errno> {
         let task = self.target.get_task()?;
         let fd = FdNumber::from_fs_str(name).map_err(|_| errno!(ENOENT))?;
-        let file = task.files()?.get_allowing_opath(fd).map_err(|_| errno!(ENOENT))?;
-        let pos = file.offset.read();
-        let flags = file.flags();
-        let mut data = format!("pos:\t{}\nflags:\t0{:o}\n", pos, flags.bits()).into_bytes();
-        if let Some(extra_fdinfo) = file.extra_fdinfo(current_task) {
-            data.extend_from_slice(extra_fdinfo.as_slice());
-        }
+        // Verify that the FD exists at lookup time. We intentionally do not store the
+        // `FileHandle` in `FdInfoFile` to avoid pinning the file in memory after the FD is
+        // closed, and to reflect live `FD_CLOEXEC` flags and closed/reassigned FDs on read.
+        task.files()?.get_allowing_opath(fd).map_err(|_| errno!(ENOENT))?;
         Ok(entry.node.fs().create_node_and_allocate_node_id(
-            BytesFile::new_node(data),
+            FdInfoFile::new_node(self.target.clone(), fd),
             FsNodeInfo::new(mode!(IFREG, 0o444), task.real_fscred()),
         ))
     }
 }
 
-fn fds_to_directory_entries(fds: Vec<FdNumber>) -> Vec<VecDirectoryEntry> {
-    fds.into_iter()
-        .map(|fd| VecDirectoryEntry {
+#[derive(Clone)]
+struct FdInfoFile {
+    target: TaskContainer,
+    fd: FdNumber,
+}
+
+impl FdInfoFile {
+    fn new_node(target: TaskContainer, fd: FdNumber) -> impl FsNodeOps {
+        DynamicFile::new_node(Self { target, fd })
+    }
+}
+
+impl DynamicFileSource for FdInfoFile {
+    fn generate(&self, current_task: &CurrentTask, sink: &mut DynamicFileBuf) -> Result<(), Errno> {
+        let task = self.target.get_task().map_err(|_| errno!(ENOENT))?;
+        let (file, fd_flags) = task
+            .files()
+            .map_err(|_| errno!(ENOENT))?
+            .get_allowing_opath_with_flags(self.fd)
+            .map_err(|_| errno!(ENOENT))?;
+        let pos = file.offset.read();
+        let mut flags = file.flags();
+        flags.set(OpenFlags::CLOEXEC, fd_flags.contains(FdFlags::CLOEXEC));
+        writeln!(sink, "pos:\t{}\nflags:\t0{:o}", pos, flags.bits())?;
+        if let Some(extra_fdinfo) = file.extra_fdinfo(current_task) {
+            sink.write(extra_fdinfo.as_slice());
+        }
+        Ok(())
+    }
+}
+
+fn fds_to_directory_entries(files: &FdTable) -> Vec<VecDirectoryEntry> {
+    let mut buf = itoa::Buffer::new();
+    let mut entries = Vec::new();
+    files.for_each_fd(|fd| {
+        entries.push(VecDirectoryEntry {
             entry_type: DirectoryEntryType::DIR,
-            name: fd.raw().to_string().into(),
+            name: buf.format(fd.raw()).as_bytes().into(),
             inode: None,
-        })
-        .collect()
+        });
+    });
+    entries
 }
 
 /// Directory that lists the task IDs (tid) in a process. Located at `/proc/<pid>/task/`.
@@ -771,13 +1032,14 @@ impl FsNodeOps for TaskListDirectory {
         _flags: OpenFlags,
     ) -> Result<Box<dyn FileOps>, Errno> {
         let task = self.target.get_task().map_err(|_| errno!(ENOENT))?;
+        let mut buf = itoa::Buffer::new();
         let inner = VecDirectory::new_file(
             task.thread_group()
                 .read()
                 .task_ids()
                 .map(|tid| VecDirectoryEntry {
                     entry_type: DirectoryEntryType::DIR,
-                    name: tid.to_string().into(),
+                    name: buf.format(tid).as_bytes().into(),
                     inode: None,
                 })
                 .collect(),
@@ -1031,7 +1293,7 @@ impl DynamicFileSource for CommFile {
         // What happens if userspace writes to this file in multiple syscalls? We need more
         // detailed tests to see when the data is actually committed back to the task.
         let bytes = data.read_all()?;
-        task.set_command_name(TaskCommand::new(&bytes));
+        task.set_command_name(task.command_from_comm(&bytes));
         Ok(bytes.len())
     }
 }
@@ -1073,7 +1335,7 @@ impl LimitsFile {
     }
 }
 impl DynamicFileSource for LimitsFile {
-    fn generate_locked(
+    fn generate(
         &self,
         _current_task: &CurrentTask,
         sink: &mut DynamicFileBuf,
@@ -1239,11 +1501,7 @@ impl StatFile {
     }
 }
 impl DynamicFileSource for StatFile {
-    fn generate_locked(
-        &self,
-        current_task: &CurrentTask,
-        sink: &mut DynamicFileBuf,
-    ) -> Result<(), Errno> {
+    fn generate(&self, current_task: &CurrentTask, sink: &mut DynamicFileBuf) -> Result<(), Errno> {
         let task = self.target.get_task()?;
 
         // All fields and their types as specified in the man page.
@@ -1353,7 +1611,7 @@ impl DynamicFileSource for StatFile {
             let mem_stats = if should_skip_memory_stats(current_task) {
                 stub_memory_stats()
             } else {
-                mm.get_stats(current_task, SelfStatsCacheMode::BypassCache)
+                mm.get_stats(current_task, SelfStatsCacheMode::AllowCached)
             };
             let page_size = *PAGE_SIZE as usize;
             vsize = mem_stats.vm_size;
@@ -1456,74 +1714,85 @@ impl DynamicFileSource for StatusFile {
         let start_monotonic = zx::MonotonicInstant::get();
         let start_boot = zx::BootInstant::get();
         let task = self.target.get_task()?;
-        let creds_string = {
-            // Collect everything stored in info in this block.  There is a lock ordering
-            // issue with the task lock acquired below, and cloning info is
-            // expensive.
-            write!(sink, "Name:\t")?;
-            sink.write(task.persistent_info.command_guard().comm_name());
-            let creds = task.persistent_info.real_creds();
-            format!(
-                "Uid:\t{}\t{}\t{}\t{}\nGid:\t{}\t{}\t{}\t{}\nGroups:\t{}",
-                creds.uid,
-                creds.euid,
-                creds.saved_uid,
-                creds.fsuid,
-                creds.gid,
-                creds.egid,
-                creds.saved_gid,
-                creds.fsgid,
-                creds.groups.iter().map(|n| n.to_string()).join(" ")
-            )
-        };
 
-        writeln!(sink)?;
+        // Typical `/proc/<pid>/status` output fits in 1024 bytes; grow the buffer once.
+        sink.reserve(1024);
+
+        sink.write(b"Name:\t");
+        sink.write(task.persistent_info.command_guard().comm_name());
+        sink.write(b"\n");
 
         if let Ok(fs) = task.fs() {
             writeln!(sink, "Umask:\t0{:03o}", fs.umask().bits())?;
         }
-        {
+
+        // Snapshot everything needed from the task state up front so `task.read()` is acquired
+        // only once and nothing is formatted while holding it.
+        let (sigblk, sigpnd, no_new_privs, state_code, tracer_tg) = {
             let task_state = task.read();
-            writeln!(sink, "SigBlk:\t{:016x}", task_state.signal_mask().0)?;
-            writeln!(sink, "SigPnd:\t{:016x}", task_state.task_specific_pending_signals().0)?;
+            (
+                task_state.signal_mask().0,
+                task_state.task_specific_pending_signals().0,
+                task_state.no_new_privs() as u8,
+                task_state.state_code(),
+                task_state.ptrace.as_ref().and_then(|p| p.core_state.thread_group.upgrade()),
+            )
+        };
+        // The tracer's `Arc<ThreadGroup>` is dropped here, outside of the task lock.
+        let tracer_pid = tracer_tg.map_or(0, |tg| tg.leader.id);
+
+        let thread_group = task.thread_group();
+        let shdpnd = thread_group.pending_signals.lock().pending().0;
+        let (sigign, sigcgt) = thread_group.signal_actions.ignored_and_caught();
+        let (ppid, threads) = {
+            let tg_state = thread_group.read();
+            (tg_state.get_ppid(), tg_state.tasks_count())
+        };
+
+        writeln!(sink, "SigBlk:\t{:016x}", sigblk)?;
+        writeln!(sink, "SigPnd:\t{:016x}", sigpnd)?;
+        writeln!(sink, "ShdPnd:\t{:016x}", shdpnd)?;
+        writeln!(sink, "SigIgn:\t{:016x}", sigign.0)?;
+        writeln!(sink, "SigCgt:\t{:016x}", sigcgt.0)?;
+        writeln!(sink, "NoNewPrivs:\t{}", no_new_privs)?;
+
+        {
+            // Since version 3.8 all nonexistent capabilities are reported as not-enabled.
+            let creds = task.real_creds();
+            writeln!(sink, "CapInh:\t{:016x}", creds.cap_inheritable)?;
+            writeln!(sink, "CapPrm:\t{:016x}", creds.cap_permitted)?;
+            writeln!(sink, "CapEff:\t{:016x}", creds.cap_effective)?;
+            writeln!(sink, "CapBnd:\t{:016x}", creds.cap_bounding)?;
+            writeln!(sink, "CapAmb:\t{:016x}", creds.cap_ambient)?;
+
+            writeln!(sink, "State:\t{} ({})", state_code.code_char(), state_code.name())?;
+            writeln!(sink, "Tgid:\t{}", task.pid)?;
+            writeln!(sink, "Pid:\t{}", self.target.tid)?;
+            writeln!(sink, "PPid:\t{}", ppid)?;
+            writeln!(sink, "TracerPid:\t{}", tracer_pid)?;
+
             writeln!(
                 sink,
-                "ShdPnd:\t{:016x}",
-                task.thread_group().pending_signals.lock().pending().0
+                "Uid:\t{}\t{}\t{}\t{}",
+                creds.uid, creds.euid, creds.saved_uid, creds.fsuid
+            )?;
+            writeln!(
+                sink,
+                "Gid:\t{}\t{}\t{}\t{}",
+                creds.gid, creds.egid, creds.saved_gid, creds.fsgid
             )?;
 
-            let (sigign, sigcgt) = task.thread_group().signal_actions.ignored_and_caught();
-            writeln!(sink, "SigIgn:\t{:016x}", sigign.0)?;
-            writeln!(sink, "SigCgt:\t{:016x}", sigcgt.0)?;
-
-            writeln!(sink, "NoNewPrivs:\t{}", task_state.no_new_privs() as u8)?;
+            // Stream supplementary groups directly into the sink to avoid intermediate `String`s.
+            sink.write(b"Groups:\t");
+            let mut itoa_buf = itoa::Buffer::new();
+            for (i, &gid) in creds.groups.iter().enumerate() {
+                if i > 0 {
+                    sink.write(b" ");
+                }
+                sink.write(itoa_buf.format(gid).as_bytes());
+            }
+            sink.write(b"\n");
         }
-
-        // Since version 3.8 all nonexistent capabilities are reported as not-enabled.
-        let creds = task.real_creds();
-        writeln!(sink, "CapInh:\t{:016x}", creds.cap_inheritable)?;
-        writeln!(sink, "CapPrm:\t{:016x}", creds.cap_permitted)?;
-        writeln!(sink, "CapEff:\t{:016x}", creds.cap_effective)?;
-        writeln!(sink, "CapBnd:\t{:016x}", creds.cap_bounding)?;
-        writeln!(sink, "CapAmb:\t{:016x}", creds.cap_ambient)?;
-
-        let state_code = task.state_code();
-        writeln!(sink, "State:\t{} ({})", state_code.code_char(), state_code.name())?;
-
-        writeln!(sink, "Tgid:\t{}", task.pid)?;
-        writeln!(sink, "Pid:\t{}", self.target.tid)?;
-        let (ppid, threads, tracer_pid) = {
-            let tracer_pid =
-                task.read().ptrace.as_ref().map_or(0, |p| {
-                    p.core_state.thread_group.upgrade().map_or(0, |tg| tg.leader.id)
-                });
-            let task_group = task.thread_group().read();
-            (task_group.get_ppid(), task_group.tasks_count(), tracer_pid)
-        };
-        writeln!(sink, "PPid:\t{}", ppid)?;
-        writeln!(sink, "TracerPid:\t{}", tracer_pid)?;
-
-        writeln!(sink, "{}", creds_string)?;
 
         if let Ok(mm) = task.mm() {
             // TODO(b/525059309): Bypassed for traced_probes due to VMAR walk slowness. Re-enable when optimized.
@@ -1717,5 +1986,849 @@ impl BytesFileOps for ClearRefsFile {
         let _task = self.target.get_task()?;
         track_stub!(TODO("https://fxbug.dev/396221597"), "/proc/pid/clear_refs");
         Ok(())
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert_matches::assert_matches;
+    use starnix_core::mm::DumpPolicy;
+    use starnix_core::task::{ExitStatus, KernelFeatures};
+    use starnix_core::testing::{
+        anon_test_file, create_task, spawn_kernel_and_run, spawn_kernel_with_features_and_run,
+    };
+    use starnix_core::vfs::{
+        FileSystemOptions, LookupContext, NamespaceNode, SymlinkMode, VecOutputBuffer, WhatToMount,
+    };
+    use starnix_uapi::auth::{CAP_DAC_OVERRIDE, Credentials};
+    use starnix_uapi::mount_flags::MountpointFlags;
+    use starnix_uapi::signals::SIGCHLD;
+    use starnix_uapi::{SIG_IGN, gid_t, sigaction_t, uid_t};
+
+    #[::fuchsia::test]
+    async fn test_fdinfo_file_lazy_and_cloexec() {
+        spawn_kernel_and_run(async move |current_task| {
+            let target_file = anon_test_file(
+                current_task,
+                Box::new(BytesFile::new(b"0123456789".to_vec())),
+                OpenFlags::RDONLY,
+            );
+            let fd = current_task
+                .files()
+                .add(current_task, target_file.clone(), FdFlags::empty())
+                .expect("add fd");
+
+            let fdinfo_file = anon_test_file(
+                current_task,
+                Box::new(DynamicFile::new(FdInfoFile {
+                    target: TaskContainer::from_task(&current_task.task),
+                    fd,
+                })),
+                OpenFlags::RDONLY,
+            );
+
+            // 1. Initial read reflects offset 0 and no O_CLOEXEC.
+            let mut buf = VecOutputBuffer::new(256);
+            let n = fdinfo_file.read_at(current_task, 0, &mut buf).expect("read fdinfo");
+            let text = String::from_utf8(buf.data()[..n].to_vec()).unwrap();
+            let expected_initial = format!("pos:\t0\nflags:\t0{:o}\n", OpenFlags::RDONLY.bits());
+            assert_eq!(text, expected_initial);
+
+            // 2. Advancing offset and setting FD_CLOEXEC are reflected lazily on next read from 0.
+            target_file.seek(current_task, SeekTarget::Set(5)).expect("seek");
+            current_task
+                .files()
+                .set_fd_flags_allowing_opath(fd, FdFlags::CLOEXEC)
+                .expect("set cloexec");
+
+            let mut buf2 = VecOutputBuffer::new(256);
+            let n2 = fdinfo_file.read_at(current_task, 0, &mut buf2).expect("read fdinfo after");
+            let text2 = String::from_utf8(buf2.data()[..n2].to_vec()).unwrap();
+            let expected_updated = format!(
+                "pos:\t5\nflags:\t0{:o}\n",
+                (OpenFlags::RDONLY | OpenFlags::CLOEXEC).bits()
+            );
+            assert_eq!(text2, expected_updated);
+
+            // 3. Closing the FD does not keep `target_file` pinned in `FdInfoFile` and subsequent
+            // reads return ENOENT.
+            current_task.files().close(fd).expect("close fd");
+            let mut buf3 = VecOutputBuffer::new(256);
+            assert_eq!(fdinfo_file.read_at(current_task, 0, &mut buf3), error!(ENOENT));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_status_file_groups_and_state() {
+        spawn_kernel_with_features_and_run(
+            async move |current_task| {
+                let target_task = create_task(current_task.kernel(), "status_target");
+                let status_file = anon_test_file(
+                    current_task,
+                    Box::new(DynamicFile::new(StatusFile {
+                        target: TaskContainer::from_task(&target_task.task),
+                    })),
+                    OpenFlags::RDONLY,
+                );
+                let has_line = |line: &str| {
+                    let mut buf = VecOutputBuffer::new(2048);
+                    let n = status_file.read_at(current_task, 0, &mut buf).expect("read status");
+                    std::str::from_utf8(&buf.data()[..n]).unwrap().lines().any(|l| l == line)
+                };
+
+                let mut creds = Credentials::with_ids(1001, 2001);
+                for groups in [vec![], vec![3001], vec![3001, 3002, 3003]] {
+                    creds.groups = groups.clone();
+                    target_task.set_creds(creds.clone());
+                    let expected = groups.iter().map(u32::to_string).collect::<Vec<_>>().join(" ");
+                    assert!(has_line(&format!("Groups:\t{expected}")));
+                }
+
+                assert!(has_line("State:\tR (running)"));
+                // Like Linux, an exiting task keeps reporting its run state until it has exited.
+                target_task.write().set_exiting(ExitStatus::Exit(0));
+                assert!(has_line("State:\tR (running)"));
+            },
+            KernelFeatures { cached_zx_map_info_bytes: 4096, ..Default::default() },
+        )
+        .await;
+    }
+
+    async fn spawn_kernel_with_procfs<F>(features: KernelFeatures, f: F)
+    where
+        F: AsyncFnOnce(&mut CurrentTask) + Send + Sync + 'static,
+    {
+        spawn_kernel_with_features_and_run(
+            async move |current_task| {
+                let proc_fs = crate::proc_fs(current_task, FileSystemOptions::default())
+                    .expect("create procfs");
+                let root = current_task.lookup_path_from_root("/".into()).expect("root");
+                let _ = root
+                    .entry
+                    .create_dir_for_testing(current_task, "proc".into())
+                    .expect("mkdir /proc");
+                let proc_mount_point = root
+                    .lookup_child(current_task, &mut LookupContext::default(), "proc".into())
+                    .expect("lookup /proc");
+                proc_mount_point
+                    .mount(WhatToMount::Fs(proc_fs), MountpointFlags::empty())
+                    .expect("mount proc");
+                f(current_task).await;
+            },
+            features,
+        )
+        .await;
+    }
+
+    fn lookup_no_follow(current_task: &CurrentTask, path: &str) -> Result<NamespaceNode, Errno> {
+        let (parent, basename) = current_task.lookup_parent(
+            &mut LookupContext::default(),
+            &current_task.fs().root(),
+            path.into(),
+        )?;
+        parent.lookup_child(current_task, &mut LookupContext::new(SymlinkMode::NoFollow), basename)
+    }
+
+    /// Returns the target of the `/proc/<pid>/ns` link at `path`.
+    fn ns_link_target(current_task: &CurrentTask, path: &str) -> FsString {
+        let link = lookup_no_follow(current_task, path).expect("lookup ns link");
+        match link.readlink(current_task).expect("readlink ns link") {
+            SymlinkTarget::Path(target) => target,
+            SymlinkTarget::Node(_) => panic!("{path} must link to a path"),
+        }
+    }
+
+    /// Returns the `<id>` of a `<ns>:[<id>]` link target.
+    fn ns_link_id(target: &FsStr) -> u64 {
+        let target = std::str::from_utf8(target).expect("UTF-8 link target");
+        let (_, id) = target.split_once(":[").expect("<ns>:[<id>] link target");
+        id.strip_suffix(']').expect("<ns>:[<id>] link target").parse().expect("numeric id")
+    }
+
+    #[::fuchsia::test]
+    async fn test_ns_symlink_uses_target_task_namespace() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let target_task = create_task(current_task.kernel(), "ns_target");
+            target_task.fs().unshare_namespace();
+            let expected = format!("mnt:[{}]", target_task.fs().namespace().id);
+            let path = format!("/proc/{}/ns/mnt", target_task.get_pid());
+            assert_eq!(ns_link_target(current_task, &path), expected);
+            target_task.write().set_exiting(ExitStatus::Exit(0));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_ns_mnt_lookup_rejects_caller_namespace_id() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let target_task = create_task(current_task.kernel(), "ns_target");
+            target_task.fs().unshare_namespace();
+            let target_pid = target_task.get_pid();
+            let caller_id = current_task.fs().namespace().id;
+            assert_ne!(target_task.fs().namespace().id, caller_id);
+            assert_matches!(
+                lookup_no_follow(current_task, &format!("/proc/{target_pid}/ns/mnt:[{caller_id}]")),
+                Err(e) if e == errno!(ENOENT)
+            );
+            target_task.write().set_exiting(ExitStatus::Exit(0));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_ns_mnt_lookup_accepts_target_namespace_id() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let target_task = create_task(current_task.kernel(), "ns_target");
+            target_task.fs().unshare_namespace();
+            let target_pid = target_task.get_pid();
+            let target_id = target_task.fs().namespace().id;
+            assert_matches!(
+                lookup_no_follow(current_task, &format!("/proc/{target_pid}/ns/mnt:[{target_id}]")),
+                Ok(_)
+            );
+            target_task.write().set_exiting(ExitStatus::Exit(0));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_ns_mnt_open_yields_target_namespace() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let target_task = create_task(current_task.kernel(), "ns_target");
+            target_task.fs().unshare_namespace();
+            let path = format!("/proc/{}/ns/mnt", target_task.get_pid());
+            let file =
+                current_task.open_file(path.as_str().into(), OpenFlags::RDONLY).expect("open");
+            let ns_file = file.downcast_file::<MountNamespaceFile>().expect("MountNamespaceFile");
+            assert!(Arc::ptr_eq(&ns_file.0, &target_task.fs().namespace()));
+            target_task.write().set_exiting(ExitStatus::Exit(0));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_ns_mnt_node_uses_weak_namespace() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            current_task.fs().unshare_namespace();
+            let pid = current_task.get_pid();
+            let private_id = current_task.fs().namespace().id;
+            let weak_ns = Arc::downgrade(&current_task.fs().namespace());
+            let _mnt_node =
+                lookup_no_follow(current_task, &format!("/proc/{pid}/ns/mnt:[{private_id}]"))
+                    .expect("lookup mnt:[id]")
+                    .entry
+                    .node
+                    .clone();
+            current_task.fs().unshare_namespace();
+            assert_matches!(weak_ns.upgrade(), None);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_ns_mnt_lookup_rejects_extra_colon_segment() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let pid = current_task.get_pid();
+            let id = current_task.fs().namespace().id;
+            assert_matches!(
+                lookup_no_follow(current_task, &format!("/proc/{pid}/ns/mnt:[{id}]:extra")),
+                Err(e) if e == errno!(ENOENT)
+            );
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_ns_mnt_node_expired_open_fails() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            current_task.fs().unshare_namespace();
+            let pid = current_task.get_pid();
+            let private_id = current_task.fs().namespace().id;
+            let mnt_node =
+                lookup_no_follow(current_task, &format!("/proc/{pid}/ns/mnt:[{private_id}]"))
+                    .expect("lookup mnt:[id]");
+            current_task.fs().unshare_namespace();
+            assert_matches!(
+                mnt_node.open(current_task, OpenFlags::RDONLY),
+                Err(e) if e == errno!(ENOENT)
+            );
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_ns_symlink_unprivileged_readlink_fails() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let target_task = create_task(current_task.kernel(), "ns_target");
+            let target_pid = target_task.get_pid();
+            let ns_mnt = lookup_no_follow(current_task, &format!("/proc/{target_pid}/ns/mnt"))
+                .expect("lookup target ns/mnt");
+            current_task.set_creds(Credentials::with_ids(1000, 1000));
+            assert_matches!(ns_mnt.readlink(current_task), Err(e) if e == errno!(EACCES));
+            target_task.write().set_exiting(ExitStatus::Exit(0));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_ns_kthread_unprivileged_readlink_fails() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let kthread_pid = current_task.kernel().kthreads.system_thread_group().leader.clone();
+            let ns_mnt = lookup_no_follow(current_task, &format!("/proc/{kthread_pid}/ns/mnt"))
+                .expect("lookup kthread ns/mnt");
+            current_task.set_creds(Credentials::with_ids(1000, 1000));
+            assert_matches!(ns_mnt.readlink(current_task), Err(e) if e == errno!(EACCES));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_ns_symlink_unprivileged_lookup_succeeds() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let target_task = create_task(current_task.kernel(), "ns_target");
+            let target_pid = target_task.get_pid();
+            current_task.set_creds(Credentials::with_ids(1000, 1000));
+            assert_matches!(
+                lookup_no_follow(current_task, &format!("/proc/{target_pid}/ns/mnt")),
+                Ok(_)
+            );
+            target_task.write().set_exiting(ExitStatus::Exit(0));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_ns_mnt_lookup_unprivileged_fails() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let target_task = create_task(current_task.kernel(), "ns_target");
+            let target_pid = target_task.get_pid();
+            let target_id = target_task.fs().namespace().id;
+            current_task.set_creds(Credentials::with_ids(1000, 1000));
+            assert_matches!(
+                lookup_no_follow(current_task, &format!("/proc/{target_pid}/ns/mnt:[{target_id}]")),
+                Err(e) if e == errno!(EACCES)
+            );
+            target_task.write().set_exiting(ExitStatus::Exit(0));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_ns_placeholder_lookup_unprivileged_fails() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let target_task = create_task(current_task.kernel(), "ns_target");
+            let target_pid = target_task.get_pid();
+            let net_target = ns_link_target(current_task, &format!("/proc/{target_pid}/ns/net"));
+            current_task.set_creds(Credentials::with_ids(1000, 1000));
+            assert_matches!(
+                lookup_no_follow(current_task, &format!("/proc/{target_pid}/ns/{net_target}")),
+                Err(e) if e == errno!(EACCES)
+            );
+            target_task.write().set_exiting(ExitStatus::Exit(0));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_ns_mnt_cached_entry_unprivileged_lookup_fails() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let target_task = create_task(current_task.kernel(), "ns_target");
+            let target_pid = target_task.get_pid();
+            let target_id = target_task.fs().namespace().id;
+            let _held =
+                lookup_no_follow(current_task, &format!("/proc/{target_pid}/ns/mnt:[{target_id}]"))
+                    .expect("privileged lookup");
+            current_task.set_creds(Credentials::with_ids(1000, 1000));
+            assert_matches!(
+                lookup_no_follow(current_task, &format!("/proc/{target_pid}/ns/mnt:[{target_id}]")),
+                Err(e) if e == errno!(EACCES)
+            );
+            target_task.write().set_exiting(ExitStatus::Exit(0));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_ns_mnt_held_node_unprivileged_open_succeeds() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let target_task = create_task(current_task.kernel(), "ns_target");
+            let target_pid = target_task.get_pid();
+            let target_id = target_task.fs().namespace().id;
+            let held =
+                lookup_no_follow(current_task, &format!("/proc/{target_pid}/ns/mnt:[{target_id}]"))
+                    .expect("privileged lookup");
+            current_task.set_creds(Credentials::with_ids(1000, 1000));
+            assert_matches!(held.open(current_task, OpenFlags::RDONLY), Ok(_));
+            target_task.write().set_exiting(ExitStatus::Exit(0));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_ns_mnt_cached_entry_stale_after_unshare() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            current_task.fs().unshare_namespace();
+            let pid = current_task.get_pid();
+            let old_id = current_task.fs().namespace().id;
+            let _held = lookup_no_follow(current_task, &format!("/proc/{pid}/ns/mnt:[{old_id}]"))
+                .expect("lookup old id");
+            current_task.fs().unshare_namespace();
+            assert_matches!(
+                lookup_no_follow(current_task, &format!("/proc/{pid}/ns/mnt:[{old_id}]")),
+                Err(e) if e == errno!(ENOENT)
+            );
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_ns_symlink_exited_task_returns_enoent() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let ns_mnt = {
+                let target_task = create_task(current_task.kernel(), "ns_target");
+                let target_pid = target_task.get_pid();
+                let ns_mnt = lookup_no_follow(current_task, &format!("/proc/{target_pid}/ns/mnt"))
+                    .expect("lookup");
+                target_task.write().set_exiting(ExitStatus::Exit(0));
+                ns_mnt
+            };
+            assert_matches!(ns_mnt.readlink(current_task), Err(e) if e == errno!(ENOENT));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_ns_placeholder_lookup_rejects_other_id() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            assert_matches!(
+                lookup_no_follow(current_task, "/proc/self/ns/net:[1]"),
+                Err(e) if e == errno!(ENOENT)
+            );
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_ns_placeholder_follow_succeeds() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            assert_matches!(current_task.lookup_path_from_root("/proc/self/ns/net".into()), Ok(_));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_ns_placeholder_lookup_exited_task_fails() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let (ns_dir, net_target) = {
+                let target_task = create_task(current_task.kernel(), "ns_target");
+                let target_pid = target_task.get_pid();
+                let net_target =
+                    ns_link_target(current_task, &format!("/proc/{target_pid}/ns/net"));
+                let ns_dir = lookup_no_follow(current_task, &format!("/proc/{target_pid}/ns"))
+                    .expect("lookup ns dir");
+                target_task.write().set_exiting(ExitStatus::Exit(0));
+                (ns_dir, net_target)
+            };
+            assert_matches!(
+                ns_dir.lookup_child(
+                    current_task,
+                    &mut LookupContext::new(SymlinkMode::NoFollow),
+                    net_target.as_ref(),
+                ),
+                Err(e) if e == errno!(ENOENT)
+            );
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_ns_placeholder_cached_entry_exited_task_lookup_fails() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let (ns_dir, net_target, _held) = {
+                let target_task = create_task(current_task.kernel(), "ns_target");
+                let target_pid = target_task.get_pid();
+                let net_target =
+                    ns_link_target(current_task, &format!("/proc/{target_pid}/ns/net"));
+                let ns_dir = lookup_no_follow(current_task, &format!("/proc/{target_pid}/ns"))
+                    .expect("lookup ns dir");
+                let held = ns_dir
+                    .lookup_child(
+                        current_task,
+                        &mut LookupContext::new(SymlinkMode::NoFollow),
+                        net_target.as_ref(),
+                    )
+                    .expect("lookup net:[id]");
+                target_task.write().set_exiting(ExitStatus::Exit(0));
+                (ns_dir, net_target, held)
+            };
+            assert_matches!(
+                ns_dir.lookup_child(
+                    current_task,
+                    &mut LookupContext::new(SymlinkMode::NoFollow),
+                    net_target.as_ref(),
+                ),
+                Err(e) if e == errno!(ENOENT)
+            );
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    fn test_ns_type_name_round_trip() {
+        for ns_type in NsType::ALL {
+            assert_eq!(NsType::from_name(ns_type.name()), Some(ns_type));
+        }
+    }
+
+    #[::fuchsia::test]
+    fn test_parse_ns_entry_name_rejects_leading_plus() {
+        assert_eq!(parse_ns_entry_name(b"mnt:[+1]"), None);
+    }
+
+    #[::fuchsia::test]
+    fn test_parse_ns_entry_name_rejects_leading_zero() {
+        assert_eq!(parse_ns_entry_name(b"mnt:[01]"), None);
+    }
+
+    #[::fuchsia::test]
+    async fn test_ns_link_ids_are_distinct() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let ids: std::collections::HashSet<u64> = NsType::ALL
+                .into_iter()
+                .filter(|ns_type| ns_type.link_type() == *ns_type)
+                .map(|ns_type| {
+                    let path = format!("/proc/self/ns/{}", ns_type.name());
+                    ns_link_id(ns_link_target(current_task, &path).as_ref())
+                })
+                .collect();
+            assert_eq!(ids.len(), 8);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_ns_pid_for_children_links_to_pid_namespace() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            assert_eq!(
+                ns_link_target(current_task, "/proc/self/ns/pid_for_children"),
+                ns_link_target(current_task, "/proc/self/ns/pid")
+            );
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_ns_pid_for_children_follow_succeeds() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            assert_matches!(
+                current_task.lookup_path_from_root("/proc/self/ns/pid_for_children".into()),
+                Ok(_)
+            );
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_ns_pid_for_children_target_lookup_fails() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let id = ns_link_id(ns_link_target(current_task, "/proc/self/ns/pid").as_ref());
+            assert_matches!(
+                lookup_no_follow(current_task, &format!("/proc/self/ns/pid_for_children:[{id}]")),
+                Err(e) if e == errno!(ENOENT)
+            );
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_ns_time_for_children_links_to_time_namespace() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            assert_eq!(
+                ns_link_target(current_task, "/proc/self/ns/time_for_children"),
+                ns_link_target(current_task, "/proc/self/ns/time")
+            );
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_ns_time_for_children_follow_succeeds() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            assert_matches!(
+                current_task.lookup_path_from_root("/proc/self/ns/time_for_children".into()),
+                Ok(_)
+            );
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_ns_symlink_cached_entry_reaped_task_lookup_fails() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            current_task
+                .thread_group()
+                .signal_actions
+                .set(SIGCHLD, sigaction_t { sa_handler: SIG_IGN, ..Default::default() });
+            let (ns_dir, _held) = {
+                let target_task = create_task(current_task.kernel(), "ns_target");
+                let target_pid = target_task.get_pid();
+                let ns_dir = lookup_no_follow(current_task, &format!("/proc/{target_pid}/ns"))
+                    .expect("lookup ns dir");
+                let held = ns_dir
+                    .lookup_child(
+                        current_task,
+                        &mut LookupContext::new(SymlinkMode::NoFollow),
+                        "mnt".into(),
+                    )
+                    .expect("lookup mnt");
+                target_task.write().set_exiting(ExitStatus::Exit(0));
+                (ns_dir, held)
+            };
+            assert_matches!(
+                ns_dir.lookup_child(
+                    current_task,
+                    &mut LookupContext::new(SymlinkMode::NoFollow),
+                    "mnt".into(),
+                ),
+                Err(e) if e == errno!(ENOENT)
+            );
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_ns_symlink_cached_entry_unprivileged_lookup_succeeds() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let target_task = create_task(current_task.kernel(), "ns_target");
+            let target_pid = target_task.get_pid();
+            let _held = lookup_no_follow(current_task, &format!("/proc/{target_pid}/ns/mnt"))
+                .expect("privileged lookup");
+            current_task.set_creds(Credentials::with_ids(1000, 1000));
+            assert_matches!(
+                lookup_no_follow(current_task, &format!("/proc/{target_pid}/ns/mnt")),
+                Ok(_)
+            );
+            target_task.write().set_exiting(ExitStatus::Exit(0));
+        })
+        .await;
+    }
+    /// Gives `current_task` distinct uid, gid, euid, egid, fsuid, and fsgid values, so that tests
+    /// can tell which of them a `/proc/<pid>` node's owner comes from.
+    fn set_distinct_creds(current_task: &CurrentTask) {
+        let mut creds = Credentials::with_ids(1000, 1001);
+        creds.euid = 2000;
+        creds.egid = 2001;
+        creds.fsuid = 3000;
+        creds.fsgid = 3001;
+        // `fd` and `fdinfo` are 0500 and owned by euid 2000, but DAC checks use fsuid 3000.
+        creds.cap_permitted |= CAP_DAC_OVERRIDE;
+        creds.cap_effective |= CAP_DAC_OVERRIDE;
+        current_task.set_creds(creds);
+        // Changing the euid makes the task non-dumpable. proc(5) makes a non-dumpable process's
+        // `/proc/<pid>` files root-owned, so mark the task dumpable again to keep these tests
+        // about euid/egid ownership.
+        current_task.mm().expect("mm").dumpable.store(DumpPolicy::User);
+    }
+
+    fn owner(node: &NamespaceNode) -> (uid_t, gid_t) {
+        let info = node.entry.node.info();
+        (info.uid, info.gid)
+    }
+
+    /// The `/proc/<pid>/attr` entries that are writable, which are all of them except `prev`.
+    const WRITABLE_ATTR_NAMES: [&str; 5] =
+        ["current", "exec", "fscreate", "keycreate", "sockcreate"];
+
+    fn attr_entry(current_task: &CurrentTask, name: &str) -> NamespaceNode {
+        lookup_no_follow(current_task, &format!("/proc/self/attr/{name}"))
+            .expect("lookup attr entry")
+    }
+
+    fn attr_entry_mode(current_task: &CurrentTask, name: &str) -> FileMode {
+        attr_entry(current_task, name).entry.node.info().mode
+    }
+
+    /// Records the entries passed to a `DirentSink`.
+    #[derive(Default)]
+    struct RecordingDirentSink {
+        offset: off_t,
+        entries: Vec<(ino_t, DirectoryEntryType, FsString)>,
+    }
+
+    impl DirentSink for RecordingDirentSink {
+        fn add(
+            &mut self,
+            inode_num: ino_t,
+            offset: off_t,
+            entry_type: DirectoryEntryType,
+            name: &FsStr,
+        ) -> Result<(), Errno> {
+            self.offset = offset;
+            self.entries.push((inode_num, entry_type, name.to_owned()));
+            Ok(())
+        }
+
+        fn offset(&self) -> off_t {
+            self.offset
+        }
+    }
+
+    /// Returns the `(d_ino, d_type, name)` of each `/proc/self/attr` entry that readdir lists,
+    /// without `.` and `..`.
+    fn list_attr_dir(current_task: &CurrentTask) -> Vec<(ino_t, DirectoryEntryType, FsString)> {
+        let dir = current_task
+            .open_file("/proc/self/attr".into(), OpenFlags::RDONLY | OpenFlags::DIRECTORY)
+            .expect("open attr dir");
+        let mut sink = RecordingDirentSink::default();
+        dir.readdir(current_task, &mut sink).expect("readdir attr dir");
+        sink.entries.retain(|(_, _, name)| name != "." && name != "..");
+        sink.entries
+    }
+
+    #[::fuchsia::test]
+    async fn test_attr_entry_owned_by_current_euid() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let attr_dir = lookup_no_follow(current_task, "/proc/self/attr").expect("lookup attr");
+            set_distinct_creds(current_task);
+            // Look up the entry through the `attr` directory instantiated before the change.
+            let entry = attr_dir
+                .lookup_child(current_task, &mut LookupContext::default(), "current".into())
+                .expect("lookup attr/current");
+            assert_eq!(owner(&entry), (2000, 2001));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_attr_writable_entries_mode_0666() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            for name in WRITABLE_ATTR_NAMES {
+                assert_eq!(attr_entry_mode(current_task, name), mode!(IFREG, 0o666), "{name}");
+            }
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_attr_prev_mode_0444() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            assert_eq!(attr_entry_mode(current_task, "prev"), mode!(IFREG, 0o444));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_attr_unknown_entry_lookup_fails() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            assert_matches!(
+                lookup_no_follow(current_task, "/proc/self/attr/nonexistent"),
+                Err(e) if e == errno!(ENOENT)
+            );
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_attr_lookup_reaped_task_returns_enoent() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            current_task
+                .thread_group()
+                .signal_actions
+                .set(SIGCHLD, sigaction_t { sa_handler: SIG_IGN, ..Default::default() });
+            // Hold only the `attr` directory, not any of its entries, while the task is reaped.
+            let attr_dir = {
+                let target_task = create_task(current_task.kernel(), "attr_target");
+                let target_pid = target_task.get_pid();
+                let attr_dir = lookup_no_follow(current_task, &format!("/proc/{target_pid}/attr"))
+                    .expect("lookup attr dir");
+                target_task.write().set_exiting(ExitStatus::Exit(0));
+                attr_dir
+            };
+            assert_matches!(
+                attr_dir.lookup_child(current_task, &mut LookupContext::default(), "current".into()),
+                Err(e) if e == errno!(ENOENT)
+            );
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_attr_readdir_reaped_task_returns_enoent() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            current_task
+                .thread_group()
+                .signal_actions
+                .set(SIGCHLD, sigaction_t { sa_handler: SIG_IGN, ..Default::default() });
+            // Hold the open `attr` directory while the task is reaped.
+            let attr_file = {
+                let target_task = create_task(current_task.kernel(), "attr_target");
+                let target_pid = target_task.get_pid();
+                let attr_file = current_task
+                    .open_file(
+                        format!("/proc/{target_pid}/attr").as_str().into(),
+                        OpenFlags::RDONLY | OpenFlags::DIRECTORY,
+                    )
+                    .expect("open attr dir");
+                target_task.write().set_exiting(ExitStatus::Exit(0));
+                attr_file
+            };
+            assert_matches!(
+                attr_file.readdir(current_task, &mut RecordingDirentSink::default()),
+                Err(e) if e == errno!(ENOENT)
+            );
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_attr_entry_ino_stable_across_attr_lookups() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            // Nothing holds `attr` between the two walks, so each walk instantiates it anew.
+            let ino = || attr_entry(current_task, "current").entry.node.ino;
+            assert_eq!(ino(), ino());
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_attr_entry_inos_distinct() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let inos: std::collections::HashSet<ino_t> =
+                list_attr_dir(current_task).into_iter().map(|(ino, _, _)| ino).collect();
+            assert_eq!(inos.len(), 6);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_attr_readdir_lists_entries() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let names: Vec<FsString> =
+                list_attr_dir(current_task).into_iter().map(|(_, _, name)| name).collect();
+            assert_eq!(names, ["current", "prev", "exec", "fscreate", "keycreate", "sockcreate"]);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_attr_readdir_entry_types_are_reg() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            for (_, entry_type, name) in list_attr_dir(current_task) {
+                assert_eq!(entry_type, DirectoryEntryType::REG, "{name}");
+            }
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_attr_readdir_ino_matches_lookup_ino() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            for (ino, _, name) in list_attr_dir(current_task) {
+                let name = name.to_string();
+                assert_eq!(attr_entry(current_task, &name).entry.node.ino, ino, "{name}");
+            }
+        })
+        .await;
     }
 }

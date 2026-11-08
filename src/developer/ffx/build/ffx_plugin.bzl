@@ -4,7 +4,7 @@
 
 """Defines the ffx_plugin macro for building ffx plugins."""
 
-load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
 load("//build/tools/json_merge:json_merge.bzl", "json_merge")
 
@@ -128,7 +128,7 @@ def _ffx_plugin_impl(
             ] + [str(d) + "_args" for d in plugin_deps],
             lint_config = lint_config,
             disable_clippy = disable_clippy,
-            target_compatible_with = HOST_CONSTRAINTS,
+            target_compatible_with = HOST_OS_CONSTRAINTS,
             version = version,
             visibility = visibility,
         )
@@ -166,7 +166,7 @@ def _ffx_plugin_impl(
         disable_clippy = disable_clippy,
         visibility = visibility,
         version = version,
-        target_compatible_with = HOST_CONSTRAINTS,
+        target_compatible_with = HOST_OS_CONSTRAINTS,
     )
 
     # Execution library
@@ -184,7 +184,7 @@ def _ffx_plugin_impl(
             data = data,
             lint_config = lint_config,
             disable_clippy = disable_clippy,
-            target_compatible_with = HOST_CONSTRAINTS,
+            target_compatible_with = HOST_OS_CONSTRAINTS,
             version = version,
             visibility = visibility,
         )
@@ -224,7 +224,7 @@ def _ffx_plugin_impl(
         disable_clippy = disable_clippy,
         version = version,
         visibility = visibility,
-        target_compatible_with = HOST_CONSTRAINTS,
+        target_compatible_with = HOST_OS_CONSTRAINTS,
     )
 
 ffx_plugin = macro(

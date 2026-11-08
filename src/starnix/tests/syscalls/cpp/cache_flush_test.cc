@@ -93,7 +93,7 @@ TEST(CacheFlush, ProtNone) {
   void* mapping = mmap(nullptr, page_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   ASSERT_NE(mapping, MAP_FAILED) << strerror(errno);
   char* start = static_cast<char*>(mapping);
-  int rv = cache_flush_syscall(start, &start[page_size * 3]);
+  int rv = cache_flush_syscall(start, &start[page_size]);
   EXPECT_EQ(rv, -EFAULT);
   SAFE_SYSCALL(munmap(mapping, page_size));
 }

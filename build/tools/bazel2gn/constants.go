@@ -56,10 +56,11 @@ const transformerAnnotationPrefix = "# @bazel2gn:transformer="
 
 // transformerAnnotationNames maps from transformer annotation names to the transformer functions.
 var transformerAnnotationNames = map[string]transformer{
-	"visibility": bazelVisibilityToGN,
-	"deps":       bazelDepToGN,
-	"configs":    bazelCOptToGNConfig,
-	"file_paths": bazelFilePathsToGN,
+	"visibility":   bazelVisibilityToGN,
+	"deps":         bazelDepToGN,
+	"configs":      bazelCOptToGNConfig,
+	"file_paths":   bazelFilePathsToGN,
+	"expectations": bazelExpectationsToGN,
 }
 
 // bazelRuleToGNTemplate maps from Bazel rule names to GN template names. They can
@@ -81,12 +82,16 @@ var bazelRuleToGNTemplate = map[string]string{
 	"py_binary":  "python_binary",
 
 	// Rust
+	"fuchsia_rust_dso":     "fuchsia_rust_dso",
 	"rust_binary":          "rustc_binary",
 	"rust_library":         "rustc_library",
+	"rust_static_library":  "rustc_staticlib",
 	"rustc_binary":         "rustc_binary",
+	"rustc_cdylib":         "rustc_cdylib",
 	"rustc_dylib":          "rustc_dylib",
 	"rustc_library":        "rustc_library",
 	"rustc_proc_macro":     "rustc_macro",
+	"rustc_staticlib":      "rustc_staticlib",
 	"rustc_test":           "rustc_test",
 	"rust_proc_macro":      "rustc_macro",
 	"rust_proto_library":   "rust_proto_library",
@@ -95,9 +100,11 @@ var bazelRuleToGNTemplate = map[string]string{
 	// C++
 	"cc_library":            "static_library",
 	"cc_binary":             "executable",
+	"fuchsia_cc_dso":        "fuchsia_cc_dso",
 	"fx_cc_binary":          "executable",
 	"fx_cc_library_headers": "library_headers",
 	"fx_cc_library":         "static_library",
+	"fx_cc_test_binary":     "cc_test_executable",
 
 	// C++ Zircon
 	"cc_shared_library_zx": "zx_library", // With `sdk="shared"` and `sdk_publishable` not specified.
@@ -110,14 +117,20 @@ var bazelRuleToGNTemplate = map[string]string{
 	"zither_fidl_library": "fidl",
 
 	// Components
-	"expect_includes":                    "expect_includes",
-	"fuchsia_structured_config_rust_lib": "fuchsia_structured_config_rust_lib",
-	"fx_component":                       "fuchsia_component",
-	"fx_component_manifest":              "fuchsia_component_manifest",
+	"cmc_merge":                                 "cmc_merge",
+	"expect_includes":                           "expect_includes",
+	"fuchsia_structured_config_rust_lib":        "fuchsia_structured_config_rust_lib",
+	"fx_compiled_manifest":                      "cm",
+	"fx_component":                              "fuchsia_component",
+	"fx_component_manifest":                     "fuchsia_component_manifest",
+	"fx_component_manifest_with_expectations":   "fuchsia_component_manifest_with_expectations",
+	"fx_expectations":                           "fuchsia_expectations",
+	"fx_generated_expectations":                 "generated_expectations_file",
+	internalFxTestComponentRule:                 "fuchsia_test_component",
+	internalFxTestComponentWithExpectationsRule: "fuchsia_test_component_with_expectations",
 
 	// Host tools
 	"cc_binary_host_tool": "executable",
-	"ffx_tool":            "ffx_tool",
 	"ffx_plugin":          "ffx_plugin",
 	"go_binary_host_tool": "go_binary",
 
@@ -136,9 +149,9 @@ var bazelRuleToGNTemplate = map[string]string{
 	"compiled_action":     "compiled_action",
 	"fidlgentest_go_test": "fidlgentest_go_test",
 	"genrule":             "action",
+	"linux_resource":      "linux_resource",
 	"metrics_registry":    "metrics_registry",
 	"package":             "package",
-	"test_suite":          "group",
 	"stamp_group":         "group",
 
 	// `exports_files()` is a concept specific to Bazel, so there is no need to convert it.
@@ -147,13 +160,16 @@ var bazelRuleToGNTemplate = map[string]string{
 	// Bazel-only Fuchsia component, package, and test rules. Any GN wrapper
 	// targets (such as `bazel_fuchsia_package()` or `bazel_test_suite()`) are
 	// maintained by hand above the bazel2gn sentinel in BUILD.gn.
-	"cml_shard":             noGNEquivalent,
-	"fx_package":            noGNEquivalent,
-	"fx_packaged_binary":    noGNEquivalent,
-	"fx_runner_shard":       noGNEquivalent,
-	"fx_test":               noGNEquivalent,
-	"fx_test_component":     noGNEquivalent,
-	"fx_unittest_component": noGNEquivalent,
+	"cml_shard":                           noGNEquivalent,
+	"fx_bootfs_files_package":             noGNEquivalent,
+	"fx_package":                          noGNEquivalent,
+	"fx_packaged_binary":                  noGNEquivalent,
+	"fx_runner_shard":                     noGNEquivalent,
+	"fx_test":                             noGNEquivalent,
+	"fx_test_component":                   noGNEquivalent,
+	"fx_test_component_with_expectations": noGNEquivalent,
+	"fx_unittest_component":               noGNEquivalent,
+	"test_suite":                          noGNEquivalent,
 
 	// Tests of a library run in both build systems while the library has
 	// users in both, so these test rules get a GN copy. See
@@ -180,6 +196,11 @@ var bazelRuleToGNTemplate = map[string]string{
 	// Runtime data for Bazel host tests, so it's only consumed by the rules
 	// above.
 	"host_test_data_files": noGNEquivalent,
+
+	// `ffx_tool` and `idk_ffx_tool` targets are Bazel-only and reach GN via
+	// handwritten `bazel_ffx_tool()` / `bazel_host_tool()` wrappers when needed.
+	"ffx_tool":     noGNEquivalent,
+	"idk_ffx_tool": noGNEquivalent,
 }
 
 // attrsToOmitByRules stores a mapping from known Bazel rules to attributes to
@@ -220,6 +241,7 @@ var attrsToOmitByRules = map[string]map[string]bool{
 	"cc_library":               {"includes": true},
 	"fx_cc_library":            {"includes": true},
 	"idk_cc_source_library":    {"includes": true},
+	"idk_cc_shared_library":    {"version_script": true},
 	"idk_cc_shared_library_zx": {"version_script": true},
 	// We do not need to include the "stamp" destination in GN because it is implicitly created by
 	// the rule.
@@ -235,10 +257,17 @@ var attrsToOmitByRules = map[string]map[string]bool{
 	// wraps. GN has no such wrapper.
 	"host_go_test":    {"size": true, "binary_name": true},
 	"host_rustc_test": {"size": true, "binary_name": true},
-	// `includes` lists `.cml` shard targets and files needed in the Bazel
-	// action sandbox. GN runs `cmc` with global include paths and a depfile
-	// instead, and `fuchsia_component_manifest()` does not accept `includes`.
-	"fx_component_manifest": {"includes": true},
+	// `includes` lists `.cml` or `.json5` inputs needed in the Bazel action
+	// sandbox. GN discovers includes via depfiles instead, and the GN templates
+	// do not accept `includes`.
+	"fx_component_manifest":                   {"includes": true},
+	"fx_component_manifest_with_expectations": {"includes": true},
+	"fx_compiled_manifest":                    {"includes": true},
+	"fx_expectations":                         {"includes": true},
+	// `fx_cc_test_binary()` is always testonly, so `extraGnExpressionByRules`
+	// always sets `testonly = true` on the GN `cc_test_executable()` instead.
+	// (`callExprToGN()` rejects non-`True` values.)
+	"fx_cc_test_binary": {"testonly": true},
 }
 
 // unsupportedAttrsByRules lists attributes that bazel2gn can't translate yet.
@@ -260,9 +289,10 @@ var implicitConditionsByRules = map[string]string{
 
 // Common Bazel attributes that use different names in GN.
 var commonAttrMap = map[string]string{
-	"aspect_hints": "deps",
-	"srcs":         "sources",
-	"hdrs":         "public",
+	"aspect_hints":    "deps",
+	"srcs":            "sources",
+	"hdrs":            "public",
+	generatedDepsAttr: "deps",
 }
 
 var aliasAttrMap = map[string]string{
@@ -274,6 +304,14 @@ var aliasAttrMap = map[string]string{
 var ccCommonAttrMap = map[string]string{
 	"copts": "configs", // Strings are converted to configs by `bazelCOptToGNConfig()`.
 }
+
+// ccBinAttrMap maps from attribute names in Bazel CC binary rules to GN parameter names.
+// Unlike `cc_library` (where Bazel's `linkopts` propagates publicly to dependents while GN's
+// `ldflags` does not), binary targets have no downstream linkers, so `linkopts` maps directly to
+// `ldflags`.
+var ccBinAttrMap = mustMergeMaps(ccCommonAttrMap, map[string]string{
+	"linkopts": "ldflags",
+})
 
 // ccLibAttrMap maps from attribute names in Bazel CC library rules to GN parameter names.
 // This map only includes attributes that have different names in Bazel and GN.
@@ -295,7 +333,11 @@ var buildFlagsAttrMap = map[string]string{
 
 // fxCcBinaryAttrMap maps from attribute names in `fx_cc_binary()` to GN parameter names.
 // This map only includes attributes that have different names in Bazel and GN.
-var fxCcBinaryAttrMap = mustMergeMaps(ccCommonAttrMap, buildFlagsAttrMap)
+var fxCcBinaryAttrMap = mustMergeMaps(mustMergeMaps(ccBinAttrMap, buildFlagsAttrMap), map[string]string{
+	// `gn_output_name` only exists on `fx_cc_binary()` / `fx_cc_test_binary()` to
+	// set the GN `output_name`; Bazel ignores it.
+	"gn_output_name": "output_name",
+})
 
 // fxCcLibAttrMap maps from attribute names in `fx_cc_library()` to GN parameter names.
 // This map only includes attributes that have different names in Bazel and GN.
@@ -307,6 +349,8 @@ var rustCommonAttrMap = map[string]string{
 	"compile_data":         "inputs",
 	"data":                 "non_rust_deps",
 	"crate_features":       "features",
+	"gn_disable_rustdoc":   "disable_rustdoc",
+	"gn_quiet_clippy":      "quiet_clippy",
 	"with_host_unit_tests": "with_unit_tests",
 	"rustc_flags":          "rustflags",
 	"crate_root":           "source_root",
@@ -372,6 +416,10 @@ var idkAttrMap = map[string]string{
 	// `sdk_headers_for_internal_use`, and `attrAssignmentToGN()` adds the files
 	// to `public`.
 	"hdrs_for_internal_use": "sdk_headers_for_internal_use",
+
+	// Dependencies that are not reflected in the IDK, such as verification targets.
+	// Supported by `idk_cc_source_library()`.
+	"non_idk_implementation_deps": "non_sdk_deps",
 }
 
 // Lists of attribute names that are specific to Fuchsia and non-Fuchsia builds.
@@ -410,11 +458,26 @@ var compiledActionAttrMap = map[string]string{
 // idkCcAttrMap maps from attribute name in Bazel IDK C++ rules to GN parameter names.
 var idkCcAttrMap = mustMergeMaps(idkAttrMap, ccLibAttrMap)
 
+// idkCcSharedAttrMap maps from attribute name in Bazel IDK C++ shared library
+// rules to GN parameter names.
+var idkCcSharedAttrMap = mustMergeMaps(idkCcAttrMap, map[string]string{
+	"linkopts": "ldflags",
+})
+
 // idkZxAttrMap maps from attribute name in Bazel IDK C++ ZX rules to GN parameter names.
 var idkZxAttrMap = mustMergeMaps(idkCcAttrMap, zxInIDKAttrMap)
 
+// idkZxSharedAttrMap maps from attribute name in Bazel IDK C++ ZX shared
+// library rules to GN parameter names.
+var idkZxSharedAttrMap = mustMergeMaps(idkZxAttrMap, map[string]string{
+	"linkopts": "ldflags",
+})
+
 // idkFIDLAttrMap maps from attribute name in Bazel IDK FIDL rules to GN parameter names.
 var idkFIDLAttrMap = mustMergeMaps(idkAttrMap, fidlAttrMap)
+
+// idkCcBinHostToolAttrMap maps from attribute names in Bazel IDK C++ host binary rules to GN parameter names.
+var idkCcBinHostToolAttrMap = mustMergeMaps(idkAttrMap, ccBinAttrMap)
 
 // idkRustBinAttrMap maps from attribute name in Bazel IDK Rust binary rules to GN parameter names.
 var idkRustBinAttrMap = mustMergeMaps(idkAttrMap, rustBinAttrMap)
@@ -439,6 +502,13 @@ var pythonBinAttrMap = map[string]string{
 	"main": "main_source",
 }
 
+// fuchsiaCcDsoAttrMap maps from attribute names in Bazel `fuchsia_cc_dso()` to
+// GN `fuchsia_cc_dso()` parameter names. `async` is a reserved keyword in
+// Starlark, so Bazel uses `is_async`.
+var fuchsiaCcDsoAttrMap = mustMergeMaps(fxCcBinaryAttrMap, map[string]string{
+	"is_async": "async",
+})
+
 // A mapping from Bazel rule names to attribute mappings.
 // Attribute mappings map from Bazel rule attributes that use different names in GN.
 var attrMapsByRules = map[string]map[string]string{
@@ -449,26 +519,38 @@ var attrMapsByRules = map[string]map[string]string{
 	"py_binary": pythonBinAttrMap,
 
 	// C++
-	"cc_library":    ccLibAttrMap,
-	"cc_binary":     ccCommonAttrMap,
-	"fx_cc_binary":  fxCcBinaryAttrMap,
-	"fx_cc_library": fxCcLibAttrMap,
+	"cc_library":          ccLibAttrMap,
+	"cc_binary":           ccBinAttrMap,
+	"cc_binary_host_tool": ccBinAttrMap,
+	"fuchsia_cc_dso":      fuchsiaCcDsoAttrMap,
+	"fx_cc_binary":        fxCcBinaryAttrMap,
+	"fx_cc_library":       fxCcLibAttrMap,
+	// Like `fx_cc_library()`, `deps` of `fx_cc_library_headers()` are public
+	// (their headers propagate to dependents), which GN `library_headers()`
+	// expects as `public_deps`.
+	"fx_cc_library_headers": ccLibAttrMap,
+	"fx_cc_test_binary":     fxCcBinaryAttrMap,
 
 	// C++ Zircon
-	"cc_shared_library_zx": ccLibAttrMap,
-	"cc_source_library_zx": ccLibAttrMap,
-	"cc_static_library_zx": ccLibAttrMap,
+	// These macros wrap `fx_cc_library()` and support `build_flags`.
+	"cc_shared_library_zx": fxCcLibAttrMap,
+	"cc_source_library_zx": fxCcLibAttrMap,
+	"cc_static_library_zx": fxCcLibAttrMap,
 
 	// Rust
-	"rust_binary":      rustBinAttrMap,
-	"rust_library":     rustCommonAttrMap,
-	"rust_proc_macro":  rustCommonAttrMap,
-	"rustc_binary":     rustBinAttrMap,
-	"rustc_dylib":      rustCommonAttrMap,
-	"rustc_library":    rustCommonAttrMap,
-	"rustc_proc_macro": rustCommonAttrMap,
-	"rustc_test":       rustBinAttrMap,
-	"host_rustc_test":  hostRustTestAttrMap,
+	"fuchsia_rust_dso":    rustCommonAttrMap,
+	"rust_binary":         rustBinAttrMap,
+	"rust_library":        rustCommonAttrMap,
+	"rust_proc_macro":     rustCommonAttrMap,
+	"rust_static_library": rustCommonAttrMap,
+	"rustc_binary":        rustBinAttrMap,
+	"rustc_cdylib":        rustCommonAttrMap,
+	"rustc_dylib":         rustCommonAttrMap,
+	"rustc_library":       rustCommonAttrMap,
+	"rustc_proc_macro":    rustCommonAttrMap,
+	"rustc_staticlib":     rustCommonAttrMap,
+	"rustc_test":          rustBinAttrMap,
+	"host_rustc_test":     hostRustTestAttrMap,
 
 	// Go
 	"host_go_test": hostTestAttrMap,
@@ -478,22 +560,23 @@ var attrMapsByRules = map[string]map[string]string{
 	"zither_fidl_library": fidlAttrMap,
 
 	// IDK
-	"idk_cc_shared_library":      idkCcAttrMap,
-	"idk_cc_shared_library_zx":   idkZxAttrMap,
+	"idk_cc_shared_library":      idkCcSharedAttrMap,
+	"idk_cc_shared_library_zx":   idkZxSharedAttrMap,
 	"idk_cc_source_library":      idkCcAttrMap,
 	"idk_cc_source_library_zx":   idkZxAttrMap,
 	"idk_cc_static_library":      idkCcAttrMap,
 	"idk_cc_static_library_zx":   idkZxAttrMap,
-	"idk_cc_binary_host_tool":    idkAttrMap,
+	"idk_cc_binary_host_tool":    idkCcBinHostToolAttrMap,
 	"idk_go_binary_host_tool":    idkAttrMap,
 	"idk_rustc_binary_host_tool": idkRustBinAttrMap,
 
 	// Components
-	"fuchsia_structured_config_rust_lib": structuredConfigRustLibAttrMap,
-	"fx_component":                       fxComponentAttrMap,
+	"fuchsia_structured_config_rust_lib":        structuredConfigRustLibAttrMap,
+	"fx_component":                              fxComponentAttrMap,
+	internalFxTestComponentRule:                 fxComponentAttrMap,
+	internalFxTestComponentWithExpectationsRule: fxComponentAttrMap,
 
 	// Tools
-	"ffx_tool":   rustBinAttrMap,
 	"ffx_plugin": ffxPluginAttrMap,
 
 	// Others
@@ -502,19 +585,18 @@ var attrMapsByRules = map[string]map[string]string{
 	"metrics_registry": {
 		"global_registry": "global",
 	},
-	"test_suite": {
-		"tests": "deps",
-	},
 }
 
-var extraGnExpressionByRules = map[string]string{
-	"cc_shared_library_zx":     `sdk = "shared"`,
-	"cc_source_library_zx":     `sdk = "source"`,
-	"cc_static_library_zx":     `sdk = "static"`,
-	"idk_cc_shared_library_zx": `sdk = "shared"`,
-	"idk_cc_source_library_zx": `sdk = "source"`,
-	"idk_cc_static_library_zx": `sdk = "static"`,
-	"test_suite":               `testonly = true`,
+var extraGnExpressionByRules = map[string][]string{
+	"cc_shared_library_zx":     {`sdk = "shared"`},
+	"cc_source_library_zx":     {`sdk = "source"`},
+	"cc_static_library_zx":     {`sdk = "static"`},
+	"idk_cc_shared_library_zx": {`sdk = "shared"`},
+	"idk_cc_source_library_zx": {`sdk = "source"`},
+	"idk_cc_static_library_zx": {`sdk = "static"`},
+	// GN `cc_test_executable()` doesn't force `testonly`, and like GN `test()`,
+	// keep test binaries out of tool_paths.json on host.
+	"fx_cc_test_binary": {`testonly = true`, `emit_tool_path = false`},
 }
 
 // These identifiers with the same meanings are represented differently in Bazel
@@ -542,7 +624,14 @@ var specialTokens = map[syntax.Token]string{
 // "//build/bazel/platforms:fuchsia_platform_x64" may be more appropriate
 // than using a list of "@platforms//os:fuchsia" and "@platforms//cpu:x86_64".
 var bazelConstraintsToGNConditions = map[string]string{
-	"@platforms//os:fuchsia": "is_fuchsia",
+	"@platforms//os:fuchsia":                       "is_fuchsia",
+	"//build/bazel/platforms:linux_flavor_starnix": "is_linux && !is_host",
+	"@platforms//cpu:arm":                          `current_cpu == "arm"`,
+	"@platforms//cpu:armv7":                        `current_cpu == "arm"`,
+	"@platforms//cpu:arm64":                        `current_cpu == "arm64"`,
+	"@platforms//cpu:aarch64":                      `current_cpu == "arm64"`,
+	"@platforms//cpu:riscv64":                      `current_cpu == "riscv64"`,
+	"@platforms//cpu:x86_64":                       `current_cpu == "x64"`,
 }
 var bazelConstraintListVarsToGNConditions = map[string]string{
 	"HOST_CONSTRAINTS":    "is_host",
@@ -614,6 +703,41 @@ const disableInstrumentationAttr = "disable_instrumentation"
 // disableInstrumentationGN is the GN statement equivalent to
 // `disable_instrumentation = True`.
 const disableInstrumentationGN = `exclude_toolchain_tags = [ "instrumented" ]`
+
+// execPropertiesAttr is the name of the common Bazel attribute setting
+// execution properties (e.g. the RBE worker pool) of the actions of a target.
+// It is never emitted verbatim in GN, see `execPropertiesToGN()`.
+const execPropertiesAttr = "exec_properties"
+
+// rbeUseLargeWorker is the name of the `exec_properties` value defined in
+// //build/bazel/rbe:rbe.bzl that runs the actions of a target on large RBE
+// workers.
+const rbeUseLargeWorker = "RBE_USE_LARGE_WORKER"
+
+// rustHighmemGN are the GN statements equivalent to
+// `exec_properties = RBE_USE_LARGE_WORKER` on Rust targets: a large RBE worker
+// when Rust RBE is enabled, or the local high memory pool otherwise. See
+// //build/toolchain/concurrent_jobs.gni, which is imported by
+// bazel_migration.gni.
+//
+// GN doesn't support nested scope access such as `a.b.c` in one expression,
+// so the scope is assigned to a variable first.
+var rustHighmemGN = []string{
+	"_concurrent_jobs = concurrent_jobs.rust_highmem",
+	"configs += _concurrent_jobs.configs",
+	`forward_variables_from(_concurrent_jobs.vars, "*")`,
+}
+
+// rustHighmemGNTemplates are the GN templates that accept the `configs` and
+// `pool` set by `rustHighmemGN`.
+var rustHighmemGNTemplates = map[string]bool{
+	"fuchsia_rust_dso": true,
+	"rustc_binary":     true,
+	"rustc_cdylib":     true,
+	"rustc_library":    true,
+	"rustc_staticlib":  true,
+	"rustc_test":       true,
+}
 
 // goThirdPartyAggregateDeps lists known third-party GN targets that include sources of multiple Go
 // libraries in a single target. These deps need to be handled specially because in Bazel we have a

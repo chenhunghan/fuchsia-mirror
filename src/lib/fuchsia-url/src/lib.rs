@@ -52,8 +52,18 @@ use crate::host::Host;
 use percent_encoding::{AsciiSet, CONTROLS};
 use std::sync::LazyLock;
 
-/// https://url.spec.whatwg.org/#fragment-percent-encode-set
-const FRAGMENT: &AsciiSet = &CONTROLS.add(b' ').add(b'"').add(b'<').add(b'>').add(b'`');
+/// The [WHATWG fragment percent-encode set](<https://url.spec.whatwg.org/#fragment-percent-encode-set>)
+/// plus `%` and `#` so that percent-decoded [`Resource`] paths round-trip losslessly.
+const FRAGMENT: &AsciiSet =
+    &CONTROLS.add(b' ').add(b'"').add(b'<').add(b'>').add(b'`').add(b'%').add(b'#');
+
+/// The printable ASCII characters that URL parsing requires to be percent-encoded inside
+/// `#<fragment>`, where a `%` only counts as encoded when it begins a valid `%HH` escape.
+///
+/// Together with control characters (which are also rejected when unencoded), these are exactly
+/// the characters of [`FRAGMENT`]. Non-ASCII characters, which percent-encoding always encodes,
+/// must also be percent-encoded.
+const FRAGMENT_MUST_PERCENT_ENCODE: &[u8] = b" \"#%<>`";
 
 const RELATIVE_SCHEME: &str = "relative";
 
@@ -80,6 +90,26 @@ impl std::fmt::Display for Scheme {
     }
 }
 
+impl Scheme {
+    /// Validates that `scheme` complies with the canonical (lowercase) RFC 3986 scheme
+    /// specification (`^[a-z][a-z0-9+.-]*$`) and is not a WHATWG special scheme (`ftp`, `file`,
+    /// `http`, `https`, `ws`, `wss`).
+    fn validate(scheme: &str) -> Result<(), ParseError> {
+        let Some((&first, rest)) = scheme.as_bytes().split_first() else {
+            return Err(ParseError::InvalidScheme);
+        };
+        if !first.is_ascii_lowercase()
+            || !rest.iter().all(|&b| {
+                b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'+' || b == b'-' || b == b'.'
+            })
+            || matches!(scheme, "ftp" | "file" | "http" | "https" | "ws" | "wss")
+        {
+            return Err(ParseError::InvalidScheme);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct UrlParts {
     scheme: Option<Scheme>,
@@ -91,26 +121,38 @@ struct UrlParts {
 
 impl UrlParts {
     fn parse(input: &str) -> Result<Self, ParseError> {
-        match url::Url::parse(input) {
-            Ok(url) => Self::from_url(&url),
-            Err(url::ParseError::RelativeUrlWithoutBase) => {
-                Self::from_scheme_and_url(None, &RELATIVE_BASE.join(input)?)
+        // Validate the raw `#<fragment>` and `?<query>` of `input` rather than the `url` crate's
+        // view of them, since the `url` crate strips trailing C0 control and space characters and
+        // ASCII tab and newline characters from them, and percent-encodes characters that must
+        // already be percent-encoded. `url::Url::query_pairs` would also skip empty query
+        // parameters and percent-decode their keys and values.
+        let (before_fragment, fragment) = match input.split_once('#') {
+            Some((before_fragment, fragment)) => (before_fragment, Some(fragment)),
+            None => (input, None),
+        };
+        let (before_query, query) = match before_fragment.split_once('?') {
+            Some((before_query, query)) => (before_query, Some(query)),
+            None => (before_fragment, None),
+        };
+        // Likewise, parse and validate the raw scheme of `input`, since the `url` crate lowercases
+        // schemes, strips leading C0 control and space characters and ASCII tab and newline
+        // characters, and accepts `<scheme>:/<path>` and `<scheme>:<path>` as well as
+        // `<scheme>://`.
+        match split_scheme_prefix(before_query)? {
+            Some((scheme, _)) => {
+                Self::from_scheme_and_url(Some(scheme), &url::Url::parse(input)?, query, fragment)
             }
-            Err(e) => Err(e)?,
+            None => Self::from_scheme_and_url(None, &RELATIVE_BASE.join(input)?, query, fragment),
         }
     }
-    fn from_url(url: &url::Url) -> Result<Self, ParseError> {
-        Self::from_scheme_and_url(
-            Some(match url.scheme() {
-                builtin_url::SCHEME => Scheme::Builtin,
-                repository_url::SCHEME => Scheme::FuchsiaPkg,
-                boot::SCHEME_STR => Scheme::FuchsiaBoot,
-                _ => return Err(ParseError::InvalidScheme),
-            }),
-            url,
-        )
-    }
-    fn from_scheme_and_url(scheme: Option<Scheme>, url: &url::Url) -> Result<Self, ParseError> {
+    /// `query` and `fragment` are the raw (not yet percent-decoded) `?<query>` and `#<fragment>`
+    /// of the URL that `url` was parsed from.
+    fn from_scheme_and_url(
+        scheme: Option<Scheme>,
+        url: &url::Url,
+        query: Option<&str>,
+        fragment: Option<&str>,
+    ) -> Result<Self, ParseError> {
         if url.port().is_some() {
             return Err(ParseError::CannotContainPort);
         }
@@ -179,26 +221,82 @@ impl UrlParts {
             Some(url.path().strip_prefix("/").unwrap_or_else(|| url.path()).parse()?)
         };
 
-        let hash = parse_query_pairs(url.query_pairs())?;
+        let hash = query.map(parse_query).transpose()?;
 
-        let resource = if let Some(resource) = url.fragment() {
-            let resource = percent_encoding::percent_decode(resource.as_bytes())
-                .decode_utf8()
-                .map_err(ParseError::ResourcePathPercentDecode)?;
-            if resource.is_empty() {
-                None
-            } else {
-                Some(
-                    Resource::try_from(resource.into_owned())
-                        .map_err(ParseError::InvalidResourcePath)?,
-                )
-            }
-        } else {
-            None
-        };
+        let resource = fragment.map(parse_fragment).transpose()?;
 
         Ok(Self { scheme, host, path, hash, resource })
     }
+}
+
+/// Parses and validates the raw (not yet lowercased) scheme of a URL, given `before_query`, the
+/// part of the URL before any `?<query>` or `#<fragment>`, and returns the [`Scheme`] and the rest
+/// of `before_query` after `<scheme>://`, or `None` if the URL has no scheme.
+///
+/// A URL has a scheme if a `:` comes before any `/`, in which case the scheme must be valid (see
+/// [`Scheme::validate`]), followed by `://`, and a known [`Scheme`].
+fn split_scheme_prefix(before_query: &str) -> Result<Option<(Scheme, &str)>, ParseError> {
+    let Some((scheme, after_scheme)) = before_query.split_once(':') else {
+        return Ok(None);
+    };
+    if scheme.contains('/') {
+        return Ok(None);
+    }
+    let () = Scheme::validate(scheme)?;
+    let after_slashes = after_scheme.strip_prefix("//").ok_or(ParseError::InvalidScheme)?;
+    let scheme = match scheme {
+        builtin_url::SCHEME => Scheme::Builtin,
+        repository_url::SCHEME => Scheme::FuchsiaPkg,
+        boot::SCHEME_STR => Scheme::FuchsiaBoot,
+        _ => return Err(ParseError::InvalidScheme),
+    };
+    Ok(Some((scheme, after_slashes)))
+}
+
+/// Returns the first character of the raw (not yet percent-decoded) `fragment` that must be
+/// percent-encoded but is not: any control or other non-ASCII character or
+/// [`FRAGMENT_MUST_PERCENT_ENCODE`] character, except for a `%` that begins a valid `%HH` escape.
+///
+/// Scanning bytes finds the same character as scanning characters: the scan stops at or before the
+/// first non-ASCII byte, which begins a multi-byte UTF-8 sequence because every earlier byte is
+/// ASCII.
+fn find_unencoded_fragment_char(fragment: &str) -> Option<char> {
+    let bytes = fragment.as_bytes();
+    let index = bytes.iter().enumerate().position(|(index, &byte)| {
+        let begins_escape = byte == b'%'
+            && bytes
+                .get(index + 1..index + 3)
+                .is_some_and(|hex| hex.iter().all(u8::is_ascii_hexdigit));
+        !byte.is_ascii()
+            || byte.is_ascii_control()
+            || (FRAGMENT_MUST_PERCENT_ENCODE.contains(&byte) && !begins_escape)
+    })?;
+    fragment[index..].chars().next()
+}
+
+/// Validates the raw (not yet percent-decoded) `#<fragment>` of a URL and percent-decodes it into
+/// a [`Resource`].
+///
+/// Rejects the first character in `fragment` that must be percent-encoded: a C0
+/// (`\u{0000}`..=`\u{001F}`) or DEL/C1 (`\u{007F}`..=`\u{009F}`) control character, another
+/// non-ASCII character, or a `FRAGMENT_MUST_PERCENT_ENCODE` character (`' '`, `'"'`, `'#'`,
+/// `'<'`, `'>'`, `` '`' ``, or a `'%'` that does not begin a valid `%HH` escape). This also
+/// rejects ASCII whitespace anywhere in `fragment`, since `' '` must be percent-encoded and all
+/// other ASCII whitespace characters are control characters. An unencoded NUL or newline is
+/// rejected like its percent-encoded form, since encoding it would not make the resource path
+/// valid. An empty `fragment` (a trailing `#`) is rejected as an empty resource path.
+fn parse_fragment(fragment: &str) -> Result<Resource, ParseError> {
+    if let Some(character) = find_unencoded_fragment_char(fragment) {
+        return Err(ParseError::InvalidResourcePath(match character {
+            '\0' => ResourcePathError::NameContainsNull,
+            '\n' => ResourcePathError::NameContainsNewline,
+            character => ResourcePathError::UrlCannotContainUnencodedCharacter { character },
+        }));
+    }
+    let resource = percent_encoding::percent_decode(fragment.as_bytes())
+        .decode_utf8()
+        .map_err(ParseError::ResourcePathPercentDecode)?;
+    Resource::try_from(resource.into_owned()).map_err(ParseError::InvalidResourcePath)
 }
 
 /// After all other checks, ensure the input string does not change when joined
@@ -213,24 +311,31 @@ fn validate_inverse_relative_url(input: &str) -> Result<(), ParseError> {
     }
 }
 
-fn parse_query_pairs(pairs: url::form_urlencoded::Parse<'_>) -> Result<Option<Hash>, ParseError> {
-    let mut query_hash = None;
-    for (key, value) in pairs {
-        if key == "hash" {
-            if query_hash.is_some() {
-                return Err(ParseError::MultipleHashes);
-            }
-            query_hash = Some(value.parse().map_err(ParseError::InvalidHash)?);
-            // fuchsia-pkg URLs require lowercase hex characters, but fuchsia_hash::Hash::parse
-            // accepts uppercase A-F.
-            if !value.bytes().all(|b| (b >= b'0' && b <= b'9') || (b >= b'a' && b <= b'f')) {
-                return Err(ParseError::UpperCaseHash);
-            }
-        } else {
-            return Err(ParseError::ExtraQueryParameters);
-        }
+/// Validates the raw (not yet percent-decoded) `?<query>` of a URL and parses its package hash.
+///
+/// The query must consist of exactly one `hash=<hash>` parameter, where `<hash>` is 64 lowercase
+/// hex digits. Empty queries (a bare `?`), empty parameters, and percent-encoded keys are rejected
+/// as extra query parameters, and percent-encoded hashes are rejected as invalid hashes.
+fn parse_query(query: &str) -> Result<Hash, ParseError> {
+    let (first, rest) = match query.split_once('&') {
+        Some((first, rest)) => (first, Some(rest)),
+        None => (query, None),
+    };
+    let value = first.strip_prefix("hash=").ok_or(ParseError::ExtraQueryParameters)?;
+    let hash = value.parse().map_err(ParseError::InvalidHash)?;
+    // fuchsia-pkg URLs require lowercase hex characters, but fuchsia_hash::Hash::parse
+    // accepts uppercase A-F.
+    if !value.bytes().all(|b| (b >= b'0' && b <= b'9') || (b >= b'a' && b <= b'f')) {
+        return Err(ParseError::UpperCaseHash);
     }
-    Ok(query_hash)
+    if let Some(rest) = rest {
+        return Err(if rest.starts_with("hash=") {
+            ParseError::MultipleHashes
+        } else {
+            ParseError::ExtraQueryParameters
+        });
+    }
+    Ok(hash)
 }
 
 /// A URL locating a Fuchsia component. Can be either absolute or relative.
@@ -366,6 +471,42 @@ mod test_url_parts {
             url = "bad-scheme://example.org",
             err = ParseError::InvalidScheme,
         }
+        err_invalid_scheme_malformed_authority => {
+            url = "bad-scheme://[::1",
+            err = ParseError::InvalidScheme,
+        }
+        err_uppercase_scheme => {
+            url = "FUCHSIA-PKG://example.org",
+            err = ParseError::InvalidScheme,
+        }
+        err_scheme_without_authority => {
+            url = "fuchsia-pkg:/name",
+            err = ParseError::InvalidScheme,
+        }
+        err_scheme_without_slashes => {
+            url = "fuchsia-boot:name#resource",
+            err = ParseError::InvalidScheme,
+        }
+        err_empty_scheme => {
+            url = "://example.org",
+            err = ParseError::InvalidScheme,
+        }
+        err_scheme_leading_space => {
+            url = " fuchsia-pkg://example.org",
+            err = ParseError::InvalidScheme,
+        }
+        err_scheme_tab => {
+            url = "fuchsia-\tpkg://example.org",
+            err = ParseError::InvalidScheme,
+        }
+        err_special_scheme => {
+            url = "http://example.org",
+            err = ParseError::InvalidScheme,
+        }
+        err_special_scheme_malformed_authority => {
+            url = "http://[::1",
+            err = ParseError::InvalidScheme,
+        }
         err_port => {
             url = "fuchsia-pkg://example.org:1",
             err = ParseError::CannotContainPort,
@@ -417,6 +558,26 @@ mod test_url_parts {
             url = "fuchsia-pkg://example.org/?invalid-key=invalid-value",
             err = ParseError::ExtraQueryParameters,
         }
+        err_empty_query => {
+            url = "fuchsia-pkg://example.org/name?",
+            err = ParseError::ExtraQueryParameters,
+        }
+        err_relative_empty_query => {
+            url = "name?",
+            err = ParseError::ExtraQueryParameters,
+        }
+        err_empty_query_parameter => {
+            url = "fuchsia-pkg://example.org/name?hash=0000000000000000000000000000000000000000000000000000000000000000&",
+            err = ParseError::ExtraQueryParameters,
+        }
+        err_percent_encoded_query_key => {
+            url = "fuchsia-pkg://example.org/name?h%61sh=0000000000000000000000000000000000000000000000000000000000000000",
+            err = ParseError::ExtraQueryParameters,
+        }
+        err_percent_encoded_hash => {
+            url = "fuchsia-pkg://example.org/name?hash=%3000000000000000000000000000000000000000000000000000000000000000",
+            err = ParseError::InvalidHash(_),
+        }
         err_resource_slash => {
             url = "fuchsia-pkg://example.org/name#/",
             err = ParseError::InvalidResourcePath(ResourcePathError::PathStartsWithSlash),
@@ -444,6 +605,70 @@ mod test_url_parts {
         err_resource_unencoded_null => {
             url =  "fuchsia-pkg://example.org/name#reso\x00urce",
             err = ParseError::InvalidResourcePath(ResourcePathError::NameContainsNull),
+        }
+        err_resource_empty_fragment => {
+            url = "fuchsia-pkg://example.org/name#",
+            err = ParseError::InvalidResourcePath(ResourcePathError::PathIsEmpty),
+        }
+        err_relative_resource_empty_fragment => {
+            url = "name#",
+            err = ParseError::InvalidResourcePath(ResourcePathError::PathIsEmpty),
+        }
+        err_resource_unencoded_control_character => {
+            url = "fuchsia-pkg://example.org/name#reso\turce",
+            err = ParseError::InvalidResourcePath(
+                ResourcePathError::UrlCannotContainUnencodedCharacter { character: '\t' }
+            ),
+        }
+        err_resource_unencoded_newline => {
+            url = "fuchsia-pkg://example.org/name#reso\nurce",
+            err = ParseError::InvalidResourcePath(ResourcePathError::NameContainsNewline),
+        }
+        err_resource_trailing_carriage_return => {
+            url = "fuchsia-pkg://example.org/name#resource\r",
+            err = ParseError::InvalidResourcePath(
+                ResourcePathError::UrlCannotContainUnencodedCharacter { character: '\r' }
+            ),
+        }
+        err_resource_trailing_space => {
+            url = "fuchsia-pkg://example.org/name#resource ",
+            err = ParseError::InvalidResourcePath(
+                ResourcePathError::UrlCannotContainUnencodedCharacter { character: ' ' }
+            ),
+        }
+        err_resource_unencoded_space => {
+            url = "fuchsia-pkg://example.org/name#reso urce",
+            err = ParseError::InvalidResourcePath(
+                ResourcePathError::UrlCannotContainUnencodedCharacter { character: ' ' }
+            ),
+        }
+        err_resource_unencoded_number_sign => {
+            url = "fuchsia-pkg://example.org/name#reso#urce",
+            err = ParseError::InvalidResourcePath(
+                ResourcePathError::UrlCannotContainUnencodedCharacter { character: '#' }
+            ),
+        }
+        err_resource_invalid_percent_escape => {
+            url = "fuchsia-pkg://example.org/name#reso%zzurce",
+            err = ParseError::InvalidResourcePath(
+                ResourcePathError::UrlCannotContainUnencodedCharacter { character: '%' }
+            ),
+        }
+        err_resource_unencoded_non_ascii => {
+            url = "fuchsia-pkg://example.org/name#reso☺urce",
+            err = ParseError::InvalidResourcePath(
+                ResourcePathError::UrlCannotContainUnencodedCharacter { character: '☺' }
+            ),
+        }
+        err_relative_resource_unencoded_non_ascii => {
+            url = "name#reso☺urce",
+            err = ParseError::InvalidResourcePath(
+                ResourcePathError::UrlCannotContainUnencodedCharacter { character: '☺' }
+            ),
+        }
+        err_resource_percent_encoded_invalid_utf8 => {
+            url = "fuchsia-pkg://example.org/name#reso%FFurce",
+            err = ParseError::ResourcePathPercentDecode(_),
         }
     }
 
@@ -553,6 +778,22 @@ mod test_url_parts {
             hash = None,
             resource = Some("reso\turce".parse().unwrap()),
         }
+        ok_resource_encoded_reserved_characters => {
+            url =  "fuchsia-pkg://#reso%20%22%23%25%3C%3E%60urce",
+            scheme = Some(Scheme::FuchsiaPkg),
+            host = None,
+            path = Option::<&str>::None,
+            hash = None,
+            resource = Some("reso \"#%<>`urce".parse().unwrap()),
+        }
+        ok_resource_encoded_non_ascii => {
+            url =  "fuchsia-pkg://#reso%E2%98%BAurce",
+            scheme = Some(Scheme::FuchsiaPkg),
+            host = None,
+            path = Option::<&str>::None,
+            hash = None,
+            resource = Some("reso☺urce".parse().unwrap()),
+        }
         ok_all_fields => {
             url =  "fuchsia-pkg://example.org/name\
             ?hash=0000000000000000000000000000000000000000000000000000000000000000\
@@ -639,6 +880,664 @@ mod test_url_parts {
 }
 
 #[cfg(test)]
+mod test_scheme {
+    use super::*;
+    use assert_matches::assert_matches;
+
+    #[test]
+    fn validate() {
+        for scheme in ["a1+-.b", "fuchsia-pkg", "fuchsia-boot", "fuchsia-builtin"] {
+            assert_matches!(Scheme::validate(scheme), Ok(()), "scheme {scheme:?}");
+        }
+        for scheme in
+            ["", "1abc", "Fuchsia-pkg", "foo_bar", "ftp", "file", "http", "https", "ws", "wss"]
+        {
+            assert_matches!(
+                Scheme::validate(scheme),
+                Err(ParseError::InvalidScheme),
+                "scheme {scheme:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn split_prefix() {
+        assert_matches!(
+            split_scheme_prefix("fuchsia-pkg://example.org/name"),
+            Ok(Some((Scheme::FuchsiaPkg, "example.org/name")))
+        );
+        assert_matches!(
+            split_scheme_prefix("fuchsia-boot:///pkg"),
+            Ok(Some((Scheme::FuchsiaBoot, "/pkg")))
+        );
+        assert_matches!(split_scheme_prefix("fuchsia-builtin://"), Ok(Some((Scheme::Builtin, ""))));
+        for scheme_less in ["", "name", "pkg/name:tag", "/name:tag", "//example.org:1"] {
+            assert_matches!(split_scheme_prefix(scheme_less), Ok(None), "input: {scheme_less:?}");
+        }
+        for invalid in [
+            "bad-scheme://example.org",
+            "FUCHSIA-PKG://example.org",
+            "fuchsia-pkg:/name",
+            "fuchsia-pkg:name",
+            "http://example.org",
+            "name:tag",
+        ] {
+            assert_matches!(
+                split_scheme_prefix(invalid),
+                Err(ParseError::InvalidScheme),
+                "input: {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_uppercase_and_non_canonical_schemes() {
+        assert_matches!(
+            FuchsiaPkgAbsolutePackageUrl::parse("FUCHSIA-PKG://example.org/name"),
+            Err(ParseError::InvalidScheme)
+        );
+        assert_matches!(
+            AbsolutePackageUrl::parse("FUCHSIA-PKG://example.org/name"),
+            Err(ParseError::InvalidScheme)
+        );
+        assert_matches!(
+            boot::AbsoluteComponentUrl::parse("FUCHSIA-BOOT:///pkg#meta/a.cm"),
+            Err(ParseError::InvalidScheme)
+        );
+
+        for bad_scheme in ["fuchsia-pkg:/name", "fuchsia-boot:/x#r", "fuchsia-builtin:#r"] {
+            assert_matches!(
+                UrlParts::parse(bad_scheme),
+                Err(ParseError::InvalidScheme),
+                "input: {bad_scheme:?}"
+            );
+        }
+        for bad_boot_url in ["fuchsia-boot:/pkg#meta/a.cm", "fuchsia-boot:pkg#meta/a.cm"] {
+            assert_matches!(
+                boot::AbsoluteComponentUrl::parse(bad_boot_url),
+                Err(ParseError::InvalidScheme),
+                "input: {bad_boot_url:?}"
+            );
+        }
+        assert_matches!(
+            FuchsiaPkgAbsolutePackageUrl::parse(" fuchsia-pkg://example.org/name"),
+            Err(ParseError::InvalidScheme)
+        );
+
+        // Colon in a scheme-less input is rejected as an invalid scheme.
+        assert_matches!(FuchsiaPkgPackageUrl::parse("name:tag"), Err(ParseError::InvalidScheme));
+        assert_matches!(RelativePackageUrl::parse("name:tag"), Err(ParseError::InvalidScheme));
+        assert_matches!(PackageUrl::parse("name:tag").map(|_| ()), Err(ParseError::InvalidScheme));
+        assert_matches!(RelativePackageUrl::parse("1name:tag"), Err(ParseError::InvalidScheme));
+
+        // A colon after a `/` or inside `?<query>` or `#<fragment>` is not parsed as a scheme.
+        assert_matches!(
+            FuchsiaPkgPackageUrl::parse("pkg/name:tag"),
+            Err(ParseError::InvalidPathSegment(
+                errors::PackagePathSegmentError::InvalidCharacter { character: ':' }
+            ))
+        );
+        assert_matches!(
+            RelativePackageUrl::parse("/name:tag"),
+            Err(ParseError::InvalidPathSegment(
+                errors::PackagePathSegmentError::InvalidCharacter { character: ':' }
+            ))
+        );
+        assert_matches!(
+            RelativePackageUrl::parse("//example.org:1"),
+            Err(ParseError::CannotContainPort)
+        );
+        assert_eq!(
+            RelativeComponentUrl::parse("name#meta:a.cm").unwrap().to_string(),
+            "name#meta:a.cm"
+        );
+        assert_matches!(
+            RelativePackageUrl::parse("name?foo:bar"),
+            Err(ParseError::ExtraQueryParameters)
+        );
+
+        // WHATWG special schemes are rejected, and hosts for non-special schemes are validated as
+        // opaque `[a-z0-9.-]+` strings without IDNA/punycode or IPv4 address parsing/normalization.
+        for special_url in [
+            "ftp://example.org/name",
+            "file:///name",
+            "http://example.org/name",
+            "https://example.org/name",
+            "ws://example.org/name",
+            "wss://example.org/name",
+        ] {
+            assert_matches!(
+                AbsolutePackageUrl::parse(special_url),
+                Err(ParseError::InvalidScheme),
+                "input: {special_url:?}"
+            );
+        }
+        for opaque_host_url in [
+            "fuchsia-pkg://1/name",
+            "fuchsia-pkg://127.1/name",
+            "fuchsia-pkg://256.0.0.1/name",
+            "fuchsia-pkg://example.123/name",
+            "fuchsia-pkg://xn--99999/name",
+        ] {
+            let parsed = FuchsiaPkgAbsolutePackageUrl::parse(opaque_host_url).unwrap();
+            assert_eq!(parsed.to_string(), opaque_host_url, "input: {opaque_host_url:?}");
+        }
+        assert_matches!(
+            FuchsiaPkgAbsolutePackageUrl::parse("fuchsia-pkg://xn--/name"),
+            Err(ParseError::InvalidHost)
+        );
+    }
+}
+
+#[cfg(test)]
+mod test_query {
+    use super::*;
+    use assert_matches::assert_matches;
+
+    #[test]
+    fn rejects_malformed_queries_and_percent_encoded_query_keys() {
+        let hash_hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+        assert_matches!(
+            FuchsiaPkgAbsolutePackageUrl::parse("fuchsia-pkg://example.org/name?"),
+            Err(ParseError::ExtraQueryParameters)
+        );
+        assert_matches!(
+            FuchsiaPkgAbsoluteComponentUrl::parse("fuchsia-pkg://example.org/name?#meta/comp.cm"),
+            Err(ParseError::ExtraQueryParameters)
+        );
+        for bad_query in [
+            "fuchsia-pkg://example.org/name?".to_string(),
+            "fuchsia-pkg://example.org/name?hash".to_string(),
+            format!("fuchsia-pkg://example.org/name?hash={hash_hex}&"),
+            format!("fuchsia-pkg://example.org/name?&hash={hash_hex}"),
+            format!("fuchsia-pkg://example.org/name?h%61sh={hash_hex}"),
+            format!("fuchsia-pkg://example.org/name?h\tash={hash_hex}"),
+            format!("fuchsia-pkg://example.org/name?\thash={hash_hex}"),
+        ] {
+            assert_matches!(
+                FuchsiaPkgPinnedAbsolutePackageUrl::parse(&bad_query),
+                Err(ParseError::ExtraQueryParameters),
+                "input: {bad_query:?}"
+            );
+        }
+
+        for bad_hash_query in [
+            "fuchsia-pkg://example.org/name?hash=%3000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            format!("fuchsia-pkg://example.org/name?hash={hash_hex} "),
+            format!("fuchsia-pkg://example.org/name?hash={hash_hex}\r\n"),
+            format!("fuchsia-pkg://example.org/name?hash={hash_hex}\x07"),
+            format!("fuchsia-pkg://example.org/name?hash=\t{hash_hex}"),
+        ] {
+            assert_matches!(
+                FuchsiaPkgPinnedAbsolutePackageUrl::parse(&bad_hash_query),
+                Err(ParseError::InvalidHash(_)),
+                "input: {bad_hash_query:?}"
+            );
+        }
+        assert_matches!(
+            FuchsiaPkgAbsoluteComponentUrl::parse(&format!(
+                "fuchsia-pkg://example.org/name?hash={hash_hex}\t#meta/comp.cm"
+            )),
+            Err(ParseError::InvalidHash(_))
+        );
+    }
+
+    #[test]
+    fn rejects_empty_query_across_url_shapes() {
+        for bad_empty_query in [
+            "fuchsia-pkg://example.org/pkg?",
+            "fuchsia-pkg://example.org/pkg?#my%20res",
+            "fuchsia-pkg://example.org?",
+            "fuchsia-boot:///?#%20",
+            "a?",
+            "a?#b",
+            "?",
+        ] {
+            assert_matches!(
+                UrlParts::parse(bad_empty_query),
+                Err(ParseError::ExtraQueryParameters),
+                "input: {bad_empty_query:?}"
+            );
+        }
+        assert_matches!(
+            RepositoryUrl::parse("fuchsia-pkg://example.org?"),
+            Err(ParseError::ExtraQueryParameters)
+        );
+        assert_matches!(RelativePackageUrl::parse("name?"), Err(ParseError::ExtraQueryParameters));
+    }
+}
+
+#[cfg(test)]
+mod test_fragment {
+    use super::*;
+    use assert_matches::assert_matches;
+
+    const HASH_HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn rejects_unencoded_whitespace_and_control_characters() {
+        // Trailing whitespace and unencoded C0/C1 control characters in `#<fragment>` are rejected
+        // rather than stripped; they must be percent-encoded.
+        for (bad_control_fragment, character) in [
+            ("fuchsia-pkg://example.org/name#meta/a\tb.cm", '\t'),
+            ("fuchsia-pkg://example.org/name#meta/a\rb.cm", '\r'),
+            ("fuchsia-pkg://example.org/name#meta/a\x07b.cm", '\x07'),
+            ("fuchsia-pkg://example.org/name#meta/a\x7fb.cm", '\x7f'),
+            ("fuchsia-pkg://example.org/name#meta/a\u{0085}b.cm", '\u{0085}'),
+        ] {
+            assert_matches!(
+                FuchsiaPkgAbsoluteComponentUrl::parse(bad_control_fragment),
+                Err(ParseError::InvalidResourcePath(
+                    ResourcePathError::UrlCannotContainUnencodedCharacter { character: c }
+                )) if c == character,
+                "input: {bad_control_fragment:?}"
+            );
+        }
+        assert_matches!(
+            FuchsiaPkgAbsoluteComponentUrl::parse("fuchsia-pkg://example.org/name#meta/a\0b.cm"),
+            Err(ParseError::InvalidResourcePath(ResourcePathError::NameContainsNull))
+        );
+        assert_matches!(
+            FuchsiaPkgAbsoluteComponentUrl::parse("fuchsia-pkg://example.org/name#meta/a\nb.cm"),
+            Err(ParseError::InvalidResourcePath(ResourcePathError::NameContainsNewline))
+        );
+        // Trailing ASCII whitespace gets no special treatment: a trailing `' '` is rejected like
+        // any other unencoded `' '`, and all other ASCII whitespace characters are control
+        // characters.
+        for (bad_trailing_ws_fragment, expected) in [
+            (
+                "fuchsia-pkg://example.org/name#meta/a.cm ",
+                ResourcePathError::UrlCannotContainUnencodedCharacter { character: ' ' },
+            ),
+            (
+                "fuchsia-pkg://example.org/name# ",
+                ResourcePathError::UrlCannotContainUnencodedCharacter { character: ' ' },
+            ),
+            (
+                "name#meta/a.cm ",
+                ResourcePathError::UrlCannotContainUnencodedCharacter { character: ' ' },
+            ),
+            (
+                "fuchsia-pkg://example.org/name#meta/a.cm\t",
+                ResourcePathError::UrlCannotContainUnencodedCharacter { character: '\t' },
+            ),
+            (
+                "fuchsia-pkg://example.org/name#meta/a.cm\r",
+                ResourcePathError::UrlCannotContainUnencodedCharacter { character: '\r' },
+            ),
+            ("fuchsia-pkg://example.org/name#meta/a.cm\n", ResourcePathError::NameContainsNewline),
+            (
+                "fuchsia-pkg://example.org/name#meta/a.cm\x0c",
+                ResourcePathError::UrlCannotContainUnencodedCharacter { character: '\x0c' },
+            ),
+        ] {
+            assert_matches!(
+                ComponentUrl::parse(bad_trailing_ws_fragment),
+                Err(ParseError::InvalidResourcePath(e)) if e == expected,
+                "input: {bad_trailing_ws_fragment:?}"
+            );
+        }
+        let encoded_space_comp =
+            FuchsiaPkgAbsoluteComponentUrl::parse("fuchsia-pkg://example.org/name#meta/a%20b.cm")
+                .unwrap();
+        assert_eq!(encoded_space_comp.resource().as_ref(), "meta/a b.cm");
+        assert_eq!(encoded_space_comp.to_string(), "fuchsia-pkg://example.org/name#meta/a%20b.cm");
+        let encoded_trailing_space_comp = FuchsiaPkgAbsoluteComponentUrl::parse(
+            "fuchsia-pkg://example.org/name#meta/a%20b.cm%20",
+        )
+        .unwrap();
+        assert_eq!(encoded_trailing_space_comp.resource().as_ref(), "meta/a b.cm ");
+        assert_eq!(
+            encoded_trailing_space_comp.to_string(),
+            "fuchsia-pkg://example.org/name#meta/a%20b.cm%20"
+        );
+        let encoded_tab_comp =
+            FuchsiaPkgAbsoluteComponentUrl::parse("fuchsia-pkg://example.org/name#meta/a%09b.cm")
+                .unwrap();
+        assert_eq!(encoded_tab_comp.resource().as_ref(), "meta/a\tb.cm");
+        assert_eq!(encoded_tab_comp.to_string(), "fuchsia-pkg://example.org/name#meta/a%09b.cm");
+    }
+
+    #[test]
+    fn fragment_requires_percent_encoding_of_reserved_characters() {
+        // `' '`, `'"'`, `'#'`, `'%'`, `'<'`, `'>'`, `` '`' ``, and non-ASCII characters (including
+        // those that render invisibly or like other characters) must be percent-encoded anywhere in
+        // `#<fragment>` (leading, interior, or trailing) for every URL shape with a fragment.
+        // None of the prefixes or suffixes below begin with two hex digits, so `'%'` never begins
+        // a valid `%HH` escape here.
+        for (character, encoded) in [
+            (' ', "%20"),
+            ('"', "%22"),
+            ('#', "%23"),
+            ('%', "%25"),
+            ('<', "%3C"),
+            ('>', "%3E"),
+            ('`', "%60"),
+            ('é', "%C3%A9"),
+            // No-break space.
+            ('\u{a0}', "%C2%A0"),
+            // Zero-width space.
+            ('\u{200b}', "%E2%80%8B"),
+            // Right-to-left override.
+            ('\u{202e}', "%E2%80%AE"),
+            // Cyrillic small letter o.
+            ('\u{43e}', "%D0%BE"),
+        ] {
+            for (prefix, suffix) in [("", "meta/a.cm"), ("meta/a", "b.cm"), ("meta/a.cm", "")] {
+                let expected = ResourcePathError::UrlCannotContainUnencodedCharacter { character };
+                let fragment = format!("{prefix}{character}{suffix}");
+                for raw_url in [
+                    format!("fuchsia-pkg://example.org/name#{fragment}"),
+                    format!("fuchsia-pkg://example.org/name?hash={HASH_HEX}#{fragment}"),
+                    format!("name#{fragment}"),
+                    format!("fuchsia-boot:///path#{fragment}"),
+                    format!("fuchsia-builtin://#{fragment}"),
+                ] {
+                    assert_matches!(
+                        UrlParts::parse(&raw_url),
+                        Err(ParseError::InvalidResourcePath(e)) if e == expected,
+                        "input: {raw_url:?}"
+                    );
+                    assert_matches!(
+                        ComponentUrl::parse(&raw_url),
+                        Err(ParseError::InvalidResourcePath(e)) if e == expected,
+                        "input: {raw_url:?}"
+                    );
+                }
+
+                // The percent-encoded form is accepted, decoded into the `Resource`, and
+                // re-encoded identically by `Display`.
+                let decoded_resource = format!("{prefix}{character}{suffix}");
+                let encoded_url =
+                    format!("fuchsia-pkg://example.org/name#{prefix}{encoded}{suffix}");
+                let comp = FuchsiaPkgAbsoluteComponentUrl::parse(&encoded_url).unwrap();
+                assert_eq!(comp.resource().as_ref(), decoded_resource, "input: {encoded_url:?}");
+                assert_eq!(comp.to_string(), encoded_url);
+            }
+        }
+
+        // Each URL type rejects the unencoded form, including package URL types, which validate
+        // `#<fragment>` before rejecting a resource.
+        assert_matches!(
+            FuchsiaPkgAbsoluteComponentUrl::parse("fuchsia-pkg://example.org/name#a<b"),
+            Err(ParseError::InvalidResourcePath(
+                ResourcePathError::UrlCannotContainUnencodedCharacter { character: '<' }
+            ))
+        );
+        assert_matches!(
+            RelativeComponentUrl::parse("name#a\"b"),
+            Err(ParseError::InvalidResourcePath(
+                ResourcePathError::UrlCannotContainUnencodedCharacter { character: '"' }
+            ))
+        );
+        assert_matches!(
+            RelativeComponentUrl::parse("name#café"),
+            Err(ParseError::InvalidResourcePath(
+                ResourcePathError::UrlCannotContainUnencodedCharacter { character: 'é' }
+            ))
+        );
+        assert_matches!(
+            boot::AbsoluteComponentUrl::parse("fuchsia-boot:///#meta/a b.cm"),
+            Err(ParseError::InvalidResourcePath(
+                ResourcePathError::UrlCannotContainUnencodedCharacter { character: ' ' }
+            ))
+        );
+        assert_matches!(
+            builtin_url::BuiltinUrl::parse("fuchsia-builtin://#a`b"),
+            Err(ParseError::InvalidResourcePath(
+                ResourcePathError::UrlCannotContainUnencodedCharacter { character: '`' }
+            ))
+        );
+        assert_matches!(
+            FuchsiaPkgComponentUrl::parse("fuchsia-pkg://example.org/name#a#b"),
+            Err(ParseError::InvalidResourcePath(
+                ResourcePathError::UrlCannotContainUnencodedCharacter { character: '#' }
+            ))
+        );
+        assert_matches!(
+            AbsoluteComponentUrl::parse("fuchsia-pkg://example.org/path#100%"),
+            Err(ParseError::InvalidResourcePath(
+                ResourcePathError::UrlCannotContainUnencodedCharacter { character: '%' }
+            ))
+        );
+        assert_matches!(
+            FuchsiaPkgAbsolutePackageUrl::parse("fuchsia-pkg://example.org/name#a>b"),
+            Err(ParseError::InvalidResourcePath(
+                ResourcePathError::UrlCannotContainUnencodedCharacter { character: '>' }
+            ))
+        );
+        assert_eq!(
+            ResourcePathError::UrlCannotContainUnencodedCharacter { character: '#' }.to_string(),
+            "URL fragments cannot contain unencoded '#'; it must be percent-encoded"
+        );
+
+        // Lowercase escapes are accepted and displayed with uppercase hex digits.
+        let lowercase = FuchsiaPkgAbsoluteComponentUrl::parse("fuchsia-pkg://a/b#%3ca%3e").unwrap();
+        assert_eq!(lowercase.resource().as_ref(), "<a>");
+        assert_eq!(lowercase.to_string(), "fuchsia-pkg://a/b#%3Ca%3E");
+
+        // `?` may remain unencoded, while a literal `%` and non-ASCII characters must be encoded.
+        let mixed =
+            FuchsiaPkgAbsoluteComponentUrl::parse("fuchsia-pkg://a/b#100%25/?/%C3%A9").unwrap();
+        assert_eq!(mixed.resource().as_ref(), "100%/?/é");
+        assert_eq!(mixed.to_string(), "fuchsia-pkg://a/b#100%25/?/%C3%A9");
+        let relative = RelativeComponentUrl::parse("name#100%25/?/%C3%A9").unwrap();
+        assert_eq!(relative.resource().as_ref(), "100%/?/é");
+        assert_eq!(relative.to_string(), "name#100%25/?/%C3%A9");
+
+        // The requirement only applies to URL syntax: a decoded `Resource` may contain these
+        // characters, and `Display` always percent-encodes them.
+        let pkg = FuchsiaPkgAbsolutePackageUrl::parse("fuchsia-pkg://a/b").unwrap();
+        let comp = FuchsiaPkgAbsoluteComponentUrl::from_package_url_and_resource(
+            pkg,
+            "a b\"#%<>`cé".to_string(),
+        )
+        .unwrap();
+        assert_eq!(comp.to_string(), "fuchsia-pkg://a/b#a%20b%22%23%25%3C%3E%60c%C3%A9");
+        assert_eq!(FuchsiaPkgAbsoluteComponentUrl::parse(&comp.to_string()).unwrap(), comp);
+        let boot_comp = boot::AbsoluteComponentUrl::new(None, "a b\"#%<>`cé".parse().unwrap());
+        assert_eq!(boot_comp.to_string(), "fuchsia-boot://#a%20b%22%23%25%3C%3E%60c%C3%A9");
+        assert_eq!(
+            boot::AbsoluteComponentUrl::parse(&boot_comp.to_string()).unwrap().resource(),
+            boot_comp.resource()
+        );
+    }
+
+    #[test]
+    fn fragment_must_percent_encode_matches_fragment_set() {
+        // An ASCII or non-ASCII character must be percent-encoded in `#<fragment>` exactly when
+        // `Display` percent-encodes it.
+        let ascii = (0u8..0x80).map(char::from);
+        let non_ascii = [
+            '\u{80}', '\u{85}', '\u{9f}', 'é', '☺', '𝄞', '\u{a0}', '\u{200b}', '\u{202e}',
+            '\u{feff}',
+        ];
+        for character in ascii.chain(non_ascii) {
+            let unencoded = character.to_string();
+            let encoded_by_display = percent_encoding::utf8_percent_encode(&unencoded, FRAGMENT)
+                .to_string()
+                != unencoded;
+            if character.is_ascii() {
+                assert_eq!(
+                    character.is_ascii_control()
+                        || FRAGMENT_MUST_PERCENT_ENCODE.contains(&(character as u8)),
+                    encoded_by_display,
+                    "character {character:?}"
+                );
+            }
+            assert_eq!(
+                find_unencoded_fragment_char(&format!("a{character}b")),
+                encoded_by_display.then_some(character),
+                "character {character:?}"
+            );
+        }
+        // A `%` that begins a valid `%HH` escape is encoded; any other `%` is not.
+        for (fragment, expected) in [
+            ("%41", None),
+            ("%4a%4A%aa", None),
+            ("a%2Fb%25", None),
+            ("%C3%A9", None),
+            ("%", Some('%')),
+            ("%4", Some('%')),
+            ("%4g", Some('%')),
+            ("%g4", Some('%')),
+            ("%%41", Some('%')),
+            ("%41%", Some('%')),
+            ("%C3%A9%", Some('%')),
+            ("%é", Some('%')),
+            ("é%", Some('é')),
+        ] {
+            assert_eq!(find_unencoded_fragment_char(fragment), expected, "fragment {fragment:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_first_unencoded_character() {
+        // The first character that must be percent-encoded determines the error, where an
+        // unencoded NUL or newline is rejected like its percent-encoded form.
+        for (fragment, expected) in [
+            ("a b\0c", ResourcePathError::UrlCannotContainUnencodedCharacter { character: ' ' }),
+            ("a\0b c", ResourcePathError::NameContainsNull),
+            ("a\tb\nc", ResourcePathError::UrlCannotContainUnencodedCharacter { character: '\t' }),
+            ("a\nb\0c", ResourcePathError::NameContainsNewline),
+            ("100%\t", ResourcePathError::UrlCannotContainUnencodedCharacter { character: '%' }),
+            ("é\u{85}", ResourcePathError::UrlCannotContainUnencodedCharacter { character: 'é' }),
+            (
+                "\u{85}é",
+                ResourcePathError::UrlCannotContainUnencodedCharacter { character: '\u{85}' },
+            ),
+        ] {
+            let url = format!("fuchsia-pkg://example.org/name#{fragment}");
+            assert_matches!(
+                FuchsiaPkgAbsoluteComponentUrl::parse(&url),
+                Err(ParseError::InvalidResourcePath(e)) if e == expected,
+                "input: {url:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn percent_encoded_fragments_round_trip() {
+        // Every `%` must begin a valid `%HH` escape.
+        for url in [
+            "fuchsia-pkg://example.org/name#100%",
+            "fuchsia-pkg://example.org/name#%4",
+            "fuchsia-pkg://example.org/name#a%2",
+            "fuchsia-pkg://example.org/name#%zz",
+            "fuchsia-pkg://example.org/name#%4g",
+            "fuchsia-pkg://example.org/name#%g4",
+            "fuchsia-pkg://example.org/name#%%20",
+            "fuchsia-pkg://example.org/name#%20%",
+            "fuchsia-pkg://example.org/name#%FF%",
+        ] {
+            assert_matches!(
+                FuchsiaPkgAbsoluteComponentUrl::parse(url),
+                Err(ParseError::InvalidResourcePath(
+                    ResourcePathError::UrlCannotContainUnencodedCharacter { character: '%' }
+                )),
+                "input: {url:?}"
+            );
+            assert_matches!(
+                serde_json::from_value::<FuchsiaPkgAbsoluteComponentUrl>(
+                    serde_json::Value::String(url.to_string())
+                ),
+                Err(_),
+                "input: {url:?}"
+            );
+        }
+
+        // Valid lowercase UTF-8 escapes, decoded interior slashes, and encoded `%` (decoded
+        // exactly once), `#`, and `?` combined with `?hash=` round-trip through `Display`.
+        for (raw_url, expected_res, expected_display) in [
+            (
+                "fuchsia-pkg://example.org/name#%e2%98%ba".to_string(),
+                "☺",
+                "fuchsia-pkg://example.org/name#%E2%98%BA".to_string(),
+            ),
+            (
+                "fuchsia-pkg://example.org/name#a%2Fb".to_string(),
+                "a/b",
+                "fuchsia-pkg://example.org/name#a/b".to_string(),
+            ),
+            (
+                "fuchsia-pkg://example.org/name#100%25".to_string(),
+                "100%",
+                "fuchsia-pkg://example.org/name#100%25".to_string(),
+            ),
+            (
+                "fuchsia-pkg://example.org/name#%25zz".to_string(),
+                "%zz",
+                "fuchsia-pkg://example.org/name#%25zz".to_string(),
+            ),
+            (
+                "fuchsia-pkg://example.org/name#%2520".to_string(),
+                "%20",
+                "fuchsia-pkg://example.org/name#%2520".to_string(),
+            ),
+            (
+                "fuchsia-pkg://example.org/name#%25%20".to_string(),
+                "% ",
+                "fuchsia-pkg://example.org/name#%25%20".to_string(),
+            ),
+            (
+                format!("fuchsia-pkg://example.org/name?hash={HASH_HEX}#a%23b?c"),
+                "a#b?c",
+                format!("fuchsia-pkg://example.org/name?hash={HASH_HEX}#a%23b?c"),
+            ),
+        ] {
+            let parsed = FuchsiaPkgAbsoluteComponentUrl::parse(&raw_url).unwrap();
+            assert_eq!(parsed.resource().as_ref(), expected_res, "input: {raw_url:?}");
+            assert_eq!(parsed.to_string(), expected_display, "input: {raw_url:?}");
+            assert_eq!(
+                FuchsiaPkgAbsoluteComponentUrl::parse(&expected_display).unwrap(),
+                parsed,
+                "input: {raw_url:?}"
+            );
+            let from_serde: FuchsiaPkgAbsoluteComponentUrl =
+                serde_json::from_value(serde_json::Value::String(raw_url.clone())).unwrap();
+            assert_eq!(from_serde, parsed, "input: {raw_url:?}");
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            failure_persistence: None,
+            ..Default::default()
+        })]
+
+        #[test]
+        fn display_round_trips(res in crate::test::random_resource_path(1, 5)) {
+            // Every resource path, including those with control, reserved, and non-ASCII
+            // characters, displays as an ASCII URL that parses back to the same resource.
+            let pkg = FuchsiaPkgAbsolutePackageUrl::parse("fuchsia-pkg://a/b").unwrap();
+            let url =
+                FuchsiaPkgAbsoluteComponentUrl::from_package_url_and_resource(pkg, res.clone())
+                    .unwrap();
+            let displayed = url.to_string();
+            proptest::prop_assert!(displayed.is_ascii(), "{displayed:?}");
+            proptest::prop_assert_eq!(
+                FuchsiaPkgAbsoluteComponentUrl::parse(&displayed).unwrap(),
+                url
+            );
+
+            let resource: Resource = res.parse().unwrap();
+            let relative = format!("name#{}", resource.percent_encode());
+            let relative = RelativeComponentUrl::parse(&relative).unwrap();
+            proptest::prop_assert_eq!(relative.resource(), &resource);
+
+            let boot = boot::AbsoluteComponentUrl::new(None, resource.clone());
+            let reparsed = boot::AbsoluteComponentUrl::parse(&boot.to_string()).unwrap();
+            proptest::prop_assert_eq!(reparsed.resource(), &resource);
+
+            let builtin = format!("fuchsia-builtin://#{}", resource.percent_encode());
+            let builtin = builtin_url::BuiltinUrl::parse(&builtin).unwrap();
+            proptest::prop_assert_eq!(builtin.resource(), Some(&resource));
+        }
+    }
+}
+
+#[cfg(test)]
 mod test_url_type_aliases {
     use super::*;
 
@@ -650,6 +1549,9 @@ mod test_url_type_aliases {
         let abs_present = "fuchsia-boot://my-host/my/path\
             ?hash=0000000000000000000000000000000000000000000000000000000000000000#my-resource";
         assert_eq!(ComponentUrl::parse(abs_present).unwrap().to_string(), abs_present);
+
+        let abs_encoded = "fuchsia-boot://my-host/my/path#my%20resource%25";
+        assert_eq!(ComponentUrl::parse(abs_encoded).unwrap().to_string(), abs_encoded);
 
         let rel = "my-path#my-resource";
         assert_eq!(ComponentUrl::parse(rel).unwrap().to_string(), rel);

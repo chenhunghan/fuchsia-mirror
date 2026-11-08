@@ -1,0 +1,66 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//src/developer/ffx/build:ffx_plugin.bzl", "ffx_plugin")
+
+package(default_applicable_licenses = ["//:license"])
+
+ffx_plugin(
+    name = "ffx_profile_memory_components",
+    srcs = [
+        "src/detailed.rs",
+        "src/json.rs",
+        "src/lib.rs",
+        "src/output.rs",
+        "src/resource_annotator.rs",
+        "src/statistics.rs",
+    ],
+    args_deps = [
+        "//src/developer/ffx/core:lib",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:camino",
+    ],
+    args_srcs = ["src/args.rs"],
+    edition = "2024",
+    link_deps = ["//third_party/zstd"],
+    sdk_category = "not-yet-specified",
+    version = "0.1.0",
+    visibility = ["//src/developer/ffx/plugins/profile/memory:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_rust_fdomain",
+        "//sdk/fidl/fuchsia.memory.attribution.plugin:fuchsia.memory.attribution.plugin_rust_fdomain",
+        "//sdk/rust/zx-types",
+        "//src/developer/ffx/lib/errors:lib",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/developer/ffx/lib/target/holders:lib",
+        "//src/developer/ffx/lib/writer:lib",
+        "//src/lib/assembly/assembled_system",
+        "//src/lib/assembly/container",
+        "//src/lib/fdomain/client",
+        "//src/lib/fidl/rust/fidl",
+        "//src/performance/memory/attribution/processing",
+        "//src/storage/fxfs/platform:constants",
+        # prettytable-rs is a fork outside vendor/; GN reaches it through
+        # the //third_party/rust_crates:prettytable-rs alias group.
+        "//third_party/rust_crates/forks/prettytable-rs:prettytable",  # @bazel2gn:path_overwrite://third_party/rust_crates:prettytable-rs
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:chrono",
+        "//third_party/rust_crates/vendor:csv",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:zstd",
+    ],
+)
+
+host_rustc_test(
+    name = "ffx_profile_memory_components_test",
+    crate = ":ffx_profile_memory_components",
+    visibility = ["//src/developer/ffx:__pkg__"],
+    deps = [
+        "//third_party/rust_crates/vendor:pretty_assertions",
+        "//third_party/rust_crates/vendor:rustc-hash",
+    ],
+)

@@ -1,0 +1,68 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_component.bzl",
+    "fx_unittest_component",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":inspect_contrib_cpp_tests"],
+    visibility = ["//sdk/lib:__pkg__"],
+)
+
+alias(
+    name = "cpp",
+    testonly = True,
+    actual = ":read_visitor",
+    visibility = ["//:__subpackages__"],
+)
+
+fx_cc_library(
+    name = "read_visitor",
+    hdrs = ["read_visitor.h"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//sdk/lib/fit",
+        "//sdk/lib/fit-promise",
+        "//zircon/system/ulib/inspect",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "read_visitor_test",
+    srcs = ["read_visitor_unittest.cc"],
+    # TODO(https://fxbug.dev/570694755): Drop once the test includes
+    # read_visitor.h with quotes instead of a root path in angle brackets.
+    copts = ["-I."],
+    tags = ["manual"],
+    deps = [
+        ":read_visitor",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_component(
+    name = "read_visitor_unittest",
+    binary = ":read_visitor_test",
+)
+
+fx_package(
+    name = "inspect_contrib_cpp_tests_package",
+    package_name = "inspect_contrib_cpp_tests",
+    test_components = [":read_visitor_unittest"],
+)
+
+fx_test(
+    name = "inspect_contrib_cpp_tests",
+    package = ":inspect_contrib_cpp_tests_package",
+)

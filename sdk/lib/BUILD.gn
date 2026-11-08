@@ -18,6 +18,7 @@ group("tests") {
     "c:tests",
     "component:tests",
     "device-watcher:tests",
+    "devicetree:tests",
     "diagnostics:tests",
     "driver:tests",
     "driver_test_realm:tests",

@@ -264,6 +264,7 @@ type SerializableUnion = strict union {
 };
 
 const SOME_DEFAULT_VALUE int32 = 100;
+const ZX_CONST uint64 = zx.CHANNEL_MAX_MSG_BYTES;
 
 service TypesTestService {
     test client_end:TypesTest;

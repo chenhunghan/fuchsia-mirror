@@ -88,46 +88,6 @@ zx::result<DeprecatedOptions> DeprecatedOptions::FromOpen1Flags(fio::OpenFlags f
   return zx::ok(FlagsToConnectionOptions(flags));
 }
 
-zx::result<DeprecatedOptions> DeprecatedOptions::FromCloneFlags(fio::OpenFlags flags,
-                                                                VnodeProtocol protocol) {
-  constexpr fio::OpenFlags kValidCloneFlags = kAllIo1Rights | fio::OpenFlags::kAppend |
-                                              fio::OpenFlags::kDescribe |
-                                              fio::OpenFlags::kCloneSameRights;
-  // Any flags not present in |kValidCloneFlags| should be ignored.
-  flags &= kValidCloneFlags;
-
-  // If CLONE_SAME_RIGHTS is specified, the client cannot request any specific rights.
-  if ((flags & fio::OpenFlags::kCloneSameRights) && (flags & kAllIo1Rights)) {
-    return zx::error(ZX_ERR_INVALID_ARGS);
-  }
-
-  // Ensure we map the request to the correct flags based on the connection's protocol.
-  switch (protocol) {
-    case fs::VnodeProtocol::kNode: {
-      flags |= fio::OpenFlags::kNodeReference;
-      break;
-    }
-    case fs::VnodeProtocol::kDirectory: {
-      flags |= fio::OpenFlags::kDirectory;
-      break;
-    }
-    default: {
-      flags |= fio::OpenFlags::kNotDirectory;
-      break;
-    }
-  }
-
-  DeprecatedOptions options = FlagsToConnectionOptions(flags);
-
-  // Downscope the rights specified by |flags| to match those that were granted to this node
-  // based on |protocol|. io1 OpenFlags expand to a set of rights which may not be compatible
-  // with this protocol (e.g. OpenFlags::RIGHT_WRITABLE grants Rights::MODIFY_DIRECTORY, but this is
-  // not applicable to files which do not have this right).
-  options.rights = internal::DownscopeRights(options.rights, protocol);
-
-  return zx::ok(options);
-}
-
 fio::OpenFlags DeprecatedOptions::ToIoV1Flags() const { return flags | RightsToOpenFlags(rights); }
 
 fio::OpenFlags RightsToOpenFlags(fio::Rights rights) {
@@ -143,20 +103,6 @@ fio::OpenFlags RightsToOpenFlags(fio::Rights rights) {
     flags |= fio::OpenFlags::kRightExecutable;
   }
   return flags;
-}
-
-fio::wire::NodeAttributes VnodeAttributes::ToIoV1NodeAttributes(const fs::Vnode& vnode) const {
-  // Filesystems that don't support hard links typically report a value of 1 for the link count.
-  constexpr uint64_t kDefaultLinkCount = 1;
-  return fio::wire::NodeAttributes{
-      .mode = mode.has_value() ? *mode
-                               : internal::GetPosixMode(vnode.GetProtocols(), vnode.GetAbilities()),
-      .id = id.value_or(fio::wire::kInoUnknown),
-      .content_size = content_size.value_or(0),
-      .storage_size = storage_size.value_or(0),
-      .link_count = link_count.value_or(kDefaultLinkCount),
-      .creation_time = creation_time.value_or(0),
-      .modification_time = modification_time.value_or(0)};
 }
 
 namespace internal {

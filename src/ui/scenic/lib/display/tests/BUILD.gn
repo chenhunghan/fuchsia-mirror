@@ -28,6 +28,7 @@ cc_test_executable("unittests") {
   deps = [
     ":mocks",
     "//sdk/fidl/fuchsia.hardware.display:fuchsia.hardware.display_cpp",
+    "//sdk/fidl/fuchsia.hardware.display.types:fuchsia.hardware.display.types_cpp",
     "//sdk/fidl/fuchsia.images2:fuchsia.images2_cpp",
     "//sdk/fidl/fuchsia.ui.display.color:fuchsia.ui.display.color_cpp",
     "//sdk/fidl/fuchsia.ui.input.internal:fuchsia.ui.input.internal_cpp",
@@ -45,7 +46,6 @@ cc_test_executable("unittests") {
     "//zircon/system/ulib/inspect",
     "//zircon/system/ulib/sync:sync-cpp",
   ]
-  public_deps = [ "//sdk/fidl/fuchsia.hardware.display.types:fuchsia.hardware.display.types_cpp" ]
 }
 
 source_set("mocks") {

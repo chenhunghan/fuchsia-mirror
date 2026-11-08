@@ -388,6 +388,16 @@ class DriverBase2 {
       cpp20::span<const fuchsia_driver_framework::Offer> offers);
 #endif
 
+  // Returns true once the driver's logger has been initialized (prior to `Start`).
+  bool has_logger() const { return logger_ != nullptr; }
+
+  // The unowned synchronized driver dispatcher that the driver is started with.
+  const fdf::UnownedSynchronizedDispatcher& driver_dispatcher() const { return driver_dispatcher_; }
+
+  // The async_dispatcher_t interface of the synchronized driver dispatcher that the driver
+  // is started with.
+  async_dispatcher_t* dispatcher() const { return driver_dispatcher_->async_dispatcher(); }
+
  protected:
   friend DriverContext;
 
@@ -401,13 +411,6 @@ class DriverBase2 {
   // Used to access the outgoing directory that the driver is serving. Can be used to add both
   // zircon and driver transport outgoing services.
   std::shared_ptr<OutgoingDirectory>& outgoing() { return outgoing_; }
-
-  // The unowned synchronized driver dispatcher that the driver is started with.
-  const fdf::UnownedSynchronizedDispatcher& driver_dispatcher() const { return driver_dispatcher_; }
-
-  // The async_dispatcher_t interface of the synchronized driver dispatcher that the driver
-  // is started with.
-  async_dispatcher_t* dispatcher() const { return driver_dispatcher_->async_dispatcher(); }
 
  private:
   // DriverServer2 installs (and clears) the Driver channel binding used by ReportHealthAlert and

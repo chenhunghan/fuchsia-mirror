@@ -63,8 +63,8 @@ common_deps = [
 
 fuchsia_test_package("iperf-test") {
   test_components = [ ":iperf-test-component" ]
-  deps =
-      common_deps + [ "//src/connectivity/network/netstack3:component-debug" ]
+  deps = common_deps
+  subpackages = [ "//src/connectivity/network/netstack3:package-debug" ]
 }
 
 # This benchmark is intended to be run by host-side logic alongside the
@@ -72,10 +72,8 @@ fuchsia_test_package("iperf-test") {
 # benchmarks GN target.
 fuchsia_test_package("iperf-benchmark") {
   test_components = [ ":iperf-benchmark-component" ]
-  deps = common_deps + [
-           "//src/connectivity/network/netstack3:component-for-tests",
-           "//src/sys/stash:stash_secure_v2",
-         ]
+  deps = common_deps + [ "//src/sys/stash:stash_secure_v2" ]
+  subpackages = [ "//src/connectivity/network/netstack3:package-for-tests" ]
 
   # Don't run the benchmark on the target as it is run as a part of the
   # host-driven iPerf benchmarks.

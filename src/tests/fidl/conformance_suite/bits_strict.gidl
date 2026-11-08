@@ -2,6 +2,50 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+success("StrictBitsUint8EmptyValue") {
+    value = StrictBitsUint8Struct{
+        b: 0,
+    },
+    bytes = {
+        v2 = [
+            0x00, padding:7,
+        ],
+    },
+}
+
+success("StrictBitsUint16EmptyValue") {
+    value = StrictBitsUint16Struct{
+        b: 0,
+    },
+    bytes = {
+        v2 = [
+            0x00, 0x00, padding:6,
+        ],
+    },
+}
+
+success("StrictBitsUint32EmptyValue") {
+    value = StrictBitsUint32Struct{
+        b: 0,
+    },
+    bytes = {
+        v2 = [
+            0x00, 0x00, 0x00, 0x00, padding:4,
+        ],
+    },
+}
+
+success("StrictBitsUint64EmptyValue") {
+    value = StrictBitsUint64Struct{
+        b: 0,
+    },
+    bytes = {
+        v2 = [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ],
+    },
+}
+
 success("StrictBitsUint8KnownValue") {
     value = StrictBitsUint8Struct{
         b: 1,

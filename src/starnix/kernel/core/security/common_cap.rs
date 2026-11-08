@@ -19,9 +19,15 @@ use linux_uapi::{
     VFS_CAP_FLAGS_EFFECTIVE, VFS_CAP_REVISION_2, VFS_CAP_REVISION_3, XATTR_NAME_CAPS, vfs_cap_data,
     vfs_cap_data__bindgen_ty_1, vfs_ns_cap_data, vfs_ns_cap_data__bindgen_ty_1,
 };
-use starnix_uapi::auth::{CAP_SETFCAP, Capabilities, Credentials, PtraceAccessMode, SecureBits};
+use starnix_logging::log_trace;
+use starnix_uapi::auth::{
+    CAP_SETFCAP, CAP_SETPCAP, CAP_SYS_RAWIO, Capabilities, Credentials, PtraceAccessMode,
+    SecureBits,
+};
 use starnix_uapi::errors::Errno;
 use starnix_uapi::mount_flags::MountFlags;
+use starnix_uapi::restricted_aspace::RESTRICTED_ASPACE_BASE;
+use starnix_uapi::user_address::UserAddress;
 use starnix_uapi::{errno, error, uid_t};
 use std::sync::atomic::{AtomicBool, Ordering};
 use zerocopy::{FromBytes as _, IntoBytes as _};
@@ -218,6 +224,65 @@ pub(super) fn capable(current_task: &CurrentTask, capability: Capabilities) -> R
 
 pub(super) fn creds_capable(creds: &Credentials, capability: Capabilities) -> Result<(), Errno> {
     creds.cap_effective.contains(capability).then_some(()).ok_or_else(|| errno!(EPERM))
+}
+
+/// Retrieves the `(effective, inheritable, permitted)` capability sets of `target`.
+///
+/// Corresponds to the `capget()` LSM hook.
+pub(super) fn capget(target: &Task) -> Result<(Capabilities, Capabilities, Capabilities), Errno> {
+    let creds = target.real_creds();
+    Ok((creds.cap_effective, creds.cap_inheritable, creds.cap_permitted))
+}
+
+/// Validates and applies proposed capability changes to `new_creds`.
+///
+/// Corresponds to the `capset()` LSM hook.
+pub(super) fn capset(
+    current_task: &CurrentTask,
+    new_creds: &mut Credentials,
+    effective: Capabilities,
+    inheritable: Capabilities,
+    permitted: Capabilities,
+) -> Result<(), Errno> {
+    let old_creds = current_task.current_creds();
+    log_trace!(
+        "Capabilities({{permitted={:?} from {:?}, effective={:?} from {:?}, inheritable={:?} from {:?}}}, bounding={:?})",
+        permitted,
+        old_creds.cap_permitted,
+        effective,
+        old_creds.cap_effective,
+        inheritable,
+        old_creds.cap_inheritable,
+        old_creds.cap_bounding
+    );
+
+    // From <https://man7.org/linux/man-pages/man2/capget.2.html>:
+    //
+    //   EPERM  An attempt was made to add a capability to the inheritable set, and either:
+    //          * that capability was not in the caller's bounding set; or
+    //          * the capability was not in the caller's permitted set and the caller
+    //            lacked the CAP_SETPCAP capability in its effective set.
+    if !old_creds.cap_inheritable.union(old_creds.cap_permitted).contains(inheritable) {
+        // Observed: Only the effective capability set is checked here, without invoking
+        // other LSMs' `capable` hooks; SELinux mediates `capset(2)` via `process { setcap }`.
+        creds_capable(&old_creds, CAP_SETPCAP)?;
+    }
+
+    if !old_creds.cap_inheritable.union(old_creds.cap_bounding).contains(inheritable) {
+        return error!(EPERM);
+    }
+    if !old_creds.cap_permitted.contains(permitted) {
+        return error!(EPERM);
+    }
+    if !permitted.contains(effective) {
+        return error!(EPERM);
+    }
+
+    new_creds.cap_effective = effective;
+    new_creds.cap_inheritable = inheritable;
+    new_creds.cap_permitted = permitted;
+    new_creds.cap_ambient &= permitted & inheritable;
+    Ok(())
 }
 
 /// Corresponds to the `inode_setxattr()` LSM hook.
@@ -593,5 +658,21 @@ pub(super) fn bprm_creds_from_file(
         resolved_program.secure_exec = true;
     }
 
+    Ok(())
+}
+
+/// Checks whether `current_task` has the capability required to map memory at `addr`.
+///
+/// Corresponds to the `mmap_addr()` LSM hook.
+pub(super) fn mmap_addr(current_task: &CurrentTask, addr: UserAddress) -> Result<(), Errno> {
+    // From <https://man7.org/linux/man-pages/man7/capabilities.7.html>:
+    //
+    //   CAP_SYS_RAWIO
+    //          [...]
+    //          * create memory mappings at addresses below the value
+    //            specified by /proc/sys/vm/mmap_min_addr;
+    if addr < UserAddress::from_ptr(RESTRICTED_ASPACE_BASE) {
+        creds_capable(&current_task.current_creds(), CAP_SYS_RAWIO)?;
+    }
     Ok(())
 }

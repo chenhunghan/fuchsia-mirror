@@ -152,11 +152,6 @@ void TraceSession::AddProvider(ProviderConnection* provider) {
   FX_LOGS(DEBUG) << std::format("Adding provider {}, buffer size {} MB", *provider,
                                 buffer_size_megabytes);
 
-  provider->RegisterForAlerts([weak = weak_ptr_factory_.GetWeakPtr()](std::string_view alert_name) {
-    if (weak && weak->alert_callback_) {
-      weak->alert_callback_(std::string(alert_name));
-    }
-  });
   tracees_.emplace_back(std::make_unique<TraceeV2>(executor_, buffer_forwarder_, provider));
   std::unique_ptr<TraceeV2>& tracee = std::get<std::unique_ptr<TraceeV2>>(tracees_.back());
 
@@ -165,6 +160,12 @@ void TraceSession::AddProvider(ProviderConnection* provider) {
   if (!tracee->Initialize(std::move(categories_clone), buffer_size, buffering_mode_)) {
     tracees_.pop_back();
   } else {
+    provider->RegisterForAlerts([weak_session = weak_ptr_factory_.GetWeakPtr(),
+                                 weak_tracee = tracee->GetWeakPtr()](std::string_view alert_name) {
+      if (weak_tracee && weak_session && weak_session->alert_callback_) {
+        weak_session->alert_callback_(std::string(alert_name));
+      }
+    });
     // Register the tracee to receive buffer save requests.
     provider->RegisterForBufferSave([weak_session = weak_ptr_factory_.GetWeakPtr(),
                                      weak_tracee = tracee->GetWeakPtr(),
@@ -227,6 +228,9 @@ void TraceSession::Terminate(fit::closure callback) {
     return;
   }
 
+  session_start_timeout_.Cancel();
+  session_stop_timeout_.Cancel();
+  CompletePendingStart();
   TransitionToState(State::kTerminating);
   terminate_callback_ = std::move(callback);
 
@@ -295,7 +299,10 @@ void TraceSession::Stop(bool write_results, StopTracingCallback callback) {
   FX_DCHECK(state_ == State::kInitialized || state_ == State::kStarting ||
             state_ == State::kStarted);
 
+  session_start_timeout_.Cancel();
+  CompletePendingStart();
   TransitionToState(State::kStopping);
+  write_results_on_stop_ = write_results;
   stop_callback_ = std::move(callback);
 
   for (const auto& tracee_variant : tracees_) {
@@ -317,11 +324,12 @@ void TraceSession::Stop(bool write_results, StopTracingCallback callback) {
     force_clear_buffer_contents_ = true;
   }
 
+  // Clear out before CheckAllProvidersStopped(), which may synchronously
+  // abort and destroy |this| if flushing fails.
+  additional_categories_.clear();
+
   session_stop_timeout_.PostDelayed(executor_.dispatcher(), stop_timeout_);
   CheckAllProvidersStopped();
-
-  // Clear out, must be respecified for each Start() request.
-  additional_categories_.clear();
 }
 
 // Called when a provider reports that it has started.
@@ -451,6 +459,15 @@ void TraceSession::NotifyStarted() {
   }
 }
 
+void TraceSession::CompletePendingStart() {
+  // Tracing did begin, however briefly. Complete StartTracing before stopping
+  // or terminating so the client sees replies in request order.
+  if (start_callback_) {
+    auto callback = std::move(start_callback_);
+    callback(fit::ok());
+  }
+}
+
 void TraceSession::OnProviderStopped(TraceProviderBundle* bundle, bool write_results) {
   auto it = std::find_if(tracees_.begin(), tracees_.end(), [bundle](const auto& tracee_variant) {
     if (std::holds_alternative<std::unique_ptr<Tracee>>(tracee_variant)) {
@@ -459,8 +476,10 @@ void TraceSession::OnProviderStopped(TraceProviderBundle* bundle, bool write_res
     return false;
   });
 
-  if (write_results) {
-    if (it != tracees_.end()) {
+  if (state_ == State::kStopped) {
+    // Late stop notification, nothing more to do.
+  } else if (state_ == State::kStopping) {
+    if (write_results && it != tracees_.end()) {
       auto& tracee = std::get<std::unique_ptr<Tracee>>(*it);
       if (!tracee->results_written()) {
         if (!WriteProviderData(tracee.get())) {
@@ -471,11 +490,6 @@ void TraceSession::OnProviderStopped(TraceProviderBundle* bundle, bool write_res
         }
       }
     }
-  }
-
-  if (state_ == State::kStopped) {
-    // Late stop notification, nothing more to do.
-  } else if (state_ == State::kStopping) {
     CheckAllProvidersStopped();
   } else {
     // Tracing may have terminated in the interim.
@@ -495,8 +509,10 @@ void TraceSession::OnV2ProviderStopped(ProviderConnection* connection, bool writ
     return false;
   });
 
-  if (write_results) {
-    if (it != tracees_.end()) {
+  if (state_ == State::kStopped) {
+    // Late stop notification, nothing more to do.
+  } else if (state_ == State::kStopping) {
+    if (write_results && it != tracees_.end()) {
       auto& tracee = std::get<std::unique_ptr<TraceeV2>>(*it);
       if (!tracee->results_written()) {
         if (!WriteV2ProviderData(tracee.get())) {
@@ -505,11 +521,6 @@ void TraceSession::OnV2ProviderStopped(ProviderConnection* connection, bool writ
         }
       }
     }
-  }
-
-  if (state_ == State::kStopped) {
-    // Late stop notification, nothing more to do.
-  } else if (state_ == State::kStopping) {
     CheckAllProvidersStopped();
   } else {
     // Tracing may have terminated in the interim.
@@ -551,12 +562,29 @@ void TraceSession::CheckAllProvidersStopped() {
 
   if (all_stopped) {
     FX_LOGS(DEBUG) << "All providers reporting stopped";
-    FX_LOGS(INFO) << "Flushing to socket";
-    buffer_forwarder_->Flush();
-
-    TransitionToState(State::kStopped);
-    NotifyStopped();
+    FinishStop();
   }
+}
+
+void TraceSession::FinishStop() {
+  FX_DCHECK(state_ == State::kStopping);
+  session_stop_timeout_.Cancel();
+
+  if (write_results_on_stop_) {
+    FX_LOGS(INFO) << "Flushing to socket";
+    if (TransferStatus status = buffer_forwarder_->Flush(); status != TransferStatus::kComplete) {
+      FX_LOGS(INFO) << "Aborting in FinishStop due to flush failed: " << status;
+      Abort();
+      return;
+    }
+  }
+  // Even if the consumer has closed the output socket, keep write_results_on_terminate_ set:
+  // in deferred mode, termination still copies provider buffers into the backing file, which
+  // test harnesses retrieve directly when the socket transfer fails (https://fxbug.dev/446873535).
+  // In eager mode, writing to the closed socket fails immediately and is ignored.
+
+  TransitionToState(State::kStopped);
+  NotifyStopped();
 }
 
 void TraceSession::NotifyStopped() {
@@ -628,10 +656,11 @@ void TraceSession::OnProviderTerminated(TraceProviderBundle* bundle) {
   } else if (state_ == State::kStopping) {
     // A trace provider may have disconnected without having been marked as
     // stopped. Check whether all remaining providers have now stopped.
+    // Note: CheckAllProvidersStopped() may synchronously abort and destroy |this|.
     CheckAllProvidersStopped();
+  } else if (state_ == State::kTerminating) {
+    TerminateSessionIfEmpty();
   }
-
-  TerminateSessionIfEmpty();
 }
 
 void TraceSession::OnV2ProviderTerminated(ProviderConnection* connection) {
@@ -665,14 +694,18 @@ void TraceSession::OnV2ProviderTerminated(ProviderConnection* connection) {
   } else if (state_ == State::kStopping) {
     // A trace provider may have disconnected without having been marked as
     // stopped. Check whether all remaining providers have now stopped.
+    // Note: CheckAllProvidersStopped() may synchronously abort and destroy |this|.
     CheckAllProvidersStopped();
+  } else if (state_ == State::kTerminating) {
+    TerminateSessionIfEmpty();
   }
-
-  TerminateSessionIfEmpty();
 }
 
 void TraceSession::TerminateSessionIfEmpty() {
   if (state_ == State::kTerminating && tracees_.empty()) {
+    if (write_results_on_terminate_) {
+      buffer_forwarder_->Flush();
+    }
     FX_LOGS(DEBUG) << "Marking session as terminated, no more tracees";
 
     session_terminate_timeout_.Cancel();
@@ -684,6 +717,9 @@ void TraceSession::TerminateSessionIfEmpty() {
 
 void TraceSession::SessionStartTimeout(async_dispatcher_t* dispatcher, async::TaskBase* task,
                                        zx_status_t status) {
+  if (state_ != State::kStarting) {
+    return;
+  }
   FX_LOGS(WARNING) << "Timed out waiting for one or more providers to ack the start request";
   for (auto& tracee_variant : tracees_) {
     std::visit(overloaded{[](const std::unique_ptr<Tracee>& tracee) {
@@ -706,32 +742,35 @@ void TraceSession::SessionStartTimeout(async_dispatcher_t* dispatcher, async::Ta
 
 void TraceSession::SessionStopTimeout(async_dispatcher_t* dispatcher, async::TaskBase* task,
                                       zx_status_t status) {
-  FX_LOGS(WARNING) << "Timed out waiting for one or more providers to ack the stop request";
-
-  if (state_ == State::kStopping) {
-    FX_LOGS(DEBUG) << "Marking session as stopped, timed out waiting for tracee(s)";
-    TransitionToState(State::kStopped);
-    for (auto& tracee_variant : tracees_) {
-      std::visit(overloaded{[](const std::unique_ptr<Tracee>& tracee) {
-                              if (tracee->state() != Tracee::State::kStopped) {
-                                FX_LOGS(WARNING) << "Timed out waiting for trace provider "
-                                                 << *tracee->bundle() << " to stop";
-                              }
-                            },
-                            [](const std::unique_ptr<TraceeV2>& tracee) {
-                              if (tracee->state() != Tracee::State::kStopped) {
-                                FX_LOGS(WARNING) << std::format(
-                                    "Timed out waiting for trace provider {} to stop",
-                                    *(tracee->connection()));
-                              }
-                            }},
-                 tracee_variant);
-    }
-
-    FX_LOGS(INFO) << "Flushing to socket";
-    buffer_forwarder_->Flush();
-    NotifyStopped();
+  if (state_ != State::kStopping) {
+    return;
   }
+  FX_LOGS(WARNING) << "Timed out waiting for one or more providers to ack the stop request";
+  FX_LOGS(DEBUG) << "Marking session as stopped, timed out waiting for tracee(s)";
+  std::erase_if(tracees_, [](auto& tracee_variant) {
+    return std::visit(overloaded{[](const std::unique_ptr<Tracee>& tracee) {
+                                   if (tracee->state() != Tracee::State::kStopped) {
+                                     FX_LOGS(WARNING) << "Timed out waiting for trace provider "
+                                                      << *tracee->bundle() << " to stop";
+                                     tracee->Terminate();
+                                     return true;
+                                   }
+                                   return false;
+                                 },
+                                 [](const std::unique_ptr<TraceeV2>& tracee) {
+                                   if (tracee->state() != Tracee::State::kStopped) {
+                                     FX_LOGS(WARNING) << std::format(
+                                         "Timed out waiting for trace provider {} to stop",
+                                         *(tracee->connection()));
+                                     tracee->Terminate([] {});
+                                     return true;
+                                   }
+                                   return false;
+                                 }},
+                      tracee_variant);
+  });
+
+  FinishStop();
 }
 
 void TraceSession::SessionTerminateTimeout(async_dispatcher_t* dispatcher, async::TaskBase* task,
@@ -758,9 +797,8 @@ void TraceSession::SessionTerminateTimeout(async_dispatcher_t* dispatcher, async
                             }},
                  tracee_variant);
     }
-    auto callback = std::move(terminate_callback_);
-    FX_DCHECK(callback);
-    callback();
+    tracees_.clear();
+    TerminateSessionIfEmpty();
   }
 }
 

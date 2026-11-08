@@ -3132,6 +3132,18 @@ TEST_P(DriverRunnerTest, InspectHealthChecks) {
               root_node->node().get_property<inspect::IntPropertyValue>("last_check_monotonic_ns"));
     EXPECT_EQ(root_driver_url,
               root_node->node().get_property<inspect::StringPropertyValue>("driver_url")->value());
+    EXPECT_EQ(
+        1u, root_node->node().get_property<inspect::UintPropertyValue>("unhealthy_count")->value());
+    EXPECT_EQ(
+        0u, root_node->node().get_property<inspect::UintPropertyValue>("recovered_count")->value());
+
+    const auto* hist_0 = hierarchy.GetByPath({"root", "history", "0"});
+    ASSERT_NE(nullptr, hist_0);
+    EXPECT_EQ("UNHEALTHY",
+              hist_0->node().get_property<inspect::StringPropertyValue>("status")->value());
+    EXPECT_EQ("FAST", hist_0->node().get_property<inspect::StringPropertyValue>("level")->value());
+    EXPECT_EQ("VSYNC_STALLED",
+              hist_0->node().get_property<inspect::StringPropertyValue>("reason_code")->value());
 
     const auto* diag_node = hierarchy.GetByPath({"root", "diagnostics"});
     ASSERT_NE(nullptr, diag_node);
@@ -3369,6 +3381,75 @@ TEST_P(DriverRunnerTest, RestartWithPowerDependenciesRootWithoutPowerElementChil
   background_loop.JoinThreads();
 
   StopDriverComponent(std::move(root_driver_2.controller));
+}
+
+TEST_P(DriverRunnerTest, AddSpecPrecreatesColocatedDriverHost) {
+  if (use_dynamic_linker()) {
+    return;
+  }
+  SetupDriverRunner();
+  PrepareRealmForStartDriverHost(/*use_next_vdso=*/true);
+
+  auto [client_end, server_end] = fidl::Endpoints<fdfw::CompositeNodeManager>::Create();
+  fidl::BindServer(dispatcher(), std::move(server_end), &driver_runner());
+  fidl::WireClient<fdfw::CompositeNodeManager> composite_node_manager(std::move(client_end),
+                                                                      dispatcher());
+
+  EXPECT_TRUE(driver_runner().driver_hosts().is_empty());
+
+  fidl::Arena<> arena;
+  fdfw::CompositeNodeSpec spec1({
+      .name = "test-group-1",
+      .parents2 = std::vector<fdfw::ParentSpec2>{fdfw::ParentSpec2({
+          .bind_rules = std::vector<fdfw::BindRule2>(),
+          .properties = std::vector<fdfw::NodeProperty2>(),
+      })},
+      .driver_host = "#my-host",
+  });
+
+  bool add_spec_1_done = false;
+  composite_node_manager->AddSpec(fidl::ToWire(arena, spec1))
+      .Then(
+          [&add_spec_1_done](fidl::WireUnownedResult<fdfw::CompositeNodeManager::AddSpec>& result) {
+            ASSERT_TRUE(result.ok());
+            ASSERT_TRUE(result->is_ok());
+            add_spec_1_done = true;
+          });
+  EXPECT_TRUE(RunLoopUntilIdle());
+  EXPECT_TRUE(add_spec_1_done);
+
+  ASSERT_EQ(1u, driver_runner().driver_hosts().size_slow());
+  const driver_manager::DriverHostComponent* host1 = &driver_runner().driver_hosts().front();
+  EXPECT_EQ("#my-host", host1->name_for_colocation());
+
+  fdfw::CompositeNodeSpec spec2({
+      .name = "test-group-2",
+      .parents2 = std::vector<fdfw::ParentSpec2>{fdfw::ParentSpec2({
+          .bind_rules = std::vector<fdfw::BindRule2>(),
+          .properties = std::vector<fdfw::NodeProperty2>(),
+      })},
+      .driver_host = "#my-host",
+  });
+
+  bool add_spec_2_done = false;
+  composite_node_manager->AddSpec(fidl::ToWire(arena, spec2))
+      .Then(
+          [&add_spec_2_done](fidl::WireUnownedResult<fdfw::CompositeNodeManager::AddSpec>& result) {
+            ASSERT_TRUE(result.ok());
+            ASSERT_TRUE(result->is_ok());
+            add_spec_2_done = true;
+          });
+  EXPECT_TRUE(RunLoopUntilIdle());
+  EXPECT_TRUE(add_spec_2_done);
+
+  ASSERT_EQ(1u, driver_runner().driver_hosts().size_slow());
+  EXPECT_EQ(host1, &driver_runner().driver_hosts().front());
+
+  bool shutdown_done = false;
+  driver_runner().ShutdownAllDrivers([&shutdown_done]() { shutdown_done = true; });
+  EXPECT_TRUE(RunLoopUntilIdle());
+  EXPECT_TRUE(shutdown_done);
+  EXPECT_TRUE(driver_runner().driver_hosts().is_empty());
 }
 
 // The tests are parameterized on whether to use the dynamic linker or not.

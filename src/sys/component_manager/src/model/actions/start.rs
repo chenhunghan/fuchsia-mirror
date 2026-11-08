@@ -251,7 +251,7 @@ async fn do_start(
         let storage_service_use_decls = if decl.is_none() {
             resolved_state.storage_service_use_decls.clone()
         } else {
-            Vec::new()
+            Box::default()
         };
         (
             runner,

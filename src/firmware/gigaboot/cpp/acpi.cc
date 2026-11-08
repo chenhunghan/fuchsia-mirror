@@ -14,7 +14,8 @@
 #include <span>
 
 #include <efi/types.h>
-#include <phys/efi/main.h>
+
+#include "utils.h"
 
 namespace gigaboot {
 

@@ -1,0 +1,101 @@
+// Copyright 2021 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    include: [
+        "inspect/client.shard.cml",
+        "syslog/client.shard.cml",
+    ],
+    program: {
+        runner: "elf",
+        binary: "bin/netcfg",
+
+        // Subscribe to component lifecycle events
+        lifecycle: { stop_event: "notify" },
+    },
+    children: [
+        {
+            name: "netcfg-config",
+            url: "fuchsia-pkg://fuchsia.com/netcfg-config#meta/netcfg-config.cm",
+        },
+    ],
+    capabilities: [
+        {
+            protocol: [
+                "fuchsia.net.dhcpv6.PrefixProvider",
+                "fuchsia.net.masquerade.Factory",
+                "fuchsia.net.name.DnsServerWatcher",
+                "fuchsia.net.policy.properties.NetworkRegistry",
+                "fuchsia.net.policy.properties.Networks",
+                "fuchsia.net.policy.properties.NetworkTokenResolver",
+                "fuchsia.net.policy.properties.PrivilegedNetworkLookup",
+                "fuchsia.net.reachability.Monitor",
+            ],
+        },
+    ],
+    use: [
+        {
+            protocol: [
+                "fuchsia.net.dhcp.ClientProvider",
+                "fuchsia.net.filter.Control",
+                "fuchsia.net.interfaces.admin.Installer",
+                "fuchsia.net.interfaces.State",
+                "fuchsia.net.name.LookupAdmin",
+                "fuchsia.net.ndp.RouterAdvertisementOptionWatcherProvider",
+                "fuchsia.net.routes.admin.RouteTableV4",
+                "fuchsia.net.routes.admin.RouteTableV6",
+                "fuchsia.net.routes.admin.RuleTableV4",
+                "fuchsia.net.routes.admin.RuleTableV6",
+            ],
+        },
+        {
+            protocol: "fuchsia.net.dhcp.Server",
+            availability: "optional",
+        },
+        {
+            protocol: "fuchsia.net.dhcpv6.ClientProvider",
+            availability: "optional",
+        },
+        { service: "fuchsia.hardware.network.Service" },
+        {
+            directory: "netcfg-config",
+            from: "#netcfg-config",
+            rights: [ "r*" ],
+            path: "/netcfg-config",
+        },
+        {
+            // Whether to hash MAC addresses in logs and Inspect. Defaults to true
+            // (fail closed) so that a product or realm that does not route this
+            // capability never logs raw identifiers; assembly routes `false`
+            // explicitly on eng builds.
+            config: "fuchsia.connectivity.RedactNetworkIdentifiers",
+            key: "redact_network_identifiers",
+            type: "bool",
+            availability: "transitional",
+            default: true,
+        },
+        {
+            // Per-boot salt used when redact_network_identifiers is true.
+            // TODO(https://fxbug.dev/576752502): Remove this dependency once the
+            // salt is provided at startup.
+            protocol: "fuchsia.diagnostics.SaltProvider",
+            from: "parent/diagnostics",
+            availability: "optional",
+        },
+    ],
+    expose: [
+        {
+            protocol: [
+                "fuchsia.net.dhcpv6.PrefixProvider",
+                "fuchsia.net.masquerade.Factory",
+                "fuchsia.net.name.DnsServerWatcher",
+                "fuchsia.net.policy.properties.NetworkRegistry",
+                "fuchsia.net.policy.properties.Networks",
+                "fuchsia.net.policy.properties.NetworkTokenResolver",
+                "fuchsia.net.policy.properties.PrivilegedNetworkLookup",
+                "fuchsia.net.reachability.Monitor",
+            ],
+            from: "self",
+        },
+    ],
+}

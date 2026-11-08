@@ -23,4 +23,5 @@ host_go_test(
     srcs = ["ignores_test.go"],
     embed = [":ignores"],
     target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/testing/host-target-testing:__pkg__"],
 )

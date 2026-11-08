@@ -3,9 +3,10 @@
 // found in the LICENSE file.
 
 use crate::checksum::{Checksum, fletcher64};
+use crate::errors::FxfsError;
 use crate::object_store::journal::{BLOCK_SIZE, JournalCheckpoint, JournalHandle, RESET_XOR};
 use crate::serialized_types::{Version, Versioned, VersionedLatest};
-use anyhow::{Context, Error, bail};
+use anyhow::{Error, anyhow, bail};
 use byteorder::{ByteOrder, LittleEndian};
 use storage_units::BlockSize;
 
@@ -136,8 +137,11 @@ impl JournalReader {
                         self.buf_range.end..self.buf.len() - std::mem::size_of::<Checksum>();
                     let (version, to_consume) = {
                         let mut cursor = std::io::Cursor::new(self.buffer());
-                        let version = Version::deserialize_from(&mut cursor)
-                            .context("Failed to deserialize version")?;
+                        let version = Version::deserialize_from(&mut cursor).map_err(|e| {
+                            anyhow!(FxfsError::Inconsistent)
+                                .context(e)
+                                .context("Failed to deserialize version")
+                        })?;
                         (version, cursor.position() as usize)
                     };
                     self.version = version.clone();
@@ -148,7 +152,7 @@ impl JournalReader {
                         return Ok(ReadResult::ChecksumMismatch);
                     }
                 }
-                Err(e.into())
+                Err(anyhow!(FxfsError::Inconsistent).context(e))
             }
         }
     }
@@ -184,7 +188,9 @@ impl JournalReader {
                 if self.eof_ok {
                     return Ok(());
                 } else {
-                    bail!("unexpected end of journal file");
+                    bail!(
+                        anyhow!(FxfsError::Inconsistent).context("unexpected end of journal file")
+                    );
                 }
             }
             buffer.copy_to_slice(&mut self.buf.as_mut_slice()[self.buf_range.end..]);

@@ -32,73 +32,36 @@ resource("javascripts") {
   outputs = [ "data/javascripts/{{source_file_part}}" ]
 }
 
-fuchsia_component_manifest("web_view_manifest") {
+fuchsia_component_manifest("simple_png_web_view_manifest") {
   component_name = "web_view"
-  manifest = "meta/web_view.cml"
+  manifest = "meta/simple_png_web_view.cml"
 }
 
 fuchsia_structured_config_cpp_elf_lib("web_view_config_lib") {
-  cm_label = ":web_view_manifest"
-}
-
-fuchsia_structured_config_values("simple_png_config") {
-  cm_label = ":web_view_manifest"
-  values = {
-    javascript_file = "/pkg/data/javascripts/simple_png.js"
-  }
-}
-
-fuchsia_structured_config_values("simple_video_config") {
-  cm_label = ":web_view_manifest"
-  values = {
-    javascript_file = "/pkg/data/javascripts/simple_video.js"
-  }
-}
-
-fuchsia_structured_config_values("simple_audio_config") {
-  cm_label = ":web_view_manifest"
-  values = {
-    javascript_file = "/pkg/data/javascripts/simple_audio.js"
-  }
-}
-
-fuchsia_structured_config_values("dynamic_element_config") {
-  cm_label = ":web_view_manifest"
-  values = {
-    javascript_file = "/pkg/data/javascripts/dynamic_elements.js"
-  }
+  cm_label = ":simple_png_web_view_manifest"
 }
 
 fuchsia_component("simple_png_web_view_component") {
-  cm_label = ":web_view_manifest"
-  deps = [
-    ":bin",
-    ":simple_png_config",
-  ]
+  cm_label = ":simple_png_web_view_manifest"
+  deps = [ ":bin" ]
 }
 
 fuchsia_component("simple_video_web_view_component") {
-  cm_label = ":web_view_manifest"
-  deps = [
-    ":bin",
-    ":simple_video_config",
-  ]
+  component_name = "web_view"
+  manifest = "meta/simple_video_web_view.cml"
+  deps = [ ":bin" ]
 }
 
 fuchsia_component("simple_audio_web_view_component") {
-  cm_label = ":web_view_manifest"
-  deps = [
-    ":bin",
-    ":simple_audio_config",
-  ]
+  component_name = "web_view"
+  manifest = "meta/simple_audio_web_view.cml"
+  deps = [ ":bin" ]
 }
 
 fuchsia_component("dynamic_element_web_view_component") {
-  cm_label = ":web_view_manifest"
-  deps = [
-    ":bin",
-    ":dynamic_element_config",
-  ]
+  component_name = "web_view"
+  manifest = "meta/dynamic_element_web_view.cml"
+  deps = [ ":bin" ]
 }
 
 fuchsia_package("simple_png_web_view") {

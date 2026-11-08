@@ -1,0 +1,76 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host:defs.bzl", "fx_script_host_tool")
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+filegroup(
+    name = "runtime_files",
+    srcs = [
+        "__init__.py",
+        "builder.py",
+        "locator.py",
+        "registry.py",
+    ],
+    visibility = [
+        "//scripts/shac:__pkg__",
+        "//tools/devshell:__subpackages__",
+    ],
+)
+
+fx_script_host_tool(
+    name = "registry",
+    data = [":runtime_files"],
+    script = "registry.py",
+    visibility = ["//tools/devshell:__subpackages__"],
+)
+
+host_py_test(
+    name = "registry_test",
+    srcs = [
+        "__init__.py",
+        "locator.py",
+        "registry.py",
+        "registry_test.py",
+    ],
+    data = [":registry"],
+    imports = ["."],
+    main = "registry_test.py",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//tools:__subpackages__"],
+)
+
+host_py_test(
+    name = "locator_test",
+    srcs = [
+        "__init__.py",
+        "locator.py",
+        "locator_test.py",
+        "registry.py",
+    ],
+    data = [":registry"],
+    imports = ["."],
+    main = "locator_test.py",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//tools:__subpackages__"],
+)
+
+# TODO(https://fxbug.dev/575968075): Fix Pyrefly errors and remove no-pyrefly.
+host_py_test(
+    name = "builder_test",
+    srcs = [
+        "__init__.py",
+        "builder.py",
+        "builder_test.py",
+        "registry.py",
+    ],
+    imports = ["."],
+    main = "builder_test.py",
+    tags = ["no-pyrefly"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//tools:__subpackages__"],
+)

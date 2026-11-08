@@ -53,5 +53,11 @@ group("bin") {
 
 group("tests") {
   testonly = true
-  deps = [ ":ffx_debug_plugin_tests($host_toolchain)" ]
+  deps = [
+    ":ffx_debug_plugin_tests($host_toolchain)",
+
+    # Plugins migrated to Bazel define standalone unit test targets that are
+    # not aggregated by `:ffx_debug_plugin_tests`.
+    "limbo:tests",
+  ]
 }

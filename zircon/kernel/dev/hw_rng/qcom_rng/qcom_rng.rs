@@ -20,7 +20,7 @@ use zbi::{DcfgQcomRng, QcomRngFlags};
 
 zr::static_assert_size_and_align!(DcfgQcomRng, 16, 8);
 
-ksync::declare_singleton_mutex!(QcomRngLock);
+crate::ksync_kernel::declare_singleton_mutex!(QcomRngLock);
 
 layout!({
     struct StatusRegister(u32);

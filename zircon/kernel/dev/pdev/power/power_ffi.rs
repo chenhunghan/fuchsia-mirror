@@ -9,44 +9,10 @@
 use zx_status::Status;
 
 use super::{
-    PdevPowerOps, PowerCpuState, PowerDomainConfigFfi, PowerRebootFlags, pdev_register_power,
-    pdev_swap_power_for_test, power_cpu_off, power_cpu_on, power_get_cpu_state, power_reboot,
-    power_shutdown, power_system_resume,
+    PdevPowerOps, PowerCpuState, PowerRebootFlags, pdev_register_power, pdev_swap_power_for_test,
+    power_cpu_off, power_cpu_on, power_get_cpu_state, power_reboot, power_shutdown,
+    power_system_resume,
 };
-
-unsafe extern "C" {
-    /// Registers the provided power domain configurations and energy models with the kernel
-    /// scheduler.
-    ///
-    /// # Safety
-    ///
-    /// If `domain_count > 0`, `domains` must be non-null, properly aligned, and valid for reads of
-    /// `domain_count` consecutive initialized [`PowerDomainConfigFfi`] elements for the duration
-    /// of this call.
-    pub fn cpp_power_management_register_domains(
-        domains: *const PowerDomainConfigFfi,
-        domain_count: usize,
-    ) -> Result<(), Status>;
-
-    /// Sets the minimum and maximum processing rate limits for CPUs in `cpu_mask`.
-    ///
-    /// # Safety
-    ///
-    /// Must only be called after the kernel scheduler and power domain registry have been
-    /// initialized.
-    pub fn cpp_power_management_set_rate_limits(
-        cpu_mask: u64,
-        min_rate: u64,
-        max_rate: u64,
-    ) -> Result<(), Status>;
-
-    /// Returns whether the boot-time CPU performance boost is enabled in kernel boot options.
-    ///
-    /// # Safety
-    ///
-    /// `BootOptions::Get()` must have been initialized prior to calling this function.
-    pub fn cpp_power_management_boot_boost_enabled() -> bool;
-}
 
 /// Registers the platform power operations table from C-ABI.
 ///
@@ -67,20 +33,6 @@ pub unsafe extern "C" fn rust_pdev_register_power(ops: *const PdevPowerOps) {
             pdev_swap_power_for_test(core::ptr::null());
         }
     }
-}
-
-/// Swaps the current power operations table with a new one for testing, returning the previous
-/// table.
-///
-/// # Safety
-///
-/// If non-null, `ops` must point to a valid `PdevPowerOps` table for the duration of the test.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_pdev_swap_power_for_test(
-    ops: *const PdevPowerOps,
-) -> *const PdevPowerOps {
-    // SAFETY: Caller upholds the safety invariants of `pdev_swap_power_for_test`.
-    unsafe { pdev_swap_power_for_test(ops) }
 }
 
 /// Reboots the system using the registered power operations.

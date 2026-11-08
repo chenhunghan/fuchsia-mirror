@@ -209,12 +209,11 @@ template("bad_signature_update") {
 
              # Production SWD components.
              "//src/sys/pkg/bin/pkg-cache:production-component-and-config",
-             "//src/sys/pkg/bin/pkg-resolver:production-component-and-config",
+             "//src/sys/pkg/bin/pkg-resolver:component",
              "//src/sys/pkg/bin/system-update-committer:component",
              "//src/sys/pkg/bin/system-updater:component",
 
              # Production network components for OTA update.
-             "//src/connectivity/network/netstack3:component-for-tests",
              "//src/connectivity/policy/http-client:component",
 
              # Mock SWD component dependencies.
@@ -236,6 +235,7 @@ template("bad_signature_update") {
              ":${test_name}_poisoned_v1_tuf_repo_resources",
              ":${test_name}_v1_update_package_resource",
            ]
+    subpackages = [ "//src/connectivity/network/netstack3:package-for-tests" ]
 
     # TODO(https://fxbug.dev/42169686): Complete test dependency composition to eliminate
     # error logs:

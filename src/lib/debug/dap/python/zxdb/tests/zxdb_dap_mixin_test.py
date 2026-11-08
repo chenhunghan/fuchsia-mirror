@@ -20,10 +20,14 @@ from zxdb_dap import (
     ZxdbPauseArguments,
     ZxdbProcessArguments,
     ZxdbProcessStoppedEvent,
+    ZxdbSetTracepointsArguments,
     ZxdbStackTraceArguments,
     ZxdbThread,
     ZxdbThreadEvent,
     ZxdbThreadsResponse,
+    ZxdbTracepointEvent,
+    ZxdbTracepointSpec,
+    ZxdbTracepointWatchSpec,
 )
 
 
@@ -792,6 +796,446 @@ class TestZxdbDapMixin(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(DapError) as ctx:
             await send_task
         self.assertIn("not a valid verb", str(ctx.exception))
+
+    async def test_zxdb_set_tracepoints_success(self) -> None:
+        """Tests sending zxdb.SetTracepoints request successfully."""
+        client = ZxdbDapClient()
+        reader, writer = self._start_client(client)
+        specs = [
+            ZxdbTracepointSpec(
+                function="my_func",
+                max_matching_frames=5,
+                max_hits=5,
+                expressions=["x", "y"],
+                locals=True,
+                registers=True,
+            )
+        ]
+
+        send_task = asyncio.create_task(client.zxdb_set_tracepoints(specs))
+
+        await asyncio.wait_for(writer.drained.wait(), timeout=2.0)
+
+        buffer_val = writer.buffer.getvalue()
+        _headers, body = buffer_val.split(b"\r\n\r\n", 1)
+        req_val = json.loads(body.decode("utf-8"))
+        self.assertEqual(req_val["command"], "zxdb.SetTracepoints")
+        self.assertEqual(len(req_val["arguments"]["tracepoints"]), 1)
+        self.assertEqual(
+            req_val["arguments"]["tracepoints"][0]["function"], "my_func"
+        )
+        self.assertEqual(
+            req_val["arguments"]["tracepoints"][0]["maxMatchingFrames"], 5
+        )
+        self.assertEqual(req_val["arguments"]["tracepoints"][0]["maxHits"], 5)
+        seq = req_val["seq"]
+
+        response = {
+            "seq": 13,
+            "type": "response",
+            "request_seq": seq,
+            "success": True,
+            "command": "zxdb.SetTracepoints",
+            "body": {
+                "tracepoints": [
+                    {
+                        "id": 1,
+                        "verified": True,
+                        "maxMatchingFrames": 5,
+                        "hitCount": 0,
+                        "maxHits": 5,
+                        "enabled": True,
+                        "autoDisabled": False,
+                    }
+                ]
+            },
+        }
+
+        feed_dap_response(reader, response)
+
+        resp = await send_task
+        self.assertTrue(resp.success)
+        self.assertEqual(len(resp.body.tracepoints), 1)
+        self.assertEqual(resp.body.tracepoints[0].id, 1)
+        self.assertTrue(resp.body.tracepoints[0].verified)
+        self.assertEqual(resp.body.tracepoints[0].max_matching_frames, 5)
+        self.assertEqual(resp.body.tracepoints[0].max_hits, 5)
+
+    async def test_zxdb_set_tracepoints_arguments_model(self) -> None:
+        """Tests sending zxdb.SetTracepoints using arguments model."""
+        client = ZxdbDapClient()
+        reader, writer = self._start_client(client)
+        args = ZxdbSetTracepointsArguments(
+            tracepoints=[
+                ZxdbTracepointSpec(
+                    file="main.cc",
+                    line=42,
+                ),
+                ZxdbTracepointSpec(
+                    watch=ZxdbTracepointWatchSpec(
+                        address=0x1000,
+                        expression="*ptr",
+                        byte_size=4,
+                        access_type="write",
+                    ),
+                ),
+            ]
+        )
+
+        send_task = asyncio.create_task(client.zxdb_set_tracepoints(args))
+
+        await asyncio.wait_for(writer.drained.wait(), timeout=2.0)
+
+        buffer_val = writer.buffer.getvalue()
+        _headers, body = buffer_val.split(b"\r\n\r\n", 1)
+        req_val = json.loads(body.decode("utf-8"))
+        self.assertEqual(req_val["command"], "zxdb.SetTracepoints")
+        self.assertEqual(len(req_val["arguments"]["tracepoints"]), 2)
+        tp0 = req_val["arguments"]["tracepoints"][0]
+        self.assertEqual(tp0["file"], "main.cc")
+        self.assertEqual(tp0["line"], 42)
+        self.assertNotIn("expressions", tp0)
+        tp1 = req_val["arguments"]["tracepoints"][1]
+        self.assertEqual(tp1["watch"]["address"], 0x1000)
+        self.assertEqual(tp1["watch"]["byteSize"], 4)
+        self.assertEqual(tp1["watch"]["accessType"], "write")
+        seq = req_val["seq"]
+
+        response = {
+            "seq": 14,
+            "type": "response",
+            "request_seq": seq,
+            "success": True,
+            "command": "zxdb.SetTracepoints",
+            "body": {
+                "tracepoints": [
+                    {
+                        "id": 2,
+                        "verified": True,
+                        "hitCount": 0,
+                        "maxHits": 20,
+                        "enabled": True,
+                        "autoDisabled": False,
+                    },
+                    {
+                        "id": 3,
+                        "verified": False,
+                        "hitCount": 0,
+                        "maxHits": 20,
+                        "enabled": True,
+                        "autoDisabled": False,
+                        "message": "Invalid watchpoint size.",
+                    },
+                ]
+            },
+        }
+
+        feed_dap_response(reader, response)
+
+        resp = await send_task
+        self.assertTrue(resp.success)
+        self.assertEqual(len(resp.body.tracepoints), 2)
+        self.assertEqual(resp.body.tracepoints[0].id, 2)
+        self.assertTrue(resp.body.tracepoints[0].verified)
+        self.assertIsNone(resp.body.tracepoints[0].message)
+        self.assertEqual(resp.body.tracepoints[1].id, 3)
+        self.assertFalse(resp.body.tracepoints[1].verified)
+        self.assertEqual(
+            resp.body.tracepoints[1].message, "Invalid watchpoint size."
+        )
+
+    async def test_zxdb_set_tracepoints_with_new_fields(self) -> None:
+        """Tests sending zxdb.SetTracepoints with id, rawBacktrace, and dataId."""
+        client = ZxdbDapClient()
+        reader, writer = self._start_client(client)
+        specs = (
+            ZxdbTracepointSpec(
+                id=42,
+                function="compute",
+                raw_backtrace=True,
+            ),
+            ZxdbTracepointSpec(
+                id=43,
+                watch=ZxdbTracepointWatchSpec(
+                    data_id="1234:0x2000:8",
+                    access_type="readWrite",
+                ),
+            ),
+        )
+
+        send_task = asyncio.create_task(client.zxdb_set_tracepoints(specs))
+
+        await asyncio.wait_for(writer.drained.wait(), timeout=2.0)
+
+        buffer_val = writer.buffer.getvalue()
+        _headers, body = buffer_val.split(b"\r\n\r\n", 1)
+        req_val = json.loads(body.decode("utf-8"))
+        self.assertEqual(req_val["command"], "zxdb.SetTracepoints")
+        self.assertEqual(len(req_val["arguments"]["tracepoints"]), 2)
+        tp0 = req_val["arguments"]["tracepoints"][0]
+        self.assertEqual(tp0["id"], 42)
+        self.assertEqual(tp0["function"], "compute")
+        self.assertTrue(tp0["rawBacktrace"])
+        tp1 = req_val["arguments"]["tracepoints"][1]
+        self.assertEqual(tp1["id"], 43)
+        self.assertEqual(tp1["watch"]["dataId"], "1234:0x2000:8")
+        self.assertEqual(tp1["watch"]["accessType"], "readWrite")
+        seq = req_val["seq"]
+
+        response = {
+            "seq": 15,
+            "type": "response",
+            "request_seq": seq,
+            "success": True,
+            "command": "zxdb.SetTracepoints",
+            "body": {
+                "tracepoints": [
+                    {
+                        "id": 42,
+                        "verified": True,
+                        "hitCount": 1,
+                        "maxHits": 20,
+                        "enabled": True,
+                        "autoDisabled": False,
+                    },
+                    {
+                        "id": 43,
+                        "verified": True,
+                        "hitCount": 0,
+                        "maxHits": 20,
+                        "enabled": True,
+                        "autoDisabled": False,
+                    },
+                ]
+            },
+        }
+
+        feed_dap_response(reader, response)
+
+        resp = await send_task
+        self.assertTrue(resp.success)
+        self.assertEqual(len(resp.body.tracepoints), 2)
+        self.assertEqual(resp.body.tracepoints[0].id, 42)
+        self.assertEqual(resp.body.tracepoints[0].hit_count, 1)
+        self.assertEqual(resp.body.tracepoints[1].id, 43)
+
+    async def test_zxdb_set_tracepoints_empty_sequence(self) -> None:
+        """Tests clearing tracepoints with an empty sequence."""
+        client = ZxdbDapClient()
+        reader, writer = self._start_client(client)
+
+        send_task = asyncio.create_task(client.zxdb_set_tracepoints([]))
+
+        await asyncio.wait_for(writer.drained.wait(), timeout=2.0)
+
+        buffer_val = writer.buffer.getvalue()
+        _headers, body = buffer_val.split(b"\r\n\r\n", 1)
+        req_val = json.loads(body.decode("utf-8"))
+        self.assertEqual(req_val["command"], "zxdb.SetTracepoints")
+        self.assertEqual(req_val["arguments"]["tracepoints"], [])
+        seq = req_val["seq"]
+
+        feed_dap_response(
+            reader,
+            {
+                "seq": 16,
+                "type": "response",
+                "request_seq": seq,
+                "success": True,
+                "command": "zxdb.SetTracepoints",
+                "body": {"tracepoints": []},
+            },
+        )
+
+        resp = await send_task
+        self.assertTrue(resp.success)
+        self.assertEqual(resp.body.tracepoints, [])
+
+    def test_zxdb_tracepoint_watch_spec_rejects_invalid_access_type(
+        self,
+    ) -> None:
+        """Tests that ZxdbTracepointWatchSpec rejects unsupported access_type values."""
+        with self.assertRaises(ValidationError):
+            ZxdbTracepointWatchSpec.model_validate({"accessType": "read"})
+
+    def test_zxdb_tracepoint_event_model(self) -> None:
+        """Tests parsing a zxdb.Tracepoint event payload."""
+        event_dict = {
+            "seq": 99,
+            "type": "event",
+            "event": "zxdb.Tracepoint",
+            "body": {
+                "tracepointId": 1,
+                "location": "foo.cc:10",
+                "hitCount": 1,
+                "maxHits": 5,
+                "autoDisabled": False,
+                "truncated": True,
+                "threadKoid": 1234,
+                "dwellMs": 2.5,
+                "capture": {
+                    "matched": True,
+                    "frame": {
+                        "name": "foo",
+                        "file": "foo.cc",
+                        "line": 10,
+                        "ip": 4096,
+                        "sp": 8192,
+                        "trust": "context",
+                    },
+                    "backtrace": [
+                        {
+                            "frameIndex": 0,
+                            "name": "foo",
+                            "file": "foo.cc",
+                            "line": 10,
+                            "ip": 4096,
+                            "sp": 8192,
+                            "trust": "context",
+                            "elided": False,
+                        },
+                        {
+                            "frameIndex": 1,
+                            "name": "bar",
+                            "file": "bar.cc",
+                            "line": 20,
+                            "ip": 8192,
+                            "sp": 16384,
+                            "trust": "cfi",
+                            "elided": True,
+                            "elideDescription": "elided async runtime frames",
+                        },
+                    ],
+                    "locals": {
+                        "var": {
+                            "value": "42",
+                            "type": "int",
+                        }
+                    },
+                    "registers": {
+                        "rax": "0x1",
+                    },
+                    "evaluations": {
+                        "x + 1": {
+                            "result": "43",
+                            "type": "int",
+                            "error": None,
+                        }
+                    },
+                    "errors": [],
+                },
+            },
+        }
+
+        event = ZxdbTracepointEvent.model_validate(event_dict)
+        self.assertEqual(event.event, "zxdb.Tracepoint")
+        self.assertEqual(event.body.tracepoint_id, 1)
+        self.assertEqual(event.body.location, "foo.cc:10")
+        self.assertEqual(event.body.dwell_ms, 2.5)
+        self.assertTrue(event.body.truncated)
+        self.assertIsNotNone(event.body.capture.frame)
+        assert event.body.capture.frame is not None
+        self.assertEqual(event.body.capture.frame.name, "foo")
+        self.assertEqual(event.body.capture.frame.trust, "context")
+        self.assertIsNotNone(event.body.capture.backtrace)
+        assert event.body.capture.backtrace is not None
+        self.assertEqual(len(event.body.capture.backtrace), 2)
+        self.assertEqual(event.body.capture.backtrace[1].trust, "cfi")
+        self.assertTrue(event.body.capture.backtrace[1].elided)
+        self.assertEqual(
+            event.body.capture.backtrace[1].elide_description,
+            "elided async runtime frames",
+        )
+        assert event.body.capture.locals is not None
+        self.assertEqual(event.body.capture.locals["var"].value, "42")
+        assert event.body.capture.registers is not None
+        self.assertEqual(event.body.capture.registers["rax"], "0x1")
+        assert event.body.capture.evaluations is not None
+        self.assertEqual(event.body.capture.evaluations["x + 1"].result, "43")
+
+    def test_minimal_zxdb_tracepoint_event_model(self) -> None:
+        """Tests parsing a minimal zxdb.Tracepoint event with optional fields omitted."""
+        event_dict = {
+            "seq": 100,
+            "type": "event",
+            "event": "zxdb.Tracepoint",
+            "body": {
+                "tracepointId": 2,
+                "location": "bar.cc:20",
+                "hitCount": 1,
+                "maxHits": 1,
+                "autoDisabled": True,
+                "threadKoid": 5678,
+                "dwellMs": 0.5,
+                "capture": {
+                    "matched": False,
+                    "errors": ["Condition evaluation failed."],
+                },
+            },
+        }
+        event = ZxdbTracepointEvent.model_validate(event_dict)
+        self.assertEqual(event.body.tracepoint_id, 2)
+        self.assertTrue(event.body.auto_disabled)
+        self.assertFalse(event.body.truncated)
+        self.assertFalse(event.body.capture.matched)
+        self.assertIsNone(event.body.capture.frame)
+        self.assertIsNone(event.body.capture.backtrace)
+        self.assertIsNone(event.body.capture.locals)
+        self.assertIsNone(event.body.capture.registers)
+        self.assertIsNone(event.body.capture.evaluations)
+        self.assertEqual(
+            event.body.capture.errors, ["Condition evaluation failed."]
+        )
+
+    def test_invalid_event_discriminator(self) -> None:
+        """Tests that ZxdbTracepointEvent rejects non-matching event names."""
+        event_dict = {
+            "seq": 101,
+            "type": "event",
+            "event": "wrong.event",
+            "body": {
+                "tracepointId": 3,
+                "location": "main.cc:1",
+                "hitCount": 1,
+                "maxHits": 10,
+                "autoDisabled": False,
+                "threadKoid": 1001,
+                "dwellMs": 1.0,
+                "capture": {"matched": True},
+            },
+        }
+        with self.assertRaises(ValidationError):
+            ZxdbTracepointEvent.model_validate(event_dict)
+
+    async def test_zxdb_set_tracepoints_error_response(self) -> None:
+        """Tests handling an error response from zxdb.SetTracepoints."""
+        client = ZxdbDapClient()
+        reader, writer = self._start_client(client)
+        specs = [ZxdbTracepointSpec(id=-1)]
+
+        send_task = asyncio.create_task(client.zxdb_set_tracepoints(specs))
+
+        await asyncio.wait_for(writer.drained.wait(), timeout=2.0)
+
+        buffer_val = writer.buffer.getvalue()
+        _headers, body = buffer_val.split(b"\r\n\r\n", 1)
+        req_val = json.loads(body.decode("utf-8"))
+        seq = req_val["seq"]
+
+        error_response = {
+            "seq": 20,
+            "type": "response",
+            "request_seq": seq,
+            "success": False,
+            "command": "zxdb.SetTracepoints",
+            "message": "Tracepoint id must be positive.",
+        }
+
+        feed_dap_response(reader, error_response)
+
+        with self.assertRaises(DapError) as cm:
+            await send_task
+        self.assertIn("Tracepoint id must be positive.", str(cm.exception))
 
 
 if __name__ == "__main__":

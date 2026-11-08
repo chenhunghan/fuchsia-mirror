@@ -68,13 +68,25 @@ class Mode {
   constexpr Dimensions active_area() const { return active_area_; }
 
   // Guaranteed to meet the requirements in the FIDL documentation.
+  //
+  // This is the maximum refresh rate when `is_variable_refresh_rate()` is true.
   constexpr int32_t refresh_rate_millihertz() const { return refresh_rate_millihertz_; }
+
+  // Guaranteed to meet the requirements in the FIDL documentation.
+  constexpr fuchsia_hardware_display_types::wire::ModeFlags flags() const { return flags_; }
+
+  // True iff the display may refresh less often than `refresh_rate_millihertz()`.
+  constexpr bool is_variable_refresh_rate() const {
+    return static_cast<bool>(flags_ &
+                             fuchsia_hardware_display_types::wire::ModeFlags::kVariableRefreshRate);
+  }
 
  private:
   struct ConstructorArgs {
     int32_t active_width;
     int32_t active_height;
     int32_t refresh_rate_millihertz;
+    fuchsia_hardware_display_types::wire::ModeFlags flags = {};
   };
 
   // In debug mode, asserts that IsValid() would return true.
@@ -86,6 +98,7 @@ class Mode {
 
   Dimensions active_area_;
   int32_t refresh_rate_millihertz_;
+  fuchsia_hardware_display_types::wire::ModeFlags flags_;
 };
 
 // static
@@ -106,7 +119,7 @@ constexpr bool Mode::IsValid(const fuchsia_hardware_display_types::wire::Mode& f
     return false;
   }
 
-  if (fidl_mode.flags != fuchsia_hardware_display_types::wire::ModeFlags()) {
+  if (fidl_mode.flags.has_unknown_bits()) {
     return false;
   }
 
@@ -115,7 +128,8 @@ constexpr bool Mode::IsValid(const fuchsia_hardware_display_types::wire::Mode& f
 
 constexpr Mode::Mode(const Mode::ConstructorArgs& args)
     : active_area_({.width = args.active_width, .height = args.active_height}),
-      refresh_rate_millihertz_(args.refresh_rate_millihertz) {
+      refresh_rate_millihertz_(args.refresh_rate_millihertz),
+      flags_(args.flags) {
   DebugAssertIsValid(args);
 }
 
@@ -128,12 +142,13 @@ constexpr Mode Mode::From(const fuchsia_hardware_display_types::wire::Mode& fidl
       .active_width = active_area.width(),
       .active_height = active_area.height(),
       .refresh_rate_millihertz = static_cast<int32_t>(fidl_mode.refresh_rate_millihertz),
+      .flags = fidl_mode.flags,
   });
 }
 
 constexpr bool operator==(const Mode& lhs, const Mode& rhs) {
   return lhs.active_area_ == rhs.active_area_ &&
-         lhs.refresh_rate_millihertz_ == rhs.refresh_rate_millihertz_;
+         lhs.refresh_rate_millihertz_ == rhs.refresh_rate_millihertz_ && lhs.flags_ == rhs.flags_;
 }
 
 constexpr bool operator!=(const Mode& lhs, const Mode& rhs) { return !(lhs == rhs); }
@@ -145,6 +160,7 @@ constexpr fuchsia_hardware_display_types::wire::Mode Mode::ToFidl() const {
       // This cast does not cause UB because the refresh rate must be
       // non-negative.
       .refresh_rate_millihertz = static_cast<uint32_t>(refresh_rate_millihertz_),
+      .flags = flags_,
   };
 }
 
@@ -155,6 +171,8 @@ constexpr void Mode::DebugAssertIsValid(const Mode::ConstructorArgs& args) {
 
   ZX_DEBUG_ASSERT(args.refresh_rate_millihertz > 0);
   ZX_DEBUG_ASSERT(args.refresh_rate_millihertz <= kMaxRefreshRateMillihertz);
+
+  ZX_DEBUG_ASSERT(!args.flags.has_unknown_bits());
 }
 
 // static
@@ -167,7 +185,7 @@ constexpr void Mode::DebugAssertIsValid(
   ZX_DEBUG_ASSERT(fidl_mode.refresh_rate_millihertz > 0);
   ZX_DEBUG_ASSERT(fidl_mode.refresh_rate_millihertz <= kMaxRefreshRateMillihertz);
 
-  ZX_DEBUG_ASSERT(fidl_mode.flags == fuchsia_hardware_display_types::wire::ModeFlags());
+  ZX_DEBUG_ASSERT(!fidl_mode.flags.has_unknown_bits());
 }
 
 }  // namespace display
@@ -177,9 +195,13 @@ template <>
 struct std::formatter<display::Mode> {
   constexpr auto parse(std::format_parse_context& ctx) { return ctx.begin(); }
   auto format(const display::Mode& mode, std::format_context& ctx) const {
-    return std::format_to(ctx.out(), "{}x{} @ {}.{:03} Hz", mode.active_area().width(),
-                          mode.active_area().height(), mode.refresh_rate_millihertz() / 1000,
-                          mode.refresh_rate_millihertz() % 1000);
+    auto out = std::format_to(ctx.out(), "{}x{} @ {}.{:03} Hz", mode.active_area().width(),
+                              mode.active_area().height(), mode.refresh_rate_millihertz() / 1000,
+                              mode.refresh_rate_millihertz() % 1000);
+    if (mode.is_variable_refresh_rate()) {
+      out = std::format_to(out, " (variable refresh rate)");
+    }
+    return out;
   }
 };
 #endif

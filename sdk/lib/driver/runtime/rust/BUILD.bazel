@@ -49,3 +49,12 @@ fx_unittest_package(
     name = "fdf_rust_tests",
     unit_tests = [":rust_test"],
 )
+
+test_suite(
+    name = "target_tests",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    tests = [
+        ":fdf_rust_tests",
+        "//sdk/lib/driver/runtime/rust/env:fdf_rust_env_tests",
+    ],
+)

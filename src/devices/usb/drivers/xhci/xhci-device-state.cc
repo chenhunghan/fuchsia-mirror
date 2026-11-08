@@ -11,7 +11,12 @@ namespace usb_xhci {
 DeviceState::~DeviceState() {
   // Each DeviceState corresponds to one slot. When the device is removed, we should call
   // DisableSlotCommand on the corresponding slot.
-  if (hci_ && hci_->Running() && !disconnecting_) {
+  bool need_disable = false;
+  {
+    fbl::AutoLock _(&transaction_lock_);
+    need_disable = (slot_ != 0 && !slot_disable_started_);
+  }
+  if (need_disable && hci_->Running()) {
     auto status =
         hci_->RunSynchronously(kPrimaryInterrupter, hci_->DisableSlotCommand(*this).box());
     if (status != ZX_OK && status != ZX_ERR_IO_NOT_PRESENT) {
@@ -29,6 +34,9 @@ DeviceState::~DeviceState() {
 
 zx_status_t DeviceState::InitEndpoint(uint8_t ep_addr, EventRing* event_ring, fdf::MmioBuffer* mmio)
     __TA_REQUIRES(transaction_lock_) {
+  if (disconnecting_) {
+    return ZX_ERR_IO_NOT_PRESENT;
+  }
   return GetEndpoint(XhciEndpointIndex(ep_addr) - 1).Init(event_ring, mmio);
 }
 
@@ -160,6 +168,11 @@ TRBPromise DeviceState::AddressDeviceCommand(UsbXhci* hci, uint8_t slot, uint8_t
 
   // Allocate the transfer ring (see section 4.9)
   fbl::AutoLock _(&transaction_lock_);
+  if (disconnecting_) {
+    return fpromise::make_result_promise(
+               fpromise::result<TRB*, zx_status_t>(fpromise::error(ZX_ERR_IO_NOT_PRESENT)))
+        .box();
+  }
   status = tr_.Init(&hci->interrupter(interrupter_target).ring(), mmio);
   if (status != ZX_OK) {
     fdf::error("Failed to allocate the transfer ring: {}", zx_status_get_string(status));

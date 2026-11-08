@@ -1,0 +1,37 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "wakeup_test",
+    srcs = [
+        "src/device.rs",
+        "src/input.rs",
+        "src/ioctl.rs",
+        "src/lib.rs",
+        "src/tracing.rs",
+    ],
+    crate_name = "starnix_modules_wakeup_test",
+    edition = "2024",
+    visibility = ["//src/starnix/modules:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.input:fuchsia.input_rust",
+        "//sdk/fidl/fuchsia.ui.test.input:fuchsia.ui.test.input_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/trace/rust:trace",
+        "//src/starnix/kernel/core",
+        "//src/starnix/lib/linux_uapi",
+        "//src/starnix/lib/starnix_logging",
+        "//src/starnix/lib/starnix_syscalls",
+        "//src/starnix/lib/starnix_uapi",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)

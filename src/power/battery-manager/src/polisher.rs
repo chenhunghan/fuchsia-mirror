@@ -377,7 +377,7 @@ impl ChargeTimeEstimator {
 }
 
 // Determine the LevelStatus
-struct LevelChecker;
+pub(crate) struct LevelChecker;
 
 impl LevelChecker {
     // Used to determine the level_status, after scale_level
@@ -385,7 +385,7 @@ impl LevelChecker {
     const THRESHOLD_LEVEL_WARNING: f32 = 40.0;
     const THRESHOLD_LEVEL_LOW: f32 = 0.0;
 
-    fn determine_level_status(
+    pub(crate) fn determine_level_status(
         level: f32,
         charger_status: Option<fpower::ChargeStatus>,
     ) -> fpower::LevelStatus {

@@ -12,7 +12,7 @@ group("hardware") {
   testonly = true
 
   deps = []
-  if (!is_debug) {
+  if (!is_debug && !is_asan) {
     deps += [ ":audio_core_hardware_tests" ]
   }
 }

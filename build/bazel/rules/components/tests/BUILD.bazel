@@ -1,0 +1,12 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(":cmc_merge_test.bzl", "cmc_merge_test_suite")
+
+package(default_applicable_licenses = ["//:license"])
+
+cmc_merge_test_suite(
+    name = "tests",
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
+)

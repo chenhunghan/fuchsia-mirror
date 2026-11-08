@@ -7,20 +7,20 @@
 
 use super::super::{FsNodeSecurityXattr, check_task_capable};
 use super::{
-    Auditable, FileSystem, FsNodeLabel, FsNodeSidAndClass, NonPrivateDirEntry, NonPrivateFsNode,
-    PermissionFlags, build_permission_check, check_permission, current_task_state,
-    fs_node_effective_sid_and_class, fs_node_ensure_class, fs_node_set_label_with_task,
+    Auditable, FileSystem, FsNodeSidAndClass, NonPrivateDirEntry, NonPrivateFsNode,
+    PermissionFlags, build_permission_check, check_permission, check_permissions,
+    current_task_state, fs_node_effective_sid_and_class, fs_node_ensure_class,
     has_fs_node_permissions, has_fs_node_permissions_dontaudit, permissions_from_flags,
     set_cached_sid,
 };
 use crate::task::CurrentTask;
-use crate::vfs::{DirEntryHandle, FsStr, FsString, PathBuilder, UnlinkKind, ValueOrSize, XattrOp};
+use crate::vfs::{DirEntry, FsStr, FsString, PathBuilder, UnlinkKind, ValueOrSize, XattrOp};
 use fuchsia_rcu::RcuReadScope;
 use selinux::policy::{AccessVector, FsUseType};
 use selinux::{
     ClassPermission, CommonFilePermission, CommonFsNodePermission, DirPermission, FileClass,
     FileSystemLabel, FileSystemLabelingScheme, FileSystemPermission, ForClass, FsNodeClass,
-    InitialSid, PolicyCap, SecurityId, SecurityServer, SocketClass, TaskAttrs,
+    InitialSid, PolicyCap, SecurityId, SecurityServer, TaskAttrs,
 };
 use starnix_logging::{CATEGORY_STARNIX_SECURITY, log_debug, log_warn, track_stub};
 use starnix_uapi::arc_key::WeakKey;
@@ -37,14 +37,16 @@ use syncio::zxio_node_attr_has_t;
 const SECURITY_SELINUX_XATTR_VALUE_MAX_SIZE: usize = 4096;
 
 /// Returns the relative path from the root of the file system containing this `DirEntry`.
-fn get_fs_relative_path(dir_entry: &DirEntryHandle) -> FsString {
+fn get_fs_relative_path(dir_entry: &DirEntry) -> FsString {
     let mut path_builder = PathBuilder::new();
 
     let scope = RcuReadScope::new();
-    let mut current_dir = dir_entry.clone();
+    let mut parent_holder;
+    let mut current_dir = dir_entry;
     while let Some(parent) = current_dir.parent() {
         path_builder.prepend_element(current_dir.local_name(&scope));
-        current_dir = parent;
+        parent_holder = parent;
+        current_dir = &parent_holder;
     }
     path_builder.build_absolute()
 }
@@ -63,6 +65,9 @@ pub(in crate::security) fn fs_node_notify_security_context(
     let sid = security_server
         .security_context_to_sid(security_context.into())
         .unwrap_or_else(|_| InitialSid::Unlabeled.into());
+    let Ok(_) = fs_node_ensure_class(fs_node) else {
+        return;
+    };
     set_cached_sid(fs_node, sid);
 }
 
@@ -80,12 +85,11 @@ pub(in crate::security) fn fs_node_init_with_dentry(
     // TODO: This ensures a correct class for nodes with a wrong `FileMode` at
     // creation, but should not really be required.
     let fs_node = dir_entry.node();
-    fs_node_ensure_class(fs_node)?;
+    let fs_node_class = fs_node_ensure_class(fs_node)?;
 
     // This hook is called every time an `FsNode` is linked to a `DirEntry`, so it is expected that
     // the `FsNode` may already have been labeled.
-    let label_class = fs_node.selinux_state().read();
-    if !matches!(label_class.label, FsNodeLabel::Uninitialized) {
+    if fs_node.selinux_state().is_labeled() {
         return Ok(());
     }
 
@@ -93,14 +97,12 @@ pub(in crate::security) fn fs_node_init_with_dentry(
     // the filesystem's labeling scheme. This allows nodes in per-process and per-task directories
     // in "proc" to inherit the task's label.
     let parent = dir_entry.parent();
-    if let Some(ref parent) = parent
+    if let Some(parent) = &parent
         && let Some(parent_node) = NonPrivateFsNode::new(&parent.node)
+        && let Some(task_state) = parent_node.selinux_state().task_state()
     {
-        let parent_label = (*parent_node.selinux_state().read()).clone();
-        if let FsNodeLabel::FromTask { task_state } = &parent_label.label {
-            fs_node_set_label_with_task(fs_node, task_state);
-            return Ok(());
-        }
+        fs_node.selinux_state().set_from_task(task_state);
+        return Ok(());
     }
 
     // Obtain labeling information for the `FileSystem`. If none has been resolved yet then queue the
@@ -219,8 +221,7 @@ pub(in crate::security) fn fs_node_init_with_dentry(
             }
         }
         FileSystemLabelingScheme::GenFsCon { .. } => {
-            let fs_type = fs_node.fs().name();
-            let fs_node_class = fs_node.selinux_state().read().class();
+            let fs_type = fs.name();
             let sub_path = get_fs_relative_path(dir_entry.as_dir_entry());
             security_server
                 .genfscon_label_for_fs_and_path(
@@ -236,6 +237,13 @@ pub(in crate::security) fn fs_node_init_with_dentry(
                     // so error out rather than panicking the kernel.
                     errno!(EINVAL)
                 })?
+        }
+        FileSystemLabelingScheme::None => {
+            if parent.is_none() {
+                label.mount_sids.root_context.unwrap_or(label.sid)
+            } else {
+                label.sid
+            }
         }
     };
 
@@ -276,27 +284,6 @@ fn file_class_from_file_mode(mode: FileMode) -> Result<FileClass, Errno> {
     }
 }
 
-/// Returns the SID to apply to an `FsNode` of socket-like `new_socket_class`.
-/// Panics if called before any policy has been loaded.
-fn compute_new_socket_sid(
-    security_server: &SecurityServer,
-    current_task: &CurrentTask,
-    new_socket_class: SocketClass,
-    name: &FsStr,
-) -> Result<SecurityId, Errno> {
-    let TaskAttrs { current_sid, sockcreate_sid, .. } = *current_task_state(current_task);
-    if let Some(sid) = sockcreate_sid {
-        return Ok(sid);
-    }
-
-    // `compute_create_sid` fails if the computed security context is invalid under the policy
-    // (for example, an unauthorized role/type combination or a non-overlapping `glblub` range).
-    let permission_check = build_permission_check(current_task, security_server);
-    permission_check
-        .compute_create_sid(current_sid, current_sid, new_socket_class.into(), name.as_ref())
-        .map_err(|_| errno!(EPERM))
-}
-
 /// Returns the SID to apply to an `FsNode` of file-like `new_file_class`.
 /// Panics if called before any policy has been loaded.
 fn compute_new_file_sid(
@@ -326,10 +313,12 @@ fn compute_new_file_sid(
     let TaskAttrs { current_sid, fscreate_sid, .. } = *current_task_state(current_task);
 
     // If the task has an "fscreate" context set then use that deferring to the policy, except in
-    // the gensfscon case where the fscreate context is ignored.
+    // the genfscon and unlabeled filesystem cases where the fscreate context is ignored.
     if let Some(fscreate_sid) = fscreate_sid {
-        if !matches!(fs_label.scheme, FileSystemLabelingScheme::GenFsCon { .. }) {
-            return Ok(fscreate_sid);
+        match fs_label.scheme {
+            FileSystemLabelingScheme::FsUse { .. } => return Ok(fscreate_sid),
+            FileSystemLabelingScheme::Mountpoint { sid } => return Ok(sid),
+            FileSystemLabelingScheme::GenFsCon { .. } | FileSystemLabelingScheme::None => (),
         }
     }
 
@@ -386,7 +375,7 @@ pub(in crate::security) fn compute_new_fs_node_sid(
 ) -> Result<SecurityId, Errno> {
     Ok(match new_node_class {
         FsNodeClass::Socket(new_socket_class) => {
-            compute_new_socket_sid(security_server, current_task, new_socket_class, name)?
+            super::socket::compute_new_socket_sid(security_server, current_task, new_socket_class)?
         }
         FsNodeClass::File(new_file_class) => compute_new_file_sid(
             security_server,
@@ -445,13 +434,12 @@ pub(in crate::security) fn fs_node_init_on_create(
     // file-system implementation that supplied the security context inline when creating the node
     // remotely (see `dentry_init_security()`), which is only possible for xattr-labeled
     // file-systems.
-    let label_class = new_node.selinux_state().read();
-    if !matches!(label_class.label, FsNodeLabel::Uninitialized) {
+    if let Some(sid) = new_node.selinux_state().sid() {
         assert!(
             new_node.fs().security_state.state.supports_xattr(),
-            "init_on_create() for {:?} with label {:?}",
+            "init_on_create() for {:?} with sid {:?}",
             new_node,
-            *label_class
+            sid
         );
         return Ok(None);
     }
@@ -482,7 +470,7 @@ pub(in crate::security) fn fs_node_init_on_create(
                 .transpose()?;
             (sid, xattr)
         }
-        FileSystemLabelingScheme::Mountpoint { .. } => (sid, None),
+        FileSystemLabelingScheme::Mountpoint { .. } | FileSystemLabelingScheme::None => (sid, None),
         FileSystemLabelingScheme::GenFsCon { .. } => {
             // Defer labeling to `fs_node_init_with_dentry()`, so that the path of the new
             // node can be taken into account.
@@ -561,7 +549,7 @@ pub(in crate::security) fn fs_node_init_anon(
         InitialSid::Unlabeled.into()
     };
 
-    new_node.selinux_state().update(FsNodeLabel::SecurityId { sid }, node_class);
+    new_node.selinux_state().set_sid_and_class(sid, node_class);
 
     Ok(())
 }
@@ -583,22 +571,13 @@ fn may_create(
     let parent_sid = fs_node_effective_sid_and_class(parent).sid;
     let fs = parent.fs();
 
-    let audit_context =
-        &[current_task.into(), parent.into(), fs.as_ref().into(), Auditable::Name(name)];
-    check_permission(
+    let audit_context = &[current_task.into(), parent.into(), Auditable::Name(name)];
+    check_permissions(
         &permission_check,
         current_task,
         current_sid,
         parent_sid,
-        DirPermission::Search,
-        audit_context.into(),
-    )?;
-    check_permission(
-        &permission_check,
-        current_task,
-        current_sid,
-        parent_sid,
-        DirPermission::AddName,
+        DirPermission::Search | DirPermission::AddName,
         audit_context.into(),
     )?;
 
@@ -667,20 +646,12 @@ fn may_link(
     let FsNodeClass::File(file_class) = file_class else {
         panic!("may_link called on non-file-like class")
     };
-    check_permission(
+    check_permissions(
         &permission_check,
         current_task,
         current_sid,
         parent_sid,
-        DirPermission::Search,
-        audit_context,
-    )?;
-    check_permission(
-        &permission_check,
-        current_task,
-        current_sid,
-        parent_sid,
-        DirPermission::AddName,
+        DirPermission::Search | DirPermission::AddName,
         audit_context,
     )?;
     check_permission(
@@ -714,20 +685,12 @@ fn may_unlink_or_rmdir(
     let current_sid = current_task_state(current_task).current_sid;
     let parent_sid = fs_node_effective_sid_and_class(parent).sid;
 
-    check_permission(
+    check_permissions(
         &permission_check,
         current_task,
         current_sid,
         parent_sid,
-        DirPermission::Search,
-        audit_context.into(),
-    )?;
-    check_permission(
-        &permission_check,
-        current_task,
-        current_sid,
-        parent_sid,
-        DirPermission::RemoveName,
+        DirPermission::Search | DirPermission::RemoveName,
         audit_context.into(),
     )?;
 
@@ -1065,8 +1028,7 @@ pub(in crate::security) fn path_notify(
 
     let permission_check = build_permission_check(current_task, security_server);
     let current_sid = current_task_state(current_task).current_sid;
-    let fs = fs_node.fs();
-    let audit_context = [current_task.into(), fs_node.into(), fs.as_ref().into()];
+    let audit_context = [current_task.into(), fs_node.into()];
     // The "watch" permission is required to set any watch, regardless of the events in `mask`.
     check_permission(
         &permission_check,
@@ -1174,7 +1136,7 @@ pub(in crate::security) fn check_fs_node_setxattr_access(
 
     // Verify that the requested modification is permitted by the loaded policy.
     if security_server.is_enforcing() {
-        let audit_context = &[current_task.into(), fs_node.into(), fs.as_ref().into()];
+        let audit_context = &[current_task.into(), fs_node.into()];
         let audit_context = audit_context.into();
 
         let new_sid =
@@ -1324,6 +1286,11 @@ pub(in crate::security) fn fs_node_setsecurity(
 ) -> Result<Option<()>, Errno> {
     if name != XATTR_NAME_SELINUX.to_bytes() {
         return Ok(None);
+    }
+
+    fs_node_ensure_class(fs_node)?;
+    if fs_node.selinux_state().task_state().is_some() {
+        return error!(ENOTSUP);
     }
 
     // If the filesystem is configured to persist labels into xattrs then apply the label to the
@@ -1561,6 +1528,68 @@ mod tests {
 
             // Verify that the SID now cached on the node corresponds to VALID_SECURITY_CONTEXT.
             assert_eq!(Some(expected_sid), get_cached_sid(node));
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn fs_node_setsecurity_uninitialized_and_from_task() {
+        spawn_kernel_with_selinux_hooks_test_policy_and_run(|current_task, security_server| {
+            let expected_sid = security_server
+                .security_context_to_sid(VALID_SECURITY_CONTEXT.into())
+                .expect("no SID for VALID_SECURITY_CONTEXT");
+
+            // Create an `UNINITIALIZED` node via `FsNodeOps::create_tmpfile` (bypassing VFS create
+            // hooks) and verify `fs_node_setsecurity` initializes its class and caches the SID.
+            let root_node = &current_task.fs().root().entry.node;
+            let uninitialized_handle = root_node
+                .ops()
+                .create_tmpfile(
+                    root_node,
+                    current_task,
+                    FileMode::IFREG,
+                    current_task.real_fscred(),
+                )
+                .expect("create_tmpfile");
+            let uninitialized_node = NonPrivateFsNode::new(&uninitialized_handle).unwrap();
+            assert_eq!(uninitialized_node.selinux_state().sid_and_class(), (None, None));
+
+            fs_node_setsecurity(
+                security_server,
+                current_task,
+                uninitialized_node,
+                XATTR_NAME_SELINUX.to_bytes().into(),
+                VALID_SECURITY_CONTEXT.into(),
+                XattrOp::Set,
+            )
+            .expect("set_xattr(security.selinux) on uninitialized node failed");
+            assert_eq!(Some(expected_sid), get_cached_sid(&uninitialized_node));
+            assert_eq!(
+                uninitialized_node.selinux_state().class(),
+                Some(FsNodeClass::File(FileClass::File))
+            );
+
+            // `fs_node_setsecurity` on a task-bound (`FromTask`) node returns `ENOTSUP`.
+            let task_entry = &current_task
+                .fs()
+                .root()
+                .create_node(current_task, "task_file".into(), FileMode::IFREG, DeviceId::NONE)
+                .expect("create_node(task_file)")
+                .entry;
+            let task_node = NonPrivateFsNode::new(&task_entry.node).unwrap();
+            clear_cached_sid(&task_node);
+            super::super::task::fs_node_init_with_task(current_task, task_node);
+            assert_eq!(
+                fs_node_setsecurity(
+                    security_server,
+                    current_task,
+                    task_node,
+                    XATTR_NAME_SELINUX.to_bytes().into(),
+                    VALID_SECURITY_CONTEXT.into(),
+                    XattrOp::Set,
+                ),
+                error!(ENOTSUP)
+            );
         })
         .await;
     }

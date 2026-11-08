@@ -335,18 +335,14 @@ func (r *RunCommand) dispatchTests(ctx context.Context, cancel context.CancelFun
 		logger.Debugf(ctx, "successfully started all targets")
 
 		defer func() {
+			// Cancel ctx before stopping targets so caller goroutines watching
+			// t.Wait(ctx) treat target shutdown as intentional rather than an
+			// unexpected mid-test failure.
+			cancel()
 			ctx, cancel := context.WithTimeout(botanist.GetLoggerCtx(ctx), time.Minute)
 			defer cancel()
 			targets.StopTargets(ctx, fuchsiaTargets)
 		}()
-
-		// Create a testbed config file. We have to do this after starting the
-		// targets so that we can get their IP addresses.
-		testbedConfig, testbedConfigPath, err := r.createTestbedConfig(baseTargets)
-		if err != nil {
-			return err
-		}
-		defer os.Remove(testbedConfigPath)
 
 		if r.expectsSSH {
 			for _, t := range fuchsiaTargets {
@@ -362,7 +358,7 @@ func (r *RunCommand) dispatchTests(ctx context.Context, cancel context.CancelFun
 				}
 				if pkgSrv != nil {
 					if err := t.AddPackageRepository(client, pkgSrv.RepoURL, pkgSrv.BlobURL); err != nil {
-						return err
+						return fmt.Errorf("%s: %w", constants.PackageRepoSetupErrorMsg, err)
 					}
 					logger.Debugf(ctx, "added package repo to target %s", t.Nodename())
 				}
@@ -387,7 +383,7 @@ func (r *RunCommand) dispatchTests(ctx context.Context, cancel context.CancelFun
 					repoName := "fuchsia-package-server"
 					pkgSrvPort, cleanupPkgServer, err := r.setupFFXPackageServer(ctx, t.GetFFX(), repoName)
 					if err != nil {
-						return err
+						return fmt.Errorf("%s: %w", constants.PackageRepoSetupErrorMsg, err)
 					}
 					defer cleanupPkgServer()
 					if pkgSrvPort != 0 {
@@ -399,11 +395,11 @@ func (r *RunCommand) dispatchTests(ctx context.Context, cancel context.CancelFun
 							}
 							return nil
 						}, nil); err != nil {
-							return err
+							return fmt.Errorf("%s: %w", constants.PackageRepoSetupErrorMsg, err)
 						}
 						cleanupForward, err := t.AddFFXPackageRepository(ctx, repoName, pkgSrvPort, forceFFXUSB)
 						if err != nil {
-							return err
+							return fmt.Errorf("%s: %w", constants.PackageRepoSetupErrorMsg, err)
 						}
 						defer cleanupForward()
 					}
@@ -509,6 +505,15 @@ func (r *RunCommand) dispatchTests(ctx context.Context, cancel context.CancelFun
 			}()
 		}
 
+		// Create a testbed config file after starting targets and establishing
+		// target connectivity so IP addresses and USB driver configuration are
+		// populated.
+		testbedConfig, testbedConfigPath, err := r.createTestbedConfig(baseTargets)
+		if err != nil {
+			return err
+		}
+		defer os.Remove(testbedConfigPath)
+
 		err = r.runAgainstTarget(ctx, primaryTarget, testsPath, testbedConfig, testbedConfigPath)
 		// Cancel ctx to notify other goroutines that this routine has completed.
 		// If another goroutine gets an error and the context is canceled, it
@@ -578,7 +583,7 @@ func (r *RunCommand) execute(ctx context.Context, args []string) error {
 			return err
 		}
 		// Attach an ffx instance for all targets. All ffx instances will use the same
-		// config and daemon, but run commands against its own specified target. The target
+		// config, but run commands against its own specified target. The target
 		// will be set after starting the target, so that we can resolve the IP address.
 		ffxForTarget := ffxutil.FFXWithTarget(ffx, "")
 		t.SetFFX(&targets.FFXInstance{ffxForTarget, experiments}, ffx.Env())
@@ -873,6 +878,20 @@ func setEnviron(environ []string) {
 	}
 }
 
+func logBotanistFailure(ctx context.Context, err error) {
+	if err == nil {
+		return
+	}
+	var pErr *botanist.PhaseError
+	if errors.As(err, &pErr) && pErr.Phase().IsValid() {
+		// LINT.IfChange(botanist_failed_phase_tag)
+		logger.Errorf(ctx, "%s: [phase=%s] %s", constants.BotanistFailedMsg, pErr.Phase(), err)
+		// LINT.ThenChange(/tools/testing/tefmocheck/string_in_log_check.go:botanist_failed_phase_tag)
+		return
+	}
+	logger.Errorf(ctx, "%s: %s", constants.BotanistFailedMsg, err)
+}
+
 func (r *RunCommand) Execute(ctx context.Context, f *flag.FlagSet, _ ...any) subcommands.ExitStatus {
 	args := f.Args()
 	if len(args) == 0 {
@@ -933,7 +952,7 @@ func (r *RunCommand) Execute(ctx context.Context, f *flag.FlagSet, _ ...any) sub
 	}
 
 	if err := r.execute(ctx, args); err != nil {
-		logger.Errorf(ctx, "%s: %s", constants.BotanistFailedMsg, err)
+		logBotanistFailure(ctx, err)
 		return subcommands.ExitFailure
 	}
 	return subcommands.ExitSuccess

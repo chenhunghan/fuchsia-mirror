@@ -47,12 +47,9 @@ rustc_test("tests_bin") {
     "//third_party/rust_crates:futures",
   ]
 }
+
 fuchsia_unittest_package("test-harness-crate-tests") {
   package_name = "test-harness-crate-tests-gn"
   component_name = "test-harness-crate-tests"
   deps = [ ":tests_bin" ]
-  visibility = [
-    ":*",
-    "//src/connectivity/bluetooth:*",
-  ]
 }

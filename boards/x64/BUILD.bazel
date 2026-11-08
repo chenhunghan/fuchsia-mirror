@@ -50,6 +50,7 @@ _COMMON_PROVIDED_FEATURES = [
     "fuchsia::pwm",
     "fuchsia::real_time_clock",
     "fuchsia::sdhci",
+    "fuchsia::sdmmc",
     "fuchsia::shared_registers",
     "fuchsia::ufs_pci",
     "fuchsia::usb_host",

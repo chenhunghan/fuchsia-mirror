@@ -1,0 +1,233 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Convert shared source file paths for GN targets.
+# @bazel2gn:transformer=file_paths
+_LIB_SRCS = [
+    "src/artifact.rs",
+    "src/constants.rs",
+    "src/controller.rs",
+    "src/corpus.rs",
+    "src/diagnostics.rs",
+    "src/duration.rs",
+    "src/input.rs",
+    "src/lib.rs",
+    "src/manager.rs",
+    "src/util.rs",
+    "src/writer.rs",
+]
+
+# Translate shared Bazel dependency labels to GN labels.
+# @bazel2gn:transformer=deps
+_LIB_DEPS = [
+    "//sdk/rust/zx-status",
+    "//src/lib/diagnostics/data",
+    "//src/lib/fidl/rust/fidl",
+    "//src/lib/fuchsia-async",
+    "//third_party/rust_crates/vendor:anyhow",
+    "//third_party/rust_crates/vendor:futures",
+    "//third_party/rust_crates/vendor:hex",
+    "//third_party/rust_crates/vendor:serde_json",
+    "//third_party/rust_crates/vendor:sha2",
+    "//third_party/rust_crates/vendor:termion",
+    "//third_party/rust_crates/vendor:url",
+]
+
+rustc_library(
+    name = "lib",
+    srcs = _LIB_SRCS,
+    crate_name = "fuchsia_fuzzctl",
+    edition = "2024",
+    visibility = ["//src/sys/fuzzing/fuzzctl/testing:__pkg__"],
+    deps = [
+        "//src/lib/fdomain/client:flex_fidl",
+        "//src/sys/fuzzing/fidl:fuchsia.fuzzer_rust_flex",
+    ] + _LIB_DEPS,
+)
+
+rustc_library(
+    name = "lib_fdomain",
+    srcs = _LIB_SRCS,
+    crate_features = ["fdomain"],
+    crate_name = "fuchsia_fuzzctl_fdomain",
+    edition = "2024",
+    visibility = [
+        "//src/developer/ffx/plugins/fuzz:__pkg__",
+        "//src/sys/fuzzing/fuzzctl/testing:__pkg__",
+    ],
+    deps = [
+        "//src/lib/fdomain/client:flex_fdomain",
+        "//src/sys/fuzzing/fidl:fuchsia.fuzzer_rust_fdomain_flex",
+    ] + _LIB_DEPS,
+)
+
+rustc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = [
+        "src/args.rs",
+        "src/fuzzctl.rs",
+        "src/main.rs",
+    ],
+    crate_name = "fuzz_ctl",
+    edition = "2024",
+    # Matches GN's testonly = true lint defaults.
+    # @bazel2gn:skip
+    lint_config = "//build/config/rust/lints:clippy_warn_default",
+    tags = ["manual"],
+    deps = [
+        ":lib",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/sys/fuzzing/fidl:fuchsia.fuzzer_rust",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:regex",
+        "//third_party/rust_crates/vendor:url",
+        "//third_party/rust_crates/vendor:walkdir",
+    ],
+)
+
+rustc_test(
+    name = "fuchsia_fuzzctl_lib_test",
+    crate = ":lib",
+    # This target includes tests which depend on the test fixtures, which in turn
+    # depend on the library. If the tests also refer to code in the library the
+    # normal way, i.e. `use crate::...`, then Rust is unable to determine that the
+    # code is identical to what the test fixtures are using and complains. The
+    # workaround is to have the test depend on the library explicitly, and `use
+    # fuchsia_fuzzctl::...` where necessary.
+    deps = [
+        ":lib",
+        "//src/lib/fuchsia",
+        "//src/sys/fuzzing/fuzzctl/testing",
+    ],
+)
+
+rustc_test(
+    name = "fuchsia_fuzzctl_fdomain_lib_test",
+    crate = ":lib_fdomain",
+    crate_features = ["fdomain"],
+    deps = [
+        ":lib_fdomain",
+        "//src/lib/fuchsia",
+        "//src/sys/fuzzing/fuzzctl/testing:testing_fdomain",
+    ],
+)
+
+rustc_test(
+    name = "fuzz_ctl_bin_test",
+    crate = ":bin",
+    deps = [
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//src/sys/fuzzing/fuzzctl/testing",
+    ],
+)
+
+# Shard includes are only used by Bazel's sandboxed cmc action.
+# @bazel2gn:skip
+_UNITTEST_INCLUDES = [
+    "//sdk/lib/inspect:client.shard",
+    "//sdk/lib/syslog:client.shard",
+    "//src/sys/test_runners:tmp_storage.shard.cml",
+    "//src/sys/test_runners/rust:default.shard.cml",
+]
+
+fx_packaged_binary(
+    name = "bin_test_packaged_bin",
+    testonly = True,
+    binary = ":fuzz_ctl_bin_test",
+    binary_name = "fuzz_ctl_bin_test",
+)
+
+fx_component_manifest(
+    name = "bin-unittests-manifest",
+    testonly = True,
+    component_name = "bin-unittests",
+    includes = _UNITTEST_INCLUDES,
+    manifest = "meta/bin-unittests.cml",
+)
+
+fx_test_component(
+    name = "bin-unittests",
+    compiled_manifest = ":bin-unittests-manifest",
+    deps = [":bin_test_packaged_bin"],
+)
+
+fx_packaged_binary(
+    name = "lib_test_packaged_bin",
+    testonly = True,
+    binary = ":fuchsia_fuzzctl_lib_test",
+    binary_name = "fuchsia_fuzzctl_lib_test",
+)
+
+fx_component_manifest(
+    name = "lib-unittests-manifest",
+    testonly = True,
+    component_name = "lib-unittests",
+    includes = _UNITTEST_INCLUDES,
+    manifest = "meta/lib-unittests.cml",
+)
+
+fx_test_component(
+    name = "lib-unittests",
+    compiled_manifest = ":lib-unittests-manifest",
+    deps = [":lib_test_packaged_bin"],
+)
+
+fx_packaged_binary(
+    name = "lib_fdomain_test_packaged_bin",
+    testonly = True,
+    binary = ":fuchsia_fuzzctl_fdomain_lib_test",
+    binary_name = "fuchsia_fuzzctl_fdomain_lib_test",
+)
+
+fx_component_manifest(
+    name = "lib-fdomain-unittests-manifest",
+    testonly = True,
+    component_name = "lib-fdomain-unittests",
+    includes = _UNITTEST_INCLUDES,
+    manifest = "meta/lib-fdomain-unittests.cml",
+)
+
+fx_test_component(
+    name = "lib-fdomain-unittests",
+    compiled_manifest = ":lib-fdomain-unittests-manifest",
+    deps = [":lib_fdomain_test_packaged_bin"],
+)
+
+fx_package(
+    name = "tests",
+    package_name = "fuzzctl-tests",
+    test_components = [
+        ":bin-unittests",
+        ":lib-unittests",
+        ":lib-fdomain-unittests",
+    ],
+)
+
+fx_test(
+    name = "fuzzctl-tests",
+    package = ":tests",
+    visibility = ["//src/sys:__pkg__"],
+)

@@ -7,12 +7,13 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from daemon.daemon import Daemon
+from daemon.tests.helpers import DaemonTestCase
 from pydap.client import READER_STOPPED_EVENT
 from shared.protocol import Response
 from shared.protocol.wait_for_event import WaitForEventRequest
 
 
-class TestDaemonEvents(unittest.IsolatedAsyncioTestCase):
+class TestDaemonEvents(DaemonTestCase):
     async def test_event_sequencing(self) -> None:
         # Port is unused in these tests.
         daemon = Daemon(port=None)

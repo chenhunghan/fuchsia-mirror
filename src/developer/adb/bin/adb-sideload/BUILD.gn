@@ -57,10 +57,8 @@ fuchsia_test_component("adb-sideload-tests-test-driver") {
 
 fuchsia_unittest_package("adb-sideload-test") {
   manifest = "meta/adb-sideload-test.cml"
-  deps = [
-    ":adb-sideload-tests-test-driver",
-    "//src/connectivity/network/netstack3:component-for-tests",
-  ]
+  deps = [ ":adb-sideload-tests-test-driver" ]
+  subpackages = [ "//src/connectivity/network/netstack3:package-for-tests" ]
 }
 
 group("tests") {

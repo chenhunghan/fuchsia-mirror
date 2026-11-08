@@ -183,6 +183,23 @@ impl PageRequest for DirectPageRequest {
         self.vaddr = vaddr;
         Ok(())
     }
+
+    fn split_at(&mut self, mid: u64) -> Self {
+        assert_eq!(self.vaddr, 0, "split_at must be called before prepare");
+        assert!(mid > self.original_range.start && mid < self.original_range.end);
+        let head_range = self.original_range.start..mid;
+        self.original_range.start = mid;
+        self.read_range.start = mid;
+        DirectPageRequest {
+            pager: Arc::clone(&self.pager),
+            key: self.key,
+            original_range: head_range.clone(),
+            read_range: head_range,
+            committed_len: 0,
+            transfer_vmo: None,
+            vaddr: 0,
+        }
+    }
 }
 
 impl Drop for DirectPageRequest {
@@ -519,7 +536,7 @@ mod tests {
             _mapping_vmo: &zx::Vmo,
             delivery_queue: zx::Vmo,
         ) -> Result<Verifier, zx::Status> {
-            Ok(Verifier::new(delivery_queue))
+            Verifier::new(delivery_queue)
         }
     }
 

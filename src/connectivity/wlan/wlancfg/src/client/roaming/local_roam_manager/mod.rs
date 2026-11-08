@@ -138,7 +138,7 @@ mod tests {
         generate_random_password, generate_random_roaming_connection_data,
     };
     use assert_matches::assert_matches;
-    use fidl_fuchsia_wlan_internal::SignalReportIndication;
+    use fidl_fuchsia_wlan_stats::ConnectionSignalReport;
     use fuchsia_async::TestExecutor;
     use futures::task::Poll;
     use std::pin::pin;
@@ -239,7 +239,7 @@ mod tests {
         // Send some data via one of the roam monitor. Ensure that it doesn't error out, which means
         // a created roam monitor is holding the receiver end.
         roam_monitor_sender
-            .send_signal_report_ind(SignalReportIndication {
+            .send_signal_report(ConnectionSignalReport {
                 rssi_dbm: Some(-60),
                 snr_db: Some(30),
                 tx_rate_500kbps: Some(0),
@@ -278,7 +278,7 @@ mod tests {
         // Send some trigger data over a channel. Ensure that it doesn't error out, which means
         // a created roam monitor is holding the receiver end.
         roam_monitor_sender
-            .send_signal_report_ind(SignalReportIndication {
+            .send_signal_report(ConnectionSignalReport {
                 rssi_dbm: Some(-60),
                 snr_db: Some(30),
                 tx_rate_500kbps: Some(0),

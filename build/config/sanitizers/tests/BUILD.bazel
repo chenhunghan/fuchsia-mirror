@@ -1,0 +1,98 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/host_tests:host_cc_test.bzl", "host_cc_test")
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
+load(
+    "//build/config/sanitizers:sanitizer_default_options.bzl",
+    "extra_options_for_all_sanitizers",
+)
+load("//build/config/sanitizers:sanitizer_extra_options.bzl", "sanitizer_extra_options")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    visibility = ["//visibility:public"],
+)
+
+# Baseline extra options
+sanitizer_extra_options(
+    name = "test_base_options",
+    args = [
+        "detect_leaks=1",
+        "quarantine_size_mb=48",
+    ],
+    sanitizer = "asan",
+)
+
+# Overriding extra options (higher priority in dependency order)
+sanitizer_extra_options(
+    name = "test_override_options",
+    args = [
+        "quarantine_size_mb=64",
+        "verbosity=2",
+    ],
+    sanitizer = "asan",
+    deps = [":test_base_options"],
+)
+
+# Runtime verification test (executes the callback and validates reversal/aggregation)
+host_cc_test(
+    name = "sanitizer_extra_options_test",
+    srcs = ["sanitizer_extra_options_test.cc"],
+    deps = [
+        ":test_override_options",
+    ],
+)
+
+# A binary target linking extra options for ELF section inspection
+fx_cc_binary(
+    name = "target_for_elf_inspection",
+    srcs = ["target_for_elf_inspection.cc"],
+    deps = [
+        ":test_override_options",
+    ],
+)
+
+# Host test that verifies the special ELF section contents using llvm-readelf
+host_py_test(
+    name = "check_elf_section_test",
+    srcs = ["check_elf_section.py"],
+    main = "check_elf_section.py",
+    test_args = [
+        "--readelf",
+        "$(rlocationpath @prebuilt_clang//:bin/llvm-readelf)",
+        "--binary",
+        "$(rlocationpath :target_for_elf_inspection)",
+        "--section",
+        "asan_default_options_strings",
+        "--expected",
+        "quarantine_size_mb=64:verbosity=2",
+        "--expected",
+        "detect_leaks=1:quarantine_size_mb=48",
+        "--expected",
+        "detect_stack_use_after_return=1:quarantine_size_mb=32",
+    ],
+    test_data = [
+        ":target_for_elf_inspection",
+        "@prebuilt_clang//:bin/llvm-readelf",
+    ],
+    deps = [
+        "@rules_python//python/runfiles",
+    ],
+)
+
+# Test extra_options_for_all_sanitizers
+extra_options_for_all_sanitizers(
+    name = "test_all_sanitizers_options",
+    args = ["print_summary=1"],
+)
+
+fx_cc_binary(
+    name = "test_all_sanitizers_bin",
+    srcs = ["target_for_elf_inspection.cc"],
+    deps = [":test_all_sanitizers_options"],
+)

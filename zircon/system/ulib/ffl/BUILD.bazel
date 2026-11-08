@@ -1,0 +1,40 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_library_headers.bzl", "fx_cc_library_headers")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library_headers(
+    name = "headers",
+    hdrs = [
+        "include/ffl/exponential_average.h",
+        "include/ffl/expression.h",
+        "include/ffl/fixed.h",
+        "include/ffl/fixed_format.h",
+        "include/ffl/saturating_arithmetic.h",
+        "include/ffl/string.h",
+        "include/ffl/utility.h",
+    ],
+    visibility = [
+        "//zircon/kernel/lib/sched:__pkg__",
+        "//zircon/kernel/vm:__pkg__",
+    ],
+)
+
+fx_cc_library(
+    name = "ffl",
+    srcs = ["string.cc"],
+    visibility = [
+        "//src/media/audio:__subpackages__",
+        "//src/memory/legacy/metrics:__pkg__",
+        "//zircon/kernel/lib/power-management:__pkg__",
+        "//zircon/kernel/lib/sched:__pkg__",
+        "//zircon/kernel/vm:__pkg__",
+        "//zircon/system/ulib/ffl/test:__pkg__",
+    ],
+    deps = [":headers"],
+    alwayslink = True,
+)

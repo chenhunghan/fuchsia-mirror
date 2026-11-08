@@ -133,7 +133,7 @@ ZBI="${HOST_TOOLS_DIR}/zbi"
 
 FUCHSIA_DIR="${ROOT_BUILD_DIR}/../.."
 PYTHON="${FUCHSIA_DIR}/scripts/fuchsia-vendored-python"
-MKBOOTIMG="${FUCHSIA_DIR}/zircon/third_party/tools/android/mkbootimg"
+MKBOOTIMG="${FUCHSIA_DIR}/third_party/android/platform/system/tools/mkbootimg/src/mkbootimg.py"
 
 # zircon image built by the Zircon build system
 if [[ -z "${ZIRCON_BOOTIMAGE}" ]]; then

@@ -7,7 +7,7 @@ pub mod args;
 use crate::common::node_property_value_to_string;
 use anyhow::{Result, anyhow};
 use args::ListDevicesCommand;
-use fidl_fuchsia_component_decl as fdecl;
+use fidl_fuchsia_component_decl_common as fdecl;
 use flex_fuchsia_driver_development as fdd;
 use flex_fuchsia_driver_framework as fdf;
 use fuchsia_driver_dev::Device;

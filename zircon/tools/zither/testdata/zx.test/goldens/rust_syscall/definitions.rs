@@ -13,6 +13,12 @@ pub use zx_types::*;
 #[link(name = "zircon")]
 unsafe extern "C" {
 
+    pub fn zx_channel_create(
+        options: u32,
+        out0: *mut zx_handle_t,
+        out1: *mut zx_handle_t,
+    ) -> zx_status_t;
+
     pub fn zx_channel_read(
         handle: zx_handle_t,
         options: u32,

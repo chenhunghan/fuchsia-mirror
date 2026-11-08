@@ -95,6 +95,11 @@ zx_duration_boot_t cpp_lockup_get_hb_period();
 zx_duration_boot_t cpp_lockup_get_hb_threshold();
 void cpp_lockup_timed_begin(const char* name);
 void cpp_lockup_timed_end();
+int64_t cpp_lockup_get_critical_section_oops_count();
+int64_t cpp_lockup_get_no_heartbeat_oops_count();
+void cpp_lockup_percpu_shutdown();
+bool cpp_can_dump_registers_and_backtrace();
+zx_status_t cpp_dump_registers_and_backtrace_stdout(uint32_t cpu);
 }
 
 #endif  // ZIRCON_KERNEL_LIB_LOCKUP_DETECTOR_INCLUDE_LIB_LOCKUP_DETECTOR_H_

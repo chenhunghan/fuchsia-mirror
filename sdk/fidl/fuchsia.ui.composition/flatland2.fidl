@@ -175,6 +175,11 @@ type LayerProperties = table {
     /// rect set while no image is bound (or while another mode is in effect) is stored
     /// without complaint. A violation at `Present` closes the connection with
     /// `BAD_OPERATION`.
+    ///
+    /// Unlike [`Flatland.SetImageSampleRegion`], no `1e-3` tolerance is applied when
+    /// `x + width > image_width` or `y + height > image_height`. Clients computing texel
+    /// rects in floating point must clamp to `[0, image_size]` themselves (or pass
+    /// `(0, 0, 0, 0)` for the full image).
     5: sample_rect fuchsia.math.RectF;
 
     /// Specifies image transform.
@@ -326,8 +331,8 @@ closed protocol Flatland2 {
     ///
     /// The binding is legal in any composition mode, and is sticky: it survives composition
     /// mode changes, and is replaced only by a later [`SetLayerImage`] call (or cleared by
-    /// [`ResetLayer`]). The image is displayed only while the layer's composition mode is
-    /// `IMAGE`.
+    /// [`ResetLayer`]/[`ResetLayerImage`]). The image is displayed only while the layer's
+    /// composition mode is `IMAGE`.
     ///
     /// The bound image must be large enough for the layer's stored `sample_rect`; this is
     /// checked at [`fuchsia.ui.composition/Flatland.Present`], not here. See
@@ -344,7 +349,7 @@ closed protocol Flatland2 {
     /// A binding is ended by:
     ///
     /// - being superseded by a later [`SetLayerImage`] on the same layer
-    /// - [`ResetLayer`]
+    /// - [`ResetLayer`] or [`ResetLayerImage`]
     /// - the layer ref-count reaching zero, either via [`ReleaseLayer`] or by being released
     ///   by a layer stack
     /// - destruction of the session, which ends every binding it holds
@@ -388,6 +393,22 @@ closed protocol Flatland2 {
     ///
     /// `layer_id` must refer to a valid, unreleased Layer.
     strict ResetLayer(struct {
+        layer_id LayerId;
+    });
+
+    /// Unbinds any Image bound to the layer while leaving all stored [`LayerProperties`]
+    /// (including `composition_mode`) intact.
+    ///
+    /// Ending the binding drops any un-waited `acquire_fence` and schedules the binding's
+    /// `release_fence` to be signaled on the next frame retire (see [`SetLayerImage`]).
+    /// Calling `ResetLayerImage` on a layer with no bound image is a no-op.
+    ///
+    /// While no image is bound, a layer in `IMAGE` composition mode contributes nothing to
+    /// the frame (the same as a newly-created layer switched to `IMAGE` before its first
+    /// [`SetLayerImage`]).
+    ///
+    /// `layer_id` must refer to a valid, unreleased Layer.
+    strict ResetLayerImage(struct {
         layer_id LayerId;
     });
 

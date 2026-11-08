@@ -1,0 +1,61 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "ffx_component",
+    srcs = [
+        "src/format.rs",
+        "src/lib.rs",
+        "src/rcs.rs",
+    ] + select({
+        "//build/bazel/platforms:is_host_os": ["src/server.rs"],
+        "//conditions:default": [],
+    }),
+    edition = "2024",
+    # `ffx_component` depends on host-only `component_debug_fdomain` and its
+    # `src/rcs.rs` module requires host-only `rcs` deps; skipped in `bazel2gn`
+    # so `BUILD.gn` keeps `ffx_component` outside `if (is_host)`.
+    # @bazel2gn:skip
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/developer/ffx:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust_fdomain",
+        "//src/developer/ffx/lib/errors:lib",
+        "//src/lib/fuchsia-url",
+        "//src/sys/lib/component_debug:component_debug_fdomain",
+        "//src/sys/lib/moniker",
+        "//third_party/rust_crates/vendor:anyhow",
+    ] + select({
+        "//build/bazel/platforms:is_host_os": [
+            "//sdk/fidl/fuchsia.developer.remotecontrol:fuchsia.developer.remotecontrol_rust_fdomain",
+            "//sdk/fidl/fuchsia.pkg:fuchsia.pkg_rust_fdomain",
+            "//src/developer/ffx/lib/pkg",
+            "//src/developer/ffx/lib/rcs:lib",
+            "//src/lib/fdomain/client",
+            "//src/lib/fuchsia-async",
+            "//third_party/rust_crates/vendor:futures",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+host_rustc_test(
+    name = "ffx_component_test",
+    crate = ":ffx_component",
+    edition = "2024",
+    visibility = [
+        "//src/developer/ffx:__pkg__",
+        "//src/developer/ffx/plugins/component:__pkg__",
+    ],
+    deps = [
+        "//src/developer/ffx/lib/target/holders:lib",
+        "//src/lib/fdomain/local",
+    ],
+)

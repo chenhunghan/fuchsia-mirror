@@ -112,6 +112,18 @@ Errno zxio::posix_ioctl(int request, va_list va) {
       *actual = static_cast<int>(available);
       return Errno(Errno::Ok);
     }
+    case FIONBIO: {
+      const int* on = va_arg(va, const int*);
+      if (on == nullptr) {
+        return Errno(EFAULT);
+      }
+      if (*on) {
+        ioflag() |= IOFLAG_NONBLOCK;
+      } else {
+        ioflag() &= ~IOFLAG_NONBLOCK;
+      }
+      return Errno(Errno::Ok);
+    }
     default:
       int16_t out_code;
       zx_status_t status = zxio_ioctl(&zxio_storage().io, request, &out_code, va);

@@ -116,12 +116,12 @@ impl InotifyFileObject {
             return Ok(watch_id);
         }
 
-        let watch_id;
-        {
+        // Holds any replaced DirEntry to defer its drop outside `state.lock()`.
+        let (watch_id, _replaced_dir_entry) = {
             let mut state = self.state.lock();
-            watch_id = state.next_watch_id();
-            state.watches.insert(watch_id, dir_entry.clone());
-        }
+            let watch_id = state.next_watch_id();
+            (watch_id, state.watches.insert(watch_id, dir_entry.clone()))
+        };
         dir_entry.node.ensure_watchers().add(mask, watch_id, weak_key);
         Ok(watch_id)
     }
@@ -279,9 +279,12 @@ impl FileOps for InotifyFileObject {
     }
 
     fn extra_fdinfo(&self, file: &FileHandle, _current_task: &CurrentTask) -> Option<FsString> {
-        let state = self.state.lock();
+        let watches = {
+            let state = self.state.lock();
+            state.watches.values().cloned().collect::<Vec<_>>()
+        };
         let mut info = String::new();
-        for dir_entry in state.watches.values() {
+        for dir_entry in watches {
             let ino = dir_entry.node.ino;
             let sdev = dir_entry.node.fs().dev_id;
             if let Some(watcher) = dir_entry.node.ensure_watchers().get(&WeakKey::from(file)) {

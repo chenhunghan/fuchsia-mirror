@@ -11,7 +11,7 @@
 #include <zircon/types.h>
 
 #include <arch/vm.h>
-#include <object/opaque_storage.h>
+#include <kernel/ffi.h>
 
 class FutexId {
  public:
@@ -36,7 +36,6 @@ extern "C" {
 void rust_futex_context_init_storage(void* storage);
 void rust_futex_context_drop_storage(void* storage);
 zx_status_t rust_futex_context_init(void* storage, uint32_t process_type);
-void rust_futex_context_shrink_pool(const void* storage);
 
 }  // extern "C"
 
@@ -64,8 +63,6 @@ class FutexContext {
     return rust_futex_context_init(&storage_, static_cast<uint32_t>(type));
   }
 
-  void ShrinkFutexStatePool() { rust_futex_context_shrink_pool(&storage_); }
-
   void* get() const { return const_cast<void*>(static_cast<const void*>(&storage_)); }
 
  private:
@@ -81,5 +78,11 @@ class FutexContext {
 
   OpaqueStorage<kFutexContextStorageSize, kFutexContextStorageAlign> storage_;
 };
+
+static_assert(sizeof(FutexContext) == kFutexContextStorageSize);
+static_assert(alignof(FutexContext) == kFutexContextStorageAlign);
+static_assert(static_cast<uint32_t>(FutexContext::ProcessType::Regular) == 0);
+static_assert(static_cast<uint32_t>(FutexContext::ProcessType::Shared) == 1);
+static_assert(sizeof(FutexContext::ProcessType) == sizeof(uint32_t));
 
 #endif  // ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_FUTEX_CONTEXT_H_

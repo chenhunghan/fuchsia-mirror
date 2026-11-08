@@ -1,0 +1,48 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host:defs.bzl", "rustc_binary_host_tool")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary_host_tool(
+    name = "test_list_tool",
+    srcs = [
+        "src/error.rs",
+        "src/main.rs",
+        "src/opts.rs",
+        "src/test_config.rs",
+    ],
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust_common",
+        "//sdk/fidl/fuchsia.data:fuchsia.data_rust_common",
+        "//src/lib/diagnostics/log/types",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-url",
+        "//src/lib/testing/test_list",
+        "//src/sys/pkg/lib/far/rust:fuchsia-archive",
+        "//src/sys/pkg/lib/fuchsia-pkg",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:camino",
+        "//third_party/rust_crates/vendor:clap",
+        "//third_party/rust_crates/vendor:maplit",
+        "//third_party/rust_crates/vendor:rayon",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+host_rustc_test(
+    name = "test_list_tool_test",
+    crate = ":test_list_tool",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//tools:__pkg__"],
+    deps = ["//third_party/rust_crates/vendor:tempfile"],
+)

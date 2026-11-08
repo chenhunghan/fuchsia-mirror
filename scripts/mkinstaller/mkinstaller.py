@@ -3,8 +3,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-from __future__ import print_function
-
 import argparse
 import functools
 import json
@@ -447,20 +445,11 @@ def IsUsbDisk(path: str) -> bool:
     return path in map(lambda a: a.split()[0], GetUsbDisks())
 
 
-def UnmountDisk(path: str) -> None:
-    """Unmount the given USB disk from the system."""
-    system = platform.system()
-    if system == "Darwin":
-        subprocess.run(["diskutil", "quiet", "unmountDisk", path])
-
-
 def EjectDisk(path: str) -> None:
     """Eject the given USB disk from the system."""
     system = platform.system()
     if system == "Linux":
         subprocess.run(["eject", path])
-    elif system == "Darwin":
-        subprocess.run(["diskutil", "eject", path])
     logging.info("Ejected USB disk")
 
 
@@ -531,8 +520,6 @@ def Main(args: argparse.Namespace) -> int:
                 )
             )
             return 1
-
-        UnmountDisk(path)
 
     output = Image(path, not args.create, ParseSize(args.block_size))
 

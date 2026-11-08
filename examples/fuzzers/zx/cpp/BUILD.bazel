@@ -1,0 +1,44 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_binary(
+    name = "bin",
+    srcs = ["zx.cc"],
+    gn_output_name = "hello_fuzzy_world",
+    tags = ["manual"],
+    deps = ["//zircon/system/ulib/zx"],
+)
+
+fx_packaged_binary(
+    name = "hello_fuzzy_world_packaged_bin",
+    binary = ":bin",
+    binary_name = "hello_fuzzy_world",
+)
+
+fx_component_manifest(
+    name = "hello-fuzzy-world-manifest",
+    component_name = "hello-fuzzy-world",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/hello_fuzzy_world.cml",
+)
+
+fx_component(
+    name = "hello-fuzzy-world-component",
+    compiled_manifest = ":hello-fuzzy-world-manifest",
+    visibility = ["//examples/fuzzers:__subpackages__"],
+    deps = [":hello_fuzzy_world_packaged_bin"],
+)

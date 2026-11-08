@@ -1,0 +1,62 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//src/developer/ffx/build:ffx_plugin.bzl", "ffx_plugin")
+load("//src/developer/ffx/build:ffx_tool.bzl", "ffx_tool")
+
+package(default_applicable_licenses = ["//:license"])
+
+ffx_plugin(
+    name = "ffx_selftest",
+    srcs = [
+        "src/component.rs",
+        "src/config.rs",
+        "src/experiment.rs",
+        "src/lib.rs",
+        "src/target.rs",
+        "src/test/asserts.rs",
+        "src/test/mod.rs",
+    ],
+    args_deps = [
+        "//src/developer/ffx/core:lib",
+        "//third_party/rust_crates/vendor:argh",
+    ],
+    args_srcs = ["src/args.rs"],
+    edition = "2024",
+    plugin_deps = ["//src/developer/ffx/plugins/self-test/experiment:ffx_selftest_experiment"],
+    sdk_category = "not-yet-specified",
+    version = "0.1.0",
+    deps = [
+        "//src/developer/ffx/config:lib",
+        "//src/developer/ffx/lib/errors:lib",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/developer/ffx/lib/isolate:lib",
+        "//src/developer/ffx/lib/writer:lib",
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:termion",
+    ],
+)
+
+# LINT.IfChange
+ffx_tool(
+    name = "ffx_selftest_tool",
+    srcs = ["src/main.rs"],
+    binary_name = "ffx-self-test",
+    edition = "2024",
+    visibility = ["//src/developer/ffx/frontends/ffx:__pkg__"],
+    deps = [
+        ":ffx_selftest_suite",
+        "//src/lib/fuchsia-async",
+    ],
+)
+# LINT.ThenChange(BUILD.gn)
+
+host_rustc_test(
+    name = "ffx_selftest_test",
+    crate = ":ffx_selftest",
+    visibility = ["//src/developer/ffx:__pkg__"],
+)

@@ -14,6 +14,7 @@ go_library(
     name = "botanist_lib",
     srcs = [
         "common.go",
+        "phase.go",
         "pkg.go",
     ],
     importpath = "go.fuchsia.dev/fuchsia/tools/botanist",
@@ -54,6 +55,7 @@ go_library(
     srcs = [
         "targets/auxiliary.go",
         "targets/device.go",
+        "targets/emu_net_proxy.go",
         "targets/emulator.go",
         "targets/errors.go",
         "targets/gce.go",
@@ -70,6 +72,7 @@ go_library(
         "//third_party/golibs:github.com/creack/pty",
         "//third_party/golibs:github.com/kr/pretty",
         "//third_party/golibs:golang.org/x/crypto/ssh",
+        "//third_party/golibs:golang.org/x/net/dns/dnsmessage",
         "//third_party/golibs:golang.org/x/sync/errgroup",
         "//tools/build",
         "//tools/lib/ffxutil",
@@ -159,6 +162,7 @@ host_go_test(
     name = "botanist_lib_tests",
     srcs = [
         "common_test.go",
+        "phase_test.go",
         "pkg_test.go",
     ],
     embed = [":botanist_lib"],
@@ -182,6 +186,7 @@ host_go_test(
     srcs = [
         "targets/auxiliary_test.go",
         "targets/device_test.go",
+        "targets/emu_net_proxy_test.go",
         "targets/emulator_test.go",
         "targets/gce_test.go",
         "targets/target_test.go",

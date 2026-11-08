@@ -8,6 +8,7 @@ load("@rules_rust//rust:rust_test.bzl", "rust_test")
 load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "define_and_wrap_host_rust_test")
 load(
     "//build/bazel/rules/rust:common.bzl",
+    "with_fuchsia_rust_link_exec_properties",
     "with_fuchsia_rust_stdlib_link_deps",
     "with_fuchsia_rust_test_aspect_hints",
 )
@@ -95,35 +96,22 @@ _ALLOWED_PACKAGES = {
     "src/lib/agents": True,
     "src/lib/analytics/rust": True,
     "src/lib/assembly/api": True,
-    "src/lib/assembly/artifact_cache": True,
-    "src/lib/assembly/assembled_system": True,
     "src/lib/assembly/blobfs": True,
     "src/lib/assembly/cli_args": True,
     "src/lib/assembly/component_id_index": True,
     "src/lib/assembly/component_manager_config": True,
-    "src/lib/assembly/config_capabilities": True,
-    "src/lib/assembly/config_data": True,
     "src/lib/assembly/domain_config": True,
-    "src/lib/assembly/driver_manifest": True,
     "src/lib/assembly/fvm": True,
     "src/lib/assembly/image_assembly_config_builder": True,
     "src/lib/assembly/memory_buckets": True,
-    "src/lib/assembly/named_file_map": True,
     "src/lib/assembly/package_copy": True,
     "src/lib/assembly/package_list": True,
     "src/lib/assembly/package_utils": True,
-    "src/lib/assembly/partitions_config": True,
-    "src/lib/assembly/sdk": True,
-    "src/lib/assembly/shell_commands": True,
-    "src/lib/assembly/subpackage_blobs_package": True,
     "src/lib/assembly/tool": True,
-    "src/lib/assembly/update_package": True,
     "src/lib/assembly/update_packages_manifest": True,
     "src/lib/assembly/util": True,
-    "src/lib/assembly/validate_package": True,
     "src/lib/assembly/validate_util": True,
     "src/lib/assembly/vbmeta": True,
-    "src/lib/assembly/zbi": True,
     "src/lib/async-utils": True,
     "src/lib/bitrs": True,
     "src/lib/buf-read-ext": True,
@@ -177,7 +165,6 @@ _ALLOWED_PACKAGES = {
     "src/lib/tempfile-ext": True,
     "src/lib/test_util": True,
     "src/lib/testing/expectation/ser": True,
-    "src/lib/testing/expectation/tool": True,
     "src/lib/trace/rust": True,
     "src/lib/usb_rs": True,
     "src/lib/utf8_path": True,
@@ -248,7 +235,6 @@ _ALLOWED_PACKAGES = {
     "src/ui/lib/input-device-constants": True,
     "third_party/lz4/rust": True,
     "tools/cmc": True,
-    "tools/create": True,
     "tools/pretty_serial": True,
 }
 
@@ -271,6 +257,7 @@ def generate_unit_tests(
         deps,
         test_deps,
         visibility,
+        crate = None,
         **kwargs):
     """Generate test targets for rustc_xxx() macros.
 
@@ -290,6 +277,7 @@ def generate_unit_tests(
             to deps to form the full dependency list for the test target. Note that
             Bazel will complain if the same label appears in both deps and test_deps.
         visibility: Visibility of the test target.
+        crate: Optional label of the crate under test. Defaults to ":<name>".
         **kwargs: Additional arguments to pass to the test target rule.
           This is expected to contain the Fuchsia-specific changes performed
           by the rustc_xxx() caller.
@@ -310,6 +298,7 @@ def generate_unit_tests(
     # Rust standard library. Parent rustc_xxx() macros only add these to the
     # parent target if it is linked too, so they are never added twice.
     kwargs["link_deps"] = with_fuchsia_rust_stdlib_link_deps(kwargs.get("link_deps"))
+    kwargs["exec_properties"] = with_fuchsia_rust_link_exec_properties(kwargs.get("exec_properties"))
 
     # rules_rust's `rust_test()` requires using either `crate` or source attributes
     # (`srcs`, `crate_root`), but not both. Since `crate = ":<name>"` is passed below,
@@ -326,7 +315,7 @@ def generate_unit_tests(
         define_and_wrap_host_rust_test(
             name = "{}_test".format(name),
             rust_test_rule = rust_test,
-            crate = ":{}".format(name),
+            crate = crate or ":{}".format(name),
             visibility = visibility,
             **kwargs
         )
@@ -335,7 +324,7 @@ def generate_unit_tests(
         kwargs["aspect_hints"] = with_fuchsia_rust_test_aspect_hints(kwargs.get("aspect_hints"))
         rust_test(
             name = "{}_test".format(name),
-            crate = ":{}".format(name),
+            crate = crate or ":{}".format(name),
             visibility = visibility,
             **kwargs
         )

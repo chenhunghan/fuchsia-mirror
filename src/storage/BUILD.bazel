@@ -12,8 +12,18 @@ test_suite(
     name = "target_tests",
     target_compatible_with = ["@platforms//os:fuchsia"],
     tests = [
+        "//src/storage/benchmarks:storage-benchmarks-framework-tests",
+        "//src/storage/conformance:tests",
+        "//src/storage/crypt/zxcrypt:tests",
+        "//src/storage/erofs/serializer:tests",
+        "//src/storage/ext4/lib/parser:tests",
+        "//src/storage/fxfs/remote_volume:fxfs-remote-volume-tests",
         "//src/storage/fxfs/trace:fxfs-trace-tests-package",
+        "//src/storage/lib/key-bag:key-bag-tests",
+        "//src/storage/lib/range/test:range-test-pkg",
         "//src/storage/lib/sparse/rust:sparse-test",
+        "//src/storage/lib/super_parser:super_parser_tests",
+        "//src/storage/lib/trace:tests",
         "//src/storage/lib/units:storage-units-tests",
     ],
 )
@@ -24,6 +34,7 @@ test_suite(
     tests = [
         "//src/storage/fxfs/trace:fxfs-trace-host-tests",
         "//src/storage/lib/sparse/rust:lib_test",
+        "//src/storage/lib/trace:host_tests",
         "//src/storage/lib/units:units_host_test",
     ],
 )

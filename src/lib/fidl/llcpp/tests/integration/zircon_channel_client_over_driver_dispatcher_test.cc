@@ -4,10 +4,12 @@
 
 #include <fidl/test.empty.protocol/cpp/wire.h>
 #include <lib/async/cpp/task.h>
+#include <lib/driver/testing/cpp/driver_runtime.h>
 #include <lib/fdf/cpp/dispatcher.h>
-#include <lib/fdf/env.h>
 #include <lib/sync/cpp/completion.h>
 
+#include <memory>
+#include <thread>
 #include <utility>
 
 #include <gtest/gtest.h>
@@ -31,16 +33,6 @@
 
 namespace {
 
-class ScopedFakeDriver {
- public:
-  ScopedFakeDriver() {
-    void* driver = reinterpret_cast<void*>(1);
-    fdf_env_register_driver_entry(driver);
-  }
-
-  ~ScopedFakeDriver() { fdf_env_register_driver_exit(); }
-};
-
 std::pair<fdf::Dispatcher, std::shared_ptr<libsync::Completion>> CreateSyncDispatcher() {
   // Use |FDF_DISPATCHER_OPTION_ALLOW_SYNC_CALLS| to encourage the driver dispatcher
   // to spawn more threads to back the same synchronized dispatcher.
@@ -56,7 +48,7 @@ std::pair<fdf::Dispatcher, std::shared_ptr<libsync::Completion>> CreateSyncDispa
 
 TEST(WireClient, CannotDestroyInDifferentDispatcherThanBound) {
   DEBUG_ONLY_TEST_MAY_SKIP();
-  ScopedFakeDriver driver;
+  fdf_testing::DriverRuntime runtime;
 
   auto [dispatcher1, dispatcher1_shutdown] = CreateSyncDispatcher();
   auto [dispatcher2, dispatcher2_shutdown] = CreateSyncDispatcher();
@@ -94,7 +86,7 @@ TEST(WireClient, CannotDestroyInDifferentDispatcherThanBound) {
 
 TEST(WireClient, CannotDestroyOnUnmanagedThread) {
   DEBUG_ONLY_TEST_MAY_SKIP();
-  ScopedFakeDriver driver;
+  fdf_testing::DriverRuntime runtime;
 
   auto [dispatcher1, dispatcher1_shutdown] = CreateSyncDispatcher();
   zx::result endpoints = fidl::CreateEndpoints<test_empty_protocol::Empty>();
@@ -134,7 +126,7 @@ using DispatcherOptions = uint32_t;
 class WireSharedClient : public ::testing::TestWithParam<DispatcherOptions> {};
 
 TEST_P(WireSharedClient, CanSendAcrossDispatcher) {
-  ScopedFakeDriver driver;
+  fdf_testing::DriverRuntime runtime;
 
   auto [dispatcher1, dispatcher1_shutdown] = CreateSyncDispatcher();
   auto [dispatcher2, dispatcher2_shutdown] = CreateSyncDispatcher();
@@ -167,7 +159,7 @@ TEST_P(WireSharedClient, CanSendAcrossDispatcher) {
 }
 
 TEST_P(WireSharedClient, CanDestroyOnUnmanagedThread) {
-  ScopedFakeDriver driver;
+  fdf_testing::DriverRuntime runtime;
 
   auto [dispatcher1, dispatcher1_shutdown] = CreateSyncDispatcher();
   zx::result endpoints = fidl::CreateEndpoints<test_empty_protocol::Empty>();
@@ -198,7 +190,7 @@ TEST_P(WireSharedClient, CanDestroyOnUnmanagedThread) {
 
 TEST(WireClient, CannotBindUnsynchronizedDispatcher) {
   DEBUG_ONLY_TEST_MAY_SKIP();
-  ScopedFakeDriver driver;
+  fdf_testing::DriverRuntime runtime;
 
   libsync::Completion dispatcher_shutdown;
   zx::result dispatcher = fdf::UnsynchronizedDispatcher::Create(
@@ -224,7 +216,7 @@ TEST(WireClient, CannotBindUnsynchronizedDispatcher) {
 }
 
 TEST_P(WireSharedClient, CanBindAnyDispatcher) {
-  ScopedFakeDriver driver;
+  fdf_testing::DriverRuntime runtime;
 
   libsync::Completion dispatcher_shutdown;
   zx::result<fdf::Dispatcher> dispatcher;

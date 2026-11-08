@@ -16,39 +16,30 @@ import sys
 import typing as T
 from pathlib import Path
 
-import build_tests_json
-
-_SCRIPT_DIR = Path(__file__).parent
-
-# The directory that contains helper Python modules for this script.
-_BUILD_BAZEL_SCRIPTS = _SCRIPT_DIR / ".." / "build" / "bazel" / "scripts"
-# The root directory of Bazel build scripts.
-_BUILD_BAZEL_DIR = _SCRIPT_DIR / ".." / "build" / "bazel"
-# The directory that contains Python modules related to the IDK.
-_BUILD_SDK_SCRIPTS = _SCRIPT_DIR / ".." / "build" / "sdk"
-_BUILD_PYTHON_DIR = _SCRIPT_DIR / ".." / "build" / "python"
-sys.path.insert(0, str(_BUILD_BAZEL_SCRIPTS))
-sys.path.insert(0, str(_BUILD_BAZEL_DIR))
-sys.path.insert(0, str(_BUILD_PYTHON_DIR))
-sys.path.insert(0, str(_BUILD_SDK_SCRIPTS))
-sys.path.insert(0, str(_BUILD_SDK_SCRIPTS / "generate_prebuild_idk"))
-
-# Insert fuchsia root directory to sys.path so we can import build packages hermetically
-_FUCHSIA_DIR = _SCRIPT_DIR.parent
+# When invoked by Ninja to regenerate build.ninja (python3 -S), PYTHONPATH is
+# not set by Ninja. Ensure the Fuchsia root is in sys.path for absolute imports.
+_FUCHSIA_DIR = Path(__file__).resolve().parent.parent
 if str(_FUCHSIA_DIR) not in sys.path:
     sys.path.insert(0, str(_FUCHSIA_DIR))
 
-import bazel_repository_utils
-import build_utils
-import compute_content_hash
-import remote_services_utils
-import workspace_utils
-from bazel_action_file_copy_utils import write_file_if_changed
+from build import build_tests_json
+from build.bazel.fuchsia_idk import generate_repository
+from build.bazel.scripts import (
+    bazel_repository_utils,
+    build_utils,
+    compute_content_hash,
+    remote_services_utils,
+    workspace_utils,
+)
+from build.bazel.scripts.bazel_action_file_copy_utils import (
+    write_file_if_changed,
+)
+from build.python.pyright_config import create_pyright_base_config
 from build.rbe import rbe_settings
 from build.scripts import properties
-from fuchsia_idk import generate_repository
-from idk_generator.idk_generator import IdkGenerator
-from pyright_config import create_pyright_base_config
+from build.sdk.generate_prebuild_idk.idk_generator.idk_generator import (
+    IdkGenerator,
+)
 
 _DEFAULT_HOST_TAG = "linux-x64"
 
@@ -273,7 +264,7 @@ def main() -> int:
 
     def run_cmd(
         args: T.Sequence[str], **kwd: T.Any
-    ) -> "subprocess.CompletedProcess[str]":
+    ) -> subprocess.CompletedProcess[str]:
         if verbose >= 2:
             log("CMD: %s" % " ".join(shlex.quote(str(a)) for a in args))
         return subprocess.run(args, text=True, **kwd)
@@ -850,7 +841,6 @@ def main() -> int:
 # See http://artifax/9020260014f8dc51
 _BACKUP_OUT_CONFIG_FLAG_RELPATH = Path(".fx/config/backup-out-config")
 _OUT_CONFIG_BACKUPS_RELPATH = Path(".fx/out-config-backups")
-_BACKUP_OUT_CONFIG_FILES = ("args.gn", "fx.config")
 
 
 def is_backup_out_config_enabled(fuchsia_dir: Path) -> bool:
@@ -864,11 +854,11 @@ def is_backup_out_config_enabled(fuchsia_dir: Path) -> bool:
 
 
 def maybe_backup_out_config(fuchsia_dir: Path, build_dir: Path) -> None:
-    """Mirrors build_dir/{args.gn,fx.config} and the out/default symlink into //.fx/out-config-backups/.
+    """Mirrors build_dir/args.gn and the out/default symlink into //.fx/out-config-backups/.
 
     When //.fx/config/backup-out-config sets BACKUP_OUT_CONFIG=1 (e.g. in ABFS
     workspaces where //out is excluded from snapshots), this backs up the active
-    build directory's args.gn, fx.config, and out/default symlink under
+    build directory's args.gn and out/default symlink under
     //.fx/out-config-backups/ (matching //out's structure 1:1) so they can be
     restored across workspace unmounts.
     """
@@ -880,11 +870,10 @@ def maybe_backup_out_config(fuchsia_dir: Path, build_dir: Path) -> None:
     backup_dir = backups_root / resolved_build_dir.name
     if backup_dir.is_symlink():
         backup_dir.unlink()
-    for fname in _BACKUP_OUT_CONFIG_FILES:
-        src = resolved_build_dir / fname
-        if src.is_file():
-            backup_dir.mkdir(parents=True, exist_ok=True)
-            write_file_if_changed(backup_dir / fname, src.read_text())
+    args_gn = resolved_build_dir / "args.gn"
+    if args_gn.is_file():
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        write_file_if_changed(backup_dir / "args.gn", args_gn.read_text())
 
     out_default = fuchsia_dir / "out" / "default"
     if out_default.is_symlink():

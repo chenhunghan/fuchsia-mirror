@@ -7,16 +7,21 @@
 
 #[cfg(console_enabled)]
 use crate::console::{CMD_AVAIL_ALWAYS, CMD_FLAG_PANIC, CmdArgs, static_command};
+use crate::jtrace::jtrace_invalidate;
+use crate::kernel::types::cpu_num_t;
+use crate::pdev_power::PowerCpuState;
 use crate::pdev_watchdog::{hw_watchdog_pet, hw_watchdog_set_enabled};
 use crate::persistent_debuglog_rs::persistent_dlog_invalidate;
-use crate::platform_rs::timer::InstantBoot;
+use crate::platform_rs::crashlog::PlatformCrashlog;
 use boot_options::BootOptions;
 #[cfg(console_enabled)]
 use core::ffi::{CStr, c_int};
-use core::ffi::{c_char, c_void};
-use core::ptr::{NonNull, slice_from_raw_parts_mut};
+use core::slice;
 #[cfg(console_enabled)]
 use debug::dprintf;
+use zx_status::Status;
+#[cfg(target_arch = "aarch64")]
+use zx_types::zx_status_t;
 
 /// Action to perform when halting the platform.
 #[repr(u32)]
@@ -102,107 +107,218 @@ impl TryFrom<u32> for ZirconCrashReason {
     }
 }
 
+/// Specifies whether a CPU suspend operation is limited to the calling CPU or may power down the
+/// encapsulating power domain.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlatformAllowDomainPowerDown {
+    /// Only suspend the calling CPU.
+    No = 0,
+    /// Allow powering down the encapsulating power domain as well.
+    Yes = 1,
+}
+
+#[cfg(target_arch = "aarch64")]
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct PlatformCpuStateResult {
+    status: zx_status_t,
+    state: u32,
+}
+
+#[cfg(target_arch = "aarch64")]
+zr::static_assert_size_and_align!(PlatformCpuStateResult, 8, 4);
+
+/// Whether [`platform_panic_start_with_option`] should halt other CPUs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanicStartHaltOtherCpus {
+    No,
+    Yes,
+}
+
 unsafe extern "C" {
     fn cpp_platform_specific_halt(
         suggested_action: PlatformHaltAction,
         reason: ZirconCrashReason,
         halt_on_panic: bool,
     ) -> !;
-    fn cpp_platform_panic_start();
-    fn cpp_platform_crashlog_get() -> NonNull<c_void>;
-    fn cpp_platform_crashlog_enable_crashlog_uptime_updates(
-        crashlog: NonNull<c_void>,
-        enabled: bool,
-    );
-    fn cpp_platform_crashlog_get_render_target(
-        crashlog: NonNull<c_void>,
-        out_len: &mut usize,
-    ) -> *mut c_char;
-    fn cpp_platform_crashlog_finalize(
-        crashlog: NonNull<c_void>,
-        reason: ZirconCrashReason,
-        amt: usize,
-    );
-    fn cpp_crashlog_to_string(
-        target_ptr: *mut c_char,
-        target_len: usize,
-        reason: ZirconCrashReason,
-    ) -> usize;
-    fn cpp_jtrace_invalidate();
-    fn cpp_platform_serial_is_suspended() -> bool;
-    fn cpp_platform_serial_suspended_at() -> InstantBoot;
+    fn cpp_platform_panic_start(halt_other_cpus: bool);
 }
 
-/// Returns whether kernel access to the debug UART has been suspended (or a suspend operation is
-/// in progress) via `platform_serial_suspend`.
+pub use super::debug::{platform_serial_is_suspended, platform_serial_suspended_at};
+
+#[cfg(target_arch = "aarch64")]
+unsafe extern "C" {
+    /// Returns `true` iff this platform supports `platform_suspend_cpu`.
+    fn cpp_platform_supports_suspend_cpu() -> bool;
+    /// Suspends the calling CPU.
+    fn cpp_platform_suspend_cpu(allow_domain: bool) -> zx_status_t;
+    /// Returns `true` iff this platform supports `platform_suspend_system`.
+    fn cpp_platform_supports_suspend_system() -> bool;
+    /// Suspends the entire system from the boot CPU after secondary CPUs have powered off.
+    fn cpp_platform_suspend_system() -> zx_status_t;
+    /// Queries the current hardware power state of `cpu_id`.
+    fn cpp_platform_get_cpu_state(cpu_id: cpu_num_t) -> PlatformCpuStateResult;
+}
+
+/// Returns `true` iff this platform supports [`platform_suspend_cpu`].
 #[inline]
-pub fn platform_serial_is_suspended() -> bool {
-    // SAFETY: `platform_serial_is_suspended` is safe to call from any context, including panic.
-    unsafe { cpp_platform_serial_is_suspended() }
-}
-
-/// Returns the boot time at which the debug UART was most recently suspended via
-/// `platform_serial_suspend`. The value is only meaningful when [`platform_serial_is_suspended`]
-/// returns `true`.
-#[inline]
-pub fn platform_serial_suspended_at() -> InstantBoot {
-    // SAFETY: `platform_serial_suspended_at` is safe to call from any context, including panic.
-    unsafe { cpp_platform_serial_suspended_at() }
-}
-
-struct PlatformCrashlog;
-
-struct PlatformCrashlogInterface(NonNull<c_void>);
-
-impl PlatformCrashlog {
-    #[inline]
-    fn get() -> PlatformCrashlogInterface {
-        // SAFETY: `PlatformCrashlog::Get()` always returns a reference to a static-lifetime
-        // `PlatformCrashlog::Interface` implementation.
-        PlatformCrashlogInterface(unsafe { cpp_platform_crashlog_get() })
+pub fn platform_supports_suspend_cpu() -> bool {
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: Pure platform capability query with no preconditions.
+        unsafe { cpp_platform_supports_suspend_cpu() }
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        crate::platform_pc::power::platform_supports_suspend_cpu()
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        crate::generic_riscv64::platform::rust_platform_supports_suspend_cpu()
     }
 }
 
-impl PlatformCrashlogInterface {
-    #[inline]
-    fn enable_crashlog_uptime_updates(&self, enabled: bool) {
-        // SAFETY: `self.0` is a valid `PlatformCrashlog::Interface*` returned by
-        // `PlatformCrashlog::Get()`.
-        unsafe { cpp_platform_crashlog_enable_crashlog_uptime_updates(self.0, enabled) }
-    }
-
-    #[inline]
-    fn get_render_target(&self) -> *mut [c_char] {
-        let mut len = 0;
-        // SAFETY: `self.0` is a valid `PlatformCrashlog::Interface*` returned by
-        // `PlatformCrashlog::Get()`, and `&mut len` is a valid writable `usize`.
-        let ptr = unsafe { cpp_platform_crashlog_get_render_target(self.0, &mut len) };
-        slice_from_raw_parts_mut(ptr, len)
-    }
-
-    #[inline]
-    fn finalize(&self, reason: ZirconCrashReason, amt: usize) {
-        // SAFETY: `self.0` is a valid `PlatformCrashlog::Interface*` returned by
-        // `PlatformCrashlog::Get()`.
-        unsafe { cpp_platform_crashlog_finalize(self.0, reason, amt) }
-    }
-}
-
+/// Suspends the calling CPU.
+///
+/// On success, the CPU will enter an implementation-defined suspend state.
+///
+/// If `allow_domain` is [`PlatformAllowDomainPowerDown::No`], then the operation will only target
+/// the calling CPU. However, if [`PlatformAllowDomainPowerDown::Yes`] is specified, then, depending
+/// on the implementation, the power domain encapsulating the calling CPU may also be suspended and
+/// powered down.
+///
+/// Prior to calling this function, it's critical to set up some kind of interrupt that will wake
+/// the CPU and resume execution. Upon successful suspend and resume, this call returns `Ok(())`.
+///
+/// Possible error results include (but are not limited to):
+/// - `Err(Status::NOT_SUPPORTED)` if unsupported on this platform.
+/// - `Err(Status::ACCESS_DENIED)` or `Err(Status::INVALID_ARGS)` if the suspend power state is
+///   incompatible with the current power state of other CPUs. This is a somewhat normal error and
+///   must be handled by callers.
+///
+/// TODO(https://fxbug.dev/417556024): Consider adding a platform-specific or custom result type to
+/// differentiate between success-but-did-not-power-down and powered-down.
+///
+/// TODO(https://fxbug.dev/417558115): Consider checking the state of the secondary CPUs in order to
+/// determine which power state value to use so that we can eliminate the need to return
+/// `ZX_ERR_ACCESS_DENIED` or `ZX_ERR_INVALID_ARGS` in "normal" situations.
+///
+/// TODO(https://fxbug.dev/417558115): Currently, the caller is responsible for determining if
+/// pausing/resuming the monotonic clock is necessary and then actually doing it. More thought needs
+/// to be given to where that logic should live. Right now, it's done in
+/// `IdlePowerThread::update_monotonic_clock`, however, it might be better to move some of that
+/// logic down into the platform layer (perhaps within `platform_suspend_cpu`).
+///
 /// # Safety
 ///
-/// If `target.len() > 0`, the caller must ensure that `target.cast::<c_char>()` is non-null
-/// and valid for writes of `target.len()` bytes for the duration of this call, with no
-/// concurrent accesses to that memory range.
+/// Must be called on a kernel-only thread pinned to the calling CPU with both interrupts and
+/// preemption disabled and a wakeup interrupt source configured.
 #[inline]
-unsafe fn crashlog_to_string(target: *mut [c_char], reason: ZirconCrashReason) -> usize {
-    // SAFETY: Discharged by the caller per this function's `# Safety` contract.
-    unsafe { cpp_crashlog_to_string(target.cast::<c_char>(), target.len(), reason) }
+pub unsafe fn platform_suspend_cpu(
+    allow_domain: PlatformAllowDomainPowerDown,
+) -> Result<(), Status> {
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: Caller upholds the kernel-only thread, CPU-pinned, IRQ-disabled, and
+        // preempt-disabled preconditions of `platform_suspend_cpu`.
+        Status::ok(unsafe {
+            cpp_platform_suspend_cpu(allow_domain == PlatformAllowDomainPowerDown::Yes)
+        })
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        crate::platform_pc::power::platform_suspend_cpu(
+            allow_domain == PlatformAllowDomainPowerDown::Yes,
+        )
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        crate::generic_riscv64::platform::rust_platform_suspend_cpu(
+            allow_domain == PlatformAllowDomainPowerDown::Yes,
+        )
+    }
 }
 
+/// Returns `true` iff this platform supports [`platform_suspend_system`].
 #[inline]
-fn jtrace_invalidate() {
-    // SAFETY: Invalidates the global jtrace buffer (or is a no-op if jtrace is disabled).
-    unsafe { cpp_jtrace_invalidate() }
+pub fn platform_supports_suspend_system() -> bool {
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: Pure platform capability query with no preconditions.
+        unsafe { cpp_platform_supports_suspend_system() }
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        crate::platform_pc::power::platform_supports_suspend_system()
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        crate::generic_riscv64::platform::rust_platform_supports_suspend_system()
+    }
+}
+
+/// Suspends the entire system from the boot CPU after all secondary CPUs have been powered off.
+///
+/// Prior to calling this function, it's critical to set up some kind of interrupt that will wake
+/// the boot CPU and resume execution.
+///
+/// Returns:
+/// - `Ok(())` on success. Note that this does not necessarily mean that the system actually
+///   suspended (e.g. it may return immediately if an interrupt is pending).
+/// - `Err(Status::NOT_SUPPORTED)` if unsupported on this platform.
+/// - `Err(Status::BAD_STATE)`, without suspending, if any secondary CPU is online or the platform
+///   cannot confirm that every secondary CPU has powered off.
+/// - Other errors if the platform rejects the request.
+///
+/// # Safety
+///
+/// Must be called on the kernel-only boot CPU (`curr_cpu_num() == BOOT_CPU_ID`) idle/power thread
+/// with interrupts and preemption disabled and at least one wakeup source configured.
+#[inline]
+pub unsafe fn platform_suspend_system() -> Result<(), Status> {
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: Caller upholds the boot-CPU, kernel-only thread, IRQ-disabled, and
+        // preempt-disabled preconditions of `platform_suspend_system`.
+        Status::ok(unsafe { cpp_platform_suspend_system() })
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        crate::platform_pc::power::platform_suspend_system()
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        crate::generic_riscv64::platform::rust_platform_suspend_system()
+    }
+}
+
+/// Queries the current power state of `cpu_id` from the platform layer.
+#[inline]
+pub fn platform_get_cpu_state(cpu_id: cpu_num_t) -> Result<PowerCpuState, Status> {
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: Pure platform CPU power state query with no memory safety preconditions.
+        let res = unsafe { cpp_platform_get_cpu_state(cpu_id) };
+        Status::ok(res.status)?;
+        match PowerCpuState::try_from(res.state) {
+            Ok(state) => Ok(state),
+            Err(_) => {
+                core::hint::cold_path();
+                Err(Status::BAD_STATE)
+            }
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        crate::platform_pc::platform::platform_get_cpu_state(cpu_id)
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        let mut state = PowerCpuState::Off;
+        crate::generic_riscv64::platform::rust_platform_get_cpu_state(cpu_id, &mut state)?;
+        Ok(state)
+    }
 }
 
 #[inline]
@@ -256,11 +372,16 @@ pub fn platform_halt(suggested_action: PlatformHaltAction, reason: ZirconCrashRe
         let target = crashlog.get_render_target();
         if target.len() > 0 {
             // SAFETY: `target` was returned by `crashlog.get_render_target()` with
-            // `target.len() > 0`, so it is non-null and valid for writes of `target.len()` bytes
-            // during `platform_halt`.
-            rendered_crashlog_len = unsafe { crashlog_to_string(target, reason) };
+            // `target.len() > 0`, so by `crashlog::Interface`'s safety contract it is non-null,
+            // valid for writes of `target.len()` bytes, and unaliased during `platform_halt`.
+            let target = unsafe { slice::from_raw_parts_mut(target.cast::<u8>(), target.len()) };
+            rendered_crashlog_len = crate::crashlog::crashlog_to_string(target, reason as u32);
         }
-        crashlog.finalize(reason, rendered_crashlog_len);
+        // SAFETY: Called during single-threaded platform halt after
+        // `enable_crashlog_uptime_updates(false)` and after rendering to `target` has completed.
+        unsafe {
+            crashlog.finalize(reason, rendered_crashlog_len);
+        }
     }
 
     // This is a graceful reboot, invalidate the persistent dlog (if we have one)
@@ -288,8 +409,14 @@ pub extern "C" fn rust_platform_halt(
 /// console to a mode that works without them.
 #[inline]
 pub fn platform_panic_start() {
+    platform_panic_start_with_option(PanicStartHaltOtherCpus::Yes);
+}
+
+/// Prepares the platform to print a panic, optionally halting other CPUs.
+#[inline]
+pub fn platform_panic_start_with_option(option: PanicStartHaltOtherCpus) {
     // SAFETY: no preconditions; safe to call from any CPU at any time.
-    unsafe { cpp_platform_panic_start() }
+    unsafe { cpp_platform_panic_start(matches!(option, PanicStartHaltOtherCpus::Yes)) }
 }
 
 /// # Safety

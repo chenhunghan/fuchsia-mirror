@@ -70,6 +70,25 @@ fn reports() -> Vec<fpowerstats::Stats> {
             ],
         },
         fpowerstats::Stats {
+            entity: "blockers_deep_sleep".to_string(),
+            state_residency_data: vec![
+                fpowerstats::StateResidency {
+                    id: 0,
+                    name: "Kernel blocker".to_string(),
+                    entry_count: 5,
+                    total_time_ms: 0,
+                    last_entry_timestamp_ms: 2,
+                },
+                fpowerstats::StateResidency {
+                    id: 1,
+                    name: "Hardware blocker".to_string(),
+                    entry_count: 4,
+                    total_time_ms: 120,
+                    last_entry_timestamp_ms: 3,
+                },
+            ],
+        },
+        fpowerstats::Stats {
             entity: "cap_power_state".to_string(),
             state_residency_data: vec![
                 fpowerstats::StateResidency {
@@ -106,6 +125,16 @@ fn reports() -> Vec<fpowerstats::Stats> {
                     last_entry_timestamp_ms: 0,
                 },
             ],
+        },
+        fpowerstats::Stats {
+            entity: "cap_dvfs_clk_dsu".to_string(),
+            state_residency_data: vec![fpowerstats::StateResidency {
+                id: 3,
+                name: "3".to_string(),
+                entry_count: 2,
+                total_time_ms: 50,
+                last_entry_timestamp_ms: 1,
+            }],
         },
         // Neither of these is served: one is not a residency entity, and the other's name is not
         // safe to use as a file name.

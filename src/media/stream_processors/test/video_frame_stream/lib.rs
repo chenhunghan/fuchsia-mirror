@@ -6,23 +6,19 @@ use anyhow::format_err;
 use async_trait::async_trait;
 use fidl_fuchsia_images2 as images2;
 use fidl_fuchsia_media::*;
-use fuchsia_image_format::sysmem1_image_format_from_images2_image_format;
 use std::rc::Rc;
 use stream_processor_test::*;
 
 #[derive(Debug)]
 pub struct VideoFrame {
-    // TODO(https://fxbug.dev/42165549)
-    #[allow(unused)]
-    format: images2::ImageFormat,
     data: Vec<u8>,
 }
 
-/// Container for raw video frame and associated format
+/// Container for raw video frame
 impl VideoFrame {
     /// Generates a frame with specified `format`.
     /// `step` is for diagonally shifting the checkerboard pattern.
-    pub fn create(format: images2::ImageFormat, step: usize) -> Self {
+    pub fn create(format: &images2::ImageFormat, step: usize) -> Self {
         // For 4:2:0 YUV, the UV data is 1/2 the size of the Y data,
         // so the size of the frame is 3/2 the size of the Y plane.
         let width = *format.bytes_per_row.as_ref().unwrap() as usize;
@@ -51,7 +47,7 @@ impl VideoFrame {
             }
         }
 
-        Self { format, data }
+        Self { data }
     }
 }
 
@@ -101,31 +97,6 @@ impl OutputValidator for TimestampValidator {
     }
 }
 
-fn new_video_uncompressed_format(image_format: images2::ImageFormat) -> VideoUncompressedFormat {
-    VideoUncompressedFormat {
-        image_format: sysmem1_image_format_from_images2_image_format(&image_format).unwrap(),
-        fourcc: 0,
-        primary_width_pixels: 0,
-        primary_height_pixels: 0,
-        secondary_width_pixels: 0,
-        secondary_height_pixels: 0,
-        planar: false,
-        swizzled: false,
-        primary_line_stride_bytes: 0,
-        secondary_line_stride_bytes: 0,
-        primary_start_offset: 0,
-        secondary_start_offset: 0,
-        tertiary_start_offset: 0,
-        primary_pixel_stride: 0,
-        secondary_pixel_stride: 0,
-        primary_display_width_pixels: 0,
-        primary_display_height_pixels: 0,
-        has_pixel_aspect_ratio: false,
-        pixel_aspect_ratio_width: 0,
-        pixel_aspect_ratio_height: 0,
-    }
-}
-
 /// Implements an `ElementaryStream` of raw video frames with the specified `format`, intended to be
 /// fed to an encoder StreamProcessor.
 pub struct VideoFrameStream {
@@ -167,9 +138,7 @@ impl VideoFrameStream {
 impl ElementaryStream for VideoFrameStream {
     fn format_details(&self, format_details_version_ordinal: u64) -> FormatDetails {
         FormatDetails {
-            domain: Some(DomainFormat::Video(VideoFormat::Uncompressed(
-                new_video_uncompressed_format(self.format.clone()),
-            ))),
+            image_format: Some(self.format.clone()),
             encoder_settings: Some((self.encoder_settings)()),
             format_details_version_ordinal: Some(format_details_version_ordinal),
             mime_type: Some(self.mime_type.to_string()),
@@ -185,15 +154,15 @@ impl ElementaryStream for VideoFrameStream {
     }
 
     fn stream<'a>(&'a self) -> Box<dyn Iterator<Item = ElementaryStreamChunk> + 'a> {
+        let timestamp_generator = self.timestamp_generator();
         Box::new((0..self.num_frames).map(move |input_index| {
-            let frame = VideoFrame::create(self.format.clone(), input_index);
+            let frame = VideoFrame::create(&self.format, input_index);
             ElementaryStreamChunk {
                 start_access_unit: false,
                 known_end_access_unit: false,
                 data: frame.data,
                 significance: Significance::Video(VideoSignificance::Picture),
-                timestamp: self
-                    .timestamp_generator()
+                timestamp: timestamp_generator
                     .as_ref()
                     .map(|timestamp_generator| timestamp_generator.timestamp_at(input_index)),
             }
@@ -205,7 +174,6 @@ impl ElementaryStream for VideoFrameStream {
 mod test {
     use super::*;
     use fidl_fuchsia_math::{RectU, SizeU};
-    use fuchsia_image_format::images2_image_format_from_sysmem_image_format;
 
     #[derive(Debug, Copy, Clone)]
     struct TestSpec {
@@ -217,24 +185,24 @@ mod test {
         bytes_per_row: usize,
     }
 
-    impl Into<VideoUncompressedFormat> for TestSpec {
-        fn into(self) -> VideoUncompressedFormat {
-            new_video_uncompressed_format(images2::ImageFormat {
-                pixel_format: Some(self.pixel_format),
+    impl From<TestSpec> for images2::ImageFormat {
+        fn from(spec: TestSpec) -> Self {
+            images2::ImageFormat {
+                pixel_format: Some(spec.pixel_format),
                 size: Some(SizeU {
-                    width: self.coded_width.try_into().unwrap(),
-                    height: self.coded_height.try_into().unwrap(),
+                    width: spec.coded_width.try_into().unwrap(),
+                    height: spec.coded_height.try_into().unwrap(),
                 }),
-                bytes_per_row: Some(self.bytes_per_row as u32),
+                bytes_per_row: Some(spec.bytes_per_row as u32),
                 display_rect: Some(RectU {
                     x: 0,
                     y: 0,
-                    width: self.display_width as u32,
-                    height: self.display_height as u32,
+                    width: spec.display_width as u32,
+                    height: spec.display_height as u32,
                 }),
                 color_space: Some(images2::ColorSpace::Rec709),
                 ..Default::default()
-            })
+            }
         }
     }
 
@@ -249,9 +217,9 @@ mod test {
             bytes_per_row: 16,
         };
 
-        let format: VideoUncompressedFormat = test_spec.into();
+        let format: images2::ImageFormat = test_spec.into();
         let stream = VideoFrameStream::create(
-            images2_image_format_from_sysmem_image_format(&format.image_format).unwrap(),
+            format,
             /*num_frames=*/ 2,
             Rc::new(move || -> EncoderSettings {
                 EncoderSettings::H264(H264EncoderSettings {
@@ -285,11 +253,8 @@ mod test {
             bytes_per_row: 8,
         };
 
-        let format: VideoUncompressedFormat = test_spec.into();
-        let frame = VideoFrame::create(
-            images2_image_format_from_sysmem_image_format(&format.image_format).unwrap(),
-            0,
-        );
+        let format: images2::ImageFormat = test_spec.into();
+        let frame = VideoFrame::create(&format, 0);
         assert_eq!(
             frame.data,
             vec![

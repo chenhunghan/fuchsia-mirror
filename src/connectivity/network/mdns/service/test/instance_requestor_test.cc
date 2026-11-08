@@ -4,8 +4,10 @@
 
 #include "src/connectivity/network/mdns/service/agents/instance_requestor.h"
 
+#include <lib/fit/function.h>
 #include <lib/zx/time.h>
 
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 #include "src/connectivity/network/mdns/service/common/mdns_names.h"
@@ -17,6 +19,11 @@
 
 namespace mdns::test {
 
+using ::testing::Eq;
+using ::testing::IsNull;
+using ::testing::NotNull;
+using ::testing::Pointee;
+
 class InstanceRequestorTest : public AgentTest {
  public:
   InstanceRequestorTest() = default;
@@ -27,6 +34,10 @@ class InstanceRequestorTest : public AgentTest {
     struct InstanceId {
       InstanceId(const DnsName& service, const DnsLabel& instance)
           : service_(service), instance_(instance) {}
+
+      bool operator==(const InstanceId& other) const {
+        return service_ == other.service_ && instance_ == other.instance_;
+      }
 
       DnsName service_;
       DnsLabel instance_;
@@ -54,32 +65,27 @@ class InstanceRequestorTest : public AgentTest {
 
     void Query(DnsType type_queried) override { query_param_ = type_queried; }
 
-    std::unique_ptr<ServiceInstance> ExpectInstanceDiscoveredCalled() {
-      EXPECT_TRUE(!!instance_discovered_params_);
+    std::unique_ptr<ServiceInstance> TakeInstanceDiscovered() {
       return std::move(instance_discovered_params_);
     }
 
-    std::unique_ptr<ServiceInstance> ExpectInstanceChangedCalled() {
-      EXPECT_TRUE(!!instance_changed_params_);
+    std::unique_ptr<ServiceInstance> TakeInstanceChanged() {
       return std::move(instance_changed_params_);
     }
 
-    std::unique_ptr<InstanceId> ExpectInstanceLostCalled() {
-      EXPECT_TRUE(!!instance_lost_params_);
-      return std::move(instance_lost_params_);
-    }
+    std::unique_ptr<InstanceId> TakeInstanceLost() { return std::move(instance_lost_params_); }
 
     void ExpectQueryCalled(DnsType type) {
-      EXPECT_NE(DnsType::kInvalid, query_param_);
-      EXPECT_EQ(type, query_param_);
+      EXPECT_NE(query_param_, DnsType::kInvalid);
+      EXPECT_EQ(query_param_, type);
       query_param_ = DnsType::kInvalid;
     }
 
     void ExpectNoOther() {
-      EXPECT_FALSE(!!instance_discovered_params_);
-      EXPECT_FALSE(!!instance_changed_params_);
-      EXPECT_FALSE(!!instance_lost_params_);
-      EXPECT_EQ(DnsType::kInvalid, query_param_);
+      EXPECT_THAT(instance_discovered_params_, IsNull());
+      EXPECT_THAT(instance_changed_params_, IsNull());
+      EXPECT_THAT(instance_lost_params_, IsNull());
+      EXPECT_EQ(query_param_, DnsType::kInvalid);
     }
 
    private:
@@ -88,6 +94,76 @@ class InstanceRequestorTest : public AgentTest {
     std::unique_ptr<InstanceId> instance_lost_params_;
     DnsType query_param_ = DnsType::kInvalid;
   };
+
+  class ActionSubscriber : public Subscriber {
+   public:
+    void SetOnInstanceDiscovered(fit::closure action) {
+      on_instance_discovered_ = std::move(action);
+    }
+    void SetOnInstanceChanged(fit::closure action) { on_instance_changed_ = std::move(action); }
+    void SetOnInstanceLost(fit::closure action) { on_instance_lost_ = std::move(action); }
+    void SetOnQuery(fit::closure action) { on_query_ = std::move(action); }
+
+    size_t instance_discovered_count() const { return instance_discovered_count_; }
+
+    void InstanceDiscovered(const DnsName& service, const DnsLabel& instance,
+                            const std::vector<inet::SocketAddress>& addresses,
+                            const std::vector<std::vector<uint8_t>>& text, uint16_t srv_priority,
+                            uint16_t srv_weight, const DnsName& target) override {
+      ++instance_discovered_count_;
+      Subscriber::InstanceDiscovered(service, instance, addresses, text, srv_priority, srv_weight,
+                                     target);
+      if (auto action = std::move(on_instance_discovered_)) {
+        action();
+      }
+    }
+
+    void InstanceChanged(const DnsName& service, const DnsLabel& instance,
+                         const std::vector<inet::SocketAddress>& addresses,
+                         const std::vector<std::vector<uint8_t>>& text, uint16_t srv_priority,
+                         uint16_t srv_weight, const DnsName& target) override {
+      Subscriber::InstanceChanged(service, instance, addresses, text, srv_priority, srv_weight,
+                                  target);
+      if (auto action = std::move(on_instance_changed_)) {
+        action();
+      }
+    }
+
+    void InstanceLost(const DnsName& service, const DnsLabel& instance) override {
+      Subscriber::InstanceLost(service, instance);
+      if (auto action = std::move(on_instance_lost_)) {
+        action();
+      }
+    }
+
+    void Query(DnsType type_queried) override {
+      Subscriber::Query(type_queried);
+      if (auto action = std::move(on_query_)) {
+        action();
+      }
+    }
+
+   private:
+    fit::closure on_instance_discovered_;
+    fit::closure on_instance_changed_;
+    fit::closure on_instance_lost_;
+    fit::closure on_query_;
+    size_t instance_discovered_count_ = 0;
+  };
+
+  // Returns a closure that increments |callback_count|, unsubscribes both |self| and |other|
+  // from |requestor|, and destroys |other|.
+  static fit::closure RemoveBothAndDestroyOther(InstanceRequestor& requestor,
+                                                size_t& callback_count,
+                                                std::unique_ptr<ActionSubscriber>& self,
+                                                std::unique_ptr<ActionSubscriber>& other) {
+    return [&requestor, &callback_count, &self, &other]() {
+      ++callback_count;
+      requestor.RemoveSubscriber(self.get());
+      requestor.RemoveSubscriber(other.get());
+      other.reset();
+    };
+  }
 
   void ReceivePublication(InstanceRequestor& under_test, const DnsName& host_full_name,
                           const DnsName& service_name, const DnsLabel& instance_name,
@@ -261,14 +337,11 @@ TEST_F(InstanceRequestorTest, Response) {
   ReceivePublication(under_test, kHostFullName, kServiceName, kInstanceName, kPort, kText,
                      sender_address);
 
-  auto params = subscriber.ExpectInstanceDiscoveredCalled();
-  if (!params) {
-    return;
-  }
-  EXPECT_EQ(ServiceInstance(kServiceName, kInstanceName, kHostName,
-                            {inet::SocketAddress(sender_address.socket_address().address(), kPort)},
-                            kText, 0, 0),
-            *params);
+  EXPECT_THAT(
+      subscriber.TakeInstanceDiscovered(),
+      Pointee(Eq(ServiceInstance(
+          kServiceName, kInstanceName, kHostName,
+          {inet::SocketAddress(sender_address.socket_address().address(), kPort)}, kText, 0, 0))));
 
   subscriber.ExpectNoOther();
 }
@@ -301,14 +374,11 @@ TEST_F(InstanceRequestorTest, Change) {
   ReceivePublication(under_test, kHostFullName, kServiceName, kInstanceName, kPort, kText,
                      sender_address);
 
-  auto params = subscriber.ExpectInstanceDiscoveredCalled();
-  if (!params) {
-    return;
-  }
-  EXPECT_EQ(ServiceInstance(kServiceName, kInstanceName, kHostName,
-                            {inet::SocketAddress(sender_address.socket_address().address(), kPort)},
-                            kText, 0, 0),
-            *params);
+  EXPECT_THAT(
+      subscriber.TakeInstanceDiscovered(),
+      Pointee(Eq(ServiceInstance(
+          kServiceName, kInstanceName, kHostName,
+          {inet::SocketAddress(sender_address.socket_address().address(), kPort)}, kText, 0, 0))));
 
   subscriber.ExpectNoOther();
 
@@ -316,11 +386,11 @@ TEST_F(InstanceRequestorTest, Change) {
   ReceivePublication(under_test, kHostFullName, kServiceName, kInstanceName, kPort, kAltText,
                      sender_address);
 
-  params = subscriber.ExpectInstanceChangedCalled();
-  EXPECT_EQ(ServiceInstance(kServiceName, kInstanceName, kHostName,
-                            {inet::SocketAddress(sender_address.socket_address().address(), kPort)},
-                            kAltText, 0, 0),
-            *params);
+  EXPECT_THAT(subscriber.TakeInstanceChanged(),
+              Pointee(Eq(ServiceInstance(
+                  kServiceName, kInstanceName, kHostName,
+                  {inet::SocketAddress(sender_address.socket_address().address(), kPort)}, kAltText,
+                  0, 0))));
 
   subscriber.ExpectNoOther();
 }
@@ -356,15 +426,11 @@ TEST_F(InstanceRequestorTest, AddressCacheFlush) {
                      sender_address_0);
 
   // Expect |sender_address_0|.
-  auto params = subscriber.ExpectInstanceDiscoveredCalled();
-  if (!params) {
-    return;
-  }
-  EXPECT_EQ(
-      ServiceInstance(kServiceName, kInstanceName, kHostName,
-                      {inet::SocketAddress(sender_address_0.socket_address().address(), kPort)},
-                      kText, 0, 0),
-      *params);
+  EXPECT_THAT(subscriber.TakeInstanceDiscovered(),
+              Pointee(Eq(ServiceInstance(
+                  kServiceName, kInstanceName, kHostName,
+                  {inet::SocketAddress(sender_address_0.socket_address().address(), kPort)}, kText,
+                  0, 0))));
 
   subscriber.ExpectNoOther();
 
@@ -376,13 +442,12 @@ TEST_F(InstanceRequestorTest, AddressCacheFlush) {
                      sender_address_v6);
 
   // Expect |sender_address_0| and |sender_address_v6|.
-  params = subscriber.ExpectInstanceChangedCalled();
-  EXPECT_EQ(
-      ServiceInstance(kServiceName, kInstanceName, kHostName,
-                      {inet::SocketAddress(sender_address_v6.socket_address().address(), kPort, 1),
-                       inet::SocketAddress(sender_address_0.socket_address().address(), kPort)},
-                      kText, 0, 0),
-      *params);
+  EXPECT_THAT(subscriber.TakeInstanceChanged(),
+              Pointee(Eq(ServiceInstance(
+                  kServiceName, kInstanceName, kHostName,
+                  {inet::SocketAddress(sender_address_v6.socket_address().address(), kPort, 1),
+                   inet::SocketAddress(sender_address_0.socket_address().address(), kPort)},
+                  kText, 0, 0))));
 
   // Make sure the above address is more than one second old.
   FakeClock::Advance(zx::sec(2));
@@ -395,14 +460,13 @@ TEST_F(InstanceRequestorTest, AddressCacheFlush) {
                      sender_address_2);
 
   // Expect |sender_address_0|, |sender_address_v6| and |sender_address_2|.
-  params = subscriber.ExpectInstanceChangedCalled();
-  EXPECT_EQ(
-      ServiceInstance(kServiceName, kInstanceName, kHostName,
-                      {inet::SocketAddress(sender_address_2.socket_address().address(), kPort),
-                       inet::SocketAddress(sender_address_v6.socket_address().address(), kPort, 1),
-                       inet::SocketAddress(sender_address_0.socket_address().address(), kPort)},
-                      kText, 0, 0),
-      *params);
+  EXPECT_THAT(subscriber.TakeInstanceChanged(),
+              Pointee(Eq(ServiceInstance(
+                  kServiceName, kInstanceName, kHostName,
+                  {inet::SocketAddress(sender_address_2.socket_address().address(), kPort),
+                   inet::SocketAddress(sender_address_v6.socket_address().address(), kPort, 1),
+                   inet::SocketAddress(sender_address_0.socket_address().address(), kPort)},
+                  kText, 0, 0))));
 
   // Make sure the second IPv4 address is less than one second old.
   FakeClock::Advance(zx::msec(500));
@@ -420,14 +484,13 @@ TEST_F(InstanceRequestorTest, AddressCacheFlush) {
   // Expect that |sender_address_| has been flushed, |sender_address_v6| and |sender_address_2| have
   // not (a V6 address and an address sent less than a second ago), and that the new
   // |sender_address_3| appears.
-  params = subscriber.ExpectInstanceChangedCalled();
-  EXPECT_EQ(
-      ServiceInstance(kServiceName, kInstanceName, kHostName,
-                      {inet::SocketAddress(sender_address_2.socket_address().address(), kPort),
-                       inet::SocketAddress(sender_address_3.socket_address().address(), kPort),
-                       inet::SocketAddress(sender_address_v6.socket_address().address(), kPort, 1)},
-                      kText, 0, 0),
-      *params);
+  EXPECT_THAT(subscriber.TakeInstanceChanged(),
+              Pointee(Eq(ServiceInstance(
+                  kServiceName, kInstanceName, kHostName,
+                  {inet::SocketAddress(sender_address_2.socket_address().address(), kPort),
+                   inet::SocketAddress(sender_address_3.socket_address().address(), kPort),
+                   inet::SocketAddress(sender_address_v6.socket_address().address(), kPort, 1)},
+                  kText, 0, 0))));
 
   subscriber.ExpectNoOther();
 }
@@ -460,14 +523,11 @@ TEST_F(InstanceRequestorTest, Removal) {
   ReceivePublication(under_test, kHostFullName, kServiceName, kInstanceName, kPort, kText,
                      sender_address);
 
-  auto params = subscriber.ExpectInstanceDiscoveredCalled();
-  if (!params) {
-    return;
-  }
-  EXPECT_EQ(ServiceInstance(kServiceName, kInstanceName, kHostName,
-                            {inet::SocketAddress(sender_address.socket_address().address(), kPort)},
-                            kText, 0, 0),
-            *params);
+  EXPECT_THAT(
+      subscriber.TakeInstanceDiscovered(),
+      Pointee(Eq(ServiceInstance(
+          kServiceName, kInstanceName, kHostName,
+          {inet::SocketAddress(sender_address.socket_address().address(), kPort)}, kText, 0, 0))));
 
   subscriber.ExpectNoOther();
 
@@ -477,9 +537,8 @@ TEST_F(InstanceRequestorTest, Removal) {
   ptr_resource.time_to_live_ = 0;
   under_test.ReceiveResource(ptr_resource, MdnsResourceSection::kExpired, sender_address);
 
-  auto instance_id = subscriber.ExpectInstanceLostCalled();
-  EXPECT_EQ(kInstanceName, instance_id->instance_);
-  EXPECT_EQ(kServiceName, instance_id->service_);
+  EXPECT_THAT(subscriber.TakeInstanceLost(),
+              Pointee(Eq(Subscriber::InstanceId(kServiceName, kInstanceName))));
   subscriber.ExpectNoOther();
 }
 
@@ -533,15 +592,11 @@ TEST_F(InstanceRequestorTest, WirelessOnly) {
   ReceivePublication(under_test, kHostFullName, kServiceName, kInstanceName, kPort, kText,
                      sender_address1);
 
-  auto params = subscriber.ExpectInstanceDiscoveredCalled();
-  if (!params) {
-    return;
-  }
-  EXPECT_EQ(
-      ServiceInstance(kServiceName, kInstanceName, kHostName,
-                      {inet::SocketAddress(sender_address1.socket_address().address(), kPort)},
-                      kText, 0, 0),
-      *params);
+  EXPECT_THAT(
+      subscriber.TakeInstanceDiscovered(),
+      Pointee(Eq(ServiceInstance(
+          kServiceName, kInstanceName, kHostName,
+          {inet::SocketAddress(sender_address1.socket_address().address(), kPort)}, kText, 0, 0))));
 
   subscriber.ExpectNoOther();
 }
@@ -580,15 +635,11 @@ TEST_F(InstanceRequestorTest, WiredOnly) {
   ReceivePublication(under_test, kHostFullName, kServiceName, kInstanceName, kPort, kText,
                      sender_address1);
 
-  auto params = subscriber.ExpectInstanceDiscoveredCalled();
-  if (!params) {
-    return;
-  }
-  EXPECT_EQ(
-      ServiceInstance(kServiceName, kInstanceName, kHostName,
-                      {inet::SocketAddress(sender_address1.socket_address().address(), kPort)},
-                      kText, 0, 0),
-      *params);
+  EXPECT_THAT(
+      subscriber.TakeInstanceDiscovered(),
+      Pointee(Eq(ServiceInstance(
+          kServiceName, kInstanceName, kHostName,
+          {inet::SocketAddress(sender_address1.socket_address().address(), kPort)}, kText, 0, 0))));
 
   subscriber.ExpectNoOther();
 }
@@ -626,15 +677,11 @@ TEST_F(InstanceRequestorTest, V4Only) {
   ReceivePublication(under_test, kHostFullName, kServiceName, kInstanceName, kPort, kText,
                      sender_address1);
 
-  auto params = subscriber.ExpectInstanceDiscoveredCalled();
-  if (!params) {
-    return;
-  }
-  EXPECT_EQ(
-      ServiceInstance(kServiceName, kInstanceName, kHostName,
-                      {inet::SocketAddress(sender_address1.socket_address().address(), kPort)},
-                      kText, 0, 0),
-      *params);
+  EXPECT_THAT(
+      subscriber.TakeInstanceDiscovered(),
+      Pointee(Eq(ServiceInstance(
+          kServiceName, kInstanceName, kHostName,
+          {inet::SocketAddress(sender_address1.socket_address().address(), kPort)}, kText, 0, 0))));
 
   subscriber.ExpectNoOther();
 }
@@ -672,15 +719,11 @@ TEST_F(InstanceRequestorTest, V6Only) {
   ReceivePublication(under_test, kHostFullName, kServiceName, kInstanceName, kPort, kText,
                      sender_address1);
 
-  auto params = subscriber.ExpectInstanceDiscoveredCalled();
-  if (!params) {
-    return;
-  }
-  EXPECT_EQ(
-      ServiceInstance(kServiceName, kInstanceName, kHostName,
-                      {inet::SocketAddress(sender_address1.socket_address().address(), kPort, 1)},
-                      kText, 0, 0),
-      *params);
+  EXPECT_THAT(subscriber.TakeInstanceDiscovered(),
+              Pointee(Eq(ServiceInstance(
+                  kServiceName, kInstanceName, kHostName,
+                  {inet::SocketAddress(sender_address1.socket_address().address(), kPort, 1)},
+                  kText, 0, 0))));
 
   subscriber.ExpectNoOther();
 }
@@ -712,13 +755,9 @@ TEST_F(InstanceRequestorTest, LocalInstance) {
       ServiceInstance(kServiceName, kInstanceName, kLocalHostName, kSocketAddresses, kText),
       kFromLocalHost);
 
-  auto params = subscriber.ExpectInstanceDiscoveredCalled();
-  if (!params) {
-    return;
-  }
-  EXPECT_EQ(
-      ServiceInstance(kServiceName, kInstanceName, kLocalHostName, kSocketAddressesReversed, kText),
-      *params);
+  EXPECT_THAT(subscriber.TakeInstanceDiscovered(),
+              Pointee(Eq(ServiceInstance(kServiceName, kInstanceName, kLocalHostName,
+                                         kSocketAddressesReversed, kText))));
 
   // |OnChangeLocalServiceInstance| should do nothing if the instance doesn't change.
   under_test.OnChangeLocalServiceInstance(
@@ -730,22 +769,82 @@ TEST_F(InstanceRequestorTest, LocalInstance) {
   under_test.OnChangeLocalServiceInstance(
       ServiceInstance(kServiceName, kInstanceName, kLocalHostName, kSocketAddresses, kAltText),
       false);
-  params = subscriber.ExpectInstanceChangedCalled();
-  EXPECT_EQ(ServiceInstance(kServiceName, kInstanceName, kLocalHostName, kSocketAddressesReversed,
-                            kAltText),
-            *params);
+  EXPECT_THAT(subscriber.TakeInstanceChanged(),
+              Pointee(Eq(ServiceInstance(kServiceName, kInstanceName, kLocalHostName,
+                                         kSocketAddressesReversed, kAltText))));
   subscriber.ExpectNoOther();
 
   // |OnRemoveLocalServiceInstance| should notify of a removal.
   under_test.OnRemoveLocalServiceInstance(kServiceName, kInstanceName, kFromLocalHost);
-  auto lost_params = subscriber.ExpectInstanceLostCalled();
-  EXPECT_EQ(kServiceName, lost_params->service_);
-  EXPECT_EQ(kInstanceName, lost_params->instance_);
+  EXPECT_THAT(subscriber.TakeInstanceLost(),
+              Pointee(Eq(Subscriber::InstanceId(kServiceName, kInstanceName))));
 
   // Expect that local proxy host instances are ignored.
   under_test.OnAddLocalServiceInstance(
       ServiceInstance(kServiceName, kInstanceName, kHostName, kSocketAddresses, kText),
       kFromLocalProxyHost);
+  subscriber.ExpectNoOther();
+}
+
+// Tests the behavior of the requestor when local service instances have empty address lists.
+TEST_F(InstanceRequestorTest, LocalInstanceEmptyAddresses) {
+  InstanceRequestor under_test(this, kServiceName, Media::kBoth, IpVersions::kBoth, kIncludeLocal,
+                               kExcludeLocalProxies);
+  SetAgent(under_test);
+  SetLocalHostAddresses(kHostAddresses);
+
+  Subscriber subscriber;
+  under_test.AddSubscriber(&subscriber);
+
+  under_test.Start(kLocalHostFullName);
+
+  // Expect a PTR question on start.
+  auto message = ExpectOutboundMessage(ReplyAddress::Multicast(Media::kBoth, IpVersions::kBoth));
+  ExpectQuestion(message.get(), kServiceFullName, DnsType::kPtr);
+  ExpectNoOtherQuestionOrResource(message.get());
+  ExpectPostTaskForTime(kMinDelay, kMinDelay);
+  ExpectNoOther();
+
+  subscriber.ExpectQueryCalled(DnsType::kPtr);
+  subscriber.ExpectNoOther();
+
+  // Adding or changing a local service instance with an empty address list when not yet
+  // discovered should not crash or notify subscribers.
+  under_test.OnAddLocalServiceInstance(
+      ServiceInstance(kServiceName, kInstanceName, kLocalHostName, {}, kText), kFromLocalHost);
+  subscriber.ExpectNoOther();
+
+  under_test.OnChangeLocalServiceInstance(
+      ServiceInstance(kServiceName, kInstanceName, kLocalHostName, {}, kText), kFromLocalHost);
+  subscriber.ExpectNoOther();
+
+  // When addresses become available via |OnChangeLocalServiceInstance|, the instance should be
+  // added and reported as discovered.
+  under_test.OnChangeLocalServiceInstance(
+      ServiceInstance(kServiceName, kInstanceName, kLocalHostName, kSocketAddresses, kText),
+      kFromLocalHost);
+
+  EXPECT_THAT(subscriber.TakeInstanceDiscovered(),
+              Pointee(Eq(ServiceInstance(kServiceName, kInstanceName, kLocalHostName,
+                                         kSocketAddressesReversed, kText))));
+  subscriber.ExpectNoOther();
+
+  // |OnChangeLocalServiceInstance| with an empty address list on an existing instance should
+  // remove the instance and notify subscribers that it was lost.
+  under_test.OnChangeLocalServiceInstance(
+      ServiceInstance(kServiceName, kInstanceName, kLocalHostName, {}, kText), kFromLocalHost);
+  EXPECT_THAT(subscriber.TakeInstanceLost(),
+              Pointee(Eq(Subscriber::InstanceId(kServiceName, kInstanceName))));
+  subscriber.ExpectNoOther();
+
+  // When addresses become available again via |OnChangeLocalServiceInstance|, the instance should
+  // be reported as discovered again.
+  under_test.OnChangeLocalServiceInstance(
+      ServiceInstance(kServiceName, kInstanceName, kLocalHostName, kSocketAddresses, kText),
+      kFromLocalHost);
+  EXPECT_THAT(subscriber.TakeInstanceDiscovered(),
+              Pointee(Eq(ServiceInstance(kServiceName, kInstanceName, kLocalHostName,
+                                         kSocketAddressesReversed, kText))));
   subscriber.ExpectNoOther();
 }
 
@@ -776,13 +875,9 @@ TEST_F(InstanceRequestorTest, LocalProxyInstance) {
       ServiceInstance(kServiceName, kInstanceName, kHostName, kSocketAddresses, kText),
       kFromLocalProxyHost);
 
-  auto params = subscriber.ExpectInstanceDiscoveredCalled();
-  if (!params) {
-    return;
-  }
-  EXPECT_EQ(
-      ServiceInstance(kServiceName, kInstanceName, kHostName, kSocketAddressesReversed, kText),
-      *params);
+  EXPECT_THAT(subscriber.TakeInstanceDiscovered(),
+              Pointee(Eq(ServiceInstance(kServiceName, kInstanceName, kHostName,
+                                         kSocketAddressesReversed, kText))));
 
   // |OnChangeLocalServiceInstance| should do nothing if the instance doesn't change.
   under_test.OnChangeLocalServiceInstance(
@@ -794,17 +889,15 @@ TEST_F(InstanceRequestorTest, LocalProxyInstance) {
   under_test.OnChangeLocalServiceInstance(
       ServiceInstance(kServiceName, kInstanceName, kHostName, kSocketAddresses, kAltText),
       kFromLocalProxyHost);
-  params = subscriber.ExpectInstanceChangedCalled();
-  EXPECT_EQ(
-      ServiceInstance(kServiceName, kInstanceName, kHostName, kSocketAddressesReversed, kAltText),
-      *params);
+  EXPECT_THAT(subscriber.TakeInstanceChanged(),
+              Pointee(Eq(ServiceInstance(kServiceName, kInstanceName, kHostName,
+                                         kSocketAddressesReversed, kAltText))));
   subscriber.ExpectNoOther();
 
   // |OnRemoveLocalServiceInstance| should notify of a removal.
   under_test.OnRemoveLocalServiceInstance(kServiceName, kInstanceName, kFromLocalProxyHost);
-  auto lost_params = subscriber.ExpectInstanceLostCalled();
-  EXPECT_EQ(kServiceName, lost_params->service_);
-  EXPECT_EQ(kInstanceName, lost_params->instance_);
+  EXPECT_THAT(subscriber.TakeInstanceLost(),
+              Pointee(Eq(Subscriber::InstanceId(kServiceName, kInstanceName))));
 
   // Expect that local host instances are ignored.
   under_test.OnAddLocalServiceInstance(
@@ -843,13 +936,9 @@ TEST_P(InstanceRequestorTestWithParam, InstanceIgnoreNetwork) {
       ServiceInstance(kServiceName, kInstanceName, host_name, kSocketAddresses, kText),
       include_local_proxies);
 
-  auto params = subscriber.ExpectInstanceDiscoveredCalled();
-  if (!params) {
-    return;
-  }
-  EXPECT_EQ(
-      ServiceInstance(kServiceName, kInstanceName, host_name, kSocketAddressesReversed, kText),
-      *params);
+  EXPECT_THAT(subscriber.TakeInstanceDiscovered(),
+              Pointee(Eq(ServiceInstance(kServiceName, kInstanceName, host_name,
+                                         kSocketAddressesReversed, kText))));
   subscriber.ExpectNoOther();
 
   ReplyAddress sender_address(
@@ -892,17 +981,15 @@ TEST_P(InstanceRequestorTestWithParam, InstanceIgnoreNetwork) {
   under_test.OnChangeLocalServiceInstance(
       ServiceInstance(kServiceName, kInstanceName, host_name, kSocketAddresses, kAltText),
       include_local_proxies);
-  params = subscriber.ExpectInstanceChangedCalled();
-  EXPECT_EQ(
-      ServiceInstance(kServiceName, kInstanceName, host_name, kSocketAddressesReversed, kAltText),
-      *params);
+  EXPECT_THAT(subscriber.TakeInstanceChanged(),
+              Pointee(Eq(ServiceInstance(kServiceName, kInstanceName, host_name,
+                                         kSocketAddressesReversed, kAltText))));
   subscriber.ExpectNoOther();
 
   // Expect that local removals are still handled.
   under_test.OnRemoveLocalServiceInstance(kServiceName, kInstanceName, include_local_proxies);
-  auto lost_params = subscriber.ExpectInstanceLostCalled();
-  EXPECT_EQ(kServiceName, lost_params->service_);
-  EXPECT_EQ(kInstanceName, lost_params->instance_);
+  EXPECT_THAT(subscriber.TakeInstanceLost(),
+              Pointee(Eq(Subscriber::InstanceId(kServiceName, kInstanceName))));
   subscriber.ExpectNoOther();
 }
 
@@ -936,14 +1023,11 @@ TEST_F(InstanceRequestorTest, AnyResponse) {
   ReceivePublication(under_test, kHostFullName, kServiceName, kInstanceName, kPort, kText,
                      sender_address);
 
-  auto params = subscriber.ExpectInstanceDiscoveredCalled();
-  if (!params) {
-    return;
-  }
-  EXPECT_EQ(ServiceInstance(kServiceName, kInstanceName, kHostName,
-                            {inet::SocketAddress(sender_address.socket_address().address(), kPort)},
-                            kText, 0, 0),
-            *params);
+  EXPECT_THAT(
+      subscriber.TakeInstanceDiscovered(),
+      Pointee(Eq(ServiceInstance(
+          kServiceName, kInstanceName, kHostName,
+          {inet::SocketAddress(sender_address.socket_address().address(), kPort)}, kText, 0, 0))));
 
   subscriber.ExpectNoOther();
 }
@@ -988,14 +1072,11 @@ TEST_F(InstanceRequestorTest, ResponseSansAddresses) {
   ReceiveAddress(under_test, kHostFullName, sender_address);
 
   // Expect discovery of the instance to be reported to the client.
-  auto params = subscriber.ExpectInstanceDiscoveredCalled();
-  if (!params) {
-    return;
-  }
-  EXPECT_EQ(ServiceInstance(kServiceName, kInstanceName, kHostName,
-                            {inet::SocketAddress(sender_address.socket_address().address(), kPort)},
-                            kText, 0, 0),
-            *params);
+  EXPECT_THAT(
+      subscriber.TakeInstanceDiscovered(),
+      Pointee(Eq(ServiceInstance(
+          kServiceName, kInstanceName, kHostName,
+          {inet::SocketAddress(sender_address.socket_address().address(), kPort)}, kText, 0, 0))));
 
   subscriber.ExpectNoOther();
 }
@@ -1029,14 +1110,11 @@ TEST_F(InstanceRequestorTest, ResponseSansTxt) {
                      sender_address, false, true);  // no TXT record, yes A record.
 
   // Expect the instance to be reported to the client with no text.
-  auto params = subscriber.ExpectInstanceDiscoveredCalled();
-  if (!params) {
-    return;
-  }
-  EXPECT_EQ(ServiceInstance(kServiceName, kInstanceName, kHostName,
-                            {inet::SocketAddress(sender_address.socket_address().address(), kPort)},
-                            {}, 0, 0),
-            *params);
+  EXPECT_THAT(
+      subscriber.TakeInstanceDiscovered(),
+      Pointee(Eq(ServiceInstance(
+          kServiceName, kInstanceName, kHostName,
+          {inet::SocketAddress(sender_address.socket_address().address(), kPort)}, {}, 0, 0))));
 
   // Expect a TXT query call.
   ExpectQueryCall(DnsType::kTxt, MdnsNames::InstanceFullName(kInstanceName, kServiceName),
@@ -1047,11 +1125,11 @@ TEST_F(InstanceRequestorTest, ResponseSansTxt) {
   ReceiveTxt(under_test, kServiceName, kInstanceName, kText, sender_address);
 
   // Expect change of the instance to be reported to the client with text.
-  params = subscriber.ExpectInstanceChangedCalled();
-  EXPECT_EQ(ServiceInstance(kServiceName, kInstanceName, kHostName,
-                            {inet::SocketAddress(sender_address.socket_address().address(), kPort)},
-                            kText, 0, 0),
-            *params);
+  EXPECT_THAT(
+      subscriber.TakeInstanceChanged(),
+      Pointee(Eq(ServiceInstance(
+          kServiceName, kInstanceName, kHostName,
+          {inet::SocketAddress(sender_address.socket_address().address(), kPort)}, kText, 0, 0))));
 
   subscriber.ExpectNoOther();
 }
@@ -1108,14 +1186,11 @@ TEST_F(InstanceRequestorTest, ResponsePtrOnly) {
   ReceiveAddress(under_test, kHostFullName, sender_address);
 
   // Expect the instance to be reported to the client with no text.
-  auto params = subscriber.ExpectInstanceDiscoveredCalled();
-  if (!params) {
-    return;
-  }
-  EXPECT_EQ(ServiceInstance(kServiceName, kInstanceName, kHostName,
-                            {inet::SocketAddress(sender_address.socket_address().address(), kPort)},
-                            {}, 0, 0),
-            *params);
+  EXPECT_THAT(
+      subscriber.TakeInstanceDiscovered(),
+      Pointee(Eq(ServiceInstance(
+          kServiceName, kInstanceName, kHostName,
+          {inet::SocketAddress(sender_address.socket_address().address(), kPort)}, {}, 0, 0))));
 
   subscriber.ExpectNoOther();
 
@@ -1123,11 +1198,11 @@ TEST_F(InstanceRequestorTest, ResponsePtrOnly) {
   ReceiveTxt(under_test, kServiceName, kInstanceName, kText, sender_address);
 
   // Expect change of the instance to be reported to the client with text.
-  params = subscriber.ExpectInstanceChangedCalled();
-  EXPECT_EQ(ServiceInstance(kServiceName, kInstanceName, kHostName,
-                            {inet::SocketAddress(sender_address.socket_address().address(), kPort)},
-                            kText, 0, 0),
-            *params);
+  EXPECT_THAT(
+      subscriber.TakeInstanceChanged(),
+      Pointee(Eq(ServiceInstance(
+          kServiceName, kInstanceName, kHostName,
+          {inet::SocketAddress(sender_address.socket_address().address(), kPort)}, kText, 0, 0))));
 
   subscriber.ExpectNoOther();
 }
@@ -1191,12 +1266,10 @@ TEST_F(InstanceRequestorTest, SubscriberUnsubscribesDuringInstanceLost) {
   ptr_resource.time_to_live_ = 0;
   under_test->ReceiveResource(ptr_resource, MdnsResourceSection::kExpired, sender_address);
 
-  auto instance_id_a = subscriber_a.ExpectInstanceLostCalled();
-  EXPECT_EQ(kServiceName, instance_id_a->service_);
-  EXPECT_EQ(kInstanceName, instance_id_a->instance_);
-  auto instance_id_b = subscriber_b.ExpectInstanceLostCalled();
-  EXPECT_EQ(kServiceName, instance_id_b->service_);
-  EXPECT_EQ(kInstanceName, instance_id_b->instance_);
+  EXPECT_THAT(subscriber_a.TakeInstanceLost(),
+              Pointee(Eq(Subscriber::InstanceId(kServiceName, kInstanceName))));
+  EXPECT_THAT(subscriber_b.TakeInstanceLost(),
+              Pointee(Eq(Subscriber::InstanceId(kServiceName, kInstanceName))));
 
   // Removing the last subscriber posts a task that quits the agent.
   ExpectPostTaskForTimeAndInvoke(zx::sec(0), zx::sec(0));
@@ -1230,10 +1303,10 @@ TEST_F(InstanceRequestorTest, SubscriberUnsubscribesDuringReportAllDiscoveries) 
       inet::IpAddress(192, 168, 1, 100), 1, Media::kWireless, IpVersions::kV4);
   ReceivePublication(under_test, kHostFullName, kServiceName, kInstanceName, kPort, kText,
                      sender_address);
-  subscriber_a.ExpectInstanceDiscoveredCalled();
+  EXPECT_THAT(subscriber_a.TakeInstanceDiscovered(), NotNull());
   ReceivePublication(under_test, kHostFullName, kServiceName, kInstanceName2, kPort, kText,
                      sender_address);
-  subscriber_a.ExpectInstanceDiscoveredCalled();
+  EXPECT_THAT(subscriber_a.TakeInstanceDiscovered(), NotNull());
 
   // A subscriber that unsubscribes on its first callback must get exactly one callback.
   class UnsubscribingSubscriber : public Subscriber {
@@ -1258,7 +1331,7 @@ TEST_F(InstanceRequestorTest, SubscriberUnsubscribesDuringReportAllDiscoveries) 
   UnsubscribingSubscriber subscriber_b(under_test);
   under_test.AddSubscriber(&subscriber_b);
 
-  EXPECT_EQ(1u, subscriber_b.discovered_count());
+  EXPECT_EQ(subscriber_b.discovered_count(), 1u);
 }
 
 // Tests the behavior of the requestor when a response containing no addresses is received on V6.
@@ -1300,15 +1373,410 @@ TEST_F(InstanceRequestorTest, ResponseSansAddressesV6) {
   ReceiveAddress(under_test, kHostFullName, sender_address);
 
   // Expect discovery of the instance to be reported to the client.
-  auto params = subscriber.ExpectInstanceDiscoveredCalled();
-  if (!params) {
-    return;
+  EXPECT_THAT(subscriber.TakeInstanceDiscovered(),
+              Pointee(Eq(ServiceInstance(
+                  kServiceName, kInstanceName, kHostName,
+                  {inet::SocketAddress(sender_address.socket_address().address(), kPort, 1)}, kText,
+                  0, 0))));
+
+  subscriber.ExpectNoOther();
+}
+
+// Tests that removing and destroying another subscriber synchronously during |Query| skips the
+// removed subscriber and quits the agent when no subscribers remain.
+TEST_F(InstanceRequestorTest, SubscriberRemovesOtherDuringQuery) {
+  // Need to |make_shared|, because the code under test expects agents to be managed
+  // by shared pointers. It may call `shared_from_this`, for example.
+  auto under_test = std::make_shared<InstanceRequestor>(
+      this, kServiceName, Media::kBoth, IpVersions::kBoth, kExcludeLocal, kExcludeLocalProxies);
+  SetAgent(*under_test);
+
+  size_t callback_count = 0;
+  auto subscriber_a = std::make_unique<ActionSubscriber>();
+  auto subscriber_b = std::make_unique<ActionSubscriber>();
+  subscriber_a->SetOnQuery(
+      RemoveBothAndDestroyOther(*under_test, callback_count, subscriber_a, subscriber_b));
+  subscriber_b->SetOnQuery(
+      RemoveBothAndDestroyOther(*under_test, callback_count, subscriber_b, subscriber_a));
+  under_test->AddSubscriber(subscriber_a.get());
+  under_test->AddSubscriber(subscriber_b.get());
+
+  under_test->Start(kLocalHostFullName);
+
+  EXPECT_EQ(callback_count, 1u);
+  ASSERT_TRUE(subscriber_a || subscriber_b);
+  EXPECT_FALSE(subscriber_a && subscriber_b);
+  auto& survivor = subscriber_a ? *subscriber_a : *subscriber_b;
+  survivor.ExpectQueryCalled(DnsType::kPtr);
+  survivor.ExpectNoOther();
+
+  auto message = ExpectOutboundMessage(ReplyAddress::Multicast(Media::kBoth, IpVersions::kBoth));
+  ExpectQuestion(message.get(), kServiceFullName, DnsType::kPtr);
+  ExpectNoOtherQuestionOrResource(message.get());
+
+  // Removing the last subscriber during |SendQuery| posts the quit task before |SendQuery| posts
+  // the next scheduled query task.
+  auto [quit_task, _] = ExpectPostTaskForTime(zx::sec(0), zx::sec(0));
+  ExpectPostTaskForTime(kMinDelay, kMinDelay);
+  ExpectNoOther();
+
+  quit_task();
+  ExpectRemoveAgentCall();
+  ExpectNoOther();
+}
+
+// Tests that removing and destroying another subscriber synchronously during |InstanceDiscovered|
+// in |EndOfMessage| skips the removed subscriber and quits the agent when no subscribers remain.
+TEST_F(InstanceRequestorTest, SubscriberRemovesOtherDuringInstanceDiscovered) {
+  // Need to |make_shared|, because the code under test expects agents to be managed
+  // by shared pointers. It may call `shared_from_this`, for example.
+  auto under_test = std::make_shared<InstanceRequestor>(
+      this, kServiceName, Media::kBoth, IpVersions::kBoth, kExcludeLocal, kExcludeLocalProxies);
+  SetAgent(*under_test);
+
+  size_t callback_count = 0;
+  auto subscriber_a = std::make_unique<ActionSubscriber>();
+  auto subscriber_b = std::make_unique<ActionSubscriber>();
+  subscriber_a->SetOnInstanceDiscovered(
+      RemoveBothAndDestroyOther(*under_test, callback_count, subscriber_a, subscriber_b));
+  subscriber_b->SetOnInstanceDiscovered(
+      RemoveBothAndDestroyOther(*under_test, callback_count, subscriber_b, subscriber_a));
+  under_test->AddSubscriber(subscriber_a.get());
+  under_test->AddSubscriber(subscriber_b.get());
+
+  under_test->Start(kLocalHostFullName);
+
+  auto message = ExpectOutboundMessage(ReplyAddress::Multicast(Media::kBoth, IpVersions::kBoth));
+  ExpectQuestion(message.get(), kServiceFullName, DnsType::kPtr);
+  ExpectNoOtherQuestionOrResource(message.get());
+  ExpectPostTaskForTime(kMinDelay, kMinDelay);
+  ExpectNoOther();
+
+  subscriber_a->ExpectQueryCalled(DnsType::kPtr);
+  subscriber_b->ExpectQueryCalled(DnsType::kPtr);
+
+  ReplyAddress sender_address(
+      inet::SocketAddress(192, 168, 1, 1, inet::IpPort::From_uint16_t(5353)),
+      inet::IpAddress(192, 168, 1, 100), 1, Media::kWireless, IpVersions::kV4);
+  ReceivePublication(*under_test, kHostFullName, kServiceName, kInstanceName, kPort, kText,
+                     sender_address);
+
+  EXPECT_EQ(callback_count, 1u);
+  ASSERT_TRUE(subscriber_a || subscriber_b);
+  EXPECT_FALSE(subscriber_a && subscriber_b);
+  auto& survivor = subscriber_a ? *subscriber_a : *subscriber_b;
+  EXPECT_THAT(
+      survivor.TakeInstanceDiscovered(),
+      Pointee(Eq(ServiceInstance(
+          kServiceName, kInstanceName, kHostName,
+          {inet::SocketAddress(sender_address.socket_address().address(), kPort)}, kText, 0, 0))));
+  survivor.ExpectNoOther();
+
+  ExpectRenewCall(DnsResource(kServiceFullName, DnsType::kPtr));
+  ExpectRenewCall(DnsResource(kInstanceFullName, DnsType::kSrv));
+  ExpectRenewCall(DnsResource(kInstanceFullName, DnsType::kTxt));
+  ExpectRenewCall(DnsResource(kHostFullName, sender_address.socket_address().address()));
+  // Expect the quit task to be posted.
+  ExpectPostTaskForTimeAndInvoke(zx::sec(0), zx::sec(0));
+  ExpectRemoveAgentCall();
+  ExpectNoOther();
+}
+
+// Tests that removing and destroying another subscriber synchronously during |InstanceChanged| in
+// |EndOfMessage| skips the removed subscriber and quits the agent when no subscribers remain.
+TEST_F(InstanceRequestorTest, SubscriberRemovesOtherDuringInstanceChanged) {
+  // Need to |make_shared|, because the code under test expects agents to be managed
+  // by shared pointers. It may call `shared_from_this`, for example.
+  auto under_test = std::make_shared<InstanceRequestor>(
+      this, kServiceName, Media::kBoth, IpVersions::kBoth, kExcludeLocal, kExcludeLocalProxies);
+  SetAgent(*under_test);
+
+  size_t callback_count = 0;
+  auto subscriber_a = std::make_unique<ActionSubscriber>();
+  auto subscriber_b = std::make_unique<ActionSubscriber>();
+  subscriber_a->SetOnInstanceChanged(
+      RemoveBothAndDestroyOther(*under_test, callback_count, subscriber_a, subscriber_b));
+  subscriber_b->SetOnInstanceChanged(
+      RemoveBothAndDestroyOther(*under_test, callback_count, subscriber_b, subscriber_a));
+  under_test->AddSubscriber(subscriber_a.get());
+  under_test->AddSubscriber(subscriber_b.get());
+
+  under_test->Start(kLocalHostFullName);
+
+  auto message = ExpectOutboundMessage(ReplyAddress::Multicast(Media::kBoth, IpVersions::kBoth));
+  ExpectQuestion(message.get(), kServiceFullName, DnsType::kPtr);
+  ExpectNoOtherQuestionOrResource(message.get());
+  ExpectPostTaskForTime(kMinDelay, kMinDelay);
+  ExpectNoOther();
+
+  subscriber_a->ExpectQueryCalled(DnsType::kPtr);
+  subscriber_b->ExpectQueryCalled(DnsType::kPtr);
+
+  ReplyAddress sender_address(
+      inet::SocketAddress(192, 168, 1, 1, inet::IpPort::From_uint16_t(5353)),
+      inet::IpAddress(192, 168, 1, 100), 1, Media::kWireless, IpVersions::kV4);
+  ReceivePublication(*under_test, kHostFullName, kServiceName, kInstanceName, kPort, kText,
+                     sender_address);
+
+  EXPECT_THAT(subscriber_a->TakeInstanceDiscovered(), NotNull());
+  EXPECT_THAT(subscriber_b->TakeInstanceDiscovered(), NotNull());
+  ExpectRenewCall(DnsResource(kServiceFullName, DnsType::kPtr));
+  ExpectRenewCall(DnsResource(kInstanceFullName, DnsType::kSrv));
+  ExpectRenewCall(DnsResource(kInstanceFullName, DnsType::kTxt));
+  ExpectRenewCall(DnsResource(kHostFullName, sender_address.socket_address().address()));
+  ExpectNoOther();
+
+  // Send updated TXT record to trigger |InstanceChanged|.
+  ReceiveTxt(*under_test, kServiceName, kInstanceName, kAltText, sender_address);
+
+  EXPECT_EQ(callback_count, 1u);
+  ASSERT_TRUE(subscriber_a || subscriber_b);
+  EXPECT_FALSE(subscriber_a && subscriber_b);
+  auto& survivor = subscriber_a ? *subscriber_a : *subscriber_b;
+  EXPECT_THAT(survivor.TakeInstanceChanged(),
+              Pointee(Eq(ServiceInstance(
+                  kServiceName, kInstanceName, kHostName,
+                  {inet::SocketAddress(sender_address.socket_address().address(), kPort)}, kAltText,
+                  0, 0))));
+  survivor.ExpectNoOther();
+
+  ExpectRenewCall(DnsResource(kInstanceFullName, DnsType::kTxt));
+  // Expect the quit task to be posted.
+  ExpectPostTaskForTimeAndInvoke(zx::sec(0), zx::sec(0));
+  ExpectRemoveAgentCall();
+  ExpectNoOther();
+}
+
+// Tests that removing and destroying another subscriber synchronously during |InstanceLost| in
+// |RemoveInstance| skips the removed subscriber and quits the agent when no subscribers remain.
+TEST_F(InstanceRequestorTest, SubscriberRemovesOtherDuringInstanceLost) {
+  // Need to |make_shared|, because the code under test expects agents to be managed
+  // by shared pointers. It may call `shared_from_this`, for example.
+  auto under_test = std::make_shared<InstanceRequestor>(
+      this, kServiceName, Media::kBoth, IpVersions::kBoth, kExcludeLocal, kExcludeLocalProxies);
+  SetAgent(*under_test);
+
+  size_t callback_count = 0;
+  auto subscriber_a = std::make_unique<ActionSubscriber>();
+  auto subscriber_b = std::make_unique<ActionSubscriber>();
+  subscriber_a->SetOnInstanceLost(
+      RemoveBothAndDestroyOther(*under_test, callback_count, subscriber_a, subscriber_b));
+  subscriber_b->SetOnInstanceLost(
+      RemoveBothAndDestroyOther(*under_test, callback_count, subscriber_b, subscriber_a));
+  under_test->AddSubscriber(subscriber_a.get());
+  under_test->AddSubscriber(subscriber_b.get());
+
+  under_test->Start(kLocalHostFullName);
+
+  auto message = ExpectOutboundMessage(ReplyAddress::Multicast(Media::kBoth, IpVersions::kBoth));
+  ExpectQuestion(message.get(), kServiceFullName, DnsType::kPtr);
+  ExpectNoOtherQuestionOrResource(message.get());
+  ExpectPostTaskForTime(kMinDelay, kMinDelay);
+  ExpectNoOther();
+
+  subscriber_a->ExpectQueryCalled(DnsType::kPtr);
+  subscriber_b->ExpectQueryCalled(DnsType::kPtr);
+
+  ReplyAddress sender_address(
+      inet::SocketAddress(192, 168, 1, 1, inet::IpPort::From_uint16_t(5353)),
+      inet::IpAddress(192, 168, 1, 100), 1, Media::kWireless, IpVersions::kV4);
+  ReceivePtr(*under_test, kServiceName, kInstanceName, sender_address);
+  ExpectQueryCall(DnsType::kSrv, MdnsNames::InstanceFullName(kInstanceName, kServiceName),
+                  Media::kBoth, IpVersions::kBoth, now(), kAdditionalInterval,
+                  kAdditionalIntervalMultiplier, kAdditionalMaxQueries, true);
+  ExpectRenewCall(DnsResource(kServiceFullName, DnsType::kPtr));
+  ExpectNoOther();
+
+  DnsResource ptr_resource(kServiceFullName, DnsType::kPtr);
+  ptr_resource.ptr_.pointer_domain_name_ = DnsName(kInstanceFullName);
+  ptr_resource.time_to_live_ = 0;
+  under_test->ReceiveResource(ptr_resource, MdnsResourceSection::kExpired, sender_address);
+
+  EXPECT_EQ(callback_count, 1u);
+  ASSERT_TRUE(subscriber_a || subscriber_b);
+  EXPECT_FALSE(subscriber_a && subscriber_b);
+  auto& survivor = subscriber_a ? *subscriber_a : *subscriber_b;
+  EXPECT_THAT(survivor.TakeInstanceLost(),
+              Pointee(Eq(Subscriber::InstanceId(kServiceName, kInstanceName))));
+  survivor.ExpectNoOther();
+
+  // Expect the quit task to be posted.
+  ExpectPostTaskForTimeAndInvoke(zx::sec(0), zx::sec(0));
+  ExpectRemoveAgentCall();
+  ExpectNoOther();
+}
+
+// Tests that removing and destroying another subscriber synchronously during |InstanceLost| in
+// |RemoveLocalInstance| skips the removed subscriber and quits the agent when no subscribers
+// remain.
+TEST_F(InstanceRequestorTest, SubscriberRemovesOtherDuringLocalInstanceLost) {
+  // Need to |make_shared|, because the code under test expects agents to be managed
+  // by shared pointers. It may call `shared_from_this`, for example.
+  auto under_test = std::make_shared<InstanceRequestor>(
+      this, kServiceName, Media::kBoth, IpVersions::kBoth, kIncludeLocal, kExcludeLocalProxies);
+  SetAgent(*under_test);
+  SetLocalHostAddresses(kHostAddresses);
+
+  size_t callback_count = 0;
+  auto subscriber_a = std::make_unique<ActionSubscriber>();
+  auto subscriber_b = std::make_unique<ActionSubscriber>();
+  subscriber_a->SetOnInstanceLost(
+      RemoveBothAndDestroyOther(*under_test, callback_count, subscriber_a, subscriber_b));
+  subscriber_b->SetOnInstanceLost(
+      RemoveBothAndDestroyOther(*under_test, callback_count, subscriber_b, subscriber_a));
+  under_test->AddSubscriber(subscriber_a.get());
+  under_test->AddSubscriber(subscriber_b.get());
+
+  under_test->Start(kLocalHostFullName);
+
+  auto message = ExpectOutboundMessage(ReplyAddress::Multicast(Media::kBoth, IpVersions::kBoth));
+  ExpectQuestion(message.get(), kServiceFullName, DnsType::kPtr);
+  ExpectNoOtherQuestionOrResource(message.get());
+  ExpectPostTaskForTime(kMinDelay, kMinDelay);
+  ExpectNoOther();
+
+  subscriber_a->ExpectQueryCalled(DnsType::kPtr);
+  subscriber_b->ExpectQueryCalled(DnsType::kPtr);
+
+  under_test->OnAddLocalServiceInstance(
+      ServiceInstance(kServiceName, kInstanceName, kLocalHostName, kSocketAddresses, kText),
+      kFromLocalHost);
+  EXPECT_THAT(subscriber_a->TakeInstanceDiscovered(), NotNull());
+  EXPECT_THAT(subscriber_b->TakeInstanceDiscovered(), NotNull());
+  ExpectNoOther();
+
+  under_test->OnRemoveLocalServiceInstance(kServiceName, kInstanceName, kFromLocalHost);
+
+  EXPECT_EQ(callback_count, 1u);
+  ASSERT_TRUE(subscriber_a || subscriber_b);
+  EXPECT_FALSE(subscriber_a && subscriber_b);
+  auto& survivor = subscriber_a ? *subscriber_a : *subscriber_b;
+  EXPECT_THAT(survivor.TakeInstanceLost(),
+              Pointee(Eq(Subscriber::InstanceId(kServiceName, kInstanceName))));
+  survivor.ExpectNoOther();
+
+  // Expect the quit task to be posted.
+  ExpectPostTaskForTimeAndInvoke(zx::sec(0), zx::sec(0));
+  ExpectRemoveAgentCall();
+  ExpectNoOther();
+}
+
+// Tests that adding subscribers synchronously during |InstanceDiscovered| does not invalidate
+// iteration and reports the instance exactly once to both existing and newly added subscribers.
+TEST_F(InstanceRequestorTest, SubscriberAddsSubscribersDuringInstanceDiscovered) {
+  InstanceRequestor under_test(this, kServiceName, Media::kBoth, IpVersions::kBoth, kIncludeLocal,
+                               kExcludeLocalProxies);
+  SetAgent(under_test);
+  SetLocalHostAddresses(kHostAddresses);
+
+  // Create an arbitrary number of subscribers to add during |InstanceDiscovered| callbacks.
+  constexpr size_t kAddedSubscriberCount = 32;
+  std::vector<std::unique_ptr<ActionSubscriber>> added_subscribers;
+  added_subscribers.reserve(kAddedSubscriberCount);
+  for (size_t i = 0; i < kAddedSubscriberCount; ++i) {
+    added_subscribers.push_back(std::make_unique<ActionSubscriber>());
   }
-  EXPECT_EQ(
-      ServiceInstance(kServiceName, kInstanceName, kHostName,
-                      {inet::SocketAddress(sender_address.socket_address().address(), kPort, 1)},
-                      kText, 0, 0),
-      *params);
+
+  bool added = false;
+  auto add_all_new_subscribers = [&under_test, &added_subscribers, &added]() {
+    if (added) {
+      return;
+    }
+    added = true;
+    for (auto& subscriber : added_subscribers) {
+      under_test.AddSubscriber(subscriber.get());
+    }
+  };
+
+  ActionSubscriber subscriber_a;
+  ActionSubscriber subscriber_b;
+  subscriber_a.SetOnInstanceDiscovered(add_all_new_subscribers);
+  subscriber_b.SetOnInstanceDiscovered(add_all_new_subscribers);
+  under_test.AddSubscriber(&subscriber_a);
+  under_test.AddSubscriber(&subscriber_b);
+
+  under_test.Start(kLocalHostFullName);
+
+  auto message = ExpectOutboundMessage(ReplyAddress::Multicast(Media::kBoth, IpVersions::kBoth));
+  ExpectQuestion(message.get(), kServiceFullName, DnsType::kPtr);
+  ExpectNoOtherQuestionOrResource(message.get());
+  ExpectPostTaskForTime(kMinDelay, kMinDelay);
+  ExpectNoOther();
+
+  subscriber_a.ExpectQueryCalled(DnsType::kPtr);
+  subscriber_b.ExpectQueryCalled(DnsType::kPtr);
+
+  under_test.OnAddLocalServiceInstance(
+      ServiceInstance(kServiceName, kInstanceName, kLocalHostName, kSocketAddresses, kText),
+      kFromLocalHost);
+
+  EXPECT_TRUE(added);
+  EXPECT_EQ(subscriber_a.instance_discovered_count(), 1u);
+  EXPECT_EQ(subscriber_b.instance_discovered_count(), 1u);
+  EXPECT_THAT(subscriber_a.TakeInstanceDiscovered(), NotNull());
+  subscriber_a.ExpectNoOther();
+  EXPECT_THAT(subscriber_b.TakeInstanceDiscovered(), NotNull());
+  subscriber_b.ExpectNoOther();
+
+  for (auto& subscriber : added_subscribers) {
+    EXPECT_EQ(subscriber->instance_discovered_count(), 1u);
+    EXPECT_THAT(subscriber->TakeInstanceDiscovered(), NotNull());
+    subscriber->ExpectNoOther();
+  }
+
+  ExpectNoOther();
+}
+
+// Tests that loopback A and AAAA records received from the wire are ignored.
+TEST_F(InstanceRequestorTest, IgnoreWireLoopbackAddresses) {
+  InstanceRequestor under_test(this, kServiceName, Media::kBoth, IpVersions::kBoth, kExcludeLocal,
+                               kExcludeLocalProxies);
+  SetAgent(under_test);
+
+  Subscriber subscriber;
+  under_test.AddSubscriber(&subscriber);
+
+  under_test.Start(kLocalHostFullName);
+
+  auto message = ExpectOutboundMessage(ReplyAddress::Multicast(Media::kBoth, IpVersions::kBoth));
+  ExpectQuestion(message.get(), kServiceFullName, DnsType::kPtr);
+  ExpectNoOtherQuestionOrResource(message.get());
+  ExpectPostTaskForTime(kMinDelay, kMinDelay);
+  ExpectNoOther();
+
+  subscriber.ExpectQueryCalled(DnsType::kPtr);
+  subscriber.ExpectNoOther();
+
+  ReplyAddress sender_address(inet::SocketAddress(0xfe80, 1, inet::IpPort::From_uint16_t(5353)),
+                              inet::IpAddress(0xfe80, 100), 1, Media::kWireless, IpVersions::kV6);
+  // Receive a publication without an address record so the instance is not reported as discovered
+  // until a valid address record arrives.
+  ReceivePublication(under_test, kHostFullName, kServiceName, kInstanceName, kPort, kText,
+                     sender_address, /*include_txt=*/true, /*include_address=*/false);
+
+  ExpectQueryCall(DnsType::kA, kHostFullName, Media::kBoth, IpVersions::kBoth, now(),
+                  kAdditionalInterval, kAdditionalIntervalMultiplier, kAdditionalMaxQueries, true);
+  ExpectQueryCall(DnsType::kAaaa, kHostFullName, Media::kBoth, IpVersions::kBoth, now(),
+                  kAdditionalInterval, kAdditionalIntervalMultiplier, kAdditionalMaxQueries, true);
+  subscriber.ExpectNoOther();
+
+  // Receive loopback A and AAAA records from the wire; they must be ignored.
+  under_test.ReceiveResource(DnsResource(kHostFullName, inet::IpAddress::kV4Loopback),
+                             MdnsResourceSection::kAnswer, sender_address);
+  under_test.ReceiveResource(DnsResource(kHostFullName, inet::IpAddress::kV6Loopback),
+                             MdnsResourceSection::kAnswer, sender_address);
+  under_test.EndOfMessage();
+
+  subscriber.ExpectNoOther();
+
+  // Receive a valid address record and verify only the non-loopback address is reported.
+  ReceiveAddress(under_test, kHostFullName, sender_address);
+
+  EXPECT_THAT(
+      subscriber.TakeInstanceDiscovered(),
+      Pointee(Eq(ServiceInstance(
+          kServiceName, kInstanceName, kHostName,
+          {inet::SocketAddress(sender_address.socket_address().address(), kPort, 1)}, kText))));
 
   subscriber.ExpectNoOther();
 }

@@ -540,6 +540,10 @@ pub(crate) mod test {
                                 assert!(!self.bonding_delegate_stream.is_some());
                                 self.bonding_delegate_stream.set(delegate.into_stream());
                              }
+                             Some(Ok(HostRequest::Shutdown { .. })) => {
+                                 self.host_info.write().discovering = false;
+                                 self.discovery_stream = MaybeStream::default();
+                             }
                              None => {
                                  self.host_info.write().discovering = false;
                                  self.maybe_send_watch_state_response().await;

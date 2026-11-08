@@ -75,7 +75,7 @@
         },
         {
             // Whether to enable TCP Generic Receive Offload (GRO).
-            // TODO(https://fxbug.dev/452980285): Remove this flag when enabled by
+            // TODO(https://fxbug.dev/573166201): Remove this flag when enabled by
             // default.
             config: "fuchsia.netstack3.TcpGroEnabled",
             from: "parent/netstack3-config",
@@ -92,6 +92,18 @@
             // Assume no suspension if not routed from parent.
             availability: "optional",
             default: false,
+        },
+        {
+            // Whether to hash MAC addresses in logs and Inspect. Defaults to true
+            // (fail closed) so that a product or realm that does not route this
+            // capability never logs raw identifiers; assembly routes `false`
+            // explicitly on eng builds. Hermetic test netstacks use the `false`
+            // default in test_common_configs.shard.cml instead.
+            config: "fuchsia.connectivity.RedactNetworkIdentifiers",
+            key: "redact_network_identifiers",
+            type: "bool",
+            availability: "transitional",
+            default: true,
         },
     ],
 }

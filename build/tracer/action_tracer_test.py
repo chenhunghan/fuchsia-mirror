@@ -9,8 +9,7 @@ import subprocess
 import textwrap
 import time
 import unittest
-from collections.abc import Iterable
-from typing import AbstractSet
+from collections.abc import Iterable, Set
 from unittest import mock
 
 import action_tracer
@@ -536,7 +535,7 @@ class AccessShouldCheckTests(unittest.TestCase):
         )
 
     def test_no_ignored_prefix(self):
-        ignore_conditions = action_tracer.MatchConditions(prefixes={})
+        ignore_conditions = action_tracer.MatchConditions(prefixes=set())
         self.assertTrue(
             action_tracer.Read("book").should_check(
                 ignore_conditions=ignore_conditions
@@ -577,7 +576,7 @@ class AccessShouldCheckTests(unittest.TestCase):
         )
 
     def test_no_ignored_suffix(self):
-        ignore_conditions = action_tracer.MatchConditions(suffixes={})
+        ignore_conditions = action_tracer.MatchConditions(suffixes=set())
         self.assertTrue(
             action_tracer.Read("book").should_check(
                 ignore_conditions=ignore_conditions
@@ -659,42 +658,42 @@ class CheckAccessAllowedTests(unittest.TestCase):
     def test_allowed_read(self):
         self.assertTrue(
             action_tracer.Read("foo.txt").allowed(
-                allowed_reads={"foo.txt"}, allowed_writes={}
+                allowed_reads={"foo.txt"}, allowed_writes=set()
             )
         )
 
     def test_forbiddden_read(self):
         self.assertFalse(
             action_tracer.Read("bar.txt").allowed(
-                allowed_reads={}, allowed_writes={}
+                allowed_reads=set(), allowed_writes=set()
             )
         )
 
     def test_allowed_write(self):
         self.assertTrue(
             action_tracer.Write("foo.txt").allowed(
-                allowed_reads={}, allowed_writes={"foo.txt"}
+                allowed_reads=set(), allowed_writes={"foo.txt"}
             )
         )
 
     def test_forbiddden_write(self):
         self.assertFalse(
             action_tracer.Write("baz.txt").allowed(
-                allowed_reads={}, allowed_writes={}
+                allowed_reads=set(), allowed_writes=set()
             )
         )
 
     def test_allowed_delete(self):
         self.assertTrue(
             action_tracer.Delete("foo.txt").allowed(
-                allowed_reads={}, allowed_writes={"foo.txt"}
+                allowed_reads=set(), allowed_writes={"foo.txt"}
             )
         )
 
     def test_forbiddden_delete(self):
         self.assertFalse(
             action_tracer.Delete("baz.txt").allowed(
-                allowed_reads={}, allowed_writes={}
+                allowed_reads=set(), allowed_writes=set()
             )
         )
 
@@ -947,26 +946,26 @@ class CheckAccessPermissionsTests(unittest.TestCase):
 class CheckMissingWritesTests(unittest.TestCase):
     def test_no_accesses(self):
         self.assertEqual(
-            action_tracer.check_missing_writes([], {}),
-            {},
+            action_tracer.check_missing_writes([], set()),
+            set(),
         )
 
     def test_only_reads(self):
         self.assertEqual(
             action_tracer.check_missing_writes(
                 [action_tracer.Read("newspaper.pdf")],
-                {},
+                set(),
             ),
-            {},
+            set(),
         )
 
     def test_excess_write(self):
         self.assertEqual(
             action_tracer.check_missing_writes(
                 [action_tracer.Write("side-effect.txt")],
-                {},
+                set(),
             ),
-            {},
+            set(),
         )
 
     def test_fulfilled_write(self):
@@ -1024,7 +1023,7 @@ class CheckMissingWritesTests(unittest.TestCase):
         )
 
 
-def abspaths(container: Iterable[str]) -> AbstractSet[str]:
+def abspaths(container: Iterable[str]) -> Set[str]:
     return {os.path.abspath(f) for f in container}
 
 

@@ -1,6 +1,6 @@
 Name: gvisor
 URL: https://github.com/google/gvisor
-Revision: df21591966b84b3a6b3f7dd0394dc407eea2ab4f
+Revision: 400320e537f7cbbfc5c5de783476c0832a231f07
 License: Apache 2.0
 License File: LICENSE
 

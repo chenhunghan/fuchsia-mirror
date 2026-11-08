@@ -27,7 +27,7 @@ source_set("data_provider") {
   public_deps = [
     ":inspect_budget",
     ":metadata",
-    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_hlcpp",
+    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_cpp",
     "//sdk/lib/async:async-cpp",
     "//sdk/lib/async-loop:async-loop-cpp",
     "//sdk/lib/sys/cpp",
@@ -42,6 +42,9 @@ source_set("data_provider") {
 
   deps = [
     ":constants",
+    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_cpp_hlcpp_conversion",
+    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_hlcpp",
+    "//sdk/fidl/fuchsia.mem:fuchsia.mem_cpp",
     "//sdk/lib/syslog/cpp",
     "//src/developer/forensics/utils:archive",
     "//src/lib/fsl",
@@ -84,8 +87,8 @@ source_set("log_buffer") {
   ]
 
   public_deps = [
-    ":log_source",
-    "//sdk/lib/fit",
+    "//sdk/fidl/fuchsia.logger:fuchsia.logger_hlcpp",
+    "//sdk/lib/fit-promise",
     "//src/developer/forensics/utils:storage_size",
     "//src/developer/forensics/utils/redact",
     "//zircon/system/ulib/zx",
@@ -93,7 +96,7 @@ source_set("log_buffer") {
 
   deps = [
     ":constants",
-    "//sdk/fidl/fuchsia.logger:fuchsia.logger_hlcpp",
+    "//sdk/lib/fit",
     "//src/developer/forensics/utils:logs",
     "//src/lib/fxl",
   ]
@@ -109,15 +112,15 @@ source_set("log_source") {
     "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_hlcpp",
     "//sdk/fidl/fuchsia.logger:fuchsia.logger_hlcpp",
     "//sdk/lib/async",
-    "//sdk/lib/async:async-cpp",
+    "//sdk/lib/fit-promise",
     "//sdk/lib/sys/cpp",
-    "//src/lib/fxl",
+    "//src/lib/diagnostics/fidl_log_message_parser",
   ]
 
   deps = [
     ":constants",
+    "//sdk/lib/fit",
     "//sdk/lib/syslog/cpp",
-    "//src/lib/diagnostics/accessor2logger",
   ]
 }
 

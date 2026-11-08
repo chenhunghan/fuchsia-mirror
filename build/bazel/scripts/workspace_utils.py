@@ -9,15 +9,13 @@ import json
 import os
 import shlex
 import stat
-import sys
 import typing as T
 from pathlib import Path
 from textwrap import dedent
 
-_SCRIPT_DIR = os.path.dirname(__file__)
-sys.path.insert(0, _SCRIPT_DIR)
-import build_utils
-from bazel_build_flags import DefaultBuildFlagsMap
+from build.bazel.scripts import bazel_invocation as bazel_inv
+from build.bazel.scripts import build_utils
+from build.bazel.scripts.bazel_build_flags import DefaultBuildFlagsMap
 
 # LINT.IfChange(gn_targets_dir_symlink)
 # Location of the @gn_targets redirection symlink, relative
@@ -475,6 +473,7 @@ def record_fuchsia_workspace(
         ninja_build_dir=config_path_value(gn_output_dir),
         prebuilt_ninja=config_path_value(ninja_binary),
         prebuilt_python_dir=config_path_value(python_prebuilt_dir),
+        bazel_logs_dirname=shlex.quote(bazel_inv.BAZEL_LOGS_DIRNAME),
     )
 
     generated.record_symlink(
@@ -608,6 +607,79 @@ def record_fuchsia_workspace(
         gn_output_dir / "regenerator_outputs/fuchsia_in_tree_idk",
         # LINT.ThenChange(//build/regenerator.py)
     )
+
+    _record_abseil_cpp_repository(generated, fuchsia_dir)
+
+
+def _record_abseil_cpp_repository(
+    generated: GeneratedWorkspaceFiles,
+    fuchsia_dir: Path,
+) -> None:
+    """Record the @abseil-cpp repository in workspace/fuchsia_build_generated/abseil-cpp.
+
+    Upstream abseil-cpp's absl/time/internal/cctz/BUILD.bazel omits the Fuchsia
+    dependencies required by time_zone_lookup.cc when __Fuchsia__ is defined.
+    Overlay that single BUILD.bazel file while symlinking all other files and
+    directories directly to //third_party/abseil-cpp/src.
+    """
+    abseil_src = fuchsia_dir / "third_party" / "abseil-cpp" / "src"
+    cctz_build_rel = "absl/time/internal/cctz/BUILD.bazel"
+    cctz_build_src = abseil_src / cctz_build_rel
+    if not cctz_build_src.exists():
+        return
+
+    # LINT.IfChange
+    dst_root = "workspace/fuchsia_build_generated/abseil-cpp"
+    # LINT.ThenChange(//build/bazel/toplevel.MODULE.bazel)
+    expand_dirs = {
+        "",
+        "absl",
+        "absl/time",
+        "absl/time/internal",
+        "absl/time/internal/cctz",
+    }
+    for rel_dir in sorted(expand_dirs):
+        src_dir = abseil_src / rel_dir if rel_dir else abseil_src
+        for name in sorted(os.listdir(src_dir)):
+            rel_path = f"{rel_dir}/{name}" if rel_dir else name
+            if rel_path in expand_dirs:
+                continue
+            dst_path = f"{dst_root}/{rel_path}"
+            if rel_path == cctz_build_rel:
+                content = generated.read_text_file(cctz_build_src)
+                old_select = """\
+    deps = [
+        ":civil_time",
+        "//absl/base:config",
+    ] + select(
+        {
+            "//conditions:default": [],
+        },
+    ),"""
+                new_select = """\
+    deps = [
+        ":civil_time",
+        "//absl/base:config",
+    ] + select(
+        {
+            "@platforms//os:fuchsia": [
+                "@@//sdk/fidl/fuchsia.intl:fuchsia.intl_hlcpp",
+                "@@//sdk/lib/async-loop:async-loop-cpp",
+                "@@//sdk/lib/fdio",
+            ],
+            "//conditions:default": [],
+        },
+    ),"""
+                assert old_select in content, (
+                    f"Expected select() block not found in {cctz_build_src}. "
+                    "If a new abseil-cpp was rolled into the Fuchsia tree, "
+                    f"please update `_record_abseil_cpp_repository` in {__file__}"
+                )
+                generated.record_file_content(
+                    dst_path, content.replace(old_select, new_select, 1)
+                )
+            else:
+                generated.record_symlink(dst_path, src_dir / name)
 
 
 def generate_fuchsia_workspace(
@@ -847,6 +919,7 @@ class GnBuildArgs(object):
         # flags are set properly for each platform, even when transitioning
         # from one to the other.
         config_values: dict[str, list[str]] = {}
+        has_lto_values: dict[str, bool] = {}
         for config_name in ("host", "fuchsia"):
             # LINT.IfChange(bazel_args_json_path)
             config_file = build_dir / "bazel_args" / f"{config_name}.json"
@@ -861,6 +934,7 @@ class GnBuildArgs(object):
                 if not isinstance(flags, list):
                     raise ValueError(f"{config_file}: Malformed input file")
                 config_values[config_name] = flags
+                has_lto_values[config_name] = bool(info.get("has_lto", False))
                 # LINT.ThenChange(//build/bazel/config/bazel_args.gni:bazel_args_json_schema)
 
         # The following map must match the platforms defined in
@@ -871,6 +945,10 @@ class GnBuildArgs(object):
         BAZEL_PLATFORMS_TO_CONFIG = {
             "linux_x64": "host",
             "linux_arm64": "host",
+            "linux_starnix_x64": "host",
+            "linux_starnix_arm64": "host",
+            "linux_starnix_riscv64": "host",
+            "linux_starnix_arm": "host",
             "fuchsia_sdk_x64": "fuchsia",
             "fuchsia_sdk_arm64": "fuchsia",
             "fuchsia_sdk_riscv64": "fuchsia",
@@ -880,9 +958,15 @@ class GnBuildArgs(object):
         }
         # LINT.ThenChange(//build/bazel/platforms/BUILD.bazel)
 
-        content = """# AUTO-GENERATED BY FUCHSIA BUILD - DO NOT EDIT
+        fuchsia_has_lto = has_lto_values.get("fuchsia", False)
+        host_has_lto = has_lto_values.get("host", False)
 
-platform_flags_map = {
+        content = f"""# AUTO-GENERATED BY FUCHSIA BUILD - DO NOT EDIT
+
+fuchsia_has_lto = {fuchsia_has_lto}
+host_has_lto = {host_has_lto}
+
+platform_flags_map = {{
 """
         for platform, config in BAZEL_PLATFORMS_TO_CONFIG.items():
             flags = list(config_values.get(config, []))
@@ -1343,6 +1427,10 @@ class BazelrcFromGnConfigGenerator(object):
         "host",
         "linux_x64",
         "linux_arm64",
+        "linux_starnix_x64",
+        "linux_starnix_arm64",
+        "linux_starnix_riscv64",
+        "linux_starnix_arm",
         "fuchsia",
         "fuchsia_sdk",
         "fuchsia_sdk_x64",
@@ -1525,6 +1613,7 @@ def _generate_sysroot_dist_targets(
                 )"""
             )
         )
+        # LINT.IfChange(sysroot_variants)
         if variant:
             select_entries[
                 f"@@//build/bazel/toolchains/clang:{variant}_variant"
@@ -1532,8 +1621,9 @@ def _generate_sysroot_dist_targets(
 
     if "" in dist_files and "" in debug_files:
         select_entries[
-            "//conditions:default"
+            "@@//build/bazel/toolchains/clang:novariant"
         ] = ":sysroot_library_dist.novariant"
+    # LINT.ThenChange(//build/bazel/toolchains/clang/BUILD.bazel:sysroot_variants)
 
     if select_entries:
         select_dict_lines = "".join(

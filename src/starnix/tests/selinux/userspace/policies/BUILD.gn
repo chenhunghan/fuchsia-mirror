@@ -14,7 +14,11 @@ template("userspace_policy") {
   sepolicy_binary(target_name) {
     testonly = true
     prebuilt = "prebuilt/$target_name"
-    deps = [ ":userspace_base_policy" ]
+    if (defined(invoker.deps)) {
+      deps = invoker.deps
+    } else {
+      deps = [ ":userspace_base_policy" ]
+    }
     sources = invoker.sources
   }
 }
@@ -52,6 +56,7 @@ userspace_policy("fcntl_policy") {
 }
 
 userspace_policy("file_transition_policy") {
+  deps = [ "//src/starnix/lib/selinux/testdata:minimal_base_policy" ]
   sources = [ "file_transition_policy.conf" ]
 }
 

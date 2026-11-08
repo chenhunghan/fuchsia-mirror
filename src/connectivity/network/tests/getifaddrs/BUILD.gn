@@ -24,14 +24,13 @@ fuchsia_test_component("test-driver") {
 
 fuchsia_test_component("getifaddrs-test") {
   manifest = "meta/getifaddrs-test.cml"
-  deps = [
-    ":test-driver",
-    "//src/connectivity/network/testing/netemul/configurable-netstack:netstack3",
-  ]
+  deps = [ ":test-driver" ]
 }
 
 fuchsia_test_package("getifaddrs-tests") {
   test_components = [ ":getifaddrs-test" ]
+  subpackages =
+      [ "//src/connectivity/network/testing/netemul/configurable-netstack" ]
 }
 
 group("tests") {

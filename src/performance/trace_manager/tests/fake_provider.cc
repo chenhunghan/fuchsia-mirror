@@ -211,6 +211,22 @@ void FakeProvider::SendAlert(const char* alert_name) {
   ZX_DEBUG_ASSERT(status == ZX_OK || status == ZX_ERR_PEER_CLOSED);
 }
 
+void FakeProvider::SendSaveBuffer(uint32_t wrapped_count, uint64_t durable_data_end) {
+  UpdateBufferHeaderAfterStopped();
+  trace_provider_packet_t packet{};
+  packet.request = TRACE_PROVIDER_SAVE_BUFFER;
+  packet.data32 = wrapped_count;
+  packet.data64 = durable_data_end;
+  SendFifoPacket(&packet);
+}
+
+void FakeProvider::SendStoppedPacket() {
+  UpdateBufferHeaderAfterStopped();
+  trace_provider_packet_t packet{};
+  packet.request = TRACE_PROVIDER_STOPPED;
+  SendFifoPacket(&packet);
+}
+
 bool FakeProvider::SendFifoPacket(const trace_provider_packet_t* packet) {
   zx_status_t status = fifo_.write(sizeof(*packet), packet, 1, nullptr);
   return status == ZX_OK || status == ZX_ERR_PEER_CLOSED;

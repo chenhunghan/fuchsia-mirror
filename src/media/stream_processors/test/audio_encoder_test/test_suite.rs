@@ -46,11 +46,12 @@ impl AudioEncoderOutputTest {
         Self {
             output_file: None,
             input_audio: PcmAudio::create_saw_wave(
-                PcmFormat {
-                    pcm_mode: AudioPcmMode::Linear,
-                    bits_per_sample: 16,
-                    frames_per_second,
-                    channel_map: vec![AudioChannelId::Cf],
+                PcmFormat2 {
+                    pcm_mode: Some(AudioPcmMode2::Linear),
+                    bits_per_sample: Some(16),
+                    frames_per_second: Some(frames_per_second),
+                    channel_map: Some(vec![AudioChannelId2::Fc]),
+                    ..Default::default()
                 },
                 TEST_PCM_FRAME_COUNT,
             ),
@@ -74,11 +75,10 @@ impl AudioEncoderTestCase {
         for (output_test, stream_lifetime_ordinal) in
             self.output_tests.into_iter().zip(OrdinalPattern::Odd.into_iter())
         {
-            let settings = self.settings.clone();
             let pcm_audio = output_test.input_audio;
             let stream = Rc::new(PcmAudioStream {
                 pcm_audio,
-                encoder_settings: settings.clone(),
+                encoder_settings: self.settings.clone(),
                 frames_per_packet: (0..).map(move |_| easy_framelength),
                 timebase: None,
             });
@@ -242,22 +242,31 @@ impl AudioEncoderTestCase {
     }
 
     fn create_test_stream<I>(&self, frames_per_packet: I) -> Rc<PcmAudioStream<I>> {
-        let pcm_format = PcmFormat {
-            pcm_mode: AudioPcmMode::Linear,
-            bits_per_sample: 16,
-            frames_per_second: self.input_frames_per_second,
-            channel_map: match self.channel_count {
-                1 => vec![AudioChannelId::Cf],
-                2 => vec![AudioChannelId::Lf, AudioChannelId::Rf],
+        let (bits_per_sample, bytes_per_sample) = self
+            .output_tests
+            .first()
+            .map(|t| {
+                let fmt = t.input_audio.pcm_format();
+                (fmt.bits_per_sample.unwrap_or(16), fmt.bytes_per_sample)
+            })
+            .unwrap_or((16, None));
+        let pcm_format = PcmFormat2 {
+            pcm_mode: Some(AudioPcmMode2::Linear),
+            bits_per_sample: Some(bits_per_sample),
+            bytes_per_sample,
+            frames_per_second: Some(self.input_frames_per_second),
+            channel_map: Some(match self.channel_count {
+                1 => vec![AudioChannelId2::Fc],
+                2 => vec![AudioChannelId2::Fl, AudioChannelId2::Fr],
                 c => panic!("{} is not a valid channel count", c),
-            },
+            }),
+            ..Default::default()
         };
-        let pcm_audio = PcmAudio::create_saw_wave(pcm_format.clone(), TEST_PCM_FRAME_COUNT);
-        let settings = self.settings.clone();
+        let pcm_audio = PcmAudio::create_saw_wave(pcm_format, TEST_PCM_FRAME_COUNT);
         Rc::new(PcmAudioStream {
             pcm_audio,
-            encoder_settings: settings.clone(),
-            frames_per_packet: frames_per_packet,
+            encoder_settings: self.settings.clone(),
+            frames_per_packet,
             timebase: Some(zx::MonotonicDuration::from_seconds(1).into_nanos() as u64),
         })
     }

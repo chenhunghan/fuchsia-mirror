@@ -1,0 +1,388 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "storage_integration_test_bin",
+    srcs = ["integration_test.rs"],
+    crate_name = "storage_integration_test",
+    crate_root = "integration_test.rs",
+    edition = "2024",
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/sys/lib/component-events",
+    ],
+)
+
+fx_packaged_binary(
+    name = "storage_integration_test_packaged_bin",
+    testonly = True,
+    binary = ":storage_integration_test_bin",
+    binary_name = "storage_integration_test",
+)
+
+rustc_test(
+    name = "storage_admin_integration_test_bin",
+    srcs = ["admin_integration_test.rs"],
+    crate_name = "storage_admin_integration_test",
+    crate_root = "admin_integration_test.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-fs",
+        "//src/sys/lib/cm_rust",
+        "//src/sys/lib/cm_types",
+        "//src/sys/lib/component-events",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:maplit",
+    ],
+)
+
+fx_packaged_binary(
+    name = "storage_admin_integration_test_packaged_bin",
+    testonly = True,
+    binary = ":storage_admin_integration_test_bin",
+    binary_name = "storage_admin_integration_test",
+)
+
+rustc_binary(
+    name = "storage_realm_admin_bin",
+    testonly = True,
+    srcs = ["storage_realm_admin.rs"],
+    crate_name = "storage_realm_admin",
+    crate_root = "storage_realm_admin.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-fs",
+        "//src/sys/lib/component-events",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:maplit",
+    ],
+)
+
+fx_packaged_binary(
+    name = "storage_realm_admin_packaged_bin",
+    testonly = True,
+    binary = ":storage_realm_admin_bin",
+    binary_name = "storage_realm_admin",
+)
+
+rustc_binary(
+    name = "storage_realm_coll_bin",
+    testonly = True,
+    srcs = ["storage_realm_coll.rs"],
+    crate_name = "storage_realm_coll",
+    crate_root = "storage_realm_coll.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-fs",
+        "//src/sys/lib/component-events",
+    ],
+)
+
+fx_packaged_binary(
+    name = "storage_realm_coll_packaged_bin",
+    testonly = True,
+    binary = ":storage_realm_coll_bin",
+    binary_name = "storage_realm_coll",
+)
+
+rustc_binary(
+    name = "storage_realm_coll_invalid_route_bin",
+    testonly = True,
+    srcs = ["storage_realm_coll_invalid_route.rs"],
+    crate_name = "storage_realm_coll_invalid_route",
+    crate_root = "storage_realm_coll_invalid_route.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/sys/lib/component-events",
+    ],
+)
+
+fx_packaged_binary(
+    name = "storage_realm_coll_invalid_route_packaged_bin",
+    testonly = True,
+    binary = ":storage_realm_coll_invalid_route_bin",
+    binary_name = "storage_realm_coll_invalid_route",
+)
+
+rustc_binary(
+    name = "storage_user_bin",
+    testonly = True,
+    srcs = ["storage_user.rs"],
+    crate_name = "storage_user",
+    crate_root = "storage_user.rs",
+    edition = "2024",
+    deps = ["//src/lib/fuchsia"],
+)
+
+fx_packaged_binary(
+    name = "storage_user_packaged_bin",
+    testonly = True,
+    binary = ":storage_user_bin",
+    binary_name = "storage_user",
+)
+
+rustc_binary(
+    name = "storage_user_with_instance_id_bin",
+    testonly = True,
+    srcs = ["storage_user_with_instance_id.rs"],
+    crate_name = "storage_user_with_instance_id",
+    crate_root = "storage_user_with_instance_id.rs",
+    edition = "2024",
+    deps = ["//src/lib/fuchsia"],
+)
+
+fx_packaged_binary(
+    name = "storage_user_with_instance_id_packaged_bin",
+    testonly = True,
+    binary = ":storage_user_with_instance_id_bin",
+    binary_name = "storage_user_with_instance_id",
+)
+
+rustc_binary(
+    name = "only_exits_bin",
+    testonly = True,
+    srcs = ["only_exits.rs"],
+    crate_name = "only_exits",
+    crate_root = "only_exits.rs",
+    edition = "2024",
+)
+
+fx_packaged_binary(
+    name = "only_exits_packaged_bin",
+    testonly = True,
+    binary = ":only_exits_bin",
+    binary_name = "only_exits",
+)
+
+fx_component_manifest(
+    name = "storage_user-manifest",
+    testonly = True,
+    component_name = "storage_user",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/storage_user.cml",
+)
+
+fx_component(
+    name = "storage_user",
+    testonly = True,
+    compiled_manifest = ":storage_user-manifest",
+    deps = [":storage_user_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "storage_user_with_instance_id-manifest",
+    testonly = True,
+    component_name = "storage_user_with_instance_id",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/storage_user_with_instance_id.cml",
+)
+
+fx_component(
+    name = "storage_user_with_instance_id",
+    testonly = True,
+    compiled_manifest = ":storage_user_with_instance_id-manifest",
+    deps = [":storage_user_with_instance_id_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "storage_realm-manifest",
+    testonly = True,
+    component_name = "storage_realm",
+    includes = [
+        "//src/sys/component_manager:meta/passthrough_diagnostics.shard.cml",
+        "//src/sys/component_manager/tests:meta/elf_runner_and_environment.shard",
+    ],
+    manifest = "meta/storage_realm.cml",
+)
+
+fx_component(
+    name = "storage_realm",
+    testonly = True,
+    compiled_manifest = ":storage_realm-manifest",
+)
+
+fx_component_manifest(
+    name = "storage_realm_admin-manifest",
+    testonly = True,
+    component_name = "storage_realm_admin",
+    includes = [
+        "//src/sys/component_manager:meta/passthrough_diagnostics.shard.cml",
+        "//src/sys/component_manager/tests:meta/use_elf_runner.shard",
+    ],
+    manifest = "meta/storage_realm_admin.cml",
+)
+
+# We want `diagnostics` from self rather than parent, so we can't use
+# syslog/client.shard.cml.
+fx_component(
+    name = "storage_realm_admin",
+    testonly = True,
+    check_includes = False,
+    compiled_manifest = ":storage_realm_admin-manifest",
+    deps = [":storage_realm_admin_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "storage_realm_coll-manifest",
+    testonly = True,
+    component_name = "storage_realm_coll",
+    includes = [
+        "//src/sys/component_manager:meta/passthrough_diagnostics.shard.cml",
+        "//src/sys/component_manager/tests:meta/use_elf_runner.shard",
+    ],
+    manifest = "meta/storage_realm_coll.cml",
+)
+
+# We want `diagnostics` from self rather than parent, so we can't use
+# syslog/client.shard.cml.
+fx_component(
+    name = "storage_realm_coll",
+    testonly = True,
+    check_includes = False,
+    compiled_manifest = ":storage_realm_coll-manifest",
+    deps = [":storage_realm_coll_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "storage_realm_coll_invalid_route-manifest",
+    testonly = True,
+    component_name = "storage_realm_coll_invalid_route",
+    includes = [
+        "//src/sys/component_manager:meta/passthrough_diagnostics.shard.cml",
+        "//src/sys/component_manager/tests:meta/use_elf_runner.shard",
+    ],
+    manifest = "meta/storage_realm_coll_invalid_route.cml",
+)
+
+fx_component(
+    name = "storage_realm_coll_invalid_route",
+    testonly = True,
+    check_includes = False,
+    compiled_manifest = ":storage_realm_coll_invalid_route-manifest",
+    deps = [":storage_realm_coll_invalid_route_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "only_exits-manifest",
+    testonly = True,
+    component_name = "only_exits",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/only_exits.cml",
+)
+
+fx_component(
+    name = "only_exits",
+    testonly = True,
+    compiled_manifest = ":only_exits-manifest",
+    deps = [":only_exits_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "storage_integration_test-manifest",
+    testonly = True,
+    component_name = "storage_integration_test",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/lib/fuchsia-component-test:meta/nested_component_manager.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/storage_integration_test.cml",
+)
+
+fx_test_component(
+    name = "storage_integration_test_component",
+    compiled_manifest = ":storage_integration_test-manifest",
+    deps = [":storage_integration_test_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "storage_admin_integration_test-manifest",
+    testonly = True,
+    component_name = "storage_admin_integration_test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/storage_admin_integration_test.cml",
+)
+
+fx_test_component(
+    name = "storage_admin_integration_test_component",
+    compiled_manifest = ":storage_admin_integration_test-manifest",
+    deps = [":storage_admin_integration_test_packaged_bin"],
+)
+
+fx_package(
+    name = "storage_integration_test_package",
+    package_name = "storage_integration_test",
+    components = [
+        ":only_exits",
+        ":storage_realm",
+        ":storage_realm_admin",
+        ":storage_realm_coll",
+        ":storage_realm_coll_invalid_route",
+        ":storage_user",
+        ":storage_user_with_instance_id",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+        "//src/storage/memfs:memfs_component",
+        "//src/sys/component_manager:component-manager-realm-builder-debug-cmp",
+    ],
+    test_components = [
+        ":storage_integration_test_component",
+        ":storage_admin_integration_test_component",
+    ],
+)
+
+fx_test(
+    name = "storage_integration_test",
+    package = ":storage_integration_test_package",
+    visibility = ["//src/sys/component_manager:__pkg__"],
+)

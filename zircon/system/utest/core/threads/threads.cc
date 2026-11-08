@@ -38,6 +38,7 @@
 
 #include <atomic>
 #include <limits>
+#include <thread>
 
 #include <mini-process/mini-process.h>
 #include <zxtest/zxtest.h>
@@ -403,6 +404,84 @@ TEST(Threads, GetInfoRuntime) {
 
 TEST(Threads, GetInfoRuntimeV1) {
   TestThreadsGetInfoRuntime<ZX_INFO_TASK_RUNTIME_V1, zx_info_task_runtime_v1_t>("GetInfoRuntimeV1");
+}
+
+// Regression test for https://fxbug.dev/578241257: verify that a non-switching
+// reschedule (where the current thread continues running its remaining time
+// slice) leaves ThreadRuntimeStats in THREAD_RUNNING so active CPU execution is
+// credited to cpu_time rather than queue_time.
+TEST(Threads, GetInfoRuntimeAfterRescheduleContinue) {
+  zx_futex_t futex_word = 0;
+  std::atomic<bool> waiter_entering_futex{false};
+  const zx_handle_t self_handle = zx::thread::self()->get();
+  zx_koid_t self_koid = ZX_KOID_INVALID;
+  ASSERT_NO_FATAL_FAILURE(get_koid(self_handle, &self_koid));
+
+  std::thread waiter([&] {
+    waiter_entering_futex.store(true, std::memory_order_release);
+    EXPECT_OK(zx_futex_wait(&futex_word, 0, self_handle, ZX_TIME_INFINITE));
+  });
+  auto cleanup = fit::defer([&] {
+    std::atomic_ref<zx_futex_t>(futex_word).store(1, std::memory_order_relaxed);
+    zx_futex_wake(&futex_word, 1);
+    if (waiter.joinable()) {
+      waiter.join();
+    }
+  });
+
+  // Wait for `waiter` to enter the thread body before polling its kernel
+  // blocked state so we do not observe a libc-internal startup futex wait.
+  while (!waiter_entering_futex.load(std::memory_order_acquire)) {
+    ASSERT_OK(zx::nanosleep(zx::deadline_after(zx::usec(100))));
+  }
+  const zx_handle_t waiter_handle = native_thread_get_zx_handle(waiter.native_handle());
+  wait_thread_blocked(waiter_handle, ZX_THREAD_STATE_BLOCKED_FUTEX);
+
+  zx_koid_t owner_koid = ZX_KOID_INVALID;
+  ASSERT_OK(zx_futex_get_owner(&futex_word, &owner_koid));
+  ASSERT_EQ(owner_koid, self_koid);
+
+  // Sleep briefly so this thread starts a fresh time slice upon wakeup,
+  // ensuring `!timeslice_expired` when the local reschedule occurs below.
+  ASSERT_OK(zx::nanosleep(zx::deadline_after(zx::usec(100))));
+
+  // Waking 0 waiters with `zx_futex_wake` releases futex ownership without
+  // unblocking `waiter`. Releasing ownership removes `waiter`'s inherited
+  // profile weight from this thread, triggering a local reschedule on this CPU
+  // where `current_thread == next_thread` and `!timeslice_expired`.
+  ASSERT_OK(zx_futex_wake(&futex_word, 0));
+
+  zx_info_task_runtime_t before{};
+  ASSERT_OK(zx::thread::self()->get_info(ZX_INFO_TASK_RUNTIME, &before, sizeof(before), nullptr,
+                                         nullptr));
+
+  // Busy-spin for an interval well within the default 10ms fair time slice so
+  // time-slice expiration does not mask a broken continue path, while also
+  // observing multiple distinct tick values so active CPU ticks are guaranteed
+  // even under heavy VM host contention.
+  constexpr zx::duration kSpinDuration = zx::msec(2);
+  constexpr int kMinDistinctTickObservations = 16;
+  const zx::time deadline = zx::deadline_after(kSpinDuration);
+  zx_instant_mono_ticks_t last_ticks = zx_ticks_get();
+  int distinct_tick_observations = 0;
+  while (zx::clock::get_monotonic() < deadline ||
+         distinct_tick_observations < kMinDistinctTickObservations) {
+    const zx_instant_mono_ticks_t now_ticks = zx_ticks_get();
+    if (now_ticks > last_ticks) {
+      ++distinct_tick_observations;
+      last_ticks = now_ticks;
+    }
+  }
+
+  zx_info_task_runtime_t after{};
+  ASSERT_OK(
+      zx::thread::self()->get_info(ZX_INFO_TASK_RUNTIME, &after, sizeof(after), nullptr, nullptr));
+
+  EXPECT_GT(after.cpu_time, before.cpu_time);
+  EXPECT_GE(after.queue_time, before.queue_time);
+
+  ASSERT_OK(zx_futex_get_owner(&futex_word, &owner_koid));
+  EXPECT_EQ(owner_koid, ZX_KOID_INVALID);
 }
 
 TEST(Threads, GetAffinity) {
@@ -862,6 +941,169 @@ void TestBadSyscall(std::string_view name, uint64_t syscall_number) {
 // should fail anyway because the call is not made from the vDSO.
 TEST(Threads, BadSyscallCaller) { TestBadSyscall("BadSyscallCaller", 1); }
 TEST(Threads, BadSyscallNumber) { TestBadSyscall("BadSyscallNumber", 10000); }
+
+// Suspends |test_thread| while it is blocked in zx_channel_call (so the kernel returns
+// ZX_ERR_INTERNAL_INTR_RETRY and leaves the thread's channel call waiter queued on the channel),
+// reads the request message from |server| into |txid|, and redirects the thread to
+// zx_thread_exit so that it exits on resume without ever calling zx_channel_call_finish.
+void SuspendChannelCallAndRedirectToExit(const TestThread& test_thread, const zx::channel& server,
+                                         zx::suspend_token* suspend_token, zx_txid_t* txid) {
+  // Wait for the thread to send its request and block waiting for the reply.
+  ASSERT_OK(server.wait_one(ZX_CHANNEL_READABLE, zx::time::infinite(), nullptr));
+  ASSERT_NO_FATAL_FAILURE(
+      wait_thread_blocked(test_thread.thread().get(), ZX_THREAD_STATE_BLOCKED_CHANNEL));
+
+  ASSERT_NO_FATAL_FAILURE(suspend_thread_synchronous(test_thread.thread().get(),
+                                                     suspend_token->reset_and_get_address()));
+
+  uint8_t request[9];
+  uint32_t actual_bytes = 0;
+  ASSERT_OK(server.read(0, request, nullptr, sizeof(request), 0, &actual_bytes, nullptr));
+  ASSERT_EQ(actual_bytes, sizeof(request));
+  memcpy(txid, request, sizeof(*txid));
+
+  ASSERT_NO_FATAL_FAILURE(jump_to_thread_exit(test_thread.thread().get()));
+}
+
+// Writes a reply for the channel call request with |txid| to |server|, carrying a duplicate of
+// |event|, so that a leaked or doubly-closed reply would show up in |event|'s handle count.
+void WriteChannelCallReplyWithHandle(const zx::channel& server, zx_txid_t txid,
+                                     const zx::event& event) {
+  uint8_t reply[9] = {'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'j'};
+  memcpy(reply, &txid, sizeof(txid));
+  zx::event dup;
+  ASSERT_OK(event.duplicate(ZX_RIGHT_SAME_RIGHTS, &dup));
+  zx_handle_t handle = dup.release();
+  ASSERT_OK(server.write(0, reply, sizeof(reply), &handle, 1));
+}
+
+uint32_t GetHandleCount(const zx::event& event) {
+  zx_info_handle_count_t info = {};
+  EXPECT_OK(event.get_info(ZX_INFO_HANDLE_COUNT, &info, sizeof(info), nullptr, nullptr));
+  return info.handle_count;
+}
+
+// A thread suspended in zx_channel_call exits before calling zx_channel_call_finish while its
+// waiter is still queued on the channel. The kernel must cancel the pending wait as the thread
+// exits, so a reply written afterwards is queued on the caller's endpoint as an ordinary message
+// rather than delivered to the exited thread's waiter.
+TEST(Threads, SuspendChannelCallThenExit) {
+  zx::channel server;
+  channel_call_suspend_test_arg thread_arg = {.channel = ZX_HANDLE_INVALID,
+                                              .call_status = ZX_ERR_BAD_STATE};
+  ASSERT_OK(zx_channel_create(0, &thread_arg.channel, server.reset_and_get_address()));
+  // The thread exits without closing its endpoint, so the test owns it.
+  zx::channel client(thread_arg.channel);
+
+  TestThread test_thread;
+  ASSERT_NO_FATAL_FAILURE(test_thread.Init("SuspendChannelCallThenExit"));
+  ASSERT_NO_FATAL_FAILURE(test_thread.Start(threads_test_channel_call_fn, &thread_arg));
+
+  zx::suspend_token suspend_token;
+  zx_txid_t txid = 0;
+  ASSERT_NO_FATAL_FAILURE(
+      SuspendChannelCallAndRedirectToExit(test_thread, server, &suspend_token, &txid));
+
+  // Resume the thread, which exits while its waiter is still queued on the channel.
+  suspend_token.reset();
+  ASSERT_NO_FATAL_FAILURE(test_thread.Wait());
+  // zx_channel_call never returned to the thread.
+  EXPECT_EQ(thread_arg.call_status, ZX_ERR_BAD_STATE);
+
+  zx::event event;
+  ASSERT_OK(zx::event::create(0, &event));
+  ASSERT_NO_FATAL_FAILURE(WriteChannelCallReplyWithHandle(server, txid, event));
+
+  // The reply must have been queued on the caller's endpoint.
+  uint8_t reply[9];
+  zx::handle received;
+  uint32_t actual_bytes = 0;
+  uint32_t actual_handles = 0;
+  ASSERT_OK(client.read(0, reply, received.reset_and_get_address(), sizeof(reply), 1, &actual_bytes,
+                        &actual_handles));
+  EXPECT_EQ(actual_bytes, sizeof(reply));
+  EXPECT_EQ(actual_handles, 1u);
+  zx_txid_t reply_txid = 0;
+  memcpy(&reply_txid, reply, sizeof(reply_txid));
+  EXPECT_EQ(reply_txid, txid);
+
+  received.reset();
+  EXPECT_EQ(GetHandleCount(event), 1u);
+}
+
+enum class ChannelCallPeerAction {
+  kReply,
+  kClose,
+  kReplyThenClose,
+};
+
+// Races the exit of a thread suspended in zx_channel_call (before it calls
+// zx_channel_call_finish) against the peer replying with a handle and/or closing its endpoint, so
+// that the exiting thread may either find its waiter still queued, or find it already unlinked
+// by the peer and have to wait for the peer's in-flight signal.
+void RunSuspendedChannelCallExitRace(ChannelCallPeerAction action) {
+  constexpr int kIterations = 50;
+
+  zx::event event;
+  ASSERT_OK(zx::event::create(0, &event));
+
+  for (int i = 0; i < kIterations; ++i) {
+    zx::channel server;
+    channel_call_suspend_test_arg thread_arg = {.channel = ZX_HANDLE_INVALID,
+                                                .call_status = ZX_ERR_BAD_STATE};
+    ASSERT_OK(zx_channel_create(0, &thread_arg.channel, server.reset_and_get_address()));
+    // The thread exits without closing its endpoint, so the test owns it.
+    zx::channel client(thread_arg.channel);
+
+    TestThread test_thread;
+    ASSERT_NO_FATAL_FAILURE(test_thread.Init("SuspendedChannelCallExitRace"));
+    ASSERT_NO_FATAL_FAILURE(test_thread.Start(threads_test_channel_call_fn, &thread_arg));
+
+    zx::suspend_token suspend_token;
+    zx_txid_t txid = 0;
+    ASSERT_NO_FATAL_FAILURE(
+        SuspendChannelCallAndRedirectToExit(test_thread, server, &suspend_token, &txid));
+
+    std::atomic<bool> go{false};
+    std::thread peer([&]() {
+      while (!go.load()) {
+      }
+      if (action != ChannelCallPeerAction::kClose) {
+        WriteChannelCallReplyWithHandle(server, txid, event);
+      }
+      if (action != ChannelCallPeerAction::kReply) {
+        server.reset();
+      }
+    });
+
+    // Resume the thread so that it exits concurrently with the peer's action.
+    go.store(true);
+    suspend_token.reset();
+    peer.join();
+    ASSERT_NO_FATAL_FAILURE(test_thread.Wait());
+    // zx_channel_call never returned to the thread.
+    EXPECT_EQ(thread_arg.call_status, ZX_ERR_BAD_STATE);
+
+    // Destroy both endpoints along with any reply still queued on the caller's endpoint. Whether
+    // the reply was delivered to the exiting thread's waiter or queued on the caller's endpoint,
+    // its handle must have been closed exactly once.
+    client.reset();
+    server.reset();
+    ASSERT_EQ(GetHandleCount(event), 1u, "iteration %d", i);
+  }
+}
+
+TEST(Threads, SuspendChannelCallThenExitRacesWithReply) {
+  ASSERT_NO_FATAL_FAILURE(RunSuspendedChannelCallExitRace(ChannelCallPeerAction::kReply));
+}
+
+TEST(Threads, SuspendChannelCallThenExitRacesWithPeerClose) {
+  ASSERT_NO_FATAL_FAILURE(RunSuspendedChannelCallExitRace(ChannelCallPeerAction::kClose));
+}
+
+TEST(Threads, SuspendChannelCallThenExitRacesWithReplyThenPeerClose) {
+  ASSERT_NO_FATAL_FAILURE(RunSuspendedChannelCallExitRace(ChannelCallPeerAction::kReplyThenClose));
+}
 
 TEST(Threads, ExitViaException) {
   TestThread test_thread;
@@ -1331,17 +1573,6 @@ TEST(Threads, WritingVectorRegisterStateUnsupportedFieldsIgnored) {
       regs.zmm[reg].v[i] = 0xfffffffffffffffful;
     }
   }
-#elif defined(__aarch64__)
-  uint32_t features = 0;
-  ASSERT_OK(zx_system_get_features(ZX_FEATURE_KIND_CPU, &features));
-  if ((features & ZX_ARM64_FEATURE_ISA_SVE) == 0) {
-    for (uint16_t& p : regs.p) {
-      p = 0xffffu;
-    }
-    // Use a non-monotonic mask to verify that arch_set_vector_regs ignores ffr rather than
-    // rejecting it with ZX_ERR_INVALID_ARGS when SVE is unsupported.
-    regs.ffr = 0x5a5au;
-  }
 #endif
 
   ASSERT_EQ(zx_thread_write_state(setup.thread_handle(), ZX_THREAD_STATE_VECTOR_REGS, &regs,
@@ -1358,89 +1589,117 @@ TEST(Threads, WritingVectorRegisterStateUnsupportedFieldsIgnored) {
   ASSERT_NO_FATAL_FAILURE(vector_regs_expect_eq(regs, vector_regs_expected));
 }
 
-#if defined(__aarch64__)
-TEST(Threads, VectorRegisterStateCompatSize) {
-  RegisterWriteSetup<zx_thread_state_vector_regs_t> setup;
-  setup.Init("VectorRegisterStateCompatSize");
+TEST(Threads, ReadingArm64SveRegisterState) {
+  zx_arm64_thread_state_sve_regs_t regs;
+  memset(&regs, 0xff, sizeof(regs));
 
-  constexpr size_t kCompatSize = offsetof(zx_arm64_thread_state_vector_regs_t, p);
-  static_assert(kCompatSize == 520);
+#ifdef __aarch64__
+  uint32_t features = 0;
+  ASSERT_OK(zx_system_get_features(ZX_FEATURE_KIND_CPU, &features));
+  if ((features & ZX_ARM64_FEATURE_ISA_SVE) == 0) {
+    RegisterWriteSetup<zx_arm64_thread_state_sve_regs_t> setup;
+    setup.Init("ReadingArm64SveRegisterState");
+    EXPECT_EQ(zx_thread_read_state(setup.thread_handle(), ZX_THREAD_STATE_ARM64_SVE, &regs,
+                                   sizeof(regs) - 1),
+              ZX_ERR_NOT_SUPPORTED);
+    EXPECT_EQ(
+        zx_thread_read_state(setup.thread_handle(), ZX_THREAD_STATE_ARM64_SVE, &regs, sizeof(regs)),
+        ZX_ERR_NOT_SUPPORTED);
+    return;
+  }
 
-  zx_thread_state_vector_regs_t regs_to_set;
-  vector_regs_fill_test_values(&regs_to_set);
+  zx_arm64_thread_state_sve_regs_t sve_regs_expected;
+  arm64_sve_regs_fill_test_values(&sve_regs_expected);
 
-  // Buffers smaller than the pre-SVE struct size or in the intermediate range (520, 560) must be
-  // rejected.
-  EXPECT_EQ(zx_thread_write_state(setup.thread_handle(), ZX_THREAD_STATE_VECTOR_REGS, &regs_to_set,
-                                  kCompatSize - 1),
+  RegisterReadSetup<zx_arm64_thread_state_sve_regs_t> setup;
+  setup.RunUntil("ReadingArm64SveRegisterState", &spin_with_arm64_sve_regs, &sve_regs_expected,
+                 reinterpret_cast<uintptr_t>(&spin_address));
+
+  EXPECT_EQ(zx_thread_read_state(setup.thread_handle(), ZX_THREAD_STATE_ARM64_SVE, &regs,
+                                 sizeof(regs) - 1),
             ZX_ERR_BUFFER_TOO_SMALL);
-  EXPECT_EQ(zx_thread_write_state(setup.thread_handle(), ZX_THREAD_STATE_VECTOR_REGS, &regs_to_set,
-                                  kCompatSize + 1),
-            ZX_ERR_BUFFER_TOO_SMALL);
-  EXPECT_EQ(zx_thread_write_state(setup.thread_handle(), ZX_THREAD_STATE_VECTOR_REGS, &regs_to_set,
+  ASSERT_OK(
+      zx_thread_read_state(setup.thread_handle(), ZX_THREAD_STATE_ARM64_SVE, &regs, sizeof(regs)));
+
+  ASSERT_NO_FATAL_FAILURE(arm64_sve_regs_expect_eq(regs, sve_regs_expected));
+#else
+  RegisterWriteSetup<zx_arm64_thread_state_sve_regs_t> setup;
+  setup.Init("ReadingArm64SveRegisterState");
+  EXPECT_EQ(zx_thread_read_state(setup.thread_handle(), ZX_THREAD_STATE_ARM64_SVE, &regs,
+                                 sizeof(regs) - 1),
+            ZX_ERR_NOT_SUPPORTED);
+  EXPECT_EQ(
+      zx_thread_read_state(setup.thread_handle(), ZX_THREAD_STATE_ARM64_SVE, &regs, sizeof(regs)),
+      ZX_ERR_NOT_SUPPORTED);
+#endif
+}
+
+TEST(Threads, WritingArm64SveRegisterState) {
+  RegisterWriteSetup<zx_arm64_thread_state_sve_regs_t> setup;
+  setup.Init("WritingArm64SveRegisterState");
+
+  zx_arm64_thread_state_sve_regs_t regs_to_set;
+  arm64_sve_regs_fill_test_values(&regs_to_set);
+
+#ifdef __aarch64__
+  uint32_t features = 0;
+  ASSERT_OK(zx_system_get_features(ZX_FEATURE_KIND_CPU, &features));
+  if ((features & ZX_ARM64_FEATURE_ISA_SVE) == 0) {
+    EXPECT_EQ(zx_thread_write_state(setup.thread_handle(), ZX_THREAD_STATE_ARM64_SVE, &regs_to_set,
+                                    sizeof(regs_to_set) - 1),
+              ZX_ERR_NOT_SUPPORTED);
+    EXPECT_EQ(zx_thread_write_state(setup.thread_handle(), ZX_THREAD_STATE_ARM64_SVE, &regs_to_set,
+                                    sizeof(regs_to_set)),
+              ZX_ERR_NOT_SUPPORTED);
+    return;
+  }
+
+  EXPECT_EQ(zx_thread_write_state(setup.thread_handle(), ZX_THREAD_STATE_ARM64_SVE, &regs_to_set,
                                   sizeof(regs_to_set) - 1),
             ZX_ERR_BUFFER_TOO_SMALL);
 
-  // Seed non-zero SVE register state (p and ffr) via a full-size write first.
-  ASSERT_OK(zx_thread_write_state(setup.thread_handle(), ZX_THREAD_STATE_VECTOR_REGS, &regs_to_set,
+  // Verify ZX_THREAD_STATE_VECTOR_REGS and ZX_THREAD_STATE_ARM64_SVE do not clobber each other.
+  zx_thread_state_vector_regs_t vec_regs_expected;
+  vector_regs_fill_test_values(&vec_regs_expected);
+  vec_regs_expected.fpcr = 0x01000000u;  // FZ
+  vec_regs_expected.fpsr = 0x08000000u;  // QC
+  ASSERT_OK(zx_thread_write_state(setup.thread_handle(), ZX_THREAD_STATE_VECTOR_REGS,
+                                  &vec_regs_expected, sizeof(vec_regs_expected)));
+
+  ASSERT_OK(zx_thread_write_state(setup.thread_handle(), ZX_THREAD_STATE_ARM64_SVE, &regs_to_set,
                                   sizeof(regs_to_set)));
 
-  zx_thread_state_vector_regs_t regs_read{};
-  ASSERT_OK(zx_thread_read_state(setup.thread_handle(), ZX_THREAD_STATE_VECTOR_REGS, &regs_read,
-                                 sizeof(regs_read)));
-  ASSERT_NO_FATAL_FAILURE(vector_regs_expect_eq(regs_to_set, regs_read));
+  zx_thread_state_vector_regs_t vec_regs_read{};
+  ASSERT_OK(zx_thread_read_state(setup.thread_handle(), ZX_THREAD_STATE_VECTOR_REGS, &vec_regs_read,
+                                 sizeof(vec_regs_read)));
+  EXPECT_EQ(vec_regs_read.fpcr, vec_regs_expected.fpcr);
+  EXPECT_EQ(vec_regs_read.fpsr, vec_regs_expected.fpsr);
+  ASSERT_NO_FATAL_FAILURE(vector_regs_expect_eq(vec_regs_expected, vec_regs_read));
 
-  memset(&regs_read, 0xff, sizeof(regs_read));
-  EXPECT_EQ(zx_thread_read_state(setup.thread_handle(), ZX_THREAD_STATE_VECTOR_REGS, &regs_read,
-                                 kCompatSize - 1),
-            ZX_ERR_BUFFER_TOO_SMALL);
-  EXPECT_EQ(zx_thread_read_state(setup.thread_handle(), ZX_THREAD_STATE_VECTOR_REGS, &regs_read,
-                                 kCompatSize + 1),
-            ZX_ERR_BUFFER_TOO_SMALL);
-  EXPECT_EQ(zx_thread_read_state(setup.thread_handle(), ZX_THREAD_STATE_VECTOR_REGS, &regs_read,
-                                 sizeof(regs_read) - 1),
-            ZX_ERR_BUFFER_TOO_SMALL);
+  // Mutate vector registers again and ensure SVE predicate/FFR state is preserved.
+  vec_regs_expected.v[0].low ^= 0x5555555555555555ull;
+  ASSERT_OK(zx_thread_write_state(setup.thread_handle(), ZX_THREAD_STATE_VECTOR_REGS,
+                                  &vec_regs_expected, sizeof(vec_regs_expected)));
 
-  // Reading using the pre-SVE 520-byte struct size must succeed and not overwrite bytes past 520.
-  ASSERT_OK(zx_thread_read_state(setup.thread_handle(), ZX_THREAD_STATE_VECTOR_REGS, &regs_read,
-                                 kCompatSize));
-  EXPECT_EQ(regs_read.fpcr, regs_to_set.fpcr);
-  EXPECT_EQ(regs_read.fpsr, regs_to_set.fpsr);
-  for (int i = 0; i < 32; i++) {
-    EXPECT_EQ(regs_read.v[i].low, regs_to_set.v[i].low);
-    EXPECT_EQ(regs_read.v[i].high, regs_to_set.v[i].high);
-  }
-  for (int i = 0; i < 16; i++) {
-    EXPECT_EQ(regs_read.p[i], 0xffffu);
-  }
-  EXPECT_EQ(regs_read.ffr, 0xffffu);
+  zx_arm64_thread_state_sve_regs_t sve_regs_read{};
+  ASSERT_OK(zx_thread_read_state(setup.thread_handle(), ZX_THREAD_STATE_ARM64_SVE, &sve_regs_read,
+                                 sizeof(sve_regs_read)));
+  ASSERT_NO_FATAL_FAILURE(arm64_sve_regs_expect_eq(regs_to_set, sve_regs_read));
 
-  // Mutate V registers and FPCR/FPSR, then write using the pre-SVE 520-byte compat size.
-  // Existing SVE state (p and ffr) must be preserved rather than zeroed.
-  regs_to_set.fpcr = 0x01000000u;  // FZ
-  regs_to_set.fpsr = 0x08000000u;  // QC
-  for (int i = 0; i < 32; i++) {
-    regs_to_set.v[i].low ^= 0x5555555555555555ull;
-    regs_to_set.v[i].high ^= 0xaaaaaaaaaaaaaaaaull;
-  }
-  ASSERT_OK(zx_thread_write_state(setup.thread_handle(), ZX_THREAD_STATE_VECTOR_REGS, &regs_to_set,
-                                  kCompatSize));
-
-  // Full-size read should show updated V/FPCR/FPSR state and preserved p and ffr state.
-  memset(&regs_read, 0, sizeof(regs_read));
-  ASSERT_OK(zx_thread_read_state(setup.thread_handle(), ZX_THREAD_STATE_VECTOR_REGS, &regs_read,
-                                 sizeof(regs_read)));
-  EXPECT_EQ(regs_read.fpcr, regs_to_set.fpcr);
-  EXPECT_EQ(regs_read.fpsr, regs_to_set.fpsr);
-  ASSERT_NO_FATAL_FAILURE(vector_regs_expect_eq(regs_to_set, regs_read));
-
-  memset(&regs_read, 0, sizeof(regs_read));
-  setup.DoSave(&save_vector_regs_and_exit_thread, &regs_read);
-  EXPECT_EQ(regs_read.fpcr, regs_to_set.fpcr);
-  EXPECT_EQ(regs_read.fpsr, regs_to_set.fpsr);
-  ASSERT_NO_FATAL_FAILURE(vector_regs_expect_eq(regs_to_set, regs_read));
+  zx_arm64_thread_state_sve_regs_t regs{};
+  setup.DoSave(&save_arm64_sve_regs_and_exit_thread, &regs);
+  ASSERT_NO_FATAL_FAILURE(arm64_sve_regs_expect_eq(regs_to_set, regs));
+#else
+  EXPECT_EQ(zx_thread_write_state(setup.thread_handle(), ZX_THREAD_STATE_ARM64_SVE, &regs_to_set,
+                                  sizeof(regs_to_set) - 1),
+            ZX_ERR_NOT_SUPPORTED);
+  EXPECT_EQ(zx_thread_write_state(setup.thread_handle(), ZX_THREAD_STATE_ARM64_SVE, &regs_to_set,
+                                  sizeof(regs_to_set)),
+            ZX_ERR_NOT_SUPPORTED);
+#endif
 }
 
+#ifdef __aarch64__
 TEST(Threads, WriteThreadStateWithInvalidFfrIsInvalidArgs) {
   uint32_t features = 0;
   ASSERT_OK(zx_system_get_features(ZX_FEATURE_KIND_CPU, &features));
@@ -1448,43 +1707,54 @@ TEST(Threads, WriteThreadStateWithInvalidFfrIsInvalidArgs) {
     ZXTEST_SKIP("SVE not supported");
   }
 
-  RegisterWriteSetup<zx_thread_state_vector_regs_t> setup;
+  RegisterWriteSetup<zx_arm64_thread_state_sve_regs_t> setup;
   setup.Init("WriteThreadStateWithInvalidFfrIsInvalidArgs");
 
-  zx_thread_state_vector_regs_t initial_regs;
-  ASSERT_OK(zx_thread_read_state(setup.thread_handle(), ZX_THREAD_STATE_VECTOR_REGS, &initial_regs,
+  zx_arm64_thread_state_sve_regs_t initial_regs;
+  ASSERT_OK(zx_thread_read_state(setup.thread_handle(), ZX_THREAD_STATE_ARM64_SVE, &initial_regs,
                                  sizeof(initial_regs)));
 
-  zx_thread_state_vector_regs_t regs_to_set;
-  vector_regs_fill_test_values(&regs_to_set);
+  zx_arm64_thread_state_sve_regs_t regs_to_set;
+  arm64_sve_regs_fill_test_values(&regs_to_set);
 
   // FFR must be a monotonically decreasing sequence of 1s from bit 0.
-  for (uint16_t invalid_ffr : {uint16_t{0x0002u}, uint16_t{0x8000u}, uint16_t{0x8001u},
-                               uint16_t{0xfffeu}, uint16_t{0x0101u}}) {
+  for (uint16_t invalid_ffr : {
+           uint16_t{0x0002u},
+           uint16_t{0x8000u},
+           uint16_t{0x8001u},
+           uint16_t{0xfffeu},
+           uint16_t{0x0101u},
+       }) {
     regs_to_set.ffr = invalid_ffr;
     EXPECT_EQ(ZX_ERR_INVALID_ARGS,
-              zx_thread_write_state(setup.thread_handle(), ZX_THREAD_STATE_VECTOR_REGS,
-                                    &regs_to_set, sizeof(regs_to_set)));
+              zx_thread_write_state(setup.thread_handle(), ZX_THREAD_STATE_ARM64_SVE, &regs_to_set,
+                                    sizeof(regs_to_set)));
   }
+
+  // Verify failed writes did not mutate the thread's initial SVE state.
+  zx_arm64_thread_state_sve_regs_t after_invalid{};
+  ASSERT_OK(zx_thread_read_state(setup.thread_handle(), ZX_THREAD_STATE_ARM64_SVE, &after_invalid,
+                                 sizeof(after_invalid)));
+  ASSERT_NO_FATAL_FAILURE(arm64_sve_regs_expect_eq(initial_regs, after_invalid));
 
   // Verify boundary valid FFR patterns succeed.
   for (uint16_t valid_ffr :
        {uint16_t{0x0000u}, uint16_t{0x0001u}, uint16_t{0x7fffu}, uint16_t{0xffffu}}) {
     regs_to_set.ffr = valid_ffr;
-    ASSERT_OK(zx_thread_write_state(setup.thread_handle(), ZX_THREAD_STATE_VECTOR_REGS,
-                                    &regs_to_set, sizeof(regs_to_set)));
-    zx_thread_state_vector_regs_t regs_read{};
-    ASSERT_OK(zx_thread_read_state(setup.thread_handle(), ZX_THREAD_STATE_VECTOR_REGS, &regs_read,
+    ASSERT_OK(zx_thread_write_state(setup.thread_handle(), ZX_THREAD_STATE_ARM64_SVE, &regs_to_set,
+                                    sizeof(regs_to_set)));
+    zx_arm64_thread_state_sve_regs_t regs_read{};
+    ASSERT_OK(zx_thread_read_state(setup.thread_handle(), ZX_THREAD_STATE_ARM64_SVE, &regs_read,
                                    sizeof(regs_read)));
     EXPECT_EQ(regs_read.ffr, valid_ffr);
   }
 
-  ASSERT_OK(zx_thread_write_state(setup.thread_handle(), ZX_THREAD_STATE_VECTOR_REGS, &initial_regs,
+  ASSERT_OK(zx_thread_write_state(setup.thread_handle(), ZX_THREAD_STATE_ARM64_SVE, &initial_regs,
                                   sizeof(initial_regs)));
 
-  zx_thread_state_vector_regs_t end_values;
-  setup.DoSave(&save_vector_regs_and_exit_thread, &end_values);
-  ASSERT_NO_FATAL_FAILURE(vector_regs_expect_eq(initial_regs, end_values));
+  zx_arm64_thread_state_sve_regs_t end_values{};
+  setup.DoSave(&save_arm64_sve_regs_and_exit_thread, &end_values);
+  ASSERT_NO_FATAL_FAILURE(arm64_sve_regs_expect_eq(initial_regs, end_values));
 }
 #endif
 

@@ -9,8 +9,9 @@ resource("starnix.profiles") {
   outputs = "config/profiles/starnix.profiles"
 }
 
-# Add lints here which should apply to all Starnix Rust targets.
-config("starnix_clippy_lints") {
+# Add lints here which should apply to all Starnix Rust targets, including
+# tests.
+config("starnix_clippy_lints_test") {
   rustflags = [ "-Wclippy::wildcard_imports" ]
 
   # TODO(https://fxbug.dev/447627502): Include me unconditionally.
@@ -19,10 +20,11 @@ config("starnix_clippy_lints") {
   }
 }
 
-# Counterpart of the Bazel starnix_clippy_lints_test, for test targets of
-# Starnix libraries that are declared separately from the library. GN appends
-# lint configs to the defaults (and leaves out production lints for test
-# code), so this is the same as starnix_clippy_lints.
-config("starnix_clippy_lints_test") {
-  configs = [ ":starnix_clippy_lints" ]
+# Add lints here which should apply to non-test Starnix Rust targets.
+config("starnix_clippy_lints") {
+  configs = [ ":starnix_clippy_lints_test" ]
+  inputs = [ "clippy.toml" ]
+  rustenv = [ "CLIPPY_CONF_DIR=" +
+              rebase_path("//src/starnix/config", root_build_dir) ]
+  rustflags = [ "-Wclippy::disallowed_types" ]
 }

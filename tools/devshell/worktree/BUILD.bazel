@@ -1,0 +1,74 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        ":test_build_dir",
+        ":test_metrics",
+        ":test_pool",
+    ],
+    visibility = ["//tools:__pkg__"],
+)
+
+py_library(
+    name = "subcommands",
+    srcs = [
+        "subcommands/__init__.py",
+        "subcommands/add.py",
+        "subcommands/list.py",
+        "subcommands/locate.py",
+        "subcommands/metrics.py",
+        "subcommands/pool_add.py",
+        "subcommands/pool_list.py",
+        "subcommands/pool_remove.py",
+        "subcommands/remove.py",
+    ],
+    imports = ["."],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+_WORKTREE_SOURCES = [
+    "build_dir.py",
+    "main.py",
+    "utils.py",
+    "worktree.py",
+    "worktree_metrics.py",
+    "worktree_pool.py",
+    "worktree_printer.py",
+]
+
+host_py_test(
+    name = "test_build_dir",
+    srcs = ["tests/test_build_dir.py"] + _WORKTREE_SOURCES,
+    imports = ["."],
+    main = "tests/test_build_dir.py",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [":subcommands"],
+)
+
+host_py_test(
+    name = "test_metrics",
+    srcs = ["tests/test_metrics.py"] + _WORKTREE_SOURCES,
+    imports = ["."],
+    main = "tests/test_metrics.py",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [":subcommands"],
+)
+
+host_py_test(
+    name = "test_pool",
+    srcs = ["tests/test_pool.py"] + _WORKTREE_SOURCES,
+    imports = ["."],
+    main = "tests/test_pool.py",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [":subcommands"],
+)

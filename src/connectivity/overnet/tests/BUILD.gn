@@ -11,8 +11,5 @@ group("tests_no_e2e") {
   testonly = true
   assert_no_deps = e2e_test_libs
 
-  deps = [
-    "fidl:tests",
-    "integration:tests",
-  ]
+  deps = [ "fidl:tests" ]
 }

@@ -43,6 +43,10 @@ struct DeviceArgs {
   // PCI metadata
   std::vector<pci_bdf_t> bdfs_;
 
+  // True when discovery already determined the device is enabled, so ReportCurrentResources skips
+  // re-evaluating _STA.
+  bool sta_enabled_ = false;
+
   DeviceArgs(zx_device_t* parent, acpi::Manager* manager, async_dispatcher_t* dispatcher,
              ACPI_HANDLE handle)
       : parent_(parent), manager_(manager), dispatcher_(dispatcher), handle_(handle) {}
@@ -56,6 +60,10 @@ struct DeviceArgs {
   }
   DeviceArgs& SetPciMetadata(std::vector<pci_bdf_t> bdfs) {
     bdfs_ = std::move(bdfs);
+    return *this;
+  }
+  DeviceArgs& SetStaEnabled(bool enabled) {
+    sta_enabled_ = enabled;
     return *this;
   }
 };

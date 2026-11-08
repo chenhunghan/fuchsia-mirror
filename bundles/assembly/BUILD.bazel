@@ -209,7 +209,7 @@ assembly_input_bundle(
         # compiled and requires the addition of instrumentation_data_processor
         # package in bootfs packages to collect and process profiles.
         "//build/bazel/config/select/is_profile:true": _BOOTSTRAP_AIB_BOOTSTRAP_PKGS + [
-            "//bundles/assembly/bazel_inputs/src/sys/instrumentation_data_processor:instrumentation_data_processor_pkg",
+            "//src/sys/instrumentation_data_processor:instrumentation_data_processor_pkg",
         ],
     }),
     bootstrap_shards = select({
@@ -226,11 +226,6 @@ assembly_input_bundle(
             "set": "bootfs",
             "package_target": "//bundles/assembly/bazel_inputs/src/devices/adc/drivers/adc:package",
             "driver_components": ["meta/adc.cm"],
-        },
-        {
-            "set": "bootfs",
-            "package_target": "//bundles/assembly/bazel_inputs/src/devices/block/drivers/sdmmc:package",
-            "driver_components": ["meta/sdmmc.cm"],
         },
         {
             "set": "bootfs",
@@ -617,6 +612,32 @@ assembly_input_bundle(
     ],
 )
 
+# BootFS `component` debugging CLI tool included in all userdebug and eng
+# systems.
+#
+# buildifier: leave-alone
+assembly_input_bundle(
+    name = "component_tool",
+    auto_include_in = [
+        "userdebug",
+        "eng",
+    ],
+    bootfs_files_package = "//bundles/assembly/bazel_inputs:component_tool.bootfs_files_package",
+)
+
+# BootFS process/task inspection utilities (`ps`, `top`, `kill`, etc.) included
+# in all userdebug and eng systems.
+#
+# buildifier: leave-alone
+assembly_input_bundle(
+    name = "psutils",
+    auto_include_in = [
+        "userdebug",
+        "eng",
+    ],
+    bootfs_files_package = "//bundles/assembly/bazel_inputs:psutils.bootfs_files_package",
+)
+
 # The most minimal AIB that is included in userdebug and eng assembled systems
 # that are meant to be standalone.
 #
@@ -696,7 +717,10 @@ assembly_input_bundle(
         {
             "set": "bootfs",
             "package_target": "//bundles/assembly/bazel_inputs/src/devices/pci/drivers/pci:bus-pci-package",
-            "driver_components": ["meta/bus-pci.cm"],
+            "driver_components": [
+                "meta/bus-pci.cm",
+                "meta/pciroot-banjo-adapter.cm",
+            ],
         },
     ],
 )
@@ -785,6 +809,19 @@ assembly_input_bundle(
     ],
     core_shards = [
         "//src/graphics/display/testing/fake-display-stack-host:meta/fake-display-core-child.shard.cml",
+    ],
+)
+
+# AIB for the sdmmc driver
+# buildifier: leave-alone
+assembly_input_bundle(
+    name = "sdmmc_driver",
+    drivers = [
+        {
+            "set": "bootfs",
+            "package_target": "//bundles/assembly/bazel_inputs/src/devices/block/drivers/sdmmc:package",
+            "driver_components": ["meta/sdmmc.cm"],
+        },
     ],
 )
 
@@ -931,6 +968,19 @@ assembly_input_bundle(
     ],
 )
 
+# BootFS `package` debugging CLI tool included in standalone eng systems.
+#
+# buildifier: leave-alone
+assembly_input_bundle(
+    name = "package_tool",
+    auto_include_in = [
+        "bootstrap::eng",
+        "utility::eng",
+        "standard::eng",
+    ],
+    bootfs_files_package = "//bundles/assembly/bazel_inputs:package_tool.bootfs_files_package",
+)
+
 # hrtimer-ctl shell utility. Used in products that use hrtimer and have shell commands enabled.
 #
 # buildifier: leave-alone
@@ -965,6 +1015,32 @@ assembly_input_bundle(
         "eng",
     ],
     bootfs_files_package = "//bundles/assembly/bazel_inputs:ufsutil.bootfs_files_package",
+)
+
+# spmi-ctl shell utility. Used in products that use SPMI and have shell commands enabled.
+#
+# buildifier: leave-alone
+assembly_input_bundle(
+    name = "spmi-ctl",
+    allowed_in = [
+        "bootstrap::eng",
+        "utility::eng",
+        "standard::eng",
+    ],
+    bootfs_files_package = "//bundles/assembly/bazel_inputs:spmi-ctl.bootfs_files_package",
+)
+
+# batteryutil shell utility. Used in products with battery support on eng builds.
+#
+# buildifier: leave-alone
+assembly_input_bundle(
+    name = "batteryutil",
+    allowed_in = [
+        "bootstrap::eng",
+        "utility::eng",
+        "standard::eng",
+    ],
+    bootfs_files_package = "//bundles/assembly/bazel_inputs:batteryutil.bootfs_files_package",
 )
 
 # The kernel_debug_broker AIB is included by all eng and userdebug products.
@@ -1315,6 +1391,8 @@ assembly_input_bundle(
         "//bundles/assembly/bazel_inputs/src/sys/pkg/bin/pkg-cache",
     ],
     base_packages = [
+        # Software Delivery.
+        "//bundles/assembly/bazel_inputs/src/sys/pkg/bin/pkg-resolver",
         # This is a required dependency of pkg-cache
         "//bundles/assembly/bazel_inputs/src/sys/pkg/bin/system-update-committer",
         # Build-Information
@@ -1528,12 +1606,13 @@ assembly_input_bundle(
     name = "network_realm_packages",
     base_packages = [
         "//bundles/assembly/bazel_inputs/src/connectivity/network:netstack3",
+        "//bundles/assembly/bazel_inputs/src/connectivity/network/dhcpv4/client/bindings:package",
         "//bundles/assembly/bazel_inputs/src/connectivity/network/dhcpv4/server:package",
         "//bundles/assembly/bazel_inputs/src/connectivity/network/dhcpv6/client:package",
         "//bundles/assembly/bazel_inputs/src/connectivity/network/dns:package",
         "//bundles/assembly/bazel_inputs/src/connectivity/policy/http-client:package",
         "//bundles/assembly/bazel_inputs/src/connectivity/policy/http-client:google_package",
-        "//bundles/assembly/bazel_inputs/src/connectivity/policy/netcfg:package-basic",
+        "//bundles/assembly/bazel_inputs/src/connectivity/policy/netcfg:package",
         "//bundles/assembly/bazel_inputs/src/connectivity/policy/reachability:package",
     ],
 )
@@ -1567,7 +1646,6 @@ assembly_input_bundle(
         "standard::eng",
     ],
     base_packages = [
-        "//bundles/assembly/bazel_inputs/src/sys/pkg/bin/pkg-resolver:pkg-resolver-eng",
         # Dash launcher and driver_debug should be available in every engineering-mode product.
         "//bundles/assembly/bazel_inputs/src/sys/tools/debug-dash-launcher",
         "//bundles/assembly/bazel_inputs/src/devices/bin/driver_debug",
@@ -1816,9 +1894,6 @@ assembly_input_bundle(
         "utility::user",
         "utility::userdebug",
     ],
-    base_packages = [
-        "//bundles/assembly/bazel_inputs/src/sys/pkg/bin/pkg-resolver",
-    ],
     core_shards = [
         # user and userdebug only have the base resolver, not the full
         # resolver.
@@ -1880,7 +1955,7 @@ assembly_input_bundle(
         # ffx's remote-control (remote access) components:
         "//bundles/assembly/bazel_inputs/src/developer/remote-control:remote-control-package",
         # The developer snapshot tool.
-        "//bundles/assembly/bazel_inputs/src/developer/forensics/snapshot:pkg",
+        "//src/developer/forensics/snapshot:pkg",
         # log_listener shell tool.
         "//bundles/assembly/bazel_inputs/src/diagnostics/log_listener:log_listener_shell_pkg",
     ],
@@ -2225,8 +2300,8 @@ assembly_input_bundle(
     auto_include_in = [
         "standard",
     ],
-    memory_buckets = ["//src/developer/memory/buckets:buckets.json5"],
-    bootfs_files_package = "//bundles/assembly/bazel_inputs:common_standard.bootfs_files_package",
+    memory_buckets = ["//src/memory/buckets:buckets.json5"],
+    bootfs_files_package = "//src/sys/core:bootfs",
     base_packages = [
         # The SWD stack artifacts that enable OTAs
         "//bundles/assembly/bazel_inputs/src/sys/pkg/bin/system-updater",
@@ -2239,9 +2314,9 @@ assembly_input_bundle(
         # Internationalization
         "//bundles/assembly/bazel_inputs/src/intl/tzdata_provider:tzdata_provider_pkg",
         # Activity
-        "//bundles/assembly/bazel_inputs/src/sys/activity",
+        "//src/sys/activity:activity",
         # Memory pressure monitoring
-        "//bundles/assembly/bazel_inputs/src/developer/memory/pressure_signaler",
+        "//bundles/assembly/bazel_inputs/src/memory/pressure_signaler",
         # Security
         "//src/security/bin/root_ssl_certificates",
         "//src/security/bin/google_root_ssl_certificates",
@@ -2270,6 +2345,10 @@ assembly_input_bundle(
                 {
                     "source": "//src/diagnostics/config/triage/detect:wlan-detect.triage",
                     "destination": "wlan-detect.triage",
+                },
+                {
+                    "source": "//src/diagnostics/config/triage/detect:driver_health_detect.triage",
+                    "destination": "driver_health_detect.triage",
                 },
             ],
         },
@@ -2314,7 +2393,7 @@ assembly_input_bundle(
         "//src/connectivity/network:meta/persistence.core_shard.cml",
         "//src/intl/tzdata_provider:meta/tzdata_provider.core_shard.cml",
         "//src/sys/pkg/bin/system-updater:meta/system_updater.core_shard.cml",
-        "//src/developer/memory/pressure_signaler:meta/memory_pressure_signaler.core_shard.cml",
+        "//src/memory/pressure_signaler:meta/memory_pressure_signaler.core_shard.cml",
     ],
     compiled_packages = [
         {
@@ -2381,11 +2460,6 @@ assembly_input_bundle(
     auto_include_in = [
         "standard::eng",
     ],
-    base_packages = [
-        # Needed to resolve driver components from "full" packages
-        "//bundles/assembly/bazel_inputs/src/sys/loopback_resolver:loopback_resolver_pkg",
-    ],
-    # Needed to resolve driver components from "full" packages
     cache_packages = [
         # Backend for ffx process command.
         "//bundles/assembly/bazel_inputs/src/developer/process_explorer:process_explorer_package",
@@ -2449,10 +2523,10 @@ assembly_input_bundle(
     name = "memory_monitor",
     base_packages = [
         # memory_monitor with profiling disabled.
-        "//bundles/assembly/bazel_inputs/src/developer/memory/monitor:monitor_without_memory_sampler",
+        "//bundles/assembly/bazel_inputs/src/memory/legacy/monitor:monitor_without_memory_sampler",
     ],
     core_shards = [
-        "//src/developer/memory/monitor:meta/memory_monitor.core_shard.cml",
+        "//src/memory/legacy/monitor:meta/memory_monitor.core_shard.cml",
     ],
 )
 
@@ -2466,12 +2540,12 @@ assembly_input_bundle(
     ],
     base_packages = [
         # memory_monitor with profiling enabled.
-        "//bundles/assembly/bazel_inputs/src/developer/memory/monitor:monitor_with_memory_sampler",
+        "//bundles/assembly/bazel_inputs/src/memory/legacy/monitor:monitor_with_memory_sampler",
         "//bundles/assembly/bazel_inputs/src/performance/memory/sampler:memory_sampler",
     ],
     core_shards = [
-        "//src/developer/memory/monitor:meta/memory_monitor.core_shard.cml",
-        "//src/developer/memory/monitor:meta/memory_monitor_with_memory_sampler.core_shard.cml",
+        "//src/memory/legacy/monitor:meta/memory_monitor.core_shard.cml",
+        "//src/memory/legacy/monitor:meta/memory_monitor_with_memory_sampler.core_shard.cml",
         "//src/performance/memory/sampler:meta/memory_sampler.core_shard.cml",
     ],
 )
@@ -2488,7 +2562,7 @@ assembly_input_bundle(
             "package_name": "memory_monitor",
             "files": [
                 {
-                    "source": "//src/developer/memory/monitor/config:send_critical_pressure_crash_reports",
+                    "source": "//src/memory/legacy/monitor/config:send_critical_pressure_crash_reports",
                     "destination": "send_critical_pressure_crash_reports",
                 },
             ],
@@ -2587,7 +2661,7 @@ assembly_input_bundle(
 assembly_input_bundle(
     name = "bluetooth_core",
     flexible_packages = [
-        "//bundles/assembly/bazel_inputs/src/connectivity/bluetooth/core/bt-host",
+        "//src/connectivity/bluetooth/core/bt-host",
     ],
     base_packages = [
         "//bundles/assembly/bazel_inputs/src/connectivity/bluetooth/core/bt-init",
@@ -2822,6 +2896,15 @@ assembly_input_bundle(
     ],
 )
 
+# Disables Full Package Driver Support
+# buildifier: leave-alone
+assembly_input_bundle(
+    name = "no_full_drivers",
+    bootstrap_shards = [
+        "//src/devices/bin/driver_framework:meta/no_full_drivers.bootstrap_shard.cml",
+    ],
+)
+
 # Core starnix support.
 # buildifier: leave-alone
 assembly_input_bundle(
@@ -2836,7 +2919,7 @@ assembly_input_bundle(
         "//src/starnix/runner:meta/starnix_runner.core_shard.cml",
     ],
     bootfs_files_package = "//src/starnix/config:starnix_support.bootfs_files_package",
-    memory_buckets = ["//src/developer/memory/buckets:starnix.json5"],
+    memory_buckets = ["//src/memory/buckets:starnix.json5"],
 )
 
 # EROFS support for Starnix.
@@ -3079,7 +3162,7 @@ assembly_input_bundle(
     core_shards = [
         "//src/camera:meta/camera.core_shard.cml",
     ],
-    memory_buckets = ["//src/developer/memory/buckets:camera_buckets.json5"],
+    memory_buckets = ["//src/memory/buckets:camera_buckets.json5"],
 )
 
 # buildifier: leave-alone
@@ -3302,7 +3385,7 @@ assembly_input_bundle(
         },
     ],
     bootfs_packages = [
-        "//bundles/assembly/bazel_inputs/src/storage/memfs:package",
+        "//src/storage/memfs:package",
     ],
 )
 
@@ -3326,11 +3409,11 @@ assembly_input_bundle(
             ],
         },
     ],
-    memory_buckets = ["//src/developer/memory/buckets:fxfs_buckets.json5"],
+    memory_buckets = ["//src/memory/buckets:fxfs_buckets.json5"],
     bootfs_packages = [
         "//bundles/assembly/bazel_inputs/src/storage/gpt/component:package",
         "//bundles/assembly/bazel_inputs/src/storage/fxfs:package",
-        "//bundles/assembly/bazel_inputs/src/storage/crypt/fxfs:package",
+        "//src/storage/crypt/fxfs:package",
     ],
 )
 
@@ -3355,8 +3438,8 @@ assembly_input_bundle(
         },
     ],
     memory_buckets = [
-        "//src/developer/memory/buckets:blobfs_buckets.json5",
-        "//src/developer/memory/buckets:minfs_buckets.json5",
+        "//src/memory/buckets:blobfs_buckets.json5",
+        "//src/memory/buckets:minfs_buckets.json5",
     ],
     bootfs_packages = [
         "//bundles/assembly/bazel_inputs/src/storage/gpt/component:package",
@@ -3387,7 +3470,7 @@ assembly_input_bundle(
             ],
         },
     ],
-    memory_buckets = ["//src/developer/memory/buckets:blobfs_buckets.json5"],
+    memory_buckets = ["//src/memory/buckets:blobfs_buckets.json5"],
     bootfs_packages = [
         "//bundles/assembly/bazel_inputs/src/storage/gpt/component:package",
         "//bundles/assembly/bazel_inputs/src/storage/blobfs/bin:package",
@@ -3440,8 +3523,8 @@ assembly_input_bundle(
         },
     ],
     memory_buckets = [
-        "//src/developer/memory/buckets:minfs_buckets.json5",
-        "//src/developer/memory/buckets:blobfs_buckets.json5",
+        "//src/memory/buckets:minfs_buckets.json5",
+        "//src/memory/buckets:blobfs_buckets.json5",
     ],
     bootfs_packages = [
         "//bundles/assembly/bazel_inputs/src/storage/blobfs/bin:package",
@@ -3558,7 +3641,7 @@ assembly_input_bundle(
 assembly_input_bundle(
     name = "product_provided_update_checker",
     base_packages = [
-        "//bundles/assembly/bazel_inputs/src/sys/pkg/bin/null-update-checker:package",
+        "//src/sys/pkg/bin/null-update-checker:package",
     ],
     core_shards = [
         "//src/sys/pkg/bin/null-update-checker:meta/null_update_checker.core_shard.cml",
@@ -3624,7 +3707,7 @@ assembly_input_bundle(
         "eng",
     ],
     system_packages = [
-        "//bundles/assembly/bazel_inputs/src/sys/pkg/bin/pkg-cache:disable-executability-restrictions",
+        "//src/sys/pkg/bin/pkg-cache:disable-executability-restrictions",
     ],
 )
 
@@ -3757,7 +3840,7 @@ assembly_input_bundle(
         "//src/connectivity/lowpan/service:meta/lowpanservice.core_shard.cml",
         "//src/connectivity/lowpan/drivers/lowpan-ot-driver:meta/lowpan-ot-driver.core_shard.cml",
     ],
-    memory_buckets = ["//src/developer/memory/buckets:thread_lowpan_buckets.json5"],
+    memory_buckets = ["//src/memory/buckets:thread_lowpan_buckets.json5"],
 )
 
 # WLAN policy component
@@ -3851,7 +3934,7 @@ assembly_input_bundle(
 assembly_input_bundle(
     name = "wlan_wlanix",
     base_packages = [
-        "//bundles/assembly/bazel_inputs/src/connectivity/wlan/wlanix",
+        "//src/connectivity/wlan/wlanix",
     ],
     core_shards = [
         "//src/connectivity/wlan/wlanix:meta/wlanix.core_shard.cml",
@@ -3953,7 +4036,7 @@ assembly_input_bundle(
         "utility::eng",
     ],
     cache_packages = [
-        "//bundles/assembly/bazel_inputs/src/media/audio/tools/virtual_audio_util",
+        "//src/media/audio/tools/virtual_audio_util",
     ],
     shell_commands = [
         {
@@ -3989,12 +4072,12 @@ assembly_input_bundle(
         "utility::eng",
     ],
     cache_packages = [
-        "//bundles/assembly/bazel_inputs/src/media/audio/tools/virtual_audio_legacy_util",
+        "//src/media/audio/tools/virtual_audio_legacy_util",
     ],
     shell_commands = [
         {
             "package": "virtual_audio_legacy_util",
-            "components": ["virtual_audio_legacy_util"],
+            "components": ["virtual_audio_legacy"],
         },
     ],
 )
@@ -4039,10 +4122,10 @@ assembly_input_bundle(
     ],
     cache_packages = [
         "//bundles/assembly/bazel_inputs/src/media/audio/tools/audio-capture-timestamp-validator",
-        "//bundles/assembly/bazel_inputs/src/media/audio/tools/audio-effects-ctl",
-        "//bundles/assembly/bazel_inputs/src/media/audio/tools/audio_listener",
+        "//src/media/audio/tools/audio-effects-ctl",
+        "//src/media/audio/tools/audio_listener",
         "//bundles/assembly/bazel_inputs/src/media/audio/tools/signal_generator",
-        "//bundles/assembly/bazel_inputs/src/media/audio/tools/vol",
+        "//src/media/audio/tools/vol",
         "//bundles/assembly/bazel_inputs/src/media/audio/tools/wav_player",
         "//bundles/assembly/bazel_inputs/src/media/audio/tools/wav_recorder",
     ],
@@ -4354,6 +4437,9 @@ assembly_input_bundle(
 assembly_input_bundle(
     name = "ui_package_eng_userdebug_with_synthetic_device_support",
     flexible_packages = ["//bundles/assembly/bazel_inputs/src/ui:ui_with_synthetic_device_support_package"],
+    core_shards = [
+        "//src/ui:meta/ui_with_synthetic_device_support.core_shard.cml",
+    ],
 )
 
 # Fan support
@@ -4711,7 +4797,7 @@ icu_assembly_input_bundle(
     core_shards = [
         "//src/settings/service:meta/setui_service.core_shard.cml",
     ],
-    memory_buckets = ["//src/developer/memory/buckets:setui_buckets.json5"],
+    memory_buckets = ["//src/memory/buckets:setui_buckets.json5"],
 )
 
 # buildifier: leave-alone
@@ -4723,7 +4809,7 @@ icu_assembly_input_bundle(
     core_shards = [
         "//src/settings/service:meta/setui_service_with_camera.core_shard.cml",
     ],
-    memory_buckets = ["//src/developer/memory/buckets:setui_buckets.json5"],
+    memory_buckets = ["//src/memory/buckets:setui_buckets.json5"],
 )
 
 # Legacy fonts setup: fonts sourced from config-data.

@@ -16,8 +16,6 @@ toc:
   path: /docs/development/drivers/concepts/device_driver_model/driver-binding.md
 - title: "The Device ops"
   path: /docs/development/drivers/concepts/device_driver_model/device-ops.md
-- title: "Device driver lifecycle"
-  path: /docs/development/drivers/concepts/device_driver_model/device-lifecycle.md
 - title: "Device power management"
   path: /docs/development/drivers/concepts/device_driver_model/device-power.md
 - title: "Protocols in drivers"

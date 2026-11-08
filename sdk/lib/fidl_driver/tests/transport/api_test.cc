@@ -5,6 +5,7 @@
 #include <fidl/test.transport/cpp/driver/fidl.h>
 #include <lib/async/cpp/task.h>
 #include <lib/driver/runtime/testing/cpp/sync_helpers.h>
+#include <lib/driver/testing/cpp/driver_runtime.h>
 #include <lib/sync/cpp/completion.h>
 
 #include <thread>
@@ -12,11 +13,12 @@
 #include <gtest/gtest.h>
 
 #include "sdk/lib/fidl_driver/tests/transport/api_test_helper.h"
-#include "sdk/lib/fidl_driver/tests/transport/scoped_fake_driver.h"
 #include "src/lib/testing/predicates/status.h"
 
 // Test creating a typed channel endpoint pair.
 TEST(Endpoints, CreateFromProtocol) {
+  fdf_testing::DriverRuntime runtime;
+
   // `std::move` pattern
   {
     auto endpoints = fdf::CreateEndpoints<test_transport::TwoWayTest>();
@@ -44,6 +46,7 @@ TEST(Endpoints, CreateFromProtocol) {
 // Test creating a typed channel endpoint pair using the out-parameter
 // overloads.
 TEST(Endpoints, CreateFromProtocolOutParameterStyleClientRetained) {
+  fdf_testing::DriverRuntime runtime;
   fdf::ClientEnd<test_transport::TwoWayTest> client_end;
   auto server_end = fdf::CreateEndpoints(&client_end);
   ASSERT_OK(server_end.status_value());
@@ -54,6 +57,7 @@ TEST(Endpoints, CreateFromProtocolOutParameterStyleClientRetained) {
 }
 
 TEST(Endpoints, CreateFromProtocolOutParameterStyleServerRetained) {
+  fdf_testing::DriverRuntime runtime;
   fdf::ServerEnd<test_transport::TwoWayTest> server_end;
   auto client_end = fdf::CreateEndpoints(&server_end);
   ASSERT_OK(client_end.status_value());
@@ -65,7 +69,7 @@ TEST(Endpoints, CreateFromProtocolOutParameterStyleServerRetained) {
 
 TEST(WireClient, CannotDestroyInDifferentDispatcherThanBound) {
   DEBUG_ONLY_TEST_MAY_SKIP();
-  fidl_driver_testing::ScopedFakeDriver driver;
+  fdf_testing::DriverRuntime runtime;
 
   auto [dispatcher1, dispatcher1_shutdown] = CreateSyncDispatcher();
   auto [dispatcher2, dispatcher2_shutdown] = CreateSyncDispatcher();
@@ -103,7 +107,7 @@ TEST(WireClient, CannotDestroyInDifferentDispatcherThanBound) {
 
 TEST(WireClient, CannotDestroyOnUnmanagedThread) {
   DEBUG_ONLY_TEST_MAY_SKIP();
-  fidl_driver_testing::ScopedFakeDriver driver;
+  fdf_testing::DriverRuntime runtime;
 
   auto [dispatcher1, dispatcher1_shutdown] = CreateSyncDispatcher();
   zx::result endpoints = fdf::CreateEndpoints<test_transport::TwoWayTest>();
@@ -143,7 +147,7 @@ using DispatcherOptions = uint32_t;
 class WireSharedClient : public testing::TestWithParam<DispatcherOptions> {};
 
 TEST_P(WireSharedClient, CanSendAcrossDispatcher) {
-  fidl_driver_testing::ScopedFakeDriver driver;
+  fdf_testing::DriverRuntime runtime;
 
   auto [dispatcher1, dispatcher1_shutdown] = CreateSyncDispatcher();
   auto [dispatcher2, dispatcher2_shutdown] = CreateSyncDispatcher();
@@ -176,7 +180,7 @@ TEST_P(WireSharedClient, CanSendAcrossDispatcher) {
 }
 
 TEST_P(WireSharedClient, CanDestroyOnUnmanagedThread) {
-  fidl_driver_testing::ScopedFakeDriver driver;
+  fdf_testing::DriverRuntime runtime;
 
   auto [dispatcher1, dispatcher1_shutdown] = CreateSyncDispatcher();
   zx::result endpoints = fdf::CreateEndpoints<test_transport::TwoWayTest>();
@@ -206,7 +210,7 @@ TEST_P(WireSharedClient, CanDestroyOnUnmanagedThread) {
 
 TEST(WireClient, CannotBindUnsynchronizedDispatcher) {
   DEBUG_ONLY_TEST_MAY_SKIP();
-  fidl_driver_testing::ScopedFakeDriver driver;
+  fdf_testing::DriverRuntime runtime;
 
   libsync::Completion dispatcher_shutdown;
   zx::result dispatcher = fdf::UnsynchronizedDispatcher::Create(
@@ -233,7 +237,7 @@ TEST(WireClient, CannotBindUnsynchronizedDispatcher) {
 }
 
 TEST_P(WireSharedClient, CanBindAnyDispatcher) {
-  fidl_driver_testing::ScopedFakeDriver driver;
+  fdf_testing::DriverRuntime runtime;
 
   libsync::Completion dispatcher_shutdown;
   zx::result<fdf::Dispatcher> dispatcher;
@@ -286,7 +290,7 @@ TYPED_TEST_SUITE_P(ClientUnbindTest);
 TYPED_TEST_P(ClientUnbindTest, UnbindMaybeGetEndpoint) {
   using Client = TypeParam;
 
-  fidl_driver_testing::ScopedFakeDriver driver;
+  fdf_testing::DriverRuntime runtime;
   auto [dispatcher, dispatcher_shutdown] = CreateSyncDispatcher();
   auto endpoints = fdf::CreateEndpoints<test_transport::TwoWayTest>();
   ASSERT_OK(endpoints.status_value());
@@ -309,7 +313,7 @@ TYPED_TEST_P(ClientUnbindTest, UnbindMaybeGetEndpoint) {
 TYPED_TEST_P(ClientUnbindTest, UnbindAfterFatalError) {
   using Client = TypeParam;
 
-  fidl_driver_testing::ScopedFakeDriver driver;
+  fdf_testing::DriverRuntime runtime;
   auto [dispatcher, dispatcher_shutdown] = CreateSyncDispatcher();
   auto endpoints = fdf::CreateEndpoints<test_transport::TwoWayTest>();
   ASSERT_OK(endpoints.status_value());
@@ -357,7 +361,7 @@ TYPED_TEST_P(ClientUnbindTest, UnbindAfterFatalError) {
 TYPED_TEST_P(ClientUnbindTest, UnbindTwice) {
   using Client = TypeParam;
 
-  fidl_driver_testing::ScopedFakeDriver driver;
+  fdf_testing::DriverRuntime runtime;
   auto [dispatcher, dispatcher_shutdown] = CreateSyncDispatcher();
   auto endpoints = fdf::CreateEndpoints<test_transport::TwoWayTest>();
   ASSERT_OK(endpoints.status_value());
@@ -386,7 +390,7 @@ TYPED_TEST_P(ClientUnbindTest, UnbindTwice) {
 TYPED_TEST_P(ClientUnbindTest, UnbindWithPendingCallsShouldFail) {
   using Client = TypeParam;
 
-  fidl_driver_testing::ScopedFakeDriver driver;
+  fdf_testing::DriverRuntime runtime;
   auto [dispatcher, dispatcher_shutdown] = CreateSyncDispatcher();
   auto endpoints = fdf::CreateEndpoints<test_transport::TwoWayTest>();
   ASSERT_OK(endpoints.status_value());
@@ -422,7 +426,7 @@ TYPED_TEST_P(ClientUnbindTest, UnbindWithPendingCallsShouldFail) {
 TYPED_TEST_P(ClientUnbindTest, UnbindAfterACompletedTwoWayCall) {
   using Client = TypeParam;
 
-  fidl_driver_testing::ScopedFakeDriver driver;
+  fdf_testing::DriverRuntime runtime;
   auto [dispatcher, dispatcher_shutdown] = CreateSyncDispatcher();
   auto endpoints = fdf::CreateEndpoints<test_transport::TwoWayTest>();
   ASSERT_OK(endpoints.status_value());

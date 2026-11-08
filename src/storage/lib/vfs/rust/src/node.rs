@@ -68,6 +68,20 @@ pub trait Node: GetEntryInfo + IntoAny + Send + Sync + 'static {
     /// Called when the node is closed.
     fn close(self: Arc<Self>) {}
 
+    #[cfg(fuchsia_api_level_at_least = "NEXT")]
+    fn link_into(
+        self: Arc<Self>,
+        _destination_dir: Arc<dyn MutableDirectory>,
+        _name: Name,
+        _options: fio::LinkIntoOptions,
+    ) -> impl Future<Output = Result<(), Status>> + Send
+    where
+        Self: Sized,
+    {
+        ready(Err(Status::NOT_SUPPORTED))
+    }
+
+    #[cfg(not(fuchsia_api_level_at_least = "NEXT"))]
     fn link_into(
         self: Arc<Self>,
         _destination_dir: Arc<dyn MutableDirectory>,
@@ -206,18 +220,6 @@ impl<N: Node> Connection<N> {
     /// Handle a [`NodeRequest`].
     async fn handle_request(&mut self, req: fio::NodeRequest) -> Result<ConnectionState, Error> {
         match req {
-            #[cfg(any(
-                fuchsia_api_level_at_least = "PLATFORM",
-                not(fuchsia_api_level_at_least = "29")
-            ))]
-            fio::NodeRequest::DeprecatedClone { flags, object, control_handle: _ } => {
-                trace::duration!("storage", "Node::Clone");
-                crate::common::send_on_open_with_error(
-                    flags.contains(fio::OpenFlags::DESCRIBE),
-                    object,
-                    Status::NOT_SUPPORTED,
-                );
-            }
             fio::NodeRequest::Clone { request, control_handle: _ } => {
                 trace::duration!("storage", "Node::Clone");
                 // Suppress any errors in the event a bad `request` channel was provided.
@@ -231,38 +233,6 @@ impl<N: Node> Connection<N> {
             fio::NodeRequest::Sync { responder } => {
                 trace::duration!("storage", "Node::Sync");
                 responder.send(Err(Status::NOT_SUPPORTED.into_raw()))?;
-            }
-            #[cfg(fuchsia_api_level_at_least = "28")]
-            fio::NodeRequest::DeprecatedGetAttr { responder } => {
-                async move {
-                    let (status, attrs) =
-                        crate::common::io2_to_io1_attrs(self.node.as_ref(), self.options.rights)
-                            .await;
-                    responder.send(status, &attrs)
-                }
-                .trace(trace::trace_future_args!("storage", "Node::GetAttr"))
-                .await?;
-            }
-            #[cfg(not(fuchsia_api_level_at_least = "28"))]
-            fio::NodeRequest::GetAttr { responder } => {
-                async move {
-                    let (status, attrs) =
-                        crate::common::io2_to_io1_attrs(self.node.as_ref(), self.options.rights)
-                            .await;
-                    responder.send(status, &attrs)
-                }
-                .trace(trace::trace_future_args!("storage", "Node::GetAttr"))
-                .await?;
-            }
-            #[cfg(fuchsia_api_level_at_least = "28")]
-            fio::NodeRequest::DeprecatedSetAttr { flags: _, attributes: _, responder } => {
-                trace::duration!("storage", "Node::SetAttr");
-                responder.send(Status::BAD_HANDLE.into_raw())?;
-            }
-            #[cfg(not(fuchsia_api_level_at_least = "28"))]
-            fio::NodeRequest::SetAttr { flags: _, attributes: _, responder } => {
-                trace::duration!("storage", "Node::SetAttr");
-                responder.send(Status::BAD_HANDLE.into_raw())?;
             }
             fio::NodeRequest::GetAttributes { query, responder } => {
                 async move {
@@ -310,14 +280,6 @@ impl<N: Node> Connection<N> {
             fio::NodeRequest::SetFlags { flags: _, responder } => {
                 trace::duration!("storage", "Node::SetFlags");
                 responder.send(Err(Status::NOT_SUPPORTED.into_raw()))?;
-            }
-            fio::NodeRequest::DeprecatedGetFlags { responder } => {
-                trace::duration!("storage", "Node::GetFlags");
-                responder.send(zx_status::sys::ZX_OK, fio::OpenFlags::NODE_REFERENCE)?;
-            }
-            fio::NodeRequest::DeprecatedSetFlags { flags: _, responder } => {
-                trace::duration!("storage", "Node::SetFlags");
-                responder.send(Status::BAD_HANDLE.into_raw())?;
             }
             fio::NodeRequest::Query { responder } => {
                 trace::duration!("storage", "Node::Query");

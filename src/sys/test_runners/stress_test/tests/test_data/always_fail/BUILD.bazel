@@ -1,0 +1,74 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "always_fail_actor_bin",
+    testonly = True,
+    srcs = ["actor/main.rs"],
+    crate_name = "always_fail_actor",
+    crate_root = "actor/main.rs",
+    edition = "2024",
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/sys/test_runners/stress_test/actor",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:rand",
+    ],
+)
+
+fx_packaged_binary(
+    name = "always_fail_actor_bin_packaged_bin",
+    testonly = True,
+    binary = ":always_fail_actor_bin",
+    binary_name = "always_fail_actor",
+)
+
+fx_component_manifest(
+    name = "actor-manifest",
+    testonly = True,
+    component_name = "always_fail_actor",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/stress_test/actor:default.shard.cml",
+    ],
+    manifest = "meta/always_fail_actor.cml",
+)
+
+fx_component(
+    name = "actor",
+    testonly = True,
+    compiled_manifest = ":actor-manifest",
+    deps = [":always_fail_actor_bin_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "test-manifest",
+    testonly = True,
+    component_name = "always_fail",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/stress_test:default.shard.cml",
+    ],
+    manifest = "meta/always_fail.cml",
+)
+
+fx_component(
+    name = "test",
+    testonly = True,
+    compiled_manifest = ":test-manifest",
+)

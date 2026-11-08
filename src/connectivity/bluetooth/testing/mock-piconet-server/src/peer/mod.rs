@@ -28,6 +28,66 @@ use crate::types::ServiceRecord;
 /// audio streaming.
 const DEFAULT_TX_SDU_SIZE: usize = Channel::DEFAULT_MAX_TX;
 
+/// Wrapper around either a `ConnectionReceiver2Proxy` or the deprecated `ConnectionReceiverProxy`.
+#[derive(Clone, Debug)]
+pub enum ConnectionReceiverClient {
+    V2(bredr::ConnectionReceiver2Proxy),
+    V1(bredr::ConnectionReceiverProxy),
+}
+
+impl ConnectionReceiverClient {
+    pub fn connected(
+        &self,
+        peer_id: PeerId,
+        channel: bredr::Channel,
+        protocol: &[bredr::ProtocolDescriptor],
+    ) -> Result<(), fidl::Error> {
+        match self {
+            Self::V2(proxy) => {
+                let _ = proxy
+                    .connected(bredr::ConnectionReceiver2ConnectedRequest {
+                        peer_id: Some(peer_id.into()),
+                        channel: Some(channel),
+                        protocol: Some(protocol.to_vec()),
+                        ..Default::default()
+                    })
+                    .check()?;
+                Ok(())
+            }
+            Self::V1(proxy) => proxy.connected(&peer_id.into(), channel, protocol),
+        }
+    }
+
+    fn take_closed_fut(&self) -> impl Future<Output = ()> + use<> {
+        enum EventStream {
+            V2(bredr::ConnectionReceiver2EventStream),
+            V1(bredr::ConnectionReceiverEventStream),
+        }
+        let stream = match self {
+            Self::V2(proxy) => EventStream::V2(proxy.take_event_stream()),
+            Self::V1(proxy) => EventStream::V1(proxy.take_event_stream()),
+        };
+        async move {
+            match stream {
+                EventStream::V2(mut s) => {
+                    while let Some(event) = s.next().await {
+                        if let Ok(bredr::ConnectionReceiver2Event::OnRevoke {}) = event {
+                            break;
+                        }
+                    }
+                }
+                EventStream::V1(mut s) => {
+                    while let Some(event) = s.next().await {
+                        if let Ok(bredr::ConnectionReceiverEvent::OnRevoke {}) = event {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The primary object that represents a peer in the piconet.
 /// `MockPeer` facilitates the registering, advertising, and connecting of services
 /// for a peer.
@@ -49,7 +109,7 @@ pub struct MockPeer {
     service_mgr: Arc<RwLock<ServiceSet>>,
 
     /// Outstanding advertised services and their connection receivers.
-    services: DetachableMap<RegistrationHandle, bredr::ConnectionReceiverProxy>,
+    services: DetachableMap<RegistrationHandle, ConnectionReceiverClient>,
 }
 
 impl MockPeer {
@@ -132,7 +192,7 @@ impl MockPeer {
     pub fn new_advertisement(
         &mut self,
         services: Vec<bredr::ServiceDefinition>,
-        proxy: bredr::ConnectionReceiverProxy,
+        proxy: ConnectionReceiverClient,
     ) -> Result<
         (
             Vec<bredr::ServiceDefinition>,
@@ -147,7 +207,7 @@ impl MockPeer {
             .write()
             .register_service(service_records)
             .ok_or_else(|| format_err!("Registration of services failed"))?;
-        let service_event_stream = proxy.take_event_stream();
+        let event_closed_fut = proxy.take_closed_fut();
 
         if let Some(s) = self.services.insert(registration_handle, proxy) {
             warn!("Replaced a service at {}: {:?}", registration_handle, s);
@@ -161,16 +221,10 @@ impl MockPeer {
         let closed_fut = {
             let peer_id = self.id.clone();
             let reg_handle_clone = registration_handle.clone();
-            let mut service_event_stream = service_event_stream;
             let detached_service = self.services.get(&registration_handle).expect("just added");
             let service_mgr_clone = self.service_mgr.clone();
             async move {
-                while let Some(event) = service_event_stream.next().await {
-                    match event {
-                        Ok(bredr::ConnectionReceiverEvent::OnRevoke {}) => break,
-                        _ => {}
-                    }
-                }
+                event_closed_fut.await;
                 detached_service.detach();
                 let removed = service_mgr_clone.write().unregister_service(&reg_handle_clone);
                 info!(peer_id:%, removed:?; "Unregistered service advertisement");
@@ -201,7 +255,7 @@ impl MockPeer {
         // Build the L2CAP descriptor and notify the receiver.
         let protocol = build_l2cap_descriptor(psm);
         let (local, remote) = Channel::create_socket_pair_with_max_tx(DEFAULT_TX_SDU_SIZE);
-        proxy.connected(&other.into(), remote.try_into()?, &protocol)?;
+        proxy.connected(other, remote.try_into()?, &protocol)?;
 
         // Notify observer relay of the connection.
         let _ = self.observer.as_ref().map(|o| Self::relay_connected(o, other, protocol));
@@ -281,7 +335,7 @@ mod tests {
     fn build_and_register_service(
         mock_peer: &mut MockPeer,
     ) -> (
-        bredr::ConnectionReceiverRequestStream,
+        bredr::ConnectionReceiver2RequestStream,
         Vec<bredr::ServiceDefinition>,
         HashSet<bredr::ServiceClassProfileIdentifier>,
         impl Future<Output = ()> + use<>,
@@ -290,9 +344,10 @@ mod tests {
         let (a2dp_def, expected_record) = a2dp_service_definition(Psm::new(bredr::PSM_AVDTP));
 
         // Register the service.
-        let (receiver, stream) = create_proxy_and_stream::<bredr::ConnectionReceiverMarker>();
-        let (registered, svc_ids, closed_fut) =
-            mock_peer.new_advertisement(vec![a2dp_def], receiver).expect("advertisement is ok");
+        let (receiver, stream) = create_proxy_and_stream::<bredr::ConnectionReceiver2Marker>();
+        let (registered, svc_ids, closed_fut) = mock_peer
+            .new_advertisement(vec![a2dp_def], ConnectionReceiverClient::V2(receiver))
+            .expect("advertisement is ok");
         assert_eq!(expected_record.service_ids().clone(), svc_ids);
 
         (stream, registered, svc_ids, closed_fut)
@@ -402,14 +457,17 @@ mod tests {
         // in `a2dp_def`. There should be a new connection request on the stream.
         assert_matches!(mock_peer.new_connection(remote_peer, Psm::AVDTP), Ok(_));
         match exec.run_until_stalled(&mut stream.next()) {
-            Poll::Ready(Some(Ok(bredr::ConnectionReceiverRequest::Connected {
-                peer_id,
-                channel,
+            Poll::Ready(Some(Ok(bredr::ConnectionReceiver2Request::Connected {
+                payload,
+                responder,
                 ..
             }))) => {
-                assert_eq!(remote_peer, peer_id.into());
+                let _ = responder.send();
+                assert_eq!(remote_peer, payload.peer_id.unwrap().into());
+                let channel = payload.channel.unwrap();
                 assert_eq!(channel.channel_mode, Some(fidl_bt::ChannelMode::Basic));
                 assert_eq!(channel.max_tx_sdu_size, Some(DEFAULT_TX_SDU_SIZE as u16));
+                assert_eq!(payload.protocol, Some(build_l2cap_descriptor(Psm::AVDTP)));
             }
             x => panic!("Expected Ready but got: {:?}", x),
         }
@@ -583,9 +641,10 @@ mod tests {
         // Register some RFCOMM service with a random channel number.
         let (rfcomm_def, _) =
             rfcomm_service_definition(ServerChannel::try_from(4).expect("valid channel"));
-        let (receiver, mut stream) = create_proxy_and_stream::<bredr::ConnectionReceiverMarker>();
-        let _adv_args =
-            mock_peer.new_advertisement(vec![rfcomm_def], receiver).expect("valid advertisement");
+        let (receiver, mut stream) = create_proxy_and_stream::<bredr::ConnectionReceiver2Marker>();
+        let _adv_args = mock_peer
+            .new_advertisement(vec![rfcomm_def], ConnectionReceiverClient::V2(receiver))
+            .expect("valid advertisement");
 
         // Some other peer wants to connect to the RFCOMM service.
         let other_peer = PeerId(81);
@@ -594,13 +653,15 @@ mod tests {
 
         // `mock_peer` should receive connection request.
         let _mock_peer_channel = match exec.run_until_stalled(&mut stream.next()) {
-            Poll::Ready(Some(Ok(bredr::ConnectionReceiverRequest::Connected {
-                peer_id,
-                channel,
+            Poll::Ready(Some(Ok(bredr::ConnectionReceiver2Request::Connected {
+                payload,
+                responder,
                 ..
             }))) => {
-                assert_eq!(other_peer, peer_id.into());
-                channel
+                let _ = responder.send();
+                assert_eq!(other_peer, payload.peer_id.unwrap().into());
+                assert_eq!(payload.protocol, Some(build_l2cap_descriptor(Psm::RFCOMM)));
+                payload.channel.unwrap()
             }
             x => panic!("Expected Connected but got: {:?}", x),
         };

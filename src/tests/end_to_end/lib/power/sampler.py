@@ -81,7 +81,7 @@ class PowerSampler:
     def has_samples(self) -> bool:
         return False
 
-    def extract_samples(self) -> Sequence["Sample"]:
+    def extract_samples(self) -> Sequence[Sample]:
         """Return recorded samples. May be expensive and require I/O."""
         return []
 

@@ -6,6 +6,7 @@ import("//build/components.gni")
 import("//src/tests/benchmarks/fidl/benchmark_suite/benchmark_suite.gni")
 import("//tools/fidl/gidl/gidl.gni")
 
+# LINT.IfChange
 gidl_reference_benchmarks("benchmark_suite_reference") {
   testonly = true
   inputs = [
@@ -47,3 +48,4 @@ fuchsia_package_with_single_component("fidl_microbenchmarks_reference") {
   component_name = "benchmark"
   deps = [ ":bin" ]
 }
+# LINT.ThenChange(//src/tests/benchmarks/fidl/reference/BUILD.bazel)

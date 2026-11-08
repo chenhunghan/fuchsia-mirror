@@ -182,7 +182,7 @@ mod tests {
     #[fuchsia::test]
     async fn test_remote_volume_layer_set() {
         let device = DeviceHolder::new(FakeDevice::new(16384, 512));
-        let fs = new_test_fs_builder().format(true).open(device).await.unwrap();
+        let fs = new_test_fs_builder().format(device).await.unwrap();
         let root_vol = root_volume(fs.clone()).await.unwrap();
         let store = root_vol.new_volume("test_remote_vol", Default::default()).await.unwrap();
 
@@ -216,7 +216,7 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let device = DeviceHolder::new(FakeDevice::new(16384, 512));
-        let fs = new_test_fs_builder().format(true).open(device).await.unwrap();
+        let fs = new_test_fs_builder().format(device).await.unwrap();
         let root_vol = root_volume(fs.clone()).await.unwrap();
         let store = root_vol.new_volume("test_remote_vol", Default::default()).await.unwrap();
 
@@ -251,7 +251,7 @@ mod tests {
         const WRAPPING_KEY_ID: [u8; 16] = [1; 16];
 
         let device = DeviceHolder::new(FakeDevice::new(16384, 512));
-        let fs = new_test_fs_builder().format(true).open(device).await.unwrap();
+        let fs = new_test_fs_builder().format(device).await.unwrap();
         let crypt = Arc::new(new_insecure_crypt());
         crypt.add_wrapping_key(WRAPPING_KEY_ID, [1; 32].into()).unwrap();
 

@@ -16,7 +16,6 @@ group("forensics") {
     ":pkg",
     ":tests",
     "crasher",
-    "snapshot",
   ]
 }
 

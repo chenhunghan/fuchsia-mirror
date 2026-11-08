@@ -9,8 +9,8 @@
 //! environments.
 
 use proc_macro::TokenStream;
-use quote::{quote, quote_spanned};
-use syn::{Error, Lit, Visibility, parse_macro_input};
+use quote::quote_spanned;
+use syn::{Error, Visibility, parse_macro_input};
 
 fn validate_item_fn(sig: &syn::Signature, vis: &syn::Visibility) -> Result<(), syn::Error> {
     // Disallow const, unsafe or abi linkage, generics etc
@@ -72,28 +72,7 @@ fn validate_item_fn(sig: &syn::Signature, vis: &syn::Visibility) -> Result<(), s
 ///     }
 ///     ```
 #[proc_macro_attribute]
-pub fn run_singlethreaded_test(args: TokenStream, item: TokenStream) -> TokenStream {
-    let mut test_component: Option<String> = None;
-    let component_parser = syn::meta::parser(|meta| {
-        if meta.path.is_ident("test_component") {
-            if let Ok(value) = meta.value() {
-                if let Ok(Lit::Str(lit_str)) = value.parse() {
-                    test_component = Some(lit_str.value());
-                }
-            }
-        }
-        Ok(())
-    });
-    parse_macro_input!(args with component_parser);
-    let test_component = match test_component {
-        Some(component) => quote! {
-            Some(String::from(#component))
-        },
-        None => quote! {
-            None
-        },
-    };
-
+pub fn run_singlethreaded_test(_args: TokenStream, item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as syn::ItemFn);
     let syn::ItemFn { attrs, sig, vis, block, modifiers: _ } = item;
 
@@ -113,7 +92,7 @@ pub fn run_singlethreaded_test(args: TokenStream, item: TokenStream) -> TokenStr
             // TODO(https://fxbug.dev/42157203): Try to improve the Rust compiler to ease
             // this restriction.
             async fn func(#inputs) #block
-            let func = move |_| { ::test_harness::run_with_harness(func, #test_component) };
+            let func = move |_| { ::test_harness::run_with_harness(func) };
             ::test_harness::run_singlethreaded_test(func)
           }
     };

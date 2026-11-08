@@ -50,7 +50,7 @@ pub enum Error {
     Cache(#[from] CacheError),
 
     #[error("invalid target specifier: {0}")]
-    ParseError(String),
+    ParseError(#[source] addr::TargetAddrParseError),
 }
 
 #[derive(Debug, Error)]

@@ -70,14 +70,13 @@ config("musl_internal.config") {
   configs = [ "//build/config/zircon:no_fuzzer" ]
 }
 
-if (toolchain_variant.base == "//sdk/lib/c:user.libc_$target_cpu") {
+if (toolchain_variant.base == "//sdk/lib/c:user.libc_$current_cpu") {
   group("legacy-impl") {
     visibility = [ "//sdk/lib/c:*" ]
     deps = [
       ":common-impl",
       "ldso",
       "src/ldso",
-      "src/thread:tls_get_addr",
     ]
   }
 

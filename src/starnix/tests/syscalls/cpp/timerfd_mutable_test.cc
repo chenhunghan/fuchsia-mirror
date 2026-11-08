@@ -49,7 +49,7 @@ TEST(TimerFD, AlarmCancelOnSet) {
     // When the UTC timeline changes, we should get an event, and reading
     // the timer must give us ECANCELED. This is the TFD_TIMER_CANCEL_ON_SET way.
     printf("test_thread: entering epoll_wait\n");
-    int ev_count = epoll_wait(epoll_fd, events, sizeof(events), -1);
+    int ev_count = epoll_wait(epoll_fd, events, std::size(events), -1);
     printf("test_thread: epoll_wait returned ev_count=%d (errno %s)\n", ev_count, strerror(errno));
     ASSERT_GT(ev_count, 0) << strerror(errno);
 

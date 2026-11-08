@@ -10,6 +10,9 @@
 #include <zircon/compiler.h>
 #include <zircon/types.h>
 
+#include <kernel/ffi.h>
+
+#include "vm/vm_cow_pages_ffi.h"
 #include "vm/vm_object_paged.h"
 
 __BEGIN_CDECLS
@@ -30,6 +33,7 @@ VmCowPages* cpp_vm_object_paged_debug_get_cow_pages(VmObjectPaged* vmo);
 uint64_t cpp_vm_object_paged_size_locked(const VmObjectPaged* vmo);
 bool cpp_vm_object_paged_lock_is_held(const VmObjectPaged* vmo);
 const VmCowPages* cpp_vm_object_paged_cow_pages(const VmObjectPaged* vmo);
+uint64_t cpp_vm_object_paged_lock_order(const VmObjectPaged* vmo);
 vm_page_t* cpp_vm_object_paged_debug_get_page(VmObjectPaged* vmo, uint64_t offset);
 
 zx_status_t cpp_vm_object_paged_zero_range(const VmObjectPaged* vmo, uint64_t offset,
@@ -41,7 +45,14 @@ void cpp_vm_object_paged_unmap_and_call(VmObjectPaged* vmo, uint64_t offset, uin
                                         void (*call_fn)(void* ctx), void* call_ctx);
 void cpp_vm_object_paged_set_user_stream_size(VmObjectPaged* vmo, StreamSizeManager* ssm);
 bool cpp_vm_object_paged_user_stream_size_locked(VmObjectPaged* vmo, uint64_t* out_stream_size);
+zx_status_t cpp_vm_object_paged_get_lookup_cursor_locked(
+    ffi::Uninitialized<VmCowPagesLookupCursorResult>* out, VmObjectPaged* vmo, uint64_t offset,
+    uint64_t max_len);
+void cpp_vm_object_paged_mark_modified_locked(VmObjectPaged* vmo);
 
+void cpp_vm_object_paged_range_change_update_locked(VmObjectPaged* vmo, uint64_t offset,
+                                                    uint64_t len, VmObject::RangeChangeOp op);
+bool cpp_vm_object_paged_can_dedup_zero_pages_locked(VmObjectPaged* vmo);
 __END_CDECLS
 
 #endif  // ZIRCON_KERNEL_VM_INCLUDE_VM_VM_OBJECT_PAGED_FFI_H_

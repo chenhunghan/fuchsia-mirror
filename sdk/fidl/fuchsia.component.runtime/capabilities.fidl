@@ -20,6 +20,7 @@ type CapabilityType = flexible enum {
     DICTIONARY_ROUTER = 7;
     DATA_ROUTER = 8;
     INSTANCE_TOKEN = 9;
+    HANDLE = 10;
 };
 
 @available(added=HEAD)
@@ -277,6 +278,32 @@ type CapabilitiesError = flexible enum {
     HANDLE_ALREADY_REGISTERED = 7;
     INVALID_DATA = 8;
     INVALID_ARGS = 9;
+    HANDLE_ALREADY_TAKEN = 10;
+};
+
+@available(added=HEAD)
+type AggregateSource = resource table {
+    /// A reference to the source `DirConnector`.
+    1: dir_connector zx.Handle:EVENTPAIR;
+
+    /// (Optional) The list of allowlisted instances to be offered. Instances
+    /// of the service not in this list will not be accessible by the target
+    /// component. If this is not set that means all instances from the source
+    /// service are offered.
+    2: source_instance_filter vector<fuchsia.component.decl.name>:MAX;
+
+    /// (Optional) The list of allowlisted instances to be offered, with
+    /// renames.
+    ///
+    /// If this is set and nonempty, the set of instances in the target service
+    /// will be restricted to the instances in this list, renaming `source_name`
+    /// to `target_name`.
+    ///
+    /// If it is set and nonempty, `source_instance_filter` will further
+    /// restrict the set of instances to those whose `target_name` appears in
+    /// that list. There is generally no reason to set both, but we support it
+    /// for compatibility.
+    3: renamed_instances vector<fuchsia.component.decl.NameMapping>:MAX;
 };
 
 /// An API for creating and manipulating references to runtime capabilities in
@@ -308,6 +335,16 @@ open protocol Capabilities {
         receiver_client_end client_end:DirReceiver;
     }) -> () error CapabilitiesError;
 
+    /// Creates a reference to a new directory connector capability that
+    /// forwards open requests to a set of sources.
+    ///
+    /// Make sure this method returns before passing the handle's peer to other
+    /// methods in this API. The creation may not be complete before then.
+    flexible ServiceAggregateCreate(resource struct {
+        dir_connector zx.Handle:EVENTPAIR;
+        sources vector<AggregateSource>:MAX;
+    }) -> () error CapabilitiesError;
+
     /// Creates a reference to a new dictionary capability.
     ///
     /// Make sure this method returns before passing the handle's peer to other
@@ -323,6 +360,16 @@ open protocol Capabilities {
     flexible DataCreate(resource struct {
         data_handle zx.Handle:EVENTPAIR;
         data Data;
+    }) -> () error CapabilitiesError;
+
+    /// Creates a reference to a new handle capability wrapping the given
+    /// `handle`.
+    ///
+    /// Make sure this method returns before passing the handle's peer to other
+    /// methods in this API. The creation may not be complete before then.
+    flexible HandleCreate(resource struct {
+        handle_capability zx.Handle:EVENTPAIR;
+        handle zx.Handle;
     }) -> () error CapabilitiesError;
 
     /// Creates a reference to a new router capability that will return a
@@ -459,11 +506,31 @@ open protocol Capabilities {
         key_iterator server_end:DictionaryKeyIterator;
     }) -> () error CapabilitiesError;
 
+    /// Associates a legacy `fuchsia.component.sandbox.Dictionary` channel
+    /// server end with the dictionary referenced by `dictionary_handle`.
+    ///
+    /// This is a legacy API to support backward compatibility with frozen CTF
+    /// tests that pass a `fuchsia.component.sandbox.Dictionary` channel to
+    /// `fuchsia.component.Namespace/Create`.
+    flexible DictionaryLegacyExport(resource struct {
+        dictionary_handle zx.Handle:EVENTPAIR;
+        server_end zx.Handle:CHANNEL;
+    }) -> () error CapabilitiesError;
+
     /// Returns the `Data` value that was provided to the `DataCreate` call used
     /// with `data_handle`.
     flexible DataGet(resource struct {
         data_handle zx.Handle:EVENTPAIR;
     }) -> (Data) error CapabilitiesError;
+
+    /// Takes and returns the `zx.Handle` that was provided to the
+    /// `HandleCreate` call used with `handle_capability`. Returns
+    /// `HANDLE_ALREADY_TAKEN` if the handle has already been taken.
+    flexible HandleGet(resource struct {
+        handle_capability zx.Handle:EVENTPAIR;
+    }) -> (resource struct {
+        handle zx.Handle;
+    }) error CapabilitiesError;
 
     /// Attempts to produce a `Connector` capability from this
     /// `ConnectorRouter`.

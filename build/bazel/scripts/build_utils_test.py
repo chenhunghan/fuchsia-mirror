@@ -5,15 +5,17 @@
 
 import json
 import os
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-_SCRIPT_DIR = os.path.dirname(__file__)
-sys.path.insert(0, _SCRIPT_DIR)
-import build_utils
-from build_utils import BazelLauncher, BazelQueryCache, MockCommandRunner
+from build.bazel.scripts import bazel_invocation as bazel_inv
+from build.bazel.scripts import build_utils
+from build.bazel.scripts.build_utils import (
+    BazelLauncher,
+    BazelQueryCache,
+    MockCommandRunner,
+)
 
 
 class FindFuchsiaDirTest(unittest.TestCase):
@@ -962,6 +964,7 @@ _BAZEL_OUTPUT_USER_ROOT="{cls._tmpdir_path / 'output_user_root'}"
 _NINJA_BUILD_DIR="{cls._ninja_build_dir}"
 _PREBUILT_NINJA="{cls._prebuilt_ninja}"
 _PREBUILT_PYTHON_DIR="{cls._python_dir}"
+_BAZEL_LOGS_DIRNAME="{bazel_inv.BAZEL_LOGS_DIRNAME}"
 """
         (cls._tmpdir_path / "bazel.sh.config").write_text(config_content)
 

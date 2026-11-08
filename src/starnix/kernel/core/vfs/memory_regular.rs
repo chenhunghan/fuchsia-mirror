@@ -4,10 +4,10 @@
 
 use crate::fs::tmpfs::TmpFs;
 use crate::mm::memory::MemoryObject;
-use crate::mm::{PAGE_SIZE, ProtectionFlags, VMEX_RESOURCE};
+use crate::mm::{MlockShadowProcess, PAGE_SIZE, ProtectionFlags, VMEX_RESOURCE};
 use crate::security;
 use crate::signals::{SignalInfo, send_standard_signal};
-use crate::task::CurrentTask;
+use crate::task::{CurrentTask, Kernel};
 use crate::vfs::buffers::{InputBuffer, OutputBuffer};
 use crate::vfs::{
     Anon, AppendLockWriteGuard, DirEntry, FallocMode, FileHandle, FileObject, FileOps,
@@ -17,6 +17,7 @@ use crate::vfs::{
     fs_node_impl_xattr_delegate,
 };
 use linux_uapi::{ASHMEM_GET_SIZE, ASHMEM_SET_SIZE};
+use memory_pinning::PinnedMapping;
 use once_cell::sync::OnceCell;
 use starnix_logging::{impossible_error, track_stub};
 use starnix_syscalls::{SUCCESS, SyscallArg, SyscallResult};
@@ -33,6 +34,9 @@ use std::sync::Arc;
 pub struct MemoryRegularNode {
     /// The memory that backs this file.
     memory: Arc<MemoryObject>,
+    /// Optional shadow-process VMAR pin keeping the backing VMO in Zircon's
+    /// `HIGH_PRIORITY` page queue (e.g., for `tmpfs -o noswap`).
+    _pin: Option<Arc<PinnedMapping>>,
     /// Cached read-only VMO handle (without WRITE or RESIZE rights).
     read_only_memory: OnceCell<Arc<MemoryObject>>,
     /// Cached read/exec VMO handle (without WRITE or RESIZE rights, with EXECUTE right).
@@ -47,13 +51,31 @@ impl MemoryRegularNode {
     pub fn new() -> Result<Self, Errno> {
         let vmo =
             zx::Vmo::create_with_opts(zx::VmoOptions::RESIZABLE, 0).map_err(|_| errno!(ENOMEM))?;
-        Ok(Self {
-            memory: Arc::new(MemoryObject::from(vmo).with_zx_name(b"starnix:vfs")),
-            read_only_memory: OnceCell::new(),
-            read_exec_memory: OnceCell::new(),
-            write_exec_memory: OnceCell::new(),
-            xattrs: MemoryXattrStorage::default(),
-        })
+        Ok(Self::from_vmo(vmo, None))
+    }
+
+    /// Create a new writable file node whose backing VMO is pinned in the kernel's
+    /// memory-pinning shadow process so Zircon will not compress or reclaim its pages
+    /// (used for `tmpfs -o noswap`).
+    pub fn new_pinned(kernel: &Kernel) -> Result<Self, Errno> {
+        let vmo =
+            zx::Vmo::create_with_opts(zx::VmoOptions::RESIZABLE, 0).map_err(|_| errno!(ENOMEM))?;
+        let shadow_process = MlockShadowProcess::get_or_try_init(kernel)?;
+        // In Zircon, mapping any range of a VMO into a VMAR with `MemoryPriority::High`
+        // (`fuchsia.starnix.pinned_memory`) increments the whole-VMO `high_priority_count_` on
+        // `VmCowPages`, routing all pages subsequently committed to the VMO into
+        // `PageQueue::HIGH_PRIORITY`. Because Zircon permits mapping `[0..PAGE_SIZE]` on a
+        // 0-length resizable VMO without eagerly committing a page, a single 1-page mapping at
+        // node creation suffices without resizing the shadow mapping as the file grows.
+        let pin = shadow_process.pin_pages(&vmo, 0, *PAGE_SIZE as usize)?;
+        Ok(Self::from_vmo(vmo, Some(pin)))
+    }
+
+    fn from_vmo(vmo: zx::Vmo, pin: Option<Arc<PinnedMapping>>) -> Self {
+        let mut node =
+            Self::from_memory(Arc::new(MemoryObject::from(vmo).with_zx_name(b"starnix:vfs")));
+        node._pin = pin;
+        node
     }
 
     /// Create a new file node based on an existing VMO.
@@ -62,6 +84,7 @@ impl MemoryRegularNode {
     pub fn from_memory(memory: Arc<MemoryObject>) -> Self {
         Self {
             memory,
+            _pin: None,
             read_only_memory: OnceCell::new(),
             read_exec_memory: OnceCell::new(),
             write_exec_memory: OnceCell::new(),

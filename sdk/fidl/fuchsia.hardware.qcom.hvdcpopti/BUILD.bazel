@@ -2,28 +2,21 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load(
-    "@rules_fuchsia//fuchsia:defs.bzl",
-    "fuchsia_fidl_library",
-)
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
 
-package(
-    default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
-)
+package(default_applicable_licenses = ["//:license"])
 
-fuchsia_fidl_library(
+fidl_library(
     name = "fuchsia.hardware.qcom.hvdcpopti",
     srcs = [
         "hvdcp_opti.fidl",
     ],
-    cc_bindings = [
-        "cpp",
-        "cpp_wire",
+    visibility = [
+        "//src/starnix/modules/hvdcp_opti:__pkg__",
+        "//vendor/google:__subpackages__",
     ],
-    target_compatible_with = ["@platforms//os:fuchsia"],
     deps = [
-        "@fuchsia_sdk//fidl/fuchsia.power.system",
-        "@fuchsia_sdk//fidl/zx",
+        "//sdk/fidl/fuchsia.power.system",
+        "//zircon/vdso/zx",
     ],
 )

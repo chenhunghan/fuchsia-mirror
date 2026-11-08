@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 {
     include: [
-        "//src/connectivity/network/lib/net_interfaces/client.shard.cml",
         "inspect/client.shard.cml",
         "syslog/client.shard.cml",
     ],
@@ -28,12 +27,14 @@
             protocol: [
                 "fuchsia.boot.ReadOnlyLog",
                 "fuchsia.diagnostics.ArchiveAccessor.feedback",
+                "fuchsia.diagnostics.ArchiveAccessor.logs",
                 "fuchsia.hardware.power.statecontrol.ShutdownWatcherRegister",
                 "fuchsia.hwinfo.Board",
                 "fuchsia.hwinfo.Product",
                 "fuchsia.kernel.RootJobForInspect",
                 "fuchsia.metrics.MetricEventLoggerFactory",
                 "fuchsia.net.http.Loader",
+                "fuchsia.net.reachability.Monitor",
                 "fuchsia.process.Launcher",
                 "fuchsia.sysinfo.SysInfo",
                 "fuchsia.ui.activity.Provider",

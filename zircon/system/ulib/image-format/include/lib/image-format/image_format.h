@@ -25,8 +25,6 @@ using zbi_pixel_format_t = uint32_t;
 // Iff this returns true, the two pixel formats are equal.
 bool ImageFormatIsPixelFormatEqual(const PixelFormatAndModifier& a,
                                    const PixelFormatAndModifier& b);
-bool ImageFormatIsPixelFormatEqual(const PixelFormatAndModifier& a,
-                                   const PixelFormatAndModifier& b);
 bool ImageFormatIsPixelFormatEqual(const fuchsia_sysmem::wire::PixelFormat& a,
                                    const fuchsia_sysmem::wire::PixelFormat& b);
 
@@ -58,7 +56,9 @@ bool ImageFormatIsSupported(const fuchsia_sysmem::wire::PixelFormat& pixel_forma
 // that contain pixel data.
 //
 // For example, NV12 is 12 bits per pixel.  This accounts for sub-sampling in
-// both horizontal and vertical.
+// both horizontal and vertical.  This counts all the bits of the bytes that
+// contain samples, including padding bits, so P010 (10-bit samples stored in
+// 16 bits each) is 24 bits per pixel.
 uint32_t ImageFormatBitsPerPixel(const PixelFormatAndModifier& pixel_format);
 uint32_t ImageFormatBitsPerPixel(const fuchsia_sysmem::wire::PixelFormat& pixel_format);
 
@@ -169,8 +169,10 @@ bool ImageFormatCompatibleWithProtectedMemory(
 
 #if FUCHSIA_API_LEVEL_AT_LEAST(30)
 // This intentionally does not define how planes are indexed or how they're counted, only whether a
-// format is both non-tiled and has a single plane. Data like TE or CCS or the like imply not being
-// single-plane, as do multi-plane YCbCr formats. MJPEG doesn't count as non-tiled and single-plane.
+// format is both non-tiled and has a single plane with uniform rows. Data like TE or CCS or the
+// like imply not being single-plane, as do multi-plane YCbCr formats, and row-interleaved YCbCr
+// formats like M420 do not count despite exposing only plane 0. MJPEG doesn't count as non-tiled
+// and single-plane.
 bool ImageFormatIsNonTiledSinglePlane(const PixelFormatAndModifier& pixel_format_and_modifier);
 #endif
 

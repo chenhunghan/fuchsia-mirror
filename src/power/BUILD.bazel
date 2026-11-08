@@ -13,3 +13,19 @@ exports_files(
     ],
     visibility = ["//bundles/assembly:__subpackages__"],
 )
+
+test_suite(
+    name = "target_tests",
+    tests = [
+        "//src/power/broker/client:tests",
+        "//src/power/cpu-manager/energy_model_config/parser:energy-model-config-parser-tests",
+    ],
+)
+
+test_suite(
+    name = "host_tests",
+    tests = [
+        "//src/power/cpu-manager/energy_model_config/parser:parser_host_test",
+        "//src/power/cpu-manager/energy_model_config/validator:validator_test",
+    ],
+)

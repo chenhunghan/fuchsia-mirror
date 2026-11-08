@@ -35,6 +35,7 @@ fn mask_bits(data: usize, idx: usize, bitoff: usize, bitmax: usize, is_set: bool
 
 /// A simple bitmap backed by generic storage.
 #[derive(Debug, Default)]
+#[repr(C)]
 pub struct RawBitmapGeneric<S: Storage> {
     bits: S,
     size: usize,

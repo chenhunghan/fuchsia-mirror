@@ -5223,4 +5223,213 @@ mod test {
         let step = assert_matches!(result, Ok(s) => s);
         assert_matches!(step, Step::Exit(ExitReason::AddressRemoved(FakeRemovedReason)));
     }
+
+    // `netcfg` and `dhcpv4_client` only request `SubnetMask`, `Router`, and
+    // `DomainNameServer`, ignoring `DomainName` (15) and `DomainSearch` (119).
+    #[derive(Clone, Copy)]
+    enum WireOptionCase {
+        RawOption(u8, &'static [u8]),
+        MaxSizedDomainSearch { oversize_by: usize },
+    }
+
+    fn build_raw_dhcp_ip_packet(
+        xid: u32,
+        message_type: dhcp_protocol::MessageType,
+        case: WireOptionCase,
+    ) -> impl AsRef<[u8]> {
+        const OPT_DOMAIN_SEARCH: u8 = 119;
+        const IPV4_HEADER_LEN: usize = 20;
+        const MAX_UNFRAGMENTED_DHCP_LEN: usize =
+            BUFFER_SIZE - IPV4_HEADER_LEN - packet_formats::udp::HEADER_BYTES;
+
+        let push_raw_option = |buf: &mut Vec<u8>, code: u8, payload: &[u8]| {
+            buf.push(code);
+            buf.push(u8::try_from(payload.len()).expect("option payload fits in u8"));
+            buf.extend_from_slice(payload);
+        };
+
+        let mut raw_dhcp = build_incoming_message(
+            xid,
+            VaryingIncomingMessageFields {
+                yiaddr: YIADDR,
+                options: vec![
+                    dhcp_protocol::DhcpOption::DhcpMessageType(message_type),
+                    dhcp_protocol::DhcpOption::ServerIdentifier(SERVER_IP),
+                    dhcp_protocol::DhcpOption::IpAddressLeaseTime(DEFAULT_LEASE_LENGTH_SECONDS),
+                    dhcp_protocol::DhcpOption::SubnetMask(TEST_PREFIX_LENGTH),
+                    dhcp_protocol::DhcpOption::Router([SERVER_IP].into()),
+                ],
+            },
+        )
+        .serialize();
+        assert_eq!(raw_dhcp.pop(), Some(u8::from(dhcp_protocol::OptionCode::End)));
+
+        // Append `DomainNameServer` after the extra/malformed options to verify
+        // option scanning continues cleanly to `End`.
+        let mut trailing = Vec::new();
+        push_raw_option(
+            &mut trailing,
+            u8::from(dhcp_protocol::OptionCode::DomainNameServer),
+            &SERVER_IP.octets(),
+        );
+        trailing.push(u8::from(dhcp_protocol::OptionCode::End));
+
+        match case {
+            WireOptionCase::RawOption(code, payload) => {
+                push_raw_option(&mut raw_dhcp, code, payload);
+            }
+            WireOptionCase::MaxSizedDomainSearch { oversize_by } => {
+                let target_len = MAX_UNFRAGMENTED_DHCP_LEN + oversize_by;
+                let mut remaining = target_len - raw_dhcp.len() - trailing.len();
+                while remaining > 0 {
+                    if remaining == 1 {
+                        raw_dhcp.push(u8::from(dhcp_protocol::OptionCode::Pad));
+                        break;
+                    }
+                    let len = (remaining - 2).min(usize::from(u8::MAX));
+                    let payload = b"\x07example\x04test\x00"
+                        .iter()
+                        .copied()
+                        .cycle()
+                        .take(len)
+                        .collect::<Vec<_>>();
+                    push_raw_option(&mut raw_dhcp, OPT_DOMAIN_SEARCH, &payload);
+                    remaining -= 2 + len;
+                }
+            }
+        }
+        raw_dhcp.extend_from_slice(&trailing);
+
+        let ip_packet = crate::parse::serialize_dhcp_bytes_to_ip_packet(
+            raw_dhcp,
+            SERVER_IP,
+            SERVER_PORT,
+            YIADDR,
+            CLIENT_PORT,
+        );
+        if let WireOptionCase::MaxSizedDomainSearch { oversize_by } = case {
+            assert_eq!(ip_packet.as_ref().len(), BUFFER_SIZE + oversize_by);
+        }
+        ip_packet
+    }
+
+    #[test_case(WireOptionCase::RawOption(15, b"example.test"); "domain_name_valid")]
+    #[test_case(WireOptionCase::RawOption(15, b"example.invalid"); "domain_name_invalid_domain")]
+    #[test_case(WireOptionCase::RawOption(15, b"example\xffinvalid"); "domain_name_malformed_utf8")]
+    #[test_case(WireOptionCase::RawOption(119, b"\x07example\x04test\x00"); "domain_search_valid")]
+    #[test_case(WireOptionCase::RawOption(119, b"\x07example\x07invalid\x00"); "domain_search_invalid_domain")]
+    #[test_case(WireOptionCase::RawOption(119, b"\xc0\xff\x04bad!"); "domain_search_malformed_compression")]
+    #[test_case(WireOptionCase::MaxSizedDomainSearch { oversize_by: 0 }; "max_unfragmented_message")]
+    #[test_case(WireOptionCase::MaxSizedDomainSearch { oversize_by: 1 }; "oversized_message_truncated_then_recovered")]
+    fn selecting_and_requesting_handle_wire_options_and_socket_truncation(case: WireOptionCase) {
+        initialize_logging();
+        let counters = Counters::default();
+        let mut rng = FakeRngProvider::new(0);
+        let time = FakeTimeController::new();
+        let (server_end, client_end) = FakeSocket::<Mac>::new_pair();
+        let test_socket_provider = FakeSocketProvider::new(client_end);
+        let (_stop_sender, mut stop_receiver) = mpsc::unbounded();
+        let client_config = test_client_config();
+        let mut executor = fasync::TestExecutor::new();
+
+        let server_end = &server_end;
+        let serve_reply = |reply_type: dhcp_protocol::MessageType| async move {
+            let recv_client_xid = || async {
+                let mut recv_buf = [0u8; BUFFER_SIZE];
+                let DatagramInfo { length, address } =
+                    server_end.recv_from(&mut recv_buf).await.expect("recv_from client");
+                assert_eq!(address, Mac::BROADCAST);
+                crate::parse::parse_dhcp_message_from_ip_packet(
+                    &recv_buf[..length],
+                    dhcp_protocol::SERVER_PORT,
+                )
+                .expect("parse client DHCP packet")
+                .1
+                .xid
+            };
+
+            let xid = recv_client_xid().await;
+            let packet = build_raw_dhcp_ip_packet(xid, reply_type, case);
+            server_end.send_to(packet.as_ref(), TEST_SERVER_MAC_ADDRESS).await.expect("send reply");
+
+            if matches!(case, WireOptionCase::MaxSizedDomainSearch { oversize_by: 1.. }) {
+                // `recv_stream` truncates packets > `BUFFER_SIZE` (1500 bytes), causing
+                // IPv4/UDP length validation to reject the packet and the client to retransmit.
+                let retry_xid = recv_client_xid().await;
+                let valid_packet = build_raw_dhcp_ip_packet(
+                    retry_xid,
+                    reply_type,
+                    WireOptionCase::MaxSizedDomainSearch { oversize_by: 0 },
+                );
+                server_end
+                    .send_to(valid_packet.as_ref(), TEST_SERVER_MAC_ADDRESS)
+                    .await
+                    .expect("send valid reply on retry");
+            }
+        };
+
+        let selecting = Init.do_init(&mut rng, &time);
+        let selecting_result = {
+            let mut main_future = pin!(async {
+                let (res, ()) = join!(
+                    selecting.do_selecting(
+                        &client_config,
+                        &test_socket_provider,
+                        &mut rng,
+                        &time,
+                        &mut stop_receiver,
+                        &counters,
+                    ),
+                    serve_reply(dhcp_protocol::MessageType::DHCPOFFER),
+                );
+                res
+            });
+            run_with_accelerated_time(&mut executor, &time, &mut main_future)
+        };
+        let requesting = assert_matches!(
+            selecting_result,
+            Ok(SelectingOutcome::Requesting(requesting)) => requesting
+        );
+
+        let requesting_result = {
+            let mut main_future = pin!(async {
+                let (res, ()) = join!(
+                    requesting.do_requesting(
+                        &client_config,
+                        &test_socket_provider,
+                        &mut rng,
+                        &time,
+                        &mut stop_receiver,
+                        &counters,
+                    ),
+                    serve_reply(dhcp_protocol::MessageType::DHCPACK),
+                );
+                res
+            });
+            run_with_accelerated_time(&mut executor, &time, &mut main_future)
+        };
+        let (_lease_state, parameters) = assert_matches!(
+            requesting_result,
+            Ok(RequestingOutcome::Bound(lease_state, parameters)) => (lease_state, parameters)
+        );
+
+        let expected_parse_failures =
+            usize::from(matches!(case, WireOptionCase::MaxSizedDomainSearch { oversize_by: 1.. }));
+        assert_eq!(
+            counters.selecting.messaging.recv_failed_dhcp_parse.load(),
+            expected_parse_failures
+        );
+        assert_eq!(
+            counters.requesting.messaging.recv_failed_dhcp_parse.load(),
+            expected_parse_failures
+        );
+        assert_eq!(
+            parameters,
+            vec![
+                dhcp_protocol::DhcpOption::SubnetMask(TEST_PREFIX_LENGTH),
+                dhcp_protocol::DhcpOption::Router([SERVER_IP].into()),
+                dhcp_protocol::DhcpOption::DomainNameServer([SERVER_IP].into()),
+            ]
+        );
+    }
 }

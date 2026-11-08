@@ -25,7 +25,7 @@
         },
         {
             name: "netstack",
-            url: "#meta/netstack3-debug.cm",
+            url: "netstack-debug#meta/netstack3-debug.cm",
         },
         {
             name: "ui",

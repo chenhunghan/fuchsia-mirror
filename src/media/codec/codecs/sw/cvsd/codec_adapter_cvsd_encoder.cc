@@ -33,16 +33,9 @@ CodecAdapterCvsdEncoder::CodecAdapterCvsdEncoder(std::mutex& lock,
 std::pair<fuchsia::media::FormatDetails, size_t> CodecAdapterCvsdEncoder::OutputFormatDetails() {
   std::lock_guard<std::mutex> lock(lock_);
   ZX_DEBUG_ASSERT(codec_params_);
-  fuchsia::media::AudioCompressedFormatCvsd cvsd;
-  fuchsia::media::AudioCompressedFormat compressed_format;
-  compressed_format.set_cvsd(std::move(cvsd));
-
-  fuchsia::media::AudioFormat audio_format;
-  audio_format.set_compressed(std::move(compressed_format));
 
   fuchsia::media::FormatDetails format_details;
   format_details.set_mime_type(kCvsdMimeType);
-  format_details.mutable_domain()->set_audio(std::move(audio_format));
 
   // The bytes needed to store each output packet. Since we're doing 16-1
   // compression for mono audio, where 2 byte input = 1 bit output. bytes needed
@@ -52,9 +45,7 @@ std::pair<fuchsia::media::FormatDetails, size_t> CodecAdapterCvsdEncoder::Output
 
 CodecAdapterCvsdEncoder::InputLoopStatus CodecAdapterCvsdEncoder::ProcessFormatDetails(
     const fuchsia::media::FormatDetails& format_details) {
-  if (!format_details.has_domain() || !format_details.domain().is_audio() ||
-      !format_details.domain().audio().is_uncompressed() ||
-      !format_details.domain().audio().uncompressed().is_pcm()) {
+  if (!format_details.has_pcm_format()) {
     events_->onCoreCodecFailCodec(
         "CVSD Encoder received input that was not uncompressed pcm audio.");
     return kShouldTerminate;
@@ -63,17 +54,21 @@ CodecAdapterCvsdEncoder::InputLoopStatus CodecAdapterCvsdEncoder::ProcessFormatD
     events_->onCoreCodecFailCodec("CVSD Encoder did not receive encoder settings.");
     return kShouldTerminate;
   }
-  auto& input_format = format_details.domain().audio().uncompressed().pcm();
-  if (input_format.pcm_mode != fuchsia::media::AudioPcmMode::LINEAR ||
-      input_format.bits_per_sample != 16 || input_format.channel_map.size() != 1) {
+  const auto& input_format = format_details.pcm_format();
+  if (!input_format.has_pcm_mode() ||
+      input_format.pcm_mode() != fuchsia::media::AudioPcmMode2::LINEAR ||
+      !input_format.has_bits_per_sample() || input_format.bits_per_sample() != 16 ||
+      (input_format.has_bytes_per_sample() && input_format.bytes_per_sample() != sizeof(int16_t)) ||
+      !input_format.has_channel_map() || input_format.channel_map().size() != 1 ||
+      !input_format.has_frames_per_second()) {
     events_->onCoreCodecFailCodec(
         "CVSD Encoder only encodes mono audio with signed 16 bit linear samples.");
     return kShouldTerminate;
   }
 
-  if (input_format.frames_per_second != kExpectedSamplingFreq) {
+  if (input_format.frames_per_second() != kExpectedSamplingFreq) {
     LOG(WARNING, "Expected sampling frequency %u got %u", kExpectedSamplingFreq,
-        input_format.frames_per_second);
+        input_format.frames_per_second());
   }
 
   {
@@ -127,11 +122,11 @@ fuchsia::sysmem::BufferCollectionConstraints CodecAdapterCvsdEncoder::BufferColl
 TimestampExtrapolator CodecAdapterCvsdEncoder::CreateTimestampExtrapolator(
     const fuchsia::media::FormatDetails& format_details) {
   if (format_details.has_timebase()) {
-    auto& input_format = format_details.domain().audio().uncompressed().pcm();
+    const auto& input_format = format_details.pcm_format();
     // Bytes per second is sampling frequency * number_of_channels * bytes_per_sample.
-    const size_t bytes_per_second = input_format.channel_map.size() *
-                                    input_format.frames_per_second *
-                                    (input_format.bits_per_sample / 8ull);
+    const size_t bytes_per_second = input_format.channel_map().size() *
+                                    input_format.frames_per_second() *
+                                    (input_format.bits_per_sample() / 8ull);
     return TimestampExtrapolator(format_details.timebase(), bytes_per_second);
   }
   return TimestampExtrapolator();

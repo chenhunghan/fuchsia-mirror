@@ -7,6 +7,7 @@ import("//build/fidl/fidl.gni")
 import("//build/testing/environments.gni")
 import("//src/tests/benchmarks/fidl/benchmark_suite/benchmark_suite.gni")
 
+# LINT.IfChange
 executable("bin") {
   output_name = "lib_fidl_microbenchmarks"
   testonly = true
@@ -29,3 +30,4 @@ fuchsia_package_with_single_component("fidl_microbenchmarks_libfidl") {
   component_name = "benchmark"
   deps = [ ":bin" ]
 }
+# LINT.ThenChange(//src/tests/benchmarks/fidl/libfidl/BUILD.bazel)

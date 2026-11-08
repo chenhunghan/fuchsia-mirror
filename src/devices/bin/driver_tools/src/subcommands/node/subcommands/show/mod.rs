@@ -8,6 +8,7 @@ use crate::subcommands::node::common;
 
 use anyhow::{Result, bail};
 use args::ShowNodeCommand;
+use fidl_fuchsia_component_decl_common as fidl_fuchsia_component_decl;
 use flex_fuchsia_driver_development as fdd;
 use flex_fuchsia_driver_framework as fdf;
 #[cfg(feature = "fdomain")]

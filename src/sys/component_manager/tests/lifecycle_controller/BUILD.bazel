@@ -1,0 +1,77 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "lifecycle_controller_test_bin",
+    srcs = ["src/lib.rs"],
+    crate_name = "lifecycle_controller_test",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.process:fuchsia.process_rust",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-runtime",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "lifecycle_controller_test_packaged_bin",
+    testonly = True,
+    binary = ":lifecycle_controller_test_bin",
+    binary_name = "lifecycle_controller_test",
+)
+
+fx_component_manifest(
+    name = "lifecycle_controller_test_component-manifest",
+    testonly = True,
+    component_name = "lifecycle_controller_test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/lifecycle_controller_test.cml",
+)
+
+fx_test_component(
+    name = "lifecycle_controller_test_component",
+    compiled_manifest = ":lifecycle_controller_test_component-manifest",
+    deps = [":lifecycle_controller_test_packaged_bin"],
+)
+
+fx_package(
+    name = "lifecycle_controller_test_package",
+    package_name = "lifecycle_controller_test",
+    components = [
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+        "//src/sys/component_manager/testing/echo_server",
+    ],
+    test_components = [":lifecycle_controller_test_component"],
+)
+
+fx_test(
+    name = "lifecycle_controller_test",
+    package = ":lifecycle_controller_test_package",
+    visibility = ["//src/sys/component_manager:__pkg__"],
+)

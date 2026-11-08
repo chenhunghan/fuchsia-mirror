@@ -1,0 +1,76 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+exports_files(
+    ["default.shard.cml"],
+    visibility = [
+        "//src/sys/component_manager/stress_tests_alt:__pkg__",
+        "//src/sys/test_runners/stress_test/tests/test_data:__subpackages__",
+    ],
+)
+
+rustc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = [
+        "src/main.rs",
+        "src/test.rs",
+    ],
+    binary_name = "stress_test_runner",
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.component.runner:fuchsia.component.runner_rust",
+        "//sdk/fidl/fuchsia.data:fuchsia.data_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.stresstest:fuchsia.stresstest_rust",
+        "//sdk/fidl/fuchsia.test:fuchsia.test_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:rand",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged_bin",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "stress_test_runner",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    testonly = True,
+    component_name = "stress-test-runner",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/stress-test-runner.cml",
+)
+
+fx_component(
+    name = "stress-test-runner-cmp",
+    testonly = True,
+    compiled_manifest = ":manifest",
+    deps = [":bin_packaged_bin"],
+)

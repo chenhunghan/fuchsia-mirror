@@ -1,0 +1,40 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "driver_manifest",
+    srcs = [
+        "src/driver_manifest.rs",
+        "src/lib.rs",
+    ],
+    crate_name = "assembly_driver_manifest",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/lib/assembly/image_assembly_config_builder:__pkg__"],
+    deps = [
+        "//src/lib/assembly/config_capabilities",
+        "//src/lib/assembly/config_schema",
+        "//src/sys/pkg/lib/fuchsia-pkg",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:camino",
+    ],
+)
+
+host_rustc_test(
+    name = "driver_manifest_test",
+    crate = ":driver_manifest",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/lib/assembly:__pkg__"],
+    deps = [
+        "//src/lib/assembly/test_util",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:tempfile",
+    ],
+)

@@ -2,7 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@io_bazel_rules_go//go:def.bzl", "go_library")
+load("@io_bazel_rules_go//go:def.bzl", "go_library", "go_test")
 load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 
 package(default_applicable_licenses = ["//:license"])
@@ -39,6 +39,31 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//third_party/golibs:github.com/google/go-cmp/cmp",
+        "//third_party/golibs:golang.org/x/exp/maps",
+        "//third_party/golibs:golang.org/x/exp/slices",
+        "//tools/lib/hostplatform",
+        "//tools/lib/jsonutil",
+        "//tools/lib/osmisc",
+    ],
+)
+
+go_test(
+    name = "build_tests",
+    srcs = [
+        "args_test.go",
+        "binaries_test.go",
+        "package_manifest_test.go",
+        "prebuilt_versions_test.go",
+        "test_durations_test.go",
+        "test_list_test.go",
+        "tests_test.go",
+        "tools_test.go",
+    ],
+    embed = [":build"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        # GN uses the top-level go-cmp library target; Bazel imports the cmp subpackage directly.
+        "//third_party/golibs:github.com/google/go-cmp/cmp",  # @bazel2gn:path_overwrite://third_party/golibs:github.com/google/go-cmp
         "//third_party/golibs:golang.org/x/exp/maps",
         "//third_party/golibs:golang.org/x/exp/slices",
         "//tools/lib/hostplatform",

@@ -10,6 +10,7 @@ use crate::arch_rs::{CpuAlignMarker, MAX_CACHE_LINE, curr_cpu_num};
 use crate::counters::define_kcounter;
 use crate::kernel::percpu::PerCpu;
 use crate::kernel::thread::{AutoPreemptDisabler, current_memory_allocation_state_is_enabled};
+use crate::ksync_kernel::TrackedMutex;
 use crate::vm::page::VmPageDoublyLinkedList;
 use crate::vm::page_state::VmPageState;
 use crate::vm::page_state::bindings::vm_page_state;
@@ -17,7 +18,7 @@ use crate::vm::pmm::{self, ALLOC_FLAG_CAN_WAIT};
 use core::ffi::c_int;
 use core::ops::Deref;
 use core::pin::Pin;
-use ksync::{KCell, KMutex, RawMutex};
+use ksync::{KCell, KMutex};
 use page_cache_ffi::{cpp_global_prng_draw, rand_r};
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop, stack_pin_init};
 use zx_status::Status;
@@ -72,6 +73,21 @@ impl PageList {
         })
     }
 
+    /// Creates an in-place initializer for a `PageList` by splicing the contents of `other`.
+    ///
+    /// # Safety
+    ///
+    /// Every page in `other` must be a valid, exclusively owned, non-loaned allocated PMM page
+    /// that is not in any page queue.
+    pub unsafe fn from_list(
+        other: Pin<&mut VmPageDoublyLinkedList>,
+    ) -> impl PinInit<Self, core::convert::Infallible> {
+        Self::new().pin_chain(move |this| {
+            this.list_mut().splice(other);
+            Ok(())
+        })
+    }
+
     /// Returns a shared reference to the underlying `VmPageDoublyLinkedList`.
     pub fn list(&self) -> &VmPageDoublyLinkedList {
         &self.pages
@@ -95,6 +111,7 @@ impl Deref for PageList {
 impl PinnedDrop for PageList {
     fn drop(self: Pin<&mut Self>) {
         if !self.pages.is_empty() {
+            core::hint::cold_path();
             // SAFETY: Pages in `self.pages` are valid allocated PMM pages that have not
             // already been freed.
             unsafe {
@@ -115,14 +132,14 @@ pub type AvailablePages = usize;
 struct CpuCache {
     _align: CpuAlignMarker,
     #[mutex]
-    cache_lock: KMutex<RawMutex>,
+    cache_lock: KMutex<TrackedMutex>,
     #[guarded_by(cache_lock)]
     available_pages: usize,
     #[pin]
     #[guarded_by(cache_lock)]
     free_list: PageList,
     #[mutex]
-    fill_lock: KMutex<RawMutex>,
+    fill_lock: KMutex<TrackedMutex>,
     #[guarded_by(cache_lock)]
     random_should_wait_state: Option<usize>,
 }
@@ -271,8 +288,8 @@ impl PageCache {
 
     /// Attempts to allocate the given number of pages from the CPU cache. If the
     /// cache is insufficient for the request, falls back to the PMM to fulfill the
-    /// request and refill the cache. The requested number of pages may be zero, in
-    /// which case only the cache is filled.
+    /// request and refill the cache. If `requested_pages` is zero, returns the
+    /// number of available pages in the cache without allocating.
     fn allocate_entry(
         &self,
         entry: &CpuCache,
@@ -291,6 +308,7 @@ impl PageCache {
                 // guarded by `cache_lock`.
                 && unsafe { rand_r(seed) } < (RAND_MAX / 10)
             {
+                core::hint::cold_path();
                 return Err(Status::SHOULD_WAIT);
             }
             if requested_pages <= *fields.available_pages {
@@ -301,6 +319,7 @@ impl PageCache {
     }
 
     /// Allocates the given number of pages from the given CPU cache.
+    #[inline(always)]
     fn allocate_cache_pages(
         mut guard: Pin<&mut CpuCacheCacheLockGuard<'_>>,
         requested_pages: usize,
@@ -340,7 +359,7 @@ impl PageCache {
         // Filter out non-borrowed pages to return to the free list. Pages remaining
         // in page_list are freed to the PMM outside the lock.
         let mut cursor = page_list.cursor_front_mut();
-        while let Some(page) = cursor.get_mut() {
+        while let Some(page) = cursor.get() {
             debug_assert!(!page.is_loaned());
             if *fields.available_pages < self.reserve_pages {
                 // SAFETY: We have conceptual ownership of `page` in `page_list`.
@@ -361,6 +380,26 @@ impl PageCache {
         free_list.cursor_front_mut().splice(return_list);
         count_return_pages(return_count);
         count_free_pages(free_count);
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn alloc_pages_one_by_one(
+        mut pages: usize,
+        alloc_flags: u32,
+        mut page_list: Pin<&mut VmPageDoublyLinkedList>,
+    ) -> Result<(), Status> {
+        while pages > 0 {
+            match pmm::alloc_page(alloc_flags) {
+                Ok((page, _pa)) => {
+                    // SAFETY: `page` was just allocated from the PMM and is not in any list.
+                    unsafe { page_list.as_mut().push_back_raw(page.as_non_null()) };
+                    pages -= 1;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(())
     }
 
     fn allocate_pages_and_fill_cache(
@@ -389,105 +428,95 @@ impl PageCache {
         // previous lock, there is a chance this thread is now running on a
         // different CPU. However, there's also a good chance the cache is now
         // sufficient to fulfill the request without falling back to the PMM.
-        ksync::lock!(let mut cache_guard = entry.lock_cache_lock());
+        // Drop the guard before calling into the PMM so other threads can access
+        // the cache if this thread blocks, and so the guard slot is not held live
+        // across the PMM call.
+        let refill_pages = {
+            ksync::lock!(let mut cache_guard = entry.lock_cache_lock());
 
-        // Re-validate the request after acquiring the locks. Another thread may
-        // have filled the cache sufficiently already.
-        if requested_pages > *cache_guard.available_pages() {
-            let refill_pages = self.reserve_pages - *cache_guard.available_pages();
-            let total_pages = requested_pages + refill_pages;
-            count_refill_pages(refill_pages);
-            count_miss_pages(requested_pages);
-
-            stack_pin_init!(let page_list = VmPageDoublyLinkedList::new());
-
-            // Release the cache lock while calling into the PMM to permit other
-            // threads to access the cache if this thread blocks.
-            let status = cache_guard.as_mut().call_unlocked(|| {
-                let mut pages = total_pages;
-                let mut status = pmm::alloc_pages(pages, alloc_flags, page_list.as_mut());
-                // If the alloc_flags contained ALLOC_FLAG_CAN_WAIT then we could get
-                // Status::SHOULD_WAIT as a return code. In this case, as per the
-                // documentation of pmm::alloc_pages, we must fall back to attempting to
-                // allocate single pages.
-                if status == Err(Status::SHOULD_WAIT) {
-                    status = Ok(());
-                    while pages > 0 {
-                        match pmm::alloc_page(alloc_flags) {
-                            Ok((page, _pa)) => {
-                                // SAFETY: `page` was just allocated from the PMM and is not in
-                                // any list.
-                                unsafe { page_list.as_mut().push_back_raw(page.as_non_null()) };
-                                pages -= 1;
-                            }
-                            Err(err) => {
-                                status = Err(err);
-                                break;
-                            }
-                        }
-                    }
-                }
-                status
-            });
-
-            if let Err(err) = status {
-                // Even if allocating all the pages failed, we may have received a few.
-                // If so, put them into the cache and then see if we have enough for the
-                // actual requested allocation. Since this is an uncommon edge case do
-                // not try and be too optimal with the implementation.
-                let mut fields = cache_guard.as_mut().fields_mut();
-                let mut free_list = fields.free_list.as_mut().list_mut();
-                while let Some(page) = page_list.as_mut().pop_front() {
-                    // SAFETY: We have conceptual ownership of `page` and it is not in any list.
-                    unsafe {
-                        page.as_ref().set_state(VmPageState(vm_page_state::CACHE));
-                        free_list.as_mut().push_back_raw(page);
-                    }
-                    *fields.available_pages += 1;
-                }
-                if requested_pages <= *fields.available_pages {
+            // Re-validate the request after acquiring the locks. Another thread may
+            // have filled the cache sufficiently already.
+            if requested_pages <= *cache_guard.available_pages() {
+                if requested_pages > 0 {
                     return Ok(Self::allocate_cache_pages(
                         cache_guard.as_mut(),
                         requested_pages,
                         out_pages,
                     ));
                 }
-                return Err(err);
+                return Ok(*cache_guard.available_pages());
             }
 
-            let out_list = out_pages.list_mut();
+            let refill_pages = self.reserve_pages.saturating_sub(*cache_guard.available_pages());
+            count_refill_pages(refill_pages);
+            count_miss_pages(requested_pages);
+            refill_pages
+        };
 
-            // Set the page state of the refill pages and find the end of the refill list.
-            if refill_pages > 0 {
-                let mut cursor = page_list.as_mut().cursor_front_mut();
-                for i in 0..refill_pages {
-                    let page = cursor.get_mut().expect("refill_pages > page_list len");
-                    // SAFETY: We have conceptual ownership of `page` in `page_list`.
-                    unsafe { page.set_state(VmPageState(vm_page_state::CACHE)) };
-                    if i + 1 < refill_pages {
-                        cursor.move_next();
-                    }
-                }
+        let total_pages = requested_pages + refill_pages;
+        stack_pin_init!(let page_list = VmPageDoublyLinkedList::new());
 
-                // Separate the return list from the refill list and add the latter to the
-                // free list.
-                let mut out_cursor = out_list.cursor_back_mut();
-                cursor.split_after(&mut out_cursor);
-            } else {
-                out_list.splice(page_list.as_mut());
-            }
-
-            let mut fields = cache_guard.as_mut().fields_mut();
-            let free_list = fields.free_list.as_mut().list_mut();
-            free_list.cursor_front_mut().splice(page_list);
-            *fields.available_pages += refill_pages;
-        } else if requested_pages > 0 {
-            return Ok(Self::allocate_cache_pages(
-                cache_guard.as_mut(),
-                requested_pages,
-                out_pages,
-            ));
+        let mut status = pmm::alloc_pages(total_pages, alloc_flags, page_list.as_mut());
+        // If `alloc_flags` contains `ALLOC_FLAG_CAN_WAIT`, `pmm::alloc_pages` may return
+        // `Status::SHOULD_WAIT`, requiring single-page fallback allocations.
+        if status == Err(Status::SHOULD_WAIT) {
+            status = Self::alloc_pages_one_by_one(total_pages, alloc_flags, page_list.as_mut());
         }
+
+        ksync::lock!(let mut cache_guard = entry.lock_cache_lock());
+
+        if let Err(err) = status {
+            core::hint::cold_path();
+            // Even if allocating all the pages failed, we may have received a few.
+            // If so, put them into the cache and then see if we have enough for the
+            // actual requested allocation. Since this is an uncommon edge case do
+            // not try and be too optimal with the implementation.
+            let mut fields = cache_guard.as_mut().fields_mut();
+            let mut free_list = fields.free_list.as_mut().list_mut();
+            while let Some(page) = page_list.as_mut().pop_front() {
+                // SAFETY: We have conceptual ownership of `page` and it is not in any list.
+                unsafe {
+                    page.as_ref().set_state(VmPageState(vm_page_state::CACHE));
+                    free_list.as_mut().push_back_raw(page);
+                }
+                *fields.available_pages += 1;
+            }
+            if requested_pages <= *fields.available_pages {
+                return Ok(Self::allocate_cache_pages(
+                    cache_guard.as_mut(),
+                    requested_pages,
+                    out_pages,
+                ));
+            }
+            return Err(err);
+        }
+
+        let out_list = out_pages.list_mut();
+
+        // Set the page state of the refill pages and find the end of the refill list.
+        if refill_pages > 0 {
+            let mut cursor = page_list.as_mut().cursor_front_mut();
+            for i in 0..refill_pages {
+                let page = cursor.get().expect("refill_pages > page_list len");
+                // SAFETY: We have conceptual ownership of `page` in `page_list`.
+                unsafe { page.set_state(VmPageState(vm_page_state::CACHE)) };
+                if i + 1 < refill_pages {
+                    cursor.move_next();
+                }
+            }
+
+            // Separate the return list from the refill list and add the latter to the
+            // free list.
+            let mut out_cursor = out_list.cursor_back_mut();
+            cursor.split_after(&mut out_cursor);
+        } else {
+            out_list.splice(page_list.as_mut());
+        }
+
+        let mut fields = cache_guard.as_mut().fields_mut();
+        let free_list = fields.free_list.as_mut().list_mut();
+        free_list.cursor_front_mut().splice(page_list);
+        *fields.available_pages += refill_pages;
 
         Ok(*cache_guard.available_pages())
     }
@@ -536,6 +565,14 @@ mod tests {
             unsafe {
                 current_thread.set_cpu_affinity(cpu_num_to_mask(current_cpu));
             }
+        }
+
+        // A zero-page allocation on an empty cache returns zero without filling.
+        {
+            stack_pin_init!(let null_list = PageList::new());
+            let null_available = unwrap_ok!(page_cache.alloc(0, null_list.as_mut()));
+            expect_eq!(0, null_available);
+            expect_eq!(0, null_list.iter().count());
         }
 
         // An allocation from an empty or insufficient page cache fills the cache AND

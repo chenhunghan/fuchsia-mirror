@@ -24,6 +24,7 @@ rustc_library(
     ],
     deps = [
         "//src/developer/ffx/lib/fho:lib",
+        "//src/developer/ffx/lib/process:lib",
         "//third_party/rust_crates/vendor:anyhow",
         "//third_party/rust_crates/vendor:cfg-if",
         "//third_party/rust_crates/vendor:mockall",

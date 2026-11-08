@@ -6,16 +6,12 @@
 """Unit-tests for build/regenerator.py functions."""
 
 import os
-import sys
 import tempfile
 import typing as T
 import unittest
 from pathlib import Path
 
-# Import regenerator.py as a module.
-_SCRIPT_DIR = os.path.dirname(__file__)
-sys.path.insert(0, _SCRIPT_DIR)
-import regenerator
+from build import regenerator
 
 
 class ContentHashTest(unittest.TestCase):
@@ -273,9 +269,7 @@ class BackupOutConfigTest(unittest.TestCase):
         self.assertEqual(
             (backup_dir / "args.gn").read_text(), 'target_cpu = "x64"\n'
         )
-        self.assertEqual(
-            (backup_dir / "fx.config").read_text(), "FUCHSIA_ARCH=x64\n"
-        )
+        self.assertFalse((backup_dir / "fx.config").exists())
         self.assertTrue(backup_default.is_symlink())
         self.assertEqual(os.readlink(backup_default), "core.x64-balanced")
 

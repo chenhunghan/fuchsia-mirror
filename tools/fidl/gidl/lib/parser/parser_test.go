@@ -1119,11 +1119,11 @@ func TestParseSucceedsBindingsAllowlistAndDenylist(t *testing.T) {
 				255, 255, 255, 255, 255, 255, 255, 255, // alloc present
 			],
 		},
-		bindings_allowlist = [go, rust],
+		bindings_allowlist = [cpp, rust],
 		bindings_denylist = [dart],
 	}`
 	p := NewParser("", strings.NewReader(gidl), Config{
-		Languages:   []ir.Language{"go", "rust", "dart"},
+		Languages:   []ir.Language{"cpp", "rust", "dart"},
 		WireFormats: []ir.WireFormat{ir.V2WireFormat},
 	})
 	var all ir.All
@@ -1150,7 +1150,7 @@ func TestParseSucceedsBindingsAllowlistAndDenylist(t *testing.T) {
 						255, 255, 255, 255, 255, 255, 255, 255, // alloc present
 					},
 				}},
-				BindingsAllowlist: &[]ir.Language{"go", "rust"},
+				BindingsAllowlist: &[]ir.Language{"cpp", "rust"},
 				BindingsDenylist:  &[]ir.Language{"dart"},
 				CheckHandleRights: false,
 				SourceLocation:    ir.SourceLocation{Line: 2},
@@ -1177,7 +1177,7 @@ func TestParseSucceedsBindingsAllowlistAndDenylist(t *testing.T) {
 						255, 255, 255, 255, 255, 255, 255, 255, // alloc present
 					},
 				}},
-				BindingsAllowlist: &[]ir.Language{"go", "rust"},
+				BindingsAllowlist: &[]ir.Language{"cpp", "rust"},
 				BindingsDenylist:  &[]ir.Language{"dart"},
 				SourceLocation:    ir.SourceLocation{Line: 2},
 			},
@@ -1198,7 +1198,7 @@ func TestParseFailsBindingsAllowlist(t *testing.T) {
 				255, 255, 255, 255, 255, 255, 255, 255, // alloc present
 			],
 		},
-		bindings_allowlist = [go, rust],
+		bindings_allowlist = [cpp, rust],
 		bindings_denylist = [dart],
 	}`
 	p := NewParser("", strings.NewReader(gidl), Config{
@@ -1207,7 +1207,7 @@ func TestParseFailsBindingsAllowlist(t *testing.T) {
 	})
 	var all ir.All
 	err := p.parseSection(&all)
-	checkFailure(t, err, "invalid language 'go'")
+	checkFailure(t, err, "invalid language 'cpp'")
 }
 
 func TestParseFailsBindingsDenylist(t *testing.T) {
@@ -1222,11 +1222,11 @@ func TestParseFailsBindingsDenylist(t *testing.T) {
 				255, 255, 255, 255, 255, 255, 255, 255, // alloc present
 			],
 		},
-		bindings_allowlist = [go, rust],
+		bindings_allowlist = [cpp, rust],
 		bindings_denylist = [dart],
 	}`
 	p := NewParser("", strings.NewReader(gidl), Config{
-		Languages:   []ir.Language{"rust", "go"},
+		Languages:   []ir.Language{"rust", "cpp"},
 		WireFormats: []ir.WireFormat{ir.V2WireFormat},
 	})
 	var all ir.All

@@ -18,9 +18,10 @@
 #include <vector>
 
 #include <gtest/gtest.h>
-#include <re2/re2.h>
 #include <src/lib/fxl/strings/utf_codecs.h>
 #include <src/tests/fidl/compatibility/hlcpp_client_app.h>
+
+#include "re2/re2.h"
 
 using fidl::test::compatibility::this_is_a_struct;
 using fidl::test::compatibility::this_is_a_table;

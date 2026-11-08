@@ -4,7 +4,7 @@
 
 #include "src/developer/forensics/feedback/crash_reports.h"
 
-#include <fuchsia/feedback/cpp/fidl.h>
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
 #include <lib/zx/clock.h>
 #include <zircon/utc.h>
 
@@ -59,9 +59,9 @@ CrashReports::CrashReports(async_dispatcher_t* dispatcher,
                       &crash_server_, &report_store_, data_provider,
                       options.snapshot_collector_window_duration) {}
 
-fuchsia::feedback::CrashReporter* CrashReports::CrashReporter() { return &crash_reporter_; }
+crash_reports::CrashReporter* CrashReports::CrashReporter() { return &crash_reporter_; }
 
-fuchsia::feedback::CrashReportingProductRegister* CrashReports::CrashRegister() {
+fidl::Server<fuchsia_feedback::CrashReportingProductRegister>* CrashReports::CrashRegister() {
   return &crash_register_;
 }
 

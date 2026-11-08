@@ -37,6 +37,7 @@
         {
             protocol: [
                 "fuchsia.component.runner.ComponentRunner",
+                "fuchsia.input.injection.InputDeviceRegistry", // test-only
                 "fuchsia.starnix.runner.Manager",
             ],
         },
@@ -147,6 +148,7 @@
                 "fuchsia.net.stack.Stack",
                 "fuchsia.net.tun.Control",
                 "fuchsia.power.battery.BatteryManager",
+                "fuchsia.power.battery.test.BatterySimulator",
                 "fuchsia.power.broker.Topology",
                 "fuchsia.power.cpu.DomainController",
                 "fuchsia.power.powercap.Client",
@@ -273,7 +275,10 @@
             from: "self",
         },
         {
-            protocol: [ "fuchsia.starnix.runner.Manager" ],
+            protocol: [
+                "fuchsia.input.injection.InputDeviceRegistry", // test-only
+                "fuchsia.starnix.runner.Manager",
+            ],
             from: "self",
         },
     ],

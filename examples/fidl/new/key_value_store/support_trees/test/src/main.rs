@@ -7,7 +7,7 @@ use example_tester::{Client, Server, TestKind, assert_logs_eq_to_golden, run_tes
 use fidl::prelude::*;
 use fidl_examples_keyvaluestore_supporttrees::StoreMarker;
 
-use fuchsia_component_test::{ChildRef, RealmBuilder};
+use fuchsia_component_test::{Capability, ChildRef, RealmBuilder, Ref, Route};
 
 #[fuchsia::test]
 async fn test_write_success() -> Result<(), Error> {
@@ -19,18 +19,40 @@ async fn test_write_success() -> Result<(), Error> {
         StoreMarker::PROTOCOL_NAME,
         TestKind::ClientAndServer { client: &client, server: &server },
         |builder: RealmBuilder, client: ChildRef| async move {
-            builder.init_mutable_config_to_empty(&client).await?;
             builder
-                .set_config_value(&client, "write_items", vec!["verse_1", "verse_2"].into())
+                .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                    name: "fuchsia.examples.keyvaluestore.supporttrees.WriteItems".parse()?,
+                    value: vec!["verse_1", "verse_2"].into(),
+                }))
                 .await?;
             builder
-                .set_config_value(
-                    &client,
-                    "write_nested",
-                    vec!["rest_of_poem\nverse_3\nverse_4"].into(),
+                .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                    name: "fuchsia.examples.keyvaluestore.supporttrees.WriteNested".parse()?,
+                    value: vec!["rest_of_poem\nverse_3\nverse_4"].into(),
+                }))
+                .await?;
+            builder
+                .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                    name: "fuchsia.examples.keyvaluestore.supporttrees.WriteNull".parse()?,
+                    value: vec!["null_verse"].into(),
+                }))
+                .await?;
+            let config_capabilities = [
+                "fuchsia.examples.keyvaluestore.supporttrees.WriteItems",
+                "fuchsia.examples.keyvaluestore.supporttrees.WriteNested",
+                "fuchsia.examples.keyvaluestore.supporttrees.WriteNull",
+            ];
+            builder
+                .add_route(
+                    config_capabilities
+                        .into_iter()
+                        .fold(Route::new(), |route, name| {
+                            route.capability(Capability::configuration(name))
+                        })
+                        .from(Ref::self_())
+                        .to(&client),
                 )
                 .await?;
-            builder.set_config_value(&client, "write_null", vec!["null_verse"].into()).await?;
             Ok::<(RealmBuilder, ChildRef), Error>((builder, client))
         },
         |log_reader| {
@@ -55,10 +77,40 @@ async fn test_empty_nested() -> Result<(), Error> {
         StoreMarker::PROTOCOL_NAME,
         TestKind::ClientAndServer { client: &client, server: &server },
         |builder: RealmBuilder, client: ChildRef| async move {
-            builder.init_mutable_config_to_empty(&client).await?;
-            builder.set_config_value(&client, "write_items", Vec::<&str>::new().into()).await?;
-            builder.set_config_value(&client, "write_nested", vec!["invalid_empty"].into()).await?;
-            builder.set_config_value(&client, "write_null", Vec::<&str>::new().into()).await?;
+            builder
+                .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                    name: "fuchsia.examples.keyvaluestore.supporttrees.WriteItems".parse()?,
+                    value: Vec::<&str>::new().into(),
+                }))
+                .await?;
+            builder
+                .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                    name: "fuchsia.examples.keyvaluestore.supporttrees.WriteNested".parse()?,
+                    value: vec!["invalid_empty"].into(),
+                }))
+                .await?;
+            builder
+                .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                    name: "fuchsia.examples.keyvaluestore.supporttrees.WriteNull".parse()?,
+                    value: Vec::<&str>::new().into(),
+                }))
+                .await?;
+            let config_capabilities = [
+                "fuchsia.examples.keyvaluestore.supporttrees.WriteItems",
+                "fuchsia.examples.keyvaluestore.supporttrees.WriteNested",
+                "fuchsia.examples.keyvaluestore.supporttrees.WriteNull",
+            ];
+            builder
+                .add_route(
+                    config_capabilities
+                        .into_iter()
+                        .fold(Route::new(), |route, name| {
+                            route.capability(Capability::configuration(name))
+                        })
+                        .from(Ref::self_())
+                        .to(&client),
+                )
+                .await?;
             Ok::<(RealmBuilder, ChildRef), Error>((builder, client))
         },
         |log_reader| {

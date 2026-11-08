@@ -14,14 +14,6 @@ fuchsia_structured_config_rust_lib("reverser_config") {
   cm_label = ":reverser_manifest"
 }
 
-fuchsia_structured_config_values("reverser_config_default_values") {
-  cm_label = ":reverser_manifest"
-  values = {
-    switch_case = false
-    use_replacer = false
-  }
-}
-
 rustc_binary("bin") {
   output_name = "reverser_bin"
   edition = "2024"
@@ -41,10 +33,7 @@ rustc_binary("bin") {
 fuchsia_component("reverser_component") {
   component_name = "reverser"
   cm_label = ":reverser_manifest"
-  deps = [
-    ":bin",
-    ":reverser_config_default_values",
-  ]
+  deps = [ ":bin" ]
 }
 
 fuchsia_package("reverser") {

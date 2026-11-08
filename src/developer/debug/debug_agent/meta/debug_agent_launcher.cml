@@ -11,11 +11,22 @@
         {
             name: "agents",
             durability: "single_run",
+            allowed_offers: "static_and_dynamic",
         },
     ],
     capabilities: [
         {
             protocol: [ "fuchsia.debugger.Launcher" ],
+        },
+        {
+            config: "fuchsia.debugger.MonitorRootJobTrue",
+            type: "bool",
+            value: true,
+        },
+        {
+            config: "fuchsia.debugger.MonitorRootJobFalse",
+            type: "bool",
+            value: false,
         },
     ],
     use: [

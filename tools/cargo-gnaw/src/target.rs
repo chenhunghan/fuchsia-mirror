@@ -9,8 +9,8 @@ use cargo_metadata::{Edition, Package, PackageId};
 use semver::Version;
 use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 
 pub struct GnTarget<'a> {
@@ -30,12 +30,14 @@ pub struct GnTarget<'a> {
     /// Type of crate
     /// rustc: --crate-type
     pub target_type: GnRustType,
-    /// Rust features enabled on this target
+    /// Unconditional Rust features enabled on this target
     /// rustc: --cfg=feature=<string>
-    pub features: &'a [Feature],
+    pub features: Vec<Feature>,
+    /// Per-platform conditional Rust features enabled on this target
+    pub platform_features: BTreeMap<Platform, Vec<Feature>>,
     /// Target depends on Cargo running a custom build-script
     pub has_build_script: bool,
-    /// Target depends on Cargo running a custom build-script
+    /// Target normal dependencies keyed by optional platform condition
     pub dependencies: HashMap<Option<Platform>, Vec<(&'a Package, String)>>,
     /// Target dev-dependencies from Cargo.toml
     pub dev_dependencies: HashMap<Option<Platform>, Vec<(&'a Package, String)>>,
@@ -89,6 +91,7 @@ impl Hash for GnTarget<'_> {
 }
 
 impl<'a> GnTarget<'a> {
+    #[cfg(test)]
     pub fn new(
         cargo_pkg_id: &'a PackageId,
         target_name: &'a str,
@@ -102,6 +105,36 @@ impl<'a> GnTarget<'a> {
         dependencies: HashMap<Option<Platform>, Vec<(&'a Package, String)>>,
         dev_dependencies: HashMap<Option<Platform>, Vec<(&'a Package, String)>>,
     ) -> Self {
+        Self::with_platform_features(
+            cargo_pkg_id,
+            target_name,
+            pkg_name,
+            edition,
+            crate_root,
+            version,
+            target_type,
+            features.to_vec(),
+            BTreeMap::new(),
+            has_build_script,
+            dependencies,
+            dev_dependencies,
+        )
+    }
+
+    pub fn with_platform_features(
+        cargo_pkg_id: &'a PackageId,
+        target_name: &'a str,
+        pkg_name: &'a str,
+        edition: Edition,
+        crate_root: &'a Utf8Path,
+        version: &'a Version,
+        target_type: GnRustType,
+        features: Vec<Feature>,
+        platform_features: BTreeMap<Platform, Vec<Feature>>,
+        has_build_script: bool,
+        dependencies: HashMap<Option<Platform>, Vec<(&'a Package, String)>>,
+        dev_dependencies: HashMap<Option<Platform>, Vec<(&'a Package, String)>>,
+    ) -> Self {
         GnTarget {
             cargo_pkg_id,
             target_name,
@@ -111,10 +144,25 @@ impl<'a> GnTarget<'a> {
             version,
             target_type,
             features,
+            platform_features,
             has_build_script,
             dependencies,
             dev_dependencies,
         }
+    }
+
+    /// Returns all features enabled on this target across all platforms, sorted and deduplicated.
+    pub fn all_features(&self) -> Vec<&str> {
+        let mut all = BTreeSet::new();
+        for f in &self.features {
+            all.insert(f.as_str());
+        }
+        for feats in self.platform_features.values() {
+            for f in feats {
+                all.insert(f.as_str());
+            }
+        }
+        all.into_iter().collect()
     }
 
     /// Name of the target given in Cargo.toml

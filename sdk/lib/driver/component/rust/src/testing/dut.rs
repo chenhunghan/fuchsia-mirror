@@ -203,6 +203,12 @@ impl<'a, D: Driver> DriverUnderTest<'a, D> {
         futures::StreamExt::next(&mut self.alert_rx).await
     }
 
+    /// Polls for an already-queued `OnHealthAlert` event without waiting. Returns `None` if no
+    /// alert is currently queued or if the channel has closed.
+    pub fn try_next_health_alert(&mut self) -> Option<HealthAlert> {
+        self.alert_rx.try_recv().ok()
+    }
+
     /// Stop the driver.
     pub async fn stop_driver(mut self) {
         // We should only send a stop request if the driver started successfully.

@@ -20,10 +20,11 @@ cc_test_executable("last_reboot_info_provider_unittest_exe") {
   sources = [ "last_reboot_info_provider_unittest.cc" ]
 
   deps = [
-    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_hlcpp",
+    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_cpp",
     "//src/developer/forensics/feedback/reboot_log",
     "//src/developer/forensics/last_reboot:last_reboot_info_provider",
     "//src/developer/forensics/testing:gpretty_printers",
+    "//src/developer/forensics/testing:unit_test_fixture",
     "//src/lib/fxl/test:gtest_main",
     "//third_party/googletest:gmock",
     "//third_party/googletest:gtest",

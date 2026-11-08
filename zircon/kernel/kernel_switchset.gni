@@ -6,7 +6,6 @@
 
 import("//build/config/compilation_modes.gni")
 import("//build/config/zircon/standard.gni")
-import("//build/rust/config.gni")
 import("//build/toolchain/zircon/zircon_toolchain_suite.gni")
 import("//build/zircon/zircon_cpu.gni")
 import("params.gni")
@@ -137,7 +136,7 @@ template("kernel_switchset") {
         # <lib/lockup_detector.h> is included by some "low-level" headers.
         "//zircon/kernel/lib/lockup_detector:headers.config",
 
-        # <kernel/percpu.h> has #include <lib/lazy_init/lazy_init.h>.
+        # <kernel/idle_power_thread.h> has #include <lib/lazy_init/lazy_init.h>.
         "//src/lib/lazy_init:headers.config",
 
         # <kernel/spinlock.h> has #include <lockdep/lock_policy.h>.
@@ -162,7 +161,7 @@ template("kernel_switchset") {
         # <vm/pmm_checker.h> has #include <lib/boot-options/boot-options.h>.
         "//zircon/kernel/lib/acpi_lite:headers.config",
         "//zircon/kernel/lib/boot-options:headers.config",
-        "//zircon/kernel/lib/devicetree:headers.config",
+        "//sdk/lib/devicetree:headers.config",
         "//zircon/system/ulib/uart:headers.config",
         "//zircon/system/ulib/hwreg:headers.config",
 
@@ -197,7 +196,6 @@ template("kernel_switchset") {
         # <arch/*/hypervisor.h> has #include <lib/id_allocator.h>.
         "//zircon/kernel/lib/id_allocator:headers.config",
 
-        # <platform/efi.h> as #include <lib/instrumentation/asan.h>
         "//zircon/kernel/lib/instrumentation:headers.config",
 
         # Everywhere has #include <lib/fit/result.h>
@@ -230,16 +228,9 @@ template("kernel_switchset") {
         "//zircon/kernel/lib/page-map:headers.config",
       ]
 
-      # The kernel_config includes the use of the custom target.
-      # The default config for --target=$rust_target would conflict.
-      remove_common_configs = [ "//build/config/rust:target" ]
+      remove_common_configs = []
+
       configs = [
-        "//zircon/kernel/switch:abi",
-
-        # The :abi configs tree doesn't do all the work for Rust.  Instead,
-        # they contribute to the rules for creating the custom target JSON.
-        "//build/toolchain/rust:target",
-
         # This rolls up configs that don't need to be separately removable.
         "//zircon/kernel/switch:kernel_config",
       ]

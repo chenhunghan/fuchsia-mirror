@@ -15,15 +15,16 @@ use crate::vfs::pseudo::simple_file::SimpleFileNode;
 use crate::vfs::socket::{SocketAddress, SocketHandle, UnixSocket};
 use crate::vfs::{
     AccessCheck, CreationStatus, DirEntry, DirEntryHandle, FileHandle, FileObject, FileOps,
-    FileSystem, FileSystemHandle, FileSystemOptions, FileWriteGuardMode, FsContext, FsNode,
-    FsNodeHandle, FsNodeOps, FsStr, FsString, OpenAccessCheck, PathBuilder, RenameFlags,
-    SymlinkTarget, UnlinkKind, fileops_impl_dataless, fileops_impl_delegate_read_write_and_seek,
-    fileops_impl_nonseekable, fileops_impl_noop_sync, fs_node_impl_not_dir,
+    FileSystem, FileSystemHandle, FileSystemOptions, FileWriteGuardMode, FsContext, FsNodeHandle,
+    FsNodeOps, FsStr, FsString, OpenAccessCheck, PathBuilder, RenameFlags, SymlinkTarget,
+    UnlinkKind, fileops_impl_dataless, fileops_impl_delegate_read_write_and_seek,
+    fileops_impl_nonseekable, fileops_impl_noop_sync,
 };
 use fuchsia_rcu::{RcuArc, RcuBox, RcuDroppable, RcuReadScope};
 use fuchsia_rcu_collections::rcu_raw_hash_map::RcuRawHashMap;
+use smallvec::SmallVec;
 use starnix_logging::log_warn;
-use starnix_sync::{LockDepMutex, MountSubmountsLock, MountsLock, NamespaceFlagsLock};
+use starnix_sync::{LockDepMutex, LockGuarded, MountSubmountsLock, MountsLock, NamespaceFlagsLock};
 use starnix_uapi::arc_key::{ArcKey, PtrKey, WeakKey};
 use starnix_uapi::auth::Credentials;
 use starnix_uapi::device_id::DeviceId;
@@ -37,6 +38,7 @@ use starnix_uapi::open_flags::OpenFlags;
 use starnix_uapi::unmount_flags::UnmountFlags;
 use starnix_uapi::vfs::{FdEvents, ResolveFlags};
 use starnix_uapi::{NAME_MAX, errno, error};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -117,7 +119,8 @@ impl Namespace {
         // Collect the list of mountpoints that leads to this node's mount
         let mut mountpoints = vec![];
         let mut mount = node.mount.clone();
-        while let Some(mountpoint) = mount.as_ref().and_then(|m| m.mountpoint()) {
+        while let Some(mountpoint) = mount.as_ref().and_then(|m| m.mountpoint_locked(mounts_guard))
+        {
             mountpoints.push(mountpoint.entry);
             let prev = std::mem::replace(&mut mount, mountpoint.mount);
             mounts_guard.defer_drop(prev);
@@ -180,10 +183,12 @@ impl Namespace {
             return error!(EINVAL);
         }
 
-        let current_root_mountpoint =
-            mounts_guard.defer_drop(current_root_mount.mountpoint().ok_or_else(|| errno!(EINVAL))?);
-        let new_root_mountpoint =
-            mounts_guard.defer_drop(new_root_mount.mountpoint().ok_or_else(|| errno!(EINVAL))?);
+        let current_root_mountpoint = mounts_guard.defer_drop(
+            current_root_mount.mountpoint_locked(&mounts_guard).ok_or_else(|| errno!(EINVAL))?,
+        );
+        let new_root_mountpoint = mounts_guard.defer_drop(
+            new_root_mount.mountpoint_locked(&mounts_guard).ok_or_else(|| errno!(EINVAL))?,
+        );
 
         // Retain mounts and mountpoint entries so that any drops triggered by
         // unlinking or reparenting under `mounts_guard` are deferred until after
@@ -242,19 +247,6 @@ impl Namespace {
         )?;
 
         Ok(())
-    }
-}
-
-impl FsNodeOps for Arc<Namespace> {
-    fs_node_impl_not_dir!();
-
-    fn create_file_ops(
-        &self,
-        _node: &FsNode,
-        _current_task: &CurrentTask,
-        _flags: OpenFlags,
-    ) -> Result<Box<dyn FileOps>, Errno> {
-        Ok(Box::new(MountNamespaceFile(self.clone())))
     }
 }
 
@@ -396,15 +388,15 @@ enum MountpointState {
 #[derive(Default)]
 struct MountRelations {
     /// Attachment state of this [`Mount`] relative to its parent [`Mount`] in the [`Namespace`].
-    mountpoint: RcuBox<MountpointState>,
+    mountpoint: LockGuarded<RcuBox<MountpointState>, MountsWriteToken>,
     /// The active submounts, keyed by the directory entry in this mount where they are mounted.
     submounts: LockDepMutex<HashMap<PtrKey<DirEntry>, Submount>, MountSubmountsLock>,
     /// A lock-free RCU friendly view of [submounts].
     submount_lookup: RcuRawHashMap<WeakKey<DirEntry>, Weak<Mount>>,
     /// The membership of this mount in its peer group.
-    peer_group: RcuArc<PeerGroup>,
+    peer_group: LockGuarded<RcuArc<PeerGroup>, MountsWriteToken>,
     /// The membership of this mount in a PeerGroup's downstream.
-    upstream: RcuBox<Option<(Weak<PeerGroup>, PtrKey<Mount>)>>,
+    upstream: LockGuarded<RcuBox<Option<(Weak<PeerGroup>, PtrKey<Mount>)>>, MountsWriteToken>,
 }
 
 impl MountRelations {
@@ -483,32 +475,27 @@ impl MountRelations {
         self.submount_lookup.len()
     }
 
-    fn set_mountpoint(
-        &self,
-        _guard: &MountsWriteToken,
-        parent: Weak<Mount>,
-        entry: Weak<DirEntry>,
-    ) {
-        self.mountpoint.update(MountpointState::Attached { parent, entry });
+    fn set_mountpoint(&self, guard: &MountsWriteToken, parent: Weak<Mount>, entry: Weak<DirEntry>) {
+        self.mountpoint.write(guard).update(MountpointState::Attached { parent, entry });
     }
 
-    fn detach_mountpoint(&self, _guard: &MountsWriteToken) {
-        self.mountpoint.update(MountpointState::Detached);
+    fn detach_mountpoint(&self, guard: &MountsWriteToken) {
+        self.mountpoint.write(guard).update(MountpointState::Detached);
     }
 
     fn mountpoint<'a>(&'a self, scope: &'a starnix_rcu::RcuReadScope) -> &'a MountpointState {
         self.mountpoint.as_ref(scope)
     }
 
-    fn take_peer_group(&self, _guard: &MountsWriteToken) -> Option<Arc<PeerGroup>> {
+    fn take_peer_group(&self, guard: &MountsWriteToken) -> Option<Arc<PeerGroup>> {
         let peer_group = self.peer_group.upgrade();
-        self.peer_group.update(None);
+        self.peer_group.write(guard).update(None);
         peer_group
     }
 
-    fn take_upstream(&self, _guard: &MountsWriteToken) -> Option<(Weak<PeerGroup>, PtrKey<Mount>)> {
+    fn take_upstream(&self, guard: &MountsWriteToken) -> Option<(Weak<PeerGroup>, PtrKey<Mount>)> {
         let upstream = self.upstream.cloned();
-        self.upstream.update(None);
+        self.upstream.write(guard).update(None);
         upstream
     }
 }
@@ -668,7 +655,8 @@ impl Mount {
             return error!(EINVAL);
         }
 
-        let source_mountpoint = source_mount.mountpoint().ok_or_else(|| errno!(EIO))?;
+        let source_mountpoint =
+            source_mount.mountpoint_locked(&mounts_guard).ok_or_else(|| errno!(EIO))?;
         let source_mountpoint = mounts_guard.defer_drop(source_mountpoint);
         let source_parent = mounts_guard.retain(
             source_mountpoint.mount.as_ref().expect("a mountpoint must be part of a mount"),
@@ -829,7 +817,7 @@ impl Mount {
             }
         }
 
-        let mountpoint = self.mountpoint().ok_or_else(|| errno!(EINVAL))?;
+        let mountpoint = self.mountpoint_locked(mounts_guard).ok_or_else(|| errno!(EINVAL))?;
         let mountpoint = mounts_guard.defer_drop(mountpoint);
         let parent_mount = mountpoint.mount.as_ref().expect("a mountpoint must be part of a mount");
         parent_mount.remove_submount(mounts_guard, &mountpoint.mount_hash_key())
@@ -874,10 +862,32 @@ impl Mount {
 
     /// [`NamespaceNode`] on which this [`Mount`] is mounted.
     pub fn mountpoint(&self) -> Option<NamespaceNode> {
+        let mut deferred_mounts = SmallVec::new();
+        self.mountpoint_defer_drop(&mut deferred_mounts)
+    }
+
+    fn mountpoint_locked(&self, mounts_guard: &MountsWriteToken) -> Option<NamespaceNode> {
+        let mut deferred_mounts = SmallVec::new();
+        let mountpoint = self.mountpoint_defer_drop(&mut deferred_mounts);
+        if !deferred_mounts.is_empty() {
+            mounts_guard.defer_drop(deferred_mounts);
+        }
+        mountpoint
+    }
+
+    fn mountpoint_defer_drop(
+        &self,
+        deferred_mounts: &mut SmallVec<[MountHandle; 2]>,
+    ) -> Option<NamespaceNode> {
         let scope = RcuReadScope::new();
         match self.relations.mountpoint(&scope) {
             MountpointState::Attached { parent, entry } => {
-                Some(NamespaceNode::new(parent.upgrade()?, entry.upgrade()?))
+                let parent = parent.upgrade()?;
+                let Some(entry) = entry.upgrade() else {
+                    deferred_mounts.push(parent);
+                    return None;
+                };
+                Some(NamespaceNode::new(parent, entry))
             }
             MountpointState::Root | MountpointState::Detached => None,
         }
@@ -1040,13 +1050,16 @@ impl Mount {
             guard.defer_drop(prev);
         }
         group.add(guard, self);
-        self.relations.peer_group.update(Some(group));
+        self.relations.peer_group.write(guard).update(Some(group));
     }
 
     fn set_upstream(self: &Arc<Mount>, guard: &MountsWriteToken, group: &Arc<PeerGroup>) {
         self.remove_from_upstream(guard);
         group.add_downstream(guard, self);
-        self.relations.upstream.update(Some((Arc::downgrade(group), Arc::as_ptr(self).into())));
+        self.relations
+            .upstream
+            .write(guard)
+            .update(Some((Arc::downgrade(group), Arc::as_ptr(self).into())));
     }
 
     /// Is the mount in a peer group? Corresponds to MS_SHARED.
@@ -1488,6 +1501,14 @@ pub struct NamespaceNode {
     pub entry: DirEntryHandle,
 }
 
+/// Target returned by [`NamespaceNode::resolve_symlink`].
+pub enum ResolvedSymlink {
+    /// A path-based symlink resolved against its starting directory.
+    Path(NamespaceNode, FsString),
+    /// A procfs magic link resolved to its target [`NamespaceNode`] (after entering mounts).
+    Node(NamespaceNode),
+}
+
 impl NamespaceNode {
     pub fn new(mount: MountHandle, entry: DirEntryHandle) -> Self {
         Self { mount: Some(mount).into(), entry }
@@ -1679,6 +1700,66 @@ impl NamespaceNode {
         }
     }
 
+    /// Reads a symbolic link and resolves its target base directory or magic-link node according
+    /// to `context`'s [`ResolveFlags`], [`ResolveBase`], and remaining symlink budget.
+    ///
+    /// Callers must handle `SymlinkMode::NoFollow` beforehand (since `resolve_symlink` ignores
+    /// `context.symlink_mode`) and check whether a returned [`ResolvedSymlink::Node`] target is
+    /// itself a symlink.
+    pub fn resolve_symlink(
+        &self,
+        current_task: &CurrentTask,
+        context: &mut LookupContext,
+    ) -> Result<ResolvedSymlink, Errno> {
+        if context.remaining_follows == 0
+            || context.resolve_flags.contains(ResolveFlags::NO_SYMLINKS)
+        {
+            return error!(ELOOP);
+        }
+        context.remaining_follows -= 1;
+        match self.readlink(current_task)? {
+            SymlinkTarget::Path(link_target) => {
+                if link_target.is_empty() {
+                    return error!(ENOENT);
+                }
+                let link_directory = if link_target[0] == b'/' {
+                    // If the path is absolute, we'll resolve the root directory.
+                    match &context.resolve_base {
+                        ResolveBase::None => current_task.fs().root(),
+                        ResolveBase::Beneath(_) => return error!(EXDEV),
+                        ResolveBase::InRoot(root) => root.clone(),
+                    }
+                } else {
+                    // If the path is not absolute, it's a relative directory.
+                    // Let's try to get the parent of the current node, or in the case that
+                    // the node is the root we can just use that directly.
+                    self.parent().unwrap_or_else(|| self.clone())
+                };
+                if context.resolve_flags.contains(ResolveFlags::NO_XDEV)
+                    && link_directory.mount != self.mount
+                {
+                    return error!(EXDEV);
+                }
+                Ok(ResolvedSymlink::Path(link_directory, link_target))
+            }
+            SymlinkTarget::Node(target) => {
+                if context.resolve_flags.contains(ResolveFlags::NO_MAGICLINKS) {
+                    return error!(ELOOP);
+                }
+                if !matches!(context.resolve_base, ResolveBase::None) {
+                    return error!(EXDEV);
+                }
+                let target = target.enter_mount();
+                if context.resolve_flags.contains(ResolveFlags::NO_XDEV)
+                    && target.mount != self.mount
+                {
+                    return error!(EXDEV);
+                }
+                Ok(ResolvedSymlink::Node(target))
+            }
+        }
+    }
+
     // Resolve the current node.
     //
     // Depending on context, this will resolve symlink and mount point.
@@ -1693,35 +1774,11 @@ impl NamespaceNode {
             if !node.entry.node.is_lnk() || context.symlink_mode == SymlinkMode::NoFollow {
                 break;
             }
-            if context.remaining_follows == 0
-                || context.resolve_flags.contains(ResolveFlags::NO_SYMLINKS)
-            {
-                return error!(ELOOP);
-            }
-            context.remaining_follows -= 1;
-            node = match node.readlink(current_task)? {
-                SymlinkTarget::Path(link_target) => {
-                    let link_directory = if link_target[0] == b'/' {
-                        // If the path is absolute, we'll resolve the root directory.
-                        match &context.resolve_base {
-                            ResolveBase::None => current_task.fs().root(),
-                            ResolveBase::Beneath(_) => return error!(EXDEV),
-                            ResolveBase::InRoot(root) => root.clone(),
-                        }
-                    } else {
-                        // If the path is not absolute, it's a relative directory.
-                        // Let's try to get the parent of the current node, or in the case that
-                        // the node is the root we can just use that directly.
-                        node.parent().unwrap_or(node)
-                    };
+            node = match node.resolve_symlink(current_task, context)? {
+                ResolvedSymlink::Path(link_directory, link_target) => {
                     current_task.lookup_path(context, link_directory, link_target.as_ref())?
                 }
-                SymlinkTarget::Node(node) => {
-                    if context.resolve_flags.contains(ResolveFlags::NO_MAGICLINKS) {
-                        return error!(ELOOP);
-                    }
-                    node
-                }
+                ResolvedSymlink::Node(target) => target,
             };
         }
         Ok(node.enter_mount())
@@ -1914,7 +1971,8 @@ impl NamespaceNode {
             if let Some(submount) =
                 mount.relations.get_submount(&RcuReadScope::new(), &PtrKey::from(&self.entry))
             {
-                return Some(submount.root());
+                let root = Arc::clone(&submount.root);
+                return Some(NamespaceNode::new(submount, root));
             }
         }
         None
@@ -1934,15 +1992,29 @@ impl NamespaceNode {
         if !self.entry.has_mounts() {
             return self;
         }
-        // While the child is a mountpoint, replace child with the mount's root.
+        // Defer dropping any intermediate or retried `NamespaceNode` until after `read_seq`
+        // finishes, since dropping the last `Arc<Mount>` invokes `FileSystemOps::unmount` (which
+        // may acquire locks ordered before `MountsLevel`, such as `FuseConnectionStateLock`) and
+        // dropping the last `Arc<DirEntry>` runs `DirEntry::drop`, which calls
+        // `parent.internal_remove_child(self)` and acquires `parent.children.write()`
+        // (`DirEntryChildrenLevel` / `FuseDirEntryChildrenLevel`).
         let kernel = self.entry.node.fs().kernel.upgrade().expect("kernel");
+        let deferred_nodes = RefCell::new(SmallVec::<[NamespaceNode; 4]>::new());
+        let result = RefCell::new(None);
         kernel.mounts_lock.read_seq(|| {
+            let mut nodes = deferred_nodes.borrow_mut();
+            if let Some(prev) = result.borrow_mut().take() {
+                nodes.push(prev);
+            }
+            // While the child is a mountpoint, replace child with the mount's root.
             let mut inner = self.clone();
             while let Some(inner_root) = inner.enter_one_mount() {
-                inner = inner_root;
+                nodes.push(std::mem::replace(&mut inner, inner_root));
             }
-            inner
-        })
+            *result.borrow_mut() = Some(inner);
+        });
+        drop(deferred_nodes);
+        result.into_inner().expect("read_seq sets result")
     }
 
     /// If this is a mount point, return the root of the mount. Otherwise return self.
@@ -1950,11 +2022,11 @@ impl NamespaceNode {
     /// This function traverses multiple mounts if there are mounts layered on top of each other.
     /// It requires the caller to hold the mounts write lock (proved by `MountsWriteToken`),
     /// unlike `enter_mount` which uses a sequence lock for reading.
-    fn enter_mount_locked(&self, _mounts_guard: &MountsWriteToken) -> NamespaceNode {
+    fn enter_mount_locked(&self, mounts_guard: &MountsWriteToken) -> NamespaceNode {
         // While the child is a mountpoint, replace child with the mount's root.
         let mut inner = self.clone();
         while let Some(inner_root) = inner.enter_one_mount() {
-            inner = inner_root;
+            drop(mounts_guard.defer_drop(std::mem::replace(&mut inner, inner_root)));
         }
         inner
     }
@@ -1965,13 +2037,24 @@ impl NamespaceNode {
     /// the mount, but then return the parent of the mount point instead of the mount point.
     fn escape_mount(&self) -> NamespaceNode {
         let kernel = self.entry.node.fs().kernel.upgrade().expect("kernel");
+        let deferred_nodes = RefCell::new(SmallVec::<[NamespaceNode; 4]>::new());
+        let deferred_mounts = RefCell::new(SmallVec::<[MountHandle; 2]>::new());
+        let result = RefCell::new(None);
         kernel.mounts_lock.read_seq(|| {
-            let mut mountpoint_or_self = self.clone();
-            while let Some(mountpoint) = mountpoint_or_self.mountpoint() {
-                mountpoint_or_self = mountpoint;
+            let mut nodes = deferred_nodes.borrow_mut();
+            let mut mounts = deferred_mounts.borrow_mut();
+            if let Some(prev) = result.borrow_mut().take() {
+                nodes.push(prev);
             }
-            mountpoint_or_self
-        })
+            let mut mountpoint_or_self = self.clone();
+            while let Some(mountpoint) = mountpoint_or_self.mountpoint(&mut mounts) {
+                nodes.push(std::mem::replace(&mut mountpoint_or_self, mountpoint));
+            }
+            *result.borrow_mut() = Some(mountpoint_or_self);
+        });
+        drop(deferred_nodes);
+        drop(deferred_mounts);
+        result.into_inner().expect("read_seq sets result")
     }
 
     /// If this node is the root of a mount, return it. Otherwise EINVAL.
@@ -1988,8 +2071,11 @@ impl NamespaceNode {
     ///
     /// If this node is mounted in another node, this function returns the node
     /// at which this node is mounted. Otherwise, returns None.
-    fn mountpoint(&self) -> Option<NamespaceNode> {
-        self.mount_if_root().ok()?.mountpoint()
+    fn mountpoint(
+        &self,
+        deferred_mounts: &mut SmallVec<[MountHandle; 2]>,
+    ) -> Option<NamespaceNode> {
+        self.mount_if_root().ok()?.mountpoint_defer_drop(deferred_mounts)
     }
 
     /// The path from the filesystem root to this node.
@@ -2427,12 +2513,19 @@ impl Mounts {
         Ok(())
     }
 
-    pub fn drop_caches(&self) {
+    /// Drops cached directory entries and backend caches across all mounted filesystems.
+    ///
+    /// Callers must not hold VFS directory, cache, or mount locks, as triggering delayed releases
+    /// can execute deferred cleanups that acquire subsystem locks.
+    pub fn drop_caches(&self, current_task: &CurrentTask) {
         let filesystems = self.unique_filesystems();
         // First purge all directory entry caches so that stacked filesystems (like OverlayFs)
         // drop references to underlying DirEntries/FsNodes before backend caches are cleared.
         for fs in &filesystems {
             fs.purge_dcache();
+            // Drain delayed releases per filesystem so evicted FsNodes drop before backend
+            // caches are cleared without accumulating a large queue across all filesystems.
+            current_task.trigger_delayed_releaser();
         }
         for fs in &filesystems {
             fs.drop_backend_caches();
@@ -2447,8 +2540,8 @@ impl Drop for Mount {
         let kernel = self.kernel();
         let peer_group = self.relations.peer_group.upgrade();
         let upstream = self.relations.upstream.cloned();
-        self.relations.peer_group.update(None);
-        self.relations.upstream.update(None);
+        self.relations.peer_group.get_mut().update(None);
+        self.relations.upstream.get_mut().update(None);
         if peer_group.is_some() || upstream.is_some() {
             let mount_ptr = PtrKey::from(self as &Mount);
             register_delayed_call(move |_current_task| {
@@ -2496,17 +2589,25 @@ impl Drop for Submount {
 #[cfg(test)]
 mod test {
     use crate::fs::tmpfs::TmpFs;
+    use crate::task::CurrentTask;
     use crate::testing::spawn_kernel_and_run;
     use crate::vfs::namespace::DeviceId;
     use crate::vfs::{
-        CallbackSymlinkNode, DirectoryMode, FsNodeInfo, LookupContext, MountInfo, Namespace,
-        NamespaceNode, RenameFlags, SymlinkMode, SymlinkTarget, UnlinkKind, WhatToMount,
+        CacheConfig, CacheMode, CallbackSymlinkNode, DirEntry, DirectoryMode, FileOps, FileSystem,
+        FileSystemOps, FileSystemOptions, FsNode, FsNodeHandle, FsNodeInfo, FsNodeOps, FsStr,
+        LookupContext, MemoryDirectoryFile, MountInfo, Namespace, NamespaceNode, RenameFlags,
+        SymlinkMode, SymlinkTarget, UnlinkKind, WhatToMount, fs_node_impl_dir_readonly,
     };
+    use starnix_types::vfs::default_statfs;
     use starnix_uapi::arc_key::PtrKey;
+    use starnix_uapi::auth::FsCred;
+    use starnix_uapi::errors::Errno;
     use starnix_uapi::mount_flags::MountpointFlags;
+    use starnix_uapi::open_flags::OpenFlags;
     use starnix_uapi::unmount_flags::UnmountFlags;
-    use starnix_uapi::{errno, mode};
+    use starnix_uapi::{errno, error, mode, statfs};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[::fuchsia::test]
     async fn test_namespace() {
@@ -2970,6 +3071,134 @@ mod test {
         .await;
     }
 
+    #[derive(Clone, Default)]
+    struct DropCachesTestFs {
+        live_nodes: Arc<AtomicUsize>,
+        live_at_drop_caches: Arc<AtomicUsize>,
+    }
+
+    impl FileSystemOps for DropCachesTestFs {
+        fn statfs(&self, _fs: &FileSystem, _current_task: &CurrentTask) -> Result<statfs, Errno> {
+            Ok(default_statfs(0))
+        }
+
+        fn name(&self) -> &'static FsStr {
+            "drop_caches_test_fs".into()
+        }
+
+        fn drop_caches(&self, _fs: &FileSystem) -> Result<(), Errno> {
+            self.live_at_drop_caches
+                .store(self.live_nodes.load(Ordering::SeqCst), Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    impl FsNodeOps for DropCachesTestFs {
+        fs_node_impl_dir_readonly!();
+
+        fn create_file_ops(
+            &self,
+            _node: &FsNode,
+            _current_task: &CurrentTask,
+            _flags: OpenFlags,
+        ) -> Result<Box<dyn FileOps>, Errno> {
+            Ok(Box::new(MemoryDirectoryFile::new()))
+        }
+
+        fn lookup(
+            &self,
+            entry: &DirEntry,
+            _current_task: &CurrentTask,
+            name: &FsStr,
+        ) -> Result<FsNodeHandle, Errno> {
+            if name != "cached_file" {
+                return error!(ENOENT);
+            }
+            self.live_nodes.fetch_add(1, Ordering::SeqCst);
+            Ok(entry.node.fs().create_node_and_allocate_node_id(
+                self.clone(),
+                FsNodeInfo::new(mode!(IFREG, 0o644), FsCred::root()),
+            ))
+        }
+
+        fn forget(
+            self: Box<Self>,
+            _current_task: &CurrentTask,
+            info: FsNodeInfo,
+        ) -> Result<(), Errno> {
+            if info.mode.is_reg() {
+                assert!(self.live_nodes.fetch_sub(1, Ordering::SeqCst) > 0);
+            }
+            Ok(())
+        }
+    }
+
+    #[::fuchsia::test]
+    async fn test_drop_caches_flushes_delayed_releaser_before_backend() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let root_fs = TmpFs::new_fs(&kernel);
+            let _mnt_node = root_fs.root().create_dir(&current_task, "mnt".into()).unwrap();
+            let ns = Namespace::new(root_fs);
+
+            let ops = DropCachesTestFs {
+                live_nodes: Arc::new(AtomicUsize::new(0)),
+                live_at_drop_caches: Arc::new(AtomicUsize::new(usize::MAX)),
+            };
+            let test_fs = FileSystem::new(
+                &kernel,
+                CacheMode::Cached(CacheConfig { capacity: 16 }),
+                ops.clone(),
+                FileSystemOptions::default(),
+            )
+            .unwrap();
+            let root_ino = test_fs.allocate_ino();
+            test_fs.create_root(root_ino, ops.clone());
+            let weak_fs = Arc::downgrade(&test_fs);
+
+            let mnt_dir = ns
+                .root()
+                .lookup_child(&current_task, &mut LookupContext::default(), "mnt".into())
+                .unwrap();
+            mnt_dir.mount(WhatToMount::Fs(test_fs), MountpointFlags::empty()).unwrap();
+            drop(mnt_dir);
+
+            {
+                let mounted_mnt = ns
+                    .root()
+                    .lookup_child(&current_task, &mut LookupContext::default(), "mnt".into())
+                    .unwrap();
+                let _cached_child = mounted_mnt
+                    .lookup_child(
+                        &current_task,
+                        &mut LookupContext::default(),
+                        "cached_file".into(),
+                    )
+                    .unwrap();
+            }
+            assert_eq!(ops.live_nodes.load(Ordering::SeqCst), 1);
+
+            kernel.mounts.drop_caches(&current_task);
+
+            assert_eq!(ops.live_at_drop_caches.load(Ordering::SeqCst), 0);
+            assert_eq!(ops.live_nodes.load(Ordering::SeqCst), 0);
+
+            // Unmounting and draining delayed releases destroys the root directory node without
+            // underflowing `live_nodes`.
+            {
+                let mounted_mnt = ns
+                    .root()
+                    .lookup_child(&current_task, &mut LookupContext::default(), "mnt".into())
+                    .unwrap();
+                mounted_mnt.unmount(UnmountFlags::empty()).unwrap();
+            }
+            current_task.trigger_delayed_releaser();
+            assert_eq!(weak_fs.strong_count(), 0);
+            assert_eq!(ops.live_nodes.load(Ordering::SeqCst), 0);
+        })
+        .await;
+    }
+
     #[::fuchsia::test]
     async fn test_enter_mount_has_mounts_lifecycle() {
         spawn_kernel_and_run(async |current_task| {
@@ -3035,6 +3264,37 @@ mod test {
                 .lookup_child(&current_task, &mut LookupContext::default(), "foo".into())
                 .unwrap();
             assert!(Arc::ptr_eq(&after_unmount1.entry, &foo_entry));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_resolve_empty_symlink_target_returns_enoent() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let root_fs = TmpFs::new_fs(&kernel);
+            let ns = Namespace::new(root_fs.clone());
+            ns.root()
+                .create_symlink(&current_task, "empty_link".into(), "".into())
+                .expect("create_symlink");
+            assert_eq!(
+                ns.root()
+                    .lookup_child(&current_task, &mut LookupContext::default(), "empty_link".into())
+                    .unwrap_err(),
+                errno!(ENOENT)
+            );
+            assert_eq!(
+                current_task
+                    .open_namespace_node_at(
+                        ns.root(),
+                        "empty_link".into(),
+                        super::OpenFlags::RDONLY,
+                        super::FileMode::default(),
+                        super::ResolveFlags::empty(),
+                    )
+                    .unwrap_err(),
+                errno!(ENOENT)
+            );
         })
         .await;
     }

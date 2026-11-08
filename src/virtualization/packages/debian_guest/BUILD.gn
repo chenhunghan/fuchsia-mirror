@@ -85,6 +85,13 @@ guest_package("debian_guest") {
   # memory.
   cmdline += " swiotlb=noforce"
 
+  # TODO(https://fxbug.dev/579470403): Remove this workaround once the Machina
+  # Debian guest kernel is upgraded to 6.10.3+. Disable the bpf LSM to work
+  # around a Linux < 6.10.3 kernel bug where its default hooks allow
+  # unprivileged setxattr/removexattr on security.* attributes without
+  # capability checks.
+  cmdline += " lsm=lockdown,capability,landlock,yama,apparmor,tomoyo,ima,evm"
+
   if (debian_guest_earlycon) {
     if (target_cpu == "x64") {
       cmdline += " earlycon=uart,io,0x3f8 console=tty0 keep_bootcon"

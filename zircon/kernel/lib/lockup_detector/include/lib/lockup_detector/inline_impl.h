@@ -84,6 +84,9 @@ inline void CallIfOuterAndLeave(LockupDetectorState& state, Func&& func) {
 
 }  // namespace lockup_internal
 
+// Rust callers use a copy of lockup_begin and lockup_end, in
+// //zircon/kernel/lib/lockup_detector/lockup_detector.rs, which must be kept in
+// sync with these.
 inline void lockup_begin(const char* name) {
   LockupDetectorState& state = gLockupDetectorPerCpuState[arch_curr_cpu_num()];
   const bool outermost = lockup_internal::Enter(state, name);

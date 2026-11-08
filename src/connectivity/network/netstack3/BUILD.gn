@@ -21,7 +21,6 @@ common_deps = [
   "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
   "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
   "//sdk/fidl/fuchsia.net.debug:fuchsia.net.debug_rust",
-  "//sdk/fidl/fuchsia.net.dhcp:fuchsia.net.dhcp_rust",
   "//sdk/fidl/fuchsia.net.filter:fuchsia.net.filter_rust",
   "//sdk/fidl/fuchsia.net.interfaces:fuchsia.net.interfaces_rust",
   "//sdk/fidl/fuchsia.net.interfaces.admin:fuchsia.net.interfaces.admin_rust",
@@ -55,8 +54,10 @@ common_deps = [
   "//src/connectivity/network/lib/diagnostics-traits",
   "//src/connectivity/network/lib/explicit",
   "//src/connectivity/network/lib/pcap",
+  "//src/diagnostics/lib/redactor_client",
   "//src/lib/async-utils",
   "//src/lib/debug/rust",
+  "//src/lib/diagnostics/inspect/runtime/rust",
   "//src/lib/diagnostics/inspect/rust",
   "//src/lib/diagnostics/log/rust",
   "//src/lib/fidl/rust/fidl",
@@ -64,6 +65,7 @@ common_deps = [
   "//src/lib/fuchsia-async",
   "//src/lib/fuchsia-component",
   "//src/lib/fuchsia-runtime",
+  "//src/lib/fuchsia-sync",
   "//src/lib/network/fidl_fuchsia_net_ext",
   "//src/lib/network/fidl_fuchsia_net_filter_ext",
   "//src/lib/network/fidl_fuchsia_net_interfaces_ext",
@@ -100,10 +102,6 @@ common_deps = [
   "//third_party/rust_crates:smallvec",
   "//third_party/rust_crates:thiserror",
   "//third_party/rust_crates:zerocopy",
-
-  # TODO(https://fxbug.dev/42175119): re-enable check includes when the inspect/client.shard.cml
-  # stops exposing diagnostics from framework.
-  "//src/lib/diagnostics/inspect/runtime/rust:unchecked_includes",
 ]
 
 common_test_deps = [
@@ -182,6 +180,7 @@ common_sources = [
   "src/bindings/sockets_fidl.rs",
   "src/bindings/stack_fidl_worker.rs",
   "src/bindings/stats_sampler.rs",
+  "src/bindings/sync.rs",
   "src/bindings/time.rs",
   "src/bindings/timers.rs",
   "src/bindings/util.rs",
@@ -246,9 +245,13 @@ config("netstack3_configs") {
       "//build/config:optimize_speed",
     ]
   }
+  visibility = [
+    "//src/connectivity/lib/packet-formats/benchmarks:*",
+    "//src/connectivity/network/*",
+  ]
 }
 
-# LINT.ThenChange(//src/connectivity/network/netstack3/BUILD.bazel:netstack3_configs)
+# LINT.ThenChange(BUILD.bazel:netstack3_configs)
 
 config("netstack3_debug_configs") {
   if (is_debug) {
@@ -286,18 +289,22 @@ rustc_binary("bin-instrumented") {
 fuchsia_component_manifest("component_manifest") {
   component_name = "netstack3"
   manifest = "meta/netstack3_prod.cml"
+  visibility = [ ":*" ]
 }
 
 fuchsia_component("component") {
   cm_label = ":component_manifest"
   component_name = "netstack3"
   deps = [ ":bin" ]
+  visibility = [ ":*" ]
+}
+
+fuchsia_package("netstack3") {
+  package_name = "netstack3"
+  deps = [ ":component" ]
   visibility = [
     ":*",
-
-    # Only available to top level network for bubbling up into assembly. Use the
-    # test components everywhere else.
-    "//src/connectivity/network:*",
+    "//bundles/assembly/*",
   ]
 }
 
@@ -322,6 +329,7 @@ template("ns3_test_component") {
     forward_variables_from(invoker, [ "deps" ])
     cm_label = ":${_manifest_target}"
     testonly = true
+    visibility = [ ":*" ]
   }
 }
 
@@ -332,12 +340,27 @@ ns3_test_component("component-for-tests") {
   deps = [ ":bin" ]
 }
 
+# A stand-in for :netstack3 to use as a subpackage in tests.
+fuchsia_package("package-for-tests") {
+  testonly = true
+  package_name = "netstack"
+  deps = [ ":component-for-tests" ]
+}
+
 # Component with debugging instrumentation enabled. This should be used for
 # tests but not benchmarks.
 ns3_test_component("component-debug") {
   component_name = "netstack3-debug"
   manifest = "meta/netstack3_debug.cml"
   deps = [ ":bin-instrumented" ]
+}
+
+# Package with debugging instrumentation enabled. This should be used as a
+# subpackage in tests, not benchmarks.
+fuchsia_package("package-debug") {
+  testonly = true
+  package_name = "netstack-debug"
+  deps = [ ":component-debug" ]
 }
 
 # A stand-in for :component-debug to use for tests that need to avoid logging as
@@ -348,12 +371,27 @@ ns3_test_component("component-debug-less-logs") {
   deps = [ ":bin-instrumented" ]
 }
 
+# A stand-in for :package-debug for tests that need reduced logging verbosity.
+fuchsia_package("package-debug-less-logs") {
+  testonly = true
+  package_name = "netstack-debug"
+  deps = [ ":component-debug-less-logs" ]
+}
+
 # Component with debugging instrumentation enabled and opaque IIDs disabled for
 # convenience in conformance testing.
 ns3_test_component("component-conformance") {
   component_name = "netstack3-conformance"
   manifest = "meta/netstack3_conformance.cml"
   deps = [ ":bin-instrumented" ]
+}
+
+# Package with debugging instrumentation enabled and opaque IIDs disabled for
+# convenience in conformance testing.
+fuchsia_package("package-conformance") {
+  testonly = true
+  package_name = "netstack-conformance"
+  deps = [ ":component-conformance" ]
 }
 
 fuchsia_unittest_package("netstack3-bin_test") {

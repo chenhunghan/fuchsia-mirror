@@ -1,0 +1,46 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        "//src/devices/tools/fidlgen_banjo:fidlgen_banjo_lib_test",
+    ],
+)
+
+test_suite(
+    name = "target_tests",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    tests = [
+        "//src/devices/block/bin/ufsutil:tests",
+        "//src/devices/block/tests/rpmb-integration-test:tests",
+        "//src/devices/clock/lib/clocktree/tests:clocktree_test",
+        "//src/devices/gpio/bin/gpioutil:gpioutil-test",
+        "//src/devices/i2c/lib/i2c-channel:i2c-channel-test",
+        "//src/devices/lib/bind:bind_tests",
+        "//src/devices/lib/dma-buffer/test:tests",
+        "//src/devices/lib/fidl-metadata/test:tests",
+        "//src/devices/lib/io-buffer/tests:phys-iter-test",
+        "//src/devices/lib/synchronous-executor/test:tests",
+        "//src/devices/pci/bin/lspci:lspci-tests",
+        "//src/devices/power/bin/batteryutil:tests",
+        "//src/devices/radar/bin/radarutil:radarutil-test",
+        "//src/devices/radar/lib/vmo-manager:vmo-manager-test",
+        "//src/devices/registers/bin/register-util:tests",
+        "//src/devices/registers/testing/mock-registers:mock-registers-test-package",
+        "//src/devices/spmi/lib/hwreg-spmi/rust:spmi-hwreg-next-rust-test",
+        "//src/devices/spmi/lib/hwreg-spmi/rust:spmi-hwreg-rust-test",
+        "//src/devices/testing/fake-bti/test:fake-bti-test",
+        "//src/devices/testing/fake-msi/test:tests",
+        "//src/devices/testing/fake-object/test:fake-object-test",
+        "//src/devices/testing/fake-resource/test:fake-resource-test",
+        "//src/devices/usb/bin/usb-cli:tests",
+        "//src/devices/usb/lib/typec:tests",
+    ],
+)

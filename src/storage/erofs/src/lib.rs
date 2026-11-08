@@ -8,8 +8,8 @@ use bitflags::bitflags;
 use crc::{CRC_32_ISCSI, Crc};
 use std::sync::Arc;
 use thiserror::Error;
-use zerocopy::IntoBytes;
 use zerocopy::byteorder::little_endian::U32 as LEU32;
+use zerocopy::{FromBytes, IntoBytes};
 
 pub mod readers;
 use readers::{Reader, ReaderError, ReaderExt};
@@ -425,11 +425,78 @@ impl TryFrom<u8> for FileType {
 }
 
 /// A directory entry in the EROFS image.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DirectoryEntry {
     pub nid: u64,
     pub file_type: FileType,
     pub name: String,
+}
+
+/// Zero-copy view over a single directory block's dirent array and packed filenames.
+struct DirBlock<'a> {
+    data: &'a [u8],
+    dirents: &'a [format::Dirent],
+}
+
+impl<'a> DirBlock<'a> {
+    fn parse(data: &'a [u8]) -> Result<Self, ParsingError> {
+        // `format::Dirent` derives `zerocopy::Unaligned` (alignment 1), so casting from `&[u8]`
+        // cannot fail due to alignment.
+        let (dirent0, _) = format::Dirent::ref_from_prefix(data)
+            .map_err(|_| ParsingError::InvalidDirectoryEntry)?;
+        let nameoff0 = dirent0.nameoff.get() as usize;
+        if nameoff0 < format::DIRENT_SIZE
+            || nameoff0 >= data.len()
+            || nameoff0 % format::DIRENT_SIZE != 0
+        {
+            return Err(ParsingError::InvalidDirectoryEntry);
+        }
+        let entry_count = nameoff0 / format::DIRENT_SIZE;
+        let dirents_raw = data
+            .get(..entry_count * format::DIRENT_SIZE)
+            .ok_or(ParsingError::InvalidDirectoryEntry)?;
+        let dirents = <[format::Dirent]>::ref_from_bytes(dirents_raw)
+            .map_err(|_| ParsingError::InvalidDirectoryEntry)?;
+        Ok(Self { data, dirents })
+    }
+
+    fn entry_count(&self) -> usize {
+        self.dirents.len()
+    }
+
+    fn dirent(&self, index: usize) -> &'a format::Dirent {
+        &self.dirents[index]
+    }
+
+    fn entry_name_bytes(&self, index: usize) -> Result<&'a [u8], ParsingError> {
+        let entry_count = self.dirents.len();
+        let nameoff = self.dirents[index].nameoff.get() as usize;
+        let min_nameoff = if index == 0 {
+            entry_count * format::DIRENT_SIZE
+        } else {
+            (self.dirents[index - 1].nameoff.get() as usize).max(entry_count * format::DIRENT_SIZE)
+        };
+        if nameoff < min_nameoff {
+            return Err(ParsingError::InvalidDirectoryEntry);
+        }
+        if index + 1 == entry_count {
+            // The last entry's name ends at the end of the block or is null-terminated.
+            let name_data = self.data.get(nameoff..).ok_or(ParsingError::InvalidDirectoryEntry)?;
+            Ok(name_data.split(|&x| x == 0).next().unwrap())
+        } else {
+            let nameoff_next = self.dirents[index + 1].nameoff.get() as usize;
+            self.data.get(nameoff..nameoff_next).ok_or(ParsingError::InvalidDirectoryEntry)
+        }
+    }
+
+    fn entry(&self, index: usize) -> Result<DirectoryEntry, ParsingError> {
+        let dirent = self.dirent(index);
+        let name_bytes = self.entry_name_bytes(index)?;
+        let name = std::str::from_utf8(name_bytes)
+            .map_err(ParsingError::InvalidDirectoryEntryName)?
+            .to_string();
+        Ok(DirectoryEntry { nid: dirent.nid.get(), file_type: dirent.file_type.try_into()?, name })
+    }
 }
 
 /// A file node in the EROFS image.
@@ -1049,125 +1116,93 @@ impl ErofsFilesystem {
         Ok(read_len)
     }
 
-    /// Read a number of entries from a directory, starting at entry_offset. Will retrieve up to
-    /// the number of entries in the directory or the size of the provided buffer, returning the
-    /// number of entries filled in the buffer. If there are less filled entries then the number of
-    /// entry slots provided in the buffer, there are no more entries in this directory. Entries
-    /// are sorted lexicographically. Reads past the end of the number of entries will return zero
-    /// entries filled.
+    /// Returns an iterator over the entries in a directory. Entries are yielded in
+    /// lexicographical order.
     ///
     /// TODO(https://fxbug.dev/479841115): It is possible for directories to omit their "." entries
     /// in erofs, and in that case there is a flag marking it and we are expected to synthesize it.
     /// Parse that flag and implement it.
-    /// TODO(https://fxbug.dev/479841115): This API is slightly awkward to hold. We should consider
-    /// making it an iterator interface.
-    pub fn read_directory(
-        &self,
-        node: &DirectoryNode,
-        mut entry_offset: usize,
-        entries: &mut [DirectoryEntry],
-    ) -> Result<usize, ErofsError> {
-        let block_size = self.block_size();
-        let block_size_usize: usize = block_size as usize;
-        let mut entries_filled = 0;
-        let mut current_entry_index = 0;
-        let mut block_data = vec![0u8; block_size_usize];
-
-        for block in 0.. {
-            let base_offset = block * block_size;
-            let bytes_read = self.read_node_range(&node.0, base_offset, &mut block_data)?;
-            if bytes_read < format::DIRENT_SIZE {
-                // We must be done if there wasn't enough data left for another dirent.
-                return Ok(entries_filled);
-            }
-            block_data[bytes_read..].fill(0);
-
-            // Get the first dirent in the block to calculate the number of entries.
-            let (dirent0, _) = zerocopy::Ref::<&[u8], format::Dirent>::from_prefix(&block_data)
-                .map_err(|_| ParsingError::InvalidDirectoryEntry)?;
-            let nameoff0 = dirent0.nameoff.get() as usize;
-            if nameoff0 < format::DIRENT_SIZE || nameoff0 >= block_size_usize {
-                return Err(ParsingError::InvalidDirectoryEntry.into());
-            }
-            let entry_count = nameoff0 / format::DIRENT_SIZE;
-
-            // Check if the offset we want is even in this block.
-            if current_entry_index + entry_count <= entry_offset {
-                current_entry_index += entry_count;
-                continue;
-            }
-
-            // Get all the dirents and make sure the nameoffs won't cause out of bounds errors.
-            let dirents_raw = block_data
-                .get(..entry_count * format::DIRENT_SIZE)
-                .ok_or(ParsingError::InvalidDirectoryEntry)?;
-            let dirents: &[format::Dirent] =
-                &*zerocopy::Ref::<&[u8], [format::Dirent]>::from_bytes(dirents_raw)
-                    .map_err(|_| ParsingError::InvalidDirectoryEntry)?;
-
-            let block_entry_offset = entry_offset - current_entry_index;
-            let space = entries.len() - entries_filled;
-            let block_entry_end = std::cmp::min(
-                entry_count,
-                block_entry_offset.checked_add(space).ok_or(ParsingError::Overflow)?,
-            );
-
-            for i in block_entry_offset..block_entry_end {
-                let last_entry = i + 1 == entry_count;
-                let nameoff = dirents[i].nameoff.get() as usize;
-
-                let name_bytes = if last_entry {
-                    // For the last entry, it ends at the end of the block or is null-terminated.
-                    // Since block_data is padded with nulls, we can just split by 0.
-                    let name_data =
-                        block_data.get(nameoff..).ok_or(ParsingError::InvalidDirectoryEntry)?;
-                    name_data.split(|&x| x == 0).next().unwrap()
-                } else {
-                    let nameoff_next = dirents[i + 1].nameoff.get() as usize;
-                    block_data
-                        .get(nameoff..nameoff_next)
-                        .ok_or(ParsingError::InvalidDirectoryEntry)?
-                };
-
-                let name = std::str::from_utf8(name_bytes)
-                    .map_err(|e| ParsingError::InvalidDirectoryEntryName(e))?
-                    .to_string();
-                entries[entries_filled] = DirectoryEntry {
-                    nid: dirents[i].nid.get(),
-                    file_type: dirents[i].file_type.try_into()?,
-                    name,
-                };
-                entries_filled += 1;
-                if entries_filled == entries.len() {
-                    return Ok(entries_filled);
-                }
-            }
-
-            current_entry_index =
-                current_entry_index.checked_add(entry_count).ok_or(ParsingError::Overflow)?;
-            entry_offset = current_entry_index;
+    pub fn read_directory<'a>(&'a self, node: &'a DirectoryNode) -> DirectoryIterator<'a> {
+        DirectoryIterator {
+            fs: self,
+            node,
+            block_buf: [0u8; format::MAX_BLOCK_SIZE],
+            block_bytes: 0,
+            next_block: 0,
+            entry_index: 0,
+            done: false,
         }
-
-        Ok(entries_filled)
     }
 
     /// Looks up a node by name in a directory.
     pub fn lookup(&self, dir: &DirectoryNode, name: &str) -> Result<Option<Node>, ErofsError> {
-        let mut entry_offset = 0;
-        let mut buffer = vec![DirectoryEntry::default(); 16];
+        let block_size = self.block_size();
+        let total_blocks = dir.size().div_ceil(block_size);
+        if total_blocks == 0 {
+            return Ok(None);
+        }
 
-        loop {
-            let filled = self.read_directory(dir, entry_offset, &mut buffer)?;
-            for i in 0..filled {
-                if buffer[i].name == name {
-                    let node = self.node(buffer[i].nid)?;
-                    return Ok(Some(node));
+        let target = name.as_bytes();
+        let mut block_buf = [0u8; format::MAX_BLOCK_SIZE];
+        let block_slice = &mut block_buf[..block_size as usize];
+
+        let mut low_block = 0u64;
+        let mut high_block = total_blocks;
+        while low_block < high_block {
+            let mid_block = low_block + (high_block - low_block) / 2;
+            let base_offset = mid_block * block_size;
+            let bytes_read = self.read_node_range(&dir.0, base_offset, block_slice)?;
+            if bytes_read < format::DIRENT_SIZE {
+                return Err(ParsingError::InvalidDirectoryEntry.into());
+            }
+            let dir_block = DirBlock::parse(&block_slice[..bytes_read])?;
+            let entry_count = dir_block.entry_count();
+
+            let first_name = dir_block.entry_name_bytes(0)?;
+            match target.cmp(first_name) {
+                std::cmp::Ordering::Less => {
+                    high_block = mid_block;
+                    continue;
+                }
+                std::cmp::Ordering::Equal => {
+                    return Ok(Some(self.node(dir_block.dirent(0).nid.get())?));
+                }
+                std::cmp::Ordering::Greater => {}
+            }
+
+            if entry_count == 1 {
+                low_block = mid_block + 1;
+                continue;
+            }
+
+            let last_idx = entry_count - 1;
+            let last_name = dir_block.entry_name_bytes(last_idx)?;
+            match target.cmp(last_name) {
+                std::cmp::Ordering::Greater => {
+                    low_block = mid_block + 1;
+                    continue;
+                }
+                std::cmp::Ordering::Equal => {
+                    return Ok(Some(self.node(dir_block.dirent(last_idx).nid.get())?));
+                }
+                std::cmp::Ordering::Less => {}
+            }
+
+            // `first_name < target < last_name`: binary search within `1..last_idx` of this block.
+            let mut low = 1usize;
+            let mut high = last_idx;
+            while low < high {
+                let mid = low + (high - low) / 2;
+                let mid_name = dir_block.entry_name_bytes(mid)?;
+                match target.cmp(mid_name) {
+                    std::cmp::Ordering::Less => high = mid,
+                    std::cmp::Ordering::Greater => low = mid + 1,
+                    std::cmp::Ordering::Equal => {
+                        return Ok(Some(self.node(dir_block.dirent(mid).nid.get())?));
+                    }
                 }
             }
-            if filled < buffer.len() {
-                break;
-            }
-            entry_offset += filled;
+            return Ok(None);
         }
 
         Ok(None)
@@ -1239,6 +1274,98 @@ impl ErofsFilesystem {
         Ok(None)
     }
 }
+
+/// An iterator over entries in an EROFS directory, holding the current directory block and cursor.
+pub struct DirectoryIterator<'a> {
+    fs: &'a ErofsFilesystem,
+    node: &'a DirectoryNode,
+    block_buf: [u8; format::MAX_BLOCK_SIZE],
+    block_bytes: usize,
+    next_block: u64,
+    entry_index: usize,
+    done: bool,
+}
+
+impl std::fmt::Debug for DirectoryIterator<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DirectoryIterator")
+            .field("nid", &self.node.nid())
+            .field("block_bytes", &self.block_bytes)
+            .field("next_block", &self.next_block)
+            .field("entry_index", &self.entry_index)
+            .field("done", &self.done)
+            .finish()
+    }
+}
+
+impl DirectoryIterator<'_> {
+    fn nth_inner(&mut self, mut n: usize) -> Result<Option<DirectoryEntry>, ErofsError> {
+        if self.done {
+            return Ok(None);
+        }
+
+        let block_size = self.fs.block_size();
+        let block_size_usize = block_size as usize;
+
+        loop {
+            if self.block_bytes == 0 {
+                let base_offset =
+                    self.next_block.checked_mul(block_size).ok_or(ParsingError::Overflow)?;
+                self.next_block = self.next_block.checked_add(1).ok_or(ParsingError::Overflow)?;
+                let bytes_read = self.fs.read_node_range(
+                    &self.node.0,
+                    base_offset,
+                    &mut self.block_buf[..block_size_usize],
+                )?;
+                if bytes_read < format::DIRENT_SIZE {
+                    // We must be done if there wasn't enough data left for another dirent.
+                    self.done = true;
+                    return Ok(None);
+                }
+                self.block_bytes = bytes_read;
+                self.entry_index = 0;
+            }
+
+            let dir_block = DirBlock::parse(&self.block_buf[..self.block_bytes])?;
+            let entry_count = dir_block.entry_count();
+            let remaining = entry_count - self.entry_index;
+
+            if n < remaining {
+                self.entry_index += n;
+                let entry = dir_block.entry(self.entry_index)?;
+                self.entry_index += 1;
+                if self.entry_index == entry_count {
+                    self.block_bytes = 0;
+                }
+                return Ok(Some(entry));
+            }
+
+            n -= remaining;
+            self.block_bytes = 0;
+        }
+    }
+}
+
+impl Iterator for DirectoryIterator<'_> {
+    type Item = Result<DirectoryEntry, ErofsError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.nth(0)
+    }
+
+    fn nth(&mut self, n: usize) -> Option<Self::Item> {
+        match self.nth_inner(n) {
+            Ok(Some(entry)) => Some(Ok(entry)),
+            Ok(None) => None,
+            Err(e) => {
+                self.done = true;
+                Some(Err(e))
+            }
+        }
+    }
+}
+
+impl std::iter::FusedIterator for DirectoryIterator<'_> {}
 
 /// An iterator over xattr entry headers for an inode.
 pub struct XattrIterator<'a> {
@@ -2107,10 +2234,10 @@ mod tests {
         let fs = ErofsFilesystem::new(reader).expect("failed to parse superblock");
         let root_node = fs.root_node();
 
-        let mut buf = vec![DirectoryEntry::default(); 16];
-        let filled = fs.read_directory(&root_node, 0, &mut buf).expect("failed to read directory");
-
-        let names: Vec<String> = buf[..filled].iter().map(|e| e.name.clone()).collect();
+        let names: Vec<String> = fs
+            .read_directory(&root_node)
+            .map(|e| e.expect("failed to read directory entry").name)
+            .collect();
         assert_eq!(
             names,
             vec![
@@ -2301,48 +2428,33 @@ mod tests {
             "symlink_to_file1",
         ];
 
-        // Test reading with buffer size 2 (pagination)
-        let mut buf = vec![DirectoryEntry::default(); 2];
-
-        // Page 1 (offset 0)
-        let filled = fs.read_directory(&root_node, 0, &mut buf).expect("failed to read dir");
-        assert_eq!(filled, 2);
-        assert_eq!(buf[0].name, expected_names[0]);
-        assert_eq!(buf[1].name, expected_names[1]);
-
-        // Page 2 (offset 2)
-        let filled = fs.read_directory(&root_node, 2, &mut buf).expect("failed to read dir");
-        assert_eq!(filled, 2);
-        assert_eq!(buf[0].name, expected_names[2]);
-        assert_eq!(buf[1].name, expected_names[3]);
-
-        // Page 3 (offset 4)
-        let filled = fs.read_directory(&root_node, 4, &mut buf).expect("failed to read dir");
-        assert_eq!(filled, 2);
-        assert_eq!(buf[0].name, expected_names[4]);
-        assert_eq!(buf[1].name, expected_names[5]);
-
-        // Page 4 (offset 6)
-        let filled = fs.read_directory(&root_node, 6, &mut buf).expect("failed to read dir");
-        assert_eq!(filled, 2);
-        assert_eq!(buf[0].name, expected_names[6]);
-        assert_eq!(buf[1].name, expected_names[7]);
-
-        // Page 5 (offset 8 - EOF)
-        let filled = fs.read_directory(&root_node, 8, &mut buf).expect("failed to read dir");
-        assert_eq!(filled, 0);
-
-        // Test reading with buffer size 1 (extreme pagination)
-        let mut buf1 = vec![DirectoryEntry::default(); 1];
-        for i in 0..expected_names.len() {
-            let filled = fs.read_directory(&root_node, i, &mut buf1).expect("failed to read dir");
-            assert_eq!(filled, 1);
-            assert_eq!(buf1[0].name, expected_names[i]);
+        // Test reading in pages of size 2 using `.skip()` and `.take()`
+        for page in 0..4 {
+            let offset = page * 2;
+            let entries: Vec<DirectoryEntry> = fs
+                .read_directory(&root_node)
+                .skip(offset)
+                .take(2)
+                .collect::<Result<Vec<_>, _>>()
+                .expect("failed to read dir");
+            assert_eq!(entries.len(), 2);
+            assert_eq!(entries[0].name, expected_names[offset]);
+            assert_eq!(entries[1].name, expected_names[offset + 1]);
         }
-        let filled = fs
-            .read_directory(&root_node, expected_names.len(), &mut buf1)
-            .expect("failed to read dir");
-        assert_eq!(filled, 0);
+
+        // Offset 8 (EOF)
+        assert!(fs.read_directory(&root_node).skip(8).next().is_none());
+
+        // Test reading 1 entry at a time via `.nth(i)`
+        for (i, expected_name) in expected_names.iter().enumerate() {
+            let entry = fs
+                .read_directory(&root_node)
+                .nth(i)
+                .expect("expected entry")
+                .expect("failed to read dir");
+            assert_eq!(&entry.name, expected_name);
+        }
+        assert!(fs.read_directory(&root_node).nth(expected_names.len()).is_none());
     }
 
     #[test_case("simple.erofs" ; "4096 block size")]
@@ -2382,19 +2494,13 @@ mod tests {
         );
 
         // Skip the first two entries, . and ..
-        let mut entry_offset = 2;
-        let mut buffer = vec![DirectoryEntry::default(); 16];
-        loop {
-            let filled = fs.read_directory(&large_dir, entry_offset, &mut buffer).unwrap();
-            for i in 0..filled {
-                // check the prefix
-                assert_eq!(buffer[i].name[..12], format!("file_number_"));
-            }
-            if filled < buffer.len() {
-                break;
-            }
-            entry_offset += filled;
+        let mut count = 0;
+        for entry in fs.read_directory(&large_dir).skip(2) {
+            let entry = entry.unwrap();
+            assert_eq!(&entry.name[..12], "file_number_");
+            count += 1;
         }
+        assert!(count > 0);
     }
 
     #[test_case("simple.erofs" ; "4096 block size")]
@@ -2635,6 +2741,399 @@ mod tests {
         let mut iter = fs.iter_xattrs(&root_node).expect("failed to create iterator");
         assert!(iter.next().unwrap().is_err());
         // Iterator MUST be fused now: subsequent next() calls MUST return None
+        assert!(iter.next().is_none());
+    }
+
+    #[test_case("simple.erofs" ; "4096 block size")]
+    #[test_case("simple_512.erofs" ; "512 block size")]
+    #[test_case("simple_lz4.erofs" ; "4096 block size lz4 compressed")]
+    #[test_case("simple_lz4_legacy.erofs" ; "4096 block size lz4 legacy compressed")]
+    #[fuchsia::test]
+    fn test_lookup_large_dir_binary_search(file: &str) {
+        let runfiles = load_image(file);
+        let reader = Arc::new(VecReader::new(runfiles));
+        let fs = ErofsFilesystem::new(reader).expect("failed to parse superblock");
+        let root_node = fs.root_node();
+
+        let Node::Directory(large_dir) =
+            fs.lookup(&root_node, "large_dir").unwrap().expect("large_dir not found")
+        else {
+            panic!("Expected directory node");
+        };
+
+        // Collect all entries via read_directory and verify lookup finds each one with matching nid.
+        let all_entries: Vec<DirectoryEntry> =
+            fs.read_directory(&large_dir).collect::<Result<Vec<_>, _>>().unwrap();
+        assert!(all_entries.len() > 20);
+
+        for entry in &all_entries {
+            let found = fs
+                .lookup(&large_dir, &entry.name)
+                .expect("lookup failed")
+                .unwrap_or_else(|| panic!("missing entry '{}'", entry.name));
+            assert_eq!(found.nid(), entry.nid);
+        }
+
+        // Verify negative lookups: before first entry ("."), between entries, and after last entry.
+        assert!(fs.lookup(&large_dir, "").unwrap().is_none());
+        assert!(fs.lookup(&large_dir, "-").unwrap().is_none());
+        assert!(fs.lookup(&large_dir, "file_number_0").unwrap().is_none());
+        assert!(fs.lookup(&large_dir, "file_number_10a").unwrap().is_none());
+        assert!(fs.lookup(&large_dir, "file_number_99999").unwrap().is_none());
+        assert!(fs.lookup(&large_dir, "zzzzzzzz").unwrap().is_none());
+    }
+
+    struct CountingReader {
+        inner: VecReader,
+        reads: fuchsia_sync::Mutex<Vec<(u64, usize)>>,
+    }
+
+    impl CountingReader {
+        fn new(data: Vec<u8>) -> Self {
+            Self { inner: VecReader::new(data), reads: fuchsia_sync::Mutex::new(Vec::new()) }
+        }
+
+        fn take_reads(&self) -> Vec<(u64, usize)> {
+            std::mem::take(&mut *self.reads.lock())
+        }
+    }
+
+    impl Reader for CountingReader {
+        fn read(&self, offset: u64, buf: &mut [u8]) -> Result<(), ReaderError> {
+            self.reads.lock().push((offset, buf.len()));
+            self.inner.read(offset, buf)
+        }
+    }
+
+    /// Writes a packed directory block into `block` from `(nid, file_type, name_bytes)` tuples.
+    fn write_dir_block(block: &mut [u8], entries: &[(u64, u8, &[u8])]) {
+        block.fill(0);
+        let dirents_size = entries.len() * format::DIRENT_SIZE;
+        let mut name_offset = dirents_size;
+        for (i, &(nid, file_type, name)) in entries.iter().enumerate() {
+            let dirent = format::Dirent {
+                nid: LEU64::new(nid),
+                nameoff: LEU16::new(name_offset as u16),
+                file_type,
+                reserved: 0,
+            };
+            let start = i * format::DIRENT_SIZE;
+            block[start..start + format::DIRENT_SIZE].copy_from_slice(dirent.as_bytes());
+            block[name_offset..name_offset + name.len()].copy_from_slice(name);
+            name_offset += name.len();
+        }
+    }
+
+    /// Builds a minimal EROFS image whose root directory (`nid = 0`) uses `FlatPlain` layout
+    /// starting at block 2 with `dir_size` bytes and `dir_blocks` content.
+    fn build_synthetic_dir_image(dir_size: u32, dir_blocks: &[u8]) -> Vec<u8> {
+        let block_size = 4096usize;
+        let num_data_blocks = dir_blocks.len().div_ceil(block_size);
+        let total_blocks = 2 + num_data_blocks;
+        let mut buf = vec![0u8; total_blocks * block_size];
+
+        let sb = format::SuperBlock {
+            magic: LEU32::new(format::EROFS_MAGIC),
+            checksum: LEU32::new(0),
+            feature_compat: LEU32::new(0),
+            block_size_bits: 12,
+            sb_ext_slots: 0,
+            root_nid: LEU16::new(0),
+            inode_count: LEU64::new(1),
+            epoch: LEU64::new(0),
+            fixed_nsec: LEU32::new(0),
+            blocks: LEU32::new(total_blocks as u32),
+            meta_block_addr: LEU32::new(1),
+            xattr_block_addr: LEU32::new(0),
+            uuid: [0; 16],
+            volume_name: [0; 16],
+            feature_incompat: LEU32::new(0),
+            available_compr_algs: LEU16::new(0),
+            extra_devices: LEU32::new(0),
+            dirblkbits: 0,
+            reserved: [0; 37],
+        };
+        buf[1024..1024 + 128].copy_from_slice(sb.as_bytes());
+
+        // Root directory compact inode at block 1 (offset 4096), FlatPlain data at block 2.
+        let inode = format::InodeCompact {
+            format: LEU16::new(0),
+            xattr_icount: LEU16::new(0),
+            mode: LEU16::new(0o040755),
+            link_count: LEU16::new(2),
+            size: LEU32::new(dir_size),
+            reserved_1: [0; 4],
+            i_u: 2u32.to_le_bytes(),
+            ino: LEU32::new(1),
+            uid: LEU16::new(0),
+            gid: LEU16::new(0),
+            reserved_2: [0; 4],
+        };
+        buf[4096..4096 + 32].copy_from_slice(inode.as_bytes());
+        buf[2 * block_size..2 * block_size + dir_blocks.len()].copy_from_slice(dir_blocks);
+        buf
+    }
+
+    #[fuchsia::test]
+    fn test_directory_iterator_multi_block() {
+        let block_size = 4096usize;
+        let mut dir_data = vec![0u8; 3 * block_size];
+        let mut expected = Vec::new();
+
+        // Block 0: 18 entries filling all 4096 bytes with zero trailing padding (the final entry's
+        // name ends right at the 4096-byte block boundary without a null terminator):
+        //   "."  -> 12 + 1 = 13B
+        //   ".." -> 12 + 2 = 14B
+        //   15 entries with 250-byte names -> 15 * (12 + 250) = 3930B
+        //   1 entry with 127-byte name -> 12 + 127 = 139B
+        //   Total = 13 + 14 + 3930 + 139 = 4096B.
+        let mut block0_names = vec![".".to_string(), "..".to_string()];
+        for i in 0..15 {
+            let prefix = format!("b0_entry_{i:02}_");
+            block0_names.push(format!("{prefix}{}", "a".repeat(250 - prefix.len())));
+        }
+        let prefix_15 = "b0_entry_15_";
+        block0_names.push(format!("{prefix_15}{}", "b".repeat(127 - prefix_15.len())));
+        assert_eq!(
+            block0_names.iter().map(|n| format::DIRENT_SIZE + n.len()).sum::<usize>(),
+            block_size
+        );
+
+        let block0_raw: Vec<(u64, u8, &[u8])> = block0_names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let nid = 100 + i as u64;
+                let ft = if i < 2 { FileType::Dir } else { FileType::RegFile };
+                expected.push(DirectoryEntry { nid, file_type: ft, name: name.clone() });
+                (nid, ft as u8, name.as_bytes())
+            })
+            .collect();
+        write_dir_block(&mut dir_data[..block_size], &block0_raw);
+
+        // Block 1: 40 entries with null-padded remainder at the end of the block.
+        let block1_names: Vec<String> = (0..40).map(|i| format!("b1_entry_{i:02}")).collect();
+        let block1_raw: Vec<(u64, u8, &[u8])> = block1_names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let nid = 200 + i as u64;
+                let ft = if i % 2 == 0 { FileType::RegFile } else { FileType::Symlink };
+                expected.push(DirectoryEntry { nid, file_type: ft, name: name.clone() });
+                (nid, ft as u8, name.as_bytes())
+            })
+            .collect();
+        write_dir_block(&mut dir_data[block_size..2 * block_size], &block1_raw);
+
+        // Block 2: single-entry final block.
+        let block2_name = "b2_final_single_entry";
+        expected.push(DirectoryEntry {
+            nid: 300,
+            file_type: FileType::Dir,
+            name: block2_name.to_string(),
+        });
+        write_dir_block(
+            &mut dir_data[2 * block_size..3 * block_size],
+            &[(300, FileType::Dir as u8, block2_name.as_bytes())],
+        );
+
+        let image = build_synthetic_dir_image(dir_data.len() as u32, &dir_data);
+        let reader = Arc::new(CountingReader::new(image));
+        let fs = ErofsFilesystem::new(reader.clone()).expect("failed to parse superblock");
+        let root_node = fs.root_node();
+
+        // Clear setup reads (superblock + root inode).
+        reader.take_reads();
+
+        // Full iteration across all 3 directory blocks (59 entries total).
+        let mut iter = fs.read_directory(&root_node);
+        let actual: Vec<DirectoryEntry> =
+            (&mut iter).collect::<Result<Vec<_>, _>>().expect("iteration failed");
+        assert_eq!(actual, expected);
+        // Iterator must be fused after exhaustion.
+        assert!(iter.next().is_none());
+
+        // Each of the 3 directory blocks must have been read from the reader exactly once.
+        let reads = reader.take_reads();
+        assert_eq!(
+            reads,
+            vec![
+                (2 * block_size as u64, block_size),
+                (3 * block_size as u64, block_size),
+                (4 * block_size as u64, block_size),
+            ]
+        );
+
+        // Verify `.skip()` across the first block into the middle of the second block.
+        let skipped: Vec<DirectoryEntry> = fs
+            .read_directory(&root_node)
+            .skip(25)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("skip iteration failed");
+        assert_eq!(skipped, expected[25..]);
+        assert_eq!(reader.take_reads().len(), 3);
+
+        // Verify `.nth()` jumping directly to the last entry in block 0, first entry in block 1,
+        // and the single entry in block 2.
+        let mut iter = fs.read_directory(&root_node);
+        assert_eq!(iter.nth(17).unwrap().unwrap(), expected[17]);
+        assert_eq!(iter.next().unwrap().unwrap(), expected[18]);
+        assert_eq!(iter.nth(39).unwrap().unwrap(), expected[58]);
+        assert!(iter.next().is_none());
+        assert!(iter.nth(10).is_none());
+    }
+
+    #[fuchsia::test]
+    fn test_directory_iterator_empty_and_all_file_types() {
+        // 1. Empty directory (`size == 0`) yields `None` immediately without reading any blocks.
+        let empty_image = build_synthetic_dir_image(0, &[]);
+        let reader = Arc::new(CountingReader::new(empty_image));
+        let fs = ErofsFilesystem::new(reader.clone()).unwrap();
+        let root = fs.root_node();
+        reader.take_reads();
+
+        let mut iter = fs.read_directory(&root);
+        assert!(iter.next().is_none());
+        assert!(iter.next().is_none());
+        assert!(reader.take_reads().is_empty());
+
+        // 2. Directory with all 8 valid `FileType` values (`0..=7`) plus a trailing partial tail
+        // smaller than `DIRENT_SIZE` (`4096 + 8` bytes).
+        let mut block = vec![0u8; 2 * 4096];
+        let all_types = [
+            (10, FileType::Unknown, "type_0_unknown"),
+            (11, FileType::RegFile, "type_1_reg"),
+            (12, FileType::Dir, "type_2_dir"),
+            (13, FileType::ChrDev, "type_3_chr"),
+            (14, FileType::BlkDev, "type_4_blk"),
+            (15, FileType::Fifo, "type_5_fifo"),
+            (16, FileType::Sock, "type_6_sock"),
+            (17, FileType::Symlink, "type_7_symlink"),
+        ];
+        let raw_entries: Vec<(u64, u8, &[u8])> =
+            all_types.iter().map(|&(nid, ft, name)| (nid, ft as u8, name.as_bytes())).collect();
+        write_dir_block(&mut block[..4096], &raw_entries);
+
+        let image = build_synthetic_dir_image(4096 + 8, &block);
+        let fs = ErofsFilesystem::new(Arc::new(VecReader::new(image))).unwrap();
+        let root = fs.root_node();
+
+        let entries: Vec<DirectoryEntry> =
+            fs.read_directory(&root).collect::<Result<Vec<_>, _>>().unwrap();
+        let expected: Vec<DirectoryEntry> = all_types
+            .iter()
+            .map(|&(nid, file_type, name)| DirectoryEntry {
+                nid,
+                file_type,
+                name: name.to_string(),
+            })
+            .collect();
+        assert_eq!(entries, expected);
+    }
+
+    #[fuchsia::test]
+    fn test_directory_iterator_fusing_on_error() {
+        let block_size = 4096usize;
+
+        // Helper to run an iterator on a 1-block directory image and verify it fuses on error.
+        let check_single_block_err = |block: &[u8], expected_ok_count: usize| -> ErofsError {
+            let image = build_synthetic_dir_image(block_size as u32, block);
+            let fs = ErofsFilesystem::new(Arc::new(VecReader::new(image))).unwrap();
+            let root = fs.root_node();
+            let mut iter = fs.read_directory(&root);
+            for _ in 0..expected_ok_count {
+                assert!(iter.next().unwrap().is_ok());
+            }
+            let err = iter.next().unwrap().expect_err("expected directory parsing error");
+            // Iterator MUST be fused after returning an error.
+            assert!(iter.next().is_none());
+            assert!(iter.nth(0).is_none());
+            err
+        };
+
+        // Case 1: `nameoff0 < DIRENT_SIZE` (4 < 12).
+        let mut block = vec![0u8; block_size];
+        write_dir_block(&mut block, &[(1, FileType::RegFile as u8, b"a")]);
+        block[8..10].copy_from_slice(&4u16.to_le_bytes());
+        assert_eq!(
+            check_single_block_err(&block, 0),
+            ErofsError::Parse(ParsingError::InvalidDirectoryEntry)
+        );
+
+        // Case 2: `nameoff0` not a multiple of `DIRENT_SIZE` (15 % 12 != 0).
+        let mut block = vec![0u8; block_size];
+        write_dir_block(&mut block, &[(1, FileType::RegFile as u8, b"a")]);
+        block[8..10].copy_from_slice(&15u16.to_le_bytes());
+        assert_eq!(
+            check_single_block_err(&block, 0),
+            ErofsError::Parse(ParsingError::InvalidDirectoryEntry)
+        );
+
+        // Case 3: `nameoff0 >= block_size` (4096).
+        let mut block = vec![0u8; block_size];
+        write_dir_block(&mut block, &[(1, FileType::RegFile as u8, b"a")]);
+        block[8..10].copy_from_slice(&(block_size as u16).to_le_bytes());
+        assert_eq!(
+            check_single_block_err(&block, 0),
+            ErofsError::Parse(ParsingError::InvalidDirectoryEntry)
+        );
+
+        // Case 4: Valid first entry, invalid `file_type` (99) on second entry, valid third entry.
+        let mut block = vec![0u8; block_size];
+        write_dir_block(
+            &mut block,
+            &[
+                (1, FileType::Dir as u8, b"."),
+                (2, 99, b"bad_type"),
+                (3, FileType::RegFile as u8, b"unreachable"),
+            ],
+        );
+        assert_eq!(
+            check_single_block_err(&block, 1),
+            ErofsError::Parse(ParsingError::InvalidFileType(99))
+        );
+
+        // Case 5: Valid first entry, invalid UTF-8 name on second entry, valid third entry.
+        let mut block = vec![0u8; block_size];
+        write_dir_block(
+            &mut block,
+            &[
+                (1, FileType::Dir as u8, b"."),
+                (2, FileType::RegFile as u8, b"\xff\xfe"),
+                (3, FileType::RegFile as u8, b"unreachable"),
+            ],
+        );
+        assert!(matches!(
+            check_single_block_err(&block, 1),
+            ErofsError::Parse(ParsingError::InvalidDirectoryEntryName(_))
+        ));
+
+        // Case 6: Out-of-order `nameoff` (entry 1's `nameoff` > entry 2's `nameoff`).
+        let mut block = vec![0u8; block_size];
+        write_dir_block(
+            &mut block,
+            &[
+                (1, FileType::Dir as u8, b"."),
+                (2, FileType::RegFile as u8, b"second"),
+                (3, FileType::RegFile as u8, b"third"),
+            ],
+        );
+        // Set entry 2's nameoff (at byte offset 2 * 12 + 8 = 32) to be smaller than entry 1's.
+        block[32..34].copy_from_slice(&36u16.to_le_bytes());
+        assert_eq!(
+            check_single_block_err(&block, 1),
+            ErofsError::Parse(ParsingError::InvalidDirectoryEntry)
+        );
+        // Jumping directly to entry 2 via `nth(2)` must also reject the out-of-order `nameoff`
+        // and fuse the iterator.
+        let image = build_synthetic_dir_image(block_size as u32, &block);
+        let fs = ErofsFilesystem::new(Arc::new(VecReader::new(image))).unwrap();
+        let root = fs.root_node();
+        let mut iter = fs.read_directory(&root);
+        assert_eq!(
+            iter.nth(2).unwrap().expect_err("expected error on nth(2)"),
+            ErofsError::Parse(ParsingError::InvalidDirectoryEntry)
+        );
         assert!(iter.next().is_none());
     }
 }

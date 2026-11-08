@@ -1,0 +1,19 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "input",
+    srcs = ["src/main.rs"],
+    edition = "2024",
+    visibility = ["//src/ui/tools:__pkg__"],
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/lib/ui/input-synthesis",
+        "//third_party/rust_crates/vendor:clap",
+    ],
+)

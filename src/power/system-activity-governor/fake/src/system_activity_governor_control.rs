@@ -4,8 +4,7 @@
 
 use anyhow::Result;
 use async_utils::hanging_get::server::HangingGet;
-use fidl::endpoints::create_endpoints;
-use fidl_fuchsia_power_broker::{self as fbroker, LeaseStatus};
+use fidl_fuchsia_power_broker as fbroker;
 use fidl_fuchsia_power_system::{self as fsystem, ApplicationActivityLevel, ExecutionStateLevel};
 use fuchsia_component::client as fclient;
 use fuchsia_component::client::connect_to_protocol;
@@ -13,11 +12,9 @@ use fuchsia_component::server::{ServiceFs, ServiceObjLocal};
 use futures::lock::Mutex;
 use futures::prelude::*;
 use log::error;
-use power_broker_client::PowerElementContext;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use fidl_test_sagcontrol as fctrl;
 use fuchsia_async as fasync;
@@ -30,24 +27,35 @@ type NotifyFn =
 type StateHangingGet =
     HangingGet<fctrl::SystemActivityGovernorState, fctrl::StateWatchResponder, NotifyFn>;
 
-async fn lease(controller: &PowerElementContext, level: u8) -> Result<fbroker::LeaseControlProxy> {
-    let lease_control =
-        controller.lessor.lease(level).await?.map_err(|e| anyhow::anyhow!("{e:?}"))?.into_proxy();
+async fn lease_application_activity(
+    topology: &fbroker::TopologyProxy,
+    token: &fbroker::DependencyToken,
+) -> Result<fbroker::LeaseToken> {
+    let (client_token, server_token) = fbroker::LeaseToken::create();
+    topology
+        .lease(fbroker::LeaseSchema {
+            lease_token: Some(server_token),
+            lease_name: Some("application_activity_control".into()),
+            dependencies: Some(vec![fbroker::LeaseDependency {
+                requires_token: Some(token.duplicate_handle(zx::Rights::SAME_RIGHTS)?),
+                requires_level: Some(ApplicationActivityLevel::Active.into_primitive()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        })
+        .await?
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
 
-    let mut lease_status = LeaseStatus::Unknown;
-    while lease_status != LeaseStatus::Satisfied {
-        lease_status = lease_control.watch_status(lease_status).await.unwrap();
-    }
-
-    Ok(lease_control)
+    Ok(client_token)
 }
 
 pub struct SystemActivityGovernorControl {
-    application_activity_controller: Arc<PowerElementContext>,
+    topology: fbroker::TopologyProxy,
+    application_activity_token: fbroker::DependencyToken,
 
     hanging_get: RefCell<StateHangingGet>,
 
-    application_activity_lease: RefCell<Option<fbroker::LeaseControlProxy>>,
+    application_activity_lease: RefCell<Option<fbroker::LeaseToken>>,
 
     boot_complete: Rc<Mutex<bool>>,
     current_state: Rc<Mutex<fctrl::SystemActivityGovernorState>>,
@@ -65,32 +73,8 @@ impl SystemActivityGovernorControl {
 
         let boot_control_proxy = connect_to_protocol::<fsystem::BootControlMarker>().unwrap();
 
-        let aa_token =
+        let application_activity_token =
             sag_power_elements.application_activity.unwrap().assertive_dependency_token.unwrap();
-        let (element_runner_client, element_runner) =
-            create_endpoints::<fbroker::ElementRunnerMarker>();
-        let application_activity_controller = Arc::new(
-            PowerElementContext::builder(
-                &topology,
-                "application_activity_controller",
-                &[0, 1],
-                element_runner_client,
-            )
-            .dependencies(vec![fbroker::LevelDependency {
-                dependent_level: Some(1),
-                requires_token: Some(aa_token),
-                requires_level_by_preference: Some(vec![1]),
-                ..Default::default()
-            }])
-            .build()
-            .await
-            .unwrap(),
-        );
-        let aac_context = application_activity_controller.clone();
-        fasync::Task::local(async move {
-            aac_context.run(element_runner, None /* inspect_node */, None /* update_fn */).await;
-        })
-        .detach();
 
         let boot_complete = Rc::new(Mutex::new(false));
 
@@ -183,7 +167,8 @@ impl SystemActivityGovernorControl {
         .detach();
 
         Rc::new(Self {
-            application_activity_controller: application_activity_controller.into(),
+            topology,
+            application_activity_token,
             hanging_get: RefCell::new(hanging_get),
             application_activity_lease: RefCell::new(None),
             boot_complete,
@@ -240,10 +225,19 @@ impl SystemActivityGovernorControl {
     ) -> Result<()> {
         match required_application_activity_level {
             ApplicationActivityLevel::Active => {
-                let _ = self
-                    .application_activity_lease
-                    .borrow_mut()
-                    .get_or_insert(lease(&self.application_activity_controller, 1).await?);
+                if self.application_activity_lease.borrow().is_none() {
+                    let lease_token = lease_application_activity(
+                        &self.topology,
+                        &self.application_activity_token,
+                    )
+                    .await?;
+                    if self.required_state.lock().await.application_activity_level
+                        == Some(ApplicationActivityLevel::Active)
+                    {
+                        let _ =
+                            self.application_activity_lease.borrow_mut().get_or_insert(lease_token);
+                    }
+                }
             }
             ApplicationActivityLevel::Inactive => {
                 drop(self.application_activity_lease.borrow_mut().take());

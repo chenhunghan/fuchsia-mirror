@@ -2,9 +2,72 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
 package(default_applicable_licenses = ["//:license"])
 
 exports_files(
     ["libdriver_runtime.ifs"],
     visibility = ["//src/devices/lib/driver:__pkg__"],
+)
+
+fx_cc_library(
+    name = "driver_runtime_impl",
+    srcs = [
+        "api.cc",
+        "arena.cc",
+        "arena.h",
+        "async_loop_owned_event_handler.h",
+        "callback_request.h",
+        "canary.h",
+        "channel.cc",
+        "channel.h",
+        "dispatcher.cc",
+        "dispatcher.h",
+        "dispatcher_coordinator.cc",
+        "dispatcher_coordinator.h",
+        "dispatcher_dump.cc",
+        "dispatcher_internals.cc",
+        "dispatcher_internals.h",
+        "dispatcher_state.h",
+        "handle.cc",
+        "handle.h",
+        "message_packet.cc",
+        "message_packet.h",
+        "object.h",
+        "thread_context.cc",
+        "thread_context.h",
+        "thread_pool.cc",
+        "thread_pool.h",
+        "token_manager.cc",
+        "token_manager.h",
+    ],
+    implementation_deps = [
+        "//sdk/fidl/fuchsia.driver.host:fuchsia.driver.host_cpp",
+        "//sdk/fidl/fuchsia.scheduler:fuchsia.scheduler_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/driver/runtime:driver_runtime_env",
+        "//sdk/lib/driver/runtime:driver_runtime_internal",
+        "//sdk/lib/driver/runtime:driver_runtime_testing",
+        "//sdk/lib/fidl/cpp/wire",
+        "//src/devices/lib/log",
+        # In Bazel on Fuchsia, Zircon syscall headers come from //src/zircon/lib/zircon:headers.
+        "//src/zircon/lib/zircon:headers",  # @bazel2gn:path_overwrite://zircon/system/public
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/sync:sync-cpp",
+        "//zircon/system/ulib/trace",
+    ],
+    public_configs = [":include"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        ":__subpackages__",
+        "//sdk/lib/fidl_driver/tests:__subpackages__",
+        "//src/tests/benchmarks/fidl/driver_cpp:__pkg__",
+        "//src/tests/benchmarks/fidl/driver_llcpp:__pkg__",
+    ],
+    deps = [
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/driver/runtime:driver_runtime",
+    ],
+    alwayslink = True,
 )

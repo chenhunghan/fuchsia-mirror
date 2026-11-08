@@ -149,9 +149,8 @@ bool AddressSpace::InsertLocked(uint64_t addr, magma::PlatformBusMapper::BusMapp
   auto& bus_addr_array = bus_mapping->Get();
   uint64_t page_count = bus_addr_array.size();
 
-  if (page_count > bus_addr_array.size()) {
-    MAGMA_LOG(ERROR, "page_count %lu larger than bus mapping length %zu", page_count,
-              bus_addr_array.size());
+  if (!IsValidVirtualAddressRange(addr, page_count)) {
+    MAGMA_LOG(ERROR, "Virtual address too large");
     return false;
   }
 
@@ -219,13 +218,12 @@ bool AddressSpace::ClearLocked(uint64_t addr, magma::PlatformBusMapper::BusMappi
 bool AddressSpace::ClearLocked(uint64_t addr, uint64_t page_count) {
   DASSERT(magma::is_page_aligned(addr));
 
-  const size_t page_shift = PageShift();
-  if ((addr >> page_shift) + page_count > (1l << (kVirtualAddressBits - page_shift))) {
+  if (!IsValidVirtualAddressRange(addr, page_count)) {
     MAGMA_LOG(ERROR, "Virtual address too large");
     return false;
   }
 
-  uint32_t page_table_index = (addr >>= page_shift) & kPageTableMask;
+  uint32_t page_table_index = (addr >>= PageShift()) & kPageTableMask;
   uint32_t page_directory_index = (addr >>= kPageTableShift) & kPageDirectoryMask;
 
   DLOG("clear pd %i pt %u", page_directory_index, page_table_index);

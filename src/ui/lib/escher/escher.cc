@@ -11,7 +11,6 @@
 #if ESCHER_USE_RUNTIME_GLSL
 #include <shaderc/shaderc.hpp>  // nogncheck
 #endif
-#include "src/ui/lib/escher/impl/image_cache.h"
 #ifdef __Fuchsia__
 #include "src/ui/lib/escher/impl/semaphore_pool.h"
 #endif
@@ -25,6 +24,7 @@
 #include "src/ui/lib/escher/util/image_utils.h"
 #include "src/ui/lib/escher/util/trace_macros.h"
 #include "src/ui/lib/escher/vk/gpu_allocator.h"
+#include "src/ui/lib/escher/vk/image_factory.h"
 #include "src/ui/lib/escher/vk/impl/descriptor_set_allocator.h"
 #include "src/ui/lib/escher/vk/impl/descriptor_set_allocator_cache.h"
 #include "src/ui/lib/escher/vk/impl/pipeline_layout_cache.h"
@@ -101,7 +101,7 @@ Escher::Escher(VulkanDeviceQueuesPtr device, HackFilesystemPtr filesystem,
   // Initialize instance variables that require |weak_factory_| to already have
   // been initialized.
   resource_recycler_ = std::make_unique<ResourceRecycler>(GetWeakPtr());
-  image_cache_ = std::make_unique<impl::ImageCache>(GetWeakPtr(), gpu_allocator());
+  image_cache_ = std::make_unique<ImageFactoryAdapter>(gpu_allocator(), resource_recycler());
 #ifdef __Fuchsia__
   semaphore_pool_ = std::make_unique<SemaphorePool>(vk_device(), device_->dispatch_loader());
 #endif
@@ -142,6 +142,7 @@ Escher::~Escher() {
 
   descriptor_set_allocator_cache_.reset();
   sampler_cache_.reset();
+  image_cache_.reset();
 
   // ResourceRecyclers must be released before the CommandBufferSequencer is,
   // since they register themselves with it.

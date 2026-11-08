@@ -10,6 +10,8 @@ use assembly_config_schema::platform_settings::sysmem_config::{
 };
 use assembly_constants::{BootfsPackageDestination, PackageSetDestination};
 use camino::Utf8PathBuf;
+use fidl_fuchsia_images2_common as fidl_fuchsia_images2;
+use fidl_fuchsia_sysmem2_common as fidl_fuchsia_sysmem2;
 use std::collections::HashSet;
 
 const CONTIGUOUS_MEMORY_SIZE_FIELD: &str = "contiguous_memory_size";

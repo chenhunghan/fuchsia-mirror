@@ -14,17 +14,10 @@
 #include <fbl/canary.h>
 #include <fbl/intrusive_double_list.h>
 #include <fbl/name.h>
-#include <fbl/ref_counted.h>
 #include <fbl/ref_ptr.h>
-#include <kernel/brwlock.h>
-#include <kernel/event.h>
 #include <kernel/ffi.h>
-#include <kernel/mutex.h>
 #include <kernel/task_runtime_stats.h>
 #include <kernel/thread.h>
-#include <ktl/array.h>
-#include <ktl/forward.h>
-#include <ktl/span.h>
 #include <object/dispatcher.h>
 #include <object/exceptionate.h>
 #include <object/futex_context.h>
@@ -37,7 +30,6 @@
 
 class JobDispatcher;
 class ProcessDispatcher;
-class ThreadDispatcher;
 class VmAddressRegionDispatcher;
 
 extern "C" {
@@ -55,26 +47,15 @@ zx_status_t cpp_process_dispatcher_create_shared(
     ffi::Uninitialized<zx_rights_t>* out_restricted_vmar_rights);
 ProcessDispatcher* cpp_process_dispatcher_current();
 bool cpp_process_dispatcher_is_current(const ProcessDispatcher* process);
-zx_status_t cpp_process_dispatcher_start(ProcessDispatcher* process, ThreadDispatcher* thread,
-                                         zx_vaddr_t pc, zx_vaddr_t sp, Handle* arg_handle,
-                                         uintptr_t arg2);
 void cpp_process_dispatcher_kill(ProcessDispatcher* process, int64_t retcode);
 zx_status_t cpp_process_dispatcher_suspend(ProcessDispatcher* process);
 void cpp_process_dispatcher_resume(ProcessDispatcher* process);
-zx_status_t cpp_process_dispatcher_make_and_add_handle(ProcessDispatcher* process,
-                                                       KernelHandle<Dispatcher>* handle,
-                                                       zx_rights_t rights, zx_handle_t* out_handle);
-zx_status_t cpp_process_dispatcher_make_and_add_handle_from_ref(ProcessDispatcher* process,
-                                                                Dispatcher* dispatcher,
-                                                                zx_rights_t rights,
-                                                                zx_handle_t* out_handle);
 const HandleTable* cpp_process_dispatcher_handle_table(const ProcessDispatcher* process);
 const ShareableProcessState* cpp_process_dispatcher_shareable_state(
     const ProcessDispatcher* process);
 const VmAspace* cpp_shareable_process_state_aspace(const ShareableProcessState* state);
 zx_status_t cpp_process_dispatcher_enforce_basic_policy(ProcessDispatcher* process,
                                                         uint32_t policy);
-int64_t cpp_process_dispatcher_get_timer_slack_policy_amount(const ProcessDispatcher* process);
 void cpp_process_dispatcher_get_timer_slack_policy(const ProcessDispatcher* process,
                                                    TimerSlack* out_slack);
 zx_info_process_t cpp_process_dispatcher_get_info(const ProcessDispatcher* process);
@@ -90,18 +71,18 @@ zx_status_t cpp_process_dispatcher_set_critical_to_job(ProcessDispatcher* proces
 JobDispatcher* cpp_process_dispatcher_job(ProcessDispatcher* process);
 
 VmAspace* cpp_process_dispatcher_aspace_at(ProcessDispatcher* process, zx_vaddr_t va);
+VmAspace* cpp_process_dispatcher_normal_aspace(ProcessDispatcher* process);
+VmAspace* cpp_process_dispatcher_restricted_aspace(const ProcessDispatcher* process);
 
 uintptr_t cpp_process_dispatcher_get_debug_addr(const ProcessDispatcher* process);
 zx_status_t cpp_process_dispatcher_set_debug_addr(ProcessDispatcher* process, uintptr_t addr);
 uintptr_t cpp_process_dispatcher_get_dyn_break_on_load(const ProcessDispatcher* process);
 zx_status_t cpp_process_dispatcher_set_dyn_break_on_load(ProcessDispatcher* process,
                                                          uintptr_t break_on_load);
-uintptr_t cpp_process_dispatcher_vdso_base_address(const ProcessDispatcher* process);
 #if ARCH_X86
 uintptr_t cpp_process_dispatcher_hw_trace_context_id(const ProcessDispatcher* process);
 #endif
 void* cpp_process_dispatcher_futex_context(const ProcessDispatcher* process);
-zx_status_t cpp_process_attach_aspace_to_thread(ProcessDispatcher* process, Thread* core_thread);
 zx_status_t cpp_process_add_initialized_thread(ProcessDispatcher* process, ThreadDispatcher* thread,
                                                bool ensure_initial_thread,
                                                const UserEntryState* entry);
@@ -110,6 +91,16 @@ Exceptionate* cpp_process_dispatcher_exceptionate(ProcessDispatcher* process);
 Exceptionate* cpp_process_dispatcher_debug_exceptionate(ProcessDispatcher* process);
 ThreadDispatcher* cpp_process_dispatcher_lookup_thread_by_id(ProcessDispatcher* process,
                                                              zx_koid_t koid);
+bool cpp_process_dispatcher_critical_to_root_job(const ProcessDispatcher* process);
+void cpp_process_dispatcher_get_attributed_memory(const ProcessDispatcher* process,
+                                                  VmObject::AttributionCounts* out_counts);
+ShareableProcessState* cpp_shareable_process_state_create();
+void cpp_shareable_process_state_destroy(ShareableProcessState* state);
+bool cpp_shareable_process_state_increment_share_count(ShareableProcessState* state);
+void cpp_shareable_process_state_decrement_share_count(ShareableProcessState* state);
+const HandleTable* cpp_shareable_process_state_handle_table(ShareableProcessState* state);
+uintptr_t cpp_process_dispatcher_vdso_code_address(ProcessDispatcher* process);
+ProcessDispatcher* cpp_process_dispatcher_lookup_process_by_id(zx_koid_t koid);
 
 }  // extern "C"
 
@@ -221,8 +212,6 @@ class ProcessDispatcher final
   }
 #endif
 
-  uintptr_t vdso_base_address() const { return shareable_state_->aspace()->vdso_base_address(); }
-
   void EnumerateAspaceChildren(VmEnumerator* ve) {
     fbl::RefPtr<VmAddressRegion> root_vmar = shareable_state_->aspace()->RootVmar();
     if (root_vmar) {
@@ -250,9 +239,6 @@ class ProcessDispatcher final
   [[nodiscard]] zx_status_t get_name(char (&out_name)[ZX_MAX_NAME_LEN]) const final;
   [[nodiscard]] zx_status_t set_name(const char* name, size_t len) final;
 
-  zx_status_t Start(fbl::RefPtr<ThreadDispatcher> thread, zx_vaddr_t pc, zx_vaddr_t sp,
-                    HandleOwner arg_handle, uintptr_t arg2);
-
   void Kill(int64_t retcode);
 
   // Suspends the process.
@@ -278,12 +264,17 @@ class ProcessDispatcher final
 
   bool CriticalToRootJob() const;
 
-  Exceptionate* exceptionate();
-  Exceptionate* debug_exceptionate();
+  Exceptionate* exceptionate() {
+    canary_.Assert();
+    return &exceptionate_;
+  }
+  Exceptionate* debug_exceptionate() {
+    canary_.Assert();
+    return &debug_exceptionate_;
+  }
 
-  // The following two methods can be slow and inaccurate and should only be
-  // called from diagnostics code.
-  uint32_t ThreadCount() const;
+  // This method can be slow and inaccurate and should only be called from
+  // diagnostics code.
   VmObject::AttributionCounts GetAttributedMemory() const;
 
   // Look up a process given its koid.
@@ -334,15 +325,6 @@ class ProcessDispatcher final
     }
     return vdso_code_address_;
   }
-
-  // Allocates a handle with the given rights to the given dispatcher. The handle is added to the
-  // calling process' handle table, and its value is returned in out.
-  zx_status_t MakeAndAddHandle(fbl::RefPtr<Dispatcher> dispatcher, zx_rights_t rights,
-                               zx_handle_t* out);
-  // Allocates a handle with the given rights to the dispatcher enclosed in the given kernel handle.
-  // The handle is added to the calling process' handle table, and its value is returned in out.
-  zx_status_t MakeAndAddHandle(KernelHandle<Dispatcher> kernel_handle, zx_rights_t rights,
-                               zx_handle_t* out);
 
   // Returns the "restricted" address space for a process, or nullptr if it does not have a
   // restricted address space.
@@ -441,7 +423,9 @@ class ProcessDispatcher final
   const JobPolicy policy_;
 
   // list of threads in this process
-  fbl::DoublyLinkedList<ThreadDispatcher*> thread_list_ TA_GUARDED(get_lock());
+  fbl::DoublyLinkedList<ThreadDispatcher*, fbl::DefaultObjectTag, fbl::SizeOrder::N,
+                        ThreadDispatcherListTraits>
+      thread_list_ TA_GUARDED(get_lock());
 
   // The address space used when a thread of this process is executing in restricted mode.  This
   // field is only non-null if this process is a "shared process".

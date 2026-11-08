@@ -114,6 +114,9 @@ Callers and implementations must preserve these invariants:
 - `TypeExprNode::concrete_type()` is never null. `GetConcreteType()` and
   `FindTypeDefinition()` return null only when the input type is null or does
   not resolve to a `Type`.
+- The single-string constructors for `Identifier` and `ParsedIdentifier` create
+  one unparsed component. Call `ExprParser::ParseIdentifier()` to parse a
+  qualified name string (such as `"ns::Type<Param>"`) into components.
 - Call `AsyncDwarfExprEval::Eval()` at most once per instance. The evaluator
   holds a self-reference until asynchronous execution finishes.
 - `DwarfLangToExprLanguage()` maps all non-Rust DWARF languages to

@@ -19,13 +19,9 @@ open protocol Handoff {
     flexible Take() -> (resource struct {
         /// A lease on the power element.
         ///
-        /// This is secretly a `fuchsia.power.broker.LeaseControl` channel
-        /// but we'd like to avoid exposing that to `ffx`. When that protocol
-        /// is stabilized, we can replace the channel with that here.
-        ///
-        /// TODO(https://fxbug.dev/339474151): This may also become an
-        /// eventpair as the linked bug tracks migrating lease control channel
-        /// to eventpair.
+        /// This is secretly a `fuchsia.power.broker.LeaseToken` eventpair, but
+        /// we'd like to avoid exposing that to `ffx`. The lease is held until
+        /// all handles to it are closed.
         lease zx.Handle;
     }) error HandoffError;
 };

@@ -18,6 +18,7 @@
 #include <zircon/time.h>
 
 #include <kernel/cpu.h>
+#include <kernel/ffi.h>
 
 // Fast routines that most arches will implement inline.
 void arch_enable_ints();
@@ -72,10 +73,13 @@ inline void arch_set_blocking_disallowed(bool value) {
 
 inline uint32_t arch_num_spinlocks_held() { return READ_PERCPU_FIELD(num_spinlocks); }
 
-class IdlePowerThread;  // fwd decl
+extern "C" {
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_arch_enter_idle_state();
+}  // extern "C"
 class ArchIdlePowerThread {
  private:
-  friend class IdlePowerThread;
+  friend void cpp_arch_enter_idle_state();
 
   // ArchIdlePowerThread::EnterIdleState is a method which is closely coupled
   // to the behavior of the IdlePowerThreads (one per CPU).  It should really

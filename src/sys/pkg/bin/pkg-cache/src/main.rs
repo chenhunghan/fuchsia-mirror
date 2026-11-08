@@ -177,6 +177,7 @@ async fn main_inner() -> Result<(), Error> {
         blob_download_resumption_attempts_limit,
         use_driver_blob_paging,
         startup_profiling_seconds,
+        post_commit_gc_earliest_boot_seconds,
     } = config;
     let mut blobfs_builder = blobfs::Client::builder().readable().writable().executable();
     let mut blob_verifier = None;
@@ -276,8 +277,10 @@ async fn main_inner() -> Result<(), Error> {
     let cache_index = Arc::new(cache_index);
     inspector.root().record_lazy_child("base-packages", base_index.record_lazy_inspect());
     inspector.root().record_lazy_child("cache-packages", cache_index.record_lazy_inspect());
-    let package_index = Arc::new(async_lock::RwLock::new(PackageIndex::new()));
-    inspector.root().record_lazy_child("index", PackageIndex::record_lazy_inspect(&package_index));
+    let upgradable_packages = enable_upgradable_packages
+        .then(|| upgradable_packages::UpgradablePackages::new(Arc::clone(&cache_index)));
+    let package_index = Arc::new(PackageIndex::new(blobfs.clone(), upgradable_packages));
+    inspector.root().record_lazy_child("index", package_index.record_lazy_inspect());
     let scope = vfs::execution_scope::ExecutionScope::new();
     let (cobalt_sender, cobalt_fut) = ProtocolConnector::new_with_buffer_size(
         CobaltConnectedService,
@@ -298,8 +301,16 @@ async fn main_inner() -> Result<(), Error> {
     .context("creating root dir helpers")?;
     inspector.root().record_lazy_child("open-packages", open_packages.record_lazy_inspect());
 
-    let upgradable_packages = enable_upgradable_packages
-        .then(|| Arc::new(upgradable_packages::UpgradablePackages::new(Arc::clone(&cache_index))));
+    let commit_status_provider = connect_to_protocol::<CommitStatusProviderMarker>()
+        .context("while connecting to commit status provider")?;
+    let gc_service = gc_service::GcService::new(
+        blobfs.clone(),
+        Arc::clone(&base_index),
+        Arc::clone(&cache_index),
+        Arc::clone(&package_index),
+        open_packages.clone(),
+        commit_status_provider,
+    );
 
     // Use VFS to serve the out dir because ServiceFs does not support PERM_EXECUTABLE and
     // pkgfs/{packages|system} require it.
@@ -312,7 +323,6 @@ async fn main_inner() -> Result<(), Error> {
         let open_packages = open_packages.clone();
         let base_index = Arc::clone(&base_index);
         let cache_index = Arc::clone(&cache_index);
-        let upgradable_packages = upgradable_packages.clone();
         let scope = scope.clone();
         let cobalt_sender = cobalt_sender.clone();
         let cache_inspect_id = Arc::new(AtomicU32::new(0));
@@ -328,7 +338,6 @@ async fn main_inner() -> Result<(), Error> {
                         root_dir_factory.clone(),
                         Arc::clone(&base_index),
                         Arc::clone(&cache_index),
-                        upgradable_packages.clone(),
                         executability_restrictions,
                         scope.clone(),
                         open_packages.clone(),
@@ -360,20 +369,15 @@ async fn main_inner() -> Result<(), Error> {
     }
     {
         let package_index = Arc::clone(&package_index);
-        let blobfs = blobfs.clone();
 
         let () = svc_dir
             .add_entry(
                 fpkg::RetainedPackagesMarker::PROTOCOL_NAME,
                 vfs::service::host(move |stream: fpkg::RetainedPackagesRequestStream| {
-                    retained_packages_service::serve(
-                        Arc::clone(&package_index),
-                        blobfs.clone(),
-                        stream,
-                    )
-                    .unwrap_or_else(|e: anyhow::Error| {
-                        error!("serving fuchsia.pkg/RetainedPackages: {e:#}")
-                    })
+                    retained_packages_service::serve(Arc::clone(&package_index), stream)
+                        .unwrap_or_else(|e: anyhow::Error| {
+                            error!("serving fuchsia.pkg/RetainedPackages: {e:#}")
+                        })
                 }),
             )
             .context("adding fuchsia.pkg/RetainedPackages to /svc")?;
@@ -397,39 +401,45 @@ async fn main_inner() -> Result<(), Error> {
             .context("adding fuchsia.pkg/RetainedBlobs to /svc")?;
     }
     {
-        let blobfs = blobfs.clone();
-        let base_index = Arc::clone(&base_index);
-        let cache_index = Arc::clone(&cache_index);
-        let upgradable_packages = upgradable_packages.clone();
-        let package_index = Arc::clone(&package_index);
-        let open_packages = open_packages.clone();
-        let commit_status_provider =
-            fuchsia_component::client::connect_to_protocol::<CommitStatusProviderMarker>()
-                .context("while connecting to commit status provider")?;
-
+        let gc_service = Arc::clone(&gc_service);
         let () = svc_dir
             .add_entry(
                 fidl_fuchsia_pkg_garbagecollector::ManagerMarker::PROTOCOL_NAME,
                 vfs::service::host(
                     move |stream: fidl_fuchsia_pkg_garbagecollector::ManagerRequestStream| {
-                        gc_service::serve(
-                            blobfs.clone(),
-                            Arc::clone(&base_index),
-                            Arc::clone(&cache_index),
-                            upgradable_packages.clone(),
-                            Arc::clone(&package_index),
-                            open_packages.clone(),
-                            commit_status_provider.clone(),
-                            stream,
+                        gc_service::serve(Arc::clone(&gc_service), stream).unwrap_or_else(
+                            |e: anyhow::Error| {
+                                error!("serving fuchsia.pkg.garbagecollector/Manager: {e:#}")
+                            },
                         )
-                        .unwrap_or_else(|e: anyhow::Error| {
-                            error!("serving fuchsia.pkg.garbagecollector/Manager: {e:#}")
-                        })
                     },
                 ),
             )
             .context("adding fuchsia.pkg.garbagecollector/Manager to /svc")?;
     }
+    // A negative value for post_commit_gc_earliest_boot_seconds disables post-commit garbage
+    // collection. A non-negative value sets the earliest time on the boot timeline (starting at 0)
+    // at which post-commit garbage collection will run after the system is committed during this
+    // boot.
+    let post_commit_gc_earliest_time = u32::try_from(post_commit_gc_earliest_boot_seconds)
+        .ok()
+        .map(|s| zx::BootInstant::ZERO + zx::BootDuration::from_seconds(s.into()));
+    let post_commit_gc_inspect = Arc::new(inspector.root().create_string(
+        "post_commit_gc",
+        if post_commit_gc_earliest_time.is_some() { "waiting for commit" } else { "disabled" },
+    ));
+    let post_commit_gc_task = post_commit_gc_earliest_time.map(|earliest_time| {
+        Task::spawn(
+            gc_service::gc_after_commit(
+                Arc::clone(&gc_service),
+                earliest_time,
+                Arc::clone(&post_commit_gc_inspect),
+            )
+            .unwrap_or_else(|e: anyhow::Error| {
+                error!("performing post-commit garbage collection: {e:#}")
+            }),
+        )
+    });
     let base_package_resolver = base_package_resolver::Resolver::new(
         Arc::clone(&base_index),
         authenticator.clone(),
@@ -516,8 +526,7 @@ async fn main_inner() -> Result<(), Error> {
             package_fetcher.clone(),
             authenticator.clone(),
             root_dir_factory.clone(),
-            package_index.clone(),
-            blobfs.clone(),
+            Arc::clone(&package_index),
             scope.clone(),
             inspector.root().create_child("fuchsia.pkg.PackageResolver-ota"),
         );
@@ -534,7 +543,7 @@ async fn main_inner() -> Result<(), Error> {
     }
     let full_package_resolver = full_package_resolver::Resolver::new(
         Arc::clone(&base_package_resolver),
-        upgradable_packages,
+        Arc::clone(&package_index),
         tuf_authority,
         cache_index,
         package_fetcher,
@@ -633,6 +642,8 @@ async fn main_inner() -> Result<(), Error> {
         ServerEnd::new(handle.into()),
     );
     let () = scope.wait().await;
+    drop(post_commit_gc_task);
+    drop(post_commit_gc_inspect);
     let () = blob_fetcher_fut.await;
     let () = package_fetcher_fut.await;
     let () = cobalt_fut.await;

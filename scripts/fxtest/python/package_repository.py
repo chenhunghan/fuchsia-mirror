@@ -29,7 +29,7 @@ class PackageRepository:
     @classmethod
     def from_env(
         cls, exec_env: environment.ExecutionEnvironment
-    ) -> "PackageRepository":
+    ) -> PackageRepository:
         """Create a package repository wrapper from an environment.
 
         Args:
@@ -73,7 +73,7 @@ class PackageRepository:
     @functools.lru_cache()
     def from_env_cached(
         cls, exec_env: environment.ExecutionEnvironment
-    ) -> "PackageRepository":
+    ) -> PackageRepository:
         """Create a package repository wrapper from an environment, reusing previous results if present.
 
         Args:

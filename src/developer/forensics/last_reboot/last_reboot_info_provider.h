@@ -5,22 +5,22 @@
 #ifndef SRC_DEVELOPER_FORENSICS_LAST_REBOOT_LAST_REBOOT_INFO_PROVIDER_H_
 #define SRC_DEVELOPER_FORENSICS_LAST_REBOOT_LAST_REBOOT_INFO_PROVIDER_H_
 
-#include <fuchsia/feedback/cpp/fidl.h>
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
 
 #include "src/developer/forensics/feedback/reboot_log/final_shutdown_info.h"
 
 namespace forensics {
 namespace last_reboot {
 
-class LastRebootInfoProvider : public fuchsia::feedback::LastRebootInfoProvider {
+class LastRebootInfoProvider : public fidl::Server<fuchsia_feedback::LastRebootInfoProvider> {
  public:
   explicit LastRebootInfoProvider(const feedback::FinalShutdownInfo& final_shutdown_info);
 
-  // |fuchsia::feedback::LastRebootInfoProvider|
-  void Get(GetCallback callback) override;
+  // |fidl::Server<fuchsia_feedback::LastRebootInfoProvider>|
+  void Get(GetCompleter::Sync& completer) override;
 
  private:
-  fuchsia::feedback::LastReboot last_reboot_;
+  fuchsia_feedback::LastReboot last_reboot_;
 };
 
 }  // namespace last_reboot

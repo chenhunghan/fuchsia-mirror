@@ -57,6 +57,7 @@ DEFAULT_CATEGORIES: list[str] = [
     "starnix",
     "starnix:binder",
     "starnix:pager",
+    "starnix:syscalls",
     "storage",
     "system_metrics",
     "view",

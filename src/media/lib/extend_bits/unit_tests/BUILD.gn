@@ -27,12 +27,13 @@
 
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
-executable("extend_bits_tests") {
-  testonly = true
+cc_test_executable("extend_bits_tests") {
   sources = [ "extend_bits_tests.cc" ]
   deps = [
     "//src/lib/fxl/test:gtest_main",
     "//src/media/lib/extend_bits",
     "//third_party/googletest:gtest",
   ]
+  testonly = true
+  emit_tool_path = false
 }

@@ -4,6 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+#include <lib/object-constants.h>
 #include <stddef.h>
 
 #include <new>
@@ -16,32 +17,12 @@
 
 namespace hypervisor {
 
-using PortPacketArena = fbl::TypedArena<PortPacket, Mutex>;
-
-// Base class providing the C++ PortAllocator vtable for Rust's BlockingPortAllocator.
-class RustPortAllocator final : public PortAllocator {
- public:
-  RustPortAllocator() = default;
-  ~RustPortAllocator() override = default;
-  PortPacket* Alloc() override;
-  void Free(PortPacket* port_packet) override;
-};
-
-static_assert(sizeof(RustPortAllocator) == 8);
-static_assert(alignof(RustPortAllocator) == 8);
-
-constexpr size_t kPortPacketArenaSize =
-    (kSchedulerLockSpinTracingEnabled || kLockNameTracingEnabled) ? 280 : 272;
 static_assert(sizeof(PortPacketArena) == kPortPacketArenaSize);
-static_assert(alignof(PortPacketArena) == 8);
+static_assert(alignof(PortPacketArena) == kPortPacketArenaAlign);
 
 }  // namespace hypervisor
 
 extern "C" {
-
-PortPacket* rust_blocking_port_allocator_alloc(hypervisor::RustPortAllocator* allocator);
-void rust_blocking_port_allocator_free(hypervisor::RustPortAllocator* allocator,
-                                       PortPacket* port_packet);
 
 zx_status_t rust_trap_queue(const hypervisor::Trap* trap, const zx_port_packet_t* packet,
                             hypervisor::StateInvalidator* invalidator);
@@ -63,12 +44,6 @@ FFI_ALWAYS_INLINE void cpp_state_invalidator_invalidate(hypervisor::StateInvalid
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_rust_port_allocator_init(
-    ffi::Uninitialized<hypervisor::RustPortAllocator>* allocator) {
-  allocator->Initialize();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE void cpp_port_packet_arena_init(
     ffi::Uninitialized<hypervisor::PortPacketArena>* arena) {
   arena->Initialize();
@@ -76,41 +51,34 @@ FFI_ALWAYS_INLINE void cpp_port_packet_arena_init(
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE void cpp_port_packet_arena_destroy(hypervisor::PortPacketArena* arena) {
-  arena->~TypedArena();
+  arena->~PortPacketArena();
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE zx_status_t cpp_port_packet_arena_init_pool(hypervisor::PortPacketArena* arena,
-                                                              const char* name, size_t max_count) {
-  return arena->Init(name, max_count);
+                                                              const char* name, size_t ob_size,
+                                                              size_t max_count) {
+  return arena->Init(name, ob_size, max_count);
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE PortPacket* cpp_port_packet_arena_new(hypervisor::PortPacketArena* arena,
-                                                        const void* handle,
-                                                        PortAllocator* allocator) {
-  return arena->New(handle, allocator);
+FFI_ALWAYS_INLINE void* cpp_port_packet_arena_alloc(hypervisor::PortPacketArena* arena) {
+  return arena->Alloc();
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_port_packet_arena_delete(hypervisor::PortPacketArena* arena,
-                                                    PortPacket* port_packet) {
-  arena->Delete(port_packet);
+FFI_ALWAYS_INLINE void cpp_port_packet_arena_free(hypervisor::PortPacketArena* arena,
+                                                  void* port_packet) {
+  arena->Free(port_packet);
 }
 
 }  // extern "C"
 
 namespace hypervisor {
 
-PortPacket* RustPortAllocator::Alloc() { return rust_blocking_port_allocator_alloc(this); }
-
-void RustPortAllocator::Free(PortPacket* port_packet) {
-  rust_blocking_port_allocator_free(this, port_packet);
-}
-
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE zx::result<> Trap::Queue(const zx_port_packet_t& packet,
-                                           StateInvalidator* invalidator) {
+                                           StateInvalidator* invalidator) const {
   return zx::make_result(rust_trap_queue(this, &packet, invalidator));
 }
 
@@ -136,7 +104,7 @@ FFI_ALWAYS_INLINE zx::result<> TrapMap::InsertTrap(uint32_t kind, zx_gpaddr_t ad
       rust_trap_map_insert_trap(this, kind, addr, len, fbl::ExportToRawPtr(&port), key));
 }
 
-zx::result<Trap*> TrapMap::FindTrap(uint32_t kind, zx_gpaddr_t addr) {
+zx::result<Trap*> TrapMap::FindTrap(uint32_t kind, zx_gpaddr_t addr) const {
   Trap* out = nullptr;
   zx_status_t status = rust_trap_map_find_trap(this, kind, addr, &out);
   if (status != ZX_OK) {

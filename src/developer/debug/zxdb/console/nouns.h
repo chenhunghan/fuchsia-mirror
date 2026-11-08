@@ -30,6 +30,7 @@ enum class Noun {
   kSymServer,
   kThread,
   kFilter,
+  kTracepoint,
 
   // Adding a new one? Add to GetNouns().
   kLast  // Not a real noun, keep last.

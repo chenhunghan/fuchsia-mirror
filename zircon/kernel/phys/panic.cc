@@ -10,11 +10,10 @@
 
 #include <__verbose_abort>
 
-#include <phys/main.h>
-#include <phys/stack.h>
+#include <phys/log/log.h>
+#include <phys/runtime/main.h>
+#include <phys/runtime/stack.h>
 #include <phys/symbolize.h>
-
-#include "log.h"
 
 namespace {
 

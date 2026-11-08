@@ -6,14 +6,12 @@
 """Unit tests for compute_content_hash.py"""
 
 import os
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(__file__))
-import compute_content_hash as cch
-from git_test_utils import git_cmd, git_init
+from build.bazel.scripts import compute_content_hash as cch
+from build.bazel.scripts.git_test_utils import git_cmd, git_init
 
 
 def _setup_first_git_dir(git_dir: Path) -> tuple[str, str]:
@@ -55,7 +53,9 @@ def _setup_second_git_dir(git_dir: Path, submodule_path: Path) -> str:
 class ComputeContentHashTest(unittest.TestCase):
     def setUp(self) -> None:
         self._td = tempfile.TemporaryDirectory()
-        self._dir = Path(self._td.name)
+        # Resolve the directory so that symlinks in $TMPDIR do not affect
+        # the expected input paths of symlink chains.
+        self._dir = Path(self._td.name).resolve()
         self.datadir = self._dir / "data"
         self.datadir.mkdir(parents=True)
         (self.datadir / "README.txt").write_text("Example input file.\n")
@@ -93,6 +93,73 @@ class ComputeContentHashTest(unittest.TestCase):
         fstate = cch.FileState()
         descriptor = fstate.process_source_path(self.datadir / "data.link")
         self.assertEqual(descriptor, "Ssubdir/data")
+
+    def test_chained_symlink_content_hash(self) -> None:
+        chained_link = self.datadir / "chained.link"
+        chained_link.symlink_to("data.link")
+
+        fstate = cch.FileState()
+        descriptor = fstate.process_source_path(chained_link)
+        self.assertEqual(descriptor, "Sdata.link->subdir/data")
+        self.assertEqual(
+            fstate.get_input_file_paths(),
+            {chained_link, self.datadir / "data.link"},
+        )
+
+    def test_chained_symlink_relative_path(self) -> None:
+        # Relative source paths (e.g. rebased on the build directory) must
+        # produce relative input paths for the intermediate links too.
+        chained_link = self.datadir / "chained.link"
+        chained_link.symlink_to("data.link")
+
+        cwd = os.getcwd()
+        os.chdir(self._dir)
+        try:
+            fstate = cch.FileState()
+            descriptor = fstate.process_source_path(Path("data/chained.link"))
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(descriptor, "Sdata.link->subdir/data")
+        self.assertEqual(
+            fstate.get_input_file_paths(),
+            {Path("data/chained.link"), Path("data/data.link")},
+        )
+
+    def test_symlink_through_symlinked_directory(self) -> None:
+        # Relative link targets containing '..' must be applied to the real
+        # directory containing the link, not to the lexical path used to
+        # reach it through a symlinked directory.
+        real_dir = self.datadir / "a" / "real"
+        real_dir.mkdir(parents=True)
+        (self.datadir / "a" / "sibling.txt").write_text("real")
+        (self.datadir / "sibling.txt").write_text("decoy")
+        (real_dir / "link2").symlink_to("../sibling.txt")
+        (real_dir / "link1").symlink_to("link2")
+        (self.datadir / "dir_sym").symlink_to("a/real")
+
+        fstate = cch.FileState()
+        descriptor = fstate.process_source_path(
+            self.datadir / "dir_sym" / "link1"
+        )
+        self.assertEqual(descriptor, "Slink2->../sibling.txt")
+        self.assertEqual(
+            fstate.get_input_file_paths(),
+            {self.datadir / "dir_sym" / "link1", real_dir / "link2"},
+        )
+
+    def test_absolute_symlink_content_hash(self) -> None:
+        absolute_link = self.datadir / "absolute.link"
+        absolute_link.symlink_to(self.datadir / "data.link")
+
+        fstate = cch.FileState()
+        descriptor = fstate.process_source_path(absolute_link)
+        self.assertEqual(
+            descriptor, f"S{self.datadir / 'data.link'}->subdir/data"
+        )
+        self.assertEqual(
+            fstate.get_input_file_paths(),
+            {absolute_link, self.datadir / "data.link"},
+        )
 
     def test_directory_content_hash(self) -> None:
         fstate = cch.FileState()

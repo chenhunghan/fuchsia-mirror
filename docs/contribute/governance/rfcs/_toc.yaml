@@ -592,3 +592,6 @@ toc:
     path: /docs/contribute/governance/rfcs/0286_restricting_zx.status_in_fidl_to_non-zero_values.md
   - title: "RFC-0287: Configuration-Driven Driver Architecture via DML"
     path: /docs/contribute/governance/rfcs/0287_config_with_dml.md
+  - title: "RFC-0288: git clone fuchsia"
+    path: /docs/contribute/governance/rfcs/0288_git_clone_fuchsia.md
+

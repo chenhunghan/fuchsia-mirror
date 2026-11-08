@@ -4,14 +4,14 @@
 
 use bitfield::bitfield;
 
-use crate::frame::error::FrameParseError;
-use crate::frame::FrameTypeMarker;
 use crate::DLCI;
+use crate::frame::FrameTypeMarker;
+use crate::frame::error::FrameParseError;
 
 /// The Address field is the first byte in the frame. See GSM 7.10 Section 5.2.1.2.
 pub(crate) const FRAME_ADDRESS_IDX: usize = 0;
 bitfield! {
-    pub struct AddressField(u8);
+    pub struct AddressField(pub u8);
     impl Debug;
     pub bool, ea_bit, set_ea_bit: 0;
     pub bool, cr_bit, set_cr_bit: 1;
@@ -28,7 +28,7 @@ impl AddressField {
 /// The Control field is the second byte in the frame. See GSM 7.10 Section 5.2.1.3.
 pub(crate) const FRAME_CONTROL_IDX: usize = 1;
 bitfield! {
-    pub struct ControlField(u8);
+    pub struct ControlField(pub u8);
     impl Debug;
     pub bool, poll_final, set_poll_final: 4;
     pub u8, frame_type_raw, set_frame_type: 7, 0;
@@ -53,7 +53,7 @@ pub(crate) const FRAME_INFORMATION_IDX: usize = 2;
 pub(crate) const INFORMATION_SECOND_OCTET_SHIFT: usize = 7;
 
 bitfield! {
-    pub struct InformationField(u8);
+    pub struct InformationField(pub u8);
     impl Debug;
     pub bool, ea_bit, set_ea_bit: 0;
     pub u8, length, set_length_inner: 7, 1;

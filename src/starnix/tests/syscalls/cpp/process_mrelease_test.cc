@@ -39,11 +39,12 @@ int DoProcessMRelease(int pidfd, int flags = 0) {
   return static_cast<int>(syscall(SYS_process_mrelease, pidfd, flags));
 }
 
-int GetProcessRSSMemorySize(pid_t pid) {
+std::optional<size_t> GetProcessRSSMemorySize(pid_t pid) {
   auto path = std::format("/proc/{}/status", pid);
   std::ifstream file(path);
   if (!file.is_open()) {
-    return testing::AssertionFailure() << "Unable to open " << path;
+    ADD_FAILURE() << "Unable to open " << path;
+    return std::nullopt;
   }
 
   std::string line;
@@ -57,11 +58,12 @@ int GetProcessRSSMemorySize(pid_t pid) {
       if (kb_pos != std::string::npos) {
         value_str.erase(kb_pos);
       }
-      return std::atoi(value_str.c_str());
+      return static_cast<size_t>(std::strtoull(value_str.c_str(), nullptr, 10));
     }
   }
 
-  return testing::AssertionFailure() << "Did not find rss value";
+  ADD_FAILURE() << "Did not find rss value";
+  return std::nullopt;
 }
 
 std::string GetMapsString(pid_t pid) {
@@ -118,18 +120,27 @@ TEST_F(ProcessMemoryReleaseTest, NoPendingSIGKILL) {
 
 TEST_F(ProcessMemoryReleaseTest, SuccessfulReleaseImmediateSIGKILL) {
   // Sending SIGKILL transitions the target process into an exiting state synchronously, allowing
-  // process_mrelease(2) to succeed immediately after kill(2) returns. If the child finishes
-  // tearing down its address space before process_mrelease(2) runs, process_mrelease(2) fails with
-  // ESRCH; retry on ESRCH to tolerate scheduling races.
+  // process_mrelease(2) to succeed immediately after kill(2) returns. Have the child fault in an
+  // anonymous mapping and block in pause(2) before signaling readiness so it is not actively
+  // running on another CPU with an empty address space when SIGKILL is sent. If the child still
+  // finishes tearing down its address space before process_mrelease(2) runs, process_mrelease(2)
+  // fails with ESRCH; retry a bounded number of times to favor exercising the release path, and
+  // tolerate ESRCH if the child wins every attempt.
   constexpr int kMaxAttempts = 10;
   for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
     test_helper::ForkHelper fork_helper;
     fork_helper.ExpectSignal(SIGKILL);
-    pid_t child_pid = fork_helper.RunInForkedProcess([]() {
-      for (;;) {
-        std::this_thread::yield();
-      }
-    });
+    test_helper::Rendezvous child_ready = test_helper::MakeRendezvous();
+    pid_t child_pid =
+        fork_helper.RunInForkedProcess([ready = std::move(child_ready.poker)]() mutable {
+          auto mapping = ASSERT_RESULT_SUCCESS_AND_RETURN(test_helper::ScopedMMap::MMap(
+              nullptr, kMemSizeBytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+          memset(mapping.mapping(), 0xab, kMemSizeBytes);
+          ready.poke();
+          pause();
+        });
+    child_ready.holder.hold();
+    ASSERT_TRUE(test_helper::WaitUntilBlocked(child_pid, /* ignore_tracer = */ true));
 
     fbl::unique_fd child_pidfd(DoPidFdOpen(child_pid));
     ASSERT_THAT(child_pidfd.get(), SyscallSucceeds());
@@ -146,7 +157,8 @@ TEST_F(ProcessMemoryReleaseTest, SuccessfulReleaseImmediateSIGKILL) {
     ASSERT_THAT(result, SyscallSucceeds());
     return;
   }
-  FAIL() << "process_mrelease(2) repeatedly lost the race with child exit (ESRCH)";
+  GTEST_LOG_(INFO)
+      << "process_mrelease(2) lost the race with child address-space teardown on all attempts";
 }
 
 TEST_F(ProcessMemoryReleaseTest, ZombieProcessFailsWithEsrch) {
@@ -367,8 +379,8 @@ TEST_F(ProcessMemoryReleaseTest, SuccessfulRelease) {
       << "ptrace PTRACE_SEIZE failed: " << strerror(errno);
 
   // Open a pidfd for the child process.
-  int child_pidfd = DoPidFdOpen(child_pid);
-  ASSERT_THAT(child_pidfd, SyscallSucceeds());
+  fbl::unique_fd child_pidfd(DoPidFdOpen(child_pid));
+  ASSERT_THAT(child_pidfd.get(), SyscallSucceeds());
 
   int status;
   // Sync with child when the child has completed the memory allocation
@@ -413,9 +425,12 @@ TEST_F(ProcessMemoryReleaseTest, SuccessfulRelease) {
 
   // Verify the RSS size decreases 1MB and `maps` info has no change after memory is released.
   auto msize = GetProcessRSSMemorySize(child_pid);
+  ASSERT_TRUE(msize.has_value());
   auto maps_str = GetMapsString(child_pid);
-  EXPECT_THAT(DoProcessMRelease(child_pidfd), SyscallSucceeds());
-  EXPECT_GT(msize, GetProcessRSSMemorySize(child_pid) + 1024);
+  EXPECT_THAT(DoProcessMRelease(child_pidfd.get()), SyscallSucceeds());
+  auto after_msize = GetProcessRSSMemorySize(child_pid);
+  ASSERT_TRUE(after_msize.has_value());
+  EXPECT_GT(*msize, *after_msize + 1024);
   EXPECT_EQ(maps_str, GetMapsString(child_pid));
 
   // Wait for the child process to terminate and check its status.

@@ -1,0 +1,67 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+"""Tests for the platform Bazel C++ rules and macros."""
+
+load(
+    "//build/bazel/rules:zx_library.bzl",
+    "cc_shared_library_zx",
+    "cc_source_library_zx",
+    "cc_static_library_zx",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+# Each library uses `deps`, including a ":headers" target that the macros
+# rewrite, and `implementation_deps`.
+
+cc_shared_library_zx(
+    name = "test_shared_library_zx",
+    srcs = ["zx_lib.cc"],
+    hdrs = ["include/zx_lib/public.h"],
+    implementation_deps = ["//sdk/lib/stdcompat"],
+    includes = ["include"],
+    deps = ["//sdk/lib/fit:headers"],
+)
+
+# A shared library that links the C++ standard library statically.
+cc_shared_library_zx(
+    name = "test_shared_library_static_libcxx_zx",
+    srcs = ["zx_lib.cc"],
+    hdrs = ["include/zx_lib/public.h"],
+    build_flags = ["//build/config/fuchsia:static_cpp_standard_library"],
+    implementation_deps = ["//sdk/lib/stdcompat"],
+    includes = ["include"],
+    deps = ["//sdk/lib/fit:headers"],
+)
+
+cc_source_library_zx(
+    name = "test_source_library_zx",
+    srcs = ["zx_lib.cc"],
+    hdrs = ["include/zx_lib/public.h"],
+    implementation_deps = ["//sdk/lib/stdcompat"],
+    includes = ["include"],
+    deps = ["//sdk/lib/fit:headers"],
+)
+
+cc_static_library_zx(
+    name = "test_static_library_zx",
+    srcs = ["zx_lib.cc"],
+    hdrs = ["include/zx_lib/public.h"],
+    implementation_deps = ["//sdk/lib/stdcompat"],
+    includes = ["include"],
+    deps = ["//sdk/lib/fit:headers"],
+)
+
+filegroup(
+    name = "build_only_tests",
+    testonly = True,
+    srcs = [
+        ":test_shared_library_static_libcxx_zx",
+        ":test_shared_library_zx",
+        ":test_source_library_zx",
+        ":test_static_library_zx",
+    ],
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
+)

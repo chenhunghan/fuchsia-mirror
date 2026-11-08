@@ -1,0 +1,75 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# test-parity-allow-manual: the bare binary only runs inside its custom-manifest
+# component; the test runs through the :haptics_system_test fx_test.
+rustc_test(
+    name = "haptics_system_test_bin",
+    srcs = ["haptics_system_test.rs"],
+    crate_root = "haptics_system_test.rs",
+    edition = "2024",
+    # Only runs inside its packaged component (fx_test), which routes the
+    # haptics service to it.
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.haptics:fuchsia.hardware.haptics_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/lib/test_util",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "haptics_system_test_packaged_bin",
+    testonly = True,
+    binary = ":haptics_system_test_bin",
+    binary_name = "haptics_system_test_bin",
+)
+
+fx_component_manifest(
+    name = "haptics_system_test_manifest",
+    component_name = "haptics_system_test",
+    includes = [
+        "//sdk/lib/sys/testing:rust_test_runner.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/haptics_system_test.cml",
+)
+
+fx_test_component(
+    name = "haptics_system_test_component",
+    compiled_manifest = ":haptics_system_test_manifest",
+    test_type = "system",
+    deps = [":haptics_system_test_packaged_bin"],
+)
+
+fx_package(
+    name = "haptics_system_test_package",
+    package_name = "haptics_system_test",
+    test_components = [":haptics_system_test_component"],
+)
+
+fx_test(
+    name = "haptics_system_test",
+    package = ":haptics_system_test_package",
+    visibility = ["//src/media:__pkg__"],
+)

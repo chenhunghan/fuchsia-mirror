@@ -24,7 +24,7 @@ func init() {
 					"field_to_set": 1,
 				},
 				// Rust is removed from the allowlist because the benchmarks (not just this case) are timing out.
-				Allowlist: []config.Binding{config.LLCPP, config.HLCPP, config.CPP, config.Go, config.Reference, config.Dart},
+				Allowlist: []config.Binding{config.LLCPP, config.HLCPP, config.CPP, config.Reference, config.Dart},
 			},
 			{
 				Name:    "Table/SingleSet/1_of_16",
@@ -34,7 +34,7 @@ func init() {
 					"field_to_set": 1,
 				},
 				// Rust is removed from the allowlist because the benchmarks (not just this case) are timing out.
-				Allowlist: []config.Binding{config.LLCPP, config.HLCPP, config.CPP, config.Go, config.Reference, config.Dart},
+				Allowlist: []config.Binding{config.LLCPP, config.HLCPP, config.CPP, config.Reference, config.Dart},
 			},
 			{
 				Name:    "Table/SingleSet/1_of_63",
@@ -43,7 +43,7 @@ func init() {
 					"size":         63,
 					"field_to_set": 1,
 				},
-				Allowlist: []config.Binding{config.LLCPP, config.HLCPP, config.CPP, config.Rust, config.Go, config.Reference, config.Dart},
+				Allowlist: []config.Binding{config.LLCPP, config.HLCPP, config.CPP, config.Rust, config.Reference, config.Dart},
 			},
 			{
 				Name:    "Table/SingleSet/16_of_16",
@@ -53,7 +53,7 @@ func init() {
 					"field_to_set": 16,
 				},
 				// Rust is removed from the allowlist because the benchmarks (not just this case) are timing out.
-				Allowlist: []config.Binding{config.LLCPP, config.HLCPP, config.CPP, config.Go, config.Reference, config.Dart},
+				Allowlist: []config.Binding{config.LLCPP, config.HLCPP, config.CPP, config.Reference, config.Dart},
 			},
 			{
 				Name:    "Table/SingleSet/16_of_63",
@@ -62,7 +62,7 @@ func init() {
 					"size":         63,
 					"field_to_set": 16,
 				},
-				Allowlist: []config.Binding{config.LLCPP, config.HLCPP, config.CPP, config.Rust, config.Go, config.Reference, config.Dart},
+				Allowlist: []config.Binding{config.LLCPP, config.HLCPP, config.CPP, config.Rust, config.Reference, config.Dart},
 			},
 			{
 				Name:    "Table/SingleSet/63_of_63",
@@ -71,7 +71,7 @@ func init() {
 					"size":         63,
 					"field_to_set": 63,
 				},
-				Allowlist: []config.Binding{config.LLCPP, config.HLCPP, config.CPP, config.Rust, config.Go, config.Reference, config.Dart},
+				Allowlist: []config.Binding{config.LLCPP, config.HLCPP, config.CPP, config.Rust, config.Reference, config.Dart},
 			},
 		},
 	})

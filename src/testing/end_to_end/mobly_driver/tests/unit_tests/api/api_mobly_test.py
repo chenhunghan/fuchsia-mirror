@@ -386,11 +386,13 @@ class ApiMoblyTest(unittest.TestCase):
                                                     1,
                                                     2,
                                                     3,
+                                                    4,
                                                 ],
                                                 "attenuator_ports_wifi_5g": [
                                                     1,
                                                     2,
                                                     3,
+                                                    4,
                                                 ],
                                             }
                                         ],

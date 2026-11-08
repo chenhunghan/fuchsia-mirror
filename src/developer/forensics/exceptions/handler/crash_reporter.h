@@ -5,8 +5,7 @@
 #define SRC_DEVELOPER_FORENSICS_EXCEPTIONS_HANDLER_CRASH_REPORTER_H_
 
 #include <fidl/fuchsia.driver.crash/cpp/fidl.h>
-#include <fuchsia/exception/cpp/fidl.h>
-#include <fuchsia/exception/internal/cpp/fidl.h>
+#include <fidl/fuchsia.exception.internal/cpp/fidl.h>
 #include <lib/async/cpp/executor.h>
 #include <lib/fit/function.h>
 #include <lib/fpromise/promise.h>
@@ -24,15 +23,14 @@ namespace exceptions {
 namespace handler {
 
 // Handles asynchronously building and filing a crash report for a given zx::exception.
-class CrashReporter : public fuchsia::exception::internal::CrashReporter {
+class CrashReporter : public fidl::Server<fuchsia_exception_internal::CrashReporter> {
  public:
   CrashReporter(async_dispatcher_t* dispatcher, std::shared_ptr<sys::ServiceDirectory> services,
                 zx::duration component_lookup_timeout, std::unique_ptr<WakeLeaseBase> wake_lease,
                 fidl::ClientEnd<fuchsia_driver_crash::CrashIntrospect> driver_crash_introspect);
 
-  // |fuchsia::exception::internal::CrashReporter|
-  virtual void Send(zx::exception exception, zx::process crashed_proces, zx::thread crashed_thread,
-                    SendCallback callback) override;
+  // |fuchsia_exception_internal::CrashReporter|
+  void Send(SendRequest& request, SendCompleter::Sync& completer) override;
 
  private:
   async_dispatcher_t* dispatcher_;

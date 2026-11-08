@@ -8,7 +8,6 @@ import fidl_fuchsia_wlan_common as fidl_common
 import fidl_fuchsia_wlan_device_service as fidl_device_svc
 import fuchsia_wlan_base_test
 import honeydew.affordances.connectivity.wlan.core as wlan_core
-from antlion import utils
 from honeydew.affordances.connectivity.netstack.types import PortClass
 from legacy_access_point.access_point import AccessPoint, setup_ap
 from legacy_access_point.ap_lib.hostapd_constants import (
@@ -88,9 +87,7 @@ class FirmwarePowerModesTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
                 ),
             )
         else:
-            raise signals.TestAbortClass(
-                "No access point configured for this test."
-            )
+            raise signals.TestError("No access point configured for this test.")
 
         ps_resp = await self.phy.device_monitor.set_power_save_mode(
             req=fidl_device_svc.SetPowerSaveModeRequest(
@@ -102,7 +99,12 @@ class FirmwarePowerModesTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
             ps_resp.status == 0
         ), f"SetPowerSaveMode failed with status {ps_resp.status}"
 
-        await iface.scan_and_connect(ssid=ssid)
+        target_channel = (
+            DEFAULT_2G_CHANNEL.number
+            if self.openwrt_ap
+            else AP_DEFAULT_CHANNEL_2G
+        )
+        await iface.scan_and_connect(ssid=ssid, channels=[target_channel])
 
         netstack_iface = await self.dut.netstack.wait_for_interface(
             PortClass.WLAN_CLIENT
@@ -118,13 +120,9 @@ class FirmwarePowerModesTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
             )
         elif isinstance(self.access_point, AccessPoint):
             ap_test_interface = self.access_point.wlan_2g
-            ap_address = utils.get_addr(
-                self.access_point.ssh, ap_test_interface
-            )
+            ap_address = self.access_point.get_addr(ap_test_interface)
         else:
-            raise signals.TestAbortClass(
-                "No access point configured for this test."
-            )
+            raise signals.TestError("No access point configured for this test.")
 
         async with odpm_utils.record_odpm_metrics(
             self.dut.tracing,

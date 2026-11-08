@@ -12,16 +12,16 @@ group("tests") {
 }
 
 # Kept in GN because `httpdate-hyper-tests` packages
-# `//src/connectivity/network/dns:component` and
-# `//src/connectivity/network/netstack3:component-for-tests`, which have no
+# `//src/connectivity/network/dns:component` and subpackages
+# `//src/connectivity/network/netstack3:package-for-tests`, which have no
 # Bazel build yet.
 fuchsia_unittest_package("httpdate-hyper-tests") {
   manifest = "meta/httpdate-hyper-lib-test.cml"
   deps = [
     ":httpdate-hyper_test",
     "//src/connectivity/network/dns:component",
-    "//src/connectivity/network/netstack3:component-for-tests",
   ]
+  subpackages = [ "//src/connectivity/network/netstack3:package-for-tests" ]
 
   # This test depends on root ssl certificate which is a system capability.
   test_type = "system"
@@ -85,6 +85,7 @@ rustc_library("httpdate-hyper") {
     "//third_party/rust_crates:thiserror",
   ]
 }
+
 rustc_test("httpdate-hyper_test") {
   sources = [ "src/lib.rs" ]
   inputs = [

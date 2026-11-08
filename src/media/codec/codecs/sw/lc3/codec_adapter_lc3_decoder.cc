@@ -8,6 +8,7 @@
 #include <lib/media/codec_impl/log.h>
 #include <netinet/in.h>
 
+#include <bit>
 #include <cstring>
 #include <unordered_set>
 
@@ -111,7 +112,7 @@ std::optional<int> GetFrameDurationUs(const std::vector<uint8_t>& raw_bytes) {
 // Assigned Numbers section 6.12.5.3 Audio_Channel_Allocation.
 // Get the channel allocation from the raw LTV parameter value.
 // If any of the channels is not one of the acceptable values, return nullopt.
-std::optional<std::vector<fuchsia::media::AudioChannelId>> GetAudioChannelMap(
+std::optional<std::vector<fuchsia::media::AudioChannelId2>> GetAudioChannelMap(
     const std::vector<uint8_t>& raw_bytes) {
   if (raw_bytes.size() != 4) {
     LOG(DEBUG, "Invalid Audio_Channel_Allocation LTV length %zu", raw_bytes.size());
@@ -123,64 +124,61 @@ std::optional<std::vector<fuchsia::media::AudioChannelId>> GetAudioChannelMap(
   std::memcpy(&raw_value, raw_bytes.data(), sizeof(raw_value));
   uint32_t value = ntohl(raw_value);
 
-  // Fuchsia media currently supports:
-  // - left front (LF)
-  // - right front (RF)
-  // - center front (CF)
-  // - left surround (LS)
-  // - right surround (RS)
+  // Note: While `AudioChannelId2` supports all 18 standard LC3 channel locations from Bluetooth
+  // Assigned Numbers section 6.12.1, this decoder currently accepts the 8 locations below:
+  // - front left (FL)
+  // - front right (FR)
+  // - front center (FC)
   // - low frequency effects (LFE)
-  // - back surround (CS)
-  // - left rear (LR)
-  // - right rear (RR)
-  //
-  // Values from Assigned Numbers section 6.12.1 Audio Location Definitions
-  // that map to the above supported values are acceptable; other values are
-  // not. Note that Assigned Numbers does not have a value that maps to CS.
-  const uint32_t LF_FLAG = 0x00000001;
-  const uint32_t RF_FLAG = 0x00000002;
-  const uint32_t CF_FLAG = 0x00000004;
-  const uint32_t LFE_FLAG = 0x00000008;
-  const uint32_t LR_FLAG = 0x00000010;
-  const uint32_t RR_FLAG = 0x00000020;
-  const uint32_t LS_FLAG = 0x04000000;
-  const uint32_t RS_FLAG = 0x08000000;
+  // - back left (BL)
+  // - back right (BR)
+  // - side left (SL)
+  // - side right (SR)
+  constexpr uint32_t kFlFlag = 0x00000001;
+  constexpr uint32_t kFrFlag = 0x00000002;
+  constexpr uint32_t kFcFlag = 0x00000004;
+  constexpr uint32_t kLfeFlag = 0x00000008;
+  constexpr uint32_t kBlFlag = 0x00000010;
+  constexpr uint32_t kBrFlag = 0x00000020;
+  constexpr uint32_t kSlFlag = 0x04000000;
+  constexpr uint32_t kSrFlag = 0x08000000;
 
-  const uint32_t ACCEPTABLE_MASK =
-      LF_FLAG | RF_FLAG | CF_FLAG | LFE_FLAG | LR_FLAG | RR_FLAG | LS_FLAG | RS_FLAG;
-  if (value == 0 || (value | ACCEPTABLE_MASK) != ACCEPTABLE_MASK) {
+  constexpr uint32_t kAcceptableMask =
+      kFlFlag | kFrFlag | kFcFlag | kLfeFlag | kBlFlag | kBrFlag | kSlFlag | kSrFlag;
+  if (value == 0 || (value | kAcceptableMask) != kAcceptableMask) {
     // If the channel contains channel ID value that's not supported by fuchsia,
     // or if no channels are allocated, we shouldn't process.
     LOG(DEBUG, "Invalid Audio_Channel_Allocation LTV value %u", value);
     return std::nullopt;
   }
 
-  std::vector<fuchsia::media::AudioChannelId> channels;
+  std::vector<fuchsia::media::AudioChannelId2> channels;
+  channels.reserve(std::popcount(value));
   // If present, channels are added in the following order:
-  // LF -> RF -> CF -> LFE -> LR -> RR -> LS -> RS.
-  if ((value & LF_FLAG) == LF_FLAG) {
-    channels.push_back(fuchsia::media::AudioChannelId::LF);
+  // FL -> FR -> FC -> LFE -> BL -> BR -> SL -> SR.
+  if ((value & kFlFlag) == kFlFlag) {
+    channels.push_back(fuchsia::media::AudioChannelId2::FL);
   }
-  if ((value & RF_FLAG) == RF_FLAG) {
-    channels.push_back(fuchsia::media::AudioChannelId::RF);
+  if ((value & kFrFlag) == kFrFlag) {
+    channels.push_back(fuchsia::media::AudioChannelId2::FR);
   }
-  if ((value & CF_FLAG) == CF_FLAG) {
-    channels.push_back(fuchsia::media::AudioChannelId::CF);
+  if ((value & kFcFlag) == kFcFlag) {
+    channels.push_back(fuchsia::media::AudioChannelId2::FC);
   }
-  if ((value & LFE_FLAG) == LFE_FLAG) {
-    channels.push_back(fuchsia::media::AudioChannelId::LFE);
+  if ((value & kLfeFlag) == kLfeFlag) {
+    channels.push_back(fuchsia::media::AudioChannelId2::LFE);
   }
-  if ((value & LR_FLAG) == LR_FLAG) {
-    channels.push_back(fuchsia::media::AudioChannelId::LR);
+  if ((value & kBlFlag) == kBlFlag) {
+    channels.push_back(fuchsia::media::AudioChannelId2::BL);
   }
-  if ((value & RR_FLAG) == RR_FLAG) {
-    channels.push_back(fuchsia::media::AudioChannelId::RR);
+  if ((value & kBrFlag) == kBrFlag) {
+    channels.push_back(fuchsia::media::AudioChannelId2::BR);
   }
-  if ((value & LS_FLAG) == LS_FLAG) {
-    channels.push_back(fuchsia::media::AudioChannelId::LS);
+  if ((value & kSlFlag) == kSlFlag) {
+    channels.push_back(fuchsia::media::AudioChannelId2::SL);
   }
-  if ((value & RS_FLAG) == RS_FLAG) {
-    channels.push_back(fuchsia::media::AudioChannelId::RS);
+  if ((value & kSrFlag) == kSrFlag) {
+    channels.push_back(fuchsia::media::AudioChannelId2::SR);
   }
 
   ZX_DEBUG_ASSERT(channels.size() <= kMaxChannelCount);
@@ -215,26 +213,28 @@ CodecAdapterLc3Decoder::CodecAdapterLc3Decoder(std::mutex& lock,
     : CodecAdapterSWImpl(lock, codec_adapter_events) {}
 
 std::pair<fuchsia::media::FormatDetails, size_t> CodecAdapterLc3Decoder::OutputFormatDetails() {
-  std::lock_guard<std::mutex> lock(lock_);
-  ZX_DEBUG_ASSERT(codec_params_);
-  fuchsia::media::PcmFormat out;
-  out.pcm_mode = fuchsia::media::AudioPcmMode::LINEAR;
+  uint32_t sr_hz = 0;
+  std::vector<fuchsia::media::AudioChannelId2> channels;
+  size_t min_output_buffer_size = 0;
+  {
+    std::lock_guard<std::mutex> lock(lock_);
+    ZX_DEBUG_ASSERT(codec_params_);
+    sr_hz = static_cast<uint32_t>(codec_params_->sr_hz);
+    channels = codec_params_->channels;
+    min_output_buffer_size = MinOutputBufferSize();
+  }
+  fuchsia::media::PcmFormat2 out;
+  out.set_pcm_mode(fuchsia::media::AudioPcmMode2::LINEAR);
   // For simplicity, we always decode the output as 16-bit PCM audio data.
-  out.bits_per_sample = kNumBitsPerPcmSample;
-  out.frames_per_second = static_cast<uint32_t>(codec_params_->sr_hz);
-  out.channel_map = codec_params_->channels;
-
-  fuchsia::media::AudioUncompressedFormat uncompressed;
-  uncompressed.set_pcm(out);
-
-  fuchsia::media::AudioFormat audio_format;
-  audio_format.set_uncompressed(std::move(uncompressed));
+  out.set_bits_per_sample(kNumBitsPerPcmSample);
+  out.set_frames_per_second(sr_hz);
+  out.set_channel_map(std::move(channels));
 
   fuchsia::media::FormatDetails format_details;
   format_details.set_mime_type(kPcmMimeType);
-  format_details.mutable_domain()->set_audio(std::move(audio_format));
+  format_details.set_pcm_format(std::move(out));
 
-  return {std::move(format_details), MinOutputBufferSize()};
+  return {std::move(format_details), min_output_buffer_size};
 }
 
 // Decode one frame of LC3 compressed input bytes across all channels into interleaved PCM samples.
@@ -333,7 +333,7 @@ CodecAdapterLc3Decoder::InputLoopStatus CodecAdapterLc3Decoder::ProcessFormatDet
   int frame_us = 0;
   int sampling_freq = 0;
   int nbytes = 0;
-  std::vector<fuchsia::media::AudioChannelId> channels;
+  std::vector<fuchsia::media::AudioChannelId2> channels;
   std::unordered_set<uint8_t> seen_params;
 
   size_t idx = 0;

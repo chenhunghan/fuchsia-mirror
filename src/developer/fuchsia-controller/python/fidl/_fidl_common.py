@@ -35,11 +35,11 @@ class FidlMeta(ABCMeta):
         bases: tuple[type, ...],
         classdict: dict[str, typing.Any],
         required_class_variables: list[tuple[str, type]] | None = None,
-    ) -> "FidlMeta":
+    ) -> FidlMeta:
         if required_class_variables is None:
             required_class_variables = []
 
-        def _check_required_class_variables(cls: type["FidlMeta"]) -> None:
+        def _check_required_class_variables(cls: type[FidlMeta]) -> None:
             # These class variables are always required.
             if required_class_variables is not None:
                 required_class_variables.extend([("__fidl_kind__", str)])
@@ -61,7 +61,7 @@ class FidlMeta(ABCMeta):
         if "__init_subclass__" in classdict:
             class_defined_init_subclass = classdict["__init_subclass__"]
 
-            def wrapper(cls: type["FidlMeta"]) -> None:
+            def wrapper(cls: type[FidlMeta]) -> None:
                 _check_required_class_variables(cls)
                 class_defined_init_subclass(cls)
 

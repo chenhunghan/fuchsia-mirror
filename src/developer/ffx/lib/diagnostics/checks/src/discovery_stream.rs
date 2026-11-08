@@ -84,7 +84,7 @@ pub(crate) fn build_discovery_stream(
     sources: DiscoverySources,
     notifier_sender: UnboundedSender<NotifierMessage>,
 ) -> Result<TargetStream> {
-    let emu_instance_root: PathBuf =
+    let emu_instance_root: Vec<PathBuf> =
         ctx.get(ffx_config::keys::EMU_INSTANCE_ROOT_DIR).with_user_message(|| {
             format!("unable to get `{}`", ffx_config::keys::EMU_INSTANCE_ROOT_DIR)
         })?;

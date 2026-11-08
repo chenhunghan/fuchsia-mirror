@@ -56,13 +56,13 @@
             interface is documented at
             https://github.com/qemu/qemu/blob/master/qga/qapi-schema.json. }}
         "-qmp-pretty",
-        "unix:{{runtime.instance_directory}}/qmp,server,nowait",
+        "unix:{{#if runtime.qmp_socket}}{{runtime.qmp_socket}}{{else}}{{runtime.instance_directory}}/qmp{{/if}},server,nowait",
 
         {{! The HMP (human monitor protocol) is an interface for issuing
           interactive commands to the emulator. Commands are documented in
           https://qemu-project.gitlab.io/qemu/system/monitor.html. }}
         "-monitor",
-        "unix:{{runtime.instance_directory}}/monitor,server,nowait",
+        "unix:{{#if runtime.monitor_socket}}{{runtime.monitor_socket}}{{else}}{{runtime.instance_directory}}/monitor{{/if}},server,nowait",
 
         {{#if (eq runtime.console "console")}}
             "-chardev",
@@ -73,7 +73,12 @@
             "char0",
         {{else}}
             "-serial",
-            "unix:{{runtime.instance_directory}}/serial,server,nowait,logfile={{host.log}}.serial",
+            "unix:{{#if runtime.console_socket}}{{runtime.console_socket}}{{else}}{{runtime.instance_directory}}/serial{{/if}},server,nowait,logfile={{host.log}}.serial",
+        {{/if}}
+
+        {{#if runtime.serial_socket}}
+            "-serial",
+            "unix:{{runtime.serial_socket}},server,nowait",
         {{/if}}
 
         {{! CPU/machine details go here }}
@@ -205,8 +210,34 @@
                 three devices, AEMU's audio controller, the disk and the pointing device, come
                 before the NIC. }}
             {{#if (eq host.networking "tap")}}
-                "-netdev",
-                "type=tap,ifname=qemu,id=net0,script=no,downscript=no",
+                {{#if host.internet}}
+                    {{! Bridge the TAP interface (for host-to-target IPv6 link-local / mDNS)
+                        and SLiRP user-mode network (for guest outbound IPv4 internet) onto
+                        the single virtio-net-pci NIC via hubid=0, because Starnix/Cuttlefish
+                        product netcfg configs (https://fxbug.dev/419096678) only provision the
+                        primary PCI slot (00:04.0) for FuchsiaNetworkProvider. Set restrict=on
+                        and ipv6=off on user0 so SLiRP blocks direct host/internet access
+                        (only allowing guestfwd rules) and does not emit IPv6 RAs onto TAP. }}
+                    "-netdev",
+                    "type=tap,ifname=qemu,id=tap0,script=no,downscript=no",
+                    "-netdev",
+                    "type=hubport,id=hubport0,hubid=0,netdev=tap0",
+                    "-netdev",
+                    "type=user,id=user0,restrict=on,ipv6=off{{~#each host.guestfwd~}},guestfwd={{this}}{{~/each~}}",
+                    "-netdev",
+                    "type=hubport,id=hubport1,hubid=0,netdev=user0",
+                    {{#if host.netdev_socket}}
+                        "-netdev",
+                        "type=socket,id=netproxy0,connect={{host.netdev_socket}}",
+                        "-netdev",
+                        "type=hubport,id=hubport2,hubid=0,netdev=netproxy0",
+                    {{/if}}
+                    "-netdev",
+                    "type=hubport,id=net0,hubid=0",
+                {{else}}
+                    "-netdev",
+                    "type=tap,ifname=qemu,id=net0,script=no,downscript=no",
+                {{/if}}
                 "-device",
                 {{#if (eq device.cpu.architecture "riscv64")}}
                     "virtio-net-pci,vectors=8,romfile=,netdev=net0,mac={{runtime.mac_address}},addr=0x4",
@@ -218,7 +249,7 @@
                 "-netdev",
                 "type=user,id=net0,restrict=off
                 {{~#each host.port_map~}}
-                    ,hostfwd=tcp::{{this.host}}-:{{this.guest}}
+                    ,hostfwd=tcp::{{#if this.host}}{{this.host}}{{else}}0{{/if}}-:{{this.guest}}
                 {{~/each~}}",
                 "-device",
                 "virtio-net-pci,vectors=8,netdev=net0,mac={{runtime.mac_address}},addr=0x4",
@@ -351,6 +382,13 @@
             "DISPLAY": "{{env "DISPLAY"}}",
         {{/unless}}
         "QEMU_AUDIO_DRV": "none"
+        {{! In headless mode with lavapipe, host GLES composition with ANGLE/swangle }}
+        {{! leaks staging VkDeviceMemory on glTexSubImage2D calls. Setting }}
+        {{! ANDROID_EMU_LAVAPIPE_GL_MODE_SWIFTSHADER=1 forces host GLES to use }}
+        {{! SwiftShader in place while keeping guest Vulkan on Lavapipe. }}
+        {{#if (eq host.gpu "lavapipe")}}
+          ,"ANDROID_EMU_LAVAPIPE_GL_MODE_SWIFTSHADER": "1"
+        {{/if}}
         {{#each runtime.addl_env}}
           ,"{{@key}}" : "{{this}}"
         {{/each}}

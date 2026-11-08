@@ -17,6 +17,8 @@
             // Keep it minimal, describe only what's actually needed.
             // TODO(https://fxbug.dev/42161902): Remove this list.
             protocol: [
+                "fuchsia.kernel.RootJobForInspect",
+                "fuchsia.kernel.Stats",
                 "fuchsia.kernel.VmexResource",
                 "fuchsia.process.Launcher",
                 "fuchsia.scheduler.RoleManager",

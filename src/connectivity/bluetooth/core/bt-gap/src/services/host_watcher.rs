@@ -37,7 +37,7 @@ async fn handler(
         }
         HostWatcherRequest::SetActive { id, responder } => {
             let result =
-                hd.set_active_host(id.into()).map_err(|_| zx::Status::NOT_FOUND.into_raw());
+                hd.set_active_host(id.into()).await.map_err(|_| zx::Status::NOT_FOUND.into_raw());
             responder.send(result).map_err(Error::from)
         }
     }

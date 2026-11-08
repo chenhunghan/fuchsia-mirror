@@ -17,7 +17,7 @@ use super::power_level_controller::{
 use crate::kernel::scheduler;
 use crate::pdev_power::{power_opp_get, power_opp_get_domain_count, power_opp_set};
 
-ksync::declare_singleton_mutex!(InstanceLock);
+crate::ksync_kernel::declare_singleton_mutex!(InstanceLock);
 
 // Serializes posting a power level request to the pdev driver with updating the scheduler's
 // power level bookkeeping for that request.
@@ -36,7 +36,7 @@ ksync::declare_singleton_mutex!(InstanceLock);
 // `power_opp_get` may take under `queue_lock_`), and must never be acquired with any of those
 // held. A single lock is used rather than one per domain because posts are infrequent and
 // domains are few; this can be split per domain if contention is ever observed.
-ksync::declare_singleton_lock!(PostLock, ::ksync::RawSpinlock);
+crate::ksync_kernel::declare_singleton_spinlock!(PostLock);
 
 static INSTANCE: KCell<Option<RefPtr<PDevPowerLevelController>>, InstanceLock> = KCell::new(None);
 

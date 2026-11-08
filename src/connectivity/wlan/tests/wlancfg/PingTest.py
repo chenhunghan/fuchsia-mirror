@@ -17,12 +17,11 @@ from typing import Callable, NamedTuple
 
 import fidl_fuchsia_wlan_policy as f_wlan_policy
 import fuchsia_wlan_base_test
-from antlion import utils
 from honeydew.affordances.connectivity.netstack.types import (
     PingResult,
     PortClass,
 )
-from legacy_access_point.access_point import setup_ap
+from legacy_access_point.access_point import AddrType, setup_ap
 from mobly import asserts, signals, test_runner
 from openwrt_access_point import AddrType as OpenWrtAddrType
 from openwrt_access_point import InterfaceName as OpenWrtInterfaceName
@@ -114,7 +113,7 @@ class PingTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         self.ssid = AccessPointConfig.random_string(10)
 
         if not self.openwrt_ap and not self.access_point:
-            raise signals.TestAbortClass("Requires at least one access point")
+            raise signals.TestError("Requires at least one access point")
 
         await self.dut.wlan_policy.ensure_clean_state()
 
@@ -160,13 +159,13 @@ class PingTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
 
             ap_bridges = self.access_point.interfaces.get_bridge_interface()
             if not ap_bridges:
-                raise signals.TestAbortClass(
+                raise signals.TestError(
                     f"Expected bridge interfaces on the AP, got {ap_bridges}"
                 )
             ap_bridge = ap_bridges[0]
-            self.ap_ipv4 = utils.get_addr(self.access_point.ssh, ap_bridge)
-            self.ap_ipv6 = utils.get_addr(
-                self.access_point.ssh, ap_bridge, addr_type="ipv6_link_local"
+            self.ap_ipv4 = self.access_point.get_addr(ap_bridge)
+            self.ap_ipv6 = self.access_point.get_addr(
+                ap_bridge, addr_type=AddrType.ipv6_link_local
             )
 
         self.log.info(

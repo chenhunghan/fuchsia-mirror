@@ -178,7 +178,7 @@ impl TryFrom<String> for TargetInfoQuery {
                 log::trace!("Failed to parse address from '{s}'. Interpreting as nodename");
                 Ok(Self::NodenameOrId(s))
             }
-            Err(e) => Err(crate::error::Error::ParseError(e.to_string())),
+            Err(e) => Err(crate::error::Error::ParseError(e)),
         }
     }
 }
@@ -336,6 +336,16 @@ mod test {
             addresses: vec![TargetAddr::UsbCtx(CID)],
             ..Default::default()
         }));
+    }
+
+    #[test]
+    fn test_unknown_scope_query_keeps_typed_error() {
+        match TargetInfoQuery::try_from("[fe80::1%nonexistent_scope]") {
+            Err(crate::error::Error::ParseError(TargetAddrParseError::Scope { scope, .. })) => {
+                assert_eq!(scope, "nonexistent_scope");
+            }
+            other => panic!("expected a scope parse error, got {other:?}"),
+        }
     }
 
     #[test_case(

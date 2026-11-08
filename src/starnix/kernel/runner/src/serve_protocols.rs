@@ -7,6 +7,7 @@ use anyhow::{Context as _, Error};
 use fidl::endpoints::{RequestStream, ServerEnd};
 use fidl_fuchsia_component_runner as frunner;
 use fidl_fuchsia_element as felement;
+use fidl_fuchsia_input_injection as finputinjection;
 use fidl_fuchsia_io as fio;
 use fidl_fuchsia_memory_attribution as fattribution;
 use fidl_fuchsia_posix as fposix;
@@ -443,6 +444,15 @@ pub fn serve_memory_attribution_provider_elfkernel(
         }
         Ok(())
     }
+}
+
+/// Serves `fuchsia.input.injection.InputDeviceRegistry` on the given request stream
+/// using the kernel's active `DirectInputManager`.
+pub fn serve_input_device_registry(
+    kernel: &Kernel,
+    stream: finputinjection::InputDeviceRegistryRequestStream,
+) {
+    starnix_modules::serve_input_device_registry(kernel, stream);
 }
 
 /// Serves the memory attribution provider for the Container component.

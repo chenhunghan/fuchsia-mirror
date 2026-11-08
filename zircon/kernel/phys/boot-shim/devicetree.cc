@@ -28,8 +28,8 @@
 #include <phys/allocation.h>
 #include <phys/boot-options.h>
 #include <phys/linuxboot-embed.h>
-#include <phys/main.h>
-#include <phys/uart.h>
+#include <phys/runtime/main.h>
+#include <phys/uart/driver.h>
 
 #include <ktl/enforce.h>
 

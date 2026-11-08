@@ -5,8 +5,9 @@
 // https://opensource.org/licenses/MIT
 
 use crate::counters::define_kcounter;
+use crate::ksync_kernel::TrackedCriticalMutex;
 use fbl::{Canary, HasRefCount};
-use ksync::{KMutex, RawCriticalMutex, guarded};
+use ksync::{KMutex, guarded};
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
 use zx_types::{
@@ -71,7 +72,7 @@ pub struct TimerDispatcherState {
     timer: Timer,
 
     #[mutex]
-    lock: KMutex<RawCriticalMutex>,
+    lock: KMutex<TrackedCriticalMutex>,
 }
 
 impl TimerDispatcherState {
@@ -122,10 +123,6 @@ pub enum OnTimerFiredAction {
 }
 
 impl TimerDispatcher {
-    pub fn default_rights() -> zx_rights_t {
-        ZX_DEFAULT_TIMER_RIGHTS
-    }
-
     /// Creates a new TimerDispatcher via C++ and returns its kernel handle and rights.
     pub fn create(
         options: u32,

@@ -18,15 +18,13 @@ use crate::user_copy::{UserInOutPtr, UserInPtr, UserOutPtr};
 use zx_status::Status;
 #[allow(unused_imports)]
 use zx_types::*;
+{{- range . }}
 
-{{ range . }}
-{{ $lastParamIndex := LastParameterIndex . }}
 #[allow(non_camel_case_types)]
 pub type {{ LowerCaseWithUnderscores . }} = extern "C" fn(
-{{- range $i, $param := .Parameters }}
-    {{ RustKernelParameterType $param }}{{ if ne $i $lastParamIndex }},{{ end }}
+{{- range .Parameters }}
+    {{ RustKernelParameterType . }},
 {{- end }}
 ) -> {{ RustKernelReturnType . }};
-{{ end }}
-
+{{- end }}
 {{ end }}

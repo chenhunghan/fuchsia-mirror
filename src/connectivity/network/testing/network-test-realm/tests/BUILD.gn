@@ -64,11 +64,20 @@ package_deps = [
   # controller is used to interact with the Network Test Realm.
   "//src/connectivity/network/testing/network-test-realm/service:controller",
 
-  # component-debug corresponds to a Netstack3 instance configured by netemul.
-  "//src/connectivity/network/netstack3:component-debug",
-
   # expectations comparer
   "//src/lib/testing/expectation:expectation_comparer",
+]
+
+package_subpackages = [
+  "//src/connectivity/network/dhcpv4/client/bindings:package",
+  "//src/connectivity/network/dhcpv4/server:package",
+
+  # `package-conformance` is launched inside the hermetic network realm by
+  # `controller`.
+  "//src/connectivity/network/netstack3:package-conformance",
+
+  # `package-debug` corresponds to a Netstack3 instance configured by netemul.
+  "//src/connectivity/network/netstack3:package-debug",
 ]
 
 name = "network-test-realm-integration-test"
@@ -79,6 +88,7 @@ fuchsia_test_with_expectations_package("${no_err_logs_name}") {
   expectations = "expects/network-test-realm.json5"
   treatment_of_cases_with_error_logs = "SKIP_CASES_WITH_ERROR_LOGS"
   deps = package_deps
+  subpackages = package_subpackages
   test_specs = {
     parallel = 1
   }
@@ -91,6 +101,7 @@ fuchsia_test_with_expectations_package("${with_err_logs_name}") {
   expectations = "expects/network-test-realm.json5"
   treatment_of_cases_with_error_logs = "RUN_ONLY_CASES_WITH_ERROR_LOGS"
   deps = package_deps
+  subpackages = package_subpackages
   test_specs = {
     log_settings = {
       max_severity = "ERROR"

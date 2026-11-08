@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+  <imports>
+    <localimport file="platform"/>
+    <!-- TODO(https://fxbug.dev/575842598): Import vendor/google here. -->
+  </imports>
+</manifest>

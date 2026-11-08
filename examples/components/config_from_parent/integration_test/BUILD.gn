@@ -31,7 +31,7 @@ executable("cpp_bin") {
   output_name = "config_from_parent_integration_test_cpp"
   sources = [ "cpp/test.cc" ]
 
-  public_deps = [
+  deps = [
     "//sdk/fidl/fuchsia.component:fuchsia.component_cpp",
     "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_cpp",
     "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_cpp_hlcpp_conversion",

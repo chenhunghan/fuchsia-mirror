@@ -6,7 +6,7 @@ use crate::cpu_manager::{
     CpuManager, SuspendBlockManager, SuspendResult, SuspendResumeListener, SuspendStatsUpdater,
 };
 use crate::events::{SagEvent, SagEventLogger};
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use async_utils::hanging_get::server::{HangingGet, Publisher};
 use fidl::endpoints::{Proxy, ServerEnd, create_endpoints};
@@ -114,6 +114,8 @@ pub(crate) fn validate_acquire_wake_lease2_request(
 // TODO(https://fxbug.dev/491840509): Allow configurable timeouts when needed.
 const RESUME_SUSPENDING_LEASE_DROP_DELAY: std::time::Duration =
     std::time::Duration::from_millis(100);
+const POST_RESUME_BOOST_HOLD_DURATION: fasync::MonotonicDuration =
+    fasync::MonotonicDuration::from_millis(100);
 const SUSPEND_BLOCKER_WARNING_TIMEOUT: fasync::MonotonicDuration =
     fasync::MonotonicDuration::from_seconds(10);
 const NO_SUSPEND_CRASH_SIGNATURE: &str = "fuchsia-no-suspend-in-5-application-activity-cycles";
@@ -401,15 +403,14 @@ struct LeaseManager {
     preallocated_leases: Rc<RefCell<PreallocatedLeaseTracker>>,
     /// Logger for system-wide activity governor events.
     sag_event_logger: SagEventLogger,
-    /// Proxy to the power topology to create power elements.
+    /// Proxy to the power topology to acquire direct power leases.
     topology: fbroker::TopologyProxy,
-    /// Proxy to the lessor for the Execution State power element.
-    execution_state_lessor: fbroker::LessorProxy,
-    /// Proxy to the lease control service for Execution State.
-    /// This lease is owned by async Tasks spawned inside of LeaseManager.
-    /// When all Tasks complete, this lease is dropped.
-    execution_state_suspending_lease:
-        Rc<Mutex<std::rc::Weak<(Option<fbroker::LeaseControlProxy>, Result<()>)>>>,
+    /// Dependency token for the Execution State power element.
+    execution_state_token: Rc<fbroker::DependencyToken>,
+    /// Shared direct lease token holding Execution State at Suspending while wake leases are
+    /// active. This lease is owned by async Tasks spawned inside of LeaseManager; when all Tasks
+    /// complete, this lease is dropped.
+    execution_state_suspending_lease: Rc<Mutex<std::rc::Weak<fbroker::LeaseToken>>>,
     /// Dependency token for Application Activity.
     application_activity_assertive_dependency_token: fbroker::DependencyToken,
     /// Used to block suspension in CpuManager while a lease is in-flight but not yet satisfied.
@@ -432,7 +433,7 @@ impl LeaseManager {
         parent_node: &INode,
         sag_event_logger: SagEventLogger,
         topology: fbroker::TopologyProxy,
-        execution_state_lessor: fbroker::LessorProxy,
+        execution_state_token: fbroker::DependencyToken,
         application_activity_assertive_dependency_token: fbroker::DependencyToken,
         suspend_blocker: Rc<SuspendBlockManager>,
         before_suspend_notifier: Rc<
@@ -509,7 +510,7 @@ impl LeaseManager {
             preallocated_leases,
             sag_event_logger,
             topology,
-            execution_state_lessor,
+            execution_state_token: Rc::new(execution_state_token),
             execution_state_suspending_lease: Rc::new(Mutex::new(std::rc::Weak::new())),
             application_activity_assertive_dependency_token,
             suspend_block_manager: suspend_blocker,
@@ -822,7 +823,8 @@ impl LeaseManager {
         let active_wake_leases = self.active_wake_leases.clone();
         let preallocated_leases = self.preallocated_leases.clone();
         let max_lease_id = self.max_lease_id.clone();
-        let execution_state_lessor = self.execution_state_lessor.clone();
+        let topology = self.topology.clone();
+        let execution_state_token = self.execution_state_token.clone();
         let long_lease_detector = self.long_lease_detector.clone();
 
         log::debug!("Acquiring wake lease for '{}'", name);
@@ -946,15 +948,14 @@ impl LeaseManager {
                 }
             }
 
-            let lease = {
+            let lease_result = {
                 let mut lease_guard = execution_state_suspending_lease.lock().await;
-                let lease_opt = lease_guard.upgrade();
-
-                match lease_opt {
-                    Some(lease) => lease,
+                match lease_guard.upgrade() {
+                    Some(lease) => Ok(lease),
                     None => {
                         Self::create_execution_state_lease(
-                            &execution_state_lessor,
+                            &topology,
+                            &execution_state_token,
                             &mut lease_guard,
                         )
                         .await
@@ -962,11 +963,12 @@ impl LeaseManager {
                 }
             };
 
-            match &lease.1 {
-                Ok(_) => {
+            let lease = match lease_result {
+                Ok(lease) => {
                     *active_lease.status.borrow_mut() = LeaseStatus::Satisfied;
                     sag_event_logger
                         .log(SagEvent::WakeLeaseSatisfied { name: name.clone(), id: lease_id });
+                    Some(lease)
                 }
                 // If there is an error while waiting for lease satisfaction, `suspend_blocker`
                 // will still prevent suspension until the client drops its token.
@@ -985,8 +987,9 @@ impl LeaseManager {
                         id: lease_id,
                         error: e.to_string(),
                     });
+                    None
                 }
-            }
+            };
 
             // Keep wake lease alive for as long as the client keeps it alive.
             // The power element lease will be dropped once all references to lease have
@@ -1034,39 +1037,48 @@ impl LeaseManager {
     }
 
     async fn create_execution_state_lease(
-        execution_state_lessor: &fbroker::LessorProxy,
-        lease_guard: &mut std::rc::Weak<(Option<fbroker::LeaseControlProxy>, Result<()>)>,
-    ) -> Rc<(Option<fbroker::LeaseControlProxy>, Result<()>)> {
-        match execution_state_lessor.lease(ExecutionStateLevel::Suspending.into_primitive()).await {
-            Ok(Ok(lease_client_end)) => {
-                let lease = lease_client_end.into_proxy();
-                let mut status = fbroker::LeaseStatus::Unknown;
-                let lease_result = loop {
-                    match lease.watch_status(status).await {
-                        Ok(fbroker::LeaseStatus::Satisfied) => break Ok(()),
-                        Ok(new_status) => {
-                            status = new_status;
-                        }
-                        Err(e) => break Err(anyhow::anyhow!(e)),
-                    }
-                };
-
-                let result = Rc::new((Some(lease), lease_result));
-                *lease_guard = Rc::downgrade(&result);
-                result
-            }
-            Ok(Err(e)) => Rc::new((
-                None,
-                Err(anyhow::anyhow!("Failed to lease execution state for wake lease: {e:?})")),
-            )),
-            Err(e) => Rc::new((
-                None,
-                Err(anyhow::anyhow!(
-                    "Failed to contact power broker to lease execution state for wake lease: {e:?})"
-                )),
-            )),
-        }
+        topology: &fbroker::TopologyProxy,
+        execution_state_token: &fbroker::DependencyToken,
+        lease_guard: &mut std::rc::Weak<fbroker::LeaseToken>,
+    ) -> Result<Rc<fbroker::LeaseToken>> {
+        let token = execution_state_token
+            .duplicate_handle(zx::Rights::SAME_RIGHTS)
+            .context("Failed to duplicate execution state token")?;
+        let lease_token = acquire_direct_lease(
+            topology,
+            token,
+            ExecutionStateLevel::Suspending.into_primitive(),
+            "wake_lease_execution_state",
+        )
+        .await?;
+        let lease = Rc::new(lease_token);
+        *lease_guard = Rc::downgrade(&lease);
+        Ok(lease)
     }
+}
+
+async fn acquire_direct_lease(
+    topology: &fbroker::TopologyProxy,
+    token: fbroker::DependencyToken,
+    level: fbroker::PowerLevel,
+    name: &str,
+) -> Result<fbroker::LeaseToken> {
+    let (client_token, server_token) = fbroker::LeaseToken::create();
+    topology
+        .lease(fbroker::LeaseSchema {
+            lease_token: Some(server_token),
+            lease_name: Some(name.into()),
+            dependencies: Some(vec![fbroker::LeaseDependency {
+                requires_token: Some(token),
+                requires_level: Some(level),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        })
+        .await
+        .with_context(|| format!("Failed to contact power broker to lease {name}"))?
+        .map_err(|e| anyhow::anyhow!("Failed to lease {name}: {e:?}"))?;
+    Ok(client_token)
 }
 
 type SuspendBlockerVector = Vec<(u64, fsystem::SuspendBlockerProxy, String)>;
@@ -1362,13 +1374,15 @@ pub struct SystemActivityGovernor {
     es_activation_after_resume_signal: Rc<RefCell<async_lock::OnceCell<()>>>,
     /// The lease which hold execution_state at suspending state temporarily
     /// after suspension.
-    resume_control_lease: Rc<RefCell<Option<fbroker::LeaseControlProxy>>>,
+    resume_control_lease: Rc<RefCell<Option<fbroker::LeaseToken>>>,
     /// The token for the CPU frequency boost.
     boost_token: Rc<RefCell<Option<zx::EventPair>>>,
+    /// Timer task holding `boost_token` across the post-resume wake window.
+    boost_drop_task: Rc<RefCell<Option<fasync::Task<()>>>>,
     /// The proxy used to call Boost.
     boost_proxy: fcpumanager::BoostProxy,
     /// Temporarily holds the boot_control lease.
-    booting_lease: Rc<RefCell<Option<fidl::endpoints::ClientEnd<fbroker::LeaseControlMarker>>>>,
+    booting_lease: Rc<RefCell<Option<fbroker::LeaseToken>>>,
     /// Logger for system-wide activity governor events.
     sag_event_logger: SagEventLogger,
     /// ElementRunner ServerEnds for the Execution State, Application Activity and Boot Control
@@ -1503,7 +1517,7 @@ impl SystemActivityGovernor {
             &inspect_root,
             sag_event_logger.clone(),
             topology.clone(),
-            execution_state.lessor.clone(),
+            execution_state.assertive_dependency_token().expect("token not registered"),
             application_activity.assertive_dependency_token().expect("token not registered"),
             cpu_manager.suspend_block_manager().await,
             before_suspend_notifier.clone(),
@@ -1618,6 +1632,7 @@ impl SystemActivityGovernor {
             es_activation_after_resume_signal: Rc::new(RefCell::new(async_lock::OnceCell::new())),
             resume_control_lease: Rc::new(RefCell::new(None)),
             boost_token: Rc::new(RefCell::new(None)),
+            boost_drop_task: Rc::new(RefCell::new(None)),
             boost_proxy,
             is_running_signal: async_lock::OnceCell::new(),
             is_shutting_down,
@@ -1646,23 +1661,14 @@ impl SystemActivityGovernor {
             &elements_node,
         );
         log::info!("System is booting. Acquiring boot control lease.");
-        let boot_control_lease = self
-            .boot_control
-            .lessor
-            .lease(BootControlLevel::Active.into())
-            .await
-            .expect("Failed to request boot control lease")
-            .expect("Failed to acquire boot control lease")
-            .into_proxy();
-
-        // TODO(https://fxbug.dev/333947976): Use RequiredLevel when LeaseStatus is removed.
-        let mut lease_status = fbroker::LeaseStatus::Unknown;
-        while lease_status != fbroker::LeaseStatus::Satisfied {
-            lease_status = boot_control_lease.watch_status(lease_status).await.unwrap();
-        }
-
-        let booting_lease =
-            boot_control_lease.into_client_end().expect("failed to convert to ClientEnd");
+        let booting_lease = acquire_direct_lease(
+            &self.lease_manager.topology,
+            self.boot_control.assertive_dependency_token().expect("token not registered"),
+            BootControlLevel::Active.into(),
+            "boot_control",
+        )
+        .await
+        .expect("Failed to acquire boot control lease");
         let _ = self.booting_lease.borrow_mut().insert(booting_lease);
 
         self.run_application_activity(
@@ -1712,6 +1718,18 @@ impl SystemActivityGovernor {
                         let this = this_clone.clone();
 
                         async move {
+                            // Whenever ExecutionState transitions downward toward suspend
+                            // (Active -> Suspending, Active -> Inactive, or Suspending -> Inactive),
+                            // immediately cancel any post-resume boost hold timer and drop the
+                            // previous wake's boost_token before notify_on_suspend acquires a fresh
+                            // boost_token.
+                            if new_power_level < previous_power_level.get() {
+                                Self::cancel_post_resume_boost_inner(
+                                    &this.boost_token,
+                                    &this.boost_drop_task,
+                                );
+                            }
+
                             // Call suspend callback before ExecutionState power level changes.
                             if new_power_level == ExecutionStateLevel::Inactive.into_primitive() {
                                 if this.is_shutting_down.get() {
@@ -2477,6 +2495,32 @@ impl SystemActivityGovernor {
             self.suspend_blockers.borrow_mut().retain(|(id, _, _)| !dead_ids.contains(id));
         }
     }
+
+    fn cancel_post_resume_boost_inner(
+        boost_token: &RefCell<Option<zx::EventPair>>,
+        boost_drop_task: &RefCell<Option<fasync::Task<()>>>,
+    ) {
+        drop(boost_drop_task.borrow_mut().take());
+        drop(boost_token.borrow_mut().take());
+    }
+
+    fn schedule_post_resume_boost_drop_inner(
+        boost_token: &Rc<RefCell<Option<zx::EventPair>>>,
+        boost_drop_task: &RefCell<Option<fasync::Task<()>>>,
+    ) {
+        drop(boost_drop_task.borrow_mut().take());
+        if boost_token.borrow().is_none() {
+            return;
+        }
+        let boost_token = boost_token.clone();
+        let task = fasync::Task::local(async move {
+            fasync::Timer::new(POST_RESUME_BOOST_HOLD_DURATION).await;
+            if boost_token.borrow_mut().take().is_some() {
+                log::info!("Post-resume boost window elapsed, dropping boost token");
+            }
+        });
+        *boost_drop_task.borrow_mut() = Some(task);
+    }
 }
 
 #[async_trait(?Send)]
@@ -2493,44 +2537,45 @@ impl SuspendResumeListener for SystemActivityGovernor {
             }
         }
         self.suspend_loop_detector.reset();
+        drop(self.boost_drop_task.borrow_mut().take());
         // Reset Execution State activation signal at each resume transition.
         let _ = self.es_activation_after_resume_signal.borrow_mut().take();
 
-        let lease = self
-            .execution_state
-            .lessor
-            .lease(ExecutionStateLevel::Suspending.into_primitive())
-            .await
-            .expect("Failed to request ExecutionState lease")
-            .expect("Failed to acquire ExecutionState lease")
-            .into_proxy();
-
-        // TODO(https://fxbug.dev/333947976): Use RequiredLevel when LeaseStatus is removed.
-        let mut lease_status = fbroker::LeaseStatus::Unknown;
-        while lease_status != fbroker::LeaseStatus::Satisfied {
-            lease_status = lease.watch_status(lease_status).await.unwrap();
-        }
+        let lease = acquire_direct_lease(
+            &self.lease_manager.topology,
+            self.execution_state.assertive_dependency_token().expect("token not registered"),
+            ExecutionStateLevel::Suspending.into_primitive(),
+            "resume_control",
+        )
+        .await
+        .expect("Failed to acquire ExecutionState lease");
 
         if self.es_activation_after_resume_signal.borrow().is_initialized() {
-            log::info!("System already Active, dropping boost token immediately");
-            drop(self.boost_token.borrow_mut().take());
+            log::info!("System already Active, holding boost token for post-resume window");
+            Self::schedule_post_resume_boost_drop_inner(&self.boost_token, &self.boost_drop_task);
         } else {
             let _ = self.resume_control_lease.borrow_mut().insert(lease);
             let resume_control_lease = self.resume_control_lease.clone();
             let es_activation_after_resume_signal = self.es_activation_after_resume_signal.clone();
             let boost_token = self.boost_token.clone();
+            let boost_drop_task = self.boost_drop_task.clone();
 
             fasync::Task::local(async move {
-                let _ = es_activation_after_resume_signal
+                let activated = es_activation_after_resume_signal
                     .borrow()
                     .wait()
+                    .map(|_| true)
                     .on_timeout(RESUME_SUSPENDING_LEASE_DROP_DELAY, || {
                         log::info!("Dropping resume control lease due to timeout");
-                        &()
+                        false
                     })
                     .await;
                 drop(resume_control_lease.borrow_mut().take());
-                drop(boost_token.borrow_mut().take());
+                if activated {
+                    Self::schedule_post_resume_boost_drop_inner(&boost_token, &boost_drop_task);
+                } else {
+                    Self::cancel_post_resume_boost_inner(&boost_token, &boost_drop_task);
+                }
             })
             .detach();
         }
@@ -2546,6 +2591,7 @@ impl SuspendResumeListener for SystemActivityGovernor {
         self.suspend_loop_detector.on_suspend_attempt();
 
         let boost_fut = async {
+            drop(self.boost_drop_task.borrow_mut().take());
             log::info!("Calling Boost protocol");
             match self.boost_proxy.boost().await {
                 Ok(Ok(token)) => {
@@ -3522,5 +3568,268 @@ mod tests {
         );
         assert_eq!(max_lease_id.load(Ordering::Relaxed), 11);
         assert!(preallocated_leases.borrow().by_server_koid.is_empty());
+    }
+
+    #[fuchsia::test]
+    fn test_post_resume_boost_hold_drops_after_window() {
+        let mut executor = fasync::TestExecutor::new_with_fake_time();
+        executor.set_fake_time(fasync::MonotonicInstant::from_nanos(0));
+
+        let (server_token, client_token) = zx::EventPair::create();
+        let boost_token = Rc::new(RefCell::new(Some(client_token)));
+        let boost_drop_task = RefCell::new(None);
+
+        SystemActivityGovernor::schedule_post_resume_boost_drop_inner(
+            &boost_token,
+            &boost_drop_task,
+        );
+        let _ = executor.run_until_stalled(&mut futures::future::pending::<()>());
+
+        // Still held just before POST_RESUME_BOOST_HOLD_DURATION (99 ms).
+        executor.set_fake_time(fasync::MonotonicInstant::from_nanos(99_000_000));
+        let _ = executor.run_until_stalled(&mut futures::future::pending::<()>());
+        assert!(boost_token.borrow().is_some());
+        assert_eq!(
+            server_token
+                .wait_one(zx::Signals::EVENTPAIR_PEER_CLOSED, zx::MonotonicInstant::INFINITE_PAST)
+                .to_result(),
+            Err(zx::Status::TIMED_OUT)
+        );
+
+        // Dropped once POST_RESUME_BOOST_HOLD_DURATION (100 ms) elapses.
+        executor.set_fake_time(fasync::MonotonicInstant::from_nanos(100_000_000));
+        let _ = executor.run_until_stalled(&mut futures::future::pending::<()>());
+        assert!(boost_token.borrow().is_none());
+        assert!(
+            server_token
+                .wait_one(zx::Signals::EVENTPAIR_PEER_CLOSED, zx::MonotonicInstant::INFINITE_PAST)
+                .to_result()
+                .is_ok()
+        );
+    }
+
+    #[fuchsia::test]
+    fn test_cancel_post_resume_boost_drops_immediately_and_protects_new_token() {
+        let mut executor = fasync::TestExecutor::new_with_fake_time();
+        executor.set_fake_time(fasync::MonotonicInstant::from_nanos(0));
+
+        let (server_token_1, client_token_1) = zx::EventPair::create();
+        let boost_token = Rc::new(RefCell::new(Some(client_token_1)));
+        let boost_drop_task = RefCell::new(None);
+
+        SystemActivityGovernor::schedule_post_resume_boost_drop_inner(
+            &boost_token,
+            &boost_drop_task,
+        );
+        let _ = executor.run_until_stalled(&mut futures::future::pending::<()>());
+
+        // Early re-suspend at 50 ms immediately drops token 1 and cancels the 100 ms timer.
+        executor.set_fake_time(fasync::MonotonicInstant::from_nanos(50_000_000));
+        SystemActivityGovernor::cancel_post_resume_boost_inner(&boost_token, &boost_drop_task);
+        assert!(boost_token.borrow().is_none());
+        assert!(boost_drop_task.borrow().is_none());
+        assert!(
+            server_token_1
+                .wait_one(zx::Signals::EVENTPAIR_PEER_CLOSED, zx::MonotonicInstant::INFINITE_PAST)
+                .to_result()
+                .is_ok()
+        );
+
+        // A fresh boost token acquired for the new suspend cycle must NOT be dropped at 100 ms.
+        let (server_token_2, client_token_2) = zx::EventPair::create();
+        *boost_token.borrow_mut() = Some(client_token_2);
+
+        executor.set_fake_time(fasync::MonotonicInstant::from_nanos(150_000_000));
+        let _ = executor.run_until_stalled(&mut futures::future::pending::<()>());
+        assert!(boost_token.borrow().is_some());
+        assert_eq!(
+            server_token_2
+                .wait_one(zx::Signals::EVENTPAIR_PEER_CLOSED, zx::MonotonicInstant::INFINITE_PAST)
+                .to_result(),
+            Err(zx::Status::TIMED_OUT)
+        );
+    }
+
+    #[fuchsia::test]
+    async fn test_acquire_direct_lease_succeeds_and_closes_peer_on_drop() {
+        let (topology, mut topology_stream) =
+            fidl::endpoints::create_proxy_and_stream::<fbroker::TopologyMarker>();
+        let token = fbroker::DependencyToken::create();
+        let expected_token_koid = token.koid().expect("token koid");
+        let token_dup = token.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("duplicate token");
+
+        let server_fut = async move {
+            let (payload, responder) = topology_stream
+                .next()
+                .await
+                .expect("stream item")
+                .expect("fidl request")
+                .into_lease()
+                .expect("expected Topology.Lease");
+            assert_eq!(payload.lease_name.as_deref(), Some("boot_control"));
+            assert_eq!(payload.should_return_pending_lease, None);
+            let deps = payload.dependencies.expect("dependencies");
+            assert_eq!(deps.len(), 1);
+            assert_eq!(deps[0].requires_level, Some(BootControlLevel::Active.into()));
+            assert_eq!(
+                deps[0].requires_token.as_ref().expect("requires_token").koid().unwrap(),
+                expected_token_koid
+            );
+            let server_lease_token = payload.lease_token.expect("lease_token");
+            let _ = responder.send(Ok(()));
+            server_lease_token
+        };
+
+        let (lease_result, server_lease_token) = futures::join!(
+            acquire_direct_lease(
+                &topology,
+                token_dup,
+                BootControlLevel::Active.into(),
+                "boot_control",
+            ),
+            server_fut
+        );
+        let client_lease_token = lease_result.expect("acquire_direct_lease should succeed");
+
+        assert_eq!(
+            server_lease_token
+                .wait_one(zx::Signals::EVENTPAIR_PEER_CLOSED, zx::MonotonicInstant::INFINITE_PAST)
+                .to_result(),
+            Err(zx::Status::TIMED_OUT)
+        );
+
+        drop(client_lease_token);
+        assert!(
+            server_lease_token
+                .wait_one(zx::Signals::EVENTPAIR_PEER_CLOSED, zx::MonotonicInstant::INFINITE_PAST)
+                .to_result()
+                .is_ok()
+        );
+    }
+
+    #[fuchsia::test]
+    async fn test_acquire_direct_lease_propagates_errors_across_branches() {
+        enum FailureCase {
+            ProtocolError(fbroker::LeaseError),
+            TransportClosed,
+        }
+
+        let cases = [
+            (
+                FailureCase::ProtocolError(fbroker::LeaseError::InvalidLevel),
+                "Failed to lease test_lease: InvalidLevel",
+            ),
+            (FailureCase::TransportClosed, "Failed to contact power broker to lease test_lease"),
+        ];
+
+        for (case, expected_err) in cases {
+            let (topology, mut topology_stream) =
+                fidl::endpoints::create_proxy_and_stream::<fbroker::TopologyMarker>();
+            let token = fbroker::DependencyToken::create();
+
+            let _server_task = fasync::Task::local(async move {
+                match case {
+                    FailureCase::ProtocolError(lease_err) => {
+                        let (_, responder) = topology_stream
+                            .next()
+                            .await
+                            .expect("stream item")
+                            .expect("fidl request")
+                            .into_lease()
+                            .expect("expected Topology.Lease");
+                        let _ = responder.send(Err(lease_err));
+                    }
+                    FailureCase::TransportClosed => {
+                        drop(topology_stream);
+                    }
+                }
+            });
+
+            let err = acquire_direct_lease(&topology, token, 1, "test_lease")
+                .await
+                .expect_err("acquire_direct_lease should fail");
+            assert!(
+                format!("{err:#}").contains(expected_err),
+                "expected '{expected_err}' in '{err:#}'"
+            );
+        }
+    }
+
+    #[fuchsia::test]
+    async fn test_create_execution_state_lease_sets_guard_to_returned_rc() {
+        let (topology, mut topology_stream) =
+            fidl::endpoints::create_proxy_and_stream::<fbroker::TopologyMarker>();
+        let es_token = fbroker::DependencyToken::create();
+        let expected_es_koid = es_token.koid().expect("es_token koid");
+
+        let _server_task = fasync::Task::local(async move {
+            let (payload, responder) = topology_stream
+                .next()
+                .await
+                .expect("stream item")
+                .expect("fidl request")
+                .into_lease()
+                .expect("expected Topology.Lease");
+            assert_eq!(payload.lease_name.as_deref(), Some("wake_lease_execution_state"));
+            assert_eq!(payload.should_return_pending_lease, None);
+            let deps = payload.dependencies.expect("dependencies");
+            assert_eq!(deps.len(), 1);
+            assert_eq!(
+                deps[0].requires_level,
+                Some(ExecutionStateLevel::Suspending.into_primitive())
+            );
+            assert_eq!(
+                deps[0].requires_token.as_ref().expect("requires_token").koid().unwrap(),
+                expected_es_koid
+            );
+            let _held_server_token = payload.lease_token.expect("lease_token");
+            let _ = responder.send(Ok(()));
+            let _ = topology_stream.next().await;
+        });
+
+        let mut lease_guard = std::rc::Weak::new();
+        let lease_rc =
+            LeaseManager::create_execution_state_lease(&topology, &es_token, &mut lease_guard)
+                .await
+                .expect("lease request should succeed");
+        let upgraded = lease_guard.upgrade().expect("weak lease should upgrade while Rc is held");
+        assert!(Rc::ptr_eq(&lease_rc, &upgraded));
+    }
+
+    #[fuchsia::test]
+    async fn test_create_execution_state_lease_propagates_error() {
+        let non_duplicable_token = fbroker::DependencyToken::create()
+            .replace_handle(zx::Rights::TRANSFER)
+            .expect("replace_handle");
+        let cases = [
+            (non_duplicable_token, "Failed to duplicate execution state token"),
+            (
+                fbroker::DependencyToken::create(),
+                "Failed to lease wake_lease_execution_state: Internal",
+            ),
+        ];
+
+        for (es_token, expected_err) in cases {
+            let (topology, mut topology_stream) =
+                fidl::endpoints::create_proxy_and_stream::<fbroker::TopologyMarker>();
+
+            let _server_task = fasync::Task::local(async move {
+                if let Some(Ok(req)) = topology_stream.next().await {
+                    let (_, responder) = req.into_lease().expect("expected Topology.Lease");
+                    let _ = responder.send(Err(fbroker::LeaseError::Internal));
+                }
+            });
+
+            let mut lease_guard = std::rc::Weak::new();
+            let err =
+                LeaseManager::create_execution_state_lease(&topology, &es_token, &mut lease_guard)
+                    .await
+                    .expect_err("lease request should fail");
+            assert!(
+                format!("{err:#}").contains(expected_err),
+                "expected '{expected_err}' in '{err:#}'"
+            );
+            assert!(lease_guard.upgrade().is_none(), "failed lease must not be cached");
+        }
     }
 }

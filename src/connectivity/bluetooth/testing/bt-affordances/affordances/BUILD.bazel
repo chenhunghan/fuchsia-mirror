@@ -8,6 +8,12 @@ load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package
 
 package(default_applicable_licenses = ["//:license"])
 
+test_suite(
+    name = "tests",
+    tests = [":fuchsia_bt_test_affordances_tests"],
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)
+
 rustc_library(
     name = "affordances",
     srcs = [
@@ -54,5 +60,4 @@ fx_unittest_package(
     name = "fuchsia_bt_test_affordances_tests",
     package_name = "fuchsia_bt_test_affordances_tests",
     unit_tests = [":affordances_test"],
-    visibility = ["//src/connectivity/bluetooth:__pkg__"],
 )

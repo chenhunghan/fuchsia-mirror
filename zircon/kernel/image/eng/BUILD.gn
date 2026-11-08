@@ -40,7 +40,7 @@ kernel_image("eng") {
   deps = [
     ":cmdline",
     ":zircon",
-    "//zircon/kernel/phys:physboot",
+    "//zircon/kernel/phys/physboot",
   ]
 }
 

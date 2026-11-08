@@ -7,7 +7,7 @@
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 pub const MAGMA_DEVICE_NAMESPACE: &[u8; 1] = b"\0";
-pub const MAGMA_API_VERSION: u32 = 15;
+pub const MAGMA_API_VERSION: u32 = 17;
 pub const MAGMA_VENDOR_ID_MALI: u32 = 5045;
 pub const MAGMA_VENDOR_ID_INTEL: u32 = 32902;
 pub type magma_log_severity_t = i8;
@@ -164,6 +164,7 @@ pub struct magma_image_info {
 }
 pub type magma_image_info_t = magma_image_info;
 pub type magma_priority_t = u64;
+pub type magma_buffer_flags_t = u64;
 unsafe extern "C" {
     #[doc = "\n \\brief Imports and takes ownership of a channel to a device. Takes ownership of |device_channel|\n        on both success and failure.\n \\param device_channel A channel connecting to a gpu class device.\n \\param device_out Returned device.\n"]
     pub fn magma_device_import(
@@ -490,6 +491,17 @@ unsafe extern "C" {
         context_id_out: *mut u32,
     ) -> magma_status_t;
 }
+unsafe extern "C" {
+    #[doc = "\n \\brief Creates a memory buffer of at least the given size. If flags includes\n        MAGMA_BUFFER_FLAG_REMOTE_ALLOCATION, the memory is allocated by the system driver;\n        otherwise this is equivalent to magma_connection_create_buffer.\n \\param connection An open connection.\n \\param size Requested buffer size.\n \\param flags A union of MAGMA_BUFFER_FLAG_* flags. Vendor-specific flags are passed to the\n        system driver.\n \\param size_out The returned buffer's actual size.\n \\param buffer_out The returned buffer.\n \\param id_out The buffer id of the buffer.\n"]
+    pub fn magma_connection_create_buffer2(
+        connection: magma_connection_t,
+        size: u64,
+        flags: magma_buffer_flags_t,
+        size_out: *mut u64,
+        buffer_out: *mut magma_buffer_t,
+        id_out: *mut magma_buffer_id_t,
+    ) -> magma_status_t;
+}
 pub type __u32 = ::std::os::raw::c_uint;
 pub type __u64 = ::std::os::raw::c_ulonglong;
 #[repr(C)]
@@ -545,6 +557,7 @@ pub const MAGMA_STATUS_UNIMPLEMENTED: magma_status_t = -8;
 pub const MAGMA_STATUS_BAD_STATE: magma_status_t = -9;
 pub const MAGMA_STATUS_CONSTRAINTS_INTERSECTION_EMPTY: magma_status_t = -10;
 pub const MAGMA_STATUS_TOO_MANY_GROUP_CHILD_COMBINATIONS: magma_status_t = -11;
+pub const MAGMA_STATUS_ALREADY_EXISTS: magma_status_t = -12;
 pub const MAGMA_CACHE_OPERATION_CLEAN: magma_cache_operation_t = 0;
 pub const MAGMA_CACHE_OPERATION_CLEAN_INVALIDATE: magma_cache_operation_t = 1;
 pub const MAGMA_CACHE_POLICY_CACHED: magma_cache_policy_t = 0;
@@ -627,6 +640,9 @@ pub const MAGMA_PRIORITY_LOW: u64 = 128;
 pub const MAGMA_PRIORITY_MEDIUM: u64 = 256;
 pub const MAGMA_PRIORITY_HIGH: u64 = 512;
 pub const MAGMA_PRIORITY_REALTIME: u64 = 1024;
+pub const MAGMA_BUFFER_FLAG_VENDOR_SHIFT: u64 = 16;
+pub const MAGMA_BUFFER_FLAG_REMOTE_ALLOCATION: magma_buffer_flags_t = 1;
+pub const MAGMA_BUFFER_FLAG_VENDOR_0: magma_buffer_flags_t = 65536;
 #[repr(C, packed)]
 #[derive(Debug, Default, Copy, Clone, IntoBytes, FromBytes, Immutable)]
 pub struct virtio_magma_config {
@@ -702,6 +718,8 @@ pub const virtio_magma_ctrl_type_VIRTIO_MAGMA_CMD_CONNECTION_READ_PERFORMANCE_CO
     virtio_magma_ctrl_type = 4159;
 pub const virtio_magma_ctrl_type_VIRTIO_MAGMA_CMD_CONNECTION_CREATE_CONTEXT2:
     virtio_magma_ctrl_type = 4188;
+pub const virtio_magma_ctrl_type_VIRTIO_MAGMA_CMD_CONNECTION_CREATE_BUFFER2:
+    virtio_magma_ctrl_type = 4189;
 pub const virtio_magma_ctrl_type_VIRTIO_MAGMA_RESP_DEVICE_IMPORT: virtio_magma_ctrl_type = 8238;
 pub const virtio_magma_ctrl_type_VIRTIO_MAGMA_RESP_DEVICE_RELEASE: virtio_magma_ctrl_type = 8239;
 pub const virtio_magma_ctrl_type_VIRTIO_MAGMA_RESP_ENUMERATE_DEVICES: virtio_magma_ctrl_type = 8240;
@@ -774,6 +792,8 @@ pub const virtio_magma_ctrl_type_VIRTIO_MAGMA_RESP_CONNECTION_CLEAR_PERFORMANCE_
 pub const virtio_magma_ctrl_type_VIRTIO_MAGMA_RESP_CONNECTION_READ_PERFORMANCE_COUNTER_COMPLETION : virtio_magma_ctrl_type = 8255 ;
 pub const virtio_magma_ctrl_type_VIRTIO_MAGMA_RESP_CONNECTION_CREATE_CONTEXT2:
     virtio_magma_ctrl_type = 8284;
+pub const virtio_magma_ctrl_type_VIRTIO_MAGMA_RESP_CONNECTION_CREATE_BUFFER2:
+    virtio_magma_ctrl_type = 8285;
 pub const virtio_magma_ctrl_type_VIRTIO_MAGMA_RESP_ERR_UNIMPLEMENTED: virtio_magma_ctrl_type =
     12289;
 pub const virtio_magma_ctrl_type_VIRTIO_MAGMA_RESP_ERR_INTERNAL: virtio_magma_ctrl_type = 12290;
@@ -1536,3 +1556,24 @@ pub struct virtio_magma_connection_create_context2_resp {
 }
 pub type virtio_magma_connection_create_context2_resp_t =
     virtio_magma_connection_create_context2_resp;
+#[repr(C, packed)]
+#[derive(Debug, Default, Copy, Clone, IntoBytes, FromBytes, Immutable)]
+pub struct virtio_magma_connection_create_buffer2_ctrl {
+    pub hdr: virtio_magma_ctrl_hdr_t,
+    pub connection: u64,
+    pub size: u64,
+    pub flags: u64,
+}
+pub type virtio_magma_connection_create_buffer2_ctrl_t =
+    virtio_magma_connection_create_buffer2_ctrl;
+#[repr(C, packed)]
+#[derive(Debug, Default, Copy, Clone, IntoBytes, FromBytes, Immutable)]
+pub struct virtio_magma_connection_create_buffer2_resp {
+    pub hdr: virtio_magma_ctrl_hdr_t,
+    pub size_out: u64,
+    pub buffer_out: u64,
+    pub id_out: u64,
+    pub result_return: u64,
+}
+pub type virtio_magma_connection_create_buffer2_resp_t =
+    virtio_magma_connection_create_buffer2_resp;

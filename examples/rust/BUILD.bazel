@@ -1,0 +1,40 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load("//build/bazel/rules/testing:fx_unittest_component.bzl", "fx_unittest_component")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_unittest_component(
+    name = "testing_lib_test",
+    binary = "//examples/rust/testing:testing_test",
+)
+
+fx_unittest_component(
+    name = "testing_integration_test",
+    binary = "//examples/rust/testing:testing_integration_test",
+)
+
+fx_unittest_component(
+    name = "testing_integration_test_two",
+    binary = "//examples/rust/testing:testing_integration_test_two",
+)
+
+fx_package(
+    name = "rust-examples",
+    package_name = "rust-examples",
+    test_components = [
+        ":testing_lib_test",
+        ":testing_integration_test",
+        ":testing_integration_test_two",
+    ],
+)
+
+fx_test(
+    name = "rust-examples_test",
+    package = ":rust-examples",
+    visibility = ["//examples:__pkg__"],
+)

@@ -43,6 +43,6 @@ fx_component(
     name = "component",
     testonly = True,
     compiled_manifest = ":component-manifest",
-    component_name = "exit-with-error",
+    visibility = ["//src/lib/fuchsia/tests/log_return_value:__pkg__"],
     deps = [":exit-with-error-bin_packaged_bin"],
 )

@@ -226,6 +226,16 @@ failure_mode_checks:
   log_types: ["serialLogType"]
   skip_passed_task: true
 
+# For https://fxbug.dev/527997914.
+# Matches driver_manager reboots triggered when a root driver in a critical
+# driver host crashes.
+# LINT.IfChange(driver_host_crashed_reboot)
+- kind: "string_in_log"
+  string: "driver host crashed. Rebooting system."
+  log_types: ["serialLogType"]
+  skip_all_passed_tests: true
+# LINT.ThenChange(//src/devices/bin/driver_manager/node.cc:driver_host_crashed_reboot)
+
 # For https://fxbug.dev/486245491
 # LINT.IfChange(no_response_tefmo)
 - kind: "string_in_log"
@@ -263,34 +273,6 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "Failed to reload the firmware"
   log_types: ["syslogType"]
-
-# For https://fxbug.dev/500045713
-# This is for driver manager removal and bootup hangs.
-- kind: "string_in_log"
-  string: "Full node removal hanging"
-  log_types: ["serialLogType"]
-  always_flake: true
-  # Ignore driver removal hangs caused by hang-on-stop in reboot_hang_test.
-  except_strings: ["hang-on-stop"]
-- kind: "string_in_log"
-  string: "Package node removal hanging"
-  log_types: ["serialLogType"]
-  always_flake: true
-  except_strings: ["hang-on-stop"]
-- kind: "string_in_log"
-  string: "waiting for driver's Stop() function and destructor finish running"
-  log_types: ["serialLogType"]
-  always_flake: true
-  # Ignore driver removal hangs caused by hang-on-stop in reboot_hang_test.
-  except_strings: ["hang-on-stop"]
-- kind: "string_in_log"
-  string: "Deadline exceeded in the bootup tracker with:"
-  log_types: ["serialLogType"]
-  always_flake: true
-- kind: "string_in_log"
-  string: "waiting for driver to finish binding"
-  log_types: ["serialLogType"]
-  always_flake: true
 
 # For https://fxbug.dev/42085023. This tracks boot test failures where
 # the success string shows up in the serial log but we fail to read it.
@@ -370,6 +352,9 @@ failure_mode_checks:
     end_string: "Finished executing 'test_driver_host_restart'"
   - start_string: " lock_dep_dynamic_analysis_tests "
     end_string: " lock_dep_static_analysis_tests "
+  # Intentionally triggers non-fatal lockdep violations.
+  - start_string: "[===KSYNC LOCKDEP EXCEPT BLOCK START===]"
+    end_string: "[===KSYNC LOCKDEP EXCEPT BLOCK END===]"
   - start_string: "RUN   TestKillCriticalProcess"
     end_string: ": TestKillCriticalProcess"
   - start_string: "RUN   TestKernelLockupDetectorCriticalSection"
@@ -400,6 +385,9 @@ failure_mode_checks:
     end_string: "Finished executing 'test_driver_host_restart'"
   - start_string: " lock_dep_dynamic_analysis_tests "
     end_string: " lock_dep_static_analysis_tests "
+  # Intentionally triggers non-fatal lockdep violations.
+  - start_string: "[===KSYNC LOCKDEP EXCEPT BLOCK START===]"
+    end_string: "[===KSYNC LOCKDEP EXCEPT BLOCK END===]"
   - start_string: "RUN   TestKillCriticalProcess"
     end_string: ": TestKillCriticalProcess"
   - start_string: "RUN   TestKernelLockupDetectorCriticalSection"
@@ -430,6 +418,9 @@ failure_mode_checks:
     end_string: "Finished executing 'test_driver_host_restart'"
   - start_string: " lock_dep_dynamic_analysis_tests "
     end_string: " lock_dep_static_analysis_tests "
+  # Intentionally triggers non-fatal lockdep violations.
+  - start_string: "[===KSYNC LOCKDEP EXCEPT BLOCK START===]"
+    end_string: "[===KSYNC LOCKDEP EXCEPT BLOCK END===]"
   - start_string: "RUN   TestKillCriticalProcess"
     end_string: ": TestKillCriticalProcess"
   - start_string: "RUN   TestKernelLockupDetectorCriticalSection"
@@ -799,24 +790,6 @@ failure_mode_checks:
   log_types: ["swarmingOutputType"]
   skip_passed_task: true
 
-# For https://fxbug.dev/42079078.
-- kind: "string_in_log"
-  string: "No daemon was running."
-  log_types: ["swarmingOutputType"]
-  skip_passed_task: true
-
-# For https://fxbug.dev/42077970.
-- kind: "string_in_log"
-  string: "FFX Daemon was told not to autostart"
-  log_types: ["swarmingOutputType"]
-
-# For https://fxbug.dev/42083744.
-- kind: "string_in_log"
-  string: "Timed out waiting for the ffx daemon on the Overnet mesh over socket"
-  log_types: ["swarmingOutputType"]
-  always_flake: true
-  attribute_to_test: true
-  add_tag: true
 
 - kind: "string_in_log"
   string: "remote command exited without exit status or exit signal"
@@ -841,12 +814,6 @@ failure_mode_checks:
   attribute_to_test: true
   add_tag: true
 
-# For https://fxbug.dev/338520852 and similar issues.
-# This is caused by lacewing tests which fail to harness the device.
-- kind: "string_in_log"
-  string: "Termination Signal Type: FuchsiaDeviceError"
-  log_types: ["swarmingOutputType"]
-
 # For https://fxbug.dev/350541791
 # This is most often caused by a delay in ffx due to
 # I/O contention on the Cavium
@@ -864,28 +831,8 @@ failure_mode_checks:
   log_types: ["swarmingOutputType"]
   always_flake: true
 
-# LINT.IfChange
-- kind: "string_in_log"
-  string: "One or more FuchsiaDevice's health check failed in teardown_test. So failing the test case..."
-  log_types: ["swarmingOutputType"]
-# LINT.ThenChange(//src/testing/end_to_end/mobly_base_tests/fuchsia_base_test/__init__.py)
-
-# LINT.IfChange
-- kind: "string_in_log"
-  string: "honeydew.errors.HealthCheckError: health check failed on"
-  log_types: ["swarmingOutputType"]
-  skip_passed_test: true
-  ignore_flakes: true
-  attribute_to_test: true
-  add_tag: true
-# LINT.ThenChange(//src/testing/end_to_end/honeydew/honeydew/fuchsia_device/fuchsia_device.py)
-
 - kind: "string_in_log"
   string: "botanist ERROR: failed to start ssh session"
-  log_types: ["swarmingOutputType"]
-
-- kind: "string_in_log"
-  string: "botanist ERROR: failed to derive $SSH_CONNECTION"
   log_types: ["swarmingOutputType"]
 
 # For https://fxbug.dev/421926925
@@ -994,12 +941,28 @@ failure_mode_checks:
   string: "botanist ERROR: failed to run snapshot over ssh"
   log_types: ["swarmingOutputType"]
 
-# For https://fxbug.dev/565930479.
-# Catch unhandled Go runtime panics in host tools (e.g. botanist or testrunner)
-# that exit before logging a top-level botanist failure message. Attribute to
-# the running test when a panic appears in test output.
+# For https://fxbug.dev/565930479 and https://fxbug.dev/527958327.
+# Catch unhandled Go panics and runtime fatal errors across host tools (e.g.
+# botanist, testrunner, or host test binaries).
 - kind: "string_in_log"
-  string: "panic: runtime error:"
+  name: "go_panic"
+  # Match "panic: " followed within a few lines (allowing blank, signal, or
+  # interleaved lines and log prefixes) by a Go goroutine stack header so we
+  # catch all Go panics without matching device or non-Go logs.
+  string: '(?m)(?:^|[^-\w\n])panic: .*\n(?:.*\n){0,8}.*goroutine \d+ \['
+  is_regex: true
+  prefilter_prefix: "panic: "
+  log_types: ["swarmingOutputType"]
+  skip_passed_task: true
+  attribute_to_test: true
+  add_tag: true
+
+- kind: "string_in_log"
+  name: "go_fatal_error"
+  # Same as go_panic, also matching "runtime stack:" for throws on the system stack (g0).
+  string: '(?m)(?:^|[^-\w\n])fatal error: .*\n(?:.*\n){0,8}.*(?:goroutine \d+ \[|runtime stack:)'
+  is_regex: true
+  prefilter_prefix: "fatal error: "
   log_types: ["swarmingOutputType"]
   skip_passed_task: true
   attribute_to_test: true

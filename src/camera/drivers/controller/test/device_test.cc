@@ -8,6 +8,8 @@
 #include <lib/async_patterns/testing/cpp/dispatcher_bound.h>
 #include <lib/component/outgoing/cpp/outgoing_directory.h>
 
+#include <optional>
+
 #include "src/camera/drivers/controller/controller_device.h"
 #include "src/camera/drivers/controller/controller_protocol.h"
 #include "src/camera/drivers/controller/test/constants.h"
@@ -257,6 +259,58 @@ TEST_F(ControllerDeviceTest, CreateStreamInvalidArgs) {
       0, 0, static_cast<uint32_t>(camera_config->stream_configs[0].image_formats.size()),
       stream.NewRequest());
   WaitForInterfaceClosure(stream, ZX_ERR_INVALID_ARGS);
+}
+
+// Runs ControllerImpl on the test loop, so that a client disconnect is handled before the next
+// client connects.
+class ControllerImplTest : public gtest::TestLoopFixture {
+ protected:
+  ControllerImplTest()
+      : controller_(dispatcher(), fuchsia::sysmem2::AllocatorSyncPtr(), isp_, gdc_, ge2d_,
+                    [](const std::string&) { return fpromise::error(ZX_ERR_NOT_SUPPORTED); }) {}
+
+  // Reads configs until the controller returns ZX_ERR_STOP, and returns how many it read.
+  uint32_t CountConfigs(fuchsia::camera2::hal::ControllerPtr& controller) {
+    uint32_t count = 0;
+    while (!HasFailure()) {
+      std::optional<zx_status_t> config_status;
+      controller->GetNextConfig([&](std::unique_ptr<fuchsia::camera2::hal::Config> config,
+                                    zx_status_t status) { config_status = status; });
+      RunLoopUntilIdle();
+      if (!config_status.has_value()) {
+        ADD_FAILURE() << "GetNextConfig did not reply";
+        break;
+      }
+      if (*config_status == ZX_ERR_STOP) {
+        break;
+      }
+      EXPECT_EQ(*config_status, ZX_OK);
+      ++count;
+    }
+    return count;
+  }
+
+  ddk::IspProtocolClient isp_;
+  ddk::GdcProtocolClient gdc_;
+  ddk::Ge2dProtocolClient ge2d_;
+  ControllerImpl controller_;
+};
+
+// A client that connects after another one went away gets every config again. camera_device
+// relies on this when it is relaunched after a crash (b/244178394).
+TEST_F(ControllerImplTest, NewClientGetsAllConfigs) {
+  constexpr uint32_t kNumConfigs = 3;
+
+  fuchsia::camera2::hal::ControllerPtr first_client;
+  controller_.Connect(first_client.NewRequest(dispatcher()));
+  EXPECT_EQ(CountConfigs(first_client), kNumConfigs);
+
+  first_client.Unbind();
+  RunLoopUntilIdle();
+
+  fuchsia::camera2::hal::ControllerPtr second_client;
+  controller_.Connect(second_client.NewRequest(dispatcher()));
+  EXPECT_EQ(CountConfigs(second_client), kNumConfigs);
 }
 
 }  // namespace

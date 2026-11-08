@@ -56,7 +56,7 @@ class StackTraceRequest(
     )
 
     @model_validator(mode="after")
-    def validate_targets(self) -> "StackTraceRequest":
+    def validate_targets(self) -> StackTraceRequest:
         if self.thread_id is not None and self.pid is not None:
             raise ValueError("Cannot specify both thread_id and pid")
         if self.thread_id is None and self.pid is None:

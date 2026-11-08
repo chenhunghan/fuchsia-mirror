@@ -11,8 +11,8 @@
 
 #include <phys/address-space.h>
 #include <phys/allocation.h>
-#include <phys/boot-zbi.h>
-#include <phys/main.h>
+#include <phys/boot-zbi/boot-zbi.h>
+#include <phys/runtime/main.h>
 #include <phys/symbolize.h>
 
 // This is a trivial "no-op" ZBI-to-ZBI boot shim.  It simply treats the data
@@ -27,7 +27,7 @@
 // must be in the new uniform format.
 
 void ZbiMain(void* zbi_ptr, EarlyBootZbi zbi, arch::EarlyTicks boot_ticks) {
-  MainSymbolize symbolize("zbi-boot-shim");
+  Symbolize symbolize("zbi-boot-shim");
 
   AddressSpace aspace;
   InitMemory(zbi_ptr, ktl::move(zbi), &aspace);

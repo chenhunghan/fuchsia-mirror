@@ -2,15 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "phys/efi/main.h"
+#include "main.h"
 
 #include <lib/abr/abr.h>
+#include <lib/boot-options/boot-options.h>
+#include <stdarg.h>
 #include <stdio.h>
+#include <zircon/assert.h>
 
 #include <optional>
 #include <string_view>
 
-#include <phys/stdio.h>
+#include <phys/runtime/main.h>
 
 #include "backends.h"
 #include "fastboot_tcp.h"
@@ -26,6 +29,10 @@
 #include <cpuid.h>
 #endif
 
+efi_handle gEfiImageHandle;
+efi_loaded_image_protocol* gEfiLoadedImage;
+efi_system_table* gEfiSystemTable;
+
 // This is necessary because the Fastboot class inherits from FastbootBase,
 // which is an abstract class with pure virtual functions.
 // The _purecall definition is not provided in efi compilation, which leads to an
@@ -33,6 +40,38 @@
 extern "C" int _purecall(void) { return 0; }
 
 namespace {
+
+using InitFiniFnPtr = void (*)();
+
+#pragma section(".CRT$XCA", read)
+#pragma section(".CRT$XCZ", read)
+[[gnu::section(".CRT$XCA")]] const InitFiniFnPtr InitBegin[1] = {};
+[[gnu::section(".CRT$XCZ")]] const InitFiniFnPtr InitEnd[1] = {};
+
+#pragma section(".CRT$XTA", read)
+#pragma section(".CRT$XTZ", read)
+[[gnu::section(".CRT$XTA")]] const InitFiniFnPtr FiniBegin[1] = {};
+[[gnu::section(".CRT$XTZ")]] const InitFiniFnPtr FiniEnd[1] = {};
+
+[[noreturn]] void EfiExit(efi_status status) {
+  if (gEfiSystemTable && gEfiSystemTable->BootServices) {
+    gEfiSystemTable->BootServices->Exit(gEfiImageHandle, status, 0, nullptr);
+  }
+  __builtin_trap();
+}
+
+[[noreturn, gnu::format(printf, 1, 0)]] void vpanic(const char* format, va_list args) {
+  // Avoid infinite recursion if console output itself triggers a panic.
+  static bool panicking = false;
+  if (!panicking) {
+    panicking = true;
+    vprintf(format, args);
+    printf("\n");
+  }
+  va_end(args);
+  EfiExit(EFI_ABORTED);
+}
+
 // Check for KVM or non-KVM QEMU using Hypervisor Vendor ID.
 bool IsQemu() {
 #if defined(__x86_64__)
@@ -54,11 +93,6 @@ bool IsQemu() {
 // Always enable serial output if not already. Infra relies on serial to get device feedback.
 // Without it, some CI/CQs fail.
 void SetSerial() {
-  PhysConsole& console = PhysConsole::Get();
-  if (*console.serial() != FILE()) {
-    return;
-  }
-
   // QEMU routes serial output to the console. To avoid double printing, avoid using serial
   // output when running in QEMU.
   if (IsQemu()) {
@@ -140,7 +174,7 @@ bool CheckFastbootKey() {
 }  // namespace
 
 // Main routine for gigaboot.
-int gigaboot_main(int argc, char** argv) {
+int gigaboot_main() {
   printf("Gigaboot main\n");
 
   auto is_secureboot_on = gigaboot::IsSecureBootOn();
@@ -224,11 +258,50 @@ int gbl_main(bool is_installer) {
 #define GBL_STOP_IN_FASTBOOT 0
 #endif
 
-int main(int argc, char** argv) {
+efi_status EfiMain(efi_handle image_handle, efi_system_table* systab) {
+  gEfiImageHandle = image_handle;
+  gEfiSystemTable = systab;
+
+  SetEfiStdout(systab);
+
+  if (auto image = EfiOpenProtocol<efi_loaded_image_protocol>(image_handle); image.is_ok()) {
+    gEfiLoadedImage = image.value().release();
+  } else {
+    printf("%s: Cannot open EFI_LOADED_IMAGE_PROTOCOL: %#zx\n", ProgramName(), image.error_value());
+  }
+
+  // Call static constructors in linked order.
+  for (const InitFiniFnPtr* fn = InitBegin + 1; fn != InitEnd; ++fn) {
+    if (*fn) {
+      (*fn)();
+    }
+  }
+
   SetSerial();
 #ifdef GIGABOOT_BOOT_GBL
-  return gbl_main(GBL_STOP_IN_FASTBOOT);
+  int ret = gbl_main(GBL_STOP_IN_FASTBOOT);
 #else
-  return gigaboot_main(argc, argv);
+  int ret = gigaboot_main();
 #endif
+  efi_status status = ret == 0 ? EFI_SUCCESS : EFI_LOAD_ERROR;
+
+  // Call static destructors in reverse of linked order.
+  const InitFiniFnPtr* fn = FiniEnd;
+  while (fn-- != FiniBegin + 1) {
+    if (*fn) {
+      (*fn)();
+    }
+  }
+
+  return status;
 }
+
+void __zx_panic(const char* format, ...) {
+  va_list args;
+  va_start(args, format);
+  vpanic(format, args);
+}
+
+const BootOptions* BootOptions::Get() { return nullptr; }
+
+const char* ProgramName() { return "gigaboot"; }

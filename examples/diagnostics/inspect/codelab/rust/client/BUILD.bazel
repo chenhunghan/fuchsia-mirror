@@ -1,0 +1,125 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    # Preserves GN output_name = "client" through bazel2gn.
+    crate_name = "client",
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        "//examples/diagnostics/inspect/codelab/fidl:fuchsia.examples.inspect_rust",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin.packaged",
+    binary = ":bin",
+    binary_name = "client",
+)
+
+fx_component_manifest(
+    name = "client_part_1_manifest",
+    component_name = "client_part_1",
+    includes = [
+        "meta/common.shard.cml",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/client_part_1.cml",
+)
+
+fx_component(
+    name = "client_part_1",
+    compiled_manifest = ":client_part_1_manifest",
+    visibility = ["//examples/diagnostics/inspect/codelab/rust:__pkg__"],
+    deps = [":bin.packaged"],
+)
+
+fx_component_manifest(
+    name = "client_part_2_manifest",
+    component_name = "client_part_2",
+    includes = [
+        "meta/common.shard.cml",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/client_part_2.cml",
+)
+
+fx_component(
+    name = "client_part_2",
+    compiled_manifest = ":client_part_2_manifest",
+    visibility = ["//examples/diagnostics/inspect/codelab/rust:__pkg__"],
+    deps = [":bin.packaged"],
+)
+
+fx_component_manifest(
+    name = "client_part_3_manifest",
+    component_name = "client_part_3",
+    includes = [
+        "meta/common.shard.cml",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/client_part_3.cml",
+)
+
+fx_component(
+    name = "client_part_3",
+    compiled_manifest = ":client_part_3_manifest",
+    visibility = ["//examples/diagnostics/inspect/codelab/rust:__pkg__"],
+    deps = [":bin.packaged"],
+)
+
+fx_component_manifest(
+    name = "client_part_4_manifest",
+    component_name = "client_part_4",
+    includes = [
+        "meta/common.shard.cml",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/client_part_4.cml",
+)
+
+fx_component(
+    name = "client_part_4",
+    compiled_manifest = ":client_part_4_manifest",
+    visibility = ["//examples/diagnostics/inspect/codelab/rust:__pkg__"],
+    deps = [":bin.packaged"],
+)
+
+fx_component_manifest(
+    name = "client_part_5_manifest",
+    component_name = "client_part_5",
+    includes = [
+        "meta/common.shard.cml",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/client_part_5.cml",
+)
+
+fx_component(
+    name = "client_part_5",
+    compiled_manifest = ":client_part_5_manifest",
+    visibility = ["//examples/diagnostics/inspect/codelab/rust:__pkg__"],
+    deps = [":bin.packaged"],
+)

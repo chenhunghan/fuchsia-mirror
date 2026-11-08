@@ -64,17 +64,6 @@ class DiagnosticsBatchIteratorNeverRespondsAfterOneBatch : public DiagnosticsBat
   std::vector<GetNextCompleter::Async> completers_;
 };
 
-class DiagnosticsBatchIteratorNeverResponds : public DiagnosticsBatchIteratorBase {
- public:
-  // |fuchsia_diagnostics::BatchIterator|
-  void GetNext(GetNextCompleter::Sync& completer) override {
-    completers_.push_back(completer.ToAsync());
-  }
-
- private:
-  std::vector<GetNextCompleter::Async> completers_;
-};
-
 class DiagnosticsBatchIteratorReturnsError : public DiagnosticsBatchIteratorBase {
  public:
   DiagnosticsBatchIteratorReturnsError() {}

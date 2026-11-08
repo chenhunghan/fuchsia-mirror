@@ -42,7 +42,10 @@ fuchsia_package(_package_name) {
     ":pass_with_config_values",
     ":pass_without_config",
   ]
-  visibility = [ ":*" ]
+  visibility = [
+    ":*",
+    "//tools/configc/tests:*",
+  ]
 }
 
 _archive_name = "${_package_name}_archive"

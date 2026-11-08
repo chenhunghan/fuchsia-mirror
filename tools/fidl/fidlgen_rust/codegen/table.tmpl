@@ -189,15 +189,15 @@ impl{{ $resourceDialectGeneric }} fidl::encoding::Decode<Self, {{ $resourceDiale
 
         {{- range .Members }}
         _next_ordinal_to_read += 1;
-        if next_offset >= end_offset {
-            return Ok(());
-        }
 
         // Decode unknown envelopes for gaps in ordinals.
-        while _next_ordinal_to_read < {{ .Ordinal }} {
+        while _next_ordinal_to_read < {{ .Ordinal }} && next_offset < end_offset {
             fidl::encoding::decode_unknown_envelope(decoder, next_offset, depth)?;
             _next_ordinal_to_read += 1;
             next_offset += envelope_size;
+        }
+        if next_offset >= end_offset {
+            return Ok(());
         }
 
         let next_out_of_line = decoder.next_out_of_line();

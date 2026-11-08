@@ -3,20 +3,23 @@
 // found in the LICENSE file.
 
 use super::rules::{
-    ExtendedPermissions, HasRuleKey, RuleKind, XPERMS_TYPE_IOCTL_PREFIX_AND_POSTFIXES,
-    XPERMS_TYPE_IOCTL_PREFIXES, XPERMS_TYPE_NLMSG, XpermsBitmap,
+    AccessRule, ExtendedPermissions, HasRuleKey, RuleKey, RuleKind,
+    XPERMS_TYPE_IOCTL_PREFIX_AND_POSTFIXES, XPERMS_TYPE_IOCTL_PREFIXES, XPERMS_TYPE_NLMSG,
+    XpermRule, XpermsBitmap,
 };
 use super::traits::{HasName, HasPolicyId};
 use super::{
-    AccessDecision, AccessVector, CategorySet, Class, ClassDefault, ClassDefaultRange, ClassId,
-    FsUseType, GenfsConPath, MlsLevel, OBJECT_R_ROLE_ID, PermissionId, Policy, PolicyCap, RoleId,
+    AccessDecision, AccessVector, Class, ClassDefault, ClassDefaultRange, ClassId, FsUseType,
+    GenfsConPath, MlsRange, OBJECT_R_ROLE_ID, PermissionId, Policy, PolicyCap, RoleId,
     SELINUX_AVD_FLAGS_PERMISSIVE, SecurityContext, TypeId,
 };
 use crate::{InitialSid, NullessByteStr};
+use zerocopy::{Immutable, IntoBytes};
 
 /// Kind of extended permission, corresponding to the base permission that triggers a check of an
 /// extended permission.
-#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq, IntoBytes, Immutable)]
+#[repr(u8)]
 pub enum XpermsKind {
     Ioctl,
     Nlmsg,
@@ -35,40 +38,59 @@ pub struct XpermsAccessDecision {
 }
 
 impl XpermsAccessDecision {
-    pub const DENY_ALL: Self = Self {
-        allow: XpermsBitmap::NONE,
-        auditallow: XpermsBitmap::NONE,
-        auditdeny: XpermsBitmap::ALL,
-    };
     #[cfg(test)]
-    pub const ALLOW_ALL: Self = Self {
-        allow: XpermsBitmap::ALL,
-        auditallow: XpermsBitmap::NONE,
-        auditdeny: XpermsBitmap::ALL,
-    };
+    pub const DENY_ALL: Self = Self::allow(XpermsBitmap::NONE);
+    #[cfg(test)]
+    pub const ALLOW_ALL: Self = Self::allow(XpermsBitmap::ALL);
+
+    /// Returns an [`XpermsAccessDecision`] with the specified extended permissions to `allow`, and
+    /// default audit behaviour.
+    pub const fn allow(allow: XpermsBitmap) -> Self {
+        Self { allow, auditallow: XpermsBitmap::NONE, auditdeny: XpermsBitmap::ALL }
+    }
+
+    /// Returns the bitmap of extended permissions that should be audit-logged given
+    /// [`Self::allow`], [`Self::auditallow`], and [`Self::auditdeny`].
+    pub fn audit(&self) -> XpermsBitmap {
+        (self.allow & self.auditallow) | (!self.allow & self.auditdeny)
+    }
 }
 
 /// [`SecurityContext`] and [`FsUseType`] derived from an `fs_use_*` line of the policy.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FsUseLabelAndType {
-    pub context: SecurityContext,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FsUseLabelAndType<'a> {
+    pub context: &'a SecurityContext,
     pub use_type: FsUseType,
 }
 
 impl Policy {
     /// Returns true if the specified capability is in the policy's enabled capabilities set.
     pub fn has_policycap(&self, policy_cap: PolicyCap) -> bool {
-        self.policy_capabilities().contains(policy_cap)
+        self.policy_capabilities.contains(policy_cap)
     }
 
     /// Returns true if `bounded` is bounded by `parent` in the policy.
     pub fn is_bounded_by(&self, bounded: TypeId, parent: TypeId) -> bool {
-        self.types().get_by_id(bounded).unwrap().bounded_by() == Some(parent)
+        let mut current = self.types.get_by_id(bounded).unwrap().bounded_by();
+        while let Some(bound_id) = current {
+            if bound_id == parent {
+                return true;
+            }
+            current = self.types.get_by_id(bound_id).unwrap().bounded_by();
+        }
+        false
     }
 
     /// Returns true if the policy has marked the type/domain for permissive checks.
+    #[inline]
     pub fn is_permissive(&self, type_: TypeId) -> bool {
-        self.permissive_map().contains(type_)
+        self.permissive_map.contains(type_)
+    }
+
+    /// Returns true if the policy has marked the type/domain as `neveraudit`.
+    #[inline]
+    pub fn is_neveraudit(&self, type_: TypeId) -> bool {
+        self.neveraudit_map.contains(type_)
     }
 
     /// Returns the [`RoleId`] of the `"object_r"` role within the policy, for use when validating
@@ -77,19 +99,23 @@ impl Policy {
         OBJECT_R_ROLE_ID
     }
 
+    /// Resolves the [`SecurityContext`] defined by this policy for the specified [`InitialSid`],
+    /// falling back to [`InitialSid::Kernel`] for [`InitialSid::Init`] when the
+    /// [`PolicyCap::UserspaceInitialContext`] capability is not enabled.
+    pub(super) fn resolve_initial_context(&self, mut id: InitialSid) -> Option<&SecurityContext> {
+        if id == InitialSid::Init && !self.has_policycap(PolicyCap::UserspaceInitialContext) {
+            id = InitialSid::Kernel;
+        }
+        self.initial_sids.get_by_id(id)
+    }
+
     /// Returns the [`SecurityContext`] defined by this policy for the specified [`InitialSid`].
     ///
     /// # Panics
     ///
     /// Panics if [`Self::validate`] has not verified that all required initial SIDs are present.
-    pub fn initial_context(&self, mut id: InitialSid) -> &SecurityContext {
-        let need_init_sid = self.has_policycap(PolicyCap::UserspaceInitialContext);
-        if id == InitialSid::Init && !need_init_sid {
-            id = InitialSid::Kernel;
-        }
-        self.initial_sids()
-            .get_by_id(id as u32)
-            .expect("initial SID must be present in validated policy")
+    pub fn initial_context(&self, id: InitialSid) -> &SecurityContext {
+        self.resolve_initial_context(id).expect("initial SID must be present in validated policy")
     }
 
     /// Returns the set of permissions for the given class, including both the explicitly owned
@@ -99,8 +125,7 @@ impl Policy {
         &self,
         class_name: &str,
     ) -> Result<Vec<(PermissionId, Vec<u8>)>, ()> {
-        let classes = self.classes();
-        let class = classes.get_by_name(class_name.as_bytes()).ok_or(())?;
+        let class = self.classes.get_by_name(class_name.as_bytes()).ok_or(())?;
         let owned_permissions = class.permissions();
 
         let mut result: Vec<_> = owned_permissions
@@ -114,7 +139,7 @@ impl Policy {
         }
 
         let common_symbol_permissions =
-            self.common_symbols().get_by_name(class.common_name()).ok_or(())?.permissions();
+            self.common_symbols.get_by_name(class.common_name()).ok_or(())?.permissions();
 
         result.extend(
             common_symbol_permissions
@@ -134,7 +159,7 @@ impl Policy {
         }
         let common_name = class.common_name();
         if !common_name.is_empty() {
-            let common_symbol = self.common_symbols().get_by_name(common_name)?;
+            let common_symbol = self.common_symbols.get_by_name(common_name)?;
             let permission = common_symbol.permissions().get_by_name(name)?;
             return Some(permission.id());
         }
@@ -143,24 +168,24 @@ impl Policy {
 
     /// If there is an `fs_use` statement for the given filesystem type, returns the associated
     /// [`SecurityContext`] and [`FsUseType`].
-    pub fn fs_use_label_and_type(&self, fs_type: NullessByteStr<'_>) -> Option<FsUseLabelAndType> {
-        self.object_contexts()
+    pub fn fs_use_label_and_type(
+        &self,
+        fs_type: NullessByteStr<'_>,
+    ) -> Option<FsUseLabelAndType<'_>> {
+        self.object_contexts
             .fs_uses()
             .iter()
             .find(|fs_use| fs_use.fs_type() == fs_type.as_bytes())
             .map(|fs_use| FsUseLabelAndType {
-                context: fs_use.context().clone(),
+                context: fs_use.context(),
                 use_type: fs_use.behavior(),
             })
     }
 
     /// Returns an iterator over all `genfscon` [`GenfsConPath`] entries for the given filesystem
     /// type.
-    fn genfscon_find_all<'a>(
-        &'a self,
-        fs_type: &'a [u8],
-    ) -> impl Iterator<Item = &'a GenfsConPath> {
-        self.generic_fs_contexts()
+    fn genfscon_find_all<'a>(&'a self, fs_type: &[u8]) -> impl Iterator<Item = &'a GenfsConPath> {
+        self.generic_fs_contexts
             .iter()
             .filter(move |entry| entry.fs_type() == fs_type)
             .flat_map(|entry| entry.paths().iter())
@@ -175,7 +200,7 @@ impl Policy {
         fs_type: NullessByteStr<'_>,
         node_path: NullessByteStr<'_>,
         class: Option<ClassId>,
-    ) -> Option<SecurityContext> {
+    ) -> Option<&SecurityContext> {
         // All contexts listed in the policy for the file system type.
         let fs_contexts = self.genfscon_find_all(fs_type.as_bytes());
 
@@ -197,19 +222,19 @@ impl Policy {
         // Partial paths are prefix-matched, so that "/abc/default" would also be assigned label3.
         let mut result: Option<&GenfsConPath> = None;
         let mut order_type = OrderType::Unknown;
-        let mut prev_path_bytes: Option<Vec<u8>> = None;
+        let mut prev_path_bytes: Option<&[u8]> = None;
         for fs_context in fs_contexts {
             // Determine the order type based on the first entries.
             let path = fs_context.partial_path();
             if order_type == OrderType::Unknown {
-                if let Some(prev) = &prev_path_bytes {
+                if let Some(prev) = prev_path_bytes {
                     if path.len() > prev.len() {
                         order_type = OrderType::Alphabetic;
-                    } else if path < prev.as_slice() {
+                    } else if path < prev {
                         order_type = OrderType::ByLength;
                     }
                 }
-                prev_path_bytes = Some(path.to_vec());
+                prev_path_bytes = Some(path);
             }
 
             // Check if the class matches.
@@ -245,7 +270,7 @@ impl Policy {
 
         // The returned SecurityContext must be valid with respect to the policy, since otherwise
         // we'd have rejected the policy load.
-        Some(result?.context().clone())
+        Some(result?.context())
     }
 
     /// Returns the [`SecurityContext`] that should be applied to a newly created SELinux object
@@ -272,7 +297,7 @@ impl Policy {
     ) -> SecurityContext {
         let override_type = if !name.is_empty() {
             class.and_then(|class| {
-                self.filename_transitions().compute_filename_transition(
+                self.filename_transitions.compute_filename_transition(
                     source.type_(),
                     target.type_(),
                     class.id(),
@@ -304,18 +329,16 @@ impl Policy {
                 source.user(),
                 self.object_role(),
                 target.type_(),
-                source.low_level().clone(),
-                None,
+                MlsRange::new(source.mls_range().low().clone(), /* high = */ None),
             );
         };
 
         let is_process_or_socket = class.name() == b"process" || class.common_name() == b"socket";
-        let (unspecified_role, unspecified_type, unspecified_low, unspecified_high) =
-            if is_process_or_socket {
-                (source.role(), source.type_(), source.low_level(), source.high_level())
-            } else {
-                (self.object_role(), target.type_(), source.low_level(), None)
-            };
+        let (unspecified_role, unspecified_type) = if is_process_or_socket {
+            (source.role(), source.type_())
+        } else {
+            (self.object_role(), target.type_())
+        };
         let defaults = class.defaults();
 
         let user = match defaults.user() {
@@ -334,10 +357,17 @@ impl Policy {
         };
 
         let type_ = override_type.unwrap_or_else(|| {
+            let key = RuleKey::new(source.type_(), target.type_(), class.id());
             let transition = self
-                .access_vector_rules()
+                .access_vector_rules
                 .find_type_rules(source.type_(), target.type_(), class.id())
                 .find(|rule| rule.kind() == RuleKind::TypeTransition)
+                .or_else(|| {
+                    self.conditional_nodes
+                        .iter()
+                        .flat_map(|node| node.active_rules().type_rules())
+                        .find(|rule| rule.kind() == RuleKind::TypeTransition && rule.key() == key)
+                })
                 .map(|rule| rule.new_type());
             match transition {
                 Some(new_type) => new_type,
@@ -349,28 +379,37 @@ impl Policy {
             }
         });
 
-        let (low_level, high_level) =
-            match self.range_transition_new_range(source.type_(), target.type_(), class) {
-                Some((low_level, high_level)) => (low_level, high_level),
-                None => match defaults.range() {
-                    ClassDefaultRange::SourceLow => (source.low_level().clone(), None),
-                    ClassDefaultRange::SourceHigh => (source.effective_high_level().clone(), None),
-                    ClassDefaultRange::SourceLowHigh => {
-                        (source.low_level().clone(), source.high_level().cloned())
+        let (source_range, target_range) = (source.mls_range(), target.mls_range());
+        let mls_range = match self.range_transition_new_range(source.type_(), target.type_(), class)
+        {
+            Some(mls_range) => mls_range,
+            None => match defaults.range() {
+                ClassDefaultRange::SourceLow => {
+                    MlsRange::new(source_range.low().clone(), /* high = */ None)
+                }
+                ClassDefaultRange::SourceHigh => {
+                    MlsRange::new(source_range.effective_high().clone(), /* high = */ None)
+                }
+                ClassDefaultRange::SourceLowHigh => source_range.clone(),
+                ClassDefaultRange::TargetLow => {
+                    MlsRange::new(target_range.low().clone(), /* high = */ None)
+                }
+                ClassDefaultRange::TargetHigh => {
+                    MlsRange::new(target_range.effective_high().clone(), /* high = */ None)
+                }
+                ClassDefaultRange::TargetLowHigh => target_range.clone(),
+                ClassDefaultRange::Unspecified => {
+                    if is_process_or_socket {
+                        source_range.clone()
+                    } else {
+                        MlsRange::new(source_range.low().clone(), /* high = */ None)
                     }
-                    ClassDefaultRange::TargetLow => (target.low_level().clone(), None),
-                    ClassDefaultRange::TargetHigh => (target.effective_high_level().clone(), None),
-                    ClassDefaultRange::TargetLowHigh => {
-                        (target.low_level().clone(), target.high_level().cloned())
-                    }
-                    ClassDefaultRange::Unspecified => {
-                        (unspecified_low.clone(), unspecified_high.cloned())
-                    }
-                    ClassDefaultRange::Glblub => glblub_range(source, target),
-                },
-            };
+                }
+                ClassDefaultRange::Glblub => source_range.glblub(target_range),
+            },
+        };
 
-        SecurityContext::new(user, role, type_, low_level, high_level)
+        SecurityContext::new(user, role, type_, mls_range)
     }
 
     /// Computes the access granted to `source` on `target`, for the specified `class`. The result
@@ -408,18 +447,30 @@ impl Policy {
         let mut computed_audit_allow = AccessVector::NONE;
         let mut computed_audit_deny = AccessVector::ALL;
 
-        let source_attributes = &self.type_attribute_maps()[source];
-        let target_attributes = &self.type_attribute_maps()[target];
+        let source_attributes = &self.type_attribute_maps[source];
+        let target_attributes = &self.type_attribute_maps[target];
+
+        let mut apply_rule = |rule: &AccessRule| match rule.kind() {
+            RuleKind::Allow => computed_access_vector |= rule.access_vector(),
+            RuleKind::AuditAllow => computed_audit_allow |= rule.access_vector(),
+            RuleKind::DontAudit => computed_audit_deny &= rule.access_vector(),
+            _ => {}
+        };
 
         for source in source_attributes.iter() {
             for target in target_attributes.iter() {
-                for rule in self.access_vector_rules().find_av_rules(source, target, class.id()) {
-                    match rule.kind() {
-                        RuleKind::Allow => computed_access_vector |= rule.access_vector(),
-                        RuleKind::AuditAllow => computed_audit_allow |= rule.access_vector(),
-                        RuleKind::DontAudit => computed_audit_deny &= rule.access_vector(),
-                        _ => {}
-                    }
+                for rule in self.access_vector_rules.find_av_rules(source, target, class.id()) {
+                    apply_rule(rule);
+                }
+            }
+        }
+        // Conditional branches typically contain only a small number of rules and binary policies
+        // do not guarantee that rules sharing a key in a conditional list are contiguous, so scan
+        // active conditional rules linearly rather than indexing them.
+        for node in self.conditional_nodes.as_ref() {
+            for rule in node.active_rules().av_rules() {
+                if rule.key().matches(source_attributes, target_attributes, class.id()) {
+                    apply_rule(rule);
                 }
             }
         }
@@ -427,7 +478,7 @@ impl Policy {
         // If `source` is bounded by some `parent` then bound the allowed permissions to those
         // available to the parent. Doing the calculation here ensures that type-bounds take into
         // account bounding ancestors, if any.
-        if let Some(parent) = self.types().get_by_id(source).unwrap().bounded_by() {
+        if let Some(parent) = self.types.get_by_id(source).unwrap().bounded_by() {
             // If `source == target` then this is a "self" permission check, which should be
             // bounded to the parent domain's "self" permissions.
             let access = if source == target {
@@ -438,8 +489,13 @@ impl Policy {
             computed_access_vector &= access.allow;
         }
 
+        if self.is_neveraudit(source) {
+            computed_audit_allow = AccessVector::NONE;
+            computed_audit_deny = AccessVector::NONE;
+        }
+
         let mut flags = 0;
-        if self.permissive_map().contains(source) {
+        if self.is_permissive(source) {
             flags |= SELINUX_AVD_FLAGS_PERMISSIVE;
         }
         AccessDecision {
@@ -505,33 +561,44 @@ impl Policy {
             },
         };
 
-        let source_attributes = &self.type_attribute_maps()[source.type_()];
-        let target_attributes = &self.type_attribute_maps()[target.type_()];
+        let source_attributes = &self.type_attribute_maps[source.type_()];
+        let target_attributes = &self.type_attribute_maps[target.type_()];
+
+        let mut apply_rule = |rule: &XpermRule| {
+            let xperms = rule.extended_permissions();
+            if rule.kind() == RuleKind::AllowXperm && xperms_types.contains(&xperms.xperms_type()) {
+                explicit_allow.get_or_insert(XpermsBitmap::NONE);
+            }
+
+            if let Some(xperms_bitmap) = bitmap_if_prefix_matches(prefix, xperms) {
+                match rule.kind() {
+                    RuleKind::AllowXperm => {
+                        (*explicit_allow.get_or_insert(XpermsBitmap::NONE)) |= xperms_bitmap;
+                    }
+                    RuleKind::AuditAllowXperm => auditallow |= xperms_bitmap,
+                    RuleKind::DontAuditXperm => auditdeny -= xperms_bitmap,
+                    _ => {}
+                }
+            }
+        };
 
         for source in source_attributes.iter() {
             for target in target_attributes.iter() {
-                for rule in self.access_vector_rules().find_xperm_rules(source, target, class.id())
-                {
-                    let xperms = rule.extended_permissions();
-                    if rule.kind() == RuleKind::AllowXperm
-                        && xperms_types.contains(&xperms.xperms_type())
-                    {
-                        explicit_allow.get_or_insert(XpermsBitmap::NONE);
-                    }
-
-                    if let Some(xperms_bitmap) = bitmap_if_prefix_matches(prefix, xperms) {
-                        match rule.kind() {
-                            RuleKind::AllowXperm => {
-                                (*explicit_allow.get_or_insert(XpermsBitmap::NONE)) |=
-                                    xperms_bitmap;
-                            }
-                            RuleKind::AuditAllowXperm => auditallow |= xperms_bitmap,
-                            RuleKind::DontAuditXperm => auditdeny -= xperms_bitmap,
-                            _ => {}
-                        }
-                    }
+                for rule in self.access_vector_rules.find_xperm_rules(source, target, class.id()) {
+                    apply_rule(rule);
                 }
             }
+        }
+        for node in self.conditional_nodes.as_ref() {
+            for rule in node.active_rules().xperm_rules() {
+                if rule.key().matches(source_attributes, target_attributes, class.id()) {
+                    apply_rule(rule);
+                }
+            }
+        }
+        if self.is_neveraudit(source.type_()) {
+            auditallow = XpermsBitmap::NONE;
+            auditdeny = XpermsBitmap::NONE;
         }
         let allow = explicit_allow.unwrap_or(XpermsBitmap::ALL);
         XpermsAccessDecision { allow, auditallow, auditdeny }
@@ -543,7 +610,7 @@ impl Policy {
         type_: TypeId,
         class: &Class,
     ) -> Option<RoleId> {
-        self.role_transitions()
+        self.role_transitions
             .iter()
             .find(|role_transition| {
                 role_transition.current_role() == current_role
@@ -556,7 +623,7 @@ impl Policy {
     /// Returns whether a transition from `source` to `new` is explicitly authorized by a role allow
     /// rule (`allow <source> <new>;`).
     pub fn role_transition_is_explicitly_allowed(&self, source: RoleId, new: RoleId) -> bool {
-        self.role_allowlist()
+        self.role_allowlist
             .iter()
             .any(|role_allow| role_allow.source_role() == source && role_allow.new_role() == new)
     }
@@ -566,16 +633,13 @@ impl Policy {
         source: TypeId,
         target: TypeId,
         class: &Class,
-    ) -> Option<(MlsLevel, Option<MlsLevel>)> {
-        for range_transition in self.range_transitions() {
+    ) -> Option<MlsRange> {
+        for range_transition in self.range_transitions.iter() {
             if range_transition.source_type() == source
                 && range_transition.target_type() == target
                 && range_transition.target_class() == class.id()
             {
-                let mls_range = range_transition.mls_range();
-                let low_level = mls_range.low().clone();
-                let high_level = mls_range.high().cloned();
-                return Some((low_level, high_level));
+                return Some(range_transition.mls_range().clone());
             }
         }
 
@@ -583,33 +647,59 @@ impl Policy {
     }
 }
 
-/// Returns the set of categories present in both `left` and `right`.
-fn intersect_categories(left: &MlsLevel, right: &MlsLevel) -> CategorySet {
-    let right_categories = right.categories();
-    CategorySet::from_ids(left.categories().iter().filter(|id| right_categories.contains(*id)))
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::policy::metadata::PolicyVersion;
+    use crate::policy::parser::{PolicyCursor, PolicyWriter};
+    use crate::policy::traits::{Parse, Serialize, Validate};
+    use crate::policy::types::{Type, TypeKind, Types};
+    use std::num::NonZeroU16;
 
-/// Returns the intersection of the `source` and `target` ranges.
-///
-/// If the two ranges do not overlap then the intersection is empty, and the returned range is
-/// mis-ordered, i.e. its high level does not dominate its low level. Such a range is rejected
-/// when the resulting Security Context is validated.
-fn glblub_range(
-    source: &SecurityContext,
-    target: &SecurityContext,
-) -> (MlsLevel, Option<MlsLevel>) {
-    let source_low = source.low_level();
-    let source_high = source.effective_high_level();
-    let target_low = target.low_level();
-    let target_high = target.effective_high_level();
+    #[test]
+    fn test_is_bounded_by_single_and_multi_hop() {
+        let mut policy = Policy::parse(include_bytes!(
+            "../../testdata/composite_policies/compiled/minimal_policy"
+        ))
+        .unwrap();
 
-    let low_level = MlsLevel::new(
-        std::cmp::max(source_low.sensitivity(), target_low.sensitivity()),
-        intersect_categories(source_low, target_low),
-    );
-    let high_level = MlsLevel::new(
-        std::cmp::min(source_high.sensitivity(), target_high.sensitivity()),
-        intersect_categories(source_high, target_high),
-    );
-    (low_level, Some(high_level))
+        let a_id = TypeId::new(NonZeroU16::new(1).unwrap());
+        let b_id = TypeId::new(NonZeroU16::new(2).unwrap());
+        let c_id = TypeId::new(NonZeroU16::new(3).unwrap());
+        let d_id = TypeId::new(NonZeroU16::new(4).unwrap());
+
+        // Construct hierarchy: C -> B -> A, and unrelated D.
+        let mut bytes = Vec::new();
+        let mut writer = PolicyWriter::new(PolicyVersion::V33, &mut bytes);
+        4u32.serialize(&mut writer).unwrap();
+        4u32.serialize(&mut writer).unwrap();
+        for (id, name, bounds) in [
+            (a_id, b"a_t".as_slice(), None),
+            (b_id, b"b_t".as_slice(), Some(a_id)),
+            (c_id, b"c_t".as_slice(), Some(b_id)),
+            (d_id, b"d_t".as_slice(), None),
+        ] {
+            Type::new_for_test(id, name, TypeKind::Type, bounds).serialize(&mut writer).unwrap();
+        }
+        let mut cursor = PolicyCursor::new(&bytes);
+        let types = Types::parse(&mut cursor).unwrap();
+        types.validate(&policy).unwrap();
+        policy.types = types;
+
+        // Direct (single-hop) bounds.
+        assert!(policy.is_bounded_by(b_id, a_id));
+        assert!(policy.is_bounded_by(c_id, b_id));
+
+        // Transitive (multi-hop) bounds: C -> B -> A.
+        assert!(policy.is_bounded_by(c_id, a_id));
+
+        // Reflexive, reverse, and unrelated pairs are not bounded.
+        assert!(!policy.is_bounded_by(a_id, a_id));
+        assert!(!policy.is_bounded_by(b_id, b_id));
+        assert!(!policy.is_bounded_by(a_id, b_id));
+        assert!(!policy.is_bounded_by(a_id, c_id));
+        assert!(!policy.is_bounded_by(b_id, c_id));
+        assert!(!policy.is_bounded_by(c_id, d_id));
+        assert!(!policy.is_bounded_by(d_id, a_id));
+    }
 }

@@ -5,8 +5,8 @@
 // https://opensource.org/licenses/MIT
 
 use crate::arch_rs::{
-    CopyContext, UserCopyCaptureFaultsError, arch_copy_from_user, arch_copy_to_user,
-    arch_copy_to_user_capture_faults,
+    CopyContext, UserCopyCaptureFaultsError, arch_copy_from_user,
+    arch_copy_from_user_capture_faults, arch_copy_to_user, arch_copy_to_user_capture_faults,
 };
 use core::mem::MaybeUninit;
 use zerocopy::{FromBytes, Immutable, IntoBytes};
@@ -89,6 +89,36 @@ impl<T> UserInPtr<T> {
         }
     }
 
+    /// Copies a single element from userspace into `dst`, capturing any page faults.
+    ///
+    /// Captures permission and translation faults. Access faults (on architectures that have them)
+    /// will be handled transparently, which may block; this method must not be called while holding
+    /// a spinlock.
+    #[inline]
+    pub fn copy_from_user_capture_faults<'a>(
+        &self,
+        dst: &'a mut MaybeUninit<T>,
+    ) -> Result<&'a mut T, UserCopyCaptureFaultsError>
+    where
+        T: FromBytes,
+    {
+        // SAFETY: `dst.as_mut_ptr()` points to `size_of::<T>()` bytes of valid kernel memory,
+        // `self.ptr` is a user pointer, and callers of `UserInPtr` methods may block (cannot hold a
+        // spinlock), satisfying `CopyContext::BlockingAllowed`. If
+        // `arch_copy_from_user_capture_faults` succeeds, `dst` is fully initialized with bytes from
+        // user memory. Since `T: FromBytes`, any bit pattern of size `size_of::<T>()` is a valid
+        // representation of `T`, making `assume_init_mut()` safe to call.
+        unsafe {
+            arch_copy_from_user_capture_faults(
+                dst.as_mut_ptr() as *mut core::ffi::c_void,
+                self.ptr as *const core::ffi::c_void,
+                core::mem::size_of::<T>(),
+                CopyContext::BlockingAllowed,
+            )?;
+            Ok(dst.assume_init_mut())
+        }
+    }
+
     /// Reads and returns a single copyable element from userspace.
     pub fn read(&self) -> Result<T, Status>
     where
@@ -119,6 +149,36 @@ impl<T> UserInPtr<T> {
                 dst.as_mut_ptr() as *mut core::ffi::c_void,
                 self.ptr as *const core::ffi::c_void,
                 len_bytes,
+            )?;
+            Ok(core::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut T, dst.len()))
+        }
+    }
+
+    /// Copies a slice of elements from userspace into `dst`, capturing any page faults.
+    ///
+    /// Captures permission and translation faults. Access faults (on architectures that have them)
+    /// will be handled transparently, which may block; this method must not be called while holding
+    /// a spinlock.
+    #[inline]
+    pub fn copy_slice_from_user_capture_faults<'a>(
+        &self,
+        dst: &'a mut [MaybeUninit<T>],
+    ) -> Result<&'a mut [T], UserCopyCaptureFaultsError>
+    where
+        T: FromBytes,
+    {
+        let len_bytes = core::mem::size_of_val(dst);
+        // SAFETY: `dst.as_mut_ptr()` points to `len_bytes` of valid kernel memory buffer space,
+        // `self.ptr` is a user pointer, and callers of `UserInPtr` methods may block (cannot hold a
+        // spinlock), satisfying `CopyContext::BlockingAllowed`. Upon successful return, all
+        // elements in `dst` are initialized with bytes from user memory. Since `T: FromBytes`,
+        // converting the raw pointer to a mutable slice of `T` with length `dst.len()` is safe.
+        unsafe {
+            arch_copy_from_user_capture_faults(
+                dst.as_mut_ptr() as *mut core::ffi::c_void,
+                self.ptr as *const core::ffi::c_void,
+                len_bytes,
+                CopyContext::BlockingAllowed,
             )?;
             Ok(core::slice::from_raw_parts_mut(dst.as_mut_ptr() as *mut T, dst.len()))
         }
@@ -229,12 +289,19 @@ impl<T> UserOutPtr<T> {
     }
 
     /// Copies a single element from `src` to userspace, capturing any page faults.
+    ///
+    /// Captures permission and translation faults. Access faults (on architectures that have them)
+    /// will be handled transparently, which may block; this method must not be called while holding
+    /// a spinlock.
+    #[inline]
     pub fn copy_to_user_capture_faults(&self, src: &T) -> Result<(), UserCopyCaptureFaultsError>
     where
         T: IntoBytes + Immutable,
     {
         let src_bytes = src.as_bytes();
-        // SAFETY: `src_bytes.as_ptr()` points to `src_bytes.len()` bytes of valid kernel memory.
+        // SAFETY: `src_bytes.as_ptr()` points to `src_bytes.len()` bytes of valid kernel memory,
+        // `self.ptr` is a user pointer, and callers of `UserOutPtr` methods may block (cannot hold
+        // a spinlock), satisfying `CopyContext::BlockingAllowed`.
         unsafe {
             arch_copy_to_user_capture_faults(
                 self.ptr as *mut core::ffi::c_void,
@@ -266,6 +333,33 @@ impl<T> UserOutPtr<T> {
                 self.ptr as *mut core::ffi::c_void,
                 src_bytes.as_ptr() as *const core::ffi::c_void,
                 src_bytes.len(),
+            )
+        }
+    }
+
+    /// Copies a slice of elements from `src` to userspace, capturing any page faults.
+    ///
+    /// Captures permission and translation faults. Access faults (on architectures that have them)
+    /// will be handled transparently, which may block; this method must not be called while holding
+    /// a spinlock.
+    #[inline]
+    pub fn copy_slice_to_user_capture_faults(
+        &self,
+        src: &[T],
+    ) -> Result<(), UserCopyCaptureFaultsError>
+    where
+        T: IntoBytes + Immutable,
+    {
+        let src_bytes = src.as_bytes();
+        // SAFETY: `src_bytes.as_ptr()` points to `src_bytes.len()` bytes of valid kernel memory
+        // slice, `self.ptr` is a user pointer, and callers of `UserOutPtr` methods may block
+        // (cannot hold a spinlock), satisfying `CopyContext::BlockingAllowed`.
+        unsafe {
+            arch_copy_to_user_capture_faults(
+                self.ptr as *mut core::ffi::c_void,
+                src_bytes.as_ptr() as *const core::ffi::c_void,
+                src_bytes.len(),
+                CopyContext::BlockingAllowed,
             )
         }
     }
@@ -342,9 +436,25 @@ impl<T> UserInOutPtr<T> {
     /// Copies a single element from userspace into `dst`.
     pub fn copy_from_user<'a>(&self, dst: &'a mut MaybeUninit<T>) -> Result<&'a mut T, Status>
     where
-        T: FromBytes + IntoBytes,
+        T: FromBytes,
     {
         self.as_in_ptr().copy_from_user(dst)
+    }
+
+    /// Copies a single element from userspace into `dst`, capturing any page faults.
+    ///
+    /// Captures permission and translation faults. Access faults (on architectures that have them)
+    /// will be handled transparently, which may block; this method must not be called while holding
+    /// a spinlock.
+    #[inline]
+    pub fn copy_from_user_capture_faults<'a>(
+        &self,
+        dst: &'a mut MaybeUninit<T>,
+    ) -> Result<&'a mut T, UserCopyCaptureFaultsError>
+    where
+        T: FromBytes,
+    {
+        self.as_in_ptr().copy_from_user_capture_faults(dst)
     }
 
     /// Reads and returns a single copyable element from userspace.
@@ -361,9 +471,25 @@ impl<T> UserInOutPtr<T> {
         dst: &'a mut [MaybeUninit<T>],
     ) -> Result<&'a mut [T], Status>
     where
-        T: FromBytes + IntoBytes,
+        T: FromBytes,
     {
         self.as_in_ptr().copy_slice_from_user(dst)
+    }
+
+    /// Copies a slice of elements from userspace into `dst`, capturing any page faults.
+    ///
+    /// Captures permission and translation faults. Access faults (on architectures that have them)
+    /// will be handled transparently, which may block; this method must not be called while holding
+    /// a spinlock.
+    #[inline]
+    pub fn copy_slice_from_user_capture_faults<'a>(
+        &self,
+        dst: &'a mut [MaybeUninit<T>],
+    ) -> Result<&'a mut [T], UserCopyCaptureFaultsError>
+    where
+        T: FromBytes,
+    {
+        self.as_in_ptr().copy_slice_from_user_capture_faults(dst)
     }
 
     /// Copies a single element from `src` to userspace.
@@ -372,6 +498,19 @@ impl<T> UserInOutPtr<T> {
         T: IntoBytes + Immutable,
     {
         self.as_out_ptr().copy_to_user(src)
+    }
+
+    /// Copies a single element from `src` to userspace, capturing any page faults.
+    ///
+    /// Captures permission and translation faults. Access faults (on architectures that have them)
+    /// will be handled transparently, which may block; this method must not be called while holding
+    /// a spinlock.
+    #[inline]
+    pub fn copy_to_user_capture_faults(&self, src: &T) -> Result<(), UserCopyCaptureFaultsError>
+    where
+        T: IntoBytes + Immutable,
+    {
+        self.as_out_ptr().copy_to_user_capture_faults(src)
     }
 
     /// Writes a single copyable value to userspace.
@@ -388,5 +527,21 @@ impl<T> UserInOutPtr<T> {
         T: IntoBytes + Immutable,
     {
         self.as_out_ptr().copy_slice_to_user(src)
+    }
+
+    /// Copies a slice of elements from `src` to userspace, capturing any page faults.
+    ///
+    /// Captures permission and translation faults. Access faults (on architectures that have them)
+    /// will be handled transparently, which may block; this method must not be called while holding
+    /// a spinlock.
+    #[inline]
+    pub fn copy_slice_to_user_capture_faults(
+        &self,
+        src: &[T],
+    ) -> Result<(), UserCopyCaptureFaultsError>
+    where
+        T: IntoBytes + Immutable,
+    {
+        self.as_out_ptr().copy_slice_to_user_capture_faults(src)
     }
 }

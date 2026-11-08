@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -32,7 +33,10 @@ constexpr int64_t kInitialTimeSecs = 1000;
 constexpr int64_t kExpiredTimeSecs = 500;
 constexpr int64_t kValidExpirationSecs = 2000;
 constexpr int64_t kUpdatedExpirationSecs = 3000;
-constexpr int64_t kScheduledExpirationSecs = 4000;
+constexpr zx::duration kDefaultUrgentExpiryThreshold = zx::hour(int64_t{24} * 7);
+constexpr int64_t kSevenDaysSecs = kDefaultUrgentExpiryThreshold.to_secs();
+constexpr int64_t kThirtyDaysSecs = zx::hour(int64_t{24} * 30).to_secs();
+constexpr int64_t kScheduledExpirationSecs = kInitialTimeSecs + kThirtyDaysSecs;
 constexpr uint32_t kHttpOk = 200;
 constexpr uint32_t kHttpServiceUnavailable = 503;
 constexpr uint32_t kOlderShufflerKeyIndex = 30;
@@ -95,6 +99,9 @@ class KeyFetcherTest : public ::gtest::TestLoopFixture {
         .steady_state_jitter = zx::hour(2),
         .poll_interval = zx::hour(1),
         .boot_clock = zx::clock::get_boot,
+        .urgent_expiry_threshold = kDefaultUrgentExpiryThreshold,
+        .urgent_poll_interval = zx::hour(1),
+        .urgent_poll_jitter = zx::sec(0),
     };
   }
 
@@ -139,6 +146,16 @@ class KeyFetcherTest : public ::gtest::TestLoopFixture {
  private:
   std::string valid_tink_keyset_bytes_;
 };
+
+TEST(KeyFetchStatusToStringTest, ReturnsExpectedNames) {
+  EXPECT_STREQ(KeyFetchStatusToString(KeyFetchStatus::kUninitialized), "Uninitialized");
+  EXPECT_STREQ(KeyFetchStatusToString(KeyFetchStatus::kSuccess), "Success");
+  EXPECT_STREQ(KeyFetchStatusToString(KeyFetchStatus::kNetworkError), "NetworkError");
+  EXPECT_STREQ(KeyFetchStatusToString(KeyFetchStatus::kParseError), "ParseError");
+  EXPECT_STREQ(KeyFetchStatusToString(KeyFetchStatus::kInvalidTinkKeyset), "InvalidTinkKeyset");
+  EXPECT_STREQ(KeyFetchStatusToString(KeyFetchStatus::kExpiredKey), "ExpiredKey");
+  EXPECT_STREQ(KeyFetchStatusToString(static_cast<KeyFetchStatus>(99)), "Unknown");
+}
 
 TEST_F(KeyFetcherTest, LoadKeysFromDiskCacheMissingFileReturnsFalse) {
   FakeSystemClock clock(kInitialTimeSecs);
@@ -447,6 +464,129 @@ TEST_F(KeyFetcherTest, ScheduledFetchPersistsToDiskAndUpdatesMakers) {
   std::string cached_bytes;
   ASSERT_TRUE(files::ReadFileToString(fetcher.cache_file_path(), &cached_bytes));
   EXPECT_EQ(cached_bytes, pb_bytes);
+}
+
+TEST_F(KeyFetcherTest, LoadKeysFromDiskCacheDoesNotNotifyStatusObserver) {
+  FakeSystemClock clock(kInitialTimeSecs);
+  util::DynamicEncryptedMessageMaker shuffler_maker(&clock);
+  util::DynamicEncryptedMessageMaker analyzer_maker(&clock);
+
+  KeyFetcher fetcher(dispatcher(), std::make_unique<lib::EmptyHTTPClient>(), &shuffler_maker,
+                     &analyzer_maker, &clock, system_data::Environment::PROD, kTestCacheDir,
+                     kTestPublicKeysUrl);
+
+  bool observer_called = false;
+  fetcher.SetStatusObserver([&](KeyFetchStatus /*status*/, uint32_t /*failures*/,
+                                int64_t /*attempt_time_secs*/) { observer_called = true; });
+
+  const std::string pb_bytes =
+      BuildPublicKeysBytes(kCachedShufflerKeyIndex, kCachedAnalyzerKeyIndex, kValidExpirationSecs);
+  ASSERT_TRUE(files::WriteFile(fetcher.cache_file_path(), pb_bytes));
+  EXPECT_TRUE(fetcher.LoadKeysFromDiskCache());
+  EXPECT_FALSE(observer_called);
+  EXPECT_EQ(fetcher.last_fetch_status(), KeyFetchStatus::kUninitialized);
+  EXPECT_EQ(fetcher.last_fetch_attempt_time_secs(), 0);
+}
+
+TEST_F(KeyFetcherTest, ScheduledFetchNotifiesStatusObserver) {
+  FakeSystemClock clock(kInitialTimeSecs);
+  util::DynamicEncryptedMessageMaker shuffler_maker(&clock);
+  util::DynamicEncryptedMessageMaker analyzer_maker(&clock);
+
+  const std::string pb_bytes = BuildPublicKeysBytes(
+      kFetchedShufflerKeyIndex, kFetchedAnalyzerKeyIndex, kUpdatedExpirationSecs);
+  auto stub_http_client =
+      std::make_unique<StubHTTPClient>(lib::HTTPResponse(pb_bytes, Status::OkStatus(), kHttpOk));
+
+  KeyFetcher fetcher(dispatcher(), std::move(stub_http_client), &shuffler_maker, &analyzer_maker,
+                     &clock, system_data::Environment::PROD, kTestCacheDir, kTestPublicKeysUrl,
+                     ImmediateScheduleOptions());
+
+  KeyFetchStatus observed_status = KeyFetchStatus::kUninitialized;
+  std::optional<uint32_t> observed_failures;
+  int64_t observed_time_secs = 0;
+  uint32_t observed_shuffler_key_index = 0;
+  uint32_t observed_analyzer_key_index = 0;
+  fetcher.SetStatusObserver(
+      [&](KeyFetchStatus status, uint32_t consecutive_failures, int64_t attempt_time_secs) {
+        observed_status = status;
+        observed_failures = consecutive_failures;
+        observed_time_secs = attempt_time_secs;
+        observed_shuffler_key_index = shuffler_maker.key_index();
+        observed_analyzer_key_index = analyzer_maker.key_index();
+      });
+
+  fetcher.OnSystemClockBecomesAccurate();
+  RunLoopUntilIdle();
+
+  EXPECT_EQ(fetcher.last_fetch_attempt_time_secs(), kInitialTimeSecs);
+  EXPECT_EQ(observed_status, KeyFetchStatus::kSuccess);
+  EXPECT_EQ(observed_failures, 0u);
+  EXPECT_EQ(observed_time_secs, kInitialTimeSecs);
+  EXPECT_EQ(observed_shuffler_key_index, kFetchedShufflerKeyIndex);
+  EXPECT_EQ(observed_analyzer_key_index, kFetchedAnalyzerKeyIndex);
+}
+
+TEST_F(KeyFetcherTest, ScheduledFetchFailureAndRecoveryNotifiesStatusObserver) {
+  FakeSystemClock clock(kInitialTimeSecs);
+  util::DynamicEncryptedMessageMaker shuffler_maker(&clock);
+  util::DynamicEncryptedMessageMaker analyzer_maker(&clock);
+
+  auto stub_http_client = std::make_unique<StubHTTPClient>(
+      lib::HTTPResponse("unavailable", Status::OkStatus(), kHttpServiceUnavailable));
+  auto* stub_http_client_ptr = stub_http_client.get();
+
+  zx::time_boot fake_boot_time{0};
+  KeyFetcher::ScheduleOptions opts{
+      .max_initial_jitter = zx::sec(0),
+      .steady_state_interval = zx::hour(24),
+      .steady_state_jitter = zx::sec(0),
+      .poll_interval = zx::hour(1),
+      .boot_clock = [&fake_boot_time] { return fake_boot_time; },
+      .urgent_expiry_threshold = kDefaultUrgentExpiryThreshold,
+      .urgent_poll_interval = zx::hour(1),
+      .urgent_poll_jitter = zx::sec(0),
+  };
+
+  KeyFetcher fetcher(dispatcher(), std::move(stub_http_client), &shuffler_maker, &analyzer_maker,
+                     &clock, system_data::Environment::PROD, kTestCacheDir, kTestPublicKeysUrl,
+                     opts);
+
+  KeyFetchStatus observed_status = KeyFetchStatus::kUninitialized;
+  std::optional<uint32_t> observed_failures;
+  int64_t observed_time_secs = 0;
+  fetcher.SetStatusObserver(
+      [&](KeyFetchStatus status, uint32_t consecutive_failures, int64_t attempt_time_secs) {
+        observed_status = status;
+        observed_failures = consecutive_failures;
+        observed_time_secs = attempt_time_secs;
+      });
+
+  fetcher.OnSystemClockBecomesAccurate();
+  RunLoopUntilIdle();
+  EXPECT_EQ(observed_status, KeyFetchStatus::kNetworkError);
+  EXPECT_EQ(observed_failures, 1u);
+  EXPECT_EQ(observed_time_secs, kInitialTimeSecs);
+
+  constexpr int64_t kSecondAttemptSecs = 1300;
+  clock.SetNowSecs(kSecondAttemptSecs);
+  fake_boot_time += zx::min(10);
+  RunLoopFor(zx::min(10));
+  EXPECT_EQ(observed_status, KeyFetchStatus::kNetworkError);
+  EXPECT_EQ(observed_failures, 2u);
+  EXPECT_EQ(observed_time_secs, kSecondAttemptSecs);
+
+  constexpr int64_t kRecoveryAttemptSecs = 2500;
+  clock.SetNowSecs(kRecoveryAttemptSecs);
+  stub_http_client_ptr->SetResponse(
+      lib::HTTPResponse(BuildPublicKeysBytes(kFetchedShufflerKeyIndex, kFetchedAnalyzerKeyIndex,
+                                             kScheduledExpirationSecs),
+                        Status::OkStatus(), kHttpOk));
+  fake_boot_time += zx::min(20);
+  RunLoopFor(zx::min(20));
+  EXPECT_EQ(observed_status, KeyFetchStatus::kSuccess);
+  EXPECT_EQ(observed_failures, 0u);
+  EXPECT_EQ(observed_time_secs, kRecoveryAttemptSecs);
 }
 
 TEST_F(KeyFetcherTest, ScheduledFetchDiskWriteFailureStillAppliesKeysInMemory) {
@@ -820,6 +960,9 @@ TEST_F(KeyFetcherTest, ScheduledPollingAppliesInitialAndSteadyStateJitter) {
       .poll_interval = zx::hour(1),
       .boot_clock = [this,
                      &boot_offset] { return zx::time_boot(test_loop().Now().get()) + boot_offset; },
+      .urgent_expiry_threshold = kDefaultUrgentExpiryThreshold,
+      .urgent_poll_interval = zx::hour(1),
+      .urgent_poll_jitter = zx::sec(0),
   };
 
   KeyFetcher fetcher(dispatcher(), std::move(stub_http_client), &shuffler_maker, &analyzer_maker,
@@ -860,6 +1003,9 @@ TEST_F(KeyFetcherTest, ScheduledFetchFailureRetriesWithBackoffAndRecovers) {
       .steady_state_jitter = zx::sec(0),
       .poll_interval = zx::hour(1),
       .boot_clock = [&fake_boot_time] { return fake_boot_time; },
+      .urgent_expiry_threshold = kDefaultUrgentExpiryThreshold,
+      .urgent_poll_interval = zx::hour(1),
+      .urgent_poll_jitter = zx::sec(0),
   };
 
   KeyFetcher fetcher(dispatcher(), std::move(stub_http_client), &shuffler_maker, &analyzer_maker,
@@ -957,6 +1103,9 @@ TEST_F(KeyFetcherTest, SteadyStatePollingChunksIntervalsUntilBootDeadline) {
       .steady_state_jitter = zx::sec(0),
       .poll_interval = zx::hour(1),
       .boot_clock = [&fake_boot_time] { return fake_boot_time; },
+      .urgent_expiry_threshold = kDefaultUrgentExpiryThreshold,
+      .urgent_poll_interval = zx::hour(1),
+      .urgent_poll_jitter = zx::sec(0),
   };
 
   KeyFetcher fetcher(dispatcher(), std::move(stub_http_client), &shuffler_maker, &analyzer_maker,
@@ -991,9 +1140,10 @@ TEST_F(KeyFetcherTest, SteadyStatePollingFetchesImmediatelyWhenActiveKeyExpiresE
   util::DynamicEncryptedMessageMaker shuffler_maker(&clock);
   util::DynamicEncryptedMessageMaker analyzer_maker(&clock);
 
-  auto stub_http_client = std::make_unique<StubHTTPClient>(lib::HTTPResponse(
-      BuildPublicKeysBytes(kCachedShufflerKeyIndex, kCachedAnalyzerKeyIndex, kValidExpirationSecs),
-      Status::OkStatus(), kHttpOk));
+  auto stub_http_client = std::make_unique<StubHTTPClient>(
+      lib::HTTPResponse(BuildPublicKeysBytes(kCachedShufflerKeyIndex, kCachedAnalyzerKeyIndex,
+                                             kScheduledExpirationSecs),
+                        Status::OkStatus(), kHttpOk));
   auto* stub_http_client_ptr = stub_http_client.get();
 
   zx::time_boot fake_boot_time{0};
@@ -1001,8 +1151,11 @@ TEST_F(KeyFetcherTest, SteadyStatePollingFetchesImmediatelyWhenActiveKeyExpiresE
       .max_initial_jitter = zx::sec(0),
       .steady_state_interval = zx::hour(24),
       .steady_state_jitter = zx::sec(0),
-      .poll_interval = zx::hour(1),
+      .poll_interval = zx::min(15),
       .boot_clock = [&fake_boot_time] { return fake_boot_time; },
+      .urgent_expiry_threshold = kDefaultUrgentExpiryThreshold,
+      .urgent_poll_interval = zx::hour(1),
+      .urgent_poll_jitter = zx::sec(0),
   };
 
   KeyFetcher fetcher(dispatcher(), std::move(stub_http_client), &shuffler_maker, &analyzer_maker,
@@ -1014,18 +1167,317 @@ TEST_F(KeyFetcherTest, SteadyStatePollingFetchesImmediatelyWhenActiveKeyExpiresE
   ASSERT_EQ(stub_http_client_ptr->get_call_count(), 1);
   ASSERT_EQ(shuffler_maker.key_index(), kCachedShufflerKeyIndex);
 
-  // Advance system clock past kValidExpirationSecs before the 24-hour boot deadline.
-  clock.SetNowSecs(kUpdatedExpirationSecs);
+  // Advance system clock past kScheduledExpirationSecs before the 1-hour urgent poll interval and
+  // 24-hour boot deadline.
+  constexpr int64_t kPostExpirationTimeSecs = kScheduledExpirationSecs + 100;
+  clock.SetNowSecs(kPostExpirationTimeSecs);
+  stub_http_client_ptr->SetResponse(
+      lib::HTTPResponse(BuildPublicKeysBytes(kFetchedShufflerKeyIndex, kFetchedAnalyzerKeyIndex,
+                                             kPostExpirationTimeSecs + kThirtyDaysSecs),
+                        Status::OkStatus(), kHttpOk));
+
+  fake_boot_time += zx::min(15);
+  RunLoopFor(zx::min(15));
+  EXPECT_EQ(stub_http_client_ptr->get_call_count(), 2);
+  EXPECT_EQ(shuffler_maker.key_index(), kFetchedShufflerKeyIndex);
+  EXPECT_EQ(analyzer_maker.key_index(), kFetchedAnalyzerKeyIndex);
+}
+
+TEST_F(KeyFetcherTest, UrgentExpiryPollingAcceleratesWhenFetchedKeyExpiresWithinThreshold) {
+  FakeSystemClock clock(kInitialTimeSecs);
+  util::DynamicEncryptedMessageMaker shuffler_maker(&clock);
+  util::DynamicEncryptedMessageMaker analyzer_maker(&clock);
+
+  constexpr int64_t kUrgentExpirationSecs = kInitialTimeSecs + kSevenDaysSecs - 1;
+  auto stub_http_client = std::make_unique<StubHTTPClient>(lib::HTTPResponse(
+      BuildPublicKeysBytes(kCachedShufflerKeyIndex, kCachedAnalyzerKeyIndex, kUrgentExpirationSecs),
+      Status::OkStatus(), kHttpOk));
+  auto* stub_http_client_ptr = stub_http_client.get();
+
+  zx::time_boot fake_boot_time{0};
+  KeyFetcher::ScheduleOptions opts{
+      .max_initial_jitter = zx::sec(0),
+      .steady_state_interval = zx::hour(24),
+      .steady_state_jitter = zx::sec(0),
+      .poll_interval = zx::hour(1),
+      .boot_clock = [&fake_boot_time] { return fake_boot_time; },
+      .urgent_expiry_threshold = kDefaultUrgentExpiryThreshold,
+      .urgent_poll_interval = zx::hour(1),
+      .urgent_poll_jitter = zx::sec(0),
+  };
+
+  KeyFetcher fetcher(dispatcher(), std::move(stub_http_client), &shuffler_maker, &analyzer_maker,
+                     &clock, system_data::Environment::PROD, kTestCacheDir, kTestPublicKeysUrl,
+                     opts);
+
+  fetcher.OnSystemClockBecomesAccurate();
+  RunLoopUntilIdle();
+  ASSERT_EQ(stub_http_client_ptr->get_call_count(), 1);
+  ASSERT_EQ(shuffler_maker.key_index(), kCachedShufflerKeyIndex);
+
+  // Because the active key has < 7 days remaining, the next fetch fires after 1 hour instead of 24
+  // hours.
   stub_http_client_ptr->SetResponse(
       lib::HTTPResponse(BuildPublicKeysBytes(kFetchedShufflerKeyIndex, kFetchedAnalyzerKeyIndex,
                                              kScheduledExpirationSecs),
                         Status::OkStatus(), kHttpOk));
-
   fake_boot_time += zx::hour(1);
   RunLoopFor(zx::hour(1));
   EXPECT_EQ(stub_http_client_ptr->get_call_count(), 2);
   EXPECT_EQ(shuffler_maker.key_index(), kFetchedShufflerKeyIndex);
   EXPECT_EQ(analyzer_maker.key_index(), kFetchedAnalyzerKeyIndex);
+}
+
+TEST_F(KeyFetcherTest, UrgentExpiryPollingAppliesUrgentPollJitter) {
+  FakeSystemClock clock(kInitialTimeSecs);
+  util::DynamicEncryptedMessageMaker shuffler_maker(&clock);
+  util::DynamicEncryptedMessageMaker analyzer_maker(&clock);
+
+  constexpr int64_t kUrgentExpirationSecs = kInitialTimeSecs + kSevenDaysSecs - 1;
+  auto stub_http_client = std::make_unique<StubHTTPClient>(lib::HTTPResponse(
+      BuildPublicKeysBytes(kCachedShufflerKeyIndex, kCachedAnalyzerKeyIndex, kUrgentExpirationSecs),
+      Status::OkStatus(), kHttpOk));
+  auto* stub_http_client_ptr = stub_http_client.get();
+
+  zx::time_boot fake_boot_time{0};
+  KeyFetcher::ScheduleOptions opts{
+      .max_initial_jitter = zx::sec(0),
+      .steady_state_interval = zx::hour(24),
+      .steady_state_jitter = zx::sec(0),
+      .poll_interval = zx::min(5),
+      .boot_clock = [&fake_boot_time] { return fake_boot_time; },
+      .urgent_expiry_threshold = kDefaultUrgentExpiryThreshold,
+      .urgent_poll_interval = zx::hour(1),
+      .urgent_poll_jitter = zx::min(10),
+  };
+
+  KeyFetcher fetcher(dispatcher(), std::move(stub_http_client), &shuffler_maker, &analyzer_maker,
+                     &clock, system_data::Environment::PROD, kTestCacheDir, kTestPublicKeysUrl,
+                     opts);
+
+  fetcher.OnSystemClockBecomesAccurate();
+  RunLoopUntilIdle();
+  ASSERT_EQ(stub_http_client_ptr->get_call_count(), 1);
+
+  // At 45 minutes (before the 50 minute lower bound of 1h - 10m), the urgent fetch has not fired.
+  fake_boot_time += zx::min(45);
+  RunLoopFor(zx::min(45));
+  EXPECT_EQ(stub_http_client_ptr->get_call_count(), 1);
+
+  // At 75 minutes (past the 70 minute upper bound of 1h + 10m), the urgent fetch must have fired.
+  fake_boot_time += zx::min(30);
+  RunLoopFor(zx::min(30));
+  EXPECT_EQ(stub_http_client_ptr->get_call_count(), 2);
+}
+
+TEST_F(KeyFetcherTest, UrgentExpiryPollingReturnsToSteadyStateIntervalAfterKeyRotation) {
+  FakeSystemClock clock(kInitialTimeSecs);
+  util::DynamicEncryptedMessageMaker shuffler_maker(&clock);
+  util::DynamicEncryptedMessageMaker analyzer_maker(&clock);
+
+  constexpr int64_t kUrgentExpirationSecs = kInitialTimeSecs + kSevenDaysSecs - 1;
+  auto stub_http_client = std::make_unique<StubHTTPClient>(lib::HTTPResponse(
+      BuildPublicKeysBytes(kCachedShufflerKeyIndex, kCachedAnalyzerKeyIndex, kUrgentExpirationSecs),
+      Status::OkStatus(), kHttpOk));
+  auto* stub_http_client_ptr = stub_http_client.get();
+
+  zx::time_boot fake_boot_time{0};
+  KeyFetcher::ScheduleOptions opts{
+      .max_initial_jitter = zx::sec(0),
+      .steady_state_interval = zx::hour(24),
+      .steady_state_jitter = zx::sec(0),
+      .poll_interval = zx::hour(1),
+      .boot_clock = [&fake_boot_time] { return fake_boot_time; },
+      .urgent_expiry_threshold = kDefaultUrgentExpiryThreshold,
+      .urgent_poll_interval = zx::hour(1),
+      .urgent_poll_jitter = zx::sec(0),
+  };
+
+  KeyFetcher fetcher(dispatcher(), std::move(stub_http_client), &shuffler_maker, &analyzer_maker,
+                     &clock, system_data::Environment::PROD, kTestCacheDir, kTestPublicKeysUrl,
+                     opts);
+
+  fetcher.OnSystemClockBecomesAccurate();
+  RunLoopUntilIdle();
+  ASSERT_EQ(stub_http_client_ptr->get_call_count(), 1);
+
+  stub_http_client_ptr->SetResponse(
+      lib::HTTPResponse(BuildPublicKeysBytes(kFetchedShufflerKeyIndex, kFetchedAnalyzerKeyIndex,
+                                             kScheduledExpirationSecs),
+                        Status::OkStatus(), kHttpOk));
+  fake_boot_time += zx::hour(1);
+  RunLoopFor(zx::hour(1));
+  ASSERT_EQ(stub_http_client_ptr->get_call_count(), 2);
+
+  // Once rotated to a key with >= 7 days remaining, polling returns to the 24-hour interval.
+  fake_boot_time += zx::hour(1);
+  RunLoopFor(zx::hour(1));
+  EXPECT_EQ(stub_http_client_ptr->get_call_count(), 2);
+
+  fake_boot_time += zx::hour(23);
+  RunLoopFor(zx::hour(1));
+  EXPECT_EQ(stub_http_client_ptr->get_call_count(), 3);
+}
+
+TEST_F(KeyFetcherTest, UrgentExpiryPollingDoesNotAccelerateAtExactThresholdBoundary) {
+  FakeSystemClock clock(kInitialTimeSecs);
+  util::DynamicEncryptedMessageMaker shuffler_maker(&clock);
+  util::DynamicEncryptedMessageMaker analyzer_maker(&clock);
+
+  constexpr int64_t kBoundaryExpirationSecs = kInitialTimeSecs + kSevenDaysSecs;
+  auto stub_http_client = std::make_unique<StubHTTPClient>(
+      lib::HTTPResponse(BuildPublicKeysBytes(kCachedShufflerKeyIndex, kCachedAnalyzerKeyIndex,
+                                             kBoundaryExpirationSecs),
+                        Status::OkStatus(), kHttpOk));
+  auto* stub_http_client_ptr = stub_http_client.get();
+
+  zx::time_boot fake_boot_time{0};
+  KeyFetcher::ScheduleOptions opts{
+      .max_initial_jitter = zx::sec(0),
+      .steady_state_interval = zx::hour(24),
+      .steady_state_jitter = zx::sec(0),
+      .poll_interval = zx::hour(1),
+      .boot_clock = [&fake_boot_time] { return fake_boot_time; },
+      .urgent_expiry_threshold = kDefaultUrgentExpiryThreshold,
+      .urgent_poll_interval = zx::hour(1),
+      .urgent_poll_jitter = zx::sec(0),
+  };
+
+  KeyFetcher fetcher(dispatcher(), std::move(stub_http_client), &shuffler_maker, &analyzer_maker,
+                     &clock, system_data::Environment::PROD, kTestCacheDir, kTestPublicKeysUrl,
+                     opts);
+
+  fetcher.OnSystemClockBecomesAccurate();
+  RunLoopUntilIdle();
+  ASSERT_EQ(stub_http_client_ptr->get_call_count(), 1);
+
+  // Remaining lifetime is exactly 7 days (not strictly < 7 days), so 1 hour does not trigger an
+  // urgent fetch.
+  fake_boot_time += zx::hour(1);
+  RunLoopFor(zx::hour(1));
+  EXPECT_EQ(stub_http_client_ptr->get_call_count(), 1);
+}
+
+TEST_F(KeyFetcherTest, UrgentExpiryPollingClampsMidCycleDeadlineWhenEnteringThresholdWindow) {
+  FakeSystemClock clock(kInitialTimeSecs);
+  util::DynamicEncryptedMessageMaker shuffler_maker(&clock);
+  util::DynamicEncryptedMessageMaker analyzer_maker(&clock);
+
+  constexpr int64_t kInitiallyNonUrgentExpirationSecs =
+      kInitialTimeSecs + kSevenDaysSecs + zx::min(20).to_secs();
+  auto stub_http_client = std::make_unique<StubHTTPClient>(
+      lib::HTTPResponse(BuildPublicKeysBytes(kCachedShufflerKeyIndex, kCachedAnalyzerKeyIndex,
+                                             kInitiallyNonUrgentExpirationSecs),
+                        Status::OkStatus(), kHttpOk));
+  auto* stub_http_client_ptr = stub_http_client.get();
+
+  zx::time_boot fake_boot_time{0};
+  KeyFetcher::ScheduleOptions opts{
+      .max_initial_jitter = zx::sec(0),
+      .steady_state_interval = zx::hour(24),
+      .steady_state_jitter = zx::sec(0),
+      .poll_interval = zx::min(15),
+      .boot_clock = [&fake_boot_time] { return fake_boot_time; },
+      .urgent_expiry_threshold = kDefaultUrgentExpiryThreshold,
+      .urgent_poll_interval = zx::hour(1),
+      .urgent_poll_jitter = zx::sec(0),
+  };
+
+  KeyFetcher fetcher(dispatcher(), std::move(stub_http_client), &shuffler_maker, &analyzer_maker,
+                     &clock, system_data::Environment::PROD, kTestCacheDir, kTestPublicKeysUrl,
+                     opts);
+
+  fetcher.OnSystemClockBecomesAccurate();
+  RunLoopUntilIdle();
+  ASSERT_EQ(stub_http_client_ptr->get_call_count(), 1);
+
+  // After 15 minutes of boot time and 25 minutes of UTC clock advancement, remaining lifetime is
+  // 7 days - 5 minutes (< 7 days). The deadline is clamped from 24 hours to 1 hour (45 minutes
+  // remaining), so no fetch fires yet at 15 minutes.
+  clock.SetNowSecs(kInitialTimeSecs + zx::min(25).to_secs());
+  fake_boot_time += zx::min(15);
+  RunLoopFor(zx::min(15));
+  EXPECT_EQ(stub_http_client_ptr->get_call_count(), 1);
+
+  // At 1 hour of boot time since the initial fetch, the clamped urgent deadline fires.
+  fake_boot_time += zx::min(45);
+  RunLoopFor(zx::min(45));
+  EXPECT_EQ(stub_http_client_ptr->get_call_count(), 2);
+}
+
+TEST_F(KeyFetcherTest, UrgentExpiryPollingRetriesWithBackoffOnFailure) {
+  FakeSystemClock clock(kInitialTimeSecs);
+  util::DynamicEncryptedMessageMaker shuffler_maker(&clock);
+  util::DynamicEncryptedMessageMaker analyzer_maker(&clock);
+
+  constexpr int64_t kUrgentExpirationSecs = kInitialTimeSecs + kSevenDaysSecs - 1;
+  auto stub_http_client = std::make_unique<StubHTTPClient>(lib::HTTPResponse(
+      BuildPublicKeysBytes(kCachedShufflerKeyIndex, kCachedAnalyzerKeyIndex, kUrgentExpirationSecs),
+      Status::OkStatus(), kHttpOk));
+  auto* stub_http_client_ptr = stub_http_client.get();
+
+  zx::time_boot fake_boot_time{0};
+  KeyFetcher::ScheduleOptions opts{
+      .max_initial_jitter = zx::sec(0),
+      .steady_state_interval = zx::hour(24),
+      .steady_state_jitter = zx::sec(0),
+      .poll_interval = zx::min(5),
+      .boot_clock = [&fake_boot_time] { return fake_boot_time; },
+      .urgent_expiry_threshold = kDefaultUrgentExpiryThreshold,
+      .urgent_poll_interval = zx::min(15),
+      .urgent_poll_jitter = zx::sec(0),
+  };
+
+  KeyFetcher fetcher(dispatcher(), std::move(stub_http_client), &shuffler_maker, &analyzer_maker,
+                     &clock, system_data::Environment::PROD, kTestCacheDir, kTestPublicKeysUrl,
+                     opts);
+
+  fetcher.OnSystemClockBecomesAccurate();
+  RunLoopUntilIdle();
+  ASSERT_EQ(stub_http_client_ptr->get_call_count(), 1);
+  ASSERT_EQ(fetcher.consecutive_fetch_failures(), 0u);
+
+  // At 15 minutes (urgent_poll_interval), the urgent fetch fires and fails with HTTP 503.
+  stub_http_client_ptr->SetResponse(
+      lib::HTTPResponse("unavailable", Status::OkStatus(), kHttpServiceUnavailable));
+  fake_boot_time += zx::min(15);
+  RunLoopFor(zx::min(15));
+  ASSERT_EQ(stub_http_client_ptr->get_call_count(), 2);
+  EXPECT_EQ(fetcher.consecutive_fetch_failures(), 1u);
+
+  // Failure 1 -> retry delay is in [5m, 10m].
+  fake_boot_time += zx::min(10);
+  RunLoopFor(zx::min(10));
+  ASSERT_EQ(stub_http_client_ptr->get_call_count(), 3);
+  EXPECT_EQ(fetcher.consecutive_fetch_failures(), 2u);
+
+  // Failure 2 -> retry delay is in [10m, 20m].
+  fake_boot_time += zx::min(20);
+  RunLoopFor(zx::min(20));
+  ASSERT_EQ(stub_http_client_ptr->get_call_count(), 4);
+  EXPECT_EQ(fetcher.consecutive_fetch_failures(), 3u);
+
+  // Failure 3 -> retry delay is in [20m, 40m], which exceeds urgent_poll_interval (15m).
+  // Advancing 15 minutes must NOT clamp the backoff deadline down to urgent_poll_interval.
+  fake_boot_time += zx::min(15);
+  RunLoopFor(zx::min(15));
+  EXPECT_EQ(stub_http_client_ptr->get_call_count(), 4);
+  EXPECT_EQ(fetcher.consecutive_fetch_failures(), 3u);
+
+  // Once the [20m, 40m] backoff window elapses and the server recovers, consecutive_fetch_failures_
+  // resets to 0 and urgent polling resumes at urgent_poll_interval (15m).
+  stub_http_client_ptr->SetResponse(
+      lib::HTTPResponse(BuildPublicKeysBytes(kFetchedShufflerKeyIndex, kFetchedAnalyzerKeyIndex,
+                                             kUrgentExpirationSecs),
+                        Status::OkStatus(), kHttpOk));
+  fake_boot_time += zx::min(25);
+  RunLoopFor(zx::min(25));
+  ASSERT_EQ(stub_http_client_ptr->get_call_count(), 5);
+  EXPECT_EQ(fetcher.consecutive_fetch_failures(), 0u);
+
+  fake_boot_time += zx::min(15);
+  RunLoopFor(zx::min(15));
+  EXPECT_EQ(stub_http_client_ptr->get_call_count(), 6);
 }
 
 TEST_F(KeyFetcherTest, DestructorCancelsPendingScheduledFetchTask) {
@@ -1055,6 +1507,317 @@ TEST_F(KeyFetcherTest, DestructorCancelsPendingScheduledFetchTask) {
   RunLoopFor(zx::min(15));
   EXPECT_EQ(shuffler_maker.key_index(), kBundledShufflerKeyIndex);
   EXPECT_EQ(analyzer_maker.key_index(), kBundledAnalyzerKeyIndex);
+}
+
+TEST_F(KeyFetcherTest, OnNetworkReconnectIsNoOpBeforeSystemClockBecomesAccurate) {
+  FakeSystemClock clock(kInitialTimeSecs);
+  util::DynamicEncryptedMessageMaker shuffler_maker(&clock);
+  util::DynamicEncryptedMessageMaker analyzer_maker(&clock);
+
+  auto stub_http_client = std::make_unique<StubHTTPClient>(
+      lib::HTTPResponse(BuildPublicKeysBytes(kFetchedShufflerKeyIndex, kFetchedAnalyzerKeyIndex,
+                                             kScheduledExpirationSecs),
+                        Status::OkStatus(), kHttpOk));
+  auto* stub_http_client_ptr = stub_http_client.get();
+
+  KeyFetcher fetcher(dispatcher(), std::move(stub_http_client), &shuffler_maker, &analyzer_maker,
+                     &clock, system_data::Environment::PROD, kTestCacheDir, kTestPublicKeysUrl,
+                     ImmediateScheduleOptions());
+
+  fetcher.OnNetworkReconnect();
+  RunLoopUntilIdle();
+  EXPECT_EQ(stub_http_client_ptr->get_call_count(), 0);
+  EXPECT_EQ(fetcher.last_fetch_status(), KeyFetchStatus::kUninitialized);
+}
+
+TEST_F(KeyFetcherTest, OnNetworkReconnectBypassesFailureBackoffAndRecoversImmediately) {
+  FakeSystemClock clock(kInitialTimeSecs);
+  util::DynamicEncryptedMessageMaker shuffler_maker(&clock);
+  util::DynamicEncryptedMessageMaker analyzer_maker(&clock);
+
+  auto stub_http_client = std::make_unique<StubHTTPClient>(
+      lib::HTTPResponse("unavailable", Status::OkStatus(), kHttpServiceUnavailable));
+  auto* stub_http_client_ptr = stub_http_client.get();
+
+  zx::time_boot fake_boot_time{0};
+  KeyFetcher::ScheduleOptions opts = ImmediateScheduleOptions();
+  opts.boot_clock = [&fake_boot_time] { return fake_boot_time; };
+
+  KeyFetcher fetcher(dispatcher(), std::move(stub_http_client), &shuffler_maker, &analyzer_maker,
+                     &clock, system_data::Environment::PROD, kTestCacheDir, kTestPublicKeysUrl,
+                     opts);
+
+  fetcher.OnSystemClockBecomesAccurate();
+  RunLoopUntilIdle();
+  ASSERT_EQ(stub_http_client_ptr->get_call_count(), 1);
+  ASSERT_EQ(fetcher.last_fetch_status(), KeyFetchStatus::kNetworkError);
+  ASSERT_EQ(fetcher.consecutive_fetch_failures(), 1u);
+
+  // Before the [5m, 10m] retry backoff elapses, network reachability is restored and
+  // OnNetworkReconnect() immediately fetches and applies the keys.
+  stub_http_client_ptr->SetResponse(
+      lib::HTTPResponse(BuildPublicKeysBytes(kFetchedShufflerKeyIndex, kFetchedAnalyzerKeyIndex,
+                                             kScheduledExpirationSecs),
+                        Status::OkStatus(), kHttpOk));
+  fake_boot_time += zx::sec(5);
+  fetcher.OnNetworkReconnect();
+
+  EXPECT_EQ(stub_http_client_ptr->get_call_count(), 2);
+  EXPECT_EQ(fetcher.last_fetch_status(), KeyFetchStatus::kSuccess);
+  EXPECT_EQ(fetcher.consecutive_fetch_failures(), 0u);
+  EXPECT_EQ(shuffler_maker.key_index(), kFetchedShufflerKeyIndex);
+  EXPECT_EQ(analyzer_maker.key_index(), kFetchedAnalyzerKeyIndex);
+}
+
+TEST_F(KeyFetcherTest, OnNetworkReconnectFetchesImmediatelyWhenActiveKeyIsExpired) {
+  FakeSystemClock clock(kInitialTimeSecs);
+  util::DynamicEncryptedMessageMaker shuffler_maker(&clock);
+  util::DynamicEncryptedMessageMaker analyzer_maker(&clock);
+
+  constexpr int64_t kFirstExpirationSecs = kInitialTimeSecs + kThirtyDaysSecs;
+  constexpr int64_t kRotatedExpirationSecs = kFirstExpirationSecs + kThirtyDaysSecs;
+  auto stub_http_client = std::make_unique<StubHTTPClient>(lib::HTTPResponse(
+      BuildPublicKeysBytes(kCachedShufflerKeyIndex, kCachedAnalyzerKeyIndex, kFirstExpirationSecs),
+      Status::OkStatus(), kHttpOk));
+  auto* stub_http_client_ptr = stub_http_client.get();
+
+  zx::time_boot fake_boot_time{0};
+  KeyFetcher::ScheduleOptions opts = ImmediateScheduleOptions();
+  opts.boot_clock = [&fake_boot_time] { return fake_boot_time; };
+
+  KeyFetcher fetcher(dispatcher(), std::move(stub_http_client), &shuffler_maker, &analyzer_maker,
+                     &clock, system_data::Environment::PROD, kTestCacheDir, kTestPublicKeysUrl,
+                     opts);
+
+  fetcher.OnSystemClockBecomesAccurate();
+  RunLoopUntilIdle();
+  ASSERT_EQ(stub_http_client_ptr->get_call_count(), 1);
+
+  stub_http_client_ptr->SetResponse(
+      lib::HTTPResponse(BuildPublicKeysBytes(kFetchedShufflerKeyIndex, kFetchedAnalyzerKeyIndex,
+                                             kRotatedExpirationSecs),
+                        Status::OkStatus(), kHttpOk));
+  clock.SetNowSecs(kFirstExpirationSecs);
+  fetcher.OnNetworkReconnect();
+
+  EXPECT_EQ(stub_http_client_ptr->get_call_count(), 2);
+  EXPECT_EQ(shuffler_maker.key_index(), kFetchedShufflerKeyIndex);
+  EXPECT_EQ(analyzer_maker.key_index(), kFetchedAnalyzerKeyIndex);
+  EXPECT_FALSE(shuffler_maker.IsExpired());
+  EXPECT_FALSE(analyzer_maker.IsExpired());
+}
+
+TEST_F(KeyFetcherTest, OnNetworkReconnectFetchesWhenBootDeadlineElapsedDuringSuspend) {
+  FakeSystemClock clock(kInitialTimeSecs);
+  util::DynamicEncryptedMessageMaker shuffler_maker(&clock);
+  util::DynamicEncryptedMessageMaker analyzer_maker(&clock);
+
+  auto stub_http_client = std::make_unique<StubHTTPClient>(
+      lib::HTTPResponse(BuildPublicKeysBytes(kCachedShufflerKeyIndex, kCachedAnalyzerKeyIndex,
+                                             kScheduledExpirationSecs),
+                        Status::OkStatus(), kHttpOk));
+  auto* stub_http_client_ptr = stub_http_client.get();
+
+  zx::time_boot fake_boot_time{0};
+  KeyFetcher::ScheduleOptions opts = ImmediateScheduleOptions();
+  opts.steady_state_jitter = zx::sec(0);
+  opts.boot_clock = [&fake_boot_time] { return fake_boot_time; };
+
+  KeyFetcher fetcher(dispatcher(), std::move(stub_http_client), &shuffler_maker, &analyzer_maker,
+                     &clock, system_data::Environment::PROD, kTestCacheDir, kTestPublicKeysUrl,
+                     opts);
+
+  fetcher.OnSystemClockBecomesAccurate();
+  RunLoopUntilIdle();
+  ASSERT_EQ(stub_http_client_ptr->get_call_count(), 1);
+
+  // Advance boot_clock past the 24-hour steady-state deadline without running the monotonic loop.
+  stub_http_client_ptr->SetResponse(
+      lib::HTTPResponse(BuildPublicKeysBytes(kFetchedShufflerKeyIndex, kFetchedAnalyzerKeyIndex,
+                                             kScheduledExpirationSecs),
+                        Status::OkStatus(), kHttpOk));
+  fake_boot_time += zx::hour(24);
+  fetcher.OnNetworkReconnect();
+
+  EXPECT_EQ(stub_http_client_ptr->get_call_count(), 2);
+  EXPECT_EQ(shuffler_maker.key_index(), kFetchedShufflerKeyIndex);
+  EXPECT_EQ(analyzer_maker.key_index(), kFetchedAnalyzerKeyIndex);
+}
+
+TEST_F(KeyFetcherTest, OnNetworkReconnectAcceleratesToUrgentDeadlineWhenActiveKeyExpiringSoon) {
+  FakeSystemClock clock(kInitialTimeSecs);
+  util::DynamicEncryptedMessageMaker shuffler_maker(&clock);
+  util::DynamicEncryptedMessageMaker analyzer_maker(&clock);
+
+  constexpr int64_t kFirstExpirationSecs = kInitialTimeSecs + kThirtyDaysSecs;
+  constexpr int64_t kRotatedExpirationSecs = kFirstExpirationSecs + kThirtyDaysSecs;
+  auto stub_http_client = std::make_unique<StubHTTPClient>(lib::HTTPResponse(
+      BuildPublicKeysBytes(kCachedShufflerKeyIndex, kCachedAnalyzerKeyIndex, kFirstExpirationSecs),
+      Status::OkStatus(), kHttpOk));
+  auto* stub_http_client_ptr = stub_http_client.get();
+
+  zx::time_boot fake_boot_time{0};
+  KeyFetcher::ScheduleOptions opts = ImmediateScheduleOptions();
+  opts.steady_state_jitter = zx::sec(0);
+  opts.boot_clock = [&fake_boot_time] { return fake_boot_time; };
+
+  KeyFetcher fetcher(dispatcher(), std::move(stub_http_client), &shuffler_maker, &analyzer_maker,
+                     &clock, system_data::Environment::PROD, kTestCacheDir, kTestPublicKeysUrl,
+                     opts);
+
+  fetcher.OnSystemClockBecomesAccurate();
+  RunLoopUntilIdle();
+  ASSERT_EQ(stub_http_client_ptr->get_call_count(), 1);
+
+  // Advance UTC clock into the < 7 days urgent window and boot_clock by 1 hour (reaching
+  // urgent_poll_interval while still well before the 24-hour steady-state deadline).
+  stub_http_client_ptr->SetResponse(
+      lib::HTTPResponse(BuildPublicKeysBytes(kFetchedShufflerKeyIndex, kFetchedAnalyzerKeyIndex,
+                                             kRotatedExpirationSecs),
+                        Status::OkStatus(), kHttpOk));
+  clock.SetNowSecs(kFirstExpirationSecs - kSevenDaysSecs + 1);
+  fake_boot_time += zx::hour(1);
+  fetcher.OnNetworkReconnect();
+
+  EXPECT_EQ(stub_http_client_ptr->get_call_count(), 2);
+  EXPECT_EQ(shuffler_maker.key_index(), kFetchedShufflerKeyIndex);
+  EXPECT_EQ(analyzer_maker.key_index(), kFetchedAnalyzerKeyIndex);
+}
+
+TEST_F(KeyFetcherTest, OnNetworkReconnectIsNoOpWhenKeysAreValidAndBeforeBootDeadline) {
+  FakeSystemClock clock(kInitialTimeSecs);
+  util::DynamicEncryptedMessageMaker shuffler_maker(&clock);
+  util::DynamicEncryptedMessageMaker analyzer_maker(&clock);
+
+  auto stub_http_client = std::make_unique<StubHTTPClient>(
+      lib::HTTPResponse(BuildPublicKeysBytes(kCachedShufflerKeyIndex, kCachedAnalyzerKeyIndex,
+                                             kScheduledExpirationSecs),
+                        Status::OkStatus(), kHttpOk));
+  auto* stub_http_client_ptr = stub_http_client.get();
+
+  zx::time_boot fake_boot_time{0};
+  KeyFetcher::ScheduleOptions opts = ImmediateScheduleOptions();
+  opts.boot_clock = [&fake_boot_time] { return fake_boot_time; };
+
+  KeyFetcher fetcher(dispatcher(), std::move(stub_http_client), &shuffler_maker, &analyzer_maker,
+                     &clock, system_data::Environment::PROD, kTestCacheDir, kTestPublicKeysUrl,
+                     opts);
+
+  fetcher.OnSystemClockBecomesAccurate();
+  RunLoopUntilIdle();
+  ASSERT_EQ(stub_http_client_ptr->get_call_count(), 1);
+
+  fake_boot_time += zx::min(30);
+  fetcher.OnNetworkReconnect();
+  EXPECT_EQ(stub_http_client_ptr->get_call_count(), 1);
+}
+
+TEST_F(KeyFetcherTest,
+       OnNetworkReconnectWhenExpiringSoonBeforeUrgentDeadlineReschedulesRemainingPollDelay) {
+  FakeSystemClock clock(kInitialTimeSecs);
+  util::DynamicEncryptedMessageMaker shuffler_maker(&clock);
+  util::DynamicEncryptedMessageMaker analyzer_maker(&clock);
+
+  constexpr int64_t kFirstExpirationSecs = kInitialTimeSecs + kThirtyDaysSecs;
+  constexpr int64_t kRotatedExpirationSecs = kFirstExpirationSecs + kThirtyDaysSecs;
+  auto stub_http_client = std::make_unique<StubHTTPClient>(lib::HTTPResponse(
+      BuildPublicKeysBytes(kCachedShufflerKeyIndex, kCachedAnalyzerKeyIndex, kFirstExpirationSecs),
+      Status::OkStatus(), kHttpOk));
+  auto* stub_http_client_ptr = stub_http_client.get();
+
+  zx::time_boot fake_boot_time{0};
+  KeyFetcher::ScheduleOptions opts{
+      .max_initial_jitter = zx::sec(0),
+      .steady_state_interval = zx::hour(24),
+      .steady_state_jitter = zx::sec(0),
+      .poll_interval = zx::hour(1),
+      .boot_clock = [&fake_boot_time] { return fake_boot_time; },
+      .urgent_expiry_threshold = kDefaultUrgentExpiryThreshold,
+      .urgent_poll_interval = zx::hour(1),
+      .urgent_poll_jitter = zx::sec(0),
+  };
+
+  KeyFetcher fetcher(dispatcher(), std::move(stub_http_client), &shuffler_maker, &analyzer_maker,
+                     &clock, system_data::Environment::PROD, kTestCacheDir, kTestPublicKeysUrl,
+                     opts);
+
+  fetcher.OnSystemClockBecomesAccurate();
+  RunLoopUntilIdle();
+  ASSERT_EQ(stub_http_client_ptr->get_call_count(), 1);
+
+  // Advance UTC clock into the < 7 days urgent window and boot_clock by 40 minutes while the
+  // device was suspended (monotonic clock did not advance).
+  stub_http_client_ptr->SetResponse(
+      lib::HTTPResponse(BuildPublicKeysBytes(kFetchedShufflerKeyIndex, kFetchedAnalyzerKeyIndex,
+                                             kRotatedExpirationSecs),
+                        Status::OkStatus(), kHttpOk));
+  clock.SetNowSecs(kFirstExpirationSecs - kSevenDaysSecs + 1);
+  fake_boot_time += zx::min(40);
+  fetcher.OnNetworkReconnect();
+
+  // Because urgent_poll_interval (60m) has not yet elapsed, OnNetworkReconnect() does not fetch
+  // immediately, and instead reschedules the poll task to fire after the remaining 20 minutes.
+  EXPECT_EQ(stub_http_client_ptr->get_call_count(), 1);
+
+  fake_boot_time += zx::min(19);
+  RunLoopFor(zx::min(19));
+  EXPECT_EQ(stub_http_client_ptr->get_call_count(), 1);
+
+  fake_boot_time += zx::min(1);
+  RunLoopFor(zx::min(1));
+  EXPECT_EQ(stub_http_client_ptr->get_call_count(), 2);
+  EXPECT_EQ(shuffler_maker.key_index(), kFetchedShufflerKeyIndex);
+  EXPECT_EQ(analyzer_maker.key_index(), kFetchedAnalyzerKeyIndex);
+}
+
+TEST_F(KeyFetcherTest, OnNetworkReconnectFetchesImmediatelyWhenOnlyAnalyzerKeyIsMissingOrExpired) {
+  FakeSystemClock clock(kInitialTimeSecs);
+  util::DynamicEncryptedMessageMaker shuffler_maker(&clock);
+  util::DynamicEncryptedMessageMaker analyzer_maker(&clock);
+
+  constexpr int64_t kFirstExpirationSecs = kInitialTimeSecs + kThirtyDaysSecs;
+  constexpr int64_t kSecondExpirationSecs = kFirstExpirationSecs + kThirtyDaysSecs;
+  auto stub_http_client = std::make_unique<StubHTTPClient>(lib::HTTPResponse(
+      BuildPublicKeysBytes(kCachedShufflerKeyIndex, kCachedAnalyzerKeyIndex, kFirstExpirationSecs),
+      Status::OkStatus(), kHttpOk));
+  auto* stub_http_client_ptr = stub_http_client.get();
+
+  zx::time_boot fake_boot_time{0};
+  KeyFetcher::ScheduleOptions opts = ImmediateScheduleOptions();
+  opts.steady_state_jitter = zx::sec(0);
+  opts.boot_clock = [&fake_boot_time] { return fake_boot_time; };
+
+  KeyFetcher fetcher(dispatcher(), std::move(stub_http_client), &shuffler_maker, &analyzer_maker,
+                     &clock, system_data::Environment::PROD, kTestCacheDir, kTestPublicKeysUrl,
+                     opts);
+
+  fetcher.OnSystemClockBecomesAccurate();
+  RunLoopUntilIdle();
+  ASSERT_EQ(stub_http_client_ptr->get_call_count(), 1);
+  ASSERT_EQ(fetcher.consecutive_fetch_failures(), 0u);
+
+  // Advance shuffler_maker to a later expiration while analyzer_maker remains at
+  // kFirstExpirationSecs, then advance the clock to kFirstExpirationSecs so only analyzer_maker is
+  // expired.
+  lib::statusor::StatusOr<util::ParsedKeyset> newer_keyset =
+      util::ParsePublicKeys(BuildPublicKeysBytes(kFetchedShufflerKeyIndex, kFetchedAnalyzerKeyIndex,
+                                                 kSecondExpirationSecs),
+                            system_data::Environment::PROD);
+  ASSERT_TRUE(newer_keyset.ok());
+  shuffler_maker.UpdateKey(newer_keyset->TakeShufflerKey());
+  clock.SetNowSecs(kFirstExpirationSecs);
+  ASSERT_FALSE(shuffler_maker.IsExpired());
+  ASSERT_TRUE(analyzer_maker.IsExpired());
+
+  stub_http_client_ptr->SetResponse(
+      lib::HTTPResponse(BuildPublicKeysBytes(kFetchedShufflerKeyIndex, kFetchedAnalyzerKeyIndex,
+                                             kSecondExpirationSecs),
+                        Status::OkStatus(), kHttpOk));
+  fetcher.OnNetworkReconnect();
+
+  EXPECT_EQ(stub_http_client_ptr->get_call_count(), 2);
+  EXPECT_FALSE(analyzer_maker.IsExpired());
+  EXPECT_EQ(analyzer_maker.key_index(), kFetchedAnalyzerKeyIndex);
 }
 
 }  // namespace

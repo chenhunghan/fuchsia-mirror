@@ -1,0 +1,16 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    include: [ "//src/testing/system-validation/web/apps/meta/web_view.shard.cml" ],
+    use: [
+        {
+            config: "fuchsia.testing.web.JavascriptFile",
+            key: "javascript_file",
+            type: "string",
+            max_size: 2048,
+            availability: "transitional",
+            default: "/pkg/data/javascripts/dynamic_elements.js",
+        },
+    ],
+}

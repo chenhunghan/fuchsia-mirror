@@ -50,6 +50,26 @@ pub enum PowerCpuState {
     ResumePending = 9,
 }
 
+impl TryFrom<u32> for PowerCpuState {
+    type Error = u32;
+
+    fn try_from(raw: u32) -> Result<Self, Self::Error> {
+        match raw {
+            x if x == Self::On as u32 => Ok(Self::On),
+            x if x == Self::Off as u32 => Ok(Self::Off),
+            x if x == Self::OnPending as u32 => Ok(Self::OnPending),
+            x if x == Self::Started as u32 => Ok(Self::Started),
+            x if x == Self::Stopped as u32 => Ok(Self::Stopped),
+            x if x == Self::StartPending as u32 => Ok(Self::StartPending),
+            x if x == Self::StopPending as u32 => Ok(Self::StopPending),
+            x if x == Self::Suspended as u32 => Ok(Self::Suspended),
+            x if x == Self::SuspendPending as u32 => Ok(Self::SuspendPending),
+            x if x == Self::ResumePending as u32 => Ok(Self::ResumePending),
+            _ => Err(raw),
+        }
+    }
+}
+
 /// Platform device power operations table.
 #[derive(Copy, Clone, Debug)]
 #[repr(C)]
@@ -94,55 +114,22 @@ pub const CONTROL_INTERFACE_ARM_WFI: u32 = 0;
 /// Control interface identifier for CPU power driver transitions.
 pub const CONTROL_INTERFACE_CPU_DRIVER: u32 = 1;
 
-/// FFI representation of a processor power level for energy model registration.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct ProcessorPowerLevelFfi {
-    /// Power level options (e.g. `kPowerLevelOptionsDomainIndependent`).
-    pub options: u32,
-    /// Processing rate associated with this power level.
-    pub processing_rate: u64,
-    /// Power consumption coefficient in nanowatts.
-    pub power_coefficient_nw: u64,
-    /// Power control interface (0 for `kArmWfi`, 1 for `kCpuDriver`).
-    pub control_interface: u32,
-    /// Control argument passed to the power control interface.
-    pub control_argument: u64,
-    /// Optional diagnostic name string pointer for debugging/inspect.
-    pub diagnostic_name: *const core::ffi::c_char,
-}
-
-zr::static_assert!(core::mem::size_of::<ProcessorPowerLevelFfi>() == 48);
-zr::static_assert!(core::mem::align_of::<ProcessorPowerLevelFfi>() == 8);
-
-/// FFI representation of a power domain configuration for energy model registration.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct PowerDomainConfigFfi {
-    /// Domain identifier.
-    pub domain_id: u32,
-    /// Bitmask of CPU core IDs belonging to this power domain.
-    pub cpu_mask: u64,
-    /// Pointer to the array of supported power levels.
-    pub levels: *const ProcessorPowerLevelFfi,
-    /// Number of power levels in the `levels` array.
-    pub level_count: usize,
-}
-
-zr::static_assert!(core::mem::size_of::<PowerDomainConfigFfi>() == 32);
-zr::static_assert!(core::mem::align_of::<PowerDomainConfigFfi>() == 8);
-
+pub use crate::power_management::{PowerDomainConfigFfi, ProcessorPowerLevelFfi};
 use boot_options::BootOptions;
-use power_ffi::{
-    cpp_power_management_boot_boost_enabled, cpp_power_management_register_domains,
-    cpp_power_management_set_rate_limits,
-};
 
 /// Registers the provided power domain configurations and energy models with the kernel scheduler.
-pub fn power_management_register_domains(domains: &[PowerDomainConfigFfi]) -> Result<(), Status> {
-    let ptr = if domains.is_empty() { core::ptr::null() } else { domains.as_ptr() };
-    // SAFETY: `domains` is a valid slice of `PowerDomainConfigFfi`.
-    unsafe { cpp_power_management_register_domains(ptr, domains.len()) }
+///
+/// # Safety
+///
+/// For every `PowerDomainConfigFfi` in `domains`, if `level_count > 0`, `levels` must point to a
+/// valid array of `level_count` initialized `ProcessorPowerLevelFfi` structs, and each non-null
+/// `diagnostic_name` must point to a valid NUL-terminated C string.
+pub unsafe fn power_management_register_domains(
+    domains: &[PowerDomainConfigFfi],
+) -> Result<(), Status> {
+    // SAFETY: Caller guarantees every `PowerDomainConfigFfi` in `domains` has valid `levels` and
+    // NUL-terminated `diagnostic_name` pointers.
+    unsafe { crate::power_management::register_domains(domains) }
 }
 
 /// Sets processing rate limits (min and max) for the CPU cores identified by `cpu_mask`.
@@ -157,14 +144,12 @@ pub fn power_management_set_rate_limits(
     min_rate: u64,
     max_rate: u64,
 ) -> Result<(), Status> {
-    // SAFETY: Foreign FFI call to C++ kernel scheduler helper.
-    unsafe { cpp_power_management_set_rate_limits(cpu_mask, min_rate, max_rate) }
+    crate::power_management::set_rate_limits(cpu_mask, min_rate, max_rate)
 }
 
 /// Returns whether early boot performance boosting is enabled via kernel boot options.
 pub fn power_management_boot_boost_enabled() -> bool {
-    // SAFETY: Foreign FFI call to C++ boot options query.
-    unsafe { cpp_power_management_boot_boost_enabled() }
+    crate::power_management::boot_boost_enabled()
 }
 
 /// Returns whether runtime processor power management (RPPM) is enabled via kernel boot options.
@@ -507,7 +492,8 @@ mod tests {
     /// Tests registering an empty domain slice with power_management_register_domains.
     #[test]
     fn test_power_management_register_domains_empty() {
-        let status = power_management_register_domains(&[]);
+        // SAFETY: An empty slice contains no raw pointers to dereference.
+        let status = unsafe { power_management_register_domains(&[]) };
         assert_ok!(status);
     }
 

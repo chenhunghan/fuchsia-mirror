@@ -16,12 +16,13 @@ declare_args() {
   # When all subtools that will be migrated to the SDK have been migrated,
   # this config flag will be set to true by default, deprecated, and eventually
   # removed: TODO(b/287779902)
-  ffx_build_dual_mode_plugins_as_subtools = false
+  ffx_build_dual_mode_plugins_as_subtools = true
 }
 
 # The path within the build where test host tools live
 ffx_test_host_tools_out_dir = "${host_tools_dir}"
 
+# LINT.IfChange
 # The list of ffx plugins that we'd expect to be included directly in the binary
 # for architectural reasons.
 required_ffx_plugins = [
@@ -66,6 +67,8 @@ dual_mode_defaults = [
   "//src/developer/ffx/plugins/product/data/config.json",
   "//src/developer/ffx/plugins/repository/data/config.json",
 ]
+
+# LINT.ThenChange(//src/developer/ffx/BUILD.bazel)
 
 # The same list as `dual_mode_plugins`, but with the normal suffix for plugins
 # converted to subtools.

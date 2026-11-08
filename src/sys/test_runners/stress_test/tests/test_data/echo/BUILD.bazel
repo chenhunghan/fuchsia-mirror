@@ -1,0 +1,118 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "echo_subject_bin",
+    testonly = True,
+    srcs = ["subject/main.rs"],
+    crate_name = "echo_subject",
+    crate_root = "subject/main.rs",
+    edition = "2024",
+    deps = [
+        "//examples/components/routing/fidl:echo_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "echo_subject_bin_packaged_bin",
+    testonly = True,
+    binary = ":echo_subject_bin",
+    binary_name = "echo_subject",
+)
+
+fx_component_manifest(
+    name = "echo_subject-manifest",
+    testonly = True,
+    component_name = "echo_subject",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/echo_subject.cml",
+)
+
+fx_component(
+    name = "echo_subject",
+    testonly = True,
+    compiled_manifest = ":echo_subject-manifest",
+    deps = [":echo_subject_bin_packaged_bin"],
+)
+
+rustc_binary(
+    name = "echo_actor_bin",
+    testonly = True,
+    srcs = ["actor/main.rs"],
+    crate_name = "echo_actor",
+    crate_root = "actor/main.rs",
+    edition = "2024",
+    deps = [
+        "//examples/components/routing/fidl:echo_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/sys/test_runners/stress_test/actor",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:rand",
+    ],
+)
+
+fx_packaged_binary(
+    name = "echo_actor_bin_packaged_bin",
+    testonly = True,
+    binary = ":echo_actor_bin",
+    binary_name = "echo_actor",
+)
+
+fx_component_manifest(
+    name = "echo_actor-manifest",
+    testonly = True,
+    component_name = "echo_actor",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/stress_test/actor:default.shard.cml",
+    ],
+    manifest = "meta/echo_actor.cml",
+)
+
+fx_component(
+    name = "echo_actor",
+    testonly = True,
+    compiled_manifest = ":echo_actor-manifest",
+    deps = [":echo_actor_bin_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "echo_test-manifest",
+    testonly = True,
+    component_name = "echo_test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/stress_test:default.shard.cml",
+    ],
+    manifest = "meta/echo_test.cml",
+)
+
+fx_component(
+    name = "echo_test",
+    testonly = True,
+    compiled_manifest = ":echo_test-manifest",
+)

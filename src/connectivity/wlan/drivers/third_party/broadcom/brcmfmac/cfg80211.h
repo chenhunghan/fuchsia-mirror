@@ -470,7 +470,7 @@ struct brcmf_cfg80211_info {
   bool ibss_starter;
   bool dongle_up;
   bool scan_tried;
-  bool scan_in_progress;
+  std::atomic<bool> scan_in_progress;
   uint8_t* dcmd_buf;
   uint8_t* extra_buf;
   zx_handle_t debugfsdir;
@@ -595,6 +595,7 @@ void brcmf_cfg80211_arm_vif_event(struct brcmf_cfg80211_info* cfg, struct brcmf_
                                   uint8_t pending_action);
 void brcmf_cfg80211_disarm_vif_event(struct brcmf_cfg80211_info* cfg);
 bool brcmf_cfg80211_vif_event_armed(struct brcmf_cfg80211_info* cfg);
+bool brcmf_cfg80211_vif_event_pending_add(struct brcmf_cfg80211_info* cfg);
 zx_status_t brcmf_cfg80211_wait_vif_event(struct brcmf_cfg80211_info* cfg, zx_duration_t timeout);
 zx_status_t brcmf_notify_escan_complete(struct brcmf_cfg80211_info* cfg, struct brcmf_if* ifp,
                                         bool aborted, bool fw_abort);

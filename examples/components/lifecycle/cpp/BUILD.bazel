@@ -1,0 +1,70 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_binary(
+    name = "lifecycle_example",
+    srcs = ["lifecycle.cc"],
+    gn_output_name = "lifecycle_example_cpp",
+    deps = [
+        "//sdk/fidl/fuchsia.process.lifecycle:fuchsia.process.lifecycle_hlcpp",
+        "//sdk/lib/async",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/syslog/cpp",
+    ],
+)
+
+fx_cc_binary(
+    name = "lifecycle_manager",
+    srcs = ["manager.cc"],
+    gn_output_name = "lifecycle_manager_cpp",
+    tags = ["manual"],
+    deps = [
+        "//examples/components/routing/fidl:echo_hlcpp",
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_hlcpp",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_hlcpp",
+        "//sdk/lib/async",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "lifecycle_manager_packaged_bin",
+    binary = ":lifecycle_manager",
+    binary_name = "lifecycle_manager_cpp",
+)
+
+fx_component_manifest(
+    name = "manager-component_manifest",
+    component_name = "lifecycle_manager",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/manager.cml",
+)
+
+fx_component(
+    name = "manager-component",
+    compiled_manifest = ":manager-component_manifest",
+    visibility = ["//examples/components/lifecycle:__pkg__"],
+    deps = [":lifecycle_manager_packaged_bin"],
+)

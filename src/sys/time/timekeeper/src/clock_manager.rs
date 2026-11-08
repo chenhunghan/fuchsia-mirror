@@ -748,7 +748,8 @@ impl<R: Rtc, D: 'static + Diagnostics> ClockManager<R, D> {
                                     utc_backstop,
                                     utc_reference,
                                 );
-                            } else if boot_reference < boot_min_reference
+                            } else if !(clock_started && has_logging_quality(&self.clock))
+                                && boot_reference < boot_min_reference
                             {
                                 log_rejected_boot_time_too_low(boot_reference, utc_reference, boot_min_reference);
                             } else {
@@ -1049,6 +1050,19 @@ fn log_rejected_boot_time_too_low(
     info!("    - boot_min_reference: = {boot_min_reference:?}");
     info!("    - boot_duration:      = {boot_reference_duration:?}");
     info!("    - reference utc_now   = {utc_reference:?}\n\n");
+}
+
+/// Returns true if SIGNAL_UTC_CLOCK_LOGGING_QUALITY is currently asserted on clock.
+///
+/// set_clock_from_rtc asserts this signal only when initializing the UTC clock from a valid
+/// (non-stale) RTC reading, and update_clock asserts it when starting or updating the clock from
+/// an external time source or accepted reference sample. It remains unasserted when the clock is
+/// unstarted, initialized from a stale RTC reading (RtcReading::Stale), or force-started from
+/// backstop.
+fn has_logging_quality(clock: &UtcClock) -> bool {
+    let signal = zx::Signals::from_bits(fft::SIGNAL_UTC_CLOCK_LOGGING_QUALITY)
+        .expect("SIGNAL_UTC_CLOCK_LOGGING_QUALITY is a valid signal bit");
+    matches!(clock.wait_one(signal, zx::MonotonicInstant::INFINITE_PAST), zx::WaitResult::Ok(_))
 }
 
 /// Applies an update to the supplied clock, panicking with a comprehensible error on failure.
@@ -2342,5 +2356,139 @@ mod tests {
         assert!(res.is_ok());
         // Verify clock was not started because boot reference was below threshold.
         assert_eq!(clock.get_details().unwrap().backstop, BACKSTOP_TIME);
+        assert_eq!(clock.get_details().unwrap().ticks_to_synthetic.synthetic_offset, BACKSTOP_TIME);
+    }
+
+    #[fuchsia::test]
+    fn accept_reference_sample_below_min_boot_time_when_clock_already_started() {
+        let mut executor = fasync::TestExecutor::new_with_fake_time();
+        executor.set_fake_time(fasync::MonotonicInstant::ZERO);
+        executor.set_fake_boot_to_mono_offset(zx::BootDuration::ZERO);
+        let clock = create_clock();
+        // Start the clock past backstop and assert SIGNAL_UTC_CLOCK_LOGGING_QUALITY (simulating
+        // valid RTC / persistent-state startup in set_clock_from_rtc) so clock_started and
+        // has_logging_quality are both true when maintain_clock enters.
+        let initial_utc = BACKSTOP_TIME + UtcDuration::from_minutes(30);
+        clock.update(UtcClockUpdate::builder().approximate_value(initial_utc)).unwrap();
+        clock
+            .signal(
+                zx::Signals::NONE,
+                zx::Signals::from_bits(fft::SIGNAL_UTC_CLOCK_LOGGING_QUALITY).unwrap(),
+            )
+            .unwrap();
+
+        let diagnostics = Arc::new(FakeDiagnostics::new());
+        let config = make_test_config_with_fn(|mut config| {
+            config.min_acceptable_boot_time_for_utc_update_minutes = 5;
+            config
+        });
+        let boot_now: zx::BootInstant = executor.boot_now().into();
+        assert_eq!(boot_now, zx::BootInstant::ZERO);
+        assert_lt!(boot_now, config.get_min_acceptable_boot_time_for_utc_update());
+
+        let clock_manager = create_clock_manager_no_test_signalers(
+            Arc::clone(&clock),
+            // Ensure we never get any external time samples.
+            vec![],
+            None,
+            None,
+            Arc::clone(&diagnostics),
+            config,
+        );
+
+        let (mut cmd_tx, cmd_rx) = mpsc::channel(2);
+        let b = new_state_for_test(false);
+
+        let proposed_utc = BACKSTOP_TIME + UtcDuration::from_hours(1);
+
+        let (responder, mut rx) = mpsc::channel(1);
+        let mut run_fut = pin!(async move {
+            cmd_tx
+                .send(Command::Reference {
+                    boot_reference: boot_now,
+                    utc_reference: proposed_utc,
+                    responder,
+                })
+                .await
+                .unwrap();
+
+            clock_manager.maintain_clock(cmd_rx, b).await;
+        });
+        let _ignore = run_in_fake_time(
+            &mut executor,
+            &mut run_fut,
+            fasync::MonotonicDuration::from_micros(1),
+        );
+
+        let res = rx.try_recv().unwrap();
+        assert!(res.is_ok());
+        // Verify reference sample was accepted and stepped the already-started clock even though
+        // boot_reference < boot_min_reference.
+        assert_geq!(clock.read().unwrap(), proposed_utc);
+    }
+
+    #[fuchsia::test]
+    fn reject_reference_sample_below_min_boot_time_when_clock_started_without_logging_quality() {
+        let mut executor = fasync::TestExecutor::new_with_fake_time();
+        executor.set_fake_time(fasync::MonotonicInstant::ZERO);
+        executor.set_fake_boot_to_mono_offset(zx::BootDuration::ZERO);
+        let clock = create_clock();
+        // Start the clock past backstop without asserting SIGNAL_UTC_CLOCK_LOGGING_QUALITY
+        // (simulating stale RTC RtcReading::Stale or forced-backstop startup).
+        let initial_utc = BACKSTOP_TIME + UtcDuration::from_minutes(30);
+        clock.update(UtcClockUpdate::builder().approximate_value(initial_utc)).unwrap();
+
+        let rtc = FakeRtc::stale(initial_utc);
+        let diagnostics = Arc::new(FakeDiagnostics::new());
+        let config = make_test_config_with_fn(|mut config| {
+            config.min_acceptable_boot_time_for_utc_update_minutes = 5;
+            config
+        });
+        let boot_now: zx::BootInstant = executor.boot_now().into();
+        assert_eq!(boot_now, zx::BootInstant::ZERO);
+        assert_lt!(boot_now, config.get_min_acceptable_boot_time_for_utc_update());
+
+        let clock_manager = create_clock_manager_no_test_signalers(
+            Arc::clone(&clock),
+            // Ensure we never get any external time samples.
+            vec![],
+            None,
+            Some(rtc.clone()),
+            Arc::clone(&diagnostics),
+            config,
+        );
+
+        let (mut cmd_tx, cmd_rx) = mpsc::channel(2);
+        let b = new_state_for_test(true);
+
+        let proposed_utc = BACKSTOP_TIME + UtcDuration::from_hours(1);
+
+        let (responder, mut rx) = mpsc::channel(1);
+        let mut run_fut = pin!(async move {
+            cmd_tx
+                .send(Command::Reference {
+                    boot_reference: boot_now,
+                    utc_reference: proposed_utc,
+                    responder,
+                })
+                .await
+                .unwrap();
+
+            clock_manager.maintain_clock(cmd_rx, b).await;
+        });
+        let _ignore = run_in_fake_time(
+            &mut executor,
+            &mut run_fut,
+            fasync::MonotonicDuration::from_micros(1),
+        );
+
+        let res = rx.try_recv().unwrap();
+        assert!(res.is_ok());
+        // Verify the early reference sample was rejected: the clock did not advance to
+        // proposed_utc, SIGNAL_UTC_CLOCK_LOGGING_QUALITY was not asserted, and the persistent
+        // RTC was not overwritten.
+        assert_lt!(clock.read().unwrap(), proposed_utc);
+        assert!(!has_logging_quality(&clock));
+        assert_eq!(rtc.last_set(), None);
     }
 }

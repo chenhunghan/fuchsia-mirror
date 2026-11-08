@@ -87,8 +87,8 @@ class ReporterTest : public UnitTestFixture, public testing::WithParamInterface<
   void TearDown() override { files::DeletePath(kHasReportedOnPath, /*recursive=*/false); }
 
  protected:
-  void SetUpCrashReporterServer(std::unique_ptr<stubs::CrashReporterBase> server) {
-    crash_reporter_server_ = std::move(server);
+  void SetUpCrashReporter(std::unique_ptr<stubs::CrashReporterBase> crash_reporter) {
+    crash_reporter_ = std::move(crash_reporter);
   }
 
   void SetUpRedactor(std::unique_ptr<RedactorBase> redactor) { redactor_ = std::move(redactor); }
@@ -118,7 +118,7 @@ class ReporterTest : public UnitTestFixture, public testing::WithParamInterface<
   }
 
   void ReportOn(const feedback::RebootLog& reboot_log) {
-    Reporter reporter(dispatcher(), &cobalt_, redactor_.get(), crash_reporter_server_.get());
+    Reporter reporter(dispatcher(), &cobalt_, redactor_.get(), crash_reporter_.get());
     reporter.ReportOn(reboot_log, /*delay=*/zx::sec(0), SpontaneousRebootReason::kSpontaneous);
     RunLoopUntilIdle();
   }
@@ -126,7 +126,7 @@ class ReporterTest : public UnitTestFixture, public testing::WithParamInterface<
   std::string zircon_reboot_log_path_;
   std::string graceful_shutdown_info_path_;
   std::string legacy_graceful_reboot_log_path_;
-  std::unique_ptr<stubs::CrashReporterBase> crash_reporter_server_;
+  std::unique_ptr<stubs::CrashReporterBase> crash_reporter_;
 
  private:
   timekeeper::TestClock clock_;
@@ -149,14 +149,13 @@ TEST_F(GenericReporterTest, Succeed_WellFormedRebootLog) {
       "HW REBOOT REASON (WARM BOOT)\n\n"
       "ZIRCON REBOOT REASON (KERNEL PANIC)\n\nUPTIME (ms)\n74715002\nRUNTIME (ms)\n73415072");
 
-  SetUpCrashReporterServer(
-      std::make_unique<stubs::CrashReporter>(stubs::CrashReporter::Expectations{
-          .crash_signature = "fuchsia-kernel-panic",
-          .reboot_log = reboot_log.RebootLogStr(),
-          .uptime = final_shutdown_info.Uptime(),
-          .runtime = final_shutdown_info.Runtime(),
-          .is_fatal = true,
-      }));
+  SetUpCrashReporter(std::make_unique<stubs::CrashReporter>(stubs::CrashReporter::Expectations{
+      .crash_signature = "fuchsia-kernel-panic",
+      .reboot_log = reboot_log.RebootLogStr(),
+      .uptime = final_shutdown_info.Uptime(),
+      .runtime = final_shutdown_info.Runtime(),
+      .is_fatal = true,
+  }));
   SetUpCobaltServer(std::make_unique<stubs::CobaltLoggerFactory>(dispatcher()));
 
   ReportOn(reboot_log);
@@ -179,14 +178,13 @@ TEST_F(GenericReporterTest, Succeed_RootJobTerminationRebootLog) {
       "ZIRCON REBOOT REASON (USERSPACE ROOT JOB TERMINATION)\n\nUPTIME (ms)\n74715002\nRUNTIME (ms)\n73415072\n"
       "ROOT JOB TERMINATED BY CRITICAL PROCESS DEATH: foo (1)");
 
-  SetUpCrashReporterServer(
-      std::make_unique<stubs::CrashReporter>(stubs::CrashReporter::Expectations{
-          .crash_signature = "fuchsia-reboot-foo-terminated",
-          .reboot_log = reboot_log.RebootLogStr(),
-          .uptime = final_shutdown_info.Uptime(),
-          .runtime = final_shutdown_info.Runtime(),
-          .is_fatal = true,
-      }));
+  SetUpCrashReporter(std::make_unique<stubs::CrashReporter>(stubs::CrashReporter::Expectations{
+      .crash_signature = "fuchsia-reboot-foo-terminated",
+      .reboot_log = reboot_log.RebootLogStr(),
+      .uptime = final_shutdown_info.Uptime(),
+      .runtime = final_shutdown_info.Runtime(),
+      .is_fatal = true,
+  }));
   SetUpCobaltServer(std::make_unique<stubs::CobaltLoggerFactory>(dispatcher()));
 
   ReportOn(reboot_log);
@@ -198,20 +196,75 @@ TEST_F(GenericReporterTest, Succeed_RootJobTerminationRebootLog) {
   EXPECT_TRUE(files::IsFile(kHasReportedOnPath));
 }
 
+TEST_F(GenericReporterTest, Succeed_SpontaneousDuringShutdown) {
+  const std::string zircon_reboot_log =
+      "HW REBOOT REASON (WARM BOOT)\n\n"
+      "ZIRCON REBOOT REASON (UNKNOWN)\n\nUPTIME (ms)\n65487494\nRUNTIME (ms)\n64208920";
+  WriteZirconRebootLogContents(zircon_reboot_log);
+  WriteGracefulShutdownInfoContents(ToJson(GracefulShutdownAction::kRebootToBootloader,
+                                           {GracefulShutdownReason::kDeveloperRequest}));
+
+  SetUpCrashReporter(std::make_unique<stubs::CrashReporter>(stubs::CrashReporter::Expectations{
+      .crash_signature = "fuchsia-spontaneous-reboot-during-shutdown",
+      .reboot_log = fxl::StringPrintf("%s\nGRACEFUL SHUTDOWN ACTION: (REBOOT_TO_BOOTLOADER)\n"
+                                      "GRACEFUL REBOOT REASONS: (DEVELOPER REQUEST)\n\n"
+                                      "FINAL REBOOT REASON (SPONTANEOUS DURING SHUTDOWN)",
+                                      zircon_reboot_log.c_str()),
+      .uptime = zx::msec(65487494),
+      .runtime = zx::msec(64208920),
+      .is_fatal = true,
+  }));
+  SetUpCobaltServer(std::make_unique<stubs::CobaltLoggerFactory>(dispatcher()));
+
+  ReportOnRebootLog();
+
+  EXPECT_THAT(ReceivedCobaltEvents(),
+              UnorderedElementsAreArray({
+                  cobalt::Event(cobalt::LastRebootReason::kSpontaneousRebootDuringShutdown,
+                                zx::msec(65487494).to_usecs()),
+              }));
+}
+
+TEST_F(GenericReporterTest, Succeed_SpontaneousDuringShutdownAfterFdr) {
+  const std::string zircon_reboot_log =
+      "HW REBOOT REASON (WARM BOOT)\n\n"
+      "ZIRCON REBOOT REASON (UNKNOWN)\n\nUPTIME (ms)\n65487494\nRUNTIME (ms)\n64208920";
+  WriteZirconRebootLogContents(zircon_reboot_log);
+  SetAsFdr();
+
+  SetUpCrashReporter(std::make_unique<stubs::CrashReporter>(stubs::CrashReporter::Expectations{
+      .crash_signature = "fuchsia-spontaneous-reboot-during-shutdown",
+      .reboot_log =
+          fxl::StringPrintf("%s\n%s\n%s\n\nFINAL REBOOT REASON (SPONTANEOUS DURING SHUTDOWN)",
+                            zircon_reboot_log.c_str(), kNoGracefulAction, kNoGracefulReason),
+      .uptime = zx::msec(65487494),
+      .runtime = zx::msec(64208920),
+      .is_fatal = true,
+  }));
+  SetUpCobaltServer(std::make_unique<stubs::CobaltLoggerFactory>(dispatcher()));
+
+  ReportOnRebootLog();
+
+  EXPECT_THAT(ReceivedCobaltEvents(),
+              UnorderedElementsAreArray({
+                  cobalt::Event(cobalt::LastRebootReason::kSpontaneousRebootDuringShutdown,
+                                zx::msec(65487494).to_usecs()),
+              }));
+}
+
 TEST_F(GenericReporterTest, Succeed_NoUptime) {
   const feedback::FinalShutdownInfo final_shutdown_info(
       feedback::FinalShutdownReason::kKernelPanic);
   const feedback::RebootLog reboot_log(
       final_shutdown_info, "HW REBOOT REASON (WARM BOOT)\n\nZIRCON REBOOT REASON (KERNEL PANIC)\n");
 
-  SetUpCrashReporterServer(
-      std::make_unique<stubs::CrashReporter>(stubs::CrashReporter::Expectations{
-          .crash_signature = "fuchsia-kernel-panic",
-          .reboot_log = reboot_log.RebootLogStr(),
-          .uptime = std::nullopt,
-          .runtime = std::nullopt,
-          .is_fatal = true,
-      }));
+  SetUpCrashReporter(std::make_unique<stubs::CrashReporter>(stubs::CrashReporter::Expectations{
+      .crash_signature = "fuchsia-kernel-panic",
+      .reboot_log = reboot_log.RebootLogStr(),
+      .uptime = std::nullopt,
+      .runtime = std::nullopt,
+      .is_fatal = true,
+  }));
   SetUpCobaltServer(std::make_unique<stubs::CobaltLoggerFactory>(dispatcher()));
 
   ReportOn(reboot_log);
@@ -231,14 +284,13 @@ TEST_F(GenericReporterTest, Succeed_NoRuntime) {
       final_shutdown_info,
       "HW REBOOT REASON (WARM BOOT)\n\nZIRCON REBOOT REASON (KERNEL PANIC)\n\nUPTIME (ms)\n74715002");
 
-  SetUpCrashReporterServer(
-      std::make_unique<stubs::CrashReporter>(stubs::CrashReporter::Expectations{
-          .crash_signature = "fuchsia-kernel-panic",
-          .reboot_log = reboot_log.RebootLogStr(),
-          .uptime = uptime,
-          .runtime = std::nullopt,
-          .is_fatal = true,
-      }));
+  SetUpCrashReporter(std::make_unique<stubs::CrashReporter>(stubs::CrashReporter::Expectations{
+      .crash_signature = "fuchsia-kernel-panic",
+      .reboot_log = reboot_log.RebootLogStr(),
+      .uptime = uptime,
+      .runtime = std::nullopt,
+      .is_fatal = true,
+  }));
   SetUpCobaltServer(std::make_unique<stubs::CobaltLoggerFactory>(dispatcher()));
 
   ReportOn(reboot_log);
@@ -271,14 +323,13 @@ TEST_F(GenericReporterTest, Succeed_RedactsData) {
   const feedback::RebootLog reboot_log(
       final_shutdown_info, "HW REBOOT REASON (WARM BOOT)\n\nZIRCON REBOOT REASON (KERNEL PANIC)\n");
 
-  SetUpCrashReporterServer(
-      std::make_unique<stubs::CrashReporter>(stubs::CrashReporter::Expectations{
-          .crash_signature = "fuchsia-kernel-panic",
-          .reboot_log = "<REDACTED>",
-          .uptime = std::nullopt,
-          .runtime = std::nullopt,
-          .is_fatal = true,
-      }));
+  SetUpCrashReporter(std::make_unique<stubs::CrashReporter>(stubs::CrashReporter::Expectations{
+      .crash_signature = "fuchsia-kernel-panic",
+      .reboot_log = "<REDACTED>",
+      .uptime = std::nullopt,
+      .runtime = std::nullopt,
+      .is_fatal = true,
+  }));
   SetUpCobaltServer(std::make_unique<stubs::CobaltLoggerFactory>(dispatcher()));
   SetUpRedactor(std::make_unique<SimpleRedactor>());
 
@@ -301,14 +352,13 @@ TEST_F(GenericReporterTest, Succeed_NoCrashReportFiledCleanReboot) {
       "HW REBOOT REASON (WARM BOOT)\n\n"
       "ZIRCON REBOOT REASON (NO CRASH)\n\nUPTIME (ms)\n74715002\nRUNTIME (ms)\n73415072");
 
-  SetUpCrashReporterServer(
-      std::make_unique<stubs::CrashReporter>(stubs::CrashReporter::Expectations{
-          .crash_signature = "fuchsia-shutdown-undetermined-userspace-reason",
-          .reboot_log = reboot_log.RebootLogStr(),
-          .uptime = uptime,
-          .runtime = runtime,
-          .is_fatal = true,
-      }));
+  SetUpCrashReporter(std::make_unique<stubs::CrashReporter>(stubs::CrashReporter::Expectations{
+      .crash_signature = "fuchsia-shutdown-undetermined-userspace-reason",
+      .reboot_log = reboot_log.RebootLogStr(),
+      .uptime = uptime,
+      .runtime = runtime,
+      .is_fatal = true,
+  }));
   SetUpCobaltServer(std::make_unique<stubs::CobaltLoggerFactory>(dispatcher()));
 
   ReportOn(reboot_log);
@@ -323,7 +373,7 @@ TEST_F(GenericReporterTest, Succeed_NoCrashReportFiledColdReboot) {
   const feedback::FinalShutdownInfo final_shutdown_info(feedback::FinalShutdownReason::kCold);
   const feedback::RebootLog reboot_log(final_shutdown_info, "");
 
-  SetUpCrashReporterServer(std::make_unique<stubs::CrashReporterNoFileExpected>());
+  SetUpCrashReporter(std::make_unique<stubs::CrashReporterNoFileExpected>());
   SetUpCobaltServer(std::make_unique<stubs::CobaltLoggerFactory>(dispatcher()));
 
   ReportOn(reboot_log);
@@ -344,7 +394,7 @@ TEST_F(GenericReporterTest, Fail_CrashReporterFailsToFile) {
       final_shutdown_info,
       "HW REBOOT REASON (WARM BOOT)\n\n"
       "ZIRCON REBOOT REASON (KERNEL PANIC)\n\nUPTIME (ms)\n74715002\nRUNTIME (ms)\n73415072");
-  SetUpCrashReporterServer(std::make_unique<stubs::CrashReporterAlwaysReturnsError>());
+  SetUpCrashReporter(std::make_unique<stubs::CrashReporterAlwaysReturnsError>());
   SetUpCobaltServer(std::make_unique<stubs::CobaltLoggerFactory>(dispatcher()));
 
   ReportOn(reboot_log);
@@ -367,7 +417,7 @@ TEST_F(GenericReporterTest, Succeed_DoesNothingIfAlreadyReportedOn) {
       "HW REBOOT REASON (WARM BOOT)\n\n"
       "ZIRCON REBOOT REASON (KERNEL PANIC)\n\nUPTIME (ms)\n74715002\nRUNTIME (ms)\n73415072");
 
-  SetUpCrashReporterServer(std::make_unique<stubs::CrashReporterNoFileExpected>());
+  SetUpCrashReporter(std::make_unique<stubs::CrashReporterNoFileExpected>());
   SetUpCobaltServer(std::make_unique<stubs::CobaltLoggerFactory>(dispatcher()));
 
   ReportOn(reboot_log);
@@ -456,16 +506,15 @@ TEST_P(UngracefulReporterTest, Succeed) {
   const UngracefulShutdownTestParam& param = GetParam();
 
   WriteZirconRebootLogContents(param.zircon_reboot_log);
-  SetUpCrashReporterServer(
-      std::make_unique<stubs::CrashReporter>(stubs::CrashReporter::Expectations{
-          .crash_signature = param.output_crash_signature,
-          .reboot_log =
-              fxl::StringPrintf("%s\n%s\n%s\n\n%s", param.zircon_reboot_log.c_str(),
-                                kNoGracefulAction, kNoGracefulReason, param.reboot_reason.c_str()),
-          .uptime = param.output_uptime,
-          .runtime = param.output_runtime,
-          .is_fatal = true,
-      }));
+  SetUpCrashReporter(std::make_unique<stubs::CrashReporter>(stubs::CrashReporter::Expectations{
+      .crash_signature = param.output_crash_signature,
+      .reboot_log =
+          fxl::StringPrintf("%s\n%s\n%s\n\n%s", param.zircon_reboot_log.c_str(), kNoGracefulAction,
+                            kNoGracefulReason, param.reboot_reason.c_str()),
+      .uptime = param.output_uptime,
+      .runtime = param.output_runtime,
+      .is_fatal = true,
+  }));
   SetUpCobaltServer(std::make_unique<stubs::CobaltLoggerFactory>(dispatcher()));
 
   ReportOnRebootLog();
@@ -511,7 +560,7 @@ TEST_P(GracefulReporterTest, Succeed) {
       "ZIRCON REBOOT REASON (NO CRASH)\n\nUPTIME (ms)\n65487494\nRUNTIME (ms)\n64208920");
   WriteGracefulShutdownInfoContents(param.graceful_shutdown_info);
 
-  SetUpCrashReporterServer(std::make_unique<stubs::CrashReporterNoFileExpected>());
+  SetUpCrashReporter(std::make_unique<stubs::CrashReporterNoFileExpected>());
   SetUpCobaltServer(std::make_unique<stubs::CobaltLoggerFactory>(dispatcher()));
 
   ReportOnRebootLog();
@@ -529,7 +578,7 @@ TEST_P(GracefulReporterTest, Succeed_FDR) {
       "ZIRCON REBOOT REASON (NO CRASH)\n\nUPTIME (ms)\n65487494\nRUNTIME (ms)\n64208920");
   SetAsFdr();
 
-  SetUpCrashReporterServer(std::make_unique<stubs::CrashReporterNoFileExpected>());
+  SetUpCrashReporter(std::make_unique<stubs::CrashReporterNoFileExpected>());
   SetUpCobaltServer(std::make_unique<stubs::CobaltLoggerFactory>(dispatcher()));
 
   ReportOnRebootLog();
@@ -688,18 +737,17 @@ TEST_P(GracefulWithCrashReporterTest, Succeed) {
     WriteGracefulShutdownInfoContents(param.graceful_shutdown_info_contents);
   }
 
-  SetUpCrashReporterServer(
-      std::make_unique<stubs::CrashReporter>(stubs::CrashReporter::Expectations{
-          .crash_signature = param.output_crash_signature,
-          .reboot_log = fxl::StringPrintf(
-              "%s\nGRACEFUL SHUTDOWN ACTION: (%s)\nGRACEFUL REBOOT REASONS: (%s)\n\n%s",
-              zircon_reboot_log.c_str(), param.output_graceful_action.c_str(),
-              feedback::ToRawStrings(param.graceful_shutdown_reasons).c_str(),
-              param.reboot_reason.c_str()),
-          .uptime = param.output_uptime,
-          .runtime = param.output_runtime,
-          .is_fatal = true,
-      }));
+  SetUpCrashReporter(std::make_unique<stubs::CrashReporter>(stubs::CrashReporter::Expectations{
+      .crash_signature = param.output_crash_signature,
+      .reboot_log = fxl::StringPrintf(
+          "%s\nGRACEFUL SHUTDOWN ACTION: (%s)\nGRACEFUL REBOOT REASONS: (%s)\n\n%s",
+          zircon_reboot_log.c_str(), param.output_graceful_action.c_str(),
+          feedback::ToRawStrings(param.graceful_shutdown_reasons).c_str(),
+          param.reboot_reason.c_str()),
+      .uptime = param.output_uptime,
+      .runtime = param.output_runtime,
+      .is_fatal = true,
+  }));
   SetUpCobaltServer(std::make_unique<stubs::CobaltLoggerFactory>(dispatcher()));
 
   ReportOnRebootLog();
@@ -723,21 +771,20 @@ TEST_P(GracefulWithCrashReporterTest, SucceedForLegacyFile) {
     WriteLegacyGracefulRebootLogContents(ToRawStrings(param.graceful_shutdown_reasons));
   }
 
-  SetUpCrashReporterServer(
-      std::make_unique<stubs::CrashReporter>(stubs::CrashReporter::Expectations{
-          .crash_signature = param.output_crash_signature,
-          .reboot_log = fxl::StringPrintf(
-              "%s\nGRACEFUL SHUTDOWN ACTION: (%s)\nGRACEFUL REBOOT REASONS: (%s)\n\n%s",
-              zircon_reboot_log.c_str(),
-              // The legacy file didn't store the action, so it's inferred from the reasons both
-              // here and in the production code.
-              param.graceful_shutdown_reasons.empty() ? "NONE" : "REBOOT",
-              feedback::ToRawStrings(param.graceful_shutdown_reasons).c_str(),
-              param.reboot_reason.c_str()),
-          .uptime = param.output_uptime,
-          .runtime = param.output_runtime,
-          .is_fatal = true,
-      }));
+  SetUpCrashReporter(std::make_unique<stubs::CrashReporter>(stubs::CrashReporter::Expectations{
+      .crash_signature = param.output_crash_signature,
+      .reboot_log = fxl::StringPrintf(
+          "%s\nGRACEFUL SHUTDOWN ACTION: (%s)\nGRACEFUL REBOOT REASONS: (%s)\n\n%s",
+          zircon_reboot_log.c_str(),
+          // The legacy file didn't store the action, so it's inferred from the reasons both
+          // here and in the production code.
+          param.graceful_shutdown_reasons.empty() ? "NONE" : "REBOOT",
+          feedback::ToRawStrings(param.graceful_shutdown_reasons).c_str(),
+          param.reboot_reason.c_str()),
+      .uptime = param.output_uptime,
+      .runtime = param.output_runtime,
+      .is_fatal = true,
+  }));
   SetUpCobaltServer(std::make_unique<stubs::CobaltLoggerFactory>(dispatcher()));
 
   ReportOnRebootLog();

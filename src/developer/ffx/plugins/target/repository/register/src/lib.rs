@@ -165,9 +165,7 @@ impl RegisterTool {
         if let Some(server_info) = pkg_server_info {
             self.register_standalone(&server_info, repository_target).await
         } else {
-            return_user_error!(
-                "{repo_name} is not a running repository, nor a daemon based repository."
-            )
+            return_user_error!("{repo_name} is not a running repository.")
         }
     }
 
@@ -274,7 +272,7 @@ mod test {
     use super::*;
     use camino::Utf8PathBuf;
 
-    use target_behavior::{ConnectionBehavior, setup_fake_resolution, target_interface};
+    use target_behavior::{DirectConnector, setup_fake_resolution, target_interface};
     use target_holders::fake_proxy;
     use tempfile::TempDir;
 
@@ -516,7 +514,7 @@ mod test {
         let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "repo", "test"]);
         let target_env = target_interface(&fho_env);
         let resolution = setup_fake_resolution(Some("1.2.3.4".to_string())).await;
-        target_env.set_behavior_for_test(ConnectionBehavior::fake_direct_connector(resolution));
+        target_env.set_behavior_for_test(DirectConnector::from_resolution_for_test(resolution));
 
         let (repo_proxy, _) = setup_fake_repo_proxy(Arc::clone(&client), None, false).await;
         let (engine_proxy, _) = setup_fake_engine_proxy(Arc::clone(&client), None).await;
@@ -568,7 +566,7 @@ mod test {
         let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "repo", "test"]);
         let target_env = target_interface(&fho_env);
         let resolution = setup_fake_resolution(Some("127.7.7.1".to_string())).await;
-        target_env.set_behavior_for_test(ConnectionBehavior::fake_direct_connector(resolution));
+        target_env.set_behavior_for_test(DirectConnector::from_resolution_for_test(resolution));
 
         let expected_config = RepositoryConfig {
             repo_url: Some("fuchsia-pkg://test-repo.fuchsia.com".into()),
@@ -649,7 +647,7 @@ mod test {
         let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "repo", "test"]);
         let target_env = target_interface(&fho_env);
         let resolution = setup_fake_resolution(Some("1.2.3.4".to_string())).await;
-        target_env.set_behavior_for_test(ConnectionBehavior::fake_direct_connector(resolution));
+        target_env.set_behavior_for_test(DirectConnector::from_resolution_for_test(resolution));
 
         make_server_instance(
             env.isolate_root.path(),
@@ -698,7 +696,7 @@ mod test {
         let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "repo", "test"]);
         let target_env = target_interface(&fho_env);
         let resolution = setup_fake_resolution(Some("1.2.3.4".to_string())).await;
-        target_env.set_behavior_for_test(ConnectionBehavior::fake_direct_connector(resolution));
+        target_env.set_behavior_for_test(DirectConnector::from_resolution_for_test(resolution));
 
         let (repo_proxy, _) = setup_fake_repo_proxy(Arc::clone(&client), None, false).await;
         let (engine_proxy, _) = setup_fake_engine_proxy(Arc::clone(&client), None).await;
@@ -749,7 +747,7 @@ mod test {
         let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "repo", "test"]);
         let target_env = target_interface(&fho_env);
         let resolution = setup_fake_resolution(Some("1.2.3.4".to_string())).await;
-        target_env.set_behavior_for_test(ConnectionBehavior::fake_direct_connector(resolution));
+        target_env.set_behavior_for_test(DirectConnector::from_resolution_for_test(resolution));
 
         let (repo_proxy, _) = setup_fake_repo_proxy(Arc::clone(&client), None, false).await;
         let (engine_proxy, _) = setup_fake_engine_proxy(Arc::clone(&client), None).await;
@@ -798,7 +796,7 @@ mod test {
         let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "repo", "test"]);
         let target_env = target_interface(&fho_env);
         let resolution = setup_fake_resolution(Some("1.2.3.4".to_string())).await;
-        target_env.set_behavior_for_test(ConnectionBehavior::fake_direct_connector(resolution));
+        target_env.set_behavior_for_test(DirectConnector::from_resolution_for_test(resolution));
 
         make_server_instance(
             env.isolate_root.path(),
@@ -849,7 +847,7 @@ mod test {
         let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "repo", "test"]);
         let target_env = target_interface(&fho_env);
         let resolution = setup_fake_resolution(Some("1.2.3.4".to_string())).await;
-        target_env.set_behavior_for_test(ConnectionBehavior::fake_direct_connector(resolution));
+        target_env.set_behavior_for_test(DirectConnector::from_resolution_for_test(resolution));
 
         make_server_instance(
             env.isolate_root.path(),
@@ -913,7 +911,7 @@ mod test {
         let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "repo", "test"]);
         let target_env = target_interface(&fho_env);
         let resolution = setup_fake_resolution(Some("1.2.3.4".to_string())).await;
-        target_env.set_behavior_for_test(ConnectionBehavior::fake_direct_connector(resolution));
+        target_env.set_behavior_for_test(DirectConnector::from_resolution_for_test(resolution));
 
         let (repo_proxy, _) = setup_fake_repo_proxy(Arc::clone(&client), None, false).await;
         let (engine_proxy, _) = setup_fake_engine_proxy(Arc::clone(&client), None).await;
@@ -974,7 +972,7 @@ mod test {
         let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "repo", "test"]);
         let target_env = target_interface(&fho_env);
         let resolution = setup_fake_resolution(None).await;
-        target_env.set_behavior_for_test(ConnectionBehavior::fake_direct_connector(resolution));
+        target_env.set_behavior_for_test(DirectConnector::from_resolution_for_test(resolution));
 
         make_server_instance(
             env.isolate_root.path(),

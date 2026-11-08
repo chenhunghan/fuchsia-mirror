@@ -1,0 +1,130 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+# lib uses target_compatible_with even though GN did not gate it with
+# if (is_fuchsia): its sources include <lib/zx/*> headers unconditionally,
+# so it cannot build for the host.
+fx_cc_library(
+    name = "lib",
+    srcs = [
+        "activity_app.cc",
+        "activity_control_connection.cc",
+        "activity_provider_connection.cc",
+        "activity_state_machine.cc",
+        "state_machine_driver.cc",
+    ],
+    hdrs = [
+        "activity_app.h",
+        "activity_control_connection.h",
+        "activity_provider_connection.h",
+        "activity_state_machine.h",
+        "common.h",
+        "state_machine_driver.h",
+    ],
+    # activity_control_connection.h uses angled `#include <src/lib/fxl/macros.h>`;
+    # //build/config:default_include_dirs is intentionally empty in Bazel and
+    # Bazel's default `-iquote .` only searches quoted `#include "..."`.
+    copts = ["-I."],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.ui.activity.control:fuchsia.ui.activity.control_hlcpp",
+        "//sdk/fidl/fuchsia.ui.activity:fuchsia.ui.activity_hlcpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/fit",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_binary(
+    name = "activity_bin",
+    srcs = ["main.cc"],
+    # Needed for angled `#include <src/lib/fxl/macros.h>` via activity_app.h
+    # (//build/config:default_include_dirs is empty in Bazel).
+    copts = ["-I."],
+    tags = ["manual"],
+    deps = [
+        ":lib",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "activity_packaged_bin",
+    binary = ":activity_bin",
+    binary_name = "activity",
+)
+
+fx_component_manifest(
+    name = "activity-component-manifest",
+    component_name = "activity",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/activity.cml",
+)
+
+fx_component(
+    name = "activity-component",
+    compiled_manifest = ":activity-component-manifest",
+    deps = [":activity_packaged_bin"],
+)
+
+fx_package(
+    name = "activity",
+    package_name = "activity",
+    components = [":activity-component"],
+    visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+fx_cc_binary(
+    name = "activity_test_bin",
+    testonly = True,
+    srcs = [
+        "activity_app_test.cc",
+        "activity_provider_connection_test.cc",
+        "activity_state_machine_test.cc",
+        "fake_listener.h",
+        "state_machine_driver_test.cc",
+    ],
+    build_flags = ["//build/config/lto:no-fat-lto-objects-linking"],
+    # Needed for angled `#include <src/lib/fxl/macros.h>` via activity_app.h
+    # (//build/config:default_include_dirs is empty in Bazel).
+    copts = ["-I."],
+    tags = ["manual"],
+    deps = [
+        ":lib",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+    ],
+)
+
+fx_unittest_package(
+    name = "activity-test",
+    max_log_severity = "ERROR",
+    unit_tests = [":activity_test_bin"],
+    visibility = ["//src/sys:__pkg__"],
+)

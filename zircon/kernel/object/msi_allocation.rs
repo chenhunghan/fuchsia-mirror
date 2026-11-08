@@ -4,10 +4,11 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+use crate::ksync_kernel::TrackedSpinlock;
 use core::sync::atomic::{AtomicU32, Ordering};
 use debug::ltracef;
 use fbl::{Recyclable, RefPtr, pin_make_ref_counted, ref_counted};
-use ksync::{KMutex, RawSpinlock, guarded};
+use ksync::{KMutex, guarded};
 use pin_init::{pin_data, pinned_drop};
 use zx_status::Status;
 use zx_types::zx_info_msi_t;
@@ -55,7 +56,7 @@ pub struct MsiAllocation {
     // that consist of multiple vectors and MsiInterruptDispatchers. It is not
     // used to guard access to anything within the MsiAllocation itself.
     #[mutex]
-    lock: KMutex<RawSpinlock>,
+    lock: KMutex<TrackedSpinlock>,
     // Function pointer for the MSI platform free function to facilitate unit tests
     // and free the block when the object is released.
     msi_free_fn: MsiFreeFn,
@@ -176,7 +177,7 @@ impl MsiAllocation {
     }
 
     /// Returns a reference to the allocation's spinlock.
-    pub const fn lock(&self) -> &KMutex<MsiAllocationLockClass, RawSpinlock> {
+    pub const fn lock(&self) -> &KMutex<MsiAllocationLockClass, TrackedSpinlock> {
         &self.lock
     }
 }

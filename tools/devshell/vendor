@@ -12,15 +12,24 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"/lib/vars.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"/lib/fx-cmd-locator.sh || exit $?
 
 function main {
+  if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    fx-command-help
+    return 0
+  fi
+
   if [[ $# -lt 2 ]]; then
     fx-command-help
 
     echo >&2 "commands: "
     for d in "${FUCHSIA_DIR}"/vendor/*; do
+      [[ -d "${d}/scripts/devshell" ]] || continue
+      local v_name
+      v_name="$(basename "$d")"
       # list all subcommands with summaries, grouped by categories
-      commands vendor "$(basename "$d")" | xargs awk \
+      commands vendor "${v_name}" | xargs awk \
         -v hide_contrib=${hide_contrib} \
         -v show_deprecated=${show_deprecated} \
+        -v registry_tsv_file=<(list_registered_host_tools_help_records "${v_name}") \
         -f "${FUCHSIA_DIR}/scripts/fx-help.awk"
     done
 
@@ -29,10 +38,45 @@ function main {
 
   vendor_name="$1"
   command_name="$2"
-  command_path="$(commands vendor "${vendor_name}" "${command_name}")"
-
-  # expand metadata if it's a "*.fx" file
-  command_path=( $(find_exec_from_path "${command_path}") )
+  if [[ -z "${vendor_name}" ]]; then
+    fx-error "Empty vendor directory passed to 'fx vendor'"
+    return 1
+  fi
+  local _v_lines _v_rc
+  _v_lines="$(_get_registered_host_tool_lines "${command_name}" "${vendor_name}")"
+  _v_rc=$?
+  if [[ ${_v_rc} -eq 2 ]]; then
+    return 2
+  elif [[ ${_v_rc} -eq 0 ]]; then
+    local -a _v_fields
+    mapfile -t _v_fields <<< "${_v_lines}"
+    if [[ -n "${_v_fields[0]:-}" ]]; then
+      _fx_registry_log "lookup 'vendor ${vendor_name} ${command_name}': found in vendor '${vendor_name}' registry (mode=target, target=${_v_fields[0]})"
+    else
+      _fx_registry_log "lookup 'vendor ${vendor_name} ${command_name}': found in vendor '${vendor_name}' registry (mode=script, script=${_v_fields[1]:-})"
+    fi
+    fx-ensure-registered-host-tool "${command_name}" "${vendor_name}" "${_v_fields[0]:-}" "${_v_fields[1]:-}" || return $?
+    _fx_apply_prebuilt_paths "$([[ "${_v_fields[2]:-false}" == "true" ]] && echo 1 || echo 0)"
+    local _v_raw_cmd
+    _v_raw_cmd="$(_find_registered_executable_from_entry "${command_name}" "${_v_fields[0]:-}" "${_v_fields[1]:-}" "${vendor_name}")"
+    if [[ -n "${_v_raw_cmd}" ]]; then
+      mapfile -t command_path <<< "${_v_raw_cmd}"
+    else
+      command_path=()
+    fi
+  else
+    _fx_apply_prebuilt_paths 1
+    command_path="$(commands vendor "${vendor_name}" "${command_name}")"
+    if [[ -n "${command_path}" ]]; then
+      if _fx_registry_log_enabled; then
+        _fx_registry_log "lookup 'vendor ${vendor_name} ${command_name}': not in vendor '${vendor_name}' registry; falling back to legacy vendor path $(_relative "${command_path%%$'\n'*}")"
+      fi
+    else
+      _fx_registry_log "lookup 'vendor ${vendor_name} ${command_name}': not found in vendor '${vendor_name}' registry or legacy paths"
+    fi
+    # expand metadata if it's a "*.fx" file
+    command_path=( $(find_exec_from_path "${command_path}") )
+  fi
 
   if [[ ! -x "${command_path[0]}" ]]; then
     echo >&2 "command ${command_name} not found on vendor ${vendor_name}!"

@@ -14,7 +14,8 @@
 #include <kernel/ffi.h>
 #include <object/dispatcher.h>
 #include <object/handle.h>
-#include <object/opaque_storage.h>
+
+class LogDispatcher;
 
 extern "C" {
 // Allocates the C++ LogDispatcher instance. Implemented in C++ (log_dispatcher_ffi.cc)

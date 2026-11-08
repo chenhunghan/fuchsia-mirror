@@ -44,7 +44,7 @@ class PackageDiffs:
         }
 
     @classmethod
-    def diff(cls, old: dict[str, str], new: dict[str, str]) -> "PackageDiffs":
+    def diff(cls, old: dict[str, str], new: dict[str, str]) -> PackageDiffs:
         return cls(
             added=[package for package in new if package not in old],
             modified=[

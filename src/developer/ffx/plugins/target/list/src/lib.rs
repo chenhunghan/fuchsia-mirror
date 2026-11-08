@@ -10,7 +10,7 @@ use ffx_target::{TargetInfo, TargetInfoQuery};
 use ffx_writer::{ToolIO as _, VerifiedMachineWriter};
 use fho::{FfxError, FfxMain, FfxTool};
 use fuchsia_async::TimeoutExt as _;
-use target_behavior::{ConnectionBehavior, target_interface};
+use target_behavior::target_interface;
 use target_formatter::{JsonTarget, JsonTargetFormatter, TargetFormatter};
 use thiserror::Error;
 
@@ -178,8 +178,7 @@ impl ListTool {
                     let mut context = self.context.clone();
                     context.override_target_specifier(&self.cmd.nodename);
                     let target_env = target_interface(&self.fho_env);
-                    let behavior = target_env.init_connection_behavior(&context).await?;
-                    let ConnectionBehavior::Direct(ref connector) = *behavior;
+                    let connector = target_env.init_connection_behavior(&context).await?;
                     let resolution = connector.resolution().await?;
                     let discovery_timeout = std::time::Duration::from_millis(
                         context.get(ffx_config::keys::DISCOVERY_TIMEOUT_MS).unwrap_or(2000),
@@ -310,6 +309,7 @@ mod test {
     use ffx_list_args::AddressTypes;
     use ffx_target::info::{RemoteControlState, TargetState};
     use ffx_writer::TestBuffers;
+    use target_behavior::DirectConnector;
 
     #[test]
     fn test_address_types_from_cmd() -> Result<()> {
@@ -365,10 +365,10 @@ mod test {
 
         let resolution =
             ffx_target::Resolution::mock(|| Err(anyhow::anyhow!("MockConnectionError")));
-        let behavior = ConnectionBehavior::fake_direct_connector(resolution);
+        let connector = DirectConnector::from_resolution_for_test(resolution);
 
         let target_env = target_interface(&fho_env);
-        target_env.set_behavior_for_test(behavior);
+        target_env.set_behavior_for_test(connector);
 
         let list_cmd = ListCommand::default();
         let tool = build_list_tool(list_cmd, &env, fho_env).await;
@@ -391,12 +391,12 @@ mod test {
         let ffx_cmd_line = FfxCommandLine::default();
         let fho_env = fho::FhoEnvironment::new(&env.context, &ffx_cmd_line);
 
-        let behavior =
-            ConnectionBehavior::fake_direct_connector(ffx_target::Resolution::mock_async(|| {
+        let connector =
+            DirectConnector::from_resolution_for_test(ffx_target::Resolution::mock_async(|| {
                 std::future::pending()
             }));
         let target_env = target_interface(&fho_env);
-        target_env.set_behavior_for_test(behavior);
+        target_env.set_behavior_for_test(connector);
 
         let list_cmd = ListCommand::default();
         let tool = build_list_tool(list_cmd, &env, fho_env).await;
@@ -416,12 +416,12 @@ mod test {
         let ffx_cmd_line = FfxCommandLine::default();
         let fho_env = fho::FhoEnvironment::new(&env.context, &ffx_cmd_line);
 
-        let behavior =
-            ConnectionBehavior::fake_direct_connector(ffx_target::Resolution::mock(|| {
+        let connector =
+            DirectConnector::from_resolution_for_test(ffx_target::Resolution::mock(|| {
                 panic!("Resolution should not be called when no_probe is true");
             }));
         let target_env = target_interface(&fho_env);
-        target_env.set_behavior_for_test(behavior);
+        target_env.set_behavior_for_test(connector);
 
         let list_cmd = ListCommand { no_probe: true, ..Default::default() };
         let tool = build_list_tool(list_cmd, &env, fho_env).await;
@@ -441,12 +441,12 @@ mod test {
         let ffx_cmd_line = FfxCommandLine::default();
         let fho_env = fho::FhoEnvironment::new(&env.context, &ffx_cmd_line);
 
-        let behavior =
-            ConnectionBehavior::fake_direct_connector(ffx_target::Resolution::mock(|| {
+        let connector =
+            DirectConnector::from_resolution_for_test(ffx_target::Resolution::mock(|| {
                 panic!("Resolution should not be called when format is Addresses");
             }));
         let target_env = target_interface(&fho_env);
-        target_env.set_behavior_for_test(behavior);
+        target_env.set_behavior_for_test(connector);
 
         let list_cmd =
             ListCommand { format: ffx_list_args::Format::Addresses, ..Default::default() };
@@ -538,10 +538,10 @@ mod test {
 
         let resolution =
             ffx_target::Resolution::mock(|| Err(anyhow::anyhow!("MockConnectionError")));
-        let behavior = ConnectionBehavior::fake_direct_connector(resolution);
+        let connector = DirectConnector::from_resolution_for_test(resolution);
 
         let target_env = target_interface(&fho_env);
-        target_env.set_behavior_for_test(behavior);
+        target_env.set_behavior_for_test(connector);
 
         let list_cmd = ListCommand::default();
         let tool = ListTool { cmd: list_cmd, fho_env, context };

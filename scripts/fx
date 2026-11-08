@@ -36,6 +36,8 @@ Global fx options: fx [OPTION] ${cmd} ...
                                    out/.
   -x                               Print commands and their arguments as they are executed.
   -xx                              Print extra logging of the fx tool itself (implies -x)
+  --no-build                       Skip building registered Bazel/GN host tools; fail if missing.
+  --build                          Force building registered Bazel host tools on invocation.
   --invoker=INVOKER                Override the command invoker for metrics and logging.
 END
   if [[ -n "$(list_optional_features)" ]]; then
@@ -57,13 +59,18 @@ function help_list_commands {
   done
 
   # list all subcommands with summaries, grouped by categories
+  local _help_records
+  _help_records="$(list_registered_host_tools_help_records)"
   commands | xargs awk \
     -v hide_contrib=${hide_contrib} \
     -v show_deprecated=${show_deprecated} \
+    -v registry_tsv_file=<(printf '%s\n' "${_help_records}") \
     -f "${fuchsia_dir}/scripts/fx-help.awk"
 
   # list host tools build artifacts without corresponding metadata
-  host_tools="$(find_host_tools)"
+  local _reg_names
+  _reg_names="$(printf '%s\n' "${_help_records}" | cut -f1)"
+  host_tools="$(find_host_tools "" "${_reg_names}")"
   if [[ -n "${host_tools}" ]]; then
     echo "Host binaries produced by the build with no metadata (more info at //tools/devshell/README.md):"
     for i in ${host_tools}; do
@@ -78,23 +85,32 @@ function help_list_commands {
 
 function help_command {
   local cmd="$*"
-  local cmd_path
-  cmd_path="$(commands "${cmd}" | head -1)"
+  local -a _help_args=("help-command" "${cmd}")
+  if fx-build-dir-if-present >/dev/null 2>&1 && [[ -n "${FUCHSIA_BUILD_DIR:-}" ]]; then
+    _help_args+=("--build-dir" "${FUCHSIA_BUILD_DIR}")
+  fi
+  local _help_rc=0
+  _fx_cli_locator "${_help_args[@]}" || _help_rc=$?
+  if [[ ${_help_rc} -eq 0 ]]; then
+    help_global_options
+    return 0
+  elif [[ ${_help_rc} -eq 2 ]]; then
+    return 2
+  fi
+  local cmd_path="$(commands "${cmd}" | head -1)"
   if [[ -z "${cmd_path}" ]]; then
-    local cmd_path
-    cmd_path="$(find_host_tools "${cmd}" | head -1)"
-    if [[ -z "${cmd_path}" ]]; then
-      echo "Command ${cmd} not found. Try \`fx help\`"
-    else
-      echo "'$(_relative "${cmd_path}")' is a host tool and no metadata" \
-        "was found. Try running \`fx ${cmd} -h\`"
-    fi
-  elif [[ $(file -b --mime "${cmd_path}" | cut -d / -f 1) == "text" ]]; then
+    cmd_path="$(find_host_tools "${cmd}" " " | head -1)"
+  fi
+  if [[ -n "${cmd_path}" && $(file -b --mime "${cmd_path}" | cut -d / -f 1) == "text" ]]; then
     fx-print-command-help "${cmd_path}"
     help_global_options
-  else
-    echo "No help found. Try \`fx ${cmd} -h\`"
+    return 0
+  elif [[ -n "${cmd_path}" ]]; then
+    echo "'$(_relative "${cmd_path}")' is a host tool and no metadata" \
+      "was found. Try running \`fx ${cmd} -h\`"
+    return 0
   fi
+  echo "Command ${cmd} not found. Try \`fx help\`"
 }
 
 function helpheader {
@@ -169,7 +185,7 @@ END
 
 function usage {
   cat <<END
-usage: fx [--dir BUILD_DIR] [-t DEVICE_NAME] [-i] [-x] COMMAND [...]
+usage: fx [--dir BUILD_DIR] [-t DEVICE_NAME] [-i] [-x] [--build|--no-build] COMMAND [...]
 END
   shorthelp
 }
@@ -272,6 +288,15 @@ export PATH="${script_dir}:$PATH"
 declare -r vars_sh="${fuchsia_dir}/tools/devshell/lib/vars.sh"
 # shellcheck disable=SC1090
 source "${vars_sh}" || exit $?
+
+# ABFS workspaces exclude out/ from snapshots with the casfs.exclude xattr,
+# which is lost whenever out/ is deleted. Mark it before anything below (e.g.
+# Python writing to PYTHONPYCACHEPREFIX, or `fx set`) can write under it.
+# This is a no-op on other filesystems and on read-only checkouts.
+if command -v setfattr >/dev/null 2>&1; then
+  { [[ -d "${FUCHSIA_OUT_DIR}" ]] || mkdir -p "${FUCHSIA_OUT_DIR}"; } 2>/dev/null &&
+    setfattr -n casfs.exclude -v 1 "${FUCHSIA_OUT_DIR}" 2>/dev/null || true
+fi
 
 declare -r metrics_sh="${fuchsia_dir}/tools/devshell/lib/metrics.sh"
 # shellcheck disable=SC1090
@@ -390,6 +415,14 @@ while [[ $# -ne 0 ]]; do
       set -x
       export FUCHSIA_DEVSHELL_VERBOSITY=1
       ;;
+    --no-build)
+      export FX_NO_BUILD_HOST_TOOL=1
+      unset FX_FORCE_BUILD_HOST_TOOL FX_FORCE_BUILD
+      ;;
+    --build)
+      export FX_FORCE_BUILD_HOST_TOOL=1
+      unset FX_NO_BUILD_HOST_TOOL FX_NO_BUILD
+      ;;
     --)
       shift
       break
@@ -404,6 +437,7 @@ while [[ $# -ne 0 ]]; do
       else
         shift
         help_command "$@"
+        exit $?
       fi
       exit 0
       ;;
@@ -448,18 +482,60 @@ if is_invoked_by_agent; then
 fi
 
 command_name="$1"
-read -r -a command_path <<< "$(find_executable "${command_name}")"
+_raw_command_path=""
+_find_status=1
+_dispatch_info="$(resolve_fx_command_dispatch "${command_name}")"
+_dispatch_rc=$?
+if [[ ${_dispatch_rc} -eq 2 ]]; then
+  exit 2
+elif [[ ${_dispatch_rc} -eq 0 ]]; then
+  mapfile -t _df <<< "${_dispatch_info}"
+  _d_kind="${_df[0]:-}"
+  _d_vendor="${_df[1]:-}"
+  _d_target="${_df[2]:-}"
+  _d_script_or_path="${_df[3]:-}"
+  _d_inject="${_df[4]:-1}"
+  if [[ "${_d_kind}" == "registered" ]]; then
+    _ensure_rc=0
+    fx-ensure-registered-host-tool "${command_name}" "${_d_vendor}" "${_d_target}" "${_d_script_or_path}" || _ensure_rc=$?
+    if [[ ${_ensure_rc} -ne 0 ]]; then
+      if [[ "${FX_NO_BUILD_HOST_TOOL:-0}" != "1" ]]; then
+        for _sub_arg in "${@:2}"; do
+          if [[ "${_sub_arg}" == "--no-build" || "${_sub_arg}" == "--build" ]]; then
+            fx-warn "Note: '${_sub_arg}' is a global fx option and must precede '${command_name}': fx ${_sub_arg} ${command_name} ..."
+            break
+          fi
+        done
+      fi
+      exit "${_ensure_rc}"
+    fi
+    _fx_apply_prebuilt_paths "${_d_inject}"
+    _raw_command_path="$(_find_registered_executable_from_entry "${command_name}" "${_d_target}" "${_d_script_or_path}" "${_d_vendor}")"
+    _find_status=$?
+    if [[ -n "${_raw_command_path}" ]]; then
+      mapfile -t command_path <<< "${_raw_command_path}"
+    else
+      command_path=()
+    fi
+  else
+    _fx_apply_prebuilt_paths 1
+    _raw_command_path="$(find_exec_from_path "${_d_script_or_path}")"
+    _find_status=$?
+    read -r -a command_path <<< "${_raw_command_path}"
+  fi
+fi
 
-if [[ $? -ne 0 || ! -x "${command_path[0]}" ]]; then
+if [[ ${_find_status} -ne 0 || ${#command_path[@]} -eq 0 || ! -x "${command_path[0]}" ]]; then
   if [[ -n "${command_path[*]}" ]]; then
     _path_message=" in the expected location $(_relative "${command_path[0]}")"
   fi
 
   _commands=$(commands)
-  _host_tools=$(find_host_tools)
+  _registered=$(list_registered_host_tools)
+  _host_tools=$(find_host_tools "" "${_registered}")
 
   # If the command is not found look for suggestions to help direct to the correct command.
-  _suggestion=$(printf "%b\n%b" "${_commands}" "${_host_tools}" | "${suggest_py}" "${command_name}")
+  _suggestion=$(printf "%b\n%b\n%b" "${_commands}" "${_registered}" "${_host_tools}" | "${suggest_py}" "${command_name}")
 
   # If no suggestions are found fall back to the old error message.
   if [ -z "$_suggestion" ]; then
@@ -499,22 +575,30 @@ fi
 mkdir -p "${FX_CACHE_DIR}"
 
 track-command-execution "${metric_name}" "$@" &
-export PATH="${PREBUILT_ALL_PATHS}:${PATH}"
 "${command_path[@]}" "$@"
 declare -r retval=$?
 
 if [ -z "${iterative}" ]; then
-  # is-remote-workflow-device returns 0 for true and 1 for false
-  # analytics requires it to be the opposite
-  declare is_remote=0
-  if is-remote-workflow-device; then
-    is_remote=1
-  fi
-
   # Capture the end_time as late as possible to best reflect the user
   # experienced end time.
   declare -r end_time="${EPOCHREALTIME/./}"
-  track-command-finished "${start_time}" "${end_time}" "${retval}" "${command_name}" "${is_remote}" "$@" &
+
+  # Report the completion of the command in the background. Computing
+  # `is_remote` calls is-remote-workflow-device, which may run
+  # `ffx target default get` through fx. That takes well over 100ms, so it must
+  # not delay the exit of every fx command. The output of the background job is
+  # redirected so that callers capturing fx's stdout or stderr (e.g. with
+  # `$(fx ...)`) do not have to wait for it either.
+  function _track-command-finished-in-background {
+    # is-remote-workflow-device returns 0 for true and 1 for false
+    # analytics requires it to be the opposite
+    local is_remote=0
+    if [[ "${METRICS_LEVEL}" -ne 0 ]] && is-remote-workflow-device; then
+      is_remote=1
+    fi
+    track-command-finished "${start_time}" "${end_time}" "${retval}" "${command_name}" "${is_remote}" "$@"
+  }
+  _track-command-finished-in-background "$@" </dev/null >/dev/null 2>&1 &
   exit ${retval}
 elif which inotifywait >/dev/null; then
   monitor_source_changes() {
@@ -526,23 +610,9 @@ elif which inotifywait >/dev/null; then
       @"${fuchsia_dir}"/out \
       @"${fuchsia_dir}"/zircon/public
   }
-elif which apt-get >/dev/null; then
+else
   echo "Missing inotifywait"
   echo "Try: sudo apt-get install inotify-tools"
-  exit 1
-elif which fswatch >/dev/null; then
-  monitor_source_changes() {
-    fswatch --one-per-batch --event=Updated \
-      -e "${fuchsia_dir}"/out/ \
-      -e "${fuchsia_dir}"/zircon/public/ \
-      -e "/\." \
-      -e "/lock" \
-      -e "/compile_commands.json" \
-      .
-  }
-else
-  echo "Missing fswatch"
-  echo "Try: brew install fswatch"
   exit 1
 fi
 
@@ -551,18 +621,14 @@ monitor_and_run() {
   local -r display_name="$2"
   shift 2
 
-  # Explicitly bind $event_pipe to a numbered FD so read behaves consistently
-  # on Linux and Mac shells ("read <$event_pipe" closes $event_pipe after the
-  # first read on Mac bash).
+  # Explicitly bind $event_pipe to a numbered FD.
   exec 3<"${event_pipe}"
 
   while read -r -u 3; do
-    if [[ "$(uname -s)" != "Darwin" ]]; then
-      # Drain all subsequent events in a batch.
-      # Otherwise when multiple files are changes at once we'd run multiple
-      # times.
-      read -r -u 3 -d "" -t .01
-    fi
+    # Drain all subsequent events in a batch.
+    # Otherwise when multiple files are changes at once we'd run multiple
+    # times.
+    read -r -u 3 -d "" -t .01
     # Allow at most one fx -i invocation per Fuchsia dir at a time.
     # Otherwise multiple concurrent fx -i invocations can trigger each other
     # and cause a storm.
@@ -576,4 +642,4 @@ monitor_and_run() {
   done
 }
 
-monitor_and_run <(monitor_source_changes) "${cmd_and_args}" "${command_path}" "$@"
+monitor_and_run <(monitor_source_changes) "${cmd_and_args}" "${command_path[@]}" "$@"

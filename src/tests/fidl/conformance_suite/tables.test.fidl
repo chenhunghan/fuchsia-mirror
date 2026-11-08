@@ -112,3 +112,17 @@ type TableFieldUnsetFlexibleEnumInlined = table {
 type TableFieldUnsetFlexibleEnumInlinedStruct = struct {
     t TableFieldUnsetFlexibleEnumInlined;
 };
+
+type TableWith64Ordinals = table {
+    63: v63 uint8;
+    64: v64 uint8;
+};
+
+type StructOfTableWith64Ordinals = struct {
+    t TableWith64Ordinals;
+};
+
+type ValueTableThenResourceTable = resource struct {
+    first SimpleTable;
+    second TableFieldInlinedHandle;
+};

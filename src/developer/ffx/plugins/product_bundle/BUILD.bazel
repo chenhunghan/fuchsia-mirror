@@ -1,0 +1,20 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//src/developer/ffx/build:gn_ffx_test_data.bzl", "gn_ffx_test_data")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Exposes the GN-built ffx-product-bundle subtool and metadata JSON to Bazel
+# host tests until //src/developer/ffx/plugins/product_bundle is migrated to
+# Bazel.
+# @bazel2gn:skip
+gn_ffx_test_data(
+    name = "ffx_product_bundle_tool_test_data",
+    expected_files = [
+        "ffx-product-bundle",
+        "ffx-product-bundle.json",
+    ],
+    visibility = ["//src/developer/ffx/build/tests:__pkg__"],
+)

@@ -4,10 +4,14 @@
 #ifndef SRC_DEVELOPER_FORENSICS_EXCEPTIONS_PROCESS_LIMBO_MANAGER_H_
 #define SRC_DEVELOPER_FORENSICS_EXCEPTIONS_PROCESS_LIMBO_MANAGER_H_
 
-#include <fuchsia/exception/cpp/fidl.h>
+#include <fidl/fuchsia.exception/cpp/fidl.h>
+#include <lib/fit/function.h>
 
 #include <map>
+#include <optional>
 #include <set>
+#include <string>
+#include <vector>
 
 #include "src/lib/fxl/memory/weak_ptr.h"
 
@@ -24,7 +28,7 @@ class ProcessLimboManager {
 
   fxl::WeakPtr<ProcessLimboManager> GetWeakPtr();
 
-  void AddToLimbo(fuchsia::exception::ProcessException);
+  void AddToLimbo(fuchsia_exception::ProcessException);
 
   // Notify all handlers that limbo changed.
   void NotifyLimboChanged();
@@ -35,7 +39,7 @@ class ProcessLimboManager {
   bool SetActive(bool active);
   bool active() const { return active_; }
 
-  const std::map<zx_koid_t, fuchsia::exception::ProcessException>& limbo() const { return limbo_; }
+  const std::map<zx_koid_t, fuchsia_exception::ProcessException>& limbo() const { return limbo_; }
 
   void set_filters(std::set<std::string> filters) { filters_ = std::move(filters); }
   const std::set<std::string>& filters() const { return filters_; }
@@ -50,7 +54,7 @@ class ProcessLimboManager {
  private:
   // Returns the list of process metadata for processes waiting on exceptions
   // Corresponds to the return value of |WatchProcessesWaitingOnException|.
-  std::vector<fuchsia::exception::ProcessExceptionMetadata> ListProcessesInLimbo();
+  std::vector<fuchsia_exception::ProcessExceptionMetadata> ListProcessesInLimbo();
 
   // TODO(https://fxbug.dev/42122544): This is an extremely naive approach. There are several
   // policies to make this more robust:
@@ -58,7 +62,7 @@ class ProcessLimboManager {
   //                - Define an eviction policy (FIFO probably).
   //                - Set a timeout for exceptions (configurable).
   //                - Decide on a throttle mechanism (if the same process is crashing continously).
-  std::map<zx_koid_t, fuchsia::exception::ProcessException> limbo_;
+  std::map<zx_koid_t, fuchsia_exception::ProcessException> limbo_;
 
   bool active_ = false;
 
@@ -77,7 +81,7 @@ class ProcessLimboManager {
 // Handles *one* process limbo connection. Having one handler per connection lets us do patterns
 // like hanging get, which requires to recongnize per-connection state. The limbo manager is the
 // common state all connections query.
-class ProcessLimboHandler : public fuchsia::exception::ProcessLimbo {
+class ProcessLimboHandler : public fidl::Server<fuchsia_exception::ProcessLimbo> {
  public:
   explicit ProcessLimboHandler(fxl::WeakPtr<ProcessLimboManager> limbo_manager);
 
@@ -86,36 +90,43 @@ class ProcessLimboHandler : public fuchsia::exception::ProcessLimbo {
   void ActiveStateChanged(bool active);
 
   // Called when a process goes in or out of limbo (ProcessLimboManager::AddToLimbo).
-  void LimboChanged(std::vector<fuchsia::exception::ProcessExceptionMetadata> limbo_list);
+  void LimboChanged(std::vector<fuchsia_exception::ProcessExceptionMetadata> limbo_list);
 
   // fuchsia.exception.ProcessLimbo implementation.
-  void SetActive(bool active, SetActiveCallback) override;
+  void SetActive(SetActiveRequest& request, SetActiveCompleter::Sync& completer) override;
 
-  void GetActive(GetActiveCallback) override;
+  void GetActive(GetActiveCompleter::Sync& completer) override;
 
-  void WatchActive(WatchActiveCallback) override;
+  void WatchActive(WatchActiveCompleter::Sync& completer) override;
 
-  void ListProcessesWaitingOnException(ListProcessesWaitingOnExceptionCallback) override;
+  void ListProcessesWaitingOnException(
+      ListProcessesWaitingOnExceptionCompleter::Sync& completer) override;
 
-  void WatchProcessesWaitingOnException(WatchProcessesWaitingOnExceptionCallback) override;
+  void WatchProcessesWaitingOnException(
+      WatchProcessesWaitingOnExceptionCompleter::Sync& completer) override;
 
-  void RetrieveException(zx_koid_t process_koid, RetrieveExceptionCallback) override;
+  void RetrieveException(RetrieveExceptionRequest& request,
+                         RetrieveExceptionCompleter::Sync& completer) override;
 
-  void ReleaseProcess(zx_koid_t process_koid, ReleaseProcessCallback) override;
+  void ReleaseProcess(ReleaseProcessRequest& request,
+                      ReleaseProcessCompleter::Sync& completer) override;
 
-  void GetFilters(GetFiltersCallback) override;
+  void GetFilters(GetFiltersCompleter::Sync& completer) override;
 
-  void AppendFilters(std::vector<std::string> filters, AppendFiltersCallback) override;
+  void AppendFilters(AppendFiltersRequest& request,
+                     AppendFiltersCompleter::Sync& completer) override;
 
-  void RemoveFilters(std::vector<std::string> filters, RemoveFiltersCallback) override;
+  void RemoveFilters(RemoveFiltersRequest& request,
+                     RemoveFiltersCompleter::Sync& completer) override;
 
  private:
   // WatchActive hanging get.
   bool watch_active_dirty_bit_ = true;
-  WatchActiveCallback is_active_callback_;
+  std::optional<WatchActiveCompleter::Async> watch_active_completer_;
 
+  // WatchProcessesWaitingOnException hanging get.
   bool watch_limbo_dirty_bit_ = true;
-  WatchProcessesWaitingOnExceptionCallback watch_limbo_callback_;
+  std::optional<WatchProcessesWaitingOnExceptionCompleter::Async> watch_limbo_completer_;
 
   fxl::WeakPtr<ProcessLimboManager> limbo_manager_;
 

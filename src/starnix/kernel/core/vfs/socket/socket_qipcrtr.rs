@@ -376,7 +376,7 @@ impl SocketOps for QipcrtrSocket {
                     let requested_capacity: socklen_t = optval.read(current_task)?;
                     // SO_SNDBUF doubles the requested capacity to leave space for bookkeeping.
                     // See https://man7.org/linux/man-pages/man7/socket.7.html
-                    let capacity = usize::try_from(requested_capacity * 2).unwrap_or(usize::MAX);
+                    let capacity = (requested_capacity as usize).saturating_mul(2);
                     // TODO(https://fxbug.dev/322907334): Clamp to `wmem_max`.
                     let capacity = capacity.clamp(SEND_BUF_MIN_SIZE, SEND_BUF_MAX_SIZE);
                     inner.send_buf_size = capacity;
@@ -385,7 +385,7 @@ impl SocketOps for QipcrtrSocket {
                     let requested_capacity: socklen_t = optval.read(current_task)?;
                     // SO_RCVBUF doubles the requested capacity to leave space for bookkeeping.
                     // See https://man7.org/linux/man-pages/man7/socket.7.html
-                    let capacity = usize::try_from(requested_capacity * 2).unwrap_or(usize::MAX);
+                    let capacity = (requested_capacity as usize).saturating_mul(2);
                     // TODO(https://fxbug.dev/322906968): Clamp to `rmem_max`.
                     let capacity = capacity.clamp(RECV_BUF_MIN_SIZE, RECV_BUF_MAX_SIZE);
                     inner.recv_buf_size = capacity;

@@ -6,7 +6,6 @@
 
 use ::fidl::endpoints::RequestStream as _;
 use anyhow::{Context as _, Error, anyhow};
-use fidl_fuchsia_component_sandbox as fsandbox;
 use fidl_fuchsia_io as fio;
 use fidl_fuchsia_paver as fpaver;
 use fidl_fuchsia_process_lifecycle as flifecycle;
@@ -15,6 +14,7 @@ use fidl_fuchsia_update_verify::HealthVerificationMarker;
 use fuchsia_async as fasync;
 use fuchsia_component::client::connect_to_protocol;
 use fuchsia_component::escrow::EscrowOperation;
+use fuchsia_component::runtime::{Capability, Dictionary, Handle};
 use fuchsia_component::server::ServiceFs;
 use fuchsia_inspect::health::Reporter as _;
 use fuchsia_inspect::{self as finspect};
@@ -54,11 +54,9 @@ async fn main_async() -> Result<(), Error> {
         fuchsia_runtime::HandleType::EscrowedDictionary,
         0,
     )) {
-        Some(dictionary) => {
-            resume_from_escrow(fsandbox::DictionaryRef { token: dictionary.into() })
-                .await
-                .context("resume_from_idle_stop")
-        }
+        Some(dictionary) => resume_from_escrow(Dictionary::from(zx::EventPair::from(dictionary)))
+            .await
+            .context("resume_from_idle_stop"),
         None => fresh_run().await.context("first_run"),
     }
 }
@@ -254,7 +252,7 @@ async fn fresh_run() -> Result<(), Error> {
 }
 
 // Returns success if the component is idle or asked to stop.
-async fn resume_from_escrow(escrowed_state: fsandbox::DictionaryRef) -> Result<(), Error> {
+async fn resume_from_escrow(escrowed_state: Dictionary) -> Result<(), Error> {
     let EscrowState { p_internal, p_external, frozen_inspect } =
         EscrowState::load(escrowed_state).await.context("loading escrowed state")?;
 
@@ -341,8 +339,8 @@ async fn run_until_idle_or_component_stopped(
     futures::select! {
         res = service_fut => {
             let (state, out_dir) = res?;
-            let escrowed_dictionary = state.store().await.context("escrowing state")?;
-            escrow_operation.with_fsandbox_dictionary(escrowed_dictionary);
+            let escrowed_dictionary = state.store().await;
+            escrow_operation.with_dictionary(escrowed_dictionary);
             escrow_operation.run(out_dir).context("failed to run escrow operation")?;
             Ok(())
         },
@@ -388,34 +386,19 @@ impl EscrowState {
     const EXTERNAL_EVENTPAIR: &'static str = "p_external";
     const INSPECT: &'static str = "frozen_inspect";
 
-    async fn load(dict: fsandbox::DictionaryRef) -> Result<Self, Error> {
-        let store =
-            fuchsia_component::client::connect_to_protocol::<fsandbox::CapabilityStoreMarker>()?;
-        let id_generator = sandbox::CapabilityIdGenerator::new();
-
-        let dict_id = id_generator.next();
-        let () = store
-            .import(dict_id, fsandbox::Capability::Dictionary(dict))
-            .await?
-            .map_err(|e| anyhow!("{e:?}"))?;
-
-        let remove_from_dict = |key: &'static str| async {
-            let id = id_generator.next();
-            match store
-                .dictionary_remove(dict_id, key, Some(&fsandbox::WrappedNewCapabilityId { id }))
-                .await?
-            {
-                Ok(()) => {
-                    let fsandbox::Capability::Handle(handle) =
-                        store.export(id).await?.map_err(|e| anyhow!("{e:?}"))?
-                    else {
-                        anyhow::bail!("Bad capability type from dictionary");
-                    };
-                    Ok(Some(handle))
-                }
-                Err(fsandbox::CapabilityStoreError::ItemNotFound) => Ok(None),
-                Err(e) => {
-                    anyhow::bail!("exporting frozen inspect {e:?}");
+    async fn load(dict: Dictionary) -> Result<Self, Error> {
+        let remove_from_dict = |key: &'static str| {
+            let dict = &dict;
+            async move {
+                match dict.remove(key).await {
+                    Some(Capability::Handle(handle)) => Ok(Some(
+                        handle
+                            .take()
+                            .await
+                            .ok_or_else(|| anyhow!("handle for {key} was already taken"))?,
+                    )),
+                    Some(_) => anyhow::bail!("Bad capability type from dictionary"),
+                    None => Ok(None),
                 }
             }
         };
@@ -435,39 +418,25 @@ impl EscrowState {
         Ok(Self { p_internal, p_external, frozen_inspect })
     }
 
-    async fn store(self) -> Result<fsandbox::DictionaryRef, Error> {
+    async fn store(self) -> Dictionary {
         let Self { p_internal, p_external, frozen_inspect } = self;
-        let store =
-            fuchsia_component::client::connect_to_protocol::<fsandbox::CapabilityStoreMarker>()?;
-        let id_generator = sandbox::CapabilityIdGenerator::new();
-        let dict_id = id_generator.next();
-        let () = store.dictionary_create(dict_id).await?.map_err(|e| anyhow!("{e:?}"))?;
+        let dict = Dictionary::new().await;
 
-        let insert_in_dict = |handle, key| async {
-            let id = id_generator.next();
-            let () = store
-                .import(id, fsandbox::Capability::Handle(handle))
-                .await?
-                .map_err(|e| anyhow!("{e:?}"))?;
-            let () = store
-                .dictionary_insert(dict_id, &fsandbox::DictionaryItem { key, value: id })
-                .await?
-                .map_err(|e| anyhow!("{e:?}"))?;
-            Result::<_, anyhow::Error>::Ok(())
+        let insert_in_dict = |handle, key: &'static str| {
+            let dict = &dict;
+            async move {
+                let handle = Handle::new(handle).await;
+                dict.insert(key, handle).await;
+            }
         };
 
         if let Some(frozen_inspect) = frozen_inspect {
-            let () = insert_in_dict(frozen_inspect, Self::INSPECT.into()).await?;
+            insert_in_dict(frozen_inspect, Self::INSPECT).await;
         }
-        let () = insert_in_dict(p_internal, Self::INTERNAL_EVENTPAIR.into()).await?;
-        let () = insert_in_dict(p_external, Self::EXTERNAL_EVENTPAIR.into()).await?;
+        insert_in_dict(p_internal, Self::INTERNAL_EVENTPAIR).await;
+        insert_in_dict(p_external, Self::EXTERNAL_EVENTPAIR).await;
 
-        let fsandbox::Capability::Dictionary(dictionary_ref) =
-            store.export(dict_id).await?.map_err(|e| anyhow!("{e:?}"))?
-        else {
-            anyhow::bail!("Bad capability type from dictionary");
-        };
-        Ok(dictionary_ref)
+        dict
     }
 }
 
@@ -490,7 +459,7 @@ mod tests {
             frozen_inspect,
         };
 
-        let stored = state.store().await.unwrap();
+        let stored = state.store().await;
         let loaded = EscrowState::load(stored).await.unwrap();
         assert!(loaded.frozen_inspect.is_some());
     }
@@ -505,7 +474,7 @@ mod tests {
             frozen_inspect: None,
         };
 
-        let stored = state.store().await.unwrap();
+        let stored = state.store().await;
         let loaded = EscrowState::load(stored).await.unwrap();
         assert_eq!(loaded.frozen_inspect, None);
     }

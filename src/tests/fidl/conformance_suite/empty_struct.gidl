@@ -199,6 +199,59 @@ decode_failure("OptionalEmptyStructInvalidPresenceIndicator") {
     err = INVALID_PRESENCE_INDICATOR,
 }
 
+decode_failure("OptionalEmptyStructInvalidPresenceIndicatorWithOutOfLineBytes") {
+    // TODO(https://fxbug.dev/579582830): Validate Box<T> presence indicator in cpp.
+    bindings_denylist = [cpp],
+    bytes = {
+        v2 = [
+            repeat(0xab):8,
+            0x00, padding:7,
+        ],
+    },
+    type = OptionalEmptyStructWrapper,
+    err = INVALID_PRESENCE_INDICATOR,
+}
+
+decode_failure("OptionalEmptyStructNonZeroBytes") {
+    // TODO(https://fxbug.dev/579595791): Validate empty struct zero byte in llcpp and hlcpp.
+    bindings_denylist = [llcpp, hlcpp],
+    bytes = {
+        v2 = [
+            repeat(0xff):8,
+            0x01, padding:7,
+        ],
+    },
+    type = OptionalEmptyStructWrapper,
+    err = INVALID_EMPTY_STRUCT,
+}
+
+decode_failure("TableWithEmptyStructNonZeroBytes") {
+    // TODO(https://fxbug.dev/579595791): Validate empty struct zero byte in llcpp and hlcpp.
+    bindings_denylist = [llcpp, hlcpp],
+    type = StructOfTableWithEmptyStruct,
+    bytes = {
+        v2 = [
+            num(1):8,
+            repeat(0xff):8,
+            0x01, padding:3, num(0):2, num(1):2,
+        ],
+    },
+    err = INVALID_EMPTY_STRUCT,
+}
+
+decode_failure("UnionWithEmptyStructNonZeroBytes") {
+    // TODO(https://fxbug.dev/579595791): Validate empty struct zero byte in llcpp and hlcpp.
+    bindings_denylist = [llcpp, hlcpp],
+    type = Uint8UnionStruct,
+    bytes = {
+        v2 = [
+            num(2):8,
+            0x01, padding:3, num(0):2, num(1):2,
+        ],
+    },
+    err = INVALID_EMPTY_STRUCT,
+}
+
 success("RecursiveEmptyStruct") {
     value = RecursiveEmptyStruct{ // 0
         inner: RecursiveEmptyStruct{ // 1

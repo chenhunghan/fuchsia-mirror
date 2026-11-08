@@ -1,0 +1,147 @@
+{{/*
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+*/}}
+{{- define "Generate-kernel_wrappers.rs" -}}
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+// DO NOT EDIT. Generated from FIDL library zx by zither, a Fuchsia platform tool.
+
+// Per-syscall kernel entry points. The architecture syscall dispatcher calls `wrapper_<syscall>`
+// with the raw 64-bit register arguments of the syscall followed by the user program counter;
+// each wrapper sanitizes the arguments, calls the `sys_<syscall>` implementation and copies any
+// output handles back to user memory.
+
+#[allow(unused_imports)]
+use crate::kernel::thread;
+#[allow(unused_imports)]
+use crate::object::HandleValue;
+#[allow(unused_imports)]
+use crate::syscalls_rs::safe_syscall_argument::SafeSyscallArgument;
+#[allow(unused_imports)]
+use crate::syscalls_rs::syscall_numbers::*;
+#[allow(unused_imports)]
+use crate::user_copy::{UserInOutPtr, UserInPtr, UserOutPtr};
+#[allow(unused_imports)]
+use super::{SyscallResult, SyscallReturn, ValidSyscallPC, do_syscall};
+#[allow(unused_imports)]
+use zx_status::Status;
+#[allow(unused_imports)]
+use zx_types::*;
+
+// The `sys_<syscall>` implementations, defined with `#[syscalls_macro::syscall]` in Rust or as
+// `extern "C"` functions in C++.
+#[allow(improper_ctypes)]
+unsafe extern "C" {
+{{- range . }}
+{{- if not .VdsoCall }}
+{{- if .Parameters }}
+    fn sys_{{ LowerCaseWithUnderscores . }}(
+{{- range .Parameters }}
+        {{ RustName . }}: {{ RustKernelParameterType . }},
+{{- end }}
+    ) -> {{ RustKernelReturnType . }};
+{{- else }}
+    fn sys_{{ LowerCaseWithUnderscores . }}() -> {{ RustKernelReturnType . }};
+{{- end }}
+{{- end }}
+{{- end }}
+}
+{{- range . }}
+{{- if not .VdsoCall }}
+{{- $syscallName := LowerCaseWithUnderscores . }}
+{{- $userOutHandles := UserOutHandles . }}
+
+/// Kernel entry point of `zx_{{ $syscallName }}`.
+///
+/// # Safety
+///
+/// Must only be called by the architecture syscall dispatcher on the syscall path of the current
+/// user thread, with interrupts disabled and `pc` the user program counter that issued the
+/// syscall.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wrapper_{{ $syscallName }}(
+{{- range .Parameters }}
+    arg_{{ LowerCaseWithUnderscores . }}: u64,
+{{- end }}
+    pc: u64,
+) -> SyscallResult {
+    let make_call = move || {
+{{- range $userOutHandles }}
+        let mut out_handle_{{ LowerCaseWithUnderscores . }} = HandleValue::new(ZX_HANDLE_INVALID);
+{{- end }}
+{{- if .NoReturn }}
+        /* noreturn */
+{{- else if not .ReturnType }}
+        /* void */
+{{- end }}
+{{- if and .Parameters $userOutHandles }}
+        // SAFETY: `sys_{{ $syscallName }}` is the kernel implementation of this
+        // syscall: every argument is sanitized from the raw user-provided register value
+        // and output handles are written to live locals.
+{{- else if .Parameters }}
+        // SAFETY: `sys_{{ $syscallName }}` is the kernel implementation of this
+        // syscall: every argument is sanitized from the raw user-provided register value.
+{{- else if $userOutHandles }}
+        // SAFETY: `sys_{{ $syscallName }}` is the kernel implementation of this
+        // syscall: output handles are written to live locals.
+{{- else }}
+        // SAFETY: `sys_{{ $syscallName }}` is the kernel implementation of this
+        // zero-argument syscall.
+{{- end }}
+        {{ if or .NoReturn (not .ReturnType) }}{{ else }}let {{ if $userOutHandles }}mut {{ end }}result = {{ end }}unsafe {
+{{- if .Parameters }}
+            sys_{{ $syscallName }}(
+{{- range .Parameters }}
+{{- if IsUserOutHandle . }}
+                &mut out_handle_{{ LowerCaseWithUnderscores . }},
+{{- else }}
+                SafeSyscallArgument::sanitize(arg_{{ LowerCaseWithUnderscores . }}),
+{{- end }}
+{{- end }}
+            )
+{{- else }}
+            sys_{{ $syscallName }}()
+{{- end }}
+        };
+{{- if $userOutHandles }}
+        // Complete copy-out of output handles.
+        if result.is_err() {
+            core::hint::cold_path();
+            return result.into_raw_return();
+        }
+{{- range $userOutHandles }}
+        result = UserOutPtr::<zx_handle_t>::sanitize(arg_{{ LowerCaseWithUnderscores . }})
+            .copy_to_user(&out_handle_{{ LowerCaseWithUnderscores . }}.raw_value());
+        if result.is_err() {
+            core::hint::cold_path();
+            thread::signal_policy_exception(ZX_EXCP_POLICY_CODE_HANDLE_LEAK, 0);
+        }
+{{- end }}
+{{- end }}
+{{- if .NoReturn }}
+        /* NOTREACHED */
+        Status::BAD_STATE.into_raw_return()
+{{- else if not .ReturnType }}
+        i64::from(ZX_OK) as u64
+{{- else }}
+        result.into_raw_return()
+{{- end }}
+    };
+    // SAFETY: The caller upholds the `do_syscall` contract: this is the syscall path of the
+    // current user thread and interrupts are disabled.
+    unsafe {
+        do_syscall(
+            ZX_SYS_{{ UpperCaseWithUnderscores . }},
+            pc,
+            ValidSyscallPC::{{ $syscallName }},
+            make_call,
+        )
+    }
+}
+{{- end }}
+{{- end }}
+{{ end }}

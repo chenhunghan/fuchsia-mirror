@@ -73,7 +73,20 @@ group("bins") {
 group("tests") {
   testonly = true
   deps = []
-  foreach(tool, _tools) {
+
+  # Tools whose unit tests have been migrated to Bazel (in
+  # //src/developer/ffx:tests).
+  _bazel_tested_tools = [
+    "//src/developer/ffx/plugins/assembly",
+    "//src/developer/ffx/plugins/coverage",
+    "//src/developer/ffx/plugins/forward",
+    "//src/developer/ffx/plugins/fuzz",
+    "//src/developer/ffx/plugins/session",
+    "//src/developer/ffx/plugins/wlan",
+    "efi",
+    "triage",
+  ]
+  foreach(tool, _tools - _bazel_tested_tools) {
     deps += [ "$tool:tests" ]
   }
 

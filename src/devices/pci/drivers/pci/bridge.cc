@@ -7,6 +7,7 @@
 #include <assert.h>
 #include <err.h>
 #include <inttypes.h>
+#include <lib/driver/logging/cpp/logger.h>
 #include <limits.h>
 #include <string.h>
 #include <zircon/compiler.h>
@@ -15,6 +16,7 @@
 
 #include <fbl/algorithm.h>
 #include <fbl/alloc_checker.h>
+#include <fbl/auto_lock.h>
 
 #include "src/devices/pci/drivers/pci/allocation.h"
 #include "src/devices/pci/drivers/pci/bus.h"
@@ -24,17 +26,17 @@
 namespace pci {
 
 // Bridges rely on most of the protected Device members when they can
-Bridge::Bridge(zx_device_t* parent, std::unique_ptr<Config>&& config, UpstreamNode* upstream,
-               BusDeviceInterface* bdi, uint8_t mbus_id)
-    : pci::Device(parent, std::move(config), upstream, bdi, /*is_bridge=*/true,
+Bridge::Bridge(std::unique_ptr<Config>&& config, UpstreamNode* upstream, BusDeviceInterface* bdi,
+               uint8_t mbus_id)
+    : pci::Device(std::move(config), upstream, bdi, /*is_bridge=*/true,
                   /*has_acpi=*/false, /*has_devicetree=*/false),
       UpstreamNode(UpstreamNode::Type::BRIDGE, mbus_id) {}
 
-zx_status_t Bridge::Create(zx_device_t* parent, std::unique_ptr<Config>&& config,
-                           UpstreamNode* upstream, BusDeviceInterface* bdi, uint8_t managed_bus_id,
+zx_status_t Bridge::Create(std::unique_ptr<Config>&& config, UpstreamNode* upstream,
+                           BusDeviceInterface* bdi, uint8_t managed_bus_id,
                            fbl::RefPtr<pci::Bridge>* out_bridge) {
   fbl::AllocChecker ac;
-  auto raw_bridge = new (&ac) Bridge(parent, std::move(config), upstream, bdi, managed_bus_id);
+  auto raw_bridge = new (&ac) Bridge(std::move(config), upstream, bdi, managed_bus_id);
   if (!ac.check()) {
     return ZX_ERR_NO_MEMORY;
   }
@@ -55,7 +57,7 @@ zx_status_t Bridge::Create(zx_device_t* parent, std::unique_ptr<Config>&& config
 zx_status_t Bridge::Init() {
   fbl::AutoLock dev_lock(&dev_lock_);
 
-  // Sanity checks of bus allocation before registering the device with the DDK.
+  // Sanity checks of bus allocation before publishing the device node.
   //
   // TODO(cja) : Strengthen sanity checks around bridge topology and
   // handle the need to reconfigure bridge topology if a bridge happens to be
@@ -63,30 +65,30 @@ zx_status_t Bridge::Init() {
   // taken care of bridge configuration.  In the short term, it would be good
   // to add some protection against cycles in the bridge configuration which
   // could lead to infinite recursion.
-  uint8_t primary_id = cfg_->Read(Config::kPrimaryBusId);
-  uint8_t secondary_id = cfg_->Read(Config::kSecondaryBusId);
+  uint8_t primary_id = config::PrimaryBusId.ReadFrom(cfg_.get()).reg_value();
+  uint8_t secondary_id = config::SecondaryBusId.ReadFrom(cfg_.get()).reg_value();
 
   if (primary_id == secondary_id) {
-    zxlogf(ERROR,
-           "PCI-to-PCI bridge detected at %s claims to be bridged to itsef "
-           "(primary %02x == secondary %02x)... skipping scan.\n",
-           cfg_->addr(), primary_id, secondary_id);
+    fdf::error(
+        "PCI-to-PCI bridge detected at {} claims to be bridged to itself "
+        "(primary {:02x} == secondary {:02x})... skipping scan.",
+        cfg_->addr(), primary_id, secondary_id);
     return ZX_ERR_BAD_STATE;
   }
 
   if (primary_id != cfg_->bdf().bus_id) {
-    zxlogf(ERROR,
-           "PCI-to-PCI bridge detected at %s has invalid primary bus id "
-           "(%02x)... skipping scan.\n",
-           cfg_->addr(), primary_id);
+    fdf::error(
+        "PCI-to-PCI bridge detected at {} has invalid primary bus id "
+        "({:02x})... skipping scan.",
+        cfg_->addr(), primary_id);
     return ZX_ERR_BAD_STATE;
   }
 
   if (secondary_id != managed_bus_id()) {
-    zxlogf(ERROR,
-           "PCI-to-PCI bridge detected at %s has invalid secondary bus id "
-           "(%02x)... skipping scan.\n",
-           cfg_->addr(), secondary_id);
+    fdf::error(
+        "PCI-to-PCI bridge detected at {} has invalid secondary bus id "
+        "({:02x})... skipping scan.",
+        cfg_->addr(), secondary_id);
     return ZX_ERR_BAD_STATE;
   }
 
@@ -116,34 +118,41 @@ zx_status_t Bridge::ParseBusWindowsLocked() {
   //
   // See The PCI-to-PCI Bridge Architecture Specification Revision 1.2,
   // section 3.2.5 and chapter 4 for detail.
-  uint32_t base, limit;
 
   // I/O window
-  base = cfg_->Read(Config::kIoBase);
-  limit = cfg_->Read(Config::kIoLimit);
+  auto io_base = config::IoBase.ReadFrom(cfg_.get());
+  auto io_limit = config::IoLimit.ReadFrom(cfg_.get());
 
-  supports_32bit_pio_ = ((base & 0xF) == 0x1) && ((base & 0xF) == (limit & 0xF));
-  io_base_ = (base & ~0xF) << 8;
-  io_limit_ = (limit << 8) | 0xFFF;
+  supports_32bit_pio_ =
+      (io_base.address_type() == 0x1) && (io_base.address_type() == io_limit.address_type());
+  io_base_ = static_cast<uint32_t>(io_base.address()) << 12u;
+  io_limit_ = (static_cast<uint32_t>(io_limit.address()) << 12u) | 0xFFFu;
   if (supports_32bit_pio_) {
-    io_base_ |= static_cast<uint32_t>(cfg_->Read(Config::kIoBaseUpper)) << 16;
-    io_limit_ |= static_cast<uint32_t>(cfg_->Read(Config::kIoLimitUpper)) << 16;
+    io_base_ |= static_cast<uint32_t>(config::IoBaseUpper.ReadFrom(cfg_.get()).reg_value()) << 16u;
+    io_limit_ |= static_cast<uint32_t>(config::IoLimitUpper.ReadFrom(cfg_.get()).reg_value())
+                 << 16u;
   }
 
   // Non-prefetchable memory window
-  mem_base_ = (static_cast<uint32_t>(cfg_->Read(Config::kMemoryBase)) << 16) & ~0xFFFFF;
-  mem_limit_ = (static_cast<uint32_t>(cfg_->Read(Config::kMemoryLimit)) << 16) | 0xFFFFF;
+  mem_base_ = static_cast<uint32_t>(config::MemoryBase.ReadFrom(cfg_.get()).address()) << 20u;
+  mem_limit_ =
+      (static_cast<uint32_t>(config::MemoryLimit.ReadFrom(cfg_.get()).address()) << 20u) | 0xFFFFFu;
 
   // Prefetchable memory window
-  base = cfg_->Read(Config::kPrefetchableMemoryBase);
-  limit = cfg_->Read(Config::kPrefetchableMemoryLimit);
+  auto pf_base = config::PrefetchableMemoryBase.ReadFrom(cfg_.get());
+  auto pf_limit = config::PrefetchableMemoryLimit.ReadFrom(cfg_.get());
 
-  bool supports_64bit_pf_mem = ((base & 0xF) == 0x1) && ((base & 0xF) == (limit & 0xF));
-  pf_mem_base_ = (base & ~0xF) << 16;
-  pf_mem_limit_ = (limit << 16) | 0xFFFFF;
+  bool supports_64bit_pf_mem =
+      (pf_base.address_type() == 0x1) && (pf_base.address_type() == pf_limit.address_type());
+  pf_mem_base_ = static_cast<uint64_t>(pf_base.address()) << 20u;
+  pf_mem_limit_ = (static_cast<uint64_t>(pf_limit.address()) << 20u) | 0xFFFFFu;
   if (supports_64bit_pf_mem) {
-    pf_mem_base_ |= static_cast<uint64_t>(cfg_->Read(Config::kPrefetchableMemoryBaseUpper)) << 32;
-    pf_mem_limit_ |= static_cast<uint64_t>(cfg_->Read(Config::kPrefetchableMemoryLimitUpper)) << 32;
+    pf_mem_base_ |=
+        static_cast<uint64_t>(config::PrefetchableMemoryBaseUpper.ReadFrom(cfg_.get()).reg_value())
+        << 32u;
+    pf_mem_limit_ |=
+        static_cast<uint64_t>(config::PrefetchableMemoryLimitUpper.ReadFrom(cfg_.get()).reg_value())
+        << 32u;
   }
 
   return ZX_OK;
@@ -152,7 +161,7 @@ zx_status_t Bridge::ParseBusWindowsLocked() {
 void Bridge::Unplug() {
   UnplugDownstream();
   pci::Device::Unplug();
-  zxlogf(DEBUG, "bridge [%s] unplugged", cfg_->addr());
+  fdf::debug("bridge [{}] unplugged", cfg_->addr());
 }
 
 zx::result<> Bridge::AllocateBars() {
@@ -195,13 +204,13 @@ zx::result<> Bridge::AllocateBridgeWindowsLocked() {
       uint64_t size = static_cast<uint64_t>(limit) - base + 1;
       auto result = upstream_alloc.Allocate(base, size);
       if (result.is_error()) {
-        zxlogf(ERROR, "[%s] Failed to allocate bridge %s window [%#lx,%#lx)", cfg_->addr(), label,
-               static_cast<uint64_t>(base), static_cast<uint64_t>(base + limit));
+        fdf::error("[{}] Failed to allocate bridge {} window [{:#x},{:#x})", cfg_->addr(), label,
+                   base, base + size);
         return result.take_error();
       }
 
-      zxlogf(DEBUG, "[%s] Allocating [%#lx, %#lx) to %s (%p)", cfg_->addr(), base, base + size,
-             label, &dest_alloc);
+      fdf::debug("[{}] Allocating [{:#x}, {:#x}) to {} ({:p})", cfg_->addr(), base, base + size,
+                 label, static_cast<void*>(&dest_alloc));
       zx_status_t status = dest_alloc.SetParentAllocation(std::move(result.value()));
       if (status != ZX_OK) {
         return zx::error(status);
@@ -213,30 +222,28 @@ zx::result<> Bridge::AllocateBridgeWindowsLocked() {
   // Configure the three windows
   auto result = configure_window(upstream_->pio_regions(), pio_regions_, io_base_, io_limit_, "io");
   if (result.is_error()) {
-    zxlogf(TRACE,
-           "[%s] Error configuring I/O window (%s), I/O bars downstream will be unavailable!\n",
-           cfg_->addr(), result.status_string());
+    fdf::trace("[{}] Error configuring I/O window ({}), I/O bars downstream will be unavailable!",
+               cfg_->addr(), result);
   } else if (io_base_ <= io_limit_) {
-    ModifyCmdLocked(/*clr_bits=*/0, /*set_bits=*/kCommandIoEn);
+    config::Command.ReadFrom(cfg_.get()).set_io_space(true).WriteTo(cfg_.get());
   }
   result =
       configure_window(upstream_->mmio_regions(), mmio_regions_, mem_base_, mem_limit_, "mmio");
   if (result.is_error()) {
-    zxlogf(TRACE,
-           "[%s] Error configuring MMIO window (%s), MMIO bars downstream will be unavailable!\n",
-           cfg_->addr(), result.status_string());
+    fdf::trace("[{}] Error configuring MMIO window ({}), MMIO bars downstream will be unavailable!",
+               cfg_->addr(), result);
   } else if (mem_base_ <= mem_limit_) {
-    ModifyCmdLocked(/*clr_bits=*/0, /*set_bits=*/kCommandMemEn);
+    config::Command.ReadFrom(cfg_.get()).set_memory_space(true).WriteTo(cfg_.get());
   }
   result = configure_window(upstream_->pf_mmio_regions(), pf_mmio_regions_, pf_mem_base_,
                             pf_mem_limit_, "pf_mmio");
   if (result.is_error()) {
-    zxlogf(TRACE,
-           "[%s] Error configuring PF-MMIO window (%s), PF-MMIO bars downstream will be "
-           "unavailable!\n",
-           cfg_->addr(), result.status_string());
+    fdf::trace(
+        "[{}] Error configuring PF-MMIO window ({}), PF-MMIO bars downstream will be "
+        "unavailable!",
+        cfg_->addr(), result);
   } else if (pf_mem_base_ <= pf_mem_limit_) {
-    ModifyCmdLocked(/*clr_bits=*/0, /*set_bits=*/kCommandMemEn);
+    config::Command.ReadFrom(cfg_.get()).set_memory_space(true).WriteTo(cfg_.get());
   }
 
   return zx::ok();
@@ -287,13 +294,14 @@ void Bridge::Disable() {
   {
     fbl::AutoLock dev_lock(&dev_lock_);
 
-    // Disable the device portion of ourselves. This clears kCommandIoEn,
-    // kCommandMemEn, and kCommandBusMasterEn in hardware config space, which
-    // stops the bridge from decoding or forwarding any I/O or memory
-    // transactions. Because the PCI bus driver does not dynamically reprogram
-    // bridge windows on startup and instead relies on ParseBusWindowsLocked()
-    // reading the firmware- or root-complex-configured windows from config
-    // space, do not overwrite the hardware window base and limit registers.
+    // Disable the device portion of ourselves. This clears the command
+    // register's I/O space, memory space, and bus mastering bits in hardware
+    // config space, which stops the bridge from decoding or forwarding any I/O
+    // or memory transactions. Because the PCI bus driver does not dynamically
+    // reprogram bridge windows on startup and instead relies on
+    // ParseBusWindowsLocked() reading the firmware- or root-complex-configured
+    // windows from config space, do not overwrite the hardware window base and
+    // limit registers.
     Device::DisableLocked();
 
     // Update the internal bookkeeping to indicate that the windows are closed.

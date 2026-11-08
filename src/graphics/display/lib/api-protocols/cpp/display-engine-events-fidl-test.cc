@@ -98,6 +98,15 @@ TEST_F(DisplayEngineEventsFidlTest, OnDisplayAddedWithPreferredModes) {
               .refresh_rate_millihertz = 30'000,
           }),
       }),
+      display::ModeAndId({
+          .id = display::ModeId(4),
+          .mode = display::Mode({
+              .active_width = 1280,
+              .active_height = 2856,
+              .refresh_rate_millihertz = 117'794,
+              .flags = fuchsia_hardware_display_types::wire::ModeFlags::kVariableRefreshRate,
+          }),
+      }),
   };
   static constexpr std::span<const display::PixelFormat> kEmptyPixelFormats;
 
@@ -110,19 +119,31 @@ TEST_F(DisplayEngineEventsFidlTest, OnDisplayAddedWithPreferredModes) {
 
         EXPECT_EQ(42u, display_info.display_id.value);
 
-        ASSERT_EQ(3u, display_info.preferred_modes.size());
+        ASSERT_EQ(4u, display_info.preferred_modes.size());
 
         EXPECT_EQ(640u, display_info.preferred_modes[0].active_area.width);
         EXPECT_EQ(480u, display_info.preferred_modes[0].active_area.height);
         EXPECT_EQ(60'000u, display_info.preferred_modes[0].refresh_rate_millihertz);
+        EXPECT_EQ(fuchsia_hardware_display_types::wire::ModeFlags(),
+                  display_info.preferred_modes[0].flags);
 
         EXPECT_EQ(640u, display_info.preferred_modes[1].active_area.width);
         EXPECT_EQ(480u, display_info.preferred_modes[1].active_area.height);
         EXPECT_EQ(30'000u, display_info.preferred_modes[1].refresh_rate_millihertz);
+        EXPECT_EQ(fuchsia_hardware_display_types::wire::ModeFlags(),
+                  display_info.preferred_modes[1].flags);
 
         EXPECT_EQ(800u, display_info.preferred_modes[2].active_area.width);
         EXPECT_EQ(600u, display_info.preferred_modes[2].active_area.height);
         EXPECT_EQ(30'000u, display_info.preferred_modes[2].refresh_rate_millihertz);
+        EXPECT_EQ(fuchsia_hardware_display_types::wire::ModeFlags(),
+                  display_info.preferred_modes[2].flags);
+
+        EXPECT_EQ(1280u, display_info.preferred_modes[3].active_area.width);
+        EXPECT_EQ(2856u, display_info.preferred_modes[3].active_area.height);
+        EXPECT_EQ(117'794u, display_info.preferred_modes[3].refresh_rate_millihertz);
+        EXPECT_EQ(fuchsia_hardware_display_types::wire::ModeFlags::kVariableRefreshRate,
+                  display_info.preferred_modes[3].flags);
 
         EXPECT_THAT(display_info.edid_bytes, ::testing::IsEmpty());
         EXPECT_THAT(display_info.pixel_formats, ::testing::IsEmpty());

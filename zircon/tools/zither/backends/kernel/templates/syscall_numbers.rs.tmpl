@@ -1,0 +1,33 @@
+{{/*
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+*/}}
+{{- define "Generate-syscall_numbers.rs" -}}
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+// DO NOT EDIT. Generated from FIDL library zx by zither, a Fuchsia platform tool.
+
+{{- $count := 0 }}
+{{ range . }}
+{{- if not .VdsoCall }}
+/// Syscall number of `zx_{{ LowerCaseWithUnderscores . }}`.
+pub const ZX_SYS_{{ UpperCaseWithUnderscores . }}: u64 = {{ $count }};
+{{- $count = Increment $count }}
+{{- end }}
+{{- end }}
+
+/// Number of kernel syscall entry points; valid syscall numbers are `0..ZX_SYS_COUNT`.
+pub const ZX_SYS_COUNT: usize = {{ $count }};
+
+/// Interned syscall names, indexed by syscall number, for `kernel:syscall` trace events.
+pub static SYSCALL_NAME_REFS: [&crate::ktrace_rs::InternedString; ZX_SYS_COUNT] = [
+{{- range . }}
+{{- if not .VdsoCall }}
+    crate::ktrace_rs::resolve_string!("{{ LowerCaseWithUnderscores . }}"),
+{{- end }}
+{{- end }}
+];
+{{ end }}

@@ -14,7 +14,7 @@
 #include <algorithm>
 // [END diff_1]
 
-#include <re2/re2.h>
+#include "re2/re2.h"
 
 // An implementation of the |Store| protocol.
 class StoreImpl final : public fidl::Server<examples_keyvaluestore_supportexports::Store> {

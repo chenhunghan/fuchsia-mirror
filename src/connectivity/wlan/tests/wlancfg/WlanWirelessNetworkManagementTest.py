@@ -76,7 +76,7 @@ class WlanWirelessNetworkManagementTest(
             self.access_point = self.access_points[0]
             self.access_point.stop_all_aps()
         else:
-            raise signals.TestAbortClass("Requires at least one access point")
+            raise signals.TestError("Requires at least one access point")
 
     def get_single_sta_ext_capabilities(
         self, mac: MacAddress, band: Band
@@ -314,12 +314,11 @@ class WlanWirelessNetworkManagementTest(
                                 ),
                             )
                         ],
+                        enabled=False,
                     ),
                 ]
             )
             self.openwrt_ap.configure_wifi(config)
-            # Disable 5 GHz radio immediately so client connects to 2G
-            self.openwrt_ap.disable_radio(Radio.RADIO_5G)
         elif self.access_point:
             self.setup_ap(
                 ssid,

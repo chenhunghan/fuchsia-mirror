@@ -141,7 +141,7 @@ pub struct SharedUniqueObject {
 
 impl WavlTreeKeyable<i32> for SharedUniqueObject {
     type Key<'a> = i32;
-    fn get_key(&self) -> i32 {
+    unsafe fn get_key(&self) -> i32 {
         self.value
     }
 }
@@ -220,7 +220,7 @@ pub struct SharedRefObject {
 
 impl WavlTreeKeyable<i32> for SharedRefObject {
     type Key<'a> = i32;
-    fn get_key(&self) -> i32 {
+    unsafe fn get_key(&self) -> i32 {
         self.value
     }
 }

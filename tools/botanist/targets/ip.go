@@ -40,7 +40,10 @@ func ResolveIP(ctx context.Context, nodename string) (net.IP, net.IPAddr, error)
 	defer m.Close()
 	m.EnableIPv4()
 	m.EnableIPv6()
-	out := make(chan net.IPAddr, 1)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel() // Clean up any goroutines launched by the mDNS client.
+
+	out := make(chan net.IPAddr, 2)
 	domain := getLocalDomain(nodename)
 	m.AddHandler(func(addr net.Addr, packet mdns.Packet) {
 		logger.Debugf(ctx, "mdns packet from %s: %# v", addr, pretty.Formatter(packet))
@@ -59,11 +62,14 @@ func ResolveIP(ctx context.Context, nodename string) (net.IP, net.IPAddr, error)
 				if record.Class == mdns.IN && record.Domain == domain {
 					switch record.Type {
 					case mdns.A, mdns.AAAA:
-						out <- net.IPAddr{
+						select {
+						case out <- net.IPAddr{
 							IP:   net.IP(record.Data),
 							Zone: zone,
+						}:
+						case <-ctx.Done():
+							return
 						}
-						return
 					}
 				}
 			}
@@ -77,8 +83,6 @@ func ResolveIP(ctx context.Context, nodename string) (net.IP, net.IPAddr, error)
 		errs <- err
 	})
 
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel() // Clean up any goroutines launched by the mDNS client.
 	if err := m.Start(ctx, mdns.DefaultPort); err != nil {
 		return nil, net.IPAddr{}, fmt.Errorf("could not start mDNS client: %w", err)
 	}

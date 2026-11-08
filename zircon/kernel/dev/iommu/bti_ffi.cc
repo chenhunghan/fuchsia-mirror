@@ -15,6 +15,20 @@
 #include <vm/pinned_vm_object.h>
 #include <vm/vm_object.h>
 
+// LINT.IfChange(BtiPageLeakReason)
+static_assert(sizeof(iommu::Bti::BtiPageLeakReason) == sizeof(uint32_t));
+static_assert(alignof(iommu::Bti::BtiPageLeakReason) == alignof(uint32_t));
+static_assert(
+    static_cast<uint32_t>(iommu::Bti::BtiPageLeakReason::BtiOrphanedWithQuarantinedPmts) == 0);
+static_assert(static_cast<uint32_t>(iommu::Bti::BtiPageLeakReason::PmtQuarantinedWhenBtiOrphaned) ==
+              1);
+static_assert(static_cast<uint32_t>(iommu::Bti::BtiPageLeakReason::PmtQuarantined) == 2);
+// LINT.ThenChange(
+//   //zircon/kernel/dev/iommu/arm_smmu/common/constants.rs:BtiPageLeakReason,
+//   //zircon/kernel/dev/iommu/bti.rs:BtiPageLeakReason,
+//   //zircon/kernel/dev/iommu/include/dev/iommu/bti.h:BtiPageLeakReason,
+// )
+
 extern "C" {
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
@@ -56,20 +70,6 @@ FFI_ALWAYS_INLINE bool cpp_bti_in_fault_state(const iommu::Bti* bti) {
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE uint64_t cpp_bti_bti_id(const iommu::Bti* bti) { return bti->bti_id(); }
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE zx_status_t cpp_bti_set_name(iommu::Bti* bti, const char* name, size_t len) {
-  return bti->set_name(name, len);
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE zx_status_t cpp_bti_get_name(const iommu::Bti* bti,
-                                               char out_name[ZX_MAX_NAME_LEN]) {
-  return bti->get_name(*reinterpret_cast<char (*)[ZX_MAX_NAME_LEN]>(out_name));
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE zx_status_t cpp_bti_map(iommu::Bti* bti, PinnedVmObject* pinned_vmo,
                                           uint32_t perms, bool require_contiguous,
                                           ffi::Uninitialized<fbl::RefPtr<iommu::Pmt>>* pmt_out) {
@@ -84,4 +84,21 @@ FFI_ALWAYS_INLINE zx_status_t cpp_bti_map(iommu::Bti* bti, PinnedVmObject* pinne
   return ZX_OK;
 }
 
+void rust_bti_print_quarantine_warning(uint64_t bti_id, const char (*bti_name)[ZX_MAX_NAME_LEN],
+                                       iommu::Bti::BtiPageLeakReason reason,
+                                       uint64_t total_leaked_pages, size_t total_leaked_vmos);
+
 }  // extern "C"
+
+namespace iommu {
+
+void Bti::PrintQuarantineWarning(BtiPageLeakReason reason, uint64_t total_leaked_pages,
+                                 size_t total_leaked_vmos) const {
+  char bti_name[ZX_MAX_NAME_LEN]{};
+  [[maybe_unused]] zx_status_t status = this->get_name(bti_name);
+  DEBUG_ASSERT(status == ZX_OK);
+  rust_bti_print_quarantine_warning(bti_id(), &bti_name, reason, total_leaked_pages,
+                                    total_leaked_vmos);
+}
+
+}  // namespace iommu

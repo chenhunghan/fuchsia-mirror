@@ -1,0 +1,65 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_test_binary(
+    name = "unittests",
+    gn_output_name = "cobalt_lib_unittests",
+    deps = [
+        "//src/lib/cobalt/cpp:unittests",
+        "//src/lib/fxl/test:gtest_main",
+    ],
+)
+
+fx_packaged_binary(
+    name = "unittests_packaged_bin",
+    testonly = True,
+    binary = ":unittests",
+    binary_name = "cobalt_lib_unittests",
+)
+
+fx_component_manifest(
+    name = "cobalt_lib_unittests_manifest",
+    testonly = True,
+    component_name = "cobalt_lib_unittests",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/cobalt_lib_unittests.cml",
+)
+
+fx_test_component(
+    name = "cobalt_lib_unittests",
+    compiled_manifest = ":cobalt_lib_unittests_manifest",
+    deps = [":unittests_packaged_bin"],
+)
+
+fx_package(
+    name = "cobalt_lib_tests_package",
+    package_name = "cobalt_lib_tests",
+    test_components = [":cobalt_lib_unittests"],
+)
+
+fx_test(
+    name = "cobalt_lib_tests",
+    max_log_severity = "FATAL",
+    package = ":cobalt_lib_tests_package",
+    visibility = ["//src/lib:__pkg__"],
+)

@@ -1,0 +1,58 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//src/developer/ffx/build:ffx_tool.bzl", "ffx_tool")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "lib",
+    srcs = [
+        "src/args.rs",
+        "src/diagnostics/mod.rs",
+        "src/lib.rs",
+    ],
+    crate_name = "ffx_usb",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_rust_fdomain",
+        "//sdk/fidl/fuchsia.diagnostics.host:fuchsia.diagnostics.host_rust_fdomain",
+        "//sdk/fidl/fuchsia.hardware.usb.policy:fuchsia.hardware.usb.policy_rust_fdomain",
+        "//sdk/fidl/fuchsia.usb.policy:fuchsia.usb.policy_rust_fdomain",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/developer/ffx/lib/rcs:lib",
+        "//src/developer/ffx/lib/target/holders:lib",
+        "//src/developer/ffx/lib/writer:lib",
+        "//src/lib/fdomain/client",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+    ],
+)
+
+ffx_tool(
+    name = "ffx_usb",
+    srcs = ["src/main.rs"],
+    binary_name = "ffx-usb",
+    edition = "2024",
+    deps = [
+        ":lib",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/lib/fuchsia-async",
+    ],
+)
+
+host_rustc_test(
+    name = "lib_test",
+    crate = ":lib",
+    # Used by bazel2gn to set GN output_name and avoid binary name collisions.
+    crate_name = "ffx_usb_lib_test",
+    visibility = ["//src/developer/ffx:__pkg__"],
+)

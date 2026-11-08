@@ -54,7 +54,7 @@ const ARRAY_SIZE: usize = 128;
 #[pin_data(PinnedDrop)]
 pub struct DebugCompressor {
     #[mutex]
-    lock: ksync::KMutex<ksync::RawSpinlock>,
+    lock: ksync::KMutex<crate::ksync_kernel::TrackedSpinlock>,
 
     // Reference to the thread that does compression so we can shut it down later.
     #[guarded_by(lock)]
@@ -85,7 +85,7 @@ impl DebugCompressor {
     /// Creates an in-place initializer for `DebugCompressor`.
     pub fn init() -> impl PinInit<Self, core::convert::Infallible> {
         pin_init!(Self {
-            lock <- ksync::KSpinlock::init(),
+            lock <- crate::ksync_kernel::KSpinlock::init(),
             thread: None.into(),
             list: None.into(),
             state: State::Shutdown.into(),

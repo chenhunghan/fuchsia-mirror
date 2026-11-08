@@ -1,0 +1,33 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+# Kept in BUILD.gn because `:structured-config`
+# (`fuchsia_structured_config_cpp_elf_lib`) and `:coordinator`
+# (`fuchsia_driver_component`) are GN-only and call
+# `get_target_outputs(":coordinator-manifest")`. All other targets in BUILD.gn
+# (`coordinator-dml`, `coordinator_bind`, `coordinator-driver`, `package`,
+# `shared`, `testing`, `display-coordinator-unittests`, and
+# `display-coordinator-unittests-package`) use GN-only driver/structured-config
+# templates or depend on unmigrated libraries (`//sdk/lib/driver/*`,
+# `//sdk/lib/zbi-format`, `//src/devices/testing/mock-ddk`,
+# `//src/graphics/display/lib/*`, `//zircon/system/ulib/hwreg`,
+# `//zircon/system/ulib/image-format`, `//zircon/system/ulib/pretty`).
+# LINT.IfChange
+fx_component_manifest(
+    name = "coordinator-manifest",
+    component_name = "display-coordinator",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/coordinator.cml",
+)
+# LINT.ThenChange(BUILD.gn)

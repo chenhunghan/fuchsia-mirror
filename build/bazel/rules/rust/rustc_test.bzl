@@ -8,6 +8,7 @@ load("@fuchsia_rules_common//build_flags:rust.bzl", "BUILD_FLAGS_RUST_MACRO_ATTR
 load("@rules_rust//rust:defs.bzl", "rust_test")
 load(
     "//build/bazel/rules/rust:common.bzl",
+    "with_fuchsia_rust_link_exec_properties",
     "with_fuchsia_rust_stdlib_link_deps",
     "with_fuchsia_rust_tags",
     "with_fuchsia_rust_test_aspect_hints",
@@ -27,6 +28,7 @@ def _rustc_test_impl(
     kwargs["tags"] = with_fuchsia_rust_tags(kwargs.get("tags"), disable_clippy)
     kwargs["rustc_flags"] = with_fuchsia_rustc_flags(rustc_flags)
     kwargs["link_deps"] = with_fuchsia_rust_stdlib_link_deps(kwargs.get("link_deps"))
+    kwargs["exec_properties"] = with_fuchsia_rust_link_exec_properties(kwargs.get("exec_properties"))
     kwargs["aspect_hints"] = with_fuchsia_rust_test_aspect_hints(kwargs.get("aspect_hints"))
 
     wrapped_kwargs = wrap_rust_macro_args_with_build_flags(
@@ -35,6 +37,9 @@ def _rustc_test_impl(
         rust_rule_name = "rust_test",
         build_flags = build_flags,
         target_type = "rust_executable",
+        default_build_flags = [
+            Label("//build/config/fuchsia:maybe_scudo_default_options"),
+        ],
     )
 
     rust_test(

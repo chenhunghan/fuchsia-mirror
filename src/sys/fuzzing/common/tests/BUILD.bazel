@@ -1,0 +1,46 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Note: Fuchsia-only target matching platform-only deps via target_compatible_with.
+fx_cc_library(
+    name = "integration-tests-lib",
+    testonly = True,
+    srcs = ["integration-tests.cc"],
+    hdrs = [
+        "fuzzer-integration-tests.inc",
+        "fuzzer-test-integration-tests.inc",
+        "integration-tests.h",
+    ],
+    implementation_deps = [
+        "//sdk/lib/fdio",
+        "//sdk/lib/sys/cpp",
+        "//src/lib/fxl",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/sys/fuzzing/common",
+        "//src/sys/fuzzing/common/testing",
+        "//src/sys/fuzzing/fidl:fuchsia.fuzzer_hlcpp",
+        "@com_google_googletest//:gtest",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/sys/fuzzing/libfuzzer/tests:__pkg__",
+        "//src/sys/fuzzing/realmfuzzer/tests:__pkg__",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "fuzzer-lib",
+    testonly = True,
+    srcs = ["fuzzer.cc"],
+    visibility = [
+        "//src/sys/fuzzing/libfuzzer/tests:__pkg__",
+        "//src/sys/fuzzing/realmfuzzer/tests:__pkg__",
+    ],
+    alwayslink = True,
+)

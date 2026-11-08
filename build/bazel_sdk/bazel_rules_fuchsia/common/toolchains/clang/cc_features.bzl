@@ -158,9 +158,6 @@ _flag_configs = struct(
         cflags = ["-fcolor-diagnostics"],
         ldflags = ["-Wl,--color-diagnostics"],
     ),
-    pic = _make_flag_config(
-        cflags = ["-fPIC"],
-    ),
     language_c11 = _make_flag_config(
         conlyflags = ["-std=c11"],
         combine_cflags_with_ldflags = False,
@@ -209,6 +206,7 @@ _flag_configs = struct(
         cflags = [
             "-g3",
             "-gdwarf-5",
+            "-gpubnames",
             "-gz=zstd",
             "-Xclang",
             "-debug-info-kind=constructor",
@@ -217,6 +215,7 @@ _flag_configs = struct(
             "-g3",
             "-gdwarf-5",
             "-gz=zstd",
+            "-Wl,--debug-names",
         ],
         combine_cflags_with_ldflags = False,
     ),
@@ -362,24 +361,23 @@ def get_default_compile_flags_feature(
     in_tree_remaining_cflags = [
         default_system_flags,
         _flag_configs.color_diagnostics,
-        _flag_configs.pic,
-        _flag_configs.linker_gc,
         _flag_configs.no_frame_pointers,
         _flag_configs.default_warnings,
-        _flag_configs.symbol_visibility_hidden,
         _flag_configs.ffp_contract_off,
     ]
 
     # Already in @fuchsia_build_info//default_build_flags (auto_var_init,
-    # default_debuginfo, libcpp_remove_transitive_includes, relative_paths,
-    # thread_safety_annotations).
+    # default_debuginfo, default_linker_gc, libcpp_remove_transitive_includes,
+    # relative_paths, symbol_visibility_hidden, thread_safety_annotations).
     # NOTE: //build/config/fuchsia:zircon_asserts (ZX_ASSERT_LEVEL) is not
     # supported OOT.
     oot_only_cflags = [] if use_default_build_flags else [
         _flag_configs.auto_var_init,
         _flag_configs.debuginfo,
         _flag_configs.libcpp_remove_transitive_includes,
+        _flag_configs.linker_gc,
         _flag_configs.relpath_debug_info,
+        _flag_configs.symbol_visibility_hidden,
         _flag_configs.thread_safety_annotations,
     ]
 
@@ -394,19 +392,19 @@ def get_default_compile_flags_feature(
 
     in_tree_remaining_ccflags = [
         default_system_flags,
-        _flag_configs.no_rtti,
-        _flag_configs.symbol_visibility_hidden,
     ]
 
     # Already in @fuchsia_build_info//default_build_flags (language, no_exceptions,
-    # no-template-backtrace-limit, relative_paths):
+    # no-template-backtrace-limit, relative_paths, symbol_visibility_hidden):
     oot_only_ccflags = [] if use_default_build_flags else [
         # NOTE: In-tree //build/config:language uses -std=c++23, but OOT keeps
         # -std=c++20 to avoid breaking petals.
         _flag_configs.language_cxx20,
         _flag_configs.no_exceptions,
+        _flag_configs.no_rtti,
         _flag_configs.no_template_backtrace_limit,
         _flag_configs.relpath_debug_info,
+        _flag_configs.symbol_visibility_hidden,
     ]
 
     in_tree_remaining_ldflags = [
@@ -414,16 +412,16 @@ def get_default_compile_flags_feature(
         _flag_configs.driver_mode,
         _flag_configs.color_diagnostics,
         _flag_configs.no_frame_pointers,
-        _flag_configs.linker_gc,
-        _flag_configs.no_rtti,
-        _flag_configs.pic,
     ]
 
     # Already in @fuchsia_build_info//default_build_flags (default_debuginfo,
-    # no_exceptions, icf, relative_paths):
+    # default_linker_gc, no_exceptions, icf, relative_paths,
+    # shared_library_config):
     oot_only_ldflags = [] if use_default_build_flags else [
         _flag_configs.debuginfo,
+        _flag_configs.linker_gc,
         _flag_configs.no_exceptions,
+        _flag_configs.no_rtti,
         _flag_configs.icf,
         _flag_configs.relpath_debug_info,
     ]
@@ -500,6 +498,7 @@ def get_default_compile_flags_feature(
                     ]) if target_os == "fuchsia" else []
                 ),
             ),
+            # LINT.IfChange(symbol_no_undefined)
             # This is subtle, normally all binaries (executables and
             # shared libraries) should be linked with --no-undefined.
             #
@@ -513,12 +512,17 @@ def get_default_compile_flags_feature(
             # otherwise. The two following flag_set() deal with this special
             # case.
 
-            # Apply --no-undefined unconditionally to executables.
+            # Apply --no-undefined to executables in OOT builds.
+            # In-tree, GN default_executable_configs does not include
+            # symbol_no_undefined, as ELF linkers already disallow undefined
+            # symbols in executables by default.
             flag_set(
                 actions = [ACTION_NAMES.cpp_link_executable],
-                flag_groups = _iter_ldflags([
-                    _flag_configs.symbol_no_undefined,
-                ]),
+                flag_groups = _iter_ldflags(
+                    [] if use_default_build_flags else [
+                        _flag_configs.symbol_no_undefined,
+                    ],
+                ),
             ),
             # Apply --no-undefined to shared libraries only when no
             # clang sanitizers are used on the host.
@@ -536,6 +540,10 @@ def get_default_compile_flags_feature(
                     ),
                 ] if is_host else [],
             ),
+            # LINT.ThenChange(
+            #   //build/config/BUILD.bazel:symbol_no_undefined,
+            #   //build/config/BUILD.gn:symbol_no_undefined,
+            # )
             # See https://fxbug.dev/542560456: Linking Rust binaries when
             # Asan is enabled fails surprisingly with undefined symbols
             # __cxa_begin_catch, std::terminate() and __gxx_personality_v0

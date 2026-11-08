@@ -24,6 +24,36 @@ use zx::StatusExt;
 use crate::buffer_collection_constraints::buffer_collection_constraints_default;
 use crate::sysmem_allocator::{BufferName, SysmemAllocatedBuffers, SysmemAllocation};
 
+fn validate_encoder_pcm_format(pcm_format: &PcmFormat2) -> Result<(), Error> {
+    if pcm_format.pcm_mode != Some(AudioPcmMode2::Linear) {
+        return Err(format_err!("Unsupported or missing pcm_mode: {:?}", pcm_format.pcm_mode));
+    }
+    let bits_per_sample =
+        pcm_format.bits_per_sample.ok_or_else(|| format_err!("Missing bits_per_sample"))?;
+    if bits_per_sample == 0 {
+        return Err(format_err!("bits_per_sample must be non-zero"));
+    }
+    let min_bytes_per_sample = bits_per_sample.div_ceil(8);
+    if let Some(bytes_per_sample) = pcm_format.bytes_per_sample {
+        if bytes_per_sample < min_bytes_per_sample {
+            return Err(format_err!(
+                "bytes_per_sample ({bytes_per_sample}) smaller than packed bits_per_sample ({bits_per_sample})"
+            ));
+        }
+    }
+    let frames_per_second =
+        pcm_format.frames_per_second.ok_or_else(|| format_err!("Missing frames_per_second"))?;
+    if frames_per_second == 0 {
+        return Err(format_err!("frames_per_second must be non-zero"));
+    }
+    let channel_map =
+        pcm_format.channel_map.as_ref().ok_or_else(|| format_err!("Missing channel_map"))?;
+    if channel_map.is_empty() || channel_map.len() > MAX_PCM_FORMAT2_CHANNEL_COUNT as usize {
+        return Err(format_err!("Invalid channel_map length: {}", channel_map.len()));
+    }
+    Ok(())
+}
+
 fn fidl_error_to_io_error(e: fidl::Error) -> io::Error {
     io::Error::other(format_err!("Fidl Error: {}", e))
 }
@@ -86,11 +116,22 @@ struct OutputQueue {
     ended: bool,
 }
 
+/// Large upper bound on unread output packets allowed in `OutputQueue` before rejecting new packets.
+/// This prevents unbounded memory growth if the consumer stalls or stops polling.
+const MAX_OUTPUT_QUEUE_PACKETS: usize = 4096;
+
 impl OutputQueue {
     /// Adds a packet to the queue and wakes the listener if necessary.
-    fn enqueue(&mut self, packet: Packet) {
+    /// Returns an error if the queue has reached `MAX_OUTPUT_QUEUE_PACKETS`.
+    fn enqueue(&mut self, packet: Packet) -> Result<(), Error> {
+        if self.queue.len() >= MAX_OUTPUT_QUEUE_PACKETS {
+            return Err(format_err!(
+                "OutputQueue exceeded max capacity of {MAX_OUTPUT_QUEUE_PACKETS} packets"
+            ));
+        }
         self.queue.push_back(packet);
         self.listener.wake();
+        Ok(())
     }
 
     /// Signals the end of the stream has happened.
@@ -189,12 +230,7 @@ impl StreamProcessorInner {
                 let processor = self.processor.clone();
                 let mut partial_settings = Self::partial_settings();
                 let token_fn = move |token: ClientEnd<BufferCollectionTokenMarker>| {
-                    // A sysmem token channel serves both sysmem(1) and sysmem2 token protocols, so
-                    // we can convert here until StreamProcessor has a sysmem2 token field.
-                    partial_settings.sysmem_token =
-                        Some(ClientEnd::<fidl_fuchsia_sysmem::BufferCollectionTokenMarker>::new(
-                            token.into_channel(),
-                        ));
+                    partial_settings.sysmem2_token = Some(token);
                     // FIDL failures will be caught via the request stream.
                     if let Err(e) = processor.set_input_buffer_partial_settings(partial_settings) {
                         warn!("Couldn't set input buffer settings: {:?}", e);
@@ -218,12 +254,7 @@ impl StreamProcessorInner {
                 let processor = self.processor.clone();
                 let mut partial_settings = Self::partial_settings();
                 let token_fn = move |token: ClientEnd<BufferCollectionTokenMarker>| {
-                    // A sysmem token channel serves both sysmem(1) and sysmem2 token protocols, so
-                    // we can convert here until StreamProcessor has a sysmem2 token field.
-                    partial_settings.sysmem_token =
-                        Some(ClientEnd::<fidl_fuchsia_sysmem::BufferCollectionTokenMarker>::new(
-                            token.into_channel(),
-                        ));
+                    partial_settings.sysmem2_token = Some(token);
                     // FIDL failures will be caught via the request stream.
                     if let Err(e) = processor.set_output_buffer_partial_settings(partial_settings) {
                         warn!("Couldn't set output buffer settings: {:?}", e);
@@ -240,7 +271,7 @@ impl StreamProcessorInner {
             }
             StreamProcessorEvent::OnOutputPacket { output_packet, .. } => {
                 let mut lock = self.output_queue.lock();
-                lock.enqueue(output_packet);
+                lock.enqueue(output_packet)?;
             }
             StreamProcessorEvent::OnFreeInputPacket {
                 free_input_packet: PacketHeader { packet_index: Some(idx), .. },
@@ -285,7 +316,7 @@ impl StreamProcessorInner {
         StreamBufferPartialSettings {
             buffer_lifetime_ordinal: Some(1),
             buffer_constraints_version_ordinal: Some(1),
-            sysmem_token: None,
+            sysmem2_token: None,
             ..Default::default()
         }
     }
@@ -484,13 +515,15 @@ impl StreamProcessor {
         }
     }
 
-    /// Create a new StreamProcessor encoder, with the given `input_domain` and `encoder_settings`.  See
+    /// Create a new StreamProcessor encoder, with the given `input_pcm_format` and `encoder_settings`.  See
     /// stream_processor.fidl for descriptions of these parameters.  This is only meant for audio
     /// encoding.
     pub fn create_encoder(
-        input_domain: DomainFormat,
+        input_pcm_format: PcmFormat2,
         encoder_settings: EncoderSettings,
     ) -> Result<StreamProcessor, Error> {
+        validate_encoder_pcm_format(&input_pcm_format)?;
+
         let sysmem_client = fuchsia_component::client::connect_to_protocol::<AllocatorMarker>()
             .context("Connecting to sysmem")?;
 
@@ -500,7 +533,7 @@ impl StreamProcessor {
         };
 
         let format_details = FormatDetails {
-            domain: Some(input_domain),
+            pcm_format: Some(input_pcm_format),
             encoder_settings: Some(encoder_settings),
             format_details_version_ordinal: Some(1),
             mime_type: Some("audio/pcm".to_string()),
@@ -541,7 +574,6 @@ impl StreamProcessor {
             oob_bytes: oob_bytes,
             format_details_version_ordinal: Some(1),
             encoder_settings: None,
-            domain: None,
             pass_through_parameters: None,
             timebase: None,
             ..Default::default()
@@ -768,25 +800,38 @@ mod tests {
 
     #[derive(Clone, Debug)]
     pub struct PcmAudio {
-        pcm_format: PcmFormat,
+        frame_size: usize,
         buffer: Vec<u8>,
     }
 
     impl PcmAudio {
-        pub fn create_saw_wave(pcm_format: PcmFormat, frame_count: usize) -> Self {
+        pub fn create_saw_wave(pcm_format: &PcmFormat2, frame_count: usize) -> Result<Self, Error> {
             const FREQUENCY: f32 = 20.0;
             const AMPLITUDE: f32 = 0.2;
 
-            let pcm_frame_size = PCM_SAMPLE_SIZE * pcm_format.channel_map.len();
-            let samples_per_frame = pcm_format.channel_map.len();
+            let PcmFormat2 {
+                frames_per_second: Some(frames_per_second),
+                channel_map: Some(ref channel_map),
+                ..
+            } = *pcm_format
+            else {
+                return Err(format_err!("PcmFormat2 missing frames_per_second or channel_map"));
+            };
+            if frames_per_second == 0 || channel_map.is_empty() {
+                return Err(format_err!(
+                    "PcmFormat2 frames_per_second and channel_map must be non-empty"
+                ));
+            }
+            let samples_per_frame = channel_map.len();
+            let pcm_frame_size = PCM_SAMPLE_SIZE * samples_per_frame;
             let sample_count = frame_count * samples_per_frame;
+            let frames_per_second = frames_per_second as f32;
 
             let mut buffer = vec![0; frame_count * pcm_frame_size];
 
             for i in 0..sample_count {
                 let frame = (i / samples_per_frame) as f32;
-                let value =
-                    ((frame * FREQUENCY / (pcm_format.frames_per_second as f32)) % 1.0) * AMPLITUDE;
+                let value = ((frame * FREQUENCY / frames_per_second) % 1.0) * AMPLITUDE;
                 let sample = (value * i16::MAX as f32) as i16;
 
                 let mut sample_bytes = [0; std::mem::size_of::<i16>()];
@@ -797,11 +842,11 @@ mod tests {
                 buffer[offset + 1] = sample_bytes[1];
             }
 
-            Self { pcm_format, buffer }
+            Ok(Self { frame_size: pcm_frame_size, buffer })
         }
 
         pub fn frame_size(&self) -> usize {
-            self.pcm_format.channel_map.len() * PCM_SAMPLE_SIZE
+            self.frame_size
         }
     }
 
@@ -849,11 +894,12 @@ mod tests {
     fn encode_sbc() {
         let mut exec = fasync::TestExecutor::new();
 
-        let pcm_format = PcmFormat {
-            pcm_mode: AudioPcmMode::Linear,
-            bits_per_sample: 16,
-            frames_per_second: 44100,
-            channel_map: vec![AudioChannelId::Cf],
+        let pcm_format = PcmFormat2 {
+            pcm_mode: Some(AudioPcmMode2::Linear),
+            bits_per_sample: Some(16),
+            frames_per_second: Some(44100),
+            channel_map: Some(vec![AudioChannelId2::Fc]),
+            ..Default::default()
         };
 
         let sub_bands = SbcSubBands::SubBands4;
@@ -861,7 +907,8 @@ mod tests {
 
         let input_frames = 3000;
 
-        let pcm_audio = PcmAudio::create_saw_wave(pcm_format.clone(), input_frames);
+        let pcm_audio =
+            PcmAudio::create_saw_wave(&pcm_format, input_frames).expect("to create saw wave");
 
         let sbc_encoder_settings = EncoderSettings::Sbc(SbcEncoderSettings {
             sub_bands,
@@ -871,11 +918,7 @@ mod tests {
             bit_pool: 59, // Recommended from the SBC spec for these parameters.
         });
 
-        let input_domain = DomainFormat::Audio(AudioFormat::Uncompressed(
-            AudioUncompressedFormat::Pcm(pcm_format),
-        ));
-
-        let mut encoder = StreamProcessor::create_encoder(input_domain, sbc_encoder_settings)
+        let mut encoder = StreamProcessor::create_encoder(pcm_format, sbc_encoder_settings)
             .expect("to create Encoder");
 
         let frames_per_packet: usize = 8; // Randomly chosen by fair d10 roll.
@@ -1145,46 +1188,53 @@ mod tests {
         let (waker, write_fut_wake_count) = new_count_waker();
         let mut counting_ctx = Context::from_waker(&waker);
 
-        let mut wake_count_before_stall = 0;
-        for frame in chunks {
-            wake_count_before_stall = write_fut_wake_count.get();
+        const MAX_FRAMES_BEFORE_STALL: usize = 50;
+        let mut stalled = false;
+        for frame in chunks.by_ref().take(MAX_FRAMES_BEFORE_STALL) {
             let mut written_fut = decoder.write(&frame);
             if written_fut.poll_unpin(&mut counting_ctx).is_pending() {
-                // The poll_unpin can wake the input waker if an event arrived for it, meaning we should
-                // continue filling.
-                if write_fut_wake_count.get() != wake_count_before_stall {
-                    continue;
-                }
-                // We should have never been woken until now, because we always were ready before,
-                // and the output waker is not registered (so can't progress)
+                // Break out of filling as soon as the write is pending (even if an incoming event
+                // already woke the input waker during polling) to avoid unbounded looping and OOM
+                // when the codec frees buffers as fast as we fill them.
+                stalled = true;
                 break;
             }
             // Flush the packet, to make input buffers get spent faster.
             let mut flush_fut = pin!(decoder.flush());
             exec.run_singlethreaded(&mut flush_fut).expect("to flush the decoder");
         }
+        assert!(
+            stalled,
+            "Expected input write to become pending within {MAX_FRAMES_BEFORE_STALL} frames"
+        );
 
         // We should be able to get a decoded output, once the codec does it's thing.
         let decoded_frame = exec.run_singlethreaded(&mut decoded_fut);
         assert_eq!(512, decoded_frame.unwrap().unwrap().len(), "Decoded frame size wrong");
 
         // Fill the input buffer again so the input waker is registered.
-        let chunks = sbc_data.as_slice().chunks(SBC_FRAME_SIZE).cycle();
-        for frame in chunks {
+        // Bound the chunks to avoid unbounded looping and OOM if the codec frees buffers as fast as
+        // we fill them.
+        let mut wake_count_before_stall = 0;
+        let mut stalled = false;
+        for frame in chunks.by_ref().take(MAX_FRAMES_BEFORE_STALL) {
             wake_count_before_stall = write_fut_wake_count.get();
             let mut written_fut = decoder.write(&frame);
             if written_fut.poll_unpin(&mut counting_ctx).is_pending() {
-                // The poll_unpin can wake the input waker if an event arrived for it, meaning we should
-                // continue filling.
-                if write_fut_wake_count.get() != wake_count_before_stall {
-                    continue;
-                }
+                // Break out of filling as soon as the write is pending (even if an incoming event
+                // already woke the input waker during polling) to avoid unbounded looping and OOM
+                // when the codec frees buffers as fast as we fill them.
+                stalled = true;
                 break;
             }
             // Flush the packet, to make input buffers get spent faster.
             let mut flush_fut = pin!(decoder.flush());
             exec.run_singlethreaded(&mut flush_fut).expect("to flush the decoder");
         }
+        assert!(
+            stalled,
+            "Expected input write to become pending within {MAX_FRAMES_BEFORE_STALL} frames"
+        );
 
         // The input waker should be the one waiting on events from the codec and get woken up,
         // even if an output event happens.
@@ -1192,9 +1242,69 @@ mod tests {
         // should wake the input waker, which is waiting to be woken up.
         while write_fut_wake_count.get() == wake_count_before_stall {
             let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+            if write_fut_wake_count.get() == wake_count_before_stall {
+                exec.run_singlethreaded(fasync::Timer::new(
+                    fasync::MonotonicDuration::from_millis(1),
+                ));
+            }
         }
 
         // Note: at this point, we may not be able to write another frame, but the waiter should
         // repoll, and set the waker again.
+    }
+
+    #[fuchsia::test]
+    fn output_queue_max_capacity() {
+        let mut queue = OutputQueue::default();
+        for _ in 0..MAX_OUTPUT_QUEUE_PACKETS {
+            assert!(queue.enqueue(Packet::default()).is_ok());
+        }
+        assert!(queue.enqueue(Packet::default()).is_err());
+    }
+
+    #[fuchsia::test]
+    fn create_encoder_validates_pcm_format_before_connecting() {
+        let valid = PcmFormat2 {
+            pcm_mode: Some(AudioPcmMode2::Linear),
+            bits_per_sample: Some(16),
+            frames_per_second: Some(48000),
+            channel_map: Some(vec![AudioChannelId2::Fl, AudioChannelId2::Fr]),
+            ..Default::default()
+        };
+        let settings = || EncoderSettings::Cvsd(CvsdEncoderSettings::default());
+
+        let check_err = |format: PcmFormat2, expected_substr: &str| {
+            let err = StreamProcessor::create_encoder(format, settings())
+                .err()
+                .expect("expected validation error");
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains(expected_substr) && !msg.contains("Connecting to sysmem"),
+                "unexpected error message: {msg}"
+            );
+        };
+
+        check_err(PcmFormat2::default(), "pcm_mode");
+        check_err(PcmFormat2 { pcm_mode: Some(AudioPcmMode2::Float), ..valid.clone() }, "pcm_mode");
+        check_err(PcmFormat2 { bits_per_sample: None, ..valid.clone() }, "bits_per_sample");
+        check_err(PcmFormat2 { bits_per_sample: Some(0), ..valid.clone() }, "bits_per_sample");
+        check_err(
+            PcmFormat2 { bits_per_sample: Some(24), bytes_per_sample: Some(2), ..valid.clone() },
+            "bytes_per_sample",
+        );
+        check_err(PcmFormat2 { frames_per_second: None, ..valid.clone() }, "frames_per_second");
+        check_err(PcmFormat2 { frames_per_second: Some(0), ..valid.clone() }, "frames_per_second");
+        check_err(PcmFormat2 { channel_map: None, ..valid.clone() }, "channel_map");
+        check_err(PcmFormat2 { channel_map: Some(vec![]), ..valid.clone() }, "channel_map");
+        check_err(
+            PcmFormat2 {
+                channel_map: Some(vec![
+                    AudioChannelId2::Skip;
+                    MAX_PCM_FORMAT2_CHANNEL_COUNT as usize + 1
+                ]),
+                ..valid
+            },
+            "channel_map",
+        );
     }
 }

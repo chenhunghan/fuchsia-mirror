@@ -242,20 +242,23 @@ pub fn is_googler_host_domain(domain: &str) -> bool {
 
 #[allow(dead_code)]
 pub(crate) fn redact_host_and_user_from(parameter: &str) -> String {
-    redact_hostname_from(&redact_user_name_from(parameter))
+    redact_host_and_user(parameter, &get_hostname(), get_username_from_env().ok().as_deref())
 }
 
-#[allow(dead_code)]
-pub fn redact_user_name_from(parameter: &str) -> String {
-    match get_username_from_env() {
-        Ok(user_value) => parameter.replace(user_value.as_str(), USER_REDACTED),
-        _ => parameter.to_string(),
+/// Replaces `hostname` with `$HOSTNAME` and `user_name` with `$USER` in `parameter`.
+///
+/// The hostname is redacted first, because it may itself contain the user name (e.g.
+/// `<user>.c.googlers.com`). Redacting the user name first would leave a partially redacted
+/// hostname that no longer matches.
+fn redact_host_and_user(parameter: &str, hostname: &str, user_name: Option<&str>) -> String {
+    let mut redacted = parameter.to_string();
+    if !hostname.is_empty() {
+        redacted = redacted.replace(hostname, HOSTNAME_REDACTED);
     }
-}
-
-#[allow(dead_code)]
-pub fn redact_hostname_from(parameter: &str) -> String {
-    parameter.replace(get_hostname().as_str(), HOSTNAME_REDACTED)
+    if let Some(user_name) = user_name.filter(|u| !u.is_empty()) {
+        redacted = redacted.replace(user_name, USER_REDACTED);
+    }
+    redacted
 }
 
 #[cfg(not(test))]
@@ -335,15 +338,39 @@ mod test {
 
     #[test]
     pub fn test_redact_user_value() {
-        let parameter = "hello player1";
-        let result = redact_user_name_from(parameter);
+        let result = redact_host_and_user("hello player1", "node.example.com", Some("player1"));
         assert_eq!("hello $USER", result);
     }
 
     #[test]
     pub fn test_redact_user_value_no_match() {
-        let parameter = "hello world";
-        let result = redact_user_name_from(parameter);
+        let result = redact_host_and_user("hello world", "node.example.com", Some("player1"));
+        assert_eq!("hello world", result);
+    }
+
+    #[test]
+    pub fn test_redact_host_and_user() {
+        let result = redact_host_and_user(
+            "/home/player1/dir on node.example.com",
+            "node.example.com",
+            Some("player1"),
+        );
+        assert_eq!("/home/$USER/dir on $HOSTNAME", result);
+    }
+
+    #[test]
+    pub fn test_redact_host_and_user_hostname_contains_user() {
+        let result = redact_host_and_user(
+            "/home/player1/dir on node.player1.c.googlers.com.local",
+            "player1.c.googlers.com",
+            Some("player1"),
+        );
+        assert_eq!("/home/$USER/dir on node.$HOSTNAME.local", result);
+    }
+
+    #[test]
+    pub fn test_redact_host_and_user_empty_values() {
+        let result = redact_host_and_user("hello world", "", Some(""));
         assert_eq!("hello world", result);
     }
 

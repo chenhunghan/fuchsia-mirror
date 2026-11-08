@@ -14,22 +14,12 @@
 import dataclasses
 import json
 import os
-import sys
 import typing as T
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(__file__))
-# Insert fuchsia root directory to sys.path so we can import build packages hermetically
-_FUCHSIA_DIR = os.path.dirname(
-    os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-)
-if _FUCHSIA_DIR not in sys.path:
-    sys.path.insert(0, _FUCHSIA_DIR)
-
-import bazel_build_events
-import build_utils
+from build.bazel.scripts import bazel_build_events, build_utils
+from build.bazel.scripts.build_utils import BazelPaths
 from build.rbe import rbe_settings
-from build_utils import BazelPaths
 
 JSONObject: T.TypeAlias = dict[str, T.Any]
 
@@ -61,11 +51,25 @@ class DirectoryOutput:
 
 @dataclasses.dataclass(order=True, frozen=True)
 class PackageOutput:
-    """A package created by Bazel that's to be exported back to ninja."""
+    """A package created by Bazel that's to be exported back to ninja.
+
+    The package archive copied to `archive_path` is also extracted into
+    `package_out_dir`.
+    """
 
     package_label: str
     archive_path: str
+    package_out_dir: str
     copy_debug_symbols: bool = False
+
+    def extracted_ninja_paths(self) -> list[str]:
+        """The Ninja output paths created by extracting the package archive."""
+        # LINT.IfChange(extracted_package_outputs)
+        return [
+            os.path.join(self.package_out_dir, "package_manifest.json"),
+            os.path.join(self.package_out_dir, "blobs.json"),
+        ]
+        # LINT.ThenChange(//build/bazel/bazel_action.gni:extracted_package_outputs)
 
 
 @dataclasses.dataclass(order=True, frozen=True)
@@ -89,6 +93,7 @@ class BazelTargetInfo(object):
     update_rust_project: bool = False
     copy_debug_symbols: bool = False
     extra_bazel_targets_file: str | None = None
+    export_test_packages: bool = False
     debug_symbols_manifest: str | None = None
     copy_outputs: list[FileOutput] = dataclasses.field(default_factory=list)
     directory_outputs: list[DirectoryOutput] = dataclasses.field(
@@ -124,6 +129,7 @@ class BazelTargetInfosMap(object):
             update_rust_project = entry["update_rust_project"]
             copy_debug_symbols = entry.get("copy_debug_symbols", False)
             extra_bazel_targets_file = entry.get("extra_bazel_targets_file")
+            export_test_packages = entry.get("export_test_packages", False)
             debug_symbols_manifest = entry.get("debug_symbols_manifest")
             target_info = self._targets.setdefault(
                 (bazel_target, bazel_platform_label),
@@ -137,6 +143,7 @@ class BazelTargetInfosMap(object):
                     update_rust_project=update_rust_project,
                     copy_debug_symbols=copy_debug_symbols,
                     extra_bazel_targets_file=extra_bazel_targets_file,
+                    export_test_packages=export_test_packages,
                     debug_symbols_manifest=debug_symbols_manifest,
                 ),
             )
@@ -170,6 +177,7 @@ class BazelTargetInfosMap(object):
                         package_label=bazel_target,
                         archive_path=entry["ninja_archive"],
                         copy_debug_symbols=entry["copy_debug_symbols"],
+                        package_out_dir=entry["ninja_package_out_dir"],
                     )
                 )
             elif entry_type == "final_symlink":
@@ -201,11 +209,14 @@ class BazelTargetInfosMap(object):
                         target_info,
                     )
             for package_output in target_info.package_outputs:
-                _check_add_ninja_path_to_map(
-                    self._targets_by_ninja_output_paths,
-                    package_output.archive_path,
-                    target_info,
-                )
+                for ninja_path in [
+                    package_output.archive_path
+                ] + package_output.extracted_ninja_paths():
+                    _check_add_ninja_path_to_map(
+                        self._targets_by_ninja_output_paths,
+                        ninja_path,
+                        target_info,
+                    )
             for symlink in target_info.final_symlink_outputs:
                 _check_add_ninja_path_to_map(
                     self._targets_by_ninja_output_paths,
@@ -325,6 +336,8 @@ class BazelGlobalArguments(object):
     sandbox_debug: bool
     auto_refresh_compdb: bool
     rust_sysroot: Path
+    # Path to the package-tool binary, relative to the Ninja build directory.
+    package_tool: str
 
     @staticmethod
     def create_from_build_dir(build_dir: Path) -> "BazelGlobalArguments":
@@ -343,6 +356,7 @@ class BazelGlobalArguments(object):
             content = json.load(f)
             auto_refresh_compdb = content["auto_refresh_compdb"]
             rust_sysroot = (build_dir / content["rust_sysroot"]).resolve()
+            package_tool = content["package_tool"]
 
         # Get settings from the build environment.
         quiet = os.environ.get("FX_BUILD_QUIET") == "1"
@@ -353,6 +367,7 @@ class BazelGlobalArguments(object):
             sandbox_debug=sandbox_debug,
             auto_refresh_compdb=auto_refresh_compdb,
             rust_sysroot=rust_sysroot,
+            package_tool=package_tool,
         )
 
 

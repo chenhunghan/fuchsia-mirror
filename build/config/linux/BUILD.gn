@@ -24,7 +24,7 @@ config("compiler") {
   ]
 }
 
-# LINT.ThenChange(//build/config/linux/BUILD.bazel:compiler)
+# LINT.ThenChange(BUILD.bazel:compiler)
 
 # LINT.IfChange(default_pie)
 config("default-pie") {
@@ -47,7 +47,7 @@ config("default-pie") {
   }
 }
 
-# LINT.ThenChange(//build/config/linux/BUILD.bazel:default_pie)
+# LINT.ThenChange(BUILD.bazel:default_pie)
 
 # LINT.IfChange(implicit_host_libs)
 compiler_config("implicit-host-libs") {
@@ -67,7 +67,7 @@ compiler_config("implicit-host-libs") {
   }
 }
 
-# LINT.ThenChange(//build/config/linux/BUILD.bazel:implicit_host_libs)
+# LINT.ThenChange(BUILD.bazel:implicit_host_libs)
 
 # LINT.IfChange(sysroot)
 config("sysroot") {
@@ -81,7 +81,7 @@ config("sysroot") {
   }
 }
 
-# LINT.ThenChange(//build/config/linux/BUILD.bazel:sysroot)
+# LINT.ThenChange(BUILD.bazel:sysroot)
 
 # LINT.IfChange(target)
 config("target") {
@@ -95,7 +95,7 @@ config("target") {
   }
 }
 
-# LINT.ThenChange(//build/config/linux/BUILD.bazel:target)
+# LINT.ThenChange(BUILD.bazel:target)
 
 # These flags are enabled by default in Fuchsia's Clang toolchain, but we set
 # them explicitly to support other Clang toolchains and Clang-based tools.
@@ -138,4 +138,4 @@ config("clang_defaults") {
     ldflags += [ "-Wl,--image-base=0x200000" ]
   }
 }
-# LINT.ThenChange(//build/config/linux/BUILD.bazel:clang_defaults)
+# LINT.ThenChange(BUILD.bazel:clang_defaults)

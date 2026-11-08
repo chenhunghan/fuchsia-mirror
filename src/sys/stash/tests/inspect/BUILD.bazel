@@ -1,0 +1,73 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "inspect_test",
+    srcs = ["src/lib.rs"],
+    edition = "2024",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/diagnostics/reader/rust",
+        "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:anyhow",
+    ],
+)
+
+fx_packaged_binary(
+    name = "inspect_test_packaged_bin",
+    testonly = True,
+    binary = ":inspect_test",
+    binary_name = "inspect_test",
+)
+
+fx_component_manifest(
+    name = "inspect_test-manifest",
+    testonly = True,
+    component_name = "inspect_test",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "//src/sys/stash/tests:meta/inspect_test.cml",
+)
+
+fx_test_component(
+    name = "inspect_test_component",
+    compiled_manifest = ":inspect_test-manifest",
+    deps = [":inspect_test_packaged_bin"],
+)
+
+fx_package(
+    name = "stash-integration-tests-package",
+    package_name = "stash-integration-tests",
+    components = [
+        "//src/sys/stash:stash_secure_v2",
+        "//src/sys/stash:stash_v2",
+    ],
+    test_components = [":inspect_test_component"],
+)
+
+fx_test(
+    name = "stash-integration-tests",
+    package = ":stash-integration-tests-package",
+    visibility = ["//src/sys:__pkg__"],
+)

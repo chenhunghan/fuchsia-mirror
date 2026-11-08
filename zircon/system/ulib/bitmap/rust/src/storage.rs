@@ -70,6 +70,7 @@ impl Storage for DefaultStorage {
 ///
 /// `N` is the number of `usize` elements in the array.
 #[derive(Debug, pin_init::Zeroable)]
+#[repr(transparent)]
 pub struct FixedStorage<const N: usize> {
     storage: [usize; N],
 }

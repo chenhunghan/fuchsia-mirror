@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 use crate::PackageIndex;
-use crate::index::{set_retained_blobs, set_retained_index};
 use anyhow::Error;
 use fidl::endpoints::ClientEnd;
 use fidl_fuchsia_pkg::{
@@ -15,8 +14,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 pub async fn serve(
-    package_index: Arc<async_lock::RwLock<PackageIndex>>,
-    blobfs: blobfs::Client,
+    package_index: Arc<PackageIndex>,
     stream: RetainedPackagesRequestStream,
 ) -> Result<(), Error> {
     stream
@@ -24,13 +22,12 @@ pub async fn serve(
         .try_for_each_concurrent(None, |event| async {
             match event {
                 RetainedPackagesRequest::Replace { iterator, responder } => {
-                    set_retained_index(&package_index, &blobfs, collect_blob_ids(iterator).await?)
-                        .await;
+                    package_index.set_retained_index(collect_blob_ids(iterator).await?).await;
 
                     responder.send()?;
                 }
                 RetainedPackagesRequest::Clear { responder } => {
-                    set_retained_index(&package_index, &blobfs, HashSet::new()).await;
+                    package_index.set_retained_index(HashSet::new()).await;
                     responder.send()?;
                 }
             };
@@ -40,7 +37,7 @@ pub async fn serve(
 }
 
 pub async fn serve_retained_blobs(
-    package_index: Arc<async_lock::RwLock<PackageIndex>>,
+    package_index: Arc<PackageIndex>,
     stream: RetainedBlobsRequestStream,
 ) -> Result<(), Error> {
     stream
@@ -48,12 +45,12 @@ pub async fn serve_retained_blobs(
         .try_for_each_concurrent(None, |event| async {
             match event {
                 RetainedBlobsRequest::Replace { iterator, responder } => {
-                    set_retained_blobs(&package_index, collect_blob_ids(iterator).await?).await;
+                    package_index.set_retained_blobs(collect_blob_ids(iterator).await?).await;
 
                     responder.send()?;
                 }
                 RetainedBlobsRequest::Clear { responder } => {
-                    set_retained_blobs(&package_index, HashSet::new()).await;
+                    package_index.set_retained_blobs(HashSet::new()).await;
                     responder.send()?;
                 }
             };

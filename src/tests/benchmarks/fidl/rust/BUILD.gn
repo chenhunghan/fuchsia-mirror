@@ -8,6 +8,7 @@ import("//build/rust/rustc_library.gni")
 import("//src/tests/benchmarks/fidl/benchmark_suite/benchmark_suite.gni")
 import("//tools/fidl/gidl/gidl.gni")
 
+# LINT.IfChange
 gidl_lib_deps = []
 gidl_pkg_names = []
 
@@ -111,3 +112,4 @@ fuchsia_package_with_single_component("fidl_microbenchmarks_rust") {
   component_name = "benchmark"
   deps = [ ":rust_fidl_microbenchmarks_bin" ]
 }
+# LINT.ThenChange(//src/tests/benchmarks/fidl/rust/BUILD.bazel)

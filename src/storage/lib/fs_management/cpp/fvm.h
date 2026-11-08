@@ -38,16 +38,6 @@ zx_status_t FvmInitPreallocated(fidl::UnownedClientEnd<fuchsia_storage_block::Bl
                                 uint64_t initial_volume_size, uint64_t max_volume_size,
                                 size_t slice_size);
 
-// Query the volume manager for info.
-zx::result<fuchsia_storage_block::wire::VolumeManagerInfo> FvmQuery(
-    fidl::UnownedClientEnd<fuchsia_storage_block::VolumeManager> fvm);
-
-// Marks one partition as active and optionally another as inactive in one atomic operation.
-// If both partition GUID are the same, the partition will be activated and
-// no partition will be marked inactive.
-zx_status_t FvmActivate(int fvm_fd, fuchsia_storage_block::wire::Guid deactivate,
-                        fuchsia_storage_block::wire::Guid activate);
-
 }  // namespace fs_management
 
 #endif  // SRC_STORAGE_LIB_FS_MANAGEMENT_CPP_FVM_H_

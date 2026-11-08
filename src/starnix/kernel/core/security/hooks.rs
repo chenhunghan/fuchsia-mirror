@@ -38,8 +38,8 @@
 use super::selinux_hooks::audit::Auditable;
 use super::{
     BpfMapState, BpfProgState, FileObjectState, FileSystemState, KernelState, NonPrivateDirEntry,
-    NonPrivateFsNode, NonPrivateSocket, NonPrivateSocketFile, PerfEventState, common_cap,
-    selinux_hooks, yama,
+    NonPrivateFsNode, NonPrivateSocket, NonPrivateSocketFile, PerfEventState, SecurityContextToken,
+    common_cap, selinux_hooks, yama,
 };
 use crate::mm::{Mapping, MappingOptions, ProtectionFlags};
 use crate::perf::PerfEventFile;
@@ -64,7 +64,7 @@ use linux_uapi::{
 use selinux::{FileSystemMountOptions, InitialSid, SecurityPermission, SecurityServer, TaskAttrs};
 use starnix_logging::{CATEGORY_STARNIX_SECURITY, log_debug};
 use starnix_uapi::arc_key::WeakKey;
-use starnix_uapi::auth::{CAP_SETUID, Credentials, PtraceAccessMode};
+use starnix_uapi::auth::{CAP_SETUID, Capabilities, Credentials, PtraceAccessMode};
 use starnix_uapi::device_id::DeviceId;
 use starnix_uapi::errors::Errno;
 use starnix_uapi::file_mode::{Access, FileMode};
@@ -445,6 +445,16 @@ pub fn mmap_file(
             protection_flags,
             options,
         )
+    })
+}
+
+/// Checks whether `current_task` is allowed to mmap memory at `addr`.
+/// Corresponds to the `mmap_addr()` LSM hook.
+pub fn mmap_addr(current_task: &CurrentTask, addr: UserAddress) -> Result<(), Errno> {
+    track_hook_duration!("security.hooks.mmap_addr");
+    common_cap::mmap_addr(current_task, addr)?;
+    if_selinux_else_default_ok(current_task, |security_server| {
+        selinux_hooks::file::mmap_addr(security_server, current_task, addr)
     })
 }
 
@@ -1279,7 +1289,7 @@ pub fn socket_socketpair(
     })
 }
 
-/// Computes and updates the socket security class associated with a new socket.
+/// Computes and updates the socket security class and label associated with a new socket.
 /// Corresponds to the `socket_post_create()` LSM hook.
 pub fn socket_post_create(current_task: &CurrentTask, socket: &Socket) {
     track_hook_duration!("security.hooks.socket_post_create");
@@ -1287,7 +1297,7 @@ pub fn socket_post_create(current_task: &CurrentTask, socket: &Socket) {
         return;
     };
     if let Some(state) = &current_task.kernel().security_state.state {
-        selinux_hooks::socket::socket_post_create(&state.server, socket);
+        selinux_hooks::socket::socket_post_create(&state.server, current_task, socket);
     }
 }
 
@@ -1520,20 +1530,33 @@ pub fn socket_getpeersec_stream(
     })
 }
 
-/// Returns the Security Context with which the [`crate::vfs::Socket`]'s is labeled, to return to
-/// the recipient via `SCM_SECURITY` auxiliary data, if `SO_PASSSEC` is set.
+/// Returns an opaque [`SecurityContextToken`] with which the [`crate::vfs::Socket`] is labeled, to
+/// resolve and return to the recipient via `SCM_SECURITY` auxiliary data if `SO_PASSSEC` is set.
 /// Corresponds to the `socket_getpeersec_dgram()` LSM hook.
-pub fn socket_getpeersec_dgram(current_task: &CurrentTask, socket: &Socket) -> Vec<u8> {
+pub fn socket_getpeersec_dgram(
+    current_task: &CurrentTask,
+    socket: &Socket,
+) -> Option<SecurityContextToken> {
     track_hook_duration!("security.hooks.socket_getpeersec_dgram");
-    let Some(socket) = NonPrivateSocket::new(socket) else {
-        return Vec::default();
-    };
+    let socket = NonPrivateSocket::new(socket)?;
+    current_task.kernel().security_state.state.is_some().then(|| SecurityContextToken {
+        state: selinux_hooks::socket::socket_getpeersec_dgram(socket),
+    })
+}
+
+/// Resolves an opaque [`SecurityContextToken`] returned by [`socket_getpeersec_dgram`] into a
+/// NUL-terminated Security Context byte string for delivery via `SCM_SECURITY`.
+pub fn security_token_to_context_with_nul(
+    current_task: &CurrentTask,
+    token: SecurityContextToken,
+) -> Option<Vec<u8>> {
+    track_hook_duration!("security.hooks.security_token_to_context_with_nul");
     if_selinux_else(
         current_task,
         |security_server| {
-            selinux_hooks::socket::socket_getpeersec_dgram(&security_server, current_task, socket)
+            selinux_hooks::socket::security_token_to_context_with_nul(security_server, token.state)
         },
-        Vec::default,
+        || None,
     )
 }
 
@@ -1789,29 +1812,43 @@ pub fn check_task_getsid(source: &CurrentTask, target: &Task) -> Result<(), Errn
     })
 }
 
-/// Called when the current task queries the Linux capabilities of the `target` task.
+/// Retrieves the `(effective, inheritable, permitted)` capability sets of `target` if `source`
+/// has permission to query them.
+///
 /// Corresponds to the `capget()` LSM hook.
-pub fn check_getcap_access(source: &CurrentTask, target: &Task) -> Result<(), Errno> {
-    track_hook_duration!("security.hooks.check_getcap_access");
+pub fn capget(
+    source: &CurrentTask,
+    target: &Task,
+) -> Result<(Capabilities, Capabilities, Capabilities), Errno> {
+    track_hook_duration!("security.hooks.capget");
+    let caps = common_cap::capget(target)?;
     if_selinux_else_default_ok(source, |security_server| {
-        selinux_hooks::task::check_getcap_access(
+        selinux_hooks::task::capget(
             &selinux_hooks::build_permission_check(source, security_server),
-            &source,
-            &target,
+            source,
+            target,
         )
-    })
+    })?;
+    Ok(caps)
 }
 
-/// Called when the current task attempts to set the Linux capabilities of the `target`
-/// task.
+/// Validates and applies proposed capability changes to `new_creds` if `source` has permission
+/// to set its capabilities.
+///
 /// Corresponds to the `capset()` LSM hook.
-pub fn check_setcap_access(source: &CurrentTask, target: &Task) -> Result<(), Errno> {
-    track_hook_duration!("security.hooks.check_setcap_access");
+pub fn capset(
+    source: &CurrentTask,
+    new_creds: &mut Credentials,
+    effective: Capabilities,
+    inheritable: Capabilities,
+    permitted: Capabilities,
+) -> Result<(), Errno> {
+    track_hook_duration!("security.hooks.capset");
+    common_cap::capset(source, new_creds, effective, inheritable, permitted)?;
     if_selinux_else_default_ok(source, |security_server| {
-        selinux_hooks::task::check_setcap_access(
+        selinux_hooks::task::capset(
             &selinux_hooks::build_permission_check(source, security_server),
-            &source,
-            &target,
+            source,
         )
     })
 }
@@ -2054,8 +2091,10 @@ pub fn path_notify(
 
 /// Returns true if the security subsystem should skip capability checks on access to the named
 /// attribute, false otherwise.
-pub fn fs_node_xattr_skipcap(name: &FsStr) -> bool {
-    common_cap::fs_node_xattr_skipcap(name) || selinux_hooks::fs_node::fs_node_xattr_skipcap(name)
+pub fn fs_node_xattr_skipcap(current_task: &CurrentTask, name: &FsStr) -> bool {
+    common_cap::fs_node_xattr_skipcap(name)
+        || (current_task.kernel().security_state.state.is_some()
+            && selinux_hooks::fs_node::fs_node_xattr_skipcap(name))
 }
 
 /// This is called by Starnix even for filesystems which support extended attributes, unlike Linux
@@ -2424,7 +2463,7 @@ pub fn set_procattr(
 }
 
 /// Returns true if the file system persists labels in extended attributes.
-pub fn fs_is_xattr_labeled(fs: FileSystemHandle) -> bool {
+pub fn fs_is_xattr_labeled(fs: &FileSystem) -> bool {
     fs.security_state.state.supports_xattr()
 }
 
@@ -2436,25 +2475,40 @@ pub fn selinuxfs_init_null(current_task: &CurrentTask, null_fs_node: &FileHandle
     selinux_hooks::selinuxfs::selinuxfs_init_null(current_task, null_fs_node)
 }
 
-/// Called by the "selinuxfs" when a policy has been successfully loaded, to allow policy-dependent
-/// initialization to be completed. This includes resolving labeling schemes and state for
-/// file-systems mounted prior to policy load (e.g. the "selinuxfs" itself), and initializing
-/// security state for any file nodes they may already contain.
-// TODO: https://fxbug.dev/362917997 - Remove this when SELinux LSM is modularized.
-pub fn selinuxfs_policy_loaded(current_task: &CurrentTask) {
-    track_hook_duration!("security.hooks.selinuxfs_policy_loaded");
-    selinux_hooks::selinuxfs::selinuxfs_policy_loaded(current_task)
+/// Loads a new SELinux policy into the SELinux LSM and completes policy-dependent
+/// initialization. This includes resolving labeling schemes and state for file-systems mounted
+/// prior to policy load (e.g. the "selinuxfs" itself), and initializing security state for any file
+/// nodes they may already contain.
+///
+/// Returns `EINVAL` if `policy_data` is malformed or invalid. On failure, any previously loaded
+/// policy, and the SELinux LSM's state, remain unchanged.
+///
+/// The calling code must have determined that the caller is permitted to load the policy (e.g. via
+/// [`selinuxfs_check_access()`] in the case of the "selinuxfs" "load" API).
+///
+/// Note that `current_task` is used as the subject for `filesystem` permission checks if any
+/// file-systems mounted prior to policy load specified SELinux mount options (see
+/// https://fxbug.dev/581698688).
+///
+/// Panics if SELinux is not enabled, or if labeling cannot be resolved for a file-system mounted
+/// prior to policy load.
+pub fn selinuxfs_load_policy(
+    current_task: &CurrentTask,
+    policy_data: Vec<u8>,
+) -> Result<(), Errno> {
+    // This API is only accessible via SELinuxFS if SELinux is enabled, and is called to set the
+    // policy, so unconditionally call into the LSM.
+    track_hook_duration!("security.hooks.selinuxfs_load_policy");
+    selinux_hooks::selinuxfs::selinuxfs_load_policy(current_task, policy_data)
 }
 
 /// Used by the "selinuxfs" module to access the SELinux administration API, if enabled.
-// TODO: https://fxbug.dev/335397745 - Return a more restricted API, or ...
-// TODO: https://fxbug.dev/362917997 - Remove this when SELinux LSM is modularized.
+// TODO: https://fxbug.dev/335397745 - Return a more restricted API.
 pub fn selinuxfs_get_admin_api(current_task: &CurrentTask) -> Option<Arc<SecurityServer>> {
     current_task.kernel().security_state.state.as_ref().map(|state| state.server.clone())
 }
 
 /// Used by the "selinuxfs" module to perform checks on SELinux API file accesses.
-// TODO: https://fxbug.dev/362917997 - Remove this when SELinux LSM is modularized.
 pub fn selinuxfs_check_access(
     current_task: &CurrentTask,
     permission: SecurityPermission,
@@ -2509,11 +2563,11 @@ mod tests {
         create_task, create_task_with_security_context, spawn_kernel_and_run,
         spawn_kernel_with_selinux_and_run,
     };
-    use linux_uapi::XATTR_NAME_SELINUX;
+    use linux_uapi::{XATTR_NAME_CAPS, XATTR_NAME_SELINUX};
     use selinux::InitialSid;
     use starnix_uapi::auth::{
-        CAP_SYS_PTRACE, PTRACE_MODE_ATTACH, PTRACE_MODE_ATTACH_REALCREDS, PTRACE_MODE_NOAUDIT,
-        PTRACE_MODE_READ_FSCREDS,
+        CAP_NET_RAW, CAP_SETPCAP, CAP_SYS_ADMIN, CAP_SYS_PTRACE, PTRACE_MODE_ATTACH,
+        PTRACE_MODE_ATTACH_REALCREDS, PTRACE_MODE_NOAUDIT, PTRACE_MODE_READ_FSCREDS,
     };
     use starnix_uapi::signals::SIGTERM;
     use std::ffi::CString;
@@ -2603,6 +2657,7 @@ mod tests {
     #[fuchsia::test]
     async fn task_create_access_allowed_for_permissive_mode() {
         spawn_kernel_with_selinux_hooks_test_policy_and_run(|current_task, security_server| {
+            assert_eq!(check_task_create_access(current_task), error!(EACCES));
             security_server.set_enforcing(false);
             assert_eq!(check_task_create_access(current_task), Ok(()));
         })
@@ -2721,8 +2776,10 @@ mod tests {
 
     #[fuchsia::test]
     async fn getsched_access_allowed_for_permissive_mode() {
-        spawn_kernel_with_selinux_and_run(async |current_task, _security_server| {
+        spawn_kernel_with_selinux_hooks_test_policy_and_run(|current_task, security_server| {
             let another_task = create_task(&current_task.kernel(), "another-task");
+            assert_eq!(check_task_getscheduler_access(current_task, &another_task), error!(EACCES));
+            security_server.set_enforcing(false);
             assert_eq!(check_task_getscheduler_access(current_task, &another_task), Ok(()));
         })
         .await;
@@ -2739,8 +2796,10 @@ mod tests {
 
     #[fuchsia::test]
     async fn setsched_access_allowed_for_permissive_mode() {
-        spawn_kernel_with_selinux_and_run(async |current_task, _security_server| {
+        spawn_kernel_with_selinux_hooks_test_policy_and_run(|current_task, security_server| {
             let another_task = create_task(&current_task.kernel(), "another-task");
+            assert_eq!(check_task_setscheduler_access(current_task, &another_task), error!(EACCES));
+            security_server.set_enforcing(false);
             assert_eq!(check_task_setscheduler_access(current_task, &another_task), Ok(()));
         })
         .await;
@@ -2757,8 +2816,10 @@ mod tests {
 
     #[fuchsia::test]
     async fn getpgid_access_allowed_for_permissive_mode() {
-        spawn_kernel_with_selinux_and_run(async |current_task, _security_server| {
+        spawn_kernel_with_selinux_hooks_test_policy_and_run(|current_task, security_server| {
             let another_task = create_task(&current_task.kernel(), "another-task");
+            assert_eq!(check_getpgid_access(current_task, &another_task), error!(EACCES));
+            security_server.set_enforcing(false);
             assert_eq!(check_getpgid_access(current_task, &another_task), Ok(()));
         })
         .await;
@@ -2775,8 +2836,10 @@ mod tests {
 
     #[fuchsia::test]
     async fn setpgid_access_allowed_for_permissive_mode() {
-        spawn_kernel_with_selinux_and_run(async |current_task, _security_server| {
+        spawn_kernel_with_selinux_hooks_test_policy_and_run(|current_task, security_server| {
             let another_task = create_task(&current_task.kernel(), "another-task");
+            assert_eq!(check_setpgid_access(current_task, &another_task), error!(EACCES));
+            security_server.set_enforcing(false);
             assert_eq!(check_setpgid_access(current_task, &another_task), Ok(()));
         })
         .await;
@@ -2793,9 +2856,49 @@ mod tests {
 
     #[fuchsia::test]
     async fn task_getsid_allowed_for_permissive_mode() {
-        spawn_kernel_with_selinux_and_run(async |current_task, _security_server| {
+        spawn_kernel_with_selinux_hooks_test_policy_and_run(|current_task, security_server| {
             let another_task = create_task(&current_task.kernel(), "another-task");
+            assert_eq!(check_task_getsid(current_task, &another_task), error!(EACCES));
+            security_server.set_enforcing(false);
             assert_eq!(check_task_getsid(current_task, &another_task), Ok(()));
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn capset_checks_common_cap_setpcap_without_selinux_capable() {
+        spawn_kernel_with_selinux_hooks_test_policy_and_run(|current_task, security_server| {
+            // In the test policy, neither `process { getcap setcap }` nor `capability { setpcap }`
+            // are granted (`handle_unknown deny`).
+            let mut caller_creds = Credentials::clone(&current_task.current_creds());
+            caller_creds.cap_permitted = CAP_SETPCAP;
+            caller_creds.cap_effective = CAP_SETPCAP;
+            caller_creds.cap_inheritable = Capabilities::empty();
+            caller_creds.cap_bounding = CAP_SETPCAP | CAP_NET_RAW;
+            current_task.set_creds(caller_creds.clone());
+
+            // When expanding `inheritable` from the bounding set in enforcing mode, `capset`
+            // checks `CAP_SETPCAP` directly in `common_cap` rather than via `check_task_capable`
+            // (which would fail with `EPERM` on `capability { setpcap }`), so it reaches
+            // `selinux_hooks::task::capset` and fails with `EACCES` on
+            // `process { setcap }`.
+            let initial_denials = current_task.kernel().security_state.access_denial_count();
+            let mut new_creds = caller_creds.clone();
+            assert_eq!(
+                capset(current_task, &mut new_creds, CAP_SETPCAP, CAP_NET_RAW, CAP_SETPCAP),
+                error!(EACCES)
+            );
+            assert_eq!(
+                current_task.kernel().security_state.access_denial_count(),
+                initial_denials + 1
+            );
+
+            security_server.set_enforcing(false);
+            let mut new_creds = caller_creds;
+            assert_eq!(
+                capset(current_task, &mut new_creds, CAP_SETPCAP, CAP_NET_RAW, CAP_SETPCAP),
+                Ok(())
+            );
         })
         .await;
     }
@@ -2811,8 +2914,10 @@ mod tests {
 
     #[fuchsia::test]
     async fn signal_access_allowed_for_permissive_mode() {
-        spawn_kernel_with_selinux_and_run(async |current_task, _security_server| {
+        spawn_kernel_with_selinux_hooks_test_policy_and_run(|current_task, security_server| {
             let another_task = create_task(&current_task.kernel(), "another-task");
+            assert_eq!(check_signal_access(current_task, &another_task, SIGTERM), error!(EACCES));
+            security_server.set_enforcing(false);
             assert_eq!(check_signal_access(current_task, &another_task, SIGTERM), Ok(()));
         })
         .await;
@@ -2829,8 +2934,10 @@ mod tests {
 
     #[fuchsia::test]
     async fn ptrace_traceme_access_allowed_for_permissive_mode() {
-        spawn_kernel_with_selinux_and_run(async |current_task, _security_server| {
+        spawn_kernel_with_selinux_hooks_test_policy_and_run(|current_task, security_server| {
             let another_task = create_task(&current_task.kernel(), "another-task");
+            assert_eq!(ptrace_traceme(current_task, &another_task), error!(EACCES));
+            security_server.set_enforcing(false);
             assert_eq!(ptrace_traceme(current_task, &another_task), Ok(()));
         })
         .await;
@@ -2850,8 +2957,13 @@ mod tests {
 
     #[fuchsia::test]
     async fn ptrace_attach_access_allowed_for_permissive_mode() {
-        spawn_kernel_with_selinux_and_run(async |current_task, _security_server| {
+        spawn_kernel_with_selinux_hooks_test_policy_and_run(|current_task, security_server| {
             let another_task = create_task(&current_task.kernel(), "another-task");
+            assert_eq!(
+                ptrace_access_check(current_task, &another_task, PTRACE_MODE_ATTACH),
+                error!(EACCES)
+            );
+            security_server.set_enforcing(false);
             assert_eq!(
                 ptrace_access_check(current_task, &another_task, PTRACE_MODE_ATTACH),
                 Ok(())
@@ -2871,8 +2983,10 @@ mod tests {
 
     #[fuchsia::test]
     async fn task_prlimit_access_allowed_for_permissive_mode() {
-        spawn_kernel_with_selinux_and_run(async |current_task, _security_server| {
+        spawn_kernel_with_selinux_hooks_test_policy_and_run(|current_task, security_server| {
             let another_task = create_task(&current_task.kernel(), "another-task");
+            assert_eq!(task_prlimit(current_task, &another_task, true, true), error!(EACCES));
+            security_server.set_enforcing(false);
             assert_eq!(task_prlimit(current_task, &another_task, true, true), Ok(()));
         })
         .await;
@@ -2921,6 +3035,83 @@ mod tests {
             .expect("set_xattr(security.selinux) failed");
 
             assert_eq!(None, selinux_hooks::get_cached_sid(node));
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn fs_node_xattr_skipcap_requires_active_lsm() {
+        spawn_kernel_and_run(async |current_task| {
+            let node = &testing::create_test_file(current_task).entry.node;
+            let mount = &current_task.fs().root().mount;
+
+            assert!(!fs_node_xattr_skipcap(current_task, XATTR_NAME_SELINUX.to_bytes().into()));
+            assert!(fs_node_xattr_skipcap(current_task, XATTR_NAME_CAPS.to_bytes().into()));
+
+            let mut creds = Credentials::clone(&current_task.current_creds());
+            creds.cap_effective &= !CAP_SYS_ADMIN;
+            current_task.set_creds(creds);
+
+            assert_eq!(
+                node.set_xattr(
+                    current_task,
+                    mount,
+                    XATTR_NAME_SELINUX.to_bytes().into(),
+                    VALID_SECURITY_CONTEXT.into(),
+                    XattrOp::Set,
+                ),
+                error!(EPERM)
+            );
+            assert_eq!(
+                node.remove_xattr(current_task, mount, XATTR_NAME_SELINUX.to_bytes().into()),
+                error!(EPERM)
+            );
+        })
+        .await;
+
+        spawn_kernel_with_selinux_and_run(async |current_task, _security_server| {
+            let node = &testing::create_test_file(current_task).entry.node;
+            let mount = &current_task.fs().root().mount;
+
+            assert!(fs_node_xattr_skipcap(current_task, XATTR_NAME_SELINUX.to_bytes().into()));
+            assert!(fs_node_xattr_skipcap(current_task, XATTR_NAME_CAPS.to_bytes().into()));
+
+            let mut creds = Credentials::clone(&current_task.current_creds());
+            creds.cap_effective &= !CAP_SYS_ADMIN;
+            current_task.set_creds(creds);
+
+            assert_eq!(
+                node.set_xattr(
+                    current_task,
+                    mount,
+                    XATTR_NAME_SELINUX.to_bytes().into(),
+                    VALID_SECURITY_CONTEXT.into(),
+                    XattrOp::Set,
+                ),
+                Ok(())
+            );
+            assert_eq!(
+                node.remove_xattr(current_task, mount, XATTR_NAME_SELINUX.to_bytes().into()),
+                Ok(())
+            );
+        })
+        .await;
+
+        spawn_kernel_with_selinux_hooks_test_policy_and_run(|current_task, _security_server| {
+            let node = &testing::create_test_file(current_task).entry.node;
+            let mount = &current_task.fs().root().mount;
+
+            assert!(fs_node_xattr_skipcap(current_task, XATTR_NAME_SELINUX.to_bytes().into()));
+            assert!(fs_node_xattr_skipcap(current_task, XATTR_NAME_CAPS.to_bytes().into()));
+
+            let mut creds = Credentials::clone(&current_task.current_creds());
+            creds.cap_effective &= !CAP_SYS_ADMIN;
+            current_task.set_creds(creds);
+
+            assert_eq!(
+                node.remove_xattr(current_task, mount, XATTR_NAME_SELINUX.to_bytes().into()),
+                error!(EACCES)
+            );
         })
         .await;
     }
@@ -3673,7 +3864,43 @@ mod tests {
                 Ok(())
             );
             assert_eq!(socket_getpeersec_stream(current_task, socket), Ok(Vec::<u8>::new()));
-            assert_eq!(socket_getpeersec_dgram(current_task, socket), Vec::<u8>::new());
+            assert_eq!(socket_getpeersec_dgram(current_task, socket), None);
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn socket_getpeersec_dgram_defers_context_serialization() {
+        spawn_kernel_with_selinux_hooks_test_policy_and_run(|current_task, security_server| {
+            // `hooks_tests_policy` only grants `unix_stream_socket { create }`, so switch to
+            // permissive mode to create a `SocketType::Datagram` socket.
+            security_server.set_enforcing(false);
+            let expected_context = b"u:object_r:test_socket_create_yes_t:s0";
+            let task_sid = security_server
+                .security_context_to_sid(expected_context.into())
+                .expect("invalid security context");
+            testing::mutate_attrs_for_test(current_task, |attrs| attrs.current_sid = task_sid);
+
+            let socket_file = SocketFile::new_socket(
+                current_task,
+                SocketDomain::Unix,
+                SocketType::Datagram,
+                OpenFlags::RDWR,
+                SocketProtocol::IP,
+                /* kernel_private = */ false,
+            )
+            .expect("socket creation should succeed");
+            let socket =
+                Socket::get_from_file(&socket_file).expect("FileHandle should be a socket");
+
+            let token = socket_getpeersec_dgram(current_task, socket)
+                .expect("non-private socket with policy should produce a security token");
+            let mut expected_with_nul = expected_context.to_vec();
+            expected_with_nul.push(b'\0');
+            assert_eq!(
+                security_token_to_context_with_nul(current_task, token),
+                Some(expected_with_nul)
+            );
         })
         .await;
     }

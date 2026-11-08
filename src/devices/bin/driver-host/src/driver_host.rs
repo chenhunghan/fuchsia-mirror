@@ -290,7 +290,10 @@ impl DriverHost {
                 }
             })
             .await
-            .expect("Failed to handle request")
+            .expect("Failed to handle request");
+        if self.exit_tracker.borrow_mut().request_exit() {
+            self.signal_no_more_drivers();
+        }
     }
 
     pub fn run_exception_listener(self: Rc<Self>) {
@@ -956,6 +959,18 @@ mod tests {
         let driver_host = Rc::new(DriverHost::new(env, no_more_drivers_signaler));
 
         load_test_driver(&driver_host).send(Weak::new()).unwrap();
+        no_more_drivers.await.unwrap();
+    }
+
+    #[fuchsia::test]
+    async fn driver_host_exits_when_stream_closes_without_drivers() {
+        let env = fdf_env::Environment::start(0).unwrap();
+        let (no_more_drivers_signaler, no_more_drivers) = oneshot::channel();
+        let driver_host = Rc::new(DriverHost::new(env, no_more_drivers_signaler));
+
+        let (proxy, stream) = fidl::endpoints::create_proxy_and_stream::<fdh::DriverHostMarker>();
+        drop(proxy);
+        driver_host.run_driver_host_server(stream).await;
         no_more_drivers.await.unwrap();
     }
 }

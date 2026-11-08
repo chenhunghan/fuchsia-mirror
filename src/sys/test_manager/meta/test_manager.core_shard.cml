@@ -292,6 +292,16 @@
             to: "#test_manager",
         },
         {
+            service: [
+                "fuchsia.hardware.google.cryptobam.Service",
+                "fuchsia.hardware.google.cryptobam.TestService",
+                "fuchsia.hardware.google.gpdma.Service",
+                "fuchsia.hardware.google.gpdma.TestService",
+            ],
+            from: "parent",
+            to: "#test_manager",
+        },
+        {
             // TODO(https://fxbug.dev/324273348): Remove this capability once the clients have
             // been migrated to services. The service capability has been added below.
             directory: "dev-class",

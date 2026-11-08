@@ -10,10 +10,11 @@ the virtual controller and the Rootcanal server.
 
 ## How to use
 
-To use this tool, include bt-rootcanal in the build. If testing with Pandora,
-include the Pandora interfaces server as well:
+To use this tool, include bt-rootcanal and the virtual HCI controller in the
+build. If testing with Pandora, include the Pandora interfaces server as well:
 ```
 $ fx set --with //src/connectivity/bluetooth/tools/bt-rootcanal
+         --with //src/connectivity/bluetooth/hci/virtual
          --with //src/connectivity/bluetooth/testing/pandora/bt-pandora-server
 ```
 
@@ -21,23 +22,6 @@ If using FEMU, start with TUN/TAP networking:
 ```
 $ ffx emu start --net tap
 $ fx serve
-```
-
-Add a test node on which the bt_hci_virtual driver can bind:
-```
-$ ffx driver test-node add bt-hci-emulator fuchsia.COMPATIBLE=bt
-```
-
-Navigate to the root of your Pigweed checkout and activate the Pigweed environment.
-E.g.
-```
-$ cd third_party/pigweed/src
-$ source bootstrap.sh
-```
-
-Launch the bt_hci_virtual driver:
-```
-$ bazel run --config=fuchsia pw_bluetooth_sapphire/fuchsia/bt_hci_virtual:pkg.x64.repo.disabled.component
 ```
 
 Make sure you have a Rootcanal server running. If the Rootcanal server is running

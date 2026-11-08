@@ -96,8 +96,8 @@
 ##
 ##   --no-status              Suppress dynamic terminal output. Use this for
 ##                            non-interactive shells. Set automatically if an
-##                            agentic runtime is detected by ANTIGRAVITY_AGENT,
-##                            ANTIGRAVITY_EDITOR_APP_ROOT, or GEMINI_CLI.
+##                            agentic runtime is detected (e.g. by
+##                            ANTIGRAVITY_AGENT, GEMINI_CLI, or CLAUDECODE).
 ##                            Currently only affects the Ninja build system.
 ##
 ##   --skip-auth-check        Bypass pre-flight build service authentication
@@ -115,6 +115,11 @@
 ##                            use '-- --verbose' to do that.
 ##
 ##   --experimental-tui       Enable terminal UI for monitoring build.
+##
+##   --summarize-failures     Generate structured reports and a human-readable
+##                            summary of unsuccessful build actions upon completion.
+##
+##   --no-summarize-failures  Disable failure summarization.
 ##
 ##   --host                   When building with Ninja, an alias for --toolchain=host.
 ##                            When building with Bazel, an alias for --config=host
@@ -434,6 +439,22 @@ function main {
         TUI_ENABLED=1
         ;;
 
+      --summarize-failures)
+        SUMMARIZE_FAILURES=1
+        ;;
+
+      --summarize-failures=*)
+        case "${1#--*=}" in
+          1|true|yes) SUMMARIZE_FAILURES=1 ;;
+          0|false|no) SUMMARIZE_FAILURES=0 ;;
+          *) fx-error "Invalid value for --summarize-failures: ${1#--*=}" ; exit 1 ;;
+        esac
+        ;;
+
+      --no-summarize-failures)
+        SUMMARIZE_FAILURES=0
+        ;;
+
       -q|--quiet)
         quiet=true
         ;;
@@ -679,16 +700,11 @@ function main {
     done
 
     local gn_targets_dir
-    if [[ -n "${has_bazel_host_flag}" ]]; then
-      # Bazel host tests don't need any GN artifacts.
-      gn_targets_dir="${FUCHSIA_DIR}/build/bazel/local_repositories/empty_gn_targets"
-    elif [[ -n "${has_bazel_fuchsia_platform_flag}" ]]; then
-      # Expose the @gn_targets inputs declared on //build/bazel/target_tests
-      # (cmc and package-tool, needed by fx_package() and fx_test()). This
-      # directory is written by `fx gen`, and the tools themselves are built
-      # with Ninja below.
-      # TODO(https://fxbug.dev/519243783, https://fxbug.dev/519244675): Point at
-      # empty_gn_targets once cmc and package-tool are migrated to Bazel.
+    if [[ -n "${has_bazel_host_flag}" || -n "${has_bazel_fuchsia_platform_flag}" ]]; then
+      # Expose the gn_targets inputs declared on //build/bazel/{target,host}_tests
+      # (configc for target tests, and ffx/subtools for host tests). This
+      # directory is written by `fx gen`, and any referenced Ninja outputs are
+      # built below.
       # LINT.IfChange(tests_json_gn_targets_dir)
       gn_targets_dir="${FUCHSIA_BUILD_DIR}/build/bazel/tests_json.gn_targets"
       # LINT.ThenChange(//build/bazel/scripts/bazel_tests_utils.py:tests_json_gn_targets_dir)
@@ -754,15 +770,53 @@ function main {
   if [[ "${FX_BUILD_MODE}" == "bazel" ]]; then
       fx-update-bazel-workspace
 
-      # --fuchsia_platform requires the sysroot artifacts and the @gn_targets
-      # inputs for //build/bazel/target_tests (cmc, package-tool) to be built
-      # with Ninja first. For now do this unconditionally. In the future, this
-      # will be optimized by a Ninja sub-build invoked on-demand by Bazel
-      # itself.
-      # TODO(https://fxbug.dev/519243783, https://fxbug.dev/519244675): Drop
-      # target_tests.bazel_inputs once cmc and package-tool are migrated to
-      # Bazel.
-      if [[ "${has_bazel_fuchsia_platform_flag}" ]]; then
+      # --fuchsia_platform requires the sysroot artifacts and the gn_targets
+      # inputs for //build/bazel/target_tests to be built with Ninja first.
+      # For --host, query the requested Bazel targets for @gn_targets file
+      # dependencies (such as ffx or subtool test_data) so Ninja only builds
+      # the exact artifacts they need, avoiding building ffx for unrelated host
+      # binaries or tests.
+      local ninja_targets=()
+      if [[ -n "${has_bazel_fuchsia_platform_flag}" ]]; then
+        ninja_targets+=(
+          phony/zircon/public/sysroot_sdk/sysroot_for_fuchsia_platform
+          phony/build/bazel/target_tests/target_tests.bazel_inputs
+        )
+      fi
+      if [[ -n "${has_bazel_host_flag}" ]]; then
+        local query_targets=("${bazel_targets[@]}")
+        for bazel_arg in "${extra_switches[@]}"; do
+          case "${bazel_arg}" in
+            @*|//*)
+              query_targets+=("${bazel_arg}")
+              ;;
+          esac
+        done
+        if [[ "${#query_targets[@]}" -gt 0 ]]; then
+          local query_expr="" target
+          for target in "${query_targets[@]}"; do
+            if [[ -n "${query_expr}" ]]; then
+              query_expr+=" + "
+            fi
+            query_expr+="\"${target}\""
+          done
+          local query_file
+          query_file="$(mktemp --tmpdir fx_build_gn_targets_query.XXXXXX)"
+          printf 'filter("^@@?gn_targets\\+?//.*:_files/", deps(%s))\n' "${query_expr}" > "${query_file}"
+          local query_line
+          while IFS= read -r query_line; do
+            if [[ "${query_line}" == *":_files/"* ]]; then
+              ninja_targets+=("${query_line#*":_files/"}")
+            fi
+          done < <(FX_BUILD_LOGDIR="${FX_BUILD_LOGDIR:-${FUCHSIA_BUILD_DIR}}" "$(fx-get-bazel)" query \
+            --config=quiet \
+            --keep_going \
+            --override_repository=gn_targets+="${gn_targets_dir}" \
+            --query_file="${query_file}" 2>/dev/null | LC_ALL=C sort -u)
+          rm -f "${query_file}"
+        fi
+      fi
+      if [[ "${#ninja_targets[@]}" -gt 0 ]]; then
         local ninja_path="$PREBUILT_NINJA"
         # The rsninja.sh script is a wrapper that enables ResultStore features,
         # and is a safe drop-in replacement for the original ninja binary,
@@ -772,8 +826,7 @@ function main {
         fi
         fx-run-ninja "${is_logging}" "${ninja_path}" \
           -C "${FUCHSIA_BUILD_DIR}" \
-          phony/zircon/public/sysroot_sdk/sysroot_for_fuchsia_platform \
-          phony/build/bazel/target_tests/target_tests.bazel_inputs
+          "${ninja_targets[@]}" || return "$?"
       fi
 
       # Invoke Bazel through fx-run-bazel to ensure a consistent environment and RBE wrapper
@@ -786,6 +839,19 @@ function main {
 
       (fx-run-bazel "${is_logging}" "$(fx-get-bazel)" build "${bazel_build_args[@]}")
       status=$?
+
+      # Consumers of bazel_test_packages.list (e.g. `fx test`) read copies of
+      # the Bazel test packages exported to the Ninja build directory.
+      # //build/bazel/target_tests normally exports them, but this build
+      # bypasses it, so export the packages that Bazel has rebuilt since they
+      # were last exported.
+      if [[ "${status}" -eq 0 && -n "${has_bazel_fuchsia_platform_flag}" ]]; then
+        "${FUCHSIA_DIR}/scripts/fuchsia-vendored-python" -S \
+          "${FUCHSIA_DIR}/build/bazel/scripts/bazel_test_packages.py" \
+          --ninja-build-dir "${FUCHSIA_BUILD_DIR}" \
+          --incremental
+        status=$?
+      fi
 
       # Note: for now, these build events are not tracked as this feature is still experimental.
   else
@@ -851,7 +917,12 @@ function main {
     fi
 
     declare -r end_time="${EPOCHREALTIME/./}"
-    track-build-event "${start_time}" "${end_time}" "${status}" "${extra_switches[*]}" "${ninja_targets[*]}" "${FUCHSIA_BUILD_DIR}" "${is_no_op}" "${is_clean_build}" "${quiet}"&
+    track-build-event "${start_time}" "${end_time}" "${status}" "${extra_switches[*]}" "${ninja_targets[*]}" "${FUCHSIA_BUILD_DIR}" "${is_no_op}" "${is_clean_build}" "${quiet}" &
+    # In dry-run mode, wait for background tracking to finish so tests and scripts
+    # can deterministically inspect tracking events before this process exits.
+    if [[ -z "${run_ninja_build}" || "${FX_BUILD_DRY_RUN:-0}" == 1 ]]; then
+      wait "$!"
+    fi
 
   fi
   exit-with-message

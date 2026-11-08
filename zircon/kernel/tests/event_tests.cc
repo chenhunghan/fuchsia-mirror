@@ -5,92 +5,11 @@
 // https://opensource.org/licenses/MIT
 
 #include <lib/fit/defer.h>
-#include <lib/kconcurrent/chainlock_transaction.h>
 #include <lib/unittest/unittest.h>
 #include <lib/zircon-internal/macros.h>
 
 #include <kernel/event.h>
 #include <kernel/thread.h>
-
-// This tests that the result in an event_signal_etc call is propagated to the waiter
-// when the event is signaled before any thread waits on the event.
-static bool event_signal_result_before_wait_test() {
-  BEGIN_TEST;
-
-  Event event;
-
-  zx_status_t signal_result = zx_status_t{42};
-  event.Signal(signal_result);
-
-  zx_status_t wake_result = event.Wait();
-
-  EXPECT_EQ(wake_result, signal_result, "");
-
-  END_TEST;
-}
-
-struct event_waiter_args {
-  Event* event;
-  zx_status_t wake_result;
-};
-
-static int event_waiter_thread(void* arg) {
-  event_waiter_args* event_args = reinterpret_cast<event_waiter_args*>(arg);
-  event_args->wake_result = event_args->event->Wait();
-  return 0;
-}
-
-enum class Signal { Only, Queue };
-
-// This tests that the result in an SignalEtc call is propagated to the waiter
-// when the waiter enters a blocking state before the event is signaled.
-template <Signal signal>
-static bool event_signal_result_after_wait_test() {
-  BEGIN_TEST;
-
-  Event event;
-
-  zx_status_t signal_result = zx_status_t{42};
-
-  event_waiter_args args = {&event, ZX_OK};
-
-  Thread* waiter =
-      Thread::Create("event waiter thread", &event_waiter_thread, &args, DEFAULT_PRIORITY);
-  waiter->Resume();
-
-  int64_t wait_duration = ZX_USEC(1);
-  while (true) {
-    {
-      // Check if the waiter thread is in the blocked state, indicating that the event
-      // has latched.
-      SingleChainLockGuard guard{IrqSaveOption, waiter->get_lock(),
-                                 CLT_TAG("event_signal_result_after_wait_test")};
-      if (waiter->state() == THREAD_BLOCKED) {
-        break;
-      }
-    }
-    // Nope - sleep and try again.
-    Thread::Current::SleepRelative(wait_duration);
-    wait_duration *= 2;
-  }
-
-  if constexpr (signal == Signal::Queue) {
-    OwnedWaitQueue queue;
-    event.Signal(signal_result, &queue);
-    queue.ResetOwnerIfNoWaiters();
-  } else {
-    event.Signal(signal_result);
-  }
-
-  int thread_retcode = 0;
-  waiter->Join(&thread_retcode, ZX_TIME_INFINITE);
-
-  ASSERT_EQ(thread_retcode, 0, "");
-
-  EXPECT_EQ(args.wake_result, signal_result, "");
-
-  END_TEST;
-}
 
 // Ensure that Event::Signal while holding a spinlock is safe.
 //
@@ -150,10 +69,5 @@ static bool event_signal_spinlock_test() {
 }
 
 UNITTEST_START_TESTCASE(event_tests)
-UNITTEST("test signaling event with result before waiting", event_signal_result_before_wait_test)
-UNITTEST("test signaling event with result after waiting",
-         event_signal_result_after_wait_test<Signal::Only>)
-UNITTEST("test signaling event with result after waiting (using OwnedWaitQueue)",
-         event_signal_result_after_wait_test<Signal::Queue>)
 UNITTEST("test signaling event while holding spinlock", event_signal_spinlock_test)
 UNITTEST_END_TESTCASE(event_tests, "event", "Tests for events")

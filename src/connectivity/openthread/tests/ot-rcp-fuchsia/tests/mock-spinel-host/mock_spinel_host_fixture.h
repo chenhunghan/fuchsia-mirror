@@ -35,6 +35,20 @@ class MockSpinelHostFixture : public gtest::RealLoopFixture {
 
   zx_status_t SetChannel(fidl::Client<fspinel::DeviceSetup>& setup, MockSpinelHost& host);
 
+  // SetChannel retry policy for a client that reconnects after dropping its Device channel: the
+  // RCP answers ALREADY_BOUND until it has handled the old channel's close. Exponential backoff
+  // like lowpan-ot-driver's restart loop, with test-sized delays.
+  static constexpr uint32_t kSetChannelMaxAttempts = 8;
+  static constexpr zx::duration kSetChannelInitialBackoff = zx::msec(10);
+  static constexpr zx::duration kSetChannelMaxBackoff = zx::sec(1);
+
+  // Calls `set_channel` until it returns anything but ZX_ERR_ALREADY_BOUND or the attempts run
+  // out, running the loop for the backoff in between. Returns the last status.
+  zx_status_t RetryWhileAlreadyBound(fit::function<zx_status_t()> set_channel);
+
+  // SetChannel() retried with RetryWhileAlreadyBound().
+  zx_status_t SetChannelWithRetry(fidl::Client<fspinel::DeviceSetup>& setup, MockSpinelHost& host);
+
   // Opens the device, then runs the loop until idle so that events sent before the `Open` reply
   // (e.g. the initial `OnReadyForSendFrames` grant) have been handled when this returns.
   void OpenDevice(MockSpinelHost& host);

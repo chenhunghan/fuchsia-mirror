@@ -1,0 +1,14 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+[package]
+name = "kernel_features"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+top_crate = { version = "1.0.0", path = "top_crate", features = ["serde"] }
+
+[target.'cfg(kernel)'.dependencies]
+top_crate = { version = "1.0.0", path = "top_crate", default-features = false, features = ["small_rng"] }

@@ -5,8 +5,6 @@
 #ifndef SRC_MEDIA_CODEC_CODECS_VAAPI_CODEC_ADAPTER_VAAPI_DECODER_H_
 #define SRC_MEDIA_CODEC_CODECS_VAAPI_CODEC_ADAPTER_VAAPI_DECODER_H_
 
-#include <fidl/fuchsia.sysmem/cpp/wire.h>
-#include <fuchsia/sysmem/cpp/fidl.h>
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async-loop/default.h>
 #include <lib/async/cpp/task.h>
@@ -17,7 +15,6 @@
 #include <lib/media/codec_impl/codec_diagnostics.h>
 #include <lib/media/codec_impl/codec_input_item.h>
 #include <lib/media/codec_impl/codec_packet.h>
-#include <lib/media/codec_impl/fourcc.h>
 #include <lib/syslog/cpp/macros.h>
 #include <lib/trace/event.h>
 #include <threads.h>
@@ -361,38 +358,43 @@ class CodecAdapterVaApiDecoder : public CodecAdapter {
   fuchsia::media::StreamOutputFormat CoreCodecGetOutputFormat(
       uint64_t stream_lifetime_ordinal,
       uint64_t new_output_format_details_version_ordinal) override {
-    std::lock_guard<std::mutex> lock(lock_);
-    fuchsia::media::StreamOutputFormat result;
-    fuchsia::sysmem::ImageFormat_2 image_format;
-    gfx::Size pic_size = media_decoder_->GetPicSize();
-    gfx::Rect visible_rect = media_decoder_->GetVisibleRect();
-    image_format.pixel_format.type = fuchsia::sysmem::PixelFormatType::NV12;
-
-    bool is_output_tiled = IsOutputTiled();
-    image_format.pixel_format.has_format_modifier = is_output_tiled;
-    if (is_output_tiled) {
-      image_format.pixel_format.format_modifier.value =
-          fuchsia_sysmem::wire::kFormatModifierIntelI915YTiled;
+    gfx::Size pic_size;
+    gfx::Rect visible_rect;
+    bool is_output_tiled = false;
+    uint32_t output_stride = 0;
+    {
+      std::lock_guard<std::mutex> lock(lock_);
+      pic_size = media_decoder_->GetPicSize();
+      visible_rect = media_decoder_->GetVisibleRect();
+      is_output_tiled = IsOutputTiled();
+      output_stride = GetOutputStride();
     }
 
-    image_format.coded_width = pic_size.width();
-    image_format.coded_height = pic_size.height();
-    image_format.bytes_per_row = GetOutputStride();
-    image_format.display_width = visible_rect.width();
-    image_format.display_height = visible_rect.height();
-    image_format.layers = 1;
-    image_format.color_space.type = fuchsia::sysmem::ColorSpaceType::REC709;
-    image_format.has_pixel_aspect_ratio = false;
+    fuchsia::images2::ImageFormat image_format;
+    image_format.set_pixel_format(fuchsia::images2::PixelFormat::NV12);
+    if (is_output_tiled) {
+      image_format.set_pixel_format_modifier(
+          fuchsia::images2::PixelFormatModifier::INTEL_I915_Y_TILED);
+    }
+
+    image_format.set_size(fuchsia::math::SizeU{
+        .width = static_cast<uint32_t>(pic_size.width()),
+        .height = static_cast<uint32_t>(pic_size.height()),
+    });
+    image_format.set_bytes_per_row(output_stride);
+    image_format.set_display_rect(fuchsia::math::RectU{
+        .x = 0,
+        .y = 0,
+        .width = static_cast<uint32_t>(visible_rect.width()),
+        .height = static_cast<uint32_t>(visible_rect.height()),
+    });
+    image_format.set_color_space(fuchsia::images2::ColorSpace::REC709);
 
     fuchsia::media::FormatDetails format_details;
-
     format_details.set_mime_type("video/raw");
+    format_details.set_image_format(std::move(image_format));
 
-    fuchsia::media::VideoFormat video_format;
-    video_format.set_uncompressed(GetUncompressedFormat(image_format));
-
-    format_details.mutable_domain()->set_video(std::move(video_format));
-
+    fuchsia::media::StreamOutputFormat result;
     result.set_stream_lifetime_ordinal(stream_lifetime_ordinal);
     result.set_format_details(std::move(format_details));
     result.mutable_format_details()->set_format_details_version_ordinal(
@@ -703,50 +705,6 @@ class CodecAdapterVaApiDecoder : public CodecAdapter {
     }
 
     return checked_stride.ValueOrDie();
-  }
-
-  fuchsia::media::VideoUncompressedFormat GetUncompressedFormat(
-      const fuchsia::sysmem::ImageFormat_2& image_format) {
-    ZX_DEBUG_ASSERT(image_format.pixel_format.type == fuchsia::sysmem::PixelFormatType::NV12);
-
-    fuchsia::media::VideoUncompressedFormat video_uncompressed;
-
-    // Common Settings
-    video_uncompressed.image_format = image_format;
-    video_uncompressed.fourcc = make_fourcc('N', 'V', '1', '2');
-    video_uncompressed.primary_width_pixels = image_format.coded_width;
-    video_uncompressed.primary_height_pixels = image_format.coded_height;
-    video_uncompressed.planar = true;
-    video_uncompressed.primary_line_stride_bytes = image_format.bytes_per_row;
-    video_uncompressed.secondary_line_stride_bytes = image_format.bytes_per_row;
-    video_uncompressed.primary_start_offset = 0;
-    video_uncompressed.primary_pixel_stride = 1;
-    video_uncompressed.secondary_pixel_stride = 2;
-    video_uncompressed.has_pixel_aspect_ratio = image_format.has_pixel_aspect_ratio;
-    video_uncompressed.pixel_aspect_ratio_height = image_format.pixel_aspect_ratio_height;
-    video_uncompressed.pixel_aspect_ratio_width = image_format.pixel_aspect_ratio_width;
-    video_uncompressed.primary_display_width_pixels = image_format.display_width;
-    video_uncompressed.primary_display_height_pixels = image_format.display_height;
-
-    video_uncompressed.secondary_width_pixels = image_format.coded_width / 2;
-    video_uncompressed.secondary_height_pixels = image_format.coded_height / 2;
-
-    // Tile dependant settings
-    if (IsOutputTiled()) {
-      video_uncompressed.swizzled = true;
-      video_uncompressed.secondary_start_offset =
-          image_format.bytes_per_row *
-          fbl::round_up(image_format.coded_height, kTileSurfaceHeightAlignment);
-      video_uncompressed.tertiary_start_offset = video_uncompressed.secondary_start_offset + 1;
-
-    } else {
-      video_uncompressed.swizzled = false;
-      video_uncompressed.secondary_start_offset =
-          image_format.bytes_per_row * image_format.coded_height;
-      video_uncompressed.tertiary_start_offset = video_uncompressed.secondary_start_offset + 1;
-    }
-
-    return video_uncompressed;
   }
 
   // Allow up to 240 frames (8 seconds @ 30 fps) between keyframes.

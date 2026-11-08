@@ -1,0 +1,211 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/host_tests:host_test_data.bzl",
+    "host_test_data_map",
+)
+load(
+    ":system_tests.bzl",
+    "system_test_reboot_suite",
+    "system_test_recovery_suite",
+    "system_test_upgrade_suite",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+# Stages runtime test data files into `test_data/system-tests/`.
+#
+# Once the pending Bazel migrations/exports for the remaining GN `test_tools`
+# inputs (from //src/sys/pkg/tests/system-tests/BUILD.gn and
+# //src/testing/host-target-testing/omaha_tool/BUILD.gn) land, merge
+# `SYSTEM_TESTS_TOOLS_DATA` (from :system_tests.bzl) into `files_map`:
+#   # cipd_prebuilt_file for //prebuilt/tools/artifacts/artifacts:
+#   "test_data/system-tests/artifacts": "//src/sys/pkg/tests/system-tests:artifacts",
+#   # cipd_prebuilt_file for //prebuilt/tools/lkg/lkg:
+#   "test_data/system-tests/lkg": "//src/sys/pkg/tests/system-tests:lkg",
+#   "test_data/system-tests/mock-omaha-server": "//src/sys/pkg/testing/mock-omaha-server:bin",
+#   "test_data/system-tests/zbi": "//zircon/tools/zbi",
+host_test_data_map(
+    name = "test_data",
+    testonly = True,
+    files_map = {
+        "test_data/system-tests/atx_psk.pem": "//:avb_testkey_atx_psk",
+        "test_data/system-tests/avb_atx_metadata.bin": "//:avb_atx_metadata",
+        "test_data/system-tests/avbtool.py": "//:avbtool_py",
+        "test_data/system-tests/test_private_key.pem": "//src/testing/host-target-testing/omaha_tool:testing_keys/test_private_key.pem",
+    },
+)
+
+# Runtime non-Go dependencies collected by collect_fuchsia_host_test_data_aspect
+# for all system_test_*_suite() targets.
+#
+# Once the parallel ffx host_test_data migration lands, append `FFX_SYSTEM_TESTS_DATA`
+# (from :system_tests.bzl) to `srcs`:
+#   "//src/developer/ffx:test_data",
+#   "//src/developer/ffx/plugins/component:ffx_component_tool_test_data",
+#   "//src/developer/ffx/plugins/emulator:ffx_emulator_tool_test_data",
+#   "//src/developer/ffx/plugins/inspect:ffx_inspect_tool_test_data",
+#   "//src/developer/ffx/plugins/log:ffx_log_tool_test_data",
+#   "//src/developer/ffx/plugins/package:ffx_package_tool_test_data",
+#   "//src/developer/ffx/plugins/product:ffx_product_tool_test_data",
+#   "//src/developer/ffx/plugins/product_bundle:ffx_product_bundle_tool_test_data",
+#   "//src/developer/ffx/plugins/repository:ffx_repository_tool_test_data",
+filegroup(
+    name = "non_go_deps",
+    testonly = True,
+    srcs = [
+        ":test_data",
+    ],
+    visibility = [
+        "//src/sys/pkg/tests/system-tests/reboot_test:__pkg__",
+        "//src/sys/pkg/tests/system-tests/recovery_test:__pkg__",
+        "//src/sys/pkg/tests/system-tests/upgrade_test:__pkg__",
+    ],
+)
+
+test_suite(
+    name = "system_tests",
+    tags = ["manual"],
+    tests = [
+        "//src/sys/pkg/tests/system-tests/reboot_test:system_tests_reboot",
+        "//src/sys/pkg/tests/system-tests/recovery_test:system_tests_recovery",
+        "//src/sys/pkg/tests/system-tests/upgrade_test:system_tests_upgrade",
+    ],
+)
+
+system_test_reboot_suite(
+    name = "workstation-release-reboot",
+    timeout = "10m",
+    cycle_count = "5",
+    cycle_timeout = "2m",
+    environments = [
+        # These are disabled on NUCs to preserve hardware capacity.
+        #{
+        #  dimensions = {
+        #    device_type = "Intel NUC Kit NUC7i5DNHE"
+        #  }
+        #  tags = [ "e2e-isolated" ]
+        #},
+        {
+            "dimensions": {
+                "device_type": "GCE",
+            },
+            "tags": ["e2e-isolated"],
+        },
+    ],
+)
+
+system_test_recovery_suite(
+    name = "workstation-release-recovery",
+    timeout = "10m",
+    cycle_count = "5",
+    cycle_timeout = "2m",
+    environments = [
+        {
+            "dimensions": {
+                "device_type": "Intel NUC Kit NUC7i5DNHE",
+            },
+            "tags": ["e2e-isolated-recovery"],
+        },
+        {
+            "dimensions": {
+                "device_type": "Intel NUC Kit NUC11TNHv5",
+            },
+            "tags": ["e2e-isolated-recovery"],
+        },
+    ],
+)
+
+system_test_reboot_suite(
+    name = "workstation-release-reboot-longevity",
+    timeout = "4h",
+    cycle_count = "100",
+    cycle_timeout = "2m",
+    environments = [
+        {
+            "dimensions": {
+                "device_type": "Intel NUC Kit NUC7i5DNHE",
+            },
+            "tags": ["e2e-isolated-longevity"],
+        },
+        {
+            "dimensions": {
+                "device_type": "Intel NUC Kit NUC11TNHv5",
+            },
+            "tags": ["e2e-isolated-longevity"],
+        },
+    ],
+)
+
+system_test_upgrade_suite(
+    name = "workstation-release-upgrade",
+    cycle_count = "1",
+    cycle_timeout = "10m",
+    downgrade_release_builder = "fuchsia/global.ci/workstation_eng.x64-release-e2e-isolated",
+    environments = [
+        # These are disabled on NUCs to preserve hardware capacity.
+        #{
+        #  dimensions = {
+        #    device_type = "Intel NUC Kit NUC7i5DNHE"
+        #  }
+        #  tags = [ "e2e-isolated" ]
+        #},
+        {
+            "dimensions": {
+                "device_type": "GCE",
+            },
+            "tags": ["e2e-isolated"],
+        },
+    ],
+    pave_timeout = "10m",
+    # We use flashing instead of paving as GCE does not support paving.
+    use_flash = True,
+)
+
+system_test_upgrade_suite(
+    name = "workstation-release-upgrade-longevity",
+    timeout = "4h",
+    cycle_count = "40",
+    cycle_timeout = "10m",
+    downgrade_release_builder = "fuchsia/global.ci/core.x64-release-nuc_in_basic_envs",
+    environments = [
+        {
+            "dimensions": {
+                "device_type": "Intel NUC Kit NUC7i5DNHE",
+            },
+            "tags": ["e2e-isolated-longevity"],
+        },
+        {
+            "dimensions": {
+                "device_type": "Intel NUC Kit NUC11TNHv5",
+            },
+            "tags": ["e2e-isolated-longevity"],
+        },
+    ],
+    pave_timeout = "10m",
+)
+
+system_test_upgrade_suite(
+    name = "workstation-release-upgrade-omaha",
+    cycle_count = "1",
+    cycle_timeout = "10m",
+    downgrade_release_builder = "fuchsia/global.ci/workstation_eng.x64-release-e2e-isolated-omaha",
+    environments = [
+        {
+            "dimensions": {
+                "device_type": "Intel NUC Kit NUC7i5DNHE",
+            },
+            "tags": ["e2e-isolated-omaha"],
+        },
+        {
+            "dimensions": {
+                "device_type": "Intel NUC Kit NUC11TNHv5",
+            },
+            "tags": ["e2e-isolated-omaha"],
+        },
+    ],
+    installer = "omaha",
+    pave_timeout = "10m",
+)

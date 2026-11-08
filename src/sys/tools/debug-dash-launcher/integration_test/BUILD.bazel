@@ -1,0 +1,23 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# `debug-dash-launcher-test` stays in BUILD.gn above the bazel2gn sentinel
+# because it packages `//src/bringup/bin/ptysvc:component` (which is GN-only).
+rustc_test(
+    name = "test_bin",
+    srcs = ["src/lib.rs"],
+    crate_name = "debug_dash_launcher_test",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.dash:fuchsia.dash_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)

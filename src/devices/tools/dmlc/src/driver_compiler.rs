@@ -75,8 +75,22 @@ pub fn compile_driver(args: &CompileDriverArgs, year: &str) -> Result<(), anyhow
 
     if !parsed_schemas.is_empty() {
         let namespace = args.namespace.as_deref().unwrap_or(driver_name);
-        let (h_code, cc_code) =
-            cpp_generator::generate_cpp_parser(&parsed_schemas, driver_name, namespace, year)?;
+        // The build names the generated files after its own driver name, which can differ from the
+        // DML `name`, so include the header by its actual file name.
+        let header_name = args
+            .h_output
+            .as_deref()
+            .and_then(|path| Path::new(path).file_name())
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("{driver_name}_parser.h"));
+        let (h_code, cc_code) = cpp_generator::generate_cpp_parser(
+            &parsed_schemas,
+            driver_name,
+            namespace,
+            &header_name,
+            year,
+        )?;
         if let Some(h_output) = &args.h_output {
             std::fs::write(h_output, h_code).context("Failed to write header file")?;
         }
@@ -1118,6 +1132,60 @@ mod tests {
 
         let bind_content = std::fs::read_to_string(&bind_path).unwrap();
         assert!(bind_content.contains("primary parent \"acpi\" {\n  fuchsia.BIND_PROTOCOL == fuchsia.acpi.BIND_PROTOCOL.DEVICE;\n  fuchsia.Service == \"fuchsia.hardware.acpi.Service\";\n  fuchsia.acpi.HID == \"PNP0C0A\";\n}"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_cpp_parser_includes_generated_header_file_name() {
+        let temp_dir = std::env::temp_dir().join("test_temp_cpp_parser_header_file_name");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // The DML `name` differs from the name of the generated files.
+        let dml_content = r#"{
+            name: "sample_bind",
+            capabilities: [
+                {
+                    service: "fuchsia.sample.Service",
+                    metadata: {
+                        id: "fuchsia.sample.Metadata",
+                        schema: {
+                            $schema: "http://json-schema.org/draft-07/schema#",
+                            title: "SampleMetadata",
+                            type: "object",
+                            properties: {
+                                value: { type: "integer", fuchsia_type: "uint32" },
+                            },
+                        },
+                    },
+                },
+            ],
+        }"#;
+
+        let dml_path = temp_dir.join("sample.dml");
+        std::fs::write(&dml_path, dml_content).unwrap();
+
+        let h_path = temp_dir.join("sample-driver_parser.h");
+        let cc_path = temp_dir.join("sample-driver_parser.cc");
+
+        let args = CompileDriverArgs {
+            input_file: dml_path.to_str().unwrap().to_string(),
+            h_output: Some(h_path.to_str().unwrap().to_string()),
+            cc_output: Some(cc_path.to_str().unwrap().to_string()),
+            rs_output: None,
+            cml_output: None,
+            bind_output: None,
+            namespace: Some("sample-driver_metadata".to_string()),
+        };
+
+        compile_driver(&args, "2026").unwrap();
+
+        let cc_content = std::fs::read_to_string(&cc_path).unwrap();
+        assert!(cc_content.contains("#include \"sample-driver_parser.h\"\n"));
+        assert!(!cc_content.contains("sample_bind_parser.h"));
+        let h_content = std::fs::read_to_string(&h_path).unwrap();
+        assert!(h_content.contains("struct SampleMetadata {"));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

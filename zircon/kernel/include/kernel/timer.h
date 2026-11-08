@@ -9,15 +9,50 @@
 #define ZIRCON_KERNEL_INCLUDE_KERNEL_TIMER_H_
 
 #include <lib/kconcurrent/chainlock.h>
+// Unused here; kept because many files rely on it (and on ktl/span.h) transitively.
 #include <string-file.h>
 #include <zircon/compiler.h>
 #include <zircon/types.h>
 
 #include <fbl/canary.h>
-#include <fbl/intrusive_double_list.h>
+#include <kernel/cpu.h>
 #include <kernel/deadline.h>
+#include <kernel/ffi.h>
 #include <kernel/spinlock.h>
-#include <ktl/atomic.h>
+#include <ktl/array.h>
+#include <ktl/bit.h>
+#include <ktl/byte.h>
+
+class Timer;
+class TimerQueue;
+
+// Timer and TimerQueue are implemented in Rust (kernel/timer.rs). The C++ classes below only
+// reserve opaque storage for the Rust objects, so that timers can be embedded in C++ objects and
+// constructed in static storage, and forward to these functions.
+extern "C" {
+void rust_timer_destroy(const Timer* timer);
+void rust_timer_set(Timer* timer, const Deadline* deadline,
+                    void (*callback)(Timer*, zx_time_t now, void* arg), void* arg);
+bool rust_timer_cancel(Timer* timer);
+zx_status_t rust_timer_trylock_or_cancel(Timer* timer, ChainLock* lock);
+bool rust_timer_cancel_pending(const Timer* timer);
+zx_duration_t rust_timer_slack_for_test(const Timer* timer);
+zx_time_t rust_timer_scheduled_time_for_test(const Timer* timer, zx_clock_t expected_clock_id);
+void rust_timer_queue_init(TimerQueue* timer_queue);
+void rust_timer_queue_destroy(TimerQueue* timer_queue);
+void rust_timer_queue_preempt_reset(TimerQueue* timer_queue, zx_instant_mono_t deadline);
+bool rust_timer_queue_preempt_armed(const TimerQueue* timer_queue);
+void rust_timer_queue_transition_off_cpu(TimerQueue* timer_queue, TimerQueue* source);
+void rust_timer_queue_print_timer_queues(char* buf, size_t len);
+void rust_timer_queue_update_platform_timer(TimerQueue* timer_queue);
+}  // extern "C"
+
+#ifdef UNITTESTS_ENABLED
+extern "C" {
+const Timer* cpp_timer_constinit_monotonic_timer_for_test();
+const Timer* cpp_timer_constinit_boot_timer_for_test();
+}  // extern "C"
+#endif
 
 // Rules for Timers:
 // - Timer callbacks occur from interrupt context.
@@ -28,9 +63,7 @@
 // - Timers aren't permanently bound to a particular CPU and may fire on a CPU other
 //   than the one on which they were set.
 
-// Timers may be removed from an arbitrary TimerQueue, so their list
-// node requires the AllowRemoveFromContainer option.
-class Timer : public fbl::DoublyLinkedListable<Timer*, fbl::NodeOptions::AllowRemoveFromContainer> {
+class Timer {
  public:
   using Callback = void (*)(Timer*, zx_time_t now, void* arg);
 
@@ -38,10 +71,15 @@ class Timer : public fbl::DoublyLinkedListable<Timer*, fbl::NodeOptions::AllowRe
   // TODO(https://fxbug.dev/328306129): The default value for the clock_id parameter should be
   // removed, thus forcing users of the Timer class to explicitly declare the clock they wish
   // to use.
-  constexpr explicit Timer(zx_clock_t clock_id = ZX_CLOCK_MONOTONIC) : clock_id_(clock_id) {}
+  constexpr explicit Timer(zx_clock_t clock_id = ZX_CLOCK_MONOTONIC)
+      : storage_(InitialStorage(clock_id)) {}
 
   // We ensure that timers are not on a list or an active cpu when destroyed.
-  ~Timer();
+  ~Timer() {
+    static_assert(sizeof(Timer) == kStorageSize);
+    static_assert(alignof(Timer) == kStorageAlign);
+    rust_timer_destroy(this);
+  }
 
   // Timers are not moved or copied.
   Timer(const Timer&) = delete;
@@ -60,7 +98,9 @@ class Timer : public fbl::DoublyLinkedListable<Timer*, fbl::NodeOptions::AllowRe
   //
   // The timer function is declared as:
   //   void callback(Timer *, zx_time_t now, void *arg) { ... }
-  void Set(const Deadline& deadline, Callback callback, void* arg);
+  void Set(const Deadline& deadline, Callback callback, void* arg) {
+    rust_timer_set(this, &deadline, callback, arg);
+  }
 
   // Cancel a pending timer
   //
@@ -68,7 +108,7 @@ class Timer : public fbl::DoublyLinkedListable<Timer*, fbl::NodeOptions::AllowRe
   // scheduled in a cpu and false otherwise or if the timer
   // was not scheduled at all.
   //
-  bool Cancel();
+  bool Cancel() { return rust_timer_cancel(this); }
 
   // Equivalent to Set with no slack
   // The deadline parameter should be interpreted differently depending on the clock_id_ field.
@@ -83,148 +123,52 @@ class Timer : public fbl::DoublyLinkedListable<Timer*, fbl::NodeOptions::AllowRe
   // ZX_OK if spinlock was acquired, ZX_ERR_TIMED_OUT if timer was canceled.
   zx_status_t TrylockOrCancel(MonitoredSpinLock* lock) TA_TRY_ACQ(false, lock);
   zx_status_t TrylockOrCancel(ChainLock& lock) TA_REQ(chainlock_transaction_token)
-      TA_TRY_ACQ(false, lock);
+      TA_TRY_ACQ(false, lock) TA_NO_THREAD_SAFETY_ANALYSIS {
+    return rust_timer_trylock_or_cancel(this, &lock);
+  }
 
   // Private accessors for timer tests.
-  zx_duration_t slack_for_test() const { return slack_; }
+  zx_duration_t slack_for_test() const { return rust_timer_slack_for_test(this); }
 
   // This function returns a zx_instant_mono_t if the expected_clock_id is ZX_CLOCK_MONOTONIC and a
   // zx_instant_boot_t if the expected_clock_id is ZX_CLOCK_BOOT.
   zx_time_t scheduled_time_for_test(zx_clock_t expected_clock_id) const {
-    DEBUG_ASSERT(clock_id_ == expected_clock_id);
-    return scheduled_time_;
+    return rust_timer_scheduled_time_for_test(this, expected_clock_id);
   }
 
  private:
-  // TimerQueues can directly manipulate the state of their enqueued Timers.
-  friend class TimerQueue;
+  // The Rust Timer (kernel/timer.rs) lives in this storage; only Rust interprets it.
+  static constexpr size_t kStorageSize = 72;
+  static constexpr size_t kStorageAlign = 8;
+  using Storage = OpaqueStorage<kStorageSize, kStorageAlign>;
 
-  // TimerSyncVar is a small helper class used to help us follow some of the
-  // trickier rules when it comes to synchronization and timer operations.  Most
-  // of timer and timer queue state is protected by the global TimerLock, which
-  // guarantees ordering.  There are some examples which are a bit more
-  // complicated.  Consider the cancel operation.
-  //
-  // When a timer needs to fire, the global lock is held and the timer's
-  // deadline is evaluated.  If the deadline has arrived, the TimerTick code
-  // will remove the timer from the appropriate pending list, and then indicate
-  // that there is a callback-in-flight by setting the `active_cpu_` atomic to
-  // the current CPU value.  Then it drops the lock and performs the callback.
-  // Both dropping the lock and recording which cpu is handling the callback are
-  // important here because the callback can choose to call into the timer's
-  // methods during the callback.  Calling "set" is a good example of something
-  // someone might want to do from the timer callback.
-  //
-  // Now consider another CPU attempting to cancel a timer T when there is a
-  // callback already in flight.  Cancel is supposed to return a boolean:
-  //
-  // 1) True means that the cancel succeeded.  The timer was canceled before any
-  //    callback was made, and now there is a guarantee that no callback will be
-  //    made and that the timer's owner is free to destroy the Timer.
-  // 2) False means that the cancel failed.  When control is returned to the
-  //    caller, the callback is guaranteed to have finished.
-  //
-  // So, when cancel runs, it grabs the lock and checks to see if the callback
-  // has already started.  If it has, then it need to drop the lock (so the
-  // TimerTick code can reacquire the lock and mark the callback done via
-  // active_cpu_), _and wait for the callback to finish_.  It does this by
-  // spinning on the `active_cpu_` variable, read using atomic loads.
-  //
-  // It is important, however, that when the callback has finished, that the
-  // cancel CPU is guaranteed that not only is the callback done, but that all
-  // of the side effects of the callback are visible to the cancel CPU.  So, it
-  // needs to load with acquire, and writes of the state (who always hold the
-  // lock) need to store with release.  Anyone else reading the variable from
-  // _inside_ of the lock, however, do not need to load with acquire.  The lock
-  // is already satisfying any ordering requirements.
-  //
-  // So: TimerSyncVar lets us control access to the two variables (cancel_ and
-  // active_cpu_) we have which are sometimes are called upon to provide
-  // synchronization guarantees without relying on the guarantees provided by
-  // the lock.  It enforces the following rules using the static analyzer.
-  //
-  // 1) Whenever a SyncVar is written, it is always stored with release semantics,
-  //    and also demands that we hold the lock.
-  // 2) Whenever a SyncVar is read from inside of the lock, it is loaded with
-  //    relaxed semantics.  The fact that #1 happened with the lock held
-  //    provides our synchronization guarantees.
-  // 3) Whenever a SyncVar is read from outside of the lock, it is read using
-  //    acquire semantics, which should syncronize-with the release-store
-  //    performed in #1.
-  //
-  // Wrapping this all up in a class provides a good place for annotations, in
-  // addition to guaranteeing that no one can make a mistake by directly
-  // accessing the actual atomic with the wrong semantics.
-  template <typename T>
-  class TimerSyncVar {
-   public:
-    // No default constructor.  Explicitly initialize your PODs folks!
-    explicit constexpr TimerSyncVar(T val) : val_{val} {}
-
-    // No copy, no move.
-    TimerSyncVar(const TimerSyncVar&) = delete;
-    TimerSyncVar(TimerSyncVar&&) = delete;
-    TimerSyncVar& operator=(const TimerSyncVar&) = delete;
-    TimerSyncVar& operator=(TimerSyncVar&&) = delete;
-
-    T load_locked() TA_REQ(TimerLock::Get()) { return val_.load(ktl::memory_order_relaxed); }
-    T load_unlocked() TA_EXCL(TimerLock::Get()) { return val_.load(ktl::memory_order_acquire); }
-    void store_locked(T val) TA_REQ(TimerLock::Get()) {
-      val_.store(val, ktl::memory_order_release);
-    }
-
-   private:
-    ktl::atomic<T> val_;
-  };
-
+  // The initial state of a Rust Timer is all zero bytes, except for the fields below. Their
+  // offsets mirror the Rust #[repr(C)] layout in kernel/timer.rs, and the timer_rust suite's
+  // constinit_timer test checks that a constexpr-constructed Timer reads back as expected in Rust.
   static constexpr uint32_t kMagic = fbl::magic("timr");
-  uint32_t magic_ = kMagic;
+  static constexpr size_t kMagicOffset = 16;
+  static constexpr size_t kClockIdOffset = 56;
+  static constexpr size_t kActiveCpuOffset = 60;
 
-  // This field should be interpreted differently depending on the clock_id_ field.
-  // If clock_id_ is set to ZX_CLOCK_MONOTONIC, this is a zx_instant_mono_t.
-  // If clock_id_ is set to ZX_CLOCK_BOOT, this is a zx_instant_boot_t.
-  zx_time_t scheduled_time_ = 0;
+  // Writes |value| at |offset| in |storage|, in the native byte order like Rust does.
+  static constexpr void StoreU32(Storage& storage, size_t offset, uint32_t value) {
+    const auto bytes = ktl::bit_cast<ktl::array<ktl::byte, sizeof(value)>>(value);
+    for (size_t i = 0; i < bytes.size(); ++i) {
+      storage.bytes[offset + i] = bytes[i];
+    }
+  }
 
-  // Stores the applied slack adjustment from the ideal scheduled_time.
-  zx_duration_t slack_ = 0;
-  Callback callback_ = nullptr;
-  void* arg_ = nullptr;
+  static constexpr Storage InitialStorage(zx_clock_t clock_id) {
+    static_assert(sizeof(cpu_num_t) == sizeof(uint32_t));
+    static_assert(sizeof(zx_clock_t) == sizeof(uint32_t));
+    Storage storage{};
+    StoreU32(storage, kMagicOffset, kMagic);
+    StoreU32(storage, kClockIdOffset, clock_id);
+    StoreU32(storage, kActiveCpuOffset, INVALID_CPU);
+    return storage;
+  }
 
-  // The clock this timer is set on.
-  const zx_clock_t clock_id_;
-
-  // INVALID_CPU, if inactive.
-  TimerSyncVar<cpu_num_t> active_cpu_{INVALID_CPU};
-
-  // true if cancel is pending
-  TimerSyncVar<bool> cancel_{false};
-
-  // Note that we need to manually name the timer_lock because it is one of and
-  // extremely small number of "wrapped" locks in the system, and cannot easily
-  // use lockdep in order to generate its name.
-  //
-  // The vast majority of locks in the system are directly instrumented using
-  // lockdep. This causes the instance of the actual lock to become a member of a
-  // generated lock dep class, which is used to access the underlying lock.  In
-  // these cases, lockdep itself controls the construction sequencing of the lock,
-  // allowing it to configure the internal lock's metadata immediately after
-  // construction has completed.
-  //
-  // Wrapped locks, OTOH, are a bit different.  The lock instance is declared
-  // outside of the lockdep generated class, which holds a reference to the lock
-  // instead of encapsulating the lock itself.  This leads to a global ctor race:
-  // Who is constructed first, the lock itself, or the lock wrapper who holds a
-  // pointer/reference to the lock?
-  //
-  // In situations like this, it is not safe for lock wrapper to be interacting
-  // with the lock whose reference it holds, since that lock may not have been
-  // constructed yet.
-  //
-  // So instead, we simply manually name the lock, and the lockdep wrapper never
-  // makes any attempt to name the lock because of the ordering issues.
-  //
-  static MonitoredSpinLock timer_lock __CPU_ALIGN_EXCLUSIVE;
-  DECLARE_SINGLETON_LOCK_WRAPPER(TimerLock, timer_lock);
+  [[maybe_unused]] Storage storage_;
 };
 
 // Preemption Timers
@@ -240,30 +184,42 @@ class Timer : public fbl::DoublyLinkedListable<Timer*, fbl::NodeOptions::AllowRe
 // Note: A preemption timer may fire even after it has been canceled.
 class TimerQueue {
  public:
+  // An empty timer list points back at itself, so the Rust TimerQueue is initialized at runtime.
+  TimerQueue() { rust_timer_queue_init(this); }
+  ~TimerQueue() {
+    static_assert(sizeof(TimerQueue) == kStorageSize);
+    static_assert(alignof(TimerQueue) == kStorageAlign);
+    rust_timer_queue_destroy(this);
+  }
+
+  // TimerQueues are not moved or copied.
+  TimerQueue(const TimerQueue&) = delete;
+  TimerQueue(TimerQueue&&) = delete;
+  TimerQueue& operator=(const TimerQueue&) = delete;
+  TimerQueue& operator=(TimerQueue&&) = delete;
+
   // Set/reset/cancel the preemption timer.
   //
   // When the preemption timer fires, Scheduler::TimerTick is called. Set the
   // deadline to ZX_TIME_INFINITE to cancel the preemption timer.
   // Scheduler::TimerTick may be called spuriously after cancellation.
-  void PreemptReset(zx_instant_mono_t deadline);
+  void PreemptReset(zx_instant_mono_t deadline) { rust_timer_queue_preempt_reset(this, deadline); }
 
   // Returns true if the preemption deadline is set and will definitely fire in
   // the future. A false value does not definitively mean the preempt timer will
   // not fire, as a spurious expiration is allowed.
-  bool PreemptArmed() const { return preempt_timer_deadline_ != ZX_TIME_INFINITE; }
+  bool PreemptArmed() const { return rust_timer_queue_preempt_armed(this); }
 
   // Internal routines used when bringing cpus online/offline
 
   // Moves |source|'s timers (except its preemption timer) to this TimerQueue.
-  void TransitionOffCpu(TimerQueue& source);
+  void TransitionOffCpu(TimerQueue& source) { rust_timer_queue_transition_off_cpu(this, &source); }
 
   // Prints the contents of all timer queues into |buf| of length |len| and null
   // terminates |buf|.
-  static void PrintTimerQueues(char* buf, size_t len);
-
-  // This is called periodically by timer_tick(), which itself is invoked
-  // periodically by some hardware timer.
-  void Tick(cpu_num_t cpu);
+  static void PrintTimerQueues(char* buf, size_t len) {
+    rust_timer_queue_print_timer_queues(buf, len);
+  }
 
   // UpdatePlatformTimer updates the platform's oneshot timer to the minimum of:
   // 1. The scheduled time of the head of the monotonic timer queue.
@@ -271,81 +227,14 @@ class TimerQueue {
   // 3. The preemption timer deadline.
   //
   // This can only be called when interrupts are disabled.
-  void UpdatePlatformTimer() TA_EXCL(Timer::TimerLock::Get());
-  void UpdatePlatformTimerLocked() TA_REQ(Timer::TimerLock::Get());
+  void UpdatePlatformTimer() { rust_timer_queue_update_platform_timer(this); }
 
  private:
-  // Timers can directly call Insert and Cancel.
-  friend class Timer;
+  // The Rust TimerQueue (kernel/timer.rs) lives in this storage; only Rust interprets it.
+  static constexpr size_t kStorageSize = 32;
+  static constexpr size_t kStorageAlign = 8;
 
-  // Add |timer| to this TimerQueue, possibly coalescing deadlines as well.
-  void Insert(Timer* timer, zx_time_t earliest_deadline, zx_time_t latest_deadline);
-
-  // A helper function for Insert that inserts the given timer into the given timer list.
-  static void InsertIntoTimerList(fbl::DoublyLinkedList<Timer*>& timer_list, Timer* timer,
-                                  zx_time_t earliest_deadline, zx_time_t latest_deadline);
-
-  // A helper function for TransitionOffCpu that moves all timers from the src_list to the
-  // dst_list. Returns the Timer at the head of the dst_list if it changed, otherwise returns
-  // nullopt.
-  static ktl::optional<Timer*> TransitionTimerList(fbl::DoublyLinkedList<Timer*>& src_list,
-                                                   fbl::DoublyLinkedList<Timer*>& dst_list);
-
-  // A helper function for PrintTimerQueues that prints all of the timers in the given timer_list
-  // into the given buffer. Also takes in the current time, which is either a zx_instant_mono_t or a
-  // zx_instant_boot_t depending on the timeline the timer_list is operating on.
-  template <typename TimestampType>
-  static void PrintTimerList(TimestampType now, fbl::DoublyLinkedList<Timer*>& timer_list,
-                             StringFile& buffer);
-
-  // The UpdatePlatformTimer* methods are used to update the platform's oneshot timer to the
-  // minimum of the existing deadline (stored in next_timer_deadline_) and the given new_deadline.
-  // The two separate variations of this method are provided for convenience, so that callers can
-  // provide either a montonic or a boot timestamp depending on the context they're operating in.
-  // Using one of these functions is a bit more efficient than calling UpdatePlatformTimer(), as
-  // they do not need to check the head of both the boot and monotonic timer queues before updating
-  // the platform oneshot timer.
-  //
-  // These can only be called when interrupts are disabled.
-  void UpdatePlatformTimerMono(zx_instant_mono_t new_deadline);
-  void UpdatePlatformTimerBoot(zx_instant_boot_t new_deadline);
-
-  // Converts the given monotonic timestamp to the raw ticks value it corresponds to.
-  // Returns nullopt if the monotonic clock is paused.
-  static ktl::optional<zx_ticks_t> ConvertMonotonicTimeToRawTicks(zx_instant_mono_t mono);
-
-  // Converts the given boot timestamp to the raw ticks value it corresponds to.
-  static zx_ticks_t ConvertBootTimeToRawTicks(zx_instant_boot_t boot);
-
-  // This is called by Tick(), and processes all timers with scheduled times less than now.
-  // Once it's done, the scheduled time of the timer at the front of the queue is returned.
-  template <typename TimestampType>
-  static void TickInternal(TimestampType now, cpu_num_t cpu,
-                           fbl::DoublyLinkedList<Timer*>* timer_list);
-
-  // Timers on the monotonic timeline are placed in this list.
-  fbl::DoublyLinkedList<Timer*> monotonic_timer_list_ TA_GUARDED(Timer::TimerLock::Get());
-
-  // Timers on the boot timeline are placed in this list.
-  fbl::DoublyLinkedList<Timer*> boot_timer_list_ TA_GUARDED(Timer::TimerLock::Get());
-
-  // This TimerQueue's preemption deadline. ZX_TIME_INFINITE means not set.
-  zx_instant_mono_t preempt_timer_deadline_ = ZX_TIME_INFINITE;
-
-  // This TimerQueue's deadline for its platform timer or ZX_TIME_INFINITE if not set.
-  // The deadline is stored in raw platform ticks, as that is the unit used by the
-  // platform_set_oneshot_timer API.
-  zx_ticks_t next_timer_deadline_ = ZX_TIME_INFINITE;
+  [[maybe_unused]] OpaqueStorage<kStorageSize, kStorageAlign> storage_{};
 };
-
-extern "C" {
-void cpp_timer_init(Timer* timer, zx_clock_t clock_id);
-void cpp_timer_destroy(Timer* timer);
-void cpp_timer_set(Timer* timer, const Deadline* deadline, Timer::Callback callback, void* arg);
-bool cpp_timer_cancel(Timer* timer);
-zx_status_t cpp_timer_trylock_or_cancel(Timer* timer, ChainLock* lock);
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_timer_queue_print_timer_queues(char* buf, size_t len);
-}  // extern "C"
 
 #endif  // ZIRCON_KERNEL_INCLUDE_KERNEL_TIMER_H_

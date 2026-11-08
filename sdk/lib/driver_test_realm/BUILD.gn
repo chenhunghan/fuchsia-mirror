@@ -45,6 +45,7 @@ group("driver_test_realm") {
     ":test_realm_manifest",
     "//src/devices/bin/devfs:component-for-test",
     "//src/devices/bin/driver-host:component",
+    "//src/devices/bin/driver-host:next_component",
     "//src/devices/bin/driver-index:component",
     "//src/devices/bin/driver_manager:driver_shared_libraries",
     "//src/devices/bin/driver_manager/devfs:component",
@@ -61,6 +62,7 @@ group("driver_test_realm_no_driver_manager") {
     ":test_realm_manifest",
     "//src/devices/bin/devfs:component-for-test",
     "//src/devices/bin/driver-host:component",
+    "//src/devices/bin/driver-host:next_component",
     "//src/devices/bin/driver-index:component",
     "//src/devices/bin/driver_manager:driver_shared_libraries",
     "//src/devices/bin/driver_manager/devfs:component",
@@ -173,19 +175,9 @@ fuchsia_structured_config_cpp_elf_lib("dtr_support_config") {
   cm_label = ":dtr_support_manifest"
 }
 
-fuchsia_structured_config_values("driver_test_realm_config_default") {
-  cm_label = ":manifest"
-  values = {
-    tunnel_boot_items = false
-  }
-}
-
 fuchsia_component("driver_test_realm_component") {
   cm_label = ":manifest"
-  deps = [
-    ":bin",
-    ":driver_test_realm_config_default",
-  ]
+  deps = [ ":bin" ]
 }
 
 fuchsia_component("dtr_support_component") {

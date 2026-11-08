@@ -14,7 +14,8 @@
 
 #include <efi/variable/variable_id.h>
 #include <fbl/vector.h>
-#include <phys/efi/main.h>
+
+#include "utils.h"
 
 namespace fbl {
 template <typename T>

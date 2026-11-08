@@ -43,11 +43,11 @@
         },
         {
             name: "sync-manager",
-            url: "#meta/sync-manager.cm",
+            url: "sync-manager#meta/sync-manager.cm",
         },
         {
             name: "netstack",
-            url: "#meta/configurable-netstack-netstack3.cm",
+            url: "configurable-netstack#meta/configurable-netstack.cm",
         },
     ],
     use: [

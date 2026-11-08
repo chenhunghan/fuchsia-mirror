@@ -1,23 +1,12 @@
 {
-    "version": 10,
+    "version": 11,
     "seats": [
         {
             "seat_id": "target_parity",
-            "name": "Target & Attribute Parity Reviewer",
-            "responsibility": "Verifies 1:1 semantic alignment of targets, deps, sources, flags, complete migration of all convertible libraries (including reference/bitrot-prevention targets without # @bazel2gn:skip), 3-tier idiomatic Bazel visibility scoping, that the change modifies only build-definition files (no source edits), shared lint config reuse: lint_config points at the defining rust_lint_config (no new alias/wrapper targets) and default lint dicts are loaded from the //build/config/rust/lints .bzl instead of copied, and GN dependency label and edge-kind parity against the base BUILD.gn (no GN-only wrapper swapped for the library it wraps, no dropped link-carrying deps, public config forwarding kept via path_overwrite or the package-local forwarding group).",
+            "name": "Semantic Migration & Parity Reviewer",
+            "responsibility": "Verifies semantic equivalence between BUILD.gn and BUILD.bazel (targets, sources, flags, conditions, dependency edges, test behavior, and dual-build sentinel sync where non-trivial) without re-litigating deterministic check rules.",
             "prompt_file": "target_parity.md",
             "allowed_tools": [
-                "inspect_target",
-                "find_rdeps"
-            ]
-        },
-        {
-            "seat_id": "dual_build_sentinel",
-            "name": "Dual-Build & Sentinel Reviewer",
-            "responsibility": "Verifies BAZEL2GN SENTINEL synchronization, rejects target-level # @bazel2gn:skip on convertible or reference libraries and rejects duplicate/unmigrated convertible targets above the sentinel in BUILD.gn, 3-tier visibility parity, build-only change scope, lint_config label parity (same-named GN config() next to the Bazel rust_lint_config, no new alias + forwarding-config wrapper pairs), and that the Rust public_deps forwarding group is the only hand-written dependency-routing target allowed above the sentinel.",
-            "prompt_file": "dual_build_sentinel.md",
-            "allowed_tools": [
-                "inspect_target",
                 "find_rdeps"
             ]
         }

@@ -2237,3 +2237,398 @@ async fn test_loopback_scatter_gather() {
         Err(Status::INVALID_ARGS.into_raw())
     );
 }
+
+#[fuchsia::test]
+async fn test_cleanup_endpoints_cancels_and_disables_before_unregistering_vmos() {
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    enum TeardownStep {
+        ClearStall(u8),
+        QueueIn,
+        QueueOut,
+        CancelIn,
+        CancelOut,
+        DisableEndpoint(u8),
+        UnregisterIn,
+        UnregisterOut,
+        Deconfigure,
+    }
+
+    let (interface_client, interface_server) =
+        create_endpoints::<fusb_function::UsbFunctionInterfaceMarker>();
+    let (function_client, function_server) = create_endpoints::<fusb_function::UsbFunctionMarker>();
+    let (endpoint_in_client, endpoint_in_server) =
+        create_endpoints::<fusb_endpoint::EndpointMarker>();
+    let (endpoint_out_client, endpoint_out_server) =
+        create_endpoints::<fusb_endpoint::EndpointMarker>();
+
+    let steps = Arc::new(Mutex::new(Vec::<TeardownStep>::new()));
+    let record_queues = Arc::new(Mutex::new(false));
+    let scope = Arc::new(fasync::Scope::new_with_name("test_teardown_order"));
+
+    let function_steps = steps.clone();
+    scope.spawn_local(async move {
+        let mut stream = function_server.into_stream();
+        while let Ok(Some(request)) = stream.try_next().await {
+            match request {
+                fusb_function::UsbFunctionRequest::ConfigureEndpoint { responder, .. } => {
+                    let _ = responder.send(Ok(()));
+                }
+                fusb_function::UsbFunctionRequest::DisableEndpoint {
+                    endpoint_address,
+                    responder,
+                } => {
+                    function_steps
+                        .lock()
+                        .expect("steps mutex")
+                        .push(TeardownStep::DisableEndpoint(endpoint_address));
+                    let _ = responder.send(Ok(()));
+                }
+                fusb_function::UsbFunctionRequest::EndpointClearStall {
+                    endpoint_address,
+                    responder,
+                } => {
+                    function_steps
+                        .lock()
+                        .expect("steps mutex")
+                        .push(TeardownStep::ClearStall(endpoint_address));
+                    let _ = responder.send(Ok(()));
+                }
+                fusb_function::UsbFunctionRequest::Deconfigure { responder } => {
+                    function_steps.lock().expect("steps mutex").push(TeardownStep::Deconfigure);
+                    let _ = responder.send(Ok(()));
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let spawn_ordered_endpoint =
+        |mut stream: fusb_endpoint::EndpointRequestStream,
+         queue_step: TeardownStep,
+         cancel_step: TeardownStep,
+         unregister_step: TeardownStep,
+         queued_tx: mpsc::UnboundedSender<()>| {
+            let endpoint_steps = steps.clone();
+            let should_record_queues = record_queues.clone();
+            scope.spawn_local(async move {
+                let control_handle = stream.control_handle();
+                let mut queued_requests = Vec::<fusb_request::Request>::new();
+                while let Ok(Some(request)) = stream.try_next().await {
+                    match request {
+                        fusb_endpoint::EndpointRequest::RegisterVmos { vmo_ids, responder } => {
+                            let vmos: Vec<fusb_endpoint::VmoHandle> = vmo_ids
+                                .into_iter()
+                                .map(|info| {
+                                    let vmo = zx::Vmo::create(info.size.expect("vmo size"))
+                                        .expect("create vmo");
+                                    fusb_endpoint::VmoHandle {
+                                        id: info.id,
+                                        vmo: Some(vmo),
+                                        ..Default::default()
+                                    }
+                                })
+                                .collect();
+                            let _ = responder.send(vmos);
+                        }
+                        fusb_endpoint::EndpointRequest::QueueRequests { req, .. } => {
+                            if *should_record_queues.lock().expect("record_queues mutex") {
+                                endpoint_steps.lock().expect("steps mutex").push(queue_step);
+                            }
+                            queued_requests.extend(req);
+                            let _ = queued_tx.unbounded_send(());
+                        }
+                        fusb_endpoint::EndpointRequest::CancelAll { responder } => {
+                            endpoint_steps.lock().expect("steps mutex").push(cancel_step);
+                            let completions: Vec<fusb_endpoint::Completion> = queued_requests
+                                .drain(..)
+                                .map(|req| fusb_endpoint::Completion {
+                                    request: Some(req),
+                                    status: Some(zx::sys::ZX_ERR_CANCELED),
+                                    transfer_size: Some(0),
+                                    ..Default::default()
+                                })
+                                .collect();
+                            if !completions.is_empty() {
+                                let _ = control_handle.send_on_completion(completions);
+                            }
+                            let _ = responder.send(Ok(()));
+                        }
+                        fusb_endpoint::EndpointRequest::UnregisterVmos { responder, .. } => {
+                            endpoint_steps.lock().expect("steps mutex").push(unregister_step);
+                            let _ = responder.send(&[], &[]);
+                        }
+                        _ => {}
+                    }
+                }
+            });
+        };
+
+    let (in_queued_tx, mut in_queued_rx) = mpsc::unbounded();
+    let (out_queued_tx, mut out_queued_rx) = mpsc::unbounded();
+    spawn_ordered_endpoint(
+        endpoint_in_server.into_stream(),
+        TeardownStep::QueueIn,
+        TeardownStep::CancelIn,
+        TeardownStep::UnregisterIn,
+        in_queued_tx,
+    );
+    spawn_ordered_endpoint(
+        endpoint_out_server.into_stream(),
+        TeardownStep::QueueOut,
+        TeardownStep::CancelOut,
+        TeardownStep::UnregisterOut,
+        out_queued_tx,
+    );
+
+    let function_proxy = function_client.into_proxy();
+    let endpoint_in_proxy = endpoint_in_client.into_proxy();
+    let endpoint_out_proxy = endpoint_out_client.into_proxy();
+    scope.spawn_local(async move {
+        UsbZeroFunctionDevice::new(
+            function_proxy,
+            endpoint_in_proxy,
+            TEST_EP_IN_ADDR,
+            endpoint_out_proxy,
+            TEST_EP_OUT_ADDR,
+            0,
+            TestMode::SourceSink,
+        )
+        .handle_requests(interface_server.into_stream())
+        .await;
+    });
+
+    let proxy = interface_client.into_proxy();
+
+    // While unconfigured, SetInterface(0, 0) must not issue EndpointClearStall on disabled
+    // endpoints.
+    assert_eq!(proxy.set_interface(0, 0).await.expect("set_interface"), Ok(()));
+    assert!(steps.lock().expect("steps mutex").is_empty());
+
+    // Once configured, SetInterface(0, 0) clears endpoint halts on both bulk endpoints.
+    assert_eq!(
+        proxy.set_configured(true, fusb_descriptor::UsbSpeed::High).await.expect("configure"),
+        Ok(())
+    );
+    assert_eq!(in_queued_rx.next().await, Some(()));
+    assert_eq!(out_queued_rx.next().await, Some(()));
+    steps.lock().expect("steps mutex").clear();
+
+    assert_eq!(proxy.set_interface(0, 0).await.expect("set_interface configured"), Ok(()));
+    let configured_set_interface_steps =
+        steps.lock().expect("steps mutex").drain(..).collect::<Vec<_>>();
+    assert_eq!(
+        configured_set_interface_steps,
+        vec![TeardownStep::ClearStall(TEST_EP_IN_ADDR), TeardownStep::ClearStall(TEST_EP_OUT_ADDR)]
+    );
+
+    // Deconfigure via SetConfigured(false) and verify CancelAll and DisableEndpoint run strictly
+    // before UnregisterVmos, with no stray QueueRequests arriving during or after CancelAll.
+    *record_queues.lock().expect("record_queues mutex") = true;
+    assert_eq!(
+        proxy.set_configured(false, fusb_descriptor::UsbSpeed::High).await.expect("deconfigure"),
+        Ok(())
+    );
+    *record_queues.lock().expect("record_queues mutex") = false;
+
+    let deconfigure_steps = steps.lock().expect("steps mutex").drain(..).collect::<Vec<_>>();
+    assert_eq!(
+        deconfigure_steps,
+        vec![
+            TeardownStep::CancelIn,
+            TeardownStep::CancelOut,
+            TeardownStep::DisableEndpoint(TEST_EP_IN_ADDR),
+            TeardownStep::DisableEndpoint(TEST_EP_OUT_ADDR),
+            TeardownStep::UnregisterIn,
+            TeardownStep::UnregisterOut,
+        ]
+    );
+
+    // Re-configure and verify VendorRequest::Deconfigure follows the exact same teardown order
+    // before calling function_client.deconfigure().
+    assert_eq!(
+        proxy.set_configured(true, fusb_descriptor::UsbSpeed::High).await.expect("reconfigure"),
+        Ok(())
+    );
+    assert_eq!(in_queued_rx.next().await, Some(()));
+    assert_eq!(out_queued_rx.next().await, Some(()));
+    steps.lock().expect("steps mutex").clear();
+
+    *record_queues.lock().expect("record_queues mutex") = true;
+    let vendor_deconfigure_setup = fusb_descriptor::UsbSetup {
+        bm_request_type: USB_TYPE_VENDOR_OUT,
+        b_request: VendorRequest::Deconfigure as u8,
+        w_value: 0,
+        w_index: 0,
+        w_length: 0,
+    };
+    assert_eq!(
+        proxy.control(&vendor_deconfigure_setup, &[]).await.expect("vendor deconfigure"),
+        Ok(vec![])
+    );
+    *record_queues.lock().expect("record_queues mutex") = false;
+
+    let vendor_deconfigure_steps = steps.lock().expect("steps mutex").drain(..).collect::<Vec<_>>();
+    assert_eq!(
+        vendor_deconfigure_steps,
+        vec![
+            TeardownStep::CancelIn,
+            TeardownStep::CancelOut,
+            TeardownStep::DisableEndpoint(TEST_EP_IN_ADDR),
+            TeardownStep::DisableEndpoint(TEST_EP_OUT_ADDR),
+            TeardownStep::UnregisterIn,
+            TeardownStep::UnregisterOut,
+            TeardownStep::Deconfigure,
+        ]
+    );
+}
+
+#[fuchsia::test]
+async fn test_loopback_reconfigure_drains_stale_cancel_completions() {
+    let (interface_client, interface_server) =
+        create_endpoints::<fusb_function::UsbFunctionInterfaceMarker>();
+    let (function_client, function_server) = create_endpoints::<fusb_function::UsbFunctionMarker>();
+    let (endpoint_in_client, endpoint_in_server) =
+        create_endpoints::<fusb_endpoint::EndpointMarker>();
+    let (endpoint_out_client, endpoint_out_server) =
+        create_endpoints::<fusb_endpoint::EndpointMarker>();
+
+    let state_in = Arc::new(Mutex::new(MockEndpointState::default()));
+    let state_out = Arc::new(Mutex::new(MockEndpointState::default()));
+
+    let (_comp_in_tx, comp_in_rx) = mpsc::unbounded();
+    let (comp_out_tx, comp_out_rx) = mpsc::unbounded();
+    let (event_in_tx, mut event_in_rx) = mpsc::unbounded();
+    let (event_out_tx, mut event_out_rx) = mpsc::unbounded();
+
+    let scope = Arc::new(fasync::Scope::new_with_name("test_loopback_reconfigure"));
+    scope.spawn_local(run_mock_function(function_server.into_stream()));
+    scope.spawn_local(run_mock_endpoint(
+        endpoint_in_server.into_stream(),
+        state_in.clone(),
+        comp_in_rx,
+        event_in_tx,
+        scope.clone(),
+    ));
+    scope.spawn_local(run_mock_endpoint(
+        endpoint_out_server.into_stream(),
+        state_out.clone(),
+        comp_out_rx,
+        event_out_tx,
+        scope.clone(),
+    ));
+
+    let function_proxy = function_client.into_proxy();
+    let endpoint_in_proxy = endpoint_in_client.into_proxy();
+    let endpoint_out_proxy = endpoint_out_client.into_proxy();
+    scope.spawn_local(async move {
+        UsbZeroFunctionDevice::new(
+            function_proxy,
+            endpoint_in_proxy,
+            TEST_EP_IN_ADDR,
+            endpoint_out_proxy,
+            TEST_EP_OUT_ADDR,
+            0,
+            TestMode::Loopback,
+        )
+        .handle_requests(interface_server.into_stream())
+        .await;
+    });
+
+    let proxy = interface_client.into_proxy();
+
+    // First configuration: wait until VMOs are registered and QUEUE_DEPTH OUT requests are queued.
+    assert_eq!(
+        proxy.set_configured(true, fusb_descriptor::UsbSpeed::High).await.expect("configure 1"),
+        Ok(())
+    );
+    assert_eq!(event_out_rx.next().await, Some(MockEvent::VmoRegistered));
+    assert_eq!(event_in_rx.next().await, Some(MockEvent::VmoRegistered));
+    assert_eq!(event_out_rx.next().await, Some(MockEvent::RequestQueued));
+    assert_eq!(state_out.lock().expect("state_out").requests.len(), QUEUE_DEPTH);
+
+    // Deconfigure: run_mock_endpoint emits 32 OnCompletion(ZX_ERR_CANCELED) events during
+    // CancelAll, which cleanup_endpoints() must drain before returning.
+    assert_eq!(
+        proxy.set_configured(false, fusb_descriptor::UsbSpeed::High).await.expect("deconfigure"),
+        Ok(())
+    );
+    assert!(state_out.lock().expect("state_out").requests.is_empty());
+
+    // Reconfigure: if stale OnCompletion(ZX_ERR_CANCELED) events were not drained, the new
+    // loopback read_task would decrement sg_config.in_flight_out from 32 down to 0, causing the
+    // subsequent ConfigureScatterGather call to cancel and permanently drop all 32 OUT requests.
+    assert_eq!(
+        proxy.set_configured(true, fusb_descriptor::UsbSpeed::High).await.expect("configure 2"),
+        Ok(())
+    );
+    assert_eq!(event_out_rx.next().await, Some(MockEvent::VmoRegistered));
+    assert_eq!(event_in_rx.next().await, Some(MockEvent::VmoRegistered));
+    assert_eq!(event_out_rx.next().await, Some(MockEvent::RequestQueued));
+    assert_eq!(state_out.lock().expect("state_out").requests.len(), QUEUE_DEPTH);
+
+    let mut sg_payload = Vec::new();
+    sg_payload.extend_from_slice(&1u16.to_le_bytes()); // num_out = 1
+    sg_payload.extend_from_slice(&1u16.to_le_bytes()); // num_in = 1
+    for (offset, size) in [(0u32, 512u32), (0u32, 512u32)] {
+        sg_payload.extend_from_slice(&offset.to_le_bytes());
+        sg_payload.extend_from_slice(&size.to_le_bytes());
+    }
+    let sg_setup = fusb_descriptor::UsbSetup {
+        bm_request_type: USB_TYPE_VENDOR_OUT,
+        b_request: VendorRequest::ConfigureScatterGather as u8,
+        w_value: 0,
+        w_index: 0,
+        w_length: sg_payload.len() as u16,
+    };
+    assert_eq!(proxy.control(&sg_setup, &sg_payload).await.expect("configure sg"), Ok(vec![]));
+    while event_out_rx.try_recv().is_ok() {}
+    assert_eq!(state_out.lock().expect("state_out").requests.len(), QUEUE_DEPTH);
+
+    // Verify loopback data transfer still works cleanly on the reconfigured session.
+    let (read_req, vmo_out) = {
+        let mut state = state_out.lock().expect("state_out");
+        let req = state.requests.remove(0);
+        let vmo_id = match req.data.as_ref().expect("data")[0].buffer.as_ref().expect("buffer") {
+            fusb_request::Buffer::VmoId(id) => *id,
+            _ => panic!("expected VmoId"),
+        };
+        let vmo = state
+            .vmos
+            .get(&vmo_id)
+            .expect("vmo_out")
+            .duplicate_handle(zx::Rights::SAME_RIGHTS)
+            .expect("dup vmo_out");
+        (req, vmo)
+    };
+    let payload = [0xA5u8; 64];
+    vmo_out.write(&payload, 0).expect("write vmo_out");
+    comp_out_tx
+        .unbounded_send(vec![fusb_endpoint::Completion {
+            request: Some(read_req),
+            status: Some(zx::sys::ZX_OK),
+            transfer_size: Some(payload.len() as u64),
+            ..Default::default()
+        }])
+        .expect("send completion");
+
+    assert_eq!(event_in_rx.next().await, Some(MockEvent::RequestQueued));
+    let (write_req, vmo_in) = {
+        let mut state = state_in.lock().expect("state_in");
+        let req = state.requests.pop().expect("write_req");
+        let vmo_id = match req.data.as_ref().expect("data")[0].buffer.as_ref().expect("buffer") {
+            fusb_request::Buffer::VmoId(id) => *id,
+            _ => panic!("expected VmoId"),
+        };
+        let vmo = state
+            .vmos
+            .get(&vmo_id)
+            .expect("vmo_in")
+            .duplicate_handle(zx::Rights::SAME_RIGHTS)
+            .expect("dup vmo_in");
+        (req, vmo)
+    };
+    assert_eq!(write_req.data.as_ref().expect("data")[0].size, Some(payload.len() as u64));
+    let mut echoed = vec![0u8; payload.len()];
+    vmo_in.read(&mut echoed, 0).expect("read vmo_in");
+    assert_eq!(echoed, payload);
+}

@@ -1,0 +1,18 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Rust bindings for our custom virtio socket library.
+# Eventually this logic will move into fdio/zxio and the standard BSD socket
+# APIs with AF_VSOCK will be used instead of this library.
+rustc_library(
+    name = "vsock_sys",
+    srcs = ["src/lib.rs"],
+    edition = "2024",
+    link_deps = ["//src/paravirtualization/lib/vsock"],
+    visibility = ["//src/microfuchsia/tee/binder-proxy:__subpackages__"],
+)

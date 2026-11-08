@@ -2,9 +2,99 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":ptysvc-test"],
+    visibility = ["//src/bringup:__pkg__"],
+)
 
 exports_files(
     ["meta/ptysvc.bootstrap_shard.cml"],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+rustc_binary(
+    name = "ptysvc",
+    srcs = [
+        "src/fifo.rs",
+        "src/integration_tests.rs",
+        "src/main.rs",
+        "src/ptysvc.rs",
+    ],
+    build_flags = ["//build/config/rust:bootfs"],
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    deps = [
+        "//sdk/fidl/fuchsia.device:fuchsia.device_rust",
+        "//sdk/fidl/fuchsia.hardware.pty:fuchsia.hardware.pty_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/sys/lib/stdout-to-debuglog/rust:stdout-to-debuglog",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "ptysvc_packaged_bin",
+    binary = ":ptysvc",
+    binary_name = "ptysvc",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "ptysvc",
+    manifest = "meta/ptysvc.cml",
+)
+
+# ptysvc uses the boot log.
+fx_component(
+    name = "component",
+    check_includes = False,
+    compiled_manifest = ":manifest",
+    visibility = [
+        "//sdk/lib/fdio/tests:__pkg__",
+        "//src/bringup/bin/virtcon:__pkg__",
+        "//src/developer/console/test:__pkg__",
+        "//src/sys/tools/debug-dash-launcher:__subpackages__",
+    ],
+    deps = [":ptysvc_packaged_bin"],
+)
+
+rustc_test(
+    name = "ptysvc_test",
+    build_flags = ["//build/config/rust:bootfs"],
+    crate = ":ptysvc",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/test_util",
+        "//third_party/rust_crates/vendor:assert_matches",
+    ],
+)
+
+fx_unittest_package(
+    name = "ptysvc-test",
+    unit_tests = [":ptysvc_test"],
 )

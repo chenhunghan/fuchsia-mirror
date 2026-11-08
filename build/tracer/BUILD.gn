@@ -2,16 +2,16 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/python/python_host_test.gni")
+import("//build/python/python_library.gni")
+
+# LINT.IfChange
 
 group("tests") {
   testonly = true
 
   deps = [
-    ":action_tracer_test($host_toolchain)",
-    ":output_cacher_test($host_toolchain)",
-    ":restat_cacher_test($host_toolchain)",
     ":tracer_test",
+    ":type_checked_scripts($host_toolchain)",
 
     # There are known platforms where fsatrace_test fails.
     # TODO(https://fxbug.dev/42150171): enable when test passes on all of them
@@ -20,13 +20,28 @@ group("tests") {
 }
 
 if (is_host) {
-  python_host_test("action_tracer_test") {
+  # Python scripts in this directory that aren't part of any other GN Python
+  # target because their tests have been migrated to Bazel host_py_test()
+  # targets. Listing them here keeps their mypy opt-out explicit as required
+  # by //build/shac.star.
+  python_library("type_checked_scripts") {
+    testonly = true
+
     # TODO(https://fxbug.dev/346606208): Resolve mypy errors and enable type checking
     enable_mypy = false
-    main_source = "action_tracer_test.py"
-    sources = [ "action_tracer.py" ]
+    visibility = [ ":*" ]
+    sources = [
+      "action_tracer.py",
+      "action_tracer_test.py",
+      "output_cacher.py",
+      "output_cacher_test.py",
+      "restat_cacher.py",
+      "restat_cacher_test.py",
+    ]
   }
 }
+
+# LINT.ThenChange(BUILD.bazel)
 
 # Copy the nonhermetic rebuild sentinel file into the build directory.
 if (is_host) {
@@ -77,20 +92,4 @@ action("fsatrace_test") {
     rebase_path(inputs[0], root_build_dir),
     rebase_path(outputs[0], root_build_dir),
   ]
-}
-
-if (is_host) {
-  python_host_test("output_cacher_test") {
-    # TODO(https://fxbug.dev/346606208): Resolve mypy errors and enable type checking
-    enable_mypy = false
-    main_source = "output_cacher_test.py"
-    sources = [ "output_cacher.py" ]
-  }
-
-  python_host_test("restat_cacher_test") {
-    # TODO(https://fxbug.dev/346606208): Resolve mypy errors and enable type checking
-    enable_mypy = false
-    main_source = "restat_cacher_test.py"
-    sources = [ "restat_cacher.py" ]
-  }
 }

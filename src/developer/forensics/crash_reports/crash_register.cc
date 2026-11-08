@@ -4,12 +4,13 @@
 
 #include "src/developer/forensics/crash_reports/crash_register.h"
 
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
+#include <fidl/fuchsia.feedback/cpp/natural_ostream.h>
 #include <lib/syslog/cpp/macros.h>
 
 #include "src/developer/forensics/feedback/annotations/constants.h"
 #include "src/lib/files/file.h"
 #include "src/lib/files/path.h"
-#include "src/lib/fostr/fidl/fuchsia/feedback/formatting.h"
 #include "src/lib/fxl/strings/string_printf.h"
 #include "third_party/rapidjson/include/rapidjson/document.h"
 #include "third_party/rapidjson/include/rapidjson/error/en.h"
@@ -26,25 +27,35 @@ CrashRegister::CrashRegister(std::shared_ptr<InfoContext> info_context,
 }
 
 namespace {
-Product ToInternalProduct(const fuchsia::feedback::CrashReportingProduct& fidl_product) {
-  FX_CHECK(fidl_product.has_name());
-  return {.name = fidl_product.name(),
-          .version = fidl_product.has_version() ? ErrorOrString(fidl_product.version())
-                                                : ErrorOrString(Error::kMissingValue),
-          .channel = fidl_product.has_channel() ? ErrorOrString(fidl_product.channel())
-                                                : ErrorOrString(Error::kMissingValue)};
+Product ToInternalProduct(const fuchsia_feedback::CrashReportingProduct& fidl_product) {
+  FX_CHECK(fidl_product.name().has_value());
+  return {.name = *fidl_product.name(),
+          .version = fidl_product.version().has_value() ? ErrorOrString(*fidl_product.version())
+                                                        : ErrorOrString(Error::kMissingValue),
+          .channel = fidl_product.channel().has_value() ? ErrorOrString(*fidl_product.channel())
+                                                        : ErrorOrString(Error::kMissingValue)};
 }
 
 }  // namespace
 
-void CrashRegister::Upsert(std::string component_url,
-                           fuchsia::feedback::CrashReportingProduct product) {
+void CrashRegister::Upsert(UpsertRequest& request, UpsertCompleter::Sync& completer) {
+  Upsert(request.component_url(), request.product());
+}
+
+void CrashRegister::UpsertWithAck(UpsertWithAckRequest& request,
+                                  UpsertWithAckCompleter::Sync& completer) {
+  Upsert(request.component_url(), request.product());
+  completer.Reply();
+}
+
+void CrashRegister::Upsert(const std::string& component_url,
+                           const fuchsia_feedback::CrashReportingProduct& product) {
   if (component_url.find('\0') != std::string::npos) {
     FX_LOGS(WARNING) << "component_url contains a null byte, ignoring: " << component_url;
     return;
   }
 
-  if (!product.has_name()) {
+  if (!product.name().has_value()) {
     FX_LOGS(WARNING) << "Missing required name in product:" << product;
     return;
   }
@@ -53,13 +64,6 @@ void CrashRegister::Upsert(std::string component_url,
   info_.UpsertComponentToProductMapping(component_url, internal_product);
   component_to_products_.insert_or_assign(component_url, std::move(internal_product));
   UpdateJson();
-}
-
-void CrashRegister::UpsertWithAck(std::string component_url,
-                                  fuchsia::feedback::CrashReportingProduct product,
-                                  UpsertWithAckCallback callback) {
-  Upsert(std::move(component_url), std::move(product));
-  callback();
 }
 
 bool CrashRegister::HasProduct(const std::string& program_name) const {

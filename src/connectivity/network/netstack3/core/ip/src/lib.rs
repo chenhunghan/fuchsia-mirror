@@ -188,7 +188,7 @@ pub mod socket {
         DeviceIpSocketHandler, IpSock, IpSockCreateAndSendError, IpSockCreationError,
         IpSockDefinition, IpSockSendError, IpSocketArgs, IpSocketBindingsContext, IpSocketContext,
         IpSocketHandler, MmsError, RouteResolutionOptions, SendOneShotIpPacketError, SendOptions,
-        SocketHopLimits,
+        SocketHopLimits, TransportGsoInfo,
     };
 
     /// IP Socket test utilities.
@@ -261,7 +261,7 @@ pub use internal::gso::{
 pub use internal::local_delivery::{
     IpHeaderInfo, LocalDeliveryPacketInfo, ReceiveIpPacketMeta, TransparentLocalDelivery,
 };
-pub use internal::path_mtu::{PmtuCache, PmtuContext};
+pub use internal::path_mtu::{PmtuCache, PmtuContext, PmtuDstAddr, PmtuSrcAddr};
 pub use internal::reassembly::{FragmentContext, FragmentTimerId, IpPacketFragmentCache};
 pub use internal::routing::rules::{
     Rule, RuleAction, RuleMatcher, RulesTable, TrafficOriginMatcher,

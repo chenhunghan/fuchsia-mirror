@@ -126,9 +126,24 @@ template("rustc_fuzzer") {
 
 template("rustc_starnix_fuzzer") {
   rustc_fuzzer(target_name) {
-    forward_variables_from(invoker, "*", [ "expect_includes_deps" ])
+    forward_variables_from(invoker,
+                           "*",
+                           [
+                             "exclude_toolchain_tags",
+                             "expect_includes_deps",
+                           ])
     expect_includes_deps =
         [ "//src/sys/fuzzing/libfuzzer:libfuzzer_starnix_includes" ]
+
+    # TODO(https://fxbug.dev/42059075): Starnix tasks require ZX_PROCESS_SHARED,
+    # whose split address space is incompatible with ASan/HWASan shadow memory.
+    exclude_toolchain_tags = [
+      "asan",
+      "hwasan",
+    ]
+    if (defined(invoker.exclude_toolchain_tags)) {
+      exclude_toolchain_tags += invoker.exclude_toolchain_tags
+    }
   }
 }
 

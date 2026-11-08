@@ -36,10 +36,10 @@ fuchsia_test_component_with_expectations("netstack-connect-test-component") {
 fuchsia_test_package("netstack-connect-tests") {
   test_components = [ ":netstack-connect-test-component" ]
   deps = [
-    "//src/connectivity/network/netstack3:component-debug",
     "//src/connectivity/network/testing/netemul/service:netemul-sandbox",
     "//src/lib/testing/expectation:expectation_comparer",
   ]
+  subpackages = [ "//src/connectivity/network/netstack3:package-debug" ]
 }
 
 group("tests") {

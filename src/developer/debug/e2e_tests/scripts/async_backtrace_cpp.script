@@ -1,0 +1,62 @@
+## require is_lto=false
+## require optimize=none
+
+[zxdb] set debug-mode true
+Set
+
+[zxdb] run-component fuchsia-pkg://fuchsia.com/zxdb_e2e_inferiors#meta/async_cpp_driver.cm
+Launched Process 1 state=Running koid=?? name=async_cpp_driver.cm component=async_cpp_driver.cm
+🛑
+
+# TODO(https://fxbug.dev/292107156): Use local unwinding once we can download symbols in E2E tests.
+[zxdb] frame --force-remote-unwind
+▶ 0
+
+[zxdb] async-backtrace
+## allow-out-of-order-output
+fdf::Dispatcher("driver_dispatcher")
+└─ Task(id = 0x??)
+   └─ ?? (Running) • async_cpp_driver.cc:??
+      └─ CrashInDriverTask (Running) • async_cpp_driver.cc:??
+└─ Task(id = 0x??)
+   └─ ?? (Pending) • async_cpp_driver.cc:??
+└─ Task(id = 0x??)
+   └─ ?? (Delayed) • async_cpp_driver.cc:??
+
+[zxdb] async-backtrace -v
+## allow-out-of-order-output
+fdf::Dispatcher("driver_dispatcher")
+└─ Task(id = 0x??)
+   └─ ?? (Running) • async_cpp_driver.cc:??
+      └─ CrashInDriverTask (Running) • async_cpp_driver.cc:??
+└─ Task(id = 0x??)
+   └─ ?? (Pending) • async_cpp_driver.cc:??
+└─ Task(id = 0x??)
+   └─ ?? (Delayed) • async_cpp_driver.cc:??
+      ??deadline = ??
+
+[zxdb] abt
+## allow-out-of-order-output
+fdf::Dispatcher("driver_dispatcher")
+└─ Task(id = 0x??)
+   └─ ?? (Running) • async_cpp_driver.cc:??
+      └─ CrashInDriverTask (Running) • async_cpp_driver.cc:??
+└─ Task(id = 0x??)
+   └─ ?? (Pending) • async_cpp_driver.cc:??
+└─ Task(id = 0x??)
+   └─ ?? (Delayed) • async_cpp_driver.cc:??
+
+[zxdb] abt --more-verbose
+## allow-out-of-order-output
+fdf::Dispatcher("driver_dispatcher")
+└─ Task(id = 0x??)
+   └─ ?? (Running) • async_cpp_driver.cc:??
+      └─ CrashInDriverTask (Running) • async_cpp_driver.cc:??
+└─ Task(id = 0x??)
+   └─ ?? (Pending) • async_cpp_driver.cc:??
+└─ Task(id = 0x??)
+   └─ ?? (Delayed) • async_cpp_driver.cc:??
+      ??deadline = ??
+
+[zxdb] kill
+Process 1 killed.

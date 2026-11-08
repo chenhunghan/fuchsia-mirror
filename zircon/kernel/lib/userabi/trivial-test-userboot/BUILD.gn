@@ -44,7 +44,7 @@ kernel_elf_binary("trivial-test-userboot") {
 user_basic_redirect("trivial-test-userboot.basic") {
   visibility = [
     ":*",
-    "//zircon/kernel/phys/test/*",
+    "//zircon/kernel/phys/physboot:*",
   ]
   testonly = true
   public_deps = [ ":trivial-test-userboot" ]
@@ -69,7 +69,7 @@ zbi_test("select-userboot-boot-test") {
   ]
   deps = [
     ":select-userboot-test",
-    "//zircon/kernel/phys:physboot",
+    "//zircon/kernel/phys/physboot",
   ]
 }
 

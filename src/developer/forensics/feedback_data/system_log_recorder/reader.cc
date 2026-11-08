@@ -11,20 +11,32 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
-#include <cmath>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "src/developer/forensics/feedback_data/constants.h"
+#include "src/developer/forensics/utils/log_format.h"
 #include "src/lib/files/directory.h"
 #include "src/lib/files/file.h"
 #include "src/lib/files/path.h"
+#include "src/lib/fxl/strings/string_number_conversions.h"
 
 namespace forensics {
 namespace feedback_data {
 namespace system_log_recorder {
 namespace {
+
+constexpr size_t kFirstFileNumber = 0u;
+
+struct PostProcessResult {
+  std::string logs;
+  uint64_t message_count;
+  uint64_t deduplicated_message_count;
+  std::optional<zx::time_boot> first_timestamp;
+  std::optional<zx::time_boot> last_timestamp;
+};
 
 // Returns a view starting at the next line in |str| or an empty view if none are left.
 std::string_view ToNextLine(std::string_view str) {
@@ -41,41 +53,7 @@ bool MatchesRepeat(std::string_view str) {
   }
 
   str.remove_prefix(kPrefix.size());
-  return !str.empty() && std::isdigit(str.front());
-}
-
-// Returns true if |str| starts like a log message.
-bool MatchesLogMessage(std::string_view str) {
-  auto MatchOpenBr = [&str] {
-    if (str.empty() || str.front() != '[') {
-      return false;
-    }
-
-    str.remove_prefix(1);
-    return true;
-  };
-
-  auto MatchDigitsPlus = [&str](const char c) {
-    std::string_view new_str(str);
-    while (!new_str.empty() && std::isdigit(new_str.front())) {
-      new_str.remove_prefix(1);
-    }
-
-    if (new_str == str || (!new_str.empty() && new_str.front() != c)) {
-      return false;
-    }
-
-    str = new_str.substr(1);
-    return true;
-  };
-
-  return
-      // The timestamp is like [$secs.$msecs]
-      MatchOpenBr() && MatchDigitsPlus('.') && MatchDigitsPlus(']') &&
-      // The process koid is like [$pid]
-      MatchOpenBr() && MatchDigitsPlus(']') &&
-      // The thread koid is like [$tid]
-      MatchOpenBr() && MatchDigitsPlus(']');
+  return !str.empty() && std::isdigit(static_cast<unsigned char>(str.front()));
 }
 
 // Splits message into 3 parts.
@@ -115,7 +93,7 @@ std::tuple<std::string_view, size_t, std::string_view> SplitRepeatedCount(
 
     std::string_view new_tail = tail;
     new_tail.remove_prefix(kPrefix.size());
-    if (new_tail.empty() || !std::isdigit(new_tail.front())) {
+    if (new_tail.empty() || !std::isdigit(static_cast<unsigned char>(new_tail.front()))) {
       break;
     }
 
@@ -149,17 +127,17 @@ std::vector<std::string_view> ParseMessages(const std::string_view log) {
   messages.reserve(20000);
 
   // Consider the first line the start of a new message, regardless of whether or not it matches a
-  // message.
-  messages.emplace_back(log.substr(0, 1));
+  // message. It initially spans all of |log| and is trimmed below if another message follows.
+  messages.emplace_back(log);
 
   std::string_view remainder = ToNextLine(log.substr(1));
   while (!remainder.empty()) {
     // Find either the start of the next message in |log| or the end of |log|.
-    while (!remainder.empty() && !MatchesLogMessage(remainder)) {
+    while (!remainder.empty() && !ParseLogHeader(remainder).has_value()) {
       remainder = ToNextLine(remainder);
     }
 
-    // "Grow" the last message's data.
+    // Resize the last message so it ends at the start of the next message or the end of |log|.
     const char* const end = (!remainder.empty()) ? remainder.data() : log.data() + log.size();
     messages.back() = std::string_view(messages.back().data(), end - messages.back().data());
 
@@ -174,44 +152,52 @@ std::vector<std::string_view> ParseMessages(const std::string_view log) {
   return messages;
 }
 
-std::string PostProcess(const std::string_view log) {
+PostProcessResult PostProcess(const std::string_view log) {
   std::vector<std::string_view> messages = ParseMessages(log);
   if (messages.empty()) {
-    return "";
+    return PostProcessResult{
+        .logs = "",
+        .message_count = 0,
+        .deduplicated_message_count = 0,
+        .first_timestamp = std::nullopt,
+        .last_timestamp = std::nullopt,
+    };
   }
 
   // Don't sort with the first message if it doesn't have a timestamp.
   auto begin = messages.begin();
-  if (!MatchesLogMessage(*begin)) {
+  if (!ParseLogHeader(*begin).has_value()) {
     ++begin;
   }
 
-  std::stable_sort(
-      begin, messages.end(), [](const std::string_view lhs, const std::string_view rhs) {
-        const std::string_view lhs_timestamp = lhs.substr(lhs.find('['), lhs.find(']'));
-        const std::string_view rhs_timestamp = rhs.substr(rhs.find('['), rhs.find(']'));
+  std::stable_sort(begin, messages.end(),
+                   [](const std::string_view lhs, const std::string_view rhs) {
+                     return ParseLogHeader(lhs) < ParseLogHeader(rhs);
+                   });
 
-        // The timestamp format is "%05d.%03d" so longer strings mean larger timestamps and then
-        // we only need to compare the strings if the length is the same.
-        if (lhs_timestamp.size() != rhs_timestamp.size()) {
-          return lhs_timestamp.size() < rhs_timestamp.size();
-        }
-
-        return lhs_timestamp < rhs_timestamp;
-      });
+  // The writer already merged consecutive repetitions of a message, so each message in |messages|
+  // counts once towards the deduplicated message count. Because |messages| is sorted, the first
+  // and last messages have the earliest and latest timestamps.
+  const uint64_t deduplicated_message_count = std::distance(begin, messages.end());
+  const std::optional<zx::time_boot> first_timestamp =
+      (begin != messages.end()) ? ParseLogHeader(*begin) : std::nullopt;
+  const std::optional<zx::time_boot> last_timestamp =
+      (begin != messages.end()) ? ParseLogHeader(messages.back()) : std::nullopt;
 
   std::string final_log;
   final_log.reserve(log.size());
+  uint64_t repeated_message_count = 0;
 
   // Appends |message| to |final_log| while recursively accumulating the repeated count for each
   // message.
-  std::function<void(std::string_view)> AddMessage = [&final_log,
+  std::function<void(std::string_view)> AddMessage = [&final_log, &repeated_message_count,
                                                       &AddMessage](const std::string_view message) {
     if (message.empty()) {
       return;
     }
 
     const auto [head, repeat_count, tail] = SplitRepeatedCount(message);
+    repeated_message_count += repeat_count;
 
     final_log.append(head);
 
@@ -230,35 +216,40 @@ std::string PostProcess(const std::string_view log) {
     AddMessage(message);
   }
 
-  return final_log;
+  return PostProcessResult{
+      .logs = std::move(final_log),
+      .message_count = deduplicated_message_count + repeated_message_count,
+      .deduplicated_message_count = deduplicated_message_count,
+      .first_timestamp = first_timestamp,
+      .last_timestamp = last_timestamp,
+  };
 }
 
 }  // namespace
 
-fit::result<ReaderError, std::string> Concatenate(const std::string& logs_dir,
-                                                  const StorageSize max_decompressed_size,
-                                                  Decoder* decoder, float* compression_ratio) {
-  // Set the default compression to NAN in case Concatenate() fails.
-  *compression_ratio = NAN;
-
+fit::result<ReaderError, ConcatenateResult> Concatenate(const std::string& logs_dir,
+                                                        const StorageSize max_decompressed_size,
+                                                        Decoder* decoder) {
   if (!files::IsDirectory(logs_dir)) {
     FX_LOGS(WARNING) << "No logs directory found: " << logs_dir;
     return fit::error(ReaderError::kIoError);
   }
 
-  std::vector<std::string> file_names;
-  files::ReadDirContents(logs_dir, &file_names);
+  std::vector<std::string> dir_contents;
+  files::ReadDirContents(logs_dir, &dir_contents);
 
-  // Remove the current directory from the files.
-  file_names.erase(std::remove(file_names.begin(), file_names.end(), "."), file_names.end());
+  // Only read the files the writer created, which are named after their number.
+  std::vector<size_t> file_nums;
+  for (const std::string& fname : dir_contents) {
+    size_t file_num = 0;
+    if (fxl::StringToNumberWithError(fname, &file_num)) {
+      file_nums.push_back(file_num);
+    }
+  }
 
   // Sort the files based on the number the previous writer assigned them. The lower the number,
   // the older the file.
-  std::sort(file_names.begin(), file_names.end(),
-            [](const std::string& lhs, const std::string& rhs) {
-              return std::strtoull(lhs.c_str(), nullptr, /*base=*/10) <
-                     std::strtoull(rhs.c_str(), nullptr, /*base=*/10);
-            });
+  std::sort(file_nums.begin(), file_nums.end());
 
   std::string uncompressed_log;
   uncompressed_log.reserve(max_decompressed_size.ToBytes());
@@ -267,8 +258,8 @@ fit::result<ReaderError, std::string> Concatenate(const std::string& logs_dir,
   buffer.reserve(max_decompressed_size.ToBytes());
 
   uint64_t total_compressed_log_size{0};
-  for (const std::string& fname : file_names) {
-    const std::string path = files::JoinPath(logs_dir, fname);
+  for (const size_t file_num : file_nums) {
+    const std::string path = files::JoinPath(logs_dir, std::to_string(file_num));
     if (!files::ReadFileToString(path, &buffer)) {
       continue;
     }
@@ -288,18 +279,25 @@ fit::result<ReaderError, std::string> Concatenate(const std::string& logs_dir,
   }
 
   // Sort logs and combine messages for repeated logs.
-  uncompressed_log = PostProcess(uncompressed_log);
-  if (uncompressed_log.empty()) {
+  PostProcessResult post_processed = PostProcess(uncompressed_log);
+  if (post_processed.logs.empty()) {
     FX_LOGS(WARNING) << "The post-processed log is empty";
     return fit::error(ReaderError::kDecompressionError);
   }
 
   // Compression ratio rounded up to the next decimal, e.g., 2.54x compression -> 2.6x.
-  uint32_t decimal_ratio =
-      (static_cast<uint32_t>(uncompressed_log.size()) * 10 - 1) / total_compressed_log_size + 1;
-  *compression_ratio = (static_cast<float>(decimal_ratio)) / 10.0f;
+  const uint32_t decimal_ratio =
+      (static_cast<uint32_t>(post_processed.logs.size()) * 10 - 1) / total_compressed_log_size + 1;
 
-  return fit::ok(uncompressed_log);
+  return fit::ok(ConcatenateResult{
+      .logs = std::move(post_processed.logs),
+      .compression_ratio = static_cast<float>(decimal_ratio) / 10.0f,
+      .is_at_capacity = !file_nums.empty() && file_nums.front() > kFirstFileNumber,
+      .message_count = post_processed.message_count,
+      .deduplicated_message_count = post_processed.deduplicated_message_count,
+      .first_timestamp = post_processed.first_timestamp,
+      .last_timestamp = post_processed.last_timestamp,
+  });
 }
 
 }  // namespace system_log_recorder

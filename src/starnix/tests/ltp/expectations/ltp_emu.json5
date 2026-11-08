@@ -8,7 +8,6 @@
             matchers: [
                 // Timing-dependent tests that flake in an emulator.
                 "epoll_wait04",
-                "futex_wait_bitset01",
                 "timerfd01",
                 "pipe13",
                 "prctl09",

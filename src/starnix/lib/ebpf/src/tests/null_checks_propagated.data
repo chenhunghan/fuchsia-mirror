@@ -1,12 +1,17 @@
 -- asm
 mov %r1, 42
+stxdw [%r10-16], %r1
+mov %r1, %r10
+add %r1, -16
 call 100
 stxdw [%r10-8], %r0
 mov %r1, %r0
 jne %r0, 0, +1
 exit
-ldxdw %r0, [%r10-8]
-add %r0, %r1
+ldxdw %r2, [%r10-8]
+ldxdw %r0, [%r1]
+ldxdw %r3, [%r2]
+add %r0, %r3
 exit
 -- result
 84

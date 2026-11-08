@@ -138,6 +138,6 @@ zbi_test("userboot-lib-boot-test") {
   ]
   deps = [
     ":userboot-lib-test",
-    "//zircon/kernel/phys:physboot",
+    "//zircon/kernel/phys/physboot",
   ]
 }

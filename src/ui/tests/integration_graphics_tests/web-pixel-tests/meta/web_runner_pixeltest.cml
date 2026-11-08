@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 {
     include: [
+        "//src/chromium/web_engine/meta/shards/test/launch_context_provider.shard.cml",
         "inspect/client.shard.cml",
         "sys/component/realm_builder.shard.cml",
         "sys/testing/elf_test_runner.shard.cml",
@@ -34,23 +35,10 @@
             from: "parent",
             to: "#realm_builder",
         },
-        {
-            directory: "root-ssl-certificates",
-            from: "parent",
-            to: "#realm_builder",
-        },
-        {
-            directory: "tzdata-icu",
-            from: "parent",
-            to: "#realm_builder",
-        },
     ],
     facets: {
         "fuchsia.test": {
-            "deprecated-allowed-packages": [
-                "intl_property_manager",
-                "web_engine",
-            ],
+            "deprecated-allowed-packages": [ "web_engine" ],
         },
     },
 }

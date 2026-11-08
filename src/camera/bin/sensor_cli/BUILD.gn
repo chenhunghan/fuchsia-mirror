@@ -16,19 +16,16 @@ executable("camera_sensor_cli_bin") {
     "main.cc",
   ]
   deps = [
+    "//sdk/fidl/fuchsia.camera2.debug:fuchsia.camera2.debug_hlcpp",
+    "//sdk/fidl/fuchsia.camera2.hal:fuchsia.camera2.hal_hlcpp",
+    "//sdk/fidl/fuchsia.hardware.camera:fuchsia.hardware.camera_cpp",
+    "//sdk/fidl/fuchsia.hardware.camera:fuchsia.hardware.camera_hlcpp",
     "//sdk/lib/async-loop:async-loop-cpp",
     "//sdk/lib/async-loop:async-loop-default",
     "//sdk/lib/component/incoming/cpp",
     "//sdk/lib/sys/cpp",
     "//sdk/lib/syslog/cpp",
     "//src/lib/fxl:fxl_cli",
-  ]
-
-  public_deps = [
-    "//sdk/fidl/fuchsia.camera2.debug:fuchsia.camera2.debug_hlcpp",
-    "//sdk/fidl/fuchsia.camera2.hal:fuchsia.camera2.hal_hlcpp",
-    "//sdk/fidl/fuchsia.hardware.camera:fuchsia.hardware.camera_cpp",
-    "//sdk/fidl/fuchsia.hardware.camera:fuchsia.hardware.camera_hlcpp",
   ]
 }
 

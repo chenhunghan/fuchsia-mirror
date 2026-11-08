@@ -480,7 +480,7 @@ pub const CQHCI_CQ_CRYPTO_CAP_OFFSET: usize = 0x100;
 
 bitfield! {
     #[derive(Clone, Copy)]
-    pub struct CqhciCqCapsRegister(u32);
+    pub struct CqhciCqCapsRegister(pub u32);
     impl Debug;
     pub u16, timer_clock_freq, set_timer_clock_freq: 9, 0;
     pub u8, timer_clock_freq_multiplier, set_timer_clock_freq_multiplier: 15, 12;
@@ -508,7 +508,7 @@ bitflags! {
 
 bitfield! {
     #[derive(Clone, Copy)]
-    pub struct CqhciCqSendStatusConfiguration1Register(u32);
+    pub struct CqhciCqSendStatusConfiguration1Register(pub u32);
     impl Debug;
     pub u16, ssc_idle_timer, set_ssc_idle_timer: 15, 0;
     pub u8, ssc_block_counter, set_ssc_block_counter: 19, 16;
@@ -516,7 +516,7 @@ bitfield! {
 
 bitfield! {
     #[derive(Clone, Copy)]
-    pub struct CqhciCqSendStatusConfiguration2Register(u32);
+    pub struct CqhciCqSendStatusConfiguration2Register(pub u32);
     impl Debug;
     pub u16, rca, set_rca: 15, 0;
 }
@@ -536,7 +536,7 @@ impl CqhciCqSendStatusConfiguration2Register {
 // TODO(https://fxbug.dev/42176727): Add crypto errors.
 bitfield! {
     #[derive(Clone, Copy)]
-    pub struct CqhciCqInterruptStatusRegister(u32);
+    pub struct CqhciCqInterruptStatusRegister(pub u32);
     impl Debug;
     pub bool, halt_complete, set_halt_complete: 0;
     pub bool, task_complete, set_task_complete: 1;
@@ -565,7 +565,7 @@ impl CqhciCqInterruptStatusRegister {
 
 bitfield! {
     #[derive(Clone, Copy)]
-    pub struct CqhciCqInterruptStatusEnableRegister(u32);
+    pub struct CqhciCqInterruptStatusEnableRegister(pub u32);
     impl Debug;
     pub bool, halt_complete, set_halt_complete: 0;
     pub bool, task_complete, set_task_complete: 1;
@@ -599,7 +599,7 @@ impl CqhciCqInterruptStatusEnableRegister {
 
 bitfield! {
     #[derive(Clone, Copy)]
-    pub struct CqhciCqInterruptSignalEnableRegister(u32);
+    pub struct CqhciCqInterruptSignalEnableRegister(pub u32);
     impl Debug;
     pub bool, halt_complete, set_halt_complete: 0;
     pub bool, task_complete, set_task_complete: 1;
@@ -631,7 +631,7 @@ impl CqhciCqInterruptSignalEnableRegister {
 
 bitfield! {
     #[derive(Clone, Copy)]
-    pub struct CqhciCqInterruptCoalescingRegister(u32);
+    pub struct CqhciCqInterruptCoalescingRegister(pub u32);
     impl Debug;
     pub u8, ic_timeout_value, set_ic_timeout_value: 6, 0;
     pub bool, ic_timeout_value_write_enable, set_ic_timeout_value_write_enable: 7;
@@ -655,7 +655,7 @@ impl CqhciCqInterruptCoalescingRegister {
 
 bitfield! {
     #[derive(Clone, Copy)]
-    pub struct CqhciCqTaskErrorRegister(u32);
+    pub struct CqhciCqTaskErrorRegister(pub u32);
     impl Debug;
     pub u8, response_mode_error_command_index, set_response_mode_error_command_index: 5, 0;
     pub u8, response_mode_error_task_id, set_response_mode_error_task_id: 12, 8;
@@ -674,7 +674,7 @@ pub const SDHCI_ISGE_OFFSET: usize = 0x38;
 
 bitfield! {
     #[derive(Clone, Copy)]
-    pub struct SdhciInterruptStatusRegister(u32);
+    pub struct SdhciInterruptStatusRegister(pub u32);
     impl Debug;
     pub bool, tuning_error, set_tuning_error: 26;
     pub bool, adma_error, set_adma_error: 25;

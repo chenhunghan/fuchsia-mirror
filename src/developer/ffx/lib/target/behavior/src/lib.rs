@@ -14,7 +14,6 @@ use ffx_target::{
 };
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::OnceCell;
 
@@ -61,10 +60,21 @@ impl From<DirectConnectError> for ffx_command_error::Error {
     }
 }
 
+// TODO(b/540442481): Clean up naming (e.g. "Direct", "DirectConnector") in a
+// follow-up CL now that direct connection is the only mechanism.
 #[derive(Clone)]
 pub struct DirectConnector(Arc<DirectConnectorInner>);
 
+// Manually implement Debug because DefaultTargetResolver inside
+// DirectConnectorInner does not implement Debug.
+impl fmt::Debug for DirectConnector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DirectConnector").finish_non_exhaustive()
+    }
+}
+
 impl DirectConnector {
+    /// Creates a `DirectConnector` from a target resolution for test use.
     pub fn from_resolution_for_test(resolution: Resolution) -> Self {
         let context =
             EnvironmentContext::no_context(ExecutableKind::Test, Default::default(), None, true)
@@ -96,7 +106,7 @@ impl DirectConnector {
     // the nested async blocks can otherwise exceed the compiler's recursion limit.
     pub fn resolution(
         &self,
-    ) -> futures::future::LocalBoxFuture<'_, Result<Arc<Resolution>, TargetResolutionError>> {
+    ) -> ffx_futures::LocalBoxFuture<'_, Result<Arc<Resolution>, TargetResolutionError>> {
         Box::pin(async move {
             let mut resolution = self.0.resolution.lock().await;
 
@@ -175,23 +185,8 @@ impl DirectConnector {
             None
         }
     }
-}
 
-#[derive(Clone)]
-pub enum ConnectionBehavior {
-    Direct(DirectConnector),
-}
-
-impl ConnectionBehavior {
-    pub fn direct_connector(&self) -> Option<&DirectConnector> {
-        let ConnectionBehavior::Direct(dc) = self;
-        Some(dc)
-    }
-
-    pub fn fake_direct_connector(resolution: Resolution) -> Self {
-        ConnectionBehavior::Direct(DirectConnector::from_resolution_for_test(resolution))
-    }
-
+    /// Creates a `DirectConnector` backed by a fake `fdomain_client::Client` for test use.
     pub async fn fake_with_fdomain_client(client: std::sync::Arc<fdomain_client::Client>) -> Self {
         let socket_addr = std::net::SocketAddr::new(
             std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
@@ -208,7 +203,7 @@ impl ConnectionBehavior {
         let resolution = ffx_target::Resolution::from_target_handle(target_handle).unwrap();
         let conn = ffx_target::Connection::from_fdomain_client(client);
         resolution.set_connection_for_test(Some(conn)).await;
-        Self::fake_direct_connector(resolution)
+        Self::from_resolution_for_test(resolution)
     }
 }
 
@@ -232,22 +227,14 @@ pub async fn setup_fake_resolution(host_address: Option<String>) -> Resolution {
     ret
 }
 
-// Manually implement Debug here so we can skip implementing
-// Debug on the traits of the variant data.
-impl fmt::Debug for ConnectionBehavior {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let ConnectionBehavior::Direct(_) = self;
-        write!(f, "ConnectionBehavior(DirectConnector)")
-    }
-}
-
 #[derive(Clone, Default)]
 pub struct FhoTargetEnvironment(Arc<FhoTargetEnvironmentOuter>);
 
+// TODO(b/540442481): Clean up naming (e.g. "Direct", "DirectConnector") in a
+// follow-up CL now that direct connection is the only mechanism.
 #[derive(Default)]
 pub struct FhoTargetEnvironmentOuter {
     inner: FhoTargetEnvironmentInner,
-    want_direct: AtomicBool,
 }
 
 impl std::ops::Deref for FhoTargetEnvironment {
@@ -265,22 +252,11 @@ impl FhoTargetEnvironmentOuter {
         self.inner.maybe_wrap_connection_errors(err)
     }
 
-    /// Specify that we want a direct connection if we ever make that connection. Used when
-    /// an FfxTool specifies '#[direct]', but may not actually need a connection at all
-    pub fn set_direct(&self) {
-        self.want_direct.store(true, Ordering::Relaxed);
-    }
-
-    #[cfg(test)]
-    pub fn get_direct(&self) -> bool {
-        self.want_direct.load(Ordering::Acquire)
-    }
-
     /// Initialize a direct connection behavior.
     pub async fn init_connection_behavior(
         &self,
         context: &EnvironmentContext,
-    ) -> Result<Arc<ConnectionBehavior>> {
+    ) -> Result<DirectConnector> {
         self.init_direct_connection_behavior(context).await
     }
 
@@ -288,7 +264,7 @@ impl FhoTargetEnvironmentOuter {
     pub async fn init_connection_behavior_indef(
         &self,
         context: &EnvironmentContext,
-    ) -> Result<Arc<ConnectionBehavior>> {
+    ) -> Result<DirectConnector> {
         self.inner.init_direct_connection_behavior_indef(context).await
     }
 
@@ -296,15 +272,16 @@ impl FhoTargetEnvironmentOuter {
     pub async fn init_direct_connection_behavior(
         &self,
         context: &EnvironmentContext,
-    ) -> Result<Arc<ConnectionBehavior>> {
+    ) -> Result<DirectConnector> {
         self.inner.init_direct_connection_behavior(context).await
     }
 
-    pub fn set_behavior_for_test(&self, new_behavior: ConnectionBehavior) {
+    /// Sets the target connector for test use. Panics if behavior is already initialized.
+    pub fn set_behavior_for_test(&self, new_behavior: DirectConnector) {
         self.inner.set_behavior_for_test(new_behavior)
     }
 
-    pub fn behavior(&self) -> Result<Arc<ConnectionBehavior>> {
+    pub fn behavior(&self) -> Result<DirectConnector> {
         self.inner.behavior()
     }
 }
@@ -313,7 +290,7 @@ pub struct FhoTargetEnvironmentInner {
     /// Defines how to connect to a Fuchsia device. Multiple tasks can attempt
     /// to initialize it at the same time, so we gate the initialization using
     /// a OnceCell.
-    behavior: OnceCell<Arc<ConnectionBehavior>>,
+    behavior: OnceCell<DirectConnector>,
 }
 
 impl Default for FhoTargetEnvironmentInner {
@@ -323,17 +300,17 @@ impl Default for FhoTargetEnvironmentInner {
 }
 
 impl FhoTargetEnvironmentInner {
-    pub fn set_behavior_for_test(&self, new_behavior: ConnectionBehavior) {
-        self.behavior.set(Arc::new(new_behavior)).expect("OnceCell::set(behavior)")
+    /// Sets the target connector for test use. Panics if behavior is already initialized.
+    pub fn set_behavior_for_test(&self, new_behavior: DirectConnector) {
+        self.behavior.set(new_behavior).expect("OnceCell::set(behavior)")
     }
 
     /// This attempts to wrap errors around a potential failure in the underlying connection being
     /// used to facilitate FIDL protocols. This should NOT be used by developers, this is intended
     /// to be used outside of the scope of an ffx subtool (outside of the `main` function).
     fn maybe_wrap_connection_errors(&self, err: fho::Error) -> fho::Error {
-        if let Some(behavior) = self.behavior.get() {
-            let ConnectionBehavior::Direct(dc) = &**behavior;
-            if let Some(conn) = dc.get_connection_if_already_established() {
+        if let Some(connector) = self.behavior.get() {
+            if let Some(conn) = connector.get_connection_if_already_established() {
                 match err {
                     fho::Error::User(e) => {
                         return fho::Error::User(conn.wrap_connection_errors(e).into());
@@ -352,22 +329,20 @@ impl FhoTargetEnvironmentInner {
     pub async fn init_direct_connection_behavior_indef(
         &self,
         context: &EnvironmentContext,
-    ) -> Result<Arc<ConnectionBehavior>> {
-        let behavior = self
-            .initialize_behavior_with(|| async {
-                log::info!("Initializing indef ConnectionBehavior::DirectConnector");
-                let discovery =
-                    build_discovery_builder_common(context).with_timeout_msecs(None).build(context);
-                let resolver = DefaultTargetResolver::new(discovery);
-                let connector = DirectConnector(Arc::new(DirectConnectorInner {
-                    context: context.clone(),
-                    resolution: futures::lock::Mutex::new(None),
-                    resolver: futures::lock::Mutex::new(resolver),
-                }));
-                Ok(ConnectionBehavior::Direct(connector))
-            })
-            .await?;
-        Ok(behavior)
+    ) -> Result<DirectConnector> {
+        self.initialize_behavior_with(|| async {
+            log::info!("Initializing indef DirectConnector");
+            let discovery =
+                build_discovery_builder_common(context).with_timeout_msecs(None).build(context);
+            let resolver = DefaultTargetResolver::new(discovery);
+            let connector = DirectConnector(Arc::new(DirectConnectorInner {
+                context: context.clone(),
+                resolution: futures::lock::Mutex::new(None),
+                resolver: futures::lock::Mutex::new(resolver),
+            }));
+            Ok(connector)
+        })
+        .await
     }
 
     /// Explicitly create direct connection behavior. Note that we don't actually
@@ -377,9 +352,9 @@ impl FhoTargetEnvironmentInner {
     pub async fn init_direct_connection_behavior(
         &self,
         context: &EnvironmentContext,
-    ) -> Result<Arc<ConnectionBehavior>> {
+    ) -> Result<DirectConnector> {
         self.initialize_behavior_with(|| async {
-            log::info!("Initializing ConnectionBehavior::DirectConnector");
+            log::info!("Initializing DirectConnector");
             let discovery = build_discovery_from_config(context);
             let resolver = DefaultTargetResolver::new(discovery);
             let connector = DirectConnector(Arc::new(DirectConnectorInner {
@@ -387,29 +362,29 @@ impl FhoTargetEnvironmentInner {
                 resolution: futures::lock::Mutex::new(None),
                 resolver: futures::lock::Mutex::new(resolver),
             }));
-            Ok(ConnectionBehavior::Direct(connector))
+            Ok(connector)
         })
         .await
     }
 
-    pub fn behavior(&self) -> Result<Arc<ConnectionBehavior>> {
+    pub fn behavior(&self) -> Result<DirectConnector> {
         self.behavior.get().cloned().ok_or(bug!("Connection behavior is not initialized"))
     }
 
-    async fn initialize_behavior_with<F, Fut>(&self, creator: F) -> Result<Arc<ConnectionBehavior>>
+    async fn initialize_behavior_with<F, Fut>(&self, creator: F) -> Result<DirectConnector>
     where
         F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = Result<ConnectionBehavior>>,
+        Fut: std::future::Future<Output = Result<DirectConnector>>,
     {
         self.behavior
             .get_or_try_init(move || async move {
                 log::debug!("initializing behavior");
-                let res = creator().await.map(Arc::new);
+                let res = creator().await;
                 log::debug!("initializing behavior done");
                 res
             })
             .await
-            .map(Clone::clone)
+            .cloned()
     }
 }
 
@@ -431,6 +406,7 @@ mod tests {
     use super::*;
     use ffx_config::test_env;
     use std::str::FromStr;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[fuchsia::test]
     async fn test_connection_behavior_correct_in_strict() {
@@ -438,24 +414,24 @@ mod tests {
             serde_json::json!({"target": {"default" : "127.0.0.1"}}).as_object().unwrap().clone();
         let ctx = EnvironmentContext::strict(ExecutableKind::Test, runtime_args).unwrap();
         let target_env = FhoTargetEnvironment::default();
-        let behavior = target_env.init_connection_behavior(&ctx).await.unwrap();
-        let _ = behavior.direct_connector().unwrap().resolution();
+        let connector = target_env.init_connection_behavior(&ctx).await.unwrap();
+        assert!(connector.resolution().await.is_ok());
     }
 
     #[fuchsia::test]
     async fn test_connection_behavior_correct_in_non_strict() {
-        let env = test_env().build().unwrap();
+        let env = test_env().runtime_config("target.default", "127.0.0.1").build().unwrap();
         let target_env = FhoTargetEnvironment::default();
-        let behavior = target_env.init_connection_behavior(&env.context).await.unwrap();
-        let _ = behavior.direct_connector().unwrap().resolution();
+        let connector = target_env.init_connection_behavior(&env.context).await.unwrap();
+        assert!(connector.resolution().await.is_ok());
     }
 
     #[fuchsia::test]
     async fn test_direct_connection_behavior() {
         let env = test_env().runtime_config("target.default", "127.0.0.1").build().unwrap();
         let target_env = FhoTargetEnvironment::default();
-        let behavior = target_env.init_connection_behavior(&env.context).await.unwrap();
-        let _ = behavior.direct_connector().unwrap().resolution();
+        let connector = target_env.init_direct_connection_behavior(&env.context).await.unwrap();
+        assert!(connector.resolution().await.is_ok());
     }
 
     #[fuchsia::test]
@@ -468,23 +444,14 @@ mod tests {
     }
 
     #[fuchsia::test]
-    async fn test_connection_behavior_correct_with_set_direct() {
-        let env = test_env().runtime_config("target.default", "127.0.0.1").build().unwrap();
-        let target_env = FhoTargetEnvironment::default();
-        target_env.set_direct();
-        let behavior = target_env.init_connection_behavior(&env.context).await.unwrap();
-        let _ = behavior.direct_connector().unwrap().resolution();
-    }
-
-    #[fuchsia::test]
     async fn set_behavior_persists() {
         let env = test_env().build().unwrap();
         let fho_env = fho::FhoEnvironment::new_with_args(&env.context, &["some", "test"]);
         let target_env = target_interface(&fho_env);
-        assert_eq!(target_env.get_direct(), false);
-        target_env.set_direct();
+        assert!(target_env.behavior().is_err());
+        let _connector = target_env.init_connection_behavior(&env.context).await.unwrap();
         let target_env = target_interface(&fho_env);
-        assert_eq!(target_env.get_direct(), true);
+        assert!(target_env.behavior().is_ok());
     }
 
     fn write_test_cache(context: &EnvironmentContext, nodename: &str, ip: &str) {
@@ -796,11 +763,10 @@ mod tests {
         ffx_target::register_targets(&strict_ctx, &[target_v1]).unwrap();
 
         let target_env = FhoTargetEnvironment::default();
-        let behavior = target_env.init_connection_behavior(&strict_ctx).await.unwrap();
-        let dc = behavior.direct_connector().unwrap();
+        let connector = target_env.init_connection_behavior(&strict_ctx).await.unwrap();
 
         // 1. Initial resolution resolves to 127.0.0.1:8082 from $SHARED_DATA/targets.json.
-        let res1 = dc.resolution().await.unwrap();
+        let res1 = connector.resolution().await.unwrap();
         assert_eq!(res1.target_spec(), "127.0.0.1:8082");
 
         // 2. Simulate connection failure (non-fatal SSH exit status 1 from /bin/false).
@@ -815,8 +781,8 @@ mod tests {
         target_v2.addresses = vec![addr::TargetAddr::from_str("127.0.0.1:8083").unwrap()];
         ffx_target::register_targets(&strict_ctx, &[target_v2]).unwrap();
 
-        // 4. Subsequent `dc.resolution()` re-reads $SHARED_DATA/targets.json and resolves to 127.0.0.1:8083.
-        let res2 = dc.resolution().await.unwrap();
+        // 4. Subsequent `connector.resolution()` re-reads $SHARED_DATA/targets.json and resolves to 127.0.0.1:8083.
+        let res2 = connector.resolution().await.unwrap();
         assert_eq!(res2.target_spec(), "127.0.0.1:8083");
     }
 
@@ -890,14 +856,10 @@ mod tests {
     async fn test_init_direct_connection_behavior_with_indefinite_timeout() {
         let env = test_env().build().unwrap();
         let target_env = FhoTargetEnvironment::default();
-        let behavior =
+        let connector =
             target_env.0.inner.init_direct_connection_behavior_indef(&env.context).await.unwrap();
-        match &*behavior {
-            ConnectionBehavior::Direct(dc) => {
-                assert_eq!(dc.discovery_timeout().await, None);
-                dc.set_discovery_timeout(Some(Duration::from_millis(500))).await;
-                assert_eq!(dc.discovery_timeout().await, Some(Duration::from_millis(500)));
-            }
-        }
+        assert_eq!(connector.discovery_timeout().await, None);
+        connector.set_discovery_timeout(Some(Duration::from_millis(500))).await;
+        assert_eq!(connector.discovery_timeout().await, Some(Duration::from_millis(500)));
     }
 }

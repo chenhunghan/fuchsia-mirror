@@ -7,15 +7,15 @@
 #include <lib/syslog/cpp/macros.h>
 
 #include <algorithm>
+#include <cctype>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
-#include <re2/re2.h>
-
 #include "absl/strings/string_view.h"
+#include "re2/re2.h"
 #include "src/developer/forensics/utils/regexp.h"
 #include "src/lib/fxl/strings/string_printf.h"
 
@@ -381,7 +381,7 @@ std::string GetOuiPrefix(const std::string& mac) {
 std::string CanonicalizeMac(const std::string& original_mac) {
   std::string lowercased_mac(original_mac);
   std::transform(lowercased_mac.begin(), lowercased_mac.end(), lowercased_mac.begin(),
-                 [](char c) { return std::tolower(c); });
+                 [](unsigned char c) { return std::tolower(c); });
 
   std::string canonical_mac = "00:00:00:00:00:00";
   absl::string_view lowercased_mac_view(lowercased_mac);

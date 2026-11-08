@@ -310,7 +310,10 @@ fn test_protocol_unreachable(test_mark_reflection: bool) {
     for proto in 0u8..=255 {
         let v4proto = Ipv4Proto::from(proto);
         match v4proto {
-            Ipv4Proto::Other(_) | Ipv4Proto::Proto(IpProto::Reserved) => {
+            Ipv4Proto::Other(_)
+            | Ipv4Proto::Proto(IpProto::Ipv4Encap)
+            | Ipv4Proto::Proto(IpProto::Ipv6Encap)
+            | Ipv4Proto::Proto(IpProto::Reserved) => {
                 let mut counter_expects =
                     CounterExpectations::<Ipv4>::default_receive_deliver_send();
                 counter_expects.icmp_tx.dest_unreachable.dest_protocol_unreachable = 1;
@@ -333,6 +336,14 @@ fn test_protocol_unreachable(test_mark_reflection: bool) {
                     test_mark_reflection,
                 );
             }
+            // ESP is dropped without an ICMP error. Per [RFC 4303 Section
+            // 3.4.2]:
+            //
+            //   If no valid Security Association exists for this packet the
+            //   receiver MUST discard the packet; this is an auditable event.
+            //
+            // [RFC 4303 Section 3.4.2]: https://datatracker.ietf.org/doc/html/rfc4303#section-3.4.2
+            Ipv4Proto::Proto(IpProto::Esp) => {}
             Ipv4Proto::Icmp
             | Ipv4Proto::Igmp
             | Ipv4Proto::Proto(IpProto::Udp)
@@ -351,6 +362,9 @@ fn test_protocol_unreachable(test_mark_reflection: bool) {
             | Ipv6Proto::Proto(IpProto::Udp)
             | Ipv6Proto::Proto(IpProto::Tcp)
             | Ipv6Proto::Other(_)
+            | Ipv6Proto::Proto(IpProto::Ipv4Encap)
+            | Ipv6Proto::Proto(IpProto::Ipv6Encap)
+            | Ipv6Proto::Proto(IpProto::Esp)
             | Ipv6Proto::Proto(IpProto::Reserved) => {}
         }
     }

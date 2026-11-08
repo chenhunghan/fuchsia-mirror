@@ -19,29 +19,20 @@ namespace tun {
 namespace {
 template <typename F>
 void WithWireState(F fn, InternalState& state) {
-  fidl::WireTableFrame<fuchsia_net_tun::wire::InternalState> frame;
-  fuchsia_net_tun::wire::InternalState wire_state(
-      fidl::ObjectView<fidl::WireTableFrame<fuchsia_net_tun::wire::InternalState>>::FromExternal(
-          &frame));
-  wire_state.set_has_session(state.has_session);
+  fidl::Arena arena;
+  auto wire_state = fuchsia_net_tun::wire::InternalState::Builder(arena);
+  wire_state.has_session(state.has_session);
 
-  fidl::WireTableFrame<fuchsia_net_tun::wire::MacState> frame_mac;
-  fuchsia_net_tun::wire::MacState wire_mac(
-      fidl::ObjectView<fidl::WireTableFrame<fuchsia_net_tun::wire::MacState>>::FromExternal(
-          &frame_mac));
-  fidl::VectorView<fuchsia_net::wire::MacAddress> multicast_filters;
   if (state.mac.has_value()) {
     MacState& mac = state.mac.value();
-    wire_mac.set_mode(mac.mode);
-    multicast_filters =
-        fidl::VectorView<fuchsia_net::wire::MacAddress>::FromExternal(mac.multicast_filters);
-    wire_mac.set_multicast_filters(
-        fidl::ObjectView<fidl::VectorView<fuchsia_net::wire::MacAddress>>::FromExternal(
-            &multicast_filters));
-    wire_state.set_mac(fidl::ObjectView<fuchsia_net_tun::wire::MacState>::FromExternal(&wire_mac));
+    auto wire_mac = fuchsia_net_tun::wire::MacState::Builder(arena);
+    wire_mac.mode(mac.mode);
+    wire_mac.multicast_filters(
+        fidl::VectorView<fuchsia_net::wire::MacAddress>::FromExternal(mac.multicast_filters));
+    wire_state.mac(wire_mac.Build());
   }
 
-  fn(std::move(wire_state));
+  fn(wire_state.Build());
 }
 }  // namespace
 
@@ -176,18 +167,16 @@ void TunDevice::RunReadFrame() {
         FX_LOGST(WARNING, "tun") << "Ignoring empty tx buffer";
         return ZX_OK;
       }
-      fidl::WireTableFrame<fuchsia_net_tun::wire::Frame> fidl_frame;
-      fuchsia_net_tun::wire::Frame frame(
-          fidl::ObjectView<fidl::WireTableFrame<fuchsia_net_tun::wire::Frame>>::FromExternal(
-              &fidl_frame));
-      fidl::VectorView data_view = fidl::VectorView<uint8_t>::FromExternal(data);
-      frame.set_data(fidl::ObjectView<fidl::VectorView<uint8_t>>::FromExternal(&data_view));
-      frame.set_frame_type(buff.frame_type());
-      frame.set_port(port_id);
+      fidl::Arena arena;
+      auto builder = fuchsia_net_tun::wire::Frame::Builder(arena);
+      builder.data(fidl::VectorView<uint8_t>::FromExternal(data));
+      builder.frame_type(buff.frame_type());
+      builder.port(port_id);
       std::optional meta = buff.TakeMetadata();
       if (meta.has_value()) {
-        frame.set_meta(meta.value());
+        builder.meta(meta.value());
       }
+      fuchsia_net_tun::wire::Frame frame = builder.Build();
       pending_read_frame_.front().ReplySuccess(frame);
       pending_read_frame_.pop();
       if (avail == 0) {
@@ -313,7 +302,7 @@ void TunDevice::GetSignals(GetSignalsCompleter::Sync& completer) {
 
 void TunDevice::AddPort(AddPortRequestView request, AddPortCompleter::Sync& _completer) {
   zx_status_t status = [&request, this]() {
-    std::optional maybe_port_config = DevicePortConfig::Create(request->config);
+    std::optional maybe_port_config = DevicePortConfig::Create(std::move(request->config));
 
     if (!maybe_port_config.has_value()) {
       return ZX_ERR_INVALID_ARGS;
@@ -325,7 +314,7 @@ void TunDevice::AddPort(AddPortRequestView request, AddPortCompleter::Sync& _com
       return ZX_ERR_ALREADY_EXISTS;
     }
 
-    zx::result maybe_port = Port::Create(this, port_config);
+    zx::result maybe_port = Port::Create(this, std::move(port_config));
     if (maybe_port.is_error()) {
       return maybe_port.status_value();
     }
@@ -372,8 +361,8 @@ void TunDevice::RequestErrorUnbind() {
   }
 }
 
-zx::result<std::unique_ptr<TunDevice::Port>> TunDevice::Port::Create(
-    TunDevice* parent, const DevicePortConfig& config) {
+zx::result<std::unique_ptr<TunDevice::Port>> TunDevice::Port::Create(TunDevice* parent,
+                                                                     DevicePortConfig&& config) {
   std::unique_ptr<Port> port(new Port(parent));
   std::unique_ptr<MacAdapter> mac;
   if (config.mac.has_value()) {
@@ -387,7 +376,8 @@ zx::result<std::unique_ptr<TunDevice::Port>> TunDevice::Port::Create(
   }
   port->adapter_ = std::make_unique<PortAdapter>(
       port.get(), config, std::move(mac),
-      fdf::UnownedUnsynchronizedDispatcher(parent->device_->netdevice_dispatcher()));
+      fdf::UnownedUnsynchronizedDispatcher(parent->device_->netdevice_dispatcher()),
+      std::move(config.power_dependency_token));
   zx_status_t status = parent->device_->AddPort(port->adapter());
   if (status != ZX_OK) {
     FX_PLOGST(ERROR, "tun", status) << "Failed to add port";

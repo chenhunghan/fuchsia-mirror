@@ -51,6 +51,8 @@ import("//build/sdk/sdk_atom.gni")
 #   non_sdk_deps (optional)
 #     List of dependencies that should not be reflected in SDKs.
 #     Mostly useful for code generation.
+#     Bazel equivalent: `non_idk_implementation_deps` (added to the IDK atom's
+#     build dependencies in Bazel and emitted by bazel2gn as `non_sdk_deps`).
 #
 #   non_sdk_public_deps (optional)
 #     List of dependencies that will go into `public_deps` field of `source_set`
@@ -160,17 +162,30 @@ template("sdk_source_set") {
           invoker.category == "partner",
           "Create a separate allowlist when adding support for other categories.")
       deps += [ "//build/sdk:partner_idk_source_sets_allowlist" ]
+      all_allowlist_entries_group = "//build/sdk:partner_idk_source_sets"
     } else {
       assert(
           invoker.category == "partner",
           "Create a separate allowlist when adding support for other categories.")
       deps += [ "//build/sdk:partner_idk_unstable_source_sets_allowlist" ]
+      all_allowlist_entries_group =
+          "//build/sdk:partner_idk_unstable_source_sets"
     }
 
     configs += [ "//build/config:sdk_extra_warnings" ]
 
-    if (defined(visibility) && generate_plasa_artifacts) {
-      visibility += [ ":${main_target_name}_cc_stub" ]
+    if (defined(visibility)) {
+      if (defined(all_allowlist_entries_group)) {
+        # All targets in the allowlist must be visible to the target that
+        # depends on that list.
+        visibility += [ all_allowlist_entries_group ]
+      }
+
+      if (generate_plasa_artifacts) {
+        visibility += [ ":${main_target_name}_cc_stub" ]
+      }
+    } else if (defined(all_allowlist_entries_group)) {
+      not_needed([ "all_allowlist_entries_group" ])
     }
   }
 

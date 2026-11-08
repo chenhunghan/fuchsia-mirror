@@ -21,14 +21,18 @@ if (is_host) {
     # `ffx driver register`, so the subtool has to ship with the test.
     test_data_deps =
         [ "//src/developer/ffx/tools/driver:ffx_driver_tool_test_data" ]
-
-    # This test drives the DUT's USB peripheral from the host, so it can only
-    # run on Iris devices hosted by a Fuchsia cell.
-    environments = [ iris_cell_env ]
+    environments = [ iris_env ]
     params = {
       stress_duration_sec = 120
     }
     timeout_secs = 1800
+    honeydew_config = {
+      transports = {
+        adb = {
+          attempts = 1
+        }
+      }
+    }
   }
 }
 

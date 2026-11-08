@@ -1,0 +1,37 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Builds a dependency graph from deserialized `gn desc` output.
+rustc_library(
+    name = "gn_graph",
+    srcs = ["src/lib.rs"],
+    # This needs to be compiled with optimizations enabled to be at all
+    # performant when deserializing the 100s of MBs of `gn desc` json output.
+    build_flags = ["//build/config:optimize_speed"],
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//tools/auto_owners:__pkg__",
+        "//tools/gn_desc:__subpackages__",
+    ],
+    deps = [
+        "//third_party/rust_crates/vendor:petgraph",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//tools/gn_desc/gn_json",
+    ],
+)
+
+host_rustc_test(
+    name = "gn_graph_tests",
+    crate = ":gn_graph",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//tools/gn_desc:__pkg__"],
+)

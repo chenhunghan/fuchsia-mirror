@@ -26,6 +26,7 @@ constexpr size_t kShortTransferLength = 800;
 constexpr size_t kFakeTrb = 0x3924ff0913;
 constexpr size_t kFakeTrbVirt = 0x8411487132;
 constexpr auto kPortNo = 5;
+constexpr auto kSecondPortNo = 6;
 
 enum class CommandType {
   EnumerateDevice,
@@ -62,13 +63,40 @@ class EventRingHarness : public ::testing::Test {
     });
 
     // Port/per-slot registers
-    (*region_)[PORTSC::Get(0, kPortNo).addr()].SetReadCallback(
-        [=]() { return port_sc_.reg_value(); });
+    (*region_)[PORTSC::Get(0, kPortNo).addr()].SetReadCallback([=]() {
+      port_sc_read_count_++;
+      if (port_sc_read_hook_) {
+        (*port_sc_read_hook_)();
+      }
+      return port_sc_.reg_value();
+    });
     (*region_)[PORTSC::Get(0, kPortNo).addr()].SetWriteCallback([=](uint64_t value) {
+      port_sc_write_count_++;
       PORTSC sc;
       sc.set_reg_value(static_cast<uint32_t>(value));
       if (sc.PR()) {
         port_sc_.set_PR(true);
+      }
+      if (sc.CSC()) {
+        port_sc_.set_CSC(false);
+      }
+      if (sc.PRC()) {
+        port_sc_.set_PRC(false);
+      }
+      if (port_sc_write_hook_) {
+        (*port_sc_write_hook_)(sc);
+      }
+    });
+    (*region_)[PORTSC::Get(0, kSecondPortNo).addr()].SetReadCallback(
+        [=]() { return second_port_sc_.reg_value(); });
+    (*region_)[PORTSC::Get(0, kSecondPortNo).addr()].SetWriteCallback([=](uint64_t value) {
+      PORTSC sc;
+      sc.set_reg_value(static_cast<uint32_t>(value));
+      if (sc.CSC()) {
+        second_port_sc_.set_CSC(false);
+      }
+      if (sc.PRC()) {
+        second_port_sc_.set_PRC(false);
       }
     });
     ASSERT_TRUE(driver_test()
@@ -120,12 +148,12 @@ class EventRingHarness : public ::testing::Test {
 
   bool PortResetPending() { return port_sc_.PR(); }
 
-  void InsertPortStatusChangeEvent() {
+  void InsertPortStatusChangeEvent(uint8_t port_id = kPortNo) {
     TRB trb;
     trb.ptr = 0;
     Control::FromTRB(&trb).set_Type(Control::PortStatusChangeEvent).ToTrb(&trb);
     auto evt = static_cast<PortStatusChangeEvent*>(&trb);
-    evt->set_PortID(kPortNo);
+    evt->set_PortID(port_id);
     auto command_completion = static_cast<CommandCompletionEvent*>(&trb);
     command_completion->set_CompletionCode(CommandCompletionEvent::Success);
     AddTRB(trb);
@@ -236,12 +264,23 @@ class EventRingHarness : public ::testing::Test {
 
   fdf_testing::ForegroundDriverTest<EmptyTestConfig>& driver_test() { return driver_test_; }
   PORTSC& port_sc() { return port_sc_; }
+  PORTSC& second_port_sc() { return second_port_sc_; }
+  size_t port_sc_write_count() const { return port_sc_write_count_; }
+  size_t port_sc_read_count() const { return port_sc_read_count_; }
+  void SetPortScWriteHook(fit::function<void(const PORTSC&)> hook) {
+    port_sc_write_hook_ = std::move(hook);
+  }
+  void SetPortScReadHook(fit::function<void()> hook) { port_sc_read_hook_ = std::move(hook); }
   EventRing* event_ring() { return ring_; }
 
  private:
   fdf_testing::ForegroundDriverTest<EmptyTestConfig> driver_test_;
   std::optional<Request> pending_req_;
   std::optional<fit::function<void(usb_xhci::TRB*, size_t, usb_xhci::TRB**)>> short_packet_handler_;
+  std::optional<fit::function<void(const PORTSC&)>> port_sc_write_hook_;
+  std::optional<fit::function<void()>> port_sc_read_hook_;
+  size_t port_sc_write_count_ = 0;
+  size_t port_sc_read_count_ = 0;
   using AllocatorTraits = fbl::InstancedSlabAllocatorTraits<std::unique_ptr<TRBContext>, 4096U>;
   using AllocatorType = fbl::SlabAllocator<AllocatorTraits>;
   AllocatorType trb_context_allocator_;
@@ -251,6 +290,7 @@ class EventRingHarness : public ::testing::Test {
   std::optional<fdf::MmioBuffer> buffer_;
   EventRing* ring_;
   PORTSC port_sc_;
+  PORTSC second_port_sc_;
   CommandRing command_ring_;
   uint64_t dcbaa_[128];
   uint64_t erdp_;
@@ -636,6 +676,366 @@ TEST_F(EventRingHarness, ClearPendingPortStatusChangesAbortsWait) {
   ASSERT_FALSE(HasCommand());
   event_ring()->ClearPendingPortStatusChanges();
   EXPECT_FALSE(driver_test().driver()->GetPortState(kPortNo).wait_for_port_status_change_);
+}
+
+TEST_F(EventRingHarness, PortStatusChangeEventInvalidPortIdIgnored) {
+  ConnectDevice();
+  // PortID 0 (underflow) and PortID > GetPortCount() (32 in test harness) should be ignored
+  // without crashing or scheduling enumeration.
+  InsertPortStatusChangeEvent(0);
+  InsertPortStatusChangeEvent(33);
+  InsertPortStatusChangeEvent(255);
+  InsertPortStatusChangeEvent(kPortNo);
+  Interrupt();
+  EXPECT_TRUE(PortResetPending());
+  EXPECT_FALSE(HasCommand());
+}
+
+TEST_F(EventRingHarness, TransferEventInvalidSlotIdIgnored) {
+  InitSlot(1);
+  // SlotID 0 (underflow) and SlotID > max_slots_ (32 in test harness) should be ignored
+  // without out-of-bounds access or crashing.
+  for (uint8_t invalid_slot_id : {uint8_t{0}, uint8_t{33}, uint8_t{200}, uint8_t{255}}) {
+    TRB trb;
+    trb.ptr = kFakeTrb;
+    Control::FromTRB(&trb).set_Type(Control::TransferEvent).ToTrb(&trb);
+    auto* evt = static_cast<TransferEvent*>(&trb);
+    evt->set_SlotID(invalid_slot_id);
+    evt->set_EndpointID(2);
+    evt->set_CompletionCode(CommandCompletionEvent::Success);
+    evt->set_TransferLength(kFinalTransferLength);
+    AddTRB(trb);
+  }
+  Interrupt();
+  EXPECT_FALSE(HasCommand());
+}
+
+TEST_F(EventRingHarness, Ring0BringupUsb2PortResetWithEarlyCscEvent) {
+  port_sc()
+      .set_CCS(true)
+      .set_PED(false)
+      .set_PR(false)
+      .set_PLS(PORTSC::Polling)
+      .set_PortSpeed(1)
+      .set_CSC(true);
+  driver_test().driver()->SignalBringupForTesting();
+  ASSERT_OK(Ring0Bringup());
+  ASSERT_TRUE(PortResetPending());
+  EXPECT_FALSE(port_sc().CSC());
+  EXPECT_EQ(port_sc_write_count(), 1UL);
+  ASSERT_FALSE(HasCommand());
+  EXPECT_TRUE(driver_test().driver()->GetPortState(kPortNo).wait_for_port_status_change_);
+
+  // An already-queued CSC=1 PortStatusChangeEvent TRB arrives while the USB 2.0 port reset is
+  // still in progress (PED=0, PR=1). Even if the controller transiently reports PLS=U0 while
+  // PR=1, it must not enumerate prematurely or drop the port status change wait.
+  port_sc().set_PLS(PORTSC::U0);
+  InsertPortStatusChangeEvent();
+  Interrupt();
+  ASSERT_FALSE(HasCommand());
+  EXPECT_TRUE(driver_test().driver()->GetPortState(kPortNo).wait_for_port_status_change_);
+
+  // Complete the USB 2.0 port reset (PR=0, PED=1, PLS=U0, PRC=1).
+  port_sc().set_PR(false).set_PED(true).set_PLS(PORTSC::U0).set_PRC(true);
+  InsertPortStatusChangeEvent();
+  Interrupt();
+  EXPECT_FALSE(port_sc().PRC());
+  ASSERT_TRUE(HasCommand());
+  auto cmd = GetCommand();
+  ASSERT_EQ(cmd->port, kPortNo);
+  ASSERT_EQ(cmd->type, CommandType::EnumerateDevice);
+  ASSERT_FALSE(cmd->hub);
+}
+
+TEST_F(EventRingHarness, Ring0BringupUsb2PortResetCompletesViaPollingWithoutEventTrb) {
+  port_sc()
+      .set_CCS(true)
+      .set_PED(false)
+      .set_PR(false)
+      .set_PLS(PORTSC::Polling)
+      .set_PortSpeed(3)
+      .set_CSC(true);
+  SetPortScWriteHook([this](const PORTSC& written) {
+    if (written.PR()) {
+      port_sc().set_PR(false).set_PED(true).set_PLS(PORTSC::U0).set_PRC(true);
+    }
+  });
+  driver_test().driver()->SignalBringupForTesting();
+  ASSERT_OK(Ring0Bringup());
+  EXPECT_FALSE(port_sc().CSC());
+  EXPECT_FALSE(port_sc().PRC());
+  ASSERT_TRUE(HasCommand());
+  auto cmd = GetCommand();
+  ASSERT_EQ(cmd->port, kPortNo);
+  ASSERT_EQ(cmd->type, CommandType::EnumerateDevice);
+  ASSERT_FALSE(cmd->hub);
+}
+
+TEST_F(EventRingHarness, Ring0BringupUsb2PortResetCompletesAfterMultiplePolls) {
+  port_sc()
+      .set_CCS(true)
+      .set_PED(false)
+      .set_PR(false)
+      .set_PLS(PORTSC::Polling)
+      .set_PortSpeed(3)
+      .set_CSC(true);
+  // The port reset only completes after several PORTSC polls, and the controller never emits a
+  // Port Status Change Event TRB for it.
+  constexpr size_t kReadsBeforeResetCompletes = 10;
+  SetPortScReadHook([this]() {
+    if (port_sc_read_count() == kReadsBeforeResetCompletes) {
+      port_sc().set_PR(false).set_PED(true).set_PLS(PORTSC::U0).set_PRC(true);
+    }
+  });
+  driver_test().driver()->SignalBringupForTesting();
+  ASSERT_OK(Ring0Bringup());
+  EXPECT_GE(port_sc_read_count(), kReadsBeforeResetCompletes);
+  EXPECT_FALSE(port_sc().PRC());
+  ASSERT_TRUE(HasCommand());
+  auto cmd = GetCommand();
+  ASSERT_EQ(cmd->port, kPortNo);
+  ASSERT_EQ(cmd->type, CommandType::EnumerateDevice);
+  ASSERT_FALSE(cmd->hub);
+}
+
+TEST_F(EventRingHarness, Ring0BringupUsb2PortStatusChangePollIsBounded) {
+  port_sc()
+      .set_CCS(true)
+      .set_PED(false)
+      .set_PR(false)
+      .set_PLS(PORTSC::Polling)
+      .set_PortSpeed(3)
+      .set_CSC(true);
+  driver_test().driver()->SignalBringupForTesting();
+  ASSERT_OK(Ring0Bringup());
+  // The port reset never completes: polling stops after a bounded number of attempts (the fake
+  // Timeout() resolves immediately) while the wait stays armed for a Port Status Change Event TRB.
+  ASSERT_TRUE(PortResetPending());
+  ASSERT_FALSE(HasCommand());
+  EXPECT_TRUE(driver_test().driver()->GetPortState(kPortNo).wait_for_port_status_change_);
+  EXPECT_LT(port_sc_read_count(), 200UL);
+
+  port_sc().set_PR(false).set_PED(true).set_PLS(PORTSC::U0).set_PRC(true);
+  InsertPortStatusChangeEvent();
+  Interrupt();
+  ASSERT_TRUE(HasCommand());
+  auto cmd = GetCommand();
+  ASSERT_EQ(cmd->port, kPortNo);
+  ASSERT_EQ(cmd->type, CommandType::EnumerateDevice);
+}
+
+TEST_F(EventRingHarness, Ring0BringupUsb2FailedPortResetDoesNotKeepWaiting) {
+  port_sc()
+      .set_CCS(true)
+      .set_PED(false)
+      .set_PR(false)
+      .set_PLS(PORTSC::Polling)
+      .set_PortSpeed(3)
+      .set_CSC(true);
+  // The port reset completes (PR=0, PRC=1) but the port stays disabled (PED=0).
+  SetPortScWriteHook([this](const PORTSC& written) {
+    if (written.PR()) {
+      port_sc().set_PR(false).set_PED(false).set_PRC(true);
+    }
+  });
+  driver_test().driver()->SignalBringupForTesting();
+  ASSERT_OK(Ring0Bringup());
+  EXPECT_FALSE(port_sc().PRC());
+  EXPECT_FALSE(HasCommand());
+  // No wait may stay armed for a reset that is no longer in progress, otherwise the enumeration
+  // queue would be blocked for every port.
+  EXPECT_FALSE(driver_test().driver()->GetPortState(kPortNo).wait_for_port_status_change_);
+
+  // A later port status change on another port is still processed.
+  second_port_sc().set_CCS(true).set_PED(true).set_PR(false).set_PLS(PORTSC::U0).set_PortSpeed(4);
+  InsertPortStatusChangeEvent(kSecondPortNo);
+  Interrupt();
+  ASSERT_TRUE(HasCommand());
+  auto cmd = GetCommand();
+  ASSERT_EQ(cmd->port, kSecondPortNo);
+  ASSERT_EQ(cmd->type, CommandType::EnumerateDevice);
+}
+
+TEST_F(EventRingHarness, Ring0BringupContinuesScanAfterIoNotPresent) {
+  // Two SuperSpeed devices already have their links up when Ring0Bringup() runs.
+  port_sc().set_CCS(true).set_PED(true).set_PR(false).set_PLS(PORTSC::U0).set_PortSpeed(4);
+  second_port_sc().set_CCS(true).set_PED(true).set_PR(false).set_PLS(PORTSC::U0).set_PortSpeed(4);
+  driver_test().driver()->SignalBringupForTesting();
+  ASSERT_OK(Ring0Bringup());
+  ASSERT_TRUE(HasCommand());
+  auto cmd = GetCommand();
+  ASSERT_EQ(cmd->port, kPortNo);
+  ASSERT_EQ(cmd->type, CommandType::EnumerateDevice);
+  ASSERT_FALSE(HasCommand());
+
+  // The first device is unplugged during enumeration. The scan must still reach the second port.
+  cmd->completer.complete_error(ZX_ERR_IO_NOT_PRESENT);
+  event_ring()->RunUntilIdle();
+  ASSERT_TRUE(HasCommand());
+  cmd = GetCommand();
+  ASSERT_EQ(cmd->port, kSecondPortNo);
+  ASSERT_EQ(cmd->type, CommandType::EnumerateDevice);
+}
+
+TEST_F(EventRingHarness, Ring0BringupStopsScanWhenControllerNotRunning) {
+  // Two SuperSpeed devices already have their links up when Ring0Bringup() runs.
+  port_sc().set_CCS(true).set_PED(true).set_PR(false).set_PLS(PORTSC::U0).set_PortSpeed(4);
+  second_port_sc().set_CCS(true).set_PED(true).set_PR(false).set_PLS(PORTSC::U0).set_PortSpeed(4);
+  driver_test().driver()->SignalBringupForTesting();
+  ASSERT_OK(Ring0Bringup());
+  ASSERT_TRUE(HasCommand());
+  auto cmd = GetCommand();
+  ASSERT_EQ(cmd->port, kPortNo);
+  ASSERT_EQ(cmd->type, CommandType::EnumerateDevice);
+  ASSERT_FALSE(HasCommand());
+
+  // Controller teardown starts while the first port's enumeration is in flight and aborts the
+  // pending command with ZX_ERR_IO_NOT_PRESENT. The scan must stop instead of starting enumeration
+  // on later ports.
+  driver_test().driver()->SetRunningForTesting(false);
+  cmd->completer.complete_error(ZX_ERR_IO_NOT_PRESENT);
+  event_ring()->RunUntilIdle();
+  EXPECT_FALSE(HasCommand());
+}
+
+TEST_F(EventRingHarness, Ring0BringupStopsScanAfterSuccessWhenControllerNotRunning) {
+  // Two SuperSpeed devices already have their links up when Ring0Bringup() runs.
+  port_sc().set_CCS(true).set_PED(true).set_PR(false).set_PLS(PORTSC::U0).set_PortSpeed(4);
+  second_port_sc().set_CCS(true).set_PED(true).set_PR(false).set_PLS(PORTSC::U0).set_PortSpeed(4);
+  driver_test().driver()->SignalBringupForTesting();
+  ASSERT_OK(Ring0Bringup());
+  ASSERT_TRUE(HasCommand());
+  auto cmd = GetCommand();
+  ASSERT_EQ(cmd->port, kPortNo);
+  ASSERT_EQ(cmd->type, CommandType::EnumerateDevice);
+  ASSERT_FALSE(HasCommand());
+
+  // Even if the in-flight port operation completes with ZX_OK just as the controller stops, the
+  // scan must halt instead of advancing to later ports.
+  driver_test().driver()->SetRunningForTesting(false);
+  cmd->completer.complete_ok(nullptr);
+  event_ring()->RunUntilIdle();
+  EXPECT_FALSE(HasCommand());
+}
+
+class StallEventHandler : public fidl::SyncEventHandler<fuchsia_hardware_usb_endpoint::Endpoint> {
+ public:
+  void OnCompletion(
+      fidl::Event<fuchsia_hardware_usb_endpoint::Endpoint::OnCompletion>& event) override {
+    completions = std::move(event.completion());
+  }
+
+  std::vector<fuchsia_hardware_usb_endpoint::Completion> completions;
+};
+
+TEST_F(EventRingHarness, FidlRequestStallCompletesWithIoRefused) {
+  InitSlot(1);
+  auto state = driver_test().driver()->GetDeviceState()[0];
+  ASSERT_TRUE(state);
+
+  auto endpoints = fidl::Endpoints<fuchsia_hardware_usb_endpoint::Endpoint>::Create();
+  TRB* expected_trb = nullptr;
+  {
+    fbl::AutoLock _(&state->transaction_lock());
+    state->GetEndpoint(0).Connect(fdf::Dispatcher::GetCurrent()->async_dispatcher(),
+                                  std::move(endpoints.server), state);
+    expected_trb = state->GetEndpoint(0).transfer_ring().PhysToVirt(kFakeTrb);
+  }
+
+  TRB* start = trb();
+  TRB stall_trb{};
+  stall_trb.ptr = kFakeTrb;
+  Control::FromTRB(&stall_trb).set_Type(Control::TransferEvent).ToTrb(&stall_trb);
+  auto* evt = static_cast<TransferEvent*>(&stall_trb);
+  evt->set_SlotID(1);
+  evt->set_EndpointID(2);
+  evt->set_CompletionCode(CommandCompletionEvent::StallError);
+  evt->set_TransferLength(0);
+  AddTRB(stall_trb);
+
+  usb::FidlRequest fidl_req(usb::EndpointType::BULK);
+  fidl_req->defer_completion() = false;
+
+  auto ctx = AllocateContext();
+  ctx->trb = start;
+  ctx->request.emplace(std::move(fidl_req));
+  AddContext(std::move(ctx));
+  SetCompletion(expected_trb);
+
+  Interrupt();
+
+  StallEventHandler handler;
+  ASSERT_TRUE(handler.HandleOneEvent(endpoints.client).ok());
+  ASSERT_EQ(handler.completions.size(), 1u);
+  EXPECT_EQ(handler.completions[0].status(), ZX_ERR_IO_REFUSED);
+  EXPECT_EQ(handler.completions[0].transfer_size(), 0u);
+  EXPECT_FALSE(HasCommand());
+  {
+    fbl::AutoLock _(&state->transaction_lock());
+    EXPECT_TRUE(state->GetEndpoint(0).transfer_ring().stalled());
+  }
+
+  endpoints.client.reset();
+  driver_test().runtime().RunUntilIdle();
+}
+
+TEST_F(EventRingHarness, FidlControlRequestStallCompletesWithIoRefused) {
+  InitSlot(1);
+  auto state = driver_test().driver()->GetDeviceState()[0];
+  ASSERT_TRUE(state);
+
+  auto endpoints = fidl::Endpoints<fuchsia_hardware_usb_endpoint::Endpoint>::Create();
+  TRB* expected_trb = nullptr;
+  {
+    fbl::AutoLock _(&state->transaction_lock());
+    ASSERT_OK(state->GetEndpoint().Init(nullptr, nullptr));
+    state->GetEndpoint().Connect(fdf::Dispatcher::GetCurrent()->async_dispatcher(),
+                                 std::move(endpoints.server), state);
+    expected_trb = state->GetEndpoint().transfer_ring().PhysToVirt(kFakeTrb);
+  }
+
+  TRB* start = trb();
+  TRB stall_trb{};
+  stall_trb.ptr = kFakeTrb;
+  Control::FromTRB(&stall_trb).set_Type(Control::TransferEvent).ToTrb(&stall_trb);
+  auto* evt = static_cast<TransferEvent*>(&stall_trb);
+  evt->set_SlotID(1);
+  evt->set_EndpointID(1);
+  evt->set_CompletionCode(CommandCompletionEvent::StallError);
+  evt->set_TransferLength(0);
+  AddTRB(stall_trb);
+
+  usb::FidlRequest fidl_req(usb::EndpointType::CONTROL);
+  fidl_req->defer_completion() = false;
+  fidl_req->information()->control()->setup(
+      fdescriptor::UsbSetup()
+          .bm_request_type(kStandardDeviceIn)
+          .b_request(fidl::ToUnderlying(fdescriptor::StandardRequest::kGetDescriptor))
+          .w_value(usb_descriptor_w_value(fdescriptor::DescriptorType::kDeviceQualifier))
+          .w_index(0)
+          .w_length(sizeof(usb_device_qualifier_descriptor_t)));
+
+  auto ctx = AllocateContext();
+  ctx->trb = start;
+  ctx->request.emplace(std::move(fidl_req));
+  AddContext(std::move(ctx));
+  SetCompletion(expected_trb);
+
+  Interrupt();
+
+  StallEventHandler handler;
+  ASSERT_TRUE(handler.HandleOneEvent(endpoints.client).ok());
+  ASSERT_EQ(handler.completions.size(), 1u);
+  EXPECT_EQ(handler.completions[0].status(), ZX_ERR_IO_REFUSED);
+  EXPECT_EQ(handler.completions[0].transfer_size(), 0u);
+  EXPECT_FALSE(HasCommand());
+  {
+    fbl::AutoLock _(&state->transaction_lock());
+    EXPECT_TRUE(state->GetEndpoint().transfer_ring().stalled());
+  }
+
+  endpoints.client.reset();
+  driver_test().runtime().RunUntilIdle();
 }
 
 }  // namespace

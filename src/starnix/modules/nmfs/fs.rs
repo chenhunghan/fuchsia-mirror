@@ -58,6 +58,10 @@ pub(crate) enum TransportType {
     Vpn = 4,
     WifiAware = 5,
     Lowpan = 6,
+    Test = 7,
+    Usb = 8,
+    Thread = 9,
+    Satellite = 10,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize_repr, PartialEq, Serialize_repr)]
@@ -473,7 +477,13 @@ fn maybe_network_type_from_transport_type(
         TransportType::Wifi => Some(fnp_properties::NetworkType::Wifi),
         TransportType::Bluetooth => Some(fnp_properties::NetworkType::Bluetooth),
         TransportType::Cellular => Some(fnp_properties::NetworkType::Cellular),
-        TransportType::Vpn | TransportType::WifiAware | TransportType::Lowpan => {
+        TransportType::Vpn
+        | TransportType::WifiAware
+        | TransportType::Lowpan
+        | TransportType::Test
+        | TransportType::Usb
+        | TransportType::Thread
+        | TransportType::Satellite => {
             log_warn!("Known NetworkType {value:?} is not currently supported");
             None
         }
@@ -614,6 +624,10 @@ mod tests {
                     TransportType::Vpn,
                     TransportType::WifiAware,
                     TransportType::Lowpan,
+                    TransportType::Test,
+                    TransportType::Usb,
+                    TransportType::Thread,
+                    TransportType::Satellite,
                 ],
                 capabilities: vec![
                     NetworkCapability::Trusted,
@@ -669,6 +683,48 @@ mod tests {
         assert_eq!(expected, deserialized);
     }
 
+    #[::fuchsia::test]
+    fn network_message_serde_usb_and_extended_transports() {
+        let json = r#"{
+            "netid": 100,
+            "mark": 65536,
+            "handle": 432932703437,
+            "dnsv4": [],
+            "dnsv6": [],
+            "version": "V2",
+            "transports": [7, 8, 9, 10],
+            "capabilities": [13, 14, 15],
+            "name": "usb0",
+            "addrv4": true,
+            "addrv6": true,
+            "defaultv4": false,
+            "defaultv6": false
+        }"#;
+
+        let deserialized: NetworkMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            deserialized.versioned_properties,
+            VersionedProperties::V2 {
+                transports: vec![
+                    TransportType::Test,
+                    TransportType::Usb,
+                    TransportType::Thread,
+                    TransportType::Satellite,
+                ],
+                capabilities: vec![
+                    NetworkCapability::NotRestricted,
+                    NetworkCapability::Trusted,
+                    NetworkCapability::NotVpn,
+                ],
+                name: "usb0".to_string(),
+                addrv4: true,
+                addrv6: true,
+                defaultv4: false,
+                defaultv6: false,
+            }
+        );
+    }
+
     // Ensure that a provided NetworkMessage can be serialized and
     // deserialized into the original form.
     fn serde_helper(network: NetworkMessage) {
@@ -696,9 +752,19 @@ mod tests {
         vec![
             TransportType::Lowpan,
             TransportType::WifiAware,
-            TransportType::Vpn
+            TransportType::Vpn,
+            TransportType::Test,
+            TransportType::Usb,
+            TransportType::Thread,
+            TransportType::Satellite,
         ],
         fnp_properties::NetworkType::Unknown; "none_applicable")]
+    #[test_case(
+        vec![
+            TransportType::Usb,
+            TransportType::Wifi,
+        ],
+        fnp_properties::NetworkType::Wifi; "supported_transport_after_usb")]
     #[::fuchsia::test]
     fn test_consolidate_transport_types_to_network_type(
         transports: Vec<TransportType>,

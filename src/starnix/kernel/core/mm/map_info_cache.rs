@@ -37,19 +37,25 @@ const ZIRCON_NAME: zx::Name = zx::Name::new_lossy("starnix_zx_map_info_cache");
 const MAX_SCRATCH_POOL_LEN: usize = 4;
 
 impl MapInfoCache {
-    pub fn get_or_init(current_task: &CurrentTask) -> Result<Arc<Self>, Errno> {
+    pub fn get_or_init(current_task: &CurrentTask) -> Result<Option<Arc<Self>>, Errno> {
         let kernel = current_task.kernel();
-        kernel.expando.get_or_try_init(|| {
-            let pinned_shadow_process = kernel.expando.get_or_try_init(|| {
-                ShadowProcess::new(ZIRCON_NAME)
-                    .map(InfoCacheShadowProcess)
-                    .map_err(|e| from_status_like_fdio!(e))
-            })?;
+        let num_cache_elements =
+            kernel.features.cached_zx_map_info_bytes as usize / std::mem::size_of::<zx::MapInfo>();
+        if num_cache_elements == 0 {
+            return Ok(None);
+        }
+        kernel
+            .expando
+            .get_or_try_init(|| {
+                let pinned_shadow_process = kernel.expando.get_or_try_init(|| {
+                    ShadowProcess::new(ZIRCON_NAME)
+                        .map(InfoCacheShadowProcess)
+                        .map_err(|e| from_status_like_fdio!(e))
+                })?;
 
-            let num_cache_elements = kernel.features.cached_zx_map_info_bytes as usize
-                / std::mem::size_of::<zx::MapInfo>();
-            Self::new(&pinned_shadow_process.0, num_cache_elements)
-        })
+                Self::new(&pinned_shadow_process.0, num_cache_elements)
+            })
+            .map(Some)
     }
 
     fn new(shadow_process: &ShadowProcess, num_cache_elements: usize) -> Result<Self, Errno> {

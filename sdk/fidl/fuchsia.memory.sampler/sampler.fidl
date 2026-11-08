@@ -35,7 +35,7 @@ type StackTrace = table {
     1: stack_frames vector<uint64>:MAX;
 };
 
-@available(added=HEAD)
+@available(added=NEXT)
 type RecordAllocationEvent = table {
     /// Address of the allocation, to uniquely identify it.
     1: address uint64;
@@ -47,7 +47,7 @@ type RecordAllocationEvent = table {
     4: sampling_interval_bytes uint64;
 };
 
-@available(added=HEAD)
+@available(added=NEXT)
 type RecordDeallocationEvent = table {
     /// Address of the deallocation, to uniquely identify it.
     1: address uint64;
@@ -55,7 +55,7 @@ type RecordDeallocationEvent = table {
     2: stack_trace StackTrace;
 };
 
-@available(added=HEAD)
+@available(added=NEXT)
 type SamplerDatagram = flexible union {
     1: record_allocation RecordAllocationEvent;
     2: record_deallocation RecordDeallocationEvent;
@@ -65,24 +65,24 @@ type SamplerDatagram = flexible union {
 @discoverable(server="platform")
 open protocol Sampler {
     /// Record an allocation.
-    @available(replaced=HEAD)
+    @available(replaced=NEXT)
     flexible RecordAllocation(table {
         1: address uint64;
         2: stack_trace StackTrace;
         3: size uint64;
     });
 
-    @available(added=HEAD)
+    @available(added=NEXT)
     flexible RecordAllocation(RecordAllocationEvent);
 
     /// Record a deallocation.
-    @available(replaced=HEAD)
+    @available(replaced=NEXT)
     flexible RecordDeallocation(table {
         1: address uint64;
         2: stack_trace StackTrace;
     });
 
-    @available(added=HEAD)
+    @available(added=NEXT)
     flexible RecordDeallocation(RecordDeallocationEvent);
 
     /// Communicate relevant process information to facilitate symbolization.
@@ -92,7 +92,7 @@ open protocol Sampler {
     });
 
     /// Provide a socket for sending allocation records.
-    @available(added=HEAD)
+    @available(added=NEXT)
     flexible SetSharedSocket(resource struct {
         socket zx.Handle:SOCKET;
     });

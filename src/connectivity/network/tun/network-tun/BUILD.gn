@@ -43,10 +43,6 @@ source_set("src") {
     "//zircon/system/ulib/svc",
     "//zircon/system/ulib/sync:sync-cpp",
   ]
-
-  # TODO(https://fxbug.dev/42176699): This target uses mutable tables which are deprecated,
-  # rather than builders.
-  configs += [ "//build/cpp:fidl-wire-deprecated-mutable-tables" ]
 }
 
 executable("bin") {
@@ -66,6 +62,10 @@ fuchsia_component("component") {
   component_name = "network-tun"
   manifest = "meta/network-tun.cml"
   deps = [ ":bin" ]
+  visibility = [
+    ":*",
+    "//src/connectivity/network/testing/netemul/service:*",
+  ]
 }
 
 fuchsia_package("network-tun") {
@@ -87,10 +87,6 @@ test("network_tun_unittest") {
     "//third_party/googletest:gmock",
     "//zircon/system/ulib/fzl",
   ]
-
-  # TODO(https://fxbug.dev/42176699): This target uses mutable tables which are deprecated,
-  # rather than builders.
-  configs += [ "//build/cpp:fidl-wire-deprecated-mutable-tables" ]
 }
 
 fuchsia_unittest_package("network-tun-test") {

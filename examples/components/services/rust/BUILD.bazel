@@ -1,0 +1,24 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "provider-bin",
+    srcs = ["src/provider.rs"],
+    # Set crate_name so bazel2gn emits output_name = "provider_bin_rust".
+    crate_name = "provider_bin_rust",
+    crate_root = "src/provider.rs",
+    edition = "2024",
+    deps = [
+        "//examples/components/services/fidl:fuchsia.examples.services_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)

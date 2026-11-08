@@ -1,0 +1,38 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//src/developer/ffx/build:ffx_plugin.bzl", "ffx_plugin")
+load("//src/developer/ffx/build:ffx_tool.bzl", "ffx_tool")
+
+package(default_applicable_licenses = ["//:license"])
+
+ffx_plugin(
+    name = "ffx_bluetooth",
+    args_deps = [
+        "//src/developer/ffx/core:lib",
+        "//third_party/rust_crates/vendor:argh",
+    ],
+    args_srcs = ["src/args.rs"],
+    edition = "2024",
+    plugin_deps = [
+        "//src/developer/ffx/tools/bluetooth/src/connectable:ffx_bluetooth_connectable",
+        "//src/developer/ffx/tools/bluetooth/src/controller:ffx_bluetooth_controller",
+        "//src/developer/ffx/tools/bluetooth/src/discoverable:ffx_bluetooth_discoverable",
+        "//src/developer/ffx/tools/bluetooth/src/discovery:ffx_bluetooth_discovery",
+        "//src/developer/ffx/tools/bluetooth/src/pairable:ffx_bluetooth_pairable",
+        "//src/developer/ffx/tools/bluetooth/src/pandora:ffx_bluetooth_pandora",
+        "//src/developer/ffx/tools/bluetooth/src/peer:ffx_bluetooth_peer",
+    ],
+)
+
+ffx_tool(
+    name = "ffx_bluetooth_tool",
+    srcs = ["src/main.rs"],
+    binary_name = "ffx-bluetooth",
+    edition = "2024",
+    deps = [
+        ":ffx_bluetooth_suite",
+        "//src/lib/fuchsia-async",
+    ],
+)

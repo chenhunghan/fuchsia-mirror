@@ -65,6 +65,16 @@
                     "/core/starnix_runner/kernels:**",
                 ],
             },
+            {
+                source_moniker: "/core/starnix_runner",
+                source: "component",
+                source_name: "fuchsia.input.injection.InputDeviceRegistry",
+                capability: "protocol",
+                target_monikers: [
+                    "/core/ui/input-helper",
+                    "/core/starnix_runner",
+                ],
+            },
         ],
     },
 }

@@ -234,6 +234,12 @@
                 // clock_nanosleep_test
                 "ClockNanosleepProcessTest.SleepFiveSeconds",
 
+                // epoll_test
+                // TODO(https://fxbug.dev/581946201): Validate event pointer and target pollability in Linux epoll_ctl order.
+                "EpollTest.BadEventPointerCheckedFirst",
+                "EpollTest.RegularFiles",
+                "EpollTest.TargetCheckedBeforeEpollType",
+
                 // exceptions_test
                 "ExceptionTest.AlignmentCheck",
 
@@ -255,17 +261,6 @@
                 // Sadly, on the Android system image, `/system/bin/echo` points to `toybox`, making
                 // the final node a symlink which breaks this test.
                 "ExecveatTest.SymlinkNoFollowIgnoreSymlinkAncestor",
-
-                // This test attempts to open `/bin` with read permissions.
-                //
-                // On the Android system image, this points to `/system/bin` which
-                // has `0751` mode permission bits (`drwxr-x--x`).
-                //
-                // A non-root user cannot read the contents of this directory.
-                //
-                // Even if the test were to be running under the root user, the `echo` file inside
-                // is a symlink that points to `toybox`, meaning that using NOFOLLOW will fail.
-                "ExecveatTest.SymlinkNoFollowWithNormalFile",
 
                 // TODO(https://fxbug.dev/297434895) These tests call exec from a process with
                 // multiple threads. Starnix doesn't yet support this.
@@ -394,7 +389,6 @@
                 // iptables_test
                 "IPTablesBasic.GetRevision",
                 "IPTablesBasic.CTTargetGetRevision",
-                "IPTablesBasic.OriginalDstErrors",
 
                 // TODO(https://fxbug.dev/572922779): Allow netfilter getsockopt on non-raw sockets and return ENOENT for nonexistent tables.
                 "IPTablesBasic.GetInfoShortBuffer",
@@ -405,9 +399,10 @@
                 // ip6tables_test
                 "IP6TablesBasic.GetRevision",
 
-                // TODO(https://fxbug.dev/572922779): Allow netfilter getsockopt on non-raw sockets.
+                // TODO(https://fxbug.dev/572922779): Allow netfilter getsockopt on non-raw sockets and return ENOENT for nonexistent tables.
                 "IP6TablesBasic.GetEntriesShortBuffer",
                 "IP6TablesBasic.GetInfoShortBuffer",
+                "IP6TablesBasic.MissingTable",
 
                 // socket_ipv4_datagram_based_socket_unbound_loopback_test
                 // Multicast support is not implemented for ICMP sockets.
@@ -492,6 +487,15 @@
                 "MountTest.MountWithStrictAtime",
                 "MountTest.OverlayfsDirectoryRenameInUserNamespace",
 
+                // TODO(https://fxbug.dev/582346862): Support /proc/self/uid_map for overlayfs sticky-dir whiteout rename test.
+                "MountTest.OverlayfsRenameOverWhiteoutInStickyDir",
+
+                // TODO(https://fxbug.dev/578126744): Apply clone_private_mount checks to overlay layers.
+                "MountTest.LockedMountStopsOverlayLowerdir",
+                "MountTest.LockedMountStopsOverlayOfSysfs",
+                "MountTest.LockedMountStopsOverlayUpperdir",
+                "MountTest.OverlayRefusesLayerFromAnotherMountNamespace",
+
                 // TODO(https://fxbug.dev/565372315): Starnix tmpfs rejects mode=1777 and overlayfs lacks stacking limits.
                 "MountTest.OverlayfsRejectedAsUpperdir",
                 "MountTest.OverlayfsStackingDepthLimit",
@@ -564,6 +568,10 @@
                 "NetworkNamespaceTest.LoopbackExists",
                 "NetworkNamespaceTest.Setns",
 
+                // open_create_test
+                // TODO(https://fxbug.dev/578125840): Return ENOENT when creating a file in a deleted directory.
+                "CreateTest.CreateInDeletedDirFails",
+
                 // packet_socket_dgram_test
                 "AllInetTests/CookedPacketTest.BindDrop/*",
                 "AllInetTests/CookedPacketTest.ReceiveOutbound/*",
@@ -616,7 +624,6 @@
                 "ProcCpuinfo.RequiredFieldsArePresent",
                 "ProcSentryMeminfo.ContainsFieldsAndEndsWithNewline",
                 "ProcStat.ContainsBasicFields",
-                "ProcPidSymlink.SubprocessZombied",
                 "ProcPidFile.SubprocessRunning",
                 "ProcPidFile.SubprocessZombie",
                 "ProcPidFile.SubprocessExited",
@@ -631,6 +638,16 @@
                 "ProcSysFsFileNr.TracksOpenFiles",
                 "ProcSysFsFileNr.MaxMatchesFileMax",
 
+                // TODO(https://fxbug.dev/578125841): Reject noncanonical fd and invalid task directory names.
+                "ProcSelfFd.NoncanonicalNames",
+                "ProcTask.InvalidTaskNames",
+
+                // TODO(https://fxbug.dev/578599318): Preserve procfs lookup errors during creation, link, and rename.
+                "ProcTest.Create",
+                "ProcTest.CreateReadOnly",
+                "ProcTest.LinkAndRenameMissing",
+                "ProcTest.LinkDestinationLookup",
+
                 // TODO(https://fxbug.dev/564605906)
                 "ProcSelfAuxv.EntryPresence",
                 "ProcSelfAuxv.Platform",
@@ -640,7 +657,6 @@
                 "ProcSysKernelHostname.MatchesUname",
                 "ProcSysKernelDomainname.MatchesUname",
                 "ProcSysVmMaxmapCount.HasNumericValue",
-                "ProcSysVmMmapMinAddr.HasNumericValue",
                 "ProcSysVmOvercommitMemory.HasNumericValue",
                 "ProcSysKernelKeysMax.*",
                 "Proc.PidReuse",
@@ -664,9 +680,11 @@
                 "ProcNetTCP6.InodeReasonable",
 
                 // proc_net_test
+                // TODO(https://fxbug.dev/582346617): Support CLONE_NEWPID and /proc/sys/net/ipv4/{tcp_sack,ip_local_port_range}.
+                "ProcSysNetIpv4Sack.SharedAcrossProcMounts",
+                "ProcSysNetPortRange.SharedAcrossProcMounts",
                 "ProcNetSymlink.FileMode",
                 "ProcNetIfInet6.Format",
-                "ProcNetSymlinkTarget.FileMode",
                 "ProcNetSymlink.Contents",
                 "ProcSysNetIpv6.FilesExist",
                 "ProcSysNetIpv4Sack.Exists",
@@ -768,6 +786,9 @@
 
                 // socket_abstract_test - https://fxbug.dev/297460498
                 "AbstractUnixSockets/AllSocketPairTest.SetSocketRecvBufForceAboveMax/*",
+
+                // TODO(https://fxbug.dev/582346929): Support CLONE_NEWUSER and SO_RCVBUFFORCE on Unix and inet sockets.
+                "AbstractUnixSockets/AllSocketPairTest.SetSocketRecvBufForceWithoutCapability/*",
                 "AbstractUnixSockets/AllSocketPairTest.GetSocketOutOfBandInlineOption/*",
                 "AbstractUnixSockets/AllSocketPairTest.GetSetSocketRcvlowatOption/*",
                 "AbstractUnixSockets/UnixSocketPairTest.InvalidGetSockOptLevel/*",
@@ -808,6 +829,9 @@
 
                 // socket_filesystem_test
                 "FilesystemUnixSockets/AllSocketPairTest.SetSocketRecvBufForceAboveMax/*",
+
+                // TODO(https://fxbug.dev/582346929): Support CLONE_NEWUSER and SO_RCVBUFFORCE on Unix and inet sockets.
+                "FilesystemUnixSockets/AllSocketPairTest.SetSocketRecvBufForceWithoutCapability/*",
                 "FilesystemUnixSockets/AllSocketPairTest.GetSocketOutOfBandInlineOption/*",
                 "FilesystemUnixSockets/AllSocketPairTest.GetSetSocketRcvlowatOption/*",
                 "FilesystemUnixSockets/UnixSocketPairTest.InvalidGetSockOptLevel/*",
@@ -827,12 +851,22 @@
                 // TODO(https://fxbug.dev/327486994): Connecting to port 0 returns ECONNREFUSED instead of EADDRNOTAVAIL.
                 "All/DualStackAfMismatchTest.V4ListenerV6Connect/TCP",
 
+                // socket_inet_loopback_test
+                // TODO(https://fxbug.dev/582347521): Support SO_LINGER on stream sockets and dual-stack wildcard port release.
+                "SocketInetLoopback.WildcardBoundPortReleasedOnClose",
+
                 // socket_ip_tcp_loopback_test
                 "AllUnixDomainSockets/AllSocketPairTest.SetSocketRecvBufForceAboveMax/*",
+
+                // TODO(https://fxbug.dev/582346929): Support CLONE_NEWUSER and SO_RCVBUFFORCE on Unix and inet sockets.
+                "AllUnixDomainSockets/AllSocketPairTest.SetSocketRecvBufForceWithoutCapability/*",
                 "AllUnixDomainSockets/AllSocketPairTest.GetSetSocketRcvlowatOption/*",
 
                 // socket_ip_udp_loopback_test
                 "AllUDPSockets/AllSocketPairTest.SetSocketRecvBufForceAboveMax/*",
+
+                // TODO(https://fxbug.dev/582346929): Support CLONE_NEWUSER and SO_RCVBUFFORCE on Unix and inet sockets.
+                "AllUDPSockets/AllSocketPairTest.SetSocketRecvBufForceWithoutCapability/*",
                 "AllUDPSockets/NonStreamSocketPairTest.RecvmsgMsghdrFlagMsgTrunc/*",
                 "AllUDPSockets/UDPSocketPairTest.PayloadTooBig/0",
                 "AllUDPSockets/UDPSocketPairTest.PayloadTooBig/2",
@@ -896,6 +930,22 @@
                 "NetlinkRouteIpv4AndIpv6Tests/NetlinkRouteIpInvariantTest.NewRouteLowestIndex/*",
                 "NetworkNamespaceTest.CloneNewNetWithCloneNewUserDoesNotNeedCapSysAdmin",
 
+                // TODO(https://fxbug.dev/578125962): Support RTNLGRP address/route notifications and route type validation.
+                "NetlinkRouteIpv4AndIpv6Tests/NetlinkRouteIpInvariantTest.AddressMulticastGroup/*",
+                "NetlinkRouteIpv4AndIpv6Tests/NetlinkRouteIpInvariantTest.AddressPrefixRouteMulticastGroup/*",
+                "NetlinkRouteIpv4AndIpv6Tests/NetlinkRouteIpInvariantTest.RouteMulticastGroup/*",
+                "NetlinkRouteIpv4AndIpv6Tests/NetlinkRouteIpInvariantTest.RouteMulticastGroupReplace/*",
+                "NetlinkRouteIpv4AndIpv6Tests/NetlinkRouteIpInvariantTest.RouteMulticastGroupSameDestination/*",
+                "NetlinkRouteTest.DeleteIpv6RouteIgnoresType",
+                "NetlinkRouteTest.NewRouteDestinationFamily",
+                "NetlinkRouteTest.NewRouteDestinationShorterThanPrefix",
+                "NetlinkRouteTest.NewRouteRejectTypeWithNexthop",
+                "NetlinkRouteTest.NewRouteTypeOutOfRange",
+                "NetlinkRouteTest.NewRouteUnspecType",
+                "NetlinkRouteTest.NewRouteUnsupportedType",
+                "NetlinkRouteTest.NewRouteWithDestinationGatewayFamily",
+                "NetlinkRouteTest.NewRouteWithDestinationUnsupportedFamily",
+
                 // socket_netlink_uevent
                 "NetlinkUeventTest.AttachFilter",
                 "NetlinkUeventTest.DetachNoFilter",
@@ -939,6 +989,7 @@
                 // All TuntapTest fails because Starnix doesn't have /dev/net/tun.
                 "TuntapStaticTest.NetTunExists",
                 "TuntapTest.*",
+                "Netlink/TuntapMTUTest.ChangeMTULimits/*",
 
                 // semaphore_test
                 "SemaphoreTest.*",
@@ -962,6 +1013,9 @@
                 "AllTCPSockets/AllSocketPairTest.SetSocketRecvBufForceAboveMax/3",
                 "AllTCPSockets/AllSocketPairTest.SetSocketRecvBufForceAboveMax/4",
                 "AllTCPSockets/AllSocketPairTest.SetSocketRecvBufForceAboveMax/5",
+
+                // TODO(https://fxbug.dev/582346929): Support CLONE_NEWUSER and SO_RCVBUFFORCE on Unix and inet sockets.
+                "AllTCPSockets/AllSocketPairTest.SetSocketRecvBufForceWithoutCapability/*",
 
                 // socket_ip_unbound_netlink_test
                 "IPUnboundSockets/IPv6UnboundSocketTest.ConnectToBadLocalAddress/1",
@@ -1045,6 +1099,27 @@
                 // TODO(https://fxbug.dev/507936011): Fix and re-enable.
                 // Truncation on getsockopt is supported, but this test uses TCP options that aren't supported yet.
                 "AllInetTests/TcpSocketTest.IntegerOptGetsockoptSmallBuffer*",
+
+                // TODO(https://fxbug.dev/580284822): Sign-extend oparg/cmparg and use signed comparisons in FUTEX_WAKE_OP.
+                "PrivateFutexTest.WakeOpNegativeOparg",
+                "PrivateFutexTest.WakeOpShiftMasked",
+                "SharedPrivate/PrivateAndSharedFutexTest.WakeOpCondNegativeCmparg/0",
+                "SharedPrivate/PrivateAndSharedFutexTest.WakeOpCondNegativeCmparg/1",
+                "SharedPrivate/PrivateAndSharedFutexTest.WakeOpCondSignedCompare/0",
+                "SharedPrivate/PrivateAndSharedFutexTest.WakeOpCondSignedCompare/1",
+
+                // TODO(https://fxbug.dev/580284383): Enforce mnt_too_revealing checks for userns proc and sysfs mounts.
+                "MountTest.InitUserNamespaceProcMountWithoutVisibleProc",
+                "MountTest.UserNamespaceProcBindMountIsNotVisible",
+                "MountTest.UserNamespaceProcMount",
+                "MountTest.UserNamespaceProcMountIgnoresUnlockedMount",
+                "MountTest.UserNamespaceProcMountLockedReadOnly",
+                "MountTest.UserNamespaceProcMountRevealingLockedMount",
+                "MountTest.UserNamespaceSysfsMountOverEmptyDir",
+                "MountTest.UserNamespaceSysfsMountRevealingLockedMount",
+
+                // TODO(https://fxbug.dev/580284958): Round up sysinfo uptime when tv_nsec is non-zero.
+                "SysinfoTest.UptimeRoundsUp",
             ],
         },
         {
@@ -1116,10 +1191,6 @@
                 "SharedPrivate/PrivateAndSharedFutexTest.Wake0/*",
                 "SharedPrivate/PrivateAndSharedFutexTest.WakeOpCondSuccess/*",
                 "SharedPrivate/PrivateAndSharedFutexTest.WakeOpCondFailure/*",
-
-                // These tests hang.
-                "AllInetTests/UdpSocketTest.ReconnectDoesNotClearReadShutdown/*",
-                "AllInetTests/UdpSocketTest.ReconnectDoesNotClearWriteShutdown/*",
 
                 // This hangs on debug builds.
                 //
@@ -1205,11 +1276,6 @@
                 "AllUnixDomainSockets/AllSocketPairTest.SetAndGetBooleanSocketOptions/*",
                 "AllUnixDomainSockets/AllSocketPairTest.GetSocketOutOfBandInlineOption/*",
 
-                // socket_udp_test - hanging tests.
-                "AllInetTests/UdpSocketTest.ReadShutdown/*",
-                "AllInetTests/UdpSocketTest.ReadShutdownDifferentThread/*",
-                "AllInetTests/UdpSocketTest.ErrorQueue/*",
-
                 // These tests cause fatal signals that crash the test suite.
                 "Processes.ExecSwapThreadGroupLeader",
                 "ExecveatTest.UnshareFiles",
@@ -1281,14 +1347,6 @@
                 // Depend on missing timer feature.
                 "FifoTest.OpenBlockedAndInterrupted",
 
-                // TODO(https://fxbug.dev/328693993) Re-enable once flake is resolved.
-                "NetdeviceTest.InterfaceFlags",
-                "NetdeviceTest.InterfaceMTU",
-                "NetdeviceTest.Loopback",
-
-                // TODO(https://fxbug.dev/328690451) Re-enable once flake is resolved.
-                "InotifyTest.InotifyAndTargetDestructionDoNotDeadlock",
-
                 // TODO(https://fxbug.dev/339238239) Re-enable once flake is resolved.
                 "IntervalTimerTest.PeriodicGroupDirectedSignal",
                 "IntervalTimerTest.NegativeInterval",
@@ -1308,10 +1366,6 @@
 
                 // TODO(https://fxbug.dev/379127911): Investigate and re-enable
                 "TimerTest.RlimitCpuInheritedAcrossFork",
-
-                // TODO(https://fxbug.dev/379165488): deflake
-                "StatTimesTest.DirCreateFile",
-                "StatTimesTest.DirList",
 
                 // TODO(https://fxbug.dev/397205797): Fix and re-enable
                 "ExecTest.Setpgid",
@@ -1401,6 +1455,12 @@
                 "PtraceTest.AccessVmUsesAttachCreds_CapDroppedAfterAttach",
                 "PtraceTest.AccessVmUsesAttachCreds_CapGainedAfterAttach",
                 "PtraceTest.TracemeNonDumpableInUserns",
+
+                // TODO(https://fxbug.dev/578126238): Times out waiting on /dev/fuse when second fstatat is not rejected with EACCES.
+                "FuseTest.RequestUsesFilesystemIDs",
+
+                // TODO(https://fxbug.dev/581947138): Ignore bytes past NUL in iptables ascii_to_string (passes on arm64, fails on x64).
+                "IP6TablesTest.InitialEntries",
             ],
         },
     ],

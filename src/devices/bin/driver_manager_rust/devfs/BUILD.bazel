@@ -1,0 +1,61 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [],  # Include all tests in the package.
+    visibility = ["//src/devices/bin/driver_manager_rust:__pkg__"],
+)
+
+rustc_library(
+    name = "driver_manager_devfs",
+    srcs = [
+        "src/builtin_devices.rs",
+        "src/class_names.rs",
+        "src/lib.rs",
+    ],
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.component.runner:fuchsia.component.runner_rust",
+        "//sdk/fidl/fuchsia.device.fs:fuchsia.device.fs_rust",
+        "//sdk/fidl/fuchsia.device:fuchsia.device_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.process:fuchsia.process_rust",
+        "//sdk/rust/zx",
+        "//src/devices/bin/driver_manager_rust/types:driver_manager_types",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-sync",
+        "//src/storage/lib/vfs/rust:vfs",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:phf",
+        "//third_party/rust_crates/vendor:rand",
+    ],
+)
+
+rustc_test(
+    name = "driver_manager_devfs_test",
+    crate = ":driver_manager_devfs",
+    # Used by bazel2gn to preserve GN output_name and avoid colliding with
+    # //src/devices/bin/driver_manager/tests:driver_manager_devfs_test.
+    crate_name = "driver_manager_devfs_lib_test",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_unittest_package(
+    name = "driver-manager-devfs-unittests",
+    unit_tests = [":driver_manager_devfs_test"],
+)

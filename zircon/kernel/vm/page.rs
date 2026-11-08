@@ -133,47 +133,6 @@ pub struct VmPageObjectState {
     pub flags: VmPageObjectFlags,
 }
 
-impl VmPageObjectState {
-    /// Returns the pin count (0..=31).
-    #[inline]
-    pub fn pin_count(&self) -> u8 {
-        self.flags.pin_count()
-    }
-
-    /// Sets the pin count.
-    #[inline]
-    pub fn set_pin_count(&mut self, count: u8) {
-        self.flags = self.flags.with_pin_count(count);
-    }
-
-    /// Returns whether the page is marked as always needed.
-    #[inline]
-    pub fn always_need(&self) -> bool {
-        self.flags.always_need()
-    }
-
-    /// Sets the always_need flag.
-    #[inline]
-    pub fn set_always_need(&mut self, needed: bool) {
-        self.flags = self.flags.with_always_need(needed);
-    }
-
-    /// Tracks state used to determine whether the page is dirty and its contents need to written
-    /// back to the page source at some point, and when it has been cleaned. Used for pages backed
-    /// by a user pager. The three states supported are Clean, Dirty, and AwaitingClean (more
-    /// details in VmCowPages::DirtyState).
-    #[inline]
-    pub fn dirty_state(&self) -> u8 {
-        self.flags.dirty_state()
-    }
-
-    /// Sets the dirty state.
-    #[inline]
-    pub fn set_dirty_state(&mut self, state: u8) {
-        self.flags = self.flags.with_dirty_state(state);
-    }
-}
-
 /// Metadata stored in `VmPage` for the ZRAM tri-page storage allocator.
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug)]
@@ -436,14 +395,11 @@ impl VmPage {
             super::page_state::page_state_to_string(page_state)
         );
         if page_state == VmPageState(bindings::vm_page_state::OBJECT) {
-            // SAFETY: Dereferencing UnsafeCell to read the object field from the active union variant.
-            // The caller guarantees `object` is active and that reading it does not race with concurrent writes.
-            let object = unsafe { &*(*self.state_union.get()).object };
-            kprint::kprintln!(
-                " pin_count {:d} share_count {:u}",
-                object.pin_count() as i32,
-                object.share_count
-            );
+            // SAFETY: `object` is the active union variant and the caller guarantees that reading
+            // these subfields does not race with concurrent writes.
+            let (pin_count, share_count) =
+                unsafe { (self.get_pin_count(), self.get_share_count()) };
+            kprint::kprintln!(" pin_count {:d} share_count {:u}", pin_count as i32, share_count);
         } else {
             kprint::kprintln!("");
         }
@@ -486,6 +442,26 @@ impl VmPage {
         p.vm_page_counts.by_state[new_state.index()].fetch_add(1);
     }
 
+    /// Returns a raw pointer to the `object` union variant.
+    ///
+    /// Accessors project individual fields from this pointer with `&raw const` / `&raw mut` and
+    /// `read` / `write` them instead of dereferencing it into a `&VmPageObjectState` /
+    /// `&mut VmPageObjectState`. Such a reference would span `page_queue_priv`, which other CPUs
+    /// access atomically without holding any VMO lock, and `object_priv` / `page_offset_priv`,
+    /// which `PageQueues` writes under its own `list_lock`, so materialising it would be an
+    /// aliasing violation even when the one field actually being accessed is properly
+    /// synchronised.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `object` is the currently active union variant.
+    #[inline]
+    unsafe fn object_ptr(&self) -> *mut VmPageObjectState {
+        // SAFETY: Projecting a raw pointer through the `UnsafeCell` to the active union variant
+        // creates no reference; `ManuallyDrop<T>` is `repr(transparent)` over `T`.
+        unsafe { (&raw mut (*self.state_union.get()).object).cast::<VmPageObjectState>() }
+    }
+
     /// Returns the backlink object pointer for the page.
     ///
     /// # Safety
@@ -495,9 +471,10 @@ impl VmPage {
     /// the page queue lock).
     #[inline]
     pub unsafe fn get_object(&self) -> *mut core::ffi::c_void {
-        // SAFETY: Dereferencing UnsafeCell to read the object field from the active union variant.
-        // The caller guarantees `object` is active and that reading it does not race with concurrent writes.
-        unsafe { (*(*self.state_union.get()).object).object_priv }
+        // SAFETY: The caller guarantees `object` is active and that reading `object_priv` does not
+        // race with concurrent writes; the field is read through a raw projection (see
+        // `object_ptr`).
+        unsafe { (&raw const (*self.object_ptr()).object_priv).read_unaligned() }
     }
 
     /// Sets the backlink object pointer for the page.
@@ -508,9 +485,9 @@ impl VmPage {
     /// ownership of this subfield or holds the page queue lock to modify it safely without data races.
     #[inline]
     pub unsafe fn set_object(&self, object: *mut core::ffi::c_void) {
-        // SAFETY: Dereferencing UnsafeCell to mutate the object field in the active union variant.
-        // The caller guarantees ownership of this subfield or holding the page queue lock.
-        unsafe { (*(*self.state_union.get()).object).object_priv = object };
+        // SAFETY: The caller guarantees `object` is active and ownership of `object_priv` or the
+        // page queue lock; the field is written through a raw projection (see `object_ptr`).
+        unsafe { (&raw mut (*self.object_ptr()).object_priv).write_unaligned(object) };
     }
 
     /// Returns the page offset in the backlink object for the page.
@@ -522,9 +499,10 @@ impl VmPage {
     /// the page queue lock).
     #[inline]
     pub unsafe fn get_page_offset(&self) -> u64 {
-        // SAFETY: Dereferencing UnsafeCell to read the page_offset field from the active union variant.
-        // The caller guarantees `object` is active and that reading it does not race with concurrent writes.
-        unsafe { (*(*self.state_union.get()).object).page_offset_priv }
+        // SAFETY: The caller guarantees `object` is active and that reading `page_offset_priv`
+        // does not race with concurrent writes; the field is read through a raw projection (see
+        // `object_ptr`).
+        unsafe { (&raw const (*self.object_ptr()).page_offset_priv).read_unaligned() }
     }
 
     /// Sets the page offset in the backlink object for the page.
@@ -535,9 +513,9 @@ impl VmPage {
     /// ownership of this subfield or holds the page queue lock to modify it safely without data races.
     #[inline]
     pub unsafe fn set_page_offset(&self, offset: u64) {
-        // SAFETY: Dereferencing UnsafeCell to mutate the page_offset field in the active union variant.
-        // The caller guarantees ownership of this subfield or holding the page queue lock.
-        unsafe { (*(*self.state_union.get()).object).page_offset_priv = offset };
+        // SAFETY: The caller guarantees `object` is active and ownership of `page_offset_priv` or
+        // the page queue lock; the field is written through a raw projection (see `object_ptr`).
+        unsafe { (&raw mut (*self.object_ptr()).page_offset_priv).write_unaligned(offset) };
     }
 
     /// Gets the pin count.
@@ -548,27 +526,100 @@ impl VmPage {
     /// this subfield is safe without data races.
     #[inline]
     pub unsafe fn get_pin_count(&self) -> u8 {
-        // SAFETY: Dereferencing UnsafeCell to read the object flags from the active union variant.
-        // The caller guarantees `object` is active and that reading it does not race with concurrent writes.
-        unsafe { (*(*self.state_union.get()).object).pin_count() }
+        // SAFETY: The caller guarantees `object` is active and that reading `flags` does not race
+        // with concurrent writes; the byte is read through a raw projection (see `object_ptr`).
+        unsafe { (&raw const (*self.object_ptr()).flags).read().pin_count() }
     }
 
     /// Sets the pin count.
     ///
     /// # Safety
     ///
-    /// The caller must ensure that `object` is the currently active union variant, and that it has
-    /// ownership of this subfield or holds the page queue lock to modify it safely without data
-    /// races.
+    /// The caller must ensure that `object` is the currently active union variant, and that no
+    /// other writer of the packed `flags` byte (shared with `always_need` and `dirty_state`) can
+    /// run concurrently: either the page has not yet been inserted into a `VmCowPages` and the
+    /// caller has exclusive ownership of it, or the owning `VmCowPages` lock is held, which
+    /// serialises every writer of `flags`.
     ///
     /// # Panics
     ///
     /// Panics in debug mode if `count > object::MAX_PIN_COUNT`.
     #[inline]
     pub unsafe fn set_pin_count(&self, count: u8) {
-        // SAFETY: Dereferencing UnsafeCell to mutate the object flags in the active union variant.
-        // The caller guarantees ownership of this subfield or holding the page queue lock.
-        unsafe { (*(*self.state_union.get()).object).set_pin_count(count) };
+        // SAFETY: Per the `# Safety` contract `object` is the active union variant and the caller
+        // excludes all concurrent writers of `flags`, so this read-modify-write of the byte cannot
+        // race; it goes through a raw projection (see `object_ptr`).
+        unsafe {
+            let flags_ptr = &raw mut (*self.object_ptr()).flags;
+            flags_ptr.write(flags_ptr.read().with_pin_count(count));
+        }
+    }
+
+    /// Returns the share count.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `object` is the currently active union variant, and that the
+    /// owning `VmCowPages` lock is held (or the caller otherwise has exclusive access) so reading
+    /// this subfield does not race with concurrent writes.
+    #[inline]
+    pub unsafe fn get_share_count(&self) -> u32 {
+        // SAFETY: The caller guarantees `object` is active and that reading `share_count` does not
+        // race with concurrent writes; the field is read through a raw projection (see
+        // `object_ptr`).
+        unsafe { (&raw const (*self.object_ptr()).share_count).read_unaligned() }
+    }
+
+    /// Sets the share count.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `object` is the currently active union variant, and that no
+    /// other thread can access `share_count` for the duration of the call: either the caller
+    /// exclusively owns the page (it is not yet reachable through any page list or page queue), or
+    /// the caller holds the lock of the `VmCowPages` that owns the page.
+    #[inline]
+    pub unsafe fn set_share_count(&self, count: u32) {
+        // SAFETY: The caller guarantees `object` is active and exclusive access to `share_count`;
+        // the field is written through a raw projection (see `object_ptr`).
+        unsafe { (&raw mut (*self.object_ptr()).share_count).write_unaligned(count) };
+    }
+
+    /// Returns the raw dirty state bits.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `object` is the currently active union variant, and that reading
+    /// this subfield is safe without data races.
+    #[inline]
+    pub unsafe fn get_dirty_state(&self) -> u8 {
+        // SAFETY: The caller guarantees `object` is active and that reading `flags` does not race
+        // with concurrent writes; the byte is read through a raw projection (see `object_ptr`).
+        unsafe { (&raw const (*self.object_ptr()).flags).read().dirty_state() }
+    }
+
+    /// Sets the dirty state.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `object` is the currently active union variant, and that no
+    /// other writer of the packed `flags` byte (shared with `pin_count` and `always_need`) can
+    /// run concurrently: either the page has not yet been inserted into a `VmCowPages` and the
+    /// caller has exclusive ownership of it, or the owning `VmCowPages` lock is held, which
+    /// serialises every writer of `flags`.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug mode if `state >= object::MAX_DIRTY_STATES`.
+    #[inline]
+    pub unsafe fn set_dirty_state(&self, state: u8) {
+        // SAFETY: Per the `# Safety` contract `object` is the active union variant and the caller
+        // excludes all concurrent writers of `flags`, so this read-modify-write of the byte cannot
+        // race; it goes through a raw projection (see `object_ptr`).
+        unsafe {
+            let flags_ptr = &raw mut (*self.object_ptr()).flags;
+            flags_ptr.write(flags_ptr.read().with_dirty_state(state));
+        }
     }
 
     /// Returns whether the page is marked as always needed.
@@ -579,22 +630,44 @@ impl VmPage {
     /// this subfield is safe without data races.
     #[inline]
     pub unsafe fn is_always_need(&self) -> bool {
-        // SAFETY: Dereferencing UnsafeCell to read the object flags from the active union variant.
-        // The caller guarantees `object` is active and that reading it does not race with
-        // concurrent writes.
-        unsafe { (*(*self.state_union.get()).object).always_need() }
+        // SAFETY: The caller guarantees `object` is active and that reading `flags` does not race
+        // with concurrent writes; the byte is read through a raw projection (see `object_ptr`).
+        unsafe { (&raw const (*self.object_ptr()).flags).read().always_need() }
+    }
+
+    /// Sets whether the page is marked as always needed.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `object` is the currently active union variant, and that no
+    /// other thread can read or write the packed `flags` byte (shared with `pin_count` and
+    /// `dirty_state`) for the duration of the call: either the page has not yet been inserted into
+    /// a `VmCowPages` and the caller has exclusive ownership of it, or the owning `VmCowPages` lock
+    /// is held, which serialises every access to `flags`.
+    #[inline]
+    pub unsafe fn set_always_need(&self, needed: bool) {
+        // SAFETY: Per the `# Safety` contract `object` is the active union variant and the caller
+        // excludes all concurrent reads and writes of `flags`, so this read-modify-write of the
+        // byte cannot race; it goes through a raw projection (see `object_ptr`).
+        unsafe {
+            let flags_ptr = &raw mut (*self.object_ptr()).flags;
+            flags_ptr.write(flags_ptr.read().with_always_need(needed));
+        }
     }
 
     /// Get a reference to the page queue atomic.
     ///
     /// # Safety
     ///
-    /// The caller must ensure that `object` is the currently active union variant.
+    /// The caller must ensure that `object` is and remains the active union variant for the
+    /// lifetime of the returned reference.
     #[inline]
     pub unsafe fn get_page_queue_ref(&self) -> &AtomicU8 {
-        // SAFETY: Dereferencing UnsafeCell to obtain a shared reference to the AtomicU8 in the
-        // active union variant. Atomic operations on the reference are thread-safe.
-        unsafe { &(*(*self.state_union.get()).object).page_queue_priv }
+        // SAFETY: The caller guarantees `object` is active for the lifetime of the returned
+        // reference. Borrowing a field of the raw place `*object_ptr()` references only the
+        // `AtomicU8` itself (see `object_ptr`), and atomic operations through a shared reference
+        // are thread-safe.
+        unsafe { &(*self.object_ptr()).page_queue_priv }
     }
 }
 
@@ -897,12 +970,78 @@ impl VmPagePtr {
     ///
     /// # Safety
     ///
-    /// The caller must ensure that the page is attached to a VM object (`state_union` is in `object` variant)
-    /// and that it has ownership of this subfield or holds the page queue lock.
+    /// The caller must ensure that the page is attached to a VM object (`state_union` is in the
+    /// `object` variant) and that no other writer of the packed `flags` byte can run
+    /// concurrently: either the page has not yet been inserted into a `VmCowPages` and the caller
+    /// has exclusive ownership of it, or the owning `VmCowPages` lock is held.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug mode if `count > object::MAX_PIN_COUNT`.
     #[inline]
     pub unsafe fn set_pin_count(self, count: u8) {
-        // SAFETY: Safety deferred to caller per function safety preconditions.
+        // SAFETY: The caller upholds `VmPage::set_pin_count`'s preconditions (active `object`
+        // variant, no concurrent writer of `flags`).
         unsafe { self.as_ref().set_pin_count(count) }
+    }
+
+    /// Returns the share count of the page when attached to a VM object.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the page is attached to a VM object (`state_union` is in
+    /// `object` variant) and that the owning `VmCowPages` lock is held (or the caller otherwise
+    /// has exclusive access) so reading this subfield does not race with concurrent writes.
+    #[inline]
+    pub unsafe fn get_share_count(self) -> u32 {
+        // SAFETY: Safety deferred to caller per function safety preconditions.
+        unsafe { self.as_ref().get_share_count() }
+    }
+
+    /// Sets the share count of the page when attached to a VM object.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the page is attached to a VM object (`state_union` is in the
+    /// `object` variant) and that no other thread can access `share_count` for the duration of the
+    /// call: either the caller exclusively owns the page (it is not yet reachable through any page
+    /// list or page queue), or the caller holds the lock of the `VmCowPages` that owns the page.
+    #[inline]
+    pub unsafe fn set_share_count(self, count: u32) {
+        // SAFETY: The caller upholds `VmPage::set_share_count`'s preconditions (active `object`
+        // variant, exclusive access to `share_count`).
+        unsafe { self.as_ref().set_share_count(count) }
+    }
+
+    /// Returns the raw dirty state bits of the page when attached to a VM object.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the page is attached to a VM object (`state_union` is in
+    /// `object` variant) and that reading this subfield is safe without data races.
+    #[inline]
+    pub unsafe fn get_dirty_state(self) -> u8 {
+        // SAFETY: Safety deferred to caller per function safety preconditions.
+        unsafe { self.as_ref().get_dirty_state() }
+    }
+
+    /// Sets the dirty state of the page when attached to a VM object.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the page is attached to a VM object (`state_union` is in the
+    /// `object` variant) and that no other writer of the packed `flags` byte can run
+    /// concurrently: either the page has not yet been inserted into a `VmCowPages` and the caller
+    /// has exclusive ownership of it, or the owning `VmCowPages` lock is held.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug mode if `state >= object::MAX_DIRTY_STATES`.
+    #[inline]
+    pub unsafe fn set_dirty_state(self, state: u8) {
+        // SAFETY: The caller upholds `VmPage::set_dirty_state`'s preconditions (active `object`
+        // variant, no concurrent writer of `flags`).
+        unsafe { self.as_ref().set_dirty_state(state) }
     }
 
     /// Returns whether the page is marked as always needed.

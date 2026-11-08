@@ -70,8 +70,6 @@ class Bcache : public fs::DeviceTransactionHandler, public storage::VmoidRegistr
 
   block_client::BlockDevice* GetDevice() final { return device_; }
 
-  uint32_t DeviceBlockSize() const;
-
   // Raw block read functions.
   // These do not track blocks (or attempt to access the block cache)
   // NOTE: Not marked as final, since these are overridden methods on host,

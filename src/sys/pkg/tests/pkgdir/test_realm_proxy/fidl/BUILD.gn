@@ -35,7 +35,6 @@ fidl("fuchsia.pkg.test") {
   stable = true
   visibility = [
     ":*",
-    "//sdk/fidl:*",
     "//src/sys/pkg/tests/pkgdir/*",
   ]
   public_deps = [

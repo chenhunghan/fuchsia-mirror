@@ -11,6 +11,7 @@
 
 use super::gicv2m::{ArmGicv2mFrameInfo, arm_gicv2m_get_frame_info};
 use crate::dev_interrupt::MAX_MSI_IRQS;
+use crate::ksync_kernel::TrackedMutex;
 use crate::pdev_interrupt::{
     InterruptHandler, InterruptVector, MsiBlock, mask_interrupt, register_int_handler,
     unmask_interrupt,
@@ -27,8 +28,8 @@ const LOCAL_TRACE: u32 = 0;
 /// The 32 and 64 bit MSI target allocators.
 ///
 /// Constructed in `rust_arm_gicv2_init_early`; `arm_gicv2m_msi_init` sizes them with `init`.
-static S_32BIT_TARGETS: LazyInit<Pow2RangeAllocator> = LazyInit::uninit();
-static S_64BIT_TARGETS: LazyInit<Pow2RangeAllocator> = LazyInit::uninit();
+static S_32BIT_TARGETS: LazyInit<Pow2RangeAllocator<TrackedMutex>> = LazyInit::uninit();
+static S_64BIT_TARGETS: LazyInit<Pow2RangeAllocator<TrackedMutex>> = LazyInit::uninit();
 
 static S_MSI_INITIALIZED: AtomicBool = AtomicBool::new(false);
 

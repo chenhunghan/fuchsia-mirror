@@ -31,17 +31,6 @@ pub const TEST_SYMLINK: &str = "testing_symlink";
 /// A common symlink target path to use in a conformance test.
 pub const TEST_SYMLINK_TARGET: &[u8] = b"symlink_target_path";
 
-/// A default value for NodeAttributes, with zeros set for all fields.
-pub const EMPTY_NODE_ATTRS: fio::NodeAttributes = fio::NodeAttributes {
-    mode: 0,
-    id: 0,
-    content_size: 0,
-    storage_size: 0,
-    link_count: 0,
-    creation_time: 0,
-    modification_time: 0,
-};
-
 /// Converts a generic [`fio::NodeProxy`] to either [`fio::FileProxy`] or [`fio::DirectoryProxy`].
 /// **WARNING**: This function does _not_ verify that the conversion is valid.
 pub fn convert_node_proxy<T: Proxy>(proxy: fio::NodeProxy) -> T {

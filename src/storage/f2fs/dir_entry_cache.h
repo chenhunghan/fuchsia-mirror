@@ -57,7 +57,6 @@ class DirEntryCache {
 
  private:
   DirEntryCacheElement &AllocateElement(std::string_view child_name) __TA_REQUIRES(lock_);
-  void DeallocateElement(const ElementRefPtr &element) __TA_REQUIRES(lock_);
 
   ElementRefPtr FindElementRefPtr(std::string_view child_name) const __TA_REQUIRES(lock_);
   DirEntryCacheElement *FindElement(std::string_view child_name) __TA_REQUIRES(lock_);

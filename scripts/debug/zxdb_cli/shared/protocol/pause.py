@@ -19,7 +19,7 @@ class PauseRequest(BaseRequest[dict[str, Any]]):
     response_type: ClassVar[Any] = dict[str, Any]
 
     @model_validator(mode="after")
-    def validate_target(self) -> "PauseRequest":
+    def validate_target(self) -> PauseRequest:
         if self.thread_id is None and self.pid is None:
             raise ValueError("Must specify either thread_id or pid")
         if self.thread_id is not None and self.pid is not None:

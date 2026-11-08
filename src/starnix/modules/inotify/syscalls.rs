@@ -6,9 +6,10 @@ use crate::inotify::InotifyFileObject;
 use starnix_core::security;
 use starnix_core::task::CurrentTask;
 use starnix_core::vfs::syscalls::{LookupFlags, lookup_at};
-use starnix_core::vfs::{FdFlags, FdNumber, WdNumber};
+use starnix_core::vfs::{AccessCheck, FdFlags, FdNumber, WdNumber};
 
 use starnix_uapi::errors::Errno;
+use starnix_uapi::file_mode::Access;
 use starnix_uapi::inotify_mask::InotifyMask;
 use starnix_uapi::user_address::UserCString;
 use starnix_uapi::{IN_CLOEXEC, IN_NONBLOCK, errno, error};
@@ -50,6 +51,7 @@ pub fn sys_inotify_add_watch(
     if mask.contains(InotifyMask::ONLYDIR) && !watched_node.entry.node.is_dir() {
         return error!(ENOTDIR);
     }
+    watched_node.check_access(current_task, AccessCheck::for_internal(Access::READ))?;
     security::path_notify(current_task, &watched_node.entry.node, mask)?;
     inotify_file.add_watch(watched_node.entry, mask, &file)
 }

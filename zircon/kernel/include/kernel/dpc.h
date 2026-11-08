@@ -43,8 +43,6 @@ class DpcRunner;
 
 extern "C" {
 
-void rust_dpc_runner_init(DpcRunner* runner);
-void rust_dpc_runner_destroy(DpcRunner* runner);
 void rust_dpc_runner_init_for_current_cpu(const DpcRunner* runner);
 zx_status_t rust_dpc_runner_shutdown(const DpcRunner* runner, zx_instant_mono_t deadline);
 void rust_dpc_runner_transition_off_cpu(const DpcRunner* runner, const DpcRunner* source);
@@ -58,8 +56,8 @@ zx_status_t rust_dpc_runner_enqueue(const Dpc* dpc, uint32_t queue_type);
 // Each cpu maintains a DpcRunner, in its percpu structure.
 class DpcRunner {
  public:
-  DpcRunner() { rust_dpc_runner_init(this); }
-  ~DpcRunner() { rust_dpc_runner_destroy(this); }
+  DpcRunner() = delete;
+  ~DpcRunner() = delete;
 
   DpcRunner(const DpcRunner&) = delete;
   DpcRunner& operator=(const DpcRunner&) = delete;

@@ -1,0 +1,123 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_rules_common//packages:resources.bzl", "resource")
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+# TODO(https://fxbug.dev/570694755): bazel2gn does not translate resource()
+# targets, so GN keeps resource_group("http_server_data") in data_deps.
+# @bazel2gn:raw_attribute:data_deps = [ ":http_server_data" ]
+fx_cc_binary(
+    name = "http_server_bin",
+    srcs = [
+        "http_server.cc",
+        # GN does not list this header from the parent directory (GN does not
+        # sandbox compiles), but the Bazel sandbox needs it as an input.
+        # @bazel2gn:skip
+        "//src/ui:tests/integration_graphics_tests/web-pixel-tests/constants.h",
+    ],
+    tags = ["manual"],
+    deps = [
+        "//sdk/lib/stdcompat",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl",
+        "//zircon/system/ulib/fbl",
+    ],
+)
+
+# TODO(https://fxbug.dev/570694755): bazel2gn does not translate resource()
+# targets; GN uses resource_group("http_server_data") above the sentinel.
+# @bazel2gn:skip
+resource(
+    name = "static_html",
+    src = "data/static.html",
+    dest = "data/static.html",
+)
+
+# TODO(https://fxbug.dev/570694755): bazel2gn does not translate resource()
+# targets; GN uses resource_group("http_server_data") above the sentinel.
+# @bazel2gn:skip
+resource(
+    name = "dynamic_html",
+    src = "data/dynamic.html",
+    dest = "data/dynamic.html",
+)
+
+# TODO(https://fxbug.dev/570694755): bazel2gn does not translate resource()
+# targets; GN uses resource_group("http_server_data") above the sentinel.
+# @bazel2gn:skip
+resource(
+    name = "video_html",
+    src = "data/video.html",
+    dest = "data/video.html",
+)
+
+# TODO(https://fxbug.dev/570694755): bazel2gn does not translate resource()
+# targets; GN uses resource_group("http_server_data") above the sentinel.
+# @bazel2gn:skip
+resource(
+    name = "four_colors_webm",
+    src = "data/four-colors.webm",
+    dest = "data/four-colors.webm",
+)
+
+fx_packaged_binary(
+    name = "http_server_bin_packaged",
+    binary = ":http_server_bin",
+    binary_name = "http_server_bin",
+)
+
+fx_component_manifest(
+    name = "http_server_manifest",
+    testonly = True,
+    component_name = "http_server",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/http_server.cml",
+)
+
+fx_component(
+    name = "http_server_component",
+    testonly = True,
+    compiled_manifest = ":http_server_manifest",
+    # Preserve unrestricted visibility from the original BUILD.gn target.
+    visibility = ["//:__subpackages__"],
+    deps = [
+        ":http_server_bin_packaged",
+        # TODO(https://fxbug.dev/570694755): In GN, these resources are
+        # packaged via data_deps = [ ":http_server_data" ] on :http_server_bin.
+        # @bazel2gn:skip
+        ":dynamic_html",
+        # TODO(https://fxbug.dev/570694755): In GN, these resources are
+        # packaged via data_deps = [ ":http_server_data" ] on :http_server_bin.
+        # @bazel2gn:skip
+        ":four_colors_webm",
+        # TODO(https://fxbug.dev/570694755): In GN, these resources are
+        # packaged via data_deps = [ ":http_server_data" ] on :http_server_bin.
+        # @bazel2gn:skip
+        ":static_html",
+        # TODO(https://fxbug.dev/570694755): In GN, these resources are
+        # packaged via data_deps = [ ":http_server_data" ] on :http_server_bin.
+        # @bazel2gn:skip
+        ":video_html",
+    ],
+)
+
+fx_package(
+    name = "http_server_package",
+    package_name = "http_server",
+    testonly = True,
+    components = [":http_server_component"],
+)

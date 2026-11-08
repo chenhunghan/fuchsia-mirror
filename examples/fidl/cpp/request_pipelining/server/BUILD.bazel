@@ -1,0 +1,56 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/cc:fx_cc_binary.bzl",
+    "fx_cc_binary",
+)
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+# fx_cc_binary names the binary after the target; GN sets output_name.
+# @bazel2gn:raw_attribute:output_name = "fidl_echo_launcher_cpp_server"
+fx_cc_binary(
+    name = "bin",
+    srcs = ["main.cc"],
+    tags = ["manual"],
+    deps = [
+        "//examples/fidl/fuchsia.examples:fuchsia.examples_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/component/outgoing/cpp",
+        "//sdk/lib/syslog/cpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "fidl_echo_launcher_cpp_server",
+)
+
+fx_component_manifest(
+    name = "echo-server-manifest",
+    component_name = "echo_server",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/server.cml",
+)
+
+fx_component(
+    name = "echo-server",
+    compiled_manifest = ":echo-server-manifest",
+    visibility = [
+        "//examples/fidl/cpp/request_pipelining:__pkg__",
+        "//examples/fidl/echo-realm:__pkg__",
+    ],
+    deps = [":bin_packaged"],
+)

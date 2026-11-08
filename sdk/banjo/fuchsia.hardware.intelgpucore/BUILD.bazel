@@ -1,0 +1,22 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fidl_library(
+    name = "fuchsia.hardware.intelgpucore",
+    srcs = ["intel-gpu-core.fidl"],
+    enable_banjo = True,
+    enable_cpp = False,
+    enable_rust_next = False,
+    visibility = [
+        "//src/graphics/display/drivers/intel-display:__pkg__",
+        "//src/graphics/drivers/msd-intel-gen/src:__pkg__",
+    ],
+    deps = [
+        "//zircon/vdso/zx",
+    ],
+)

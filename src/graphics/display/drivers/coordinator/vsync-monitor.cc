@@ -122,16 +122,17 @@ zx::duration VsyncMonitor::TimeSinceLastVsync() const {
 void VsyncMonitor::UpdateStatistics() {
   time_since_last_vsync_sampled_ns_property_.Set(TimeSinceLastVsync().to_nsecs());
 
-  if (vsync_stalled_) {
-    return;
-  }
+  if (!vsync_stalled_) {
+    zx::time_monotonic now = zx::clock::get_monotonic();
+    zx::duration since_last_vsync =
+        now - last_vsync_timestamp_mono_.load(std::memory_order_relaxed);
 
-  zx::time_monotonic now = zx::clock::get_monotonic();
-  zx::duration since_last_vsync = now - last_vsync_timestamp_mono_.load();
-
-  if (since_last_vsync > kVsyncStallThreshold) {
-    vsync_stalled_ = true;
-    vsync_stalls_detected_.Add(1);
+    if (since_last_vsync > kVsyncStallThreshold) {
+      vsync_stalled_ = true;
+      ++vsync_stalls_count_;
+      current_stall_start_boot_ = zx::clock::get_boot();
+      vsync_stalls_detected_.Add(1);
+    }
   }
 
   zx_status_t status = updater_.PostDelayed(&dispatcher_, kVsyncMonitorInterval);
@@ -161,6 +162,7 @@ void VsyncMonitor::OnVsync(display::DisplayId display_id, zx::time_monotonic vsy
   last_vsync_interval_boot_ns_property_.Set(vsync_interval_duration_boot.to_nsecs());
 
   vsync_count_property_.Add(1);
+  ++vsync_count_;
 
   // The first Vsync event has no predecessor to be measured against, and an
   // interval that spans two displays does not describe either display.

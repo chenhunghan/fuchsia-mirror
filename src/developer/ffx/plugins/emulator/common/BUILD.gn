@@ -43,6 +43,7 @@ if (is_host) {
     ]
     deps = [
       "//src/developer/ffx/lib/fho:lib",
+      "//src/developer/ffx/lib/process:lib",
       "//third_party/rust_crates:anyhow",
       "//third_party/rust_crates:cfg-if",
       "//third_party/rust_crates:mockall",
@@ -64,6 +65,7 @@ if (is_host) {
     edition = "2024"
     deps = [
              "//src/developer/ffx/lib/fho:lib",
+             "//src/developer/ffx/lib/process:lib",
              "//third_party/rust_crates:anyhow",
              "//third_party/rust_crates:cfg-if",
              "//third_party/rust_crates:mockall",

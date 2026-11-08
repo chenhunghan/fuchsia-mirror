@@ -387,14 +387,15 @@ impl<T: Driver> DriverLocalServerHandler<Transport> for LifecycleHandler<'_, T> 
 mod tests {
     use super::*;
     use crate::{
-        DriverError, HealthAlert, HealthAlertReporter, HealthCheckRequest, HealthCheckResponse,
-        HealthCheckResult, HealthCondition, HealthDiagnosticItem, HealthDiagnosticValue,
-        HealthStatus,
+        DriverError, HealthAlert, HealthAlertLatch, HealthAlertReporter, HealthCheckRequest,
+        HealthCheckResponse, HealthCheckResult, HealthCondition, HealthDiagnosticItem,
+        HealthDiagnosticValue, HealthStatus,
     };
 
     use fdf::{CurrentDispatcher, OnDispatcher};
     use fdf_env::test::spawn_in_driver;
     use fidl_next_fuchsia_driver_framework::DriverClientHandler;
+    use fuchsia_sync::Mutex;
     use futures::StreamExt;
     use futures::channel::{mpsc, oneshot};
     use zx::Status;
@@ -810,9 +811,6 @@ mod tests {
 
                 let err = client.health_check(HealthCheckRequest::Deep).await.unwrap();
                 assert_eq!(err, Err(HealthCheckError::NotSupported));
-                let unknown =
-                    client.health_check(HealthCheckRequest::UnknownOrdinal_(99)).await.unwrap();
-                assert_eq!(unknown, Err(HealthCheckError::NotSupported));
 
                 client.stop().await.unwrap();
             },
@@ -822,8 +820,7 @@ mod tests {
     /// Signals `test_stop_with_hung_health_check` once the hung check has been entered. Only
     /// that test's driver type touches it, so a concurrently running test cannot consume the
     /// sender.
-    static HUNG_HEALTH_CHECK_STARTED: std::sync::Mutex<Option<oneshot::Sender<()>>> =
-        std::sync::Mutex::new(None);
+    static HUNG_HEALTH_CHECK_STARTED: Mutex<Option<oneshot::Sender<()>>> = Mutex::new(None);
 
     /// Never answers a health check and signals `HUNG_HEALTH_CHECK_STARTED` on entry.
     struct SignallingHungHealthCheckDriver;
@@ -837,7 +834,7 @@ mod tests {
         async fn stop(&self) {}
 
         async fn health_check(&self, _request: HealthCheckRequest) -> HealthCheckResult {
-            if let Some(tx) = HUNG_HEALTH_CHECK_STARTED.lock().unwrap().take() {
+            if let Some(tx) = HUNG_HEALTH_CHECK_STARTED.lock().take() {
                 let _ = tx.send(());
             }
             futures::future::pending().await
@@ -852,7 +849,7 @@ mod tests {
                 client.start(DriverStartArgs::default()).await.unwrap().unwrap();
 
                 let (started_tx, started_rx) = oneshot::channel();
-                *HUNG_HEALTH_CHECK_STARTED.lock().unwrap() = Some(started_tx);
+                *HUNG_HEALTH_CHECK_STARTED.lock() = Some(started_tx);
                 let hc_client = client.clone();
                 let hc_task = CurrentDispatcher
                     .compute(async move { hc_client.health_check(HealthCheckRequest::Fast).await });
@@ -901,11 +898,11 @@ mod tests {
 
     /// Lets `test_forwards_health_alerts` report an alert from outside the driver after it has
     /// started, the way a driver's own background task would.
-    static ALERTING_DRIVER_REPORTER: std::sync::Mutex<Option<HealthAlertReporter>> =
-        std::sync::Mutex::new(None);
+    static ALERTING_DRIVER_REPORTER: Mutex<Option<HealthAlertReporter>> = Mutex::new(None);
+    static ALERTING_DRIVER_LATCH: Mutex<Option<HealthAlertLatch>> = Mutex::new(None);
 
-    /// Reports an alert from inside `start` and publishes its reporter for the test to report
-    /// another later.
+    /// Reports an alert from inside `start` and publishes its reporter and shared latch for the
+    /// test to use later.
     struct AlertingDriver;
 
     impl Driver for AlertingDriver {
@@ -915,7 +912,11 @@ mod tests {
             context.report_health_alert(HealthAlert::UpstreamNeighborFault(
                 HealthCheckResponse::default(),
             ));
-            *ALERTING_DRIVER_REPORTER.lock().unwrap() = Some(context.health_alert_reporter());
+            *ALERTING_DRIVER_REPORTER.lock() = Some(context.health_alert_reporter());
+            // Every call returns a handle onto the same per-driver latch.
+            let latch = context.health_alert_latch();
+            latch.raise_degraded("BUS_RETRIES", "retrying bus transfer");
+            *ALERTING_DRIVER_LATCH.lock() = Some(context.health_alert_latch());
             Ok(Self)
         }
         async fn stop(&self) {}
@@ -929,9 +930,16 @@ mod tests {
                 client.start(DriverStartArgs::default()).await.unwrap().unwrap();
                 // The alert reported during `start` is sent over the `Driver` channel.
                 assert!(matches!(alerts.next().await, Some(HealthAlert::UpstreamNeighborFault(_))));
+                // So is the latch's first raise.
+                let Some(HealthAlert::SelfFault(latched)) = alerts.next().await else {
+                    panic!("expected latched SelfFault");
+                };
+                assert_eq!(
+                    latched.conditions.unwrap()[0].reason_code.as_deref(),
+                    Some("BUS_RETRIES")
+                );
 
-                let reporter =
-                    ALERTING_DRIVER_REPORTER.lock().unwrap().take().expect("driver started");
+                let reporter = ALERTING_DRIVER_REPORTER.lock().take().expect("driver started");
                 reporter.report_health_alert(HealthAlert::SelfFault(HealthCheckResponse {
                     conditions: Some(vec![HealthCondition {
                         status: Some(HealthStatus::Unhealthy),
@@ -947,6 +955,17 @@ mod tests {
                     details.conditions.unwrap()[0].reason_code.as_deref(),
                     Some("DMA_STALLED")
                 );
+
+                // The second handle shares state with the one used in `start`: a duplicate raise
+                // is deduplicated (no alert), and clearing the only condition emits a recovery.
+                let latch = ALERTING_DRIVER_LATCH.lock().take().expect("driver started");
+                latch.raise_degraded("BUS_RETRIES", "retrying bus transfer");
+                assert_eq!(latch.snapshot()[0].occurrence_count, Some(2));
+                latch.clear("BUS_RETRIES");
+                let Some(HealthAlert::SelfFault(recovered)) = alerts.next().await else {
+                    panic!("expected recovery SelfFault");
+                };
+                assert!(recovered.conditions.is_none());
 
                 client.stop().await.unwrap();
             },

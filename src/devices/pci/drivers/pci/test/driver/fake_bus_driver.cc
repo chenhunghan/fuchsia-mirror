@@ -4,10 +4,8 @@
 
 #include "fake_bus_driver.h"
 
-#include <lib/ddk/binding_driver.h>
-#include <lib/ddk/driver.h>
-#include <lib/ddk/platform-defs.h>
-#include <lib/fit/defer.h>
+#include <fidl/fuchsia.kernel/cpp/wire.h>
+#include <lib/driver/component/cpp/driver_export2.h>
 
 #include "src/devices/pci/drivers/pci/device.h"
 #include "src/devices/pci/drivers/pci/test/driver/driver_tests.h"
@@ -17,65 +15,53 @@
 
 namespace pci {
 
-zx_status_t FakeBusDriver::Create(zx_device_t* parent, const char* name, uint8_t start_bus,
-                                  uint8_t end_bus, bool is_extended) {
-  auto bus_driver =
-      std::unique_ptr<FakeBusDriver>(new FakeBusDriver(parent, start_bus, end_bus, is_extended));
-  zx_status_t st = bus_driver->DdkAdd(ddk::DeviceAddArgs(name).set_flags(DEVICE_ADD_NON_BINDABLE));
-  if (st != ZX_OK) {
-    return st;
-  }
+zx::result<> FakeBusDriver::Start(fdf::DriverContext context) {
+  bus_.SetDriverContext(outgoing().get(), dispatcher());
 
-  auto cleanup = fit::defer([&bus_driver] { bus_driver->DdkAsyncRemove(); });
-  zx::unowned_resource ioport_resource(get_ioport_resource(parent));
-  if (ioport_resource->is_valid()) {
-    zx::resource dup;
-    if (ioport_resource->duplicate(ZX_RIGHT_SAME_RIGHTS, &dup) == ZX_OK) {
-      bus_driver->upstream().fake_pio_regions().SetResource(std::move(dup));
+  auto ioport_client_end = context.incoming().Connect<fuchsia_kernel::IoportResource>();
+  if (ioport_client_end.is_ok()) {
+    auto ioport_res = fidl::WireCall(ioport_client_end.value())->Get();
+    if (ioport_res.ok() && ioport_res->resource.is_valid()) {
+      upstream_.fake_pio_regions().SetResource(std::move(ioport_res->resource));
     }
   }
-  st = bus_driver->CreateDevice(bus_driver->test_bdf(), kFakeQuadroDeviceConfig.data(),
-                                kFakeQuadroDeviceConfig.max_size());
+
+  zx_status_t st =
+      CreateDevice(test_bdf(), kFakeQuadroDeviceConfig.data(), kFakeQuadroDeviceConfig.max_size());
   if (st != ZX_OK) {
-    return st;
+    return zx::error(st);
   }
 
-  bus_driver->upstream().ConfigureDownstreamDevices();
-  cleanup.cancel();
-  [[maybe_unused]] void* unused = bus_driver.release();
+  upstream_.ConfigureDownstreamDevices();
+  return zx::ok();
+}
 
-  return ZX_OK;
+void FakeBusDriver::Stop(fdf::StopCompleter completer) {
+  Teardown();
+  completer(zx::ok());
+}
+
+void FakeBusDriver::Teardown() {
+  upstream_.DisableDownstream();
+  upstream_.UnplugDownstream();
 }
 
 // Creates a device, seeding the configuration space with a given buffer if provided.
 zx_status_t FakeBusDriver::CreateDevice(fuchsia_hardware_pci::wire::Bdf bdf, uint8_t* base_cfg,
                                         size_t base_cfg_size, uint16_t vid, uint16_t did) {
-  fdf::MmioView view = bus_.pciroot().ecam().mmio().View(
-      GetConfigOffsetInCam(bdf, 0, /*is_extended=*/bus_.pciroot().is_extended()),
-      zx_system_get_page_size());
+  fdf::MmioView view = bus_.ecam().mmio().View(
+      GetConfigOffsetInCam(bdf, 0, /*is_extended=*/bus_.is_extended()), zx_system_get_page_size());
   for (uint32_t off = 0; off < base_cfg_size; off++) {
     view.Write(base_cfg[off], off);
   }
 
   std::unique_ptr<Config> cfg = std::make_unique<FakeMmioConfig>(bdf, std::move(view));
-  cfg->Write(Config::kVendorId, vid);
-  cfg->Write(Config::kDeviceId, did);
-  return pci::Device::Create(this->zxdev(), std::move(cfg), &upstream(), bus().bdi(),
+  config::VendorId.FromValue(vid).WriteTo(cfg.get());
+  config::DeviceId.FromValue(did).WriteTo(cfg.get());
+  return pci::Device::Create(std::move(cfg), &upstream(), bus().bdi(),
                              /*has_acpi=*/false, /*has_devicetree=*/false);
 }
 
 }  // namespace pci
 
-static zx_status_t fake_pci_bus_driver_bind(void* ctx, zx_device_t* parent) {
-  return pci::FakeBusDriver::Create(parent, kFakeBusDriverName, /*start_bus=*/0, /*end_bus=*/1,
-                                    /*is_extended=*/false);
-}
-
-static const zx_driver_ops_t fake_pci_bus_driver_ops = []() {
-  zx_driver_ops_t ops = {};
-  ops.version = DRIVER_OPS_VERSION;
-  ops.bind = fake_pci_bus_driver_bind;
-  return ops;
-}();
-
-ZIRCON_DRIVER(fake_pci_bus_driver, fake_pci_bus_driver_ops, "zircon", "0.1");
+FUCHSIA_DRIVER_EXPORT2(pci::FakeBusDriver);

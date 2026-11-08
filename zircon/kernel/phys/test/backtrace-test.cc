@@ -11,7 +11,7 @@
 #include <zircon/assert.h>
 
 #include <ktl/iterator.h>
-#include <phys/stack.h>
+#include <phys/runtime/stack.h>
 #include <phys/symbolize.h>
 
 #include "test-main.h"
@@ -112,7 +112,7 @@ ptrdiff_t PHYS_SINGLETHREAD CheckAsmMacros() {
 
 [[gnu::noinline]] int TestMain(void* bootloader_data, ktl::optional<EarlyBootZbi> zbi,
                                arch::EarlyTicks) {
-  MainSymbolize symbolize("backtrace-test");
+  Symbolize symbolize("backtrace-test");
 
   if (zbi) {
     ZX_ASSERT(Foo() == 4);  // _start -> PhysMain -> ZbiMain -> TestMain -> Foo -> Otter...

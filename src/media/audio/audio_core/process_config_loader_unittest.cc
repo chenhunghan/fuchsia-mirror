@@ -6,8 +6,10 @@
 
 #include <lib/zx/time.h>
 
+#include <cctype>
 #include <iostream>
 #include <ostream>
+#include <string>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -17,7 +19,19 @@
 namespace media::audio {
 namespace {
 
-constexpr char kTestAudioCoreConfigFilename[] = "/tmp/audio_core_config.json";
+std::string TestConfigFilename() {
+  const auto* test_info = ::testing::UnitTest::GetInstance()->current_test_info();
+  if (test_info) {
+    std::string test_name = std::string(test_info->test_suite_name()) + "_" + test_info->name();
+    for (char& c : test_name) {
+      if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') {
+        c = '_';
+      }
+    }
+    return "/tmp/audio_core_config_" + test_name + ".json";
+  }
+  return "/tmp/audio_core_config.json";
+}
 
 TEST(ProcessConfigLoaderTest, LoadProcessConfigWithOnlyVolumeCurve) {
   static const std::string kConfigWithVolumeCurve =
@@ -33,10 +47,10 @@ TEST(ProcessConfigLoaderTest, LoadProcessConfigWithOnlyVolumeCurve) {
       }
     ]
   })JSON";
-  ASSERT_TRUE(files::WriteFile(kTestAudioCoreConfigFilename, kConfigWithVolumeCurve.data(),
+  ASSERT_TRUE(files::WriteFile(TestConfigFilename(), kConfigWithVolumeCurve.data(),
                                kConfigWithVolumeCurve.size()));
 
-  auto result = ProcessConfigLoader::LoadProcessConfig(kTestAudioCoreConfigFilename);
+  auto result = ProcessConfigLoader::LoadProcessConfig(TestConfigFilename().c_str());
   ASSERT_TRUE(result.is_ok()) << result.error();
   const auto config = result.take_value();
   EXPECT_FLOAT_EQ(config.default_volume_curve().VolumeToDb(0.0), -160.0);
@@ -57,10 +71,10 @@ TEST(ProcessConfigLoaderTest, LoadProcessConfigWithMutedVolumeCurve) {
       }
     ]
   })JSON";
-  ASSERT_TRUE(files::WriteFile(kTestAudioCoreConfigFilename, kConfigWithVolumeCurve.data(),
+  ASSERT_TRUE(files::WriteFile(TestConfigFilename(), kConfigWithVolumeCurve.data(),
                                kConfigWithVolumeCurve.size()));
 
-  auto result = ProcessConfigLoader::LoadProcessConfig(kTestAudioCoreConfigFilename);
+  auto result = ProcessConfigLoader::LoadProcessConfig(TestConfigFilename().c_str());
   ASSERT_TRUE(result.is_ok()) << result.error();
   const auto config = result.take_value();
   EXPECT_FLOAT_EQ(config.default_volume_curve().VolumeToDb(0.0), -160.0);
@@ -86,10 +100,10 @@ TEST(ProcessConfigLoaderTest, LoadProcessConfigWithMixProfile) {
       }
     ]
   })JSON";
-  ASSERT_TRUE(files::WriteFile(kTestAudioCoreConfigFilename, kConfigWithMixProfile.data(),
+  ASSERT_TRUE(files::WriteFile(TestConfigFilename(), kConfigWithMixProfile.data(),
                                kConfigWithMixProfile.size()));
 
-  auto result = ProcessConfigLoader::LoadProcessConfig(kTestAudioCoreConfigFilename);
+  auto result = ProcessConfigLoader::LoadProcessConfig(TestConfigFilename().c_str());
   ASSERT_TRUE(result.is_ok()) << result.error();
   const auto config = result.take_value();
   EXPECT_EQ(config.mix_profile_config().capacity.to_usecs(), 1000);
@@ -134,7 +148,7 @@ TEST(ProcessConfigLoaderTest, LoadProcessConfigWithRoutingPolicy) {
       }
     ]
   })JSON";
-  ASSERT_TRUE(files::WriteFile(kTestAudioCoreConfigFilename, kConfigWithRoutingPolicy.data(),
+  ASSERT_TRUE(files::WriteFile(TestConfigFilename(), kConfigWithRoutingPolicy.data(),
                                kConfigWithRoutingPolicy.size()));
 
   const audio_stream_unique_id_t expected_id = {.data = {0x34, 0x38, 0x4e, 0x7d, 0xa9, 0xd5, 0x2c,
@@ -144,7 +158,7 @@ TEST(ProcessConfigLoaderTest, LoadProcessConfigWithRoutingPolicy) {
                                                         0x81, 0x42, 0xa9, 0x76, 0x5b, 0xae, 0xb6,
                                                         0x22, 0x3a}};
 
-  const auto result = ProcessConfigLoader::LoadProcessConfig(kTestAudioCoreConfigFilename);
+  const auto result = ProcessConfigLoader::LoadProcessConfig(TestConfigFilename().c_str());
   ASSERT_TRUE(result.is_ok()) << result.error();
 
   auto& config = result.value().device_config();
@@ -197,7 +211,7 @@ TEST(ProcessConfigLoaderTest, LoadProcessConfigWithRoutingMultipleDeviceIds) {
       }
     ]
   })JSON";
-  ASSERT_TRUE(files::WriteFile(kTestAudioCoreConfigFilename, kConfigWithRoutingPolicy.data(),
+  ASSERT_TRUE(files::WriteFile(TestConfigFilename(), kConfigWithRoutingPolicy.data(),
                                kConfigWithRoutingPolicy.size()));
 
   const audio_stream_unique_id_t expected_id1 = {.data = {0x34, 0x38, 0x4e, 0x7d, 0xa9, 0xd5, 0x2c,
@@ -207,7 +221,7 @@ TEST(ProcessConfigLoaderTest, LoadProcessConfigWithRoutingMultipleDeviceIds) {
                                                           0x80, 0x62, 0xa9, 0x76, 0x5b, 0xae, 0xb6,
                                                           0x05, 0x3b}};
 
-  auto result = ProcessConfigLoader::LoadProcessConfig(kTestAudioCoreConfigFilename);
+  auto result = ProcessConfigLoader::LoadProcessConfig(TestConfigFilename().c_str());
   ASSERT_TRUE(result.is_ok()) << result.error();
 
   auto& config = result.value().device_config();
@@ -253,14 +267,14 @@ TEST(ProcessConfigLoaderTest, LoadProcessConfigWithRoutingPolicyNoDefault) {
       }
     ]
   })JSON";
-  ASSERT_TRUE(files::WriteFile(kTestAudioCoreConfigFilename, kConfigWithRoutingPolicy.data(),
+  ASSERT_TRUE(files::WriteFile(TestConfigFilename(), kConfigWithRoutingPolicy.data(),
                                kConfigWithRoutingPolicy.size()));
 
   const audio_stream_unique_id_t unknown_id = {.data = {0x32, 0x38, 0x4e, 0x7d, 0xa9, 0xd5, 0x2c,
                                                         0x81, 0x42, 0xa9, 0x76, 0x5b, 0xae, 0xb6,
                                                         0x22, 0x3a}};
 
-  auto result = ProcessConfigLoader::LoadProcessConfig(kTestAudioCoreConfigFilename);
+  auto result = ProcessConfigLoader::LoadProcessConfig(TestConfigFilename().c_str());
   ASSERT_TRUE(result.is_ok()) << result.error();
 
   auto& config = result.value().device_config();
@@ -303,10 +317,10 @@ TEST(ProcessConfigLoaderTest, RejectConfigWithUnknownStreamTypes) {
       }
     ]
   })JSON";
-  ASSERT_TRUE(files::WriteFile(kTestAudioCoreConfigFilename, kConfigWithRoutingPolicy.data(),
+  ASSERT_TRUE(files::WriteFile(TestConfigFilename(), kConfigWithRoutingPolicy.data(),
                                kConfigWithRoutingPolicy.size()));
 
-  auto result = ProcessConfigLoader::LoadProcessConfig(kTestAudioCoreConfigFilename);
+  auto result = ProcessConfigLoader::LoadProcessConfig(TestConfigFilename().c_str());
   ASSERT_TRUE(result.is_error());
   ASSERT_THAT(result.error(), ::testing::HasSubstr("Parse error: Schema validation error"));
   ASSERT_THAT(
@@ -341,10 +355,10 @@ TEST(ProcessConfigLoaderTest, LoadProcessConfigWithRoutingPolicyInsufficientCove
       }
     ]
   })JSON";
-  ASSERT_TRUE(files::WriteFile(kTestAudioCoreConfigFilename, kConfigWithRoutingPolicy.data(),
+  ASSERT_TRUE(files::WriteFile(TestConfigFilename(), kConfigWithRoutingPolicy.data(),
                                kConfigWithRoutingPolicy.size()));
 
-  auto result = ProcessConfigLoader::LoadProcessConfig(kTestAudioCoreConfigFilename);
+  auto result = ProcessConfigLoader::LoadProcessConfig(TestConfigFilename().c_str());
   ASSERT_TRUE(result.is_error());
   ASSERT_EQ(result.error(),
             "Parse error: Failed to parse output device policies: No output to support usage "
@@ -379,10 +393,10 @@ TEST(ProcessConfigLoaderTest, AllowConfigWithoutUltrasound) {
       }
     ]
   })JSON";
-  ASSERT_TRUE(files::WriteFile(kTestAudioCoreConfigFilename, kConfigWithRoutingPolicy.data(),
+  ASSERT_TRUE(files::WriteFile(TestConfigFilename(), kConfigWithRoutingPolicy.data(),
                                kConfigWithRoutingPolicy.size()));
 
-  auto result = ProcessConfigLoader::LoadProcessConfig(kTestAudioCoreConfigFilename);
+  auto result = ProcessConfigLoader::LoadProcessConfig(TestConfigFilename().c_str());
   ASSERT_TRUE(result.is_ok()) << result.error();
 }
 
@@ -415,10 +429,10 @@ TEST(ProcessConfigLoaderTest, LoadProcessConfigWithOutputGains) {
       }
     ]
   })JSON";
-  ASSERT_TRUE(files::WriteFile(kTestAudioCoreConfigFilename, kConfigWithDriverGain.data(),
+  ASSERT_TRUE(files::WriteFile(TestConfigFilename(), kConfigWithDriverGain.data(),
                                kConfigWithDriverGain.size()));
 
-  auto result = ProcessConfigLoader::LoadProcessConfig(kTestAudioCoreConfigFilename);
+  auto result = ProcessConfigLoader::LoadProcessConfig(TestConfigFilename().c_str());
   ASSERT_TRUE(result.is_ok()) << result.error();
 
   const audio_stream_unique_id_t expected_id = {.data = {0x34, 0x38, 0x4e, 0x7d, 0xa9, 0xd5, 0x2c,
@@ -458,10 +472,10 @@ TEST(ProcessConfigLoaderTest, LoadProcessConfigWithInputGains) {
       }
     ]
   })JSON";
-  ASSERT_TRUE(files::WriteFile(kTestAudioCoreConfigFilename, kConfigWithDriverGain.data(),
+  ASSERT_TRUE(files::WriteFile(TestConfigFilename(), kConfigWithDriverGain.data(),
                                kConfigWithDriverGain.size()));
 
-  auto result = ProcessConfigLoader::LoadProcessConfig(kTestAudioCoreConfigFilename);
+  auto result = ProcessConfigLoader::LoadProcessConfig(TestConfigFilename().c_str());
   ASSERT_TRUE(result.is_ok()) << result.error();
 
   const audio_stream_unique_id_t expected_id = {.data = {0x34, 0x38, 0x4e, 0x7d, 0xa9, 0xd5, 0x2c,
@@ -505,7 +519,7 @@ TEST(ProcessConfigLoaderTest, LoadProcessConfigWithInputDevices) {
       }
     ]
   })JSON";
-  ASSERT_TRUE(files::WriteFile(kTestAudioCoreConfigFilename, kConfigWithInputDevices.data(),
+  ASSERT_TRUE(files::WriteFile(TestConfigFilename(), kConfigWithInputDevices.data(),
                                kConfigWithInputDevices.size()));
 
   const audio_stream_unique_id_t expected_id = {.data = {0x34, 0x38, 0x4e, 0x7d, 0xa9, 0xd5, 0x2c,
@@ -515,7 +529,7 @@ TEST(ProcessConfigLoaderTest, LoadProcessConfigWithInputDevices) {
                                                         0x81, 0x42, 0xa9, 0x76, 0x5b, 0xae, 0xb6,
                                                         0x22, 0x3a}};
 
-  auto result = ProcessConfigLoader::LoadProcessConfig(kTestAudioCoreConfigFilename);
+  auto result = ProcessConfigLoader::LoadProcessConfig(TestConfigFilename().c_str());
   ASSERT_TRUE(result.is_ok()) << result.error();
 
   auto& config = result.value().device_config();
@@ -650,10 +664,10 @@ TEST(ProcessConfigLoaderTest, LoadProcessConfigWithEffectsV1) {
       }
     ]
   })JSON";
-  ASSERT_TRUE(files::WriteFile(kTestAudioCoreConfigFilename, kConfigWithEffects.data(),
-                               kConfigWithEffects.size()));
+  ASSERT_TRUE(
+      files::WriteFile(TestConfigFilename(), kConfigWithEffects.data(), kConfigWithEffects.size()));
 
-  auto result = ProcessConfigLoader::LoadProcessConfig(kTestAudioCoreConfigFilename);
+  auto result = ProcessConfigLoader::LoadProcessConfig(TestConfigFilename().c_str());
   ASSERT_TRUE(result.is_ok()) << result.error();
 
   const audio_stream_unique_id_t device_id = {.data = {0x34, 0x38, 0x4e, 0x7d, 0xa9, 0xd5, 0x2c,
@@ -833,10 +847,10 @@ TEST(ProcessConfigLoaderTest, LoadProcessConfigWithEffectsV2) {
       }
     ]
   })JSON";
-  ASSERT_TRUE(files::WriteFile(kTestAudioCoreConfigFilename, kConfigWithEffects.data(),
-                               kConfigWithEffects.size()));
+  ASSERT_TRUE(
+      files::WriteFile(TestConfigFilename(), kConfigWithEffects.data(), kConfigWithEffects.size()));
 
-  auto result = ProcessConfigLoader::LoadProcessConfig(kTestAudioCoreConfigFilename);
+  auto result = ProcessConfigLoader::LoadProcessConfig(TestConfigFilename().c_str());
   ASSERT_TRUE(result.is_ok()) << result.error();
 
   const audio_stream_unique_id_t device_id = {.data = {0x34, 0x38, 0x4e, 0x7d, 0xa9, 0xd5, 0x2c,
@@ -931,10 +945,10 @@ TEST(ProcessConfigLoaderTest, FileNotFound) {
 
 TEST(ProcessConfigLoaderTest, RejectConfigWithoutVolumeCurve) {
   static const std::string kConfigWithoutVolumeCurve = R"JSON({  })JSON";
-  ASSERT_TRUE(files::WriteFile(kTestAudioCoreConfigFilename, kConfigWithoutVolumeCurve.data(),
+  ASSERT_TRUE(files::WriteFile(TestConfigFilename(), kConfigWithoutVolumeCurve.data(),
                                kConfigWithoutVolumeCurve.size()));
 
-  auto result = ProcessConfigLoader::LoadProcessConfig(kTestAudioCoreConfigFilename);
+  auto result = ProcessConfigLoader::LoadProcessConfig(TestConfigFilename().c_str());
   ASSERT_TRUE(result.is_error());
   ASSERT_THAT(result.error(), ::testing::HasSubstr("Parse error: Schema validation error"));
   ASSERT_THAT(result.error(), ::testing::HasSubstr("\"required\":"));
@@ -959,10 +973,10 @@ TEST(ProcessConfigLoaderTest, RejectConfigWithUnknownKeys) {
       }
     ]
   })JSON";
-  ASSERT_TRUE(files::WriteFile(kTestAudioCoreConfigFilename, kConfigWithExtraKeys.data(),
+  ASSERT_TRUE(files::WriteFile(TestConfigFilename(), kConfigWithExtraKeys.data(),
                                kConfigWithExtraKeys.size()));
 
-  auto result = ProcessConfigLoader::LoadProcessConfig(kTestAudioCoreConfigFilename);
+  auto result = ProcessConfigLoader::LoadProcessConfig(TestConfigFilename().c_str());
   ASSERT_TRUE(result.is_error());
   ASSERT_THAT(result.error(), ::testing::HasSubstr("Parse error: Schema validation error"));
   ASSERT_THAT(result.error(), ::testing::HasSubstr("\"additionalProperties\":"));
@@ -1018,10 +1032,10 @@ TEST(ProcessConfigLoaderTest, RejectConfigWithMultipleLoopbackStages) {
       }
     ]
   })JSON";
-  ASSERT_TRUE(files::WriteFile(kTestAudioCoreConfigFilename, kConfigWithVolumeCurve.data(),
+  ASSERT_TRUE(files::WriteFile(TestConfigFilename(), kConfigWithVolumeCurve.data(),
                                kConfigWithVolumeCurve.size()));
 
-  auto result = ProcessConfigLoader::LoadProcessConfig(kTestAudioCoreConfigFilename);
+  auto result = ProcessConfigLoader::LoadProcessConfig(TestConfigFilename().c_str());
   ASSERT_TRUE(result.is_error());
   ASSERT_EQ(
       result.error(),
@@ -1066,10 +1080,10 @@ TEST(ProcessConfigLoaderTest, RejectConfigWithoutLoopbackPointSpecified) {
       }
     ]
   })JSON";
-  ASSERT_TRUE(files::WriteFile(kTestAudioCoreConfigFilename, kConfigWithVolumeCurve.data(),
+  ASSERT_TRUE(files::WriteFile(TestConfigFilename(), kConfigWithVolumeCurve.data(),
                                kConfigWithVolumeCurve.size()));
 
-  auto result = ProcessConfigLoader::LoadProcessConfig(kTestAudioCoreConfigFilename);
+  auto result = ProcessConfigLoader::LoadProcessConfig(TestConfigFilename().c_str());
   ASSERT_TRUE(result.is_error());
   ASSERT_EQ(result.error(),
             "Parse error: Failed to parse output device policies: Device supports loopback but no "
@@ -1158,10 +1172,10 @@ TEST(ProcessConfigLoaderTest, RejectConfigWithInvalidDefaultVolumeRenderUsages) 
       "invalid": 0.0
     }
   })JSON";
-  ASSERT_TRUE(files::WriteFile(kTestAudioCoreConfigFilename, kConfigWithInvalidRenderUsages.data(),
+  ASSERT_TRUE(files::WriteFile(TestConfigFilename(), kConfigWithInvalidRenderUsages.data(),
                                kConfigWithInvalidRenderUsages.size()));
 
-  auto result = ProcessConfigLoader::LoadProcessConfig(kTestAudioCoreConfigFilename);
+  auto result = ProcessConfigLoader::LoadProcessConfig(TestConfigFilename().c_str());
   ASSERT_TRUE(result.is_error());
 }
 
@@ -1214,10 +1228,10 @@ TEST(ProcessConfigLoaderTest, LoadThermalConfigWithStates) {
         }
     ]
   })JSON";
-  ASSERT_TRUE(files::WriteFile(kTestAudioCoreConfigFilename, kConfigWithThermalStates.data(),
+  ASSERT_TRUE(files::WriteFile(TestConfigFilename(), kConfigWithThermalStates.data(),
                                kConfigWithThermalStates.size()));
 
-  auto result = ProcessConfigLoader::LoadProcessConfig(kTestAudioCoreConfigFilename);
+  auto result = ProcessConfigLoader::LoadProcessConfig(TestConfigFilename().c_str());
   ASSERT_TRUE(result.is_ok()) << result.error();
 
   auto config = result.value();
@@ -1402,11 +1416,10 @@ TEST(ProcessConfigLoaderTest, MalformedThermalConfigs) {
 
   for (auto idx = 0u; idx < kMalformedThermalConfigs.size(); ++idx) {
     const auto [bad_case_name, bad_config] = kMalformedThermalConfigs[idx];
-    ASSERT_TRUE(
-        files::WriteFile(kTestAudioCoreConfigFilename, bad_config.data(), bad_config.size()))
+    ASSERT_TRUE(files::WriteFile(TestConfigFilename(), bad_config.data(), bad_config.size()))
         << "case " << idx << " (" << bad_case_name << ") could not write file" << '\n';
 
-    auto result = ProcessConfigLoader::LoadProcessConfig(kTestAudioCoreConfigFilename);
+    auto result = ProcessConfigLoader::LoadProcessConfig(TestConfigFilename().c_str());
     EXPECT_TRUE(result.is_error()) << "'" << bad_case_name << "'";
   }
 }
@@ -1445,14 +1458,14 @@ TEST(ProcessConfigLoaderTest, LoadOutputDevicePolicyWithDefaultPipeline) {
       }
     ]
   })JSON";
-  ASSERT_TRUE(files::WriteFile(kTestAudioCoreConfigFilename, kConfigWithRoutingPolicy.data(),
+  ASSERT_TRUE(files::WriteFile(TestConfigFilename(), kConfigWithRoutingPolicy.data(),
                                kConfigWithRoutingPolicy.size()));
 
   const audio_stream_unique_id_t expected_id = {.data = {0x34, 0x38, 0x4e, 0x7d, 0xa9, 0xd5, 0x2c,
                                                          0x80, 0x62, 0xa9, 0x76, 0x5b, 0xae, 0xb6,
                                                          0x05, 0x3a}};
 
-  const auto result = ProcessConfigLoader::LoadProcessConfig(kTestAudioCoreConfigFilename);
+  const auto result = ProcessConfigLoader::LoadProcessConfig(TestConfigFilename().c_str());
   ASSERT_TRUE(result.is_ok()) << result.error();
 
   auto& config = result.value().device_config().output_device_profile(expected_id);
@@ -1497,14 +1510,14 @@ TEST(ProcessConfigLoaderTest, LoadOutputDevicePolicyWithNoSupportedStreamTypes) 
       }
     ]
   })JSON";
-  ASSERT_TRUE(files::WriteFile(kTestAudioCoreConfigFilename, kConfigWithRoutingPolicy.data(),
+  ASSERT_TRUE(files::WriteFile(TestConfigFilename(), kConfigWithRoutingPolicy.data(),
                                kConfigWithRoutingPolicy.size()));
 
   const audio_stream_unique_id_t expected_id = {.data = {0x34, 0x38, 0x4e, 0x7d, 0xa9, 0xd5, 0x2c,
                                                          0x80, 0x62, 0xa9, 0x76, 0x5b, 0xae, 0xb6,
                                                          0x05, 0x3a}};
 
-  const auto result = ProcessConfigLoader::LoadProcessConfig(kTestAudioCoreConfigFilename);
+  const auto result = ProcessConfigLoader::LoadProcessConfig(TestConfigFilename().c_str());
   ASSERT_TRUE(result.is_ok()) << result.error();
 
   auto& config = result.value().device_config().output_device_profile(expected_id);
@@ -1555,14 +1568,14 @@ TEST(ProcessConfigLoaderTest, LoadOutputDevicePolicyVolumeCurve) {
       }
     ]
   })JSON";
-  ASSERT_TRUE(files::WriteFile(kTestAudioCoreConfigFilename, kConfigWithRoutingPolicy.data(),
+  ASSERT_TRUE(files::WriteFile(TestConfigFilename(), kConfigWithRoutingPolicy.data(),
                                kConfigWithRoutingPolicy.size()));
 
   const audio_stream_unique_id_t expected_id = {.data = {0x34, 0x38, 0x4e, 0x7d, 0xa9, 0xd5, 0x2c,
                                                          0x80, 0x62, 0xa9, 0x76, 0x5b, 0xae, 0xb6,
                                                          0x05, 0x3a}};
 
-  const auto result = ProcessConfigLoader::LoadProcessConfig(kTestAudioCoreConfigFilename);
+  const auto result = ProcessConfigLoader::LoadProcessConfig(TestConfigFilename().c_str());
   ASSERT_TRUE(result.is_ok()) << result.error();
   auto& result_curve =
       result.value().device_config().output_device_profile(expected_id).volume_curve();
@@ -1721,11 +1734,10 @@ TEST(ProcessConfigLoaderTest, RejectConfigsWithIndefiniteDeviceGainDb) {
 
   for (auto idx = 0u; idx < kMalformedDeviceGainDbs.size(); ++idx) {
     const auto [bad_case_name, bad_config] = kMalformedDeviceGainDbs[idx];
-    ASSERT_TRUE(
-        files::WriteFile(kTestAudioCoreConfigFilename, bad_config.data(), bad_config.size()))
+    ASSERT_TRUE(files::WriteFile(TestConfigFilename(), bad_config.data(), bad_config.size()))
         << "case " << idx << " (" << bad_case_name << ") could not write file" << '\n';
 
-    auto result = ProcessConfigLoader::LoadProcessConfig(kTestAudioCoreConfigFilename);
+    auto result = ProcessConfigLoader::LoadProcessConfig(TestConfigFilename().c_str());
     EXPECT_TRUE(result.is_error()) << "'" << bad_case_name << "'";
   }
 }
@@ -1744,10 +1756,10 @@ TEST(ProcessConfigLoaderTest, RejectConfigWithNonPositiveInputDeviceRate) {
         ]
       })JSON"};
 
-  ASSERT_TRUE(files::WriteFile(kTestAudioCoreConfigFilename, kMalformedDeviceRate.data(),
+  ASSERT_TRUE(files::WriteFile(TestConfigFilename(), kMalformedDeviceRate.data(),
                                kMalformedDeviceRate.size()))
       << "Could not write file" << '\n';
-  auto result = ProcessConfigLoader::LoadProcessConfig(kTestAudioCoreConfigFilename);
+  auto result = ProcessConfigLoader::LoadProcessConfig(TestConfigFilename().c_str());
   EXPECT_TRUE(result.is_error()) << "Non-positive device rate";
 }
 
@@ -1834,10 +1846,9 @@ TEST(ProcessConfigLoaderTest, RejectConfigsWithInvalidMixGroupGainValues) {
 
   for (auto idx = 0u; idx < kInvalidMixGroupGains.size(); ++idx) {
     const auto [bad_case_name, bad_config] = kInvalidMixGroupGains[idx];
-    ASSERT_TRUE(
-        files::WriteFile(kTestAudioCoreConfigFilename, bad_config.data(), bad_config.size()))
+    ASSERT_TRUE(files::WriteFile(TestConfigFilename(), bad_config.data(), bad_config.size()))
         << "case " << idx << " (" << bad_case_name << ") could not write file" << '\n';
-    ASSERT_DEATH(ProcessConfigLoader::LoadProcessConfig(kTestAudioCoreConfigFilename), "")
+    ASSERT_DEATH(ProcessConfigLoader::LoadProcessConfig(TestConfigFilename().c_str()), "")
         << bad_case_name;
   }
 }
@@ -1915,11 +1926,10 @@ TEST(ProcessConfigLoaderTest, RejectConfigsWithInvalidVolumeCurves) {
 
   for (auto idx = 0u; idx < kInvalidVolumeCurves.size(); ++idx) {
     const auto [bad_case_name, bad_config] = kInvalidVolumeCurves[idx];
-    ASSERT_TRUE(
-        files::WriteFile(kTestAudioCoreConfigFilename, bad_config.data(), bad_config.size()))
+    ASSERT_TRUE(files::WriteFile(TestConfigFilename(), bad_config.data(), bad_config.size()))
         << "case " << idx << " (" << bad_case_name << ") could not write file" << '\n';
 
-    auto result = ProcessConfigLoader::LoadProcessConfig(kTestAudioCoreConfigFilename);
+    auto result = ProcessConfigLoader::LoadProcessConfig(TestConfigFilename().c_str());
     EXPECT_TRUE(result.is_error()) << "'" << bad_case_name << "'";
   }
 }

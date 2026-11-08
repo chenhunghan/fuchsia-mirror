@@ -20,7 +20,7 @@ class Readme:
     @staticmethod
     def from_text(
         readme_label: GnLabel, applicable_target: GnLabel, file_text: str
-    ) -> "Readme":
+    ) -> Readme:
         package_name = None
         last_license_file_path = ""
         last_license_file_url = ""

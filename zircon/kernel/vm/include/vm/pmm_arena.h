@@ -6,13 +6,10 @@
 #ifndef ZIRCON_KERNEL_VM_INCLUDE_VM_PMM_ARENA_H_
 #define ZIRCON_KERNEL_VM_INCLUDE_VM_PMM_ARENA_H_
 
-#include <lib/zx/result.h>
-#include <trace.h>
 #include <zircon/types.h>
 
 #include <fbl/macros.h>
 #include <vm/page.h>
-#include <vm/phys/arena.h>
 
 #define PMM_ARENA_FLAG_LO_MEM \
   (0x1)  // this arena is contained within architecturally-defined 'low memory'
@@ -26,8 +23,6 @@ typedef struct pmm_arena_info {
   size_t size;
 } pmm_arena_info_t;
 
-class PmmNode;
-
 class PmmArena {
  public:
   constexpr PmmArena() = default;
@@ -35,24 +30,12 @@ class PmmArena {
 
   DISALLOW_COPY_ASSIGN_AND_MOVE(PmmArena);
 
-  // initialize the arena and allocate memory for internal data structures
-  void Init(const PmmArenaSelection& selected, PmmNode* node);
-
-  void InitForTest(const pmm_arena_info_t& info, vm_page_t* page_array);
-
   // accessors
-  const pmm_arena_info_t& info() const { return info_; }
-  const char* name() const { return info_.name; }
   paddr_t base() const { return info_.base; }
   size_t size() const { return info_.size; }
-  paddr_t end() const { return base() + size(); }
-  unsigned int flags() const { return info_.flags; }
 
   vm_page_t* get_page(size_t index) { return &page_array_[index]; }
   size_t get_index(const vm_page_t* page) { return page - page_array_; }
-
-  // find a free run of contiguous pages
-  vm_page_t* FindFreeContiguous(size_t count, uint8_t alignment_log2);
 
   // helpers
   bool page_belongs_to_arena(const vm_page* page) const {

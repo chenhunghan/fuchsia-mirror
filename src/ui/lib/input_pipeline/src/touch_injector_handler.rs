@@ -471,6 +471,7 @@ impl TouchInjectorHandler {
             pointerinjector::EventPhase::Add,
             pointerinjector::EventPhase::Change,
             pointerinjector::EventPhase::Remove,
+            pointerinjector::EventPhase::Cancel,
         ];
 
         let mut events: Vec<pointerinjector::Event> = vec![];
@@ -1296,6 +1297,85 @@ mod tests {
         // Declare expected event.
         let expected_event = create_touch_pointer_sample_event(
             pointerinjector::EventPhase::Add,
+            &contact,
+            Position { x: 20.0, y: 40.0 },
+            event_time,
+        );
+
+        // Await all futures concurrently. If this completes, then the touch event was handled and
+        // matches `expected_event`.
+        let device_fut =
+            handle_device_request_stream(injector_device_request_stream, expected_event);
+        let (handle_result, _) = futures::future::join(handle_event_fut, device_fut).await;
+
+        // No unhandled events.
+        assert_matches!(
+            handle_result.as_slice(),
+            [input_device::InputEvent { handled: input_device::Handled::Yes, .. }]
+        );
+    }
+
+    // Tests that a cancel contact event is handled correctly with a viewport.
+    #[fuchsia::test]
+    async fn cancel_contact_succeeds_with_viewport() {
+        let mut fixtures = TestFixtures::new().await;
+
+        // Add an injector.
+        let (injector_device_proxy, mut injector_device_request_stream) =
+            next_client_old_stream::<pointerinjector::DeviceMarker, pointerinjector_next::Device>();
+        fixtures
+            .touch_handler
+            .mutable_state
+            .borrow_mut()
+            .injectors
+            .insert(1, injector_device_proxy);
+
+        // Request a viewport update.
+        let _watch_viewport_task =
+            fasync::Task::local(fixtures.touch_handler.clone().watch_viewport());
+
+        // Send a viewport update.
+        match fixtures.configuration_request_stream.next().await {
+            Some(Ok(pointerinjector_config::SetupRequest::WatchViewport { responder, .. })) => {
+                responder.send(&create_viewport(0.0, 100.0)).expect("Failed to send viewport.");
+            }
+            other => panic!("Received unexpected value: {:?}", other),
+        };
+
+        // Check that the injector received an updated viewport
+        match injector_device_request_stream.next().await {
+            Some(Ok(pointerinjector::DeviceRequest::InjectEvents { events, .. })) => {
+                assert_eq!(events.len(), 1);
+                assert!(events[0].data.is_some());
+                assert_eq!(
+                    events[0].data,
+                    Some(pointerinjector::Data::Viewport(create_viewport(0.0, 100.0)))
+                );
+            }
+            other => panic!("Received unexpected value: {:?}", other),
+        }
+
+        // Create touch cancel event.
+        let event_time = zx::MonotonicInstant::get();
+        let contact = create_touch_contact(TOUCH_ID, Position { x: 20.0, y: 40.0 });
+        let descriptor = get_touch_screen_device_descriptor();
+        let input_event = input_device::UnhandledInputEvent::try_from(create_touch_screen_event(
+            SortedVecMap::from_iter(vec![(
+                fidl_ui_input::PointerEventPhase::Cancel,
+                vec![contact.clone()],
+            )]),
+            event_time,
+            &descriptor,
+        ))
+        .unwrap();
+
+        // Handle event.
+        let handle_event_fut =
+            fixtures.touch_handler.clone().handle_input_events(vec![input_event.into()]);
+
+        // Declare expected event.
+        let expected_event = create_touch_pointer_sample_event(
+            pointerinjector::EventPhase::Cancel,
             &contact,
             Position { x: 20.0, y: 40.0 },
             event_time,

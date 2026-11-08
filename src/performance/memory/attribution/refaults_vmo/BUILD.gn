@@ -44,6 +44,7 @@ rustc_library("refaults_vmo") {
     "//src/performance/memory/attribution/monitor:*",
     "//src/starnix/runner/lib/kernel_manager:*",
     "//src/storage/fxfs/platform:*",
+    "//src/storage/fxfs/remote_volume:*",
     "//src/storage/fxfs/test-fxfs:*",
     "//src/storage/fxfs/tools:*",
   ]

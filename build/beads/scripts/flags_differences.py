@@ -38,7 +38,7 @@ class FlagsDifferences:
     @staticmethod
     def new_from_lists(
         gn_flags: T.Iterable[str], bazel_flags: T.Iterable[str]
-    ) -> "FlagsDifferences":
+    ) -> FlagsDifferences:
         """Create new instance from two sequences of GN and Bazel flags."""
         gn_flags_set = set(gn_flags)
         bazel_flags_set = set(bazel_flags)
@@ -58,7 +58,7 @@ class FlagsDifferences:
 
     def get_categories_map(
         self, flag_categorizer: FlagCategorizer
-    ) -> dict[str, "FlagsDifferences"]:
+    ) -> dict[str, FlagsDifferences]:
         """Map an input FlagsDifferences value to categories.
 
         Args:

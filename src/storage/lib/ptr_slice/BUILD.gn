@@ -54,5 +54,9 @@ rustc_library("ptr_slice") {
     "//vendor/google/*",
   ]
   with_unit_tests = true
-  deps = [ "//third_party/rust_crates:zerocopy" ]
+  deps = []
+  deps += [ "//third_party/rust_crates:zerocopy" ]
+  if (is_fuchsia) {
+    deps += [ "//sdk/rust/zx" ]
+  }
 }

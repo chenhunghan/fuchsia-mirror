@@ -20,7 +20,6 @@ typedef struct pci_interrupt_modes pci_interrupt_modes_t;
 typedef uint8_t pci_interrupt_mode_t;
 #define PCI_INTERRUPT_MODE_DISABLED UINT8_C(0)
 #define PCI_INTERRUPT_MODE_LEGACY UINT8_C(1)
-#define PCI_INTERRUPT_MODE_LEGACY_NOACK UINT8_C(2)
 #define PCI_INTERRUPT_MODE_MSI UINT8_C(3)
 #define PCI_INTERRUPT_MODE_MSI_X UINT8_C(4)
 #define PCI_INTERRUPT_MODE_COUNT UINT8_C(5)

@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 use fidl::endpoints::{DiscoverableProtocolMarker, create_endpoints};
-use fidl_fuchsia_power_broker::{self as fbroker, LeaseStatus};
+use fidl_fuchsia_power_broker as fbroker;
 use fidl_fuchsia_power_system::{self as fsystem, ApplicationActivityLevel, ExecutionStateLevel};
 use fidl_test_sagcontrol as fctrl;
 use fuchsia_async as fasync;
@@ -331,16 +331,27 @@ async fn test_fsystem_activity_governor_suspend_blocker_and_get_power_element() 
     on_suspend_rx.next().await.unwrap();
     on_resume_rx.next().await.unwrap();
 
-    let lease_control = test_driver_controller
-        .lessor
-        .lease(1)
+    let (lease_client, lease_server) = fbroker::LeaseToken::create();
+    topology
+        .lease(fbroker::LeaseSchema {
+            lease_token: Some(lease_server),
+            lease_name: Some("test_driver_controller".into()),
+            dependencies: Some(vec![fbroker::LeaseDependency {
+                requires_token: Some(test_driver_controller.assertive_dependency_token().unwrap()),
+                requires_level: Some(1),
+                ..Default::default()
+            }]),
+            should_return_pending_lease: Some(true),
+            ..Default::default()
+        })
         .await?
-        .map_err(|e| anyhow::anyhow!("{e:?}"))?
-        .into_proxy();
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
 
+    // Lease remains pending until both test_driver and test_driver_controller complete SetLevel(1).
+    let satisfied_signal = zx::Signals::from_bits_truncate(fbroker::LEASE_SIGNAL_SATISFIED);
     assert_eq!(
-        LeaseStatus::Pending,
-        lease_control.watch_status(LeaseStatus::Unknown).await.unwrap()
+        lease_client.wait_one(satisfied_signal, zx::MonotonicInstant::INFINITE_PAST).to_result(),
+        Err(zx::Status::TIMED_OUT)
     );
 
     let _ = sag_ctrl_state
@@ -364,13 +375,13 @@ async fn test_fsystem_activity_governor_suspend_blocker_and_get_power_element() 
         .unwrap();
     assert_eq!(1, required_level);
     assert_eq!(
-        LeaseStatus::Pending,
-        lease_control.watch_status(LeaseStatus::Unknown).await.unwrap()
+        lease_client.wait_one(satisfied_signal, zx::MonotonicInstant::INFINITE_PAST).to_result(),
+        Err(zx::Status::TIMED_OUT)
     );
     assert!(responder.send().is_ok());
     assert_eq!(
-        LeaseStatus::Pending,
-        lease_control.watch_status(LeaseStatus::Unknown).await.unwrap()
+        lease_client.wait_one(satisfied_signal, zx::MonotonicInstant::INFINITE_PAST).to_result(),
+        Err(zx::Status::TIMED_OUT)
     );
     let (required_level, responder) = tdc_runner_stream
         .next()
@@ -381,10 +392,7 @@ async fn test_fsystem_activity_governor_suspend_blocker_and_get_power_element() 
         .unwrap();
     assert_eq!(1, required_level);
     assert!(responder.send().is_ok());
-    assert_eq!(
-        LeaseStatus::Satisfied,
-        lease_control.watch_status(LeaseStatus::Pending).await.unwrap()
-    );
+    fasync::OnSignals::new(&lease_client, satisfied_signal).await.unwrap();
 
     // TODO(didis): Add test for setting ExecutionStateLevel to Inactive after
     // fxr/1014552 lands.

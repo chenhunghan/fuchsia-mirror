@@ -15,7 +15,7 @@ class VersionCommand(fx_cmd.CommandTransformer[None, "VersionOutput"]):
     """Transformer for `ffx version` command."""
 
     # overrides base class
-    def _to_output(self, output: CommandOutput) -> "VersionOutput":
+    def _to_output(self, output: CommandOutput) -> VersionOutput:
         data = json.loads(output.stdout)
         return VersionOutput(api_level=data["tool_version"]["api_level"])
 

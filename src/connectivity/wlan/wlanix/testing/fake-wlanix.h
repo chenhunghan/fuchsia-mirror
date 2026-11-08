@@ -47,6 +47,7 @@ enum class CommandTag {
   kWifiStaIfaceGetName,
   kWifiStaIfaceSetScanOnlyMode,
   kWifiStaIfaceSetMacAddress,
+  kWifiStaIfaceGetFactoryMacAddress,
   kWifiStaIfaceGetApfPacketFilterSupport,
   kWifiStaIfaceInstallApfPacketFilter,
   kWifiStaIfaceReadApfPacketFilterData,
@@ -88,6 +89,9 @@ struct Command {
     } wifi_get_chip_args;
   } args;
 };
+
+inline constexpr fidl::Array<uint8_t, 6> kFakeStaAddr = {13, 37, 13, 37, 13, 37};
+inline constexpr fidl::Array<uint8_t, 6> kFakeFactoryAddr = {12, 34, 56, 78, 90, 12};
 
 class FakeWlanix : public fidl::WireServer<fuchsia_wlan_wlanix::Wlanix>,
                    public fidl::WireServer<fuchsia_wlan_wlanix::Wifi>,
@@ -159,6 +163,9 @@ class FakeWlanix : public fidl::WireServer<fuchsia_wlan_wlanix::Wlanix>,
                        SetScanOnlyModeCompleter::Sync& completer) override;
   void SetMacAddress(fuchsia_wlan_wlanix::wire::WifiStaIfaceSetMacAddressRequest* request,
                      SetMacAddressCompleter::Sync& completer) override;
+  void GetFactoryMacAddress(
+      fidl::WireServer<fuchsia_wlan_wlanix::WifiStaIface>::GetFactoryMacAddressCompleter::Sync&
+          completer) override;
   void GetApfPacketFilterSupport(GetApfPacketFilterSupportCompleter::Sync& completer) override;
   void InstallApfPacketFilter(
       fuchsia_wlan_wlanix::wire::WifiStaIfaceInstallApfPacketFilterRequest* request,
@@ -191,7 +198,8 @@ class FakeWlanix : public fidl::WireServer<fuchsia_wlan_wlanix::Wlanix>,
                   AddNetworkCompleter::Sync& completer) override;
   void Disconnect(DisconnectCompleter::Sync& completer) override;
   void GetMacAddress(GetMacAddressCompleter::Sync& completer) override;
-  void GetFactoryMacAddress(GetFactoryMacAddressCompleter::Sync& completer) override;
+  void GetFactoryMacAddress(fidl::WireServer<fuchsia_wlan_wlanix::SupplicantStaIface>::
+                                GetFactoryMacAddressCompleter::Sync& completer) override;
   void SetBtCoexistenceMode(
       fuchsia_wlan_wlanix::wire::SupplicantStaIfaceSetBtCoexistenceModeRequest* request,
       SetBtCoexistenceModeCompleter::Sync& completer) override;

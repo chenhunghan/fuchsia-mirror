@@ -2,12 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-
-fuchsia_unittest_package("reverser_rust_unittest") {
-  deps = [ ":reverser_crate_test" ]
-}
-
 group("hermetic_tests") {
   testonly = true
   deps = [ ":reverser_rust_unittest" ]
@@ -41,5 +35,20 @@ import("//build/tools/bazel2gn/bazel_migration.gni")
 rustc_library("reverser_crate") {
   sources = [ "src/lib.rs" ]
   edition = "2024"
-  with_unit_tests = true
+}
+
+rustc_test("reverser_crate_test") {
+  sources = [ "src/lib.rs" ]
+  edition = "2024"
+}
+
+fuchsia_unittest_package("reverser_rust_unittest") {
+  package_name = "reverser_rust_unittest-gn"
+  component_name = "reverser_rust_unittest"
+  deps = [ ":reverser_crate_test" ]
+  visibility = [
+    ":*",
+    "//examples:*",
+    "//examples/assembly/test_product_bundle:*",
+  ]
 }

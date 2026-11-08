@@ -4,6 +4,7 @@
 
 import("//build/toolchain/variant_tags.gni")
 
+# LINT.IfChange(sanitizer_default_options)
 declare_args() {
   # Default [AddressSanitizer](https://clang.llvm.org/docs/AddressSanitizer.html)
   # options (before the `ASAN_OPTIONS` environment variable is read at
@@ -96,6 +97,8 @@ declare_args() {
   hwasan_default_options = [ "allocator_may_return_null=1" ]
 }
 
+# LINT.ThenChange(//build/bazel/BUILD.gn:sanitizer_default_options)
+
 sanitizer_names = [
   "asan",
   "lsan",
@@ -167,6 +170,7 @@ template("_sanitizer_default_options_target") {
     }
 
     if (nonempty) {
+      # LINT.IfChange(common_copts)
       # On Fuchsia, the ASan runtime is dynamically linked and needs to have
       # the __asan_default_options symbol exported.  In situations where the
       # runtime is statically linked, it doesn't matter either way.
@@ -182,6 +186,8 @@ template("_sanitizer_default_options_target") {
       # It's necessary to link into Rust binaries, which are PIE even
       # on platforms where C binaries are not PIE by default.
       cflags = [ "-fPIE" ]
+
+      # LINT.ThenChange(//build/config/sanitizers/sanitizer_default_options.bzl:common_copts)
 
       defines = [
         "DEFINE_SANITIZER_DEFAULT_OPTIONS=${invoker.default}",

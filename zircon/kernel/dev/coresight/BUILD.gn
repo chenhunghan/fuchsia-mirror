@@ -6,7 +6,6 @@
 
 import("//build/components.gni")
 import("//build/cpp/library_headers.gni")
-import("//build/rust/rustc_staticlib.gni")
 import("//zircon/kernel/kernel_rust_crate.gni")
 
 group("coresight") {
@@ -14,9 +13,6 @@ group("coresight") {
     ":coresight-rs",
     ":headers",
   ]
-  if (!is_kernel) {
-    public_deps += [ ":coresight-staticlib" ]
-  }
 }
 
 library_headers("headers") {
@@ -27,8 +23,8 @@ library_headers("headers") {
 
   public_deps = [
     # <dev/coresight/component.h> has #include <hwreg/bitfields.h>.
-    # <dev/coresight/rom_table.h> has #include <hwreg/bitfields.h>.
-    # <dev/coresight/rom_table.h> has #include <hwreg/internal.h>.
+    # <dev/coresight/component.h> has #include <hwreg/mmio.h>.
+    # <dev/coresight/rom_table.h> has #include <hwreg/mmio.h>.
     "//zircon/system/ulib/hwreg:headers",
 
     # <dev/coresight/rom_table.h> has #include <lib/fit/result.h>.
@@ -44,7 +40,12 @@ kernel_rust_crate("coresight-rs") {
     "src/lib.rs",
     "src/rom_table.rs",
   ]
-  deps = [ "//src/lib/zr" ]
+  deps = [
+    "//src/lib/bitrs",
+    "//src/lib/regio",
+    "//src/lib/zr",
+    "//third_party/rust_crates:zerocopy",
+  ]
 
   if (!is_kernel) {
     with_unit_tests = true
@@ -52,18 +53,6 @@ kernel_rust_crate("coresight-rs") {
 }
 
 if (!is_kernel) {
-  rustc_staticlib("coresight-staticlib") {
-    edition = "2024"
-    source_root = "src/lib.rs"
-    sources = [
-      "src/component.rs",
-      "src/lib.rs",
-      "src/rom_table.rs",
-    ]
-    features = [ "std" ]
-    deps = [ "//src/lib/zr" ]
-  }
-
   fuchsia_unittest_package("coresight-rust-test-pkg") {
     package_name = "coresight-rust-test"
     deps = [ ":coresight-rs_test" ]
@@ -76,7 +65,6 @@ group("tests") {
     deps = [
       ":coresight-rs_test($host_toolchain)",
       ":coresight-rust-test-pkg",
-      "tests($host_toolchain)",
     ]
   }
 }

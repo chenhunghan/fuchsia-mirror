@@ -1,0 +1,56 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/idk:idk_cc_source_library.bzl", "idk_cc_source_library")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+# @bazel2gn:skip
+test_suite(
+    name = "tests",
+    tests = [":fake-mmio-reg-test"],
+    visibility = ["//sdk/lib:__pkg__"],
+)
+
+idk_cc_source_library(
+    name = "cpp",
+    srcs = ["fake-mmio-reg.cc"],
+    hdrs = ["fake-mmio-reg.h"],
+    api_area = "Driver SDK",
+    category = "partner",
+    idk_name = "driver_fake_mmio_reg_cpp",
+    include_base = "//sdk",
+    public_configs = ["//sdk/config"],
+    stable = True,
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//sdk/lib/driver/mmio/cpp",
+        "//sdk/lib/fit",
+        "//zircon/system/ulib/mmio-ptr",
+    ],
+)
+
+fx_cc_test_binary(
+    name = "fake-mmio-reg-test-bin",
+    srcs = ["fake-mmio-reg-test.cc"],
+    disable_build_flags = select({
+        "@platforms//os:fuchsia": ["//build/config/fuchsia:fdio_config"],
+    }),
+    gn_output_name = "fake-mmio-reg-cpp-test",
+    tags = ["manual"],
+    deps = [
+        ":cpp",
+        "//sdk/lib/fdio",
+        "//zircon/system/ulib/zx",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "fake-mmio-reg-test",
+    package_name = "fake-mmio-reg-cpp-tests",
+    unit_tests = [":fake-mmio-reg-test-bin"],
+)

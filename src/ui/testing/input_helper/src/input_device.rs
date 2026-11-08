@@ -3,47 +3,78 @@
 // found in the LICENSE file.
 
 use crate::input_reports_reader::InputReportsReaderV2;
-use anyhow::{Context as _, Error};
+use anyhow::Error;
 use async_utils::event::Event as AsyncEvent;
-use fidl::Error as FidlError;
-use fidl::endpoints::ServerEnd;
+use fidl_fuchsia_input_injection::{InputDeviceRegistryMarker, InputDeviceRegistryProxy};
 use fidl_fuchsia_input_report::{
-    DeviceDescriptor, FeatureReport, InputDeviceRequest, InputDeviceRequestStream, InputReport,
-    InputReportsReaderV2Marker,
+    DeviceDescriptor, FeatureReport, InputDeviceMarker, InputDeviceRequest,
+    InputDeviceRequestStream, InputReport,
 };
-use fuchsia_async as fasync;
+use fuchsia_async::{self as fasync, TimeoutExt as _};
+use fuchsia_component::client::connect_to_protocol_at_path;
 use futures::channel::mpsc;
-use futures::{StreamExt, TryFutureExt, future, pin_mut};
+use futures::future::FusedFuture as _;
+use futures::{FutureExt as _, StreamExt};
+use log::{info, warn};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 
 pub type DeviceId = u32;
+
+pub(crate) const MAX_BUFFERED_REPORTS: usize = 32;
+
+#[derive(Debug)]
+pub(crate) enum PrimarySenderState {
+    Active(mpsc::UnboundedSender<InputReport>),
+    Buffering(VecDeque<InputReport>),
+    Closed,
+}
+
+#[derive(Debug)]
+pub(crate) enum StarnixSenderState {
+    Active(mpsc::UnboundedSender<InputReport>),
+    Buffering(VecDeque<InputReport>),
+    Inactive,
+}
+
+#[derive(Clone)]
+pub(crate) enum StarnixConnector {
+    Path(String),
+    #[cfg(test)]
+    Test(Arc<dyn Fn() -> Result<InputDeviceRegistryProxy, Error> + Send + Sync>),
+}
 
 /// Implements the server side of the
 /// `fuchsia.input.report.InputDevice` FIDL protocol. This struct also enables users to inject
 /// input reports `as fuchsia.ui.input.InputReport`.
-///
-/// # Notes
-/// * Some of the methods of `fuchsia.input.report.InputDevice` are not relevant to
-///   input injection, so this implemnentation does not support them:
-///   * `SendOutputReport` provides a way to change keyboard LED state.
-///   If these FIDL methods are invoked, `InputDevice::flush()` will resolve to Err.
-/// * This implementation does not support multiple calls to `GetInputReportsReaderV2`,
-///   since:
-///   * The ideal semantics for multiple calls are not obvious, and
-///   * Each `InputDevice` has a single FIDL client (an input pipeline implementation),
-///     and the current input pipeline implementation is happy to use a single
-///     `InputReportsReaderV2` for the lifetime of the `InputDevice`.
 pub(crate) struct InputDevice {
-    /// FIFO queue of reports to be consumed by calls to
-    /// `fuchsia.input.report.InputReportsReader.ReadInputReports()`.
-    /// Populated by `input_device::InputDevice`.
-    report_sender: futures::channel::mpsc::UnboundedSender<InputReport>,
+    primary_sender: Arc<Mutex<PrimarySenderState>>,
 
     /// `Task` to keep serving the `fuchsia.input.report.InputDevice` protocol.
     _input_device_task: fasync::Task<()>,
 
+    #[cfg(test)]
+    flush_sender: Option<futures::channel::oneshot::Sender<()>>,
+
+    /// Active state for Starnix reader, populated when Starnix registers and opens a reader.
+    starnix_sender: Arc<Mutex<StarnixSenderState>>,
+
+    /// `Task` to keep serving the Starnix `fuchsia.input.report.InputDevice` protocol.
+    _starnix_input_device_task: Arc<Mutex<Option<fasync::Task<()>>>>,
+
+    /// Optional background task retrying attachment to Starnix registry if initial attempt failed.
+    _starnix_retry_task: Option<fasync::Task<()>>,
+
+    wake_retry: Option<mpsc::UnboundedSender<()>>,
+
+    pub descriptor: DeviceDescriptor,
+
     /// The device_id of the InputDevice.
     pub device_id: DeviceId,
 }
+
+pub(crate) const STARNIX_REGISTRATION_TIMEOUT: zx::MonotonicDuration =
+    zx::MonotonicDuration::from_seconds(10);
 
 impl InputDevice {
     /// Creates a new `InputDevice` that will create a task to:
@@ -54,17 +85,205 @@ impl InputDevice {
         descriptor: DeviceDescriptor,
         got_input_reports_reader: AsyncEvent,
     ) -> Self {
-        let (report_sender, report_receiver) = mpsc::unbounded::<InputReport>();
+        let primary_sender = Arc::new(Mutex::new(PrimarySenderState::Buffering(VecDeque::new())));
+        #[cfg(test)]
+        let (flush_sender, flush_receiver) = {
+            let (tx, rx) = futures::channel::oneshot::channel::<()>();
+            (Some(tx), Some(rx))
+        };
+        #[cfg(not(test))]
+        let flush_receiver = None;
 
-        // Create a `Task` to keep serving the `fuchsia.input.report.InputDevice` protocol.
         let input_device_task = fasync::Task::local(Self::serve_reports(
             request_stream,
-            descriptor,
-            report_receiver,
+            descriptor.clone(),
+            primary_sender.clone(),
             got_input_reports_reader,
+            flush_receiver,
         ));
 
-        Self { report_sender, _input_device_task: input_device_task, device_id: 0 }
+        Self {
+            primary_sender,
+            _input_device_task: input_device_task,
+            #[cfg(test)]
+            flush_sender,
+            starnix_sender: Arc::new(Mutex::new(StarnixSenderState::Inactive)),
+            _starnix_input_device_task: Arc::new(Mutex::new(None)),
+            _starnix_retry_task: None,
+            wake_retry: None,
+            descriptor,
+            device_id: 0,
+        }
+    }
+
+    /// Best-effort attaches a secondary device registration to Starnix's `InputDeviceRegistry`.
+    /// Returns true if registration succeeded and device_id was returned, false otherwise.
+    pub(super) async fn attach_starnix(
+        &mut self,
+        starnix_proxy: &InputDeviceRegistryProxy,
+        descriptor: DeviceDescriptor,
+        timeout: zx::MonotonicDuration,
+    ) -> bool {
+        let (starnix_client_end, starnix_request_stream) =
+            fidl::endpoints::create_request_stream::<InputDeviceMarker>();
+        let starnix_slot = self.starnix_sender.clone();
+        let starnix_task = fasync::Task::local(Self::serve_starnix_device(
+            starnix_request_stream,
+            descriptor,
+            starnix_slot.clone(),
+        ));
+
+        let registration_res = starnix_proxy
+            .register_and_get_device_info(starnix_client_end)
+            .map(Some)
+            .on_timeout(fasync::MonotonicInstant::after(timeout), || None)
+            .await;
+
+        match registration_res {
+            Some(Ok(info)) => match info.device_id {
+                Some(device_id) => {
+                    info!(
+                        "Registered synthetic device with Starnix input registry (device_id={device_id})"
+                    );
+                    if let Ok(mut guard) = starnix_slot.lock() {
+                        if matches!(*guard, StarnixSenderState::Inactive) {
+                            *guard = StarnixSenderState::Buffering(VecDeque::new());
+                        }
+                    }
+                    if let Ok(mut task_guard) = self._starnix_input_device_task.lock() {
+                        *task_guard = Some(starnix_task);
+                    }
+                    true
+                }
+                None => {
+                    warn!(
+                        "Starnix input registry replied without a device_id; registration failed"
+                    );
+                    false
+                }
+            },
+            Some(Err(e)) => {
+                if e.is_closed() {
+                    info!("Starnix input registry channel closed: {:?}", e);
+                } else {
+                    warn!(
+                        "Failed to register synthetic device with Starnix input registry: {:?}",
+                        e
+                    );
+                }
+                false
+            }
+            None => {
+                warn!(
+                    "Timed out waiting for Starnix input registry registration; registration failed"
+                );
+                false
+            }
+        }
+    }
+
+    /// Spawns a background task that periodically attempts to reconnect to Starnix
+    /// and register the device if initial registration was unavailable or failed.
+    pub(super) fn start_starnix_retry_task(
+        &mut self,
+        connector: StarnixConnector,
+        timeout: zx::MonotonicDuration,
+    ) {
+        let descriptor = self.descriptor.clone();
+        let starnix_slot = self.starnix_sender.clone();
+        let starnix_task_slot = self._starnix_input_device_task.clone();
+        let (wake_tx, mut wake_rx) = mpsc::unbounded::<()>();
+        self.wake_retry = Some(wake_tx);
+
+        self._starnix_retry_task = Some(fasync::Task::local(async move {
+            const RETRY_INTERVAL: zx::MonotonicDuration = zx::MonotonicDuration::from_millis(250);
+            const TOTAL_TIMEOUT: zx::MonotonicDuration = zx::MonotonicDuration::from_seconds(60);
+            let start = fasync::MonotonicInstant::now();
+
+            loop {
+                // If already attached, stop retrying.
+                if let Ok(guard) = starnix_slot.lock() {
+                    if matches!(
+                        *guard,
+                        StarnixSenderState::Active(_) | StarnixSenderState::Buffering(_)
+                    ) {
+                        break;
+                    }
+                }
+
+                if (fasync::MonotonicInstant::now() - start) > TOTAL_TIMEOUT {
+                    warn!("Timed out retrying attachment to Starnix input registry");
+                    break;
+                }
+
+                futures::select! {
+                    _ = fasync::Timer::new(fasync::MonotonicInstant::after(RETRY_INTERVAL)).fuse() => {},
+                    _ = wake_rx.next() => {},
+                }
+
+                if let Ok(guard) = starnix_slot.lock() {
+                    if matches!(
+                        *guard,
+                        StarnixSenderState::Active(_) | StarnixSenderState::Buffering(_)
+                    ) {
+                        break;
+                    }
+                }
+
+                let proxy_res = match connector {
+                    StarnixConnector::Path(ref path) => {
+                        if std::path::Path::new(path).exists() {
+                            connect_to_protocol_at_path::<InputDeviceRegistryMarker>(path)
+                                .map_err(Into::into)
+                        } else {
+                            Err(anyhow::format_err!("path does not exist"))
+                        }
+                    }
+                    #[cfg(test)]
+                    StarnixConnector::Test(ref factory) => factory(),
+                };
+
+                let Ok(proxy) = proxy_res else {
+                    continue;
+                };
+
+                let (starnix_client_end, starnix_request_stream) =
+                    fidl::endpoints::create_request_stream::<InputDeviceMarker>();
+                let task_slot_clone = starnix_slot.clone();
+                let starnix_task = fasync::Task::local(Self::serve_starnix_device(
+                    starnix_request_stream,
+                    descriptor.clone(),
+                    task_slot_clone,
+                ));
+
+                let registration_res = proxy
+                    .register_and_get_device_info(starnix_client_end)
+                    .map(Some)
+                    .on_timeout(fasync::MonotonicInstant::after(timeout), || None)
+                    .await;
+
+                match registration_res {
+                    Some(Ok(info)) if info.device_id.is_some() => {
+                        info!(
+                            "Successfully attached to Starnix input registry via retry (device_id={:?})",
+                            info.device_id
+                        );
+                        if let Ok(mut guard) = starnix_slot.lock() {
+                            if matches!(*guard, StarnixSenderState::Inactive) {
+                                *guard = StarnixSenderState::Buffering(VecDeque::new());
+                            }
+                        }
+                        if let Ok(mut task_guard) = starnix_task_slot.lock() {
+                            *task_guard = Some(starnix_task);
+                        }
+                        break;
+                    }
+                    _ => {
+                        // Registration failed or channel closed; continue retrying on next tick.
+                    }
+                }
+            }
+        }));
     }
 
     #[cfg(test)]
@@ -72,160 +291,328 @@ impl InputDevice {
         report_sender: futures::channel::mpsc::UnboundedSender<InputReport>,
     ) -> Self {
         Self {
-            report_sender,
+            primary_sender: Arc::new(Mutex::new(PrimarySenderState::Active(report_sender))),
             _input_device_task: fasync::Task::local(futures::future::ready(())),
+            flush_sender: None,
+            starnix_sender: Arc::new(Mutex::new(StarnixSenderState::Inactive)),
+            _starnix_input_device_task: Arc::new(Mutex::new(None)),
+            _starnix_retry_task: None,
+            wake_retry: None,
+            descriptor: DeviceDescriptor::default(),
             device_id: 0,
         }
     }
 
-    /// Enqueues an input report, to be read by the input reports reader.
+    /// Enqueues an input report to the primary client's reader (e.g. scene_manager),
+    /// and best-effort forwards/buffers a clone of the report to Starnix if Starnix
+    /// is active or buffering.
     pub(super) fn send_input_report(&self, input_report: InputReport) -> Result<(), Error> {
-        self.report_sender
-            .unbounded_send(input_report)
-            .context("failed to send input report to reader")
+        let mut starnix_handled = false;
+        if let Ok(mut guard) = self.starnix_sender.lock() {
+            match *guard {
+                StarnixSenderState::Active(ref sender) => {
+                    let _ = sender.unbounded_send(clone_input_report(&input_report));
+                    starnix_handled = true;
+                }
+                StarnixSenderState::Buffering(ref mut queue) => {
+                    if queue.len() >= MAX_BUFFERED_REPORTS {
+                        queue.pop_front();
+                    }
+                    queue.push_back(clone_input_report(&input_report));
+                    starnix_handled = true;
+                }
+                StarnixSenderState::Inactive => {}
+            }
+        }
+
+        if !starnix_handled {
+            if let Some(ref wake) = self.wake_retry {
+                let _ = wake.unbounded_send(());
+            }
+        }
+
+        let primary_send_res: Result<(), Error> = if let Ok(mut guard) = self.primary_sender.lock()
+        {
+            match *guard {
+                PrimarySenderState::Active(ref sender) => {
+                    sender.unbounded_send(input_report).map_err(Into::into)
+                }
+                PrimarySenderState::Buffering(ref mut queue) => {
+                    if queue.len() >= MAX_BUFFERED_REPORTS {
+                        queue.pop_front();
+                    }
+                    queue.push_back(input_report);
+                    Ok(())
+                }
+                PrimarySenderState::Closed => Err(anyhow::format_err!("primary reader closed")),
+            }
+        } else {
+            Err(anyhow::format_err!("primary reader lock poisoned"))
+        };
+
+        match primary_send_res {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                if starnix_handled {
+                    // Starnix currently holds input ownership and is receiving or buffering the report.
+                    // Primary reader closure (e.g. when scene_manager drops reader on ClientInputOwned)
+                    // is expected, so do not fail when Starnix handled the report.
+                    Ok(())
+                } else {
+                    Err(e.context("failed to send input report to reader"))
+                }
+            }
+        }
     }
 
     /// Returns a `Future` which resolves when all input reports for this device
     /// have been sent to the FIDL peer.
-    ///
-    /// # Note
-    /// When the future resolves, input reports may still be sitting unread in the
-    /// channel to the FIDL peer.
     #[cfg(test)]
     pub(super) async fn flush(self) {
-        let Self { _input_device_task: input_device_task, report_sender, .. } = self;
-        std::mem::drop(report_sender); // Drop `report_sender` to close channel.
-        input_device_task.await
+        let Self {
+            _input_device_task: input_device_task,
+            primary_sender,
+            starnix_sender,
+            flush_sender,
+            ..
+        } = self;
+        if let Ok(mut guard) = primary_sender.lock() {
+            *guard = PrimarySenderState::Closed;
+        }
+        if let Ok(mut guard) = starnix_sender.lock() {
+            *guard = StarnixSenderState::Inactive;
+        }
+        if let Some(tx) = flush_sender {
+            let _ = tx.send(());
+        }
+        input_device_task.await;
     }
 
-    /// Returns a `Future` which resolves when all `InputReport`s for this device
-    /// have been sent to a `fuchsia.input.report.InputReportsReaderV2` client.
-    ///
-    /// # Notes
-    /// * This function `panic()`s on error, to ensure that the error is reported
-    ///   synchronously. Otherwise, the original error might lead to additional errors, and
-    ///   make the integration tests that use this library harder to debug.
-    /// * When the `Future` resolves, `InputReports` may still be sitting unread in the
-    ///   channel to the `fuchsia.input.report.InputReportsReaderV2` client. (The client will
-    ///   typically be an input pipeline implementation.)
-    ///
-    /// # Corner cases
-    /// Resolves to `Err` if the `fuchsia.input.report.InputDevice` client did not call
-    /// `GetInputReportsReaderV2()`, even if no `InputReport`s were queued.
+    /// Serves Starnix's `fuchsia.input.report.InputDevice` connection.
+    /// Does not require or block on `GetInputReportsReaderV2`. When Starnix
+    /// requests an `InputReportsReaderV2`, any buffered reports are drained to it,
+    /// and subsequent reports are forwarded; when no reader is active, reports
+    /// are cleanly dropped without unbounded buffering.
+    async fn serve_starnix_device(
+        mut request_stream: InputDeviceRequestStream,
+        descriptor: DeviceDescriptor,
+        starnix_slot: Arc<Mutex<StarnixSenderState>>,
+    ) {
+        let mut reader_fut: futures::future::Fuse<
+            std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Error>>>>,
+        > = futures::future::Fuse::terminated();
+
+        loop {
+            futures::select! {
+                request = request_stream.next() => {
+                    match request {
+                        Some(Ok(InputDeviceRequest::GetInputReportsReaderV2 {
+                            reader,
+                            max_unacknowledged_reports_limit,
+                            responder,
+                        })) => {
+                            let max_unacknowledged_reports = max_unacknowledged_reports_limit.max(1);
+                            if let Err(e) = responder.send(max_unacknowledged_reports) {
+                                warn!("Failed to send GetInputReportsReaderV2 response to Starnix: {e}");
+                                break;
+                            }
+                            let (sender, receiver) = mpsc::unbounded::<InputReport>();
+                            if let Ok(mut guard) = starnix_slot.lock() {
+                                if let StarnixSenderState::Buffering(ref mut queue) = *guard {
+                                    for report in queue.drain(..) {
+                                        let _ = sender.unbounded_send(report);
+                                    }
+                                }
+                                *guard = StarnixSenderState::Active(sender);
+                            }
+                            let new_reader: std::pin::Pin<
+                                Box<dyn std::future::Future<Output = Result<(), Error>>>,
+                            > = Box::pin(
+                                InputReportsReaderV2 {
+                                    request_stream: reader.into_stream(),
+                                    report_receiver: receiver,
+                                    max_unacknowledged_reports,
+                                }
+                                .into_future(),
+                            );
+                            reader_fut = new_reader.fuse();
+                        }
+                        Some(Ok(InputDeviceRequest::GetDescriptor { responder })) => {
+                            if let Err(e) = responder.send(&descriptor) {
+                                warn!("Failed to send GetDescriptor response to Starnix: {e}");
+                                break;
+                            }
+                        }
+                        Some(Ok(InputDeviceRequest::GetFeatureReport { responder })) => {
+                            if let Err(e) = responder.send(Ok(&FeatureReport::default())) {
+                                warn!("Failed to send GetFeatureReport response to Starnix: {e}");
+                                break;
+                            }
+                        }
+                        Some(Err(e)) => {
+                            warn!("Error on Starnix InputDevice request stream: {e}");
+                            break;
+                        }
+                        None => {
+                            break;
+                        }
+                        Some(Ok(req)) => {
+                            warn!("Unsupported request on Starnix InputDevice: {:?}", req);
+                        }
+                    }
+                }
+                res = reader_fut => {
+                    if let Err(e) = res {
+                        warn!("Starnix InputReportsReaderV2 ended with error: {e}");
+                    }
+                    if let Ok(mut guard) = starnix_slot.lock() {
+                        *guard = StarnixSenderState::Inactive;
+                    }
+                }
+            }
+        }
+
+        if let Ok(mut guard) = starnix_slot.lock() {
+            *guard = StarnixSenderState::Inactive;
+        }
+    }
+}
+
+// Note: This must be kept in sync with FIDL InputReport fields when new fields
+// are added, as `..Default::default()` will otherwise silently omit them on the clone.
+fn clone_input_report(report: &InputReport) -> InputReport {
+    InputReport {
+        event_time: report.event_time,
+        mouse: report.mouse.clone(),
+        sensor: report.sensor.clone(),
+        touch: report.touch.clone(),
+        keyboard: report.keyboard.clone(),
+        consumer_control: report.consumer_control.clone(),
+        trace_id: report.trace_id,
+        report_id: report.report_id,
+        wake_lease: report
+            .wake_lease
+            .as_ref()
+            .and_then(|h| h.duplicate_handle(zx::Rights::SAME_RIGHTS).ok()),
+        ..Default::default()
+    }
+}
+
+impl InputDevice {
+    /// Serves the primary client's `fuchsia.input.report.InputDevice` connection.
+    /// Supports reader closure and replacement across input focus transitions.
     async fn serve_reports(
         request_stream: InputDeviceRequestStream,
         descriptor: DeviceDescriptor,
-        report_receiver: mpsc::UnboundedReceiver<InputReport>,
+        primary_slot: Arc<Mutex<PrimarySenderState>>,
         got_input_reports_reader: AsyncEvent,
+        flush_receiver: Option<futures::channel::oneshot::Receiver<()>>,
     ) {
-        // Process `fuchsia.input.report.InputDevice` requests, waiting for the `InputDevice`
-        // client to provide a `ServerEnd<InputReportsReaderV2Marker>` by calling `GetInputReportsReaderV2()`.
-        //
-        // `filter_map` creates a new stream `input_reports_reader_server_end_stream` for
-        // `request_stream` based on the result of `handle_device_request`, only
-        // `GetInputReportsReaderV2` requests enter `input_reports_reader_server_end_stream`
-        // for following process.
-        let mut input_reports_reader_server_end_stream = request_stream.filter_map(|r| {
-            future::ready(Self::handle_device_request(
-                r,
-                &descriptor,
-                got_input_reports_reader.clone(),
-            ))
-        });
-
-        // Create a `Future` to serve `GetInputReportsReaderV2()` and extract the input reader
-        // server_end from the request.
-        let input_reports_reader_fut = {
-            let (reader_server_end, max_unacknowledged_reports) =
-                input_reports_reader_server_end_stream.next().await.unwrap_or_else(|| {
-                    panic!("stream ended without a call to GetInputReportsReaderV2")
-                });
-            InputReportsReaderV2 {
-                request_stream: reader_server_end.into_stream(),
-                report_receiver,
-                max_unacknowledged_reports,
-            }
-            .into_future()
+        let mut request_stream = request_stream.fuse();
+        let mut reader_fut: futures::future::Fuse<
+            std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Error>>>>,
+        > = futures::future::Fuse::terminated();
+        let mut got_reader_once = false;
+        let mut flush_receiver_fut = match flush_receiver {
+            Some(rx) => rx.fuse(),
+            None => futures::future::Fuse::terminated(),
         };
-        pin_mut!(input_reports_reader_fut);
+        let mut flush_requested = false;
 
-        // Create a `Future` to keep serving the `fuchsia.input.report.InputDevice` protocol.
-        // This time, receiving a `ServerEnd<InputReportsReaderV2Marker>` will be an `Err`.
-        let input_device_server_fut = async {
-            match input_reports_reader_server_end_stream.next().await {
-                Some(_server_end) => {
-                    // There are no obvious "best" semantics for how to handle multiple
-                    // `GetInputReportsReaderV2` calls, and there is no current need to
-                    // do so. Instead of taking a guess at what the client might want
-                    // in such a case, just `panic()`.
-                    panic!("InputDevice does not support multiple GetInputReportsReaderV2 calls")
+        loop {
+            futures::select! {
+                request = request_stream.next() => {
+                    match request {
+                        Some(Ok(InputDeviceRequest::GetInputReportsReaderV2 {
+                            reader,
+                            max_unacknowledged_reports_limit,
+                            responder,
+                        })) => {
+                            got_reader_once = true;
+                            let _ = got_input_reports_reader.signal();
+                            let max_unacknowledged_reports = max_unacknowledged_reports_limit.max(1);
+                            if let Err(e) = responder.send(max_unacknowledged_reports) {
+                                warn!("Failed to send GetInputReportsReaderV2 response: {e}");
+                                break;
+                            }
+                            let (sender, receiver) = mpsc::unbounded::<InputReport>();
+                            if let Ok(mut guard) = primary_slot.lock() {
+                                if let PrimarySenderState::Buffering(ref mut queue) = *guard {
+                                    for report in queue.drain(..) {
+                                        let _ = sender.unbounded_send(report);
+                                    }
+                                }
+                                if flush_requested {
+                                    *guard = PrimarySenderState::Closed;
+                                    std::mem::drop(sender);
+                                } else {
+                                    *guard = PrimarySenderState::Active(sender);
+                                }
+                            }
+                            let new_reader: std::pin::Pin<
+                                Box<dyn std::future::Future<Output = Result<(), Error>>>,
+                            > = Box::pin(
+                                InputReportsReaderV2 {
+                                    request_stream: reader.into_stream(),
+                                    report_receiver: receiver,
+                                    max_unacknowledged_reports,
+                                }
+                                .into_future(),
+                            );
+                            reader_fut = new_reader.fuse();
+                        }
+                        Some(Ok(InputDeviceRequest::GetDescriptor { responder })) => {
+                            if let Err(e) = responder.send(&descriptor) {
+                                warn!("Failed to send GetDescriptor response: {e}");
+                                break;
+                            }
+                        }
+                        Some(Ok(InputDeviceRequest::GetFeatureReport { responder })) => {
+                            if let Err(e) = responder.send(Ok(&FeatureReport::default())) {
+                                warn!("Failed to send GetFeatureReport response: {e}");
+                                break;
+                            }
+                        }
+                        Some(Err(e)) => {
+                            warn!("Error on InputDevice request stream: {e}");
+                            break;
+                        }
+                        None => {
+                            if !got_reader_once {
+                                panic!("stream ended without a call to GetInputReportsReaderV2");
+                            }
+                            if !reader_fut.is_terminated() {
+                                let _ = (&mut reader_fut).await;
+                            }
+                            break;
+                        }
+                        Some(Ok(req)) => {
+                            warn!("Unsupported request on InputDevice: {:?}", req);
+                        }
+                    }
                 }
-                None => Ok(()),
+                res = reader_fut => {
+                    if let Err(e) = res {
+                        warn!("InputReportsReaderV2 ended with error: {e}");
+                    }
+                    if let Ok(mut guard) = primary_slot.lock() {
+                        *guard = PrimarySenderState::Closed;
+                    }
+                    if flush_requested {
+                        break;
+                    }
+                }
+                _flush_req = flush_receiver_fut => {
+                    flush_requested = true;
+                    if got_reader_once && reader_fut.is_terminated() {
+                        break;
+                    }
+                }
             }
-        };
-        pin_mut!(input_device_server_fut);
+        }
 
-        // Now, process both `fuchsia.input.report.InputDevice` requests, and
-        // `fuchsia.input.report.InputReportsReaderV2` requests. And keep processing
-        // `InputReportsReaderV2` requests even if the `InputDevice` connection
-        // is severed.
-        future::select(
-            input_device_server_fut.and_then(|_: ()| future::pending()),
-            input_reports_reader_fut,
-        )
-        .await
-        .factor_first()
-        .0
-        .unwrap_or_else(|e| panic!("processing FIDL requests: {e}"))
-    }
-
-    /// Processes a single request from an `InputDeviceRequestStream`
-    ///
-    /// # Returns
-    /// * Some((ServerEnd<InputReportsReaderV2Marker>, u16)) if the request yielded an `InputReportsReaderV2`.
-    /// * None if the request was fully processed by `handle_device_request()`
-    ///
-    /// # Note
-    /// * This function `panic()`s on error. See `serve_reports()` for the reason why.
-    fn handle_device_request(
-        request: Result<InputDeviceRequest, FidlError>,
-        descriptor: &DeviceDescriptor,
-        got_input_reports_reader: AsyncEvent,
-    ) -> Option<(ServerEnd<InputReportsReaderV2Marker>, u16)> {
-        match request {
-            Ok(InputDeviceRequest::GetInputReportsReaderV2 {
-                reader: reader_server_end,
-                max_unacknowledged_reports_limit,
-                responder,
-            }) => {
-                let _ = got_input_reports_reader.signal();
-                let max_unacknowledged_reports = max_unacknowledged_reports_limit.max(1);
-                if let Err(e) = responder.send(max_unacknowledged_reports) {
-                    panic!("failed to send GetInputReportsReaderV2 response: {e}");
-                }
-                Some((reader_server_end, max_unacknowledged_reports))
-            }
-            Ok(InputDeviceRequest::GetDescriptor { responder }) => {
-                match responder.send(descriptor) {
-                    Ok(()) => None,
-                    Err(e) => panic!("failed to send GetDescriptor response: {e}"),
-                }
-            }
-            Ok(InputDeviceRequest::GetFeatureReport { responder }) => {
-                match responder.send(Ok(&FeatureReport::default())) {
-                    Ok(()) => None,
-                    Err(e) => panic!("failed to send GetFeatureReport response: {e}"),
-                }
-            }
-            Err(e) => {
-                panic!("failed to read `InputDevice` request: {:?}", e);
-            }
-            _ => {
-                panic!(
-                    "InputDevice::handle_device_request does not support this request: {:?}",
-                    request
-                );
-            }
+        if let Ok(mut guard) = primary_slot.lock() {
+            *guard = PrimarySenderState::Closed;
         }
     }
 }
@@ -233,9 +620,13 @@ impl InputDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Context as _;
     use fidl::endpoints;
-    use fidl_fuchsia_input_report::{DeviceDescriptor, InputDeviceMarker};
+    use fidl_fuchsia_input_report::{
+        DeviceDescriptor, InputDeviceMarker, InputReportsReaderV2Marker,
+    };
     use fuchsia_async as fasync;
+    use futures::{future, pin_mut};
 
     mod responds_to_get_feature_report_request {
         use super::*;
@@ -575,6 +966,56 @@ mod tests {
                 pin_mut!(input_device_fut);
                 assert_matches!(executor.run_until_stalled(&mut input_device_fut), Poll::Pending)
             }
+        }
+    }
+
+    mod clone_input_report_tests {
+        use super::*;
+        use fidl_fuchsia_input::Key;
+        use fidl_fuchsia_input_report::{
+            ConsumerControlButton, ConsumerControlInputReport, KeyboardInputReport,
+        };
+
+        #[test]
+        fn clones_all_fields_and_duplicates_wake_lease() {
+            let (wake_lease, _peer) = zx::EventPair::create();
+            let original_koid = wake_lease.koid().expect("original koid");
+
+            let report = InputReport {
+                event_time: Some(123456789),
+                keyboard: Some(KeyboardInputReport {
+                    pressed_keys3: Some(vec![Key::A, Key::B]),
+                    ..Default::default()
+                }),
+                consumer_control: Some(ConsumerControlInputReport {
+                    pressed_buttons: Some(vec![ConsumerControlButton::VolumeUp]),
+                    ..Default::default()
+                }),
+                trace_id: Some(42),
+                report_id: Some(7),
+                wake_lease: Some(wake_lease),
+                ..Default::default()
+            };
+
+            let cloned = clone_input_report(&report);
+
+            assert_eq!(cloned.event_time, report.event_time);
+            assert_eq!(cloned.keyboard, report.keyboard);
+            assert_eq!(cloned.consumer_control, report.consumer_control);
+            assert_eq!(cloned.trace_id, report.trace_id);
+            assert_eq!(cloned.report_id, report.report_id);
+            assert_eq!(cloned.mouse, report.mouse);
+            assert_eq!(cloned.touch, report.touch);
+            assert_eq!(cloned.sensor, report.sensor);
+
+            // Assert that the cloned wake_lease has the same koid as the original
+            // while the original still holds its handle.
+            let orig_wake_lease = report.wake_lease.as_ref().expect("original wake_lease");
+            let cloned_wake_lease = cloned.wake_lease.as_ref().expect("cloned wake_lease");
+            assert_eq!(orig_wake_lease.koid().expect("orig koid"), original_koid);
+            assert_eq!(cloned_wake_lease.koid().expect("cloned koid"), original_koid);
+            assert!(!orig_wake_lease.is_invalid());
+            assert!(!cloned_wake_lease.is_invalid());
         }
     }
 

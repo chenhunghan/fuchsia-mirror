@@ -1,0 +1,62 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/components:structured_config.bzl",
+    "fuchsia_structured_config_rust_lib",
+)
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+# GN puts the binary in a per-target directory so the `client_bin` outputs
+# of the sibling canvas examples don't collide.
+# @bazel2gn:raw_attribute:output_dir = target_out_dir + "/rust_next"
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    # Preserve the GN output_name expected by meta/client.cml.
+    binary_name = "client_bin",
+    edition = "2024",
+    deps = [
+        ":config",
+        "//examples/fidl/new/canvas/client_requested_draw/fidl:examples.canvas.clientrequesteddraw_rust_next",
+        "//src/lib/fidl/rust_next/fidl_next",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "canvas_clientrequesteddraw_client",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "//examples/fidl/new/canvas/client_requested_draw:meta/client.cml",
+)
+
+fuchsia_structured_config_rust_lib(
+    name = "config",
+    cm_label = ":manifest",
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "client_bin",
+)
+
+fx_component(
+    name = "client",
+    compiled_manifest = ":manifest",
+    visibility = ["//examples/fidl/new/canvas/client_requested_draw/rust_next:__pkg__"],
+    deps = [":bin_packaged"],
+)

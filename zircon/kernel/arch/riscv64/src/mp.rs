@@ -17,13 +17,8 @@ type hart_id_t = u32;
 
 unsafe extern "C" {
     pub static mut riscv64_num_cpus: u32;
-    fn cpp_mp_get_online_mask() -> cpu_mask_t;
     fn cpp_interrupt_send_ipi(cpu_mask: cpu_mask_t, ipi: MpIpi) -> Result<(), Status>;
     fn cpp_interrupt_init_percpu();
-    fn cpp_mp_mbx_reschedule_irq();
-    fn cpp_mp_mbx_generic_irq();
-    fn cpp_mp_mbx_interrupt_irq();
-    fn cpp_mp_is_cpu_online(cpu_id: cpu_num_t) -> bool;
     fn cpp_platform_halt_cpu();
 }
 
@@ -153,6 +148,9 @@ pub extern "C" fn riscv64_boot_hart_id() -> hart_id_t {
 }
 
 /// Get the current logical CPU number from s11 percpu pointer.
+// TODO(https://fxbug.dev/581987928): Remove `#[coverage(off)]` once compiler options can control
+// atomic coverage counter updates.
+#[coverage(off)]
 #[inline(always)]
 pub fn arch_curr_cpu_num() -> cpu_num_t {
     // SAFETY: Single-instruction read of cpu_num from s11 percpu struct.
@@ -167,6 +165,9 @@ pub extern "C" fn riscv64_curr_hart_id() -> hart_id_t {
 }
 
 /// Increments the count of spinlocks held on the current CPU.
+// TODO(https://fxbug.dev/581987928): Remove `#[coverage(off)]` once compiler options can control
+// atomic coverage counter updates.
+#[coverage(off)]
 #[inline(always)]
 pub fn percpu_inc_num_spinlocks() {
     // SAFETY: Single-instruction read of cpu_num from s11 percpu struct.
@@ -178,6 +179,9 @@ pub fn percpu_inc_num_spinlocks() {
 }
 
 /// Decrements the count of spinlocks held on the current CPU.
+// TODO(https://fxbug.dev/581987928): Remove `#[coverage(off)]` once compiler options can control
+// atomic coverage counter updates.
+#[coverage(off)]
 #[inline(always)]
 pub fn percpu_dec_num_spinlocks() {
     // SAFETY: Single-instruction read of cpu_num from s11 percpu struct.
@@ -216,17 +220,23 @@ pub extern "C" fn riscv64_mp_early_init_percpu(hart_id: hart_id_t, cpu_num: cpu_
 }
 
 /// Associate the high-level percpu structure with a CPU.
+///
 /// # Safety
-/// Caller guarantees valid percpu pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arch_setup_percpu(cpu_num: cpu_num_t, percpu: *mut core::ffi::c_void) {
+///
+/// - `cpu_num` must identify the calling CPU and be less than [`SMP_MAX_CPUS`].
+/// - `percpu` must point to a valid, initialized `'static` [`crate::kernel::percpu::PerCpu`]
+///   instance dedicated to `cpu_num`.
+/// - Interrupts must be disabled on `cpu_num` so no concurrent access to
+///   `RISCV64_PERCPU_ARRAY[cpu_num].high_level_percpu` occurs.
+pub unsafe fn arch_setup_percpu(cpu_num: cpu_num_t, percpu: *mut crate::kernel::percpu::PerCpu) {
     let cpu_idx = cpu_num as usize;
-    if cpu_idx < SMP_MAX_CPUS {
-        // SAFETY: Only written during early CPU init sequentially, array bounds guaranteed by SMP_MAX_CPUS check.
-        // The pointer validity for `percpu` is deferred to the caller per the function's Safety docs.
-        unsafe {
-            RISCV64_PERCPU_ARRAY[cpu_idx].high_level_percpu = percpu as *mut _;
-        }
+    assert!(cpu_idx < SMP_MAX_CPUS);
+    // SAFETY: `assert!` above guarantees `cpu_idx < SMP_MAX_CPUS`, the caller upholds `percpu`
+    // validity and exclusive access with interrupts disabled on `cpu_num`, and `PerCpu` is
+    // `#[repr(C)]` layout-verified identical to C++ `struct percpu`.
+    unsafe {
+        RISCV64_PERCPU_ARRAY[cpu_idx].high_level_percpu =
+            percpu.cast::<riscv64_mp_bindings::percpu>();
     }
 }
 
@@ -260,13 +270,11 @@ pub extern "C" fn arch_mp_send_ipi(target: MpIpiTarget, mut cpu_mask: cpu_mask_t
     // translate the high level target + mask mechanism into just a mask
     match target {
         MpIpiTarget::All => {
-            // SAFETY: Reads the C++ layer online CPU mask scalar.
-            cpu_mask = unsafe { cpp_mp_get_online_mask() };
+            cpu_mask = crate::kernel::mp::get_online_mask();
         }
         MpIpiTarget::AllButLocal => {
             let curr_cpu = arch_curr_cpu_num();
-            // SAFETY: Reads the C++ layer online CPU mask scalar.
-            cpu_mask = (unsafe { cpp_mp_get_online_mask() }) & !(1u32 << curr_cpu);
+            cpu_mask = crate::kernel::mp::get_online_mask() & !(1u32 << curr_cpu);
         }
         MpIpiTarget::Mask => {}
     }
@@ -336,18 +344,17 @@ pub extern "C" fn riscv64_software_exception() {
     };
 
     if (reason & (1u32 << (crate::kernel::mp::MpIpi::Reschedule as u8))) != 0 {
-        // SAFETY: Delegating generic IPI callback processing to C++.
-        unsafe { cpp_mp_mbx_reschedule_irq() };
+        // SAFETY: Called from the supervisor software interrupt handler with interrupts disabled.
+        unsafe { crate::kernel::mp::mbx_reschedule_irq() };
         reason &= !(1u32 << (crate::kernel::mp::MpIpi::Reschedule as u8));
     }
     if (reason & (1u32 << (crate::kernel::mp::MpIpi::Generic as u8))) != 0 {
-        // SAFETY: Delegating generic IPI callback processing to C++.
-        unsafe { cpp_mp_mbx_generic_irq() };
+        // SAFETY: Called from the supervisor software interrupt handler with interrupts disabled.
+        unsafe { crate::kernel::mp::mbx_generic_irq() };
         reason &= !(1u32 << (crate::kernel::mp::MpIpi::Generic as u8));
     }
     if (reason & (1u32 << (crate::kernel::mp::MpIpi::Interrupt as u8))) != 0 {
-        // SAFETY: Delegating interrupt IPI callback processing to C++.
-        unsafe { cpp_mp_mbx_interrupt_irq() };
+        crate::kernel::mp::mbx_interrupt_irq();
         reason &= !(1u32 << (crate::kernel::mp::MpIpi::Interrupt as u8));
     }
     if (reason & (1u32 << (crate::kernel::mp::MpIpi::Halt as u8))) != 0 {
@@ -376,15 +383,19 @@ pub extern "C" fn arch_mp_init_percpu() {
 /// Flush CPU state and halt execution on CPU unplug.
 ///
 /// # Safety
-/// `flush_done` must point at a live `MpUnplugEvent` that stays alive until the
-/// unplugging CPU observes the signal. The generic mp layer owns it.
+///
+/// Must be called on the unplugging CPU's idle/power thread with interrupts disabled
+/// (`arch_ints_disabled()`), an initialized current `Thread`, no spinlocks or active
+/// `ChainLockTransaction` held, and a valid pointer `flush_done` to a live `MpUnplugEvent` that
+/// stays alive until the unplugging CPU's waiter observes the signal.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn arch_flush_state_and_halt(flush_done: *mut MpUnplugEvent) -> ! {
     debug_assert!(super::arch::arch_ints_disabled());
     crate::kernel::thread::preempt_disable();
-    // SAFETY: the caller guarantees `flush_done` points at a live `MpUnplugEvent`;
-    // signalling it is the last thing this CPU does before halting, and
-    // `cpp_platform_halt_cpu` takes no arguments and does not return.
+    // SAFETY: The caller guarantees `flush_done` points at a live `MpUnplugEvent`, the current
+    // `Thread` is initialized, and no spinlocks or active `ChainLockTransaction` are held;
+    // signalling it is the last thing this CPU does before halting, and `cpp_platform_halt_cpu`
+    // takes no arguments and does not return.
     unsafe {
         crate::kernel::mp::unplug_event_signal(flush_done);
         cpp_platform_halt_cpu();
@@ -413,13 +424,18 @@ pub extern "C" fn arch_mp_cpu_unplug(cpu_id: u32) -> Result<(), Status> {
 }
 
 /// Hotplug a secondary CPU.
+///
+/// # Safety
+///
+/// The caller must invoke this from normal thread context after VM initialization with interrupts
+/// enabled, serialize it with every other hotplug and unplug of `cpu_id`, and ensure `cpu_id` is
+/// fully stopped (not still booting and not partway through halting).
 #[unsafe(no_mangle)]
-pub extern "C" fn arch_mp_cpu_hotplug(cpu_id: u32) -> Result<(), Status> {
+pub unsafe extern "C" fn arch_mp_cpu_hotplug(cpu_id: u32) -> Result<(), Status> {
     if cpu_id == 0 || cpu_id >= arch_max_num_cpus() {
         return Err(Status::INVALID_ARGS);
     }
-    // SAFETY: takes a CPU number by value and queries the generic online mask.
-    if unsafe { cpp_mp_is_cpu_online(cpu_id) } {
+    if crate::kernel::mp::is_cpu_online(cpu_id) {
         return Err(Status::BAD_STATE);
     }
     let hart_id = arch_cpu_num_to_hart_id(cpu_id);

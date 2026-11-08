@@ -268,9 +268,6 @@ class TestCommand(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(events), 2, f"Events was actually {events}")
 
             self.assertStdout(events[0], b"OK\n")
-            # This causes spurious failures on Mac for some reason, where
-            # the return value is sometimes -13.
-            # self.assertTermination(events[1], 0)
 
             # Run the long-running shell script, and ensure terminating it does not hang.
             cmd = await command.AsyncCommand.create(

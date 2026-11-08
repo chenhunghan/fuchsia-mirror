@@ -1,0 +1,63 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+_sources = [
+    "src/errors.rs",
+    "src/header.rs",
+    "src/lib.rs",
+    "src/reader.rs",
+    "src/writer.rs",
+]
+
+# @bazel2gn:transformer=deps
+_deps = [
+    "//sdk/rust/zx",
+    "//src/lib/fuchsia-async",
+    "//src/lib/fuchsia-runtime",
+    "//src/lib/fuchsia-sync",
+    "//src/storage/fxfs:lib",
+    "//src/storage/lib/ptr_slice",
+    "//third_party/rust_crates/vendor:bincode",
+    "//third_party/rust_crates/vendor:bitflags",
+    "//third_party/rust_crates/vendor:serde",
+    "//third_party/rust_crates/vendor:thiserror",
+]
+
+rustc_library(
+    name = "transaction_fifo",
+    srcs = _sources,
+    edition = "2024",
+    visibility = [
+        "//src/starnix:__subpackages__",
+        "//src/storage/fxfs:__subpackages__",
+    ],
+    deps = _deps,
+)
+
+rustc_test(
+    name = "transaction_fifo_test",
+    crate = ":transaction_fifo",
+    edition = "2024",
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/storage/lib/storage_device",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_unittest_package(
+    name = "transaction-fifo-tests",
+    unit_tests = [":transaction_fifo_test"],
+)
+
+test_suite(
+    name = "tests",
+    tests = [":transaction-fifo-tests"],
+)

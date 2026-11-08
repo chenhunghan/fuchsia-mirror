@@ -45,7 +45,6 @@ fuchsia_unittest_package("netemul-runner-tests") {
   deps = [
     ":netemul_runner_test",
     "test-data",
-    "//src/connectivity/network/testing/netemul/runner:component",
   ]
   subpackages = [ "//src/sys/test_manager:pkg" ]
   test_type = "test_arch"
@@ -67,7 +66,6 @@ fuchsia_unittest_package("netemul-runner-errors-tests") {
   deps = [
     ":netemul_runner_errors_test",
     "test-data",
-    "//src/connectivity/network/testing/netemul/runner:component",
   ]
 
   subpackages = [ "//src/sys/test_manager:pkg" ]

@@ -80,6 +80,10 @@ common:no_gn_targets \
 # See //build/bazel/aspects/tests/assert_no_deps_test.bzl for example usage.
 build --aspects=//build/bazel/aspects:assert_no_deps.bzl%assert_no_deps_aspect
 
+# Enable Pyrefly static type checking across first-party Python targets
+# (opt out with `tags = ["no-pyrefly"]`).
+build --aspects=//build/bazel/aspects:pyrefly.bzl%pyrefly_aspect
+
 # Enable clippy for Rust targets specified on the build line.
 # See https://bazelbuild.github.io/rules_rust/rust_clippy.html.
 build --aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect
@@ -101,6 +105,17 @@ build:fuchsia_rust_coverage --@rules_rust//rust/settings:extra_rustc_flags=-Cins
 # LINT.ThenChange(
 #   //build/config/BUILD.gn:optimize_coverage,
 #   //build/config/profile/BUILD.gn:rust_coverage,
+# )
+
+# LINT.IfChange(rust_profile)
+# Enable Rust PGO profile generation for Host targets
+build:host_rust_profile --@rules_rust//rust/settings:extra_rustc_flags=-Cprofile-generate,-Cllvm-args=-disable-vp,-Copt-level=1
+
+# Enable Rust PGO profile generation for Fuchsia targets
+build:fuchsia_rust_profile --@rules_rust//rust/settings:extra_rustc_flags=-Cprofile-generate,-Cllvm-args=-disable-vp,-Copt-level=1,-Clink-arg=-lzircon,-Clink-arg=build/config/profile/llvm_profile_counter_bias.ld
+# LINT.ThenChange(
+#   //build/config/BUILD.gn:optimize_profile,
+#   //build/config/profile/BUILD.gn:rust_profile,
 # )
 
 # Restore the repository rule behavior of adding an implicit watch() for
@@ -171,6 +186,10 @@ common --experimental_propagate_custom_flag=EXECUTOR
 # https://github.com/bazelbuild/bazel/issues/26228.
 common --experimental_platform_in_output_dir=True
 
+# Ensure that cc_test() targets generate single executables, instead of
+# one executable + one shared library per transitive dependency.
+build --dynamic_mode=off
+
 # Enable dynamic linking of C++ stdlib for drivers in-tree.
 common --@rules_fuchsia//fuchsia/flags:dynamic_cpp_standard_library_for_drivers=True
 
@@ -191,8 +210,15 @@ build --@rules_python//python/config_settings:venvs_use_declare_symlink=no
 build --per_file_copt=external/re2.*/.*@-Wno-deprecated-declarations
 build --host_per_file_copt=external/re2.*/.*@-Wno-deprecated-declarations
 
-# Ignore upstream BUILD/BUILD.bazel files inside third_party/boringssl/src and
-# third_party/perfetto so that Fuchsia BUILD.bazel files can reference upstream
-# sources directly without crossing subpackage boundaries.
-common --deleted_packages=third_party/boringssl/src,third_party/boringssl/src/rust/bssl-macros,third_party/boringssl/src/rust/bssl-sys,third_party/perfetto
+# Suppress warnings when compiling protobuf (e.g. protoc and upb), matching
+# config("protobuf_warnings") in //build/secondary/third_party/protobuf/BUILD.gn.
+build --per_file_copt=external/protobuf.*/.*@-Wno-extra-semi,-Wno-deprecated-declarations,-Wno-sign-compare
+build --host_per_file_copt=external/protobuf.*/.*@-Wno-extra-semi,-Wno-deprecated-declarations,-Wno-sign-compare
+
+# Ignore upstream BUILD/BUILD.bazel files inside
+# third_party/android/platform/system/tools/mkbootimg/src,
+# third_party/boringssl/src, third_party/gfxstream/src and third_party/perfetto
+# so that Fuchsia BUILD.bazel files can reference upstream sources directly
+# without crossing subpackage boundaries.
+common --deleted_packages=third_party/android/platform/system/tools/mkbootimg/src,third_party/boringssl/src,third_party/boringssl/src/rust/bssl-macros,third_party/boringssl/src/rust/bssl-sys,third_party/gfxstream/src,third_party/gfxstream/src/host,third_party/perfetto
 

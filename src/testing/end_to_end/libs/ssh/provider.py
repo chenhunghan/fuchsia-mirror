@@ -4,8 +4,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-from __future__ import annotations
-
 import logging
 import os
 import shlex
@@ -296,11 +294,12 @@ class SSHProvider(Runner):
             except TimeoutError:
                 return
 
-            if time.time() < timeout:
+            if time.time() >= timeout:
                 raise TimeoutError(
                     f"Connection to {self.config.host_name} is still reachable "
                     f"after {timeout_sec}s"
                 )
+            time.sleep(interval_sec)
 
     def run(
         self,

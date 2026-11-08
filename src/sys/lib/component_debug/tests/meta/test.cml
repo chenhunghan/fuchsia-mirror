@@ -62,6 +62,17 @@
         // find them.
         { protocol: "fuchsia.foo.Bar" },
     ],
+    offer: [
+        {
+            config: [
+                "fuchsia.my.String",
+                "fuchsia.my.Uint8",
+            ],
+            from: "void",
+            to: "#foo",
+            availability: "optional",
+        },
+    ],
     expose: [
         // These capabilities aren't actually being served, but commands should still be able to
         // find them.

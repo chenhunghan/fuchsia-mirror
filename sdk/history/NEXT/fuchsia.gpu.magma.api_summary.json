@@ -110,6 +110,17 @@
         "type": "uint32"
     },
     {
+        "kind": "bits/member",
+        "name": "fuchsia.gpu.magma/CreateBufferFlags.VENDOR_FLAG_0",
+        "value": "65536"
+    },
+    {
+        "kind": "bits",
+        "name": "fuchsia.gpu.magma/CreateBufferFlags",
+        "strictness": "flexible",
+        "type": "uint64"
+    },
+    {
         "kind": "protocol/member",
         "name": "fuchsia.gpu.magma/DependencyInjection.SetMemoryPressureProvider",
         "strictness": "strict",
@@ -529,6 +540,16 @@
     },
     {
         "kind": "protocol/member",
+        "name": "fuchsia.gpu.magma/Primary.CreateBuffer",
+        "strictness": "strict",
+        "ordinal": "7065545625420122599",
+        "direction": "two_way",
+        "request": "fuchsia.gpu.magma/PrimaryCreateBufferRequest",
+        "response": "fuchsia.gpu.magma/Primary_CreateBuffer_Response",
+        "error": "int32"
+    },
+    {
+        "kind": "protocol/member",
         "name": "fuchsia.gpu.magma/Primary.CreateContext",
         "strictness": "strict",
         "ordinal": "6528690901102583204",
@@ -732,6 +753,28 @@
     {
         "kind": "struct",
         "name": "fuchsia.gpu.magma/PrimaryClearPerformanceCountersRequest"
+    },
+    {
+        "kind": "table/member",
+        "name": "fuchsia.gpu.magma/PrimaryCreateBufferRequest.flags",
+        "ordinal": "3",
+        "type": "fuchsia.gpu.magma/CreateBufferFlags"
+    },
+    {
+        "kind": "table/member",
+        "name": "fuchsia.gpu.magma/PrimaryCreateBufferRequest.object_id",
+        "ordinal": "2",
+        "type": "uint64"
+    },
+    {
+        "kind": "table/member",
+        "name": "fuchsia.gpu.magma/PrimaryCreateBufferRequest.size",
+        "ordinal": "1",
+        "type": "uint64"
+    },
+    {
+        "kind": "table",
+        "name": "fuchsia.gpu.magma/PrimaryCreateBufferRequest"
     },
     {
         "kind": "struct/member",
@@ -1017,6 +1060,17 @@
     {
         "kind": "table",
         "name": "fuchsia.gpu.magma/PrimaryUnmapBufferRequest"
+    },
+    {
+        "kind": "table/member",
+        "name": "fuchsia.gpu.magma/Primary_CreateBuffer_Response.buffer",
+        "ordinal": "1",
+        "type": "zx/Handle:VMO"
+    },
+    {
+        "kind": "table",
+        "name": "fuchsia.gpu.magma/Primary_CreateBuffer_Response",
+        "resourceness": "resource"
     },
     {
         "kind": "enum/member",

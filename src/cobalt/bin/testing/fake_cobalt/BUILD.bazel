@@ -41,6 +41,7 @@ rustc_binary(
 rustc_test(
     name = "bin_test",
     crate = ":bin",
+    crate_name = "fake_cobalt_bin_test",
     edition = "2024",
     deps = [
         "//src/lib/async-utils",
@@ -67,7 +68,6 @@ fx_component(
     name = "component_v2",
     testonly = True,
     compiled_manifest = ":component_v2_manifest",
-    component_name = "fake_cobalt",
     deps = [":fake_cobalt_packaged_bin"],
 )
 

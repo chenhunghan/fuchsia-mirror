@@ -5,7 +5,6 @@
 #ifndef SRC_CAMERA_DRIVERS_SENSORS_IMX227_IMX227_MODES_H_
 #define SRC_CAMERA_DRIVERS_SENSORS_IMX227_IMX227_MODES_H_
 
-#include <fuchsia/hardware/camera/c/banjo.h>
 #include <fuchsia/hardware/camera/sensor/c/banjo.h>
 
 #include <array>

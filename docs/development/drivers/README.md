@@ -17,8 +17,8 @@ section.
   Migrate existing legacy DFv1 drivers to the new driver framework (DFv2).
 - [**DFv2 driver development**][dfv2-overview]: Create new DFv2 drivers using
   the [Fuchsia source checkout][fuchsia-git] development setup.
-- [**DFv1 driver development**][fuchsia-driver-development]: Build, debug, and
-  test legacy DFv1 drivers.
+- [**Fuchsia driver development**][fuchsia-driver-development]: Build, debug, and
+  test drivers.
 - [**DFv1 concepts**][fuchsia-driver-framework]: Understand concepts specific
   to the legacy driver framework (DFv1).
 - [**Driver-specific guides**][gpio-init]: Explore examples and best practices
@@ -83,15 +83,12 @@ section.
 
   - [DMA (Direct Memory Access)][dma]
 
-### DFv1 driver development
+### Fuchsia driver development
 
-- [Fuchsia driver development (DFv1)][fuchsia-driver-development]
+- [Fuchsia driver development][fuchsia-driver-development]
 - [Building drivers][bulding-drivers]
 - [Interrupts][interrupts]
 - [Platform Bus][platform-bus]
-- Tutorials
-
-  - [Using the C++ DDK Template Library][using-cpp-ddk-template-lib]
 
 - Testing
 
@@ -113,7 +110,6 @@ section.
   - [Device model][device-model]
   - [Driver binding][driver-binding]
   - [The Device ops][the-device-ops]
-  - [Device driver lifecycle][device-driver-lifecycle]
   - [Device power management][device-power-management]
   - [Protocols in drivers][protocols-in-drivers]
 
@@ -195,7 +191,6 @@ section.
 [device-model]: concepts/device_driver_model/device-model.md
 [driver-binding]: concepts/device_driver_model/driver-binding.md
 [the-device-ops]: concepts/device_driver_model/device-ops.md
-[device-driver-lifecycle]: concepts/device_driver_model/device-lifecycle.md
 [device-power-management]: concepts/device_driver_model/device-power.md
 [protocols-in-drivers]: concepts/device_driver_model/protocol.md
 [platform-bus]: concepts/device_driver_model/platform-bus.md
@@ -204,7 +199,6 @@ section.
 [fuchsia-input-drivers]: concepts/driver_architectures/input_drivers/input.md
 [input-report-reader-library]: concepts/driver_architectures/input_drivers/input_report_reader.md
 [sdmmc-drivers-architecture]: concepts/driver_architectures/sdmmc_drivers/sdmmc.md
-[using-cpp-ddk-template-lib]: concepts/driver_development/using-ddktl.md
 [configuration]: concepts/driver_development/bar.md
 [interrupts]: concepts/driver_development/interrupts.md
 [dma]: concepts/driver_development/dma.md

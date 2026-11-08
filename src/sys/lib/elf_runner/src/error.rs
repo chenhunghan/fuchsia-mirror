@@ -64,6 +64,8 @@ pub enum JobError {
     SetPolicy(#[source] zx::Status),
     #[error("failed to create child job: {_0}")]
     CreateChild(#[source] zx::Status),
+    #[error("failed to set job name: {_0}")]
+    SetName(#[source] zx::Status),
 }
 
 /// Errors from parsing ComponentStartInfo.

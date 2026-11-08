@@ -2,11 +2,82 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":auto-slot-committer-tests"],
+    visibility = ["//src/bringup:__pkg__"],
+)
 
 exports_files(
     [
         "meta/auto-slot-committer.bootstrap_shard.cml",
     ],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    binary_name = "auto_slot_committer",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.paver:fuchsia.paver_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/sys/lib/stdout-to-debuglog/rust",
+        "//third_party/rust_crates/vendor:anyhow",
+    ],
+)
+
+rustc_test(
+    name = "bin_test",
+    crate = ":bin",
+    # Preserves the GN test binary name from `rustc_binary(name = "auto_slot_committer", with_unit_tests = true)`.
+    crate_name = "auto_slot_committer_bin_test",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = ["//third_party/rust_crates/vendor:futures"],
+)
+
+fx_unittest_package(
+    name = "auto-slot-committer-tests",
+    unit_tests = [":bin_test"],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "auto_slot_committer",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "auto-slot-committer",
+    manifest = "meta/auto-slot-committer.cml",
+)
+
+fx_component(
+    name = "auto-slot-committer-component",
+    check_includes = False,
+    compiled_manifest = ":manifest",
+    deps = [":bin_packaged"],
 )

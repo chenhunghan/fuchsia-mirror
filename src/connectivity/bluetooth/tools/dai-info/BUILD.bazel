@@ -1,0 +1,21 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Preserve the hyphenated GN binary output_name for the fuchsia_package.
+# @bazel2gn:raw_attribute:output_name = "dai-info"
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    deps = [
+        "//src/connectivity/bluetooth/lib/fuchsia-audio-dai",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:anyhow",
+    ],
+)

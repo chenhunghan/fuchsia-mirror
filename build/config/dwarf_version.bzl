@@ -49,11 +49,24 @@ load("@fuchsia_rules_common//build_flags:providers.bzl", "BuildFlagsInfo")
 
 def _dwarf_version_build_flags_impl(ctx):
     # LINT.IfChange(dwarf_version)
-    cflags = ["-gdwarf-{}".format(ctx.attr._flag[BuildSettingInfo].value)]
+    dwarf_version = ctx.attr._flag[BuildSettingInfo].value
+    cflags = ["-gdwarf-{}".format(dwarf_version)]
 
     # NOTE: asmflags is not supported. Bazel uses cflags.
     # asmflags = cflags
-    ldflags = cflags
+    ldflags = list(cflags)
+    rustflags = ["-Cdwarf-version={}".format(dwarf_version)]
+    if dwarf_version >= 5:
+        # NOTE: This assumes is_gcc=false && is_elf=true in Bazel.
+        # TODO(https://fxbug.dev/578487101): Remove once upstream Clang and
+        # rustc enable .debug_names and pass --debug-names to LLD by default
+        # for -gdwarf-5.
+        cflags.append("-gpubnames")
+        ldflags.append("-Wl,--debug-names")
+
+        # Unlike GN, Bazel's @rules_rust invokes the Clang driver as the linker
+        # on both Fuchsia and host platforms, so we use the Clang flag spelling.
+        rustflags.append("-Clink-arg=-Wl,--debug-names")
 
     # LINT.ThenChange(BUILD.gn:dwarf_version)
     return [
@@ -61,6 +74,7 @@ def _dwarf_version_build_flags_impl(ctx):
             label = ctx.label,
             cflags = cflags,
             ldflags = ldflags,
+            rustflags = rustflags,
         ),
     ]
 

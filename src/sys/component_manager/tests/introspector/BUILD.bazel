@@ -1,0 +1,271 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load("//build/component:config.bzl", "component_config")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "introspector_integration_test_bin",
+    srcs = ["src/main.rs"],
+    crate_root = "src/main.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.component.runner:fuchsia.component.runner_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-sync",
+        "//src/sys/lib/component-events",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:futures-util",
+    ],
+)
+
+fx_packaged_binary(
+    name = "introspector_integration_test_packaged_bin",
+    testonly = True,
+    binary = ":introspector_integration_test_bin",
+    binary_name = "introspector_integration_test_bin",
+)
+
+rustc_binary(
+    name = "proxy_outgoing_to_incoming",
+    testonly = True,
+    srcs = ["src/proxy_outgoing_to_incoming.rs"],
+    crate_root = "src/proxy_outgoing_to_incoming.rs",
+    edition = "2024",
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-fs",
+        "//third_party/rust_crates/vendor:futures-util",
+    ],
+)
+
+fx_packaged_binary(
+    name = "proxy_outgoing_to_incoming_packaged_bin",
+    testonly = True,
+    binary = ":proxy_outgoing_to_incoming",
+    binary_name = "proxy_outgoing_to_incoming",
+)
+
+rustc_test(
+    name = "use_introspector_disallowed_test_bin",
+    srcs = ["src/use_introspector_disallowed_test.rs"],
+    crate_root = "src/use_introspector_disallowed_test.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "use_introspector_disallowed_test_packaged_bin",
+    testonly = True,
+    binary = ":use_introspector_disallowed_test_bin",
+    binary_name = "use_realm_moniker_disallowed_test_bin",
+)
+
+fx_component_manifest(
+    name = "use-introspector-disallowed-test-manifest",
+    testonly = True,
+    component_name = "use-introspector-disallowed-test",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/use_introspector_disallowed_test.cml",
+)
+
+fx_test_component(
+    name = "use-introspector-disallowed-test-component",
+    compiled_manifest = ":use-introspector-disallowed-test-manifest",
+    deps = [":use_introspector_disallowed_test_packaged_bin"],
+)
+
+fx_package(
+    name = "use-introspector-disallowed-test-package",
+    package_name = "use-introspector-disallowed-test",
+    test_components = [":use-introspector-disallowed-test-component"],
+)
+
+fx_test(
+    name = "use-introspector-disallowed-test",
+    package = ":use-introspector-disallowed-test-package",
+)
+
+component_config(
+    name = "component_manager_config",
+    testonly = True,
+    srcs = [
+        "mock_runner_cm_config.json5",
+        "//src/sys/component_manager/configs:test_config.base.json5",
+    ],
+)
+
+fx_component_manifest(
+    name = "component_manager_debug_with_mock_runner-manifest",
+    testonly = True,
+    component_name = "component_manager_debug_with_mock_runner",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "//src/sys/component_manager:meta/component_manager.cml",
+)
+
+fx_component(
+    name = "component_manager_debug_with_mock_runner",
+    testonly = True,
+    compiled_manifest = ":component_manager_debug_with_mock_runner-manifest",
+    deps = [
+        ":component_manager_config",
+        "//src/sys/component_manager:bin_with_tracing_packaged",  # @bazel2gn:path_overwrite://src/sys/component_manager:bin_with_tracing
+    ],
+)
+
+fx_component_manifest(
+    name = "test_root-manifest",
+    testonly = True,
+    component_name = "test_root",
+    includes = [
+        "//src/sys/component_manager:meta/passthrough_diagnostics.shard.cml",
+        "//src/sys/component_manager/tests:meta/use_elf_runner.shard",
+    ],
+    manifest = "meta/test_root.cml",
+)
+
+# We want `diagnostics` from self rather than parent, so we can't use
+# syslog/client.shard.cml.
+fx_component(
+    name = "test_root",
+    testonly = True,
+    check_includes = False,
+    compiled_manifest = ":test_root-manifest",
+    deps = [":proxy_outgoing_to_incoming_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "main_realm-manifest",
+    testonly = True,
+    component_name = "main_realm",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/main_realm.cml",
+)
+
+fx_component(
+    name = "main_realm",
+    testonly = True,
+    compiled_manifest = ":main_realm-manifest",
+)
+
+fx_component_manifest(
+    name = "main_realm_child-manifest",
+    testonly = True,
+    component_name = "main_realm_child",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/simple.cml",
+)
+
+fx_component(
+    name = "main_realm_child",
+    testonly = True,
+    compiled_manifest = ":main_realm_child-manifest",
+)
+
+fx_component_manifest(
+    name = "unrelated_realm_child-manifest",
+    testonly = True,
+    component_name = "unrelated_realm_child",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/simple.cml",
+)
+
+fx_component(
+    name = "unrelated_realm_child",
+    testonly = True,
+    compiled_manifest = ":unrelated_realm_child-manifest",
+)
+
+fx_component_manifest(
+    name = "unrelated_realm-manifest",
+    testonly = True,
+    component_name = "unrelated_realm",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/unrelated_realm.cml",
+)
+
+fx_component(
+    name = "unrelated_realm",
+    testonly = True,
+    compiled_manifest = ":unrelated_realm-manifest",
+)
+
+fx_component_manifest(
+    name = "introspector-integration-test-manifest",
+    testonly = True,
+    component_name = "introspector-integration-test",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/lib/fuchsia-component-test:meta/nested_component_manager.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/introspector_integration_test.cml",
+)
+
+fx_test_component(
+    name = "introspector-integration-test-component",
+    compiled_manifest = ":introspector-integration-test-manifest",
+    deps = [":introspector_integration_test_packaged_bin"],
+)
+
+fx_package(
+    name = "introspector-integration-test-package",
+    package_name = "introspector-integration-test",
+    components = [
+        ":component_manager_debug_with_mock_runner",
+        ":main_realm",
+        ":main_realm_child",
+        ":test_root",
+        ":unrelated_realm",
+        ":unrelated_realm_child",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":introspector-integration-test-component"],
+)
+
+fx_test(
+    name = "introspector-integration-test",
+    package = ":introspector-integration-test-package",
+    visibility = ["//src/sys/component_manager:__pkg__"],
+)

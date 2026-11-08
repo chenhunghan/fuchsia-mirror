@@ -188,8 +188,7 @@ TEST_F(UnmanagedTestFixture, ResetDuringControlWrite) {
   TearDownAndPowerOffDriver();
 }
 
-// TODO(b/509735595): Re-enable once the production fixes are landed.
-TEST_F(UnmanagedTestFixture, DISABLED_Ep0ResetForceAbortsOutstandingSetupTrb) {
+TEST_F(UnmanagedTestFixture, Ep0ResetForceAbortsActiveTransfers) {
   // Shared sequential log to verify strict protocol stages chronologically!
   auto sequence_log = std::make_shared<std::vector<std::string>>();
 
@@ -224,12 +223,14 @@ TEST_F(UnmanagedTestFixture, DISABLED_Ep0ResetForceAbortsOutstandingSetupTrb) {
   dut_.RunInDriverContext([&](Dwc3& drv) {
     Dwc3TestHelper::SetControllerStarted(drv, true);
 
-    // Place EP0 in Setup state waiting for packets
+    // Place EP0 in Setup state with active transfers on both directions
     Dwc3TestHelper::SetEp0State(drv, Dwc3TestHelper::State::Setup);
-    Dwc3TestHelper::SetEpTransferState(
-        drv, 0, Dwc3TestHelper::TransferState::kIdle);  // Outstanding Setup TRB queued!
+    Dwc3TestHelper::SetEpTransferState(drv, 0, Dwc3TestHelper::TransferState::kActiveSingle);
+    Dwc3TestHelper::SetEpRsrcId(drv, 0, 1);
+    Dwc3TestHelper::SetEpTransferState(drv, 1, Dwc3TestHelper::TransferState::kActiveSingle);
+    Dwc3TestHelper::SetEpRsrcId(drv, 1, 2);
 
-    // Invoke Ep0Reset! This must unconditionally and sequentially abort EP0 OUT then EP0 IN!
+    // Invoke Ep0Reset! This must sequentially abort EP0 OUT then EP0 IN!
     Dwc3TestHelper::Ep0Reset(drv);
   });
 
@@ -411,8 +412,7 @@ TEST_F(UnmanagedTestFixture, UsbBusResetDuringTransfer) {
   TearDownAndPowerOffDriver();
 }
 
-// TODO(b/509735595): Re-enable once the deferred cancel logic production fixes land in a future CL.
-TEST_F(UnmanagedTestFixture, DISABLED_DisableEndpointDuringTransfer) {
+TEST_F(UnmanagedTestFixture, DisableEndpointDuringTransfer) {
   SetUpAndPowerOnDriver();
 
   auto cleanup_callbacks = DeferClearDepcmdCallbacks(2);
@@ -440,8 +440,7 @@ TEST_F(UnmanagedTestFixture, DISABLED_DisableEndpointDuringTransfer) {
   });
 
   // StopDriver calls Stop() which runs QuiesceCore() -> StopActiveTransfers().
-  // RemoveRequests should call CmdEpEndTransfer on EP2 because transfer_state is active!
-  // And since rsrc_id is invalid, it should crash!
+  // RemoveRequests guards against kInvalidResourceId and must not crash.
   TearDownAndPowerOffDriver();
 }
 
@@ -545,9 +544,9 @@ TEST_F(UnmanagedTestFixture, ZeroLengthPacket) {
   TearDownAndPowerOffDriver();
 }
 
-// This test verifies that the driver handles a Control Write with maximum buffer size.
-// TODO(b/509735595): Re-enable once the production fixes are landed.
-TEST_F(UnmanagedTestFixture, DISABLED_MaxBufferSizeTransfer) {
+// This test verifies that the driver stalls a Control Write that exceeds the maximum FIDL control
+// request length.
+TEST_F(UnmanagedTestFixture, MaxBufferSizeTransfer) {
   FakeUsbDciInterface fake_dci;
 
   SetUpAndPowerOnDriver();
@@ -571,10 +570,16 @@ TEST_F(UnmanagedTestFixture, DISABLED_MaxBufferSizeTransfer) {
         MakeSetupPacket(fdescriptor::EndpointDirection::kOut | fdescriptor::RequestType::kVendor |
                             fdescriptor::RequestRecipient::kDevice,
                         0x01, 0, 0, 65535));
+    // A 3-stage Control Write first arms the 64 KiB Data OUT TRB in State::DataOut;
+    // DoControlCall() checks the received payload length against kMaxControlRequestLen (65400)
+    // and stalls EP0 only after the Data OUT phase completes.
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::DataOut);
+    Dwc3TestHelper::SimulateDataOutPhase(drv, 65535);
   });
 
   dut_.RunInDriverContext([&](Dwc3& drv) {
     // With the FIDL limit fix, oversized requests are stalled and state returns to Setup.
+    EXPECT_TRUE(Dwc3TestHelper::IsEp0OutStalled(drv));
     EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
   });
 
@@ -1185,7 +1190,7 @@ TEST_F(UnmanagedTestFixture, DISABLED_ControlReadOversizedStallIn) {
   TearDownAndPowerOffDriver();
 }
 
-TEST_F(UnmanagedTestFixture, DISABLED_ControlWriteComplete) {
+TEST_F(UnmanagedTestFixture, ControlWriteComplete) {
   SetUpAndPowerOnDriver();
 
   FakeUsbDciInterface fake_dci;
@@ -1216,9 +1221,11 @@ TEST_F(UnmanagedTestFixture, DISABLED_ControlWriteComplete) {
                         0x99, 0, 0, 8);
     Dwc3TestHelper::WriteEp0Buffer(drv, &setup, 0, sizeof(setup));
     Dwc3TestHelper::HandleEp0TransferCompleteEvent(drv, 0);
+    Dwc3TestHelper::SimulateDataOutPhase(drv, 8);
   });
 
   ASSERT_EQ(control_called->Wait(zx::sec(5)), ZX_OK);
+  EXPECT_EQ(callback_received_len->load(), 8u);
 
   if (binding.has_value()) {
     binding->Unbind();
@@ -1342,8 +1349,7 @@ TEST_F(UnmanagedTestFixture, ControlWriteShortPacketDataOut) {
   TearDownAndPowerOffDriver();
 }
 
-// TODO(b/509735595): Re-enable once the production fixes are landed.
-TEST_F(UnmanagedTestFixture, DISABLED_MaxBufferSizeTransferIn) {
+TEST_F(UnmanagedTestFixture, MaxBufferSizeTransferIn) {
   FakeUsbDciInterface fake_dci;
   SetUpAndPowerOnDriver();
 
@@ -1357,6 +1363,8 @@ TEST_F(UnmanagedTestFixture, DISABLED_MaxBufferSizeTransferIn) {
 
   dut_.RunInDriverContext([&](Dwc3& drv) {
     Dwc3TestHelper::SetControllerStarted(drv, true);
+    Dwc3TestHelper::SetEp0OutEnabled(drv, true);
+    Dwc3TestHelper::SetEp0InEnabled(drv, true);
     Dwc3TestHelper::Ep0QueueSetup(drv);
     Dwc3TestHelper::SetEp0State(drv, Dwc3TestHelper::State::Setup);
 
@@ -1372,8 +1380,19 @@ TEST_F(UnmanagedTestFixture, DISABLED_MaxBufferSizeTransferIn) {
     Dwc3TestHelper::SimulateSetupReceived(drv, setup);
   });
 
+  ASSERT_TRUE(dut_.runtime().RunWithTimeoutOrUntil(
+      [&]() {
+        bool in_setup = false;
+        dut_.RunInDriverContext([&](Dwc3& drv) {
+          in_setup = (Dwc3TestHelper::GetEp0State(drv) == Dwc3TestHelper::State::Setup);
+        });
+        return in_setup;
+      },
+      zx::sec(5)));
+
   dut_.RunInDriverContext([&](Dwc3& drv) {
     // With the FIDL limit fix, oversized requests are stalled and state returns to Setup.
+    EXPECT_TRUE(Dwc3TestHelper::IsEp0OutStalled(drv));
     EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
   });
 
@@ -2704,6 +2723,400 @@ TEST_F(UnmanagedTestFixture, XferActiveNotReadyOutsideSetupEndsActiveTransfer) {
     EXPECT_FALSE(Dwc3TestHelper::IsEp0InStalled(drv));
     EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
   });
+
+  TearDownAndPowerOffDriver();
+}
+
+TEST_F(UnmanagedTestFixture, Ep0SetupPendingAbortsControlTransferAndRearmsSetup) {
+  SetUpAndPowerOnDriver();
+
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    Dwc3TestHelper::SetEp0OutEnabled(drv, true);
+    Dwc3TestHelper::SetEp0InEnabled(drv, true);
+    Dwc3TestHelper::SetControllerStarted(drv, true);
+
+    // 1. Setup interrupted by TRB_TRBSTS_SETUP_PENDING: must discard the superseded Setup packet
+    // without executing HandleEp0Setup or stalling EP0 OUT, and immediately re-arm Ep0QueueSetup().
+    Dwc3TestHelper::Ep0QueueSetup(drv);
+    Dwc3TestHelper::HandleEpTransferStartedEvent(drv, 0, 1);
+    auto superseded_setup = MakeSetupPacket(
+        kStandardDeviceOut, fidl::ToUnderlying(fdescriptor::StandardRequest::kSetAddress), 9, 0, 0);
+    Dwc3TestHelper::WriteEp0Buffer(drv, &superseded_setup, 0, sizeof(superseded_setup));
+    dwc3_trb_t* setup_trb = Dwc3TestHelper::GetCurrentReadTrb(drv);
+    ASSERT_NE(setup_trb, nullptr);
+    setup_trb->status = (TRB_TRBSTS_SETUP_PENDING << TRB_TRBSTS_START);
+    Dwc3TestHelper::HandleEp0TransferCompleteEvent(drv, 0);
+
+    EXPECT_FALSE(Dwc3TestHelper::IsEp0OutStalled(drv));
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
+    EXPECT_EQ(Dwc3TestHelper::GetDeviceState(drv),
+              fuchsia_hardware_usb_policy::wire::DeviceState::kPowered);
+    ASSERT_NE(Dwc3TestHelper::GetCurrentReadTrb(drv), nullptr);
+    EXPECT_NE(Dwc3TestHelper::GetCurrentReadTrb(drv)->control & TRB_HWO, 0u);
+    Dwc3TestHelper::HandleEpTransferStartedEvent(drv, 0, 2);
+
+    // 2. DataOut interrupted by TRB_TRBSTS_SETUP_PENDING, followed by trailing
+    // DEPEVT_XFER_NOT_READY(Control_Status) from the aborted transfer.
+    auto out_setup =
+        MakeSetupPacket(fdescriptor::EndpointDirection::kOut | fdescriptor::RequestType::kVendor |
+                            fdescriptor::RequestRecipient::kDevice,
+                        0x10, 0, 0, 16);
+    Dwc3TestHelper::SimulateSetupReceived(drv, out_setup);
+    Dwc3TestHelper::HandleEpTransferStartedEvent(drv, 0, 3);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::DataOut);
+
+    dwc3_trb_t* trb = Dwc3TestHelper::GetCurrentReadTrb(drv);
+    ASSERT_NE(trb, nullptr);
+    trb->status = (TRB_TRBSTS_SETUP_PENDING << TRB_TRBSTS_START) | TRB_BUFSIZ(512);
+    Dwc3TestHelper::HandleEp0TransferCompleteEvent(drv, 0);
+
+    EXPECT_FALSE(Dwc3TestHelper::IsEp0OutStalled(drv));
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
+    dwc3_trb_t* rearmed_after_data_out = Dwc3TestHelper::GetCurrentReadTrb(drv);
+    ASSERT_NE(rearmed_after_data_out, nullptr);
+    EXPECT_NE(rearmed_after_data_out->control & TRB_HWO, 0u);
+    // Trailing XferNotReady(Status) from the aborted DataOut transfer must preserve the newly armed
+    // Setup TRB without cancelling or re-queuing it.
+    Dwc3TestHelper::HandleEp0TransferNotReadyEvent(drv, 1, DEPEVT_XFER_NOT_READY_STAGE_STATUS);
+    EXPECT_EQ(Dwc3TestHelper::GetCurrentReadTrb(drv), rearmed_after_data_out);
+    EXPECT_NE(rearmed_after_data_out->control & TRB_HWO, 0u);
+    Dwc3TestHelper::HandleEpTransferStartedEvent(drv, 0, 4);
+
+    // 3. DataIn interrupted by TRB_TRBSTS_SETUP_PENDING, followed by trailing
+    // DEPEVT_XFER_NOT_READY(Control_Status).
+    Dwc3TestHelper::SetEp0State(drv, Dwc3TestHelper::State::DataIn);
+    Dwc3TestHelper::SetEp0CurTransferLen(drv, 64);
+    dwc3_trb_t data_in_trb{};
+    data_in_trb.status = (TRB_TRBSTS_SETUP_PENDING << TRB_TRBSTS_START) | TRB_BUFSIZ(64);
+    Dwc3TestHelper::PushTrbToSharedFifo(drv, data_in_trb);
+    Dwc3TestHelper::HandleEp0TransferCompleteEvent(drv, 1);
+
+    EXPECT_FALSE(Dwc3TestHelper::IsEp0OutStalled(drv));
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
+    dwc3_trb_t* rearmed_after_data_in = Dwc3TestHelper::GetCurrentReadTrb(drv);
+    ASSERT_NE(rearmed_after_data_in, nullptr);
+    EXPECT_NE(rearmed_after_data_in->control & TRB_HWO, 0u);
+    Dwc3TestHelper::HandleEp0TransferNotReadyEvent(drv, 0, DEPEVT_XFER_NOT_READY_STAGE_STATUS);
+    EXPECT_EQ(Dwc3TestHelper::GetCurrentReadTrb(drv), rearmed_after_data_in);
+    EXPECT_NE(rearmed_after_data_in->control & TRB_HWO, 0u);
+    Dwc3TestHelper::HandleEpTransferStartedEvent(drv, 0, 5);
+
+    // 4. WaitZlpIn interrupted by TRB_TRBSTS_SETUP_PENDING, followed by trailing
+    // DEPEVT_XFER_NOT_READY(Control_Status).
+    Dwc3TestHelper::SetEp0State(drv, Dwc3TestHelper::State::WaitZlpIn);
+    dwc3_trb_t zlp_in_trb{};
+    zlp_in_trb.status = (TRB_TRBSTS_SETUP_PENDING << TRB_TRBSTS_START);
+    Dwc3TestHelper::PushTrbToSharedFifo(drv, zlp_in_trb);
+    Dwc3TestHelper::HandleEp0TransferCompleteEvent(drv, 1);
+
+    EXPECT_FALSE(Dwc3TestHelper::IsEp0OutStalled(drv));
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
+    dwc3_trb_t* rearmed_after_zlp_in = Dwc3TestHelper::GetCurrentReadTrb(drv);
+    ASSERT_NE(rearmed_after_zlp_in, nullptr);
+    EXPECT_NE(rearmed_after_zlp_in->control & TRB_HWO, 0u);
+    Dwc3TestHelper::HandleEp0TransferNotReadyEvent(drv, 0, DEPEVT_XFER_NOT_READY_STAGE_STATUS);
+    EXPECT_EQ(Dwc3TestHelper::GetCurrentReadTrb(drv), rearmed_after_zlp_in);
+    EXPECT_NE(rearmed_after_zlp_in->control & TRB_HWO, 0u);
+    Dwc3TestHelper::HandleEpTransferStartedEvent(drv, 0, 6);
+
+    // 5. Status (with latched test_mode) interrupted by TRB_TRBSTS_SETUP_PENDING must NOT issue
+    // EP0_OUT_STALL and must NOT apply test_mode to DCTL.TSTCTL.
+    auto test_setup = MakeSetupPacket(
+        kStandardDeviceOut, fidl::ToUnderlying(fdescriptor::StandardRequest::kSetFeature),
+        fidl::ToUnderlying(fdescriptor::FeatureSelector::kDeviceTestMode),
+        static_cast<uint16_t>(fidl::ToUnderlying(fdescriptor::TestModeSelector::kTestPacket) << 8),
+        0);
+    Dwc3TestHelper::SimulateSetupReceived(drv, test_setup);
+    EXPECT_FALSE(Dwc3TestHelper::IsEp0OutStalled(drv));
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::WaitHost);
+    Dwc3TestHelper::HandleEp0TransferNotReadyEvent(drv, 1, DEPEVT_XFER_NOT_READY_STAGE_STATUS);
+    Dwc3TestHelper::HandleEpTransferStartedEvent(drv, 1, 7);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Status);
+
+    dwc3_trb_t* status_trb = Dwc3TestHelper::GetCurrentReadTrb(drv);
+    ASSERT_NE(status_trb, nullptr);
+    status_trb->status = (TRB_TRBSTS_SETUP_PENDING << TRB_TRBSTS_START);
+    Dwc3TestHelper::HandleEp0TransferCompleteEvent(drv, 1);
+
+    EXPECT_FALSE(Dwc3TestHelper::IsEp0OutStalled(drv));
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0TestMode(drv), 0u);
+    dwc3_trb_t* final_setup_trb = Dwc3TestHelper::GetCurrentReadTrb(drv);
+    ASSERT_NE(final_setup_trb, nullptr);
+    EXPECT_NE(final_setup_trb->control & TRB_HWO, 0u);
+    Dwc3TestHelper::HandleEpTransferStartedEvent(drv, 0, 8);
+  });
+
+  EXPECT_EQ(DCTL::Get().FromValue(Read_DCTL()).TSTCTL(), 0u);
+
+  TearDownAndPowerOffDriver();
+}
+
+// Verifies that ConfigureEndpoint returns ZX_ERR_IO_NOT_PRESENT when the controller power is off.
+TEST_F(UnmanagedTestFixture, ConfigureEndpointPowerOff) {
+  dut_.RunInEnvironmentTypeContext([](Environment& env) {
+    env.usb_phy().set_initial_connected(false);  // Start disconnected
+  });
+
+  ASSERT_TRUE(StartDriverWithoutPlatformExtension().is_ok());
+
+  fidl::SyncClient client = ConnectController();
+
+  fuchsia_hardware_usb_descriptor::UsbEndpointDescriptor ep_desc;
+  ep_desc.b_endpoint_address() = 1;  // EP 1 OUT
+  ep_desc.bm_attributes() = 2;       // Bulk
+
+  auto result = client->ConfigureEndpoint({{.ep_descriptor = ep_desc}});
+  ASSERT_TRUE(result.is_error());
+  ASSERT_TRUE(result.error_value().is_domain_error());
+  EXPECT_EQ(result.error_value().domain_error(), ZX_ERR_IO_NOT_PRESENT);
+
+  TearDownAndPowerOffDriver();
+}
+
+// Verifies that QueueRequests completes each request with ZX_ERR_IO_NOT_PRESENT when the endpoint
+// is disabled.
+TEST_F(UnmanagedTestFixture, QueueRequestsEndpointDisabled) {
+  SetUpAndPowerOnDriver();
+
+  fidl::SyncClient client = ConnectController();
+
+  auto [ep_client, ep_server] = fidl::Endpoints<fuchsia_hardware_usb_endpoint::Endpoint>::Create();
+  fuchsia_hardware_usb_dci::UsbDciConnectToEndpointRequest connect_req;
+  connect_req.ep_addr() = 1;
+  connect_req.ep() = std::move(ep_server);
+  auto connect_result = client->ConnectToEndpoint(std::move(connect_req));
+  ASSERT_TRUE(connect_result.is_ok());
+
+  fidl::SyncClient ep_sync_client{std::move(ep_client)};
+
+  fuchsia_hardware_usb_request::BufferRegion region;
+  region.buffer(fuchsia_hardware_usb_request::Buffer::WithData(std::vector<uint8_t>{1}));
+  region.size(1);
+  region.offset(0);
+
+  std::vector<fuchsia_hardware_usb_request::BufferRegion> data;
+  data.push_back(std::move(region));
+
+  fuchsia_hardware_usb_request::Request request;
+  request.data(std::move(data));
+
+  std::vector<fuchsia_hardware_usb_request::Request> reqs;
+  reqs.push_back(std::move(request));
+  auto queue_result = ep_sync_client->QueueRequests(std::move(reqs));
+  ASSERT_TRUE(queue_result.is_ok());
+
+  bool completed = false;
+  zx_status_t status = ZX_OK;
+  TestEndpointEventHandler handler{completed, status};
+
+  ASSERT_TRUE(ep_sync_client.HandleOneEvent(handler).ok());
+  EXPECT_TRUE(completed);
+  EXPECT_EQ(status, ZX_ERR_IO_NOT_PRESENT);
+
+  TearDownAndPowerOffDriver();
+}
+
+// Verifies that CancelAll succeeds on a disabled endpoint.
+TEST_F(UnmanagedTestFixture, CancelAllEndpointDisabled) {
+  SetUpAndPowerOnDriver();
+
+  fidl::SyncClient client = ConnectController();
+
+  auto [ep_client, ep_server] = fidl::Endpoints<fuchsia_hardware_usb_endpoint::Endpoint>::Create();
+  fuchsia_hardware_usb_dci::UsbDciConnectToEndpointRequest connect_req;
+  connect_req.ep_addr() = 1;
+  connect_req.ep() = std::move(ep_server);
+  auto connect_result = client->ConnectToEndpoint(std::move(connect_req));
+  ASSERT_TRUE(connect_result.is_ok());
+
+  fidl::SyncClient ep_sync_client{std::move(ep_client)};
+
+  auto cancel_result = ep_sync_client->CancelAll();
+  ASSERT_TRUE(cancel_result.is_ok());
+
+  TearDownAndPowerOffDriver();
+}
+
+// Verifies that the driver powers on and transitions to kPowered when a connection event arrives
+// from the PHY ConnectionWatcher.
+TEST_F(UnmanagedTestFixture, OnConnectStatusChangedConnect) {
+  dut_.RunInEnvironmentTypeContext([](Environment& env) {
+    env.usb_phy().set_initial_connected(false);  // Start disconnected
+  });
+
+  ASSERT_TRUE(StartDriverWithoutPlatformExtension().is_ok());
+  ASSERT_EQ(WaitForPhy(), ZX_OK);
+
+  bool power_is_on = true;
+  dut_.RunInDriverContext([&](Dwc3& drv) { power_is_on = Dwc3TestHelper::GetPowerOn(drv); });
+  EXPECT_FALSE(power_is_on);
+
+  dut_.RunInEnvironmentTypeContext([](Environment& env) { env.usb_phy().TriggerConnection(true); });
+
+  dut_.runtime().RunUntil([&]() {
+    bool watcher_rearmed = false;
+    dut_.RunInDriverContext([&](Dwc3& drv) { power_is_on = Dwc3TestHelper::GetPowerOn(drv); });
+    dut_.RunInEnvironmentTypeContext(
+        [&](Environment& env) { watcher_rearmed = env.usb_phy().has_completer(); });
+    return power_is_on && watcher_rearmed;
+  });
+  EXPECT_TRUE(power_is_on);
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    EXPECT_EQ(Dwc3TestHelper::GetDeviceState(drv),
+              fuchsia_hardware_usb_policy::wire::DeviceState::kPowered);
+  });
+
+  TearDownAndPowerOffDriver();
+}
+
+// Verifies that the driver powers off and transitions to kNotAttached when a disconnect event
+// arrives from the PHY ConnectionWatcher.
+TEST_F(UnmanagedTestFixture, OnConnectStatusChangedDisconnect) {
+  SetUpAndPowerOnDriver();
+  ASSERT_EQ(WaitForPhy(), ZX_OK);
+
+  bool power_is_on = false;
+  dut_.RunInDriverContext([&](Dwc3& drv) { power_is_on = Dwc3TestHelper::GetPowerOn(drv); });
+  EXPECT_TRUE(power_is_on);
+
+  auto client_end = dut_.Connect<fuchsia_hardware_usb_policy::Service::Controller>();
+  ASSERT_TRUE(client_end.is_ok());
+  fidl::Client client{std::move(*client_end), fdf::Dispatcher::GetCurrent()->async_dispatcher()};
+
+  bool is_powered = false;
+  client->WatchDeviceState().Then(
+      [&](fidl::Result<fuchsia_hardware_usb_policy::Controller::WatchDeviceState>& result) {
+        if (!result.is_ok()) {
+          ADD_FAILURE() << "WatchDeviceState failed: " << result.error_value();
+          is_powered = true;
+          return;
+        }
+        EXPECT_EQ(result->state(), fuchsia_hardware_usb_policy::DeviceState::kPowered);
+        is_powered = true;
+      });
+  dut_.runtime().RunUntil([&]() { return is_powered; });
+
+  bool state_changed = false;
+  client->WatchDeviceState().Then(
+      [&](fidl::Result<fuchsia_hardware_usb_policy::Controller::WatchDeviceState>& result) {
+        if (!result.is_ok()) {
+          ADD_FAILURE() << "WatchDeviceState failed: " << result.error_value();
+          state_changed = true;
+          return;
+        }
+        EXPECT_EQ(result->state(), fuchsia_hardware_usb_policy::DeviceState::kNotAttached);
+        state_changed = true;
+      });
+
+  dut_.runtime().RunUntil([&]() {
+    bool queued = false;
+    dut_.RunInDriverContext(
+        [&](Dwc3& drv) { queued = (Dwc3TestHelper::PendingCompletersCount(drv) > 0); });
+    return queued || state_changed;
+  });
+  EXPECT_FALSE(state_changed);
+
+  dut_.RunInEnvironmentTypeContext([](Environment& env) { env.usb_phy().TriggerDisconnect(); });
+
+  dut_.runtime().RunUntil([&]() {
+    bool watcher_rearmed = false;
+    dut_.RunInDriverContext([&](Dwc3& drv) { power_is_on = Dwc3TestHelper::GetPowerOn(drv); });
+    dut_.RunInEnvironmentTypeContext(
+        [&](Environment& env) { watcher_rearmed = env.usb_phy().has_completer(); });
+    return state_changed && !power_is_on && watcher_rearmed;
+  });
+  EXPECT_FALSE(power_is_on);
+
+  TearDownAndPowerOffDriver();
+}
+
+// Verifies that WatchDeviceState blocks as a hanging get after the client consumes the initial
+// state and completes when SetDeviceState updates the state.
+TEST_F(ManagedTestFixture, WatchDeviceStateHangingGet) {
+  auto client_end = dut_.Connect<fuchsia_hardware_usb_policy::Service::Controller>();
+  ASSERT_TRUE(client_end.is_ok());
+  fidl::Client client{std::move(*client_end), fdf::Dispatcher::GetCurrent()->async_dispatcher()};
+
+  bool first_call_done = false;
+  client->WatchDeviceState().Then(
+      [&](fidl::Result<fuchsia_hardware_usb_policy::Controller::WatchDeviceState>& result) {
+        if (!result.is_ok()) {
+          ADD_FAILURE() << "WatchDeviceState failed: " << result.error_value();
+          first_call_done = true;
+          return;
+        }
+        EXPECT_EQ(result->state(), fuchsia_hardware_usb_policy::DeviceState::kNotAttached);
+        first_call_done = true;
+      });
+  dut_.runtime().RunUntil([&]() { return first_call_done; });
+
+  bool second_call_done = false;
+  client->WatchDeviceState().Then(
+      [&](fidl::Result<fuchsia_hardware_usb_policy::Controller::WatchDeviceState>& result) {
+        if (!result.is_ok()) {
+          ADD_FAILURE() << "WatchDeviceState failed: " << result.error_value();
+          second_call_done = true;
+          return;
+        }
+        EXPECT_EQ(result->state(), fuchsia_hardware_usb_policy::DeviceState::kPowered);
+        second_call_done = true;
+      });
+
+  dut_.runtime().RunUntil([&]() {
+    bool queued = false;
+    dut_.RunInDriverContext(
+        [&](Dwc3& drv) { queued = (Dwc3TestHelper::PendingCompletersCount(drv) > 0); });
+    return queued || second_call_done;
+  });
+  EXPECT_FALSE(second_call_done);
+
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    Dwc3TestHelper::SetDeviceState(drv, fuchsia_hardware_usb_policy::DeviceState::kPowered);
+  });
+
+  dut_.runtime().RunUntil([&]() { return second_call_done; });
+}
+
+// Verifies that ConfigureEndpoint rejects EP0 (an invalid user endpoint address) with
+// ZX_ERR_INVALID_ARGS.
+TEST_F(UnmanagedTestFixture, ConfigureEndpointInvalidEp) {
+  SetUpAndPowerOnDriver();
+
+  fidl::SyncClient client = ConnectController();
+
+  fuchsia_hardware_usb_descriptor::UsbEndpointDescriptor desc;
+  desc.b_endpoint_address() = 0;  // EP 0 OUT (invalid user endpoint)
+  desc.bm_attributes() = 2;       // Bulk
+
+  fuchsia_hardware_usb_descriptor::UsbSsEpCompDescriptor comp_desc;
+
+  auto result =
+      client->ConfigureEndpoint({{.ep_descriptor = desc, .ss_comp_descriptor = comp_desc}});
+  ASSERT_TRUE(result.is_error());
+  ASSERT_TRUE(result.error_value().is_domain_error());
+  EXPECT_EQ(result.error_value().domain_error(), ZX_ERR_INVALID_ARGS);
+
+  TearDownAndPowerOffDriver();
+}
+
+// Verifies that ConfigureEndpoint rejects isochronous endpoints with ZX_ERR_NOT_SUPPORTED.
+TEST_F(UnmanagedTestFixture, ConfigureEndpointIsoch) {
+  SetUpAndPowerOnDriver();
+
+  fidl::SyncClient client = ConnectController();
+
+  fuchsia_hardware_usb_descriptor::UsbEndpointDescriptor desc;
+  desc.b_endpoint_address() = 1;  // EP 1 OUT -> ep_num = 2
+  desc.bm_attributes() = 1;       // Isochronous
+
+  fuchsia_hardware_usb_descriptor::UsbSsEpCompDescriptor comp_desc;
+
+  auto result =
+      client->ConfigureEndpoint({{.ep_descriptor = desc, .ss_comp_descriptor = comp_desc}});
+  ASSERT_TRUE(result.is_error());
+  ASSERT_TRUE(result.error_value().is_domain_error());
+  EXPECT_EQ(result.error_value().domain_error(), ZX_ERR_NOT_SUPPORTED);
 
   TearDownAndPowerOffDriver();
 }

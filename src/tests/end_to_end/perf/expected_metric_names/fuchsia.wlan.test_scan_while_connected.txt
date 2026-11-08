@@ -1,0 +1,3 @@
+[no-summarize-metrics]
+fuchsia.wlan.test_scan_while_connected: Power
+fuchsia.wlan.test_scan_while_connected: TotalEnergy

@@ -6,7 +6,6 @@ load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
 
 package(default_applicable_licenses = ["//:license"])
 
-# @bazel2gn:raw_attribute:deps += [ "//build/validate:non_production_tag" ]
 rustc_library(
     name = "insecure",
     srcs = ["src/lib.rs"],

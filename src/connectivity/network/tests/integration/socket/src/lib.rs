@@ -396,7 +396,7 @@ async fn ip_endpoint_packets(name: &str) {
         let (tun_port, server_end) = fidl::endpoints::create_proxy::<fnet_tun::PortMarker>();
         tun_dev
             .add_port(
-                &fnet_tun::DevicePortConfig {
+                fnet_tun::DevicePortConfig {
                     base: Some(base_ip_device_port_config()),
                     online: Some(true),
                     // No MAC, this is a pure IP device.

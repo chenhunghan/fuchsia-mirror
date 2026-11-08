@@ -107,7 +107,7 @@ TEST_F(WaitpidFlagsTest, waitpidWithCloneFlagFailsWhenChildSendsSIGCHLD) {
 }
 
 TEST_F(WaitpidFlagsTest, waitpidWithWallFlagSucceedsWhenChildSendsSIGCHLD) {
-  unsigned int waitFlag = 0;
+  unsigned int waitFlag = __WALL;
   int cloneFlags = SIGCHLD;
   test_helper::waitForChildSucceeds(waitFlag, cloneFlags, test_helper::CloneHelper::sleep_1sec,
                                     test_helper::CloneHelper::doNothing);

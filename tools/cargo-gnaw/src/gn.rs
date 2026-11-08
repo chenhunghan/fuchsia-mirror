@@ -536,9 +536,17 @@ pub fn write_rule<W: io::Write>(
     rustflags.add_cfg(format!("-Cextra-filename=-{}", target.metadata_hash()));
 
     // Aggregate feature flags
-    for feature in target.features {
+    for feature in &target.features {
         if !platform_specific_features.contains(feature.as_str()) {
             rustflags.add_cfg(format!("--cfg=feature=\\\"{}\\\"", feature));
+        }
+    }
+    for (platform, features) in &target.platform_features {
+        for feature in features {
+            rustflags.add_platform_cfg(
+                Some(platform.clone()),
+                format!("--cfg=feature=\\\"{}\\\"", feature),
+            );
         }
     }
 

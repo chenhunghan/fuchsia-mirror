@@ -3,8 +3,8 @@
 // found in the LICENSE file.
 
 #include <fidl/test.transport/cpp/driver/wire.h>
+#include <lib/driver/testing/cpp/driver_runtime.h>
 #include <lib/fdf/cpp/dispatcher.h>
-#include <lib/fit/defer.h>
 #include <lib/sync/cpp/completion.h>
 #include <zircon/errors.h>
 
@@ -12,7 +12,6 @@
 
 #include <zxtest/zxtest.h>
 
-#include "sdk/lib/fidl_driver/tests/transport/scoped_fake_driver.h"
 #include "sdk/lib/fidl_driver/tests/transport/server_on_unbound_helper.h"
 
 namespace {
@@ -40,7 +39,7 @@ struct TestServer : public fdf::WireServer<test_transport::OneWayTest> {
 };
 
 TEST(DriverTransport, WireOneWayVector) {
-  fidl_driver_testing::ScopedFakeDriver driver;
+  fdf_testing::DriverRuntime runtime;
 
   libsync::Completion dispatcher_shutdown;
   auto dispatcher = fdf::UnsynchronizedDispatcher::Create(
@@ -72,7 +71,7 @@ TEST(DriverTransport, WireOneWayVector) {
 }
 
 TEST(DriverTransport, WireOneWayVectorSyncViaAsyncClient) {
-  fidl_driver_testing::ScopedFakeDriver driver;
+  fdf_testing::DriverRuntime runtime;
 
   libsync::Completion dispatcher_shutdown;
   auto dispatcher = fdf::SynchronizedDispatcher::Create(

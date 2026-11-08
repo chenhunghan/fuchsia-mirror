@@ -1511,6 +1511,94 @@ decode_failure("UnionInlinePadding_ThreePaddingByte_UpperByte_InvalidPadding") {
     err = INVALID_PADDING_BYTE,
 }
 
+decode_failure("TableInlinePadding_OnePaddingByte_InvalidPadding") {
+    // TODO(https://fxbug.dev/579582163): Validate inline envelope padding in rust_next.
+    bindings_denylist = [rust_next],
+    type = TableInlinePaddingStruct,
+    bytes = {
+        v2 = [
+            num(3):8, // max ordinal
+            repeat(0xff):8, // alloc present
+            num(0):8, // ordinal 1 absent
+            num(0):8, // ordinal 2 absent
+            0x01, 0x02, 0x03, 0xee, num(0):2, num(1):2, // ordinal 3 inlined envelope
+        ],
+    },
+    err = INVALID_PADDING_BYTE,
+}
+
+decode_failure("TableInlinePadding_TwoPaddingByte_LowerByte_InvalidPadding") {
+    // TODO(https://fxbug.dev/579582163): Validate inline envelope padding in rust_next.
+    bindings_denylist = [rust_next],
+    type = TableInlinePaddingStruct,
+    bytes = {
+        v2 = [
+            num(2):8, // max ordinal
+            repeat(0xff):8, // alloc present
+            num(0):8, // ordinal 1 absent
+            0x01, 0x02, 0xee, 0x00, num(0):2, num(1):2, // ordinal 2 inlined envelope
+        ],
+    },
+    err = INVALID_PADDING_BYTE,
+}
+
+decode_failure("TableInlinePadding_TwoPaddingByte_UpperByte_InvalidPadding") {
+    // TODO(https://fxbug.dev/579582163): Validate inline envelope padding in rust_next.
+    bindings_denylist = [rust_next],
+    type = TableInlinePaddingStruct,
+    bytes = {
+        v2 = [
+            num(2):8, // max ordinal
+            repeat(0xff):8, // alloc present
+            num(0):8, // ordinal 1 absent
+            0x01, 0x02, 0x00, 0xee, num(0):2, num(1):2, // ordinal 2 inlined envelope
+        ],
+    },
+    err = INVALID_PADDING_BYTE,
+}
+
+decode_failure("TableInlinePadding_ThreePaddingByte_LowerByte_InvalidPadding") {
+    // TODO(https://fxbug.dev/579582163): Validate inline envelope padding in rust_next.
+    bindings_denylist = [rust_next],
+    type = TableInlinePaddingStruct,
+    bytes = {
+        v2 = [
+            num(1):8, // max ordinal
+            repeat(0xff):8, // alloc present
+            0x01, 0xee, 0x00, 0x00, num(0):2, num(1):2, // ordinal 1 inlined envelope
+        ],
+    },
+    err = INVALID_PADDING_BYTE,
+}
+
+decode_failure("TableInlinePadding_ThreePaddingByte_MiddleByte_InvalidPadding") {
+    // TODO(https://fxbug.dev/579582163): Validate inline envelope padding in rust_next.
+    bindings_denylist = [rust_next],
+    type = TableInlinePaddingStruct,
+    bytes = {
+        v2 = [
+            num(1):8, // max ordinal
+            repeat(0xff):8, // alloc present
+            0x01, 0x00, 0xee, 0x00, num(0):2, num(1):2, // ordinal 1 inlined envelope
+        ],
+    },
+    err = INVALID_PADDING_BYTE,
+}
+
+decode_failure("TableInlinePadding_ThreePaddingByte_UpperByte_InvalidPadding") {
+    // TODO(https://fxbug.dev/579582163): Validate inline envelope padding in rust_next.
+    bindings_denylist = [rust_next],
+    type = TableInlinePaddingStruct,
+    bytes = {
+        v2 = [
+            num(1):8, // max ordinal
+            repeat(0xff):8, // alloc present
+            0x01, 0x00, 0x00, 0xee, num(0):2, num(1):2, // ordinal 1 inlined envelope
+        ],
+    },
+    err = INVALID_PADDING_BYTE,
+}
+
 decode_failure("BadPaddedString_LowerByte") {
 
     type = StringWrapper,

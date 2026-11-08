@@ -1,0 +1,19 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+# GN's bootfs_test() expects the binary at test/running-on-bootfs-test via distribution_entries metadata, which cc_test_executable() omits.
+# @bazel2gn:raw_attribute:metadata = { distribution_entries = [ { source = rebase_path("$root_out_dir/running-on-bootfs-test", root_build_dir) destination = "test/running-on-bootfs-test" label = get_label_info(":running_on_bootfs_test", "label_with_toolchain") } ] }
+fx_cc_test_binary(
+    name = "running_on_bootfs_test",
+    srcs = ["running_on_bootfs_test.cc"],
+    gn_output_name = "running-on-bootfs-test",
+    deps = [
+        "//sdk/lib/fdio",
+        "//zircon/system/ulib/zxtest",
+    ],
+)

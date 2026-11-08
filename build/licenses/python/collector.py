@@ -30,7 +30,7 @@ class CollectedLicense:
     def create(
         public_name: str,
         license_files: tuple[GnLabel, ...],
-    ) -> "CollectedLicense":
+    ) -> CollectedLicense:
         assert type(public_name) is str
         assert type(license_files) is tuple
         GnLabel.check_types_in_list(list(license_files))

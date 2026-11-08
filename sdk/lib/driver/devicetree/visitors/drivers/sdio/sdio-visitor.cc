@@ -64,6 +64,9 @@ zx::result<> SdioVisitor::ParseChild(fdf_devicetree::Node& parent,
                  fdf::MakeAcceptBindRule(bind_fuchsia::PROTOCOL,
                                          bind_fuchsia_sdio::BIND_PROTOCOL_DEVICE),
                  fdf::MakeAcceptBindRule(bind_fuchsia::SDIO_FUNCTION, func),
+                 // Require the base SDIO service to explicitly avoid binding to
+                 // the sibling `-driver` node (fuchsia.hardware.sdio.DriverService).
+                 fdf::MakeAcceptBindRule(bind_fuchsia::SERVICE, "fuchsia.hardware.sdio.Service"),
              },
          .properties = {
              fdf::MakeProperty2(bind_fuchsia::SERVICE, "fuchsia.hardware.sdio.Service"),

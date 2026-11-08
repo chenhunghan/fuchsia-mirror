@@ -1,0 +1,61 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":ufsutil-test"],
+    visibility = ["//src/devices:__pkg__"],
+)
+
+fx_cc_binary(
+    name = "ufsutil",
+    srcs = [
+        "main.cc",
+        "query.cc",
+        "query.h",
+        "ufsutil.cc",
+        "ufsutil.h",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.ufs:fuchsia.hardware.ufs_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//src/lib/files",
+        "//zircon/third_party/ulib/safemath",
+    ],
+)
+
+fx_cc_test_binary(
+    name = "ufsutil-test-bin",
+    srcs = [
+        "query.cc",
+        "query.h",
+        "ufsutil.cc",
+        "ufsutil.h",
+        "ufsutil-test.cc",
+    ],
+    gn_output_name = "ufsutil-test",
+    # Packaged into :ufsutil-test below; do not run bare.
+    tags = ["manual"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.ufs:fuchsia.hardware.ufs_cpp",
+        "//sdk/fidl/fuchsia.hardware.ufs:fuchsia.hardware.ufs_cpp_testing",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/incoming/cpp",
+        "//src/lib/files",
+        "//zircon/system/ulib/zxtest",
+        "//zircon/third_party/ulib/safemath",
+    ],
+)
+
+fx_unittest_package(
+    name = "ufsutil-test",
+    unit_tests = [":ufsutil-test-bin"],
+)

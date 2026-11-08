@@ -34,15 +34,12 @@ extern "C" {
 
 RestrictedState* cpp_thread_current_restricted_state();
 void cpp_thread_current_set_restricted_state(RestrictedState* raw_rs);
-bool cpp_thread_current_is_signaled();
 bool cpp_thread_current_check_for_restricted_kick();
 bool cpp_thread_in_restricted(Thread* thread);
 
 void rust_restricted_state_destroy(RestrictedState* ptr);
 bool rust_restricted_state_in_restricted(const RestrictedState* state);
 
-void rust_redirect_restricted_exception_to_normal_mode(RestrictedState* rs,
-                                                       const zx_exception_report_t* report);
 [[noreturn]] void rust_restricted_leave_iframe(const iframe_t* iframe,
                                                zx_restricted_reason_t reason);
 [[noreturn]] void rust_restricted_leave_syscall(const syscall_regs_t* regs,

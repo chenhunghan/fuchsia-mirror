@@ -2,16 +2,17 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+"""Rules for compiling Fuchsia component manifests."""
+
 load(
     "@fuchsia_rules_common//components:component_manifest.bzl",
     "compile_component_manifest",
+    "merge_component_manifests",
 )
 load(
     "@fuchsia_rules_common//components:providers.bzl",
     "FuchsiaComponentManifestInfo",
 )
-
-# buildifier: disable=module-docstring
 load("//fuchsia/constraints:target_compatibility.bzl", "COMPATIBILITY")
 load("//fuchsia/private:fuchsia_toolchains.bzl", "FUCHSIA_TOOLCHAIN_DEFINITION", "get_fuchsia_sdk_toolchain")
 load(
@@ -84,25 +85,16 @@ def _compile_component_manifest(ctx, manifest_in, component_name, includes_in):
 
     if ctx.configuration.coverage_enabled:
         coverage_shard = ctx.attr._sdk_coverage_shard[FuchsiaComponentManifestShardInfo]
-        manifest_merged = ctx.actions.declare_file("%s_merged.cml" % _component_name_from_cml_file(manifest_in))
-        ctx.actions.run(
-            executable = sdk.cmc,
-            arguments = [
-                "merge",
-                "--output",
-                manifest_merged.path,
-                manifest_in.path,
-                coverage_shard.file.path,
-            ],
-            inputs = [
+        manifest_in = merge_component_manifests(
+            ctx = ctx,
+            cmc_tool = sdk.cmc,
+            srcs = [
                 manifest_in,
                 coverage_shard.file,
             ],
-            outputs = [manifest_merged],
-            mnemonic = "CmcMergeManifests",
+            output_name = "%s_merged.cml" % _component_name_from_cml_file(manifest_in),
             toolchain = FUCHSIA_TOOLCHAIN_DEFINITION,
         )
-        manifest_in = manifest_merged
 
     # use a dict to eliminate duplicate include paths
     include_path_dict = {}
@@ -192,6 +184,9 @@ def fuchsia_component_manifest(*, name, tags = ["manual"], **kwargs):
 
 def _ensure_compiled_component_manifest_impl(ctx):
     if FuchsiaComponentManifestInfo in ctx.attr.dep:
+        if ctx.attr.component_name:
+            fail("`component_name` must not be set when `manifest` is a `fuchsia_component_manifest` target.")
+
         # This is already a compiled manifest so just return the providers.
         return [
             ctx.attr.dep[DefaultInfo],
@@ -201,7 +196,7 @@ def _ensure_compiled_component_manifest_impl(ctx):
         return _compile_component_manifest(
             ctx,
             ctx.file.dep,
-            _component_name_from_cml_file(ctx.file.dep),
+            ctx.attr.component_name or _component_name_from_cml_file(ctx.file.dep),
             [],
         )
 
@@ -218,6 +213,9 @@ ensure_compiled_component_manifest = rule(
         "dep": attr.label(
             doc = "The dependency to check. This should either be a plain cml file or a fuchsia_component_manifest target.",
             allow_single_file = [".cml", ".cm"],
+        ),
+        "component_name": attr.string(
+            doc = "The name of the component when `dep` is a plain cml file. Must not be set when `dep` is a `fuchsia_component_manifest` target.",
         ),
     } | COMPATIBILITY.HOST_ATTRS | _COMMON_CMC_ATTRIBUTES,
     provides = [FuchsiaComponentManifestInfo],

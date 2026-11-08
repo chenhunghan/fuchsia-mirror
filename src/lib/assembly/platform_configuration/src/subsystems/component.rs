@@ -220,7 +220,7 @@ mod tests {
 
     fn compile_component_manager_config(
         platform: PlatformSettings,
-    ) -> anyhow::Result<fidl_fuchsia_component_internal::Config> {
+    ) -> anyhow::Result<fidl_fuchsia_component_internal_common::Config> {
         let product = ProductSettings::default();
         let gendir = tempdir().unwrap();
         let gendir_path = Utf8Path::from_path(gendir.path()).unwrap();
@@ -256,7 +256,7 @@ mod tests {
         )
         .unwrap();
 
-        Ok(unpersist::<fidl_fuchsia_component_internal::Config>(
+        Ok(unpersist::<fidl_fuchsia_component_internal_common::Config>(
             &fs::read(gendir_path.join("component/config.json5")).unwrap(),
         )?)
     }
@@ -267,9 +267,9 @@ mod tests {
         let config = compile_component_manager_config(platform).unwrap();
         assert_eq!(
             config,
-            fidl_fuchsia_component_internal::Config {
+            fidl_fuchsia_component_internal_common::Config {
                 security_policy: Some(Default::default()),
-                health_check: Some(fidl_fuchsia_component_internal::HealthCheck {
+                health_check: Some(fidl_fuchsia_component_internal_common::HealthCheck {
                     monikers: Some(vec![]),
                     ..Default::default()
                 }),

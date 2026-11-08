@@ -72,6 +72,8 @@ async fn activity_in_volume(fs: &OpenFxFilesystem, vol: &Arc<ObjectStore>) -> Re
     // everywhere else.
     ops::set_project_limit(vol, PROJECT_ID, 102400, 1024).await?;
     ops::set_project_for_node(vol, PROJECT_ID, regular_dir_path).await?;
+    // TODO(https://fxbug.dev/562121082): Exercise PosixOwner quota records once user/group usage
+    // tracking is enabled.
 
     ops::put(fs, vol, &Path::new(REGULAR_FILE_PATH), EXPECTED_FILE_CONTENT.to_vec()).await?;
     ops::put(fs, vol, &Path::new(DELETED_FILE_PATH), EXPECTED_FILE_CONTENT.to_vec()).await?;
@@ -168,6 +170,18 @@ pub async fn install_blobs(builder: &FxBlobBuilder) -> Result<Vec<[u8; 32]>, Err
             .generate_blob(vec![42; 100], Some(CompressionAlgorithm::Zstd))
             .context("Generate small blob")?;
         builder.install_blob(&blob_info).await.context("Install small blob")?;
+        blob_names.push(blob_info.hash().as_array::<32>().unwrap().clone());
+    }
+
+    // An LZ4 blob where only the first chunk compresses, so the other chunks are stored raw.
+    {
+        let mut rng = SmallRng::seed_from_u64(43);
+        let mut data = vec![42; 32768];
+        data.extend((0..32768 + 5000).map(|_| rng.random::<u8>()));
+        let blob_info = builder
+            .generate_blob(data, Some(CompressionAlgorithm::Lz4))
+            .context("Generate LZ4 blob")?;
+        builder.install_blob(&blob_info).await.context("Install LZ4 blob")?;
         blob_names.push(blob_info.hash().as_array::<32>().unwrap().clone());
     }
 

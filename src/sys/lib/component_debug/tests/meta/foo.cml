@@ -6,6 +6,23 @@
         runner: "elf",
         binary: "bin/foo_noop",
     },
+    use: [
+        {
+            config: "fuchsia.my.Uint8",
+            key: "my_uint8",
+            type: "uint8",
+            availability: "optional",
+            default: 255,
+        },
+        {
+            config: "fuchsia.my.String",
+            key: "my_string",
+            type: "string",
+            max_size: 100,
+            availability: "optional",
+            default: "hello, world!",
+        },
+    ],
     expose: [
         {
             protocol: "void-protocol",
@@ -13,15 +30,4 @@
             availability: "optional",
         },
     ],
-    config: {
-        my_uint8: {
-            type: "uint8",
-            mutability: [ "parent" ],
-        },
-        my_string: {
-            type: "string",
-            max_size: 100,
-            mutability: [ "parent" ],
-        },
-    },
 }

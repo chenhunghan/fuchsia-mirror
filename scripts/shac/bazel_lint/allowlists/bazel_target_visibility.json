@@ -1,14 +1,6 @@
 {
     "entries": [
         {
-            "path": "build/bazel/aspects/tests/assert_no_deps_test.bzl",
-            "bug": "https://fxbug.dev/570203009"
-        },
-        {
-            "path": "build/bazel/aspects/tests/component_manifests_test.bzl",
-            "bug": "https://fxbug.dev/570203009"
-        },
-        {
             "path": "build/bazel/bazel_sdk/BUILD.bazel",
             "targets": [
                 "idk_to_bazel_sdk"
@@ -504,13 +496,6 @@
             "bug": "https://fxbug.dev/570203009"
         },
         {
-            "path": "sdk/lib/fdio/BUILD.bazel",
-            "targets": [
-                "constants"
-            ],
-            "bug": "https://fxbug.dev/570203009"
-        },
-        {
             "path": "sdk/lib/file-lock/BUILD.bazel",
             "targets": [
                 "cpp"
@@ -542,13 +527,6 @@
             "path": "sdk/lib/magma_common/BUILD.bazel",
             "targets": [
                 "magma_common"
-            ],
-            "bug": "https://fxbug.dev/570203009"
-        },
-        {
-            "path": "sdk/lib/memory_barriers/BUILD.bazel",
-            "targets": [
-                "memory_barriers"
             ],
             "bug": "https://fxbug.dev/570203009"
         },
@@ -711,13 +689,6 @@
             "path": "src/developer/debug/zxdb/common/BUILD.bazel",
             "targets": [
                 "common"
-            ],
-            "bug": "https://fxbug.dev/570203009"
-        },
-        {
-            "path": "src/developer/ffx/fidl/BUILD.bazel",
-            "targets": [
-                "fuchsia.developer.ffx"
             ],
             "bug": "https://fxbug.dev/570203009"
         },

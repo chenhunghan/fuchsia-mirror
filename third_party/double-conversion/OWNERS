@@ -1,0 +1,3 @@
+include /src/developer/debug/OWNERS
+
+# COMPONENT: Tools>zxdb

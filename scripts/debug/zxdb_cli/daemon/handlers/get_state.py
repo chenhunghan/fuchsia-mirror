@@ -2,8 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-from __future__ import annotations
-
 from typing import TYPE_CHECKING
 
 from shared.protocol.base import Response
@@ -51,11 +49,14 @@ async def handle(
             for file, lines in daemon.active_breakpoints.items()
             if lines
         }
+        fn_bps = sorted(daemon.active_function_breakpoints.keys())
         state_resp = GetStateResponse(
             threads=threads,
             processes={p.id: p.name for p in daemon.processes.values()},
             breakpoints=breakpoints or None,
             watchpoints=daemon.active_watchpoints or None,
+            function_breakpoints=fn_bps or None,
+            tracepoints=list(daemon.tracepoints.values()) or None,
         )
         return Response(
             success=True,

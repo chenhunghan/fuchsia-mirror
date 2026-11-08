@@ -23,6 +23,7 @@
 #include "src/developer/debug/zxdb/client/source_file_provider_impl.h"
 #include "src/developer/debug/zxdb/client/target.h"
 #include "src/developer/debug/zxdb/client/thread.h"
+#include "src/developer/debug/zxdb/client/tracepoint.h"
 #include "src/developer/debug/zxdb/common/err.h"
 #include "src/developer/debug/zxdb/common/join_callbacks.h"
 #include "src/developer/debug/zxdb/common/string_util.h"
@@ -33,6 +34,7 @@
 #include "src/developer/debug/zxdb/console/format_frame.h"
 #include "src/developer/debug/zxdb/console/format_location.h"
 #include "src/developer/debug/zxdb/console/format_target.h"
+#include "src/developer/debug/zxdb/console/format_tracepoint.h"
 #include "src/developer/debug/zxdb/console/input_location_parser.h"
 #include "src/developer/debug/zxdb/expr/eval_context_impl.h"
 #include "src/developer/debug/zxdb/expr/expr.h"
@@ -271,6 +273,42 @@ Err ResolveBreakpointsForModification(const Command& cmd, const char* command_na
   }
 
   return Err();
+}
+
+void ModifyTracepointsEnabled(ConsoleContext* context, const Command& cmd, bool enabled,
+                              const char* verb_past_tense,
+                              const fxl::RefPtr<CommandContext>& cmd_context) {
+  if (Err err = cmd.ValidateNouns({Noun::kTracepoint}, true); err.has_error()) {
+    cmd_context->ReportError(err);
+    return;
+  }
+  if (!cmd.args().empty()) {
+    cmd_context->ReportError(
+        Err(fxl::StringPrintf("The \"%s\" command does not take arguments when %s tracepoints.",
+                              enabled ? "enable" : "disable", enabled ? "enabling" : "disabling")));
+    return;
+  }
+
+  if (!context)
+    return;
+
+  std::vector<Tracepoint*> tracepoints;
+  if (cmd.GetNounIndex(Noun::kTracepoint) == Command::kWildcard) {
+    tracepoints = cmd.all_tracepoints();
+  } else if (cmd.tracepoint()) {
+    tracepoints.push_back(cmd.tracepoint());
+  } else {
+    cmd_context->ReportError(
+        Err(fxl::StringPrintf("No tracepoint to %s.", enabled ? "enable" : "disable")));
+    return;
+  }
+
+  for (Tracepoint* tp : tracepoints) {
+    tp->SetEnabled(enabled);
+    OutputBuffer out(fxl::StringPrintf("%s ", verb_past_tense));
+    out.Append(FormatTracepoint(context, tp));
+    cmd_context->Output(out);
+  }
 }
 
 OutputBuffer FormatBreakpoint(const ConsoleContext* context, const Breakpoint* breakpoint,

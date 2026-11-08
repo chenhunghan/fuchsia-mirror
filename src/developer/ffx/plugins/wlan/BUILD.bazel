@@ -1,0 +1,39 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/idk:idk_ffx_tool.bzl", "idk_ffx_tool")
+load("//src/developer/ffx/build:ffx_plugin.bzl", "ffx_plugin")
+
+package(default_applicable_licenses = ["//:license"])
+
+ffx_plugin(
+    name = "ffx_wlan",
+    args_deps = [
+        "//src/developer/ffx/core:lib",
+        "//third_party/rust_crates/vendor:argh",
+    ],
+    args_srcs = ["src/args.rs"],
+    edition = "2024",
+    plugin_deps = [
+        "//src/developer/ffx/plugins/wlan/access_point:ffx_wlan_ap",
+        "//src/developer/ffx/plugins/wlan/client:ffx_wlan_client",
+        "//src/developer/ffx/plugins/wlan/deprecated:ffx_wlan_deprecated",
+    ],
+    sdk_category = "not-yet-specified",
+    version = "0.0.1",
+)
+
+# LINT.IfChange
+idk_ffx_tool(
+    name = "ffx_wlan_tool",
+    srcs = ["src/main.rs"],
+    category = "partner",
+    edition = "2024",
+    idk_name = "ffx-wlan",
+    deps = [
+        ":ffx_wlan_suite",
+        "//src/lib/fuchsia-async",
+    ],
+)
+# LINT.ThenChange(BUILD.gn)

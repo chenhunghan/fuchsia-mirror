@@ -1,0 +1,113 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Note: Fuchsia-only target matching platform-only deps via target_compatible_with.
+fx_cc_test_binary(
+    name = "integration-tests-bin",
+    testonly = True,
+    srcs = ["integration-tests.cc"],
+    gn_output_name = "registry_integration_tests",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/lib/fdio",
+        "//sdk/lib/sys/cpp",
+        "//src/lib/fxl",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/sys/fuzzing/common",
+        "//src/sys/fuzzing/common/testing",
+        "//src/sys/fuzzing/fidl:fuchsia.fuzzer_hlcpp",
+        "//zircon/system/ulib/sync",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "integration-tests-bin_packaged_bin",
+    testonly = True,
+    binary = ":integration-tests-bin",
+    binary_name = "registry_integration_tests",
+    install_root = "test/",
+)
+
+fx_packaged_binary(
+    name = "fuzzer-bin_packaged_bin",
+    testonly = True,
+    binary = "//src/sys/fuzzing/common/testing:fuzzer-bin",
+    binary_name = "fake_fuzzer_for_testing",
+)
+
+fx_component_manifest(
+    name = "integration-tests-manifest",
+    testonly = True,
+    component_name = "integration-tests",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/integration-tests.cml",
+)
+
+fx_component(
+    name = "integration-tests",
+    testonly = True,
+    compiled_manifest = ":integration-tests-manifest",
+    deps = [
+        # Bazel packages the fake fuzzer through fx_packaged_binary; GN
+        # executables install themselves, so GN depends on the binary directly.
+        ":fuzzer-bin_packaged_bin",  # @bazel2gn:path_overwrite://src/sys/fuzzing/common/testing:fuzzer-bin
+        # Installs the test binary at test/registry_integration_tests, which GN
+        # test() did implicitly and meta/integration-tests.cml expects.
+        ":integration-tests-bin_packaged_bin",
+    ],
+)
+
+fx_component_manifest(
+    name = "test-realm-manifest",
+    testonly = True,
+    component_name = "test-realm",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:offer.shard",
+    ],
+    manifest = "meta/test-realm.cml",
+)
+
+fx_test_component(
+    name = "test-realm",
+    compiled_manifest = ":test-realm-manifest",
+)
+
+fx_package(
+    name = "registry-integration-tests-package",
+    package_name = "registry-integration-tests",
+    testonly = True,
+    components = [
+        ":integration-tests",
+        "//src/sys/fuzzing/registry",
+    ],
+    test_components = [":test-realm"],
+)
+
+fx_test(
+    name = "registry-integration-tests",
+    package = ":registry-integration-tests-package",
+    visibility = ["//src/sys:__pkg__"],
+)

@@ -7,7 +7,6 @@
 use super::io_buffer_dispatcher::IoBufferDispatcher;
 use super::process_dispatcher::ProcessDispatcher;
 use super::vm_object_dispatcher::{VmObjectDispatcher, VmoOwnership, vmo_to_info_entry};
-use crate::arch_rs::UserCopyCaptureFaultsError;
 use crate::vm::arch_vm_aspace::{
     ARCH_MMU_FLAG_INVALID, ARCH_MMU_FLAG_PERM_EXECUTE, ARCH_MMU_FLAG_PERM_READ,
     ARCH_MMU_FLAG_PERM_WRITE, ArchMmuFlags,
@@ -29,14 +28,21 @@ use zx_types::{
 
 #[cfg(console_enabled)]
 use super::diagnostics_ffi::{
-    dump_all_peer_dispatchers, dump_all_vm_objects, dump_handles_for_koid, dump_job_list,
-    dump_job_policies, dump_orphaned_mapped_vmos, dump_orphaned_slices,
-    dump_peer_dispatchers_by_koid, dump_process_address_space, dump_process_handles,
-    dump_process_list, dump_process_memory_usage, dump_process_vm_objects, dump_vm_object_cow_tree,
-    handle_diagnostics_dump_table_info, handle_diagnostics_outstanding_handles, kill_process,
+    dump_all_peer_dispatchers, dump_all_vm_objects, dump_handles_for_koid,
+    dump_orphaned_mapped_vmos, dump_orphaned_slices, dump_peer_dispatchers_by_koid,
+    dump_process_address_space, dump_process_handles, dump_process_memory_usage,
+    dump_process_vm_objects, dump_vm_object_cow_tree,
 };
 #[cfg(console_enabled)]
+use super::handle::HandleTableArena;
+#[cfg(console_enabled)]
+use super::job_dispatcher::{JobDispatcher, JobEnumerator};
+#[cfg(console_enabled)]
+use super::singleton::get_root_job_dispatcher;
+#[cfg(console_enabled)]
 use crate::console::{CMD_AVAIL_NORMAL, CmdArgs, static_command};
+#[cfg(console_enabled)]
+use crate::kernel::deadline::SlackMode;
 #[cfg(console_enabled)]
 use crate::kernel::thread;
 #[cfg(console_enabled)]
@@ -48,11 +54,23 @@ use core::ptr;
 #[cfg(console_enabled)]
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 #[cfg(console_enabled)]
-use kprint::kprintln;
+use kprint::{kformat, kprintln};
 #[cfg(console_enabled)]
 use zx_types::{
-    ZX_OBJ_TYPE_CHANNEL, ZX_OBJ_TYPE_EVENTPAIR, ZX_OBJ_TYPE_FIFO, ZX_OBJ_TYPE_IOB,
-    ZX_OBJ_TYPE_SOCKET,
+    ZX_OBJ_TYPE_BTI, ZX_OBJ_TYPE_CHANNEL, ZX_OBJ_TYPE_DEBUGLOG, ZX_OBJ_TYPE_EVENT,
+    ZX_OBJ_TYPE_EVENTPAIR, ZX_OBJ_TYPE_EXCEPTION, ZX_OBJ_TYPE_FIFO, ZX_OBJ_TYPE_GUEST,
+    ZX_OBJ_TYPE_INTERRUPT, ZX_OBJ_TYPE_IOB, ZX_OBJ_TYPE_IOMMU, ZX_OBJ_TYPE_JOB, ZX_OBJ_TYPE_PAGER,
+    ZX_OBJ_TYPE_PMT, ZX_OBJ_TYPE_PORT, ZX_OBJ_TYPE_PROCESS, ZX_OBJ_TYPE_PROFILE,
+    ZX_OBJ_TYPE_RESOURCE, ZX_OBJ_TYPE_SOCKET, ZX_OBJ_TYPE_SUSPEND_TOKEN, ZX_OBJ_TYPE_THREAD,
+    ZX_OBJ_TYPE_TIMER, ZX_OBJ_TYPE_UPPER_BOUND, ZX_OBJ_TYPE_VCPU, ZX_OBJ_TYPE_VMAR,
+    ZX_OBJ_TYPE_VMO, ZX_POL_ACTION_ALLOW, ZX_POL_ACTION_ALLOW_EXCEPTION, ZX_POL_ACTION_DENY,
+    ZX_POL_ACTION_DENY_EXCEPTION, ZX_POL_ACTION_KILL, ZX_POL_ACTION_MAX,
+    ZX_POL_AMBIENT_MARK_VMO_EXEC, ZX_POL_BAD_HANDLE, ZX_POL_MAX, ZX_POL_NEW_ANY,
+    ZX_POL_NEW_CHANNEL, ZX_POL_NEW_EVENT, ZX_POL_NEW_EVENTPAIR, ZX_POL_NEW_FIFO, ZX_POL_NEW_IOB,
+    ZX_POL_NEW_PAGER, ZX_POL_NEW_PORT, ZX_POL_NEW_PROCESS, ZX_POL_NEW_PROFILE, ZX_POL_NEW_SAMPLER,
+    ZX_POL_NEW_SOCKET, ZX_POL_NEW_TIMER, ZX_POL_NEW_VMO, ZX_POL_OVERRIDE_ALLOW,
+    ZX_POL_OVERRIDE_DENY, ZX_POL_VMAR_WX, ZX_POL_WRONG_OBJECT, ZX_TASK_RETCODE_SYSCALL_KILL,
+    zx_koid_t,
 };
 
 /// Abstraction around writing `zx_info_vmo_t`s to user space. As there are multiple versions of the
@@ -65,13 +83,6 @@ pub trait VmoInfoWriter {
     /// Writes a single `zx_info_vmo_t` at the given element offset. Return values are same as
     /// `user_ptr::copy_to_user`.
     fn write(&mut self, vmo: &zx_info_vmo_t, offset: usize) -> Result<(), Status>;
-    /// Same as `write`, except is the no faulting variant and returns the complete capture result
-    /// type.
-    fn write_capture_faults(
-        &mut self,
-        vmo: &zx_info_vmo_t,
-        offset: usize,
-    ) -> Result<(), UserCopyCaptureFaultsError>;
     /// Increases the base offset such that writes to offset 0 write to this offset.
     fn add_offset(&mut self, offset: usize);
 }
@@ -81,13 +92,6 @@ pub trait VmarMapsInfoWriter {
     /// Writes a single `zx_info_maps_t` at the given element offset. Return values are same as
     /// `user_ptr::copy_to_user`.
     fn write(&mut self, maps: &zx_info_maps_t, offset: usize) -> Result<(), Status>;
-    /// Same as `write`, except is the no faulting variant and returns the complete capture result
-    /// type.
-    fn write_capture_faults(
-        &mut self,
-        maps: &zx_info_maps_t,
-        offset: usize,
-    ) -> Result<(), UserCopyCaptureFaultsError>;
     /// Increases the base offset such that writes to offset 0 write to this offset.
     fn add_offset(&mut self, offset: usize);
 }
@@ -97,6 +101,12 @@ fn copy_cstr_to_name(dst: &mut [u8; ZX_MAX_NAME_LEN], src: &CStr) {
     let len = bytes.len().min(dst.len() - 1);
     dst[..len].copy_from_slice(&bytes[..len]);
     dst[len..].fill(0);
+}
+
+/// Returns the NUL-terminated prefix of a `ZX_MAX_NAME_LEN` name buffer for printing.
+#[cfg(console_enabled)]
+fn c_name(name: &[u8]) -> &CStr {
+    CStr::from_bytes_until_nul(name).unwrap_or(c"")
 }
 
 fn arch_mmu_flags_to_vm_flags(arch_mmu_flags: ArchMmuFlags) -> u32 {
@@ -114,6 +124,39 @@ fn arch_mmu_flags_to_vm_flags(arch_mmu_flags: ArchMmuFlags) -> u32 {
         ret |= ZX_VM_PERM_EXECUTE;
     }
     ret
+}
+
+/// Number of entries that are counted, but not written because the user buffer is already full,
+/// between checks for contention on the aspace lock.
+///
+/// Writing an entry always releases and re-acquires the aspace lock (the entry is built and copied
+/// out via `call_unlocked`), which lets other threads of the target process make progress.
+/// Counting an entry does not, so once the user buffer is full the remainder of the walk would
+/// otherwise hold the aspace lock continuously, stalling page faults and VMAR operations of the
+/// target process for the whole duration of the walk (several milliseconds for address spaces with
+/// many thousands of mappings). To bound this, the lock is yielded if it is found to be contested
+/// every this many counted entries.
+const COUNT_ONLY_ENTRIES_BETWEEN_CONTENTION_CHECKS: usize = 32;
+
+/// Called by the enumerators below for every entry that is counted but not written, with `count`
+/// being the number of entries enumerated so far. Every
+/// `COUNT_ONLY_ENTRIES_BETWEEN_CONTENTION_CHECKS` entries, if the aspace lock held by `guard` is
+/// contested, briefly releases it so that the waiting threads can acquire it.
+///
+/// Dropping the lock is permitted at any point of a `VmEnumerator` callback, since
+/// `enumerate_children` pauses its enumerator across each callback, with the usual caveat that
+/// objects observed before the lock was dropped may have been unmapped meanwhile.
+#[inline]
+fn yield_aspace_lock_if_contested(
+    count: usize,
+    vmar: &VmAddressRegion,
+    guard: Pin<&mut VmAspaceGuard<'_>>,
+) {
+    if count.is_multiple_of(COUNT_ONLY_ENTRIES_BETWEEN_CONTENTION_CHECKS)
+        && vmar.lock().raw_mutex().is_contested()
+    {
+        guard.call_unlocked(|| {});
+    }
 }
 
 /// Builds a list of all VMARs and mappings in a `VmAspace` or `VmAddressRegion`.
@@ -138,7 +181,7 @@ impl<W: VmarMapsInfoWriter> VmEnumerator for AspaceEnumerator<'_, W> {
     fn on_vm_mapping(
         &mut self,
         map: &VmMapping,
-        _vmar: &VmAddressRegion,
+        vmar: &VmAddressRegion,
         depth: u32,
         mut guard: Pin<&mut VmAspaceGuard<'_>>,
     ) -> Status {
@@ -192,6 +235,8 @@ impl<W: VmarMapsInfoWriter> VmEnumerator for AspaceEnumerator<'_, W> {
                 if status.is_err() {
                     return Status::INVALID_ARGS;
                 }
+            } else {
+                yield_aspace_lock_if_contested(self.available, vmar, guard.as_mut());
             }
             self.available += 1;
             region_offset += region_len;
@@ -221,6 +266,8 @@ impl<W: VmarMapsInfoWriter> VmEnumerator for AspaceEnumerator<'_, W> {
             if status.is_err() {
                 return Status::INVALID_ARGS;
             }
+        } else {
+            yield_aspace_lock_if_contested(self.available, vmar, guard.as_mut());
         }
         self.available += 1;
 
@@ -301,7 +348,7 @@ impl<W: VmoInfoWriter> VmEnumerator for AspaceVmoEnumerator<'_, W> {
     fn on_vm_mapping(
         &mut self,
         map: &VmMapping,
-        _vmar: &VmAddressRegion,
+        vmar: &VmAddressRegion,
         _depth: u32,
         mut guard: Pin<&mut VmAspaceGuard<'_>>,
     ) -> Status {
@@ -319,6 +366,8 @@ impl<W: VmoInfoWriter> VmEnumerator for AspaceVmoEnumerator<'_, W> {
             if let Err(err) = status {
                 return err;
             }
+        } else {
+            yield_aspace_lock_if_contested(self.available, vmar, guard.as_mut());
         }
         self.available += 1;
         Status::NEXT
@@ -392,6 +441,254 @@ pub fn get_process_vmos(
     Ok((actual, available))
 }
 
+/// Machinery to walk over a job tree and run a callback on each process.
+#[cfg(console_enabled)]
+struct ProcessWalker<F: FnMut(&ProcessDispatcher)> {
+    cb: F,
+}
+
+#[cfg(console_enabled)]
+impl<F: FnMut(&ProcessDispatcher)> JobEnumerator for ProcessWalker<F> {
+    fn on_process(&mut self, process: &ProcessDispatcher) -> bool {
+        (self.cb)(process);
+        true
+    }
+}
+
+#[cfg(console_enabled)]
+fn make_process_walker<F: FnMut(&ProcessDispatcher)>(cb: F) -> ProcessWalker<F> {
+    ProcessWalker { cb }
+}
+
+/// Machinery to walk over a job tree and run a callback on each job.
+#[cfg(console_enabled)]
+struct JobWalker<F: FnMut(&JobDispatcher)> {
+    cb: F,
+}
+
+#[cfg(console_enabled)]
+impl<F: FnMut(&JobDispatcher)> JobEnumerator for JobWalker<F> {
+    fn on_job(&mut self, job: &JobDispatcher) -> bool {
+        (self.cb)(job);
+        true
+    }
+}
+
+#[cfg(console_enabled)]
+fn make_job_walker<F: FnMut(&JobDispatcher)>(cb: F) -> JobWalker<F> {
+    JobWalker { cb }
+}
+
+/// Per-`zx_obj_type_t` handle counts, indexed by object type.
+#[cfg(console_enabled)]
+type HandleTypeCounts<'a> = &'a mut [u32; ZX_OBJ_TYPE_UPPER_BOUND];
+
+/// Returns the count of a process's handles. For each handle, the corresponding
+/// `zx_obj_type_t`-indexed element of `handle_types` is incremented.
+#[cfg(console_enabled)]
+fn build_handle_stats(pd: &ProcessDispatcher, handle_types: HandleTypeCounts<'_>) -> u32 {
+    let mut total = 0;
+    let _ = pd.handle_table().for_each_handle(|_handle, _rights, disp| {
+        let obj_type = disp.get_type() as usize;
+        handle_types[obj_type] += 1;
+        total += 1;
+        Ok(())
+    });
+    total
+}
+
+/// Counts the process's handles by type and formats them into the provided
+/// buffer as strings.
+#[cfg(console_enabled)]
+fn format_handle_type_count<'a>(pd: &ProcessDispatcher, buf: &'a mut [u8]) -> &'a [u8] {
+    let mut types = [0u32; ZX_OBJ_TYPE_UPPER_BOUND];
+    let handle_count = build_handle_stats(pd, &mut types);
+
+    kformat!(
+        buf,
+        "{:4u}: {:4u} {:3u} {:3u} {:3u} {:3u} {:3u} {:3u} {:3u} {:3u} {:3u} {:3u} {:3u}",
+        handle_count,
+        types[ZX_OBJ_TYPE_JOB as usize],
+        types[ZX_OBJ_TYPE_PROCESS as usize],
+        types[ZX_OBJ_TYPE_THREAD as usize],
+        types[ZX_OBJ_TYPE_VMO as usize],
+        types[ZX_OBJ_TYPE_VMAR as usize],
+        types[ZX_OBJ_TYPE_CHANNEL as usize],
+        types[ZX_OBJ_TYPE_EVENT as usize] + types[ZX_OBJ_TYPE_EVENTPAIR as usize],
+        types[ZX_OBJ_TYPE_PORT as usize],
+        types[ZX_OBJ_TYPE_SOCKET as usize],
+        types[ZX_OBJ_TYPE_TIMER as usize],
+        types[ZX_OBJ_TYPE_FIFO as usize],
+        types[ZX_OBJ_TYPE_INTERRUPT as usize]
+            + types[ZX_OBJ_TYPE_DEBUGLOG as usize]
+            + types[ZX_OBJ_TYPE_RESOURCE as usize]
+            + types[ZX_OBJ_TYPE_GUEST as usize]
+            + types[ZX_OBJ_TYPE_VCPU as usize]
+            + types[ZX_OBJ_TYPE_IOMMU as usize]
+            + types[ZX_OBJ_TYPE_BTI as usize]
+            + types[ZX_OBJ_TYPE_PROFILE as usize]
+            + types[ZX_OBJ_TYPE_PMT as usize]
+            + types[ZX_OBJ_TYPE_SUSPEND_TOKEN as usize]
+            + types[ZX_OBJ_TYPE_PAGER as usize]
+            + types[ZX_OBJ_TYPE_EXCEPTION as usize]
+    )
+}
+
+#[cfg(console_enabled)]
+fn dump_process_list() {
+    kprintln!("{:>7s}   #h:  #jb #pr #th #vo #vm #ch #ev #po #so #tm #fi #?? [name]", "id");
+
+    let mut walker = make_process_walker(|process: &ProcessDispatcher| {
+        let mut handle_counts = [0u8; (ZX_OBJ_TYPE_UPPER_BOUND * 4) + 1 + /*slop*/ 16];
+        let handle_counts_str = format_handle_type_count(process, &mut handle_counts);
+
+        let mut pname = [0u8; ZX_MAX_NAME_LEN];
+        let status = process.get_name(&mut pname);
+        debug_assert!(status.is_ok());
+        kprintln!("{:7u} {:s} [{:s}]", process.get_koid(), handle_counts_str, c_name(&pname));
+    });
+    get_root_job_dispatcher().enumerate_children_recursive(&mut walker);
+}
+
+#[cfg(console_enabled)]
+fn dump_job_list() {
+    kprintln!("All jobs:");
+    kprintln!("{:>7s} {:s}", "koid", "name");
+    let mut walker = make_job_walker(|job: &JobDispatcher| {
+        let mut name = [0u8; ZX_MAX_NAME_LEN];
+        let status = job.get_name(&mut name);
+        debug_assert!(status.is_ok());
+        kprintln!("{:7u} '{:s}'", job.get_koid(), c_name(&name));
+    });
+    get_root_job_dispatcher().enumerate_children_recursive(&mut walker);
+}
+
+#[cfg(console_enabled)]
+struct JobPolicyNameValue {
+    name: &'static str,
+    value: u32,
+}
+
+#[cfg(console_enabled)]
+macro_rules! entry {
+    ($x:ident) => {
+        JobPolicyNameValue { name: stringify!($x), value: $x }
+    };
+}
+
+#[cfg(console_enabled)]
+const JOB_POLICIES: [JobPolicyNameValue; ZX_POL_MAX as usize] = [
+    entry!(ZX_POL_BAD_HANDLE),
+    entry!(ZX_POL_WRONG_OBJECT),
+    entry!(ZX_POL_VMAR_WX),
+    entry!(ZX_POL_NEW_ANY),
+    entry!(ZX_POL_NEW_VMO),
+    entry!(ZX_POL_NEW_CHANNEL),
+    entry!(ZX_POL_NEW_EVENT),
+    entry!(ZX_POL_NEW_EVENTPAIR),
+    entry!(ZX_POL_NEW_PORT),
+    entry!(ZX_POL_NEW_SOCKET),
+    entry!(ZX_POL_NEW_FIFO),
+    entry!(ZX_POL_NEW_TIMER),
+    entry!(ZX_POL_NEW_PROCESS),
+    entry!(ZX_POL_NEW_PROFILE),
+    entry!(ZX_POL_NEW_PAGER),
+    entry!(ZX_POL_AMBIENT_MARK_VMO_EXEC),
+    entry!(ZX_POL_NEW_IOB),
+    entry!(ZX_POL_NEW_SAMPLER),
+];
+
+// Missing Policy Id.
+#[cfg(console_enabled)]
+zr::static_assert!(JOB_POLICIES.len() == ZX_POL_MAX as usize);
+
+#[cfg(console_enabled)]
+fn policy_action_to_string(action: u32) -> &'static str {
+    if action >= ZX_POL_ACTION_MAX {
+        return "INVALID ACTION";
+    }
+
+    match action {
+        ZX_POL_ACTION_ALLOW => "Allow",
+        ZX_POL_ACTION_DENY => "Deny",
+        ZX_POL_ACTION_ALLOW_EXCEPTION => "Allow+Exception",
+        ZX_POL_ACTION_DENY_EXCEPTION => "Deny+Exception",
+        ZX_POL_ACTION_KILL => "Kill",
+        _ => "Unknown",
+    }
+}
+
+#[cfg(console_enabled)]
+fn policy_override_to_string(override_val: u32) -> &'static str {
+    match override_val {
+        ZX_POL_OVERRIDE_ALLOW => "Allow override",
+        ZX_POL_OVERRIDE_DENY => "Deny override",
+        _ => "Unknown",
+    }
+}
+
+#[cfg(console_enabled)]
+fn slack_mode_to_string(mode: SlackMode) -> &'static str {
+    match mode {
+        SlackMode::Center => "TIMER_SLACK_CENTER",
+        SlackMode::Early => "TIMER_SLACK_EARLY",
+        SlackMode::Late => "TIMER_SLACK_LATE",
+    }
+}
+
+#[cfg(console_enabled)]
+fn dump_job_policies(job: &JobDispatcher) {
+    let mut jname = [0u8; ZX_MAX_NAME_LEN];
+    let status = job.get_name(&mut jname);
+    debug_assert!(status.is_ok());
+    kprintln!("job {:u} ('{:s}') Basic Policies:", job.get_koid(), c_name(&jname));
+    kprintln!("{:<30s}\t{:<15s}\t{:<15s}", "Policy", "Action", "Override");
+
+    let policy = job.get_policy();
+
+    for job_policy in &JOB_POLICIES {
+        let action = policy.query_basic_policy(job_policy.value);
+        let policy_override = policy.query_basic_policy_override(job_policy.value);
+
+        kprintln!(
+            "{:<30s}\t{:<15s}\t{:<15s}",
+            job_policy.name,
+            policy_action_to_string(action),
+            policy_override_to_string(policy_override)
+        );
+    }
+
+    kprintln!("Slack Policy:");
+    let slack = policy.get_timer_slack();
+    kprintln!("mode: {:s}", slack_mode_to_string(slack.mode()));
+    kprintln!("duration: {}ns", slack.amount().0);
+}
+
+#[cfg(console_enabled)]
+fn dump_job_policies_by_koid(id: zx_koid_t) {
+    let mut walker = make_job_walker(|job: &JobDispatcher| {
+        if job.get_koid() != id {
+            return;
+        }
+
+        dump_job_policies(job);
+    });
+    get_root_job_dispatcher().enumerate_children_recursive(&mut walker);
+}
+
+#[cfg(console_enabled)]
+fn kill_process(id: zx_koid_t) {
+    // search the process list and send a kill if found
+    let pd = ProcessDispatcher::lookup_process_by_id(id);
+    let Some(pd) = pd else {
+        kprintln!("process not found!");
+        return;
+    };
+    // if found, outside of the lock hit it with kill
+    kprintln!("killing process {:u}", id);
+    pd.kill(ZX_TASK_RETCODE_SYSCALL_KILL);
+}
+
 #[cfg(console_enabled)]
 const MB: usize = 1024 * 1024;
 
@@ -461,8 +758,8 @@ fn dump_address_space(arg: &CmdArgs) {
 
 #[cfg(console_enabled)]
 fn dump_handle_table() {
-    kprintln!("outstanding handles: {}", handle_diagnostics_outstanding_handles());
-    handle_diagnostics_dump_table_info();
+    kprintln!("outstanding handles: {}", HandleTableArena::diagnostic_count());
+    HandleTableArena::dump();
 }
 
 #[cfg(console_enabled)]
@@ -470,7 +767,7 @@ extern "C" fn hwd_thread(_arg: *mut c_void) -> i32 {
     static PREVIOUS_HANDLE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
     loop {
-        let handle_count = handle_diagnostics_outstanding_handles();
+        let handle_count = HandleTableArena::diagnostic_count();
         let prev = PREVIOUS_HANDLE_COUNT.load(Ordering::Relaxed);
         if handle_count != prev {
             let limit = HWD_LIMIT.load(Ordering::Relaxed);
@@ -546,7 +843,7 @@ unsafe extern "C" fn cmd_diagnostics(argc: c_int, argv: *const CmdArgs, _flags: 
             if argc < 3 {
                 break 'usage;
             }
-            dump_job_policies(argv[2].arg_uint);
+            dump_job_policies_by_koid(argv[2].arg_uint);
         } else if argv[1].as_str() == "hwd" {
             if argc == 3 {
                 HWD_LIMIT.store(argv[2].arg_uint as usize, Ordering::Relaxed);

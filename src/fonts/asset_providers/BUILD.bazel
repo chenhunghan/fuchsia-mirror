@@ -2,23 +2,34 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@rules_fuchsia//fuchsia:assembly.bzl", "fuchsia_prebuilt_package")
+load("//build/bazel/rules/components:fx_component.bzl", "fx_component_manifest")
+load("//src/fonts/build:fonts.bzl", "font_asset_provider")
 
-package(
-    default_applicable_licenses = ["//:license"],
-    default_visibility = [
-        "//visibility:public",
+package(default_applicable_licenses = ["//:license"])
+
+# LINT.IfChange
+# Hermetic asset provider.
+fx_component_manifest(
+    name = "asset-provider.manifest",
+    component_name = "asset-provider",
+    manifest = "meta/asset-provider.cml",
+    visibility = [
+        "//src/fonts:__subpackages__",
+        "//vendor/google:__subpackages__",
     ],
 )
 
-# Uses the `.far` file from
-# GN's target `//src/fonts/asset_providers:open-fonts-collection-bazel`.
-fuchsia_prebuilt_package(
+# Font asset provider definitions.
+# Expect to have one for each font collection in //src/fonts/collections.
+font_asset_provider(
     name = "open-fonts-collection",
-    archive = "@gn_targets//src/fonts/asset_providers:open-fonts-collection.asset-provider.package",
+    visibility = ["//products/terminal:__pkg__"],
+    deps = ["//src/fonts/collections:open-fonts-collection"],
 )
 
-fuchsia_prebuilt_package(
+font_asset_provider(
     name = "small-open-fonts-collection",
-    archive = "@gn_targets//src/fonts/asset_providers:small-open-fonts-collection.asset-provider.package",
+    visibility = ["//products/core:__pkg__"],
+    deps = ["//src/fonts/collections:small-open-fonts-collection"],
 )
+# LINT.ThenChange(BUILD.gn)

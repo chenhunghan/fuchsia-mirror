@@ -2,7 +2,9 @@
 # Use of this source code is governed by a BSD-style license[s] that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
 load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 load("//build/rust:fidl_rust_next.bzl", "fidl_rust_next_allowlist")
 
 package(default_applicable_licenses = ["//:license"])
@@ -87,4 +89,14 @@ alias(
     name = "fidl_next_codec",
     actual = ":fidl_next_codec_internal",
     visibility = fidl_rust_next_allowlist,
+)
+
+wrap_host_rust_test(
+    name = "fidl_next_codec_host_test",
+    binary_name = "fidl_next_codec_internal_test",
+)
+
+fx_unittest_package(
+    name = "fidl_next_codec_test_package",
+    unit_tests = [":fidl_next_codec_internal_test"],
 )

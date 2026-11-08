@@ -70,7 +70,6 @@ group("tests") {
     "lib/storage:wlan-storage-tests",
     "lib/telemetry:wlan-telemetry-tests",
     "lib/trace:wlan-trace-tests",
-    "lib/wep_deprecated:wep-deprecated-tests",
     "testing/hw-sim:wlan-hw-sim-lib-tests",
     "testing/hw-sim/test:wlan-hw-sim-component-tests",
     "testing/wlan-service-util:wlan-service-util-tests",
@@ -96,7 +95,6 @@ group("tests_e2e") {
   testonly = true
   deps = [
     "tests:tests_host($host_toolchain)",
-    "//src/testing/end_to_end/antlion/tests:e2e_tests($host_toolchain)",
     "//src/testing/end_to_end/honeydew/honeydew/affordances/connectivity/wlan/wlan_policy/tests:functional_tests($host_toolchain)",
     "//src/testing/end_to_end/honeydew/honeydew/affordances/connectivity/wlan/wlan_policy/tests:unit_tests($host_toolchain)",
     "//src/testing/end_to_end/honeydew/honeydew/affordances/connectivity/wlan/wlan_policy_ap/tests:functional_tests($host_toolchain)",

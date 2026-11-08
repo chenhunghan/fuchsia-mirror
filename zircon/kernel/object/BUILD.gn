@@ -5,7 +5,6 @@
 # https://opensource.org/licenses/MIT
 
 import("//build/cpp/library_headers.gni")
-import("//zircon/kernel/kernel_bindgen_crate.gni")
 import("//zircon/kernel/kernel_rust_mod.gni")
 
 source_set("object") {
@@ -15,7 +14,6 @@ source_set("object") {
     "bus_transaction_initiator_dispatcher.cc",
     "bus_transaction_initiator_dispatcher_ffi.cc",
     "channel_dispatcher.cc",
-    "channel_dispatcher_ffi.cc",
     "clock_dispatcher.cc",
     "clock_dispatcher_ffi.cc",
     "counter_dispatcher.cc",
@@ -27,17 +25,12 @@ source_set("object") {
     "event_dispatcher_ffi.cc",
     "event_pair_dispatcher.cc",
     "event_pair_dispatcher_ffi.cc",
-    "exception.cc",
     "exception_dispatcher.cc",
-    "exceptionate.cc",
-    "executor.cc",
     "fifo_dispatcher.cc",
     "fifo_dispatcher_ffi.cc",
-    "futex_context_ffi.cc",
     "guest_dispatcher.cc",
     "guest_dispatcher_ffi.cc",
     "handle.cc",
-    "handle_table.cc",
     "interrupt_dispatcher_ffi.cc",
     "io_buffer_dispatcher.cc",
     "io_buffer_dispatcher_ffi.cc",
@@ -46,10 +39,8 @@ source_set("object") {
     "iommu_dispatcher_ffi.cc",
     "job_dispatcher.cc",
     "job_dispatcher_ffi.cc",
-    "job_policy.cc",
     "log_dispatcher.cc",
     "log_dispatcher_ffi.cc",
-    "memory_watchdog.cc",
     "msi_dispatcher_ffi.cc",
     "pager_dispatcher.cc",
     "pager_dispatcher_ffi.cc",
@@ -60,19 +51,14 @@ source_set("object") {
     "process_dispatcher.cc",
     "process_dispatcher_ffi.cc",
     "profile_dispatcher.cc",
-    "profile_dispatcher_ffi.cc",
-    "resource.cc",
     "resource_dispatcher.cc",
     "resource_dispatcher_ffi.cc",
-    "root_job_observer.cc",
     "root_job_observer_ffi.cc",
     "sampler_dispatcher.cc",
     "sampler_dispatcher_ffi.cc",
-    "singleton.cc",
     "socket_dispatcher.cc",
     "socket_dispatcher_ffi.cc",
     "stream_dispatcher.cc",
-    "stream_dispatcher_ffi.cc",
     "suspend_token_dispatcher.cc",
     "suspend_token_dispatcher_ffi.cc",
     "thread_dispatcher.cc",
@@ -87,13 +73,11 @@ source_set("object") {
   deps = [
     ":object-rs",
     "//sdk/lib/fit",
-    "//sdk/lib/iob",
     "//zircon/kernel/dev/iommu/stub",
     "//zircon/kernel/hypervisor",
     "//zircon/kernel/lib/arch",
     "//zircon/kernel/lib/boot-options",
     "//zircon/kernel/lib/counters",
-    "//zircon/kernel/lib/crashlog",
     "//zircon/kernel/lib/dump",
     "//zircon/kernel/lib/fasttime:headers",
     "//zircon/kernel/lib/fbl",
@@ -102,14 +86,9 @@ source_set("object") {
     "//zircon/kernel/lib/ktl",
     "//zircon/kernel/lib/ktrace",
     "//zircon/kernel/lib/object-constants",
-    "//zircon/kernel/lib/object_cache",
     "//zircon/kernel/lib/page",
-    "//zircon/kernel/lib/page-map",
-    "//zircon/kernel/lib/page_cache",
     "//zircon/kernel/lib/stall:headers",
-    "//zircon/kernel/lib/thread_sampler",
     "//zircon/system/ulib/pretty",
-    "//zircon/system/ulib/region-alloc",
     "//zircon/system/ulib/zx",
   ]
   if (current_cpu == "arm64") {
@@ -120,113 +99,23 @@ source_set("object") {
 library_headers("headers") {
   headers = []
   public_deps = [
-    # <object/message_packet.h> has #include <ktl/unique_ptr.h>.
-    "//zircon/kernel/lib/ktl:headers",
-
-    # <object/port_dispatcher.h> has <lib/object_cache.h>
-    "//zircon/kernel/lib/object_cache:headers",
-
-    # <object/log_dispatcher.h> has #include <lib/debuglog.h>.
+    "//zircon/kernel/dev/interrupt:headers",
     "//zircon/kernel/lib/debuglog:headers",
+
+    # <object/dispatcher.h> has #include <ktl/unique_ptr.h>.
+    "//zircon/kernel/lib/ktl:headers",
 
     # <object/log_dispatcher.h> and <object/counter_dispatcher.h> have #include
     # <lib/object-constants.h>.
-    "//zircon/kernel/dev/interrupt:headers",
     "//zircon/kernel/lib/object-constants:headers",
-
-    # <object/clock_dispatcher.h> includes things from kconcurrent
-    "//zircon/kernel/lib/kconcurrent:headers",
-
-    # <object/clock_dispatcher.h> has #include <lib/page/size.h>
-    "//zircon/kernel/lib/page:headers",
 
     # <object/process_dispatcher.h> has #include <vm/vm_aspace.h>.
     "//zircon/kernel/vm:headers",
-
-    # <object/clock_dispatcher.h> has #include <lib/affine/transform.h>.
     "//zircon/system/ulib/affine",
   ]
 }
 
-source_set("tests") {
-  testonly = true
-  sources = [
-    "test/exceptionate_tests.cc",
-    "test/handle_tests.cc",
-    "test/interrupt_event_dispatcher_tests.cc",
-    "test/job_dispatcher_tests.cc",
-    "test/process_dispatcher_tests.cc",
-    "test/shareable_process_state_tests.cc",
-    "test/state_tracker_tests.cc",
-  ]
-  deps = [
-    ":headers",
-    "//zircon/kernel/lib/console",
-    "//zircon/kernel/lib/ktl",
-    "//zircon/kernel/lib/unittest",
-  ]
-}
-
-group("kernel-tests") {
-  testonly = true
-  deps = [ ":tests" ]
-}
-
-kernel_bindgen_crate("process-dispatcher-bindings") {
-  visibility = [ ":*" ]
-  headers = [ "include/object/process_dispatcher_ffi.h" ]
-  non_rust_deps = [ ":headers" ]
-  output_name = "process_dispatcher_bindings.rs"
-  cpp = true
-  notice_year = 2026
-  function_allowlist = [
-    "cpp_process_dispatcher_normal_aspace",
-    "cpp_process_dispatcher_restricted_aspace",
-  ]
-  type_allowlist = [ "ProcessDispatcher" ]
-  opaque_types = [ "ProcessDispatcher" ]
-  function_blocklist = [ "ProcessDispatcher_.*" ]
-  type_blocklist = [ "VmAspace" ]
-  additional_bindgen_flags = [ "--no-recursive-allowlist" ]
-
-  edition = "2024"
-  raw_lines = [
-    "#![no_std]",
-    "pub type VmAspace = core::ffi::c_void;",
-  ]
-}
-
-kernel_bindgen_crate("executor-bindings") {
-  visibility = [ ":*" ]
-  headers = [ "include/object/executor.h" ]
-  non_rust_deps = [ ":headers" ]
-  cpp = true
-
-  edition = "2024"
-  notice_year = 2026
-
-  function_blocklist = [ ".*" ]
-  type_allowlist = [
-    "Executor",
-    "HandleOwner",
-    "MemoryWatchdog",
-  ]
-  type_blocklist = [ "MemoryWatchdog_.*" ]
-  opaque_types = [
-    "HandleOwner",
-    "MemoryWatchdog",
-    "fbl::RefPtr",
-    "ktl::unique_ptr",
-    "std::unique_ptr",
-  ]
-  additional_bindgen_flags = [ "--no-recursive-allowlist" ]
-  raw_lines = [ "#![no_std]" ]
-  expect_lints = []
-}
-
 kernel_rust_mod("object-rs") {
-  output_name = "object"
-  source_root = "object.rs"
   sources = [
     "bti.rs",
     "buffer_chain.rs",
@@ -246,8 +135,10 @@ kernel_rust_mod("object-rs") {
     "event_dispatcher_ffi.rs",
     "event_pair_dispatcher.rs",
     "event_pair_dispatcher_ffi.rs",
+    "exception.rs",
     "exception_dispatcher.rs",
     "exception_dispatcher_ffi.rs",
+    "exception_ffi.rs",
     "exceptionate.rs",
     "exceptionate_ffi.rs",
     "executor.rs",
@@ -297,11 +188,11 @@ kernel_rust_mod("object-rs") {
     "resource.rs",
     "resource_dispatcher.rs",
     "resource_dispatcher_ffi.rs",
-    "resource_ffi.rs",
     "root_job_observer.rs",
     "root_job_observer_ffi.rs",
     "sampler_dispatcher.rs",
     "sampler_dispatcher_ffi.rs",
+    "singleton.rs",
     "socket_dispatcher.rs",
     "socket_dispatcher_ffi.rs",
     "stream_dispatcher.rs",
@@ -326,8 +217,6 @@ kernel_rust_mod("object-rs") {
   ]
 
   deps = [
-    ":executor-bindings",
-    ":process-dispatcher-bindings",
     "//sdk/rust/iob",
     "//sdk/rust/zx-status",
     "//sdk/rust/zx-types",
@@ -344,6 +233,7 @@ kernel_rust_mod("object-rs") {
     "//zircon/kernel/lib/arch:arch-rs",
     "//zircon/kernel/lib/boot-options:boot-options-rs",
     "//zircon/kernel/lib/debug",
+    "//zircon/kernel/lib/fbl:gparena",
     "//zircon/kernel/lib/init:init_rust",
     "//zircon/kernel/lib/object-constants:object-constants-rs",
     "//zircon/kernel/lib/page:page-rs",

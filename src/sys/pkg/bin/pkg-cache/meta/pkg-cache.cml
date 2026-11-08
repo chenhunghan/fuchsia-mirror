@@ -187,6 +187,19 @@
             default: 0,
         },
         {
+            // Earliest time, in seconds on the boot timeline (starting at 0), at which garbage
+            // collection will be triggered after the system is committed during this boot. If the
+            // commit occurs after this time, garbage collection runs immediately. It is skipped if
+            // any garbage collection already completed during this boot, and it is not retried on
+            // later boots if the device reboots before it runs. Negative values disable
+            // post-commit garbage collection.
+            config: "fuchsia.pkgcache.PostCommitGcEarliestBootSeconds",
+            key: "post_commit_gc_earliest_boot_seconds",
+            type: "int32",
+            availability: "optional",
+            default: -1,
+        },
+        {
             config: "fuchsia.zircon.system.pkgfs.cmd",
             key: "system_image_hash",
             type: "string",

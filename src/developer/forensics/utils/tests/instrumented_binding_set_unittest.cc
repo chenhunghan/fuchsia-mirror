@@ -6,8 +6,6 @@
 
 #include <fidl/fuchsia.feedback/cpp/fidl.h>
 #include <fidl/fuchsia.feedback/cpp/test_base.h>
-#include <fuchsia/feedback/cpp/fidl.h>
-#include <fuchsia/feedback/cpp/fidl_test_base.h>
 #include <lib/syslog/cpp/macros.h>
 
 #include <string>
@@ -24,15 +22,10 @@ using inspect::testing::NodeMatches;
 using inspect::testing::PropertyList;
 using inspect::testing::UintIs;
 using testing::AllOf;
-using testing::IsSupersetOf;
+using testing::ElementsAre;
 using testing::UnorderedElementsAreArray;
 
-class StubCrashReporter : public fuchsia::feedback::testing::CrashReporter_TestBase {
- public:
-  void NotImplemented_(const std::string& name) override { FX_CHECK(false); }
-};
-
-class NaturalStubCrashReporter : public fidl::testing::TestBase<fuchsia_feedback::CrashReporter> {
+class StubCrashReporter : public fidl::testing::TestBase<fuchsia_feedback::CrashReporter> {
  public:
   void NotImplemented_(const std::string& name, fidl::CompleterBase& completer) override {
     FX_CHECK(false);
@@ -45,27 +38,31 @@ class InstrumentedBindingSetTest : public UnitTestFixture {
       : inspect_node_manager_(&InspectRoot()),
         bindings_(dispatcher(), &crash_reporter_, &inspect_node_manager_, "/fidl") {}
 
-  InstrumentedBindingSet<fuchsia::feedback::CrashReporter>& Bindings() { return bindings_; }
+  InstrumentedBindingSet<fuchsia_feedback::CrashReporter>& Bindings() { return bindings_; }
 
  protected:
   InspectNodeManager inspect_node_manager_;
   StubCrashReporter crash_reporter_;
-  InstrumentedBindingSet<fuchsia::feedback::CrashReporter> bindings_;
+  InstrumentedBindingSet<fuchsia_feedback::CrashReporter> bindings_;
 };
 
 TEST_F(InstrumentedBindingSetTest, Check_MakingAndClosingConnections) {
-  fuchsia::feedback::CrashReporterPtr ptr1;
-  fuchsia::feedback::CrashReporterPtr ptr2;
-  fuchsia::feedback::CrashReporterPtr ptr3;
+  zx::result endpoints1 = fidl::CreateEndpoints<fuchsia_feedback::CrashReporter>();
+  zx::result endpoints2 = fidl::CreateEndpoints<fuchsia_feedback::CrashReporter>();
+  zx::result endpoints3 = fidl::CreateEndpoints<fuchsia_feedback::CrashReporter>();
+  ASSERT_TRUE(endpoints1.is_ok());
+  ASSERT_TRUE(endpoints2.is_ok());
+  ASSERT_TRUE(endpoints3.is_ok());
 
   EXPECT_THAT(InspectTree(), ChildrenMatch(ElementsAre(NodeMatches(AllOf(
                                  NameMatches("fidl"), PropertyList(UnorderedElementsAreArray({
                                                           UintIs("current_num_connections", 0u),
                                                           UintIs("total_num_connections", 0u),
                                                       })))))));
+
   // 2 New connections: 2 created, 2 active
-  Bindings().AddBinding(ptr1.NewRequest(dispatcher()));
-  Bindings().AddBinding(ptr2.NewRequest(dispatcher()));
+  Bindings().AddBinding(std::move(endpoints1->server));
+  Bindings().AddBinding(std::move(endpoints2->server));
 
   EXPECT_THAT(InspectTree(), ChildrenMatch(ElementsAre(NodeMatches(AllOf(
                                  NameMatches("fidl"), PropertyList(UnorderedElementsAreArray({
@@ -74,7 +71,7 @@ TEST_F(InstrumentedBindingSetTest, Check_MakingAndClosingConnections) {
                                                       })))))));
 
   // Close 1 connection: 2 created, 1 active
-  ptr1.Unbind();
+  endpoints1->client.reset();
   RunLoopUntilIdle();
 
   EXPECT_THAT(InspectTree(), ChildrenMatch(ElementsAre(NodeMatches(AllOf(
@@ -84,7 +81,7 @@ TEST_F(InstrumentedBindingSetTest, Check_MakingAndClosingConnections) {
                                                       })))))));
 
   // 1 New Connection: 3 created, 2 active
-  Bindings().AddBinding(ptr3.NewRequest(dispatcher()));
+  Bindings().AddBinding(std::move(endpoints3->server));
 
   EXPECT_THAT(InspectTree(), ChildrenMatch(ElementsAre(NodeMatches(AllOf(
                                  NameMatches("fidl"), PropertyList(UnorderedElementsAreArray({
@@ -93,8 +90,8 @@ TEST_F(InstrumentedBindingSetTest, Check_MakingAndClosingConnections) {
                                                       })))))));
 
   // Close 2 connections: 3 created, 0 active
-  ptr2.Unbind();
-  ptr3.Unbind();
+  endpoints2->client.reset();
+  endpoints3->client.reset();
   RunLoopUntilIdle();
 
   EXPECT_THAT(InspectTree(), ChildrenMatch(ElementsAre(NodeMatches(AllOf(
@@ -102,70 +99,6 @@ TEST_F(InstrumentedBindingSetTest, Check_MakingAndClosingConnections) {
                                                           UintIs("current_num_connections", 0u),
                                                           UintIs("total_num_connections", 3u),
                                                       })))))));
-}
-
-TEST_F(InstrumentedBindingSetTest, Check_MakingAndClosingNaturalConnections) {
-  NaturalStubCrashReporter natural_crash_reporter;
-  InstrumentedBindingSet<fuchsia_feedback::CrashReporter> natural_bindings(
-      dispatcher(), &natural_crash_reporter, &inspect_node_manager_, "/natural_fidl");
-
-  zx::result endpoints1 = fidl::CreateEndpoints<fuchsia_feedback::CrashReporter>();
-  zx::result endpoints2 = fidl::CreateEndpoints<fuchsia_feedback::CrashReporter>();
-  zx::result endpoints3 = fidl::CreateEndpoints<fuchsia_feedback::CrashReporter>();
-  ASSERT_TRUE(endpoints1.is_ok());
-  ASSERT_TRUE(endpoints2.is_ok());
-  ASSERT_TRUE(endpoints3.is_ok());
-
-  EXPECT_THAT(InspectTree(),
-              ChildrenMatch(IsSupersetOf({NodeMatches(
-                  AllOf(NameMatches("natural_fidl"), PropertyList(UnorderedElementsAreArray({
-                                                         UintIs("current_num_connections", 0u),
-                                                         UintIs("total_num_connections", 0u),
-                                                     }))))})));
-
-  // 2 New connections: 2 created, 2 active
-  natural_bindings.AddBinding(std::move(endpoints1->server));
-  natural_bindings.AddBinding(std::move(endpoints2->server));
-
-  EXPECT_THAT(InspectTree(),
-              ChildrenMatch(IsSupersetOf({NodeMatches(
-                  AllOf(NameMatches("natural_fidl"), PropertyList(UnorderedElementsAreArray({
-                                                         UintIs("current_num_connections", 2u),
-                                                         UintIs("total_num_connections", 2u),
-                                                     }))))})));
-
-  // Close 1 connection: 2 created, 1 active
-  endpoints1->client.reset();
-  RunLoopUntilIdle();
-
-  EXPECT_THAT(InspectTree(),
-              ChildrenMatch(IsSupersetOf({NodeMatches(
-                  AllOf(NameMatches("natural_fidl"), PropertyList(UnorderedElementsAreArray({
-                                                         UintIs("current_num_connections", 1u),
-                                                         UintIs("total_num_connections", 2u),
-                                                     }))))})));
-
-  // 1 New Connection: 3 created, 2 active
-  natural_bindings.AddBinding(std::move(endpoints3->server));
-
-  EXPECT_THAT(InspectTree(),
-              ChildrenMatch(IsSupersetOf({NodeMatches(
-                  AllOf(NameMatches("natural_fidl"), PropertyList(UnorderedElementsAreArray({
-                                                         UintIs("current_num_connections", 2u),
-                                                         UintIs("total_num_connections", 3u),
-                                                     }))))})));
-
-  // Close 2 connections: 3 created, 0 active
-  endpoints2->client.reset();
-  endpoints3->client.reset();
-  RunLoopUntilIdle();
-
-  EXPECT_THAT(InspectTree(),
-              ChildrenMatch(IsSupersetOf({NodeMatches(
-                  AllOf(NameMatches("natural_fidl"), PropertyList(UnorderedElementsAreArray({
-                                                         UintIs("current_num_connections", 0u),
-                                                         UintIs("total_num_connections", 3u),
-                                                     }))))})));
 }
 
 }  // namespace

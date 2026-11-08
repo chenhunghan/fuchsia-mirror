@@ -2,39 +2,69 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use crate::env::EnvLike;
 use crate::errors::TestRunError;
 use crate::std_writer::StdWriter;
 use crate::test_config::{OutputProcessor, TestConfig};
 use std::borrow::Cow;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
-use std::time::Instant;
 use std::{fs, io};
 use test_pilot_lib::invocation_log::CommandInvocationLog;
 use test_pilot_lib::test_output::{
-    OutputDirectory, Summary, SummaryArtifact, is_fail_exit_status, outcome_from_exit_status,
+    OutputDirectory, TestResult, failure_reason_from_exit_status, is_fail_exit_status,
 };
 use tokio::io::AsyncReadExt;
 use tokio::process::{self, Command};
 
 const STDIO_BUFFER_SIZE: usize = 2 * 1024;
 const ENV_PATH: &str = "PATH";
+const ENV_TEST_OUTPUT_SUMMARY_PATH: &str = "TEST_OUTPUT_SUMMARY_PATH";
 
-const ARTIFACT_TYPE_STDOUT: &str = "STDOUT";
-const ARTIFACT_TYPE_STDERR: &str = "STDERR";
-
-pub async fn run_test(
+pub async fn run_test<E: EnvLike>(
     test_config: &TestConfig,
     outdir: &OutputDirectory<'_>,
-    path_env_var_value: &str,
+    env_like: &E,
 ) -> Result<ExitStatus, TestRunError> {
     let mut log = CommandInvocationLog::new();
+    let path_env_var_value = env_like.var(ENV_PATH).unwrap_or_default();
 
-    let exit_status = run_test_inner(test_config, &outdir, path_env_var_value, &mut log).await?;
+    let exit_status =
+        run_test_inner(test_config, outdir, path_env_var_value.as_str(), &mut log).await?;
 
     let _ = fs::write(outdir.execution_log(), serde_json::to_string_pretty(&log).unwrap());
 
+    if let Ok(summary_path) = env_like.var(ENV_TEST_OUTPUT_SUMMARY_PATH) {
+        copy_output_summary(&outdir.main_summary(), Path::new(&summary_path))?;
+    }
+
     Ok(exit_status)
+}
+
+fn copy_output_summary(from: &Path, to: &Path) -> Result<(), TestRunError> {
+    if let Some(parent) = to.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(|source| TestRunError::FailedToCopySummary {
+                from: from.to_path_buf(),
+                to: to.to_path_buf(),
+                source,
+            })?;
+        }
+    }
+
+    if let (Ok(canonical_from), Ok(canonical_to)) = (fs::canonicalize(from), fs::canonicalize(to))
+        && canonical_from == canonical_to
+    {
+        return Ok(());
+    }
+
+    fs::copy(from, to).map_err(|source| TestRunError::FailedToCopySummary {
+        from: from.to_path_buf(),
+        to: to.to_path_buf(),
+        source,
+    })?;
+
+    Ok(())
 }
 
 async fn run_test_inner(
@@ -43,7 +73,10 @@ async fn run_test_inner(
     path_env_var_value: &str,
     log: &mut CommandInvocationLog,
 ) -> Result<ExitStatus, TestRunError> {
-    let mut main_summary = Summary::default();
+    let mut main_summary = TestResult {
+        output_dir: test_config.output_directory.to_string_lossy().to_string(),
+        ..Default::default()
+    };
     let mut cmd =
         create_test_launch_command(test_config, &outdir.test_config(), path_env_var_value);
 
@@ -52,7 +85,6 @@ async fn run_test_inner(
             StdWriter::new(outdir.test_invocation_stdout(), Box::new(io::stdout()))?;
         let mut stderr_writer =
             StdWriter::new(outdir.test_invocation_stderr(), Box::new(io::stderr()))?;
-        let start_time = Instant::now();
         let exit_status = run_command(&mut cmd, &mut stdout_writer, &mut stderr_writer).await?;
         log.record_test(
             &cmd,
@@ -62,18 +94,22 @@ async fn run_test_inner(
         );
 
         // Populate the main summary based on test run results.
-        main_summary.common.duration = start_time.elapsed().as_millis() as i64;
-        main_summary.common.outcome = outcome_from_exit_status(exit_status);
         if let Some(stdout) = stdout_writer.path_if_wrote() {
-            main_summary.common.artifacts.insert(
-                outdir.make_relative(&stdout).expect("stdout file is in output directory"),
-                SummaryArtifact { artifact_type: String::from(ARTIFACT_TYPE_STDOUT) },
+            main_summary.output_files.push(
+                outdir
+                    .make_relative(&stdout)
+                    .expect("stdout file is in output directory")
+                    .to_string_lossy()
+                    .to_string(),
             );
         }
         if let Some(stderr) = stderr_writer.path_if_wrote() {
-            main_summary.common.artifacts.insert(
-                outdir.make_relative(&stderr).expect("stdout file is in output directory"),
-                SummaryArtifact { artifact_type: String::from(ARTIFACT_TYPE_STDERR) },
+            main_summary.output_files.push(
+                outdir
+                    .make_relative(&stderr)
+                    .expect("stderr file is in output directory")
+                    .to_string_lossy()
+                    .to_string(),
             );
         }
 
@@ -98,6 +134,10 @@ async fn run_test_inner(
     };
 
     let _merged = main_summary.maybe_merge_file(&outdir.test_summary())?;
+
+    if main_summary.setup_succeeded == Some(false) && main_summary.failure_reason.is_none() {
+        main_summary.failure_reason = failure_reason_from_exit_status(exit_status);
+    }
 
     // We write the summary here, because post-processors may want to read it.
     main_summary.write(&outdir.main_summary())?;
@@ -141,7 +181,7 @@ async fn run_test_inner(
                 stderr_writer.path_if_wrote().and_then(|p| outdir.make_relative(&p)),
             );
 
-            if !exit_status.success() && is_fail_exit_status(exit_status) {
+            if !exit_status.success() && !is_fail_exit_status(exit_status) {
                 eprintln!(
                     "output processor {0:?} returned bad exit status {1}",
                     output_processor.binary.display(),
@@ -305,6 +345,7 @@ async fn run_command<W1: io::Write + Send, W2: io::Write + Send>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::env::testutils::FakeEnv;
     use assert_matches::assert_matches;
     use rand::RngExt as _;
     use rand::distr::Alphanumeric;
@@ -313,6 +354,7 @@ mod tests {
     use std::io::Cursor;
     use std::os::unix::process::ExitStatusExt;
     use tempfile::tempdir;
+    use test_pilot_lib::test_output::{FailureReason, TestCaseResult, TestStatus};
 
     const CURRENT_DIR: &str = "current_dir";
 
@@ -431,9 +473,9 @@ mod tests {
         };
 
         let output_directory = OutputDirectory::new(&config.output_directory);
-        let exit_status = run_test(&config, &output_directory, "/usr/bin")
-            .await
-            .expect("run_test should succeed");
+        let fake_env = FakeEnv::from_parts(&[], &[("PATH", "/usr/bin")]);
+        let exit_status =
+            run_test(&config, &output_directory, &fake_env).await.expect("run_test should succeed");
 
         assert_eq!(ExitStatus::from_raw(0), exit_status);
         assert_eq!(
@@ -450,8 +492,11 @@ mod tests {
         let mut summary_reader = std::io::BufReader::new(
             fs::File::open(output_directory.main_summary()).expect("can open main summary"),
         );
-        let summary: Summary =
+        let summary: TestResult =
             serde_json::from_reader(&mut summary_reader).expect("can parse main summary");
+        assert_eq!(summary.output_dir, temp_dir.path().to_string_lossy().to_string());
+        assert_eq!(summary.output_files, vec![String::from("test/invocation_stdout.txt")]);
+        assert_eq!(summary.failure_reason, None);
         assert_eq!(summary.setup_succeeded, Some(true));
         assert_eq!(summary.teardown_succeeded, Some(true));
         assert_eq!(summary.exit_code, Some(0));
@@ -490,6 +535,119 @@ mod tests {
     }
 
     #[fuchsia::test]
+    async fn test_run_test_copies_output_summary_when_env_defined() {
+        let temp_dir = tempdir().expect("to create temporary directory");
+        let summary_dir = tempdir().expect("to create summary directory");
+        let copied_summary_path = summary_dir.path().join("nested").join("copied_summary.json");
+        let postprocessor_summary_source = summary_dir.path().join("postprocessor_summary.json");
+        fs::write(
+            &postprocessor_summary_source,
+            serde_json::to_string_pretty(&json!({
+                "output_files": ["cp/extra.txt"],
+                "cases": [
+                    {
+                        "display_name": "postprocessor_case",
+                        "case_name": "postprocessor_case",
+                        "status": "PASS",
+                        "format": "FTF"
+                    }
+                ]
+            }))
+            .unwrap(),
+        )
+        .expect("write postprocessor source summary");
+
+        let output_directory = OutputDirectory::new(temp_dir.path());
+        let postprocessor_summary_destination =
+            output_directory.postprocessor_summary(&PathBuf::from("cp"));
+
+        let config = TestConfig {
+            host_test_binary: PathBuf::from("echo"),
+            host_test_args: vec![String::from("should_end_up_in_test_stdout")],
+            output_directory: temp_dir.path().to_path_buf(),
+            output_processors: vec![OutputProcessor {
+                binary: PathBuf::from("cp"),
+                args: vec![
+                    postprocessor_summary_source.to_string_lossy().to_string(),
+                    postprocessor_summary_destination.to_string_lossy().to_string(),
+                ],
+                use_on_success: true,
+                use_on_failure: false,
+                use_if_defined: vec![],
+            }],
+            unknown: HashMap::new(),
+        };
+
+        let path_env = std::env::var(ENV_PATH).unwrap_or_else(|_| String::from("/bin:/usr/bin"));
+        let fake_env = FakeEnv::from_parts(
+            &[],
+            &[
+                (ENV_PATH, path_env.as_str()),
+                (
+                    ENV_TEST_OUTPUT_SUMMARY_PATH,
+                    copied_summary_path.to_str().expect("summary path is valid UTF-8"),
+                ),
+            ],
+        );
+
+        let exit_status =
+            run_test(&config, &output_directory, &fake_env).await.expect("run_test should succeed");
+        assert_eq!(exit_status.code(), Some(0));
+
+        let main_summary_bytes =
+            fs::read(output_directory.main_summary()).expect("can read main summary");
+        let copied_summary_bytes = fs::read(&copied_summary_path).expect("can read copied summary");
+        assert_eq!(copied_summary_bytes, main_summary_bytes);
+
+        let copied_summary: TestResult =
+            serde_json::from_slice(&copied_summary_bytes).expect("can parse copied summary");
+        assert_eq!(
+            copied_summary.output_files,
+            vec![String::from("test/invocation_stdout.txt"), String::from("cp/extra.txt")]
+        );
+        assert_eq!(
+            copied_summary.cases,
+            vec![TestCaseResult {
+                display_name: String::from("postprocessor_case"),
+                case_name: String::from("postprocessor_case"),
+                status: TestStatus::Pass,
+                format: String::from("FTF"),
+                ..Default::default()
+            }]
+        );
+        assert_eq!(copied_summary.setup_succeeded, Some(true));
+        assert_eq!(copied_summary.teardown_succeeded, Some(true));
+        assert_eq!(copied_summary.exit_code, Some(0));
+
+        // Verify TEST_OUTPUT_SUMMARY_PATH is not leaked into child command environments.
+        let mut log_reader = std::io::BufReader::new(
+            fs::File::open(output_directory.execution_log()).expect("can open invocation log"),
+        );
+        let log: Value = from_reader(&mut log_reader).expect("can parse invocation log");
+        assert_eq!(log["test"]["envs"], json!({ "PATH": path_env }));
+        assert_eq!(log["postprocessors"]["cp"]["envs"], json!({ "PATH": path_env }));
+
+        // Verify copying fails with FailedToCopySummary if TEST_OUTPUT_SUMMARY_PATH is a directory.
+        let invalid_env = FakeEnv::from_parts(
+            &[],
+            &[
+                (ENV_PATH, path_env.as_str()),
+                (
+                    ENV_TEST_OUTPUT_SUMMARY_PATH,
+                    summary_dir.path().to_str().expect("summary dir is valid UTF-8"),
+                ),
+            ],
+        );
+        let error = run_test(&config, &output_directory, &invalid_env)
+            .await
+            .expect_err("copying to a directory should fail");
+        assert_matches!(error, TestRunError::FailedToCopySummary { .. });
+
+        temp_dir.close().expect("temp directory successfully closed");
+        summary_dir.close().expect("summary directory successfully closed");
+    }
+
+    #[fuchsia::test]
     async fn test_run_test_output_processor_missing_def() {
         let temp_dir = tempdir().expect("to create temporary directory");
 
@@ -508,9 +666,9 @@ mod tests {
         };
 
         let output_directory = OutputDirectory::new(&config.output_directory);
-        let exit_status = run_test(&config, &output_directory, "/usr/bin")
-            .await
-            .expect("run_test should succeed");
+        let fake_env = FakeEnv::from_parts(&[], &[("PATH", "/usr/bin")]);
+        let exit_status =
+            run_test(&config, &output_directory, &fake_env).await.expect("run_test should succeed");
 
         assert_eq!(ExitStatus::from_raw(0), exit_status);
         assert_eq!(
@@ -566,16 +724,18 @@ mod tests {
 
         let output_directory = OutputDirectory::new(&config.output_directory);
         let path_env = std::env::var(ENV_PATH).unwrap_or_else(|_| String::from("/bin:/usr/bin"));
+        let fake_env = FakeEnv::from_parts(&[], &[(ENV_PATH, path_env.as_str())]);
         let exit_status =
-            run_test(&config, &output_directory, &path_env).await.expect("run_test should succeed");
+            run_test(&config, &output_directory, &fake_env).await.expect("run_test should succeed");
 
         assert_eq!(exit_status.code(), Some(86));
 
         let mut summary_reader = std::io::BufReader::new(
             fs::File::open(output_directory.main_summary()).expect("can open main summary"),
         );
-        let summary: Summary =
+        let summary: TestResult =
             serde_json::from_reader(&mut summary_reader).expect("can parse main summary");
+        assert_eq!(summary.failure_reason, None);
         assert_eq!(summary.setup_succeeded, Some(true));
         assert_eq!(summary.teardown_succeeded, Some(true));
         assert_eq!(summary.exit_code, Some(86));
@@ -609,16 +769,21 @@ mod tests {
 
         let output_directory = OutputDirectory::new(&config.output_directory);
         let path_env = std::env::var(ENV_PATH).unwrap_or_else(|_| String::from("/bin:/usr/bin"));
+        let fake_env = FakeEnv::from_parts(&[], &[(ENV_PATH, path_env.as_str())]);
         let exit_status =
-            run_test(&config, &output_directory, &path_env).await.expect("run_test should succeed");
+            run_test(&config, &output_directory, &fake_env).await.expect("run_test should succeed");
 
         assert_eq!(exit_status.code(), Some(1));
 
         let mut summary_reader = std::io::BufReader::new(
             fs::File::open(output_directory.main_summary()).expect("can open main summary"),
         );
-        let summary: Summary =
+        let summary: TestResult =
             serde_json::from_reader(&mut summary_reader).expect("can parse main summary");
+        assert_eq!(
+            summary.failure_reason,
+            FailureReason::from_message("test binary failed with exit status 1")
+        );
         assert_eq!(summary.setup_succeeded, Some(false));
         assert_eq!(summary.teardown_succeeded, None);
         assert_eq!(summary.exit_code, Some(1));

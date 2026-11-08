@@ -21,7 +21,7 @@ rustc_binary(
     srcs = ["src/main.rs"],
     crate_name = "fake_lutex_controller",
     edition = "2024",
-    lint_config = "//src/starnix/config:starnix_clippy_lints",
+    lint_config = "//src/starnix/config:starnix_clippy_lints_test",
     deps = [
         "//sdk/fidl/fuchsia.posix:fuchsia.posix_rust",
         "//sdk/fidl/fuchsia.starnix.binder:fuchsia.starnix.binder_rust",
@@ -58,7 +58,6 @@ fx_component(
     name = "fake_lutex_controller",
     testonly = True,
     compiled_manifest = ":fake_lutex_controller_manifest",
-    component_name = "fake_lutex_controller",
     visibility = ["//src/starnix/fakes:__pkg__"],
     deps = [":fake_lutex_controller_packaged_bin"],
 )

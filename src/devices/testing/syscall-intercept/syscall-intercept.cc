@@ -5,6 +5,7 @@
 #include "syscall-intercept.h"
 
 #include <fidl/fuchsia.test.syscalls/cpp/wire.h>
+#include <lib/driver/logging/cpp/logger.h>
 #include <lib/fidl/cpp/wire/channel.h>
 #include <lib/zircon-internal/thread_annotations.h>
 #include <zircon/syscalls-next.h>
@@ -13,7 +14,6 @@
 
 #include <fbl/auto_lock.h>
 #include <fbl/mutex.h>
-#include <sdk/lib/driver/logging/cpp/logger.h>
 
 #include "fidl/fuchsia.test.syscalls/cpp/wire_types.h"
 

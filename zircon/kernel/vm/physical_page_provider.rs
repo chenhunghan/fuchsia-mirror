@@ -25,8 +25,9 @@ use crate::vm::vm_cow_pages::{DeferredOps, SupplyOptions, VmCowPages, VmCowRange
 use crate::vm::vm_page_list::VmPageSpliceList;
 use crate::vm::{physmap, pmm};
 
+use crate::ksync_kernel::TrackedMutex;
 use fbl::{DoublyLinkedList, DoublyLinkedListContainable};
-use ksync::{KMutex, RawMutex, guarded, kcell_init};
+use ksync::{KMutex, guarded, kcell_init};
 use page_bindings::{vm_page_state, vm_page_t};
 use page_source_bindings::PageSource as CppPageSource;
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop, stack_pin_init};
@@ -63,7 +64,7 @@ define_kcounter!(PHYSICAL_RECLAIM_FAILED_REQUESTS, "physical.reclaim.failed_requ
 #[repr(C)]
 pub struct PhysicalPageProvider {
     #[mutex]
-    mtx: KMutex<RawMutex>,
+    mtx: KMutex<TrackedMutex>,
 
     /// Loaned pages should only have their loaned state manipulated by their 'owner', and should
     /// only have their loaned state inspected when it is known to be stable. Due to the
@@ -73,7 +74,7 @@ pub struct PhysicalPageProvider {
     /// we use this lock to ensure that, whenever we cannot be certain that there is no other actor
     /// that could be manipulating or inspecting the loaned state, we force a serialization.
     #[mutex]
-    loaned_state_lock: KMutex<RawMutex>,
+    loaned_state_lock: KMutex<TrackedMutex>,
 
     /// Only written once, under `mtx`, just after construction.  Reads after that don't need to be
     /// under `mtx`.
@@ -473,19 +474,19 @@ impl PhysicalPageProvider {
 
                         // Check if we should attempt to replace the page to avoid eviction.
                         if PhysicalPageBorrowingConfig::get().is_replace_on_unloan_enabled() {
-                            stack_pin_init!(let page_request = AnonymousPageRequest::new());
+                            let mut page_request = AnonymousPageRequest::new();
                             let replace_result = cow_container.replace_page(
                                 page_ptr,
                                 backlink_offset,
                                 false,
-                                Some(page_request.as_mut()),
+                                Some(&mut page_request),
                             );
                             // If replacement failed for any reason, fall back to eviction. If
                             // replacement succeeded then the page got directly returned to the
                             // pmm.
                             needs_evict = replace_result.is_err();
                             if replace_result == Err(Status::SHOULD_WAIT) {
-                                page_request.as_mut().cancel();
+                                page_request.cancel();
                             }
                             // If replacement succeeded, i.e. we are not going to fall back to
                             // eviction, then the page should be back in the PMM.

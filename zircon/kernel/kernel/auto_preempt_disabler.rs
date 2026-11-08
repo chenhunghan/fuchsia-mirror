@@ -13,6 +13,7 @@ use super::thread::{
     preempt_clear_timeslice_extension, preempt_disable, preempt_reenable,
     preempt_set_timeslice_extension,
 };
+use crate::kernel::mutex::Mutex;
 use crate::platform_rs::timer::DurationMono;
 
 /// `AutoPreemptDisabler` is a RAII helper that automatically manages disabling and
@@ -77,7 +78,9 @@ impl AutoPreemptDisabler {
     #[inline]
     pub fn enable(&mut self) {
         if self.disabled {
-            preempt_reenable();
+            // SAFETY: `self.disabled` records that this guard's own `preempt_disable()` is still
+            // unmatched, and this guard type never mints a `PreemptDisabledToken`.
+            unsafe { preempt_reenable() };
             self.disabled = false;
         }
     }
@@ -141,7 +144,10 @@ impl AnnotatedAutoPreemptDisabler {
     #[inline]
     pub fn enable(&mut self) {
         if self.disabled {
-            preempt_reenable();
+            // SAFETY: `self.disabled` records that this guard's own `preempt_disable()` is still
+            // unmatched, and the `&mut self` borrow guarantees that no `&PreemptDisabledToken`
+            // handed out by `Self::token(&self)` is still live.
+            unsafe { preempt_reenable() };
             self.disabled = false;
         }
     }
@@ -199,7 +205,9 @@ impl AutoEagerReschedDisabler {
     #[inline]
     pub fn enable(&mut self) {
         if self.disabled {
-            eager_resched_reenable();
+            // SAFETY: `self.disabled` records that this guard's own `eager_resched_disable()` is
+            // still unmatched, and this guard type never mints a `PreemptDisabledToken`.
+            unsafe { eager_resched_reenable() };
             self.disabled = false;
         }
     }
@@ -257,7 +265,10 @@ impl AnnotatedAutoEagerReschedDisabler {
     #[inline]
     pub fn enable(&mut self) {
         if self.disabled {
-            eager_resched_reenable();
+            // SAFETY: `self.disabled` records that this guard's own `eager_resched_disable()` is
+            // still unmatched, and the `&mut self` borrow guarantees that no
+            // `&PreemptDisabledToken` handed out by `Self::token(&self)` is still live.
+            unsafe { eager_resched_reenable() };
             self.disabled = false;
         }
     }
@@ -289,8 +300,8 @@ pub struct AutoExpiringPreemptDisabler {
 }
 
 impl AutoExpiringPreemptDisabler {
-    /// Default timeslice extension duration (150us).
-    pub const DEFAULT_TIMESLICE_EXTENSION: DurationMono = DurationMono::from_micros(150);
+    /// Default timeslice extension duration, [`Mutex::DEFAULT_TIMESLICE_EXTENSION`] (150us).
+    pub const DEFAULT_TIMESLICE_EXTENSION: DurationMono = Mutex::DEFAULT_TIMESLICE_EXTENSION;
 
     /// Creates a new guard and attempts to set a timeslice extension for `max_deferral_duration`.
     #[inline]

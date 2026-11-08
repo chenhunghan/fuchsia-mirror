@@ -1,0 +1,77 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/components:fx_component.bzl", "fx_component", "fx_component_manifest")
+load(
+    "//build/bazel/rules/components:structured_config.bzl",
+    "fuchsia_structured_config_rust_lib",
+)
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [],  # Include all tests in the package.
+    visibility = ["//src/session:__pkg__"],
+)
+
+fx_component_manifest(
+    name = "element_launcher_component_manifest",
+    component_name = "element_launcher",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/element_launcher.cml",
+)
+
+fuchsia_structured_config_rust_lib(
+    name = "element_launcher_config",
+    cm_label = ":element_launcher_component_manifest",
+)
+
+rustc_binary(
+    name = "element_launcher_bin",
+    srcs = ["src/main.rs"],
+    crate_name = "element_launcher",
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        ":element_launcher_config",
+        "//sdk/fidl/fuchsia.element:fuchsia.element_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "element_launcher_bin_packaged",
+    binary = ":element_launcher_bin",
+    binary_name = "element_launcher",
+)
+
+rustc_test(
+    name = "element_launcher_bin_test",
+    crate = ":element_launcher_bin",
+    tags = ["manual"],
+    deps = ["//third_party/rust_crates/vendor:futures"],
+)
+
+fx_component(
+    name = "element_launcher_component",
+    compiled_manifest = ":element_launcher_component_manifest",
+    deps = [":element_launcher_bin_packaged"],
+)
+
+fx_unittest_package(
+    name = "element_launcher_tests",
+    unit_tests = [":element_launcher_bin_test"],
+)

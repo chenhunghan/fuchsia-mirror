@@ -37,9 +37,10 @@ closed protocol Monitor {
     /// state at some point, it does not guarantee observation of every
     /// intermediate state.
     ///
-    /// It is not valid to call `Watch` concurrently. Calling `Watch` while
-    /// another call over the same server end is in flight will result in the
-    /// closing the channel.
+    /// Only one call to `Watch` may be in flight at a time per `Monitor`
+    /// connection. Calling `Watch` while another call over the same
+    /// connection is already in flight will result in closing the channel
+    /// with a `zx.Status.ALREADY_EXISTS` epitaph.
     ///
     /// - response a snapshot of current system reachability state.
     strict Watch() -> (Snapshot);

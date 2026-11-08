@@ -7,7 +7,6 @@
 
 //! arm64 FPU state save and restore for user threads.
 
-use core::ffi::CStr;
 use core::mem::offset_of;
 
 use arm64_thread_bindings::{
@@ -54,8 +53,7 @@ unsafe extern "C" {
 /// # Safety
 ///
 /// `t` points to a live `Thread` whose lock the caller holds.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arm64_fpu_restore_state(t: *const Thread) {
+pub(super) unsafe fn arm64_fpu_restore_state(t: *const Thread) {
     // SAFETY: `t` points to a live `Thread`, per the caller's contract.
     let arch = unsafe { thread_arch_const(t) };
     // SAFETY: `arch` is the thread's live `arch_thread`, and taking the field's address reads
@@ -65,8 +63,8 @@ pub unsafe extern "C" fn arm64_fpu_restore_state(t: *const Thread) {
     ltracef!(
         "cpu {}, thread {}, load fpstate {:p}\n",
         arch_curr_cpu_num(),
-        // SAFETY: `t` points to a live `Thread`, whose name is a NUL-terminated string it owns.
-        zr::from_utf8_lossy(unsafe { CStr::from_ptr(crate::kernel::thread::name(t)) }.to_bytes()),
+        // SAFETY: `t` points to a live `Thread`, per the caller's contract.
+        unsafe { Thread::name_copy_ptr(t) },
         fpstate
     );
 
@@ -82,8 +80,7 @@ pub unsafe extern "C" fn arm64_fpu_restore_state(t: *const Thread) {
 /// # Safety
 ///
 /// `t` points to a live `Thread` whose lock the caller holds.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arm64_fpu_save_state(t: *mut Thread) {
+pub(super) unsafe fn arm64_fpu_save_state(t: *mut Thread) {
     // SAFETY: `t` points to a live `Thread`, per the caller's contract.
     let arch = unsafe { thread_arch(t) };
     // SAFETY: `arch` is the thread's live `arch_thread`, and taking the field's address reads
@@ -93,8 +90,8 @@ pub unsafe extern "C" fn arm64_fpu_save_state(t: *mut Thread) {
     ltracef!(
         "cpu {}, thread {}, save fpstate {:p}\n",
         arch_curr_cpu_num(),
-        // SAFETY: `t` points to a live `Thread`, whose name is a NUL-terminated string it owns.
-        zr::from_utf8_lossy(unsafe { CStr::from_ptr(crate::kernel::thread::name(t)) }.to_bytes()),
+        // SAFETY: `t` points to a live `Thread`, per the caller's contract.
+        unsafe { Thread::name_copy_ptr(t) },
         fpstate
     );
 
@@ -104,8 +101,8 @@ pub unsafe extern "C" fn arm64_fpu_save_state(t: *mut Thread) {
 
     ltracef!(
         "thread {}, fpcr {:x}, fpsr {:x}\n",
-        // SAFETY: `t` points to a live `Thread`, whose name is a NUL-terminated string it owns.
-        zr::from_utf8_lossy(unsafe { CStr::from_ptr(crate::kernel::thread::name(t)) }.to_bytes()),
+        // SAFETY: `t` points to a live `Thread`, per the caller's contract.
+        unsafe { Thread::name_copy_ptr(t) },
         // SAFETY: The caller holds `t`'s lock, so nothing writes `fpstate` meanwhile.
         unsafe { (*fpstate).fpcr },
         // SAFETY: As above.
@@ -118,8 +115,7 @@ pub unsafe extern "C" fn arm64_fpu_save_state(t: *mut Thread) {
 /// # Safety
 ///
 /// `oldthread` and `newthread` point to live `Thread`s whose locks the caller holds.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arm64_fpu_context_switch(oldthread: *mut Thread, newthread: *mut Thread) {
+pub(super) unsafe fn arm64_fpu_context_switch(oldthread: *mut Thread, newthread: *mut Thread) {
     // The kernel itself does not use the FPU outside of managing state for user space threads.
     // Thus the only threads that can have relevant FPU state to save or restore are those that
     // have user space threads. This code only saves the FPU state when switching away from a user

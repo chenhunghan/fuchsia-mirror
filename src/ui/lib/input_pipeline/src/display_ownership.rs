@@ -8,6 +8,7 @@ use crate::keyboard_binding::{KeyboardDeviceDescriptor, KeyboardEvent};
 use crate::metrics;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use fidl_fuchsia_input::Key;
 use fidl_fuchsia_ui_input_internal as finput;
 use fidl_fuchsia_ui_input3::KeyEventType;
 use fuchsia_async::{OnSignals, Task};
@@ -54,6 +55,17 @@ pub static ANY_OWNERSHIP_SIGNAL: LazyLock<Signals> = LazyLock::new(|| {
     *DISPLAY_UNOWNED | *DISPLAY_PLATFORM_OWNED | *INPUT_CLIENT_OWNED | *INPUT_PLATFORM_OWNED
 });
 
+// Granular ownership state representing which entity owns display and input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OwnershipState {
+    /// Both display and input are owned by the platform.
+    PlatformOwned,
+    /// Display is owned by the platform, but input is owned by a direct client (e.g. Starnix).
+    ClientInputOwned,
+    /// Display is unowned (e.g. switched away to virtual console / Virtcon).
+    DisplayUnowned,
+}
+
 // Stores the last received ownership signals.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ownership {
@@ -67,32 +79,61 @@ impl std::convert::From<Signals> for Ownership {
 }
 
 impl Ownership {
-    /// Returns true if the platform does not currently own input.
+    /// Evaluates the 4-bit orthogonal signals on `signals` to determine the granular ownership state.
+    ///
+    /// - If `Signals::OBJECT_PEER_CLOSED` is asserted, or `DISPLAY_UNOWNED` is asserted, or
+    ///   `DISPLAY_PLATFORM_OWNED` is missing, ownership is `DisplayUnowned`.
+    /// - If display is platform-owned, but `INPUT_CLIENT_OWNED` is asserted or `INPUT_PLATFORM_OWNED`
+    ///   is missing, ownership is `ClientInputOwned`.
+    /// - Otherwise, ownership is `PlatformOwned`.
+    pub fn signals_to_ownership_state(signals: Signals) -> OwnershipState {
+        if signals.contains(Signals::OBJECT_PEER_CLOSED) {
+            return OwnershipState::DisplayUnowned;
+        }
+        let is_display_unowned =
+            signals.contains(*DISPLAY_UNOWNED) || !signals.contains(*DISPLAY_PLATFORM_OWNED);
+        if is_display_unowned {
+            return OwnershipState::DisplayUnowned;
+        }
+
+        let has_input_signals =
+            signals.contains(*INPUT_CLIENT_OWNED) || signals.contains(*INPUT_PLATFORM_OWNED);
+        if has_input_signals {
+            if signals.contains(*INPUT_CLIENT_OWNED) || !signals.contains(*INPUT_PLATFORM_OWNED) {
+                OwnershipState::ClientInputOwned
+            } else {
+                OwnershipState::PlatformOwned
+            }
+        } else {
+            // Fallback for legacy display-only signals if ViewTree bits are absent.
+            OwnershipState::PlatformOwned
+        }
+    }
+
+    /// Returns the granular ownership state.
+    pub fn ownership_state(&self) -> OwnershipState {
+        Self::signals_to_ownership_state(self.signals)
+    }
+
+    /// Returns true if display is unowned.
+    pub fn is_display_unowned(&self) -> bool {
+        self.ownership_state() == OwnershipState::DisplayUnowned
+    }
+
+    /// Returns true if input is client-owned while display is platform-owned.
+    pub fn is_input_client_owned(&self) -> bool {
+        self.ownership_state() == OwnershipState::ClientInputOwned
+    }
+
+    /// Returns true if the platform does not currently own both display and input.
     pub fn is_display_ownership_lost(&self) -> bool {
         Self::is_signals_ownership_lost(self.signals)
     }
 
     /// Evaluates the 4-bit orthogonal signals on `signals` to determine whether
     /// platform input ownership is lost.
-    ///
-    /// Platform owns input iff `DISPLAY_PLATFORM_OWNED` (Bit 1) is asserted AND
-    /// `INPUT_PLATFORM_OWNED` (Bit 4) is asserted, and neither `DISPLAY_UNOWNED` (Bit 0)
-    /// nor `INPUT_CLIENT_OWNED` (Bit 3) is asserted.
     pub fn is_signals_ownership_lost(signals: Signals) -> bool {
-        if signals.contains(Signals::OBJECT_PEER_CLOSED) {
-            return true;
-        }
-        let has_input_signals =
-            signals.contains(*INPUT_CLIENT_OWNED) || signals.contains(*INPUT_PLATFORM_OWNED);
-        let input_owned = if has_input_signals {
-            signals.contains(*INPUT_PLATFORM_OWNED) && !signals.contains(*INPUT_CLIENT_OWNED)
-        } else {
-            // Fallback for legacy display-only signals if ViewTree bits are absent.
-            true
-        };
-        let display_owned =
-            signals.contains(*DISPLAY_PLATFORM_OWNED) && !signals.contains(*DISPLAY_UNOWNED);
-        !(display_owned && input_owned)
+        Self::signals_to_ownership_state(signals) != OwnershipState::PlatformOwned
     }
 
     fn read_current_signals<T: AsHandleRef>(event: &T) -> Result<Signals, Status> {
@@ -104,70 +145,57 @@ impl Ownership {
         }
     }
 
+    fn has_contradictory_signals(signals: Signals) -> bool {
+        (signals.contains(*DISPLAY_PLATFORM_OWNED) && signals.contains(*DISPLAY_UNOWNED))
+            || (signals.contains(*INPUT_PLATFORM_OWNED) && signals.contains(*INPUT_CLIENT_OWNED))
+    }
+
     /// Waits for the next ownership state transition.
-    ///
-    /// If currently owned, waits until ownership is lost (either DISPLAY_UNOWNED
-    /// or INPUT_CLIENT_OWNED is asserted, or peer closed).
-    /// If currently unowned, waits until platform ownership is regained (both
-    /// DISPLAY_PLATFORM_OWNED and INPUT_PLATFORM_OWNED are asserted, and neither
-    /// unowned signal is asserted).
     pub async fn wait_ownership_change<T: AsHandleRef>(
         &self,
         event: &T,
     ) -> Result<Signals, Status> {
-        let currently_lost = self.is_display_ownership_lost();
+        let current_state = self.ownership_state();
         loop {
-            let wait_signals = if !currently_lost {
-                *DISPLAY_UNOWNED | *INPUT_CLIENT_OWNED | Signals::OBJECT_PEER_CLOSED
-            } else {
-                let cur = Self::read_current_signals(event)?;
-                if cur.contains(Signals::OBJECT_PEER_CLOSED) {
+            let cur = Self::read_current_signals(event)?;
+            if cur.contains(Signals::OBJECT_PEER_CLOSED) {
+                if current_state == OwnershipState::DisplayUnowned {
                     return Err(Status::PEER_CLOSED);
-                }
-                if !Self::is_signals_ownership_lost(cur) {
+                } else {
                     return Ok(cur);
                 }
-                let missing_display = !cur.contains(*DISPLAY_PLATFORM_OWNED);
-                let has_input_signals =
-                    cur.contains(*INPUT_CLIENT_OWNED) || cur.contains(*INPUT_PLATFORM_OWNED);
-                let missing_input =
-                    if has_input_signals { !cur.contains(*INPUT_PLATFORM_OWNED) } else { false };
+            }
+            if Self::has_contradictory_signals(cur) {
+                log::error!(
+                    "display_ownership: peer asserted invalid contradictory signals: {:?}",
+                    cur
+                );
+                return Err(Status::BAD_STATE);
+            }
+            let new_state = Self::signals_to_ownership_state(cur);
+            if new_state != current_state {
+                return Ok(cur);
+            }
 
-                let mut signals_to_wait = Signals::OBJECT_PEER_CLOSED;
-                if missing_display && missing_input {
-                    signals_to_wait |= *DISPLAY_PLATFORM_OWNED | *INPUT_PLATFORM_OWNED;
-                } else if missing_display {
-                    signals_to_wait |= *DISPLAY_PLATFORM_OWNED;
-                } else if missing_input {
-                    signals_to_wait |= *INPUT_PLATFORM_OWNED;
-                } else {
-                    log::error!(
-                        "display_ownership: peer asserted invalid contradictory signals (ownership lost but neither platform signal missing): {:?}",
-                        cur
-                    );
-                    return Err(Status::BAD_STATE);
+            let wait_signals = match current_state {
+                OwnershipState::PlatformOwned => {
+                    *DISPLAY_UNOWNED | *INPUT_CLIENT_OWNED | Signals::OBJECT_PEER_CLOSED
                 }
-                signals_to_wait
+                OwnershipState::ClientInputOwned => {
+                    *DISPLAY_UNOWNED | *INPUT_PLATFORM_OWNED | Signals::OBJECT_PEER_CLOSED
+                }
+                OwnershipState::DisplayUnowned => {
+                    *DISPLAY_PLATFORM_OWNED | Signals::OBJECT_PEER_CLOSED
+                }
             };
 
             OnSignals::new(event, wait_signals).await?;
-
-            let cur = Self::read_current_signals(event)?;
-            if currently_lost && cur.contains(Signals::OBJECT_PEER_CLOSED) {
-                return Err(Status::PEER_CLOSED);
-            }
-            let new_lost = Self::is_signals_ownership_lost(cur);
-            if new_lost != currently_lost {
-                return Ok(cur);
-            }
-            if cur.contains(Signals::OBJECT_PEER_CLOSED) {
-                return Err(Status::PEER_CLOSED);
-            }
         }
     }
 }
 
-type OwnershipChangeCallback = Rc<dyn Fn(bool) -> LocalBoxFuture<'static, ()>>;
+type OwnershipChangeCallback =
+    Rc<dyn Fn(OwnershipState, OwnershipState) -> LocalBoxFuture<'static, ()>>;
 
 /// A handler that turns the input pipeline off or on based on whether
 /// Scenic and ViewTree grant input ownership to the platform.
@@ -197,11 +225,14 @@ pub struct DisplayOwnership {
     /// The registry of currently pressed keys.
     key_state: RefCell<KeyState>,
 
+    /// Keys released or cancelled before handle_ownership_change processed the ownership loss.
+    pending_released_keys: RefCell<Vec<Key>>,
+
     /// The source of ownership change events for the main loop.
     display_ownership_change_receiver: RefCell<Option<UnboundedReceiver<Ownership>>>,
 
     /// An optional callback invoked whenever ownership transitions.
-    /// Parameter is `true` if platform owns input, `false` if lost.
+    /// The callback receives `(old_state, new_state)`.
     ownership_change_callback: RefCell<Option<OwnershipChangeCallback>>,
 
     /// A background task that watches for display ownership changes. We keep
@@ -310,6 +341,7 @@ impl DisplayOwnership {
         Rc::new(Self {
             ownership,
             key_state: RefCell::new(KeyState::new()),
+            pending_released_keys: RefCell::new(Vec::new()),
             display_ownership_change_receiver: RefCell::new(Some(ownership_receiver)),
             ownership_change_callback: RefCell::new(None),
             _display_ownership_task: display_ownership_task,
@@ -322,17 +354,16 @@ impl DisplayOwnership {
     }
 
     /// Registers a callback to be invoked whenever ownership transitions.
-    /// The callback receives `true` when platform ownership is gained,
-    /// and `false` when platform ownership is lost.
+    /// The callback receives `(old_state, new_state)`.
     pub fn set_ownership_change_callback(
         &self,
-        callback: impl Fn(bool) -> LocalBoxFuture<'static, ()> + 'static,
+        callback: impl Fn(OwnershipState, OwnershipState) -> LocalBoxFuture<'static, ()> + 'static,
     ) {
         *self.ownership_change_callback.borrow_mut() = Some(Rc::new(callback));
     }
 
-    /// Returns true if the platform does not currently own input.
-    pub fn is_display_ownership_lost(&self) -> bool {
+    /// Returns the granular ownership state.
+    pub fn ownership_state(&self) -> OwnershipState {
         // Query the signal state synchronously with INFINITE_PAST (non-blocking)
         // to get the real-time state and avoid TOCTOU race conditions during
         // display transitions. While this introduces a syscall overhead, it is
@@ -342,14 +373,31 @@ impl DisplayOwnership {
             .wait_one(Signals::empty(), MonotonicInstant::INFINITE_PAST)
         {
             WaitResult::Ok(signals) | WaitResult::TimedOut(signals) => {
-                Ownership::is_signals_ownership_lost(signals)
+                Ownership::signals_to_ownership_state(signals)
             }
-            WaitResult::Err(Status::PEER_CLOSED) | WaitResult::Canceled(_) => true,
+            WaitResult::Err(Status::PEER_CLOSED) | WaitResult::Canceled(_) => {
+                OwnershipState::DisplayUnowned
+            }
             WaitResult::Err(e) => {
                 log::error!("Unexpected error on display ownership event: {:?}", e);
-                self.ownership.borrow().is_display_ownership_lost()
+                self.ownership.borrow().ownership_state()
             }
         }
+    }
+
+    /// Returns true if display is unowned.
+    pub fn is_display_unowned(&self) -> bool {
+        self.ownership_state() == OwnershipState::DisplayUnowned
+    }
+
+    /// Returns true if input is client-owned while display is platform-owned.
+    pub fn is_input_client_owned(&self) -> bool {
+        self.ownership_state() == OwnershipState::ClientInputOwned
+    }
+
+    /// Returns true if the platform does not currently own both display and input.
+    pub fn is_display_ownership_lost(&self) -> bool {
+        self.ownership_state() != OwnershipState::PlatformOwned
     }
 
     /// Watches for display ownership changes and sends cancel/sync events.
@@ -368,29 +416,38 @@ impl DisplayOwnership {
             .take()
             .context("display_ownership_change_receiver already taken")?;
         while let Some(new_ownership) = ownership_source.next().await {
-            let was_ownership_lost = self.ownership.borrow().is_display_ownership_lost();
-            let is_display_ownership_lost = new_ownership.is_display_ownership_lost();
+            let was_ownership_state = self.ownership.borrow().ownership_state();
+            let new_ownership_state = new_ownership.ownership_state();
+            let was_ownership_lost = was_ownership_state != OwnershipState::PlatformOwned;
+            let is_display_ownership_lost = new_ownership_state != OwnershipState::PlatformOwned;
             // When the ownership is modified, float a set of cancel or sync
             // events to scoop up stale keyboard state, treating it the same
             // as loss of focus.
-            let event_type = match is_display_ownership_lost {
-                true => KeyEventType::Cancel,
-                false => KeyEventType::Sync,
-            };
-            let keys = self.key_state.borrow().get_set();
-            let mut event_time = MonotonicInstant::get();
-            for key in keys.into_iter() {
-                let key_event = KeyboardEvent::new(key, event_type);
-                output
-                    .unbounded_send(vec![into_input_event(key_event, event_time)])
-                    .context("unable to send display updates")?;
-                event_time = event_time + MonotonicDuration::from_nanos(1);
+            if was_ownership_lost != is_display_ownership_lost {
+                let event_type = match is_display_ownership_lost {
+                    true => KeyEventType::Cancel,
+                    false => KeyEventType::Sync,
+                };
+                let keys = self.key_state.borrow().get_set();
+                let mut event_time = MonotonicInstant::get();
+                for key in keys.into_iter() {
+                    let key_event = KeyboardEvent::new(key, event_type);
+                    output
+                        .unbounded_send(vec![into_input_event(key_event, event_time)])
+                        .context("unable to send display updates")?;
+                    event_time = event_time + MonotonicDuration::from_nanos(1);
+                }
+                if is_display_ownership_lost {
+                    for key in self.pending_released_keys.borrow_mut().drain(..) {
+                        self.key_state.borrow_mut().update(KeyEventType::Released, key);
+                    }
+                }
             }
             *(self.ownership.borrow_mut()) = new_ownership;
-            if was_ownership_lost != is_display_ownership_lost {
+            if was_ownership_state != new_ownership_state {
                 let callback = self.ownership_change_callback.borrow().clone();
                 if let Some(cb) = callback {
-                    cb(!is_display_ownership_lost).await;
+                    cb(was_ownership_state, new_ownership_state).await;
                 }
             }
             #[cfg(test)]
@@ -430,9 +487,28 @@ impl UnhandledInputHandler for DisplayOwnership {
     ) -> Vec<input_device::InputEvent> {
         fuchsia_trace::duration!("input", "display_ownership");
         self.inspect_status.count_received_event(&unhandled_input_event.event_time);
+        let is_display_ownership_lost = self.is_display_ownership_lost();
         match unhandled_input_event.device_event {
             input_device::InputDeviceEvent::Keyboard(ref e) => {
-                self.key_state.borrow_mut().update(e.get_event_type(), e.get_key());
+                if matches!(e.get_event_type(), KeyEventType::Pressed | KeyEventType::Sync) {
+                    self.pending_released_keys.borrow_mut().retain(|k| *k != e.get_key());
+                    self.key_state.borrow_mut().update(e.get_event_type(), e.get_key());
+                } else if matches!(
+                    e.get_event_type(),
+                    KeyEventType::Released | KeyEventType::Cancel
+                ) {
+                    if is_display_ownership_lost
+                        && self.ownership.borrow().ownership_state()
+                            == OwnershipState::PlatformOwned
+                    {
+                        let mut pending = self.pending_released_keys.borrow_mut();
+                        if !pending.contains(&e.get_key()) {
+                            pending.push(e.get_key());
+                        }
+                    } else {
+                        self.key_state.borrow_mut().update(e.get_event_type(), e.get_key());
+                    }
+                }
             }
             _ => {
                 self.metrics_logger.log_error(
@@ -445,7 +521,6 @@ impl UnhandledInputHandler for DisplayOwnership {
                 );
             }
         }
-        let is_display_ownership_lost = self.is_display_ownership_lost();
         if is_display_ownership_lost {
             self.inspect_status.count_handled_event();
         }
@@ -1065,27 +1140,32 @@ mod tests {
         wrangler.set_owned();
         loop_done.next().await;
         assert!(!handler.is_display_ownership_lost());
+        assert_eq!(handler.ownership_state(), OwnershipState::PlatformOwned);
 
         // 2. Client takes input (Bit 1 | Bit 3).
         wrangler.set_client_input_owned();
         loop_done.next().await;
         assert!(handler.is_display_ownership_lost());
+        assert_eq!(handler.ownership_state(), OwnershipState::ClientInputOwned);
 
         // 3. User switches to Virtcon while client owned (Bit 0 | Bit 3).
-        // Pipeline was already unowned, so this is still unowned.
         wrangler.set_unowned();
+        loop_done.next().await;
         assert!(handler.is_display_ownership_lost());
+        assert_eq!(handler.ownership_state(), OwnershipState::DisplayUnowned);
 
         // 4. User switches back from Virtcon to Scenic (Bit 1 | Bit 3).
-        // Display is owned, but client still owns input, so pipeline is still unowned.
         wrangler.set_owned();
+        loop_done.next().await;
         assert!(handler.is_display_ownership_lost());
+        assert_eq!(handler.ownership_state(), OwnershipState::ClientInputOwned);
 
         // 5. Client exits direct input (Bit 1 | Bit 4).
         // Now pipeline regains ownership!
         wrangler.set_platform_input_owned();
         loop_done.next().await;
         assert!(!handler.is_display_ownership_lost());
+        assert_eq!(handler.ownership_state(), OwnershipState::PlatformOwned);
     }
 
     #[fuchsia::test]
@@ -1100,11 +1180,11 @@ mod tests {
             metrics::MetricsLogger::default(),
         );
 
-        let (cb_sender, mut cb_receiver) = mpsc::unbounded::<bool>();
-        handler.set_ownership_change_callback(move |owned| {
+        let (cb_sender, mut cb_receiver) = mpsc::unbounded::<(OwnershipState, OwnershipState)>();
+        handler.set_ownership_change_callback(move |old_state, new_state| {
             let cb_sender = cb_sender.clone();
             Box::pin(async move {
-                cb_sender.unbounded_send(owned).unwrap();
+                cb_sender.unbounded_send((old_state, new_state)).unwrap();
             })
         });
 
@@ -1114,30 +1194,143 @@ mod tests {
             handler_clone.handle_ownership_change(handler_sender).await.unwrap();
         });
 
-        // 1. Set to owned -> callback invoked with true.
+        // 1. Set to owned -> callback invoked with PlatformOwned.
         wrangler.set_owned();
         loop_done.next().await;
-        assert_eq!(cb_receiver.next().await, Some(true));
+        assert_eq!(
+            cb_receiver.next().await,
+            Some((OwnershipState::DisplayUnowned, OwnershipState::PlatformOwned))
+        );
 
-        // 2. Switch to Virtcon (unowned) -> callback invoked with false.
+        // 2. Switch to Virtcon (unowned) -> callback invoked with DisplayUnowned.
         wrangler.set_unowned();
         loop_done.next().await;
-        assert_eq!(cb_receiver.next().await, Some(false));
+        assert_eq!(
+            cb_receiver.next().await,
+            Some((OwnershipState::PlatformOwned, OwnershipState::DisplayUnowned))
+        );
 
-        // 3. Switch back to Scenic -> callback invoked with true.
+        // 3. Switch back to Scenic -> callback invoked with PlatformOwned.
         wrangler.set_owned();
         loop_done.next().await;
-        assert_eq!(cb_receiver.next().await, Some(true));
+        assert_eq!(
+            cb_receiver.next().await,
+            Some((OwnershipState::DisplayUnowned, OwnershipState::PlatformOwned))
+        );
 
-        // 4. Client takes direct input -> callback invoked with false.
+        // 4. Client takes direct input -> callback invoked with ClientInputOwned.
         wrangler.set_client_input_owned();
         loop_done.next().await;
-        assert_eq!(cb_receiver.next().await, Some(false));
+        assert_eq!(
+            cb_receiver.next().await,
+            Some((OwnershipState::PlatformOwned, OwnershipState::ClientInputOwned))
+        );
 
-        // 5. Client releases direct input -> callback invoked with true.
+        // 5. Client releases direct input -> callback invoked with PlatformOwned.
         wrangler.set_platform_input_owned();
         loop_done.next().await;
-        assert_eq!(cb_receiver.next().await, Some(true));
+        assert_eq!(
+            cb_receiver.next().await,
+            Some((OwnershipState::ClientInputOwned, OwnershipState::PlatformOwned))
+        );
+    }
+
+    #[fuchsia::test]
+    async fn ownership_change_callback_between_client_input_owned_and_display_unowned() {
+        let (test_event, handler_event) = EventPair::create();
+        let (loop_done_sender, mut loop_done) = mpsc::unbounded::<()>();
+
+        let mut wrangler = DisplayWrangler::new(test_event);
+        let handler = DisplayOwnership::new_for_test(
+            handler_event,
+            loop_done_sender,
+            metrics::MetricsLogger::default(),
+        );
+
+        let (cb_sender, mut cb_receiver) = mpsc::unbounded::<(OwnershipState, OwnershipState)>();
+        handler.set_ownership_change_callback(move |old_state, new_state| {
+            let cb_sender = cb_sender.clone();
+            Box::pin(async move {
+                cb_sender.unbounded_send((old_state, new_state)).unwrap();
+            })
+        });
+
+        let (handler_sender, _test_receiver) = mpsc::unbounded::<Vec<InputEvent>>();
+        let handler_clone = handler.clone();
+        let _task = fasync::Task::local(async move {
+            handler_clone.handle_ownership_change(handler_sender).await.unwrap();
+        });
+
+        // 1. Initial owned -> callback invoked with PlatformOwned.
+        wrangler.set_owned();
+        loop_done.next().await;
+        assert_eq!(
+            cb_receiver.next().await,
+            Some((OwnershipState::DisplayUnowned, OwnershipState::PlatformOwned))
+        );
+
+        // 2. Client takes input -> callback invoked with ClientInputOwned.
+        wrangler.set_client_input_owned();
+        loop_done.next().await;
+        assert_eq!(
+            cb_receiver.next().await,
+            Some((OwnershipState::PlatformOwned, OwnershipState::ClientInputOwned))
+        );
+
+        // 3. User switches to Virtcon while client owned -> callback invoked with DisplayUnowned.
+        wrangler.set_unowned();
+        loop_done.next().await;
+        assert_eq!(
+            cb_receiver.next().await,
+            Some((OwnershipState::ClientInputOwned, OwnershipState::DisplayUnowned))
+        );
+
+        // 4. User switches back from Virtcon to Scenic -> callback invoked with ClientInputOwned.
+        wrangler.set_owned();
+        loop_done.next().await;
+        assert_eq!(
+            cb_receiver.next().await,
+            Some((OwnershipState::DisplayUnowned, OwnershipState::ClientInputOwned))
+        );
+    }
+
+    #[fuchsia::test]
+    fn signal_state_evaluations() {
+        // PlatformOwned
+        assert_eq!(
+            Ownership::signals_to_ownership_state(*DISPLAY_PLATFORM_OWNED | *INPUT_PLATFORM_OWNED),
+            OwnershipState::PlatformOwned
+        );
+        // ClientInputOwned
+        assert_eq!(
+            Ownership::signals_to_ownership_state(*DISPLAY_PLATFORM_OWNED | *INPUT_CLIENT_OWNED),
+            OwnershipState::ClientInputOwned
+        );
+        // DisplayUnowned (Virtcon)
+        assert_eq!(
+            Ownership::signals_to_ownership_state(*DISPLAY_UNOWNED | *INPUT_PLATFORM_OWNED),
+            OwnershipState::DisplayUnowned
+        );
+        // DisplayUnowned takes precedence even if INPUT_CLIENT_OWNED is asserted
+        assert_eq!(
+            Ownership::signals_to_ownership_state(*DISPLAY_UNOWNED | *INPUT_CLIENT_OWNED),
+            OwnershipState::DisplayUnowned
+        );
+        // Peer closed -> DisplayUnowned
+        assert_eq!(
+            Ownership::signals_to_ownership_state(Signals::OBJECT_PEER_CLOSED),
+            OwnershipState::DisplayUnowned
+        );
+        // Legacy display-only: DISPLAY_PLATFORM_OWNED without input signals -> PlatformOwned
+        assert_eq!(
+            Ownership::signals_to_ownership_state(*DISPLAY_PLATFORM_OWNED),
+            OwnershipState::PlatformOwned
+        );
+        // Legacy display-only: DISPLAY_UNOWNED without input signals -> DisplayUnowned
+        assert_eq!(
+            Ownership::signals_to_ownership_state(*DISPLAY_UNOWNED),
+            OwnershipState::DisplayUnowned
+        );
     }
 
     #[fuchsia::test]
@@ -1211,5 +1404,267 @@ mod tests {
 
         let result = ownership.wait_ownership_change(&handler_event).await;
         assert_eq!(result, Err(Status::BAD_STATE));
+    }
+
+    #[fuchsia::test]
+    async fn key_state_across_client_input_owned_and_display_unowned() {
+        let (test_event, handler_event) = EventPair::create();
+        let (test_sender, handler_receiver) = mpsc::unbounded::<InputEvent>();
+        let (handler_sender, test_receiver) = mpsc::unbounded::<Vec<InputEvent>>();
+        let (loop_done_sender, mut loop_done) = mpsc::unbounded::<()>();
+        let mut wrangler = DisplayWrangler::new(test_event);
+        let handler = DisplayOwnership::new_for_test(
+            handler_event,
+            loop_done_sender,
+            metrics::MetricsLogger::default(),
+        );
+
+        let handler_clone = handler.clone();
+        let handler_sender_clone = handler_sender.clone();
+        let _task = fasync::Task::local(async move {
+            handler_clone.handle_ownership_change(handler_sender_clone).await.unwrap();
+        });
+
+        let handler_clone_2 = handler.clone();
+        let _input_task = fasync::Task::local(async move {
+            let mut receiver = handler_receiver;
+            while let Some(event) = receiver.next().await {
+                let unhandled_event = UnhandledInputEvent::try_from(event).unwrap();
+                let out_events =
+                    handler_clone_2.clone().handle_unhandled_input_event(unhandled_event).await;
+                handler_sender.unbounded_send(out_events).unwrap();
+            }
+        });
+
+        let fake_time = MonotonicInstant::from_nanos(42);
+
+        // 1. Gain the display and input ownership, press key A.
+        wrangler.set_owned();
+        loop_done.next().await;
+        test_sender
+            .unbounded_send(new_keyboard_input_event(Key::A, KeyEventType::Pressed))
+            .unwrap();
+        loop_done.next().await;
+
+        // 2. Client takes direct input ownership (PlatformOwned -> ClientInputOwned).
+        // Since was_ownership_lost (false) != is_display_ownership_lost (true), Cancel is emitted.
+        wrangler.set_client_input_owned();
+        loop_done.next().await;
+
+        // 3. Switch to Virtcon (ClientInputOwned -> DisplayUnowned).
+        // Since was_ownership_lost (true) == is_display_ownership_lost (true), NO duplicate Cancel is emitted!
+        wrangler.set_unowned();
+        loop_done.next().await;
+
+        // 4. Switch back to Scenic while client still owns input (DisplayUnowned -> ClientInputOwned).
+        // Since was_ownership_lost (true) == is_display_ownership_lost (true), NO spurious Sync is emitted!
+        wrangler.set_owned();
+        loop_done.next().await;
+
+        // 5. Restore platform input ownership (ClientInputOwned -> PlatformOwned).
+        // Since was_ownership_lost (true) != is_display_ownership_lost (false), Sync is emitted!
+        wrangler.set_platform_input_owned();
+        loop_done.next().await;
+
+        // 6. Release key A.
+        test_sender
+            .unbounded_send(new_keyboard_input_event(Key::A, KeyEventType::Released))
+            .unwrap();
+        loop_done.next().await;
+
+        let actual: Vec<InputEvent> = test_receiver
+            .take(4)
+            .flat_map(|events| futures::stream::iter(events))
+            .map(|e| e.into_with_event_time(fake_time))
+            .collect()
+            .await;
+
+        assert_eq!(
+            actual,
+            vec![
+                new_keyboard_input_event(Key::A, KeyEventType::Pressed),
+                new_keyboard_input_event(Key::A, KeyEventType::Cancel)
+                    .into_with_device_descriptor(empty_keyboard_device_descriptor()),
+                new_keyboard_input_event(Key::A, KeyEventType::Sync)
+                    .into_with_device_descriptor(empty_keyboard_device_descriptor()),
+                new_keyboard_input_event(Key::A, KeyEventType::Released),
+            ]
+        );
+    }
+
+    #[fuchsia::test]
+    async fn peer_closed_from_client_input_owned_transitions_to_unowned_then_terminates() {
+        let (test_event, handler_event) = EventPair::create();
+        // Initialize as ClientInputOwned
+        test_event
+            .signal_peer(Signals::empty(), *DISPLAY_PLATFORM_OWNED | *INPUT_CLIENT_OWNED)
+            .unwrap();
+
+        let ownership = Ownership::from(*DISPLAY_PLATFORM_OWNED | *INPUT_CLIENT_OWNED);
+        assert_eq!(ownership.ownership_state(), OwnershipState::ClientInputOwned);
+
+        // Drop peer while in ClientInputOwned.
+        drop(test_event);
+
+        // First wait: detects transition to DisplayUnowned because of peer closed.
+        let result = ownership.wait_ownership_change(&handler_event).await;
+        assert!(result.is_ok());
+        let cur_signals = result.unwrap();
+        let unowned_ownership = Ownership::from(cur_signals);
+        assert_eq!(unowned_ownership.ownership_state(), OwnershipState::DisplayUnowned);
+
+        // Second wait: since it is already DisplayUnowned and peer is closed, returns PEER_CLOSED without busy loop.
+        let result2 = unowned_ownership.wait_ownership_change(&handler_event).await;
+        assert_eq!(result2, Err(Status::PEER_CLOSED));
+    }
+
+    #[fuchsia::test]
+    async fn keyboard_cancel_and_in_flight_pressed_handling() {
+        let (test_event, handler_event) = EventPair::create();
+        let (test_sender, handler_receiver) = mpsc::unbounded::<InputEvent>();
+        let (handler_sender, test_receiver) = mpsc::unbounded::<Vec<InputEvent>>();
+        let (loop_done_sender, mut loop_done) = mpsc::unbounded::<()>();
+        let mut wrangler = DisplayWrangler::new(test_event);
+        let handler = DisplayOwnership::new_for_test(
+            handler_event,
+            loop_done_sender,
+            metrics::MetricsLogger::default(),
+        );
+
+        let handler_clone = handler.clone();
+        let handler_sender_clone = handler_sender.clone();
+        let _task = fasync::Task::local(async move {
+            handler_clone.handle_ownership_change(handler_sender_clone).await.unwrap();
+        });
+
+        let handler_clone_2 = handler.clone();
+        let _input_task = fasync::Task::local(async move {
+            let mut receiver = handler_receiver;
+            while let Some(event) = receiver.next().await {
+                let unhandled_event = UnhandledInputEvent::try_from(event).unwrap();
+                let out_events =
+                    handler_clone_2.clone().handle_unhandled_input_event(unhandled_event).await;
+                handler_sender.unbounded_send(out_events).unwrap();
+            }
+        });
+
+        let fake_time = MonotonicInstant::from_nanos(42);
+
+        // 1. Gain ownership and press Key::A.
+        wrangler.set_owned();
+        loop_done.next().await;
+        test_sender
+            .unbounded_send(new_keyboard_input_event(Key::A, KeyEventType::Pressed))
+            .unwrap();
+        loop_done.next().await;
+
+        // 2. Lose ownership.
+        wrangler.set_unowned();
+        loop_done.next().await;
+
+        // 3. While unowned, an in-flight Pressed event for Key::B arrives,
+        // followed by a Cancel event for Key::B (from discarding reports).
+        test_sender
+            .unbounded_send(new_keyboard_input_event(Key::B, KeyEventType::Pressed))
+            .unwrap();
+        loop_done.next().await;
+        test_sender.unbounded_send(new_keyboard_input_event(Key::B, KeyEventType::Cancel)).unwrap();
+        loop_done.next().await;
+
+        // 4. Also release Key::A using a Cancel event while unowned.
+        test_sender.unbounded_send(new_keyboard_input_event(Key::A, KeyEventType::Cancel)).unwrap();
+        loop_done.next().await;
+
+        // 5. Regain ownership. Since Key::A was cancelled and Key::B was pressed then cancelled,
+        // no Sync events should be emitted!
+        wrangler.set_owned();
+        loop_done.next().await;
+
+        // Send a normal Key::C press after regaining ownership to verify pipeline is working.
+        test_sender
+            .unbounded_send(new_keyboard_input_event(Key::C, KeyEventType::Pressed))
+            .unwrap();
+        loop_done.next().await;
+
+        let actual: Vec<InputEvent> = test_receiver
+            .take(6)
+            .flat_map(|events| futures::stream::iter(events))
+            .map(|e| e.into_with_event_time(fake_time))
+            .collect()
+            .await;
+
+        assert_eq!(
+            actual,
+            vec![
+                new_keyboard_input_event(Key::A, KeyEventType::Pressed),
+                new_keyboard_input_event(Key::A, KeyEventType::Cancel)
+                    .into_with_device_descriptor(empty_keyboard_device_descriptor()),
+                new_keyboard_input_event(Key::B, KeyEventType::Pressed).into_handled(),
+                new_keyboard_input_event(Key::B, KeyEventType::Cancel).into_handled(),
+                new_keyboard_input_event(Key::A, KeyEventType::Cancel).into_handled(),
+                new_keyboard_input_event(Key::C, KeyEventType::Pressed),
+            ]
+        );
+    }
+
+    #[fuchsia::test]
+    async fn keyboard_cancel_before_ownership_task_clears_key_state() {
+        let (test_event, handler_event) = EventPair::create();
+        let (handler_sender, mut test_receiver) = mpsc::unbounded::<Vec<InputEvent>>();
+        let (loop_done_sender, mut loop_done) = mpsc::unbounded::<()>();
+
+        // Start PlatformOwned
+        test_event
+            .signal_peer(Signals::empty(), *DISPLAY_PLATFORM_OWNED | *INPUT_PLATFORM_OWNED)
+            .unwrap();
+
+        let handler = DisplayOwnership::new_for_test(
+            handler_event,
+            loop_done_sender,
+            metrics::MetricsLogger::default(),
+        );
+
+        // 1. Press Key::A while PlatformOwned.
+        let press_event = new_keyboard_input_event(Key::A, KeyEventType::Pressed);
+        let handled = handler
+            .clone()
+            .handle_unhandled_input_event(UnhandledInputEvent::try_from(press_event).unwrap())
+            .await;
+        assert_eq!(handled[0].handled, input_device::Handled::No);
+
+        // 2. Signal ownership loss on test_event, BUT do NOT start handle_ownership_change yet!
+        test_event.signal_peer(*DISPLAY_PLATFORM_OWNED, *DISPLAY_UNOWNED).unwrap();
+
+        // 3. Send Cancel event for Key::A. Real-time signal is unowned, but handler.ownership is PlatformOwned.
+        let cancel_event = new_keyboard_input_event(Key::A, KeyEventType::Cancel);
+        let handled = handler
+            .clone()
+            .handle_unhandled_input_event(UnhandledInputEvent::try_from(cancel_event).unwrap())
+            .await;
+        assert_eq!(handled[0].handled, input_device::Handled::Yes);
+
+        // 4. Now run handle_ownership_change task. It processes ownership loss, emits Cancel for Key::A,
+        // and drains pending_released_keys.
+        let handler_clone = handler.clone();
+        let _task = fasync::Task::local(async move {
+            handler_clone.handle_ownership_change(handler_sender).await.unwrap();
+        });
+        loop_done.next().await;
+
+        let cancel_events = test_receiver.next().await.expect("cancel events");
+        assert_eq!(cancel_events.len(), 1);
+        if let input_device::InputDeviceEvent::Keyboard(ref k) = cancel_events[0].device_event {
+            assert_eq!(k.get_event_type(), KeyEventType::Cancel);
+            assert_eq!(k.get_key(), Key::A);
+        } else {
+            panic!("expected keyboard cancel event");
+        }
+
+        // 5. Restore PlatformOwned. Since Key::A was in pending_released_keys, key_state is empty!
+        test_event.signal_peer(*DISPLAY_UNOWNED, *DISPLAY_PLATFORM_OWNED).unwrap();
+        loop_done.next().await;
+
+        // No sync event should be emitted!
+        assert!(test_receiver.try_recv().is_err());
     }
 }

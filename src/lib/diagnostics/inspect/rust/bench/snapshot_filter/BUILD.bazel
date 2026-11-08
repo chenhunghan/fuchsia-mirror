@@ -1,0 +1,68 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "snapshot-filter-bin",
+    srcs = ["src/main.rs"],
+    crate_name = "inspect_rust_snapshot_filter_benchmarks",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    tags = ["manual"],
+    deps = [
+        "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_rust",
+        "//src/developer/fuchsia-criterion",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/diagnostics/inspect/rust/bench/utils:fuchsia_inspect_bench_utils",
+        "//src/lib/diagnostics/selectors",
+        "//src/lib/fuchsia-async",
+    ],
+)
+
+fx_packaged_binary(
+    name = "snapshot-filter-bin_packaged_bin",
+    binary = ":snapshot-filter-bin",
+    binary_name = "inspect_rust_snapshot_filter_benchmarks",
+)
+
+fx_component_manifest(
+    name = "snapshot-filter-component-manifest",
+    component_name = "snapshot_filter",
+    includes = ["//src/lib/diagnostics/inspect/rust/bench/meta:benchmark.shard"],
+    manifest = "meta/snapshot_filter.cml",
+)
+
+fx_component(
+    name = "snapshot-filter-component",
+    compiled_manifest = ":snapshot-filter-component-manifest",
+    visibility = ["//src/lib/diagnostics/inspect/rust/bench:__pkg__"],
+    deps = [":snapshot-filter-bin_packaged_bin"],
+)
+
+rustc_test(
+    name = "snapshot-filter-bin_test",
+    crate = ":snapshot-filter-bin",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    deps = ["//src/lib/fuchsia"],
+)
+
+fx_unittest_package(
+    name = "rust-inspect-benchmarks-test",
+    unit_tests = [":snapshot-filter-bin_test"],
+    visibility = ["//src/lib/diagnostics:__pkg__"],
+)

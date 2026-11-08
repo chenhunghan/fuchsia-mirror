@@ -15,7 +15,12 @@ alias(
     # Widely used in GN, so GN visibility stays open via raw_overwrite; Bazel
     # visibility is limited to actual Bazel dependents.
     visibility = [
+        "//:__subpackages__",
+        "//src/camera/lib/fake_camera:__pkg__",
+        "//src/camera/lib/fake_legacy_stream:__pkg__",
+        "//src/camera/lib/fake_stream:__pkg__",
         "//src/developer/build_info:__pkg__",
+        "//src/sys/activity:__pkg__",
     ],  # @bazel2gn:raw_overwrite:[ "//*" ]
 )
 

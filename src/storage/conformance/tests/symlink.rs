@@ -107,7 +107,11 @@ async fn symlink_link_into_rights_enforcement() {
     let token = get_token(&dir).await.into();
     let symlink =
         dir.open_node::<fio::SymlinkMarker>(TEST_SYMLINK, full_flags, None).await.unwrap();
-    symlink.link_into(token, "linked").await.unwrap().expect("link_into should succeed");
+    symlink
+        .link_into(token, "linked", &fio::LinkIntoOptions::default())
+        .await
+        .unwrap()
+        .expect("link_into should succeed");
 
     // 2. Connection without full rights (e.g. read-only) fails with ACCESS_DENIED.
     let ro_flags =
@@ -116,8 +120,47 @@ async fn symlink_link_into_rights_enforcement() {
     let ro_symlink =
         dir.open_node::<fio::SymlinkMarker>(TEST_SYMLINK, ro_flags, None).await.unwrap();
     assert_eq!(
-        ro_symlink.link_into(token, "linked2").await.unwrap().unwrap_err(),
+        ro_symlink
+            .link_into(token, "linked2", &fio::LinkIntoOptions::default())
+            .await
+            .unwrap()
+            .unwrap_err(),
         zx::Status::ACCESS_DENIED.into_raw()
+    );
+}
+
+#[fuchsia::test]
+async fn symlink_link_into_unknown_flags() {
+    let harness = TestHarness::new().await;
+    if !harness.config.supports_symlinks || !harness.config.supports_link_into {
+        return;
+    }
+
+    let full_flags = fio::Flags::PROTOCOL_SYMLINK
+        | fio::PERM_READABLE
+        | fio::PERM_WRITABLE
+        | fio::Flags::PERM_GET_ATTRIBUTES;
+    let dir = harness.get_directory(
+        vec![symlink(TEST_SYMLINK, TEST_SYMLINK_TARGET)],
+        harness.dir_rights.all_flags(),
+    );
+    let token = get_token(&dir).await.into();
+    let symlink =
+        dir.open_node::<fio::SymlinkMarker>(TEST_SYMLINK, full_flags, None).await.unwrap();
+    assert_eq!(
+        symlink
+            .link_into(
+                token,
+                "linked",
+                &fio::LinkIntoOptions {
+                    flags: Some(fio::LinkIntoFlags::from_bits_retain(1 << 63)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap_err(),
+        zx::Status::INVALID_ARGS.into_raw()
     );
 }
 
@@ -146,7 +189,11 @@ async fn symlink_clone_preserves_rights() {
     // LinkInto is denied on the clone because the cloned connection retained read-only rights.
     let token = get_token(&dir).await.into();
     assert_eq!(
-        clone_proxy.link_into(token, "linked_from_clone").await.unwrap().unwrap_err(),
+        clone_proxy
+            .link_into(token, "linked_from_clone", &fio::LinkIntoOptions::default())
+            .await
+            .unwrap()
+            .unwrap_err(),
         zx::Status::ACCESS_DENIED.into_raw()
     );
 }

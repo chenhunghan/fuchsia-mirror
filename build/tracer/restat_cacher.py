@@ -38,7 +38,7 @@ import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from typing import Any
 
 _SCRIPT_BASENAME = os.path.basename(__file__)
@@ -167,7 +167,7 @@ class TempFileTransform(object):
 def env_safe_command(command: Sequence[str]) -> Sequence[str]:
     """Automatically prefix a command with env if needed."""
     if command and "=" in command[0]:
-        return ["/usr/bin/env"] + command
+        return ["/usr/bin/env", *command]
     return command
 
 
@@ -191,7 +191,7 @@ def record_existing_outputs(
 
 
 def backup_outputs(
-    outputs: frozenset[str], tempfile_transform: TempFileTransform
+    outputs: Collection[str], tempfile_transform: TempFileTransform
 ) -> dict[str, str]:
     """Move pre-existing output files to backup locations.
 
@@ -275,7 +275,7 @@ class Action(object):
     """Represents a set of parameters of a single build action."""
 
     command: Sequence[str] = dataclasses.field(default_factory=list)
-    outputs: frozenset[str] = dataclasses.field(default_factory=set)
+    outputs: Collection[str] = dataclasses.field(default_factory=set)
     label: str = ""
 
     def run_cached(

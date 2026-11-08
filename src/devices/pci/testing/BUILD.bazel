@@ -1,0 +1,36 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "pci-protocol-fake",
+    testonly = True,
+    srcs = [
+        "protocol/fidl.cc",
+        "protocol/internal.cc",
+    ],
+    hdrs = [
+        "pci_protocol_fake.h",
+        "protocol/internal.h",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//src/devices/pci/lib/cpp:headers",
+        "//src/devices/pci/lib/device-protocol-pci",
+        "//zircon/system/ulib/fbl",
+        "@fuchsia_sdk//fidl/fuchsia.hardware.pci:fuchsia.hardware.pci_cpp_testing",
+        "@fuchsia_sdk//pkg/async-cpp",
+        "@fuchsia_sdk//pkg/async-loop-cpp",
+        "@fuchsia_sdk//pkg/async-loop-default",
+        "@fuchsia_sdk//pkg/driver_fake_bti_cpp",
+        "@fuchsia_sdk//pkg/driver_fake_resource_cpp",
+        "@fuchsia_sdk//pkg/stdcompat",
+        "@fuchsia_sdk//pkg/sync",
+        "@fuchsia_sdk//pkg/zx",
+    ],
+)

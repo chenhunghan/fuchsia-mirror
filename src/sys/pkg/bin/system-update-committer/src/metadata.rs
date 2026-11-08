@@ -94,9 +94,12 @@ async fn put_metadata_in_happy_state_impl(
     };
 
     // Tell the rest of the system we are now committed.
-    let () = p_internal
-        .signal_peer(zx::Signals::NONE, zx::Signals::USER_0)
-        .map_err(MetadataError::SignalPeer)?;
+    let signals = match commit_result {
+        CommitResult::CommittedSystem => zx::Signals::USER_0 | zx::Signals::USER_1,
+        CommitResult::CommitNotNecessary => zx::Signals::USER_0,
+    };
+    let () =
+        p_internal.signal_peer(zx::Signals::NONE, signals).map_err(MetadataError::SignalPeer)?;
 
     // Ensure the FIDL server will be unblocked, even if we didn't verify health.
     unblock_fidl_server(unblocker)?;
@@ -347,7 +350,10 @@ mod tests {
                 PaverEvent::BootManagerFlush,
             ]
         );
-        assert_eq!(OnSignals::new(&p_external, zx::Signals::USER_0).await, Ok(zx::Signals::USER_0));
+        assert_eq!(
+            OnSignals::new(&p_external, zx::Signals::USER_0).await,
+            Ok(zx::Signals::USER_0 | zx::Signals::USER_1)
+        );
         assert_eq!(unblocker_recv.await, Ok(()));
         assert_eq!(health_verification_call_count.load(Ordering::SeqCst), 1);
     }

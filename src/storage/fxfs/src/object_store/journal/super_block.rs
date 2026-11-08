@@ -34,7 +34,9 @@ use crate::object_store::journal::bootstrap_handle::BootstrapObjectHandle;
 use crate::object_store::journal::reader::{JournalReader, ReadResult};
 use crate::object_store::journal::writer::JournalWriter;
 use crate::object_store::journal::{BLOCK_SIZE, JournalCheckpoint, JournalCheckpointV32};
-use crate::object_store::object_record::{ObjectItem, ObjectItemV56, ObjectItemV59, ObjectItemV62};
+use crate::object_store::object_record::{
+    ObjectItem, ObjectItemV56, ObjectItemV59, ObjectItemV62, ObjectItemV63,
+};
 use crate::object_store::transaction::{AssocObj, Options, ReservationOptions};
 use crate::object_store::tree::MajorCompactable;
 use crate::object_store::{
@@ -42,10 +44,10 @@ use crate::object_store::{
 };
 use crate::range::RangeExt;
 use crate::serialized_types::{
-    EARLIEST_SUPPORTED_VERSION, Migrate, Version, Versioned, VersionedLatest, migrate_nodefault,
-    migrate_to_version,
+    EARLIEST_SUPPORTED_VERSION, LATEST_VERSION, Migrate, Version, Versioned, VersionedLatest,
+    migrate_nodefault, migrate_to_version,
 };
-use anyhow::{Context, Error, bail, ensure};
+use anyhow::{Context, Error, anyhow, bail, ensure};
 use fprint::TypeFingerprint;
 use fuchsia_inspect::{Property as _, UintProperty};
 use fuchsia_sync::Mutex;
@@ -248,20 +250,30 @@ impl<'de> Deserialize<'de> for UuidWrapper {
     }
 }
 
-pub type SuperBlockRecord = SuperBlockRecordV62;
+pub type SuperBlockRecord = SuperBlockRecordV63;
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Serialize, Deserialize, TypeFingerprint, Versioned)]
-pub enum SuperBlockRecordV62 {
+pub enum SuperBlockRecordV63 {
     // When reading the super-block we know the initial extent, but not subsequent extents, so these
     // records need to exist to allow us to completely read the super-block.
     Extent(Range<u64>),
 
     // Following the super-block header are ObjectItem records that are to be replayed into the root
     // parent object store.
-    ObjectItem(ObjectItemV62),
+    ObjectItem(ObjectItemV63),
 
     // Marks the end of the full super-block.
+    End,
+}
+
+#[allow(clippy::large_enum_variant)]
+#[derive(Migrate, Debug, Serialize, Deserialize, TypeFingerprint, Versioned)]
+#[migrate_to_version(SuperBlockRecordV63)]
+#[migrate_nodefault]
+pub enum SuperBlockRecordV62 {
+    Extent(Range<u64>),
+    ObjectItem(ObjectItemV62),
     End,
 }
 
@@ -327,21 +339,25 @@ async fn read(
         // TODO: Flatten a layer and move reader here?
         let mutation = match reader.next_item().await? {
             // RecordReader should filter out extent records.
-            SuperBlockRecord::Extent(_) => bail!("Unexpected extent record"),
+            SuperBlockRecord::Extent(_) => {
+                bail!(anyhow!(FxfsError::Inconsistent).context("Unexpected extent record"))
+            }
             SuperBlockRecord::ObjectItem(item) => Mutation::insert_object(item.key, item.value),
             SuperBlockRecord::End => break,
         };
-        root_parent.apply_mutation(
-            mutation,
-            &ApplyContext {
-                mode: ApplyMode::Replay,
-                // A file offset of 0 is safe here because this is only used for the root parent
-                // store, which is completely reconstructed from the superblock at each mount,
-                // making the checkpoint offset irrelevant.
-                checkpoint: JournalCheckpoint { file_offset: 0, ..Default::default() },
-            },
-            AssocObj::None,
-        )?;
+        root_parent
+            .apply_mutation(
+                mutation,
+                &ApplyContext {
+                    mode: ApplyMode::Replay,
+                    // A file offset of 0 is safe here because this is only used for the root parent
+                    // store, which is completely reconstructed from the superblock at each mount,
+                    // making the checkpoint offset irrelevant.
+                    checkpoint: JournalCheckpoint { file_offset: 0, ..Default::default() },
+                },
+                AssocObj::None,
+            )
+            .map_err(|e| anyhow!(FxfsError::Inconsistent).context(e))?;
     }
     Ok((super_block_header, instance, root_parent))
 }
@@ -422,7 +438,20 @@ impl SuperBlockManager {
             read(device.clone(), block_size, SuperBlockInstance::B)
         ) {
             (Err(e1), Err(e2)) => {
-                bail!("Failed to load both superblocks due to {:?}\nand\n{:?}", e1, e2)
+                if !FxfsError::Inconsistent.matches(&e1) && !FxfsError::InvalidVersion.matches(&e1)
+                {
+                    return Err(e1.context(format!(
+                        "Failed to load both superblocks (other error: {e2:?})"
+                    )));
+                } else if !FxfsError::Inconsistent.matches(&e2) {
+                    return Err(e2.context(format!(
+                        "Failed to load both superblocks (other error: {e1:?})"
+                    )));
+                } else {
+                    return Err(e1.context(format!(
+                        "Failed to load both superblocks (other error: {e2:?})"
+                    )));
+                }
             }
             (Ok(result), Err(_)) => result,
             (Err(_), Ok(result)) => result,
@@ -523,12 +552,29 @@ impl SuperBlockHeader {
             let mut cursor = std::io::Cursor::new(reader.buffer());
             // Validate magic bytes.
             let mut magic_bytes: [u8; 8] = [0; 8];
-            cursor.read_exact(&mut magic_bytes)?;
+            cursor
+                .read_exact(&mut magic_bytes)
+                .map_err(|e| anyhow!(FxfsError::Inconsistent).context(e))?;
             if magic_bytes.as_slice() != SUPER_BLOCK_MAGIC.as_slice() {
-                bail!("Invalid magic: {:?}", magic_bytes);
+                bail!(
+                    anyhow!(FxfsError::Inconsistent)
+                        .context(format!("Invalid magic: {magic_bytes:?}"))
+                );
             }
-            (super_block_header, super_block_version) =
-                SuperBlockHeader::deserialize_with_version(&mut cursor)?;
+            super_block_version = Version::deserialize_from(&mut cursor)
+                .map_err(|e| anyhow!(FxfsError::Inconsistent).context(e))?;
+            if super_block_version < EARLIEST_SUPPORTED_VERSION
+                || super_block_version > LATEST_VERSION
+            {
+                bail!(
+                    anyhow!(FxfsError::InvalidVersion).context(format!(
+                        "Unsupported SuperBlock version: {super_block_version:?}"
+                    ))
+                );
+            }
+            super_block_header =
+                SuperBlockHeader::deserialize_from_version(&mut cursor, super_block_version)
+                    .map_err(|e| anyhow!(FxfsError::Inconsistent).context(e))?;
 
             // Ensure all store IDs are distinct.
             let mut stores = HashSet::new();
@@ -563,25 +609,23 @@ impl SuperBlockHeader {
                 FxfsError::Inconsistent
             );
 
-            if super_block_version < EARLIEST_SUPPORTED_VERSION {
-                bail!("Unsupported SuperBlock version: {:?}", super_block_version);
-            }
-
             // NOTE: It is possible that data was written to the journal with an old version
             // but no compaction ever happened, so the journal version could potentially be older
             // than the layer file versions.
-            if super_block_header.journal_checkpoint.version < EARLIEST_SUPPORTED_VERSION {
-                bail!(
-                    "Unsupported JournalCheckpoint version: {:?}",
-                    super_block_header.journal_checkpoint.version
-                );
+            let checkpoint_version = super_block_header.journal_checkpoint.version;
+            if checkpoint_version < EARLIEST_SUPPORTED_VERSION
+                || checkpoint_version > LATEST_VERSION
+            {
+                bail!(anyhow!(FxfsError::InvalidVersion).context(format!(
+                    "Unsupported JournalCheckpoint version: {checkpoint_version:?}"
+                )));
             }
 
-            if super_block_header.earliest_version < EARLIEST_SUPPORTED_VERSION {
-                bail!(
-                    "Filesystem contains struct with unsupported version: {:?}",
-                    super_block_header.earliest_version
-                );
+            let earliest_version = super_block_header.earliest_version;
+            if earliest_version < EARLIEST_SUPPORTED_VERSION || earliest_version > LATEST_VERSION {
+                bail!(anyhow!(FxfsError::InvalidVersion).context(format!(
+                    "Filesystem contains struct with unsupported version: {earliest_version:?}"
+                )));
             }
 
             cursor.position() as usize
@@ -708,10 +752,14 @@ impl RecordReader {
     pub async fn next_item(&mut self) -> Result<SuperBlockRecord, Error> {
         loop {
             match self.reader.deserialize().await? {
-                ReadResult::Reset(_) => bail!("Unexpected reset"),
-                ReadResult::ChecksumMismatch => bail!("Checksum mismatch"),
+                ReadResult::Reset(_) => {
+                    bail!(anyhow!(FxfsError::Inconsistent).context("Unexpected reset"))
+                }
+                ReadResult::ChecksumMismatch => {
+                    bail!(anyhow!(FxfsError::Inconsistent).context("Checksum mismatch"))
+                }
                 ReadResult::Some(SuperBlockRecord::Extent(extent)) => {
-                    ensure!(extent.is_valid(), FxfsError::Inconsistent);
+                    ensure!(extent.is_valid() && !extent.is_empty(), FxfsError::Inconsistent);
                     self.reader.handle().push_extent(0, extent)
                 }
                 ReadResult::Some(x) => return Ok(x),
@@ -727,6 +775,7 @@ mod tests {
         SuperBlockInstance, SuperBlockManager, SuperBlockRecord, UuidWrapper, compact_root_parent,
         write,
     };
+    use crate::errors::FxfsError;
     use crate::filesystem::{FxFilesystem, OpenFxFilesystem, SyncOptions};
     use crate::object_handle::ReadObjectHandle;
     use crate::object_store::journal::JournalCheckpoint;
@@ -735,11 +784,13 @@ mod tests {
     use crate::object_store::{
         DataObjectHandle, HandleOptions, ObjectHandle, ObjectKey, ObjectStore,
     };
-    use crate::serialized_types::{LATEST_VERSION, Versioned, VersionedLatest};
+    use crate::serialized_types::{
+        EARLIEST_SUPPORTED_VERSION, LATEST_VERSION, Version, Versioned, VersionedLatest,
+    };
     use anyhow::bail;
     use std::io::Write;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use storage_device::DeviceHolder;
     use storage_device::fake_device::{FakeDevice, Op};
     use storage_units::BlockSize;
@@ -1444,5 +1495,136 @@ mod tests {
             .await
             .expect("save failed");
         assert_eq!(*manager.next_instance.lock(), SuperBlockInstance::B);
+    }
+
+    #[fuchsia::test]
+    async fn test_load_differentiates_inconsistent_and_io_errors() {
+        const BLOCK_SIZE: BlockSize = BlockSize::SIZE_4KIB;
+        // Fail modes:
+        // 0: no failures
+        // 1: fail all reads
+        // 2: fail 1st read only (SuperBlockInstance::A)
+        // 3: fail 2nd read only (SuperBlockInstance::B)
+        let read_fail_mode = Arc::new(AtomicUsize::new(0));
+        let read_count = Arc::new(AtomicUsize::new(0));
+        let read_fail_mode_clone = read_fail_mode.clone();
+        let read_count_clone = read_count.clone();
+
+        let mut fake_device = FakeDevice::new(TEST_DEVICE_BLOCK_COUNT, BLOCK_SIZE.get() as u32);
+        fake_device.set_op_callback(move |op| match op {
+            Op::Read => {
+                let idx = read_count_clone.fetch_add(1, Ordering::SeqCst);
+                match read_fail_mode_clone.load(Ordering::SeqCst) {
+                    1 => bail!("Injected read error"),
+                    2 if idx == 0 => bail!("Injected read error on first superblock"),
+                    3 if idx == 1 => bail!("Injected read error on second superblock"),
+                    _ => Ok(()),
+                }
+            }
+            _ => Ok(()),
+        });
+        let device = DeviceHolder::new(fake_device);
+        let manager = SuperBlockManager::new();
+
+        // 1. Unformatted (zeroed) device should fail with FxfsError::Inconsistent.
+        let err = manager
+            .load((*device).clone(), BLOCK_SIZE)
+            .await
+            .map(|_| ())
+            .expect_err("load on unformatted device should fail");
+        assert!(
+            FxfsError::Inconsistent.matches(&err),
+            "Expected FxfsError::Inconsistent for unformatted device, got: {err:?}"
+        );
+
+        // 2. When one or both superblock reads fail with an I/O error while the other is
+        // unformatted (Inconsistent), the returned error should prioritize the I/O error and NOT
+        // match FxfsError::Inconsistent or FxfsError::InvalidVersion.
+        for mode in [1, 2, 3] {
+            read_count.store(0, Ordering::SeqCst);
+            read_fail_mode.store(mode, Ordering::SeqCst);
+            let err = manager
+                .load((*device).clone(), BLOCK_SIZE)
+                .await
+                .map(|_| ())
+                .expect_err("load with injected read error should fail");
+            assert!(
+                !FxfsError::Inconsistent.matches(&err) && !FxfsError::InvalidVersion.matches(&err),
+                "Expected I/O error (not Inconsistent/InvalidVersion) for mode {mode}, got: {err:?}"
+            );
+        }
+        read_fail_mode.store(0, Ordering::SeqCst);
+
+        // 3. Corrupt checksum in both superblocks should fail with FxfsError::Inconsistent.
+        let mut buf = device.allocate_buffer(BLOCK_SIZE.get() as usize).await;
+        buf.fill(0xff);
+        device.write(SuperBlockInstance::A.first_extent().start, buf.as_ref()).await.unwrap();
+        device.write(SuperBlockInstance::B.first_extent().start, buf.as_ref()).await.unwrap();
+        let err = manager
+            .load((*device).clone(), BLOCK_SIZE)
+            .await
+            .map(|_| ())
+            .expect_err("load with bad checksum should fail");
+        assert!(
+            FxfsError::Inconsistent.matches(&err),
+            "Expected FxfsError::Inconsistent for bad checksum, got: {err:?}"
+        );
+
+        // 4. Unsupported superblock version should fail with FxfsError::InvalidVersion, even when
+        // the other superblock is corrupt/inconsistent.
+        let unsupported_version = Version { major: EARLIEST_SUPPORTED_VERSION.major - 1, minor: 0 };
+        {
+            let mut writer = JournalWriter::new(BLOCK_SIZE, 0);
+            writer.write_all(SUPER_BLOCK_MAGIC).unwrap();
+            unsupported_version.serialize_into(&mut writer).unwrap();
+            writer.pad_to_block().unwrap();
+            let mut buf = device.allocate_buffer(writer.flushable_bytes()).await;
+            writer.take_flushable(buf.as_mut());
+            device.write(SuperBlockInstance::A.first_extent().start, buf.as_ref()).await.unwrap();
+        }
+        let err = manager
+            .load((*device).clone(), BLOCK_SIZE)
+            .await
+            .map(|_| ())
+            .expect_err("load with unsupported version should fail");
+        assert!(
+            FxfsError::InvalidVersion.matches(&err),
+            "Expected FxfsError::InvalidVersion for unsupported version, got: {err:?}"
+        );
+
+        // 5. Out-of-bounds extent record in superblock should fail with FxfsError::Inconsistent.
+        for instance in [SuperBlockInstance::A, SuperBlockInstance::B] {
+            let mut super_block_header = SuperBlockHeader::new(
+                1,
+                3,
+                4,
+                5,
+                6,
+                7,
+                JournalCheckpoint { version: LATEST_VERSION, ..Default::default() },
+                LATEST_VERSION,
+            );
+            super_block_header.guid = UuidWrapper::new();
+            let mut writer = JournalWriter::new(BLOCK_SIZE, 0);
+            writer.write_all(SUPER_BLOCK_MAGIC).unwrap();
+            super_block_header.serialize_with_version(&mut writer).unwrap();
+            let oob_start = device.size();
+            SuperBlockRecord::Extent(oob_start..oob_start + BLOCK_SIZE.get())
+                .serialize_into(&mut writer)
+                .unwrap();
+            writer.pad_to_block().unwrap();
+            let mut buf = device.allocate_buffer(writer.flushable_bytes()).await;
+            writer.take_flushable(buf.as_mut());
+            device.write(instance.first_extent().start, buf.as_ref()).await.unwrap();
+        }
+        let err = manager
+            .load((*device).clone(), BLOCK_SIZE)
+            .await
+            .map(|_| ())
+            .expect_err("load with out-of-bounds extent should fail");
+        assert!(
+            FxfsError::Inconsistent.matches(&err),
+            "Expected FxfsError::Inconsistent for out-of-bounds extent, got: {err:?}"
+        );
     }
 }

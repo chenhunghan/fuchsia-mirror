@@ -38,9 +38,7 @@ class RawDescriptionDefaultArgsHelpFormatter(
     pass
 
 
-if platform.system() == "Darwin":
-    target = "mac-x64"
-elif platform.system() == "Linux":
+if platform.system() == "Linux":
     if platform.machine() == "x86_64":
         target = "linux-x64"
     elif platform.machine() == "aarch64":
@@ -50,6 +48,10 @@ elif platform.system() == "Linux":
             "Clang toolchain not provided for platform machine "
             + platform.machine()
         )
+else:
+    raise Exception(
+        "Clang toolchain not provided for platform system " + platform.system()
+    )
 
 # Point to the readelf provided in the clang toolchain.
 DEFAULT_READELF = (

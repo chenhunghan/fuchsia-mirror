@@ -10,7 +10,6 @@ use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use libarch::arm64::{ExceptionClass, ExceptionSyndromeRegister};
-use libc::stdio::FILE;
 use zx_status::Status;
 
 use super::Iframe;
@@ -18,7 +17,7 @@ use super::vm::is_kernel_address;
 use crate::kernel::types::{PAddr, VAddr};
 
 /// Register state captured for the crashlog (`crashlog_regs_t`).
-type CrashlogRegs = arm64_crashlog_bindings::crashlog_regs_t;
+pub type CrashlogRegs = arm64_crashlog_bindings::crashlog_regs_t;
 
 // `regs.iframe` is read as an `Iframe`, whose field offsets mod.rs pins to `iframe_t`'s.
 zr::static_assert!(size_of::<arm64_crashlog_bindings::iframe_t>() == size_of::<Iframe>());
@@ -63,11 +62,7 @@ impl fmt::Display for AltHex18 {
 ///
 /// `regs.iframe` must be null or point at an `iframe_t` that stays live, and is not written,
 /// for the duration of the call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_arch_render_crashlog_registers(
-    target: &mut FILE,
-    regs: &CrashlogRegs,
-) {
+pub unsafe fn render_crashlog_registers(target: &mut impl Write, regs: &CrashlogRegs) {
     if regs.iframe.is_null() {
         let _ = writeln!(target, "missing");
         return;

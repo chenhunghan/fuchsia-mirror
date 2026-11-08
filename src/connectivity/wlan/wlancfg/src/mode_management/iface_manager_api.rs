@@ -31,6 +31,8 @@ const STOP_AP_TIMEOUT: fuchsia_async::MonotonicDuration =
     fuchsia_async::MonotonicDuration::from_seconds(10);
 const AP_STATUS_TIMEOUT: fuchsia_async::MonotonicDuration =
     fuchsia_async::MonotonicDuration::from_seconds(10);
+const SIGNAL_REPORT_TIMEOUT: fuchsia_async::MonotonicDuration =
+    fuchsia_async::MonotonicDuration::from_seconds(5);
 
 #[async_trait(?Send)]
 pub trait IfaceManagerApi {
@@ -271,6 +273,7 @@ impl DefectReporter for SmeForScan {
 #[derive(Clone, Debug)]
 pub struct SmeForClientStateMachine {
     proxy: fidl_sme::ClientSmeProxy,
+    telemetry_proxy: Option<fidl_sme::TelemetryProxy>,
     iface_id: u16,
     defect_sender: mpsc::Sender<Defect>,
 }
@@ -281,7 +284,35 @@ impl SmeForClientStateMachine {
         iface_id: u16,
         defect_sender: mpsc::Sender<Defect>,
     ) -> Self {
-        Self { proxy, iface_id, defect_sender }
+        Self { proxy, telemetry_proxy: None, iface_id, defect_sender }
+    }
+
+    pub fn new_with_telemetry(
+        proxy: fidl_sme::ClientSmeProxy,
+        telemetry_proxy: fidl_sme::TelemetryProxy,
+        iface_id: u16,
+        defect_sender: mpsc::Sender<Defect>,
+    ) -> Self {
+        Self { proxy, telemetry_proxy: Some(telemetry_proxy), iface_id, defect_sender }
+    }
+
+    pub fn get_signal_report(
+        &self,
+    ) -> impl Future<Output = Result<fidl_fuchsia_wlan_stats::SignalReport, Error>> + use<> {
+        let telemetry_proxy = self.telemetry_proxy.clone();
+        async move {
+            let proxy = telemetry_proxy.ok_or_else(|| format_err!("No telemetry proxy"))?;
+            proxy
+                .get_signal_report()
+                .map_err(|e| format_err!("Failed to send get_signal_report command: {:?}", e))
+                .on_timeout(SIGNAL_REPORT_TIMEOUT, || {
+                    Err(format_err!("Timed out waiting on get_signal_report response from SME"))
+                })
+                .await?
+                .map_err(|e| {
+                    format_err!("get_signal_report returned error: {}", zx::Status::err_from_raw(e))
+                })
+        }
     }
 
     pub async fn connect(
@@ -2183,5 +2214,103 @@ mod tests {
                 source: TimeoutSource::ApStatus,
             })),
         );
+    }
+
+    #[fuchsia::test]
+    fn state_machine_sme_get_signal_report() {
+        let mut exec = fasync::TestExecutor::new();
+
+        let (proxy, _sme_fut) = create_proxy::<fidl_sme::ClientSmeMarker>();
+        let (telemetry_proxy, telemetry_server) = create_proxy::<fidl_sme::TelemetryMarker>();
+        let (defect_sender, _defect_receiver) = mpsc::channel(100);
+        let iface_id = rand::random::<u16>();
+        let sme = SmeForClientStateMachine::new_with_telemetry(
+            proxy,
+            telemetry_proxy,
+            iface_id,
+            defect_sender,
+        );
+
+        let fut = sme.get_signal_report();
+        let mut fut = pin!(fut);
+        assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
+
+        let mut telemetry_stream = telemetry_server.into_stream();
+        let expected_report = fidl_fuchsia_wlan_stats::SignalReport {
+            connection_signal_report: Some(fidl_fuchsia_wlan_stats::ConnectionSignalReport {
+                rssi_dbm: Some(-45),
+                snr_db: Some(25),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_matches!(
+            exec.run_until_stalled(&mut telemetry_stream.next()),
+            Poll::Ready(Some(Ok(fidl_sme::TelemetryRequest::GetSignalReport { responder }))) => {
+                responder.send(Ok(&expected_report)).expect("could not send signal report response");
+            }
+        );
+
+        assert_matches!(
+            exec.run_until_stalled(&mut fut),
+            Poll::Ready(Ok(report)) => assert_eq!(report, expected_report)
+        );
+    }
+
+    #[fuchsia::test]
+    fn state_machine_sme_get_signal_report_error() {
+        let mut exec = fasync::TestExecutor::new();
+
+        let (proxy, _sme_fut) = create_proxy::<fidl_sme::ClientSmeMarker>();
+        let (telemetry_proxy, telemetry_server) = create_proxy::<fidl_sme::TelemetryMarker>();
+        let (defect_sender, _defect_receiver) = mpsc::channel(100);
+        let iface_id = rand::random::<u16>();
+        let sme = SmeForClientStateMachine::new_with_telemetry(
+            proxy,
+            telemetry_proxy,
+            iface_id,
+            defect_sender,
+        );
+
+        let fut = sme.get_signal_report();
+        let mut fut = pin!(fut);
+        assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
+
+        let mut telemetry_stream = telemetry_server.into_stream();
+        assert_matches!(
+            exec.run_until_stalled(&mut telemetry_stream.next()),
+            Poll::Ready(Some(Ok(fidl_sme::TelemetryRequest::GetSignalReport { responder }))) => {
+                responder.send(Err(zx::Status::INTERNAL.into_raw())).expect("could not send response");
+            }
+        );
+
+        assert_matches!(exec.run_until_stalled(&mut fut), Poll::Ready(Err(_)));
+    }
+
+    #[fuchsia::test]
+    fn state_machine_sme_get_signal_report_timeout() {
+        let mut exec = fasync::TestExecutor::new_with_fake_time();
+        exec.set_fake_time(fasync::MonotonicInstant::from_nanos(0));
+
+        let (proxy, _sme_fut) = create_proxy::<fidl_sme::ClientSmeMarker>();
+        let (telemetry_proxy, _telemetry_server) = create_proxy::<fidl_sme::TelemetryMarker>();
+        let (defect_sender, _defect_receiver) = mpsc::channel(100);
+        let iface_id = rand::random::<u16>();
+        let sme = SmeForClientStateMachine::new_with_telemetry(
+            proxy,
+            telemetry_proxy,
+            iface_id,
+            defect_sender,
+        );
+
+        let fut = sme.get_signal_report();
+        let mut fut = pin!(fut);
+        assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
+
+        exec.set_fake_time(fasync::MonotonicInstant::after(
+            SIGNAL_REPORT_TIMEOUT + fasync::MonotonicDuration::from_seconds(1),
+        ));
+
+        assert_matches!(exec.run_until_stalled(&mut fut), Poll::Ready(Err(_)));
     }
 }

@@ -19,6 +19,11 @@ from shared.protocol.base import (
 )
 
 # isort: split
+from shared.protocol.aspace import (
+    AddressRegionEntry,
+    AspaceRequest,
+    AspaceResponse,
+)
 from shared.protocol.async_backtrace import (
     AsyncBacktraceRequest,
     AsyncBacktraceResponse,
@@ -28,6 +33,17 @@ from shared.protocol.break_request import BreakRequest
 from shared.protocol.console import ConsoleRequest, ConsoleResponse
 from shared.protocol.continue_request import ContinueRequest
 from shared.protocol.detach import DetachRequest
+from shared.protocol.diagnose_hang import (
+    ClassifiedThread,
+    DiagnoseHangRequest,
+    DiagnoseHangResponse,
+    ThreadHangClassification,
+)
+from shared.protocol.driver_list import (
+    DriverHostEntry,
+    DriverListRequest,
+    DriverListResponse,
+)
 from shared.protocol.evaluate import EvaluateRequest, EvaluateResponse
 from shared.protocol.finish import FinishRequest
 from shared.protocol.get_state import (
@@ -36,7 +52,22 @@ from shared.protocol.get_state import (
     ThreadInfo,
     WatchpointInfo,
 )
+from shared.protocol.handles import (
+    HandleEntry,
+    HandlesRequest,
+    HandlesResponse,
+)
 from shared.protocol.hello import HelloRequest
+from shared.protocol.mem_read import (
+    MemoryRowEntry,
+    MemReadRequest,
+    MemReadResponse,
+)
+from shared.protocol.modules import (
+    ModuleEntry,
+    ModulesRequest,
+    ModulesResponse,
+)
 from shared.protocol.next_request import NextRequest
 from shared.protocol.pause import PauseRequest
 from shared.protocol.stack_trace import (
@@ -49,21 +80,32 @@ from shared.protocol.start import StartRequest
 from shared.protocol.step_in import StepInRequest
 from shared.protocol.stop import StopRequest
 from shared.protocol.threads import ThreadsRequest
+from shared.protocol.tracepoint import (
+    TracepointInfo,
+    TracepointRequest,
+    TracepointResponse,
+)
 from shared.protocol.variables import VariablesRequest
 from shared.protocol.wait_for_event import WaitForEventRequest
 from shared.protocol.watch_request import WatchRequest
 
 RequestType = Annotated[
-    AsyncBacktraceRequest
+    AspaceRequest
+    | AsyncBacktraceRequest
     | AttachRequest
     | BreakRequest
     | ConsoleRequest
     | ContinueRequest
     | DetachRequest
+    | DiagnoseHangRequest
+    | DriverListRequest
     | EvaluateRequest
     | FinishRequest
     | GetStateRequest
+    | HandlesRequest
     | HelloRequest
+    | MemReadRequest
+    | ModulesRequest
     | NextRequest
     | PauseRequest
     | StackTraceRequest
@@ -71,6 +113,7 @@ RequestType = Annotated[
     | StepInRequest
     | StopRequest
     | ThreadsRequest
+    | TracepointRequest
     | VariablesRequest
     | WaitForEventRequest
     | WatchRequest,
@@ -84,6 +127,13 @@ ResponseType = (
     | ThreadStackTraceResponse
     | ProcessStackTraceResponse
     | AsyncBacktraceResponse
+    | ModulesResponse
+    | AspaceResponse
+    | HandlesResponse
+    | MemReadResponse
+    | DriverListResponse
+    | TracepointResponse
+    | DiagnoseHangResponse
     | dict[str, Any]
     | None
 )
@@ -99,6 +149,27 @@ __all__ = [
     "ThreadStackTraceResponse",
     "StackFrame",
     "AsyncBacktraceResponse",
+    "AddressRegionEntry",
+    "AspaceRequest",
+    "AspaceResponse",
+    "HandleEntry",
+    "HandlesRequest",
+    "HandlesResponse",
+    "MemoryRowEntry",
+    "MemReadRequest",
+    "MemReadResponse",
+    "ModuleEntry",
+    "ModulesRequest",
+    "ModulesResponse",
+    "DriverHostEntry",
+    "DriverListRequest",
+    "DriverListResponse",
+    "TracepointInfo",
+    "TracepointResponse",
+    "ClassifiedThread",
+    "DiagnoseHangRequest",
+    "DiagnoseHangResponse",
+    "ThreadHangClassification",
     "PROTOCOL_VERSION",
     "serialize",
     "make_request",
@@ -126,6 +197,7 @@ __all__ = [
     "StepInRequest",
     "StopRequest",
     "ThreadsRequest",
+    "TracepointRequest",
     "VariablesRequest",
     "WaitForEventRequest",
     "WatchRequest",

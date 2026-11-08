@@ -25,7 +25,7 @@ use fidl_fuchsia_posix_socket_raw as fposix_socket_raw;
 use linux_uapi::{IP_MULTICAST_ALL, IP_PASSSEC};
 use starnix_logging::{log_error, log_warn, track_stub};
 use starnix_syscalls::{SUCCESS, SyscallArg, SyscallResult};
-use starnix_uapi::auth::{CAP_NET_ADMIN, CAP_NET_RAW};
+use starnix_uapi::auth::{CAP_NET_ADMIN, CAP_NET_BIND_SERVICE, CAP_NET_RAW};
 use starnix_uapi::errors::{ENOTSUP, Errno, ErrnoCode};
 use starnix_uapi::user_address::{UserAddress, UserRef};
 use starnix_uapi::vfs::FdEvents;
@@ -350,8 +350,8 @@ impl ZxioBackedSocket {
             self.zxio.clone_handle().map_err(|_| errno!(EIO))?.into(),
         )
         .into_sync_proxy();
-        let code: &[u64] = zerocopy::transmute_ref!(program.code());
-        let result = packet_socket.attach_bpf_filter_unsafe(code, zx::MonotonicInstant::INFINITE);
+        let code: Vec<u64> = program.code().iter().map(ebpf::EbpfInstruction::get).collect();
+        let result = packet_socket.attach_bpf_filter_unsafe(&code, zx::MonotonicInstant::INFINITE);
         result.map_err(|_: fidl::Error| errno!(EIO))?.map_err(|e| {
             Errno::with_context(
                 ErrnoCode::from_error_code(e.into_primitive() as i16),
@@ -366,10 +366,10 @@ impl ZxioBackedSocket {
         current_task: &CurrentTask,
         op: SockAddrOp,
         socket_address: impl AsSockAddrBytes,
-    ) -> Result<(), Errno> {
+    ) -> Result<SockAddrProgramResult, Errno> {
         // BPF_PROG_TYPE_CGROUP_SOCK_ADDR programs are executed only for IPv4 and IPv6 sockets.
         if !matches!(socket.domain, SocketDomain::Inet | SocketDomain::Inet6) {
-            return Ok(());
+            return Ok(SockAddrProgramResult::Allow);
         }
 
         let ebpf_result =
@@ -383,7 +383,9 @@ impl ZxioBackedSocket {
                 socket,
             )?;
         match ebpf_result {
-            SockAddrProgramResult::Allow => Ok(()),
+            SockAddrProgramResult::Allow | SockAddrProgramResult::AllowNoCapNetBindService => {
+                Ok(ebpf_result)
+            }
             SockAddrProgramResult::Block => error!(EPERM),
         }
     }
@@ -443,12 +445,12 @@ impl SocketOps for ZxioBackedSocket {
         current_task: &CurrentTask,
         peer: SocketPeer,
     ) -> Result<(), Errno> {
-        match peer {
-            SocketPeer::Address(
-                ref address @ (SocketAddress::Inet(_) | SocketAddress::Inet6(_)),
-            ) => self.run_sockaddr_ebpf(socket, current_task, SockAddrOp::Connect, address)?,
-            _ => (),
-        };
+        if let SocketPeer::Address(
+            ref address @ (SocketAddress::Inet(_) | SocketAddress::Inet6(_)),
+        ) = peer
+        {
+            self.run_sockaddr_ebpf(socket, current_task, SockAddrOp::Connect, address)?;
+        }
 
         let connect_result = match &peer {
             SocketPeer::Address(
@@ -544,7 +546,24 @@ impl SocketOps for ZxioBackedSocket {
         current_task: &CurrentTask,
         socket_address: SocketAddress,
     ) -> Result<(), Errno> {
-        self.run_sockaddr_ebpf(socket, current_task, SockAddrOp::Bind, &socket_address)?;
+        let ebpf_result =
+            self.run_sockaddr_ebpf(socket, current_task, SockAddrOp::Bind, &socket_address)?;
+
+        if ebpf_result != SockAddrProgramResult::AllowNoCapNetBindService
+            && let Some(port) = socket_address.maybe_inet_port()
+            && port != 0
+            && port < 1024
+        {
+            // See <https://man7.org/linux/man-pages/man7/ip.7.html>:
+            //
+            //   The port numbers below 1024 are called privileged ports (or
+            //   sometimes: reserved ports).  Only a privileged process (on Linux:
+            //   a process that has the CAP_NET_BIND_SERVICE capability in the
+            //   user namespace governing its network namespace) may bind(2) to
+            //   these sockets.
+            security::check_task_capable(current_task, CAP_NET_BIND_SERVICE)
+                .map_err(|_| errno!(EACCES))?;
+        }
 
         match socket_address {
             SocketAddress::Inet(addr)
@@ -586,6 +605,7 @@ impl SocketOps for ZxioBackedSocket {
             message_length: info.message_length,
             address,
             credentials: None,
+            security_state: None,
             ancillary_data: info.control_messages.drain(..).map(AncillaryData::Ip).collect(),
         })
     }

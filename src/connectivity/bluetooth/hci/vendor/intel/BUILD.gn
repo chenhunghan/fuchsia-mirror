@@ -121,6 +121,15 @@ cc_test_executable("tests_executable") {
 
   deps = [
     ":common",
+    "$dir_pw_assert",
+    "$dir_pw_bluetooth:emboss_hci_group",
+    "$dir_pw_chrono:system_clock",
+    "$dir_pw_intrusive_ptr",
+    "$dir_pw_log",
+    "$dir_pw_random",
+    "$dir_pw_span",
+    "$dir_pw_string",
+    "$dir_pw_third_party/fuchsia:fit",
     "//sdk/lib/component/outgoing/cpp",
     "//sdk/lib/driver/compat/cpp",
     "//sdk/lib/driver/runtime:driver_runtime_cpp",
@@ -134,18 +143,6 @@ cc_test_executable("tests_executable") {
     "//third_party/googletest:gtest",
     "//zircon/system/ulib/fzl",
     "//zircon/system/ulib/zircon-internal",
-  ]
-
-  public_deps = [
-    "$dir_pw_assert",
-    "$dir_pw_bluetooth:emboss_hci_group",
-    "$dir_pw_chrono:system_clock",
-    "$dir_pw_intrusive_ptr",
-    "$dir_pw_log",
-    "$dir_pw_random",
-    "$dir_pw_span",
-    "$dir_pw_string",
-    "$dir_pw_third_party/fuchsia:fit",
   ]
 
   # Suppress UBsan's complains on the __PACKED structure.

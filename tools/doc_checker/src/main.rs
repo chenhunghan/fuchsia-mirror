@@ -70,8 +70,10 @@ pub(crate) mod mock_path_helper_module {
             // markdown files exist with a couple exceptions.
             || (path_str.ends_with(".md")
                 && (!path_str.ends_with("no_readme/README.md")
+                    && !path_str.ends_with("index.md")
                     && !path_str.ends_with("unused/README.md")
                     && !path_str.ends_with("missing.md")
+                    && !path_str.contains("/old")
                     && !path_str.ends_with("no-extension")))
             // OWNERS file exists.
             || path.ends_with("OWNERS")
@@ -354,7 +356,6 @@ fn check_yaml<'a>(
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::env;
 
     #[fuchsia::test]
     async fn test_project_test() -> Result<()> {
@@ -370,8 +371,8 @@ mod test {
             allow_unreferenced_hidden: false,
         };
 
-        // Set the current directory to the executable dir so the relative test paths WAI.
-        env::set_current_dir(env::current_exe()?.parent().unwrap_or(&PathBuf::from(".")))?;
+        // Bazel host_test runs in doc_checker_bin_test.runtime_dir, where
+        // host_test_data_map stages doc_checker_test_data/ directly.
 
         let expected: Vec<DocCheckError> = vec![
             DocCheckError::new_error(

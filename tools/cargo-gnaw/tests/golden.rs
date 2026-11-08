@@ -216,6 +216,11 @@ fn main() {
             golden_expected_filename: vec!["inputs", "BUILD.gn"],
             options: Options { extra_args: vec!["--skip-root"], ..Default::default() },
         },
+        TestCase {
+            manifest_path: vec!["kernel_features", "Cargo.toml"],
+            golden_expected_filename: vec!["kernel_features", "BUILD.gn"],
+            options: Options { extra_args: vec!["--skip-root"], ..Default::default() },
+        },
     ];
 
     let run_gnaw = |manifest_path: &[&str], extra_args: &[&str], output_sdk_metadata: bool| {

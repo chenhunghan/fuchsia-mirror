@@ -1,0 +1,25 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library_headers.bzl", "fx_cc_library_headers")
+
+package(default_applicable_licenses = ["//:license"])
+
+alias(
+    name = "special-sections",
+    actual = ":headers",
+    visibility = [
+        "//src/performance/lib/fxt:__pkg__",
+        "//zircon/kernel/lib:__subpackages__",
+    ],
+)
+
+fx_cc_library_headers(
+    name = "headers",
+    hdrs = ["include/lib/special-sections/special-sections.h"],
+    visibility = [
+        "//src/performance/lib/fxt:__pkg__",
+        "//zircon/kernel/lib:__subpackages__",
+    ],
+)

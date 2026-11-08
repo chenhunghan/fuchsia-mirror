@@ -1,0 +1,139 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+// Test-facing observation of the simulated medium.
+library test.lowpan.rfsim;
+
+using zx;
+
+/// What one node observes of a transmission the medium delivered to it.
+type Destination = struct {
+    /// The node the medium delivered the frame to.
+    node_id NodeId;
+    /// Received signal strength the medium decided this node observes, in dBm.
+    rssi_dbm int8;
+    /// Link quality indicator the medium decided this node observes, 0 to 255.
+    lqi uint8;
+};
+
+/// One `Radio.Transmit` call the medium received from an attached node, and
+/// the nodes it delivered the frame to.
+type Transmission = struct {
+    /// The transmitting node.
+    node_id NodeId;
+    /// Exactly what the node passed to `Radio.Transmit`.
+    frame Frame;
+    /// When the medium received the `Radio.Transmit` call, on the monotonic
+    /// clock.
+    timestamp zx.InstantMono;
+    /// The nodes the medium delivered the frame to. Empty when it reached
+    /// nobody.
+    destinations vector<Destination>:MAX_NODES;
+};
+
+/// A node, with the time of the event that reports it.
+type Node = struct {
+    node_id NodeId;
+    /// When the medium attached the node (`existing`, `added`) or detached it
+    /// (`removed`), on the monotonic clock.
+    timestamp zx.InstantMono;
+};
+
+/// A change in the set of attached nodes.
+type NodeEvent = strict union {
+    /// A node that was attached when watching started.
+    1: existing Node;
+    /// No more `existing` events will be sent.
+    2: idle struct {};
+    /// A node that attached while watching.
+    3: added Node;
+    /// A node that detached while watching.
+    4: removed Node;
+};
+
+/// Upper bound on node events returned by one `NodeEventWatcher.Watch` reply.
+const MAX_NODE_EVENTS_PER_BATCH uint32 = 256;
+
+/// Upper bound on transmissions returned by one `TransmissionWatcher.Watch`
+/// reply. Sized so that a full reply, each transmission with `MAX_NODES`
+/// destinations, fits in one channel message.
+const MAX_TRANSMISSIONS_PER_BATCH uint32 = 64;
+
+/// Test-facing view of the medium: which nodes are attached, what they
+/// transmit, and who can hear whom. Not used by Thread nodes.
+///
+/// Observation is done through watchers. The medium records node events and
+/// transmissions only while a watcher for them exists, queues them per
+/// watcher, and releases everything when the watcher is closed.
+@discoverable
+closed protocol Monitor {
+    /// Creates a watcher for the set of attached nodes. The watcher first
+    /// reports every node attached when it was registered as `existing`,
+    /// then `idle`, then every `added` and `removed` after that.
+    strict GetNodeEventWatcher(resource struct {
+        /// Served until closed, which ends the observation.
+        watcher server_end:NodeEventWatcher;
+    });
+
+    /// Creates a watcher that captures transmissions. Only transmissions the
+    /// medium processes after this call are captured.
+    ///
+    /// Two-way only to synchronize: the reply indicates the watcher is
+    /// installed.
+    strict GetTransmissionWatcher(resource struct {
+        /// Served until closed, which ends the capture.
+        watcher server_end:TransmissionWatcher;
+    }) -> ();
+
+    /// Returns the ids of the attached nodes that the medium's topology lets
+    /// hear `node_id`'s transmissions.
+    ///
+    /// Errors:
+    ///  * `ZX_ERR_NOT_FOUND`: `node_id` is not attached.
+    strict GetNeighbors(struct {
+        node_id NodeId;
+    }) -> (struct {
+        node_ids vector<NodeId>:MAX_NODES;
+    }) error zx.Status;
+};
+
+/// Delivers node events to one `Monitor.GetNodeEventWatcher` caller.
+closed protocol NodeEventWatcher {
+    /// Hanging get for the events not yet returned on this watcher, oldest
+    /// first, at most `MAX_NODE_EVENTS_PER_BATCH` per reply; when more remain,
+    /// the next call returns immediately with them. Blocks while there is
+    /// nothing new. The first events are the `existing` nodes followed by
+    /// `idle`, possibly spread over several replies.
+    ///
+    /// The medium queues a bounded number of events for a watcher and closes
+    /// it with `ZX_ERR_NO_RESOURCES` beyond that.
+    ///
+    /// Closes the watcher with `ZX_ERR_BAD_STATE` if called while a previous
+    /// call is still outstanding.
+    strict Watch() -> (struct {
+        events vector<NodeEvent>:MAX_NODE_EVENTS_PER_BATCH;
+    });
+};
+
+/// Delivers captured transmissions to one `Monitor.GetTransmissionWatcher`
+/// caller.
+closed protocol TransmissionWatcher {
+    /// Hanging get for the transmissions not yet returned on this watcher,
+    /// oldest first, at most `MAX_TRANSMISSIONS_PER_BATCH` per reply; when
+    /// more remain, the next call returns immediately with them. Blocks while
+    /// there is nothing new.
+    ///
+    /// The medium queues a bounded number of transmissions for a watcher and
+    /// drops the oldest beyond that; `dropped` counts the ones dropped since
+    /// the previous reply.
+    ///
+    /// Closes the watcher with `ZX_ERR_BAD_STATE` if called while a previous
+    /// call is still outstanding.
+    strict Watch() -> (struct {
+        transmissions vector<Transmission>:MAX_TRANSMISSIONS_PER_BATCH;
+        /// Transmissions dropped since the previous reply because the
+        /// watcher's queue was full.
+        dropped uint32;
+    });
+};

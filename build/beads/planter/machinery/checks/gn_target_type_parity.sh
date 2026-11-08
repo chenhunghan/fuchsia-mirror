@@ -30,12 +30,38 @@ set -euo pipefail
 #      Bazel and bazel2gn does not translate them). A GN host binary or
 #      `install_host_tools` target (`rustc_binary`, `go_binary`, `executable`,
 #      `install_host_tools`) may likewise become a `bazel_host_tool` (or a
-#      forwarding `group` in a `BUILD.gn` that defines a `bazel_host_tool`), and a
+#      forwarding `group` in a `BUILD.gn` that defines a `bazel_host_tool`), a
+#      GN `fuchsia_package` or `fuchsia_package_with_single_component` migrated
+#      to `fx_package` in `BUILD.bazel` may become a `bazel_fuchsia_package` of
+#      the same name for remaining GN dependents, and a
 #      `bazel_input_file` or `bazel_input_directory` whose generator moved to
 #      Bazel may become an empty `group` for soft transitions (while keeping
 #      `bazel_input_file` for a Bazel-migrated/`bazel_host_tool` generator or
 #      leaving `@gn_targets//.../<pkg>` references under `build/bazel/` is an
-#      error).
+#      error). A pure single-target forwarding `group("<outer>")` whose sole
+#      same-package convertible target `:<inner>` has no external callers may
+#      also fold `:<inner>` directly into `<tmpl>("<outer>")`. A
+#      `fuchsia_test_component` without `test_type` and a `testonly`
+#      `fuchsia_component` may convert in either direction (helper components
+#      become `fuchsia_component` via `fx_component(testonly = True)`, while
+#      test roots in `fx_package(test_components = [...])` become
+#      `fuchsia_test_component` via `fx_test_component`), because
+#      `//build/components/fuchsia_test_component.gni` only adds
+#      `testonly = true` and `test_type` metadata to `fuchsia_component`.
+#      A GN C++ `test` may become the `cc_test_executable` that bazel2gn emits
+#      for `fx_cc_test_binary` (INFO test_became_cc_test_executable: it installs
+#      to `bin/` and no longer registers a host test by itself; ERROR
+#      host_test_lost when GN built it on host and no hand-written GN
+#      `host_test()` in the BUILD.gn runs it anymore). A testonly GN
+#      `executable` may likewise become that `cc_test_executable` (INFO
+#      executable_became_cc_test_executable).
+#      A GN `cc_test_executable` may become the testonly `executable` that
+#      bazel2gn emits for `fx_cc_binary(testonly = True)`, but:
+#   6. cc_test_executable_lost_lto_config (error): the `executable` lacks the
+#      `//build/config/lto:no-fat-lto-objects-linking` config that
+#      `cc_test_executable` adds unless `disable_lto = false`; use
+#      `fx_cc_test_binary` (or set the config with `build_flags` on the
+#      `fx_cc_binary`).
 # - If the GN target is gone (BUILD.gn deleted in a full removal, or the target
 #   removed) and BUILD.bazel defines a cc_library or fx_cc_library of the same
 #   name, its `alwayslink` must match the GN type:
@@ -56,7 +82,21 @@ import sys
 
 workdir = os.path.abspath(sys.argv[1])
 target_dir = sys.argv[2].strip().strip("/")
-change_base = os.environ.get("PLANTER_CHANGE_BASE", "").strip() or "HEAD"
+change_base = (os.environ.get("PLANTER_RESOLVED_CHANGE_BASE") or os.environ.get("PLANTER_CHANGE_BASE") or "HEAD").strip()
+
+
+def _emit(findings, category, severity, file, line, message, remediation=""):
+    d = {
+        "source": "gn_target_type_parity",
+        "category": category,
+        "severity": severity,
+        "file": file,
+        "line": line,
+        "message": message,
+    }
+    if remediation:
+        d["remediation"] = remediation
+    findings.append(d)
 
 GN_TARGET = re.compile(r'\b([A-Za-z_]\w*)\(\s*"([^"$]+)"\s*\)\s*\{')
 GN_TEMPLATE = re.compile(r'\btemplate\(\s*"([^"$]+)"\s*\)\s*\{')
@@ -73,9 +113,6 @@ NOT_TARGETS = {"template", "declare_args", "foreach", "forward_variables_from", 
 CC_RULE = re.compile(r'(?<![\w.])(cc_library|fx_cc_library)\s*\(')
 BAZEL_NAME = re.compile(r'\bname\s*=\s*"([^"]+)"')
 ALWAYSLINK = re.compile(r'\balwayslink\s*=\s*(True|False)\b')
-# With fx_test in the checkout, a GN test package migrated to Bazel is replaced by a GN
-# bazel_test_suite of the same name that exports the Bazel tests to tests.json.
-FX_TEST_AVAILABLE = os.path.isfile(os.path.join(workdir, "build/bazel/rules/testing/fx_test.bzl"))
 GN_TEST_TEMPLATES = {
     "fuchsia_unittest_package",
     "fuchsia_test_package",
@@ -98,10 +135,15 @@ GN_HOST_TOOL_TEMPLATES = {
     "sdk_host_tool",
     "executable",
     "install_host_tools",
+    "ffx_tool",
 }
 GN_BAZEL_INPUT_TEMPLATES = {
     "bazel_input_file",
     "bazel_input_directory",
+}
+GN_PACKAGE_TEMPLATES = {
+    "fuchsia_package",
+    "fuchsia_package_with_single_component",
 }
 GN_CONVERTIBLE_SYMMETRY_TEMPLATES = {
     "static_library",
@@ -113,6 +155,8 @@ GN_CONVERTIBLE_SYMMETRY_TEMPLATES = {
     "go_library",
     "python_library",
     "fidl",
+    "ffx_plugin",
+    "ffx_tool",
     "sdk_source_set",
     "sdk_static_library",
     "sdk_shared_library",
@@ -130,6 +174,101 @@ def is_testonly_target(gn_text, name):
         if re.search(r"\btestonly\s*=\s*true\b", body):
             return True
     return False
+
+
+# Check whether any build file outside `pkg` still references `//<pkg>:<target_name>`.
+def has_external_target_refs(pkg, target_name):
+    pkg_base = os.path.basename(pkg)
+    try:
+        out = subprocess.check_output(
+            [
+                "git",
+                "-C",
+                workdir,
+                "grep",
+                "-l",
+                "-F",
+                f"{pkg_base}:{target_name}",
+                "--",
+                "BUILD.gn",
+                "BUILD.bazel",
+                "*.gni",
+                "*.bzl",
+                "**/BUILD.gn",
+                "**/BUILD.bazel",
+            ],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except Exception:
+        return False
+    pat = re.compile(
+        r'"@?(?://'
+        + re.escape(pkg)
+        + r"|(?:[^\"\s:]*/)*"
+        + re.escape(pkg_base)
+        + r"):"
+        + re.escape(target_name)
+        + r'(?:["(])'
+    )
+    for rel in out.splitlines():
+        rel = rel.strip().strip("/")
+        if not rel or rel == pkg or rel.startswith(pkg + "/"):
+            continue
+        txt = new_text(rel) or ""
+        if pat.search(blank_comments(txt)):
+            return True
+    return False
+
+
+# Identify pure single-target forwarding `group("<outer>")` targets in `before` whose
+# same-package convertible target `:<inner>` was folded directly into `<outer>`.
+def find_folded_forwarding_groups(gn_text, old_map, new_map, bazel_names, pkg):
+    folded_from_group = {}
+    folded_into_group = {}
+    if not gn_text:
+        return folded_from_group, folded_into_group
+    code = blank_comments(gn_text)
+    allowed_group_attrs = {"public_deps", "deps", "visibility", "testonly"}
+    convertible = GN_CONVERTIBLE_SYMMETRY_TEMPLATES | {"rustc_library_with_features"}
+    for m in GN_TARGET.finditer(code):
+        tmpl, outer = m.group(1), m.group(2)
+        if tmpl != "group" or old_map.get(outer, (set(), 0))[0] != {"group"}:
+            continue
+        body = code[m.end() - 1 : call_end(code, m.end() - 1)][1:-1]
+        attrs = set(re.findall(r"(?m)^\s*([A-Za-z_]\w*)\s*[+-]?=", body))
+        if not attrs or not (attrs <= allowed_group_attrs):
+            continue
+        deps = []
+        for dm in re.finditer(
+            r"(?<![\w.])(?:public_deps|deps)\s*\+?=\s*\[([^\]]*)\]", body
+        ):
+            deps.extend(re.findall(r'"([^"]+)"', dm.group(1)))
+        if len(deps) != 1 or "(" in deps[0]:
+            continue
+        dep = deps[0].strip()
+        if dep.startswith(":"):
+            inner = dep[1:]
+        elif dep.startswith(f"//{pkg}:"):
+            inner = dep[len(f"//{pkg}:") :]
+        else:
+            continue
+        if inner == outer or inner not in old_map:
+            continue
+        inner_types = old_map[inner][0]
+        if not (inner_types <= convertible):
+            continue
+        if is_testonly_target(gn_text, outer) != is_testonly_target(gn_text, inner):
+            continue
+        if inner in new_map or inner in bazel_names:
+            continue
+        if outer not in new_map and outer not in bazel_names:
+            continue
+        if has_external_target_refs(pkg, inner):
+            continue
+        folded_from_group[outer] = inner
+        folded_into_group[inner] = outer
+    return folded_from_group, folded_into_group
 
 
 def bazel_input_generator_migrated(gn_text, name, pkg, bazel_names, new_map):
@@ -233,6 +372,74 @@ def call_end(code, open_paren):
     return len(code)
 
 
+def gn_target_body(text, tmpl, name):
+    """Returns the `{...}` body of `tmpl("name")` in GN `text` (comments blanked), or None."""
+    if not text:
+        return None
+    code = blank_comments(text)
+    m = re.search(r"\b" + re.escape(tmpl) + r'\(\s*"' + re.escape(name) + r'"\s*\)\s*\{', code)
+    if not m:
+        return None
+    return code[m.end() - 1 : call_end(code, m.end() - 1)]
+
+
+# Check whether a GN component target body (or its enclosing BUILD.gn file scope) sets testonly.
+def is_gn_component_testonly(gn_text, comp_body):
+    if not comp_body or re.search(r"\btestonly\s*=\s*false\b", comp_body):
+        return False
+    if re.search(r"\btestonly\s*=\s*true\b", comp_body):
+        return True
+    if not gn_text:
+        return False
+    code = blank_comments(gn_text)
+    top_chars = []
+    depth, quote, i = 0, None, 0
+    while i < len(code):
+        c = code[i]
+        if quote:
+            if c == "\\":
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+        elif c in "\"'":
+            quote = c
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            top_chars.append(c)
+        i += 1
+    return re.search(r"(?m)^\s*testonly\s*=\s*true\b", "".join(top_chars)) is not None
+
+
+# Check bidirectional equivalence between `fuchsia_test_component` without `test_type`
+# and `testonly` `fuchsia_component` (//build/components/fuchsia_test_component.gni).
+def equivalent_test_component_templates(before_gn, after_gn, orig_name, name, old_types, new_types):
+    if old_types == {"fuchsia_test_component"} and new_types == {"fuchsia_component"}:
+        old_body = gn_target_body(before_gn, "fuchsia_test_component", orig_name)
+        new_body = gn_target_body(after_gn, "fuchsia_component", name)
+        if (
+            old_body is not None
+            and new_body is not None
+            and not re.search(r"\btest_type\s*=", old_body)
+            and is_gn_component_testonly(after_gn, new_body)
+        ):
+            return ("fuchsia_test_component", "fuchsia_component")
+    elif old_types == {"fuchsia_component"} and new_types == {"fuchsia_test_component"}:
+        old_body = gn_target_body(before_gn, "fuchsia_component", orig_name)
+        new_body = gn_target_body(after_gn, "fuchsia_test_component", name)
+        if (
+            old_body is not None
+            and new_body is not None
+            and is_gn_component_testonly(before_gn, old_body)
+            and not re.search(r"\btest_type\s*=", new_body)
+        ):
+            return ("fuchsia_component", "fuchsia_test_component")
+    return None
+
+
 def gn_types(text):
     """Maps each GN target name to the set of templates defining it (resolving file-local single-target templates)."""
     code = blank_comments(text)
@@ -316,6 +523,19 @@ def type_change_finding(label, name, pkg, gn_rel, line, old_types, new_types):
                 f"`fx bazel2gn -d {pkg}`."
             ),
         )
+    elif "test" in old_types and "test" not in new_types and "executable" in new_types:
+        f.update(
+            category="test_became_executable",
+            message=(
+                f"`{label}` was a GN C++ `test()` and is now an `executable()`, usually because BUILD.bazel uses "
+                "`fx_cc_binary(testonly = True)`. GN `test()` disables FatLTO linking; `executable()` doesn't."
+            ),
+            remediation=(
+                f"Replace the `{name}` `fx_cc_binary(testonly = True)` in {pkg}/BUILD.bazel with `fx_cc_test_binary` (load "
+                "`//build/bazel/rules/cc:fx_cc_test_binary.bzl`, drop `testonly`) so bazel2gn generates "
+                f"`cc_test_executable()`, and run `fx bazel2gn -d {pkg}`. Do not dispute this finding."
+            ),
+        )
     else:
         f.update(
             category="gn_target_type_changed",
@@ -363,6 +583,96 @@ def alwayslink_finding(label, name, pkg, bazel_rel, rule, alwayslink, line, old_
     return None
 
 
+# Check whether a pre-existing BUILD.bazel outside the migrated target directories was
+# only modified to register tests in test_suite(), export files via exports_files(), or
+# update target visibility allowlists, without dual-build migrating that package.
+_REG_ONLY_PKG_CACHE = {}
+
+
+def is_registration_only_bazel_pkg(pkg_dir):
+    pkg_dir = pkg_dir.strip("/")
+    if pkg_dir in _REG_ONLY_PKG_CACHE:
+        return _REG_ONLY_PKG_CACHE[pkg_dir]
+    target_pkgs = {
+        d.strip().lstrip("/").rstrip("/")
+        for d in os.environ.get("PLANTER_TARGET_DIRS", "").split()
+        if d.strip()
+    }
+    if target_dir:
+        target_pkgs.add(target_dir)
+    if not pkg_dir or pkg_dir in target_pkgs:
+        _REG_ONLY_PKG_CACHE[pkg_dir] = False
+        return False
+    gn_rel = f"{pkg_dir}/BUILD.gn"
+    gn_cur = new_text(gn_rel)
+    if gn_cur and "BAZEL2GN SENTINEL" in gn_cur:
+        _REG_ONLY_PKG_CACHE[pkg_dir] = False
+        return False
+    bazel_rel = f"{pkg_dir}/BUILD.bazel"
+    cur_src = new_text(bazel_rel)
+    if not cur_src:
+        _REG_ONLY_PKG_CACHE[pkg_dir] = False
+        return False
+    prev_src = None
+    for ref in dict.fromkeys([change_base, "HEAD", "HEAD~1"]):
+        if not ref:
+            continue
+        try:
+            cand = subprocess.check_output(
+                ["git", "-C", workdir, "show", f"{ref}:{bazel_rel}"],
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            if cand == cur_src and ref != "HEAD~1":
+                continue
+            prev_src = cand
+            break
+        except Exception:
+            continue
+    if prev_src is None:
+        _REG_ONLY_PKG_CACHE[pkg_dir] = False
+        return False
+    try:
+        import ast
+
+        prev_tree = ast.parse(prev_src, filename=bazel_rel)
+        cur_tree = ast.parse(cur_src, filename=bazel_rel)
+    except Exception:
+        _REG_ONLY_PKG_CACHE[pkg_dir] = False
+        return False
+
+    def strip_vis_dump(stmt):
+        if not (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)):
+            return None
+        call = stmt.value
+        kept = [(kw.arg, ast.dump(kw.value)) for kw in call.keywords if kw.arg != "visibility"]
+        return (ast.dump(call.func), tuple(ast.dump(a) for a in call.args), tuple(kept))
+
+    prev_dumps = {ast.dump(s) for s in prev_tree.body}
+    prev_stripped = {d for d in (strip_vis_dump(s) for s in prev_tree.body) if d is not None}
+    for stmt in cur_tree.body:
+        if ast.dump(stmt) in prev_dumps:
+            continue
+        if not (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)):
+            _REG_ONLY_PKG_CACHE[pkg_dir] = False
+            return False
+        call = stmt.value
+        fn = (
+            call.func.id
+            if isinstance(call.func, ast.Name)
+            else (call.func.attr if isinstance(call.func, ast.Attribute) else "")
+        )
+        if (
+            fn in ("test_suite", "exports_files", "stamp_group", "filegroup")
+            or strip_vis_dump(stmt) in prev_stripped
+        ):
+            continue
+        _REG_ONLY_PKG_CACHE[pkg_dir] = False
+        return False
+    _REG_ONLY_PKG_CACHE[pkg_dir] = True
+    return True
+
+
 EXCLUDED_GLOBAL_DIRS = (
     "bundles/assembly",
     "build/bazel",
@@ -372,18 +682,138 @@ EXCLUDED_GLOBAL_DIRS = (
 )
 
 candidate_dirs = {target_dir} if target_dir else set()
-changed_all = git_lines(["diff", "--name-only", change_base]) + git_lines(["ls-files", "--others", "--exclude-standard"])
+_env_changed = os.environ.get("PLANTER_CHANGED_FILES")
+changed_all = (
+    [l.strip() for l in _env_changed.splitlines() if l.strip()]
+    if _env_changed is not None
+    else git_lines(["diff", "--name-only", change_base]) + git_lines(["ls-files", "--others", "--exclude-standard"])
+)
 changed_set = set(changed_all)
 for p in changed_all:
     if os.path.basename(p) in ("BUILD.bazel", "BUILD.gn"):
         d = os.path.dirname(p).strip("/")
+        if d and is_registration_only_bazel_pkg(d):
+            continue
         if (
             d
-            and d not in ("tools", "src", "sdk")
+            and d not in ("tools", "src", "sdk", "build")
             and not any(d == ex or d.startswith(ex + "/") for ex in EXCLUDED_GLOBAL_DIRS)
             and not (target_dir and d == os.path.dirname(target_dir) and f"{d}/BUILD.bazel" not in changed_set)
         ):
             candidate_dirs.add(d)
+
+NO_FAT_LTO_LINKING = "//build/config/lto:no-fat-lto-objects-linking"
+
+
+# GN `cc_test_executable()` (//build/testing/cc_test_executable.gni), and GN `test()` which wraps
+# it, add `configs += [ NO_FAT_LTO_LINKING ]` unless `disable_lto = false`. A bazel2gn-generated
+# `executable()` only gets it from `build_flags` on the Bazel `fx_cc_binary`, so report a
+# conversion that drops it.
+def append_lost_lto_config_error(
+    findings, before, after, gn_rel, label, name, line, was_tmpl, old_name=None
+):
+    old_body = gn_target_body(before, was_tmpl, old_name or name)
+    if old_body is None or re.search(r"\bdisable_lto\s*=\s*false\b", old_body):
+        return
+    new_body = gn_target_body(after, "executable", name)
+    if new_body is None or NO_FAT_LTO_LINKING in new_body:
+        return
+    _emit(
+        findings,
+        "cc_test_executable_lost_lto_config",
+        "ERROR",
+        gn_rel,
+        line,
+        f"`{label}` was GN `{was_tmpl}`, which links with `{NO_FAT_LTO_LINKING}`\n"
+        "unless it sets `disable_lto = false`, but the bazel2gn-generated `executable`\n"
+        "does not, so the migration changes how the test links in GN and Bazel.",
+        "Replace the Bazel `fx_cc_binary(testonly = True)` with `fx_cc_test_binary`\n"
+        "(load `//build/bazel/rules/cc:fx_cc_test_binary.bzl`, drop `testonly`), which\n"
+        "links with that config and makes bazel2gn generate `cc_test_executable()`.",
+    )
+
+
+# GN `test()` registers a host test when built on host; the `cc_test_executable()` that bazel2gn
+# generates for a Bazel `fx_cc_test_binary` doesn't. Returns True when a GN file at the change
+# base listed `//<pkg>:<name>($host_toolchain)` (in any spelling) and the current BUILD.gn has no
+# hand-written `host_test()` that depends on `:<name>`.
+def host_test_lost(pkg, name, after):
+    lines = git_lines(["grep", "-n", "-F", f":{name}($host_toolchain)", change_base, "--", "*.gn", "*.gni"])
+    host_ref = False
+    for l in lines:
+        parts = l.split(":", 3)  # <rev>:<path>:<line>:<text>
+        if len(parts) < 4:
+            continue
+        ref_dir = os.path.dirname(parts[1])
+        for m in re.finditer(r'"((?://)?[^":]*):' + re.escape(name) + r'\(\$host_toolchain\)"', parts[3]):
+            target_dir = m.group(1)
+            if target_dir.startswith("//"):
+                target_dir = target_dir[2:]
+            else:
+                target_dir = os.path.normpath(os.path.join(ref_dir, target_dir)) if target_dir else ref_dir
+            if target_dir == pkg:
+                host_ref = True
+    if not host_ref:
+        return False
+    code = blank_comments(after or "")
+    for m in re.finditer(r'\bhost_test\(\s*"[^"]+"\s*\)\s*\{', code):
+        body = code[m.end() - 1 : call_end(code, m.end() - 1)]
+        if re.search(r'"(?://' + re.escape(pkg) + r')?:' + re.escape(name) + r'"', body):
+            return False
+    return True
+
+
+# Check whether a pre-migration GN target was a unittest/test component that maps to
+# fx_test_component -> fuchsia_test_component when packaged via fx_package(test_components).
+def is_test_root_component_in_base(gn_text, name, old_types):
+    if old_types == {"fuchsia_unittest_component"}:
+        return True
+    if old_types != {"fuchsia_component"} or not gn_text:
+        return False
+    if is_testonly_target(gn_text, name):
+        return True
+    code = blank_comments(gn_text)
+    return bool(
+        re.search(
+            r"\btest_components\s*\+?=\s*\[[^\]]*\"(?::|//[^\":]+:)"
+            + re.escape(name)
+            + r"\"",
+            code,
+        )
+    )
+
+
+# Check whether a renamed Bazel target (`new_name` not in `old_map`) converting a removed
+# pre-migration GN `cc_test_executable` (`old_name` not in `new_map`) dropped its LTO config.
+def check_renamed_cc_test_executable_lto_config(
+    findings, before, after, old_map, new_map, bazel_text, bazel_names, gn_rel
+):
+    if not bazel_text or not before or not after:
+        return
+    removed_old = [
+        (old_name, old_types)
+        for old_name, (old_types, _) in sorted(old_map.items())
+        if old_name not in new_map and old_types == {"cc_test_executable"}
+    ]
+    if not removed_old:
+        return
+    for new_name, (new_types, new_line) in sorted(new_map.items()):
+        if new_name in old_map or new_name not in bazel_names:
+            continue
+        if new_types == {"executable"} and is_testonly_target(after, new_name):
+            for old_name, old_types in removed_old:
+                append_lost_lto_config_error(
+                    findings,
+                    before,
+                    after,
+                    gn_rel,
+                    f"//{os.path.dirname(gn_rel)}:{new_name}",
+                    new_name,
+                    new_line,
+                    next(iter(old_types)),
+                    old_name=old_name,
+                )
+
 
 findings = []
 for pkg in sorted(candidate_dirs):
@@ -397,47 +827,54 @@ for pkg in sorted(candidate_dirs):
     bazel_text = new_text(bazel_rel)
     bazel_names = set(BAZEL_NAME.findall(blank_comments(bazel_text))) if bazel_text else set()
     cc_libs = bazel_cc_libraries(bazel_text) if bazel_text else {}
-    has_bazel_host_tool = any("bazel_host_tool" in t for t, _ in new.values())
+    has_bazel_host_tool = any(
+        bool(t & {"bazel_host_tool", "bazel_ffx_tool"}) for t, _ in new.values()
+    )
     had_bazel_input = any(t & GN_BAZEL_INPUT_TEMPLATES for t, _ in old.values())
+    folded_from_group, folded_into_group = find_folded_forwarding_groups(
+        before, old, new, bazel_names, pkg
+    )
     for name, (old_types, _) in sorted(old.items()):
+        if name in folded_into_group:
+            continue
+        orig_name = folded_from_group.get(name, name)
+        if name in folded_from_group:
+            old_types = old[orig_name][0]
         label = f"//{pkg}:{name}"
         if name in new:
             new_types, line = new[name]
             if new_types & GN_BAZEL_INPUT_TEMPLATES and (
                 has_bazel_host_tool or bazel_input_generator_migrated(after, name, pkg, bazel_names, new)
             ):
-                findings.append(
-                    {
-                        "source": "gn_target_type_parity",
-                        "category": "stale_bazel_input_target",
-                        "severity": "ERROR",
-                        "file": gn_rel,
-                        "line": line,
-                        "message": (
-                            f"`{label}` in `{gn_rel}` still uses `bazel_input_file`/`bazel_input_directory` for a "
-                            f"target now built in `{bazel_rel}` (or wrapped by `bazel_host_tool()`). A "
-                            "`bazel_host_tool()` or Bazel-migrated target must never be bridged back to Bazel via "
-                            "`bazel_input_file()`."
-                        ),
-                        "remediation": (
-                            f"Replace `bazel_input_file(\"{name}\")` (and any `else` branch) in `{gn_rel}` with an "
-                            f"empty `group(\"{name}\") {{}}` for soft-transitioning references in other repositories "
-                            "(or delete it if unreferenced), wrap migrated host binaries in `bazel_host_tool()` "
-                            "instead of dual-building them with `bazel2gn`, and update any "
-                            f"`@gn_targets//.../{pkg}:...` references in `.bzl` or `BUILD.bazel` files to point "
-                            f"directly at the migrated target in `//{pkg}`."
-                        ),
-                    }
+                _emit(
+                    findings,
+                    "stale_bazel_input_target",
+                    "ERROR",
+                    gn_rel,
+                    line,
+                    f"`{label}` in `{gn_rel}` still uses `bazel_input_file`/`bazel_input_directory` for a "
+                    f"target now built in `{bazel_rel}` (or wrapped by `bazel_host_tool()`). A "
+                    "`bazel_host_tool()` or Bazel-migrated target must never be bridged back to Bazel via "
+                    "`bazel_input_file()`.",
+                    f'Replace `bazel_input_file("{name}")` (and any `else` branch) in `{gn_rel}` with an '
+                    f'empty `group("{name}") {{}}` for soft-transitioning references in other repositories '
+                    "(or delete it if unreferenced), wrap migrated host binaries in `bazel_host_tool()` "
+                    "instead of dual-building them with `bazel2gn`, and update any "
+                    f"`@gn_targets//.../{pkg}:...` references in `.bzl` or `BUILD.bazel` files to point "
+                    f"directly at the migrated target in `//{pkg}`.",
                 )
                 continue
+            has_bazel_test_suite = any("bazel_test_suite" in t for t, _ in new.values())
             is_test_suite_conversion = (
-                FX_TEST_AVAILABLE
-                and new_types == {"bazel_test_suite"}
+                (
+                    new_types == {"bazel_test_suite"}
+                    or (new_types == {"group"} and has_bazel_test_suite)
+                )
                 and old_types <= GN_TEST_TEMPLATES
             )
             is_host_tool_conversion = (
                 has_bazel_host_tool
-                and new_types <= {"bazel_host_tool", "group"}
+                and new_types <= {"bazel_host_tool", "bazel_ffx_tool", "group"}
                 and old_types <= GN_HOST_TOOL_TEMPLATES | GN_BAZEL_INPUT_TEMPLATES | {"group"}
             )
             is_bazel_input_transition = (
@@ -445,12 +882,25 @@ for pkg in sorted(candidate_dirs):
                 and new_types == {"group"}
                 and old_types <= GN_BAZEL_INPUT_TEMPLATES | {"group"}
             )
+            # Check whether a GN fuchsia_package or fuchsia_package_with_single_component
+            # was migrated to fx_package in BUILD.bazel while retaining a thin
+            # bazel_fuchsia_package wrapper (or forwarding group) in BUILD.gn.
+            is_fuchsia_package_conversion = (
+                bool(bazel_text)
+                and new_types <= {"bazel_fuchsia_package", "group"}
+                and old_types <= GN_PACKAGE_TEMPLATES | {"group"}
+                and any("bazel_fuchsia_package" in t for t, _ in new.values())
+            )
             # Check whether a rustc_library_with_features template expanded into explicit
             # rustc_library targets for the base target and all feature_sets variants.
             is_feature_set_expansion = False
             if old_types == {"rustc_library_with_features"} and new_types == {"rustc_library"}:
                 code_before = blank_comments(before)
-                pat = re.compile(r'\brustc_library_with_features\(\s*"' + re.escape(name) + r'"\s*\)\s*\{')
+                pat = re.compile(
+                    r'\brustc_library_with_features\(\s*"'
+                    + re.escape(orig_name)
+                    + r'"\s*\)\s*\{'
+                )
                 variant_names = set()
                 for fm in pat.finditer(code_before):
                     fbody = code_before[fm.end() - 1 : call_end(code_before, fm.end() - 1)]
@@ -460,13 +910,165 @@ for pkg in sorted(candidate_dirs):
                 is_feature_set_expansion = all(
                     "rustc_library" in new.get(v, (set(), 0))[0] for v in variant_names
                 )
+            # Accept a GN cc_test_executable converted from a Bazel fx_cc_binary(testonly = True):
+            # bazel2gn maps fx_cc_binary/cc_binary to executable(). The executable must keep
+            # cc_test_executable's LTO config (see append_lost_lto_config_error); prefer
+            # fx_cc_test_binary, which bazel2gn turns into cc_test_executable().
+            is_cc_test_executable_conversion = (
+                old_types == {"cc_test_executable"}
+                and new_types == {"executable"}
+                and name in bazel_names
+                and is_testonly_target(after, name)
+            )
+            if is_cc_test_executable_conversion:
+                was_tmpl = next(iter(old_types))
+                _emit(
+                    findings,
+                    "cc_test_executable_converted",
+                    "INFO",
+                    gn_rel,
+                    line,
+                    f"`{label}` was GN `{was_tmpl}` and is now a bazel2gn-generated\n"
+                    "testonly `executable` from a Bazel fx_cc_binary(testonly = True); this type\n"
+                    "change is accepted as long as the LTO config is kept.",
+                    "None needed for the type change; do not dispute or work around this\n"
+                    "INFO. Keep the LTO config (`cc_test_executable_lost_lto_config`), or\n"
+                    "use `fx_cc_test_binary`, which keeps GN `cc_test_executable()`.",
+                )
+                append_lost_lto_config_error(
+                    findings, before, after, gn_rel, label, name, line, was_tmpl, old_name=orig_name
+                )
+            # Accept a GN C++ `test` that becomes the `cc_test_executable` bazel2gn generates
+            # for a Bazel `fx_cc_test_binary`. Both link with the no-FatLTO config; the GN copy
+            # installs to `bin/` instead of `test/` and doesn't register a host test by itself.
+            is_test_to_cc_test_executable = (
+                old_types == {"test"}
+                and new_types == {"cc_test_executable"}
+                and name in bazel_names
+            )
+            if is_test_to_cc_test_executable and host_test_lost(pkg, orig_name, after):
+                _emit(
+                    findings,
+                    "host_test_lost",
+                    "ERROR",
+                    gn_rel,
+                    line,
+                    f"`{label}` was GN `test()`, which GN built on host as a host test\n"
+                    "(a GN file listed it with `($host_toolchain)`), but the generated\n"
+                    "`cc_test_executable()` doesn't register a host test and no GN `host_test()`\n"
+                    "in this BUILD.gn runs it, so GN silently stops running it.",
+                    f'Add a Bazel `host_test(name = "{name}_host_test", binary = ":{name}",\n'
+                    "target_compatible_with = HOST_OS_CONSTRAINTS)` wrapping the same\n"
+                    "fx_cc_test_binary, exported to CQ as in the coder instructions, and a\n"
+                    "hand-written GN `host_test()` above the BAZEL2GN SENTINEL with\n"
+                    f'`deps = [ ":{name}" ]`, `binary_path` set to the binary and\n'
+                    f'`target = get_label_info(":{name}", "label_with_toolchain")`, and point\n'
+                    "the GN group at it with `($host_toolchain)`, as in the coder instructions.",
+                )
+            elif is_test_to_cc_test_executable:
+                _emit(
+                    findings,
+                    "test_became_cc_test_executable",
+                    "INFO",
+                    gn_rel,
+                    line,
+                    f"`{label}` was GN `test()` and is now the `cc_test_executable()` bazel2gn\n"
+                    "generates for a Bazel fx_cc_test_binary, so this type change is expected.\n"
+                    "Unlike `test()`, it installs to `bin/<output_name>` in packages and doesn't\n"
+                    "register a host test on host.",
+                    "None needed for the type change. Custom manifests that run\n"
+                    "`test/<output_name>` need `fx_packaged_binary(install_root = \"test/\")` or\n"
+                    "`bin/` paths.",
+                )
+            # Also accept a testonly GN `executable` (e.g. from an earlier
+            # fx_cc_binary(testonly = True) migration of a cc_test_executable) that becomes the
+            # `cc_test_executable` of a Bazel fx_cc_test_binary: `cc_test_executable()` is an
+            # `executable()` that only adds the no-FatLTO link config.
+            is_executable_to_cc_test_executable = (
+                old_types == {"executable"}
+                and new_types == {"cc_test_executable"}
+                and name in bazel_names
+                and is_testonly_target(before, orig_name)
+            )
+            if is_executable_to_cc_test_executable:
+                _emit(
+                    findings,
+                    "executable_became_cc_test_executable",
+                    "INFO",
+                    gn_rel,
+                    line,
+                    f"`{label}` was a testonly GN `executable()` and is now the\n"
+                    "`cc_test_executable()` bazel2gn generates for a Bazel fx_cc_test_binary,\n"
+                    "which only adds the no-FatLTO link config, so this type change is expected.",
+                    "None needed; do not dispute or work around this INFO.",
+                )
+            # Accept a GN `fuchsia_unittest_package` or `fuchsia_unittest_component` that
+            # becomes `fuchsia_test_package` or `fuchsia_test_component` below the sentinel
+            # when migrated to `fx_package(test_components = [...])`, `fx_test_component`, or
+            # multi-binary `fx_unittest_package` in BUILD.bazel (e.g. for a custom .cml
+            # manifest or test_type; fuchsia_unittest_package.gni and
+            # fuchsia_unittest_component.gni expand to those templates internally).
+            is_unittest_package_unwrap = (
+                old_types == {"fuchsia_unittest_package"}
+                and new_types == {"fuchsia_test_package"}
+                and name in bazel_names
+            )
+            if is_unittest_package_unwrap:
+                _emit(
+                    findings,
+                    "unittest_package_unwrapped",
+                    "INFO",
+                    gn_rel,
+                    line,
+                    f"`{label}` was GN `fuchsia_unittest_package` and is now a "
+                    "bazel2gn-generated `fuchsia_test_package` (which "
+                    "`fuchsia_unittest_package.gni` expands to internally when "
+                    "unrolled in Bazel for a custom manifest, test_type, or "
+                    "multiple test components).",
+                    "None needed; do not dispute or work around this INFO.",
+                )
+            is_unittest_component_unwrap = (
+                is_test_root_component_in_base(before, orig_name, old_types)
+                and new_types == {"fuchsia_test_component"}
+                and name in bazel_names
+            )
+            if is_unittest_component_unwrap:
+                was_comp_tmpl = next(iter(old_types))
+                _emit(
+                    findings,
+                    "unittest_component_unwrapped",
+                    "INFO",
+                    gn_rel,
+                    line,
+                    f"`{label}` was GN `{was_comp_tmpl}` and is now a "
+                    "bazel2gn-generated `fuchsia_test_component` (required when "
+                    "packaged via `fx_package(test_components = [...])` in Bazel).",
+                    "None needed; do not dispute or work around this INFO.",
+                )
+            # Without `test_type`, `fuchsia_test_component` and `testonly` `fuchsia_component`
+            # expand identically (//build/components/fuchsia_test_component.gni): helper
+            # components migrate to `fx_component(testonly = True)` (`fuchsia_component`),
+            # while test roots in `fx_package(test_components = [...])` require
+            # `fx_test_component` (`fuchsia_test_component`).
+            equiv_test_comp = equivalent_test_component_templates(
+                before, after, orig_name, name, old_types, new_types
+            )
             if new_types != old_types and not (
-                is_test_suite_conversion
+                is_cc_test_executable_conversion
+                or is_test_to_cc_test_executable
+                or is_executable_to_cc_test_executable
+                or is_test_suite_conversion
                 or is_host_tool_conversion
                 or is_bazel_input_transition
+                or is_fuchsia_package_conversion
                 or is_feature_set_expansion
+                or is_unittest_package_unwrap
+                or is_unittest_component_unwrap
+                or equiv_test_comp
             ):
-                findings.append(type_change_finding(label, name, pkg, gn_rel, line, old_types, new_types))
+                findings.append(
+                    type_change_finding(label, name, pkg, gn_rel, line, old_types, new_types)
+                )
         elif name in cc_libs:
             rule, alwayslink, line = cc_libs[name]
             f = alwayslink_finding(label, name, pkg, bazel_rel, rule, alwayslink, line, old_types)
@@ -479,26 +1081,24 @@ for pkg in sorted(candidate_dirs):
             and not is_testonly_target(before, name)
         ):
             was = "/".join(sorted(old_types))
-            findings.append(
-                {
-                    "source": "gn_target_type_parity",
-                    "category": "missing_migrated_target",
-                    "severity": "ERROR",
-                    "file": bazel_rel,
-                    "line": 1,
-                    "message": (
-                        f"`{label}` (GN `{was}`) existed in `{gn_rel}` at `{change_base}` but is missing from both "
-                        f"`{bazel_rel}` and `{gn_rel}`. Every convertible non-test GN target must have a "
-                        f"corresponding target in `{bazel_rel}` (or remain in `{gn_rel}` above the BAZEL2GN SENTINEL "
-                        "if blocked by a GN-only attribute)."
-                    ),
-                    "remediation": (
-                        f"Migrate `{name}` (`{was}`) to `{bazel_rel}` and run `fx bazel2gn -d {pkg}` (or restore it "
-                        f"in `{gn_rel}` if it cannot be migrated). If dropping `{label}` was intentional because it "
-                        "had zero reverse dependencies and is dead code, dispute this finding in the CoderReport."
-                    ),
-                }
+            _emit(
+                findings,
+                "missing_migrated_target",
+                "ERROR",
+                bazel_rel,
+                1,
+                f"`{label}` (GN `{was}`) existed in `{gn_rel}` in base GN but is missing from both "
+                f"`{bazel_rel}` and `{gn_rel}`. Every convertible non-test GN target must have a "
+                f"corresponding target in `{bazel_rel}` (or remain in `{gn_rel}` above the BAZEL2GN SENTINEL "
+                "if blocked by a GN-only attribute).",
+                f"Migrate `{name}` (`{was}`) to `{bazel_rel}` and run `fx bazel2gn -d {pkg}` (or restore it "
+                f"in `{gn_rel}` if it cannot be migrated). If dropping `{label}` was intentional because it "
+                "had zero reverse dependencies and is dead code, dispute this finding in the CoderReport.",
             )
+
+    check_renamed_cc_test_executable_lto_config(
+        findings, before, after, old, new, bazel_text, bazel_names, gn_rel
+    )
 
     if bazel_text and (had_bazel_input or has_bazel_host_tool):
         gn_targets_pat = re.compile(r'@gn_targets//(?:[^\s"\':]+/)?' + re.escape(pkg) + r'(?::([^\s"\']+))?')
@@ -514,24 +1114,18 @@ for pkg in sorted(candidate_dirs):
                         continue
                     code_f = blank_comments(txt)
                     for gm in gn_targets_pat.finditer(code_f):
-                        findings.append(
-                            {
-                                "source": "gn_target_type_parity",
-                                "category": "stale_gn_targets_reference",
-                                "severity": "ERROR",
-                                "file": rel_f,
-                                "line": line_of(code_f, gm.start()),
-                                "message": (
-                                    f"`{rel_f}` still references `{gm.group(0)}`, which bridged `//{pkg}` from GN "
-                                    f"via `bazel_input_file`, even though `//{pkg}` is now migrated to `{bazel_rel}`."
-                                ),
-                                "remediation": (
-                                    f"Replace `{gm.group(0)}` in `{rel_f}` with the migrated Bazel target label in "
-                                    f"`//{pkg}` (e.g. `//{pkg}:<target>`) so Bazel rules use the Bazel-compiled "
-                                    f"target directly, and ensure `{bazel_rel}` grants visibility to `{rel_f}`'s "
-                                    "package or callers (such as `\"//build/bazel:__subpackages__\"`)."
-                                ),
-                            }
+                        _emit(
+                            findings,
+                            "stale_gn_targets_reference",
+                            "ERROR",
+                            rel_f,
+                            line_of(code_f, gm.start()),
+                            f"`{rel_f}` still references `{gm.group(0)}`, which bridged `//{pkg}` from GN "
+                            f"via `bazel_input_file`, even though `//{pkg}` is now migrated to `{bazel_rel}`.",
+                            f"Replace `{gm.group(0)}` in `{rel_f}` with the migrated Bazel target label in "
+                            f"`//{pkg}` (e.g. `//{pkg}:<target>`) so Bazel rules use the Bazel-compiled "
+                            f"target directly, and ensure `{bazel_rel}` grants visibility to `{rel_f}`'s "
+                            'package or callers (such as `"//build/bazel:__subpackages__"`).',
                         )
 
 print(json.dumps(findings, indent=2))

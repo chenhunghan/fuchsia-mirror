@@ -162,7 +162,6 @@ template("fuchsia_test_package") {
       host_test_component_target =
           "//src/developer/ffx:suite_test_data($host_toolchain)"
 
-      resummarize_target = "//tools/test_pilot/post_processing/resummarize:test_deps($host_toolchain)"
       test_pilot_target = "//tools/test_pilot:test_deps($host_toolchain)"
     }
 
@@ -207,9 +206,8 @@ template("fuchsia_test_package") {
 
         # _test_config is used to produce a JSON file that controls test-pilot
         # in the execution of the test in question. In this case, the test is
-        # executed by first running ffx and then running the post-processor
-        # 'resummarize', which produces a summary in the format suitable for
-        # consumption by botanist.
+        # executed by running ffx, which produces a summary in the format
+        # suitable for consumption by test-pilot and botanist.
         #
         # test-pilot performs a number of substitutions at test runtime. JSON
         # properties of the form 'foo: { from_env: "BAR" }' assign the value of
@@ -225,10 +223,10 @@ template("fuchsia_test_package") {
         #
         # This configuration uses the environment variable "FUCHSIA_HOST_TOOLS"
         # to locate binaries that are needed at test runtime: specifically
-        # test-pilot, ffx, and resummarize. When botanist runs a test, host
-        # tools can be in any number of different locations depending on the
-        # bot. ./host_x64 and ./host_arm64 are the most common locations, but
-        # other directories are used as well.
+        # test-pilot and ffx. When botanist runs a test, host tools can be in
+        # any number of different locations depending on the bot. ./host_x64
+        # and ./host_arm64 are the most common locations, but other directories
+        # are used as well.
         _test_config = {
         }
         _test_config = {
@@ -273,26 +271,6 @@ template("fuchsia_test_package") {
           ffx_config = {
             try_from_env = "FFX_CONFIG"
           }
-          botanist_output_summary_file = {
-            try_from_env = "TEST_OUTPUT_SUMMARY_PATH"
-          }
-          output_processors = [
-            # This is the resummarize post-processor that translates the output
-            # summary into a form required by botanist. Note that resummarize is
-            # only executed if TEST_OUTPUT_SUMMARY_PATH is defined in the
-            # runtime environment.
-            {
-              binary = "{host_tools_dir}/resummarize"
-              args = [
-                "{test_config_file}",
-                "{output_directory}/output_summary.json",
-                "{botanist_output_summary_file}",
-              ]
-              use_on_success = true
-              use_on_failure = true
-              use_if_defined = [ "botanist_output_summary_file" ]
-            },
-          ]
 
           require = [
             "target",
@@ -393,7 +371,6 @@ template("fuchsia_test_package") {
           data_deps = [
             ffx_test_tool_target,
             host_test_component_target,
-            resummarize_target,
             test_pilot_target,
             test_script_generator_target,
           ]

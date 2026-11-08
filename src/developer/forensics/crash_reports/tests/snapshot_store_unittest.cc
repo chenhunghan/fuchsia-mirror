@@ -4,6 +4,8 @@
 
 #include "src/developer/forensics/crash_reports/snapshot_store.h"
 
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
+
 #include <fstream>
 #include <memory>
 #include <string>
@@ -11,7 +13,6 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-#include "fuchsia/feedback/cpp/fidl.h"
 #include "src/developer/forensics/crash_reports/constants.h"
 #include "src/developer/forensics/crash_reports/snapshot.h"
 #include "src/developer/forensics/feedback/annotations/annotation_manager.h"
@@ -19,9 +20,9 @@
 #include "src/developer/forensics/testing/gpretty_printers.h"  // IWYU pragma: keep
 #include "src/developer/forensics/testing/unit_test_fixture.h"
 #include "src/developer/forensics/utils/storage_size.h"
+#include "src/developer/forensics/utils/vmo.h"
 #include "src/lib/files/path.h"
 #include "src/lib/files/scoped_temp_dir.h"
-#include "src/lib/fsl/vmo/strings.h"
 
 namespace forensics::crash_reports {
 namespace {
@@ -71,10 +72,10 @@ class SnapshotStoreTest : public UnitTestFixture {
                                         temp_root, persistent_root, max_archives_size);
   }
 
-  fuchsia::feedback::Attachment GetDefaultAttachment() {
-    fuchsia::feedback::Attachment snapshot;
-    snapshot.key = kDefaultArchiveKey;
-    FX_CHECK(fsl::VmoFromString("", &snapshot.value));
+  fuchsia_feedback::Attachment GetDefaultAttachment() {
+    fuchsia_feedback::Attachment snapshot;
+    snapshot.key(kDefaultArchiveKey);
+    snapshot.value(BufferFromString("").value());
     return snapshot;
   }
 
@@ -160,9 +161,9 @@ TEST_F(SnapshotStoreTest, Check_NoGarbageCollectionIfSnapshotTooBig) {
   AddDefaultSnapshot();
   ASSERT_EQ(snapshot_store_->SnapshotLocation(kTestUuid), ItemLocation::kMemory);
 
-  fuchsia::feedback::Attachment big_snapshot;
-  big_snapshot.key = kDefaultArchiveKey;
-  FX_CHECK(fsl::VmoFromString("Too big for the store", &big_snapshot.value));
+  fuchsia_feedback::Attachment big_snapshot;
+  big_snapshot.key(kDefaultArchiveKey);
+  big_snapshot.value(BufferFromString("Too big for the store").value());
 
   const std::string kTestUuid2 = "test uuid 2";
   snapshot_store_->AddSnapshot(kTestUuid2, std::move(big_snapshot));

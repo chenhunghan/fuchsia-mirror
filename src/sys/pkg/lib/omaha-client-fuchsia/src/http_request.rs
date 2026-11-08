@@ -154,13 +154,35 @@ impl Default for FuchsiaHttpRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fuchsia_hyper_test_support::TestServer;
     use fuchsia_hyper_test_support::fault_injection::{Hang, HangBody};
-    use fuchsia_hyper_test_support::handler::StaticResponse;
+    use fuchsia_hyper_test_support::handler::{ForPath, StaticResponse};
+    use fuchsia_hyper_test_support::{Handler, TestServer};
+
+    // Tests run concurrently against a cold test realm where `#http-client` and `#dns_resolver`
+    // (used to resolve `TestServer`'s `localhost` URL) start lazily and sequentially on the first
+    // request. On slower or coverage-instrumented emulated builders (e.g. QEMU-riscv64 or
+    // x64-coverage-rust), those cold starts plus transferring a 1 MiB response body can exceed 5
+    // seconds, so use a generous 30-second timeout when not testing timeout expiration.
+    const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
     /// Helper that constructs a Request for a given path on the given test server.
     fn make_request_for(server: &TestServer, path: &str) -> Request<Body> {
         Request::builder().uri(server.local_url_for_path(path)).body(Body::default()).unwrap()
+    }
+
+    /// Starts a `TestServer` with `handler` and completes an initial request so `#http-client` and
+    /// `#dns_resolver` are already running before short-timeout assertions begin.
+    async fn start_warmed_up_server(handler: impl Handler + 'static) -> TestServer {
+        let server = TestServer::builder()
+            .handler(ForPath::new("/warmup", StaticResponse::ok_body("")))
+            .handler(handler)
+            .start()
+            .await;
+        let _: Response<Vec<u8>> = FuchsiaHttpRequest::using_timeout(TEST_TIMEOUT)
+            .request(make_request_for(&server, "warmup"))
+            .await
+            .unwrap();
+        server
     }
 
     /// Test that the HttpRequest implementation works against a simple server and returns
@@ -169,7 +191,7 @@ mod tests {
     async fn test_simple_request() {
         let server =
             TestServer::builder().handler(StaticResponse::ok_body("some data")).start().await;
-        let mut client = FuchsiaHttpRequest::using_timeout(Duration::from_secs(5));
+        let mut client = FuchsiaHttpRequest::using_timeout(TEST_TIMEOUT);
         let response = client.request(make_request_for(&server, "some/path")).await.unwrap();
         let string = String::from_utf8(response.into_body()).unwrap();
         assert_eq!(string, "some data");
@@ -179,7 +201,7 @@ mod tests {
     /// a response over the socket after accepting the connection.
     #[fuchsia::test]
     async fn test_hang() {
-        let server = TestServer::builder().handler(Hang).start().await;
+        let server = start_warmed_up_server(Hang).await;
         let mut client = FuchsiaHttpRequest::using_timeout(Duration::from_secs(1));
         let response = client.request(make_request_for(&server, "some/path")).await;
         assert!(response.unwrap_err().is_timeout());
@@ -189,7 +211,7 @@ mod tests {
     /// a the entire body that's expected (after returning a response header).
     #[fuchsia::test]
     async fn test_hang_body() {
-        let server = TestServer::builder().handler(HangBody::content_length(500)).start().await;
+        let server = start_warmed_up_server(HangBody::content_length(500)).await;
         let mut client = FuchsiaHttpRequest::using_timeout(Duration::from_secs(1));
         let response = client.request(make_request_for(&server, "some/path")).await;
         assert!(response.unwrap_err().is_timeout());
@@ -200,7 +222,7 @@ mod tests {
     #[fuchsia::test]
     async fn test_post_and_headers_with_non_200_status() {
         struct CustomPostHandler;
-        impl fuchsia_hyper_test_support::Handler for CustomPostHandler {
+        impl Handler for CustomPostHandler {
             fn handles(
                 &self,
                 request: &hyper::Request<hyper::body::Incoming>,
@@ -226,7 +248,7 @@ mod tests {
         }
 
         let server = TestServer::builder().handler(CustomPostHandler).start().await;
-        let mut client = FuchsiaHttpRequest::using_timeout(Duration::from_secs(5));
+        let mut client = FuchsiaHttpRequest::using_timeout(TEST_TIMEOUT);
         let req = Request::builder()
             .method(http::Method::POST)
             .uri(server.local_url_for_path("update"))
@@ -249,7 +271,7 @@ mod tests {
             .handler(StaticResponse::ok_body(vec![b'a'; MAX_RESPONSE_BODY_SIZE + 1]))
             .start()
             .await;
-        let mut client = FuchsiaHttpRequest::using_timeout(Duration::from_secs(5));
+        let mut client = FuchsiaHttpRequest::using_timeout(TEST_TIMEOUT);
         let response = client.request(make_request_for(&server, "some/path")).await;
         let err = response.unwrap_err();
         std::assert_matches!(

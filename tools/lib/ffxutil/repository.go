@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strconv"
 )
 
@@ -62,11 +63,19 @@ func (f *FFXInstance) ListPackageServer(ctx context.Context) ([]string, error) {
 }
 
 // Forward forwards connections between the host and the target.
-func (f *FFXInstance) Forward(ctx context.Context, port int) error {
+func (f *FFXInstance) Forward(ctx context.Context, port int, stdout io.Writer) error {
 	if f.target == "" {
 		return fmt.Errorf("no target is set")
 	}
-	return f.invoker([]string{"forward", fmt.Sprintf("%d<=0", port)}).setTarget(f.target).setTimeout(0).run(ctx)
+	invoker := f.invoker([]string{"forward", fmt.Sprintf("%d<=0", port)}).setTarget(f.target).setTimeout(0)
+	if stdout != nil {
+		if f.stdout != nil {
+			invoker.setStdout(io.MultiWriter(f.stdout, stdout))
+		} else {
+			invoker.setStdout(stdout)
+		}
+	}
+	return invoker.run(ctx)
 }
 
 // RegisterRepository registers the given package repository server with the target.

@@ -64,7 +64,10 @@ static SYMBOLIZER_LOCK: Mutex<()> = Mutex::new(());
 impl Symbolizer {
     /// Create a new symbolizer instance with a specific ffx context. Normally only needed in tests.
     pub fn with_context(context: &EnvironmentContext) -> Result<Self, CreateSymbolizerError> {
-        symbol_index::ensure_symbol_index_registered(&context)?;
+        if !context.is_strict() {
+            // For the user's convenience, register the symbol index if it isn't already.
+            symbol_index::ensure_symbol_index_registered(&context)?;
+        }
 
         let _global_init = global_init::GlobalInitHandle::new();
 

@@ -77,7 +77,7 @@ impl CrashReporter {
             .thread
             .get()
             .expect("handles for crashing threads are still valid")
-            .koid;
+            .koid();
         let linux_pid = current_task.pid.id as i64;
         let thread_name = current_task.command().to_string();
 

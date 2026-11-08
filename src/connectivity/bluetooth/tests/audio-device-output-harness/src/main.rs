@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 use anyhow::Context;
-use fidl_fuchsia_media::{AudioChannelId, AudioDeviceEnumeratorMarker, AudioPcmMode, PcmFormat};
+use fidl_fuchsia_media::{AudioChannelId2, AudioDeviceEnumeratorMarker, AudioPcmMode2, PcmFormat2};
 use fuchsia_audio_device::stream_config::SoftStreamConfig;
 
 use futures::StreamExt;
@@ -12,11 +12,12 @@ use log::info;
 #[fuchsia::main(logging_tags = ["audio-device-output-harness"])]
 async fn main() -> Result<(), anyhow::Error> {
     const LOCAL_MONOTONIC_CLOCK_DOMAIN: u32 = 0;
-    let pcm_format = PcmFormat {
-        pcm_mode: AudioPcmMode::Linear,
-        bits_per_sample: 16,
-        frames_per_second: 48000,
-        channel_map: vec![AudioChannelId::Lf, AudioChannelId::Rf],
+    let pcm_format = PcmFormat2 {
+        pcm_mode: Some(AudioPcmMode2::Linear),
+        bits_per_sample: Some(16),
+        frames_per_second: Some(48000),
+        channel_map: Some(vec![AudioChannelId2::Fl, AudioChannelId2::Fr]),
+        ..Default::default()
     };
 
     let id = [2; 16];

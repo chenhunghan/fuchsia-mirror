@@ -13,19 +13,19 @@ use crate::fuchsia::volume::FxVolume;
 use anyhow::{Context as _, Error};
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use delivery_blob::compression::{
-    ChunkInfo, ChunkedDecompressor, CompressionAlgorithm, CompressionInfo, decode_archive,
+    ChunkInfo, ChunkedArchiveOptions, ChunkedDecompressor, CompressionAlgorithm, Compressor,
+    RAW_CHUNK_ALIGNMENT, decode_archive,
 };
 use delivery_blob::{DeliveryBlob, MINIMUM_HEADER_SIZE};
 use fidl::endpoints::RequestStream as _;
 use fidl_fuchsia_fxfs::{BlobWriterRequest, BlobWriterRequestStream};
 use fuchsia_merkle::{BufferedMerkleRootBuilder, Hash};
-use futures::{TryStreamExt as _, try_join};
+use futures::TryStreamExt as _;
 use fxfs::blob_metadata::{
     BlobFormat, BlobMetadata, BlobMetadataLeafHashCollector, FxfsBlobMetadataExt, MerkleLeaves,
 };
 use fxfs::errors::FxfsError;
 use fxfs::object_handle::ObjectHandle;
-use fxfs::object_store::data_object_handle::OverwriteOptions;
 use fxfs::object_store::directory::{ReplacedChild, replace_child_with_object};
 use fxfs::object_store::transaction::{LockKey, lock_keys};
 use fxfs::object_store::{
@@ -90,6 +90,24 @@ impl Stage {
     }
 }
 
+/// Format for which a blob should be written to storage via `BlobWriter`.
+///
+/// Note that this only applies to blobs written by Fxblob at runtime; blobs in a flashed image may
+/// be in a different format.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlobStorageFormat {
+    /// The blob will be written uncompressed.
+    Uncompressed,
+    /// Compressed delivery blobs will be re-compressed to the chunked-compression V3 format with
+    /// Zstd. Uncompressed delivery blobs will still be written uncompressed.
+    Zstd,
+    /// Compressed delivery blobs will be re-compressed to the chunked-compression V3 format with
+    /// LZ4. Uncompressed delivery blobs will still be written uncompressed.
+    Lz4,
+    /// The blob will be written in the format that it's received.
+    DeliveryBlob,
+}
+
 /// Represents an RFC-0207 compliant delivery blob that is being written. Used to implement the
 /// fuchsia.fxfs/BlobWriter protocol (see [`Self::handle_requests`]).
 ///
@@ -103,6 +121,8 @@ pub struct DeliveryBlobWriter {
     /// Either Stage::Writing with an associated Handle to this blob within the filesystem, or
     /// Stage::Complete once the blob has finished writing.
     stage: Stage,
+    /// Format for which a blob should be written to storage.
+    storage_format: BlobStorageFormat,
     /// Ring buffer used for the fuchsia.fxfs/BlobWriter protocol. Initialized when
     /// [`Self::get_vmo`] is called.
     ring_buffer: Option<RingBuffer>,
@@ -113,22 +133,30 @@ pub struct DeliveryBlobWriter {
     /// The Merkle tree builder for this blob. Once the Merkle tree is complete, the root hash of
     /// the blob is verified, before storing the Merkle tree as part of the blob's metadata.
     tree_builder: BufferedMerkleRootBuilder<BlobMetadataLeafHashCollector>,
-    /// Set to true when we've allocated space for the blob payload on disk.
-    allocated_space: bool,
-    /// How many bytes from the delivery blob payload have been written to disk so far.
-    payload_persisted: u64,
-    /// Offset within the delivery blob payload we started writing data to disk.
-    payload_offset: u64,
     /// Streaming decompressor used to calculate the Merkle tree of compressed delivery blobs.
     /// Initialized once the seek table has been decoded and verified.
     decompressor: Option<ChunkedDecompressor>,
+    /// Validated seek table metadata for compressed passthrough writes, cached during
+    /// [`Self::decode_archive_header`] so [`Self::generate_metadata`] doesn't re-parse it.
+    parsed_seek_table: Option<ParsedSeekTable>,
+    /// State for re-compressing a blob into a different compressed format. Only set when
+    /// `storage_format` requires re-compression.
+    recompressor: Option<Recompressor>,
+    /// Buffer holding bytes ready to be written to storage.
+    write_buffer: Vec<u8>,
+    /// How many bytes from `write_buffer` have been written to disk so far.
+    payload_persisted: u64,
 }
 
 impl DeliveryBlobWriter {
     /// Creates a new object in the `parent` object store that manages writing the blob `hash`.
     /// After the blob is fully written and verified, it will be added as an entry under `parent`.
     /// If this object is dropped before the blob is fully written/verified, it will be tombstoned.
-    pub(crate) async fn new(parent: &Arc<BlobDirectory>, hash: Hash) -> Result<Self, Error> {
+    pub(crate) async fn new(
+        parent: &Arc<BlobDirectory>,
+        hash: Hash,
+        storage_format: BlobStorageFormat,
+    ) -> Result<Self, Error> {
         let parent = parent.directory().clone();
         let store = parent.store();
         let keys = lock_keys![LockKey::object(store.store_object_id(), parent.object_id())];
@@ -152,14 +180,16 @@ impl DeliveryBlobWriter {
             hash,
             parent,
             stage: Stage::Writing(handle),
+            storage_format,
             ring_buffer: None,
-            buffer: Default::default(),
+            buffer: Vec::with_capacity(PAYLOAD_BUFFER_FLUSH_THRESHOLD),
             header: None,
             tree_builder: BufferedMerkleRootBuilder::new(BlobMetadataLeafHashCollector::new()),
-            allocated_space: false,
-            payload_persisted: 0,
-            payload_offset: 0,
             decompressor: None,
+            parsed_seek_table: None,
+            recompressor: None,
+            write_buffer: Vec::new(),
+            payload_persisted: 0,
         })
     }
 }
@@ -187,148 +217,205 @@ impl DeliveryBlobWriter {
         self.ring_buffer.as_ref().unwrap()
     }
 
-    fn decompressor(&self) -> &ChunkedDecompressor {
-        self.decompressor.as_ref().unwrap()
-    }
-
-    fn storage_size(&self) -> usize {
-        let header = self.header();
-        if header.is_compressed {
-            let seek_table = self.decompressor().seek_table();
-            if seek_table.is_empty() {
-                return 0;
-            }
-            // TODO(https://fxbug.dev/42078146): If the uncompressed size of the blob is smaller than the
-            // filesystem's block size, we should decompress it before persisting it on disk.
-            return seek_table.last().unwrap().compressed_range.end;
-        }
-        // Data is uncompressed, storage size is equal to the payload length.
-        header.payload_length
-    }
-
-    async fn write_payload(&mut self) -> Result<(), Error> {
-        self.ensure_allocated().await.with_context(|| {
-            format!(
-                "Failed to allocate space for blob (required space = {} bytes)",
-                self.storage_size()
-            )
-        })?;
-        let final_write = self.payload_persisted.checked_add(self.buffer.len() as u64)
-            == Some(self.header().payload_length as u64);
-        let block_size = self.stage.handle().block_size();
+    async fn flush_write_buffer(&mut self, is_final: bool) -> Result<(), Error> {
+        let handle = self.stage.handle();
+        let block_size = handle.block_size();
         let flush_threshold =
             std::cmp::max(block_size.get() as usize, PAYLOAD_BUFFER_FLUSH_THRESHOLD);
-        // If we expect more data but haven't met the flush threshold, wait for more.
-        if !final_write && self.buffer.len() < flush_threshold {
+        if !is_final && self.write_buffer.len() < flush_threshold {
             return Ok(());
         }
-        let len = if final_write {
-            self.buffer.len()
+        let len = if is_final {
+            self.write_buffer.len()
         } else {
-            block_size.align_down(self.buffer.len() as u64) as usize
+            block_size.align_down(self.write_buffer.len() as u64) as usize
         };
-        // Update Merkle tree.
-        let data = &self.buffer.as_slice()[..len];
-        let update_merkle_tree_fut = async {
-            if let Some(ref mut decompressor) = self.decompressor {
-                // Data is compressed, decompress to update Merkle tree.
-                decompressor
-                    .update(data, &mut |chunk_data| self.tree_builder.write(chunk_data))
-                    .context("Failed to decompress archive")?;
-            } else {
-                // Data is uncompressed, use payload to update Merkle tree.
-                self.tree_builder.write(data);
-            }
-            Ok::<(), Error>(())
-        };
-
-        debug_assert!(self.payload_persisted >= self.payload_offset);
-
-        // Copy data into transfer buffer, zero pad if required.
+        if len == 0 {
+            return Ok(());
+        }
         let aligned_len = block_size.align_up(len as u64).ok_or(FxfsError::OutOfRange)? as usize;
-        let mut buffer = self.stage.handle().allocate_buffer(aligned_len).await;
-        buffer.as_mut().subslice_mut(..len).copy_from_slice(&self.buffer[..len]);
-        buffer.as_mut().subslice_mut(len..).fill(0);
+        let mut transfer_buf = handle.allocate_buffer(aligned_len).await;
+        transfer_buf.as_mut().subslice_mut(..len).copy_from_slice(&self.write_buffer[..len]);
+        transfer_buf.as_mut().subslice_mut(len..).fill(0);
 
-        // Overwrite allocated bytes in the object's handle.
-        let overwrite_fut = async {
-            self.stage
-                .handle()
-                .overwrite(
-                    self.payload_persisted - self.payload_offset,
-                    buffer.as_mut(),
-                    OverwriteOptions::default(),
-                )
-                .await
-                .context("Failed to write data to object handle.")
-        };
-        // NOTE: `overwrite_fut` needs to be polled first to initiate the asynchronous write to the
-        // block device which will then run in parallel with the synchronous
-        // `update_merkle_tree_fut`.
-        try_join!(overwrite_fut, update_merkle_tree_fut)?;
-        self.buffer.drain(..len);
-        self.payload_persisted =
+        let new_persisted =
             self.payload_persisted.checked_add(len as u64).ok_or(FxfsError::OutOfRange)?;
+        let offset = self.payload_persisted;
+        let range = offset..offset + aligned_len as u64;
+
+        let mut transaction =
+            handle.new_transaction().await.context("Failed to create transaction.")?;
+        handle
+            .multi_write(
+                &mut transaction,
+                handle.attribute_id(),
+                std::slice::from_ref(&range),
+                transfer_buf.as_mut(),
+            )
+            .await
+            .context("Failed to write data to object handle.")?;
+        handle.txn_update_size(&mut transaction, new_persisted, None).await?;
+        transaction.commit().await.context("Failed to commit transaction.")?;
+
+        self.write_buffer.drain(..len);
+        self.payload_persisted = new_persisted;
         Ok(())
     }
 
-    fn generate_metadata(&self, hashes: MerkleLeaves) -> Result<BlobMetadata, Error> {
-        let metadata = match &self.decompressor {
-            // Uncompressed blob.
-            None => BlobMetadata { merkle_leaves: hashes, format: BlobFormat::Uncompressed },
-            // The delivery blob said it was compressed but there are no chunks so it's actually the
-            // empty blob.
-            Some(decompressor) if decompressor.seek_table().is_empty() => BlobMetadata::empty(),
-            // Compressed blob.
-            Some(decompressor) => {
-                let (uncompressed_size, chunk_size, compressed_offsets) =
-                    parse_seek_table(decompressor.seek_table())
-                        .context("Failed to parse seek table.")?;
-                let format = match decompressor.algorithm() {
+    fn headers_decoded(&self) -> bool {
+        self.header
+            .as_ref()
+            .is_some_and(|header| !header.is_compressed || self.decompressor.is_some())
+    }
+
+    /// Returns true if the delivery blob payload should be written directly to storage without
+    /// transcoding (either because the incoming delivery blob is uncompressed or because
+    /// `self.storage_format` is `BlobStorageFormat::DeliveryBlob`).
+    fn is_passthrough(&self) -> bool {
+        !self.header().is_compressed || self.storage_format == BlobStorageFormat::DeliveryBlob
+    }
+
+    /// Updates the Merkle tree and stages output bytes for a single decompressed chunk.
+    fn process_decompressed_chunk(&mut self, chunk: &[u8]) -> Result<(), Error> {
+        self.tree_builder.write(chunk);
+        match self.storage_format {
+            BlobStorageFormat::DeliveryBlob => unreachable!(),
+            BlobStorageFormat::Uncompressed => {
+                self.write_buffer.extend_from_slice(chunk);
+            }
+            BlobStorageFormat::Zstd | BlobStorageFormat::Lz4 => {
+                self.recompressor.as_mut().unwrap().write(chunk, &mut self.write_buffer)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Feeds `input_slice` into `self.decompressor` and processes any resulting decompressed
+    /// chunks.
+    fn decompress_slice(&mut self, input_slice: &[u8]) -> Result<(), Error> {
+        let mut decompressor = self.decompressor.take().unwrap();
+        let mut callback_error = None;
+        let res = decompressor.update(input_slice, &mut |chunk| {
+            if callback_error.is_none() {
+                if let Err(e) = self.process_decompressed_chunk(chunk) {
+                    callback_error = Some(e);
+                }
+            }
+        });
+        self.decompressor = Some(decompressor);
+        res.context("Failed to decompress archive")?;
+        if let Some(err) = callback_error {
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    /// Writes payload bytes that are already in `self.write_buffer` (where the last `new_bytes_len`
+    /// bytes were newly added) directly to storage without transcoding.
+    async fn write_passthrough_payload(&mut self, new_bytes_len: usize) -> Result<(), Error> {
+        let new_bytes = &self.write_buffer[self.write_buffer.len() - new_bytes_len..];
+        if !new_bytes.is_empty() {
+            if self.header().is_compressed {
+                self.decompressor
+                    .as_mut()
+                    .unwrap()
+                    .update(new_bytes, &mut |chunk| {
+                        self.tree_builder.write(chunk);
+                    })
+                    .context("Failed to decompress archive")?;
+            } else {
+                self.tree_builder.write(new_bytes);
+            }
+            self.flush_write_buffer(/*is_final=*/ false).await?;
+        }
+        Ok(())
+    }
+
+    /// Decompresses payload bytes from `self.buffer`, optionally re-compresses them into
+    /// `self.write_buffer`, and flushes ready bytes to storage.
+    async fn write_transcoded_payload(&mut self) -> Result<(), Error> {
+        let buffer = std::mem::take(&mut self.buffer);
+        let mut buf_offset = 0;
+        let res = async {
+            while buf_offset < buffer.len() {
+                let step = match self.decompressor.as_ref().unwrap().bytes_needed_for_next_chunk() {
+                    Some(needed) => std::cmp::min(buffer.len() - buf_offset, needed),
+                    None => buffer.len() - buf_offset,
+                };
+                let input_slice = &buffer[buf_offset..buf_offset + step];
+                buf_offset += step;
+
+                self.decompress_slice(input_slice)?;
+                self.flush_write_buffer(/*is_final=*/ false).await?;
+            }
+            Ok::<(), Error>(())
+        }
+        .await;
+        self.buffer = buffer;
+        self.buffer.clear();
+        res
+    }
+
+    fn generate_metadata(&mut self, hashes: MerkleLeaves) -> Result<BlobMetadata, Error> {
+        if !self.header().is_compressed || self.storage_format == BlobStorageFormat::Uncompressed {
+            return Ok(BlobMetadata { merkle_leaves: hashes, format: BlobFormat::Uncompressed });
+        }
+        let decompressor = self.decompressor.as_ref().unwrap();
+        if decompressor.seek_table().is_empty() {
+            return Ok(BlobMetadata::empty());
+        }
+        let format = match self.storage_format {
+            BlobStorageFormat::Uncompressed => unreachable!(),
+            BlobStorageFormat::Zstd => {
+                let recompressor = self.recompressor.take().unwrap();
+                BlobFormat::ChunkedZstd {
+                    uncompressed_size: recompressor.uncompressed_size,
+                    chunk_size: ChunkedArchiveOptions::V3_CHUNK_SIZE as u64,
+                    compressed_offsets: recompressor.compressed_offsets,
+                }
+            }
+            BlobStorageFormat::Lz4 => {
+                let recompressor = self.recompressor.take().unwrap();
+                BlobFormat::ChunkedLz4WithRawChunks {
+                    uncompressed_size: recompressor.uncompressed_size,
+                    chunk_size: ChunkedArchiveOptions::V3_CHUNK_SIZE as u64,
+                    compressed_offsets: recompressor.compressed_offsets,
+                }
+            }
+            BlobStorageFormat::DeliveryBlob => {
+                let ParsedSeekTable { uncompressed_size, chunk_size, compressed_offsets } =
+                    self.parsed_seek_table.take().unwrap();
+                match decompressor.algorithm() {
                     CompressionAlgorithm::Zstd => BlobFormat::ChunkedZstd {
                         uncompressed_size,
                         chunk_size,
                         compressed_offsets,
                     },
-                    CompressionAlgorithm::Lz4 => {
-                        BlobFormat::ChunkedLz4 { uncompressed_size, chunk_size, compressed_offsets }
-                    }
-                };
-                BlobMetadata { merkle_leaves: hashes, format }
+                    CompressionAlgorithm::Lz4 => BlobFormat::ChunkedLz4WithRawChunks {
+                        uncompressed_size,
+                        chunk_size,
+                        compressed_offsets,
+                    },
+                }
             }
         };
-        Ok(metadata)
-    }
-
-    async fn ensure_allocated(&mut self) -> Result<(), Error> {
-        if self.allocated_space {
-            return Ok(());
-        }
-        let handle = self.stage.handle();
-        let size = self.storage_size() as u64;
-        let mut range = 0..handle.block_size().align_up(size).ok_or(FxfsError::OutOfRange)?;
-        let mut first_time = true;
-        while range.start < range.end {
-            let mut transaction =
-                handle.new_transaction().await.context("Failed to create transaction.")?;
-            if first_time {
-                handle
-                    .grow(&mut transaction, 0, size)
-                    .await
-                    .with_context(|| format!("Failed to grow handle to {} bytes.", size))?;
-                first_time = false;
-            }
-            handle.preallocate_range(&mut transaction, &mut range).await.with_context(|| {
-                format!("Failed to allocate range ({} to {}).", range.start, range.end)
-            })?;
-            transaction.commit().await.context("Failed to commit transaction.")?;
-        }
-        self.allocated_space = true;
-        Ok(())
+        Ok(BlobMetadata { merkle_leaves: hashes, format })
     }
 
     async fn complete(&mut self) -> Result<(), Error> {
-        debug_assert!(self.payload_persisted == self.header().payload_length as u64);
+        if self.header.is_none() || !self.buffer.is_empty() {
+            return Err(FxfsError::IntegrityError).context("Incomplete delivery blob header");
+        }
+        if self.header().is_compressed {
+            let Some(decompressor) = &self.decompressor else {
+                return Err(FxfsError::IntegrityError).context("Incomplete archive header");
+            };
+            if !decompressor.is_complete() {
+                return Err(FxfsError::IntegrityError)
+                    .context("Archive decompressor did not finish all chunks");
+            }
+        }
+
         // Finish building Merkle tree and verify the hash matches the filename.
         let (root, hashes) = std::mem::replace(
             &mut self.tree_builder,
@@ -338,14 +425,29 @@ impl DeliveryBlobWriter {
         if root != self.hash {
             return Err(FxfsError::IntegrityError).with_context(|| {
                 format!(
-                    "Calculated Merkle root ({}) does not match given hash ({}).",
-                    root, self.hash
+                    "Calculated Merkle root ({root}) does not match given hash ({}).",
+                    self.hash
                 )
             });
         }
+
+        // Compress any trailing uncompressed bytes.
+        if let Some(recompressor) = &mut self.recompressor {
+            recompressor.flush(&mut self.write_buffer)?;
+        }
+        self.flush_write_buffer(/*is_final=*/ true).await?;
+
+        // Free temporary buffers and compression state before metadata generation and directory
+        // replacement transactions.
+        self.ring_buffer = None;
+        self.buffer = Vec::new();
+        self.write_buffer = Vec::new();
+
         // Write metadata to disk.
         let metadata =
             self.generate_metadata(hashes).context("Failed to generate metadata for blob.")?;
+        self.decompressor = None;
+        self.recompressor = None;
         metadata.write_to(self.stage.handle()).await.context("Failed to write blob metadata")?;
 
         let name = format!("{}", self.hash);
@@ -364,7 +466,7 @@ impl DeliveryBlobWriter {
         let mut transaction = dir
             .directory()
             .directory()
-            .acquire_context_for_replace(None, &name, false)
+            .acquire_context_for_replace(None, &name, false, &[])
             .await
             .context("Failed to acquire context for replacement.")?
             .transaction;
@@ -387,26 +489,8 @@ impl DeliveryBlobWriter {
                 let pager_info = if volume.use_driver_blob_paging() {
                     None
                 } else {
-                    let compressed_size = self.payload_persisted - self.payload_offset;
-                    let compression_info = match &metadata.format {
-                        BlobFormat::Uncompressed => None,
-                        BlobFormat::ChunkedZstd { chunk_size, compressed_offsets, .. } => {
-                            Some(CompressionInfo::new(
-                                *chunk_size,
-                                compressed_size,
-                                &compressed_offsets,
-                                CompressionAlgorithm::Zstd,
-                            )?)
-                        }
-                        BlobFormat::ChunkedLz4 { chunk_size, compressed_offsets, .. } => {
-                            Some(CompressionInfo::new(
-                                *chunk_size,
-                                compressed_size,
-                                &compressed_offsets,
-                                CompressionAlgorithm::Lz4,
-                            )?)
-                        }
-                    };
+                    let compressed_size = self.payload_persisted;
+                    let compression_info = metadata.format.compression_info(compressed_size)?;
                     let merkle_verifier = metadata.into_merkle_verifier(root)?;
                     Some((merkle_verifier, compression_info))
                 };
@@ -458,12 +542,8 @@ impl DeliveryBlobWriter {
     }
 
     /// Attempts to decode the delivery blob header from `self.buffer`.
-    /// Returns `Ok(true)` if the header is decoded (or was already decoded), or `Ok(false)` if
-    /// more data is needed.
+    /// Returns `Ok(true)` if the header is decoded, or `Ok(false)` if more data is needed.
     fn decode_delivery_blob_header(&mut self) -> Result<bool, Error> {
-        if self.header.is_some() {
-            return Ok(true);
-        }
         // Type 3 delivery blobs are currently UNSTABLE / EXPERIMENTAL and subject to change,
         // so they are gated by `allow_type3_blobs` (defaults to false).
         let allow_type3 = self.parent.store().filesystem().options().allow_type3_blobs;
@@ -491,24 +571,64 @@ impl DeliveryBlobWriter {
     }
 
     /// Attempts to decode the chunked archive header and initialize the decompressor for compressed
-    /// blobs. Returns `Ok(true)` if initialized (or uncompressed/already initialized), or
-    /// `Ok(false)` if more data is needed.
+    /// blobs. Returns `Ok(true)` if initialized, or `Ok(false)` if more data is needed.
     fn decode_archive_header(&mut self) -> Result<bool, Error> {
-        if !self.header().is_compressed || self.decompressor.is_some() {
-            return Ok(true);
-        }
         let archive_length = self.header().payload_length;
         let Some((decoded_archive, chunk_data)) = decode_archive(&self.buffer, archive_length)
             .context("Failed to decode archive header")?
         else {
             return Ok(false); // Not enough data to decode archive header/seek table.
         };
-        // We store the seek table out-of-line with the data, so we don't persist that
-        // part of the payload directly.
-        let archive_header_len = self.buffer.len() - chunk_data.len();
-        self.buffer.drain(..archive_header_len);
-        self.payload_offset = archive_header_len as u64;
-        self.payload_persisted = self.payload_offset;
+        if decoded_archive.version() == 3
+            && !self.parent.store().filesystem().options().allow_type3_blobs
+        {
+            return Err(FxfsError::IntegrityError).context("Type 3 blobs are not enabled");
+        }
+        let matches_storage_format = decoded_archive.version() == 3
+            && ((self.storage_format == BlobStorageFormat::Lz4
+                && decoded_archive.compression_algorithm() == CompressionAlgorithm::Lz4)
+                || (self.storage_format == BlobStorageFormat::Zstd
+                    && decoded_archive.compression_algorithm() == CompressionAlgorithm::Zstd));
+        if self.storage_format == BlobStorageFormat::DeliveryBlob || matches_storage_format {
+            if !decoded_archive.seek_table().is_empty() {
+                self.parsed_seek_table = Some(
+                    parse_seek_table(
+                        decoded_archive.seek_table(),
+                        decoded_archive.compression_algorithm(),
+                        decoded_archive.version(),
+                    )
+                    .context("Failed to parse seek table.")?,
+                );
+            }
+            // Short-circuit recompression for V3 archives whose algorithm already matches
+            // `storage_format`.
+            self.storage_format = BlobStorageFormat::DeliveryBlob;
+        }
+        if self.storage_format != BlobStorageFormat::DeliveryBlob {
+            // PAYLOAD_BUFFER_FLUSH_THRESHOLD is a multiple of RAW_CHUNK_ALIGNMENT, so adding
+            // V3_CHUNK_SIZE + RAW_CHUNK_ALIGNMENT reserves space for one more chunk plus alignment
+            // padding or compressor scratch headroom.
+            self.write_buffer.reserve(
+                PAYLOAD_BUFFER_FLUSH_THRESHOLD
+                    + ChunkedArchiveOptions::V3_CHUNK_SIZE
+                    + RAW_CHUNK_ALIGNMENT,
+            );
+        }
+        if self.storage_format == BlobStorageFormat::Zstd
+            || self.storage_format == BlobStorageFormat::Lz4
+        {
+            let compression_algorithm = match self.storage_format {
+                BlobStorageFormat::Zstd => CompressionAlgorithm::Zstd,
+                BlobStorageFormat::Lz4 => CompressionAlgorithm::Lz4,
+                _ => unreachable!(),
+            };
+            self.recompressor = Some(Recompressor::new(
+                compression_algorithm,
+                decoded_archive.decompressed_size(),
+            )?);
+        }
+        let consumed = self.buffer.len() - chunk_data.len();
+        self.buffer.drain(..consumed);
         let hash = self.hash;
         self.decompressor = Some(
             ChunkedDecompressor::new_with_error_handler(
@@ -522,21 +642,24 @@ impl DeliveryBlobWriter {
         Ok(true)
     }
 
-    /// Process the data that exists in the writer's buffer. The writer cannot recover from errors,
-    /// so this function should not be invoked after it returns any errors.
-    async fn process_buffer(&mut self) -> Result<(), Error> {
-        if !self.decode_delivery_blob_header()? {
-            return Ok(());
+    /// Attempts to decode the delivery blob header and (if compressed) the archive header from
+    /// `self.buffer`. Returns `Ok(true)` if all headers have been decoded, or `Ok(false)` if more
+    /// data is needed.
+    fn decode_headers(&mut self) -> Result<bool, Error> {
+        if self.headers_decoded() {
+            return Ok(true);
         }
-        if !self.decode_archive_header()? {
-            return Ok(());
+        if self.header.is_none() && !self.decode_delivery_blob_header()? {
+            return Ok(false);
         }
-        // Write payload to disk and update Merkle tree.
-        if !self.buffer.is_empty() {
-            // This ends up being a large future, so we box it.
-            Box::pin(self.write_payload()).await?;
+        if self.header().is_compressed && !self.decode_archive_header()? {
+            return Ok(false);
         }
-        Ok(())
+        if self.is_passthrough() {
+            debug_assert!(self.write_buffer.is_empty());
+            std::mem::swap(&mut self.buffer, &mut self.write_buffer);
+        }
+        Ok(true)
     }
 
     fn get_vmo(&mut self, size: u64) -> Result<zx::Vmo, Error> {
@@ -546,6 +669,7 @@ impl DeliveryBlobWriter {
         let (ring_buffer, vmo_dup) = RingBuffer::new(size)
             .with_context(|| format!("Failed to truncate blob {} to size {}", self.hash, size))?;
         self.ring_buffer = Some(ring_buffer);
+
         Ok(vmo_dup)
     }
 
@@ -556,16 +680,32 @@ impl DeliveryBlobWriter {
     /// be latched by the caller instead of calling this function again. The writer can be closed,
     /// and a new one can be opened to attempt writing the delivery blob again.
     async fn bytes_ready(&mut self, bytes_written: u64) -> Result<(), Error> {
-        let (write_offset, expected_size) = {
-            let ring_buffer = self
-                .ring_buffer
-                .as_mut()
-                .ok_or(Status::BAD_STATE)
-                .context("BlobWriter.GetVmo must be called before BlobWriter.BytesReady.")?;
-            (ring_buffer.read(bytes_written, &mut self.buffer)?, ring_buffer.expected_size())
+        let expected_size = self
+            .ring_buffer
+            .as_ref()
+            .ok_or(Status::BAD_STATE)
+            .context("BlobWriter.GetVmo must be called before BlobWriter.BytesReady.")?
+            .expected_size();
+        let prev_write_buf_len = self.write_buffer.len();
+        let target_buffer = if self.headers_decoded() && self.is_passthrough() {
+            &mut self.write_buffer
+        } else {
+            &mut self.buffer
         };
-        // Process the data from the buffer.
-        self.process_buffer().await.with_context(|| {
+        let write_offset = self.ring_buffer.as_mut().unwrap().read(bytes_written, target_buffer)?;
+        let res = async {
+            if self.decode_headers()? {
+                if self.is_passthrough() {
+                    let new_bytes_len = self.write_buffer.len() - prev_write_buf_len;
+                    self.write_passthrough_payload(new_bytes_len).await?;
+                } else {
+                    self.write_transcoded_payload().await?;
+                }
+            }
+            Ok::<(), Error>(())
+        }
+        .await;
+        res.with_context(|| {
             // LINT.IfChange(blob_write_failure)
             format!(
                 "failed to write blob {} (bytes_written = {}, offset = {}, delivery_size = {})",
@@ -626,43 +766,95 @@ impl DeliveryBlobWriter {
     }
 }
 
+#[cfg_attr(test, derive(Debug, PartialEq))]
+struct ParsedSeekTable {
+    uncompressed_size: u64,
+    chunk_size: u64,
+    compressed_offsets: Vec<u64>,
+}
+
 fn parse_seek_table(
     seek_table: &[ChunkInfo],
-) -> Result<(/*uncompressed_size*/ u64, /*chunk_size*/ u64, /*compressed_offsets*/ Vec<u64>), Error>
-{
-    let uncompressed_size = seek_table.last().unwrap().decompressed_range.end;
-    let chunk_size = seek_table.first().unwrap().decompressed_range.len();
-    // fxblob only supports archives with equally sized chunks.
-    if seek_table.len() > 1
-        && seek_table[1..seek_table.len() - 1]
-            .iter()
-            .any(|entry| entry.decompressed_range.len() != chunk_size)
-    {
-        return Err(FxfsError::NotSupported)
-            .context("Unsupported archive: compressed length of each chunk must be the same");
-    }
-    let compressed_offsets = seek_table
-        .iter()
-        .map(|entry| TryInto::<u64>::try_into(entry.compressed_range.start))
-        .collect::<Result<Vec<_>, _>>()?;
+    compression_algorithm: CompressionAlgorithm,
+    version: u16,
+) -> Result<ParsedSeekTable, Error> {
+    let (Some(first), Some(last)) = (seek_table.first(), seek_table.last()) else {
+        return Err(FxfsError::IntegrityError).context("Empty seek table");
+    };
+    let uncompressed_size = last.decompressed_range.end;
 
-    // TODO(https://fxbug.dev/42078146): The pager assumes chunk_size alignment is at least the size of a
-    // Merkle tree block. We should allow arbitrary chunk sizes. For now, we reject archives with
-    // multiple chunks that don't meet this requirement (since we control archive generation), and
-    // round up the chunk size for archives with a single chunk, as we won't read past the file end.
-    let chunk_size: u64 = chunk_size.try_into()?;
-    let alignment: u64 = fuchsia_merkle::BLOCK_SIZE.try_into()?;
-    let aligned_chunk_size = if seek_table.len() > 1 {
-        if chunk_size < alignment || chunk_size % alignment != 0 {
-            return Err(FxfsError::NotSupported)
-                .context("Unsupported archive: chunk size must be multiple of Merkle tree block");
+    // Each offset is where the previous chunk ends. Chunks must be contiguous, except that raw LZ4
+    // chunks are aligned. LZ4 chunks can't be larger than their uncompressed data.
+    let is_lz4 = compression_algorithm == CompressionAlgorithm::Lz4;
+    let mut compressed_offsets = Vec::with_capacity(seek_table.len());
+    let mut prev_end: usize = 0;
+    for entry in seek_table {
+        let (compressed_len, decompressed_len) =
+            (entry.compressed_range.len(), entry.decompressed_range.len());
+        let start = if is_lz4 && compressed_len == decompressed_len {
+            prev_end.checked_next_multiple_of(RAW_CHUNK_ALIGNMENT)
+        } else {
+            Some(prev_end)
+        };
+        if start != Some(entry.compressed_range.start)
+            || (is_lz4 && compressed_len > decompressed_len)
+        {
+            return Err(FxfsError::IntegrityError).context("Unsupported archive chunk layout");
         }
-        chunk_size
+        compressed_offsets.push(prev_end.try_into()?);
+        prev_end = entry.compressed_range.end;
+    }
+
+    let aligned_chunk_size = if version == 3 {
+        let v3_chunk_size = ChunkedArchiveOptions::V3_CHUNK_SIZE;
+        if seek_table[..seek_table.len() - 1]
+            .iter()
+            .any(|entry| entry.decompressed_range.len() != v3_chunk_size)
+            || last.decompressed_range.len() > v3_chunk_size
+        {
+            return Err(FxfsError::NotSupported).context(
+                "Unsupported archive: V3 chunk uncompressed lengths must be V3_CHUNK_SIZE",
+            );
+        }
+        v3_chunk_size as u64
     } else {
-        round_up(chunk_size, alignment).unwrap()
+        let chunk_size = first.decompressed_range.len();
+        // fxblob only supports archives with equally sized chunks.
+        if seek_table.len() > 1
+            && (seek_table[1..seek_table.len() - 1]
+                .iter()
+                .any(|entry| entry.decompressed_range.len() != chunk_size)
+                || last.decompressed_range.len() > chunk_size)
+        {
+            return Err(FxfsError::NotSupported).context(
+                "Unsupported archive: uncompressed length of each chunk must be the same",
+            );
+        }
+
+        // TODO(https://fxbug.dev/42078146): The pager assumes chunk_size alignment is at least the
+        // size of a Merkle tree block. We should allow arbitrary chunk sizes. For now, we reject
+        // archives with multiple chunks that don't meet this requirement (since we control archive
+        // generation), and round up the chunk size for archives with a single chunk, as we won't
+        // read past the file end.
+        let chunk_size: u64 = chunk_size.try_into()?;
+        let alignment: u64 = fuchsia_merkle::BLOCK_SIZE.try_into()?;
+        if seek_table.len() > 1 {
+            if chunk_size < alignment || chunk_size % alignment != 0 {
+                return Err(FxfsError::NotSupported).context(
+                    "Unsupported archive: chunk size must be multiple of Merkle tree block",
+                );
+            }
+            chunk_size
+        } else {
+            round_up(chunk_size, alignment).unwrap()
+        }
     };
 
-    Ok((uncompressed_size.try_into()?, aligned_chunk_size, compressed_offsets))
+    Ok(ParsedSeekTable {
+        uncompressed_size: uncompressed_size.try_into()?,
+        chunk_size: aligned_chunk_size,
+        compressed_offsets,
+    })
 }
 
 /// Manages the ring buffer used for the fuchsia.fxfs/BlobWriter protocol.
@@ -745,13 +937,120 @@ impl RingBuffer {
     }
 }
 
+/// Manages state for re-compressing a blob into a different compressed format.
+struct Recompressor {
+    /// Algorithm used to compress chunks.
+    compression_algorithm: CompressionAlgorithm,
+    /// Compressor used for writing compressed chunks.
+    compressor: Compressor,
+    /// Buffer holding uncompressed bytes waiting to be compressed into V3 chunks.
+    uncompressed_buffer: Vec<u8>,
+    /// Total uncompressed size of the blob.
+    uncompressed_size: u64,
+    /// Where each chunk's predecessor ends (before any padding) for the metadata. See
+    /// `BlobFormat::ChunkedLz4WithRawChunks`.
+    compressed_offsets: Vec<u64>,
+    /// Current compressed offset on disk (sum of lengths of all compressed chunks and padding).
+    compressed_data_size: u64,
+}
+
+impl Recompressor {
+    fn new(
+        compression_algorithm: CompressionAlgorithm,
+        decompressed_size: usize,
+    ) -> Result<Self, Error> {
+        let compressor = ChunkedArchiveOptions::V3 { compression_algorithm }.compressor();
+        let uncompressed_buffer = Vec::with_capacity(ChunkedArchiveOptions::V3_CHUNK_SIZE);
+        let num_chunks = decompressed_size.div_ceil(ChunkedArchiveOptions::V3_CHUNK_SIZE);
+        let mut compressed_offsets = Vec::new();
+        compressed_offsets
+            .try_reserve(num_chunks)
+            .context("Failed to reserve compressed offsets")?;
+        Ok(Self {
+            compression_algorithm,
+            compressor,
+            uncompressed_buffer,
+            uncompressed_size: 0,
+            compressed_offsets,
+            compressed_data_size: 0,
+        })
+    }
+
+    /// Compresses a single chunk into `write_buffer` and updates `self.compressed_offsets`.
+    fn compress_single_chunk(
+        &mut self,
+        chunk: &[u8],
+        write_buffer: &mut Vec<u8>,
+    ) -> Result<(), Error> {
+        let prev_len = write_buffer.len();
+        let written = self
+            .compressor
+            .compress_into(chunk, write_buffer, self.compressed_offsets.len())
+            .context("Failed to compress chunk")?;
+        self.compressed_offsets.push(self.compressed_data_size);
+        if self.compression_algorithm == CompressionAlgorithm::Lz4 && written >= chunk.len() {
+            // Store LZ4 chunks that don't compress raw, which requires alignment.
+            let aligned = self
+                .compressed_data_size
+                .checked_next_multiple_of(RAW_CHUNK_ALIGNMENT as u64)
+                .ok_or(Status::OUT_OF_RANGE)?;
+            let padding = (aligned - self.compressed_data_size) as usize;
+            write_buffer.truncate(prev_len);
+            write_buffer.resize(prev_len + padding, 0);
+            write_buffer.extend_from_slice(chunk);
+            self.compressed_data_size = aligned + chunk.len() as u64;
+        } else {
+            self.compressed_data_size += written as u64;
+        }
+        Ok(())
+    }
+
+    /// Buffers decompressed data into V3-sized chunks and compresses full chunks into
+    /// `write_buffer`.
+    fn write(&mut self, mut slice: &[u8], write_buffer: &mut Vec<u8>) -> Result<(), Error> {
+        self.uncompressed_size += slice.len() as u64;
+        if !self.uncompressed_buffer.is_empty() {
+            let needed = ChunkedArchiveOptions::V3_CHUNK_SIZE - self.uncompressed_buffer.len();
+            if slice.len() < needed {
+                self.uncompressed_buffer.extend_from_slice(slice);
+                return Ok(());
+            }
+            self.uncompressed_buffer.extend_from_slice(&slice[..needed]);
+            slice = &slice[needed..];
+            let full_chunk = std::mem::take(&mut self.uncompressed_buffer);
+            let res = self.compress_single_chunk(&full_chunk, write_buffer);
+            self.uncompressed_buffer = full_chunk;
+            self.uncompressed_buffer.clear();
+            res?;
+        }
+        while slice.len() >= ChunkedArchiveOptions::V3_CHUNK_SIZE {
+            let (chunk_slice, rest) = slice.split_at(ChunkedArchiveOptions::V3_CHUNK_SIZE);
+            slice = rest;
+            self.compress_single_chunk(chunk_slice, write_buffer)?;
+        }
+        if !slice.is_empty() {
+            self.uncompressed_buffer.extend_from_slice(slice);
+        }
+        Ok(())
+    }
+
+    /// Compresses any remaining buffered uncompressed bytes into `write_buffer`.
+    fn flush(&mut self, write_buffer: &mut Vec<u8>) -> Result<(), Error> {
+        if !self.uncompressed_buffer.is_empty() {
+            let trailing = std::mem::take(&mut self.uncompressed_buffer);
+            self.compress_single_chunk(&trailing, write_buffer)?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fuchsia::fxblob::testing::{BlobFixture, new_blob_fixture, open_blob_fixture};
     use crate::fuchsia::testing::{TestFixture, TestFixtureOptions};
     use core::ops::Range;
-    use delivery_blob::{CompressionMode, Type1Blob, Type3Blob};
+    use delivery_blob::{CompressionMode, Type1Blob, Type2Blob, Type3Blob};
     use fidl_fuchsia_fxfs::{BlobCreatorMarker, BlobWriterProxy, CreateBlobError};
     use fidl_fuchsia_io::UnlinkOptions;
     use fuchsia_async::epoch::Epoch;
@@ -843,6 +1142,60 @@ mod tests {
                     .map_err(Status::err_from_raw)
                     .expect_err("get_vmo unexpectedly succeeded"),
                 zx::Status::INVALID_ARGS
+            );
+        }
+        fixture.close().await;
+    }
+
+    /// Calling get_vmo a second time on the same writer should fail with BAD_STATE.
+    #[fuchsia::test(threads = 10)]
+    async fn test_reject_get_vmo_twice() {
+        let fixture = new_blob_fixture().await;
+        let data = vec![1; 100];
+        let hash = fuchsia_merkle::root_from_slice(&data);
+        let delivery_data = Type1Blob::generate(&data, CompressionMode::Never);
+
+        {
+            let writer =
+                fixture.create_blob(&hash.into(), false).await.expect("failed to create blob");
+            let _vmo = writer
+                .get_vmo(delivery_data.len() as u64)
+                .await
+                .expect("transport error on get_vmo")
+                .expect("failed to get vmo");
+
+            assert_eq!(
+                writer
+                    .get_vmo(delivery_data.len() as u64)
+                    .await
+                    .expect("transport error on get_vmo")
+                    .map_err(Status::err_from_raw)
+                    .expect_err("second get_vmo unexpectedly succeeded"),
+                zx::Status::BAD_STATE
+            );
+        }
+        fixture.close().await;
+    }
+
+    /// Calling bytes_ready before get_vmo should fail with BAD_STATE.
+    #[fuchsia::test(threads = 10)]
+    async fn test_reject_bytes_ready_before_get_vmo() {
+        let fixture = new_blob_fixture().await;
+        let data = vec![1; 100];
+        let hash = fuchsia_merkle::root_from_slice(&data);
+
+        {
+            let writer =
+                fixture.create_blob(&hash.into(), false).await.expect("failed to create blob");
+
+            assert_eq!(
+                writer
+                    .bytes_ready(100)
+                    .await
+                    .expect("transport error on bytes_ready")
+                    .map_err(Status::err_from_raw)
+                    .expect_err("bytes_ready unexpectedly succeeded"),
+                zx::Status::BAD_STATE
             );
         }
         fixture.close().await;
@@ -1511,7 +1864,9 @@ mod tests {
                     *chunk_size = BLOB_SIZE as u64;
                     compressed_offsets.truncate(1);
                 }
-                BlobFormat::ChunkedLz4 { .. } => panic!("Expected Zstd"),
+                BlobFormat::ChunkedLz4 { .. } | BlobFormat::ChunkedLz4WithRawChunks { .. } => {
+                    panic!("Expected Zstd")
+                }
             }
             metadata.write_to(&blob_object).await.expect("Failed to write blob metadata");
         };
@@ -1649,5 +2004,580 @@ mod tests {
         ring_buffer.total_written = u64::MAX - 10;
         let mut buf = Vec::new();
         ring_buffer.read(11, &mut buf).expect_err("Should overflow");
+    }
+
+    #[fuchsia::test(threads = 10)]
+    async fn test_delivery_blob_to_lz4() {
+        let fixture = new_blob_fixture().await;
+        let mut data = vec![0x3c; 128 * 1024];
+        rand::fill(&mut data[ChunkedArchiveOptions::V3_CHUNK_SIZE..]);
+        let hash = fuchsia_merkle::root_from_slice(&data);
+        // Type 1 blob is compressed with Zstd.
+        let delivery_data = Type1Blob::generate(&data, CompressionMode::Always);
+
+        {
+            let blob_dir =
+                fixture.volume().root().clone().into_any().downcast::<BlobDirectory>().unwrap();
+            let mut writer =
+                DeliveryBlobWriter::new(&blob_dir, hash, BlobStorageFormat::Lz4).await.unwrap();
+            let vmo = writer.get_vmo(delivery_data.len() as u64).unwrap();
+            vmo.write(&delivery_data, 0).unwrap();
+            writer.bytes_ready(delivery_data.len() as u64).await.unwrap();
+        }
+
+        let handle = fixture.get_blob_handle(&format!("{}", hash)).await;
+        let metadata = BlobMetadata::read_from(&handle).await.unwrap();
+        assert_matches::assert_matches!(
+            metadata.format,
+            BlobFormat::ChunkedLz4WithRawChunks { .. }
+        );
+        std::mem::drop(handle);
+
+        assert_eq!(fixture.read_blob(hash).await, data);
+        fixture.close().await;
+    }
+
+    #[fuchsia::test(threads = 10)]
+    async fn test_delivery_blob_to_uncompressed() {
+        let fixture = new_blob_fixture().await;
+        let mut data = vec![0x5a; 128 * 1024];
+        rand::fill(&mut data[..]);
+        let hash = fuchsia_merkle::root_from_slice(&data);
+        // Type 1 blob is compressed with Zstd.
+        let delivery_data = Type1Blob::generate(&data, CompressionMode::Always);
+
+        {
+            let blob_dir =
+                fixture.volume().root().clone().into_any().downcast::<BlobDirectory>().unwrap();
+            let mut writer =
+                DeliveryBlobWriter::new(&blob_dir, hash, BlobStorageFormat::Uncompressed)
+                    .await
+                    .unwrap();
+            let vmo = writer.get_vmo(delivery_data.len() as u64).unwrap();
+            vmo.write(&delivery_data, 0).unwrap();
+            writer.bytes_ready(delivery_data.len() as u64).await.unwrap();
+        }
+
+        let handle = fixture.get_blob_handle(&format!("{}", hash)).await;
+        let metadata = BlobMetadata::read_from(&handle).await.unwrap();
+        assert_matches::assert_matches!(metadata.format, BlobFormat::Uncompressed);
+        std::mem::drop(handle);
+
+        assert_eq!(fixture.read_blob(hash).await, data);
+        fixture.close().await;
+    }
+
+    #[fuchsia::test(threads = 10)]
+    async fn test_uncompressed_delivery_blob_ignores_storage_format() {
+        let fixture = new_blob_fixture().await;
+        let data = vec![0x7b; 64 * 1024];
+        let hash = fuchsia_merkle::root_from_slice(&data);
+        // Uncompressed delivery blob.
+        let delivery_data = Type1Blob::generate(&data, CompressionMode::Never);
+
+        {
+            let blob_dir =
+                fixture.volume().root().clone().into_any().downcast::<BlobDirectory>().unwrap();
+            let mut writer =
+                DeliveryBlobWriter::new(&blob_dir, hash, BlobStorageFormat::Lz4).await.unwrap();
+            let vmo = writer.get_vmo(delivery_data.len() as u64).unwrap();
+            vmo.write(&delivery_data, 0).unwrap();
+            writer.bytes_ready(delivery_data.len() as u64).await.unwrap();
+        }
+
+        let handle = fixture.get_blob_handle(&format!("{}", hash)).await;
+        let metadata = BlobMetadata::read_from(&handle).await.unwrap();
+        assert_matches::assert_matches!(metadata.format, BlobFormat::Uncompressed);
+        std::mem::drop(handle);
+
+        assert_eq!(fixture.read_blob(hash).await, data);
+        fixture.close().await;
+    }
+
+    #[fuchsia::test(threads = 10)]
+    async fn test_recompress_delivery_blob_unaligned_trailing_chunk() {
+        let fixture = new_blob_fixture().await;
+        // 100 KiB has 3 full 32 KiB chunks + 4 KiB remainder, exercising complete() trailing chunk
+        // compression.
+        let mut data = vec![0x4a; 100 * 1024];
+        rand::fill(&mut data[..]);
+        let hash = fuchsia_merkle::root_from_slice(&data);
+        let delivery_data = Type1Blob::generate(&data, CompressionMode::Always);
+
+        {
+            let blob_dir =
+                fixture.volume().root().clone().into_any().downcast::<BlobDirectory>().unwrap();
+            let mut writer =
+                DeliveryBlobWriter::new(&blob_dir, hash, BlobStorageFormat::Lz4).await.unwrap();
+            let vmo = writer.get_vmo(delivery_data.len() as u64).unwrap();
+            vmo.write(&delivery_data, 0).unwrap();
+            writer.bytes_ready(delivery_data.len() as u64).await.unwrap();
+        }
+
+        let handle = fixture.get_blob_handle(&format!("{}", hash)).await;
+        let metadata = BlobMetadata::read_from(&handle).await.unwrap();
+        assert_matches::assert_matches!(
+            metadata.format,
+            BlobFormat::ChunkedLz4WithRawChunks { .. }
+        );
+        std::mem::drop(handle);
+
+        assert_eq!(fixture.read_blob(hash).await, data);
+        fixture.close().await;
+    }
+
+    #[fuchsia::test(threads = 10)]
+    async fn test_recompress_small_delivery_blob() {
+        let fixture = new_blob_fixture().await;
+        // 10 KiB is smaller than the 32 KiB chunk size.
+        let mut data = vec![0x2b; 10 * 1024];
+        rand::fill(&mut data[..]);
+        let hash = fuchsia_merkle::root_from_slice(&data);
+        let delivery_data = Type1Blob::generate(&data, CompressionMode::Always);
+
+        {
+            let blob_dir =
+                fixture.volume().root().clone().into_any().downcast::<BlobDirectory>().unwrap();
+            let mut writer =
+                DeliveryBlobWriter::new(&blob_dir, hash, BlobStorageFormat::Lz4).await.unwrap();
+            let vmo = writer.get_vmo(delivery_data.len() as u64).unwrap();
+            vmo.write(&delivery_data, 0).unwrap();
+            writer.bytes_ready(delivery_data.len() as u64).await.unwrap();
+        }
+
+        let handle = fixture.get_blob_handle(&format!("{}", hash)).await;
+        let metadata = BlobMetadata::read_from(&handle).await.unwrap();
+        assert_matches::assert_matches!(
+            metadata.format,
+            BlobFormat::ChunkedLz4WithRawChunks { .. }
+        );
+        std::mem::drop(handle);
+
+        assert_eq!(fixture.read_blob(hash).await, data);
+        fixture.close().await;
+    }
+
+    #[fuchsia::test(threads = 10)]
+    async fn test_type2_delivery_blob_to_zstd() {
+        let fixture = new_blob_fixture().await;
+        let mut data = vec![0x6c; 128 * 1024];
+        rand::fill(&mut data[..]);
+        let hash = fuchsia_merkle::root_from_slice(&data);
+        // Type 2 delivery blob uses 128 KiB chunks (Zstd V2), testing recompression to 32 KiB V3
+        // chunks.
+        let delivery_data = Type2Blob::generate(&data, CompressionMode::Always);
+
+        {
+            let blob_dir =
+                fixture.volume().root().clone().into_any().downcast::<BlobDirectory>().unwrap();
+            let mut writer =
+                DeliveryBlobWriter::new(&blob_dir, hash, BlobStorageFormat::Zstd).await.unwrap();
+            let vmo = writer.get_vmo(delivery_data.len() as u64).unwrap();
+            vmo.write(&delivery_data, 0).unwrap();
+            writer.bytes_ready(delivery_data.len() as u64).await.unwrap();
+        }
+
+        let handle = fixture.get_blob_handle(&format!("{}", hash)).await;
+        let metadata = BlobMetadata::read_from(&handle).await.unwrap();
+        assert_matches::assert_matches!(metadata.format, BlobFormat::ChunkedZstd { .. });
+        std::mem::drop(handle);
+
+        assert_eq!(fixture.read_blob(hash).await, data);
+        fixture.close().await;
+    }
+
+    #[fuchsia::test(threads = 10)]
+    async fn test_type3_delivery_blob_to_zstd() {
+        let fixture = TestFixture::open(
+            DeviceHolder::new(FakeDevice::new(16384, 512)),
+            TestFixtureOptions {
+                allow_type3_blobs: true,
+                encrypted: false,
+                as_blob: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        let mut data = vec![0x6c; 128 * 1024];
+        rand::fill(&mut data[ChunkedArchiveOptions::V3_CHUNK_SIZE..]);
+        let hash = fuchsia_merkle::root_from_slice(&data);
+        // Type 3 delivery blob is compressed with LZ4.
+        let delivery_data = Type3Blob::generate(&data, CompressionMode::Always);
+
+        {
+            let blob_dir =
+                fixture.volume().root().clone().into_any().downcast::<BlobDirectory>().unwrap();
+            let mut writer =
+                DeliveryBlobWriter::new(&blob_dir, hash, BlobStorageFormat::Zstd).await.unwrap();
+            let vmo = writer.get_vmo(delivery_data.len() as u64).unwrap();
+            vmo.write(&delivery_data, 0).unwrap();
+            writer.bytes_ready(delivery_data.len() as u64).await.unwrap();
+        }
+
+        let handle = fixture.get_blob_handle(&format!("{}", hash)).await;
+        let metadata = BlobMetadata::read_from(&handle).await.unwrap();
+        assert_matches::assert_matches!(metadata.format, BlobFormat::ChunkedZstd { .. });
+        std::mem::drop(handle);
+
+        assert_eq!(fixture.read_blob(hash).await, data);
+        fixture.close().await;
+    }
+
+    #[fuchsia::test(threads = 10)]
+    async fn test_recompress_delivery_blob_chunked_streaming() {
+        let fixture = new_blob_fixture().await;
+        let mut data = vec![0x8e; 200 * 1024];
+        rand::fill(&mut data[..]);
+        let hash = fuchsia_merkle::root_from_slice(&data);
+        let delivery_data = Type1Blob::generate(&data, CompressionMode::Always);
+
+        {
+            let blob_dir =
+                fixture.volume().root().clone().into_any().downcast::<BlobDirectory>().unwrap();
+            let mut writer =
+                DeliveryBlobWriter::new(&blob_dir, hash, BlobStorageFormat::Lz4).await.unwrap();
+            let vmo = writer.get_vmo(delivery_data.len() as u64).unwrap();
+            let list_of_writes = generate_list_of_writes(delivery_data.len() as u64);
+            let mut write_offset = 0;
+            let vmo_size = *RING_BUFFER_SIZE;
+            for range in list_of_writes {
+                let len = range.end - range.start;
+                vmo.write(
+                    &delivery_data[range.start as usize..range.end as usize],
+                    write_offset % vmo_size,
+                )
+                .unwrap();
+                writer.bytes_ready(len).await.unwrap();
+                write_offset += len;
+            }
+        }
+
+        let handle = fixture.get_blob_handle(&format!("{}", hash)).await;
+        let metadata = BlobMetadata::read_from(&handle).await.unwrap();
+        assert_matches::assert_matches!(
+            metadata.format,
+            BlobFormat::ChunkedLz4WithRawChunks { .. }
+        );
+        std::mem::drop(handle);
+
+        assert_eq!(fixture.read_blob(hash).await, data);
+        fixture.close().await;
+    }
+
+    #[fuchsia::test(threads = 10)]
+    async fn test_delivery_blob_format_type1_zstd() {
+        let fixture = new_blob_fixture().await;
+        let mut data = vec![0x3c; 150 * 1024];
+        rand::fill(&mut data[..]);
+        let hash = fuchsia_merkle::root_from_slice(&data);
+        let delivery_data = Type1Blob::generate(&data, CompressionMode::Always);
+
+        {
+            let blob_dir =
+                fixture.volume().root().clone().into_any().downcast::<BlobDirectory>().unwrap();
+            let mut writer =
+                DeliveryBlobWriter::new(&blob_dir, hash, BlobStorageFormat::DeliveryBlob)
+                    .await
+                    .unwrap();
+            let vmo = writer.get_vmo(delivery_data.len() as u64).unwrap();
+            vmo.write(&delivery_data, 0).unwrap();
+            writer.bytes_ready(delivery_data.len() as u64).await.unwrap();
+        }
+
+        let handle = fixture.get_blob_handle(&format!("{}", hash)).await;
+        let metadata = BlobMetadata::read_from(&handle).await.unwrap();
+        assert_matches::assert_matches!(metadata.format, BlobFormat::ChunkedZstd { .. });
+        std::mem::drop(handle);
+
+        assert_eq!(fixture.read_blob(hash).await, data);
+        fixture.close().await;
+    }
+
+    #[fuchsia::test(threads = 10)]
+    async fn test_delivery_blob_format_type3_lz4() {
+        let fixture = TestFixture::open(
+            DeviceHolder::new(FakeDevice::new(16384, 512)),
+            TestFixtureOptions {
+                allow_type3_blobs: true,
+                encrypted: false,
+                as_blob: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        let mut data = vec![0x5d; 150 * 1024];
+        rand::fill(&mut data[ChunkedArchiveOptions::V3_CHUNK_SIZE..]);
+        let hash = fuchsia_merkle::root_from_slice(&data);
+        let delivery_data = Type3Blob::generate(&data, CompressionMode::Always);
+
+        {
+            let blob_dir =
+                fixture.volume().root().clone().into_any().downcast::<BlobDirectory>().unwrap();
+            let mut writer =
+                DeliveryBlobWriter::new(&blob_dir, hash, BlobStorageFormat::DeliveryBlob)
+                    .await
+                    .unwrap();
+            let vmo = writer.get_vmo(delivery_data.len() as u64).unwrap();
+            vmo.write(&delivery_data, 0).unwrap();
+            writer.bytes_ready(delivery_data.len() as u64).await.unwrap();
+        }
+
+        let handle = fixture.get_blob_handle(&format!("{}", hash)).await;
+        let metadata = BlobMetadata::read_from(&handle).await.unwrap();
+        assert_matches::assert_matches!(
+            metadata.format,
+            BlobFormat::ChunkedLz4WithRawChunks { .. }
+        );
+        std::mem::drop(handle);
+
+        assert_eq!(fixture.read_blob(hash).await, data);
+        fixture.close().await;
+    }
+
+    #[fuchsia::test(threads = 10)]
+    async fn test_delivery_blob_format_uncompressed() {
+        let fixture = new_blob_fixture().await;
+        let mut data = vec![0x7e; 50 * 1024];
+        rand::fill(&mut data[..]);
+        let hash = fuchsia_merkle::root_from_slice(&data);
+        let delivery_data = Type1Blob::generate(&data, CompressionMode::Never);
+
+        {
+            let blob_dir =
+                fixture.volume().root().clone().into_any().downcast::<BlobDirectory>().unwrap();
+            let mut writer =
+                DeliveryBlobWriter::new(&blob_dir, hash, BlobStorageFormat::DeliveryBlob)
+                    .await
+                    .unwrap();
+            let vmo = writer.get_vmo(delivery_data.len() as u64).unwrap();
+            vmo.write(&delivery_data, 0).unwrap();
+            writer.bytes_ready(delivery_data.len() as u64).await.unwrap();
+        }
+
+        let handle = fixture.get_blob_handle(&format!("{}", hash)).await;
+        let metadata = BlobMetadata::read_from(&handle).await.unwrap();
+        assert_matches::assert_matches!(metadata.format, BlobFormat::Uncompressed);
+        std::mem::drop(handle);
+
+        assert_eq!(fixture.read_blob(hash).await, data);
+        fixture.close().await;
+    }
+
+    #[fuchsia::test(threads = 10)]
+    async fn test_recompress_large_highly_compressible_blob() {
+        // 512 KiB of zeros is 4x PAYLOAD_BUFFER_FLUSH_THRESHOLD (128 KiB), exercising
+        // multi-batch streaming flushes during decompression while compressing to < 1 KiB
+        // in Zstd so it arrives in a single VMO write.
+        let data = vec![0u8; 512 * 1024];
+        let hash = fuchsia_merkle::root_from_slice(&data);
+        let delivery_data = Type1Blob::generate(&data, CompressionMode::Always);
+        assert!(delivery_data.len() < *RING_BUFFER_SIZE as usize);
+
+        for format in [BlobStorageFormat::Uncompressed, BlobStorageFormat::Lz4] {
+            let fixture = new_blob_fixture().await;
+            {
+                let blob_dir =
+                    fixture.volume().root().clone().into_any().downcast::<BlobDirectory>().unwrap();
+                let mut writer = DeliveryBlobWriter::new(&blob_dir, hash, format).await.unwrap();
+                let vmo = writer.get_vmo(delivery_data.len() as u64).unwrap();
+                vmo.write(&delivery_data, 0).unwrap();
+                writer.bytes_ready(delivery_data.len() as u64).await.unwrap();
+            }
+
+            assert_eq!(fixture.read_blob(hash).await, data);
+            fixture.close().await;
+        }
+    }
+
+    #[fuchsia::test(threads = 10)]
+    async fn test_reject_truncated_archive_header() {
+        let fixture = new_blob_fixture().await;
+        let hash = fuchsia_merkle::root_from_slice(&[]);
+        // Construct a compressed Type 1 blob header with payload_length = 4 bytes (too small for a
+        // chunked archive header).
+        let header =
+            Type1Blob { header: Type1Blob::HEADER, payload_length: 4, is_compressed: true };
+        let mut delivery_data = header.header_bytes();
+        delivery_data.extend_from_slice(&[0u8; 4]);
+
+        {
+            let blob_dir =
+                fixture.volume().root().clone().into_any().downcast::<BlobDirectory>().unwrap();
+            let mut writer =
+                DeliveryBlobWriter::new(&blob_dir, hash, BlobStorageFormat::Lz4).await.unwrap();
+            let vmo = writer.get_vmo(delivery_data.len() as u64).unwrap();
+            vmo.write(&delivery_data, 0).unwrap();
+            assert!(writer.bytes_ready(delivery_data.len() as u64).await.is_err());
+        }
+        fixture.close().await;
+    }
+
+    #[fuchsia::test(threads = 10)]
+    async fn test_short_circuit_type3_lz4_to_lz4() {
+        let fixture = TestFixture::open(
+            DeviceHolder::new(FakeDevice::new(16384, 512)),
+            TestFixtureOptions {
+                allow_type3_blobs: true,
+                encrypted: false,
+                as_blob: true,
+                ..Default::default()
+            },
+        )
+        .await;
+        let mut data = vec![0x42; 150 * 1024];
+        rand::fill(&mut data[ChunkedArchiveOptions::V3_CHUNK_SIZE..]);
+        let hash = fuchsia_merkle::root_from_slice(&data);
+        let delivery_data = Type3Blob::generate(&data, CompressionMode::Always);
+
+        {
+            let blob_dir =
+                fixture.volume().root().clone().into_any().downcast::<BlobDirectory>().unwrap();
+            let mut writer =
+                DeliveryBlobWriter::new(&blob_dir, hash, BlobStorageFormat::Lz4).await.unwrap();
+            assert!(writer.recompressor.is_none());
+            let vmo = writer.get_vmo(delivery_data.len() as u64).unwrap();
+            vmo.write(&delivery_data, 0).unwrap();
+            writer.bytes_ready(delivery_data.len() as u64).await.unwrap();
+            assert_eq!(writer.storage_format, BlobStorageFormat::DeliveryBlob);
+            assert!(writer.recompressor.is_none());
+        }
+
+        let handle = fixture.get_blob_handle(&format!("{}", hash)).await;
+        let metadata = BlobMetadata::read_from(&handle).await.unwrap();
+        assert_matches::assert_matches!(
+            metadata.format,
+            BlobFormat::ChunkedLz4WithRawChunks { .. }
+        );
+        std::mem::drop(handle);
+
+        assert_eq!(fixture.read_blob(hash).await, data);
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    fn test_parse_seek_table() {
+        const CHUNK: usize = ChunkedArchiveOptions::V3_CHUNK_SIZE;
+        let chunk = |decompressed_range, compressed_range| ChunkInfo {
+            decompressed_range,
+            compressed_range,
+        };
+        let lz4 = CompressionAlgorithm::Lz4;
+        let zstd = CompressionAlgorithm::Zstd;
+
+        // Empty seek tables are rejected cleanly without panicking.
+        assert!(parse_seek_table(&[], lz4, 3).is_err());
+
+        // A compressed chunk followed by an aligned raw chunk, and a raw final chunk. Offsets are
+        // where the previous chunk ends.
+        let seek_table = [
+            chunk(0..CHUNK, 0..100),
+            chunk(CHUNK..CHUNK * 2, RAW_CHUNK_ALIGNMENT..RAW_CHUNK_ALIGNMENT + CHUNK),
+            chunk(
+                CHUNK * 2..CHUNK * 2 + 5000,
+                RAW_CHUNK_ALIGNMENT + CHUNK..RAW_CHUNK_ALIGNMENT + CHUNK + 5000,
+            ),
+        ];
+        assert_eq!(
+            parse_seek_table(&seek_table, lz4, 3).unwrap(),
+            ParsedSeekTable {
+                uncompressed_size: (CHUNK * 2 + 5000) as u64,
+                chunk_size: CHUNK as u64,
+                compressed_offsets: vec![0, 100, (RAW_CHUNK_ALIGNMENT + CHUNK) as u64],
+            }
+        );
+
+        // Single-chunk V3 blobs always use V3_CHUNK_SIZE as the metadata chunk_size.
+        assert_eq!(
+            parse_seek_table(&[chunk(0..5000, 0..5000)], lz4, 3).unwrap(),
+            ParsedSeekTable {
+                uncompressed_size: 5000,
+                chunk_size: CHUNK as u64,
+                compressed_offsets: vec![0],
+            }
+        );
+        assert_eq!(
+            parse_seek_table(&[chunk(0..5000, 0..100)], zstd, 3).unwrap(),
+            ParsedSeekTable {
+                uncompressed_size: 5000,
+                chunk_size: CHUNK as u64,
+                compressed_offsets: vec![0],
+            }
+        );
+
+        // V3 archives with a single chunk larger than V3_CHUNK_SIZE are rejected.
+        assert!(parse_seek_table(&[chunk(0..CHUNK + 1, 0..CHUNK + 1)], lz4, 3).is_err());
+        assert!(parse_seek_table(&[chunk(0..CHUNK + 1, 0..100)], zstd, 3).is_err());
+
+        // V2 archives preserve rounding single-chunk blobs up to a Merkle block multiple.
+        assert_eq!(
+            parse_seek_table(&[chunk(0..5000, 0..100)], zstd, 2).unwrap(),
+            ParsedSeekTable {
+                uncompressed_size: 5000,
+                chunk_size: fuchsia_merkle::BLOCK_SIZE as u64,
+                compressed_offsets: vec![0],
+            }
+        );
+        assert_eq!(
+            parse_seek_table(&[chunk(0..65536, 0..100), chunk(65536..70536, 100..200)], zstd, 2)
+                .unwrap(),
+            ParsedSeekTable {
+                uncompressed_size: 70536,
+                chunk_size: 65536,
+                compressed_offsets: vec![0, 100],
+            }
+        );
+
+        // Zstd chunks are never aligned as raw and must always be contiguous.
+        assert_eq!(
+            parse_seek_table(
+                &[chunk(0..CHUNK, 0..100), chunk(CHUNK..CHUNK * 2, 100..100 + CHUNK)],
+                zstd,
+                3
+            )
+            .unwrap(),
+            ParsedSeekTable {
+                uncompressed_size: (CHUNK * 2) as u64,
+                chunk_size: CHUNK as u64,
+                compressed_offsets: vec![0, 100],
+            }
+        );
+        assert!(
+            parse_seek_table(
+                &[
+                    chunk(0..CHUNK, 0..100),
+                    chunk(CHUNK..CHUNK * 2, RAW_CHUNK_ALIGNMENT..RAW_CHUNK_ALIGNMENT + CHUNK)
+                ],
+                zstd,
+                3
+            )
+            .is_err()
+        );
+
+        // Raw LZ4 chunks must be aligned, other chunks must be contiguous, and LZ4 chunks can't be
+        // larger than their uncompressed data.
+        assert!(
+            parse_seek_table(
+                &[chunk(0..CHUNK, 0..100), chunk(CHUNK..CHUNK * 2, 100..100 + CHUNK)],
+                lz4,
+                3
+            )
+            .is_err()
+        );
+        assert!(
+            parse_seek_table(&[chunk(0..CHUNK, 0..100), chunk(CHUNK..CHUNK * 2, 200..300)], lz4, 3)
+                .is_err()
+        );
+        assert!(parse_seek_table(&[chunk(0..CHUNK, 0..CHUNK + 1)], lz4, 3).is_err());
+        assert!(
+            parse_seek_table(
+                &[
+                    chunk(0..CHUNK, 0..100),
+                    chunk(CHUNK..CHUNK * 3, RAW_CHUNK_ALIGNMENT..RAW_CHUNK_ALIGNMENT + CHUNK * 2)
+                ],
+                lz4,
+                3
+            )
+            .is_err()
+        );
     }
 }

@@ -8,6 +8,7 @@ import concurrent.futures
 import io
 import os
 import signal
+import socket
 import subprocess
 import sys
 import tarfile
@@ -28,6 +29,10 @@ from mobly import signals
 
 _DEVICE_NAME = "fuchsia-mock-device"
 _SERIAL_NUMBER = "12345678"
+
+# Arbitrary ports for `adb forward` / `adb reverse` tests.
+_HOST_PORT = 15000
+_DEVICE_PORT = 25000
 
 
 # pylint: disable=protected-access
@@ -162,6 +167,87 @@ class AdbTests(unittest.TestCase):
         finally:
             self._verify_supported_patcher.start()
 
+    def test_is_tcp_serial(self) -> None:
+        """Test is_tcp_serial identifies TCP host:port serials."""
+        self.assertTrue(adb.is_tcp_serial("127.0.0.1:5555"))
+        self.assertTrue(adb.is_tcp_serial("localhost:5556"))
+        self.assertTrue(adb.is_tcp_serial("[::1]:5555"))
+        self.assertTrue(
+            adb.is_tcp_serial("[fe80::5054:ff:fe63:5e7a%qemu]:5555")
+        )
+        self.assertFalse(adb.is_tcp_serial(None))
+        self.assertFalse(adb.is_tcp_serial(""))
+        self.assertFalse(adb.is_tcp_serial(_SERIAL_NUMBER))
+        self.assertFalse(adb.is_tcp_serial(":5555"))
+        self.assertFalse(adb.is_tcp_serial("127.0.0.1:0"))
+        self.assertFalse(adb.is_tcp_serial("127.0.0.1:70000"))
+        self.assertFalse(adb.is_tcp_serial("127.0.0.1:¹²³"))
+        self.assertFalse(adb.is_tcp_serial("fe80::1"))
+        self.assertFalse(adb.is_tcp_serial("[127.0.0.1]:5555"))
+        self.assertFalse(adb.is_tcp_serial("[127.0.0.1:5555"))
+        self.assertFalse(adb.is_tcp_serial("127.0.0.1]:5555"))
+        self.assertFalse(adb.is_tcp_serial("[]:5555"))
+
+    @mock.patch.object(
+        adb, "_check_adb_sysfs", return_value=False, autospec=True
+    )
+    def test_verify_supported_tcp_serial_skips_sysfs(
+        self, mock_check: mock.Mock
+    ) -> None:
+        """Test verify_supported skips sysfs check when serial is a TCP address."""
+        self._verify_supported_patcher.stop()
+        try:
+            self.adb_obj._serial_number = "127.0.0.1:5555"
+            with self.assertLogs(level="INFO") as log:
+                self.adb_obj.verify_supported()
+            mock_check.assert_not_called()
+            self.assertTrue(
+                any(
+                    "TCP ADB serial '127.0.0.1:5555' detected" in msg
+                    for msg in log.output
+                )
+            )
+        finally:
+            self._verify_supported_patcher.start()
+
+    @mock.patch(
+        "socket.getaddrinfo",
+        side_effect=socket.gaierror("Name or service not known"),
+        autospec=True,
+    )
+    @mock.patch.object(
+        adb, "_check_adb_sysfs", return_value=False, autospec=True
+    )
+    def test_verify_supported_tcp_serial_unresolvable_host_raises(
+        self, mock_check: mock.Mock, mock_getaddrinfo: mock.Mock
+    ) -> None:
+        """Test verify_supported raises NotSupportedError on unresolvable TCP host."""
+        self._verify_supported_patcher.stop()
+        try:
+            self.adb_obj._serial_number = "[fe80::1%qemu]:5555"
+            with self.assertRaisesRegex(
+                errors.NotSupportedError, "could not be resolved"
+            ):
+                self.adb_obj.verify_supported()
+            mock_getaddrinfo.assert_called_once_with(
+                "fe80::1", 5555, type=socket.SOCK_STREAM
+            )
+            mock_check.assert_not_called()
+        finally:
+            self._verify_supported_patcher.start()
+
+    def test_public_properties(self) -> None:
+        """Test serial_number, binary_path, and server_host_port properties."""
+        self.assertEqual(self.adb_obj.serial_number, _SERIAL_NUMBER)
+        self.assertEqual(self.adb_obj.binary_path, "/custom/adb")
+        self.assertIsNone(self.adb_obj.server_host_port)
+
+        mock_server = mock.create_autospec(adb_server.AdbServer, instance=True)
+        mock_server.host.return_value = "127.0.0.1"
+        mock_server.port.return_value = 54321
+        self.adb_obj._adb_server = mock_server
+        self.assertEqual(self.adb_obj.server_host_port, ("127.0.0.1", 54321))
+
     @mock.patch.object(resources, "files", autospec=True)
     def test_get_adb_binary_with_env_override(
         self, mock_files: mock.Mock
@@ -236,13 +322,17 @@ class AdbTests(unittest.TestCase):
         mock_cache_pid: mock.Mock,
     ) -> None:
         """Test init sets adb binary and serial number."""
-        with mock.patch.dict(os.environ, {}, clear=True):
+        with (
+            mock.patch.dict(os.environ, {}, clear=True),
+            mock.patch.object(adb._LOGGER, "warning") as mock_log_warning,
+        ):
             obj = adb.Adb(
                 device_name=_DEVICE_NAME,
                 serial_number=_SERIAL_NUMBER,
                 ffx_transport=self.mock_ffx,
                 run_isolated_server=False,
             )
+            mock_log_warning.assert_not_called()
             self.assertEqual(obj._adb_binary, "/usr/bin/adb")
             self.assertEqual(obj._serial_number, _SERIAL_NUMBER)
             mock_which.assert_called_once_with("adb")
@@ -289,15 +379,19 @@ class AdbTests(unittest.TestCase):
         mock_exists: mock.Mock,
         mock_cache_pid: mock.Mock,
     ) -> None:
-        """Test init starts isolated server by default (run_isolated_server=True)."""
+        """Test init starts isolated server by default and warns when output_dir is None."""
         mock_server = mock.Mock()
         mock_adb_server_cls.return_value = mock_server
 
-        obj = adb.Adb(
-            device_name=_DEVICE_NAME,
-            serial_number=_SERIAL_NUMBER,
-            ffx_transport=self.mock_ffx,
-            vendor_keys_path="/keys",
+        with self.assertLogs(adb._LOGGER, level="WARNING") as cm:
+            obj = adb.Adb(
+                device_name=_DEVICE_NAME,
+                serial_number=_SERIAL_NUMBER,
+                ffx_transport=self.mock_ffx,
+                vendor_keys_path="/keys",
+            )
+        self.assertTrue(
+            any("No output_dir provided" in msg for msg in cm.output)
         )
         mock_adb_server_cls.assert_called_once_with(
             adb_binary_path="/custom/adb",
@@ -320,18 +414,20 @@ class AdbTests(unittest.TestCase):
         mock_exists: mock.Mock,
         mock_cache_pid: mock.Mock,
     ) -> None:
-        """Test init passes specified output_dir to AdbServer."""
+        """Test init passes specified output_dir to AdbServer without warning."""
         mock_server = mock.Mock()
         mock_adb_server_cls.return_value = mock_server
 
         custom_output_dir = "/tmp/custom_output_dir"
-        obj = adb.Adb(
-            device_name=_DEVICE_NAME,
-            serial_number=_SERIAL_NUMBER,
-            ffx_transport=self.mock_ffx,
-            output_dir=custom_output_dir,
-            vendor_keys_path="/keys",
-        )
+        with mock.patch.object(adb._LOGGER, "warning") as mock_log_warning:
+            obj = adb.Adb(
+                device_name=_DEVICE_NAME,
+                serial_number=_SERIAL_NUMBER,
+                ffx_transport=self.mock_ffx,
+                output_dir=custom_output_dir,
+                vendor_keys_path="/keys",
+            )
+            mock_log_warning.assert_not_called()
         mock_adb_server_cls.assert_called_once_with(
             adb_binary_path="/custom/adb",
             serial_id=_SERIAL_NUMBER,
@@ -353,16 +449,20 @@ class AdbTests(unittest.TestCase):
         mock_exists: mock.Mock,
         mock_cache_pid: mock.Mock,
     ) -> None:
-        """Test init treats empty output_dir as unspecified."""
+        """Test init treats empty output_dir as unspecified and logs a warning."""
         mock_server = mock.Mock()
         mock_adb_server_cls.return_value = mock_server
 
-        obj = adb.Adb(
-            device_name=_DEVICE_NAME,
-            serial_number=_SERIAL_NUMBER,
-            ffx_transport=self.mock_ffx,
-            output_dir="",
-            vendor_keys_path="/keys",
+        with self.assertLogs(adb._LOGGER, level="WARNING") as cm:
+            obj = adb.Adb(
+                device_name=_DEVICE_NAME,
+                serial_number=_SERIAL_NUMBER,
+                ffx_transport=self.mock_ffx,
+                output_dir="",
+                vendor_keys_path="/keys",
+            )
+        self.assertTrue(
+            any("No output_dir provided" in msg for msg in cm.output)
         )
         mock_adb_server_cls.assert_called_once_with(
             adb_binary_path="/custom/adb",
@@ -427,16 +527,12 @@ class AdbTests(unittest.TestCase):
         self.assertFalse(self.adb_obj._rooted_by_context)
         self.assertEqual(self.adb_obj._root_ref_count, 0)
 
-    @mock.patch("time.time", side_effect=[100.0, 103.0], autospec=True)
-    @mock.patch.object(adb.Adb, "wait_for_boot_complete", autospec=True)
     @mock.patch.object(adb.Adb, "run", autospec=True)
     def test_check_connection_success(
         self,
         mock_run: mock.Mock,
-        mock_wait_for_boot: mock.Mock,
-        mock_time: mock.Mock,
     ) -> None:
-        """Test check_connection deducts elapsed time before calling wait_for_boot_complete."""
+        """Test check_connection runs wait-for-device with the specified timeout."""
         self._check_connection_patcher.stop()
         try:
             self.adb_obj.check_connection(timeout=10.0)
@@ -446,20 +542,13 @@ class AdbTests(unittest.TestCase):
                 timeout=10.0,
                 attempts=adb._DEFAULT_RUN_ATTEMPTS,
             )
-            mock_wait_for_boot.assert_called_once_with(
-                self.adb_obj, timeout=7.0
-            )
         finally:
             self._check_connection_patcher.start()
 
-    @mock.patch("time.time", side_effect=[100.0, 100.0], autospec=True)
-    @mock.patch.object(adb.Adb, "wait_for_boot_complete", autospec=True)
     @mock.patch.object(adb.Adb, "run", autospec=True)
     def test_check_connection_default_timeout(
         self,
         mock_run: mock.Mock,
-        mock_wait_for_boot: mock.Mock,
-        mock_time: mock.Mock,
     ) -> None:
         """Test check_connection uses default timeout of 300.0s when not specified."""
         self._check_connection_patcher.stop()
@@ -471,29 +560,6 @@ class AdbTests(unittest.TestCase):
                 timeout=300.0,
                 attempts=adb._DEFAULT_RUN_ATTEMPTS,
             )
-            mock_wait_for_boot.assert_called_once_with(
-                self.adb_obj, timeout=300.0
-            )
-        finally:
-            self._check_connection_patcher.start()
-
-    @mock.patch("time.time", side_effect=[100.0, 110.0], autospec=True)
-    @mock.patch.object(adb.Adb, "wait_for_boot_complete", autospec=True)
-    @mock.patch.object(adb.Adb, "run", autospec=True)
-    def test_check_connection_timeout_expired(
-        self,
-        mock_run: mock.Mock,
-        mock_wait_for_boot: mock.Mock,
-        mock_time: mock.Mock,
-    ) -> None:
-        """Test check_connection raises AdbConnectionError if timeout expires during wait-for-device."""
-        self._check_connection_patcher.stop()
-        try:
-            with self.assertRaisesRegex(
-                adb_errors.AdbConnectionError, "check_connection"
-            ):
-                self.adb_obj.check_connection(timeout=10.0)
-            mock_wait_for_boot.assert_not_called()
         finally:
             self._check_connection_patcher.start()
 
@@ -512,21 +578,126 @@ class AdbTests(unittest.TestCase):
         finally:
             self._check_connection_patcher.start()
 
-    @mock.patch.object(adb.Adb, "wait_for_boot_complete", autospec=True)
+    @mock.patch("time.time", side_effect=[100.0, 102.0], autospec=True)
     @mock.patch.object(adb.Adb, "run", autospec=True)
-    def test_check_connection_failure_wait_for_boot_complete(
-        self, mock_run: mock.Mock, mock_wait_for_boot: mock.Mock
+    @mock.patch.object(adb.Adb, "_connect_tcp", autospec=True)
+    def test_check_connection_tcp_serial(
+        self,
+        mock_connect_tcp: mock.Mock,
+        mock_run: mock.Mock,
+        mock_time: mock.Mock,
     ) -> None:
-        """Test check_connection raises AdbConnectionError when wait_for_boot_complete fails."""
+        """Test check_connection connects over TCP before wait-for-device."""
+        self.adb_obj._serial_number = "127.0.0.1:5555"
         self._check_connection_patcher.stop()
         try:
-            mock_wait_for_boot.side_effect = adb_errors.AdbTimeoutError(
-                "boot timeout"
+            self.adb_obj.check_connection(timeout=10.0)
+            mock_connect_tcp.assert_called_once_with(self.adb_obj, timeout=10.0)
+            mock_run.assert_called_once_with(
+                self.adb_obj,
+                ["wait-for-device"],
+                timeout=8.0,
+                attempts=adb._DEFAULT_RUN_ATTEMPTS,
             )
-            with self.assertRaises(adb_errors.AdbConnectionError):
-                self.adb_obj.check_connection()
         finally:
             self._check_connection_patcher.start()
+
+    @mock.patch.object(host_shell, "run", autospec=True)
+    def test_connect_tcp_success(self, mock_host_shell_run: mock.Mock) -> None:
+        """Test _connect_tcp succeeds when adb connect reports connected."""
+        self.adb_obj._serial_number = "127.0.0.1:5555"
+        mock_host_shell_run.return_value = "connected to 127.0.0.1:5555\n"
+
+        self.adb_obj._connect_tcp(timeout=5.0)
+
+        mock_host_shell_run.assert_called_once_with(
+            cmd=["/custom/adb", "connect", "127.0.0.1:5555"],
+            capture_output=True,
+            capture_error_in_output=True,
+            timeout=5.0,
+            env=mock.ANY,
+        )
+
+    @mock.patch("time.sleep", autospec=True)
+    @mock.patch.object(host_shell, "run", autospec=True)
+    def test_connect_tcp_polls_until_connected(
+        self, mock_host_shell_run: mock.Mock, mock_sleep: mock.Mock
+    ) -> None:
+        """Test _connect_tcp polls when initial connect attempt fails."""
+        self.adb_obj._serial_number = "127.0.0.1:5555"
+        mock_host_shell_run.side_effect = [
+            "failed to connect to '127.0.0.1:5555': Connection refused\n",
+            "unable to connect to 127.0.0.1:5555: No route to host\n",
+            errors.HostCmdError("adb connect failed"),
+            "already connected to 127.0.0.1:5555\n",
+        ]
+
+        self.adb_obj._connect_tcp(timeout=5.0, poll_interval=0.5)
+
+        self.assertEqual(mock_host_shell_run.call_count, 4)
+        mock_sleep.assert_has_calls(
+            [mock.call(0.5), mock.call(0.5), mock.call(0.5)]
+        )
+
+    @mock.patch("time.sleep", autospec=True)
+    @mock.patch("time.time", side_effect=[0.0, 1.0, 10.0], autospec=True)
+    @mock.patch.object(host_shell, "run", autospec=True)
+    def test_connect_tcp_timeout(
+        self,
+        mock_host_shell_run: mock.Mock,
+        mock_time: mock.Mock,
+        mock_sleep: mock.Mock,
+    ) -> None:
+        """Test _connect_tcp raises AdbConnectionError with last error on timeout."""
+        self.adb_obj._serial_number = "127.0.0.1:5555"
+        mock_host_shell_run.return_value = (
+            "failed to connect to '127.0.0.1:5555': Connection refused\n"
+        )
+
+        with self.assertRaisesRegex(
+            adb_errors.AdbConnectionError, "Connection refused"
+        ):
+            self.adb_obj._connect_tcp(timeout=5.0)
+
+    @mock.patch.object(host_shell, "run", autospec=True)
+    def test_connect_tcp_non_positive_timeout_raises(
+        self, mock_host_shell_run: mock.Mock
+    ) -> None:
+        """Test _connect_tcp raises AdbConnectionError immediately when timeout <= 0."""
+        self.adb_obj._serial_number = "127.0.0.1:5555"
+        for bad_timeout in (0.0, -1.0):
+            with self.subTest(timeout=bad_timeout):
+                with self.assertRaises(adb_errors.AdbConnectionError):
+                    self.adb_obj._connect_tcp(timeout=bad_timeout)
+        mock_host_shell_run.assert_not_called()
+
+    @mock.patch.object(host_shell, "run", autospec=True)
+    def test_connect_tcp_unauthorized_fails_fast(
+        self, mock_host_shell_run: mock.Mock
+    ) -> None:
+        """Test _connect_tcp raises AdbUnauthorizedError immediately when unauthorized or auth fails."""
+        self.adb_obj._serial_number = "127.0.0.1:5555"
+        for bad_output in (
+            "error: device unauthorized.\n",
+            "failed to authenticate to 127.0.0.1:5555\n",
+        ):
+            with self.subTest(output=bad_output):
+                mock_host_shell_run.reset_mock()
+                mock_host_shell_run.return_value = bad_output
+                with self.assertRaises(adb_errors.AdbUnauthorizedError):
+                    self.adb_obj._connect_tcp(timeout=5.0)
+                mock_host_shell_run.assert_called_once()
+
+        for bad_err in (
+            "error: device unauthorized.",
+            "failed to authenticate to 127.0.0.1:5555",
+        ):
+            with self.subTest(err=bad_err):
+                mock_host_shell_run.reset_mock()
+                mock_host_shell_run.side_effect = errors.HostCmdError(bad_err)
+                with self.assertRaises(adb_errors.AdbUnauthorizedError):
+                    self.adb_obj._connect_tcp(timeout=5.0)
+                mock_host_shell_run.assert_called_once()
 
     @mock.patch.object(host_shell, "run", autospec=True)
     def test_run_success(self, mock_host_shell_run: mock.Mock) -> None:
@@ -743,6 +914,37 @@ class AdbTests(unittest.TestCase):
         self.assertEqual(mock_host_shell_run.call_count, 3)
         mock_server.restart.assert_called_once()
         mock_sleep.assert_any_call(10)
+
+    @mock.patch.object(host_shell, "run", autospec=True)
+    @mock.patch("time.sleep", autospec=True)
+    def test_run_retries_tcp_drop_errors(
+        self, mock_sleep: mock.Mock, mock_host_shell_run: mock.Mock
+    ) -> None:
+        """Test run retries on TCP connection drop error messages."""
+        mock_server = mock.Mock()
+        mock_server.host.return_value = "127.0.0.1"
+        mock_server.port.return_value = 12345
+        self.adb_obj._adb_server = mock_server
+
+        for err_msg in (
+            "error: closed",
+            "error: protocol fault (couldn't read status)",
+            "Connection reset by peer",
+            "No route to host",
+            "Network is unreachable",
+            "Connection timed out",
+        ):
+            with self.subTest(err_msg=err_msg):
+                mock_server.reset_mock()
+                mock_host_shell_run.reset_mock()
+                mock_host_shell_run.side_effect = [
+                    errors.HostCmdError(err_msg),
+                    "5555\n",
+                    "recovered_output",
+                ]
+                output = self.adb_obj.run(["shell", "some_cmd"])
+                self.assertEqual(output, "recovered_output")
+                mock_server.restart.assert_called_once()
 
     @mock.patch.object(host_shell, "run", autospec=True)
     @mock.patch("time.sleep", autospec=True)
@@ -994,6 +1196,182 @@ class AdbTests(unittest.TestCase):
         mock_server.restart.assert_called_once()
         self.assertTrue(self.adb_obj.is_root)
         self.assertEqual(self.adb_obj._cached_adbd_pid, "8765")
+
+    @mock.patch.object(host_shell, "run", autospec=True)
+    @mock.patch("time.sleep", autospec=True)
+    def test_recover_adb_server_tcp_serial_reconnects(
+        self, mock_sleep: mock.Mock, mock_host_shell_run: mock.Mock
+    ) -> None:
+        """Test _recover_adb_server reconnects over TCP after server restart and root."""
+        self.adb_obj._serial_number = "127.0.0.1:5555"
+        mock_server = mock.create_autospec(adb_server.AdbServer, instance=True)
+        mock_server.host.return_value = "127.0.0.1"
+        mock_server.port.return_value = 12345
+        self.adb_obj._adb_server = mock_server
+        self.adb_obj._is_root = True
+
+        mock_host_shell_run.side_effect = [
+            "connected to 127.0.0.1:5555\n",
+            "restarting adbd as root",
+            "connected to 127.0.0.1:5555\n",
+            "",
+            "8765\n",
+        ]
+
+        self.adb_obj._recover_adb_server()
+
+        mock_server.restart.assert_called_once()
+        self.assertEqual(self.adb_obj._cached_adbd_pid, "8765")
+        connect_calls = [
+            c
+            for c in mock_host_shell_run.call_args_list
+            if c.kwargs["cmd"][-2:] == ["connect", "127.0.0.1:5555"]
+        ]
+        self.assertEqual(len(connect_calls), 2)
+
+    @mock.patch.object(adb.Adb, "_cache_adbd_pid", autospec=True)
+    @mock.patch.object(adb.Adb, "_connect_tcp", autospec=True)
+    @mock.patch.object(host_shell, "run", autospec=True)
+    @mock.patch("time.sleep", autospec=True)
+    def test_recover_adb_server_tcp_serial_connect_failure_and_unauthorized(
+        self,
+        mock_sleep: mock.Mock,
+        mock_host_shell_run: mock.Mock,
+        mock_connect_tcp: mock.Mock,
+        mock_cache_pid: mock.Mock,
+    ) -> None:
+        """Test _recover_adb_server propagates AdbConnectionError and AdbUnauthorizedError on TCP connect failure."""
+        self.adb_obj._serial_number = "127.0.0.1:5555"
+        mock_server = mock.create_autospec(adb_server.AdbServer, instance=True)
+        self.adb_obj._adb_server = mock_server
+        self.adb_obj._is_root = True
+
+        # 1. Connection error -> propagates immediately without calling root or _cache_adbd_pid
+        mock_connect_tcp.side_effect = adb_errors.AdbConnectionError(
+            "connect timed out"
+        )
+        with self.assertRaises(adb_errors.AdbConnectionError):
+            self.adb_obj._recover_adb_server()
+        mock_host_shell_run.assert_not_called()
+        mock_cache_pid.assert_not_called()
+
+        # 2. Unauthorized error -> propagates immediately
+        mock_connect_tcp.side_effect = adb_errors.AdbUnauthorizedError(
+            "unauthorized"
+        )
+        with self.assertRaises(adb_errors.AdbUnauthorizedError):
+            self.adb_obj._recover_adb_server()
+        mock_host_shell_run.assert_not_called()
+        mock_cache_pid.assert_not_called()
+
+    @mock.patch.object(adb.Adb, "_connect_tcp", autospec=True)
+    @mock.patch.object(host_shell, "run", autospec=True)
+    def test_run_retries_tcp_drop_without_isolated_server(
+        self,
+        mock_host_shell_run: mock.Mock,
+        mock_connect_tcp: mock.Mock,
+    ) -> None:
+        """Test run reconnects over TCP and retries on drop even when _adb_server is None."""
+        self.adb_obj._serial_number = "127.0.0.1:5555"
+        self.adb_obj._adb_server = None
+
+        mock_host_shell_run.side_effect = [
+            errors.HostCmdError("error: device '127.0.0.1:5555' not found"),
+            "recovered_output",
+        ]
+
+        output = self.adb_obj.run(["shell", "id"])
+        self.assertEqual(output, "recovered_output")
+        mock_connect_tcp.assert_called_once_with(
+            self.adb_obj, timeout=adb._TCP_RECONNECT_TIMEOUT_SECS
+        )
+        self.assertEqual(mock_host_shell_run.call_count, 2)
+
+        # Verify AdbUnauthorizedError during TCP reconnect propagates immediately
+        mock_connect_tcp.reset_mock()
+        mock_connect_tcp.side_effect = adb_errors.AdbUnauthorizedError(
+            "unauthorized"
+        )
+        mock_host_shell_run.side_effect = errors.HostCmdError("error: closed")
+        with self.assertRaises(adb_errors.AdbUnauthorizedError):
+            self.adb_obj.run(["shell", "id"])
+
+    @mock.patch.object(host_shell, "run", autospec=True)
+    def test_reconnect_offline_tcp_serial(
+        self, mock_host_shell_run: mock.Mock
+    ) -> None:
+        """Test _reconnect_offline runs adb connect after reconnect offline for TCP."""
+        self.adb_obj._serial_number = "127.0.0.1:5555"
+        mock_host_shell_run.side_effect = [
+            "reconnecting offline",
+            "connected to 127.0.0.1:5555\n",
+        ]
+
+        self.adb_obj._reconnect_offline()
+
+        self.assertEqual(mock_host_shell_run.call_count, 2)
+        self.assertEqual(
+            mock_host_shell_run.call_args_list[0].kwargs["cmd"],
+            ["/custom/adb", "reconnect", "offline"],
+        )
+        self.assertEqual(
+            mock_host_shell_run.call_args_list[1].kwargs["cmd"],
+            ["/custom/adb", "connect", "127.0.0.1:5555"],
+        )
+
+    @mock.patch(
+        "time.time",
+        side_effect=[100.0, 102.0, 104.0, 110.0, 112.0, 115.0],
+        autospec=True,
+    )
+    @mock.patch.object(adb.Adb, "_connect_tcp", autospec=True)
+    @mock.patch.object(adb.Adb, "run", autospec=True)
+    def test_root_and_unroot_tcp_serial(
+        self,
+        mock_run: mock.Mock,
+        mock_connect_tcp: mock.Mock,
+        mock_time: mock.Mock,
+    ) -> None:
+        """Test root and unroot reconnect over TCP before wait-for-device."""
+        self.adb_obj._serial_number = "127.0.0.1:5555"
+
+        self.adb_obj.root(timeout=10.0)
+        self.adb_obj.unroot(timeout=10.0)
+
+        mock_connect_tcp.assert_has_calls(
+            [
+                mock.call(self.adb_obj, timeout=8.0),
+                mock.call(self.adb_obj, timeout=8.0),
+            ]
+        )
+        mock_run.assert_has_calls(
+            [
+                mock.call(
+                    self.adb_obj,
+                    ["root"],
+                    timeout=10.0,
+                    attempts=adb._DEFAULT_RUN_ATTEMPTS,
+                ),
+                mock.call(
+                    self.adb_obj,
+                    ["wait-for-device"],
+                    timeout=6.0,
+                    attempts=adb._DEFAULT_RUN_ATTEMPTS,
+                ),
+                mock.call(
+                    self.adb_obj,
+                    ["unroot"],
+                    timeout=10.0,
+                    attempts=adb._DEFAULT_RUN_ATTEMPTS,
+                ),
+                mock.call(
+                    self.adb_obj,
+                    ["wait-for-device"],
+                    timeout=5.0,
+                    attempts=adb._DEFAULT_RUN_ATTEMPTS,
+                ),
+            ]
+        )
 
     def test_close(self) -> None:
         """Test close stops the adb server if running and drops the reference."""
@@ -1358,101 +1736,95 @@ class AdbTests(unittest.TestCase):
             attempts=adb._DEFAULT_RUN_ATTEMPTS,
         )
 
-    @mock.patch.object(adb.Adb, "getprop", autospec=True)
-    def test_wait_for_boot_complete_success_immediately(
-        self, mock_getprop: mock.Mock
-    ) -> None:
-        """Test wait_for_boot_complete succeeds immediately when sys.boot_completed is 1."""
-        mock_getprop.return_value = "1"
+    @mock.patch.object(adb.Adb, "run", autospec=True)
+    def test_forward_passes_no_rebind(self, mock_run: mock.Mock) -> None:
+        """Test forward passes --no-rebind when creating a binding."""
+        args = [f"tcp:{_HOST_PORT}", f"tcp:{_DEVICE_PORT}"]
 
-        self.adb_obj.wait_for_boot_complete()
+        self.adb_obj.forward(args, timeout=5.0)
 
-        mock_getprop.assert_called_once_with(
+        mock_run.assert_called_once_with(
             self.adb_obj,
-            "sys.boot_completed",
-            timeout=adb._BOOT_COMPLETED_GETPROP_TIMEOUT_SECS,
-            attempts=1,
+            ["forward", "--no-rebind", *args],
+            timeout=5.0,
+            attempts=adb._DEFAULT_RUN_ATTEMPTS,
         )
 
-    @mock.patch("time.sleep", autospec=True)
-    @mock.patch.object(adb.Adb, "getprop", autospec=True)
-    def test_wait_for_boot_complete_success_after_polling(
-        self, mock_getprop: mock.Mock, mock_sleep: mock.Mock
-    ) -> None:
-        """Test wait_for_boot_complete polls until sys.boot_completed is 1."""
-        mock_getprop.side_effect = ["0", "", "1"]
-
-        self.adb_obj.wait_for_boot_complete(poll_interval=0.5)
-
-        self.assertEqual(mock_getprop.call_count, 3)
-        mock_sleep.assert_has_calls([mock.call(0.5), mock.call(0.5)])
-
-    @mock.patch("time.sleep", autospec=True)
-    @mock.patch.object(adb.Adb, "getprop", autospec=True)
-    def test_wait_for_boot_complete_success_after_adb_errors(
-        self, mock_getprop: mock.Mock, mock_sleep: mock.Mock
-    ) -> None:
-        """Test wait_for_boot_complete ignores AdbErrors during polling and succeeds."""
-        mock_getprop.side_effect = [
-            adb_errors.AdbCommandError("device offline"),
-            "0",
-            "1",
-        ]
-
-        self.adb_obj.wait_for_boot_complete(poll_interval=0.5)
-
-        self.assertEqual(mock_getprop.call_count, 3)
-        mock_sleep.assert_has_calls([mock.call(0.5), mock.call(0.5)])
-
-    @mock.patch("time.sleep", autospec=True)
-    @mock.patch.object(adb.Adb, "getprop", autospec=True)
-    def test_wait_for_boot_complete_retries_after_getprop_timeout(
-        self, mock_getprop: mock.Mock, mock_sleep: mock.Mock
-    ) -> None:
-        """Test a timed-out getprop poll is treated as not booted and polling continues."""
-        mock_getprop.side_effect = [
-            adb_errors.AdbTimeoutError("getprop timed out"),
-            "1",
-        ]
-
-        self.adb_obj.wait_for_boot_complete(poll_interval=0.5)
-
-        mock_getprop.assert_has_calls(
-            [
-                mock.call(
+    @mock.patch.object(adb.Adb, "run", autospec=True)
+    def test_forward_omits_no_rebind(self, mock_run: mock.Mock) -> None:
+        """Test forward omits --no-rebind for option-only invocations."""
+        for args in (
+            ["--list"],
+            ["--remove", f"tcp:{_HOST_PORT}"],
+            ["--remove-all"],
+        ):
+            with self.subTest(args=args):
+                mock_run.reset_mock()
+                self.adb_obj.forward(args)
+                mock_run.assert_called_once_with(
                     self.adb_obj,
-                    "sys.boot_completed",
-                    timeout=adb._BOOT_COMPLETED_GETPROP_TIMEOUT_SECS,
-                    attempts=1,
+                    ["forward", *args],
+                    timeout=None,
+                    attempts=adb._DEFAULT_RUN_ATTEMPTS,
                 )
-            ]
-            * 2
-        )
-        mock_sleep.assert_called_once_with(0.5)
 
-    @mock.patch("time.sleep", autospec=True)
-    @mock.patch("time.time", autospec=True)
-    @mock.patch.object(adb.Adb, "getprop", autospec=True)
-    def test_wait_for_boot_complete_timeout(
-        self,
-        mock_getprop: mock.Mock,
-        mock_time: mock.Mock,
-        mock_sleep: mock.Mock,
-    ) -> None:
-        """Test wait_for_boot_complete raises AdbTimeoutError when timeout expires."""
-        mock_time.side_effect = [0.0, 1.0, 10.0]
-        mock_getprop.return_value = "0"
+    @mock.patch.object(adb.Adb, "run", autospec=True)
+    def test_reverse(self, mock_run: mock.Mock) -> None:
+        """Test reverse runs `adb reverse` with the given args."""
+        args = [f"tcp:{_DEVICE_PORT}", f"tcp:{_HOST_PORT}"]
 
-        with self.assertRaises(adb_errors.AdbTimeoutError):
-            self.adb_obj.wait_for_boot_complete(timeout=5.0)
+        self.adb_obj.reverse(args, timeout=5.0)
 
-        mock_getprop.assert_called_once_with(
+        mock_run.assert_called_once_with(
             self.adb_obj,
-            "sys.boot_completed",
-            timeout=adb._BOOT_COMPLETED_GETPROP_TIMEOUT_SECS,
-            attempts=1,
+            ["reverse", *args],
+            timeout=5.0,
+            attempts=adb._DEFAULT_RUN_ATTEMPTS,
         )
-        mock_sleep.assert_called_once_with(1.0)
+
+    def test_forward_and_reverse_hold_port_lock(self) -> None:
+        """Test forward and reverse hold _ADB_PORT_LOCK while running."""
+        lock_states: list[bool] = []
+
+        def _record_lock_state(*args: Any, **kwargs: Any) -> str:
+            lock_states.append(adb._ADB_PORT_LOCK.locked())
+            return ""
+
+        args = [f"tcp:{_HOST_PORT}", f"tcp:{_DEVICE_PORT}"]
+        with mock.patch.object(
+            adb.Adb, "run", autospec=True, side_effect=_record_lock_state
+        ):
+            self.adb_obj.forward(args)
+            self.adb_obj.reverse(args)
+
+        self.assertEqual(lock_states, [True, True])
+        self.assertFalse(adb._ADB_PORT_LOCK.locked())
+
+    @mock.patch.object(
+        host_shell,
+        "run",
+        side_effect=errors.HoneydewTimeoutError("timeout"),
+        autospec=True,
+    )
+    def test_custom_default_attempts_in_init(
+        self, mock_host_run: mock.Mock
+    ) -> None:
+        """Test Adb(..., attempts=1) defaults commands to 1 attempt without retries."""
+        with mock.patch.object(adb.Adb, "_cache_adbd_pid"):
+            obj = adb.Adb(
+                device_name=_DEVICE_NAME,
+                serial_number=_SERIAL_NUMBER,
+                ffx_transport=self.mock_ffx,
+                run_isolated_server=False,
+                attempts=1,
+            )
+        try:
+            self.assertEqual(obj._attempts, 1)
+            with self.assertRaises(adb_errors.AdbTimeoutError):
+                obj.run(["shell", "echo", "hi"], timeout=10.0)
+            mock_host_run.assert_called_once()
+        finally:
+            obj.close()
 
 
 class ResolveVendorKeysPathTests(unittest.TestCase):
@@ -1556,6 +1928,7 @@ class ResolveVendorKeysPathTests(unittest.TestCase):
             mock_resource.joinpath.return_value = Path(tar_path)
 
             with (
+                mock.patch.dict(sys.modules, {"honeydew.data": mock.Mock()}),
                 mock.patch.dict(os.environ, {}, clear=True),
                 mock.patch.object(
                     resources, "files", return_value=mock_resource
@@ -1638,12 +2011,14 @@ class AdbServerTests(unittest.TestCase):
                 subprocess,
                 "run",
                 return_value=subprocess.CompletedProcess(
-                    args=["pgrep", "-a", "adb"],
+                    args=["pgrep", "-u", str(os.getuid()), "-af", "adb"],
                     returncode=0,
                     stdout=pgrep_output,
                     stderr="",
                 ),
             ),
+            mock.patch.object(server, "_read_proc_cmdline", return_value=[]),
+            mock.patch.object(server, "_is_zombie_process", return_value=False),
             mock.patch.object(
                 os,
                 "kill",
@@ -1669,6 +2044,56 @@ class AdbServerTests(unittest.TestCase):
                 ],
             )
             mock_sleep.assert_called_once_with(0.05)
+
+    def test_check_for_conflicting_adb_servers_ignores_pgrep_failure(
+        self,
+    ) -> None:
+        """Test _check_for_conflicting_adb_servers skips the check when pgrep
+        cannot be run or its output cannot be decoded."""
+        server = adb_server.AdbServer(
+            adb_binary_path="/custom/adb",
+            serial_id="target_serial",
+        )
+        for err in [
+            FileNotFoundError("pgrep"),
+            UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
+        ]:
+            with (
+                self.subTest(err=err),
+                mock.patch.object(
+                    subprocess,
+                    "run",
+                    side_effect=err,
+                ) as mock_run,
+                mock.patch.object(os, "kill") as mock_kill,
+            ):
+                server._check_for_conflicting_adb_servers()
+
+                mock_run.assert_called_once()
+                mock_kill.assert_not_called()
+
+    def test_check_for_conflicting_adb_servers_propagates_unexpected_exceptions(
+        self,
+    ) -> None:
+        """Test _check_for_conflicting_adb_servers propagates unexpected
+        exceptions (e.g. Mobly signals) raised while running pgrep."""
+        server = adb_server.AdbServer(
+            adb_binary_path="/custom/adb",
+            serial_id="target_serial",
+        )
+        with (
+            mock.patch.object(
+                subprocess,
+                "run",
+                side_effect=signals.TestAbortAll("abort"),
+            ) as mock_run,
+            mock.patch.object(os, "kill") as mock_kill,
+        ):
+            with self.assertRaises(signals.TestAbortAll):
+                server._check_for_conflicting_adb_servers()
+
+            mock_run.assert_called_once()
+            mock_kill.assert_not_called()
 
     def test_set_pdeathsig_on_linux(self) -> None:
         """Test _set_pdeathsig sets PR_SET_PDEATHSIG to SIGKILL on Linux."""

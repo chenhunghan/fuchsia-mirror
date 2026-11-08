@@ -98,10 +98,9 @@ test("fidl_llcpp_zircon_channel_client_over_driver_dispatcher_tests_bin") {
   deps = [
     "//sdk/lib/async:async-cpp",
     "//sdk/lib/driver/runtime:driver_runtime_cpp",
-    "//sdk/lib/driver/runtime:driver_runtime_env",
+    "//sdk/lib/driver/testing/cpp",
     "//sdk/testing/fidl/protocols_tests:test.empty.protocol_cpp",
-    "//src/devices/bin/driver_runtime",
-    "//src/devices/testing/driver-runtime-main:gtest",
+    "//src/lib/fxl/test:gtest_main",
     "//src/lib/testing/predicates",
     "//third_party/googletest:gtest",
     "//zircon/system/ulib/sync:sync-cpp",

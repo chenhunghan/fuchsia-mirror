@@ -180,6 +180,12 @@ fuchsia_hardware_pwm::PwmChannelsMetadata ConvertMetadata(
   for (const auto& c : generic.channels) {
     fuchsia_hardware_pwm::PwmChannelInfo info;
     info.id(c.channel);
+    if (c.id) {
+      info.global_id(*c.id);
+    }
+    if (c.name) {
+      info.name(*c.name);
+    }
     info.period_ns(c.period_ns);
     channels.push_back(std::move(info));
   }

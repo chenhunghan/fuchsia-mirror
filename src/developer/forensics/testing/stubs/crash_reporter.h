@@ -5,18 +5,19 @@
 #ifndef SRC_DEVELOPER_FORENSICS_TESTING_STUBS_CRASH_REPORTER_H_
 #define SRC_DEVELOPER_FORENSICS_TESTING_STUBS_CRASH_REPORTER_H_
 
-#include <fuchsia/feedback/cpp/fidl.h>
-#include <fuchsia/feedback/cpp/fidl_test_base.h>
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
+#include <lib/fit/function.h>
 #include <lib/zx/time.h>
 
 #include <optional>
+#include <string>
 
-#include "src/developer/forensics/testing/stubs/fidl_server_hlcpp.h"
+#include "src/developer/forensics/crash_reports/crash_reporter_internal.h"
 
 namespace forensics {
 namespace stubs {
 
-using CrashReporterBase = SINGLE_BINDING_STUB_FIDL_SERVER(fuchsia::feedback, CrashReporter);
+using CrashReporterBase = crash_reports::CrashReporterInternal;
 
 class CrashReporter : public CrashReporterBase {
  public:
@@ -30,10 +31,11 @@ class CrashReporter : public CrashReporterBase {
 
   CrashReporter(Expectations expectations) : expectations_(expectations) {}
 
-  ~CrashReporter();
+  ~CrashReporter() override;
 
-  // |fuchsia::feedback::CrashReporter|
-  void FileReport(fuchsia::feedback::CrashReport report, FileReportCallback callback) override;
+  // |crash_reports::CrashReporterInternal|
+  void FileReportInternal(fuchsia_feedback::CrashReport report,
+                          FileReportInternalCallback callback) override;
 
  private:
   const Expectations expectations_;
@@ -45,22 +47,18 @@ class CrashReporter : public CrashReporterBase {
   std::optional<bool> is_fatal_;
 };
 
-class CrashReporterClosesConnection : public CrashReporterBase {
- public:
-  // |fuchsia::feedback::CrashReporter|
-  STUB_METHOD_CLOSES_CONNECTION(FileReport, fuchsia::feedback::CrashReport, FileReportCallback)
-};
-
 class CrashReporterAlwaysReturnsError : public CrashReporterBase {
  public:
-  // |fuchsia::feedback::CrashReporter|
-  void FileReport(fuchsia::feedback::CrashReport report, FileReportCallback callback) override;
+  // |crash_reports::CrashReporterInternal|
+  void FileReportInternal(fuchsia_feedback::CrashReport report,
+                          FileReportInternalCallback callback) override;
 };
 
 class CrashReporterNoFileExpected : public CrashReporterBase {
  public:
-  // |fuchsia::feedback::CrashReporter|
-  void FileReport(fuchsia::feedback::CrashReport report, FileReportCallback callback) override;
+  // |crash_reports::CrashReporterInternal|
+  void FileReportInternal(fuchsia_feedback::CrashReport report,
+                          FileReportInternalCallback callback) override;
 };
 
 }  // namespace stubs

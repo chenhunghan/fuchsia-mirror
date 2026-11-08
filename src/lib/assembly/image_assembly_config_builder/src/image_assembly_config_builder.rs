@@ -45,7 +45,7 @@ use assembly_validate_package::{PackageValidationError, validate_component, vali
 use assembly_validate_util::{BootfsContents, PkgNamespace};
 use camino::{Utf8Path, Utf8PathBuf};
 use fidl::unpersist;
-use fidl_fuchsia_component_decl::Component;
+use fidl_fuchsia_component_decl_common::Component;
 use fuchsia_archive::Utf8Reader;
 use fuchsia_pkg::PackageManifest;
 use fuchsia_url::fuchsia_pkg::AbsoluteComponentUrl;
@@ -1655,6 +1655,8 @@ impl std::fmt::Display for BootfsValidationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use fidl_fuchsia_component_decl_common as fidl_fuchsia_component_decl;
 
     use assembly_config_schema::assembly_input_bundle::{
         CompiledComponentDefinition, PartialKernelConfig,

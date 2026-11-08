@@ -12,6 +12,7 @@ rustc_library("lib") {
   edition = "2024"
 
   deps = [
+    ":netcfg-structured-config",
     "//sdk/fidl/fuchsia.hardware.network:fuchsia.hardware.network_rust",
     "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
     "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
@@ -38,6 +39,7 @@ rustc_library("lib") {
     "//src/connectivity/network/lib/dns_server_watcher",
     "//src/connectivity/network/lib/netfilter",
     "//src/connectivity/policy/lib/properties",
+    "//src/diagnostics/lib/redactor_client",
     "//src/lib/async-utils",
     "//src/lib/diagnostics/inspect/contrib/rust",
     "//src/lib/diagnostics/inspect/derive",
@@ -101,9 +103,9 @@ rustc_library("lib") {
   configs += [ "//build/config/rust/lints:deny_unused_results" ]
 }
 
-rustc_binary("bin-basic") {
+rustc_binary("bin") {
   edition = "2024"
-  name = "netcfg_basic"
+  name = "netcfg"
   source_root = "src/main.rs"
 
   deps = [
@@ -116,15 +118,24 @@ rustc_binary("bin-basic") {
   configs += [ "//build/config/rust/lints:deny_unused_results" ]
 }
 
-fuchsia_component("component-basic") {
-  component_name = "netcfg-basic"
-  manifest = "meta/netcfg-basic.cml"
-  deps = [ ":bin-basic" ]
+fuchsia_component_manifest("manifest") {
+  component_name = "netcfg"
+  manifest = "meta/netcfg.cml"
 }
 
-fuchsia_package("package-basic") {
-  package_name = "netcfg-basic"
-  deps = [ ":component-basic" ]
+fuchsia_structured_config_rust_lib("netcfg-structured-config") {
+  name = "netcfg_structured_config"
+  cm_label = ":manifest"
+}
+
+fuchsia_component("component") {
+  cm_label = ":manifest"
+  deps = [ ":bin" ]
+}
+
+fuchsia_package("package") {
+  package_name = "netcfg"
+  deps = [ ":component" ]
   visibility = [ "//bundles/assembly/*" ]
 }
 

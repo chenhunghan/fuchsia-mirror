@@ -314,7 +314,8 @@ impl From<&FetchError> for fidl_fuchsia_pkg::ResolveError {
         use FetchError::*;
         use fidl_fuchsia_pkg::ResolveError as Err;
         match err {
-            CreateBlob { .. } => Err::Io,
+            CreateBlob(blobfs::CreateError::OutOfSpace) => Err::NoSpace,
+            CreateBlob(_) => Err::Io,
             BlobUrl { .. } => Err::Internal,
             ConnectToHttpClient(_) => Err::Io,
             DownloadBlobFidl { .. } => Err::Internal,

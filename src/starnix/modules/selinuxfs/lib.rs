@@ -8,7 +8,7 @@ use seq_lock::{SeqLock, SeqLockable, WriteSize};
 
 use selinux::policy::{AccessDecision, AccessVector, POLICYDB_VERSION_MAX, PolicyData, PolicyId};
 use selinux::{
-    ClassId, InitialSid, PolicyCap, SeLinuxStatus, SeLinuxStatusPublisher, SecurityId,
+    ClassId, HashStats, InitialSid, PolicyCap, SeLinuxStatus, SeLinuxStatusPublisher, SecurityId,
     SecurityPermission, SecurityServer,
 };
 use starnix_core::device::mem::DevNull;
@@ -28,9 +28,7 @@ use starnix_core::vfs::{
     fileops_impl_directory, fileops_impl_noop_sync, fileops_impl_seekable,
     fileops_impl_unbounded_seek, fs_node_impl_dir_readonly, fs_node_impl_not_dir,
 };
-use starnix_logging::{
-    __track_stub_inner, BugRef, impossible_error, log_error, log_info, track_stub,
-};
+use starnix_logging::{__track_stub_inner, BugRef, impossible_error, log_error, track_stub};
 use starnix_sync::{LockDepMutex, SeLinuxFsContextSidLock};
 use starnix_types::vfs::default_statfs;
 use starnix_uapi::auth::FsCred;
@@ -144,6 +142,18 @@ impl SeLinuxFs {
                 AvcCacheStatsFile::new_node(security_server.clone()),
                 mode!(IFREG, 0o444),
             );
+            dir.entry(
+                "hash_stats",
+                AvcHashStatsFile::new_node(security_server.clone()),
+                mode!(IFREG, 0o444),
+            );
+        });
+        dir.subdir("ss", 0o555, |dir| {
+            dir.entry(
+                "sidtab_hash_stats",
+                SidTableHashStatsFile::new_node(security_server.clone()),
+                mode!(IFREG, 0o444),
+            );
         });
         dir.entry("checkreqprot", CheckReqProtApi::new_node(), mode!(IFREG, 0o644));
         dir.entry("class", ClassDirectory::new(security_server.clone()), mode!(IFDIR, 0o555));
@@ -210,7 +220,7 @@ impl SeLinuxFs {
         dir.entry("member", MemberApi::new_node(), mode!(IFREG, 0o666));
         dir.entry("relabel", RelabelApi::new_node(), mode!(IFREG, 0o666));
         dir.entry("user", UserApi::new_node(), mode!(IFREG, 0o666));
-        dir.entry("load", LoadApi::new_node(security_server.clone()), mode!(IFREG, 0o600));
+        dir.entry("load", LoadApi::new_node(), mode!(IFREG, 0o600));
         dir.entry(
             "commit_pending_bools",
             CommitBooleansApi::new_node(security_server.clone()),
@@ -246,13 +256,11 @@ impl SeLinuxFs {
 
 /// "load" API, accepting a binary policy in a single `write()` operation, which must be at seek
 /// position zero.
-struct LoadApi {
-    security_server: Arc<SecurityServer>,
-}
+struct LoadApi;
 
 impl LoadApi {
-    fn new_node(security_server: Arc<SecurityServer>) -> impl FsNodeOps {
-        SeLinuxApi::new_node(move || Ok(Self { security_server: security_server.clone() }))
+    fn new_node() -> impl FsNodeOps {
+        SeLinuxApi::new_node(|| Ok(Self))
     }
 }
 
@@ -261,16 +269,9 @@ impl SeLinuxApiOps for LoadApi {
         SecurityPermission::LoadPolicy
     }
     fn api_write_with_task(&self, current_task: &CurrentTask, data: Vec<u8>) -> Result<(), Errno> {
-        log_info!("Loading {} byte policy", data.len());
-        self.security_server.load_policy(data).map_err(|error| {
+        security::selinuxfs_load_policy(current_task, data).inspect_err(|error| {
             log_error!("Policy load error: {}", error);
-            errno!(EINVAL)
-        })?;
-
-        // Allow one-time initialization of state that requires a loaded policy.
-        security::selinuxfs_policy_loaded(current_task);
-
-        Ok(())
+        })
     }
 }
 
@@ -306,12 +307,7 @@ impl FileOps for PolicyFile {
     ) -> Result<usize, Errno> {
         let policy = self.binary_policy.as_ref().ok_or_else(|| errno!(EINVAL))?;
         let policy_bytes: &[u8] = policy.deref();
-
-        if offset >= policy_bytes.len() {
-            return Ok(0);
-        }
-
-        data.write(&policy_bytes[offset..])
+        data.write_tail(policy_bytes, offset)
     }
 
     fn write(
@@ -858,7 +854,7 @@ impl FsNodeOps for BooleansDirectory {
         name: &FsStr,
     ) -> Result<FsNodeHandle, Errno> {
         let utf8_name = String::from_utf8(name.to_vec()).map_err(|_| errno!(ENOENT))?;
-        if self.security_server.conditional_booleans().contains(&utf8_name) {
+        if self.security_server.get_boolean(&utf8_name).is_ok() {
             Ok(entry.node.fs().create_node_and_allocate_node_id(
                 BooleanFile::new_node(self.security_server.clone(), utf8_name),
                 FsNodeInfo::new(mode!(IFREG, 0o644), current_task.current_fscred()),
@@ -995,11 +991,8 @@ impl FsNodeOps for ClassDirectory {
         _current_task: &CurrentTask,
         name: &FsStr,
     ) -> Result<FsNodeHandle, Errno> {
-        let id: u32 = self
-            .security_server
-            .class_id_by_name(&name.to_string())
-            .map_err(|_| errno!(EINVAL))?
-            .into();
+        let id =
+            self.security_server.class_id_by_name(&name.to_string()).map_err(|_| errno!(EINVAL))?;
 
         let fs = entry.node.fs();
         let dir = SimpleDirectory::new();
@@ -1097,6 +1090,48 @@ impl BytesFileOps for AvcCacheStatsFile {
     }
 }
 
+fn format_hash_stats(stats: HashStats) -> Vec<u8> {
+    format!(
+        "entries: {}\nbuckets used: {}/{}\nlongest chain: {}\n",
+        stats.entries, stats.buckets_used, stats.total_buckets, stats.longest_chain
+    )
+    .into_bytes()
+}
+
+/// Exposes AVC hash distribution statistics from the SELinux security server to userspace.
+struct AvcHashStatsFile {
+    security_server: Arc<SecurityServer>,
+}
+
+impl AvcHashStatsFile {
+    fn new_node(security_server: Arc<SecurityServer>) -> impl FsNodeOps {
+        BytesFile::new_node(Self { security_server })
+    }
+}
+
+impl BytesFileOps for AvcHashStatsFile {
+    fn read(&self, _current_task: &CurrentTask) -> Result<Cow<'_, [u8]>, Errno> {
+        Ok(format_hash_stats(self.security_server.avc_hash_stats()).into())
+    }
+}
+
+/// Exposes SID table hash distribution statistics from the SELinux security server to userspace.
+struct SidTableHashStatsFile {
+    security_server: Arc<SecurityServer>,
+}
+
+impl SidTableHashStatsFile {
+    fn new_node(security_server: Arc<SecurityServer>) -> impl FsNodeOps {
+        BytesFile::new_node(Self { security_server })
+    }
+}
+
+impl BytesFileOps for SidTableHashStatsFile {
+    fn read(&self, _current_task: &CurrentTask) -> Result<Cow<'_, [u8]>, Errno> {
+        Ok(format_hash_stats(self.security_server.sid_table_hash_stats()).into())
+    }
+}
+
 /// File node implementation tailored to the behaviour of the APIs exposed to userspace via the
 /// SELinux filesystem. These API files share some unusual behaviours:
 ///
@@ -1180,7 +1215,7 @@ impl<T: SeLinuxApiOps + Sync + Send + 'static> FileOps for SeLinuxApi<T> {
         data: &mut dyn OutputBuffer,
     ) -> Result<usize, Errno> {
         let response = self.ops.api_read()?;
-        data.write(&response[offset..])
+        data.write_tail(&response, offset)
     }
 
     fn write(

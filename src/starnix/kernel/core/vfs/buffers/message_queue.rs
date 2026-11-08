@@ -5,6 +5,7 @@
 use std::collections::VecDeque;
 
 use super::message_types::{AncillaryData, Message, MessageData, UnixControlData};
+use crate::security;
 use crate::vfs::buffers::{InputBuffer, OutputBuffer};
 use crate::vfs::socket::SocketAddress;
 use starnix_uapi::errors::Errno;
@@ -38,6 +39,7 @@ pub struct MessageReadInfo {
     pub message_length: usize,
     pub address: Option<SocketAddress>,
     pub credentials: Option<uapi::ucred>,
+    pub security_state: Option<security::SecurityContextToken>,
     pub ancillary_data: Vec<AncillaryData>,
 }
 
@@ -51,6 +53,9 @@ impl MessageReadInfo {
         }
         if self.credentials.is_none() {
             self.credentials = info.credentials.take();
+        }
+        if self.security_state.is_none() {
+            self.security_state = info.security_state.take();
         }
         if self.ancillary_data.iter().any(AncillaryData::is_credentials) {
             info.ancillary_data.retain(|d| !d.is_credentials());
@@ -251,6 +256,7 @@ impl<D: MessageData> MessageQueue<D> {
                 message_length: total_bytes_read,
                 address,
                 credentials: creds,
+                security_state: None,
                 ancillary_data,
             },
             messages_read > 0,
@@ -316,6 +322,7 @@ impl<D: MessageData> MessageQueue<D> {
                 message_length: total_bytes_read,
                 address,
                 credentials: creds,
+                security_state: None,
                 ancillary_data,
             },
             messages_peeked > 0,
@@ -333,6 +340,7 @@ impl<D: MessageData> MessageQueue<D> {
                     message_length: message.len(),
                     address: message.address,
                     credentials: message.credentials,
+                    security_state: message.security_state,
                     ancillary_data: message.ancillary_data,
                 },
                 true,
@@ -353,6 +361,7 @@ impl<D: MessageData> MessageQueue<D> {
                     message_length: message.len(),
                     address: message.address.clone(),
                     credentials: message.credentials,
+                    security_state: message.security_state,
                     ancillary_data: message.ancillary_data.clone(),
                 },
                 true,
@@ -589,6 +598,7 @@ mod tests {
             message_length: 2,
             address: None,
             credentials: Some(creds),
+            security_state: None,
             ancillary_data: Vec::new(),
         };
         assert!(message_queue.can_coalesce_with(&info_with_creds, PasscredMode::Enabled));
@@ -599,6 +609,7 @@ mod tests {
             message_length: 2,
             address: None,
             credentials: None,
+            security_state: None,
             ancillary_data: Vec::new(),
         };
         assert!(message_queue.can_coalesce_with(&info_without_creds, PasscredMode::Disabled));

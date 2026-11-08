@@ -6,13 +6,16 @@
 
 //! Lockup detector diagnostics and console commands.
 
+use core::cell::UnsafeCell;
 use core::ffi::{CStr, c_char};
 use core::mem::offset_of;
-use core::sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, AtomicU32};
+use core::ptr;
+use core::sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, AtomicU32, Ordering, compiler_fence};
 use zx_types::{zx_duration_boot_t, zx_duration_boot_ticks_t, zx_instant_boot_ticks_t};
 
-use crate::arch_rs::{CpuAlignMarker, MAX_CACHE_LINE};
+use crate::arch_rs::{CpuAlignMarker, MAX_CACHE_LINE, curr_cpu_num};
 use crate::kernel::event_limiter::EventLimiter;
+use crate::kernel::mp::SMP_MAX_CPUS;
 use crate::platform_rs::timer::{timer_get_ticks_to_time_ratio, zx_sec};
 
 /// Per-CPU lockup detector state used for detecting the "heartbeat" condition.
@@ -54,8 +57,9 @@ struct CriticalSectionState {
     /// enter a critical section, compiler fences must be used when accessing to
     /// ensure that compiler reordering does not lead to problem.
     ///
-    /// Accessed only by this CPU.
-    depth: u32,
+    /// Accessed only by this CPU. Wrapped in `UnsafeCell` as it is mutated through the shared
+    /// `LOCKUP_DETECTOR_PER_CPU_STATE` static (see [`lockup_begin`] and [`lockup_end`]).
+    depth: UnsafeCell<u32>,
 
     /// The name of the active critical section, if any. May be nullptr.
     ///
@@ -84,16 +88,18 @@ struct CriticalSectionState {
     /// State variable used to de-dupe the critical section lockup events for the
     /// purposes of updating kcounters.
     ///
-    /// Accessed only by observers.
-    last_counted_begin_ticks: zx_instant_boot_ticks_t,
+    /// Accessed only by observers. Wrapped in `UnsafeCell` as observers mutate it through the
+    /// shared `LOCKUP_DETECTOR_PER_CPU_STATE` static.
+    last_counted_begin_ticks: UnsafeCell<zx_instant_boot_ticks_t>,
 
     /// The largest worst case value ever _reported_ by a heartbeat checker.
     /// This variable is only ever used by the current checker, and the
     /// acquire/release semantics of the `current_checker_id` variable should
     /// ensure that it is coherent on architectures with weak memory ordering.
     ///
-    /// Accessed only by observers.
-    reported_worst_case_ticks: zx_duration_boot_ticks_t,
+    /// Accessed only by observers. Wrapped in `UnsafeCell` as observers mutate it through the
+    /// shared `LOCKUP_DETECTOR_PER_CPU_STATE` static.
+    reported_worst_case_ticks: UnsafeCell<zx_duration_boot_ticks_t>,
 
     /// The alert limiter used to rate limit warnings printed for ongoing
     /// critical section times (eg; CPUs which enter critical sections, but don't
@@ -159,6 +165,14 @@ zr::static_assert!(
 
 #[allow(improper_ctypes)]
 unsafe extern "C" {
+    /// Per-CPU lockup detector state array defined in `lockup_detector.cc`.
+    ///
+    /// Although this static is immutable, every field of `LockupDetectorState` that is mutated
+    /// (by Rust or C++) is atomic or wrapped in `UnsafeCell`, as mutating any other byte of an
+    /// immutable static is undefined behavior.
+    #[link_name = "gLockupDetectorPerCpuState"]
+    static LOCKUP_DETECTOR_PER_CPU_STATE: [LockupDetectorState; SMP_MAX_CPUS];
+
     /// Returns the critical section lockup threshold in ticks.
     ///
     /// # Safety
@@ -191,6 +205,13 @@ unsafe extern "C" {
     /// Must balance a preceding `cpp_lockup_timed_begin` call on the same CPU with preemption or
     /// interrupts disabled.
     fn cpp_lockup_timed_end();
+    /// Returns the number of times a "critical section threshold exceeded" oops was triggered.
+    fn cpp_lockup_get_critical_section_oops_count() -> i64;
+    /// Returns the number of times a "no heartbeat" oops was triggered.
+    fn cpp_lockup_get_no_heartbeat_oops_count() -> i64;
+    fn cpp_lockup_percpu_shutdown();
+    fn cpp_can_dump_registers_and_backtrace() -> bool;
+    fn cpp_dump_registers_and_backtrace_stdout(cpu: u32) -> zx_types::zx_status_t;
 }
 
 #[inline]
@@ -229,6 +250,155 @@ impl HeartbeatLockupChecker {
     }
 }
 
+/// Must match `LOCKUP_CRITICAL_SECTION_ENALBED` in `<lib/lockup_detector.h>`, which, when 0,
+/// compiles the C++ `lockup_begin()` and `lockup_end()` calls out of `LOCKUP_BEGIN` and
+/// `LOCKUP_END`.
+const LOCKUP_CRITICAL_SECTION_ENABLED: bool = true;
+
+/// Returns the critical section state of the calling CPU.
+///
+/// Only a raw pointer is returned, as other CPUs concurrently access the state.
+#[inline(always)]
+fn current_critical_section_state() -> *const CriticalSectionState {
+    let cpu = curr_cpu_num() as usize;
+    // As for the C++ `gLockupDetectorPerCpuState[arch_curr_cpu_num()]`, the index is not bounds
+    // checked outside of debug builds, as these accesses are on the monitored spinlock hot path.
+    debug_assert!(cpu < SMP_MAX_CPUS);
+    // SAFETY: `LOCKUP_DETECTOR_PER_CPU_STATE` is a valid static array of `SMP_MAX_CPUS` elements,
+    // and the number of the calling CPU is always less than `SMP_MAX_CPUS`, so `cpu` indexes an
+    // element of it. Only raw pointers to the element and its field are formed.
+    unsafe {
+        let state = (&raw const LOCKUP_DETECTOR_PER_CPU_STATE).cast::<LockupDetectorState>();
+        &raw const (*state.add(cpu)).critical_section
+    }
+}
+
+/// Indicates that the calling CPU is entering a critical section named `name`, where it might
+/// appear to be locked up (`LOCKUP_BEGIN`).
+///
+/// This is the Rust equivalent of the C++ `lockup_begin()` in
+/// `<lib/lockup_detector/inline_impl.h>`, and must stay in sync with it.
+///
+/// # Safety
+///
+/// The caller must have preemption or interrupts disabled on the calling CPU, and must balance
+/// this call with a [`lockup_end`] on the same CPU (including before returning from an interrupt
+/// handler if called from interrupt context). Also, any interrupt handler on the same CPU that
+/// calls [`lockup_begin`] must balance its own [`lockup_begin`] / [`lockup_end`] calls before
+/// returning.
+#[inline]
+pub unsafe fn lockup_begin(name: &'static CStr) {
+    if !LOCKUP_CRITICAL_SECTION_ENABLED {
+        return;
+    }
+    let cs_state = current_critical_section_state();
+    // SAFETY: `cs_state` points to the calling CPU's live `CriticalSectionState`, whose `depth` is
+    // only accessed by that CPU, which the caller keeps this thread on. An interrupt handler on
+    // this CPU may enter and leave a critical section of its own, but restores `depth` before
+    // returning.
+    let depth = unsafe { (*cs_state).depth.get() };
+
+    // We must maintain the invariant that if a call to `lockup_begin` increments the depth, the
+    // matching call to `lockup_end` decrements it. The most reliable way to accomplish that is to
+    // always increment and always decrement.
+    //
+    // SAFETY: As above, `depth` is valid and only accessed by this CPU. Raw pointer `read` and
+    // `write` avoid materializing a `&mut u32` reference across the read-modify-write when
+    // interrupts are enabled.
+    let new_depth = unsafe {
+        let new_depth = depth.read().wrapping_add(1);
+        depth.write(new_depth);
+        new_depth
+    };
+    if new_depth != 1 {
+        // Matches the C++ `likely(outermost)`: nested critical sections are rare.
+        core::hint::cold_path();
+        return;
+    }
+
+    // This is the outermost critical section. However, we may be racing with an interrupt handler
+    // that may call into `lockup_begin`. Use a compiler fence to ensure that the compiler cannot
+    // reorder upcoming stores to precede the depth=1 store above. If the compiler were to make
+    // such a reordering, the `lockup_begin` call made by the interrupt handler may incorrectly
+    // believe its critical section is the outermost critical section because it has not seen our
+    // depth=1 store.
+    //
+    // Note, there is a small gap here where the `CriticalSectionLockupChecker` may fail to notice
+    // a lockup (though the `HeartbeatLockupChecker` may still detect it). Consider the following:
+    //
+    //   1. We have stored depth=1, but not yet stored `begin_ticks`.
+    //   2. An interrupt fires and the handler calls `lockup_begin`.
+    //   3. The handler sees that depth is 1 so it does nothing.
+    //   4. The CPU enters an infinite loop.
+    //   5. `CriticalSectionLockupChecker` sees that `begin_ticks` has not been set so it assumes
+    //      the CPU is not in a critical section.
+    //
+    // If interrupts are enabled at the time of the infinite loop in step 4, the system may never
+    // detect the problem. If instead of an infinite loop we just spend a lot of time in the
+    // interrupt handler, we may never know it because `begin_ticks` would only get set by the
+    // outer critical section *after* returning from the handler.
+    //
+    // One way to close the gap would be to use `begin_ticks` rather than depth to determine if
+    // we're already in a critical section. Instead of storing `begin_ticks` when depth=1, we would
+    // store `begin_ticks` only if it's currently unset (i.e. use an atomic compare and exchange
+    // with an expected value of 0). However, this would increase the cost of critical section
+    // instrumentation. Because the gap is small and we have heartbeats we have chosen to live
+    // with it rather than pay the price of atomic compare and exchange.
+    compiler_fence(Ordering::SeqCst);
+
+    // `Relaxed` rather than `Release` to minimize the performance impact. As a result,
+    // `HeartbeatLockupChecker` and `CriticalSectionLockupChecker` may see stale name values
+    // because there is nothing for them to synchronize-with.
+    //
+    // SAFETY: `cs_state` points to the calling CPU's live `CriticalSectionState`, and `name` is
+    // atomic.
+    unsafe { (*cs_state).name.store(name.as_ptr().cast_mut(), Ordering::Relaxed) };
+}
+
+/// Indicates that the calling CPU has left the critical section entered by the matching
+/// [`lockup_begin`] (`LOCKUP_END`).
+///
+/// This is the Rust equivalent of the C++ `lockup_end()` in
+/// `<lib/lockup_detector/inline_impl.h>`, and must stay in sync with it.
+///
+/// # Safety
+///
+/// The caller must have preemption or interrupts disabled on the calling CPU, and must balance a
+/// preceding [`lockup_begin`] call on the same CPU (including before returning from an interrupt
+/// handler if the matching [`lockup_begin`] was called in that interrupt handler). Also, any
+/// interrupt handler on the same CPU that calls [`lockup_begin`] must balance its own
+/// [`lockup_begin`] / [`lockup_end`] calls before returning.
+#[inline]
+pub unsafe fn lockup_end() {
+    if !LOCKUP_CRITICAL_SECTION_ENABLED {
+        return;
+    }
+    let cs_state = current_critical_section_state();
+    // SAFETY: As in `lockup_begin`.
+    let depth = unsafe { (*cs_state).depth.get() };
+    // SAFETY: As in `lockup_begin`, `depth` is valid and only accessed by this CPU.
+    if unsafe { depth.read() } == 1 {
+        // This is the outermost critical section. However, we may be racing with an interrupt
+        // handler that may call into `lockup_begin`. Use a compiler fence to ensure that the store
+        // below cannot be compiler reordered to precede the depth operations above.
+        compiler_fence(Ordering::SeqCst);
+        // See the comment in `lockup_begin` at the point where the name is stored.
+        //
+        // SAFETY: `cs_state` points to the calling CPU's live `CriticalSectionState`, and `name`
+        // is atomic.
+        unsafe { (*cs_state).name.store(ptr::null_mut(), Ordering::Relaxed) };
+    } else {
+        // Matches the C++ `likely(outermost)`: nested critical sections are rare.
+        core::hint::cold_path();
+    }
+    // SAFETY: As above. Raw pointer `read` and `write` avoid materializing a `&mut u32` reference
+    // across the read-modify-write when interrupts are enabled.
+    unsafe {
+        debug_assert!(depth.read() > 0);
+        depth.write(depth.read().wrapping_sub(1));
+    }
+}
+
 /// Enters a timed critical section (`LOCKUP_TIMED_BEGIN`).
 ///
 /// # Safety
@@ -253,14 +423,53 @@ pub unsafe fn lockup_timed_end() {
     unsafe { cpp_lockup_timed_end() };
 }
 
+/// Returns the number of times a "critical section threshold exceeded" oops was triggered.
+#[inline]
+pub fn lockup_get_critical_section_oops_count() -> i64 {
+    // SAFETY: Sums a kernel counter across CPUs with no preconditions.
+    unsafe { cpp_lockup_get_critical_section_oops_count() }
+}
+
+/// Returns the number of times a "no heartbeat" oops was triggered.
+#[inline]
+pub fn lockup_get_no_heartbeat_oops_count() -> i64 {
+    // SAFETY: Sums a kernel counter across CPUs with no preconditions.
+    unsafe { cpp_lockup_get_no_heartbeat_oops_count() }
+}
+
+/// Shuts down the lockup detector for the calling CPU.
+#[inline]
+pub fn lockup_percpu_shutdown() {
+    // SAFETY: Shuts down the lockup detector on the calling CPU.
+    unsafe { cpp_lockup_percpu_shutdown() };
+}
+
+/// Returns `true` if the target architecture supports dumping registers and backtraces for a CPU.
+#[inline]
+pub fn can_dump_registers_and_backtrace() -> bool {
+    // SAFETY: Pure query function with no preconditions.
+    unsafe { cpp_can_dump_registers_and_backtrace() }
+}
+
+/// Dumps registers and backtrace for `cpu` to stdout.
+#[inline]
+pub fn dump_registers_and_backtrace_stdout(cpu: u32) -> Result<(), zx_status::Status> {
+    if !crate::kernel::types::is_valid_cpu_num(cpu) || cpu >= crate::arch_rs::max_num_cpus() {
+        return Err(zx_status::Status::INVALID_ARGS);
+    }
+    // SAFETY: `cpu` is a valid CPU index strictly less than both `SMP_MAX_CPUS` and
+    // `max_num_cpus()`, and `stdout` is passed internally in C++.
+    zx_status::Status::ok(unsafe { cpp_dump_registers_and_backtrace_stdout(cpu) })
+}
+
 #[cfg(console_enabled)]
 mod console {
     use super::{
-        CriticalSectionLockupChecker, HeartbeatLockupChecker, LockupDetectorState,
+        CriticalSectionLockupChecker, HeartbeatLockupChecker, LOCKUP_DETECTOR_PER_CPU_STATE,
         lockup_timed_begin, lockup_timed_end, ticks_to_duration,
     };
     use crate::console::{CMD_AVAIL_NORMAL, CmdArgs, static_command};
-    use crate::kernel::mp::{SMP_MAX_CPUS, cpu_num_to_mask, is_cpu_online};
+    use crate::kernel::mp::{cpu_num_to_mask, is_cpu_online};
     use crate::kernel::percpu::PerCpu;
     use crate::kernel::scheduler;
     use crate::kernel::thread::{AutoPreemptDisabler, DEFAULT_PRIORITY, create_with_priority};
@@ -276,13 +485,6 @@ mod console {
         ZX_OK, ZX_TIME_INFINITE, zx_duration_boot_t, zx_duration_boot_ticks_t, zx_instant_boot_t,
         zx_instant_boot_ticks_t,
     };
-
-    #[allow(improper_ctypes)]
-    unsafe extern "C" {
-        /// Per-CPU lockup detector state array defined in `lockup_detector.cc`.
-        #[link_name = "gLockupDetectorPerCpuState"]
-        static LOCKUP_DETECTOR_PER_CPU_STATE: [LockupDetectorState; SMP_MAX_CPUS];
-    }
 
     fn lockup_status() {
         let ticks: zx_duration_boot_ticks_t = CriticalSectionLockupChecker::threshold_ticks();
@@ -408,7 +610,7 @@ mod console {
             // until the thread is joined.
             let duration: zx_duration_boot_t = unsafe { *(arg as *const zx_duration_boot_t) };
             // Acquire a spinlock and hold it for `duration`.
-            ksync::declare_singleton_monitored_spinlock!(LockupTestLock);
+            crate::ksync_kernel::declare_singleton_monitored_spinlock!(LockupTestLock);
             ksync::lock!(let _guard = LockupTestLock::get().lock_with(ksync::source_tag!()));
             let deadline: zx_instant_boot_t = current_boot_time().0.saturating_add(duration);
             while current_boot_time().0 < deadline {
@@ -514,4 +716,69 @@ mod console {
         cmd_lockup,
         CMD_AVAIL_NORMAL
     );
+}
+
+/// Returns the critical section depth and name of the calling CPU, for tests.
+///
+/// Interrupts must be disabled, so that the values are not changed by an interrupt handler.
+#[cfg(ktest)]
+pub(crate) fn current_critical_section_depth_and_name() -> (u32, *const c_char) {
+    debug_assert!(crate::arch_rs::ints_disabled());
+    let cs_state = current_critical_section_state();
+    // SAFETY: `cs_state` points to the calling CPU's live `CriticalSectionState`. `depth` is only
+    // accessed by this CPU, which has interrupts disabled, and `name` is atomic.
+    unsafe { (*(*cs_state).depth.get(), (*cs_state).name.load(Ordering::Relaxed).cast_const()) }
+}
+
+/// Tests of the Rust `lockup_begin` and `lockup_end`.
+#[cfg(ktest)]
+#[unittest::suite(name = "lockup_detector_rs")]
+mod tests {
+    use super::{current_critical_section_depth_and_name, lockup_begin, lockup_end};
+    use crate::arch_rs::InterruptDisableGuard;
+    use core::ptr;
+    use unittest::expect_true;
+
+    /// Verifies that the depth tracks nesting and only the outermost section is named.
+    #[test]
+    fn nested_critical_section() {
+        // Mirrors the C++ `nested_critical_section` test.
+        let _interrupt_guard = InterruptDisableGuard::new();
+
+        expect_true!(
+            current_critical_section_depth_and_name() == (0, ptr::null()),
+            "critical section depth and name"
+        );
+
+        const OUTER: &core::ffi::CStr = c"NestedCriticalSectionTest-outer";
+        // SAFETY: Interrupts are disabled, and this is balanced by a `lockup_end` below.
+        unsafe { lockup_begin(OUTER) };
+        expect_true!(
+            current_critical_section_depth_and_name() == (1, OUTER.as_ptr()),
+            "critical section depth and name"
+        );
+
+        const INNER: &core::ffi::CStr = c"NestedCriticalSectionTest-inner";
+        // SAFETY: Interrupts are disabled, and this is balanced by a `lockup_end` below.
+        unsafe { lockup_begin(INNER) };
+        // No change to the name, because only the outermost critical section is tracked.
+        expect_true!(
+            current_critical_section_depth_and_name() == (2, OUTER.as_ptr()),
+            "critical section depth and name"
+        );
+
+        // SAFETY: Interrupts are disabled, and this balances the inner `lockup_begin`.
+        unsafe { lockup_end() };
+        expect_true!(
+            current_critical_section_depth_and_name() == (1, OUTER.as_ptr()),
+            "critical section depth and name"
+        );
+
+        // SAFETY: Interrupts are disabled, and this balances the outer `lockup_begin`.
+        unsafe { lockup_end() };
+        expect_true!(
+            current_critical_section_depth_and_name() == (0, ptr::null()),
+            "critical section depth and name"
+        );
+    }
 }

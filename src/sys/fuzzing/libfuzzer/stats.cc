@@ -8,9 +8,8 @@
 
 #include <sstream>
 
-#include <re2/re2.h>
-
 #include "absl/strings/string_view.h"
+#include "re2/re2.h"
 
 namespace fuzzing {
 

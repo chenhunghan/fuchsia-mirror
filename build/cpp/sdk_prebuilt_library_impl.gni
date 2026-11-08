@@ -345,10 +345,14 @@ template("sdk_prebuilt_library_impl") {
     underlying_target_type = "static_library"
     prebuild_format = "static"
     allowlist = "//build/sdk:partner_idk_static_libraries_allowlist"
+    all_allowlist_entries_group =
+        "//build/sdk:partner_idk_versioned_static_libraries"
   } else if (prebuilt_library_type == "shared") {
     underlying_target_type = "shared_library"
     prebuild_format = "shared"
     allowlist = "//build/sdk:partner_idk_shared_libraries_allowlist"
+    all_allowlist_entries_group =
+        "//build/sdk:partner_idk_versioned_shared_libraries"
   } else {
     assert("Unrecognized `prebuilt_library_type` '${prebuilt_library_type}'.")
   }
@@ -368,7 +372,15 @@ template("sdk_prebuilt_library_impl") {
                            ])
 
     if (defined(visibility)) {
-      visibility += [ ":${sdk_target_name}" ]
+      visibility += [
+        ":${sdk_target_name}",
+
+        # All targets in the allowlist must be visible to the target that
+        # depends on that list.
+        all_allowlist_entries_group,
+      ]
+    } else {
+      not_needed([ "all_allowlist_entries_group" ])
     }
 
     if (!defined(libcxx_linkage)) {

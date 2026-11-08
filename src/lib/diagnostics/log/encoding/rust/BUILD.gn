@@ -84,6 +84,7 @@ rustc_library("rust") {
   test_deps = [ "//src/lib/fuchsia" ]
   visibility = [
     ":*",
+    "//src/developer/ffx/plugins/log/*",
     "//src/diagnostics/archivist/*",
     "//src/diagnostics/archivist/tests/integration/realm_factory/puppet:*",
     "//src/diagnostics/lib/log-command/*",

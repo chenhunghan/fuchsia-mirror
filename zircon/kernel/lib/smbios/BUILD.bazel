@@ -1,0 +1,32 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_library_headers.bzl", "fx_cc_library_headers")
+
+package(default_applicable_licenses = ["//:license"])
+
+# <lib/smbios/smbios.h> includes <lib/zx/result.h>, so GN consumers need
+# //zircon/system/ulib/zx as a public dependency.
+# TODO(https://fxbug.dev/570694755): Map fx_cc_library_headers `deps` to GN
+# `public_deps` in bazel2gn.
+# @bazel2gn:raw_attribute:public_deps = [ "//zircon/system/ulib/zx" ]
+fx_cc_library_headers(
+    name = "headers",
+    hdrs = ["include/lib/smbios/smbios.h"],
+    # Emitted as `public_deps` in GN via `@bazel2gn:raw_attribute` above.
+    # @bazel2gn:skip
+    deps = ["//zircon/system/ulib/zx"],
+)
+
+fx_cc_library(
+    name = "smbios",
+    srcs = ["smbios.cc"],
+    implementation_deps = ["//zircon/system/ulib/fbl"],
+    visibility = [
+        "//src/devices/board/lib/smbios:__pkg__",
+        "//zircon/kernel/lib/smbios/test:__pkg__",
+    ],
+    deps = [":headers"],
+)

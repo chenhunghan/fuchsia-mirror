@@ -564,6 +564,7 @@ type Type struct {
 	Identifier         EncodedCompoundIdentifier
 	InternalSubtype    InternalSubtype
 	Nullable           bool
+	Zeroable           bool
 	ProtocolTransport  string
 	ObjType            uint32
 	ResourceIdentifier string
@@ -610,7 +611,7 @@ func (t *Type) UnmarshalJSON(b []byte) error {
 		}
 	case StringArray:
 		// Treat string_array as just an array of uint8
-		t.ElementType = &Type{Kind: PrimitiveType, PrimitiveSubtype: Uint8}
+		t.ElementType = &Type{Kind: PrimitiveType, PrimitiveSubtype: Uint8, Zeroable: true}
 		err = json.Unmarshal(*obj["element_count"], &t.ElementCount)
 		if err != nil {
 			return err
@@ -685,6 +686,14 @@ func (t *Type) UnmarshalJSON(b []byte) error {
 		if err != nil {
 			return err
 		}
+		if zeroable, ok := obj["zeroable"]; ok {
+			err = json.Unmarshal(*zeroable, &t.Zeroable)
+			if err != nil {
+				return err
+			}
+		} else {
+			t.Zeroable = true
+		}
 	case IdentifierType:
 		err = json.Unmarshal(*obj["identifier"], &t.Identifier)
 		if err != nil {
@@ -753,6 +762,9 @@ func (t *Type) MarshalJSON() ([]byte, error) {
 		obj["protocol_transport"] = t.ProtocolTransport
 	case PrimitiveType:
 		obj["subtype"] = t.PrimitiveSubtype
+		if !t.Zeroable {
+			obj["zeroable"] = t.Zeroable
+		}
 	case IdentifierType:
 		obj["identifier"] = t.Identifier
 		obj["nullable"] = t.Nullable
@@ -1292,6 +1304,7 @@ func EmptyStructMember(name string) StructMember {
 		Type: Type{
 			Kind:             PrimitiveType,
 			PrimitiveSubtype: Uint8,
+			Zeroable:         true,
 		},
 		MaybeDefaultValue: &Constant{
 			Kind:       "literal",

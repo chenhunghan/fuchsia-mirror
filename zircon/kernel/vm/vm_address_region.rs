@@ -5,8 +5,10 @@
 // https://opensource.org/licenses/MIT
 
 use super::arch_vm_aspace::{
-    ARCH_MMU_FLAG_PERM_EXECUTE, ARCH_MMU_FLAG_PERM_READ, ARCH_MMU_FLAG_PERM_WRITE, ArchMmuFlags,
+    ARCH_MMU_FLAG_CACHE_MASK, ARCH_MMU_FLAG_PERM_EXECUTE, ARCH_MMU_FLAG_PERM_READ,
+    ARCH_MMU_FLAG_PERM_WRITE, ArchMmuFlags,
 };
+use super::attribution::AttributionCounts;
 use super::name::name_to_c_buf;
 use super::vm_address_region_enumerator::{
     VmAddressRegionEnumerator, VmAddressRegionEnumeratorType,
@@ -15,11 +17,14 @@ use super::vm_aspace::{
     VmAspace, VmAspaceLockClass, VmAspaceMutex, VmAspaceRegionLockClass, VmAspaceRegionMutex,
 };
 use super::vm_mapping::VmMapping;
-use super::vm_object::{VmObject, VmObjectLockClass};
+use super::vm_object::{EvictionHint, VmObject, VmObjectLockClass};
 use crate::kernel::types::VAddr;
+use crate::ksync_kernel::TrackedCriticalMutex;
 use crate::user_copy::UserInOutPtr;
+use ::page as kernel_page;
 use core::cell::UnsafeCell;
 use core::ffi::{CStr, c_char};
+use core::hint;
 use core::mem::MaybeUninit;
 use core::ops::Deref;
 use core::pin::Pin;
@@ -27,7 +32,7 @@ use core::ptr::{self, NonNull};
 use debug::ltracef;
 use fbl::{Canary, HasRefCount, Recyclable, RefCounted, RefPtr};
 use kprint::kprint;
-use ksync::{KCell, KMutexGuard, LockToken, RawCriticalMutex};
+use ksync::{KCell, KMutexGuard, LockToken};
 use pin_init::{PinInit, pin_data};
 use vm_address_region_bindings as bindings;
 use vm_constants_rs as constants;
@@ -95,15 +100,6 @@ zr::static_assert!(
     MemoryPriority::High as u8 == bindings::VmAddressRegionOrMapping_MemoryPriority::HIGH as u8
 );
 
-impl From<MemoryPriority> for bindings::VmAddressRegionOrMapping_MemoryPriority {
-    fn from(priority: MemoryPriority) -> Self {
-        match priority {
-            MemoryPriority::Default => Self::DEFAULT,
-            MemoryPriority::High => Self::HIGH,
-        }
-    }
-}
-
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifeCycleState {
@@ -149,16 +145,16 @@ zr::static_assert!(
     VmAddressRegionOpChildren::No as u8 == bindings::VmAddressRegionOpChildren::No as u8
 );
 
-impl From<VmAddressRegionOpChildren> for bindings::VmAddressRegionOpChildren {
-    fn from(op_children: VmAddressRegionOpChildren) -> Self {
-        match op_children {
-            VmAddressRegionOpChildren::Yes => Self::Yes,
-            VmAddressRegionOpChildren::No => Self::No,
-        }
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RangeOpType {
+    Commit,
+    Decommit,
+    MapRange,
+    Zero,
+    DontNeed,
+    AlwaysNeed,
+    Prefetch,
 }
-pub type RangeOpType = bindings::VmAddressRegion_RangeOpType;
-pub type UnmapOptions = bindings::VmMapping_UnmapOptions;
 
 /// Result of calling [`VmAddressRegion::create_vm_mapping`].
 pub struct MapResult {
@@ -456,7 +452,7 @@ impl VmAddressRegionOrMapping {
         }
     }
 
-    /// Dump debug info
+    /// Dump debug info.
     fn dump_locked(
         &self,
         region_token: &LockToken<'_, VmAspaceRegionLockClass>,
@@ -536,15 +532,6 @@ impl VmAddressRegionOrMapping {
         unsafe { *self.state().life_cycle.get() }
     }
 
-    /// For a `VmMapping` the state is only modified either with the `object` lock held, or if
-    /// there is no `object`. Therefore it is safe to read the state if just the object lock is
-    /// held.
-    #[inline]
-    fn state_locked_object(&self, _token: &LockToken<'_, VmObjectLockClass>) -> LifeCycleState {
-        // SAFETY: The object lock is held.
-        unsafe { *self.state().life_cycle.get() }
-    }
-
     #[inline]
     pub(super) fn set_state_locked(
         &self,
@@ -614,6 +601,25 @@ impl VmAddressRegionOrMapping {
             // `kalloc::Box` to which no reference remains.
             unsafe { VmAddressRegion::recycle(NonNull::new_unchecked(region.cast())) }
         }
+    }
+}
+
+impl VmMapping {
+    pub(super) fn is_alive_locked_object(&self, token: &LockToken<'_, VmObjectLockClass>) -> bool {
+        (**self).state().canary.assert();
+        self.state_locked_object(token) == LifeCycleState::Alive
+    }
+
+    /// For a `VmMapping` the state is only modified either with the `object` lock held, or if
+    /// there is no `object`. Therefore it is safe to read the state if just the object lock is
+    /// held.
+    #[inline]
+    pub(super) fn state_locked_object(
+        &self,
+        _token: &LockToken<'_, VmObjectLockClass>,
+    ) -> LifeCycleState {
+        // SAFETY: The object lock is held.
+        unsafe { *(**self).state().life_cycle.get() }
     }
 }
 
@@ -804,16 +810,54 @@ impl VmAddressRegion {
     /// to the derived type to know how to apply and update the memory priority.
     fn set_memory_priority_locked(
         &self,
-        _token: &mut LockToken<'_, VmAspaceLockClass>,
+        token: &mut LockToken<'_, VmAspaceLockClass>,
         priority: MemoryPriority,
     ) -> Result<(), Status> {
-        // SAFETY: The aspace lock is held.
-        Status::ok(unsafe {
-            bindings::cpp_vm_address_region_set_memory_priority_locked(
-                self.as_ffi_ptr(),
-                priority.into(),
-            )
-        })
+        if self.state_locked(token) != LifeCycleState::Alive {
+            hint::cold_path();
+            debug_assert!(self.memory_priority_locked(token) == MemoryPriority::Default);
+            return Err(Status::BAD_STATE);
+        }
+
+        let set_region_priority =
+            |region: &VmAddressRegion, token: &mut LockToken<'_, VmAspaceLockClass>| {
+                debug_assert!(region.lock_is_held());
+                if priority == region.memory_priority_locked(token) {
+                    return;
+                }
+                region.set_memory_priority_field_locked(token, priority);
+                // As a region we only need to inform the `VmAspace` of the change.
+                region.aspace().change_high_priority_count_locked(
+                    token,
+                    if priority == MemoryPriority::High { 1 } else { -1 },
+                );
+            };
+
+        // Do our own priority change.
+        set_region_priority(self, token);
+
+        // Enumerate all of the subregions below us.
+        pin_init::stack_pin_init!(let enumerator = VmAddressRegionEnumerator::new(
+            VmAddressRegionEnumeratorType::VmarsAndMappings,
+            self,
+            0,
+            usize::MAX,
+            token,
+        ));
+        debug_assert!(self.lock_is_held());
+        while let Some((next, _)) = enumerator.as_mut().next(token) {
+            let next = ptr::from_ref(next);
+            // SAFETY: The aspace lock (`token`) remains held and `subregions_` is not modified in
+            // this loop, so `next` stays live for the duration of the iteration.
+            let next = unsafe { &*next };
+            if let Some(map) = next.as_vm_mapping_ptr() {
+                debug_assert!(map.lock_is_held());
+                map.set_memory_priority_locked::<false>(token, priority);
+            } else {
+                set_region_priority(next.as_vm_address_region_ptr().unwrap(), token);
+            }
+        }
+        Ok(())
     }
 
     fn destroy_locked(
@@ -923,6 +967,42 @@ impl VmAddressRegion {
         region_list::find_region(self, token, addr).map(RefPtr::from_ref)
     }
 
+    /// Recursively compute the amount of attributed memory within this region.
+    pub fn get_attributed_memory(&self) -> AttributionCounts {
+        self.state().canary.assert();
+
+        ksync::lock!(let mut guard = self.lock().lock());
+        if !self.is_alive_locked(guard.token()) {
+            return AttributionCounts::default();
+        }
+
+        let mut page_counts = AttributionCounts::default();
+
+        // Enumerate all of the subregions below us & count allocated pages.
+        pin_init::stack_pin_init!(let enumerator = VmAddressRegionEnumerator::new(
+            VmAddressRegionEnumeratorType::MappingsOnly,
+            self,
+            0,
+            usize::MAX,
+            guard.token(),
+        ));
+        debug_assert!(self.lock_is_held());
+        while let Some((next, _)) = enumerator.as_mut().next(guard.token()) {
+            if let Some(map) = next.as_vm_mapping() {
+                debug_assert!(map.lock_is_held());
+                enumerator.as_mut().pause(guard.token());
+                page_counts += map.get_attributed_memory_locked(guard.as_mut());
+                drop(map);
+                enumerator.as_mut().resume(guard.token());
+                if !self.is_alive_locked(guard.token()) {
+                    break;
+                }
+            }
+        }
+
+        page_counts
+    }
+
     /// Recursively traverses the regions for a given virtual address and returns a reference to a
     /// mapping if one is found. The returned reference is only valid as long as the aspace lock
     /// remains held.
@@ -965,7 +1045,9 @@ impl VmAddressRegion {
 
         // Look for a region in the parent starting from our desired base. If any region is found,
         // make sure we do not intersect with it.
-        if let Some(candidate) = region_list::include_or_higher(parent, aspace_token, self.base()) {
+        if let Some(candidate) =
+            region_list::include_or_higher(parent, aspace_token, self.base()).get()
+        {
             debug_assert!(candidate.lock_is_held());
             assert!(candidate.base().0 >= self.base().0.wrapping_add(self.size()));
         }
@@ -976,7 +1058,8 @@ impl VmAddressRegion {
         Ok(())
     }
 
-    fn dump_locked(
+    /// Dump debug info.
+    pub fn dump_locked(
         &self,
         region_token: &LockToken<'_, VmAspaceRegionLockClass>,
         token: &LockToken<'_, VmAspaceLockClass>,
@@ -984,6 +1067,8 @@ impl VmAddressRegion {
         verbose: bool,
     ) {
         self.state().canary.assert();
+        debug_assert!(self.lock_is_held());
+        debug_assert!(self.region_lock_is_held());
         for _ in 0..depth {
             kprint!("  ");
         }
@@ -1008,19 +1093,80 @@ impl VmAddressRegion {
     }
 
     fn commit_high_memory_priority(&self) {
-        // SAFETY: `self.as_ffi_ptr()` points to a live `VmAddressRegion`.
-        unsafe { bindings::cpp_vm_address_region_commit_high_memory_priority(self.as_ffi_ptr()) }
+        self.state().canary.assert();
+
+        ksync::lock!(let mut guard = self.lock().lock());
+        // Capture the validation that we need to do whenever the lock is acquired.
+        let validate = |token: &LockToken<'_, VmAspaceLockClass>| -> bool {
+            if self.state_locked(token) != LifeCycleState::Alive {
+                hint::cold_path();
+                return false;
+            }
+
+            if self.memory_priority_locked(token) != MemoryPriority::High {
+                hint::cold_path();
+                return false;
+            }
+
+            true
+        };
+        if !validate(guard.token()) {
+            return;
+        }
+
+        pin_init::stack_pin_init!(let enumerator = VmAddressRegionEnumerator::new(
+            VmAddressRegionEnumeratorType::MappingsOnly,
+            self,
+            0,
+            usize::MAX,
+            guard.token(),
+        ));
+        debug_assert!(self.lock_is_held());
+        while let Some((region_or_mapping, _)) = enumerator.as_mut().next(guard.token()) {
+            // Presently we hold the lock, so we know that `region_or_mapping` is valid, but we want
+            // to use this outside of the lock later on, and so we must upgrade it to a `RefPtr`.
+            let Some(mapping) = region_or_mapping.as_vm_mapping() else {
+                continue;
+            };
+            enumerator.as_mut().pause(guard.token());
+            guard.as_mut().call_unlocked(move || {
+                mapping.commit_high_memory_priority();
+                drop(mapping);
+            });
+            // Since the lock was dropped we must re-validate before doing anything else.
+            if !validate(guard.token()) {
+                return;
+            }
+            enumerator.as_mut().resume(guard.token());
+        }
     }
 
     /// Applies the given memory priority to this region and all subregions.
     pub fn set_memory_priority(&self, priority: MemoryPriority) -> Result<(), Status> {
-        // SAFETY: `self.as_ffi_ptr()` points to a live `VmAddressRegion`.
-        Status::ok(unsafe {
-            bindings::cpp_vm_address_region_set_memory_priority(self.as_ffi_ptr(), priority.into())
-        })
+        self.state().canary.assert();
+        let have_children = {
+            ksync::lock!(let mut guard = self.lock().lock());
+            if let Err(status) =
+                self.set_memory_priority_locked(guard.as_mut().token_mut(), priority)
+            {
+                hint::cold_path();
+                return Err(status);
+            }
+            !region_list::is_empty(self, guard.token())
+        };
+        // If a high memory priority was set, perform another pass through any mappings to commit
+        // it, unless we know we didn't have any children at the point we set the priority to avoid
+        // a needless lock acquisition and pass.
+        if priority == MemoryPriority::High && have_children {
+            self.commit_high_memory_priority();
+        }
+        Ok(())
     }
 
-    /// Unmaps a subset of the region of memory in the containing address space.
+    /// Unmap a subset of the region of memory in the containing address space,
+    /// returning it to this region to allocate. If a subregion is entirely in
+    /// the range, and `op_children` is `Yes`, that subregion is destroyed. If a subregion is
+    /// partially in the range, `unmap()` will fail.
     ///
     /// # Safety
     ///
@@ -1031,38 +1177,313 @@ impl VmAddressRegion {
         size: usize,
         op_children: VmAddressRegionOpChildren,
     ) -> Result<(), Status> {
-        // SAFETY: `self.as_ffi_ptr()` points to a live `VmAddressRegion`.
-        Status::ok(unsafe {
-            bindings::cpp_vm_address_region_unmap(
-                self.as_ffi_ptr(),
-                base.0,
+        self.state().canary.assert();
+
+        let size = size.wrapping_add(kernel_page::MASK) & !kernel_page::MASK;
+        if size == 0 || !kernel_page::is_page_rounded(base.0) {
+            hint::cold_path();
+            return Err(Status::INVALID_ARGS);
+        }
+
+        ksync::lock!(let mut region_guard = self.region_lock().lock());
+        ksync::lock!(let mut guard = self.lock().lock());
+        if self.state_locked(guard.token()) != LifeCycleState::Alive {
+            hint::cold_path();
+            return Err(Status::BAD_STATE);
+        }
+
+        // SAFETY: `size` is not zero, `base` and `size` are page aligned, and the virtual
+        // address range `[base, base + size)` is no longer used.
+        unsafe {
+            self.unmap_internal_locked(
+                region_guard.as_mut().token_mut(),
+                guard.as_mut().token_mut(),
+                base,
                 size,
-                op_children.into(),
+                op_children == VmAddressRegionOpChildren::Yes, /* can_destroy_regions */
             )
-        })
+        }
     }
 
-    /// Changes protections on a subset of the region of memory in the containing address space.
-    pub fn protect(
+    /// Implementation for `unmap()` and the C++ `OverwriteVmMappingLocked()` that does not acquire
+    /// the region and aspace locks. If `can_destroy_regions` is true, then this may destroy
+    /// VMARs that it completely covers.
+    ///
+    /// # Safety
+    ///
+    /// `size` is not zero, `base` and `size` are page aligned, and the virtual address range
+    /// `[base, base + size)` is no longer used.
+    unsafe fn unmap_internal_locked(
+        &self,
+        region_token: &mut LockToken<'_, VmAspaceRegionLockClass>,
+        aspace_token: &mut LockToken<'_, VmAspaceLockClass>,
+        base: VAddr,
+        size: usize,
+        can_destroy_regions: bool,
+    ) -> Result<(), Status> {
+        if !self.is_in_range(base, size) {
+            hint::cold_path();
+            return Err(Status::INVALID_ARGS);
+        }
+
+        if region_list::is_empty(self, aspace_token) {
+            return Ok(());
+        }
+
+        // Any unmap spanning the vDSO code mapping is verboten.
+        if self.aspace().intersects_vdso_code_locked(aspace_token, base, size) {
+            hint::cold_path();
+            return Err(Status::ACCESS_DENIED);
+        }
+
+        debug_assert!(size > 0);
+        let (end_addr_byte, overflowed) = base.0.overflowing_add(size - 1);
+        assert!(!overflowed);
+
+        // Check if we're partially spanning a subregion, or aren't allowed to
+        // destroy regions and are spanning a region, and bail if we are.
+        let mut itr = region_list::include_or_higher(self, aspace_token, base);
+        while let Some(curr) = itr.get() {
+            if curr.base().0 > end_addr_byte {
+                break;
+            }
+            debug_assert!(curr.lock_is_held());
+            debug_assert!(curr.size() > 0);
+            let (itr_end_byte, overflowed) = curr.base().0.overflowing_add(curr.size() - 1);
+            assert!(!overflowed);
+            if !curr.is_mapping()
+                && (!can_destroy_regions || curr.base().0 < base.0 || itr_end_byte > end_addr_byte)
+            {
+                hint::cold_path();
+                return Err(Status::INVALID_ARGS);
+            }
+            itr.next();
+        }
+
+        // TODO(https://fxbug.dev/503042881): Every deletion invalidates our iterator, hence we have
+        // to look up a new one every time.
+        while let Some(curr_region) = region_list::include_or_higher(self, aspace_token, base).get()
+        {
+            if curr_region.base().0 > end_addr_byte {
+                break;
+            }
+
+            debug_assert!(curr_region.lock_is_held());
+            debug_assert!(curr_region.region_lock_is_held());
+
+            assert!(curr_region.size() > 0);
+            let (curr_end_byte, overflowed) =
+                curr_region.base().0.overflowing_add(curr_region.size() - 1);
+            assert!(!overflowed);
+            let unmap_base = curr_region.base().0.max(base.0);
+            let unmap_end_byte = curr_end_byte.min(end_addr_byte);
+            assert!(unmap_base <= unmap_end_byte);
+            let (unmap_size, overflowed) = (unmap_end_byte - unmap_base).overflowing_add(1);
+            assert!(!overflowed);
+            if unmap_base == curr_region.base().0 && unmap_size == curr_region.size() {
+                if let Err(status) = VmAddressRegionOrMapping::destroy_locked(
+                    RefPtr::from_ref(curr_region),
+                    region_token,
+                    aspace_token,
+                ) {
+                    hint::cold_path();
+                    debug_assert!(status == Status::NO_MEMORY);
+                    return Err(status);
+                }
+            } else {
+                let mapping = curr_region.as_vm_mapping();
+                // Already validated in the loop above that the only kind of region we can partially
+                // span is a mapping.
+                assert!(mapping.is_some());
+                let mapping = mapping.unwrap();
+                // Unmapping can fail if an allocation needed to happen. Nothing can be done to
+                // rollback here so the only option is to propagate the `Status::NO_MEMORY` up. If
+                // this is happening in response to a user request then they will most likely panic,
+                // as users have no ability to resolve `Status::NO_MEMORY`.
+                // SAFETY: `unmap_size` is not zero, `unmap_base` and `unmap_size` are page
+                // aligned, and `[unmap_base, unmap_base + unmap_size)` is a strict subrange of
+                // `mapping` that may be unmapped.
+                if let Err(status) = unsafe {
+                    VmMapping::unmap_locked(
+                        &mapping,
+                        region_token,
+                        aspace_token,
+                        unmap_base,
+                        unmap_size,
+                    )
+                } {
+                    hint::cold_path();
+                    assert!(status == Status::NO_MEMORY);
+                    return Err(status);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Change protections on a subset of the region of memory in the containing
+    /// address space. If the requested range overlaps with a subregion and `op_children` is `No`,
+    /// `protect()` will fail, otherwise the mapping permissions in the subregion may only be
+    /// reduced.
+    ///
+    /// # Safety
+    ///
+    /// The virtual address range `[base, base + size)` may have its permissions changed and be
+    /// unmapped.
+    pub unsafe fn protect(
         &self,
         base: VAddr,
         size: usize,
         new_arch_mmu_flags: ArchMmuFlags,
         op_children: VmAddressRegionOpChildren,
     ) -> Result<(), Status> {
-        // SAFETY: `self.as_ffi_ptr()` points to a live `VmAddressRegion`.
-        Status::ok(unsafe {
-            bindings::cpp_vm_address_region_protect(
-                self.as_ffi_ptr(),
+        self.state().canary.assert();
+
+        let size = size.wrapping_add(kernel_page::MASK) & !kernel_page::MASK;
+        if size == 0 || !kernel_page::is_page_rounded(base.0) {
+            hint::cold_path();
+            return Err(Status::INVALID_ARGS);
+        }
+
+        ksync::lock!(let mut guard = self.lock().lock());
+        let token = guard.as_mut().token_mut();
+        if self.state_locked(token) != LifeCycleState::Alive {
+            hint::cold_path();
+            return Err(Status::BAD_STATE);
+        }
+
+        if !self.is_in_range(base, size) {
+            hint::cold_path();
+            return Err(Status::INVALID_ARGS);
+        }
+
+        // Do not allow changing caching.
+        if (new_arch_mmu_flags & ARCH_MMU_FLAG_CACHE_MASK) != 0 {
+            hint::cold_path();
+            return Err(Status::INVALID_ARGS);
+        }
+
+        // The last byte of the range.
+        let (end_addr_byte, overflowed) = base.0.overflowing_add(size - 1);
+        assert!(!overflowed);
+
+        // Check part of the range is not mapped, or the new permissions are invalid for some
+        // mapping in the range.
+        {
+            let token = &*token;
+            pin_init::stack_pin_init!(let enumerator = VmAddressRegionEnumerator::new(
+                VmAddressRegionEnumeratorType::MappingsOnly,
+                self,
                 base.0,
-                size,
-                new_arch_mmu_flags,
-                op_children.into(),
-            )
-        })
+                end_addr_byte,
+                token,
+            ));
+            let mut expected = base.0;
+            while let Some((entry, _)) = enumerator.as_mut().next(token) {
+                let mapping = entry.as_vm_mapping_ptr();
+                debug_assert!(mapping.is_some());
+                let mapping = mapping.unwrap();
+                debug_assert!(mapping.lock_is_held());
+                if mapping.base().0 > expected {
+                    hint::cold_path();
+                    return Err(Status::NOT_FOUND);
+                }
+                let (end, overflowed) = mapping.base().0.overflowing_add(mapping.size());
+                assert!(!overflowed);
+                if !mapping.is_valid_mapping_flags(new_arch_mmu_flags) {
+                    hint::cold_path();
+                    return Err(Status::ACCESS_DENIED);
+                }
+                if ptr::eq(self.aspace().vdso_code_mapping_locked(token), mapping) {
+                    hint::cold_path();
+                    return Err(Status::ACCESS_DENIED);
+                }
+                if !ptr::eq(mapping.parent_locked(token), self) {
+                    if op_children == VmAddressRegionOpChildren::No {
+                        hint::cold_path();
+                        return Err(Status::INVALID_ARGS);
+                    }
+                    // As this is a subregion we cannot increase its mapping flags, even if they
+                    // might otherwise be permissible. A mapping might have multiple different
+                    // protect regions so need to check all of them within the protection range.
+                    // Already know that `expected` is within the mapping, calculate a length that
+                    // is within the range of `mapping`.
+                    let len = end_addr_byte.min(end - 1) - expected + 1;
+                    mapping.enumerate_protection_ranges_locked(
+                        token,
+                        expected,
+                        len,
+                        move |_, _, flags| {
+                            if (flags & new_arch_mmu_flags) != new_arch_mmu_flags {
+                                hint::cold_path();
+                                return Err(Status::ACCESS_DENIED);
+                            }
+                            Err(Status::NEXT)
+                        },
+                    )?;
+                }
+                expected = end;
+            }
+            if expected < end_addr_byte {
+                hint::cold_path();
+                return Err(Status::NOT_FOUND);
+            }
+        }
+
+        pin_init::stack_pin_init!(let enumerator = VmAddressRegionEnumerator::new(
+            VmAddressRegionEnumeratorType::MappingsOnly,
+            self,
+            base.0,
+            end_addr_byte,
+            token,
+        ));
+        while let Some((entry, _)) = enumerator.as_mut().next(token) {
+            let mapping = entry.as_vm_mapping_ptr();
+            debug_assert!(mapping.is_some());
+            let mapping = ptr::from_ref(mapping.unwrap());
+            // SAFETY: The aspace lock (`token`) remains held and `subregions_` is not modified in
+            // this loop, so `mapping` stays live for the duration of the iteration.
+            let mapping = unsafe { &*mapping };
+
+            // The last byte of the current region.
+            debug_assert!(mapping.lock_is_held());
+            let (curr_end_byte, overflowed) = mapping.base().0.overflowing_add(mapping.size() - 1);
+            assert!(!overflowed);
+            let protect_base = mapping.base().0.max(base.0);
+            let protect_end_byte = curr_end_byte.min(end_addr_byte);
+            let (protect_size, overflowed) = (protect_end_byte - protect_base).overflowing_add(1);
+            assert!(!overflowed);
+
+            // `protect_locked` mutates the mapping's protection ranges in place, and so we must
+            // pause the enumerator to safely perform mutations. Note that even though we are
+            // pausing the enumerator here, it is *NOT* okay to drop the lock between the pause and
+            // resume. We need to mutate permissions on all the mappings in the requested range
+            // atomically (except for failure due to `Status::NO_MEMORY`) and so the lock must be
+            // held throughout.
+            enumerator.as_mut().pause(token);
+            // SAFETY: `protect_size` is not zero, `protect_base` and `protect_size` are page
+            // aligned, `[protect_base, protect_base + protect_size)` is within `mapping` and may
+            // have its permissions changed and be unmapped, and `new_arch_mmu_flags` has no cache
+            // flags and is valid for `mapping`.
+            if let Err(status) = unsafe {
+                mapping.protect_locked(token, protect_base, protect_size, new_arch_mmu_flags)
+            } {
+                hint::cold_path();
+                // We can error out only due to failed allocations. Other error conditions should
+                // have already been checked above.
+                assert!(status == Status::NO_MEMORY);
+                // TODO(teisenbe): Try to work out a way to guarantee success, or
+                // provide a full unwind?
+                return Err(status);
+            }
+            enumerator.as_mut().resume(token);
+        }
+
+        Ok(())
     }
 
-    /// Performs a VMO or mapping operation (`op`) across mappings in `[base, base + len)`.
+    /// Apply `op` to VMO mappings in the specified range of pages.
     pub fn range_op(
         &self,
         op: RangeOpType,
@@ -1072,18 +1493,226 @@ impl VmAddressRegion {
         buffer: UserInOutPtr<u8>,
         buffer_size: usize,
     ) -> Result<(), Status> {
-        // SAFETY: `self.as_ffi_ptr()` points to a live `VmAddressRegion`.
-        Status::ok(unsafe {
-            bindings::cpp_vm_address_region_range_op(
-                self.as_ffi_ptr(),
-                op,
-                base.0,
-                len,
-                op_children.into(),
-                buffer.as_ptr().cast(),
-                buffer_size,
-            )
-        })
+        self.state().canary.assert();
+        if !buffer.is_null() || buffer_size != 0 {
+            hint::cold_path();
+            return Err(Status::INVALID_ARGS);
+        }
+        let len = len.wrapping_add(kernel_page::MASK) & !kernel_page::MASK;
+        if len == 0 || !kernel_page::is_page_rounded(base.0) {
+            hint::cold_path();
+            return Err(Status::INVALID_ARGS);
+        }
+
+        if !self.is_in_range(base, len) {
+            hint::cold_path();
+            return Err(Status::OUT_OF_RANGE);
+        }
+
+        let (last_addr, overflowed) = base.0.overflowing_add(len);
+        assert!(!overflowed);
+
+        ksync::lock!(let mut guard = self.lock().lock());
+        // Capture the validation that we need to do whenever the lock is acquired.
+        let validate = |token: &LockToken<'_, VmAspaceLockClass>| -> Result<(), Status> {
+            if self.state_locked(token) != LifeCycleState::Alive {
+                hint::cold_path();
+                return Err(Status::BAD_STATE);
+            }
+
+            // Don't allow any operations on the vDSO code mapping.
+            if self.aspace().intersects_vdso_code_locked(token, base, len) {
+                hint::cold_path();
+                return Err(Status::ACCESS_DENIED);
+            }
+            Ok(())
+        };
+        validate(guard.token())?;
+
+        pin_init::stack_pin_init!(let enumerator = VmAddressRegionEnumerator::new(
+            VmAddressRegionEnumeratorType::MappingsOnly,
+            self,
+            base.0,
+            last_addr,
+            guard.token(),
+        ));
+        let mut expected = base.0;
+        while let Some((region_or_mapping, _)) = enumerator.as_mut().next(guard.token()) {
+            // Presently we hold the lock, so we know that `region_or_mapping` is valid, but we want
+            // to use this outside of the lock later on, and so we must upgrade it to a `RefPtr`.
+            let mapping = region_or_mapping.as_vm_mapping().expect("mapping must be set");
+
+            // It's possible the mapping's base is less than `expected` if the first mapping is not
+            // precisely aligned to the start of our range. After that its base should always be
+            // `expected`, and if it's greater then there is a gap and this is considered an error.
+            if mapping.base().0 > expected {
+                hint::cold_path();
+                return Err(Status::BAD_STATE);
+            }
+            // We should only have been called if we were at least partially in range.
+            debug_assert!(mapping.is_in_range(VAddr(expected), 1));
+            let mapping_offset = expected - mapping.base().0;
+            let vmo_offset = mapping.object_offset() + mapping_offset as u64;
+
+            // Should only have been called for a non-zero range.
+            debug_assert!(last_addr > expected);
+
+            let total_remain = last_addr - expected;
+            debug_assert!(mapping.size() > mapping_offset);
+            let max_in_mapping = mapping.size() - mapping_offset;
+
+            let size = total_remain.min(max_in_mapping);
+
+            let vmo = mapping.vmo_locked(guard.token());
+
+            enumerator.as_mut().pause(guard.token());
+            // The commit, decommit and prefetch ops check the maximal permissions of the mapping
+            // and can be thought of as acting as if they perform a protect to add read or write
+            // permissions. Since protect to add permissions through a parent VMAR is not valid we
+            // similarly forbid this notional protect by not allowing these operations if acting
+            // through a sub-VMAR, regardless of whether `op_children` is otherwise allowed.
+            if (matches!(op, RangeOpType::Commit | RangeOpType::Decommit | RangeOpType::Prefetch)
+                || op_children == VmAddressRegionOpChildren::No)
+                && !ptr::eq(mapping.parent_locked(guard.token()), self)
+            {
+                hint::cold_path();
+                return Err(Status::INVALID_ARGS);
+            }
+
+            let result = guard.as_mut().call_unlocked(move || {
+                let result = Self::range_op_on_mapping(
+                    op,
+                    &mapping,
+                    vmo.as_deref().expect("mapping must have a VMO"),
+                    mapping_offset,
+                    vmo_offset,
+                    size,
+                );
+                // Drop our references while the lock is released: the mapping may have been
+                // destroyed and the VMO closed meanwhile, leaving these as the last references.
+                drop(vmo);
+                drop(mapping);
+                result
+            });
+            // Since the lock was dropped we must re-validate before doing anything else.
+            validate(guard.token())?;
+            enumerator.as_mut().resume(guard.token());
+
+            result?;
+            expected += size;
+        }
+
+        // Check if there was a gap right at the end of the range.
+        if expected < last_addr {
+            hint::cold_path();
+            return Err(Status::BAD_STATE);
+        }
+        Ok(())
+    }
+
+    /// Applies `op` to `size` bytes of `mapping` from `mapping_offset`, which maps `vmo` from
+    /// `vmo_offset`. This is a separate function so that `range_op` can move its references to
+    /// the mapping and VMO into the unlocked call and drop them there, not under the aspace lock.
+    ///
+    /// The aspace lock must not be held.
+    fn range_op_on_mapping(
+        op: RangeOpType,
+        mapping: &VmMapping,
+        vmo: &VmObject,
+        mapping_offset: usize,
+        vmo_offset: u64,
+        size: usize,
+    ) -> Result<(), Status> {
+        debug_assert!(!mapping.lock_is_held());
+        // For fault-beyond-stream-size mappings, ensure there are no gaps due to the stream
+        // size being less than the end of the mapping. User synchronization is required
+        // for the observable result to be defined, as the stream size is a user managed
+        // property & not guaranteed atomic to the VMO.
+        if mapping.flags() & flag::FAULT_BEYOND_STREAM_SIZE != 0 {
+            let paged = vmo.as_paged().expect("vmo must be paged");
+            {
+                ksync::lock!(let vmo_guard = paged.lock_ref().lock());
+
+                let stream_size = paged
+                    .saturating_stream_size_locked(vmo_guard.token())
+                    .expect("stream_size must be set");
+                if vmo_offset > stream_size {
+                    hint::cold_path();
+                    return Err(Status::OUT_OF_RANGE);
+                }
+                if size as u64 > stream_size - vmo_offset {
+                    hint::cold_path();
+                    return Err(Status::OUT_OF_RANGE);
+                }
+            }
+        }
+        match op {
+            RangeOpType::Commit => {
+                if !mapping.is_valid_mapping_flags(ARCH_MMU_FLAG_PERM_WRITE) {
+                    hint::cold_path();
+                    Err(Status::ACCESS_DENIED)
+                } else {
+                    vmo.commit_range(vmo_offset, size as u64)?;
+                    mapping.map_range(
+                        mapping_offset,
+                        size,
+                        /*commit=*/ false,
+                        /*ignore_existing=*/ true,
+                    )
+                }
+            }
+            RangeOpType::Decommit => {
+                // Decommit zeroes pages of the VMO, equivalent to writing to it.
+                // Check that the mapping is currently writable, or could be made
+                // writable.
+                if !mapping.is_valid_mapping_flags(ARCH_MMU_FLAG_PERM_WRITE) {
+                    hint::cold_path();
+                    Err(Status::ACCESS_DENIED)
+                } else {
+                    vmo.decommit_range(vmo_offset, size as u64)
+                }
+            }
+            RangeOpType::MapRange => mapping.map_range(
+                mapping_offset,
+                size,
+                /*commit=*/ false,
+                /*ignore_existing=*/ true,
+            ),
+            RangeOpType::Zero => {
+                if !mapping.is_valid_mapping_flags(ARCH_MMU_FLAG_PERM_WRITE) {
+                    hint::cold_path();
+                    Err(Status::ACCESS_DENIED)
+                } else {
+                    vmo.zero_range(vmo_offset, size as u64)
+                }
+            }
+            RangeOpType::AlwaysNeed => {
+                vmo.hint_range(vmo_offset, size as u64, EvictionHint::AlwaysNeed)?;
+                mapping.map_range(
+                    mapping_offset,
+                    size,
+                    /*commit=*/ false,
+                    /*ignore_existing=*/ true,
+                )
+            }
+            RangeOpType::DontNeed => {
+                vmo.hint_range(vmo_offset, size as u64, EvictionHint::DontNeed)
+            }
+            RangeOpType::Prefetch => {
+                if !mapping.is_valid_mapping_flags(ARCH_MMU_FLAG_PERM_READ) {
+                    hint::cold_path();
+                    Err(Status::ACCESS_DENIED)
+                } else {
+                    vmo.prefetch_range(vmo_offset, size as u64)?;
+                    mapping.map_range(
+                        mapping_offset,
+                        size,
+                        /*commit=*/ false,
+                        /*ignore_existing=*/ true,
+                    )
+                }
+            }
+        }
     }
 
     /// Reserves a memory region within this VMAR without allocating physical pages.
@@ -1152,7 +1781,7 @@ impl VmAddressRegion {
 }
 
 /// Guard passed to [`VmEnumerator`] callbacks representing the held root `VmAspace` lock.
-pub type VmAspaceGuard<'a> = KMutexGuard<'a, VmAspaceLockClass, RawCriticalMutex>;
+pub type VmAspaceGuard<'a> = KMutexGuard<'a, VmAspaceLockClass, TrackedCriticalMutex>;
 
 /// Interface for walking a `VmAspace`-rooted `VmAddressRegion`/`VmMapping` tree.
 /// Implement this trait and pass an instance to `VmAddressRegion::enumerate_children()`.
@@ -1197,8 +1826,54 @@ pub(super) mod region_list {
     use super::{VmAddressRegion, VmAddressRegionOrMapping, bindings};
     use crate::kernel::types::VAddr;
     use core::ffi::c_void;
+    use core::marker::PhantomData;
     use ksync::LockToken;
+    use zr::Opaque;
     use zx_status::Status;
+
+    /// A cursor into a VMAR's region list, valid while the aspace lock is held for `'a`.
+    pub(in crate::vm) struct Cursor<'a> {
+        raw: Opaque<bindings::VmAddressRegionSubregionsCursor>,
+        _vmar: PhantomData<&'a VmAddressRegion>,
+    }
+
+    impl<'a> Cursor<'a> {
+        /// # Safety
+        ///
+        /// `init` initializes the cursor it is passed to a cursor into the region list of a VMAR,
+        /// and the VMAR is live and its region list is not modified for `'a`.
+        #[inline]
+        unsafe fn new(init: impl FnOnce(*mut bindings::VmAddressRegionSubregionsCursor)) -> Self {
+            let raw = Opaque::uninit();
+            init(raw.get());
+            Self { raw, _vmar: PhantomData }
+        }
+
+        #[inline]
+        fn is_valid(&self) -> bool {
+            // SAFETY: `self.raw` is a cursor into a live region list, and is not stale.
+            unsafe { bindings::cpp_vm_address_region_subregions_cursor_is_valid(self.raw.get()) }
+        }
+
+        #[inline]
+        pub(in crate::vm) fn get(&self) -> Option<&'a VmAddressRegionOrMapping> {
+            if !self.is_valid() {
+                return None;
+            }
+            // SAFETY: `self.raw` is a valid cursor into a live region list, and is not stale.
+            let raw =
+                unsafe { bindings::cpp_vm_address_region_subregions_cursor_get(self.raw.get()) };
+            // SAFETY: `raw` points to a child of the VMAR that is live for `'a`.
+            Some(unsafe { &*raw.cast::<VmAddressRegionOrMapping>() })
+        }
+
+        /// Advance to the next region in address order.
+        #[inline]
+        pub(in crate::vm) fn next(&mut self) {
+            // SAFETY: `self.raw` is a cursor into a live region list, and is not stale.
+            unsafe { bindings::cpp_vm_address_region_subregions_cursor_next(self.raw.get()) }
+        }
+    }
 
     /// Find the region that covers `addr`, returns `None` if not found.
     #[inline]
@@ -1222,13 +1897,18 @@ pub(super) mod region_list {
         vmar: &'a VmAddressRegion,
         _token: &'a LockToken<'_, VmAspaceLockClass>,
         base: VAddr,
-    ) -> Option<&'a VmAddressRegionOrMapping> {
-        // SAFETY: `vmar` is live and the aspace lock is held.
-        let raw = unsafe {
-            bindings::cpp_vm_address_region_subregions_include_or_higher(vmar.as_ffi_ptr(), base.0)
-        };
-        // SAFETY: `raw` is null or points to a child of `vmar` that is live for `'a`.
-        unsafe { raw.cast::<VmAddressRegionOrMapping>().as_ref() }
+    ) -> Cursor<'a> {
+        // SAFETY: `vmar` is live, the aspace lock is held for `'a`, `out` is valid for writes, and
+        // the closure initializes `out` to a cursor into the region list of `vmar`.
+        unsafe {
+            Cursor::new(|out| {
+                bindings::cpp_vm_address_region_subregions_include_or_higher(
+                    vmar.as_ffi_ptr(),
+                    base.0,
+                    out.cast(),
+                )
+            })
+        }
     }
 
     /// Insert `region` to the region list. On failure the region list is unmodified.
@@ -1275,6 +1955,87 @@ pub(super) mod region_list {
                 region.raw.get(),
             )
         }
+    }
+
+    /// Replaces the target region with a new region at the same address. Unlike insertion this
+    /// cannot fail.
+    ///
+    /// # Safety
+    ///
+    /// `prev` is a child of `vmar` and is kept alive by another owning reference for the duration
+    /// of the call, and `region` has the same base as `prev` and does not overlap with any other
+    /// child of `vmar`.
+    #[inline]
+    pub(in crate::vm) unsafe fn replace_region(
+        vmar: &VmAddressRegion,
+        _region_token: &mut LockToken<'_, VmAspaceRegionLockClass>,
+        _token: &mut LockToken<'_, VmAspaceLockClass>,
+        prev: &VmAddressRegionOrMapping,
+        region: &VmAddressRegionOrMapping,
+    ) {
+        // SAFETY: `vmar` and `region` are live, `prev` is a child of `vmar` that is kept alive by
+        // another owning reference for the duration of the call, `region` has the same base as
+        // `prev` and does not overlap with any other child of `vmar`, and the region and aspace
+        // locks are held.
+        unsafe {
+            bindings::cpp_vm_address_region_subregions_replace_region(
+                vmar.as_ffi_ptr(),
+                prev.raw.get(),
+                region.raw.get(),
+            )
+        }
+    }
+
+    /// Request the region to the left of the given region.
+    ///
+    /// # Safety
+    ///
+    /// `region` is a child of `vmar`.
+    #[inline]
+    pub(in crate::vm) unsafe fn left_of<'a>(
+        vmar: &'a VmAddressRegion,
+        _token: &'a LockToken<'_, VmAspaceLockClass>,
+        region: &VmAddressRegionOrMapping,
+    ) -> Option<&'a VmAddressRegionOrMapping> {
+        // SAFETY: `vmar` is live and its region list is not modified for `'a`, `region` is a child
+        // of `vmar`, the aspace lock is held for `'a`, `out` is valid for writes, and the closure
+        // initializes `out` to a cursor into the region list of `vmar`.
+        let cursor = unsafe {
+            Cursor::new(|out| {
+                bindings::cpp_vm_address_region_subregions_left_of(
+                    vmar.as_ffi_ptr(),
+                    region.raw.get(),
+                    out.cast(),
+                )
+            })
+        };
+        cursor.get()
+    }
+
+    /// Request the region to the right of the given region.
+    ///
+    /// # Safety
+    ///
+    /// `region` is a child of `vmar`.
+    #[inline]
+    pub(in crate::vm) unsafe fn right_of<'a>(
+        vmar: &'a VmAddressRegion,
+        _token: &'a LockToken<'_, VmAspaceLockClass>,
+        region: &VmAddressRegionOrMapping,
+    ) -> Option<&'a VmAddressRegionOrMapping> {
+        // SAFETY: `vmar` is live and its region list is not modified for `'a`, `region` is a child
+        // of `vmar`, the aspace lock is held for `'a`, `out` is valid for writes, and the closure
+        // initializes `out` to a cursor into the region list of `vmar`.
+        let cursor = unsafe {
+            Cursor::new(|out| {
+                bindings::cpp_vm_address_region_subregions_right_of(
+                    vmar.as_ffi_ptr(),
+                    region.raw.get(),
+                    out.cast(),
+                )
+            })
+        };
+        cursor.get()
     }
 
     /// Returns whether the region list is empty.
@@ -1440,18 +2201,6 @@ pub unsafe extern "C" fn rust_vm_address_region_or_mapping_state_locked(
 
 /// # Safety
 ///
-/// `this` is the base of a `VmMapping` whose object lock is held.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_vm_address_region_or_mapping_state_locked_object(
-    this: &VmAddressRegionOrMapping,
-) -> LifeCycleState {
-    // SAFETY: The object lock is held by the caller.
-    let token = unsafe { LockToken::new() };
-    this.state_locked_object(&token)
-}
-
-/// # Safety
-///
 /// The region lock is held.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rust_vm_address_region_or_mapping_state_locked_region(
@@ -1487,19 +2236,6 @@ pub unsafe extern "C" fn rust_vm_address_region_or_mapping_memory_priority_locke
     // SAFETY: The aspace lock is held by the caller, or no other reference to `this` exists.
     let token = unsafe { LockToken::new() };
     this.memory_priority_locked(&token)
-}
-
-/// # Safety
-///
-/// The aspace lock is held.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_vm_address_region_or_mapping_set_memory_priority_locked(
-    this: &VmAddressRegionOrMapping,
-    priority: MemoryPriority,
-) {
-    // SAFETY: The aspace lock is held by the caller.
-    let mut token = unsafe { LockToken::new() };
-    this.set_memory_priority_field_locked(&mut token, priority);
 }
 
 /// # Safety
@@ -1583,6 +2319,68 @@ pub extern "C" fn rust_vm_address_region_has_parent(this: &VmAddressRegion) -> b
     this.has_parent()
 }
 
+/// # Safety
+///
+/// The specified virtual address range to unmap is no longer used.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_vm_address_region_unmap(
+    this: &VmAddressRegion,
+    base: usize,
+    size: usize,
+    op_children: VmAddressRegionOpChildren,
+) -> zx_status_t {
+    // SAFETY: The specified virtual address range to unmap is no longer used.
+    Status::result_into_raw(unsafe { this.unmap(VAddr(base), size, op_children) })
+}
+
+/// # Safety
+///
+/// The region lock and the aspace lock are held and the object lock is not held. `size` is not
+/// zero, `base` and `size` are page aligned, and the virtual address range
+/// `[base, base + size)` is no longer used.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_vm_address_region_unmap_internal_locked(
+    this: &VmAddressRegion,
+    base: usize,
+    size: usize,
+    can_destroy_regions: bool,
+) -> zx_status_t {
+    // SAFETY: The region lock is held.
+    let mut region_token = unsafe { LockToken::new() };
+    // SAFETY: The aspace lock is held.
+    let mut aspace_token = unsafe { LockToken::new() };
+    // SAFETY: `size` is not zero, `base` and `size` are page aligned, and the virtual address
+    // range `[base, base + size)` is no longer used.
+    Status::result_into_raw(unsafe {
+        this.unmap_internal_locked(
+            &mut region_token,
+            &mut aspace_token,
+            VAddr(base),
+            size,
+            can_destroy_regions,
+        )
+    })
+}
+
+/// # Safety
+///
+/// The virtual address range `[base, base + size)` may have its permissions changed and be
+/// unmapped.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_vm_address_region_protect(
+    this: &VmAddressRegion,
+    base: usize,
+    size: usize,
+    new_arch_mmu_flags: ArchMmuFlags,
+    op_children: VmAddressRegionOpChildren,
+) -> zx_status_t {
+    // SAFETY: The virtual address range `[base, base + size)` may have its permissions changed and
+    // be unmapped.
+    Status::result_into_raw(unsafe {
+        this.protect(VAddr(base), size, new_arch_mmu_flags, op_children)
+    })
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_vm_address_region_find_region(
     this: &VmAddressRegion,
@@ -1592,6 +2390,14 @@ pub extern "C" fn rust_vm_address_region_find_region(
         Some(region) => RefPtr::into_raw(region).cast_mut().cast(),
         None => core::ptr::null_mut(),
     }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_vm_address_region_get_attributed_memory(
+    this: &VmAddressRegion,
+    out_counts: &mut MaybeUninit<AttributionCounts>,
+) {
+    out_counts.write(this.get_attributed_memory());
 }
 
 /// # Safety
@@ -1682,6 +2488,27 @@ pub extern "C" fn rust_vm_address_region_or_mapping_commit_high_memory_priority(
     this: &VmAddressRegionOrMapping,
 ) {
     this.commit_high_memory_priority();
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_vm_address_region_set_memory_priority(
+    this: &VmAddressRegion,
+    priority: MemoryPriority,
+) -> zx_status_t {
+    Status::result_into_raw(this.set_memory_priority(priority))
+}
+
+/// # Safety
+///
+/// The aspace lock is held and the object lock is not held.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_vm_address_region_set_memory_priority_locked(
+    this: &VmAddressRegion,
+    priority: MemoryPriority,
+) -> zx_status_t {
+    // SAFETY: The aspace lock is held.
+    let mut token = unsafe { LockToken::new() };
+    Status::result_into_raw(this.set_memory_priority_locked(&mut token, priority))
 }
 
 #[unsafe(no_mangle)]

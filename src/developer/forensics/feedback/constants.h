@@ -95,8 +95,6 @@ constexpr char kCurrentLogsDir[] = "/cache/current_system_logs";
 constexpr char kPreviousLogsFilePath[] = "/tmp/log.system.previous_boot.txt";
 constexpr char kPreviousBootKernelLogPath[] = "/tmp/log.kernel.previous_boot.txt";
 constexpr char kPreviousBootInspectPath[] = "/tmp/inspect.previous_boot.json";
-constexpr char kPreviousDiskBackedLogsMetadataPath[] = "/tmp/disk_backed_logs_metadata.json";
-constexpr char kCurrentDiskBackedLogsMetadataPath[] = "/cache/disk_backed_logs_metadata.json";
 constexpr char kPreviousBootIdPath[] = "/tmp/boot_id.txt";
 constexpr char kCurrentBootIdPath[] = "/data/boot_id.txt";
 constexpr char kPreviousSystemTimePath[] = "/tmp/system_time.json";
@@ -115,7 +113,12 @@ constexpr zx::duration kSystemTimeTrackerWritePeriod = zx::min(1);
 
 constexpr size_t kRedactionIdCacheCapacity = 1500;
 
-constexpr bool kEnableDiskBackedCurrentBootLogs = true;
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Legacy files
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+// Feedback no longer writes this file, but older versions may have left it behind.
+constexpr char kLegacyDiskBackedLogsMetadataPath[] = "/cache/disk_backed_logs_metadata.json";
 
 }  // namespace forensics::feedback
 

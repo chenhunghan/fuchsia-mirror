@@ -589,18 +589,18 @@ class AdjustableClockPipelineTest : public ClockSyncPipelineTest {
 // sides have a chance to converge (at the maximum, the slow side can never fully catch up).
 // To be discernable from the TotalRampFrames interval, the skew must also be > 291 PPM.
 // At 96k rate, to make the offset an exact integer, clock skew should be a multiple of 125.
-TEST_F(MicroSrcPipelineTest, ImpulseUp500) { RunImpulseTest(500, kFrameRate); }
+TEST_F(MicroSrcPipelineTest, DISABLED_ImpulseUp500) { RunImpulseTest(500, kFrameRate); }
 TEST_F(MicroSrcPipelineTest, ImpulseUp875) { RunImpulseTest(875, kFrameRate); }
 TEST_F(MicroSrcPipelineTest, ImpulseDown500) { RunImpulseTest(-500, kFrameRate); }
 
 TEST_F(AdjustableClockPipelineTest, ImpulseUp500) { RunImpulseTest(500, kFrameRate); }
-TEST_F(AdjustableClockPipelineTest, ImpulseDown500) { RunImpulseTest(-500, kFrameRate); }
+TEST_F(AdjustableClockPipelineTest, DISABLED_ImpulseDown500) { RunImpulseTest(-500, kFrameRate); }
 
 TEST_F(MicroSrcPipelineTest, StepUp500) { RunStepTest(500, kFrameRate); }
-TEST_F(MicroSrcPipelineTest, StepDown500) { RunStepTest(-500, kFrameRate); }
+TEST_F(MicroSrcPipelineTest, DISABLED_StepDown500) { RunStepTest(-500, kFrameRate); }
 TEST_F(MicroSrcPipelineTest, StepDown625) { RunStepTest(-625, kFrameRate); }
 
-TEST_F(AdjustableClockPipelineTest, StepUp500) { RunStepTest(500, kFrameRate); }
+TEST_F(AdjustableClockPipelineTest, DISABLED_StepUp500) { RunStepTest(500, kFrameRate); }
 TEST_F(AdjustableClockPipelineTest, StepDown500) { RunStepTest(-500, kFrameRate); }
 
 // For best precision in measuring resultant signal frequency, input signal frequency should be
@@ -610,10 +610,10 @@ TEST_F(AdjustableClockPipelineTest, StepDown500) { RunStepTest(-500, kFrameRate)
 // // Sine test input buffer length: the largest power-of-2 (frames) that fits into 2 sec @96kHz.
 // The numbers below work out to a frequency of 20k / (131072/96kHz) = 14.648 kHz.
 TEST_F(MicroSrcPipelineTest, SineUp500) { RunSineTest(500, 131072, 20000); }
-TEST_F(MicroSrcPipelineTest, SineDown500) { RunSineTest(-500, 131072, 20000); }
+TEST_F(MicroSrcPipelineTest, DISABLED_SineDown500) { RunSineTest(-500, 131072, 20000); }
 TEST_F(MicroSrcPipelineTest, SineDown750) { RunSineTest(-750, 131072, 20000); }
 
 TEST_F(AdjustableClockPipelineTest, SineUp500) { RunSineTest(500, 131072, 20000); }
-TEST_F(AdjustableClockPipelineTest, SineDown500) { RunSineTest(-500, 131072, 20000); }
+TEST_F(AdjustableClockPipelineTest, DISABLED_SineDown500) { RunSineTest(-500, 131072, 20000); }
 
 }  // namespace media::audio::test

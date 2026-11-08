@@ -458,8 +458,11 @@ create_protocol_enum!(
     #[allow(missing_docs)]
     #[derive(Copy, Clone, Hash, Eq, Ord, PartialEq, PartialOrd)]
     pub enum IpProto: u8 {
+        Ipv4Encap, 4, "IPv4-Encap";
         Tcp, 6, "TCP";
         Udp, 17, "UDP";
+        Ipv6Encap, 41, "IPv6-Encap";
+        Esp, 50, "ESP";
         Reserved, 255, "IANA-RESERVED";
     }
 );

@@ -1,0 +1,47 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_binary(
+    name = "bin",
+    srcs = ["virtual_audio.cc"],
+    tags = ["manual"],
+    deps = [
+        "//sdk/fidl/fuchsia.virtualaudio:fuchsia.virtualaudio_cpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/fdio",
+        "//sdk/lib/media/cpp:no_converters",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fsl",
+        "//src/lib/fxl:fxl_cli",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/fzl",
+        "//zircon/system/ulib/zx",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "virtual_audio_legacy",
+)
+
+fx_package(
+    name = "virtual_audio_legacy_util",
+    package_name = "virtual_audio_legacy_util",
+    package_repository_name = "fuchsia.com",
+    resources = [":bin_packaged"],
+    visibility = ["//bundles/assembly:__subpackages__"],
+)

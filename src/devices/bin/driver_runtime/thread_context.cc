@@ -78,7 +78,10 @@ thread_local std::atomic_int64_t g_task_entry_time = -1;
 // This global will be used to maintain a mapping to the atomic holding the active driver for each
 // thread. This is then used to service the GetDriverOnTid requests to locate the thread local
 // driver that is running.
-CurrentDriverTracker g_current_driver_for_tid = {};
+// Use `[[clang::no_destroy]]` so that `g_current_driver_for_tid` is not destroyed during
+// `__cxa_finalize` at process exit while detached or background threads are still exiting and
+// running their `thread_local` `g_remove_current_driver` destructor.
+[[clang::no_destroy]] CurrentDriverTracker g_current_driver_for_tid = {};
 
 // Use a thread local bool to track this so we don't have to go into the tracker which requires
 // locking a mutex.
@@ -86,8 +89,10 @@ thread_local bool g_added_to_tracker = false;
 
 // Remove the current driver entry when the thread is destroyed.
 thread_local fit::deferred_callback g_remove_current_driver = fit::defer_callback([]() {
-  g_current_driver_for_tid.Remove(g_thread_koid);
-  g_added_to_tracker = false;
+  if (g_added_to_tracker) {
+    g_current_driver_for_tid.Remove(g_thread_koid);
+    g_added_to_tracker = false;
+  }
 });
 
 }  // namespace

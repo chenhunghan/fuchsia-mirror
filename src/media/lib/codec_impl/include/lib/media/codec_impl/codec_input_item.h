@@ -31,6 +31,7 @@ class CodecInputItem {
   bool is_end_of_stream() const;
 
   const fuchsia::media::FormatDetails& format_details();
+  fuchsia::media::FormatDetails& mutable_format_details();
   const CodecPacket* packet() const;
 
  private:

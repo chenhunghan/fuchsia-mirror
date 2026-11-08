@@ -1,0 +1,34 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_binary(
+    name = "kstress",
+    srcs = [
+        "main.cc",
+        "stress_test.cc",
+        "stress_test.h",
+        "vmstress.cc",
+    ],
+    # GN uses the //build/config:all_source config to define _ALL_SOURCE.
+    copts = ["-D_ALL_SOURCE"],  # @bazel2gn:raw_overwrite:[ "//build/config:all_source" ]
+    disable_build_flags = select({
+        "@platforms//os:fuchsia": ["//build/config/fuchsia:fdio_config"],
+    }),
+    # In GN, kstress is not wrapped in top-level if (is_fuchsia), as GN only
+    # instantiates it from Fuchsia-only targets; Bazel builds //...:all on host.
+    # @bazel2gn:skip
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/zircon/tests/stress-tests:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/fdio",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/zx",
+    ],
+)

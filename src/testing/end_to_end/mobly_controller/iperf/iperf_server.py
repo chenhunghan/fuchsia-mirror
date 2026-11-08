@@ -4,10 +4,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Blanket ignores to enable mypy in Antlion
-# mypy: disable-error-code="no-untyped-def"
-from __future__ import annotations
-
 import json
 import logging
 import math
@@ -17,9 +13,9 @@ import shlex
 import subprocess
 import threading
 import time
-from typing import IO
+from typing import IO, Any
 
-from antlion import utils
+from libs import ip_utils
 from libs.commands import nmcli
 from libs.commands.command import (
     LinuxCommand,
@@ -29,6 +25,7 @@ from libs.commands.journalctl import (
     LinuxJournalctlCommand,
 )
 from libs.proc import job
+from libs.proc.runner import CalledProcessError, Runner
 from libs.ssh import connection, settings
 from libs.types import ControllerConfig, Json
 from libs.validation import MapValidator
@@ -96,7 +93,9 @@ def get_info(
 
 
 class IPerfResult(object):
-    def __init__(self, result_path, reporting_speed_units="Mbytes"):
+    def __init__(
+        self, result_path: str, reporting_speed_units: str = "Mbytes"
+    ) -> None:
         """Loads iperf result from file.
 
         Loads iperf result from JSON formatted server log. File can be accessed
@@ -126,7 +125,7 @@ class IPerfResult(object):
                     lines = f.readlines()[1:]
                     self.result = json.loads("".join(lines))
 
-    def _has_data(self):
+    def _has_data(self) -> bool:
         """Checks if the iperf result has valid throughput data.
 
         Returns:
@@ -164,16 +163,16 @@ class IPerfResult(object):
             speed_divisor = speed_divisor * GIGABITS
         return network_speed_in_bits_per_second / speed_divisor
 
-    def get_json(self):
+    def get_json(self) -> dict[str, Any]:
         """Returns the raw json output from iPerf."""
         return self.result
 
     @property
-    def error(self):
+    def error(self) -> str | None:
         return self.result.get("error", None)
 
     @property
-    def avg_rate(self):
+    def avg_rate(self) -> float | None:
         """Average UDP rate in MB/s over the entire run.
 
         This is the average UDP rate observed at the terminal the iperf result
@@ -188,7 +187,7 @@ class IPerfResult(object):
         return self._get_reporting_speed(bps)
 
     @property
-    def avg_receive_rate(self):
+    def avg_receive_rate(self) -> float | None:
         """Average receiving rate in MB/s over the entire run.
 
         This data may not exist if iperf was interrupted. If the result is not
@@ -200,7 +199,7 @@ class IPerfResult(object):
         return self._get_reporting_speed(bps)
 
     @property
-    def avg_send_rate(self):
+    def avg_send_rate(self) -> float | None:
         """Average sending rate in MB/s over the entire run.
 
         This data may not exist if iperf was interrupted. If the result is not
@@ -212,7 +211,7 @@ class IPerfResult(object):
         return self._get_reporting_speed(bps)
 
     @property
-    def instantaneous_rates(self):
+    def instantaneous_rates(self) -> list[float] | None:
         """Instantaneous received rate in MB/s over entire run.
 
         This data may not exist if iperf was interrupted. If the result is not
@@ -227,7 +226,7 @@ class IPerfResult(object):
         return intervals
 
     @property
-    def std_deviation(self):
+    def std_deviation(self) -> float | None:
         """Standard deviation of rates in MB/s over entire run.
 
         This data may not exist if iperf was interrupted. If the result is not
@@ -235,7 +234,7 @@ class IPerfResult(object):
         """
         return self.get_std_deviation(0)
 
-    def get_std_deviation(self, iperf_ignored_interval):
+    def get_std_deviation(self, iperf_ignored_interval: int) -> float | None:
         """Standard deviation of rates in MB/s over entire run.
 
         This data may not exist if iperf was interrupted. If the result is not
@@ -251,11 +250,10 @@ class IPerfResult(object):
         Returns:
             The standard deviation.
         """
-        if not self._has_data():
+        rates = self.instantaneous_rates
+        if rates is None:
             return None
-        instantaneous_rates = self.instantaneous_rates[
-            iperf_ignored_interval:-1
-        ]
+        instantaneous_rates = rates[iperf_ignored_interval:-1]
         avg_rate = math.fsum(instantaneous_rates) / len(instantaneous_rates)
         sqd_deviations = [
             (rate - avg_rate) ** 2 for rate in instantaneous_rates
@@ -273,7 +271,7 @@ class IPerfServerBase(object):
 
     __log_file_lock = threading.Lock()
 
-    def __init__(self, port: int):
+    def __init__(self, port: int) -> None:
         self._port = port
         # TODO(markdr): We shouldn't be storing the log files in an array like
         # this. Nobody should be reading this property either. Instead, the
@@ -343,16 +341,69 @@ class IPerfServerBase(object):
         return full_out_dir
 
 
-def _get_port_from_ss_output(ss_output, pid):
-    pid = str(pid)
+def _get_port_from_ss_output(ss_output: str, pid: int) -> str:
+    pid_str = str(pid)
     lines = ss_output.split("\n")
     for line in lines:
-        if pid in line:
+        if f"pid={pid_str}" in line:
             # Expected format:
             # tcp LISTEN  0 5 *:<PORT>  *:* users:(("cmd",pid=<PID>,fd=3))
             return line.split()[4].split(":")[-1]
     else:
         raise ProcessLookupError("Could not find started iperf3 process.")
+
+
+def get_interface_based_on_ip(runner: Runner, desired_ip_address: str) -> str:
+    """Gets the interface for a particular IP.
+
+    Args:
+        runner: How to send commands to a device. Can be ssh, adb serial,
+            etc. Must have the run function implemented.
+        desired_ip_address: The IP address that is being looked for on a device.
+
+    Returns:
+        The name of the test interface.
+
+    Raises:
+        RuntimeError: when desired_ip_address is not found
+    """
+    desired_ip_address = desired_ip_address.split("%", 1)[0]
+    ip = runner.run(["ip", "-o", "addr", "show"])
+    for line in ip.stdout.decode("utf-8").splitlines():
+        if desired_ip_address in line:
+            return line.split()[1]
+    raise RuntimeError(
+        f'IP "{desired_ip_address}" not found in list:\n{ip.stdout.decode("utf-8")}'
+    )
+
+
+def renew_linux_ip_address(runner: Runner, interface: str) -> None:
+    # Ensure the interface is not empty, so we don't accidentally target _all_ interfaces.
+    if not interface:
+        raise ValueError("Interface name must not be empty.")
+
+    # If dhcpcd is managing this interface (common on Raspberry Pi OS), release
+    # its lease so it stops managing the interface and does not race with dhclient.
+    try:
+        runner.run(f"sudo dhcpcd -k {interface}")
+    except CalledProcessError:
+        # dhcpcd may not be installed or running on this device.
+        pass
+
+    # Ensure interface is UP.
+    runner.run(f"sudo ip link set {interface} up")
+    # Release any existing lease on the DHCP server and stop the running
+    # dhclient daemon to prevent multiple competing daemons.
+    try:
+        runner.run(f"sudo dhclient -r {interface}")
+    except CalledProcessError:
+        # No prior dhclient process or lease to release.
+        pass
+    # Flush existing IPv4 addresses to ensure stale leases from previous networks
+    # are removed, preventing MultipleAddresses errors when a new lease is assigned.
+    runner.run(f"sudo ip -4 addr flush dev {interface}")
+    # Negotiate a fresh lease for the current network scope and start a new daemon.
+    runner.run(f"sudo dhclient {interface}")
 
 
 class IPerfServer(IPerfServerBase):
@@ -402,7 +453,9 @@ class IPerfServer(IPerfServerBase):
             try:
                 self._port = int(
                     _get_port_from_ss_output(
-                        job.run("ss -l -p -n | grep iperf").stdout,
+                        job.run("ss -l -p -n | grep iperf").stdout.decode(
+                            "utf-8", errors="replace"
+                        ),
                         self._iperf_process.pid,
                     )
                 )
@@ -446,7 +499,7 @@ class IPerfServerOverSsh(IPerfServerBase):
         test_interface: str,
         use_killall: bool = False,
         ssh_session: connection.SshConnection | None = None,
-    ):
+    ) -> None:
         super().__init__(port)
         self.test_interface = test_interface
         self.hostname = ssh_settings.hostname
@@ -476,11 +529,11 @@ class IPerfServerOverSsh(IPerfServerBase):
             # The control and test interfaces have to be different, otherwise
             # performing a DHCP release+renewal risks severing the SSH connection
             # and bricking the device.
-            control_interface = utils.get_interface_based_on_ip(
+            control_interface = get_interface_based_on_ip(
                 self._ssh_session, self.hostname
             )
             if control_interface == test_interface:
-                raise signals.TestAbortAll(
+                raise signals.TestError(
                     f"iperf server control interface ({control_interface}) cannot be the "
                     f"same as the test interface ({test_interface})."
                 )
@@ -499,7 +552,7 @@ class IPerfServerOverSsh(IPerfServerBase):
 
     def get_interface_ip_addresses(
         self, interface: str
-    ) -> dict[str, list[str]]:
+    ) -> dict[ip_utils.AddrType, list[str]]:
         """Gets all of the ip addresses, ipv4 and ipv6, associated with a
            particular interface name.
 
@@ -508,9 +561,9 @@ class IPerfServerOverSsh(IPerfServerBase):
 
         Returns:
             A list of dictionaries of the various IP addresses. See
-            utils.get_interface_ip_addresses.
+            ip_utils.get_interface_ip_addresses.
         """
-        return utils.get_interface_ip_addresses(self._get_ssh(), interface)
+        return ip_utils.get_interface_ip_addresses(self._get_ssh(), interface)
 
     def renew_test_interface_ip_address(self) -> None:
         """Renews the test interface's IPv4 address.
@@ -521,16 +574,21 @@ class IPerfServerOverSsh(IPerfServerBase):
         # DHCP renewal severs the SSH connection and fails because no DHCP client runs on them.
         if self.test_interface in ("br-lan", "lan"):
             return
-        utils.renew_linux_ip_address(self._get_ssh(), self.test_interface)
+        renew_linux_ip_address(self._get_ssh(), self.test_interface)
 
     def get_addr(
-        self, addr_type: str = "ipv4_private", timeout_sec: int | None = None
+        self,
+        addr_type: ip_utils.AddrType = ip_utils.AddrType.ipv4_private,
+        timeout_sec: int | None = None,
     ) -> str:
         """Wait until a type of IP address on the test interface is available
         then return it.
         """
-        return utils.get_addr(
-            self._get_ssh(), self.test_interface, addr_type, timeout_sec
+        return ip_utils.get_addr(
+            self._get_ssh(),
+            self.test_interface,
+            addr_type,
+            timeout_sec,
         )
 
     def _cleanup_iperf_port(self) -> None:

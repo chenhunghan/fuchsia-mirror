@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use anyhow::{Context as _, Error};
+use anyhow::{Context as _, Error, format_err};
 use bt_a2dp as a2dp;
 use bt_a2dp::media_task::MediaTaskError;
-use fidl_fuchsia_media::{AudioFormat, AudioUncompressedFormat, DomainFormat, PcmFormat};
+use fidl_fuchsia_media::PcmFormat2;
 use fuchsia_async as fasync;
 use fuchsia_audio_codec::StreamProcessor;
 use fuchsia_audio_device::AudioStreamItem;
@@ -42,30 +42,24 @@ impl EncodedStream {
     /// is attempted.  EncodedStream produces a Some(Err) result in these cases.  It is
     /// recommended to confirm that the system can encode using `EncodedStream::test()` first.
     pub fn build(
-        input_format: &PcmFormat,
+        input_format: &PcmFormat2,
         source: BoxStream<'static, fuchsia_audio_device::Result<AudioStreamItem>>,
         config: &a2dp::codec::MediaCodecConfig,
     ) -> Result<Self, Error> {
         let encoder_settings = config.encoder_settings()?;
 
-        let bytes_per_pcm_frame =
-            (input_format.bits_per_sample / 8) as usize * input_format.channel_map.len();
-        let pcm_bytes_per_encoded_packet = config.pcm_frames_per_encoded_frame()
-            * bytes_per_pcm_frame
-            * config.frames_per_packet();
+        let (bytes_per_pcm_frame, _frames_per_second) =
+            fuchsia_audio_device::validate_pcm_format2(input_format)?;
+        let pcm_bytes_per_encoded_packet = config
+            .pcm_frames_per_encoded_frame()
+            .checked_mul(bytes_per_pcm_frame)
+            .and_then(|n| n.checked_mul(config.frames_per_packet()))
+            .ok_or_else(|| format_err!("pcm_bytes_per_encoded_packet overflow"))?;
 
-        let pcm_input_format = DomainFormat::Audio(AudioFormat::Uncompressed(
-            AudioUncompressedFormat::Pcm(input_format.clone()),
-        ));
-        let processor = StreamProcessor::create_encoder(
-            pcm_input_format.clone(),
-            encoder_settings.clone(),
-        )
-        .inspect_err(|e| {
-            log::warn!(
-                "Couldn't make StreamProcessor for {pcm_input_format:?} {encoder_settings:?}: {e:?}"
-            );
-        })?;
+        let processor = StreamProcessor::create_encoder(input_format.clone(), encoder_settings)
+            .inspect_err(|e| {
+                log::warn!("Couldn't make StreamProcessor for {input_format:?} {config:?}: {e:?}");
+            })?;
         let mut encoder = Box::new(processor);
         let encoded_stream = encoder.take_output_stream()?.boxed();
 
@@ -102,10 +96,12 @@ impl EncodedStream {
 
     /// Run a preliminary test for a encoding audio in `input_format` into the codec `config`.
     pub async fn test(
-        input_format: PcmFormat,
+        input_format: PcmFormat2,
         config: &a2dp::codec::MediaCodecConfig,
     ) -> Result<(), MediaTaskError> {
-        let silence_source = SilenceStream::build(input_format.clone());
+        let silence_source = SilenceStream::build(&input_format)
+            .context("Building silence stream")
+            .map_err(|e| MediaTaskError::Other(e.to_string()))?;
         let mut encoder = EncodedStream::build(&input_format, silence_source.boxed(), config)
             .context("Building encoder")
             .map_err(|e| MediaTaskError::Other(e.to_string()))?;
@@ -181,10 +177,8 @@ impl Stream for EncodedStream {
     }
 }
 
-const PCM_SAMPLE_SIZE: usize = 2;
-
 struct SilenceStream {
-    pcm_format: PcmFormat,
+    bytes_per_second: usize,
     next_frame_timer: Pin<Box<fasync::Timer>>,
     /// the last time we delivered frames.
     last_frame_time: Option<fasync::MonotonicInstant>,
@@ -201,28 +195,33 @@ impl futures::Stream for SilenceStream {
         let last_time = self.last_frame_time.as_ref().unwrap().clone();
         let repeats = (now - last_time).into_seconds();
         if repeats == 0 {
-            self.next_frame_timer =
-                Box::pin(fasync::Timer::new(last_time + zx::MonotonicDuration::from_seconds(1)));
+            self.next_frame_timer
+                .as_mut()
+                .reset(last_time + zx::MonotonicDuration::from_seconds(1));
             match self.next_frame_timer.poll_unpin(cx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(_) => {} // Raced to the next second, continue to generate.
             }
         }
         // Generate one second of silence.
-        let pcm_frame_size = self.pcm_format.channel_map.len() * PCM_SAMPLE_SIZE;
-        let buffer = vec![0; self.pcm_format.frames_per_second as usize * pcm_frame_size];
+        let buffer = vec![0; self.bytes_per_second];
         self.last_frame_time = Some(last_time + zx::MonotonicDuration::from_seconds(1));
         Poll::Ready(Some(Ok(AudioStreamItem::Data(buffer))))
     }
 }
 
 impl SilenceStream {
-    fn build(pcm_format: PcmFormat) -> Self {
-        Self {
-            pcm_format,
+    fn build(pcm_format: &PcmFormat2) -> Result<Self, Error> {
+        let (pcm_frame_size, frames_per_second) =
+            fuchsia_audio_device::validate_pcm_format2(pcm_format)?;
+        let bytes_per_second = (frames_per_second as usize)
+            .checked_mul(pcm_frame_size)
+            .ok_or_else(|| format_err!("bytes_per_second overflow"))?;
+        Ok(Self {
+            bytes_per_second,
             next_frame_timer: Box::pin(fasync::Timer::new(fasync::MonotonicInstant::INFINITE_PAST)),
             last_frame_time: None,
-        }
+        })
     }
 }
 
@@ -230,6 +229,7 @@ impl SilenceStream {
 mod tests {
 
     use super::*;
+    use fidl_fuchsia_media::AudioPcmMode2;
     use fuchsia_sync::Mutex;
     use futures::io;
     use std::sync::Arc;
@@ -401,12 +401,14 @@ mod tests {
     #[test]
     fn silence_stream_racing_timer() {
         let mut exec = fasync::TestExecutor::new();
-        let mut silence_stream = SilenceStream::build(PcmFormat {
-            pcm_mode: fidl_fuchsia_media::AudioPcmMode::Linear,
-            bits_per_sample: 16,
-            frames_per_second: 48000,
-            channel_map: vec![fidl_fuchsia_media::AudioChannelId::Cf],
-        });
+        let mut silence_stream = SilenceStream::build(&PcmFormat2 {
+            pcm_mode: Some(AudioPcmMode2::Linear),
+            bits_per_sample: Some(16),
+            frames_per_second: Some(48000),
+            channel_map: Some(vec![fidl_fuchsia_media::AudioChannelId2::Fc]),
+            ..Default::default()
+        })
+        .expect("builds");
         // Poll once to produce the first second of audio, which should need more audio at 10s.
         let Poll::Ready(_) = exec.run_until_stalled(&mut silence_stream.next()) else {
             panic!("Should have been ready on first poll");
@@ -445,6 +447,41 @@ mod tests {
             x => panic!("Expected Ready Ok(AudioDisabled), got {:?}", x),
         }
     }
+
+    #[test]
+    fn test_invalid_pcm_format_returns_error() {
+        let mut exec = fasync::TestExecutor::new();
+        let config = a2dp::codec::MediaCodecConfig::min_sbc();
+        let valid_format = PcmFormat2 {
+            pcm_mode: Some(AudioPcmMode2::Linear),
+            bits_per_sample: Some(16),
+            frames_per_second: Some(48000),
+            channel_map: Some(vec![fidl_fuchsia_media::AudioChannelId2::Fc]),
+            ..Default::default()
+        };
+
+        let invalid_formats = [
+            PcmFormat2 { pcm_mode: None, ..valid_format.clone() },
+            PcmFormat2 { pcm_mode: Some(AudioPcmMode2::Alaw), ..valid_format.clone() },
+            PcmFormat2 { bits_per_sample: None, ..valid_format.clone() },
+            PcmFormat2 { bits_per_sample: Some(0), ..valid_format.clone() },
+            PcmFormat2 { bits_per_sample: Some(12), ..valid_format.clone() },
+            PcmFormat2 { bytes_per_sample: Some(4), ..valid_format.clone() },
+            PcmFormat2 { channel_map: None, ..valid_format.clone() },
+            PcmFormat2 { channel_map: Some(vec![]), ..valid_format.clone() },
+            PcmFormat2 { frames_per_second: None, ..valid_format.clone() },
+            PcmFormat2 { frames_per_second: Some(0), ..valid_format },
+        ];
+
+        for format in invalid_formats {
+            assert!(SilenceStream::build(&format).is_err());
+            let build_res =
+                EncodedStream::build(&format, futures::stream::empty().boxed(), &config);
+            assert!(build_res.is_err());
+            let test_res = exec.run_singlethreaded(EncodedStream::test(format, &config));
+            assert!(test_res.is_err());
+        }
+    }
 }
 
 #[cfg(feature = "test_encoding")]
@@ -452,22 +489,23 @@ mod encoder_tests {
     use super::*;
 
     use bt_avdtp as avdtp;
-    use fidl_fuchsia_media::{AudioChannelId, AudioPcmMode};
+    use fidl_fuchsia_media::{AudioChannelId2, AudioPcmMode2};
 
     pub async fn test_encoding_capability(
         capability: &avdtp::ServiceCapability,
     ) -> Result<(), MediaTaskError> {
         let config = a2dp::codec::MediaCodecConfig::try_from(capability)?;
         let channel_map = match config.channel_count()? {
-            1 => vec![AudioChannelId::Lf],
-            2 => vec![AudioChannelId::Lf, AudioChannelId::Rf],
+            1 => vec![AudioChannelId2::Fl],
+            2 => vec![AudioChannelId2::Fl, AudioChannelId2::Fr],
             _ => panic!("More than 2 channels not supported"),
         };
-        let input_format = PcmFormat {
-            pcm_mode: AudioPcmMode::Linear,
-            bits_per_sample: 16,
-            frames_per_second: 48000,
-            channel_map,
+        let input_format = PcmFormat2 {
+            pcm_mode: Some(AudioPcmMode2::Linear),
+            bits_per_sample: Some(16),
+            frames_per_second: Some(48000),
+            channel_map: Some(channel_map),
+            ..Default::default()
         };
         EncodedStream::test(input_format, &config).await
     }

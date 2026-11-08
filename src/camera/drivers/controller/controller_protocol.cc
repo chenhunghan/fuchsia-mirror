@@ -36,6 +36,12 @@ void ControllerImpl::Connect(fidl::InterfaceRequest<fuchsia::camera2::hal::Contr
     return;
   }
 
+  // Each client starts from the initial state: it lists the configs from the first one, and
+  // streaming is enabled. The previous client may have read some configs or disabled streaming
+  // before it went away, for example a camera_device that crashed and was relaunched.
+  config_count_ = 0;
+  pipeline_manager_.SetStreamingEnabled(true);
+
   zx_status_t status = binding_.Bind(std::move(request), dispatcher_);
   zxlogf(INFO, "ControllerImpl::Connect(): Bind() -> %d", status);
 }

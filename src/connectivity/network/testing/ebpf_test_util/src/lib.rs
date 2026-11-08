@@ -2,8 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use ebpf_api::{AttachType, ProgramType, StructId};
+use ebpf_api::{AttachType, ProgramType};
 use fidl_fuchsia_ebpf as febpf;
+use futures::StreamExt as _;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 // The structs below must match the structs in `ebpf_test_progs.c`.
@@ -102,24 +103,38 @@ impl TestProgram {
     }
 
     pub fn get_fidl_program(&self) -> febpf::VerifiedProgram {
-        let code: Vec<u64> =
-            <[u64]>::ref_from_bytes(self.program.code().as_bytes()).unwrap().to_owned();
-        let struct_access_instructions = self
-            .program
-            .struct_access_instructions()
-            .iter()
-            .map(|s| febpf::StructAccess {
-                pc: s.pc.try_into().unwrap(),
-                struct_id: StructId::try_from(&s.memory_id).unwrap().into(),
-                field_offset: s.field_offset.try_into().unwrap(),
-                is_32_bit_ptr_load: s.is_32_bit_ptr_load,
-            })
-            .collect();
+        let program = self.program.clone();
+        let (client_end, server_end) =
+            fidl::endpoints::create_endpoints::<febpf::ProgramLinkerMarker>();
+        let _: std::thread::JoinHandle<()> = std::thread::spawn(move || {
+            let mut executor = fuchsia_async::LocalExecutor::default();
+            executor.run_singlethreaded(async move {
+                let mut stream = server_end.into_stream();
+                if let Some(Ok(request)) = stream.next().await {
+                    match request {
+                        febpf::ProgramLinkerRequest::Link { payload, responder } => {
+                            let result =
+                                ebpf_api::program_linkage_from_fidl(payload).and_then(|linkage| {
+                                    ebpf::link_instructions(&program, &linkage)
+                                        .map(|linked| {
+                                            let instructions: Vec<u64> =
+                                                linked.into_iter().map(u64::from).collect();
+                                            febpf::LinkedProgram::Bytecode(febpf::Bytecode {
+                                                instructions,
+                                            })
+                                        })
+                                        .map_err(ebpf_api::link_error_to_fidl)
+                                });
+                            let _ = responder.send(result);
+                        }
+                    }
+                }
+            });
+        });
         febpf::VerifiedProgram {
-            code: Some(code),
-            struct_access_instructions: Some(struct_access_instructions),
+            linker: Some(client_end),
             maps: Some(self.maps.iter().map(|m| m.share().expect("share map")).collect()),
-            __source_breaking: Default::default(),
+            ..Default::default()
         }
     }
 

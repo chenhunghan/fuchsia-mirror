@@ -53,14 +53,16 @@ var supportedBackends = []string{
 
 // Flag values, grouped into a struct to be kept out of the global namespace.
 var flags struct {
-	irFile          string
-	backend         string
-	outputManifest  string
-	outputDir       string
-	outputNamespace string
-	sourceDir       string
-	formatter       string
-	formatterArgs   flagmisc.StringsValue
+	irFile            string
+	backend           string
+	outputManifest    string
+	outputDir         string
+	outputNamespace   string
+	sourceDir         string
+	formatter         string
+	formatterArgs     flagmisc.StringsValue
+	rustFormatter     string
+	rustFormatterArgs flagmisc.StringsValue
 }
 
 func init() {
@@ -95,6 +97,14 @@ took place`)
 
 	flag.Var(&flags.formatterArgs, "formatter-args",
 		`Arguments to pass to the formatter`)
+
+	flag.StringVar(&flags.rustFormatter, "rust-formatter", "",
+		`The path to a (stdin-to-stdout) Rust formatter, used to format the Rust outputs of backends
+that emit Rust alongside other languages (currently only the kernel backend), for which -formatter
+applies to the non-Rust outputs`)
+
+	flag.Var(&flags.rustFormatterArgs, "rust-formatter-args",
+		`Arguments to pass to the Rust formatter`)
 }
 
 func main() {
@@ -129,6 +139,14 @@ func main() {
 	}
 
 	f := fidlgen.NewFormatter(flags.formatter, flags.formatterArgs...)
+
+	// Only the kernel backend emits Rust alongside other languages.
+	if flags.rustFormatter != "" && flags.backend != kernelBackend {
+		logger.Errorf(ctx, "backend %q does not support `-rust-formatter` (%q)",
+			flags.backend, flags.rustFormatter)
+		os.Exit(1)
+	}
+
 	var gen generator
 	switch flags.backend {
 	case cBackend:
@@ -145,7 +163,10 @@ func main() {
 		gen = zircon_ifs.NewGenerator(f)
 	case kernelBackend:
 		assertNoNamespace()
-		gen = kernel.NewGenerator(f)
+		// The kernel backend emits both C++ and Rust: `f` formats the former.
+		cppF := f
+		rustF := fidlgen.NewFormatter(flags.rustFormatter, flags.rustFormatterArgs...)
+		gen = kernel.NewGenerator(cppF, rustF)
 	case legacySyscallCDeclBackend:
 		assertNoNamespace()
 		gen = legacy_syscall_cdecl.NewGenerator(f)

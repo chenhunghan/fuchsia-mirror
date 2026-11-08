@@ -1,0 +1,17 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/fidl/fidl.gni")
+
+# Simulated IEEE 802.15.4 medium used by hermetic OpenThread tests. Test-only:
+# served by rf_medium_dispatcher, consumed by ot-rcp-fuchsia (medium.fidl) and
+# by tests observing the medium (monitor.fidl).
+fidl("test.lowpan.rfsim") {
+  testonly = true
+  sources = [
+    "medium.fidl",
+    "monitor.fidl",
+  ]
+  public_deps = [ "//zircon/vdso/zx" ]
+}

@@ -128,9 +128,16 @@ std::optional<LogsData> LogsSubscription::LoadJson(rapidjson::Document document,
   return result;
 }
 
+LogsData::LogsData(std::string moniker, Metadata metadata, std::string message,
+                   std::vector<inspect::PropertyValue> keys, uint64_t version)
+    : moniker_(std::move(moniker)),
+      metadata_(std::move(metadata)),
+      message_(std::move(message)),
+      keys_(std::move(keys)),
+      version_(version) {}
+
 LogsData::LogsData(rapidjson::Document document) {
   if (document.HasMember(kMonikerName) && document[kMonikerName].IsString()) {
-    std::string val = document[kMonikerName].GetString();
     moniker_ = document[kMonikerName].GetString();
   }
   if (document.HasMember(kVersionName) && document[kVersionName].IsNumber()) {

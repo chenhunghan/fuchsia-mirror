@@ -12,23 +12,24 @@ The PCI bus driver provides management of the PCI bus in applicable systems and 
 
 ### Organization
 
-Bus level operations are handled in `bus.cc`. Device specific operations are in `device_*.cc`, and FIDL / Banjo protocol implementations are in `fidl.cc` and `banjo.cc` respectively. The interface between a Device and the Bus is the `BusDeviceInterface` specified in `bus_device_interface.h`. The service implementation `fuchsia.hardware.pci/Service` used by `lspci` is in `device_service.cc`.
+Bus level operations are handled in `bus.cc`. Device-specific operations and the `fuchsia.hardware.pci/Device` FIDL protocol implementation are in `device.cc` and `device_*.cc`. The interface between a Device and the Bus is the `BusDeviceInterface` specified in `bus_device_interface.h`. The `fuchsia.hardware.pci/Debug` protocol (served through `fuchsia.hardware.pci/DebugService`) used by `lspci` is implemented in `device_service.cc`.
 
 ### Build Targets
 
-* [`//src/devices/pci/drivers/pci:bus-pci`](https://cs.opensource.google/fuchsia/fuchsia/+/main:src/devices/pci/drivers/pci/BUILD.gn;l=86) for the driver.
+* [`//src/devices/pci/drivers/pci:bus-pci`](https://cs.opensource.google/fuchsia/fuchsia/+/main:src/devices/pci/drivers/pci/BUILD.gn;l=107) for the driver.
 
 ## FIDL
 
 ### Dependent Protocols
 
-The PCI bus driver binds to [`fuchsia.hardware.pciroot/Pciroot`](https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/banjo/fuchsia.hardware.pciroot/pciroot.fidl) and receives platform level information for ACPI (if applicable), interrupts, interrupt routing, and bus configuration.
+The PCI bus driver binds to [`fuchsia.hardware.pci.root/RootService`](https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/fidl/fuchsia.hardware.pci.root/pciroot.fidl) (and uses `fuchsia.hardware.pci.root/ConfigService` when offered) to receive platform-level information for ACPI or devicetree devices, interrupts, interrupt routing, address space allocation, and bus configuration. On boards whose platform bus driver still serves the legacy banjo [`fuchsia.hardware.pciroot/Pciroot`](https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/banjo/fuchsia.hardware.pciroot/pciroot.fidl) protocol, `pciroot-banjo-adapter` bridges it to `fuchsia.hardware.pci.root`.
 
 ### Implemented Protocols
 
 * [`//fuchsia/sdk/fidl/fuchsia.hardware.pci/pci.fidl`](https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/fidl/fuchsia.hardware.pci/pci.fidl)
-  * `fuchsia.hardware.pci/Device`: Provides the interface to develop PCI device drivers
-  * `fuchsia.hardware.pci/Service`: Enables device information export for use with lspci
+  * `fuchsia.hardware.pci/Device`: Provides the interface to develop PCI device drivers. Each PCI function's child node is offered one `fuchsia.hardware.pci/Service` instance serving it.
+* [`//fuchsia/sdk/fidl/fuchsia.hardware.pci/debug.fidl`](https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/fidl/fuchsia.hardware.pci/debug.fidl)
+  * `fuchsia.hardware.pci/Debug`: Exports bus and device state for use with `lspci`, served through `fuchsia.hardware.pci/DebugService`
 
 ## Libraries
 
@@ -47,11 +48,12 @@ See [`//src/devices/pci/drivers/pci/test/README.md`](drivers/pci/test/README.md)
 
 * [`//src/devices/pci/drivers/pci:tests`](https://cs.opensource.google/fuchsia/fuchsia/+/main:src/devices/pci/drivers/pci/BUILD.gn;l=122)
   * `pci-driver-test`: Rust integration test suite in `drivers/pci/test/driver/driver_tests.rs` running against `fake-bus-pci` (build target `pci_fake`) inside `DriverTestRealm`.
-  * `pci-unit-test`: C++ unit test suite in `drivers/pci/test/unit/` testing allocation, bus, config, device, fake pciroot, and MSI-X against mock DDK and fakes.
-* [`//src/devices/pci:tests`](https://cs.opensource.google/fuchsia/fuchsia/+/main:src/devices/pci/BUILD.gn;l=13)
+  * `pci-unit-test`: C++ unit test suite in `drivers/pci/test/unit/` testing allocation, bus, config, device, and MSI-X against fakes.
+* [`//src/devices/pci:tests`](https://cs.opensource.google/fuchsia/fuchsia/+/main:src/devices/pci/BUILD.gn;l=14)
   * `device-protocol-pci-test`
   * `pci-protocol-fake-test`
   * `pci-roothost-test`
+  * `pciroot-banjo-adapter-test`
 
 ## Fakes
 
@@ -59,67 +61,9 @@ Fakes exist for most major classes in the PCI bus driver and can be found in [`/
 
 # Debugging
 
-## Inspect
+## Driver nodes
 
-Inspect data for both the Bus and all devices are exported via `bootstrap/driver_manager` under `class/pci/*.inspect`:
-
-```
-$ ffx inspect show bootstrap/driver_manager --file class/pci/000.inspect
-bootstrap/driver_manager:
-  metadata:
-    filename = class/pci/000.inspect
-    component_url = fuchsia-boot:///driver_manager#meta/driver_manager.cm
-    timestamp = 1382682707618
-  payload:
-    root:
-      Bus:
-        acpi devices = ["00:1f.0", "00:1f.3", "00:00.0", "00:01.0", "00:02.0", "00:03.0", "00:04.0", "00:05.0", "00:06.0"]
-        bus end = 0xff
-        bus start = 0x0
-        ecam = 0x1047cbaa000
-        name = PCI0
-        segment group = 0x0
-        vectors = ["0x13", "0x12", "0x11", "0x17", "0x16", "0x10", "0x15", "0x14"]
-        irq routing entries:
-          0x0:
-            device id = 0x0
-            pins = ["0x14", "0x15", "0x16", "0x17"]
-            port device id = 0xff
-            port function id = 0xff
-[...]
-          0xf:
-            device id = 0xf
-            pins = ["0x17", "0x14", "0x15", "0x16"]
-            port device id = 0xff
-            port function id = 0xff
-      Devices:
-        00:00.0:
-        00:01.0:
-          BARs:
-            0:
-              0. Initial = 0xc000
-              1. Probed = IO (non-prefetchable) [size=128B]
-              2. Configured = 0xc000
-            1:
-              0. Initial = 0xfebc0000
-              1. Probed = MMIO (non-prefetchable) [size=4K]
-              2. Configured = 0xfebc0000
-            4:
-              0. Initial = 0xfebe8000
-              1. Probed = MMIO (64-bit, prefetchable) [size=16K]
-              2. Configured = 0xfebe8000
-          Interrupts:
-            Allocated = 2
-            Base Vector = 44
-            Mode = MSI-X
-[...]
-        00:1f.3:
-          BARs:
-            4:
-              0. Initial = 0x700
-              1. Probed = IO (non-prefetchable) [size=64B]
-              2. Configured = 0x700
-```
+Each PCI function is published as a child node of the bus node, named `<bus>_<device>_<function>` in hex (for example `00_1f_3`). Use `ffx driver list-devices -v` to see the nodes, their bind properties, and the drivers bound to them.
 
 ## Tools
 

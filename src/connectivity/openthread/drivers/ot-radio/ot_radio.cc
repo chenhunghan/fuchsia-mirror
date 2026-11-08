@@ -331,6 +331,11 @@ zx_status_t OtRadioDevice::Init() {
 
 zx_status_t OtRadioDevice::ReadRadioPacket() {
   [[maybe_unused]] auto is_packet_present = spinel_framer_->IsPacketPresent();
+
+  // Acquire the lock to protect the read in TRACE_DURATION, the write in
+  // ReceivePacketFromRadio, and the read in the vector deep copy.
+  fbl::AutoLock lock(&spi_rx_lock_);
+
   TRACE_DURATION(kOtRadioTraceCategory, __func__, "inbound_allowance_", inbound_allowance_.load(),
                  "is_packet_present", is_packet_present, "spi_rx_buffer_len_", spi_rx_buffer_len_);
   if ((inbound_allowance_.load() > 0) && (spinel_framer_->IsPacketPresent())) {
@@ -757,6 +762,8 @@ zx_status_t OtRadioDevice::Start() {
 #ifdef INTERNAL_ACCESS
 zx_status_t OtRadioDevice::CheckFWUpdateRequired(bool* update_fw) {
   *update_fw = false;
+  uint8_t local_spi_rx_buffer[kMaxFrameSize];
+  uint16_t local_spi_rx_buffer_len = 0;
 
   // Get the new firmware version:
   std::string new_fw_version = GetNewFirmwareVersion();
@@ -783,11 +790,6 @@ zx_status_t OtRadioDevice::CheckFWUpdateRequired(bool* update_fw) {
     zxlogf(DEBUG, "ot-radio: waiting for response for GetNCPVersion cmd, attempt: %d / %d",
            attempts + 1, kGetNcpVersionMaxRetries);
 
-    // Simply update the allowance for each attempt. Radio will send
-    // response to GetNCPVersion to us eventually. Ignore any response to
-    // earlier commands.
-    SetMaxInboundAllowance();
-
     // Wait for response to arrive, signaled by spi_rx_complete_
     status = sync_completion_wait(&spi_rx_complete_, ZX_SEC(10));
     sync_completion_reset(&spi_rx_complete_);
@@ -802,10 +804,21 @@ zx_status_t OtRadioDevice::CheckFWUpdateRequired(bool* update_fw) {
     }
 
     // Check for matching TID in spinel header
-    if ((spi_rx_buffer_[0] & 0xf) == kGetNcpVersionTID) {
-      response_received = true;
-      break;
+    {
+      fbl::AutoLock lock(&spi_rx_lock_);
+      if (spi_rx_buffer_len_ > 0 && (spi_rx_buffer_[0] & 0xf) == kGetNcpVersionTID) {
+        // Safely copy the buffer out, then break to release the lock
+        local_spi_rx_buffer_len = spi_rx_buffer_len_;
+        memcpy(local_spi_rx_buffer, spi_rx_buffer_, local_spi_rx_buffer_len);
+        response_received = true;
+        break;
+      }
     }
+
+    // Restore the allowance after accessing the shared spi_rx_buffer_ to avoid the
+    // potential data race condition. Radio will send response to GetNCPVersion to us
+    // eventually. Ignore any response to earlier commands.
+    SetMaxInboundAllowance();
   }
 
   if (!response_received) {
@@ -816,14 +829,26 @@ zx_status_t OtRadioDevice::CheckFWUpdateRequired(bool* update_fw) {
     return ZX_OK;
   }
 
-  // Response is received, copy it to the string cur_fw_version
-  // First make sure that last character is null
-  ZX_DEBUG_ASSERT(spi_rx_buffer_len_ <= kMaxFrameSize);
-  spi_rx_buffer_[spi_rx_buffer_len_ - 1] = '\0';
-  zxlogf(DEBUG, "ot-radio: response received size = %d, value : %s", spi_rx_buffer_len_,
-         reinterpret_cast<char*>(&(spi_rx_buffer_[3])));
+  // Response is received, copy it to the string cur_fw_version.
+  // First make sure that last character is null, validate the minimum
+  // length before terminating and reading.
+  // The header occupies indices 0-2, so the payload starts at index 3.
+  // The length MUST be strictly greater than 3 to contain any version string.
+  if (local_spi_rx_buffer_len <= 3) {
+    zxlogf(ERROR, "ot-radio: response too small (%d bytes) to contain version string.",
+           local_spi_rx_buffer_len);
+    // Treat as invalid and force a firmware update
+    *update_fw = true;
+    return ZX_OK;
+  }
+
+  ZX_DEBUG_ASSERT(local_spi_rx_buffer_len <= kMaxFrameSize);
+  local_spi_rx_buffer[local_spi_rx_buffer_len - 1] = '\0';
+
+  zxlogf(DEBUG, "ot-radio: response received size = %d, value : %s", local_spi_rx_buffer_len,
+         reinterpret_cast<char*>(&(local_spi_rx_buffer[3])));
   std::string cur_fw_version;
-  cur_fw_version.assign(reinterpret_cast<char*>(&(spi_rx_buffer_[3])));
+  cur_fw_version.assign(reinterpret_cast<char*>(&(local_spi_rx_buffer[3])));
   zxlogf(INFO, "ot-radio: cur_fw_version: %s", cur_fw_version.c_str());
 
   // We want to update firmware if the versions don't match

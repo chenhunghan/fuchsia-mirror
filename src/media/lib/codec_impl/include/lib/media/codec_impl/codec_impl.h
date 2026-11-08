@@ -167,9 +167,6 @@ class CodecImpl final : public fuchsia::media::StreamProcessor,
   // connection.  The sysmem connection should be set up to use the
   // shared_fidl_dispatcher.
   //
-  // The shared_fidl_thread parameter is deprecated and ignored and may be
-  // thrd_t{} or just {} at the call site.
-  //
   // The shared_fidl_dispatcher must be a single-threaded dispatcher (such as
   // async::Loop::dispatcher()) or a synchronized dispatcher (such as
   // fdf::SynchronizedDispatcher::async_dispatcher()), meaning it will only run
@@ -183,6 +180,12 @@ class CodecImpl final : public fuchsia::media::StreamProcessor,
   //
   // The calling thread must be running under the shared_fidl_dispatcher
   // (sequence/thread).
+  CodecImpl(fidl::ClientEnd<fuchsia_sysmem2::Allocator> sysmem,
+            std::unique_ptr<CodecAdmission> codec_admission,
+            async_dispatcher_t* shared_fidl_dispatcher, StreamProcessorParams params,
+            fidl::InterfaceRequest<fuchsia::media::StreamProcessor> request);
+
+  // Deprecated; use the constructor overload without shared_fidl_thread.
   CodecImpl(fidl::ClientEnd<fuchsia_sysmem2::Allocator> sysmem,
             std::unique_ptr<CodecAdmission> codec_admission,
             async_dispatcher_t* shared_fidl_dispatcher, thrd_t shared_fidl_thread,
@@ -403,7 +406,22 @@ class CodecImpl final : public fuchsia::media::StreamProcessor,
   uint64_t GetSharedFidlForStreamWaitCountForTesting() __TA_EXCLUDES(lock_);
   void WaitForSharedFidlForStreamWaitCountForTesting(uint64_t expected_count) __TA_EXCLUDES(lock_);
 
+  static void EnsureInputFormatDetailsNormalizedForTesting(
+      fuchsia::media::FormatDetails* format_details, bool is_decryptor = false);
+  static void EnsureFormatDetailsBridgedForTesting(fuchsia::media::FormatDetails* format_details);
+
  private:
+  // Normalizes input FormatDetails: moves legacy `domain.crypto.encrypted` into `encrypted_format`
+  // without cloning per-packet buffers and clears `domain.crypto`; for non-decryptors (decoders,
+  // secure decoders, and encoders), bridges video/audio bidirectionally while cross-repo encoders
+  // complete the soft transition and synthesizes compressed `domain` from `mime_type` when needed.
+  static void EnsureInputFormatDetailsNormalized(fuchsia::media::FormatDetails* format_details,
+                                                 bool is_decryptor);
+
+  // Populates both new top-level FormatDetails fields (`image_format`, `pcm_format`,
+  // `encrypted_format`) and legacy `domain` fields when either representation is provided,
+  // treating the top-level fields as authoritative when both are present.
+  static void EnsureFormatDetailsBridged(fuchsia::media::FormatDetails* format_details);
   class AddingBuffer;
 
   using BuffersByIndex = std::unordered_map<uint32_t, std::unique_ptr<CodecBuffer>>;
@@ -617,8 +635,10 @@ class CodecImpl final : public fuchsia::media::StreamProcessor,
     // These mutations occur in StreamControl ordering domain:
     ~Stream();
     // This can be called 0-N times for a given stream, and each call replaces
-    // any previously-set details.
-    void SetInputFormatDetails(std::unique_ptr<fuchsia::media::FormatDetails> input_format_details);
+    // any previously-set details (returning the previous details so the caller
+    // can destroy them outside lock_).
+    std::unique_ptr<fuchsia::media::FormatDetails> SetInputFormatDetails(
+        std::unique_ptr<fuchsia::media::FormatDetails> input_format_details);
     // Can be nullptr if no per-stream details have been set, in which case the
     // caller should look at CodecImpl::initial_input_format_details_
     // instead.  The returned pointer is only valid up until the next call to to

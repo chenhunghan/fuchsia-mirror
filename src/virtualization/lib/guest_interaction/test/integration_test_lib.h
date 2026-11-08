@@ -5,7 +5,7 @@
 #ifndef SRC_VIRTUALIZATION_LIB_GUEST_INTERACTION_TEST_INTEGRATION_TEST_LIB_H_
 #define SRC_VIRTUALIZATION_LIB_GUEST_INTERACTION_TEST_INTEGRATION_TEST_LIB_H_
 
-#include <fuchsia/virtualization/cpp/fidl.h>
+#include <fidl/fuchsia.virtualization/cpp/fidl.h>
 
 #include "src/lib/testing/loop_fixture/real_loop_fixture.h"
 #include "src/virtualization/tests/lib/fake_netstack.h"
@@ -29,13 +29,12 @@ class GuestInteractionTest : public gtest::RealLoopFixture {
   void SetUp() override;
   void TearDown() override;
 
-  void GetHostVsockEndpoint(
-      fidl::InterfaceRequest<::fuchsia::virtualization::HostVsockEndpoint> endpoint);
+  void GetHostVsockEndpoint(fidl::ServerEnd<fuchsia_virtualization::HostVsockEndpoint> endpoint);
 
  private:
   std::optional<component_testing::RealmRoot> realm_root_;
-  fuchsia::virtualization::DebianGuestManagerSyncPtr guest_manager_;
-  fuchsia::virtualization::GuestPtr guest_;
+  fidl::SyncClient<fuchsia_virtualization::DebianGuestManager> guest_manager_;
+  fidl::SyncClient<fuchsia_virtualization::Guest> guest_;
   FakeNetstack fake_netstack_;
 };
 

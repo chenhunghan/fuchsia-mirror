@@ -1,0 +1,58 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/host_tests:host_test_data.bzl", "host_test_data_files")
+load("//src/developer/ffx/build:ffx_plugin.bzl", "ffx_plugin")
+
+package(default_applicable_licenses = ["//:license"])
+
+ffx_plugin(
+    name = "ffx_debug_symbol_index",
+    srcs = ["src/lib.rs"],
+    args_deps = [
+        "//src/developer/ffx/core:lib",
+        "//third_party/rust_crates/vendor:argh",
+    ],
+    args_srcs = ["src/args.rs"],
+    edition = "2024",
+    sdk_category = "not-yet-specified",
+    version = "0.1.0",
+    visibility = ["//src/developer/ffx/plugins/debug:__pkg__"],
+    deps = [
+        "//src/developer/ffx/lib/errors:lib",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/developer/ffx/lib/symbol-index:lib",
+        "//src/developer/ffx/lib/writer:lib",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:schemars",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+    ],
+)
+
+host_test_data_files(
+    name = "test_data",
+    testonly = True,
+    srcs = [
+        "//src/developer/ffx/lib/symbol-index:test_data/another.json",
+        "//src/developer/ffx/lib/symbol-index:test_data/main.json",
+    ],
+    dest_dir = "test_data",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+# bazel2gn cannot translate test_data; exported via //src/developer/ffx:tests.
+# @bazel2gn:skip
+host_rustc_test(
+    name = "ffx_debug_symbol_index_test",
+    crate = ":ffx_debug_symbol_index",
+    test_data = [":test_data"],
+    visibility = ["//src/developer/ffx:__pkg__"],
+    deps = [
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:tempfile",
+    ],
+)

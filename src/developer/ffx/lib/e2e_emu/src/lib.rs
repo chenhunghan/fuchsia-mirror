@@ -21,7 +21,7 @@ use tempfile::TempDir;
 
 use discovery;
 use ffx_target::{Resolution, TargetInfoQuery};
-use target_behavior::{ConnectionBehavior, target_interface};
+use target_behavior::{DirectConnector, target_interface};
 
 #[derive(Debug, thiserror::Error)]
 pub enum IsolatedEmulatorError {
@@ -346,9 +346,9 @@ impl IsolatedEmulator {
         };
 
         let resolution = Resolution::from_target_handle(th)?;
-        let behavior = ConnectionBehavior::fake_direct_connector(resolution);
+        let connector = DirectConnector::from_resolution_for_test(resolution);
 
-        target_interface(&fho_env).set_behavior_for_test(behavior);
+        target_interface(&fho_env).set_behavior_for_test(connector);
         Ok(())
     }
 
@@ -489,6 +489,9 @@ impl IsolatedEmulator {
     }
 
     /// Collect the logs for a particular component.
+    // TODO(https://fxbug.dev/582353224): `output` is moved into `sender` before being reassigned,
+    // so `.clear()` cannot be used (clippy::new_instead_of_clear false positive).
+    #[allow(clippy::new_instead_of_clear)]
     pub async fn log_stream_for_moniker(
         &self,
         moniker: &str,

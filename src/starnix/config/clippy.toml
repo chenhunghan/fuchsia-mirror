@@ -1,0 +1,14 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+disallowed-types = [
+    { path = "fuchsia_sync::Mutex", reason = "use starnix_sync::LockDepMutex instead" },
+    { path = "fuchsia_sync::RwLock", reason = "use starnix_sync::LockDepRwLock instead" },
+    { path = "parking_lot::Mutex", reason = "use starnix_sync::LockDepMutex instead" },
+    { path = "parking_lot::RwLock", reason = "use starnix_sync::LockDepRwLock instead" },
+    { path = "starnix_sync::Mutex", reason = "use starnix_sync::LockDepMutex instead" },
+    { path = "starnix_sync::RwLock", reason = "use starnix_sync::LockDepRwLock instead" },
+    { path = "std::sync::Mutex", reason = "use starnix_sync::LockDepMutex instead" },
+    { path = "std::sync::RwLock", reason = "use starnix_sync::LockDepRwLock instead" },
+]

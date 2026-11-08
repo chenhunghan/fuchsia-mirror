@@ -1,0 +1,36 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# TODO(b/366268742): Enable MyPy type checking
+# TODO(https://fxbug.dev/575968075): Fix Pyrefly errors and remove no-pyrefly.
+# Note: Host-only target matching platform-only deps via target_compatible_with.
+# @bazel2gn:raw_attribute:enable_mypy = false
+py_library(
+    name = "images_json",
+    srcs = [
+        "__init__.py",
+        "images_json.py",
+    ],
+    imports = [".."],
+    tags = ["no-pyrefly"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/memory/tools/snapshots:__pkg__"],
+    deps = ["//src/memory/tools/dataclasses_json_lite"],
+)
+
+# TODO(https://fxbug.dev/575968075): Fix Pyrefly errors and remove no-pyrefly.
+host_py_test(
+    name = "images_json_test",
+    srcs = ["images_json_test.py"],
+    tags = ["no-pyrefly"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/memory/tools:__pkg__"],
+    deps = [":images_json"],
+)

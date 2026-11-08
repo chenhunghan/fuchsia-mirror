@@ -14,6 +14,11 @@ class RebootCapableDevice(abc.ABC):
     """Abstract base class to be implemented by a device which supports the
     reboot operation."""
 
+    @property
+    @abc.abstractmethod
+    def is_static_address(self) -> bool:
+        """Returns True if the device was created with a statically provided address."""
+
     @abc.abstractmethod
     async def reboot(self) -> None:
         """Soft reboot the device."""
@@ -38,7 +43,11 @@ class RebootCapableDevice(abc.ABC):
 
     @abc.abstractmethod
     async def wait_for_online(self) -> None:
-        """Wait for Fuchsia device to go online."""
+        """Wait for Fuchsia device to go online.
+
+        Raises:
+            errors.FuchsiaDeviceError: If device fails to go online.
+        """
 
 
 class SuspendResumeCapableDevice(abc.ABC):
@@ -105,20 +114,20 @@ class FuchsiaDeviceClose(abc.ABC):
         """
 
 
-class FuchsiaDeviceIpChange(abc.ABC):
+class FuchsiaDeviceAddressChange(abc.ABC):
     """Abstract base class which contains methods that let you register to run any custom logic
-    when device IP address is changed."""
+    when device address is changed."""
 
     @abc.abstractmethod
-    def register_for_on_device_ip_change(
+    def register_for_on_device_address_change(
         self,
-        fn: Callable[[custom_types.IpPort], None]
-        | Callable[[custom_types.IpPort], Awaitable[None]],
+        fn: Callable[[custom_types.TargetAddr], None]
+        | Callable[[custom_types.TargetAddr], Awaitable[None]],
     ) -> None:
-        """Register a function that will be called when an IP address is changed.
+        """Register a function that will be called when a device address is changed.
 
         Args:
-            fn: Function that need to be called when an IP address is changed.
+            fn: Function that need to be called when a device address is changed.
         """
 
 

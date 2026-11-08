@@ -7,6 +7,22 @@ package(
     default_visibility = ["//visibility:public"],
 )
 
+{{#if EXPORT_ALL_FILES}}
+{{!-- If a generated file is missing from this list, the golden test fails Bazel analysis. --}}
+exports_files(
+    [
+        "BUILD.bazel",
+        "BUILD.gn",
+        "README.md",
+        "meta/{{snake_case PROJECT_NAME}}.bind",
+        "meta/{{snake_case PROJECT_NAME}}.cml",
+        "meta/{{snake_case PROJECT_NAME}}_info.json",
+        "src/lib.rs",
+    ],
+    visibility = ["//tools/create/goldens:__pkg__"],
+)
+
+{{/if}}
 fuchsia_prebuilt_package(
     name = "{{snake_case PROJECT_NAME}}",
     archive = "@gn_targets//{{PROJECT_PATH}}:pkg",

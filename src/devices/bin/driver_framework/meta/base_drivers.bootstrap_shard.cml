@@ -193,6 +193,7 @@
             config: [
                 "fuchsia.storage.ufs.AutoHibernateTimerUs",
                 "fuchsia.storage.ufs.EnableAutoHibernate",
+                "fuchsia.storage.ufs.LinkIdleAhitMultiplier",
             ],
             from: "void",
             to: "#base-drivers",
@@ -249,6 +250,10 @@
                 "fuchsia.gpu.magma.TrustedService",
                 "fuchsia.hardware.clock.DebugService",
                 "fuchsia.hardware.gnss.Service",
+                "fuchsia.hardware.google.cryptobam.Service",
+                "fuchsia.hardware.google.cryptobam.TestService",
+                "fuchsia.hardware.google.gpdma.Service",
+                "fuchsia.hardware.google.gpdma.TestService",
                 "fuchsia.hardware.google.nanohub.DataChannelService",
                 "fuchsia.hardware.google.nanohub.DisplayService",
                 "fuchsia.hardware.google.nanohub.Service",

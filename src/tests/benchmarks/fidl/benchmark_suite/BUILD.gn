@@ -5,6 +5,7 @@
 import("//build/fidl/fidl.gni")
 import("benchmark_suite.gni")
 
+# LINT.IfChange
 fidl("benchmark_suite_fidl") {
   testonly = true
   name = "test.benchmarkfidl"
@@ -64,3 +65,4 @@ foreach(suite, benchmark_suites) {
     }
   }
 }
+# LINT.ThenChange(//src/tests/benchmarks/fidl/benchmark_suite/BUILD.bazel)

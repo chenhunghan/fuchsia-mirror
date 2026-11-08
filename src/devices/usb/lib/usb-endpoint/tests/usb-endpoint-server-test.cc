@@ -15,6 +15,8 @@
 
 namespace {
 
+namespace frequest = fuchsia_hardware_usb_request;
+
 class FakeEndpoint : public usb::EndpointServer {
  public:
   FakeEndpoint(const zx::bti& bti, uint8_t ep_addr,
@@ -693,6 +695,256 @@ TEST_F(UsbEndpointServerTest, GetIterUnsupportedScatterGatherTest) {
   auto iters_zero = unsupported_ep->get_iter(req_zero_var, page_size);
   ASSERT_TRUE(iters_zero.is_ok());
   EXPECT_EQ(iters_zero->size(), 0);
+}
+
+TEST_F(UsbEndpointServerTest, UnregisterVmoWhileRequestInFlightDefersUnpinTest) {
+  const size_t page_size = zx_system_get_page_size();
+  std::vector<fuchsia_hardware_usb_endpoint::VmoInfo> vmo_info;
+  vmo_info.emplace_back(std::move(fuchsia_hardware_usb_endpoint::VmoInfo().id(8).size(page_size)));
+  sync_completion_t wait;
+  client_->RegisterVmos({std::move(vmo_info)})
+      .Then([&](const fidl::Result<fuchsia_hardware_usb_endpoint::Endpoint::RegisterVmos>& result) {
+        ASSERT_TRUE(result.is_ok());
+        sync_completion_signal(&wait);
+      });
+  sync_completion_wait(&wait, zx::time::infinite().get());
+  VerifyRegisteredVmos(1);
+
+  frequest::Request req;
+  req.defer_completion(false);
+  req.data()
+      .emplace()
+      .emplace_back()
+      .buffer(fuchsia_hardware_usb_request::Buffer::WithVmoId(8))
+      .offset(0)
+      .size(64);
+  auto req_var = usb::RequestVariant(usb::FidlRequest(std::move(req)));
+  auto iters = ep_->get_iter(req_var, page_size);
+  ASSERT_TRUE(iters.is_ok());
+
+  // Unregister VMO while req_var is still holding the shared_context from get_iter().
+  sync_completion_reset(&wait);
+  client_->UnregisterVmos({{8}}).Then(
+      [&](const fidl::Result<fuchsia_hardware_usb_endpoint::Endpoint::UnregisterVmos>& result) {
+        ASSERT_TRUE(result.is_ok());
+        EXPECT_TRUE(result->failed_vmo_ids().empty());
+        EXPECT_TRUE(result->errors().empty());
+        sync_completion_signal(&wait);
+      });
+  sync_completion_wait(&wait, zx::time::infinite().get());
+
+  // The VMO is removed from the server's map, but its PMT remains pinned in BTI while req_var is
+  // in flight.
+  EXPECT_TRUE(ep_->GetRegisteredVmosInfo().empty());
+  VerifyRegisteredVmos(1);
+
+  // Completing the request invokes take_request() -> Unpin(), releasing the shared_context and
+  // unpinning the PMT.
+  ep_->RequestComplete(ZX_OK, 64, std::move(req_var));
+  VerifyRegisteredVmos(0);
+  sync_completion_wait(&event_handler_.received_on_completion_, zx::time::infinite().get());
+}
+
+TEST_F(UsbEndpointServerTest, UnbindWhileRequestInFlightDefersUnpinTest) {
+  const size_t page_size = zx_system_get_page_size();
+  std::vector<fuchsia_hardware_usb_endpoint::VmoInfo> vmo_info;
+  vmo_info.emplace_back(std::move(fuchsia_hardware_usb_endpoint::VmoInfo().id(8).size(page_size)));
+  sync_completion_t wait;
+  client_->RegisterVmos({std::move(vmo_info)})
+      .Then([&](const fidl::Result<fuchsia_hardware_usb_endpoint::Endpoint::RegisterVmos>& result) {
+        ASSERT_TRUE(result.is_ok());
+        sync_completion_signal(&wait);
+      });
+  sync_completion_wait(&wait, zx::time::infinite().get());
+  VerifyRegisteredVmos(1);
+
+  frequest::Request req;
+  req.defer_completion(false);
+  req.data()
+      .emplace()
+      .emplace_back()
+      .buffer(fuchsia_hardware_usb_request::Buffer::WithVmoId(8))
+      .offset(0)
+      .size(64);
+  auto req_var = usb::RequestVariant(usb::FidlRequest(std::move(req)));
+  auto iters = ep_->get_iter(req_var, page_size);
+  ASSERT_TRUE(iters.is_ok());
+
+  // Trigger unbind while req_var is still holding the shared_context from get_iter().
+  {
+    auto unused = std::move(client_);
+  }
+  sync_completion_wait(&ep_->unbound_, zx::time::infinite().get());
+
+  // OnUnbound clears the server's registered VMO map, but the VMO's PMT remains pinned in BTI
+  // while req_var is in flight.
+  EXPECT_TRUE(ep_->GetRegisteredVmosInfo().empty());
+  VerifyRegisteredVmos(1);
+
+  // Completing the request invokes take_request() -> Unpin(), releasing the shared_context and
+  // unpinning the PMT.
+  ep_->RequestComplete(ZX_OK, 64, std::move(req_var));
+  VerifyRegisteredVmos(0);
+}
+
+TEST_F(UsbEndpointServerTest, GetMappedRegisteredVmoAndCacheFlushTest) {
+  std::vector<fuchsia_hardware_usb_endpoint::VmoInfo> vmo_info;
+  vmo_info.emplace_back(
+      fuchsia_hardware_usb_endpoint::VmoInfo().id(12).size(zx_system_get_page_size()));
+
+  sync_completion_t wait;
+  zx::vmo client_vmo;
+  client_->RegisterVmos({std::move(vmo_info)})
+      .Then([&](fidl::Result<fuchsia_hardware_usb_endpoint::Endpoint::RegisterVmos>& result) {
+        ASSERT_TRUE(result.is_ok());
+        ASSERT_EQ(result->vmos().size(), 1u);
+        client_vmo = std::move(result->vmos().at(0).vmo().value());
+        sync_completion_signal(&wait);
+      });
+  sync_completion_wait(&wait, zx::time::infinite().get());
+
+  uint8_t pattern[] = {0x11, 0x22, 0x33, 0x44};
+  ASSERT_OK(client_vmo.write(pattern, 0, sizeof(pattern)));
+
+  usb::FidlRequest req;
+  req.add_vmo_id(12, 1024, 0);
+
+  usb::RequestVariant req_var(std::move(req));
+  ASSERT_OK(ep_->get_iter(req_var, zx_system_get_page_size()));
+
+  auto& fidl_req = std::get<usb::FidlRequest>(req_var);
+  ASSERT_OK(
+      fidl_req.CacheFlushInvalidate([this](const fuchsia_hardware_usb_request::Buffer& buffer) {
+        return ep_->GetMapped(buffer);
+      }));
+
+  uint8_t buf[4] = {};
+  auto copy_res = fidl_req.CachedCopyFrom(
+      0, buf, sizeof(buf), [this](const fuchsia_hardware_usb_request::Buffer& buffer) {
+        return ep_->GetMapped(buffer);
+      });
+  ASSERT_OK(copy_res);
+  ASSERT_EQ(copy_res.value().size(), 1u);
+  ASSERT_EQ(copy_res.value()[0], 4u);
+  EXPECT_EQ(buf[0], 0x11);
+  EXPECT_EQ(buf[1], 0x22);
+  EXPECT_EQ(buf[2], 0x33);
+  EXPECT_EQ(buf[3], 0x44);
+}
+
+TEST_F(UsbEndpointServerTest, GetMappedSucceedsForInFlightRequestAfterUnregisterVmosTest) {
+  std::vector<fuchsia_hardware_usb_endpoint::VmoInfo> vmo_info;
+  vmo_info.emplace_back(
+      fuchsia_hardware_usb_endpoint::VmoInfo().id(12).size(zx_system_get_page_size()));
+
+  sync_completion_t wait;
+  zx::vmo client_vmo;
+  client_->RegisterVmos({std::move(vmo_info)})
+      .Then([&](fidl::Result<fuchsia_hardware_usb_endpoint::Endpoint::RegisterVmos>& result) {
+        ASSERT_TRUE(result.is_ok());
+        ASSERT_EQ(result->vmos().size(), 1u);
+        client_vmo = std::move(result->vmos().at(0).vmo().value());
+        sync_completion_signal(&wait);
+      });
+  sync_completion_wait(&wait, zx::time::infinite().get());
+
+  uint8_t pattern[] = {0xAA, 0xBB, 0xCC, 0xDD};
+  ASSERT_OK(client_vmo.write(pattern, 0, sizeof(pattern)));
+
+  usb::FidlRequest req;
+  req.add_vmo_id(12, 1024, 0);
+
+  usb::RequestVariant req_var(std::move(req));
+  ASSERT_OK(ep_->get_iter(req_var, zx_system_get_page_size()));
+
+  // Unregister while in-flight
+  sync_completion_t unreg_wait;
+  client_->UnregisterVmos({{12}}).Then(
+      [&](fidl::Result<fuchsia_hardware_usb_endpoint::Endpoint::UnregisterVmos>& result) {
+        ASSERT_TRUE(result.is_ok());
+        sync_completion_signal(&unreg_wait);
+      });
+  sync_completion_wait(&unreg_wait, zx::time::infinite().get());
+
+  // Still readable!
+  auto& fidl_req = std::get<usb::FidlRequest>(req_var);
+  ASSERT_OK(
+      fidl_req.CacheFlushInvalidate([this](const fuchsia_hardware_usb_request::Buffer& buffer) {
+        return ep_->GetMapped(buffer);
+      }));
+
+  uint8_t buf[4] = {};
+  auto copy_res = fidl_req.CachedCopyFrom(
+      0, buf, sizeof(buf), [this](const fuchsia_hardware_usb_request::Buffer& buffer) {
+        return ep_->GetMapped(buffer);
+      });
+  ASSERT_OK(copy_res);
+  ASSERT_EQ(copy_res.value().size(), 1u);
+  ASSERT_EQ(copy_res.value()[0], 4u);
+  EXPECT_EQ(buf[0], 0xAA);
+  EXPECT_EQ(buf[1], 0xBB);
+  EXPECT_EQ(buf[2], 0xCC);
+  EXPECT_EQ(buf[3], 0xDD);
+
+  // Complete the request to drop the shared_context
+  ep_->RequestComplete(ZX_OK, 1024, std::move(req_var));
+  EXPECT_STATUS(ep_->GetMapped(fuchsia_hardware_usb_request::Buffer::WithVmoId(12)).status_value(),
+                ZX_ERR_NOT_FOUND);
+}
+
+TEST_F(UsbEndpointServerTest, GetMappedSucceedsForInFlightRequestAfterClientUnbindTest) {
+  std::vector<fuchsia_hardware_usb_endpoint::VmoInfo> vmo_info;
+  vmo_info.emplace_back(
+      fuchsia_hardware_usb_endpoint::VmoInfo().id(12).size(zx_system_get_page_size()));
+
+  sync_completion_t wait;
+  zx::vmo client_vmo;
+  client_->RegisterVmos({std::move(vmo_info)})
+      .Then([&](fidl::Result<fuchsia_hardware_usb_endpoint::Endpoint::RegisterVmos>& result) {
+        ASSERT_TRUE(result.is_ok());
+        ASSERT_EQ(result->vmos().size(), 1u);
+        client_vmo = std::move(result->vmos().at(0).vmo().value());
+        sync_completion_signal(&wait);
+      });
+  sync_completion_wait(&wait, zx::time::infinite().get());
+
+  uint8_t pattern[] = {0xAA, 0xBB, 0xCC, 0xDD};
+  ASSERT_OK(client_vmo.write(pattern, 0, sizeof(pattern)));
+
+  usb::FidlRequest req;
+  req.add_vmo_id(12, 1024, 0);
+
+  usb::RequestVariant req_var(std::move(req));
+  ASSERT_OK(ep_->get_iter(req_var, zx_system_get_page_size()));
+
+  // Unbind while in-flight
+  client_ = {};
+  sync_completion_wait(&ep_->unbound_, zx::time::infinite().get());
+
+  // Still readable!
+  auto& fidl_req = std::get<usb::FidlRequest>(req_var);
+  ASSERT_OK(
+      fidl_req.CacheFlushInvalidate([this](const fuchsia_hardware_usb_request::Buffer& buffer) {
+        return ep_->GetMapped(buffer);
+      }));
+
+  uint8_t buf[4] = {};
+  auto copy_res = fidl_req.CachedCopyFrom(
+      0, buf, sizeof(buf), [this](const fuchsia_hardware_usb_request::Buffer& buffer) {
+        return ep_->GetMapped(buffer);
+      });
+  ASSERT_OK(copy_res);
+  ASSERT_EQ(copy_res.value().size(), 1u);
+  ASSERT_EQ(copy_res.value()[0], 4u);
+  EXPECT_EQ(buf[0], 0xAA);
+  EXPECT_EQ(buf[1], 0xBB);
+  EXPECT_EQ(buf[2], 0xCC);
+  EXPECT_EQ(buf[3], 0xDD);
+
+  // Complete the request to drop the shared_context
+  ep_->RequestComplete(ZX_OK, 1024, std::move(req_var));
+  EXPECT_STATUS(ep_->GetMapped(fuchsia_hardware_usb_request::Buffer::WithVmoId(12)).status_value(),
+                ZX_ERR_NOT_FOUND);
 }
 
 }  // namespace

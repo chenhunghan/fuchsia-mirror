@@ -199,7 +199,7 @@ output\_summary.json     (post-processor output summary)
 ```
 
 *   `<root>/` is the specified `output_directory`. If the output directory is moved or copied to another location, the test configuration is not modified. The output directory in the configuration refers to the location at which the directory was initially created on the host that ran `test-pilot`.
-*   `output_summary.json` is a merged summary of all `output_summary.json` files in the subdirectories. `test-pilot` produces this merge after the test run and all post processing is complete.
+*   `output_summary.json` is a merged summary of all `output_summary.json` files in the subdirectories. `test-pilot` produces this merge after the test run and all post processing is complete. If the `TEST_OUTPUT_SUMMARY_PATH` environment variable is defined, `test-pilot` copies the final `output_summary.json` to that path.
 *   `test_config.json` is the compiled test configuration.
 *   `test/` holds the output of the invoked test. The test may not supplement or modify any part of `<root>/` outside this subdirectory.
 *   `<post-processor name>/` holds the output of a specific post-processor.

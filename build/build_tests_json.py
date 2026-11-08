@@ -14,12 +14,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-sys.path.insert(0, str(Path(__file__).parent / "bazel/scripts"))
-sys.path.insert(0, str(Path(__file__).parent / "python/modules"))
-import bazel_tests_utils
-import build_utils
-from build_utils import CommandRunner
-from serialization import JSONValue, instance_from_dict
+from build.bazel.scripts import bazel_tests_utils, build_utils
+from build.bazel.scripts.build_utils import CommandRunner
+from build.python.modules.serialization.serialization import (
+    JSONValue,
+    instance_from_dict,
+)
 
 
 @dataclass(frozen=True)
@@ -56,7 +56,7 @@ class Dimensions:
         val: str | None = getattr(self, key, None)
         return val if val is not None else default
 
-    def is_subset_of(self, other: "Dimensions") -> bool:
+    def is_subset_of(self, other: Dimensions) -> bool:
         """Return True if all non-None dimensions in `self` are present with the same values in `other`.
 
         Because `dict.items()` returns a set-like `dict_items` view of `(key,
@@ -82,6 +82,7 @@ class EmulatorConfig:
 
     accel: str | None = None
     device: str | None = None
+    allow_internet: bool | None = None
     kernel_args: tuple[str, ...] | None = None
     name: str = ""
     uefi: bool | None = None
@@ -124,7 +125,7 @@ class Environment:
         if isinstance(self.tags, list):
             object.__setattr__(self, "tags", tuple(self.tags))
 
-    def __lt__(self, other: "Environment") -> bool:
+    def __lt__(self, other: Environment) -> bool:
         return json.dumps(self.to_dict(), sort_keys=True) < json.dumps(
             other.to_dict(), sort_keys=True
         )
@@ -187,7 +188,7 @@ class TestEntryKey:
     cpu: str
 
     @classmethod
-    def from_test(cls, test: dict[str, Any]) -> "TestEntryKey":
+    def from_test(cls, test: dict[str, Any]) -> TestEntryKey:
         """Return the key for a test entry.
 
         Runnable tests in a product_bundle_test_group have the product bundle's
@@ -257,6 +258,71 @@ def matches_target_platform(
     )
 
 
+NON_HARDWARE_DEVICE_TYPES: frozenset[str] = frozenset(
+    {
+        "AEMU",
+        "GCE",
+        "QEMU",
+        "crosvm",
+    }
+)
+
+
+def is_hardware_environment(env: dict[str, Any]) -> bool:
+    """Return True if a resolved environment dict targets physical hardware."""
+    if "emulator" in env:
+        return False
+    device_type = env.get("dimensions", {}).get("device_type")
+    return (
+        device_type is not None and device_type not in NON_HARDWARE_DEVICE_TYPES
+    )
+
+
+def find_duplicated_hardware_tests(
+    test_entries_by_key: dict[TestEntryKey, TestEntries],
+) -> list[dict[str, Any]]:
+    """Find tests that run on the same hardware device_type across multiple product bundles."""
+    duplicated_tests: list[dict[str, Any]] = []
+
+    for key, test_entries in test_entries_by_key.items():
+        if len(test_entries.runnable_entries) <= 1:
+            continue
+
+        pbs_by_device_type: dict[str, list[str]] = {}
+        for entry in test_entries.runnable_entries:
+            pb = entry.get("product_bundle", "<default>")
+            for env in entry.get("environments", []):
+                if is_hardware_environment(env):
+                    device_type = env["dimensions"]["device_type"]
+                    pbs = pbs_by_device_type.setdefault(device_type, [])
+                    if pb not in pbs:
+                        pbs.append(pb)
+
+        if not pbs_by_device_type:
+            continue
+
+        sample_test_info = test_entries.runnable_entries[0].get("test", {})
+        for device_type, product_bundles in sorted(pbs_by_device_type.items()):
+            if len(product_bundles) > 1:
+                dup_entry: dict[str, Any] = {
+                    "name": key.name,
+                    "cpu": key.cpu,
+                    "device_type": device_type,
+                    "product_bundles": product_bundles,
+                }
+                for field in (
+                    "label",
+                    "source_label",
+                    "component_label",
+                    "package_url",
+                ):
+                    if field in sample_test_info:
+                        dup_entry[field] = sample_test_info[field]
+                duplicated_tests.append(dup_entry)
+
+    return duplicated_tests
+
+
 def is_pure_host_test(test: dict[str, Any]) -> bool:
     """Return True if the test spec describes a pure Linux host test (no target device)."""
     test_info = test.get("test", {})
@@ -280,7 +346,7 @@ def set_environments_for_test(
         test["build_only"] = True
         test["environments"] = []
     else:
-        test["environments"] = [e.to_dict() for e in sorted_envs]
+        test["environments"] = sorted_envs
         if "build_only" in test:
             test["build_only"] = False
 
@@ -420,6 +486,105 @@ def resolve_product_bundle_test_environments(
         ):
             matched_envs.append(env)
     set_environments_for_test(test, matched_envs)
+
+
+@dataclass
+class ResolvedTestGroup:
+    """A product_bundle_test_group whose tests have had their environments resolved."""
+
+    label: str | None
+    product_bundle_name: str
+    dedupe_against: list[str]
+    tests: list[dict[str, Any]]
+
+    def display_name(self) -> str:
+        return self.label or self.product_bundle_name
+
+
+def dedupe_test_groups(groups: list[ResolvedTestGroup]) -> None:
+    """Remove environments from tests that another group already runs them in.
+
+    For each group with `dedupe_against`, any environment of a runnable test
+    that the same test (see `TestEntryKey`) also runs in from one of the listed
+    groups is removed from this group's test.  If no environments remain, the
+    test becomes build-only for this group.
+
+    A group's `dedupe_against` groups are deduplicated before the group itself,
+    so that it's compared against the environments that those groups will
+    actually run tests in.  Cycles are rejected, as they could otherwise cause
+    a test to not be run anywhere.
+
+    Raises:
+        ValueError: if a `dedupe_against` group isn't found, or there's a cycle.
+    """
+    groups_by_label: dict[str, ResolvedTestGroup] = {}
+    for group in groups:
+        if group.label is None:
+            continue
+        if group.label in groups_by_label:
+            raise ValueError(
+                f"Duplicate product_bundle_test_group label: {group.label}"
+            )
+        groups_by_label[group.label] = group
+
+    for group in groups:
+        for label in group.dedupe_against:
+            if label not in groups_by_label:
+                raise ValueError(
+                    f"product_bundle_test_group:{group.display_name()}: "
+                    + f"`dedupe_against` group {label} is not included in "
+                    + "the build"
+                )
+
+    # For each processed group (by id), the environments that each of its
+    # tests will run in.
+    runnable_envs_by_group: dict[int, dict[TestEntryKey, set[Environment]]] = {}
+    in_progress: set[int] = set()
+
+    def dedupe_group(
+        group: ResolvedTestGroup, path: list[str]
+    ) -> dict[TestEntryKey, set[Environment]]:
+        group_id = id(group)
+        if group_id in runnable_envs_by_group:
+            return runnable_envs_by_group[group_id]
+        path = path + [group.display_name()]
+        if group_id in in_progress:
+            raise ValueError(
+                "Cycle found in product_bundle_test_group `dedupe_against`: "
+                + " -> ".join(path)
+            )
+        in_progress.add(group_id)
+
+        # The environments that each test is already run in by other groups.
+        excluded_envs: dict[TestEntryKey, set[Environment]] = {}
+        for label in group.dedupe_against:
+            other_envs = dedupe_group(groups_by_label[label], path)
+            for key, other_test_envs in other_envs.items():
+                excluded_envs.setdefault(key, set()).update(other_test_envs)
+
+        runnable_envs: dict[TestEntryKey, set[Environment]] = {}
+        for test in group.tests:
+            # Pure host tests aren't product-bundle specific, and are already
+            # deduplicated when merged.
+            if is_pure_host_test(test) or test_is_build_only(test):
+                continue
+            key = TestEntryKey.from_test(test)
+            envs: list[Environment] = test["environments"]
+            if key in excluded_envs:
+                excluded = excluded_envs[key]
+                envs = [e for e in envs if e not in excluded]
+                if not envs:
+                    test["build_only"] = True
+                test["environments"] = envs
+            if envs:
+                runnable_envs.setdefault(key, set()).update(envs)
+
+        in_progress.remove(group_id)
+        runnable_envs_by_group[group_id] = runnable_envs
+        return runnable_envs
+
+    for group in groups:
+        dedupe_group(group, [])
 
 
 def build_tests_json(
@@ -588,6 +753,12 @@ def build_tests_json(
     #
     # We also assert that the product bundle name is found in
     # product_bundles.json.
+    #
+    # This happens in three phases: first, every group's test environments are
+    # resolved; then groups are deduplicated against the groups listed in
+    # their `dedupe_against`; and finally, the tests are renamed and merged
+    # into `test_entries_by_key`.
+    resolved_groups: list[ResolvedTestGroup] = []
     for test_group in test_groups:
         product_bundle_name = test_group["product_bundle_name"]
         if product_bundle_name not in product_bundle_names:
@@ -657,17 +828,15 @@ def build_tests_json(
             suite_file = build_dir / test_group["bazel_target_test_suites"]
             product_bundle_tests.extend(bazel_tests.grouped_tests[suite_file])
 
-        # Update the test spec to include the product bundle target and
-        # environments.
+        # Resolve the environments for each test in the group.  The tests
+        # are renamed and merged into `test_entries_by_key` below, after
+        # they've been deduplicated against other groups.
+        resolved_tests: list[dict[str, Any]] = []
         for test in product_bundle_tests:
             test_info = test.get("test", {})
-            original_name = test_info["name"]
-            name = original_name + "-" + product_bundle_name
+            name = test_info["name"] + "-" + product_bundle_name
             test_label = test_info.get("label")
             test_id = f"{name} ({test_label})" if test_label else name
-
-            # Get the key before the test's name is changed below.
-            test_entry_key = TestEntryKey.from_test(test)
 
             try:
                 if is_pure_host_test(test):
@@ -692,26 +861,49 @@ def build_tests_json(
                             target_platforms,
                             other_platforms,
                         )
-
-                    # If it's not a build-only test, mark the runnable test as
-                    # targeting this specific product bundle.
-                    if not test_is_build_only(test):
-                        test_info["name"] = name
-                        test["product_bundle"] = product_bundle_name
-
-                test_entries_by_key.setdefault(
-                    test_entry_key,
-                    TestEntries(),
-                ).update_with(test)
+                resolved_tests.append(test)
 
             except ValueError as err:
                 validation_errors.append(f"{test_id}: {err}")
+
+        resolved_groups.append(
+            ResolvedTestGroup(
+                label=test_group.get("label"),
+                product_bundle_name=product_bundle_name,
+                dedupe_against=test_group.get("dedupe_against", []),
+                tests=resolved_tests,
+            )
+        )
+
+    try:
+        dedupe_test_groups(resolved_groups)
+    except ValueError as err:
+        validation_errors.append(str(err))
 
     if validation_errors:
         raise ValueError(
             "Invalid test environment specifications found:\n"
             + "\n".join(f"  - {err}" for err in validation_errors)
         )
+
+    for group in resolved_groups:
+        for test in group.tests:
+            # Get the key before the test's name is changed below.
+            test_entry_key = TestEntryKey.from_test(test)
+
+            # If it's not a build-only test, mark the runnable test as
+            # targeting this specific product bundle.
+            if not is_pure_host_test(test) and not test_is_build_only(test):
+                test_info = test["test"]
+                test_info["name"] = (
+                    test_info["name"] + "-" + group.product_bundle_name
+                )
+                test["product_bundle"] = group.product_bundle_name
+
+            test_entries_by_key.setdefault(
+                test_entry_key,
+                TestEntries(),
+            ).update_with(test)
 
     # For each test in test_entries, we add the runnable test entries, and if it only
     # has build_only entries remaining, we add that as a placeholder.  If it has neither,
@@ -727,6 +919,9 @@ def build_tests_json(
                 "Test has no runnable entries and no build-only entry."
             )
 
+    for test in all_tests:
+        test["environments"] = [e.to_dict() for e in test["environments"]]
+
     # Write the final list of tests to tests.json if the contents changed.
     contents_changed = True
     if tests_json_path.exists():
@@ -735,6 +930,26 @@ def build_tests_json(
             contents_changed = False
     if contents_changed:
         tests_json_path.write_text(json.dumps(all_tests, indent=2))
+
+    # Write the list of tests running on the same hardware across multiple
+    # product bundles to duplicated_hardware_tests.json if changed.
+    duplicated_hardware_tests_path = (
+        build_dir / "duplicated_hardware_tests.json"
+    )
+    duplicated_hardware_tests = find_duplicated_hardware_tests(
+        test_entries_by_key
+    )
+    dup_contents_changed = True
+    if duplicated_hardware_tests_path.exists():
+        previous_dup_tests = json.loads(
+            duplicated_hardware_tests_path.read_text()
+        )
+        if previous_dup_tests == duplicated_hardware_tests:
+            dup_contents_changed = False
+    if dup_contents_changed:
+        duplicated_hardware_tests_path.write_text(
+            json.dumps(duplicated_hardware_tests, indent=2)
+        )
 
     return {
         tests_from_metadata_path,

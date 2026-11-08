@@ -11,6 +11,8 @@
 #include <oi_codec_sbc.h>
 #include <oi_status.h>
 
+#include <optional>
+
 #include "chunk_input_stream.h"
 #include "codec_adapter_sw.h"
 #include "fuchsia/media/cpp/fidl.h"
@@ -60,7 +62,7 @@ class CodecAdapterSbcDecoder : public CodecAdapterSW<fit::deferred_action<fit::c
 
  private:
   struct Context {
-    explicit Context(fuchsia::media::PcmFormat format) : output_format(std::move(format)) {}
+    explicit Context(fuchsia::media::PcmFormat2 format) : output_format(std::move(format)) {}
     ~Context() = default;
     // OI_CODEC_SBC_DecoderReset() stores interior pointers into `context_data` inside
     // `context.common`, so `Context` cannot be safely copied or moved once initialized.
@@ -72,10 +74,10 @@ class CodecAdapterSbcDecoder : public CodecAdapterSW<fit::deferred_action<fit::c
     OI_CODEC_SBC_DECODER_CONTEXT context{};
     uint32_t context_data[CODEC_DATA_WORDS(SBC_MAX_CHANNELS, SBC_CODEC_FAST_FILTER_BUFFERS)]{};
 
-    fuchsia::media::PcmFormat output_format;
+    fuchsia::media::PcmFormat2 output_format;
 
     uint32_t max_pcm_chunk_size() const {
-      return (output_format.bits_per_sample / 8) * SBC_MAX_SAMPLES_PER_FRAME * SBC_MAX_CHANNELS;
+      return (output_format.bits_per_sample() / 8) * SBC_MAX_SAMPLES_PER_FRAME * SBC_MAX_CHANNELS;
     }
   };
 
@@ -103,7 +105,8 @@ class CodecAdapterSbcDecoder : public CodecAdapterSW<fit::deferred_action<fit::c
   InputLoopStatus DecodeInput(const CodecPacket* input_packet);
 
   // Extract PCM format from SBC codec info bytes
-  static fuchsia::media::PcmFormat DecodeCodecInfo(const std::vector<uint8_t>& oob_bytes);
+  static std::optional<fuchsia::media::PcmFormat2> DecodeCodecInfo(
+      const std::vector<uint8_t>& oob_bytes);
 
   // Attempts to setup an output packet and return a pointer into `output_buffer_` at
   // `output_offset_`. Caller should ensure output_offset_ does not exceed output buffer size

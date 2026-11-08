@@ -60,9 +60,6 @@ const std::unordered_map<std::string_view, ServiceEntry> kClassNameToService = {
      {ServiceEntry::kDevfsAndService, "fuchsia.hardware.audio.StreamConfigConnectorOutputService",
       "stream_config_connector"}},
     {"battery", {ServiceEntry::kDevfsAndService, "fuchsia.power.battery.InfoService", "device"}},
-    {"block-partition", {ServiceEntry::kDevfs, "", ""}},
-    {"block", {ServiceEntry::kDevfs, "", ""}},
-    {"block-volume", {ServiceEntry::kDevfs, "", ""}},
     {"bt-emulator",
      {ServiceEntry::kDevfsAndService, "fuchsia.hardware.bluetooth.EmulatorService", "device"}},
     {"bt-hci", {ServiceEntry::kDevfsAndService, "fuchsia.hardware.bluetooth.Service", "vendor"}},
@@ -91,14 +88,11 @@ const std::unordered_map<std::string_view, ServiceEntry> kClassNameToService = {
     {"gpu", {ServiceEntry::kDevfs, "fuchsia.gpu.magma.Service", "device"}},
     {"hrtimer", {ServiceEntry::kDevfsAndService, "fuchsia.hardware.hrtimer.Service", "device"}},
     {"i2c", {ServiceEntry::kDevfsAndService, "fuchsia.hardware.i2c.Service", "device"}},
-    {"input-report",
-     {ServiceEntry::kDevfsAndService, "fuchsia.input.report.Service", "input_device"}},
     {"input", {ServiceEntry::kDevfsAndService, "fuchsia.hardware.input.Service", "controller"}},
     {"light", {ServiceEntry::kDevfsAndService, "fuchsia.hardware.light.LightService", "light"}},
     {"media-codec",
      {ServiceEntry::kDevfsAndService, "fuchsia.hardware.mediacodec.Service", "device"}},
     {"midi", {ServiceEntry::kDevfsAndService, "fuchsia.hardware.midi.Service", "controller"}},
-    {"nand", {ServiceEntry::kDevfs, "", ""}},
     {"network", {ServiceEntry::kDevfsAndService, "fuchsia.hardware.network.Service", "device"}},
     {"ot-radio", {ServiceEntry::kDevfsAndService, "fuchsia.lowpan.spinel.Service", "device_setup"}},
     {"power-sensor",
@@ -145,9 +139,6 @@ std::unordered_map<std::string_view, uint8_t> classes_that_assume_ordering({
     // TODO(https://fxbug.dev/42065012): Remove.
     {"adc", 0},
 
-    // TODO(https://fxbug.dev/42068339): Remove.
-    {"block", 0},
-
     // TODO(https://fxbug.dev/42065067): Remove.
     {"goldfish-address-space", 0},
     {"goldfish-control", 0},
@@ -174,7 +165,6 @@ std::unordered_map<std::string_view, uint8_t> classes_that_assume_ordering({
 // for accessing topological paths at /src/devices/lib/client
 //
 const std::unordered_set<std::string> kClassesThatAllowTopologicalPath({
-    "block",
     "devfs_service_test",
     "network",
 });

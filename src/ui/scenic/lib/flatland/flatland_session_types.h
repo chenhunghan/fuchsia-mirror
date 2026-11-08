@@ -149,7 +149,7 @@ struct LayerObject {
   // Set by `SetLayerImage()`. Moved into the `fence_queue_` wait set by the
   // first `Present()` that publishes this layer in `Mode::kImage`, or dropped
   // un-waited if the binding is replaced first (`SetLayerImage()`, `ResetLayer()`,
-  // `UnbindLayerImage()`). Valid only while an image is bound.
+  // `ResetLayerImage()`, `UnbindLayerImage()`). Valid only while an image is bound.
   WaitFence pending_acquire_fence;
 
   // The current binding's release fence.  No `Present()` consumes it (unlike

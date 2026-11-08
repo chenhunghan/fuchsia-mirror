@@ -18,10 +18,6 @@ group("camera-gym") {
     ":camera_gym_pkg",
     "fidl:controller($fidl_toolchain)",
   ]
-  deps = [
-    # Camera-gym is for testing and shouldn't be in production builds.
-    "//build/validate:non_production_tag",
-  ]
 }
 
 group("tests") {

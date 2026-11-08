@@ -1,0 +1,35 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+alias(
+    name = "rust",
+    actual = ":tee",
+    visibility = [
+        "//src/security/bin/kms:__pkg__",
+        "//src/security/lib/kms-stateless/rust:__pkg__",
+    ],
+)
+
+rustc_library(
+    name = "tee",
+    srcs = [
+        "src/lib.rs",
+        "src/tee_client_api.rs",
+    ],
+    edition = "2024",
+    link_deps = [
+        # Bazel links against the static library target directly; GN depends on
+        # the default shared_library target.
+        "//src/security/lib/tee/tee-client-api:tee-client-api-static",  # @bazel2gn:path_overwrite://src/security/lib/tee/tee-client-api
+    ],
+    visibility = [
+        "//src/security/bin/kms:__pkg__",
+        "//src/security/lib/kms-stateless/rust:__pkg__",
+    ],
+    deps = ["//third_party/rust_crates/vendor:log"],
+)

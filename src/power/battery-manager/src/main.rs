@@ -18,7 +18,7 @@ use crate::battery_simulator::SimulatedBatteryInfoSource;
 use crate::cache::Wakeup;
 pub(crate) use crate::config::BatteryManagerConfig;
 use crate::config::read_battery_manager_config;
-use crate::governor_supervisor::spawn_configured_governors;
+use crate::governor_supervisor::Governors;
 use anyhow::Error;
 use battery_manager_config::Config;
 use fidl::endpoints::Proxy as _;
@@ -46,6 +46,7 @@ pub(crate) enum BatteryInfoSource {
 enum IncomingService {
     BatteryManager(fpower::BatteryManagerRequestStream),
     BatterySimulator(spower::BatterySimulatorRequestStream),
+    GovernorDebug(spower::GovernorDebugRequestStream),
 }
 
 const CURR_BOOT_BATTERY_HISTORY_FILE: &str = "/data/history.txt";
@@ -373,27 +374,25 @@ async fn main() -> Result<(), Error> {
     ));
 
     let battery_simulator = Arc::new(SimulatedBatteryInfoSource::new(
-        battery_manager.get_battery_info_copy(),
+        fpower::BatteryInfo::default(),
         Arc::downgrade(&battery_manager) as Weak<dyn BatterySimulationStateObserver>,
     ));
 
     let mut fs = ServiceFs::new();
     fs.dir("svc")
         .add_fidl_service(IncomingService::BatteryManager)
-        .add_fidl_service(IncomingService::BatterySimulator);
+        .add_fidl_service(IncomingService::BatterySimulator)
+        .add_fidl_service(IncomingService::GovernorDebug);
 
     fs.take_and_serve_directory_handle()?;
 
-    let _governor_scope = spawn_configured_governors(
-        &battery_manager_config.governor_urls,
-        &arbiter,
-        cache,
-        inspector.root(),
-    );
+    let governors =
+        Governors::spawn(&battery_manager_config.governor_urls, &arbiter, cache, inspector.root());
 
     fs.for_each_concurrent(None, |request| {
         let battery_manager = battery_manager.clone();
         let battery_simulator = battery_simulator.clone();
+        let governors = governors.clone();
 
         async move {
             match request {
@@ -406,7 +405,7 @@ async fn main() -> Result<(), Error> {
                 IncomingService::BatterySimulator(stream) => {
                     let res = stream
                         .err_into()
-                        .try_for_each_concurrent(None, |request| {
+                        .try_for_each(|request| {
                             let battery_simulator = battery_simulator.clone();
                             let battery_manager = battery_manager.clone();
                             async move {
@@ -414,11 +413,11 @@ async fn main() -> Result<(), Error> {
                                     spower::BatterySimulatorRequest::DisconnectRealBattery {
                                         ..
                                     } => {
+                                        // Start simulation with an all-`None` override table so
+                                        // only fields explicitly set via subsequent simulator
+                                        // calls override the live `BatteryInfo`.
                                         battery_simulator
-                                            .update_simulation(
-                                                true,
-                                                battery_manager.get_battery_info_copy(),
-                                            )
+                                            .update_simulation(true, fpower::BatteryInfo::default())
                                             .await?;
                                     }
                                     spower::BatterySimulatorRequest::ReconnectRealBattery {
@@ -427,7 +426,7 @@ async fn main() -> Result<(), Error> {
                                         battery_simulator
                                             .update_simulation(
                                                 false,
-                                                battery_manager.get_battery_info_copy(),
+                                                fpower::BatteryInfo::default(),
                                             )
                                             .await?;
                                     }
@@ -449,6 +448,13 @@ async fn main() -> Result<(), Error> {
 
                     if let Err(e) = res {
                         error!("BatterySimulator failed {}", e);
+                    }
+                }
+                IncomingService::GovernorDebug(stream) => {
+                    if let Err(e) = governors.serve_debug(stream).await
+                        && !e.is_closed()
+                    {
+                        error!("GovernorDebug failed: {e:?}");
                     }
                 }
             }

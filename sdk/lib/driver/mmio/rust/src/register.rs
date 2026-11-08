@@ -363,7 +363,7 @@ macro_rules! register {
         ::bitfield::bitfield! {
             $(#[$attr])*
             #[derive(Copy, Clone, PartialEq, Eq, Default)]
-            pub struct $name($val_type);
+            pub struct $name(pub $val_type);
             impl Debug;
             $($field_spec)*
         }
@@ -395,7 +395,7 @@ macro_rules! register {
         ::bitfield::bitfield! {
             $(#[$attr])*
             #[derive(Copy, Clone, PartialEq, Eq, Default)]
-            pub struct $name($val_type);
+            pub struct $name(pub $val_type);
             impl Debug;
             $($field_spec)*
         }
@@ -427,7 +427,7 @@ macro_rules! register {
         ::bitfield::bitfield! {
             $(#[$attr])*
             #[derive(Copy, Clone, PartialEq, Eq, Default)]
-            pub struct $name($val_type);
+            pub struct $name(pub $val_type);
             impl Debug;
             $($field_spec)*
         }
@@ -460,7 +460,7 @@ macro_rules! register {
         ::bitfield::bitfield! {
             $(#[$attr])*
             #[derive(Copy, Clone, PartialEq, Eq, Default)]
-            pub struct $name($val_type);
+            pub struct $name(pub $val_type);
             impl Debug;
         }
 
@@ -495,7 +495,7 @@ macro_rules! register {
         ::bitfield::bitfield! {
             $(#[$attr])*
             #[derive(Copy, Clone, PartialEq, Eq, Default)]
-            pub struct $name($val_type);
+            pub struct $name(pub $val_type);
             impl Debug;
         }
 
@@ -530,7 +530,7 @@ macro_rules! register {
         ::bitfield::bitfield! {
             $(#[$attr])*
             #[derive(Copy, Clone, PartialEq, Eq, Default)]
-            pub struct $name($val_type);
+            pub struct $name(pub $val_type);
             impl Debug;
         }
 
@@ -567,7 +567,7 @@ macro_rules! register {
         ::bitfield::bitfield! {
             $(#[$attr])*
             #[derive(Copy, Clone, PartialEq, Eq, Default)]
-            pub struct $name($val_type);
+            pub struct $name(pub $val_type);
             impl Debug;
             $($field_spec)*
         }
@@ -601,7 +601,7 @@ macro_rules! register {
         ::bitfield::bitfield! {
             $(#[$attr])*
             #[derive(Copy, Clone, PartialEq, Eq, Default)]
-            pub struct $name($val_type);
+            pub struct $name(pub $val_type);
             impl Debug;
             $($field_spec)*
         }
@@ -635,7 +635,7 @@ macro_rules! register {
         ::bitfield::bitfield! {
             $(#[$attr])*
             #[derive(Copy, Clone, PartialEq, Eq, Default)]
-            pub struct $name($val_type);
+            pub struct $name(pub $val_type);
             impl Debug;
             $($field_spec)*
         }
@@ -670,7 +670,7 @@ macro_rules! register {
         ::bitfield::bitfield! {
             $(#[$attr])*
             #[derive(Copy, Clone, PartialEq, Eq, Default)]
-            pub struct $name($val_type);
+            pub struct $name(pub $val_type);
             impl Debug;
         }
 
@@ -707,7 +707,7 @@ macro_rules! register {
         ::bitfield::bitfield! {
             $(#[$attr])*
             #[derive(Copy, Clone, PartialEq, Eq, Default)]
-            pub struct $name($val_type);
+            pub struct $name(pub $val_type);
             impl Debug;
         }
 
@@ -744,7 +744,7 @@ macro_rules! register {
         ::bitfield::bitfield! {
             $(#[$attr])*
             #[derive(Copy, Clone, PartialEq, Eq, Default)]
-            pub struct $name($val_type);
+            pub struct $name(pub $val_type);
             impl Debug;
         }
 

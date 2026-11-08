@@ -84,9 +84,3 @@ idk_cc_source_library_zx(
         "//sdk/lib/fit:headers",
     ],
 )
-
-test_suite(
-    name = "tests",
-    tests = ["//sdk/lib/async/test"],
-    visibility = ["//visibility:public"],
-)

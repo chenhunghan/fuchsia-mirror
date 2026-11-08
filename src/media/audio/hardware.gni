@@ -8,14 +8,19 @@ import("//build/testing/environments.gni")
 
 # These should be targeted by tests that CANNOT run on emulated systems
 # that may run slower than real-time.
-hardware_envs = chromebook_envs + [
-                  astro_env,
-                  nelson_env,
-                  nuc7_env,
-                  nuc11_env,
-                  sherlock_env,
-                  vim3_env,
-                ]
+arm64_hardware_envs = [
+  astro_env,
+  nelson_env,
+  sherlock_env,
+  vim3_env,
+]
+
+x64_hardware_envs = [
+  nuc7_env,
+  nuc11_env,
+]
+
+hardware_envs = arm64_hardware_envs + x64_hardware_envs
 
 # These should be targeted by tests that MUST run on platforms with built-in
 # audio input hardware.
@@ -23,5 +28,4 @@ built_in_input_hardware_envs = [
   astro_env,
   nelson_env,
   sherlock_env,
-  atlas_env,
 ]

@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef ZIRCON_PLATFORM_CONNECTION_CLIENT_H
-#define ZIRCON_PLATFORM_CONNECTION_CLIENT_H
+#ifndef SRC_GRAPHICS_MAGMA_LIB_MAGMA_PLATFORM_ZIRCON_ZIRCON_PLATFORM_CONNECTION_CLIENT_H_
+#define SRC_GRAPHICS_MAGMA_LIB_MAGMA_PLATFORM_ZIRCON_ZIRCON_PLATFORM_CONNECTION_CLIENT_H_
 
 #include <fidl/fuchsia.gpu.magma/cpp/fidl.h>
 #include <fidl/fuchsia.gpu.magma/cpp/wire.h>
@@ -25,6 +25,7 @@ class PrimaryWrapper : public fidl::WireAsyncEventHandler<fuchsia_gpu_magma::Pri
   magma_status_t ImportObject(zx::handle handle, uint64_t flags,
                               magma::PlatformObject::Type object_type, uint64_t object_id);
   magma_status_t ReleaseObject(uint64_t object_id, magma::PlatformObject::Type object_type);
+  magma_status_t CreateBuffer(uint64_t size, uint64_t flags, uint64_t object_id, zx::vmo* vmo_out);
   magma_status_t CreateContext(uint32_t context_id);
   magma_status_t CreateContext2(uint32_t context_id, uint64_t priority);
   magma_status_t DestroyContext(uint32_t context_id);
@@ -94,4 +95,4 @@ class PrimaryWrapper : public fidl::WireAsyncEventHandler<fuchsia_gpu_magma::Pri
 
 }  // namespace magma
 
-#endif  // ZIRCON_PLATFORM_CONNECTION_CLIENT_H
+#endif  // SRC_GRAPHICS_MAGMA_LIB_MAGMA_PLATFORM_ZIRCON_ZIRCON_PLATFORM_CONNECTION_CLIENT_H_

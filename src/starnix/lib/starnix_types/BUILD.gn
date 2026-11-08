@@ -78,6 +78,7 @@ rustc_library("starnix_types") {
     "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
     "//sdk/fidl/fuchsia.starnix.binder:fuchsia.starnix.binder_rust",
     "//sdk/rust/zx",
+    "//src/lib/fuchsia-rcu:fuchsia-rcu-traits",
     "//src/starnix/lib/linux_uapi",
     "//src/starnix/lib/starnix_uapi",
     "//src/starnix/lib/syncio",

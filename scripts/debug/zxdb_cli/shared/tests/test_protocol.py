@@ -11,6 +11,7 @@ from shared.protocol import (
     deserialize_response,
     make_request,
 )
+from shared.protocol.aspace import AspaceRequest, AspaceResponse
 from shared.protocol.async_backtrace import (
     AsyncBacktraceRequest,
     AsyncBacktraceResponse,
@@ -20,10 +21,22 @@ from shared.protocol.break_request import BreakRequest
 from shared.protocol.console import ConsoleRequest, ConsoleResponse
 from shared.protocol.continue_request import ContinueRequest
 from shared.protocol.detach import DetachRequest
+from shared.protocol.diagnose_hang import (
+    DiagnoseHangRequest,
+    DiagnoseHangResponse,
+)
+from shared.protocol.driver_list import (
+    DriverHostEntry,
+    DriverListRequest,
+    DriverListResponse,
+)
 from shared.protocol.evaluate import EvaluateRequest, EvaluateResponse
 from shared.protocol.finish import FinishRequest
 from shared.protocol.get_state import GetStateRequest, GetStateResponse
+from shared.protocol.handles import HandlesRequest, HandlesResponse
 from shared.protocol.hello import HelloRequest
+from shared.protocol.mem_read import MemReadRequest, MemReadResponse
+from shared.protocol.modules import ModulesRequest, ModulesResponse
 from shared.protocol.next_request import NextRequest
 from shared.protocol.pause import PauseRequest
 from shared.protocol.stack_trace import (
@@ -35,6 +48,11 @@ from shared.protocol.start import StartRequest
 from shared.protocol.step_in import StepInRequest
 from shared.protocol.stop import StopRequest
 from shared.protocol.threads import ThreadsRequest
+from shared.protocol.tracepoint import (
+    TracepointInfo,
+    TracepointRequest,
+    TracepointResponse,
+)
 from shared.protocol.variables import VariablesRequest
 from shared.protocol.wait_for_event import WaitForEventRequest
 from shared.protocol.watch_request import WatchRequest
@@ -167,6 +185,112 @@ class TestAttachRequestSchema(unittest.TestCase):
         with self.assertRaises(ValidationError):
             AttachRequest()
 
+    def test_weak_and_exact_flags(self) -> None:
+        req = AttachRequest(
+            filter="xhci", weak=True, exact=True, recursive=True
+        )
+        self.assertTrue(req.weak)
+        self.assertTrue(req.exact)
+        self.assertTrue(req.recursive)
+
+    def test_driver_and_node_flags(self) -> None:
+        req_drv = AttachRequest(driver="xhci", weak=True, wait=True)
+        self.assertEqual(req_drv.driver, "xhci")
+        self.assertTrue(req_drv.weak)
+        self.assertTrue(req_drv.wait)
+
+        req_node = AttachRequest(node="dev.sys.platform.xhci")
+        self.assertEqual(req_node.node, "dev.sys.platform.xhci")
+
+        with self.assertRaises(ValidationError):
+            AttachRequest(filter="xhci", driver="xhci")
+
+        with self.assertRaises(ValidationError):
+            AttachRequest(driver="xhci", node="dev.sys.platform.xhci")
+
+        with self.assertRaises(ValidationError):
+            AttachRequest(driver="xhci", exact=True)
+
+        with self.assertRaises(ValidationError):
+            AttachRequest(node="dev.sys.platform.xhci", exact=True)
+
+        valid_exact = AttachRequest(filter="xhci", exact=True)
+        self.assertTrue(valid_exact.exact)
+
+    def test_driver_list_schema(self) -> None:
+        req = DriverListRequest(filter="usb")
+        self.assertEqual(req.command, "driver-list")
+        self.assertEqual(req.filter, "usb")
+        resp = DriverListResponse(
+            driver_hosts=[
+                DriverHostEntry(
+                    host_koid=48291,
+                    host_name="driver_host:pdev",
+                    drivers=["fuchsia-boot:///xhci#meta/xhci.cm"],
+                    devices=["dev.sys.platform.xhci"],
+                    colocated=False,
+                    transport_hazard=True,
+                    transport_sensitive=["fuchsia-boot:///xhci#meta/xhci.cm"],
+                )
+            ]
+        )
+        self.assertEqual(resp.driver_hosts[0].host_koid, 48291)
+
+    def test_diagnose_hang_schema(self) -> None:
+        hang_req = make_request(
+            {"command": "diagnose-hang", "pid": 48291, "auto_resume": False}
+        )
+        self.assertIsInstance(hang_req, DiagnoseHangRequest)
+        self.assertEqual(hang_req.pid, 48291)
+        self.assertFalse(hang_req.auto_resume)
+        self.assertEqual(
+            DiagnoseHangRequest.response_type, DiagnoseHangResponse
+        )
+
+    def test_process_inspection_schemas(self) -> None:
+        mod_req = ModulesRequest(pid=48291, filter="xhci", force_reload=True)
+        self.assertEqual(mod_req.command, "modules")
+        self.assertIsInstance(ModulesResponse(), ModulesResponse)
+
+        as_req = AspaceRequest(pid=48291, address="0x1000", filter="mmio")
+        self.assertEqual(as_req.command, "aspace")
+        self.assertIsInstance(AspaceResponse(), AspaceResponse)
+
+        h_req = HandlesRequest(pid=48291, type="interrupt", detail=True)
+        self.assertEqual(h_req.command, "handles")
+        self.assertIsInstance(HandlesResponse(), HandlesResponse)
+
+        mr_req = MemReadRequest(address="0x7ffee1234000", size=32, pid=48291)
+        self.assertEqual(mr_req.command, "mem-read")
+        self.assertIsInstance(
+            MemReadResponse(address="0x7ffee1234000", size=32, hex_bytes=""),
+            MemReadResponse,
+        )
+
+
+class TestBreakRequestSchema(unittest.TestCase):
+    def test_valid_source_breakpoint(self) -> None:
+        req = BreakRequest(file="src/foo.cc", line=42, condition="x > 0")
+        self.assertEqual(req.file, "src/foo.cc")
+        self.assertEqual(req.line, 42)
+        self.assertEqual(req.condition, "x > 0")
+
+    def test_valid_function_breakpoint(self) -> None:
+        req = BreakRequest(
+            function="usb_xhci::UsbXhci::Init", condition="i == 1"
+        )
+        self.assertEqual(req.function, "usb_xhci::UsbXhci::Init")
+        self.assertIsNone(req.file)
+        self.assertIsNone(req.line)
+
+    def test_invalid_multiple_modes(self) -> None:
+        with self.assertRaises(ValidationError):
+            BreakRequest(file="src/foo.cc", line=42, function="bar")
+
+    def test_invalid_incomplete_source(self) -> None:
+        with self.assertRaises(ValidationError):
+            BreakRequest(file="src/foo.cc")
+
 
 class TestWaitForEventRequestSchema(unittest.TestCase):
     def test_valid(self) -> None:
@@ -182,6 +306,58 @@ class TestWaitForEventRequestSchema(unittest.TestCase):
     def test_missing_last_seen_seq(self) -> None:
         with self.assertRaises(ValidationError):
             WaitForEventRequest(timeout=5)
+
+
+class TestTracepointSchema(unittest.TestCase):
+    def test_valid_function_tracepoint(self) -> None:
+        req = TracepointRequest(
+            function="foo::Bar",
+            expressions=["x", "y"],
+            capture=["frame", "locals"],
+            max_hits=10,
+        )
+        self.assertEqual(req.command, "tracepoint")
+        self.assertEqual(req.function, "foo::Bar")
+        self.assertEqual(req.max_hits, 10)
+
+    def test_raw_backtrace_implies_backtrace(self) -> None:
+        req = TracepointRequest(
+            function="foo::Bar",
+            raw_backtrace=True,
+        )
+        self.assertTrue(req.raw_backtrace)
+        self.assertIn("backtrace", req.capture)
+
+    def test_valid_list_all(self) -> None:
+        req = TracepointRequest(list_all=True)
+        self.assertTrue(req.list_all)
+
+    def test_valid_id_alias(self) -> None:
+        req = TracepointRequest(id=1, delete=True)
+        self.assertEqual(req.tracepoint_id, 1)
+
+    def test_tracepoint_info_with_data_id(self) -> None:
+        info = TracepointInfo(
+            id=1,
+            location="watch:foo",
+            watch="foo",
+            data_id="123:0x1000:4",
+        )
+        self.assertEqual(info.data_id, "123:0x1000:4")
+
+    def test_max_matching_frames_validation(self) -> None:
+        req = TracepointRequest(
+            function="foo::Bar",
+            max_matching_frames=5,
+        )
+        self.assertEqual(req.max_matching_frames, 5)
+
+        with self.assertRaises(ValidationError):
+            TracepointRequest(function="foo::Bar", max_matching_frames=0)
+
+    def test_invalid_missing_target(self) -> None:
+        with self.assertRaises(ValidationError):
+            TracepointRequest()
 
 
 class TestPolymorphicParsing(unittest.TestCase):
@@ -308,6 +484,7 @@ class TestResponseTypeAndDeserialization(unittest.TestCase):
         self.assertEqual(StepInRequest.response_type, dict[str, Any])
         self.assertIsNone(StopRequest.response_type)
         self.assertEqual(ThreadsRequest.response_type, dict[str, Any])
+        self.assertEqual(DriverListRequest.response_type, DriverListResponse)
         self.assertEqual(VariablesRequest.response_type, dict[str, Any])
         self.assertIsNone(WaitForEventRequest.response_type)
 
@@ -476,6 +653,87 @@ class TestResponseTypeAndDeserialization(unittest.TestCase):
         self.assertEqual(wp.access_type, "write")
         self.assertTrue(wp.verified)
         self.assertIsNone(wp.message)
+
+    def test_deserialize_tracepoint_response(self) -> None:
+        req = TracepointRequest(list_all=True)
+        json_line = (
+            '{"success": true, "message": null, "events": null, "body": '
+            '{"tracepoints": [{"id": 1, "location": "foo.cc:10", "hit_count": 5, '
+            '"max_hits": 5, "enabled": false, "auto_disabled": true, "verified": true}]}}'
+        )
+        resp = deserialize_response(json_line, req)
+        self.assertTrue(resp.success)
+        self.assertIsInstance(resp.body, TracepointResponse)
+        assert resp.body is not None
+        self.assertEqual(len(resp.body.tracepoints), 1)
+        self.assertEqual(resp.body.tracepoints[0].id, 1)
+        self.assertEqual(resp.body.tracepoints[0].location, "foo.cc:10")
+        self.assertFalse(resp.body.tracepoints[0].enabled)
+        self.assertTrue(resp.body.tracepoints[0].auto_disabled)
+        self.assertTrue(resp.body.tracepoints[0].verified)
+
+    def test_tracepoint_management_modes(self) -> None:
+        clear_req = TracepointRequest(clear=True)
+        self.assertTrue(clear_req.clear)
+
+        en_req = TracepointRequest(tracepoint_id=3, enabled=True)
+        self.assertEqual(en_req.tracepoint_id, 3)
+        self.assertEqual(en_req.enabled, True)
+
+        dis_req = TracepointRequest(id=4, enabled=False)
+        self.assertEqual(dis_req.tracepoint_id, 4)
+        self.assertEqual(dis_req.enabled, False)
+
+    def test_tracepoint_conflicting_flags_and_id_aliases(self) -> None:
+        invalid_kwargs: list[dict[str, Any]] = [
+            {"list_all": True, "delete": True},
+            {"list_all": True, "clear": True},
+            {"list_all": True, "function": "foo"},
+            {"list_all": True, "tracepoint_id": 1},
+            {"clear": True, "tracepoint_id": 1},
+            {"clear": True, "function": "foo"},
+            {"delete": True},
+            {"delete": True, "tracepoint_id": 1, "function": "other"},
+            {"delete": True, "function": "foo", "raw_backtrace": True},
+            {"enabled": True},
+            {"enabled": False, "tracepoint_id": 1, "function": "foo"},
+            {"id": 1, "tracepoint_id": 2, "function": "foo"},
+        ]
+        for kwargs in invalid_kwargs:
+            with self.assertRaises(ValidationError, msg=f"Failed for {kwargs}"):
+                TracepointRequest(**kwargs)
+
+    def test_tracepoint_validation_numeric_bounds(self) -> None:
+        with self.assertRaises(ValueError):
+            TracepointRequest(function="foo", tracepoint_id=0)
+        with self.assertRaises(ValueError):
+            TracepointRequest(function="foo", tracepoint_id=-1)
+        with self.assertRaises(ValueError):
+            TracepointRequest(file="a.cc", line=0)
+        with self.assertRaises(ValueError):
+            TracepointRequest(file="a.cc", line=-1)
+        with self.assertRaises(ValueError):
+            TracepointRequest(watch="0x1000", size=0)
+        with self.assertRaises(ValueError):
+            TracepointRequest(watch="0x1000", size=-1)
+        with self.assertRaises(ValueError):
+            TracepointRequest(function="foo", frame_index=-1)
+        with self.assertRaises(ValueError):
+            TracepointRequest(function="foo", max_hits=0)
+        with self.assertRaises(ValueError):
+            TracepointRequest(function="foo", max_matching_frames=0)
+        with self.assertRaises(ValueError):
+            TracepointRequest(function="")
+        with self.assertRaises(ValueError):
+            TracepointRequest(function="   ")
+        with self.assertRaises(ValueError):
+            TracepointRequest(file="", line=10)
+        with self.assertRaises(ValueError):
+            TracepointRequest(file="   ", line=10)
+        with self.assertRaises(ValueError):
+            TracepointRequest(watch="")
+        with self.assertRaises(ValueError):
+            TracepointRequest(watch="   ")
 
 
 if __name__ == "__main__":

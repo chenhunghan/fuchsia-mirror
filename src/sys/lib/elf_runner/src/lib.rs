@@ -393,8 +393,10 @@ impl ElfRunner {
     }
 
     /// Creates a job for a component.
-    fn create_job(&self, program_config: &ElfProgramConfig) -> Result<Job, JobError> {
+    fn create_job(&self, program_config: &ElfProgramConfig, name: &str) -> Result<Job, JobError> {
+        let job_name = zx::Name::new_lossy(name);
         let job = self.job.create_child_job().map_err(JobError::CreateChild)?;
+        job.set_name(&job_name).map_err(JobError::SetName)?;
 
         // Set timer slack.
         //
@@ -449,6 +451,8 @@ impl ElfRunner {
             // a job's exception channel for crash recording so we create a new
             // job underneath the original job to hold the process.
             let child = job.create_child_job().map_err(JobError::CreateChild)?;
+            let child_job_name = zx::Name::new_lossy(&format!("{job_name}_child"));
+            child.set_name(&child_job_name).map_err(JobError::SetName)?;
             Job::Multiple { parent: job, child }
         } else {
             Job::Single(job)
@@ -668,8 +672,18 @@ impl ElfRunner {
 
         let resolved_url = &start_info.resolved_url;
 
+        let name = Path::new(resolved_url)
+            .file_name()
+            .and_then(|filename| filename.to_str())
+            .ok_or_else(|| {
+                StartComponentError::StartInfoError(StartInfoError::BadResolvedUrl(
+                    resolved_url.clone(),
+                ))
+            })?
+            .to_owned();
+
         // Create a job for this component that will contain its process.
-        let job = self.create_job(&program_config)?;
+        let job = self.create_job(&program_config, &name)?;
 
         crash_handler::run_exceptions_server(
             &self.scope,
@@ -698,16 +712,6 @@ impl ElfRunner {
             .proc()
             .duplicate_handle(zx::Rights::SAME_RIGHTS)
             .map_err(StartComponentError::JobDuplicateFailed)?;
-
-        let name = Path::new(resolved_url)
-            .file_name()
-            .and_then(|filename| filename.to_str())
-            .ok_or_else(|| {
-                StartComponentError::StartInfoError(StartInfoError::BadResolvedUrl(
-                    resolved_url.clone(),
-                ))
-            })?
-            .to_owned();
 
         let environs = merge_environ(
             &self.additional_environ,
@@ -1678,6 +1682,50 @@ mod tests {
         Ok(())
     }
 
+    #[test_case(false, "lifecycle.cm", "lifecycle.cm", "lifecycle.cm"; "single_job")]
+    #[test_case(
+        true,
+        "starnix_kernel.cm",
+        "starnix_kernel.cm",
+        "starnix_kernel.cm_child";
+        "multiple_jobs"
+    )]
+    #[test_case(
+        true,
+        "twenty_eight_byte_name_xx.cm",
+        "twenty_eight_byte_name_xx.cm",
+        "twenty_eight_byte_name_xx.cm_ch";
+        "partially_truncated_child_suffix"
+    )]
+    #[test_case(
+        true,
+        "component_with_a_name_exceeding_zx_max_name_len.cm",
+        "component_with_a_name_exceeding",
+        "component_with_a_name_exceeding";
+        "truncated_long_name"
+    )]
+    #[fuchsia::test]
+    async fn test_create_job_sets_name(
+        job_with_available_exception_channel: bool,
+        name: &str,
+        expected_top_name: &str,
+        expected_proc_name: &str,
+    ) -> Result<(), Error> {
+        let runner = new_elf_runner_for_test();
+        let program_config =
+            ElfProgramConfig { job_with_available_exception_channel, ..Default::default() };
+        let job = runner.create_job(&program_config, name)?;
+        assert_eq!(job.top().get_name()?, expected_top_name);
+        assert_eq!(job.proc().get_name()?, expected_proc_name);
+        if job_with_available_exception_channel {
+            assert_ne!(job.top().koid()?, job.proc().koid()?);
+        } else {
+            assert_eq!(job.top().koid()?, job.proc().koid()?);
+        }
+        job.top().kill()?;
+        Ok(())
+    }
+
     async fn expect_diagnostics_event(event_stream: &mut fcrunner::ComponentControllerEventStream) {
         let event = event_stream.try_next().await;
         assert_matches!(
@@ -1862,6 +1910,14 @@ mod tests {
             assert_eq!(
                 elf_component.get_url().as_str(),
                 "fuchsia-pkg://fuchsia.com/lifecycle-example#meta/lifecycle.cm"
+            );
+            assert_eq!(
+                elf_component.copy_job().top().get_name().unwrap(),
+                zx::Name::new_lossy("lifecycle.cm")
+            );
+            assert_eq!(
+                elf_component.copy_job().proc().get_name().unwrap(),
+                zx::Name::new_lossy("lifecycle.cm")
             );
             count.fetch_add(1, Ordering::SeqCst);
         });

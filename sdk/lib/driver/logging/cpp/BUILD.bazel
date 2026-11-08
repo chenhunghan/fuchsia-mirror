@@ -1,0 +1,43 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/idk:idk_cc_source_library.bzl", "idk_cc_source_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# `deps` need to be defined before `fuchsia_deps` for bazel2gn to work properly, so tell buildifier
+# to leave this target alone.
+#
+# buildifier: leave-alone
+idk_cc_source_library(
+    name = "cpp",
+    srcs = ["logger.cc"],
+    hdrs = [
+        "internal/logger_internal.h",
+        "internal/panic.h",
+        "logger.h",
+        "structured_logger.h",
+    ],
+    api_area = "Driver SDK",
+    category = "partner",
+    deps = [
+        "//sdk/lib/stdcompat",
+        "//sdk/lib/zircon-assert",
+        "//zircon/system/ulib/zx",
+    ],
+    fuchsia_deps = [
+        "//sdk/fidl/fuchsia.logger:fuchsia.logger_cpp",
+        "//sdk/lib/driver/incoming/cpp",
+        "//sdk/lib/fdio",
+        "//sdk/lib/syslog/structured_backend",
+    ],
+    non_fuchsia_deps = [
+        "//sdk/lib/syslog/cpp",
+    ],
+    idk_name = "driver_logging_cpp",
+    include_base = "//sdk",
+    public_configs = ["//sdk/config"],
+    stable = True,
+    visibility = ["//:__subpackages__"],
+)

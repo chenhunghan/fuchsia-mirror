@@ -188,7 +188,7 @@ TEST_F(SysfsPowerTest, SuspendStatsFilesUpdateAfterFailedSuspend) {
 
     uint64_t val = 0;
     // Read the event from the timer_fd to reset the pending events.
-    EXPECT_EQ(1, read(timer_fd.get(), &val, 1));
+    EXPECT_EQ(static_cast<ssize_t>(sizeof(val)), read(timer_fd.get(), &val, sizeof(val)));
   }
 
   // This should fail due to the implicit wake lock.
@@ -305,7 +305,7 @@ TEST_F(SysfsPowerTest, SuspendStateFileWriteFailsWaitAgain) {
 
     uint64_t val = 0;
     // Read the event from the timer_fd to reset the pending events.
-    EXPECT_EQ(1, read(timer_fd.get(), &val, 1));
+    EXPECT_EQ(static_cast<ssize_t>(sizeof(val)), read(timer_fd.get(), &val, sizeof(val)));
   }
 
   // This should fail due to the implicit wake lock.
@@ -351,14 +351,14 @@ TEST_F(SysfsPowerTest, SuspendStateFileWriteFailsCloseFD) {
 
     uint64_t val = 0;
     // Read the event from the timer_fd to reset the pending events.
-    EXPECT_EQ(1, read(timer_fd.get(), &val, 1));
+    EXPECT_EQ(static_cast<ssize_t>(sizeof(val)), read(timer_fd.get(), &val, sizeof(val)));
   }
 
   // This should fail due to the implicit wake lock.
   ASSERT_FALSE(attempt_suspend("mem"));
 
-  // Closing the epoll file descriptor should remove the wake lock.
-  epoll_fd.reset();
+  // Closing the watched timer file descriptor should remove the wake lock.
+  timer_fd.reset();
 
   // Attempt to suspend the system now that the implicit wake lock
   // should have been deleted.
@@ -391,7 +391,7 @@ TEST_F(SysfsPowerTest, SuspendStateFileWriteFailsCloseEpollFD) {
 
     uint64_t val = 0;
     // Read the event from the timer_fd to reset the pending events.
-    EXPECT_EQ(1, read(timer_fd.get(), &val, 1));
+    EXPECT_EQ(static_cast<ssize_t>(sizeof(val)), read(timer_fd.get(), &val, sizeof(val)));
   }
 
   // This should fail due to the implicit wake lock.
@@ -431,7 +431,7 @@ TEST_F(SysfsPowerTest, SuspendStateFileWriteFailsEpollDelete) {
 
     uint64_t val = 0;
     // Read the event from the timer_fd to reset the pending events.
-    EXPECT_EQ(1, read(timer_fd.get(), &val, 1));
+    EXPECT_EQ(static_cast<ssize_t>(sizeof(val)), read(timer_fd.get(), &val, sizeof(val)));
   }
 
   // This should fail due to the implicit wake lock.

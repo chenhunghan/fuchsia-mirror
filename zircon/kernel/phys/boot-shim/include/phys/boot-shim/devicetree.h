@@ -29,13 +29,12 @@
 #include <ktl/string_view.h>
 #include <ktl/type_traits.h>
 #include <phys/address-space.h>
-#include <phys/arch/arch-phys-info.h>
-#include <phys/boot-zbi.h>
-#include <phys/main.h>
+#include <phys/boot-zbi/boot-zbi.h>
 #include <phys/new.h>
-#include <phys/stdio.h>
+#include <phys/runtime/info.h>
+#include <phys/runtime/main.h>
 #include <phys/symbolize.h>
-#include <phys/uart-console.h>
+#include <phys/uart/driver.h>
 
 // Bootstrapping data from the devicetree blob.
 struct DevicetreeBoot {
@@ -196,7 +195,7 @@ class BootShimHelper {
                           ktl::invocable<> auto&& after_relocs_cb)
       : symbolize_((
             // Must happen before initializing the symbolize object.
-            ApplyRelocations(), InitStdout(), after_relocs_cb(), shim_name)),
+            ApplyRelocations(), after_relocs_cb(), shim_name)),
         shim_(shim_name, [this, boot_payload]() {
           ArchSetUpCpu();
           // Will initialize `gDevicetreeBoot`.
@@ -303,7 +302,7 @@ class BootShimHelper {
   }
 
   MaybeAddressSpace<options.enable_mmu> maybe_aspace_;
-  MainSymbolize symbolize_;
+  Symbolize symbolize_;
   Shim shim_;
   ktl::string_view zbi_boot_;
 };

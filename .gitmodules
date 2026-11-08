@@ -73,11 +73,6 @@
 	url = https://fuchsia.googlesource.com/third_party/dart-pkg
 	name = third_party/dart-pkg
 	ignore = all
-[submodule "third_party/double-conversion"]
-	path = third_party/double-conversion
-	url = https://fuchsia.googlesource.com/third_party/google/double-conversion
-	name = third_party/google/double-conversion
-	ignore = all
 [submodule "third_party/etnaviv_gpu_tests"]
 	path = third_party/etnaviv_gpu_tests
 	url = https://fuchsia.googlesource.com/third_party/etnaviv_gpu_tests
@@ -127,11 +122,6 @@
 	path = third_party/glm
 	url = https://chromium.googlesource.com/external/github.com/g-truc/glm
 	name = external/github.com/g-truc/glm
-	ignore = all
-[submodule "third_party/go"]
-	path = third_party/go
-	url = https://fuchsia.googlesource.com/third_party/go
-	name = third_party/go
 	ignore = all
 [submodule "third_party/googletest/src"]
 	path = third_party/googletest/src
@@ -623,11 +613,6 @@
 	url = https://fuchsia.googlesource.com/third_party/mesa
 	name = third_party/mesa
 	ignore = all
-[submodule "third_party/acpica-migrating/src"]
-	path = third_party/acpica-migrating/src
-	url = https://fuchsia.googlesource.com/third_party/acpica
-	name = third_party/acpica
-	ignore = all
 [submodule "third_party/ogg-migrating/src"]
 	path = third_party/ogg-migrating/src
 	url = https://fuchsia.googlesource.com/third_party/ogg
@@ -727,4 +712,14 @@
 	path = third_party/markupsafe/markupsafe
 	url = https://fuchsia.googlesource.com/third_party/markupsafe
 	name = third_party/markupsafe
+	ignore = all
+[submodule "third_party/acpica/src"]
+	path = third_party/acpica/src
+	url = https://fuchsia.googlesource.com/third_party/acpica
+	name = third_party/acpica
+	ignore = all
+[submodule "third_party/double-conversion/src"]
+	path = third_party/double-conversion/src
+	url = https://fuchsia.googlesource.com/third_party/google/double-conversion
+	name = third_party/google/double-conversion
 	ignore = all

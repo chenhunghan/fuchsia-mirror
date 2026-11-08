@@ -48,6 +48,27 @@ impl FileBackedDevice {
             BufferAllocator::new(block_size as usize, BufferSource::new(TRANSFER_HEAP_SIZE));
         Self { allocator, file, block_count, block_size }
     }
+
+    // When created via `new_with_block_count`, the underlying file may be smaller than
+    // `self.size()`, so reads within `0..self.size()` past the file's current EOF should be
+    // zero-filled.
+    fn read_or_zero_at(&self, mut slice: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+        while !slice.is_empty() {
+            match self.file.read_at(slice, offset) {
+                Ok(0) => {
+                    slice.fill(0);
+                    break;
+                }
+                Ok(n) => {
+                    slice = &mut slice[n..];
+                    offset += n as u64;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -76,10 +97,10 @@ impl Device for FileBackedDevice {
         ensure!(offset + buffer.len() as u64 <= self.size(), "Reading past end of file");
         // This isn't actually async, but that probably doesn't matter for host usage.
         if let Some(slice) = buffer.try_as_mut_slice() {
-            self.file.read_exact_at(slice, offset)?;
+            self.read_or_zero_at(slice, offset)?;
         } else {
             let mut data = vec![0u8; buffer.len()];
-            self.file.read_exact_at(&mut data, offset)?;
+            self.read_or_zero_at(&mut data, offset)?;
             buffer.copy_from_slice(&data);
         }
         Ok(())
@@ -247,5 +268,37 @@ mod tests {
             assert_eq!(data[8192..], vec![0xbb as u8; 8192]);
         }
         device.close().await.expect("Close failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_unwritten_regions_read_as_zeroes_with_explicit_block_count() {
+        let mut temp_path = std::env::temp_dir();
+        temp_path.push(format!("file_{:x}", rand::random::<u64>()));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(temp_path.as_path())
+            .expect("create failed");
+        // Underlying file is 0 bytes, but the device has 2048 blocks of 512 bytes (1 MiB).
+        let device = FileBackedDevice::new_with_block_count(file, 512, 2048);
+
+        {
+            let mut write_buf = device.allocate_buffer(512).await;
+            write_buf.fill(0xcc);
+            device.write(512, write_buf.as_ref()).await.expect("Write failed");
+        }
+        {
+            let mut read_buf = device.allocate_buffer(8192).await;
+            read_buf.fill(0xff);
+            device.read(0, read_buf.as_mut()).await.expect("Read failed");
+            let mut data = vec![0u8; 8192];
+            read_buf.copy_to_slice(&mut data);
+            assert_eq!(&data[..512], &[0u8; 512]);
+            assert_eq!(&data[512..1024], &[0xccu8; 512]);
+            assert_eq!(&data[1024..], &[0u8; 8192 - 1024]);
+        }
+        device.close().await.expect("Close failed");
+        let _ = std::fs::remove_file(temp_path);
     }
 }

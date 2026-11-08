@@ -18,7 +18,7 @@
     children: [
         {
             name: "secure-stash",
-            url: "fuchsia-pkg://fuchsia.com/bt-gap-unittests#meta/test-stash-secure.cm",
+            url: "#meta/test-stash-secure.cm",
         },
     ],
     use: [

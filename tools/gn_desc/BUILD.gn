@@ -44,15 +44,4 @@ if (is_host) {
     ]
     outputs = [ "gn_desc" ]
   }
-
-  # All the tests.
-  group("host_tests") {
-    testonly = true
-    deps = [
-      "bin:tests",
-      "gn_graph:tests",
-      "gn_json:tests",
-      "tests",
-    ]
-  }
 }

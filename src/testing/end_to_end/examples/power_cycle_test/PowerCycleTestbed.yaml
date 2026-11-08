@@ -4,18 +4,17 @@ TestBeds:
       FuchsiaDevice:
         - name: "fuchsia-emulator"
           # If running this test locally then specify the additional details
-          # in power_switch_hw and power_switch_impl sections.
+          # in power_switch_hw, power_switch_outlet, and power_switch_impl
+          # sections.
 
+          # Example 1: Digital Loggers PDU via SSH (PowerSwitchUsingPdu)
           # Power Switch hardware related information.
           # Whatever information is provided here, will be just passed to
           # power_switch_impl.
           power_switch_hw:
-            # power switch ip address
-            ip_address: "192.168.1.2"
-            # power switch username
-            username: "admin"
-            # power switch password
-            password: "admin"
+            pdu_host: "192.168.42.48"
+            pdu_username: "admin"
+            priv_key_path: "/home/user/.ssh/pdu_key"
 
           # The outlet that the fuchsia device is connected to. This can be omitted
           # if the implementation doesn't use the outlet in power_on()/power_off().
@@ -24,10 +23,18 @@ TestBeds:
           # Where to find the PowerSwitch ABC implementation information.
           power_switch_impl:
             # module inside honeydew package pointing to PowerSwitch implementation.
-            module: "honeydew.auxiliary_devices.power_switch.web_power_switch"
+            module: "honeydew.auxiliary_devices.power_switch.power_switch_using_pdu"
             # Class name that implements PowerSwitch.
-            class: "WebPowerSwitch"
-            # Based on this example,
-            #   WebPowerSwitch is the class located in
-            #   honeydew.auxiliary_devices.power_switch.web_power_switch module
+            class: "PowerSwitchUsingPdu"
+
+          # Example 2: Synaccess NP-02B PDU via HTTP (PowerSwitchUsingSynaccess)
+          # power_switch_hw:
+          #   host: "192.168.42.33"
+          #   username: "admin"
+          #   password: "admin"
+          # power_switch_outlet: 1
+          # power_switch_impl:
+          #   module: "honeydew.auxiliary_devices.power_switch.power_switch_using_synaccess"
+          #   class: "PowerSwitchUsingSynaccess"
+
 

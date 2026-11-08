@@ -14,7 +14,7 @@ use fidl_fuchsia_power_broker::{
     TopologyRequestStream,
 };
 use fpb::ElementSchema;
-use fuchsia_async::{MonotonicInstant, Task, Timer};
+use fuchsia_async::{MonotonicInstant, Scope, ScopeHandle, Task, Timer};
 use fuchsia_component::server::ServiceFs;
 use fuchsia_inspect::component;
 use fuchsia_inspect::health::Reporter;
@@ -75,6 +75,7 @@ impl BrokerSvc {
         element_name: String,
         stream: LessorRequestStream,
     ) -> Result<(), Error> {
+        let lease_name = format!("{element_name}_lessor_lease");
         stream
             .map(|result| result.context("failed request"))
             .try_for_each(|request| async {
@@ -96,7 +97,7 @@ impl BrokerSvc {
                                     .send(Err(LeaseError::InvalidLevel))
                                     .context("send failed");
                             };
-                            broker.acquire_lease(element_id, level, lease_control_koid)
+                            broker.acquire_lease(element_id, level, lease_control_koid, &lease_name)
                         };
                         match resp {
                             Ok(lease) => {
@@ -193,13 +194,15 @@ impl BrokerSvc {
             .await
     }
 
-    async fn handle_direct_lease(
+    fn handle_direct_lease(
         self: Rc<Self>,
         lease_token: zx::EventPair,
         lease_name: String,
         dependencies: Vec<fpb::LeaseDependency>,
         should_return_pending_lease: bool,
-    ) -> Result<(), fpb::LeaseError> {
+        responder: fpb::TopologyLeaseResponder,
+        scope: &ScopeHandle,
+    ) -> Result<(), Error> {
         let lease_token_koid = lease_token.as_handle_ref().koid().unwrap();
         let resp = {
             let mut broker = self.broker.borrow_mut();
@@ -210,24 +213,31 @@ impl BrokerSvc {
                 log::debug!("Direct lease granted: {lease:?}");
                 if let Err(err) = self.clone().monitor_lease(lease.id, lease_token) {
                     log::error!("monitor_lease failed: {:?}", err);
-                    return Err(fpb::LeaseError::Internal);
+                    return responder.send(Err(fpb::LeaseError::Internal)).context("send failed");
                 }
                 let lease_id = lease.id;
 
-                if !should_return_pending_lease {
+                if should_return_pending_lease {
+                    responder.send(Ok(())).context("send failed")
+                } else {
                     let mut receiver = {
                         let mut broker = self.broker.borrow_mut();
                         broker.watch_lease_status(lease_id)
                     };
-                    while let Some(status) = receiver.next().await {
-                        if status == Some(LeaseStatus::Satisfied) {
-                            break;
+                    scope.spawn_local(async move {
+                        while let Some(status) = receiver.next().await {
+                            if status == Some(LeaseStatus::Satisfied) {
+                                break;
+                            }
                         }
-                    }
+                        if let Err(err) = responder.send(Ok(())) {
+                            log::debug!("Topology::Lease responder send failed: {err:?}");
+                        }
+                    });
+                    Ok(())
                 }
-                Ok(())
             }
-            Err(err) => Err(err.into()),
+            Err(err) => responder.send(Err(err.into())).context("send failed"),
         }
     }
 
@@ -339,6 +349,18 @@ impl BrokerSvc {
                 }
                 responder.send(res.map_err(Into::into)).context("send failed")?;
                 Ok(())
+            }
+            ElementControlRequest::RemoveDependency { payload, responder } => {
+                fuchsia_trace::duration!(c"power-broker", c"ElementControl::RemoveDependency");
+                let dep = payload;
+                log::debug!(
+                    "{debug_info}: RemoveDependency({:?}, {:?}, {:?})",
+                    dep.dependent_level,
+                    dep.requires_token,
+                    dep.requires_level_by_preference
+                );
+                let res = self.broker.borrow_mut().remove_dependency(element_id, &dep);
+                responder.send(res.map_err(Into::into)).context("send failed")
             }
             ElementControlRequest::_UnknownMethod { ordinal, .. } => {
                 log::warn!("{debug_info}: Received unknown ElementControlRequest: {ordinal}");
@@ -473,6 +495,7 @@ impl BrokerSvc {
     }
 
     async fn run_topology(self: Rc<Self>, stream: TopologyRequestStream) -> Result<(), Error> {
+        let scope = Scope::new();
         stream
             .map(|result| result.context("failed request"))
             .try_for_each(|request| async {
@@ -571,6 +594,8 @@ impl BrokerSvc {
                                 if let Some(lease_token) = initial_lease_token {
                                     let lease_token_koid =
                                         lease_token.as_handle_ref().koid().unwrap();
+                                    let initial_lease_name =
+                                        format!("{element_name}_initial_lease");
 
                                     let resp = {
                                         let mut broker = self.broker.borrow_mut();
@@ -578,7 +603,12 @@ impl BrokerSvc {
                                             Some(lvl) => {
                                                 let level = lvl.clone();
                                                 broker
-                                                    .acquire_lease(element_id, level, lease_token_koid)
+                                                    .acquire_lease(
+                                                        element_id,
+                                                        level,
+                                                        lease_token_koid,
+                                                        &initial_lease_name,
+                                                    )
                                                     .map_err(|e| match e {
                                                         fpb::LeaseError::NotAuthorized => {
                                                             fpb::AddElementError::NotAuthorized
@@ -660,16 +690,14 @@ impl BrokerSvc {
                                 return responder.send(Err(err)).context("send failed");
                             }
                         };
-                        let res = self
-                            .clone()
-                            .handle_direct_lease(
-                                lease_token,
-                                lease_name,
-                                dependencies,
-                                should_return_pending_lease,
-                            )
-                            .await;
-                        responder.send(res).context("send failed")
+                        self.clone().handle_direct_lease(
+                            lease_token,
+                            lease_name,
+                            dependencies,
+                            should_return_pending_lease,
+                            responder,
+                            &scope,
+                        )
                     }
                     TopologyRequest::_UnknownMethod { ordinal, .. } => {
                         log::warn!("Received unknown TopologyRequest: {ordinal}");
@@ -929,7 +957,7 @@ impl ElementRunnerHandler {
                                 // This allows us to support adding an element with an
                                 // initial_current_level above the minimum level.
                                 if let Some(wait) = &wait_for_level {
-                                    if required_level.level < wait.level {
+                                    if required_level < *wait {
                                        // We must update the broker state to complete the transition,
                                        // otherwise the broker will block future updates (like going back to 1).
                                        suppressed_level = Some(required_level.clone());
@@ -1093,7 +1121,7 @@ mod tests {
         let task = detector.spawn_watchdog(
             "test_element".to_string(),
             "test_debug".to_string(),
-            IndexedPowerLevel { level: 1, index: 1 },
+            IndexedPowerLevel::from_same_level_and_index(1),
         );
 
         // Run until stalled to start the watchdog task and register the timer.
@@ -1164,7 +1192,7 @@ mod tests {
         let task = detector.spawn_watchdog(
             "test_element".to_string(),
             "test_debug".to_string(),
-            IndexedPowerLevel { level: 1, index: 1 },
+            IndexedPowerLevel::from_same_level_and_index(1),
         );
 
         // Run until stalled to start the watchdog task and register the timer.
@@ -1203,7 +1231,8 @@ mod tests {
             let level_1 = broker.get_level_index(element_b, &1).unwrap().clone();
             // Lease B at level 1 so B's required level is 1; adding a dependency from B(1) to A(1)
             // will therefore acquire a provisional lease on A(1) and wait for it to be satisfied.
-            let _lease_b = broker.acquire_lease(element_b, level_1, zx::Koid::from_raw(1)).unwrap();
+            let _lease_b =
+                broker.acquire_lease(element_b, level_1, zx::Koid::from_raw(1), "B_lease").unwrap();
             (element_a, element_b)
         };
 
@@ -1237,5 +1266,92 @@ mod tests {
 
         drop(element_control_proxy);
         control_task.await.expect("run_element_control failed");
+    }
+
+    #[fuchsia::test]
+    fn test_topology_lease_does_not_head_of_line_block_subsequent_requests() {
+        let mut executor = fuchsia_async::TestExecutor::new();
+        let svc = Rc::new(BrokerSvc::new(StuckDetector::new(0, false, None, None)));
+        let token_a = fpb::DependencyToken::create();
+        let token_b = fpb::DependencyToken::create();
+        let level_1 = IndexedPowerLevel::from_same_level_and_index(1);
+
+        let (element_a, element_b) = {
+            let mut broker = svc.broker.borrow_mut();
+            let element_a = broker.add_element("A", 0, vec![0, 1], vec![]).unwrap();
+            broker
+                .register_dependency_token(
+                    element_a,
+                    token_a.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap().into(),
+                )
+                .unwrap();
+            let element_b = broker.add_element("B", 0, vec![0, 1], vec![]).unwrap();
+            broker
+                .register_dependency_token(
+                    element_b,
+                    token_b.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap().into(),
+                )
+                .unwrap();
+            (element_a, element_b)
+        };
+
+        let (topology_proxy, topology_stream) = create_proxy_and_stream::<fpb::TopologyMarker>();
+        let mut topology_task = Task::local(svc.clone().run_topology(topology_stream));
+
+        // Send `lease_a` first on `topology_proxy`, followed by `lease_b` on the same channel.
+        let (_client_token_a, server_token_a) = fpb::LeaseToken::create();
+        let mut lease_a_fut = topology_proxy.lease(fpb::LeaseSchema {
+            lease_token: Some(server_token_a),
+            lease_name: Some("lease_a".into()),
+            dependencies: Some(vec![fpb::LeaseDependency {
+                requires_token: Some(token_a),
+                requires_level: Some(1),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+
+        let (_client_token_b, server_token_b) = fpb::LeaseToken::create();
+        let mut lease_b_fut = topology_proxy.lease(fpb::LeaseSchema {
+            lease_token: Some(server_token_b),
+            lease_name: Some("lease_b".into()),
+            dependencies: Some(vec![fpb::LeaseDependency {
+                requires_token: Some(token_b),
+                requires_level: Some(1),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+
+        // Both lease calls are still pending satisfaction, but `run_topology` must have already
+        // processed both requests in FIFO order (raising both A and B's required levels to 1).
+        assert!(executor.run_until_stalled(&mut lease_a_fut).is_pending());
+        assert!(executor.run_until_stalled(&mut lease_b_fut).is_pending());
+        assert_eq!(svc.broker.borrow().get_required_level(&element_a), Some(level_1));
+        assert_eq!(svc.broker.borrow().get_required_level(&element_b), Some(level_1));
+
+        // Satisfy B while A is still at 0; `lease_b` must complete without waiting for `lease_a`.
+        svc.broker.borrow_mut().update_current_level(element_b, level_1);
+        assert_eq!(
+            executor.run_until_stalled(&mut lease_b_fut).map(|r| r.expect("lease_b FIDL call")),
+            std::task::Poll::Ready(Ok(()))
+        );
+        assert!(executor.run_until_stalled(&mut lease_a_fut).is_pending());
+
+        // Satisfy A; `lease_a` should now complete.
+        svc.broker.borrow_mut().update_current_level(element_a, level_1);
+        assert_eq!(
+            executor.run_until_stalled(&mut lease_a_fut).map(|r| r.expect("lease_a FIDL call")),
+            std::task::Poll::Ready(Ok(()))
+        );
+
+        drop(topology_proxy);
+        assert!(
+            matches!(
+                executor.run_until_stalled(&mut topology_task),
+                std::task::Poll::Ready(Ok(()))
+            ),
+            "run_topology did not complete cleanly"
+        );
     }
 }

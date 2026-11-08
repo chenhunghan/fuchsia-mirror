@@ -9,11 +9,18 @@ package(default_applicable_licenses = ["//:license"])
 test_suite(
     name = "target_tests",
     target_compatible_with = ["@platforms//os:fuchsia"],
-    tests = ["//src/starnix/lib:target_tests"],
+    tests = [
+        "//src/starnix/lib:target_tests",
+        "//src/starnix/modules/kgsl:tests",
+        "//src/starnix/psi_provider:psi_provider-tests",
+    ],
 )
 
 test_suite(
     name = "host_tests",
     target_compatible_with = HOST_CONSTRAINTS,
-    tests = ["//src/starnix/tools/tar_to_pkg:host_tests"],
+    tests = [
+        "//src/starnix/lib:host_tests",
+        "//src/starnix/tools/tar_to_pkg:host_tests",
+    ],
 )

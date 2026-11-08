@@ -26,22 +26,65 @@ var (
 		"manifest":               true,
 		"component_name":         true,
 		"includes":               true,
+		"restricted_features":    true,
 		"testonly":               true,
 		"visibility":             true,
 		"tags":                   true,
 		"target_compatible_with": true,
+		generatedDepsAttr:        true,
+	}
+
+	// `fx_compiled_manifest()` accepts the same attributes as
+	// `fx_component_manifest()`, plus `output_name`.
+	allowedFxCompiledManifestAttrs = map[string]bool{
+		"name":                   true,
+		"manifest":               true,
+		"component_name":         true,
+		"includes":               true,
+		"output_name":            true,
+		"restricted_features":    true,
+		"testonly":               true,
+		"visibility":             true,
+		"tags":                   true,
+		"target_compatible_with": true,
+		generatedDepsAttr:        true,
 	}
 
 	allowedFxComponentAttrs = map[string]bool{
 		"name":                   true,
 		"compiled_manifest":      true,
-		"component_name":         true,
 		"check_includes":         true,
 		"deps":                   true,
 		"testonly":               true,
 		"visibility":             true,
 		"tags":                   true,
 		"target_compatible_with": true,
+	}
+
+	// `fx_test_component()` accepts the same attributes as `fx_component()`,
+	// plus `test_type`.
+	allowedFxTestComponentAttrs = mustMergeAllowedAttrs(allowedFxComponentAttrs, map[string]bool{
+		"test_type": true,
+	})
+
+	// `fx_test_component_with_expectations()` sets `check_includes` internally
+	// and configures `component_name` on its manifest target instead.
+	allowedFxTestComponentWithExpectationsAttrs = map[string]bool{
+		"name":                               true,
+		"compiled_manifest":                  true,
+		"expectations":                       true,
+		"treatment_of_cases_with_error_logs": true,
+		"test_type":                          true,
+		"deps":                               true,
+		"testonly":                           true,
+		"visibility":                         true,
+		"tags":                               true,
+		"target_compatible_with":             true,
+	}
+
+	allowedErrorLogsTreatments = map[string]bool{
+		"SKIP_CASES_WITH_ERROR_LOGS":     true,
+		"RUN_ONLY_CASES_WITH_ERROR_LOGS": true,
 	}
 
 	allowedFxPackagedBinaryAttrs = map[string]bool{
@@ -58,16 +101,111 @@ var (
 	rawOutputNameRE = regexp.MustCompile(`^\s*output_name\s*=\s*"([^"]+)"\s*$`)
 )
 
-// validateFxComponentManifest validates a Bazel `fx_component_manifest()` call
-// before converting it to GN `fuchsia_component_manifest()`.
+// isFxManifestRule returns whether `rule` compiles a component manifest that
+// GN targets can pass to `get_target_outputs()`.
+func isFxManifestRule(rule string) bool {
+	return rule == "fx_component_manifest" ||
+		rule == "fx_component_manifest_with_expectations" ||
+		rule == "fx_compiled_manifest"
+}
+
+// prepareFxCompiledManifest validates a Bazel `fx_compiled_manifest()` call and
+// rewrites it in place before converting it to GN `cm()`.
+//
+// GN `cm()` has no `component_name`, so this replaces `component_name` and
+// `output_name` with the `output_name` and `config_values_package_path` that
+// the Bazel rule uses, so both build systems produce the same `.cm` file at
+// the same path relative to the target's output directory.
+func prepareFxCompiledManifest(call *syntax.CallExpr) error {
+	var name, componentName, outputName string
+	hasManifest := false
+	newArgs := make([]syntax.Expr, 0, len(call.Args)+2)
+	insertIdx := -1
+
+	for _, arg := range call.Args {
+		binaryExpr, ok := arg.(*syntax.BinaryExpr)
+		if !ok || binaryExpr.Op != syntax.EQ {
+			return fmt.Errorf("fx_compiled_manifest only accepts keyword arguments, got %T", arg)
+		}
+		shouldSkip, err := hasSkipAnnotation(binaryExpr)
+		if err != nil {
+			return fmt.Errorf("failed to check skip annotation: %v", err)
+		}
+		if shouldSkip {
+			newArgs = append(newArgs, arg)
+			continue
+		}
+		ident, ok := binaryExpr.X.(*syntax.Ident)
+		if !ok {
+			return fmt.Errorf("expected identifier for argument name, got %T", binaryExpr.X)
+		}
+		if !allowedFxCompiledManifestAttrs[ident.Name] {
+			return fmt.Errorf("bazel2gn doesn't support attribute %q of fx_compiled_manifest; use # @bazel2gn:skip and write the GN copy by hand", ident.Name)
+		}
+		switch ident.Name {
+		case "name":
+			name, err = stringLiteralValue(binaryExpr.Y)
+			if err != nil {
+				return fmt.Errorf("fx_compiled_manifest name: %v", err)
+			}
+		case "manifest":
+			hasManifest = true
+			newArgs = append(newArgs, arg)
+			insertIdx = len(newArgs)
+			continue
+		case "component_name":
+			componentName, err = stringLiteralValue(binaryExpr.Y)
+			if err != nil {
+				return fmt.Errorf("fx_compiled_manifest component_name: %v", err)
+			}
+			continue
+		case "output_name":
+			outputName, err = stringLiteralValue(binaryExpr.Y)
+			if err != nil {
+				return fmt.Errorf("fx_compiled_manifest output_name: %v", err)
+			}
+			continue
+		}
+		newArgs = append(newArgs, arg)
+	}
+
+	if name == "" {
+		return errors.New("missing `name` attribute in fx_compiled_manifest")
+	}
+	if !hasManifest {
+		return fmt.Errorf("missing `manifest` attribute in fx_compiled_manifest %q", name)
+	}
+	if componentName == "" {
+		componentName = name
+	}
+	if outputName == "" {
+		// LINT.IfChange(fx_compiled_manifest_output_name)
+		outputName = fmt.Sprintf("cml/%s/%s.cm", name, componentName)
+		// LINT.ThenChange(//build/bazel/rules/components/fx_component.bzl:fx_compiled_manifest_output_name)
+	}
+	generated := []syntax.Expr{
+		attrExpr("output_name", stringLiteral(outputName)),
+		// `compile_component_manifest()` always passes `--config-package-path`.
+		attrExpr("config_values_package_path", stringLiteral("meta/"+componentName+".cvf")),
+	}
+	call.Args = append(newArgs[:insertIdx:insertIdx], append(generated, newArgs[insertIdx:]...)...)
+	return nil
+}
+
+// validateFxComponentManifest validates a Bazel `fx_component_manifest()` or
+// `fx_component_manifest_with_expectations()` call before converting it to GN.
 func validateFxComponentManifest(call *syntax.CallExpr) error {
+	rule := "fx_component_manifest"
+	if fn, ok := call.Fn.(*syntax.Ident); ok {
+		rule = fn.Name
+	}
 	var name string
 	hasManifest := false
 
 	for _, arg := range call.Args {
 		binaryExpr, ok := arg.(*syntax.BinaryExpr)
 		if !ok || binaryExpr.Op != syntax.EQ {
-			return fmt.Errorf("fx_component_manifest only accepts keyword arguments, got %T", arg)
+			return fmt.Errorf("%s only accepts keyword arguments, got %T", rule, arg)
 		}
 		shouldSkip, err := hasSkipAnnotation(binaryExpr)
 		if err != nil {
@@ -81,13 +219,13 @@ func validateFxComponentManifest(call *syntax.CallExpr) error {
 			return fmt.Errorf("expected identifier for argument name, got %T", binaryExpr.X)
 		}
 		if !allowedFxComponentManifestAttrs[ident.Name] {
-			return fmt.Errorf("bazel2gn doesn't support attribute %q of fx_component_manifest; use # @bazel2gn:skip and write the GN copy by hand", ident.Name)
+			return fmt.Errorf("bazel2gn doesn't support attribute %q of %s; use # @bazel2gn:skip and write the GN copy by hand", ident.Name, rule)
 		}
 		switch ident.Name {
 		case "name":
 			name, err = stringLiteralValue(binaryExpr.Y)
 			if err != nil {
-				return fmt.Errorf("fx_component_manifest name: %v", err)
+				return fmt.Errorf("%s name: %v", rule, err)
 			}
 		case "manifest":
 			hasManifest = true
@@ -95,24 +233,38 @@ func validateFxComponentManifest(call *syntax.CallExpr) error {
 	}
 
 	if name == "" {
-		return errors.New("missing `name` attribute in fx_component_manifest")
+		return fmt.Errorf("missing `name` attribute in %s", rule)
 	}
 	if !hasManifest {
-		return fmt.Errorf("missing `manifest` attribute in fx_component_manifest %q", name)
+		return fmt.Errorf("missing `manifest` attribute in %s %q", rule, name)
 	}
 	return nil
 }
 
-// validateFxComponent validates a Bazel `fx_component()` call before converting
-// it to GN `fuchsia_component()`.
+// validateFxComponent validates a Bazel `fx_component()`,
+// `fx_test_component()`, or `fx_test_component_with_expectations()` call before
+// converting it to GN.
 func validateFxComponent(call *syntax.CallExpr) error {
+	rule := "fx_component"
+	allowedAttrs := allowedFxComponentAttrs
+	if fn, ok := call.Fn.(*syntax.Ident); ok {
+		switch fn.Name {
+		case internalFxTestComponentRule:
+			rule = "fx_test_component"
+			allowedAttrs = allowedFxTestComponentAttrs
+		case internalFxTestComponentWithExpectationsRule:
+			rule = "fx_test_component_with_expectations"
+			allowedAttrs = allowedFxTestComponentWithExpectationsAttrs
+		}
+	}
 	var name string
-	var compiledManifestExpr syntax.Expr
+	var compiledManifestExpr, treatmentExpr syntax.Expr
+	hasExpectations := false
 
 	for _, arg := range call.Args {
 		binaryExpr, ok := arg.(*syntax.BinaryExpr)
 		if !ok || binaryExpr.Op != syntax.EQ {
-			return fmt.Errorf("fx_component only accepts keyword arguments, got %T", arg)
+			return fmt.Errorf("%s only accepts keyword arguments, got %T", rule, arg)
 		}
 		shouldSkip, err := hasSkipAnnotation(binaryExpr)
 		if err != nil {
@@ -125,35 +277,76 @@ func validateFxComponent(call *syntax.CallExpr) error {
 		if !ok {
 			return fmt.Errorf("expected identifier for argument name, got %T", binaryExpr.X)
 		}
-		if !allowedFxComponentAttrs[ident.Name] {
-			return fmt.Errorf("bazel2gn doesn't support attribute %q of fx_component; use # @bazel2gn:skip and write the GN copy by hand", ident.Name)
+		if !allowedAttrs[ident.Name] {
+			return fmt.Errorf("bazel2gn doesn't support attribute %q of %s; use # @bazel2gn:skip and write the GN copy by hand", ident.Name, rule)
 		}
 		switch ident.Name {
 		case "name":
 			name, err = stringLiteralValue(binaryExpr.Y)
 			if err != nil {
-				return fmt.Errorf("fx_component name: %v", err)
+				return fmt.Errorf("%s name: %v", rule, err)
 			}
 		case "compiled_manifest":
 			compiledManifestExpr = binaryExpr.Y
+		case "expectations":
+			hasExpectations = true
+		case "treatment_of_cases_with_error_logs":
+			treatmentExpr = binaryExpr.Y
 		}
 	}
 
 	if name == "" {
-		return errors.New("missing `name` attribute in fx_component")
+		return fmt.Errorf("missing `name` attribute in %s", rule)
 	}
 	if compiledManifestExpr == nil {
-		return fmt.Errorf("missing `compiled_manifest` attribute in fx_component %q", name)
+		return fmt.Errorf("missing `compiled_manifest` attribute in %s %q", rule, name)
+	}
+	if rule == "fx_test_component_with_expectations" && !hasExpectations {
+		return fmt.Errorf("missing `expectations` attribute in %s %q", rule, name)
+	}
+	if treatmentExpr != nil {
+		if lit, ok := unwrapParenExpr(treatmentExpr).(*syntax.Literal); ok {
+			treatment, err := stringLiteralValue(lit)
+			if err != nil {
+				return fmt.Errorf("%s treatment_of_cases_with_error_logs: %v", rule, err)
+			}
+			if !allowedErrorLogsTreatments[treatment] {
+				return fmt.Errorf("invalid treatment_of_cases_with_error_logs %q in %s %q", treatment, rule, name)
+			}
+		}
 	}
 
 	cmTarget, err := localTargetLabelValue(compiledManifestExpr)
 	if err != nil {
-		return fmt.Errorf("fx_component %q compiled_manifest: %v", name, err)
+		return fmt.Errorf("%s %q compiled_manifest: %v", rule, name, err)
 	}
 	if !strings.HasPrefix(cmTarget, ":") {
-		return fmt.Errorf("fx_component %q compiled_manifest %q must refer to a target in the same BUILD file (\":<target>\") because GN fuchsia_component calls get_target_outputs(cm_label); use # @bazel2gn:skip and write the GN copy by hand", name, cmTarget)
+		return fmt.Errorf("%s %q compiled_manifest %q must refer to a target in the same BUILD file (\":<target>\") because GN calls get_target_outputs(cm_label); use # @bazel2gn:skip and write the GN copy by hand", rule, name, cmTarget)
 	}
 	return nil
+}
+
+// isConvertedFxComponentRule returns whether `rule` is converted to a GN
+// `fuchsia_component()`, `fuchsia_test_component()`, or
+// `fuchsia_test_component_with_expectations()`.
+func isConvertedFxComponentRule(rule string) bool {
+	return rule == "fx_component" ||
+		rule == internalFxTestComponentRule ||
+		rule == internalFxTestComponentWithExpectationsRule
+}
+
+// mustMergeAllowedAttrs returns the union of the allowed attribute sets.
+func mustMergeAllowedAttrs(sets ...map[string]bool) map[string]bool {
+	ret := map[string]bool{}
+	for _, set := range sets {
+		for k, v := range set {
+			if _, ok := ret[k]; ok {
+				panic(fmt.Sprintf("duplicate allowed attribute %q", k))
+			}
+			ret[k] = v
+		}
+	}
+	return ret
 }
 
 // localTargetLabelValue returns the effective GN label string of a literal
@@ -175,30 +368,42 @@ type packagedBinaryRecord struct {
 	emittedName bool
 }
 
-// resolveComponentTargets prepares a parsed `BUILD.bazel` file so
-// `fx_component_manifest()` and `fx_component()` convert cleanly to GN:
+// resolveComponentTargets prepares a parsed `BUILD.bazel` file so component
+// manifests and converted component targets (see `resolveTestPackages()`)
+// convert cleanly to GN:
 //
-//  1. Skips any `fx_component_manifest()` statement referenced via
-//     `compiled_manifest` by an `fx_test_component()` or a skipped
-//     `fx_component()` in the same file when not referenced by any un-skipped
-//     `fx_component()` or `fuchsia_structured_config_rust_lib()`.
-//  2. Hoists any `fx_component_manifest()` statement that appears after an
-//     earlier `fx_component()` or `fuchsia_structured_config_rust_lib()`
-//     referencing it via `:manifest`, since GN's `get_target_outputs(cm_label)`
-//     requires the manifest target to be evaluated earlier in `BUILD.gn`.
-//  3. Resolves `fx_packaged_binary()` targets referenced by `fx_component()`
-//     `deps`: unwrapping directly to `:<binary>` when `install_root + binary_name`
-//     matches the GN binary's default `"bin/<output_name>"`, or rewriting the
-//     `fx_packaged_binary()` into a GN `renamed_binary()` target otherwise.
+//  1. Skips any `fx_component_manifest()` or
+//     `fx_component_manifest_with_expectations()` statement referenced via
+//     `compiled_manifest` only by an unconverted test component or a skipped
+//     component in the same file when not referenced by any un-skipped
+//     converted component or `fuchsia_structured_config_rust_lib()`.
+//  2. Hoists any manifest statement that appears after an earlier converted
+//     component or `fuchsia_structured_config_rust_lib()` referencing it via
+//     `:manifest`, since GN's `get_target_outputs(cm_label)` requires the
+//     manifest target to be evaluated earlier in `BUILD.gn`.
+//  3. Resolves `fx_packaged_binary()` targets referenced by converted
+//     component `deps`: unwrapping directly to `:<binary>` when
+//     `install_root + binary_name` matches the GN target's default
+//     distribution destination (e.g. `"bin/<output_name>"` for executables,
+//     including `fx_cc_test_binary()`, or `"lib/lib<output_name>.so"`
+//     for `rustc_cdylib`, `fuchsia_cc_dso`, and `fuchsia_rust_dso`), or
+//     rewriting the `fx_packaged_binary()` into a GN `renamed_binary()` target
+//     otherwise (when supported by the rule).
 func resolveComponentTargets(f *syntax.File) error {
+	if err := checkCompiledManifestConsumers(f); err != nil {
+		return err
+	}
 	if err := skipBazelOnlyComponentManifests(f); err != nil {
 		return err
 	}
 	if err := hoistComponentManifests(f); err != nil {
 		return err
 	}
+	if err := resolveCmcMergeTargets(f); err != nil {
+		return err
+	}
 
-	gnBinOutputs, err := indexGNBinaryOutputNames(f)
+	gnBins, err := indexGNBinaries(f)
 	if err != nil {
 		return err
 	}
@@ -250,7 +455,7 @@ func resolveComponentTargets(f *syntax.File) error {
 			continue
 		}
 		fn, ok := call.Fn.(*syntax.Ident)
-		if !ok || fn.Name != "fx_component" || bazelRuleToGNTemplate[fn.Name] == noGNEquivalent {
+		if !ok || !isConvertedFxComponentRule(fn.Name) {
 			continue
 		}
 		skip, err := hasSkipAnnotation(stmt)
@@ -274,7 +479,7 @@ func resolveComponentTargets(f *syntax.File) error {
 				continue
 			}
 			kv := arg.(*syntax.BinaryExpr)
-			rewritten, err := resolveComponentDepsExpr(kv.Y, compName, pkgBins, gnBinOutputs, varStmts, visitedVars)
+			rewritten, err := resolveComponentDepsExpr(kv.Y, compName, pkgBins, gnBins, varStmts, visitedVars)
 			if err != nil {
 				return stmtError(stmt, err)
 			}
@@ -285,10 +490,57 @@ func resolveComponentTargets(f *syntax.File) error {
 	return nil
 }
 
+// checkCompiledManifestConsumers fails if an un-skipped `fx_component()` uses an
+// `fx_compiled_manifest()` in the same file as its `compiled_manifest`, because
+// GN `fuchsia_component()` relies on `fuchsia_component_manifest()` to add the
+// compiled manifest to the package, which GN `cm()` doesn't do.
+func checkCompiledManifestConsumers(f *syntax.File) error {
+	compiledManifests := map[string]bool{}
+	for _, stmt := range f.Stmts {
+		call, ok := callOfStmt(stmt)
+		if !ok {
+			continue
+		}
+		if fn, ok := call.Fn.(*syntax.Ident); ok && fn.Name == "fx_compiled_manifest" {
+			if name, ok := callStringAttr(call, "name"); ok {
+				compiledManifests[name] = true
+			}
+		}
+	}
+	if len(compiledManifests) == 0 {
+		return nil
+	}
+	for _, stmt := range f.Stmts {
+		call, ok := callOfStmt(stmt)
+		if !ok {
+			continue
+		}
+		fn, ok := call.Fn.(*syntax.Ident)
+		if !ok || !isConvertedFxComponentRule(fn.Name) {
+			continue
+		}
+		skip, err := hasSkipAnnotation(stmt)
+		if err != nil {
+			return err
+		}
+		if skip {
+			continue
+		}
+		cmVal, attrSkip, ok := callLocalLabelAttr(call, "compiled_manifest")
+		if !ok || attrSkip || !compiledManifests[strings.TrimPrefix(cmVal, ":")] {
+			continue
+		}
+		compName, _ := callStringAttr(call, "name")
+		return stmtError(stmt, fmt.Errorf("fx_component %q compiled_manifest %q refers to an fx_compiled_manifest(), which isn't packaged in GN; use fx_component_manifest() instead", compName, cmVal))
+	}
+	return nil
+}
+
 // skipBazelOnlyComponentManifests omits any un-skipped `fx_component_manifest`
-// statement referenced via `compiled_manifest` by an `fx_test_component` or a
-// skipped `fx_component` in the same file and not by any un-skipped
-// `fx_component` or `fuchsia_structured_config_rust_lib`.
+// or `fx_component_manifest_with_expectations` statement referenced via
+// `compiled_manifest` by an unconverted test component or a skipped component
+// in the same file and not by any un-skipped converted component or
+// `fuchsia_structured_config_rust_lib`.
 func skipBazelOnlyComponentManifests(f *syntax.File) error {
 	convertedConsumers := map[string]bool{}
 	bazelOnlyConsumers := map[string]bool{}
@@ -304,7 +556,9 @@ func skipBazelOnlyComponentManifests(f *syntax.File) error {
 		}
 		var cmAttr string
 		switch fn.Name {
-		case "fx_component", "fx_test_component":
+		case "fx_component",
+			"fx_test_component", internalFxTestComponentRule,
+			"fx_test_component_with_expectations", internalFxTestComponentWithExpectationsRule:
 			cmAttr = "compiled_manifest"
 		case "fuchsia_structured_config_rust_lib":
 			cmAttr = "cm_label"
@@ -320,7 +574,7 @@ func skipBazelOnlyComponentManifests(f *syntax.File) error {
 			continue
 		}
 		mName := strings.TrimPrefix(cmVal, ":")
-		if fn.Name == "fx_test_component" || bazelRuleToGNTemplate[fn.Name] == noGNEquivalent || stmtSkip || attrSkip {
+		if bazelRuleToGNTemplate[fn.Name] == noGNEquivalent || stmtSkip || attrSkip {
 			bazelOnlyConsumers[mName] = true
 		} else {
 			convertedConsumers[mName] = true
@@ -334,7 +588,8 @@ func skipBazelOnlyComponentManifests(f *syntax.File) error {
 	newStmts := make([]syntax.Stmt, 0, len(f.Stmts))
 	for _, stmt := range f.Stmts {
 		if call, ok := callOfStmt(stmt); ok {
-			if fn, ok := call.Fn.(*syntax.Ident); ok && fn.Name == "fx_component_manifest" {
+			if fn, ok := call.Fn.(*syntax.Ident); ok &&
+				(fn.Name == "fx_component_manifest" || fn.Name == "fx_component_manifest_with_expectations") {
 				skip, err := hasSkipAnnotation(stmt)
 				if err != nil {
 					return err
@@ -380,7 +635,7 @@ func hoistComponentManifests(f *syntax.File) error {
 			continue
 		}
 		fn, ok := call.Fn.(*syntax.Ident)
-		if !ok || fn.Name != "fx_component_manifest" {
+		if !ok || !isFxManifestRule(fn.Name) {
 			continue
 		}
 		skip, err := hasSkipAnnotation(stmt)
@@ -409,15 +664,12 @@ func hoistComponentManifests(f *syntax.File) error {
 			continue
 		}
 		var cmAttr string
-		switch fn.Name {
-		case "fx_component":
+		switch {
+		case isConvertedFxComponentRule(fn.Name):
 			cmAttr = "compiled_manifest"
-		case "fuchsia_structured_config_rust_lib":
+		case fn.Name == "fuchsia_structured_config_rust_lib":
 			cmAttr = "cm_label"
 		default:
-			continue
-		}
-		if bazelRuleToGNTemplate[fn.Name] == noGNEquivalent {
 			continue
 		}
 		skip, err := hasSkipAnnotation(stmt)
@@ -448,7 +700,7 @@ func hoistComponentManifests(f *syntax.File) error {
 			continue
 		}
 		fn, ok := call.Fn.(*syntax.Ident)
-		if !ok || fn.Name != "fx_component_manifest" {
+		if !ok || !isFxManifestRule(fn.Name) {
 			continue
 		}
 		name, ok := callStringAttr(call, "name")
@@ -477,11 +729,29 @@ func hoistComponentManifests(f *syntax.File) error {
 	return nil
 }
 
-// indexGNBinaryOutputNames maps each un-skipped binary target name defined in
-// `f` to the executable `output_name` that its converted GN target produces in
-// `$root_out_dir`.
-func indexGNBinaryOutputNames(f *syntax.File) (map[string]string, error) {
-	outputs := map[string]string{}
+type gnBinaryOutput struct {
+	// outFile is the output filename produced in `$root_out_dir` (for targets
+	// built directly in `$root_out_dir`).
+	outFile string
+	// defaultDest is the default package installation path emitted by the GN
+	// target's `distribution_entries` metadata (e.g. `"bin/<output_name>"` or
+	// `"lib/lib<output_name>.so"`).
+	defaultDest string
+	// ruleName is the Bazel rule name defining this target.
+	ruleName string
+	// allowRenamed reports whether a non-default `fx_packaged_binary`
+	// destination can be emitted as a GN `renamed_binary()` reading
+	// `"$root_out_dir/" + outFile`. C++ `shared_library()` targets
+	// (`fuchsia_cc_dso`) redirect to `$shlib_toolchain`, so they cannot use a
+	// `$root_out_dir` `renamed_binary()`.
+	allowRenamed bool
+}
+
+// indexGNBinaries maps each un-skipped binary or shared-object target name
+// defined in `f` to the output filename and default distribution destination
+// produced by its converted GN target.
+func indexGNBinaries(f *syntax.File) (map[string]gnBinaryOutput, error) {
+	outputs := map[string]gnBinaryOutput{}
 	for _, stmt := range f.Stmts {
 		call, ok := callOfStmt(stmt)
 		if !ok {
@@ -504,14 +774,41 @@ func indexGNBinaryOutputNames(f *syntax.File) (map[string]string, error) {
 		}
 
 		rawOut, hasRawOut := rawOutputNameFromStmt(stmt, call)
+		// `gn_output_name` on `fx_cc_binary` and `fx_cc_test_binary` sets the GN `output_name`.
+		if fn.Name == "fx_cc_binary" || fn.Name == "fx_cc_test_binary" {
+			if out, ok := unskippedCallStringAttr(call, "gn_output_name"); ok && out != "" {
+				rawOut, hasRawOut = out, true
+			}
+		}
 
 		switch fn.Name {
-		case "cc_binary", "fx_cc_binary", "cc_binary_host_tool", "idk_cc_binary_host_tool",
-			"go_binary", "go_binary_host_tool", "idk_go_binary_host_tool":
+		case "cc_binary", "fx_cc_binary", "fx_cc_test_binary":
+			// GN `executable()` and `cc_test_executable()` (which
+			// `fx_cc_test_binary()` becomes) both install to `"bin/"`.
+			outName := name
 			if hasRawOut {
-				outputs[name] = rawOut
-			} else {
-				outputs[name] = name
+				outName = rawOut
+			}
+			if unskippedCallBoolTrue(call, "linkshared") {
+				outName = strings.TrimSuffix(outName, ".so") + ".so"
+			}
+			outputs[name] = gnBinaryOutput{
+				outFile:      outName,
+				defaultDest:  "bin/" + outName,
+				ruleName:     fn.Name,
+				allowRenamed: true,
+			}
+		case "cc_binary_host_tool", "idk_cc_binary_host_tool",
+			"go_binary", "go_binary_host_tool", "idk_go_binary_host_tool":
+			outName := name
+			if hasRawOut {
+				outName = rawOut
+			}
+			outputs[name] = gnBinaryOutput{
+				outFile:      outName,
+				defaultDest:  "bin/" + outName,
+				ruleName:     fn.Name,
+				allowRenamed: true,
 			}
 		case "rustc_binary", "rust_binary", "idk_rustc_binary_host_tool":
 			outName := name
@@ -523,9 +820,20 @@ func indexGNBinaryOutputNames(f *syntax.File) (map[string]string, error) {
 			if hasRawOut {
 				outName = rawOut
 			}
-			outputs[name] = outName
+			outputs[name] = gnBinaryOutput{
+				outFile:      outName,
+				defaultDest:  "bin/" + outName,
+				ruleName:     fn.Name,
+				allowRenamed: true,
+			}
 			if unskippedCallBoolTrue(call, "with_unit_tests") {
-				outputs[name+"_test"] = strings.ReplaceAll(outName+"_bin_test", "-", "_")
+				testOut := strings.ReplaceAll(outName+"_bin_test", "-", "_")
+				outputs[name+"_test"] = gnBinaryOutput{
+					outFile:      testOut,
+					defaultDest:  "bin/" + testOut,
+					ruleName:     fn.Name,
+					allowRenamed: true,
+				}
 			}
 		case "rustc_test":
 			outName := name
@@ -537,14 +845,58 @@ func indexGNBinaryOutputNames(f *syntax.File) (map[string]string, error) {
 			if hasRawOut {
 				outName = rawOut
 			}
-			outputs[name] = strings.ReplaceAll(outName, "-", "_")
+			testOut := strings.ReplaceAll(outName, "-", "_")
+			outputs[name] = gnBinaryOutput{
+				outFile:      testOut,
+				defaultDest:  "bin/" + testOut,
+				ruleName:     fn.Name,
+				allowRenamed: true,
+			}
 		case "rustc_library", "rust_library":
 			if unskippedCallBoolTrue(call, "with_unit_tests") {
 				crateName := name
 				if cn, ok := unskippedCallStringAttr(call, "crate_name"); ok {
 					crateName = cn
 				}
-				outputs[name+"_test"] = strings.ReplaceAll(crateName, "-", "_") + "_lib_test"
+				testOut := strings.ReplaceAll(crateName, "-", "_") + "_lib_test"
+				outputs[name+"_test"] = gnBinaryOutput{
+					outFile:      testOut,
+					defaultDest:  "bin/" + testOut,
+					ruleName:     fn.Name,
+					allowRenamed: true,
+				}
+			}
+		case "fuchsia_cc_dso":
+			outName := name
+			if on, ok := unskippedCallStringAttr(call, "output_name"); ok && on != "" {
+				outName = on
+			}
+			if hasRawOut {
+				outName = rawOut
+			}
+			soFile := "lib" + outName + ".so"
+			outputs[name] = gnBinaryOutput{
+				outFile:      soFile,
+				defaultDest:  "lib/" + soFile,
+				ruleName:     fn.Name,
+				allowRenamed: false,
+			}
+		case "rustc_cdylib", "fuchsia_rust_dso":
+			outName := name
+			if on, ok := unskippedCallStringAttr(call, "output_name"); ok && on != "" {
+				outName = on
+			} else if cn, ok := unskippedCallStringAttr(call, "crate_name"); ok && cn != "" {
+				outName = strings.ReplaceAll(cn, "-", "_")
+			}
+			if hasRawOut {
+				outName = rawOut
+			}
+			soFile := "lib" + outName + ".so"
+			outputs[name] = gnBinaryOutput{
+				outFile:      soFile,
+				defaultDest:  "lib/" + soFile,
+				ruleName:     fn.Name,
+				allowRenamed: true,
 			}
 		}
 	}
@@ -595,13 +947,13 @@ func resolveComponentDepsExpr(
 	expr syntax.Expr,
 	compName string,
 	pkgBins map[string]*packagedBinaryRecord,
-	gnBinOutputs map[string]string,
+	gnBins map[string]gnBinaryOutput,
 	varStmts map[string]*syntax.AssignStmt,
 	visitedVars map[string]bool,
 ) (syntax.Expr, error) {
 	switch v := expr.(type) {
 	case *syntax.ParenExpr:
-		inner, err := resolveComponentDepsExpr(v.X, compName, pkgBins, gnBinOutputs, varStmts, visitedVars)
+		inner, err := resolveComponentDepsExpr(v.X, compName, pkgBins, gnBins, varStmts, visitedVars)
 		if err != nil {
 			return nil, err
 		}
@@ -616,7 +968,7 @@ func resolveComponentDepsExpr(
 			if skip {
 				continue
 			}
-			rewritten, err := resolveComponentDepsExpr(elem, compName, pkgBins, gnBinOutputs, varStmts, visitedVars)
+			rewritten, err := resolveComponentDepsExpr(elem, compName, pkgBins, gnBins, varStmts, visitedVars)
 			if err != nil {
 				return nil, err
 			}
@@ -625,11 +977,11 @@ func resolveComponentDepsExpr(
 		return v, nil
 	case *syntax.BinaryExpr:
 		if v.Op == syntax.PLUS {
-			lhs, err := resolveComponentDepsExpr(v.X, compName, pkgBins, gnBinOutputs, varStmts, visitedVars)
+			lhs, err := resolveComponentDepsExpr(v.X, compName, pkgBins, gnBins, varStmts, visitedVars)
 			if err != nil {
 				return nil, err
 			}
-			rhs, err := resolveComponentDepsExpr(v.Y, compName, pkgBins, gnBinOutputs, varStmts, visitedVars)
+			rhs, err := resolveComponentDepsExpr(v.Y, compName, pkgBins, gnBins, varStmts, visitedVars)
 			if err != nil {
 				return nil, err
 			}
@@ -638,11 +990,11 @@ func resolveComponentDepsExpr(
 		}
 		return v, nil
 	case *syntax.CondExpr:
-		tBranch, err := resolveComponentDepsExpr(v.True, compName, pkgBins, gnBinOutputs, varStmts, visitedVars)
+		tBranch, err := resolveComponentDepsExpr(v.True, compName, pkgBins, gnBins, varStmts, visitedVars)
 		if err != nil {
 			return nil, err
 		}
-		fBranch, err := resolveComponentDepsExpr(v.False, compName, pkgBins, gnBinOutputs, varStmts, visitedVars)
+		fBranch, err := resolveComponentDepsExpr(v.False, compName, pkgBins, gnBins, varStmts, visitedVars)
 		if err != nil {
 			return nil, err
 		}
@@ -657,7 +1009,7 @@ func resolveComponentDepsExpr(
 					if !ok {
 						continue
 					}
-					rewritten, err := resolveComponentDepsExpr(kv.Value, compName, pkgBins, gnBinOutputs, varStmts, visitedVars)
+					rewritten, err := resolveComponentDepsExpr(kv.Value, compName, pkgBins, gnBins, varStmts, visitedVars)
 					if err != nil {
 						return nil, err
 					}
@@ -669,7 +1021,7 @@ func resolveComponentDepsExpr(
 	case *syntax.Ident:
 		if assign, ok := varStmts[v.Name]; ok && !visitedVars[v.Name] {
 			visitedVars[v.Name] = true
-			rewritten, err := resolveComponentDepsExpr(assign.RHS, compName, pkgBins, gnBinOutputs, varStmts, visitedVars)
+			rewritten, err := resolveComponentDepsExpr(assign.RHS, compName, pkgBins, gnBins, varStmts, visitedVars)
 			if err != nil {
 				return nil, err
 			}
@@ -689,7 +1041,7 @@ func resolveComponentDepsExpr(
 		if !isPkgBin {
 			return v, nil
 		}
-		resolvedLabel, err := resolvePackagedBinaryRecord(rec, targetName, compName, gnBinOutputs)
+		resolvedLabel, err := resolvePackagedBinaryRecord(rec, targetName, compName, gnBins)
 		if err != nil {
 			return nil, err
 		}
@@ -709,7 +1061,7 @@ func resolvePackagedBinaryRecord(
 	rec *packagedBinaryRecord,
 	pkgBinName string,
 	compName string,
-	gnBinOutputs map[string]string,
+	gnBins map[string]gnBinaryOutput,
 ) (string, error) {
 	if rec.emittedName {
 		return ":" + pkgBinName, nil
@@ -777,18 +1129,21 @@ func resolvePackagedBinaryRecord(
 	}
 
 	binTarget := strings.TrimPrefix(binaryLabel, ":")
-	gnOutName, ok := gnBinOutputs[binTarget]
+	gnOut, ok := gnBins[binTarget]
 	if !ok {
 		return "", fmt.Errorf("fx_packaged_binary %q binary %q (used by fx_component %q) does not refer to an unskipped binary target in the same BUILD.bazel; use # @bazel2gn:skip on fx_component %q and write the GN copy by hand", pkgBinName, binaryLabel, compName, compName)
 	}
 
 	dest := installRoot + binaryName
-	if dest == "bin/"+gnOutName {
+	if dest == gnOut.defaultDest {
 		return ":" + binTarget, nil
+	}
+	if !gnOut.allowRenamed {
+		return "", fmt.Errorf("fx_packaged_binary %q (wrapping %s %q, used by fx_component %q) installs to %q, but GN %s only supports its default destination %q (set install_root = \"lib/\" and binary_name = %q)", pkgBinName, gnOut.ruleName, binaryLabel, compName, dest, gnOut.ruleName, gnOut.defaultDest, gnOut.outFile)
 	}
 
 	if rec.skipped {
-		return "", fmt.Errorf("fx_packaged_binary %q is referenced by fx_component %q and requires a GN renamed_binary target (dest %q != default %q), so it cannot have # @bazel2gn:skip", pkgBinName, compName, dest, "bin/"+gnOutName)
+		return "", fmt.Errorf("fx_packaged_binary %q is referenced by fx_component %q and requires a GN renamed_binary target (dest %q != default %q), so it cannot have # @bazel2gn:skip", pkgBinName, compName, dest, gnOut.defaultDest)
 	}
 	if hasRawAttributeAnnotation(rec.stmt) {
 		return "", errors.New("raw_attribute annotation is not supported on fx_packaged_binary")
@@ -799,7 +1154,7 @@ func resolvePackagedBinaryRecord(
 		newArgs = append(newArgs, testonlyArg)
 	}
 	newArgs = append(newArgs,
-		attrExpr("source", stringLiteral("$root_out_dir/"+gnOutName)),
+		attrExpr("source", stringLiteral("$root_out_dir/"+gnOut.outFile)),
 		attrExpr("source_deps", &syntax.ListExpr{List: []syntax.Expr{stringLiteral(":" + binTarget)}}),
 		attrExpr("dest", stringLiteral(dest)),
 	)

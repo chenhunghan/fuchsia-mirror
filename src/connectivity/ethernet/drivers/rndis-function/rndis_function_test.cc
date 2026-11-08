@@ -24,6 +24,8 @@
 #include <lib/inspect/testing/cpp/inspect.h>
 #include <lib/sync/cpp/completion.h>
 
+#include <span>
+
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <usb-inspect/usb-inspect-test-helper.h>
@@ -96,7 +98,11 @@ class FakeFunction
       fidl::internal::NaturalCompleter<ffunction::UsbFunction::ConfigureEndpoint>::Sync& completer)
       override {
     config_ep_calls_++;
-    completer.Reply(fit::ok());
+    if (config_endpoint_status_ != ZX_OK) {
+      completer.Reply(fit::error(config_endpoint_status_));
+    } else {
+      completer.Reply(fit::ok());
+    }
   }
 
   void DisableEndpoint(
@@ -104,8 +110,15 @@ class FakeFunction
       fidl::internal::NaturalCompleter<ffunction::UsbFunction::DisableEndpoint>::Sync& completer)
       override {
     disable_ep_calls_++;
-    completer.Reply(fit::ok());
+    if (disable_endpoint_status_ != ZX_OK) {
+      completer.Reply(fit::error(disable_endpoint_status_));
+    } else {
+      completer.Reply(fit::ok());
+    }
   }
+
+  void set_config_endpoint_status(zx_status_t status) { config_endpoint_status_ = status; }
+  void set_disable_endpoint_status(zx_status_t status) { disable_endpoint_status_ = status; }
 
   size_t ConfigEpCalls() const { return config_ep_calls_; }
   size_t DisableEpCalls() const { return disable_ep_calls_; }
@@ -119,6 +132,8 @@ class FakeFunction
   fit::callback<void()> on_configure_;
   size_t config_ep_calls_ = 0;
   size_t disable_ep_calls_ = 0;
+  zx_status_t config_endpoint_status_ = ZX_OK;
+  zx_status_t disable_endpoint_status_ = ZX_OK;
   async_dispatcher_t* dispatcher_;
 };
 
@@ -136,31 +151,46 @@ class FakeNetworkDeviceIfc : public fidl::testing::WireTestBase<fnetdev::Network
   void AddPort(fnetdev::wire::NetworkDeviceIfcAddPortRequest* request, fdf::Arena& arena,
                AddPortCompleter::Sync& completer) override {
     fdf::info("FakeNetworkDeviceIfc::AddPort called with id: {}", request->id);
-    port_id_ = request->id;
-    port_ = std::move(request->port);
+    fit::function<void()> callback;
+    {
+      std::lock_guard lock(lock_);
+      port_id_ = request->id;
+      port_ = std::move(request->port);
+      callback = on_add_port_.share();
+    }
     completer.buffer(arena).Reply(ZX_OK);
-    if (on_add_port_) {
-      on_add_port_();
+    if (callback) {
+      callback();
     }
   }
 
   void CompleteRx(fnetdev::wire::NetworkDeviceIfcCompleteRxRequest* request, fdf::Arena& arena,
                   CompleteRxCompleter::Sync& completer) override {
-    for (auto& result : request->rx) {
-      completed_rx_.push(fidl::ToNatural(result));
+    fit::function<void()> callback;
+    {
+      std::lock_guard lock(lock_);
+      for (auto& result : request->rx) {
+        completed_rx_.push(fidl::ToNatural(result));
+      }
+      callback = on_complete_rx_.share();
     }
-    if (on_complete_rx_) {
-      on_complete_rx_();
+    if (callback) {
+      callback();
     }
   }
 
   void CompleteTx(fnetdev::wire::NetworkDeviceIfcCompleteTxRequest* request, fdf::Arena& arena,
                   CompleteTxCompleter::Sync& completer) override {
-    for (const auto& result : request->tx) {
-      completed_tx_.push(result);
+    fit::function<void()> callback;
+    {
+      std::lock_guard lock(lock_);
+      for (const auto& result : request->tx) {
+        completed_tx_.push(result);
+      }
+      callback = on_complete_tx_.share();
     }
-    if (on_complete_tx_) {
-      on_complete_tx_();
+    if (callback) {
+      callback();
     }
   }
 
@@ -168,28 +198,53 @@ class FakeNetworkDeviceIfc : public fidl::testing::WireTestBase<fnetdev::Network
                          fdf::Arena& arena, PortStatusChangedCompleter::Sync& completer) override {
     ASSERT_FALSE(completer.is_reply_needed());
     EXPECT_EQ(request->id, RndisFunction::kPortId);
-    last_online_ =
-        (request->new_status.flags() & fuchsia_hardware_network::wire::StatusFlags::kOnline) !=
-        fuchsia_hardware_network::wire::StatusFlags{};
-    if (on_port_status_changed_) {
-      on_port_status_changed_();
+    fit::function<void()> callback;
+    {
+      std::lock_guard lock(lock_);
+      last_online_ =
+          (request->new_status.flags() & fuchsia_hardware_network::wire::StatusFlags::kOnline) !=
+          fuchsia_hardware_network::wire::StatusFlags{};
+      callback = on_port_status_changed_.share();
+    }
+    if (callback) {
+      callback();
     }
   }
 
-  bool HasPort() { return port_.is_valid(); }
+  bool HasPort() {
+    std::lock_guard lock(lock_);
+    return port_.is_valid();
+  }
 
-  std::optional<bool> last_online() { return last_online_; }
+  std::optional<bool> last_online() {
+    std::lock_guard lock(lock_);
+    return last_online_;
+  }
 
-  fdf::ClientEnd<fnetdev::NetworkPort> TakePort() { return std::move(port_); }
+  fdf::ClientEnd<fnetdev::NetworkPort> TakePort() {
+    std::lock_guard lock(lock_);
+    return std::move(port_);
+  }
 
-  void set_on_add_port(fit::function<void()> callback) { on_add_port_ = std::move(callback); }
-  void set_on_complete_tx(fit::function<void()> callback) { on_complete_tx_ = std::move(callback); }
-  void set_on_complete_rx(fit::function<void()> callback) { on_complete_rx_ = std::move(callback); }
+  void set_on_add_port(fit::function<void()> callback) {
+    std::lock_guard lock(lock_);
+    on_add_port_ = std::move(callback);
+  }
+  void set_on_complete_tx(fit::function<void()> callback) {
+    std::lock_guard lock(lock_);
+    on_complete_tx_ = std::move(callback);
+  }
+  void set_on_complete_rx(fit::function<void()> callback) {
+    std::lock_guard lock(lock_);
+    on_complete_rx_ = std::move(callback);
+  }
   void set_on_port_status_changed(fit::function<void()> callback) {
+    std::lock_guard lock(lock_);
     on_port_status_changed_ = std::move(callback);
   }
 
   std::optional<fnetdev::wire::TxResult> PopCompleteTx() {
+    std::lock_guard lock(lock_);
     if (completed_tx_.empty()) {
       return std::nullopt;
     }
@@ -198,6 +253,7 @@ class FakeNetworkDeviceIfc : public fidl::testing::WireTestBase<fnetdev::Network
     return tx;
   }
   std::optional<fnetdev::RxBuffer> PopCompleteRx() {
+    std::lock_guard lock(lock_);
     if (completed_rx_.empty()) {
       return std::nullopt;
     }
@@ -207,6 +263,7 @@ class FakeNetworkDeviceIfc : public fidl::testing::WireTestBase<fnetdev::Network
   }
 
  private:
+  std::mutex lock_;
   uint8_t port_id_;
   fdf::ClientEnd<fnetdev::NetworkPort> port_;
   fit::function<void()> on_add_port_;
@@ -303,6 +360,7 @@ class RndisFunctionTest : public ::testing::Test {
     configure_done.Wait();
 
     driver_test_.RunInEnvironmentTypeContext([this](RndisFunctionTestEnvironment& env) {
+      env.fake_ifc_.set_on_add_port(nullptr);
       ASSERT_TRUE(env.fake_ifc_.HasPort());
       net_port_client_.Bind(env.fake_ifc_.TakePort());
       function_interface_client_.Bind(env.fake_function_.TakeInterface());
@@ -541,8 +599,14 @@ TEST_F(RndisFunctionTest, Send) {
   fdf::Arena arena(kArenaTag);
   StartNetworkDevice();
   constexpr uint8_t kVmoId = 1;
+  constexpr uint64_t kRequestLength = 64;
+  std::array<uint8_t, kRequestLength> tx_payload;
+  for (size_t i = 0; i < tx_payload.size(); ++i) {
+    tx_payload[i] = static_cast<uint8_t>(0xA0 + i);
+  }
   zx::vmo vmo;
   ASSERT_OK(zx::vmo::create(4096, 0, &vmo));
+  ASSERT_OK(vmo.write(tx_payload.data(), 0, tx_payload.size()));
   fdf::WireUnownedResult vmo_result =
       net_impl_client_.buffer(arena)->PrepareVmo(kVmoId, std::move(vmo));
   ASSERT_TRUE(vmo_result.ok()) << vmo_result.error().FormatDescription();
@@ -562,7 +626,6 @@ TEST_F(RndisFunctionTest, Send) {
   EXPECT_EQ(transmit_errors, 0u);
   EXPECT_EQ(transmit_no_buffer, 0u);
 
-  constexpr uint64_t kRequestLength = 64;
   constexpr size_t kRequestCount = RndisFunction::kRequestPoolSize;
 
   // Fill the TX queue.
@@ -592,6 +655,23 @@ TEST_F(RndisFunctionTest, Send) {
   }
 
   tx_enqueued.Wait();
+
+  RunInFunctionContext([&](FakeFunction& function) {
+    zx::result<std::vector<uint8_t>> req_data =
+        function.fake_endpoint(bulk_in_addr).ReadPendingRequestData();
+    ASSERT_OK(req_data);
+    ASSERT_EQ(req_data->size(), sizeof(rndis_packet_header) + kRequestLength);
+    rndis_packet_header header{};
+    memcpy(&header, req_data->data(), sizeof(header));
+    EXPECT_EQ(header.msg_type, static_cast<uint32_t>(RNDIS_PACKET_MSG));
+    EXPECT_EQ(header.msg_length, sizeof(rndis_packet_header) + kRequestLength);
+    EXPECT_EQ(header.data_offset,
+              sizeof(rndis_packet_header) - offsetof(rndis_packet_header, data_offset));
+    EXPECT_EQ(header.data_length, kRequestLength);
+    std::span<const uint8_t> payload_span(req_data->data() + sizeof(rndis_packet_header),
+                                          kRequestLength);
+    EXPECT_THAT(payload_span, ::testing::ElementsAreArray(tx_payload));
+  });
 
   QueryOid(OID_GEN_RCV_OK, &transmit_ok, sizeof(transmit_ok), &actual);
   QueryOid(OID_GEN_RCV_ERROR, &transmit_errors, sizeof(transmit_errors), &actual);
@@ -677,8 +757,10 @@ TEST_F(RndisFunctionTest, Send) {
   EXPECT_EQ(transmit_errors, 0u);
   EXPECT_EQ(transmit_no_buffer, 1u);
 
-  driver_test_.RunInEnvironmentTypeContext(
-      [&](RndisFunctionTestEnvironment& env) { env.fake_ifc_.set_on_complete_tx(nullptr); });
+  driver_test_.RunInEnvironmentTypeContext([&](RndisFunctionTestEnvironment& env) {
+    env.fake_ifc_.set_on_complete_tx(nullptr);
+    env.fake_function_.fake_endpoint(bulk_in_addr).set_on_queue_requests(nullptr);
+  });
 }
 
 TEST_F(RndisFunctionTest, Receive) {
@@ -742,6 +824,7 @@ TEST_F(RndisFunctionTest, Receive) {
 
   rx_completed.Wait();
   driver_test_.RunInEnvironmentTypeContext([&](RndisFunctionTestEnvironment& env) {
+    env.fake_ifc_.set_on_complete_rx(nullptr);
     std::optional rx = env.fake_ifc_.PopCompleteRx();
     ASSERT_TRUE(rx.has_value());
     EXPECT_EQ(rx->meta().port(), RndisFunction::kPortId);
@@ -799,6 +882,7 @@ TEST_F(RndisFunctionTest, Halt) {
 
   port_status_changed.Wait();
   driver_test_.RunInEnvironmentTypeContext([](RndisFunctionTestEnvironment& env) {
+    env.fake_ifc_.set_on_port_status_changed(nullptr);
     EXPECT_EQ(env.fake_function_.DisableEpCalls(), 3u);
     ASSERT_TRUE(env.fake_ifc_.last_online().has_value());
     EXPECT_FALSE(env.fake_ifc_.last_online().value());
@@ -957,6 +1041,7 @@ TEST_F(RndisFunctionTest, Reset) {
 
   port_status_changed.Wait();
   driver_test_.RunInEnvironmentTypeContext([&](RndisFunctionTestEnvironment& env) {
+    env.fake_ifc_.set_on_port_status_changed(nullptr);
     ASSERT_TRUE(env.fake_ifc_.last_online().has_value());
     EXPECT_FALSE(env.fake_ifc_.last_online().value());
   });
@@ -1088,6 +1173,624 @@ TEST_F(RndisFunctionTest, SetOutOfBoundsBuffer) {
   EXPECT_EQ(response.msg_type, static_cast<uint32_t>(RNDIS_SET_CMPLT));
   EXPECT_EQ(response.request_id, 42u);
   EXPECT_EQ(response.status, static_cast<uint32_t>(RNDIS_STATUS_INVALID_DATA));
+}
+
+TEST_F(RndisFunctionTest, InitMessageInvalidVersion) {
+  // Invalid major version
+  rndis_init msg{
+      .msg_type = RNDIS_INITIALIZE_MSG,
+      .msg_length = sizeof(rndis_init),
+      .request_id = 42,
+      .major_version = RNDIS_MAJOR_VERSION + 1,
+      .minor_version = RNDIS_MINOR_VERSION,
+      .max_xfer_size = RNDIS_MAX_XFER_SIZE,
+  };
+  WriteCommand(&msg, sizeof(msg));
+
+  rndis_init_complete response;
+  ReadResponse(&response, sizeof(response));
+  EXPECT_EQ(response.msg_type, static_cast<uint32_t>(RNDIS_INITIALIZE_CMPLT));
+  EXPECT_EQ(response.request_id, 42u);
+  EXPECT_EQ(response.status, static_cast<uint32_t>(RNDIS_STATUS_NOT_SUPPORTED));
+
+  // Invalid minor version
+  msg.major_version = RNDIS_MAJOR_VERSION;
+  msg.minor_version = RNDIS_MINOR_VERSION + 1;
+  WriteCommand(&msg, sizeof(msg));
+
+  ReadResponse(&response, sizeof(response));
+  EXPECT_EQ(response.msg_type, static_cast<uint32_t>(RNDIS_INITIALIZE_CMPLT));
+  EXPECT_EQ(response.request_id, 42u);
+  EXPECT_EQ(response.status, static_cast<uint32_t>(RNDIS_STATUS_NOT_SUPPORTED));
+
+  // Command too small for init
+  constexpr size_t kShortInitSize = sizeof(rndis_init) - 1;
+  WriteCommand(&msg, kShortInitSize);
+  std::vector<uint8_t> invalid_buf(sizeof(rndis_indicate_status) + sizeof(rndis_diagnostic_info) +
+                                   kShortInitSize);
+  ReadResponse(invalid_buf.data(), invalid_buf.size());
+  auto* status = reinterpret_cast<const rndis_indicate_status*>(invalid_buf.data());
+  EXPECT_EQ(status->msg_type, static_cast<uint32_t>(RNDIS_INDICATE_STATUS_MSG));
+  EXPECT_EQ(status->msg_length, invalid_buf.size());
+  EXPECT_EQ(status->status, static_cast<uint32_t>(RNDIS_STATUS_INVALID_DATA));
+}
+
+TEST_F(RndisFunctionTest, InvalidQuerySizeCommand) {
+  rndis_query query{
+      .msg_type = RNDIS_QUERY_MSG,
+      .msg_length = sizeof(rndis_query),
+      .request_id = 42,
+      .oid = OID_GEN_HARDWARE_STATUS,
+  };
+  // Send a query command smaller than sizeof(rndis_query)
+  constexpr size_t kShortQuerySize = sizeof(rndis_query) - 1;
+  WriteCommand(&query, kShortQuerySize);
+  std::vector<uint8_t> invalid_buf(sizeof(rndis_indicate_status) + sizeof(rndis_diagnostic_info) +
+                                   kShortQuerySize);
+  ReadResponse(invalid_buf.data(), invalid_buf.size());
+  auto* status = reinterpret_cast<const rndis_indicate_status*>(invalid_buf.data());
+  EXPECT_EQ(status->msg_type, static_cast<uint32_t>(RNDIS_INDICATE_STATUS_MSG));
+  EXPECT_EQ(status->msg_length, invalid_buf.size());
+  EXPECT_EQ(status->status, static_cast<uint32_t>(RNDIS_STATUS_INVALID_DATA));
+}
+
+TEST_F(RndisFunctionTest, SetMessageBoundaryChecks) {
+  // 1. Command too small for rndis_set
+  rndis_set set{
+      .msg_type = RNDIS_SET_MSG,
+      .msg_length = sizeof(rndis_set),
+      .request_id = 42,
+      .oid = OID_GEN_CURRENT_PACKET_FILTER,
+  };
+  constexpr size_t kShortSetSize = sizeof(rndis_set) - 1;
+  WriteCommand(&set, kShortSetSize);
+  std::vector<uint8_t> invalid_buf(sizeof(rndis_indicate_status) + sizeof(rndis_diagnostic_info) +
+                                   kShortSetSize);
+  ReadResponse(invalid_buf.data(), invalid_buf.size());
+  auto* status = reinterpret_cast<const rndis_indicate_status*>(invalid_buf.data());
+  EXPECT_EQ(status->msg_type, static_cast<uint32_t>(RNDIS_INDICATE_STATUS_MSG));
+  EXPECT_EQ(status->msg_length, invalid_buf.size());
+  EXPECT_EQ(status->status, static_cast<uint32_t>(RNDIS_STATUS_INVALID_DATA));
+
+  // 2. info_buffer_length > RNDIS_SET_INFO_BUFFER_LENGTH
+  set.info_buffer_length = RNDIS_SET_INFO_BUFFER_LENGTH + 1;
+  WriteCommand(&set, sizeof(rndis_set));
+
+  rndis_set_complete response;
+  ReadResponse(&response, sizeof(response));
+  EXPECT_EQ(response.msg_type, static_cast<uint32_t>(RNDIS_SET_CMPLT));
+  EXPECT_EQ(response.request_id, 42u);
+  EXPECT_EQ(response.status, static_cast<uint32_t>(RNDIS_STATUS_INVALID_DATA));
+
+  // 3. Unhandled OID
+  set.info_buffer_length = 0;
+  set.oid = 0xDEADBEEF;
+  WriteCommand(&set, sizeof(rndis_set));
+  ReadResponse(&response, sizeof(response));
+  EXPECT_EQ(response.status, static_cast<uint32_t>(RNDIS_STATUS_NOT_SUPPORTED));
+
+  // 4. OID_802_3_MULTICAST_LIST (succeeds)
+  set.oid = OID_802_3_MULTICAST_LIST;
+  WriteCommand(&set, sizeof(rndis_set));
+  ReadResponse(&response, sizeof(response));
+  EXPECT_EQ(response.status, static_cast<uint32_t>(RNDIS_STATUS_SUCCESS));
+}
+
+TEST_F(RndisFunctionTest, UnrecognizedControlTransfer) {
+  fidl::Result result = function_interface_client_->Control({{
+      .setup = fdescriptor::UsbSetup{{
+          .bm_request_type = 0,
+          .b_request = 0,
+          .w_value = 0,
+          .w_index = 0,
+          .w_length = 0,
+      }},
+      .write = {},
+  }});
+  ASSERT_TRUE(result.is_error());
+  ASSERT_TRUE(result.error_value().is_domain_error());
+  EXPECT_STATUS(result.error_value().domain_error(), ZX_ERR_NOT_SUPPORTED);
+}
+
+TEST_F(RndisFunctionTest, LinkSpeedAllSpeeds) {
+  struct SpeedCase {
+    fdescriptor::UsbSpeed usb_speed;
+    uint32_t expected_rndis_speed;
+  };
+  const SpeedCase cases[] = {
+      {fdescriptor::UsbSpeed::kLow, 15'000},     {fdescriptor::UsbSpeed::kFull, 120'000},
+      {fdescriptor::UsbSpeed::kHigh, 4'800'000}, {fdescriptor::UsbSpeed::kSuper, 50'000'000},
+      {fdescriptor::UsbSpeed::kUndefined, 0},
+  };
+
+  for (const auto& c : cases) {
+    ASSERT_OK(function_interface_client_->SetConfigured({{
+        .configured = true,
+        .speed = c.usb_speed,
+    }}));
+    uint32_t speed = 0xFFFFFFFF;
+    size_t actual = 0;
+    QueryOid(OID_GEN_LINK_SPEED, &speed, sizeof(speed), &actual);
+    ASSERT_EQ(actual, sizeof(speed));
+    EXPECT_EQ(speed, c.expected_rndis_speed);
+  }
+}
+
+TEST_F(RndisFunctionTest, RxInvalidPacketsDiscarded) {
+  fdf::Arena arena(kArenaTag);
+  StartNetworkDevice();
+
+  constexpr uint8_t kVmoId = 1;
+  zx::vmo vmo;
+  ASSERT_OK(zx::vmo::create(4096, 0, &vmo));
+  zx::vmo duplicate;
+  ASSERT_OK(vmo.duplicate(ZX_RIGHT_SAME_RIGHTS, &duplicate));
+  fdf::WireUnownedResult vmo_result =
+      net_impl_client_.buffer(arena)->PrepareVmo(kVmoId, std::move(duplicate));
+  ASSERT_TRUE(vmo_result.ok());
+  ASSERT_OK(vmo_result.value().s);
+
+  SetPacketFilter();
+
+  uint8_t bulk_out_addr = 0;
+  driver_test_.RunInDriverContext(
+      [&](RndisFunction& driver) { bulk_out_addr = driver.BulkOutAddress(); });
+
+  constexpr uint32_t kRxBufferId = 111;
+  fnetdev::wire::RxSpaceBuffer rx_buffer = {
+      .id = kRxBufferId,
+      .region = {.vmo = kVmoId, .offset = 0, .length = 4096},
+  };
+  ASSERT_TRUE(net_impl_client_.buffer(arena)
+                  ->QueueRxSpace(
+                      fidl::VectorView<fnetdev::wire::RxSpaceBuffer>::FromExternal(&rx_buffer, 1))
+                  .ok());
+
+  // 1. Send packet with unrecognized msg_type
+  struct Payload {
+    rndis_packet_header header;
+    char data[16];
+  };
+  Payload payload = {};
+  payload.header.msg_type = 0x9999;  // Not RNDIS_PACKET_MSG
+  payload.header.msg_length = sizeof(payload);
+
+  libsync::Completion requeued;
+  driver_test_.RunInEnvironmentTypeContext([&](RndisFunctionTestEnvironment& env) {
+    auto* payload_bytes = reinterpret_cast<uint8_t*>(&payload);
+    env.fake_function_.fake_endpoint(bulk_out_addr).set_on_queue_requests([&](FakeEndpoint&) {
+      requeued.Signal();
+    });
+    env.fake_function_.fake_endpoint(bulk_out_addr)
+        .RequestComplete(ZX_OK,
+                         std::vector<uint8_t>(payload_bytes, payload_bytes + sizeof(payload)));
+  });
+  requeued.Wait();
+  requeued.Reset();
+
+  // 2. Send packet with data_length > space.region.length
+  payload.header.msg_type = RNDIS_PACKET_MSG;
+  payload.header.data_offset =
+      sizeof(rndis_packet_header) - offsetof(rndis_packet_header, data_offset);
+  payload.header.data_length = 4096 + 1;  // Exceeds 4096
+  driver_test_.RunInEnvironmentTypeContext([&](RndisFunctionTestEnvironment& env) {
+    auto* payload_bytes = reinterpret_cast<uint8_t*>(&payload);
+    env.fake_function_.fake_endpoint(bulk_out_addr)
+        .RequestComplete(ZX_OK,
+                         std::vector<uint8_t>(payload_bytes, payload_bytes + sizeof(payload)));
+  });
+  requeued.Wait();
+  requeued.Reset();
+
+  // 3. Send packet whose claimed data_length fits in space.region.length but exceeds transfer_size
+  payload.header.data_length = 100;  // Exceeds sizeof(payload.data) == 16
+  driver_test_.RunInEnvironmentTypeContext([&](RndisFunctionTestEnvironment& env) {
+    auto* payload_bytes = reinterpret_cast<uint8_t*>(&payload);
+    env.fake_function_.fake_endpoint(bulk_out_addr)
+        .RequestComplete(ZX_OK,
+                         std::vector<uint8_t>(payload_bytes, payload_bytes + sizeof(payload)));
+  });
+  requeued.Wait();
+  requeued.Reset();
+
+  uint32_t receive_errors = 0;
+  size_t actual = 0;
+  QueryOid(OID_GEN_XMIT_ERROR, &receive_errors, sizeof(receive_errors), &actual);
+  EXPECT_EQ(receive_errors, 3u);
+
+  // 4. Send valid packet now, should use the still-available rx_buffer
+  payload.header.data_length = sizeof(payload.data);
+  libsync::Completion rx_completed;
+  driver_test_.RunInEnvironmentTypeContext([&](RndisFunctionTestEnvironment& env) {
+    env.fake_function_.fake_endpoint(bulk_out_addr).set_on_queue_requests(nullptr);
+    env.fake_ifc_.set_on_complete_rx([&]() { rx_completed.Signal(); });
+    auto* payload_bytes = reinterpret_cast<uint8_t*>(&payload);
+    env.fake_function_.fake_endpoint(bulk_out_addr)
+        .RequestComplete(ZX_OK,
+                         std::vector<uint8_t>(payload_bytes, payload_bytes + sizeof(payload)));
+  });
+  rx_completed.Wait();
+  driver_test_.RunInEnvironmentTypeContext([&](RndisFunctionTestEnvironment& env) {
+    env.fake_ifc_.set_on_complete_rx(nullptr);
+    std::optional rx = env.fake_ifc_.PopCompleteRx();
+    ASSERT_TRUE(rx.has_value());
+    EXPECT_EQ(rx->data()[0].id(), kRxBufferId);
+  });
+}
+
+TEST_F(RndisFunctionTest, RxCompletionInvalidVmo) {
+  fdf::Arena arena(kArenaTag);
+  StartNetworkDevice();
+
+  constexpr uint8_t kVmoId = 1;
+  zx::vmo vmo;
+  ASSERT_OK(zx::vmo::create(4096, 0, &vmo));
+  zx::vmo duplicate;
+  ASSERT_OK(vmo.duplicate(ZX_RIGHT_SAME_RIGHTS, &duplicate));
+  fdf::WireUnownedResult vmo_result =
+      net_impl_client_.buffer(arena)->PrepareVmo(kVmoId, std::move(duplicate));
+  ASSERT_TRUE(vmo_result.ok());
+  ASSERT_OK(vmo_result.value().s);
+
+  SetPacketFilter();
+
+  uint8_t bulk_out_addr = 0;
+  driver_test_.RunInDriverContext(
+      [&](RndisFunction& driver) { bulk_out_addr = driver.BulkOutAddress(); });
+
+  // 1. Queue only an invalid VMO ID (99): it should be popped and returned unfulfilled, and the
+  // packet dropped because no valid RxSpaceBuffer remains.
+  fnetdev::wire::RxSpaceBuffer invalid_only = {
+      .id = 222,
+      .region = {.vmo = 99, .offset = 0, .length = 4096},
+  };
+  ASSERT_TRUE(net_impl_client_.buffer(arena)
+                  ->QueueRxSpace(fidl::VectorView<fnetdev::wire::RxSpaceBuffer>::FromExternal(
+                      &invalid_only, 1))
+                  .ok());
+
+  struct Payload {
+    rndis_packet_header header;
+    char data[16];
+  };
+  Payload payload = {};
+  payload.header.msg_type = RNDIS_PACKET_MSG;
+  payload.header.msg_length = sizeof(payload);
+  payload.header.data_offset =
+      sizeof(rndis_packet_header) - offsetof(rndis_packet_header, data_offset);
+  payload.header.data_length = sizeof(payload.data);
+  memset(payload.data, 0x5a, sizeof(payload.data));
+
+  libsync::Completion requeued;
+  libsync::Completion rx_unfulfilled;
+  driver_test_.RunInEnvironmentTypeContext([&](RndisFunctionTestEnvironment& env) {
+    env.fake_function_.fake_endpoint(bulk_out_addr).set_on_queue_requests([&](FakeEndpoint&) {
+      requeued.Signal();
+    });
+    env.fake_ifc_.set_on_complete_rx([&]() { rx_unfulfilled.Signal(); });
+    auto* payload_bytes = reinterpret_cast<uint8_t*>(&payload);
+    env.fake_function_.fake_endpoint(bulk_out_addr)
+        .RequestComplete(ZX_OK,
+                         std::vector<uint8_t>(payload_bytes, payload_bytes + sizeof(payload)));
+  });
+  requeued.Wait();
+  rx_unfulfilled.Wait();
+  driver_test_.RunInEnvironmentTypeContext([&](RndisFunctionTestEnvironment& env) {
+    env.fake_function_.fake_endpoint(bulk_out_addr).set_on_queue_requests(nullptr);
+    env.fake_ifc_.set_on_complete_rx(nullptr);
+    std::optional rx = env.fake_ifc_.PopCompleteRx();
+    ASSERT_TRUE(rx.has_value());
+    ASSERT_EQ(rx->data().size(), 1u);
+    EXPECT_EQ(rx->data()[0].id(), 222u);
+    EXPECT_EQ(rx->data()[0].length(), 0u);
+    EXPECT_FALSE(env.fake_ifc_.PopCompleteRx().has_value());
+  });
+
+  uint32_t receive_errors = 0;
+  size_t actual = 0;
+  QueryOid(OID_GEN_XMIT_ERROR, &receive_errors, sizeof(receive_errors), &actual);
+  EXPECT_EQ(receive_errors, 1u);
+
+  uint32_t receive_ok = 0;
+  QueryOid(OID_GEN_XMIT_OK, &receive_ok, sizeof(receive_ok), &actual);
+  EXPECT_EQ(receive_ok, 0u);
+
+  // 2. Queue an invalid VMO ID buffer, an out-of-bounds region buffer, and a valid buffer: a
+  // single valid RX packet must pop and return both invalid buffers unfulfilled while delivering
+  // the packet into the valid buffer without wedging the queue.
+  std::array<fnetdev::wire::RxSpaceBuffer, 3> mixed_buffers = {{
+      {.id = 223, .region = {.vmo = 99, .offset = 0, .length = 4096}},
+      {.id = 224, .region = {.vmo = kVmoId, .offset = 4000, .length = 256}},
+      {.id = 225, .region = {.vmo = kVmoId, .offset = 0, .length = 4096}},
+  }};
+  ASSERT_TRUE(net_impl_client_.buffer(arena)
+                  ->QueueRxSpace(fidl::VectorView<fnetdev::wire::RxSpaceBuffer>::FromExternal(
+                      mixed_buffers.data(), mixed_buffers.size()))
+                  .ok());
+
+  libsync::Completion rx_completed;
+  driver_test_.RunInEnvironmentTypeContext([&](RndisFunctionTestEnvironment& env) {
+    env.fake_ifc_.set_on_complete_rx([&]() { rx_completed.Signal(); });
+    auto* payload_bytes = reinterpret_cast<uint8_t*>(&payload);
+    env.fake_function_.fake_endpoint(bulk_out_addr)
+        .RequestComplete(ZX_OK,
+                         std::vector<uint8_t>(payload_bytes, payload_bytes + sizeof(payload)));
+  });
+  rx_completed.Wait();
+  driver_test_.RunInEnvironmentTypeContext([&](RndisFunctionTestEnvironment& env) {
+    env.fake_ifc_.set_on_complete_rx(nullptr);
+    std::optional rx1 = env.fake_ifc_.PopCompleteRx();
+    ASSERT_TRUE(rx1.has_value());
+    EXPECT_EQ(rx1->data()[0].id(), 223u);
+    EXPECT_EQ(rx1->data()[0].length(), 0u);
+
+    std::optional rx2 = env.fake_ifc_.PopCompleteRx();
+    ASSERT_TRUE(rx2.has_value());
+    EXPECT_EQ(rx2->data()[0].id(), 224u);
+    EXPECT_EQ(rx2->data()[0].length(), 0u);
+
+    std::optional rx3 = env.fake_ifc_.PopCompleteRx();
+    ASSERT_TRUE(rx3.has_value());
+    EXPECT_EQ(rx3->data()[0].id(), 225u);
+    EXPECT_EQ(rx3->data()[0].length(), sizeof(payload.data));
+
+    EXPECT_FALSE(env.fake_ifc_.PopCompleteRx().has_value());
+  });
+
+  std::array<char, sizeof(payload.data)> received_data = {};
+  ASSERT_OK(vmo.read(received_data.data(), 0, received_data.size()));
+  EXPECT_EQ(memcmp(received_data.data(), payload.data, sizeof(payload.data)), 0);
+
+  QueryOid(OID_GEN_XMIT_OK, &receive_ok, sizeof(receive_ok), &actual);
+  EXPECT_EQ(receive_ok, 1u);
+}
+
+TEST_F(RndisFunctionTest, HaltDisableEndpointFailure) {
+  RunInFunctionContext(
+      [](FakeFunction& function) { function.set_disable_endpoint_status(ZX_ERR_IO); });
+
+  fidl::Result result = function_interface_client_->SetConfigured({{
+      .configured = false,
+      .speed = fdescriptor::UsbSpeed::kFull,
+  }});
+  ASSERT_TRUE(result.is_error());
+  ASSERT_TRUE(result.error_value().is_domain_error());
+  EXPECT_STATUS(result.error_value().domain_error(), ZX_ERR_IO);
+
+  RunInFunctionContext([](FakeFunction& function) {
+    EXPECT_EQ(function.DisableEpCalls(), 3u);
+    function.set_disable_endpoint_status(ZX_OK);
+  });
+}
+
+TEST_F(RndisFunctionTest, SetConfiguredConfigureEndpointFailure) {
+  RunInFunctionContext(
+      [](FakeFunction& function) { function.set_config_endpoint_status(ZX_ERR_NO_RESOURCES); });
+
+  fidl::Result result = function_interface_client_->SetConfigured({{
+      .configured = true,
+      .speed = fdescriptor::UsbSpeed::kFull,
+  }});
+  ASSERT_TRUE(result.is_error());
+  ASSERT_TRUE(result.error_value().is_domain_error());
+  EXPECT_STATUS(result.error_value().domain_error(), ZX_ERR_NO_RESOURCES);
+
+  RunInFunctionContext([](FakeFunction& function) { function.set_config_endpoint_status(ZX_OK); });
+}
+
+TEST_F(RndisFunctionTest, RxCompletionIoNotPresent) {
+  StartNetworkDevice();
+  SetPacketFilter();
+
+  uint8_t bulk_out_addr = 0;
+  driver_test_.RunInDriverContext(
+      [&](RndisFunction& driver) { bulk_out_addr = driver.BulkOutAddress(); });
+
+  // Complete all RX requests with ZX_ERR_IO_NOT_PRESENT; they should be returned to the pool (not
+  // requeued) via ProcessRxCompletions() while shutting_down_ is still false.
+  for (size_t i = 0; i < RndisFunction::kRequestPoolSize; ++i) {
+    driver_test_.RunInEnvironmentTypeContext([&](RndisFunctionTestEnvironment& env) {
+      env.fake_function_.fake_endpoint(bulk_out_addr)
+          .RequestComplete(ZX_ERR_IO_NOT_PRESENT, std::vector<uint8_t>{});
+    });
+  }
+
+  ASSERT_TRUE(driver_test_.runtime().RunWithTimeoutOrUntil(
+      [&]() {
+        return driver_test_.RunInDriverContext<bool>(
+            [](RndisFunction& driver) { return driver.BulkOutRequestsFullForTesting(); });
+      },
+      zx::duration::infinite()));
+
+  driver_test_.RunInEnvironmentTypeContext([&](RndisFunctionTestEnvironment& env) {
+    EXPECT_EQ(env.fake_function_.fake_endpoint(bulk_out_addr).pending_request_count(), 0u);
+    EXPECT_FALSE(env.fake_ifc_.PopCompleteRx().has_value());
+  });
+
+  uint32_t receive_errors = 0;
+  size_t actual = 0;
+  QueryOid(OID_GEN_XMIT_ERROR, &receive_errors, sizeof(receive_errors), &actual);
+  EXPECT_EQ(receive_errors, 0u);
+}
+
+TEST_F(RndisFunctionTest, RxCompletionCanceled) {
+  StartNetworkDevice();
+  SetPacketFilter();
+
+  uint8_t bulk_out_addr = 0;
+  driver_test_.RunInDriverContext(
+      [&](RndisFunction& driver) { bulk_out_addr = driver.BulkOutAddress(); });
+
+  // Complete all RX requests with ZX_ERR_CANCELED; they should be returned to the pool and NOT
+  // requeued via ProcessRxCompletions() while shutting_down_ is still false.
+  for (size_t i = 0; i < RndisFunction::kRequestPoolSize; ++i) {
+    driver_test_.RunInEnvironmentTypeContext([&](RndisFunctionTestEnvironment& env) {
+      env.fake_function_.fake_endpoint(bulk_out_addr)
+          .RequestComplete(ZX_ERR_CANCELED, std::vector<uint8_t>{});
+    });
+  }
+
+  ASSERT_TRUE(driver_test_.runtime().RunWithTimeoutOrUntil(
+      [&]() {
+        return driver_test_.RunInDriverContext<bool>(
+            [](RndisFunction& driver) { return driver.BulkOutRequestsFullForTesting(); });
+      },
+      zx::duration::infinite()));
+
+  driver_test_.RunInEnvironmentTypeContext([&](RndisFunctionTestEnvironment& env) {
+    EXPECT_EQ(env.fake_function_.fake_endpoint(bulk_out_addr).pending_request_count(), 0u);
+    EXPECT_FALSE(env.fake_ifc_.PopCompleteRx().has_value());
+  });
+
+  uint32_t receive_errors = 0;
+  size_t actual = 0;
+  QueryOid(OID_GEN_XMIT_ERROR, &receive_errors, sizeof(receive_errors), &actual);
+  EXPECT_EQ(receive_errors, 0u);
+}
+
+TEST_F(RndisFunctionTest, RxCompletionFailure) {
+  StartNetworkDevice();
+  SetPacketFilter();
+
+  uint8_t bulk_out_addr = 0;
+  driver_test_.RunInDriverContext(
+      [&](RndisFunction& driver) { bulk_out_addr = driver.BulkOutAddress(); });
+
+  libsync::Completion requeued;
+  driver_test_.RunInEnvironmentTypeContext([&](RndisFunctionTestEnvironment& env) {
+    env.fake_function_.fake_endpoint(bulk_out_addr).set_on_queue_requests([&](FakeEndpoint&) {
+      requeued.Signal();
+    });
+    env.fake_function_.fake_endpoint(bulk_out_addr)
+        .RequestComplete(ZX_ERR_IO_REFUSED, std::vector<uint8_t>{});
+  });
+  requeued.Wait();
+  driver_test_.RunInEnvironmentTypeContext([&](RndisFunctionTestEnvironment& env) {
+    env.fake_function_.fake_endpoint(bulk_out_addr).set_on_queue_requests(nullptr);
+    EXPECT_FALSE(env.fake_ifc_.PopCompleteRx().has_value());
+  });
+
+  uint32_t receive_errors = 0;
+  size_t actual = 0;
+  QueryOid(OID_GEN_XMIT_ERROR, &receive_errors, sizeof(receive_errors), &actual);
+  EXPECT_EQ(receive_errors, 1u);
+}
+
+TEST_F(RndisFunctionTest, QueueTxOversizedBatchAndStop) {
+  fdf::Arena arena(kArenaTag);
+  StartNetworkDevice();
+  constexpr uint8_t kVmoId = 1;
+  zx::vmo vmo;
+  ASSERT_OK(zx::vmo::create(RNDIS_MAX_XFER_SIZE, 0, &vmo));
+  fdf::WireUnownedResult vmo_result =
+      net_impl_client_.buffer(arena)->PrepareVmo(kVmoId, std::move(vmo));
+  ASSERT_TRUE(vmo_result.ok()) << vmo_result.error().FormatDescription();
+  ASSERT_OK(vmo_result.value().s);
+
+  SetPacketFilter();
+  uint8_t bulk_in_addr = 0;
+  driver_test_.RunInDriverContext(
+      [&](RndisFunction& driver) { bulk_in_addr = driver.BulkInAddress(); });
+
+  // 1. An over-MTU single buffer (> kMtu) must be rejected with ZX_ERR_INVALID_ARGS.
+  libsync::Completion tx_completed;
+  driver_test_.RunInEnvironmentTypeContext([&](RndisFunctionTestEnvironment& env) {
+    env.fake_ifc_.set_on_complete_tx([&]() { tx_completed.Signal(); });
+  });
+  {
+    fnetdev::wire::BufferRegion over_mtu_region = {
+        .vmo = kVmoId,
+        .offset = 0,
+        .length = RndisFunction::kMtu + 1,
+    };
+    fnetdev::wire::TxBuffer over_mtu_tx{
+        .id = 999,
+        .data = fidl::VectorView<fnetdev::wire::BufferRegion>::FromExternal(&over_mtu_region, 1),
+    };
+    ASSERT_OK(
+        net_impl_client_.buffer(arena)
+            ->QueueTx(fidl::VectorView<fnetdev::wire::TxBuffer>::FromExternal(&over_mtu_tx, 1))
+            .status());
+  }
+  tx_completed.Wait();
+  tx_completed.Reset();
+  driver_test_.RunInEnvironmentTypeContext([&](RndisFunctionTestEnvironment& env) {
+    std::optional complete = env.fake_ifc_.PopCompleteTx();
+    ASSERT_TRUE(complete.has_value());
+    EXPECT_EQ(complete->id, 999u);
+    EXPECT_STATUS(complete->status, ZX_ERR_INVALID_ARGS);
+  });
+
+  // 2. Submit an oversized batch (kRequestPoolSize + 2) in a single QueueTx call.
+  constexpr size_t kOversizedBatch = RndisFunction::kRequestPoolSize + 2;
+  std::array<fnetdev::wire::BufferRegion, kOversizedBatch> regions;
+  std::array<fnetdev::wire::TxBuffer, kOversizedBatch> tx_buffers;
+  for (size_t i = 0; i < kOversizedBatch; ++i) {
+    regions[i] = {.vmo = kVmoId, .offset = 0, .length = 64};
+    tx_buffers[i] = {
+        .id = static_cast<uint32_t>(i),
+        .data = fidl::VectorView<fnetdev::wire::BufferRegion>::FromExternal(&regions[i], 1),
+    };
+  }
+
+  libsync::Completion tx_enqueued;
+  RunInFunctionContext([&](FakeFunction& function) {
+    function.fake_endpoint(bulk_in_addr).set_on_queue_requests([&](FakeEndpoint& ep) {
+      if (ep.pending_request_count() == RndisFunction::kRequestPoolSize) {
+        tx_enqueued.Signal();
+      }
+    });
+  });
+
+  ASSERT_OK(net_impl_client_.buffer(arena)
+                ->QueueTx(fidl::VectorView<fnetdev::wire::TxBuffer>::FromExternal(
+                    tx_buffers.data(), tx_buffers.size()))
+                .status());
+  tx_enqueued.Wait();
+  tx_completed.Wait();
+  tx_completed.Reset();
+
+  driver_test_.RunInEnvironmentTypeContext([&](RndisFunctionTestEnvironment& env) {
+    env.fake_function_.fake_endpoint(bulk_in_addr).set_on_queue_requests(nullptr);
+    for (size_t i = RndisFunction::kRequestPoolSize; i < kOversizedBatch; ++i) {
+      std::optional complete = env.fake_ifc_.PopCompleteTx();
+      ASSERT_TRUE(complete.has_value());
+      EXPECT_EQ(complete->id, static_cast<uint32_t>(i));
+      EXPECT_STATUS(complete->status, ZX_ERR_NO_RESOURCES);
+    }
+    EXPECT_FALSE(env.fake_ifc_.PopCompleteTx().has_value());
+  });
+
+  // 3. Stop() discards the 8 pending TX buffers with ZX_ERR_CANCELED before replying.
+  ASSERT_OK(net_impl_client_.buffer(arena)->Stop().status());
+  ReadIndicateStatus(RNDIS_STATUS_MEDIA_DISCONNECT);
+  tx_completed.Wait();
+  driver_test_.RunInEnvironmentTypeContext([&](RndisFunctionTestEnvironment& env) {
+    env.fake_ifc_.set_on_complete_tx(nullptr);
+    for (size_t i = 0; i < RndisFunction::kRequestPoolSize; ++i) {
+      std::optional complete = env.fake_ifc_.PopCompleteTx();
+      ASSERT_TRUE(complete.has_value());
+      EXPECT_EQ(complete->id, static_cast<uint32_t>(i));
+      EXPECT_STATUS(complete->status, ZX_ERR_CANCELED);
+    }
+    EXPECT_FALSE(env.fake_ifc_.PopCompleteTx().has_value());
+  });
+
+  // 4. Completing the underlying USB requests afterward must not emit duplicate CompleteTx events.
+  for (size_t i = 0; i < RndisFunction::kRequestPoolSize; ++i) {
+    RunInFunctionContext([&](FakeFunction& function) {
+      function.fake_endpoint(bulk_in_addr).RequestComplete(ZX_ERR_CANCELED, 0);
+    });
+  }
+  ASSERT_TRUE(driver_test_.runtime().RunWithTimeoutOrUntil(
+      [&]() {
+        return driver_test_.RunInDriverContext<bool>(
+            [](RndisFunction& driver) { return driver.BulkInRequestsFullForTesting(); });
+      },
+      zx::duration::infinite()));
+  driver_test_.RunInEnvironmentTypeContext([&](RndisFunctionTestEnvironment& env) {
+    EXPECT_FALSE(env.fake_ifc_.PopCompleteTx().has_value());
+  });
 }
 
 }  // namespace

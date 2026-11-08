@@ -833,37 +833,40 @@ static void brcmf_notify_escan_complete(struct brcmf_cfg80211_info* cfg, struct 
   fuchsia_wlan_fullmac_wire::WlanScanResult scan_result =
       fuchsia_wlan_fullmac_wire::WlanScanResult::kSuccess;
 
-  if (!ndev) {
-    BRCMF_WARN("Device does not exist, skipping escan complete notify.");
-    return;
-  }
-
   // Canceling if it's inactive is OK. Checking if it's active just invites race conditions.
   cfg->escan_timer->Stop();
-  brcmf_scan_config_mpc(ifp, 1);
+  // `ifp` is null if the interface the scan ran on has already been removed.
+  if (ifp) {
+    brcmf_scan_config_mpc(ifp, 1);
+  }
 
-  if (cfg->scan_in_progress) {
-    BRCMF_IFDBG(WLANIF, ndev, "ESCAN Completed scan: %s",
-                status == BRCMF_E_STATUS_SUCCESS ? "Done"
-                : status == BRCMF_E_STATUS_ABORT ? "Aborted"
-                                                 : "Errored");
-    cfg->scan_in_progress = false;
+  // Only one caller gets to report the end of a scan, even if a scan completion and an abort race.
+  if (cfg->scan_in_progress.exchange(false)) {
+    if (!ndev) {
+      // Still clear the scan state below so that the next scan isn't rejected as busy.
+      BRCMF_WARN("Device does not exist, skipping escan complete notify.");
+    } else {
+      BRCMF_IFDBG(WLANIF, ndev, "ESCAN Completed scan: %s",
+                  status == BRCMF_E_STATUS_SUCCESS ? "Done"
+                  : status == BRCMF_E_STATUS_ABORT ? "Aborted"
+                                                   : "Errored");
 
-    switch (status) {
-      case BRCMF_E_STATUS_SUCCESS:
-        scan_result = fuchsia_wlan_fullmac_wire::WlanScanResult::kSuccess;
-        break;
-      case BRCMF_E_STATUS_NEWASSOC:
-        // In this case, the scan process has been interrupted by an assoc inside the firwmare.
-      case BRCMF_E_STATUS_ABORT:
-        BRCMF_INFO("Sending notification of aborted scan: %d", status);
-        scan_result = fuchsia_wlan_fullmac_wire::WlanScanResult::kCanceledByDriverOrFirmware;
-        break;
-      default:
-        BRCMF_WARN("Sending notification of failed scan: %d", status);
-        scan_result = fuchsia_wlan_fullmac_wire::WlanScanResult::kInternalError;
+      switch (status) {
+        case BRCMF_E_STATUS_SUCCESS:
+          scan_result = fuchsia_wlan_fullmac_wire::WlanScanResult::kSuccess;
+          break;
+        case BRCMF_E_STATUS_NEWASSOC:
+          // In this case, the scan process has been interrupted by an assoc inside the firwmare.
+        case BRCMF_E_STATUS_ABORT:
+          BRCMF_INFO("Sending notification of aborted scan: %d", status);
+          scan_result = fuchsia_wlan_fullmac_wire::WlanScanResult::kCanceledByDriverOrFirmware;
+          break;
+        default:
+          BRCMF_WARN("Sending notification of failed scan: %d", status);
+          scan_result = fuchsia_wlan_fullmac_wire::WlanScanResult::kInternalError;
+      }
+      brcmf_signal_scan_end(ndev, ndev->scan_txn_id, scan_result);
     }
-    brcmf_signal_scan_end(ndev, ndev->scan_txn_id, scan_result);
   }
 
   if (!brcmf_test_and_clear_bit(brcmf_scan_status_bit_t::BUSY, &cfg->scan_status)) {
@@ -2193,12 +2196,14 @@ void brcmf_return_roam_conf(struct net_device* ndev, const uint8_t* selected_bss
 std::vector<uint8_t> brcmf_find_ssid_in_ies(const uint8_t* ie, size_t ie_len) {
   std::vector<uint8_t> ssid;
   size_t offset = 0;
-  while (offset < ie_len) {
+  while (offset + TLV_HDR_LEN <= ie_len) {
     uint8_t type = ie[offset];
     uint8_t length = ie[offset + TLV_LEN_OFF];
+    if (length > ie_len - (offset + TLV_HDR_LEN)) {
+      break;  // Malformed element so reject it
+    }
     if (type == WLAN_IE_TYPE_SSID) {
-      size_t ssid_len = std::min<size_t>(length, ie_len - (offset + TLV_HDR_LEN));
-      ssid_len = std::min<size_t>(ssid_len, fuchsia_wlan_ieee80211::kMaxSsidByteLen);
+      size_t ssid_len = std::min<size_t>(length, fuchsia_wlan_ieee80211::kMaxSsidByteLen);
       auto start = ie + offset + TLV_HDR_LEN;
       ssid = std::vector<uint8_t>(start, start + ssid_len);
       break;
@@ -3364,7 +3369,11 @@ static zx_status_t brcmf_abort_scanning(struct brcmf_cfg80211_info* cfg) {
 
   if (cfg->scan_in_progress) {
     escan->escan_state = WL_ESCAN_STATE_IDLE;
-    if ((err = brcmf_abort_escan(escan->ifp)) != ZX_OK) {
+    // `escan->ifp` is cleared when its interface is freed. There is then nothing to abort in
+    // firmware.
+    if (escan->ifp == nullptr) {
+      BRCMF_INFO("Scan interface already removed, skipping firmware scan abort");
+    } else if ((err = brcmf_abort_escan(escan->ifp)) != ZX_OK) {
       BRCMF_ERR("Abort scan failed -- error: %s", zx_status_get_string(err));
     }
   }
@@ -5752,11 +5761,6 @@ zx_status_t brcmf_if_get_iface_histogram_stats(
   }
   auto stats_builder = fuchsia_wlan_stats::wire::IfaceHistogramStats::Builder(arena);
 
-  ndev->stats.noise_floor_histograms = {};
-  ndev->stats.rssi_histograms = {};
-  ndev->stats.rx_rate_index_histograms = {};
-  ndev->stats.snr_histograms = {};
-
   if (brcmf_feat_is_enabled(ifp, BRCMF_FEAT_MFG)) {
     // MFG builds do not support many of the stats iovars.
     return ZX_ERR_NOT_SUPPORTED;
@@ -5784,30 +5788,23 @@ zx_status_t brcmf_if_get_iface_histogram_stats(
               histograms_report.antennaid.idx);
     return antenna_id_status;
   }
-  ndev->stats.noise_floor_histograms.resize(1);
+  fidl::VectorView<fuchsia_wlan_stats::wire::NoiseFloorHistogram> noise_floor_histograms(arena, 1);
   brcmf_convert_histograms_report_noise_floor(histograms_report, antenna_id,
-                                              ndev->stats.noise_floor_histograms.data(), arena);
-  ndev->stats.rssi_histograms.resize(1);
-  brcmf_convert_histograms_report_rssi(histograms_report, antenna_id,
-                                       ndev->stats.rssi_histograms.data(), arena);
-  ndev->stats.rx_rate_index_histograms.resize(1);
+                                              noise_floor_histograms.data(), arena);
+  fidl::VectorView<fuchsia_wlan_stats::wire::RssiHistogram> rssi_histograms(arena, 1);
+  brcmf_convert_histograms_report_rssi(histograms_report, antenna_id, rssi_histograms.data(),
+                                       arena);
+  fidl::VectorView<fuchsia_wlan_stats::wire::RxRateIndexHistogram> rx_rate_index_histograms(arena,
+                                                                                            1);
   brcmf_convert_histograms_report_rx_rate_index(histograms_report, antenna_id,
-                                                ndev->stats.rx_rate_index_histograms.data(), arena);
-  ndev->stats.snr_histograms.resize(1);
-  brcmf_convert_histograms_report_snr(histograms_report, antenna_id,
-                                      ndev->stats.snr_histograms.data(), arena);
+                                                rx_rate_index_histograms.data(), arena);
+  fidl::VectorView<fuchsia_wlan_stats::wire::SnrHistogram> snr_histograms(arena, 1);
+  brcmf_convert_histograms_report_snr(histograms_report, antenna_id, snr_histograms.data(), arena);
 
-  // Conversion from banjo to FIDL table.
-  stats_builder.noise_floor_histograms(
-      fidl::VectorView<fuchsia_wlan_stats::wire::NoiseFloorHistogram>(
-          arena, ndev->stats.noise_floor_histograms));
-  stats_builder.rssi_histograms(fidl::VectorView<fuchsia_wlan_stats::wire::RssiHistogram>(
-      arena, ndev->stats.rssi_histograms));
-  stats_builder.rx_rate_index_histograms(
-      fidl::VectorView<fuchsia_wlan_stats::wire::RxRateIndexHistogram>(
-          arena, ndev->stats.rx_rate_index_histograms));
-  stats_builder.snr_histograms(
-      fidl::VectorView<fuchsia_wlan_stats::wire::SnrHistogram>(arena, ndev->stats.snr_histograms));
+  stats_builder.noise_floor_histograms(noise_floor_histograms);
+  stats_builder.rssi_histograms(rssi_histograms);
+  stats_builder.rx_rate_index_histograms(rx_rate_index_histograms);
+  stats_builder.snr_histograms(snr_histograms);
 
   *out_stats = stats_builder.Build();
 
@@ -6646,6 +6643,18 @@ void brcmf_free_vif(struct brcmf_cfg80211_vif* vif) {
 
 void brcmf_free_net_device_vif(struct net_device* ndev) {
   struct brcmf_if* ifp = ndev_to_if(ndev);
+  // `ifp` is about to be freed. Drop the cached escan pointer to it and abort any scan in progress.
+  if (ifp && ifp->drvr && ifp->drvr->config) {
+    struct brcmf_cfg80211_info* cfg = ifp->drvr->config;
+    if (cfg->escan_info.ifp == ifp) {
+      cfg->escan_info.ifp = nullptr;
+      cfg->escan_info.escan_state = WL_ESCAN_STATE_IDLE;
+      if (cfg->scan_in_progress) {
+        BRCMF_WARN("Aborting scan, interface %d is being freed", ifp->bsscfgidx);
+        brcmf_notify_escan_complete(cfg, nullptr, BRCMF_E_STATUS_ABORT);
+      }
+    }
+  }
   if (ifp && ifp->vif) {
     brcmf_free_vif(ifp->vif);
     ifp->vif = nullptr;
@@ -7901,8 +7910,9 @@ static zx_status_t brcmf_notify_vif_event(struct brcmf_if* ifp, const struct brc
 
   switch (ifevent->action) {
     case BRCMF_E_IF_ADD:
-      /* waiting process may have timed out */
-      if (!cfg->vif_event.vif) {
+      // Only accept the ADD the host is waiting for. The wait may have timed out, the host may be
+      // waiting for a different action, or the vif may already have an interface.
+      if (!vif || cfg->vif_event_pending_action != BRCMF_E_IF_ADD || vif->ifp != nullptr) {
         mtx_unlock(&event->vif_event_lock);
         return ZX_ERR_SHOULD_WAIT;
       }
@@ -7912,10 +7922,8 @@ static zx_status_t brcmf_notify_vif_event(struct brcmf_if* ifp, const struct brc
       if (ifp->ndev) {
         vif->wdev.netdev = ifp->ndev;
       }
+      sync_completion_signal(&event->vif_event_wait);
       mtx_unlock(&event->vif_event_lock);
-      if (event->action == cfg->vif_event_pending_action) {
-        sync_completion_signal(&event->vif_event_wait);
-      }
       return ZX_OK;
 
     case BRCMF_E_IF_DEL:
@@ -8472,6 +8480,21 @@ bool brcmf_cfg80211_vif_event_armed(struct brcmf_cfg80211_info* cfg) {
   mtx_unlock(&event->vif_event_lock);
 
   return armed;
+}
+
+bool brcmf_cfg80211_vif_event_pending_add(struct brcmf_cfg80211_info* cfg) {
+  if (cfg == nullptr) {
+    return false;
+  }
+  struct brcmf_cfg80211_vif_event* event = &cfg->vif_event;
+  bool pending_add;
+
+  mtx_lock(&event->vif_event_lock);
+  pending_add = event->vif != nullptr && cfg->vif_event_pending_action == BRCMF_E_IF_ADD &&
+                event->vif->ifp == nullptr;
+  mtx_unlock(&event->vif_event_lock);
+
+  return pending_add;
 }
 
 zx_status_t brcmf_cfg80211_wait_vif_event(struct brcmf_cfg80211_info* cfg, zx_duration_t timeout) {

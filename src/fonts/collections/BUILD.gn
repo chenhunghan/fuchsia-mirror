@@ -4,6 +4,7 @@
 
 import("//src/fonts/build/fonts.gni")
 
+# LINT.IfChange
 local_font_bundle("alegreya-local") {
   asset_names = [
     "AlegreyaSansSC-Bold.ttf",
@@ -271,3 +272,4 @@ font_collection("test-fonts-large-collection") {
 font_collection("empty-font-collection") {
   empty = true
 }
+# LINT.ThenChange(BUILD.bazel)

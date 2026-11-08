@@ -1,0 +1,21 @@
+# Copyright 2026 The Fuchsia Authors
+#
+# Use of this source code is governed by a MIT-style
+# license that can be found in the LICENSE file or at
+# https://opensource.org/licenses/MIT
+
+import("//build/cpp/library_headers.gni")
+
+library_headers("headers") {
+  headers = [ "phys/uart/driver.h" ]
+  public_deps = [ "//zircon/system/ulib/uart" ]
+}
+
+source_set("uart") {
+  public_deps = [ ":headers" ]
+  sources = [ "driver.cc" ]
+  deps = [
+    "//zircon/kernel/lib/ktl",
+    "//zircon/kernel/lib/libc",
+  ]
+}

@@ -137,6 +137,17 @@ rust_syscall_tests = [
       "//third_party/rust_crates:zerocopy",
     ]
   },
+  {
+    name = "usb_test"
+    source_root = "src/usb_test.rs"
+    includes = [ "//src/starnix/tests/syscalls/rust/meta/usb_test.shard.cml" ]
+    deps = [
+      "//src/starnix/lib/linux_uapi",
+      "//third_party/rust_crates:libc",
+      "//third_party/rust_crates:serial_test",
+      "//third_party/rust_crates:zerocopy",
+    ]
+  },
 ]
 
 generated_expectations_file("syscalls_rust_test_expectations") {
@@ -163,12 +174,42 @@ foreach(test_def, rust_syscall_tests) {
     forward_variables_from(test_def,
                            "*",
                            [
+                             "includes",
                              "name",
                              "resources",
                            ])
     test_target_kernel = "linux"
     custom_expectations = ":linux_rust_test_expectations"
   }
+}
+
+# Fake USB device provider serving fuchsia.hardware.usb.UsbService, for
+# usb_test.
+rustc_binary("fake_usb_device_bin") {
+  testonly = true
+  edition = "2024"
+  output_name = "fake_usb_device"
+  source_root = "src/fake_usb_device.rs"
+  sources = [ "src/fake_usb_device.rs" ]
+  deps = [
+    "//sdk/fidl/fuchsia.hardware.usb:fuchsia.hardware.usb_rust",
+    "//sdk/fidl/fuchsia.hardware.usb.descriptor:fuchsia.hardware.usb.descriptor_rust",
+    "//sdk/fidl/fuchsia.hardware.usb.endpoint:fuchsia.hardware.usb.endpoint_rust",
+    "//sdk/fidl/fuchsia.hardware.usb.request:fuchsia.hardware.usb.request_rust",
+    "//sdk/rust/zx",
+    "//src/lib/fuchsia",
+    "//src/lib/fuchsia-async",
+    "//src/lib/fuchsia-component",
+    "//src/lib/fuchsia-sync",
+    "//third_party/rust_crates:anyhow",
+    "//third_party/rust_crates:futures",
+  ]
+}
+
+fuchsia_component("fake_usb_device") {
+  testonly = true
+  manifest = "meta/fake_usb_device.cml"
+  deps = [ ":fake_usb_device_bin" ]
 }
 
 # Fake power stats provider serving fuchsia.hardware.power.stats.Service, for
@@ -212,6 +253,7 @@ fuchsia_test_package("starnix_syscalls_rust_tests") {
   subpackages += [ "//src/starnix/containers/debian:debian_package" ]
   deps = [
     ":fake_power_stats",
+    ":fake_usb_device",
     "//src/lib/testing/expectation:expectation_comparer",
   ]
   test_specs = {

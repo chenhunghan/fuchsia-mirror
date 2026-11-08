@@ -24,6 +24,7 @@ namespace forensics::feedback {
 namespace {
 
 using testing::BuildLogMessage;
+using ::testing::UnorderedElementsAre;
 using ::testing::UnorderedElementsAreArray;
 
 MATCHER_P2(MatchesCobaltEvent, expected_type, expected_metric_id, "") {
@@ -198,8 +199,8 @@ TEST_F(NamespaceInitTest, CreatePreviousLogsFile) {
   }
 
   std::string log_file = MakeFilepath(RootdDir(), "log.system.previous_boot.txt");
-  CreatePreviousLogsFile(&cobalt, /*max_decompressed_size=*/StorageSize::Kilobytes(128), logs_dir,
-                         log_file);
+  CreatePreviousLogsFile(&cobalt, /*max_decompressed_size=*/StorageSize::Kilobytes(128),
+                         /*last_boot_uptime=*/std::nullopt, logs_dir, log_file);
 
   RunLoopUntilIdle();
 
@@ -213,6 +214,107 @@ TEST_F(NamespaceInitTest, CreatePreviousLogsFile) {
           MatchesCobaltEvent(cobalt::EventType::kInteger,
                              cobalt_registry::kPreviousBootLogCompressionRatioMigratedMetricId),
       }));
+}
+
+TEST_F(NamespaceInitTest, CreatePreviousLogsFileLogsMetricsAtCapacity) {
+  timekeeper::TestClock clock;
+  cobalt::Logger cobalt(dispatcher(), services(), &clock);
+  SetUpCobaltServer(std::make_unique<stubs::CobaltLoggerFactory>(dispatcher()));
+
+  std::string logs_dir;
+  ASSERT_TRUE(temp_dir_.NewTempDir(&logs_dir));
+
+  feedback_data::system_log_recorder::ProductionEncoder encoder;
+  const std::string unencoded =
+      "[00002.000][07559][07687][] INFO: line 0\n"
+      "!!! MESSAGE REPEATED 2 MORE TIMES !!!\n"
+      "[00124.000][07559][07687][] INFO: line 1\n";
+  // File 0 is missing, so the log buffer is at capacity.
+  WriteFile(MakeFilepath(logs_dir, 1), encoder.Encode(unencoded));
+
+  const std::string log_file = MakeFilepath(RootdDir(), "log.system.previous_boot.txt");
+  CreatePreviousLogsFile(&cobalt, /*max_decompressed_size=*/StorageSize::Kilobytes(128),
+                         /*last_boot_uptime=*/zx::sec(124) + zx::msec(55), logs_dir, log_file);
+
+  RunLoopUntilIdle();
+
+  EXPECT_THAT(
+      ReceivedCobaltEvents(),
+      UnorderedElementsAre(
+          MatchesCobaltEvent(cobalt::EventType::kInteger,
+                             cobalt_registry::kPreviousBootLogCompressionRatioMigratedMetricId),
+          cobalt::Event(cobalt::EventType::kInteger,
+                        cobalt_registry::kPreviousBootLogMessageCountAtCapacityMetricId,
+                        {cobalt_registry::FeedbackMetricDimensionProvider::Feedback}, 4),
+          cobalt::Event(cobalt::EventType::kInteger,
+                        cobalt_registry::kPreviousBootLogDeduplicatedMessageCountAtCapacityMetricId,
+                        {cobalt_registry::FeedbackMetricDimensionProvider::Feedback}, 2),
+          cobalt::Event(cobalt::EventType::kInteger,
+                        cobalt_registry::kPreviousBootLogDurationAtCapacityMetricId,
+                        {cobalt_registry::FeedbackMetricDimensionProvider::Feedback}, 2),
+          cobalt::Event(cobalt::EventType::kInteger,
+                        cobalt_registry::kPreviousBootLogLastTimestampDeltaMetricId,
+                        {cobalt_registry::FeedbackMetricDimensionProvider::Feedback}, 55)));
+}
+
+TEST_F(NamespaceInitTest, CreatePreviousLogsFileLogsMetricsNotAtCapacity) {
+  timekeeper::TestClock clock;
+  cobalt::Logger cobalt(dispatcher(), services(), &clock);
+  SetUpCobaltServer(std::make_unique<stubs::CobaltLoggerFactory>(dispatcher()));
+
+  std::string logs_dir;
+  ASSERT_TRUE(temp_dir_.NewTempDir(&logs_dir));
+
+  feedback_data::system_log_recorder::ProductionEncoder encoder;
+  const std::string unencoded =
+      "[00002.000][07559][07687][] INFO: line 0\n"
+      "[00124.000][07559][07687][] INFO: line 1\n";
+  WriteFile(MakeFilepath(logs_dir, 0), encoder.Encode(unencoded));
+
+  const std::string log_file = MakeFilepath(RootdDir(), "log.system.previous_boot.txt");
+  CreatePreviousLogsFile(&cobalt, /*max_decompressed_size=*/StorageSize::Kilobytes(128),
+                         /*last_boot_uptime=*/zx::sec(124) + zx::msec(55), logs_dir, log_file);
+
+  RunLoopUntilIdle();
+
+  EXPECT_THAT(
+      ReceivedCobaltEvents(),
+      UnorderedElementsAre(
+          MatchesCobaltEvent(cobalt::EventType::kInteger,
+                             cobalt_registry::kPreviousBootLogCompressionRatioMigratedMetricId),
+          cobalt::Event(cobalt::EventType::kInteger,
+                        cobalt_registry::kPreviousBootLogLastTimestampDeltaMetricId,
+                        {cobalt_registry::FeedbackMetricDimensionProvider::Feedback}, 55)));
+}
+
+TEST_F(NamespaceInitTest, CreatePreviousLogsFileLogsNegativeDelta) {
+  timekeeper::TestClock clock;
+  cobalt::Logger cobalt(dispatcher(), services(), &clock);
+  SetUpCobaltServer(std::make_unique<stubs::CobaltLoggerFactory>(dispatcher()));
+
+  std::string logs_dir;
+  ASSERT_TRUE(temp_dir_.NewTempDir(&logs_dir));
+
+  feedback_data::system_log_recorder::ProductionEncoder encoder;
+  const std::string unencoded =
+      "[00002.000][07559][07687][] INFO: line 0\n"
+      "[00120.000][07559][07687][] INFO: line 1\n";
+  WriteFile(MakeFilepath(logs_dir, 0), encoder.Encode(unencoded));
+
+  const std::string log_file = MakeFilepath(RootdDir(), "log.system.previous_boot.txt");
+  CreatePreviousLogsFile(&cobalt, /*max_decompressed_size=*/StorageSize::Kilobytes(128),
+                         /*last_boot_uptime=*/zx::sec(100), logs_dir, log_file);
+
+  RunLoopUntilIdle();
+
+  EXPECT_THAT(
+      ReceivedCobaltEvents(),
+      UnorderedElementsAre(
+          MatchesCobaltEvent(cobalt::EventType::kInteger,
+                             cobalt_registry::kPreviousBootLogCompressionRatioMigratedMetricId),
+          cobalt::Event(cobalt::EventType::kInteger,
+                        cobalt_registry::kPreviousBootLogLastTimestampDeltaMetricId,
+                        {cobalt_registry::FeedbackMetricDimensionProvider::Feedback}, -20000)));
 }
 
 }  // namespace

@@ -211,10 +211,9 @@ async fn do_copy<S: Directory, D: Directory, W: std::io::Write>(
 
 async fn is_file<D: Directory>(dir: &D, path: &PathBuf) -> Result<bool> {
     let parent_dir = open_parent_subdir_readable(path, dir)?;
-    let source_file = path.file_name().map_or_else(
-        || Err(CopyError::EmptyFileName),
-        |file| Ok(file.to_string_lossy().to_string()),
-    )?;
+    let source_file = path
+        .file_name()
+        .map_or(Err(CopyError::EmptyFileName), |file| Ok(file.to_string_lossy().to_string()))?;
 
     let remote_type = parent_dir.entry_type(&source_file).await?;
     match remote_type {
@@ -241,10 +240,7 @@ async fn maybe_expand_wildcards<D: Directory>(path: &PathBuf, dir: &D) -> Result
 
     let file_pattern = &path
         .file_name()
-        .map_or_else(
-            || Err(CopyError::EmptyFileName),
-            |file| Ok(file.to_string_lossy().to_string()),
-        )?
+        .map_or(Err(CopyError::EmptyFileName), |file| Ok(file.to_string_lossy().to_string()))?
         .replace("*", ".*"); // Regex syntax requires a . before wildcard.
 
     let entries = get_dirents_matching_pattern(&parent_dir, file_pattern.clone()).await?;

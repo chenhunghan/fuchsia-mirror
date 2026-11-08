@@ -108,6 +108,14 @@ _rustfmt = {
 #      of Zither.
 #    - Type: scope
 #
+#  * rust_formatter
+#    - Optional: A formatting specification for the Rust outputs of a backend
+#      that emits Rust alongside other languages (currently only `kernel`),
+#      whose `formatter` applies to the non-Rust outputs. Same shape as
+#      `formatter`; passed to Zither as `-rust-formatter`. Not consumed by
+#      zither_golden_files(), which compares the Rust goldens verbatim.
+#    - Type: scope
+#
 supported_zither_backend_info = {
   c = {
     output_namespace = {
@@ -158,6 +166,7 @@ supported_zither_backend_info = {
 
   kernel = {
     formatter = _clang_format
+    rust_formatter = _rustfmt
     output_namespace = {
       prefix_parts = [
         "lib",
@@ -224,6 +233,10 @@ supported_zither_backend_info = {
 #    - Optional: See `supported_zither_backend_info`.
 #    - Type: scope.
 #
+#  * rust_formatter
+#    - Optional: See `supported_zither_backend_info`.
+#    - Type: scope.
+#
 #  * testonly, visibility, deps
 #    - Usual GN meanings. `deps` is just expected to contain whatever produced
 #      the FIDL IR file.
@@ -237,6 +250,7 @@ template("_zither") {
                              "output_dir",
                              "output_namespace_override",
                              "formatter",
+                             "rust_formatter",
                            ])
 
     main_target = target_name
@@ -295,6 +309,20 @@ template("_zither") {
         }
         if (defined(formatter.inputs)) {
           inputs += formatter.inputs
+        }
+      }
+
+      if (defined(rust_formatter)) {
+        inputs += [ rust_formatter.script ]
+        args += [
+          "-rust-formatter",
+          rebase_path(rust_formatter.script, root_build_dir),
+        ]
+        if (defined(rust_formatter.args)) {
+          args += [ "-rust-formatter-args" ] + rust_formatter.args
+        }
+        if (defined(rust_formatter.inputs)) {
+          inputs += rust_formatter.inputs
         }
       }
       deps = [ fidl_ir_target ]
@@ -601,7 +629,8 @@ template("_zither_kernel_sources") {
   generated_files = [
     "$output_dir/${output_namespace}/category.inc",
     "$output_dir/${output_namespace}/kernel.inc",
-    "$output_dir/${output_namespace}/kernel-wrappers.inc",
+    "$output_dir/${output_namespace}/kernel_wrappers.rs",
+    "$output_dir/${output_namespace}/syscall_numbers.rs",
     "$output_dir/${output_namespace}/syscall_sigs.rs",
     "$output_dir/${output_namespace}/syscalls.inc",
     "$output_dir/${output_namespace}/zx-syscall-numbers.h",
@@ -618,6 +647,7 @@ template("_zither_kernel_sources") {
                              "fidl_ir_target",
                              "generated_files",
                              "formatter",
+                             "rust_formatter",
                            ])
   }
 
@@ -833,7 +863,11 @@ template("zither_library") {
                                "testonly",
                                "visibility",
                              ])
-      forward_variables_from(backend_info, [ "formatter" ])
+      forward_variables_from(backend_info,
+                             [
+                               "formatter",
+                               "rust_formatter",
+                             ])
 
       output_dir = "${fidl_gen_dir}/${backend}"
 

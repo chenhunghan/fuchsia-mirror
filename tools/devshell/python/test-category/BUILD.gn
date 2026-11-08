@@ -21,8 +21,11 @@ python_binary("test-category") {
 
 if (is_host) {
   host_test_data("metadata_json") {
-    sources = [ "${root_build_dir}/testing_metadata.json" ]
-    outputs = [ "$target_out_dir/testing_metadata.json" ]
+    sources = [
+      "${root_build_dir}/directory_owners.json",
+      "${root_build_dir}/testing_metadata.json",
+    ]
+    outputs = [ "$target_out_dir/{{source_file_part}}" ]
     deps = [ "//tools/testing_metadata:testing_metadata_json_action($default_toolchain)" ]
   }
 

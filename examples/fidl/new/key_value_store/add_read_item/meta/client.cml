@@ -9,27 +9,38 @@
     },
     use: [
         { protocol: "examples.keyvaluestore.addreaditem.Store" },
-    ],
-    config: {
-        write_items: {
+        {
+            config: "fuchsia.examples.keyvaluestore.addreaditem.WriteItems",
+            key: "write_items",
             type: "vector",
             max_count: 16,
             element: {
                 type: "string",
                 max_size: 64,
             },
+            availability: "transitional",
+            default: [
+                "verse_1",
+                "verse_2",
+                "verse_3",
+                "verse_4",
+            ],
         },
 
         // [START diff_1]
-        read_items: {
+        {
+            config: "fuchsia.examples.keyvaluestore.addreaditem.ReadItems",
+            key: "read_items",
             type: "vector",
             max_count: 16,
             element: {
                 type: "string",
                 max_size: 64,
             },
+            availability: "transitional",
+            default: [],
         },
 
         // [END diff_1]
-    },
+    ],
 }

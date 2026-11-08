@@ -119,6 +119,7 @@ template("ifs_shared_library") {
   source_set(main_target) {
     forward_variables_from(invoker,
                            [
+                             "check_includes",
                              "data_deps",
                              "public",
                              "public_configs",
@@ -126,6 +127,9 @@ template("ifs_shared_library") {
                              "testonly",
                              "visibility",
                            ])
+    if (defined(invoker.check_includes_strict)) {
+      check_includes_strict = invoker.check_includes_strict
+    }
     configs += [ ":$config_target" ]
     libs = [ gen_stub_file ]
     deps = [ gen_label ]
@@ -160,6 +164,7 @@ template("ifs_shared_library") {
   source_set(as_needed_target) {
     forward_variables_from(invoker,
                            [
+                             "check_includes",
                              "data_deps",
                              "public",
                              "public_configs",
@@ -167,6 +172,9 @@ template("ifs_shared_library") {
                              "testonly",
                              "visibility",
                            ])
+    if (defined(invoker.check_includes_strict)) {
+      check_includes_strict = invoker.check_includes_strict
+    }
     libs = [ output_name ]
     deps = [
       ":$gen_as_needed_skip_target.a($default_toolchain)",
@@ -268,7 +276,11 @@ template("ifs_shared_library") {
           visibility += [
             ":$main_target",
             ":$stub_target",
+            ":$stub_target.all_cpus",
           ]
+          foreach(cpu, standard_fuchsia_cpus) {
+            visibility += [ ":$stub_target.$cpu" ]
+          }
         }
 
         script = _llvm_ifs
@@ -302,6 +314,44 @@ template("ifs_shared_library") {
           " */",
           "INPUT(AS_NEEDED($relative_stub_path))",
         ]
+      }
+    }
+
+    # Target providing stubs for all supported CPU architectures:
+    group("$stub_target.all_cpus") {
+      forward_variables_from(invoker,
+                             [
+                               "testonly",
+                               "visibility",
+                             ])
+      public_deps = []
+      foreach(cpu, standard_fuchsia_cpus) {
+        _clang_cpu = cpu
+        foreach(translation, clang_cpu_translations) {
+          if (cpu == translation.gn) {
+            _clang_cpu = translation.clang
+          }
+        }
+        public_deps += [ ":$gen_target_base$_clang_cpu" ]
+      }
+    }
+
+    # Per-architecture stub targets:
+    foreach(cpu, standard_fuchsia_cpus) {
+      _clang_cpu = cpu
+      foreach(translation, clang_cpu_translations) {
+        if (cpu == translation.gn) {
+          _clang_cpu = translation.clang
+        }
+      }
+
+      group("$stub_target.$cpu") {
+        forward_variables_from(invoker,
+                               [
+                                 "testonly",
+                                 "visibility",
+                               ])
+        public_deps = [ ":$gen_target_base$_clang_cpu" ]
       }
     }
 

@@ -6,12 +6,20 @@ if (is_fuchsia) {
   group("fidl") {
     testonly = true
     deps = [
-      ":hermetic_tests",
+      ":tests",
       "calculator:all",
       "cpp:all",
       "fuchsia.examples.docs:all",
       "rust:all",
       "rust_next:all",
+    ]
+  }
+
+  group("tests") {
+    testonly = true
+    deps = [
+      ":hermetic_tests",
+      "rust:tests",
     ]
   }
 

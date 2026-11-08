@@ -1,0 +1,109 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+alias(
+    name = "bind",
+    actual = ":lib",
+    visibility = [
+        "//src/devices/bin/driver_tools:__pkg__",
+        "//src/devices/bind:__pkg__",
+    ],
+)
+
+rustc_library(
+    name = "lib",
+    srcs = [
+        "src/bytecode_constants.rs",
+        "src/bytecode_encoder/bytecode_checker.rs",
+        "src/bytecode_encoder/debug_encoder.rs",
+        "src/bytecode_encoder/encode_v1.rs",
+        "src/bytecode_encoder/encode_v2.rs",
+        "src/bytecode_encoder/error.rs",
+        "src/bytecode_encoder/instruction_encoder.rs",
+        "src/bytecode_encoder/mod.rs",
+        "src/bytecode_encoder/symbol_table_encoder.rs",
+        "src/compiler/compiler.rs",
+        "src/compiler/dependency_graph.rs",
+        "src/compiler/instruction.rs",
+        "src/compiler/mod.rs",
+        "src/compiler/symbol_table.rs",
+        "src/compiler/test_lib.rs",
+        "src/ddk_bind_constants.rs",
+        "src/debugger/debug_dump.rs",
+        "src/debugger/debugger.rs",
+        "src/debugger/device_specification.rs",
+        "src/debugger/mod.rs",
+        "src/debugger/offline_debugger.rs",
+        "src/errors.rs",
+        "src/interpreter/common.rs",
+        "src/interpreter/decode_bind_rules.rs",
+        "src/interpreter/instruction_decoder.rs",
+        "src/interpreter/match_bind.rs",
+        "src/interpreter/mod.rs",
+        "src/interpreter/test_common.rs",
+        "src/lib.rs",
+        "src/linter.rs",
+        "src/parser/bind_composite.rs",
+        "src/parser/bind_library.rs",
+        "src/parser/bind_rules.rs",
+        "src/parser/common.rs",
+        "src/parser/mod.rs",
+        "src/test.rs",
+    ],
+    compile_data = [
+        "composite_tests_schema.json",
+        "tests_schema.json",
+    ],
+    crate_name = "bind",
+    edition = "2024",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:num-derive"],
+    visibility = [
+        "//src/devices/bin/driver-index:__pkg__",
+        "//src/devices/bin/driver_tools:__pkg__",
+        "//src/devices/bind:__pkg__",
+        "//src/devices/lib/driver-static-checks:__pkg__",
+        "//tools/bindc:__pkg__",
+    ],
+    deps = [
+        "//third_party/rust_crates/vendor:bitfield",
+        "//third_party/rust_crates/vendor:byteorder",
+        "//third_party/rust_crates/vendor:nom",
+        "//third_party/rust_crates/vendor:nom_locate",
+        "//third_party/rust_crates/vendor:num-traits",
+        "//third_party/rust_crates/vendor:regex-lite",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:valico",
+    ],
+)
+
+rustc_test(
+    name = "lib_test",
+    crate = ":lib",
+    # Give the generated GN `rustc_test("lib_test")` a unique `output_name`.
+    crate_name = "bind_lib_test",
+    deps = ["//third_party/rust_crates/vendor:assert_matches"],
+)
+
+wrap_host_rust_test(
+    name = "lib_host_test",
+    binary_name = "lib_test",
+)
+
+fx_unittest_package(
+    name = "bind_tests",
+    # TODO(https://fxbug.dev/570694755): bazel2gn does not support `environments` on
+    # `fx_unittest_package`; the generated GN `fuchsia_unittest_package` already defaults to Emu.
+    environments = ["//build/testing/environments:emu_env"],  # @bazel2gn:skip
+    unit_tests = [":lib_test"],
+    visibility = ["//src/devices:__pkg__"],
+)

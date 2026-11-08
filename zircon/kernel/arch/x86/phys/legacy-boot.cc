@@ -7,23 +7,27 @@
 #include "legacy-boot.h"
 
 #include <inttypes.h>
+#include <lib/acpi_lite.h>
 #include <lib/boot-shim/acpi.h>
 #include <lib/memalloc/pool.h>
 #include <lib/memalloc/range.h>
+#include <lib/zx/result.h>
+#include <stdio.h>
 #include <zircon/assert.h>
+#include <zircon/errors.h>
 
+#include <fbl/no_destructor.h>
 #include <ktl/array.h>
 #include <ktl/iterator.h>
 #include <ktl/limits.h>
 #include <ktl/ranges.h>
 #include <ktl/span.h>
 #include <ktl/string_view.h>
-#include <phys/acpi.h>
 #include <phys/address-space.h>
 #include <phys/allocation.h>
-#include <phys/main.h>
+#include <phys/runtime/main.h>
 #include <phys/symbolize.h>
-#include <phys/uart-console.h>
+#include <phys/uart/driver.h>
 #include <pretty/sizes.h>
 
 #include <ktl/enforce.h>
@@ -43,6 +47,29 @@ constexpr uintptr_t kSmbiosSearchBase = 0xf0000;
 constexpr size_t kSmbiosSearchSize = 0x10000;
 constexpr size_t kSmbiosAlign = 16;
 constexpr ktl::array kSmbiosSignatures{"_SM_"sv, "_SM3_"sv};
+
+class PhysMemReader final : public acpi_lite::PhysMemReader {
+ public:
+  constexpr PhysMemReader() = default;
+
+  zx::result<const void*> PhysToPtr(uintptr_t phys, size_t length) final {
+    return zx::success(reinterpret_cast<const void*>(phys));
+  }
+};
+
+// Returns a new AcpiParser instance that uses a physical memory reader for
+// which the transformation from physical address to virtual address is the
+// identity.
+zx::result<acpi_lite::AcpiParser> MakeAcpiParser(uint64_t acpi_rsdp) {
+  static fbl::NoDestructor<PhysMemReader> reader;
+  if (static_cast<uintptr_t>(acpi_rsdp) != acpi_rsdp) {
+    printf("%s: ACPI tables found at (%#" PRIx64 ") not within lower 4GiB\n", ProgramName(),
+           acpi_rsdp);
+    return zx::error(ZX_ERR_NOT_FOUND);
+  }
+
+  return acpi_lite::AcpiParser::Init(*reader, static_cast<zx_paddr_t>(acpi_rsdp));
+}
 
 void InitAcpi(LegacyBoot& boot_info) {
   auto acpi_parser = MakeAcpiParser(boot_info.acpi_rsdp);
@@ -90,15 +117,9 @@ constexpr memalloc::Range AsMemrange(  //
 
 }  // namespace
 
-// A default, weak definition that may be overrode to perform other relevant
-// initialization.
-[[gnu::weak]] void LegacyBootSetUartConsole(const uart::all::Config<>& uart_config) {
-  SetUartConsole(uart_config);
-}
-
 void LegacyBootInitMemory(AddressSpace* aspace) {
-  // Note that these are done before paging is enabled (at all for 32-bit) with
-  // new identity-mapping page tables, because the fixed-address regions they
+  // Note that these are done before paging is enabled with new
+  // identity-mapping page tables, because the fixed-address regions they
   // scan won't be among the known RAM ranges that get identity-mapped.
   InitAcpi(gLegacyBoot);
   InitSmbios(gLegacyBoot);

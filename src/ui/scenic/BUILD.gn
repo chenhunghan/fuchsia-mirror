@@ -124,7 +124,6 @@ fuchsia_unittest_package(
   deps = [
            "lib/flatland/engine/tests/pixeltests:pixeltests_with_fake_display",
            "//src/graphics/display/testing/fake-display-stack-host:component",
-           "//src/graphics/display/testing/fake-display-stack-host:default-config-values",
          ] + scenic_test_deps
   test_specs = {
     log_settings = {
@@ -146,7 +145,6 @@ fuchsia_unittest_package("flatland_display_compositor_smoketests") {
   deps = [
            "lib/flatland/engine/tests/smoketests:smoketests_with_fake_display",
            "//src/graphics/display/testing/fake-display-stack-host:component",
-           "//src/graphics/display/testing/fake-display-stack-host:default-config-values",
          ] + scenic_test_deps
   test_specs = {
     log_settings = {
@@ -217,7 +215,6 @@ fuchsia_unittest_package("flatland_renderer_display_unittests") {
   deps = [
            "lib/flatland/renderer/tests:display_unittests",
            "//src/graphics/display/testing/fake-display-stack-host:component",
-           "//src/graphics/display/testing/fake-display-stack-host:default-config-values",
          ] + scenic_test_deps
   test_specs = {
     log_settings = {
@@ -327,6 +324,12 @@ fuchsia_component_manifest("scenic_dso_manifest") {
   manifest = "bin/meta/scenic.dso.cml"
 }
 
+fuchsia_component_manifest("scenic_test_manifest") {
+  testonly = true
+  component_name = "scenic"
+  manifest = "bin/meta/scenic.test.cml"
+}
+
 _component = {
   deps = [ "//src/ui/scenic/lib/image-compression:component" ]
   if (escher_use_runtime_glsl) {
@@ -355,29 +358,21 @@ fuchsia_structured_config_cpp_elf_lib("scenic_structured_config") {
   cm_label = ":scenic_manifest"
 }
 
-fuchsia_structured_config_values2("scenic_config") {
-  testonly = true
-  cm_label = ":scenic_manifest"
-  output_component_name = "config"
-  values_source = "config/default_for_test.json5"
-}
-
 fuchsia_package("scenic_pkg") {
   package_name = "scenic"
-  validate_structured_config = false
   deps = [ ":component" ]
 }
 
 fuchsia_package("scenic_pkg_dso") {
   package_name = "scenic"
-  validate_structured_config = false
   deps = [ ":component_dso" ]
 }
 
-group("scenic_with_default_config") {
+# Stand-in for `:component` with transitional default configuration values for
+# hermetic integration tests.
+fuchsia_component("scenic_with_default_config") {
   testonly = true
-  deps = [
-    ":component",
-    ":scenic_config",
-  ]
+  forward_variables_from(_component, "*")
+  cm_label = ":scenic_test_manifest"
+  deps += [ "bin" ]
 }

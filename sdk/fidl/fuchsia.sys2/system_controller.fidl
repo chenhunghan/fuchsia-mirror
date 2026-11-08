@@ -25,3 +25,14 @@ open protocol BootController {
     @available(added=29)
     flexible Notify() -> ();
 };
+
+@discoverable(server="platform")
+@available(added=HEAD)
+open protocol BootNotifier {
+    /// Emitted when the system has finished booting.
+    ///
+    /// If the system has already finished booting when the client connects, the server will
+    /// immediately emit this event.
+    @available(added=HEAD)
+    flexible -> OnBootComplete();
+};

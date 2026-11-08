@@ -150,12 +150,20 @@ static SocketFlushResult local_socket_flush_incoming(asocket* s) {
   bool fd_full = !s->packet_queue.empty() && !s->has_write_error;
   if (s->transport && s->peer) {
     if (s->available_send_bytes.has_value()) {
-      // Deferred acks are available.
-      send_ready(s->id, s->peer->id, s->transport, bytes_flushed);
+      // Deferred acks are available. In this mode, packet_queue can contain any number of
+      // A_WRTE payloads. But A_OKAY is used to communicate back the "send window" size. If
+      // no bytes were flushed, the window did not change and there is no need to send A_OKAY.
+      // The sender will keep on sending even without receiving an A_OKAY.
+      if (bytes_flushed > 0) {
+        send_ready(s->id, s->peer->id, s->transport, bytes_flushed);
+      }
     } else {
-      // Deferred acks aren't available, we should ask for more data as long as we've made any
-      // progress.
-      if (bytes_flushed != 0) {
+      // Legacy mode (deferred acks aren't available): The legacy protocol relies on
+      // a strict 1-to-1 A_WRTE to A_OKAY ratio. In this mode, the `packet_queue` holds
+      // the incoming A_WRTE payload (and only one). By waiting for the queue to fully
+      // empty before sending the A_OKAY, we prevent spamming multiple acks for partial
+      // writes of a single packet.
+      if (bytes_flushed > 0 && s->packet_queue.empty()) {
         send_ready(s->id, s->peer->id, s->transport, 0);
       }
     }

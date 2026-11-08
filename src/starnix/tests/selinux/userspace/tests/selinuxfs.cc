@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include <fcntl.h>
+#include <lib/fit/defer.h>
 #include <lib/fit/result.h>
 #include <unistd.h>
 
@@ -121,6 +122,46 @@ SeLinuxApiResult ComputeAccess(std::string_view source_context, std::string_view
   return CallSeLinuxApi("access", request);
 }
 
+struct ParsedAccessDecision {
+  uint32_t allowed = 0;
+  uint32_t decided = 0;
+  uint32_t auditallow = 0;
+  uint32_t auditdeny = 0;
+};
+
+fit::result<int, ParsedAccessDecision> ComputeParsedAccess(std::string_view source_context,
+                                                           std::string_view target_context,
+                                                           std::string_view target_class,
+                                                           uint32_t requested = UINT32_MAX) {
+  auto result = ComputeAccess(source_context, target_context, target_class, requested);
+  if (result.is_error()) {
+    return result.take_error();
+  }
+  ParsedAccessDecision decision{};
+  uint32_t seqno = 0;
+  uint32_t flags = 0;
+  if (sscanf(result.value().c_str(), "%x %x %x %x %u %x", &decision.allowed, &decision.decided,
+             &decision.auditallow, &decision.auditdeny, &seqno, &flags) != 6) {
+    ADD_FAILURE() << "Unexpected access result format: " << result.value();
+    return fit::error(EINVAL);
+  }
+  return fit::ok(decision);
+}
+
+SeLinuxApiResult ReadBoolean(std::string_view name) {
+  return ReadFile(fxl::StringPrintf("/sys/fs/selinux/booleans/%s", std::string(name).c_str()));
+}
+
+fit::result<int> SetPendingBoolean(std::string_view name, bool value) {
+  return WriteExistingFile(
+      fxl::StringPrintf("/sys/fs/selinux/booleans/%s", std::string(name).c_str()),
+      value ? "1" : "0");
+}
+
+fit::result<int> CommitPendingBooleans() {
+  return WriteExistingFile("/sys/fs/selinux/commit_pending_bools", "1");
+}
+
 TEST(SeLinuxFsNull, HasPolicyDevnullContext) {
   constexpr char kSeLinuxFsNull[] = "/sys/fs/selinux/null";
 
@@ -198,6 +239,25 @@ TEST(SeLinuxFsContext, ReadUpdatesSeekPosition) {
   }
 
   EXPECT_THAT(RemoveTrailingNul(result), SyscallResultIsOk(kMinimumValidContext));
+}
+
+TEST(SeLinuxFsContext, PreadPastEof) {
+  fbl::unique_fd api_fd(open("/sys/fs/selinux/context", O_RDWR));
+  ASSERT_TRUE(api_fd.is_valid()) << strerror(errno);
+
+  constexpr char kMinimumValidContext[] = "test_selinuxfs_u:test_selinuxfs_r:test_selinuxfs_t:s0";
+  ASSERT_THAT(write(api_fd.get(), kMinimumValidContext, sizeof(kMinimumValidContext)),
+              SyscallSucceedsWithValue(sizeof(kMinimumValidContext)));
+
+  char buf[256] = {};
+  ssize_t initial = pread(api_fd.get(), buf, sizeof(buf), 0);
+  ASSERT_THAT(initial, SyscallSucceedsWithValue(sizeof(kMinimumValidContext)));
+  ASSERT_LT(static_cast<size_t>(initial), sizeof(buf));
+
+  EXPECT_THAT(pread(api_fd.get(), buf, sizeof(buf), initial), SyscallSucceedsWithValue(0));
+  EXPECT_THAT(pread(api_fd.get(), buf, sizeof(buf), initial + 1), SyscallSucceedsWithValue(0));
+  EXPECT_THAT(pread(api_fd.get(), buf, sizeof(buf), 4096), SyscallSucceedsWithValue(0));
+  EXPECT_THAT(pread(api_fd.get(), buf, sizeof(buf), 1 << 20), SyscallSucceedsWithValue(0));
 }
 
 TEST(SeLinuxFsContext, ValidatesRequiredFieldsPresent) {
@@ -825,6 +885,153 @@ TEST(SeLinuxFsPolicy, ReadPolicyPermission) {
     fbl::unique_fd fd(open("/sys/fs/selinux/policy", O_RDONLY));
     EXPECT_THAT(fd.get(), SyscallFailsWithErrno(EACCES));
   }));
+}
+
+TEST(SeLinuxFsHashStats, ReadAvcAndSidtabHashStats) {
+  for (const char* path :
+       {"/sys/fs/selinux/avc/hash_stats", "/sys/fs/selinux/ss/sidtab_hash_stats"}) {
+    auto stats = ReadFile(path);
+    ASSERT_THAT(stats, SyscallResultIsOk()) << path;
+    unsigned int entries = 0;
+    unsigned int buckets_used = 0;
+    unsigned int total_buckets = 0;
+    unsigned int longest_chain = 0;
+    int chars_read = 0;
+    ASSERT_EQ(
+        sscanf(stats.value().c_str(), "entries: %u\nbuckets used: %u/%u\nlongest chain: %u\n%n",
+               &entries, &buckets_used, &total_buckets, &longest_chain, &chars_read),
+        4)
+        << path << ": " << stats.value();
+    EXPECT_EQ(static_cast<size_t>(chars_read), stats.value().size())
+        << path << ": " << stats.value();
+    EXPECT_GT(total_buckets, 0u) << path;
+    EXPECT_LE(buckets_used, total_buckets) << path;
+    EXPECT_LE(buckets_used, entries) << path;
+    EXPECT_LE(longest_chain, entries) << path;
+  }
+}
+
+TEST(SeLinuxFsBooleans, CommitUpdatesConditionalAccessDecisions) {
+  auto restore_booleans = fit::defer([]() {
+    EXPECT_TRUE(SetPendingBoolean("test_selinuxfs_bool_first", true).is_ok());
+    EXPECT_TRUE(SetPendingBoolean("test_selinuxfs_bool_second", false).is_ok());
+    EXPECT_TRUE(SetPendingBoolean("test_selinuxfs_bool_third", true).is_ok());
+    EXPECT_TRUE(CommitPendingBooleans().is_ok());
+  });
+
+  constexpr std::string_view kSourceContext =
+      "test_selinuxfs_u:test_selinuxfs_r:test_selinuxfs_cond_source_t:s0";
+  constexpr std::string_view kTargetContext =
+      "test_selinuxfs_u:object_r:test_selinuxfs_cond_target_t:s0";
+
+  const uint32_t kGetAttr = GetAccessVector("file", "getattr");
+  const uint32_t kRead = GetAccessVector("file", "read");
+  const uint32_t kOpen = GetAccessVector("file", "open");
+  const uint32_t kWrite = GetAccessVector("file", "write");
+  const uint32_t kExecute = GetAccessVector("file", "execute");
+  const uint32_t kAppend = GetAccessVector("file", "append");
+  const uint32_t kSetAttr = GetAccessVector("file", "setattr");
+  const uint32_t kLock = GetAccessVector("file", "lock");
+
+  // Initial boolean states:
+  //   test_selinuxfs_bool_first = true
+  //   test_selinuxfs_bool_second = false
+  //   test_selinuxfs_bool_third = true
+  EXPECT_THAT(ReadBoolean("test_selinuxfs_bool_first"), SyscallResultIsOk("1 1"));
+  EXPECT_THAT(ReadBoolean("test_selinuxfs_bool_second"), SyscallResultIsOk("0 0"));
+  EXPECT_THAT(ReadBoolean("test_selinuxfs_bool_third"), SyscallResultIsOk("1 1"));
+
+  auto initial_decision = ComputeParsedAccess(kSourceContext, kTargetContext, "file");
+  ASSERT_TRUE(initial_decision.is_ok());
+  EXPECT_EQ(initial_decision->allowed, kGetAttr | kRead | kWrite | kAppend);
+  EXPECT_EQ(initial_decision->auditallow, kSetAttr);
+  EXPECT_EQ(initial_decision->auditdeny, ~0u);
+
+  // Stage a pending change to `test_selinuxfs_bool_first` without committing it yet.
+  ASSERT_TRUE(SetPendingBoolean("test_selinuxfs_bool_first", false).is_ok());
+  EXPECT_THAT(ReadBoolean("test_selinuxfs_bool_first"), SyscallResultIsOk("1 0"));
+
+  auto uncommitted_decision = ComputeParsedAccess(kSourceContext, kTargetContext, "file");
+  ASSERT_TRUE(uncommitted_decision.is_ok());
+  EXPECT_EQ(uncommitted_decision->allowed, kGetAttr | kRead | kWrite | kAppend);
+  EXPECT_EQ(uncommitted_decision->auditallow, kSetAttr);
+  EXPECT_EQ(uncommitted_decision->auditdeny, ~0u);
+
+  // Commit the pending boolean change and verify that conditional rules re-evaluate:
+  //   test_selinuxfs_bool_first = false
+  //   test_selinuxfs_bool_second = false
+  //   test_selinuxfs_bool_third = true
+  ASSERT_TRUE(CommitPendingBooleans().is_ok());
+  EXPECT_THAT(ReadBoolean("test_selinuxfs_bool_first"), SyscallResultIsOk("0 0"));
+
+  auto false_decision = ComputeParsedAccess(kSourceContext, kTargetContext, "file");
+  ASSERT_TRUE(false_decision.is_ok());
+  EXPECT_EQ(false_decision->allowed, kGetAttr | kOpen | kExecute);
+  EXPECT_EQ(false_decision->auditallow, 0u);
+  EXPECT_EQ(false_decision->auditdeny, ~kLock);
+
+  // Set `test_selinuxfs_bool_first = true` and `test_selinuxfs_bool_second = true`:
+  //   test_selinuxfs_bool_first = true
+  //   test_selinuxfs_bool_second = true
+  //   test_selinuxfs_bool_third = true
+  ASSERT_TRUE(SetPendingBoolean("test_selinuxfs_bool_first", true).is_ok());
+  ASSERT_TRUE(SetPendingBoolean("test_selinuxfs_bool_second", true).is_ok());
+  ASSERT_TRUE(CommitPendingBooleans().is_ok());
+
+  auto multi_decision = ComputeParsedAccess(kSourceContext, kTargetContext, "file");
+  ASSERT_TRUE(multi_decision.is_ok());
+  EXPECT_EQ(multi_decision->allowed, kGetAttr | kRead | kExecute | kAppend);
+  EXPECT_EQ(multi_decision->auditallow, kSetAttr);
+  EXPECT_EQ(multi_decision->auditdeny, ~0u);
+}
+
+TEST(SeLinuxFsBooleans, CommitUpdatesConditionalTypeTransition) {
+  auto restore_booleans = fit::defer([]() {
+    EXPECT_TRUE(SetPendingBoolean("test_selinuxfs_bool_first", true).is_ok());
+    EXPECT_TRUE(CommitPendingBooleans().is_ok());
+  });
+
+  constexpr std::string_view kSourceContext =
+      "test_selinuxfs_u:test_selinuxfs_r:test_selinuxfs_cond_source_t:s0";
+  constexpr std::string_view kTargetContext =
+      "test_selinuxfs_u:object_r:test_selinuxfs_cond_target_t:s0";
+
+  EXPECT_THAT(ComputeCreateContext(kSourceContext, kTargetContext, "file"),
+              SyscallResultIsOk("test_selinuxfs_u:object_r:test_selinuxfs_cond_create_true_t:s0"));
+
+  ASSERT_TRUE(SetPendingBoolean("test_selinuxfs_bool_first", false).is_ok());
+  EXPECT_THAT(ComputeCreateContext(kSourceContext, kTargetContext, "file"),
+              SyscallResultIsOk("test_selinuxfs_u:object_r:test_selinuxfs_cond_create_true_t:s0"));
+
+  ASSERT_TRUE(CommitPendingBooleans().is_ok());
+  EXPECT_THAT(ComputeCreateContext(kSourceContext, kTargetContext, "file"),
+              SyscallResultIsOk("test_selinuxfs_u:object_r:test_selinuxfs_cond_create_false_t:s0"));
+}
+
+TEST(SeLinuxFsBooleans, CommitUpdatesBinaryPolicy) {
+  auto restore_booleans = fit::defer([]() {
+    EXPECT_TRUE(SetPendingBoolean("test_selinuxfs_bool_second", false).is_ok());
+    EXPECT_TRUE(CommitPendingBooleans().is_ok());
+  });
+
+  auto initial_policy = ReadFile("/sys/fs/selinux/policy");
+  ASSERT_TRUE(initial_policy.is_ok());
+  ASSERT_FALSE(initial_policy->empty());
+
+  ASSERT_TRUE(SetPendingBoolean("test_selinuxfs_bool_second", true).is_ok());
+  ASSERT_TRUE(CommitPendingBooleans().is_ok());
+
+  auto modified_policy = ReadFile("/sys/fs/selinux/policy");
+  ASSERT_TRUE(modified_policy.is_ok());
+  EXPECT_EQ(modified_policy->size(), initial_policy->size());
+  EXPECT_NE(*modified_policy, *initial_policy);
+
+  ASSERT_TRUE(SetPendingBoolean("test_selinuxfs_bool_second", false).is_ok());
+  ASSERT_TRUE(CommitPendingBooleans().is_ok());
+
+  auto restored_policy = ReadFile("/sys/fs/selinux/policy");
+  ASSERT_TRUE(restored_policy.is_ok());
+  EXPECT_EQ(*restored_policy, *initial_policy);
 }
 
 }  // namespace

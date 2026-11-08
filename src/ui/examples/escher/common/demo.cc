@@ -11,7 +11,6 @@
 #include <thread>
 
 #include "src/ui/lib/escher/impl/command_buffer_pool.h"
-#include "src/ui/lib/escher/impl/image_cache.h"
 #include "src/ui/lib/escher/impl/vulkan_utils.h"
 #include "src/ui/lib/escher/renderer/frame.h"
 #include "src/ui/lib/escher/util/stopwatch.h"

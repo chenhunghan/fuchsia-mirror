@@ -11,20 +11,6 @@
 #include <lib/syscalls/zx-syscall-numbers.h>
 #include <zircon/errors.h>
 
-#ifdef KERNEL_NO_USERABI
-// If we're not building user abi there are no wrapper functions or
-// proper unknown_syscall function for the dispatcher to dispatch to,
-// so define a stub routine so the code at least links.
-.function unknown_syscall
-  lla a0, unknown_syscall_panic_string
-  j panic
-.end_function
-
-.object unknown_syscall_panic_string, type=rodata
-  .string "no syscall hooks to call!"
-.end_object
-#endif // KERNEL_NO_USERABI
-
 // void riscv64_syscall_dispatcher(iframe_t* iframe);
 // Registers in the iframe are parsed using the following convention:
 //
@@ -115,11 +101,7 @@
 .else
   mv a\nargs, t1
 .endif
-#ifndef KERNEL_NO_USERABI
   tail wrapper_\syscall
-#else
-  tail unknown_syscall
-#endif
   .popsection
 
   // Each trampoline's address goes into the table so it can be indexed as a

@@ -4,17 +4,17 @@
 
 #include "integration_test_lib.h"
 
-#include <fuchsia/kernel/cpp/fidl.h>
-#include <fuchsia/logger/cpp/fidl.h>
-#include <fuchsia/net/stack/cpp/fidl.h>
-#include <fuchsia/net/virtualization/cpp/fidl.h>
-#include <fuchsia/scheduler/cpp/fidl.h>
-#include <fuchsia/sysinfo/cpp/fidl.h>
-#include <fuchsia/sysmem/cpp/fidl.h>
-#include <fuchsia/sysmem2/cpp/fidl.h>
-#include <fuchsia/tracing/provider/cpp/fidl.h>
-#include <fuchsia/virtualization/cpp/fidl.h>
-#include <fuchsia/virtualization/guest/interaction/cpp/fidl.h>
+#include <fidl/fuchsia.kernel/cpp/fidl.h>
+#include <fidl/fuchsia.logger/cpp/fidl.h>
+#include <fidl/fuchsia.net.stack/cpp/fidl.h>
+#include <fidl/fuchsia.net.virtualization/cpp/fidl.h>
+#include <fidl/fuchsia.scheduler/cpp/fidl.h>
+#include <fidl/fuchsia.sysinfo/cpp/fidl.h>
+#include <fidl/fuchsia.sysmem/cpp/fidl.h>
+#include <fidl/fuchsia.sysmem2/cpp/fidl.h>
+#include <fidl/fuchsia.tracing.provider/cpp/fidl.h>
+#include <fidl/fuchsia.virtualization.guest.interaction/cpp/fidl.h>
+#include <fidl/fuchsia.virtualization/cpp/fidl.h>
 #include <lib/async/cpp/task.h>
 #include <lib/syslog/cpp/macros.h>
 
@@ -31,17 +31,10 @@ static fit::closure MakeRecurringTask(async_dispatcher_t* dispatcher, fit::closu
 }
 
 void GuestInteractionTest::GetHostVsockEndpoint(
-    fidl::InterfaceRequest<::fuchsia::virtualization::HostVsockEndpoint> endpoint) {
-  std::optional<fuchsia::virtualization::Guest_GetHostVsockEndpoint_Result> vsock_result;
-  guest_->GetHostVsockEndpoint(
-      std::move(endpoint),
-      [&vsock_result](fuchsia::virtualization::Guest_GetHostVsockEndpoint_Result result) {
-        vsock_result = std::move(result);
-      });
-
-  bool loop_result =
-      RunLoopWithTimeoutOrUntil([&vsock_result] { return vsock_result.has_value(); }, zx::sec(5));
-  FX_CHECK(loop_result && vsock_result->is_response());
+    fidl::ServerEnd<fuchsia_virtualization::HostVsockEndpoint> endpoint) {
+  fidl::Result<fuchsia_virtualization::Guest::GetHostVsockEndpoint> vsock_result =
+      guest_->GetHostVsockEndpoint({{.endpoint = std::move(endpoint)}});
+  FX_CHECK(vsock_result.is_ok()) << vsock_result.error_value().FormatDescription();
 }
 
 void GuestInteractionTest::SetUp() {
@@ -59,8 +52,8 @@ void GuestInteractionTest::SetUp() {
 
   constexpr auto kGuestManagerName = "guest_manager";
 
-  fuchsia::virtualization::GuestConfig cfg;
-  cfg.set_virtio_gpu(false);
+  fuchsia_virtualization::GuestConfig cfg;
+  cfg.virtio_gpu(false);
 
   auto realm_builder = RealmBuilder::Create();
   realm_builder.AddChild(kGuestManagerName, kDebianGuestManagerUrl);
@@ -68,99 +61,92 @@ void GuestInteractionTest::SetUp() {
                               [&]() { return fake_netstack_.NewComponent(); });
 
   realm_builder
-      .AddRoute(Route{.capabilities =
-                          {
-                              Protocol{fuchsia::logger::LogSink::Name_},
-                              Protocol{fuchsia::kernel::HypervisorResource::Name_},
-                              Protocol{fuchsia::kernel::VmexResource::Name_},
-                              Protocol{fuchsia::sysinfo::SysInfo::Name_},
-                              Protocol{fuchsia::sysmem::Allocator::Name_},
-                              Protocol{fuchsia::sysmem2::Allocator::Name_},
-                              Protocol{fuchsia::tracing::provider::Registry::Name_},
-                              Protocol{fuchsia::scheduler::RoleManager::Name_},
-                          },
-                      .source = {ParentRef()},
-                      .targets = {ChildRef{kGuestManagerName}}})
-      .AddRoute(Route{.capabilities =
-                          {
-                              Protocol{fuchsia::net::virtualization::Control::Name_},
-                          },
-                      .source = {ChildRef{kFakeNetstackComponentName}},
-                      .targets = {ChildRef{kGuestManagerName}}})
-      .AddRoute(Route{.capabilities =
-                          {
-                              Protocol{fuchsia::virtualization::DebianGuestManager::Name_},
-                          },
-                      .source = ChildRef{kGuestManagerName},
-                      .targets = {ParentRef()}});
+      .AddRoute(Route{
+          .capabilities =
+              {
+                  Protocol{fidl::DiscoverableProtocolName<fuchsia_logger::LogSink>},
+                  Protocol{fidl::DiscoverableProtocolName<fuchsia_kernel::HypervisorResource>},
+                  Protocol{fidl::DiscoverableProtocolName<fuchsia_kernel::VmexResource>},
+                  Protocol{fidl::DiscoverableProtocolName<fuchsia_sysinfo::SysInfo>},
+                  Protocol{fidl::DiscoverableProtocolName<fuchsia_sysmem::Allocator>},
+                  Protocol{fidl::DiscoverableProtocolName<fuchsia_sysmem2::Allocator>},
+                  Protocol{fidl::DiscoverableProtocolName<fuchsia_tracing_provider::Registry>},
+                  Protocol{fidl::DiscoverableProtocolName<fuchsia_scheduler::RoleManager>},
+              },
+          .source = {ParentRef()},
+          .targets = {ChildRef{kGuestManagerName}}})
+      .AddRoute(Route{
+          .capabilities =
+              {
+                  Protocol{fidl::DiscoverableProtocolName<fuchsia_net_virtualization::Control>},
+              },
+          .source = {ChildRef{kFakeNetstackComponentName}},
+          .targets = {ChildRef{kGuestManagerName}}})
+      .AddRoute(Route{
+          .capabilities =
+              {
+                  Protocol{
+                      fidl::DiscoverableProtocolName<fuchsia_virtualization::DebianGuestManager>},
+              },
+          .source = ChildRef{kGuestManagerName},
+          .targets = {ParentRef()}});
 
   realm_root_ = realm_builder.Build(dispatcher());
-  fuchsia::virtualization::GuestManager_Launch_Result res;
-  guest_manager_ =
-      realm_root_->component().ConnectSync<fuchsia::virtualization::DebianGuestManager>();
+
+  zx::result client_end =
+      realm_root_->component().Connect<fuchsia_virtualization::DebianGuestManager>();
+  ASSERT_OK(client_end.status_value());
+  guest_manager_.Bind(std::move(*client_end));
+
+  zx::result endpoints = fidl::CreateEndpoints<fuchsia_virtualization::Guest>();
+  ASSERT_OK(endpoints.status_value());
+  auto [guest_client_end, guest_server_end] = std::move(*endpoints);
 
   FX_LOGS(INFO) << "Starting Debian Guest";
-  ASSERT_OK(guest_manager_->Launch(std::move(cfg), guest_.NewRequest(), &res));
-  if (res.is_err()) {
-    FAIL() << "Failed to launch guest with error: " << static_cast<uint32_t>(res.err());
-  }
+  fidl::Result<fuchsia_virtualization::DebianGuestManager::Launch> res = guest_manager_->Launch(
+      {{.guest_config = std::move(cfg), .controller = std::move(guest_server_end)}});
+  ASSERT_TRUE(res.is_ok()) << res.error_value().FormatDescription();
+
+  guest_.Bind(std::move(guest_client_end));
 
   // Start a GuestConsole.  When the console starts, it waits until it
   // receives some sensible output from the guest to ensure that the guest is
   // usable.
   FX_LOGS(INFO) << "Getting Serial Console";
-  guest_.set_error_handler([](zx_status_t status) { FAIL() << zx_status_get_string(status); });
-  std::optional<fuchsia::virtualization::Guest_GetConsole_Result> get_console_result;
-  guest_->GetConsole(
-      [&get_console_result](fuchsia::virtualization::Guest_GetConsole_Result result) {
-        get_console_result = std::move(result);
-      });
-  FX_LOGS(INFO) << "Waiting for Serial Console";
-  RunLoopUntil([&get_console_result]() { return get_console_result.has_value() || HasFailure(); });
+  fidl::Result<fuchsia_virtualization::Guest::GetConsole> get_console_result = guest_->GetConsole();
+  ASSERT_TRUE(get_console_result.is_ok()) << get_console_result.error_value().FormatDescription();
   FX_LOGS(INFO) << "Serial Console Received";
-  if (HasFailure()) {
-    return;
-  }
-  fuchsia::virtualization::Guest_GetConsole_Result& result = get_console_result.value();
-  switch (result.Which()) {
-    case fuchsia::virtualization::Guest_GetConsole_Result::Tag::kResponse: {
-      GuestConsole serial(std::make_unique<ZxSocket>(std::move(result.response().socket)));
-      ASSERT_OK(serial.Start(zx::time::infinite()));
 
-      // Make sure the pty is running and that the guest will receive our commands.
-      ASSERT_OK(serial.RepeatCommandTillSuccess("echo guest ready", "$", "guest ready",
-                                                zx::time::infinite(), zx::sec(1)));
+  GuestConsole serial(std::make_unique<ZxSocket>(std::move(get_console_result->socket())));
+  ASSERT_OK(serial.Start(zx::time::infinite()));
 
-      // Wait until guest_interaction_daemon is running.
-      ASSERT_OK(serial.ExecuteBlocking(
-          "journalctl -f --no-tail -u guest_interaction_daemon | grep -m1 Listening", "$",
-          zx::time::infinite(), nullptr));
+  // Make sure the pty is running and that the guest will receive our commands.
+  ASSERT_OK(serial.RepeatCommandTillSuccess("echo guest ready", "$", "guest ready",
+                                            zx::time::infinite(), zx::sec(1)));
 
-      // Periodically log the guest state.
-      MakeRecurringTask(
-          dispatcher(),
-          [serial = std::move(serial), log_count = 0]() mutable {
-            ASSERT_OK(
-                serial.ExecuteBlocking("echo " + std::to_string(++log_count) +
-                                           "; journalctl -u guest_interaction_daemon --no-pager",
-                                       "$", zx::time::infinite(), nullptr));
-          },
-          zx::sec(10))();
+  // Wait until guest_interaction_daemon is running.
+  ASSERT_OK(serial.ExecuteBlocking(
+      "journalctl -f --no-tail -u guest_interaction_daemon | grep -m1 Listening", "$",
+      zx::time::infinite(), nullptr));
 
-      break;
-    }
-    case fuchsia::virtualization::Guest_GetConsole_Result::Tag::kErr:
-      FAIL() << "fuchsia.virtualization/Guest.GetConsole error: "
-             << static_cast<int32_t>(result.err());
-    case fuchsia::virtualization::Guest_GetConsole_Result::Tag::Invalid:
-      FAIL() << "fuchsia.virtualization/Guest.GetConsole: invalid FIDL tag";
-  }
+  // Periodically log the guest state.
+  MakeRecurringTask(
+      dispatcher(),
+      [serial = std::move(serial), log_count = 0]() mutable {
+        ASSERT_OK(serial.ExecuteBlocking("echo " + std::to_string(++log_count) +
+                                             "; journalctl -u guest_interaction_daemon --no-pager",
+                                         "$", zx::time::infinite(), nullptr));
+      },
+      zx::sec(10))();
 }
 
 void GuestInteractionTest::TearDown() {
-  // We're about to shut down the realm; unbind to unhook the error handler.
-  guest_.Unbind();
-  bool complete = false;
-  realm_root_->Teardown([&](fit::result<fuchsia::component::Error> result) { complete = true; });
-  RunLoopUntil([&]() { return complete; });
+  guest_ = {};
+  guest_manager_ = {};
+  if (realm_root_) {
+    bool complete = false;
+    realm_root_->Teardown([&](fit::result<fuchsia::component::Error> result) { complete = true; });
+    RunLoopUntil([&]() { return complete; });
+    realm_root_.reset();
+  }
 }

@@ -8,6 +8,8 @@
 #include <lib/power-management/power-state.h>
 #include <stddef.h>
 
+#include <fbl/ref_ptr.h>
+#include <kernel/ffi.h>
 #include <ktl/utility.h>
 
 #ifdef UNITTESTS_ENABLED
@@ -37,9 +39,23 @@ static_assert(offsetof(PowerLevelUpdateRequest, options) == 24);
 namespace {
 PowerDomainSet g_saved_power_domains[SMP_MAX_CPUS];
 }  // namespace
+#endif
 
 extern "C" {
 
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE zx_status_t
+cpp_pdev_power_level_controller_get(uint32_t domain_id, PowerLevelController** out_controller) {
+  auto result = PDevPowerLevelController::Get(domain_id);
+  if (result.is_ok()) {
+    fbl::RefPtr<PowerLevelController> base = ktl::move(result.value());
+    *out_controller = fbl::ExportToRawPtr(&base);
+    return ZX_OK;
+  }
+  return result.status_value();
+}
+
+#ifdef UNITTESTS_ENABLED
 void cpp_save_and_clear_power_domains_for_test() {
   percpu::ForEach([](cpu_num_t cpu_num, percpu* percpu) {
     g_saved_power_domains[cpu_num] = percpu->scheduler.ExchangePowerDomainSet(PowerDomainSet{});
@@ -51,8 +67,8 @@ void cpp_restore_power_domains_for_test() {
     percpu->scheduler.ExchangePowerDomainSet(ktl::move(g_saved_power_domains[cpu_num]));
   });
 }
+#endif
 
 }  // extern "C"
-#endif
 
 }  // namespace power_management

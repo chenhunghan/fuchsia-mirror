@@ -1,0 +1,81 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+# Aggregated into //src/ui:target_tests.
+# @bazel2gn:skip
+test_suite(
+    name = "tests",
+    tests = [":print-input-report-tests"],
+    visibility = ["//src/ui:__pkg__"],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = [
+        "src/commands.rs",
+        "src/commands/get_descriptor.rs",
+        "src/commands/list.rs",
+        "src/commands/read.rs",
+        "src/common.rs",
+        "src/descriptor_types.rs",
+        "src/indented_serializer.rs",
+        "src/input_report_types.rs",
+        "src/main.rs",
+        "src/testing.rs",
+        "src/testing/fake_input_device.rs",
+    ],
+    binary_name = "print-input-report",
+    build_flags = ["//build/config/rust:bootfs"],
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.input.report:fuchsia.input.report_rust_next",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fdio/rust:fdio",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fidl/rust_next/fidl_next",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-fs",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:csv",
+        "//third_party/rust_crates/vendor:futures",
+        # prettytable-rs is a fork outside vendor/; GN reaches it through
+        # the //third_party/rust_crates:prettytable-rs alias group.
+        "//third_party/rust_crates/forks/prettytable-rs:prettytable",  # @bazel2gn:path_overwrite://third_party/rust_crates:prettytable-rs
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+    ],
+)
+
+rustc_test(
+    name = "print_input_report_bin_test",
+    build_flags = ["//build/config/rust:bootfs"],
+    crate = ":bin",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.input:fuchsia.input_rust_next",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-sync",
+        "//src/storage/lib/vfs/rust:vfs",
+        "//third_party/rust_crates/vendor:googletest",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_unittest_package(
+    name = "print-input-report-tests",
+    max_log_severity = "ERROR",
+    unit_tests = [":print_input_report_bin_test"],
+)

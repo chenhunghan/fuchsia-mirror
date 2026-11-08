@@ -3,16 +3,14 @@
 // found in the LICENSE file.
 
 #include <fidl/test.transport/cpp/driver/wire.h>
+#include <lib/driver/testing/cpp/driver_runtime.h>
 #include <lib/fdf/cpp/dispatcher.h>
-#include <lib/fit/defer.h>
 #include <lib/sync/cpp/completion.h>
 
 #include <zxtest/zxtest.h>
 
-#include "sdk/lib/fidl_driver/tests/transport/scoped_fake_driver.h"
-
 TEST(Client, ServerReset) {
-  fidl_driver_testing::ScopedFakeDriver driver;
+  fdf_testing::DriverRuntime runtime;
 
   libsync::Completion dispatcher_shutdown;
   auto dispatcher = fdf::UnsynchronizedDispatcher::Create(
@@ -47,7 +45,7 @@ TEST(Client, ServerReset) {
 }
 
 TEST(Client, ServerResetMidCall) {
-  fidl_driver_testing::ScopedFakeDriver driver;
+  fdf_testing::DriverRuntime runtime;
 
   libsync::Completion dispatcher_shutdown;
   auto dispatcher = fdf::UnsynchronizedDispatcher::Create(

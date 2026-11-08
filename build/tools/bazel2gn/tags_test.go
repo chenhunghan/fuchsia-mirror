@@ -5,6 +5,7 @@
 package bazel2gn_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -115,6 +116,117 @@ func TestTagsConversion(t *testing.T) {
 	]
 }`,
 		},
+		{
+			name: "sync assert_no_deps with path_overwrite comment",
+			bazel: `rustc_library(
+    name = "lib",
+    srcs = ["src/lib.rs"],
+    tags = [
+        "assert_no_deps=//third_party/rust_crates/vendor:serde_json5",  # @bazel2gn:path_overwrite://third_party/rust_crates:serde_json5($current_toolchain)
+    ],
+)
+`,
+			wantGN: `rustc_library("lib") {
+	sources = [
+		"src/lib.rs",
+	]
+	assert_no_deps = [
+		"//third_party/rust_crates:serde_json5($current_toolchain)",
+	]
+}`,
+		},
+		{
+			name: "sync exclude_toolchain_tags",
+			bazel: `rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    tags = [
+        "exclude_toolchain_tags=heapdump",
+        "assert_no_deps=//src/lib/foo:bar",
+        "exclude_toolchain_tags=asan",
+    ],
+)
+`,
+			wantGN: `rustc_binary("bin") {
+	sources = [
+		"src/main.rs",
+	]
+	assert_no_deps = [
+		"//src/lib/foo:bar",
+	]
+	exclude_toolchain_tags = [
+		"heapdump",
+		"asan",
+	]
+}`,
+		},
+		{
+			name: "sync exclude_toolchain_tags on rustc_test",
+			bazel: `rustc_test(
+    name = "foo_test",
+    srcs = ["src/lib.rs"],
+    tags = ["exclude_toolchain_tags=heapdump"],
+)
+`,
+			wantGN: `rustc_test("foo_test") {
+	sources = [
+		"src/lib.rs",
+	]
+	exclude_toolchain_tags = [
+		"heapdump",
+	]
+}`,
+		},
+		{
+			name: "sync exclude_toolchain_tags on rustc_library with with_unit_tests",
+			bazel: `rustc_library(
+    name = "lib",
+    srcs = ["src/lib.rs"],
+    with_unit_tests = True,
+    tags = ["exclude_toolchain_tags=heapdump"],
+)
+`,
+			wantGN: `rustc_library("lib") {
+	sources = [
+		"src/lib.rs",
+	]
+	with_unit_tests = true
+	exclude_toolchain_tags = [
+		"heapdump",
+	]
+}`,
+		},
+		{
+			name: "sync exclude_toolchain_tags on rustc_cdylib and fuchsia_rust_dso",
+			bazel: `rustc_cdylib(
+    name = "cdylib",
+    srcs = ["src/lib.rs"],
+    tags = ["exclude_toolchain_tags=heapdump"],
+)
+
+fuchsia_rust_dso(
+    name = "dso",
+    srcs = ["src/lib.rs"],
+    tags = ["exclude_toolchain_tags=instrumented"],
+)
+`,
+			wantGN: `rustc_cdylib("cdylib") {
+	sources = [
+		"src/lib.rs",
+	]
+	exclude_toolchain_tags = [
+		"heapdump",
+	]
+}
+fuchsia_rust_dso("dso") {
+	sources = [
+		"src/lib.rs",
+	]
+	exclude_toolchain_tags = [
+		"instrumented",
+	]
+}`,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := toSyntaxFile(t, tc.bazel)
@@ -131,8 +243,9 @@ func TestTagsConversion(t *testing.T) {
 
 func TestTagsConversionErrors(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		bazel string
+		name    string
+		bazel   string
+		wantErr string
 	}{
 		{
 			name: "tags not list literal",
@@ -143,13 +256,72 @@ func TestTagsConversionErrors(t *testing.T) {
         "//conditions:default": ["assert_no_deps=//third_party/rust_crates/vendor:anyhow"],
     }),
 )`,
+			wantErr: "expected list literal for tags attribute, got *syntax.CallExpr",
+		},
+		{
+			name: "exclude_toolchain_tags on a C++ rule",
+			bazel: `fx_cc_binary(
+    name = "bin",
+    srcs = ["main.cc"],
+    tags = ["exclude_toolchain_tags=instrumented"],
+)`,
+			wantErr: `the "exclude_toolchain_tags=instrumented" tag is only supported on Rust binary, library, and test rules, got fx_cc_binary`,
+		},
+		{
+			name: "empty exclude_toolchain_tags",
+			bazel: `rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    tags = ["exclude_toolchain_tags="],
+)`,
+			wantErr: `empty "exclude_toolchain_tags=" tag`,
+		},
+		{
+			name: "exclude_toolchain_tags on rustc_library without with_unit_tests",
+			bazel: `rustc_library(
+    name = "lib",
+    srcs = ["src/lib.rs"],
+    tags = ["exclude_toolchain_tags=heapdump"],
+)`,
+			wantErr: `the "exclude_toolchain_tags=heapdump" tag is only supported on rustc_library when with_unit_tests is set`,
+		},
+		{
+			name: "exclude_toolchain_tags on rustc_library with with_unit_tests=False",
+			bazel: `rustc_library(
+    name = "lib",
+    srcs = ["src/lib.rs"],
+    with_unit_tests = False,
+    tags = ["exclude_toolchain_tags=heapdump"],
+)`,
+			wantErr: `the "exclude_toolchain_tags=heapdump" tag is only supported on rustc_library when with_unit_tests is set`,
+		},
+		{
+			name: "exclude_toolchain_tags on rust_library without with_unit_tests",
+			bazel: `rust_library(
+    name = "lib",
+    srcs = ["src/lib.rs"],
+    tags = ["exclude_toolchain_tags=heapdump"],
+)`,
+			wantErr: `the "exclude_toolchain_tags=heapdump" tag is only supported on rust_library when with_unit_tests is set`,
+		},
+		{
+			name: "exclude_toolchain_tags on fuchsia_cc_dso",
+			bazel: `fuchsia_cc_dso(
+    name = "dso",
+    is_async = True,
+    srcs = ["main.cc"],
+    tags = ["exclude_toolchain_tags=instrumented"],
+)`,
+			wantErr: `the "exclude_toolchain_tags=instrumented" tag is only supported on Rust binary, library, and test rules, got fuchsia_cc_dso`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := toSyntaxFile(t, tc.bazel)
 			_, err := bazelToGN(f)
 			if err == nil {
-				t.Errorf("Unexpected success converting Bazel targets. Bazel source:\n%s", tc.bazel)
+				t.Fatalf("Unexpected success converting Bazel targets. Bazel source:\n%s", tc.bazel)
+			} else if tc.wantErr != "" && !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("bazelToGN() error = %q, want substring %q", err.Error(), tc.wantErr)
 			}
 		})
 	}

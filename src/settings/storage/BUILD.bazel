@@ -1,0 +1,129 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/components:fx_component.bzl", "fx_component_manifest", "fx_test_component")
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [],  # Include all tests in the package.
+    visibility = ["//src/settings:__pkg__"],
+)
+
+fidl_library(
+    name = "test.storage",
+    testonly = True,
+    srcs = ["storage.test.fidl"],
+    enable_rust = True,
+    visibility = ["//:__subpackages__"],
+)
+
+rustc_library(
+    name = "settings_storage",
+    srcs = [
+        "src/device_storage.rs",
+        "src/fidl_storage.rs",
+        "src/lib.rs",
+        "src/stash_logger.rs",
+        "src/storage_factory.rs",
+    ],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    visibility = [
+        "//src/settings/accessibility:__pkg__",
+        "//src/settings/audio:__pkg__",
+        "//src/settings/display:__pkg__",
+        "//src/settings/do_not_disturb:__pkg__",
+        "//src/settings/factory_reset:__pkg__",
+        "//src/settings/input:__pkg__",
+        "//src/settings/intl:__pkg__",
+        "//src/settings/keyboard:__pkg__",
+        "//src/settings/light:__pkg__",
+        "//src/settings/night_mode:__pkg__",
+        "//src/settings/privacy:__pkg__",
+        "//src/settings/service:__pkg__",
+        "//src/settings/setup:__pkg__",
+        "//src/settings/test_common:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.stash:fuchsia.stash_rust",
+        "//sdk/rust/zx",
+        "//src/lib/diagnostics/inspect/derive",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-fs",
+        "//src/settings/inspect_utils:settings_inspect_utils",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+    ],
+)
+
+# The bare binary only runs inside its custom-manifest
+# component; the test runs through the :settings_storage_tests fx_test.
+rustc_test(
+    name = "settings_storage_lib_test",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate = ":settings_storage",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":test.storage_rust",
+        "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:tempfile",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+fx_packaged_binary(
+    name = "settings_storage_lib_test_packaged_bin",
+    testonly = True,
+    binary = ":settings_storage_lib_test",
+    binary_name = "settings_storage_lib_test",
+)
+
+fx_component_manifest(
+    name = "settings_storage_tests_manifest",
+    testonly = True,
+    component_name = "settings_storage_test",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners:tmp_storage.shard.cml",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/settings_storage_tests.cml",
+)
+
+fx_test_component(
+    name = "settings_storage_tests_component",
+    compiled_manifest = ":settings_storage_tests_manifest",
+    deps = [":settings_storage_lib_test_packaged_bin"],
+)
+
+fx_package(
+    name = "settings_storage_tests-package",
+    package_name = "settings_storage_tests",
+    test_components = [":settings_storage_tests_component"],
+)
+
+fx_test(
+    name = "settings_storage_tests",
+    max_log_severity = "ERROR",
+    package = ":settings_storage_tests-package",
+)

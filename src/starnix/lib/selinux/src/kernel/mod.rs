@@ -11,7 +11,7 @@ mod permissions;
 
 pub use avc::{
     AccessCacheStorage, AccessQueryArgs, CacheStats, ConcurrentAccessCache, DEFAULT_SHARED_SIZE,
-    PerThreadCache, QueryCacheCapacity,
+    PerThreadCache,
 };
 pub(crate) use avc::{AccessVectorCache, Query};
 pub(crate) use index::PolicyIndex;
@@ -23,7 +23,7 @@ use std::num::NonZeroU32;
 
 /// Identifies a specific class by its policy-defined Id, or as a kernel object class enum Id.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, RcuDroppable)]
-pub enum ObjectClass {
+pub(crate) enum ObjectClass {
     /// Refers to a well-known SELinux [`KernelClass`] (e.g. "process", "file", "capability").
     Kernel(KernelClass),
     /// Refers to a policy-defined class by its policy-defined numeric [`ClassId`]. This is most
@@ -46,14 +46,29 @@ impl<T: Into<KernelClass>> From<T> for ObjectClass {
 /// Access decision translated into kernel permission bit positions for a [`KernelClass`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KernelAccessDecision {
+    /// Set of kernel permissions that are allowed.
     pub allow: AccessVector,
+    /// Set of kernel permissions that should be audited when checked (as `auditallow` if the
+    /// corresponding bit in `allow` is set, or `auditdeny` if it is cleared).
     pub audit: AccessVector,
+    /// Flags associated with the access decision (e.g. `SELINUX_AVD_FLAGS_PERMISSIVE`).
     pub flags: u32,
+    /// Bug ID to include in audit logs if denials are permitted via an exception rule.
     pub todo_bug: Option<NonZeroU32>,
 }
 
+impl KernelAccessDecision {
+    /// Access decision that allows all permissions without auditing.
+    pub const ALLOW_ALL: Self =
+        Self { allow: AccessVector::ALL, audit: AccessVector::NONE, flags: 0, todo_bug: None };
+
+    /// Access decision that denies all permissions and audits all denials.
+    pub const DENY_ALL: Self =
+        Self { allow: AccessVector::NONE, audit: AccessVector::ALL, flags: 0, todo_bug: None };
+}
+
 /// Extended permission access decision as seen from the kernel.
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct KernelXpermsAccessDecision {
     /// Set of xperms that are allowed.
     pub allow: XpermsBitmap,
@@ -65,6 +80,24 @@ pub(crate) struct KernelXpermsAccessDecision {
     pub has_todo: bool,
 }
 
+impl KernelXpermsAccessDecision {
+    /// Extended permission decision that allows all extended permissions without auditing.
+    pub(crate) const ALLOW_ALL: Self = Self {
+        allow: XpermsBitmap::ALL,
+        audit: XpermsBitmap::NONE,
+        permissive: false,
+        has_todo: false,
+    };
+
+    /// Extended permission decision that denies all extended permissions and audits all denials.
+    #[cfg(test)]
+    pub(crate) const DENY_ALL: Self = Self {
+        allow: XpermsBitmap::NONE,
+        audit: XpermsBitmap::ALL,
+        permissive: false,
+        has_todo: false,
+    };
+}
 #[cfg(test)]
 mod tests {
     use super::*;

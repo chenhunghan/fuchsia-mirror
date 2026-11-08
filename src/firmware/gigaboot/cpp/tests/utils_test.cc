@@ -17,7 +17,6 @@
 #include "gmock/gmock.h"
 #include "gpt.h"
 #include "mock_boot_service.h"
-#include "phys/efi/main.h"
 
 using ::testing::ContainerEq;
 

@@ -68,13 +68,18 @@ fuchsia_component("component") {
   component_name = "dhcp-client"
   manifest = "meta/dhcp-client.cml"
   deps = [ ":dhcp_client" ]
+  visibility = [ ":*" ]
+}
+
+fuchsia_package("package") {
+  package_name = "dhcp-client"
+  deps = [ ":component" ]
 }
 
 fuchsia_test_component("dhcp-client-test") {
   manifest = "meta/dhcp-client-test.cml"
   deps = [
     ":dhcp_client_test",
-    "//src/connectivity/network/netstack3:component-debug",
     "//src/connectivity/network/testing/netemul/service:netemul-sandbox",
   ]
 }
@@ -83,14 +88,20 @@ fuchsia_test_with_expectations_package("dhcp-client-tests") {
   test_components = [ ":dhcp-client-test" ]
   treatment_of_cases_with_error_logs = "SKIP_CASES_WITH_ERROR_LOGS"
   expectations = "expects/expectations.json5"
-  deps = [ ":component" ]
+  subpackages = [
+    ":package",
+    "//src/connectivity/network/netstack3:package-debug",
+  ]
 }
 
 fuchsia_test_with_expectations_package("dhcp-client-tests-with-error-logs") {
   test_components = [ ":dhcp-client-test" ]
   treatment_of_cases_with_error_logs = "RUN_ONLY_CASES_WITH_ERROR_LOGS"
   expectations = "expects/expectations.json5"
-  deps = [ ":component" ]
+  subpackages = [
+    ":package",
+    "//src/connectivity/network/netstack3:package-debug",
+  ]
   test_specs = {
     log_settings = {
       max_severity = "ERROR"

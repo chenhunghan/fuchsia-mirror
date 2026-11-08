@@ -28,9 +28,12 @@ mod event_dispatcher_ffi;
 mod event_pair_dispatcher;
 #[allow(improper_ctypes)]
 mod event_pair_dispatcher_ffi;
+mod exception;
 mod exception_dispatcher;
 mod exception_dispatcher_ffi;
+mod exception_ffi;
 mod exceptionate;
+#[allow(improper_ctypes)]
 mod exceptionate_ffi;
 mod executor;
 mod fifo_dispatcher;
@@ -83,20 +86,19 @@ mod port_dispatcher;
 mod port_dispatcher_ffi;
 mod process_dispatcher;
 #[allow(improper_ctypes)]
-pub(crate) mod process_dispatcher_ffi;
+mod process_dispatcher_ffi;
 mod profile_dispatcher;
 #[allow(improper_ctypes)]
 mod profile_dispatcher_ffi;
 mod resource;
 mod resource_dispatcher;
 mod resource_dispatcher_ffi;
-#[allow(improper_ctypes)]
-mod resource_ffi;
 mod root_job_observer;
 mod root_job_observer_ffi;
 mod sampler_dispatcher;
 #[allow(improper_ctypes)]
 mod sampler_dispatcher_ffi;
+mod singleton;
 mod socket_dispatcher;
 #[allow(improper_ctypes)]
 mod socket_dispatcher_ffi;
@@ -140,13 +142,14 @@ pub use diagnostics::{
 pub use dispatcher::{Dispatcher, DispatcherOps};
 pub use event_dispatcher::EventDispatcher;
 pub use event_pair_dispatcher::EventPairDispatcher;
-pub use exception_dispatcher::{ArchExceptionContext, ExceptionDispatcher};
+pub use exception::{dispatch_user_exception, dump_common_exception_context};
+pub use exception_dispatcher::ExceptionDispatcher;
 pub use exceptionate::Exceptionate;
-pub use executor::Executor;
 pub use fifo_dispatcher::FifoDispatcher;
 pub use futex_context::{FutexContext, FutexId, OwnerAction, ProcessType};
 pub use guest::Guest;
 pub use guest_dispatcher::GuestDispatcher;
+pub(crate) use handle::HandleTableArena;
 pub use handle::{Handle, HandleOwner, HandleRef, HandleValue, KernelHandle};
 pub use handle_table::{
     HandleEntry, HandleTable, HandleTableLockClass, HandleTableReadGuard, HandleTableWriteGuard,
@@ -158,27 +161,32 @@ pub use io_buffer_shared_region_dispatcher::IoBufferSharedRegionDispatcher;
 pub use iommu_dispatcher::IommuDispatcher;
 pub use job_dispatcher::*;
 pub use job_policy::{JobPolicy, JobPolicyCollection, Policy};
-pub use log_dispatcher::*;
+pub use log_dispatcher::LogDispatcher;
 pub use memory_watchdog::*;
 pub use message_packet::{MessagePacket, MessagePacketPtr};
 pub use msi_allocation::MsiAllocation;
 pub use msi_dispatcher::MsiDispatcher;
 pub use msi_interrupt_dispatcher::MsiInterruptDispatcher;
 pub use pager_dispatcher::PagerDispatcher;
-pub use pinned_memory_token_dispatcher::{PinnedMemoryTokenDispatcher, dev_vaddr_t};
-pub use port_dispatcher::{PortDispatcher, PortPacket, RawPortPacket};
+pub use pinned_memory_token_dispatcher::{
+    PinnedMemoryTokenDispatcher, QueryAddressResult, dev_vaddr_t,
+};
+pub use port_dispatcher::{PortAllocator, PortDispatcher, PortPacket, RawPortPacket};
 pub use process_dispatcher::{CurrentProcessDispatcher, ProcessDispatcher};
 pub use profile_dispatcher::ProfileDispatcher;
 pub use resource::{
-    validate_ranged_resource, validate_ranged_resource_dispatcher, validate_resource_irq,
-    validate_resource_kind_base, validate_system_resource,
+    validate_ranged_resource, validate_ranged_resource_dispatcher, validate_resource_ioport,
+    validate_resource_irq, validate_resource_kind_base, validate_resource_mmio,
+    validate_system_resource,
 };
 pub use resource_dispatcher::{ResourceDispatcher, is_valid_kind};
 pub use root_job_observer::RootJobObserver;
-pub use root_job_observer_ffi::start_root_job_observer;
 pub use sampler_dispatcher::SamplerDispatcher;
+pub use singleton::{
+    get_memory_watchdog, get_root_job_dispatcher, get_root_job_handle, start_root_job_observer,
+};
 pub use socket_dispatcher::{Disposition, ReadType, SocketDispatcher};
-pub use stream_dispatcher::*;
+pub use stream_dispatcher::{StreamDispatcher, StreamOptions};
 pub use suspend_token_dispatcher::SuspendTokenDispatcher;
 pub use thread_dispatcher::{AutoBlocked, Blocked, CurrentMessageWaiter, ThreadDispatcher};
 pub use timer_dispatcher::TimerDispatcher;
@@ -191,3 +199,6 @@ pub use vm_object_dispatcher::{
     InitialMutability, VmObjectDispatcher, VmoOwnership, vmo_to_info_entry,
 };
 pub use wait_signal_observer::WaitSignalObserver;
+
+/// The kernel's `fbl::Name`, protected by a spinlock like the C++ `fbl::Name<Size>`.
+pub type Name<const SIZE: usize> = fbl::Name<SIZE, crate::ksync_kernel::TrackedSpinlock>;

@@ -6,6 +6,7 @@
 
 #include <fidl/fuchsia.driver.metadata/cpp/fidl.h>
 #include <lib/driver/fake-platform-device/cpp/fake-pdev.h>
+#include <lib/driver/metadata/cpp/metadata.h>
 #include <lib/driver/testing/cpp/driver_test.h>
 
 #include <cstring>
@@ -596,6 +597,66 @@ TEST_F(AmlPwmDriverGenericMetadataTest, GenericMetadataTest) {
   driver_test().RunInEnvironmentTypeContext(
       [dict = std::move(dict)](auto& env) mutable { env.InitGeneric(dict); });
   ASSERT_OK(driver_test().StartDriver());
+
+  ASSERT_OK(driver_test().RunOnBackgroundDispatcherSync([&]() {
+    zx::result metadata = fdf_metadata::GetMetadata<fuchsia_hardware_pwm::PwmChannelsMetadata>(
+        driver_test().ConnectToDriverSvcDir());
+    ASSERT_OK(metadata);
+    ASSERT_TRUE(metadata->channels().has_value());
+    ASSERT_EQ(metadata->channels()->size(), 1u);
+    const fuchsia_hardware_pwm::PwmChannelInfo& channel = metadata->channels()->at(0);
+    EXPECT_EQ(channel.id(), 0u);
+    EXPECT_EQ(channel.period_ns(), 1000u);
+    EXPECT_FALSE(channel.global_id().has_value());
+    EXPECT_FALSE(channel.name().has_value());
+  }));
+}
+
+// The DML global ID and name of each channel are forwarded to the pwm core.
+TEST_F(AmlPwmDriverGenericMetadataTest, GlobalIdAndName) {
+  std::vector<fuchsia_driver_metadata::DictionaryEntry> entries;
+  entries.push_back(fuchsia_driver_metadata::DictionaryEntry(
+      "channels._count", fuchsia_driver_metadata::DictionaryValue::WithInt64(2)));
+  entries.push_back(fuchsia_driver_metadata::DictionaryEntry(
+      "channels.0.channel", fuchsia_driver_metadata::DictionaryValue::WithInt64(0)));
+  entries.push_back(fuchsia_driver_metadata::DictionaryEntry(
+      "channels.0.period_ns", fuchsia_driver_metadata::DictionaryValue::WithInt64(1250)));
+  entries.push_back(fuchsia_driver_metadata::DictionaryEntry(
+      "channels.0.id", fuchsia_driver_metadata::DictionaryValue::WithInt64(0x12345678)));
+  entries.push_back(fuchsia_driver_metadata::DictionaryEntry(
+      "channels.0.name", fuchsia_driver_metadata::DictionaryValue::WithStr("pwm")));
+  entries.push_back(fuchsia_driver_metadata::DictionaryEntry(
+      "channels.1.channel", fuchsia_driver_metadata::DictionaryValue::WithInt64(9)));
+  entries.push_back(fuchsia_driver_metadata::DictionaryEntry(
+      "channels.1.period_ns", fuchsia_driver_metadata::DictionaryValue::WithInt64(0)));
+  entries.push_back(fuchsia_driver_metadata::DictionaryEntry(
+      "channels.1.id", fuchsia_driver_metadata::DictionaryValue::WithInt64(0x9abcdef0)));
+
+  fuchsia_driver_metadata::Dictionary dict{{.entries = std::move(entries)}};
+
+  driver_test().RunInEnvironmentTypeContext(
+      [dict = std::move(dict)](auto& env) mutable { env.InitGeneric(dict); });
+  ASSERT_OK(driver_test().StartDriver());
+
+  ASSERT_OK(driver_test().RunOnBackgroundDispatcherSync([&]() {
+    zx::result metadata = fdf_metadata::GetMetadata<fuchsia_hardware_pwm::PwmChannelsMetadata>(
+        driver_test().ConnectToDriverSvcDir());
+    ASSERT_OK(metadata);
+    ASSERT_TRUE(metadata->channels().has_value());
+    ASSERT_EQ(metadata->channels()->size(), 2u);
+
+    const fuchsia_hardware_pwm::PwmChannelInfo& channel0 = metadata->channels()->at(0);
+    EXPECT_EQ(channel0.id(), 0u);
+    EXPECT_EQ(channel0.period_ns(), 1250u);
+    EXPECT_EQ(channel0.global_id(), 0x12345678u);
+    EXPECT_EQ(channel0.name(), "pwm");
+
+    const fuchsia_hardware_pwm::PwmChannelInfo& channel1 = metadata->channels()->at(1);
+    EXPECT_EQ(channel1.id(), 9u);
+    EXPECT_EQ(channel1.period_ns(), 0u);
+    EXPECT_EQ(channel1.global_id(), 0x9abcdef0u);
+    EXPECT_FALSE(channel1.name().has_value());
+  }));
 }
 
 }  // namespace

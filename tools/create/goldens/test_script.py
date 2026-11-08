@@ -10,6 +10,7 @@ import argparse
 import difflib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -68,9 +69,35 @@ def main() -> None:
         golden_files = set(json.load(f))
 
     # Create a temporary directory to house the generated project.
-    with tempfile.TemporaryDirectory() as project_dir:
+    with (
+        tempfile.TemporaryDirectory() as project_dir,
+        tempfile.TemporaryDirectory() as bin_dir,
+    ):
+        # `create` looks for templates in a `create_templates` directory next
+        # to its own executable, using the executable's real path with
+        # symlinks resolved. The test runs with these runtime files:
+        #
+        #   host-tools/create            -> symlink to bazel-out/.../create_bin
+        #   host-tools/create_templates/ -> symlinks to each template file
+        #
+        # So running host-tools/create directly would make it look for
+        # bazel-out/.../create_templates, which doesn't exist. Instead, set up:
+        #
+        #   <bin_dir>/create            (a copy of the binary)
+        #   <bin_dir>/create_templates  -> host-tools/create_templates
+        create_bin = os.path.join(bin_dir, "create")
+        shutil.copy(proc_args.create_bin, create_bin)
+        os.symlink(
+            os.path.abspath(
+                os.path.join(
+                    os.path.dirname(proc_args.create_bin), "create_templates"
+                )
+            ),
+            os.path.join(bin_dir, "create_templates"),
+        )
+
         args = [
-            proc_args.create_bin,
+            create_bin,
             proc_args.project_type,
             proc_args.project_subtype,
             "--path",
@@ -112,11 +139,5 @@ def main() -> None:
             sys.exit(1)
 
 
-# The python_host_test build rule calls `unittest.main`.
-# Since this is not a unittest (and can't be since it takes command line arguments),
-# we pretend our main is unittest's main.
-
-unittest = sys.modules[__name__]
-
 if __name__ == "__main__":
-    unittest.main()
+    main()

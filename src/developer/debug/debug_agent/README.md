@@ -114,11 +114,12 @@ Callers and implementations must preserve these invariants:
   channel (crash exceptions) from the non-exclusive `"job debugger"` channel
   (`ZX_EXCP_PROCESS_STARTING`). Process attachment uses the process debugger
   exception channel instead.
-- Job attachments with `kMinimal` or `kNone` priority do not claim the debugger
-  exception channel and do not receive upfront `ZX_EXCP_PROCESS_STARTING` or
-  `ZX_EXCP_THREAD_STARTING` notifications. Exception handlers in `DebuggedJob`
-  and `DebuggedProcess` must lazily create `DebuggedProcess` and call
-  `PopulateCurrentThreads` upon receiving an exception.
+- Job and process attachments with `kMinimal` or `kNone` priority do not claim
+  the debugger exception channel and do not receive upfront
+  `ZX_EXCP_PROCESS_STARTING` or `ZX_EXCP_THREAD_STARTING` notifications.
+  Exception handlers in `DebuggedJob` and `DebuggedProcess` must lazily create
+  `DebuggedProcess` and call `PopulateCurrentThreads` upon receiving an
+  exception.
 
 ## Side Effects
 

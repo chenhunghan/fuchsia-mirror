@@ -97,8 +97,7 @@ fn i8042_wait_write() -> Result<(), ()> {
 }
 
 /// Reboot the system via the keyboard, returns on failure.
-#[unsafe(no_mangle)]
-pub extern "C" fn pc_keyboard_reboot() {
+pub fn pc_keyboard_reboot() {
     if i8042_wait_write().is_err() {
         return;
     }

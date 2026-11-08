@@ -33,4 +33,12 @@ const std::array<int32_t, HermeticFidelityTest::kNumReferenceFreqs>
         // clang-format on
 };
 
+// A representative summary subset of reference frequencies across the spectrum:
+// 12 Hz (subsonic/out-of-band), 80 Hz (bass), 250 Hz (low-midrange), 1000 Hz (reference),
+// 4 kHz (upper-mid/crossover), 20 kHz (high/treble), and 26 kHz (ultrasonic/out-of-band).
+const std::array<int32_t, HermeticFidelityTest::kNumSummaryFreqs>
+    HermeticFidelityTest::kSummaryFrequencies = {
+        12, 80, 250, 1000, 4000, 20000, 26000,
+};
+
 }  // namespace media::audio::test

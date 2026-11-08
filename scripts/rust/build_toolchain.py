@@ -80,7 +80,7 @@ def main():
     parser.add_argument(
         "--host-os",
         help="host operating system",
-        choices=["linux", "mac"],
+        choices=["linux"],
         default="linux",
     )
     parser.add_argument(

@@ -5,7 +5,6 @@
 #include "imx227.h"
 
 #include <endian.h>
-#include <fuchsia/hardware/camera/sensor/c/banjo.h>
 #include <lib/ddk/binding_driver.h>
 #include <lib/ddk/debug.h>
 #include <lib/ddk/metadata.h>

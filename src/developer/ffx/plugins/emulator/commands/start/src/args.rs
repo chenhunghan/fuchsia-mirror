@@ -152,6 +152,20 @@ pub struct StartCommand {
     #[argh(option, default = "host_is_mac()")]
     pub hidpi_scaling: bool,
 
+    /// enable external internet access (via SLiRP IPv4) when using tap networking mode.
+    #[argh(switch)]
+    pub internet: bool,
+
+    /// specify a SLiRP guestfwd rule when --internet is enabled. May be repeated for multiple
+    /// rules.
+    #[argh(option)]
+    pub guestfwd: Vec<String>,
+
+    /// specify a host TCP address (host:port) for a socket netdev attached to hubid=0 when
+    /// --internet is enabled.
+    #[argh(option)]
+    pub netdev_socket: Option<String>,
+
     /// passes the given string to the emulator executable, appended after all other arguments
     /// (since duplicated values favor the later value). This means command-line values will
     /// override configuration-provided values for any of these kernel arguments. Can be repeated

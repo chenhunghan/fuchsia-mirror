@@ -3,7 +3,9 @@
 // found in the LICENSE file.
 
 use crate::boot_manager::serve_boot_manager;
-use crate::data_sink::{DataSink, serve_data_sink, serve_dynamic_data_sink, serve_partition_io};
+use crate::data_sink::{DataSink, serve_data_sink, serve_dynamic_data_sink};
+use crate::partition::BoardPartitions;
+use crate::partition_io::{PartitionIo, serve_partition_io};
 use anyhow::{Context as _, Error};
 use fidl::epitaph::ChannelEpitaphExt as _;
 use fidl_next::Request;
@@ -15,6 +17,20 @@ use fidl_next_fuchsia_paver::paver::{
 use fidl_next_fuchsia_process_lifecycle as fprocess_lifecycle;
 use fuchsia_async as fasync;
 use std::rc::Rc;
+
+const BLOCK_DIR_PATH: &str = "/block";
+
+/// Opens the paver component's `/block` directory for legacy [`DataSink`] and `DynamicDataSink`
+/// connections.
+fn open_block_dir() -> Result<fidl_next::ClientEnd<fio::Directory>, zx::Status> {
+    let (block_dir, server_end) = fidl_next::fuchsia::create_channel::<fio::Directory>();
+    fdio::open(
+        BLOCK_DIR_PATH,
+        fidl_fuchsia_io::Flags::PROTOCOL_DIRECTORY | fidl_fuchsia_io::PERM_READABLE,
+        server_end.into_untyped(),
+    )?;
+    Ok(block_dir)
+}
 
 /// Trait representing the top-level `fuchsia.paver.Paver` and
 /// `fuchsia.process.lifecycle.Lifecycle` FIDL protocols.
@@ -28,23 +44,35 @@ pub trait Paver: 'static {
         Ok(())
     }
 
-    /// Creates a [`DataSink`] for reading and writing boot assets, firmware, and partitions.
-    async fn find_data_sink(&self) -> Result<DataSink, zx::Status> {
-        Ok(DataSink)
+    /// Opens the `/block` directory passed to [`DataSink`] by [`Self::find_data_sink`] and
+    /// [`Self::find_partition_table_manager`].
+    fn open_block_dir(&self) -> Result<fidl_next::ClientEnd<fio::Directory>, zx::Status> {
+        open_block_dir()
     }
 
-    /// Creates a [`DataSink`] serving `fuchsia.paver.PartitionIo` backed by `block_dir`.
+    /// Creates a board-specific [`BoardPartitions`] used by [`DataSink`], `DynamicDataSink`, and
+    /// [`PartitionIo`].
+    async fn create_board_partitions(&self) -> Result<Box<dyn BoardPartitions>, zx::Status>;
+
+    /// Creates a [`DataSink`] for reading and writing boot assets, firmware, and partitions.
+    async fn find_data_sink(&self) -> Result<DataSink, zx::Status> {
+        let block_dir = self.open_block_dir()?;
+        Ok(DataSink::new(self.create_board_partitions().await?, block_dir))
+    }
+
+    /// Creates a [`PartitionIo`] serving `fuchsia.paver.PartitionIo` backed by `block_dir`.
     async fn open_partition_io(
         &self,
-        _block_dir: fidl_next::ClientEnd<fio::Directory>,
-    ) -> Result<DataSink, zx::Status> {
-        Ok(DataSink)
+        block_dir: fidl_next::ClientEnd<fio::Directory>,
+    ) -> Result<PartitionIo, zx::Status> {
+        Ok(PartitionIo::new(self.create_board_partitions().await?, block_dir))
     }
 
     /// Creates a [`DataSink`] serving `fuchsia.paver.DynamicDataSink` for partition table
     /// management.
     async fn find_partition_table_manager(&self) -> Result<DataSink, zx::Status> {
-        Ok(DataSink)
+        let block_dir = self.open_block_dir()?;
+        Ok(DataSink::new(self.create_board_partitions().await?, block_dir))
     }
 
     /// Creates a board-specific [`BootManager`](Self::BootManager) for managing A/B/R boot
@@ -63,6 +91,7 @@ pub trait Paver: 'static {
     }
 }
 
+/// FIDL server handler for `fuchsia.paver.Paver` that dispatches requests to [`Paver`].
 struct PaverHandler<P> {
     paver: Rc<P>,
     scope: fasync::ScopeHandle,
@@ -89,10 +118,10 @@ impl<P: Paver> fpaver::PaverLocalServerHandler for PaverHandler<P> {
     async fn open_partition_io(&mut self, request: Request<OpenPartitionIo>) {
         let req = request.payload();
         match self.paver.open_partition_io(req.block_dir).await {
-            Ok(sink) => {
-                let partition_io = req.partition_io;
+            Ok(partition_io) => {
+                let server_end = req.partition_io;
                 self.scope.spawn_local(async move {
-                    if let Err(err) = serve_partition_io(sink, partition_io).await {
+                    if let Err(err) = serve_partition_io(partition_io, server_end).await {
                         log::error!(err:?; "Error serving PartitionIo");
                     }
                 });
@@ -158,6 +187,7 @@ pub async fn serve_paver<P: Paver>(
         .context("serving Paver")
 }
 
+/// FIDL server handler for `fuchsia.process.lifecycle.Lifecycle`.
 struct LifecycleHandler<P> {
     paver: Rc<P>,
     scope: Option<fasync::Scope>,
@@ -202,13 +232,30 @@ pub async fn serve_lifecycle<P: Paver>(
 mod tests {
     use super::*;
     use crate::ResponderExt as _;
+    use crate::partition::PartitionClient;
     use crate::sysconfig::serve_sysconfig;
+    use async_trait::async_trait;
     use fidl_next::Responder;
     use fidl_next_fuchsia_paver::{boot_manager, sysconfig};
     use std::cell::Cell;
 
+    struct EmptyBoardPartitions;
+
+    #[async_trait(?Send)]
+    impl BoardPartitions for EmptyBoardPartitions {
+        async fn open_partition(
+            &self,
+            _partition_name: &str,
+            _block_dir: &fidl_next::ClientEnd<fio::Directory>,
+        ) -> Result<Box<dyn PartitionClient>, zx::Status> {
+            Err(zx::Status::NOT_SUPPORTED)
+        }
+    }
+
     struct FakePaver {
         stopped: Cell<bool>,
+        has_block_dir: Cell<bool>,
+        fail_board_partitions: Cell<Option<zx::Status>>,
     }
 
     impl Paver for FakePaver {
@@ -217,6 +264,22 @@ mod tests {
         async fn stop(&self) -> Result<(), zx::Status> {
             self.stopped.set(true);
             Ok(())
+        }
+
+        fn open_block_dir(&self) -> Result<fidl_next::ClientEnd<fio::Directory>, zx::Status> {
+            if self.has_block_dir.get() {
+                let (block_dir, _server) = fidl_next::fuchsia::create_channel::<fio::Directory>();
+                Ok(block_dir)
+            } else {
+                super::open_block_dir()
+            }
+        }
+
+        async fn create_board_partitions(&self) -> Result<Box<dyn BoardPartitions>, zx::Status> {
+            if let Some(status) = self.fail_board_partitions.get() {
+                return Err(status);
+            }
+            Ok(Box::new(EmptyBoardPartitions))
         }
 
         async fn find_boot_manager(&self) -> Result<Self::BootManager, zx::Status> {
@@ -341,9 +404,14 @@ mod tests {
         }
     }
 
+    /// Verifies `Paver` sub-protocol routing, error epitaphs, and `Lifecycle::Stop` shutdown.
     #[fuchsia::test]
     async fn test_serve_paver_and_lifecycle_stop() {
-        let paver = Rc::new(FakePaver { stopped: Cell::new(false) });
+        let paver = Rc::new(FakePaver {
+            stopped: Cell::new(false),
+            has_block_dir: Cell::new(false),
+            fail_board_partitions: Cell::new(None),
+        });
         let scope = fasync::Scope::new_with_name("test");
         let (paver_client, paver_server) = fidl_next::fuchsia::create_channel::<fpaver::Paver>();
         let paver_client = paver_client.spawn();
@@ -353,14 +421,38 @@ mod tests {
             serve_paver(paver_clone, paver_server, scope_handle).await.expect("serve_paver");
         });
 
-        // FindDataSink spawns a skeleton DataSink task.
+        // Without `/block` in the namespace, FindDataSink closes with NOT_FOUND.
+        let (missing_ds_client, missing_ds_server) =
+            fidl_next::fuchsia::create_channel::<fpaver::DataSink>();
+        let missing_ds_client = missing_ds_client.spawn();
+        paver_client.find_data_sink(missing_ds_server).await.expect("find_data_sink");
+        assert!(matches!(
+            missing_ds_client.flush().await,
+            Err(fidl_next::Error::Protocol(fidl_next::ProtocolError::PeerClosedWithEpitaph(
+                epitaph
+            ))) if zx::Status::err_from_raw(epitaph) == zx::Status::NOT_FOUND
+        ));
+
+        // With `open_block_dir` succeeding, FindDataSink and FindPartitionTableManager spawn
+        // DataSink / DynamicDataSink tasks.
+        paver.has_block_dir.set(true);
+
         let (data_sink_client, data_sink_server) =
             fidl_next::fuchsia::create_channel::<fpaver::DataSink>();
         let data_sink_client = data_sink_client.spawn();
         paver_client.find_data_sink(data_sink_server).await.expect("find_data_sink");
         assert_eq!(data_sink_client.flush().await.expect("flush fidl").status, Ok(()));
 
-        // OpenPartitionIo spawns a skeleton PartitionIo task.
+        let (dyn_sink_client, dyn_sink_server) =
+            fidl_next::fuchsia::create_channel::<fpaver::DynamicDataSink>();
+        let dyn_sink_client = dyn_sink_client.spawn();
+        paver_client
+            .find_partition_table_manager(dyn_sink_server)
+            .await
+            .expect("find_partition_table_manager");
+        assert_eq!(dyn_sink_client.flush().await.expect("dyn flush fidl").status, Ok(()));
+
+        // OpenPartitionIo spawns a PartitionIo task.
         let (block_dir_client, _block_dir_server) =
             fidl_next::fuchsia::create_channel::<fio::Directory>();
         let (partition_io_client, partition_io_server) =
@@ -371,6 +463,50 @@ mod tests {
             .await
             .expect("open_partition_io");
         assert_eq!(partition_io_client.flush().await.expect("partition_io flush"), Ok(()));
+
+        // When `create_board_partitions` fails, FindDataSink, FindPartitionTableManager, and
+        // OpenPartitionIo close their server channels with that status epitaph.
+        paver.fail_board_partitions.set(Some(zx::Status::INTERNAL));
+
+        let (err_ds_client, err_ds_server) =
+            fidl_next::fuchsia::create_channel::<fpaver::DataSink>();
+        let err_ds_client = err_ds_client.spawn();
+        paver_client.find_data_sink(err_ds_server).await.expect("find_data_sink");
+        assert!(matches!(
+            err_ds_client.flush().await,
+            Err(fidl_next::Error::Protocol(fidl_next::ProtocolError::PeerClosedWithEpitaph(
+                epitaph
+            ))) if zx::Status::err_from_raw(epitaph) == zx::Status::INTERNAL
+        ));
+
+        let (err_dds_client, err_dds_server) =
+            fidl_next::fuchsia::create_channel::<fpaver::DynamicDataSink>();
+        let err_dds_client = err_dds_client.spawn();
+        paver_client
+            .find_partition_table_manager(err_dds_server)
+            .await
+            .expect("find_partition_table_manager");
+        assert!(matches!(
+            err_dds_client.flush().await,
+            Err(fidl_next::Error::Protocol(fidl_next::ProtocolError::PeerClosedWithEpitaph(
+                epitaph
+            ))) if zx::Status::err_from_raw(epitaph) == zx::Status::INTERNAL
+        ));
+
+        let (err_block_dir, _err_block_server) =
+            fidl_next::fuchsia::create_channel::<fio::Directory>();
+        let (err_pio_client, err_pio_server) =
+            fidl_next::fuchsia::create_channel::<fpaver::PartitionIo>();
+        let err_pio_client = err_pio_client.spawn();
+        paver_client.open_partition_io(err_block_dir, err_pio_server).await.expect("open_pio");
+        assert!(matches!(
+            err_pio_client.flush().await,
+            Err(fidl_next::Error::Protocol(fidl_next::ProtocolError::PeerClosedWithEpitaph(
+                epitaph
+            ))) if zx::Status::err_from_raw(epitaph) == zx::Status::INTERNAL
+        ));
+
+        paver.fail_board_partitions.set(None);
 
         // FindBootManager and FindSysconfig close with NOT_SUPPORTED epitaph when unsupported.
         let (bm_client, bm_server) = fidl_next::fuchsia::create_channel::<fpaver::BootManager>();
@@ -402,6 +538,7 @@ mod tests {
         assert!(paver.stopped.get());
     }
 
+    /// Verifies `BootManager` and `Sysconfig` FIDL server helpers and [`ResponderExt`] responses.
     #[fuchsia::test]
     async fn test_boot_manager_and_sysconfig_responder_ext() {
         let scope = fasync::Scope::new_with_name("test_bm_sc");

@@ -1,0 +1,50 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "pkg_url",
+    srcs = [
+        "fuchsia_pkg_url.cc",
+        "url_resolver.cc",
+    ],
+    hdrs = [
+        "fuchsia_pkg_url.h",
+        "url_resolver.h",
+    ],
+    implementation_deps = [
+        "//sdk/lib/stdcompat",
+        "@re2",
+    ],
+    visibility = ["//src/sys/fuzzing/common:__pkg__"],
+    deps = ["//src/lib/fxl"],
+    alwayslink = True,
+)
+
+fx_cc_binary(
+    name = "tests",
+    testonly = True,
+    srcs = [
+        "fuchsia_pkg_url_unittest.cc",
+        "url_resolver_unittest.cc",
+    ],
+    build_flags = ["//build/config/lto:no-fat-lto-objects-linking"],
+    gn_output_name = "pkg_url_unittests",
+    tags = ["manual"],
+    deps = [
+        ":pkg_url",
+        "//src/lib/fxl/test:gtest_main",
+    ],
+)
+
+fx_unittest_package(
+    name = "pkg_url_unittests",
+    package_name = "pkg_url_unittests",
+    unit_tests = [":tests"],
+)

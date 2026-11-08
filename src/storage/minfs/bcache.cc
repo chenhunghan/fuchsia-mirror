@@ -149,8 +149,6 @@ zx::result<std::unique_ptr<Bcache>> Bcache::Create(block_client::BlockDevice* de
   return zx::ok(std::move(bcache));
 }
 
-uint32_t Bcache::DeviceBlockSize() const { return info_.block_size; }
-
 Bcache::Bcache(block_client::BlockDevice* device, uint32_t max_blocks)
     : max_blocks_(max_blocks), device_(device) {}
 

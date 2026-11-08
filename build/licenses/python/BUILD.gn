@@ -17,7 +17,6 @@ if (is_host) {
     "gn_label.py",
     "gn_license_metadata.py",
     "readme_fuchsia.py",
-    "spdx_comparator.py",
     "spdx_writer.py",
   ]
 
@@ -37,7 +36,6 @@ if (is_host) {
       "gn_label.py",
       "gn_license_metadata.py",
       "readme_fuchsia.py",
-      "spdx_comparator.py",
       "spdx_writer.py",
     ]
     deps = common_libraries

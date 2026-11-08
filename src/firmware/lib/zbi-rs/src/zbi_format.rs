@@ -613,13 +613,14 @@ pub struct zbi_dcfg_arm_psci_cpu_suspend_state_t {
     pub entry_latency_us: u32,
     pub exit_latency_us: u32,
     pub min_residency_us: u32,
+    pub cpu_mask: u64,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of zbi_dcfg_arm_psci_cpu_suspend_state_t"]
-        [::core::mem::size_of::<zbi_dcfg_arm_psci_cpu_suspend_state_t>() - 24usize];
+        [::core::mem::size_of::<zbi_dcfg_arm_psci_cpu_suspend_state_t>() - 32usize];
     ["Alignment of zbi_dcfg_arm_psci_cpu_suspend_state_t"]
-        [::core::mem::align_of::<zbi_dcfg_arm_psci_cpu_suspend_state_t>() - 4usize];
+        [::core::mem::align_of::<zbi_dcfg_arm_psci_cpu_suspend_state_t>() - 8usize];
     ["Offset of field: zbi_dcfg_arm_psci_cpu_suspend_state_t::id"]
         [::core::mem::offset_of!(zbi_dcfg_arm_psci_cpu_suspend_state_t, id) - 0usize];
     ["Offset of field: zbi_dcfg_arm_psci_cpu_suspend_state_t::power_state"]
@@ -636,6 +637,8 @@ const _: () = {
         zbi_dcfg_arm_psci_cpu_suspend_state_t,
         min_residency_us
     ) - 20usize];
+    ["Offset of field: zbi_dcfg_arm_psci_cpu_suspend_state_t::cpu_mask"]
+        [::core::mem::offset_of!(zbi_dcfg_arm_psci_cpu_suspend_state_t, cpu_mask) - 24usize];
 };
 pub type zbi_qcom_rng_flags_t = u32;
 pub const ZBI_QCOM_RNG_FLAGS_ENABLED: zbi_qcom_rng_flags_t = 1;

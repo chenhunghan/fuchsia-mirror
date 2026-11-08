@@ -2,8 +2,27 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
-load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+exports_files(
+    ["test_data/single_vd_manifest.json"],
+    visibility = ["//src/developer/ffx/plugins/product/get_artifacts:__pkg__"],
+)
+
+exports_files(
+    ["test_data/virtual_device.json"],
+    visibility = [
+        "//src/developer/ffx/plugins/emulator/configuration:__pkg__",
+        "//src/developer/ffx/plugins/product/create_old:__pkg__",
+        "//src/developer/ffx/plugins/product/show:__pkg__",
+    ],
+)
+
+exports_files(
+    ["test_data/virtual_device2.json"],
+    visibility = ["//src/developer/ffx/plugins/product/create_old:__pkg__"],
+)
 
 # This list should only contain schemas that are currently exported outside of
 # the Fuchsia source tree. Unless otherwise indicated, each file corresponds
@@ -71,7 +90,7 @@ rustc_library(
     crate_name = "sdk_metadata",
     data = [":idk_schema_files"],
     edition = "2024",
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     test_deps = [
         "//third_party/rust_crates/vendor:tempfile",
     ],

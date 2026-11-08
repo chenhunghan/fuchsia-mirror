@@ -15,10 +15,11 @@ pub mod test {
         BPF_JSGE, BPF_JSGT, BPF_JSLE, BPF_JSLT, BPF_LD, BPF_LDX, BPF_LSH, BPF_MEM, BPF_MOD,
         BPF_MOV, BPF_MUL, BPF_NEG, BPF_OR, BPF_RSH, BPF_SRC_IMM, BPF_SRC_REG, BPF_ST, BPF_STX,
         BPF_SUB, BPF_TO_BE, BPF_TO_LE, BPF_W, BPF_XCHG, BPF_XOR, BpfValue, CallingContext,
-        DataWidth, EbpfHelperImpl, EbpfInstruction, EbpfProgramContext, FromBpfValue,
-        FunctionSignature, HelperDefinition, MapFlags, MapReference, MapSchema, MapTypeFilter,
-        MemoryId, MemoryParameterSize, NullVerifierLogger, Packet, PointerOrigin, ProgramArgument,
-        Type, link_program_dynamic, static_helper_set, verify_program,
+        DataWidth, EbpfHelperImpl, EbpfInstruction, EbpfProgramContext, FieldDescriptor, FieldType,
+        FromBpfValue, FunctionSignatureBuilder, HelperDefinition, MapFlags, MapReference,
+        MapSchema, MapTypeFilter, MemoryId, MemoryParameterSize, NullVerifierLogger, Packet,
+        PointerOrigin, ProgramArgument, StructDescriptor, Type, link_program_dynamic,
+        new_memory_id, static_helper_set, verify_program,
     };
     use pest::Parser;
     use pest::iterators::Pair;
@@ -27,10 +28,106 @@ pub mod test {
     use std::str::FromStr;
     use std::sync::LazyLock;
     use test_case::test_case;
-    use zerocopy::IntoBytes;
 
     #[derive(Parser)]
-    #[grammar = "../../src/starnix/lib/ebpf/src/test_grammar.pest"]
+    #[grammar_inline = r##"
+rules = { SOI ~
+          ( ASM | MEMORY | RAW | ( RESULT | ERROR ) | IGNORED_SECTIONS | EOL )* ~
+          EOI }
+
+WHITESPACE = _{ " " }
+_COMMENT   = _{ "#" ~ (!NEWLINE ~ ANY)* ~ NEWLINE }
+EOL = _{ NEWLINE | _COMMENT }
+SECTION_MARKER = _{ "-- " }
+
+HEXPREFIX = _{ "0x" }
+HEXSUFFIX = { ASCII_HEX_DIGIT+ }
+HEXNUM = _{ HEXPREFIX ~ HEXSUFFIX }
+DECNUM = @{ ASCII_DIGIT+ }
+NUM = { HEXNUM | DECNUM }
+SIGN = { "+" | "-" }
+IMM = { SIGN? ~ NUM }
+OFFSET = { SIGN ~ NUM }
+EXIT = { "exit" }
+
+REG_PREFIX = _{ "%r" }
+REG_NUMBER = @{ ASCII_DIGIT{1, 2} }
+REG = _{ REG_PREFIX ~ REG_NUMBER }
+DEREF = { "[" ~ REG ~ OFFSET? ~ "]" }
+
+BASE_BINARY_OP = @{ "add" | "sub" | "mul" | "div" | "or" | "and" | "lsh" | "rsh" | "mod" |
+                    "xor" | "mov" | "arsh" }
+BINARY_OP = @{ BASE_BINARY_OP ~ ( "32" )? }
+UNARY_OP = @{ ( "neg" ~ ( "32" )? ) | "le16" | "le32" | "le64" | "be16" | "be32" | "be64" }
+
+ALU_INSTRUCTION = { ( UNARY_OP ~ REG ) |
+                    ( BINARY_OP  ~ REG ~ "," ~ (REG | IMM) ) }
+
+BASE_ATOMIC_OP = @{ "add" | "and" | "or" | "xor" | "cmpxchg" | "xchg" }
+ATOMIC_OP = @{ BASE_ATOMIC_OP ~ ( "32" )? }
+
+FETCH = { "fetch" }
+ATOMIC_INSTRUCTION = { "lock" ~ FETCH ? ~ ATOMIC_OP ~ DEREF ~ "," ~ REG }
+
+STORE_REG_OP = @{ "stxb" | "stxh" | "stxw" | "stxdw" }
+STORE_IMM_OP = @{ "stb" | "sth" | "stw" | "stdw" }
+LOAD_OP = @{ "ldxb" | "ldxh" | "ldxw" | "ldxdw" }
+LOAD_PACKET_OP = @{ "ldpb" | "ldph" | "ldpw" | "ldpdw" }
+LDDW_OP = @{ "lddw" }
+MAP_INDEX = { "map" ~ "[" ~ IMM ~ "]" }
+MAP_VALUE = { "map_val" ~ "[" ~ IMM ~ "]" ~ OFFSET? }
+
+MEM_INSTRUCTION = { ( STORE_REG_OP ~ DEREF ~ "," ~ REG ) |
+                    ( STORE_IMM_OP ~ DEREF ~ "," ~ IMM ) |
+                    ( LOAD_OP ~ REG ~ "," ~ DEREF ) |
+                    ( LDDW_OP ~ REG ~ "," ~ MAP_VALUE ) |
+                    ( LDDW_OP ~ REG ~ "," ~ MAP_INDEX ) |
+                    ( LDDW_OP ~ REG ~ "," ~ IMM ) |
+                    ( LOAD_PACKET_OP ~ REG? ~ OFFSET? ) }
+
+BASE_JMP_OP = @{ "jeq" | "jgt" | "jge" | "jlt" | "jle" | "jset" | "jne" | "jsgt" |
+                 "jsge" | "jslt" | "jsle" }
+JMP_OP = @{ BASE_JMP_OP ~ ( "32" )? }
+
+JMP_CONDITIONAL = { JMP_OP ~ REG ~ "," ~ (REG | IMM) ~ "," ~ ( OFFSET | EXIT ) }
+JMP = { "ja" ~ OFFSET }
+CALL = { "call" ~ IMM }
+JMP_INSTRUCTION = { JMP_CONDITIONAL |
+                    JMP |
+                    CALL |
+                    EXIT }
+
+ASM_INSTRUCTION = { (   ALU_INSTRUCTION |
+                        MEM_INSTRUCTION |
+                        JMP_INSTRUCTION |
+                        ATOMIC_INSTRUCTION |
+                        ""
+                    ) ~ EOL }
+
+ASM_INSTRUCTIONS = { ASM_INSTRUCTION+ }
+
+ASM = _{ "-- asm" ~ EOL ~
+         ASM_INSTRUCTIONS }
+
+IGNORED_SECTION_MARKS = _{ "-- c" | "-- no register offset" | "-- no jit" }
+IGNORED_SECTIONS = _{ EOL* ~ IGNORED_SECTION_MARKS ~ EOL ~
+                      ((!(SECTION_MARKER | NEWLINE) ~ ANY)* ~ EOL)* }
+
+MEMORY_DATA = { ASCII_HEX_DIGIT{2} }
+MEMORY = { "-- mem" ~ EOL ~
+           (MEMORY_DATA* ~ EOL)* }
+
+RESULT = { "-- result" ~ EOL ~
+           IMM ~  EOL }
+
+ERROR = { ( "-- error pattern" | "-- error" ) ~ EOL ~
+          (!NEWLINE ~ ANY)* ~ EOL }
+
+RAW_VALUE = { ASCII_HEX_DIGIT{16} }
+RAW_LINE = _{ "0x" ~ RAW_VALUE }
+RAW = { "-- raw" ~ EOL ~
+        (RAW_LINE ~  EOL)* }
+"##]
     struct TestGrammar {}
 
     const HEXADECIMAL_BASE: u32 = 16;
@@ -166,6 +263,23 @@ pub mod test {
                                     imm,
                                 ),
                                 EbpfInstruction::new(0, 0, 0, 0, 0),
+                            ]
+                        }
+                        Rule::MAP_VALUE => {
+                            let mut map_inner = next.into_inner();
+                            let map_idx = Self::parse_value(map_inner.next().unwrap()).as_i32();
+                            let offset =
+                                map_inner.next().map_or(0, |pair| Self::parse_value(pair).as_i32());
+                            let code = BPF_IMM | BPF_LD | BPF_DW;
+                            vec![
+                                EbpfInstruction::new(
+                                    code,
+                                    dst_reg,
+                                    crate::api::BPF_PSEUDO_MAP_IDX_VALUE,
+                                    0,
+                                    map_idx,
+                                ),
+                                EbpfInstruction::new(0, 0, 0, 0, offset),
                             ]
                         }
                         Rule::IMM => {
@@ -442,11 +556,21 @@ pub mod test {
     /// Size of the value of the test map at index `TEST_MAP_INDEX_WITH_VALUE`.
     const TEST_MAP_VALUE_SIZE: usize = 16;
 
+    #[repr(C)]
+    #[derive(Default)]
+    struct TestStruct {
+        data: u64,
+        data_end: u64,
+        mutable_field: u32,
+        _padding: u32,
+    }
+
     struct TestEbpfRunContext {
         buffer_size: usize,
         /// Storage for the value returned by the `map_lookup_value` helper.
         /// Stored as `u64` to guarantee 8-byte alignment.
         map_value: [u64; TEST_MAP_VALUE_SIZE / std::mem::size_of::<u64>()],
+        test_struct: TestStruct,
     }
 
     const DATA_OFFSET: usize = 8;
@@ -473,7 +597,7 @@ pub mod test {
         }
     }
 
-    static TEST_ARG_MEMORY_ID: LazyLock<MemoryId> = LazyLock::new(|| MemoryId::new());
+    static TEST_ARG_MEMORY_ID: LazyLock<MemoryId> = LazyLock::new(|| new_memory_id());
 
     impl ProgramArgument for TestBuffer {
         fn get_type() -> &'static Type {
@@ -563,7 +687,33 @@ pub mod test {
         HELPER_DEFS.iter().map(|(def, impl_)| (def.index, impl_.clone())).collect()
     );
 
-    static MALLOC_ID: LazyLock<MemoryId> = LazyLock::new(|| MemoryId::new());
+    static MALLOC_ID: LazyLock<MemoryId> = LazyLock::new(|| new_memory_id());
+    static TEST_STRUCT_ID: LazyLock<MemoryId> = LazyLock::new(new_memory_id);
+    static TEST_ARRAY_ID: LazyLock<MemoryId> = LazyLock::new(new_memory_id);
+    static TEST_STRUCT_DESCRIPTOR: LazyLock<Box<StructDescriptor>> = LazyLock::new(|| {
+        Box::new(StructDescriptor {
+            fields: vec![
+                FieldDescriptor {
+                    offset: std::mem::offset_of!(TestStruct, data),
+                    field_type: FieldType::PtrToArray {
+                        is_32_bit: false,
+                        id: TEST_ARRAY_ID.clone(),
+                    },
+                },
+                FieldDescriptor {
+                    offset: std::mem::offset_of!(TestStruct, data_end),
+                    field_type: FieldType::PtrToEndArray {
+                        is_32_bit: false,
+                        id: TEST_ARRAY_ID.clone(),
+                    },
+                },
+                FieldDescriptor {
+                    offset: std::mem::offset_of!(TestStruct, mutable_field),
+                    field_type: FieldType::MutableScalar { size: 4 },
+                },
+            ],
+        })
+    });
 
     static HELPER_DEFS: LazyLock<Vec<(HelperDefinition, EbpfHelperImpl<TestEbpfProgramContext>)>> =
         LazyLock::new(|| {
@@ -572,7 +722,7 @@ pub mod test {
                     HelperDefinition {
                         index: 0,
                         name: "gather_bytes",
-                        signature: FunctionSignature {
+                        signature: FunctionSignatureBuilder {
                             args: vec![
                                 Type::ScalarValueParameter,
                                 Type::ScalarValueParameter,
@@ -582,7 +732,8 @@ pub mod test {
                             ],
                             return_value: Type::UNKNOWN_SCALAR,
                             invalidate_array_bounds: false,
-                        },
+                        }
+                        .build(),
                     },
                     EbpfHelperImpl::<TestEbpfProgramContext>(gather_bytes),
                 ),
@@ -590,7 +741,7 @@ pub mod test {
                     HelperDefinition {
                         index: 1,
                         name: "memfrob",
-                        signature: FunctionSignature {
+                        signature: FunctionSignatureBuilder {
                             args: vec![
                                 Type::MemoryParameter {
                                     size: MemoryParameterSize::Reference { index: 1 },
@@ -599,9 +750,14 @@ pub mod test {
                                 },
                                 Type::ScalarValueParameter,
                             ],
-                            return_value: Type::AliasParameter { parameter_index: 0 },
+                            return_value: Type::MemoryParameter {
+                                size: MemoryParameterSize::Reference { index: 1 },
+                                input: true,
+                                output: true,
+                            },
                             invalidate_array_bounds: false,
-                        },
+                        }
+                        .build(),
                     },
                     EbpfHelperImpl::<TestEbpfProgramContext>(memfrob),
                 ),
@@ -609,11 +765,12 @@ pub mod test {
                     HelperDefinition {
                         index: 2,
                         name: "trash_registers",
-                        signature: FunctionSignature {
+                        signature: FunctionSignatureBuilder {
                             args: vec![],
                             return_value: Type::UNKNOWN_SCALAR,
                             invalidate_array_bounds: false,
-                        },
+                        }
+                        .build(),
                     },
                     EbpfHelperImpl::<TestEbpfProgramContext>(get_zero),
                 ),
@@ -621,11 +778,12 @@ pub mod test {
                     HelperDefinition {
                         index: 3,
                         name: "sqrti",
-                        signature: FunctionSignature {
+                        signature: FunctionSignatureBuilder {
                             args: vec![Type::ScalarValueParameter],
                             return_value: Type::UNKNOWN_SCALAR,
                             invalidate_array_bounds: false,
-                        },
+                        }
+                        .build(),
                     },
                     EbpfHelperImpl::<TestEbpfProgramContext>(sqrti),
                 ),
@@ -633,13 +791,14 @@ pub mod test {
                     HelperDefinition {
                         index: 4,
                         name: "strcmp_ext",
-                        signature: FunctionSignature {
+                        signature: FunctionSignatureBuilder {
                             // Args cannot be correctly verified as the verifier cannot check the string
                             // are correctly 0 terminated.
                             args: vec![],
                             return_value: Type::UNKNOWN_SCALAR,
                             invalidate_array_bounds: false,
-                        },
+                        }
+                        .build(),
                     },
                     EbpfHelperImpl::<TestEbpfProgramContext>(strcmp_ext),
                 ),
@@ -647,11 +806,20 @@ pub mod test {
                     HelperDefinition {
                         index: 100,
                         name: "null_or",
-                        signature: FunctionSignature {
-                            args: vec![Type::ScalarValueParameter],
-                            return_value: Type::NullOrParameter(Box::new(Type::UNKNOWN_SCALAR)),
+                        signature: FunctionSignatureBuilder {
+                            args: vec![Type::MemoryParameter {
+                                size: MemoryParameterSize::Value(8),
+                                input: true,
+                                output: true,
+                            }],
+                            return_value: Type::NullOrParameter(Box::new(Type::MemoryParameter {
+                                size: MemoryParameterSize::Value(8),
+                                input: true,
+                                output: true,
+                            })),
                             invalidate_array_bounds: false,
-                        },
+                        }
+                        .build(),
                     },
                     EbpfHelperImpl::<TestEbpfProgramContext>(null_or),
                 ),
@@ -659,7 +827,7 @@ pub mod test {
                     HelperDefinition {
                         index: 101,
                         name: "read_only",
-                        signature: FunctionSignature {
+                        signature: FunctionSignatureBuilder {
                             args: vec![Type::MemoryParameter {
                                 size: MemoryParameterSize::Value(8),
                                 input: true,
@@ -667,7 +835,8 @@ pub mod test {
                             }],
                             return_value: Type::UNKNOWN_SCALAR,
                             invalidate_array_bounds: false,
-                        },
+                        }
+                        .build(),
                     },
                     EbpfHelperImpl::<TestEbpfProgramContext>(read_only),
                 ),
@@ -675,7 +844,7 @@ pub mod test {
                     HelperDefinition {
                         index: 102,
                         name: "write_only",
-                        signature: FunctionSignature {
+                        signature: FunctionSignatureBuilder {
                             args: vec![
                                 Type::MemoryParameter {
                                     size: MemoryParameterSize::Value(8),
@@ -686,7 +855,8 @@ pub mod test {
                             ],
                             return_value: Type::UNKNOWN_SCALAR,
                             invalidate_array_bounds: false,
-                        },
+                        }
+                        .build(),
                     },
                     EbpfHelperImpl::<TestEbpfProgramContext>(write_only),
                 ),
@@ -694,7 +864,7 @@ pub mod test {
                     HelperDefinition {
                         index: 103,
                         name: "malloc",
-                        signature: FunctionSignature {
+                        signature: FunctionSignatureBuilder {
                             args: vec![Type::ScalarValueParameter],
                             return_value: Type::NullOrParameter(Box::new(
                                 Type::ReleasableParameter {
@@ -707,7 +877,8 @@ pub mod test {
                                 },
                             )),
                             invalidate_array_bounds: false,
-                        },
+                        }
+                        .build(),
                     },
                     EbpfHelperImpl::<TestEbpfProgramContext>(malloc),
                 ),
@@ -715,11 +886,12 @@ pub mod test {
                     HelperDefinition {
                         index: 104,
                         name: "free",
-                        signature: FunctionSignature {
+                        signature: FunctionSignatureBuilder {
                             args: vec![Type::ReleaseParameter { id: MALLOC_ID.clone() }],
                             return_value: Type::UNKNOWN_SCALAR,
                             invalidate_array_bounds: false,
-                        },
+                        }
+                        .build(),
                     },
                     EbpfHelperImpl::<TestEbpfProgramContext>(free),
                 ),
@@ -727,16 +899,17 @@ pub mod test {
                     HelperDefinition {
                         index: 105,
                         name: "maps_sk_storage_get",
-                        signature: FunctionSignature {
+                        signature: FunctionSignatureBuilder {
                             args: vec![Type::ConstPtrToMapParameter {
-                                filter: MapTypeFilter::AllowList(&[
+                                filter: MapTypeFilter::AllowList(vec![
                                     linux_uapi::bpf_map_type_BPF_MAP_TYPE_SK_STORAGE,
                                 ]),
                                 must_be_writable: false,
                             }],
                             return_value: Type::UNKNOWN_SCALAR,
                             invalidate_array_bounds: false,
-                        },
+                        }
+                        .build(),
                     },
                     EbpfHelperImpl::<TestEbpfProgramContext>(get_zero),
                 ),
@@ -744,16 +917,17 @@ pub mod test {
                     HelperDefinition {
                         index: 106,
                         name: "map_lookup",
-                        signature: FunctionSignature {
+                        signature: FunctionSignatureBuilder {
                             args: vec![Type::ConstPtrToMapParameter {
-                                filter: MapTypeFilter::DenyList(&[
+                                filter: MapTypeFilter::DenyList(vec![
                                     linux_uapi::bpf_map_type_BPF_MAP_TYPE_SK_STORAGE,
                                 ]),
                                 must_be_writable: false,
                             }],
                             return_value: Type::UNKNOWN_SCALAR,
                             invalidate_array_bounds: false,
-                        },
+                        }
+                        .build(),
                     },
                     EbpfHelperImpl::<TestEbpfProgramContext>(get_zero),
                 ),
@@ -761,16 +935,17 @@ pub mod test {
                     HelperDefinition {
                         index: 108,
                         name: "map_update",
-                        signature: FunctionSignature {
+                        signature: FunctionSignatureBuilder {
                             args: vec![Type::ConstPtrToMapParameter {
-                                filter: MapTypeFilter::DenyList(&[
+                                filter: MapTypeFilter::DenyList(vec![
                                     linux_uapi::bpf_map_type_BPF_MAP_TYPE_SK_STORAGE,
                                 ]),
                                 must_be_writable: true,
                             }],
                             return_value: Type::UNKNOWN_SCALAR,
                             invalidate_array_bounds: false,
-                        },
+                        }
+                        .build(),
                     },
                     EbpfHelperImpl::<TestEbpfProgramContext>(get_zero),
                 ),
@@ -778,10 +953,10 @@ pub mod test {
                     HelperDefinition {
                         index: 109,
                         name: "map_lookup_value",
-                        signature: FunctionSignature {
+                        signature: FunctionSignatureBuilder {
                             args: vec![
                                 Type::ConstPtrToMapParameter {
-                                    filter: MapTypeFilter::DenyList(&[
+                                    filter: MapTypeFilter::DenyList(vec![
                                         linux_uapi::bpf_map_type_BPF_MAP_TYPE_SK_STORAGE,
                                     ]),
                                     must_be_writable: false,
@@ -792,19 +967,79 @@ pub mod test {
                                 Type::MapValueParameter { map_ptr_index: 0 },
                             )),
                             invalidate_array_bounds: false,
-                        },
+                        }
+                        .build(),
                     },
                     EbpfHelperImpl::<TestEbpfProgramContext>(map_lookup_value),
                 ),
                 (
                     HelperDefinition {
+                        index: 110,
+                        name: "map_update_elem",
+                        signature: FunctionSignatureBuilder {
+                            args: vec![
+                                Type::ConstPtrToMapParameter {
+                                    filter: MapTypeFilter::DenyList(vec![
+                                        linux_uapi::bpf_map_type_BPF_MAP_TYPE_SK_STORAGE,
+                                    ]),
+                                    must_be_writable: true,
+                                },
+                                Type::MapKeyParameter { map_ptr_index: 0 },
+                                Type::MapValueParameter { map_ptr_index: 0 },
+                            ],
+                            return_value: Type::UNKNOWN_SCALAR,
+                            invalidate_array_bounds: false,
+                        }
+                        .build(),
+                    },
+                    EbpfHelperImpl::<TestEbpfProgramContext>(get_zero),
+                ),
+                (
+                    HelperDefinition {
+                        index: 111,
+                        name: "map_null_or_value",
+                        signature: FunctionSignatureBuilder {
+                            args: vec![
+                                Type::ConstPtrToMapParameter {
+                                    filter: MapTypeFilter::DenyList(vec![
+                                        linux_uapi::bpf_map_type_BPF_MAP_TYPE_SK_STORAGE,
+                                    ]),
+                                    must_be_writable: true,
+                                },
+                                Type::NullOrParameter(Box::new(Type::MapValueParameter {
+                                    map_ptr_index: 0,
+                                })),
+                            ],
+                            return_value: Type::UNKNOWN_SCALAR,
+                            invalidate_array_bounds: false,
+                        }
+                        .build(),
+                    },
+                    EbpfHelperImpl::<TestEbpfProgramContext>(get_zero),
+                ),
+                (
+                    HelperDefinition {
                         index: 107,
                         name: "with_context",
-                        signature: FunctionSignature {
+                        signature: FunctionSignatureBuilder {
                             args: vec![Type::ContextParameter { parameter_index: 0 }],
                             return_value: Type::UNKNOWN_SCALAR,
                             invalidate_array_bounds: false,
-                        },
+                        }
+                        .build(),
+                    },
+                    EbpfHelperImpl::<TestEbpfProgramContext>(get_zero),
+                ),
+                (
+                    HelperDefinition {
+                        index: 112,
+                        name: "take_any",
+                        signature: FunctionSignatureBuilder {
+                            args: vec![Type::AnyParameter],
+                            return_value: Type::UNKNOWN_SCALAR,
+                            invalidate_array_bounds: false,
+                        }
+                        .build(),
                     },
                     EbpfHelperImpl::<TestEbpfProgramContext>(get_zero),
                 ),
@@ -812,11 +1047,12 @@ pub mod test {
                     HelperDefinition {
                         index: 200,
                         name: "mock_sk_storage_get",
-                        signature: FunctionSignature {
+                        signature: FunctionSignatureBuilder {
                             args: vec![Type::StructParameter { id: MemoryId::from_raw(4) }],
                             return_value: Type::UNKNOWN_SCALAR,
                             invalidate_array_bounds: false,
-                        },
+                        }
+                        .build(),
                     },
                     EbpfHelperImpl::<TestEbpfProgramContext>(get_zero),
                 ),
@@ -824,7 +1060,7 @@ pub mod test {
                     HelperDefinition {
                         index: 201,
                         name: "mock_get_ptr",
-                        signature: FunctionSignature {
+                        signature: FunctionSignatureBuilder {
                             args: vec![],
                             return_value: Type::MemoryParameter {
                                 size: MemoryParameterSize::Value(100),
@@ -832,9 +1068,27 @@ pub mod test {
                                 output: true,
                             },
                             invalidate_array_bounds: false,
-                        },
+                        }
+                        .build(),
                     },
                     EbpfHelperImpl::<TestEbpfProgramContext>(get_zero),
+                ),
+                (
+                    HelperDefinition {
+                        index: 202,
+                        name: "get_test_struct",
+                        signature: FunctionSignatureBuilder {
+                            args: vec![],
+                            return_value: Type::PtrToStruct {
+                                id: TEST_STRUCT_ID.clone(),
+                                offset: 0.into(),
+                                descriptor: TEST_STRUCT_DESCRIPTOR.clone(),
+                            },
+                            invalidate_array_bounds: false,
+                        }
+                        .build(),
+                    },
+                    EbpfHelperImpl::<TestEbpfProgramContext>(get_test_struct),
                 ),
             ]
         });
@@ -900,7 +1154,7 @@ pub mod test {
                 let code = code.as_ref().unwrap();
                 assert_eq!(raw.len(), code.len());
                 for (raw, code) in raw.iter().zip(code.iter()) {
-                    assert_eq!(raw.as_bytes(), code.as_bytes());
+                    assert_eq!(raw, code);
                 }
                 if result.is_none() {
                     // Special case that only tests the assembler.
@@ -912,7 +1166,7 @@ pub mod test {
         }
     }
 
-    fn gather_bytes(
+    extern "C" fn gather_bytes(
         _context: &mut TestEbpfRunContext,
         a: BpfValue,
         b: BpfValue,
@@ -928,7 +1182,7 @@ pub mod test {
         BpfValue::from((a << 32) | (b << 24) | (c << 16) | (d << 8) | e)
     }
 
-    fn memfrob(
+    extern "C" fn memfrob(
         _context: &mut TestEbpfRunContext,
         ptr: BpfValue,
         n: BpfValue,
@@ -944,7 +1198,7 @@ pub mod test {
         slice.as_mut_ptr().into()
     }
 
-    fn get_zero(
+    extern "C" fn get_zero(
         _context: &mut TestEbpfRunContext,
         _: BpfValue,
         _: BpfValue,
@@ -955,7 +1209,7 @@ pub mod test {
         0.into()
     }
 
-    fn sqrti(
+    extern "C" fn sqrti(
         _context: &mut TestEbpfRunContext,
         v: BpfValue,
         _: BpfValue,
@@ -966,7 +1220,7 @@ pub mod test {
         BpfValue::from((u64::from(v) as f64).sqrt() as u64)
     }
 
-    fn strcmp_ext(
+    extern "C" fn strcmp_ext(
         _context: &mut TestEbpfRunContext,
         s1: BpfValue,
         s2: BpfValue,
@@ -994,7 +1248,7 @@ pub mod test {
         }
     }
 
-    fn null_or(
+    extern "C" fn null_or(
         _context: &mut TestEbpfRunContext,
         s1: BpfValue,
         _: BpfValue,
@@ -1005,7 +1259,7 @@ pub mod test {
         s1
     }
 
-    fn read_only(
+    extern "C" fn read_only(
         _context: &mut TestEbpfRunContext,
         s1: BpfValue,
         _: BpfValue,
@@ -1018,7 +1272,7 @@ pub mod test {
         v1.into()
     }
 
-    fn write_only(
+    extern "C" fn write_only(
         _context: &mut TestEbpfRunContext,
         s1: BpfValue,
         s2: BpfValue,
@@ -1031,7 +1285,7 @@ pub mod test {
         0.into()
     }
 
-    fn malloc(
+    extern "C" fn malloc(
         _context: &mut TestEbpfRunContext,
         size: BpfValue,
         _: BpfValue,
@@ -1042,7 +1296,7 @@ pub mod test {
         unsafe { libc::malloc(usize::from(size) as libc::size_t) }.into()
     }
 
-    fn free(
+    extern "C" fn free(
         _context: &mut TestEbpfRunContext,
         ptr: BpfValue,
         _: BpfValue,
@@ -1054,7 +1308,7 @@ pub mod test {
         0.into()
     }
 
-    fn map_lookup_value(
+    extern "C" fn map_lookup_value(
         context: &mut TestEbpfRunContext,
         _map: BpfValue,
         _key: BpfValue,
@@ -1063,6 +1317,17 @@ pub mod test {
         _: BpfValue,
     ) -> BpfValue {
         (context.map_value.as_mut_ptr() as u64).into()
+    }
+
+    extern "C" fn get_test_struct(
+        context: &mut TestEbpfRunContext,
+        _: BpfValue,
+        _: BpfValue,
+        _: BpfValue,
+        _: BpfValue,
+        _: BpfValue,
+    ) -> BpfValue {
+        (std::ptr::from_mut(&mut context.test_struct) as u64).into()
     }
 
     pub fn parse_asm(data: &str) -> Vec<EbpfInstruction> {
@@ -1109,17 +1374,19 @@ pub mod test {
     #[test_case(ubpf_test_data!("call.data"))]
     #[test_case(ubpf_test_data!("call-memfrob.data"))]
     #[test_case(ubpf_test_data!("call-save.data"))]
+    // `call_unwind.data` and `call_unwind_fail.data` are omitted because they test a
+    // uBPF-specific unwind extension not present in Linux eBPF.
     #[test_case(ubpf_test_data!("div32-by-zero-reg.data"))]
     #[test_case(ubpf_test_data!("div32-high-divisor.data"))]
     #[test_case(ubpf_test_data!("div32-imm.data"))]
     #[test_case(ubpf_test_data!("div32-reg.data"))]
-    #[test_case(ubpf_test_data!("div64-by-zero-imm.data"))]
+    // `div64-by-zero-imm.data` and `div-by-zero-imm.data` are omitted because uBPF executes
+    // immediate division by zero at runtime, whereas the Linux verifier rejects it at load time.
     #[test_case(ubpf_test_data!("div64-by-zero-reg.data"))]
     #[test_case(ubpf_test_data!("div64-imm.data"))]
     #[test_case(ubpf_test_data!("div64-negative-imm.data"))]
     #[test_case(ubpf_test_data!("div64-negative-reg.data"))]
     #[test_case(ubpf_test_data!("div64-reg.data"))]
-    #[test_case(ubpf_test_data!("div-by-zero-imm.data"))]
     #[test_case(ubpf_test_data!("div-by-zero-reg.data"))]
     #[test_case(ubpf_test_data!("early-exit.data"))]
     #[test_case(ubpf_test_data!("err-call-bad-imm.data"))]
@@ -1179,10 +1446,10 @@ pub mod test {
     #[test_case(ubpf_test_data!("lsh-reg.data"))]
     #[test_case(ubpf_test_data!("mem-len.data"))]
     #[test_case(ubpf_test_data!("mod32.data"))]
-    #[test_case(ubpf_test_data!("mod64-by-zero-imm.data"))]
+    // `mod64-by-zero-imm.data` and `mod-by-zero-imm.data` are omitted because uBPF executes
+    // immediate modulo by zero at runtime, whereas the Linux verifier rejects it at load time.
     #[test_case(ubpf_test_data!("mod64-by-zero-reg.data"))]
     #[test_case(ubpf_test_data!("mod64.data"))]
-    #[test_case(ubpf_test_data!("mod-by-zero-imm.data"))]
     #[test_case(ubpf_test_data!("mod-by-zero-reg.data"))]
     #[test_case(ubpf_test_data!("mod.data"))]
     #[test_case(ubpf_test_data!("mov64-sign-extend.data"))]
@@ -1193,9 +1460,13 @@ pub mod test {
     #[test_case(ubpf_test_data!("mul64-imm.data"))]
     #[test_case(ubpf_test_data!("mul64-reg.data"))]
     #[test_case(ubpf_test_data!("mul-loop.data"))]
+    // `mul-loop-memory-iterations.data` is omitted because it loops on a counter loaded from
+    // memory, which the static verifier rejects as a potentially unbounded loop.
     #[test_case(ubpf_test_data!("neg64.data"))]
     #[test_case(ubpf_test_data!("neg.data"))]
     #[test_case(ubpf_test_data!("prime.data"))]
+    // `reload.data` and `unload_reload.data` are omitted because they test uBPF's C VM
+    // reload API rather than eBPF program verification or execution.
     #[test_case(ubpf_test_data!("rsh32.data"))]
     #[test_case(ubpf_test_data!("rsh-reg.data"))]
     #[test_case(ubpf_test_data!("stack2.data"))]
@@ -1228,19 +1499,29 @@ pub mod test {
     #[test_case(local_test_data!("branch_zero_jgt_ptr_prunes_live.data"))]
     #[test_case(local_test_data!("cmpxchg_both_outcomes.data"))]
     #[test_case(local_test_data!("cmpxchg_prune_point.data"))]
+    #[test_case(local_test_data!("compare_with_r10.data"))]
     #[test_case(local_test_data!("div_by_range_with_zero.data"))]
+    #[test_case(local_test_data!("err_any_parameter_use_after_free.data"))]
     #[test_case(local_test_data!("err_atomic_misaligned32.data"))]
     #[test_case(local_test_data!("err_atomic_misaligned64.data"))]
     #[test_case(local_test_data!("err_atomic_misaligned_stack.data"))]
     #[test_case(local_test_data!("err_atomic_not_map_value.data"))]
+    #[test_case(local_test_data!("err_atomic_spilled_ptr_stack.data"))]
     #[test_case(local_test_data!("err_atomic_variable_offset.data"))]
+    #[test_case(local_test_data!("err_atomic_xchg_non_scalar_src.data"))]
     #[test_case(local_test_data!("err_bounded_loop_oob_last_iteration.data"))]
     #[test_case(local_test_data!("err_cmpxchg_both_outcomes.data"))]
+    #[test_case(local_test_data!("err_cmpxchg_uninit_src_stack.data"))]
     #[test_case(local_test_data!("err_context_parameter.data"))]
+    #[test_case(local_test_data!("err_context_parameter_releasable_alias.data"))]
     #[test_case(local_test_data!("err_infinite_loop_counter.data"))]
     #[test_case(local_test_data!("err_infinite_loop_same_state.data"))]
     #[test_case(local_test_data!("err_lddw_punning.data"))]
+    #[test_case(local_test_data!("err_map_ptr_jeq_zero_dce.data"))]
+    #[test_case(local_test_data!("err_mem_load_u64_max_wraparound.data"))]
     #[test_case(local_test_data!("err_memory_id_collision.data"))]
+    #[test_case(local_test_data!("err_mixed_struct_and_mem_store.data"))]
+    #[test_case(local_test_data!("err_mixed_struct_and_stack_load.data"))]
     #[test_case(local_test_data!("err_offset_overflow.data"))]
     #[test_case(local_test_data!("err_packet_load_exit_path_prune.data"))]
     #[test_case(local_test_data!("err_packet_load_ind_offset.data"))]
@@ -1248,14 +1529,36 @@ pub mod test {
     #[test_case(local_test_data!("err_packet_load_r0_dep.data"))]
     #[test_case(local_test_data!("err_packet_load_scalar_src.data"))]
     #[test_case(local_test_data!("err_packet_oob.data"))]
+    #[test_case(local_test_data!("err_prune_atomic_map_ptr_leak.data"))]
+    #[test_case(local_test_data!("err_prune_call_map_value_ptr_leak.data"))]
+    #[test_case(local_test_data!("err_prune_call_null_or_stack_uninit.data"))]
+    #[test_case(local_test_data!("err_prune_dead_stack_atomic.data"))]
+    #[test_case(local_test_data!("err_prune_dead_stack_load.data"))]
+    #[test_case(local_test_data!("err_prune_partial_non_scalar_stack_store.data"))]
+    #[test_case(local_test_data!("err_prune_partial_stack_store.data"))]
+    #[test_case(local_test_data!("err_prune_partial_stack_store_src_dep.data"))]
     #[test_case(local_test_data!("err_prune_point_dependency_chain.data"))]
+    #[test_case(local_test_data!("err_prune_stack_store_dst_reg.data"))]
+    #[test_case(local_test_data!("err_prune_uninit_partial_stack_store.data"))]
+    #[test_case(local_test_data!("err_ptr_to_array_negative_offset.data"))]
+    #[test_case(local_test_data!("err_ptr_wrap_jgt_dce.data"))]
     #[test_case(local_test_data!("err_read_only_helper.data"))]
+    #[test_case(local_test_data!("err_signed_ptr_jsgt_fold.data"))]
+    #[test_case(local_test_data!("err_unchecked_malloc_leak.data"))]
+    #[test_case(local_test_data!("err_unreachable_lddw_invalid_map.data"))]
+    #[test_case(local_test_data!("err_unreachable_lddw_map_fd.data"))]
+    #[test_case(local_test_data!("err_unreachable_pseudo_call.data"))]
     #[test_case(local_test_data!("err_write_r10.data"))]
     #[test_case(local_test_data!("exponential_verification.data"))]
     #[test_case(local_test_data!("forget_release.data"))]
     #[test_case(local_test_data!("forget_release_multiple.data"))]
+    #[test_case(local_test_data!("jeq32_disjoint_known_bits.data"))]
+    #[test_case(local_test_data!("jeq64_disjoint_known_bits.data"))]
+    #[test_case(local_test_data!("jeq64_known_bits_above_umax.data"))]
     #[test_case(local_test_data!("malloc_double_free.data"))]
     #[test_case(local_test_data!("malloc_multiple_use_free.data"))]
+    #[test_case(local_test_data!("malloc_null_check_jeq.data"))]
+    #[test_case(local_test_data!("malloc_null_check_jgt_jle.data"))]
     #[test_case(local_test_data!("malloc_use_free.data"))]
     #[test_case(local_test_data!("map_read_only_allowed.data"))]
     #[test_case(local_test_data!("map_read_only_prohibited.data"))]
@@ -1268,6 +1571,7 @@ pub mod test {
     #[test_case(local_test_data!("packet_access.data"))]
     #[test_case(local_test_data!("packet_load_prune.data"))]
     #[test_case(local_test_data!("ptr_sub_ptr_offset.data"))]
+    #[test_case(local_test_data!("ptr_to_end_array_eq_symmetric.data"))]
     #[test_case(local_test_data!("range_narrowing_with_conditional_jump.data"))]
     #[test_case(local_test_data!("read_only_helper.data"))]
     #[test_case(local_test_data!("releasable_compare.data"))]
@@ -1330,22 +1634,31 @@ pub mod test {
 
         let verified_program = verify_program(
             test_case.code,
-            CallingContext { maps, helpers, args, packet_type },
+            CallingContext { maps, helpers, args, packet_type, allow_ptr_leaks: false },
             &mut NullVerifierLogger,
         );
 
         if let Some(value) = test_case.result {
             let verified_program = verified_program.expect("program must be loadable");
             let maps = verified_program
-                .maps
+                .maps()
                 .iter()
                 .map(|schema| TestMap { schema: *schema })
                 .collect::<Vec<_>>();
             let program = link_program_dynamic::<TestEbpfProgramContext>(&verified_program, maps)
                 .expect("failed to link a test program");
 
-            let mut context =
-                TestEbpfRunContext { buffer_size: test_memory.size, map_value: Default::default() };
+            let data = if test_memory.ptr.is_null() {
+                std::ptr::NonNull::<u8>::dangling().as_ptr() as u64
+            } else {
+                test_memory.ptr as u64
+            };
+            let data_end = data.wrapping_add(test_memory.size as u64);
+            let mut context = TestEbpfRunContext {
+                buffer_size: test_memory.size,
+                map_value: Default::default(),
+                test_struct: TestStruct { data, data_end, mutable_field: 0, _padding: 0 },
+            };
             let result = program.run_with_2_arguments(&mut context, test_memory, test_memory.size);
             assert_eq!(result, value);
         } else {

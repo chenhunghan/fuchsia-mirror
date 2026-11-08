@@ -102,17 +102,7 @@ fn empty_repo_spec() -> RepositorySpec {
 impl PkgServerInfo {
     /// Returns true if the process identified by the pid is running.
     pub fn is_running(&self) -> bool {
-        let pid: Pid = nix::unistd::Pid::from_raw(
-            self.pid.try_into().expect("pid to be representable as i32"),
-        );
-        if pid.as_raw() != 0 {
-            // First do a no-hang wait to collect the process if it's defunct.
-            let _ = nix::sys::wait::waitpid(pid, Some(nix::sys::wait::WaitPidFlag::WNOHANG));
-            // Check to see if it is running by sending signal 0. If there is no error,
-            // the process is running.
-            return nix::sys::signal::kill(pid, None).is_ok();
-        }
-        return false;
+        ffx_process::is_pid_running(self.pid)
     }
 
     pub fn port(&self) -> u16 {

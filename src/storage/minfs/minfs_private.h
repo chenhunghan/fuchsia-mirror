@@ -271,7 +271,6 @@ class Minfs final : public TransactionalFs {
 #endif
 
   [[nodiscard]] bool IsJournalErrored();
-  void EnqueueAllocation(std::unique_ptr<PendingWork> transaction);
 
   // Complete a transaction by enqueueing its WritebackWork to the WritebackQueue.
   void CommitTransaction(std::unique_ptr<Transaction> transaction) final;
@@ -369,9 +368,6 @@ class Minfs final : public TransactionalFs {
 
   Bcache* GetMutableBcache() final { return bc_.get(); }
 
-  // TODO(rvargas): Make private.
-  std::unique_ptr<Bcache> bc_;
-
   Allocator& GetBlockAllocator() final { return *block_allocator_; }
   Allocator& GetInodeAllocator() final { return inodes_->inode_allocator(); }
 
@@ -437,6 +433,7 @@ class Minfs final : public TransactionalFs {
   // while any metadata fields are modified until the time they are enqueued for writeback. This
   // is to avoid modifications from other threads potentially jeopardizing the metadata integrity
   // before it is safely persisted to disk.
+  std::unique_ptr<Bcache> bc_;
   std::unique_ptr<SuperblockManager> sb_;
   std::unique_ptr<Allocator> block_allocator_;
   std::unique_ptr<InodeManager> inodes_;
@@ -489,8 +486,6 @@ class Minfs final : public TransactionalFs {
 [[nodiscard]] zx::result<fs::JournalSuperblock> ReplayJournal(Bcache* bc, const Superblock& info);
 #endif
 
-// write the inode data of this vnode to disk (default does not update time values)
-void SyncVnode(fbl::RefPtr<VnodeMinfs> vn, uint32_t flags);
 void DumpInfo(const Superblock& info);
 void DumpInode(const Inode* inode, ino_t ino);
 zx_time_t GetTimeUTC();

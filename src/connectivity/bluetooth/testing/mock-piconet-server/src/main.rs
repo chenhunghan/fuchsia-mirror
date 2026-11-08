@@ -8,6 +8,9 @@ use anyhow::{Error, format_err};
 use async_utils::stream::{StreamItem, StreamWithEpitaph, Tagged, WithEpitaph, WithTag};
 use fidl::endpoints::ClientEnd;
 use fidl_fuchsia_bluetooth::ErrorCode;
+use fidl_fuchsia_bluetooth_bredr as bredr;
+use fidl_fuchsia_bluetooth_bredr_test as bredr_test;
+use fuchsia_async as fasync;
 use fuchsia_bluetooth::profile::Psm;
 use fuchsia_bluetooth::types::PeerId;
 use fuchsia_component::server::ServiceFs;
@@ -22,16 +25,12 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::pin::pin;
 use std::sync::Arc;
-use {
-    fidl_fuchsia_bluetooth_bredr as bredr, fidl_fuchsia_bluetooth_bredr_test as bredr_test,
-    fuchsia_async as fasync,
-};
 
 mod peer;
 mod profile;
 mod types;
 
-use crate::peer::MockPeer;
+use crate::peer::{ConnectionReceiverClient, MockPeer};
 
 /// The maximum number of concurrent piconet member requests this server supports. This is chosen to
 /// be more than sufficient for most testing scenarios.
@@ -103,7 +102,7 @@ impl MockPiconetServer {
         &self,
         id: PeerId,
         services: Vec<bredr::ServiceDefinition>,
-        receiver: bredr::ConnectionReceiverProxy,
+        receiver: ConnectionReceiverClient,
         responder: bredr::ProfileAdvertiseResponder,
     ) {
         let mut inner = self.inner.lock();
@@ -135,12 +134,19 @@ impl MockPiconetServer {
         info!("Received profile request: {:?}, {:?}", id, request);
         match request {
             bredr::ProfileRequest::Advertise { payload, responder, .. } => {
-                if payload.services.is_none() || payload.receiver.is_none() {
+                let Some(services) = payload.services else {
                     let _ = responder.send(Err(ErrorCode::InvalidArguments));
                     return;
-                }
-                let proxy = payload.receiver.unwrap().into_proxy();
-                self.new_advertisement(id, payload.services.unwrap(), proxy, responder);
+                };
+                let receiver = match (payload.connection_receiver, payload.receiver) {
+                    (Some(r), None) => ConnectionReceiverClient::V2(r.into_proxy()),
+                    (None, Some(r)) => ConnectionReceiverClient::V1(r.into_proxy()),
+                    _ => {
+                        let _ = responder.send(Err(ErrorCode::InvalidArguments));
+                        return;
+                    }
+                };
+                self.new_advertisement(id, services, receiver, responder);
             }
             bredr::ProfileRequest::Connect { peer_id, connection, responder, .. } => {
                 let channel = self
@@ -334,7 +340,7 @@ impl MockPiconetServerInner {
         &mut self,
         id: PeerId,
         services: Vec<bredr::ServiceDefinition>,
-        receiver: bredr::ConnectionReceiverProxy,
+        receiver: ConnectionReceiverClient,
         responder: bredr::ProfileAdvertiseResponder,
     ) {
         let res = match self.peers.entry(id) {
@@ -645,10 +651,10 @@ mod tests {
         assert_matches!(exec.run_until_stalled(&mut connect_fut), Poll::Ready(Ok(_)));
 
         // Advertise - the request should be handled by the server and remain active.
-        let (target, receiver) = create_request_stream::<ConnectionReceiverMarker>();
+        let (target, receiver) = create_request_stream::<ConnectionReceiver2Marker>();
         let mut adv_fut = c.advertise(bredr::ProfileAdvertiseRequest {
             services: Some(vec![]),
-            receiver: Some(target),
+            connection_receiver: Some(target),
             ..Default::default()
         });
         exec.run_until_stalled(&mut adv_fut).expect_pending("should still be advertising");

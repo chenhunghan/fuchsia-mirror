@@ -69,7 +69,6 @@ fx_component_manifest(
 fx_test_component(
     name = "far-integration-tests-component",
     compiled_manifest = ":far-integration-tests-manifest",
-    component_name = "far-integration-tests",
     visibility = ["//visibility:private"],
     deps = [
         ":driver_packaged_bin",

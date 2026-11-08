@@ -4,7 +4,7 @@
 
 use anyhow::Context as _;
 use bt_a2dp::media_task::MediaTaskError;
-use fidl_fuchsia_media::{AudioDeviceEnumeratorMarker, PcmFormat};
+use fidl_fuchsia_media::{AudioDeviceEnumeratorMarker, PcmFormat2};
 use fuchsia_audio_device::stream_config::SoftStreamConfig;
 use fuchsia_bluetooth::types::{PeerId, peer_audio_stream_id};
 use fuchsia_inspect::Node;
@@ -29,7 +29,7 @@ impl AudioSourceStreamBuilder for AudioOutStream {
     fn build(
         &self,
         peer_id: &PeerId,
-        pcm_format: PcmFormat,
+        pcm_format: PcmFormat2,
         external_delay: std::time::Duration,
         inspect_parent: &mut Node,
     ) -> Result<Box<dyn AudioSourceStream>, MediaTaskError> {
@@ -42,7 +42,7 @@ impl AudioSourceStreamBuilder for AudioOutStream {
 impl AudioOutStream {
     pub fn new(
         peer_id: &PeerId,
-        pcm_format: PcmFormat,
+        pcm_format: PcmFormat2,
         external_delay: zx::MonotonicDuration,
     ) -> Result<fuchsia_audio_device::AudioFrameStream, MediaTaskError> {
         let id = peer_audio_stream_id(*peer_id, crate::media::AUDIO_SOURCE_UUID);

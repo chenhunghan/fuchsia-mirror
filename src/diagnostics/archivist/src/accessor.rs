@@ -170,6 +170,9 @@ impl ArchiveAccessorServer {
         let trace_id = ftrace::Id::new();
         match params.data_type.ok_or(AccessorError::MissingDataType)? {
             DataType::Inspect => {
+                if !pipeline.inspect_enabled() {
+                    return Err(AccessorError::InspectNotSupported);
+                }
                 let _trace_guard = ftrace::async_enter!(
                     trace_id,
                     TRACE_CATEGORY,
@@ -227,6 +230,9 @@ impl ArchiveAccessorServer {
                 .await
             }
             DataType::Logs => {
+                if !pipeline.logs_enabled() {
+                    return Err(AccessorError::LogsNotSupported);
+                }
                 if format == Format::Cbor {
                     // CBOR is not supported for logs
                     return Err(AccessorError::UnsupportedFormat);
@@ -1418,5 +1424,251 @@ mod tests {
         let content = fidl_fuchsia_diagnostics::FormattedContent::Fxt(vmo);
         let buffer = get_buffer_from_formatted_content(content).unwrap();
         assert_eq!(buffer.size, 50);
+    }
+
+    #[fuchsia::test]
+    async fn pipeline_denies_log_access() {
+        use crate::identity::ComponentIdentity;
+        use crate::logs::testing::make_message;
+        use moniker::ExtendedMoniker;
+        use selectors::VerboseError;
+
+        let scope = fasync::Scope::new();
+        let inspector = Inspector::default();
+        let log_repo = LogsRepository::new(
+            create_ring_buffer(1_000_000),
+            std::iter::empty(),
+            inspector.root(),
+            scope.new_child(),
+        );
+
+        let secret_identity = Arc::new(ComponentIdentity::new(
+            ExtendedMoniker::parse_str("secret_component").unwrap(),
+            "fuchsia-pkg://fuchsia.com/secret#meta/secret.cm",
+        ));
+        let log_container = log_repo.get_log_container(secret_identity);
+        log_container.ingest_message(make_message(
+            "SENSITIVE_SECRET_TOKEN_12345",
+            None,
+            zx::BootInstant::from_nanos(100),
+        ));
+
+        let allowed_selector =
+            selectors::parse_selector::<VerboseError>("allowed_component:root:my_prop").unwrap();
+        let restricted_pipeline = Arc::new(Pipeline::for_test(Some(vec![allowed_selector])));
+        let logs_pipeline = Arc::new(Pipeline::logs_only_for_test());
+        let all_pipeline = Arc::new(Pipeline::for_test(None));
+        let inspect_repo = Arc::new(InspectRepository::new(
+            vec![Arc::downgrade(&restricted_pipeline), Arc::downgrade(&all_pipeline)],
+            scope.new_child(),
+        ));
+
+        // Directly verify that `ArchiveAccessorServer::spawn` returns `LogsNotSupported` and
+        // `InspectNotSupported` before `spawn_server` maps them to `Status::INVALID_ARGS` epitaphs.
+        let (_batch_iterator, stream) =
+            fidl::endpoints::create_proxy_and_stream::<BatchIteratorMarker>();
+        assert_matches!(
+            ArchiveAccessorServer::spawn(
+                Arc::clone(&restricted_pipeline),
+                Arc::clone(&inspect_repo),
+                Arc::clone(&log_repo),
+                stream.peekable(),
+                StreamParameters {
+                    data_type: Some(DataType::Logs),
+                    stream_mode: Some(StreamMode::Snapshot),
+                    format: Some(Format::Json),
+                    client_selector_configuration: Some(ClientSelectorConfiguration::SelectAll(
+                        true
+                    )),
+                    ..Default::default()
+                },
+                4,
+                BatchRetrievalTimeout::max(),
+            )
+            .await,
+            Err(AccessorError::LogsNotSupported)
+        );
+
+        let (_batch_iterator, stream) =
+            fidl::endpoints::create_proxy_and_stream::<BatchIteratorMarker>();
+        assert_matches!(
+            ArchiveAccessorServer::spawn(
+                Arc::clone(&restricted_pipeline),
+                Arc::clone(&inspect_repo),
+                Arc::clone(&log_repo),
+                stream.peekable(),
+                StreamParameters {
+                    data_type: Some(DataType::Logs),
+                    stream_mode: Some(StreamMode::Snapshot),
+                    format: Some(Format::Json),
+                    client_selector_configuration: Some(ClientSelectorConfiguration::Selectors(
+                        vec![SelectorArgument::RawSelector("allowed_component:root".to_string())]
+                    )),
+                    ..Default::default()
+                },
+                4,
+                BatchRetrievalTimeout::max(),
+            )
+            .await,
+            Err(AccessorError::LogsNotSupported)
+        );
+
+        let (_batch_iterator, stream) =
+            fidl::endpoints::create_proxy_and_stream::<BatchIteratorMarker>();
+        assert_matches!(
+            ArchiveAccessorServer::spawn(
+                Arc::clone(&logs_pipeline),
+                Arc::clone(&inspect_repo),
+                Arc::clone(&log_repo),
+                stream.peekable(),
+                StreamParameters {
+                    data_type: Some(DataType::Inspect),
+                    stream_mode: Some(StreamMode::Snapshot),
+                    format: Some(Format::Json),
+                    client_selector_configuration: Some(ClientSelectorConfiguration::SelectAll(
+                        true
+                    )),
+                    ..Default::default()
+                },
+                4,
+                BatchRetrievalTimeout::max(),
+            )
+            .await,
+            Err(AccessorError::InspectNotSupported)
+        );
+
+        let server = ArchiveAccessorServer::new(
+            inspect_repo,
+            log_repo,
+            4,
+            BatchRetrievalTimeout::max(),
+            scope.new_child(),
+        );
+
+        // 1. Restricted pipeline must deny log access (both SelectAll and explicit selectors).
+        let (pipeline_accessor, pipeline_stream) =
+            fidl::endpoints::create_proxy_and_stream::<ArchiveAccessorMarker>();
+        server.spawn_server(restricted_pipeline, pipeline_stream);
+
+        let (batch_iterator, server_end) = fidl::endpoints::create_proxy::<BatchIteratorMarker>();
+        assert!(
+            pipeline_accessor
+                .r#stream_diagnostics(
+                    &StreamParameters {
+                        data_type: Some(DataType::Logs),
+                        stream_mode: Some(StreamMode::Snapshot),
+                        format: Some(Format::Json),
+                        client_selector_configuration: Some(
+                            ClientSelectorConfiguration::SelectAll(true)
+                        ),
+                        ..Default::default()
+                    },
+                    server_end
+                )
+                .is_ok()
+        );
+        assert_matches!(
+            batch_iterator.get_next().await,
+            Err(fidl::Error::ClientChannelClosed { epitaph, .. })
+                if epitaph == zx_status::Status::INVALID_ARGS
+        );
+
+        let (batch_iterator, server_end) = fidl::endpoints::create_proxy::<BatchIteratorMarker>();
+        assert!(
+            pipeline_accessor
+                .r#stream_diagnostics(
+                    &StreamParameters {
+                        data_type: Some(DataType::Logs),
+                        stream_mode: Some(StreamMode::Snapshot),
+                        format: Some(Format::Json),
+                        client_selector_configuration: Some(
+                            ClientSelectorConfiguration::Selectors(vec![
+                                SelectorArgument::RawSelector("allowed_component:root".to_string()),
+                            ])
+                        ),
+                        ..Default::default()
+                    },
+                    server_end
+                )
+                .is_ok()
+        );
+        assert_matches!(
+            batch_iterator.get_next().await,
+            Err(fidl::Error::ClientChannelClosed { epitaph, .. })
+                if epitaph == zx_status::Status::INVALID_ARGS
+        );
+
+        // 2. Logs-only pipeline (ArchiveAccessor.logs) must allow log access and deny inspect access.
+        let (logs_accessor, logs_stream) =
+            fidl::endpoints::create_proxy_and_stream::<ArchiveAccessorMarker>();
+        server.spawn_server(logs_pipeline, logs_stream);
+
+        let (batch_iterator, server_end) = fidl::endpoints::create_proxy::<BatchIteratorMarker>();
+        assert!(
+            logs_accessor
+                .r#stream_diagnostics(
+                    &StreamParameters {
+                        data_type: Some(DataType::Logs),
+                        stream_mode: Some(StreamMode::Snapshot),
+                        format: Some(Format::Json),
+                        client_selector_configuration: Some(
+                            ClientSelectorConfiguration::SelectAll(true)
+                        ),
+                        ..Default::default()
+                    },
+                    server_end
+                )
+                .is_ok()
+        );
+        let batch = batch_iterator.get_next().await.expect("get_next fidl").expect("get_next ok");
+        assert!(!batch.is_empty());
+
+        let (batch_iterator, server_end) = fidl::endpoints::create_proxy::<BatchIteratorMarker>();
+        assert!(
+            logs_accessor
+                .r#stream_diagnostics(
+                    &StreamParameters {
+                        data_type: Some(DataType::Inspect),
+                        stream_mode: Some(StreamMode::Snapshot),
+                        format: Some(Format::Json),
+                        client_selector_configuration: Some(
+                            ClientSelectorConfiguration::SelectAll(true)
+                        ),
+                        ..Default::default()
+                    },
+                    server_end
+                )
+                .is_ok()
+        );
+        assert_matches!(
+            batch_iterator.get_next().await,
+            Err(fidl::Error::ClientChannelClosed { epitaph, .. })
+                if epitaph == zx_status::Status::INVALID_ARGS
+        );
+
+        // 3. Regular ArchiveAccessor ("all" pipeline) must still allow log access.
+        let (all_accessor, all_stream) =
+            fidl::endpoints::create_proxy_and_stream::<ArchiveAccessorMarker>();
+        server.spawn_server(all_pipeline, all_stream);
+
+        let (batch_iterator, server_end) = fidl::endpoints::create_proxy::<BatchIteratorMarker>();
+        assert!(
+            all_accessor
+                .r#stream_diagnostics(
+                    &StreamParameters {
+                        data_type: Some(DataType::Logs),
+                        stream_mode: Some(StreamMode::Snapshot),
+                        format: Some(Format::Json),
+                        client_selector_configuration: Some(
+                            ClientSelectorConfiguration::SelectAll(true)
+                        ),
+                        ..Default::default()
+                    },
+                    server_end
+                )
+                .is_ok()
+        );
+        let batch = batch_iterator.get_next().await.expect("get_next fidl").expect("get_next ok");
+        assert!(!batch.is_empty());
     }
 }

@@ -6,6 +6,7 @@ from typing import Any, ClassVar, Final, Literal
 
 from pydantic import BaseModel
 from shared.protocol.base import BaseRequest
+from shared.protocol.tracepoint import TracepointInfo
 from shared.protocol.watch_request import WatchAccessType
 
 COMMAND_NAME: Final = "get-state"
@@ -46,6 +47,8 @@ class GetStateResponse(BaseModel):
     processes: dict[int, str] | None = None
     breakpoints: dict[str, list[int]] | None = None
     watchpoints: dict[str, WatchpointInfo] | None = None
+    function_breakpoints: list[str] | None = None
+    tracepoints: list[TracepointInfo] | None = None
 
 
 class GetStateRequest(BaseRequest[GetStateResponse]):

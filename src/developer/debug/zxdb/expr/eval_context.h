@@ -111,6 +111,12 @@ class EvalContext : public fxl::RefCountedThreadSafe<EvalContext> {
     return zxdb::GetConcreteTypeAs<DerivedType>(GetFindNameContext(), symbol);
   }
 
+  // Convenience wrapper around the toplevel FindTypeDefinition() that uses the FindNameContext()
+  // from this class.
+  fxl::RefPtr<Type> FindTypeDefinition(std::string_view looking_for) const {
+    return zxdb::FindTypeDefinition(GetFindNameContext(), looking_for);
+  }
+
   // May return null (ProcessSymbols are destroyed with the process, and the EvalContext is
   // refcounted and can outlive it).
   virtual const ProcessSymbols* GetProcessSymbols() const = 0;

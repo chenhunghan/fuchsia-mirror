@@ -12,6 +12,11 @@ load(
     "fx_packaged_binary",
 )
 load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -37,14 +42,21 @@ rustc_binary(
     ],
 )
 
-# @bazel2gn:skip
+rustc_test(
+    name = "psi_provider-bin_test",
+    crate = ":psi_provider-bin",
+    # Preserves the GN binary `output_name` for `psi_provider-bin_test`.
+    crate_name = "psi_provider-bin_bin_test",
+    lint_config = "//src/starnix/config:starnix_clippy_lints_test",
+    deps = ["//src/lib/fuchsia-sync"],
+)
+
 fx_packaged_binary(
     name = "psi_provider_packaged_bin",
     binary = ":psi_provider-bin",
     binary_name = "psi_provider-bin",
 )
 
-# @bazel2gn:skip
 fx_component_manifest(
     name = "psi_provider-manifest",
     component_name = "psi_provider",
@@ -52,10 +64,14 @@ fx_component_manifest(
     manifest = "meta/psi_provider.cml",
 )
 
-# @bazel2gn:skip
 fx_component(
     name = "psi_provider",
     compiled_manifest = ":psi_provider-manifest",
-    component_name = "psi_provider",
     deps = [":psi_provider_packaged_bin"],
+)
+
+fx_unittest_package(
+    name = "psi_provider-tests",
+    unit_tests = [":psi_provider-bin_test"],
+    visibility = ["//src/starnix:__pkg__"],
 )

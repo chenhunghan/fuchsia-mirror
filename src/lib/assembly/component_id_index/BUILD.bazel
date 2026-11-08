@@ -1,0 +1,50 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    tests = [":component_id_index_test"],
+    visibility = ["//src/lib/assembly:__pkg__"],
+)
+
+rustc_library(
+    name = "component_id_index",
+    srcs = [
+        "src/index.rs",
+        "src/lib.rs",
+    ],
+    crate_name = "assembly_component_id_index",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//src/lib/assembly/platform_configuration:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.component.internal:fuchsia.component.internal_rust_common",
+        "//src/lib/fidl/rust/fidl",
+        "//src/sys/lib/component_id_index",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:camino",
+    ],
+)
+
+host_rustc_test(
+    name = "component_id_index_test",
+    crate = ":component_id_index",
+    # Set crate_name so bazel2gn sets output_name = "assembly_component_id_index_lib_test"
+    # to avoid colliding with //src/sys/lib/component_id_index, matching original GN test name.
+    crate_name = "assembly_component_id_index_lib_test",
+    deps = [
+        "//src/sys/lib/moniker",
+        "//third_party/rust_crates/vendor:pretty_assertions",
+        "//third_party/rust_crates/vendor:serde_json5",
+        "//third_party/rust_crates/vendor:tempfile",
+    ],
+)

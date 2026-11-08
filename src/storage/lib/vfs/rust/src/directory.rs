@@ -38,11 +38,10 @@ pub struct DirectoryOptions {
 }
 
 impl DirectoryOptions {
+    #[cfg(any(fuchsia_api_level_at_least = "PLATFORM", not(fuchsia_api_level_at_least = "32")))]
     pub(crate) fn to_io1(&self) -> fio::OpenFlags {
         // Note that rights in io1 correspond to several different rights in io2. The *_STAR_DIR
-        // constants defined in the protocol indicate which rights these flags map to. Note that
-        // this is more strict than the checks in FileOptions::to_io1, as OpenFlags map to several
-        // different io2 directory rights.
+        // constants defined in the protocol indicate which rights these flags map to.
         let mut flags = fio::OpenFlags::empty();
         if self.rights.contains(fio::R_STAR_DIR) {
             flags |= fio::OpenFlags::RIGHT_READABLE;

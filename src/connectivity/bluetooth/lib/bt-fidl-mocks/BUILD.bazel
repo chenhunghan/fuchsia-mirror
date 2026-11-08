@@ -8,6 +8,12 @@ load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package
 
 package(default_applicable_licenses = ["//:license"])
 
+test_suite(
+    name = "tests",
+    tests = [":bt-fidl-mocks-tests"],
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)
+
 rustc_library(
     name = "bt-fidl-mocks",
     srcs = [
@@ -59,5 +65,4 @@ fx_unittest_package(
     name = "bt-fidl-mocks-tests",
     package_name = "bt-fidl-mocks-tests",
     unit_tests = [":bt-fidl-mocks_test"],
-    visibility = ["//src/connectivity/bluetooth:__pkg__"],
 )

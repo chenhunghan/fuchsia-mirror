@@ -12,8 +12,7 @@
 #include <lib/syslog/cpp/macros.h>
 #include <zircon/status.h>
 
-#include <re2/re2.h>
-
+#include "re2/re2.h"
 #include "src/camera/bin/camera-gym/controller_error/controller_error.h"
 #include "src/lib/fxl/command_line.h"
 #include "src/lib/fxl/log_settings_command_line.h"
@@ -45,32 +44,32 @@ bool ControllerClientApp::ConnectToServer() {
 void ControllerClientApp::SendCommand(std::vector<fuchsia::camera::gym::Command> commands,
                                       uint32_t index) {
   fuchsia::camera::gym::Command command = std::move(commands[index]);
-  controller_->SendCommand(
-      std::move(command), [this, commands = std::move(commands), index](
-                              fuchsia::camera::gym::Controller_SendCommand_Result result) mutable {
-        if (result.is_err()) {
-          auto str = CommandErrorString(result.err());
-          fprintf(stderr, "Command error: %s (%u)\n", str.c_str(),
-                  static_cast<unsigned int>(result.err()));
-          loop_.Quit();
-          return;
-        }
-        if (!result.is_response()) {
-          fprintf(stderr, "ERROR: Invalid return\n");
-          loop_.Quit();
-          return;
-        }
-        fprintf(stderr, "OK\n");
+  controller_->SendCommand(std::move(command),
+                           [this, commands = std::move(commands), index](
+                               fuchsia::camera::gym::Controller_SendCommand_Result result) mutable {
+                             if (result.is_err()) {
+                               auto str = CommandErrorString(result.err());
+                               fprintf(stderr, "Command error: %s (%u)\n", str.c_str(),
+                                       static_cast<unsigned int>(result.err()));
+                               loop_.Quit();
+                               return;
+                             }
+                             if (!result.is_response()) {
+                               fprintf(stderr, "ERROR: Invalid return\n");
+                               loop_.Quit();
+                               return;
+                             }
+                             fprintf(stderr, "OK\n");
 
-        uint32_t next_index = index + 1;
-        if (next_index == commands.size()) {
-          loop_.Quit();
-          return;
-        }
+                             uint32_t next_index = index + 1;
+                             if (next_index == commands.size()) {
+                               loop_.Quit();
+                               return;
+                             }
 
-        // Execute next command
-        SendCommand(std::move(commands), next_index);
-      });
+                             // Execute next command
+                             SendCommand(std::move(commands), next_index);
+                           });
 }
 
 void ControllerClientApp::Quit() {

@@ -635,11 +635,9 @@ class SchedulerState {
   friend class OwnedWaitQueue;
   friend class WaitQueue;
   friend class WaitQueueBase;
-  friend class WaitQueueCollection;
 
   // Allow tests to observe/modify our state.
   friend class LoadBalancerTest;
-  friend struct WaitQueueOrderingTests;
   friend class SchedulerRunQueueTestHelper;
   friend class unittest::ThreadEffectiveProfileObserver;
   friend Thread;
@@ -686,6 +684,21 @@ class SchedulerState {
 
   // The scheduling state of the thread.
   thread_state state_{THREAD_INITIAL};
+
+  // Demand-driven migration state. Owned and documented by the Rust scheduler
+  // (SchedulerState::demand_migration_pending / demand_migration_target);
+  // mirrored here only to keep the layout in sync.
+  bool demand_migration_pending_{false};
+  uint8_t demand_migration_target_{0};
+  // Variable demand reservation record. Owned and documented by the Rust scheduler
+  // (SchedulerState::variable_reservation_cpu); mirrored here only to keep the
+  // layout in sync.
+  uint8_t variable_reservation_cpu_{0xff};
+  // Deadline bandwidth reservation record. Owned and documented by the Rust
+  // scheduler (SchedulerState::deadline_reservation_cpu / _slot); mirrored here
+  // only to keep the layout in sync.
+  uint8_t deadline_reservation_cpu_{0xff};
+  uint8_t deadline_reservation_slot_{0};
 
   BaseProfile base_profile_;
   InheritedProfileValues inherited_profile_values_;
@@ -739,19 +752,37 @@ class SchedulerState {
   // The set of CPUs the thread should run on if possible. The thread may be
   // assigned to CPUs outside of this set if necessary.
   cpu_mask_t soft_affinity_{CPU_MASK_ALL};
+
+  // Demand-driven migration state. Owned and documented by the Rust scheduler
+  // (SchedulerState::demand_migration_next_eval_time); mirrored here only to
+  // keep the layout in sync.
+  SchedTime demand_migration_next_eval_time_{0};
+  // Variable demand reservation record. Owned and documented by the Rust scheduler
+  // (SchedulerState::variable_reservation_until); mirrored here only to keep the
+  // layout in sync.
+  SchedTime variable_reservation_until_{0};
+  // Deadline reservation record. Owned and documented by the Rust scheduler
+  // (SchedulerState::deadline_reservation_utilization); mirrored here only to
+  // keep the layout in sync.
+  SchedUtilization deadline_reservation_utilization_{0};
   static void AssertLayout() {
     static_assert(sizeof(SubtreeInvariants) == 16);
     static_assert(alignof(SubtreeInvariants) == 8);
     static_assert(offsetof(SubtreeInvariants, min_finish_time) == 0);
     static_assert(offsetof(SubtreeInvariants, min_weight) == 8);
 
-    static_assert(sizeof(SchedulerState) == 224);
+    static_assert(sizeof(SchedulerState) == 248);
     static_assert(alignof(SchedulerState) == 8);
     static_assert(offsetof(SchedulerState, start_time_) == 0);
     static_assert(offsetof(SchedulerState, finish_time_) == 8);
     static_assert(offsetof(SchedulerState, activation_count_) == 16);
     static_assert(offsetof(SchedulerState, subtree_invariants_) == 24);
     static_assert(offsetof(SchedulerState, state_) == 40);
+    static_assert(offsetof(SchedulerState, demand_migration_pending_) == 41);
+    static_assert(offsetof(SchedulerState, demand_migration_target_) == 42);
+    static_assert(offsetof(SchedulerState, variable_reservation_cpu_) == 43);
+    static_assert(offsetof(SchedulerState, deadline_reservation_cpu_) == 44);
+    static_assert(offsetof(SchedulerState, deadline_reservation_slot_) == 45);
     static_assert(offsetof(SchedulerState, base_profile_) == 48);
     static_assert(offsetof(SchedulerState, inherited_profile_values_) == 80);
     static_assert(offsetof(SchedulerState, effective_profile_) == 112);
@@ -767,6 +798,9 @@ class SchedulerState {
     static_assert(offsetof(SchedulerState, last_cpu_) == 212);
     static_assert(offsetof(SchedulerState, hard_affinity_) == 216);
     static_assert(offsetof(SchedulerState, soft_affinity_) == 220);
+    static_assert(offsetof(SchedulerState, demand_migration_next_eval_time_) == 224);
+    static_assert(offsetof(SchedulerState, variable_reservation_until_) == 232);
+    static_assert(offsetof(SchedulerState, deadline_reservation_utilization_) == 240);
   }
 };
 

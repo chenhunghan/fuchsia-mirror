@@ -36,6 +36,8 @@ extern "C" void* cpp_vm_aspace_lock(const VmAspace* aspace);
 extern "C" void* cpp_vm_aspace_region_lock(const VmAspace* aspace);
 extern "C" VmAddressRegion* cpp_vm_aspace_root_vmar_locked(VmAspace* aspace);
 extern "C" void cpp_vm_aspace_change_high_priority_count_locked(VmAspace* aspace, int64_t delta);
+extern "C" bool cpp_vm_aspace_is_guest_physical(const VmAspace* aspace);
+extern "C" bool cpp_vm_aspace_can_enlarge_arch_unmap(const VmAspace* aspace);
 extern "C" uint8_t cpp_vm_aspace_enlarge_arch_unmap(const VmAspace* aspace);
 extern "C" const VmMapping* cpp_vm_aspace_last_fault_locked(const VmAspace* aspace);
 extern "C" void cpp_vm_aspace_clear_last_fault_locked(VmAspace* aspace);
@@ -225,9 +227,6 @@ class VmAspace : public fbl::DoublyLinkedListable<VmAspace*>, public fbl::RefCou
   uintptr_t vdso_base_address() const;
   uintptr_t vdso_code_address() const;
 
-  // Helper function to test for collision with vdso_code_mapping_.
-  bool IntersectsVdsoCodeLocked(vaddr_t base, size_t size) const TA_REQ(lock_);
-
   // Returns whether this aspace is currently set to be a high memory priority.
   bool IsHighMemoryPriority() const;
 
@@ -236,7 +235,6 @@ class VmAspace : public fbl::DoublyLinkedListable<VmAspace*>, public fbl::RefCou
   // changes to the aspace.
   friend class VmAddressRegionOrMapping;
   friend class VmAddressRegion;
-  friend class VmMapping;
   Lock<CriticalMutex>* lock() const TA_RET_CAP(lock_) { return &lock_; }
   Lock<CriticalMutex>& lock_ref() const TA_RET_CAP(lock_) { return lock_; }
   Lock<CriticalMutex>* region_lock() const TA_RET_CAP(region_lock_) { return &region_lock_; }
@@ -279,6 +277,8 @@ class VmAspace : public fbl::DoublyLinkedListable<VmAspace*>, public fbl::RefCou
   friend VmAddressRegion* ::cpp_vm_aspace_root_vmar_locked(VmAspace* aspace);
   friend void ::cpp_vm_aspace_change_high_priority_count_locked(VmAspace* aspace, int64_t delta);
   friend uint8_t(::cpp_vm_aspace_enlarge_arch_unmap)(const VmAspace* aspace);
+  friend bool ::cpp_vm_aspace_is_guest_physical(const VmAspace* aspace);
+  friend bool ::cpp_vm_aspace_can_enlarge_arch_unmap(const VmAspace* aspace);
   friend const VmMapping* ::cpp_vm_aspace_last_fault_locked(const VmAspace* aspace);
   friend void ::cpp_vm_aspace_clear_last_fault_locked(VmAspace* aspace);
   friend const VmMapping* ::cpp_vm_aspace_vdso_code_mapping_locked(const VmAspace* aspace);

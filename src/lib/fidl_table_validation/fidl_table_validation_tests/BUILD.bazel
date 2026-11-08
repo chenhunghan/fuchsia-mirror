@@ -1,0 +1,41 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":fidl_table_validation_tests"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+fidl_library(
+    name = "test.tablevalidation",
+    testonly = True,
+    srcs = ["table_validation.test.fidl"],
+    # TODO(https://fxbug.dev/381096879): Fix lint warnings and remove.
+    excluded_checks = ["string-bounds-not-specified"],
+)
+
+rustc_test(
+    name = "fidl_table_validation_tests_bin",
+    srcs = ["src/lib.rs"],
+    edition = "2024",
+    deps = [
+        ":test.tablevalidation_rust",
+        "//src/lib/fidl_table_validation",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:test-case",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+fx_unittest_package(
+    name = "fidl_table_validation_tests",
+    unit_tests = [":fidl_table_validation_tests_bin"],
+)

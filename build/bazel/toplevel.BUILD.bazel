@@ -36,6 +36,12 @@ exports_files(
     visibility = ["//build/bazel/rules/host_tests:__pkg__"],
 )
 
+# Used by pyrefly_aspect() to configure static Python type checking hermetically.
+exports_files(
+    ["pyproject.toml"],
+    visibility = ["//build/bazel/aspects:__pkg__"],
+)
+
 # Executed by some shac tests, rather than mocked.
 exports_files(
     glob(["prebuilt/third_party/keep-sorted/*/keep-sorted"]),
@@ -138,6 +144,13 @@ exports_files(
     # Unicode data, used in //src/storage/fxfs/unicode.
     ["prebuilt/third_party/ucd/UCD.zip"] +
 
+    # RobotoSlab font, compiled into //src/lib/ui/carnelian and
+    # //src/recovery/lib/recovery-ui with include_bytes!().
+    ["prebuilt/third_party/fonts/robotoslab/RobotoSlab-Regular.ttf"] +
+
+    # RobotoMono font, compiled into //src/lib/ui/terminal with include_bytes!().
+    ["prebuilt/third_party/fonts/robotomono/RobotoMono-Regular.ttf"] +
+
     # end of list.
     [],
 )
@@ -180,7 +193,22 @@ filegroup(
 filegroup(
     name = "avb_testkey_atx_psk",
     srcs = ["third_party/android/platform/external/avb/test/data/testkey_atx_psk.pem"],
-    visibility = ["//src/lib/assembly/test_keys:__pkg__"],
+    visibility = [
+        "//src/lib/assembly/test_keys:__pkg__",
+        "//src/sys/pkg/tests/system-tests:__pkg__",
+    ],
+)
+
+filegroup(
+    name = "avb_atx_metadata",
+    srcs = ["third_party/android/platform/external/avb/test/data/atx_metadata.bin"],
+    visibility = ["//src/sys/pkg/tests/system-tests:__pkg__"],
+)
+
+filegroup(
+    name = "avbtool_py",
+    srcs = ["third_party/android/platform/external/avb/avbtool.py"],
+    visibility = ["//src/sys/pkg/tests/system-tests:__pkg__"],
 )
 
 # Bionic kernel UAPI headers used by //src/lib/android/bionic_compat.
@@ -255,4 +283,38 @@ license(
     license_kinds = ["@rules_license//licenses/spdx:BSD-2-Clause"],
     license_text = "LICENSE",
     visibility = ["//visibility:public"],
+)
+
+# libdivide is a header-only library, used by the 32-bit arm Starnix vDSO.
+filegroup(
+    name = "libdivide_headers",
+    srcs = [
+        "third_party/github.com/ridiculousfish/libdivide/include/libdivide.h",
+        "third_party/github.com/ridiculousfish/libdivide/src/libdivide.h",
+    ],
+    visibility = ["//src/starnix/kernel/vdso:__pkg__"],
+)
+
+# PCI ID database used by //src/devices/pci/bin/lspci.
+# third_party/pciids has no BUILD.bazel file, so this target gives Bazel
+# packages a root package label without a slash.
+filegroup(
+    name = "pci_ids",
+    srcs = ["third_party/pciids/pci.ids"],
+    visibility = ["//src/devices/pci/bin/lspci:__pkg__"],
+)
+
+# d3_v3 assets, compiled into //src/developer/ffx/plugins/assembly with include_str!().
+# scripts/third_party/d3_v3 has no BUILD.bazel file, so these targets give Bazel
+# packages root package labels without a slash.
+filegroup(
+    name = "d3_v3_js",
+    srcs = ["scripts/third_party/d3_v3/d3.js"],
+    visibility = ["//src/developer/ffx/plugins/assembly:__pkg__"],
+)
+
+filegroup(
+    name = "d3_v3_license",
+    srcs = ["scripts/third_party/d3_v3/LICENSE"],
+    visibility = ["//src/developer/ffx/plugins/assembly:__pkg__"],
 )

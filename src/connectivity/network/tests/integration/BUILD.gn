@@ -21,18 +21,20 @@ tests = [
     label = "dhcp"
     err_logs = true
     package_deps = [
-      "//src/connectivity/network/dhcpv4/client/bindings:component",
-      "//src/connectivity/network/dhcpv4/server:component",
       "//src/lib/fake-clock/svc",
       "//src/sys/stash:stash_secure_v2",
+    ]
+    subpackages = [
+      "//src/connectivity/network/dhcpv4/client/bindings:package",
+      "//src/connectivity/network/dhcpv4/server:package",
     ]
   },
   {
     label = "dhcp-client"
     err_logs = true
-    package_deps = [
-      "//src/connectivity/network/dhcpv4/client/bindings:component",
-      "//src/connectivity/network/dhcpv4/server:component",
+    subpackages = [
+      "//src/connectivity/network/dhcpv4/client/bindings:package",
+      "//src/connectivity/network/dhcpv4/server:package",
     ]
   },
   {
@@ -44,15 +46,17 @@ tests = [
     label = "dns"
     err_logs = true
     package_deps = [
-      "//src/connectivity/network/dhcpv4/client/bindings:component",
-      "//src/connectivity/network/dhcpv4/server:component",
       "//src/connectivity/network/dhcpv6/client:component",
       "//src/connectivity/network/dns:component_with_fake_time",
-      "//src/connectivity/policy/netcfg:component-basic",
+      "//src/connectivity/policy/netcfg:component",
       "//src/connectivity/policy/socket-proxy:component",
       "//src/connectivity/policy/tests/integration:netcfg-netemul-configs",
       "//src/lib/fake-clock/svc",
       "//src/sys/stash:stash_secure_v2",
+    ]
+    subpackages = [
+      "//src/connectivity/network/dhcpv4/client/bindings:package",
+      "//src/connectivity/network/dhcpv4/server:package",
     ]
   },
   {
@@ -85,11 +89,13 @@ tests = [
     label = "product-flow"
     err_logs = true
     package_deps = [
-      "//src/connectivity/network/dhcpv4/client/bindings:component",
-      "//src/connectivity/network/dhcpv4/server:component",
       "//src/connectivity/network/dns:component_with_fake_time",
       "//src/lib/fake-clock/svc",
       "//src/sys/stash:stash_secure_v2",
+    ]
+    subpackages = [
+      "//src/connectivity/network/dhcpv4/client/bindings:package",
+      "//src/connectivity/network/dhcpv4/server:package",
     ]
   },
   {
@@ -117,19 +123,21 @@ common_package_deps = [
 
   # netemul-sandbox is used to create hermetic test realms.
   "//src/connectivity/network/testing/netemul/service:netemul-sandbox",
-
-  # netstack3 is commonly under test.
-  "//src/connectivity/network/netstack3:component-for-tests",
 ]
 
-non_log_less_package_deps =
-    [ "//src/connectivity/network/netstack3:component-debug" ]
+common_subpackages = [
+  # Netstack3 is commonly under test.
+  "//src/connectivity/network/netstack3:package-for-tests",
+]
 
-log_less_package_deps = [
-  # :component-debug-less-logs is used instead of :component-debug to avoid
+non_log_less_subpackages =
+    [ "//src/connectivity/network/netstack3:package-debug" ]
+
+log_less_subpackages = [
+  # `:package-debug-less-logs` is used instead of `:package-debug` to avoid
   # forcing DEBUG logs to be included, which are too verbose and cause some
   # longer suites to time out.
-  "//src/connectivity/network/netstack3:component-debug-less-logs",
+  "//src/connectivity/network/netstack3:package-debug-less-logs",
 ]
 
 all_test_packages = []
@@ -154,12 +162,13 @@ foreach(test, tests) {
   if (defined(test.package_deps)) {
     _package_deps += test.package_deps
   }
-  if (defined(test.log_less) && test.log_less) {
-    _package_deps += log_less_package_deps
-  } else {
-    _package_deps += non_log_less_package_deps
-  }
   _subpackages = []
+  _subpackages += common_subpackages
+  if (defined(test.log_less) && test.log_less) {
+    _subpackages += log_less_subpackages
+  } else {
+    _subpackages += non_log_less_subpackages
+  }
   if (defined(test.subpackages)) {
     _subpackages += test.subpackages
   }

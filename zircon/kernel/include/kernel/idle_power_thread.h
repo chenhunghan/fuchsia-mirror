@@ -7,36 +7,44 @@
 #define ZIRCON_KERNEL_INCLUDE_KERNEL_IDLE_POWER_THREAD_H_
 
 #include <lib/lazy_init/lazy_init.h>
-#include <lib/relaxed_atomic.h>
 #include <lib/wake-vector.h>
 #include <stdint.h>
 #include <zircon/time.h>
+#include <zircon/types.h>
 
 #include <arch/mp_unplug_event.h>
 #include <kernel/ffi.h>
-#include <kernel/mutex.h>
-#include <kernel/spinlock.h>
 #include <kernel/thread.h>
-#include <kernel/timer.h>
-
-class SuspendWakeupTimer;  // fwd decl
+#include <ktl/atomic.h>
 
 class IdlePowerThread;
 
+// TODO(https://fxbug.dev/576429446): Remove transitional C++ FFI declarations once all callers
+// are ported to Rust.
 extern "C" {
+
+struct IdlePowerThreadTransitionResult {
+  zx_status_t status;
+  uint8_t starting_state;
+};
+
+IdlePowerThreadTransitionResult rust_idle_power_thread_transition_active_to_offline(
+    IdlePowerThread& ipt, zx_instant_mono_t timeout_at);
+IdlePowerThreadTransitionResult rust_idle_power_thread_transition_offline_to_active(
+    IdlePowerThread& ipt, zx_instant_mono_t timeout_at);
+int rust_idle_power_thread_run(void* arg);
+void rust_idle_power_thread_flush_and_halt(IdlePowerThread& ipt) __NO_RETURN;
+void rust_resume_timer_wake_vector_get_diagnostics(
+    wake_vector::WakeVector::Diagnostics& diagnostics_out);
+
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE wake_vector::WakeResult cpp_idle_power_thread_trigger_system_wake_event();
+FFI_ALWAYS_INLINE void cpp_idle_power_thread_init(ffi::Uninitialized<IdlePowerThread>* out);
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_idle_power_thread_acknowledge_system_wake_event();
+FFI_ALWAYS_INLINE void cpp_resume_timer_wake_vector_init();
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE zx_instant_boot_t
-cpp_idle_power_thread_transition_all_active_to_suspend(zx_instant_boot_t resume_deadline);
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE zx_instant_boot_t
-cpp_idle_power_thread_suspend_system(zx_instant_boot_t resume_deadline);
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE const Thread* cpp_idle_power_thread_get_thread(const IdlePowerThread* ipt);
-}
+FFI_ALWAYS_INLINE const wake_vector::WakeEvent* cpp_resume_timer_wake_vector_get_wake_event();
+
+}  // extern "C"
 
 //
 // Platform Independent Per-CPU Idle/Power Thread
@@ -115,96 +123,74 @@ class IdlePowerThread final {
   // message periodically.
   //
   // Returns:
-  //   - {ZX_OK, Active} if the transition was successful.
-  //   - {ZX_OK, Offline} if the current state was already Offline.
+  //   - {ZX_OK, State::Active} if the transition was successful.
+  //   - {ZX_OK, State::Offline} if the current state was already Offline.
   //   - {ZX_ERR_BAD_STATE, current state} if the current state was not Active or Offline.
-  //   - {ZX_ERR_TIMED_OUT, Active} if the current state was Active and transition timeout expired.
-  //     Note that in this case the request is not withdrawn (once the CPU's idle/power thread has
-  //     begun to take it offline, it cannot be stopped), so the CPU may still go Offline later.
+  //   - {ZX_ERR_TIMED_OUT, State::Active} if the current state was Active and transition timeout
+  //     expired.  Note that in this case the request is not withdrawn (once the CPU's idle/power
+  //     thread has begun to take it offline, it cannot be stopped), so the CPU may still go Offline
+  //     later.
   //   - {ZX_ERR_TIMED_OUT, starting state} if the transition completed, but the timeout expired
   //     before the platform reported that the CPU was powered off.  Note that in this case, the
   //     CPU's state is Offline.
   //   - {error, starting state} if the transition completed, but querying the CPU's power state
   //     failed with |error|.  Note that in this case, the CPU's state is Offline.
   TransitionResult TransitionActiveToOffline(zx_instant_mono_t timeout_at = ZX_TIME_INFINITE)
-      TA_EXCL(TransitionLock::Get());
+      TA_EXCL(chainlock_transaction_token) {
+    const IdlePowerThreadTransitionResult res =
+        rust_idle_power_thread_transition_active_to_offline(*this, timeout_at);
+    return {.status = res.status, .starting_state = static_cast<State>(res.starting_state)};
+  }
 
   // Requests to transition from Offline to Active.
   //
   // Returns:
-  //   - {ZX_OK, Offline} if the transition was successful.
-  //   - {ZX_OK, Active} if the current state was already Active.
+  //   - {ZX_OK, State::Offline} if the transition was successful.
+  //   - {ZX_OK, State::Active} if the current state was already Active.
   //   - {ZX_ERR_BAD_STATE, current state} if the current state was not Active or Offline.
-  //   - {ZX_ERR_TIMED_OUT, Offline} if the current state was Offline and transition timeout
+  //   - {ZX_ERR_TIMED_OUT, State::Offline} if the current state was Offline and transition timeout
   //     expired.
-  TransitionResult TransitionOfflineToActive(zx_instant_mono_t timeout_at = ZX_TIME_INFINITE) {
-    return TransitionFromTo(State::Offline, State::Active, timeout_at);
+  TransitionResult TransitionOfflineToActive(zx_instant_mono_t timeout_at = ZX_TIME_INFINITE)
+      TA_EXCL(chainlock_transaction_token) {
+    const IdlePowerThreadTransitionResult res =
+        rust_idle_power_thread_transition_offline_to_active(*this, timeout_at);
+    return {.status = res.status, .starting_state = static_cast<State>(res.starting_state)};
   }
 
-  // Attempts to transition all active CPUs from Active to Suspend until the specified resume time.
-  // CPUs that are Offline before suspend will remain Offline after resume until explicitly
-  // transitioned to Active.
-  //
-  // Returns:  The boot-time at which the suspend operation is formally considered to have started.
-  // This value can be used in conjunction with timestamps recorded in wake events to decide whether
-  // a wake vector became signaled before suspend had formally started, or not.
-  static zx_instant_boot_t TransitionAllActiveToSuspend(
-      zx_instant_boot_t resume_at = ZX_TIME_INFINITE) TA_EXCL(TransitionLock::Get());
-
-  // Attempts to suspend the entire system using platform_suspend_system until the specified resume
-  // time.
-  //
-  // Similar to |TransitionAllActiveToSuspend|, except that rather than transitioning the active
-  // non-boot CPUs to Suspend, transitions them to Offline (powering them off).  Once the platform
-  // has confirmed that every one of them has powered off, the boot CPU is transitioned to Suspend
-  // and its idle/power thread suspends the system with platform_suspend_system.  If power off
-  // cannot be confirmed for every CPU, the suspend operation is aborted.  Upon resume, the non-boot
-  // CPUs which were taken offline are brought back online.  (If bringing a CPU back online fails,
-  // a KERNEL_OOPS is logged and that CPU remains Offline until explicitly transitioned to Active.
-  // Its timers are migrated to the boot CPU, but its queued DPCs and pinned threads remain with it
-  // until it is brought back online.)
-  // CPUs that are Offline before suspend will remain Offline after resume until explicitly
-  // transitioned to Active.
-  //
-  // If the platform does not support system suspend, or cannot report CPU power state (see
-  // platform_get_cpu_state), this behaves like |TransitionAllActiveToSuspend|.
-  //
-  // Returns:  The boot-time at which the suspend operation is formally considered to have started.
-  // This value can be used in conjunction with timestamps recorded in wake events to decide whether
-  // a wake vector became signaled before suspend had formally started, or not.
-  static zx_instant_boot_t SuspendSystem(zx_instant_boot_t resume_at = ZX_TIME_INFINITE)
-      TA_EXCL(TransitionLock::Get());
-
   // Implements the run loop executed by the CPU's idle/power thread.
-  static int Run(void* arg);
-
-  static void InitHook(uint level);
+  static constexpr thread_start_routine Run = rust_idle_power_thread_run;
 
   // Called by mp_unplug_current_cpu() to complete last steps of taking the CPU offline.
-  void FlushAndHalt();
+  void FlushAndHalt() __NO_RETURN { rust_idle_power_thread_flush_and_halt(*this); }
 
   // Accessors to the underlying Thread instance.
   Thread& thread() { return thread_; }
   const Thread& thread() const { return thread_; }
 
-  // Accessor to the global system suspend state.
-  static bool system_suspended() {
-    return system_suspend_state_.load(ktl::memory_order_acquire) & SystemSuspendStateSuspendedBit;
-  }
-  static uint64_t pending_wake_events() {
-    return system_suspend_state_.load(ktl::memory_order_acquire) &
-           SystemSuspendStateWakeEventPendingMask;
-  }
-
  private:
-  // Allow percpu to initialize this_cpu_;
-  friend struct percpu;
+  friend struct IdlePowerThreadLayout;
+  friend void cpp_resume_timer_wake_vector_init();
+  friend const wake_vector::WakeEvent* cpp_resume_timer_wake_vector_get_wake_event();
 
-  // Allow Scheduler to get/reset the time spent in the processor idle state.
-  friend class Scheduler;
+  // A bespoke wake vector used by the resume timer handler to wake the system when the resume boot
+  // time is reached.
+  struct ResumeTimerWakeVector : public wake_vector::WakeVector {
+    ResumeTimerWakeVector() : WakeVector{&ResumeTimerWakeVector::wake_event}, wake_event{*this} {
+      wake_event.Initialize();
+    }
+    ~ResumeTimerWakeVector() override { wake_event.Destroy(); }
 
-  // Allow tests to exercise |SuspendAllActive| directly.
-  friend struct IdlePowerThreadTestAccess;
+    void GetDiagnostics(WakeVector::Diagnostics& diagnostics_out) const final {
+      rust_resume_timer_wake_vector_get_diagnostics(diagnostics_out);
+    }
+
+    wake_vector::WakeEvent wake_event;
+  };
+
+  // Use LazyInit to sequence constructing this instance after global ctors initialize the global
+  // WakeEvent list. This instance is initialized by an init hook well before it can be used at
+  // runtime by TransitionAllActiveToSuspend.
+  inline static lazy_init::LazyInit<ResumeTimerWakeVector> resume_timer_wake_vector_;
 
   struct StateMachine {
     State current{State::Active};
@@ -215,148 +201,16 @@ class IdlePowerThread final {
     }
   };
 
-  // Shorthand expressions for various comparisons and asserts.
-  static constexpr StateMachine kActive{State::Active, State::Active};
-  static constexpr StateMachine kActiveToSuspend{State::Active, State::Suspend};
-  static constexpr StateMachine kSuspendToActive{State::Suspend, State::Active};
-  static constexpr StateMachine kWakeup{State::Wakeup, State::Wakeup};
-  static constexpr StateMachine kSuspend{State::Suspend, State::Suspend};
-  static constexpr StateMachine kSuspendToWakeup{State::Suspend, State::Wakeup};
+  static constexpr StateMachine kActive{.current = State::Active, .target = State::Active};
 
-  // See |TransitionLock|.
-  bool CompareExchangeState(StateMachine& expected, StateMachine desired) {
-    return state_.compare_exchange_strong(expected, desired, ktl::memory_order_acq_rel,
-                                          ktl::memory_order_acquire);
-  }
-  // See |TransitionLock|.
-  TransitionResult TransitionFromTo(State expected_state, State target_state,
-                                    zx_instant_mono_t timeout_at);
-
-  // Whether |TransitionActiveToOfflineLocked| must confirm that the CPU has powered off.
-  enum class PowerOffConfirmation : bool {
-    // If the platform does not support querying CPU power state, do not wait for confirmation.
-    BestEffort,
-    // If the platform does not support querying CPU power state, fail with ZX_ERR_NOT_SUPPORTED
-    // (leaving the CPU Offline).
-    Required,
-  };
-
-  // See |TransitionActiveToOffline|.
-  TransitionResult TransitionActiveToOfflineLocked(zx_instant_mono_t timeout_at,
-                                                   PowerOffConfirmation confirmation)
-      TA_REQ(TransitionLock::Get());
-
-  // How |SuspendAllActive| suspends the system.
-  enum class SuspendMode : bool {
-    // Transition the active non-boot CPUs to Suspend, then suspend the boot CPU with
-    // platform_suspend_cpu.  See |TransitionAllActiveToSuspend|.
-    Cpu,
-    // Transition the active non-boot CPUs to Offline, then suspend the system from the boot CPU
-    // with platform_suspend_system.  See |SuspendSystem|.
-    System,
-  };
-
-  // Implements |TransitionAllActiveToSuspend| and |SuspendSystem|.
-  static zx_instant_boot_t SuspendAllActive(zx_instant_boot_t resume_at, SuspendMode mode)
-      TA_EXCL(TransitionLock::Get());
-
-  using WakeResult = wake_vector::WakeResult;
-  using WakeEvent = wake_vector::WakeEvent;
-  friend WakeEvent;
-  friend WakeResult cpp_idle_power_thread_trigger_system_wake_event();
-  friend void cpp_idle_power_thread_acknowledge_system_wake_event();
-
-  static WakeResult WakeBootCpu();
-  static WakeResult TriggerSystemWakeEvent();
-  static void AcknowledgeSystemWakeEvent();
-  static void ResumeFromTimerIrq(zx_instant_boot_t now, zx_instant_boot_t resume_at);
-
-  // This function does different things depending on the current_cpu and current_state.
-  //
-  // 1. If the current_cpu is equal to the boot CPU, and:
-  //    a. If the state indicates that we are suspended, then pause the monotonic clock.
-  //    b. If the state indicates that we are waking up, then unpause the monotonic clock and update
-  //       the platform timer.
-  // 2. If the current_cpu is a secondary CPU and the state indicates that we are active, then
-  //    just update the platform timer.
-  //
-  // The boot CPU is responsible for pausing and resuming the clock since it is the last CPU to
-  // suspend and the first CPU to resume. However, each CPU has its own platform timer that it must
-  // update after the monotonic clock is resumed.
-  static void UpdateMonotonicClock(cpu_num_t current_cpu, const StateMachine& current_state);
-
-  // See |TransitionLock|.
+  // The layout of these fields must match the Rust `IdlePowerThread`.
   // TODO(https://fxbug.dev/542143859): Explicit initialization of state_ is a workaround for a
   // compiler front-end issue regarding nested structures
   // (https://github.com/llvm/llvm-project/issues/60321).
   ktl::atomic<StateMachine> state_{kActive};
   AutounsignalMpUnplugEvent complete_;
-
   Thread thread_;
   cpu_num_t this_cpu_{INVALID_CPU};
-
-  // The TransitionLock guards the |state_| of the subset of secondary (non-boot) CPUs that are
-  // actively transitioning in and out of suspension. Modifications to this participating secondary
-  // set must be performed under this global lock.
-  //
-  // TransitionAllActiveToSuspend and SuspendSystem obtain the global lock when they obtain the
-  // participating secondary set and hold it for the remainder of the method to prevent CPUs
-  // unexpectedly going offline.
-  //
-  // For example, unplugging a CPU by transitioning it from active to offline must be done under
-  // this lock, as otherwise it could modify the participating secondary set. On the other hand,
-  // transitioning a secondary CPU from offline to active need not be done under this lock, as
-  // TransitionAllActiveToSuspend itself ignores additional active CPUs after its participating set
-  // is acquired.
-  //
-  // Note: SuspendSystem cannot ignore additional active CPUs, since platform_suspend_system
-  // requires that all secondary CPUs be powered off.  If a secondary CPU is brought online
-  // concurrently with SuspendSystem, platform_suspend_system will fail with ZX_ERR_BAD_STATE and
-  // the boot CPU will fall back to platform_suspend_cpu.
-  DECLARE_SINGLETON_MUTEX(TransitionLock);
-
-  enum SystemSuspendState : uint64_t {
-    SystemSuspendStateActive = 0,
-    SystemSuspendStateSuspendedBit = uint64_t{1} << 63,
-    SystemSuspendStateWakeEventPendingMask = SystemSuspendStateSuspendedBit - 1,
-  };
-
-  // Provides an interlock between pending wake events and system suspend, preventing suspend entry
-  // until there are no pending wake events.
-  inline static ktl::atomic<uint64_t> system_suspend_state_{SystemSuspendStateActive};
-
-  // When true, the boot CPU's idle/power thread suspends with platform_suspend_system rather than
-  // platform_suspend_cpu when it is in the Suspend state.
-  //
-  // Set by SuspendSystem (while holding TransitionLock) before transitioning the boot CPU to
-  // Suspend, and cleared by SuspendSystem once that transition has returned (i.e. once the boot CPU
-  // has resumed, or the suspend attempt was aborted or timed out).  The boot CPU's idle/power
-  // thread also clears it if platform_suspend_system fails, so that a persistent failure does not
-  // prevent it from suspending.  Accesses are ordered with respect to the boot CPU's transitions by
-  // |state_|.
-  inline static ktl::atomic<bool> system_suspend_requested_{false};
-
-  // A timer on the boot timeline used to resume the system at the given boot time if no other wake
-  // events occur by then.
-  static ktl::unique_ptr<SuspendWakeupTimer> resume_timer_;
-
-  // A bespoke wake vector used by the resume timer handler to wake the system when the resume boot
-  // time is reached.
-  struct ResumeTimerWakeVector : public wake_vector::WakeVector {
-    ResumeTimerWakeVector() : WakeVector{&ResumeTimerWakeVector::wake_event}, wake_event{*this} {
-      wake_event.Initialize();
-    }
-    ~ResumeTimerWakeVector() { wake_event.Destroy(); }
-
-    void GetDiagnostics(WakeVector::Diagnostics& diagnostics) const final;
-
-    WakeEvent wake_event;
-  };
-
-  // Use LazyInit to sequence constructing this instance after global ctors initialize the global
-  // WakeEvent list. This instance is initialized by an init hook well before it can be used at
-  // runtime by TransitionAllActiveToSuspend.
-  inline static lazy_init::LazyInit<ResumeTimerWakeVector> resume_timer_wake_vector_;
 };
 
 #endif  // ZIRCON_KERNEL_INCLUDE_KERNEL_IDLE_POWER_THREAD_H_

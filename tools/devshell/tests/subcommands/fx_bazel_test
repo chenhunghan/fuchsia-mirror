@@ -16,6 +16,7 @@ BT_FILE_DEPS=(
     "tools/devshell/lib/platform.sh"
     "tools/devshell/lib/vars.sh"
     "tools/devshell/lib/is_invoked_by_agent.sh"
+    "tools/devshell/lib/agent_session_ids.txt"
     "tools/devshell/lib/agents.txt"
     #"tools/devshell/jq.fx"
     # "tools/devshell/lib/build_api_client.sh"
@@ -73,6 +74,7 @@ _BAZEL_OUTPUT_USER_ROOT="${bazel_output_user_root}"
 _NINJA_BUILD_DIR="${TEST_BUILD_DIR}"
 _PREBUILT_NINJA="${ninja_bin}"
 _PREBUILT_PYTHON_DIR="${python3_dir}"
+_BAZEL_LOGS_DIRNAME="bazel_logs"
 EOF
 
     mkdir -p "${python3_dir}"
@@ -183,16 +185,15 @@ TEST_bazel_wrapper_build_command_with_disk_cache() {
     FUCHSIA_BAZEL_DISK_CACHE="${BT_TEMP_DIR}/disk-cache" \
     "${bazel}" build --config=some_config //some:target
     source "${bazel_bin}.mock_state"
-    BT_EXPECT_EQ "${#BT_MOCK_ARGS[@]}" 9
+    BT_EXPECT_EQ "${#BT_MOCK_ARGS[@]}" 8
     BT_EXPECT_EQ "${BT_MOCK_ARGS[0]}" "${bazel_bin}"
     BT_EXPECT_EQ "${BT_MOCK_ARGS[1]}" --nohome_rc
     BT_EXPECT_EQ "${BT_MOCK_ARGS[2]}" --output_base="${bazel_output_base}"
     BT_EXPECT_EQ "${BT_MOCK_ARGS[3]}" --output_user_root="${bazel_output_user_root}"
     BT_EXPECT_EQ "${BT_MOCK_ARGS[4]}" --bazelrc="${TEST_BUILD_DIR}"/regenerator_outputs/remote_services.bazelrc
     BT_EXPECT_EQ "${BT_MOCK_ARGS[5]}" build
-    BT_EXPECT_EQ "${BT_MOCK_ARGS[6]}" --disk_cache="${BT_TEMP_DIR}"/disk-cache
-    BT_EXPECT_EQ "${BT_MOCK_ARGS[7]}" --config=some_config
-    BT_EXPECT_EQ "${BT_MOCK_ARGS[8]}" //some:target
+    BT_EXPECT_EQ "${BT_MOCK_ARGS[6]}" --config=some_config
+    BT_EXPECT_EQ "${BT_MOCK_ARGS[7]}" //some:target
 }
 
 TEST_bazel_wrapper_build_command_with_disk_cache_with_max_size() {
@@ -200,17 +201,15 @@ TEST_bazel_wrapper_build_command_with_disk_cache_with_max_size() {
     FUCHSIA_BAZEL_DISK_CACHE_SIZE="40G" \
     "${bazel}" build --config=some_config //some:target
     source "${bazel_bin}.mock_state"
-    BT_EXPECT_EQ "${#BT_MOCK_ARGS[@]}" 10
+    BT_EXPECT_EQ "${#BT_MOCK_ARGS[@]}" 8
     BT_EXPECT_EQ "${BT_MOCK_ARGS[0]}" "${bazel_bin}"
     BT_EXPECT_EQ "${BT_MOCK_ARGS[1]}" --nohome_rc
     BT_EXPECT_EQ "${BT_MOCK_ARGS[2]}" --output_base="${bazel_output_base}"
     BT_EXPECT_EQ "${BT_MOCK_ARGS[3]}" --output_user_root="${bazel_output_user_root}"
     BT_EXPECT_EQ "${BT_MOCK_ARGS[4]}" --bazelrc="${TEST_BUILD_DIR}"/regenerator_outputs/remote_services.bazelrc
     BT_EXPECT_EQ "${BT_MOCK_ARGS[5]}" build
-    BT_EXPECT_EQ "${BT_MOCK_ARGS[6]}" --disk_cache="${BT_TEMP_DIR}"/disk-cache
-    BT_EXPECT_EQ "${BT_MOCK_ARGS[7]}" --experimental_disk_cache_gc_max_size=40G
-    BT_EXPECT_EQ "${BT_MOCK_ARGS[8]}" --config=some_config
-    BT_EXPECT_EQ "${BT_MOCK_ARGS[9]}" //some:target
+    BT_EXPECT_EQ "${BT_MOCK_ARGS[6]}" --config=some_config
+    BT_EXPECT_EQ "${BT_MOCK_ARGS[7]}" //some:target
 }
 
 TEST_bazel_wrapper_print_commands() {

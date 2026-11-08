@@ -100,7 +100,9 @@ fn to_utf8_path(path: Option<PathBuf>) -> Result<Option<String>, MappingError> {
 /// single scan. Escaped dollar signs (`$$`) are converted to a literal `$`.
 ///
 /// Substituted variable values are appended directly to the output buffer without being
-/// rescanned, preventing second-order macro injection.
+/// rescanned, preventing second-order macro injection. Returns `Ok(None)` if any referenced
+/// built-in macro cannot be resolved or if any referenced environment variable is unset, empty,
+/// or whitespace-only.
 fn expand_string_with_source(
     ctx: &EnvironmentContext,
     s: &str,
@@ -159,7 +161,7 @@ fn expand_string_with_source(
         } else {
             let expanded = match BuiltinMacro::parse(var_name) {
                 Some(m) => m.resolve(ctx)?,
-                None => ctx.env_var(var_name).ok(),
+                None => ctx.env_var(var_name).ok().filter(|v| !v.trim().is_empty()),
             };
 
             match expanded {
@@ -340,14 +342,37 @@ mod tests {
             expand_macros(&ctx_with_home, json!("$HOME/.ssh")).unwrap(),
             Some(json!("/custom/isolated/home/.ssh"))
         );
+
+        let main_ffx_isolated = EnvironmentContext::isolated(
+            crate::environment::ExecutableKind::MainFfx,
+            "/tmp/ffx_isolate".into(),
+            [("HOME".to_string(), "/home/builder".to_string())].into_iter().collect(),
+            Default::default(),
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            expand_macros(&main_ffx_isolated, json!("$HOME/.ssh/fuchsia_ed25519")).unwrap(),
+            Some(json!("/home/builder/.ssh/fuchsia_ed25519"))
+        );
+        assert_eq!(
+            expand_macros(&main_ffx_isolated, json!("$DATA/subdir")).unwrap(),
+            Some(json!("/tmp/ffx_isolate/data/subdir"))
+        );
     }
 
     #[test]
     fn test_expand_macros_unresolvable_returns_none() {
-        let ctx = isolated_env(&[]);
+        let ctx = isolated_env(&[("EMPTY_VAR", ""), ("WS_VAR", "   ")]);
 
         for input in [
             "$NONEXISTENT_VAR",
+            "$EMPTY_VAR/file",
+            "$WS_VAR/file",
+            "$DATA/$EMPTY_VAR",
+            "$DATA/$WS_VAR",
             "$BUILD_DIR/file",
             "$FIND_WORKSPACE_ROOT/file",
             "$DATA/$NONEXISTENT_VAR",

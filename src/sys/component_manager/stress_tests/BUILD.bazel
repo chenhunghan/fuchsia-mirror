@@ -1,0 +1,192 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Only for internal use.
+rustc_library(
+    name = "lib",
+    testonly = True,
+    srcs = ["lib.rs"],
+    crate_name = "cm_stress_tests_lib",
+    crate_root = "lib.rs",
+    edition = "2024",
+    deps = [
+        ":test.componentmanager.stresstests_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//third_party/rust_crates/vendor:anyhow",
+    ],
+)
+
+fidl_library(
+    name = "test.componentmanager.stresstests",
+    testonly = True,
+    srcs = ["stress.test.fidl"],
+)
+
+rustc_test(
+    name = "realm_with_many_children_bin",
+    srcs = ["realm_with_many_children.rs"],
+    crate_name = "realm_with_many_children",
+    crate_root = "realm_with_many_children.rs",
+    edition = "2024",
+    deps = [
+        ":lib",
+        ":test.componentmanager.stresstests_rust",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "realm_with_many_children_packaged_bin",
+    testonly = True,
+    binary = ":realm_with_many_children_bin",
+    binary_name = "realm_with_many_children",
+)
+
+fx_component_manifest(
+    name = "realm_with_many_children-manifest",
+    testonly = True,
+    component_name = "realm-with-many-children",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/realm-with-many-children.cml",
+)
+
+fx_test_component(
+    name = "realm_with_many_children",
+    compiled_manifest = ":realm_with_many_children-manifest",
+    deps = [":realm_with_many_children_packaged_bin"],
+)
+
+rustc_test(
+    name = "deep_tree_stress_test_bin",
+    srcs = ["deep_tree_stress_test.rs"],
+    crate_name = "deep_tree_stress_test",
+    crate_root = "deep_tree_stress_test.rs",
+    edition = "2024",
+    deps = [
+        ":lib",
+        "//src/lib/fuchsia",
+    ],
+)
+
+fx_packaged_binary(
+    name = "deep_tree_stress_test_packaged_bin",
+    testonly = True,
+    binary = ":deep_tree_stress_test_bin",
+    binary_name = "deep_tree_stress_test",
+)
+
+fx_component_manifest(
+    name = "deep_tree_stress_test-manifest",
+    testonly = True,
+    component_name = "deep-tree-stress-test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/deep-tree-stress-test.cml",
+)
+
+fx_test_component(
+    name = "deep_tree_stress_test",
+    compiled_manifest = ":deep_tree_stress_test-manifest",
+    deps = [":deep_tree_stress_test_packaged_bin"],
+)
+
+rustc_binary(
+    name = "child_for_stress_test_bin",
+    testonly = True,
+    srcs = ["child_for_stress_test.rs"],
+    crate_name = "child_for_stress_test",
+    crate_root = "child_for_stress_test.rs",
+    edition = "2024",
+    deps = [
+        ":lib",
+        ":test.componentmanager.stresstests_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-sync",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "child_for_stress_test_packaged_bin",
+    testonly = True,
+    binary = ":child_for_stress_test_bin",
+    binary_name = "child_for_stress_test",
+)
+
+fx_component_manifest(
+    name = "child_for_stress_test-manifest",
+    testonly = True,
+    component_name = "child-for-stress-test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/child-for-stress-test.cml",
+)
+
+fx_component(
+    name = "child_for_stress_test",
+    testonly = True,
+    compiled_manifest = ":child_for_stress_test-manifest",
+    deps = [":child_for_stress_test_packaged_bin"],
+)
+
+fx_package(
+    name = "component-manager-stress-tests_package",
+    package_name = "component-manager-stress-tests",
+    components = [
+        ":child_for_stress_test",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+        # https://fxbug.dev/42052321: Dep included for affected tests presubmit
+        "//src/sys/component_manager:component-manager-realm-builder-cmp",
+    ],
+    test_components = [
+        ":deep_tree_stress_test",
+        ":realm_with_many_children",
+    ],
+)
+
+# https://fxbug.dev/42052321: Dep included for affected tests presubmit
+fx_test(
+    name = "component-manager-stress-tests",
+    package = ":component-manager-stress-tests_package",
+    parallel = 1,
+    visibility = ["//src/sys/component_manager:__pkg__"],
+)

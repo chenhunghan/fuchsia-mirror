@@ -6,7 +6,8 @@ use crate::task::{Kernel, PidTable};
 use fuchsia_rcu::RcuReadScope;
 use starnix_logging::{log_debug, log_error, log_warn};
 use starnix_sync::{
-    LockDepMutex, LockDepRwLock, PidToKoidMapInnerLock, TracePerformanceEventManagerStateLock,
+    LockDepMutex, LockDepRwLock, LockGuarded, PidToKoidMapInnerLock,
+    TracePerformanceEventManagerStateLock,
 };
 use starnix_uapi::{pid_t, tid_t};
 use std::collections::{HashMap, HashSet};
@@ -158,6 +159,9 @@ impl PidKoidMap {
     }
 }
 
+#[derive(Default)]
+struct SessionState;
+
 /// Kernel-wide manager of pid/tid to koid mappings, shared by all recording clients
 /// (system tracing and CPU profiling). Stored in `kernel.trace_event_manager`.
 ///
@@ -178,10 +182,10 @@ pub struct TracePerformanceEventManager {
 
     /// Number of live [`PidKoidSession`]s. Maintained exclusively under [`state_lock`] by
     /// [`TracePerformanceEventManager::open`] and [`PidKoidSession::drop`].
-    active_sessions: AtomicUsize,
+    active_sessions: LockGuarded<AtomicUsize, SessionState>,
 
     /// Serializes session lifecycle transitions (0 -> 1 initialization and 1 -> 0 cleanup).
-    state_lock: LockDepMutex<(), TracePerformanceEventManagerStateLock>,
+    state_lock: LockDepMutex<SessionState, TracePerformanceEventManagerStateLock>,
 
     /// The bidirectional mapping table. Readers take short read locks per lookup; the
     /// only writers are task spawns while recording (one insert each) and the session
@@ -202,8 +206,8 @@ impl TracePerformanceEventManager {
     pub fn new_with_sink(weak_kernel: Weak<Kernel>, sink: Arc<dyn TraceEventSink>) -> Self {
         Self {
             weak_kernel,
-            active_sessions: AtomicUsize::new(0),
-            state_lock: LockDepMutex::new(()),
+            active_sessions: LockGuarded::new(AtomicUsize::new(0)),
+            state_lock: Default::default(),
             map: LockDepRwLock::new(PidKoidMap::default()),
             sink,
         }
@@ -327,8 +331,8 @@ impl TracePerformanceEventManager {
     /// Increments the session count, seeding the map from the kernel pid table when this
     /// is the first session.
     fn start_session_internal(&self) {
-        let _guard = self.state_lock.lock();
-        let current = self.active_sessions.fetch_add(1, Ordering::AcqRel);
+        let guard = self.state_lock.lock();
+        let current = self.active_sessions.write(&guard).fetch_add(1, Ordering::AcqRel);
         if current == 0 {
             if let Some(kernel) = self.weak_kernel.upgrade() {
                 let snapshot = Self::snapshot_existing_tasks(&kernel.pids, &*self.sink);
@@ -342,12 +346,12 @@ impl TracePerformanceEventManager {
 
     /// Decrements the session count, releasing the map when the last session drops.
     fn stop_session_internal(&self) {
-        let _guard = self.state_lock.lock();
+        let guard = self.state_lock.lock();
         if self.active_sessions.load(Ordering::Acquire) == 0 {
             log_error!("session stopped without an active session");
             return;
         }
-        let current = self.active_sessions.fetch_sub(1, Ordering::AcqRel);
+        let current = self.active_sessions.write(&guard).fetch_sub(1, Ordering::AcqRel);
         if current == 1 {
             *self.map.write() = PidKoidMap::default();
         }

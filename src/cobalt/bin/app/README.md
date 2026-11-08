@@ -52,12 +52,12 @@ above the generated file will be `memory_metrics_registry.cb.h`.
 
 The generated code files will be created within the *target gen dir* for the
 *metrics_registry* target. For example assuming that the *metrics_registry*
-target given above occurs in `//src/developer/memory/monitor/BUILD.gn`, and
+target given above occurs in `//src/memory/legacy/monitor/BUILD.gn`, and
 assuming standard default values for GN parameters, the
 generated C++ file will be
 
 ```
-out/default/gen/src/developer/memory/monitor/memory_metrics_registry.cb.h
+out/default/gen/src/memory/legacy/monitor/memory_metrics_registry.cb.h
 ```
 
 You can peruse the generated file to see what constants are generated that
@@ -77,7 +77,7 @@ for a C++ library that include .cc or .h files that `#include`
 ## Include the generated code files
 Using the example from above we would add the line
 ```
-#include "src/developer/memory/monitor/memory_metrics_registry.cb.h"
+#include "src/memory/legacy/monitor/memory_metrics_registry.cb.h"
 ```
 to any source file that needed to references the generated constants.
 

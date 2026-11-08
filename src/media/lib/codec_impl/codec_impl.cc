@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <fidl/fuchsia.images2/cpp/hlcpp_conversion.h>
+#include <fidl/fuchsia.sysmem/cpp/hlcpp_conversion.h>
 #include <fuchsia/media/cpp/fidl.h>
 #include <fuchsia/mediacodec/cpp/fidl.h>
 #include <inttypes.h>
@@ -12,8 +14,10 @@
 #include <lib/fit/defer.h>
 #include <lib/media/codec_impl/codec_impl.h>
 #include <lib/media/codec_impl/codec_vmo_range.h>
+#include <lib/media/codec_impl/fourcc.h>
 #include <lib/media/codec_impl/log.h>
 #include <lib/sync/cpp/completion.h>
+#include <lib/sysmem-version/sysmem-version.h>
 #include <lib/zx/clock.h>
 #include <lib/zx/time.h>
 #include <stdarg.h>
@@ -28,6 +32,7 @@
 #include <bind/fuchsia/sysmem/heap/cpp/bind.h>
 #include <fbl/algorithm.h>
 #include <fbl/macros.h>
+#include <safemath/safe_math.h>
 
 #include "lib/media/codec_impl/codec_port.h"
 #include "src/media/lib/codec_impl/dispatcher.h"
@@ -134,6 +139,8 @@ std::optional<CodecPort> CodecPortFromFidlPort(fuchsia::media::Port port) {
   }
 }
 
+void NormalizeInputFormatDetails(fuchsia::media::FormatDetails* format_details, bool is_decryptor);
+
 CodecImpl::StreamProcessorParams EnsureInitialInputFormatDetailsVersionOrdinal(
     CodecImpl::StreamProcessorParams params) {
   fuchsia::media::FormatDetails* input_details =
@@ -141,10 +148,650 @@ CodecImpl::StreamProcessorParams EnsureInitialInputFormatDetailsVersionOrdinal(
   if (!input_details->has_format_details_version_ordinal()) {
     input_details->set_format_details_version_ordinal(0);
   }
+  const bool is_decryptor = std::holds_alternative<fuchsia::media::drm::DecryptorParams>(params);
+  NormalizeInputFormatDetails(input_details, is_decryptor);
   return params;
 }
 
+constexpr uint32_t kIntelYTiledHeightAlignment = 32u;
+// Matches legacy `PcmFormat.channel_map`'s `vector<AudioChannelId>:16` FIDL bound (rather than the
+// unused `MAX_PCM_CHANNEL_COUNT = 8` constant).
+constexpr size_t kMaxLegacyPcmChannelCount = 16;
+
+std::optional<fuchsia::media::AudioPcmMode2> ToAudioPcmMode2(fuchsia::media::AudioPcmMode v1) {
+  switch (v1) {
+    case fuchsia::media::AudioPcmMode::LINEAR:
+      return fuchsia::media::AudioPcmMode2::LINEAR;
+    case fuchsia::media::AudioPcmMode::ALAW:
+      return fuchsia::media::AudioPcmMode2::ALAW;
+    case fuchsia::media::AudioPcmMode::MULAW:
+      return fuchsia::media::AudioPcmMode2::MULAW;
+    default:
+      return std::nullopt;
+  }
+}
+
+std::optional<fuchsia::media::AudioPcmMode> ToAudioPcmModeV1(fuchsia::media::AudioPcmMode2 v2) {
+  switch (v2) {
+    case fuchsia::media::AudioPcmMode2::LINEAR:
+      return fuchsia::media::AudioPcmMode::LINEAR;
+    case fuchsia::media::AudioPcmMode2::ALAW:
+      return fuchsia::media::AudioPcmMode::ALAW;
+    case fuchsia::media::AudioPcmMode2::MULAW:
+      return fuchsia::media::AudioPcmMode::MULAW;
+    default:
+      return std::nullopt;
+  }
+}
+
+#define AUDIO_CHANNEL_ID_V1_V2_MAPPING_LIST(V) \
+  V(SKIP, SKIP)                                \
+  V(LF, FL)                                    \
+  V(RF, FR)                                    \
+  V(CF, FC)                                    \
+  V(LS, SL)                                    \
+  V(RS, SR)                                    \
+  V(LFE, LFE)                                  \
+  V(CS, BC)                                    \
+  V(LR, BL)                                    \
+  V(RR, BR)
+
+// Legacy `AudioChannelId` originally predated `strict` vs. `flexible` FIDL enums and was later
+// migrated from unqualified `enum` to `strict enum`, so its intended
+// `[EXTENDED_CHANNEL_ID_BASE, MAX]` subrange cannot carry unlisted extended values over FIDL
+// (they fail strict-enum wire validation), leaving `END_DEFINED`, `EXTENDED_CHANNEL_ID_BASE`,
+// and `MAX` as range-bound markers rather than speaker roles. Treat
+// `[MIN_EXTENDED_AUDIO_CHANNEL_ID2, MAX_AUDIO_CHANNEL_ID2]` as V2-only (callers needing
+// extended channel IDs must use `pcm_format`).
+std::optional<fuchsia::media::AudioChannelId2> ToAudioChannelId2(
+    fuchsia::media::AudioChannelId v1) {
+  switch (v1) {
+#define CASE_V1_TO_V2(v1_name, v2_name)         \
+  case fuchsia::media::AudioChannelId::v1_name: \
+    return fuchsia::media::AudioChannelId2::v2_name;
+    AUDIO_CHANNEL_ID_V1_V2_MAPPING_LIST(CASE_V1_TO_V2)
+#undef CASE_V1_TO_V2
+    default:
+      return std::nullopt;
+  }
+}
+
+std::optional<fuchsia::media::AudioChannelId> ToAudioChannelIdV1(
+    fuchsia::media::AudioChannelId2 v2) {
+  switch (v2) {
+#define CASE_V2_TO_V1(v1_name, v2_name)          \
+  case fuchsia::media::AudioChannelId2::v2_name: \
+    return fuchsia::media::AudioChannelId::v1_name;
+    AUDIO_CHANNEL_ID_V1_V2_MAPPING_LIST(CASE_V2_TO_V1)
+#undef CASE_V2_TO_V1
+    default:
+      return std::nullopt;
+  }
+}
+
+#undef AUDIO_CHANNEL_ID_V1_V2_MAPPING_LIST
+
+// `sysmem::V1CopyFromV2ImageFormat` uses an unchecked `static_cast` from flexible
+// `fuchsia.images2.PixelFormat` / `ColorSpace` into strict `fuchsia.sysmem` V1 enums, which fail
+// FIDL encoding if given a V2-only value.
+bool IsPixelFormatRepresentableInV1(fuchsia_images2::PixelFormat pf) {
+  switch (pf) {
+    case fuchsia_images2::PixelFormat::kInvalid:
+    case fuchsia_images2::PixelFormat::kR8G8B8A8:
+    case fuchsia_images2::PixelFormat::kB8G8R8A8:
+    case fuchsia_images2::PixelFormat::kI420:
+    case fuchsia_images2::PixelFormat::kM420:
+    case fuchsia_images2::PixelFormat::kNv12:
+    case fuchsia_images2::PixelFormat::kYuy2:
+    case fuchsia_images2::PixelFormat::kMjpeg:
+    case fuchsia_images2::PixelFormat::kYv12:
+    case fuchsia_images2::PixelFormat::kB8G8R8:
+    case fuchsia_images2::PixelFormat::kR5G6B5:
+    case fuchsia_images2::PixelFormat::kR3G3B2:
+    case fuchsia_images2::PixelFormat::kR2G2B2X2:
+    case fuchsia_images2::PixelFormat::kL8:
+    case fuchsia_images2::PixelFormat::kR8:
+    case fuchsia_images2::PixelFormat::kR8G8:
+    case fuchsia_images2::PixelFormat::kA2R10G10B10:
+    case fuchsia_images2::PixelFormat::kA2B10G10R10:
+    case fuchsia_images2::PixelFormat::kDoNotCare:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool IsColorSpaceRepresentableInV1(fuchsia_images2::ColorSpace cs) {
+  switch (cs) {
+    case fuchsia_images2::ColorSpace::kInvalid:
+    case fuchsia_images2::ColorSpace::kSrgb:
+    case fuchsia_images2::ColorSpace::kRec601Ntsc:
+    case fuchsia_images2::ColorSpace::kRec601NtscFullRange:
+    case fuchsia_images2::ColorSpace::kRec601Pal:
+    case fuchsia_images2::ColorSpace::kRec601PalFullRange:
+    case fuchsia_images2::ColorSpace::kRec709:
+    case fuchsia_images2::ColorSpace::kRec2020:
+    case fuchsia_images2::ColorSpace::kRec2100:
+    case fuchsia_images2::ColorSpace::kPassthrough:
+    case fuchsia_images2::ColorSpace::kDoNotCare:
+      return true;
+    default:
+      return false;
+  }
+}
+
+std::optional<uint32_t> LinearStrideBytesPerWidthPixelInV1(fuchsia_images2::PixelFormat pf) {
+  switch (pf) {
+    case fuchsia_images2::PixelFormat::kI420:
+    case fuchsia_images2::PixelFormat::kM420:
+    case fuchsia_images2::PixelFormat::kNv12:
+    case fuchsia_images2::PixelFormat::kYv12:
+    case fuchsia_images2::PixelFormat::kR3G3B2:
+    case fuchsia_images2::PixelFormat::kR2G2B2X2:
+    case fuchsia_images2::PixelFormat::kL8:
+    case fuchsia_images2::PixelFormat::kR8:
+      return 1u;
+    case fuchsia_images2::PixelFormat::kYuy2:
+    case fuchsia_images2::PixelFormat::kR5G6B5:
+    case fuchsia_images2::PixelFormat::kR8G8:
+      return 2u;
+    case fuchsia_images2::PixelFormat::kB8G8R8:
+      return 3u;
+    case fuchsia_images2::PixelFormat::kR8G8B8A8:
+    case fuchsia_images2::PixelFormat::kB8G8R8A8:
+    case fuchsia_images2::PixelFormat::kA2R10G10B10:
+    case fuchsia_images2::PixelFormat::kA2B10G10R10:
+      return 4u;
+    default:
+      return std::nullopt;
+  }
+}
+
+std::optional<fuchsia_images2::ImageFormat> VideoFormatV1ToV2Natural(
+    const fuchsia::media::VideoUncompressedFormat& uncompressed) {
+  fuchsia_sysmem::ImageFormat2 v1_natural =
+      fidl::HLCPPToNatural(fidl::Clone(uncompressed.image_format));
+  if (v1_natural.coded_width() == 0 && v1_natural.coded_height() == 0 &&
+      (uncompressed.primary_width_pixels != 0 || uncompressed.primary_height_pixels != 0)) {
+    v1_natural.coded_width() = uncompressed.primary_width_pixels;
+    v1_natural.coded_height() = uncompressed.primary_height_pixels;
+  }
+  if (v1_natural.bytes_per_row() == 0 && uncompressed.primary_line_stride_bytes != 0) {
+    v1_natural.bytes_per_row() = uncompressed.primary_line_stride_bytes;
+  }
+
+  bool had_pixel_format =
+      v1_natural.pixel_format().type() != fuchsia_sysmem::PixelFormatType::kInvalid;
+  if (!had_pixel_format) {
+    if (v1_natural.coded_width() == 0 && v1_natural.coded_height() == 0 &&
+        v1_natural.display_width() == 0 && v1_natural.display_height() == 0 &&
+        uncompressed.primary_display_width_pixels == 0 &&
+        uncompressed.primary_display_height_pixels == 0) {
+      return std::nullopt;
+    }
+    // `sysmem::V2CopyFromV1ImageFormat` requires `pixel_format.type` to be non-INVALID, whereas
+    // legacy V1 encoder input `FormatDetails` may specify dimensions while leaving
+    // `pixel_format.type` as `INVALID` to be negotiated via sysmem constraints. Temporarily
+    // supply a placeholder `kNv12` pixel format for `V2CopyFromV1ImageFormat` and reset
+    // `pixel_format` afterward.
+    v1_natural.pixel_format().type() = fuchsia_sysmem::PixelFormatType::kNv12;
+  }
+
+  auto v2_result = sysmem::V2CopyFromV1ImageFormat(v1_natural);
+  if (!v2_result.is_ok()) {
+    return std::nullopt;
+  }
+  fuchsia_images2::ImageFormat v2_natural = v2_result.take_value();
+  if (!had_pixel_format) {
+    v2_natural.pixel_format().reset();
+    v2_natural.pixel_format_modifier().reset();
+  }
+  if (v1_natural.color_space().type() == fuchsia_sysmem::ColorSpaceType::kInvalid) {
+    v2_natural.color_space().reset();
+  }
+  if (v1_natural.bytes_per_row() == 0) {
+    v2_natural.bytes_per_row().reset();
+  }
+  if (v1_natural.coded_width() == 0 && v1_natural.coded_height() == 0) {
+    v2_natural.size().reset();
+    v2_natural.valid_size().reset();
+  }
+  if (uncompressed.image_format.display_width == 0 &&
+      uncompressed.image_format.display_height == 0) {
+    if (uncompressed.primary_display_width_pixels != 0 ||
+        uncompressed.primary_display_height_pixels != 0) {
+      v2_natural.display_rect() = {0, 0, uncompressed.primary_display_width_pixels,
+                                   uncompressed.primary_display_height_pixels};
+    } else {
+      // `sysmem::V2CopyFromV1ImageFormat` unconditionally populates `display_rect` from
+      // `v1.display_width()` / `v1.display_height()`. Reset `display_rect` when both V1 display
+      // dimension fields are zero so downstream consumers fall back to `valid_size` or `size`
+      // rather than reading a 0x0 `display_rect`.
+      v2_natural.display_rect().reset();
+    }
+  }
+  if (!uncompressed.image_format.has_pixel_aspect_ratio && uncompressed.has_pixel_aspect_ratio) {
+    v2_natural.pixel_aspect_ratio() = {uncompressed.pixel_aspect_ratio_width,
+                                       uncompressed.pixel_aspect_ratio_height};
+  }
+  return v2_natural;
+}
+
+void PopulateVideoDomainV1FromV2Natural(fuchsia_images2::ImageFormat* v2_natural,
+                                        fuchsia::media::FormatDetails* format_details) {
+  ZX_DEBUG_ASSERT(v2_natural);
+  if (v2_natural->display_rect().has_value() &&
+      (v2_natural->display_rect()->x() != 0 || v2_natural->display_rect()->y() != 0)) {
+    format_details->clear_domain();
+    return;
+  }
+  if (v2_natural->pixel_format().has_value() &&
+      !IsPixelFormatRepresentableInV1(v2_natural->pixel_format().value())) {
+    format_details->clear_domain();
+    return;
+  }
+  if (v2_natural->color_space().has_value() &&
+      !IsColorSpaceRepresentableInV1(v2_natural->color_space().value())) {
+    format_details->clear_domain();
+    return;
+  }
+
+  bool had_pixel_format = v2_natural->pixel_format().has_value();
+  if (!had_pixel_format) {
+    // `sysmem::V1CopyFromV2ImageFormat` requires `pixel_format` to be set (and logs an error if
+    // it is missing), whereas encoder input `FormatDetails` may specify dimensions while leaving
+    // `pixel_format` to be negotiated via sysmem constraints. Temporarily supply a placeholder
+    // `kNv12` pixel format for `V1CopyFromV2ImageFormat` and reset `pixel_format` to `INVALID`
+    // afterward.
+    v2_natural->pixel_format() = fuchsia_images2::PixelFormat::kNv12;
+  }
+  auto v1_result = sysmem::V1CopyFromV2ImageFormat(*v2_natural);
+  if (!had_pixel_format) {
+    v2_natural->pixel_format().reset();
+  }
+  if (!v1_result.is_ok()) {
+    format_details->clear_domain();
+    return;
+  }
+
+  fuchsia::media::VideoUncompressedFormat video_uncompressed;
+  video_uncompressed.image_format = fidl::NaturalToHLCPP(v1_result.take_value());
+  auto& v1_img = video_uncompressed.image_format;
+  if (!had_pixel_format) {
+    v1_img.pixel_format.type = fuchsia::sysmem::PixelFormatType::INVALID;
+    v1_img.pixel_format.has_format_modifier = false;
+  } else if (!v2_natural->bytes_per_row().has_value() && v2_natural->size().has_value() &&
+             (!v2_natural->pixel_format_modifier().has_value() ||
+              v2_natural->pixel_format_modifier().value() ==
+                  fuchsia_images2::PixelFormatModifier::kLinear)) {
+    // On linear `fuchsia.images2.ImageFormat`, `bytes_per_row` is optional and defaults to unpadded
+    // `stride_bytes_per_width_pixel * size.width`, whereas `sysmem::V1CopyFromV2ImageFormat` leaves
+    // `v1_img.bytes_per_row == 0` when unset.
+    if (auto stride_bytes_per_pixel =
+            LinearStrideBytesPerWidthPixelInV1(v2_natural->pixel_format().value());
+        stride_bytes_per_pixel.has_value()) {
+      auto unpadded_row_bytes = safemath::CheckMul(v1_img.coded_width, *stride_bytes_per_pixel);
+      if (!unpadded_row_bytes.IsValid()) {
+        format_details->clear_domain();
+        return;
+      }
+      v1_img.bytes_per_row = unpadded_row_bytes.ValueOrDie();
+    }
+  }
+
+  uint32_t display_width = v1_img.display_width != 0 ? v1_img.display_width
+                                                     : (v2_natural->valid_size().has_value()
+                                                            ? v2_natural->valid_size()->width()
+                                                            : v1_img.coded_width);
+  uint32_t display_height = v1_img.display_height != 0 ? v1_img.display_height
+                                                       : (v2_natural->valid_size().has_value()
+                                                              ? v2_natural->valid_size()->height()
+                                                              : v1_img.coded_height);
+  if (!had_pixel_format && v1_img.coded_width == 0 && v1_img.coded_height == 0 &&
+      display_width == 0 && display_height == 0) {
+    format_details->clear_domain();
+    return;
+  }
+  if (v1_img.display_width == 0 && v1_img.display_height == 0) {
+    v1_img.display_width = display_width;
+    v1_img.display_height = display_height;
+  }
+
+  video_uncompressed.primary_width_pixels = v1_img.coded_width;
+  video_uncompressed.primary_height_pixels = v1_img.coded_height;
+  video_uncompressed.primary_display_width_pixels = display_width;
+  video_uncompressed.primary_display_height_pixels = display_height;
+  video_uncompressed.has_pixel_aspect_ratio = v1_img.has_pixel_aspect_ratio;
+  video_uncompressed.pixel_aspect_ratio_width =
+      v1_img.has_pixel_aspect_ratio ? v1_img.pixel_aspect_ratio_width : 1;
+  video_uncompressed.pixel_aspect_ratio_height =
+      v1_img.has_pixel_aspect_ratio ? v1_img.pixel_aspect_ratio_height : 1;
+  video_uncompressed.primary_line_stride_bytes = v1_img.bytes_per_row;
+  video_uncompressed.primary_start_offset = 0;
+
+  if (v2_natural->pixel_format().has_value()) {
+    switch (v2_natural->pixel_format().value()) {
+      case fuchsia_images2::PixelFormat::kNv12: {
+        video_uncompressed.fourcc = make_fourcc('N', 'V', '1', '2');
+        video_uncompressed.planar = true;
+        bool is_y_tiled = v2_natural->pixel_format_modifier().has_value() &&
+                          v2_natural->pixel_format_modifier().value() ==
+                              fuchsia_images2::PixelFormatModifier::kIntelI915YTiled;
+        video_uncompressed.swizzled = is_y_tiled;
+        video_uncompressed.secondary_width_pixels = v1_img.coded_width / 2;
+        video_uncompressed.secondary_height_pixels = v1_img.coded_height / 2;
+        video_uncompressed.secondary_line_stride_bytes = v1_img.bytes_per_row;
+        uint32_t primary_height_for_offset = v1_img.coded_height;
+        if (is_y_tiled) {
+          uint32_t rem = v1_img.coded_height % kIntelYTiledHeightAlignment;
+          if (rem != 0) {
+            auto aligned =
+                safemath::CheckAdd(v1_img.coded_height, kIntelYTiledHeightAlignment - rem);
+            if (!aligned.IsValid()) {
+              format_details->clear_domain();
+              return;
+            }
+            primary_height_for_offset = aligned.ValueOrDie();
+          }
+        }
+        auto secondary_offset = safemath::CheckMul(v1_img.bytes_per_row, primary_height_for_offset);
+        auto tertiary_offset = safemath::CheckAdd(secondary_offset, 1u);
+        if (!secondary_offset.IsValid() || !tertiary_offset.IsValid()) {
+          format_details->clear_domain();
+          return;
+        }
+        video_uncompressed.secondary_start_offset = secondary_offset.ValueOrDie();
+        video_uncompressed.tertiary_start_offset = tertiary_offset.ValueOrDie();
+        video_uncompressed.primary_pixel_stride = 1;
+        video_uncompressed.secondary_pixel_stride = 2;
+        break;
+      }
+      case fuchsia_images2::PixelFormat::kYv12:
+      case fuchsia_images2::PixelFormat::kI420: {
+        video_uncompressed.fourcc =
+            (v2_natural->pixel_format().value() == fuchsia_images2::PixelFormat::kI420)
+                ? make_fourcc('I', '4', '2', '0')
+                : make_fourcc('Y', 'V', '1', '2');
+        video_uncompressed.planar = true;
+        video_uncompressed.swizzled = false;
+        video_uncompressed.secondary_width_pixels = v1_img.coded_width / 2;
+        video_uncompressed.secondary_height_pixels = v1_img.coded_height / 2;
+        video_uncompressed.secondary_line_stride_bytes = v1_img.bytes_per_row / 2;
+        auto secondary_offset = safemath::CheckMul(v1_img.bytes_per_row, v1_img.coded_height);
+        auto secondary_plane_bytes =
+            safemath::CheckMul(video_uncompressed.secondary_height_pixels,
+                               video_uncompressed.secondary_line_stride_bytes);
+        auto tertiary_offset = safemath::CheckAdd(secondary_offset, secondary_plane_bytes);
+        if (!secondary_offset.IsValid() || !tertiary_offset.IsValid()) {
+          format_details->clear_domain();
+          return;
+        }
+        video_uncompressed.secondary_start_offset = secondary_offset.ValueOrDie();
+        video_uncompressed.tertiary_start_offset = tertiary_offset.ValueOrDie();
+        video_uncompressed.primary_pixel_stride = 1;
+        video_uncompressed.secondary_pixel_stride = 1;
+        break;
+      }
+      case fuchsia_images2::PixelFormat::kR8G8B8A8:
+      case fuchsia_images2::PixelFormat::kB8G8R8A8: {
+        video_uncompressed.fourcc =
+            (v2_natural->pixel_format().value() == fuchsia_images2::PixelFormat::kR8G8B8A8)
+                ? make_fourcc('R', 'G', 'B', 'A')
+                : make_fourcc('B', 'G', 'R', 'A');
+        video_uncompressed.primary_pixel_stride = 4;
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  format_details->mutable_domain()->video().set_uncompressed(std::move(video_uncompressed));
+}
+
+void EnsureVideoFormatBridged(fuchsia::media::FormatDetails* format_details) {
+  // Video uncompressed: legacy `domain.video.uncompressed` <-> `image_format`, treating
+  // `image_format` as authoritative when present (either when `domain` is unset or when `domain`
+  // already holds uncompressed video that may be stale after mutating `image_format`).
+  //
+  // When `image_format` is not yet set, convert `domain.video.uncompressed` into `v2_natural`
+  // once, normalize `domain.video.uncompressed` from `v2_natural` (so repeated calls to
+  // `EnsureFormatDetailsBridged` are idempotent), and move `v2_natural` into `image_format`
+  // without re-cloning or re-converting.
+  std::optional<fuchsia_images2::ImageFormat> v2_natural;
+  bool set_image_format_from_v2_natural = false;
+  if (!format_details->has_image_format() && format_details->has_domain() &&
+      format_details->domain().is_video() && format_details->domain().video().is_uncompressed()) {
+    v2_natural = VideoFormatV1ToV2Natural(format_details->domain().video().uncompressed());
+    if (!v2_natural.has_value()) {
+      return;
+    }
+    set_image_format_from_v2_natural = true;
+  } else if (format_details->has_image_format() &&
+             (!format_details->has_domain() ||
+              (format_details->domain().is_video() &&
+               format_details->domain().video().is_uncompressed()))) {
+    v2_natural = fidl::HLCPPToNatural(fidl::Clone(format_details->image_format()));
+  } else {
+    return;
+  }
+
+  PopulateVideoDomainV1FromV2Natural(&*v2_natural, format_details);
+  if (set_image_format_from_v2_natural) {
+    format_details->set_image_format(fidl::NaturalToHLCPP(std::move(*v2_natural)));
+  }
+}
+
+void PopulatePcmFormatV2FromV1(const fuchsia::media::PcmFormat& pcm_v1,
+                               fuchsia::media::FormatDetails* format_details) {
+  if (pcm_v1.bits_per_sample == 0 || pcm_v1.channel_map.size() > kMaxLegacyPcmChannelCount) {
+    return;
+  }
+  auto mode_v2 = ToAudioPcmMode2(pcm_v1.pcm_mode);
+  if (!mode_v2.has_value()) {
+    return;
+  }
+  std::vector<fuchsia::media::AudioChannelId2> channel_map_v2;
+  channel_map_v2.reserve(pcm_v1.channel_map.size());
+  for (const auto& ch_v1 : pcm_v1.channel_map) {
+    auto ch_v2 = ToAudioChannelId2(ch_v1);
+    if (!ch_v2.has_value()) {
+      return;
+    }
+    channel_map_v2.push_back(ch_v2.value());
+  }
+  auto* pcm_v2 = format_details->mutable_pcm_format();
+  pcm_v2->set_pcm_mode(mode_v2.value());
+  pcm_v2->set_bits_per_sample(pcm_v1.bits_per_sample);
+  pcm_v2->set_frames_per_second(pcm_v1.frames_per_second);
+  pcm_v2->set_channel_map(std::move(channel_map_v2));
+  if (pcm_v1.bits_per_sample == 24 && format_details->has_encoder_settings() &&
+      format_details->encoder_settings().is_lc3()) {
+    // Legacy V1 `PcmFormat` had no `bytes_per_sample` field and implicitly represented LC3 24-bit
+    // input as 24-bit samples padded in 4-byte containers (`bytes_per_sample == 4`).
+    pcm_v2->set_bytes_per_sample(4);
+  }
+}
+
+void EnsurePcmFormatBridged(fuchsia::media::FormatDetails* format_details) {
+  // Treat `pcm_format` as authoritative when present (either when `domain` is unset or when
+  // `domain` already holds uncompressed audio that may be stale after mutating `pcm_format`).
+  if (format_details->has_pcm_format() &&
+      (!format_details->has_domain() || (format_details->domain().is_audio() &&
+                                         format_details->domain().audio().is_uncompressed()))) {
+    const auto& pcm_v2 = format_details->pcm_format();
+    if (!pcm_v2.has_pcm_mode() || !pcm_v2.has_bits_per_sample() || pcm_v2.bits_per_sample() == 0 ||
+        !pcm_v2.has_frames_per_second() || !pcm_v2.has_channel_map() ||
+        pcm_v2.channel_map().size() > kMaxLegacyPcmChannelCount) {
+      format_details->clear_domain();
+      return;
+    }
+    const uint64_t min_packed_bytes = (static_cast<uint64_t>(pcm_v2.bits_per_sample()) + 7) / 8;
+    const uint64_t effective_bytes_per_sample =
+        pcm_v2.has_bytes_per_sample() ? pcm_v2.bytes_per_sample() : min_packed_bytes;
+    const bool is_lc3_24bit = pcm_v2.bits_per_sample() == 24 &&
+                              format_details->has_encoder_settings() &&
+                              format_details->encoder_settings().is_lc3();
+    // Legacy V1 `PcmFormat` had no `bytes_per_sample` field: it implied packed containers
+    // (`min_packed_bytes`) everywhere except LC3 24-bit encoding, where V1 implied 4-byte
+    // (`24-in-32`) containers.
+    const uint64_t v1_implied_bytes_per_sample = is_lc3_24bit ? 4 : min_packed_bytes;
+    if (effective_bytes_per_sample != v1_implied_bytes_per_sample) {
+      format_details->clear_domain();
+      return;
+    }
+    auto mode_v1 = ToAudioPcmModeV1(pcm_v2.pcm_mode());
+    if (!mode_v1.has_value()) {
+      format_details->clear_domain();
+      return;
+    }
+    std::vector<fuchsia::media::AudioChannelId> channel_map_v1;
+    channel_map_v1.reserve(pcm_v2.channel_map().size());
+    for (const auto& ch_v2 : pcm_v2.channel_map()) {
+      auto ch_v1 = ToAudioChannelIdV1(ch_v2);
+      if (!ch_v1.has_value()) {
+        format_details->clear_domain();
+        return;
+      }
+      channel_map_v1.push_back(ch_v1.value());
+    }
+    fuchsia::media::PcmFormat pcm_v1;
+    pcm_v1.pcm_mode = mode_v1.value();
+    pcm_v1.bits_per_sample = pcm_v2.bits_per_sample();
+    pcm_v1.frames_per_second = pcm_v2.frames_per_second();
+    pcm_v1.channel_map = std::move(channel_map_v1);
+    format_details->mutable_domain()->audio().uncompressed().set_pcm(std::move(pcm_v1));
+    return;
+  }
+
+  // Audio uncompressed PCM: legacy `domain.audio.uncompressed.pcm` -> `pcm_format`.
+  if (!format_details->has_pcm_format() && format_details->has_domain() &&
+      format_details->domain().is_audio() && format_details->domain().audio().is_uncompressed() &&
+      format_details->domain().audio().uncompressed().is_pcm()) {
+    PopulatePcmFormatV2FromV1(format_details->domain().audio().uncompressed().pcm(),
+                              format_details);
+  }
+}
+
+void EnsureEncryptedFormatBridged(fuchsia::media::FormatDetails* format_details) {
+  // Treat `encrypted_format` as authoritative when present (either when `domain` is unset or when
+  // `domain` already holds `crypto.encrypted` that may be stale after mutating `encrypted_format`).
+  if (format_details->has_encrypted_format() &&
+      (!format_details->has_domain() || (format_details->domain().is_crypto() &&
+                                         format_details->domain().crypto().is_encrypted()))) {
+    format_details->mutable_domain()->crypto().set_encrypted(
+        fidl::Clone(format_details->encrypted_format()));
+    return;
+  }
+
+  // Crypto encrypted: legacy `domain.crypto.encrypted` -> `encrypted_format`.
+  if (!format_details->has_encrypted_format() && format_details->has_domain() &&
+      format_details->domain().is_crypto() && format_details->domain().crypto().is_encrypted()) {
+    format_details->set_encrypted_format(
+        fidl::Clone(format_details->domain().crypto().encrypted()));
+  }
+}
+
+void SynthesizeCompressedDomainFromMimeType(fuchsia::media::FormatDetails* format_details) {
+  if (!format_details->has_mime_type()) {
+    return;
+  }
+  const std::string& mime = format_details->mime_type();
+  if (mime.starts_with("video/") && mime != "video/raw") {
+    fuchsia::media::VideoCompressedFormat compressed;
+    compressed.set_temp_field_todo_remove(0);
+    format_details->mutable_domain()->video().set_compressed(std::move(compressed));
+  } else if (mime == "audio/aac" || mime == "audio/aac-adts" || mime == "audio/aac-latm") {
+    format_details->mutable_domain()->audio().compressed().set_aac(
+        fuchsia::media::AudioCompressedFormatAac());
+  } else if (mime == "audio/sbc" || mime == "audio/msbc") {
+    format_details->mutable_domain()->audio().compressed().set_sbc(
+        fuchsia::media::AudioCompressedFormatSbc());
+  } else if (mime == "audio/cvsd") {
+    format_details->mutable_domain()->audio().compressed().set_cvsd(
+        fuchsia::media::AudioCompressedFormatCvsd());
+  } else if (mime == "audio/lc3") {
+    format_details->mutable_domain()->audio().compressed().set_lc3(
+        fuchsia::media::AudioCompressedFormatLc3());
+  }
+}
+
+void NormalizeInputFormatDetails(fuchsia::media::FormatDetails* format_details, bool is_decryptor) {
+  if (!format_details) {
+    return;
+  }
+
+  // All DecryptorAdapter implementations (in-tree and in vendor repos) inherit
+  // DecryptorAdapter::CoreCodecQueueInputFormatDetails in codec_impl, which reads
+  // `encrypted_format` directly. Normalize per-packet encrypted input unidirectionally (moving
+  // `key_id`, `init_vector`, and `subsamples` without cloning) and clear `domain.crypto` so V1 and
+  // V2 callers compare equal in `QueueInputFormatDetails` without per-packet heap copies.
+  if (format_details->has_encrypted_format()) {
+    if (format_details->has_domain() && format_details->domain().is_crypto()) {
+      format_details->clear_domain();
+    }
+  } else if (format_details->has_domain() && format_details->domain().is_crypto()) {
+    if (format_details->domain().crypto().is_encrypted()) {
+      format_details->set_encrypted_format(
+          std::move(format_details->mutable_domain()->crypto().encrypted()));
+    }
+    format_details->clear_domain();
+  }
+
+  if (is_decryptor) {
+    // Never synthesize compressed video/audio `domain` markers from `mime_type` on a decryptor.
+    return;
+  }
+
+  // Video and audio encoders/decoders across repositories (e.g. //vendor/amlogic/drivers during the
+  // cross-repo soft transition, as well as earlier CLs in this series) still inspect `domain`
+  // until all petals have rolled, so keep bidirectional bridging for video/audio input formats, and
+  // synthesize compressed `domain` from `mime_type` even on encrypted input to a secure decoder.
+  EnsureVideoFormatBridged(format_details);
+  EnsurePcmFormatBridged(format_details);
+  if (!format_details->has_domain() && !format_details->has_image_format() &&
+      !format_details->has_pcm_format()) {
+    SynthesizeCompressedDomainFromMimeType(format_details);
+  }
+}
+
 }  // namespace
+
+// static
+void CodecImpl::EnsureInputFormatDetailsNormalizedForTesting(
+    fuchsia::media::FormatDetails* format_details, bool is_decryptor) {
+  EnsureInputFormatDetailsNormalized(format_details, is_decryptor);
+}
+
+// static
+void CodecImpl::EnsureFormatDetailsBridgedForTesting(
+    fuchsia::media::FormatDetails* format_details) {
+  EnsureFormatDetailsBridged(format_details);
+}
+
+// static
+void CodecImpl::EnsureInputFormatDetailsNormalized(fuchsia::media::FormatDetails* format_details,
+                                                   bool is_decryptor) {
+  NormalizeInputFormatDetails(format_details, is_decryptor);
+}
+
+// static
+void CodecImpl::EnsureFormatDetailsBridged(fuchsia::media::FormatDetails* format_details) {
+  if (!format_details) {
+    return;
+  }
+
+  EnsureVideoFormatBridged(format_details);
+  EnsurePcmFormatBridged(format_details);
+  EnsureEncryptedFormatBridged(format_details);
+
+  // Synthesize legacy compressed `domain` marker from `mime_type` when neither `domain` nor any
+  // uncompressed/encrypted format table is set.
+  if (!format_details->has_domain() && !format_details->has_image_format() &&
+      !format_details->has_pcm_format() && !format_details->has_encrypted_format()) {
+    SynthesizeCompressedDomainFromMimeType(format_details);
+  }
+}
 
 // std::unique_lock<> doesn't have thread annotations, but the "owns_lock()" call is useful, and
 // condition variables require std::unique_lock<>, so we wrap std::unique_lock<> here.
@@ -192,6 +839,13 @@ CodecImpl::CodecImpl(fidl::ClientEnd<fuchsia_sysmem2::Allocator> sysmem,
                      std::unique_ptr<CodecAdmission> codec_admission,
                      async_dispatcher_t* shared_fidl_dispatcher, thrd_t shared_fidl_thread,
                      StreamProcessorParams params,
+                     fidl::InterfaceRequest<fuchsia::media::StreamProcessor> request)
+    : CodecImpl(std::move(sysmem), std::move(codec_admission), shared_fidl_dispatcher,
+                std::move(params), std::move(request)) {}
+
+CodecImpl::CodecImpl(fidl::ClientEnd<fuchsia_sysmem2::Allocator> sysmem,
+                     std::unique_ptr<CodecAdmission> codec_admission,
+                     async_dispatcher_t* shared_fidl_dispatcher, StreamProcessorParams params,
                      fidl::InterfaceRequest<fuchsia::media::StreamProcessor> request)
     // The parameters to CodecAdapter constructor here aren't important.
     : CodecAdapter(lock_, this),
@@ -1117,6 +1771,13 @@ void CodecImpl::QueueInputFormatDetails_StreamControl(
     uint64_t stream_lifetime_ordinal, fuchsia::media::FormatDetails format_details) {
   ZX_DEBUG_ASSERT(IsStreamControl());
 
+  EnsureInputFormatDetailsNormalized(&format_details, IsDecryptor());
+  // Declare `old_format_details` and `new_format_details` before `ScopedLock` so heap allocation
+  // and destruction happen outside `lock_`.
+  std::unique_ptr<fuchsia::media::FormatDetails> old_format_details;
+  auto new_format_details =
+      std::make_unique<fuchsia::media::FormatDetails>(std::move(format_details));
+
   ScopedLock lock(lock_);
   if (IsStoppingLocked()) {
     return;
@@ -1153,7 +1814,7 @@ void CodecImpl::QueueInputFormatDetails_StreamControl(
                                                             ? stream_->input_format_details()
                                                             : initial_input_format_details_;
   ZX_DEBUG_ASSERT(current_format && current_format->has_format_details_version_ordinal());
-  uint64_t new_ordinal = format_details.format_details_version_ordinal();
+  uint64_t new_ordinal = new_format_details->format_details_version_ordinal();
   uint64_t last_ordinal = current_format->format_details_version_ordinal();
   if (new_ordinal < last_ordinal) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
@@ -1163,23 +1824,21 @@ void CodecImpl::QueueInputFormatDetails_StreamControl(
         new_ordinal, last_ordinal);
     return;
   }
-  if (new_ordinal == last_ordinal && !fidl::Equals(format_details, *current_format)) {
+  if (new_ordinal == last_ordinal &&
+      !stream_->input_format_details_same_version_different_content_complained_ &&
+      !fidl::Equals(*new_format_details, *current_format)) {
     // TODO(b/568171550): Switch to FailLocked(...) once clients are updated.
     // Complain (at most once per stream) if the input format changes without increasing
     // input_format_details_version_ordinal. We may switch this to strict enforcement in future.
-    if (!stream_->input_format_details_same_version_different_content_complained_) {
-      stream_->input_format_details_same_version_different_content_complained_ = true;
-      LogEvent(
-          media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
-      LOG(ERROR,
-          "client QueueInputFormatDetails(): version ordinal %lu is the same as "
-          "previous version ordinal %lu, but the content is different.",
-          new_ordinal, last_ordinal);
-    }
+    stream_->input_format_details_same_version_different_content_complained_ = true;
+    LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
+    LOG(ERROR,
+        "client QueueInputFormatDetails(): version ordinal %lu is the same as "
+        "previous version ordinal %lu, but the content is different.",
+        new_ordinal, last_ordinal);
   }
 
-  stream_->SetInputFormatDetails(
-      std::make_unique<fuchsia::media::FormatDetails>(std::move(format_details)));
+  old_format_details = stream_->SetInputFormatDetails(std::move(new_format_details));
   // SetOobConfigPending(true) to ensure oob_config_pending() is true.
   //
   // This call is needed only to properly handle a call to
@@ -7617,10 +8276,10 @@ CodecImpl::Stream::~Stream() {
   VLOGF("~Stream() stream_lifetime_ordinal: %lu", stream_lifetime_ordinal_);
 }
 
-void CodecImpl::Stream::SetInputFormatDetails(
+std::unique_ptr<fuchsia::media::FormatDetails> CodecImpl::Stream::SetInputFormatDetails(
     std::unique_ptr<fuchsia::media::FormatDetails> input_format_details) {
   // This is allowed to happen multiple times per stream.
-  input_format_details_ = std::move(input_format_details);
+  return std::exchange(input_format_details_, std::move(input_format_details));
 }
 
 const fuchsia::media::FormatDetails* CodecImpl::Stream::input_format_details() {
@@ -8029,6 +8688,11 @@ fuchsia::media::StreamOutputFormat CodecImpl::CoreCodecGetOutputFormat(
   ZX_DEBUG_ASSERT(format.format_details().has_format_details_version_ordinal());
   ZX_DEBUG_ASSERT(format.format_details().format_details_version_ordinal() ==
                   new_output_format_details_version_ordinal);
+  if (IsDecryptor() && !format.format_details().has_domain() &&
+      !format.format_details().has_encrypted_format()) {
+    format.mutable_format_details()->mutable_domain()->crypto().decrypted();
+  }
+  EnsureFormatDetailsBridged(format.mutable_format_details());
   return format;
 }
 

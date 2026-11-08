@@ -10,11 +10,11 @@ Because the Zircon/kernel toolchain is not yet supported in Bazel, the rules
 are currently just thin wrappers around the built-in C++ rules.
 """
 
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
 
 visibility([
+    "//build/bazel/rules/cc/tests",
     "//build/bazel/rules/idk/private/...",  # Uses helper functions defined here.
-    "//build/bazel/rules/tests/zx_library",
     "//src/devices/...",
     "//src/firmware/lib/...",
     "//src/lib/...",
@@ -166,11 +166,11 @@ def apply_common_zx_library_modifications(kwargs):
 # are configurable, which turns even plain lists into `select()`s.
 _NON_CONFIGURABLE_DEPS_ATTRS = {
     "deps": attr.label_list(
-        doc = "Public dependencies. See `cc_library()`.",
+        doc = "Public dependencies. See `fx_cc_library()`.",
         configurable = False,
     ),
     "implementation_deps": attr.label_list(
-        doc = "Private dependencies. See `cc_library()`.",
+        doc = "Private dependencies. See `fx_cc_library()`.",
         configurable = False,
     ),
 }
@@ -190,7 +190,8 @@ def _cc_shared_library_zx_impl(
 
     kwargs = apply_common_zx_library_modifications(kwargs)
 
-    cc_library(
+    # TODO(https://fxbug.dev/421888626): Use `fx_cc_shared_library()`.
+    fx_cc_library(
         name = name,
         includes = includes,
         **kwargs
@@ -216,9 +217,7 @@ When not using a Zircon-specific toolchain:
     will be replaced by:
         implementation_deps = [ "//zircon/system/ulib/bar" ]
 """,
-    # TODO(https://fxbug.dev/446694542): Remove `native.` once the
-    # `cc_library()` wrapper is a symbolic macro.
-    inherit_attrs = native.cc_library,
+    inherit_attrs = fx_cc_library,
     implementation = _cc_shared_library_zx_impl,
     attrs = {
         "includes": attr.string_list(
@@ -250,7 +249,7 @@ def _cc_source_library_zx_impl(
 
     kwargs = apply_common_zx_library_modifications(kwargs)
 
-    cc_library(
+    fx_cc_library(
         name = name,
         includes = includes,
         **kwargs
@@ -278,9 +277,7 @@ When not using a Zircon-specific toolchain:
     will be replaced by:
         implementation_deps = [ "//zircon/system/ulib/bar" ]
 """,
-    # TODO(https://fxbug.dev/446694542): Remove `native.` once the
-    # `cc_library()` wrapper is a symbolic macro.
-    inherit_attrs = native.cc_library,
+    inherit_attrs = fx_cc_library,
     implementation = _cc_source_library_zx_impl,
     attrs = {
         "includes": attr.string_list(
@@ -312,7 +309,11 @@ def _cc_static_library_zx_impl(
 
     kwargs = apply_common_zx_library_modifications(kwargs)
 
-    cc_library(
+    # `cc_static_library_zx()` creates an in-tree static library, so it wraps
+    # `fx_cc_library()` (which wraps `cc_library()`), NOT `cc_static_library()`,
+    # which produces a self-contained prebuilt archive for external distribution
+    # (such as in the IDK).
+    fx_cc_library(
         name = name,
         includes = includes,
         **kwargs
@@ -320,6 +321,9 @@ def _cc_static_library_zx_impl(
 
 cc_static_library_zx = macro(
     doc = """Defines a Zircon C++ static library that will be a `zx_library()` in GN.
+
+This wraps `fx_cc_library()`, not `cc_static_library()`, because it defines an
+in-tree library rather than a self-contained prebuilt archive.
 
 This macro is for libraries not in the IDK. For IDK libraries, use `idk_cc_static_library_zx()`.
 
@@ -338,9 +342,7 @@ When not using a Zircon-specific toolchain:
     will be replaced by:
         implementation_deps = [ "//zircon/system/ulib/bar" ]
 """,
-    # TODO(https://fxbug.dev/446694542): Remove `native.` once the
-    # `cc_library()` wrapper is a symbolic macro.
-    inherit_attrs = native.cc_library,
+    inherit_attrs = fx_cc_library,
     implementation = _cc_static_library_zx_impl,
     attrs = {
         "includes": attr.string_list(
